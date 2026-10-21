@@ -1,6 +1,6 @@
 import { BusinessError } from '../contracts/errors';
 import { LIMITS } from '../contracts/limits';
-import type { RegisterInput } from '../contracts/schemas';
+import type { AgentRenameInput, RegisterInput } from '../contracts/schemas';
 import { newId, nowMs, randomToken, sha256Hex, stableStringify, utf8Bytes } from '../storage/db';
 import { eventStatement, inboxHeadStatement, inboxTopic, outboxStatement } from '../storage/events';
 import { guardSql } from '../storage/guards';
@@ -210,6 +210,51 @@ export async function updateProfile(
   const actor = await getActor(db, id);
   if (!actor) throw new BusinessError('NOT_FOUND', 'actor 不存在');
   return identityView(actor, origin);
+}
+
+export interface AgentRenameResult {
+  actor_id: string;
+  name: string;
+  updated_at: string;
+}
+
+/**
+ * 全局重命名 Agent actor。
+ *
+ * 产品负责人已确认：任何已注册 principal 都可以重命名任意 Agent，
+ * 服务端不做所有权检查；人类 actor 不能通过此工具改名。
+ */
+export async function renameAgent(
+  db: D1Database,
+  principal: Principal,
+  input: AgentRenameInput,
+): Promise<AgentRenameResult> {
+  const caller = actorId(principal);
+  const target = await getActor(db, input.actor_id);
+  if (!target) throw new BusinessError('NOT_FOUND', '目标 actor 不存在');
+  if (target.kind !== 'agent') {
+    throw new BusinessError('INVALID_ARGUMENT', '只能重命名 agent actor');
+  }
+
+  const name = input.name.trim();
+  const at = nowMs();
+  const result = { actor_id: target.actor_id, name, updated_at: String(at) };
+  const payloadHash = await sha256Hex(stableStringify(input));
+
+  await runIdempotent(db, {
+    actorId: caller,
+    requestId: input.request_id,
+    payloadHash,
+    result,
+    build: (resultJson) => [
+      operationsStatement(db, caller, input.request_id, payloadHash, resultJson, at),
+      db
+        .prepare("UPDATE actors SET name = ?, updated_at = ? WHERE actor_id = ? AND kind = 'agent'")
+        .bind(name, at, target.actor_id),
+    ],
+  });
+
+  return result;
 }
 
 export async function recoveryCreate(

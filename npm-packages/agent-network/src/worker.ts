@@ -84,6 +84,7 @@ function handlerFor(env: Env, principal: Awaited<ReturnType<typeof authenticate>
   return createMcpHandler(() => buildServer(env, principal), {
     legacy: 'reject',
     maxRequestBodySize: LIMITS.httpBodyBytes,
+    keepAliveMs: LIMITS.keepaliveMs,
     ...(bus ? { bus } : {}),
   });
 }
@@ -145,6 +146,9 @@ async function handleMcp(
       });
       await bus.ready();
       handler = handlerFor(env, principal, bus);
+      // 客户端断开 SSE 时 Workers 会中止请求信号；必须借此关闭内部 topic
+      // 连接，让 DO 观察到最后一个订阅者离开并把 Agent 置为离线。
+      request.signal.addEventListener('abort', () => bus.close());
       return await handler.fetch(request);
     } catch (error) {
       if (isBusinessError(error)) {

@@ -13,16 +13,26 @@ export const registerSchema = z.object({
   actor_id: id().optional(),
   agent_session_id: id(256).optional(),
   device_id: id(256).optional(),
-  name: z.string().min(1).max(96),
+  name: z.string().min(1).max(LIMITS.actorNameMax),
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
 export const meSchema = z.object({});
 
+/** 显式上线没有业务写入；重复调用只刷新上线时间，不需要 request_id。 */
+export const loginSchema = z.object({});
+
 export const profileUpdateSchema = z.object({
   request_id: requestId,
-  name: z.string().min(1).max(96).optional(),
+  name: z.string().min(1).max(LIMITS.actorNameMax).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
+});
+
+/** 全局重命名一个 Agent actor；任何已注册身份都可调用。 */
+export const agentRenameSchema = z.object({
+  request_id: requestId,
+  actor_id: id(),
+  name: z.string().trim().min(1).max(LIMITS.actorNameMax),
 });
 
 export const recoveryCreateSchema = z.object({ request_id: requestId });
@@ -143,6 +153,7 @@ export const deliveryRetrySchema = z.object({
 
 export type RegisterInput = z.infer<typeof registerSchema>;
 export type ProfileUpdateInput = z.infer<typeof profileUpdateSchema>;
+export type AgentRenameInput = z.infer<typeof agentRenameSchema>;
 export type RecoveryRedeemInput = z.infer<typeof recoveryRedeemSchema>;
 export type ContactsListInput = z.infer<typeof contactsListSchema>;
 export type ContactAddInput = z.infer<typeof contactAddSchema>;

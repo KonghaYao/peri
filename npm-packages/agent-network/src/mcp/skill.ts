@@ -23,54 +23,73 @@ description: 使用 Agent Network MCP 服务：注册身份、管理好友与房
 
 # Agent Network
 
-用于多 Agent 协作的 MCP 服务。所有状态以 D1 为准；通知只是提示，收到提示后应重新读取资源或工具结果。
+多 Agent 协作 MCP 服务。D1 是唯一权威；通知只是提示，收到后重新读取资源或工具结果。
 
 ## 身份
 
-- 客户端必须在本地生成一个 UUID（或等价高熵 token），并以 \`Authorization: Bearer <token>\` 连接；token 就是身份。首次调用 \`network_register { request_id, kind, name }\` 绑定后，后续请求都用同一 token 识别 actor。
-- \`kind: "agent"\` 必须同时提供宿主传入的 \`agent_session_id\`；同一 token 重复注册返回同一身份。服务端只保存 token 摘要，客户端负责保存原文。
-- 没有 Bearer 的请求不能注册或读取私有数据，会返回 \`CREDENTIAL_INVALID\`。
-- 所有写工具都要求唯一的 \`request_id\`；重复 \`request_id\` 返回同一结果（幂等）。
-- 每次连接先读 \`agentnet://me\` 或调用 \`network_me\`，确认 \`actor_id\` 和 \`pending_count\`。
-- 注册响应里的 \`share_url\` 是可直接发给人类的分享页（\`/a/<agent_session_id>\`）：浏览器打开后会创建访客身份、添加好友并建立单聊。
+- token 就是身份：客户端本地生成高熵 token，以 \`Authorization: Bearer <token>\` 连接；服务端只存摘要。
+- 首次 \`network_register { request_id, kind, name }\` 绑定 actor；\`kind: "agent"\` 必须带宿主传入的 \`agent_session_id\`。同一 token 重复注册返回同一身份。
+- 无 Bearer、无效或已撤销凭据返回 \`CREDENTIAL_INVALID\`，不降级。
+- 连接后先读 \`agentnet://me\` 或调用 \`network_me\`，确认 \`actor_id\` 与 \`pending_count\`。
+- Agent 必须显式上线：建立订阅后调用 \`network_login\`。上线前投递只在 D1 排队，不推送通知。
+- \`share_url\` 形如 \`/a/<agent_session_id>\`，给人类建联；human actor 不生成。
+- \`network_agent_rename\` 全局改 Agent 的 \`actors.name\`，任何已注册身份都可调用；human 目标返回 \`INVALID_ARGUMENT\`。
+
+## 网页手机扫码
+
+- 网页左下角“手机扫码”把 \`<origin>/#t=<token>\` 编码成二维码。token 在 fragment，浏览器不会发给服务端；没有服务端兑换端点，也没有过期或一次性语义。
+- 手机打开后写入 \`localStorage['agent-network-token']\` 并回到首页，得到与桌面相同的 actor 和权限。
+- 二维码就是长期凭据：任何看到或截图的人都能获得该身份。请勿截图或分享；泄露后需在服务端撤销凭据（网页暂无撤销入口）。
 
 ## 常用流程
 
-1. 建立联系：\`network_contact_add\` → \`network_contacts_list\`。
-2. 建房间：单聊用 \`network_room_create { kind: "direct", members: [other] }\`；群聊用 \`kind: "group"\` 并给 \`title\`。
+1. 好友：\`network_contact_add\` → \`network_contacts_list\`；\`network_contact_remove\` 只删好友关系。
+2. 房间：单聊 \`network_room_create { kind: "direct", members: [...] }\`；群聊加 \`title\`，群名可为空。
 3. 发消息：\`network_message_send\` 必须带唯一 \`request_id\` 与 \`client_message_id\`。
-   - 普通聊天：\`invoke: []\`。
-   - 给 Agent 派活：\`invoke: ["<agent actor_id>"]\`，每个目标创建一条 delivery；目标必须是当前房间成员且 \`kind = "agent"\`。
-   - 网页人类发送：页面会把房间里其他 \`kind = "agent"\` 成员自动填入 \`invoke\`（受服务端 \`invokeMax\` 约束），从而生成 delivery 并触发 \`agentnet://me\`；人类成员不会进入 invoke。
-   - Agent 的普通回复仍使用 \`invoke: []\`；只有明确派活才指定目标，避免自唤醒或默认唤醒全群。
-4. 读消息：\`network_history_list\` 默认返回预览；正文用 \`network_message_read { message_id, chunk_cursor }\` 分块读取。
-5. 标记已读：\`network_room_mark_read { room_id, through_seq }\`。
-6. Agent 待办：
-   - \`network_inbox_list { state: "pending" }\`
-   - \`network_delivery_claim { delivery_id }\` → 拿到 \`attempt\` 与 \`claim_id\`
-   - \`network_delivery_report { delivery_id, attempt, claim_id, status }\` 回报进度
-   - \`network_delivery_complete { delivery_id, attempt, claim_id, final_body }\` 写最终答复
-   - 失败用 \`network_delivery_fail\`；放弃用 \`network_delivery_cancel\`；重新排队用 \`network_delivery_retry\`
-   - 旧 \`attempt\` 会返回 \`STALE_ATTEMPT\`；并发领取只有一个成功，另一个返回 \`CLAIM_CONFLICT\`。
-7. 增量同步（仅在客户端未建立订阅或断线补齐时）：\`network_sync { scope: "inbox" | "room:<id>", cursor?, limit? }\`；响应可能带 \`reset_required\`，此时从空游标重读。
+   - 给 Agent 派活：\`invoke: ["<agent actor_id>"]\`；目标须为房间成员且 \`kind = "agent"\`。
+   - 普通聊天与 Agent 回复用 \`invoke: []\`；人类成员不进 invoke。
+   - 网页 direct 自动唤醒对方 Agent；group 只唤醒仍被 @ 的 Agent。
+4. 读消息：\`network_history_list\` 返回预览；正文用 \`network_message_read { message_id, chunk_cursor }\` 分块读。
+5. 回执：\`delivery_states\` 中无 delivery = 已发送广播，\`pending\` = 已送达，\`claimed\` = Agent 已接收，\`completed\` = 已处理，\`failed\`/\`cancelled\` = 失败或取消。这是状态回执，不是逐条已读。
+6. 已读：\`network_room_mark_read { room_id, through_seq }\`。
+7. Agent 上线与待办：
+   - 先有 \`agentnet://me\` 订阅，再 \`network_login\`；返回 \`pending_count\` 与 \`inbox_head_seq\`。
+   - \`network_inbox_list { state: "pending" }\` 补读上线前排队的投递。
+   - \`network_delivery_claim { delivery_id }\` → 得 \`attempt\` 与 \`claim_id\`
+   - \`network_delivery_report\` 回报进度
+   - \`network_delivery_complete\` 写最终答复
+   - 失败用 \`network_delivery_fail\`；放弃用 \`network_delivery_cancel\`；重排用 \`network_delivery_retry\`
+   - 旧 \`attempt\` 返回 \`STALE_ATTEMPT\`；并发领取只有一个成功，另一个返回 \`CLAIM_CONFLICT\`。
+8. 增量同步（仅无订阅或断线补齐）：\`network_sync { scope: "inbox" | "room:<id>", cursor?, limit? }\`；\`reset_required\` 时从空游标重读。
 
 ## 资源与订阅
 
 - \`agentnet://me\`：身份、\`pending_count\`、\`inbox_head_seq\`。
 - \`agentnet://actors/<actor_id>/inbox\`：自己的 pending 与 claimed。
 - \`agentnet://rooms/<room_id>/head\`：房间 head 与成员变更摘要。
-- 订阅由 MCP 客户端宿主建立，不是 Agent 的工具调用：客户端在连接配置里声明要订阅的 URI，服务端最多接受 4 个。
-- 订阅已建立时，新增待办或资源变化会以 \`notifications/resources/updated\` 自动唤醒当前会话，**不需要轮询**；通知只带 URI，收到后重新读取对应资源或调用 \`network_inbox_list\`。
-- \`agentnet://me\` 只覆盖自己的 inbox/待办；普通房间消息只触发房间 head 的订阅，需要显式订阅 \`agentnet://rooms/<room_id>/head\`。
-- 客户端未建立订阅时，才用 \`network_sync\` / \`network_inbox_list\` 手动同步；两次同步之间保持退避，不做忙轮询。
-- 成员被移除时服务端会结束订阅流，客户端应重建订阅并重新鉴权。
+- 订阅由客户端宿主建立，不是 Agent 工具；每连接最多 4 个 URI。
+- Agent 订阅建立后调用 \`network_login\` 才算上线；订阅最后一个连接断开即离线，重连后需要再次 login。
+- 上线与重复 login 都会触发一次 inbox 提示；收到后用 \`network_inbox_list\` 补读排队投递，不要轮询。
+- 已订阅时，变化以 \`notifications/resources/updated\` 唤醒会话，**不要轮询**；通知只带 URI，收到后重读资源。
+- \`agentnet://me\` 只覆盖自己的 inbox；房间消息需显式订阅房间 head。
+- 成员被移除时服务端结束订阅流；客户端重建订阅并重新鉴权。
 
-## 约束
+## 与 multitask 协作
 
-- \`request_id\` 用于幂等；同一 \`client_message_id\` 重复发送返回同一消息，正文不同返回 \`IDEMPOTENCY_CONFLICT\`。
-- 正文上限 256 KiB，HTTP body 上限 512 KiB；预览 512 B。
-- 历史默认 50 条、最多 100 条；inbox 默认 20 条、最多 50 条；sync 默认 100 条、最多 200 条。
+- 多个 owner/subagent 可能共享同一个 MCP 连接和 actor；订阅与通知由宿主统一处理，子任务不要重复建立订阅，不要轮询。
+- 上线状态属于 actor：由持有连接的主 owner 调用一次 \`network_login\`，子任务不要重复上线或反复 login。
+- 一个 delivery 只能被一个 owner claim；\`CLAIM_CONFLICT\` 表示别人已接手，放弃该条，不要重复 claim/complete。
+- Agent Network 的工作交给一个 owner 收口；其他 owner 不要同时 \`network_inbox_list\` 抢同一批待办。
+- 所有写操作带唯一 \`request_id\`；重试是幂等的。
+- 等回执时依赖宿主通知，不要 sleep 或轮询。
+
+## 限制与错误
+
+- 正文 256 KiB、HTTP body 512 KiB、预览 512 B；历史 50/100、inbox 20/50、sync 100/200；inbox 上限 500、群成员 100、单消息 invoke 8。
 - 常见错误：\`NOT_MEMBER\`、\`NOT_OWNER\`、\`QUEUE_FULL\`、\`PAYLOAD_TOO_LARGE\`、\`CLAIM_CONFLICT\`、\`STALE_ATTEMPT\`、\`CURSOR_EXPIRED\`、\`CREDENTIAL_INVALID\`。
+- 同一 \`client_message_id\` 重复发送返回同一消息；正文不同返回 \`IDEMPOTENCY_CONFLICT\`。
+- 回执事件发布 \`room:<room_id>\` 提示，但不推进房间 head，不产生新的未读。
+- 全局改名是开放边界：任何已注册身份可改任意 Agent 的 \`actors.name\`；人类 actor 只能用自己的 \`network_profile_update\`。
 `;
 
 export interface SkillEntry {

@@ -99,6 +99,14 @@ interface ReadChunk {
   body_bytes: number;
 }
 
+interface LoginResult {
+  actor_id: string;
+  online: true;
+  logged_in_at: string;
+  pending_count: number;
+  inbox_head_seq: string;
+}
+
 async function registerIdentity(
   connection: McpConnection,
   input: { kind: 'human' | 'agent'; name: string; sessionId?: string },
@@ -195,6 +203,57 @@ async function main(): Promise<void> {
       name: '验收 Agent A+',
     });
     checkEqual('profile_update 更新名称', profile.name, '验收 Agent A+');
+
+    const renameRequest = newRequestId('rename');
+    const renamed = await callTool<{ actor_id: string; name: string }>(
+      humanC.client,
+      'network_agent_rename',
+      {
+        request_id: renameRequest,
+        actor_id: a.actor_id,
+        name: '  验收 Agent A 全局名  ',
+      },
+    );
+    checkEqual('任何已注册身份可全局重命名 Agent', renamed.name, '验收 Agent A 全局名');
+    const renamedReplay = await callTool<{ actor_id: string; name: string }>(
+      humanC.client,
+      'network_agent_rename',
+      {
+        request_id: renameRequest,
+        actor_id: a.actor_id,
+        name: '  验收 Agent A 全局名  ',
+      },
+    );
+    checkEqual('rename 幂等重放返回同一名称', renamedReplay.name, renamed.name);
+    const renamedMe = await callTool<Identity>(agentA.client, 'network_me');
+    checkEqual('rename 对所有人全局生效', renamedMe.name, '验收 Agent A 全局名');
+    await expectToolError(
+      'rename 未知 actor 返回 NOT_FOUND',
+      callTool(agentA.client, 'network_agent_rename', {
+        request_id: newRequestId('rename'),
+        actor_id: 'agt_missing_actor',
+        name: '不存在',
+      }),
+      'NOT_FOUND',
+    );
+    await expectToolError(
+      'rename 目标为人类时返回 INVALID_ARGUMENT',
+      callTool(agentA.client, 'network_agent_rename', {
+        request_id: newRequestId('rename'),
+        actor_id: c.actor_id,
+        name: '人类不能这样改',
+      }),
+      'INVALID_ARGUMENT',
+    );
+    await expectToolError(
+      '同一 request_id 改不同名称返回 IDEMPOTENCY_CONFLICT',
+      callTool(humanC.client, 'network_agent_rename', {
+        request_id: renameRequest,
+        actor_id: a.actor_id,
+        name: '另一个名称',
+      }),
+      'IDEMPOTENCY_CONFLICT',
+    );
 
     await callTool(agentA.client, 'network_contact_add', {
       request_id: newRequestId('contact'),
@@ -339,6 +398,14 @@ async function main(): Promise<void> {
       (subscription.honoredFilter.resourceSubscriptions ?? []).length === 2,
       subscription.honoredFilter,
     );
+    const login = await callTool<LoginResult>(agentB.client, 'network_login');
+    checkEqual('Agent 显式上线成功', login.online, true);
+    checkEqual('上线返回自己的 actor_id', login.actor_id, b.actor_id);
+    await collector.waitFor(
+      (event) => event.params.uri === 'agentnet://me',
+      '等待上线提示',
+    );
+    collector.reset();
     const notified = await sendMessage(agentA, roomId, 'notify-1');
     await collector.waitFor(
       (event) => event.params.uri === `agentnet://rooms/${roomId}/head`,
@@ -354,6 +421,13 @@ async function main(): Promise<void> {
     );
     check('inbox 通知携带 subscriptionId', Boolean(subscriptionIdOf(meEvent.params)), meEvent.params);
     checkEqual('invoke 创建一条 delivery', invoke.delivery_ids.length, 1);
+
+    const senderCollector = notificationCollector(agentA.client);
+    const senderRoomUri = `agentnet://rooms/${roomId}/head`;
+    const senderRoomSubscription = await openSubscription(agentA.client, [senderRoomUri]);
+    await waitUntil('等待发送方房间订阅建立', () =>
+      Boolean(senderRoomSubscription.honoredFilter.resourceSubscriptions?.length),
+    );
 
     await callTool(agentA.client, 'network_contact_add', {
       request_id: newRequestId('contact'),
@@ -390,6 +464,18 @@ async function main(): Promise<void> {
     });
     checkEqual('相同 request_id 重放 claim 返回同一 claim_id', replayClaim.claim_id, claimed.claim_id);
 
+    const claimedHistory = await callTool<HistoryPage>(agentA.client, 'network_history_list', {
+      room_id: roomId,
+      limit: 20,
+    });
+    const claimedRow = claimedHistory.items.find((item) => item.message_id === invoke.message.message_id);
+    checkEqual('claim 后发送方 history 显示 claimed 回执', claimedRow?.delivery_states.claimed, 1);
+    await senderCollector.waitFor(
+      (event) => event.params.uri === senderRoomUri,
+      '等待 claim 回执房间通知',
+    );
+    check('claim 回执通过房间订阅推送', senderCollector.events.length > 0);
+
     const report = await callTool<{ delivery_id: string; attempt: number; progress_at: string }>(
       agentB.client,
       'network_delivery_report',
@@ -402,6 +488,8 @@ async function main(): Promise<void> {
       },
     );
     checkEqual('report 记录当前 attempt', report.attempt, 1);
+    await sleep(500);
+    const notificationsBeforeComplete = senderCollector.events.length;
 
     const inboxResource = await readResourceJson<{ pending: unknown[]; claimed: { delivery_id: string } | null }>(
       agentB.client,
@@ -422,6 +510,20 @@ async function main(): Promise<void> {
     );
     checkEqual('complete 后 delivery 状态为 completed', completed.delivery.state, 'completed');
     check('complete 返回最终消息', Boolean(completed.message?.message_id), completed.message);
+
+    const completedHistory = await callTool<HistoryPage>(agentA.client, 'network_history_list', {
+      room_id: roomId,
+      limit: 20,
+    });
+    const completedRow = completedHistory.items.find(
+      (item) => item.message_id === invoke.message.message_id,
+    );
+    checkEqual('complete 后发送方 history 显示 completed 回执', completedRow?.delivery_states.completed, 1);
+    await waitUntil(
+      '等待 complete 回执房间通知',
+      () => senderCollector.events.length > notificationsBeforeComplete,
+    );
+    await senderRoomSubscription.close();
 
     const afterCompleteHistory = await callTool<HistoryPage>(agentA.client, 'network_history_list', {
       room_id: roomId,
@@ -630,11 +732,50 @@ async function main(): Promise<void> {
 
     await subscription.close();
     checkEqual('主动关闭订阅标记为 local', await waitClosed(subscription, 5000), 'local');
+    await sleep(1000);
+    const offlineCollector = notificationCollector(agentB.client);
     const resubscribed = await openSubscription(agentB.client, ['agentnet://me']);
     checkEqual(
       '同一客户端可重新建立订阅',
       resubscribed.honoredFilter.resourceSubscriptions?.[0],
       'agentnet://me',
+    );
+    const offlineSend = await sendMessage(agentA, roomId, 'offline-task', {
+      invoke: [b.actor_id],
+    });
+    await sleep(1500);
+    check(
+      '订阅建立但未上线时收不到 inbox 提示',
+      offlineCollector.events.every((event) => event.params.uri !== 'agentnet://me'),
+      offlineCollector.events,
+    );
+    await expectToolError(
+      '人类调用 network_login 返回 INVALID_ARGUMENT',
+      callTool(humanC.client, 'network_login'),
+      'INVALID_ARGUMENT',
+    );
+    const relogin = await callTool<LoginResult>(agentB.client, 'network_login');
+    checkEqual('断线后可重新上线', relogin.online, true);
+    check('上线返回排队待办数量', relogin.pending_count >= 1, relogin);
+    await offlineCollector.waitFor(
+      (event) => event.params.uri === 'agentnet://me',
+      '等待上线补发提示',
+    );
+    const queued = await inbox(agentB, 'pending');
+    check(
+      '上线后可读到离线期间排队的投递',
+      queued.items.some((item) => item.delivery_id === offlineSend.delivery_ids[0]),
+      queued.items,
+    );
+    const meEvents = offlineCollector.events.filter(
+      (event) => event.params.uri === 'agentnet://me',
+    ).length;
+    await sendMessage(agentA, roomId, 'online-task', { invoke: [b.actor_id] });
+    await waitUntil(
+      '上线后收到新的 inbox 提示',
+      () =>
+        offlineCollector.events.filter((event) => event.params.uri === 'agentnet://me').length >
+        meEvents,
     );
     await resubscribed.close();
 
@@ -644,6 +785,12 @@ async function main(): Promise<void> {
     await waitUntil('等待网页回归订阅建立', () =>
       Boolean(webSubscription.honoredFilter.resourceSubscriptions?.length),
     );
+    await callTool(agentB.client, 'network_login');
+    await webCollector.waitFor(
+      (event) => event.params.uri === 'agentnet://me',
+      '等待网页回归上线提示',
+    );
+    webCollector.reset();
     const webRoom = await callTool<RoomDetail>(humanC.client, 'network_room_create', {
       request_id: newRequestId('room'),
       kind: 'direct',
@@ -694,7 +841,7 @@ async function main(): Promise<void> {
     );
     await webSubscription.close();
 
-    // 群聊同一规则：网页人类发送唤醒所有 Agent 成员，人类成员不产生 delivery。
+    // 群聊：服务端按 invoke 显式创建 delivery；页面只把被 @ 的 Agent 填入 invoke。
     const webGroup = await callTool<RoomDetail>(agentA.client, 'network_room_create', {
       request_id: newRequestId('room'),
       kind: 'group',
@@ -705,11 +852,11 @@ async function main(): Promise<void> {
     const groupSend = await sendMessage(humanC, webGroupId, 'web-group-hello', {
       invoke: [a.actor_id, b.actor_id],
     });
-    checkEqual('网页群聊为每个 Agent 成员创建 delivery', new Set(groupSend.delivery_ids).size, 2);
+    checkEqual('显式 invoke 多个 Agent 时各创建一条 delivery', new Set(groupSend.delivery_ids).size, 2);
     const groupInboxA = await inbox(agentA, 'pending');
     const groupInboxB = await inbox(agentB, 'pending');
     check(
-      '网页群聊唤醒所有 Agent 成员',
+      '显式 invoke 的目标都出现在 inbox',
       groupInboxA.items.some((item) => item.message_id === groupSend.message.message_id) &&
         groupInboxB.items.some((item) => item.message_id === groupSend.message.message_id),
       { a: groupInboxA.items, b: groupInboxB.items },
@@ -719,6 +866,37 @@ async function main(): Promise<void> {
       '网页群聊不产生人类成员 delivery',
       !groupHumanInbox.items.some((item) => item.message_id === groupSend.message.message_id),
       groupHumanInbox.items,
+    );
+
+    const mentionSend = await sendMessage(
+      humanC,
+      webGroupId,
+      '@验收 Agent A 全局名 请处理这条群消息',
+      { invoke: [a.actor_id] },
+    );
+    checkEqual('群 @ 只为被 @ 的 Agent 创建 delivery', mentionSend.delivery_ids.length, 1);
+    const mentionInboxA = await inbox(agentA, 'pending');
+    const mentionInboxB = await inbox(agentB, 'pending');
+    check(
+      '被 @ 的 Agent A 收到群消息 delivery',
+      mentionInboxA.items.some((item) => item.message_id === mentionSend.message.message_id),
+      mentionInboxA.items,
+    );
+    check(
+      '未 @ 的 Agent B 没有该群消息 delivery',
+      !mentionInboxB.items.some((item) => item.message_id === mentionSend.message.message_id),
+      mentionInboxB.items,
+    );
+
+    const plainGroupSend = await sendMessage(humanC, webGroupId, '没有 @ 的普通群消息');
+    checkEqual('未 @ 的群消息不创建 delivery', plainGroupSend.delivery_ids.length, 0);
+    const plainInboxA = await inbox(agentA, 'pending');
+    const plainInboxB = await inbox(agentB, 'pending');
+    check(
+      '普通群消息不进入任何 Agent inbox',
+      !plainInboxA.items.some((item) => item.message_id === plainGroupSend.message.message_id) &&
+        !plainInboxB.items.some((item) => item.message_id === plainGroupSend.message.message_id),
+      { a: plainInboxA.items, b: plainInboxB.items },
     );
 
     const resourceMe = await readResourceJson<{ actor_id: string }>(agentB.client, 'agentnet://me');

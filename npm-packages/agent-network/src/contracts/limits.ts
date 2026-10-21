@@ -4,6 +4,8 @@ export const LIMITS = {
   httpBodyBytes: 512 * 1024,
   /** 单条消息正文 UTF-8 上限。 */
   messageBodyBytes: 256 * 1024,
+  /** actor 展示名称长度上限（按去空格后的字符数）。 */
+  actorNameMax: 96,
   /** actor metadata 上限。 */
   actorMetadataBytes: 4 * 1024,
   /** 消息预览上限。 */
@@ -40,8 +42,8 @@ export const LIMITS = {
   hintBytes: 1024,
   /** 单条监听待发送队列。 */
   listenQueueMax: 32,
-  /** SSE 保活间隔（毫秒）。 */
-  keepaliveMs: 25_000,
+  /** SSE 保活间隔（毫秒）；同时决定客户端断开后服务端发现离线的上限。 */
+  keepaliveMs: 5_000,
   /** 主动轮换间隔（毫秒）。 */
   rotationMs: 15 * 60_000,
   /** 同 URI 通知合并窗口（毫秒）。 */

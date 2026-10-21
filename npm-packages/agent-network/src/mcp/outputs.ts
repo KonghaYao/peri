@@ -164,6 +164,20 @@ export const recoveredIdentitySchema = identitySchema.extend({ recovered: z.lite
 
 export const profileResultSchema = identitySchema;
 
+export const agentRenameResultSchema = z.object({
+  actor_id: z.string(),
+  name: z.string(),
+  updated_at: z.string(),
+});
+
+export const loginResultSchema = z.object({
+  actor_id: z.string(),
+  online: z.literal(true),
+  logged_in_at: z.string(),
+  pending_count: z.number(),
+  inbox_head_seq: z.string(),
+});
+
 export const removedResultSchema = z.object({
   actor_id: z.string(),
   removed: z.literal(true),

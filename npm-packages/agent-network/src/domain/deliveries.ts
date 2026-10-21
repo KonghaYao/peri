@@ -16,6 +16,7 @@ import {
   inboxHeadStatement,
   inboxTopic,
   outboxStatement,
+  roomTopic,
 } from '../storage/events';
 import { guardSql } from '../storage/guards';
 import { getActor, getDelivery, getMessage, getRoom } from '../storage/queries';
@@ -218,6 +219,43 @@ function inboxEventStatements(
   ];
 }
 
+/**
+ * 交付状态变化同时发布房间提示，让发送方页面刷新回执。
+ *
+ * 这里不推进 `rooms.head_seq`：回执不是消息，推进 head 会让会话列表
+ * 出现没有新消息的未读点。事件本身仍进入 room scope，sync 可读到。
+ */
+function roomDeliveryEventStatements(
+  db: D1Database,
+  delivery: DeliveryRow,
+  requestId: string,
+  action: string,
+  eventType: string,
+  at: number,
+  metadata: Record<string, unknown>,
+): D1PreparedStatement[] {
+  const eventKey = `room_delivery:${action}:${delivery.delivery_id}:${requestId}`;
+  return [
+    eventStatement(
+      db,
+      {
+        eventKey,
+        scopeKind: 'room',
+        scopeId: delivery.room_id,
+        eventType,
+        refId: delivery.delivery_id,
+        metadata: {
+          delivery_id: delivery.delivery_id,
+          message_id: delivery.message_id,
+          ...metadata,
+        },
+      },
+      at,
+    ),
+    outboxStatement(db, { topic: roomTopic(delivery.room_id), eventKey }, at),
+  ];
+}
+
 function claimedGuard(
   db: D1Database,
   deliveryId: string,
@@ -289,6 +327,15 @@ export async function deliveryClaim(
           -1,
           { message_id: delivery.message_id, room_id: delivery.room_id },
         ),
+        ...roomDeliveryEventStatements(
+          db,
+          delivery,
+          input.request_id,
+          'claim',
+          'delivery_claimed',
+          at,
+          { state: 'claimed' },
+        ),
       ],
     });
   } catch (error) {
@@ -334,6 +381,15 @@ export async function deliveryReport(
         at,
         0,
         { status: input.status, attempt: input.attempt },
+      ),
+      ...roomDeliveryEventStatements(
+        db,
+        delivery,
+        input.request_id,
+        'progress',
+        'delivery_progress',
+        at,
+        { state: 'claimed', attempt: input.attempt },
       ),
     ],
   });
@@ -403,6 +459,15 @@ export async function deliveryComplete(
         0,
         { message_id: delivery.message_id, attempt: input.attempt },
       ),
+      ...roomDeliveryEventStatements(
+        db,
+        delivery,
+        input.request_id,
+        'complete',
+        'delivery_completed',
+        at,
+        { state: 'completed', attempt: input.attempt },
+      ),
     ],
   });
 
@@ -450,6 +515,15 @@ export async function deliveryFail(
         at,
         0,
         { attempt: input.attempt },
+      ),
+      ...roomDeliveryEventStatements(
+        db,
+        delivery,
+        input.request_id,
+        'fail',
+        'delivery_failed',
+        at,
+        { state: 'failed', attempt: input.attempt },
       ),
     ],
   });
@@ -534,6 +608,15 @@ export async function deliveryCancel(
         0,
         { reason: input.reason },
       ),
+      ...roomDeliveryEventStatements(
+        db,
+        delivery,
+        input.request_id,
+        'cancel',
+        'delivery_cancelled',
+        at,
+        { state: 'cancelled' },
+      ),
     ],
   });
 
@@ -590,6 +673,15 @@ export async function deliveryRetry(
         at,
         1,
         { attempt: input.expected_attempt },
+      ),
+      ...roomDeliveryEventStatements(
+        db,
+        delivery,
+        input.request_id,
+        'retry',
+        'delivery_retried',
+        at,
+        { state: 'pending', attempt: input.expected_attempt },
       ),
     ],
   });

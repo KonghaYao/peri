@@ -3,8 +3,12 @@
   "name": "peri-agent-network",
   "main": "src/worker.ts",
   "compatibility_date": "2026-10-06",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
   "observability": { "enabled": true },
+  "workers_dev": false,
+  "routes": [
+    { "pattern": "networks.peri-code.dev", "custom_domain": true }
+  ],
   "durable_objects": {
     "bindings": [{ "name": "NOTIFICATION_CHANNELS", "class_name": "NotificationChannel" }]
   },
@@ -19,7 +23,7 @@
   ],
   "vars": {
     "ENVIRONMENT": "production",
-    "PUBLIC_ORIGIN": "https://peri-agent-network.claude-code-best.workers.dev"
+    "PUBLIC_ORIGIN": "https://networks.peri-code.dev"
   },
   "triggers": {
     "crons": ["* * * * *"]

@@ -130,6 +130,9 @@ export class TopicEventBus implements ServerEventBus {
     }
     return () => {
       this.#listeners.delete(listener);
+      // 订阅流结束时 SDK 只会取消订阅，不会通知 bus；这里主动断开内部
+      // WebSocket，让 DO 观察到连接关闭并立即把 Agent 置为离线。
+      if (this.#listeners.size === 0) this.close();
     };
   }
 

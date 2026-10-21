@@ -155,6 +155,7 @@ export async function readResourceJson<T = Record<string, unknown>>(
 
 export function notificationCollector(client: Client): {
   events: { method: string; params: Record<string, unknown> }[];
+  reset(): void;
   waitFor(predicate: (event: { method: string; params: Record<string, unknown> }) => boolean, label: string, timeoutMs?: number): Promise<{ method: string; params: Record<string, unknown> }>;
 } {
   const events: { method: string; params: Record<string, unknown> }[] = [];
@@ -168,6 +169,9 @@ export function notificationCollector(client: Client): {
   });
   return {
     events,
+    reset() {
+      events.length = 0;
+    },
     async waitFor(predicate, label, timeoutMs = 15_000) {
       const deadline = Date.now() + timeoutMs;
       for (;;) {

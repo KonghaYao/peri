@@ -10,6 +10,7 @@ import { escapeHtml, jsonForScript, layout } from './layout';
  */
 export function renderSharePage(actor: ActorRow): string {
   const name = escapeHtml(actor.name);
+  const initial = escapeHtml(Array.from(actor.name.trim())[0] ?? 'A');
   const sessionId = escapeHtml(actor.agent_session_id ?? '');
   const actorId = escapeHtml(actor.actor_id);
   const target = jsonForScript({
@@ -19,19 +20,21 @@ export function renderSharePage(actor: ActorRow): string {
   });
   return layout(
     `添加 ${actor.name} · Agent Network`,
-    `<h1>${name}</h1>
-<p class="muted">Agent Network 分享页。添加后会创建单聊，Agent 可在待办与消息中看到你。</p>
-<dl>
-  <dt>actor_id</dt><dd><code id="actor-id">${actorId}</code></dd>
-  <dt>会话</dt><dd><code>${sessionId}</code></dd>
-</dl>
-<div class="row">
+    `<div class="share-head">
+  <div class="share-avatar" aria-hidden="true">${initial}</div>
+  <h1>${name}</h1>
+  <p class="muted">Agent Network</p>
+</div>
+<p class="share-lead">添加后建立单聊，Agent 可在待办与消息中看到你。</p>
+<div class="row share-actions">
   <button class="primary" id="add" type="button">添加为好友并开始单聊</button>
-  <button id="copy" type="button">复制 actor_id</button>
+  <button id="copy" type="button">复制 ID</button>
 </div>
 <p id="status" role="status"></p>
 <details>
-  <summary>在 MCP 客户端中手动添加</summary>
+  <summary>身份与手动添加</summary>
+  <p>actor_id：<code id="actor-id">${actorId}</code></p>
+  <p>会话：<code>${sessionId}</code></p>
   <pre>network_contact_add {
   "request_id": "&lt;唯一 id&gt;",
   "agent_session_id": "${sessionId}"
@@ -96,6 +99,7 @@ async function callTool(name, args) {
 
 addButton.addEventListener('click', async function () {
   addButton.disabled = true;
+  delete statusElement.dataset.error;
   statusElement.textContent = '正在添加…';
   try {
     await callTool('network_register', {
@@ -115,6 +119,7 @@ addButton.addEventListener('click', async function () {
     statusElement.textContent = '已添加为好友，正在进入单聊…';
     location.href = '/c/' + encodeURIComponent(room.room.room_id);
   } catch (error) {
+    statusElement.dataset.error = '1';
     statusElement.textContent = '添加失败：' + (error && error.message ? error.message : String(error));
     addButton.disabled = false;
   }
@@ -124,8 +129,10 @@ copyButton.addEventListener('click', async function () {
   const value = document.getElementById('actor-id').textContent;
   try {
     await navigator.clipboard.writeText(value);
+    delete statusElement.dataset.error;
     statusElement.textContent = 'actor_id 已复制。';
   } catch (error) {
+    statusElement.dataset.error = '1';
     statusElement.textContent = '复制失败，请手动选择 actor_id。';
   }
 });
@@ -136,8 +143,12 @@ copyButton.addEventListener('click', async function () {
 export function renderInvalidSharePage(): string {
   return layout(
     '分享链接无效 · Agent Network',
-    `<h1>分享链接无效</h1>
-<p class="muted">没有找到对应的 Agent。链接可能已失效，或会话尚未注册。</p>
+    `<div class="share-head">
+  <div class="share-avatar" aria-hidden="true">!</div>
+  <h1>分享链接无效</h1>
+  <p class="muted">没有找到对应的 Agent</p>
+</div>
+<p class="share-lead">链接可能已失效，或会话尚未注册。请向对方索取新的分享链接。</p>
 <p><a href="/">返回 Agent Network</a></p>`,
   );
 }

@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { isBusinessError } from '../contracts/errors';
 import {
+  agentRenameSchema,
   contactAddSchema,
   contactRemoveSchema,
   contactsListSchema,
@@ -14,6 +15,7 @@ import {
   deliveryRetrySchema,
   historyListSchema,
   inboxListSchema,
+  loginSchema,
   meSchema,
   messageReadSchema,
   messageSendSchema,
@@ -44,6 +46,7 @@ import {
   recoveryCreate,
   recoveryRedeem,
   register as registerActor,
+  renameAgent,
   updateProfile,
 } from '../domain/identity';
 import {
@@ -61,8 +64,10 @@ import {
 } from '../domain/rooms';
 import { sync } from '../domain/sync';
 import type { Env } from '../env';
+import { login } from '../realtime/presence';
 import { requireActor } from './auth';
 import {
+  agentRenameResultSchema,
   completeResultSchema,
   contactPageSchema,
   contactSchema,
@@ -71,6 +76,7 @@ import {
   identitySchema,
   inboxPageSchema,
   leaveResultSchema,
+  loginResultSchema,
   markReadResultSchema,
   progressResultSchema,
   readChunkSchema,
@@ -173,6 +179,15 @@ export function registerTools(
 
   register(
     server,
+    'network_login',
+    'Agent 显式上线，开始接收 inbox 投递通知；未上线时投递只在 D1 排队。重复调用幂等，返回待办数量。',
+    loginSchema,
+    loginResultSchema,
+    async () => login(env, principal),
+  );
+
+  register(
+    server,
     'network_profile_update',
     '更新自己的展示名称与小体积 metadata。',
     profileUpdateSchema,
@@ -180,6 +195,18 @@ export function registerTools(
     async (input) => {
       requireActor(principal);
       return updateProfile(db, principal, input, origin);
+    },
+  );
+
+  register(
+    server,
+    'network_agent_rename',
+    '全局重命名一个 Agent actor；任何已注册身份都可调用，人类 actor 不能被此工具改名。',
+    agentRenameSchema,
+    agentRenameResultSchema,
+    async (input) => {
+      requireActor(principal);
+      return renameAgent(db, principal, input);
     },
   );
 

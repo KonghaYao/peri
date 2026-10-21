@@ -74,10 +74,12 @@ async function main(): Promise<void> {
   const list = await rawRpc('tools/list');
   const listed = list.body.result as { tools?: { name: string }[] } | undefined;
   const toolNames = listed?.tools?.map((tool) => tool.name) ?? [];
-  check('tools/list 返回 25 个工具', toolNames.length === 25, toolNames.length);
+  check('tools/list 返回 27 个工具', toolNames.length === 27, toolNames.length);
   for (const required of [
     'network_register',
     'network_me',
+    'network_login',
+    'network_agent_rename',
     'network_message_send',
     'network_inbox_list',
     'network_delivery_claim',
@@ -219,7 +221,22 @@ async function main(): Promise<void> {
   );
   const homeHtml = await home.text();
   check('首页包含会话列表容器', homeHtml.includes('id="room-list"'));
-  check('首页包含双栏空状态', homeHtml.includes('选择一个单聊开始聊天'));
+  check('首页包含双栏空状态', homeHtml.includes('id="empty-state"') && homeHtml.includes('选择一个会话开始聊天'));
+  check('首页包含会话搜索框', homeHtml.includes('id="room-search"') && homeHtml.includes('搜索'));
+  check('首页包含新建群聊入口', homeHtml.includes('id="new-group"'));
+  check('首页包含新建群聊弹窗', homeHtml.includes('id="group-modal"'));
+  check('首页包含手机扫码入口', homeHtml.includes('id="device-handoff"') && homeHtml.includes('手机扫码'));
+  check(
+    '首页包含扫码弹窗与二维码画布',
+    homeHtml.includes('id="handoff-modal"') && homeHtml.includes('id="handoff-qr"'),
+  );
+  check(
+    '扫码页内联 fragment 采纳脚本',
+    homeHtml.includes("#t=") && homeHtml.includes('history.replaceState'),
+  );
+  check('扫码弹窗标明凭据泄露风险', homeHtml.includes('请勿截图或分享'));
+  const removedHandoff = await fetch(`${baseUrl()}/j/removed`);
+  checkEqual('服务端不提供 /j 扫码兑换端点', removedHandoff.status, 404);
   check(
     '首页服务信息收在折叠区',
     homeHtml.includes('<details') && homeHtml.includes('/a/&lt;agent_session_id&gt;'),
@@ -295,6 +312,9 @@ async function main(): Promise<void> {
   check('单聊页包含 room_id', chatHtml.includes(roomResult?.room?.room_id ?? '\u0000'));
   check('单聊页包含会话列表容器', chatHtml.includes('id="room-list"'));
   check('单聊页包含消息输入框', chatHtml.includes('id="composer"'));
+  check('单聊页包含改名入口', chatHtml.includes('id="rename"'));
+  check('单聊页包含 @ 成员选择器', chatHtml.includes('id="mention-picker"'));
+  check('单聊页包含手机扫码入口', chatHtml.includes('id="device-handoff"'));
   check('单聊页订阅房间 head', chatHtml.includes('agentnet://rooms/'));
 
   const getResponse = await fetch(`${baseUrl()}/mcp`);
@@ -308,8 +328,13 @@ async function main(): Promise<void> {
   const connection = await connectClient(unregistered);
   try {
     const tools = await connection.client.listTools();
-    checkEqual('官方 SDK 可通过 server/discover 建连', tools.tools.length, 25);
+    checkEqual('官方 SDK 可通过 server/discover 建连', tools.tools.length, 27);
     await expectToolError('未注册凭据调用 network_me 返回 CREDENTIAL_INVALID', callTool(connection.client, 'network_me'), 'CREDENTIAL_INVALID');
+    await expectToolError(
+      '未注册凭据调用 network_login 返回 CREDENTIAL_INVALID',
+      callTool(connection.client, 'network_login'),
+      'CREDENTIAL_INVALID',
+    );
 
     const listen = await rawRpc(
       'subscriptions/listen',
