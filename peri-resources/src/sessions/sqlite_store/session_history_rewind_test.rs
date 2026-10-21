@@ -257,6 +257,7 @@ async fn test_rewind_clears_the_whole_projection_payload_of_restored_entries() {
             policy_version: 2,
             entries: Vec::new(),
             superseded_by: Some(summary_id),
+            ..Default::default()
         }),
     };
     data.apply_compaction(
@@ -330,6 +331,7 @@ async fn test_rewind_leaves_untouched_entries_flags_bit_for_bit() {
             policy_version: 2,
             entries: Vec::new(),
             superseded_by: Some(summary),
+            ..Default::default()
         }),
     };
     data.apply_compaction(
@@ -471,4 +473,135 @@ async fn test_rewind_flag_rebuild_failure_leaves_the_store_unchanged() {
         before_flags,
         "失败不得留下部分 flags"
     );
+}
+
+#[tokio::test]
+async fn test_rewind_atomically_revokes_micro_group_when_anchor_is_removed() {
+    use peri_acp_types::context_archive::build_catalog;
+    use peri_acp_types::projection::{
+        ArchiveGroupLink, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
+    };
+    let (store, data, directory) = database().await;
+    let workspace = workspace(&store, directory.path()).await;
+    let id = "archive-rewind".to_string();
+    data.save_new_session(&session(
+        &id,
+        &workspace.cwd.to_string_lossy(),
+        &workspace,
+        frozen("archive"),
+    ))
+    .await
+    .unwrap();
+    let history = payloads(2);
+    data.append_history(&id, &history).await.unwrap();
+    let anchor = history[1].id();
+    let catalog = build_catalog(
+        id.clone(),
+        "group".into(),
+        anchor,
+        &history,
+        "Historical data".into(),
+    )
+    .unwrap();
+    let updates = history
+        .iter()
+        .map(|p| {
+            (
+                p.id(),
+                MessageFlags {
+                    truncated: true,
+                    projection: Some(MessageProjectionDirective {
+                        policy_version: 3,
+                        archive_catalog: (p.id() == anchor).then(|| catalog.clone()),
+                        archive_group: Some(ArchiveGroupLink {
+                            group_id: "group".into(),
+                            anchor_message_id: anchor,
+                        }),
+                        entries: vec![ProjectionActionEntry {
+                            message_id: p.id(),
+                            target: ProjectionTarget::Message,
+                            action: ProjectionAction::OmitToolExchange {
+                                anchor_message_id: anchor,
+                                group_id: "group".into(),
+                                tool_call_ids: vec!["call".into()],
+                            },
+                        }],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect();
+    data.apply_compaction(
+        &id,
+        &CompactionChange {
+            flag_updates: updates,
+            appended_messages: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    data.rewind_history(&id, RewindBoundary::KeepThrough(history[0].id()), &[])
+        .await
+        .unwrap();
+    let restored = data.load_snapshot(&id).await.unwrap();
+    assert_eq!(restored.payloads.len(), 1);
+    let projection = restored.flags[&history[0].id()]
+        .projection
+        .as_ref()
+        .unwrap();
+    assert!(projection.entries.is_empty(), "不能留下半组隐藏");
+    assert!(projection.archive_group.is_none());
+}
+
+#[tokio::test]
+async fn test_compaction_summary_roots_commit_with_append_and_failure_rolls_back() {
+    use peri_acp_types::context_archive::ArchiveRoot;
+    let (store, data, directory) = database().await;
+    let workspace = workspace(&store, directory.path()).await;
+    let id = "archive-summary-roots".to_string();
+    data.save_new_session(&session(
+        &id,
+        &workspace.cwd.to_string_lossy(),
+        &workspace,
+        frozen("archive"),
+    ))
+    .await
+    .unwrap();
+    let history = payloads(1);
+    data.append_history(&id, &history).await.unwrap();
+    let anchor = history[0].id();
+    let summary = BaseMessage::human("Summary deliberately contains no archive identifiers");
+    let flags = MessageFlags {
+        projection: Some(MessageProjectionDirective {
+            policy_version: 3,
+            archive_roots: vec![ArchiveRoot {
+                source_thread_id: id.clone(),
+                first_anchor: anchor,
+                last_anchor: anchor,
+                committed_tail: anchor,
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut change = CompactionChange {
+        flag_updates: vec![
+            (summary.id(), flags.clone()),
+            (MessageId::new(), MessageFlags::default()),
+        ],
+        appended_messages: vec![summary.clone()],
+    };
+    data.apply_compaction(&id, &change).await.unwrap_err();
+    assert_eq!(
+        data.load_snapshot(&id).await.unwrap().payloads.len(),
+        1,
+        "第k项失败不得残留摘要"
+    );
+    change.flag_updates.pop();
+    data.apply_compaction(&id, &change).await.unwrap();
+    let snapshot = data.load_snapshot(&id).await.unwrap();
+    assert_eq!(snapshot.flags[&summary.id()], flags);
+    assert_eq!(snapshot.payloads.len(), 2);
 }

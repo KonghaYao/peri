@@ -323,6 +323,46 @@ pub(crate) trait SessionDataPort: Send + Sync {
         )
     }
 
+    /// Resolve a frozen inherited archive grant. Source IDs/references are never credentials.
+    async fn inherited_archive_root(
+        &self,
+        _id: &ThreadId,
+        _source: &ThreadId,
+        _anchor: MessageId,
+    ) -> SessionResourceResult<peri_acp_types::context_archive::ArchiveRoot> {
+        Err(
+            peri_acp_types::session_resources::SessionResourceError::new(
+                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
+            ),
+        )
+    }
+
+    /// Bounded archive metadata access, including excluded anchors. Unsupported adapters fail closed.
+    async fn read_archive_metadata(
+        &self,
+        _id: &ThreadId,
+        _query: &peri_acp_types::context_archive::ArchiveMetadataQuery,
+    ) -> SessionResourceResult<peri_acp_types::context_archive::ArchiveMetadataPage> {
+        Err(
+            peri_acp_types::session_resources::SessionResourceError::new(
+                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
+            ),
+        )
+    }
+
+    /// Read only the requested canonical byte interval below a stable committed tail.
+    async fn read_archive_chunk(
+        &self,
+        _id: &ThreadId,
+        _query: &peri_acp_types::context_archive::ArchiveChunkQuery,
+    ) -> SessionResourceResult<peri_acp_types::context_archive::ArchiveChunk> {
+        Err(
+            peri_acp_types::session_resources::SessionResourceError::new(
+                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
+            ),
+        )
+    }
+
     /// 按给定 id 集合读取 flags（有界）：只查这些 id，不做全历史扫描。
     ///
     /// 与 [`Self::load_session_history`] 同一条派生视图规则：只返回非默认标记；

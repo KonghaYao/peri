@@ -20,6 +20,7 @@ use crate::agent::events::CompactStrategy;
 use crate::session::transcript::MessageTranscript;
 
 pub mod config;
+pub mod exposure;
 pub mod full;
 pub mod micro;
 pub mod planner;
@@ -178,6 +179,36 @@ pub async fn run_compact_with_protected(
     before_full_summary: Option<FullSummaryNotice<'_>>,
     protected: &crate::session::async_result_mailbox::ProtectedResults,
 ) -> CompactResult {
+    run_compact_with_facts(
+        transcript,
+        llm,
+        config,
+        pressure,
+        force,
+        consecutive_failures,
+        cwd,
+        before_full_summary,
+        protected,
+        &planner::MicroPlanningFacts::default(),
+        &ProviderCapabilities::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_compact_with_facts(
+    transcript: &mut MessageTranscript,
+    llm: Option<&dyn peri_model::Model>,
+    config: &CompactConfig,
+    pressure: &ContextPressure,
+    force: bool,
+    consecutive_failures: &mut u32,
+    cwd: &str,
+    before_full_summary: Option<FullSummaryNotice<'_>>,
+    protected: &crate::session::async_result_mailbox::ProtectedResults,
+    facts: &planner::MicroPlanningFacts,
+    caps: &ProviderCapabilities,
+) -> CompactResult {
     let before_visible_len = transcript.visible_messages().len();
 
     // 自动关闭不影响显式手动 force。
@@ -270,7 +301,15 @@ pub async fn run_compact_with_protected(
             }
 
             // Dry-run：先用 plan_micro 估算效果（无副作用）
-            let plan = plan_micro(transcript, config, true);
+            let plan =
+                match planner::plan_micro_with_facts(transcript, config, pressure, facts, caps) {
+                    Ok(plan) => plan,
+                    Err(error) => return micro_failure(before_visible_len, error),
+                };
+            tracing::info!(trigger_pressure_tokens = pressure.estimated_tokens, trigger_ratio = budget_pct,
+                view_before_estimate = plan.estimated_before_tokens, view_after_estimate = plan.estimated_after_tokens,
+                incremental_saved_estimate = plan.estimated_tokens_saved, diagnostics = ?plan.diagnostics,
+                policy_version = plan.policy_version, "Micro projection planned (estimates)");
 
             // Shadow mode：只估算不应用
             if config.shadow_mode_enabled {
@@ -342,7 +381,10 @@ pub async fn run_compact_with_protected(
 
             if plan.estimated_tokens_saved >= reclaim_target && plan.has_changes() {
                 // Micro 满足回收目标 → 应用（复用 dry-run 计划，不二次规划）
-                let affected = micro::apply_micro_plan(transcript, &plan);
+                let affected = match micro::apply_micro_plan(transcript, &plan).await {
+                    Ok(affected) => affected,
+                    Err(error) => return micro_failure(before_visible_len, error),
+                };
                 *consecutive_failures = 0;
                 debug!(
                     saved = plan.estimated_tokens_saved,
@@ -369,7 +411,10 @@ pub async fn run_compact_with_protected(
                 // 设计决策：Micro 每轮都提供实际收益（truncated 标记持久化到 transcript），
                 // 因此先执行 micro_compact 再叠加 Full——即使 Full 失败，Micro 的截断仍然生效。
                 // Smart 路径（`mod.rs:304`）有相同模式：先 Smart 再 Full，Full 失败不影响 Smart 结果。
-                let micro_affected = micro::apply_micro_plan(transcript, &plan);
+                let micro_affected = match micro::apply_micro_plan(transcript, &plan).await {
+                    Ok(affected) => affected,
+                    Err(error) => return micro_failure(before_visible_len, error),
+                };
                 // 注意：estimated_tokens_saved 使用 dry-run 估计
                 // 实际 micro 应用后的节省可能略有不同，但 plan 是最佳可用近似
                 debug!(
@@ -410,7 +455,10 @@ pub async fn run_compact_with_protected(
                 full_result
             } else {
                 // 不足但未达 Full 阈值 → 应用 Micro（部分收益也好），复用 dry-run 计划
-                let affected = micro::apply_micro_plan(transcript, &plan);
+                let affected = match micro::apply_micro_plan(transcript, &plan).await {
+                    Ok(affected) => affected,
+                    Err(error) => return micro_failure(before_visible_len, error),
+                };
                 *consecutive_failures = 0;
                 debug!(
                     saved = plan.estimated_tokens_saved,
@@ -436,7 +484,16 @@ pub async fn run_compact_with_protected(
         }
         CompactAction::Smart => {
             if config.shadow_mode_enabled {
-                let plan = plan_micro(transcript, config, true);
+                let plan =
+                    match planner::plan_micro_with_facts(transcript, config, pressure, facts, caps)
+                    {
+                        Ok(plan) => plan,
+                        Err(error) => return micro_failure(before_visible_len, error),
+                    };
+                tracing::info!(trigger_pressure_tokens = pressure.estimated_tokens, trigger_ratio = budget_pct,
+                view_before_estimate = plan.estimated_before_tokens, view_after_estimate = plan.estimated_after_tokens,
+                incremental_saved_estimate = plan.estimated_tokens_saved, diagnostics = ?plan.diagnostics,
+                policy_version = plan.policy_version, "Micro projection planned (estimates)");
                 info!(
                     estimated_saved = plan.estimated_tokens_saved,
                     actions_count = plan.actions.len(),
@@ -461,8 +518,19 @@ pub async fn run_compact_with_protected(
 
             // Smart Compact 已废弃，委托给 Micro Compact
             tracing::warn!("Smart Compact is deprecated, falling back to Micro Compact");
-            let plan = plan_micro(transcript, config, true);
-            let affected = micro::apply_micro_plan(transcript, &plan);
+            let plan =
+                match planner::plan_micro_with_facts(transcript, config, pressure, facts, caps) {
+                    Ok(plan) => plan,
+                    Err(error) => return micro_failure(before_visible_len, error),
+                };
+            tracing::info!(trigger_pressure_tokens = pressure.estimated_tokens, trigger_ratio = budget_pct,
+                view_before_estimate = plan.estimated_before_tokens, view_after_estimate = plan.estimated_after_tokens,
+                incremental_saved_estimate = plan.estimated_tokens_saved, diagnostics = ?plan.diagnostics,
+                policy_version = plan.policy_version, "Micro projection planned (estimates)");
+            let affected = match micro::apply_micro_plan(transcript, &plan).await {
+                Ok(affected) => affected,
+                Err(error) => return micro_failure(before_visible_len, error),
+            };
             let estimated_tokens_saved = plan.estimated_tokens_saved;
 
             // 空结果 → 无可 compact 消息
@@ -674,3 +742,25 @@ mod _test;
 #[cfg(test)]
 #[path = "trigger_test.rs"]
 mod trigger_test;
+
+pub(crate) fn micro_failure(visible_len: usize, error: crate::error::AgentError) -> CompactResult {
+    tracing::error!(%error, commit_status = "failed", "Micro projection not published");
+    CompactResult {
+        strategy: CompactStrategy::Micro,
+        affected_count: 0,
+        estimated_tokens_saved: 0,
+        before_visible_len: visible_len,
+        after_visible_len: visible_len,
+        summary: None,
+        full_escalation_reason: None,
+        outcome: CompactOutcome::MicroFailed,
+        failure: Some(error),
+        changed_messages: 0,
+        changed_fields: 0,
+        no_op_candidates: 0,
+    }
+}
+
+#[cfg(test)]
+#[path = "archive_lifecycle_test.rs"]
+mod archive_lifecycle_tests;

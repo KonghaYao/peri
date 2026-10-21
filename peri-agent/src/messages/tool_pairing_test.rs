@@ -320,7 +320,7 @@ fn raw_inline_result_cannot_reach_anthropic_request() {
 }
 
 #[test]
-fn incomplete_or_displaced_inline_results_fail_before_send() {
+fn incomplete_or_duplicate_inline_results_fail_before_send() {
     let inline = || {
         BaseMessage::human(MessageContent::blocks(vec![ContentBlock::tool_result(
             "first",
@@ -330,7 +330,6 @@ fn incomplete_or_displaced_inline_results_fail_before_send() {
     };
     for messages in [
         vec![assistant(&["first", "second"]), inline()],
-        vec![assistant(&["first"]), BaseMessage::human("later"), inline()],
         vec![
             assistant(&["first"]),
             inline(),
@@ -412,6 +411,7 @@ fn persisted_result_projection_and_interrupted_tail_share_the_repaired_view() {
                 },
             }],
             superseded_by: None,
+            ..Default::default()
         },
     );
     transcript.append(BaseMessage::human("continue"));
@@ -423,4 +423,97 @@ fn persisted_result_projection_and_interrupted_tail_share_the_repaired_view() {
     );
     assert!(matches!(view[4], BaseMessage::Human { .. }));
     assert!(AgentModelBridge::convert_messages(&view).is_ok());
+}
+
+#[test]
+fn test_raw_inline_results_do_not_create_missing_result_placeholders() {
+    let ai = BaseMessage::Ai {
+        id: crate::messages::MessageId::new(),
+        content: MessageContent::raw(vec![
+            json!({"type":"tool_use","id":"raw","name":"Read","input":{"path":"a.rs"}}),
+        ]),
+        tool_calls: Vec::new(),
+    };
+    let result = BaseMessage::human(MessageContent::raw(vec![
+        json!({"type":"tool_result","id":"native-result-id","tool_use_id":"raw","content":[{"type":"text","text":"actual"}]}),
+    ]));
+    let result_id = result.id();
+    let view = repair_model_tool_pairing(vec![ai, result]).unwrap();
+    assert_eq!(view.len(), 2);
+    assert_eq!(view[1].id(), result_id);
+    assert_eq!(view[0].tool_calls()[0].id, "raw");
+    assert!(
+        matches!(view[1].message_content(), MessageContent::Raw(values) if values[0]["id"] == "native-result-id")
+    );
+}
+
+#[test]
+fn test_raw_result_only_batch_can_cross_human_interjection_without_identity_loss() {
+    let user = BaseMessage::human("keep this constraint in its original user order");
+    let user_id = user.id();
+    let result = BaseMessage::human(MessageContent::raw(vec![
+        json!({"type":"tool_result","tool_use_id":"raw","content":"actual"}),
+    ]));
+    let result_id = result.id();
+    let view = repair_model_tool_pairing(vec![assistant(&["raw"]), user, result]).unwrap();
+    assert_eq!(view.len(), 3);
+    assert_eq!(view[1].id(), result_id);
+    assert_eq!(view[2].id(), user_id);
+    assert!(!view
+        .iter()
+        .any(|message| message.content().contains(MISSING_RESULT)));
+}
+
+#[test]
+fn test_mixed_inline_relocation_is_explicit_protocol_dependency() {
+    let result = BaseMessage::human(MessageContent::raw(vec![
+        json!({"type":"tool_result","tool_use_id":"raw","content":"actual"}),
+        json!({"type":"text","text":"newer user constraint"}),
+    ]));
+    let error = repair_model_tool_pairing(vec![
+        assistant(&["raw"]),
+        BaseMessage::human("earlier user constraint"),
+        result,
+    ])
+    .unwrap_err();
+    assert!(error.to_string().contains("protocol_dependency"));
+    assert!(error.to_string().contains("reorder user content"));
+}
+
+#[test]
+fn test_raw_and_standalone_duplicate_result_is_rejected() {
+    let inline = BaseMessage::human(MessageContent::raw(vec![
+        json!({"type":"tool_result","tool_use_id":"raw","content":"actual"}),
+    ]));
+    let error = repair_model_tool_pairing(vec![
+        assistant(&["raw"]),
+        inline,
+        BaseMessage::tool_result("raw", "duplicate"),
+    ])
+    .unwrap_err();
+    assert!(error.to_string().contains("duplicate result for raw"));
+}
+
+#[test]
+fn inline_result_message_cannot_be_moved_across_its_other_call_batch() {
+    let raw = vec![
+        json!({"type":"tool_result","tool_use_id":"a","content":[{"type":"text","text":"first"}]}),
+        json!({"type":"tool_result","tool_use_id":"b","content":[{"type":"text","text":"second"}]}),
+    ];
+    let typed = raw
+        .iter()
+        .map(|value| serde_json::from_value(value.clone()).unwrap())
+        .collect();
+    for content in [MessageContent::Raw(raw), MessageContent::Blocks(typed)] {
+        let error = repair_model_tool_pairing(vec![
+            assistant(&["a"]),
+            assistant(&["b"]),
+            BaseMessage::human(content),
+        ])
+        .unwrap_err();
+        assert!(error.to_string().contains("protocol_dependency"));
+        assert!(error
+            .to_string()
+            .contains("multiple assistant call batches"));
+    }
 }

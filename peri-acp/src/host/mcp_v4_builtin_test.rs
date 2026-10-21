@@ -319,13 +319,21 @@ async fn builtin_instances_expose_frozen_effective_names_on_first_model_request(
     println!("[V-02 迁移后] deferred 条目 = {deferred:?}");
 
     // 与 acceptance §2.3 的迁移前基线逐项对照：同一夹具、同一观察量、同一命令。
-    // 工具总数保持 18：选中的十项以原始名注入，cron 仍是 deferred。
+    // 原有 18 项加上直接可用的历史回查；cron 仍是 deferred。
     // 计数守卫可发现工具面意外增减。
     assert_eq!(
         names.len(),
-        18,
-        "首个请求的工具总数必须与迁移前基线一致（acceptance §2.3 记为 18；计数仅供对照）: {names:?}"
+        19,
+        "首个请求应包含原有工具与 ReadContextArchive: {names:?}"
     );
+    assert_eq!(
+        names
+            .iter()
+            .filter(|name| *name == "ReadContextArchive")
+            .count(),
+        1
+    );
+    assert!(!deferred.iter().any(|name| name == "ReadContextArchive"));
     for (raw_name, _) in WEB_ARTIFACT_CAPABILITIES {
         assert_eq!(
             names.iter().filter(|name| *name == raw_name).count(),

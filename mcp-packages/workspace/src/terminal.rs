@@ -385,7 +385,7 @@ impl BaseTool for BashTool {
         input: Value,
         ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<ToolOutput, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(self.execute(input, ctx).await?.output)
+        Ok(self.execute(input, ctx).await?.into_tool_output())
     }
 
     async fn invoke(
@@ -894,6 +894,26 @@ pub(crate) struct BashOutput {
     pub(crate) recovery: Option<String>,
 }
 impl BashOutput {
+    /// The structured path must retain the same recovery failure as legacy invoke.
+    pub(crate) fn into_tool_output(mut self) -> ToolOutput {
+        if let Some(recovery) = self.recovery {
+            let error = peri_mcp_common::failure::ToolFailure::new(recovery, self.output.text);
+            self.output.text = peri_mcp_common::result_mapping::failure_text("Bash", &error);
+            self.output.outcome = peri_agent::tools::ToolOutcome::reported(true);
+        } else if let Some(evidence) = self.output.execution.as_ref() {
+            if evidence.status != ToolExecutionStatus::Unknown {
+                self.output.outcome = peri_agent::tools::ToolOutcome::reported(matches!(
+                    evidence.status,
+                    ToolExecutionStatus::Failed
+                        | ToolExecutionStatus::Cancelled
+                        | ToolExecutionStatus::TimedOut
+                        | ToolExecutionStatus::RunningAfterTimeout
+                ));
+            }
+        }
+        self.output
+    }
+
     fn with_execution(text: impl Into<String>, evidence: ToolExecutionEvidence) -> Self {
         let recovery = (evidence.status == ToolExecutionStatus::TimedOut).then(||
             "Command timed out. The process group has been terminated. Use a more focused command or background execution when a task manager is available.".to_string());

@@ -381,9 +381,9 @@ fn test_short_tool_result_compact_action_is_direct_render_noop() {
 }
 
 #[test]
-fn test_tool_result_projection_compacts_complete_multi_block_text_stream() {
-    let first = "A".repeat(300);
-    let second = "B".repeat(300);
+fn test_tool_result_projection_preserves_block_boundaries() {
+    let first = "A".repeat(3000);
+    let second = "B".repeat(3000);
     let original_content = MessageContent::Blocks(vec![
         ContentBlock::text(first.clone()),
         ContentBlock::text(second.clone()),
@@ -420,21 +420,26 @@ fn test_tool_result_projection_compacts_complete_multi_block_text_stream() {
         ..Default::default()
     };
 
-    let expected = format!(
-        "{}\n... [150 字符已省略] ...\n{}",
-        "A".repeat(300) + &"B".repeat(50),
-        "B".repeat(100)
-    );
     let projected = render_llm_view(&transcript, &plan.actions, &ProviderCapabilities::default())
         .expect("render_llm_view 应成功");
     let BaseMessage::Tool { content, .. } = &projected[1] else {
         panic!("第二条消息应为 Tool 消息");
     };
-    assert!(matches!(content, MessageContent::Text(_)));
-    assert_eq!(content.text_content(), expected);
+    let MessageContent::Blocks(blocks) = content else {
+        panic!("block boundaries must survive")
+    };
+    assert_eq!(blocks.len(), 2);
+    for (block, character) in blocks.iter().zip(['A', 'B']) {
+        let ContentBlock::Text { text } = block else {
+            panic!("expected text")
+        };
+        assert!(text.starts_with(&character.to_string().repeat(350)));
+        assert!(text.ends_with(&character.to_string().repeat(100)));
+        assert!(text.contains("2550 字符已省略"));
+    }
 
     let (before, after) = estimate_projection_chars(&transcript, &[action]);
-    assert_eq!(before, 600);
+    assert_eq!(before, 6000);
     assert_eq!(after, content.text_content().chars().count() as u64);
     assert!(before > after, "多 Text block 的整体估算应体现节省");
 }
@@ -507,8 +512,8 @@ fn test_tool_result_projection_uses_action_policy_below_planner_threshold() {
         message_id: tool_id,
         target: ProjectionTarget::Message,
         action: ProjectionAction::CompactToolResult {
-            keep_head: 200,
-            keep_tail: 100,
+            keep_head: 100,
+            keep_tail: 10,
             preserve_recovery_handle: false,
         },
     };
@@ -527,7 +532,7 @@ fn test_tool_result_projection_uses_action_policy_below_planner_threshold() {
     let BaseMessage::Tool { content, .. } = &projected[1] else {
         panic!("第二条消息应为 Tool 消息");
     };
-    assert!(matches!(content, MessageContent::Text(_)));
+    assert!(matches!(content, MessageContent::Blocks(_)));
     assert!(content.text_content().contains("字符已省略"));
 
     let (before, after) = estimate_projection_chars(&transcript, &[action]);

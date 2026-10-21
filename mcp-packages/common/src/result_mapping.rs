@@ -36,3 +36,17 @@ pub fn failure_text(tool: &str, error: &(dyn std::error::Error + 'static)) -> St
 #[cfg(test)]
 #[path = "result_mapping_test.rs"]
 mod tests;
+
+/// Preserve producer execution facts across the builtin MCP transport.
+pub fn with_execution(
+    mut result: rmcp::model::CallToolResult,
+    evidence: Option<&peri_agent::tools::ToolExecutionEvidence>,
+) -> rmcp::model::CallToolResult {
+    if let Some(evidence) = evidence {
+        result.meta.get_or_insert_with(Default::default).0.insert(
+            peri_acp_types::tools::TOOL_EXECUTION_META_KEY.into(),
+            serde_json::json!(evidence),
+        );
+    }
+    result
+}

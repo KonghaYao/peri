@@ -510,9 +510,10 @@ impl BaseTool for McpToolBridge {
                     "Its completion result will be delivered to the initiating session \
                      while that session is live."
                 };
-                return Ok(peri_agent::tools::ToolOutput::from_legacy(format!(
-                    "Background task started: {public_id}. {delivery_note}"
-                )));
+                return Ok(super::tool_execution::task_started(
+                    public_id,
+                    delivery_note,
+                ));
             }
             _ => {
                 return Err(Box::new(ToolCallError::CallFailed {
@@ -662,7 +663,7 @@ impl BaseTool for McpToolBridge {
             format_output(pool.as_deref(), session_id, formatted, false).await
         };
         // 远端 JSON-RPC error 的原始载荷尚未在协议失败分支接线，见该分支注释。
-        Ok(peri_agent::tools::ToolOutput::from_raw_result(text, raw))
+        super::tool_execution::complete(self, text, raw)
     }
 }
 

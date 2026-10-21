@@ -534,6 +534,7 @@ async fn apply_full_compaction(
         policy_version: 1,
         entries: Vec::new(),
         superseded_by: Some(summary_id),
+        ..Default::default()
     };
     data.apply_compaction(
         &id.to_owned(),
@@ -656,6 +657,7 @@ async fn insert_archive(pool: &SqlitePool, id: &str, rows: usize) -> MessageId {
         policy_version: 1,
         entries: Vec::new(),
         superseded_by: Some(summary),
+        ..Default::default()
     })
     .unwrap();
     let mut tx = pool.begin().await.unwrap();

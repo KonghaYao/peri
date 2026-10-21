@@ -265,10 +265,20 @@ impl WorkspaceMcpServer {
             if client_supports_tasks {
                 return Ok(CallToolResponse::Task(CreateTaskResult::new(task)));
             }
+            let evidence = peri_agent::tools::ToolExecutionEvidence {
+                status: ToolExecutionStatus::Running,
+                task_id: Some(task.task_id.clone()),
+                exit_code: None,
+                output_ref: None,
+                output_truncated: false,
+            };
             return Ok(CallToolResponse::Complete(
-                rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
-                    format!("Background shell task started.\ntask_id: {}", task.task_id),
-                )]),
+                peri_mcp_common::result_mapping::with_execution(
+                    rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+                        format!("Background shell task started.\ntask_id: {}", task.task_id),
+                    )]),
+                    Some(&evidence),
+                ),
             ));
         }
 
@@ -312,17 +322,17 @@ impl WorkspaceMcpServer {
                         return Ok(CallToolResponse::Task(CreateTaskResult::new(task)));
                     }
                 }
-                if let Some(recovery) = output.recovery {
-                    let error =
-                        peri_mcp_common::failure::ToolFailure::new(recovery, output.output.text);
+                let output = output.into_tool_output();
+                let result = if output.is_error() == Some(true) {
                     rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(
-                        peri_mcp_common::result_mapping::failure_text("Bash", &error),
+                        output.text,
                     )])
                 } else {
                     rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
-                        output.output.text,
+                        output.text,
                     )])
-                }
+                };
+                peri_mcp_common::result_mapping::with_execution(result, output.execution.as_ref())
             }
             Err(error) => {
                 rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(

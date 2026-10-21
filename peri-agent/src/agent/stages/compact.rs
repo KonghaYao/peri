@@ -178,15 +178,13 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
 
         let config_clone: CompactConfig = config.clone();
 
-        // G6: 记录 compact 前的 flag 计数，用于 cancel arm 检测是否已提交变更
-        let pre_compact_flagged = transcript_owned
+        // Compare actual flags: a second downgrade can change content without increasing
+        // the number of truncated messages.
+        let pre_compact_flags: std::collections::HashMap<_, _> = transcript_owned
             .entries()
             .iter()
-            .filter(|e| {
-                let f = transcript_owned.flags(e.id());
-                f.truncated || f.excluded || f.projection.is_some()
-            })
-            .count();
+            .map(|entry| (entry.id(), transcript_owned.flags(entry.id())))
+            .collect();
 
         // G6: 记录 compact 前的可见消息数，供 cancel arm 发射 MessagesCompacted 事件使用
         let before_visible_len = transcript_owned.visible_messages().len();
@@ -214,6 +212,8 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
         // mailbox 负责并在随后请求中重新投影。
         let protected = ctx.session.async_result_mailbox.protected_snapshot();
 
+        let capabilities = ctx.runtime.llm.provider_capabilities();
+
         // 包在 select! biased 中：cancel 优先，避免 Full Compact 的长 LLM 调用阻塞中断。
         // 注：run_compact 内部不感知 turn cancel_token，必须在此层显式 select。
         let mut result = tokio::select! {
@@ -221,14 +221,9 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
             _ = ctx.session.turn.cancel_token.cancelled() => {
                 // G6: 检查 compact 是否在 cancel 前已提交变更（通过 flag 计数对比）。
                 // transcript_owned 已通过 &mut 被 run_compact 修改，变更已持久化在内存中。
-                let post_compact_flagged = transcript_owned
-                    .entries()
-                    .iter()
-                    .filter(|e| {
-                        let f = transcript_owned.flags(e.id());
-                        f.truncated || f.excluded || f.projection.is_some()
-                    })
-                    .count();
+                let committed_changes = transcript_owned.entries().iter().filter(|entry| {
+                    pre_compact_flags.get(&entry.id()).is_none_or(|before| before != &transcript_owned.flags(entry.id()))
+                }).count();
 
                 // 把 transcript 放回 RwLock（与正常路径一致，避免遗失消息）
                 *ctx.session.transcript.write() = transcript_owned;
@@ -240,7 +235,7 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
                     break 'compact_core Err(uncertain_compaction_error(ctx));
                 }
 
-                if post_compact_flagged > pre_compact_flagged {
+                if committed_changes > 0 {
                     // G6: 发射配对事件，防止 Langfuse span 孤立
                     let visible: Vec<crate::messages::BaseMessage> = ctx.session.transcript.read()
                         .visible_messages().into_iter().cloned().collect();
@@ -256,19 +251,19 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
                             skills: vec![],
                             re_inject_count: 0,
                             strategy: compact_strategy,
-                            affected_count: post_compact_flagged - pre_compact_flagged,
+                            affected_count: committed_changes,
                             estimated_tokens_saved: 0,
                             estimated_tokens_before: pressure.estimated_tokens,
                             estimated_tokens_after: pressure.estimated_tokens,
-                            changed_messages: post_compact_flagged - pre_compact_flagged,
-                            changed_fields: post_compact_flagged - pre_compact_flagged,
+                            changed_messages: committed_changes,
+                            changed_fields: committed_changes,
                             no_op_candidates: 0,
                             full_escalation_reason: None,
                             cache_hit_rate_before: pressure.cache_hit_rate,
                             outcome: crate::agent::compact_v2::CompactOutcome::InterruptedAfterCommit,
                         },
                     );
-                    affected_count = post_compact_flagged - pre_compact_flagged;
+                    affected_count = committed_changes;
                     break 'compact_core Ok(CompactOutput { compacted: true });
                 }
                 // S1.4：cancel 且未提交变更 → 补发 CompactEnded 配对事件
@@ -286,7 +281,14 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
                 );
                 break 'compact_core Err(crate::error::AgentError::Interrupted);
             }
-            r = crate::agent::compact_v2::run_compact_with_protected(
+            r = async {
+                // Recovery probing may use a remote Store. It shares the commit path's
+                // cancellation boundary and failure events, while ownership remains here.
+                let facts = match super::micro_facts::snapshot(ctx, &transcript_owned, &protected).await {
+                    Ok(facts) => facts,
+                    Err(error) => return crate::agent::compact_v2::micro_failure(before_visible_len, error),
+                };
+                crate::agent::compact_v2::run_compact_with_facts(
                 &mut transcript_owned,
                 compact_llm_ref,
                 &config_clone,
@@ -296,7 +298,10 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
                 ctx.cwd(),
                 Some(&before_full_summary),
                 &protected,
-            ) => r,
+                &facts,
+                &capabilities,
+                ).await
+            } => r,
         };
 
         if transcript_owned.compaction_commit_state().is_uncertain() {
@@ -377,6 +382,7 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
         // 把 transcript 放回 RwLock
         *ctx.session.transcript.write() = transcript_owned;
 
+        let micro_failed = result.outcome == crate::agent::compact_v2::CompactOutcome::MicroFailed;
         let failure = result.failure.take();
         let compacted = {
             let r = result; // compact_v2::run_compact 直接返回 CompactResult
@@ -472,7 +478,7 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
             if matches!(error, crate::error::AgentError::Interrupted) {
                 break 'compact_core Err(error);
             }
-            if pct >= config.auto_compact_threshold {
+            if micro_failed || pct >= config.auto_compact_threshold {
                 break 'compact_core Err(error);
             }
         }

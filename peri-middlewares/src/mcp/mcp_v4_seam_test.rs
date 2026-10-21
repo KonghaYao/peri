@@ -46,8 +46,8 @@ const PLUGIN_NAMESPACE: &str = "mcp__plugin_p1_workspace__";
 /// 原始工具名含 `.`（净化后为 `read_file`），用于验证「配置匹配原始名」。
 const PLUGIN_REQUIRED_TOOL: &str = "read_file";
 
-/// `collect_tools` 固定追加的两个工具（非 MCP 静态 bridge）。
-const APPENDED_TOOLS: [&str; 2] = ["mcp_read_resource", "DiscoverMCP"];
+/// `collect_tools` 固定追加的工具（非外部 server 的静态 bridge）。
+const APPENDED_TOOLS: [&str; 3] = ["ReadContextArchive", "mcp_read_resource", "DiscoverMCP"];
 
 // ─── 夹具 ────────────────────────────────────────────────────────────────────
 
@@ -274,15 +274,21 @@ impl hook_state::StartupState for StartupProbe {
 
 // ─── 视图读取 helpers ────────────────────────────────────────────────────────
 
-/// 切出收集视图中的静态 bridge 前缀：尾部两个是固定追加的 resource / discover 工具。
+/// 切出外部 server 的静态 bridge；归档读取、resource / discover 独立追加。
 fn static_bridges(view: &[Box<dyn BaseTool>]) -> &[Box<dyn BaseTool>] {
     let split = view
         .len()
         .checked_sub(APPENDED_TOOLS.len())
-        .expect("收集视图必须包含追加的 resource / discover 工具");
+        .expect("收集视图必须包含追加的 archive / resource / discover 工具");
     let (static_tools, appended) = view.split_at(split);
     let names: Vec<&str> = appended.iter().map(|tool| tool.name()).collect();
     assert_eq!(names, APPENDED_TOOLS, "追加工具与顺序必须保持原样");
+    assert!(appended[0].is_direct(), "当前会话原文回查始终可直接调用");
+    assert!(matches!(
+        appended[0].context_retention(),
+        peri_agent::tools::ContextRetention::ArchiveRead
+    ));
+    assert!(appended[0].mcp_server_name().is_none());
     static_tools
 }
 

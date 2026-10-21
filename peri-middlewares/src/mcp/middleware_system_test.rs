@@ -526,7 +526,7 @@ async fn startup_error_text_folds_control_chars_and_preserves_credentials() {
 // ─── collect_tools 的整批替换与 deferred 回退 ────────────────────────────────
 
 /// 就绪后收集：prepared 整批**替换**初始 Vec，必需项 direct 且只注册一次；
-/// resource / discover 仍原样追加。
+/// archive / resource / discover 独立追加。
 #[tokio::test]
 async fn collect_tools_replaces_initial_bridges_without_duplicate_registration() {
     let mut fixture = GateFixture::new();
@@ -554,11 +554,14 @@ async fn collect_tools_replaces_initial_bridges_without_duplicate_registration()
         .collect();
 
     assert_eq!(
-        &names[names.len() - 2..],
-        ["mcp_read_resource", "DiscoverMCP"],
-        "resource / discover 仍原样追加: {names:?}"
+        &names[names.len() - 3..],
+        ["ReadContextArchive", "mcp_read_resource", "DiscoverMCP"],
+        "archive / resource / discover 独立追加: {names:?}"
     );
-    let bridges = &collected[..names.len() - 2];
+    let archive = &collected[names.len() - 3];
+    assert!(archive.is_direct());
+    assert!(archive.mcp_server_name().is_none());
+    let bridges = &collected[..names.len() - 3];
     assert_eq!(bridges.len(), 3, "整批静态 bridge 恰好一次: {names:?}");
     for name in ["Read", "mcp__sys__Glob", "mcp__aux__Write"] {
         assert_eq!(
@@ -599,7 +602,20 @@ async fn collect_tools_keeps_deferred_bridges_until_manifest_loaded() {
         .find(|tool| tool.name() == "mcp__sys__Read")
         .expect("deferred bridge 仍应存在");
     assert!(!read.is_direct(), "清单未发布不得提升 direct");
-    assert_eq!(collected.len(), 3, "1 static bridge + resource + discover");
+    assert_eq!(
+        collected.len(),
+        4,
+        "1 static bridge + archive + resource + discover"
+    );
+    assert_eq!(
+        collected
+            .iter()
+            .filter(|tool| tool.is_direct())
+            .map(|tool| tool.name())
+            .collect::<Vec<_>>(),
+        vec!["ReadContextArchive"],
+        "未准入的外部工具仍不得进入 direct 集合"
+    );
 
     fixture.shutdown().await;
 }
@@ -620,7 +636,11 @@ async fn collect_tools_falls_back_to_deferred_when_required_tool_missing() {
     assert!(collected
         .iter()
         .all(|tool| tool.mcp_server_name() != Some("sys")));
-    assert_eq!(collected.len(), 2, "只剩 resource + discover");
+    assert_eq!(
+        collected.iter().map(|tool| tool.name()).collect::<Vec<_>>(),
+        vec!["ReadContextArchive", "mcp_read_resource", "DiscoverMCP"],
+        "缺少 required 工具时只保留独立的 archive / resource / discover"
+    );
 
     fixture.shutdown().await;
 }

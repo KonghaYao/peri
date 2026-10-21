@@ -97,6 +97,50 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
         FrozenContext::builder().build(),
         None,
     );
+    let first = BaseMessage::human(format!("@image {}\n先看图片", image_path.display()));
+    let later = BaseMessage::human(format!(
+        "@image {}\n按照图中的数据修改",
+        image_path.display()
+    ));
+    session.queue().push(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        first.clone(),
+    ));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let fixture = ImageFixture::new(dir.path()).await;
+    let mut chain = MiddlewareChain::new();
+    chain.add(Box::new(fixture.middleware()));
+    let mcp = crate::mcp::McpMiddleware::new(Arc::new(crate::mcp::McpClientPool::new_empty()));
+    let archive =
+        peri_agent::middleware::Middleware::collect_tools(&mcp, dir.path().to_str().unwrap())
+            .into_iter()
+            .find(|tool| tool.name() == "ReadContextArchive")
+            .unwrap();
+    let tools = Arc::new(parking_lot::RwLock::new(std::collections::BTreeMap::from(
+        [(
+            "ReadContextArchive".to_owned(),
+            Arc::<dyn BaseTool>::from(archive),
+        )],
+    )));
+    let mut ctx = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_middleware_chain(Arc::new(chain))
+    .with_tools(tools)
+    .with_llm(Arc::new(CapturingLlm {
+        requests: Arc::clone(&requests),
+        queue: session.queue().clone(),
+        next_input: later.clone(),
+    }))
+    .with_context_budget(ContextBudget::new(200_000))
+    .with_compact_config(CompactConfig {
+        micro_compact_stale_steps: 1,
+        ..Default::default()
+    })
+    .build();
+    let _work_fixture = work_fixture::bind(&mut ctx).await;
     {
         let transcript = session.transcript();
         let mut transcript = transcript.write();
@@ -116,37 +160,6 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
             ));
         }
     }
-    let first = BaseMessage::human(format!("@image {}\n先看图片", image_path.display()));
-    let later = BaseMessage::human(format!(
-        "@image {}\n按照图中的数据修改",
-        image_path.display()
-    ));
-    session.queue().push(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        first.clone(),
-    ));
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let fixture = ImageFixture::new(dir.path()).await;
-    let mut chain = MiddlewareChain::new();
-    chain.add(Box::new(fixture.middleware()));
-    let mut ctx = StageContext::builder(
-        session.start_turn(),
-        session.transcript(),
-        session.queue().clone(),
-    )
-    .with_middleware_chain(Arc::new(chain))
-    .with_llm(Arc::new(CapturingLlm {
-        requests: Arc::clone(&requests),
-        queue: session.queue().clone(),
-        next_input: later.clone(),
-    }))
-    .with_context_budget(ContextBudget::new(200_000))
-    .with_compact_config(CompactConfig {
-        micro_compact_stale_steps: 1,
-        ..Default::default()
-    })
-    .build();
-    let _work_fixture = work_fixture::bind(&mut ctx).await;
     let result = run_react_loop(ctx.clone(), 3).await;
     assert!(
         matches!(result, LoopResult::Completed),
@@ -159,6 +172,7 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
     )
     .with_middleware_chain(Arc::clone(&ctx.runtime.middleware_chain))
     .with_llm(Arc::clone(&ctx.runtime.llm))
+    .with_tools(Arc::clone(&ctx.runtime.tools))
     .build();
     next_context.compact = ctx.compact.clone();
     let result = run_react_loop(next_context.clone(), 3).await;

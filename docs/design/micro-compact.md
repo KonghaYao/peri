@@ -1,384 +1,160 @@
-# Micro Compact 投影引擎设计
+# Micro Compact：可回查的模型视图投影
 
-> 状态：现行设计
+> 状态：现行实现设计；尚未实现的内容策略与验收边界见末节。本文不代表真实 provider 发布验收已通过。
 >
-> 运行时事实源为 `peri-agent/src/agent/compact_v2/` 与相邻测试。
+> 行为事实源：[Compact 引擎](../../peri-agent/src/agent/compact_v2/)、[投影契约](../../peri-acp-types/src/projection.rs)、[归档契约](../../peri-acp-types/src/context_archive.rs)。工程规则见 [ARC-COMPACT-001 与 ARC-MICRO-TOOL-INPUT-001](../standards/architecture-contracts.md)。
 
-## 1. 背景
+## 1. 职责和数据流
 
-旧版 Micro Compact 有四个设计问题，导致实际压缩效果不可靠：
-
-1. **标记了但不生效**：`micro_compact()` 给消息打 `truncated` 标记，但 Reason 阶段用 `truncated_content(100)` 只处理 `Text` 类型的消息。如果消息是 `Blocks` 格式（含 Image/Document），Base64 payload 原样发送给 LLM——标记白打了。
-2. **工具调用被连带伤害**：一条 AI 消息可能同时调用 Bash 和 AskUserQuestion。旧版以消息为单位打标记——Bash 要截断，AskUserQuestion 也被一起截了。
-3. **JSON 结构被破坏**：截断 tool input 时把 `{"path": "/a", "content": "..."}` 截成字符串再写回，导致 `Value::Object` 变 `Value::String`，provider adapter 看到不一致的数据。
-4. **效果用"标记了几条"衡量**：一条 10KB 的 Bash 输出和一条 10 字节的 Read 输出权重相同。
-
-新版围绕四个独立阶段重建了 Micro Compact：
-
-```text
-分析上下文压力 → 生成压缩计划（纯计算，不写盘） → 构造 LLM 视图（纯函数） → 应用标记并报告
-```
-
----
-
-## 2. 总体架构
+Micro 不调用摘要模型、不改写 canonical 消息。它在既有压力门控之后，计算下一次模型请求可使用的历史投影，并把动作与回查目录一起持久化。历史展示仍读取 canonical 内容；Micro 的省略不复用 Full 的 `excluded` 语义。
 
 ```mermaid
-graph TB
-    subgraph STAGE["Compact 阶段"]
-        PRESSURE["ContextPressure<br/>当前用了多少 token · 需要回收多少"]
-        PLAN["plan_micro()<br/>纯计算 · 不写盘<br/>输出 MicroCompactPlan"]
-        PRESSURE --> PLAN
-    end
-
-    subgraph DECISION["决策"]
-        Q{"估算节省量<br/>够不够？"}
-        APPLY["micro_compact()<br/>应用 truncated 标记"]
-        SKIP_MF["跳过 Micro<br/>直接 Full Compact"]
-        PARTIAL["应用 Micro<br/>虽然不够，聊胜于无"]
-        Q -->|"✅ 够"| APPLY
-        Q -->|"❌ 不够 + 逼近上限"| SKIP_MF
-        Q -->|"❌ 不够 + 还没到上限"| PARTIAL
-    end
-
-    subgraph REASON["Reason 阶段"]
-        VIEW["render_llm_view()<br/>纯函数 · 根据计划渲染<br/>输出 Vec&lt;BaseMessage&gt;"]
-        LLM["发送给 LLM"]
-        VIEW --> LLM
-    end
-
-    PLAN --> Q
-    DECISION --> VIEW
+flowchart LR
+    G[既有压力门控] --> F[当前运行期事实快照]
+    F --> P[纯 planner：候选与净收益]
+    P --> V[完整视图与协议校验]
+    V --> B[原文持久化 barrier 与有界回查验证]
+    B --> C[单次原子提交动作和目录]
+    C --> R[Reason 恢复已提交投影]
+    R --> M[provider 请求]
+    M --> E[成功响应持久化后确认暴露]
+    E --> F
 ```
 
-整个流程中唯一有副作用的步骤是 `apply_micro_plan()`——它修改 Transcript 的 flags，并异步写数据库（`micro_compact()` 是其「plan + apply」包装；`run_compact` 直接复用 dry-run 计划调用前者，不再二次规划）。`plan_micro()` 和 `render_llm_view()` 都是纯函数。
+| 边界 | 入口 | 所有权 |
+| --- | --- | --- |
+| 触发与 Full 决策 | `stages/compact.rs`、`compact_v2/mod.rs` | 保留已有压力样本、取消和失败语义 |
+| 运行期证据 | `compact_v2/exposure.rs`、`stages/micro_facts.rs`、`stages/{reason,act}.rs` | 有界暴露索引与终态证据；不恢复旧执行 |
+| 规划 | `planner.rs`、`planner/{index,catalogs,planning}.rs` | 只读 transcript、配置、事实和 provider 能力；不做 I/O |
+| 投影 | `projection.rs`、`projection_archive.rs` | 校验并渲染模型视图，不写 canonical 内容 |
+| 提交 | `micro.rs`、`MessageTranscript::commit_compaction_lifecycle` | 原文确认、回查验证、事务确认后发布热态 |
+| 回查 | `peri-agent::context_archive`、`peri-middlewares::mcp::context_archive` | 只读能力经 MCP 调用；不持有可写 transcript |
+| 存储 | `peri-resources::sessions::{archive,sqlite_store,remote}` | 本地和远端共享有界读取语义；不改表结构 |
 
-### 2.1 模块关系
+## 2. 触发与预算
 
-| 模块 | 做什么 |
-|------|--------|
-| `compact_v2/planner.rs` | `plan_micro()`——生成压缩计划（纯函数）。还包含 `TurnGroup` 分组逻辑和 `ContextPressure`。 |
-| `compact_v2/projection.rs` | `render_llm_view()`——根据计划把 Transcript 渲染成 LLM 可见的消息列表（纯函数）。 |
-| `compact_v2/mod.rs` | `run_compact()`——串联 planner + 决策 + 应用。 |
-| `compact_v2/micro.rs` | `apply_micro_plan()`——把已生成的计划按 message_id 分组落地为 `truncated` 标记 + projection directive；`micro_compact()` 是其「调 planner + apply」的薄包装。计划只规划一次：`run_compact` 的 dry-run 结果直接交给 `apply_micro_plan`。 |
-| `compact_v2/smart.rs` | `smart_compact()`——规则驱动的消息保留策略，同样通过 planner 生成计划。已收缩为 `plan_micro` 兼容入口（带 deprecation warning，趋向 Micro Compact）。 |
-| `compact_v2/config.rs` | `CompactConfig` 纯数据契约已归位 `peri-acp-types::compact`（配置来源为外部配置文件，跨层共享），本文件仅保留 re-export 保兼容。 |
-| `stages/reason.rs` | Reason 阶段——调用 `render_llm_view()` 获取压缩后的消息列表，替代旧版 `truncated_content(100)`。 |
-| `stages/compact.rs` | Compact 阶段——构建 `ContextPressure`，调用 `run_compact()`，填充事件字段。 |
+自动门控保持 `P / C >= micro_compact_threshold`：`P` 是现有 `TokenTracker::estimated_context_tokens()`，`C` 是完整 `context_window`。默认 Micro 为 75%，Full 为 95%。分母不扣输出预留；零/未知窗口、环境覆盖、自动开关、shadow、cache-aware 延迟及同一 `pressure_sample_key` 去重沿用原路径。
 
----
+Reason 在 `before_model` 与工具目录发布后，仅在可见压力确有增长且达到现有 Full 阈值时补检一次，不重复运行 hooks，也不新增低于 75% 的自动投影入口。手动 `/compact` 仍走 force/Full；关闭自动压缩不会撤销已提交投影。
 
-## 3. 分组模型：TurnGroup
+| 数值 | 用途 |
+| --- | --- |
+| `ContextPressure::target_reclaim_tokens()` | 必要回收量，保留预留和 2% 窗口下限，供既有 Full 决策使用 |
+| `min(45% × C, pressure.target_tokens())` | 触发后的尽力目标；达到目标停止更强整组省略，未达目标报告缺口，不作为触发或 Full 升级条件 |
+| 最近已完成 Step | 默认保护最近 2 步，可由 `micro_compact_stale_steps` 配置；软预算 `min(8192, 10% × C)` |
+| 历史收据与索引 | 预算 `min(2048, 2% × C)`；收据超预算时保留合并范围入口，通过分页发现目录 |
 
-旧版把单条消息当成一个 round，仅在 AI 后面紧跟对应 ToolResult 时把它们合并。这种简化模型遇到插入消息或异常顺序就会出错。
+收益对比同一冻结请求的当前已提交视图与候选视图，计入参数、消息壳、收据、引用和固定前缀/工具成本。保留当前 token 估算器，二进制媒体不按 Base64 字符数计文本成本。净收益不为正就清空计划；已经隐藏的正文不重复计省。
 
-新版引入显式的 `TurnGroup`：从 Human 消息开始，收集后续的 AI 消息及其所有 ToolResult，直到下一条 Human。一条真实用户交互对应一个 TurnGroup。
+达到 Full 阈值且无有效 Micro，或 Micro 净收益不足必要回收量，才进入既有 Full 路径。先提交有效 Micro；后续 Full 失败仍保留其收益。45% 未达标只报告原因，不能借此循环压缩或新增 Full 条件。估算与后续真实 provider usage 分开记录。
 
-```
-TurnGroup #1:
-  Human:  "帮我查文件"
-  AI:     tool_calls=[Bash(call_1), Read(call_2)]
-  Tool:   call_1 = "file not found"
-  Tool:   call_2 = "content: ..."
+## 3. Step、交换与保护
 
-TurnGroup #2:
-  Human:  "改成这样"
-  AI:     tool_calls=[Write(call_3)]
-  Tool:   call_3 = "written"
-```
+`Step` 是一次模型响应及其工具批次，按可见 own 历史顺序计龄；它不以 Human 消息切段。`Exchange` 以当前会话作用域的调用 ID 关联调用与结果，跨用户插话查找。索引同时核对缓存 `tool_calls`、Blocks/Raw 的 ToolUse 与独立/嵌套 ToolResult；空 ID、重复 ID、表示冲突及结果先于调用显式失败。
 
-每个 TurnGroup 内部，tool_use 和 ToolResult 的配对关系通过 `ToolExchange` 显式记录——tool_call_id 相同的是一对。压缩时这对关系不可拆分：不能删了 tool_use 留着 ToolResult，反过来也不行。
+整组省略要求同时具备：
 
-### 3.1 与 Micro 的关系
+1. **Closed**：明确执行终态，相关后台义务已结清；启动成功或 `is_error=false` 不足以证明任务完成。
+2. **Exposed**：对应 canonical 内容实际进入过后续模型请求，响应成功且通过持久化确认；仅有年龄不算证据。
+3. **可回查**：当前模型工具面可调用受信任的 ArchiveRead 能力，且目录所指原文通过有界读取与摘要校验。
+4. **闭包安全**：当前 provider 能力允许同时移除全部调用、结果与签名依赖；混合消息内其他内容保留。
 
-`plan_micro()` 跳过最近 `micro_compact_stale_steps`（默认 3，`peri-acp-types/src/compact.rs:120`）个 TurnGroup——最近几轮对话通常还在活跃使用中，不需要压缩。更早的 TurnGroup 才会被逐一检查并生成压缩动作。
+`RequestExposure` 从最终请求捕获与 canonical 内容相同的成员及指纹；`ExposureLedger` 只在成功响应持久化后确认。索引有容量上限，遗忘只增加保护。冷恢复从空账本开始，不推测旧内容已消费，也不引入执行 journal；已经提交的投影直接按持久化指令恢复。
 
----
+硬保护优先于预算：未结调用、未暴露结果、mailbox `ProtectedResults`、有效用户要求/回答、权限事实、仍生效的状态、System/冻结工具前缀、只读 ancestor，以及无法证明安全闭包的 provider 内容。`ProtectedResults` 仍以最终请求中的真实内容确认消费，收据不能替代其 delivery 身份。
 
-## 4. 投影引擎
+## 4. 当前内容策略
 
-投影引擎回答一个问题：**下一次 LLM 请求应该看到什么内容？**
+策略由工具定义和 builtin 声明表提供，`ContextRetention` 默认 `PreviewOnly`。配置只能增加保护，不能授权删除未知副作用、用户答案或未结任务。`micro_excluded_tools` 默认空；显式配置仍可添加保护。
 
-旧版把这个逻辑写在 Reason 阶段里——遍历消息，看到 `truncated` flag 就调 `truncated_content(100)`。问题是 `truncated_content` 只处理 `Text` 类型，Image/Document/ToolUse 全部穿透。
+| 内容/策略 | 当前动作与边界 |
+| --- | --- |
+| `PreviewOnly`：未知工具 | 已暴露且可回查后做不完整结果预览；不整组省略 |
+| `Recomputable` / `SideEffectReceipt` | 已知成功交换满足全部条件后整组省略；恢复读取历史 canonical 内容，不重新读取当前文件或执行工具 |
+| 长结果 | 从 canonical 原文按字符边界取 head/tail，携带不完整提示与原文引用；短内容不因标记而膨胀 |
+| 错误结果 | 更大的诊断预览与原文引用；不按相同前缀去重，不把错误组当成功组省略 |
+| `Report` | 任务关闭且结果暴露后允许明确不完整的预览；自由正文不伪装为完整结论 |
+| `Preserve` / `StateBearing` | 当前完整保留；目标、Todo、提问等不会仅因工具名重复而互相替代 |
+| `ArchiveRead` | 新结果先保护；后续合格预览复用调用参数里的原源引用，不创建递归归档链 |
+| 媒体 | 可恢复的 canonical Base64/Text 可按交换归档并分块回查；独立用户媒体当前保护；仅有外部 URL 的媒体不可据此强省略 |
+| 签名/Raw/Unknown | 已知 provider 的完整安全闭包可整体移除；未知块及未识别依赖保留并报告 |
+| 助手自由文本、canonical reminder | 当前保留；不以首尾截断伪造语义摘要 |
 
-新版把这个逻辑独立成一个纯函数 `render_llm_view()`：输入 Transcript + MicroCompactPlan + ProviderCapabilities，输出 LLM 可见的消息列表。**不修改 Transcript**。
+当前 planner 生成 `CompactToolResult`、`OmitToolExchange`、`PreviewArchiveRead`。`ResultReceipt` 等可序列化形状不等于 planner 已覆盖所有内容策略。旧 `CompactToolInput` 只为解码历史保留，当前不生成、不应用参数截断。
 
-### 4.1 投影粒度
+仍出现在 provider 请求中的 `ToolCallRequest.arguments` 与 `ToolUse.input` 必须逐值等于 canonical 原值。整组省略同时处理缓存调用、Blocks/Raw 调用、独立/嵌套结果和必要推理依赖；不能删除混合消息里的用户内容、助手结论或其他未结调用。最终配对检查直接拒绝非法变换，不由 pairing repair 补造结果掩盖问题。
 
-压缩按工具结果消息与媒体 block 分别投影，不连带改变同消息的其他内容。
-历史 `ToolCallRequest.arguments` 与 `ContentBlock::ToolUse.input` 是 canonical
-执行数据，Micro 在模型可见视图中也不得修改；长 Bash 参数不是可压缩对象。
+历史收据是派生的 Assistant 数据消息，明确标注为历史事实及非执行/授权，使用基于引用和版本的独立虚拟 ID，不复用结果 ID 或 `delivery_id`。收据只写已有的工具、调用、路径、执行状态/退出码等事实，不编造版本、hash 或完成状态。原始日志不会借收据提升为 System/用户指令。
 
-| 粒度 | 什么时候用 | 例子 |
-|------|-----------|------|
-| 整条消息 | 工具输出（ToolResult）——整条消息做 head/tail 截断 | Bash 的 stdout 输出 |
-| 消息内的一个 block | Image/Document 类型的 ContentBlock——把 Base64 替换成文本占位符 | 用户发的截图 |
-| 消息内的一个工具调用 | 仅保留 legacy directive 的可解码形状；当前 planner 不生成、renderer 不应用输入投影 | ToolCall/ToolUse 输入保持原值 |
+## 5. 持久化与恢复
 
-目标形状由 `ProjectionTarget` 枚举表示；可解码的历史形状不等于当前允许的投影行为。
+投影持久化仍使用 `messages.projection` JSON，无新增表或列。载荷格式 `format_version=1`；当前 policy 为 3，已知 policy 2 只恢复原有安全工具结果动作，输入动作继续忽略。未知格式/策略、成员身份错配或损坏投影返回错误，不把整份 canonical 历史重新展开后继续发送。
 
-### 4.2 投影动作
+| 元数据 | 保存位置与作用 |
+| --- | --- |
+| `entries` | 各消息的渲染动作，不复制正文 |
+| `archive_catalog` | 仅保存于组锚点：源会话、成员身份/类型、canonical 字节数与内容/分块摘要、事实收据、依赖 |
+| `archive_group` | 成员到唯一目录的链接，不复制成员表 |
+| `archive_roots` | 首末目录锚点、来源和固定已提交尾界；当前有效锚点或 Full 摘要承载 |
+| `archive_receipt_budget_tokens` | 冷恢复复用当次目录/收据预算 |
+| `superseded_by` | Full 摘要替代关系，与渲染动作分开 |
 
-`ProjectionAction` 保留以下形状，历史输入 action 不参与当前执行：
+一次 Micro 先等待 canonical writer barrier，随后 `ContextArchiveReader::verify_catalog` 有界读取并核对每个成员的实际字节。目录身份一经发布不得覆盖。全部成员动作、目录、组链接与根入口交给同一次 `CompactionChange`，确认成功后才更新热态和视图 revision。明确未提交时保持旧热态；提交结果未知时沿用 `ReloadRequired`。不逐条发布半组投影，不仅凭 writer 入队报告成功。
 
-| 动作 | 对什么用 | 效果 |
-|------|---------|------|
-| **Keep** | Human 消息、System 消息、错误输出、受保护的工具 | 原样保留 |
-| **CompactToolResult** | 普通工具的输出 | 保留前 N 个字符和后 N 个字符，中间省略 |
-| **CompactToolInput** | legacy 输入投影 directive | 可解码但忽略；输入保持 canonical transcript 原值 |
-| **CompactText** | 普通文本 | 截断到 max_chars 字符，追加 `[内容已压缩]` |
-| **ReplaceMedia** | Image / Document block | 移除 Base64 payload，换成 `[图片已压缩: ...]` 文本 |
-| **Exclude** | 整块内容 | 替换为 `[已排除]` |
+Reason 只恢复已提交指令，不重做规划或读取所有归档正文。视图缓存仍以 transcript revision 与 provider 能力为键；切换 provider 会重新渲染并校验闭包。候选规划建立一次调用索引，局部计算候选收益，最后统一完整渲染复核，不逐候选克隆整个历史。
 
-### 4.3 CJK 安全截断
+## 6. ReadContextArchive
 
-旧版用 `&s[..N]` 截断中文文本会导致 panic（切在 UTF-8 多字节字符中间）。新版用 `chars().take(N)` 按字符边界处理：
+模型工具只接受 `archive_ref`、可选 `cursor`、可选 `budget_tokens`，不接受任意 session ID。可信 `ToolContext` 绑定当前会话和 `SessionResources`；引用只是定位符，不是授权凭证。
 
-```
-原始: "这是一段很长的输出内容...exit code 0"
-截断 (head=20, tail=10):
-  → "这是一段很长的输出内容...\n... [500 字符已省略] ...\nexit code 0"
-```
+调用经进程内 MCP `tools/call` 到 `ContextArchiveMcpServer`，服务端仅持有 `ContextArchiveReadPort`。当前每次调用建立临时连接并在取消/完成后关闭与等待任务；不共享可写 transcript，也不调用旧工具。它遵循 MCP middleware 和会话工具过滤后的可见性；没有可调用回查能力时，新归档候选保持保护。
 
-### 4.4 Provider 差异
+| 约束 | 实现 |
+| --- | --- |
+| 身份 | `pa1:c` 引用绑定来源、目录锚点、SHA-256 摘要及可选成员；`pa1:r` 绑定目录范围、固定尾界及范围摘要；不依赖进程缓存 |
+| 授权 | 当前会话自己的来源，或当前子会话冻结 inherited flags 中明确授权的 archive root；父会话后来追加的数据不自动加入授权 |
+| 元数据 | 按锚点读取，或按存储顺序固定范围分页；每页扫描/返回均有界，不先取整历史再过滤 |
+| 原文 | canonical 存储字节分块；返回原消息身份、内容摘要、块类型、偏移/总字节数、片段、完整性与游标 |
+| 预算 | 默认 2048 tokens，允许 256–4096；包含元数据/游标的序列化返回受 `budget × 4` 字节限制；源块最多 4096 字节 |
+| 附件 | 返回历史存储的 Base64/Text 内容；UTF-8 边界片段必要时使用显式 hex 编码；不从当前 URL/文件补齐 |
+| 错误 | 不存在、无权限、摘要不匹配、Unsupported、暂不可读/非法请求均明确失败；不返回成功空占位或执行兜底 |
 
-不同 Provider 对消息格式有不同的限制。`ProviderCapabilities` 记录这些差异：
+SQLite 与远端 Turso adapter 使用同一有界读取规则。未实现这些端口的 adapter 默认 `Unsupported`，不回退 `load_session_snapshot` 或整历史读取。完整 projection directive（含 entries、目录、组链接和根）共用 64 KiB 元数据预算；规划先校验，Micro、Full 与 fork 在写入前再次校验。目录按源消息缓存；每次强闭包最多 32 个交换，同一 inline 结果消息每次最多 32 个预览，超限内容保留并报告原因。
 
-| Provider | 特点 | 影响 |
-|----------|------|------|
-| OpenAI | 无签名机制 | reasoning 可以局部截断 |
-| Anthropic | reasoning 块带签名 | 带签名的 reasoning 必须整体保留或整体移除，不能局部截断 |
+## 7. Full、继承、fork 与 rewind
 
-`ProviderCapabilities` 通过 `AgentModelBridge`（即 `peri_model::Model` trait）获取。Anthropic 实例返回 `signed_reasoning_must_be_whole = true`，OpenAI 返回 `false`。`render_llm_view()` 据此决定 reasoning 块的处理方式。
+Full 从与 Reason 相同的已提交模型视图生成摘要；摘要生成与取消/失败预算遵守 [ARC-COMPACT-001](../standards/architecture-contracts.md)。未消费后台结果依旧受 [异步任务设计](session-async-tasks.md) 保护，摘要模型不承担消费确认。
 
-### 4.5 投影流程
+Full 清除被取代的渲染动作，同时保留旧锚点的目录及组链接。原锚点即使变成 excluded，授权的点查仍可访问。目录根按来源合并范围，随新摘要与 excluded transitions 同事务提交，不复制所有旧成员 ID。renderer 从摘要元数据确定性渲染入口，摘要正文无需复述任何引用。
 
-```mermaid
-sequenceDiagram
-    participant T as Transcript
-    participant P as plan_micro()
-    participant R as render_llm_view()
-    participant V as validate
+子会话继承的是冻结 payload/flags，不能修改 ancestor。独立 fork 经 `SessionResources::load_fork_snapshot` 合并冻结 inherited 与 own 历史；父 Full 后只剩根入口时，按冻结 roots 的授权范围与尾界分块补齐目录成员，并验证目录身份及内容摘要。补齐正文保持 excluded，来源缺失、内容变化或依赖超出冻结授权时拒绝复制，不纳入父会话后来追加的内容。随后重映射消息、目录成员/锚点、依赖、来源与根边界，按目标载荷重新计算内容摘要。canonical 工具参数中已经存在的旧字面引用不被伪改；未经授权的旧源引用明确拒绝，目标目录提供新的可发现入口。
 
-    T->>P: 读取所有消息
-    P->>P: TurnGroup 分组<br/>估算每组 token
-    P-->>R: MicroCompactPlan
+rewind 在同一事务中检查保留前缀、组成员、目录锚点与替代依赖；必要成员或依据消失时撤销整组省略及失效入口，完整目录保持原身份。固定尾界或锚点已删除的旧游标明确失效。显式 rewind 导致原文重新可见属于历史变换，不是低于门槛的新自动压缩。
 
-    loop 每条消息
-        R->>R: 查找 plan 中该消息的 actions
-        alt 没有 action
-            R->>R: 原样保留
-        else Message 级 action
-            R->>R: Human→Keep<br/>Tool→CompactToolResult
-        else ContentBlock 级 action
-            R->>R: Image→ReplaceMedia<br/>Document→ReplaceMedia
-        else ToolCall 级 action
-            R->>R: 忽略 legacy input action<br/>保留 ToolCall/ToolUse canonical 输入
-        end
-    end
+## 8. 观测、测试与能力边界
 
-    R-->>V: 投影后的消息列表
-    V->>V: 检查 tool use/result 配对<br/>检查 JSON 根类型<br/>检查 reasoning 签名完整性
-```
+规划日志记录触发压力/比例、同快照 before/after 与增量估算、保护原因、剩余内容分类、缺口、候选/预览/收据/零收益数量、扫描消息数和 policy。真实输入 usage 仍由后续 `LlmCallEnd` 按 request ID 报告；估算不能当作实测节省或修改 tracker 的预算恢复证据。客户端 Compact 事件继续使用既有估算字段，没有新增独立诊断协议。
 
----
+验证应走真实 planner → commit → restore → renderer，并在 provider adapter 捕获最终 wire。以下是可重复验证入口，不代表这些测试已在任意环境运行通过：
 
-## 5. Planner：压缩计划
+| 行为 | 测试入口 |
+| --- | --- |
+| 75%/95%、配置、shadow、去重/补检 | `compact_v2/{config,trigger}_test.rs`、`stages/{stages,compact,compact_retry}_test.rs` |
+| Step、混合调用、暴露与净收益 | `compact_v2/{planner,exposure,projection_render,projection_restore}_test.rs`、`stages/micro_exposure_test.rs` |
+| 批次提交、失败与冷恢复视图 | `compact_v2/micro_test.rs`、`session/transcript_persistence_test.rs` |
+| 两次 Micro + 两次 Full、无 ID 摘要、实际新进程读取 | `compact_v2/archive_lifecycle_test.rs` |
+| 原文分页、继承权限、摘要冲突、媒体、fork/rewind | `peri-agent/src/context_archive_test.rs`、`peri-acp-types/src/store/history_archive_test.rs` |
+| 子会话 Full 后独立 fork 的冻结归档授权 | `peri-acp/src/dispatch/session_fork_archive_test.rs` |
+| 远端有界读取与真实 MCP 调用 | `peri-resources/src/sessions/remote/session_archive_test.rs`、`peri-middlewares/src/mcp/context_archive_test.rs` |
+| 最终 provider 请求 | `peri-agent/tests/micro_compact_wire_test.rs` |
 
-`plan_micro()` 是一个纯函数——读 Transcript 和配置，输出 `MicroCompactPlan`。不写数据库、不修改 Transcript。这是 dry-run 决策的前提。
+运行命令沿用 [测试标准](../standards/testing.md) 和 `scripts/cargo-rmcp-patched.sh`；测试断言是契约证据，运行结果应在交付/验收记录提供，设计文档不保存某次勾选状态。模拟 provider wire 不能替代真实 provider 发布验收，本文没有声明调用过付费模型。
 
-### 5.1 上下文压力
+当前实现的明确边界：
 
-旧版只用百分比（"当前用了 80%"）决定要不要压缩。但实际上需要知道的是"需要回收多少 token"，而不是"用了百分之几"。
-
-新版引入 `ContextPressure`，核心方法是 `target_reclaim_tokens()`：
-
-```
-需要回收 = 当前 token 数 - (模型窗口 - 输出预留 - 预测增长 - 安全余量)
-```
-
-如果当前 token 数还没超过目标，返回 0（用 `saturating_sub`）。
-
-百分比仍然用于 Compact 触发判断——但决策以显式回收量 `target_reclaim_tokens()` 为准。
-
-### 5.2 计划内容
-
-`MicroCompactPlan` 包含：
-
-- **actions**：压缩动作列表。每条是 `(消息id, 目标粒度, 做什么动作)` 的三元组，不包含消息内容副本
-- **estimated_tokens_saved**：估算能省多少 token（chars / 4 近似估算）
-- **target_reclaim_tokens**：需要回收的目标量
-
-关键是 `estimated_tokens_saved`——决策流用它替代旧版 `affected_count`（"标记了几条消息"）。一条 10KB 的 Bash 输出估算节省 ~2500 token，一条 10 字节的 Read 输出估算节省 ~2 token，权重天差地别。
-
-### 5.3 工具保留策略
-
-哪些工具不压缩？旧版用 `micro_excluded_tools: Vec<String>` 黑名单——不断往里加工具名，容易出现"先放开全部工具，再补保护名单"的回归循环。
-
-新版引入 `ContextRetention`，作为 `BaseTool` 的 trait 方法：
-
-| 分类 | 含义 | 例子 |
-|------|------|------|
-| **Preserve** | 不可压缩——默认值 | AskUserQuestion、goal、TodoWrite |
-| **StateBearing** | 后续控制流依赖的状态 | Agent 任务描述 |
-| **SideEffectReceipt** | 副作用已完成，只需保留收据 | Bash 执行完成后的输出 |
-| **Recomputable** | 可从磁盘或网络重建 | Read 的文件内容 |
-
-`plan_micro()` 决定是否保留一个工具时，先查 `config.tool_retention_map`（集中配置），再回退到工具自身的 `context_retention()` 方法。
-
----
-
-## 6. 决策流
-
-### 6.1 旧版的问题
-
-仅凭 `affected_count`（标记了几条）无法判断是否需要升级 Full：少量长结果可能释放较多预算，许多已隐藏结果则没有新的可回收量。决策应使用当前可见模型视图的增量收益估算。
-
-### 6.2 新版 dry-run 决策
-
-新版先跑 `plan_micro()`（纯函数，无副作用），拿到 `estimated_tokens_saved`，然后做三路决策：
-
-```mermaid
-flowchart TD
-    PM["plan_micro() · dry run"] --> Q1{"estimated_tokens_saved<br/>≥ reclaim_target ?"}
-    Q1 -->|"✅ 够用了"| APPLY["apply_micro_plan() 应用"]
-    Q1 -->|"❌ 不够"| Q2{"预算逼近上限<br/>budget ≥ auto_compact_threshold ?"}
-    Q2 -->|"是"| FULL["提交有效 Micro<br/>再尝试 Full Compact"]
-    Q2 -->|"否"| PARTIAL["虽然不够，聊胜于无<br/>应用 Micro"]
-```
-
-当 Micro 回收量不足且预算达到 Full 阈值时，先提交有效 Micro，再尝试 Full；Full 失败时保留已经取得的 Micro 收益。planner 与收益估算都跳过 excluded 消息，且只规划 own region，不能把 Full 已排除的历史重复算作可回收量。stale round 也只从当前可见 own history 计算。
-
-压力样本由有效 provider usage、canonical 工具结果增长和可见请求增长的 generation 共同标识；同一样本只自动评估一次，已启动的 Full 内部空摘要重试属于同一次评估。预算使用上次有效 input usage 加上对应请求之后累计的可见内容正增长，包含 assistant 正文、工具参数、用户输入、reminder 和 direct 工具 schema；工具提交估算与完整视图增长取较大值，避免双计。下一次有效 input usage 结清估算，missing/zero usage 不清账，Micro 估算缩减只移动下一次比较的位置，不能抵扣其后的新内容或替代真实 usage 证明恢复。预算中已包含该增长，不能再次扣减 headroom。
-
-新 turn 和冷恢复没有 usage 时，以当前已提交模型视图及静态 system 前缀估算首个请求，不复用旧 turn 的 usage。文本采用字符启发式，二进制媒体与 data URI 使用固定占位，不能把 base64 编码长度当正文成本；文本型文档仍按正文计量。估算不能准确覆盖不同语言的 token 密度、媒体尺寸或页数、provider 包装或尚未求值的动态 system 后缀；后续有效 usage 仍是权威基线。Reason 在 `before_model` 和工具目录发布之后检查新增压力，必要时复用无 hooks 的 Compact 核心补检一次，再绑定最终发送视图；不能重复执行会产生输入的 hooks。
-
-### 6.3 Full 的上下文快照与报告替换
-
-Full 与 Reason 共用 `render_persisted_llm_view` 恢复已提交的模型视图，包括 canonical reminder；派生摘要请求保留消息角色、工具配对与完整可见正文，不再使用每条 2000 字符、工具结果前三行或关键参数预览。已有 Micro 投影仍生效，避免 Full 重新展开已经隐藏的工具输出。摘要请求不开放可执行工具；冻结 prompt 与父会话的继承快照不被改写。摘要视图是 Compact 检查复用槽之外的另一份整份历史正文，因此在**确实要构造摘要视图之前**必须释放该复用槽：`compact_v2::run_compact` 的 `FullSummaryNotice` 只在 `run_full_or_degrade` 进入摘要渲染时触发一次，否则整个摘要请求期间会多驻留一份历史正文。Micro/Smart 未落地、shadow、空计划未达 Full 阈值等不渲染摘要视图的路径不触发通知，缓存照常供 Reason 复用（无变化范围内仍只构建一次视图）。
-
-子 Agent 报告与**已被主模型响应覆盖**的后台任务结果参与摘要，摘要指令要求保留结论、约束与未完成工作并按通知来源归因。未覆盖的终态通知（Ready／InFlight／Blocked／Suspended）不进入摘要请求，也不被 `flag_updates` 归档：摘要模型不承担消费确认。Full 从同一 canonical 视图派生时排除这些 ID，最终模型视图在压缩后的历史／摘要之后按接收顺序重新投影一次；只剩 System 与受保护结果时返回明确 no-op。Covered 后恢复普通压缩资格。详见 [Session 异步任务](session-async-tasks.md)。摘要只输出交接正文，长度目标是 `min(summary_max_tokens, 当前模型已解析的单次输出上限)` 的一半，给模型输出留余量；请求预算与目标同源——沿用同一已解析上限，不用 `summary_max_tokens` 覆写 provider 输出上限（零值或解析出零上限是显式配置错误，不是「不限」，也不代填常量）；不要求分析块、所有消息清单或完整代码副本。未完成的摘要在同一次 Full 内按**有界恢复循环**补齐：首轮与所有恢复共用 `summary_max_requests`（默认 3）这**一个**逻辑生成计数器，达到上限即返回 `CompactRecoveryExhausted`（携带实际次数与最后原因），绝不发起第 N+1 次请求。截断或未闭合时保留片段，把已生成的正文按原顺序回填进派生请求（不插分隔符，不重放隐藏思考或工具），下一轮续写，最后一轮改用收尾提示。从未取得正文时只允许一次带减半目标的重新生成（改写提示，不注入空 assistant），重新生成仍无正文则提前结束。每次生成前**不做**窗口前置拦截：摘要输入就是历史本身，装不下时照常发出请求并由 provider 结果（截断或未闭合）驱动恢复循环续写，不裁剪上下文或工具配对，也不冒用主模型窗口。只有正常完成且后处理后非空的摘要可以提交；没有可续接正文、恢复耗尽、恢复中协议错误或仅含 analysis 时保留原历史；嵌套的分析标签与残留结束标签不能充当有效摘要；思考块之外已闭合的 `<summary>` 正文按普通文本保留，其中讨论的标签字面量不得再次被剥除。提交时将快照内 own region 的普通历史与 reminder 一起标 excluded，摘要与标记使用同一持久化事务；System 和 ancestor 不在排除集合。原文留在 canonical 存储供回查，后续模型请求及冷恢复不再发送已排除报告全文。
-
-手动 `/compact` 不再恢复完整 payload：`compact_pipeline` 用 `load_active_snapshot` 读取当前有效 own 条目（存储侧 `excluded = 0` 过滤）与冻结 inherited 区，按有序消息投影核对身份后从有效快照重建临时 transcript；已归档正文不进入本次读取、不重新解码。调用方仍带回完整历史（含已归档 id）时，多出的 id 只在有界 flags 查询确认其为 `excluded` 后被忽略；未知 id 或读取失败保持拒绝。有效集为空时用 flags 区分全新 thread 与全归档，后者返回 `no history to compact`。仅有 reminder 的会话也可压缩。摘要期间新到达的 inbox 结果在后续 Receive 处理，不属于旧快照的排除集合。完整历史仍保留在 canonical 存储；窗口启用后，展示侧通过历史窗口按需读取。该契约在服务端明确回显 `peri.historyWindowV1: true` 且 TUI 本地开关启用时生效（未配置默认开启、显式 false 关闭）；未启用时保留旧行为。
-
-恢复耗尽前不进入 Reason，不重复应用 Micro，并保留取消边界；取消、配置错误、provider 重试耗尽与持久化失败都不在这里重开预算，失败后没有后台自动重试。传输错误的重试归 provider，持久化错误不在这里重试。外层组合不再重试空摘要——空响应重新生成已经并入上面这一个计数器，避免内外层次数相乘；`max_consecutive_failures` 只作跨 Full 调用的失败计数。自动 Compact 达到 Full 阈值时，必要的 Full 失败会阻止后续 Reason：恢复耗尽返回 `CompactRecoveryExhausted`，跨 Full 失败预算耗尽返回 `CompactRetriesExhausted`，缺失模型、非正常完成的摘要及 provider 错误保留各自类型。已提交的 Micro 仍保留。手动 `/compact` 通过同一结果携带安全诊断，并在错误映射前检查取消。未产生变更的尝试以 `CompactEnded` 闭合观测，只有实际变更才发出 `MessagesCompacted`。
-
-### 6.4 Full 后预算验证
-
-成功 Full 后，Reason 将实际请求与该 Full generation 绑定，用对应响应的有效 input usage 检查是否降到 `auto_compact_threshold` 以下。没有新增用户或工具工作时，连续两次 Full 后仍高压会返回 `CompactBudgetUnrecovered`，结束本轮；cancel 优先。AI 输出、摘要和 canonical Reminder 不重置次数，新的用户或工具工作开启新一轮验证。未知、零或过期 usage 不作为进展证据。此保护限制无工作进展的重复压缩，不自行删除内容或把历史排除数量当作真实 token 收益。
-
-### 6.5 缓存感知
-
-高缓存命中率 + 充足 headroom 的情况下，compact 可以推迟——缓存还在有效期内，提前压缩反而损失缓存带来的 token 节省。
-
-当 `cache_aware_enabled = true` 且 `cache_hit_rate > 0.7` 且 headroom > 20% 时，跳过本次 compact。
-
-### 6.6 Shadow Mode
-
-自动 Compact 在 `shadow_mode_enabled = true` 时只跑 `plan_micro()` 估算，不应用任何标记；空计划且高压也不能绕过 shadow 执行 Full。手动 force 仍直接执行 Full。日志输出估算值。用于校准 chars→tokens 估算模型——对比估算值与下一次真实 LLM 请求的 `input_tokens`。
-
----
-
-## 7. 持久化
-
-### 7.1 MessageFlags 扩展
-
-旧版 `MessageFlags` 只有 `truncated` 和 `excluded` 两个布尔字段。新版新增 `projection` 字段——存储投影指令，支持 session 恢复：
-
-```
-MessageFlags {
-    truncated: bool,    // Micro 标记
-    excluded: bool,     // Full/Smart 标记
-    projection: Option<MessageProjectionDirective>,  // v2 新增：投影指令
-}
-```
-
-`MessageProjectionDirective` 包含 `policy_version`（策略版本）和 `entries`（仅含本消息的 action 列表）。不包含 BaseMessage 内容或 Base64——可以安全序列化到 SQLite。
-
-该载荷同时承载一项渲染之外的事实：`superseded_by: Option<MessageId>`（`#[serde(default)]`，`Full Compact` 归档时写入）= **取代本条的摘要消息 id**。写入时 `entries` 为空，因此它不产生任何渲染动作，只在 `excluded` 为真时被读取；rewind 的「清零哪些 `excluded`」据此逐条精确判定（取代它的摘要仍在保留前缀 ⇒ 排除依旧有依据，否则原文重新有效）。没有这条记录的历史行（该字段落地前归档）回退到原有的排除前缀结构判定。清零 `excluded` 的存储路径（本机 `clear_rewind_excluded`、远端 `CLEAR_EXCLUDED_SQL`）会把整条载荷一并清掉，恢复正文的条目不会残留取代记录；字段新增没有改变 `messages` 表形状（仍是同一列、同一代数），旧行反序列化为 `None`、旧构建忽略未知字段。
-
-### 7.2 批量写入
-
-旧版逐条持久化 `truncated` 标记产生多次写入；当前采用同事务批量投影更新。当前形状已移除会话派生缓存及其失效接口，不再为历史变更维护缓存正文或 epoch。
-
-`PersistOp::ApplyCompactionBatch` 将本轮投影合为一个持久化行为；SQLite 数据面在同一事务内提交投影和更新时间，不再调用缓存失效接口。
-
-### 7.3 Session 恢复
-
-SQLite 的 `projection TEXT` 列通过幂等迁移添加。恢复时 `load_message_flags()` 同时读取、反序列化 projection。Reason 仅渲染已提交且有效的 directive，无 directive 时使用 canonical 可见消息；此恢复不依赖自动 compact 是否启用。子会话另行持久化继承 payload 与 flags 的冻结快照，避免父会话后续 compact 改变 child 视图。完整恢复契约见 `ARC-COMPACT-001` 与 [会话消息设计](message-transcript.md)。
-
----
-
-## 8. 新增配置
-
-| 字段 | 默认值 | 用途 |
-|------|--------|------|
-| `target_headroom_tokens` | `0` | 目标 headroom token 数 |
-| `tool_result_keep_chars` | `200` | ToolResult head/tail 保留字符数 |
-| `shadow_mode_enabled` | `false` | 只估算不应用 |
-| `cache_aware_enabled` | `false` | 高缓存命中时延迟 compact |
-| `tool_retention_map` | `{}` | 工具名 → ContextRetention 映射 |
-
----
-
-## 9. 新增事件字段
-
-`CompactCompleted` 事件新增 9 个字段，覆盖建议稿中提出的全部可观测性需求：
-
-| 字段 | 说明 |
-|------|------|
-| `estimated_tokens_saved` | 估算节省量（替代 `affected_count` 做主要指标） |
-| `estimated_tokens_before` | 投影前 token 估算 |
-| `estimated_tokens_after` | 投影后 token 估算 |
-| `changed_messages` | 实际产生内容变化的消息数 |
-| `changed_fields` | 实际变化的字段数 |
-| `no_op_candidates` | 候选但无实际变化的条目数 |
-| `full_escalation_reason` | 升级到 Full 的原因 |
-| `cache_hit_rate_before` | 压缩前缓存命中率 |
-| `strategy` | 新增 `Skip` 变体（cache-aware / shadow mode） |
-
----
-
-## 10. 测试覆盖
-
-| 模块 | 文件 | 测试数 | 重点 |
-|------|------|--------|------|
-| projection | `projection_test.rs` | 8 | Image/Document 移除、legacy directive 下 ToolInput 保真、head/tail 截断、CJK 安全、signed reasoning |
-| planner | `planner_test.rs` | 8 | token 估算、TurnGroup 分组、retention map、并行 tool exchange |
-| micro | `micro_test.rs` | 9 | 基本截断、错误保护、retention 排除 |
-| trigger | `trigger_test.rs` | 9 | estimated_tokens_saved 反映、多轮次增长、完整 pipeline |
-| smart | `smart.rs` 内联 | 8 | 空 transcript、stale 窗口、idempotent、ancestor 保护 |
-| compact v2 | `_test.rs` | 4 | CompactResult 字段、escalation reason |
-| transcript | `transcript_test.rs` | - | projection 持久化、批量恢复 |
-| sqlite_store | `sqlite_store_test.rs` | 1 | SQLite projection 列读写 |
-| adapters | `anthropic_test.rs` / `openai_test.rs` | - | Provider 协议序列化 |
-
----
-
-## 11. 问题修复清单
-
-| 编号 | 问题 | 怎么修的 |
-|------|------|---------|
-| P0-1 | Blocks/Raw 打了标记但不投影 | `project_content()` 处理所有 ContentBlock 类型，`render_llm_view()` 替换 `truncated_content(100)` |
-| P0-2 | `affected_count` 不是真实收益 | `estimate_tokens()` + `estimated_tokens_saved` 决策 |
-| P0-3 | 同一条 AI 消息的工具调用被连带 | 结果投影按 tool exchange 判断，所有历史输入均保留 |
-| P0-4 | Tool input 的 JSON 结构被破坏 | planner 不生成输入投影，renderer 忽略 legacy 输入 action；遵循 ARC-MICRO-TOOL-INPUT-001 |
-| P1-1 | 100 字符截断丢失恢复信息 | `apply_head_tail()` head+tail+省略提示 |
-| P1-2 | round 分组太简化 | `TurnGroup::collect()` + `ToolExchange` 配对 |
-| P1-3 | Micro 后跑 Full 白写标记 | dry-run → 不足时跳过 Micro apply |
-| P1-4 | 百分比触发没有回收目标 | `ContextPressure::target_reclaim_tokens()` |
-| P2-1 | 逐条写入与派生缓存维护 | `ApplyCompactionBatch` 同事务批量投影；当前形状不维护派生缓存 |
-
----
-
-## 12. 关键设计决策
-
-1. **Planner 纯函数**：`plan_micro()` 零副作用。这是 dry-run、Skip-Micro-when-Full、shadow mode 的前提。如果不纯，每一步决策都可能产生不可逆的副作用。
-
-2. **Micro 收缩为 thin wrapper**：核心逻辑在 planner 和 projection。`micro_compact()` 只有 ~20 行——调 planner、应用 flag。Smart 同样通过 planner 兼容入口。保持代码焦点集中。计划与应用分离：同一轮 dry-run 的计划只规划一次，落地走 `apply_micro_plan()`（同一消息的多个 action 合并进同一条 directive，按 message_id 分组）。
-
-3. **默认 Preserve**：`ContextRetention` 默认值是 `Preserve`——没有显式声明的工具一律不压缩。旧版黑名单默认是空的（全部压缩），过于激进。
-
-4. **Token 估算用 chars/4**：不使用复杂 tokenizer。预留 shadow mode 校准路径——对比估算值和真实 `input_tokens`。
-
-5. **保留 `affected_count` 兼容**：新逻辑以 `estimated_tokens_saved` 为主，但旧字段保留——事件消费者（TUI、Langfuse）不需要同步迁移。
+1. 结果先做有回查保证的预览；当前候选视图仍超过 45% 尽力目标时，才继续对合格交换做更强省略。硬保护占用过大时报告缺口。
+2. 错误不按前缀去重；尚无错误完整语义指纹/解决关系。领域状态、进度/确认与 canonical reminder 缺少生产者提供的完整替代证据时继续保护，不依赖文本或工具名猜测替代关系，也不建立第二套状态 reducer。
+3. 独立用户图片/文档仍受保护；附件回查恢复 canonical 数据，不自动将重组附件转换为新的 vision 输入。外部 URL 不能代表历史媒体读取保证；未知 provider 块也保留。
+4. ArchiveRead 可复用原引用预览；尚无按源范围消除重复请求的独立机制。超过全局收据预算时提供目录入口，必要保护内容和冻结底座不会为满足预算被删。
+5. 目录/成员上限、不同来源数量及签名协议能力会限制可回收量。超大单条未消费内容或固定底座超过窗口时，沿用现有 Full/明确失败路径。
+6. 合成样本测量与本次执行范围见 [验证记录](../verification/micro-compact-redesign-2026-10-21.md)。反复回查的真实负载和所有支持 provider 的真实请求验收仍需独立证据，不能由合成 wire 测试推断已经完成。

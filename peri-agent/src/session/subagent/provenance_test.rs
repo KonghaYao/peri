@@ -1,8 +1,6 @@
 //! Real SQLite spawn/compact/reopen/resume regression for read-only inherited history.
 use super::*;
-use crate::agent::compact_v2::{
-    micro_compact, run_compact, CompactConfig, CompactOutcome, ContextPressure,
-};
+use crate::agent::compact_v2::{run_compact, CompactConfig, CompactOutcome, ContextPressure};
 use crate::messages::MessageId;
 use peri_acp_types::projection::{
     MessageProjectionDirective, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
@@ -55,6 +53,7 @@ fn directive(id: MessageId) -> MessageProjectionDirective {
             },
         }],
         superseded_by: None,
+        ..Default::default()
     }
 }
 
@@ -210,15 +209,9 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
             )],
         ));
         transcript.append(own_tool.clone());
-        assert!(
-            micro_compact(
-                &mut transcript,
-                &CompactConfig {
-                    micro_compact_stale_steps: 0,
-                    ..Default::default()
-                }
-            ) > 0
-        );
+        // Persisted own directives stay independent of the inherited parent's flags.
+        // Cold history alone is no longer exposure evidence for new Micro planning.
+        transcript.set_flags_projection(own_tool.id(), directive(own_tool.id()));
         assert!(transcript.flags(own_tool.id()).truncated);
         transcript.flush_persistence().await.unwrap();
         transcript.shutdown_persistence();

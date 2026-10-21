@@ -419,13 +419,22 @@ async fn bridge_accepts_workspace_owned_task_handle() {
     pool.bind_session_task_manager("task-session", &manager);
     let bridge = crate::mcp::tool_bridge::McpToolBridge::new("workspace", bash, handle)
         .with_output_store(&pool, Some("task-session"));
-    let receipt = bridge
-        .invoke(
+    let output = bridge
+        .invoke_output(
             json!({"command":"sleep 0.2; printf bridge-ok", "run_in_background":true}),
             ToolContext::new(&[], &cwd).with_session_identity("task-session", "task-turn"),
         )
         .await
         .expect("bridge accepts Tasks response");
+    let evidence = output
+        .execution
+        .as_ref()
+        .expect("task response must carry execution facts");
+    assert_eq!(
+        evidence.status,
+        peri_agent::tools::ToolExecutionStatus::Running
+    );
+    let receipt = output.text;
     let task_id = receipt
         .split("Background task started: ")
         .nth(1)
@@ -434,6 +443,23 @@ async fn bridge_accepts_workspace_owned_task_handle() {
         .next()
         .expect("task id");
     assert!(task_id.starts_with("mcp-"));
+    assert_eq!(evidence.task_id.as_deref(), Some(task_id));
+    let completed = bridge
+        .invoke_output(
+            json!({"command":"printf sync-ok", "run_in_background":false}),
+            ToolContext::new(&[], &cwd).with_session_identity("task-session", "task-turn"),
+        )
+        .await
+        .expect("synchronous Bash completes");
+    let completed_evidence = completed
+        .execution
+        .expect("producer terminal facts survive MCP");
+    assert_eq!(
+        completed_evidence.status,
+        peri_agent::tools::ToolExecutionStatus::Completed
+    );
+    assert_eq!(completed_evidence.exit_code, Some(0));
+    assert!(completed_evidence.task_id.is_none());
     assert!(manager
         .snapshot()
         .tasks

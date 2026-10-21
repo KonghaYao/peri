@@ -30,6 +30,7 @@ pub(crate) mod skill_discovery;
 pub(crate) mod system_tools;
 pub mod task_scope;
 pub mod tool_bridge;
+mod tool_execution;
 mod tool_request;
 pub mod transport;
 
@@ -108,3 +109,9 @@ mod workspace_recovery_tests;
 #[cfg(test)]
 #[path = "builtin_cron_runtime_test.rs"]
 mod builtin_cron_runtime_tests;
+
+mod context_archive;
+
+#[cfg(test)]
+#[path = "tool_bridge_invocation_fixture_test.rs"]
+mod current_invocation_fixture;

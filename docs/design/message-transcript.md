@@ -13,7 +13,7 @@
 3. **修改即新消息**：消息内容不可原地修改。需要变更时，正常路径产生新消息（新 id）。Micro 持久化 projection directive，Full 标 `excluded`；标记不改变消息内容本身。（Smart Compact 为 planner 兼容入口，见 §2.6）
 4. **Transcript 为运行时事实源**：运行时从 Transcript 构造消息视图；冷恢复从持久化 payload 与 flags 重建。已提交的 compact 结果跨 turn 保留，包括随后取消或失败的 turn。不持久化 MessageQueue——Queue 是临时收件箱。
 5. **追加异步、提交有确认**：普通追加经异步 writer，compact lifecycle 与 turn 收尾必须检查持久化结果。writer 失败后停止使用热会话，保留已落盘内容，重新加载后才能继续；不以删除新增 ID 模拟事务回滚。
-6. **标记代替删除**：Compact 不删除、不修改消息内容。Micro 标 `truncated`（LLM 请求时截断输出），Full 标 `excluded`（LLM 请求时跳过该消息）。（Smart Compact 已实现为 planner 兼容入口，见 §2.6）标记可撤销，消息本体不变。仅 rewind 允许真删除。
+6. **标记代替删除**：Compact 不删除、不修改消息内容。Micro 以 directive 预览结果或省略合格交换，Full 标 `excluded`（LLM 请求时跳过该消息）。（Smart Compact 已实现为 planner 兼容入口，见 §2.6）标记可撤销，消息本体不变。仅 rewind 允许真删除。
 
 ---
 
@@ -65,7 +65,7 @@ graph TB
   - ❌ 禁止 prepend 或中间插入——破坏 Prompt Cache 前缀
   - ❌ 禁止删除或修改——Compact 通过标记改变模型视图，不改变消息本体
 - **代码位置**：`BaseMessage` / `ContentBlock` / `MessageContent` 定义于 `peri-agent/src/messages/`；`MessageTranscript` 定义于 `peri-agent/src/session/transcript.rs`；`MessageQueue` 定义于 `peri-agent/src/session/queue.rs`。Transcript 和 Queue 属于 session 模块，messages 模块仅含消息数据类型定义。
-- **ancestor 边界**：SubAgent 引用父上下文时，将 payload 与 flags 一起冻结为版本化 `InheritedContext`，并在 `threads.inherited_context` 列一次性写入；恢复时先放 ancestor、再放 child own history。窗口 `inherited` 来源的 `frozenSnapshotId` 由子会话、字节数、条数、祖先与首尾消息 id 派生，父会话后续 append/compact/rewind 不改变该快照。祖先标记允许初始化恢复，普通标记 setter 与 compact lifecycle 拒绝改写祖先；本机 SQLite 提供 inherited 窗口读取，remote/emscripten adapter 未覆写该端口时返回 `Unsupported`。ACP `session/fork` 是独立会话复制：复制后的 payload 使用新 `MessageId` 并归新 thread 所有，因此属于可压缩 own region，而非共享 ancestor。
+- **ancestor 边界**：SubAgent 引用父上下文时，将 payload 与 flags 一起冻结为版本化 `InheritedContext`，并在 `threads.inherited_context` 列一次性写入；恢复时先放 ancestor、再放 child own history。窗口 `inherited` 来源的 `frozenSnapshotId` 由子会话、字节数、条数、祖先与首尾消息 id 派生，父会话后续 append/compact/rewind 不改变该快照。祖先标记允许初始化恢复，普通标记 setter 与 compact lifecycle 拒绝改写祖先；本机 SQLite 提供 inherited 窗口读取，remote/emscripten adapter 未覆写该端口时返回 `Unsupported`。ACP `session/fork` 经 `load_fork_snapshot` 合并冻结 inherited 与 own 历史，按冻结授权补齐归档，复制后的 payload 使用新 `MessageId` 并归新 thread 所有，因此属于可压缩 own region；归档正文保持 excluded。授权与重映射规则见 [Micro 生命周期](micro-compact.md#7-full继承fork-与-rewind)。
 - **Staging 两阶段写入**：Reason 阶段产出的 AI 消息（含 tool_calls）不直接追加到 Transcript——先 Staging。Act 阶段收集所有 ToolResult 后，AI 消息 + ToolResult 作为一组原子提交到 Transcript。Staging 期间的消息 LLM 请求不可见。提交后触发持久化。若 Act 阶段异常终止（Cancel/Error），staging 消息丢弃——Transcript 回到本轮开始前的状态，不留半个 AI 消息。
 
 ### 2.3 MessageQueue
@@ -97,7 +97,7 @@ graph TB
 
 ### 2.4 持久化
 
-ThreadStore 负责 Transcript 的完整持久化。`ThreadStore` trait 定义已下沉 `peri-acp-types/src/store/mod.rs`（`pub trait ThreadStore` :221），实现迁至 `peri-resources/src/sessions/`（`filesystem.rs` 的 `FilesystemThreadStore` / `sqlite_store.rs` 的 `SqliteThreadStore`），`thread/mod.rs` 仅 re-export。该 trait 是**迁移桥**：目标契约是 `peri-acp-types/src/session_resources.rs` 的 `SessionResources`（行为门面，数据与本机执行两面分离），历史纯变换（fork/投影/compaction/rewind）在 `peri-acp-types/src/store/history.rs`，消费侧迁移见 active spec 2026-09-26-session-store。
+ThreadStore 负责 Transcript 的完整持久化。`ThreadStore` trait 定义已下沉 `peri-acp-types/src/store/mod.rs`（`pub trait ThreadStore` :221），实现迁至 `peri-resources/src/sessions/`（`filesystem.rs` 的 `FilesystemThreadStore` / `sqlite_store.rs` 的 `SqliteThreadStore`），`thread/mod.rs` 仅 re-export。该 trait 是**迁移桥**：目标契约是 `peri-acp-types/src/session_resources.rs` 的 `SessionResources`（行为门面，数据与本机执行两面分离），历史纯变换（fork/投影/compaction/rewind）在 `peri-acp-types/src/store/{history,history_projection}.rs`，消费侧迁移见 active spec 2026-09-26-session-store。
 
 #### ThreadStore trait 核心方法概览
 
@@ -120,26 +120,26 @@ ThreadStore 负责 Transcript 的完整持久化。`ThreadStore` trait 定义已
 
 ### 2.5 Rewind
 
-按 MessageId 将会话回滚到指定消息，撤销其后所有操作。
+按 MessageId 回滚历史；调用入口显式区分保留目标的 `KeepThrough` 与移除目标的 `RemoveFrom`。
 
-- **操作**：指定目标 id → Transcript 截断至该消息（含）→ id 索引表同步收缩 → 持久化层删除该 id 之后的所有记录 → MessageQueue 清空。
-- **文件系统回滚**：rewind 到某消息时，该消息之后产生的临时文件（如输出落盘文件）同步清理。仅保留回滚点之前的文件系统状态。
-- **恢复**：回滚后的会话从该点继续，ReAct 循环正常启动。
+- **Transcript 操作**：`session/transcript/rewind.rs::MessageTranscript::rewind_to` 为异步 `KeepThrough`。先等待追加 writer barrier，再由 `SessionResources::rewind_history` 在同一事务删除后缀并撤销失效投影，读回已提交 flags 后才截断热态和推进视图版本；不能进入 ancestor 区。已知未生效保留旧视图，提交不确定或提交后读回失败要求冷恢复。
+- **用户入口**：ACP rewind 使用 `RemoveFrom`，由 `session/command/rewind.rs` 编排文件复原与持久化；文件复原经绑定的 Workspace MCP 能力完成，失败不裁剪历史。存储确认后才发布有效视图与完成事件，具体入口见 [ACP 索引](../code-index/peri-acp.md)。
+- **恢复**：仅撤销保留前缀中已经失去成员、目录锚点或替代依据的投影，完整目录保留原身份；成功后从回滚后的有效历史继续。
 
 ### 2.6 与 Compact 的交互
 
-Compact 保留消息本体，通过标记改变可见性或模型投影；Micro directive 随 writer 持久化并在收尾检查，Full lifecycle 在存储确认成功后发布摘要与标记的内存状态。三种模式的策略：
+Compact 保留消息本体，通过标记改变可见性或模型投影；Micro 与 Full 均等待 canonical writer barrier，通过单次 lifecycle 提交，并在存储确认成功后发布热态。策略与目录生命周期的权威说明见 [Micro 设计](micro-compact.md)。三种入口的持久化行为：
 
 | Compact 模式 | 重建策略 | 持久化影响 |
 |-------------|---------|-----------|
-| Micro | 保留全部消息，部分标 `truncated: true` | UPDATE 标记字段 |
+| Micro | 保留 canonical 正文，以 directive 预览结果或省略合格交换 | 同一批 UPDATE 成员动作、目录与根 flags |
 | Full | 追加新摘要消息，旧消息标 `excluded: true` | INSERT 摘要 + UPDATE 旧消息标记 |
-| Smart（已实现为兼容入口） | 经 `plan_micro` 生成计划后应用，未选中消息标 `truncated` + projection directive | UPDATE 标记 + INSERT projection directive |
+| Smart（显式旧配置入口） | 复用 Micro 规划与提交；缺少当前运行期暴露证据时保留历史 | 与 Micro 相同 |
 
-- Micro 和 Full 两种已实现模式通过标记实现——Micro 标 `truncated`，Full 标 `excluded`。消息不删，标记可撤销。rewind 清标记恢复原状
+- Micro 和 Full 通过持久化 flags 改变模型视图，正文不变。rewind 按依赖有效性撤销投影，不无条件清除所有标记。
 - Reason 与 Compact 检查在内容未变时复用同一份模型视图（`peri-agent/src/agent/stages/model_view.rs`）：`MessageTranscript::view_revision()` 返回 `TranscriptRevision { instance, revision }`——任何改变模型可见内容的写入推进修订号（staging 不推进；`rebuild` 保留实例身份并强制前进，避免换出重建后被误判为同一内容），实例身份区分 `std::mem::take` 换出后的新 transcript。复用槽按迭代划定作用域（`run_react_loop` 每轮入口清空、取到请求快照后释放），不跨迭代常驻，也不缓存 token 估算（工具目录可能在检查点之间变化）。槽的存续遵守「同一时刻至多一份整份视图正文」：键不匹配时先丢弃旧项再渲染新视图；只有确实要构造 Full 摘要视图时才释放（`compact_v2::FullSummaryNotice` 在渲染前调用，Micro/Smart 未落地、shadow、空计划未达阈值等无变化路径保留缓存供 Reason 复用）；Reason 准备阶段持作用域守卫，hook 错误、提前取消与取快照失败等所有退出路径统一释放。回归入口 `agent::stages::model_view_tests`
-- Smart Compact 已实现为 planner 兼容入口（`peri-agent/src/agent/compact_v2/smart.rs`）：不再走独立 LLM 筛选分支，而是通过 `plan_micro` 生成计划再应用（`set_flags_projection` 统一持久化 directive），并带 deprecation warning（"will be removed, converging to Micro"）；`compact_v2` 已目录化（原 `compact_v2.rs:57` stub 位置不复存在）
-- Full 从完整可见模型历史（含 canonical reminder，恢复已提交 Micro 投影和历史工具结果）生成摘要，将新摘要和本次快照内 own region 的非 System 历史 excluded transitions 作为同一 lifecycle 提交。历史工具调用及结果留存在 transcript，不从计算实例本机回读 Workspace 文件。报告/通知不因 reminder 类型而豁免；原文留存，成功后退出活跃模型视图；未纳入快照的新结果继续等待 Receive。后续取消或失败不撤销已提交事务；恢复须保持摘要与 flags 配对（每条被归档条目在同一批里记下取代它的摘要 id，rewind 据此逐条判定排除是否仍有依据，见 `docs/design/micro-compact.md` §7.1）。提交前置 pending 状态，只有存储确认成功并应用内存后才标记 committed；取消或错误留下的不确定状态由自动 executor 与手动命令 interceptor 传播给 host，不能仅以普通 writer barrier 成功确认一致性。
+- Smart 的便捷入口（`peri-agent/src/agent/compact_v2/smart.rs`）通过 `plan_micro` 与异步 `apply_micro_plan` 共用 Micro 提交边界；没有当前运行期暴露证据时不从历史年龄推断内容已消费。
+- Full 从完整可见模型历史（含 canonical reminder，恢复已提交 Micro 投影和历史工具结果）生成摘要，将新摘要和本次快照内 own region 的非 System 历史 excluded transitions 作为同一 lifecycle 提交。历史工具调用及结果留存在 transcript，不从计算实例本机回读 Workspace 文件。报告/通知不因 reminder 类型而豁免；原文留存，成功后退出活跃模型视图；未纳入快照的新结果继续等待 Receive。后续取消或失败不撤销已提交事务；恢复须保持摘要与 flags 配对（每条被归档条目在同一批里记下取代它的摘要 id，rewind 据此逐条判定排除是否仍有依据，见 [Micro 生命周期](micro-compact.md#7-full继承fork-与-rewind)）。提交前置 pending 状态，只有存储确认成功并应用内存后才标记 committed；取消或错误留下的不确定状态由自动 executor 与手动命令 interceptor 传播给 host，不能仅以普通 writer barrier 成功确认一致性。
 
 ### 2.7 与 v2 其他模块的关系
 
@@ -200,5 +200,5 @@ Compact 保留消息本体，通过标记改变可见性或模型投影；Micro 
 - 超大条目详情与 inherited 详情已交付（`HistoryDetailPanel`、`session/history/body`、4 MiB 预算、UTF-8 跨块重组、关闭释放 chunks）。限制：鼠标单击只设焦点需再 Enter；UI 导出为剪贴板复制已加载正文（模型支持分块流式）；未做 JSON 字段级展示；inherited 段内部不插入独立占位行；TUI 仍接受旧顶层 `bodyDescriptors` 兼容输入，服务端已不再发送该形状。
 - remote/emscripten adapter 未覆写窗口/继承读取端口，默认返回 `Unsupported`（出口 `-32603`），不能宣称这些后端已支持窗口。
 - `readTicket` 是进程内不透明值与精确匹配，没有密码学签名；它绑定 connection/session/generation/structure/snapshot/source/tail/投影版本/时间/nonce，但不是访问授权。
-- rewind 的持久化不确定仍由集中后的文本 marker 判定（`PERSISTENCE_UNCERTAIN_MARKER`），尚无 typed mutation outcome；`schema_test.rs` 的存量 1038 行超限不属本次变更。
+- ACP host rewind 的错误出口仍由集中后的文本 marker 判定持久化不确定（`PERSISTENCE_UNCERTAIN_MARKER`）；底层资源错误与 Transcript rewind 已使用 `MutationOutcome`，host 的错误出口尚未完整传递该类型；`schema_test.rs` 的存量 1038 行超限不属本次变更。
 - beta 设置面板仍只列 `BETA_FLAGS`；`history-window-v1` 未配置默认开启，如需关闭须手动写入 settings `false`，TUI 启动只读一次、无热重载。

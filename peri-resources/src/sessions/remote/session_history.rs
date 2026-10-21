@@ -101,18 +101,6 @@ const SET_TITLE_IF_ABSENT_SQL: &str =
 const REWIND_KEEP_THROUGH_SQL: &str = "DELETE FROM messages WHERE thread_id = ?1 AND rowid > ?2";
 const REWIND_REMOVE_FROM_SQL: &str = "DELETE FROM messages WHERE thread_id = ?1 AND rowid >= ?2";
 
-/// rewind 有效视图重建：清零保留前缀里条目的 `excluded`，并把**整条 `projection` 载荷一并
-/// 清掉**（置 NULL）；`truncated` 不动。
-///
-/// 载荷必须随清零一起消失：`projection` 列是 flags 的持久化载荷，其中的 `superseded_by`
-/// 只在 `excluded` 为真时被读取——正文已恢复的条目留着「我被某摘要取代」的记录，下游读到它
-/// 就会拿到一份与有效视图矛盾的投影指令。清掉它不丢任何仍然有效的渲染信息：生产里
-/// `excluded: true` 的唯一写入点是 Full Compact（`peri-agent/src/agent/compact_v2/full.rs`），
-/// 它写 flags 时用 `..Default::default()` 整体覆盖，被排除的行本来就不带渲染指令。
-/// 本机同一语义见 `sqlite_store::session_data::history::clear_rewind_excluded`。
-const CLEAR_EXCLUDED_SQL: &str =
-    "UPDATE messages SET excluded = 0, projection = NULL WHERE thread_id = ?1 AND message_id = ?2";
-
 /// 精确移除单条条目。
 const REMOVE_MESSAGE_SQL: &str = "DELETE FROM messages WHERE thread_id = ?1 AND message_id = ?2";
 
@@ -269,6 +257,12 @@ impl RemoteSessionData {
             .flag_updates
             .iter()
             .map(|(message, _)| *message)
+            .filter(|message| {
+                !change
+                    .appended_messages
+                    .iter()
+                    .any(|appended| appended.id() == *message)
+            })
             .collect::<Vec<_>>();
         if !self
             .missing_session_messages(id, &flagged)
@@ -288,10 +282,6 @@ impl RemoteSessionData {
         // 计数重数与标题补齐都作用在会话行上：会话不存在要明确失败，不让 0 行更新成成功。
         effects.push(guard_session_statement(id));
         let mut inputs = vec![id.as_str().to_owned()];
-        for (message, flags) in &change.flag_updates {
-            effects.push(flag_statement(id, *message, flags));
-            inputs.push(flags_label(*message, flags));
-        }
         let entries = change
             .appended_messages
             .iter()
@@ -305,6 +295,11 @@ impl RemoteSessionData {
                 content,
                 role_of_message(message),
             ));
+        }
+        for (message, flags) in &change.flag_updates {
+            effects.push(guard_message_statement(id, *message));
+            effects.push(flag_statement(id, *message, flags));
+            inputs.push(flags_label(*message, flags));
         }
         inputs.extend(entry_inputs(&entries));
         effects.push(refresh_statement(id, &timestamp()));
@@ -321,8 +316,8 @@ impl RemoteSessionData {
     /// 随后重数计数。
     ///
     /// `clear_excluded` 是保留前缀里要清零 `excluded` 的 id（由调用方从一致读取的完整历史
-    /// 算出）；清零同时把整条 `projection` 载荷清掉（`truncated` 不动，理由见
-    /// [`CLEAR_EXCLUDED_SQL`]）。删除与清零在**同一批**里：只有资格写落定、整批生效才算成功，
+    /// 算出）；同批撤销失效取代关系/归档组，保留完整目录（`rewind_projection_updates`）。
+    /// 删除与重建在**同一批**里：只有资格写落定、整批生效才算成功，
     /// 不存在「删了边界却没恢复原文」的中间状态。前置一致读把「不是本会话的条目」归
     /// `InvalidInput`（与本机同一归类）；批内守卫让「读与写之间被删掉」以整批回滚收场而不是
     /// 静默 0 行，其中 [`GUARD_BOUNDARY_ROWID_SQL`] 专门盯住删除下界本身。
@@ -340,6 +335,13 @@ impl RemoteSessionData {
         let Some(rowid) = self.boundary_rowid(id, message).await? else {
             return Ok(RewindOutcome::BoundaryMissing);
         };
+        let tail_rows = self.store().await?.fetch_rows(&StatementSpec::new(
+            "SELECT message_id, rowid FROM messages WHERE thread_id = ?1 ORDER BY rowid DESC LIMIT 1",
+            vec![Value::Text(id.clone())],
+        )).await?;
+        let tail = tail_rows.first().ok_or_else(|| {
+            SessionResourceError::conflict("rewind history disappeared before planning")
+        })?;
         let mut seen = HashSet::with_capacity(clear_excluded.len());
         let unique = clear_excluded
             .iter()
@@ -355,7 +357,42 @@ impl RemoteSessionData {
             RewindBoundary::KeepThrough(_) => (REWIND_KEEP_THROUGH_SQL, "keep_through"),
             RewindBoundary::RemoveFrom(_) => (REWIND_REMOVE_FROM_SQL, "remove_from"),
         };
-        let mut effects = Vec::with_capacity(unique.len() * 2 + 3);
+        let select = match boundary {
+            RewindBoundary::KeepThrough(_) => "SELECT message_id, truncated, excluded, projection FROM messages WHERE thread_id = ?1 AND rowid <= ?2 ORDER BY rowid",
+            RewindBoundary::RemoveFrom(_) => "SELECT message_id, truncated, excluded, projection FROM messages WHERE thread_id = ?1 AND rowid < ?2 ORDER BY rowid",
+        };
+        let rows = self
+            .store()
+            .await?
+            .fetch_rows(&StatementSpec::new(
+                select,
+                vec![Value::Text(id.clone()), codec::int_value(rowid)],
+            ))
+            .await?;
+        let retained = rows
+            .iter()
+            .map(|row| codec::decode_flag_row(row).map(|(message, flags)| (message, flags, false)))
+            .collect::<SessionResourceResult<Vec<_>>>()?;
+        let kept_ids: HashSet<_> = retained.iter().map(|(id, _, _)| *id).collect();
+        if unique.iter().any(|id| !kept_ids.contains(id)) {
+            return Err(invalid_input(
+                "rewind flag target is outside the retained prefix",
+            ));
+        }
+        let updates = peri_acp_types::store::history::rewind_projection_updates(&retained, &unique);
+        let mut effects = Vec::with_capacity(updates.len() * 2 + retained.len() + 3);
+        effects.push(StatementSpec::new(
+            "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM messages WHERE thread_id = ?1 AND message_id = ?2 AND rowid = ?3 AND rowid = (SELECT MAX(rowid) FROM messages WHERE thread_id = ?1))",
+            vec![Value::Text(id.clone()), tail[0].clone(), tail[1].clone()],
+        ));
+        // Every dependency snapshot is guarded before deletion, preventing concurrent flags
+        // from being silently overwritten by a plan computed against older evidence.
+        for row in &rows {
+            effects.push(StatementSpec::new(
+                "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM messages WHERE thread_id = ?1 AND message_id = ?2 AND truncated = ?3 AND excluded = ?4 AND projection IS ?5)",
+                vec![Value::Text(id.clone()), row[0].clone(), row[1].clone(), row[2].clone(), row[3].clone()],
+            ));
+        }
         // 守卫在删除之前：边界行必须仍以同一 rowid 存在，否则整批不生效。
         effects.push(StatementSpec::new(
             GUARD_BOUNDARY_ROWID_SQL,
@@ -369,16 +406,9 @@ impl RemoteSessionData {
             sql,
             vec![Value::Text(id.as_str().to_owned()), codec::int_value(rowid)],
         ));
-        for message in &unique {
-            // 守卫在删除之后求值：清零集合必须落在保留前缀里，越界的 id 会让整批回滚。
+        for (message, flags) in &updates {
             effects.push(guard_message_statement(id, *message));
-            effects.push(StatementSpec::new(
-                CLEAR_EXCLUDED_SQL,
-                vec![
-                    Value::Text(id.as_str().to_owned()),
-                    Value::Text(message_label(*message)),
-                ],
-            ));
+            effects.push(flag_statement(id, *message, flags));
         }
         effects.push(refresh_statement(id, &timestamp()));
         // 方向进摘要：同一个边界上的 `KeepThrough` 与 `RemoveFrom` 是**两个操作**，
@@ -389,8 +419,16 @@ impl RemoteSessionData {
             direction.to_owned(),
             message_label(message),
             rowid.to_string(),
+            // A later rewind of the same boundary must delete newly appended history,
+            // rather than replaying the previous operation's acknowledged no-op.
+            format!("{:?}:{:?}", tail[0], tail[1]),
         ];
         inputs.extend(unique.iter().map(|message| message_label(*message)));
+        inputs.extend(
+            updates
+                .iter()
+                .map(|(message, flags)| flags_label(*message, flags)),
+        );
         match self
             .commit_effects("rewind_history", &inputs, effects, id)
             .await
@@ -663,7 +701,11 @@ fn flags_label(message: MessageId, flags: &MessageFlags) -> String {
         u8::from(flags.excluded),
         u8::from(flags.projection.is_some())
     );
-    format!("{}:flags:{bits}", message_label(message))
+    format!(
+        "{}:flags:{bits}:{}",
+        message_label(message),
+        encode_projection(flags).unwrap_or_default()
+    )
 }
 
 fn message_label(message: MessageId) -> String {
@@ -704,7 +746,7 @@ mod tests {
 
     #[test]
     fn every_statement_is_static_and_fully_bound() {
-        let cases: [(&str, usize); 12] = [
+        let cases: [(&str, usize); 11] = [
             (GUARD_SESSION_ABSENT_SQL, 1),
             (GUARD_MESSAGE_NOT_IN_SESSION_SQL, 2),
             (GUARD_MESSAGE_FOREIGN_SQL, 2),
@@ -717,7 +759,6 @@ mod tests {
             (REFRESH_COUNTS_SQL, 3),
             (SET_TITLE_IF_ABSENT_SQL, 2),
             (REWIND_KEEP_THROUGH_SQL, 2),
-            (CLEAR_EXCLUDED_SQL, 2),
             (REMOVE_MESSAGE_SQL, 2),
             (SELECT_ROWID_SQL, 2),
         ];
@@ -757,16 +798,6 @@ mod tests {
     fn rewind_boundaries_differ_only_in_the_comparison() {
         assert!(REWIND_KEEP_THROUGH_SQL.ends_with("rowid > ?2"));
         assert!(REWIND_REMOVE_FROM_SQL.ends_with("rowid >= ?2"));
-    }
-
-    /// 清零语句必须**整条载荷一起清**：`projection` 里的 `superseded_by` 只在 `excluded` 为真
-    /// 时被读取，正文恢复后留着它就是「已生效的条目仍带着『我被某摘要取代』」的矛盾记录。
-    ///
-    /// `truncated` 不许进 SET：它来自 Micro compact，与排除无关，清零必须原样保留。
-    #[test]
-    fn rewind_clearing_excluded_clears_the_whole_projection_payload() {
-        assert!(CLEAR_EXCLUDED_SQL.contains("SET excluded = 0, projection = NULL"));
-        assert!(!CLEAR_EXCLUDED_SQL.contains("truncated"));
     }
 
     /// 操作身份必须区分「同内容的两批追加」：只按内容摘要会让第二批被当成重放静默跳过。

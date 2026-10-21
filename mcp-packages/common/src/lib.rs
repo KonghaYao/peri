@@ -1,6 +1,7 @@
 //! Shared behavior used by the independently packaged builtin MCP instances.
 
 pub use peri_mcp_core::agent_definition;
+pub mod context_archive;
 pub mod failure;
 mod helpers;
 mod numeric;

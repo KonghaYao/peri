@@ -108,6 +108,10 @@ fn summarize_changes(old: &[TodoItem], new: &[TodoItem]) -> String {
 
 #[async_trait]
 impl BaseTool for TodoWriteTool {
+    fn context_retention(&self) -> peri_agent::tools::ContextRetention {
+        peri_agent::tools::ContextRetention::StateBearing
+    }
+
     fn name(&self) -> &str {
         "TodoWrite"
     }

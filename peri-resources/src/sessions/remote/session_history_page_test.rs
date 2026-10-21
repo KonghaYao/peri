@@ -507,3 +507,6 @@ async fn remote_frozen_state_rejects_unknown_thread() {
         .unwrap_err();
     assert!(matches!(error.kind(), SessionResourceErrorKind::NotFound));
 }
+
+#[path = "session_archive_test.rs"]
+mod archive_tests;

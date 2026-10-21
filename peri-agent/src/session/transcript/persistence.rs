@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::anyhow;
-use peri_acp_types::session_resources::{RewindBoundary, SessionResources};
+use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::store::PersistedPayload;
 
 use super::PersistOp;
@@ -315,22 +315,6 @@ pub(super) async fn run_writer(
                 )
                 .await;
                 let (reservation, result) = match other {
-                    // transcript 自身的截断（保留到目标为止）：只把内存里已经丢掉的后缀同步删掉，
-                    // 不重建有效视图——保留前缀的 flags 在内存里没有被改过，这里清零任何
-                    // `excluded` 都会让存储与 transcript 分叉。有效视图重建属于 ACP rewind
-                    // （`SessionResources::rewind_history` 的 clear_excluded 参数）。
-                    //
-                    // 与 ACP rewind 的区别就在这里：`BoundaryMissing` 对本路径是**成功**——
-                    // 内存已经截断，存储里没有这一行就没有要删的后缀，本次同步的目的已经
-                    // 达成（目标行缺失时删除下界无从谈起，重试也不会变）。ACP rewind 相反：
-                    // 它要发布一份「已按边界重建」的热态，边界没生效就绝不能发布。
-                    PersistOp::RewindTo { id, reserved } => (
-                        reserved,
-                        store
-                            .rewind_history(&tid, RewindBoundary::KeepThrough(id), &[])
-                            .await
-                            .map(|_| ()),
-                    ),
                     PersistOp::UpdateFlags {
                         id,
                         flags,

@@ -22,9 +22,17 @@ fn test_collect_tools_empty_pool() {
     let tools = <McpMiddleware as Middleware>::collect_tools(&mw, "/tmp");
     // Resource reader 与 DiscoverMCP 都是 deferred capability；即使初始为空也注册，
     // 使 session-local projected pool 后续 ready 的 resources 可在同一会话使用。
-    assert_eq!(tools.len(), 2);
-    assert_eq!(tools[0].name(), "mcp_read_resource");
-    assert_eq!(tools[1].name(), "DiscoverMCP");
+    assert_eq!(tools.len(), 3);
+    assert_eq!(tools[0].name(), "ReadContextArchive");
+    assert!(tools[0].is_direct(), "当前会话原文回查可直接调用");
+    assert!(matches!(
+        tools[0].context_retention(),
+        peri_agent::tools::ContextRetention::ArchiveRead
+    ));
+    assert_eq!(tools[1].name(), "mcp_read_resource");
+    assert_eq!(tools[2].name(), "DiscoverMCP");
+    assert!(!tools[1].is_direct());
+    assert!(!tools[2].is_direct());
 }
 
 #[test]

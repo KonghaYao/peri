@@ -22,6 +22,9 @@ use super::{fork_bound_session, load_fork_source};
 
 const SOURCE: &str = "source";
 
+#[path = "session_fork_archive_test.rs"]
+mod archive;
+
 /// 本文件的用例只读三条短条目：页预算够装下它们即可。取值刻意不引用
 /// `host::history_page::PAGE_BYTE_BUDGET`（那是协议面默认值，与本用例要判的
 /// 「父收缩是否改动子页内容」无关）。
@@ -118,6 +121,7 @@ async fn forked_payloads_have_independent_ids_flags_and_compaction_lifecycle() {
                             },
                         }],
                         superseded_by: None,
+                        ..Default::default()
                     }),
                 },
             )],

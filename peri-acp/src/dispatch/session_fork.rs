@@ -41,7 +41,9 @@ pub(crate) async fn load_fork_source(
     source_thread_id: &str,
 ) -> Result<ForkSource> {
     let thread_id = source_thread_id.to_owned();
-    let snapshot = resources.load_session_snapshot(&thread_id).await?;
+    // The fork capability flattens frozen inherited sources and materializes their
+    // authorized archive members. Reading only own history would lose those roots.
+    let snapshot = resources.load_fork_snapshot(&thread_id).await?;
     let binding = bound_binding(&snapshot)?;
     let frozen = source_frozen(&snapshot)?;
     let payloads = ensure_complete_tool_calls(snapshot.payloads)?;
@@ -74,11 +76,11 @@ pub(crate) async fn fork_bound_session(
         .to_owned();
     // SQLite 的 message_id 是库级主键：复用 source ID 会让写入静默丢行，因此复制前
     // 先做纯 ID 重映射（adapter 不重复执行 fork 算法）。
-    let forked = remap_fork_history(&source.payloads, &source.flags, MessageId::new);
+    let target_id = uuid::Uuid::now_v7().to_string();
+    let forked = remap_fork_history(&target_id, &source.payloads, &source.flags, MessageId::new)?;
     // 新会话状态只发布有效集合：已排除正文随复制进目标存储（完整 canonical 历史），
     // 但不回到内存执行上下文。
     let published = forked.active_payloads();
-    let target_id = uuid::Uuid::now_v7().to_string();
     resources
         .save_fork(&ForkSnapshot {
             target: NewSession {

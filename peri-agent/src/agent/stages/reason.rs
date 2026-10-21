@@ -107,6 +107,11 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         &included,
     );
 
+    let exposure = crate::agent::compact_v2::exposure::RequestExposure::capture(
+        &messages_snapshot,
+        &ctx.session.transcript.read(),
+    )?;
+
     let tools_owned: Vec<std::sync::Arc<dyn crate::tools::BaseTool>> = catalog
         .tools
         .values()
@@ -335,6 +340,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         catalog,
         messages_snapshot,
         receipt,
+        exposure,
     })
 }
 

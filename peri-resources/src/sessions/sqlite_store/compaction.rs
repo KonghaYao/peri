@@ -85,6 +85,21 @@ pub(super) async fn commit_compaction_lifecycle_on(
     thread_id: &ThreadId,
     lifecycle: &CompactionChange,
 ) -> Result<()> {
+    for message in &lifecycle.appended_messages {
+        let message_id = message.id().as_uuid().to_string();
+        let content = serde_json::to_string(message)?;
+        sqlx::query(
+            "INSERT INTO messages (message_id, thread_id, role, content)
+                 VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(&message_id)
+        .bind(thread_id.as_str())
+        .bind(role_of(message))
+        .bind(&content)
+        .execute(&mut *tx)
+        .await?;
+    }
+
     for (message_id, flags) in &lifecycle.flag_updates {
         let projection_json = flags
             .projection
@@ -109,21 +124,6 @@ pub(super) async fn commit_compaction_lifecycle_on(
             message_id.as_uuid(),
             thread_id.as_str()
         );
-    }
-
-    for message in &lifecycle.appended_messages {
-        let message_id = message.id().as_uuid().to_string();
-        let content = serde_json::to_string(message)?;
-        sqlx::query(
-            "INSERT INTO messages (message_id, thread_id, role, content)
-                 VALUES (?1, ?2, ?3, ?4)",
-        )
-        .bind(&message_id)
-        .bind(thread_id.as_str())
-        .bind(role_of(message))
-        .bind(&content)
-        .execute(&mut *tx)
-        .await?;
     }
 
     let now = peri_time::now_utc_rfc3339();

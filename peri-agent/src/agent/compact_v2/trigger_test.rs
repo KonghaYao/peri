@@ -2,14 +2,16 @@
 
 use crate::agent::compact_v2::config::CompactConfig;
 use crate::agent::compact_v2::planner::{
-    plan_micro_call_count, reset_plan_micro_calls, ContextPressure, FullEscalationReason,
+    plan_micro_call_count, reset_plan_micro_calls, ArchivePlanningScope, ContextPressure,
+    FullEscalationReason, MicroPlanningFacts,
 };
 use crate::agent::compact_v2::{
-    determine_compact_action, run_compact, CompactAction, CompactOutcome,
+    determine_compact_action, run_compact, run_compact_with_facts, CompactAction, CompactOutcome,
 };
 use crate::agent::events::CompactStrategy;
 use crate::messages::{BaseMessage, MessageContent};
 use crate::session::test_resources::mock::MockSessionResources;
+use crate::session::test_resources::TestSession;
 use crate::session::transcript::MessageTranscript;
 use crate::thread::ThreadMeta;
 use peri_model::{
@@ -33,11 +35,39 @@ fn make_ai_with_tool(text: &str, tool_name: &str, tool_id: &str) -> BaseMessage 
     )
 }
 
-fn make_tool_result(tool_call_id: &str, _text: &str) -> BaseMessage {
-    BaseMessage::tool_result(
-        tool_call_id.to_string(),
-        MessageContent::text("x".repeat(501)),
-    )
+fn make_tool_result(tool_call_id: &str, text: &str) -> BaseMessage {
+    // Even the short fixture outputs carry enough body to pay the real archive receipt cost.
+    let body = format!(
+        "{text}{}",
+        "x".repeat(8_000usize.saturating_sub(text.len()))
+    );
+    BaseMessage::tool_result(tool_call_id.to_string(), MessageContent::text(body))
+}
+
+fn exposed_facts(transcript: &MessageTranscript, session_id: &str) -> MicroPlanningFacts {
+    let mut facts = MicroPlanningFacts {
+        archive_scope: transcript
+            .entries()
+            .last()
+            .map(|entry| ArchivePlanningScope {
+                thread_id: session_id.into(),
+                committed_tail: entry.id(),
+            }),
+        ..Default::default()
+    };
+    for entry in transcript.entries().iter().skip(transcript.ancestor_len()) {
+        facts.exposed_message_ids.insert(entry.id());
+        if let Some(message) = entry.as_message() {
+            for call in message.tool_calls() {
+                facts.closed_call_ids.insert(call.id.clone());
+                facts.tool_retention.insert(
+                    call.name.to_lowercase(),
+                    crate::tools::ContextRetention::Recomputable,
+                );
+            }
+        }
+    }
+    facts
 }
 
 struct MockSummaryModel;
@@ -82,7 +112,9 @@ fn pressure_from_budget(budget_pct: f64) -> ContextPressure {
     ContextPressure {
         estimated_tokens: (budget_pct * context_window as f64) as u64,
         context_window,
-        output_reserve: 8000,
+        // High-pressure fixtures reserve a large next response, making Micro
+        // savings insufficient for the requested Full-escalation branch.
+        output_reserve: if budget_pct >= 0.95 { 40_000 } else { 8_000 },
         predicted_tool_growth: 0,
         safety_buffer: 5000,
         cache_hit_rate: 0.0,
@@ -133,7 +165,9 @@ fn test_determine_compact_action_smart_enabled() {
 #[tokio::test]
 async fn test_micro_effective_no_full_overlay() {
     // budget = 0.80 → 75% < 80% < 95% → Micro 有效 → 不叠加 Full
-    let mut t = MessageTranscript::new();
+    let bound = TestSession::open().await;
+    let mut t =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
     for i in 0..8 {
         t.append(make_human(&format!("q {}", i)));
         t.append(make_ai_with_tool("", "Bash", &format!("c_{}", i)));
@@ -144,7 +178,8 @@ async fn test_micro_effective_no_full_overlay() {
     let mut failures = 0u32;
     let pressure = pressure_from_budget(0.80);
     reset_plan_micro_calls();
-    let result = run_compact(
+    let facts = exposed_facts(&t, &bound.thread_id);
+    let result = run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -153,6 +188,9 @@ async fn test_micro_effective_no_full_overlay() {
         &mut failures,
         "/tmp",
         None,
+        &crate::session::async_result_mailbox::ProtectedResults::default(),
+        &facts,
+        &crate::agent::compact_v2::ProviderCapabilities::openai(),
     )
     .await;
     assert_eq!(result.strategy, CompactStrategy::Micro, "应走 Micro");
@@ -165,7 +203,9 @@ async fn test_micro_effective_no_full_overlay() {
 async fn test_micro_invalid_upgrades_to_full() {
     // 仅 3 轮 + stale_steps=1 → 回收不足 + budget=0.80 ≥ 0.95? 否 → Micro 应用（部分收益）
     // 此测试改为：验证低 budget 时 Micro 应用而不是升级
-    let mut t = MessageTranscript::new();
+    let bound = TestSession::open().await;
+    let mut t =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
     for i in 0..3 {
         t.append(make_human(&format!("q {}", i)));
         t.append(make_ai_with_tool("", "Bash", &format!("c_{}", i)));
@@ -180,7 +220,8 @@ async fn test_micro_invalid_upgrades_to_full() {
     // budget=0.80 (< 0.95) → Micro 应用（部分收益），不升级 Full
     let pressure = pressure_from_budget(0.80);
     reset_plan_micro_calls();
-    let result = run_compact(
+    let facts = exposed_facts(&t, &bound.thread_id);
+    let result = run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -189,6 +230,9 @@ async fn test_micro_invalid_upgrades_to_full() {
         &mut failures,
         "/tmp",
         None,
+        &crate::session::async_result_mailbox::ProtectedResults::default(),
+        &facts,
+        &crate::agent::compact_v2::ProviderCapabilities::openai(),
     )
     .await;
     // budget=0.80 < threshold=0.95 → 走 "不足但未达 Full 阈值" 路径 → 应用 Micro
@@ -210,7 +254,9 @@ async fn test_micro_invalid_upgrades_to_full() {
 #[tokio::test]
 async fn test_micro_effective_full_overlay() {
     // budget = 0.98 → ≥ 95% → dry-run 估算 → token saving 不足 + budget 高位 → 跳过 Micro → 直接 Full
-    let mut t = MessageTranscript::new();
+    let bound = TestSession::open().await;
+    let mut t =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
     for i in 0..8 {
         t.append(make_human(&format!("q {}", i)));
         t.append(make_ai_with_tool("", "Bash", &format!("c_{}", i)));
@@ -222,7 +268,8 @@ async fn test_micro_effective_full_overlay() {
     // budget=0.98 (196000 tokens) → 远高于 threshold → 直接 Full（无 LLM 降级）
     let pressure = pressure_from_budget(0.98);
     reset_plan_micro_calls();
-    let result = run_compact(
+    let facts = exposed_facts(&t, &bound.thread_id);
+    let result = run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -231,6 +278,9 @@ async fn test_micro_effective_full_overlay() {
         &mut failures,
         "/tmp",
         None,
+        &crate::session::async_result_mailbox::ProtectedResults::default(),
+        &facts,
+        &crate::agent::compact_v2::ProviderCapabilities::openai(),
     )
     .await;
     // Full 无 LLM 失败，但已应用的 Micro 必须仍是有效策略视图。
@@ -249,12 +299,9 @@ async fn test_micro_effective_full_overlay() {
 
 #[tokio::test]
 async fn test_micro_then_full_success_does_not_double_count_affected_messages() {
-    let store = MockSessionResources::new();
-    let thread_id = store
-        .create_thread(ThreadMeta::new_at("/tmp", peri_time::now_wall()))
-        .await
-        .expect("创建 thread 失败");
-    let mut t = MessageTranscript::new().with_persistence(store, thread_id);
+    let bound = TestSession::open().await;
+    let mut t =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
     for i in 0..8 {
         t.append(make_human(&format!("q {}", i)));
         t.append(make_ai_with_tool("", "Bash", &format!("c_{}", i)));
@@ -263,7 +310,8 @@ async fn test_micro_then_full_success_does_not_double_count_affected_messages() 
     let expected_full_transitions = t.visible_messages().len();
     let mut failures = 0u32;
 
-    let result = run_compact(
+    let facts = exposed_facts(&t, &bound.thread_id);
+    let result = run_compact_with_facts(
         &mut t,
         Some(&MockSummaryModel),
         &CompactConfig::default(),
@@ -272,6 +320,9 @@ async fn test_micro_then_full_success_does_not_double_count_affected_messages() 
         &mut failures,
         "/tmp",
         None,
+        &crate::session::async_result_mailbox::ProtectedResults::default(),
+        &facts,
+        &crate::agent::compact_v2::ProviderCapabilities::openai(),
     )
     .await;
 
@@ -388,7 +439,9 @@ async fn test_force_triggers_full_directly() {
 #[tokio::test]
 async fn test_full_without_llm_fails_no_panic() {
     // Full Compact 无 LLM 时优雅降级，不 panic
-    let mut t = MessageTranscript::new();
+    let bound = TestSession::open().await;
+    let mut t =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
     for i in 0..8 {
         t.append(make_human(&format!("q {}", i)));
         t.append(make_ai_with_tool("", "Bash", &format!("c_{}", i)));
@@ -399,7 +452,8 @@ async fn test_full_without_llm_fails_no_panic() {
     let mut failures = 0u32;
     // budget=0.80 → Micro 执行，不升级 Full（因为 budget < threshold）
     let pressure = pressure_from_budget(0.80);
-    let result = run_compact(
+    let facts = exposed_facts(&t, &bound.thread_id);
+    let result = run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -408,6 +462,9 @@ async fn test_full_without_llm_fails_no_panic() {
         &mut failures,
         "/tmp",
         None,
+        &crate::session::async_result_mailbox::ProtectedResults::default(),
+        &facts,
+        &crate::agent::compact_v2::ProviderCapabilities::openai(),
     )
     .await;
     // budget=0.80 → Micro → 满足 target → 只走 Micro
@@ -422,7 +479,9 @@ async fn test_full_without_llm_fails_no_panic() {
 #[tokio::test]
 async fn test_micro_applied_then_full_failure_is_not_reported_as_full_completion() {
     // 高上下文压力下，Micro 先应用；随后无 LLM 的 Full 必然失败。
-    let mut t = MessageTranscript::new();
+    let bound = TestSession::open().await;
+    let mut t =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
     let long_output = "x".repeat(2_000);
     for i in 0..8 {
         t.append(make_human(&format!("q {}", i)));
@@ -436,7 +495,8 @@ async fn test_micro_applied_then_full_failure_is_not_reported_as_full_completion
     };
     let mut failures = 0u32;
     let pressure = pressure_from_budget(0.98);
-    let result = run_compact(
+    let facts = exposed_facts(&t, &bound.thread_id);
+    let result = run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -445,6 +505,9 @@ async fn test_micro_applied_then_full_failure_is_not_reported_as_full_completion
         &mut failures,
         "/tmp",
         None,
+        &crate::session::async_result_mailbox::ProtectedResults::default(),
+        &facts,
+        &crate::agent::compact_v2::ProviderCapabilities::openai(),
     )
     .await;
 
@@ -479,7 +542,9 @@ async fn test_micro_applied_then_full_failure_is_not_reported_as_full_completion
 async fn test_estimated_tokens_saved_reflected_in_result() {
     // 有效 Micro Compact 的 estimated_tokens_saved 应 > 0
     // 与 planner_test 对齐：使用 "x".repeat(2000) 保证 token 估算 > 0
-    let mut t = MessageTranscript::new();
+    let bound = TestSession::open().await;
+    let mut t =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
     let long_output = "x".repeat(2000);
     for i in 0..10 {
         t.append(make_human(&format!("question {}", i)));
@@ -497,7 +562,8 @@ async fn test_estimated_tokens_saved_reflected_in_result() {
     };
     let mut failures = 0u32;
     let pressure = pressure_from_budget(0.80);
-    let result = run_compact(
+    let facts = exposed_facts(&t, &bound.thread_id);
+    let result = run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -506,6 +572,9 @@ async fn test_estimated_tokens_saved_reflected_in_result() {
         &mut failures,
         "/tmp",
         None,
+        &crate::session::async_result_mailbox::ProtectedResults::default(),
+        &facts,
+        &crate::agent::compact_v2::ProviderCapabilities::openai(),
     )
     .await;
 
@@ -530,7 +599,9 @@ async fn test_estimated_tokens_saved_increases_with_more_rounds() {
     // 更多轮次应产生更大的 token 节省估算
     let long_output = "x".repeat(2000);
     async fn make_and_compact(rounds: usize, long_output: &str) -> u64 {
-        let mut t = MessageTranscript::new();
+        let bound = TestSession::open().await;
+        let mut t =
+            MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
         for i in 0..rounds {
             t.append(make_human(&format!("q {}", i)));
             t.append(make_ai_with_tool(
@@ -546,7 +617,8 @@ async fn test_estimated_tokens_saved_increases_with_more_rounds() {
         };
         let mut failures = 0u32;
         let pressure = pressure_from_budget(0.80);
-        run_compact(
+        let facts = exposed_facts(&t, &bound.thread_id);
+        run_compact_with_facts(
             &mut t,
             None,
             &config,
@@ -555,6 +627,9 @@ async fn test_estimated_tokens_saved_increases_with_more_rounds() {
             &mut failures,
             "/tmp",
             None,
+            &crate::session::async_result_mailbox::ProtectedResults::default(),
+            &facts,
+            &crate::agent::compact_v2::ProviderCapabilities::openai(),
         )
         .await
         .estimated_tokens_saved
@@ -573,7 +648,9 @@ async fn test_estimated_tokens_saved_increases_with_more_rounds() {
 #[tokio::test]
 async fn test_run_compact_smart_applied_then_full_failure_preserves_effects() {
     // 高压力下 Smart 已先应用；无 LLM 的 Full 随后失败也不得抹去该事实。
-    let mut t = MessageTranscript::new();
+    let bound = TestSession::open().await;
+    let mut t =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
     let long_output = "x".repeat(2_000);
     for i in 0..8 {
         t.append(make_human(&format!("q {}", i)));
@@ -588,7 +665,8 @@ async fn test_run_compact_smart_applied_then_full_failure_preserves_effects() {
     };
     let mut failures = 0u32;
     reset_plan_micro_calls();
-    let result = run_compact(
+    let facts = exposed_facts(&t, &bound.thread_id);
+    let result = run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -597,6 +675,9 @@ async fn test_run_compact_smart_applied_then_full_failure_preserves_effects() {
         &mut failures,
         "/tmp",
         None,
+        &crate::session::async_result_mailbox::ProtectedResults::default(),
+        &facts,
+        &crate::agent::compact_v2::ProviderCapabilities::openai(),
     )
     .await;
 
@@ -635,16 +716,9 @@ async fn test_run_compact_smart_applied_then_full_failure_preserves_effects() {
 async fn test_smart_then_full_success_aggregates_metrics() {
     // Full compact 现在需要 persistence（commit_compaction_lifecycle 要求 store）。
     // 使用临时 SQLite store 满足此约束。
-    let store = MockSessionResources::new();
-    let thread_id = store
-        .create_thread(ThreadMeta::new_at(
-            "/tmp".to_string(),
-            peri_time::now_wall(),
-        ))
-        .await
-        .expect("创建 thread 失败");
-
-    let mut t = MessageTranscript::new().with_persistence(store.clone(), thread_id);
+    let bound = TestSession::open().await;
+    let mut t =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
     let long_output = "x".repeat(2_000);
     for i in 0..8 {
         t.append(make_human(&format!("q {}", i)));
@@ -658,7 +732,8 @@ async fn test_smart_then_full_success_aggregates_metrics() {
         ..Default::default()
     };
     let mut failures = 0u32;
-    let result = run_compact(
+    let facts = exposed_facts(&t, &bound.thread_id);
+    let result = run_compact_with_facts(
         &mut t,
         Some(&MockSummaryModel),
         &config,
@@ -667,6 +742,9 @@ async fn test_smart_then_full_success_aggregates_metrics() {
         &mut failures,
         "/tmp",
         None,
+        &crate::session::async_result_mailbox::ProtectedResults::default(),
+        &facts,
+        &crate::agent::compact_v2::ProviderCapabilities::openai(),
     )
     .await;
 
@@ -732,7 +810,9 @@ async fn test_run_compact_failure_limit_returns_explicit_full_failure() {
 
 #[tokio::test]
 async fn test_run_compact_micro_shadow_mode_returns_shadowed_without_changes() {
-    let mut t = MessageTranscript::new();
+    let bound = TestSession::open().await;
+    let mut t =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
     let long_output = "x".repeat(2_000);
     for i in 0..8 {
         t.append(make_human(&format!("q {}", i)));
@@ -746,7 +826,8 @@ async fn test_run_compact_micro_shadow_mode_returns_shadowed_without_changes() {
     };
     let mut failures = 0u32;
     reset_plan_micro_calls();
-    let result = run_compact(
+    let facts = exposed_facts(&t, &bound.thread_id);
+    let result = run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -755,6 +836,9 @@ async fn test_run_compact_micro_shadow_mode_returns_shadowed_without_changes() {
         &mut failures,
         "/tmp",
         None,
+        &crate::session::async_result_mailbox::ProtectedResults::default(),
+        &facts,
+        &crate::agent::compact_v2::ProviderCapabilities::openai(),
     )
     .await;
 
@@ -775,7 +859,9 @@ async fn test_run_compact_micro_shadow_mode_returns_shadowed_without_changes() {
 
 #[tokio::test]
 async fn test_run_compact_smart_shadow_mode_returns_shadowed_without_changes() {
-    let mut t = MessageTranscript::new();
+    let bound = TestSession::open().await;
+    let mut t =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
     let long_output = "x".repeat(2_000);
     for i in 0..8 {
         t.append(make_human(&format!("q {}", i)));
@@ -790,7 +876,8 @@ async fn test_run_compact_smart_shadow_mode_returns_shadowed_without_changes() {
     };
     let mut failures = 0u32;
     reset_plan_micro_calls();
-    let result = run_compact(
+    let facts = exposed_facts(&t, &bound.thread_id);
+    let result = run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -799,6 +886,9 @@ async fn test_run_compact_smart_shadow_mode_returns_shadowed_without_changes() {
         &mut failures,
         "/tmp",
         None,
+        &crate::session::async_result_mailbox::ProtectedResults::default(),
+        &facts,
+        &crate::agent::compact_v2::ProviderCapabilities::openai(),
     )
     .await;
 
@@ -821,9 +911,10 @@ async fn test_run_compact_smart_shadow_mode_returns_shadowed_without_changes() {
 /// 只走 Micro、不叠加 Full，且计划只规划一次。
 #[tokio::test]
 async fn test_micro_satisfied_reclaim_applies_once_from_dry_run_plan() {
-    let mut t = MessageTranscript::new();
-    // 本用例的 save 量必须真正超过 reclaim_target，故不能复用固定 501 字符的
-    // make_tool_result 辅助（它忽略传入文本）。
+    let bound = TestSession::open().await;
+    let mut t =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
+    // 本用例的 save 量必须真正超过 reclaim_target，因此显式提供更大的输出。
     let long_output = "x".repeat(20_000);
     for i in 0..8 {
         t.append(make_human(&format!("q {}", i)));
@@ -841,7 +932,8 @@ async fn test_micro_satisfied_reclaim_applies_once_from_dry_run_plan() {
     let mut failures = 0u32;
     let pressure = pressure_from_budget(0.80);
     reset_plan_micro_calls();
-    let result = run_compact(
+    let facts = exposed_facts(&t, &bound.thread_id);
+    let result = run_compact_with_facts(
         &mut t,
         None,
         &config,
@@ -850,6 +942,9 @@ async fn test_micro_satisfied_reclaim_applies_once_from_dry_run_plan() {
         &mut failures,
         "/tmp",
         None,
+        &crate::session::async_result_mailbox::ProtectedResults::default(),
+        &facts,
+        &crate::agent::compact_v2::ProviderCapabilities::openai(),
     )
     .await;
 

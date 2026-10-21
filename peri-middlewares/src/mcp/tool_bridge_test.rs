@@ -3,9 +3,7 @@ use crate::mcp::client::ClientStatus;
 use rmcp::handler::server::ServerHandler;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-#[path = "tool_bridge_invocation_fixture_test.rs"]
-mod current_invocation_fixture;
-use current_invocation_fixture::CurrentInvocationFixture;
+use crate::mcp::current_invocation_fixture::CurrentInvocationFixture;
 
 fn make_tool(name: &str, description: Option<&str>) -> Tool {
     let json = serde_json::json!({

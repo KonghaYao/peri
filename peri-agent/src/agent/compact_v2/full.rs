@@ -129,7 +129,27 @@ pub(super) async fn full_compact_inner_with_protected(
     // 追加的摘要 id 同样在提交前分配：同一批 flags 里每条被归档条目都指向它，
     // 追加时必须恰好用这个 id（见下方 `build_summary_message`）。
     let summary_id = MessageId::new();
-    let flag_updates: Vec<_> = transcript
+    let mut archive_receipt_budget_tokens = None;
+    let mut archive_roots = Vec::<peri_acp_types::context_archive::ArchiveRoot>::new();
+    for entry in transcript.entries() {
+        if let Some(directive) = transcript.projection_ref(entry.id()) {
+            if directive.archive_receipt_budget_tokens.is_some() {
+                archive_receipt_budget_tokens = directive.archive_receipt_budget_tokens;
+            }
+            for root in &directive.archive_roots {
+                archive_roots.push(root.clone());
+            }
+        }
+    }
+    let archive_roots = peri_acp_types::context_archive::coalesce_archive_roots(
+        archive_roots,
+        &transcript
+            .entries()
+            .iter()
+            .map(|entry| entry.id())
+            .collect::<Vec<_>>(),
+    );
+    let mut flag_updates: Vec<_> = transcript
         .entries()
         .iter()
         .skip(transcript.ancestor_len())
@@ -147,6 +167,13 @@ pub(super) async fn full_compact_inner_with_protected(
                         policy_version: PROJECTION_POLICY_VERSION,
                         entries: Vec::new(),
                         superseded_by: Some(summary_id),
+                        archive_catalog: transcript
+                            .projection_ref(entry.id())
+                            .and_then(|old| old.archive_catalog.clone()),
+                        archive_group: transcript
+                            .projection_ref(entry.id())
+                            .and_then(|old| old.archive_group.clone()),
+                        ..Default::default()
                     }),
                     ..Default::default()
                 },
@@ -199,6 +226,29 @@ pub(super) async fn full_compact_inner_with_protected(
         "No conversation history to compact.".to_owned()
     };
 
+    if !archive_roots.is_empty() {
+        flag_updates.push((
+            summary_id,
+            MessageFlags {
+                projection: Some(MessageProjectionDirective {
+                    policy_version: PROJECTION_POLICY_VERSION,
+                    archive_roots,
+                    archive_receipt_budget_tokens,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ));
+    }
+    // Retained catalogs gain superseded_by, and merged roots share one summary owner.
+    // Both can grow beyond the bounded reader's budget despite legal source metadata.
+    for (_, flags) in &flag_updates {
+        if let Some(directive) = &flags.projection {
+            peri_acp_types::context_archive::validate_projection_metadata(directive).map_err(
+                |error| anyhow::anyhow!("Full archive metadata cannot be read: {error}"),
+            )?;
+        }
+    }
     transcript
         .commit_compaction_lifecycle(CompactionChange {
             flag_updates,
@@ -546,6 +596,10 @@ pub use peri_acp_types::compact::{extract_file_info, extract_skill_names};
 #[cfg(test)]
 #[path = "full_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "full_protected_result_test.rs"]
+mod protected_result_tests;
 
 #[cfg(test)]
 #[path = "full_report_test.rs"]

@@ -24,6 +24,9 @@ use std::sync::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[path = "compact_failure_adversarial_test/archive_tool.rs"]
+mod archive_tool;
+
 struct BoundSession {
     resources: Arc<dyn SessionResources>,
     thread_id: String,
@@ -292,7 +295,7 @@ async fn make_case(
                         serde_json::json!({"command":"fixed command"}),
                     )],
                 ));
-                guard.append(BaseMessage::tool_result(call, "output ".repeat(100)));
+                guard.append(BaseMessage::tool_result(call, "output ".repeat(400)));
                 guard.append(BaseMessage::human(format!("continue {index}")));
             }
         }
@@ -309,11 +312,19 @@ async fn make_case(
     let (bus, handles) = EventBus::new(Default::default());
     let ctx = StageContext::builder(turn, session.transcript(), session.queue().clone())
         .with_llm(reason.clone())
+        .with_tools(archive_tool::tools())
         .with_compact_llm(summary.clone())
         .with_context_budget(ContextBudget::new(100_000))
         .with_compact_config(CompactConfig::default())
         .with_event_bus(Arc::new(bus))
         .build();
+    if micro {
+        // Archive eligibility comes from an actual successful Reason/Act persistence barrier.
+        archive_tool::expose_history(&ctx).await;
+        assert_eq!(reason.requests.lock().len(), 1);
+        assert_eq!(summary.calls.load(Ordering::SeqCst), 0);
+        reason.requests.lock().clear();
+    }
     ctx.compact.token_tracker.write().accumulate(&TokenUsage {
         input_tokens: 109_000,
         output_tokens: 0,
@@ -618,8 +629,8 @@ async fn test_micro_persists_when_full_empty_attempts_exhaust() {
     );
     assert_eq!(
         snapshot.payloads.len(),
-        26,
-        "原始 task + 8 轮 + 新输入必须完整保存"
+        27,
+        "原始 task + 8 步 + 已提交的消费响应 + 新输入必须完整保存"
     );
 }
 
@@ -649,7 +660,7 @@ async fn test_cancel_after_micro_preserves_projection_without_reason() {
         snapshot.flags.values().all(|flags| !flags.excluded),
         "空摘要不得 excluded"
     );
-    assert_eq!(snapshot.payloads.len(), 26);
+    assert_eq!(snapshot.payloads.len(), 27);
     assert_eq!(
         std::iter::from_fn(|| handles.try_observe())
             .filter(|event| matches!(
@@ -758,7 +769,7 @@ async fn test_cancel_on_provider_failure_wins_after_micro_commit() {
         .load_session_snapshot(&bound.thread_id)
         .await
         .unwrap();
-    assert_eq!(snapshot.payloads.len(), 26);
+    assert_eq!(snapshot.payloads.len(), 27);
     assert!(snapshot
         .flags
         .values()

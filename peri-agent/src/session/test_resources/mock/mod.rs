@@ -52,6 +52,7 @@ impl ResumeLoadGate {
 #[derive(Default)]
 struct Injection {
     fail_compaction: bool,
+    uncertain_compaction: bool,
     append_calls: usize,
     compaction_calls: usize,
     rewind_calls: usize,
@@ -134,6 +135,7 @@ pub(crate) struct MockSessionResources {
     pub(crate) inherited_load_gate: Mutex<Option<ResumeLoadGate>>,
     pub(crate) flags_load_gate: Mutex<Option<ResumeLoadGate>>,
     pub(crate) active_write_gate: Mutex<Option<ResumeLoadGate>>,
+    pub(crate) archive_probe_gate: Mutex<Option<ResumeLoadGate>>,
     /// 下一次 canonical reminder 提交的阶段门：进入后等待用例放行。
     reminder_append_gate: Mutex<
         Option<(
@@ -172,6 +174,7 @@ impl MockSessionResources {
             inherited_load_gate: Mutex::new(None),
             flags_load_gate: Mutex::new(None),
             active_write_gate: Mutex::new(None),
+            archive_probe_gate: Mutex::new(None),
             reminder_append_gate: Mutex::new(None),
             claimed: Arc::new(AtomicBool::new(false)),
             fail_snapshot_at: AtomicUsize::new(0),

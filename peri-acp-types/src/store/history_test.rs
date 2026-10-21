@@ -47,6 +47,7 @@ fn directive_referencing(id: MessageId) -> MessageProjectionDirective {
             action: ProjectionAction::CompactText { max_chars: 10 },
         }],
         superseded_by: None,
+        ..Default::default()
     }
 }
 
@@ -54,7 +55,13 @@ fn directive_referencing(id: MessageId) -> MessageProjectionDirective {
 fn fork_remap_allocates_new_ids_and_keeps_payload_discriminants() {
     let message = PersistedPayload::Message(BaseMessage::human("hello"));
     let source_payloads = vec![message.clone(), reminder_payload()];
-    let forked = remap_fork_history(&source_payloads, &HashMap::new(), deterministic_ids());
+    let forked = remap_fork_history(
+        &"fork-target".into(),
+        &source_payloads,
+        &HashMap::new(),
+        deterministic_ids(),
+    )
+    .unwrap();
 
     assert_eq!(forked.payloads.len(), 2);
     assert!(matches!(forked.payloads[0], PersistedPayload::Message(_)));
@@ -95,7 +102,13 @@ fn fork_remap_rewrites_projection_references_and_drops_foreign_flags() {
     let payloads_before = payload_ids(&source_payloads);
     let flags_before = source_flags.clone();
 
-    let forked = remap_fork_history(&source_payloads, &source_flags, deterministic_ids());
+    let forked = remap_fork_history(
+        &"fork-target".into(),
+        &source_payloads,
+        &source_flags,
+        deterministic_ids(),
+    )
+    .unwrap();
 
     assert_eq!(forked.flags.len(), 1);
     let forked_id = forked.payloads[0].id();
@@ -125,11 +138,18 @@ fn fork_remap_rewrites_superseded_by_to_the_forked_summary() {
                 policy_version: 1,
                 entries: Vec::new(),
                 superseded_by: Some(summary.id()),
+                ..Default::default()
             }),
         },
     );
 
-    let forked = remap_fork_history(&source_payloads, &source_flags, deterministic_ids());
+    let forked = remap_fork_history(
+        &"fork-target".into(),
+        &source_payloads,
+        &source_flags,
+        deterministic_ids(),
+    )
+    .unwrap();
 
     let flags = forked
         .flags
@@ -151,7 +171,13 @@ fn fork_remap_rewrites_superseded_by_to_the_forked_summary() {
 fn fork_remap_without_source_flags_yields_empty_flags() {
     let source_payloads = vec![PersistedPayload::Message(BaseMessage::human("a"))];
 
-    let forked = remap_fork_history(&source_payloads, &HashMap::new(), deterministic_ids());
+    let forked = remap_fork_history(
+        &"fork-target".into(),
+        &source_payloads,
+        &HashMap::new(),
+        deterministic_ids(),
+    )
+    .unwrap();
 
     assert!(forked.flags.is_empty());
     assert_eq!(forked.payloads.len(), 1);
@@ -371,6 +397,7 @@ fn superseded_entry(index: u128, summary_index: u128) -> (MessageId, MessageFlag
         policy_version: 1,
         entries: Vec::new(),
         superseded_by: Some(entry_id(summary_index)),
+        ..Default::default()
     });
     (id, flags, is_system)
 }

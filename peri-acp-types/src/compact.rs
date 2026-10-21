@@ -28,6 +28,8 @@ pub enum FullEscalationReason {
 pub enum CompactOutcome {
     /// 本轮未应用 Compact。
     Skipped,
+    /// Micro 规划或提交失败；未发布新投影。
+    MicroFailed,
     /// 已应用 Micro Compact。
     MicroApplied,
     /// 已应用 Smart Compact。
@@ -122,24 +124,11 @@ fn default_threshold_075() -> f64 {
     0.75
 }
 fn default_stale_steps() -> usize {
-    3
+    2
 }
-/// Micro Compact 黑名单默认值——这些工具的消息不被截断。
-///
-/// │ 工具             │ 理由                                          │
-/// │──────────────────│───────────────────────────────────────────────│
-/// │ Agent            │ 子任务描述（prompt）等结构化参数不可恢复，     │
-/// │                  │ 丢失=子 agent 调度失败，必填字段缺失           │
-/// │ AskUserQuestion  │ 用户答案不可恢复，丢失=对话断裂               │
-/// │ goal             │ 长期目标状态，丢失=agent 漂移方向             │
-/// │ TodoWrite        │ 任务列表结构，丢失=agent 工作记忆重置         │
+/// 显式配置只可增加保护；语义策略来自工具目录，不再按名字永久豁免。
 fn default_excluded_tools() -> Vec<String> {
-    vec![
-        "Agent".to_string(),
-        "AskUserQuestion".to_string(),
-        "goal".to_string(),
-        "TodoWrite".to_string(),
-    ]
+    Vec::new()
 }
 fn default_summary_max_tokens() -> u32 {
     16000
@@ -213,8 +202,7 @@ pub struct CompactConfig {
     pub micro_compact_threshold: f64,
     #[serde(default = "default_stale_steps")]
     pub micro_compact_stale_steps: usize,
-    /// 黑名单工具——这些工具的消息（输入+输出）不参与 Micro 截断。
-    /// 默认保留 AskUserQuestion、goal、TodoWrite（对话/任务状态不可恢复），其余工具全部截断。
+    /// 显式附加保护工具名；默认空，工具目录中的语义保护仍优先。
     #[serde(default = "default_excluded_tools")]
     pub micro_excluded_tools: Vec<String>,
     /// Full Compact 摘要的**长度目标上限**（不是 provider 输出上限的覆写）。
@@ -272,8 +260,8 @@ pub struct CompactConfig {
 
     // ── Retention Metadata ──────────────────────────────────────────────
     /// 工具 retention 映射（工具名小写 → retention 分类）
-    /// 优先于 micro_excluded_tools，为空时使用后者。
-    /// planner 使用此映射而非直接访问 BaseTool 实例。
+    /// 只可增加保护，不可覆盖工具目录中的硬语义保护或授权未知副作用退场。
+    /// planner 从当前工具目录快照获取权威策略，配置不重新定义工具语义。
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub tool_retention_map: HashMap<String, ContextRetention>,
 }

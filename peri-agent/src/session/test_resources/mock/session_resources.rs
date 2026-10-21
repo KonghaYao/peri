@@ -27,6 +27,21 @@ fn unsupported(behavior: &str) -> SessionResourceError {
 
 #[async_trait]
 impl SessionResources for MockSessionResources {
+    async fn read_archive_metadata(
+        &self,
+        _session: &ThreadId,
+        _query: &peri_acp_types::context_archive::ArchiveMetadataQuery,
+    ) -> SessionResourceResult<peri_acp_types::context_archive::ArchiveMetadataPage> {
+        let gate = self.archive_probe_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.wait().await;
+            return Err(unsupported("injected archive probe failure"));
+        }
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
     async fn inspect_availability(
         &self,
         _session: Option<&ThreadId>,
@@ -338,6 +353,11 @@ impl SessionResources for MockSessionResources {
         self.ensure_writable()?;
         let mut injection = self.injection.lock().unwrap();
         injection.compaction_calls += 1;
+        if injection.uncertain_compaction {
+            return Err(SessionResourceError::persistence_uncertain(Some(
+                session_id.clone(),
+            )));
+        }
         if injection.fail_compaction {
             drop(injection);
             return Err(SessionResourceError::new(
@@ -414,12 +434,20 @@ impl SessionResources for MockSessionResources {
             for removed_id in &removed {
                 region.flags.remove(removed_id);
             }
-            // 有效视图重建与边界删除同属一次提交：mock 也一并生效，只清 excluded 位。
-            for cleared_id in &cleared {
-                if let Some(flags) = region.flags.get_mut(cleared_id) {
-                    flags.excluded = false;
-                }
-            }
+            let retained: Vec<_> = region
+                .payloads
+                .iter()
+                .map(|payload| {
+                    (
+                        payload.id(),
+                        region.flags.get(&payload.id()).cloned().unwrap_or_default(),
+                        matches!(payload.as_message(), Some(BaseMessage::System { .. })),
+                    )
+                })
+                .collect();
+            let updates =
+                peri_acp_types::store::history::rewind_projection_updates(&retained, &cleared);
+            peri_acp_types::store::history::apply_flag_updates(&mut region.flags, &updates);
         });
         Ok(RewindOutcome::Applied)
     }

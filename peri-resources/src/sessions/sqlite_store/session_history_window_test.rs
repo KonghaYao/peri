@@ -89,6 +89,7 @@ async fn checkpoint_is_rebuilt_from_the_latest_superseded_by_target() {
         policy_version: 1,
         entries: Vec::new(),
         superseded_by: Some(summary_id),
+        ..Default::default()
     };
     data.apply_compaction(
         &id,

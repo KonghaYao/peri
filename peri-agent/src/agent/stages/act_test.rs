@@ -57,6 +57,7 @@ async fn test_act_no_tool_calls_writes_answer() {
     let ctx = make_context();
     let reasoning = Reasoning::with_answer("thinking", "final answer");
     let input = ActInput {
+        exposure: Default::default(),
         context: ctx.clone(),
         reasoning,
         catalog: ctx.runtime.tool_catalog.snapshot(),
@@ -84,6 +85,7 @@ async fn test_act_with_tool_calls_dispatches() {
     let tool_call = ToolCall::new("call_1", "Read", serde_json::json!({"path": "/tmp"}));
     let reasoning = Reasoning::with_tools("need to read file", vec![tool_call]);
     let input = ActInput {
+        exposure: Default::default(),
         context: ctx.clone(),
         reasoning,
         catalog: ctx.runtime.tool_catalog.snapshot(),
@@ -123,6 +125,7 @@ async fn test_act_after_agent_failure_emits_turn_completed() {
 
     let reasoning = Reasoning::with_answer("thinking", "final answer");
     let result = run_act(ActInput {
+        exposure: Default::default(),
         context: ctx.clone(),
         reasoning,
         catalog: ctx.runtime.tool_catalog.snapshot(),
@@ -157,6 +160,7 @@ async fn test_act_tool_path_cancel_emits_turn_completed() {
     let tool_call = ToolCall::new("call_1", "Read", serde_json::json!({"path": "/tmp"}));
     let reasoning = Reasoning::with_tools("need to read file", vec![tool_call]);
     let result = run_act(ActInput {
+        exposure: Default::default(),
         context: ctx.clone(),
         reasoning,
         catalog: ctx.runtime.tool_catalog.snapshot(),
@@ -258,6 +262,7 @@ async fn async_result_act_commit_covers_requested_result() {
     let (id, receipt) = terminal_result(&ctx.session.async_result_mailbox);
     let reasoning = Reasoning::with_answer("thinking", "final answer");
     run_act(ActInput {
+        exposure: Default::default(),
         context: ctx.clone(),
         reasoning,
         catalog: ctx.runtime.tool_catalog.snapshot(),
@@ -287,6 +292,7 @@ async fn async_result_act_empty_response_keeps_responsibility() {
     let (id, receipt) = terminal_result(&ctx.session.async_result_mailbox);
     let reasoning = Reasoning::with_answer("thinking", "");
     run_act(ActInput {
+        exposure: Default::default(),
         context: ctx.clone(),
         reasoning,
         catalog: ctx.runtime.tool_catalog.snapshot(),
@@ -324,6 +330,7 @@ async fn async_result_act_tool_call_settles_after_pair_commit_or_keeps_on_failur
     let tool_call = ToolCall::new("call_1", "Read", serde_json::json!({"path": "/tmp"}));
     let reasoning = Reasoning::with_tools("need to read file", vec![tool_call]);
     run_act(ActInput {
+        exposure: Default::default(),
         context: ctx.clone(),
         reasoning,
         catalog: ctx.runtime.tool_catalog.snapshot(),
@@ -354,6 +361,7 @@ async fn async_result_act_tool_call_settles_after_pair_commit_or_keeps_on_failur
     let tool_call = ToolCall::new("call_2", "Read", serde_json::json!({"path": "/tmp"}));
     let reasoning = Reasoning::with_tools("need to read file", vec![tool_call]);
     let outcome = run_act(ActInput {
+        exposure: Default::default(),
         context: ctx.clone(),
         reasoning,
         catalog: ctx.runtime.tool_catalog.snapshot(),
@@ -397,6 +405,7 @@ async fn async_result_act_barrier_failure_keeps_blocked() {
 
     let reasoning = Reasoning::with_answer("thinking", "final answer");
     let outcome = run_act(ActInput {
+        exposure: Default::default(),
         context: ctx.clone(),
         reasoning,
         catalog: ctx.runtime.tool_catalog.snapshot(),
@@ -426,4 +435,36 @@ async fn async_result_act_barrier_failure_keeps_blocked() {
         "诊断需指出 barrier 失败：{}",
         diagnostic.summary
     );
+}
+
+#[test]
+fn closure_requires_terminal_evidence_and_no_live_task() {
+    use crate::agent::react::ToolResult;
+    use crate::tools::{ToolExecutionEvidence, ToolExecutionStatus};
+    let call = ToolCall::new("bash-call", "Bash", serde_json::json!({}));
+    let mut result = ToolResult::success("bash-call", "Bash", "Completed successfully");
+    assert!(
+        closed_calls(&[(call.clone(), result.clone())]).is_empty(),
+        "text and retention cannot prove completion"
+    );
+    for status in [
+        ToolExecutionStatus::Running,
+        ToolExecutionStatus::RunningAfterTimeout,
+        ToolExecutionStatus::Unknown,
+        ToolExecutionStatus::TimedOut,
+    ] {
+        result.execution = Some(ToolExecutionEvidence {
+            status,
+            task_id: None,
+            exit_code: None,
+            output_ref: None,
+            output_truncated: false,
+        });
+        assert!(closed_calls(&[(call.clone(), result.clone())]).is_empty());
+    }
+    result.execution.as_mut().unwrap().status = ToolExecutionStatus::Completed;
+    result.execution.as_mut().unwrap().task_id = Some("live-task".into());
+    assert!(closed_calls(&[(call.clone(), result.clone())]).is_empty());
+    result.execution.as_mut().unwrap().task_id = None;
+    assert_eq!(closed_calls(&[(call, result)]), vec!["bash-call"]);
 }

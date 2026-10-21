@@ -434,6 +434,11 @@ impl SessionResources for SessionResourcesImpl {
         Ok(snapshot)
     }
 
+    async fn load_fork_snapshot(&self, id: &ThreadId) -> SessionResourceResult<SessionSnapshot> {
+        let snapshot = self.load_session_snapshot(id).await?;
+        super::archive_fork::expand(self, id, snapshot).await
+    }
+
     async fn load_active_snapshot(
         &self,
         id: &ThreadId,
@@ -570,6 +575,33 @@ impl SessionResources for SessionResourcesImpl {
         id: &ThreadId,
     ) -> SessionResourceResult<HashMap<MessageId, u64>> {
         self.gate.data().load_entry_positions(id).await
+    }
+
+    async fn inherited_archive_root(
+        &self,
+        id: &ThreadId,
+        source: &ThreadId,
+        anchor: MessageId,
+    ) -> SessionResourceResult<peri_acp_types::context_archive::ArchiveRoot> {
+        self.gate
+            .data()
+            .inherited_archive_root(id, source, anchor)
+            .await
+    }
+
+    async fn read_archive_metadata(
+        &self,
+        id: &ThreadId,
+        query: &peri_acp_types::context_archive::ArchiveMetadataQuery,
+    ) -> SessionResourceResult<peri_acp_types::context_archive::ArchiveMetadataPage> {
+        self.gate.data().read_archive_metadata(id, query).await
+    }
+    async fn read_archive_chunk(
+        &self,
+        id: &ThreadId,
+        query: &peri_acp_types::context_archive::ArchiveChunkQuery,
+    ) -> SessionResourceResult<peri_acp_types::context_archive::ArchiveChunk> {
+        self.gate.data().read_archive_chunk(id, query).await
     }
 
     async fn load_message_flags(

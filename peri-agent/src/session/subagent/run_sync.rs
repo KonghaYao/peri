@@ -11,8 +11,8 @@ use peri_acp_types::identity::AgentId;
 use super::factory::ResumeClaim;
 use super::lifecycle::drain_subagent_events;
 use super::types::{
-    ChildHandoffReceipt, ChildRunOutcome, SubagentFailure, SubagentLifecycleStart,
-    SubagentLifecycleStop,
+    ChildHandoffReason, ChildHandoffReceipt, ChildRunOutcome, SubagentFailure,
+    SubagentLifecycleStart, SubagentLifecycleStop,
 };
 use super::util::{extract_last_ai_text, format_handoff_notice};
 use super::v2_bridge::{forward_subagent_start_v1, forward_subagent_stop_v1, V2SubagentContext};
@@ -101,6 +101,13 @@ where
             Err(_) => return Ok(SyncCompletion::Finished(execution.await?)),
         },
     };
+    if receipt.reason == ChildHandoffReason::ExecutionFailed {
+        // RCRA has already failed. Finish its existing lifecycle barriers so
+        // the original typed error reaches the caller; a residual receipt is
+        // not permission to report this execution as merely Pending. This
+        // does not start another settlement window or wait for residual tasks.
+        return Ok(SyncCompletion::Finished(execution.await?));
+    }
     handed_off.store(true, Ordering::Release);
 
     let can_detach = parent_manager.is_some() && task_id.is_some() && on_complete.is_some();

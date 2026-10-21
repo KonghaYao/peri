@@ -115,6 +115,12 @@ async fn test_bash_typed_evidence_marks_promoted_timeout_still_running() {
         )
         .await
         .unwrap();
+    assert_eq!(
+        output.is_error(),
+        Some(true),
+        "structured timeout preserves the recovery failure"
+    );
+    assert!(output.text.contains("Command timed out") && output.text.contains("Do not rerun"));
     let evidence = output.execution.expect("promoted timeout evidence");
     assert_eq!(evidence.status, ToolExecutionStatus::RunningAfterTimeout);
     assert!(evidence.task_id.is_some());
