@@ -341,6 +341,9 @@ impl McpClientPool {
                         .map(|e| e.to_string())
                         .unwrap_or_else(|| "MCP connection did not become ready".into());
                     tracing::error!(server=%name,%error,"MCP control failed");
+                    if self.is_open() && self.get_client(&name).is_none() {
+                        McpClientPool::insert_failed(&self, &name, error.clone());
+                    }
                     return Err(McpControlError::new(-32603, "connection_failed", error));
                 }
             }

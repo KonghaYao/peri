@@ -236,6 +236,13 @@ async fn protected_sources_are_rejected_before_oauth_or_namespace_mutation() {
             .status,
         McpControlStatus::Stopped
     );
+    let stopped = pool
+        .all_server_infos()
+        .into_iter()
+        .find(|info| info.name == "plugin:tools:docs")
+        .unwrap();
+    assert_eq!(stopped.status, ClientStatus::Disconnected);
+    assert_eq!(stopped.status_label, "disconnected");
     pool.set_stdio_available(false).unwrap();
     let registration = McpControlRequest::Register {
         session_id: "s1".into(),
@@ -344,4 +351,48 @@ async fn register_oauth_without_credentials_returns_authorization_without_callba
         .snapshot()
         .tools
         .is_empty());
+}
+
+#[cfg(not(target_os = "emscripten"))]
+#[tokio::test]
+async fn early_registration_failure_is_queryable_and_can_be_stopped() {
+    // Ready configuration with no execution directory fails before a transport
+    // exists. The reserved registration must still expose its failure in list.
+    let pool = Arc::new(McpClientPool::new_empty_with_cache_policy(
+        McpCachePolicy::Disabled,
+    ));
+    *pool.init_status.write() = McpInitStatus::Ready { total: 0 };
+    let registration = McpControlRequest::Register {
+        session_id: "s1".into(),
+        server_name: "docs".into(),
+        config: McpRegistrationConfig::Stdio {
+            command: "must-not-execute".into(),
+            args: vec![],
+            env: HashMap::new(),
+        },
+    };
+    let error = pool.clone().control_mcp(registration).await.unwrap_err();
+    assert_eq!(error.kind, "connection_failed");
+    let failed = pool
+        .all_server_infos()
+        .into_iter()
+        .find(|info| info.name == "docs")
+        .unwrap();
+    assert!(matches!(failed.status, ClientStatus::Failed(_)));
+    assert_eq!(failed.status_label, "failed");
+    assert!(failed.error_summary.is_some());
+    let stopped = pool
+        .clone()
+        .control_mcp(request("stop", "docs"))
+        .await
+        .unwrap();
+    assert_eq!(stopped.status, McpControlStatus::Stopped);
+    let info = pool
+        .all_server_infos()
+        .into_iter()
+        .find(|info| info.name == "docs")
+        .unwrap();
+    assert_eq!(info.status, ClientStatus::Disconnected);
+    assert_eq!(info.status_label, "disconnected");
+    assert!(pool.shutdown().await.is_complete());
 }

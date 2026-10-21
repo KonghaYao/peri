@@ -8,7 +8,7 @@
 
 1. 外部客户端经 ACP 动态注册、重启、关闭 MCP，不要求模型工具调用或 HITL。
 2. TUI MCP 面板本轮提供重启和关闭；不提供动态配置编辑器。
-3. 删除旧 `DynamicMCP` Agent 工具、load/status/unload 协议、动态覆盖层、独立 operation/secret resolver、专属 OAuth 身份及装配。没有兼容入口、别名或双写。
+3. 删除旧 `DynamicMCP` Agent 工具、load/status/unload 协议、动态覆盖层、独立 operation/secret resolver、专属 OAuth 身份及装配。不保留旧工具或控制协议的兼容入口、别名或双写。
 4. 使用当前 session 环境已有 MCP pool 和唯一任务 owner；不再建立另一套 deployment registry。
 5. 运行控制的配置与运行状态不写配置文件、session store 或数据库，不改变表结构；已有 OAuth credential store 的正常凭据保存保持原契约。进程重启和冷加载不会恢复临时注册或关闭状态。
 6. MCP over ACP 的 `mcp/message` 与 Apps 协议继续保持各自边界。

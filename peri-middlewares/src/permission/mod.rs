@@ -151,7 +151,7 @@ fn builtin_tool_effective_name(instance: &str, original_name: &str) -> &'static 
 ///
 /// 与 [`default_requires_approval`] 的判定分支一一对应——段落不再硬编码
 /// 列表（设计 §3.1.2 重复段处理：修改代码无需同步段落，防失同步）。
-/// 数量与顺序固定为 14 项 / 3 条前缀；已迁移为 builtin 一等工具的条目
+/// 清单包括精确工具条目和前缀规则；已迁移为 builtin 一等工具的条目
 /// （web×2 + cron×1 + workspace×4）名为**模型面名字**，经
 /// [`builtin_tool_effective_name`] 从 `peri_acp_types::builtin_mcp` 声明表解析
 /// （A19/IF-G3：模型看到的名字就是 effective name，条目名若留裸名会点名一个
