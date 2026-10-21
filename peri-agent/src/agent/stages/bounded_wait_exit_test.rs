@@ -24,6 +24,15 @@ fn parked_context(
     let store = crate::session::test_resources::mock::MockSessionResources::new();
     *session.transcript().write() = crate::session::MessageTranscript::new()
         .with_persistence(store, "bounded-wait-root".into());
+    parked_context_on(&session, bounded, manager)
+}
+
+/// 复用同一会话（同一 store / transcript）的 loop 上下文；每轮各自新建有界等待。
+fn parked_context_on(
+    session: &std::sync::Arc<crate::session::Session>,
+    bounded: std::sync::Arc<BoundedWait>,
+    manager: std::sync::Arc<crate::agent::async_tasks::TaskManager>,
+) -> StageContext {
     let wait = std::sync::Arc::clone(&bounded);
     let handoff = std::sync::Arc::clone(&bounded);
     let deadline = std::sync::Arc::clone(&bounded);
@@ -124,4 +133,58 @@ async fn test_idle_without_pending_work_does_not_park() {
         "无未结算任务时不得进入有界等待"
     );
     assert!(bounded.deadline().is_none(), "未进入等待时不存在截止窗口");
+}
+
+// T2：同一长任务跨两次用户执行、两轮都到点交接；第二轮不得把交接失败升级成
+// AgentExecutionFailed，原任务归属与状态也不得被这次交接伪造改变。
+#[tokio::test(start_paused = true)]
+async fn test_second_turn_handoff_of_the_same_pending_set_completes() {
+    let manager = std::sync::Arc::new(crate::agent::async_tasks::TaskManager::new());
+    register_never_settling_task(&manager);
+    let session = crate::session::Session::new(
+        Arc::from("/tmp/bounded-wait-exit"),
+        crate::session::FrozenContext::builder().build(),
+        Some("bounded-wait-root".into()),
+    );
+    let store = crate::session::test_resources::mock::MockSessionResources::new();
+    *session.transcript().write() = crate::session::MessageTranscript::new()
+        .with_persistence(store.clone(), "bounded-wait-root".into());
+
+    for turn in 0..2 {
+        let bounded = BoundedWait::new(Duration::from_secs(120));
+        let context = parked_context_on(&session, bounded, std::sync::Arc::clone(&manager));
+        let mut handle = tokio::spawn(run_react_loop(context, 4));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(60), &mut handle)
+                .await
+                .is_err(),
+            "turn {turn}: 界内不得退出"
+        );
+        tokio::time::advance(Duration::from_secs(121)).await;
+        let result = tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("到点必须自行退出")
+            .expect("loop task 不应 panic");
+        assert!(
+            matches!(result, LoopResult::Completed),
+            "turn {turn}: 同一 pending 集合的第二次交接不得让整轮失败，实际 {result:?}"
+        );
+        assert_eq!(
+            TaskManagerPort::active_count(manager.as_ref()),
+            1,
+            "交接不得伪造任务的终态或归属"
+        );
+    }
+
+    let reminders = store
+        .payloads_of(&"bounded-wait-root".to_owned())
+        .into_iter()
+        .filter(|payload| {
+            matches!(
+                payload,
+                peri_acp_types::store::PersistedPayload::SystemReminder { .. }
+            )
+        })
+        .count();
+    assert_eq!(reminders, 1, "同一集合跨轮次只保留一条交接记录");
 }
