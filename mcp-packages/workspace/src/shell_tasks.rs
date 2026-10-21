@@ -717,9 +717,11 @@ impl ShellLaunchFailure {
 }
 
 /// 启动失败：保留结构化分类，供准入者判断进程是否可能已被接受。
+///
+/// `McpError` 较大，装箱以避免 `Result` 的错误分支超过 clippy 阈值。
 struct ShellLaunchError {
     failure: ShellLaunchFailure,
-    error: McpError,
+    error: Box<McpError>,
 }
 
 impl ShellLaunchError {
@@ -730,7 +732,7 @@ impl ShellLaunchError {
     }
 
     fn into_mcp_error(self) -> McpError {
-        self.error
+        *self.error
     }
 }
 
@@ -740,7 +742,7 @@ fn shell_launch_worker_error(error: tokio::task::JoinError) -> ShellLaunchError 
         failure_class = failure.class(),
         "background shell launch worker did not return"
     );
-    let error = McpError::internal_error(failure.message(), None);
+    let error = Box::new(McpError::internal_error(failure.message(), None));
     ShellLaunchError { failure, error }
 }
 
@@ -752,7 +754,7 @@ fn shell_launch_registration_error(
         failure_class = failure.class(),
         "background shell task launch failed before registration"
     );
-    let error = McpError::internal_error(failure.message(), None);
+    let error = Box::new(McpError::internal_error(failure.message(), None));
     ShellLaunchError { failure, error }
 }
 
