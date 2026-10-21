@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "peri-agent-network",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-10-06",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "durable_objects": {
+    "bindings": [{ "name": "NOTIFICATION_CHANNELS", "class_name": "NotificationChannel" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["NotificationChannel"] }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "peri-agent-network",
+      "database_id": "c240bea3-e94d-4042-9d94-76ac737ab552",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    "ENVIRONMENT": "production",
+    "PUBLIC_ORIGIN": "https://peri-agent-network.claude-code-best.workers.dev"
+  },
+  "triggers": {
+    "crons": ["* * * * *"]
+  }
+}

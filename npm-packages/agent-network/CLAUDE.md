@@ -1,0 +1,44 @@
+# Agent Network
+
+## Scope
+
+独立 Bun 包，部署为 Cloudflare Worker：标准 MCP `2026-07-28` 服务，提供身份、好友、房间、消息、Agent 待办与资源订阅。不属于根 Cargo workspace；跨层、事件、工具与安全变更按需读取 `../../docs/standards/index.md`，测试读取 `testing.md`，文档读取 `documentation.md`。
+
+## 边界与数据流
+
+`POST /mcp` → Hono → 官方 MCP TS SDK（modern-only）→ domain → D1。通知链路为 D1 `outbox` → Worker drain（`waitUntil` + Cron）→ PartyServer `NotificationChannel`（`room:{id}` / `inbox:{actor}`）→ Gateway → `notifications/resources/updated`。
+
+D1 是业务状态唯一权威。DO 只广播小型提示，不保存消息历史、不读 D1、不跑模型。`waitUntil` 是低延迟快速路径，可靠性来自已提交 outbox；不能用内存队列替代。
+
+## 稳定不变量
+
+- 只接受 MCP `2026-07-28`，单一 `POST /mcp`；没有协议 session、GET SSE 或旧版回退。非 POST 的 `/mcp` 返回 `405` 与 `Allow: POST`。
+- 每个独立 Agent 会话使用自己的 Bearer token；服务端只保存带域分隔前缀的 SHA-256 摘要。未注册凭据只能调用注册与恢复兑换。
+- 所有幂等写入经 `runIdempotent`：`operations` 取得所有权，业务写入与条件闸门在同一 `db.batch()` 中全有或全无。禁止 `INSERT OR IGNORE` 后无条件继续写。
+- 闸门表只接受 `x = 0`；迁移 `0002_named_guards.sql` 的命名约束是错误分类依据，新增闸门必须同时更新 `GUARD_TABLES`、迁移和错误映射。
+- `pending_count` 只随 inbox 事件在 `inboxHeadStatement` 中变更；同一事务不得再手写增减。
+- 待办以 `attempt` + `claim_id` 校验；每个 Agent 至多一条 claimed（部分唯一索引）。并发 claim、旧 attempt、幂等重放分别映射为 `CLAIM_CONFLICT`、`STALE_ATTEMPT`、同一结果。
+- 普通消息不唤醒 inbox；inbox 提示用于新增待办、领取状态与成员/房间入口变化。房间状态通知 `room:{id}`。
+- 订阅建立前校验 URI 归属与成员资格；成员变化以 `membership` 提示结束订阅流，客户端重建后重新鉴权。
+- 阈值只在 `src/contracts/limits.ts` 维护；正文、分页、订阅与队列限制不得在调用点复制。
+- 日志不得输出 token、凭据摘要或消息正文。
+
+## 路由
+
+- 当前边界、命令、部署与验收：`README.md`。
+- 入口与模块索引：`../../docs/code-index/agent-network.md`。
+- 任务契约与原始计划：`../../spec/issues/2026-10-21-agent-network.md`。
+- 包内入口：`src/worker.ts`、`src/mcp/tools.ts`、`src/mcp/resources.ts`、`src/mcp/subscriptions.ts`、`src/domain/`、`src/storage/transactions/runner.ts`、`src/realtime/outbox.ts`。
+
+## 命令
+
+在本目录执行：
+
+- `bun run db:migrate:local`、`bun run dev`：本地 D1 与 workerd，默认端口 8792。
+- `bun run typecheck`：TypeScript 检查。
+- `bun run test:protocol`：协议逐帧验收，默认本地地址。
+- `bun run test:acceptance`：端到端业务与通知验收。
+- `AGENTNET_URL=https://<origin> bun run test:protocol` / `test:acceptance`：远程验收。
+- `bun run db:migrate:remote`、`bun run deploy`：远程迁移与发布；生产操作不隐含在测试或 build 中。
+
+提交前至少运行 `typecheck`、`test:protocol` 与 `test:acceptance`；改动通知或事务路径时不要只跑协议验收。
