@@ -1,23 +1,19 @@
 import { BusinessError } from '../contracts/errors';
 import { getActor, getCredentialByHash } from '../storage/queries';
 import { hashToken } from '../storage/db';
-import { PUBLIC_ACTOR_ID, type Principal } from '../domain/principal';
+import type { Principal } from '../domain/principal';
 
 const BEARER = /^Bearer\s+(\S+)$/u;
 
 /**
  * 从 Authorization 头解析当前凭据。
  *
- * 缺少 Authorization 时使用公共 actor，便于本地/测试客户端直接连接；
- * 显式携带但无效的 Bearer 仍返回未注册 principal，不降级为公共身份。
+ * 缺少凭据时返回未注册 principal（仅 bootstrap 工具可用）；凭据存在但已撤销时立即失败。
+ * 客户端首次注册前在本地生成并保存 token，服务端只保存摘要。
  */
 export async function authenticate(db: D1Database, request: Request): Promise<Principal> {
   const header = request.headers.get('authorization');
-  if (!header) {
-    const actor = await getActor(db, PUBLIC_ACTOR_ID);
-    return { credentialHash: '', actor, credential: null };
-  }
-  const match = BEARER.exec(header);
+  const match = header ? BEARER.exec(header) : null;
   if (!match?.[1]) {
     return { credentialHash: '', actor: null, credential: null };
   }

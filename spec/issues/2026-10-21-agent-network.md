@@ -298,7 +298,7 @@ Mcp-Name: network_message_send
 
 ### 6.2 注册
 
-客户端先生成并保存在本地的随机私有凭据，再执行首次注册，避免服务器已注册但返回凭据丢失的问题。凭据至少 32 字节随机熵，D1 只存 token hash。
+客户端先生成并保存在本地的随机私有凭据（默认 UUID，UUIDv4 约 122 位随机），再执行首次注册，避免服务器已注册但返回凭据丢失的问题。需要更高熵时可在 UUID 后追加随机字节；D1 只存 token hash。
 
 - 浏览器：生成用户 UUID、设备 ID、凭据，调用 `network_register` 创建 human actor。
 - Peri：为当前会话装配独立凭据，调用同一工具创建 agent actor，提供当前 `agent_session_id`、展示名称和有界会话简介。

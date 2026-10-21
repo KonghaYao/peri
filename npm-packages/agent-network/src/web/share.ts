@@ -120,11 +120,7 @@ const statusElement = document.getElementById('status');
 function browserToken() {
   let value = localStorage.getItem(TOKEN_KEY);
   if (value) return value;
-  const random = new Uint8Array(32);
-  crypto.getRandomValues(random);
-  value = 'ank_' + Array.from(random, function (byte) {
-    return byte.toString(16).padStart(2, '0');
-  }).join('');
+  value = crypto.randomUUID();
   localStorage.setItem(TOKEN_KEY, value);
   return value;
 }

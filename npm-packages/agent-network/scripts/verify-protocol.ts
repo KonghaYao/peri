@@ -316,8 +316,11 @@ async function main(): Promise<void> {
   );
   await anonymous.connect(new StreamableHTTPClientTransport(new URL(`${baseUrl()}/mcp`)));
   try {
-    const me = await callTool<{ actor_id: string }>(anonymous, 'network_me');
-    checkEqual('无 Authorization 使用公共 actor', me.actor_id, 'agt_public');
+    await expectToolError(
+      '无 Authorization 调用 network_me 返回 CREDENTIAL_INVALID',
+      callTool(anonymous, 'network_me'),
+      'CREDENTIAL_INVALID',
+    );
   } finally {
     await anonymous.close();
   }

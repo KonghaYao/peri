@@ -1,8 +1,5 @@
 import type { ActorRow, CredentialRow } from '../storage/rows';
 
-/** 无 Authorization 的请求使用的公共 actor；由迁移 0003_public_actor.sql 创建。 */
-export const PUBLIC_ACTOR_ID = 'agt_public';
-
 export interface Principal {
   /** 当前请求凭据的 SHA-256 hash；不保存原文。 */
   credentialHash: string;
