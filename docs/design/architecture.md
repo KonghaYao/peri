@@ -124,7 +124,7 @@ Windows 挂起进程，attach 后提供终止请求与实际退出证据。它�
 
 ## 6. Peri Controller 层
 
-- 控制面：lite params -> pick Resources -> pick Runtime -> run Session -> pop events
+- 控制面：lite params -> pick Resources -> pick Runtime -> run Session -> 消费事件（订阅）
   - lite params 定义：session 标识、agent 定义引用、cwd、初始输入
   - 其余上下文由 Controller 从 Resources 组装注入
 - 事件聚合/过滤（业务事件 -> 协议化前的出口）

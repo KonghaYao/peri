@@ -1,11 +1,11 @@
 //! Controller 控制面契约测试（Seam 2：`docs/top-level.md` §6/§9）。
 //!
 //! 只测外部行为不测实现细节（`docs/design/testing-standards.md` P0 分层）：
-//! - 控制面五步：lite params → pick Resources → pick Runtime → run Session → pop events
+//! - 控制面五步：lite params → pick Resources → pick Runtime → run Session → 消费事件
 //! - cancel 转发：按 (session_id, turn_id, attempt_id) 三元组定位，幂等判定归 Agent
-//! - 会话生命周期面：join（deadline）/ destroy（§9 六阶段编排 + drain 双投递）/ 枚举
+//! - 会话生命周期面：join（deadline）/ destroy（§9 六阶段编排 + drain 投递）/ 枚举
 //! - 消息/工具注入面：submit_input 经 Runtime 透传句柄；LiteParams 初始消息/工具装载
-//! - 事件协议化前分支：弹出队列 + 订阅（显式注册/退订；旁路消费者可订阅同一分支）
+//! - 事件协议化前分支：订阅广播（显式注册/退订；旁路消费者可订阅同一分支）
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -42,7 +42,7 @@ impl MockHandle {
         })
     }
 
-    /// 带 drain 事件构造（销毁路径断言双投递用）。
+    /// 带 drain 事件构造（销毁路径断言事件投递用）。
     fn with_drained(drained: Vec<UnstampedEvent>) -> Arc<Self> {
         let handle = Self::new();
         *handle.drained.lock().unwrap() = drained.into();
@@ -243,10 +243,10 @@ async fn cancel_unknown_session_typed_error() {
     );
 }
 
-// ─── 事件协议化前分支（§6 pop events / §6 观测订阅） ───────────────────────────
+// ─── 事件协议化前分支（§6 订阅） ──────────────────────────────────────────────
 
 #[tokio::test]
-async fn publish_pop_and_subscribe_events() {
+async fn publish_and_subscribe_events() {
     let controller = Controller::new(temp_facade().await);
     let mut sub = controller.subscribe();
 
@@ -269,16 +269,7 @@ async fn publish_pop_and_subscribe_events() {
     controller.publish(e1.clone());
     controller.publish(e2.clone());
 
-    // pop events：按投递序返回全部已入队事件（控制面第五步）
-    let popped = controller.pop_events();
-    assert_eq!(popped.len(), 2);
-    assert_eq!(popped[0].envelope.turn_id, "t1");
-    assert_eq!(popped[1].envelope.turn_id, "t2");
-
-    // pop 后队列为空（事件已弹出）
-    assert!(controller.pop_events().is_empty());
-
-    // 订阅分支：订阅者收到同一事件（ACP 协议化输入）
+    // 订阅分支：订阅者按投递序收到事件（ACP 协议化输入）
     let received = sub.recv().await.unwrap();
     assert_eq!(received.envelope, e1);
     let received = sub.recv().await.unwrap();
@@ -312,7 +303,6 @@ async fn bypass_consumer_subscribes_same_branch() {
         env,
         "旁路消费者（观测）收到同一事件"
     );
-    assert_eq!(controller.pop_events().len(), 1, "弹出队列独立于订阅者");
 }
 
 #[tokio::test]
@@ -335,14 +325,10 @@ async fn publish_event_preserves_source_message_id_when_session_is_unregistered(
         },
     );
 
-    let popped = controller.pop_events();
-    assert_eq!(popped.len(), 1);
-    assert_eq!(popped[0].envelope.message_id.as_deref(), Some("message-1"));
-    assert_eq!(popped[0].envelope.turn_id, "turn-1");
-    assert!(popped[0].event.is_some());
-
     let received = sub.recv().await.expect("event should reach subscribers");
     assert_eq!(received.envelope.message_id.as_deref(), Some("message-1"));
+    assert_eq!(received.envelope.turn_id, "turn-1");
+    assert!(received.event.is_some(), "v1 payload 随订阅分支投递");
 }
 
 // ─── sessions 存储通道（既有访问路径不回归） ───────────────────────────────────
@@ -429,19 +415,10 @@ async fn destroy_session_orchestrates_phases_and_publishes_drained() {
     // 映射移除（枚举反映）
     assert!(!controller.contains_session("s1"));
 
-    // drain 事件三路可见：返回值 + 弹出队列 + 订阅分支（publish 双投递）
+    // drain 事件两路可见：返回值 + 订阅分支（publish 投递）
     assert_eq!(drained.len(), 2);
     assert_eq!(drained[0].session_id, "s1");
     assert_eq!(drained[0].session_seq, SessionSeq::initial());
-    let popped = controller.pop_events();
-    assert_eq!(
-        popped
-            .iter()
-            .map(|m| m.envelope.clone())
-            .collect::<Vec<_>>(),
-        drained,
-        "drain 事件进入弹出队列（投递序一致）"
-    );
     assert_eq!(
         sub.recv().await.unwrap().envelope,
         drained[0],
@@ -527,17 +504,13 @@ async fn subscription_register_and_unsubscribe() {
         e2,
         "退订不影响其他订阅者"
     );
-    assert_eq!(controller.pop_events().len(), 2, "弹出队列独立于订阅者");
 }
 
+/// 广播交付语义：慢消费者不静默丢事件，而是显式收到 [`SubscriptionError::Lagged`]。
 #[tokio::test]
-async fn full_pop_queue_records_session_loss_without_blocking_broadcast() {
-    use peri_acp_types::event_v2::BusHealth;
+async fn slow_subscriber_sees_lagged_instead_of_silent_drop() {
     let controller = Controller::new(temp_facade().await);
-    let health = Arc::new(BusHealth::default());
-    let other = Arc::new(BusHealth::default());
-    controller.bind_event_health("s1", &health);
-    controller.bind_event_health("s2", &other);
+    let mut sub = controller.subscribe();
     let env = EventEnvelope::new(
         "s1",
         SessionEpoch::initial(),
@@ -546,30 +519,12 @@ async fn full_pop_queue_records_session_loss_without_blocking_broadcast() {
         SessionSeq::initial(),
         EventDeliveryClass::Critical,
     );
-    for _ in 0..super::EVENT_CHANNEL_CAPACITY {
+    for _ in 0..=super::EVENT_BROADCAST_CAPACITY {
         controller.publish(env.clone());
     }
-    assert!(!health.snapshot().dirty);
-    let mut sub = controller.subscribe();
-    controller.publish(env.clone());
-    assert_eq!(sub.recv().await.unwrap().envelope, env);
-    assert_eq!(controller.pop_events().len(), super::EVENT_CHANNEL_CAPACITY);
-    assert_eq!(health.snapshot().state_dropped, 1);
-    assert!(health.snapshot().dirty);
-    assert_eq!(controller.event_health(), health.snapshot());
-    assert!(!other.snapshot().dirty);
-    controller.publish(env);
-    assert_eq!(health.snapshot().state_dropped, 1, "成功不清除丢失记录");
-    controller.events_rx.lock().close();
-    controller.publish(EventEnvelope::new(
-        "s2",
-        SessionEpoch::initial(),
-        "t2",
-        "a2",
-        SessionSeq::initial(),
-        EventDeliveryClass::Critical,
-    ));
-    assert_eq!(other.snapshot().state_dropped, 1);
-    assert!(other.snapshot().dirty);
-    assert_eq!(controller.event_health().state_dropped, 2);
+    let err = sub.recv().await.unwrap_err();
+    assert!(
+        matches!(err, super::SubscriptionError::Lagged(skipped) if skipped > 0),
+        "慢消费者必须显式收到 Lagged: {err:?}"
+    );
 }

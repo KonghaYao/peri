@@ -1,6 +1,6 @@
 //! Controller 层控制面宿主（`docs/top-level.md` §6）。
 //!
-//! 控制面五步：lite params → 会话资源句柄 → pick Runtime → run Session → pop events。
+//! 控制面五步：lite params → 会话资源句柄 → pick Runtime → run Session → 消费事件（订阅）。
 //! - [`LiteParams`]：session 标识 / agent 定义引用 / cwd / 初始输入 / 初始消息与
 //!   工具集装载（§6）
 //! - [`Controller::sessions`] / [`Controller::pick_runtime`]：取业务侧会话资源句柄
@@ -11,7 +11,7 @@
 //!   会话生命周期面（join 等待自然终止 / §9 六阶段销毁 / 枚举透传 Runtime 映射）
 //! - [`Controller::submit_input`]：消息/工具注入面（运行时输入经 Runtime 收口
 //!   到 `SessionHandle::submit_input`；初始输入在 LiteParams）
-//! - [`Controller::pop_events`] / [`Controller::subscribe`]：事件协议化前分支
+//! - [`Controller::subscribe`]：事件协议化前分支
 //!   （业务事件 → ACP 协议化的出口）；Langfuse bridge 是此分支上的旁路消费者
 //!   （§6 观测：bridge 装配在 Controller 侧宿主，不承担 Controller 职责）；
 //!   订阅者经 [`Subscription`] 显式注册/退订
@@ -22,24 +22,23 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use parking_lot::Mutex;
 use peri_acp_types::event::{EventMessage, ExecutorEvent};
-use peri_acp_types::event_v2::{BusHealth, BusHealthSnapshot, EmitOutcome};
 use peri_acp_types::identity::{CancelRequest, EventEnvelope, SessionSeq};
 use peri_acp_types::messages::MessageContent;
 use peri_acp_types::runtime::UnstampedEvent;
 use peri_acp_types::session_resources::SessionResources;
 use peri_agent::tools::ToolDefinition;
 use peri_runtime::Runtime;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::broadcast;
 
 use crate::error::{ControllerError, SubscriptionError};
 
-/// 事件通道容量（弹出队列与订阅广播共用）。
+/// 事件订阅广播容量。
 ///
-/// 交付语义对齐 §9 事件契约：弹出队列为有界通道（满时丢弃，对应 Critical
-/// 交付类）；订阅广播对慢消费者 lagging（对应 Broadcast 交付类）。
-const EVENT_CHANNEL_CAPACITY: usize = 1024;
+/// 交付语义对齐 §9 事件契约 Broadcast 类：慢消费者 lagging（错过条数经
+/// [`SubscriptionError::Lagged`] 显式返回，不静默丢失）。Controller 不维护
+/// 第二个缺少消费者的有界队列——没有拉取者不等于事件在投递链路上丢失。
+const EVENT_BROADCAST_CAPACITY: usize = 1024;
 
 /// agent 定义引用（§6 lite params）。
 ///
@@ -164,7 +163,7 @@ impl Subscription {
 /// - 装配注入端口（pick 目标源）：mcp 池 / cron 调度器 / 工具检索索引，
 ///   宿主装配点构造具体实现后 upcast 注入（3.0 批 2 波 2；
 ///   消费方为执行装配，随 L5 落位）
-/// - 事件协议化前分支（弹出队列 + 订阅广播）
+/// - 事件协议化前分支（订阅广播）
 pub struct Controller {
     /// 会话资源通道（会话行为门面）：业务侧经 [`Controller::sessions`] 取得，Controller
     /// 只转发句柄，不另存数据或执行注册表。
@@ -177,15 +176,8 @@ pub struct Controller {
     cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
     /// 工具检索索引端口（pick 目标源；缺省未注入）。
     tool_search: Option<Arc<dyn peri_acp_types::ports::ToolSearchPort>>,
-    /// 弹出队列发送端（pop_events 消费；有界满丢弃）。
-    events_tx: mpsc::Sender<EventMessage>,
-    /// 弹出队列接收端（控制面第五步 pop events）。
-    events_rx: Mutex<mpsc::Receiver<EventMessage>>,
     /// 订阅广播（subscribe 分发；慢消费者 lagging）。
     subscribers: broadcast::Sender<EventMessage>,
-    event_health: Arc<BusHealth>,
-    /// 宿主拥有 session 生命周期；弱引用不会延长 SessionState 存活时间。
-    session_health: Mutex<std::collections::HashMap<String, std::sync::Weak<BusHealth>>>,
 }
 
 impl Controller {
@@ -194,19 +186,14 @@ impl Controller {
     /// Runtime / Resources / 装配注入端口由部署装配点（Resources 打开后、
     /// Runtime 建立后）经对应 `with_*` 注入；本构造函数保持既有调用点兼容。
     pub fn new(sessions: Arc<dyn SessionResources>) -> Self {
-        let (events_tx, events_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
-        let (subscribers, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        let (subscribers, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
         Self {
             sessions,
             runtime: Arc::new(Runtime::new()),
             mcp_pool: None,
             cron_scheduler: None,
             tool_search: None,
-            events_tx,
-            events_rx: Mutex::new(events_rx),
             subscribers,
-            event_health: Arc::new(BusHealth::default()),
-            session_health: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -347,8 +334,7 @@ impl Controller {
     ///
     /// 停收新输入 → 取消 owned tasks → join（带 deadline）→ 超时 abort →
     /// 持久化事务收束 → drain 事件 → 移除映射。drain 出的补打事件经
-    /// [`Controller::publish`] 双投递（弹出队列 + 订阅分支），并作为返回值
-    /// 交给调用方（ACP 可继续经 pop_events / 订阅消费）。
+    /// [`Controller::publish`] 投递到订阅分支，并作为返回值交给调用方。
     ///
     /// 持久化失败时映射保留（重试安全），包 context 为
     /// [`ControllerError::DestroyFailed`]。
@@ -385,10 +371,11 @@ impl Controller {
     }
 
     /// 事件投递入口（协议化前分支）：宿主把 Runtime 聚合补打后的事件投进
-    /// Controller，同时分发给弹出队列与全部订阅者。
+    /// Controller，分发给全部订阅者。
     ///
-    /// 交付语义（§9 事件契约）：弹出队列有界满丢弃（Critical 类）；
-    /// 订阅广播慢消费者 lagging（Broadcast 类）。
+    /// 交付语义（§9 事件契约 Broadcast 类）：慢消费者 lagging
+    /// （[`SubscriptionError::Lagged`]，错过条数可观测）；无订阅者时事件不保留
+    /// （广播的既有语义，不是投递丢失）。
     ///
     /// 本方法接收**身份事件**（销毁路径 drain 出的事件无 v1 payload），
     /// 包装为 [`EventMessage`]（`event: None`）投递；业务事件发射请用
@@ -400,11 +387,11 @@ impl Controller {
     /// 事件发射入口（协议化前分支，事件三层化统一出口）：ACP 侧发射点
     /// （Agent EventBus 消费侧）把 Agent 层未补打事件（身份 + v1 payload）
     /// 经本方法发射——Controller 经 Runtime 补打 `session_id` / `session_seq`
-    /// （§9 事件契约）后双投递（弹出队列 + 订阅广播）。
+    /// （§9 事件契约）后分发给全部订阅者。
     ///
-    /// 交付语义同 [`Controller::publish`]：弹出队列有界满丢弃（Critical 类）；
-    /// 订阅广播慢消费者 lagging（Broadcast 类）。未注册 session（迟到事件 /
-    /// 销毁后事件）无法补打，降级为发射方提供的身份直接投递（不 panic）。
+    /// 交付语义同 [`Controller::publish`]：订阅广播慢消费者 lagging；未注册
+    /// session（迟到事件 / 销毁后事件）无法补打，降级为发射方提供的身份直接
+    /// 投递（不 panic）。
     ///
     /// 返回实际补打的 `session_seq`；降级投递没有可信序号，返回 `None`。
     pub fn publish_event(
@@ -437,37 +424,10 @@ impl Controller {
         None
     }
 
-    /// 绑定宿主当前 session 实例的健康度，不改变事件序号或持久状态。
-    pub fn bind_event_health(&self, session_id: &str, health: &Arc<BusHealth>) {
-        let mut sessions = self.session_health.lock();
-        sessions.retain(|_, health| health.strong_count() != 0);
-        sessions.insert(session_id.to_owned(), Arc::downgrade(health));
-    }
-
-    pub fn event_health(&self) -> BusHealthSnapshot {
-        self.event_health.snapshot()
-    }
-
-    /// 双投递（弹出队列 + 订阅广播）的内部实现。
+    /// 分发给全部订阅者的内部实现。
     fn publish_message(&self, msg: EventMessage) {
-        let outcome = match self.events_tx.try_send(msg.clone()) {
-            Ok(()) => EmitOutcome::Sent,
-            Err(mpsc::error::TrySendError::Full(_)) => EmitOutcome::Dropped,
-            Err(mpsc::error::TrySendError::Closed(_)) => EmitOutcome::Closed,
-        };
-        if outcome != EmitOutcome::Sent {
-            self.event_health.record_state(outcome, 1);
-            if let Some(health) = self
-                .session_health
-                .lock()
-                .get(&msg.envelope.session_id)
-                .and_then(std::sync::Weak::upgrade)
-            {
-                health.record_state(outcome, 1);
-            }
-            tracing::warn!(session_id = %msg.envelope.session_id, ?outcome, "控制面弹出队列事件未投递");
-        }
-        // 广播仍独立投递；弹出队列背压不得阻塞 ACP 消费链。
+        // 无订阅者时 send 返回 Err：这是正常订阅生命周期（例如 ACP 已退订），
+        // 不代表事件在投递链路上被丢弃。慢消费者由 broadcast lagging 显式报告。
         let _ = self.subscribers.send(msg);
     }
 
@@ -480,16 +440,6 @@ impl Controller {
         Subscription {
             receiver: self.subscribers.subscribe(),
         }
-    }
-
-    /// pop events（控制面第五步）：按投递序弹出队列中全部待处理事件。
-    pub fn pop_events(&self) -> Vec<EventMessage> {
-        let mut rx = self.events_rx.lock();
-        let mut out = Vec::new();
-        while let Ok(msg) = rx.try_recv() {
-            out.push(msg);
-        }
-        out
     }
 }
 

@@ -93,7 +93,7 @@ pub trait EventSink: Send + Sync {
 /// 事件发布端口（L5：执行体迁入 Agent 层的统一发射面）。
 ///
 /// 实现方为 ACP/Controller 适配层（语义对齐 `Controller::publish_event`：
-/// 补打 session_id / session_seq 后扇出弹出队列 + 订阅广播）；Agent 层执行体
+/// 补打 session_id / session_seq 后广播到订阅者）；Agent 层执行体
 /// （`session::exec::*`）经本端口发射，不触碰 Controller 实现。
 pub trait EventPublisher: Send + Sync {
     /// 发射一条协议化前事件（携带事件源身份 [`crate::runtime::UnstampedEvent`]）。
@@ -1180,8 +1180,8 @@ pub enum ExecutorEvent {
 /// - 发射点（Agent EventBus 消费侧）构造 [`crate::runtime::UnstampedEvent`]
 ///   身份与 v1 payload（[`ExecutorEvent`]），经 `Controller::publish_event`
 ///   统一发射——Controller 经 Runtime 补打 `session_id` / `session_seq` 后
-///   扇出到弹出队列与订阅广播
-/// - ACP 协议化消费侧（`Controller::subscribe` / `Controller::pop_events`）
+///   广播到订阅者
+/// - ACP 协议化消费侧（`Controller::subscribe`）
 ///   接收本载体，按 `envelope.session_id` 过滤后做 v1 协议化映射
 ///
 /// `event` 为 `Option`：会话销毁路径（`Controller::destroy_session`）drain 出的

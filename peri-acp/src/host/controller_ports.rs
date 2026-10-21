@@ -16,8 +16,8 @@ use peri_acp_types::{
 
 /// Controller → [`EventPublisher`] 适配。
 ///
-/// 语义 = `Controller::publish_event`（补打 session_id / session_seq 后扇出
-/// 弹出队列 + 订阅广播）；Agent 层执行体只持端口，不引用 Controller 类型。
+/// 语义 = `Controller::publish_event`（补打 session_id / session_seq 后广播
+/// 到订阅者）；Agent 层执行体只持端口，不引用 Controller 类型。
 pub struct ControllerEventPublisher(pub Arc<peri_controller::Controller>);
 
 impl EventPublisher for ControllerEventPublisher {

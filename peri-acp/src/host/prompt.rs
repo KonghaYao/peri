@@ -494,7 +494,6 @@ async fn run_prompt_attempt(
     let event_publisher: Arc<dyn peri_acp_types::event::EventPublisher> = Arc::new(
         crate::host::controller_ports::ControllerEventPublisher(Arc::clone(controller)),
     );
-    controller.bind_event_health(&session_id, &event_health);
     let subscribe: Arc<dyn Fn() -> Box<dyn peri_acp_types::event::EventSubscriber> + Send + Sync> = {
         let controller = Arc::clone(controller);
         Arc::new(move || {
