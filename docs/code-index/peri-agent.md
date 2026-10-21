@@ -108,10 +108,10 @@ Full 摘要不改变模型思考配置和单次输出上限。未完成的摘要
 | --- | --- | --- |
 | 策略选择 + 触发编排 | `compact_v2/mod.rs` | `determine_compact_action`、`run_compact_with_facts`、`CompactResult`；75%/95% 既有门控与必要回收量不变；45% 是触发后尽力目标/缺口诊断 |
 | 压力计算与计划 | `compact_v2/planner.rs` + `planner/{index,catalogs,planning}.rs` | `plan_micro_with_facts`；Step/Exchange 索引跨 Human 配对，Closed/Exposed/协议与回查条件；按源消息缓存目录，批次与完整元数据大小有界；仅 visible own history，最终同快照视图复核净收益；缺少运行期事实的 `plan_micro` 包装保持保护；详见 [Micro 设计](../design/micro-compact.md) |
-| 当前运行期暴露证据 | `compact_v2/exposure.rs` + `stages/{context,micro_facts,reason,act}.rs` | `RequestExposure`、`ExposureLedger`、`MicroPlanningFacts`：最终请求 canonical 成员指纹，成功响应持久化后确认；有界非持久化，冷恢复不推断旧内容已消费；mailbox 与执行终态继续各自权威 |
+| 当前会话运行期暴露证据 | `compact_v2/exposure.rs` + `stages/{context,micro_facts,reason,act}.rs` + `session/exec/stage_builder{,/session_setup}.rs` | `RequestExposure`、`ExposureLedger`、`MicroPlanningFacts`：宿主会话持有有界账本并跨 turn 显式注入，最终请求 canonical 指纹在成功响应持久化后确认；冷恢复为空，成功全量重新暴露后可采用 canonical typed 同步终态，task-bearing 结果仍须 owner 结算；回归 `stages/micro_turn_exposure_test.rs` |
 | 投影契约测试 | `compact_v2/projection_test.rs`、`projection_render_test.rs`、`projection_restore_test.rs`、`projection_estimate_test.rs`、`projection_tool_use_test.rs` | 分离 serde/provider 契约、模型视图、持久指令恢复、收益估算与非法 ToolUse action；统一过滤 `agent::compact_v2::projection`，legacy input 指令不得修改 canonical 参数 |
 | 归档投影与完整生命周期 | `compact_v2/projection_archive.rs` + `archive_lifecycle_test.rs`；`tests/micro_compact_wire_test.rs` | `OmitToolExchange` 同时更新所有调用/结果表示；独立虚拟收据、范围根预算、保留参数校验；生产两次 Micro/Full、无 ID 摘要、新进程回查与 provider 最终 wire 验证 |
-| Micro 原子提交 | `compact_v2/micro.rs` | `apply_micro_plan`：canonical barrier → `ContextArchiveReader::verify_catalog` → 单次 `CompactionChange` 提交成员动作/唯一目录/范围根；确认后才更新热态，未知结果进入 ReloadRequired；回归 `micro_test.rs` |
+| Micro 原子提交 | `compact_v2/micro.rs` | `apply_micro_plan`：canonical barrier → `ContextArchiveReader::verify_catalogs` 固定尾界有界批量验证 → 单次 `CompactionChange` 提交成员动作/唯一目录/范围根；确认后才更新热态，未知结果进入 ReloadRequired；回归 `micro_test.rs` |
 | 模型历史原文回查 | `src/context_archive.rs` + `context_archive_test.rs` | `ContextArchiveReader::{new,verify_catalog}`、`ContextArchiveReadPort::read`；绑定当前会话，只读 `SessionResources` 有界端口，目录/块摘要校验、固定尾界游标、冻结继承授权；原文/附件分页，不持有 transcript、不执行历史工具 |
 | Smart 旧入口 | `compact_v2/smart.rs` + `mod.rs` | 显式旧配置仍由策略分支消费；生产复用同一 `plan_micro_with_facts` 与原子提交，缺少运行期事实不新压缩 |
 | Full 执行 | compact_v2/full.rs | `full_compact_inner` 从已提交投影视图生成结构化摘要，排除 own reminder 等旧历史；清渲染动作但保留旧目录/组链接，范围根合并后与新摘要同事务提交，原引用不依赖摘要正文；同一批里给每条被归档条目写下取代关系（`MessageFlags::superseded_by` = 本次追加的摘要 id，供 rewind 精确判定排除是否仍有依据）；不从计算实例本机回读 Read/Skill 路径；回归 `full_report_test.rs` / `full_test.rs` / `full_protected_result_test.rs` / `full_continuation_test.rs`（摘要截断续写、失败保全及远端内容来源） |
@@ -177,3 +177,5 @@ Full 摘要不改变模型思考配置和单次输出上限。未完成的摘要
 - ARC-MIDDLEWARE-CAPABILITY-001：阶段能力接口 `middleware/capabilities.rs`；执行适配与回写入口 `agent/stages/middleware_runner.rs`
 
 子 Agent 的委派执行身份与工具卡片身份遵守 `ARC-SUBAGENT-IDENTITY-001`：`SubagentSpawnConfig` / `SubagentResumeConfig` 接收 `parent_invocation_id`，`session/subagent/factory/delegation.rs::parent_tool_call_id` 从可信父执行 intent 解析模型卡片身份后交给 sync/background 发射。实际工厂回归见 `subagent/bound_and_tail_test.rs::subagent_start_uses_model_call_identity_for_spawn_and_resume`；委派 fixture 必须保持两种 ID 不同。
+
+归档恢复权限在 `agent/stages/archive_capability.rs` 校验最终工具目录与有界读取端口；`reason.rs` 在补充 Full 与模型调用前执行，即使低于自动压缩阈值。生命周期回归见 `peri-middlewares/src/subagent/tool/tool_test/resume_archive_test.rs`，多 block 全路径回查见 `agent/compact_v2/micro_block_budget_test.rs`。

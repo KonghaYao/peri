@@ -594,6 +594,10 @@ async fn run_prompt_attempt(
         async_result_mailbox: session_manager
             .get_session(&session_id)
             .map(|session| Arc::clone(&session.async_result_mailbox)),
+        compact_exposure: session_manager
+            .get_session(&session_id)
+            .map(|session| Arc::clone(&session.compact_exposure))
+            .unwrap_or_default(),
         frozen_fallback_builder,
     };
 

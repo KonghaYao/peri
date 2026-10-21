@@ -80,8 +80,11 @@ pub fn rewind_projection_updates(
     let mut updates = Vec::new();
     for (id, original, _) in retained {
         let mut flags = original.clone();
-        if clear.contains(id) {
+        if clear.contains(id) && !flags.is_recovery_only() {
             flags.excluded = false;
+        }
+        if flags.is_recovery_only() {
+            flags.excluded = true;
         }
         if let Some(projection) = flags.projection.as_mut() {
             if clear.contains(id) {
@@ -121,6 +124,7 @@ pub fn rewind_projection_updates(
                 .filter_map(|root| roots.get(&root.source_thread_id).cloned())
                 .collect();
             if clear.contains(id)
+                && !projection.recovery_only
                 && projection.archive_catalog.is_none()
                 && projection.archive_group.is_none()
                 && projection.archive_roots.is_empty()

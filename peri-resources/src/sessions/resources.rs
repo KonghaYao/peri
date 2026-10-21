@@ -604,6 +604,14 @@ impl SessionResources for SessionResourcesImpl {
         self.gate.data().read_archive_chunk(id, query).await
     }
 
+    async fn read_archive_chunks(
+        &self,
+        id: &ThreadId,
+        batch: &peri_acp_types::context_archive::ArchiveChunkBatch,
+    ) -> SessionResourceResult<Vec<peri_acp_types::context_archive::ArchiveChunk>> {
+        self.gate.data().read_archive_chunks(id, batch).await
+    }
+
     async fn load_message_flags(
         &self,
         id: &ThreadId,

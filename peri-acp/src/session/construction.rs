@@ -116,6 +116,7 @@ impl SessionManager {
                     thread_scope,
                 ),
             ),
+            compact_exposure: Arc::default(),
             user_input_events_cancel: CancellationToken::new(),
             cron_bridge: None,
             task_manager,

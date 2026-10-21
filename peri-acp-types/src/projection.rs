@@ -85,8 +85,8 @@ pub struct ProjectionActionEntry {
 /// 消息级投影指令 — 存储于 MessageFlags 中，可序列化/可恢复
 ///
 /// 本类型是 `MessageFlags.projection` 的**持久化载荷形状**（本机与远端的
-/// `messages.projection` 列都是它的 JSON）：以渲染指令为主，另承载一项渲染之外的
-/// 事实——[`Self::superseded_by`] 的 Full Compact 取代关系。
+/// `messages.projection` 列都是它的 JSON）：另承载 Full 的取代关系与
+/// [`Self::recovery_only`] 的归档正文隔离事实。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageProjectionDirective {
     #[serde(default = "default_format_version")]
@@ -99,6 +99,11 @@ pub struct MessageProjectionDirective {
     pub archive_roots: Vec<ArchiveRoot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive_receipt_budget_tokens: Option<u64>,
+    /// Canonical archive bytes copied from a frozen grant, without authority to
+    /// restore a complete executable exchange. These rows stay excluded through
+    /// rewind and refork; their catalog remains available for bounded recovery.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recovery_only: bool,
     pub policy_version: u32,
     /// 仅含本消息的 action entries，不含 BaseMessage 内容或 Base64
     #[serde(default)]
@@ -134,6 +139,7 @@ impl Default for MessageProjectionDirective {
             archive_group: None,
             archive_roots: Vec::new(),
             archive_receipt_budget_tokens: None,
+            recovery_only: false,
         }
     }
 }

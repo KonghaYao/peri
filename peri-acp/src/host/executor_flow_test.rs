@@ -470,6 +470,7 @@ pub(super) async fn make_session_context(session_id: &str) -> SessionContext {
         continuation_notify: None,
         user_input_mailbox: None,
         async_result_mailbox: None,
+        compact_exposure: Arc::default(),
         frozen_fallback_builder: None,
     };
     execution_fixture::initialize_runtime(&mut context, Some(directory));

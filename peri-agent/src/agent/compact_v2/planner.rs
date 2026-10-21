@@ -94,7 +94,7 @@ mod sources;
 
 pub use planning::plan_micro_with_facts;
 
-/// Inputs are snapshots of current-run facts, never reconstructed from message age.
+/// Inputs are snapshots of confirmed session-runtime facts, never inferred from message age.
 #[derive(Debug, Default, Clone)]
 pub struct MicroPlanningFacts {
     pub exposed_message_ids: HashSet<MessageId>,

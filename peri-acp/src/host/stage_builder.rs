@@ -241,6 +241,7 @@ pub(crate) fn build_stage_context(
         session_resources: ctx.session_resources.clone(),
         thread_id: ctx.thread_id.clone(),
         async_result_mailbox: ctx.async_result_mailbox.clone(),
+        compact_exposure: Arc::clone(&ctx.compact_exposure),
         // 注入面
         model_name: ctx.provider_model_name.clone(),
         provider_name: ctx.provider_name.clone(),

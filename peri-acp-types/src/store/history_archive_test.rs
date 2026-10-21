@@ -127,6 +127,16 @@ fn test_archive_directive_roundtrip_and_legacy_defaults() {
     assert_eq!(old.format_version, 1);
     assert!(old.archive_catalog.is_none());
     assert!(old.archive_roots.is_empty());
+    assert!(!old.recovery_only, "旧格式未授予仅恢复语义");
+    let recovery = MessageProjectionDirective {
+        recovery_only: true,
+        ..Default::default()
+    };
+    let encoded = serde_json::to_string(&recovery).unwrap();
+    assert_eq!(
+        serde_json::from_str::<MessageProjectionDirective>(&encoded).unwrap(),
+        recovery
+    );
 }
 
 #[test]
@@ -517,4 +527,26 @@ fn test_fork_clears_typed_archive_read_preview_without_rewriting_canonical_input
         .unwrap()
         .entries
         .is_empty());
+}
+
+/// [回归测试] archive-only 的持久事实不能借 refork 修复成有效历史。
+#[test]
+fn test_archive_fork_rejects_active_recovery_only_payload_before_allocating_ids() {
+    let (payloads, mut flags) = archived_history();
+    for flag in flags.values_mut() {
+        flag.projection.as_mut().unwrap().recovery_only = true;
+    }
+    let mut allocations = 0;
+    let error = remap_fork_history(&"target".into(), &payloads, &flags, || {
+        allocations += 1;
+        MessageId::new()
+    })
+    .unwrap_err();
+    assert_eq!(
+        error,
+        HistoryError::InvalidArchive {
+            id: payloads[0].id()
+        }
+    );
+    assert_eq!(allocations, 0);
 }

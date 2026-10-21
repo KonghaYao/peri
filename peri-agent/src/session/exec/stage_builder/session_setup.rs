@@ -27,6 +27,8 @@ pub(super) fn build_session(
         shared_queue.clone(),
     );
 
+    session.set_compact_exposure(Arc::clone(&input.compact_exposure));
+
     // 会话级结果处理责任 owner：宿主注入的实例跨 prompt 复用；无宿主时建立
     // 本地 owner（与本次执行的 delivery 共用同一实例）。
     let async_result_mailbox = input.async_result_mailbox.clone().unwrap_or_else(|| {

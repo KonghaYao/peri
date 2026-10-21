@@ -7,6 +7,7 @@ use peri_acp_types::{
     thread::ThreadId,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 pub struct ContextArchiveReader {
@@ -21,51 +22,117 @@ impl ContextArchiveReader {
         }
     }
 
-    /// Confirm every byte needed for strong eviction through the same bounded recovery port.
+    /// Confirm every byte needed for strong eviction through the bounded recovery port.
     /// Call after the canonical persistence barrier, before the atomic projection commit.
     pub async fn verify_catalog(
         &self,
         catalog: &ArchiveCatalog,
     ) -> Result<MessageId, ArchiveError> {
-        catalog.validate()?;
-        if catalog.source_thread_id != self.session_id {
-            return Err(ArchiveError::Forbidden);
+        self.verify_catalogs(std::slice::from_ref(catalog)).await
+    }
+
+    /// Verify an entire plan below one committed tail, with one bounded I/O batch in flight.
+    /// Dropping this future drops the current read; no verification work is detached.
+    pub async fn verify_catalogs(
+        &self,
+        catalogs: &[ArchiveCatalog],
+    ) -> Result<MessageId, ArchiveError> {
+        let first = catalogs
+            .first()
+            .ok_or_else(|| ArchiveError::InvalidRequest("empty archive plan".into()))?;
+        for catalog in catalogs {
+            catalog.validate()?;
+            if catalog.source_thread_id != self.session_id {
+                return Err(ArchiveError::Forbidden);
+            }
         }
         let page = self
             .resources
             .read_archive_metadata(
                 &self.session_id,
                 &ArchiveMetadataQuery {
-                    anchor: Some(catalog.anchor_message_id),
+                    anchor: Some(first.anchor_message_id),
                     limit: 1,
                     ..Default::default()
                 },
             )
             .await
             .map_err(map_error)?;
-        for member in &catalog.members {
+        let tail = page.committed_tail;
+        for catalog in catalogs {
+            ensure_fragment_budget(catalog, tail)?;
+        }
+        let mut pending = Vec::with_capacity(ARCHIVE_CHUNKS_PER_BATCH);
+        let mut expected = Vec::with_capacity(ARCHIVE_CHUNKS_PER_BATCH);
+        let mut canonical_digest = Sha256::new();
+        for member in catalogs.iter().flat_map(|catalog| &catalog.members) {
             for (index, digest) in member.chunk_digests.iter().enumerate() {
-                let chunk = self
-                    .resources
-                    .read_archive_chunk(
-                        &self.session_id,
-                        &ArchiveChunkQuery {
-                            message_id: member.message_id,
-                            committed_tail: page.committed_tail,
-                            offset: (index * ARCHIVE_CHUNK_BYTES) as u64,
-                            max_bytes: ARCHIVE_CHUNK_BYTES as u32,
-                        },
+                pending.push(ArchiveChunkQuery {
+                    message_id: member.message_id,
+                    committed_tail: tail,
+                    offset: (index * ARCHIVE_CHUNK_BYTES) as u64,
+                    max_bytes: ARCHIVE_CHUNK_BYTES as u32,
+                });
+                expected.push((member, digest));
+                if pending.len() == ARCHIVE_CHUNKS_PER_BATCH {
+                    self.verify_chunk_batch(
+                        std::mem::take(&mut pending),
+                        &expected,
+                        &mut canonical_digest,
                     )
-                    .await
-                    .map_err(map_error)?;
-                if chunk.total_bytes != member.canonical_bytes
-                    || content_digest(&chunk.bytes) != *digest
-                {
+                    .await?;
+                    expected.clear();
+                }
+            }
+        }
+        if !pending.is_empty() {
+            self.verify_chunk_batch(pending, &expected, &mut canonical_digest)
+                .await?;
+        }
+        Ok(tail)
+    }
+
+    async fn verify_chunk_batch(
+        &self,
+        queries: Vec<ArchiveChunkQuery>,
+        expected: &[(&ArchiveMember, &String)],
+        canonical_digest: &mut Sha256,
+    ) -> Result<(), ArchiveError> {
+        let batch = ArchiveChunkBatch::new(queries)?;
+        let chunks = self
+            .resources
+            .read_archive_chunks(&self.session_id, &batch)
+            .await
+            .map_err(map_error)?;
+        if chunks.len() != expected.len() {
+            return Err(ArchiveError::ContentMismatch);
+        }
+        for ((chunk, query), (member, digest)) in
+            chunks.into_iter().zip(batch.queries()).zip(expected)
+        {
+            let expected_bytes = member
+                .canonical_bytes
+                .saturating_sub(query.offset)
+                .min(u64::from(query.max_bytes));
+            if chunk.total_bytes != member.canonical_bytes
+                || chunk.bytes.len() as u64 != expected_bytes
+                || content_digest(&chunk.bytes) != **digest
+            {
+                return Err(ArchiveError::ContentMismatch);
+            }
+            canonical_digest.update(&chunk.bytes);
+            if query.offset + chunk.bytes.len() as u64 == member.canonical_bytes {
+                let actual = canonical_digest
+                    .finalize_reset()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                if actual != member.content_digest {
                     return Err(ArchiveError::ContentMismatch);
                 }
             }
         }
-        Ok(page.committed_tail)
+        Ok(())
     }
     async fn authorize(
         &self,
@@ -298,16 +365,20 @@ impl ContextArchiveReadPort for ContextArchiveReader {
                     return Err(ArchiveError::ContentMismatch);
                 }
                 let available = &chunk.bytes[start..];
-                // Leave space for stable identities, digest and continuation. Escape expansion is
-                // included by the final serialized-size check below.
-                let max_data = (tokens as usize * 4).saturating_sub(1200).max(16);
+                // Budget the actual metadata and the largest continuation before adding data.
+                // Legacy catalogs may contain repeated block kinds; response metadata is a set.
+                let overhead = fragment_overhead(&catalog, index, &request.archive_ref, tail)?;
+                let max_data = (tokens as usize * 4).checked_sub(overhead).filter(|n| *n >= 8)
+                    .ok_or_else(|| ArchiveError::InvalidRequest(
+                        "return budget too small for archive metadata/fragment; request a larger budget".into()
+                    ))?;
                 let mut end = max_data.min(available.len());
                 while end > 0
                     && (std::str::from_utf8(&available[..end]).is_err()
                         || std::str::from_utf8(&available[..end])
                             .ok()
                             .and_then(|text| serde_json::to_string(text).ok())
-                            .is_some_and(|json| json.len() > max_data))
+                            .is_some_and(|json| json.len().saturating_sub(2) > max_data))
                 {
                     end -= 1;
                 }
@@ -320,7 +391,7 @@ impl ContextArchiveReadPort for ContextArchiveReader {
                         end,
                     )
                 } else {
-                    let count = max_data.min(4).min(available.len());
+                    let count = (max_data / 2).min(4).min(available.len());
                     (
                         available[..count]
                             .iter()
@@ -337,7 +408,7 @@ impl ContextArchiveReadPort for ContextArchiveReader {
                     message_id: source.message_id,
                     content_digest: source.content_digest.clone(),
                     kind: source.kind.clone(),
-                    block_types: source.block_types.clone(),
+                    block_types: distinct_block_types(source),
                     archive_ref: catalog.member_ref(index)?,
                     offset,
                     total_bytes: source.canonical_bytes,
@@ -365,6 +436,64 @@ impl ContextArchiveReadPort for ContextArchiveReader {
         }
         Ok(result)
     }
+}
+
+fn distinct_block_types(member: &ArchiveMember) -> Vec<String> {
+    let mut types = member.block_types.clone();
+    types.sort_unstable();
+    types.dedup();
+    types
+}
+
+// Includes the empty data string; adding JSON-escaped data costs its serialized length minus 2.
+fn fragment_overhead(
+    catalog: &ArchiveCatalog,
+    index: usize,
+    reference: &str,
+    tail: MessageId,
+) -> Result<usize, ArchiveError> {
+    let source = &catalog.members[index];
+    let continuation = Cursor {
+        reference_digest: content_digest(reference.as_bytes()),
+        member: usize::MAX,
+        offset: u64::MAX,
+        after: Some(tail),
+        tail: Some(tail),
+    };
+    let packet = ArchiveReadResponse {
+        archive_ref: reference.into(),
+        complete: false,
+        next_cursor: Some(continuation.encode()?),
+        entries: vec![ArchiveReadEntry {
+            message_id: source.message_id,
+            content_digest: source.content_digest.clone(),
+            kind: source.kind.clone(),
+            block_types: distinct_block_types(source),
+            archive_ref: catalog.member_ref(index)?,
+            offset: u64::MAX,
+            total_bytes: source.canonical_bytes,
+            data: String::new(),
+            encoding: "utf8".into(),
+            complete: false,
+        }],
+    };
+    serde_json::to_vec(&packet)
+        .map(|bytes| bytes.len())
+        .map_err(|_| ArchiveError::ContentMismatch)
+}
+
+/// A lossy projection can publish only if recovery can return a nonempty fragment.
+fn ensure_fragment_budget(catalog: &ArchiveCatalog, tail: MessageId) -> Result<(), ArchiveError> {
+    for index in 0..catalog.members.len() {
+        for reference in [catalog.reference()?, catalog.member_ref(index)?] {
+            if fragment_overhead(catalog, index, &reference, tail)? + 8
+                > ARCHIVE_MAX_TOKENS as usize * 4
+            {
+                return Err(ArchiveError::Unsupported);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn map_error(error: SessionResourceError) -> ArchiveError {

@@ -121,7 +121,7 @@ pub(super) async fn expand(
                         excluded: true,
                         projection: Some(MessageProjectionDirective {
                             policy_version,
-                            superseded_by: Some(holder),
+                            recovery_only: true,
                             ..Default::default()
                         }),
                         ..Default::default()

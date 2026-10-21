@@ -874,3 +874,41 @@ fn complete_metadata_budget_preserves_the_old_view_before_publication() {
     assert!(planned.diagnostics.unhandled_by_reason["archive_metadata_budget"] > 0);
     assert_eq!(transcript.projection_ref(result_id), Some(&directive));
 }
+
+/// [回归测试] typed 失败只证明调用已结算，缺少 is_error 也不能整组省略失败。
+#[test]
+fn test_typed_unsuccessful_terminal_without_error_flag_is_not_wholly_archived() {
+    for status in [
+        ToolExecutionStatus::Failed,
+        ToolExecutionStatus::Cancelled,
+        ToolExecutionStatus::TimedOut,
+    ] {
+        let mut transcript = MessageTranscript::new();
+        let (ai, result) = step(&mut transcript, 0, "Write", &"failed detail ".repeat(4_000));
+        let mut message = transcript.get(result).unwrap().message().clone();
+        if let BaseMessage::Tool {
+            execution,
+            is_error,
+            ..
+        } = &mut message
+        {
+            assert!(!*is_error, "夹具保留不一致的历史 outcome 标志");
+            *execution = Some(ToolExecutionEvidence {
+                status,
+                task_id: None,
+                exit_code: None,
+                output_ref: None,
+                output_truncated: false,
+            });
+        }
+        transcript.replace_by_id(message);
+        transcript.append(BaseMessage::human("retained requirement ".repeat(5_000)));
+        let facts = facts(&transcript, ContextRetention::SideEffectReceipt);
+        let plan = plan(&transcript, &facts);
+        assert_eq!(plan.diagnostics.archived_exchange_count, 0, "{status:?}");
+        assert!(plan.diagnostics.unhandled_by_reason["unresolved_error"] > 0);
+        let view = render_micro_plan(&transcript, &plan, &ProviderCapabilities::openai()).unwrap();
+        assert!(view.iter().any(|message| message.id() == ai));
+        assert!(view.iter().any(|message| message.id() == result));
+    }
+}

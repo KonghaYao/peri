@@ -106,3 +106,66 @@ async fn archive_remote_exact_chunks_and_scoped_catalog_after_exclusion() {
         .await
         .is_err());
 }
+
+#[tokio::test]
+async fn archive_remote_reads_32_chunks_in_one_bounded_transaction() {
+    use std::sync::atomic::Ordering;
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .unwrap();
+    sqlx::query("CREATE TABLE messages(thread_id TEXT, message_id TEXT, content TEXT)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let payload = PersistedPayload::Message(BaseMessage::ai("original".repeat(20000)));
+    let original = serialize_persisted_payload(&payload).unwrap();
+    sqlx::query("INSERT INTO messages VALUES (?1, ?2, ?3)")
+        .bind(PAGE_SESSION)
+        .bind(payload.id().as_uuid().to_string())
+        .bind(&original)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let transport = Arc::new(SqliteTransport::for_test(pool));
+    let data = remote_data(&transport);
+    let queries = (0..ARCHIVE_CHUNKS_PER_BATCH)
+        .map(|index| ArchiveChunkQuery {
+            message_id: payload.id(),
+            committed_tail: payload.id(),
+            offset: (index * ARCHIVE_CHUNK_BYTES) as u64,
+            max_bytes: ARCHIVE_CHUNK_BYTES as u32,
+        })
+        .collect();
+    let batch = ArchiveChunkBatch::new(queries).unwrap();
+    let chunks = data
+        .read_archive_chunks(&PAGE_SESSION.into(), &batch)
+        .await
+        .unwrap();
+    assert_eq!(
+        transport.read_batches.load(Ordering::SeqCst),
+        1,
+        "32个4KiB块必须共用一次远端请求"
+    );
+    assert_eq!(chunks.len(), ARCHIVE_CHUNKS_PER_BATCH);
+    let bytes = chunks
+        .into_iter()
+        .flat_map(|chunk| {
+            assert_eq!(chunk.total_bytes, original.len() as u64);
+            chunk.bytes
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bytes,
+        original.as_bytes()[..ARCHIVE_CHUNKS_PER_BATCH * ARCHIVE_CHUNK_BYTES]
+    );
+    let error = data
+        .read_archive_chunks(&"foreign".into(), &batch)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error.kind(), SessionResourceErrorKind::NotFound),
+        "批量读取仍须校验会话和尾界: {error}"
+    );
+}

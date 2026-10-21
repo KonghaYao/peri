@@ -200,6 +200,9 @@ pub struct SessionContext {
     /// 会话级后台结果处理责任 owner（ACP 宿主跨 prompt 注入；None 时由本次执行
     /// 建立本地 owner，保证无宿主路径也有等价语义）。
     pub async_result_mailbox: Option<Arc<crate::session::async_result_mailbox::AsyncResultMailbox>>,
+    /// Host-owned runtime consumption evidence; never serialized or restored.
+    pub compact_exposure:
+        Arc<parking_lot::Mutex<crate::agent::compact_v2::exposure::ExposureLedger>>,
     pub cancel: AgentCancellationToken,
     pub broker: Arc<dyn UserInteractionBroker>,
     pub permission_mode: Arc<peri_acp_types::permission::SharedPermissionMode>,

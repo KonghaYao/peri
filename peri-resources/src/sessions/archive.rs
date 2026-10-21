@@ -34,13 +34,9 @@ pub(crate) fn validate_metadata(query: &ArchiveMetadataQuery) -> SessionResource
     Ok(())
 }
 pub(crate) fn validate_chunk(query: &ArchiveChunkQuery) -> SessionResourceResult<()> {
-    if query.max_bytes == 0
-        || query.max_bytes as usize > ARCHIVE_CHUNK_BYTES
-        || query.offset > i64::MAX as u64 - ARCHIVE_CHUNK_BYTES as u64
-    {
-        return Err(invalid("invalid archive chunk bounds"));
-    }
-    Ok(())
+    query
+        .validate()
+        .map_err(|_| invalid("invalid archive chunk bounds"))
 }
 pub(crate) fn invalid(detail: &str) -> SessionResourceError {
     SessionResourceError::new(SessionResourceErrorKind::InvalidInput {
