@@ -476,7 +476,11 @@ pub fn build_stage_context(
     // 工具（`mcp__{server}__{tool}`）不进入共享 registry，无需剔除。
     let session_tools: SharedToolMap =
         build_session_tool_view(&shared_tools, chain.collect_tools(&cwd));
-    let tool_catalog = tools::register_tool_catalog(input, &session_tools)?;
+    let tool_catalog = tools::register_tool_catalog(
+        &session_tools,
+        input.meta_harness_disabled.clone(),
+        input.session_mcp_catalog.clone(),
+    )?;
 
     // 构造 StageContext（builder 构造晚于工具注入：chain 在
     // collect_tools 借用后被 move 进 builder，顺序不可调换）

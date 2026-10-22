@@ -78,14 +78,14 @@ stdio 注册使用同一 action，`args`、`env` 缺省为空；执行目录由�
 5. 关闭保留配置与 stopped/disconnected 条目，重复关闭成功；后续 restart 可恢复。注册同名条目返回 name_conflict，不能隐式 replace。
 6. shutdown 不完整时保持不可调用和可重试关闭状态；返回 shutdown_incomplete，禁止报告 stopped 或开始新实例。pool 的 server slot 在 await 前持有待清理 service/process；超时、waiter 取消或 worker 被 abort 后仍保留相同 owner 与关闭事务，重试不能丢失资源。
 7. 旧 bridge、迟到 discovery/OAuth/notification 必须核对当前 handle/连接代次，不能重新发布已关闭实例或覆盖新实例。本版临时注册禁用持久化 resource cache，内存缓存仍须绑定当前连接身份。
-8. initialize、OAuth、reconnect 与三个控制动作共用 per-server 准入门和连接代次；建连前取得代次，提交时复核，stop 之后旧初始化不能迟到发布。pool begin-close 后拒绝控制准入/连接发布。任务继续纳入现有 non-Clone McpTaskOwner；关闭顺序遵循 ARC-HOST-SHUTDOWN-001。
+8. initialize、OAuth、reconnect 与三个控制动作共用 per-server 准入门和连接代次；建连前取得代次，提交时复核，stop 之后旧初始化不能迟到发布。pool begin-close 后拒绝控制准入/连接发布。任务继续纳入现有 non-Clone McpTaskOwner；关闭顺序遵循 ARC-HOST-SHUTDOWN-001。不同 server 仍共享 pool 生命周期与 service 所有权锁，连接发布和关闭转移必须遵守相同锁顺序；不得持有 service 表锁后反向获取生命周期准入锁。
 9. stdio 复用既有进程隔离、执行 cwd、环境与平台准入；HTTP 复用部署网络能力。客户端配置不能伪造可信来源。
 
 ## 5. 能力目录与可观察性
 
 1. pool 是唯一 MCP 连接事实源；工具/资源/skill/command 投影从当前可调用 handle 推导。
 2. 下一次 Reason 刷新 MCP 目录，原子发布工具与 ToolSearch 索引；本次 Reason 的 dispatch 固定同一快照。关闭后旧快照的 bridge 也必须拒绝新调用；App/host 工具、resource/skill 激活等入口共用该连接调用 gate，不能绕过撤销。skill 激活须匹配当前 `Discovered` 条目及 `Connected` handle；legacy 已校验的缓存正文无需 RPC peer，但仍须通过同一校验，重连发现中、条目撤销或缓存快照变更后拒绝旧内容。
-3. 保留通用 Reason 目录刷新、固定快照与 allowlist/disallowlist。删除仅服务旧 Dynamic MCP 的 overlay 与静态遮蔽/恢复。普通订阅、Git Watch 与任务通知迁移为通用 `McpNotification` 消息源，保持原有 Info/Defer 与持久化历史可读语义。
+3. 保留通用 Reason 目录刷新、固定快照与 allowlist/disallowlist。主 Agent、子 Agent spawn/resume 的初始目录及后续刷新均应用父会话冻结的 MCP 关闭策略，再与子 Agent allowlist/disallowlist 取交集；默认继承或 `tools: ["*"]` 不得从完整 pool 重新引入已关闭能力，非 MCP 工具不因 MCP 关闭被误删。过滤应先于候选重名合并，已关闭工具不得占用合法 core/远端工具的名字；主、子 Agent 的首个 before_agent 读取同一过滤后的初始目录。删除仅服务旧 Dynamic MCP 的 overlay 与静态遮蔽/恢复。普通订阅、Git Watch 与任务通知迁移为通用 `McpNotification` 消息源，保持原有 Info/Defer 与持久化历史可读语义。
 4. stop/restart 在成功返回前撤销该 server 的资源、skill、command、agent 投影；discovery 任务键绑定 session、registry 与具体连接身份，避免共享环境或重连代次的重复键冲突；同一连接仅启动一次发现，新连接独立启动，按 server 关闭时须 join 所有代次；恢复后重新发现，迟到提交不能复活旧数据。frozen prompt 不重建。
 5. 运行状态通过既有 `mcp/list` 查询；TUI 操作结束刷新当前会话快照，失败可见，不依赖通知证明动作完成。
 
@@ -93,7 +93,7 @@ stdio 注册使用同一 action，`args`、`env` 缺省为空；执行目录由�
 
 1. MCP 详情提供重启/关闭动作，按稳定 server 名执行；不可管理类型隐藏或禁用并给原因。
 2. 请求携带当前 session ID，使用既有 OperationScope / CompletionGate；同目标在途操作不重复发送，切换 session 后旧完成不能污染新视图。
-3. 成功/失败与重启中/关闭中反馈按既有 i18n、主题和快照提交入口实现。控件不得直调 pool 或 middleware。取消等待、超时或观察者消失表达 OutcomeUnknown，不自动重发；刷新当前作用域后才能展示已确认结论。
+3. 成功/失败与重启中/关闭中反馈按既有 i18n、主题和快照提交入口实现。控件不得直调 pool 或 middleware。MCP 控制从会话身份准入到 RPC 回执共用 60 秒等待期限，不叠加普通会话请求的 10 秒默认期限。取消等待、超时或观察者消失表达 OutcomeUnknown，不自动重发；刷新当前作用域后才能展示已确认结论。
 
 ## 7. 验收
 
@@ -101,8 +101,8 @@ stdio 注册使用同一 action，`args`、`env` 缺省为空；执行目录由�
 
 1. DTO roundtrip 与非法输入、当前连接 capability gate、未知/关闭 session，无副作用。
 2. 真实本地 MCP wire：register → 发现/调用 → stop → 旧 bridge 拒绝 → restart → 新 handle 可用；重复 stop、同名注册冲突。
-3. session 环境隔离、同 server 并发控制、关闭与迟到连接发布竞态、cleanup 不完整不能报告成功。
-4. Reason/ToolSearch 与子 Agent 的过滤、固定快照仍成立；skill/command 旧代不可回写。
-5. TUI 操作 wire、稳定目标与切换会话后的完成门；不新增视觉快照测试。
+3. session 环境隔离、同 server 并发控制、跨 server 关闭与连接提交并发、关闭与迟到连接发布竞态、cleanup 不完整不能报告成功。
+4. Reason/ToolSearch 与子 Agent spawn/resume 的父关闭策略及子过滤交集、固定快照仍成立；刷新不能复活已关闭能力，skill/command 旧代不可回写。
+5. TUI 操作 wire、稳定目标与切换会话后的完成门；12 秒成功回执、60 秒到期及普通请求默认期限；不新增视觉快照测试。
 6. 旧 DynamicMCP 名称、专属类型/工具/提示词/配置键/实现与测试全部退出当前源码和当前权威文档。历史月志可保留历史表述。
 7. 按变更范围执行 cargo check、相关契约测试、fmt、层依赖与文档/文件规模检查；记录准确退出状态及未执行范围。

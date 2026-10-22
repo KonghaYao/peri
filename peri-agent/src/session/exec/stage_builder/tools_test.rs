@@ -106,3 +106,109 @@ fn session_view_keeps_first_injected_name_case_insensitively() {
     assert_eq!(view.read().len(), 1);
     assert!(view.read().contains_key("lookup"));
 }
+
+struct SourceTool(&'static str, Option<&'static str>, Option<&'static str>);
+
+#[async_trait]
+impl BaseTool for SourceTool {
+    fn name(&self) -> &str {
+        self.0
+    }
+    fn description(&self) -> &str {
+        self.0
+    }
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn mcp_server_name(&self) -> Option<&str> {
+        self.1
+    }
+    fn builtin_mcp_instance(&self) -> Option<&str> {
+        self.2
+    }
+    async fn invoke(
+        &self,
+        _: serde_json::Value,
+        _: crate::tools::ToolContext<'_>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        unreachable!("initial catalog probe does not invoke tools")
+    }
+}
+
+struct InitialCatalogProbe(Arc<RwLock<Vec<String>>>);
+
+#[async_trait]
+impl crate::middleware::Middleware for InitialCatalogProbe {
+    fn name(&self) -> &str {
+        "InitialCatalogProbe"
+    }
+    async fn before_agent(
+        &self,
+        state: &mut dyn crate::middleware::capabilities::BeforeAgentState,
+    ) -> crate::error::AgentResult<()> {
+        *self.0.write() = state
+            .local_tools()
+            .unwrap()
+            .read()
+            .keys()
+            .cloned()
+            .collect();
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn main_initial_before_agent_observes_filtered_mcp_catalog() {
+    use crate::{
+        agent::stages::{middleware_runner, StageContext},
+        middleware::MiddlewareChain,
+        session::{FrozenContext, Session},
+    };
+
+    for (policy, expected) in [
+        (
+            "WorkspaceMiddleware",
+            vec!["Read", "RemoteRead", "WebSearch"],
+        ),
+        ("McpMiddleware", vec!["Read"]),
+    ] {
+        let core: Arc<dyn BaseTool> = Arc::new(SourceTool("Read", None, None));
+        let shared = RwLock::new(BTreeMap::from([("Read".into(), core)]));
+        let view = build_session_tool_view(
+            &shared,
+            vec![
+                Box::new(SourceTool("Write", Some("workspace"), Some("workspace"))),
+                Box::new(SourceTool("RemoteRead", Some("workspace"), None)),
+                Box::new(SourceTool("WebSearch", Some("web"), Some("web"))),
+            ],
+        );
+        assert!(
+            view.read().contains_key("Write"),
+            "name-only view is not the MCP policy boundary"
+        );
+        let catalog =
+            register_tool_catalog(&view, [policy.into()].into_iter().collect(), None).unwrap();
+        let observed = Arc::new(RwLock::new(Vec::new()));
+        let mut chain = MiddlewareChain::new();
+        chain.add(Box::new(InitialCatalogProbe(observed.clone())));
+        let session = Session::new(Arc::from("/tmp"), FrozenContext::builder().build(), None);
+        let ctx = StageContext::builder(
+            session.start_turn(),
+            session.transcript(),
+            session.queue().clone(),
+        )
+        .with_tools(view)
+        .with_tool_catalog(catalog.clone())
+        .with_middleware_chain(Arc::new(chain))
+        .build();
+        middleware_runner::run_before_agent(&ctx, &[])
+            .await
+            .unwrap();
+        assert_eq!(*observed.read(), expected, "first hook: {policy}");
+        assert_eq!(
+            catalog.snapshot().tools.keys().cloned().collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(shared.read().len(), 1, "host registry remains unchanged");
+    }
+}

@@ -15,6 +15,8 @@ use crate::application::operations::{
 use crate::i18n;
 use crate::kit::atoms::{ACP_CLIENT_HANDLE, ACTIVE_SESSION_ID, BRIDGE_RESET_COUNTER, MCP_SERVERS};
 
+const MCP_CONTROL_TIMEOUT: Duration = Duration::from_secs(60);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ControlAction {
     Restart,
@@ -198,13 +200,12 @@ async fn run(
         tokio::select! {
             biased;
             _ = ticket.token().cancelled() => (OperationOutcome::OutcomeUnknown { reason: OutcomeUnknownReason::WaitCancelled }, None),
-            result = peri_time::timeout(Duration::from_secs(60), request(&client, &identity, &name, action)) => match result {
-                Ok(Ok(status)) => (OperationOutcome::Succeeded, Some(status)),
-                Ok(Err(error)) => {
+            result = request(&client, &identity, &name, action) => match result {
+                Ok(status) => (OperationOutcome::Succeeded, Some(status)),
+                Err(error) => {
                     tracing::warn!(session_id = %identity.0, server = %name, %error, "MCP control request failed");
                     (classify_error(error), None)
                 }
-                Err(_) => (OperationOutcome::OutcomeUnknown { reason: OutcomeUnknownReason::TimedOut }, None),
             }
         }
     };
@@ -240,20 +241,17 @@ async fn run(
 }
 
 fn classify_error(error: AcpError) -> OperationOutcome {
-    if error.code == -32603
-        && error
-            .data
-            .as_ref()
-            .and_then(|data| data.get("kind"))
-            .is_none()
-    {
-        OperationOutcome::OutcomeUnknown {
+    let kind = error.data.as_ref().and_then(|data| data.get("kind"));
+    match (error.code, kind) {
+        (-32603, Some(kind)) if kind == "request_timeout" => OperationOutcome::OutcomeUnknown {
+            reason: OutcomeUnknownReason::TimedOut,
+        },
+        (-32603, None) => OperationOutcome::OutcomeUnknown {
             reason: OutcomeUnknownReason::ObserverGone,
-        }
-    } else {
-        OperationOutcome::Failed {
+        },
+        _ => OperationOutcome::Failed {
             reason: error.message,
-        }
+        },
     }
 }
 
@@ -264,12 +262,13 @@ async fn request(
     action: ControlAction,
 ) -> Result<String, AcpError> {
     let response = client
-        .send_session_request(
+        .send_session_request_with_timeout(
             identity,
             "peri/mcp/control",
             json!({
                 "sessionId": identity.0, "serverName": name, "action": action.wire(),
             }),
+            MCP_CONTROL_TIMEOUT,
         )
         .await?;
     let status = response.get("status").and_then(Value::as_str);

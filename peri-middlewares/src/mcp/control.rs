@@ -166,8 +166,7 @@ impl McpClientPool {
             }
         }
         // Move resources into their pool-retained owner before any cancellation point.
-        if let Some(service) = self.services.lock().remove(name) {
-            let owner = self.own_service(service);
+        if let Some(owner) = self.take_service_for_close(name) {
             slot.services.lock().push(owner);
         }
         let resources = slot.services.lock().clone();

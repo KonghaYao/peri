@@ -9,6 +9,7 @@ use super::AcpTuiClient;
 
 /// 配置类 RPC 的本地回执上限；持锁等待无界会连带阻塞后续输入提交。
 const CONFIG_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const SESSION_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 #[cfg(test)]
 #[path = "cancel_test.rs"]
@@ -21,6 +22,10 @@ mod caps_tests;
 #[cfg(test)]
 #[path = "session_request_test.rs"]
 mod session_request_tests;
+
+#[cfg(test)]
+#[path = "session_request_timeout_test.rs"]
+mod session_request_timeout_tests;
 
 #[cfg(test)]
 #[path = "steer_config_timeout_test.rs"]
@@ -37,20 +42,34 @@ impl AcpTuiClient {
         method: &str,
         params: Value,
     ) -> Result<Value, AcpError> {
-        {
-            let _operation = self.lifecycle.operation_gate().lock().await;
-            if self.lifecycle.stable_identity().as_ref() != Some(identity)
-                || params.get("sessionId").and_then(Value::as_str) != Some(identity.0.as_str())
+        self.send_session_request_with_timeout(identity, method, params, SESSION_REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// 一个期限覆盖准入等待与回执；operation gate 仅保护发送前的身份校验。
+    pub(crate) async fn send_session_request_with_timeout(
+        &self,
+        identity: &(String, u64),
+        method: &str,
+        params: Value,
+        timeout: std::time::Duration,
+    ) -> Result<Value, AcpError> {
+        peri_time::timeout(timeout, async {
             {
-                return Err(AcpError::new(-32602, "session changed before request"));
+                let _operation = self.lifecycle.operation_gate().lock().await;
+                if self.lifecycle.stable_identity().as_ref() != Some(identity)
+                    || params.get("sessionId").and_then(Value::as_str) != Some(identity.0.as_str())
+                {
+                    return Err(AcpError::new(-32602, "session changed before request"));
+                }
             }
-        }
-        peri_time::timeout(
-            std::time::Duration::from_secs(10),
-            self.transport.send_request(method, params),
-        )
+            self.transport.send_request(method, params).await
+        })
         .await
-        .map_err(|_| AcpError::new(-32603, "session RPC outcome unknown: timed out"))?
+        .map_err(|_| {
+            AcpError::new(-32603, "session RPC outcome unknown: timed out")
+                .with_data(json!({"kind":"request_timeout"}))
+        })?
     }
 
     /// Send a raw ACP request and return the response.

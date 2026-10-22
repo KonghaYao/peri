@@ -1,7 +1,9 @@
 //! Session-local 工具视图与当前 MCP 目录绑定；不写宿主共享表。
-use super::{StageBuildError, StageBuildInput};
+use super::StageBuildError;
 use crate::{
-    agent::stages::SharedToolMap, session::tool_catalog::SessionToolCatalog, tools::BaseTool,
+    agent::stages::SharedToolMap,
+    session::tool_catalog::{SessionToolCatalog, ToolFilterPolicy},
+    tools::BaseTool,
 };
 use parking_lot::RwLock;
 use std::{
@@ -64,28 +66,20 @@ pub(super) fn build_session_tool_view(
 }
 
 pub(super) fn register_tool_catalog(
-    input: &StageBuildInput,
     session_tools: &SharedToolMap,
+    disabled: HashSet<String>,
+    session_mcp_catalog: Option<Arc<dyn peri_acp_types::ports::SessionMcpCatalogPort>>,
 ) -> Result<Arc<SessionToolCatalog>, StageBuildError> {
-    let disabled = input.meta_harness_disabled.clone();
     let enabled = !disabled.contains("McpMiddleware");
-    let tool_filter = Arc::new(move |tool: &dyn BaseTool| {
-        if tool.mcp_server_name().is_none() {
-            return true;
-        }
-        if !enabled {
-            return false;
-        }
-        !tool.builtin_mcp_instance().is_some_and(|instance| {
-            peri_acp_types::builtin_mcp::find(instance)
-                .is_some_and(|declared| disabled.contains(declared.policy_key))
-        })
-    });
-    Ok(Arc::new(SessionToolCatalog::try_with_filter(
+    let tool_filter = ToolFilterPolicy::with_mcp_policy(disabled, Arc::new(|_| true));
+    let catalog = Arc::new(SessionToolCatalog::try_with_filter(
         session_tools.read().clone(),
-        enabled.then(|| input.session_mcp_catalog.clone()).flatten(),
+        enabled.then_some(session_mcp_catalog).flatten(),
         tool_filter,
-    )?))
+    )?);
+    // 首个 before_agent 与后续 Reason 使用同一策略过滤后的视图。
+    *session_tools.write() = catalog.snapshot().tool_map();
+    Ok(catalog)
 }
 
 #[cfg(test)]

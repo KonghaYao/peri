@@ -107,6 +107,79 @@ async fn test_control_wire_keeps_session_server_and_action_identity() {
     server_task.await.unwrap();
 }
 
+#[tokio::test(start_paused = true)]
+async fn test_control_request_accepts_response_after_twelve_seconds() {
+    for (action, status) in [
+        (ControlAction::Restart, "connected"),
+        (ControlAction::Stop, "stopped"),
+    ] {
+        let (transport, server) = mpsc_transport_pair();
+        let (client, _, _) = AcpTuiClient::new(transport);
+        client.force_stable_for_test("session-a", false);
+        let identity = client.stable_session_identity().unwrap();
+        let task = tokio::spawn(async move { request(&client, &identity, "docs", action).await });
+        let Some(IncomingMessage::Request { id, method, params }) = server.recv().await else {
+            panic!("control request was not sent")
+        };
+        assert_eq!(method, "peri/mcp/control");
+        assert_eq!(params["action"], action.wire());
+        let sent_at = tokio::time::Instant::now();
+
+        tokio::time::advance(Duration::from_secs(11)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !task.is_finished(),
+            "control RPC was cut off at ten seconds"
+        );
+        tokio::time::advance(Duration::from_secs(1)).await;
+        server
+            .send_response(
+                id,
+                Ok(json!({
+                    "sessionId":"session-a", "serverName":"docs",
+                    "action":action.wire(), "status":status,
+                })),
+            )
+            .await
+            .unwrap();
+        assert_eq!(task.await.unwrap().unwrap(), status);
+        assert_eq!(sent_at.elapsed(), Duration::from_secs(12));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_control_request_times_out_at_sixty_seconds_with_unknown_outcome() {
+    for action in [ControlAction::Restart, ControlAction::Stop] {
+        let (transport, server) = mpsc_transport_pair();
+        let (client, _, _) = AcpTuiClient::new(transport);
+        client.force_stable_for_test("session-a", false);
+        let identity = client.stable_session_identity().unwrap();
+        let task = tokio::spawn(async move { request(&client, &identity, "docs", action).await });
+        let Some(IncomingMessage::Request { .. }) = server.recv().await else {
+            panic!("control request was not sent")
+        };
+
+        tokio::time::advance(Duration::from_secs(59)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !task.is_finished(),
+            "control RPC expired before sixty seconds"
+        );
+        tokio::time::advance(Duration::from_secs(1) + Duration::from_millis(1)).await;
+        let error = tokio::time::timeout(Duration::from_millis(1), task)
+            .await
+            .expect("control RPC must expire at its sixty-second deadline")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(
+            classify_error(error),
+            OperationOutcome::OutcomeUnknown {
+                reason: OutcomeUnknownReason::TimedOut
+            }
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_control_rejects_mismatched_server_success() {
     let (transport, server) = mpsc_transport_pair();

@@ -12,7 +12,7 @@ use crate::agent::react::ReactLLM;
 use crate::agent::stages::{SharedToolMap, StageContext};
 use crate::agent::{CompactConfig, ContextBudget};
 use crate::middleware::chain::MiddlewareChain;
-use crate::session::tool_catalog::SessionToolCatalog;
+use crate::session::tool_catalog::{SessionToolCatalog, ToolFilterPolicy};
 use crate::session::turn::TurnId;
 use crate::session::{FrozenContext, MessageQueue, Session};
 use crate::tools::{BaseTool, DirectToolInvocationResolver, ToolInvocationResolver};
@@ -267,14 +267,27 @@ pub fn build_v2_subagent_context(
     let transcript = session.transcript();
     let queue_clone = session.queue().clone();
 
-    // tools → SharedToolMap（本地 tools 全部进 map）
+    // 独立构造入口也以 Session 的冻结关闭集为准，不能依赖 factory 的预过滤。
+    let disabled = session
+        .store()
+        .frozen
+        .meta_harness
+        .disabled_middlewares
+        .clone();
+    let mcp_enabled = !disabled.contains("McpMiddleware");
+    let tool_filter = ToolFilterPolicy::with_mcp_policy(disabled, tool_filter);
+
+    // 先过滤再合并，关闭的旧 MCP 候选不得占用合法 core 工具的名字。
     let mut tools_map: std::collections::BTreeMap<String, Arc<dyn BaseTool>> =
         std::collections::BTreeMap::new();
-    for tool in tools {
+    for tool in tools.into_iter().filter(|tool| tool_filter(tool.as_ref())) {
         tools_map.insert(tool.name().to_string(), tool);
     }
     for tool in chain.collect_tools(cwd) {
         let tool: Arc<dyn BaseTool> = Arc::from(tool);
+        if !tool_filter(tool.as_ref()) {
+            continue;
+        }
         if let Some(winner) = tools_map.values().find(|existing| {
             crate::session::tool_catalog::tool_names_conflict(existing.as_ref(), tool.as_ref())
         }) {
@@ -283,12 +296,13 @@ pub fn build_v2_subagent_context(
         }
         tools_map.insert(tool.name().to_string(), tool);
     }
-    let combined_shared_tools: SharedToolMap = Arc::new(RwLock::new(tools_map.clone()));
     let tool_catalog = Arc::new(SessionToolCatalog::with_filter(
         tools_map,
-        session_mcp_catalog,
+        mcp_enabled.then_some(session_mcp_catalog).flatten(),
         tool_filter,
     ));
+    let combined_shared_tools: SharedToolMap =
+        Arc::new(RwLock::new(tool_catalog.snapshot().tool_map()));
 
     let (event_bus, event_handles) = EventBus::new(EventBusConfig::default());
     let event_bus_arc: Arc<EventBus> = Arc::new(event_bus);
