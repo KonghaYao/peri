@@ -499,6 +499,28 @@ pub(crate) static HISTORY_PAGING: AtomStatic<crate::kit::history_paging::History
 pub static HISTORY_WINDOW_V1: AtomStatic<bool> = AtomStatic::new(|| false);
 /// 当前连接是否协商 `peri.historyWindowV1`（initialize 响应写入；未回显一律 fail-closed）。
 pub static HISTORY_WINDOW_CAPABLE: AtomStatic<bool> = AtomStatic::new(|| false);
+/// H5a 本地 V2 beta（`history-v2`，默认关闭）；启动时由配置写入。
+pub static HISTORY_V2: AtomStatic<bool> = AtomStatic::new(|| false);
+/// 当前连接是否由服务端选择 History V2（initialize 回显；未回显一律 false）。
+pub static HISTORY_V2_CAPABLE: AtomStatic<bool> = AtomStatic::new(|| false);
+/// 协商后的 V2 预算；未协商时保留协议默认值。
+pub static HISTORY_V2_LIMITS: AtomStatic<peri_acp_types::history_v2::HistoryLimits> =
+    AtomStatic::new(peri_acp_types::history_v2::HistoryLimits::default);
+/// V2 唯一历史状态（initial 首屏准入；H5b 的页合并扩展同一结构）。
+pub static HISTORY_V2_STATE: AtomStatic<crate::kit::history_v2::HistoryV2State> =
+    AtomStatic::new(crate::kit::history_v2::HistoryV2State::default);
+/// H5c：V2 页/seek/open 消费者队列。V2 激活时 V1 窗口队列不再收到请求。
+pub(crate) static HISTORY_V2_TX: OnceLock<
+    UnboundedSender<crate::kit::history_v2::consumer::HistoryV2ConsumerRequest>,
+> = OnceLock::new();
+/// H5c：V2 requestKey 的本地单调解码器；initial 接纳时以服务端回显的键播种。
+pub(crate) static HISTORY_V2_NEXT_KEY: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+/// H5c：`committed` 前缀里由 V2 窗口投影出的展示单元数。V2 更新只替换这段前缀，
+/// 其后是 live 事件追加的内容；桥接 reset 时归零。
+pub static HISTORY_V2_PREFIX_LEN: AtomStatic<usize> = AtomStatic::new(|| 0);
+/// H5c：上次投影的导航代次。代次变化（seek/reopen）时连同 live 尾部一起重建。
+pub static HISTORY_V2_VIEW_EPOCH: AtomStatic<u64> = AtomStatic::new(|| 0);
 /// 桥接窗口当前代次；consumer 用它给页请求盖代次。
 pub static HISTORY_WINDOW_GENERATION: AtomStatic<u64> = AtomStatic::new(|| 0);
 /// S5.4 consumer 侧窗口请求/在途/待合并状态。

@@ -34,6 +34,11 @@ impl AcpTuiClient {
         let _preparing = PreparingSessionGuard::enter();
         *self.restore_error.lock().unwrap() = None;
         self.clear_startup_restore_target();
+        if self.history_v2_active() {
+            // 切换会话前 best-effort 关闭旧窗口；关闭确认属于服务端，本地只复位状态。
+            crate::kit::history_v2::consumer::request_close_current();
+            crate::kit::history_v2::reset_state();
+        }
         self.project_execution_cwd(None);
         let start = self
             .lifecycle
@@ -108,10 +113,15 @@ impl AcpTuiClient {
             .await?;
         // S5.4：新建与恢复统一建立窗口。服务端只向持有 window ticket 的连接发送
         // `peri/history_committed`；新会话不 open 会让实时段永远停在 position=None。
-        crate::kit::history_page_consumer::enqueue_window_open(
-            &session_id,
-            crate::kit::history_paging::WindowDirection::Before,
-        );
+        // H5b：V2 连接的新会话没有 load initial，用 `_peri/history open latest` 建立首窗。
+        if self.history_v2_active() {
+            crate::kit::history_v2::consumer::request_open_latest(&session_id);
+        } else {
+            crate::kit::history_page_consumer::enqueue_window_open(
+                &session_id,
+                crate::kit::history_paging::WindowDirection::Before,
+            );
+        }
         self.project_execution_cwd(Some(effective_cwd));
         *self.restore_error.lock().unwrap() = None;
         projection.committed = true;

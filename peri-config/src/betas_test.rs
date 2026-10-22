@@ -69,3 +69,16 @@ fn test_history_window_v1_beta_defaults_false_and_accepts_override() {
     disabled.config.betas.validate();
     assert!(!from_merged(&disabled).is_enabled(HISTORY_WINDOW_V1));
 }
+
+/// History V2 本地 beta：未配置默认关闭，显式 true 才生效。
+#[test]
+fn test_history_v2_beta_defaults_false_and_accepts_override() {
+    let default = PeriConfig::default();
+    assert!(!from_merged(&default).is_enabled(HISTORY_V2));
+    assert!(is_known(HISTORY_V2));
+
+    let mut enabled = PeriConfig::default();
+    enabled.config.betas.set(HISTORY_V2, true);
+    enabled.config.betas.validate();
+    assert!(from_merged(&enabled).is_enabled(HISTORY_V2));
+}

@@ -105,11 +105,30 @@ impl AcpTuiClient {
         // safe 契约：`mcp/oauth_start` 强制要求 flow_id、`mcp/oauth_callback`
         // 直接拒绝授权码——TUI 的 [ 授权 ] 按钮会因缺 flow_id 被拒且无反馈。
         caps.oauth = false;
-        caps.history_window_v1 = crate::kit::atoms::HISTORY_WINDOW_V1.get();
+        // H5a：本地 V2 beta 开启时只声明 `peri.history`，不再声明任何旧私有历史
+        // 能力（设计 §4.7：同时声明旧、新能力会被服务端拒绝）。关闭时保持原 V1
+        // 声明逐字节不变。
+        let history_v2_requested = crate::kit::atoms::HISTORY_V2.get();
+        *self.history_v2_enabled.lock().unwrap() = Some(history_v2_requested);
+        caps.history_pagination = !history_v2_requested;
+        caps.history_window_v1 =
+            !history_v2_requested && crate::kit::atoms::HISTORY_WINDOW_V1.get();
         caps.ui_commands = specs.to_vec();
         self.mcp_control
             .store(false, std::sync::atomic::Ordering::Release);
         let mut meta = caps.to_agent_meta();
+        if history_v2_requested {
+            let capability = peri_acp_types::history_v2::HistoryClientCapability {
+                versions: vec![peri_acp_types::history_v2::HISTORY_V2_VERSION],
+                requested_profile: peri_acp_types::history_v2::HISTORY_PROFILE_WINDOWED.to_owned(),
+            };
+            let value =
+                serde_json::to_value(capability).expect("HistoryClientCapability 序列化不应失败");
+            meta.insert(
+                peri_acp_types::history_v2::HISTORY_META_KEY.to_owned(),
+                value,
+            );
+        }
         meta.insert("peri.mcpControlV1".into(), Value::Bool(true));
         let params = json!({
             "protocolVersion": 1,
@@ -143,6 +162,45 @@ impl AcpTuiClient {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(history_window);
+
+        // History V2 只认服务端明确回显的 version=2 + selectedProfile=windowed。
+        // 未请求、未回显或形状不符都保持关闭；本地开关与服务端事实同时为真才启用。
+        let negotiated_v2 = crate::kit::history_v2::negotiate_from_initialize_response(&result);
+        let history_v2 = match negotiated_v2 {
+            Ok(Some(capability)) if history_v2_requested => {
+                self.set_history_v2_negotiation(true, capability.limits.clone());
+                crate::kit::atoms::HISTORY_V2_LIMITS.set(capability.limits);
+                true
+            }
+            Ok(Some(_)) => {
+                tracing::warn!("server selected History V2 without a client request; ignoring");
+                self.set_history_v2_negotiation(
+                    false,
+                    peri_acp_types::history_v2::HistoryLimits::default(),
+                );
+                false
+            }
+            Ok(None) => {
+                self.set_history_v2_negotiation(
+                    false,
+                    peri_acp_types::history_v2::HistoryLimits::default(),
+                );
+                false
+            }
+            Err(error) => {
+                tracing::warn!(%error, "History V2 negotiation response rejected");
+                self.set_history_v2_negotiation(
+                    false,
+                    peri_acp_types::history_v2::HistoryLimits::default(),
+                );
+                false
+            }
+        };
+        let was_history_v2_capable = crate::kit::atoms::HISTORY_V2_CAPABLE.get();
+        crate::kit::atoms::HISTORY_V2_CAPABLE.set(history_v2);
+        if !history_v2 && was_history_v2_capable {
+            crate::kit::history_v2::reset_state();
+        }
         if self.projection_mode == super::ClientProjectionMode::Interactive {
             crate::kit::steer_state::STEERS.state().write().enabled = supported;
         }

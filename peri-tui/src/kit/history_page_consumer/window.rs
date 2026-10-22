@@ -238,7 +238,10 @@ pub enum WindowSettlement {
 }
 
 pub fn window_path_enabled() -> bool {
-    atoms::HISTORY_WINDOW_V1.get() && atoms::HISTORY_WINDOW_CAPABLE.get()
+    // V2 激活时窗口状态只属于 V2 reducer；V1 窗口队列不得再收到任何请求。
+    atoms::HISTORY_WINDOW_V1.get()
+        && atoms::HISTORY_WINDOW_CAPABLE.get()
+        && !crate::kit::history_v2::consumer::v2_path_active()
 }
 
 pub fn reset_window_paging_state() {
