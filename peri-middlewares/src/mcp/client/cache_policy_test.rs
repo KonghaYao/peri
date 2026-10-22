@@ -218,6 +218,7 @@ async fn enabled_policy_preserves_versioned_cache_hits_without_rpc() {
     let peer = running.peer();
     peer.set_peer_info(rmcp::model::InitializeResult::default().into());
     let handle = Arc::new(super::McpClientHandle {
+        call_gate: Default::default(),
         name: "server".into(),
         version: None,
         connected_at: None,
@@ -343,9 +344,10 @@ async fn disabled_policy_bypasses_skill_discovery_caches_and_keeps_registry_live
     use tokio_util::sync::CancellationToken;
 
     for skills_capable in [true, false] {
-        let pool = Arc::new(McpClientPool::new_empty_with_cache_policy(
-            McpCachePolicy::Disabled,
-        ));
+        let (mut owner, spawner) = crate::mcp::McpTaskOwner::new();
+        let mut pool = McpClientPool::new_empty_with_cache_policy(McpCachePolicy::Disabled);
+        pool.task_spawner = spawner;
+        let pool = Arc::new(pool);
         let origin = pool.cache_origin("server");
         let params = if skills_capable { "{}" } else { SKILL_URI };
         let method = if skills_capable {
@@ -377,6 +379,7 @@ async fn disabled_policy_bypasses_skill_discovery_caches_and_keeps_registry_live
         pool.clients.write().insert(
             "server".into(),
             Arc::new(McpClientHandle {
+                call_gate: Default::default(),
                 name: "server".into(),
                 version: None,
                 connected_at: None,
@@ -427,11 +430,15 @@ async fn disabled_policy_bypasses_skill_discovery_caches_and_keeps_registry_live
             .await
             .unwrap();
         assert_eq!(cached, stale);
+        pool.begin_shutdown();
+        owner.begin_shutdown();
+        owner.shutdown().await;
         running.cancel().await.unwrap();
         tokio::time::timeout(Duration::from_secs(2), server)
             .await
             .unwrap()
             .unwrap();
+        assert!(pool.shutdown().await.is_complete());
     }
 }
 

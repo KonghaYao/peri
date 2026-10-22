@@ -23,7 +23,9 @@ use crate::kit::atoms::{
 
 mod commit;
 mod file_scan;
+mod mcp_refresh;
 mod memory_scan;
+pub(crate) use mcp_refresh::refresh_mcp_projection;
 mod session_metadata;
 mod session_services;
 mod thread_list_refresh;
@@ -40,6 +42,13 @@ use session_metadata::derive_provider_and_model;
 use session_metadata::{SessionMetadata, SessionMetadataRefresh, derive_providers};
 use session_services::SessionServices;
 use thread_list_refresh::ThreadListRefresh;
+
+// 操作后的主动刷新使先前开始的周期采样失效，避免迟到旧结果覆盖新状态。
+static MCP_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn mcp_revision() -> u64 {
+    MCP_REVISION.load(std::sync::atomic::Ordering::Acquire)
+}
 
 /// 快照源——从 `ServiceRegistry` 抽出的可跨 task 共享句柄。
 #[derive(Clone)]
@@ -141,6 +150,7 @@ async fn tick_once(
     // 重置代次与 cwd 一同在首个 await 之前采样：本次 tick 的整批观察值都归这一个代次，
     // 期间发生的会话边界会让提交门拒绝整批。
     let bridge_reset = BRIDGE_RESET_COUNTER.get();
+    let mcp_revision = mcp_revision();
     let active_cwd = ACTIVE_EXECUTION_CWD.state().read().clone();
     let cwd = active_cwd.clone().unwrap_or_else(|| src.cwd.clone());
     let scope = THREAD_BROWSER_SCOPE.get();
@@ -187,6 +197,7 @@ async fn tick_once(
         archived,
         page_count,
         bridge_reset,
+        mcp_revision,
     };
     let patches = [
         SnapshotPatch::Cwd(cwd),

@@ -6,6 +6,24 @@ use peri_acp_types::plugin::McpSubscriptionsConfig;
 // 命令面）为新增数据端口；TUI 不再直持池句柄与 watch channel。
 #[async_trait::async_trait]
 impl peri_acp_types::ports::McpPoolPort for McpClientPool {
+    async fn control_mcp(
+        self: Arc<Self>,
+        request: peri_acp_types::mcp_control::McpControlRequest,
+    ) -> Result<
+        peri_acp_types::mcp_control::McpControlResponse,
+        peri_acp_types::mcp_control::McpControlError,
+    > {
+        McpClientPool::control_mcp(self, request).await
+    }
+    fn catalog_source(
+        self: Arc<Self>,
+        session_id: &str,
+    ) -> Option<Arc<dyn peri_acp_types::mcp_control::SessionMcpCatalogPort>> {
+        Some(crate::mcp::control::catalog_source(self, session_id))
+    }
+    fn cancel_oauth_flow(&self, flow_id: &str) -> Result<bool, String> {
+        Ok(McpClientPool::cancel_oauth_flow(self, flow_id))
+    }
     fn verify_shared_environment_close(&self, root_session_id: &str) -> Result<(), String> {
         self.session_bindings
             .read()
@@ -97,7 +115,12 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
     fn server_infos(&self) -> Result<Vec<McpServerInfo>, String> {
         Ok(McpClientPool::all_server_infos(self)
             .into_iter()
-            .map(mcp_server_info_projection)
+            .map(|info| {
+                let control = self.control_descriptor(&info.name);
+                let mut projected = mcp_server_info_projection(info);
+                projected.control = control;
+                projected
+            })
             .collect())
     }
 
@@ -130,28 +153,8 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
         McpClientPool::deliver_oauth_callback(self, server_name, code, state)
     }
 
-    fn deliver_dynamic_oauth_callback(
-        &self,
-        instance: DynamicMcpInstanceKey,
-        flow_id: &str,
-        code: String,
-        state: String,
-    ) -> Result<(), String> {
-        McpClientPool::deliver_dynamic_oauth_callback(self, instance, flow_id, code, state)
-    }
-
     fn cancel_oauth_callback(&self, server_name: &str) -> Result<bool, String> {
         Ok(McpClientPool::cancel_oauth_callback(self, server_name))
-    }
-
-    fn cancel_dynamic_oauth_flow(
-        &self,
-        instance: DynamicMcpInstanceKey,
-        flow_id: &str,
-    ) -> Result<bool, String> {
-        Ok(McpClientPool::cancel_dynamic_oauth_flow(
-            self, instance, flow_id,
-        ))
     }
 
     async fn open_workspace_task_scope(&self, session_id: &str) -> Result<(), String> {
@@ -355,6 +358,7 @@ fn mcp_server_info_projection(info: ServerInfo) -> McpServerInfo {
         protocol_version: info.protocol_version,
         error_summary: info.error_summary,
         url: info.url,
+        control: Default::default(),
     }
 }
 

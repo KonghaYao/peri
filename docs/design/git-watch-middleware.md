@@ -37,7 +37,7 @@
 | 节流 / 单飞 / 短路 | 60s（按完成时刻）/ `in_flight` / `NotRepository` | 同（状态机整体搬迁） | 逐字保持 |
 | 采样 | `GIT_OPTIONAL_LOCKS=0`、1s 超时 | 同 + `kill_on_drop(true)` | D-3：旧实现超时后子进程成孤儿 |
 | 文案 | `info_message_if_changed` | `notice_text`（**逐字**搬迁）+ 新增快照文本 / 未采样固定文本 | D-2 |
-| 送达 | 直接推 `MessageQueue`（`Info` + `SystemInjected`） | 订阅通知 → 宿主回读 → `Info` + `DynamicMcpNotification` | D-4 |
+| 送达 | 直接推 `MessageQueue`（`Info` + `SystemInjected`） | 订阅通知 → 宿主回读 → `Info` + `McpNotification` | D-4 |
 | 提醒映射 | 硬编码在 middleware | 硬编码在宿主消费侧（**不新增**配置面） | D-5 |
 | 无订阅者 | 不适用（middleware 恒在链上） | **不采样**（零 git 调用） | 计划 §2「无订阅者 ⇒ 不采样」 |
 | 关闭 | `GitWatchMiddleware: false` | `WorkspaceMiddleware: false` / 实例 `subscriptions` 覆盖 | D-5；`GitWatchMiddleware` 成为未知键（warn + 忽略） |
@@ -58,7 +58,7 @@
 | 不监视 | 工作区 / 暂存区 / untracked（避免 Agent 自身 Write/Edit 造成误报） |
 | 形态 | builtin `workspace` 实例的资源 + 订阅（**不再有**独立 middleware） |
 | 提示语言 | **固定英文** 正文 |
-| 注入方式 | `MessageKind::Info` + `MessageSource::DynamicMcpNotification`（transcript 层统一 `<system-reminder>`） |
+| 注入方式 | `MessageKind::Info` + `MessageSource::McpNotification`（transcript 层统一 `<system-reminder>`） |
 | 非 git | 探测一次 → 本实例 `NotRepository`，后续零 git 调用 |
 
 ### 1.3 非目标
@@ -220,7 +220,7 @@ builtin `workspace` 实例的订阅回传提供，链上不再有对应槽位（
 | 2026-09-02 | 只监视 branch + commit，**不**监视变更区域 / working tree |
 | 2026-09-02 | 工具完成后参与检测，**1 分钟节流**限制实际 git 调用 |
 | 2026-09-02 | 提示文案固定英文 |
-| 2026-09-29 | **下放到 builtin `workspace` 实例**（资源 + 2026-07-28 订阅回传）；D-1 触发语义收窄、D-2 资源正文 = 最近一次采样结论、D-3 `kill_on_drop`、D-4 来源标识改 `DynamicMcpNotification`、D-5 不新增配置面 |
+| 2026-09-29 | **下放到 builtin `workspace` 实例**（资源 + 2026-07-28 订阅回传）；D-1 触发语义收窄、D-2 资源正文 = 最近一次采样结论、D-3 `kill_on_drop`、D-4 来源标识改 `McpNotification`、D-5 不新增配置面 |
 
 ## 11. 参考实现锚点
 

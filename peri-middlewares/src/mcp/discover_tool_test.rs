@@ -31,6 +31,7 @@ fn make_tool(name: &str, description: &str) -> Tool {
 
 fn make_handle(name: &str, tools: Vec<Tool>, resources: Vec<Resource>) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
+        call_gate: Default::default(),
         name: name.to_string(),
         version: None,
         connected_at: None,

@@ -221,10 +221,7 @@ pub struct SessionContext {
     pub hook_groups: Vec<Vec<peri_acp_types::hooks::RegisteredHook>>,
     pub cron_scheduler: Option<Arc<dyn peri_acp_types::cron::CronSchedulerPort>>,
     pub mcp_pool: Option<Arc<dyn peri_acp_types::ports::McpPoolPort>>,
-    pub dynamic_mcp: Option<Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
-    pub session_mcp_capability: Option<Arc<dyn peri_acp_types::ports::SessionMcpCapabilityPort>>,
-    pub dynamic_mcp_projection:
-        Arc<parking_lot::Mutex<Option<Arc<dyn peri_acp_types::ports::SessionMcpProjectionLease>>>>,
+    pub session_mcp_catalog: Option<Arc<dyn peri_acp_types::ports::SessionMcpCatalogPort>>,
     pub tool_search_index: Arc<dyn peri_acp_types::ports::ToolSearchPort>,
     /// Agent 候选目录端口（prompt 渲染 `{{available_agents}}` 经此访问；
     /// W5：实现是会话级 MCP Agent registry 的只读投影，不再扫盘）。

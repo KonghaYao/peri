@@ -231,6 +231,7 @@ async fn oauth_start_without_injection_fails_without_fallback() {
     pool.configs
         .write()
         .insert("server".into(), http_config("https://example/mcp", None));
+    pool.reserve_oauth_flow("server", "flow");
     let error = pool
         .start_oauth_flow("flow", "server", false)
         .await

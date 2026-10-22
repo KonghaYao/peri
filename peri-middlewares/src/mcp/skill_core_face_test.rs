@@ -40,6 +40,7 @@ use super::{finish_command_source, mark_system_origins, project_core_skill_comma
 /// 判定事实是「连接事实」而不是名字自称，因此夹具必须以真实标记构造。
 fn builtin_handle(name: &str) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
+        call_gate: Default::default(),
         name: name.to_string(),
         version: None,
         connected_at: None,

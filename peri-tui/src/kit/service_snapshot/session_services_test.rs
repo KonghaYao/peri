@@ -188,3 +188,30 @@ async fn plugin_projection_keeps_writable_scope_and_read_only_entries_distinct()
     assert_eq!(services.plugins.len(), 4);
     server_task.await.unwrap();
 }
+
+#[test]
+fn test_mcp_management_projection_needs_connection_and_server_capabilities() {
+    let value = json!({"servers":[
+        {"name":"plugin:docs", "transport":"stdio", "connectionStatus":"connected", "oauthStatus":"none", "toolsCount":0, "control":{"restart":true,"stop":true,"unavailableReason":null}},
+        {"name":"workspace", "transport":"stdio", "connectionStatus":"connected", "oauthStatus":"none", "toolsCount":0, "control":{"restart":false,"stop":false,"unavailableReason":"builtin"}},
+        {"name":"legacy", "transport":"http", "connectionStatus":"connected", "oauthStatus":"none", "toolsCount":0}
+    ]});
+    let (_, servers) = decode_mcp(value.clone(), true).unwrap();
+    assert!(servers[0].control.restart && servers[0].control.stop);
+    assert!(!servers[1].control.restart && !servers[1].control.stop);
+    assert_eq!(
+        servers[1].control.unavailable_reason.as_deref(),
+        Some("builtin")
+    );
+    assert!(!servers[2].control.restart && !servers[2].control.stop);
+    let (_, servers) = decode_mcp(value, false).unwrap();
+    assert!(
+        servers
+            .iter()
+            .all(|server| !server.control.restart && !server.control.stop)
+    );
+    assert_eq!(
+        servers[0].control.unavailable_reason.as_deref(),
+        Some("capability_not_negotiated")
+    );
+}

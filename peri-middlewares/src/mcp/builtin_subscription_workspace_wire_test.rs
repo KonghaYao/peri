@@ -345,6 +345,7 @@ async fn t6_session_delivery_is_info_and_closure_skips_subscription() {
     let link = connect_workspace(&cwd).await;
     let peer = link.peer();
     let handle = Arc::new(McpClientHandle {
+        call_gate: Default::default(),
         name: "workspace".to_string(),
         version: None,
         connected_at: None,
@@ -410,8 +411,8 @@ async fn t6_session_delivery_is_info_and_closure_skips_subscription() {
     assert!(!message.kind.wakes_up(), "Info 不得唤醒会话");
     assert_eq!(
         message.source,
-        MessageSource::DynamicMcpNotification,
-        "D-4：队列来源标识为 DynamicMcpNotification"
+        MessageSource::McpNotification,
+        "D-4：队列来源标识为 McpNotification"
     );
     let reminder = match &message.payload {
         QueuedPayload::SystemReminder(reminder) => reminder.as_reminder(),
@@ -531,6 +532,7 @@ async fn t7b_read_failure_falls_back_to_generic_reminder() {
     pool.clients.write().insert(
         "workspace".to_string(),
         Arc::new(McpClientHandle {
+            call_gate: Default::default(),
             name: "workspace".to_string(),
             version: None,
             connected_at: None,

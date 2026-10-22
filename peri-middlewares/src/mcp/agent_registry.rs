@@ -493,6 +493,7 @@ impl McpAgentRegistry {
             .get_client(&metadata.origin)
             .filter(|handle| matches!(handle.status, ClientStatus::Connected))
             .ok_or_else(|| format!("MCP server '{}' is not connected", metadata.origin))?;
+        let _permit = handle.call_gate.try_acquire().map_err(str::to_owned)?;
         let peer = handle
             .peer
             .as_ref()
@@ -656,6 +657,7 @@ impl McpAgentRegistry {
         pool.clients.write().insert(
             "workspace".to_string(),
             Arc::new(McpClientHandle {
+                call_gate: Default::default(),
                 name: "workspace".to_string(),
                 version: None,
                 connected_at: None,

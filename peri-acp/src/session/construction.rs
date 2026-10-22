@@ -126,14 +126,6 @@ impl SessionManager {
             mcp_skill_registry: Arc::new(McpSkillRegistry::new()),
             command_registry: self.build_command_registry(),
             mcp_subscription: self.inner.mcp_subscription.clone(),
-            dynamic_mcp_deployment: self.inner.dynamic_mcp.clone(),
-            dynamic_mcp_close: self
-                .inner
-                .dynamic_mcp
-                .as_ref()
-                .map(|deployment| deployment.close_registration(session_id)),
-            dynamic_mcp_projection: Arc::new(parking_lot::Mutex::new(None)),
-            dynamic_mcp_notifications: None,
         }
     }
 }

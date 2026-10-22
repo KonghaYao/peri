@@ -130,7 +130,7 @@ pub(super) const W2_TICK_INTERVAL: std::time::Duration = std::time::Duration::fr
 /// （与 `peri-middlewares/src/mcp/builtin/cron_test.rs` 的计数窗口同口径）。
 pub(super) const W2_EVERY_SECOND_CRON: &str = "* * * * * *";
 
-/// 生产装配 + 真实 `run_initialize` 的宿主夹具（`drive_cron_tick` 可控）。
+/// 生产装配及其唯一后台初始化任务的宿主夹具（`drive_cron_tick` 可控）。
 ///
 /// 与 [`BuiltinHostFixture`] 的差别只有一处，但这一处是本组用例的前提：pool / cron
 /// scheduler / `SessionManager` 全部来自**同一次**生产装配
@@ -161,41 +161,37 @@ impl AssembledHostFixture {
         let pool = Arc::clone(&cfg.mcp_pool.clone().expect("装配必须构造 MCP pool"))
             .downcast_arc::<McpClientPool>()
             .unwrap_or_else(|_| panic!("装配的 MCP pool 必须是 McpClientPool"));
-        // 真实 `run_initialize`（与 `run_acp_server` 同一步骤；上下文已由装配注入）。
-        let (status_tx, mut status_rx) = tokio::sync::watch::channel(McpInitStatus::Pending);
-        let init_pool = Arc::clone(&pool);
-        let workspace = dirs.workspace.clone();
-        let claude_home = dirs.claude_home.clone();
-        let init_task = tokio::spawn(async move {
-            McpClientPool::run_initialize(init_pool, &workspace, &claude_home, status_tx, None)
-                .await;
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(30), async {
-            loop {
-                if matches!(
-                    &*status_rx.borrow_and_update(),
-                    McpInitStatus::Ready { .. } | McpInitStatus::Failed(_)
-                ) {
-                    break;
-                }
-                status_rx
-                    .changed()
-                    .await
-                    .expect("init status 发送端在本任务内");
-            }
-        })
-        .await
-        .expect("真实 MCP 初始化不得挂起");
-        tokio::time::timeout(std::time::Duration::from_secs(30), init_task)
-            .await
-            .expect("初始化任务必须在有界等待内结束")
-            .expect("初始化任务不得 panic");
-        let status = status_rx.borrow().clone();
-        // 期望值从**注册表**派生（实例数随波次增长：wave 1 两个 → wave 5 五个）。
+        // assemble.rs already owns and starts Initialize. Starting a second
+        // run_initialize on this pool races the per-server operation gates and
+        // lets each initializer count only its own subset of the connections.
+        let initialized = wait_until(
+            "production MCP initialization",
+            std::time::Duration::from_secs(30),
+            || {
+                matches!(
+                    pool.snapshot()["initPhase"].as_str(),
+                    Some("ready" | "failed")
+                )
+            },
+        )
+        .await;
+        let snapshot = pool.snapshot();
+        assert!(initialized, "生产 MCP 初始化不得挂起: {snapshot}");
+        assert_eq!(
+            snapshot["initPhase"], "ready",
+            "装配自己的初始化任务必须成功: {snapshot}"
+        );
+        let infos = pool.all_server_infos();
         let expected_ready = peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES.len();
-        assert!(
-            matches!(status, McpInitStatus::Ready { total } if total == expected_ready),
-            "装配池必须 {expected_ready}/{expected_ready} ready（否则 tick / 工具面 / 生命周期断言面全是空的）: {status:?}"
+        assert_eq!(
+            infos.len(),
+            expected_ready,
+            "装配池必须恰含完整 builtin 注册表: {snapshot}"
+        );
+        assert_eq!(
+            infos.iter().filter(|info| info.status == ClientStatus::Connected).count(),
+            expected_ready,
+            "装配池必须 {expected_ready}/{expected_ready} ready（否则 tick / 工具面 / 生命周期断言面全是空的）: {snapshot}"
         );
         Self {
             dirs,
@@ -231,8 +227,9 @@ impl AssembledHostFixture {
     }
 
     pub(super) fn assert_all_ready(&self) {
-        for (instance, expected) in WAVE2_INSTANCES {
-            assert_instance_ready(&self.pool, instance, expected);
+        for instance in peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES {
+            let expected = declared_tool_names(instance.name);
+            assert_instance_ready(&self.pool, instance.name, &expected);
         }
     }
 

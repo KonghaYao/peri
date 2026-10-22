@@ -22,10 +22,8 @@ impl McpClientPool {
     /// 注入的 `oauth_event_callback` 转发给 TUI；授权成功后自动用
     /// `AuthorizationManager` 重建认证传输层并连接。
     ///
-    /// 无 `oauth_event_callback`（TUI 面板池，UI 无法弹 popup）时降级为
-    /// 快速路径：仅尝试恢复存储凭证连接，不启动完整授权（不弹窗、不阻塞）；
-    /// 凭据缺失/失效时保持 `NeedsAuthorization`，由 host pool 授权完成后
-    /// 各 pool 经宿主注入的 MCP 凭据客户端恢复。
+    /// 无 `oauth_event_callback` 的部署只尝试恢复存储凭证，不启动完整授权。
+    /// 凭据缺失/失效时保持 `NeedsAuthorization`，由客户端显式请求 OAuth 授权。
     pub fn spawn_oauth_flow(self: &Arc<Self>, server_name: &str) {
         let flow_id = uuid::Uuid::now_v7().to_string();
         let _ = self.spawn_oauth_flow_with_id(server_name, &flow_id);
@@ -43,7 +41,18 @@ impl McpClientPool {
             return disposition;
         }
         let _admission = self.lifecycle_registration.lock();
-        if !self.is_open() {
+        if !self.is_open()
+            || self
+                .server_slot(server_name)
+                .control_operation
+                .try_lock()
+                .is_err()
+            || self
+                .server_slot(server_name)
+                .stopped
+                .load(std::sync::atomic::Ordering::Acquire)
+            || self.active_oauth_flow(server_name).as_deref() != Some(flow_id)
+        {
             self.release_oauth_flow(server_name, flow_id);
             return OAuthStartDisposition::Conflict {
                 active_flow_id: "pool-closing".to_string(),
@@ -61,7 +70,6 @@ impl McpClientPool {
                 pool.release_oauth_flow(&server_name, &flow_id);
                 return;
             }
-            Self::insert_needs_auth(&pool, &server_name, "OAuth 授权进行中".to_string());
             let _ = pool.start_oauth_flow(&flow_id, &server_name, false).await;
             pool.release_oauth_flow(&server_name, &flow_id);
         });
@@ -76,16 +84,50 @@ impl McpClientPool {
 
     /// 执行 OAuth 授权流程（异步，两轮尝试）。
     ///
-    /// `quick_only=true`（面板池路径）：只跑第一轮「恢复存储凭证 → 连接」，
-    /// 凭据失效时不清除、不启动完整授权，直接返回错误（保持 NeedsAuthorization）。
-    /// `quick_only=false`（host pool 路径）：第一轮恢复失败/凭据失效时清除
-    /// 失效凭证，第二轮走完整授权（DCR + PKCE + AuthorizationNeeded 弹 popup）。
+    /// `quick_only=true`：只恢复存储凭证并连接；不清除失效凭据，也不启动授权。
+    /// `quick_only=false`：显式 OAuth 授权可在凭据失效后清除凭据，重新完成
+    /// DCR、PKCE 与 `AuthorizationNeeded` 回调。
     pub async fn start_oauth_flow(
         self: &Arc<Self>,
         flow_id: &str,
         server_name: &str,
         quick_only: bool,
     ) -> Result<(), McpPoolError> {
+        let slot = self.server_slot(server_name);
+        let control_admission =
+            slot.control_operation
+                .try_lock()
+                .map_err(|_| McpPoolError::NotConnected {
+                    server: server_name.into(),
+                    status: ClientStatus::Disconnected,
+                })?;
+        if self.active_oauth_flow(server_name).as_deref() != Some(flow_id) {
+            return Err(McpPoolError::NotConnected {
+                server: server_name.into(),
+                status: ClientStatus::Disconnected,
+            });
+        }
+        let _operation = slot.operation.clone().try_lock_owned().map_err(|_| {
+            McpPoolError::ConnectionFailed {
+                server: server_name.into(),
+                reason: "MCP server is busy".into(),
+            }
+        })?;
+        if slot.stopped.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(McpPoolError::NotConnected {
+                server: server_name.into(),
+                status: ClientStatus::Disconnected,
+            });
+        }
+        self.close_server_connection(server_name, false)
+            .await
+            .map_err(|e| McpPoolError::ConnectionFailed {
+                server: server_name.into(),
+                reason: e.to_string(),
+            })?;
+        slot.stopped
+            .store(false, std::sync::atomic::Ordering::Release);
+        drop(control_admission);
         let cfg = match self.configs.read().get(server_name).cloned() {
             Some(config) => config,
             None => {
@@ -134,16 +176,21 @@ impl McpClientPool {
         // 两轮尝试：第一轮优先恢复存储凭证（可能已过期/被 revoke）；恢复后
         // 连接仍要求授权（401）时清除失效凭证，第二轮走完整授权流程（弹
         // popup 让用户重新授权）。第二轮再失败直接返回错误。
-        // quick_only（面板池路径）只跑第一轮：401 时不清除凭据、不完整授权。
+        // quick_only 只跑凭据恢复：401 时不清除凭据、不启动完整授权。
         let rounds: u8 = if quick_only { 1 } else { 2 };
         for attempt in 0..rounds {
             let mut mgr = OAuthFlowManager::new_with_arc(ts.clone(), event_cb.clone());
-            mgr.run_oauth_flow_with_id(flow_id, server_name, &url, &oauth_cfg)
-                .await
-                .map_err(|e| McpPoolError::ConnectionFailed {
-                    server: server_name.to_string(),
-                    reason: format!("OAuth 授权失败: {e}"),
-                })?;
+            let authorization = if quick_only {
+                mgr.restore_oauth_flow_with_id(flow_id, server_name, &url, &oauth_cfg)
+                    .await
+            } else {
+                mgr.run_oauth_flow_with_id(flow_id, server_name, &url, &oauth_cfg)
+                    .await
+            };
+            authorization.map_err(|e| McpPoolError::ConnectionFailed {
+                server: server_name.to_string(),
+                reason: format!("OAuth 授权失败: {e}"),
+            })?;
 
             // 从 OAuth 流程中提取 AuthorizationManager，用于构建认证传输层
             let auth_manager = match mgr.get_authorization_manager(server_name) {
@@ -190,7 +237,8 @@ impl McpClientPool {
 
             match result {
                 Ok(Ok(rs)) => {
-                    let service = self.retain_service(McpServiceWrapper::Default(rs));
+                    let service =
+                        self.track_server_service(server_name, McpServiceWrapper::Default(rs));
                     let rs = &service;
                     let peer = rs.peer().clone();
                     self.configure_peer_cache(&peer).await;
@@ -250,6 +298,7 @@ impl McpClientPool {
                     };
                     let skills_capable = super::client::peer_declares_skills(&peer);
                     let handle = Arc::new(McpClientHandle {
+                        call_gate: Default::default(),
                         name: server_name.to_string(),
                         version: peer.peer_info().and_then(|info| {
                             info.server_info.as_ref().map(|si| si.version.clone())
@@ -413,6 +462,7 @@ impl McpClientPool {
         self.clients.write().insert(
             server_name.to_string(),
             Arc::new(McpClientHandle {
+                call_gate: Default::default(),
                 name: server_name.to_string(),
                 version: None,
                 connected_at: None,

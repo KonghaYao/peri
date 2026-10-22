@@ -143,7 +143,6 @@ async fn make_server_config_with(
         None,
         None,
         None,
-        None,
         task_manager_factory.or_else(|| {
             Some(Arc::new(|| {
                 Arc::new(peri_agent::agent::async_tasks::TaskManager::new())
@@ -171,7 +170,6 @@ async fn make_server_config_with(
         mcp_apps_facade: None,
         session_authorization: None,
         acp_mcp: None,
-        dynamic_mcp: None,
         oauth_event_tx: None,
         oauth_event_rx: None,
         plugin_skill_roots: Vec::new(),

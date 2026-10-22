@@ -20,6 +20,7 @@ use crate::host::connection::ConnectionFacts;
 pub(crate) mod acp_mcp;
 pub(crate) mod config_options;
 mod cron;
+pub(crate) mod mcp_control;
 mod mcp_oauth;
 mod plugin;
 mod rewind;
@@ -72,6 +73,18 @@ pub(crate) async fn handle_request_for_connection(
         .get("sessionId")
         .or_else(|| params.get("session_id"))
         .and_then(Value::as_str);
+    if method == "peri/mcp/control" {
+        let prepared = mcp_control::prepare(params, &connection, sessions)?;
+        return mcp_control::execute(prepared).await;
+    }
+    let scoped_mcp = if matches!(
+        method,
+        "mcp/list" | "mcp/oauth_start" | "mcp/oauth_callback" | "mcp/oauth_cancel"
+    ) {
+        Some(mcp_control::session_environment(params, sessions)?)
+    } else {
+        None
+    };
     let lifecycle = matches!(
         method,
         "session/new"
@@ -84,7 +97,9 @@ pub(crate) async fn handle_request_for_connection(
     let environment = session_id
         .and_then(|id| sessions.get(id))
         .and_then(|state| state.environment.clone());
-    let cfg = if lifecycle {
+    let cfg = if let Some(environment) = scoped_mcp.as_ref() {
+        &environment.cfg
+    } else if lifecycle {
         cfg
     } else {
         environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg)
@@ -178,11 +193,18 @@ pub(crate) async fn handle_request_for_connection(
         "marketplace/add" => plugin::handle_marketplace_add(params, cfg).await,
         "marketplace/remove" => plugin::handle_marketplace_remove(params, cfg).await,
         "marketplace/refresh" => plugin::handle_refresh(params, cfg).await,
-        "mcp/list" => mcp_oauth::handle_list(params, cfg),
+        "mcp/list" => mcp_oauth::handle_list(
+            params,
+            cfg,
+            &connection,
+            scoped_mcp
+                .as_ref()
+                .is_some_and(|env| env.mcp_control_enabled),
+        ),
         "cron/list" | "cron/toggle" | "cron/remove" => cron::handle(method, params, sessions).await,
-        "mcp/oauth_start" => mcp_oauth::handle_oauth_start(params, cfg),
-        "mcp/oauth_callback" => mcp_oauth::handle_oauth_callback(params, cfg),
-        "mcp/oauth_cancel" => mcp_oauth::handle_oauth_cancel(params, cfg),
+        "mcp/oauth_start" => mcp_oauth::handle_oauth_start(params, cfg, &connection),
+        "mcp/oauth_callback" => mcp_oauth::handle_oauth_callback(params, cfg, &connection),
+        "mcp/oauth_cancel" => mcp_oauth::handle_oauth_cancel(params, cfg, &connection),
         _ => Err(AcpError::new(-32601, format!("Method not found: {method}"))),
     };
     if matches!(

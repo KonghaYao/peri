@@ -148,8 +148,6 @@ where
         command_registry: None,
         cron_scheduler: cfg.cron_scheduler.clone(),
         mcp_pool: cfg.mcp_pool.clone(),
-        dynamic_mcp: cfg.dynamic_mcp.clone(),
-        dynamic_mcp_projection: Arc::new(parking_lot::Mutex::new(None)),
         session_id: session_id.to_owned(),
         tool_search_index: Arc::clone(&cfg.tool_search_index),
         shared_tools: Arc::clone(&cfg.shared_tools),

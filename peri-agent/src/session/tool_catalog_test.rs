@@ -1,13 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
-use peri_acp_types::{
-    dynamic_mcp::{
-        DynamicMcpConfig, DynamicMcpInstanceKey, DynamicMcpLogicalKey, DynamicMcpServerProjection,
-        SessionMcpCapabilitySnapshot,
-    },
-    ports::SessionMcpCapabilityPort,
-};
+use peri_acp_types::mcp_control::{SessionMcpCatalogPort, SessionMcpCatalogSnapshot};
 use serde_json::json;
 
 use super::*;
@@ -64,24 +58,16 @@ impl BaseTool for NamedTool {
     }
 }
 
-struct FixedCapability(Arc<SessionMcpCapabilitySnapshot>);
-
-impl SessionMcpCapabilityPort for FixedCapability {
-    fn snapshot(&self) -> Arc<SessionMcpCapabilitySnapshot> {
-        Arc::clone(&self.0)
-    }
-}
-
-struct MutableCapability(parking_lot::RwLock<Arc<SessionMcpCapabilitySnapshot>>);
+struct MutableCapability(parking_lot::RwLock<Arc<SessionMcpCatalogSnapshot>>);
 
 impl MutableCapability {
-    fn publish(&self, snapshot: SessionMcpCapabilitySnapshot) {
+    fn publish(&self, snapshot: SessionMcpCatalogSnapshot) {
         *self.0.write() = Arc::new(snapshot);
     }
 }
 
-impl SessionMcpCapabilityPort for MutableCapability {
-    fn snapshot(&self) -> Arc<SessionMcpCapabilitySnapshot> {
+impl SessionMcpCatalogPort for MutableCapability {
+    fn snapshot(&self) -> Arc<SessionMcpCatalogSnapshot> {
         Arc::clone(&self.0.read())
     }
 }
@@ -103,59 +89,6 @@ fn conflicting_base_aliases_are_reported_without_weakening_production_constructo
 }
 
 #[test]
-fn dynamic_server_shadows_static_server_as_one_catalog_unit() {
-    let core: Arc<dyn BaseTool> = Arc::new(NamedTool::new("Read", "core"));
-    let static_tool: Arc<dyn BaseTool> = Arc::new(NamedTool::new("mcp__example__static", "static"));
-    let dynamic_tool: Arc<dyn BaseTool> =
-        Arc::new(NamedTool::new("mcp__example__dynamic", "dynamic"));
-    let config = DynamicMcpConfig {
-        command: Some("example-mcp".to_string()),
-        ..Default::default()
-    }
-    .canonicalize()
-    .unwrap();
-    let instance_key = DynamicMcpInstanceKey {
-        logical: DynamicMcpLogicalKey {
-            session_id: "session-a".to_string(),
-            server_name: "example".to_string(),
-        },
-        incarnation_id: Default::default(),
-    };
-    let capability = Arc::new(FixedCapability(Arc::new(SessionMcpCapabilitySnapshot {
-        generation: 1,
-        servers: BTreeMap::from([(
-            "example".to_string(),
-            DynamicMcpServerProjection {
-                instance_key: instance_key.clone(),
-                name: "example".to_string(),
-                config,
-                tool_count: 1,
-                resource_count: 0,
-            },
-        )]),
-        tools: BTreeMap::from([(
-            "mcp__example__dynamic".to_string(),
-            peri_acp_types::dynamic_mcp::DynamicMcpToolCapability {
-                instance: instance_key,
-                tool: dynamic_tool,
-            },
-        )]),
-    })));
-    let catalog = SessionToolCatalog::new(
-        BTreeMap::from([
-            ("Read".to_string(), core),
-            ("mcp__example__static".to_string(), static_tool),
-        ]),
-        Some(capability),
-    );
-
-    let snapshot = catalog.refresh().unwrap();
-    assert!(snapshot.tools.contains_key("Read"));
-    assert!(snapshot.tools.contains_key("mcp__example__dynamic"));
-    assert!(!snapshot.tools.contains_key("mcp__example__static"));
-}
-
-#[test]
 fn request_local_tool_binding_does_not_mutate_session_publisher() {
     let old: Arc<dyn BaseTool> = Arc::new(NamedTool::new("example", "old"));
     let catalog = SessionToolCatalog::new(
@@ -172,64 +105,6 @@ fn request_local_tool_binding_does_not_mutate_session_publisher() {
     assert_eq!(published.tools["example"].tool.description(), "old");
     assert_eq!(pinned.tools["example"].tool.description(), "new");
     assert!(Arc::ptr_eq(&published, &catalog.snapshot()));
-}
-
-#[test]
-fn filtered_catalog_reapplies_policy_across_load_and_unload() {
-    let capability = Arc::new(MutableCapability(parking_lot::RwLock::new(Arc::new(
-        SessionMcpCapabilitySnapshot::default(),
-    ))));
-    let dynamic: Arc<dyn BaseTool> = Arc::new(NamedTool::new("mcp__example__lookup", "dynamic"));
-    let instance = DynamicMcpInstanceKey {
-        logical: DynamicMcpLogicalKey {
-            session_id: "session-a".to_string(),
-            server_name: "example".to_string(),
-        },
-        incarnation_id: Default::default(),
-    };
-    let catalog = SessionToolCatalog::with_filter(
-        BTreeMap::new(),
-        Some(capability.clone()),
-        Arc::new(|tool| tool.name() != "mcp__example__lookup"),
-    );
-
-    capability.publish(SessionMcpCapabilitySnapshot {
-        generation: 1,
-        servers: BTreeMap::from([(
-            "example".to_string(),
-            DynamicMcpServerProjection {
-                instance_key: instance.clone(),
-                name: "example".to_string(),
-                config: DynamicMcpConfig {
-                    command: Some("example-mcp".to_string()),
-                    ..Default::default()
-                }
-                .canonicalize()
-                .unwrap(),
-                tool_count: 1,
-                resource_count: 0,
-            },
-        )]),
-        tools: BTreeMap::from([(
-            "mcp__example__lookup".to_string(),
-            peri_acp_types::dynamic_mcp::DynamicMcpToolCapability {
-                instance,
-                tool: dynamic,
-            },
-        )]),
-    });
-    let loaded = catalog.refresh().unwrap();
-
-    capability.publish(SessionMcpCapabilitySnapshot {
-        generation: 2,
-        ..Default::default()
-    });
-    let unloaded = catalog.refresh().unwrap();
-
-    assert_eq!(loaded.generation, 1);
-    assert!(!loaded.tools.contains_key("mcp__example__lookup"));
-    assert_eq!(unloaded.generation, 2);
-    assert!(!unloaded.tools.contains_key("mcp__example__lookup"));
 }
 
 // ─── 启动闸门静态提交（B-05）─────────────────────────────────────────────────
@@ -299,6 +174,128 @@ impl BaseTool for BridgeTool {
     }
 }
 
+#[test]
+fn pool_catalog_replaces_mcp_entries_and_preserves_pinned_reason() {
+    let old: Arc<dyn BaseTool> = Arc::new(BridgeTool::bridge("mcp__docs__lookup", "docs"));
+    let replacement: Arc<dyn BaseTool> = Arc::new(BridgeTool::bridge("mcp__docs__lookup", "docs"));
+    let source = Arc::new(MutableCapability(parking_lot::RwLock::new(Arc::new(
+        SessionMcpCatalogSnapshot {
+            generation: 1,
+            tools: vec![old.clone()],
+        },
+    ))));
+    let catalog = SessionToolCatalog::new(
+        BTreeMap::from([(
+            "Read".into(),
+            Arc::new(NamedTool::new("Read", "core")) as Arc<dyn BaseTool>,
+        )]),
+        Some(source.clone()),
+    );
+    let pinned = catalog
+        .pin_working_tools(&catalog.snapshot().tool_map())
+        .unwrap();
+    source.publish(SessionMcpCatalogSnapshot {
+        generation: 2,
+        tools: vec![],
+    });
+    let stopped = catalog.refresh().unwrap();
+    assert!(
+        stopped.tools.contains_key("Read"),
+        "关闭 MCP 不得移除 core 工具"
+    );
+    assert!(
+        !stopped.tools.contains_key(old.name()),
+        "下一 Reason 不再发布已关闭工具"
+    );
+    assert!(
+        Arc::ptr_eq(&pinned.tools[old.name()].tool, &old),
+        "在途 Reason 固定旧对象"
+    );
+    source.publish(SessionMcpCatalogSnapshot {
+        generation: 3,
+        tools: vec![replacement.clone()],
+    });
+    let restarted = catalog.refresh().unwrap();
+    assert!(Arc::ptr_eq(
+        &restarted.tools[replacement.name()].tool,
+        &replacement
+    ));
+    assert!(
+        Arc::ptr_eq(&pinned.tools[old.name()].tool, &old),
+        "重启不能重定向旧 dispatch"
+    );
+}
+
+#[test]
+fn pool_catalog_reapplies_child_filter_on_each_generation() {
+    let source = Arc::new(MutableCapability(parking_lot::RwLock::new(Arc::new(
+        SessionMcpCatalogSnapshot {
+            generation: 1,
+            tools: vec![],
+        },
+    ))));
+    let catalog = SessionToolCatalog::with_filter(
+        BTreeMap::new(),
+        Some(source.clone()),
+        ToolFilterPolicy::canonical(Some(vec!["mcp__docs__read".into()]), vec![]),
+    );
+    source.publish(SessionMcpCatalogSnapshot {
+        generation: 2,
+        tools: vec![
+            Arc::new(BridgeTool::bridge("mcp__docs__read", "docs")),
+            Arc::new(BridgeTool::bridge("mcp__docs__write", "docs")),
+        ],
+    });
+    let published = catalog.refresh().unwrap();
+    assert_eq!(
+        published.tools.keys().collect::<Vec<_>>(),
+        vec!["mcp__docs__read"]
+    );
+    source.publish(SessionMcpCatalogSnapshot {
+        generation: 3,
+        tools: vec![],
+    });
+    assert!(catalog.refresh().unwrap().tools.is_empty());
+}
+
+#[test]
+fn pool_catalog_rejects_missing_source_without_partial_publication() {
+    let source = Arc::new(MutableCapability(parking_lot::RwLock::new(Arc::new(
+        SessionMcpCatalogSnapshot {
+            generation: 1,
+            tools: vec![],
+        },
+    ))));
+    let catalog = SessionToolCatalog::new(BTreeMap::new(), Some(source.clone()));
+    let before = catalog.snapshot();
+    source.publish(SessionMcpCatalogSnapshot {
+        generation: 2,
+        tools: vec![Arc::new(NamedTool::new("mcp__docs__fake", "unbound"))],
+    });
+    assert_eq!(
+        catalog.refresh().unwrap_err(),
+        CatalogRefreshError::InvalidMcpSource {
+            tool: "mcp__docs__fake".into(),
+        }
+    );
+    assert!(
+        Arc::ptr_eq(&before, &catalog.snapshot()),
+        "非法来源不得部分发布目录"
+    );
+    source.publish(SessionMcpCatalogSnapshot {
+        generation: 2,
+        tools: vec![Arc::new(BridgeTool::bridge("mcp__docs__read", "docs"))],
+    });
+    assert!(
+        catalog
+            .refresh()
+            .unwrap()
+            .tools
+            .contains_key("mcp__docs__read"),
+        "相同代次可重试"
+    );
+}
+
 fn startup_update(
     tools: Vec<Arc<dyn BaseTool>>,
     required: &[(&str, &str, &str)],
@@ -316,68 +313,14 @@ fn startup_update(
     }
 }
 
-fn server_projection(server: &str) -> DynamicMcpServerProjection {
-    DynamicMcpServerProjection {
-        instance_key: DynamicMcpInstanceKey {
-            logical: DynamicMcpLogicalKey {
-                session_id: "session-a".to_string(),
-                server_name: server.to_string(),
-            },
-            incarnation_id: Default::default(),
-        },
-        name: server.to_string(),
-        config: DynamicMcpConfig {
-            command: Some(format!("{server}-mcp")),
-            ..Default::default()
-        }
-        .canonicalize()
-        .unwrap(),
-        tool_count: 1,
-        resource_count: 0,
-    }
-}
-
-fn dynamic_capability(
-    generation: u64,
-    servers: &[&str],
-    tools: &[(&str, &str, Arc<dyn BaseTool>)],
-) -> SessionMcpCapabilitySnapshot {
-    let mut server_map: BTreeMap<String, DynamicMcpServerProjection> = servers
-        .iter()
-        .map(|server| ((*server).to_string(), server_projection(server)))
-        .collect();
-    let mut tool_map = BTreeMap::new();
-    for (name, server, tool) in tools {
-        let projection = server_map
-            .entry((*server).to_string())
-            .or_insert_with(|| server_projection(server));
-        tool_map.insert(
-            (*name).to_string(),
-            peri_acp_types::dynamic_mcp::DynamicMcpToolCapability {
-                instance: projection.instance_key.clone(),
-                tool: Arc::clone(tool),
-            },
-        );
-    }
-    SessionMcpCapabilitySnapshot {
-        generation,
-        servers: server_map,
-        tools: tool_map,
-    }
-}
-
 /// static base 的可观察投影（提交失败时用于断言 base 未被部分修改）。
 fn base_names(catalog: &SessionToolCatalog) -> Vec<String> {
-    catalog
-        .dynamic_catalog_tools()
-        .into_iter()
-        .map(|tool| tool.name)
-        .collect()
+    catalog.state.read().base_tools.keys().cloned().collect()
 }
 
 fn startup_catalog(
     base: BTreeMap<String, Arc<dyn BaseTool>>,
-    capability: Option<Arc<dyn SessionMcpCapabilityPort>>,
+    capability: Option<Arc<dyn SessionMcpCatalogPort>>,
 ) -> SessionToolCatalog {
     SessionToolCatalog::new(base, capability)
 }
@@ -401,15 +344,7 @@ fn core_and_static_base() -> BTreeMap<String, Arc<dyn BaseTool>> {
 
 #[test]
 fn startup_commit_publishes_required_direct_tool_into_static_base() {
-    let catalog = startup_catalog(
-        core_and_static_base(),
-        Some(Arc::new(FixedCapability(Arc::new(
-            SessionMcpCapabilitySnapshot {
-                generation: 1,
-                ..Default::default()
-            },
-        )))),
-    );
+    let catalog = startup_catalog(core_and_static_base(), None);
     assert!(
         catalog
             .snapshot()
@@ -441,12 +376,12 @@ fn startup_commit_publishes_required_direct_tool_into_static_base() {
     );
     assert_eq!(
         published.tools["mcp__system__lookup"].source,
-        ToolSource::StaticMcp("system".to_string())
+        ToolSource::Mcp("system".to_string())
     );
     assert!(published.tools.contains_key("Read"), "core 工具不受影响");
     assert_eq!(
         published.tools["mcp__other__keep"].source,
-        ToolSource::StaticMcp("other".to_string()),
+        ToolSource::Mcp("other".to_string()),
         "未参与本次提交的 server 保持原条目"
     );
     assert!(
@@ -458,67 +393,6 @@ fn startup_commit_publishes_required_direct_tool_into_static_base() {
             .any(|definition| definition.name == "mcp__system__lookup"),
         "Reason 边界 refresh 后 required 仍可达"
     );
-}
-
-#[test]
-fn startup_commit_survives_dynamic_generation_bump() {
-    let capability = Arc::new(MutableCapability(parking_lot::RwLock::new(Arc::new(
-        SessionMcpCapabilitySnapshot::default(),
-    ))));
-    let catalog = startup_catalog(core_and_static_base(), Some(capability.clone()));
-    let prepared: Arc<dyn BaseTool> =
-        Arc::new(BridgeTool::bridge("mcp__system__lookup", "system").direct());
-    catalog
-        .replace_static_mcp_tools(startup_update(
-            vec![Arc::clone(&prepared)],
-            &[("system", "lookup", "mcp__system__lookup")],
-        ))
-        .unwrap();
-
-    capability.publish(SessionMcpCapabilitySnapshot {
-        generation: 2,
-        ..Default::default()
-    });
-    let refreshed = catalog.refresh().unwrap();
-
-    assert_eq!(refreshed.generation, 2, "refresh 必须按新 generation 重建");
-    assert!(
-        Arc::ptr_eq(&refreshed.tools["mcp__system__lookup"].tool, &prepared),
-        "dynamic overlay 重建必须以提交后的 static base 为事实源"
-    );
-    assert!(refreshed.tools.contains_key("Read"));
-}
-
-#[test]
-fn dynamic_overlay_still_shadows_static_entries_after_startup_commit() {
-    let capability = Arc::new(MutableCapability(parking_lot::RwLock::new(Arc::new(
-        SessionMcpCapabilitySnapshot::default(),
-    ))));
-    let catalog = startup_catalog(core_and_static_base(), Some(capability.clone()));
-    let prepared: Arc<dyn BaseTool> =
-        Arc::new(BridgeTool::bridge("mcp__system__lookup", "system").direct());
-    catalog
-        .replace_static_mcp_tools(startup_update(
-            vec![Arc::clone(&prepared)],
-            &[("system", "lookup", "mcp__system__lookup")],
-        ))
-        .unwrap();
-
-    let dynamic_tool: Arc<dyn BaseTool> =
-        Arc::new(NamedTool::new("mcp__system__direct", "dynamic"));
-    capability.publish(dynamic_capability(
-        1,
-        &["system"],
-        &[("mcp__system__direct", "system", dynamic_tool)],
-    ));
-    let refreshed = catalog.refresh().unwrap();
-
-    assert!(
-        !refreshed.tools.contains_key("mcp__system__lookup"),
-        "启动提交不得绕过动态实例对同名 logical server 的遮蔽"
-    );
-    assert!(refreshed.tools.contains_key("mcp__system__direct"));
-    assert!(refreshed.tools.contains_key("Read"));
 }
 
 #[test]
@@ -556,36 +430,6 @@ fn startup_commit_rejects_required_tool_filtered_by_policy() {
             "mcp__other__keep".to_string(),
             "mcp__system__lookup".to_string()
         ]
-    );
-}
-
-#[test]
-fn startup_commit_rejects_required_tool_shadowed_by_dynamic_instance() {
-    let catalog = startup_catalog(
-        core_and_static_base(),
-        Some(Arc::new(FixedCapability(Arc::new(dynamic_capability(
-            1,
-            &["system"],
-            &[],
-        ))))),
-    );
-    let before = catalog.snapshot();
-    let prepared: Arc<dyn BaseTool> =
-        Arc::new(BridgeTool::bridge("mcp__system__lookup", "system").direct());
-    let error = catalog
-        .replace_static_mcp_tools(startup_update(
-            vec![Arc::clone(&prepared)],
-            &[("system", "lookup", "mcp__system__lookup")],
-        ))
-        .unwrap_err();
-
-    assert!(matches!(
-        error,
-        CatalogRefreshError::RequiredToolUnavailable { ref tool, .. } if tool == "mcp__system__lookup"
-    ));
-    assert!(
-        Arc::ptr_eq(&before, &catalog.snapshot()),
-        "被动态遮蔽的必需项必须拒绝整批，不发布半成品"
     );
 }
 
@@ -629,7 +473,7 @@ fn startup_commit_skips_cross_server_takeover() {
 
     assert_eq!(
         catalog.snapshot().tools["mcp__system__lookup"].source,
-        ToolSource::StaticMcp("system".to_string()),
+        ToolSource::Mcp("system".to_string()),
         "跨 server 覆盖必须被拒绝且不修改既有条目"
     );
 }
@@ -658,53 +502,6 @@ fn startup_commit_skips_alias_conflict() {
     assert_eq!(
         base_names(&catalog),
         vec!["Read".to_string(), "mcp__other__keep".to_string()]
-    );
-}
-
-#[test]
-fn startup_commit_registers_collision_directory_before_publishing() {
-    let catalog = startup_catalog(core_and_static_base(), None);
-    let seen: Arc<parking_lot::Mutex<Option<Vec<String>>>> =
-        Arc::new(parking_lot::Mutex::new(None));
-    let captured = Arc::clone(&seen);
-    catalog.set_startup_catalog_registration(Arc::new(move |tools| {
-        *captured.lock() = Some(tools.into_iter().map(|tool| tool.name).collect());
-        Ok(())
-    }));
-
-    let prepared: Arc<dyn BaseTool> =
-        Arc::new(BridgeTool::bridge("mcp__system__lookup", "system").direct());
-    catalog
-        .replace_static_mcp_tools(startup_update(
-            vec![Arc::clone(&prepared)],
-            &[("system", "lookup", "mcp__system__lookup")],
-        ))
-        .unwrap();
-
-    let registered = seen.lock().clone().expect("注册回调必须被调用");
-    assert!(registered.contains(&"mcp__system__lookup".to_string()));
-    assert!(registered.contains(&"Read".to_string()));
-
-    catalog.set_startup_catalog_registration(Arc::new(|_| {
-        Err(CatalogRefreshError::StartupRegistrationRejected {
-            tool: "mcp__system__lookup".to_string(),
-        })
-    }));
-    let rejected: Arc<dyn BaseTool> = Arc::new(BridgeTool::bridge("mcp__system__lookup", "system"));
-    let error = catalog
-        .replace_static_mcp_tools(startup_update(vec![rejected], &[]))
-        .unwrap_err();
-
-    assert!(matches!(
-        error,
-        CatalogRefreshError::StartupRegistrationRejected { .. }
-    ));
-    assert!(
-        Arc::ptr_eq(
-            &catalog.snapshot().tools["mcp__system__lookup"].tool,
-            &prepared
-        ),
-        "碰撞目录拒绝后本地状态不得改变"
     );
 }
 

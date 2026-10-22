@@ -68,6 +68,7 @@ impl AgentFaceFixture {
             let peer = service.peer().clone();
             let resources = peer.list_all_resources().await.expect("resources/list");
             let handle = Arc::new(McpClientHandle {
+                call_gate: Default::default(),
                 name: "workspace".to_string(),
                 version: None,
                 connected_at: None,

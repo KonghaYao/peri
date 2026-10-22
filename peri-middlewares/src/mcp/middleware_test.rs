@@ -7,9 +7,16 @@ use crate::mcp::{
 };
 use peri_agent::session::{MessageKind, MessageQueue};
 
+fn owned_discovery_pool() -> (crate::mcp::McpTaskOwner, Arc<McpClientPool>) {
+    let (owner, spawner) = crate::mcp::McpTaskOwner::new();
+    let mut pool = McpClientPool::new_empty();
+    pool.task_spawner = spawner;
+    (owner, Arc::new(pool))
+}
+
 #[test]
 fn test_name_returns_mcp_middleware() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner, pool) = owned_discovery_pool();
     let mw = McpMiddleware::new(pool);
     let name = <McpMiddleware as Middleware>::name(&mw);
     assert_eq!(name, "McpMiddleware");
@@ -17,7 +24,7 @@ fn test_name_returns_mcp_middleware() {
 
 #[test]
 fn test_collect_tools_empty_pool() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner, pool) = owned_discovery_pool();
     let mw = McpMiddleware::new(pool);
     let tools = <McpMiddleware as Middleware>::collect_tools(&mw, "/tmp");
     // Resource reader 与 DiscoverMCP 都是 deferred capability；即使初始为空也注册，
@@ -35,42 +42,19 @@ fn test_collect_tools_empty_pool() {
     assert!(!tools[2].is_direct());
 }
 
-#[test]
-fn static_tool_bridges_use_deployment_pool_not_session_projection() {
-    let deployment_pool = Arc::new(McpClientPool::new_empty());
-    deployment_pool.clients.write().insert(
-        "static".to_string(),
-        make_connected_handle_with_tool("static", "instantiate_app"),
-    );
-    let projected_pool = Arc::new(McpClientPool::new_empty());
-    projected_pool.clients.write().insert(
-        "dynamic".to_string(),
-        make_connected_handle_with_tool("dynamic", "shadow_tool"),
-    );
-
-    let mw = McpMiddleware::new(Arc::clone(&projected_pool))
-        .with_tool_pool(Arc::clone(&deployment_pool));
-    let names = <McpMiddleware as Middleware>::collect_tools(&mw, "/tmp")
-        .into_iter()
-        .map(|tool| tool.name().to_string())
-        .collect::<Vec<_>>();
-
-    assert!(names.contains(&"mcp__static__instantiate_app".to_string()));
-    assert!(!names.contains(&"mcp__dynamic__shadow_tool".to_string()));
-}
-
 // ─── first_turn_reminder：首 turn 概览 ───────────────────────────────────────
 
 /// 空池（无任何服务器配置）→ None（零噪音）
 #[test]
 fn test_overview_empty_pool_returns_none() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner, pool) = owned_discovery_pool();
     let mw = McpMiddleware::new(pool);
     assert!(mw.overview_text().is_none());
 }
 
 fn make_connected_handle(name: &str, tools: usize) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
+        call_gate: Default::default(),
         name: name.to_string(),
         version: None,
         connected_at: None,
@@ -87,39 +71,17 @@ fn make_connected_handle(name: &str, tools: usize) -> Arc<McpClientHandle> {
     })
 }
 
-fn make_connected_handle_with_tool(name: &str, tool_name: &str) -> Arc<McpClientHandle> {
-    let tool = rmcp::model::Tool::new(
-        tool_name.to_string(),
-        "fixture".to_string(),
-        serde_json::Map::new(),
-    );
-    Arc::new(McpClientHandle {
-        name: name.to_string(),
-        version: None,
-        connected_at: None,
-        protocol_version: None,
-        cache_version: None,
-        peer: None,
-        tools: vec![tool],
-        resources: vec![],
-        status: ClientStatus::Connected,
-        oauth_status: OAuthStatus::default(),
-        source: None,
-        url: None,
-        skills_capable: false,
-    })
-}
-
 /// 混合状态概览：connected 带工具数、failed 带错误、disabled 计数
 #[test]
 fn test_overview_mixed_statuses() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner, pool) = owned_discovery_pool();
     pool.clients
         .write()
         .insert("github".to_string(), make_connected_handle("github", 1));
     pool.clients.write().insert(
         "chrome".to_string(),
         Arc::new(McpClientHandle {
+            call_gate: Default::default(),
             name: "chrome".to_string(),
             version: None,
             connected_at: None,
@@ -138,6 +100,7 @@ fn test_overview_mixed_statuses() {
     pool.clients.write().insert(
         "legacy".to_string(),
         Arc::new(McpClientHandle {
+            call_gate: Default::default(),
             name: "legacy".to_string(),
             version: None,
             connected_at: None,
@@ -177,7 +140,7 @@ fn test_overview_mixed_statuses() {
 /// 初始化前（initialized=false）：状态变化不产生通知（首 turn 概览覆盖）
 #[test]
 fn test_record_change_before_initialized_is_silent() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner, pool) = owned_discovery_pool();
     pool.clients
         .write()
         .insert("github".to_string(), make_connected_handle("github", 3));
@@ -191,7 +154,7 @@ fn test_record_change_before_initialized_is_silent() {
 /// 初始化后：Connected→Failed 产生"名字 + 错误"通知，恰好一次
 #[test]
 fn test_record_change_after_initialized_notifies_once() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner, pool) = owned_discovery_pool();
     pool.mark_initialized();
     pool.clients
         .write()
@@ -236,7 +199,7 @@ fn test_status_change_text_formats() {
 /// 旧状态不存在（首次插入）不通知
 #[test]
 fn test_record_change_without_old_is_silent() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner, pool) = owned_discovery_pool();
     pool.mark_initialized();
     pool.clients
         .write()
@@ -286,7 +249,7 @@ impl peri_agent::middleware::state::MiddlewareState for TestMiddlewareState {
 /// before_model：有缓冲变化时 push Info（SystemInjected source）；空缓冲无操作
 #[test]
 fn test_before_model_pushes_info_messages() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner, pool) = owned_discovery_pool();
     pool.mark_initialized();
     let mw = McpMiddleware::new(Arc::clone(&pool));
     let mut state = TestMiddlewareState::new();
@@ -362,7 +325,7 @@ fn test_before_model_pushes_info_messages() {
 /// 同一会话实例：tool search 提示仅首条附带
 #[test]
 fn test_tool_search_hint_once_per_instance() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner, pool) = owned_discovery_pool();
     pool.mark_initialized();
     let mw = McpMiddleware::new(Arc::clone(&pool));
     let mut state = TestMiddlewareState::new();
@@ -448,6 +411,7 @@ fn insert_skill_handle(
     ));
     pool.services.lock().insert(name.to_string(), service);
     let handle = Arc::new(McpClientHandle {
+        call_gate: Default::default(),
         name: name.to_string(),
         version: None,
         connected_at: None,
@@ -486,7 +450,7 @@ async fn wait_discovered(reg: &McpSkillRegistry, server: &str) {
 /// 变 Discovered{[]}；全程 state 无消息推送（验收 13 半边）。
 #[tokio::test]
 async fn before_agent_marks_started_then_completes_silently() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner, pool) = owned_discovery_pool();
     let handle = insert_skill_handle(
         &pool,
         "srv",
@@ -537,7 +501,7 @@ async fn before_agent_marks_started_then_completes_silently() {
 /// on_change（恰好一次）。
 #[tokio::test]
 async fn before_agent_disconnect_removes_entry_and_fires_on_change() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner, pool) = owned_discovery_pool();
     insert_skill_handle(&pool, "srv", vec![]);
     let reg = Arc::new(McpSkillRegistry::new());
     let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -568,51 +532,78 @@ async fn before_agent_disconnect_removes_entry_and_fires_on_change() {
     assert_eq!(state.messages().len(), 0, "断连清理静默");
 }
 
-/// 重连（新 Arc handle → token 变化）：before_agent 重新置 Started。
+/// 旧任务尚未调度时立即换代：显式断连或直接替换均独立发现，停止会 join 全部代次。
 #[tokio::test]
 async fn before_agent_reconnect_new_handle_rescans() {
-    let pool = Arc::new(McpClientPool::new_empty());
-    let reg = Arc::new(McpSkillRegistry::new());
-    let mw = McpMiddleware::new(Arc::clone(&pool))
-        .with_skill_discovery(Some(Arc::clone(&reg)), AgentCancellationToken::new());
-    let mut state = AgentState::new("/tmp");
+    for observe_disconnect in [false, true] {
+        let (mut owner, pool) = owned_discovery_pool();
+        let reg = Arc::new(McpSkillRegistry::new());
+        let mw = McpMiddleware::new(Arc::clone(&pool))
+            .with_skill_discovery(Some(Arc::clone(&reg)), AgentCancellationToken::new());
+        let mut state = AgentState::new("/tmp");
 
-    let h1 = insert_skill_handle(&pool, "srv", vec![]);
-    Middleware::before_agent(&mw, &mut state).await.unwrap();
-    let h1_token: HandleToken = h1.clone();
-    match reg.discovery_state("srv") {
-        Some(ServerDiscoveryState::Started { handle }) => {
-            assert!(Arc::ptr_eq(&handle, &h1_token));
+        let h1 = insert_skill_handle(&pool, "srv", vec![]);
+        Middleware::before_agent(&mw, &mut state).await.unwrap();
+        let h1_token: HandleToken = h1.clone();
+        match reg.discovery_state("srv") {
+            Some(ServerDiscoveryState::Started { handle }) => {
+                assert!(Arc::ptr_eq(&handle, &h1_token));
+            }
+            other => panic!("应 Started: {other:?}"),
         }
-        other => panic!("应 Started: {other:?}"),
-    }
+        assert_eq!(owner.active_count(), 1);
 
-    // 断连移除
-    pool.clients.write().remove("srv");
-    Middleware::before_agent(&mw, &mut state).await.unwrap();
-    assert!(reg.discovery_state("srv").is_none());
-
-    // 重连：新 Arc handle（token 变）→ 重新 Started
-    let h2 = insert_skill_handle(&pool, "srv", vec![]);
-    Middleware::before_agent(&mw, &mut state).await.unwrap();
-    let h2_token: HandleToken = h2.clone();
-    match reg.discovery_state("srv") {
-        Some(ServerDiscoveryState::Started { handle }) => {
-            assert!(Arc::ptr_eq(&handle, &h2_token), "重连后应持新 handle");
-            assert!(
-                !Arc::ptr_eq(&handle, &h1_token),
-                "新 handle 不应与旧 handle 同址"
-            );
+        if observe_disconnect {
+            pool.clients.write().remove("srv");
+            Middleware::before_agent(&mw, &mut state).await.unwrap();
+            assert!(reg.discovery_state("srv").is_none());
         }
-        other => panic!("应重新 Started: {other:?}"),
+
+        // 本测试运行于 current_thread；上述钩子没有让出执行权，旧任务尚未
+        // 首次 poll。新代不能依赖旧任务完成、轮询重试或时间延迟才能注册。
+        let h2 = insert_skill_handle(&pool, "srv", vec![]);
+        Middleware::before_agent(&mw, &mut state).await.unwrap();
+        let h2_token: HandleToken = h2.clone();
+        match reg.discovery_state("srv") {
+            Some(ServerDiscoveryState::Started { handle }) => {
+                assert!(Arc::ptr_eq(&handle, &h2_token), "重连后应持新 handle");
+                assert!(!Arc::ptr_eq(&handle, &h1_token));
+            }
+            other => panic!("应重新 Started: {other:?}"),
+        }
+        assert_eq!(owner.active_count(), 2, "两代发现任务均由 owner 持有");
+
+        reg.mark_discovery_completed(
+            "srv",
+            h1_token,
+            vec![SkillMetadata {
+                name: "mcp__srv__stale".into(),
+                ..SkillMetadata::default()
+            }],
+        );
+        assert!(matches!(reg.discovery_state("srv"),
+            Some(ServerDiscoveryState::Started { handle }) if Arc::ptr_eq(&handle, &h2_token)));
+        assert!(reg.all_skills().is_empty(), "旧代回写不得发布陈旧技能");
+        assert_eq!(state.messages().len(), 0);
+
+        pool.close_server_connection("srv", true).await.unwrap();
+        assert_eq!(
+            owner.active_count(),
+            0,
+            "停止必须 join 该 server 的全部代次"
+        );
+        assert!(reg.discovery_state("srv").is_none());
+        pool.begin_shutdown();
+        owner.begin_shutdown();
+        owner.shutdown().await;
+        assert!(pool.shutdown().await.is_complete());
     }
-    assert_eq!(state.messages().len(), 0);
 }
 
 /// cancel token 已触发 → before_agent 零动作（不投影、不置位）。
 #[tokio::test]
 async fn before_agent_cancelled_token_noop() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner, pool) = owned_discovery_pool();
     insert_skill_handle(&pool, "srv", vec![]);
     let reg = Arc::new(McpSkillRegistry::new());
     let cancel = AgentCancellationToken::new();
@@ -632,7 +623,7 @@ async fn before_agent_cancelled_token_noop() {
 /// registry 未装配（默认 new()）→ before_agent 直接返回（无发现行为）。
 #[tokio::test]
 async fn before_agent_without_registry_noop() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner, pool) = owned_discovery_pool();
     insert_skill_handle(&pool, "srv", vec![]);
     let mw = McpMiddleware::new(pool);
     let mut state = AgentState::new("/tmp");

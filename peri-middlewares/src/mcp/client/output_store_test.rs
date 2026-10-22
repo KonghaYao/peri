@@ -202,6 +202,7 @@ impl Wire {
 
     pub(crate) fn install(&self, pool: &McpClientPool, name: &str, builtin: bool) {
         let handle = Arc::new(McpClientHandle {
+            call_gate: Default::default(),
             name: name.into(),
             version: None,
             connected_at: None,

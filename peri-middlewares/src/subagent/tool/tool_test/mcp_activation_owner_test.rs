@@ -60,6 +60,7 @@ async fn remote_agent_face(dir: &std::path::Path) -> Arc<crate::mcp::McpAgentReg
         pool.clients.write().insert(
             "workspace".to_string(),
             Arc::new(McpClientHandle {
+                call_gate: Default::default(),
                 name: builtin.name.clone(),
                 version: builtin.version.clone(),
                 connected_at: builtin.connected_at.clone(),

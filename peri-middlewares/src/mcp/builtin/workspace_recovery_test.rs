@@ -31,6 +31,7 @@ async fn bridge(pair: &Pair, name: &str, builtin: bool) -> McpToolBridge {
     let tools = pair.peer().list_tools(None).await.unwrap().tools;
     let tool = tools.iter().find(|tool| tool.name == name).unwrap().clone();
     let handle = Arc::new(McpClientHandle {
+        call_gate: Default::default(),
         name: "workspace".into(),
         version: None,
         connected_at: None,

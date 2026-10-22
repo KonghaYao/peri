@@ -545,14 +545,14 @@ fn sensitive_entries_match_default_requires_approval() {
     }
 }
 
-/// 条目集合与判定分支数一致（精确 10 项 + 前缀 3 项 = 13 项；
+/// 条目集合与判定分支数一致（精确 8 项 + 前缀 3 项 = 11 项；
 /// 变更 `default_requires_approval` 分支时必须同步条目清单）。
 #[test]
 fn sensitive_entries_cover_all_requires_approval_branches() {
     let entries = sensitive_tool_entries();
     assert_eq!(
         entries.len(),
-        13,
+        11,
         "条目清单应覆盖 default_requires_approval 全部分支"
     );
     // 前缀条目恰好 3 项（delete_ / rm_ / mcp__）
@@ -927,7 +927,7 @@ fn workspace_sensitive_entries_use_model_names() {
 fn cron_sensitive_markdown_uses_registry_effective_name() {
     let rendered = format_sensitive_tools();
     let lines: Vec<&str> = rendered.lines().collect();
-    assert_eq!(lines.len(), 13, "渲染行数 = 条目数（13 项，顺序不变）");
+    assert_eq!(lines.len(), 11, "敏感工具完整列表应逐项渲染");
 
     let cron = peri_acp_types::builtin_mcp::find("cron").expect("cron 实例应有声明");
     let register = cron
@@ -936,12 +936,12 @@ fn cron_sensitive_markdown_uses_registry_effective_name() {
         .find(|tool| tool.original_name == "cron_register")
         .expect("cron 实例应声明 cron_register");
     assert_eq!(
-        lines[12],
+        *lines.last().expect("敏感工具列表非空"),
         format!(
             "- `{}` — scheduled task registration (can trigger arbitrary prompts later, equivalent to delegated execution rights)",
             register.effective_name
         ),
-        "末项（顺序第 13）显示名必须是注册表解析出的 effective name，实际渲染：\n{rendered}"
+        "末项显示名必须是注册表解析出的 effective name，实际渲染：\n{rendered}"
     );
 
     // 已失效裸名不得作为条目名出现；effective name 内部含 `cron_register` 子串，
@@ -979,5 +979,5 @@ fn deployment_closed_builtin_is_omitted_from_prompt_without_weakening_approval()
     assert!(!visible.lines().any(|line| line.starts_with("- `Bash`")));
     assert!(visible.lines().any(|line| line.starts_with("- `WebFetch`")));
     assert!(default_requires_approval("cron_register"));
-    assert_eq!(format_sensitive_tools().lines().count(), 13);
+    assert_eq!(format_sensitive_tools().lines().count(), 11);
 }

@@ -347,9 +347,8 @@ async fn closure_matrix_four_faces_on_real_builtin_pool() {
         expected_servers.sort();
 
         // 面①：闸门候选。
-        let middleware = McpMiddleware::new(Arc::clone(&pool))
-            .with_tool_pool(Arc::clone(&pool))
-            .with_builtin_closures(closed.clone());
+        let middleware =
+            McpMiddleware::new(Arc::clone(&pool)).with_builtin_closures(closed.clone());
         let mut probe = StartupProbe::default();
         Middleware::before_react_start(&middleware, &mut probe)
             .await
@@ -560,9 +559,7 @@ async fn closing_web_keeps_artifact_capability_and_real_call() {
     );
 
     // 能力面：目录与 parent_tools 提供面都只剩 artifact。
-    let middleware = McpMiddleware::new(Arc::clone(&pool))
-        .with_tool_pool(Arc::clone(&pool))
-        .with_builtin_closures(closed.clone());
+    let middleware = McpMiddleware::new(Arc::clone(&pool)).with_builtin_closures(closed.clone());
     let collected = tool_names(&middleware.collect_tools(&cwd));
     let web_tools = declared_effective_names(find("web").expect("web 已实现"));
     let artifact_tools = declared_effective_names(find("artifact").expect("artifact 已实现"));

@@ -47,7 +47,7 @@ pub struct McpToolBridge {
     server_generation: u64,
     client: Arc<McpClientHandle>,
     binding_leases: Option<Arc<super::apps::McpAppBindingRegistry>>,
-    admission: Option<super::dynamic::admission::DynamicMcpAdmissionGate>,
+    admission: Option<super::connection_gate::McpCallGate>,
     output_pool: Option<std::sync::Weak<McpClientPool>>,
     output_session_id: Option<String>,
 }
@@ -153,48 +153,12 @@ impl McpToolBridge {
             model_visible,
             direct: false,
             server_generation: 0,
+            admission: Some(client.call_gate.clone()),
             client,
             binding_leases: None,
-            admission: None,
             output_pool: None,
             output_session_id: None,
         }
-    }
-
-    pub fn new_dynamic(
-        server_name: &str,
-        tool: &Tool,
-        client: Arc<McpClientHandle>,
-        admission: super::dynamic::admission::DynamicMcpAdmissionGate,
-    ) -> Result<Self, ToolCallError> {
-        let tool_name = tool.name.to_string();
-        if !valid_name_component(server_name) || !valid_name_component(&tool_name) {
-            return Err(ToolCallError::Unavailable {
-                server: server_name.to_string(),
-            });
-        }
-        let description = bounded_tool_description(
-            server_name,
-            tool.description.as_ref().map(|value| value.as_ref()),
-        );
-        let model_visible =
-            super::apps::tool_visibility(tool).model && !declared_model_hidden(&client, &tool_name);
-        Ok(Self {
-            server_name: server_name.to_string(),
-            full_name: effective_mcp_tool_name(server_name, &tool_name),
-            tool_name,
-            description,
-            input_schema: serde_json::to_value(&*tool.input_schema)
-                .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
-            model_visible,
-            direct: false,
-            server_generation: 0,
-            client,
-            binding_leases: None,
-            admission: Some(admission),
-            output_pool: None,
-            output_session_id: None,
-        })
     }
 
     pub fn with_output_store(
@@ -251,13 +215,6 @@ impl McpToolBridge {
     pub(crate) fn client_handle(&self) -> &Arc<McpClientHandle> {
         &self.client
     }
-}
-
-fn valid_name_component(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 #[async_trait]
@@ -819,6 +776,7 @@ mod direct_flag_tests {
 
     fn make_handle(server: &str, tools: Vec<Tool>, status: ClientStatus) -> Arc<McpClientHandle> {
         Arc::new(McpClientHandle {
+            call_gate: Default::default(),
             name: server.to_string(),
             version: None,
             connected_at: None,
@@ -837,6 +795,7 @@ mod direct_flag_tests {
 
     fn make_builtin_handle(instance: &str) -> Arc<McpClientHandle> {
         Arc::new(McpClientHandle {
+            call_gate: Default::default(),
             name: instance.to_string(),
             version: None,
             connected_at: None,

@@ -376,7 +376,7 @@ async fn test_mcp_list_requires_negotiated_oauth_capability() {
     cfg.session_manager.set_pending_caps(PeriCaps::default());
     cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let error = handle_request(
+    let error = handle_mcp_projection(
         "mcp/list",
         &json!({}),
         &cfg,
@@ -408,7 +408,7 @@ async fn test_legacy_agent_event_mcp_list_returns_snapshot() {
     });
     cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let response = handle_request(
+    let response = handle_mcp_projection(
         "mcp/list",
         &json!({}),
         &cfg,
@@ -437,7 +437,7 @@ async fn test_mcp_list_returns_bounded_safe_empty_snapshot_when_negotiated() {
     });
     cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let response = handle_request(
+    let response = handle_mcp_projection(
         "mcp/list",
         &json!({}),
         &cfg,
@@ -502,6 +502,7 @@ async fn test_mcp_list_projects_connection_meta() {
         servers: vec![
             McpServerInfo {
                 name: "fixture".to_string(),
+                control: peri_acp_types::mcp_control::McpServerControl::available(),
                 transport: "stdio".to_string(),
                 status: McpServerConnectionStatus::Connected,
                 oauth_status: McpServerOAuthStatus::None,
@@ -530,6 +531,7 @@ async fn test_mcp_list_projects_connection_meta() {
             },
             McpServerInfo {
                 name: "never-connected".to_string(),
+                control: peri_acp_types::mcp_control::McpServerControl::available(),
                 transport: "http".to_string(),
                 status: McpServerConnectionStatus::Failed,
                 oauth_status: McpServerOAuthStatus::None,
@@ -547,7 +549,7 @@ async fn test_mcp_list_projects_connection_meta() {
         ],
     }));
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let response = handle_request(
+    let response = handle_mcp_projection(
         "mcp/list",
         &json!({}),
         &cfg,
@@ -630,7 +632,7 @@ async fn test_oauth_start_rejects_missing_flow_id_before_spawning() {
     });
     cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let error = handle_request(
+    let error = handle_mcp_projection(
         "mcp/oauth_start",
         &json!({ "server_name": "docs" }),
         &cfg,
@@ -667,7 +669,7 @@ async fn test_legacy_agent_event_oauth_start_without_flow_id_generates_one() {
     let pool = Arc::new(peri_middlewares::mcp::McpClientPool::new_pending_with_spawner(spawner));
     cfg.mcp_pool = Some(pool);
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let response = handle_request(
+    let response = handle_mcp_projection(
         "mcp/oauth_start",
         &json!({ "server_name": "docs" }),
         &cfg,
@@ -702,7 +704,7 @@ async fn test_safe_oauth_capability_rejects_callback_secrets_over_acp() {
     });
     cfg.mcp_pool = Some(Arc::new(peri_middlewares::mcp::McpClientPool::new_pending()));
     let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
-    let error = handle_request(
+    let error = handle_mcp_projection(
         "mcp/oauth_callback",
         &json!({
             "server_name": "docs",
@@ -719,4 +721,24 @@ async fn test_safe_oauth_capability_rejects_callback_secrets_over_acp() {
     assert_eq!(error.code, -32601);
     assert!(!error.message.contains("secret-code"));
     assert!(!error.message.contains("secret-state"));
+}
+
+// Projection/OAuth behavior is exercised after session admission; scoped routing is
+// covered by mcp_control_tests through the production request and server-loop paths.
+async fn handle_mcp_projection(
+    method: &str,
+    params: &Value,
+    cfg: &AcpServerConfig,
+    _sessions: &mut HashMap<String, SessionState>,
+    _transport: &Arc<dyn crate::transport::AcpTransport>,
+) -> Result<Value, AcpError> {
+    let mut connection = crate::host::connection::ConnectionContext::new(false);
+    connection.commit_initialize(cfg.session_manager.effective_host_caps());
+    let connection = connection.facts();
+    match method {
+        "mcp/list" => super::mcp_oauth::handle_list(params, cfg, &connection, true),
+        "mcp/oauth_start" => super::mcp_oauth::handle_oauth_start(params, cfg, &connection),
+        "mcp/oauth_callback" => super::mcp_oauth::handle_oauth_callback(params, cfg, &connection),
+        _ => unreachable!(),
+    }
 }

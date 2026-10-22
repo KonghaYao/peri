@@ -19,7 +19,7 @@
 //!
 //! 批准面（X6 核实结论，2026-09-29 W2b）：**skill 级批准面当前不存在**——
 //! 既有批准只落在两处：(a) 工具粒度 `permission::sensitive_tool_entries()`
-//! （14 项 + 3 前缀，含 `mcp__` 前缀「按绑定来源审批」；`SkillTool` 不在表内，
+//! （含 `mcp__` 前缀「按绑定来源审批」；`SkillTool` 不在表内，
 //! 属免批准 direct 工具）；(b) agent 粒度 `McpAgentRegistry::approvals`
 //! （内容 + 有效能力绑定，变更重批）。因此 X6 的「本地受信来源免逐技能批准」
 //! 在 W2 无面可删（本来就不逐技能弹窗），「远端维持既有批准面」= 沿用上述
@@ -34,7 +34,7 @@ use peri_acp_types::{
 use rmcp::{service::Peer, RoleClient};
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
-use super::client::McpClientHandle;
+use super::client::{ClientStatus, McpClientHandle};
 use super::skill_discovery::{
     frontmatter_maps_equal, parse_skill_frontmatter_map, read_skill_resource_text,
     recover_entry_via_skills_get, uri_eq_ignore_scheme_case, verify_digest, SkillResourceRead,
@@ -45,7 +45,7 @@ use super::skill_discovery::{
 pub(crate) enum ActivationError {
     /// 条目不是 MCP 来源（本地/内置 skill 走各自的读取路径）。
     NotMcpSourced,
-    /// server 断连、当前 handle 无 peer 或不在 registry 中。
+    /// server 断连、条目已撤销，或绑定正文所需的当前 peer 不可用。
     Unreachable,
     /// 条目无 SKILL.md 内容绑定（动态技能或 legacy 兜底条目）。
     MissingBinding,
@@ -77,21 +77,38 @@ impl ActivationError {
     }
 }
 
-/// 从 registry 的**当前** handle 解析 server 的 peer。
+/// 从 registry 的当前已发现条目取得连接调用许可。
 ///
-/// 返回 `(handle, peer)`：handle 用于刷新回写（`refresh_entries` 的代数校验），
-/// peer 用于本次读取。registry 无该 server / 已断连 / handle 非本 crate 的
-/// 客户端类型 → `None`（调用方按 `Unreachable` 处理，不回落磁盘）。
-fn peer_of(registry: &McpSkillRegistry, server: &str) -> Option<(HandleToken, Peer<RoleClient>)> {
-    let state = registry.discovery_state(server)?;
-    let handle = match &state {
-        ServerDiscoveryState::Started { handle }
-        | ServerDiscoveryState::Discovered { handle, .. } => handle.clone(),
-        ServerDiscoveryState::Failed { .. } => return None,
+/// 条目快照须仍属于当前发现结果；旧代、撤销或尚在发现的连接不能激活旧正文。
+/// legacy 已校验正文无需 RPC peer，但同样受连接状态与调用 gate 约束。
+fn connection_of(
+    registry: &McpSkillRegistry,
+    server: &str,
+    meta: &SkillMetadata,
+) -> Option<(
+    HandleToken,
+    std::sync::Arc<McpClientHandle>,
+    super::connection_gate::McpCallPermit,
+)> {
+    let ServerDiscoveryState::Discovered { handle, entries } = registry.discovery_state(server)?
+    else {
+        return None;
     };
+    if !entries.iter().any(|entry| {
+        entry.name == meta.name
+            && entry.origin == meta.origin
+            && entry.resources == meta.resources
+            && entry.frontmatter == meta.frontmatter
+            && entry.content == meta.content
+    }) {
+        return None;
+    }
     let client = handle.clone().downcast::<McpClientHandle>().ok()?;
-    let peer = client.peer.clone()?;
-    Some((handle, peer))
+    if client.status != ClientStatus::Connected {
+        return None;
+    }
+    let permit = client.call_gate.try_acquire().ok()?;
+    Some((handle, client, permit))
 }
 
 /// 激活 skill：返回**已校验**的 SKILL.md 正文。
@@ -109,26 +126,34 @@ pub(crate) async fn activate(
     let Some(SkillOrigin::Mcp { server, uri }) = &meta.origin else {
         return Err(ActivationError::NotMcpSourced);
     };
+    let Some((handle, client, _permit)) = connection_of(registry, server, meta) else {
+        return Err(ActivationError::Unreachable);
+    };
     // 绑定面：条目 resources[] 中 SKILL.md 自身条目 + 发现时 frontmatter 快照。
     let binding = meta
         .resources
         .iter()
         .find(|resource| uri_eq_ignore_scheme_case(&resource.uri, uri));
-    let (Some(binding), Some(expected_fm)) = (binding, meta.frontmatter.as_ref()) else {
+    let Some(binding) = binding else {
+        if !meta.resources.is_empty() {
+            return Err(ActivationError::MissingBinding);
+        }
         // legacy 兜底（无绑定条目）：使用发现阶段已校验的正文。
         return match &meta.content {
             Some(content) => Ok(content.clone()),
             None => Err(ActivationError::MissingBinding),
         };
     };
-    let Some((handle, peer)) = peer_of(registry, server) else {
-        return Err(ActivationError::Unreachable);
-    };
-    let text = read_text(&peer, server, uri).await?;
+    let expected_fm = meta
+        .frontmatter
+        .as_ref()
+        .ok_or(ActivationError::MissingBinding)?;
+    let peer = client.peer.as_ref().ok_or(ActivationError::Unreachable)?;
+    let text = read_text(peer, server, uri).await?;
     match verify_body(&text, &binding.digest, expected_fm) {
         Ok(()) => Ok(text),
         Err(ActivationError::DigestMismatch) => {
-            refresh_after_digest_mismatch(registry, &peer, server, uri, &handle, cancel).await
+            refresh_after_digest_mismatch(registry, peer, server, uri, &handle, cancel).await
         }
         Err(other) => Err(other),
     }

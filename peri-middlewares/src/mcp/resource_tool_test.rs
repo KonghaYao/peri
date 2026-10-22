@@ -346,6 +346,7 @@ fn make_connected_pool(peer: rmcp::Peer<rmcp::RoleClient>) -> Arc<McpClientPool>
     pool.clients.write().insert(
         "srv".to_string(),
         Arc::new(McpClientHandle {
+            call_gate: Default::default(),
             name: "srv".to_string(),
             version: None,
             connected_at: None,

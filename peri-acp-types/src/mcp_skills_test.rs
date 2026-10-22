@@ -212,24 +212,34 @@ fn on_change_not_fired_on_started() {
 }
 
 #[test]
-fn started_returns_setter_bool_only_first_wins() {
-    // 审查 M1：并发挂点（装配/连接事件/before_agent）重复投影时，仅置位者
-    // 返回 true（负责 spawn），覆盖已有 Started 返回 false（跳过 spawn）。
+fn started_returns_setter_bool_once_per_handle() {
+    // 同代并发挂点仅首次负责 spawn；旧代仍 Started 时，新代也必须负责 spawn。
     let (reg, count) = counter_reg();
+    let first = token(1);
+    let second = token(2);
+    let fourth = token(4);
     assert!(
-        reg.mark_discovery_started("srv", token(1)),
+        reg.mark_discovery_started("srv", first.clone()),
         "首次置位 = 置位者"
     );
     assert!(
-        !reg.mark_discovery_started("srv", token(2)),
-        "覆盖已有 Started 非置位者"
+        !reg.mark_discovery_started("srv", first),
+        "同代已有 Started 不重复 spawn"
+    );
+    assert!(
+        reg.mark_discovery_started("srv", second.clone()),
+        "新代必须 spawn"
+    );
+    assert!(
+        !reg.mark_discovery_started("srv", second),
+        "新代也只 spawn 一次"
     );
     // 覆盖非空 Discovered = 重新发现（新任务应 spawn）：返回 true，且
     // 旧条目从 all_skills 消失触发一次 on_change。
     complete(&reg, "srv", token(3), vec![skill("mcp__srv__a")]);
     assert_eq!(count.load(Ordering::SeqCst), 1, "完成回写触发一次");
     assert!(
-        reg.mark_discovery_started("srv", token(4)),
+        reg.mark_discovery_started("srv", fourth.clone()),
         "覆盖 Discovered = 重新发现，置位者应 spawn"
     );
     assert_eq!(
@@ -238,8 +248,8 @@ fn started_returns_setter_bool_only_first_wins() {
         "覆盖非空 Discovered 仍触发恰一次"
     );
     assert!(
-        !reg.mark_discovery_started("srv", token(5)),
-        "再覆盖 Started 非置位者（重复投影不 spawn）"
+        !reg.mark_discovery_started("srv", fourth),
+        "同代再次投影不 spawn"
     );
 }
 

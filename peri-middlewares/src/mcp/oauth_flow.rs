@@ -28,6 +28,8 @@ pub enum OAuthFlowError {
     AuthError(#[from] AuthError),
     #[error("OAuth 授权被用户取消")]
     Cancelled,
+    #[error("OAuth authorization is required")]
+    AuthorizationRequired,
     #[error("OAuth 回调等待超时")]
     CallbackTimeout,
 }
@@ -40,14 +42,6 @@ pub enum OAuthFlowEvent {
         server_name: String,
         authorization_url: String,
         /// 回调通道：TUI 收集用户输入后通过此通道传回授权码
-        callback_tx: oneshot::Sender<OAuthCallbackResult>,
-    },
-    /// Dynamic MCP authorization, preserving the non-reducible instance identity.
-    DynamicAuthorizationNeeded {
-        instance: peri_acp_types::dynamic_mcp::DynamicMcpInstanceKey,
-        flow_id: String,
-        server_name: String,
-        authorization_url: String,
         callback_tx: oneshot::Sender<OAuthCallbackResult>,
     },
     /// OAuth 授权完成
@@ -175,6 +169,7 @@ impl OAuthFlowManager {
                 credential_key,
                 server_url,
                 oauth_config,
+                true,
             )
             .await;
         if let Err(error) = &result {
@@ -196,6 +191,19 @@ impl OAuthFlowManager {
         result
     }
 
+    /// Restore credentials without opening a callback listener or starting authorization.
+    pub(crate) async fn restore_oauth_flow_with_id(
+        &mut self,
+        flow_id: &str,
+        server_name: &str,
+        server_url: &str,
+        oauth_config: &OAuthConfig,
+    ) -> Result<(), OAuthFlowError> {
+        let key = static_credential_key(server_name, server_url, oauth_config);
+        self.run_oauth_flow_inner(flow_id, server_name, &key, server_url, oauth_config, false)
+            .await
+    }
+
     async fn run_oauth_flow_inner(
         &mut self,
         flow_id: &str,
@@ -203,6 +211,7 @@ impl OAuthFlowManager {
         credential_key: &str,
         server_url: &str,
         oauth_config: &OAuthConfig,
+        interactive: bool,
     ) -> Result<(), OAuthFlowError> {
         info!(server = %server_name, "开始 OAuth 授权流程");
 
@@ -246,6 +255,10 @@ impl OAuthFlowManager {
             self.states
                 .insert(server_name.to_string(), (credential_key.to_string(), state));
             return Ok(());
+        }
+
+        if !interactive {
+            return Err(OAuthFlowError::AuthorizationRequired);
         }
 
         // 3. 绑定回调服务器
@@ -368,6 +381,7 @@ fn failure_kind(error: &OAuthFlowError) -> OAuthFailureKind {
         OAuthFlowError::AuthError(_) => OAuthFailureKind::ProviderRejected,
         OAuthFlowError::Cancelled => OAuthFailureKind::Internal,
         OAuthFlowError::CallbackTimeout => OAuthFailureKind::CallbackTimeout,
+        OAuthFlowError::AuthorizationRequired => OAuthFailureKind::ProviderRejected,
     }
 }
 

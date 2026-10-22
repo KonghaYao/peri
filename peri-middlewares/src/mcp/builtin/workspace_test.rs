@@ -395,6 +395,7 @@ async fn bridge_accepts_workspace_owned_task_handle() {
     let tools = peer.list_all_tools().await.expect("tool list");
     let bash = tools.iter().find(|tool| tool.name == "Bash").expect("Bash");
     let handle = Arc::new(crate::mcp::client::McpClientHandle {
+        call_gate: Default::default(),
         name: "workspace".into(),
         version: None,
         connected_at: None,
@@ -558,6 +559,7 @@ async fn closing_workspace_scope_reconciles_without_live_agent_manager() {
     pool.clients.write().insert(
         "workspace".into(),
         Arc::new(crate::mcp::client::McpClientHandle {
+            call_gate: Default::default(),
             name: "workspace".into(),
             version: None,
             connected_at: None,

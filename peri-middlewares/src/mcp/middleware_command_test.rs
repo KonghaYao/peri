@@ -6,7 +6,7 @@ use super::*;
 /// 断连 → 命令面按前缀批量注销（removed_any → on_change）。
 #[tokio::test]
 async fn before_agent_command_registry_projection_and_disconnect() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner,pool) = owned_discovery_pool();
     insert_skill_handle(&pool, "srv", vec![]);
     let reg = Arc::new(McpSkillRegistry::new());
     let cmd_reg = Arc::new(CommandRegistry::new());
@@ -46,7 +46,7 @@ async fn before_agent_command_registry_projection_and_disconnect() {
 /// with_command_registry 未装配（默认 new()）→ 命令面零动作（兼容既有行为）。
 #[tokio::test]
 async fn before_agent_without_command_registry_noop() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner,pool) = owned_discovery_pool();
     insert_skill_handle(&pool, "srv", vec![]);
     let cmd_reg = Arc::new(CommandRegistry::new());
     let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -80,7 +80,7 @@ async fn before_agent_without_command_registry_noop() {
 /// spawn 的空回写落定再手动回写，避免空回写注销覆盖。
 #[tokio::test]
 async fn before_agent_command_registry_disconnect_removes_namespace_and_fires_on_change() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner,pool) = owned_discovery_pool();
     let h1 = insert_skill_handle(&pool, "srv", vec![]);
     let reg = Arc::new(McpSkillRegistry::new());
     let cmd_reg = Arc::new(CommandRegistry::new());
@@ -142,7 +142,7 @@ async fn before_agent_command_registry_disconnect_removes_namespace_and_fires_on
 /// 条目；重复预热（Started/Discovered 去重）零动作、不触发 on_change。
 #[tokio::test]
 async fn prewarm_discovery_triggers_idempotent_discovery() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner,pool) = owned_discovery_pool();
     let h1 = insert_skill_handle(&pool, "srv", vec![]);
     let reg = Arc::new(McpSkillRegistry::new());
     let cmd_reg = Arc::new(CommandRegistry::new());
@@ -213,7 +213,7 @@ async fn prewarm_discovery_triggers_idempotent_discovery() {
 /// 补偿（无 chain、无 before_agent）。notify_tx=None 仅发现触发。
 #[tokio::test]
 async fn attach_connection_notifier_triggers_discovery_on_connected() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner,pool) = owned_discovery_pool();
     let reg = Arc::new(McpSkillRegistry::new());
     let cmd_reg = Arc::new(CommandRegistry::new());
     attach_connection_notifier(
@@ -258,7 +258,7 @@ async fn attach_connection_notifier_triggers_discovery_on_connected() {
 
 #[test]
 fn test_connection_notifier_does_not_strongly_retain_pool() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner,pool) = owned_discovery_pool();
     let pool_weak = Arc::downgrade(&pool);
     let registry = Arc::new(McpSkillRegistry::new());
     let registry_weak = Arc::downgrade(&registry);
@@ -286,7 +286,7 @@ fn test_connection_notifier_does_not_strongly_retain_pool() {
 /// 需靠收口补发驱动「刚进入、未说话」时的 skill 发现。
 #[tokio::test]
 async fn notify_initial_connections_triggers_discovery_on_startup() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner,pool) = owned_discovery_pool();
     let reg = Arc::new(McpSkillRegistry::new());
     let cmd_reg = Arc::new(CommandRegistry::new());
     attach_connection_notifier(
@@ -338,7 +338,7 @@ async fn notify_initial_connections_triggers_discovery_on_startup() {
 /// 条目）；每轮先 `wait_discovered` 让 spawn 空回写落定再手动回写。
 #[tokio::test]
 async fn before_agent_command_registry_reconnect_sequence_no_aba() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner,pool) = owned_discovery_pool();
     let reg = Arc::new(McpSkillRegistry::new());
     let cmd_reg = Arc::new(CommandRegistry::new());
     let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -457,7 +457,7 @@ async fn before_agent_command_registry_reconnect_sequence_no_aba() {
 /// Conflict（验收 :414/:415 在 plugin server 形态下成立）。
 #[tokio::test]
 async fn before_agent_command_registry_plugin_server_disconnect_reconnect() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner,pool) = owned_discovery_pool();
     let reg = Arc::new(McpSkillRegistry::new());
     let cmd_reg = Arc::new(CommandRegistry::new());
     let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));

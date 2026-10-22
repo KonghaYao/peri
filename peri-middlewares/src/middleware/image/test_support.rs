@@ -41,6 +41,7 @@ impl ImageFixture {
         pool.clients.write().insert(
             "workspace".to_owned(),
             Arc::new(McpClientHandle {
+                call_gate: Default::default(),
                 name: "workspace".to_owned(),
                 version: None,
                 connected_at: None,

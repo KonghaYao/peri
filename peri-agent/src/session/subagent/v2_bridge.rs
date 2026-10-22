@@ -241,7 +241,7 @@ pub fn build_v2_subagent_context(
     chain: Arc<MiddlewareChain>,
     tools: Vec<Arc<dyn BaseTool>>,
     tool_filter: crate::session::tool_catalog::ToolFilter,
-    session_mcp_capability: Option<Arc<dyn peri_acp_types::ports::SessionMcpCapabilityPort>>,
+    session_mcp_catalog: Option<Arc<dyn peri_acp_types::ports::SessionMcpCatalogPort>>,
     cwd: &str,
     cancel_token: CancellationToken,
     tool_invocation_resolver: Option<Arc<dyn ToolInvocationResolver>>,
@@ -286,7 +286,7 @@ pub fn build_v2_subagent_context(
     let combined_shared_tools: SharedToolMap = Arc::new(RwLock::new(tools_map.clone()));
     let tool_catalog = Arc::new(SessionToolCatalog::with_filter(
         tools_map,
-        session_mcp_capability,
+        session_mcp_catalog,
         tool_filter,
     ));
 

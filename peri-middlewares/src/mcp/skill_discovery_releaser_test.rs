@@ -37,7 +37,22 @@ fn make_releaser_ctx(raw_text: &str, supports_inject: bool) -> CommandContext {
 
 /// 造 Discovered 条目（content 带全文；对齐 mcp_skills_test 的 complete）。
 fn seed_discovered(reg: &Arc<McpSkillRegistry>, server: &str, skill: &str, content: &str) {
-    let token: HandleToken = Arc::new(1u32);
+    let token: HandleToken = Arc::new(crate::mcp::client::McpClientHandle {
+        call_gate: Default::default(),
+        name: server.to_string(),
+        version: None,
+        cache_version: None,
+        connected_at: None,
+        protocol_version: None,
+        peer: None,
+        tools: vec![],
+        resources: vec![],
+        status: crate::mcp::client::ClientStatus::Connected,
+        oauth_status: Default::default(),
+        source: None,
+        url: None,
+        skills_capable: false,
+    });
     let meta = SkillMetadata {
         name: format!("mcp__{server}__{skill}"),
         aliases: Vec::new(),

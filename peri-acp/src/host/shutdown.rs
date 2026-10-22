@@ -65,9 +65,6 @@ pub(super) async fn shutdown_host(
     }
     connection.lock().await.begin_close();
     task_owner.begin_shutdown();
-    if let Some(dynamic_mcp) = cfg.dynamic_mcp.as_ref() {
-        dynamic_mcp.begin_shutdown();
-    }
     if let Some(pool) = cfg.mcp_pool.as_ref() {
         pool.begin_shutdown();
     }
@@ -93,18 +90,6 @@ pub(super) async fn shutdown_host(
     if let task_scope::HostShutdownReport::Incomplete { unfinished } = host_report {
         tracing::warn!(unfinished, "ACP host task drain incomplete");
     }
-    let dynamic_report = if let Some(dynamic_mcp) = cfg.dynamic_mcp.as_ref() {
-        let report = dynamic_mcp.shutdown().await;
-        if let peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport::Incomplete {
-            unfinished_instances,
-        } = report
-        {
-            tracing::warn!(unfinished_instances, "Dynamic MCP service drain incomplete");
-        }
-        report
-    } else {
-        peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport::Complete
-    };
     let _ = mcp_task_owner.shutdown().await;
     for session_id in &all_ids {
         if !cfg.session_manager.drain_session_tasks(session_id).await {
@@ -119,9 +104,7 @@ pub(super) async fn shutdown_host(
         let session = closing_sessions
             .get(&session_id)
             .expect("closing session retained");
-        if session.close_resources().await
-            == peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport::Complete
-        {
+        if session.close_resources().await {
             closing_sessions.remove(&session_id);
         } else {
             tracing::warn!(session_id = %session_id, "session resources retained for shutdown retry");
@@ -175,7 +158,6 @@ pub(super) async fn shutdown_host(
     };
     let terminal_report = task_scope::HostTerminalShutdownReport::aggregate(
         host_report,
-        dynamic_report,
         pool_report,
         session_close_failures + environment_failures,
     );

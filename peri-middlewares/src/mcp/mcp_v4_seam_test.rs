@@ -142,6 +142,7 @@ fn object_schema() -> serde_json::Value {
 
 fn connected_handle(name: &str, tools: Vec<Tool>) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
+        call_gate: Default::default(),
         name: name.to_string(),
         version: None,
         connected_at: None,
@@ -194,6 +195,7 @@ impl SeamFixture {
         let service = self.pool.retain_service(service);
         let peer = service.peer().clone();
         let handle = Arc::new(McpClientHandle {
+            call_gate: Default::default(),
             name: name.to_string(),
             version: None,
             connected_at: None,

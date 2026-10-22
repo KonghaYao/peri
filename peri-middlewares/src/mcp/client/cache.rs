@@ -32,10 +32,10 @@ enum CacheDenial {
     Pending,
     WorkspaceUnbound,
     Configuration,
-    DynamicConnection,
     /// 会话级 ACP 连接身份不可证明 / 与请求代不一致（M7，fail-closed）。
     AcpConnection,
     Credentials,
+    Transient,
 }
 
 /// 会话级 ACP 连接的 cache 身份判定（M7）。
@@ -138,11 +138,6 @@ impl McpClientPool {
             Some(McpCachePolicy::Disabled) => return Some(CacheDenial::Configuration),
             Some(McpCachePolicy::Enabled) => {}
         }
-        if connection.is_dynamic() {
-            // Dynamic MCP 首版 fail-closed：在 scoped cache ticket/current-instance
-            // fencing 完成前，不读取或写入持久化 resource cache。
-            return Some(CacheDenial::DynamicConnection);
-        }
         if let Some(identity) = connection.acp_identity() {
             // 同代命中才可复用：换代（generation）/ 更换声明（session / connection）
             // 或身份不可证明都拒绝——不跨会话按同名 server 命中（M7）。
@@ -150,6 +145,13 @@ impl McpClientPool {
                 AcpCacheScope::Identified(current) if current == *identity => None,
                 _ => Some(CacheDenial::AcpConnection),
             };
+        }
+        if self
+            .server_slot(connection.server_name())
+            .transient
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Some(CacheDenial::Transient);
         }
         let allowed = self
             .configs
@@ -565,7 +567,7 @@ impl McpClientPool {
                     CacheDenial::Pending => "cache_pending",
                     CacheDenial::WorkspaceUnbound => "cache_disabled_workspace_unbound",
                     CacheDenial::Configuration => "cache_disabled_by_config",
-                    CacheDenial::DynamicConnection => "cache_disabled_dynamic",
+                    CacheDenial::Transient => "cache_disabled_transient",
                     CacheDenial::AcpConnection => "cache_disabled_acp_connection",
                     CacheDenial::Credentials => "cache_disabled",
                 }

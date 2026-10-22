@@ -15,9 +15,10 @@ async fn wait_failed(registry: &McpSkillRegistry, token: &HandleToken) {
 /// [回归测试] 无 peer 因而无 cache 的当前连接仍须完成发现并暴露 Failed。
 #[tokio::test]
 async fn before_agent_missing_peer_without_cache_finishes_failed() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner,pool) = owned_discovery_pool();
     let empty = insert_skill_handle(&pool, "srv", vec![]);
     let handle = Arc::new(McpClientHandle {
+                call_gate: Default::default(),
         peer: None,
         ..empty.as_ref().clone()
     });
@@ -53,9 +54,10 @@ async fn before_agent_missing_peer_without_cache_finishes_failed() {
 /// [回归测试] 投影后、spawn 前换代时不得把新 handle 搭配旧 token 发起发现。
 #[tokio::test]
 async fn before_agent_rejects_replaced_handle_before_discovery_spawn() {
-    let pool = Arc::new(McpClientPool::new_empty());
+    let (_mcp_owner,pool) = owned_discovery_pool();
     let empty = insert_skill_handle(&pool, "srv", vec![]);
     let replacement = Arc::new(McpClientHandle {
+                call_gate: Default::default(),
         peer: None,
         ..empty.as_ref().clone()
     });

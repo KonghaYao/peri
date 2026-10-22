@@ -370,6 +370,7 @@ async fn builtin_source_propagates() {
         pool.clients.write().insert(
             (*instance).to_string(),
             Arc::new(McpClientHandle {
+                call_gate: Default::default(),
                 name: (*instance).to_string(),
                 version: None,
                 connected_at: None,

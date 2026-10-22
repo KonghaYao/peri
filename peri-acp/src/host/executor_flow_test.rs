@@ -437,9 +437,7 @@ pub(super) async fn make_session_context(session_id: &str) -> SessionContext {
         hook_groups: vec![],
         cron_scheduler: None,
         mcp_pool: None,
-        dynamic_mcp: None,
-        session_mcp_capability: None,
-        dynamic_mcp_projection: Arc::new(parking_lot::Mutex::new(None)),
+        session_mcp_catalog: None,
         tool_search_index: Arc::new(ToolSearchIndex::default()),
         shared_tools: Arc::new(parking_lot::RwLock::new(Default::default())),
         agent_catalog: Arc::new(AgentCatalogProvider::new()),
@@ -544,7 +542,6 @@ async fn make_session_context_with_manager(
         None,
         None,
         None, // MCP 订阅端口（测试无）
-        None, // Dynamic MCP（测试无）
         None, // 无 bg 场景：fallback NoopTaskManager
         Arc::new(AgentCatalogProvider::new()),
         Vec::new(), // plugin 命令条目（Phase 6 B2；测试无）

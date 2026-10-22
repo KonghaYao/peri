@@ -105,6 +105,7 @@ impl Fixture {
             .unwrap();
         let pool = Arc::new(McpClientPool::new_empty());
         let handle = Arc::new(McpClientHandle {
+            call_gate: Default::default(),
             name: "workspace".to_string(),
             version: None,
             connected_at: None,

@@ -1,15 +1,9 @@
-//! Session-local 工具视图与动态目录注册；不写宿主共享表。
+//! Session-local 工具视图与当前 MCP 目录绑定；不写宿主共享表。
 use super::{StageBuildError, StageBuildInput};
 use crate::{
-    agent::stages::SharedToolMap,
-    session::tool_catalog::{CatalogRefreshError, SessionToolCatalog, StartupCatalogRegistration},
-    tools::BaseTool,
+    agent::stages::SharedToolMap, session::tool_catalog::SessionToolCatalog, tools::BaseTool,
 };
 use parking_lot::RwLock;
-use peri_acp_types::{
-    dynamic_mcp::{DynamicMcpCatalogTool, DynamicMcpErrorCode},
-    ports::DynamicMcpDeploymentPort,
-};
 use std::{
     collections::{BTreeMap, HashSet},
     sync::Arc,
@@ -73,48 +67,25 @@ pub(super) fn register_tool_catalog(
     input: &StageBuildInput,
     session_tools: &SharedToolMap,
 ) -> Result<Arc<SessionToolCatalog>, StageBuildError> {
-    let tool_catalog = Arc::new(SessionToolCatalog::try_new(
+    let disabled = input.meta_harness_disabled.clone();
+    let enabled = !disabled.contains("McpMiddleware");
+    let tool_filter = Arc::new(move |tool: &dyn BaseTool| {
+        if tool.mcp_server_name().is_none() {
+            return true;
+        }
+        if !enabled {
+            return false;
+        }
+        !tool.builtin_mcp_instance().is_some_and(|instance| {
+            peri_acp_types::builtin_mcp::find(instance)
+                .is_some_and(|declared| disabled.contains(declared.policy_key))
+        })
+    });
+    Ok(Arc::new(SessionToolCatalog::try_with_filter(
         session_tools.read().clone(),
-        input.session_mcp_capability.clone(),
-    )?);
-    if let Some(deployment) = input.dynamic_mcp.as_ref() {
-        deployment
-            .register_catalog(&input.session_id, tool_catalog.dynamic_catalog_tools())
-            .map_err(StageBuildError::DynamicMcp)?;
-        // 启动闸门提交晚到的静态 MCP 工具后，碰撞目录必须随新 base 重验：注册
-        // 回调缺省不设置（子 agent 沿用自身 capability，不改父 session 目录）。
-        tool_catalog.set_startup_catalog_registration(catalog_registration(
-            Arc::clone(deployment),
-            input.session_id.clone(),
-        ));
-    }
-
-    Ok(tool_catalog)
-}
-
-/// 启动提交的碰撞目录注册回调：捕获 deployment 与 session_id，把 registry 的
-/// 拒绝翻译为目录发布错误。
-///
-/// registry 在重名/别名冲突时以冲突工具名作为 `safe_summary`
-/// （见 `mcp/dynamic/registry.rs::candidate_catalog_conflict`），因此可以无损
-/// 映射到 `StartupRegistrationRejected`；其余拒绝（会话/任务已关闭）不是工具
-/// 冲突，不作为「某个工具名与目录冲突」上报。
-fn catalog_registration(
-    deployment: Arc<dyn DynamicMcpDeploymentPort>,
-    session_id: String,
-) -> StartupCatalogRegistration {
-    Arc::new(move |tools: Vec<DynamicMcpCatalogTool>| {
-        deployment
-            .register_catalog(&session_id, tools)
-            .map_err(|failure| match failure.code {
-                DynamicMcpErrorCode::ToolNameConflict => {
-                    CatalogRefreshError::StartupRegistrationRejected {
-                        tool: failure.safe_summary,
-                    }
-                }
-                _ => CatalogRefreshError::InconsistentCapability,
-            })
-    })
+        enabled.then(|| input.session_mcp_catalog.clone()).flatten(),
+        tool_filter,
+    )?))
 }
 
 #[cfg(test)]

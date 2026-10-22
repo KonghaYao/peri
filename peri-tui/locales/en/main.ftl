@@ -963,7 +963,6 @@ panel-mcp-cache-saved = CACHE saved
 panel-mcp-cache-ready = CACHE ready
 panel-mcp-cache-disabled = CACHE off: authenticated
 panel-mcp-cache-disabled-config = CACHE off: configuration
-panel-mcp-cache-disabled-dynamic = CACHE off: dynamic connection
 panel-mcp-cache-pending = CACHE pending initialization
 panel-mcp-cache-live-fetch = Persistent cache: live fetch
 panel-mcp-cache-none = Persistent cache: —
@@ -1306,3 +1305,21 @@ exit-resume-hint = To resume this session: peri -r { $session }
 
 panel-title-history-detail = History Detail
 panel-desc-history-detail = Oversized history entry detail
+
+# ACP MCP runtime control
+panel-mcp-detail-btn-restart = Restart
+panel-mcp-detail-btn-stop = Stop
+panel-mcp-restarting = Restarting MCP… Esc stops waiting.
+panel-mcp-stopping = Stopping MCP… Esc stops waiting.
+panel-mcp-control-connected = MCP connected.
+panel-mcp-control-stopped = MCP stopped.
+panel-mcp-control-needs-auth = MCP needs authorization. Choose Authorize to continue.
+panel-mcp-control-failed = MCP operation failed: { $detail }
+panel-mcp-control-unknown = MCP result unknown. Check the refreshed status before retrying.
+panel-mcp-control-target-unavailable = This MCP server is no longer available for that action.
+panel-mcp-control-unavailable = MCP runtime control is unavailable.
+panel-mcp-control-builtin = Builtin MCP servers are managed by the host.
+panel-mcp-control-workspace = The workspace connection is managed by the host.
+panel-mcp-control-system = System MCP servers are managed by the host.
+panel-mcp-control-acp = MCP over ACP does not support runtime control.
+panel-mcp-control-session-policy = MCP runtime control is disabled for this session.

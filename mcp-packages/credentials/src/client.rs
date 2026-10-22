@@ -226,7 +226,7 @@ impl OAuthCredentialClient {
         let key = server_key.to_owned();
         wasm_bindgen_futures::spawn_local(async move {
             if let Err(error) = client.clear_server(&key).await {
-                tracing::error!(%error, "dynamic MCP OAuth credential rollback failed during drop");
+                tracing::error!(%error, "MCP OAuth credential rollback failed during drop");
             }
         });
         Ok(())

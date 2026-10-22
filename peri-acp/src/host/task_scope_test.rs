@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use peri_acp_types::{dynamic_mcp::DynamicMcpShutdownReport, ports::McpPoolShutdownReport};
+use peri_acp_types::ports::McpPoolShutdownReport;
 use tokio::sync::{oneshot, Barrier};
 
 use super::{
@@ -22,33 +22,18 @@ fn test_terminal_shutdown_evidence_requires_all_subsystems_and_sessions_complete
         failed_services: 0,
     };
     assert!(matches!(
-        HostTerminalShutdownReport::aggregate(
-            HostShutdownReport::Complete,
-            DynamicMcpShutdownReport::Complete,
-            complete_pool,
-            0,
-        ),
+        HostTerminalShutdownReport::aggregate(HostShutdownReport::Complete, complete_pool, 0,),
         HostTerminalShutdownReport::Complete { .. }
     ));
 
     for report in [
         HostTerminalShutdownReport::aggregate(
             HostShutdownReport::Incomplete { unfinished: 1 },
-            DynamicMcpShutdownReport::Complete,
             complete_pool,
             0,
         ),
         HostTerminalShutdownReport::aggregate(
             HostShutdownReport::Complete,
-            DynamicMcpShutdownReport::Incomplete {
-                unfinished_instances: 1,
-            },
-            complete_pool,
-            0,
-        ),
-        HostTerminalShutdownReport::aggregate(
-            HostShutdownReport::Complete,
-            DynamicMcpShutdownReport::Complete,
             McpPoolShutdownReport::Incomplete {
                 settled_services: 1,
                 unfinished_services: 1,
@@ -56,12 +41,7 @@ fn test_terminal_shutdown_evidence_requires_all_subsystems_and_sessions_complete
             },
             0,
         ),
-        HostTerminalShutdownReport::aggregate(
-            HostShutdownReport::Complete,
-            DynamicMcpShutdownReport::Complete,
-            complete_pool,
-            1,
-        ),
+        HostTerminalShutdownReport::aggregate(HostShutdownReport::Complete, complete_pool, 1),
     ] {
         assert!(matches!(
             report,

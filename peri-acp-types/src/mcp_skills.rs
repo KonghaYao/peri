@@ -155,8 +155,8 @@ impl McpSkillRegistry {
 
     /// 发现任务 spawn 前同步置位（插入/覆盖为 Started）。
     ///
-    /// 返回「本调用是否置位者」（审查 M1）：插入前状态非 Started → true，
-    /// 调用方负责 spawn；覆盖已有 Started → false，调用方跳过 spawn——
+    /// 返回「本调用是否置位者」（审查 M1）：同代已 Started → false；
+    /// 新连接或新代 → true，调用方负责 spawn——
     /// 装配后立即 / 连接完成事件 / before_agent 并发调用时防重复发现任务。
     ///
     /// on_change 语义（评审 LOW-2）：一般插入/覆盖为 Started 不触发；**例外**——
@@ -168,7 +168,8 @@ impl McpSkillRegistry {
             let mut guard = self.inner.write();
             let was_started = matches!(
                 guard.servers.get(server),
-                Some(ServerDiscoveryState::Started { .. })
+                Some(ServerDiscoveryState::Started { handle: current })
+                    if std::sync::Arc::ptr_eq(current, &handle)
             );
             let fire = !was_started
                 && matches!(

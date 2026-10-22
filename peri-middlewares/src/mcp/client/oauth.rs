@@ -2,7 +2,6 @@
 
 use super::{McpClientPool, McpConnectionKey};
 use crate::mcp::oauth_flow::{OAuthCallbackResult, OAuthFlowEvent};
-use peri_acp_types::dynamic_mcp::DynamicMcpInstanceKey;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -81,19 +80,6 @@ impl McpClientPool {
         )
     }
 
-    pub fn register_dynamic_oauth_callback(
-        &self,
-        instance: DynamicMcpInstanceKey,
-        flow_id: &str,
-        callback_tx: tokio::sync::oneshot::Sender<OAuthCallbackResult>,
-    ) -> bool {
-        self.register_oauth_callback_scoped(
-            McpConnectionKey::dynamic(instance),
-            flow_id,
-            callback_tx,
-        )
-    }
-
     pub(crate) fn register_oauth_callback_scoped(
         &self,
         connection: McpConnectionKey,
@@ -101,7 +87,17 @@ impl McpClientPool {
         callback_tx: tokio::sync::oneshot::Sender<OAuthCallbackResult>,
     ) -> bool {
         let _admission = self.lifecycle_registration.lock();
-        if !self.is_open() {
+        if !self.is_open()
+            || self
+                .server_slot(connection.server_name())
+                .control_operation
+                .try_lock()
+                .is_err()
+            || self
+                .server_slot(connection.server_name())
+                .stopped
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
             return false;
         }
         let mut active = self.active_oauth_flows.lock();
@@ -152,49 +148,6 @@ impl McpClientPool {
             .map_err(|_| format!("{server_name} OAuth 授权流程已结束"))
     }
 
-    pub fn deliver_dynamic_oauth_callback(
-        &self,
-        instance: DynamicMcpInstanceKey,
-        flow_id: &str,
-        code: String,
-        state: String,
-    ) -> Result<(), String> {
-        self.deliver_oauth_callback_scoped(
-            &McpConnectionKey::dynamic(instance),
-            flow_id,
-            code,
-            state,
-        )
-    }
-
-    /// 以完整 dynamic identity 精确投递授权码。调用方必须持有当前
-    /// `(session_id, incarnation_id, flow_id)`，禁止退化为裸 server name。
-    pub(super) fn deliver_oauth_callback_scoped(
-        &self,
-        connection: &McpConnectionKey,
-        flow_id: &str,
-        code: String,
-        state: String,
-    ) -> Result<(), String> {
-        if !connection.is_dynamic() {
-            return Err("scoped OAuth callback requires dynamic identity".to_string());
-        }
-        let key = OAuthFlowKey {
-            connection: connection.clone(),
-            flow_id: flow_id.to_string(),
-        };
-        let pending = self
-            .pending_oauth_callbacks
-            .lock()
-            .remove(&key)
-            .filter(|pending| pending.flow_id == flow_id)
-            .ok_or_else(|| "OAuth flow 不再等待 callback".to_string())?;
-        pending
-            .tx
-            .send(OAuthCallbackResult { code, state })
-            .map_err(|_| "OAuth flow 已结束".to_string())
-    }
-
     /// 以 flow identity 精确投递授权码。Hub 不使用该接口；保留给未来安全
     /// 手动 callback 能力，避免 server-name-only 的错误归属。
     pub fn deliver_oauth_callback_for_flow(
@@ -233,31 +186,6 @@ impl McpClientPool {
             .unwrap_or(false)
     }
 
-    pub fn cancel_dynamic_oauth_flow(
-        &self,
-        instance: DynamicMcpInstanceKey,
-        flow_id: &str,
-    ) -> bool {
-        self.cancel_oauth_flow_scoped(&McpConnectionKey::dynamic(instance), flow_id)
-    }
-
-    pub(super) fn cancel_oauth_flow_scoped(
-        &self,
-        connection: &McpConnectionKey,
-        flow_id: &str,
-    ) -> bool {
-        if !connection.is_dynamic() {
-            return false;
-        }
-        self.pending_oauth_callbacks
-            .lock()
-            .remove(&OAuthFlowKey {
-                connection: connection.clone(),
-                flow_id: flow_id.to_string(),
-            })
-            .is_some_and(|pending| pending.flow_id == flow_id)
-    }
-
     /// 精确取消一个活跃 flow；不接受由客户端指定的 server 名称。
     pub fn cancel_oauth_flow(&self, flow_id: &str) -> bool {
         let Some(connection) = self.connection_for_oauth_flow(flow_id) else {
@@ -294,7 +222,17 @@ impl McpClientPool {
         flow_id: &str,
     ) -> OAuthStartDisposition {
         let _admission = self.lifecycle_registration.lock();
-        if !self.is_open() {
+        if !self.is_open()
+            || self
+                .server_slot(connection.server_name())
+                .control_operation
+                .try_lock()
+                .is_err()
+            || self
+                .server_slot(connection.server_name())
+                .stopped
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
             return OAuthStartDisposition::Conflict {
                 active_flow_id: "pool-closing".to_string(),
             };

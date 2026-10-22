@@ -287,8 +287,8 @@ pub struct SubagentHost {
     pub frozen_claude_md: Option<Arc<String>>,
     /// Frozen skills summary 回退值（生产路径由 spawn_subagent 从 parent session copy）
     pub frozen_skill_summary: Option<Arc<String>>,
-    /// Session-local Dynamic MCP capability publisher shared by the whole agent tree.
-    pub session_mcp_capability: Option<Arc<dyn peri_acp_types::ports::SessionMcpCapabilityPort>>,
+    /// 当前 MCP pool 的只读目录来源，由同一 Agent 树共享。
+    pub session_mcp_catalog: Option<Arc<dyn peri_acp_types::ports::SessionMcpCatalogPort>>,
 }
 
 // ─── spawn 配置与产物 ────────────────────────────────────────────────────────

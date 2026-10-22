@@ -76,11 +76,12 @@ pub(super) fn spawn_oauth_consumer(
     >,
     transport: &Arc<dyn crate::transport::AcpTransport>,
     cfg: &AcpServerConfig,
+    connection: &Arc<tokio::sync::Mutex<super::connection::ConnectionContext>>,
 ) {
     if let Some(mut rx) = oauth_event_rx {
         let oauth_transport = Arc::clone(transport);
+        let connection = Arc::clone(connection);
         let oauth_sessions = cfg.session_manager.clone();
-        let dynamic_mcp = cfg.dynamic_mcp.clone();
         let shutdown = cfg.host_task_spawner.shutdown_token();
         let _ = cfg.host_task_spawner.spawn(
             task_scope::HostTaskOwnerKind::Host,
@@ -91,7 +92,7 @@ pub(super) fn spawn_oauth_consumer(
                         _ = shutdown.cancelled() => break,
                         event = rx.recv() => match event { Some(event) => event, None => break },
                     };
-                    let caps = oauth_sessions.effective_host_caps();
+                    let caps = connection.lock().await.admission_caps();
                     let policy = oauth_delivery_policy(&caps);
                     let (session_id, event) = match event {
                         crate::event::oauth::HostOAuthEvent::Session { session_id, event } => {
@@ -99,22 +100,10 @@ pub(super) fn spawn_oauth_consumer(
                         }
                         event => (String::new(), event),
                     };
-                    let session_dynamic = if session_id.is_empty() {
-                        dynamic_mcp.clone()
-                    } else {
-                        let Some(session) = oauth_sessions.get_session(&session_id) else {
-                            continue;
-                        };
-                        session.dynamic_mcp_deployment.clone()
-                    };
-                    deliver_oauth_event(
-                        event,
-                        policy,
-                        &oauth_transport,
-                        &session_id,
-                        session_dynamic.as_ref(),
-                    )
-                    .await;
+                    if !session_id.is_empty() && oauth_sessions.get_session(&session_id).is_none() {
+                        continue;
+                    }
+                    deliver_oauth_event(event, policy, &oauth_transport, &session_id).await;
                 }
             },
         );
@@ -126,24 +115,9 @@ async fn deliver_oauth_event(
     policy: OAuthDeliveryPolicy,
     oauth_transport: &Arc<dyn crate::transport::AcpTransport>,
     session_id: &str,
-    dynamic_mcp: Option<&Arc<dyn peri_acp_types::ports::DynamicMcpDeploymentPort>>,
 ) {
     match event {
         crate::event::oauth::HostOAuthEvent::Session { .. } => {}
-        crate::event::oauth::HostOAuthEvent::DynamicAuthorizationNeeded {
-            instance,
-            flow_id,
-            server_name: _,
-            authorization_url,
-        } => {
-            let Some(deployment) = dynamic_mcp else {
-                return;
-            };
-            if policy.safe {
-                let _ =
-                    deployment.notify_authorization_needed(&instance, &flow_id, &authorization_url);
-            }
-        }
         crate::event::oauth::HostOAuthEvent::AuthorizationNeeded {
             flow_id,
             server_name,

@@ -154,7 +154,7 @@ impl McpAdmissionPreparation {
     /// session 级构造入口：四个输入全是 session 级事实，其中没有 turn 输入。
     ///
     /// 调用方约定：
-    /// - `tool_pool` 取 deployment pool（非 session projection）；
+    /// - `tool_pool` 取 session pool；
     /// - `closed_instances` 取本 session **冻结**的 `meta_harness_disabled` 派生集
     ///   （`None` 语义不存在：空集即不关闭任何实例）；
     /// - `cancel` 与 session 同生命周期（取消后本次准入返回 `Cancelled`）。
@@ -227,7 +227,7 @@ impl McpAdmissionPreparation {
             });
         }
         // 必需工具来自本次协商的 requirement（含空数组：该 server 只要求 ready）。
-        // 静态 bridge 一律取 deployment `tool_pool`，不用会混入动态投影的 session
+        // 工具 bridge 一律取本 session pool，保留连接身份与声明的
         // projection。
         //
         // 关闭实例（IF-D10 面①）既不进 required、也不进 bridges：有意的关闭不得

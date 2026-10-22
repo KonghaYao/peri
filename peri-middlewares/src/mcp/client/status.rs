@@ -3,7 +3,7 @@
 use super::{ClientStatus, McpClientHandle, McpClientPool, OAuthStatus, ServerInfo};
 use peri_acp_types::plugin::ConfigSource;
 use peri_acp_types::ports::{McpResourceInfo, McpToolInfo};
-use std::sync::Arc;
+use std::sync::{atomic::Ordering, Arc};
 
 /// 传输形态三分类（IF-D11）：builtin 身份来自运行时标记 `source`，其余保持既有推断。
 ///
@@ -107,6 +107,7 @@ impl McpClientPool {
                 .unwrap_or((None, None));
             let old_status = pool.clients.read().get(name).map(|c| c.status.clone());
             let handle = Arc::new(McpClientHandle {
+                call_gate: Default::default(),
                 name: name.to_string(),
                 version: None,
                 connected_at: None,
@@ -123,6 +124,7 @@ impl McpClientPool {
             });
             pool.advance_handle_generation(&handle);
             pool.clients.write().insert(name.to_string(), handle);
+            pool.bump_catalog_generation();
             old_status
         };
         // 新失败代际取代旧证据：等待方立即重读并得到 ConnectionFailed/ToolDiscoveryFailed。
@@ -156,6 +158,7 @@ impl McpClientPool {
                 .unwrap_or((None, None));
             let old_status = pool.clients.read().get(name).map(|c| c.status.clone());
             let handle = Arc::new(McpClientHandle {
+                call_gate: Default::default(),
                 name: name.to_string(),
                 version: None,
                 connected_at: None,
@@ -172,6 +175,7 @@ impl McpClientPool {
             });
             pool.advance_handle_generation(&handle);
             pool.clients.write().insert(name.to_string(), handle);
+            pool.bump_catalog_generation();
             old_status
         };
         // 需要授权是确定事实，不是「连接中」：本代证据失效并唤醒等待方。
@@ -218,8 +222,7 @@ impl McpClientPool {
 
     /// 返回所有 MCP 服务器信息（合并 configs + clients）
     ///
-    /// config 中有但 clients 中没有的 server 会被标记为 Uninitialized。
-    /// 这覆盖了连接失败后被移除、运行时新增配置、以及 disabled 后被清理等场景。
+    /// 尚无连接句柄的配置按控制槽投影：已停止为 Disconnected，其余为 Uninitialized。
     pub fn all_server_infos(&self) -> Vec<ServerInfo> {
         let clients = self.clients.read();
         let configs = self.configs.read();
@@ -253,9 +256,15 @@ impl McpClientPool {
             });
         }
 
-        // 遍历 configs，补充 clients 中不存在的条目（标记为 Uninitialized）
+        // 无连接句柄时，停止状态仍以控制槽为准。
         for (name, sc) in configs.iter() {
             if !clients.contains_key(name) {
+                let status = if self.server_slot(name).stopped.load(Ordering::Acquire) {
+                    ClientStatus::Disconnected
+                } else {
+                    ClientStatus::Uninitialized
+                };
+                let status_label = mcp_status_label(&status).to_string();
                 result.push(ServerInfo {
                     version: None,
                     connected_at: None,
@@ -264,8 +273,8 @@ impl McpClientPool {
                     name: name.clone(),
                     transport_type: transport_type_of(sc.source.as_ref(), sc.url.as_deref())
                         .to_string(),
-                    status: ClientStatus::Uninitialized,
-                    status_label: "uninitialized".to_string(),
+                    status,
+                    status_label,
                     error_summary: None,
                     cache_status: self.cache_status_for(name),
                     tool_count: 0,

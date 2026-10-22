@@ -149,6 +149,10 @@ impl PoolMcpAppsRelay {
             return Err(relay_error(McpAppsErrorKind::StaleAttachmentEpoch));
         }
         let handle = self.handle(&record.server_id)?;
+        let _permit = handle
+            .call_gate
+            .try_acquire()
+            .map_err(|_| relay_error(McpAppsErrorKind::ServerDisconnected))?;
         if self.pool.handle_generation(&handle) != record.server_generation {
             return Err(relay_error(McpAppsErrorKind::StaleServerGeneration));
         }
@@ -217,6 +221,10 @@ impl McpAppsRelayPort for PoolMcpAppsRelay {
         }
         // 绑定 server 必须是池内当前世代（否则 App 没有可执行面）。
         let handle = self.handle(&record.server_id)?;
+        let _permit = handle
+            .call_gate
+            .try_acquire()
+            .map_err(|_| relay_error(McpAppsErrorKind::ServerDisconnected))?;
         if self.pool.handle_generation(&handle) != record.server_generation {
             return Err(relay_error(McpAppsErrorKind::StaleServerGeneration));
         }
@@ -426,6 +434,10 @@ impl McpAppsRelayPort for PoolMcpAppsRelay {
             .filter(|record| record.state() != RecordState::Revoked)
             .ok_or_else(|| relay_error(McpAppsErrorKind::PolicyDenied))?;
         let handle = self.handle(&record.server_id)?;
+        let _permit = handle
+            .call_gate
+            .try_acquire()
+            .map_err(|_| relay_error(McpAppsErrorKind::ServerDisconnected))?;
         if self.pool.handle_generation(&handle) != record.server_generation {
             return Err(relay_error(McpAppsErrorKind::StaleServerGeneration));
         }

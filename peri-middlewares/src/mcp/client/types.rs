@@ -1,7 +1,6 @@
 //! 客户端句柄、状态与 scoped connection identity；由 client 保持原导出路径。
 
 use crate::mcp::config::ConfigSource;
-use peri_acp_types::dynamic_mcp::DynamicMcpInstanceKey;
 use rmcp::{
     model::{Resource, Tool},
     service::{Peer, RoleClient},
@@ -95,6 +94,7 @@ pub enum McpPoolError {
 /// 单个 MCP 服务器的客户端句柄
 #[derive(Clone)]
 pub struct McpClientHandle {
+    pub call_gate: crate::mcp::McpCallGate,
     pub name: String,
     pub version: Option<String>,
     pub cache_version: Option<String>,
@@ -122,9 +122,6 @@ pub struct McpClientHandle {
 pub(crate) enum McpConnectionKey {
     Static {
         server_name: String,
-    },
-    Dynamic {
-        instance: DynamicMcpInstanceKey,
     },
     /// 会话级 ACP（MCP over ACP）连接：持久化 cache 只按声明会话 + 连接身份 +
     /// 连接代命中（M7）。见 [`AcpConnectionIdentity`]。
@@ -164,10 +161,6 @@ impl McpConnectionKey {
         }
     }
 
-    pub(crate) fn dynamic(instance: DynamicMcpInstanceKey) -> Self {
-        Self::Dynamic { instance }
-    }
-
     pub(crate) fn acp(server_name: impl Into<String>, identity: AcpConnectionIdentity) -> Self {
         Self::Acp {
             server_name: server_name.into(),
@@ -178,16 +171,11 @@ impl McpConnectionKey {
     pub(crate) fn server_name(&self) -> &str {
         match self {
             Self::Static { server_name } => server_name,
-            Self::Dynamic { instance } => &instance.logical.server_name,
             Self::Acp { server_name, .. } => server_name,
         }
     }
 
-    pub(crate) fn is_dynamic(&self) -> bool {
-        matches!(self, Self::Dynamic { .. })
-    }
-
-    /// 会话级 ACP 连接身份（静态 / dynamic 连接为 `None`）。
+    /// 会话级 ACP 连接身份（静态 连接为 `None`）。
     pub(crate) fn acp_identity(&self) -> Option<&AcpConnectionIdentity> {
         match self {
             Self::Acp { identity, .. } => Some(identity),

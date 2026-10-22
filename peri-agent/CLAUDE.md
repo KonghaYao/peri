@@ -37,6 +37,7 @@
 - `StageContext` 是阶段依赖边界；阶段间通过输入/输出和上下文传递，不绕过为全局状态。
 - `FrozenContext` 的 prompt、指引、skills 与日期在会话内不可漂移；SubAgent 复用上游冻结数据。
 - `FrozenContext.external_instructions` 是会话级独立来源；模型 bridge 在内部身份和请求贡献之间组合，子身份历史不保存该正文（`ARC-EXTERNAL-INSTRUCTIONS-001`）。
+- MCP 目录由当前 pool 的 `SessionMcpCatalogPort` 提供；Reason 边界完整替换 MCP 来源条目并重新应用关闭集及 Agent 工具过滤，再重绑 ToolSearch、固定本次 dispatch。core/middleware 工具不因 MCP 关闭被移除，frozen prompt 不重建；运行控制不进入模型工具目录。
 - `BaseTool::is_direct()` 是工具可见性事实源（builtin MCP 实例工具例外：直连性由 `peri-acp-types/src/builtin_mcp.rs` 的逐工具 `direct` 声明决定，见 ARC-TOOLS-001）；deferred 工具经搜索/执行代理访问。
 - Compact 行为、阈值和环境覆盖仅引用 `CompactConfig`，本文不复制数值。
 - 中间件链装配在 session 初始化时经 `src/session/factory.rs` 构建（`production_blueprint` 是链序事实源，ARC-MIDDLEWARE-001；装配实现当前位于 `../peri-middlewares/src/assembly.rs`，依赖反转完成后物理迁入本层）。

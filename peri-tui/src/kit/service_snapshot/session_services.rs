@@ -106,6 +106,8 @@ struct McpServer {
     connection_status: String,
     oauth_status: String,
     tools_count: usize,
+    #[serde(default)]
+    control: crate::kit::atoms::McpControlSummary,
     /// 工具有界投影；旧 host 不返回时为空（计数仍由 toolsCount 承载）。
     #[serde(default)]
     tools: Vec<McpToolWire>,
@@ -192,63 +194,10 @@ pub(super) async fn query(
         }
         Err(error) => errors.push(format!("plugin/list: {error}")),
     }
-    match mcp.and_then(|value| {
-        serde_json::from_value::<McpServers>(value)
-            .map_err(|error| peri_acp::transport::types::AcpError::new(-32603, error.to_string()))
-    }) {
-        Ok(servers) => {
-            result.mcp = McpStatusSnapshot {
-                total: servers.servers.len(),
-                connected: servers
-                    .servers
-                    .iter()
-                    .filter(|server| server.connection_status == "connected")
-                    .count(),
-                init_phase: McpInitPhase::Ready,
-            };
-            result.mcp_servers = servers
-                .servers
-                .into_iter()
-                .map(|server| McpServerSummary {
-                    name: server.name,
-                    version: server.version,
-                    connected_at: server.connected_at,
-                    protocol_version: server.protocol_version,
-                    transport: server.transport,
-                    status: server.connection_status,
-                    needs_auth: server.oauth_status == "needs_authorization",
-                    tools_count: server.tools_count,
-                    tools: server
-                        .tools
-                        .into_iter()
-                        .map(|tool| crate::kit::atoms::McpToolSummary {
-                            name: tool.name,
-                            description: tool.description,
-                        })
-                        .collect(),
-                    resources: server
-                        .resources
-                        .into_iter()
-                        .map(|resource| crate::kit::atoms::McpResourceSummary {
-                            uri: resource.uri,
-                            name: resource.name,
-                            description: resource.description,
-                        })
-                        .collect(),
-                    resources_count: server.resources_count,
-                    subscriptions: server.subscriptions.map(|subscriptions| {
-                        crate::kit::atoms::McpSubscriptionsSummary {
-                            resources: subscriptions.resources,
-                            tools_list_changed: subscriptions.tools_list_changed,
-                            prompts_list_changed: subscriptions.prompts_list_changed,
-                            resources_list_changed: subscriptions.resources_list_changed,
-                        }
-                    }),
-                    error_summary: server.error_summary,
-                    url: server.url,
-                    ..McpServerSummary::default()
-                })
-                .collect();
+    match mcp.and_then(|value| decode_mcp(value, client.supports_mcp_control())) {
+        Ok((mcp, servers)) => {
+            result.mcp = mcp;
+            result.mcp_servers = servers;
         }
         Err(error) => {
             result.mcp.init_phase = McpInitPhase::Failed;
@@ -284,6 +233,76 @@ pub(super) async fn query(
             &[("detail".into(), fluent_bundle::FluentValue::from(detail))],
         ))
     }
+}
+
+pub(super) fn decode_mcp(
+    value: serde_json::Value,
+    control_supported: bool,
+) -> Result<(McpStatusSnapshot, Vec<McpServerSummary>), peri_acp::transport::types::AcpError> {
+    let servers = serde_json::from_value::<McpServers>(value)
+        .map_err(|error| peri_acp::transport::types::AcpError::new(-32603, error.to_string()))?;
+
+    let mcp = McpStatusSnapshot {
+        total: servers.servers.len(),
+        connected: servers
+            .servers
+            .iter()
+            .filter(|server| server.connection_status == "connected")
+            .count(),
+        init_phase: McpInitPhase::Ready,
+    };
+    let mcp_servers = servers
+        .servers
+        .into_iter()
+        .map(|server| McpServerSummary {
+            control: if control_supported {
+                server.control
+            } else {
+                crate::kit::atoms::McpControlSummary {
+                    unavailable_reason: Some("capability_not_negotiated".into()),
+                    ..Default::default()
+                }
+            },
+            name: server.name,
+            version: server.version,
+            connected_at: server.connected_at,
+            protocol_version: server.protocol_version,
+            transport: server.transport,
+            status: server.connection_status,
+            needs_auth: server.oauth_status == "needs_authorization",
+            tools_count: server.tools_count,
+            tools: server
+                .tools
+                .into_iter()
+                .map(|tool| crate::kit::atoms::McpToolSummary {
+                    name: tool.name,
+                    description: tool.description,
+                })
+                .collect(),
+            resources: server
+                .resources
+                .into_iter()
+                .map(|resource| crate::kit::atoms::McpResourceSummary {
+                    uri: resource.uri,
+                    name: resource.name,
+                    description: resource.description,
+                })
+                .collect(),
+            resources_count: server.resources_count,
+            subscriptions: server.subscriptions.map(|subscriptions| {
+                crate::kit::atoms::McpSubscriptionsSummary {
+                    resources: subscriptions.resources,
+                    tools_list_changed: subscriptions.tools_list_changed,
+                    prompts_list_changed: subscriptions.prompts_list_changed,
+                    resources_list_changed: subscriptions.resources_list_changed,
+                }
+            }),
+            error_summary: server.error_summary,
+            url: server.url,
+            ..McpServerSummary::default()
+        })
+        .collect();
+    Ok((mcp, mcp_servers))
 }
 
 async fn request(

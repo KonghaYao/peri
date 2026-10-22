@@ -74,8 +74,6 @@ fn make_parity_context(
         command_registry: None,
         cron_scheduler: None,
         mcp_pool: None,
-        dynamic_mcp: None,
-        dynamic_mcp_projection: Arc::new(parking_lot::Mutex::new(None)),
         session_id: "session-parity-test".to_string(),
         tool_search_index: Arc::new(ToolSearchIndex::new()),
         shared_tools,

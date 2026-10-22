@@ -172,6 +172,9 @@ pub(crate) async fn run_discovery_with_cache(
         project_core_skill_commands(&command_registry, &registry, skills_face_closed);
         return;
     };
+    let Ok(_permit) = handle.call_gate.try_acquire() else {
+        return;
+    };
     // legacy 兜底：resources 里无 skill:// 候选 → 直接完成（规范模式不受
     // resources 影响——skills/list 是独立原语）。cancel 已触发时与下方
     // cancel 分支同构：回退 Started 状态（不触发 on_change），下轮可重试。

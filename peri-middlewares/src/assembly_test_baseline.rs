@@ -205,38 +205,6 @@ fn hook_groups_expand_hook_middleware() {
     );
 }
 
-#[test]
-fn dynamic_mcp_registers_deferred_control_tool_at_mcp_slot() {
-    let mut ctx = base_context();
-    ctx.dynamic_mcp = Some(Arc::new(FakeDynamicDeployment));
-
-    let names = assemble_names(&ctx);
-    let tools = assemble_tool_names(&ctx);
-
-    assert!(names.contains(&"DynamicMcpMiddleware".to_string()));
-    assert!(tools.contains(&"DynamicMCP".to_string()));
-    assert!(!tools
-        .iter()
-        .any(|tool| matches!(tool.as_str(), "DynamicMCP.load" | "DynamicMCP.unload")));
-}
-
-#[test]
-fn dynamic_mcp_projection_is_bound_without_optional_registries() {
-    let mut ctx = base_context();
-    ctx.mcp_pool = Some(Arc::new(McpClientPool::new_empty()));
-    ctx.dynamic_mcp = Some(Arc::new(FakeDynamicDeployment));
-    assert!(ctx.mcp_skill_registry.is_none());
-    assert!(ctx.command_registry.is_none());
-    let projection = Arc::clone(&ctx.dynamic_mcp_projection);
-
-    let names = assemble_names(&ctx);
-    let names_again = assemble_names(&ctx);
-
-    assert!(names.contains(&"McpMiddleware".to_string()));
-    assert!(names_again.contains(&"McpMiddleware".to_string()));
-    assert!(projection.lock().is_some());
-}
-
 /// 条件注册矩阵：MCP / Workflow / Goal 开关组合。
 #[test]
 fn conditional_registration_matrix() {

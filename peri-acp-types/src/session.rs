@@ -128,11 +128,6 @@ pub trait SessionAccessPort: Send + Sync {
         false
     }
 
-    /// Bind the existing session inbox as the checked Dynamic MCP notification target.
-    fn dynamic_mcp_notifications_for(&self, _session_id: &str) -> bool {
-        false
-    }
-
     /// 会话级 MCP skill 远端注册表（AcpSession 持有；发现任务写入，
     /// Skills 侧读取合并）。
     ///

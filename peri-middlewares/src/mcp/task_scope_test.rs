@@ -3,13 +3,7 @@ use std::sync::{
     Arc,
 };
 
-use peri_acp_types::dynamic_mcp::{
-    DynamicMcpIncarnationId, DynamicMcpInstanceKey, DynamicMcpLogicalKey,
-};
-
-use super::{
-    DynamicMcpTaskKind, McpTaskKey, McpTaskOwner, McpTaskShutdownReport, TaskAdmissionError,
-};
+use super::{McpTaskKey, McpTaskOwner, McpTaskShutdownReport, TaskAdmissionError};
 
 #[tokio::test]
 async fn test_keyed_stop_before_first_poll_still_completes() {
@@ -122,23 +116,10 @@ async fn test_terminal_shutdown_owns_task_after_keyed_waiter_cancel() {
     assert_eq!(owner.active_count(), 0);
 }
 
-fn dynamic_instance(session_id: &str, incarnation: &str) -> DynamicMcpInstanceKey {
-    DynamicMcpInstanceKey {
-        logical: DynamicMcpLogicalKey {
-            session_id: session_id.to_string(),
-            server_name: "example".to_string(),
-        },
-        incarnation_id: DynamicMcpIncarnationId::from_string(incarnation),
-    }
-}
-
 #[tokio::test]
 async fn test_admission_distinguishes_duplicate_from_owner_closed() {
     let (mut owner, spawner) = McpTaskOwner::new();
-    let key = McpTaskKey::dynamic(
-        DynamicMcpTaskKind::Connect,
-        &dynamic_instance("session-a", "inc-a"),
-    );
+    let key = McpTaskKey::Control("example".into());
     spawner.spawn(key.clone(), std::future::pending()).unwrap();
     assert_eq!(
         spawner.spawn(key, async {}).unwrap_err(),
@@ -149,28 +130,5 @@ async fn test_admission_distinguishes_duplicate_from_owner_closed() {
         spawner.spawn(McpTaskKey::Initialize, async {}).unwrap_err(),
         TaskAdmissionError::OwnerClosed
     );
-    owner.shutdown().await;
-}
-
-#[tokio::test]
-async fn test_stop_instance_except_preserves_unload_orchestrator() {
-    let (mut owner, spawner) = McpTaskOwner::new();
-    let instance = dynamic_instance("session-a", "inc-a");
-    spawner
-        .spawn(
-            McpTaskKey::dynamic(DynamicMcpTaskKind::Connect, &instance),
-            std::future::pending(),
-        )
-        .unwrap();
-    spawner
-        .spawn(
-            McpTaskKey::dynamic(DynamicMcpTaskKind::Unload, &instance),
-            std::future::pending(),
-        )
-        .unwrap();
-    spawner
-        .stop_instance_except(&instance, DynamicMcpTaskKind::Unload)
-        .await;
-    assert_eq!(owner.active_count(), 1);
     owner.shutdown().await;
 }

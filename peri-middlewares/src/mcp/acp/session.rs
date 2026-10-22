@@ -315,6 +315,7 @@ async fn discover_server(
     }
 
     let client = McpClientHandle {
+        call_gate: Default::default(),
         name: preferred_name(&spec),
         version: peer.peer_info().and_then(|info| {
             info.server_info

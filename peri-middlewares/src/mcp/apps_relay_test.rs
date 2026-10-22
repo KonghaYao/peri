@@ -47,6 +47,7 @@ fn app_tool() -> rmcp::model::Tool {
 /// 把真实 peer 装进池（工具面是 App 工具）。
 fn install_app_server(pool: &McpClientPool, wire: &Wire) {
     let handle = Arc::new(crate::mcp::client::McpClientHandle {
+        call_gate: Default::default(),
         name: SERVER.to_string(),
         version: None,
         connected_at: None,

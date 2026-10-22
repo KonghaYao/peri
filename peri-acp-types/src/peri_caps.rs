@@ -79,6 +79,9 @@ pub struct PeriCaps {
     /// 门控按**当前连接**的协商结果判定。
     #[serde(default)]
     pub history_window_v1: bool,
+    /// ACP MCP register/restart/stop control, negotiated on the current connection.
+    #[serde(default)]
+    pub mcp_control_v1: bool,
     /// `peri.uiCommands`：TUI 上送的 ui 域命令明细（空 = 不广播 ui 条目）。
     /// 门控语义反转：TUI 声明明细 → ACP 注册为 `ui:*` 条目，而非 ACP 附加
     /// 硬编码列表；旧客户端 bool `true` 由 [`PeriCaps::from_client_meta`]
@@ -111,6 +114,7 @@ impl PeriCaps {
             session_workspace_v1: meta_bool(meta, "peri.sessionWorkspaceV1"),
             history_pagination: meta_bool(meta, "peri.historyPagination"),
             history_window_v1: meta_bool(meta, "peri.historyWindowV1"),
+            mcp_control_v1: meta_bool(meta, "peri.mcpControlV1"),
             ui_commands: Self::meta_ui_commands(meta),
         }
     }
@@ -185,6 +189,7 @@ impl PeriCaps {
             "peri.historyWindowV1".into(),
             Value::Bool(self.history_window_v1),
         );
+        m.insert("peri.mcpControlV1".into(), Value::Bool(self.mcp_control_v1));
         m.insert(
             "peri.uiCommands".into(),
             serde_json::to_value(&self.ui_commands).expect("Vec<UiCommandSpec> 序列化不应失败"),
@@ -212,6 +217,7 @@ impl PeriCaps {
             session_workspace_v1: true,
             history_pagination: true,
             history_window_v1: true,
+            mcp_control_v1: true,
             ui_commands: default_ui_commands(),
         }
     }

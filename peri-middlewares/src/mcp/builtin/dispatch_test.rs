@@ -399,6 +399,7 @@ async fn bridge_pool(instance: &str, peer: &Peer<RoleClient>) -> Arc<McpClientPo
     pool.clients.write().insert(
         instance.to_string(),
         Arc::new(McpClientHandle {
+            call_gate: Default::default(),
             name: instance.to_string(),
             version: None,
             connected_at: None,

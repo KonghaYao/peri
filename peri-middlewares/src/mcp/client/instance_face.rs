@@ -67,6 +67,7 @@ impl McpClientPool {
         request_meta: Option<serde_json::Value>,
     ) -> Result<String, String> {
         let handle = self.instance_handle(instance)?;
+        let _permit = handle.call_gate.try_acquire().map_err(str::to_owned)?;
         let arguments = match arguments {
             serde_json::Value::Object(map) => map,
             serde_json::Value::Null => Default::default(),
@@ -123,6 +124,7 @@ impl McpClientPool {
         uri: &str,
     ) -> Result<String, String> {
         let handle = self.instance_handle(instance)?;
+        let _permit = handle.call_gate.try_acquire().map_err(str::to_owned)?;
         let peer = handle
             .peer
             .as_ref()
@@ -184,6 +186,7 @@ impl McpClientPool {
         uri: &str,
     ) -> Result<McpResourceSubscription, String> {
         let handle = self.instance_handle(instance)?;
+        let _permit = handle.call_gate.try_acquire().map_err(str::to_owned)?;
         // A24 关闭语义覆盖订阅面（订阅是能力的外部副作用；与 initialize /
         // reconnect 的配置订阅同门）：命中关闭集的 builtin 实例不建立长流。
         if !self.subscription_allowed(instance) {

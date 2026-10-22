@@ -169,7 +169,6 @@ impl Wave3Fixture {
 fn mw_projection_tools(pool: &Arc<McpClientPool>, disabled: &[&str]) -> Vec<Box<dyn BaseTool>> {
     let disabled: HashSet<String> = disabled.iter().map(|name| name.to_string()).collect();
     McpMiddleware::new(Arc::clone(pool))
-        .with_tool_pool(Arc::clone(pool))
         .with_builtin_closures(closed_instances(&disabled))
         .collect_tools("/tmp/mw-projection")
 }

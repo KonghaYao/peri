@@ -272,7 +272,7 @@ pub(super) async fn run_receive_with_budget(
                 MessageSource::ShellComplete
                     | MessageSource::SubAgentComplete
                     | MessageSource::WorkflowComplete
-                    | MessageSource::DynamicMcpNotification
+                    | MessageSource::McpNotification
             );
             if let Some(delivery_id) = msg.delivery_id.filter(|_| terminal_result) {
                 if let QueuedPayload::SystemReminder(reminder) = &msg.payload {
@@ -382,3 +382,7 @@ pub(super) async fn run_receive_with_budget(
 #[cfg(test)]
 #[path = "receive_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "receive_delivery_test.rs"]
+mod delivery_tests;

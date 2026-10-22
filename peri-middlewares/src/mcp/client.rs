@@ -14,6 +14,7 @@ pub(crate) mod process;
 #[cfg(target_os = "emscripten")]
 #[path = "client/process_wasm.rs"]
 pub(crate) mod process;
+mod queries;
 // System MCP 启动准入 seam：清单发布与闸门已接线（`initialize` / `middleware`），
 // 仍有三处冻结但尚无生产读取方的成员——`DiscoveryEvidence::is_complete`（只有测试在问）、
 // `NegotiatedSystemMcp::handle`（协商结果保留句柄，消费方只读 `requirement`/`generation`）、
@@ -42,7 +43,6 @@ use oauth::{OAuthFlowKey, PendingOAuthCallback};
 use peri_acp_types::{
     builtin_mcp::find,
     command_registry::CommandRegistry,
-    dynamic_mcp::DynamicMcpInstanceKey,
     mcp::McpSubscriptionPort,
     mcp_skills::McpSkillRegistry,
     ports::{
@@ -93,6 +93,8 @@ pub use types::{
 
 /// MCP 客户端连接池
 pub struct McpClientPool {
+    pub(crate) control: super::control::PoolControl,
+    pub(crate) catalog_generation: std::sync::atomic::AtomicU64,
     cache_policy: std::sync::OnceLock<McpCachePolicy>,
     workspace_scope: std::sync::OnceLock<peri_acp_types::workspace::WorkspaceId>,
     pub(super) configuration_snapshot: std::sync::OnceLock<Arc<peri_config::ConfigurationSnapshot>>,
@@ -271,6 +273,8 @@ impl McpClientPool {
         capability_profile: super::apps::McpCapabilityProfile,
     ) -> Self {
         Self {
+            control: Default::default(),
+            catalog_generation: std::sync::atomic::AtomicU64::new(1),
             cache_policy: std::sync::OnceLock::new(),
             workspace_scope: std::sync::OnceLock::new(),
             configuration_snapshot: std::sync::OnceLock::new(),
@@ -354,12 +358,13 @@ impl McpClientPool {
 
     /// 装入一个**已经建立连接**的客户端句柄（跨 crate 集成测试夹具；`test-support`）。
     ///
-    /// 生产路径的句柄注册归 `run_initialize` / 动态 MCP 连接面；本入口只让测试能
+    /// 生产路径的句柄注册归 `run_initialize` / MCP 控制面；本入口只让测试能
     /// 构造「真实 peer + 真实池」的夹具，返回该句柄的服务端世代。
     #[cfg(feature = "test-support")]
     pub fn install_client_for_tests(&self, handle: Arc<McpClientHandle>) -> u64 {
         let generation = self.advance_handle_generation(&handle);
         self.clients.write().insert(handle.name.clone(), handle);
+        self.bump_catalog_generation();
         generation
     }
 
@@ -391,6 +396,7 @@ impl McpClientPool {
         name: &str,
     ) -> Arc<McpClientHandle> {
         let handle = Arc::new(McpClientHandle {
+            call_gate: Default::default(),
             name: name.to_string(),
             version: None,
             connected_at: None,
@@ -901,82 +907,6 @@ impl McpClientPool {
         };
         let cancel = tokio_util::sync::CancellationToken::new();
         super::skill_discovery::snapshot_via_skills_list(peer, &handle.name, cancel).await
-    }
-
-    pub fn get_tools(&self, name: &str) -> Vec<Tool> {
-        self.clients
-            .read()
-            .get(name)
-            .map(|h| h.tools.clone())
-            .unwrap_or_default()
-    }
-    pub fn get_resources(&self, name: &str) -> Vec<Resource> {
-        self.clients
-            .read()
-            .get(name)
-            .map(|h| h.resources.clone())
-            .unwrap_or_default()
-    }
-    pub fn get_client(&self, name: &str) -> Option<Arc<McpClientHandle>> {
-        self.clients.read().get(name).cloned()
-    }
-    /// 会话可见的连接句柄（[`Self::get_client`] 的 ACP 归属过滤版）。
-    pub fn get_client_visible_to(
-        &self,
-        name: &str,
-        session_id: Option<&str>,
-    ) -> Option<Arc<McpClientHandle>> {
-        if session_id.is_some_and(|session_id| !self.is_visible_to_session(name, session_id)) {
-            return None;
-        }
-        self.get_client(name)
-    }
-    pub fn get_all_clients(&self) -> Vec<Arc<McpClientHandle>> {
-        self.clients
-            .read()
-            .values()
-            .filter(|c| matches!(c.status, ClientStatus::Connected))
-            .cloned()
-            .collect()
-    }
-    /// 会话可见的连接句柄（[`Self::get_all_clients`] 的 ACP 归属过滤版）。
-    ///
-    /// `session_id` 为 `None` 表示不过滤（部署面视图：面板、命令面、池关闭）。
-    pub fn get_all_clients_visible_to(
-        &self,
-        session_id: Option<&str>,
-    ) -> Vec<Arc<McpClientHandle>> {
-        let mut clients = self.get_all_clients();
-        if let Some(session_id) = session_id {
-            clients.retain(|client| self.is_visible_to_session(&client.name, session_id));
-        }
-        clients
-    }
-    pub fn has_resources(&self) -> bool {
-        self.clients
-            .read()
-            .values()
-            .any(|c| matches!(c.status, ClientStatus::Connected) && !c.resources.is_empty())
-    }
-    pub fn resource_summary(&self) -> String {
-        self.clients
-            .read()
-            .values()
-            .filter(|c| matches!(c.status, ClientStatus::Connected) && !c.resources.is_empty())
-            .map(|c| {
-                format!(
-                    "- server \"{}\": {} ({} resources)",
-                    c.name,
-                    c.resources
-                        .iter()
-                        .map(|r| r.uri.clone())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    c.resources.len()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
     }
 }
 

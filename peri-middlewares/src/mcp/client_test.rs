@@ -6,10 +6,7 @@ use crate::mcp::builtin::{
     runtime::BuiltinSpawnError,
 };
 use crate::mcp::oauth_flow::OAuthFailureKind;
-use peri_acp_types::{
-    dynamic_mcp::{DynamicMcpIncarnationId, DynamicMcpInstanceKey, DynamicMcpLogicalKey},
-    plugin::McpSubscriptionsConfig,
-};
+use peri_acp_types::plugin::McpSubscriptionsConfig;
 use rmcp::model::SubscriptionFilter;
 
 fn controlled_service(
@@ -26,6 +23,7 @@ fn timing_out_service(close_count: Arc<std::sync::atomic::AtomicUsize>) -> McpSe
 
 fn connected_test_handle(name: &str) -> Arc<McpClientHandle> {
     Arc::new(McpClientHandle {
+        call_gate: Default::default(),
         name: name.to_string(),
         version: None,
         connected_at: None,
@@ -174,6 +172,7 @@ async fn test_server_infos_projects_version_and_connected_at() {
     pool.clients.write().insert(
         "s".into(),
         Arc::new(McpClientHandle {
+            call_gate: Default::default(),
             name: "s".into(),
             version: Some("1.2.3".into()),
             connected_at: Some("2026-10-11T06:32:05Z".into()),
@@ -291,6 +290,7 @@ async fn test_remove_server() {
     pool.clients.write().insert(
         "a".into(),
         Arc::new(McpClientHandle {
+            call_gate: Default::default(),
             name: "a".into(),
             version: None,
             connected_at: None,
@@ -315,6 +315,7 @@ async fn test_get_tools_resources() {
     pool.clients.write().insert(
         "s".into(),
         Arc::new(McpClientHandle {
+            call_gate: Default::default(),
             name: "s".into(),
             version: None,
             connected_at: None,
@@ -433,87 +434,6 @@ async fn test_set_disabled_marks_handle_disabled() {
 }
 
 #[test]
-fn test_two_sessions_with_same_server_have_isolated_oauth_flows() {
-    let pool = McpClientPool::new_pending();
-    let connection = |session: &str, incarnation: &str| McpConnectionKey::Dynamic {
-        instance: DynamicMcpInstanceKey {
-            logical: DynamicMcpLogicalKey {
-                session_id: session.to_string(),
-                server_name: "docs".to_string(),
-            },
-            incarnation_id: DynamicMcpIncarnationId::from_string(incarnation),
-        },
-    };
-    let first = connection("session-a", "mcpinc_a");
-    let second = connection("session-b", "mcpinc_b");
-
-    assert_eq!(
-        pool.reserve_oauth_flow_scoped(first.clone(), "flow-a"),
-        OAuthStartDisposition::Started
-    );
-    assert_eq!(
-        pool.reserve_oauth_flow_scoped(second.clone(), "flow-b"),
-        OAuthStartDisposition::Started
-    );
-    assert_eq!(
-        pool.active_oauth_flow_scoped(&first).as_deref(),
-        Some("flow-a")
-    );
-    assert_eq!(
-        pool.active_oauth_flow_scoped(&second).as_deref(),
-        Some("flow-b")
-    );
-    assert_eq!(first.server_name(), "docs");
-    assert!(first.is_dynamic());
-    assert!(!pool.persistent_cache_allowed_for(&first));
-    assert!(!pool.persistent_cache_allowed_for(&second));
-}
-
-#[test]
-fn test_dynamic_oauth_callback_requires_full_instance_identity_and_rejects_late_l1() {
-    let pool = McpClientPool::new_pending();
-    let connection = |incarnation: &str| McpConnectionKey::Dynamic {
-        instance: DynamicMcpInstanceKey {
-            logical: DynamicMcpLogicalKey {
-                session_id: "session-a".to_string(),
-                server_name: "docs".to_string(),
-            },
-            incarnation_id: DynamicMcpIncarnationId::from_string(incarnation),
-        },
-    };
-    let l1 = connection("mcpinc_l1");
-    let l2 = connection("mcpinc_l2");
-    assert_eq!(
-        pool.reserve_oauth_flow_scoped(l1.clone(), "flow-l1"),
-        OAuthStartDisposition::Started
-    );
-    let (l1_tx, _l1_rx) = tokio::sync::oneshot::channel();
-    assert!(pool.register_oauth_callback_scoped(l1.clone(), "flow-l1", l1_tx));
-    pool.revoke_oauth_connection(&l1);
-
-    assert_eq!(
-        pool.reserve_oauth_flow_scoped(l2.clone(), "flow-l2"),
-        OAuthStartDisposition::Started
-    );
-    let (l2_tx, _l2_rx) = tokio::sync::oneshot::channel();
-    assert!(pool.register_oauth_callback_scoped(l2.clone(), "flow-l2", l2_tx));
-    assert!(pool
-        .deliver_oauth_callback_scoped(
-            &l1,
-            "flow-l1",
-            "late-code".to_string(),
-            "late-state".to_string(),
-        )
-        .is_err());
-    assert_eq!(
-        pool.active_oauth_flow_scoped(&l2).as_deref(),
-        Some("flow-l2")
-    );
-    assert!(!pool.cancel_oauth_flow_scoped(&l1, "flow-l1"));
-    assert!(pool.cancel_oauth_flow_scoped(&l2, "flow-l2"));
-}
-
-#[test]
 fn test_oauth_flow_reservation_is_idempotent_and_rejects_competing_identity() {
     let pool = McpClientPool::new_pending();
     assert_eq!(
@@ -588,6 +508,7 @@ async fn test_oauth_preflight_failure_emits_one_exact_terminal_event() {
                 .push((flow_id, server_name, failure_kind));
         }
     });
+    pool.reserve_oauth_flow("missing", "flow-1");
     let result = pool.start_oauth_flow("flow-1", "missing", false).await;
     assert!(matches!(result, Err(McpPoolError::NotConnected { .. })));
     assert_eq!(

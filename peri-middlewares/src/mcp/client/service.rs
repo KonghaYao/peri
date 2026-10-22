@@ -46,7 +46,7 @@ impl McpServiceOwner {
             return Ok(Some(QuitReason::Closed));
         }
         let result = service.close_with_timeout(timeout).await;
-        if !matches!(result, Ok(None)) {
+        if matches!(result, Ok(Some(_))) {
             self.stopped
                 .store(true, std::sync::atomic::Ordering::Release);
         }

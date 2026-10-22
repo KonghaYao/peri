@@ -262,7 +262,6 @@ async fn run_prompt_attempt(
     let plugin_loaded = deployment.plugin_loaded.as_slice();
     let hook_groups = deployment.hook_groups.as_slice();
     let mcp_pool = deployment.mcp_pool.clone();
-    let dynamic_mcp = deployment.dynamic_mcp.clone();
     let tool_search_index = deployment.tool_search_index.clone();
     let agent_catalog = deployment.agent_catalog.clone();
     let shared_tools = deployment.shared_tools.clone();
@@ -534,13 +533,9 @@ async fn run_prompt_attempt(
     // 因此不存在「静默重冻」这条路径。
     let frozen_fallback_builder: Option<executor::FrozenFallbackBuilder> = None;
 
-    let session_mcp_capability = dynamic_mcp
+    let session_mcp_catalog = mcp_pool
         .as_ref()
-        .map(|deployment| deployment.capability(&session_id));
-    let dynamic_mcp_projection = session_manager
-        .get_session(&session_id)
-        .map(|session| Arc::clone(&session.dynamic_mcp_projection))
-        .unwrap_or_else(|| Arc::new(parking_lot::Mutex::new(None)));
+        .and_then(|pool| Arc::clone(pool).catalog_source(&session_id));
 
     let ctx = executor::SessionContext {
         cwd,
@@ -570,9 +565,7 @@ async fn run_prompt_attempt(
         hook_groups: hook_groups.to_vec(),
         cron_scheduler,
         mcp_pool,
-        dynamic_mcp,
-        session_mcp_capability,
-        dynamic_mcp_projection,
+        session_mcp_catalog,
         tool_search_index,
         agent_catalog,
         shared_tools,

@@ -45,6 +45,7 @@ pub(crate) struct SessionEnvironment {
     task_owner: tokio::sync::Mutex<task_scope::HostTaskOwner>,
     mcp_owner: tokio::sync::Mutex<Box<dyn peri_acp_types::ports::McpTaskOwnerPort>>,
     session_id: String,
+    pub(crate) mcp_control_enabled: bool,
     cwd: String,
     end_hooks: tokio::sync::Mutex<SessionEndState>,
     cleanup_tasks: Arc<dyn peri_acp_types::tasks::TaskManager>,
@@ -602,6 +603,7 @@ impl SessionEnvironment {
             task_owner: tokio::sync::Mutex::new(task_owner),
             mcp_owner: tokio::sync::Mutex::new(mcp_owner),
             session_id: session_id.to_owned(),
+            mcp_control_enabled: !source.bare && !disabled_middlewares.contains("McpMiddleware"),
             cwd,
             end_hooks: tokio::sync::Mutex::new(SessionEndState::Pending),
             cleanup_tasks: Arc::new(peri_agent::agent::async_tasks::TaskManager::new()),
@@ -759,14 +761,7 @@ impl SessionEnvironment {
         if let Some(pool) = self.cfg.mcp_pool.as_ref() {
             pool.begin_shutdown();
         }
-        if let Some(dynamic) = self.cfg.dynamic_mcp.as_ref() {
-            dynamic.begin_shutdown();
-        }
         let host = tasks.shutdown().await;
-        let dynamic = match self.cfg.dynamic_mcp.as_ref() {
-            Some(dynamic) => dynamic.shutdown().await,
-            None => peri_acp_types::dynamic_mcp::DynamicMcpShutdownReport::Complete,
-        };
         let mut mcp_tasks = self.mcp_owner.lock().await;
         mcp_tasks.begin_shutdown();
         let _ = mcp_tasks.shutdown().await;
@@ -778,7 +773,7 @@ impl SessionEnvironment {
             },
         };
         matches!(
-            task_scope::HostTerminalShutdownReport::aggregate(host, dynamic, pool, 0),
+            task_scope::HostTerminalShutdownReport::aggregate(host, pool, 0),
             task_scope::HostTerminalShutdownReport::Complete { .. }
         )
     }

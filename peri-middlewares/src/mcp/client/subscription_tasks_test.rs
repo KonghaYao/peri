@@ -313,6 +313,7 @@ async fn terminal_reminder_keeps_the_public_task_id_instead_of_the_remote_shell_
     pool.clients.write().insert(
         "workspace".into(),
         Arc::new(crate::mcp::client::McpClientHandle {
+            call_gate: Default::default(),
             name: "workspace".into(),
             version: None,
             connected_at: None,

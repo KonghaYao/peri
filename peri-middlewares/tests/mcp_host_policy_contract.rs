@@ -221,6 +221,7 @@ async fn spawn_fixture(blocking_call: bool) -> Fixture {
         .await
         .expect("fixture tools/list must succeed");
     let handle = Arc::new(McpClientHandle {
+        call_gate: Default::default(),
         name: FIXTURE_SERVER.to_string(),
         version: None,
         connected_at: None,
