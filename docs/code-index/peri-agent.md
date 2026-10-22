@@ -157,7 +157,7 @@ Full 摘要不改变模型思考配置和单次输出上限。未完成的摘要
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
 | 调用解析与参数归一化 | `src/tools/invocation.rs` | `DirectToolInvocationResolver::resolve/resolve_target`；同一 Arc 多 key 去重、不同 target 的歧义拒绝；`normalize_params` 是唯一实现，同时声明 alias/canonical 的 schema 不改写字段；`TOOL_PARAM_ALIASES`（:133，匹配点 :187）为**匹配型归一**：先按工具名原样查表；旧 builtin 前缀只经 `original_tool_name_of_effective` 用于历史/配置输入归一，执行目标使用显式来源与当前可见名，不得新增 effective name 字面量行 |
-| 工具名过滤（allow/deny） | `src/session/tool_catalog.rs` | `ToolFilterPolicy::{canonical,with_mcp_policy}`；`name_candidates` | `--disallowed-tools` / agent `tools:` 以当前模型可见名过滤；历史 builtin 前缀仅供旧配置归一，不能作为执行别名。来源身份进入执行解析和权限判定，避免外部裸名冒充 builtin（ARC-TOOLS-001 / ARC-HITL-001） |
+| 工具名过滤（allow/deny） | `src/session/tool_catalog.rs` | `ToolFilterPolicy::{canonical,with_mcp_policy}`；`name_candidates`。`--disallowed-tools` / agent `tools:` 以当前模型可见名过滤；历史 builtin 前缀仅供旧配置归一，不能作为执行别名。来源身份进入执行解析和权限判定，避免外部裸名冒充 builtin（ARC-TOOLS-001 / ARC-HITL-001） |
 | 工具 trait 事实源 | `peri-acp-types/src/tools.rs` | `BaseTool`（:146）；`is_direct()` 默认 false（:199） |
 | 工具注册面 | middleware `collect_tools()`（`peri-agent/src/middleware/trait.rs:60`，13 处实现） | 新工具由中间件提供；包装层透传 is_direct |
 | deferred 搜索/执行代理 | `peri-middlewares/src/tool_search/` | `middleware.rs`（基于 local tool view 构建索引并刷新元工具描述）、`search_tool.rs`、`execute_tool.rs`、`tool_index.rs`、`core_tools.rs`（调用解析与 direct 描述 helper） |
