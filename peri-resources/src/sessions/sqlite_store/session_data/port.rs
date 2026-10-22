@@ -215,14 +215,10 @@ impl SessionDataPort for SqliteSessionData {
                 SessionResourceErrorKind::Workspace(WorkspaceError::UnverifiedLegacyOwner),
             ));
         }
-        sqlx::query(
-            "INSERT OR IGNORE INTO projects(id, locator, object_identity) VALUES (?1, ?2, ?1)",
-        )
-        .bind(binding.project_id.to_string())
-        .bind(workspace.root.to_string_lossy().into_owned())
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| write_failure(error.into()))?;
+        // 接纳不制造项目：workspace 归属行由 resolve_workspace 建立，项目必须已登记。
+        workspace_store::require_project_exists(&mut tx, binding.project_id)
+            .await
+            .map_err(write_failure)?;
         // The workspace owner was established by resolve_workspace.
         // Adoption may attach its immutable evidence, but must not fabricate a
         // workspace owner or change the session's logical workspace.

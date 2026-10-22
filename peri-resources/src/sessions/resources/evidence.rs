@@ -49,7 +49,8 @@ impl SessionResourcesImpl {
         // History remains addressable by Session ID when its old binding is
         // absent, its directory is gone, or it belongs to another machine.
         // The returned projection carries no execution proof; the separate
-        // validate_session gate still checks the immutable evidence.
+        // validate_session gate still checks workspace ownership and cwd
+        // availability.
         if binding.is_none() || missing_directory || foreign_machine || missing_remote_evidence {
             let relative_cwd = binding
                 .as_ref()
@@ -103,8 +104,9 @@ impl SessionResourcesImpl {
         Ok(resolved)
     }
 
-    /// 用 canonical 绑定字节做本机复核（`full` 为真时叠一次完整发现快照比对）。
+    /// 用 canonical 绑定字节做本机复核（归属关系与执行目录可用性）。
     ///
+    /// `full` 保留既有调用签名，两种力度执行同一套检查；文件对象身份与快照不参与准入。
     /// 绑定字节来自数据面：本机组合是本机 `session_bindings`，远程组合是远端会话行。
     /// 没有绑定行时按 `BindingMissing` 如实失败——执行资格需要一个可复核的绑定。
     pub(super) async fn recheck_binding(

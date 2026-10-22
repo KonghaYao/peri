@@ -131,10 +131,9 @@ impl RemoteExecution {
             } else {
                 saved.root.join(&binding.cwd_relative_to_workspace)
             };
-            let (canonical_cwd, observed) = discovery::observe(&cwd).await?;
-            if canonical_cwd != cwd || observed.discovery != saved {
-                return Err(WorkspaceError::NeedsRelink.into());
-            }
+            // 恢复准入只要求 cwd 可用且未被 symlink 换位；文件对象身份与 Git 布局
+            // 只随快照保存，不参与判定。
+            let canonical_cwd = discovery::ensure_cwd_available(&cwd).await?;
             let machine = crate::sessions::machine::current()?;
             let path = saved.root.to_str().ok_or(WorkspaceError::InvalidBinding)?;
             let recorded = self.data.workspace_for_path(machine, path).await?;

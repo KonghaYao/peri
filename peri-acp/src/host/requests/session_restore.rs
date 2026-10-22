@@ -361,7 +361,7 @@ pub(super) async fn response_identity(
 }
 
 /// 绑定复核强度见 [`BindingCheck`](crate::host::workspace::BindingCheck)：
-/// 协议读请求复核完整发现快照，同一次准入内的身份读取只复核已记录证据。
+/// `Full` 与 `Recorded` 现在执行同一套归属关系与 cwd 可用性检查，都不重跑 Git 发现。
 ///
 /// 绑定分类走门面的轻量投影（不拉全历史）；本机无法验证的绑定
 /// （[`BindingState::ExternalOrUnregistered`]）不冒充「没有绑定」，其执行目录由

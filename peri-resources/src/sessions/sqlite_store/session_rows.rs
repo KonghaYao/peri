@@ -9,6 +9,7 @@ use peri_acp_types::workspace::{SessionBinding, WorkspaceId};
 use sqlx::SqliteConnection;
 
 use crate::sessions::canonical;
+use crate::sessions::sqlite_store::workspace::require_project_exists;
 
 /// 新建 `threads` 行的显式输入；派生字段（`message_count`、时间戳）由调用方给定，
 /// 不在本层读时钟。
@@ -78,6 +79,8 @@ pub(super) async fn insert_binding_row(
     binding: &SessionBinding,
 ) -> Result<()> {
     super::workspace::validate_relative(&binding.cwd_relative_to_workspace)?;
+    // 写绑定必须引用已登记项目；缺失按 InvalidBinding 拒绝，不静默补造。
+    require_project_exists(connection, binding.project_id).await?;
     let version = i64::from(binding.schema_version);
     sqlx::query(
         "INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd,

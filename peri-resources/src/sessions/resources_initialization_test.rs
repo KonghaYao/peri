@@ -1,5 +1,76 @@
 use super::*;
 
+/// [回归测试] 诊断快照变化不破坏创建准入；真正的归属差异仍然失败。
+#[tokio::test]
+async fn test_initialization_tolerates_snapshot_only_change_between_stages() {
+    let fixture = Fixture::new().await;
+    let workspace = fixture.workspace().await;
+    let initialization = fixture.begin("s-snapshot-drift").await;
+    let id = "s-snapshot-drift".to_owned();
+
+    // 只改诊断快照（模拟容器重启后的 device/inode 变化），布局与归属不变。
+    let (recorded,): (String,) = sqlx::query_as("SELECT discovery FROM workspaces WHERE id = ?1")
+        .bind(workspace.workspace_id.to_string())
+        .fetch_one(fixture.facade.local_pool())
+        .await
+        .unwrap();
+    let mut recorded: serde_json::Value = serde_json::from_str(&recorded).unwrap();
+    for key in ["root_identity", "common_identity", "private_identity"] {
+        if let Some(identity) = recorded
+            .get_mut(key)
+            .and_then(|value| value.as_object_mut())
+        {
+            identity.insert("device".into(), serde_json::json!(9_999));
+            identity.insert("inode".into(), serde_json::json!(9_999));
+        }
+    }
+    sqlx::query("UPDATE workspaces SET discovery = ?1 WHERE id = ?2")
+        .bind(recorded.to_string())
+        .bind(workspace.workspace_id.to_string())
+        .execute(fixture.facade.local_pool())
+        .await
+        .unwrap();
+
+    // 快照不再参与执行归属比较：同一 workspace/project/cwd 继续通过。
+    fixture
+        .facade
+        .validate_session(&id, &workspace)
+        .await
+        .unwrap();
+
+    // workspace 或路径结构真正不一致时仍然失败。
+    for mismatched in [
+        ResolvedWorkspace {
+            cwd: workspace.root.join("elsewhere"),
+            ..workspace.clone()
+        },
+        ResolvedWorkspace {
+            workspace_id: peri_acp_types::workspace::WorkspaceId::new(),
+            ..workspace.clone()
+        },
+    ] {
+        let error = fixture
+            .facade
+            .validate_session(&id, &mismatched)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.kind(),
+            SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionBindingMismatch)
+        ));
+    }
+
+    // 会话仍能完成创建。
+    let frozen = FrozenSnapshotBytes::new(r#"{"v":1,"id":"s-snapshot-drift"}"#);
+    initialization.commit_frozen(&frozen).await.unwrap();
+    assert_eq!(
+        fixture.frozen_of(&id).await.as_deref(),
+        Some(frozen.as_str())
+    );
+    assert_eq!(fixture.count_threads(&id).await, 1);
+    assert_eq!(fixture.count_bindings(&id).await, 1);
+}
+
 // ─── 撤销未发布创建 ───────────────────────────────────────────────────────────
 
 #[tokio::test]

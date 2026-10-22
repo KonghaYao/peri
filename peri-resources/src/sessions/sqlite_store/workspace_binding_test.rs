@@ -1,5 +1,126 @@
 use super::*;
 
+/// [回归测试] 写绑定前的纯路径结构校验：root/relative/cwd 自相矛盾时拒绝。
+#[tokio::test]
+async fn test_worktree_create_bound_thread_rejects_inconsistent_path_structure() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    let (store, _db) = store().await;
+    let workspace = store.resolve_workspace(&root).await.unwrap();
+
+    let inconsistent = [
+        // 归属行路径与 root 不一致。
+        ResolvedWorkspace {
+            root: directory.path().join("other"),
+            ..workspace.clone()
+        },
+        // root + relative 推不出执行 cwd。
+        ResolvedWorkspace {
+            cwd: root.join("elsewhere"),
+            ..workspace.clone()
+        },
+    ];
+    for candidate in inconsistent {
+        let meta = ThreadMeta::new_at(candidate.cwd.to_str().unwrap(), peri_time::now_wall());
+        let id = meta.id.clone();
+        let error = store
+            .create_bound_thread(meta, &candidate)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error.downcast_ref::<WorkspaceError>(),
+                Some(WorkspaceError::ExecutionBindingMismatch)
+            ),
+            "自相矛盾的路径结构必须拒绝：{error}"
+        );
+        let (threads,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM threads WHERE id = ?1")
+            .bind(id.as_str())
+            .fetch_one(&store.database.pool)
+            .await
+            .unwrap();
+        let (bindings,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM session_bindings WHERE thread_id = ?1")
+                .bind(id.as_str())
+                .fetch_one(&store.database.pool)
+                .await
+                .unwrap();
+        assert_eq!((threads, bindings), (0, 0), "失败不得留下半条会话行");
+    }
+}
+
+/// [回归测试] `Full` 与 `Recorded` 复核等价：诊断快照变化不改变结论。
+#[tokio::test]
+async fn test_worktree_full_and_recorded_rechecks_are_equivalent() {
+    let repo = repository();
+    let (store, _db) = store().await;
+    let (id, registered) = bound(&store, repo.path()).await;
+
+    // 只改发现快照里的对象身份（模拟容器重启后的 inode 变化）。
+    let (snapshot,): (String,) = sqlx::query_as("SELECT discovery FROM workspaces WHERE id = ?1")
+        .bind(registered.workspace_id.to_string())
+        .fetch_one(&store.database.pool)
+        .await
+        .unwrap();
+    let mut snapshot: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
+    let inode = snapshot["root_identity"]["inode"].as_u64().unwrap();
+    snapshot["root_identity"]["inode"] = serde_json::json!(inode + 1);
+    sqlx::query("UPDATE workspaces SET discovery = ?1 WHERE id = ?2")
+        .bind(snapshot.to_string())
+        .bind(registered.workspace_id.to_string())
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
+
+    let full = store.validate_session_binding(&id).await.unwrap();
+    let recorded = store.reassert_session_binding(&id).await.unwrap();
+    assert_eq!(full, recorded);
+    assert_eq!(full.workspace_id, registered.workspace_id);
+    assert_eq!(full.project_id, registered.project_id);
+}
+
+/// [回归测试] 准入不比较归属行当前项目与绑定项目：绑定项目仍被保留。
+#[tokio::test]
+async fn test_worktree_binding_project_survives_workspace_project_change() {
+    let repo = repository();
+    let (store, _db) = store().await;
+    let (id, registered) = bound(&store, repo.path()).await;
+
+    // 同库登记另一个合法项目，再把归属行项目改到它：旧绑定仍指向原项目。
+    let other_project = ProjectId::new();
+    sqlx::query("INSERT INTO projects (id, locator, object_identity) VALUES (?1, ?2, ?3)")
+        .bind(other_project.to_string())
+        .bind("/another-project")
+        .bind(r#"{"device":1,"inode":1}"#)
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE workspaces SET project_id = ?1 WHERE id = ?2")
+        .bind(other_project.to_string())
+        .bind(registered.workspace_id.to_string())
+        .execute(&store.database.pool)
+        .await
+        .unwrap();
+
+    let resolved = store.validate_session_binding(&id).await.unwrap();
+    assert_eq!(resolved.workspace_id, registered.workspace_id);
+    assert_eq!(
+        resolved.project_id, registered.project_id,
+        "返回的归属必须沿用绑定项目，不被行项目改绑"
+    );
+    assert_ne!(resolved.project_id, other_project);
+    assert_eq!(
+        store
+            .load_session_binding(&id)
+            .await
+            .unwrap()
+            .unwrap()
+            .project_id,
+        registered.project_id
+    );
+}
+
 #[tokio::test]
 async fn test_worktree_writes_do_not_claim_ownership_and_metadata_cannot_rebind() {
     let repo = repository();

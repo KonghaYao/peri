@@ -232,7 +232,11 @@ async fn assert_registration_upgrade_allows_directory_changes(version: i64) {
             resolved.workspace_id == workspace.workspace_id,
             cwd == &original
         );
-        assert_ne!(resolved.project_id, workspace.project_id);
+        // 项目按 canonical locator 归属：原路径复用原项目，新路径另立项目。
+        assert_eq!(
+            resolved.project_id == workspace.project_id,
+            cwd == &original
+        );
         let new_thread = store
             .create_bound_thread(
                 ThreadMeta::new_at(cwd.to_str().unwrap(), peri_time::now_wall()),
@@ -246,14 +250,10 @@ async fn assert_registration_upgrade_allows_directory_changes(version: i64) {
         );
     }
     assert_eq!(store.load_session_binding(&thread).await.unwrap(), binding);
-    let error = store.validate_session_binding(&thread).await.unwrap_err();
-    assert!(
-        matches!(
-            error.downcast_ref::<WorkspaceError>(),
-            Some(WorkspaceError::NeedsRelink)
-        ),
-        "原路径被替换后旧会话必须拒绝执行：{error}"
-    );
+    // 原路径被替换只影响诊断快照；旧会话仍按 cwd 可用性继续执行，绑定不被改写。
+    let resolved = store.validate_session_binding(&thread).await.unwrap();
+    assert_eq!(resolved.workspace_id, workspace.workspace_id);
+    assert_eq!(resolved.project_id, workspace.project_id);
     let mut connection = store.database.pool.acquire().await.unwrap();
     // 精确读取旧会话，不以新增线程的插入顺序推断目标。
     assert_eq!(history_bytes(&mut connection).await, old_history);

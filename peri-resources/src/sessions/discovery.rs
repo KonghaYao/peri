@@ -96,6 +96,28 @@ pub(super) fn path_text(path: &Path) -> Result<&str> {
     })
 }
 
+/// 执行准入要求执行目录可用：canonical 路径与保存路径一致，且指向目录。
+///
+/// 文件对象身份（device/inode）与 Git 布局随容器重启、同路径重建等环境变化而改变，
+/// 只保留在发现快照里作诊断，不参与准入判定。恢复旧会话时 cwd 仍在且未被 symlink
+/// 换位即可继续执行；保存路径被 symlink 指向别处时无法证明仍是同一位置，按
+/// `NeedsRelink` 拒绝。返回 canonical 路径，供需要执行目录的调用方复用。
+pub(in crate::sessions) async fn ensure_cwd_available(cwd: &Path) -> Result<PathBuf> {
+    let canonical = tokio::fs::canonicalize(cwd)
+        .await
+        .map_err(|_| WorkspaceError::Unavailable)?;
+    let meta = tokio::fs::metadata(&canonical)
+        .await
+        .map_err(|_| WorkspaceError::Unavailable)?;
+    if !meta.is_dir() {
+        return Err(WorkspaceError::Unavailable.into());
+    }
+    if canonical != cwd {
+        return Err(WorkspaceError::NeedsRelink.into());
+    }
+    Ok(canonical)
+}
+
 pub(super) async fn object_identity(path: &Path) -> Result<ObjectIdentity> {
     let meta = tokio::fs::metadata(path)
         .await
@@ -498,8 +520,8 @@ async fn observe_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Obser
         }
     }
     // Missing Git is a directory-only execution mode, not evidence that the path
-    // is outside a repository. Persisted Git bindings still require the exact
-    // discovery snapshot in revalidate, and the registry never rewrites one from
+    // is outside a repository. Persisted Git bindings no longer require a snapshot
+    // match at admission; the registry still never rewrites a recorded layout from
     // an observation without `git_answered`; never rewrite them to this directory.
     let Some(inside) = inside.filter(|output| output.status.success()) else {
         return Ok((
@@ -590,49 +612,26 @@ async fn observe_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Obser
 }
 
 impl Discovery {
+    /// 测试用的目录可用性复核（生产准入直接调用 [`ensure_cwd_available`]）。
+    ///
+    /// 文件对象身份与 Git 布局不参与准入判定（容器重启、同路径重建都会改变它们），
+    /// 因此这里不重新执行发现，也不比较 `Discovery`；`#[cfg(test)]` 保留原有测试调用
+    /// 签名。
+    #[cfg(test)]
     pub async fn revalidate(&self, cwd: &Path) -> Result<()> {
         self.revalidate_with_git(cwd, OsStr::new("git")).await
     }
-    async fn revalidate_with_git(&self, cwd: &Path, program: &OsStr) -> Result<()> {
-        let (_, current) = observe_with_git(cwd, program).await?;
-        if current.discovery != *self {
-            return Err(WorkspaceError::NeedsRelink.into());
-        }
-        Ok(())
+    #[cfg(test)]
+    async fn revalidate_with_git(&self, cwd: &Path, _program: &OsStr) -> Result<()> {
+        ensure_cwd_available(cwd).await.map(|_| ())
     }
 
-    /// 提交前的重验：只复核外部探测所依赖的关键文件对象，不启动任何外部进程。
+    /// 提交前的重验：执行目录可用即可。
     ///
-    /// 设计 §3.2 要求探测在事务外进行、提交前只复核关键文件对象与关联关系。Git
-    /// 布局是同一目录的派生观测，登记层会在下一次准入刷新它，因此在持有 SQLite
-    /// 写事务期间重新执行完整发现既无必要，也会把 Git 的等待时间摊到同库其他
-    /// writer 身上。
+    /// 设计 §3.2 要求探测在事务外进行、提交前只复核执行事实与关联关系。文件对象身份
+    /// 与 Git 布局只是诊断快照，不再是准入证据，因此这里不启动外部进程，也不读取快照。
     pub(in crate::sessions) async fn reassert_key_objects(&self, cwd: &Path) -> Result<()> {
-        let canonical = tokio::fs::canonicalize(cwd)
-            .await
-            .map_err(|_| WorkspaceError::Unavailable)?;
-        if canonical != cwd {
-            return Err(WorkspaceError::NeedsRelink.into());
-        }
-        if object_identity(&self.root).await? != self.root_identity {
-            return Err(WorkspaceError::NeedsRelink.into());
-        }
-        for (path, recorded) in [
-            (self.common_dir.as_deref(), self.common_identity.as_ref()),
-            (self.private_dir.as_deref(), self.private_identity.as_ref()),
-        ] {
-            match (path, recorded) {
-                // 记录过的 Git 位置被移除或替换：证据不足，放弃本次结果。
-                (Some(path), Some(recorded)) => match object_identity(path).await {
-                    Ok(current) if current == *recorded => {}
-                    _ => return Err(WorkspaceError::NeedsRelink.into()),
-                },
-                (None, None) => {}
-                // 快照自相矛盾：路径与文件对象身份必须成对出现。
-                _ => return Err(WorkspaceError::InvalidBinding.into()),
-            }
-        }
-        Ok(())
+        ensure_cwd_available(cwd).await.map(|_| ())
     }
 
     pub fn project_locator(&self) -> &Path {
