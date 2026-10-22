@@ -1,0 +1,583 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 29c1a55..d1cb679 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -29,6 +29,16 @@ repository = "https://github.com/tursodatabase/turso"
+ name = "turso_serverless"
+ path = "lib.rs"
+ 
++[features]
++# Selects the host's `fetch` as the driver's network primitive on the
++# Emscripten target (browser hosts have no POSIX sockets). The default build
++# keeps the reqwest executor.
++wasm-fetch = [
++    "dep:wasm-bindgen",
++    "dep:wasm-bindgen-futures",
++    "dep:js-sys",
++]
++
+ [dependencies.base64]
+ version = "0.22"
+ 
+@@ -60,6 +70,18 @@ version = "1.0"
+ features = ["sync"]
+ default-features = false
+ 
++[target.'cfg(target_os = "emscripten")'.dependencies.js-sys]
++version = "0.3"
++optional = true
++
++[target.'cfg(target_os = "emscripten")'.dependencies.wasm-bindgen]
++version = "=0.2.129"
++optional = true
++
++[target.'cfg(target_os = "emscripten")'.dependencies.wasm-bindgen-futures]
++version = "=0.4.79"
++optional = true
++
+ [dev-dependencies.tokio]
+ version = "1.0"
+ features = ["full"]
+diff --git a/http.rs b/http.rs
+new file mode 100644
+index 0000000..48f6e78
+--- /dev/null
++++ b/http.rs
+@@ -0,0 +1,346 @@
++//! HTTP transport seam.
++//!
++//! Every driver call is a single POST to a stream endpoint. This module owns
++//! the request/response shape and the executor that performs the request. The
++//! default executor is `reqwest`; builds that enable `wasm-fetch` perform the
++//! same requests through the host's `fetch` instead (browser hosts have no
++//! POSIX sockets), keeping the wire protocol and error shape unchanged.
++
++use std::pin::Pin;
++use std::sync::Arc;
++
++use bytes::Bytes;
++use futures::{future::BoxFuture, Stream};
++
++use crate::{Error, Result};
++
++/// One driver request: a POST with the driver's headers and JSON body.
++pub struct HttpRequest {
++    pub url: String,
++    pub headers: Vec<(String, String)>,
++    pub body: Vec<u8>,
++}
++
++/// A response body as a byte stream. Cursor responses are newline-delimited
++/// JSON and are decoded incrementally; the other endpoints read the stream to
++/// the end.
++pub type HttpResponseBody = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send>>;
++
++/// A driver response: the status code and the body stream.
++pub struct HttpResponse {
++    pub status: u16,
++    pub body: HttpResponseBody,
++}
++
++/// Performs driver HTTP requests.
++///
++/// The future returned by `execute` is `Send` on every target: host work that
++/// is not `Send` (browser `fetch` handles) stays on the JS microtask queue and
++/// reaches the caller through channels, so the store keeps its thread-safe
++/// contract even when the network primitive is the host's `fetch`.
++pub trait HttpExecutor: Send + Sync + 'static {
++    fn execute(&self, request: HttpRequest) -> BoxFuture<'static, Result<HttpResponse>>;
++}
++
++/// The executor used when the caller does not inject one.
++pub fn default_executor() -> Arc<dyn HttpExecutor> {
++    #[cfg(all(target_os = "emscripten", feature = "wasm-fetch"))]
++    {
++        Arc::new(fetch::FetchExecutor)
++    }
++    #[cfg(not(all(target_os = "emscripten", feature = "wasm-fetch")))]
++    {
++        Arc::new(reqwest_executor::ReqwestExecutor::new())
++    }
++}
++
++#[cfg(not(all(target_os = "emscripten", feature = "wasm-fetch")))]
++mod reqwest_executor {
++    use super::*;
++    use futures::StreamExt;
++
++    pub(super) struct ReqwestExecutor {
++        client: reqwest::Client,
++    }
++
++    impl ReqwestExecutor {
++        pub(super) fn new() -> Self {
++            Self {
++                client: reqwest::Client::new(),
++            }
++        }
++    }
++
++    impl HttpExecutor for ReqwestExecutor {
++        fn execute(&self, request: HttpRequest) -> BoxFuture<'static, Result<HttpResponse>> {
++            let client = self.client.clone();
++            Box::pin(async move {
++                let mut builder = client.post(&request.url);
++                for (name, value) in &request.headers {
++                    builder = builder.header(name.as_str(), value.as_str());
++                }
++                let response = builder
++                    .body(request.body)
++                    .send()
++                    .await
++                    .map_err(|error| {
++                        Error::Http(format!("request to {} failed: {error}", request.url))
++                    })?;
++                let status = response.status().as_u16();
++                let stream = response.bytes_stream().map(|chunk| {
++                    chunk.map_err(|error| {
++                        Error::Http(format!("response body stream failed: {error}"))
++                    })
++                });
++                Ok(HttpResponse {
++                    status,
++                    body: Box::pin(stream),
++                })
++            })
++        }
++    }
++}
++
++#[cfg(all(target_os = "emscripten", feature = "wasm-fetch"))]
++mod fetch {
++    use super::*;
++    use js_sys::{Promise, Reflect, Uint8Array};
++    use tokio::sync::{mpsc, oneshot};
++    use wasm_bindgen::prelude::*;
++    use wasm_bindgen_futures::{spawn_local, JsFuture};
++
++    const QUEUED_CHUNKS: usize = 2;
++
++    #[wasm_bindgen(inline_js = r#"
++export function periStoreFetchBegin(url, headersJson, body) {
++    const handle = { controller: new AbortController(), reader: null };
++    handle.response = globalThis.fetch(url, {
++        method: 'POST',
++        headers: JSON.parse(headersJson),
++        body,
++        signal: handle.controller.signal,
++        redirect: 'manual',
++    });
++    return handle;
++}
++export function periStoreFetchResponse(handle) { return handle.response; }
++export function periStoreFetchStatus(response) { return response.status; }
++export function periStoreFetchRead(handle, response) {
++    if (!response.body) return Promise.resolve({ done: true });
++    handle.reader ??= response.body.getReader();
++    return handle.reader.read();
++}
++export function periStoreFetchClose(handle) {
++    handle.controller.abort();
++    const reader = handle.reader;
++    handle.reader = null;
++    if (reader) {
++        try { reader.cancel().catch(() => {}); } catch (_) {}
++    }
++}
++"#)]
++    extern "C" {
++        #[wasm_bindgen(js_name = periStoreFetchBegin, catch)]
++        fn fetch_begin(
++            url: &str,
++            headers_json: &str,
++            body: &JsValue,
++        ) -> std::result::Result<JsValue, JsValue>;
++        #[wasm_bindgen(js_name = periStoreFetchResponse)]
++        fn fetch_response(handle: &JsValue) -> Promise;
++        #[wasm_bindgen(js_name = periStoreFetchStatus, catch)]
++        fn fetch_status(response: &JsValue) -> std::result::Result<f64, JsValue>;
++        #[wasm_bindgen(js_name = periStoreFetchRead, catch)]
++        fn fetch_read(
++            handle: &JsValue,
++            response: &JsValue,
++        ) -> std::result::Result<Promise, JsValue>;
++        #[wasm_bindgen(js_name = periStoreFetchClose)]
++        fn fetch_close(handle: &JsValue);
++    }
++
++    fn describe(error: &JsValue) -> String {
++        error
++            .as_string()
++            .or_else(|| {
++                Reflect::get(error, &JsValue::from_str("message"))
++                    .ok()
++                    .and_then(|value| value.as_string())
++            })
++            .unwrap_or_else(|| format!("{error:?}"))
++    }
++
++    fn failure(url: &str, error: &JsValue) -> Error {
++        Error::Http(format!("request to {url} failed: {}", describe(error)))
++    }
++
++    /// Owns the pump's stop signal: dropping the body stream (or the session
++    /// before it ever gets one) cancels the request instead of letting it keep
++    /// downloading into a channel nobody reads.
++    struct FetchOwnership(Option<oneshot::Sender<()>>);
++
++    impl Drop for FetchOwnership {
++        fn drop(&mut self) {
++            if let Some(sender) = self.0.take() {
++                let _ = sender.send(());
++            }
++        }
++    }
++
++    /// The stream handed to the session. It only carries channel halves, so it
++    /// stays `Send`; the JS handle lives inside the pump task.
++    struct FetchBody {
++        receiver: mpsc::Receiver<Result<Vec<u8>>>,
++        _ownership: FetchOwnership,
++    }
++
++    impl Stream for FetchBody {
++        type Item = Result<Bytes>;
++
++        fn poll_next(
++            mut self: Pin<&mut Self>,
++            context: &mut std::task::Context<'_>,
++        ) -> std::task::Poll<Option<Self::Item>> {
++            self.receiver
++                .poll_recv(context)
++                .map(|option| option.map(|item| item.map(Bytes::from)))
++        }
++    }
++
++    /// Runs `operation` unless the stop signal fires first (the caller dropped
++    /// the stream, so nobody waits for the body any more).
++    async fn until_stopped<F: std::future::Future>(
++        stop: &mut oneshot::Receiver<()>,
++        operation: F,
++    ) -> Option<F::Output> {
++        match futures::future::select(stop, Box::pin(operation)).await {
++            futures::future::Either::Left(_) => None,
++            futures::future::Either::Right((output, _)) => Some(output),
++        }
++    }
++
++    async fn read_chunk(handle: &JsValue, response: &JsValue) -> Result<Option<Vec<u8>>> {
++        let promise = fetch_read(handle, response)
++            .map_err(|error| Error::Http(format!("response body stream failed: {}", describe(&error))))?;
++        let value = JsFuture::from(promise)
++            .await
++            .map_err(|error| Error::Http(format!("response body stream failed: {}", describe(&error))))?;
++        let done = Reflect::get(&value, &JsValue::from_str("done"))
++            .ok()
++            .and_then(|value| value.as_bool())
++            .unwrap_or(false);
++        if done {
++            return Ok(None);
++        }
++        let chunk = Reflect::get(&value, &JsValue::from_str("value"))
++            .map_err(|error| Error::Http(format!("response body stream failed: {}", describe(&error))))?;
++        Ok(Some(Uint8Array::new(&chunk).to_vec()))
++    }
++
++    /// Drives one request on the JS microtask queue: the status is delivered
++    /// once, then the body streams into the chunk channel. The pump owns the JS
++    /// handle and aborts the request when the stop signal fires.
++    async fn pump(
++        url: String,
++        headers_json: String,
++        body: Vec<u8>,
++        mut stop: oneshot::Receiver<()>,
++        status_sender: oneshot::Sender<Result<u16>>,
++        chunks: mpsc::Sender<Result<Vec<u8>>>,
++    ) {
++        let encoded_body: JsValue = Uint8Array::from(body.as_slice()).into();
++        let handle = match fetch_begin(&url, &headers_json, &encoded_body) {
++            Ok(handle) => handle,
++            Err(error) => {
++                let _ = status_sender.send(Err(failure(&url, &error)));
++                return;
++            }
++        };
++        let response = match until_stopped(&mut stop, JsFuture::from(fetch_response(&handle))).await
++        {
++            None => {
++                fetch_close(&handle);
++                return;
++            }
++            Some(Err(error)) => {
++                let _ = status_sender.send(Err(failure(&url, &error)));
++                return;
++            }
++            Some(Ok(response)) => response,
++        };
++        let status = match fetch_status(&response) {
++            Ok(status) if status.fract() == 0.0 && (100.0..=599.0).contains(&status) => status as u16,
++            Ok(status) => {
++                let _ = status_sender.send(Err(Error::Http(format!(
++                    "invalid fetch response status {status} from {url}"
++                ))));
++                fetch_close(&handle);
++                return;
++            }
++            Err(error) => {
++                let _ = status_sender.send(Err(failure(&url, &error)));
++                fetch_close(&handle);
++                return;
++            }
++        };
++        if status_sender.send(Ok(status)).is_err() {
++            // The session stopped waiting for the response.
++            fetch_close(&handle);
++            return;
++        }
++        loop {
++            match until_stopped(&mut stop, read_chunk(&handle, &response)).await {
++                None => {
++                    fetch_close(&handle);
++                    return;
++                }
++                Some(Ok(Some(chunk))) => {
++                    if chunks.send(Ok(chunk)).await.is_err() {
++                        fetch_close(&handle);
++                        return;
++                    }
++                }
++                Some(Ok(None)) => return,
++                Some(Err(error)) => {
++                    let _ = chunks.send(Err(error)).await;
++                    return;
++                }
++            }
++        }
++    }
++
++    pub(super) struct FetchExecutor;
++
++    impl HttpExecutor for FetchExecutor {
++        fn execute(&self, request: HttpRequest) -> BoxFuture<'static, Result<HttpResponse>> {
++            Box::pin(async move {
++                let headers_json = serde_json::to_string(&request.headers).map_err(|error| {
++                    Error::Http(format!("failed to encode request headers: {error}"))
++                })?;
++                let (stop_sender, stop_receiver) = oneshot::channel();
++                let (status_sender, status_receiver) = oneshot::channel();
++                let (chunk_sender, chunk_receiver) = mpsc::channel(QUEUED_CHUNKS);
++                spawn_local(pump(
++                    request.url,
++                    headers_json,
++                    request.body,
++                    stop_receiver,
++                    status_sender,
++                    chunk_sender,
++                ));
++                let status = status_receiver.await.map_err(|_| {
++                    Error::Http(
++                        "the request was cancelled before a response arrived".to_string(),
++                    )
++                })??;
++                Ok(HttpResponse {
++                    status,
++                    body: Box::pin(FetchBody {
++                        receiver: chunk_receiver,
++                        _ownership: FetchOwnership(Some(stop_sender)),
++                    }),
++                })
++            })
++        }
++    }
++}
+diff --git a/lib.rs b/lib.rs
+index b697b2a..8129bda 100644
+--- a/lib.rs
++++ b/lib.rs
+@@ -49,6 +49,7 @@ pub mod batch;
+ mod column;
+ pub mod connection;
+ mod error;
++mod http;
+ pub mod params;
+ pub mod protocol;
+ mod rows;
+diff --git a/session.rs b/session.rs
+index c31fcf5..18f7d30 100644
+--- a/session.rs
++++ b/session.rs
+@@ -1,17 +1,15 @@
+ //! HTTP session management: one session per connection, tracking the
+ //! stream baton, base URL, and transaction state.
+ 
+-use std::{
+-    pin::Pin,
+-    sync::{
+-        atomic::{AtomicBool, AtomicI64, Ordering},
+-        Arc,
+-    },
++use std::sync::{
++    atomic::{AtomicBool, AtomicI64, Ordering},
++    Arc,
+ };
+ 
+ use futures::StreamExt;
+ 
+ use crate::{
++    http::{default_executor, HttpExecutor, HttpRequest, HttpResponse, HttpResponseBody},
+     protocol::{
+         decode_value, Batch, BatchCond, BatchStep, CursorEntry, CursorRequest, CursorResponse,
+         PipelineRequest, PipelineResponse, Stmt, StreamRequest, StreamResponse, StreamResult,
+@@ -55,7 +53,7 @@ pub struct StmtOutput {
+ }
+ 
+ pub struct Session {
+-    client: reqwest::Client,
++    executor: Arc<dyn HttpExecutor>,
+     auth_token: Option<AuthTokenFn>,
+     remote_encryption_key: Option<String>,
+     base_url: String,
+@@ -66,15 +64,15 @@ pub struct Session {
+ /// Reads newline-separated JSON values from a cursor response body
+ /// (section 7.2).
+ struct LineReader {
+-    stream: Pin<Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
++    stream: HttpResponseBody,
+     buf: Vec<u8>,
+     eof: bool,
+ }
+ 
+ impl LineReader {
+-    fn new(response: reqwest::Response) -> Self {
++    fn new(stream: HttpResponseBody) -> Self {
+         Self {
+-            stream: Box::pin(response.bytes_stream()),
++            stream,
+             buf: Vec::new(),
+             eof: false,
+         }
+@@ -106,7 +104,7 @@ impl LineReader {
+             }
+             match self.stream.next().await {
+                 Some(Ok(chunk)) => self.buf.extend_from_slice(&chunk),
+-                Some(Err(e)) => return Err(Error::Http(format!("cursor stream failed: {e}"))),
++                Some(Err(e)) => return Err(e),
+                 None => self.eof = true,
+             }
+         }
+@@ -124,6 +122,17 @@ impl LineReader {
+     }
+ }
+ 
++/// Read a response body to the end. Used for responses the driver consumes as
++/// one JSON document (pipeline results and error bodies); cursor responses are
++/// decoded incrementally by [`LineReader`] instead.
++async fn read_body(mut body: HttpResponseBody) -> Result<Vec<u8>> {
++    let mut buffer = Vec::new();
++    while let Some(chunk) = body.next().await {
++        buffer.extend_from_slice(&chunk?);
++    }
++    Ok(buffer)
++}
++
+ impl Session {
+     pub fn new(
+         url: &str,
+@@ -135,7 +144,7 @@ impl Session {
+             last_insert_rowid: AtomicI64::new(0),
+         });
+         let session = Self {
+-            client: reqwest::Client::new(),
++            executor: default_executor(),
+             auth_token,
+             remote_encryption_key,
+             base_url: normalize_url(url),
+@@ -152,33 +161,34 @@ impl Session {
+         self.shared.autocommit.store(true, Ordering::Relaxed);
+     }
+ 
+-    async fn send(&self, path: &str, body: String) -> Result<reqwest::Response> {
++    async fn send(&self, path: &str, body: String) -> Result<HttpResponse> {
+         let url = format!("{}{}", self.base_url, path);
+-        let mut request = self
+-            .client
+-            .post(&url)
+-            .header("Content-Type", "application/json");
++        let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
+         // Resolved here rather than once at construction so dynamic providers
+         // can rotate the token between requests.
+         if let Some(provider) = &self.auth_token {
+             let token = provider().await?;
+-            request = request.header("Authorization", format!("Bearer {token}"));
++            headers.push(("Authorization".to_string(), format!("Bearer {token}")));
+         }
+         if let Some(key) = &self.remote_encryption_key {
+-            request = request.header(ENCRYPTION_KEY_HEADER, key);
++            headers.push((ENCRYPTION_KEY_HEADER.to_string(), key.clone()));
+         }
+-        request
+-            .body(body)
+-            .send()
++        self.executor
++            .execute(HttpRequest {
++                url,
++                headers,
++                body: body.into_bytes(),
++            })
+             .await
+-            .map_err(|e| Error::Http(format!("request to {url} failed: {e}")))
+     }
+ 
+-    async fn http_error(response: reqwest::Response) -> Error {
+-        let status = response.status();
++    async fn http_error(response: HttpResponse) -> Error {
++        let status = response.status;
+         let mut message = None;
+-        if let Ok(body) = response.text().await {
+-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&body) {
++        // Failing to read the error body must not obscure the status itself,
++        // so the read error is discarded here.
++        if let Ok(body) = read_body(response.body).await {
++            if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&body) {
+                 message = parsed
+                     .get("error")
+                     .and_then(|v| v.as_str())
+@@ -201,7 +211,7 @@ impl Session {
+         &mut self,
+         path: &str,
+         make_body: impl FnOnce(Option<String>) -> Result<String>,
+-    ) -> Result<reqwest::Response> {
++    ) -> Result<HttpResponse> {
+         let response = match self.send(path, make_body(self.baton.clone())?).await {
+             Ok(response) => response,
+             Err(e) => {
+@@ -209,7 +219,7 @@ impl Session {
+                 return Err(e);
+             }
+         };
+-        if !response.status().is_success() {
++        if !(200..300).contains(&response.status) {
+             self.reset_stream();
+             return Err(Self::http_error(response).await);
+         }
+@@ -242,9 +252,8 @@ impl Session {
+                     .map_err(|e| Error::Error(format!("failed to encode request: {e}")))
+             })
+             .await?;
+-        let mut response: PipelineResponse = response
+-            .json()
+-            .await
++        let body = read_body(response.body).await?;
++        let mut response: PipelineResponse = serde_json::from_slice(&body)
+             .map_err(|e| Error::Http(format!("invalid pipeline response: {e}")))?;
+         self.update_stream(response.baton.take(), response.base_url.take());
+         let mut results = response.results;
+@@ -318,7 +327,7 @@ impl Session {
+             })
+             .await?;
+ 
+-        let mut reader = LineReader::new(response);
++        let mut reader = LineReader::new(response.body);
+         let first_line = reader.next_line().await?.ok_or_else(|| {
+             Error::Http("cursor response body ended before the cursor response line".to_string())
+         })?;

@@ -4,15 +4,9 @@ import { isIP } from "node:net";
 
 /**
  * Host ports for the Emscripten ACP Host. Each port owns one piece of platform state
- * (timers, sockets, name resolution) and is injected into the module factory by `startPeriWasmHost`.
+ * (sockets, name resolution) and is injected into the module factory by `startPeriWasmHost`.
+ * 定时器端口与平台无关，见 `./scheduler`。
  */
-
-export interface WasmSchedulerPort {
-    schedule(callback: () => void, delayMs?: number): unknown;
-    cancel(timer: unknown): void;
-    /** Stop accepting callbacks and drop every pending timer owned by the host. */
-    close(): void;
-}
 
 export interface WasmNetworkPort {
     /** Module-shaped `node:net` replacement handed to the Emscripten glue. */
@@ -36,32 +30,6 @@ export interface WasmDnsLookupOptions {
 export interface WasmDnsPort {
     lookup(hostname: string, options: WasmDnsLookupOptions,
         callback: (error: Error | null, addresses?: WasmDnsAddress[]) => void): void;
-}
-
-/** Timers stay owned by the host so a closed host cannot run callbacks afterwards. */
-export function createNodeSchedulerPort(): WasmSchedulerPort {
-    const timers = new Set<ReturnType<typeof setTimeout>>();
-    let closed = false;
-    return {
-        schedule(callback: () => void, delayMs = 0): ReturnType<typeof setTimeout> {
-            if (closed) throw new Error("WASM scheduler is closed");
-            const timer = setTimeout(() => {
-                timers.delete(timer);
-                if (!closed) callback();
-            }, delayMs);
-            timers.add(timer);
-            return timer;
-        },
-        cancel(timer: unknown): void {
-            clearTimeout(timer as ReturnType<typeof setTimeout>);
-            timers.delete(timer as ReturnType<typeof setTimeout>);
-        },
-        close(): void {
-            closed = true;
-            for (const timer of timers) clearTimeout(timer);
-            timers.clear();
-        },
-    };
 }
 
 /** Sockets stay owned by the host so shutdown closes only the connections it created. */

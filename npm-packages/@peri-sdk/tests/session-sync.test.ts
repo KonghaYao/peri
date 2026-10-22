@@ -21,7 +21,8 @@ test("bounded binary batches preserve Unicode streaming, tool payload refs, and 
     docs.completeTurn();
     await sync.close();
     const view = readSessionView(replica.chat, replica.session);
-    expect(view.activeTurnStatus).toBe("completed");
+    expect(view.readiness).toBe("ready");
+    expect(view.activeTurn.status).toBe("completed");
     expect(view.entries[1]?.blocks[0]).toMatchObject({ text: pieces.join("") });
     const card = view.entries[1]?.blocks[1];
     expect(card?.type).toBe("tool_call");

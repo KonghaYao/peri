@@ -2,6 +2,7 @@ import { AgentClaims } from "../kv/agent-claims";
 import type { AtomicManagedAgentKv } from "../kv/types";
 import { Session } from "./session";
 import type { AgentOptions } from "./types";
+import { AcpMcpBridge } from "./acp-mcp-bridge";
 import type { SessionSummary } from "../storage/session-summary";
 import { SessionDocs } from "../state/session-docs";
 import type { CloseOptions } from "./session-close";
@@ -10,6 +11,8 @@ export class Agent {
     readonly id: string;
     readonly session: Session;
     readonly claims: AgentClaims;
+    /** acp 型 MCP 声明的反向桥接；http/stdio 声明不经过它。 */
+    readonly mcpBridge: AcpMcpBridge;
     private currentDocs: SessionDocs;
     /** 当前有效的初始 load 代次；旧代次的通知与响应一律作废（REQ-H04、验收 A22）。 */
     private loadGeneration?: string;
@@ -20,6 +23,7 @@ export class Agent {
     ) {
         this.id = options.id;
         this.claims = new AgentClaims(kv, options.sandbox.id, options.id);
+        this.mcpBridge = new AcpMcpBridge(options.mcpServers);
         this.currentDocs = new SessionDocs();
         this.session = new Session(this);
     }
@@ -53,21 +57,32 @@ export class Agent {
     mcpServers(): unknown[] {
         const servers: unknown[] = Object.entries(
             this.options.mcpServers ?? {},
-        ).map(([name, server]) => ({
-            name,
-            ...server,
-            ...(server.type === "http"
-                ? {
-                      headers: Object.entries(server.headers ?? {}).map(
-                          ([header, value]) => ({ name: header, value }),
-                      ),
-                  }
-                : {
-                      env: Object.entries(server.env ?? {}).map(
-                          ([name, value]) => ({ name, value }),
-                      ),
-                  }),
-        }));
+        ).map(([name, server]) => {
+            if (server.type === "acp")
+                return {
+                    name,
+                    type: "acp",
+                    serverId: server.serverId ?? name,
+                };
+            if (server.type === "http")
+                return {
+                    name,
+                    type: "http",
+                    url: server.url,
+                    headers: Object.entries(server.headers ?? {}).map(
+                        ([header, value]) => ({ name: header, value }),
+                    ),
+                };
+            return {
+                name,
+                type: "stdio",
+                command: server.command,
+                ...(server.args === undefined ? {} : { args: server.args }),
+                env: Object.entries(server.env ?? {}).map(
+                    ([envName, value]) => ({ name: envName, value }),
+                ),
+            };
+        });
         const workspace = this.options.sandbox.optionalWorkspace;
         if (workspace) {
             if (this.options.mcpServers?.workspace) {

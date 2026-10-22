@@ -60,6 +60,7 @@ export function decodeMessagesJson(raw: unknown): SnapshotMessage[] | null {
                 const block = object(rawBlock);
                 if (!block) continue;
                 if ((block.type === "text" || block.type === "reasoning") && typeof block.text === "string") {
+                    if (block.type === "reasoning" && block.visibility !== undefined && block.visibility !== "summary") continue;
                     blocks.push({ type: block.type, text: block.text });
                 } else if (block.type === "tool_use") {
                     const callId = string(block.id);

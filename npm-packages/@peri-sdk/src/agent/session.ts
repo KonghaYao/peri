@@ -111,7 +111,9 @@ export class Session {
                 : `Session not found: ${requestedSessionId}`);
             transport = await this.agent.options.sandbox.createTransport(path);
             this.transport = transport;
-            transport.setRequestHandler((method, params) => this.docs.handleRequest(method, params, this.sessionId, this.agent.options));
+            transport.setRequestHandler((method, params) => method === "mcp/message"
+                ? this.agent.mcpBridge.handle(params)
+                : this.docs.handleRequest(method, params, this.sessionId, this.agent.options));
             let replayTurnPending = false;
             // 初始 load 的代次（REQ-H04、验收 A22）：订阅在本请求**之前**建立，所以
             // 回放通知一条都不会漏；本代次的通知先暂存，响应成功后才一次安装。
@@ -174,6 +176,8 @@ export class Session {
                 },
             });
             const params = { cwd: path, mcpServers: this.agent.mcpServers() };
+            // 声明里的 acp server 必须在 session/new|load 前接上反向 mcp/message 通道。
+            await this.agent.mcpBridge.connect();
             let id: string;
             if (requestedSessionId === null) {
                 const created = await transport.request<SessionSetup>("session/new", {
@@ -309,6 +313,8 @@ export class Session {
     }
 
     private async releaseResources(): Promise<void> {
+        // 未决的 MCP 请求必须结算；外部 server 实例的生命周期仍归调用方。
+        this.agent.mcpBridge.abortPending();
         const transport = this.transport;
         if (transport) {
             // 关闭未确认时保留引用，重试必须能再次尝试同一个 transport。

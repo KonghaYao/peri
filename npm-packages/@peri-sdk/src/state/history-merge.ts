@@ -14,6 +14,8 @@ import { object, string, toolContentText, type RecordValue } from "./protocol";
  * - 子项位置是它在**本条 payload 自己的投影序列**中的下标（页给 `subItems[].position`；
  *   回放没有子项下标，用 `(messageId, 类型, 出现次序)` 派生出同一份稳定块身份
  *   `h:{messageId}:{type}:{slot}`，两条路径对同一子项收敛到同一个块）。
+ * - 工具块的身份是 `toolCallId`：同一个调用可能出现在多个持久 payload 里（调用帧、结果帧），
+ *   但工具实例只有一个归属 Entry，块始终保留在首次引用它的条目上。
  *
  * 这里不推进任何实时状态：不建 active turn、不伪造用户输入、不碰 plan／任务／输入队列
  * （REQ-C01-6/7、REQ-C02、验收 A23／A24）。实时路径的入口仍然是 `ChatProjection`。
@@ -101,9 +103,15 @@ export class HistoryMerge {
         const applicable = [...subItems].filter((sub) => this.mergeable(sub.update));
         if (!applicable.length) return false;
         const entry = this.ensureEntry(ref, applicable);
-        const turnId = string(entry.get("turnId"))!;
         let changed = false;
-        for (const sub of applicable) changed = this.mergeSubItem(entry, turnId, sub) || changed;
+        // 工具实例身份全局唯一：结果 payload 可能带着同一个 toolCallId 再落成一条新 Entry，
+        // 但它的块必须留在首次引用该工具的 Entry 上，否则适配层按 turn 合并后会渲染两行。
+        // 该 payload 若没有其它内容，就不值得为它保留一个空 Entry。
+        if (!entry) {
+            for (const sub of applicable) changed = this.mergeTool(null, sub) || changed;
+            return changed;
+        }
+        for (const sub of applicable) changed = this.mergeSubItem(entry, sub) || changed;
         return changed;
     }
 
@@ -120,7 +128,29 @@ export class HistoryMerge {
         return false;
     }
 
-    private ensureEntry(ref: HistoryEntryRef, subItems: HistorySubItem[]): Y.Map<unknown> {
+    /**
+     * 该 payload 是否需要自己的 Entry：文本总是需要；工具只有在还没有归属 Entry，
+     * 或归属就是本条 entryId 时才需要。已有归属的重复工具 payload 只更新工具状态，
+     * 不再新建空 Entry（见 `mergeTool`）。
+     */
+    private needsOwnEntry(entryId: string, subItems: HistorySubItem[]): boolean {
+        for (const sub of subItems) {
+            const kind = string(sub.update.sessionUpdate);
+            if (kind === "user_message_chunk" || kind === "agent_message_chunk" || kind === "agent_thought_chunk") {
+                return true;
+            }
+            const id = string(sub.update.toolCallId) ?? string(sub.update.id);
+            if (!id) continue;
+            const tool = this.docs.tools().get(id);
+            if (!tool) return true;
+            const ownerId = string(tool.get("entryId"));
+            if (!ownerId || ownerId === entryId) return true;
+            if (!this.docs.entries().get(ownerId)) return true;
+        }
+        return false;
+    }
+
+    private ensureEntry(ref: HistoryEntryRef, subItems: HistorySubItem[]): Y.Map<unknown> | null {
         const known = this.entryIds.get(ref.entryId);
         const existing = known ? this.docs.entries().get(known) : undefined;
         if (existing) return existing;
@@ -130,10 +160,12 @@ export class HistoryMerge {
                 return entry;
             }
         }
+        if (!this.needsOwnEntry(ref.entryId, subItems)) return null;
         const role = subItems.some((sub) => string(sub.update.sessionUpdate) === "user_message_chunk")
             ? "user" : "assistant";
         // 文档条目 id 直接用 wire 身份：同一个 payload 在回放与分页上落进同一个条目。
-        const entry = this.docs.ensureEntry(ref.entryId, `history:${ref.entryId}`, role);
+        // 历史条目的展示时间未知：不得用当前时钟冒充（createdAt/completedAt 保持 null）。
+        const entry = this.docs.ensureEntry(ref.entryId, `history:${ref.entryId}`, role, true);
         entry.set("historyEntryId", ref.entryId);
         entry.set("status", "completed");
         // 条目级位置 = 存储序键（跨条目可比）；块级是 `historySubPosition`（投影下标，不跨条目比）。
@@ -175,12 +207,12 @@ export class HistoryMerge {
         order.push([entryId]);
     }
 
-    private mergeSubItem(entry: Y.Map<unknown>, turnId: string, sub: HistorySubItem): boolean {
+    private mergeSubItem(entry: Y.Map<unknown>, sub: HistorySubItem): boolean {
         const kind = string(sub.update.sessionUpdate);
         if (kind === "user_message_chunk" || kind === "agent_message_chunk" || kind === "agent_thought_chunk") {
             return this.mergeText(entry, sub, kind === "agent_thought_chunk" ? "reasoning" : "text");
         }
-        return this.mergeTool(entry, turnId, sub);
+        return this.mergeTool(entry, sub);
     }
 
     /** 文本块：历史子项是完整正文（不是流式分片），因此写「设定」而非「追加」。 */
@@ -270,18 +302,26 @@ export class HistoryMerge {
     }
 
     /** 工具块：按调用实例身份合并；终态不可回退（与实时路径同一规则）。 */
-    private mergeTool(entry: Y.Map<unknown>, turnId: string, sub: HistorySubItem): boolean {
+    private mergeTool(entry: Y.Map<unknown> | null, sub: HistorySubItem): boolean {
         const update = sub.update;
         const id = string(update.toolCallId) ?? string(update.id);
         if (!id) return false;
         const name = string(update.title) ?? string(update.name);
         const status = historyToolStatus(string(update.status));
-        const tool = this.docs.ensureTool(id, turnId, name ?? "Tool");
+        // 工具实例只有一个归属 Entry：结果 payload 可能带着同一个 toolCallId 落成另一条
+        // 历史 Entry，这里始终写回首次引用它的那条，避免同一调用在 turn 内出现两次。
+        const ownerId = string(this.docs.tools().get(id)?.get("entryId"));
+        const owner = ownerId ? this.docs.entries().get(ownerId) : undefined;
+        const target = owner ?? entry;
+        if (!target) return false;
+        const turnId = string(target.get("turnId")) ?? "";
+        const tool = this.docs.ensureTool(id, turnId, name ?? "Tool", true);
+        const ownsPosition = target === entry;
         let changed = false;
         if (name && tool.get("name") !== name) { tool.set("name", name); changed = true; }
         const kind = string(update.kind);
         if (kind && tool.get("kind") !== kind) { tool.set("kind", kind); changed = true; }
-        if (sub.position !== null && tool.get("historySubPosition") !== sub.position) {
+        if (ownsPosition && sub.position !== null && tool.get("historySubPosition") !== sub.position) {
             tool.set("historySubPosition", sub.position);
         }
         const previous = string(tool.get("status"));
@@ -301,13 +341,18 @@ export class HistoryMerge {
             if (Object.keys(result).length) { this.docs.payloads.set(tool, "result", result); changed = true; }
         }
         const blockId = `tool:${id}`;
-        const blocks = entry.get("blocks") as Y.Map<Y.Map<unknown>>;
+        const blocks = target.get("blocks") as Y.Map<Y.Map<unknown>>;
         const existingBlock = blocks.get(blockId);
         if (existingBlock) {
+            if (string(tool.get("entryId")) !== string(target.get("entryId"))) {
+                tool.set("entryId", target.get("entryId"));
+                changed = true;
+            }
             // 重复到达（重试页／结果先到、调用后到）：位置没变就不动顺序。
-            if (sub.position !== null && existingBlock.get("historySubPosition") !== sub.position) {
+            // 结果 payload 的位置属于它自己的条目，不能拿来移动调用条目里的块。
+            if (ownsPosition && sub.position !== null && existingBlock.get("historySubPosition") !== sub.position) {
                 existingBlock.set("historySubPosition", sub.position);
-                this.moveBlock(entry, blockId, sub.position);
+                this.moveBlock(target, blockId, sub.position);
             }
         } else {
             // 不复用 `addToolBlock`：它把块追加在末尾，而历史块要按投影下标就位。
@@ -315,11 +360,11 @@ export class HistoryMerge {
             block.set("blockId", blockId);
             block.set("type", "tool_call");
             block.set("toolCallId", id);
-            if (sub.position !== null) block.set("historySubPosition", sub.position);
+            if (ownsPosition && sub.position !== null) block.set("historySubPosition", sub.position);
             blocks.set(blockId, block);
-            const order = entry.get("blockOrder") as Y.Array<string>;
-            order.insert(this.blockIndex(entry, order, sub.position, blockId), [blockId]);
-            tool.set("entryId", entry.get("entryId"));
+            const order = target.get("blockOrder") as Y.Array<string>;
+            order.insert(this.blockIndex(target, order, ownsPosition ? sub.position : null, blockId), [blockId]);
+            tool.set("entryId", target.get("entryId"));
             changed = true;
         }
         return changed;
