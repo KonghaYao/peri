@@ -99,6 +99,15 @@ Rewind · Fork · Resume<br>
 curl -fsSL https://raw.githubusercontent.com/konghayao/peri/main/scripts/install.sh | bash
 ```
 
+中国大陆用户可使用代理安装：
+
+```bash
+curl -fsSL https://github-proxy-5ad00a.netlify.app/konghayao/peri/raw/main/scripts/install.sh \
+  | GITHUB_PROXY=https://github-proxy-5ad00a.netlify.app \
+    GITHUB_API_PROXY=https://github-proxy-5ad00a.netlify.app/api \
+    bash
+```
+
 **Windows PowerShell**
 
 ```powershell
