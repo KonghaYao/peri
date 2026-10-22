@@ -405,6 +405,7 @@ fn layout_candidate(
         message_id,
         position,
         encoded_bytes,
+        role: peri_acp_types::history_page::HistoryEntryRole::Unknown,
     })
 }
 
@@ -542,6 +543,9 @@ fn assemble_inherited_rows(
 fn oversized_entry(entry: HistoryPageCandidate) -> InheritedHistoryEntry {
     InheritedHistoryEntry::Oversized {
         entry_id: entry.message_id,
+        // candidate.position 在 canonical 路径来自 layout 下标，在 SQL 回退来自
+        // `json_each.key`；两者都与 `inherited_payload_index.ordinal` 同序。
+        ordinal: entry.position,
         total_bytes: entry.encoded_bytes as u64,
     }
 }

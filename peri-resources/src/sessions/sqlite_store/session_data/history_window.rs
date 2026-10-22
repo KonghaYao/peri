@@ -5,7 +5,7 @@
 
 use super::blob_reader::{is_transient_blob_error, BlobReadError};
 use super::history::{
-    read_content_lengths, HISTORY_WINDOW_AFTER_SQL, HISTORY_WINDOW_ANCHOR_SQL,
+    read_window_candidates, HISTORY_WINDOW_AFTER_SQL, HISTORY_WINDOW_ANCHOR_SQL,
     HISTORY_WINDOW_BEFORE_SQL, HISTORY_WINDOW_BODY_ROWID_SQL, HISTORY_WINDOW_BOUNDS_SQL,
     HISTORY_WINDOW_CHECKPOINT_FAST_SQL, HISTORY_WINDOW_CHECKPOINT_SQL,
     HISTORY_WINDOW_INHERITED_ROWID_SQL, HISTORY_WINDOW_LATEST_SQL, HISTORY_WINDOW_NEWER_EXISTS_SQL,
@@ -244,7 +244,7 @@ impl SqliteSessionData {
         let before_plan = if plan.before_limit == 0 {
             None
         } else {
-            let candidates: Vec<(String, i64)> = sqlx::query_as(HISTORY_WINDOW_BEFORE_SQL)
+            let candidates: Vec<(String, i64, String)> = sqlx::query_as(HISTORY_WINDOW_BEFORE_SQL)
                 .bind(id.as_str())
                 .bind(tail_position)
                 .bind(anchor_position_i64)
@@ -253,8 +253,7 @@ impl SqliteSessionData {
                 .fetch_all(&mut *tx)
                 .await
                 .map_err(|error| map_sqlx(&error))?;
-            let candidates = read_content_lengths(&mut tx, candidates).await?;
-            let candidates = decode_window_candidates(candidates)?;
+            let candidates = read_window_candidates(&mut tx, candidates).await?;
             Some(HistoryPagePlan::plan(
                 id,
                 "",
@@ -276,17 +275,17 @@ impl SqliteSessionData {
         let after_plan = match (plan.after_limit, anchor_position_i64) {
             (0, _) | (_, None) => None,
             (limit, Some(anchor)) => {
-                let candidates: Vec<(String, i64)> = sqlx::query_as(HISTORY_WINDOW_AFTER_SQL)
-                    .bind(id.as_str())
-                    .bind(tail_position)
-                    .bind(anchor)
-                    .bind(i64::from(plan.after_includes_anchor()))
-                    .bind((limit + 1) as i64)
-                    .fetch_all(&mut *tx)
-                    .await
-                    .map_err(|error| map_sqlx(&error))?;
-                let candidates = read_content_lengths(&mut tx, candidates).await?;
-                let candidates = decode_window_candidates(candidates)?;
+                let candidates: Vec<(String, i64, String)> =
+                    sqlx::query_as(HISTORY_WINDOW_AFTER_SQL)
+                        .bind(id.as_str())
+                        .bind(tail_position)
+                        .bind(anchor)
+                        .bind(i64::from(plan.after_includes_anchor()))
+                        .bind((limit + 1) as i64)
+                        .fetch_all(&mut *tx)
+                        .await
+                        .map_err(|error| map_sqlx(&error))?;
+                let candidates = read_window_candidates(&mut tx, candidates).await?;
                 Some(HistoryPagePlan::plan_after(
                     id,
                     "",
@@ -501,15 +500,15 @@ pub(super) fn window_anchor_failure(
     }
 }
 
-fn decode_window_candidates(
-    candidates: Vec<(String, i64, i64)>,
-) -> SessionResourceResult<Vec<HistoryPageCandidate>> {
-    candidates
-        .into_iter()
-        .map(|(message_id, position, encoded_bytes)| {
-            HistoryPageCandidate::new(&message_id, position, encoded_bytes)
-        })
-        .collect()
+fn window_body_ids(plan: Option<&HistoryPagePlan>) -> Vec<MessageId> {
+    plan.map(|plan| {
+        plan.entries()
+            .iter()
+            .filter(|entry| entry.encoded_bytes <= plan.byte_budget())
+            .map(|entry| entry.message_id)
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// 由页行集两端与 fixed snapshot 内的邻接存在性计算双侧游标锚点。
@@ -565,17 +564,6 @@ async fn window_boundary_cursors(
     ))
 }
 
-fn window_body_ids(plan: Option<&HistoryPagePlan>) -> Vec<MessageId> {
-    plan.map(|plan| {
-        plan.entries()
-            .iter()
-            .filter(|entry| entry.encoded_bytes <= plan.byte_budget())
-            .map(|entry| entry.message_id)
-            .collect()
-    })
-    .unwrap_or_default()
-}
-
 fn window_oversized_entries(
     entries: Vec<HistoryPageCandidate>,
 ) -> impl Iterator<Item = HistoryWindowEntry> {
@@ -585,6 +573,7 @@ fn window_oversized_entries(
             entry_id: entry.message_id,
             position: entry.position,
             total_bytes: entry.encoded_bytes as u64,
+            role: entry.role,
         })
 }
 

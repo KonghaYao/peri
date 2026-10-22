@@ -254,6 +254,7 @@ async fn live_load_does_not_hold_the_global_sessions_lock_across_io() {
             &sessions_for_task,
             &transport,
             crate::host::connection::ConnectionFacts::unnegotiated(),
+            None,
         )
         .await
     });
@@ -286,6 +287,7 @@ async fn cold_load_does_not_hold_the_global_sessions_lock_across_io() {
             &sessions_for_task,
             &transport,
             crate::host::connection::ConnectionFacts::unnegotiated(),
+            None,
         )
         .await
     });

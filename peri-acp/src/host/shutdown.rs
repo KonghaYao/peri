@@ -63,7 +63,12 @@ pub(super) async fn shutdown_host(
             relay.close_connection(&connection_id);
         }
     }
-    connection.lock().await.begin_close();
+    {
+        let mut connection = connection.lock().await;
+        // 实时流归连接：SessionState 可能仍持有 `Arc`，必须在连接收口时显式清空。
+        connection.live.close_all();
+        connection.begin_close();
+    }
     task_owner.begin_shutdown();
     if let Some(pool) = cfg.mcp_pool.as_ref() {
         pool.begin_shutdown();
