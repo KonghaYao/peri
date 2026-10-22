@@ -505,6 +505,7 @@ fn plan_after_selects_the_nearest_rows_and_reports_more() {
             message_id: MessageId::new(),
             position: index + 1,
             encoded_bytes: 4,
+            role: crate::history_page::HistoryEntryRole::Unknown,
         })
         .collect();
     let plan = HistoryPagePlan::plan_after(&thread, "", candidates.clone(), 2, 100);

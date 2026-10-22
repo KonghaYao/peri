@@ -39,6 +39,13 @@ pub enum SessionResourceErrorKind {
     Corrupt {
         detail: String,
     },
+    /// 派生索引缺失或不完整，且回退到全量扫描会超出有界预算。
+    ///
+    /// 读取请求不得隐式建索引或扫描整列；出口应返回 `index_not_ready`，
+    /// 由调用方稍后重试或显式准备索引，不能降级成空页。
+    IndexNotReady {
+        detail: String,
+    },
     /// 后端暂不可用（网络、锁、IO）：可重试，但不代表没生效。
     Unavailable {
         detail: String,
@@ -164,6 +171,9 @@ impl std::fmt::Display for SessionResourceError {
             SessionResourceErrorKind::Workspace(_) => ("workspace check failed", ""),
             SessionResourceErrorKind::Corrupt { detail } => {
                 ("session data is corrupt", detail.as_str())
+            }
+            SessionResourceErrorKind::IndexNotReady { detail } => {
+                ("history index is not ready", detail.as_str())
             }
             SessionResourceErrorKind::Unavailable { detail } => {
                 ("store is unavailable", detail.as_str())
