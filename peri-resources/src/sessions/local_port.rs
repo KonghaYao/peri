@@ -52,11 +52,12 @@ pub(in crate::sessions) trait LocalExecutionPort: Send + Sync {
         Err(WorkspaceError::UnverifiedLegacyOwner.into())
     }
 
-    /// 用调用方给出的绑定字节做本机复核：目录关系、关键文件对象，`full` 为真时再叠一次
-    /// 完整发现快照比对（一次准入的权威复核）。
+    /// 用调用方给出的绑定字节做本机复核：归属关系与执行目录可用性。
     ///
-    /// 本机组合的字节来自本机 `session_bindings`，远端组合的字节来自远端会话行；两种组合
-    /// 走的是同一套本机判定，因此复核结论不会因为数据在哪而不同。
+    /// `full` 保留既有调用签名；两种力度现在执行同一套检查（文件对象身份与完整发现
+    /// 快照不参与准入）。本机组合的字节来自本机 `session_bindings`，远端组合的字节
+    /// 来自远端会话行；两种组合走的是同一套本机判定，因此复核结论不会因为数据在哪
+    /// 而不同。
     async fn validate_binding_value(
         &self,
         binding: &SessionBinding,

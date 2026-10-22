@@ -156,13 +156,16 @@ Workspace 身份，也不能作为多个历史 Session 共用的不可变执行�
 不可变的版本化执行发现快照**：创建时的 root、文件对象身份、Git private/common
 directory 证据及执行目录相对路径。旧本机绑定只能复制迁移时登记的**最后观测值**：
 旧实现可能原地更新 `workspaces.discovery`，故不能把该值冒称为 Session 创建时证据。
-旧绑定标明 `evidence_origin=legacy_last_observation`，按旧环境规则重新复核；无法
-证明原对象连续性时只读历史。新 Session 使用 `evidence_origin=creation_snapshot`。
+旧绑定标明 `evidence_origin=legacy_last_observation`。执行发现快照（含文件对象身份与
+Git 布局）只作诊断与兼容数据，不再参与执行准入：本机准入只要求归属行存在、机器一致
+且 cwd 可用。远端组合仍要求快照存在：root 用于定位执行目录，identity/Git 观测字段不
+参与比较；virtual 远端是独立例外，沿用快照 root / project 校验。新 Session 使用
+`evidence_origin=creation_snapshot`。
 旧远端迁移若没有远端保存的执行发现快照，快照明确缺失并保留原
 `session_bindings.workspace_id` 执行登记 UUID；该 Session 仅可按 ID 读取历史，
 不得用当前同名目录、本地旧 SQLite 登记或新的文件系统观测补造执行资格。
 已有远端快照的旧 v2 Session 即使执行登记 UUID 与 `threads.workspace_id` 不同，
-仍可按其远端快照、当前文件系统/Git、远端 Machine/path 归属重新复核。
+仍可按其远端快照、远端 Machine/path 归属重新复核。
 当前形状不再保留这份双 ID：绑定行的 `workspace_id` 在迁移中改写为会话归属行 ID，
 改写前逐行校验绑定记录的根就是归属行路径，任一行不成立即拒绝升级。
 
@@ -406,7 +409,8 @@ SQL 的 `WHERE`/主键中使用。ACP 装配先由 Session 取得 Workspace ID�
 - 同机同 Git worktree 的根与子目录：Workspace ID、OAuth 凭证相同，Session cwd
   各自保持；linked worktree 独立。
 - 同机同路径目录对象重建：Workspace ID 不变，旧绑定的执行快照不被新发现覆盖；
-  新 Session 保存新快照。
+  旧 Session 只要 cwd 仍可用就可继续执行，新 Session 保存新快照；项目沿用原
+  workspace 行登记值（只有新路径才按 canonical locator 选择/复用项目）。
 - Turso 写打开、只读打开及冷恢复在全新或损坏本地 SQLite 的 HOME 均不访问本地库。
 - 旧本机库、旧远端库、跨 Machine 共用旧 Workspace UUID、Git 不可用与缺目录：
   迁移保存 ThreadId/消息/frozen，归档全 false；不确定归属或证据保持只读。

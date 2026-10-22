@@ -34,11 +34,11 @@ async fn test_worktree_missing_git_uses_exact_directory() {
     assert_eq!(discovered.common_dir, None);
     assert_eq!(discovered.private_dir, None);
     discovered
-        .revalidate_with_git(&nested, missing.as_os_str())
+        .revalidate_with_git(&cwd, missing.as_os_str())
         .await
         .unwrap();
     // 安装 Git 后，仍是普通目录时身份不变。
-    discovered.revalidate(&nested).await.unwrap();
+    discovered.revalidate(&cwd).await.unwrap();
 }
 
 #[tokio::test]
@@ -56,9 +56,9 @@ async fn test_worktree_missing_git_does_not_hide_unavailable_directory() {
     ));
 }
 
-/// [回归测试] Git 安装状态改变不能把已绑定的仓库会话改绑为目录，反向同样禁止。
+/// [回归测试] Git 安装状态与布局变化不再阻断已有绑定；准入只看 cwd 是否可用。
 #[tokio::test]
-async fn test_worktree_git_availability_change_preserves_binding_boundary() {
+async fn test_worktree_git_availability_change_does_not_block_binding() {
     let directory = tempfile::tempdir().unwrap();
     let output = Command::new("git")
         .env_clear()
@@ -71,36 +71,22 @@ async fn test_worktree_git_availability_change_preserves_binding_boundary() {
         .await
         .unwrap();
     assert!(output.status.success(), "Git fixture 创建失败: {output:?}");
-    let (_, repository) = observe(directory.path()).await.unwrap();
+    let (cwd, repository) = observe(directory.path()).await.unwrap();
     let missing = directory.path().join("missing-git");
-    let error = repository
+    // Git 不可用、布局未刷新：cwd 仍在，恢复准入继续。
+    repository
         .discovery
-        .revalidate_with_git(directory.path(), missing.as_os_str())
+        .revalidate_with_git(&cwd, missing.as_os_str())
         .await
-        .unwrap_err();
-    assert!(matches!(
-        error.downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::NeedsRelink)
-    ));
+        .unwrap();
     let (_, plain) = observe_with_git(directory.path(), missing.as_os_str())
         .await
         .unwrap();
     assert!(!plain.git_answered);
-    let error = plain
-        .discovery
-        .revalidate(directory.path())
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error.downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::NeedsRelink)
-    ));
-    // Git 恢复可用后，原仓库绑定仍可复核，不受目录模式影响。
-    repository
-        .discovery
-        .revalidate(directory.path())
-        .await
-        .unwrap();
+    // 目录模式观测与仓库快照布局不同，也不影响已有绑定。
+    plain.discovery.revalidate(&cwd).await.unwrap();
+    // Git 恢复可用后同样只按 cwd 可用性复核。
+    repository.discovery.revalidate(&cwd).await.unwrap();
 }
 
 #[cfg(unix)]
@@ -241,12 +227,13 @@ async fn test_worktree_hanging_git_ends_within_the_call_budget() {
     );
 }
 
-/// [回归测试] 提交前的轻量复核只接受关键文件对象未变的观测。
+/// [回归测试] 提交前的轻量复核只要求执行目录仍可用。
 ///
-/// 这是写事务内唯一允许执行的重验（设计 §3.2：探测在事务外，提交前复核关键文件
-/// 对象与关联关系），因此它必须在不启动外部进程的前提下仍然拒绝失效观测。
+/// 文件对象身份与 Git 布局是诊断快照，不再参与准入：`.git` 消失、同路径换成新对象
+/// 都放行。cwd 不存在或不是目录 → `Unavailable`；cwd 被 symlink/canonical 换位
+/// （canonical 文本与保存路径不一致）→ `NeedsRelink`。
 #[tokio::test]
-async fn test_worktree_key_object_reassertion_rejects_changed_objects() {
+async fn test_worktree_reassertion_requires_existing_cwd() {
     let directory = tempfile::tempdir().unwrap();
     let repository = directory.path().join("repository");
     tokio::fs::create_dir(&repository).await.unwrap();
@@ -264,36 +251,20 @@ async fn test_worktree_key_object_reassertion_rejects_changed_objects() {
     let (cwd, observed) = observe(&repository).await.unwrap();
     observed.discovery.reassert_key_objects(&cwd).await.unwrap();
 
-    // Git 位置消失：不再有证据支持已登记的仓库布局。
+    // Git 位置消失：cwd 仍在，准入通过（快照只作诊断）。
     tokio::fs::remove_dir_all(repository.join(".git"))
         .await
         .unwrap();
-    let error = observed
-        .discovery
-        .reassert_key_objects(&cwd)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error.downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::NeedsRelink)
-    ));
+    observed.discovery.reassert_key_objects(&cwd).await.unwrap();
 
-    // 根目录被新的文件对象替换：路径可用不等于身份通过。
+    // 根目录被新的文件对象替换：路径可用即可。
     tokio::fs::rename(&repository, directory.path().join("moved"))
         .await
         .unwrap();
     tokio::fs::create_dir(&repository).await.unwrap();
-    let error = observed
-        .discovery
-        .reassert_key_objects(&cwd)
-        .await
-        .unwrap_err();
-    assert!(matches!(
-        error.downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::NeedsRelink)
-    ));
+    observed.discovery.reassert_key_objects(&cwd).await.unwrap();
 
-    // cwd 本身消失：不可用，而不是被当成布局变化。
+    // cwd 本身消失：不可用。
     tokio::fs::remove_dir_all(&repository).await.unwrap();
     let error = observed
         .discovery

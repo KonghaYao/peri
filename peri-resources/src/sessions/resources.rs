@@ -322,9 +322,9 @@ impl SessionResources for SessionResourcesImpl {
         id: &ThreadId,
         workspace: &ResolvedWorkspace,
     ) -> SessionResourceResult<()> {
-        // 一次准入的权威复核：关系、关键文件对象加一次完整发现快照比对。
+        // 一次准入的权威复核：归属关系与执行目录可用性（文件对象身份不参与准入）。
         let resolved = self.recheck_binding_of(id, true).await?;
-        if &resolved != workspace {
+        if !resolved.same_execution_binding(workspace) {
             return Err(Self::workspace_mismatch());
         }
         Ok(())

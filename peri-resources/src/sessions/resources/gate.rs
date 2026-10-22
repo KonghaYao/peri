@@ -312,13 +312,16 @@ impl MutationGate {
             .workspace_id_of(id)
             .await?
             .ok_or_else(|| SessionResourceError::new(SessionResourceErrorKind::NotFound))?;
-        let saved = self.data().binding_discovery_snapshot(id).await?;
         if matches!(self.home, SessionDataHome::RemoteStore) {
-            let saved = saved.ok_or_else(|| {
-                SessionResourceError::new(SessionResourceErrorKind::Workspace(
-                    WorkspaceError::InvalidBinding,
-                ))
-            })?;
+            let saved = self
+                .data()
+                .binding_discovery_snapshot(id)
+                .await?
+                .ok_or_else(|| {
+                    SessionResourceError::new(SessionResourceErrorKind::Workspace(
+                        WorkspaceError::InvalidBinding,
+                    ))
+                })?;
             let resolved = self
                 .local()
                 .validate_saved_binding(binding, &saved, owner, full)
@@ -331,6 +334,7 @@ impl MutationGate {
             }
             return Ok(resolved);
         }
+        // 本地组合的快照只作诊断：文件对象身份会随容器重启变化，不参与绑定复核。
         let resolved = self
             .local()
             .validate_binding_value(binding, full)
@@ -340,39 +344,6 @@ impl MutationGate {
             return Err(SessionResourceError::new(
                 SessionResourceErrorKind::Workspace(WorkspaceError::ExecutionBindingMismatch),
             ));
-        }
-        match saved {
-            Some(saved) => {
-                let recorded: serde_json::Value = serde_json::from_str(&saved).map_err(|_| {
-                    SessionResourceError::new(SessionResourceErrorKind::Workspace(
-                        WorkspaceError::InvalidBinding,
-                    ))
-                })?;
-                let observed: serde_json::Value = serde_json::from_str(
-                    resolved.discovery_snapshot.as_deref().ok_or_else(|| {
-                        SessionResourceError::new(SessionResourceErrorKind::Workspace(
-                            WorkspaceError::InvalidBinding,
-                        ))
-                    })?,
-                )
-                .map_err(|_| {
-                    SessionResourceError::new(SessionResourceErrorKind::Workspace(
-                        WorkspaceError::InvalidBinding,
-                    ))
-                })?;
-                if recorded != observed {
-                    return Err(SessionResourceError::new(
-                        SessionResourceErrorKind::Workspace(
-                            WorkspaceError::ExecutionBindingMismatch,
-                        ),
-                    ));
-                }
-            }
-            None => {
-                return Err(SessionResourceError::new(
-                    SessionResourceErrorKind::Workspace(WorkspaceError::InvalidBinding),
-                ))
-            }
         }
         Ok(resolved)
     }

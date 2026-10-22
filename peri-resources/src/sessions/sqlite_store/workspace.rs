@@ -18,7 +18,8 @@ pub(super) type BindingRow = (i64, String, String, String);
 /// 归属行按 `(machine_id, path)` 命中的已记录证据：`(id, project_id, discovery, identity)`。
 ///
 /// `project_id` 与 `discovery` 为 NULL 表示这行从未被写打开观测过（历史惰性行）；`identity`
-/// 是当前占用该路径的文件对象证据，不参与身份。只读节点按 NULL 判「本机不认识这个目录」。
+/// 是当前占用该路径的文件对象证据，只作诊断，不参与身份或执行准入。只读节点按 NULL 判
+/// 「本机不认识这个目录」。
 type RecordedWorkspace = (String, Option<String>, Option<String>, Option<String>);
 
 pub(super) fn decode_binding(row: BindingRow) -> Result<SessionBinding> {
@@ -50,6 +51,24 @@ pub(super) fn validate_relative(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 写绑定前确认项目行存在。
+///
+/// 项目不参与执行准入（归属行当前项目与绑定项目不同仍可恢复），但**写入**绑定必须
+/// 引用已登记项目。缺失按 `InvalidBinding` 拒绝，不静默补造项目行。
+pub(super) async fn require_project_exists(
+    connection: &mut SqliteConnection,
+    project_id: ProjectId,
+) -> Result<()> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT id FROM projects WHERE id = ?1")
+        .bind(project_id.to_string())
+        .fetch_optional(&mut *connection)
+        .await?;
+    if row.is_none() {
+        return Err(WorkspaceError::InvalidBinding.into());
+    }
+    Ok(())
+}
+
 /// 绑定指向的执行目录：相对路径为空时就是工作区根本身。
 ///
 /// 不能直接写 `root.join(relative)`：`join("")` 会追加分隔符（`/a/b` → `/a/b/`），
@@ -68,30 +87,73 @@ fn binding_cwd(root: &Path, relative: &Path) -> PathBuf {
 ///
 /// 行上还没有已记录快照时（迁移建出的历史惰性行），本次观测就是它的第一条证据：
 /// 没有已记录的 Git 布局可以被这条目录模式观测改写，因此不要求 Git 回答。行上已有
-/// 快照且与本次不同时，只有 Git 回答过的观测可以改写它——Git 不可用的目录模式观测
-/// 证明不了原仓库消失了。
+/// 快照时只比较 Git 布局（root/common/private 路径）；文件对象身份随环境变化，不参与
+/// 判定。布局不同且本次观测来自 Git 的真实回答时可以改写；Git 不可用的目录模式观测
+/// 证明不了原仓库消失了，仍按证据不足拒绝。
 fn may_write_observation(recorded: Option<&str>, current: &str, git_answered: bool) -> bool {
-    match recorded {
-        None => true,
-        Some(recorded) => recorded == current || git_answered,
-    }
+    let Some(recorded) = recorded else {
+        return true;
+    };
+    let recorded = serde_json::from_str::<Discovery>(recorded).ok();
+    let current = serde_json::from_str::<Discovery>(current).ok();
+    // 已记录快照解析失败按「布局不同」处理：只有 Git 回答过才允许覆盖。
+    let same_layout = matches!(
+        (recorded, current),
+        (Some(recorded), Some(current))
+            if recorded.root == current.root
+                && recorded.common_dir == current.common_dir
+                && recorded.private_dir == current.private_dir
+    );
+    same_layout || git_answered
 }
 
 #[test]
-fn observation_write_follows_recorded_evidence_and_git_answer() {
+fn observation_write_follows_recorded_layout_and_git_answer() {
+    let directory = |root: &str| {
+        format!(
+            r#"{{"root":"{root}","root_identity":{{"device":1,"inode":1}},"common_dir":null,"common_identity":null,"private_dir":null,"private_identity":null}}"#
+        )
+    };
+    let repository = |root: &str| {
+        format!(
+            r#"{{"root":"{root}","root_identity":{{"device":2,"inode":2}},"common_dir":"{root}/.git","common_identity":{{"device":2,"inode":2}},"private_dir":"{root}/.git","private_identity":{{"device":2,"inode":2}}}}"#
+        )
+    };
     // 从未观测过的历史归组行接受第一条目录模式观测（迁移期行没有可被改写的布局）。
-    assert!(may_write_observation(None, "directory", false));
-    // 行上已有快照：同一快照照写，不同快照只接受 Git 回答过的观测。
+    assert!(may_write_observation(None, &directory("/work"), false));
+    // 行上已有快照：同一 Git 布局照写（inode 变化不影响），不同布局只接受 Git 回答过的观测。
     assert!(may_write_observation(
-        Some("repository"),
-        "repository",
+        Some(&directory("/work")),
+        &directory("/work"),
         false
     ));
-    assert!(may_write_observation(Some("repository"), "directory", true));
-    assert!(!may_write_observation(
-        Some("repository"),
-        "directory",
+    // 同一布局、不同 device/inode（容器重启/同路径重建）：允许写。
+    let rebuilt = r#"{"root":"/work","root_identity":{"device":7,"inode":7},"common_dir":null,"common_identity":null,"private_dir":null,"private_identity":null}"#;
+    assert!(may_write_observation(
+        Some(&directory("/work")),
+        rebuilt,
         false
+    ));
+    assert!(may_write_observation(
+        Some(&directory("/work")),
+        &repository("/work"),
+        true
+    ));
+    assert!(!may_write_observation(
+        Some(&directory("/work")),
+        &repository("/work"),
+        false
+    ));
+    // 已记录快照解析失败：按布局不同处理，没有 Git 回答时拒绝改写。
+    assert!(!may_write_observation(
+        Some("broken"),
+        &repository("/work"),
+        false
+    ));
+    assert!(may_write_observation(
+        Some("broken"),
+        &repository("/work"),
+        true
     ));
 }
 
@@ -114,10 +176,10 @@ impl SqliteSessionDatabase {
         };
         let machine = crate::sessions::machine::current()?;
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        // 归属键是 `(machine_id, path)`：同机同路径只有一个 Workspace。执行证据（项目、
-        // 文件对象身份、发现快照）只是该行记录**当前占用这个路径的对象**，不参与身份：
-        // 目录被替换（同路径的新对象）或换位（同一对象的新路径）都不移动归属，已有绑定
-        // 继续按各自创建时的证据复核，不会静默改绑。
+        // 归属键是 `(machine_id, path)`：同机同路径只有一个 Workspace。项目、文件对象
+        // 身份与发现快照只是该行记录**当前占用这个路径的对象**，不参与工作区身份，也不
+        // 参与执行准入：目录被替换（同路径的新对象）或换位（同一对象的新路径）都不移动
+        // 归属，已有绑定只要 cwd 可用就继续执行，不会静默改绑。
         let recorded: Option<RecordedWorkspace> = sqlx::query_as(
             "SELECT id, project_id, discovery, identity FROM workspaces WHERE machine_id = ?1 AND path = ?2",
         )
@@ -132,22 +194,18 @@ impl SqliteSessionDatabase {
                 let project = project.ok_or(WorkspaceError::InvalidBinding)?;
                 (id.parse::<WorkspaceId>()?, project.parse::<ProjectId>()?)
             }
-            Some((id, project, recorded, recorded_identity)) => {
+            Some((id, project, recorded, _)) => {
                 // 目录模式的变化必须以 Git 的回答为准：只读目录观测（Git 没回答）不能
                 // 证明已记录的仓库消失了，保持 fail-closed，而不是把仓库改写成普通目录。
                 if !may_write_observation(recorded.as_deref(), &snapshot, git_answered) {
                     return Err(WorkspaceError::NeedsRelink.into());
                 }
-                // 项目归属只在**该路径换了文件对象**时随证据移动：对象身份没变，说明这是
-                // 同一个目录的派生观测变化（`git init`、移除 `.git`），原项目继续复用
-                // （设计 §3.3），已有绑定的项目关系因此保持成立。
+                // 已有归属行沿用其登记项目：同路径换对象、`git init`、移除 `.git` 都
+                // 不改变行上的 project_id（项目不参与执行准入）。canonical locator 只
+                // 用于新建归属行或尚未记录项目的历史惰性行选择/复用项目。
                 let project_id = match project {
-                    Some(project)
-                        if recorded_identity.as_deref() == Some(root_identity.as_str()) =>
-                    {
-                        project.parse::<ProjectId>()?
-                    }
-                    _ => Self::observation_project(&mut tx, locator, &identity).await?,
+                    Some(project) => project.parse::<ProjectId>()?,
+                    None => Self::observation_project(&mut tx, locator, &identity).await?,
                 };
                 sqlx::query(
                     "UPDATE workspaces SET project_id = ?1, identity = ?2, discovery = ?3,
@@ -266,17 +324,19 @@ impl SqliteSessionDatabase {
         Ok(())
     }
 
-    /// 本次观测的项目记录：定位与对象证据同时一致才复用（Git linked worktree 换位后
-    /// common directory 未变而路径已变，它仍属于原项目；不相关的同名副本各自成项目）。
+    /// 新归属行（或尚无项目的历史惰性行）的项目记录：按 canonical locator 选择/复用。
+    ///
+    /// 已有归属行不会走到这里——它沿用行上登记的 `project_id`，`git init`、移除
+    /// `.git` 或同路径换文件对象都不改项目。`identity` 只写入 `object_identity` 列
+    /// 作为诊断值，不参与匹配。
     async fn observation_project(
         connection: &mut SqliteConnection,
         locator: &str,
         identity: &str,
     ) -> Result<ProjectId> {
         let existing: Option<(String,)> =
-            sqlx::query_as("SELECT id FROM projects WHERE locator = ? AND object_identity = ?")
+            sqlx::query_as("SELECT id FROM projects WHERE locator = ?1 ORDER BY rowid ASC LIMIT 1")
                 .bind(locator)
-                .bind(identity)
                 .fetch_optional(&mut *connection)
                 .await?;
         match existing {
@@ -294,14 +354,12 @@ impl SqliteSessionDatabase {
         }
     }
 
-    /// 事务内的复核：SQL 关系加关键文件对象，不启动外部进程。
+    /// 事务内的复核：归属行与路径结构一致、机器一致，且执行目录可用。
     ///
-    /// 关系读的是归属行本身（`workspaces.id` = 归属身份）：项目证据、路径与机器三样
-    /// 必须与本次准入手上的 workspace 一致。关键文件对象以该行记录的执行证据为基线；
-    /// 行上还没有证据时退回本次观测的快照，两者都没有就按 fail-closed 要求重新解析。
-    ///
-    /// 项目证据允许为空（远端写入的归属行可能只有路径）：空值在这里是一致性比较的
-    /// 不匹配，不是解码失败——按「行不再记录这次准入的对象」处理，不落到内部错误上。
+    /// 文件对象身份与 Git 布局只保留在快照里作诊断，不再参与准入通过/失败判定；
+    /// 项目也不是执行准入身份，绑定自身的 `project_id` 与归属行当前项目不一致
+    /// 不影响执行。归属行路径必须就是 workspace 的 root，root + relative 必须就是
+    /// 执行 cwd；这些是纯路径结构校验，防止自相矛盾的 `ResolvedWorkspace` 写入绑定。
     ///
     /// Transaction callers reuse their admitted connection, including every SQL read.
     async fn validate_resolved_on(
@@ -309,15 +367,13 @@ impl SqliteSessionDatabase {
         workspace: &ResolvedWorkspace,
     ) -> Result<()> {
         validate_relative(&workspace.relative_cwd)?;
-        let row: Option<(Option<String>, String, String, Option<String>)> = sqlx::query_as(
-            "SELECT project_id, machine_id, path, discovery FROM workspaces WHERE id = ?1",
-        )
-        .bind(workspace.workspace_id.to_string())
-        .fetch_optional(&mut *connection)
-        .await?;
-        let (project, machine, path, recorded) = row.ok_or(WorkspaceError::InvalidBinding)?;
-        if project.as_deref() != Some(workspace.project_id.to_string().as_str())
-            || Path::new(&path) != workspace.root
+        let row: Option<(String, String)> =
+            sqlx::query_as("SELECT machine_id, path FROM workspaces WHERE id = ?1")
+                .bind(workspace.workspace_id.to_string())
+                .fetch_optional(&mut *connection)
+                .await?;
+        let (machine, path) = row.ok_or(WorkspaceError::InvalidBinding)?;
+        if Path::new(&path) != workspace.root
             || binding_cwd(&workspace.root, &workspace.relative_cwd) != workspace.cwd
         {
             return Err(WorkspaceError::ExecutionBindingMismatch.into());
@@ -325,33 +381,20 @@ impl SqliteSessionDatabase {
         if machine != crate::sessions::machine::current()? {
             return Err(WorkspaceError::ExecutionBindingMismatch.into());
         }
-        let snapshot = recorded
-            .or_else(|| workspace.discovery_snapshot.clone())
-            .ok_or(WorkspaceError::NeedsRelink)?;
-        let discovered: Discovery =
-            serde_json::from_str(&snapshot).map_err(|_| WorkspaceError::InvalidBinding)?;
-        discovered.reassert_key_objects(&workspace.cwd).await
+        discovery::ensure_cwd_available(&workspace.cwd).await?;
+        Ok(())
     }
 
-    /// 事务外的完整快照复核：重新执行 Git 发现并与归属行记录的执行证据比对（设计 §3.2）。
+    /// 事务外的完整复核：现在与事务内复核等价，只要求执行目录仍可用。
     ///
-    /// 只能在持有写事务之外调用；事务内的复核见 `validate_resolved_on`。行上还没有执行
-    /// 证据（或证据读不出来）时按 `NeedsRelink` 失败关闭：本机证明不了这个目录是绑定
-    /// 时那个对象，就不能拿别的观测替代。
+    /// 保留薄封装以维持 `full` 的调用签名；完整发现快照比对已因 inode 不参与准入而移除。
     async fn revalidate_registered_observation_on(
-        connection: &mut SqliteConnection,
+        _connection: &mut SqliteConnection,
         workspace: &ResolvedWorkspace,
     ) -> Result<()> {
-        let row: Option<(Option<String>,)> =
-            sqlx::query_as("SELECT discovery FROM workspaces WHERE id = ?1")
-                .bind(workspace.workspace_id.to_string())
-                .fetch_optional(&mut *connection)
-                .await?;
-        let (snapshot,) = row.ok_or(WorkspaceError::InvalidBinding)?;
-        let snapshot = snapshot.ok_or(WorkspaceError::NeedsRelink)?;
-        let discovered: Discovery =
-            serde_json::from_str(&snapshot).map_err(|_| WorkspaceError::InvalidBinding)?;
-        discovered.revalidate(&workspace.cwd).await
+        discovery::ensure_cwd_available(&workspace.cwd)
+            .await
+            .map(|_| ())
     }
 
     pub(super) async fn create_bound_thread_impl(
@@ -360,18 +403,18 @@ impl SqliteSessionDatabase {
         workspace: &ResolvedWorkspace,
     ) -> Result<ThreadId> {
         self.require_writable()?;
-        // 提交前的复核在写事务内进行（`validate_resolved_on`：关系加关键文件对象）。
-        // 同一次准入已在解析阶段观测过完整发现，这里再跑一轮 Git 只是把同一次观测
-        // 重复一遍，代价是每个创建方都要等 Git（含慢 Git 的固定等待）。
+        // 父会话的绑定用于继承归属：比较执行归属字段（不含诊断快照）。提交前在写
+        // 事务内再复核一次归属关系、路径结构与 cwd 可用性。
         if let Some(parent) = &meta.parent_thread_id {
             let parent_workspace = self.reassert_session_binding_impl(parent).await?;
-            if &parent_workspace != workspace {
+            if !parent_workspace.same_execution_binding(workspace) {
                 return Err(WorkspaceError::ExecutionBindingMismatch.into());
             }
         }
         meta.cwd = discovery::path_text(&workspace.cwd)?.to_owned();
         let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         Self::validate_resolved_on(&mut tx, workspace).await?;
+        require_project_exists(&mut tx, workspace.project_id).await?;
         sqlx::query("INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count,
             parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, agent_status, workspace_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
@@ -450,12 +493,14 @@ impl SqliteSessionDatabase {
         if let Some(row) = existing {
             // A concurrent restorer may have won. Never overwrite or repair its binding.
             decode_binding(row)?;
-            if Self::validate_session_binding_on(&mut tx, id).await? != *workspace {
+            let existing_workspace = Self::validate_session_binding_on(&mut tx, id).await?;
+            if !existing_workspace.same_execution_binding(workspace) {
                 return Err(WorkspaceError::ExecutionBindingMismatch.into());
             }
         } else {
             // 缺绑定就是接纳的全部前提：frozen 列已有字节同样是 legacy 现场，字节本身
             // 是唯一事实源——COALESCE 只补空列，已有字节不因候选而改变（write-once）。
+            require_project_exists(&mut tx, workspace.project_id).await?;
             sqlx::query(
                 "UPDATE threads SET frozen_context = COALESCE(frozen_context, ?) WHERE id = ?",
             )
@@ -476,36 +521,23 @@ impl SqliteSessionDatabase {
         Ok(())
     }
 
-    /// 已有绑定的权威复核：关系、关键文件对象加一次完整发现快照比对。
+    /// 已有绑定的权威复核：关系一致且执行目录仍可用。
     ///
     /// 这是**一次准入的复核动作**：调用方（`session/load`、prompt 轮、`workflow/resume`
     /// 等）以此为本次准入判定的全部依据，一次准入只应调用一次。准入内的后续检查用
-    /// `reassert_session_binding_impl`。
+    /// `reassert_session_binding_impl`；两者现在等价，都不启动外部进程。
     pub(super) async fn validate_session_binding_impl(
         &self,
         id: &ThreadId,
     ) -> Result<ResolvedWorkspace> {
         let mut connection = self.pool.acquire().await?;
-        let workspace = Self::validate_session_binding_on(&mut connection, id).await?;
-        // 事务外才叠加完整快照复核，写事务内不做 Git 探测（设计 §3.2）。
-        let snapshot: (Option<String>,) =
-            sqlx::query_as("SELECT discovery_snapshot FROM session_bindings WHERE thread_id = ?1")
-                .bind(id)
-                .fetch_one(&mut *connection)
-                .await?;
-        let snapshot = snapshot.0.ok_or(WorkspaceError::NeedsRelink)?;
-        let discovered: Discovery =
-            serde_json::from_str(&snapshot).map_err(|_| WorkspaceError::InvalidBinding)?;
-        discovered.revalidate(&workspace.cwd).await?;
-        Ok(workspace)
+        Self::validate_session_binding_on(&mut connection, id).await
     }
 
-    /// 同一次准入内的复核：SQL 关系加关键文件对象，不启动外部进程。
+    /// 同一次准入内的复核：与 `validate_session_binding_impl` 同一套判定。
     ///
-    /// 与 `validate_session_binding_impl` 的差别只有一处：不重新执行 Git 发现。准入已经
-    /// 观测过完整快照并复核过，重复发现只会把 Git 的等待（慢盘、慢 Git、Git 缺失时的
-    /// 探测）叠加到同一次准入的每一步上，不会带来新的证据。目录被替换、被换位或 Git
-    /// 位置消失仍会在这里失败——这些都由关键文件对象身份覆盖。
+    /// 文件对象身份与 Git 布局不再是准入证据，因此这里与权威复核没有差别：只读
+    /// SQL 关系并要求 cwd 可用，不重新执行 Git 发现。
     pub(super) async fn reassert_session_binding_impl(
         &self,
         id: &ThreadId,
@@ -529,52 +561,35 @@ impl SqliteSessionDatabase {
         if owner.0 != workspace.workspace_id.to_string() {
             return Err(WorkspaceError::ExecutionBindingMismatch.into());
         }
-        let snapshot: (Option<String>,) =
-            sqlx::query_as("SELECT discovery_snapshot FROM session_bindings WHERE thread_id = ?1")
-                .bind(id)
-                .fetch_one(&mut *connection)
-                .await?;
-        let snapshot = snapshot.0.ok_or(WorkspaceError::NeedsRelink)?;
-        let discovered: Discovery =
-            serde_json::from_str(&snapshot).map_err(|_| WorkspaceError::InvalidBinding)?;
-        if discovered.root != workspace.root {
-            return Err(WorkspaceError::ExecutionBindingMismatch.into());
-        }
-        discovered.reassert_key_objects(&workspace.cwd).await?;
+        discovery::ensure_cwd_available(&workspace.cwd).await?;
         Ok(workspace)
     }
 
-    /// 绑定值的本机复核：归属关系加关键文件对象。
+    /// 绑定值的本机复核：归属行关系加执行目录可用性。
     ///
     /// 与 [`Self::validate_session_binding_on`] 的差别只在于事实来源：那个从已保存的
     /// binding 行读，这个复核调用方手上的 binding 值（新建/fork/child 在写入前用它，
     /// 避免未登记的 project/workspace 直接落到外键失败上）。
     ///
     /// 归属身份就是归属行的 `id`（`(machine_id, path)`）：查不到这行，或这行属于别的
-    /// 机器，都是「本机不认识这个绑定」——与 v19 之前查不到执行登记同一类失败，保持
-    /// `InvalidBinding`，不升级成内部错误。
+    /// 机器，都是「本机不认识这个绑定」，保持 `InvalidBinding`。
     ///
-    /// 行还在、机器也对，但行上记录的项目证据（当前占用该路径的文件对象）与绑定不同：
-    /// 绑定创建时那个对象已经不在这个路径上（目录被替换、删除后重建）。归属身份仍然
-    /// 成立，但这次绑定不能在这里执行，也不自动改绑——按 `NeedsRelink` fail-closed，
-    /// 与 v19 之前「登记证据复核不过」得到同一个结论。没有项目证据的行同理：本机无法
-    /// 证明这个目录是绑定时那个对象。
+    /// 行还在、机器也对，但绑定记录的项目已经不同于归属行当前项目（同路径换了文件
+    /// 对象、Git 布局变化）：项目不是执行准入身份，不据此拒绝执行，也不自动改绑；
+    /// `ResolvedWorkspace.project_id` 保留绑定自身的值。只有 cwd 不存在或不是目录时
+    /// 失败关闭。
     pub(super) async fn validate_binding_relation_on(
         connection: &mut SqliteConnection,
         binding: &SessionBinding,
     ) -> Result<ResolvedWorkspace> {
-        let row: Option<(String, Option<String>, String, Option<String>)> = sqlx::query_as(
-            "SELECT path, project_id, machine_id, discovery FROM workspaces WHERE id = ?1",
-        )
-        .bind(binding.workspace_id.to_string())
-        .fetch_optional(&mut *connection)
-        .await?;
-        let (path, project, machine, discovery) = row.ok_or(WorkspaceError::InvalidBinding)?;
+        let row: Option<(String, String, Option<String>)> =
+            sqlx::query_as("SELECT path, machine_id, discovery FROM workspaces WHERE id = ?1")
+                .bind(binding.workspace_id.to_string())
+                .fetch_optional(&mut *connection)
+                .await?;
+        let (path, machine, discovery) = row.ok_or(WorkspaceError::InvalidBinding)?;
         if machine != crate::sessions::machine::current()? {
             return Err(WorkspaceError::InvalidBinding.into());
-        }
-        if project.as_deref() != Some(binding.project_id.to_string().as_str()) {
-            return Err(WorkspaceError::NeedsRelink.into());
         }
         let root = PathBuf::from(&path);
         let workspace = ResolvedWorkspace {
@@ -591,9 +606,10 @@ impl SqliteSessionDatabase {
 
     /// 绑定**值**的本机复核（远程组合：绑定来自远端会话行，不在本机 `session_bindings`）。
     ///
-    /// 判定与本机绑定完全同一套：归属关系（project/workspace 必须在本机登记过）加关键文件
-    /// 对象身份，`full` 时再叠一次完整发现快照比对。因此「远端 binding 指向的本机对象」与
-    /// 「本机会话的绑定」不会出现两套结论。
+    /// 判定与本机绑定完全同一套：归属关系（workspace 必须在本机登记过）加执行目录
+    /// 可用性。`full` 保留既有调用签名，其复核已退化为同一个 cwd 检查（文件对象身份
+    /// 与完整发现快照不再参与准入）。因此「远端 binding 指向的本机对象」与「本机会话
+    /// 的绑定」不会出现两套结论。
     pub(super) async fn validate_binding_value_impl(
         &self,
         binding: &SessionBinding,

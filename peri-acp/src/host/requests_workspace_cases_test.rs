@@ -648,10 +648,18 @@ async fn worktree_session_end_uses_saved_directory_and_drains_resources() {
         );
         assert!(
             pool.called.load(Ordering::Acquire),
-            "invalid hook binding must not prevent MCP shutdown"
+            "incomplete resource drain must not prevent MCP shutdown"
         );
         assert!(!moved.join("ended").exists());
-        assert!(!target.join("ended").exists());
+        if directory_replaced {
+            // 同路径换成新对象后 cwd 仍可用：准入通过，SessionEnd 在保存目录执行。
+            assert!(
+                target.join("ended").exists(),
+                "saved cwd 可用时 SessionEnd 必须在保存目录执行"
+            );
+        } else {
+            assert!(!target.join("ended").exists());
+        }
         assert!(
             sessions.contains_key(id),
             "actual incomplete resource drain must retain the owner"
@@ -663,9 +671,16 @@ async fn worktree_session_end_uses_saved_directory_and_drains_resources() {
         assert!(!sessions.contains_key(id));
         assert!(
             !moved.join("ended").exists(),
-            "terminal hook must not run while the saved directory is missing"
+            "terminal hook must never run in the moved directory"
         );
-        assert!(!target.join("ended").exists());
+        if directory_replaced {
+            assert!(target.join("ended").exists());
+        } else {
+            assert!(
+                !target.join("ended").exists(),
+                "terminal hook must not run while the saved directory is missing"
+            );
+        }
         if directory_replaced {
             std::fs::remove_dir_all(&target).unwrap();
         }

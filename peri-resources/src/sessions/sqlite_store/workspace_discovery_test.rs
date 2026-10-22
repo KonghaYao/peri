@@ -59,6 +59,8 @@ async fn test_worktree_symlink_discovery_reuses_identity_but_binding_escape_is_r
     assert_eq!(original, alias);
     std::fs::create_dir(repo.path().join("sub")).unwrap();
     let (id, _) = bound(&store, &repo.path().join("sub")).await;
+    let binding = store.load_session_binding(&id).await.unwrap().unwrap();
+    // cwd 被 symlink 指向别处：canonical 与保存路径不一致，无法证明仍是同一位置。
     std::fs::remove_dir(repo.path().join("sub")).unwrap();
     std::os::unix::fs::symlink(aliases.path(), repo.path().join("sub")).unwrap();
     let error = store.validate_session_binding(&id).await.unwrap_err();
@@ -66,6 +68,63 @@ async fn test_worktree_symlink_discovery_reuses_identity_but_binding_escape_is_r
         error.downcast_ref::<WorkspaceError>(),
         Some(WorkspaceError::NeedsRelink)
     ));
+    // 复核失败不改写绑定或历史。
+    assert_eq!(
+        store.load_session_binding(&id).await.unwrap(),
+        Some(binding)
+    );
+}
+
+#[tokio::test]
+async fn test_worktree_cwd_replaced_by_file_is_unavailable() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    let (store, _db) = store().await;
+    let (id, _) = bound(&store, &root).await;
+    // 同路径换成普通文件：不是目录，按不可用失败。
+    std::fs::remove_dir(&root).unwrap();
+    std::fs::write(&root, b"not a directory").unwrap();
+    let error = store.validate_session_binding(&id).await.unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<WorkspaceError>(),
+        Some(WorkspaceError::Unavailable)
+    ));
+}
+
+/// [回归测试] 祖先组件被 symlink 换位：canonical 与保存路径不一致，拒绝执行。
+///
+/// 临时目录 canonicalize 后可能位于 `/private/var`，因此全部用 canonical 路径构造。
+#[cfg(unix)]
+#[tokio::test]
+async fn test_worktree_ancestor_symlink_swap_is_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = tokio::fs::canonicalize(directory.path()).await.unwrap();
+    let parent = root.join("parent");
+    let sub = parent.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let outside = tokio::fs::canonicalize(outside.path()).await.unwrap();
+    std::fs::create_dir_all(outside.join("sub")).unwrap();
+
+    let (store, _db) = store().await;
+    let (id, _) = bound(&store, &sub).await;
+    let binding = store.load_session_binding(&id).await.unwrap().unwrap();
+
+    // 祖先 parent 改名，原位换成指向外部的 symlink；外部同样存在 sub。
+    std::fs::rename(&parent, root.join("moved-parent")).unwrap();
+    std::os::unix::fs::symlink(&outside, &parent).unwrap();
+
+    let error = store.validate_session_binding(&id).await.unwrap_err();
+    assert!(matches!(
+        error.downcast_ref::<WorkspaceError>(),
+        Some(WorkspaceError::NeedsRelink)
+    ));
+    // 复核失败不改写绑定。
+    assert_eq!(
+        store.load_session_binding(&id).await.unwrap(),
+        Some(binding)
+    );
 }
 
 /// 建立绑定会话并写入一条消息，使历史进入列表查询的可见范围。
@@ -95,37 +154,33 @@ async fn assert_only_history(store: &SqliteThreadStore, project: ProjectId, thre
     assert_eq!(&page.entries[0].thread.id, thread);
 }
 
-/// [回归测试] 目录对象被替换后，新会话仍必须可建立。
+/// [回归测试] 同路径换成新文件对象后，归属、项目与已有绑定都不受影响。
 ///
-/// 归属键是 `(machine_id, 路径)`：同一路径上的新文件对象仍然落在同一条归属行上，只是
-/// 该行的执行证据（项目、对象身份、发现快照）被更新为本次观测。旧绑定按**自己创建时**
-/// 记录的证据复核，继续失败关闭，历史不被改绑或隐藏。
+/// 归属键是 `(machine_id, 路径)`；项目按 canonical locator 归属。文件对象身份
+/// （device/inode）只写入发现快照作诊断，不参与执行准入：旧会话只要 cwd 仍在就能
+/// 继续执行，新会话复用同一工作区与同一项目。
 ///
 /// 文件对象证据只有 device/inode，删除后重建时文件系统可能复用刚释放的 inode，
 /// 那种情况下新旧对象在证据上等同（设计 §8：不依赖 creation time）。所以这里让
 /// 旧对象改名到另一路径继续存活，新对象才确定是一个不同的对象，断言不随分配策略
 /// 摆动。
 #[tokio::test]
-async fn test_worktree_replaced_directory_registers_new_workspace_keeps_old_history() {
+async fn test_worktree_replaced_directory_keeps_workspace_and_binding() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("project");
     std::fs::create_dir(&root).unwrap();
     let (store, _db) = store().await;
     let (old_thread, registered) = bound_with_history(&store, &root).await;
 
-    // 同一路径上换成一个新的文件对象：路径可用不等于身份延续。
+    // 同一路径上换成一个新的文件对象：对象身份变化不再阻断恢复。
     std::fs::rename(&root, directory.path().join("replaced")).unwrap();
     std::fs::create_dir(&root).unwrap();
 
-    // 旧会话不再可执行，但历史仍可见且绑定没有被改写。
-    assert!(matches!(
-        store
-            .validate_session_binding(&old_thread)
-            .await
-            .unwrap_err()
-            .downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::NeedsRelink)
-    ));
+    // 旧会话继续可执行：归属行仍在、cwd 仍可用；绑定没有被改写。
+    let resolved = store.validate_session_binding(&old_thread).await.unwrap();
+    assert_eq!(resolved.workspace_id, registered.workspace_id);
+    assert_eq!(resolved.project_id, registered.project_id);
+    assert_eq!(resolved.cwd, registered.cwd);
     assert_only_history(&store, registered.project_id, &old_thread).await;
     let binding = store
         .load_session_binding(&old_thread)
@@ -135,13 +190,13 @@ async fn test_worktree_replaced_directory_registers_new_workspace_keeps_old_hist
     assert_eq!(binding.workspace_id, registered.workspace_id);
     assert_eq!(binding.project_id, registered.project_id);
 
-    // 同一路径上的新对象复用同一条归属行：归属不变，执行证据换成新对象的。
+    // 同一路径上的新对象复用同一条归属行与同一个项目（locator-only）。
     let (replacement_thread, replacement) = bound(&store, &root).await;
     assert_eq!(replacement.workspace_id, registered.workspace_id);
-    assert_ne!(replacement.project_id, registered.project_id);
+    assert_eq!(replacement.project_id, registered.project_id);
     assert_ne!(
         replacement.discovery_snapshot, registered.discovery_snapshot,
-        "同一路径的新对象必须把该行的执行证据更新为本次观测"
+        "同一路径的新对象仍把该行的诊断快照更新为本次观测"
     );
     assert_eq!(
         replacement.cwd,
@@ -270,22 +325,22 @@ async fn test_worktree_registration_reuses_exact_object_and_keeps_rows_unique() 
     assert!(duplicate.is_err(), "同一 (machine_id, path) 不得重复登记");
 }
 
+/// [回归测试] 子目录随后初始化 Git，不再让原绑定失败关闭。
+///
+/// Git 布局变化只刷新观测快照；已有归属行沿用原项目，不因 locator 变化改项目。
+/// 项目与快照都不参与执行准入：原路径的 cwd 仍在，已有会话继续执行，也不被静默改绑。
 #[tokio::test]
-async fn test_worktree_new_nested_repository_invalidates_original_binding() {
+async fn test_worktree_new_nested_repository_keeps_original_binding() {
     let repo = repository();
     let nested = repo.path().join("sub");
     std::fs::create_dir(&nested).unwrap();
     let (store, _db) = store().await;
-    let (id, _) = bound(&store, &nested).await;
+    let (id, registered) = bound(&store, &nested).await;
     git(&nested, &["init", "-q"]);
-    assert!(matches!(
-        store
-            .validate_session_binding(&id)
-            .await
-            .unwrap_err()
-            .downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::NeedsRelink)
-    ));
+    let resolved = store.validate_session_binding(&id).await.unwrap();
+    assert_eq!(resolved.workspace_id, registered.workspace_id);
+    assert_eq!(resolved.project_id, registered.project_id);
+    assert_eq!(resolved.cwd, registered.cwd);
 }
 
 /// [回归测试] 普通目录登记后出现 `.git`：工作区身份是目录对象本身，Git 布局是
@@ -316,14 +371,9 @@ async fn test_worktree_directory_gaining_repository_keeps_registration() {
     assert_eq!(nested.project_id, registered.project_id);
     assert_eq!(nested.relative_cwd, Path::new("sub"));
     // The existing session is neither rebound nor hidden, and new sessions work.
-    assert!(matches!(
-        store
-            .validate_session_binding(&root_id)
-            .await
-            .unwrap_err()
-            .downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::NeedsRelink)
-    ));
+    let existing = store.validate_session_binding(&root_id).await.unwrap();
+    assert_eq!(existing.workspace_id, registered.workspace_id);
+    assert_eq!(existing.project_id, registered.project_id);
     let (fresh, fresh_workspace) = bound(&store, &root).await;
     assert_ne!(fresh, root_id);
     assert_eq!(fresh_workspace.workspace_id, registered.workspace_id);
@@ -331,17 +381,13 @@ async fn test_worktree_directory_gaining_repository_keeps_registration() {
         fresh_workspace.discovery_snapshot,
         rediscovered.discovery_snapshot
     );
-    // The session registered inside the directory that became a repository root
-    // keeps its history but no longer executes there; the layout change is not
-    // silently rewritten into a different workspace.
-    assert!(matches!(
-        store
-            .validate_session_binding(&nested_id)
-            .await
-            .unwrap_err()
-            .downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::NeedsRelink)
-    ));
+    // The session registered inside the subdirectory keeps executing: its own workspace
+    // row still exists and the cwd is available. It is not silently rebound to the
+    // repository root workspace.
+    let nested_existing = store.validate_session_binding(&nested_id).await.unwrap();
+    assert_eq!(nested_existing.workspace_id, nested_workspace.workspace_id);
+    assert_eq!(nested_existing.project_id, nested_workspace.project_id);
+    assert_eq!(nested_existing.cwd, nested_workspace.cwd);
 }
 
 /// [回归测试] 已登记仓库移除 `.git`：根目录对象仍然相同，注册继续可用。
@@ -365,14 +411,10 @@ async fn test_worktree_repository_losing_git_keeps_registration() {
         rediscovered.discovery_snapshot,
         registered.discovery_snapshot
     );
-    assert!(matches!(
-        store
-            .validate_session_binding(&id)
-            .await
-            .unwrap_err()
-            .downcast_ref::<WorkspaceError>(),
-        Some(WorkspaceError::NeedsRelink)
-    ));
+    // 移除 `.git` 只刷新观测；已有绑定继续按 cwd 可用性执行，不被改绑。
+    let existing = store.validate_session_binding(&id).await.unwrap();
+    assert_eq!(existing.workspace_id, registered.workspace_id);
+    assert_eq!(existing.project_id, registered.project_id);
     let _ = bound(&store, repo.path()).await;
     // Without a repository each directory is again its own workspace; the
     // subdirectory no longer belongs to the registered root workspace.

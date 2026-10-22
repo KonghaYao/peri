@@ -485,17 +485,55 @@ async fn remote_only_cold_recovery_uses_saved_evidence_and_old_distinct_registra
     std::fs::create_dir(&workspace_dir).unwrap();
     let changed = full_remote_facade(transport.clone());
     assert!(changed.load_session_history(&session_id).await.is_ok());
+    // 同路径换成新对象只改变诊断快照；cwd 仍可用，恢复准入照常通过。
     assert_eq!(
         changed
             .inspect_availability(Some(&session_id))
             .await
             .unwrap()
             .execution,
-        Some(ExecutionAvailability::WorkspaceUnavailable)
+        Some(ExecutionAvailability::Available)
     );
     drop(changed);
     std::fs::remove_dir(&workspace_dir).unwrap();
     std::fs::rename(&displaced, &workspace_dir).unwrap();
+
+    #[cfg(unix)]
+    {
+        // 保存路径被 symlink 指向别处：canonical 与保存路径不一致，拒绝执行。
+        let escaped = directory.path().join("workspace-escaped");
+        std::fs::rename(&workspace_dir, &escaped).unwrap();
+        std::os::unix::fs::symlink(&escaped, &workspace_dir).unwrap();
+        let escaped_facade = full_remote_facade(transport.clone());
+        assert!(escaped_facade
+            .load_session_history(&session_id)
+            .await
+            .is_ok());
+        assert_eq!(
+            escaped_facade
+                .inspect_availability(Some(&session_id))
+                .await
+                .unwrap()
+                .execution,
+            Some(ExecutionAvailability::WorkspaceUnavailable)
+        );
+        let error = escaped_facade
+            .validate_bound_workspace(&session_id, BindingRecheck::Full)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error.kind(),
+                peri_acp_types::session_resources::SessionResourceErrorKind::Workspace(
+                    peri_acp_types::workspace::WorkspaceError::NeedsRelink
+                )
+            ),
+            "symlink 换位必须按 NeedsRelink 拒绝：{error:?}"
+        );
+        drop(escaped_facade);
+        std::fs::remove_file(&workspace_dir).unwrap();
+        std::fs::rename(&escaped, &workspace_dir).unwrap();
+    }
 
     let original_machine = crate::sessions::machine::current().unwrap();
     let other_machine = uuid::Uuid::new_v4().to_string();

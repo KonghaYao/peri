@@ -110,7 +110,8 @@ impl SessionBinding {
 pub struct ResolvedWorkspace {
     pub project_id: ProjectId,
     /// Machine/path ownership identity: the session binding and the session row both
-    /// name this one Workspace, and its recorded evidence is what rechecks execution.
+    /// name this one Workspace; admission rechecks that ownership relation and that
+    /// `cwd` is still a canonical, available directory.
     pub workspace_id: WorkspaceId,
     pub cwd: PathBuf,
     pub root: PathBuf,
@@ -118,6 +119,20 @@ pub struct ResolvedWorkspace {
     /// Internal creation evidence. Never expose filesystem identity bytes on ACP wire.
     #[serde(skip)]
     pub discovery_snapshot: Option<String>,
+}
+
+impl ResolvedWorkspace {
+    /// 执行归属比较：只比决定「在哪执行、属于谁」的字段。
+    ///
+    /// `discovery_snapshot` 是诊断与兼容数据（含 device/inode），会随容器重启、目录
+    /// 重建或观测刷新而变化，不能参与准入是否通过的判定。
+    pub fn same_execution_binding(&self, other: &Self) -> bool {
+        self.workspace_id == other.workspace_id
+            && self.project_id == other.project_id
+            && self.root == other.root
+            && self.cwd == other.cwd
+            && self.relative_cwd == other.relative_cwd
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

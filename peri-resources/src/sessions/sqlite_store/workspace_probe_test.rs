@@ -467,14 +467,13 @@ async fn test_worktree_repository_registration_keeps_git_calls_bounded() {
     );
 }
 
-/// [回归测试] 已有会话恢复执行前的绑定复核只有一轮观测，且发生在写事务之外。
+/// [回归测试] 已有会话的恢复准入不启动任何外部探测。
 ///
-/// 恢复执行必须复核 cwd 与登记一致（设计 §3.2），但复核不该比一次发现更贵：重复发现会
-/// 把 Git 的等待时间叠加到每次 `session/load`。子进程复用准入时建好的假 Git，日志尾部
-/// 即本轮复核的调用序列。
+/// 文件对象身份与 Git 布局不再参与准入：复核只读 SQL 关系并检查 cwd 可用，
+/// 不会为 `session/load` 叠加 Git 发现成本。
 #[cfg(unix)]
 #[tokio::test]
-async fn test_worktree_bound_session_validation_probes_once() {
+async fn test_worktree_bound_session_validation_never_probes_git() {
     let repository = repository();
     let directory = tempfile::tempdir().unwrap();
     let (recorded, database) = probe_admission(
@@ -515,14 +514,9 @@ async fn test_worktree_bound_session_validation_probes_once() {
         .map(str::to_owned)
         .collect();
     let validation = &calls[before..];
-    assert_eq!(
-        validation.len(),
-        3,
-        "已有会话复核只应观测一轮（三条命令）：{validation:?}",
-    );
     assert!(
-        validation.iter().all(|line| lock_state(line) == "free"),
-        "复核不得在写事务内执行：{validation:?}",
+        validation.is_empty(),
+        "已有会话复核不得执行外部探测：{validation:?}",
     );
 }
 

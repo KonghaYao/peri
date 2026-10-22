@@ -890,17 +890,19 @@ pub(crate) fn resource_error(error: SessionResourceError) -> AcpError {
 
 /// 绑定复核强度。
 ///
-/// 准入边界（协议读请求、`session/new` | `load` | `resume` | `fork` 的入口）复核完整
-/// 发现快照；同一次准入内的后续检查只复核已记录证据——准入已经观测过完整快照，为
-/// 同一件事再跑一轮 Git 发现不会带来新证据，只会把 Git 的等待叠加到这次准入的每一步。
+/// 文件对象身份与 Git 布局不参与执行准入，因此准入边界（协议读请求、
+/// `session/new` | `load` | `resume` | `fork` 的入口）与准入内的后续检查执行同一套
+/// 判定：归属关系与 cwd 可用性。保留枚举只为调用方语义与 API 稳定，两者都不再重跑
+/// Git 发现，也不再比较发现快照。
 #[derive(Clone, Copy)]
 pub(crate) enum BindingCheck {
     Full,
     Recorded,
 }
 
-/// 一次准入的权威检查：复核完整发现快照，并比对调用方给出的执行目录。
+/// 一次准入的权威检查：复核归属关系与 cwd 可用性。
 ///
+/// `expected` 参数保留给调用方兼容，当前不参与判定（`check_expected` 忽略它）。
 /// 一次准入只应调用一次（准入以本次复核为判定依据）；准入内的后续检查用
 /// [`reassert_expected`]。
 pub(crate) async fn validate_expected(
@@ -911,10 +913,10 @@ pub(crate) async fn validate_expected(
     check_expected(cfg, session_id, expected, BindingCheck::Full).await
 }
 
-/// 同一次准入内的检查：只复核已记录证据，不重新执行 Git 发现。
+/// 同一次准入内的检查：与权威检查同一套判定，不启动外部进程。
 ///
-/// 绑定不存在、关系不一致、目录被替换或换位仍然失败；省去的只有「重新执行 Git
-/// 发现」——准入已经观测过完整快照，重复发现只是把 Git 的等待叠加到同一次准入。
+/// 绑定不存在、归属关系不一致或 cwd 不可用时仍然失败；目录被替换、Git 布局变化
+/// 不再影响准入。
 pub(crate) async fn reassert_expected(
     cfg: &AcpServerConfig,
     session_id: &str,

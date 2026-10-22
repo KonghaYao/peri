@@ -666,7 +666,8 @@ fn decode_page_bounds(bounds: &[Value]) -> (Option<String>, bool) {
 /// 绑定列 + 父关系 → 绑定分类。
 ///
 /// 远端只回答绑定事实是否完整存在。执行资格由门面读取远端不可变
-/// 发现快照，再用当前文件系统与 Git 复核；缺快照不改变绑定分类。
+/// 发现快照（root 用于定位执行目录），再复核归属关系与 cwd 可用性；
+/// 不再跑 Git，也不比较文件对象身份。缺快照不改变绑定分类。
 fn classify_binding(binding: Option<SessionBinding>, facts: &[Value]) -> BindingState {
     match binding {
         Some(binding) => BindingState::Bound(binding),
