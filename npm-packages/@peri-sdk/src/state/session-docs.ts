@@ -1,14 +1,19 @@
+import type * as Y from "yjs";
 import type { JsonRpcNotification } from "../transport/types";
-import type { AgentOptions } from "../agent/types";
+import type { InteractionCallbacks } from "../agent/types";
 import { ChatProjection } from "./chat-projection";
-import { DocModel } from "./doc-model";
+import { applyCheckpoint, exportCheckpoint, type DisplayCheckpoint } from "./checkpoint";
+import { DocModel, type ProjectionClock } from "./doc-model";
 import { HistoryMerge, decodeHistoryPageItems, historyEntryRefOf } from "./history-merge";
 import { InputQueueProjection } from "./input-queue-projection";
 import { InteractionProjection } from "./interaction-projection";
 import { decodeAgentEvent, object, string } from "./protocol";
 import { SessionProjection } from "./session-projection";
 import { TaskProjection } from "./task-projection";
+import { ToolPayloads, type ToolPayloadBudgets } from "./tool-payloads";
 import { TurnMachine, type TurnExitStatus } from "./turn-machine";
+
+export type SessionDocsOptions = { now?: ProjectionClock; payloadBudgets?: ToolPayloadBudgets };
 
 /**
  * 已加载历史窗口的浏览身份与翻页进度（REQ-C01、REQ-H02）。
@@ -27,14 +32,14 @@ export type HistoryPageMerge = {
 
 /** One Agent's live ACP projection. Session.start filters sessionId before accept. */
 export class SessionDocs {
-    private readonly model = new DocModel();
-    private readonly turns = new TurnMachine(this.model);
-    private readonly chatProjection = new ChatProjection(this.model, this.turns);
-    private readonly historyMerge = new HistoryMerge(this.model);
-    private readonly sessionProjection = new SessionProjection(this.model, this.turns);
-    private readonly taskProjection = new TaskProjection(this.model);
-    private readonly inputQueue = new InputQueueProjection(this.model);
-    private readonly interaction = new InteractionProjection(this.model);
+    private readonly model: DocModel;
+    private readonly turns: TurnMachine;
+    private readonly chatProjection: ChatProjection;
+    private readonly historyMerge: HistoryMerge;
+    private readonly sessionProjection: SessionProjection;
+    private readonly taskProjection: TaskProjection;
+    private readonly inputQueue: InputQueueProjection;
+    private readonly interaction: InteractionProjection;
     private readonly seenEvents = new Set<string>();
     private historyWindow: HistoryWindow | null = null;
     /** 窗口被 rewind 作废：游标没了，但「范围失效」与「从未协商」是两回事（验收 A11）。 */
@@ -42,11 +47,44 @@ export class SessionDocs {
     private taskSnapshotInFlight = false;
     private destroyed = false;
 
-    readonly chat = this.model.chat;
-    readonly session = this.model.session;
+    readonly chat: Y.Doc;
+    readonly session: Y.Doc;
+
+    constructor(private readonly options: SessionDocsOptions = {}, importedModel?: DocModel) {
+        this.model = importedModel ?? new DocModel(
+            () => this.options.now?.() ?? new Date().toISOString(),
+            this.options.payloadBudgets ? new ToolPayloads(
+                this.options.payloadBudgets.inlineBytes,
+                this.options.payloadBudgets.externalBytes,
+                this.options.payloadBudgets.maxPayloadBytes,
+            ) : undefined,
+        );
+        this.turns = new TurnMachine(this.model);
+        this.chatProjection = new ChatProjection(this.model, this.turns);
+        this.historyMerge = new HistoryMerge(this.model);
+        this.sessionProjection = new SessionProjection(this.model, this.turns);
+        this.taskProjection = new TaskProjection(this.model);
+        this.inputQueue = new InputQueueProjection(this.model);
+        this.interaction = new InteractionProjection(this.model);
+        this.chat = this.model.chat;
+        this.session = this.model.session;
+    }
 
     /** Exact immutable JSON for a current ToolPayloadRef; stale or unknown versions are absent. */
     readPayload(id: string): string | undefined { return this.model.payloads.read(id); }
+
+    /**
+     * 从展示 checkpoint 构造全新文档（import 不作用于任何活跃 doc）。
+     * 活动 turn/interactions 收敛为中断/失效；缺失引用或未知版本显式拒绝。
+     */
+    static fromCheckpoint(checkpoint: unknown, options: SessionDocsOptions = {}): SessionDocs {
+        const docs = new SessionDocs(options);
+        applyCheckpoint(checkpoint, docs.model);
+        return docs;
+    }
+
+    /** 当前文档的公开展示材料；payload 全文随 checkpoint 一起导出，引用必须可解析。 */
+    exportCheckpoint(): DisplayCheckpoint { return exportCheckpoint(this.model); }
 
     /** Ingest a received batch without publishing a Yjs transaction per ACP notification. */
     acceptBatch(notifications: Iterable<JsonRpcNotification>): void {
@@ -121,9 +159,9 @@ export class SessionDocs {
         this.invalidateHistoryWindow();
         this.model.destroy();
     }
-    completeTurn(status: TurnExitStatus = "completed"): boolean {
+    completeTurn(status: TurnExitStatus = "completed", stopReason?: string): boolean {
         if (this.destroyed) return false;
-        const exited = this.turns.exit(status);
+        const exited = this.turns.exit(status, stopReason);
         this.interaction.abortAll();
         return exited;
     }
@@ -141,7 +179,7 @@ export class SessionDocs {
         this.interaction.abortAll();
         return this.chatProjection.acceptDeliveredUserInput(inputId, text);
     }
-    handleRequest(method: string, params: unknown, expectedSessionId: string | undefined, options: AgentOptions): Promise<unknown> {
+    handleRequest(method: string, params: unknown, expectedSessionId: string | undefined, options: InteractionCallbacks): Promise<unknown> {
         if (this.destroyed) return Promise.reject(new Error("SessionDocs is destroyed"));
         return this.interaction.handle(method, params, expectedSessionId, options);
     }
@@ -200,7 +238,7 @@ export class SessionDocs {
             const reason = string(params.stopReason);
             const status: TurnExitStatus = reason === "cancelled" ? "cancelled"
                 : reason === "max_tokens" || reason === "max_turn_requests" || reason === "error" ? "error" : "completed";
-            accepted = this.completeTurn(status);
+            accepted = this.completeTurn(status, reason ?? undefined);
         } else if (notification.method === "peri/unstable_event") {
             accepted = this.taskProjection.acceptBackground(string(params.event), object(params.data));
         }

@@ -26,7 +26,7 @@ type Pending = {
 
 /** Host-side decisions for the interaction IDs already projected into Session Doc. */
 export class InteractionResponder {
-    private readonly pending = new Map<number, Pending>();
+    private readonly pending = new Map<string, Pending>();
 
     readonly onPermissionRequest = (request: PermissionRequest): Promise<"allow_once" | "reject_once"> =>
         new Promise((resolve) => {
@@ -70,7 +70,7 @@ export class InteractionResponder {
             });
         });
 
-    respond(sessionId: string, interactionId: number, answer: InteractionAnswer): boolean {
+    respond(sessionId: string, interactionId: string, answer: InteractionAnswer): boolean {
         const pending = this.pending.get(interactionId);
         return !!pending && pending.sessionId === sessionId && pending.kind === answer.kind && pending.answer(answer);
     }

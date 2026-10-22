@@ -190,8 +190,55 @@ describe("history projection merge", () => {
         content: [{ type: "text", text: "tests passed" }],
       } }]),
     ]));
-    expect(readSessionView(docs.chat, docs.session).entries[0]!.blocks[0])
+    const view = readSessionView(docs.chat, docs.session);
+    // 结果 payload 不另建空 Entry；同一个 toolCallId 在整段历史里只有一个块。
+    expect(view.entries).toHaveLength(1);
+    expect(view.entries[0]!.blocks).toHaveLength(1);
+    expect(view.entries[0]!.blocks[0])
       .toMatchObject({ tool: { status: "completed", result: { contentText: "tests passed" } } });
+    docs.destroy();
+  });
+
+  test("a replay result payload does not duplicate the tool block on a second entry", () => {
+    const docs = new SessionDocs();
+    docs.accept(replay("s1", "s1:call", {
+      sessionUpdate: "tool_call", toolCallId: "call-11", title: "Read", status: "in_progress",
+      rawInput: { path: "/demo/notes.txt" },
+    }, 10));
+    docs.accept(replay("s1", "s1:result", {
+      sessionUpdate: "tool_call_update", toolCallId: "call-11", status: "completed",
+      content: [{ type: "text", text: "alpha" }],
+    }, 20));
+
+    const view = readSessionView(docs.chat, docs.session);
+    expect(view.entries).toHaveLength(1);
+    expect(view.entries[0]!.blocks).toHaveLength(1);
+    expect(view.entries[0]!.blocks[0])
+      .toMatchObject({ type: "tool_call", tool: { status: "completed", result: { contentText: "alpha" } } });
+    docs.destroy();
+  });
+
+  test("a result payload with its own text keeps the text entry but reuses the tool's owner block", () => {
+    const docs = withWindow();
+    docs.mergeHistoryPage("s1", historyPage([
+      item("s1:call", 10, [{
+        position: 0,
+        update: { sessionUpdate: "tool_call", toolCallId: "call-10", title: "Bash", status: "in_progress" },
+      }]),
+    ]));
+    docs.mergeHistoryPage("s1", historyPage([
+      item("s1:result", 20, [
+        { position: 0, update: { sessionUpdate: "tool_call_update", toolCallId: "call-10", status: "completed" } },
+        { position: 1, update: text("agent_message_chunk", "命令已完成") },
+      ]),
+    ]));
+
+    const view = readSessionView(docs.chat, docs.session);
+    expect(view.entries).toHaveLength(2);
+    expect(view.entries[0]!.blocks.map((block) => block.type)).toEqual(["tool_call"]);
+    expect(view.entries[1]!.blocks.map((block) => block.type)).toEqual(["text"]);
+    expect(view.entries[0]!.blocks[0])
+      .toMatchObject({ tool: { status: "completed" } });
     docs.destroy();
   });
 

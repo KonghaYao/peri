@@ -21,7 +21,26 @@ export type { ExecutionCoordinatorOptions, AdmissionResult } from "./execution/c
 export { ExecutionMutationConflictError } from "./execution/registry-ledger";
 export type * from "./execution/types";
 export { SessionDocs } from "./state/session-docs";
-export type { ToolPayloadRef } from "./state/tool-payloads";
+export type { SessionDocsOptions } from "./state/session-docs";
+export { CheckpointImportError, CHECKPOINT_VERSION, SUPPORTED_SCHEMA_VERSIONS } from "./state/checkpoint";
+export type {
+  DisplayCheckpoint, CheckpointBlock, CheckpointEntry, CheckpointToolCall, CheckpointTurn,
+  CheckpointInteraction, CheckpointImportErrorCode,
+} from "./state/checkpoint";
+export type { PublicError, PublicErrorCode } from "./state/doc-model";
+export { ToolPayloadCapacityError } from "./state/tool-payloads";
+export {
+  TOOL_PAYLOAD_INLINE_BYTES, TOOL_PAYLOAD_PREVIEW_CHARS, TOOL_PAYLOAD_MAX_BYTES,
+  SESSION_INLINE_PAYLOAD_BUDGET_BYTES, SESSION_EXTERNAL_PAYLOAD_BUDGET_BYTES,
+} from "./state/tool-payloads";
+export type { ToolPayloadBudgets, ToolPayloadRef } from "./state/tool-payloads";
+export { INTERACTION_HISTORY_LIMIT, INTERACTION_FORM_MAX_FIELDS, evaluateElicitationForm, validateElicitationContent } from "./state/interaction-projection";
+export type { FormField } from "./state/interaction-projection";
+export { InteractionResponder, parseInteractionAnswer } from "./agent/interaction-responder";
+export type { InteractionAnswer } from "./agent/interaction-responder";
+export type {
+  AgentOptions, InteractionCallbacks, PermissionRequest, ElicitationRequest, ElicitationDecision,
+} from "./agent/types";
 export { TursoStorage } from "./storage/turso-storage";
 export { SESSION_BY_ID_SQL, SESSION_LIST_SQL } from "./storage/session-summary";
 export type { SessionStorage } from "./storage/types";
