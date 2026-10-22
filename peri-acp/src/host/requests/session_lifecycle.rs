@@ -144,7 +144,8 @@ pub(crate) fn handle_initialize(params: &Value, cfg: &AcpServerConfig) -> Result
 
     // 解析 clientCapabilities._meta 中的 peri 自定义 flag，并按后端实际能力收敛：
     // 客户端声明不能让未实现窗口端口（remote/emscripten）变成端到端可用。
-    let peri_caps = super::session_caps::effective_peri_caps(cfg, params);
+    // History V2 协商失败必须让 initialize 显式失败；失败时不提交任何 caps。
+    let peri_caps = super::session_caps::effective_peri_caps(cfg, params)?;
 
     // 暂存 caps，session/new 时 consume
     cfg.session_manager.set_pending_caps(peri_caps.clone());
@@ -159,11 +160,16 @@ pub(crate) fn handle_initialize(params: &Value, cfg: &AcpServerConfig) -> Result
 /// 两处消费同一份事实：会话级暂存（`set_pending_caps`，供会话能力投影）与
 /// 连接级协商值（`ConnectionContext`，供按当前连接分流的判定）。
 pub(crate) fn initialize_peri_caps(params: &Value) -> PeriCaps {
+    PeriCaps::from_client_meta(&initialize_client_meta(params))
+}
+
+/// `initialize` 的 `clientCapabilities._meta`；缺失或非对象时为空 map。
+pub(crate) fn initialize_client_meta(params: &Value) -> serde_json::Map<String, Value> {
     params
         .get("clientCapabilities")
         .and_then(|c| c.get("_meta"))
         .and_then(|m| m.as_object())
-        .map(PeriCaps::from_client_meta)
+        .cloned()
         .unwrap_or_default()
 }
 
@@ -468,6 +474,7 @@ pub(crate) async fn new_session_from_prepared(
             structure_version: 0,
             session_generation: crate::host::next_session_generation(),
             history_window: Default::default(),
+            live_delivery: None,
             event_health: Default::default(),
             cancel_token: None,
             // session-owned 交互门：环境自带（router 借用同一 Arc，跨轮共享）。
@@ -845,6 +852,7 @@ pub(crate) async fn handle_fork(
             structure_version: 0,
             session_generation: crate::host::next_session_generation(),
             history_window: Default::default(),
+            live_delivery: None,
             event_health: Default::default(),
             cancel_token: None,
             // session-owned 交互门：环境自带（router 借用同一 Arc，跨轮共享）。

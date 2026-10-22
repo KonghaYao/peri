@@ -374,9 +374,10 @@ impl SessionDataPort for SqliteSessionData {
             .map_err(|error| map_sqlx(&error))?;
         frozen_state_on(&mut connection, id).await
     }
-
     fn supports_history_window(&self) -> bool {
-        // 本机 SQLite 覆写了 bounds/page/body 全部窗口读取端口。
+        true
+    }
+    fn supports_history_v2(&self) -> bool {
         true
     }
 

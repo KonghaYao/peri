@@ -254,6 +254,7 @@ pub(crate) async fn prepare_existing(
                 structure_version: 0,
                 session_generation: crate::host::next_session_generation(),
                 history_window: Default::default(),
+                live_delivery: None,
                 event_health: Default::default(),
                 cancel_token: None,
                 // 本分支无持久执行恢复：恢复准入一律以「无续跑」状态发布。
@@ -707,6 +708,8 @@ pub(crate) async fn handle_load(
     if connection_caps.replay {
         response["_meta"]["periLoadGeneration"] = Value::String(generation.as_str().to_owned());
     }
+    // 成功接管后才撤销旧连接的实时投递绑定：失败的标准 load 不破坏既有交付。
+    crate::host::live_delivery::detach_session_state(sessions, req_session_id);
     Ok(response)
 }
 
@@ -742,10 +745,13 @@ pub(crate) async fn handle_resume(
     prewarm_session_mcp_discovery(cfg, req_session_id);
 
     let resp = ResumeSessionResponse::new();
-    identity_response(
+    let response = identity_response(
         serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, e.to_string()))?,
         prepared.identity,
-    )
+    )?;
+    // 成功接管后才撤销旧连接的实时投递绑定：失败的 resume 不破坏既有交付。
+    crate::host::live_delivery::detach_session_state(sessions, req_session_id);
+    Ok(response)
 }
 
 fn reject_incomplete_local_close(

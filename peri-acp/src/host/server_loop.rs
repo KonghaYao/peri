@@ -8,8 +8,9 @@ use tokio_util::sync::CancellationToken;
 use super::diagnostics::ResponseDiagnostics;
 use super::{
     connection::ConnectionContext, dispatch_prompt_turn, extract_session_id, handle_notification,
-    handle_request_for_connection, history_page, history_window, mcp_apps, requests,
-    send_session_info_update, task_scope, AcpServerConfig, PromptLocks, SharedSessions,
+    handle_request_for_connection, history_page, history_service, history_v2_load, history_window,
+    mcp_apps, requests, send_session_info_update, task_scope, AcpServerConfig, PromptLocks,
+    SharedSessions,
 };
 use crate::transport::types::{IncomingMessage, RequestId};
 
@@ -49,6 +50,10 @@ impl ServerLoop<'_> {
                     | "peri/mcp/invoke" => {
                         self.spawn_mcp_apps_request(id, method, params).await;
                     }
+                    // History V2 只读 RPC：在 initialize 之后、会话生命周期路由之前分流。
+                    m if m == peri_acp_types::history_v2::HISTORY_METHOD => {
+                        self.handle_history_request(id, params).await;
+                    }
                     _ => self.dispatch_request(id, method, params).await,
                 },
                 IncomingMessage::Notification { method, params } => {
@@ -59,6 +64,46 @@ impl ServerLoop<'_> {
                 }
             }
         }
+    }
+
+    /// `_peri/history` 分流：连接级协商与 own 适配器注入都在进入服务前完成。
+    ///
+    /// 未协商时**不进入服务**，直接返回领域错误；协商后读取统一走
+    /// [`super::history_v2_adapter::HistoryV2BackendAdapter`]，未实现窗口读取的后端
+    /// 仍由适配器 fail-closed。
+    /// 请求在连接循环内就地 await：H2 的窗口/幂等账本是连接级短锁状态，就地处理
+    /// 保持同连接请求的接收顺序；后端读取只发生在服务锁之外。
+    async fn handle_history_request(&self, id: RequestId, params: Value) {
+        let diagnostics =
+            ResponseDiagnostics::new(id, peri_acp_types::history_v2::HISTORY_METHOD, &params);
+        let (facts, service) = {
+            let connection = self.connection.lock().await;
+            (connection.facts(), connection.history_v2.clone())
+        };
+        let result = if !facts.history_v2 {
+            Err(history_service::protocol_not_negotiated_error())
+        } else {
+            let backend: Arc<dyn peri_acp_types::history_v2::HistoryV2Backend> =
+                Arc::new(super::history_v2_adapter::HistoryV2BackendAdapter::new(
+                    Arc::clone(&self.cfg.session_resources),
+                    facts.caps.clone(),
+                ));
+            let limits = facts
+                .caps
+                .history_v2
+                .as_ref()
+                .map(|capability| capability.limits.clone())
+                .unwrap_or_default();
+            let request = history_service::HistoryServiceRequest::new(true, Some(backend), limits);
+            tokio::select! {
+                biased;
+                _ = self.connection_cancellation.cancelled() => Err(
+                    crate::transport::types::AcpError::new(-32800, "request cancelled"),
+                ),
+                result = service.handle(&params, request) => result,
+            }
+        };
+        let _ = diagnostics.send(self.transport.as_ref(), result).await;
     }
 
     async fn spawn_mcp_control(&self, id: RequestId, params: Value) {
@@ -411,8 +456,25 @@ impl ServerLoop<'_> {
         let connection = self.connection;
         // 本连接的协商事实：一次请求取一份（短锁，不跨派发持锁），路由里按连接分流的判定
         // 只读它——`caps()` 是展示判据、注册表是进程/会话级的，都不能回答「当前连接声明了
-        // 什么」（REQ §5.3）。
-        let connection_facts = connection.lock().await.facts();
+        // 什么」（REQ §5.3）。History V2 服务与连接同生命周期，initial 的重放账本也在这里。
+        let (connection_facts, connection_history_v2) = {
+            let connection = connection.lock().await;
+            (connection.facts(), connection.history_v2.clone())
+        };
+        // History V2 initial：在生命周期装配之前解析。V2 连接缺 meta、混入旧顶层私有字段、
+        // 未协商却带 initial 都在这里显式拒绝，不进入会话恢复路径。
+        let history_load = match method.as_str() {
+            "session/load" => match history_v2_load::parse(&params, &connection_facts) {
+                Ok(Some(request)) => Some(request),
+                Ok(None) => None,
+                Err(error) => {
+                    let _ = diagnostics.send(transport.as_ref(), Err(error)).await;
+                    return;
+                }
+            },
+            _ => None,
+        };
+        let v2_initial = history_load.is_some();
         // `session/history/body`：V1 正文分块，不进入生命周期路由。
         if method == "session/history/body" {
             let result = if !connection_facts.history_window_v1 {
@@ -479,7 +541,8 @@ impl ServerLoop<'_> {
                     return;
                 }
                 Ok(history_page::SessionLoadMode::InitialLoad) => {
-                    connection_facts.history_pagination
+                    // V1 游标身份不进入 V2 initial 响应（两套协议不混用）。
+                    connection_facts.history_pagination && !v2_initial
                 }
                 Err(error) => {
                     let _ = diagnostics.send(transport.as_ref(), Err(error)).await;
@@ -572,6 +635,8 @@ impl ServerLoop<'_> {
         } else {
             None
         };
+        // V2 initial 的实时流：响应发送成功后才 flush 暂停期缓冲；失败则关闭未发布的流。
+        let mut live_v2_initial: Option<(String, Arc<super::live_delivery::LiveDelivery>)> = None;
         let mut result = if requests::session_io::handles(&method) {
             let prepared = {
                 let sessions = sessions.lock().await;
@@ -589,17 +654,42 @@ impl ServerLoop<'_> {
             }
         } else if method == "session/load" {
             // 分阶段 load：DB/资源 I/O 在全局 sessions 锁之外；内部只做短锁读写。
+            let history = match history_load {
+                Some(request) => {
+                    let live = { self.connection.lock().await.live.clone() };
+                    live_v2_initial = Some((
+                        extract_session_id(&params, "").to_string(),
+                        Arc::clone(&live),
+                    ));
+                    Some(history_v2_load::LoadInitial {
+                        request,
+                        service: connection_history_v2.clone(),
+                        limits: history_v2_load::limits(&connection_facts),
+                        live,
+                    })
+                }
+                None => None,
+            };
             requests::session_lifecycle::handle_load_shared(
                 &params,
                 cfg,
                 sessions,
                 transport,
                 connection_facts.clone(),
+                history,
             )
             .await
         } else if method == "session/resume" {
-            requests::session_lifecycle::handle_resume_shared(&params, cfg, sessions, transport)
-                .await
+            let result = requests::session_lifecycle::handle_resume_shared(
+                &params, cfg, sessions, transport,
+            )
+            .await;
+            // 标准连接恢复会话后不得继承其他连接的实时投递身份。
+            if result.is_ok() && !connection_facts.history_v2 {
+                let session_id = extract_session_id(&params, "").to_string();
+                super::live_delivery::detach_session(sessions, &session_id).await;
+            }
+            result
         } else if method == "session/fork" {
             requests::session_lifecycle::handle_fork_shared(&params, cfg, sessions, transport).await
         } else {
@@ -646,14 +736,30 @@ impl ServerLoop<'_> {
         if method == "initialize" && result.is_ok() {
             // 协商值同时落到**本连接**：进程级 pending_caps 会被下一个连接覆盖，
             // 会话级 registry 会把旧连接的能力带给重连的同一会话。
-            let caps = requests::session_caps::effective_peri_caps(self.cfg, &params);
-            connection.lock().await.commit_initialize(caps);
+            //
+            // 同输入下本调用与 `handle_initialize` 的协商结果一致，正常不会失败；
+            // 若意外失败则 fail-closed：不提交任何 caps，已发送的成功响应保持不变。
+            match requests::session_caps::effective_peri_caps(self.cfg, &params) {
+                Ok(caps) => connection.lock().await.commit_initialize(caps),
+                Err(error) => {
+                    tracing::error!(
+                        code = error.code,
+                        error = %error,
+                        "initialize 成功后重复协商失败，未提交连接级 peri caps"
+                    );
+                }
+            }
         }
         if result.is_ok() {
             // 会话级拆除（`session/close` / `session/delete`）：撤销本会话全部 App
             // record 与交付令牌、取消 session 层令牌（已 dispatch 的调用由 invocation
             // owner 收尾）。轮次取消（`session/cancel`）**不**走这里。
             if let Some(session_id) = closed_session_id.as_deref() {
+                // History V2 窗口与实时流都不跨连接；只清理本连接上该会话的状态，
+                // 不影响其他会话窗口或既有会话语义。
+                connection_history_v2.close_session(session_id);
+                let live = self.connection.lock().await.live.clone();
+                live.close(session_id);
                 let environment = sessions
                     .lock()
                     .await
@@ -701,7 +807,27 @@ impl ServerLoop<'_> {
                 .await;
             }
         }
+        let v2_initial_ok = live_v2_initial.is_some() && result.is_ok();
         let response_sent = diagnostics.send(transport.as_ref(), result).await.is_ok();
+        // 首屏响应先入通道，随后才补发 load 期间缓冲的实时更新；失败路径关闭未发布的流。
+        if let Some((session_id, live)) = live_v2_initial {
+            if v2_initial_ok && response_sent {
+                for payload in live.resume_and_take(&session_id) {
+                    if let Err(error) = transport.send_notification("session/update", payload).await
+                    {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            error = %error,
+                            "history v2 live flush failed; closing delivery stream"
+                        );
+                        live.close(&session_id);
+                        break;
+                    }
+                }
+            } else {
+                live.close_if_paused(&session_id);
+            }
+        }
         if response_sent {
             if let Some(session_id) = setup_session_id {
                 let environment = sessions

@@ -176,6 +176,14 @@ pub(crate) trait SessionDataPort: Send + Sync {
         false
     }
 
+    /// 后端是否实现 History V2 读取端口；默认 false。
+    ///
+    /// 本地 SQLite 复用窗口读取端口（`load_history_window_page` /
+    /// `load_history_body_chunk`）并覆写为 true；远端/其他实现保持 fail-closed。
+    fn supports_history_v2(&self) -> bool {
+        false
+    }
+
     /// 轻量绑定分类（不加载历史）：记录事实三种——绑定与本机登记一致、绑定指向的登记
     /// 已不存在（含子会话没有绑定行）、无绑定行。`LegacyConfirmed` 由门面按本机来源
     /// 证据联合判定，不在这里冒充。

@@ -341,6 +341,7 @@ fn make_host_sessions(ctx: &SessionContext, payloads: Vec<PersistedPayload>) -> 
         structure_version: 0,
         session_generation: crate::host::next_session_generation(),
         history_window: Default::default(),
+        live_delivery: None,
         event_health: Default::default(),
         cancel_token: Some(ctx.cancel.clone()),
         interaction_gate: Arc::new(tokio::sync::Mutex::new(())),

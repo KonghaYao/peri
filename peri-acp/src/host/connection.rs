@@ -20,6 +20,10 @@ pub(crate) struct ConnectionContext {
     negotiated_caps: Option<PeriCaps>,
     apps_enabled: bool,
     pub(crate) acp_mcp: std::sync::Arc<peri_acp_types::acp_mcp::AcpMcpRegistry>,
+    /// 本连接的 History V2 服务（窗口与幂等账本不跨连接共享）。
+    pub(crate) history_v2: std::sync::Arc<super::history_service::HistoryV2Service>,
+    /// 本连接的实时投递注册表（按会话索引；连接关闭时整体清理）。
+    pub(crate) live: std::sync::Arc<super::live_delivery::LiveDelivery>,
     cancellation: tokio_util::sync::CancellationToken,
 }
 
@@ -32,6 +36,8 @@ impl ConnectionContext {
             negotiated_caps: None,
             apps_enabled,
             acp_mcp: Default::default(),
+            history_v2: std::sync::Arc::new(super::history_service::HistoryV2Service::system()),
+            live: std::sync::Arc::new(super::live_delivery::LiveDelivery::new()),
             cancellation: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -95,6 +101,19 @@ impl ConnectionContext {
                 .is_some_and(|caps| caps.history_window_v1)
     }
 
+    /// `peri.history` V2 准入：只有本连接成功协商出 `HistoryServerCapability` 才为 true。
+    ///
+    /// 与分页/窗口同一失败关闭规则：未 `initialize`、未请求 V2，或协商失败（不提交
+    /// caps）都不会把连接变成 V2。后续 `_peri/history` 分流必须读本方法。
+    pub(crate) fn history_v2(&self) -> bool {
+        self.initialized
+            && self
+                .negotiated_caps
+                .as_ref()
+                .and_then(|caps| caps.history_v2.as_ref())
+                .is_some()
+    }
+
     pub(crate) fn mcp_control_v1(&self) -> bool {
         self.initialized
             && self.lifecycle == ConnectionLifecycle::Open
@@ -116,6 +135,8 @@ impl ConnectionContext {
             negotiated_caps: self.negotiated_caps.clone(),
             apps_enabled: self.apps_enabled,
             acp_mcp: self.acp_mcp.clone(),
+            history_v2: self.history_v2.clone(),
+            live: self.live.clone(),
             cancellation: self.cancellation.clone(),
         }
     }
@@ -155,6 +176,7 @@ impl ConnectionContext {
             connection_id: self.id.clone(),
             history_pagination: self.history_pagination(),
             history_window_v1: self.history_window_v1(),
+            history_v2: self.history_v2(),
             mcp_control_v1: self.mcp_control_v1(),
             caps: self.caps(),
             admission_caps: self.admission_caps(),
@@ -171,6 +193,8 @@ pub(crate) struct ConnectionFacts {
     pub(crate) history_pagination: bool,
     /// `peri.historyWindowV1` 是否由**当前连接**协商。与分页独立、失败关闭。
     pub(crate) history_window_v1: bool,
+    /// `peri.history` V2 是否由**当前连接**成功协商（存在服务端回显）。失败关闭。
+    pub(crate) history_v2: bool,
     pub(crate) mcp_control_v1: bool,
     /// **当前连接**的 peri 能力集（[`ConnectionContext::caps`] 的原样取值）。
     ///
@@ -195,6 +219,7 @@ impl ConnectionFacts {
             connection_id: "unnegotiated-test".into(),
             history_pagination: false,
             history_window_v1: false,
+            history_v2: false,
             mcp_control_v1: false,
             caps: PeriCaps::all_enabled(),
             admission_caps: PeriCaps::default(),

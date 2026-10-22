@@ -203,6 +203,7 @@ pub(super) fn oversize_descriptors(rows: Option<&HistoryWindowRows>) -> Vec<(Mes
                     InheritedHistoryEntry::Oversized {
                         entry_id,
                         total_bytes,
+                        ..
                     } => Some((*entry_id, *total_bytes)),
                     InheritedHistoryEntry::Loaded(_) => None,
                 }),
@@ -278,6 +279,7 @@ pub(super) fn response(
                 entry_id,
                 position,
                 total_bytes,
+                ..
             } => {
                 let body = HistoryBodyDescriptor::new(
                     total_bytes,
@@ -308,6 +310,7 @@ pub(super) fn response(
             InheritedHistoryEntry::Oversized {
                 entry_id,
                 total_bytes,
+                ..
             } => {
                 let body = HistoryBodyDescriptor::new(
                     total_bytes,

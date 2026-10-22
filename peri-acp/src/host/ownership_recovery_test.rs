@@ -73,6 +73,7 @@ async fn restore(
         sessions,
         transport,
         ConnectionFacts::unnegotiated(),
+        None,
     )
     .await
     .unwrap();

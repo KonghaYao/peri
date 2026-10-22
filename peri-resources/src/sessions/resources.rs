@@ -457,6 +457,10 @@ impl SessionResources for SessionResourcesImpl {
         self.gate.data().supports_history_window()
     }
 
+    fn supports_history_v2(&self) -> bool {
+        self.gate.data().supports_history_v2()
+    }
+
     async fn load_session_binding(&self, id: &ThreadId) -> SessionResourceResult<BindingState> {
         let state = self.gate.data().load_binding(id).await?;
         self.classify_binding(id, state).await

@@ -161,6 +161,7 @@ fn state_with(
         structure_version,
         session_generation: generation,
         history_window: coordinator,
+        live_delivery: None,
         event_health: Default::default(),
         cancel_token: None,
         interaction_gate: Arc::new(tokio::sync::Mutex::new(())),

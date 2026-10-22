@@ -370,6 +370,7 @@ async fn run_prompt_attempt(
         interaction_gate,
         interaction_router,
         event_health,
+        live_delivery,
     ) = {
         let mut states = sessions.lock().await;
         let state = states
@@ -408,6 +409,8 @@ async fn run_prompt_attempt(
                 .as_ref()
                 .map(|env| Arc::clone(env.interaction_router())),
             Arc::clone(&state.event_health),
+            // History V2 实时投递注册表：仅 V2 load 装配过的会话有值。
+            state.live_delivery.clone(),
         )
     };
     #[cfg(test)]
@@ -432,13 +435,19 @@ async fn run_prompt_attempt(
         ),
     };
     let event_sink = Arc::new(
-        TransportEventSink::new(Arc::clone(transport), session_manager.caps_registry())
-            .with_compact_commit_observer(Arc::new(
-                super::history_window::StoreCompactCommitObserver::new(
-                    Arc::clone(sessions),
-                    Arc::clone(&session_resources),
-                ),
-            )),
+        match live_delivery {
+            Some(live) => {
+                TransportEventSink::new(Arc::clone(transport), session_manager.caps_registry())
+                    .with_live_delivery(live)
+            }
+            None => TransportEventSink::new(Arc::clone(transport), session_manager.caps_registry()),
+        }
+        .with_compact_commit_observer(Arc::new(
+            super::history_window::StoreCompactCommitObserver::new(
+                Arc::clone(sessions),
+                Arc::clone(&session_resources),
+            ),
+        )),
     );
 
     let provider_snapshot = provider.read().clone();

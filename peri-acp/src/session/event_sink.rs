@@ -28,6 +28,7 @@ use serde_json::json;
 use std::sync::Arc;
 use tracing::{debug, error};
 
+use crate::host::live_delivery::{LiveDelivery, PublishOutcome};
 use crate::{event::activity::map_agent_activity, event::map_event, transport::AcpTransport};
 
 /// EventSink 契约（L5：事实源 peri-acp-types::event）。
@@ -66,6 +67,8 @@ pub struct TransportEventSink {
     caps_registry: Arc<DashMap<String, PeriCaps>>,
     /// 宿主注入的 Full Compact 提交观察者；None 时保持纯事件转发。
     compact_commit_observer: Option<Arc<dyn CompactCommitObserver>>,
+    /// History V2 实时投递注册表（连接级）；None 时 wire 与 V1 完全一致。
+    live_delivery: Option<Arc<LiveDelivery>>,
 }
 
 impl TransportEventSink {
@@ -141,7 +144,17 @@ impl TransportEventSink {
             transport,
             caps_registry,
             compact_commit_observer: None,
+            live_delivery: None,
         }
+    }
+
+    /// 注入本连接/本会话的 History V2 实时投递注册表。
+    ///
+    /// 只有 V2 `session/load` 成功装配的会话才有注册表；其余会话不调用本方法，
+    /// `session/update` 的 wire 形状保持不变。
+    pub(crate) fn with_live_delivery(mut self, live: Arc<LiveDelivery>) -> Self {
+        self.live_delivery = Some(live);
+        self
     }
 
     /// 注入 Full Compact 提交观察者。仅宿主装配路径使用；测试/轻量 sink 不注入时
@@ -291,6 +304,9 @@ impl EventSink for TransportEventSink {
         for m in mapped {
             // 1. session/update — 标准 ACP 通知（Category ①）
             for update in m.updates {
+                // 只有 transcript 内容更新进入 V2 实时交付序列；命令/配置/用量等
+                // 通知保持原样（结构判定见 `is_transcript_update`）。
+                let transcript = is_transcript_update(&update);
                 let update_value = match serde_json::to_value(&update) {
                     Ok(p) => p,
                     Err(e) => {
@@ -325,6 +341,25 @@ impl EventSink for TransportEventSink {
                         );
                     }
                 }
+                let payload = match (&self.live_delivery, transcript) {
+                    (Some(live), true) => match live.publish(session_id, payload) {
+                        PublishOutcome::Send(payload) => Some(payload),
+                        PublishOutcome::Buffered => None,
+                        PublishOutcome::Overflow => {
+                            // 客户端会因序号缺口进入 detached；服务端只记录，不阻塞
+                            // 发送路径，也不伪装连续。
+                            tracing::warn!(
+                                session_id = %session_id,
+                                "history v2 live buffer overflow; dropped oldest update"
+                            );
+                            None
+                        }
+                    },
+                    _ => Some(payload),
+                };
+                let Some(payload) = payload else {
+                    continue;
+                };
                 self.transport
                     .send_notification("session/update", payload)
                     .await
@@ -430,15 +465,50 @@ impl EventSink for TransportEventSink {
     }
 
     async fn push_session_update(&self, session_id: &str, update: serde_json::Value) {
+        let transcript = serde_json::from_value::<SessionUpdate>(update.clone())
+            .map(|update| is_transcript_update(&update))
+            .unwrap_or(false);
         let payload = serde_json::json!({
             "sessionId": session_id,
             "update": update,
         });
+        let payload = match (&self.live_delivery, transcript) {
+            (Some(live), true) => match live.publish(session_id, payload) {
+                PublishOutcome::Send(payload) => Some(payload),
+                PublishOutcome::Buffered => None,
+                PublishOutcome::Overflow => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        "history v2 live buffer overflow; dropped oldest update"
+                    );
+                    None
+                }
+            },
+            _ => Some(payload),
+        };
+        let Some(payload) = payload else {
+            return;
+        };
         let _ = self
             .transport
             .send_notification("session/update", payload)
             .await;
     }
+}
+
+/// 会改变 transcript 内容的标准 `session/update` 变体。
+///
+/// 使用协议枚举判定而不是解析后的字符串黑名单：新增的非正文变体默认不进入
+/// V2 实时投递序列（命令、配置、用量、计划与会话信息都由各自通道维护）。
+fn is_transcript_update(update: &SessionUpdate) -> bool {
+    matches!(
+        update,
+        SessionUpdate::AgentMessageChunk(_)
+            | SessionUpdate::AgentThoughtChunk(_)
+            | SessionUpdate::UserMessageChunk(_)
+            | SessionUpdate::ToolCall(_)
+            | SessionUpdate::ToolCallUpdate(_)
+    )
 }
 
 #[cfg(test)]

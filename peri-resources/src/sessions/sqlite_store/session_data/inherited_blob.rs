@@ -20,7 +20,7 @@
 //! 语义（不反序列化、不校验正文转义）。正文合法性由消费/解析路径负责；非 canonical 或
 //! 结构异常的信封回退 SQL，后者按原有语义反序列化首尾 payload。
 
-use peri_acp_types::history_window::{HistoryInheritedSnapshot, HistoryWindowError};
+use peri_acp_types::history_window::HistoryWindowError;
 use peri_acp_types::messages::MessageId;
 use std::sync::Arc;
 
@@ -31,7 +31,7 @@ use super::history::HISTORY_WINDOW_INHERITED_HEADER_SQL;
 use super::history_window::inherited_snapshot_of;
 use super::inherited_facts::{
     scan_layout, scan_summary, CachedInheritedFacts, InheritedCacheLookup, InheritedLayout,
-    InheritedSummary, PayloadSpan,
+    PayloadSpan,
 };
 use super::*;
 
@@ -622,56 +622,10 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// summary 读取结果：`Unsupported` 表示信封不是 canonical 形状，调用方回退 SQL。
-pub(super) enum InheritedSummaryRead {
-    Facts {
-        snapshot: Option<HistoryInheritedSnapshot>,
-    },
-    Unsupported,
-}
-
-/// 全量布局读取结果：`Unsupported` 表示信封不是 canonical 形状，调用方回退 SQL。
-pub(super) enum InheritedFactsRead {
-    Facts {
-        snapshot: Option<HistoryInheritedSnapshot>,
-        layout: Option<Arc<InheritedLayout>>,
-    },
-    Unsupported,
-}
-
-/// 定位与打开 blob 之间只做一次缓存判定/扫描，结果交给外层分类。
-enum SummaryProbe {
-    Absent,
-    Cached(Arc<InheritedSummary>),
-    Parsed(Arc<InheritedSummary>),
-    Unsupported,
-}
-
-enum LayoutProbe {
-    Absent,
-    Cached(Arc<InheritedLayout>),
-    Parsed(Arc<InheritedLayout>),
-    Unsupported,
-}
-
-pub(super) fn map_inherited_blob_error(error: BlobReadError) -> SessionResourceError {
-    match error {
-        BlobReadError::OffsetBeyondLength => {
-            HistoryWindowError::invalid_request("body chunk offset is beyond the entry length")
-                .into()
-        }
-        BlobReadError::Corrupt(detail) => corrupt(detail),
-        BlobReadError::Sqlite(code) => HistoryWindowError::ReadFailed {
-            detail: format!("sqlite blob read failed (code {code})"),
-        }
-        .into(),
-        BlobReadError::Transient(detail) => HistoryWindowError::ReadFailed {
-            detail: detail.to_owned(),
-        }
-        .into(),
-        BlobReadError::Unsupported => corrupt("inherited context is not incrementally readable"),
-    }
-}
+pub(super) use super::inherited_read::{
+    fallback_exceeds_bound, inherited_index_not_ready, map_inherited_blob_error,
+    InheritedFactsRead, InheritedSummaryRead, LayoutProbe, SummaryProbe,
+};
 
 impl SqliteSessionData {
     fn inherited_cache_lookup(&self, id: &ThreadId, total: u64) -> InheritedCacheLookup {
@@ -839,6 +793,14 @@ impl SqliteSessionData {
                 self.store_inherited_facts(id, CachedInheritedFacts::Summary(Arc::clone(&summary)));
                 return Ok(SummaryProbe::Cached(summary));
             }
+            // 派生索引缺失/不完整时，回退扫描必须先过有界门禁；超过预算不做全列扫描。
+            let entry_count = indexed.as_ref().map(|indexed| indexed.entry_count);
+            if fallback_exceeds_bound(total, entry_count) {
+                return Ok(SummaryProbe::IndexNotReady {
+                    total_bytes: total,
+                    entry_count,
+                });
+            }
             match scan_summary(reader) {
                 Ok(summary) => {
                     let summary = Arc::new(summary);
@@ -867,6 +829,10 @@ impl SqliteSessionData {
                 })
             }
             Ok(SummaryProbe::Unsupported) => Ok(InheritedSummaryRead::Unsupported),
+            Ok(SummaryProbe::IndexNotReady {
+                total_bytes,
+                entry_count,
+            }) => Err(inherited_index_not_ready(total_bytes, entry_count)),
             // 打开失败（类型不是 TEXT/BLOB、行在定位后消失）或扫描期间 blob 失效：
             // 交给 SQL 语义解释。瞬态错误不写缓存，避免一次竞争永久停用增量路径。
             Err(error) if is_unsupported_blob_error(&error) || is_transient_blob_error(&error) => {
@@ -942,6 +908,14 @@ impl SqliteSessionData {
                 self.store_inherited_facts(id, CachedInheritedFacts::Layout(Arc::clone(&layout)));
                 return Ok(LayoutProbe::Cached(layout));
             }
+            // 派生索引缺失/不完整时，回退扫描必须先过有界门禁；超过预算不做全列扫描。
+            let entry_count = indexed.as_ref().map(|indexed| indexed.entry_count);
+            if fallback_exceeds_bound(total, entry_count) {
+                return Ok(LayoutProbe::IndexNotReady {
+                    total_bytes: total,
+                    entry_count,
+                });
+            }
             match scan_layout(reader) {
                 Ok(layout) => {
                     let layout = Arc::new(layout);
@@ -987,6 +961,10 @@ impl SqliteSessionData {
                 })
             }
             Ok(LayoutProbe::Unsupported) => Ok(InheritedFactsRead::Unsupported),
+            Ok(LayoutProbe::IndexNotReady {
+                total_bytes,
+                entry_count,
+            }) => Err(inherited_index_not_ready(total_bytes, entry_count)),
             Err(error) if is_unsupported_blob_error(&error) || is_transient_blob_error(&error) => {
                 Ok(InheritedFactsRead::Unsupported)
             }

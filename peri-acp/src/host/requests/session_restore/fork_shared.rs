@@ -162,6 +162,7 @@ pub(crate) async fn handle_fork_shared(
         structure_version: 0,
         session_generation: crate::host::next_session_generation(),
         history_window: Default::default(),
+        live_delivery: None,
         event_health: Default::default(),
         cancel_token: None,
         interaction_gate: crate::host::workspace_interaction::session_interaction_gate(

@@ -17,7 +17,8 @@
 //! 3. 命中路径不把正文读进内存：布局只保留区间/身份/逻辑长度，`decoded` 保持空；
 //!    正文可读性用 `read_history_body_chunk` 按块实测，并与索引给出的逻辑长度核对。
 //! 4. legacy = 删除派生索引行后首次读取：一次全列扫描 + 回填；随后新句柄直接命中。
-//! 5. 坏索引 = `payload_bytes` 与列总字节数不符：读取必须回退扫描，结果与命中一致。
+//! 5. 坏索引 = `payload_bytes` 与列总字节数不符：小快照必须回退扫描，结果与命中一致；
+//!    大快照（> 8 MiB）必须显式 `index_not_ready`，不得全列扫描。
 //! 6. 内存只报告可核对的事实：索引行数、`dbstat` 页字节、布局结构体估算、缓存容量；
 //!    不伪造 RSS。磁盘占用单列，不计入内存结论。
 
@@ -479,12 +480,10 @@ async fn inherited_index_cold_paths_evidence() {
     );
     drop(legacy_hit_store);
 
-    // 坏 legacy：payload_bytes 与列总字节数不符 → 必须回退扫描且结果一致。
+    // 坏 legacy：payload_bytes 与列总字节数不符 → 小快照回退扫描且结果一致；
+    // 大快照超过有界回退上界，必须显式 index_not_ready。
     println!("  -- 坏索引回退 --");
-    for (label, session, expected) in [
-        ("medium", &fixture.medium, MEDIUM_ENTRIES),
-        ("large", &fixture.large, LARGE_ENTRIES),
-    ] {
+    for (label, session, expected) in [("medium", &fixture.medium, MEDIUM_ENTRIES)] {
         let (corrupt_store, _corrupt_data) = cold(&fixture.path).await;
         sqlx::query(
             "UPDATE inherited_snapshot_index SET payload_bytes = payload_bytes + 1 \
@@ -519,4 +518,34 @@ async fn inherited_index_cold_paths_evidence() {
         );
         drop(fallback_store);
     }
+
+    let (corrupt_store, _corrupt_data) = cold(&fixture.path).await;
+    sqlx::query(
+        "UPDATE inherited_snapshot_index SET payload_bytes = payload_bytes + 1 \
+         WHERE thread_id = ?1",
+    )
+    .bind(fixture.large.thread.as_str())
+    .execute(&corrupt_store.database.pool)
+    .await
+    .unwrap();
+    drop(corrupt_store);
+    let (gate_store, gate_data) = cold(&fixture.path).await;
+    let mut connection = gate_data.database.pool.acquire().await.unwrap();
+    let error = match gate_data
+        .read_inherited_summary_cached(&mut connection, &fixture.large.thread)
+        .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("large bad index must fail closed"),
+    };
+    assert!(
+        matches!(
+            error.kind(),
+            peri_acp_types::session_resources::SessionResourceErrorKind::IndexNotReady { .. }
+        ),
+        "large bad index must fail closed, got {error:?}"
+    );
+    drop(connection);
+    drop(gate_store);
+    println!("  large 坏索引: index_not_ready（未回退全列扫描）");
 }

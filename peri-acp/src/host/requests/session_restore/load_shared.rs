@@ -10,16 +10,26 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
+use peri_acp_types::history_v2::{
+    DecimalU64, HistoryLiveBoundary, HistoryV2Backend, HISTORY_META_KEY,
+};
 use peri_acp_types::thread::ThreadId;
 
 use crate::host::connection::ConnectionFacts;
-use crate::host::{AcpServerConfig, SharedSessions};
+use crate::host::history_service::{self, HistoryInitialContext};
+use crate::host::history_v2_adapter::HistoryV2BackendAdapter;
+use crate::host::history_v2_load::LoadInitial;
+use crate::host::{AcpServerConfig, ContextOwnership, SharedSessions};
 use crate::{dispatch, transport::types::AcpError};
 
 use super::*;
+
+/// initial 沿用独立的可取消恢复期限（设计 §12.4）：分页 10 秒总期限会误杀合法冷启动。
+const LOAD_INITIAL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// `session/load` 的生产入口：调用方**不得**持有 sessions 全局锁。
 pub(crate) async fn handle_load_shared(
@@ -28,6 +38,7 @@ pub(crate) async fn handle_load_shared(
     sessions: &SharedSessions,
     transport: &Arc<dyn crate::transport::AcpTransport>,
     connection: ConnectionFacts,
+    history: Option<LoadInitial>,
 ) -> Result<Value, AcpError> {
     let generation = crate::host::history_page::initial_load_generation(params)?
         .unwrap_or_else(LoadGeneration::generate);
@@ -35,7 +46,8 @@ pub(crate) async fn handle_load_shared(
     // 窗口连接的首屏不是 load 响应里的回放：声明 `peri.historyWindowV1` 后，
     // `session/load` 只装配会话，历史由随后的 `history.open` 提供。判据取本连接
     // 的协商事实，不能用 `history_pagination` 代替——两者独立。
-    let skip_replay = connection.history_window_v1;
+    // History V2 initial 同样自行交付首屏，不再执行 V1 回放；所有权检查仍保留。
+    let skip_replay = connection.history_window_v1 || history.is_some();
     let environment = replay_after_load(
         cfg,
         sessions,
@@ -47,7 +59,7 @@ pub(crate) async fn handle_load_shared(
     )
     .await?;
     let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
-    finish_load_response(
+    let mut response = finish_load_response(
         cfg,
         transport,
         &prepared.id,
@@ -55,7 +67,137 @@ pub(crate) async fn handle_load_shared(
         &connection,
         &generation,
     )
+    .await?;
+    // 非 V2 连接成功接管会话：撤销上一条连接留下的实时投递绑定，事件回到 V1 wire
+    // 形状。失败路径（装配/回放拒绝）不破坏既有交付。
+    if history.is_none() {
+        crate::host::live_delivery::detach_session(sessions, &prepared.id).await;
+    }
+    if let Some(initial) = history {
+        attach_history_initial(
+            cfg,
+            sessions,
+            &prepared.id,
+            &connection,
+            initial,
+            &mut response,
+        )
+        .await?;
+    }
+    Ok(response)
+}
+
+/// 在 standard `session/load` 响应上挂载 `_meta["peri.history"]`。
+///
+/// 顺序保证：
+/// 1. 先量出完整响应的固定部分（配置、模式、身份与 JSON-RPC 包络），把剩余预算交给
+///    initial；H4a 的页面字节复核因此覆盖整份 load 响应，而不只是页面本身。
+/// 2. initial 成功后才写入 `_meta`；失败返回带 effect 的领域错误，会话保持已恢复状态，
+///    同 requestKey 可重试。
+async fn attach_history_initial(
+    cfg: &AcpServerConfig,
+    sessions: &SharedSessions,
+    session_id: &str,
+    connection: &ConnectionFacts,
+    initial: LoadInitial,
+    response: &mut Value,
+) -> Result<(), AcpError> {
+    // V2 交付用 deliveryId/liveBoundary；V1 的 periLoadGeneration 不得混入。
+    let meta = response_meta(response)?;
+    meta.remove("periLoadGeneration");
+    meta.insert(HISTORY_META_KEY.to_owned(), json!({}));
+    let reserved_response_bytes = serde_json::to_vec(response)
+        .map_err(|error| AcpError::new(-32603, error.to_string()))?
+        .len()
+        .saturating_sub(2) as u64;
+
+    let (runtime_generation, execution_ready) = execution_facts(sessions, session_id).await?;
+    let backend: Arc<dyn HistoryV2Backend> = Arc::new(HistoryV2BackendAdapter::new(
+        Arc::clone(&cfg.session_resources),
+        connection.caps.clone(),
+    ));
+    let live = Arc::clone(&initial.live);
+    let context = HistoryInitialContext {
+        session_id: session_id.to_owned(),
+        backend: Some(backend),
+        negotiated: true,
+        limits: initial.limits,
+        runtime_generation: runtime_generation.clone(),
+        execution_ready,
+        live: Some(Arc::clone(&live)),
+        // 生产路径由 `begin` 生成边界；该字段只在无注册表的测试路径使用。
+        live_boundary: HistoryLiveBoundary {
+            stream_id: String::new(),
+            after_seq: DecimalU64::new(0),
+        },
+        reserved_response_bytes,
+    };
+    let result = match tokio::time::timeout(
+        LOAD_INITIAL_TIMEOUT,
+        initial.service.initial(initial.request, context),
+    )
     .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            live.close_if_paused(session_id);
+            return Err(history_service::initial_timeout_error(
+                execution_ready,
+                &runtime_generation,
+            ));
+        }
+    }?;
+    let value = serde_json::to_value(result).map_err(|error| {
+        live.close_if_paused(session_id);
+        AcpError::new(-32603, error.to_string())
+    })?;
+    // 成功交付之后才把注册表绑定到会话：load 期间没有可执行的 prompt，绑定点
+    // 与响应发布之间不存在「sink 拿不到流」的窗口。
+    let previous = {
+        let mut states = sessions.lock().await;
+        let state = states.get_mut(session_id).ok_or_else(|| {
+            AcpError::new(-32603, "session disappeared while loading history initial")
+        })?;
+        state.live_delivery.replace(Arc::clone(&live))
+    };
+    if let Some(previous) = previous {
+        if !Arc::ptr_eq(&previous, &live) {
+            // A44：新 initial 原子替换旧 delivery，旧流关闭且不再投递。
+            previous.close(session_id);
+        }
+    }
+    response_meta(response)?.insert(HISTORY_META_KEY.to_owned(), value);
+    Ok(())
+}
+
+fn response_meta(response: &mut Value) -> Result<&mut serde_json::Map<String, Value>, AcpError> {
+    let object = response
+        .as_object_mut()
+        .ok_or_else(|| AcpError::new(-32603, "session/load response is not an object"))?;
+    object
+        .entry("_meta")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| AcpError::new(-32603, "session/load response _meta is not an object"))
+}
+
+/// 当前生命周期的执行事实：`runtimeGeneration` 取本会话实例代次；只有正文仍驻留
+/// Host（`Resident`）且会话未关闭时，prompt 才可立即开始。
+async fn execution_facts(
+    sessions: &SharedSessions,
+    session_id: &str,
+) -> Result<(String, bool), AcpError> {
+    let states = sessions.lock().await;
+    let state = states
+        .get(session_id)
+        .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
+    if state.closing {
+        return Err(AcpError::new(-32010, "Session is closing"));
+    }
+    Ok((
+        format!("runtime-{}", state.session_generation),
+        state.context_ownership == ContextOwnership::Resident,
+    ))
 }
 
 /// 共享的“确保会话已 live”阶段：load/resume/fork 复用，不包含回放或具体响应语义。

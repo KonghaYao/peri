@@ -53,11 +53,19 @@ mod execution;
 #[path = "executor_flow_test.rs"]
 mod executor_flow_tests;
 mod history_page;
+/// 连接级 History V2 协议服务（H2）：窗口、幂等、cursor、预算与后端 port。
+mod history_service;
+/// History V2 own 历史适配器（H3a1）：复用窗口读取端口，不开新表/列。
+mod history_v2_adapter;
+/// `session/load` 的 History V2 initial 准入（H4b）：生命周期装配前解析与拒绝。
+mod history_v2_load;
 /// `peri.historyWindowV1` 的 Host coordinator 与 open/page/seek 路由。
 mod history_window;
 /// session-owned 交互路由（按可信归属选审批 endpoint；投递失败原因的诚实产出点：
 /// `NoOnlineEndpoint` / `OwnerUnmatched` / `AttachmentDetached`，见 `interaction_router.rs`）。
 mod interaction_router;
+/// 连接级实时投递注册表（F2a）：暂停缓冲、序号与关闭语义。
+pub(crate) mod live_delivery;
 
 /// MCP Apps facade（七个 `peri/mcp/apps/*` 方法）与请求账本（设计 4a §1.3/§4.4）。
 mod apps_facade;
@@ -208,6 +216,11 @@ pub(crate) struct SessionState {
     /// `peri.historyWindowV1` 的轻量运行期事实：ticket、committed tail、checkpoint、
     /// rewind 状态。**不保存历史正文**。
     pub(crate) history_window: HistoryWindowCoordinator,
+    /// 本会话当前绑定的实时投递注册表（V2 `session/load` 成功装配时写入）。
+    ///
+    /// 注册表归**连接**所有；这里只保存 `Arc` 供执行轮的事件 sink 选用。非 V2 会话为
+    /// `None`，事件保持既有 wire 形状。
+    pub(crate) live_delivery: Option<Arc<live_delivery::LiveDelivery>>,
     /// 仅内存诊断；dirty 表示事件视图需要重同步，局部补快照不清除此标记。
     event_health: Arc<peri_acp_types::event_v2::BusHealth>,
     pub(crate) cancel_token: Option<CancellationToken>,

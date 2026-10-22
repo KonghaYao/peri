@@ -108,6 +108,7 @@ async fn register_child_with_inherited_history(
             structure_version: 0,
             session_generation: crate::host::next_session_generation(),
             history_window: Default::default(),
+            live_delivery: None,
             event_health: Default::default(),
             cancel_token: None,
             interaction_gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
