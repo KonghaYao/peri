@@ -11,6 +11,7 @@ use super::super::types::{
 };
 use super::super::v2_bridge::{build_v2_subagent_context, V2SubagentContext};
 use crate::agent::{CompactConfig, ContextBudget};
+use crate::session::tool_catalog::ToolFilterPolicy;
 use crate::session::{FrozenContext, MessageQueue, Session};
 use crate::tools::{BaseTool, ToolInvocationResolver};
 use peri_acp_types::session_resources::SessionResources;
@@ -208,6 +209,16 @@ pub(super) async fn build_subagent_session_v2(
 
     // StageContext 构造（v2_bridge 迁移；tool_invocation_resolver 参数化；
     // 复用上面预创建的 session——transcript 已装载 ancestor 并绑定持久化）
+    // bind_tools 也消费有效策略，避免工具发现/调用绑定先收到父会话已关闭的能力。
+    let tool_filter = ToolFilterPolicy::with_mcp_policy(
+        session
+            .store()
+            .frozen
+            .meta_harness
+            .disabled_middlewares
+            .clone(),
+        tool_filter,
+    );
     let tools = tools
         .into_iter()
         .filter(|tool| tool_filter(tool.as_ref()))

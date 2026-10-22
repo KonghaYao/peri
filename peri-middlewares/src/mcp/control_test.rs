@@ -9,6 +9,10 @@ use crate::mcp::{
 use serde_json::json;
 use std::sync::atomic::AtomicUsize;
 
+#[cfg(not(target_os = "emscripten"))]
+#[path = "control_lock_order_test.rs"]
+mod lock_order;
+
 fn pool_fixture() -> (McpTaskOwner, Arc<McpClientPool>, tempfile::TempDir) {
     let (owner, spawner) = McpTaskOwner::new();
     let mut pool = McpClientPool::new_empty_with_cache_policy(McpCachePolicy::Disabled);

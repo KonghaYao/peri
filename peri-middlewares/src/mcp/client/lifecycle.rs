@@ -67,6 +67,20 @@ impl McpClientPool {
 
     pub(crate) fn own_service(&self, service: McpServiceWrapper) -> Arc<super::McpServiceOwner> {
         let _admission = self.lifecycle_registration.lock();
+        self.own_service_admitted(service)
+    }
+
+    /// Move the active service into the pool-retained cleanup owners atomically
+    /// with lifecycle admission. Like connection commit, always acquire the
+    /// lifecycle gate before the services map; callers must not hold either lock.
+    pub(crate) fn take_service_for_close(&self, name: &str) -> Option<Arc<super::McpServiceOwner>> {
+        let _admission = self.lifecycle_registration.lock();
+        let service = { self.services.lock().remove(name) }?;
+        Some(self.own_service_admitted(service))
+    }
+
+    /// The caller holds lifecycle_registration; never acquire it recursively.
+    fn own_service_admitted(&self, service: McpServiceWrapper) -> Arc<super::McpServiceOwner> {
         let owner = Arc::new(super::McpServiceOwner::new(service));
         if !self.is_open() {
             owner.begin_close();
@@ -75,6 +89,11 @@ impl McpClientPool {
         services.retain(|service| !service.is_stopped());
         services.push(owner.clone());
         owner
+    }
+
+    #[cfg(all(test, not(target_os = "emscripten")))]
+    pub(crate) fn retained_service_count(&self) -> usize {
+        self.shared_services.lock().len()
     }
 
     async fn close_shared_services(&self) -> usize {

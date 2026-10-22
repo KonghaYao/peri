@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     sync::Arc,
 };
 
@@ -113,6 +113,25 @@ pub enum ToolFilterPolicy {
 }
 
 impl ToolFilterPolicy {
+    /// 冻结的父能力关闭集与当前 Agent 的工具策略取交集。
+    ///
+    /// 关闭策略只识别 MCP 来源及 builtin 实例身份；同名 core 工具或显式远端
+    /// workspace 不能被 builtin 的关闭策略误删。闭包同时用于初始目录和后续刷新。
+    pub(crate) fn with_mcp_policy(disabled: HashSet<String>, filter: ToolFilter) -> ToolFilter {
+        Arc::new(move |tool| {
+            if tool.mcp_server_name().is_some()
+                && (disabled.contains("McpMiddleware")
+                    || tool.builtin_mcp_instance().is_some_and(|instance| {
+                        peri_acp_types::builtin_mcp::find(instance)
+                            .is_some_and(|declared| disabled.contains(declared.policy_key))
+                    }))
+            {
+                return false;
+            }
+            filter(tool)
+        })
+    }
+
     /// 在按名策略之外校验 MCP 来源；显式 builtin allowlist 不能授权同名外部 raw 工具。
     pub fn canonical(allowed: Option<Vec<String>>, disallowed: Vec<String>) -> ToolFilter {
         let explicit_without_wildcard = allowed
@@ -309,13 +328,17 @@ impl SessionToolCatalog {
         for tool in update.tools {
             let name = tool.name().to_string();
             let entry = startup_entry(&name, tool)?;
+            if !(self.tool_filter)(entry.tool.as_ref()) {
+                continue;
+            }
             let same_identity = |existing: &CatalogToolEntry| {
                 existing.source == entry.source
                     && existing.tool.mcp_tool_name() == entry.tool.mcp_tool_name()
                     && existing.tool.name() == name
             };
             let collision = next_base.values().find(|existing| {
-                tool_names_conflict(existing.tool.as_ref(), entry.tool.as_ref())
+                (self.tool_filter)(existing.tool.as_ref())
+                    && tool_names_conflict(existing.tool.as_ref(), entry.tool.as_ref())
                     && (!same_identity(existing) || updated.contains(&name))
             });
             if let Some(winner) = collision.map(|entry| entry.tool.as_ref()) {
@@ -405,8 +428,7 @@ fn build_published(
     capability: Option<&SessionMcpCatalogSnapshot>,
     tool_filter: &(dyn Fn(&dyn BaseTool) -> bool + Send + Sync),
 ) -> Result<SessionToolCatalogSnapshot, CatalogRefreshError> {
-    let mut tools = build_tools(base, capability)?;
-    tools.retain(|_, entry| tool_filter(entry.tool.as_ref()));
+    let tools = build_tools(base, capability, tool_filter)?;
     finalize(generation, tools)
 }
 
@@ -437,13 +459,19 @@ fn startup_entry(
 fn build_tools(
     base: &BTreeMap<String, CatalogToolEntry>,
     capability: Option<&SessionMcpCatalogSnapshot>,
+    tool_filter: &(dyn Fn(&dyn BaseTool) -> bool + Send + Sync),
 ) -> Result<BTreeMap<String, CatalogToolEntry>, CatalogRefreshError> {
     let Some(capability) = capability else {
-        return Ok(base.clone());
+        return Ok(base
+            .iter()
+            .filter(|(_, entry)| tool_filter(entry.tool.as_ref()))
+            .map(|(name, entry)| (name.clone(), entry.clone()))
+            .collect());
     };
     let mut tools: BTreeMap<_, _> = base
         .iter()
         .filter(|(_, entry)| matches!(entry.source, ToolSource::CoreOrMiddleware))
+        .filter(|(_, entry)| tool_filter(entry.tool.as_ref()))
         .map(|(name, entry)| (name.clone(), entry.clone()))
         .collect();
     for tool in &capability.tools {
@@ -452,6 +480,10 @@ fn build_tools(
                 tool: tool.name().into(),
             });
         };
+        // 被关闭的候选不参与名字占用；允许的同名其它来源仍可入目录。
+        if !tool_filter(tool.as_ref()) {
+            continue;
+        }
         if let Some(winner) = tools
             .values()
             .find(|entry| tool_names_conflict(entry.tool.as_ref(), tool.as_ref()))

@@ -842,6 +842,8 @@ mod close_lifecycle_cases;
 
 #[path = "subagent/child_wire_capture_test.rs"]
 mod child_wire_capture_test;
+#[path = "subagent/mcp_policy_test.rs"]
+mod mcp_policy_tests;
 #[path = "subagent/provenance_test.rs"]
 mod provenance_tests;
 async fn create_bound_root(
