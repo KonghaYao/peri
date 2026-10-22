@@ -80,7 +80,7 @@
 
 #[path = "history_page_visibility.rs"]
 mod visibility;
-pub use visibility::history_body_displayable_to_client;
+pub use visibility::{history_body_displayable_to_client, HistoryEntryRole};
 
 use serde::{Deserialize, Serialize};
 
@@ -544,6 +544,8 @@ pub struct HistoryPageCandidate {
     pub position: u64,
     /// 持久化信封的编码字节数。
     pub encoded_bytes: usize,
+    /// `messages.role` 的粗分类；窗口读取用它判定 oversize 可见性。
+    pub role: HistoryEntryRole,
 }
 
 impl HistoryPageCandidate {
@@ -552,12 +554,28 @@ impl HistoryPageCandidate {
     /// id 不是 uuid 即损坏（与 [`HistoryPageRow::new`] 同规）；负的行号或长度不可能出现
     /// （`rowid` 与长度都非负），出现即损坏，不取绝对值兜底。
     pub fn new(message_id: &str, position: i64, encoded_bytes: i64) -> SessionResourceResult<Self> {
+        Self::new_with_role(
+            message_id,
+            position,
+            encoded_bytes,
+            HistoryEntryRole::Unknown,
+        )
+    }
+
+    /// 带存储 role 的候选行；窗口读取用它避免为可见性判定解码正文。
+    pub fn new_with_role(
+        message_id: &str,
+        position: i64,
+        encoded_bytes: i64,
+        role: HistoryEntryRole,
+    ) -> SessionResourceResult<Self> {
         Ok(Self {
             message_id: message_id_of(message_id)?,
             position: u64::try_from(position)
                 .map_err(|_| corrupt("history row position is negative"))?,
             encoded_bytes: usize::try_from(encoded_bytes)
                 .map_err(|_| corrupt("history entry length is negative"))?,
+            role,
         })
     }
 }

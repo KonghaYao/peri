@@ -932,6 +932,11 @@ impl From<SessionResourceError> for HistoryWindowError {
                 }
             },
             SessionResourceErrorKind::InvalidInput { detail } => Self::invalid_request(detail),
+            // V1 没有 index_not_ready 的 wire 取值：保留为读取失败，绝不伪装成
+            // NotFound 或空页。V2 适配器在转换前直接映射到 IndexNotReady。
+            SessionResourceErrorKind::IndexNotReady { detail } => Self::ReadFailed {
+                detail: detail.clone(),
+            },
             _ => Self::ReadFailed {
                 detail: error.to_string(),
             },

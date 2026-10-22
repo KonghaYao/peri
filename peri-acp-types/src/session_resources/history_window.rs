@@ -6,7 +6,7 @@
 //!
 //! 公开路径由父模块 `pub use` 保持为 `peri_acp_types::session_resources::*`。
 
-use crate::history_page::HistoryPageItem;
+use crate::history_page::{HistoryEntryRole, HistoryPageItem};
 use crate::history_window::{
     HistoryCheckpoint, HistoryCommittedTail, HistoryInheritedWindow, HistorySource,
     HistoryWindowDirection,
@@ -160,6 +160,8 @@ pub enum HistoryWindowEntry {
         entry_id: MessageId,
         position: u64,
         total_bytes: u64,
+        /// 存储 `role` 粗分类；用于不读正文的可见性判定。
+        role: HistoryEntryRole,
     },
 }
 
@@ -187,6 +189,9 @@ pub enum InheritedHistoryEntry {
     Loaded(HistoryPageItem),
     Oversized {
         entry_id: MessageId,
+        /// 冻结快照内的稳定序号：来自 `inherited_payload_index.ordinal` 或
+        /// canonical layout 的 payload 位置，两路径顺序一致。
+        ordinal: u64,
         total_bytes: u64,
     },
 }
@@ -196,6 +201,14 @@ impl InheritedHistoryEntry {
         match self {
             Self::Loaded(item) => item.id,
             Self::Oversized { entry_id, .. } => *entry_id,
+        }
+    }
+
+    /// 冻结快照内的稳定序号；不是当前父会话的 rowid。
+    pub fn ordinal(&self) -> u64 {
+        match self {
+            Self::Loaded(item) => item.position,
+            Self::Oversized { ordinal, .. } => *ordinal,
         }
     }
 }
