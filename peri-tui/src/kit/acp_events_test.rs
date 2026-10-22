@@ -35,6 +35,8 @@ mod group_incremental_test;
 mod history_page_test;
 #[path = "acp_events_test/history_runtime_test.rs"]
 mod history_runtime_test;
+#[path = "acp_events_test/history_v2_view_test.rs"]
+mod history_v2_view_test;
 #[path = "acp_events_test/history_window_commit_test.rs"]
 mod history_window_commit_test;
 #[path = "acp_events_test/history_window_page_test.rs"]

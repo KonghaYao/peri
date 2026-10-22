@@ -411,6 +411,7 @@ fn apply_bridge_reset(state: &mut BridgeState, last_reset_counter: &mut u64, cou
     state.committed = im::Vector::new();
     state.window.reset();
     crate::kit::history_page_consumer::reset_window_paging_state();
+    crate::kit::history_v2::consumer::reset_consumer_state();
     crate::kit::history_window::clear_window_viewport();
     crate::kit::atoms::HISTORY_DETAIL.set(None);
     state.current_turn.reset();

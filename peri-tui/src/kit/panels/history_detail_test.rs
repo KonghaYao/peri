@@ -1,9 +1,14 @@
 use std::sync::Arc;
 
+use base64::Engine as _;
+use peri_acp_types::history_v2::{
+    DecimalU64 as V2U64, HISTORY_V2_VERSION, HistoryBodyChunk as V2BodyChunk, HistoryBodyKind,
+    HistoryEncoding, HistoryRepresentation,
+};
 use peri_acp_types::history_window::HistoryBodyChunk;
 
 use super::*;
-use crate::kit::history_window::{DetailDescriptor, HistorySource};
+use crate::kit::history_window::{DetailDescriptor, HistorySource, HistoryV2BodyBinding};
 
 fn descriptor(total: u64) -> DetailDescriptor {
     DetailDescriptor::new(
@@ -23,6 +28,52 @@ fn chunk(offset: u64, bytes: &[u8], complete: bool, next: Option<u64>) -> Histor
         bytes: bytes.to_vec(),
         next_offset: next,
         complete,
+    }
+}
+
+fn v2_descriptor(total: u64) -> DetailDescriptor {
+    DetailDescriptor::new(
+        HistorySource::Own,
+        "s1:m1",
+        total,
+        256 * 1024,
+        "snap-1",
+        "ticket-1",
+    )
+    .with_v2(HistoryV2BodyBinding {
+        session_id: "s1".into(),
+        window_id: "w1".into(),
+        snapshot_token: "snap-1".into(),
+        read_ticket: "ticket-1".into(),
+        source: peri_acp_types::history_v2::HistorySource::Own,
+        entry_id: "s1:m1".into(),
+        sub_item_id: "s1:m1:0".into(),
+        body_ref: "body-1".into(),
+    })
+}
+
+fn v2_chunk(
+    offset: u64,
+    bytes: &[u8],
+    complete: bool,
+    next: Option<u64>,
+    total: u64,
+) -> V2BodyChunk {
+    V2BodyChunk {
+        version: HISTORY_V2_VERSION,
+        kind: HistoryBodyKind::Body,
+        session_id: "s1".into(),
+        window_id: "w1".into(),
+        snapshot_token: "snap-1".into(),
+        body_ref: "body-1".into(),
+        content_version: "cv-1".into(),
+        representation: HistoryRepresentation::DisplayText,
+        encoding: HistoryEncoding::Base64,
+        offset: V2U64::new(offset),
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        next_offset: next.map(V2U64::new),
+        complete,
+        total_bytes: V2U64::new(total),
     }
 }
 
@@ -560,4 +611,36 @@ fn detail_export_reports_prefix_gap_instead_of_copying_empty() {
         detail.last_error
     );
     close_history_detail();
+}
+
+#[test]
+fn v2_detail_renders_text_and_adopts_authoritative_total() {
+    // 页面描述符给的是 canonical 预估（5）；body 首块给出真实展示长度（11）。
+    let mut window = HistoryDetailWindow::open(v2_descriptor(5)).expect("open");
+    window
+        .apply_v2_chunk(&v2_chunk(0, b"hello ", false, Some(6), 11), 256 * 1024)
+        .expect("first chunk");
+    assert_eq!(window.descriptor.total_bytes, 11, "首块修正滚动范围");
+    assert_eq!(window.loaded_text().expect("utf8"), "hello ");
+
+    window
+        .apply_v2_chunk(&v2_chunk(6, b"world", true, None, 11), 256 * 1024)
+        .expect("second chunk");
+    assert_eq!(window.loaded_text().expect("utf8"), "hello world");
+    assert!(window.is_complete());
+    assert_eq!(window.scroll_to(10), None, "修正后的范围覆盖末尾");
+}
+
+#[test]
+fn v2_detail_rejects_later_total_mismatch() {
+    let mut window = HistoryDetailWindow::open(v2_descriptor(2048)).expect("open");
+    window
+        .apply_v2_chunk(&v2_chunk(0, b"hello", false, Some(5), 11), 256 * 1024)
+        .expect("first chunk");
+    let error = window
+        .apply_v2_chunk(&v2_chunk(5, b"world", true, None, 12), 256 * 1024)
+        .expect_err("后续块 total 不一致");
+    assert_eq!(error, DetailError::InvalidChunk);
+    assert_eq!(window.descriptor.total_bytes, 11);
+    assert_eq!(window.loaded_text().expect("utf8"), "hello");
 }

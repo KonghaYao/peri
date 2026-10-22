@@ -116,6 +116,14 @@ pub struct AcpTuiClient {
     user_input_queue: Arc<std::sync::atomic::AtomicBool>,
     session_workspace: Arc<std::sync::atomic::AtomicBool>,
     mcp_control: Arc<std::sync::atomic::AtomicBool>,
+    /// History V2 连接事实：本地开关、服务端选择与协商预算都按连接持有。
+    /// 不读进程级 atom，避免另一条连接/测试切换全局开关改变本连接的 load 语义。
+    ///
+    /// `None` 表示 initialize 尚未落账：此时按启动配置（atom）取值。测试可先写入
+    /// `Some`，不触碰进程级 beta 开关。
+    history_v2_enabled: Arc<Mutex<Option<bool>>>,
+    history_v2_capable: Arc<std::sync::atomic::AtomicBool>,
+    history_v2_limits: Arc<Mutex<peri_acp_types::history_v2::HistoryLimits>>,
     execution_cwd: watch::Sender<Option<String>>,
     restore_error: Arc<Mutex<Option<String>>>,
     /// 关闭旧会话失败（`-32010` incomplete）后仍未完成的切换：旧身份与被打断的
@@ -129,6 +137,74 @@ pub struct AcpTuiClient {
 }
 
 impl AcpTuiClient {
+    /// 本连接是否请求 History V2（initialize 时按启动配置固定）。
+    ///
+    /// initialize 尚未落账（`None`）时回退启动配置 atom；落账后只认连接事实，
+    /// 其他连接或测试改动进程级开关不会改变本连接的 load 语义。
+    pub(crate) fn history_v2_enabled(&self) -> bool {
+        self.history_v2_enabled
+            .lock()
+            .unwrap()
+            .unwrap_or_else(|| crate::kit::atoms::HISTORY_V2.get())
+    }
+
+    /// 本连接是否真正使用 V2：请求过且服务端明确选择。
+    pub(crate) fn history_v2_active(&self) -> bool {
+        self.history_v2_enabled()
+            && self
+                .history_v2_capable
+                .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// beta 开启时，initialize 必须被服务端明确选中 V2；否则启动必须失败关闭。
+    ///
+    /// 返回 `Err` 的文案直接展示给用户：不得静默落回标准全量回放，那会让
+    /// 「beta 已开」与「实际走了旧协议」同时成立而无人知晓。
+    pub(crate) fn require_history_v2_startup(&self) -> Result<(), String> {
+        if self.history_v2_enabled() {
+            if self
+                .history_v2_capable
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                Ok(())
+            } else {
+                Err(
+                    "服务端未启用/不支持 History V2；关闭 beta 后重试 (history-v2 beta is enabled but the server did not select V2)"
+                        .to_owned(),
+                )
+            }
+        } else {
+            Ok(())
+        }
+    }
+
+    /// 本连接协商后的 V2 预算。
+    pub(crate) fn history_v2_limits(&self) -> peri_acp_types::history_v2::HistoryLimits {
+        self.history_v2_limits.lock().unwrap().clone()
+    }
+
+    /// initialize 结果落账：能力与服务端预算绑定在同一条连接上。
+    pub(crate) fn set_history_v2_negotiation(
+        &self,
+        capable: bool,
+        limits: peri_acp_types::history_v2::HistoryLimits,
+    ) {
+        self.history_v2_capable
+            .store(capable, std::sync::atomic::Ordering::Release);
+        *self.history_v2_limits.lock().unwrap() = limits;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_history_v2_for_test(
+        &self,
+        enabled: bool,
+        capable: bool,
+        limits: peri_acp_types::history_v2::HistoryLimits,
+    ) {
+        *self.history_v2_enabled.lock().unwrap() = Some(enabled);
+        self.set_history_v2_negotiation(capable, limits);
+    }
+
     /// 部署退出时显式关闭 transport；不依赖 UI/后台消费者释放所有 client 克隆。
     pub fn close(&self) {
         self.mcp_control
@@ -198,6 +274,11 @@ impl AcpTuiClient {
             user_input_queue: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             session_workspace: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_control: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            history_v2_enabled: Arc::new(Mutex::new(None)),
+            history_v2_capable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            history_v2_limits: Arc::new(Mutex::new(
+                peri_acp_types::history_v2::HistoryLimits::default(),
+            )),
             execution_cwd: watch::channel(None).0,
             restore_error: Arc::new(Mutex::new(None)),
             pending_close: Arc::new(Mutex::new(None)),

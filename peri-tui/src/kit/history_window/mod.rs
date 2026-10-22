@@ -43,8 +43,8 @@ pub(crate) use budget::{PENDING_TOOL_ENDS_BYTES_MAX, PENDING_TOOL_ENDS_LIMIT};
 pub use budget::{WindowBudget, WindowLimits};
 pub use commit::{CommitOutcome, HistoryCommitInfo};
 pub use detail::{
-    DetailDescriptor, HistoryDetailTarget, clear_detail_targets, placeholder_hash,
-    publish_detail_targets, remove_detail_targets,
+    DetailDescriptor, HistoryDetailTarget, HistoryV2BodyBinding, clear_detail_targets,
+    placeholder_hash, publish_detail_targets, remove_detail_targets,
 };
 pub use diagnostics::{HistoryWindowDiagnostics, WindowStats};
 pub use display::DisplayLedger;

@@ -90,6 +90,18 @@ pub async fn run_kit_fullscreen(
             )
         });
     crate::kit::history_window::apply_history_window_beta(history_window_beta);
+    // H5a：History V2 本地 beta 默认关闭；只有显式 `history-v2=true` 才尝试协商。
+    // 是否真正启用仍由 initialize 的服务端回显决定（fail-closed）。
+    let history_v2_beta = app
+        .config_source
+        .snapshot()
+        .map(|snapshot| {
+            crate::kit::history_v2::history_v2_beta_enabled_from_flags(snapshot.flags())
+        })
+        .unwrap_or_else(|| {
+            crate::kit::history_v2::history_v2_beta_enabled(&app.services.peri_config.read())
+        });
+    crate::kit::history_v2::apply_history_v2_beta(history_v2_beta);
     // 2b0. 从 AppConfig.extra 提取旧 TUI 键初始化 TuiConfig（向后兼容）
     {
         let cfg = app.services.peri_config.read();
@@ -392,6 +404,16 @@ pub async fn run_kit_fullscreen(
                 shutdown.clone(),
             );
 
+        // 4b2c. HISTORY_V2 channel：H5c 的 open/page/seek/详情正文（V2 激活时唯一入口）。
+        // 与 V1 窗口队列互斥：`window_path_enabled()` 在 V2 激活时返回 false。
+        let (history_v2_tx, history_v2_rx) = mpsc::unbounded_channel();
+        let _ = atoms::HISTORY_V2_TX.set(history_v2_tx);
+        let _history_v2_consumer = crate::kit::history_v2::consumer::spawn_history_v2_consumer(
+            client.clone(),
+            history_v2_rx,
+            shutdown.clone(),
+        );
+
         // 4a2. CANCEL channel：event_handlers Ctrl+C → cancel_consumer
         let (cancel_tx, cancel_rx) = mpsc::unbounded_channel::<()>();
         let _ = atoms::CANCEL_TX.set(cancel_tx);
@@ -443,7 +465,22 @@ pub async fn run_kit_fullscreen(
             )
             .collect();
         if let Err(error) = client.register_ui_commands(&specs).await {
+            if crate::kit::atoms::HISTORY_V2.get() {
+                // beta 开启时 initialize 失败不能继续：后续 session/new|load 会落到标准
+                // 全量回放，UI 看起来正常但协议已与用户选择不符。启动期显式失败。
+                shutdown.cancel();
+                client.close();
+                teardown_app(&mut app).await;
+                return Err(anyhow::anyhow!(
+                    "History V2 initialize failed: {error}. 服务端未启用/不支持 History V2；关闭 beta 后重试"
+                ));
+            }
             tracing::warn!(error = %error, "kit: ui command capability negotiation failed");
+        } else if let Err(message) = client.require_history_v2_startup() {
+            shutdown.cancel();
+            client.close();
+            teardown_app(&mut app).await;
+            return Err(anyhow::anyhow!(message));
         }
         let _steer_handle = crate::kit::steer_consumer::spawn_steer_consumer(
             client.clone(),

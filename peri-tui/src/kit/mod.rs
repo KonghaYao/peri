@@ -27,6 +27,7 @@ pub mod exit_hint;
 pub mod focus_router;
 pub mod history_page_consumer;
 pub mod history_paging;
+pub mod history_v2;
 pub mod history_window;
 pub mod hitl_response;
 pub mod image_overlay;

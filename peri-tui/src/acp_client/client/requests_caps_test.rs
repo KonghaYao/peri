@@ -190,3 +190,120 @@ async fn test_mcp_control_requires_server_true_and_resets_on_close() {
         server_task.await.unwrap();
     }
 }
+
+/// H5a：V2 本地 beta 开启时只声明 `peri.history`，服务端明确选择后才启用；
+/// 未回显时不建立 V2 能力（旧 V1 / 标准路径继续可用）。
+#[tokio::test]
+#[serial_test::serial]
+async fn test_history_v2_declaration_requires_explicit_server_selection() {
+    use peri_acp_types::history_v2::{HISTORY_META_KEY, HistoryLimits};
+
+    crate::kit::atoms::HISTORY_V2.set(true);
+    crate::kit::atoms::HISTORY_WINDOW_V1.set(true);
+    crate::kit::atoms::HISTORY_V2_CAPABLE.set(false);
+    crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(false);
+    let limits = HistoryLimits::default();
+    let server_capability = json!({
+        "version": 2,
+        "selectedProfile": "windowed",
+        "method": "_peri/history",
+        "notification": "_peri/history/changed",
+        "limits": &limits,
+    });
+    let response_meta = json!({"peri.history": server_capability});
+
+    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client, notification_tx, _) = AcpTuiClient::new(client_transport);
+    client.spawn_pump(notification_tx);
+    let server = tokio::spawn(async move {
+        let IncomingMessage::Request { id, method, params } =
+            server_transport.recv().await.unwrap()
+        else {
+            panic!("应收到 initialize");
+        };
+        assert_eq!(method, "initialize");
+        let meta = &params["clientCapabilities"]["_meta"];
+        assert_eq!(
+            meta[HISTORY_META_KEY],
+            json!({"versions": [2], "requestedProfile": "windowed"}),
+            "V2 beta 开启时必须声明统一历史能力"
+        );
+        assert_eq!(
+            meta["peri.historyWindowV1"],
+            json!(false),
+            "不得同时声明旧窗口能力（服务端会拒绝混合声明）"
+        );
+        assert_eq!(
+            meta["peri.historyPagination"],
+            json!(false),
+            "不得同时声明旧分页能力"
+        );
+        server_transport
+            .send_response(
+                id,
+                Ok(json!({"agentCapabilities": {"_meta": response_meta}})),
+            )
+            .await
+            .unwrap();
+    });
+    client.register_ui_commands(&[]).await.unwrap();
+    server.await.unwrap();
+    assert!(
+        crate::kit::atoms::HISTORY_V2_CAPABLE.get(),
+        "服务端明确选择 version=2/windowed 后才启用"
+    );
+    assert!(
+        client.require_history_v2_startup().is_ok(),
+        "服务端选择 V2 后启动准入通过"
+    );
+    assert_eq!(
+        client.history_v2_limits(),
+        limits,
+        "协商预算必须写入客户端事实源"
+    );
+
+    // 未回显：保持关闭，不回落到伪 V2。
+    crate::kit::atoms::HISTORY_V2_CAPABLE.set(false);
+    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client2, notification_tx, _) = AcpTuiClient::new(client_transport);
+    client2.spawn_pump(notification_tx);
+    let server = tokio::spawn(async move {
+        let IncomingMessage::Request { id, method, .. } = server_transport.recv().await.unwrap()
+        else {
+            panic!("应收到 initialize");
+        };
+        assert_eq!(method, "initialize");
+        server_transport
+            .send_response(id, Ok(json!({"agentCapabilities": {}})))
+            .await
+            .unwrap();
+    });
+    client2.register_ui_commands(&[]).await.unwrap();
+    server.await.unwrap();
+    assert!(
+        !crate::kit::atoms::HISTORY_V2_CAPABLE.get(),
+        "服务端未选择 V2 时必须 fail-closed"
+    );
+    let error = client2
+        .require_history_v2_startup()
+        .expect_err("beta 开启而服务端未选择 V2 时必须终止启动");
+    assert!(
+        error.contains("History V2"),
+        "错误必须明确指向 History V2：{error}"
+    );
+
+    crate::kit::atoms::HISTORY_V2.set(false);
+    // 未发起 V2 请求的连接按启动配置（atom）取值；beta 关闭时启动准入不变。
+    let (off_transport, off_server) = mpsc_transport_pair();
+    let (off_client, _, _) = AcpTuiClient::new(off_transport);
+    assert!(
+        off_client.require_history_v2_startup().is_ok(),
+        "beta 关闭时不改变旧启动路径"
+    );
+    off_client.close();
+    drop(off_server);
+    crate::kit::atoms::HISTORY_WINDOW_V1.set(false);
+    crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(false);
+    client.close();
+    client2.close();
+}

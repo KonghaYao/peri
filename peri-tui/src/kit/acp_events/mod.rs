@@ -8,6 +8,7 @@ mod agent;
 mod compact;
 mod fold;
 mod history_page;
+pub(crate) mod history_v2;
 pub(crate) mod history_window;
 mod memory_probe;
 pub(crate) mod render;
@@ -698,6 +699,7 @@ pub(crate) fn dispatch_for_bridge(
         HistoryWindowDegraded { session_id, reason } => {
             history_window::handle_window_degraded(state, session_id, reason);
         }
+        HistoryV2ViewChanged { state: v2 } => history_v2::handle_view(state, v2.as_ref()),
         // 回放条目位置标记：只登记区间，不产生展示单元。
         ReplayEntryMarked { entry_id, position } => {
             crate::kit::history_paging::mark_own_entry(entry_id, *position)
@@ -768,6 +770,7 @@ pub(crate) fn dispatch_for_bridge(
             | ReplayToolEnded { .. }
             | HistoryPageLoaded { .. }
             | HistoryWindowPageLoaded { .. }
+            | HistoryV2ViewChanged { .. }
     ) {
         PublicationIntent::Deferred
     } else {

@@ -162,7 +162,23 @@ typed schema、默认值、领域合并、scope/revision/explain/update 归
 | handler 契约 | `CommandHandler`（command_handler.rs:30）、`CommandOutcome`（:15）；注册表 `command_registry` 顶层 re-export（lib.rs:38） |
 | 注册表测试 | `command_registry_test.rs` 覆盖路由、冲突与并发索引；`command_registry_change_test.rs` 覆盖注销和变更投影；`command_registry_source_test.rs` 覆盖发现、重连与旧 handle 拒绝；统一过滤 `command_registry::` |
 
-### 其余契约模块（src/）
+### history_v2（src/history_v2.rs + 私有 history_v2/）
+
+统一历史加载 V2 的**纯契约**：不接运行路径、不读数据库、不修改 V1 类型。大整数统一 `DecimalU64`（规范十进制字符串），所有请求/响应/子结构 `deny_unknown_fields`；枚举以 `kind`/`action` tag 判别。
+
+| 功能 | 入口/关键点 |
+| --- | --- |
+| 顶层常量与导出 | `history_v2.rs`：`HISTORY_V2_VERSION=2`、`HISTORY_V2_PROJECTION_VERSION`、`HISTORY_META_KEY="peri.history"`、`HISTORY_METHOD="_peri/history"`、`HISTORY_CHANGED_NOTIFICATION`、`HISTORY_PROFILE_WINDOWED`、`HISTORY_DOMAIN`；预算上限 `HISTORY_MAX_ITEMS` / `HISTORY_MIN_TARGET_PAGE_BYTES` / `HISTORY_MAX_TARGET_PAGE_BYTES` / `HISTORY_MAX_BODY_CHUNK_BYTES` / `HISTORY_IDENTITY_MAX_BYTES` / `HISTORY_TOKEN_MAX_BYTES` |
+| 协商 | `negotiation.rs`：`HistoryClientCapability::{parse_from_meta,select}`、`HistoryServerCapability::{to_meta,parse_from_meta}`、`HistoryLimits`；默认 `maxWindowsPerConnection=8`、items/target/响应/正文块默认值。客户端必须显式请求 `windowed`；服务端只回显自己兑现的能力 |
+| initial | `initial.rs`：`HistoryInitialRequest`（`action=initial`、`requestKey`、`limit`、`targetBytes`）、`HistoryInitialResult`（`deliveryId`、`liveBoundary{streamId,afterSeq}`、`executionReady`、`runtimeGeneration`、`page`）；`liveBoundary.afterSeq` 之前的实时事件属于首屏覆盖范围 |
+| 只读 RPC | `request.rs`：`HistoryRequest::{Open,Page,Seek,Body,Close}` 严格解码；page 的 `cursor` 缺省走窗口 home，`direction` 与 cursor 必须同向；seek 只接受 entry 锚点；body 的 `offset/maxBytes` 先做范围/溢出校验 |
+| 页面与条目 | `page.rs`：`HistoryWindowPage`（`windowId`/`snapshotToken`/`readTicket`/`historyRevision`/`committedTail`/`projectionVersion`/`beforeCursor`/`afterCursor`/`items`/`coverage`/`progress`）；`HistoryEntry`（稳定 `entryId`、`source`、`contentVersion`、`durability`、`order`、`subItems`）；`HistorySubItem` 变体 `text/reasoning/toolCall/toolResult/reminder/summary/attachment/opaque`。`HistorySubItem::Opaque` 只带身份与 `HistoryBodyDescriptor`，不承载内联正文 |
+| 正文 | `body.rs`：`HistoryBodyDescriptor`（`bodyRef`/`representation`/`mediaType`/`totalBytes`/`chunkBytes`）与 `HistoryBodyChunk`（`data` 为 base64、`nextOffset`/`complete`、`contentVersion`）。`representation` 序列化为 kebab-case（`display-text`/`display-binary`/`display-json`）。page descriptor 的 `totalBytes` 是 canonical payload 预估；body 响应的 `totalBytes` 才是投影展示长度的权威 |
+| 后端 port | `backend.rs`：`HistoryV2Backend::{open,page,seek,body}`、`HistoryOpenedSnapshot`、`HistorySnapshotRef`、`HistoryPageData`、`HistoryBodySlice`、`HistoryBackendError`（reason/recovery/message 映射为领域错误）；adapter 合同由每个后端分别兑现 |
+| 后端能力判定 | `session_resources.rs`：`SessionResources::supports_history_v2` 默认 `false`，本地 SQLite 覆写 `true`；`peri-acp` 的 `initialize` 只有在该判据为真时才回显 `peri.history`，未实现的后端 fail-closed |
+| 错误 | `error.rs`：`HistoryErrorData`、`HistoryErrorReason`（`invalid_cursor`/`cross_window_cursor`/`snapshot_invalidated`/`window_closed`/`ticket_invalid`/`permission_denied`/`not_found`/`index_not_ready`/`source_unavailable`/`capacity_exceeded`/`budget_exceeded`/`operation_in_progress`/`delivery_expired`/`busy` 等）、`HistoryEffect`/`ExecutionEffect`/`HistoryRecovery`；JSON-RPC code 由 `peri-acp` 的 session caps/错误映射决定 |
+| 回归 | `src/history_v2_test.rs`（`history_v2::tests`：解码、预算、page/subItem 形状、协商）与其中的 `body_and_opaque_tests`（`src/history_v2_body_test.rs`：body 形状与 `totalBytes`）；宿主层回归见 `peri-acp` 的 `history_service/*_test`、`history_v2_adapter*_test`、`history_v2_load_test`、`history_v2_end_to_end_test` |
+
 
 `session_resources.rs` 的 `SessionAvailability` 只提供存储访问、持久化与执行环境事实，不提供 unreleased owner。`session/load` / `session/resume` 不返回 ownership 只读准入；执行唯一性与接管由 `peri-sdk` 负责。
 

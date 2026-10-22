@@ -113,7 +113,12 @@ pub(super) fn request_newer_page_at_scroll_facts(
                 viewport_length,
             )
         };
-    at_boundary && crate::kit::history_page_consumer::request_window_newer_page_if_due()
+    at_boundary
+        && if crate::kit::history_v2::consumer::v2_path_active() {
+            crate::kit::history_v2::consumer::request_newer_page_if_due()
+        } else {
+            crate::kit::history_page_consumer::request_window_newer_page_if_due()
+        }
 }
 
 fn request_newer_page_after_scroll(
@@ -168,6 +173,11 @@ fn request_pages_after_scroll(
 pub(super) fn request_gap_page_after_scroll(
     direction: Option<crate::kit::history_window::GapSeekDirection>,
 ) -> bool {
+    if crate::kit::history_v2::consumer::v2_path_active() {
+        // V2 的缺口由 reducer 的 coverage 判定，不依赖 V1 窗口视口锚点。
+        let _ = direction;
+        return crate::kit::history_v2::consumer::request_gap_if_due();
+    }
     if !crate::kit::history_page_consumer::window_path_enabled() {
         return false;
     }

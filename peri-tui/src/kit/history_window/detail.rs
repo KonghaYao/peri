@@ -10,6 +10,22 @@ pub struct DetailDescriptor {
     pub chunk_size: u32,
     pub snapshot_token: String,
     pub read_ticket: String,
+    /// V2 绑定：正文块走 `_peri/history` 的 `body` 动作，身份来自已交付页面。
+    /// `None` = V1 `peri/history/body` 描述符。
+    pub v2: Option<HistoryV2BodyBinding>,
+}
+
+/// 一个 V2 正文的完整请求身份；只保存已交付的 descriptor 与窗口令牌。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HistoryV2BodyBinding {
+    pub session_id: String,
+    pub window_id: String,
+    pub snapshot_token: String,
+    pub read_ticket: String,
+    pub source: peri_acp_types::history_v2::HistorySource,
+    pub entry_id: String,
+    pub sub_item_id: String,
+    pub body_ref: String,
 }
 
 impl super::HistoryWindow {
@@ -79,6 +95,13 @@ impl DetailDescriptor {
             chunk_size,
             snapshot_token: snapshot_token.into(),
             read_ticket: read_ticket.into(),
+            v2: None,
         }
+    }
+
+    /// V2 描述符：`key` 仍用真实条目身份；子项身份在 binding 里单列。
+    pub fn with_v2(mut self, binding: HistoryV2BodyBinding) -> Self {
+        self.v2 = Some(binding);
+        self
     }
 }

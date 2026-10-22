@@ -292,9 +292,14 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
         ctx.total_visual_rows,
         ctx.vis_height as usize,
     );
-    // 跟随态在底部：窗口模式按 after_cursor 拉取更新的一页；consumer 自己合并/退避。
+    // 跟随态在底部：按 after_cursor 拉取更新的一页；consumer 自己合并/退避。
+    // V2 激活时 after 方向也只走同一 reducer，V1 窗口队列不得参与。
     if !browsing {
-        crate::kit::history_page_consumer::request_window_newer_page_if_due();
+        if crate::kit::history_v2::consumer::v2_path_active() {
+            crate::kit::history_v2::consumer::request_newer_page_if_due();
+        } else {
+            crate::kit::history_page_consumer::request_window_newer_page_if_due();
+        }
     }
 
     // ── 粘性跟随 guard ──

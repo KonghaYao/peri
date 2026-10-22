@@ -302,7 +302,15 @@ async fn handle_session_update(
     session_id: &str,
 ) -> Option<AcpEventData> {
     let update = params.get("update")?;
-    match update.get("sessionUpdate").and_then(Value::as_str) {
+    let tag = update.get("sessionUpdate").and_then(Value::as_str);
+    // F2b：带 `_meta["peri.delivery"]` 的 transcript 更新先过接纳门；没有元数据的
+    // V1 路径直接放行。判定必须在 decode / bridge send 之前，跳过即整条不渲染。
+    if crate::kit::history_v2::live::gate_session_update(session_id, tag, &params)
+        == crate::kit::history_v2::live::LiveGate::Skip
+    {
+        return None;
+    }
+    match tag {
         Some("available_commands_update") => {
             let entries = session_update::decode_commands(update)?;
             let len = entries.len();
@@ -342,9 +350,102 @@ async fn handle_session_update(
     }
 }
 
+/// F2b：initial 发布后重放暂存的 live 更新。
+///
+/// 只重放与 initial `liveBoundary.streamId` 相同的 stream；每条先走与实时路径相同
+/// 的接纳门，只有连续的 `Accepted` 才解码为 bridge 事件。返回的事件仍由调用方按
+/// 顺序发送（`publish_initial` 经 `LOCAL_EVENT_TX` 与视图发布同序）。
+pub(crate) fn replay_pending_initial(
+    state: &crate::kit::history_v2::HistoryV2State,
+) -> Vec<AcpEventWithEpoch> {
+    let Some(session_id) = state.session_id.as_deref() else {
+        return Vec::new();
+    };
+    let Some(stream_id) = state
+        .window
+        .as_ref()
+        .and_then(|window| window.paging.live.stream_id.as_deref())
+    else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    for (meta, params) in crate::kit::history_v2::live::take_pending(session_id) {
+        if meta.stream_id != stream_id {
+            debug!(
+                session_id = %session_id,
+                expected = %stream_id,
+                received = %meta.stream_id,
+                "history v2: dropping buffered update from a stale stream"
+            );
+            continue;
+        }
+        match crate::kit::history_v2::live::admit_live_delivery(session_id, &meta) {
+            crate::kit::history_v2::live::HistoryV2LiveAdmission::Accepted { .. } => {
+                events.extend(decode_live_update(&params, session_id));
+            }
+            admission => {
+                debug!(
+                    session_id = %session_id,
+                    seq = meta.seq.get(),
+                    ?admission,
+                    "history v2: buffered live update not replayed"
+                );
+            }
+        }
+    }
+    events
+}
+
+/// 与实时 notifier 同一套解码：条目位置标记先于内容事件。
+fn decode_live_update(params: &Value, session_id: &str) -> Vec<AcpEventWithEpoch> {
+    let Some(update) = params.get("update") else {
+        return Vec::new();
+    };
+    let decoded = session_update::decode_stream_update(params, session_id);
+    let Some(event) = decoded.event else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    if let Some((entry_id, position)) = session_update::decode_entry_marks(update) {
+        events.push(AcpEventWithEpoch {
+            event: AcpEventData::ReplayEntryMarked { entry_id, position },
+            active_session_id: session_id.to_string(),
+        });
+    }
+    events.push(AcpEventWithEpoch {
+        event,
+        active_session_id: session_id.to_string(),
+    });
+    events
+}
+
+/// 把重放事件按顺序送入 bridge（与 `HistoryV2ViewChanged` 共用 LOCAL_EVENT_TX）。
+pub(crate) fn dispatch_local_events(events: Vec<AcpEventWithEpoch>) {
+    if events.is_empty() {
+        return;
+    }
+    let Some(tx) = crate::kit::atoms::LOCAL_EVENT_TX.get() else {
+        debug!(
+            count = events.len(),
+            "history v2: LOCAL_EVENT_TX unavailable; replayed live updates dropped"
+        );
+        return;
+    };
+    for event in events {
+        if tx.send(event).is_err() {
+            debug!("history v2: LOCAL_EVENT_TX closed; stopping replay");
+            break;
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "acp_notifier_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "acp_notifier_live_test.rs"]
+mod live_tests;
 
 #[cfg(test)]
 #[path = "acp_notifier_agent_test.rs"]

@@ -67,6 +67,19 @@ impl AcpTuiClient {
             .send_request("session/history/body", params)
             .await
     }
+
+    /// History V2 的唯一 RPC 出口（open/page/seek/body/close）。
+    ///
+    /// 参数由 `history_v2::consumer` 或详情面板按 reducer 分配的身份构造；本方法
+    /// 不做二次校验，也不在失败时降级到 V1。
+    pub(crate) async fn history_v2_request(
+        &self,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, AcpError> {
+        self.transport
+            .send_request(peri_acp_types::history_v2::HISTORY_METHOD, params)
+            .await
+    }
 }
 
 #[cfg(test)]

@@ -695,6 +695,11 @@ pub(crate) fn request_older_page_at_boundary(
 /// 返回 `true` 表示本次真的派发了请求。相同 cursor + 相同 limit 已在途时**合并**
 /// 为一个请求（不重复派发，REQ-C01-2）；未协商 / 没有下一页 / 退避窗口内都是 no-op。
 pub(crate) fn request_older_page_if_due(near_forward_boundary: bool) -> bool {
+    // V2 激活时页请求只走 V2 reducer（before 方向），旧页/旧窗口两套队列都不参与。
+    if crate::kit::history_v2::consumer::v2_path_active() {
+        return near_forward_boundary
+            && crate::kit::history_v2::consumer::request_older_page_if_due();
+    }
     if crate::kit::history_page_consumer::window_path_enabled() {
         return near_forward_boundary
             && crate::kit::history_page_consumer::request_window_older_page_if_due();
