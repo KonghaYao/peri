@@ -23,10 +23,21 @@ impl CurrentTurn {
     ///    claim 的 Agent 卡片（到达顺序兜底，语义同修复前）。
     ///
     /// 两条路都找不到落点时，段先记在尾部并进入待配对表，等卡片到达再迁移。
+    /// 同步 subagent 的默认入口；后台组由事件处理器走显式变体。
     pub fn start_subagent(
         &mut self,
         agent_id: String,
         agent_name: String,
+        parent_tool_call_id: Option<String>,
+    ) {
+        self.start_subagent_with_background(agent_id, agent_name, false, parent_tool_call_id);
+    }
+
+    pub fn start_subagent_with_background(
+        &mut self,
+        agent_id: String,
+        agent_name: String,
+        is_background: bool,
         parent_tool_call_id: Option<String>,
     ) {
         // Duplicate Start for the same live occurrence is idempotent. A resume,
@@ -70,8 +81,9 @@ impl CurrentTurn {
                 .push(TurnSegment::SubAgent { subagent_idx: idx });
         }
 
-        self.subagents
-            .push(SubAgentAccumulator::new(agent_id, agent_name));
+        let mut subagent = SubAgentAccumulator::new(agent_id, agent_name);
+        subagent.is_background = is_background;
+        self.subagents.push(subagent);
         self.active = true;
         self.invalidate_cache();
     }
@@ -193,6 +205,14 @@ impl CurrentTurn {
 
     pub fn has_running_subagent(&self) -> bool {
         self.subagents.iter().any(|subagent| subagent.is_running)
+    }
+
+    /// 仅同步 subagent 需要在 turn 边界后继续接收事件；后台组由全局 live
+    /// 明细维护，跨 turn 时必须冻结，不能保留活动容器。
+    pub fn has_running_sync_subagent(&self) -> bool {
+        self.subagents
+            .iter()
+            .any(|subagent| subagent.is_running && !subagent.is_background)
     }
 
     /// [诊断] 返回当前所有 SubAgentAccumulator 的 agent_id 列表。

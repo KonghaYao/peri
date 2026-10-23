@@ -258,17 +258,25 @@ fn test_turn_interrupted_archive_registers_resident_bytes() {
     );
 }
 
-/// [回归测试] 带运行中 subagent 的挂起仍保持冻结语义：子组归档、trailing
-/// 冻结为 Completed 形态，正文计入窗口预算；不因统一入口而无限保留。
+/// [回归测试] 挂起时同步 subagent 仍在运行：稳定前缀归档、活动组保留在
+/// current_turn，后续 stopped/done 仍能找到它并完成归档。
 #[test]
 #[serial]
-fn test_turn_suspended_freezes_running_subagent_and_registers_bytes() {
+fn test_turn_suspended_preserves_running_sync_subagent_and_registers_bytes() {
     let mut state = make_fold_test_state();
     state.active_session_id = "s1".into();
     state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
     state
         .window
         .begin_window(WindowIdentity::new("s1", "gen-1", 7, "snap-1"));
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+            text: "stable-prefix".into(),
+            message_id: None,
+            agent_id: None,
+        }),
+    );
     dispatch_and_notify(
         &mut state,
         &AcpEventData::SubagentStarted {
@@ -286,37 +294,48 @@ fn test_turn_suspended_freezes_running_subagent_and_registers_bytes() {
             agent_id: Some("child".into()),
         }),
     );
-    assert!(state.current_turn.has_running_subagent());
+    assert!(state.current_turn.has_running_sync_subagent());
 
     dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
     assert!(
-        state.current_turn.is_empty(),
-        "挂起仍要 reset current_turn（保留既有冻结语义）"
+        state.current_turn.has_running_sync_subagent(),
+        "挂起不得 reset 仍在运行的同步组"
     );
-    let group = state
-        .committed
-        .iter()
-        .find_map(|unit| match unit {
-            TuiRenderUnit::TuiSubAgentGroup(group) => Some(group),
-            _ => None,
-        })
-        .expect("运行中子组必须作为冻结快照归档");
     assert!(
-        group.is_running,
-        "子组仍标记 running（subagent-stopped 未到）"
+        state.committed.iter().any(|unit| matches!(
+            unit,
+            TuiRenderUnit::TuiAssistantBubble(bubble) if bubble.text == "stable-prefix"
+        )),
+        "子组之前的稳定正文必须归档"
     );
-    let bubble = group
-        .view_models
-        .iter()
-        .find_map(|unit| match unit {
-            TuiRenderUnit::TuiAssistantBubble(bubble) => Some(bubble),
-            _ => None,
-        })
-        .expect("子组正文必须保留");
-    assert!(!bubble.text.is_empty(), "挂起归档必须保留子组已产出的正文");
     assert!(
         state.window.budget().unattributed_live_bytes > 0,
-        "带运行中子组的挂起正文必须计入驻留预算"
+        "归档正文必须计入驻留预算"
+    );
+    assert!(
+        state
+            .current_turn
+            .view_models()
+            .iter()
+            .any(|unit| matches!(unit, TuiRenderUnit::TuiSubAgentGroup(_))),
+        "活动组必须保留在 current_turn 等待后续事件"
+    );
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "child".into(),
+            result: "done".into(),
+            is_error: false,
+        },
+    );
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    assert!(
+        state.committed.iter().any(|unit| matches!(
+            unit,
+            TuiRenderUnit::TuiSubAgentGroup(group) if group.agent_id == "child"
+        )),
+        "stopped 后活动组必须在 turn 结束时完成归档"
     );
 }
 

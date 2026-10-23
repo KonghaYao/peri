@@ -476,3 +476,107 @@ fn test_loading_reset_then_turn_interrupted_keeps_idle() {
         "取消后 loading 不得闪回"
     );
 }
+
+/// [回归] TurnSuspended 不得丢弃仍在运行的同步 subagent：
+/// 归档已产出前缀后保留活动组，后续 SubagentStopped 仍能落到同一容器。
+#[test]
+#[serial]
+fn test_turn_suspended_keeps_running_subagent() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    let mut state = make_state(SessionPhase::PromptRunning, 0);
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "sync-1".into(),
+            agent_name: "coder".into(),
+            is_background: false,
+            parent_tool_call_id: None,
+        },
+    );
+    assert!(state.current_turn.has_running_subagent());
+
+    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    assert!(
+        state.current_turn.has_running_subagent(),
+        "挂起后运行中的 subagent 必须保留"
+    );
+    assert_eq!(state.current_turn.subagent_ids(), vec!["sync-1"]);
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "sync-1".into(),
+            result: "done".into(),
+            is_error: false,
+        },
+    );
+    assert!(!state.current_turn.has_running_subagent());
+    assert_eq!(state.current_turn.subagent_ids(), vec!["sync-1"]);
+}
+
+/// [回归] stale TurnInterrupted 只归档旧 turn 前缀，不重置仍在运行的组。
+#[test]
+#[serial]
+fn test_stale_interrupt_keeps_running_subagent() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    let mut state = make_state(SessionPhase::PromptRunning, 0);
+    state.turn_generation = 2;
+    state.last_prompt_generation = 1;
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "sync-1".into(),
+            agent_name: "coder".into(),
+            is_background: false,
+            parent_tool_call_id: None,
+        },
+    );
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "stale".into(),
+            request_id: None,
+        },
+    );
+    assert!(
+        state.current_turn.has_running_subagent(),
+        "stale 归档后运行中的 subagent 必须保留"
+    );
+    assert_eq!(state.current_turn.subagent_ids(), vec!["sync-1"]);
+}
+
+/// [回归] 非 stale 取消同样不得重置仍在运行的组，否则 SubagentStopped 丢失。
+#[test]
+#[serial]
+fn test_cancel_interrupt_keeps_running_subagent() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    let mut state = make_state(SessionPhase::PromptRunning, 0);
+    state.turn_generation = 1;
+    state.last_prompt_generation = 1;
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "sync-1".into(),
+            agent_name: "coder".into(),
+            is_background: false,
+            parent_tool_call_id: None,
+        },
+    );
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "user-cancelled".into(),
+            request_id: None,
+        },
+    );
+    assert!(
+        state.current_turn.has_running_subagent(),
+        "取消归档后运行中的 subagent 必须保留"
+    );
+    assert_eq!(state.current_turn.subagent_ids(), vec!["sync-1"]);
+}

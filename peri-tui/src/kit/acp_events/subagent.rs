@@ -21,9 +21,10 @@ pub(super) fn handle_subagent_started(
         existing_subagent_count = state.current_turn.subagent_ids().len(),
         "SubagentStarted: creating SubAgentGroup container"
     );
-    state.current_turn.start_subagent(
+    state.current_turn.start_subagent_with_background(
         agent_id.to_string(),
         agent_name.to_string(),
+        is_background,
         parent_tool_call_id,
     );
     // 仅后台 subagent 注册到 BG_AGENT_IDS——同步 subagent 不进入后台显示区域

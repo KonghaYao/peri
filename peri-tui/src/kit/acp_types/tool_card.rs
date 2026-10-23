@@ -190,6 +190,8 @@ pub struct SubAgentAccumulator {
     pub instance_id: String,
     pub agent_id: String,
     pub agent_name: String,
+    /// 后台 subagent 的生命周期跨 turn，turn 边界只能冻结、不能保留活动容器。
+    pub is_background: bool,
     pub is_running: bool,
     /// 已从父 turn 消费并交给归档入口，不再接受该轮次的事件路由。
     pub archived: bool,
@@ -214,6 +216,7 @@ impl SubAgentAccumulator {
             ),
             agent_id,
             agent_name,
+            is_background: false,
             is_running: true,
             archived: false,
             is_error: false,
