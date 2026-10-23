@@ -120,7 +120,7 @@ async fn cancelled_bridge_stops_process_and_drains_session_ownership() {
     let bash = bridge(&pair, "Bash", true).await;
     let running = tokio::spawn(async move {
         bash.invoke(
-            json!({"command":"echo $$ > started.pid.tmp; mv started.pid.tmp started.pid; exec sleep 60", "timeout":120000}),
+            json!({"command":"echo $$ > started.pid.tmp; mv started.pid.tmp started.pid; exec sleep 30", "timeout":120000}),
             ToolContext::new(&[], "").with_session_identity(SESSION_ID, "recovery-turn"),
         )
         .await
@@ -178,7 +178,7 @@ async fn maximum_foreground_timeout_retains_logs_and_cancellable_task() {
     let receipt = tokio::time::timeout(
         Duration::from_secs(140),
         bash.invoke_output(
-            json!({"command":"echo live-marker; exec sleep 180", "timeout":120000}),
+            json!({"command":"echo live-marker; exec sh -c 'sleep 180'", "timeout":120000}),
             ToolContext::new(&[], &cwd).with_session_identity(SESSION_ID, "recovery-turn"),
         ),
     )
@@ -231,7 +231,7 @@ async fn maximum_foreground_timeout_retains_logs_and_cancellable_task() {
     assert_eq!(active_count_before_cancel, 1);
     assert!(live_output.unwrap().contains("live-marker"));
     assert!(
-        result.contains("Command that timed out: echo live-marker; exec sleep 180"),
+        result.contains("Command that timed out: echo live-marker; exec sh -c 'sleep 180'"),
         "{result}"
     );
 }
@@ -254,7 +254,7 @@ async fn request_timeout_stops_server_shell() {
         &pair.peer(),
         call(
             "Bash",
-            json!({"command":"echo $$ > timeout.pid; exec sleep 60", "timeout":120000}),
+            json!({"command":"echo $$ > timeout.pid; exec sleep 30", "timeout":120000}),
         ),
         Some(Duration::from_secs(1)),
     )
@@ -285,7 +285,7 @@ async fn external_source_keeps_120_second_deadline_and_cancels_execution() {
     let error = tokio::time::timeout(
         Duration::from_secs(130),
         bash.invoke(
-            json!({"command":"echo $$ > external.pid; exec sleep 180", "timeout":120000}),
+            json!({"command":"echo $$ > external.pid; exec sh -c 'sleep 180'", "timeout":120000}),
             ToolContext::new(&[], &cwd).with_session_identity(SESSION_ID, "recovery-turn"),
         ),
     )

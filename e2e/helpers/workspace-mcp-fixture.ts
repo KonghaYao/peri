@@ -31,7 +31,7 @@ export const SUBAGENT_PROMPT = "W6-SUBAGENT-TASK-TEXT";
 export const GAP_AGENT = "gap-agent";
 export const GAP_SKILL = "missing-skill-x";
 export const GAP_SUBAGENT_PROMPT = "W6-GAP-SUBAGENT-TASK-TEXT";
-export const WORKSPACE_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "folder_operations", "Bash"];
+export const WORKSPACE_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "folder_operations", "Bash", "TaskOutput"];
 export const SKILL_SECTION_MARKER = "你可以使用以下 Skills";
 export const MODEL_REPLY = "W6-MODEL-REPLY";
 

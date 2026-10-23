@@ -149,7 +149,8 @@ async fn image_custom_request_uses_wire_without_adding_model_tools() {
             "Glob",
             "Grep",
             "folder_operations",
-            "Bash"
+            "Bash",
+            "TaskOutput"
         ]
     );
     let result = peer

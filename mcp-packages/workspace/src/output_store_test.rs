@@ -113,7 +113,7 @@ async fn output_wire_stores_and_reads_in_the_tool_environment() {
     assert!(serde_json::to_string(&page)
         .unwrap()
         .contains("远程完整输出"));
-    assert_eq!(client.peer().list_all_tools().await.unwrap().len(), 7);
+    assert_eq!(client.peer().list_all_tools().await.unwrap().len(), 8);
     assert!(client
         .peer()
         .send_request(ClientRequest::CustomRequest(CustomRequest::new(

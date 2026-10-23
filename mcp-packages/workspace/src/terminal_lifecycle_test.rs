@@ -32,7 +32,7 @@ async fn test_cancelled_foreground_shell_retains_owner_until_process_exit() {
     let tool = BashTool::new(fixture.path().to_str().unwrap()).with_task_manager(manager.clone());
     let command = tokio::spawn(async move {
         tool.invoke(
-            serde_json::json!({"command": "echo $$ > ready; sleep 60", "timeout": 0}),
+            serde_json::json!({"command": "echo $$ > ready; sleep 30", "timeout": 0}),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await

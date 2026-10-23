@@ -4,8 +4,15 @@ use std::sync::Arc;
 use peri_acp_types::session::InboxHandle;
 use peri_acp_types::tasks::TaskManager;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ExternalTaskRoute {
+    pub(crate) server: String,
+    pub(crate) raw_id: String,
+}
+
 #[derive(Default)]
 struct Binding {
+    routes: HashMap<String, ExternalTaskRoute>,
     inbox: Option<InboxHandle>,
     manager: Option<Arc<dyn TaskManager>>,
     registered: bool,
@@ -17,6 +24,49 @@ pub(crate) struct SessionBindings {
 }
 
 impl SessionBindings {
+    pub(crate) fn record_external_task_route(
+        &mut self,
+        session: &str,
+        public_id: &str,
+        server: &str,
+        raw_id: &str,
+    ) -> Result<(), String> {
+        let binding = self
+            .current
+            .get_mut(session)
+            .ok_or("unknown task for this session")?;
+        let route = ExternalTaskRoute {
+            server: server.into(),
+            raw_id: raw_id.into(),
+        };
+        if binding
+            .routes
+            .get(public_id)
+            .is_some_and(|existing| existing != &route)
+        {
+            return Err("conflicting external task route".into());
+        }
+        binding.routes.insert(public_id.into(), route);
+        Ok(())
+    }
+
+    pub(crate) fn resolve_external_task_route(
+        &self,
+        session: &str,
+        public_id: &str,
+        server: &str,
+    ) -> Result<ExternalTaskRoute, String> {
+        let route = self
+            .current
+            .get(session)
+            .and_then(|binding| binding.routes.get(public_id))
+            .ok_or("unknown task for this session")?;
+        if route.server != server {
+            return Err("task belongs to a different server".into());
+        }
+        Ok(route.clone())
+    }
+
     #[cfg(test)]
     pub(crate) fn registered_sessions(&self) -> Vec<String> {
         self.current
@@ -90,3 +140,7 @@ impl SessionBindings {
         self.current.remove(session);
     }
 }
+
+#[cfg(test)]
+#[path = "session_bindings_test.rs"]
+mod tests;

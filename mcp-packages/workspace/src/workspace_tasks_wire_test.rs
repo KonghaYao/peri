@@ -153,6 +153,27 @@ async fn task_owner_isolation_hides_and_protects_other_sessions_tasks() {
         "owner B must not read owner A's task"
     );
 
+    let mut other_output = CallToolRequestParams::new("TaskOutput").with_arguments(
+        serde_json::json!({"task_id":task_id})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    other_output.meta = Some(owner_meta("session-b"));
+    assert!(client.peer().call_tool_once(other_output).await.is_err());
+    let mut own_output = CallToolRequestParams::new("TaskOutput").with_arguments(
+        serde_json::json!({"task_id":task_id,"wait_ms":1})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    own_output.meta = Some(owner_meta("session-a"));
+    let CallToolResponse::Complete(output) =
+        client.peer().call_tool_once(own_output).await.unwrap()
+    else {
+        panic!("Complete diagnostic")
+    };
+    assert_eq!(output.structured_content.unwrap()["wait_timed_out"], true);
     let mut other_cancel = CancelTaskParams::new(&task_id);
     other_cancel.meta = Some(owner_meta("session-b"));
     assert!(
@@ -471,6 +492,25 @@ async fn foreground_timeout_promotion_returns_queryable_task() {
         .await
         .expect("promoted task immediately queryable");
     assert_eq!(initial.task.task.task_id, task_id);
+    let CallToolResponse::Complete(diagnostic) = client
+        .peer()
+        .call_tool_once(
+            CallToolRequestParams::new("TaskOutput").with_arguments(
+                serde_json::json!({"task_id":task_id,"wait_ms":1000})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .expect("promoted output via real MCP")
+    else {
+        panic!("diagnostic must be Complete")
+    };
+    let diagnostic = diagnostic.structured_content.unwrap();
+    assert_eq!(diagnostic["status"], "completed");
+    assert_eq!(diagnostic["output"]["stdout"], "promoted");
+    assert!(!diagnostic.to_string().contains(&task_id));
     let terminal = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let snapshot = client
@@ -493,6 +533,69 @@ async fn foreground_timeout_promotion_returns_queryable_task() {
         server.shutdown_shell_tasks().await,
         Some(peri_acp_types::tasks::TaskShutdownReport::Complete)
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn long_sleep_wire_rejection_has_no_execution_or_task_side_effects() {
+    let _env_lock = peri_mcp_common::process_env::lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let logs = tempfile::tempdir().unwrap();
+    struct RestoreTemp(Option<std::ffi::OsString>);
+    impl Drop for RestoreTemp {
+        fn drop(&mut self) {
+            if let Some(value) = &self.0 {
+                std::env::set_var("TMPDIR", value);
+            } else {
+                std::env::remove_var("TMPDIR");
+            }
+        }
+    }
+    let _restore = RestoreTemp(std::env::var_os("TMPDIR"));
+    std::env::set_var("TMPDIR", logs.path());
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let (client, server_task) = connect(
+        server.clone(),
+        ClientCapabilities::builder().enable_tasks().build(),
+    )
+    .await;
+    for (command, background, code) in [
+        (
+            "printf bad > sentinel; sleep 60",
+            false,
+            "foreground_long_sleep",
+        ),
+        ("sleep 60", true, "background_pure_sleep"),
+    ] {
+        let response = client
+            .peer()
+            .call_tool_once(
+                CallToolRequestParams::new("Bash").with_arguments(
+                    serde_json::json!({"command":command,"run_in_background":background})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+            )
+            .await
+            .unwrap();
+        let CallToolResponse::Complete(result) = response else {
+            panic!("rejection cannot start task")
+        };
+        assert_eq!(result.is_error, Some(true));
+        let content = result.structured_content.unwrap();
+        assert_eq!(content["code"], code);
+        assert_eq!(content["started"], false);
+        assert_eq!(content["threshold_ms"], 60000);
+        assert!(!dir.path().join("sentinel").exists());
+        let tasks = server.shell_tasks.as_ref().unwrap();
+        assert_eq!(tasks.tracked_count(), 0);
+        assert!(tasks.manager().is_execution_idle());
+        assert_eq!(std::fs::read_dir(logs.path()).unwrap().count(), 0);
+    }
+    drop(client);
+    server_task.await.unwrap();
+    server.shutdown_shell_tasks().await;
 }
 
 // ── beta flag `full-async-tools`（生产路径：`standalone` 注入有效缺省）──────

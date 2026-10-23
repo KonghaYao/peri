@@ -261,8 +261,9 @@ fn find_hits_only_implemented_instances() {
             "Grep",
             "folder_operations",
             "Bash",
+            "TaskOutput",
         ]),
-        "workspace 的工具面必须恰为迁移前的 7 个本地工具"
+        "workspace 的工具面必须恰为 8 个工具（含 TaskOutput）"
     );
 
     // 未登记的名字：不得被解析（否则会构造出无 runtime 的 transport）。
@@ -307,6 +308,10 @@ fn original_tool_name_of_effective_hits_frozen_literals() {
         Some("folder_operations")
     );
     assert_eq!(original_tool_name_of_effective("Bash"), Some("Bash"));
+    assert_eq!(
+        original_tool_name_of_effective("TaskOutput"),
+        Some("TaskOutput")
+    );
 }
 
 #[test]

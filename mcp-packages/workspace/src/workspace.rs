@@ -1,8 +1,8 @@
-//! `workspace` builtin MCP handler wraps six filesystem tools and `BashTool`; it does not define
-//! a second tool schema or execution path. `peri-mcp-common` owns tools/list conversion,
+//! `workspace` builtin MCP handler wraps six filesystem tools, `BashTool`, and `TaskOutputTool`;
+//! it does not define a second tool schema or execution path. `peri-mcp-common` owns tools/list conversion,
 //! tools/call mapping, and safe failure projection.
 //!
-//! Construction freezes one host cwd and gives it to all seven tools. This does not create a
+//! Construction freezes one host cwd and gives it to all eight tools. This does not create a
 //! capability root: filesystem tools can still address absolute paths outside cwd, and Bash is
 //! not a sandbox. Do not infer stronger isolation from cwd binding.
 //!
@@ -10,7 +10,7 @@
 //! over MCP Tasks. The direct `new` constructor retains its injected-manager seam for legacy
 //! tool tests; the builtin dispatcher and independent CLI do not use it.
 //!
-//! The handler does not override `discover`; besides the seven tools it exposes the git ref
+//! The handler does not override `discover`; besides the eight tools it exposes the git ref
 //! resource (`workspace://git/ref`) and the 2026-07-28 subscription surface
 //! (`accepted_subscription_filter` + `listen`) that carries git ref changes to the host.
 //! Tool failures use shared allowlisted recovery text; request cancellation drops the tool
@@ -66,7 +66,7 @@ const WORKSPACE_SERVER_NAME: &str = "peri-workspace-mcp";
 /// git ref 资源的展示名（与 URI 一起出现在 `resources/list`）。
 const GIT_REF_RESOURCE_NAME: &str = "git-ref";
 
-/// `workspace` 实例的 handler：持有 7 个既有工具（**同一份** `BaseTool` 实现）与一个
+/// `workspace` 实例的 handler：持有 8 个既有工具（**同一份** `BaseTool` 实现）与一个
 /// 构造期冻结的 host cwd。
 ///
 /// cwd 在构造时取一次；`list_tools` 不重算、运行期不可变更（与 pool 的 `execution_cwd`
@@ -96,11 +96,11 @@ pub struct WorkspaceMcpServer {
 }
 
 impl WorkspaceMcpServer {
-    /// 生产构造：按 cwd 实例化 7 个既有工具，并把 session 级输入（若有）转交 `BashTool`。
+    /// 生产构造：按 cwd 实例化 8 个既有工具，并把 session 级输入（若有）转交 `BashTool`。
     ///
     /// 顺序 = 注册表 `WORKSPACE_TOOLS` 的声明顺序（`list_tools_of` 保留本向量顺序）：
-    /// 6 个文件工具 Read → Write → Edit → Glob → Grep → folder_operations，`Bash` 作为
-    /// 唯一执行类工具排在末位（与 `namespace()` 的 `filesystem` / `execution` 分组一致）。
+    /// 6 个文件工具 Read → Write → Edit → Glob → Grep → folder_operations；
+    /// `Bash` 排在第 7 项，随后是 `TaskOutput` 诊断工具（`execution` 分组）。
     /// v4-part-4 W3-C1 后链上已无 middleware 提供面（原 `FilesystemMiddleware::build_tools`
     /// 的顺序参照随之失效）：本段顺序的**唯一**事实源是注册表声明顺序，两处由
     /// `workspace_test.rs` 的声明段用例锁定。
@@ -129,6 +129,7 @@ impl WorkspaceMcpServer {
             Arc::new(GrepTool::new(cwd.as_str())),
             Arc::new(FolderOperationsTool::new(cwd.as_str())),
             bash.clone(),
+            Arc::new(crate::task_output::TaskOutputTool),
         ];
         Self {
             tools,
@@ -158,7 +159,12 @@ impl WorkspaceMcpServer {
                 .with_on_bg_complete(tasks.completion_callback())
                 .with_default_run_in_background(default_run_in_background),
         );
-        server.tools[6] = bash.clone();
+        let bash_slot = server
+            .tools
+            .iter_mut()
+            .find(|tool| tool.name() == "Bash")
+            .expect("Bash is a declared Workspace tool");
+        *bash_slot = bash.clone();
         server.bash = bash;
         server.shell_tasks = Some(tasks);
         server
@@ -202,6 +208,21 @@ impl WorkspaceMcpServer {
                 .and_then(|args| args.get("command"))
                 .and_then(serde_json::Value::as_str)
                 .ok_or_else(|| McpError::invalid_params("missing Bash command", None))?;
+            if let Some(rejection) = crate::foreground_sleep::reject_long_sleep(
+                command,
+                true,
+                crate::foreground_sleep::ShellPlatform::current(),
+            ) {
+                let mut result =
+                    rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(
+                        rejection.text(),
+                    )]);
+                result.structured_content = Some(
+                    serde_json::to_value(rejection)
+                        .map_err(|error| McpError::internal_error(error.to_string(), None))?,
+                );
+                return Ok(CallToolResponse::Complete(result));
+            }
             let timeout_input = serde_json::Value::Object(arguments.cloned().unwrap_or_default());
             let timeout = parse_background_timeout(&timeout_input)
                 .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
@@ -221,7 +242,7 @@ impl WorkspaceMcpServer {
             return Ok(CallToolResponse::Complete(
                 peri_mcp_common::result_mapping::with_execution(
                     rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
-                        format!("Background shell task started.\ntask_id: {}", task.task_id),
+                        format!("Background shell task started.\ntask_id: {}\nContinue independent work; use TaskOutput for diagnosis, do not sleep or query in a polling loop, and rely on completion notifications. Use health checks for service readiness; use a bounded background watch for CI.", task.task_id),
                     )]),
                     Some(&evidence),
                 ),
@@ -237,8 +258,10 @@ impl WorkspaceMcpServer {
         let bash = BashTool::new(&self.cwd)
             .with_task_manager(tasks.manager())
             .with_on_bg_complete(callback)
-            .with_on_bg_started(Arc::new(move |task_id| {
-                started_owner.track_promoted_owned(task_id, started_operation_owner.as_deref());
+            .with_on_bg_started(Arc::new(move |output| {
+                started_owner.retain_promoted_output(output);
+                started_owner
+                    .track_promoted_owned(&output.task_id, started_operation_owner.as_deref());
             }));
         let result = match bash.execute(input, ToolContext::new(&[], &self.cwd)).await {
             Ok(output) => {
@@ -256,8 +279,14 @@ impl WorkspaceMcpServer {
                         return Ok(CallToolResponse::Task(CreateTaskResult::new(task)));
                     }
                 }
+                let rejection = output
+                    .rejection
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|error| McpError::internal_error(error.to_string(), None))?;
                 let output = output.into_tool_output();
-                let result = if output.is_error() == Some(true) {
+                let mut result = if output.is_error() == Some(true) {
                     rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(
                         output.text,
                     )])
@@ -266,6 +295,7 @@ impl WorkspaceMcpServer {
                         output.text,
                     )])
                 };
+                result.structured_content = rejection;
                 peri_mcp_common::result_mapping::with_execution(result, output.execution.as_ref())
             }
             Err(error) => {
@@ -706,7 +736,7 @@ impl ServerHandler for WorkspaceMcpServer {
         let owner = self.task_owner(&context)?;
         let owner = owner.as_deref();
         // 传实例冻结的 host cwd（不走 `web` / `cron` 的空串形态）。**注意**：本参
-        // 只落进 `ToolContext`，而本波 7 个工具都忽略 `ToolContext`（`invoke` 的 `_ctx`），
+        // 只落进 `ToolContext`，而本波 8 个工具都忽略 `ToolContext`（`invoke` 的 `_ctx`），
         // 真正生效的 cwd 绑定点是 [`Self::new`] 注入各工具的 `cwd` 字段——不得据本行推断
         // 「cwd 由 `tools/call` 决定」（反例实验证据见 `workspace_test.rs` 模块头）。
         let response = tokio::select! {
@@ -715,6 +745,9 @@ impl ServerHandler for WorkspaceMcpServer {
             result = async {
                 if request.name.as_ref() == "Bash" && self.shell_tasks.is_some() {
                     self.call_owned_bash(&request, client_supports_tasks, owner).await
+                } else if request.name.as_ref() == "TaskOutput" {
+                    let tasks = self.shell_tasks.as_ref().ok_or_else(|| McpError::invalid_params("TaskOutput requires Workspace-owned tasks", None))?;
+                    crate::task_output::query(tasks, serde_json::Value::Object(request.arguments.clone().unwrap_or_default()), owner).await.map(CallToolResponse::Complete)
                 } else {
                     invoke_tool_call(self.tools(), &self.cwd, &request).await
                 }

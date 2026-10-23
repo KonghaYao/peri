@@ -164,7 +164,7 @@ fn single_contents(result: ReadResourceResult) -> ResourceContents {
 // ─── 能力位与工具面 ───────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn wire_declares_resources_and_keeps_seven_tools() {
+async fn wire_declares_resources_and_keeps_eight_tools() {
     let cwd = tempdir();
     let skills = tempdir();
     let pair = connect(server_with_resources(cwd.path(), skills.path())).await;
@@ -184,7 +184,8 @@ async fn wire_declares_resources_and_keeps_seven_tools() {
             "Glob",
             "Grep",
             "folder_operations",
-            "Bash"
+            "Bash",
+            "TaskOutput"
         ],
         "W1 不得改变七工具声明顺序，也不得新增 SkillTool"
     );

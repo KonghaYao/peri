@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use peri_acp_types::tool_outcome::RawToolResult;
-use peri_agent::tools::BaseTool;
+use peri_agent::tools::{BaseTool, ToolExecutionStatus};
 use rmcp::model::{ContentBlock, Tool};
 use thiserror::Error;
 
@@ -57,6 +57,23 @@ pub struct McpToolBridge {
 /// comes from ConfigSource; other builtins retain the bounded MCP call contract.
 /// In particular Bash must finish promotion and return its receipt at the 120s boundary.
 pub(crate) const TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// 从带内执行事实中提取仍在运行的任务 id；工具文本永不参与解析。
+fn running_task_id(result: &rmcp::model::CallToolResult) -> Option<String> {
+    let value = result
+        .meta
+        .as_ref()?
+        .0
+        .get(peri_acp_types::tools::TOOL_EXECUTION_META_KEY)?;
+    let evidence =
+        serde_json::from_value::<peri_agent::tools::ToolExecutionEvidence>(value.clone()).ok()?;
+    matches!(
+        evidence.status,
+        ToolExecutionStatus::Running | ToolExecutionStatus::RunningAfterTimeout
+    )
+    .then_some(evidence.task_id)
+    .flatten()
+}
 
 /// Sanitize name components to match API tool name pattern: ^[a-zA-Z0-9_-]+$
 pub(crate) fn sanitize_name_component(name: &str) -> String {
@@ -320,6 +337,16 @@ impl BaseTool for McpToolBridge {
                     reason: "session MCP task owner unavailable".into(),
                 }) as Box<dyn std::error::Error + Send + Sync>
             })?;
+        let mut arguments = input.as_object().cloned().unwrap_or_default();
+        if self.tool_name == "TaskOutput" {
+            let public_id = arguments
+                .get("task_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or("TaskOutput requires a public task_id")?;
+            let raw_id =
+                pool.resolve_external_task_route(session_id, public_id, &self.server_name)?;
+            arguments.insert("task_id".into(), raw_id.into());
+        }
         let mut execution_guard = pool
             .begin_external_task_execution(session_id, &self.server_name)
             .map_err(|reason| {
@@ -332,7 +359,6 @@ impl BaseTool for McpToolBridge {
 
         let delivery = ctx.task_terminal_delivery.clone();
         // 2. 构建 rmcp 请求参数
-        let arguments = input.as_object().cloned().unwrap_or_default();
         let mut request = rmcp::model::CallToolRequestParams::new(self.tool_name.clone())
             .with_arguments(arguments);
         // per-call 会话身份（`peri/taskOwner`）随源接线：只有 Workspace 实例
@@ -382,6 +408,24 @@ impl BaseTool for McpToolBridge {
         let result = match response {
             rmcp::model::CallToolResponse::Complete(result) => {
                 execution_guard.confirm_stopped();
+                // 未协商 Tasks 能力的客户端拿到的是 Workspace 内部任务 id；为
+                // TaskOutput 记录一条 raw→raw 的会话内可信路由，避免前缀截取。
+                if self.tool_name == "Bash" {
+                    if let Some(task_id) = running_task_id(&result) {
+                        if let Err(error) = pool.record_external_task_route(
+                            session_id,
+                            &task_id,
+                            &self.server_name,
+                            &task_id,
+                        ) {
+                            tracing::warn!(
+                                %error,
+                                server = %self.server_name,
+                                "failed to record TaskOutput route for running shell task"
+                            );
+                        }
+                    }
+                }
                 result
             }
             rmcp::model::CallToolResponse::Task(created) => {
@@ -429,10 +473,16 @@ impl BaseTool for McpToolBridge {
                         return Err(Box::new(ToolCallError::CallFailed {
                             server: self.server_name.clone(),
                             tool: self.tool_name.clone(),
-                            reason: format!("{reason}; remote task {task_id} started but local registration failed; do not repeat the invocation"),
+                            reason: format!("{reason}; remote task started but local registration failed; do not repeat the invocation"),
                         }));
                     }
                 };
+                pool.record_external_task_route(
+                    session_id,
+                    &public_id,
+                    &self.server_name,
+                    &task_id,
+                )?;
                 if let Err(error) = pool.spawn_managed_task_subscription(
                     self.server_name.clone(),
                     session_id.to_owned(),

@@ -43,7 +43,7 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
   本来就不含 deferred 工具），实例、handler 与 1s tick 保留；
 - `"WorkspaceMiddleware": false`：关闭 builtin `workspace` 实例的工具面
   （`Read` / `Write` / `Edit` / `Glob` / `Grep` /
-  `folder_operations` / `Bash`）。这 7 个工具全部是 direct，因此关闭面是三个真实面
+  `folder_operations` / `Bash` / `TaskOutput`）。这 8 个工具全部是 direct，因此关闭面是三个真实面
   （首个模型请求 tools、subagent `parent_tools`、workflow agent 工具列表）；deferred
   目录与检索面本来就不含 direct 工具（平凡成立）。关闭后链上不再提供任何文件系统与
   shell 工具（该实例之外：外部 MCP server 不在此关闭范围）。实例、handler 与 pool 级
@@ -92,14 +92,18 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 2. **builtin MCP 实例策略键**：`WebMiddleware` / `ArtifactMiddleware` /
    `CronMiddleware` / `WorkspaceMiddleware`
    （`BUILTIN_INSTANCE_POLICY_KEYS`）。v4-part-2 起 Web / Artifact、v4-part-3 起
-   Cron、v4-part-4 起 `workspace`（7 个文件/终端工具：`Read` / `Write` /
-   `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`，模型面名字
+   Cron、v4-part-4 起 `workspace`（8 个文件/终端及诊断工具：`Read` / `Write` /
+   `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash` / `TaskOutput`，模型面名字
    原始名）不再是链槽位——能力由同进程 builtin 实例（`web` /
    `artifact` / `cron` / `workspace`）提供，这四个键是该实例的关闭键；映射唯一来源是声明表
    `peri-acp-types/src/builtin_mcp.rs` 的 `policy_key`，**不按 `mcp__` 前缀或实例名
    硬编码过滤**。实例的另外两条关闭路径是配置片段
    `{"<实例>": {"disabled": true}}` 与进程级环境开关（`PERI_MCP_BUILTIN=off`），
    详见 [MCP 生态参考](reference/mcp-ecosystem.md)。
+
+## 后台任务诊断
+
+`TaskOutput` 是第 8 个 Workspace direct 工具。构建、安装、测试预计超过短前台窗口时优先后台，拿到公共 task_id 后继续独立工作；诊断才用 TaskOutput，不用 sleep 或连续查询等待，没有新信息时交回完成通知。服务就绪使用健康检查，CI 使用带截止时间的后台 watch；只有真实终态才能报告成功。宿主在会话 Binding 内保存 public→server/raw 映射，release 清理，查询同时受 Workspace owner 隔离；关闭 Workspace 也关闭此诊断面。
 
 关闭语义：
 

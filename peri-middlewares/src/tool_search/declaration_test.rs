@@ -398,7 +398,7 @@ fn test_all_real_tool_declarations_render_without_placeholder_residue() {
             "{name} 必须有声明模板（工具实现或 builtin 声明表，全量迁移完成）"
         );
     }
-    // system MCP 的七个 workspace 工具以原名进入 direct 工具面。
+    // system MCP 的八个 workspace 工具以原名进入 direct 工具面。
     for tool in workspace.tools {
         assert!(
             tools.iter().any(|t| t.name() == tool.original_name),
@@ -408,6 +408,8 @@ fn test_all_real_tool_declarations_render_without_placeholder_residue() {
     }
 
     let rendered = collect_declarations(&tools).expect("真实工具集声明段非空");
+    assert!(rendered.contains("`TaskOutput`"));
+    assert!(rendered.contains("Do not poll or sleep"));
     assert!(
         !rendered.contains("{{"),
         "声明段不得残留占位符（含 {{ 未闭合）：\n{rendered}"
