@@ -653,8 +653,15 @@ async fn worktree_session_end_uses_saved_directory_and_drains_resources() {
         assert!(!moved.join("ended").exists());
         if directory_replaced {
             // 同路径换成新对象后 cwd 仍可用：准入通过，SessionEnd 在保存目录执行。
+            // hook 是异步收尾：close 可能在等待窗口内返回并保留任务（由客户端
+            // 重试 join），因此这里等文件副作用，而不是假定 close 返回时已落盘。
+            let ended = target.join("ended");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !ended.exists() && std::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
             assert!(
-                target.join("ended").exists(),
+                ended.exists(),
                 "saved cwd 可用时 SessionEnd 必须在保存目录执行"
             );
         } else {

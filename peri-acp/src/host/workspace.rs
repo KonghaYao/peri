@@ -733,9 +733,10 @@ impl SessionEnvironment {
         if let Some(port) = self.cfg.acp_mcp.as_ref() {
             port.close_session(&self.session_id).await;
         }
-        if !self.finish_session_end().await {
-            return false;
-        }
+        // 终态 hook 的收尾结果不参与关闭成败：hook 是尽力而为的会话通知，
+        // 完成/失败/证据未结算都不得阻止本次资源排空（Windows 上进程启动与
+        // job 结算都可能超过等待窗口）。仅在 hook 仍在飞时要求客户端重试。
+        let end_hooks = self.finish_session_end().await;
         // 关闭顺序第 ① 步（design §5.5 / §4.4）：密封运行时准入（不再接受新 run 与
         // 新任务发布；F6 `CloseGate` 的宿主接线点），随后停止消费者——停止领取新任务、
         // 取消在飞执行并有界等待收口（②③）；订阅随消费者句柄 drop 注销，均先于
@@ -772,10 +773,11 @@ impl SessionEnvironment {
                 failed_services: 0,
             },
         };
-        matches!(
-            task_scope::HostTerminalShutdownReport::aggregate(host, pool, 0),
-            task_scope::HostTerminalShutdownReport::Complete { .. }
-        )
+        end_hooks
+            && matches!(
+                task_scope::HostTerminalShutdownReport::aggregate(host, pool, 0),
+                task_scope::HostTerminalShutdownReport::Complete { .. }
+            )
     }
 
     /// Keep one terminal hook execution across close retries. Its cleanup scope is
@@ -827,12 +829,20 @@ impl SessionEnvironment {
                     tracing::warn!(%error, "SessionEnd hook task failed");
                     *state = SessionEndState::Failed;
                 }
+                // Still in flight: this close cannot claim the hook settled, but the
+                // resource drain must proceed; the client retries to join the same task.
                 Err(_) => return false,
             }
         }
-        let joined = matches!(*state, SessionEndState::Finished | SessionEndState::Skipped);
-        let cleanup = self.cleanup_tasks.shutdown().await;
-        joined && cleanup == peri_acp_types::tasks::TaskShutdownReport::Complete
+        // The hook scope only owns hook processes. Its evidence is advisory: a hook
+        // that exited but whose job accounting has not settled (observed on Windows)
+        // must not keep the session un-closeable forever.
+        if self.cleanup_tasks.shutdown().await
+            != peri_acp_types::tasks::TaskShutdownReport::Complete
+        {
+            tracing::warn!("SessionEnd hook cleanup did not settle");
+        }
+        true
     }
 }
 
