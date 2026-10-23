@@ -432,3 +432,36 @@ fn test_resolve_selected_subagent_falls_back_to_view_models_for_sync_group() {
     assert_eq!(found.instance_id, "instance-sync-agent");
     assert!(resolve_selected_subagent(&snap, &live, &display, Some("nope")).is_none());
 }
+
+/// [回归] 终态正文已释放的 live 明细只剩轻量状态；选中项必须回到仍持有正文的
+/// 归档组，否则详情面板为空。归档组不在快照时仍回退 live（面板可打开）。
+#[test]
+fn test_resolve_selected_subagent_uses_archived_group_when_live_body_released() {
+    let mut archived = make_subagent("bg-agent", "coder");
+    archived.instance_id = "subagent-1".into();
+    archived.view_models = im::Vector::from(vec![text_unit("archived body")]);
+    let snap = ViewModelsSnapshot {
+        items: im::Vector::from(vec![TuiRenderUnit::TuiSubAgentGroup(archived)]),
+        generation: 0,
+    };
+    let live = std::collections::HashMap::from([(
+        "task-1".to_string(),
+        crate::kit::atoms::BgLiveDetail {
+            agent_id: Some("bg-agent".into()),
+            subagent_instance_id: Some("subagent-1".into()),
+            terminal_body_released: true,
+            nested_units: im::Vector::new(),
+            ..Default::default()
+        },
+    )]);
+    let display = vec![bg_display_entry("task-1", "bg-agent")];
+
+    let group = resolve_selected_subagent(&snap, &live, &display, Some("task-1"))
+        .expect("released detail resolves archived group");
+    assert_eq!(nested_texts(&group), vec!["archived body".to_string()]);
+
+    let empty_snap = ViewModelsSnapshot::default();
+    let fallback = resolve_selected_subagent(&empty_snap, &live, &display, Some("task-1"))
+        .expect("live fallback when archive is gone");
+    assert!(fallback.view_models.is_empty());
+}

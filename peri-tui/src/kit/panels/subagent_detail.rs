@@ -12,7 +12,8 @@
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{
-    BG_DISPLAY, BG_LIVE_DETAIL, BgDisplayEntry, LANG_VERSION, SELECTED_SUBAGENT_ID, VIEW_MODELS,
+    BG_DISPLAY, BG_LIVE_DETAIL, BgDisplayEntry, BgLiveDetail, LANG_VERSION, SELECTED_SUBAGENT_ID,
+    VIEW_MODELS,
 };
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::tui_render_unit::{
@@ -440,8 +441,35 @@ fn resolve_selected_subagent(
     display: &[BgDisplayEntry],
     selected_id: Option<&str>,
 ) -> Option<TuiSubAgentGroup> {
+    // 终态正文可能已释放：live 只剩轻量状态，正文仍在归档组里。
+    // 此时优先按 instance（其次 agent、最后 task_id）解析归档组；
+    // 归档组已不在快照时仍回退到 live，保证面板可打开。
+    if let Some(selected_id) = selected_id
+        && let Some(task_id) = live_task_id_for(live, display, selected_id)
+        && let Some(detail) = live.get(&task_id)
+        && detail.terminal_body_released
+        && let Some(archived) = find_released_subagent(vm_snapshot, detail, &task_id)
+    {
+        return Some(archived);
+    }
     find_live_detail_subagent(live, display, selected_id)
         .or_else(|| find_selected_subagent(vm_snapshot, selected_id))
+}
+
+/// 正文已释放的 live 明细对应哪个归档组：instance 优先，其次 agent，最后 task_id。
+fn find_released_subagent(
+    snap: &crate::kit::atoms::ViewModelsSnapshot,
+    detail: &BgLiveDetail,
+    task_id: &str,
+) -> Option<TuiSubAgentGroup> {
+    [
+        detail.subagent_instance_id.as_deref(),
+        detail.agent_id.as_deref(),
+        Some(task_id),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|key| find_selected_subagent(snap, Some(key)))
 }
 
 /// 从 VIEW_MODELS 快照扫描 `TuiSubAgentGroup`，按 instance_id / agent_id 匹配选中项。

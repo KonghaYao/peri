@@ -141,11 +141,19 @@ impl BgStream {
         }
     }
 
-    /// 未投影的 trailing stream 才计入详情正文；投影后正文已由 `nested_units`
-    /// 持有，重复相加会制造假总量。
+    /// 未投影的 trailing stream 计入详情正文；投影后正文已由 `nested_units`
+    /// 持有，逻辑正文不重复相加。但 stream 的 bubble 是独立分配（投影用 clone），
+    /// 其容量仍驻留，因此两种状态都计入 `reserved`。
     fn memory_bytes(&self) -> (usize, usize) {
+        let reserved = self.bubble.text.capacity()
+            + self
+                .bubble
+                .reasoning
+                .as_ref()
+                .map_or(0, |block| block.text.capacity())
+            + self.bubble.message_id.as_ref().map_or(0, String::capacity);
         if self.projected {
-            return (0, 0);
+            return (0, reserved);
         }
         let body = self.bubble.text.len()
             + self
@@ -154,13 +162,6 @@ impl BgStream {
                 .as_ref()
                 .map_or(0, |block| block.text.len())
             + self.bubble.message_id.as_ref().map_or(0, String::len);
-        let reserved = self.bubble.text.capacity()
-            + self
-                .bubble
-                .reasoning
-                .as_ref()
-                .map_or(0, |block| block.text.capacity())
-            + self.bubble.message_id.as_ref().map_or(0, String::capacity);
         (body, reserved)
     }
 }
@@ -498,6 +499,14 @@ pub(crate) fn compact_terminal_detail(
 /// 终态条目数上限：只淘汰正文已释放（或本来无正文）的条目，保留唯一正文。
 ///
 /// 被淘汰条目留下墓碑，迟到事件按墓碑累计丢弃计数。
+/// 首次进入终态时记录完成时刻；重复的终态写入不刷新时间。
+fn mark_terminal(detail: &mut BgLiveDetail, status: BgLiveStatus) {
+    if detail.completed_at.is_none() {
+        detail.completed_at = Some(std::time::Instant::now());
+    }
+    detail.status = status;
+}
+
 pub(crate) fn evict_excess_terminal_details(max: usize) -> usize {
     let live = BG_LIVE_DETAIL.state();
     let mut map = live.write();
@@ -508,18 +517,21 @@ pub(crate) fn evict_excess_terminal_details(max: usize) -> usize {
     if terminal <= max {
         return 0;
     }
-    let mut evictable: Vec<String> = map
+    let mut evictable: Vec<(Option<std::time::Instant>, String)> = map
         .iter()
         .filter(|(_, detail)| {
             detail.status.is_terminal()
                 && detail.nested_units.is_empty()
+                && detail.output_preview.is_none()
+                && detail.subagent_result.is_none()
                 && detail.memory_bytes().body <= TERMINAL_EVICTABLE_BYTES_MAX
         })
-        .map(|(task_id, _)| task_id.clone())
+        .map(|(task_id, detail)| (detail.completed_at, task_id.clone()))
         .collect();
-    evictable.sort();
+    // 先淘汰最早完成的；同一时刻按 task_id 稳定排序。
+    evictable.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     let mut evicted = 0;
-    for task_id in evictable {
+    for (_, task_id) in evictable {
         if terminal <= max {
             break;
         }
@@ -603,12 +615,13 @@ pub fn seed_live_from_terminal_snapshot(
         detail.kind = kind.to_string();
         detail.summary = summary.to_string();
         detail.pid = pid;
-        detail.status = match status {
+        let terminal = match status {
             "completed" => BgLiveStatus::Succeeded,
             "failed" => BgLiveStatus::Failed,
             "cancelled" => BgLiveStatus::Cancelled,
             _ => return,
         };
+        mark_terminal(detail, terminal);
         finalize_nested_reasoning(detail);
         sync_tool_units(detail);
     });
@@ -675,11 +688,14 @@ pub fn handle_bg_subagent_stopped(agent_id: &str, result: &str, is_error: bool) 
     with_live_detail_for_agent(agent_id, |_, detail| {
         detail.subagent_result = Some(result.to_string());
         detail.subagent_is_error = is_error;
-        detail.status = if is_error {
-            BgLiveStatus::Failed
-        } else {
-            BgLiveStatus::Succeeded
-        };
+        mark_terminal(
+            detail,
+            if is_error {
+                BgLiveStatus::Failed
+            } else {
+                BgLiveStatus::Succeeded
+            },
+        );
         finalize_nested_reasoning(detail);
         sync_tool_units(detail);
     });
@@ -694,11 +710,14 @@ pub fn mark_task_completed(
     with_live_detail(task_id, |d| {
         d.duration_ms = Some(duration_ms);
         d.output_preview = output_preview.filter(|s| !s.is_empty());
-        d.status = if success {
-            BgLiveStatus::Succeeded
-        } else {
-            BgLiveStatus::Failed
-        };
+        mark_terminal(
+            d,
+            if success {
+                BgLiveStatus::Succeeded
+            } else {
+                BgLiveStatus::Failed
+            },
+        );
         finalize_nested_reasoning(d);
         sync_tool_units(d);
     });
@@ -707,7 +726,7 @@ pub fn mark_task_completed(
 pub fn mark_task_cancelled(task_id: &str, reason: &str) {
     with_live_detail(task_id, |d| {
         d.cancel_reason = Some(reason.to_string());
-        d.status = BgLiveStatus::Cancelled;
+        mark_terminal(d, BgLiveStatus::Cancelled);
         finalize_nested_reasoning(d);
         sync_tool_units(d);
     });

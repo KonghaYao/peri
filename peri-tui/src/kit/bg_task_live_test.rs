@@ -316,3 +316,52 @@ fn detail_terminal_compaction_releases_duplicated_body_only() {
     BG_TASK_IDENTITY.state().write().remove("dup-detail");
     BG_LIVE_DETAIL.state().write().remove("dup-detail");
 }
+
+/// [回归] 淘汰按完成时间从旧到新；仍有可见结果（preview / subagent_result）的
+/// 终态明细不得淘汰，避免用户正在看的结果被另一任务冲掉。
+#[test]
+#[serial_test::serial]
+fn eviction_skips_visible_results_and_prefers_oldest() {
+    BG_LIVE_DETAIL.state().write().clear();
+    BG_LIVE_TOMBSTONES.state().write().clear();
+    let now = std::time::Instant::now();
+    let base = BgLiveDetail {
+        status: BgLiveStatus::Succeeded,
+        ..Default::default()
+    };
+    let with_age = |seconds| BgLiveDetail {
+        completed_at: Some(now - std::time::Duration::from_secs(seconds)),
+        ..base.clone()
+    };
+    BG_LIVE_DETAIL.state().write().extend([
+        ("old".to_string(), with_age(3)),
+        ("new".to_string(), with_age(1)),
+        (
+            "preview".to_string(),
+            BgLiveDetail {
+                output_preview: Some("visible".into()),
+                ..with_age(4)
+            },
+        ),
+        (
+            "result".to_string(),
+            BgLiveDetail {
+                subagent_result: Some("visible".into()),
+                ..with_age(5)
+            },
+        ),
+    ]);
+
+    let evicted = evict_excess_terminal_details(2);
+    assert_eq!(evicted, 2);
+    let state = BG_LIVE_DETAIL.state();
+    let live = state.read();
+    assert!(!live.contains_key("old"), "最旧的空终态先淘汰");
+    assert!(!live.contains_key("new"), "次旧的空终态随后淘汰");
+    assert!(live.contains_key("preview"), "有 output_preview 时不得淘汰");
+    assert!(live.contains_key("result"), "有 subagent_result 时不得淘汰");
+    drop(live);
+
+    BG_LIVE_DETAIL.state().write().clear();
+    BG_LIVE_TOMBSTONES.state().write().clear();
+}

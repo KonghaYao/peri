@@ -783,6 +783,8 @@ pub struct BgLiveDetail {
     pub(crate) terminal_body_released: bool,
     /// 终态正文释放/收缩后到达并被拒绝改写的事件数（诊断，不丢静默）。
     pub(crate) late_events_discarded: u64,
+    /// 首次进入终态的时刻；用于按完成时间从旧到新淘汰。
+    pub(crate) completed_at: Option<std::time::Instant>,
     pub(crate) stream: Option<crate::kit::bg_task_live::BgStream>,
 }
 
@@ -805,6 +807,7 @@ impl Default for BgLiveDetail {
             subagent_is_error: false,
             terminal_body_released: false,
             late_events_discarded: 0,
+            completed_at: None,
             stream: None,
         }
     }
