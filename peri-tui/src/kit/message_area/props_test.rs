@@ -26,6 +26,20 @@ fn initial_message_area_geometry_requests_one_corrective_frame() {
 }
 
 #[test]
+fn scrollbar_outer_area_restores_terminal_width_from_band() {
+    let grid = GridSpec::grid_for(140);
+    let band = Rect::new(grid.left_pad, 2, grid.band_width, 20);
+    assert_eq!(grid.left_pad, 11);
+    // band → 整幅外框：左缘退回留白、宽取终端宽度。
+    assert_eq!(
+        scrollbar_outer_area(band, grid, 140),
+        Rect::new(0, 2, 140, 20)
+    );
+    // 尺寸不可用时回退 band，不构造跨屏矩形。
+    assert_eq!(scrollbar_outer_area(band, grid, 0), band);
+}
+
+#[test]
 fn message_area_geometry_changes_request_frames_without_content_updates() {
     let mut tracker = MsgAreaTracker::new();
     let mut context = Context::from_waker(Waker::noop());

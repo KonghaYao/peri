@@ -16,7 +16,6 @@ use crate::kit::atoms::{
     BRIDGE_RESET_COUNTER, FOCUSED_ENTRY, HISTORY_PREPEND_EPOCH, IMAGE_HOVER, LANG_VERSION,
     LOADING_EPOCH, VIEW_MODELS,
 };
-use crate::kit::layout::CenterBandHook;
 use crate::kit::text_selection::TextSelection;
 #[cfg(test)]
 use crate::kit::tui_render_unit::TuiRenderUnit;
@@ -117,24 +116,21 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let grid = props.grid;
 
     // [§3.1] 滚动条是窗口级 chrome——锚在窗口最右列，不随居中带内移。
-    // 注册与 fields state 都在 CenterBandHook 之前：hook 在 pre_component_draw
-    // 捕获的是收窄前的整幅区域，渲染与命中测试共用该矩形。
+    // MessageArea 由 `CenterBand` 在 draw 期收窄，本 hook 的
+    // `pre_component_draw` 看到的是 band；render body 每帧写入终端宽度与网格，
+    // 由 `ScrollbarHook` 还原外框，渲染与命中测试共用该矩形。
+    let (term_w, _) = hooks.use_terminal_size();
     let scrollbar_fields = hooks.use_state(ScrollbarFields::default);
     let scrollbar_area = {
         let sb = hooks.use_hook(move || ScrollbarHook {
             fields: scrollbar_fields,
             outer: None,
+            term_width: 0,
+            grid,
         });
-        sb.outer // 上一帧的收窄前区域（本帧渲染用 hook 内同一字段）
+        sb.set_layout(term_w, grid);
+        sb.outer // 上一帧的外框（本帧渲染用 hook 内同一字段）
     };
-
-    // [§3.1] 居中带：本组件区域收进 band（宽终端下左右留白、内容居中）。
-    // 必须在 MsgAreaTracker 之前注册——tracker 记录的 rect 是所有命中区、
-    // 换行宽度与滚动条列的坐标基准。
-    {
-        let band = hooks.use_hook(|| CenterBandHook::new(grid));
-        band.set_grid(grid);
-    }
 
     let vm_generation = snapshot.generation;
 
@@ -867,6 +863,10 @@ fn render_viewport(
     )
     .into_any()
 }
+
+#[cfg(test)]
+#[path = "center_band_test.rs"]
+mod center_band_tests;
 
 #[cfg(test)]
 #[path = "mod_test.rs"]

@@ -58,6 +58,17 @@ fn selection_position_uses_centered_area_and_scroll_offset() {
     );
 }
 
+/// 居中带回归：140 列终端 left_pad=11，屏幕列 20 必须是内容列 20-11=9。
+/// 回归时渲染从 x=0 开始，复制内容整体左移 left_pad。
+#[test]
+fn selection_position_in_center_band_uses_band_relative_columns() {
+    let grid = crate::kit::message_area::grid::GridSpec::grid_for(140);
+    let band = crate::kit::layout::center_band_area(Rect::new(0, 0, 140, 40), grid);
+    assert_eq!(grid.left_pad, 11);
+    assert_eq!(band.x, 11);
+    assert_eq!(selection_position(band, (20, 5), 0), (5, 9));
+}
+
 #[test]
 fn selection_position_clamps_outside_viewport() {
     let area = Rect::new(10, 5, 40, 10);

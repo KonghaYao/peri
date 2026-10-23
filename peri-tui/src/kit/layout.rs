@@ -18,7 +18,7 @@ use ratatui_kit::{
 /// 把组件区域收进 transcript 居中带——左偏移 + 带宽取自 [`GridSpec`]，
 /// 两端余量在该带之外由父级布局留白。
 ///
-/// 纯函数（hook 只做 `drawer.area` 替换），越界时向右收缩并至少保留 1 列。
+/// 纯函数（[`CenterBand::draw`] 只做 `drawer.area` 替换），越界时向右收缩并至少保留 1 列。
 ///
 /// [Why 两条早退] `terminal::size()` 取不到尺寸时 `use_terminal_size` 返回
 /// `(0, 0)`，`grid_for(0)` 的 `band_width` 也是 0——此时网格不可信，保持原区域
@@ -36,33 +36,50 @@ pub(crate) fn center_band_area(area: Rect, grid: GridSpec) -> Rect {
     }
 }
 
-/// 居中带 hook——把消息区 / 输入区的绘制区域收进居中带（§3.1）。
+/// 居中带包装组件——在 **draw 期**把自身区域收进居中带（§3.1），
+/// 子组件因此同时按该区域渲染并观察到带矩形。
 ///
 /// [Why 收窄区域而非给每行加左填充] 区域收窄后，组件内所有坐标（换行宽度、
 /// 命中列、光标列、滚动条列）仍是带内相对坐标，`AreaTracker` / `MsgAreaTracker`
 /// 记录的也是带矩形；若改为在行首补空格，每个消费点都要各自加偏移。
 ///
-/// [机制] `pre_component_draw` 早于组件自身 draw 与子节点区域计算，
-/// 改写 `drawer.area` 与 ScrollView 在 `draw()` 中收成 `block.inner` 同路径。
-/// 因此必须**先于位置 tracker 注册**（否则 tracker 记录未收窄的整幅宽度），
-/// 且在任何条件分支前注册（TUI-HOOK-001）。
-pub(crate) struct CenterBandHook {
+/// [Why 包装组件而非 hook] ratatui-kit 0.12 的 `InstantiatedComponent::draw` 在
+/// `pre_component_draw` 之后把 `drawer.area` 重置为组件区域——hook 里改写只对
+/// 后续 hook 可见，不影响真实渲染与子节点布局。draw 期改写则直接决定子节点
+/// 区域（与上游 `Border` / `Positioned` 同一机制）。
+///
+/// [Why 透明布局] `set_transparent_layout(true)` 让父级仍按**被包裹组件**的
+/// `Fill/Length` 约束分配区域，包装不改变布局占位；draw 期再把该区域收窄到带。
+#[derive(Default, Props)]
+pub(crate) struct CenterBandProps<'a> {
+    /// Transcript 水平网格（终端 resize 后每帧重建）。
+    pub grid: GridSpec,
+    pub children: Vec<AnyElement<'a>>,
+}
+
+pub(crate) struct CenterBand {
     grid: GridSpec,
 }
 
-impl CenterBandHook {
-    pub(crate) fn new(grid: GridSpec) -> Self {
-        Self { grid }
+impl Component for CenterBand {
+    type Props<'a> = CenterBandProps<'a>;
+
+    fn new(props: &Self::Props<'_>) -> Self {
+        Self { grid: props.grid }
     }
 
-    /// 每帧由 render body 写入当前网格（终端 resize 后带宽与左偏移随之变化）。
-    pub(crate) fn set_grid(&mut self, grid: GridSpec) {
-        self.grid = grid;
+    fn update(
+        &mut self,
+        props: &mut Self::Props<'_>,
+        _hooks: Hooks,
+        updater: &mut ComponentUpdater,
+    ) {
+        self.grid = props.grid;
+        updater.set_transparent_layout(true);
+        updater.update_children(&mut props.children, None);
     }
-}
 
-impl Hook for CenterBandHook {
-    fn pre_component_draw(&mut self, drawer: &mut ComponentDrawer) {
+    fn draw(&mut self, drawer: &mut ComponentDrawer<'_, '_>) {
         drawer.area = center_band_area(drawer.area, self.grid);
     }
 }
@@ -182,22 +199,29 @@ pub fn SessionColumn(
             width: Constraint::Fill(1),
             height: Constraint::Fill(1),
         ) {
-            MessageArea(grid: grid)
+            // [§3.1] 居中带在 draw 期收窄：组件自身 hooks（MsgAreaTracker /
+            // AreaTracker）与渲染共用同一带矩形。
+            CenterBand(grid: grid) {
+                MessageArea(grid: grid)
+            }
 
             // 面板位于消息流之上、输入区之上；参与主布局，不再是根级浮动覆盖。
+            // 面板自带内边距与坐标基准，不参与居中带收窄。
             PanelOverlay()
 
             // 面板打开时隐藏输入区，避免输入框抢占用户注意力；关闭面板后自动恢复。
             // [Slice 3a] grid prop：composer prompt 前缀按 gap 对齐 transcript
             // content 起点（§10）；窄断点下标题/footer 随 HeightPlan 降级。
-            InputArea(
-                loading: loading,
-                hidden: panel_open,
-                max_lines: props.plan.composer_max_lines,
-                session_title_visible: props.plan.session_title_visible,
-                grid: grid,
-                max_total_height: Some(input_max_height),
-            )
+            CenterBand(grid: grid) {
+                InputArea(
+                    loading: loading,
+                    hidden: panel_open,
+                    max_lines: props.plan.composer_max_lines,
+                    session_title_visible: props.plan.session_title_visible,
+                    grid: grid,
+                    max_total_height: Some(input_max_height),
+                )
+            }
         }
     )
 }
@@ -205,6 +229,112 @@ pub fn SessionColumn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui_kit::ratatui::style::Style;
+    use ratatui_kit::test_util::render_frame;
+    use std::sync::{Arc, Mutex};
+
+    // ── 居中带渲染级回归（P1：宽终端鼠标偏移）────────────────────────────
+
+    #[derive(Default, Props)]
+    struct AreaProbeProps {
+        text: &'static str,
+        sink: Arc<Mutex<Option<Rect>>>,
+    }
+
+    /// 测试专用探针：hook 记录 `pre_component_draw` 看到的区域，
+    /// draw 在该区域左上角写标记——两者必须落在同一列。
+    struct AreaProbe {
+        text: &'static str,
+    }
+
+    struct AreaProbeHook {
+        sink: Arc<Mutex<Option<Rect>>>,
+    }
+
+    impl Hook for AreaProbeHook {
+        fn pre_component_draw(&mut self, drawer: &mut ComponentDrawer) {
+            *self.sink.lock().unwrap() = Some(drawer.area);
+        }
+    }
+
+    impl Component for AreaProbe {
+        type Props<'a> = AreaProbeProps;
+
+        fn new(_props: &Self::Props<'_>) -> Self {
+            Self { text: "P" }
+        }
+
+        fn update(
+            &mut self,
+            props: &mut Self::Props<'_>,
+            mut hooks: Hooks,
+            _updater: &mut ComponentUpdater,
+        ) {
+            self.text = props.text;
+            let sink = props.sink.clone();
+            hooks.use_hook(move || AreaProbeHook { sink });
+        }
+
+        fn draw(&mut self, drawer: &mut ComponentDrawer<'_, '_>) {
+            let area = drawer.area;
+            drawer
+                .buffer_mut()
+                .set_string(area.x, area.y, self.text, Style::default());
+        }
+    }
+
+    /// `CenterBand` 在 draw 期把子组件区域收进带：140 列 left_pad=11、
+    /// 80 列 0、220 列 51；x=0 不得出现子组件标记（回归：宽终端渲染从 0 开始）。
+    #[test]
+    fn center_band_draw_places_child_inside_band() {
+        for (term_w, expected_x) in [(80u16, 0u16), (140, 11), (220, 51)] {
+            let grid = GridSpec::grid_for(term_w);
+            assert_eq!(grid.left_pad, expected_x, "term_w={term_w}");
+            let buf = render_frame(
+                element!(CenterBand(grid: grid) {
+                    Text(text: "X")
+                }),
+                term_w,
+                3,
+            );
+            assert_eq!(
+                buf[(expected_x, 0)].symbol(),
+                "X",
+                "term_w={term_w}: 标记应出现在带左缘"
+            );
+            if expected_x > 0 {
+                assert_ne!(
+                    buf[(0, 0)].symbol(),
+                    "X",
+                    "term_w={term_w}: 整幅左缘不得渲染子组件"
+                );
+            }
+        }
+    }
+
+    /// tracker 一致性：hook 的 `pre_component_draw` 记录区域 == 实际绘制起点/宽度。
+    /// 回归时渲染在 x=0 而 tracker 记录 x=left_pad，此断言会失败。
+    #[test]
+    fn center_band_tracker_matches_rendered_band() {
+        let grid = GridSpec::grid_for(140);
+        let expected = center_band_area(Rect::new(0, 0, 140, 5), grid);
+        let sink = Arc::new(Mutex::new(None));
+        let buf = render_frame(
+            element!(CenterBand(grid: grid) {
+                AreaProbe(text: "P", sink: sink.clone())
+            }),
+            140,
+            5,
+        );
+        let recorded = sink
+            .lock()
+            .unwrap()
+            .expect("pre_component_draw 应记录组件区域");
+        assert_eq!(recorded, expected);
+        assert_eq!(recorded.x, grid.left_pad);
+        assert_eq!(recorded.width, grid.band_width);
+        assert_eq!(buf[(recorded.x, recorded.y)].symbol(), "P");
+    }
 
     /// §11 高度断点矩阵：13/12 → Full；11/9/8 → Row1Only；7 → Hidden + composer 钳制。
     #[test]
