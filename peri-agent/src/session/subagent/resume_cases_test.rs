@@ -591,9 +591,9 @@ async fn test_resume_subagent_rolls_back_status_on_rebuild_failure() {
     let thread_id = uuid::Uuid::now_v7().to_string();
     preset_resumable_thread(&store, &thread_id, None).await;
 
-    // 注入「认领后 history 装载」失败：第 1 次快照读取是认领前的绑定分类，
-    // 第 2 次才是 own history 装载。
-    store.fail_snapshot_load_at(2);
+    // 注入「认领后 history 装载」失败：绑定预检只读 binding，不经过完整快照；
+    // 因此第 1 次完整快照读取就是 own history 装载。
+    store.fail_snapshot_load_at(1);
     let config = resume_config(store.clone(), thread_id.clone());
     let err = resume_err(None, config).await;
     assert!(
@@ -987,4 +987,44 @@ async fn test_resume_subagent_bg_scope_closed_rejected_before_claim() {
         assert_eq!(seq, vec!["done"], "claim 之前失败不写 active");
     }
     assert_eq!(task_manager.active_count(), 0, "不得留下后台任务条目");
+}
+
+/// [回归测试] 绑定不匹配必须在 binding 预检阶段拒绝：不读取任何完整快照，
+/// 也不改变 child 的 agent_status。
+#[tokio::test]
+async fn test_resume_binding_mismatch_rejected_from_binding_only() {
+    let store = MockSessionResources::new();
+    let child_id = uuid::Uuid::now_v7().to_string();
+    store.register_bound_session(&child_id, "/tmp/child-workspace");
+    store.update_thread_status(&child_id, "done").await.unwrap();
+    store
+        .append_message(&child_id, BaseMessage::human("task"))
+        .await
+        .unwrap();
+
+    let parent_id = uuid::Uuid::now_v7().to_string();
+    // 两次登记各自生成独立 binding（project/workspace 不同）→ 必然 mismatch。
+    store.register_bound_session(&parent_id, "/tmp/parent-workspace");
+    let parent = Session::new(
+        Arc::from("/tmp/parent-workspace"),
+        FrozenContext::builder().build(),
+        Some(parent_id),
+    );
+
+    let config = resume_config(store.clone(), child_id.clone());
+    let err = resume_err(Some(&parent), config).await;
+    assert!(
+        err.contains("execution binding does not match"),
+        "binding mismatch 应在预检拒绝，got: {err}"
+    );
+    assert_eq!(
+        store.snapshot_reads(),
+        0,
+        "binding 预检不得为校验物化 child/parent 有效正文"
+    );
+    assert_eq!(
+        store.load_meta(&child_id).await.unwrap().agent_status,
+        AgentStatus::Done,
+        "预检拒绝不得认领或改写 child 状态"
+    );
 }

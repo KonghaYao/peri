@@ -246,8 +246,6 @@ impl BaseTool for SubAgentTool {
             crate::subagent::fork::fork_context_usage_gate(ctx.context_usage)?;
         }
 
-        let current_messages = self.current_messages(ctx.messages);
-
         let is_mcp_agent = subagent_type
             .as_deref()
             .is_some_and(|id| id.starts_with("mcp__"));
@@ -276,13 +274,20 @@ impl BaseTool for SubAgentTool {
         // task_manager 缺失时维持既有语义：落回同步路径（与显式 true 一致）。
         let run_in_background = run_in_background && host.task_manager.is_some();
         if resume_thread_id.is_none() && run_in_background {
+            // 只有 fork 消费父历史；命名子 agent 的后台路径从零构建 transcript。
+            // 在分支内物化，避免命名路径把不会使用的父正文副本带过整个 spawn。
+            let parent_messages = if is_fork {
+                self.current_messages(ctx.messages)
+            } else {
+                Vec::new()
+            };
             return self
                 .invoke_background(
                     prompt,
                     subagent_type,
                     cwd,
                     is_fork,
-                    current_messages,
+                    parent_messages,
                     model.as_deref(),
                     parent_tool_call_id.clone(),
                 )
@@ -291,8 +296,9 @@ impl BaseTool for SubAgentTool {
         }
 
         if is_fork {
+            let parent_messages = self.current_messages(ctx.messages);
             return self
-                .invoke_fork(&prompt, &cwd, current_messages, parent_tool_call_id.clone())
+                .invoke_fork(&prompt, &cwd, parent_messages, parent_tool_call_id.clone())
                 .await
                 .map(ToolOutput::from_legacy);
         }
