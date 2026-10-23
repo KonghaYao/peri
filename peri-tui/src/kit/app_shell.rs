@@ -8,7 +8,8 @@ use crate::kit::atoms;
 use crate::kit::bg_task_area::BgTaskArea;
 use crate::kit::event_handlers;
 use crate::kit::image_overlay::ImageOverlay;
-use crate::kit::layout::SessionColumn;
+use crate::kit::layout::{CenterBand, SessionColumn};
+use crate::kit::message_area::grid::GridSpec;
 use crate::kit::popup_overlay::PopupOverlay;
 use crate::kit::setup_wizard::SetupWizard;
 use crate::kit::status_bar::StatusBar;
@@ -118,8 +119,11 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // [Slice 1c] 高度断点（§11）：纯函数 layout_plan 按终端高度推导降级计划，
     // SessionColumn（session title / composer 钳制）与 StatusBar 消费结果。
-    let (_, term_h) = hooks.use_terminal_size();
+    let (term_w, term_h) = hooks.use_terminal_size();
     let plan = crate::kit::layout::layout_plan(term_h);
+    // [§3.1] 状态栏与后台任务栏同属 transcript 居中带——在 draw 期收窄，
+    // 与 SessionColumn 内的消息区 / 输入区逐列对齐。
+    let grid = GridSpec::grid_for(term_w);
 
     if wizard_active {
         element! {
@@ -146,11 +150,15 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         height: Constraint::Fill(1),
                     ) {
                         SessionColumn(plan: plan)
-                        StatusBar(
-                            hide_hints: matches!(plan.status_bar, crate::kit::layout::StatusBarMode::Row1Only),
-                            hidden: matches!(plan.status_bar, crate::kit::layout::StatusBarMode::Hidden),
-                        )
-                        BgTaskArea()
+                        CenterBand(grid: grid) {
+                            StatusBar(
+                                hide_hints: matches!(plan.status_bar, crate::kit::layout::StatusBarMode::Row1Only),
+                                hidden: matches!(plan.status_bar, crate::kit::layout::StatusBarMode::Hidden),
+                            )
+                        }
+                        CenterBand(grid: grid) {
+                            BgTaskArea()
+                        }
                     }
                     // 图片预览浮层（T7）：与 PopupOverlay 同级、不参与 flex；
                     // 挂载在 PopupOverlay 之前（弹窗后绘制、覆盖其上），遮挡时

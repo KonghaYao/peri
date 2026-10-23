@@ -60,17 +60,51 @@ pub(super) struct ScrollbarFields {
 /// 替代被移除的 ScrollView 内置滚动条。每帧 render body 更新 ScrollbarFields state。
 ///
 /// [§3.1] 滚动条是窗口级 chrome：锚在**窗口最右列**，不随居中带内移（带内的
-/// 最右列是正文的最后一列）。因此本 hook 必须在 `CenterBandHook` **之前**注册——
-/// `pre_component_draw` 捕获的是收窄前的整幅区域；垂直范围与带一致（带只改水平轴）。
+/// 最右列是正文的最后一列）。MessageArea 由 `CenterBand` 在 draw 期收窄后，
+/// 本 hook 的 `pre_component_draw` 看到的是 band；render body 每帧写入终端
+/// 宽度与网格，由 [`scrollbar_outer_area`] 显式还原外框。渲染与命中测试
+/// （`scroll::handle_event`）共用该矩形。
 pub(super) struct ScrollbarHook {
     pub(super) fields: State<ScrollbarFields>,
-    /// 收窄前的组件区域；命中测试（`scroll::handle_event`）与渲染共用同一矩形。
+    /// 外框（终端整幅宽度）；命中测试与渲染共用同一矩形。
     pub(super) outer: Option<Rect>,
+    /// 终端总列数——render body 每帧写入；0 表示未知（回退 band 本身）。
+    pub(super) term_width: u16,
+    /// 当前水平网格——`left_pad` 用于从 band 反推外框左缘。
+    pub(super) grid: GridSpec,
+}
+
+impl ScrollbarHook {
+    /// 每帧由 render body 写入（终端 resize 后宽度与网格随帧变化）。
+    pub(super) fn set_layout(&mut self, term_width: u16, grid: GridSpec) {
+        self.term_width = term_width;
+        self.grid = grid;
+    }
+}
+
+/// 由居中带区域还原滚动条外框：左缘退回带前留白、宽取终端总宽。
+///
+/// `term_width == 0`（终端尺寸不可用）时回退 band——找不到窗口边界时宁可
+/// 只覆盖带内，不构造跨屏矩形。
+pub(super) fn scrollbar_outer_area(band: Rect, grid: GridSpec, term_width: u16) -> Rect {
+    if term_width == 0 {
+        return band;
+    }
+    Rect {
+        x: band.x.saturating_sub(grid.left_pad),
+        y: band.y,
+        width: term_width,
+        height: band.height,
+    }
 }
 
 impl Hook for ScrollbarHook {
     fn pre_component_draw(&mut self, drawer: &mut ComponentDrawer) {
-        self.outer = Some(drawer.area);
+        self.outer = Some(scrollbar_outer_area(
+            drawer.area,
+            self.grid,
+            self.term_width,
+        ));
     }
 
     fn post_component_draw(&mut self, drawer: &mut ComponentDrawer) {

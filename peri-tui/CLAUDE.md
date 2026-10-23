@@ -49,7 +49,7 @@ ACP notification → acp_notifier → acp_bridge / BridgeState
 - Assistant VM 的完整气泡以 `Arc<TuiAssistantBubble>` 发布，快照与 im 节点 COW 共享不可变 payload；修改 fold/终态前先判定是否真的变化，再复制或 `Arc::make_mut`，不能改动旧快照。后台流式累积仍持有独占正文，不能把共享发布气泡直接当逐 chunk 写入缓冲。
 - Markdown 稳定分片仅冻结安全空行边界，fence 内部空行不能切断代码块；引用、列表、表格与未闭合 fence 保留可变尾部，terminal full parse 校正。正文前景与代码背景须同时进入内外层缓存 key，主题变化只复用 parsed blocks，不复用旧样式。
 - `#[component]` 的 hooks 必须在所有条件分支、`match` 与提前返回前按稳定顺序调用。
-- 消息区、输入区、状态栏与后台任务栏的绘制区域由 `kit/layout.rs` 的 `CenterBandHook` 收进居中带（§3.1）。带内的换行宽度、命中列与光标列都以带内相对坐标为准，位置 tracker 必须注册在 band hook 之后，否则记录的是未收窄的整幅宽度。滚动条是窗口级 chrome（锚在终端最右列）：`ScrollbarHook` 必须在 band hook **之前**注册并在 `pre_component_draw` 捕获收窄前的矩形，渲染与命中测试共用该矩形。
+- 消息区、输入区、状态栏与后台任务栏的绘制区域由 `kit/layout.rs` 的 `CenterBand` 包装组件在 **draw 期**收进居中带（§3.1）；透明布局保持父级按原子组件约束分配。带内的换行宽度、命中列与光标列都以带内相对坐标为准，位置 tracker 看到的区域即 band——不要再注册改 `drawer.area` 的 hook（ratatui-kit 0.12 会在 `pre_component_draw` 后重置）。滚动条是窗口级 chrome（锚在终端最右列）：`ScrollbarHook` 每帧接收终端宽度与网格，在 `pre_component_draw` 由 band 显式还原整幅外框（`term_width == 0` 时回退 band），渲染与命中测试共用该矩形。
 - 交互事件按 focus owner、语义命中区域、z-order 与 pointer capture 分发；弹窗/面板前景事件和遮罩必须先于背景处理，避免 click-through。
 - 用户可见文本使用 i18n；新增 key 同步更新 `locales/en/main.ftl` 和 `locales/zh-CN/main.ftl`。主题从 `peri-theme` atoms 获取，不硬编码颜色。
 - 文本编辑、截断与坐标按 Unicode 字符边界和终端显示宽度处理；不得用字节长度替代显示宽度。

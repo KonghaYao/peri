@@ -8,7 +8,6 @@ use crate::kit::bg_task_click::{
     BgTaskLineHit, apply_bg_task_click_route, build_bg_task_line_hits, route_bg_task_click,
     sort_bg_display_rows, visible_bg_display_entries,
 };
-use crate::kit::layout::CenterBandHook;
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::mouse_router;
 use crate::kit::panel_mouse::AreaTracker;
@@ -50,14 +49,10 @@ pub fn BgTaskArea(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _heartbeat = hooks.use_atom(&atoms::RENDER_HEARTBEAT);
     let (term_w, _) = hooks.use_terminal_size();
 
-    // [§3.1] 居中带：与 transcript / composer / 状态栏同宽——耗时列右对齐到
-    // 带右缘（原为终端右缘）。必须先于 AreaTracker 注册（`area_rect` 是行命中
-    // 区域的坐标基准，行文本按带宽截断/填充）。
+    // [§3.1] 居中带由 AppShell 的 `CenterBand` 包装在 draw 期收窄——与
+    // transcript / composer / 状态栏同宽；`area_rect` 是行命中区域的坐标基准，
+    // 行文本按带宽截断/填充。
     let grid = GridSpec::grid_for(term_w);
-    {
-        let band = hooks.use_hook(|| CenterBandHook::new(grid));
-        band.set_grid(grid);
-    }
 
     let area_tracker = hooks.use_hook(AreaTracker::new);
     let area_rect = area_tracker.rect;
