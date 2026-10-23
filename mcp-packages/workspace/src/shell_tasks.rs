@@ -68,6 +68,43 @@ pub(crate) struct ShellTasks {
     spawn_after_gate: Option<Arc<SpawnAfterGate>>,
 }
 
+struct SpawnCancelGuard {
+    tasks: ShellTasks,
+    started: Option<tokio::sync::oneshot::Receiver<String>>,
+    armed: bool,
+}
+
+impl SpawnCancelGuard {
+    fn new(tasks: ShellTasks, started: tokio::sync::oneshot::Receiver<String>) -> Self {
+        Self {
+            tasks,
+            started: Some(started),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SpawnCancelGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Some(started) = self.started.take() else {
+            return;
+        };
+        let tasks = self.tasks.clone();
+        tokio::spawn(async move {
+            if let Ok(task_id) = started.await {
+                let _ = tasks.cancel_and_wait(&task_id).await;
+            }
+        });
+    }
+}
+
 impl ShellTasks {
     pub(crate) fn new() -> Self {
         let (updates, _) = tokio::sync::broadcast::channel(64);
@@ -84,6 +121,11 @@ impl ShellTasks {
     #[cfg(test)]
     pub(crate) fn hold_spawn_after_gate(&mut self, gate: Arc<SpawnAfterGate>) {
         self.spawn_after_gate = Some(gate);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_spawn_after_gate(&mut self) {
+        self.spawn_after_gate = None;
     }
 
     #[cfg(test)]
@@ -181,8 +223,33 @@ impl ShellTasks {
         timeout_ms: Option<u64>,
         owner: Option<&str>,
     ) -> Result<Task, McpError> {
-        self.spawn_owned_inner(command, cwd, timeout_ms, owner)
-            .await
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let mut guard = SpawnCancelGuard::new(self.clone(), started_rx);
+        let result = self
+            .spawn_owned_inner(command, cwd, timeout_ms, owner, Some(started_tx))
+            .await;
+        if result.is_ok() {
+            guard.disarm();
+        }
+        result
+    }
+
+    pub(crate) async fn cancel_and_wait(&self, task_id: &str) -> Result<(), McpError> {
+        let result = self.cancel(task_id);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let terminal = self
+                .state
+                .lock()
+                .records
+                .get(task_id)
+                .is_none_or(|record| record.task.status.is_terminal());
+            if terminal || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        result
     }
 
     #[cfg(test)]
@@ -201,6 +268,7 @@ impl ShellTasks {
         cwd: String,
         timeout_ms: Option<u64>,
         owner: Option<&str>,
+        started: Option<tokio::sync::oneshot::Sender<String>>,
     ) -> Result<Task, McpError> {
         let manager = self.manager();
         let callback = self.completion_callback_for(owner.map(str::to_owned));
@@ -227,7 +295,13 @@ impl ShellTasks {
                 TaskPayload::Working,
             );
             let mut state = state.lock();
-            state.tracked.insert(handle.task_id.clone());
+            let already_terminal = state
+                .records
+                .get(&handle.task_id)
+                .is_some_and(|detail| detail.task.status.is_terminal());
+            if !already_terminal {
+                state.tracked.insert(handle.task_id.clone());
+            }
             if let Some(owner) = &owner {
                 state.owners.insert(handle.task_id.clone(), owner.clone());
             }
@@ -238,6 +312,9 @@ impl ShellTasks {
                 .or_insert(record)
                 .clone();
             drop(state);
+            if let Some(started) = started {
+                let _ = started.send(handle.task_id.clone());
+            }
             if inserted {
                 let _ = updates.send(detail);
             }
@@ -274,7 +351,13 @@ impl ShellTasks {
             TaskPayload::Working,
         );
         let mut state = self.state.lock();
-        state.tracked.insert(task_id.into());
+        let already_terminal = state
+            .records
+            .get(task_id)
+            .is_some_and(|detail| detail.task.status.is_terminal());
+        if !already_terminal {
+            state.tracked.insert(task_id.into());
+        }
         if let Some(owner) = owner {
             state.owners.insert(task_id.into(), owner.into());
         }

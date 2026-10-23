@@ -369,16 +369,22 @@ async fn composite_spawn_and_registration_failure_stays_unclassified() {
 }
 
 #[tokio::test]
-async fn cancellation_during_spawn_is_still_tracked_and_cancelled() {
+async fn cancellation_during_spawn_cancels_only_initiating_owner() {
     let mut tasks = ShellTasks::new();
     let gate = Arc::new(super::SpawnAfterGate::new());
     tasks.hold_spawn_after_gate(gate.clone());
-    let tasks = Arc::new(tasks);
+    let mut updates = tasks.subscribe();
+
     let request = tokio::spawn({
         let tasks = tasks.clone();
         async move {
             tasks
-                .spawn("sleep 30".to_string(), ".".to_string(), None)
+                .spawn_owned(
+                    "sleep 30".to_string(),
+                    ".".to_string(),
+                    None,
+                    Some("session-a"),
+                )
                 .await
         }
     });
@@ -389,14 +395,46 @@ async fn cancellation_during_spawn_is_still_tracked_and_cancelled() {
     request.abort();
     gate.release.wait();
 
+    let task_a = tokio::time::timeout(Duration::from_secs(2), updates.recv())
+        .await
+        .expect("started task update")
+        .expect("task update")
+        .task
+        .task_id;
     tokio::time::timeout(Duration::from_secs(2), async {
-        while tasks.tracked_count() == 0 {
+        loop {
+            let terminal = tasks
+                .get(&task_a)
+                .map(|result| result.task.status().is_terminal())
+                .unwrap_or(true);
+            if terminal {
+                break;
+            }
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("task must be tracked after the request future is cancelled");
+    .expect("cancelled task must terminate");
 
-    assert_eq!(tasks.shutdown().await, TaskShutdownReport::Complete);
+    tasks.clear_spawn_after_gate();
+    let task_b = tasks
+        .spawn_owned(
+            "sleep 30".to_string(),
+            ".".to_string(),
+            None,
+            Some("session-b"),
+        )
+        .await
+        .expect("session b task starts");
+    assert!(!task_b.status.is_terminal());
+
+    tasks
+        .cancel_and_wait(&task_b.task_id)
+        .await
+        .expect("cancel session b task");
+    assert!(tasks
+        .get(&task_b.task_id)
+        .map(|result| result.task.status().is_terminal())
+        .unwrap_or(true));
     assert_eq!(tasks.tracked_count(), 0);
 }
