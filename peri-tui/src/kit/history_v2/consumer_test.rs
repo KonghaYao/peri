@@ -136,8 +136,10 @@ fn atomics_guard() -> AtomGuard {
     atoms::HISTORY_V2_CAPABLE.set(true);
     atoms::HISTORY_V2_LIMITS.set(HistoryLimits::default());
     atoms::HISTORY_V2_STATE.set(HistoryV2State::default());
-    // 手工构造的 initial 状态回显 requestKey=1；触发侧从同一位置继续分配。
-    seed_request_key(DecimalU64::new(1));
+    // 手工构造的 initial 状态回显 requestKey=1；用例还会显式使用 2（page）与 3（seek）。
+    // 分配器高水位必须覆盖这些手工键：nextest 每个用例独立进程运行，否则后续自动分配
+    // （如失效后的 reopen）会复用手工页键，被 `apply_open` 判为过期响应而丢弃。
+    seed_request_key(DecimalU64::new(3));
     AtomGuard
 }
 
