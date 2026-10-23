@@ -10,299 +10,12 @@ use rmcp::{
 };
 
 use super::WorkspaceMcpServer;
-use crate::{TaskScopeAuthority, TASK_SCOPE_META_KEY};
+use crate::TASK_OWNER_META_KEY;
 
-fn scope_meta(token: &str) -> rmcp::model::RequestMetaObject {
+fn owner_meta(owner: &str) -> rmcp::model::RequestMetaObject {
     let mut fields = serde_json::Map::new();
-    fields.insert(TASK_SCOPE_META_KEY.into(), token.into());
+    fields.insert(TASK_OWNER_META_KEY.into(), owner.into());
     rmcp::model::RequestMetaObject(rmcp::model::MetaObject(fields))
-}
-
-async fn scope_request(
-    client: &rmcp::service::RunningService<rmcp::service::RoleClient, ClientConfig>,
-    method: &str,
-    token: &str,
-    cursor: Option<u64>,
-) -> Result<serde_json::Value, rmcp::ServiceError> {
-    let mut params = serde_json::json!({"_meta": {TASK_SCOPE_META_KEY: token}});
-    params["_meta"] = serde_json::to_value(scope_meta(token)).unwrap();
-    if let Some(cursor) = cursor {
-        params["cursor"] = cursor.into();
-    }
-    let result = client
-        .peer()
-        .send_request(rmcp::model::ClientRequest::CustomRequest(
-            rmcp::model::CustomRequest::new(method, Some(params)),
-        ))
-        .await?;
-    let rmcp::model::ServerResult::CustomResult(result) = result else {
-        panic!("custom result")
-    };
-    Ok(result.0)
-}
-
-async fn scope_epoch_request(
-    client: &rmcp::service::RunningService<rmcp::service::RoleClient, ClientConfig>,
-    method: &str,
-    token: &str,
-    epoch: u64,
-) -> Result<serde_json::Value, rmcp::ServiceError> {
-    let params = serde_json::json!({"_meta": serde_json::to_value(scope_meta(token)).unwrap(), "epoch": epoch});
-    let result = client
-        .peer()
-        .send_request(rmcp::model::ClientRequest::CustomRequest(
-            rmcp::model::CustomRequest::new(method, Some(params)),
-        ))
-        .await?;
-    let rmcp::model::ServerResult::CustomResult(result) = result else {
-        panic!("custom result")
-    };
-    Ok(result.0)
-}
-
-#[tokio::test]
-async fn session_capabilities_work_across_connections_without_execution_fencing() {
-    let dir = tempfile::tempdir().expect("workspace");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false)
-        .with_task_scope_authority(TaskScopeAuthority::trusted_connection());
-    let token = TaskScopeAuthority::trusted_connection().issue("session-a");
-    let (client, server_task) = connect(
-        server.clone(),
-        ClientCapabilities::builder().enable_tasks().build(),
-    )
-    .await;
-    let snapshot = scope_request(&client, "workspace/taskSnapshot", &token, None)
-        .await
-        .expect("session capability needs no execution claim");
-    assert_eq!(snapshot["tasks"], serde_json::json!([]));
-    let error = scope_request(&client, "workspace/taskFence", &token, None)
-        .await
-        .expect_err("removed method");
-    assert!(matches!(error, rmcp::ServiceError::McpError(error)
-        if error.code == rmcp::model::ErrorCode::METHOD_NOT_FOUND));
-    let mut request = CallToolRequestParams::new("Bash").with_arguments(
-        serde_json::json!({"command":"sleep 30", "run_in_background":true})
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
-    request.meta = Some(scope_meta(&token));
-    let CallToolResponse::Task(created) = client
-        .peer()
-        .call_tool_once(request)
-        .await
-        .expect("session task")
-    else {
-        panic!("task handle")
-    };
-    let task_id = created.task.task_id;
-    drop(client);
-    server_task.await.expect("first connection closed");
-
-    let (client, server_task) = connect(
-        server.clone(),
-        ClientCapabilities::builder().enable_tasks().build(),
-    )
-    .await;
-    let next_token = TaskScopeAuthority::trusted_connection().issue("session-a");
-    for capability in [&token, &next_token] {
-        let snapshot = scope_request(&client, "workspace/taskSnapshot", capability, None)
-            .await
-            .expect("same session remains accessible");
-        assert_eq!(snapshot["tasks"][0]["task"]["taskId"], task_id);
-        assert_eq!(snapshot["tasks"][0]["initiatorSessionId"], "session-a");
-    }
-    let other = TaskScopeAuthority::trusted_connection().issue("session-b");
-    let mut cancel = CancelTaskParams::new(&task_id);
-    cancel.meta = Some(scope_meta(&other));
-    assert!(client.peer().cancel_task(cancel).await.is_err());
-    let mut cancel = CancelTaskParams::new(&task_id);
-    cancel.meta = Some(scope_meta(&token));
-    client
-        .peer()
-        .cancel_task(cancel)
-        .await
-        .expect("original session may cancel");
-    drop(client);
-    server_task.await.expect("second connection closed");
-    assert!(server.shutdown_shell_tasks().await.is_some());
-}
-
-#[tokio::test]
-async fn shared_peer_scopes_discovery_access_and_close() {
-    let dir = tempfile::tempdir().expect("workspace");
-    let authority = TaskScopeAuthority::new();
-    let first = authority.issue("first-session");
-    let second = authority.issue("second-session");
-    let base = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
-    let server = base.clone().with_task_scope_authority(authority);
-    let (client, server_task) =
-        connect(base, ClientCapabilities::builder().enable_tasks().build()).await;
-    let mut request = CallToolRequestParams::new("Bash").with_arguments(
-        serde_json::json!({"command": "sleep 0.1; printf scoped", "run_in_background": true})
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
-    request.meta = Some(scope_meta(&first));
-    let CallToolResponse::Task(created) = client
-        .peer()
-        .call_tool_once(request.clone())
-        .await
-        .expect("scoped task")
-    else {
-        panic!("task handle")
-    };
-    let id = created.task.task_id;
-
-    let first_snapshot = scope_request(&client, "workspace/taskSnapshot", &first, None)
-        .await
-        .expect("snapshot");
-    assert_eq!(first_snapshot["tasks"].as_array().unwrap().len(), 1);
-    assert_eq!(first_snapshot["tasks"][0]["task"]["taskId"], id);
-    assert!(first_snapshot["tasks"][0]["summary"]
-        .as_str()
-        .unwrap()
-        .contains("printf scoped"));
-    let cursor = first_snapshot["cursor"].as_u64().unwrap();
-    let second_snapshot = scope_request(&client, "workspace/taskSnapshot", &second, None)
-        .await
-        .expect("other snapshot");
-    assert!(second_snapshot["tasks"].as_array().unwrap().is_empty());
-    let mut other_get = GetTaskParams::new(&id);
-    other_get.meta = Some(scope_meta(&second));
-    assert!(client.peer().get_task(other_get).await.is_err());
-    let mut missing_get = GetTaskParams::new(&id);
-    missing_get.meta = None;
-    assert!(client.peer().get_task(missing_get).await.is_err());
-
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let current = scope_request(&client, "workspace/taskSnapshot", &first, None)
-                .await
-                .expect("task status");
-            if current["tasks"][0]["terminalTransitionId"].is_string() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("terminal result");
-    let changes = scope_request(&client, "workspace/taskChanges", &first, Some(cursor))
-        .await
-        .expect("changes");
-    assert!(changes["changes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|change| change["initiatorSessionId"] == "first-session"));
-    assert!(changes["changes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|change| change["terminalTransitionId"].is_string()));
-    let epoch = first_snapshot["epoch"].as_u64().unwrap();
-    let closed = scope_epoch_request(&client, "workspace/taskClose", &first, epoch)
-        .await
-        .expect("close gate");
-    assert!(closed["barrierCursor"].as_u64().is_some());
-    assert_eq!(closed["epoch"].as_u64(), Some(epoch));
-    assert_eq!(closed["resourcesSettled"], true);
-    assert!(client.peer().call_tool_once(request).await.is_err());
-    let reopened = scope_epoch_request(&client, "workspace/taskOpen", &first, epoch)
-        .await
-        .expect("reopen settled scope");
-    assert_eq!(reopened["epoch"], epoch + 1);
-    assert!(
-        scope_epoch_request(&client, "workspace/taskClose", &first, epoch)
-            .await
-            .is_err()
-    );
-    assert!(
-        scope_epoch_request(&client, "workspace/taskOpen", &first, epoch)
-            .await
-            .is_err()
-    );
-    let mut reopened_call = CallToolRequestParams::new("Bash").with_arguments(
-        serde_json::json!({"command":"printf reopened", "run_in_background":true})
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
-    reopened_call.meta = Some(scope_meta(&first));
-    assert!(matches!(
-        client.peer().call_tool_once(reopened_call).await,
-        Ok(CallToolResponse::Task(_))
-    ));
-
-    let mut other_request = CallToolRequestParams::new("Bash").with_arguments(
-        serde_json::json!({"command": "printf other", "run_in_background": true})
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
-    other_request.meta = Some(scope_meta(&second));
-    assert!(matches!(
-        client.peer().call_tool_once(other_request).await,
-        Ok(CallToolResponse::Task(_))
-    ));
-    drop(client);
-    server_task.await.expect("join server");
-    assert!(server.shutdown_shell_tasks().await.is_some());
-}
-
-#[tokio::test]
-async fn scoped_foreground_promotion_is_discoverable() {
-    let dir = tempfile::tempdir().expect("workspace");
-    let authority = TaskScopeAuthority::new();
-    let token = authority.issue("promoted-session");
-    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false)
-        .with_task_scope_authority(authority);
-    let (client, server_task) = connect(
-        server.clone(),
-        ClientCapabilities::builder().enable_tasks().build(),
-    )
-    .await;
-    let mut request = CallToolRequestParams::new("Bash").with_arguments(
-        serde_json::json!({"command":"sleep 0.2; printf promoted", "timeout":50})
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
-    request.meta = Some(scope_meta(&token));
-    let CallToolResponse::Task(created) = client
-        .peer()
-        .call_tool_once(request)
-        .await
-        .expect("promote")
-    else {
-        panic!("task handle")
-    };
-    let snapshot = scope_request(&client, "workspace/taskSnapshot", &token, None)
-        .await
-        .expect("snapshot");
-    assert_eq!(snapshot["tasks"][0]["task"]["taskId"], created.task.task_id);
-    assert_eq!(
-        snapshot["tasks"][0]["initiatorSessionId"],
-        "promoted-session"
-    );
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let snapshot = scope_request(&client, "workspace/taskSnapshot", &token, None)
-                .await
-                .expect("snapshot");
-            if snapshot["tasks"][0]["terminalTransitionId"].is_string() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("promoted terminal");
-    drop(client);
-    server_task.await.expect("join server");
-    assert!(server.shutdown_shell_tasks().await.is_some());
 }
 
 async fn connect(
@@ -334,6 +47,155 @@ async fn connect(
     .await
     .expect("MCP handshake");
     (client, server_task)
+}
+
+/// 通用 MCP 客户端不发送任何 `peri/*` 元数据时，基础工具照常工作：
+/// 没有 owner 就没有 session 隔离，但能力面不因缺少 Peri 元数据而缩小。
+#[tokio::test]
+async fn generic_client_without_peri_metadata_calls_write_and_bash() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let target = dir.path().join("plain.txt");
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let (client, server_task) = connect(server.clone(), ClientCapabilities::default()).await;
+
+    let write = CallToolRequestParams::new("Write").with_arguments(
+        serde_json::json!({
+            "file_path": target.to_string_lossy(),
+            "content": "plain",
+        })
+        .as_object()
+        .unwrap()
+        .clone(),
+    );
+    client
+        .peer()
+        .call_tool_once(write)
+        .await
+        .expect("generic client call without task metadata");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "plain");
+
+    let bash = CallToolRequestParams::new("Bash").with_arguments(
+        serde_json::json!({"command": "printf generic-bash"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let CallToolResponse::Complete(result) = client
+        .peer()
+        .call_tool_once(bash)
+        .await
+        .expect("generic Bash call without task metadata")
+    else {
+        panic!("foreground Bash must return a completion")
+    };
+    let text = result
+        .content
+        .iter()
+        .filter_map(|block| block.as_text().map(|text| text.text.clone()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("generic-bash"), "{text}");
+
+    let error = client
+        .peer()
+        .send_request(rmcp::model::ClientRequest::CustomRequest(
+            rmcp::model::CustomRequest::new("workspace/taskSnapshot", Some(serde_json::json!({}))),
+        ))
+        .await
+        .expect_err("removed custom lifecycle must be method-not-found");
+    assert!(matches!(error, rmcp::ServiceError::McpError(error)
+        if error.code == rmcp::model::ErrorCode::METHOD_NOT_FOUND));
+
+    drop(client);
+    server_task.await.expect("join server");
+    assert!(server.shutdown_shell_tasks().await.is_some());
+}
+
+/// 两个 owner 的后台任务互不可见、不可取消；owner A 自己的任务照常可用。
+#[tokio::test]
+async fn task_owner_isolation_hides_and_protects_other_sessions_tasks() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let (client, server_task) = connect(
+        server.clone(),
+        ClientCapabilities::builder().enable_tasks().build(),
+    )
+    .await;
+    let mut request = CallToolRequestParams::new("Bash").with_arguments(
+        serde_json::json!({"command": "sleep 30", "run_in_background": true})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    request.meta = Some(owner_meta("session-a"));
+    let CallToolResponse::Task(created) = client
+        .peer()
+        .call_tool_once(request)
+        .await
+        .expect("owned background task")
+    else {
+        panic!("task handle")
+    };
+    let task_id = created.task.task_id;
+
+    let mut owner_get = GetTaskParams::new(&task_id);
+    owner_get.meta = Some(owner_meta("session-a"));
+    client
+        .peer()
+        .get_task(owner_get)
+        .await
+        .expect("owner reads its own task");
+
+    let mut other_get = GetTaskParams::new(&task_id);
+    other_get.meta = Some(owner_meta("session-b"));
+    assert!(
+        client.peer().get_task(other_get).await.is_err(),
+        "owner B must not read owner A's task"
+    );
+
+    let mut other_cancel = CancelTaskParams::new(&task_id);
+    other_cancel.meta = Some(owner_meta("session-b"));
+    assert!(
+        client.peer().cancel_task(other_cancel).await.is_err(),
+        "owner B must not cancel owner A's task"
+    );
+
+    let mut owner_cancel = CancelTaskParams::new(&task_id);
+    owner_cancel.meta = Some(owner_meta("session-a"));
+    client
+        .peer()
+        .cancel_task(owner_cancel)
+        .await
+        .expect("owner cancels its task");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let mut query = GetTaskParams::new(&task_id);
+            query.meta = Some(owner_meta("session-a"));
+            if client
+                .peer()
+                .get_task(query)
+                .await
+                .expect("task status")
+                .task
+                .status()
+                == TaskStatus::Cancelled
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("cancelled after cleanup");
+
+    drop(client);
+    server_task.await.expect("join server");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), server.shutdown_shell_tasks())
+            .await
+            .expect("process cleanup deadline"),
+        Some(peri_acp_types::tasks::TaskShutdownReport::Complete)
+    );
 }
 
 #[tokio::test]
@@ -627,150 +489,6 @@ async fn foreground_timeout_promotion_returns_queryable_task() {
     assert_eq!(terminal.task.status(), TaskStatus::Completed);
     client.cancel().await.expect("close client");
     server_task.await.expect("join server");
-    assert_eq!(
-        server.shutdown_shell_tasks().await,
-        Some(peri_acp_types::tasks::TaskShutdownReport::Complete)
-    );
-}
-
-fn current_invocation_meta(scope: Option<&str>, session: &str) -> rmcp::model::RequestMetaObject {
-    let mut metadata = scope.map(scope_meta).unwrap_or_default();
-    metadata.0 .0.insert(
-        "peri.invocation".into(),
-        serde_json::json!({
-            "initiatorSessionId": session,
-            "invocationId": "current-invocation",
-            "toolCallId": "model-call"
-        }),
-    );
-    metadata
-}
-
-#[tokio::test]
-async fn current_invocation_metadata_allows_ordinary_calls_without_task_owner() {
-    let directory = tempfile::tempdir().unwrap();
-    tokio::fs::write(directory.path().join("current.txt"), "current call result")
-        .await
-        .unwrap();
-    let server = WorkspaceMcpServer::new(directory.path().to_string_lossy().into_owned(), None);
-    let (client, server_task) = connect(server, ClientCapabilities::default()).await;
-    for _attempt in 0..2 {
-        let mut request = CallToolRequestParams::new("Read").with_arguments(
-            serde_json::json!({"file_path":"current.txt"})
-                .as_object()
-                .unwrap()
-                .clone(),
-        );
-        request.meta = Some(current_invocation_meta(None, "session"));
-        let CallToolResponse::Complete(result) =
-            client.peer().call_tool_once(request).await.unwrap()
-        else {
-            panic!("ordinary Read must return a result without a task owner")
-        };
-        assert_ne!(result.is_error, Some(true));
-        assert!(serde_json::to_string(&result)
-            .unwrap()
-            .contains("current call result"));
-    }
-    client.cancel().await.unwrap();
-    server_task.await.unwrap();
-}
-
-#[tokio::test]
-async fn current_invocation_metadata_rejects_scope_mismatch_before_tool_execution() {
-    let directory = tempfile::tempdir().unwrap();
-    let authority = TaskScopeAuthority::trusted_connection();
-    let token = authority.issue("session");
-    let server = WorkspaceMcpServer::standalone(directory.path().to_string_lossy(), false)
-        .with_task_scope_authority(authority);
-    let (client, server_task) = connect(server.clone(), ClientCapabilities::default()).await;
-    let mut request = CallToolRequestParams::new("Write").with_arguments(
-        serde_json::json!({"file_path":"unexpected.txt", "content":"must not be written"})
-            .as_object()
-            .unwrap()
-            .clone(),
-    );
-    request.meta = Some(current_invocation_meta(Some(&token), "other-session"));
-    let error = client
-        .peer()
-        .call_tool_once(request)
-        .await
-        .expect_err("scope mismatch must be rejected");
-    assert!(matches!(error, rmcp::ServiceError::McpError(error)
-        if error.code == rmcp::model::ErrorCode::INVALID_PARAMS));
-    assert!(!directory.path().join("unexpected.txt").exists());
-    client.cancel().await.unwrap();
-    server_task.await.unwrap();
-    assert_eq!(
-        server.shutdown_shell_tasks().await,
-        Some(peri_acp_types::tasks::TaskShutdownReport::Complete)
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn current_invocation_metadata_keeps_tasks_without_invocation_recovery() {
-    let directory = tempfile::tempdir().unwrap();
-    let authority = TaskScopeAuthority::trusted_connection();
-    let token = authority.issue("session");
-    let server = WorkspaceMcpServer::standalone(directory.path().to_string_lossy(), false)
-        .with_task_scope_authority(authority);
-    let (client, server_task) = connect(
-        server.clone(),
-        ClientCapabilities::builder().enable_tasks().build(),
-    )
-    .await;
-    let mut task_ids = Vec::new();
-    for _attempt in 0..2 {
-        let mut request = CallToolRequestParams::new("Bash").with_arguments(
-            serde_json::json!({"command":"sleep 30", "run_in_background":true})
-                .as_object()
-                .unwrap()
-                .clone(),
-        );
-        request.meta = Some(current_invocation_meta(Some(&token), "session"));
-        let CallToolResponse::Task(created) = client.peer().call_tool_once(request).await.unwrap()
-        else {
-            panic!("current background call must return its normal task handle")
-        };
-        task_ids.push(created.task.task_id);
-    }
-    assert_ne!(
-        task_ids[0], task_ids[1],
-        "current metadata must not create replay fencing"
-    );
-    let snapshot = scope_request(&client, "workspace/taskSnapshot", &token, None)
-        .await
-        .unwrap();
-    assert_eq!(snapshot["tasks"].as_array().unwrap().len(), 2);
-    assert!(snapshot.get("invocations").is_none());
-    for method in ["workspace/invocationSnapshot", "workspace/taskCapabilities"] {
-        let error = scope_request(&client, method, &token, None)
-            .await
-            .expect_err("removed recovery protocol");
-        assert!(matches!(error, rmcp::ServiceError::McpError(error)
-            if error.code == rmcp::model::ErrorCode::METHOD_NOT_FOUND));
-    }
-    for task_id in task_ids {
-        let mut cancel = CancelTaskParams::new(&task_id);
-        cancel.meta = Some(scope_meta(&token));
-        client.peer().cancel_task(cancel).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let mut query = GetTaskParams::new(&task_id);
-                query.meta = Some(scope_meta(&token));
-                let task = client.peer().get_task(query).await.unwrap();
-                if task.task.status() == TaskStatus::Cancelled {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("cancelled task must become queryable terminal state");
-    }
-    client.cancel().await.unwrap();
-    server_task.await.unwrap();
     assert_eq!(
         server.shutdown_shell_tasks().await,
         Some(peri_acp_types::tasks::TaskShutdownReport::Complete)

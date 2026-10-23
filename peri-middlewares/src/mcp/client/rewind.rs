@@ -31,12 +31,11 @@ impl McpClientPool {
             .ok_or("trusted Workspace capability unavailable")?;
         let peer = handle.peer.as_ref().ok_or("Workspace disconnected")?;
         let generation = self.handle_generation(&handle);
-        let scope = self
-            .task_scope_meta_for("workspace", session_id)
-            .ok_or("Workspace session scope unavailable")?;
+        let owner = super::task_owner_metadata::task_owner_meta(handle.source.as_ref(), session_id)
+            .ok_or("Workspace task owner unavailable")?;
         let request = CustomRequest::new(
             "workspace/rewindFiles",
-            Some(serde_json::json!({"changes": changes, "_meta": scope})),
+            Some(serde_json::json!({"changes": changes, "_meta": owner})),
         );
         let result = peri_time::timeout(Duration::from_secs(30), async {
             let pending = peer

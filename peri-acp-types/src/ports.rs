@@ -354,26 +354,16 @@ pub trait McpPoolPort: Send + Sync {
         Err("MCP OAuth flow unavailable".into())
     }
 
-    // ── Workspace task scope ─────────────────────────────────────────────
+    // ── Workspace task owner ─────────────────────────────────────────────
 
+    /// 子会话释放：取消已知 external task 并等待进程收口。默认跳过。
     async fn close_agent_session_scope(self: Arc<Self>, _session_id: &str) -> Result<(), String> {
         Err("Incomplete: agent session scope close capability unavailable".into())
     }
-    //
-    // 默认实现同「替换前类型还原失败 ⇒ 跳过」：不参与 scope 生命周期。
 
-    /// 在 Store 清除持久 close intent 后重新开启已关闭的 scope。默认跳过。
-    async fn open_workspace_task_scope(&self, _session_id: &str) -> Result<(), String> {
-        Ok(())
-    }
-
-    /// 会话关闭：栅栏新工作、发现既有任务、经 TaskManager 路由取消。默认跳过。
-    async fn close_workspace_task_scope(self: Arc<Self>, _session_id: &str) -> Result<(), String> {
-        Ok(())
-    }
-
-    /// 会话已不在内存（重入 close）时对账既有 scope 并收口。默认跳过。
-    async fn reconcile_closing_workspace_scope(&self, _session_id: &str) -> Result<(), String> {
+    /// 会话释放：取消该会话 TaskManager 已登记的 external task 并等待 settled。
+    /// 默认无操作（无 runtime 投影的池没有可取消的任务）。
+    async fn cancel_session_external_tasks(&self, _session_id: &str) -> Result<(), String> {
         Ok(())
     }
 

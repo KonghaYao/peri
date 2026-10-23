@@ -290,13 +290,10 @@ pub(crate) fn builtin_server_handler_with_env(
             //
             // Bash 的有效 `run_in_background` 缺省经上下文一次注入（beta flag 投影，
             // 装配期从会话冻结值派生）：本工厂不读配置、不解析 flag 语义。
-            let mut server = WorkspaceMcpServer::standalone(
+            let server = WorkspaceMcpServer::standalone(
                 ctx.cwd.clone(),
                 ctx.workspace_bash_default_run_in_background,
             );
-            if let Some(authority) = ctx.task_scope_authority.get() {
-                server = server.with_task_scope_authority(authority.clone());
-            }
             // 资源面输入（装配期一次注入的槽位）：`None` = 资源面未接线（既有行为），
             // `Some` = 装载 provider（W4a：会话装配只装 meta 面，见
             // `peri-acp/src/host/workspace.rs` 的构造点）。本工厂不读配置、不派生根。

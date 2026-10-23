@@ -18,9 +18,7 @@ mod workspace;
 pub use git_watch::{GitWatchState, GIT_REF_RESOURCE_URI};
 pub use input::WorkspaceInstanceInput;
 pub use peri_acp_types::workspace_resources::ResourceScope;
-pub use peri_mcp_common::task_scope::{
-    TaskScopeAuthority, TaskScopeCapability, TASK_SCOPE_META_KEY,
-};
+pub use peri_mcp_common::task_owner::{task_owner_from_meta, TASK_OWNER_META_KEY};
 pub use resources::{ResourceBudget, ResourceRoot, WorkspaceResourcesInput};
 pub use workspace::WorkspaceMcpServer;
 

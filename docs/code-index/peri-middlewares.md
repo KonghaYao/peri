@@ -107,18 +107,15 @@ Host 别名用 `host_attribution` → `RequestLedger::issue_legacy_seq`（4b 批
 lease 模型的 300 s）；签发准入按 `MAX_APPS_PER_SESSION`（超限 `IssueRejection::SessionCapacityExceeded`
 **拒绝且不淘汰存活记录**）；注册表跨会话上限 `MAX_APP_RECORDS` 由 `cleanup()` 在**登记后**
 按最旧（record 身份是 UUID v7）淘汰并终态撤销——原先在登记前清理，表长可停在「上限 + 1」。
-当前 scope 仅用于本进程任务权限与关联，不作为恢复旧执行的证据。
-`tasks/get` 轮询与 Workspace
-`workspace/taskSnapshot`/`workspace/taskChanges` cursor 对账将终态交给 Manager，
-Manager 先投递带稳定 delivery ID 的 Defer，再发布终态。订阅只有在结算成功，或 `false` 同时有同任务的终态快照证据时才结束；缺失条目与竞争中的结算必须重试。monitor 准入失败沿工具错误返回已存在的 opaque ID，并明确不保证通知、禁止盲目重跑；同键已有 monitor 可复用。回归入口为 `client/subscription_tasks_test.rs` 与 `client/output_store_test.rs`。
+当前 owner 仅用于本进程任务权限与关联，不作为恢复旧执行的证据。
+`tasks/get` 轮询把终态交给 Manager，
+Manager 先投递带稳定 delivery ID 的 Defer，再发布终态。订阅只有在结算成功，或 `false` 同时有同任务的终态证据时才结束；缺失条目与竞争中的结算必须重试。monitor 准入失败沿工具错误返回已存在的 opaque ID，并明确不保证通知、禁止盲目重跑；同键已有 monitor 可复用。回归入口为 `client/subscription_tasks_test.rs` 与 `client/output_store_test.rs`。
 `tasks/get` 连续失败达到阈值仅尝试放弃未知任务，不保证投递与结算成功；已经观测到终态后，本次运行缓存真实结果并重试投递，不以「owner 不可观测」覆盖已知终态。查询恢复非终态会重置失败计数，单次挂起的请求不由重试次数约束。
 Builtin Workspace Bash 提醒只带退出信息与输出文件引用；提醒 metadata 的 `task_id` 是会话侧公共 id（`mcp-...`，与启动回执/任务面板一致），`remote_task_id` 是 Workspace owner id（`shell-...`，供 `tasks/get` 查询）。`McpPoolPort::has_active_tasks` 查询 Manager
-未结清的外部任务供 Agent idle probe 使用。外部 Workspace 的 scope 元数据经部署可信的 MCP 连接传递；builtin 使用同进程 scope authority。
-显式删除可调用 `reconcile_closing_workspace_scope`，在 Agent Manager 不存在时从可信
-session ID 重新构造 scope 元数据，逐 owner 关闭创建、发现、取消并等待终态；缺少 owner 或
-可信 scope 时返回未完成，不允许静默删除。
-scope 快照携 epoch；`taskClose`/`taskOpen` 按该 epoch 做 owner 端 CAS，旧关闭请求
-在重开后不能再次关掉同一 session 的新执行轮次。
+未结清的外部任务供 Agent idle probe 使用。builtin workspace 与 `WorkspaceRemote` 的 owner 元数据都是 `_meta["peri/taskOwner"] = 直接发起 session id`；不签发 token，其他 server 不注入。
+会话释放只取消 Manager 已知 external task 并等待 settled；已删除
+`open_workspace_task_scope`/`close_workspace_task_scope`/`reconcile_closing_workspace_scope`，不存在
+snapshot/`taskClose`/`taskOpen`/epoch CAS，也不从 owner 端补发现未登记任务。
 
 ### OAuth 凭证接入（实现完成）
 

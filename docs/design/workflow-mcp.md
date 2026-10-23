@@ -67,7 +67,7 @@ Workflow 是目前唯一仍以「middleware 槽位 + 私有 wire 协议」接入
 
 **领域控制接口**：MCP adapter（handler）背后的唯一控制面是 `WorkflowRuntime`（start_run / kill / resume / status / 任务表 / 资源快照）。Node wire（`workflow/start`、`agent/task`、`agent/result` 等）是 `WorkflowRuntime` 的实现细节；MCP 对外契约（工具/资源/订阅）不依赖 wire 形态，**wire 改造与 MCP 面落地解耦实施**。
 
-**会话隔离**：池按 session 构建（`assemble.rs` `session_scoped=true`），实例与消费者随会话创建、随会话关闭销毁；实例上下文按 `BuiltinInstanceContext` 会话装配期一次性注入（对标 `workspace_resources` 范式）。per-call 身份沿用 `_meta["peri/taskScope"]` 能力令牌 + `peri.invocation.initiatorSessionId` 通道，为 workflow 源接线。
+**会话隔离**：池按 session 构建（`assemble.rs` `session_scoped=true`），实例与消费者随会话创建、随会话关闭销毁；实例上下文按 `BuiltinInstanceContext` 会话装配期一次性注入（对标 `workspace_resources` 范式）。per-call 身份只走 `peri.invocation.initiatorSessionId`；`_meta["peri/taskOwner"]` 仅注入 builtin workspace 与 `WorkspaceRemote`，workflow 来源不接收该字段。
 
 **信道裁决记录**：
 

@@ -7,6 +7,20 @@
 
 每个会话拥有当前进程的任务目录、队列和取消关系。共享 MCP 连接不共享含混的收件人回调；结果投递给直接发起会话，父子关系仅表达委托与显式取消策略。
 
+### 1.1 并发后台任务（P0）
+
+并发后台任务是多数场景，父子 Agent 并发后台任务是 P0，不是边缘路径。父会话与多个子会话共享同一 workspace 时，后台 Bash 任务按直接发起会话归属：父会话结束、取消或排空不得误清理仍存活的子会话任务，子会话也不得观察或取消父会话任务。
+
+会话开始/结束只是 per-session 生命周期事件，不能使用全局 open/close 作用域。任务归属仅存在于当前进程；不随会话恢复重建，也不持久化 owner declaration、恢复 locator 或 terminal delivery ACK。
+
+### 1.2 Workspace task owner 契约
+
+Workspace MCP 默认是通用 MCP 服务：不发送任何 `peri/*` 元数据的客户端走 generic 模式，7 个基础工具照常可用，后台任务不参与 session 隔离。Peri 宿主只为 builtin workspace 与 `WorkspaceRemote` 注入 `_meta["peri/taskOwner"] = 直接发起会话的 session id`；其他 MCP server 不接收该字段。
+
+owner 是纯身份，不是秘密或 capability：不存在 per-session token、签发/解析表或调用一致性校验，远程部署的信任来自连接级认证（loopback 或部署认证）。服务端每次请求从 `_meta` 读取可选 owner；后台 Bash、`tasks/get|cancel` 与 `subscriptions/listen` 的任务事件在 owner 存在时按 owner 过滤，owner A 不能读取或取消 owner B 的任务。模型不能通过工具参数伪造 owner，宿主在工具桥接层注入。
+
+任务事件订阅使用 MCP 2026-07-28 标准 `subscriptions/listen`。不存在 `workspace/taskOpen|taskClose|taskSnapshot|taskChanges` 自定义生命周期，也没有 epoch、close barrier 或连接重建后的 owner 恢复；旧客户端调用这些方法得到标准 method-not-found。`workspace/rewindFiles` 保留服务端计算，owner 可选。
+
 模型 tool-call ID 用于工具卡及子 Agent 展示归属；当前 invocation/task ID 用于当前调用关联。当前运行可保留可信绑定和去重，但不持久化 task binding、owner declaration、恢复 locator 或 terminal delivery ACK 账本。
 
 ## 2. 操作与结果
@@ -45,13 +59,13 @@ MQ pending 标记是后续处理提示，不作为排队请求的准入锁。重
 
 ## 4. 移除冷恢复
 
-不在 session/load/resume、新输入或进程重启时扫描旧 task scope、重建旧 invocation、接管 owner 或自动续跑 child。缺少旧 callback/任务身份不写 Work quarantine，不阻塞新的普通执行。
+不在 session/load/resume、新输入或进程重启时扫描旧 task owner、重建旧 invocation、接管 owner 或自动续跑 child。缺少旧 callback/任务身份不写 Work quarantine，不阻塞新的普通执行。
 
 历史状态可显示，但不是当前 running。重启后不保证外部后台结果再次送达；外部任务可能继续存在，显式工具查询或人工处理不等于恢复旧 Agent 执行。
 
 ## 5. 取消与关闭
 
-当前进程保留 Cascade/Independent 策略、取消 token、MCP owner 关闭顺序和有界排空。清理未结清明确报错，不假称已停止。
+当前进程保留 Cascade/Independent 策略、取消 token、MCP owner 关闭顺序和有界排空。清理未结清明确报错，不假称已停止。会话释放只取消该会话 TaskManager 已登记的 external task 并等待 settled；不扫描未登记任务、不做 snapshot/close barrier，也不把「未发现任务」当作恢复证据。
 
 取消本地后台 Agent 后，owner 的协作退出仍须交付原 task ID 的一次结果；这不是第二次 registry 终态，也不绕过父会话 Stop 或关闭。强制 abort 没有结果时不得伪造已完成清理。后台 resume 先完成资源认领移交再放行执行；放行前失败由资源认领 handle 恢复原记录，已运行后台的终态不能被前台终止声明覆盖。正常结束与 panic 均先收尾事件、hook 和会话状态，再交付 owner 终态；状态落库失败是可见失败。
 

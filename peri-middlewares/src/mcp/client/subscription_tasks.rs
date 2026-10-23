@@ -3,22 +3,11 @@ use std::{sync::Arc, time::Duration};
 use peri_acp_types::event::BackgroundTaskResult;
 use peri_acp_types::tasks::TaskManager;
 use rmcp::{
-    model::{
-        CancelTaskParams, ClientRequest, CustomRequest, DetailedTask, GetTaskParams,
-        RequestMetaObject, ServerResult, TaskPayload,
-    },
+    model::{DetailedTask, GetTaskParams, TaskPayload},
     service::{Peer, RoleClient},
 };
-use serde::Deserialize;
-use serde_json::json;
 
 use super::super::McpClientPool;
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ScopeTaskRow {
-    task: DetailedTask,
-}
 
 /// After this many consecutive failed status queries, attempt to settle an
 /// unobservable owner as unresolved. Settlement itself can still fail, and a
@@ -30,116 +19,15 @@ fn lost_owner_retry_due(attempts: &mut usize) -> bool {
     *attempts >= LOST_ABANDON_ATTEMPTS
 }
 
-#[derive(Deserialize)]
-struct ScopeTaskSnapshot {
-    cursor: u64,
-    epoch: u64,
-    closing: bool,
-    #[serde(default, rename = "resourcesSettled")]
-    resources_settled: Option<bool>,
-    tasks: Vec<ScopeTaskRow>,
-}
-
-fn pending_tasks_for_closed_epoch(
-    server: &str,
-    expected_epoch: u64,
-    snapshot: ScopeTaskSnapshot,
-) -> Result<Vec<String>, String> {
-    if snapshot.epoch != expected_epoch || !snapshot.closing {
-        return Err(format!(
-            "workspace task owner {server} close epoch changed during reconciliation"
-        ));
-    }
-    if snapshot.resources_settled.is_none() {
-        return Err(format!(
-            "Incomplete: workspace task owner {server} resource settlement evidence missing"
-        ));
-    }
-    Ok(snapshot
-        .tasks
-        .into_iter()
-        .filter(|row| !row.task.status().is_terminal())
-        .map(|row| row.task.task.task_id)
-        .collect())
-}
-
 impl McpClientPool {
-    async fn wait_for_task_owner_catalog(&self) -> Result<(), String> {
-        let until = peri_time::monotonic_now() + Duration::from_secs(10);
-        while self.configs.read().is_empty()
-            && !self.initialized.load(std::sync::atomic::Ordering::Acquire)
-        {
-            if peri_time::monotonic_now() >= until {
-                return Err("workspace task owner catalog unavailable".into());
-            }
-            peri_time::sleep(Duration::from_millis(50)).await;
-        }
-        Ok(())
-    }
-
-    async fn wait_for_workspace_peer(&self, server: &str) -> Result<Peer<RoleClient>, String> {
-        let until = peri_time::monotonic_now() + Duration::from_secs(10);
-        loop {
-            if let Some(peer) = self
-                .clients
-                .read()
-                .get(server)
-                .and_then(|client| client.peer.clone())
-            {
-                return Ok(peer);
-            }
-            if peri_time::monotonic_now() >= until {
-                return Err(format!("workspace task owner {server} disconnected"));
-            }
-            peri_time::sleep(Duration::from_millis(50)).await;
-        }
-    }
-
-    fn configured_workspace_task_owners(&self) -> Vec<String> {
-        self.configs
-            .read()
-            .iter()
-            .filter_map(|(name, config)| match config.source.as_ref() {
-                Some(crate::mcp::config::ConfigSource::Builtin { instance })
-                    if instance == "workspace" =>
-                {
-                    Some(name.clone())
-                }
-                Some(crate::mcp::config::ConfigSource::WorkspaceRemote) => Some(name.clone()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// Conclusive scope reconciliation clears the execution evidence recorded by
-    /// cancelled or timed-out calls to that same owner, so a single interruption
-    /// cannot lock the session permanently. Without evidence nothing is cleared.
-    fn resolve_execution_evidence(&self, session_id: &str, scope: &str) {
-        let Some(manager) = self.session_bindings.read().manager(session_id) else {
-            return;
-        };
-        let cleared = manager.resolve_external_execution_evidence(scope);
-        if cleared > 0 {
-            tracing::info!(session = %session_id, scope, cleared,
-                "cleared external execution uncertainty after conclusive reconciliation");
-        }
-    }
-
-    /// Explicit session close: gate new Workspace work, discover all admitted
-    /// tasks, then route cancellation through the session TaskManager.
-    pub async fn close_workspace_task_scope(
-        self: &Arc<Self>,
-        session_id: &str,
-    ) -> Result<(), String> {
-        self.reconcile_closing_workspace_scope(session_id).await?;
-        for server in self.configured_workspace_task_owners() {
-            self.resolve_execution_evidence(session_id, &server);
-        }
+    /// Cancel every external task the session TaskManager knows about and wait
+    /// for their processes to settle.
+    ///
+    /// There is no snapshot/close barrier: unused owner state cannot be
+    /// discovered, and a session only owns the tasks its runtime registered.
+    pub async fn cancel_session_external_tasks(&self, session_id: &str) -> Result<(), String> {
         let manager = self.session_bindings.read().manager(session_id);
         let Some(manager) = manager else {
-            // A session may have no Agent task projection (for example a
-            // disabled Workspace profile). The owner scope was already
-            // reconciled above, and SessionManager closes its own tasks.
             return Ok(());
         };
         for task_id in manager.external_task_ids() {
@@ -153,157 +41,6 @@ impl McpClientPool {
             peri_time::sleep(Duration::from_millis(200)).await;
         }
         Ok(())
-    }
-
-    /// Close resources on the currently connected, trusted Workspace scope.
-    pub async fn reconcile_closing_workspace_scope(&self, session_id: &str) -> Result<(), String> {
-        self.wait_for_task_owner_catalog().await?;
-        for server in self.configured_workspace_task_owners() {
-            let peer = self.wait_for_workspace_peer(&server).await?;
-            let meta = self
-                .task_scope_meta_for(&server, session_id)
-                .ok_or_else(|| format!("workspace task scope for {server} unavailable"))?;
-            let initial: ScopeTaskSnapshot =
-                serde_json::from_value(Self::workspace_scope_snapshot(&peer, meta.clone()).await?)
-                    .map_err(|error| format!("invalid workspace task snapshot: {error}"))?;
-            let response = peri_time::timeout(
-                Duration::from_secs(10),
-                peer.send_request(ClientRequest::CustomRequest(CustomRequest::new(
-                    "workspace/taskClose",
-                    Some(json!({"_meta": meta, "epoch": initial.epoch})),
-                ))),
-            )
-            .await
-            .map_err(|_| "workspace task close timed out".to_owned())?;
-            let response = match response {
-                Ok(response) => response,
-                Err(error) => {
-                    let current: ScopeTaskSnapshot = serde_json::from_value(
-                        Self::workspace_scope_snapshot(&peer, meta.clone()).await?,
-                    )
-                    .map_err(|cause| format!("invalid workspace task snapshot: {cause}"))?;
-                    if current.epoch != initial.epoch || !current.closing {
-                        return Err(format!(
-                            "workspace task close epoch changed; scope must be reviewed before retry: {error}"
-                        ));
-                    }
-                    return Err(format!("workspace task close rejected: {error}"));
-                }
-            };
-            let ServerResult::CustomResult(response) = response else {
-                return Err("workspace task close returned unexpected response".into());
-            };
-            let barrier_cursor = response
-                .0
-                .get("barrierCursor")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or("Incomplete: workspace task close barrier missing")?;
-            if response.0.get("epoch").and_then(serde_json::Value::as_u64) != Some(initial.epoch) {
-                return Err("Incomplete: workspace task close response epoch mismatch".into());
-            }
-            let until = peri_time::monotonic_now() + Duration::from_secs(20);
-            loop {
-                let snapshot: ScopeTaskSnapshot = serde_json::from_value(
-                    Self::workspace_scope_snapshot(&peer, meta.clone()).await?,
-                )
-                .map_err(|error| format!("invalid workspace task snapshot: {error}"))?;
-                if snapshot.cursor < barrier_cursor {
-                    return Err("Incomplete: workspace task snapshot precedes close barrier".into());
-                }
-                let resources_settled = snapshot.resources_settled == Some(true);
-                let pending = pending_tasks_for_closed_epoch(&server, initial.epoch, snapshot)?;
-                if pending.is_empty() && resources_settled {
-                    break;
-                }
-                for raw_id in pending {
-                    let mut params = CancelTaskParams::new(raw_id);
-                    params.meta = Some(meta.clone());
-                    // A concurrent terminal transition can race cancellation.
-                    // The next snapshot is the authoritative completion check.
-                    match peri_time::timeout(Duration::from_secs(5), peer.cancel_task(params)).await
-                    {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => tracing::debug!(server = %server, %error,
-                            "Workspace close cancel failed; reconciling"),
-                        Err(error) => tracing::debug!(server = %server, %error,
-                            "Workspace close cancel timed out; reconciling"),
-                    }
-                }
-                if peri_time::monotonic_now() >= until {
-                    return Err(format!("workspace task owner {server} close incomplete"));
-                }
-                peri_time::sleep(Duration::from_millis(200)).await;
-            }
-        }
-        Ok(())
-    }
-
-    /// Admit work into a previously closed scope only after Store has cleared
-    /// closing the owner scope. Epoch CAS fences delayed taskClose replays.
-    pub async fn open_workspace_task_scope(&self, session_id: &str) -> Result<(), String> {
-        self.wait_for_task_owner_catalog().await?;
-        for server in self.configured_workspace_task_owners() {
-            let peer = self.wait_for_workspace_peer(&server).await?;
-            let meta = self
-                .task_scope_meta_for(&server, session_id)
-                .ok_or_else(|| format!("workspace task scope for {server} unavailable"))?;
-            let snapshot: ScopeTaskSnapshot =
-                serde_json::from_value(Self::workspace_scope_snapshot(&peer, meta.clone()).await?)
-                    .map_err(|error| format!("invalid workspace task snapshot: {error}"))?;
-            if !snapshot.closing {
-                continue;
-            }
-            if snapshot.resources_settled != Some(true)
-                || snapshot
-                    .tasks
-                    .iter()
-                    .any(|row| !row.task.task.status.is_terminal())
-            {
-                return Err("Incomplete: previous Workspace scope resources unsettled".into());
-            }
-            let response = peri_time::timeout(
-                Duration::from_secs(10),
-                peer.send_request(ClientRequest::CustomRequest(CustomRequest::new(
-                    "workspace/taskOpen",
-                    Some(json!({"_meta":meta,"epoch":snapshot.epoch})),
-                ))),
-            )
-            .await
-            .map_err(|_| "workspace task open timed out".to_owned())?
-            .map_err(|error| format!("workspace task open rejected: {error}"))?;
-            let ServerResult::CustomResult(result) = response else {
-                return Err("workspace task open returned unexpected response".into());
-            };
-            let next_epoch = result
-                .0
-                .get("epoch")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| "workspace task open epoch missing".to_owned())?;
-            if next_epoch != snapshot.epoch.saturating_add(1) {
-                return Err("workspace task open epoch mismatch".into());
-            }
-        }
-        Ok(())
-    }
-
-    async fn workspace_scope_snapshot(
-        peer: &Peer<RoleClient>,
-        meta: RequestMetaObject,
-    ) -> Result<serde_json::Value, String> {
-        let result = peri_time::timeout(
-            Duration::from_secs(10),
-            peer.send_request(ClientRequest::CustomRequest(CustomRequest::new(
-                "workspace/taskSnapshot",
-                Some(json!({"_meta": meta})),
-            ))),
-        )
-        .await
-        .map_err(|_| "workspace task snapshot timed out".to_owned())?
-        .map_err(|error| error.to_string())?;
-        match result {
-            ServerResult::CustomResult(result) => Ok(result.0),
-            _ => Err("workspace task snapshot returned unexpected response".into()),
-        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -336,7 +73,7 @@ impl McpClientPool {
                 };
                 let mut params = GetTaskParams::new(&raw_task_id);
                 if is_workspace_shell {
-                    params.meta = pool.task_scope_meta_for(&server, &session_id);
+                    params.meta = pool.task_owner_meta_for(&server, &session_id);
                 }
                 let observed = match known_terminal.as_ref() {
                     Some(task) => Ok(task.clone()),
@@ -502,4 +239,4 @@ mod binding;
 
 #[cfg(test)]
 #[path = "subscription_tasks_test.rs"]
-mod task_projection_tests;
+mod tests;

@@ -92,8 +92,6 @@ pub struct BuiltinInstanceContext {
     /// 关闭位）的事实源是装配期输入（F11 插件 manifest / F12 配置读取已在该层完成）。
     #[cfg(not(target_os = "emscripten"))]
     pub workspace_resources: Option<WorkspaceResourcesInput>,
-    /// Host-issued capabilities shared by all sessions using this builtin instance.
-    pub task_scope_authority: std::sync::OnceLock<peri_mcp_core::task_scope::TaskScopeAuthority>,
     /// `workspace` 实例 Bash 的**有效 `run_in_background` 缺省**（beta flag 投影）。
     ///
     /// 装配期一次注入：会话装配从**会话冻结**的 flag 值派生，dispatch 只读不改、
@@ -129,7 +127,6 @@ impl BuiltinInstanceContext {
             workspace: None,
             #[cfg(not(target_os = "emscripten"))]
             workspace_resources: None,
-            task_scope_authority: std::sync::OnceLock::new(),
             #[cfg(not(target_os = "emscripten"))]
             workspace_bash_default_run_in_background: false,
             closed: BTreeSet::new(),
