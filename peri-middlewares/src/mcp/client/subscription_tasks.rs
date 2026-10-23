@@ -30,17 +30,25 @@ impl McpClientPool {
         let Some(manager) = manager else {
             return Ok(());
         };
+        let mut failures = Vec::new();
         for task_id in manager.external_task_ids() {
-            manager.cancel_async(&task_id).await?;
+            if let Err(err) = manager.cancel_async(&task_id).await {
+                failures.push(format!("{task_id}: {err}"));
+            }
         }
         let until = peri_time::monotonic_now() + Duration::from_secs(20);
         while manager.has_unsettled_external() {
             if peri_time::monotonic_now() >= until {
-                return Err("external task close incomplete".into());
+                failures.push("external task close incomplete".into());
+                break;
             }
             peri_time::sleep(Duration::from_millis(200)).await;
         }
-        Ok(())
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

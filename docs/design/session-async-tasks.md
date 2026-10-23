@@ -19,7 +19,7 @@ Workspace MCP 默认是通用 MCP 服务：不发送任何 `peri/*` 元数据的
 
 owner 是纯身份，不是秘密或 capability：不存在 per-session token、签发/解析表或调用一致性校验，远程部署的信任来自连接级认证（loopback 或部署认证）。服务端每次请求从 `_meta` 读取可选 owner；后台 Bash、`tasks/get|cancel` 与 `subscriptions/listen` 的任务事件在 owner 存在时按 owner 过滤，owner A 不能读取或取消 owner B 的任务。模型不能通过工具参数伪造 owner，宿主在工具桥接层注入。
 
-任务事件订阅使用 MCP 2026-07-28 标准 `subscriptions/listen`。不存在 `workspace/taskOpen|taskClose|taskSnapshot|taskChanges` 自定义生命周期，也没有 epoch、close barrier 或连接重建后的 owner 恢复；旧客户端调用这些方法得到标准 method-not-found。`workspace/rewindFiles` 保留服务端计算，owner 可选。
+任务事件订阅使用 MCP 2026-07-28 标准 `subscriptions/listen`。不存在 `workspace/taskOpen|taskClose|taskSnapshot|taskChanges` 自定义生命周期，也没有 epoch、close barrier 或连接重建后的 owner 恢复；旧客户端调用这些方法得到标准 method-not-found。`workspace/rewindFiles` 保留非标准能力：客户端计算变更集，服务端校验并应用，owner 可选。
 
 模型 tool-call ID 用于工具卡及子 Agent 展示归属；当前 invocation/task ID 用于当前调用关联。当前运行可保留可信绑定和去重，但不持久化 task binding、owner declaration、恢复 locator 或 terminal delivery ACK 账本。
 
