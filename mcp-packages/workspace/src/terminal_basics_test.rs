@@ -44,10 +44,11 @@ async fn test_bash_timeout_returns_quickly() {
     let start = Instant::now();
 
     // Windows 用 ping 模拟 sleep，Unix 用 sleep
+    // 59s 保持在 60s 前台 sleep 守卫阈值之下，仍足以让 1s 超时生效
     let (sleep_cmd, timeout_ms) = if cfg!(target_os = "windows") {
         ("ping -n 60 127.0.0.1", 1000)
     } else {
-        ("sleep 60", 1000)
+        ("sleep 59", 1000)
     };
 
     let result = tool
@@ -62,7 +63,7 @@ async fn test_bash_timeout_returns_quickly() {
     let err_msg = result.unwrap_err().to_string();
     let elapsed = start.elapsed();
 
-    // 应在约 1 秒内返回（不超过 3 秒），不等待 sleep 60 完成
+    // 应在约 1 秒内返回（不超过 3 秒），不等待 sleep 59 完成
     assert!(
         elapsed.as_secs() < if cfg!(target_os = "windows") { 8 } else { 3 },
         "超时后应快速返回，实际耗时 {:?}",
@@ -425,4 +426,171 @@ fn test_truncate_output_persists_full_content_on_byte_truncation() {
         result.contains("peri-tool-output-"),
         "字节截断应包含文件路径: {result}"
     );
+}
+
+// ── 前台 sleep 守卫 ──────────────────────────────────────────────
+
+#[test]
+fn test_foreground_sleep_parses_seconds_units_and_multiple_args() {
+    assert_eq!(foreground_sleep_seconds("sleep 115"), Some(115.0));
+    assert_eq!(foreground_sleep_seconds("sleep 1.5"), Some(1.5));
+    assert_eq!(foreground_sleep_seconds("sleep 2m"), Some(120.0));
+    assert_eq!(foreground_sleep_seconds("sleep 1.5m"), Some(90.0));
+    assert_eq!(foreground_sleep_seconds("sleep 1h"), Some(3600.0));
+    assert_eq!(foreground_sleep_seconds("sleep 1m 30s"), Some(90.0));
+    assert_eq!(foreground_sleep_seconds("sleep -- 100"), Some(100.0));
+}
+
+#[test]
+fn test_foreground_sleep_finds_segment_starts_after_wrappers_and_separators() {
+    assert_eq!(foreground_sleep_seconds("sudo sleep 100"), Some(100.0));
+    assert_eq!(foreground_sleep_seconds("sudo -n sleep 100"), Some(100.0));
+    assert_eq!(foreground_sleep_seconds("time -p sleep 100"), Some(100.0));
+    assert_eq!(foreground_sleep_seconds("env FOO=1 sleep 100"), Some(100.0));
+    assert_eq!(foreground_sleep_seconds("exec sleep 100"), Some(100.0));
+    assert_eq!(
+        foreground_sleep_seconds("sleep 115; echo done"),
+        Some(115.0)
+    );
+    assert_eq!(
+        foreground_sleep_seconds("echo start; sleep 115"),
+        Some(115.0)
+    );
+    assert_eq!(
+        foreground_sleep_seconds("echo start\nsleep 115\ndone"),
+        Some(115.0)
+    );
+    assert_eq!(
+        foreground_sleep_seconds("echo start | sleep 115"),
+        Some(115.0)
+    );
+    assert_eq!(foreground_sleep_seconds("(sleep 115)"), Some(115.0));
+    assert_eq!(foreground_sleep_seconds("{ sleep 115; }"), Some(115.0));
+    assert_eq!(foreground_sleep_seconds("! sleep 115"), Some(115.0));
+    assert_eq!(
+        foreground_sleep_seconds("if true; then sleep 115; fi"),
+        Some(115.0)
+    );
+    assert_eq!(
+        foreground_sleep_seconds("for i in 1; do sleep 115; done"),
+        Some(115.0)
+    );
+    assert_eq!(
+        foreground_sleep_seconds("sleep 1 && sleep 100"),
+        Some(100.0),
+        "应取最长的一段"
+    );
+    assert_eq!(
+        foreground_sleep_seconds("sleep 50 || sleep 100"),
+        Some(100.0)
+    );
+}
+
+#[test]
+fn test_foreground_sleep_ignores_quoted_commented_short_and_unknown_sleeps() {
+    assert_eq!(
+        foreground_sleep_seconds("sleep 30; echo done"),
+        Some(30.0),
+        "短等待应可解析且低于阈值"
+    );
+    assert!(foreground_sleep_seconds("echo \"sleep 115\"").is_none());
+    assert!(foreground_sleep_seconds("echo 'sleep 115'").is_none());
+    assert!(foreground_sleep_seconds("echo done # sleep 115").is_none());
+    assert!(
+        foreground_sleep_seconds("timeout 5 sleep 100").is_none(),
+        "简单命令首 token 不是 sleep 时不拒绝"
+    );
+    assert!(
+        foreground_sleep_seconds("sleep \"$N\"").is_none(),
+        "变量时长无法静态解析，不拒绝"
+    );
+    assert!(
+        foreground_sleep_seconds("sh -c 'sleep 115'").is_none(),
+        "包装形式允许漏检（防御性约束，非安全沙箱）"
+    );
+    assert!(
+        foreground_sleep_seconds("sleep 100 &").is_none(),
+        "后台段不阻塞调用方"
+    );
+    assert!(
+        foreground_sleep_seconds("nohup sleep 100 &").is_none(),
+        "后台段不阻塞调用方"
+    );
+}
+
+#[test]
+fn test_foreground_sleep_ignores_redirection_attached_to_duration() {
+    assert_eq!(
+        foreground_sleep_seconds("sleep 100 >/dev/null"),
+        Some(100.0)
+    );
+    assert_eq!(foreground_sleep_seconds("sleep 59 2>&1"), Some(59.0));
+    assert_eq!(
+        foreground_sleep_seconds("sleep 115 &>wait.log"),
+        Some(115.0)
+    );
+}
+
+#[tokio::test]
+async fn test_bash_rejects_long_foreground_sleep() {
+    let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
+    let start = Instant::now();
+    let error = tool
+        .invoke(
+            serde_json::json!({"command": "sleep 115"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .expect_err("前台 sleep 115 必须被拒绝")
+        .to_string();
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "拒绝必须先于进程启动，实际耗时 {:?}",
+        start.elapsed()
+    );
+    assert!(error.contains("115s"), "应说明检测到的时长: {error}");
+    assert!(
+        error.contains("run_in_background"),
+        "应给出后台执行指引: {error}"
+    );
+    assert!(
+        error.contains("completion notification"),
+        "应要求等待完成通知而不是轮询: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_bash_rejects_long_foreground_sleep_in_chain() {
+    let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
+    let start = Instant::now();
+    let error = tool
+        .invoke(
+            serde_json::json!({"command": "sleep 115; echo done"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .expect_err("链式前台 sleep 115 必须被拒绝")
+        .to_string();
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "拒绝必须先于进程启动，实际耗时 {:?}",
+        start.elapsed()
+    );
+    assert!(error.contains("115s"), "应说明检测到的时长: {error}");
+}
+
+#[tokio::test]
+async fn test_bash_allows_quoted_sleep_text() {
+    let _process_env = peri_mcp_common::process_env::lock().expect("process env lock");
+    let tool = BashTool::new(std::env::temp_dir().to_str().unwrap());
+    let output = tool
+        .invoke(
+            serde_json::json!({"command": "echo \"sleep 115\""}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .expect("引号内文本不应触发守卫");
+    assert!(output.contains("sleep 115"), "输出应保留原文: {output}");
 }

@@ -18,6 +18,10 @@ use tracing::warn;
 
 use peri_mcp_common::shell::persist_truncated_output_with_ref;
 
+#[path = "terminal_sleep_guard.rs"]
+mod sleep_guard;
+use sleep_guard::{foreground_sleep_seconds, MAX_FOREGROUND_SLEEP_SECONDS};
+
 // Render only the host platform's cleanup command; Unix PGIDs are not Windows PIDs.
 fn background_cleanup_hint(pid: u32, platform: &str) -> String {
     let stop = if platform == "windows" {
@@ -363,7 +367,7 @@ impl BaseTool for BashTool {
                     "minimum": 0,
                     "maximum": 600000,
                     "description": format!(
-                        "Optional timeout in milliseconds. The synchronous path is always bounded: it defaults to 15000ms and is capped at {FOREGROUND_MAX_TIMEOUT_MS}ms (2 minutes) — `timeout: 0` is treated as that maximum instead of disabling the timeout, so no request can produce an unbounded synchronous wait. Foreground timeout returns an error: if background task registration succeeds, the process is promoted and the tool returns a background task receipt carrying its task id (no pid or log paths), without a new timeout; otherwise termination is requested. Background tasks (run_in_background: true) run until completion: omitting `timeout` or setting `0` leaves that background command without a timeout, and a positive `timeout` (up to 600000ms) requests termination when reached. Check the returned process status before retrying; do not duplicate a task that is still running. For builds, installs, or tests, set a longer `timeout` up to the foreground maximum, or use run_in_background: true for work that needs longer."
+                        "Optional timeout in milliseconds. The synchronous path is always bounded: it defaults to 15000ms and is capped at {FOREGROUND_MAX_TIMEOUT_MS}ms (2 minutes) — `timeout: 0` is treated as that maximum instead of disabling the timeout, so no request can produce an unbounded synchronous wait. Foreground timeout returns an error: if background task registration succeeds, the process is promoted and the tool returns a background task receipt carrying its task id (no pid or log paths), without a new timeout; otherwise termination is requested. Background tasks (run_in_background: true) run until completion: omitting `timeout` or setting `0` leaves that background command without a timeout, and a positive `timeout` (up to 600000ms) requests termination when reached. Check the returned process status before retrying; do not duplicate a task that is still running. For builds, installs, or tests, set a longer `timeout` up to the foreground maximum, or use run_in_background: true for work that needs longer. Foreground `sleep` of 60 seconds or more is rejected: use run_in_background: true for long waits and wait for the completion notification instead of polling with `sleep`."
                     )
                 },
                 "run_in_background": self.run_in_background_schema()
@@ -514,6 +518,30 @@ impl BashTool {
         // ── 同步执行路径 ──
         // 前台执行恒有界：`timeout: 0` 与超过上限的请求都界到前台上限，
         // 不存在禁用超时的同步路径（无 Option，结构上无法表达"不超时"）。
+        //
+        // 防御性效率约束（非安全沙箱）：模型常用 `sleep 100` 轮询构建/测试/CI，
+        // 这类等待应放到后台。无法静态识别的包装形式允许漏检（见 sleep_guard 模块文档）。
+        if let Some(sleep_seconds) = foreground_sleep_seconds(command) {
+            if sleep_seconds >= MAX_FOREGROUND_SLEEP_SECONDS {
+                let requested = if sleep_seconds.is_finite() {
+                    format!("{sleep_seconds}s")
+                } else {
+                    "infinity".to_string()
+                };
+                return Err(peri_mcp_common::failure::ToolFailure::new(
+                    "Use `run_in_background: true` for the long-running work, then wait for \
+                     its completion notification instead of polling with `sleep`.",
+                    format!(
+                        "Foreground sleep of {requested} was rejected: sleeps of \
+                         {MAX_FOREGROUND_SLEEP_SECONDS} seconds or more are not allowed on the \
+                         synchronous path because they block the session and hide progress. \
+                         Start the build/test/CI command with `run_in_background: true` and wait \
+                         for its completion notification; do not poll with `sleep`."
+                    ),
+                )
+                .into());
+            }
+        }
         let (foreground_timeout_ms, adjusted_timeout) = parse_foreground_timeout(&input)?;
         let timeout_note = foreground_timeout_note(adjusted_timeout);
         let ownership = self

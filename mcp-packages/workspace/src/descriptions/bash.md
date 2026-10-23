@@ -19,6 +19,7 @@ Timeout behavior:
 - Foreground timeout returns a timeout error, but does not terminate the process: when background task registration is available and succeeds, the command is promoted to a background task and the tool returns a background receipt. The command has already run for at least the foreground deadline, so the receipt is not evidence that it just started, and output produced before promotion is not included in the receipt.
 - If background task registration is unavailable or fails, foreground timeout requests process termination.
 - For commands explicitly started with `run_in_background: true`, a positive `timeout` requests process termination when reached. Omitting `timeout` or setting it to `0` leaves that background command without a timeout.
+- Foreground `sleep` of 60 seconds or more is rejected. For a long build, test, CI job, or other wait, start it with `run_in_background: true` and wait for the completion notification instead of polling with `sleep`.
 - Read the returned process status before retrying. If it says the process is still running, do not start a replacement for the same work; wait for the completion reminder or use the host's task cancellation interface to stop it.
 
 Platform behavior:
