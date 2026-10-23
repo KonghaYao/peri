@@ -115,6 +115,8 @@ async fn test_execution_started_rejects_duplicate_generation_and_switched_sessio
     client
         .lifecycle
         .commit_stable(transition.generation, "s2".into());
+    // commit 后要等初始化结束才 flush；本用例直接提交路由，需显式排空以恢复即时转发。
+    client.flush_buffered();
     server
         .send_notification("peri/agent_event", started("s1", "g1", "C"))
         .await
@@ -331,10 +333,10 @@ async fn test_user_input_run_snapshot_before_old_done_keeps_new_run_active() {
         .lifecycle
         .open_execution("s1", "mailbox-1", "B", true)
         .unwrap();
-    client.flush_buffered(vec![AcpNotification::AgentEvent {
+    client.deliver_immediate(AcpNotification::AgentEvent {
         session_id: "s1".into(),
         event: started("B"),
-    }]);
+    });
     assert!(matches!(rx.recv().await, Some(AcpNotification::AgentEvent {
         event: AcpEvent::UserInputRunStarted { request_id, .. }, ..
     }) if request_id == "B"));

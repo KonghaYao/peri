@@ -222,8 +222,7 @@ impl AcpTuiClient {
         if self.projection_mode == ClientProjectionMode::Interactive {
             crate::kit::session_boundary::project_session_boundary(Some(&session_id));
         }
-        let buffered = self
-            .lifecycle
+        self.lifecycle
             .commit_stable(start.generation, session_id.clone());
         self.finish_session_initialization(start.generation, &session_id)
             .await?;
@@ -237,7 +236,7 @@ impl AcpTuiClient {
         *self.restore_error.lock().unwrap() = None;
         projection.committed = true;
         transition.disarm();
-        self.flush_buffered(buffered);
+        self.flush_buffered();
         if self.projection_mode == ClientProjectionMode::Interactive {
             crate::kit::acp_events::request_bg_task_snapshot();
         }
@@ -579,6 +578,7 @@ impl AcpTuiClient {
             .commit_stable(start.generation, session_id.to_string());
         self.finish_session_initialization(start.generation, session_id)
             .await?;
+        self.flush_buffered();
         // S5.4：协商过窗口能力且开关开启时，额外建立 V1 窗口（默认关闭时无行为）。
         //
         // 必须在初始化成功之后：服务端对声明 `peri.historyWindowV1` 的连接不再回放历史，

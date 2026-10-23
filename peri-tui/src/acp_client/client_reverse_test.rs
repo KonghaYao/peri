@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, atomic::Ordering},
+    time::Duration,
+};
 
 use agent_client_protocol::schema::v1::{RequestPermissionOutcome, RequestPermissionResponse};
 use agent_client_protocol_schema::v1::{CreateElicitationResponse, ElicitationAction};
@@ -857,6 +860,124 @@ async fn test_new_immediate_post_response_notification_buffered_until_commit() {
         notification_rx.try_recv(),
         Err(TryRecvError::Empty)
     ));
+}
+
+fn command_update(names: &[&str]) -> Value {
+    json!({
+        "sessionId": "new",
+        "update": {
+            "sessionUpdate": "available_commands_update",
+            "availableCommands": names
+                .iter()
+                .map(|name| json!({ "name": name }))
+                .collect::<Vec<_>>(),
+        }
+    })
+}
+
+async fn next_command_names(
+    notification_rx: &mut tokio::sync::mpsc::Receiver<AcpNotification>,
+) -> Vec<String> {
+    let notification = tokio::time::timeout(Duration::from_secs(2), notification_rx.recv())
+        .await
+        .expect("初始化完成后应投递缓存批次")
+        .expect("notification channel closed");
+    let AcpNotification::SessionUpdate { params, .. } = notification else {
+        panic!("expected session update")
+    };
+    params["update"]["availableCommands"]
+        .as_array()
+        .expect("available commands")
+        .iter()
+        .map(|command| command["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// [回归测试] commit 之后、`session/input/snapshot` 初始化完成之前到达的命令快照
+/// 必须继续排队。旧实现立即 Forward 新帧，再 flush 旧帧，导致启动后 `/` 列表
+/// 被不含 skill 的旧快照覆盖。
+#[tokio::test]
+async fn test_new_session_flushes_notifications_in_wire_order_across_initialization() {
+    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
+    client.user_input_queue.store(true, Ordering::Release);
+    client.spawn_pump(notification_tx);
+    let server = Arc::new(server_transport);
+
+    let creator = client.clone();
+    let new_session = tokio::spawn(async move { creator.new_session("/tmp", None).await });
+    let IncomingMessage::Request { id, method, .. } = server.recv().await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(method, "session/new");
+
+    // 首帧：session/new 响应之前到达，路由为 Transitioning(New)，进入缓存。
+    server
+        .send_notification("session/update", command_update(&["help"]))
+        .await
+        .unwrap();
+    // 未路由的通知作为屏障：它被直接投递，收到即证明前一条 update 已经过
+    // route_ordinary，避免测试在竞态下空转通过。
+    server
+        .send_notification("test/unbuffered-barrier", json!({}))
+        .await
+        .unwrap();
+    assert!(matches!(
+        notification_rx.recv().await,
+        Some(AcpNotification::Other { .. })
+    ));
+    server
+        .send_response(id, Ok(json!({"sessionId": "new"})))
+        .await
+        .unwrap();
+
+    let IncomingMessage::Request {
+        id: snapshot_id,
+        method,
+        ..
+    } = server.recv().await.unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(method, "session/input/snapshot");
+
+    // commit 已完成但初始化挂起：含 skill 的新帧必须排在首帧之后。
+    server
+        .send_notification("session/update", command_update(&["help", "fix-bug"]))
+        .await
+        .unwrap();
+    server
+        .send_notification("test/unbuffered-barrier", json!({}))
+        .await
+        .unwrap();
+    assert!(matches!(
+        notification_rx.recv().await,
+        Some(AcpNotification::Other { .. })
+    ));
+    server
+        .send_response(
+            snapshot_id,
+            Ok(json!({"sessionId":"new","generation":"g","revision":1,"items":[]})),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(new_session.await.unwrap().unwrap(), "new");
+    assert_eq!(
+        next_command_names(&mut notification_rx).await,
+        vec!["help".to_owned()],
+        "旧快照必须先于新快照投递"
+    );
+    assert_eq!(
+        next_command_names(&mut notification_rx).await,
+        vec!["help".to_owned(), "fix-bug".to_owned()],
+        "最终状态必须是含 skill 的较新快照"
+    );
+    assert!(matches!(
+        notification_rx.try_recv(),
+        Err(TryRecvError::Empty)
+    ));
+    client.close();
 }
 
 #[tokio::test]
