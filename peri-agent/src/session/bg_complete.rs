@@ -70,12 +70,28 @@ struct Publication {
 ///
 /// 对完整结果取固定长度摘要：通知文本对大输出只保留文件引用，
 /// 不能作为冲突判定的内容边界；结果对象才包含完整 output。
+///
+/// 使用流式写入避免为大输出额外分配完整序列化缓冲区。
+struct Sha256Writer(Sha256);
+
+impl std::io::Write for Sha256Writer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 fn publication_fingerprint(
     result: &BackgroundTaskResult,
     kind: BgTaskKind,
 ) -> Result<String, String> {
-    let encoded = serde_json::to_vec(&(kind, result)).map_err(|error| error.to_string())?;
-    let digest = Sha256::digest(&encoded);
+    let mut writer = Sha256Writer(Sha256::new());
+    serde_json::to_writer(&mut writer, &(kind, result)).map_err(|error| error.to_string())?;
+    let digest = writer.0.finalize();
     let mut fingerprint = String::with_capacity(digest.len() * 2);
     for byte in digest {
         use std::fmt::Write as _;
