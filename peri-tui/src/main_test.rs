@@ -49,6 +49,21 @@ fn acp_settings_stdin_is_explicit_opt_in() {
     assert!(validate_cli(&cli).is_err());
 }
 
+#[test]
+fn update_use_proxy_is_opt_in() {
+    let cli = Cli::try_parse_from(["peri", "update"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Update { use_proxy: false })
+    ));
+
+    let cli = Cli::try_parse_from(["peri", "update", "--use-proxy"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Update { use_proxy: true })
+    ));
+}
+
 fn make_temp_file(content: &str) -> tempfile::TempPath {
     use std::io::Write;
     let mut file = tempfile::NamedTempFile::new().unwrap();

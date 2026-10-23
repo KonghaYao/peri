@@ -108,6 +108,8 @@ curl -fsSL https://github-proxy-5ad00a.netlify.app/konghayao/peri/raw/main/scrip
     bash
 ```
 
+安装完成后，运行 `peri update --use-proxy` 通过同一代理更新。
+
 **Windows PowerShell**
 
 ```powershell
