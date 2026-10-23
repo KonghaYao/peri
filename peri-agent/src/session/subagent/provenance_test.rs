@@ -223,6 +223,29 @@ async fn test_sqlite_subagent_spawn_full_micro_cold_resume_preserves_provenance(
         spawned.session.transcript().read().ancestor_len(),
         parent_messages.len()
     );
+    // [M03 回归] snapshot 锚点仍在父消息尾部；inherited 逐条保持原 ID 顺序。
+    let snapshot_tail = parent_messages.last().unwrap().id().as_uuid().to_string();
+    let child_meta = store.load_session_meta(&child_id).await.unwrap();
+    assert_eq!(
+        child_meta.snapshot_at_message_id.as_deref(),
+        Some(snapshot_tail.as_str()),
+        "fork child 的 snapshot_at_message_id 必须指向父消息尾"
+    );
+    let child_snapshot = store.load_session_snapshot(&child_id).await.unwrap();
+    let inherited_ids = child_snapshot
+        .inherited
+        .payloads
+        .iter()
+        .map(PersistedPayload::id)
+        .collect::<Vec<_>>();
+    let expected_ids = parent_messages
+        .iter()
+        .map(BaseMessage::id)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        inherited_ids, expected_ids,
+        "inherited payload 必须保持父消息的 ID 与顺序"
+    );
     compact(&spawned.session, &cwd).await;
     let own_tool = BaseMessage::tool_result("child-bash", "child-output-".repeat(1_000));
     {

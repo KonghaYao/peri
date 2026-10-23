@@ -172,10 +172,7 @@ pub(super) fn handle_turn_interrupted(
         // 后续该 turn 被取消（连续取消场景）时零产出回滚仍需它恢复输入文本；
         // 旧 turn 的锚点残留风险由 TurnDone 清空（handle_turn_done）兜底。
         if !state.current_turn.committed && !state.current_turn.is_empty() {
-            state.current_turn.deactivate();
-            for vm in state.current_turn.view_models() {
-                state.committed.push_back(vm.clone());
-            }
+            state.commit_current_turn_units();
         }
         state.current_turn = CurrentTurn::new();
         state.last_pushed_text_len = 0;
@@ -237,10 +234,7 @@ pub(super) fn handle_turn_interrupted(
 
     // 守卫：仅当 current_turn 有未归档内容时才归档
     if !state.current_turn.committed && !state.current_turn.is_empty() {
-        state.current_turn.deactivate();
-        for vm in state.current_turn.view_models() {
-            state.committed.push_back(vm.clone());
-        }
+        state.commit_current_turn_units();
     }
     // [Slice 3 D4] 归档分支同样 drain 排队项（不丢弃）：排队输入是用户已提交
     // 的请求，取消本 turn 后继续按序发送，与 stale 分支行为一致。
@@ -259,10 +253,7 @@ pub(super) fn handle_turn_suspended(state: &mut BridgeState) {
     // 归档 current_turn → committed，停止 loading，但不 drain_input_buffer
     // （Agent 还在 await_wake，新 turn 的流事件会自动恢复 loading）
     if !state.current_turn.committed && !state.current_turn.is_empty() {
-        state.current_turn.deactivate();
-        for vm in state.current_turn.view_models() {
-            state.committed.push_back(vm.clone());
-        }
+        state.commit_current_turn_units();
     }
     state.current_turn.reset();
     state.last_pushed_text_len = 0;

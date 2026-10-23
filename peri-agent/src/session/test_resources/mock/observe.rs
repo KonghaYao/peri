@@ -8,6 +8,13 @@ impl MockSessionResources {
         self.fail_snapshot_at.store(nth, Ordering::SeqCst);
     }
 
+    /// 已发生的完整快照读取次数（不含 `load_session_binding` 的轻量读取）。
+    ///
+    /// resume 的绑定预检只答应读 binding；会话正文装载才记一次完整快照。
+    pub(crate) fn snapshot_reads(&self) -> usize {
+        self.snapshot_reads.load(Ordering::SeqCst)
+    }
+
     pub(crate) fn uncertain_compaction(self: &Arc<Self>) {
         self.injection.lock().unwrap().uncertain_compaction = true;
     }

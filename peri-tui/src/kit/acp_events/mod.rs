@@ -231,6 +231,23 @@ impl BridgeState {
         self.register_live_seal_segments(range);
     }
 
+    /// 已产出轮次归档的统一入口：先搬 VM，再按实际槽位登记窗口预算。
+    ///
+    /// stale / cancel / suspend 等直接归档路径必须共用，避免绕过
+    /// `register_live_seal_segments` 形成未记账的驻留正文。
+    fn commit_current_turn_units(&mut self) {
+        if self.current_turn.committed || self.current_turn.is_empty() {
+            return;
+        }
+        let start = self.committed.len();
+        self.current_turn.deactivate();
+        for vm in self.current_turn.view_models() {
+            self.committed.push_back(vm.clone());
+        }
+        let range = start..self.committed.len();
+        self.register_live_seal_segments(range);
+    }
+
     fn register_live_seal_segments(&mut self, slots: impl Iterator<Item = usize>) {
         if !self.window.is_enabled() {
             return;
