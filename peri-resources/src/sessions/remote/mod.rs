@@ -184,8 +184,8 @@ mod initialization_tests;
 mod session_shape_tests;
 
 #[cfg(test)]
-#[path = "session_history_page_test.rs"]
-mod session_history_page_tests;
+#[path = "session_history_replay_test.rs"]
+mod session_history_replay_tests;
 
 #[cfg(test)]
 #[path = "session_history_rewind_test.rs"]

@@ -4,7 +4,9 @@
 //! 固定 own tail 的失效语义；不新增表/列，全部复用现有存储原语。
 
 use super::*;
-use crate::host::history_v2_adapter::{inherited_prefix_visible, HistoryV2BackendAdapter};
+use crate::host::history_v2_adapter::{
+    inherited_prefix_verdict, HistoryV2BackendAdapter, PrefixVerdict,
+};
 use peri_acp_types::history_v2::{
     DecimalU64, HistoryAnchor, HistoryBackendError, HistoryBoundary, HistoryCoverage,
     HistoryCoverageInterval, HistoryDirection, HistoryDurabilityState, HistoryEntryAnchor,
@@ -74,7 +76,7 @@ async fn set_inherited(
 
 async fn inherited_snapshot(
     fixture: &PageFixture,
-) -> peri_acp_types::history_window::HistoryInheritedSnapshot {
+) -> peri_acp_types::history_common::HistoryInheritedSnapshot {
     fixture
         .cfg
         .session_resources
@@ -741,19 +743,56 @@ async fn own_append_does_not_change_the_frozen_prefix_and_tail_delete_invalidate
 
 #[test]
 fn inherited_prefix_judgement_is_fail_closed_when_identity_is_unknown() {
-    assert!(!inherited_prefix_visible(&[b'{'; 1024]));
-    assert!(!inherited_prefix_visible(
-        br#"{"type":"system","id":"x","content":"..."}"#
-    ));
-    assert!(!inherited_prefix_visible(
-        br#"{"type":"system_reminder","id":"x","reminder":{"audiences":["model"],"body":"..."}}"#
-    ));
-    assert!(inherited_prefix_visible(
-        br#"{"type":"system_reminder","id":"x","reminder":{"audiences":["tui"],"body":"..."}}"#
-    ));
-    assert!(inherited_prefix_visible(
-        br#"{"role":"user","content":"..."}"#
-    ));
+    assert_eq!(
+        inherited_prefix_verdict(&[b'{'; 1024]),
+        PrefixVerdict::Undetermined,
+        "invalid/truncated prefixes must not be treated as hidden"
+    );
+    assert_eq!(
+        inherited_prefix_verdict(br#"{"type":"system","id":"x","content":"..."}"#),
+        PrefixVerdict::Hidden
+    );
+    assert_eq!(
+        inherited_prefix_verdict(
+            br#"{"type":"system_reminder","id":"x","reminder":{"version":1,"category":"guidance","source":"test","kind":"notice","severity":"info","delivery":"configurable","audiences":["model"],"body":"..."}}"#
+        ),
+        PrefixVerdict::Hidden
+    );
+    assert_eq!(
+        inherited_prefix_verdict(
+            br#"{"type":"system_reminder","id":"x","reminder":{"version":1,"category":"guidance","source":"test","kind":"notice","severity":"info","delivery":"diagnostic_only","audiences":["tui"],"body":"..."}}"#
+        ),
+        PrefixVerdict::Hidden,
+        "diagnostic-only reminders are never delivered to the TUI"
+    );
+    assert_eq!(
+        inherited_prefix_verdict(
+            br#"{"type":"system_reminder","id":"x","reminder":{"version":1,"category":"guidance","source":"test","kind":"notice","severity":"info","delivery":"configurable","audiences":["tui"],"body":"..."}}"#
+        ),
+        PrefixVerdict::ReminderCandidate,
+        "the reminder prefix still needs the bounded body validation"
+    );
+    assert_eq!(
+        inherited_prefix_verdict(
+            br#"{"type":"system_reminder","id":"x","reminder":{"audiences":["tui"],"body":"..."}}"#
+        ),
+        PrefixVerdict::Undetermined,
+        "missing validate fields in the prefix must not guess Visible"
+    );
+    assert_eq!(
+        inherited_prefix_verdict(br#"{"role":"user","content":"..."}"#),
+        PrefixVerdict::Visible
+    );
+    assert_eq!(
+        inherited_prefix_verdict(br#"{"role":"user","content":"#),
+        PrefixVerdict::Visible,
+        "a complete role decides even when the body is truncated"
+    );
+    assert_eq!(
+        inherited_prefix_verdict(br#"{"role":"user","content":"{\"role\":\"system\"}"#),
+        PrefixVerdict::Visible,
+        "field-like text inside a string must not change the verdict"
+    );
 }
 
 /// 大 inherited 快照没有派生索引：open/page 都必须是 `index_not_ready`，

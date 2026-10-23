@@ -253,15 +253,8 @@ pub(super) fn handle_prediction(p: &Prediction) {
 pub(super) fn handle_file_suggestions() {}
 
 pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &str) {
-    // rewind 改变了会话的有效范围：旧 `nextCursor` / `snapshotToken` / 区间索引 /
-    // 在途认领在新窗口下都不再对应任何条目。先失效浏览状态，rewind 时刻已在途、
-    // 之后才返回的页会在消费侧与桥接侧都被判为过期（REQ-C01-5、A11；
-    // 服务端同时会对旧 cursor 回 -32012）。TUI 不在 rewind 后自动重新 load，
-    // 因此下一次翻页要等新的初始 load 建立浏览身份——旧 cursor 本已失效。
-    crate::kit::history_paging::reset_browsing_state();
-    state.window.reset();
-    crate::kit::history_page_consumer::reset_window_paging_state();
-    crate::kit::history_window::clear_window_viewport();
+    // rewind 改变了会话的有效范围：V2 历史由会话边界/下一次 initial 重建，
+    // 详情面板内容属于旧窗口，必须显式关闭。
     crate::kit::atoms::FOCUSED_ENTRY.set(None);
     crate::kit::atoms::HISTORY_DETAIL.set(None);
     // H3: rewind 完成——反序列化 messages_json 为 Vec<Value>，按 role

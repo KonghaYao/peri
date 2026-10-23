@@ -1,5 +1,5 @@
-//! S9b：未协商 `peri.historyPagination` 的连接交付 **canonical 完整历史**（含 Full 归档
-//! 原文），且是**流式**逐段读取（REQ §5.3）。
+//! S9b：标准 ACP 连接交付 **canonical 完整历史**（含 Full 归档原文），且是**流式**
+//! 逐段读取（REQ §5.3）。
 //!
 //! 本文件覆盖的判据全部落在 host 层的请求出口上（`handle_request` / 带连接事实的
 //! `handle_request_for_connection`）：wire 形状、交付内容、有界读取、失败关闭与回退。
@@ -341,21 +341,8 @@ impl ReplayFixture {
         self.connection_caps = caps;
     }
 
-    /// 未协商分页的连接：分页准入为 false，回放标记按本连接声明的 caps。
-    async fn load_unnegotiated(&mut self) -> Result<Value, AcpError> {
-        self.load_with_pagination(false).await
-    }
-
-    /// 协商分页的连接：分页准入为 true，回放标记同样按本连接声明的 caps。
-    async fn load_negotiated(&mut self) -> Result<Value, AcpError> {
-        self.load_with_pagination(true).await
-    }
-
-    async fn load_with_pagination(&mut self, history_pagination: bool) -> Result<Value, AcpError> {
+    async fn load(&mut self) -> Result<Value, AcpError> {
         let facts = ConnectionFacts {
-            connection_id: "unnegotiated-test".into(),
-            history_pagination,
-            history_window_v1: false,
             history_v2: false,
             mcp_control_v1: false,
             caps: self.connection_caps.clone(),

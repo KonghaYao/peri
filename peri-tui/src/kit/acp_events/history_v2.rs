@@ -18,18 +18,20 @@ use peri_acp_types::history_v2::{
 };
 
 use super::BridgeState;
-use super::history_page::DEFERRED_TOOL_RESULT_TEXT;
 #[cfg(test)]
 use crate::kit::acp_types::AcpEventData;
 use crate::kit::atoms;
-use crate::kit::history_v2::body::HistoryV2BodyLocator;
-use crate::kit::history_v2::{HistoryV2State, HistoryV2Window, sub_item_descriptor, sub_item_id};
-use crate::kit::history_window::{
+use crate::kit::history_detail_binding::{
     DetailDescriptor, HistoryDetailTarget, HistorySource as TuiSource, HistoryV2BodyBinding,
 };
+use crate::kit::history_v2::body::HistoryV2BodyLocator;
+use crate::kit::history_v2::{HistoryV2State, HistoryV2Window, sub_item_descriptor, sub_item_id};
 use crate::kit::tui_render_unit::{
     TuiNoteLevel, TuiRenderUnit, TuiSystemNote, TuiToolCard, TuiUserBubble, tui_hash_str,
 };
+
+/// 超大工具结果的延迟补读提示；V2 详情面板按 descriptor 读取正文。
+pub(crate) const DEFERRED_TOOL_RESULT_TEXT: &str = "结果正文较大，展开后按需加载";
 
 /// 应用一次 V2 整体状态发布；调用方已保证事件串行。
 pub(super) fn handle_view(state: &mut BridgeState, v2: &HistoryV2State) {
@@ -501,6 +503,8 @@ fn binding_for(
         entry_id: entry.entry_id.clone(),
         sub_item_id: sub_item_id(sub_item).to_owned(),
         body_ref: descriptor.body_ref.clone(),
+        representation: descriptor.representation,
+        media_type: descriptor.media_type.clone(),
     })
 }
 

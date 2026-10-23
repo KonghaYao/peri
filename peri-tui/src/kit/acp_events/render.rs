@@ -24,10 +24,6 @@ use std::sync::Mutex;
 /// 3. todo 进度摘要行（§6.9：TODO_ITEMS 派生，插在最终回答前）；
 /// 4. `group_successful_tools`（§7：相邻成功工具压成 `TuiCollapsedGroup`）。
 pub(crate) fn push_view_models(state: &mut BridgeState) {
-    state
-        .window
-        .ack_release_epoch(crate::kit::atoms::RENDER_ACHIEVED_EPOCH.get());
-    crate::kit::atoms::HISTORY_WINDOW_STATS.set(state.window.diagnostics());
     // running child 可以阻止归档，但主 turn 的终态时长仍只冻结一次。
     if state.phase != SessionPhase::PromptRunning {
         state.current_turn.freeze_trailing();
@@ -187,7 +183,6 @@ pub(crate) fn push_view_models(state: &mut BridgeState) {
         peri_time::elapsed_since(__t).as_nanos() as u64,
     );
     tracing::trace!(target: "frozen_diag", "bridge: wrote VIEW_MODELS");
-    super::history_window::settle_after_publication(state);
 }
 
 /// [PERF] insert_todo_summary 摘要文本缓存——键 = (TODO_ITEMS 指纹, LANG_VERSION)。
@@ -388,6 +383,7 @@ const GROUP_CUT_CAP: usize = 512;
 static TOOL_GROUP_CACHE: Mutex<Option<ToolGroupCache>> = Mutex::new(None);
 
 /// 结构性释放：丢弃所有持有旧 `committed` 节点的投影/分组缓存。
+#[cfg(test)]
 pub(crate) fn invalidate_structural_caches() {
     *TRANSCRIPT_HISTORY.lock().unwrap_or_else(|e| e.into_inner()) = None;
     *DIVIDER_HISTORY.lock().unwrap_or_else(|e| e.into_inner()) = None;

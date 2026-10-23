@@ -959,3 +959,11 @@ async fn create_empty_session(cfg: &AcpServerConfig, root: &std::path::Path, sid
 // 正文投影与有界读取：单独文件挂载（STD-SIZE-001）。
 #[path = "history_v2_adapter_body_test.rs"]
 mod body_tests;
+
+// FIX-02：页预算拆分不得影响 body 定位（单独文件挂载，STD-SIZE-001）。
+#[path = "history_v2_adapter_budget_test.rs"]
+mod budget_tests;
+
+// FIX-03：前缀不可判定/读取失败不得当成隐藏（单独文件挂载，STD-SIZE-001）。
+#[path = "history_v2_adapter_visibility_test.rs"]
+mod visibility_tests;

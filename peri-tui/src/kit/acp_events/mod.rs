@@ -7,9 +7,7 @@
 mod agent;
 mod compact;
 mod fold;
-mod history_page;
 pub(crate) mod history_v2;
-pub(crate) mod history_window;
 mod memory_probe;
 pub(crate) mod render;
 mod streaming;
@@ -132,9 +130,6 @@ pub struct BridgeState {
     pub variant: u8,
     /// 已提交的 TuiRenderUnit 列表——im::Vector 支持 O(1) clone + O(log n) push_back。
     pub committed: im::Vector<TuiRenderUnit>,
-    /// S5：历史窗口模型与账目。默认关闭；关闭时不改变旧渲染/滚动/事件行为。
-    /// `committed` 仍是展示正文的唯一强持有者，窗口只保存持久身份与字节账目。
-    pub window: crate::kit::history_window::HistoryWindow,
     /// 当前轮次的增量数据
     pub current_turn: CurrentTurn,
     /// 当前 session lifecycle 阶段。loading 只由该阶段派生。
@@ -209,7 +204,6 @@ impl BridgeState {
     /// 运行中分组之后的子 Agent **不能**单独抽到 committed：committed 整段渲染在
     /// current_turn 之前，抽走会让它跨越仍在运行的分组，破坏原时间线顺序（R05）。
     fn archive_current_turn(&mut self) {
-        let start = self.committed.len();
         if self.current_turn.has_running_subagent() {
             // 运行中 subagent 不应让整轮常驻：只把第一个仍会增长的实体之前的稳定
             // 前缀按 segment 顺序交给 committed——文本、已完成工具，以及已停止且已
@@ -228,102 +222,6 @@ impl BridgeState {
             }
             self.current_turn.take_completed_subagents();
         }
-        let range = start..self.committed.len();
-        self.register_live_seal_segments(range);
-    }
-
-    fn register_live_seal_segments(&mut self, slots: impl Iterator<Item = usize>) {
-        if !self.window.is_enabled() {
-            return;
-        }
-        use crate::kit::history_window::{
-            HistoryEntryView, HistorySource, PersistentEntryKey, PersistentSubItemKey,
-            SegmentDraft, SegmentOrigin, SegmentPlacement, WindowUnitMapping,
-            publish_window_unit_mappings,
-        };
-
-        // 同一消息可能跨多个 bubble，中间还有无持久身份的工具；只收本次归档槽位。
-        let mut groups: Vec<(PersistentEntryKey, Vec<usize>)> = Vec::new();
-        let mut group_indices = HashMap::new();
-        let mut unattributed_bytes = 0usize;
-        let mut unattributed_seen = crate::kit::retained_bytes::SeenAllocations::default();
-        for slot in slots {
-            let Some(message_id) = live_message_id(&self.committed[slot]) else {
-                // 工具卡、子 Agent 等没有持久身份：不能建可淘汰段，但正文确实驻留，
-                // 必须计入同一预算，避免账目低估。
-                unattributed_bytes += crate::kit::retained_bytes::retained_unit_bytes(
-                    &self.committed[slot],
-                    &mut unattributed_seen,
-                );
-                continue;
-            };
-            let key = PersistentEntryKey::own(format!("{}:{message_id}", self.active_session_id));
-            let index = *group_indices.entry(key.clone()).or_insert_with(|| {
-                groups.push((key, Vec::new()));
-                groups.len() - 1
-            });
-            groups[index].1.push(slot);
-        }
-        if unattributed_bytes > 0 {
-            self.window.note_unattributed_live_bytes(unattributed_bytes);
-        }
-        let mut mappings = Vec::new();
-        let mut display_slots = Vec::new();
-        for (key, slots) in groups {
-            if self.window.is_entry_displayed(&key) || self.window.index().contains_entry(&key) {
-                continue;
-            }
-            let mut seen = crate::kit::retained_bytes::SeenAllocations::default();
-            let mut body_bytes = 0usize;
-            let mut reserved_bytes = 0usize;
-            for slot in &slots {
-                let unit = &self.committed[*slot];
-                body_bytes += match unit {
-                    TuiRenderUnit::TuiUserBubble(bubble) => bubble.text.len(),
-                    TuiRenderUnit::TuiAssistantBubble(bubble) => {
-                        bubble.text.len() + bubble.reasoning.as_ref().map_or(0, |r| r.text.len())
-                    }
-                    _ => 0,
-                };
-                reserved_bytes += crate::kit::retained_bytes::retained_unit_bytes(unit, &mut seen);
-            }
-            // live 事件没有持久 sub-item position；不能拿 VM 序号冒充协议子项身份（依赖 S2）。
-            let sub_items: Vec<PersistentSubItemKey> = Vec::new();
-            let entry = HistoryEntryView::new(
-                key.clone(),
-                None,
-                slots.len(),
-                body_bytes,
-                reserved_bytes,
-                sub_items,
-            );
-            let draft =
-                SegmentDraft::new(HistorySource::Own, vec![entry], body_bytes, reserved_bytes)
-                    .durable(false)
-                    .origin(SegmentOrigin::LiveSeal);
-            match self.window.register_segment(draft, SegmentPlacement::Tail) {
-                Ok(_) => {
-                    for slot in slots {
-                        mappings.push(WindowUnitMapping {
-                            token: crate::kit::message_area::window_identity_token(
-                                &self.committed[slot],
-                            ),
-                            entry: key.clone(),
-                        });
-                        display_slots.push((slot, key.clone()));
-                    }
-                }
-                Err(error) => {
-                    tracing::error!(?error, "history_window: live seal registration failed")
-                }
-            }
-        }
-        // 按实际槽位递增登记，避免同消息的离散区间把中间其他消息的区间右移。
-        display_slots.sort_by_key(|(slot, _)| *slot);
-        for (slot, key) in display_slots {
-            self.window.mark_display_block(&[(key, 1)], slot);
-        }
-        publish_window_unit_mappings(mappings);
     }
 
     /// 将 current_turn 已产出内容 flush 到 committed，然后 reset。
@@ -373,10 +271,8 @@ impl BridgeState {
         let mut bubble = TuiUserBubble::with_attachments(text, attachments);
         bubble.message_id = message_id;
         if self.current_turn.is_empty() {
-            let start = self.committed.len();
             self.committed
                 .push_back(TuiRenderUnit::TuiUserBubble(bubble));
-            self.register_live_seal_segments(start..self.committed.len());
         } else {
             self.current_turn
                 .push_user_bubble(bubble.text, bubble.attachments, bubble.message_id);
@@ -453,8 +349,6 @@ pub(crate) fn dispatch_for_bridge(
     event: &AcpEventData,
 ) -> PublicationIntent {
     state.publication_intent = PublicationIntent::None;
-    // 回放条目区间登记需要「本事件推入了哪个槽位」——在 handler 之前取长度。
-    let committed_len_before = state.committed.len();
     use AcpEventData::*;
     // S4.1 方案 B：CompactCompleted 置 compact_just_completed 后，任何流事件
     // 到达即清除标志——agent 内部 auto-compact 后 ReAct 循环继续产出，流事件
@@ -495,11 +389,7 @@ pub(crate) fn dispatch_for_bridge(
         }
         CacheUsageUpdated(sample) => turn::handle_cache_usage_updated(state, sample),
         SessionReplayStarted => turn::handle_session_replay_started(state),
-        SessionReplayDone => {
-            // 回放结束：关闭正在铺的条目区间（首屏区间索引在此定型）。
-            crate::kit::history_paging::close_own_entry();
-            turn::handle_session_replay_done(state)
-        }
+        SessionReplayDone => turn::handle_session_replay_done(state),
         TurnDone => turn::handle_turn_done(state),
         AgentDone { request_id } => turn::handle_agent_done(state, request_id),
         TurnInterrupted { reason, request_id } => {
@@ -676,34 +566,8 @@ pub(crate) fn dispatch_for_bridge(
             output_summary,
             is_error,
         } => tool::handle_replay_tool_ended(state, tool_id, output_summary, *is_error),
-        // 历史分页：整页并入窗口（本地事件，非 wire；见 `acp_events::history_page`）。
-        // 它只动 committed，不碰执行 / 审批 / Todo / 输入状态（REQ-C01-6、A24）。
-        HistoryPageLoaded {
-            response,
-            origin,
-            refetch,
-        } => history_page::handle_history_page_loaded(
-            state,
-            response.as_ref(),
-            origin.as_ref(),
-            refetch.as_deref(),
-        ),
-        HistoryCommitted(info) => history_window::handle_history_committed(state, info),
-        HistoryWindowPageLoaded { context, response } => {
-            state.publication_intent = history_window::handle_window_page_loaded(
-                state,
-                context.as_ref(),
-                response.as_ref(),
-            );
-        }
-        HistoryWindowDegraded { session_id, reason } => {
-            history_window::handle_window_degraded(state, session_id, reason);
-        }
+        // 历史 V2 状态整体发布（本地事件，非 wire）。
         HistoryV2ViewChanged { state: v2 } => history_v2::handle_view(state, v2.as_ref()),
-        // 回放条目位置标记：只登记区间，不产生展示单元。
-        ReplayEntryMarked { entry_id, position } => {
-            crate::kit::history_paging::mark_own_entry(entry_id, *position)
-        }
 
         // ── §4.7 Background Tasks ──
         BgTaskSnapshot {
@@ -741,26 +605,6 @@ pub(crate) fn dispatch_for_bridge(
     }
 
     let requested = std::mem::take(&mut state.publication_intent);
-    // 回放条目区间：这些变体各自在末尾推入**恰好一个**展示单元，槽位即
-    // `committed.len() - 1`。计数不符（例如 user 气泡落进 current_turn，或
-    // reminder 前 `flush_current_turn` 并入了流式产出）时不登记，避免把区间错标到
-    // 别的条目上。
-    //
-    // reminder（含 fallback）必须在集合里：首屏自有条目**只有 reminder** 是合法
-    // 形状，漏登记会让区间索引为空、更早历史插到继承前缀之前（REQ-H01-6、A20）。
-    if state.committed.len() == committed_len_before + 1
-        && matches!(
-            event,
-            CommittedAssistantText { .. }
-                | ReplayToolStarted { .. }
-                | ReplayedUserBubble { .. }
-                | LocalUserBubble { .. }
-                | SystemReminder { .. }
-                | SystemReminderFallback { .. }
-        )
-    {
-        crate::kit::history_paging::note_own_entry_unit(committed_len_before);
-    }
     if requested != PublicationIntent::None {
         requested
     } else if matches!(
@@ -768,8 +612,6 @@ pub(crate) fn dispatch_for_bridge(
         CommittedAssistantText { .. }
             | ReplayToolStarted { .. }
             | ReplayToolEnded { .. }
-            | HistoryPageLoaded { .. }
-            | HistoryWindowPageLoaded { .. }
             | HistoryV2ViewChanged { .. }
     ) {
         PublicationIntent::Deferred
@@ -803,15 +645,6 @@ pub(crate) fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData)
         render::push_view_models(state);
     }
     crate::kit::bg_task_live::publish_pending_streams();
-}
-
-fn live_message_id(unit: &TuiRenderUnit) -> Option<String> {
-    match unit {
-        TuiRenderUnit::TuiUserBubble(bubble) => bubble.message_id.clone(),
-        TuiRenderUnit::TuiAssistantBubble(bubble) => bubble.message_id.clone(),
-        // 工具单元没有持久 message id；不得从 tool_id 推测身份，等 S2 暴露持久关联。
-        _ => None,
-    }
 }
 
 // ---------------------------------------------------------------------------

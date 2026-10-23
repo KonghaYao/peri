@@ -381,7 +381,8 @@ async fn session_load_v2_legacy_response_is_unchanged_and_missing_meta_is_reject
 async fn session_load_v2_mixed_fields_and_unnegotiated_initial_are_rejected() {
     let tmp = tempfile::TempDir::new().unwrap();
     let fixture = PageFixture::new(&tmp).await;
-    let sid = fixture.sid.clone();
+    // 用未注册的会话：拒绝必须发生在恢复/装配之前，不能顺手创建会话。
+    let sid = "v2-mixed-fields-session".to_owned();
 
     let (v2_client, _sessions, v2_task) = spawn_loop(
         Arc::clone(&fixture.cfg),
@@ -408,6 +409,10 @@ async fn session_load_v2_mixed_fields_and_unnegotiated_initial_are_rejected() {
             "{field} 必须显式说明混合字段：{error:?}"
         );
     }
+    assert!(
+        fixture.sessions.lock().await.get(&sid).is_none(),
+        "旧字段拒绝必须发生在会话恢复/装配之前"
+    );
     v2_task.abort();
 
     let (legacy_client, _sessions, legacy_task) =
@@ -424,6 +429,23 @@ async fn session_load_v2_mixed_fields_and_unnegotiated_initial_are_rejected() {
     assert_eq!(data.reason, HistoryErrorReason::ProtocolNotNegotiated);
     assert_eq!(data.effect.execution, ExecutionEffect::NotReady);
     legacy_task.abort();
+}
+
+/// 已删除的旧正文方法必须返回 method not found，不进入任何历史读取。
+#[tokio::test]
+#[serial]
+async fn session_history_body_is_method_not_found() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (_fixture, _cfg, client, task) = v2_fixture(&tmp).await;
+    let error = client
+        .send_request(
+            "session/history/body",
+            json!({ "sessionId": "any", "entryId": "any:any", "offset": 0 }),
+        )
+        .await
+        .expect_err("旧正文方法必须被拒绝");
+    assert_eq!(error.code, -32601, "{error:?}");
+    task.abort();
 }
 
 /// 同一连接连续多次 `session/load`：每次 initial 替换同会话旧窗口，不触发容量上限。

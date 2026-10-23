@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use peri_acp_types::history_window::{HistoryInheritedSnapshot, HistoryWindowError};
+use peri_acp_types::history_common::{HistoryInheritedSnapshot, HistoryWindowError};
 
 use super::blob_reader::BlobReadError;
 use super::inherited_facts::{InheritedLayout, InheritedSummary};

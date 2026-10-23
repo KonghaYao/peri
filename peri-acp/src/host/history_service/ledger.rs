@@ -190,6 +190,23 @@ impl Ledger {
         }
     }
 
+    /// 本次尝试是否仍是该 requestKey 的唯一在途尝试。
+    ///
+    /// 提交阶段必须在写成功记录前复核：超时旧任务、被新尝试接管的旧任务都不得
+    /// 发布结果，也不得覆盖账本。
+    pub(super) fn is_current(&self, key: u64, attempt: u64, fingerprint: [u8; 32]) -> bool {
+        matches!(
+            self.entries.get(&key),
+            Some(Entry {
+                fingerprint: recorded,
+                state: EntryState::InProgress {
+                    attempt: recorded_attempt,
+                    ..
+                },
+            }) if *recorded == fingerprint && *recorded_attempt == attempt
+        )
+    }
+
     /// 成功响应入账；只接受当前尝试，避免超时旧任务覆盖新尝试。
     #[allow(clippy::too_many_arguments)] // 账本字段逐项入账，分组结构会隐藏调用点事实。
     pub(super) fn finish_success(

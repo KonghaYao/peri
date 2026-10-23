@@ -2,9 +2,9 @@
 
 > BaseMessage、ContentBlock 枚举、MessageTranscript 与 staging 事务写
 >
-> 状态：现行内容模型；2026-10-07 已批准撤销持久执行恢复。MessageQueue 属于当前进程，canonical 历史继续持久化；会话隔离、类型化消费和历史加载边界由 [RCRA 权威](rcra-message-activation.md) 定义，剥离进度见 active spec。2026-10-17 增补有效上下文所有权、手动 Compact 有效集读取与 `peri.historyWindowV1` 窗口边界；窗口协议默认关闭，实施状态见 active spec。
+> 状态：现行内容模型；2026-10-07 已批准撤销持久执行恢复。MessageQueue 属于当前进程，canonical 历史继续持久化；会话隔离、类型化消费和历史加载边界由 [RCRA 权威](rcra-message-activation.md) 定义，剥离进度见 active spec。2026-10-23 更新：历史窗口事实源改为 History V2（`_peri/history`），旧私有分页/窗口协议已删除；远端与多实例 V2 仍显式失败。
 >
-> 运行时事实源为 `peri-agent/src/session/transcript.rs`、消息契约类型与相邻测试；有效上下文所有权与窗口事实源为 `peri-acp/src/host/{mod,prompt,history_window}.rs`、`peri-acp-types/src/history_window.rs` 与 `peri-tui/src/kit/history_window/`。
+> 运行时事实源为 `peri-agent/src/session/transcript.rs`、消息契约类型与相邻测试；有效上下文所有权与历史窗口事实源为 `peri-acp/src/host/{mod,prompt,history_service,history_v2_adapter}.rs`、`peri-acp-types/src/history_v2.rs` 与 `peri-tui/src/kit/history_v2/`。
 
 ## 1. 设计原则
 
@@ -152,16 +152,16 @@ Compact 保留消息本体，通过标记改变可见性或模型投影；Micro 
 | **Hook 系统** | Hook 不能直接写 Transcript——通过 MessageQueue 注入 |
 | **事件流 / TUI** | `visible_messages()` 过滤 excluded 标记返回可见消息（LLM 请求构造用）；`visible_snapshot()` 返回 `Arc<Vec<BaseMessage>>` 快照，用于 TUI 事件传递（如 TurnCompleted 事件）。Transcript 变更产生事件，外部据此刷新 UI |
 
-### 2.8 有效上下文所有权、手动 Compact 与历史窗口（2026-10-17）
+### 2.8 有效上下文所有权、手动 Compact 与 History V2
 
-本节描述已落地的所有权收敛与窗口边界。`PeriCaps::history_window_v1` 默认 false（只接受显式 `true`），TUI 只把服务端 initialize 响应中明确回显的 `true` 视为连接能力，未回显一律 fail-closed；TUI 的 `HISTORY_WINDOW_V1` 窗口开关由 settings beta `history-window-v1` 在启动时读取一次（未配置视为开启，显式 `false` 关闭），设置变更需重启生效。TUI 的 initialize 以 `PeriCaps::all_enabled` 声明能力，但客户端请求值不替代服务端能力事实。关闭时旧 `HISTORY_PAGING` 路径不变。窗口与段释放的 TUI 细节见 [TUI 与 ACP 数据流](tui-acp-data-flow.md)，wire 字段见 [peri-acp 协议](peri-acp-protocol.md)。
+本节描述已落地的所有权收敛与历史读取边界。History V2 是本地 TUI 的唯一历史路径：TUI 在 initialize 请求 `_meta["peri.history"]`，服务端显式选择后才使用 `session/load` 的 initial 与 `_peri/history`；未选择时启动失败，不回退旧分页、旧窗口或标准全量回放。V2 的 wire 字段与拒绝边界见 [peri-acp 协议](peri-acp-protocol.md)，TUI 调度与窗口模型见 [TUI 与 ACP 数据流](tui-acp-data-flow.md)。
 
 #### 2.8.1 执行期所有权
 
 1. `SessionState` 只保存 `history_payloads`（当前有效 payload）与轻量 `context_ownership`，不再保存 `history: Vec<BaseMessage>` 投影；命令与展示所需的 `BaseMessage` 按需短暂派生。
 2. `Resident`：Host 持有有效上下文，可读、可派生展示投影。`HandedOff`：正文随本轮执行移交给执行器，Host 不再持有副本；此时 `history_payloads` 为空，不能解释为空会话。`ReloadRequired`：持久化结果不确定或热态不可继续，下一次使用前必须从权威存储恢复。
 3. 启动执行时 Host 取走 `history_payloads` 并标记 `HandedOff`；执行结束的 `finish_prompt_turn` 采纳 `PromptResult.persisted_payloads`（执行器返回的有效集合）并恢复 `Resident`。`SessionState` 不因 turn 结束被移除；取消、模型错误或 forwarder 失败仍可采纳可信快照。
-4. `persistence_inconsistent` 或 writer 失败清空热态、标记 `ReloadRequired`、撤销当前窗口票据；不得按新增 id 伪造回滚，也不得让旧窗口继续读取不可信 tail。完整 canonical 历史（含 excluded 原文）只从存储按需读取。
+4. `persistence_inconsistent` 或 writer 失败清空热态、标记 `ReloadRequired`；不得按新增 id 伪造回滚。旧 V2 窗口不继续读取不可信 tail：下一次 `page`/`seek`/`body` 的 revision/tail 复核失败并返回可重开错误。完整 canonical 历史（含 excluded 原文）只从存储按需读取。
 5. 该所有权是内存生命周期约束，不是执行所有权或访问授权；跨实例执行协调仍归 `peri-sdk`，窗口票据也不是会话访问凭证。
 
 #### 2.8.2 手动 `/compact` 只读有效集
@@ -170,35 +170,33 @@ Compact 保留消息本体，通过标记改变可见性或模型投影；Micro 
 2. 身份校验按**有序消息投影**比较 inherited + own 的 id 序列，并拒绝 inherited 与 own 的 id 重叠。调用方仍带回完整历史（含已归档 id）时，多出的 id 只有在有界 `load_message_flags` 查询确认全部为 `excluded` 后才被忽略；未知 id 或 flags 读取失败保持拒绝，并返回 `compact persistence context mismatch`。
 3. 有效集为空时用 flags 区分两种来源：全新 thread（历史尚未落库）与全部 own 条目已被之前的 Full 归档；后者返回 `no history to compact`，不读取任何归档正文。
 4. 手动 Compact 的提交与自动 Full 共用 `commit_compaction_lifecycle`：存储确认后才收缩热态并发布摘要；提交失败或不确定沿用 `ReloadRequired`，不把已提交摘要当脏数据删除。**磁盘已提交前缀是身份与恢复的唯一权威**，热态不是第二份审计源。
-5. 这是已获批的契约变更：手动 `/compact` 不再“恢复完整 payload”，而是“只读有效集 + 历史窗口按需读取”。生效条件是服务端明确回显 `peri.historyWindowV1: true` 且 TUI 本地开关启用（未配置默认开启、显式 false 关闭）；任一条件不满足时保留旧行为。
+5. 这是已获批的契约变更：手动 `/compact` 不再“恢复完整 payload”，而是“只读有效集 + 历史按需读取”。History V2 下该路径始终生效；历史页与正文通过 `_peri/history` 读取，不再受旧私有能力开关影响。
 
-#### 2.8.3 历史窗口与展示段
+#### 2.8.3 History V2 与展示窗口
 
-1. 窗口协议复用 `session/load`，请求带 `history: { kind: "open" | "page" | "seek", ... }`，正文分块走 `session/history/body`；它只读、不装配会话、不取执行锁、不广播命令，也不回退为完整 `session/load`。旧顶层 `cursor`/`limit` 分页保持独立语义。
-2. 存储按有界 keyset 读取：先取候选行身份/长度，只为计划内正文取内容；超大条目只返回描述符，正文按 `offset`/`maxBytes` 分块读取。窗口读取 canonical 存储的请求区间（包含已归档 `excluded` 行，范围由锚点/方向/limit/tail 限定），但归档正文只在该区间被明确请求时读取，且读取结果不写回 Host 热态；有效上下文、手动 Compact 与恢复仍只读 `load_active_snapshot`（存储侧 `excluded = 0`）。
-3. 服务端签发的 `snapshotToken`、`committedTail`、`readTicket` 与 `sessionGeneration`/`structureVersion` 共同固定一次浏览；`page`/`seek`/`body` 在进入存储前和返回前各校验一次 generation、structure、ticket epoch、snapshot 与 tail。新 `open` 成功才原子替换旧 ticket，失败保留旧窗口。rewind durable 成功恰好推进 `structureVersion + 1` 并撤销 ticket；失败不推进；持久化不确定 fail-closed。
-4. TUI 的展示正文仍由 `BridgeState.committed` 唯一强持有；`HistoryWindow` 只保存持久身份、段/缺口、字节账目与 pin 原因。compact 提交确认后按 `committedTail` 封印 durable 段，保留视口与相邻段，其余段生成 `ReleasePlan`；统一释放事务同时清 `DisplayLedger`、`HistorySpans`/`ResidentIndex`、折叠历史、渲染缓存、`WINDOW_UNIT_KEYS`、焦点与未配对工具结果。释放不删除存储历史。
-5. 释放先移除 `committed` 展示正文与派生缓存，再递增 `structural_epoch`；渲染侧处理后写回 `RENDER_ACHIEVED_EPOCH`，预算额度才从 `pending_release` 归还。连接断开或 headless 路径在 session close 时统一结算。
-6. 能力/开关缺失、游标失效或提交通知丢失时，窗口进入 `Degraded`：停止淘汰、保留现有可读段与游标、按退避重试 `open`；不得自动退化为完整 `session/load`。
+1. 本地 TUI 的历史只走 History V2：`session/load` 的 `_meta["peri.history"].initial` 提供首屏，后续浏览走 `_peri/history` 的 `open/page/seek/body/close`。它只读、不装配会话、不取执行锁、不广播命令；`initial` 之外不再有第二条首屏路径，也不回退完整 `session/load`。
+2. 存储按有界 keyset 读取：先取候选行身份/长度，只为计划内正文取内容；超大条目只返回 opaque descriptor，正文按 `bodyRef`/`offset`/`maxBytes` 分块读取。正文定位使用独立条目元数据读取，不依赖条目在该页是内联还是 opaque；own 与 inherited 都可读。窗口读取覆盖 canonical 存储（含已归档行），但不写回 Host 热态；有效上下文、手动 Compact 与恢复仍只读 `load_active_snapshot`（存储侧 `excluded = 0`）。
+3. 服务端签发 `windowId`、`snapshotToken`、`readTicket`、`historyRevision`、`committedTail` 与 `projectionVersion`，固定一次浏览。`page`/`seek`/`body` 在读取前和返回前复核这些事实；关闭、删除、rewind 或会话关闭优先使旧窗口失效。新 `open`/`initial` 成功接纳后才关闭旧窗口，失败保留旧窗口继续可读。
+4. TUI 的展示正文仍由 `BridgeState.committed` 唯一强持有；`HistoryV2Window` 只保存服务端身份、保留页段、coverage/gap、字节账目与阅读锚点，不复制另一份 canonical 历史。保留预算为 200 条 / 16 MiB / 64 页段，详情正文 4 MiB；淘汰以整页段为单位，并保留重载游标。
+5. 正文详情通过 `HistoryV2BodyBinding` 绑定 session/window/snapshot/ticket/source/entry/subItem/bodyRef；响应为 base64 分块，按原始字节重组后再解码。页面 descriptor 的 `totalBytes` 只是 canonical 预估，body 响应的 `totalBytes` 才是展示长度权威；关闭面板、session 边界或窗口换代清空 chunks。
+6. 协议未协商、服务端未选择 V2 或后端不支持时启动失败；窗口失效是可重开的显式状态（保留旧页、重新 `open`），不得静默切换到旧协议或标准全量回放。
 
 #### 2.8.4 对象级证据与已知边界
 
 进度与验收记录见 active spec；本节只固定当前实现边界，避免把目标写成现状。
 
-对象级释放不能以 `committed.len()`、`VIEW_MODELS.items.len()` 或 RSS 单独证明。当前验收使用以下证据：
+历史读取与窗口状态不能以 `committed.len()`、`VIEW_MODELS.items.len()` 或 RSS 单独证明。当前验收使用以下证据：
 
-1. `release_removes_committed_and_invalidates_holders_before_ack`：释放并收到渲染 ack 后，`Weak<TuiAssistantBubble>` 无法升级，`DisplayLedger`/折叠历史/渲染缓存/焦点/工具配对指纹均不含被淘汰身份。
-2. `structural_epoch_drops_old_slot_lines_and_uses_8mib_to_6mib_budget` 与 `structural_epoch_with_empty_snapshot_reaches_zero_retained_bytes`：结构代次变化后旧 slot 行缓存被丢弃，`Transcript::retained_bytes() == 0`。
-3. `pending_release_keeps_budget_conservative_until_ack`、`release_ack_is_idempotent_and_late_ack_does_not_double_credit`：渲染确认前不提前归还预算，重复/迟到 ack 幂等。
-4. `stale_or_late_response_is_dropped_and_reservation_released`、`one_in_flight_and_one_pending_merge_are_enforced`：迟到页与并发页不合并，页预留归还。
+1. `history_v2_adapter_visibility_test::{undetermined_prefix_fails_the_page_and_retry_reads_the_entry,injected_prefix_read_failure_fails_page_then_retry_reads}`：前缀无法判定或读取失败时整页失败，不把条目静默当隐藏，也不越过失败条目提交游标。
+2. `history_v2_adapter_budget_test::{around_seek_after_entry_is_opaque_and_body_reads_fully,same_entry_inline_and_opaque_yields_identical_display_text}` 与 `history_v2_adapter_inherited_test::inherited_body_chunks_match_projected_text`：页预算分类不影响正文可达性，inline/opaque 与 own/inherited 的展示表示一致。
+3. `history_service/initial_replacement_test::{initial_backend_failure_keeps_old_window_and_live_identity,initial_budget_failure_keeps_old_window_and_live_stream,initial_replacement_at_capacity_is_bounded_across_success_failure_and_replay}`：准备失败保留旧窗口与实时身份，替换在配额边界上有界。
+4. TUI `body_test::{late_body_response_does_not_write_into_a_newer_request,first_chunk_adopts_authoritative_total_and_later_mismatch_is_rejected}` 与 `consumer_test::wire_requests_follow_enqueue_order_across_all_v2_rpcs`：迟到正文不写入新请求，首块修正权威长度，所有 V2 RPC 按入队顺序发送并逐条等待响应。
 
 已知边界（不得写成已完成）：
 
-- 折叠组/子 Agent 组尚未真正惰性化。当前 `TuiCollapsedGroup.view_models` 通过 `im::Vector` 结构共享持有成员，构造不深复制正文；但释放时只做 `FoldedHistory::invalidate()` 与整组缓存失效，没有按段精准惰性物化/清理。
-- 结构性失效目前清空全部渲染 slot，尚未按段精准清理。
-- 旧 `HISTORY_PAGING` 路径仍使用轻量静态 `PENDING_TOOL_ENDS` 表，未完全迁移到 `ResidentIndex`；窗口路径与旧路径共享该表的清理入口。
-- 超大条目详情与 inherited 详情已交付（`HistoryDetailPanel`、`session/history/body`、4 MiB 预算、UTF-8 跨块重组、关闭释放 chunks）。限制：鼠标单击只设焦点需再 Enter；UI 导出为剪贴板复制已加载正文（模型支持分块流式）；未做 JSON 字段级展示；inherited 段内部不插入独立占位行；TUI 仍接受旧顶层 `bodyDescriptors` 兼容输入，服务端已不再发送该形状。
-- remote/emscripten adapter 未覆写窗口/继承读取端口，默认返回 `Unsupported`（出口 `-32603`），不能宣称这些后端已支持窗口。
-- `readTicket` 是进程内不透明值与精确匹配，没有密码学签名；它绑定 connection/session/generation/structure/snapshot/source/tail/投影版本/时间/nonce，但不是访问授权。
-- ACP host rewind 的错误出口仍由集中后的文本 marker 判定持久化不确定（`PERSISTENCE_UNCERTAIN_MARKER`）；底层资源错误与 Transcript rewind 已使用 `MutationOutcome`，host 的错误出口尚未完整传递该类型；`schema_test.rs` 的存量 1038 行超限不属本次变更。
-- beta 设置面板仍只列 `BETA_FLAGS`；`history-window-v1` 未配置默认开启，如需关闭须手动写入 settings `false`，TUI 启动只读一次、无热重载。
+- 真实 socket 断连未做端到端用例；本地 ServerLoop 断连治理由 `server_loop_history_disconnect_*` 覆盖，真实 transport 断开复用同一 cancellation token。`session/load` 仍在连接接收循环内 `await`（最长 60 s，本轮未改），initial 读取期间同连接其它请求会等待。TUI 出站调度逐条等待，慢 page/body 会延迟后续 close/load（最多 10 s）。
+- `_peri/history/changed` 未发送；窗口失效依赖后续请求错误。
+- TUI 的 `HISTORY_V2_STATE` 是进程级 atom，多连接共享；未做长时间滚动 RSS 或 100 MiB 工具输出实测。
+- 超大条目详情已交付（`HistoryDetailPanel`、V2 `body`、4 MiB 预算、UTF-8 跨块重组、关闭释放 chunks）。限制：鼠标单击只设焦点需再 Enter；UI 导出为剪贴板复制已加载正文；未做 JSON 字段级展示；inherited 段内部不插入独立占位行。
+- remote/emscripten 的 `supports_history_v2()` 为 false，协商显式失败，不能宣称这些后端已支持历史窗口。
+- `readTicket` 是进程内不透明值与精确匹配，没有密码学签名，也不是访问授权。

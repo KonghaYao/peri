@@ -1,5 +1,7 @@
 //! Receive loop and request-class dispatch; long-running work stays host-owned.
 
+mod history;
+
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -8,9 +10,8 @@ use tokio_util::sync::CancellationToken;
 use super::diagnostics::ResponseDiagnostics;
 use super::{
     connection::ConnectionContext, dispatch_prompt_turn, extract_session_id, handle_notification,
-    handle_request_for_connection, history_page, history_service, history_v2_load, history_window,
-    mcp_apps, requests, send_session_info_update, task_scope, AcpServerConfig, PromptLocks,
-    SharedSessions,
+    handle_request_for_connection, history_v2_load, mcp_apps, requests, send_session_info_update,
+    task_scope, AcpServerConfig, PromptLocks, SharedSessions,
 };
 use crate::transport::types::{IncomingMessage, RequestId};
 
@@ -64,46 +65,6 @@ impl ServerLoop<'_> {
                 }
             }
         }
-    }
-
-    /// `_peri/history` 分流：连接级协商与 own 适配器注入都在进入服务前完成。
-    ///
-    /// 未协商时**不进入服务**，直接返回领域错误；协商后读取统一走
-    /// [`super::history_v2_adapter::HistoryV2BackendAdapter`]，未实现窗口读取的后端
-    /// 仍由适配器 fail-closed。
-    /// 请求在连接循环内就地 await：H2 的窗口/幂等账本是连接级短锁状态，就地处理
-    /// 保持同连接请求的接收顺序；后端读取只发生在服务锁之外。
-    async fn handle_history_request(&self, id: RequestId, params: Value) {
-        let diagnostics =
-            ResponseDiagnostics::new(id, peri_acp_types::history_v2::HISTORY_METHOD, &params);
-        let (facts, service) = {
-            let connection = self.connection.lock().await;
-            (connection.facts(), connection.history_v2.clone())
-        };
-        let result = if !facts.history_v2 {
-            Err(history_service::protocol_not_negotiated_error())
-        } else {
-            let backend: Arc<dyn peri_acp_types::history_v2::HistoryV2Backend> =
-                Arc::new(super::history_v2_adapter::HistoryV2BackendAdapter::new(
-                    Arc::clone(&self.cfg.session_resources),
-                    facts.caps.clone(),
-                ));
-            let limits = facts
-                .caps
-                .history_v2
-                .as_ref()
-                .map(|capability| capability.limits.clone())
-                .unwrap_or_default();
-            let request = history_service::HistoryServiceRequest::new(true, Some(backend), limits);
-            tokio::select! {
-                biased;
-                _ = self.connection_cancellation.cancelled() => Err(
-                    crate::transport::types::AcpError::new(-32800, "request cancelled"),
-                ),
-                result = service.handle(&params, request) => result,
-            }
-        };
-        let _ = diagnostics.send(self.transport.as_ref(), result).await;
     }
 
     async fn spawn_mcp_control(&self, id: RequestId, params: Value) {
@@ -474,84 +435,9 @@ impl ServerLoop<'_> {
             },
             _ => None,
         };
-        let v2_initial = history_load.is_some();
-        // `session/history/body`：V1 正文分块，不进入生命周期路由。
-        if method == "session/history/body" {
-            let result = if !connection_facts.history_window_v1 {
-                Err(history_window::window_error(
-                    peri_acp_types::history_window::HistoryWindowError::NotNegotiated,
-                ))
-            } else {
-                tokio::select! {
-                    biased;
-                    _ = self.connection_cancellation.cancelled() => Err(
-                        crate::transport::types::AcpError::new(-32800, "request cancelled"),
-                    ),
-                    result = history_window::handle_body_chunk(
-                        cfg,
-                        sessions,
-                        &params,
-                        &connection_facts.connection_id,
-                    ) => result,
-                }
-            };
-            let _ = diagnostics.send(transport.as_ref(), result).await;
-            return;
-        }
         let closed_session_id = matches!(method.as_str(), "session/close" | "session/delete")
             .then(|| extract_session_id(&params, "").to_string())
             .filter(|session_id| !session_id.is_empty());
-        // 历史分页：模式在进入生命周期路由**之前**解析（REQ §5.1）。带 cursor 的 load 是
-        // 只读浏览——不取执行生命周期锁、不装配、不广播；非法参数与未协商能力都在这里
-        // 明确拒绝，绝不降级成初始 load。
-        let load_initial_cursor = if method == "session/load" {
-            // 分页/窗口准入按**当前连接**的协商结果（REQ §5.3）：`caps()` 对从未
-            // `initialize` 的连接是兜底能力集，不能用来放行分页或窗口语义。
-            let caps = connection_facts.caps.clone();
-            match history_page::classify(
-                &params,
-                connection_facts.history_pagination,
-                connection_facts.history_window_v1,
-            ) {
-                Ok(history_page::SessionLoadMode::HistoryPage(request)) => {
-                    let result = history_page::handle_page(cfg, sessions, &caps, &request).await;
-                    let _ = diagnostics.send(transport.as_ref(), result).await;
-                    return;
-                }
-                Ok(history_page::SessionLoadMode::HistoryWindow {
-                    session_id,
-                    request,
-                }) => {
-                    let window_connection = history_window::WindowConnection::new(
-                        connection_facts.connection_id.clone(),
-                        Arc::new(history_window::TransportWindowSink::new(Arc::clone(
-                            self.transport,
-                        ))),
-                    );
-                    let result = tokio::select! {
-                        biased;
-                        _ = self.connection_cancellation.cancelled() => Err(
-                            crate::transport::types::AcpError::new(-32800, "request cancelled"),
-                        ),
-                        result = history_window::handle(
-                            cfg, sessions, &caps, &session_id, request, &window_connection,
-                        ) => result,
-                    };
-                    let _ = diagnostics.send(transport.as_ref(), result).await;
-                    return;
-                }
-                Ok(history_page::SessionLoadMode::InitialLoad) => {
-                    // V1 游标身份不进入 V2 initial 响应（两套协议不混用）。
-                    connection_facts.history_pagination && !v2_initial
-                }
-                Err(error) => {
-                    let _ = diagnostics.send(transport.as_ref(), Err(error)).await;
-                    return;
-                }
-            }
-        } else {
-            false
-        };
         if matches!(
             method.as_str(),
             "session/new" | "session/fork" | "session/load" | "session/resume"
@@ -637,7 +523,7 @@ impl ServerLoop<'_> {
         };
         // V2 initial 的实时流：响应发送成功后才 flush 暂停期缓冲；失败则关闭未发布的流。
         let mut live_v2_initial: Option<(String, Arc<super::live_delivery::LiveDelivery>)> = None;
-        let mut result = if requests::session_io::handles(&method) {
+        let result = if requests::session_io::handles(&method) {
             let prepared = {
                 let sessions = sessions.lock().await;
                 requests::session_io::prepare(&method, &params, &sessions)
@@ -705,22 +591,6 @@ impl ServerLoop<'_> {
             .await
         };
         drop(lifecycle_lock);
-        // 初始 load 的分页身份：只对协商了分页能力的当前连接附加（REQ §5.3）。
-        // 放在执行锁之外：这是初始 load 路径上的有界读取，不必占着生命周期锁。
-        if load_initial_cursor && result.is_ok() {
-            let session_id = extract_session_id(&params, "").to_string();
-            let failure = match result.as_mut() {
-                Ok(response) if !session_id.is_empty() => {
-                    history_page::attach_initial_cursor(cfg, sessions, &session_id, response)
-                        .await
-                        .err()
-                }
-                _ => None,
-            };
-            if let Some(error) = failure {
-                result = Err(error);
-            }
-        }
         if result.is_ok() && super::user_input::starts_execution(&method) {
             if let Some(session_id) = params.get("sessionId").and_then(Value::as_str) {
                 super::user_input::schedule_mailbox(

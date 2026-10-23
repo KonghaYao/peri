@@ -4,8 +4,8 @@
 //! 公开路径 `peri_acp_types::session_resources::{SessionResourceError, SessionResourceErrorKind}`
 //! 由父模块 `pub use` 保持。
 
+use crate::history_common::HistoryWindowError;
 use crate::history_page::HistoryCursorError;
-use crate::history_window::HistoryWindowError;
 use crate::thread::ThreadId;
 use crate::workspace::WorkspaceError;
 
@@ -67,12 +67,12 @@ pub enum SessionResourceErrorKind {
     Conflict {
         detail: String,
     },
-    /// 历史分页游标不能用于本次读取：分类见 [`HistoryCursorError`]。
+    /// 历史回放游标不能用于本次读取：分类见 [`HistoryCursorError`]。
     ///
     /// 单独一类是为了让出口把「坏游标」映射成参数错误、把「失效游标」映射成需要重新
-    /// 开始的错误；两者都不得降级成首屏或空页。
+    /// 开始的错误；两者都不得降级成首段或空段。
     Cursor(HistoryCursorError),
-    /// `peri.historyWindowV1` 的稳定错误分类；出口按
+    /// 历史窗口读取的稳定错误分类；出口按
     /// [`HistoryWindowError::code`]/[`HistoryWindowError::reason`] 映射，不解析文本。
     HistoryWindow(HistoryWindowError),
     Internal {

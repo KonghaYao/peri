@@ -1,93 +1,19 @@
 //! open/seek 的固定快照重取与初始窗口组装。
 
-use peri_acp_types::history_page::HistoryEntryRole;
+use peri_acp_types::history_common::{HistorySource as WindowSource, HistoryWindowDirection};
 use peri_acp_types::history_v2::{
-    HistoryBackendError, HistoryEntryAnchor, HistoryOpenedSnapshot, HistorySnapshotRef,
-    HistorySource as V2Source,
+    HistoryBackendError, HistoryEntryAnchor, HistoryOpenedSnapshot, HistorySource as V2Source,
 };
-use peri_acp_types::history_window::{
-    HistoryCommittedTail, HistorySource as WindowSource, HistoryWindowDirection,
-};
-use peri_acp_types::messages::MessageId;
-use peri_acp_types::session_resources::{
-    HistoryWindowEntry, HistoryWindowPagePlan, HistoryWindowReadIntent,
-    HistoryWindowTailExpectation, InheritedHistoryEntry,
-};
+use peri_acp_types::session_resources::HistoryWindowPagePlan;
 use peri_acp_types::thread::ThreadId;
 
 use super::refs::{encode_inherited_ref, encode_own_ref, InheritedRef};
 use super::{
-    anchor_limits, inherited_seek_plan, parse_entry_id, tail_refs, target_bytes,
-    HistoryV2BackendAdapter, PageParts,
+    anchor_limits, inherited_seek_plan, parse_entry_id, tail_refs, HistoryV2BackendAdapter,
+    PageParts,
 };
 
 impl HistoryV2BackendAdapter {
-    /// 从固定快照里重取一个 own 条目的 descriptor 总长度与存储侧 role。
-    pub(super) async fn descriptor(
-        &self,
-        thread_id: &ThreadId,
-        snapshot: &HistorySnapshotRef,
-        tail: &HistoryCommittedTail,
-        entry_id: MessageId,
-    ) -> Result<(u64, HistoryEntryRole), HistoryBackendError> {
-        let plan = HistoryWindowPagePlan {
-            intent: HistoryWindowReadIntent::Seek,
-            source: WindowSource::Own,
-            anchor: Some(entry_id),
-            direction: HistoryWindowDirection::After,
-            include_anchor: true,
-            before_limit: 0,
-            after_limit: 1,
-            byte_budget: target_bytes(snapshot)?,
-            tail: HistoryWindowTailExpectation::Fixed(Some(tail.clone())),
-        };
-        let rows = self.load_rows(thread_id, &plan).await?;
-        for entry in &rows.entries {
-            if entry.entry_id() != entry_id {
-                continue;
-            }
-            return match entry {
-                HistoryWindowEntry::Oversized {
-                    total_bytes, role, ..
-                } => Ok((*total_bytes, *role)),
-                HistoryWindowEntry::Loaded(_) => Err(HistoryBackendError::NotFound),
-            };
-        }
-        Err(HistoryBackendError::AnchorUnavailable)
-    }
-
-    /// inherited 条目的 descriptor 总长度；冻结快照之外的身份不返回长度。
-    pub(super) async fn inherited_descriptor_total(
-        &self,
-        thread_id: &ThreadId,
-        snapshot: &HistorySnapshotRef,
-        source: &InheritedRef,
-        entry_id: MessageId,
-    ) -> Result<u64, HistoryBackendError> {
-        let plan = HistoryWindowPagePlan {
-            intent: HistoryWindowReadIntent::Seek,
-            source: source.window_source(),
-            anchor: Some(entry_id),
-            direction: HistoryWindowDirection::After,
-            include_anchor: true,
-            before_limit: 0,
-            after_limit: 1,
-            byte_budget: target_bytes(snapshot)?,
-            tail: HistoryWindowTailExpectation::Fixed(None),
-        };
-        let rows = self.load_rows(thread_id, &plan).await?;
-        for entry in &rows.inherited_entries {
-            if entry.entry_id() != entry_id {
-                continue;
-            }
-            return match entry {
-                InheritedHistoryEntry::Oversized { total_bytes, .. } => Ok(*total_bytes),
-                InheritedHistoryEntry::Loaded(_) => Err(HistoryBackendError::NotFound),
-            };
-        }
-        Err(HistoryBackendError::AnchorUnavailable)
-    }
-
     pub(super) async fn open_latest(
         &self,
         thread_id: &ThreadId,
@@ -105,7 +31,7 @@ impl HistoryV2BackendAdapter {
             target_bytes,
         );
         let own_rows = self.load_rows(thread_id, &own_plan).await?;
-        let own = self.own_view(thread_id, own_rows).await;
+        let own = self.own_view(thread_id, own_rows).await?;
         let own_oldest = own.oldest;
         let own_entries_empty = own.entries.is_empty();
 
@@ -126,7 +52,7 @@ impl HistoryV2BackendAdapter {
                             budget,
                         );
                         let rows = self.load_rows(thread_id, &plan).await?;
-                        let view = self.inherited_view(thread_id, source, rows).await;
+                        let view = self.inherited_view(thread_id, source, rows).await?;
                         Some((source.clone(), view))
                     }
                 }
@@ -207,7 +133,7 @@ impl HistoryV2BackendAdapter {
                     target_bytes,
                 );
                 let own_rows = self.load_rows(thread_id, &plan).await?;
-                let own = self.own_view(thread_id, own_rows).await;
+                let own = self.own_view(thread_id, own_rows).await?;
                 let inherited = if own.before_more {
                     None
                 } else {
@@ -247,7 +173,7 @@ impl HistoryV2BackendAdapter {
                 let plan =
                     inherited_seek_plan(&source, entry_id, before_limit, after_limit, target_bytes);
                 let rows = self.load_rows(thread_id, &plan).await?;
-                let view = self.inherited_view(thread_id, &source, rows).await;
+                let view = self.inherited_view(thread_id, &source, rows).await?;
                 let own_present = bounds.own_latest.is_some();
                 let before_cursor = view
                     .before_anchor

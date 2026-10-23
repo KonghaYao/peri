@@ -11,8 +11,6 @@ export class Agent {
     readonly session: Session;
     readonly claims: AgentClaims;
     private currentDocs: SessionDocs;
-    /** 当前有效的初始 load 代次；旧代次的通知与响应一律作废（REQ-H04、验收 A22）。 */
-    private loadGeneration?: string;
 
     constructor(
         readonly options: AgentOptions,
@@ -37,17 +35,6 @@ export class Agent {
     discardFailedSessionDocs(): void {
         this.currentDocs.destroy();
         this.currentDocs = new SessionDocs();
-    }
-
-    /** 开始一次初始 load：返回本次代次，并让此前未完成的代次作废。 */
-    beginLoadGeneration(generation: string): string {
-        this.loadGeneration = generation;
-        return generation;
-    }
-
-    /** 该代次是否仍是当前这次 load（被新代次取代后为假：暂存丢弃、迟到回放不安装）。 */
-    isCurrentLoadGeneration(generation: string | undefined): boolean {
-        return generation !== undefined && this.loadGeneration === generation;
     }
 
     mcpServers(): unknown[] {

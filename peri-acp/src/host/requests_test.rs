@@ -346,9 +346,8 @@ async fn register_session_with_history(
             closing: false,
             context_ownership: crate::host::ContextOwnership::Resident,
             history_payloads,
-            structure_version: 0,
             session_generation: crate::host::next_session_generation(),
-            history_window: Default::default(),
+            handed_off_alive: None,
             live_delivery: None,
             event_health: Default::default(),
             cancel_token: None,
@@ -570,10 +569,6 @@ impl PluginManagerPort for MockPluginManager {
 #[path = "user_input_test.rs"]
 mod user_input_tests;
 
-/// 历史分页的 wire 级用例：与 `user_input_tests` 同一夹具面（真实门面 + ServerLoop）。
-#[path = "history_page_wire_test.rs"]
-mod history_page_wire_tests;
-
 #[path = "requests/plugin_search_test.rs"]
 mod plugin_search_tests;
 
@@ -703,9 +698,8 @@ async fn register_session_with_workflow(
             closing: false,
             context_ownership: crate::host::ContextOwnership::Resident,
             history_payloads: Vec::new(),
-            structure_version: 0,
             session_generation: crate::host::next_session_generation(),
-            history_window: Default::default(),
+            handed_off_alive: None,
             live_delivery: None,
             event_health: Default::default(),
             cancel_token: None,
@@ -723,3 +717,7 @@ async fn register_session_with_workflow(
         },
     );
 }
+
+// History V2 的真实 SQLite / wire 夹具与其子模块（旧 V1 分页测试删除后保留）。
+#[path = "history_v2_test_fixture.rs"]
+mod history_v2_test_fixture;

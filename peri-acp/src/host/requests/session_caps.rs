@@ -1,9 +1,7 @@
 //! `initialize` 的 peri 能力收敛：客户端声明必须与后端实际支持一致。
 //!
-//! 只回显客户端声明会把「客户端想要」冒充成「端到端可用」。窗口协议依赖
-//! Store 的 bounds/page/body 读取端口；History V2 依赖 initial 与
-//! `_peri/history` 的读取端口。未实现的后端（remote/emscripten）不得因声明
-//! 而被协商成可用。
+//! 只回显客户端声明会把「客户端想要」冒充成「端到端可用」。History V2 依赖 initial 与
+//! `_peri/history` 的读取端口。未实现的后端（remote/emscripten）不得因声明而被协商成可用。
 
 use peri_acp_types::history_v2::{
     ExecutionEffect, HistoryClientCapability, HistoryContractError, HistoryEffect,
@@ -20,6 +18,7 @@ use super::session_lifecycle::{initialize_client_meta, initialize_peri_caps};
 /// History V2 领域错误统一使用的 JSON-RPC server error code（设计 §12.1）。
 pub(crate) const HISTORY_DOMAIN_ERROR_CODE: i64 = -32000;
 
+/// 已删除的旧私有历史能力键：只作为**拒绝边界**存在。
 const LEGACY_HISTORY_PAGINATION_KEY: &str = "peri.historyPagination";
 const LEGACY_HISTORY_WINDOW_V1_KEY: &str = "peri.historyWindowV1";
 
@@ -32,23 +31,21 @@ pub(crate) fn effective_peri_caps(
         initialize_peri_caps(params),
         &initialize_client_meta(params),
         cfg.session_resources.supports_history_v2(),
-        cfg.session_resources.supports_history_window(),
     )
 }
 
 /// 纯能力收敛规则：客户端声明不能把未实现的后端协商成可用。
 ///
 /// History V2 的失败必须显式返回（`UnsupportedVersion`），不能静默清空
-/// `caps.history_v2` 后把连接当作标准模式；旧 V1 能力的后端门控保持原语义。
+/// `caps.history_v2` 后把连接当作标准模式。
 pub(crate) fn effective_caps_for_backend(
     mut caps: PeriCaps,
     meta: &Map<String, Value>,
     supports_history_v2: bool,
-    supports_history_window: bool,
 ) -> Result<PeriCaps, AcpError> {
     caps.history_v2 = negotiate_history_v2(meta, supports_history_v2, HistoryLimits::default())
         .map_err(history_contract_error)?;
-    Ok(apply_backend_caps(caps, supports_history_window))
+    Ok(caps)
 }
 
 /// History V2 纯协商规则（设计 §4 / §4.7 / §4.8）。
@@ -84,14 +81,6 @@ fn legacy_history_declared(meta: &Map<String, Value>) -> bool {
     [LEGACY_HISTORY_PAGINATION_KEY, LEGACY_HISTORY_WINDOW_V1_KEY]
         .into_iter()
         .any(|key| meta.get(key).and_then(Value::as_bool) == Some(true))
-}
-
-/// 纯能力收敛的 V1 部分：客户端声明不能把未实现的后端协商成可用。
-fn apply_backend_caps(mut caps: PeriCaps, supports_history_window: bool) -> PeriCaps {
-    if !supports_history_window {
-        caps.history_window_v1 = false;
-    }
-    caps
 }
 
 /// `HistoryContractError` → `AcpError` 的唯一映射点。
@@ -163,16 +152,14 @@ mod tests {
     }
 
     #[test]
-    fn no_history_declaration_keeps_legacy_caps_and_declares_no_v2() {
+    fn no_history_declaration_keeps_caps_and_declares_no_v2() {
         let caps = PeriCaps {
-            history_pagination: true,
-            history_window_v1: true,
+            rewind: true,
             ..PeriCaps::default()
         };
-        let caps = effective_caps_for_backend(caps, &Map::new(), true, true).unwrap();
+        let caps = effective_caps_for_backend(caps, &Map::new(), true).unwrap();
         assert!(caps.history_v2.is_none());
-        assert!(caps.history_window_v1, "后端支持时保留客户端 V1 声明");
-        assert!(caps.history_pagination, "无 V2 声明时旧路径不变");
+        assert!(caps.rewind, "无 V2 声明时其他能力不变");
     }
 
     #[test]
@@ -260,8 +247,28 @@ mod tests {
                 HistoryErrorReason::UnsupportedVersion
             );
             assert!(
-                effective_caps_for_backend(PeriCaps::default(), &mixed, true, true).is_err(),
+                effective_caps_for_backend(PeriCaps::default(), &mixed, true).is_err(),
                 "混合声明不得产生任何 server cap: {legacy}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_only_history_declarations_do_not_select_or_echo_v2() {
+        for legacy in ["peri.historyPagination", "peri.historyWindowV1"] {
+            let mut meta = Map::new();
+            meta.insert(legacy.to_owned(), Value::Bool(true));
+            assert!(
+                negotiate_history_v2(&meta, true, HistoryLimits::default())
+                    .unwrap()
+                    .is_none(),
+                "只声明已删除的旧能力不得被当成 V2: {legacy}"
+            );
+            let caps = PeriCaps::from_client_meta(&meta);
+            assert!(caps.history_v2.is_none());
+            assert!(
+                caps.to_agent_meta().get(legacy).is_none(),
+                "已删除的旧能力不得被回显: {legacy}"
             );
         }
     }
@@ -309,34 +316,5 @@ mod tests {
                 .contains_key(HISTORY_META_KEY),
             "未协商时不得提前宣告 peri.history"
         );
-    }
-
-    #[test]
-    fn unsupported_backend_cannot_be_negotiated_into_window_protocol() {
-        let caps = apply_backend_caps(
-            PeriCaps {
-                history_window_v1: true,
-                history_pagination: true,
-                ..PeriCaps::default()
-            },
-            false,
-        );
-        assert!(!caps.history_window_v1);
-        assert!(
-            caps.history_pagination,
-            "收敛只影响窗口端口，不篡改其他声明"
-        );
-    }
-
-    #[test]
-    fn supported_backend_keeps_client_declaration() {
-        let caps = apply_backend_caps(
-            PeriCaps {
-                history_window_v1: true,
-                ..PeriCaps::default()
-            },
-            true,
-        );
-        assert!(caps.history_window_v1);
     }
 }

@@ -15,20 +15,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use peri_acp_types::history_page::{
-    HistoryCursor, HistoryForwardCursor, HistoryPage, HistoryPageBounds, HistorySegment,
-};
-use peri_acp_types::history_window::{
+use peri_acp_types::history_common::{
     HistoryBodyChunk, HistoryCommittedTail, HistoryReadTicket, HistorySource,
 };
+use peri_acp_types::history_page::{HistoryForwardCursor, HistorySegment};
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     AccessMode, ActiveSessionSnapshot, BindingRecheck, BindingState, ChildResumeClaim,
     ChildSnapshot, CloseSettlement, DataCapabilities, ExecutionAvailability, ForkSnapshot,
-    FrozenSnapshotBytes, FrozenState, HistoryWindowPagePlan, HistoryWindowRows, NewSession,
-    NewSessionDraft, PersistenceRecovery, RewindBoundary, RewindOutcome, SessionAvailability,
-    SessionHistoryWindowBounds, SessionInitialization, SessionMetaPatch, SessionResourceError,
-    SessionResourceErrorKind, SessionResourceResult, SessionResources, SessionSnapshot,
+    FrozenSnapshotBytes, FrozenState, HistoryEntryMetadata, HistoryWindowPagePlan,
+    HistoryWindowRows, NewSession, NewSessionDraft, PersistenceRecovery, RewindBoundary,
+    RewindOutcome, SessionAvailability, SessionHistoryWindowBounds, SessionInitialization,
+    SessionMetaPatch, SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
+    SessionResources, SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
@@ -453,10 +452,6 @@ impl SessionResources for SessionResourcesImpl {
         self.gate.data().load_frozen_state(id).await
     }
 
-    fn supports_history_window(&self) -> bool {
-        self.gate.data().supports_history_window()
-    }
-
     fn supports_history_v2(&self) -> bool {
         self.gate.data().supports_history_v2()
     }
@@ -479,23 +474,6 @@ impl SessionResources for SessionResourcesImpl {
         id: &ThreadId,
     ) -> SessionResourceResult<Vec<PersistedPayload>> {
         self.gate.data().load_session_history(id).await
-    }
-
-    async fn load_history_page(
-        &self,
-        id: &ThreadId,
-        cursor: Option<&HistoryCursor>,
-        limit: usize,
-        byte_budget: usize,
-    ) -> SessionResourceResult<HistoryPage> {
-        self.gate
-            .data()
-            .load_history_page(id, cursor, limit, byte_budget)
-            .await
-    }
-
-    async fn history_page_bounds(&self, id: &ThreadId) -> SessionResourceResult<HistoryPageBounds> {
-        self.gate.data().history_page_bounds(id).await
     }
 
     async fn load_history_segment(
@@ -547,6 +525,20 @@ impl SessionResources for SessionResourcesImpl {
                 byte_budget,
                 committed_tail,
             )
+            .await
+    }
+
+    async fn read_history_entry_metadata(
+        &self,
+        id: &ThreadId,
+        source: HistorySource,
+        entry_id: MessageId,
+        committed_tail: Option<&HistoryCommittedTail>,
+        read_ticket: &HistoryReadTicket,
+    ) -> SessionResourceResult<HistoryEntryMetadata> {
+        self.gate
+            .data()
+            .read_history_entry_metadata(id, source, entry_id, committed_tail, read_ticket)
             .await
     }
 

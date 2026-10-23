@@ -19,7 +19,7 @@ pub(super) const TOOL_INPUT_LIMIT_BYTES: usize = 64 * 1024;
 /// 把一条已解码 payload 投影成展示纯文本；没有可见内容时返回 `None`。
 pub(super) fn display_text(payload: &PersistedPayload, caps: &PeriCaps) -> Option<String> {
     let mut segments = Vec::new();
-    for update in dispatch::project_payload_updates(payload, caps, None) {
+    for update in dispatch::project_payload_updates(payload, caps) {
         if let Some(segment) = render_update(update) {
             if !segment.is_empty() {
                 segments.push(segment);

@@ -64,41 +64,17 @@ fn connection_caps_fall_back_to_all_enabled_only_before_initialize() {
 
     let mut negotiated = ConnectionContext::new(false);
     negotiated.commit_initialize(PeriCaps {
-        history_pagination: true,
+        session_workspace_v1: true,
         ..PeriCaps::default()
     });
     assert_eq!(
         negotiated.caps(),
         PeriCaps {
-            history_pagination: true,
+            session_workspace_v1: true,
             ..PeriCaps::default()
         }
     );
     assert_eq!(negotiated.snapshot_for_request().caps(), negotiated.caps());
-}
-
-/// 分页准入与 `caps()` 的兜底**刻意不同**（REQ §5.3 / A25）：`caps()` 在未协商时给出
-/// 全能力兜底，分页准入却必须失败关闭，否则「从未协商」会被读成「默认获得分页语义」。
-#[test]
-fn history_pagination_stays_closed_until_this_connection_negotiates_it() {
-    let mut unnegotiated = ConnectionContext::new(false);
-    assert!(unnegotiated.caps().history_pagination);
-    assert!(!unnegotiated.history_pagination());
-    assert!(!unnegotiated.snapshot_for_request().history_pagination());
-
-    unnegotiated.commit_initialize(PeriCaps::default());
-    assert!(!unnegotiated.history_pagination());
-
-    let mut negotiated = ConnectionContext::new(false);
-    negotiated.commit_initialize(PeriCaps {
-        history_pagination: true,
-        ..PeriCaps::default()
-    });
-    assert!(negotiated.history_pagination());
-
-    // 只认**第一次** initialize：后一次不能把准入从关改成开，也不能把它改回去。
-    negotiated.commit_initialize(PeriCaps::default());
-    assert!(negotiated.history_pagination());
 }
 
 #[test]

@@ -5,33 +5,13 @@ use peri_acp_types::history_v2::{
     DecimalU64 as V2U64, HISTORY_V2_VERSION, HistoryBodyChunk as V2BodyChunk, HistoryBodyKind,
     HistoryEncoding, HistoryRepresentation,
 };
-use peri_acp_types::history_window::HistoryBodyChunk;
 
 use super::*;
-use crate::kit::history_window::{DetailDescriptor, HistorySource, HistoryV2BodyBinding};
+use crate::kit::history_detail_binding::{
+    DetailDescriptor, HistoryDetailTarget, HistorySource, HistoryV2BodyBinding, placeholder_hash,
+};
 
 fn descriptor(total: u64) -> DetailDescriptor {
-    DetailDescriptor::new(
-        HistorySource::Own,
-        "s1:m1",
-        total,
-        256 * 1024,
-        "snap-1",
-        "ticket-1",
-    )
-}
-
-fn chunk(offset: u64, bytes: &[u8], complete: bool, next: Option<u64>) -> HistoryBodyChunk {
-    HistoryBodyChunk {
-        entry_id: "s1:m1".into(),
-        offset,
-        bytes: bytes.to_vec(),
-        next_offset: next,
-        complete,
-    }
-}
-
-fn v2_descriptor(total: u64) -> DetailDescriptor {
     DetailDescriptor::new(
         HistorySource::Own,
         "s1:m1",
@@ -49,6 +29,8 @@ fn v2_descriptor(total: u64) -> DetailDescriptor {
         entry_id: "s1:m1".into(),
         sub_item_id: "s1:m1:0".into(),
         body_ref: "body-1".into(),
+        representation: HistoryRepresentation::DisplayText,
+        media_type: "text/plain; charset=utf-8".into(),
     })
 }
 
@@ -59,6 +41,26 @@ fn v2_chunk(
     next: Option<u64>,
     total: u64,
 ) -> V2BodyChunk {
+    v2_chunk_with(
+        offset,
+        bytes,
+        complete,
+        next,
+        total,
+        HistoryRepresentation::DisplayText,
+        "cv-1",
+    )
+}
+
+fn v2_chunk_with(
+    offset: u64,
+    bytes: &[u8],
+    complete: bool,
+    next: Option<u64>,
+    total: u64,
+    representation: HistoryRepresentation,
+    content_version: &str,
+) -> V2BodyChunk {
     V2BodyChunk {
         version: HISTORY_V2_VERSION,
         kind: HistoryBodyKind::Body,
@@ -66,8 +68,8 @@ fn v2_chunk(
         window_id: "w1".into(),
         snapshot_token: "snap-1".into(),
         body_ref: "body-1".into(),
-        content_version: "cv-1".into(),
-        representation: HistoryRepresentation::DisplayText,
+        content_version: content_version.into(),
+        representation,
         encoding: HistoryEncoding::Base64,
         offset: V2U64::new(offset),
         data: base64::engine::general_purpose::STANDARD.encode(bytes),
@@ -77,16 +79,26 @@ fn v2_chunk(
     }
 }
 
+/// 用 descriptor 的 canonical 总长构造一块正文并应用。
+fn apply(
+    window: &mut HistoryDetailWindow,
+    offset: u64,
+    bytes: &[u8],
+    complete: bool,
+    next: Option<u64>,
+    max_bytes: u32,
+) -> Result<(), DetailError> {
+    let chunk = v2_chunk(offset, bytes, complete, next, window.descriptor.total_bytes);
+    let generation = window.attempt_generation();
+    window.apply_v2_chunk(&chunk, max_bytes, generation)
+}
+
 #[test]
 fn detail_chunks_cross_utf8_boundary_without_garble() {
     let mut window = HistoryDetailWindow::open(descriptor(6)).expect("open");
     let text = "中文".as_bytes();
-    window
-        .apply_chunk(chunk(0, &text[..1], false, Some(1)), 256 * 1024)
-        .expect("first byte");
-    window
-        .apply_chunk(chunk(1, &text[1..], true, None), 256 * 1024)
-        .expect("rest");
+    apply(&mut window, 0, &text[..1], false, Some(1), 256 * 1024).expect("first byte");
+    apply(&mut window, 1, &text[1..], true, None, 256 * 1024).expect("rest");
     assert_eq!(window.loaded_text().expect("utf8"), "中文");
     assert!(window.is_complete());
 }
@@ -94,9 +106,7 @@ fn detail_chunks_cross_utf8_boundary_without_garble() {
 #[test]
 fn detail_close_releases_chunk_allocations() {
     let mut window = HistoryDetailWindow::open(descriptor(4)).expect("open");
-    window
-        .apply_chunk(chunk(0, b"body", true, None), 256 * 1024)
-        .expect("chunk");
+    apply(&mut window, 0, b"body", true, None, 256 * 1024).expect("chunk");
     let weak = Arc::downgrade(&window.chunk_arc(0).expect("chunk arc"));
     window.close();
     assert_eq!(window.retained_bytes(), 0);
@@ -112,17 +122,15 @@ fn detail_budget_keeps_at_most_4mib() {
     while offset < total {
         let len = block.len().min((total - offset) as usize);
         let complete = offset as usize + len >= total as usize;
-        window
-            .apply_chunk(
-                chunk(
-                    offset,
-                    &block[..len],
-                    complete,
-                    (!complete).then_some(offset + len as u64),
-                ),
-                256 * 1024,
-            )
-            .expect("bounded chunk");
+        apply(
+            &mut window,
+            offset,
+            &block[..len],
+            complete,
+            (!complete).then_some(offset + len as u64),
+            256 * 1024,
+        )
+        .expect("bounded chunk");
         offset += len as u64;
     }
     assert!(window.retained_bytes() <= DETAIL_WINDOW_MAX_BYTES);
@@ -132,12 +140,8 @@ fn detail_budget_keeps_at_most_4mib() {
 #[test]
 fn detail_export_streams_each_chunk_without_full_copy() {
     let mut window = HistoryDetailWindow::open(descriptor(6)).expect("open");
-    window
-        .apply_chunk(chunk(0, b"abc", false, Some(3)), 256 * 1024)
-        .expect("chunk 1");
-    window
-        .apply_chunk(chunk(3, b"def", true, None), 256 * 1024)
-        .expect("chunk 2");
+    apply(&mut window, 0, b"abc", false, Some(3), 256 * 1024).expect("chunk 1");
+    apply(&mut window, 3, b"def", true, None, 256 * 1024).expect("chunk 2");
     let mut calls = 0usize;
     let mut collected = Vec::new();
     let report = window
@@ -165,30 +169,13 @@ fn detail_allows_one_in_flight_request() {
 }
 
 #[test]
-fn inherited_detail_request_keeps_frozen_source() {
-    let source =
-        HistorySource::inherited_with_ancestor("snap-frozen", Some("ancestor-session".into()));
-    let descriptor = DetailDescriptor::new(
-        source.clone(),
-        "s1:ancestor-message",
-        1024,
-        64 * 1024,
-        "snap-window",
-        "ticket",
-    );
-    let mut window = HistoryDetailWindow::open(descriptor).expect("open");
-    let request = window.request(0, 64 * 1024).expect("request");
-    assert_eq!(request.source, source);
-    assert_eq!(request.snapshot_token, "snap-window");
-}
-
-#[test]
 fn detail_failure_is_explicit_and_keeps_no_silent_empty_body() {
     let mut window = HistoryDetailWindow::open(descriptor(4)).expect("open");
-    let mut wrong = chunk(0, b"body", true, None);
-    wrong.entry_id = "s1:other".into();
+    let mut wrong = v2_chunk(0, b"body", true, None, 4);
+    wrong.body_ref = "other-body".into();
+    let generation = window.attempt_generation();
     assert_eq!(
-        window.apply_chunk(wrong, 4),
+        window.apply_v2_chunk(&wrong, 4, generation),
         Err(DetailError::IdentityMismatch)
     );
     assert!(window.last_error.is_some());
@@ -196,30 +183,27 @@ fn detail_failure_is_explicit_and_keeps_no_silent_empty_body() {
 }
 
 #[test]
-fn detail_scroll_does_not_touch_window_viewport_atom() {
+fn detail_scroll_does_not_touch_render_prepend_epoch() {
     crate::kit::atoms::init_atoms();
-    let before = crate::kit::atoms::WINDOW_VIEWPORT.state().read().clone();
+    let before = crate::kit::atoms::HISTORY_PREPEND_EPOCH.get();
     let mut window = HistoryDetailWindow::open(descriptor(1024)).expect("open");
     let request = window.scroll_to(512).expect("scroll request");
     assert_eq!(request.offset, 512);
     assert_eq!(window.pending_offset(), Some(512));
     assert_eq!(
-        crate::kit::atoms::WINDOW_VIEWPORT.state().read().clone(),
+        crate::kit::atoms::HISTORY_PREPEND_EPOCH.get(),
         before,
-        "detail scrolling must not move the main viewport atom"
+        "detail scrolling must not move the main viewport"
     );
 }
 
 #[test]
-fn open_close_detail_uses_window_descriptor_and_keeps_slot_state() {
+#[serial_test::serial]
+fn open_close_detail_uses_descriptor_and_keeps_slot_state() {
     crate::kit::atoms::init_atoms();
-    let mut window = crate::kit::history_window::HistoryWindow::new(
-        crate::kit::history_window::HistoryWindowConfig::enabled(),
-    );
     let descriptor = descriptor(1024);
-    let key = descriptor.key.clone();
-    window.register_detail_descriptor(descriptor);
-    open_history_detail(&window, &key).expect("open detail");
+    crate::kit::atoms::HISTORY_DETAIL
+        .set(Some(HistoryDetailWindow::open(descriptor).expect("open")));
     assert!(crate::kit::atoms::HISTORY_DETAIL.state().read().is_some());
     close_history_detail();
     assert!(crate::kit::atoms::HISTORY_DETAIL.state().read().is_none());
@@ -229,13 +213,9 @@ fn open_close_detail_uses_window_descriptor_and_keeps_slot_state() {
 #[serial_test::serial]
 fn session_boundary_clears_detail_and_focus() {
     crate::kit::atoms::init_atoms();
-    let mut window = crate::kit::history_window::HistoryWindow::new(
-        crate::kit::history_window::HistoryWindowConfig::enabled(),
-    );
-    let descriptor = descriptor(1024);
-    let key = descriptor.key.clone();
-    window.register_detail_descriptor(descriptor);
-    open_history_detail(&window, &key).expect("open detail");
+    crate::kit::atoms::HISTORY_DETAIL.set(Some(
+        HistoryDetailWindow::open(descriptor(1024)).expect("open"),
+    ));
     crate::kit::atoms::FOCUSED_ENTRY
         .set(Some(crate::kit::atoms::FocusedEntry { slot: 3, key: None }));
     let old_active = crate::kit::atoms::ACTIVE_SESSION_ID.state().read().clone();
@@ -250,9 +230,7 @@ fn session_boundary_clears_detail_and_focus() {
 #[test]
 fn detail_failure_closes_and_reports_explicitly() {
     let mut window = HistoryDetailWindow::open(descriptor(4)).expect("open");
-    window
-        .apply_chunk(chunk(0, b"body", true, None), 256 * 1024)
-        .expect("chunk");
+    apply(&mut window, 0, b"body", true, None, 256 * 1024).expect("chunk");
     assert!(window.retained_bytes() > 0);
     window.fail("read ticket expired");
     assert!(
@@ -271,13 +249,11 @@ fn event_layer_opens_detail_from_placeholder_and_clears_on_close() {
     use crate::kit::atoms::{
         ACTIVE_PANEL, HISTORY_DETAIL, HISTORY_DETAIL_TARGETS, VIEW_MODELS, ViewModelsSnapshot,
     };
-    use crate::kit::history_window::HistoryDetailTarget;
     use crate::kit::tui_render_unit::{TuiNoteLevel, TuiRenderUnit, TuiSystemNote};
 
     crate::kit::atoms::init_atoms();
     let descriptor = descriptor(1024);
-    let hash =
-        crate::kit::history_window::placeholder_hash(&descriptor.key, descriptor.total_bytes);
+    let hash = placeholder_hash(&descriptor.key, descriptor.total_bytes);
     *VIEW_MODELS.state().write() = ViewModelsSnapshot {
         generation: 1,
         items: vec![TuiRenderUnit::TuiSystemNote(TuiSystemNote {
@@ -306,7 +282,7 @@ fn event_layer_opens_detail_from_placeholder_and_clears_on_close() {
 
 #[test]
 #[serial_test::serial]
-fn detail_scroll_event_path_uses_one_registered_request_per_chunk() {
+fn detail_without_v2_binding_fails_explicitly() {
     crate::kit::atoms::init_atoms();
     let descriptor = DetailDescriptor::new(
         HistorySource::Own,
@@ -316,6 +292,49 @@ fn detail_scroll_event_path_uses_one_registered_request_per_chunk() {
         "snap-1",
         "ticket-1",
     );
+    crate::kit::atoms::HISTORY_DETAIL
+        .set(Some(HistoryDetailWindow::open(descriptor).expect("open")));
+    request_detail_chunk(0);
+    let detail = crate::kit::atoms::HISTORY_DETAIL
+        .state()
+        .read()
+        .clone()
+        .expect("detail");
+    assert!(
+        detail
+            .last_error
+            .as_deref()
+            .is_some_and(|message| message.contains("History V2")),
+        "missing binding must fail explicitly: {:?}",
+        detail.last_error
+    );
+    close_history_detail();
+}
+
+#[test]
+#[serial_test::serial]
+fn detail_scroll_event_path_uses_one_registered_request_per_chunk() {
+    crate::kit::atoms::init_atoms();
+    let descriptor = DetailDescriptor::new(
+        HistorySource::Own,
+        "s1:m1",
+        4096,
+        1024,
+        "snap-1",
+        "ticket-1",
+    )
+    .with_v2(HistoryV2BodyBinding {
+        session_id: "s1".into(),
+        window_id: "w1".into(),
+        snapshot_token: "snap-1".into(),
+        read_ticket: "ticket-1".into(),
+        source: peri_acp_types::history_v2::HistorySource::Own,
+        entry_id: "s1:m1".into(),
+        sub_item_id: "s1:m1:0".into(),
+        body_ref: "body-1".into(),
+        representation: HistoryRepresentation::DisplayText,
+        media_type: "text/plain; charset=utf-8".into(),
+    });
     crate::kit::atoms::HISTORY_DETAIL
         .set(Some(HistoryDetailWindow::open(descriptor).expect("open")));
 
@@ -335,13 +354,13 @@ fn detail_scroll_event_path_uses_one_registered_request_per_chunk() {
         );
     }
     // 响应落地后 pending 清空，下一次滚动可以继续登记并发送。
-    crate::kit::atoms::HISTORY_DETAIL
-        .state()
-        .write()
-        .as_mut()
-        .expect("detail")
-        .apply_chunk(chunk(1024, &vec![b'a'; 1024], false, Some(2048)), 1024)
-        .expect("apply first request");
+    {
+        let handle = crate::kit::atoms::HISTORY_DETAIL.state();
+        let mut guard = handle.write();
+        let detail = guard.as_mut().expect("detail");
+        apply(detail, 1024, &vec![b'a'; 1024], false, Some(2048), 1024)
+            .expect("apply first request");
+    }
     let second = scroll_detail_request(1).expect("second scroll must request a chunk");
     assert_eq!(second.offset, 2048);
     close_history_detail();
@@ -358,32 +377,35 @@ fn detail_visible_text_survives_first_chunk_eviction_and_prefix_refetch() {
 
     // 先铺满 4 MiB 预算，再滚到 4 MiB 处加载新块；以视口为锚会淘汰最早块。
     for offset in (0..4 * 1024 * 1024).step_by(step) {
-        window
-            .apply_chunk(
-                chunk(
-                    offset as u64,
-                    &block,
-                    false,
-                    Some(offset as u64 + step as u64),
-                ),
-                step as u32,
-            )
-            .expect("chunk");
-    }
-    assert_eq!(window.retained_bytes(), DETAIL_WINDOW_MAX_BYTES);
-    let request = window.scroll_to(4 * 1024 * 1024).expect("scroll request");
-    assert_eq!(request.offset, 4 * 1024 * 1024);
-    window
-        .apply_chunk(
-            chunk(
-                4 * 1024 * 1024,
-                &block,
-                false,
-                Some(4 * 1024 * 1024 + step as u64),
-            ),
+        apply(
+            &mut window,
+            offset as u64,
+            &block,
+            false,
+            Some(offset as u64 + step as u64),
             step as u32,
         )
-        .expect("tail chunk");
+        .expect("chunk");
+    }
+    assert!(
+        window.retained_bytes() <= DETAIL_WINDOW_MAX_BYTES,
+        "budget must stay bounded"
+    );
+    assert!(
+        window.retained_bytes() > DETAIL_WINDOW_MAX_BYTES - step,
+        "budget should retain the newest chunks"
+    );
+    let request = window.scroll_to(4 * 1024 * 1024).expect("scroll request");
+    assert_eq!(request.offset, 4 * 1024 * 1024);
+    apply(
+        &mut window,
+        4 * 1024 * 1024,
+        &block,
+        false,
+        Some(4 * 1024 * 1024 + step as u64),
+        step as u32,
+    )
+    .expect("tail chunk");
     let visible = window.visible_text().expect("visible text");
     assert!(
         !visible.text.is_empty(),
@@ -398,9 +420,7 @@ fn detail_visible_text_survives_first_chunk_eviction_and_prefix_refetch() {
     // 滚回开头重新请求首块，落地后显示从 0 开始。
     let request = window.scroll_to(0).expect("prefix request");
     assert_eq!(request.offset, 0);
-    window
-        .apply_chunk(chunk(0, b"prefix", false, Some(6)), step as u32)
-        .expect("prefix chunk");
+    apply(&mut window, 0, b"prefix", false, Some(6), step as u32).expect("prefix chunk");
     let visible = window.visible_text().expect("visible text");
     assert!(visible.text.starts_with("prefix"));
     assert!(!visible.prefix_evicted);
@@ -434,12 +454,11 @@ fn detail_panel_lines_show_loading_error_and_inherited_notice() {
 
 #[test]
 #[serial_test::serial]
-fn detail_scroll_event_path_requests_next_chunk_without_main_viewport_change() {
+fn detail_scroll_event_path_fails_explicitly_without_client() {
     crate::kit::atoms::init_atoms();
     crate::kit::atoms::HISTORY_DETAIL.set(Some(
         HistoryDetailWindow::open(descriptor(1024)).expect("open"),
     ));
-    let before = crate::kit::atoms::WINDOW_VIEWPORT.state().read().clone();
     scroll_detail(1);
     let detail = crate::kit::atoms::HISTORY_DETAIL
         .state()
@@ -450,10 +469,6 @@ fn detail_scroll_event_path_requests_next_chunk_without_main_viewport_change() {
     assert!(
         detail.last_error.is_some(),
         "no ACP client in test -> explicit failure"
-    );
-    assert_eq!(
-        crate::kit::atoms::WINDOW_VIEWPORT.state().read().clone(),
-        before
     );
     close_history_detail();
 }
@@ -468,20 +483,21 @@ fn detail_refetches_evicted_prefix_after_complete() {
 
     let mut offset = 0u64;
     while offset < last_offset {
-        window
-            .apply_chunk(
-                chunk(offset, &block, false, Some(offset + step as u64)),
-                step as u32,
-            )
-            .expect("sequential chunk");
+        apply(
+            &mut window,
+            offset,
+            &block,
+            false,
+            Some(offset + step as u64),
+            step as u32,
+        )
+        .expect("sequential chunk");
         offset += step as u64;
     }
     // 把视口移到尾部，首块才会在预算压力下被淘汰。
     let request = window.scroll_to(last_offset).expect("scroll to tail");
     assert_eq!(request.offset, last_offset);
-    window
-        .apply_chunk(chunk(last_offset, &block, true, None), step as u32)
-        .expect("final chunk");
+    apply(&mut window, last_offset, &block, true, None, step as u32).expect("final chunk");
     assert!(window.is_complete(), "EOF reached");
     assert!(
         window.chunk_arc(0).is_none(),
@@ -491,9 +507,15 @@ fn detail_refetches_evicted_prefix_after_complete() {
     // EOF 只表示顺序读到末尾，不表示前缀仍驻留：回读必须重新请求。
     let request = window.scroll_to(0).expect("evicted prefix must refetch");
     assert_eq!(request.offset, 0);
-    window
-        .apply_chunk(chunk(0, &block, false, Some(step as u64)), step as u32)
-        .expect("refetched prefix");
+    apply(
+        &mut window,
+        0,
+        &block,
+        false,
+        Some(step as u64),
+        step as u32,
+    )
+    .expect("refetched prefix");
     let visible = window.visible_text().expect("visible text after refetch");
     assert!(
         visible.text.starts_with('x'),
@@ -511,12 +533,15 @@ fn detail_visible_text_truncates_at_a_char_boundary_when_prefix_is_evicted() {
     window
         .request(1, 256 * 1024)
         .expect("request from a mid-character offset");
-    window
-        .apply_chunk(
-            chunk(1, &text[1..], false, Some(text.len() as u64)),
-            256 * 1024,
-        )
-        .expect("chunk");
+    apply(
+        &mut window,
+        1,
+        &text[1..],
+        false,
+        Some(text.len() as u64),
+        256 * 1024,
+    )
+    .expect("chunk");
 
     let visible = window.visible_text().expect("fragment is not corruption");
     assert_eq!(visible.text, "文");
@@ -537,12 +562,15 @@ fn detail_visible_text_keeps_valid_prefix_when_tail_is_truncated() {
         "fixture must cut inside a three-byte character"
     );
     let mut window = HistoryDetailWindow::open(descriptor(bytes.len() as u64)).expect("open");
-    window
-        .apply_chunk(
-            chunk(0, &bytes[..first_len], false, Some(first_len as u64)),
-            256 * 1024,
-        )
-        .expect("first chunk");
+    apply(
+        &mut window,
+        0,
+        &bytes[..first_len],
+        false,
+        Some(first_len as u64),
+        256 * 1024,
+    )
+    .expect("first chunk");
 
     let visible = window
         .visible_text()
@@ -551,12 +579,15 @@ fn detail_visible_text_keeps_valid_prefix_when_tail_is_truncated() {
     assert_eq!(visible.trailing_fragment_bytes, 2);
     assert!(!visible.text.is_empty(), "valid prefix must stay visible");
 
-    window
-        .apply_chunk(
-            chunk(first_len as u64, &bytes[first_len..], true, None),
-            256 * 1024,
-        )
-        .expect("second chunk");
+    apply(
+        &mut window,
+        first_len as u64,
+        &bytes[first_len..],
+        true,
+        None,
+        256 * 1024,
+    )
+    .expect("second chunk");
     let visible = window.visible_text().expect("complete text");
     assert_eq!(visible.text, body);
     assert_eq!(visible.trailing_fragment_bytes, 0);
@@ -566,9 +597,7 @@ fn detail_visible_text_keeps_valid_prefix_when_tail_is_truncated() {
 fn detail_incomplete_tail_at_eof_is_still_corruption() {
     let bytes = b"ab\xe4\xb8";
     let mut window = HistoryDetailWindow::open(descriptor(bytes.len() as u64)).expect("open");
-    window
-        .apply_chunk(chunk(0, bytes, true, None), 256 * 1024)
-        .expect("chunk");
+    apply(&mut window, 0, bytes, true, None, 256 * 1024).expect("chunk");
     assert_eq!(window.visible_text(), Err(DetailError::Utf8));
 }
 
@@ -578,9 +607,7 @@ fn detail_true_corruption_still_reports_utf8() {
     let mut bytes = b"abcde".to_vec();
     bytes.push(0xFF);
     bytes.extend_from_slice(b"xyz");
-    window
-        .apply_chunk(chunk(0, &bytes, true, None), 256 * 1024)
-        .expect("chunk");
+    apply(&mut window, 0, &bytes, true, None, 256 * 1024).expect("chunk");
     assert_eq!(window.visible_text(), Err(DetailError::Utf8));
 }
 
@@ -590,9 +617,7 @@ fn detail_export_reports_prefix_gap_instead_of_copying_empty() {
     crate::kit::atoms::init_atoms();
     let mut window = HistoryDetailWindow::open(descriptor(1024)).expect("open");
     window.request(256, 256 * 1024).expect("evicted prefix");
-    window
-        .apply_chunk(chunk(256, b"tail", false, Some(260)), 256 * 1024)
-        .expect("chunk");
+    apply(&mut window, 256, b"tail", false, Some(260), 256 * 1024).expect("chunk");
     assert_eq!(window.loaded_text(), Err(DetailError::ExportGap));
 
     crate::kit::atoms::HISTORY_DETAIL.set(Some(window));
@@ -613,19 +638,34 @@ fn detail_export_reports_prefix_gap_instead_of_copying_empty() {
     close_history_detail();
 }
 
+fn apply_v2(
+    window: &mut HistoryDetailWindow,
+    chunk: &V2BodyChunk,
+    max_bytes: u32,
+) -> Result<(), DetailError> {
+    let generation = window.attempt_generation();
+    window.apply_v2_chunk(chunk, max_bytes, generation)
+}
+
 #[test]
 fn v2_detail_renders_text_and_adopts_authoritative_total() {
     // 页面描述符给的是 canonical 预估（5）；body 首块给出真实展示长度（11）。
-    let mut window = HistoryDetailWindow::open(v2_descriptor(5)).expect("open");
-    window
-        .apply_v2_chunk(&v2_chunk(0, b"hello ", false, Some(6), 11), 256 * 1024)
-        .expect("first chunk");
+    let mut window = HistoryDetailWindow::open(descriptor(5)).expect("open");
+    apply_v2(
+        &mut window,
+        &v2_chunk(0, b"hello ", false, Some(6), 11),
+        256 * 1024,
+    )
+    .expect("first chunk");
     assert_eq!(window.descriptor.total_bytes, 11, "首块修正滚动范围");
     assert_eq!(window.loaded_text().expect("utf8"), "hello ");
 
-    window
-        .apply_v2_chunk(&v2_chunk(6, b"world", true, None, 11), 256 * 1024)
-        .expect("second chunk");
+    apply_v2(
+        &mut window,
+        &v2_chunk(6, b"world", true, None, 11),
+        256 * 1024,
+    )
+    .expect("second chunk");
     assert_eq!(window.loaded_text().expect("utf8"), "hello world");
     assert!(window.is_complete());
     assert_eq!(window.scroll_to(10), None, "修正后的范围覆盖末尾");
@@ -633,14 +673,89 @@ fn v2_detail_renders_text_and_adopts_authoritative_total() {
 
 #[test]
 fn v2_detail_rejects_later_total_mismatch() {
-    let mut window = HistoryDetailWindow::open(v2_descriptor(2048)).expect("open");
-    window
-        .apply_v2_chunk(&v2_chunk(0, b"hello", false, Some(5), 11), 256 * 1024)
-        .expect("first chunk");
-    let error = window
-        .apply_v2_chunk(&v2_chunk(5, b"world", true, None, 12), 256 * 1024)
-        .expect_err("后续块 total 不一致");
+    let mut window = HistoryDetailWindow::open(descriptor(2048)).expect("open");
+    apply_v2(
+        &mut window,
+        &v2_chunk(0, b"hello", false, Some(5), 11),
+        256 * 1024,
+    )
+    .expect("first chunk");
+    let error = apply_v2(
+        &mut window,
+        &v2_chunk(5, b"world", true, None, 12),
+        256 * 1024,
+    )
+    .expect_err("后续块 total 不一致");
     assert_eq!(error, DetailError::InvalidChunk);
     assert_eq!(window.descriptor.total_bytes, 11);
     assert_eq!(window.loaded_text().expect("utf8"), "hello");
+}
+
+#[test]
+fn v2_detail_rejects_representation_mismatch() {
+    let mut window = HistoryDetailWindow::open(descriptor(5)).expect("open");
+    let error = apply_v2(
+        &mut window,
+        &v2_chunk_with(
+            0,
+            b"hello",
+            true,
+            None,
+            5,
+            HistoryRepresentation::DisplayBinary,
+            "cv-1",
+        ),
+        256 * 1024,
+    )
+    .expect_err("正文表示必须与描述符一致");
+    assert_eq!(error, DetailError::RepresentationMismatch);
+    assert_eq!(window.chunk_count(), 0);
+}
+
+#[test]
+fn v2_detail_rejects_content_version_change_between_chunks() {
+    let mut window = HistoryDetailWindow::open(descriptor(10)).expect("open");
+    apply_v2(
+        &mut window,
+        &v2_chunk_with(
+            0,
+            b"hello",
+            false,
+            Some(5),
+            10,
+            HistoryRepresentation::DisplayText,
+            "cv-first",
+        ),
+        256 * 1024,
+    )
+    .expect("first chunk adopts contentVersion");
+    let error = apply_v2(
+        &mut window,
+        &v2_chunk_with(
+            5,
+            b"world",
+            true,
+            None,
+            10,
+            HistoryRepresentation::DisplayText,
+            "cv-second",
+        ),
+        256 * 1024,
+    )
+    .expect_err("后续块 contentVersion 必须一致");
+    assert_eq!(error, DetailError::ContentVersionMismatch);
+    assert_eq!(window.loaded_text().expect("first chunk retained"), "hello");
+}
+
+#[test]
+fn v2_detail_rejects_chunk_from_a_stale_attempt_after_failure() {
+    let mut window = HistoryDetailWindow::open(descriptor(5)).expect("open");
+    let stale_generation = window.attempt_generation();
+    window.fail("timeout");
+    let chunk = v2_chunk(0, b"hello", true, None, 5);
+    assert_eq!(
+        window.apply_v2_chunk(&chunk, 256 * 1024, stale_generation),
+        Err(DetailError::StaleAttempt)
+    );
+    assert_eq!(window.chunk_count(), 0);
 }

@@ -13,7 +13,6 @@ export type { InteractionAnswer } from "../agent/interaction-responder";
 export { initializeAcpClient, ACP_PROTOCOL_VERSION } from "../agent/acp-handshake";
 export type { AcpInitializeOptions } from "../agent/acp-handshake";
 export { SessionDocs } from "../state/session-docs";
-export { AWAITING_RESULT_STATUS } from "../state/history-merge";
 export { COMPACTION_STATUS } from "../state/session-projection";
 export type { CompactionStatus } from "../state/session-projection";
 export type { ToolPayloadRef } from "../state/tool-payloads";

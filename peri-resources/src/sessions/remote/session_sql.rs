@@ -147,35 +147,6 @@ const SELECT_ACTIVE_MESSAGES_SQL: &str =
     "SELECT m.message_id, m.content, m.truncated, m.excluded, m.projection
     FROM messages m WHERE m.thread_id = ?1 AND m.excluded = 0 ORDER BY m.rowid ASC";
 
-/// 浏览范围的边界事实（分页读取与初始 load 共用的**唯一**一条边界语句）：会话存在吗、
-/// 浏览范围起点是谁、锚点行在不在。
-///
-/// 会话不存在时**没有行**（`NotFound`）；起点缺失为 NULL，锚点列只是**存在性判据**
-/// （`NULL` = 锚点已不在；边界读取固定传 NULL，只取起点一列）。刻意不写
-/// `COALESCE(..., MAX(rowid)+1)` 这类兜底：锚点消失必须失败关闭，不能悄悄把它变成
-/// 「从最新一页开始」。
-const SELECT_HISTORY_PAGE_BOUNDS_SQL: &str = "SELECT
-        (SELECT m.message_id FROM messages m WHERE m.thread_id = t.id ORDER BY m.rowid ASC LIMIT 1),
-        (SELECT m.rowid FROM messages m WHERE m.thread_id = t.id AND m.message_id = ?2)
-    FROM threads t WHERE t.id = ?1";
-
-/// 一页候选行的**阶段一**读取：（身份 + 存储序键 + 正文长度），keyset 遍历，最多
-/// `limit + 1` 行，**不取正文**。
-///
-/// `?2` 为空 = 首屏，从最新一行开始——只有首屏允许这条路径：带游标时锚点行的存在性已由
-/// [`SELECT_HISTORY_PAGE_BOUNDS_SQL`] 证明，`NULL` 在那里已经变成失败。锚点用**子查询按
-/// `message_id` 定位**（同一条语句内完成，两次语句之间不引入新的时间点），排序才用
-/// `rowid`：删掉尾部行之后新插入的行会复用这些 rowid，rowid 不是稳定的条目身份。
-///
-/// 长度是**字节数**（`length(CAST(content AS BLOB))`；直接 `length(content)` 数的是字符），
-/// 与页预算同一口径。
-const SELECT_HISTORY_PAGE_ROWS_SQL: &str = "SELECT s.message_id, s.rowid,
-        length(CAST(s.content AS BLOB))
-    FROM messages s
-    WHERE s.thread_id = ?1 AND (?2 IS NULL OR s.rowid < (
-        SELECT m.rowid FROM messages m WHERE m.thread_id = ?1 AND m.message_id = ?2))
-    ORDER BY s.rowid DESC LIMIT ?3";
-
 /// 页内一条条目的正文：**阶段二**只按本页那些行的 id 取，一条语句一个 id，同一批次读出。
 ///
 /// 批内 `LIMIT 1` 与唯一约束共同保证「一个 id 至多一行」：多行即回复形状不符（调用方
@@ -196,7 +167,7 @@ const SELECT_ACTIVE_ENTRY_POSITIONS_SQL: &str =
 /// 段读取的边界事实：会话存在吗 + 本次回放的固定上界（该线程自有行的最大 `rowid`，
 /// 没有自有行时为 NULL）。
 ///
-/// 与 [`SELECT_HISTORY_PAGE_BOUNDS_SQL`] 同形（`threads` 单行 + 子查询）：会话不存在时
+/// 与窗口边界读取同形（`threads` 单行 + 子查询）：会话不存在时
 /// **没有行**（`NotFound`）。上界在这里读出来交给游标，行则由
 /// [`SELECT_HISTORY_SEGMENT_HEAD_SQL`] 在同一批次内再算一次 `MAX(rowid)` 作谓词——两条语句
 /// 落在同一个只读批次里，区间与行同源。
@@ -343,40 +314,6 @@ pub(super) fn select_messages_statement(id: &str) -> StatementSpec {
 /// 有效范围的自有 payload 行（同一顺序，读取条件带未排除约束）。
 pub(super) fn select_active_messages_statement(id: &str) -> StatementSpec {
     StatementSpec::new(SELECT_ACTIVE_MESSAGES_SQL, vec![Value::Text(id.to_owned())])
-}
-
-/// 分页读取的边界事实：`anchor` 为 `None` 时锚点列恒为 NULL（首屏）。
-pub(super) fn history_page_bounds_statement(id: &str, anchor: Option<&str>) -> StatementSpec {
-    StatementSpec::new(
-        SELECT_HISTORY_PAGE_BOUNDS_SQL,
-        vec![
-            Value::Text(id.to_owned()),
-            match anchor {
-                Some(anchor) => Value::Text(anchor.to_owned()),
-                None => Value::Null,
-            },
-        ],
-    )
-}
-
-/// 一页候选行（阶段一：身份 + 存储序键 + 正文长度）：`anchor` 为 `None` 时取最新
-/// `limit + 1` 行（只有首屏会这样调用）。
-pub(super) fn history_page_rows_statement(
-    id: &str,
-    anchor: Option<&str>,
-    limit: i64,
-) -> StatementSpec {
-    StatementSpec::new(
-        SELECT_HISTORY_PAGE_ROWS_SQL,
-        vec![
-            Value::Text(id.to_owned()),
-            match anchor {
-                Some(anchor) => Value::Text(anchor.to_owned()),
-                None => Value::Null,
-            },
-            Value::Integer(limit),
-        ],
-    )
 }
 
 /// 阶段二：一条语句取**一个**本页条目的正文（一条语句一个 id，调用方按同一批次一起发）。

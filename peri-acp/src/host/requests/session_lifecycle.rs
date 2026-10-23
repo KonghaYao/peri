@@ -28,8 +28,6 @@ use crate::{dispatch, transport::types::AcpError};
 pub(crate) mod restore;
 #[path = "session_apps_capability.rs"]
 mod session_apps_capability;
-#[cfg(test)]
-pub(crate) use restore::cleanup_unpublished_restore;
 pub(crate) use restore::{
     handle_context, handle_fork_shared, handle_load, handle_load_shared, handle_metadata,
     handle_resume, handle_resume_shared,
@@ -471,9 +469,8 @@ pub(crate) async fn new_session_from_prepared(
             closing: false,
             context_ownership: crate::host::ContextOwnership::Resident,
             history_payloads: Vec::new(),
-            structure_version: 0,
             session_generation: crate::host::next_session_generation(),
-            history_window: Default::default(),
+            handed_off_alive: None,
             live_delivery: None,
             event_health: Default::default(),
             cancel_token: None,
@@ -849,9 +846,8 @@ pub(crate) async fn handle_fork(
             closing: false,
             context_ownership: crate::host::ContextOwnership::Resident,
             history_payloads: published_payloads,
-            structure_version: 0,
             session_generation: crate::host::next_session_generation(),
-            history_window: Default::default(),
+            handed_off_alive: None,
             live_delivery: None,
             event_health: Default::default(),
             cancel_token: None,

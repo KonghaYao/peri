@@ -90,13 +90,10 @@ impl AcpTuiClient {
     /// 把明细注册进注册表，投影回推刷新补全缓存）。
     ///
     /// **时序契约**：必须在首个 `session/new` 之前调用（initialize 是进程级
-    /// 一次性协商）；失败仅 warn 不阻断——host 回退 all_enabled 兜底明细，
-    /// 首 session 仍可用（R2 双写窗口防御）。
+    /// 一次性协商）；失败启动期显式失败——TUI 只使用 History V2，没有降级路径。
     ///
-    /// `peri.historyWindowV1` 按 TUI 本地 beta 开关声明：host 把该声明当作
-    /// 「首屏由窗口 open 交付」的连接契约，声明 true 却因本地开关关闭而不发 open
-    /// 会让 `session/load` 跳过回放、恢复会话首屏缺失。因此本地关闭时必须声明
-    /// false，让 host 走原来的历史回放路径。
+    /// 旧私有历史能力（`peri.historyPagination` / `peri.historyWindowV1`）不再声明；
+    /// `PeriCaps` 字段暂时保留，但在 TUI 侧恒为 false。
     pub async fn register_ui_commands(&self, specs: &[UiCommandSpec]) -> Result<(), AcpError> {
         let mut caps = PeriCaps::all_enabled();
         // TUI 的 MCP OAuth 交互走 legacy `peri/agent_event` 通道
@@ -105,30 +102,21 @@ impl AcpTuiClient {
         // safe 契约：`mcp/oauth_start` 强制要求 flow_id、`mcp/oauth_callback`
         // 直接拒绝授权码——TUI 的 [ 授权 ] 按钮会因缺 flow_id 被拒且无反馈。
         caps.oauth = false;
-        // H5a：本地 V2 beta 开启时只声明 `peri.history`，不再声明任何旧私有历史
-        // 能力（设计 §4.7：同时声明旧、新能力会被服务端拒绝）。关闭时保持原 V1
-        // 声明逐字节不变。
-        let history_v2_requested = crate::kit::atoms::HISTORY_V2.get();
-        *self.history_v2_enabled.lock().unwrap() = Some(history_v2_requested);
-        caps.history_pagination = !history_v2_requested;
-        caps.history_window_v1 =
-            !history_v2_requested && crate::kit::atoms::HISTORY_WINDOW_V1.get();
+        // 旧私有历史协议已从 TUI 删除；本地始终只请求 `peri.history`。
         caps.ui_commands = specs.to_vec();
         self.mcp_control
             .store(false, std::sync::atomic::Ordering::Release);
         let mut meta = caps.to_agent_meta();
-        if history_v2_requested {
-            let capability = peri_acp_types::history_v2::HistoryClientCapability {
-                versions: vec![peri_acp_types::history_v2::HISTORY_V2_VERSION],
-                requested_profile: peri_acp_types::history_v2::HISTORY_PROFILE_WINDOWED.to_owned(),
-            };
-            let value =
-                serde_json::to_value(capability).expect("HistoryClientCapability 序列化不应失败");
-            meta.insert(
-                peri_acp_types::history_v2::HISTORY_META_KEY.to_owned(),
-                value,
-            );
-        }
+        let capability = peri_acp_types::history_v2::HistoryClientCapability {
+            versions: vec![peri_acp_types::history_v2::HISTORY_V2_VERSION],
+            requested_profile: peri_acp_types::history_v2::HISTORY_PROFILE_WINDOWED.to_owned(),
+        };
+        let value =
+            serde_json::to_value(capability).expect("HistoryClientCapability 序列化不应失败");
+        meta.insert(
+            peri_acp_types::history_v2::HISTORY_META_KEY.to_owned(),
+            value,
+        );
         meta.insert("peri.mcpControlV1".into(), Value::Bool(true));
         let params = json!({
             "protocolVersion": 1,
@@ -155,30 +143,13 @@ impl AcpTuiClient {
             .unwrap_or(false);
         self.user_input_queue
             .store(supported, std::sync::atomic::Ordering::Release);
-        // fail-closed：只有服务端在 initialize 响应中明确回显 true 才启用。
-        // 客户端请求值不是服务端能力事实，缺失/非布尔一律按不支持处理。
-        let history_window = result
-            .pointer("/agentCapabilities/_meta/peri.historyWindowV1")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(history_window);
-
         // History V2 只认服务端明确回显的 version=2 + selectedProfile=windowed。
-        // 未请求、未回显或形状不符都保持关闭；本地开关与服务端事实同时为真才启用。
-        let negotiated_v2 = crate::kit::history_v2::negotiate_from_initialize_response(&result);
-        let history_v2 = match negotiated_v2 {
-            Ok(Some(capability)) if history_v2_requested => {
+        // 未回显或形状不符都保持关闭，启动期由 `require_history_v2_startup` 显式失败。
+        let history_v2 = match crate::kit::history_v2::negotiate_from_initialize_response(&result) {
+            Ok(Some(capability)) => {
                 self.set_history_v2_negotiation(true, capability.limits.clone());
                 crate::kit::atoms::HISTORY_V2_LIMITS.set(capability.limits);
                 true
-            }
-            Ok(Some(_)) => {
-                tracing::warn!("server selected History V2 without a client request; ignoring");
-                self.set_history_v2_negotiation(
-                    false,
-                    peri_acp_types::history_v2::HistoryLimits::default(),
-                );
-                false
             }
             Ok(None) => {
                 self.set_history_v2_negotiation(
@@ -200,6 +171,7 @@ impl AcpTuiClient {
         crate::kit::atoms::HISTORY_V2_CAPABLE.set(history_v2);
         if !history_v2 && was_history_v2_capable {
             crate::kit::history_v2::reset_state();
+            crate::kit::history_v2::consumer::reset_consumer_state();
         }
         if self.projection_mode == super::ClientProjectionMode::Interactive {
             crate::kit::steer_state::STEERS.state().write().enabled = supported;

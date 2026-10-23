@@ -10,6 +10,7 @@
 
 use std::sync::Arc;
 
+use parking_lot::Mutex;
 use peri_acp_types::history_v2::{
     HistoryAnchor, HistoryBackendError, HistoryInitialKind, HistoryInitialRequest,
     HistoryInitialResult, HistoryLimits, HistoryLiveBoundary, HistoryV2Backend, HISTORY_V2_VERSION,
@@ -17,12 +18,12 @@ use peri_acp_types::history_v2::{
 use serde_json::Value;
 
 use super::error::{
-    initial_error, invalid_params, invalid_params_message, protocol_not_negotiated_error,
-    ServiceFailure,
+    initial_error, initial_timeout_error, invalid_params, invalid_params_message,
+    protocol_not_negotiated_error, ServiceFailure,
 };
 use super::ledger::{fingerprint, Admission, ExpiryReason};
-use super::{build_page, AttemptGuard, HistoryV2Service};
-use crate::host::live_delivery::LiveDelivery;
+use super::{build_page, AttemptGuard, HistoryV2Service, ServiceState};
+use crate::host::live_delivery::{LiveCandidate, LiveDelivery};
 use crate::transport::types::AcpError;
 
 /// 路由层交给 initial 的连接事实。`session_id` 来自外层 `session/load` 参数。
@@ -46,7 +47,27 @@ pub(crate) struct HistoryInitialContext {
 
 impl HistoryV2Service {
     /// 构建 `session/load` 首屏。成功时返回与 open 共用快照/票据的 initial 结果。
+    ///
+    /// FIX-05：先准备、后提交。准备阶段（窗口候选、候选实时流、页面、bodyRef、校验、
+    /// 预算）不撤销旧窗口或旧实时流；只有单锁提交成功后才关闭旧窗口并切换候选流。
+    ///
+    /// 总期限使用独立的 `initial_timeout`（生产 60s，与 `session/load` 冷启动一致）；
+    /// 超时 drop 内部 future 会触发窗口/候选 guard，旧状态保持不变。
     pub(crate) async fn initial(
+        &self,
+        request: HistoryInitialRequest,
+        context: HistoryInitialContext,
+    ) -> Result<HistoryInitialResult, AcpError> {
+        let execution_ready = context.execution_ready;
+        let runtime_generation = context.runtime_generation.clone();
+        match tokio::time::timeout(self.initial_timeout, self.initial_inner(request, context)).await
+        {
+            Ok(result) => result,
+            Err(_) => Err(initial_timeout_error(execution_ready, &runtime_generation)),
+        }
+    }
+
+    async fn initial_inner(
         &self,
         request: HistoryInitialRequest,
         context: HistoryInitialContext,
@@ -73,36 +94,74 @@ impl HistoryV2Service {
             Ok(Admission::Execute { attempt }) => attempt,
             Err(failure) => return Err(initial_failure(&context, failure)),
         };
-        // 设计 §6.3 第 4 步：首屏装配前建立本连接/本会话的实时缓冲与序号边界。
-        // 只有真正执行的 initial 才换流；同 requestKey 重放沿用既有流（见 `replay_initial`）。
-        let (live_boundary, mut live_guard) = match context.live.as_deref() {
-            Some(live) => (
-                live.begin(&context.session_id),
-                Some(PausedLiveGuard::new(live, &context.session_id)),
-            ),
-            None => (context.live_boundary.clone(), None),
-        };
         let mut guard = self.attempt_guard(key, attempt, fingerprint);
 
-        // 同一连接重复 `session/load` 不得累积窗口：新首屏替换旧窗口，旧窗口按
-        // closed 身份处理（后续 page/body 返回 `window_closed`）。其他会话窗口保留。
-        self.close_session(&context.session_id);
+        // ── 准备阶段 ──────────────────────────────────────────────────────
+        // 窗口先同步预留（不读后端），随后立即建立实时候选流，最后才调用 backend.open。
+        // 后端读取期间的事件进入候选缓冲，旧 streamId/序号/缓冲保持不变。
+        let reserved = match self.reserve_window(
+            &context.session_id,
+            context.limits.max_windows_per_connection,
+            true,
+        ) {
+            Ok(reserved) => reserved,
+            Err(failure) => return self.fail_initial(&mut guard, failure, &context),
+        };
+        let candidate = context
+            .live
+            .as_deref()
+            .map(|live| live.begin_candidate(&context.session_id));
+        let mut candidate_guard = match (context.live.as_deref(), candidate.as_ref()) {
+            (Some(live), Some(candidate)) => Some(LiveCandidateGuard::new(
+                live,
+                &context.session_id,
+                candidate.candidate_id.clone(),
+            )),
+            _ => None,
+        };
+        let live_boundary = candidate
+            .as_ref()
+            .map(|candidate| candidate.boundary.clone())
+            .unwrap_or_else(|| context.live_boundary.clone());
 
         let opened = match self
-            .begin_window(
+            .open_window(
+                reserved,
                 backend.as_ref(),
                 &context.session_id,
                 &HistoryAnchor::Latest,
                 request.limit,
                 0,
                 request.target_bytes,
-                context.limits.max_windows_per_connection,
             )
             .await
         {
             Ok(opened) => opened,
             Err(failure) => return self.fail_initial(&mut guard, failure, &context),
         };
+        let mut window_guard =
+            PreparedWindowGuard::new(&self.state, opened.access.window_id.clone());
+
+        let page = build_page(&self.cursor_secret, &opened.access, opened.data);
+        if !self.issue_body_refs(&opened.access.window_id, &page) {
+            return self.fail_initial(&mut guard, ServiceFailure::window_expired(), &context);
+        }
+        // 页面字节 + 外层 load 固定字段的预算预检；最终结果还会在候选边界确定后再查一次。
+        let page_bytes = match serde_json::to_vec(&page) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                return self.fail_initial(
+                    &mut guard,
+                    ServiceFailure::source_unavailable(),
+                    &context,
+                );
+            }
+        };
+        if (page_bytes.len() as u64).saturating_add(context.reserved_response_bytes)
+            > context.limits.max_response_bytes
+        {
+            return self.fail_initial(&mut guard, ServiceFailure::budget_exceeded(), &context);
+        }
 
         let result = HistoryInitialResult {
             version: HISTORY_V2_VERSION,
@@ -112,20 +171,14 @@ impl HistoryV2Service {
             runtime_generation: context.runtime_generation.clone(),
             delivery_id: new_delivery_id(),
             live_boundary,
-            page: build_page(&self.cursor_secret, &opened.access, opened.data),
+            page,
         };
-        if !self.issue_body_refs(&opened.access.window_id, &result.page) {
-            self.remove_window(&opened.access.window_id, false);
-            return self.fail_initial(&mut guard, ServiceFailure::window_expired(), &context);
-        }
         if result.validate().is_err() {
-            self.remove_window(&opened.access.window_id, false);
             return self.fail_initial(&mut guard, ServiceFailure::source_unavailable(), &context);
         }
         let value = match serde_json::to_value(&result) {
             Ok(value) => value,
             Err(_) => {
-                self.remove_window(&opened.access.window_id, false);
                 return self.fail_initial(
                     &mut guard,
                     ServiceFailure::source_unavailable(),
@@ -136,7 +189,6 @@ impl HistoryV2Service {
         let bytes = match serde_json::to_vec(&value) {
             Ok(bytes) => bytes,
             Err(_) => {
-                self.remove_window(&opened.access.window_id, false);
                 return self.fail_initial(
                     &mut guard,
                     ServiceFailure::source_unavailable(),
@@ -147,20 +199,76 @@ impl HistoryV2Service {
         if (bytes.len() as u64).saturating_add(context.reserved_response_bytes)
             > context.limits.max_response_bytes
         {
-            self.remove_window(&opened.access.window_id, false);
             return self.fail_initial(&mut guard, ServiceFailure::budget_exceeded(), &context);
         }
 
-        self.succeed(
+        // ── 提交阶段 ──────────────────────────────────────────────────────
+        match self.commit_initial(
             &mut guard,
+            &opened.access.window_id,
+            candidate.as_ref(),
             value,
-            Some(opened.access.window_id.clone()),
-            true,
-        );
-        if let Some(guard) = live_guard.as_mut() {
-            guard.disarm();
+            &context,
+        ) {
+            Ok(()) => {
+                window_guard.disarm();
+                if let Some(candidate_guard) = candidate_guard.as_mut() {
+                    candidate_guard.disarm();
+                }
+                Ok(result)
+            }
+            Err(failure) => self.fail_initial(&mut guard, failure, &context),
         }
-        Ok(result)
+    }
+
+    /// 单锁提交：候选窗口仍存在、会话未关闭、账本 attempt 仍有效时才生效。
+    ///
+    /// 成功顺序：提交候选实时流 → 关闭同会话旧窗口（记录 closed 身份）→ 写成功账本。
+    /// 任何一步失败都不关闭旧窗口、不写成功记录；候选由 guard 回收。
+    fn commit_initial(
+        &self,
+        guard: &mut AttemptGuard<'_>,
+        window_id: &str,
+        candidate: Option<&LiveCandidate>,
+        value: Value,
+        context: &HistoryInitialContext,
+    ) -> Result<(), ServiceFailure> {
+        let now = self.clock.now();
+        let mut state = self.state.lock();
+        state.windows.prune(now);
+        if state.windows.get(window_id).is_none() {
+            // 会话/窗口已被外部关闭：关闭优先，不复活旧窗口或旧流。
+            return Err(ServiceFailure::window_expired());
+        }
+        if !state
+            .ledger
+            .is_current(guard.key, guard.attempt, guard.fingerprint)
+        {
+            return Err(ServiceFailure::delivery_expired());
+        }
+        if let Some(candidate) = candidate {
+            let Some(live) = context.live.as_deref() else {
+                return Err(ServiceFailure::delivery_expired());
+            };
+            if !live.commit_candidate(&context.session_id, &candidate.candidate_id) {
+                return Err(ServiceFailure::delivery_expired());
+            }
+        }
+        // 提交成功后才让旧窗口进入 closed；失败路径不会执行到这里。
+        state
+            .windows
+            .remove_session_except(&context.session_id, Some(window_id), now, true);
+        state.ledger.finish_success(
+            guard.key,
+            guard.attempt,
+            guard.fingerprint,
+            value,
+            Some(window_id.to_owned()),
+            true,
+            now,
+        );
+        guard.disarm();
+        Ok(())
     }
 
     fn fail_initial<T>(
@@ -251,20 +359,21 @@ fn new_delivery_id() -> String {
     format!("dl_{}", uuid::Uuid::new_v4().simple())
 }
 
-/// initial 装配期的暂停流清理：失败、取消或超时返回时移除尚未发布的首屏流。
+/// initial 准备期的候选窗口清理：失败、取消或 drop 时移除尚未提交的候选窗口。
 ///
-/// 成功路径显式 `disarm`；此后流的生命周期由响应发送方的 flush/close 接管。
-struct PausedLiveGuard<'a> {
-    live: &'a LiveDelivery,
-    session_id: &'a str,
+/// 与 `OpeningGuard` 不同，候选窗口在后端读取成功后已升级为 `Ready`；这里按 id
+/// 丢弃它（不记录 closed 身份），旧窗口不受影响。提交成功路径显式 `disarm`。
+struct PreparedWindowGuard<'a> {
+    state: &'a Mutex<ServiceState>,
+    window_id: String,
     armed: bool,
 }
 
-impl<'a> PausedLiveGuard<'a> {
-    fn new(live: &'a LiveDelivery, session_id: &'a str) -> Self {
+impl<'a> PreparedWindowGuard<'a> {
+    fn new(state: &'a Mutex<ServiceState>, window_id: String) -> Self {
         Self {
-            live,
-            session_id,
+            state,
+            window_id,
             armed: true,
         }
     }
@@ -274,10 +383,42 @@ impl<'a> PausedLiveGuard<'a> {
     }
 }
 
-impl Drop for PausedLiveGuard<'_> {
+impl Drop for PreparedWindowGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
-            self.live.close_if_paused(self.session_id);
+            self.state.lock().windows.discard(&self.window_id);
+        }
+    }
+}
+
+/// 候选实时流清理：失败、取消、超时或 drop 时回收候选缓冲，旧流保持不变。
+struct LiveCandidateGuard<'a> {
+    live: &'a LiveDelivery,
+    session_id: &'a str,
+    candidate_id: String,
+    armed: bool,
+}
+
+impl<'a> LiveCandidateGuard<'a> {
+    fn new(live: &'a LiveDelivery, session_id: &'a str, candidate_id: String) -> Self {
+        Self {
+            live,
+            session_id,
+            candidate_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for LiveCandidateGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.live
+                .abort_candidate(self.session_id, &self.candidate_id);
         }
     }
 }

@@ -53,6 +53,10 @@ pub struct HistoryWindowPage {
 pub struct HistoryEntry {
     pub entry_id: String,
     pub source: HistorySource,
+    /// 页面条目的版本占位值。
+    ///
+    /// 契约：页面阶段不读正文，这里恒为 `"1"`，**不用于冲突检测或内容一致性判断**。
+    /// 需要稳定内容身份时使用 body chunk 的 `contentVersion`（canonical payload hash）。
     pub content_version: String,
     pub durability: HistoryDurability,
     pub order: HistoryOrder,

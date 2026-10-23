@@ -31,9 +31,9 @@
 - `ConfigSource::save(expected_revision, &PeriConfig)` 返回 accepted snapshot；持久 configOptions / update_config 必须 candidate → 验证 → 保存成功 → 从 accepted snapshot 发布，失败不更新 live provider / agent cache、不 notify、不返回成功。revision 在编辑开始捕获，不得提交时换成最新版；远程 wire 与延迟 UI draft 的基线 token 仍需审计，见配置 active issue。
 - `SessionManager` 在每条 session/new、load、resume 或 fork 路径注册 session caps；发送扩展事件前按该 session 的 caps 门控。
 - MCP 运行控制统一走 `peri/mcp/control` 与当前连接协商的 `peri.mcpControlV1`；按显式 session 定位已建立环境，禁止未知 session 回落启动池。`mcp/list` 投影服务端可管理性，控制业务与清理 owner 归 pool；不提供模型动态注册工具。契约见 `../docs/design/acp-mcp-control.md`。
-- `session/load` 无 `cursor` = 初始 load、带合法 `cursor` = 历史页：模式在进入生命周期路由前由 `host/history_page.rs::classify` 唯一解析，锁策略与响应后 setup 都由模式决定。历史页不取执行生命周期锁、不做绑定 / MCP 接纳 / 广播 / 续跑，也不在全局 sessions 锁内做存储 I/O；未协商却带分页字段即拒绝，不降级为初始 load。扩展能力按**当前连接**的 `ConnectionContext::caps` 判定，不读会话级 registry（重连后能力重新协商）。
-- History V2（TUI 本地 beta `history-v2` 默认关闭；服务端仅在 `supports_history_v2()` 为真时回显）走独立连接级服务，不改变 V1 默认路径：`host/history_v2_load.rs` 在生命周期装配前准入 initial（V2 连接缺 meta / 混入旧顶层字段 / 未协商即显式拒绝），`host/history_service.rs` 管理窗口、requestKey 账本、期限与 cursor/body 授权并分流 `_peri/history`（`server_loop.rs::handle_history_request`），`host/history_v2_adapter.rs` 复用窗口读取端口提供 own/inherited 投影，`host/live_delivery.rs` 为 transcript 通知附加 `_meta["peri.delivery"]`。`session/close` / `session/delete` 成功后同连接的该会话窗口与实时流一起拆除；非 V2 的 load/resume 撤销旧实时绑定。契约类型在 `peri-acp-types::history_v2`。
-- `SessionState::structure_version` 只在 rewind 持久化提交**成功**时 `+1`（恰好一次，失败分支不得触碰）：它让已发出的历史游标在存储委派之前失效，客户端处置与「锚点被删」同为 `-32012`。回放投递失败使 `session/load` 整体失败（`-32603`，不返回半回放成功，也不跑成功路径后处理）：已发布的会话态保持完整并留给下次 load 经 `AlreadyLive` 原位修复。初始 load 的代次（客户端可选或服务端生成）经 `_meta.periLoadGeneration` 同时出现在成功响应与本次全部重放（含 reminder 出口），门控仍是 `caps.replay`。
+- `session/load` 的标准语义只服务未声明 `_meta["peri.history"]` 的连接；History V2 连接必须带 initial，解析在会话恢复/MCP 装配前完成。旧顶层 `cursor`/`limit`/`history`/`loadGeneration` 一律 `-32602`，旧 `session/history/body` 与未知方法同为 `-32601`；不存在旧分页分类器或成功 shim。扩展能力按**当前连接**的 `ConnectionContext::caps` 判定，不读会话级 registry（重连后能力重新协商）。
+- History V2 是本地唯一历史路径（TUI 始终请求；服务端仅在 `supports_history_v2()` 为真时回显）：`host/history_v2_load.rs` 在生命周期装配前准入 initial（V2 缺 meta / 混入旧顶层字段 / 未协商即显式拒绝），`host/history_service.rs` 管理窗口、requestKey 账本、期限与 cursor/body 授权，`server_loop/history.rs` 在接收循环内同步准入、把读取交给 Connection 任务并限制 4 个在途读（close 快速路径），`host/history_v2_adapter.rs` 复用窗口读取端口与独立条目元数据提供 own/inherited 投影，`host/live_delivery.rs` 为 transcript 通知附加 `_meta["peri.delivery"]` 并支持候选流。`session/close` / `session/delete` 成功后同连接的该会话窗口与实时流一起拆除；非 V2 的 load/resume 撤销旧实时绑定。契约类型在 `peri-acp-types::{history_v2,history_common}`。
+- rewind 持久化提交成功后，旧 V2 窗口在下一次 `page`/`seek`/`body` 的 `historyRevision`/`committedTail` 复核中失败（`snapshot_invalidated`），客户端必须重新 `open`，不得复用旧窗口身份。回放投递失败使 `session/load` 整体失败（`-32603`，不返回半回放成功，也不跑成功路径后处理）：已发布的会话态保持完整并留给下次 load 经 `AlreadyLive` 原位修复。`loadGeneration` 与 `_meta.periLoadGeneration` 已删除；标准回放只带 `caps.replay` 门控的 `periReplay`，V2 initial 用 `requestKey`/`deliveryId`/`liveBoundary` 配对。
 - 新增 `ExecutorEvent` 或 ACP 扩展事件时，覆盖发射、ACP mapper/forwarder、caps 门控（如适用）和客户端消费；不能只增加枚举或单一发送点。
 - 给 Hub/Web 的事件投影必须从 canonical event 映射为版本化 allowlist DTO；不得复用包含消息、路径、输出或错误正文的 TUI 私有 `event_json`。`peri.agentActivity` 是该安全摘要面，legacy `peri.agentEvent` wire 保持独立兼容。
 - session 创建时构建并复用 frozen 数据；Prompt 与 SubAgent 不得在会话中途重读导致前缀漂移。`env` 正文独立冻结，模型桥接层在所有 contribution 后追加并填入当前执行 session ID；V3 快照保存该字段，旧主提示词不改写；旧会话派生执行经 `prepare_derived_environment` 从冻结输入准备 env，V3 显式缺席与 V1 外部指令拒绝边界保持。
@@ -55,7 +55,8 @@ cargo check -p peri-acp
 cargo test -p peri-acp --lib
 cargo test -p peri-acp --lib -- host::task_scope
 cargo test -p peri-acp --lib -- acp_mcp
-cargo test -p peri-acp --lib -- history_page
+cargo test -p peri-acp --lib -- history
+cargo test -p peri-acp --lib -- server_loop_history
 cargo test -p peri-acp --lib mapper
 cargo test -p peri-controller --test langfuse_e2e
 cargo test -p peri-acp --doc
@@ -63,7 +64,7 @@ cargo test -p peri-acp --doc
 
 ## Verify
 
-- session/caps 改动：运行相关 crate 测试，并人工检查所有创建、加载、恢复、fork 入口均在 session 就绪后注册 caps；`session/load` 分页改动另跑 `cargo test -p peri-acp --lib -- history_page`，并确认分页路径未取得生命周期锁、未在全局 sessions 锁内做存储 I/O。
+- session/caps 改动：运行相关 crate 测试，并人工检查所有创建、加载、恢复、fork 入口均在 session 就绪后注册 caps；`session/load` 历史改动另跑 `cargo test -p peri-acp --lib -- history`，并确认 V2 准入发生在恢复/MCP 装配之前、旧顶层字段在装配前被拒绝。
 - 事件改动：运行 mapper 测试，并人工沿服务端发送点到 TUI/stdio 客户端检查新增事件覆盖；现有 mapper 测试不自动证明全链路完整。
 - Prompt、middleware 或 Langfuse 改动：按 `ARC-FROZEN-001`、`ARC-MIDDLEWARE-001`、`ARC-SECRET-001` 逐项核对。
 - 配置规则改动：先读 `../peri-config/CLAUDE.md` 与 `../docs/design/configuration-authority.md`；领域回归在 core，ACP 验证消费与装配接线。插件生命周期、hook 格式及存储/执行 credentials 仍遵守专属能力边界。

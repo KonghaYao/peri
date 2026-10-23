@@ -1,4 +1,5 @@
 use super::*;
+use crate::acp_client::client::test_support::{install_history_v2, with_history_v2_initial};
 use peri_acp::transport::{
     AcpTransport,
     mpsc::{MpscServerTransport, mpsc_transport_pair},
@@ -29,10 +30,16 @@ fn client() -> (AcpTuiClient, MpscServerTransport) {
     (client, server)
 }
 
+fn v2_client() -> (AcpTuiClient, MpscServerTransport) {
+    let (client, server) = client();
+    install_history_v2(&client);
+    (client, server)
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn legacy_history_context_without_binding_can_restore_saved_directory() {
-    let (client, server) = client();
+    let (client, server) = v2_client();
     let loader = client.clone();
     let load = tokio::spawn(async move { loader.load_session("legacy", "/startup", None).await });
     let (id, _) = request(&server, "peri/session_context").await;
@@ -41,7 +48,13 @@ async fn legacy_history_context_without_binding_can_restore_saved_directory() {
     server.send_response(id, Ok(legacy)).await.unwrap();
     let (id, params) = request(&server, "session/load").await;
     assert_eq!(params["cwd"], "/saved/project");
-    server.send_response(id, Ok(json!({}))).await.unwrap();
+    server
+        .send_response(
+            id,
+            Ok(with_history_v2_initial(json!({}), "legacy", &params)),
+        )
+        .await
+        .unwrap();
     assert_eq!(load.await.unwrap().unwrap(), "legacy");
     assert_eq!(
         client.current_execution_cwd().as_deref(),
@@ -94,7 +107,7 @@ async fn request(server: &MpscServerTransport, expected: &str) -> (RequestId, Va
 #[tokio::test]
 #[serial_test::serial]
 async fn resume_uses_saved_execution_directory_and_commits_it_after_load() {
-    let (client, server) = client();
+    let (client, server) = v2_client();
     client.lifecycle.force_stable("old", false);
     client.project_execution_cwd(Some("/main".into()));
     let loader = client.clone();
@@ -112,7 +125,13 @@ async fn resume_uses_saved_execution_directory_and_commits_it_after_load() {
     let (id, params) = request(&server, "session/load").await;
     assert_eq!(params["cwd"], "/worktrees/feature/src");
     assert_eq!(client.current_execution_cwd(), None);
-    server.send_response(id, Ok(json!({}))).await.unwrap();
+    server
+        .send_response(
+            id,
+            Ok(with_history_v2_initial(json!({}), "target", &params)),
+        )
+        .await
+        .unwrap();
     assert_eq!(load.await.unwrap().unwrap(), "target");
     assert_eq!(
         client.current_execution_cwd().as_deref(),
@@ -287,8 +306,9 @@ async fn unsupported_context_version_cannot_be_used_for_execution() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn failed_input_initialization_closes_loaded_session_and_blocks_prompt() {
-    let (client, server) = client();
+    let (client, server) = v2_client();
     client
         .user_input_queue
         .store(true, std::sync::atomic::Ordering::Release);
@@ -299,8 +319,14 @@ async fn failed_input_initialization_closes_loaded_session_and_blocks_prompt() {
         .send_response(id, Ok(context("/worktrees/feature/src")))
         .await
         .unwrap();
-    let (id, _) = request(&server, "session/load").await;
-    server.send_response(id, Ok(json!({}))).await.unwrap();
+    let (id, params) = request(&server, "session/load").await;
+    server
+        .send_response(
+            id,
+            Ok(with_history_v2_initial(json!({}), "target", &params)),
+        )
+        .await
+        .unwrap();
     let (id, _) = request(&server, "session/input/snapshot").await;
     server
         .send_response(id, Err(AcpError::new(-32603, "snapshot unavailable")))

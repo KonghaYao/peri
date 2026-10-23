@@ -94,6 +94,23 @@ pub(crate) struct LiveDelivery {
 #[derive(Default)]
 struct Inner {
     streams: HashMap<String, LiveStream>,
+    /// 尚未提交的 initial 候选流（每会话至多一个）。
+    ///
+    /// 候选从旧流的 `next_seq` 起步并独立缓冲；提交前旧流保持原样（FIX-05）。
+    candidates: HashMap<String, CandidateStream>,
+}
+
+struct CandidateStream {
+    candidate_id: String,
+    stream: LiveStream,
+}
+
+/// initial 准备阶段建立、尚未提交的候选流。
+///
+/// `boundary` 是提交成功后客户端应使用的 `liveBoundary`；候选未提交前旧流仍然有效。
+pub(crate) struct LiveCandidate {
+    pub(crate) candidate_id: String,
+    pub(crate) boundary: HistoryLiveBoundary,
 }
 
 /// `publish` 的结果：直发、已缓冲，或因溢出丢弃了最旧更新。
@@ -131,6 +148,10 @@ impl LiveDelivery {
     ///
     /// `afterSeq` 沿用旧流已发出的最后序号：重复 initial 时客户端已经接收过这些事件，
     /// 新首屏快照与它们一致；新流的 `eventSeq` 从 `afterSeq + 1` 继续。没有旧流时从 0 开始。
+    ///
+    /// 注意：生产 initial 使用 [`Self::begin_candidate`] + [`Self::commit_candidate`]；
+    /// 本方法只在旧流已经可以丢弃时使用，当前仅测试直接建立暂停流。
+    #[cfg(test)]
     pub(crate) fn begin(&self, session_id: &str) -> HistoryLiveBoundary {
         let mut inner = self.lock();
         let after_seq = inner
@@ -149,6 +170,67 @@ impl LiveDelivery {
         }
     }
 
+    /// 建立候选流：旧流（streamId / 序号 / 缓冲）保持不变，候选独立缓冲实时更新。
+    ///
+    /// 候选从旧流当前 `next_seq` 起步，提交后事件序号连续；提交前旧流仍按原状态投递。
+    /// 同会话已有候选时替换之：旧候选的 guard 会因 `candidateId` 不匹配而无法提交。
+    pub(crate) fn begin_candidate(&self, session_id: &str) -> LiveCandidate {
+        let mut inner = self.lock();
+        let after_seq = inner
+            .streams
+            .get(session_id)
+            .map(|stream| stream.next_seq)
+            .unwrap_or(0);
+        let stream_id = format!("live:{}", uuid::Uuid::now_v7());
+        let candidate_id = format!("cand_{}", uuid::Uuid::new_v4().simple());
+        inner.candidates.insert(
+            session_id.to_owned(),
+            CandidateStream {
+                candidate_id: candidate_id.clone(),
+                stream: LiveStream::new(stream_id.clone(), after_seq),
+            },
+        );
+        LiveCandidate {
+            candidate_id,
+            boundary: HistoryLiveBoundary {
+                stream_id,
+                after_seq: DecimalU64::new(after_seq),
+            },
+        }
+    }
+
+    /// 提交候选：用候选流替换旧流。候选已被回收/替换时返回 false，旧流不受影响。
+    pub(crate) fn commit_candidate(&self, session_id: &str, candidate_id: &str) -> bool {
+        let mut inner = self.lock();
+        let matches = inner
+            .candidates
+            .get(session_id)
+            .is_some_and(|candidate| candidate.candidate_id == candidate_id);
+        if !matches {
+            return false;
+        }
+        let Some(candidate) = inner.candidates.remove(session_id) else {
+            return false;
+        };
+        inner
+            .streams
+            .insert(session_id.to_owned(), candidate.stream);
+        true
+    }
+
+    /// 回收候选；旧流保持不变。用于失败、取消、超时与 drop。
+    pub(crate) fn abort_candidate(&self, session_id: &str, candidate_id: &str) -> bool {
+        let mut inner = self.lock();
+        let matches = inner
+            .candidates
+            .get(session_id)
+            .is_some_and(|candidate| candidate.candidate_id == candidate_id);
+        if matches {
+            inner.candidates.remove(session_id);
+        }
+        matches
+    }
+
     /// 发布一条 transcript 更新。
     ///
     /// - 流不存在（非 V2 会话或已 close）：原样返回，不挂投递元数据；
@@ -156,6 +238,10 @@ impl LiveDelivery {
     /// - 活动期：分配序号、写入元数据后返回待发送 payload。
     pub(crate) fn publish(&self, session_id: &str, payload: Value) -> PublishOutcome {
         let mut inner = self.lock();
+        // initial 准备期间的新事件进入候选缓冲：旧流身份、序号与缓冲保持不变。
+        if let Some(candidate) = inner.candidates.get_mut(session_id) {
+            return candidate.stream.buffer(payload);
+        }
         let Some(stream) = inner.streams.get_mut(session_id) else {
             return PublishOutcome::Send(payload);
         };
@@ -187,9 +273,11 @@ impl LiveDelivery {
             .collect()
     }
 
-    /// 关闭并移除本会话的流；缓冲一并丢弃。之后的更新原样透传。
+    /// 关闭并移除本会话的流与未提交候选；缓冲一并丢弃。之后的更新原样透传。
     pub(crate) fn close(&self, session_id: &str) {
-        self.lock().streams.remove(session_id);
+        let mut inner = self.lock();
+        inner.streams.remove(session_id);
+        inner.candidates.remove(session_id);
     }
 
     /// 只关闭仍处于暂停期的流（load 失败/响应未送达的清理路径）。
@@ -206,9 +294,11 @@ impl LiveDelivery {
         }
     }
 
-    /// 连接关闭：丢弃该连接的全部流与缓冲（SessionState 可能仍持有 `Arc`）。
+    /// 连接关闭：丢弃该连接的全部流、候选与缓冲（SessionState 可能仍持有 `Arc`）。
     pub(crate) fn close_all(&self) {
-        self.lock().streams.clear();
+        let mut inner = self.lock();
+        inner.streams.clear();
+        inner.candidates.clear();
     }
 
     /// 重放校验：会话当前是否仍由 `stream_id` 标识的流承载。
@@ -247,6 +337,20 @@ impl LiveDelivery {
             .streams
             .get(session_id)
             .map(|stream| stream.buffered_bytes)
+            .unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_candidate(&self, session_id: &str) -> bool {
+        self.lock().candidates.contains_key(session_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn candidate_buffered_len(&self, session_id: &str) -> usize {
+        self.lock()
+            .candidates
+            .get(session_id)
+            .map(|candidate| candidate.stream.buffer.len())
             .unwrap_or(0)
     }
 }

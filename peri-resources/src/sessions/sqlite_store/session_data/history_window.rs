@@ -5,24 +5,28 @@
 
 use super::blob_reader::{is_transient_blob_error, BlobReadError};
 use super::history::{
-    read_window_candidates, HISTORY_WINDOW_AFTER_SQL, HISTORY_WINDOW_ANCHOR_SQL,
-    HISTORY_WINDOW_BEFORE_SQL, HISTORY_WINDOW_BODY_ROWID_SQL, HISTORY_WINDOW_BOUNDS_SQL,
-    HISTORY_WINDOW_CHECKPOINT_FAST_SQL, HISTORY_WINDOW_CHECKPOINT_SQL,
-    HISTORY_WINDOW_INHERITED_ROWID_SQL, HISTORY_WINDOW_LATEST_SQL, HISTORY_WINDOW_NEWER_EXISTS_SQL,
-    HISTORY_WINDOW_OLDER_EXISTS_SQL, HISTORY_WINDOW_TAIL_CHECK_SQL,
+    read_content_length, read_window_candidates, HISTORY_WINDOW_AFTER_SQL,
+    HISTORY_WINDOW_ANCHOR_SQL, HISTORY_WINDOW_BEFORE_SQL, HISTORY_WINDOW_BODY_ROWID_SQL,
+    HISTORY_WINDOW_BOUNDS_SQL, HISTORY_WINDOW_CHECKPOINT_FAST_SQL, HISTORY_WINDOW_CHECKPOINT_SQL,
+    HISTORY_WINDOW_ENTRY_METADATA_SQL, HISTORY_WINDOW_INHERITED_ANCHOR_SQL,
+    HISTORY_WINDOW_INHERITED_LENGTH_SQL, HISTORY_WINDOW_INHERITED_ROWID_SQL,
+    HISTORY_WINDOW_LATEST_SQL, HISTORY_WINDOW_NEWER_EXISTS_SQL, HISTORY_WINDOW_OLDER_EXISTS_SQL,
+    HISTORY_WINDOW_TAIL_CHECK_SQL,
 };
 use super::inherited_blob::{map_inherited_blob_error, InheritedFactsRead, InheritedSummaryRead};
 use super::inherited_facts::{InheritedLayout, InheritedSummary};
+use super::inherited_page::verify_inherited_source;
 use super::*;
-use peri_acp_types::history_window::{
+use peri_acp_types::history_common::{
     HistoryBodyChunk, HistoryCheckpoint, HistoryCommittedTail, HistoryEntryId,
     HistoryInheritedSnapshot, HistoryInheritedWindow, HistoryReadTicket, HistorySource,
     HistoryWindowError, HISTORY_WINDOW_MAX_BYTE_BUDGET, HISTORY_WINDOW_MAX_CHUNK_SIZE,
     HISTORY_WINDOW_MAX_LIMIT,
 };
+use peri_acp_types::history_page::HistoryEntryRole;
 use peri_acp_types::session_resources::{
-    HistoryWindowEntry, HistoryWindowPagePlan, HistoryWindowReadIntent, HistoryWindowRows,
-    HistoryWindowTailExpectation, SessionHistoryWindowBounds,
+    HistoryEntryMetadata, HistoryWindowEntry, HistoryWindowPagePlan, HistoryWindowReadIntent,
+    HistoryWindowRows, HistoryWindowTailExpectation, SessionHistoryWindowBounds,
 };
 use sha2::{Digest, Sha256};
 
@@ -255,8 +259,6 @@ impl SqliteSessionData {
                 .map_err(|error| map_sqlx(&error))?;
             let candidates = read_window_candidates(&mut tx, candidates).await?;
             Some(HistoryPagePlan::plan(
-                id,
-                "",
                 candidates,
                 plan.before_limit,
                 plan.byte_budget,
@@ -286,13 +288,7 @@ impl SqliteSessionData {
                         .await
                         .map_err(|error| map_sqlx(&error))?;
                 let candidates = read_window_candidates(&mut tx, candidates).await?;
-                Some(HistoryPagePlan::plan_after(
-                    id,
-                    "",
-                    candidates,
-                    limit,
-                    after_budget,
-                ))
+                Some(HistoryPagePlan::plan_after(candidates, limit, after_budget))
             }
         };
 
@@ -450,6 +446,196 @@ impl SqliteSessionData {
         })
     }
 
+    /// body 定位的独立元数据读取：单条主键 + 固定 tail，长度来自 blob 句柄。
+    ///
+    /// 与页读取完全解耦：不构造 `HistoryWindowPagePlan`，也不读取任何正文。页上的
+    /// `Oversized`/`Loaded` 只是当页交付方式，不能作为正文存在性的依据。
+    pub(super) async fn read_history_entry_metadata_from_store(
+        &self,
+        id: &ThreadId,
+        source: HistorySource,
+        entry_id: MessageId,
+        committed_tail: Option<&HistoryCommittedTail>,
+        _read_ticket: &HistoryReadTicket,
+    ) -> SessionResourceResult<HistoryEntryMetadata> {
+        if let HistorySource::Inherited {
+            frozen_snapshot_id,
+            ancestor_thread_id,
+        } = &source
+        {
+            return self
+                .read_inherited_entry_metadata(
+                    id,
+                    frozen_snapshot_id,
+                    ancestor_thread_id.as_ref(),
+                    entry_id,
+                )
+                .await;
+        }
+        let committed_tail = committed_tail.ok_or_else(|| {
+            HistoryWindowError::invalid_request("own history metadata requires a committed tail")
+        })?;
+        let tail_position = i64::try_from(committed_tail.position)
+            .map_err(|_| corrupt("history window tail position exceeds the supported range"))?;
+        let mut connection = self
+            .database
+            .pool
+            .acquire()
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        let mut tx = sqlx::Connection::begin(&mut *connection)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        self.require_session(&mut tx, id).await?;
+        let row: Option<(i64, String)> = sqlx::query_as(HISTORY_WINDOW_ENTRY_METADATA_SQL)
+            .bind(id.as_str())
+            .bind(entry_id.as_uuid().to_string())
+            .bind(tail_position)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        let Some((rowid, role)) = row else {
+            return Err(HistoryWindowError::anchor_unavailable(
+                "history body entry is not present in this session",
+            )
+            .into());
+        };
+        let canonical_bytes = read_content_length(&mut tx, rowid).await?;
+        tx.commit().await.map_err(|error| map_sqlx(&error))?;
+        Ok(HistoryEntryMetadata {
+            canonical_bytes,
+            role: HistoryEntryRole::from_stored(&role),
+        })
+    }
+
+    async fn read_inherited_entry_metadata(
+        &self,
+        id: &ThreadId,
+        frozen_snapshot_id: &str,
+        ancestor_thread_id: Option<&ThreadId>,
+        entry_id: MessageId,
+    ) -> SessionResourceResult<HistoryEntryMetadata> {
+        let mut connection = self
+            .database
+            .pool
+            .acquire()
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        let read = self
+            .read_inherited_layout_cached(&mut connection, id)
+            .await?;
+        match read {
+            InheritedFactsRead::Unsupported => {
+                self.read_inherited_entry_metadata_sql(
+                    &mut connection,
+                    id,
+                    frozen_snapshot_id,
+                    ancestor_thread_id,
+                    entry_id,
+                )
+                .await
+            }
+            InheritedFactsRead::Facts { snapshot: None, .. } => {
+                Err(HistoryWindowError::window_invalidated("inherited prefix is absent").into())
+            }
+            InheritedFactsRead::Facts {
+                snapshot: Some(snapshot),
+                layout: Some(layout),
+            } => {
+                verify_inherited_source(&snapshot, frozen_snapshot_id, ancestor_thread_id)?;
+                let index = layout.position_of(entry_id).ok_or_else(|| {
+                    HistoryWindowError::anchor_unavailable(
+                        "inherited history entry is not present in this frozen snapshot",
+                    )
+                })?;
+                let row: Option<(i64,)> = sqlx::query_as(HISTORY_WINDOW_INHERITED_ROWID_SQL)
+                    .bind(id.as_str())
+                    .fetch_optional(&mut *connection)
+                    .await
+                    .map_err(|error| map_sqlx(&error))?;
+                let Some((rowid,)) = row else {
+                    return Err(not_found());
+                };
+                let read = Self::inherited_blob_scope(&mut connection, rowid, |reader| {
+                    layout.logical_len(reader, index)
+                })
+                .await?;
+                match read {
+                    Ok(canonical_bytes) => Ok(HistoryEntryMetadata {
+                        canonical_bytes,
+                        // inherited 没有 role 列：可见性只能由前缀判定。
+                        role: HistoryEntryRole::Unknown,
+                    }),
+                    // 冻结列被并发改写：回退 SQL 语义，避免把瞬态竞争当损坏。
+                    Err(error) if is_transient_blob_error(&error) => {
+                        self.read_inherited_entry_metadata_sql(
+                            &mut connection,
+                            id,
+                            frozen_snapshot_id,
+                            ancestor_thread_id,
+                            entry_id,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(map_inherited_blob_error(error)),
+                }
+            }
+            InheritedFactsRead::Facts {
+                snapshot: Some(_),
+                layout: None,
+            } => Err(corrupt("inherited layout is missing")),
+        }
+    }
+
+    async fn read_inherited_entry_metadata_sql(
+        &self,
+        connection: &mut SqliteConnection,
+        id: &ThreadId,
+        frozen_snapshot_id: &str,
+        ancestor_thread_id: Option<&ThreadId>,
+        entry_id: MessageId,
+    ) -> SessionResourceResult<HistoryEntryMetadata> {
+        let mut tx = sqlx::Connection::begin(&mut *connection)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        self.require_session(&mut tx, id).await?;
+        let snapshot = Self::read_inherited_facts_sql(&mut tx, id)
+            .await?
+            .ok_or_else(|| HistoryWindowError::window_invalidated("inherited prefix is absent"))?;
+        verify_inherited_source(&snapshot, frozen_snapshot_id, ancestor_thread_id)?;
+        let key: Option<(i64,)> = sqlx::query_as(HISTORY_WINDOW_INHERITED_ANCHOR_SQL)
+            .bind(id.as_str())
+            .bind(entry_id.as_uuid().to_string())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        let Some((key,)) = key else {
+            return Err(HistoryWindowError::anchor_unavailable(
+                "inherited history entry is not present in this frozen snapshot",
+            )
+            .into());
+        };
+        let length: Option<(i64,)> = sqlx::query_as(HISTORY_WINDOW_INHERITED_LENGTH_SQL)
+            .bind(id.as_str())
+            .bind(key)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        tx.commit().await.map_err(|error| map_sqlx(&error))?;
+        let Some((length,)) = length else {
+            return Err(HistoryWindowError::anchor_unavailable(
+                "inherited history entry is not present in this frozen snapshot",
+            )
+            .into());
+        };
+        let canonical_bytes = u64::try_from(length)
+            .map_err(|_| corrupt("inherited history body length is negative"))?;
+        Ok(HistoryEntryMetadata {
+            canonical_bytes,
+            role: HistoryEntryRole::Unknown,
+        })
+    }
+
     async fn read_window_tail(
         connection: &mut SqliteConnection,
         id: &ThreadId,
@@ -578,10 +764,7 @@ fn window_oversized_entries(
 }
 
 pub(super) fn empty_window_page() -> HistoryPage {
-    HistoryPage {
-        items: Vec::new(),
-        next_cursor: None,
-    }
+    HistoryPage { items: Vec::new() }
 }
 
 impl SqliteSessionData {

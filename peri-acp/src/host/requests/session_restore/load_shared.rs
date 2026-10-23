@@ -17,7 +17,6 @@ use serde_json::{json, Value};
 use peri_acp_types::history_v2::{
     DecimalU64, HistoryLiveBoundary, HistoryV2Backend, HISTORY_META_KEY,
 };
-use peri_acp_types::thread::ThreadId;
 
 use crate::host::connection::ConnectionFacts;
 use crate::host::history_service::{self, HistoryInitialContext};
@@ -40,34 +39,21 @@ pub(crate) async fn handle_load_shared(
     connection: ConnectionFacts,
     history: Option<LoadInitial>,
 ) -> Result<Value, AcpError> {
-    let generation = crate::host::history_page::initial_load_generation(params)?
-        .unwrap_or_else(LoadGeneration::generate);
     let prepared = prepare_shared(params, cfg, sessions).await?.prepared;
-    // 窗口连接的首屏不是 load 响应里的回放：声明 `peri.historyWindowV1` 后，
-    // `session/load` 只装配会话，历史由随后的 `history.open` 提供。判据取本连接
-    // 的协商事实，不能用 `history_pagination` 代替——两者独立。
-    // History V2 initial 同样自行交付首屏，不再执行 V1 回放；所有权检查仍保留。
-    let skip_replay = connection.history_window_v1 || history.is_some();
+    // History V2 initial 自行交付首屏，不再执行标准回放；所有权检查仍保留。
+    let skip_replay = history.is_some();
     let environment = replay_after_load(
         cfg,
         sessions,
         &prepared.id,
         transport,
         &connection,
-        &generation,
         skip_replay,
     )
     .await?;
     let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
-    let mut response = finish_load_response(
-        cfg,
-        transport,
-        &prepared.id,
-        prepared.identity,
-        &connection,
-        &generation,
-    )
-    .await?;
+    let mut response =
+        finish_load_response(cfg, transport, &prepared.id, prepared.identity).await?;
     // 非 V2 连接成功接管会话：撤销上一条连接留下的实时投递绑定，事件回到 V1 wire
     // 形状。失败路径（装配/回放拒绝）不破坏既有交付。
     if history.is_none() {
@@ -102,9 +88,8 @@ async fn attach_history_initial(
     initial: LoadInitial,
     response: &mut Value,
 ) -> Result<(), AcpError> {
-    // V2 交付用 deliveryId/liveBoundary；V1 的 periLoadGeneration 不得混入。
+    // V2 交付用 deliveryId/liveBoundary；旧回放代次不得混入。
     let meta = response_meta(response)?;
-    meta.remove("periLoadGeneration");
     meta.insert(HISTORY_META_KEY.to_owned(), json!({}));
     let reserved_response_bytes = serde_json::to_vec(response)
         .map_err(|error| AcpError::new(-32603, error.to_string()))?
@@ -418,14 +403,11 @@ async fn replay_after_load(
     session_id: &str,
     transport: &Arc<dyn crate::transport::AcpTransport>,
     connection: &ConnectionFacts,
-    generation: &LoadGeneration,
     skip_replay: bool,
 ) -> Result<Option<Arc<crate::host::workspace::SessionEnvironment>>, AcpError> {
     if skip_replay {
-        // 所有权检查与回放内容无关，不能因跳过回放而绕过：
-        // - `HandedOff`：正文在在途执行器里，load 必须失败（-32010）；
-        // - `ReloadRequired`：窗口读取以存储为事实源，这里不回填热态，直接返回
-        //   environment（与分页回放的防御性分支同口径）。
+        // 所有权检查与回放内容无关，不能因跳过回放而绕过：`HandedOff` 表示正文在
+        // 在途执行器里，load 必须失败（-32010）。
         let (environment, ownership) = {
             let states = sessions.lock().await;
             let state = states
@@ -444,66 +426,23 @@ async fn replay_after_load(
     let replay_sender = TuiReplaySender {
         transport: transport.as_ref(),
     };
-    let positions = if connection.history_pagination {
-        Some(
-            cfg.session_resources
-                .load_entry_positions(&ThreadId::from(session_id.to_owned()))
-                .await
-                .map_err(crate::host::workspace::resource_error)?,
-        )
-    } else {
-        None
-    };
-    let replay_marks = match positions.as_ref() {
-        Some(positions) => dispatch::ReplayMarks::new(generation, session_id, positions),
-        None => dispatch::ReplayMarks::without_entry_marks(generation, session_id),
-    };
-    let (environment, ownership, history_payloads) = {
+    let environment = {
         let states = sessions.lock().await;
         let state = states
             .get(session_id)
             .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
-        (
-            state.environment.clone(),
-            state.context_ownership,
-            state.history_payloads.clone(),
-        )
+        state.environment.clone()
     };
     let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
-    let replay = if connection.history_pagination {
-        let history_payloads = match ownership {
-            crate::host::ContextOwnership::Resident => history_payloads,
-            crate::host::ContextOwnership::HandedOff => {
-                return Err(AcpError::new(
-                    -32010,
-                    "Session context is owned by an in-flight prompt",
-                ))
-            }
-            crate::host::ContextOwnership::ReloadRequired => {
-                // 防御性分支：只读存储，不回填热态。
-                dispatch::load_active_session_payloads(local.controller.as_ref(), session_id)
-                    .await?
-            }
-        };
-        dispatch::replay_persisted_session_history(
-            session_id,
-            &history_payloads,
-            &replay_sender,
-            &connection.caps,
-            &replay_marks,
-        )
-        .await
-    } else {
-        dispatch::replay_canonical_history_streamed(
-            local.controller.as_ref(),
-            session_id,
-            &replay_sender,
-            &connection.caps,
-            generation,
-        )
-        .await
-    };
-    replay.map_err(|error| {
+    // 标准 ACP 完整回放：存储是唯一来源（热态只有有效集合，用它会把归档原文漏掉）。
+    dispatch::replay_canonical_history_streamed(
+        local.controller.as_ref(),
+        session_id,
+        &replay_sender,
+        &connection.caps,
+    )
+    .await
+    .map_err(|error| {
         tracing::error!(
             session_id,
             error = %error,
@@ -514,9 +453,6 @@ async fn replay_after_load(
             format!("session/load: history replay failed: {error}"),
         )
     })?;
-    // warm load 只推进该连接自己的 loadGeneration（由调用方持有），不得刷新共享
-    // session generation：票据绑定的是 open 时的固定视图，另一连接的读取不能被
-    // 一次重新 attach 撤销。只有真实 rewind/delete 才使受影响结构失效。
     Ok(environment)
 }
 
@@ -538,8 +474,6 @@ async fn finish_load_response(
     transport: &Arc<dyn crate::transport::AcpTransport>,
     session_id: &str,
     identity: Option<Value>,
-    connection: &ConnectionFacts,
-    generation: &LoadGeneration,
 ) -> Result<Value, AcpError> {
     let session_caps = cfg.session_manager.ensure_session_caps(session_id);
     send_config_option_update(transport.as_ref(), session_id, cfg).await;
@@ -561,14 +495,10 @@ async fn finish_load_response(
     )
     .await;
     prewarm_session_mcp_discovery(cfg, session_id);
-    let mut response = identity_response(
+    identity_response(
         serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, e.to_string()))?,
         identity,
-    )?;
-    if connection.caps.replay {
-        response["_meta"]["periLoadGeneration"] = Value::String(generation.as_str().to_owned());
-    }
-    Ok(response)
+    )
 }
 
 /// `session/resume` 的生产入口：与 load 共用“确保 live”阶段，但不回放、不刷新 generation。

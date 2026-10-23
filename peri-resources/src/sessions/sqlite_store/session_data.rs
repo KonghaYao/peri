@@ -18,9 +18,8 @@ use crate::sessions::data::ChildResumeRecord;
 use crate::sessions::data::SessionDataPort;
 use async_trait::async_trait;
 use peri_acp_types::history_page::{
-    message_id_of, resolve_browsing_range, HistoryCursor, HistoryCursorError, HistoryEntryRole,
-    HistoryForwardCursor, HistoryPage, HistoryPageBounds, HistoryPageCandidate, HistoryPagePlan,
-    HistoryPageRow, HistorySegment, HistorySegmentPlan,
+    message_id_of, HistoryCursorError, HistoryEntryRole, HistoryForwardCursor, HistoryPage,
+    HistoryPageCandidate, HistoryPagePlan, HistoryPageRow, HistorySegment, HistorySegmentPlan,
 };
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{

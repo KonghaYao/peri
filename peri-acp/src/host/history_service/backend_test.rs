@@ -12,28 +12,29 @@ use serde_json::{json, Value};
 use tokio::sync::Notify;
 
 use peri_acp_types::history_v2::{
-    DecimalU64, HistoryAnchor, HistoryBackendError, HistoryBodySlice, HistoryCommittedTailRef,
-    HistoryCoverage, HistoryDirection, HistoryDurability, HistoryDurabilityState, HistoryEncoding,
-    HistoryEntry, HistoryEntryAnchor, HistoryLimits, HistoryOpenedSnapshot, HistoryOrigin,
-    HistoryPageData, HistoryProgress, HistoryProgressReason, HistoryRepresentation,
-    HistorySnapshotRef, HistorySource, HistorySubItem, HistoryTextSubItem, HistoryV2Backend,
+    DecimalU64, HistoryAnchor, HistoryBackendError, HistoryBodyDescriptor, HistoryBodySlice,
+    HistoryCommittedTailRef, HistoryCoverage, HistoryDirection, HistoryDurability,
+    HistoryDurabilityState, HistoryEncoding, HistoryEntry, HistoryEntryAnchor, HistoryLimits,
+    HistoryOpaqueSubItem, HistoryOpenedSnapshot, HistoryOrigin, HistoryPageData, HistoryProgress,
+    HistoryProgressReason, HistoryRepresentation, HistorySnapshotRef, HistorySource,
+    HistorySubItem, HistoryTextSubItem, HistoryV2Backend,
 };
 
 use super::state::HistoryClock;
 
 /// 手动推进的单调时钟。
-pub(super) struct ManualClock {
+pub(crate) struct ManualClock {
     now: Mutex<Duration>,
 }
 
 impl ManualClock {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             now: Mutex::new(Duration::ZERO),
         }
     }
 
-    pub(super) fn advance(&self, delta: Duration) {
+    pub(crate) fn advance(&self, delta: Duration) {
         let mut now = self.now.lock();
         *now += delta;
     }
@@ -46,44 +47,46 @@ impl HistoryClock for ManualClock {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct OpenCall {
-    pub(super) session_id: String,
-    pub(super) anchor: HistoryAnchor,
-    pub(super) before: u32,
-    pub(super) after: u32,
-    pub(super) target_bytes: u64,
+pub(crate) struct OpenCall {
+    pub(crate) session_id: String,
+    pub(crate) anchor: HistoryAnchor,
+    pub(crate) before: u32,
+    pub(crate) after: u32,
+    pub(crate) target_bytes: u64,
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct PageCall {
-    pub(super) raw_cursor: String,
-    pub(super) direction: HistoryDirection,
-    pub(super) limit: u32,
+pub(crate) struct PageCall {
+    pub(crate) raw_cursor: String,
+    pub(crate) direction: HistoryDirection,
+    pub(crate) limit: u32,
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct BodyCall {
-    pub(super) body_ref: String,
-    pub(super) offset: u64,
-    pub(super) max_bytes: u64,
+pub(crate) struct BodyCall {
+    pub(crate) body_ref: String,
+    pub(crate) offset: u64,
+    pub(crate) max_bytes: u64,
 }
 
-pub(super) struct FakeBackend {
+pub(crate) struct FakeBackend {
     open_result: Mutex<Result<HistoryOpenedSnapshot, HistoryBackendError>>,
     page_result: Mutex<Result<HistoryPageData, HistoryBackendError>>,
     seek_result: Mutex<Result<HistoryPageData, HistoryBackendError>>,
     body_result: Mutex<Result<HistoryBodySlice, HistoryBackendError>>,
-    pub(super) open_calls: Mutex<Vec<OpenCall>>,
-    pub(super) page_calls: Mutex<Vec<PageCall>>,
-    pub(super) body_calls: Mutex<Vec<BodyCall>>,
+    pub(crate) open_calls: Mutex<Vec<OpenCall>>,
+    pub(crate) page_calls: Mutex<Vec<PageCall>>,
+    pub(crate) body_calls: Mutex<Vec<BodyCall>>,
     open_gates: Mutex<VecDeque<Arc<Notify>>>,
     page_gates: Mutex<VecDeque<Arc<Notify>>>,
-    pub(super) open_entered: Arc<Notify>,
-    pub(super) page_entered: Arc<Notify>,
+    body_gates: Mutex<VecDeque<Arc<Notify>>>,
+    pub(crate) open_entered: Arc<Notify>,
+    pub(crate) page_entered: Arc<Notify>,
+    pub(crate) body_entered: Arc<Notify>,
 }
 
 impl FakeBackend {
-    pub(super) fn new(open: HistoryOpenedSnapshot) -> Self {
+    pub(crate) fn new(open: HistoryOpenedSnapshot) -> Self {
         Self {
             open_result: Mutex::new(Ok(open)),
             page_result: Mutex::new(Ok(page_data(0, None, None))),
@@ -94,41 +97,50 @@ impl FakeBackend {
             body_calls: Mutex::new(Vec::new()),
             open_gates: Mutex::new(VecDeque::new()),
             page_gates: Mutex::new(VecDeque::new()),
+            body_gates: Mutex::new(VecDeque::new()),
             open_entered: Arc::new(Notify::new()),
             page_entered: Arc::new(Notify::new()),
+            body_entered: Arc::new(Notify::new()),
         }
     }
 
-    pub(super) fn set_open_result(
+    pub(crate) fn set_open_result(
         &self,
         result: Result<HistoryOpenedSnapshot, HistoryBackendError>,
     ) {
         *self.open_result.lock() = result;
     }
 
-    pub(super) fn set_page_result(&self, result: Result<HistoryPageData, HistoryBackendError>) {
+    pub(crate) fn set_page_result(&self, result: Result<HistoryPageData, HistoryBackendError>) {
         *self.page_result.lock() = result;
     }
 
-    pub(super) fn set_seek_result(&self, result: Result<HistoryPageData, HistoryBackendError>) {
+    pub(crate) fn set_seek_result(&self, result: Result<HistoryPageData, HistoryBackendError>) {
         *self.seek_result.lock() = result;
     }
 
-    pub(super) fn set_body_result(&self, result: Result<HistoryBodySlice, HistoryBackendError>) {
+    pub(crate) fn set_body_result(&self, result: Result<HistoryBodySlice, HistoryBackendError>) {
         *self.body_result.lock() = result;
     }
 
     /// 让下一次 open 阻塞；返回的 Notify 用于释放。
-    pub(super) fn gate_next_open(&self) -> Arc<Notify> {
+    pub(crate) fn gate_next_open(&self) -> Arc<Notify> {
         let gate = Arc::new(Notify::new());
         self.open_gates.lock().push_back(gate.clone());
         gate
     }
 
     /// 让下一次 page 阻塞；返回的 Notify 用于释放。
-    pub(super) fn gate_next_page(&self) -> Arc<Notify> {
+    pub(crate) fn gate_next_page(&self) -> Arc<Notify> {
         let gate = Arc::new(Notify::new());
         self.page_gates.lock().push_back(gate.clone());
+        gate
+    }
+
+    /// 让下一次 body 阻塞；返回的 Notify 用于释放。
+    pub(crate) fn gate_next_body(&self) -> Arc<Notify> {
+        let gate = Arc::new(Notify::new());
+        self.body_gates.lock().push_back(gate.clone());
         gate
     }
 
@@ -206,22 +218,27 @@ impl HistoryV2Backend for FakeBackend {
             offset,
             max_bytes,
         });
+        let gate = self.body_gates.lock().pop_front();
+        if gate.is_some() {
+            self.body_entered.notify_one();
+        }
+        Self::wait(gate).await;
         self.body_result.lock().clone()
     }
 }
 
-pub(super) fn limits() -> HistoryLimits {
+pub(crate) fn limits() -> HistoryLimits {
     HistoryLimits::default()
 }
 
-pub(super) fn tail_ref() -> HistoryCommittedTailRef {
+pub(crate) fn tail_ref() -> HistoryCommittedTailRef {
     HistoryCommittedTailRef {
         entry_id: "entry-42".to_owned(),
         position: 42,
     }
 }
 
-pub(super) fn snap(revision: u64) -> HistoryOpenedSnapshot {
+pub(crate) fn snap(revision: u64) -> HistoryOpenedSnapshot {
     HistoryOpenedSnapshot {
         history_revision: DecimalU64::new(revision),
         committed_tail: Some(tail_ref()),
@@ -230,7 +247,7 @@ pub(super) fn snap(revision: u64) -> HistoryOpenedSnapshot {
     }
 }
 
-pub(super) fn page_data(
+pub(crate) fn page_data(
     revision: u64,
     before: Option<&str>,
     after: Option<&str>,
@@ -251,7 +268,7 @@ pub(super) fn page_data(
     }
 }
 
-pub(super) fn big_page(bytes_per_entry: usize, entries: usize) -> HistoryPageData {
+pub(crate) fn big_page(bytes_per_entry: usize, entries: usize) -> HistoryPageData {
     let mut page = page_data(0, Some("b0"), Some("a0"));
     page.entries = (0..entries)
         .map(|index| HistoryEntry {
@@ -278,7 +295,7 @@ pub(super) fn big_page(bytes_per_entry: usize, entries: usize) -> HistoryPageDat
     page
 }
 
-pub(super) fn body_slice() -> HistoryBodySlice {
+pub(crate) fn body_slice() -> HistoryBodySlice {
     HistoryBodySlice {
         body_ref: "body-1".to_owned(),
         content_version: "cv-1".to_owned(),
@@ -293,7 +310,37 @@ pub(super) fn body_slice() -> HistoryBodySlice {
     }
 }
 
-pub(super) fn open_params(key: u64, session: &str, before: u32, after: u32) -> Value {
+/// 携带一个 opaque 子项的首屏：initial/open 会为该 `bodyRef` 签发读取授权。
+pub(crate) fn opaque_page() -> HistoryPageData {
+    let mut page = page_data(0, Some("b0"), Some("a0"));
+    page.entries = vec![HistoryEntry {
+        entry_id: "e0".to_owned(),
+        source: HistorySource::Own,
+        content_version: "v1".to_owned(),
+        durability: HistoryDurability {
+            state: HistoryDurabilityState::Sealed,
+            origin: HistoryOrigin::Imported,
+            final_item_seq: None,
+        },
+        order: peri_acp_types::history_v2::HistoryOrder {
+            region: "own".to_owned(),
+            ordinal: DecimalU64::ZERO,
+        },
+        sub_items: vec![HistorySubItem::Opaque(HistoryOpaqueSubItem {
+            sub_item_id: "s0".to_owned(),
+            body: HistoryBodyDescriptor {
+                body_ref: "body-1".to_owned(),
+                representation: HistoryRepresentation::DisplayText,
+                media_type: "text/plain".to_owned(),
+                total_bytes: DecimalU64::new(5),
+                chunk_bytes: 65536,
+            },
+        })],
+    }];
+    page
+}
+
+pub(crate) fn open_params(key: u64, session: &str, before: u32, after: u32) -> Value {
     json!({
         "version": 2,
         "action": "open",
@@ -306,7 +353,7 @@ pub(super) fn open_params(key: u64, session: &str, before: u32, after: u32) -> V
     })
 }
 
-pub(super) fn open_entry_params(key: u64, session: &str, entry_id: &str) -> Value {
+pub(crate) fn open_entry_params(key: u64, session: &str, entry_id: &str) -> Value {
     json!({
         "version": 2,
         "action": "open",
@@ -324,7 +371,7 @@ pub(super) fn open_entry_params(key: u64, session: &str, entry_id: &str) -> Valu
 }
 
 #[allow(clippy::too_many_arguments)] // 测试 helper 逐项对应 wire 字段。
-pub(super) fn page_params(
+pub(crate) fn page_params(
     key: u64,
     session: &str,
     window_id: &str,
@@ -351,7 +398,7 @@ pub(super) fn page_params(
     value
 }
 
-pub(super) fn seek_params(
+pub(crate) fn seek_params(
     key: u64,
     session: &str,
     window_id: &str,
@@ -377,7 +424,7 @@ pub(super) fn seek_params(
     })
 }
 
-pub(super) fn body_params(
+pub(crate) fn body_params(
     key: u64,
     session: &str,
     window_id: &str,
@@ -398,7 +445,7 @@ pub(super) fn body_params(
     })
 }
 
-pub(super) fn close_params(
+pub(crate) fn close_params(
     key: u64,
     session: &str,
     window_id: &str,

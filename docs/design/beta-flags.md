@@ -33,11 +33,11 @@ Flag 是受控的 beta 能力开关：能力已在代码中实现但不默认启
 
 | 概念 | 含义 | 权威 |
 | --- | --- | --- |
-| Flag 定义 | 稳定 id（kebab-case）与 canonical 描述 | ACP flag 注册表（`peri-acp-types::beta_flags::BETA_FLAGS`）；TUI 本地 beta 另由 `peri-config::betas` 声明 |
+| Flag 定义 | 稳定 id（kebab-case）与 canonical 描述 | ACP flag 注册表（`peri-acp-types::beta_flags::BETA_FLAGS`）；TUI 历史迁移键另由 `peri-config::betas` 声明 |
 | Flag 覆盖 | settings `config.betas` 的稀疏 `id → bool` 表 | 用户 settings（global / workspace） |
 | 有效值 | `覆盖.get(id).unwrap_or(false)` | resolve 投影 `BetaFlags` |
 
-所有 flag 默认值恒为 false；ACP 注册表不得声明默认开启条目。TUI 本地 beta 也必须默认 false。
+所有 flag 默认值恒为 false；ACP 注册表不得声明默认开启条目。TUI 历史迁移键不再有协议选择行为，保留它只为让旧配置被识别而不是作为未知键告警。
 id 一经发布不得改名（settings 键、日志与面板身份），改名等同于「废除 + 引入」。面板操作产生的
 覆盖是用户偏好数据，不因能力转正而被改写（残留键按未知键规则失效）。
 
@@ -45,8 +45,8 @@ id 一经发布不得改名（settings 键、日志与面板身份），改名�
 
 ACP 注册表在 `peri-acp-types` 集中声明（与 MetaHarness 常量表同址），供配置校验、装配方
 （peri-middlewares、peri-mcp-workspace）与 TUI 共同消费。条目字段：id、canonical
-description。消费方以注册表常量（而非字符串字面量）引用 id。TUI 历史窗口的
-`history-window-v1` 不在 ACP 注册表，另见「TUI 本地 beta」。
+description。消费方以注册表常量（而非字符串字面量）引用 id。TUI 的 `history-v2` 不在 ACP
+注册表，只是无行为迁移键，见「TUI 迁移键」。
 
 生命周期：
 
@@ -78,7 +78,7 @@ flowchart LR
 | 规则 | 内容 |
 | --- | --- |
 | 合并 | global 与 workspace 逐 key 覆盖（workspace 同名键胜出），不做整体替换；workspace 显式 false 可关闭 global 的 true。差异提取与 MetaHarness 同款 |
-| 校验 | 键必须在 ACP 注册表或 TUI 本地 beta 清单内（当前 `history-window-v1`）；未知键在解析后从内存配置剔除并记录 warning（`validate_meta_harness` 同款语义），不进入快照、投影与面板；磁盘残留键在下一次经权威保存路径写回时清理 |
+| 校验 | 键必须在 ACP 注册表或 `peri-config::betas` 的迁移键清单内（当前仅 `history-v2`）；未知键在解析后从内存配置剔除并记录 warning（`validate_meta_harness` 同款语义），不进入快照、投影与面板；磁盘残留键在下一次经权威保存路径写回时清理 |
 | 类型 | 值必须为 bool；非 bool 使该来源解析失败，不静默降级为 false 或 true |
 | 投影 | `ConfigurationSnapshot` 新增 `BetaFlags` 投影（与 `resources()` 同级），由合并后 settings 派生；`is_enabled(id)` 对未覆盖或未知 id 返回 false |
 | 解释 | `ConfigurationField::Betas`，DOMAINS 声明来源为 Global + Workspace |
@@ -113,25 +113,22 @@ flowchart LR
 - 区块标注**新会话生效**；已运行会话不受切换影响。
 - 描述优先 i18n key `beta-desc-<id>`，缺失回退注册表 canonical 文本。
 - BetasPanel（Ctrl+B / `/betas`，当前为 mock 列表）退役：ACP flag 列表的单一权威是
-  注册表，不保留第二入口；TUI 本地 beta 例外见下节。
+  注册表，不保留第二入口；TUI 迁移键见下节。
 
-## TUI 本地 beta：history-window-v1
+## TUI 迁移键：history-v2（无行为）
 
-`history-window-v1` 是 TUI 历史窗口的本地 beta，键定义在 `peri-config/src/betas.rs`。
-发布启用绑定 S7：**未配置视为开启**，只有用户显式配置 `false` 才关闭。它由 `is_known` 接受并
-进入 `BetaFlags` 投影，但不在 `peri-acp-types::beta_flags::BETA_FLAGS`，因此 ConfigPanel 的
-beta 区块不列出，需手动写入 settings：
+History V2 是本地 TUI 的唯一历史路径，不再由 beta 开关选择。`history-v2` 常量保留在
+`peri-config/src/betas.rs`，`is_known` 继续接受该键，使它不会按未知键告警；投影仍会记录
+用户写入的 bool，但 TUI 启动与 ACP 协商都不读取它做分支。
 
 ```json
-{ "config": { "betas": { "history-window-v1": false } } }
+{ "config": { "betas": { "history-v2": true } } }
 ```
 
-TUI 启动时（`peri-tui/src/kit/entry.rs`）读取一次快照 flags，调用
-`kit/history_window::apply_history_window_beta` 写入 `HISTORY_WINDOW_V1` atom；设置变更需重启，
-无热重载。该开关只决定 TUI 是否采用窗口模型，仍需服务端 `peri.historyWindowV1` 在 initialize
-响应中明确回显 `true`（未回显一律 fail-closed）；两者之一为 false 时保留旧 `HISTORY_PAGING`
-行为。Beta 面板未列出该键是当前限制；在把它纳入面板前，键的定义与消费仍以
-`peri-config::betas` 和 TUI 启动路径为准。
+上面的配置不会改变协议：TUI 始终请求 `_meta["peri.history"]`，服务端未显式选择 V2 时启动
+失败。该键不在 ACP `BETA_FLAGS`，ConfigPanel 不列出，只能作为旧配置迁移保留。旧键
+`history-window-v1` 已从代码与 `is_known` 删除，磁盘残留按未知键剔除并 warn，不会再启用旧
+窗口协议。回滚使用上一软件版本或撤销本次提交，不能通过 beta 开关完成。
 
 ## ACP 首个 flag：full-async-tools
 
@@ -155,5 +152,5 @@ TUI 启动时（`peri-tui/src/kit/entry.rs`）读取一次快照 flags，调用
 - 远程下发、灰度、AB 实验与用户分群。
 - 安全策略与数据兼容语义的 beta 开关。
 - 会话内热生效与运行期 flag 变更通知。
-- 环境变量覆盖（若未来引入，必须经同一配置面与同一校验清单——ACP 注册表 + TUI 本地 beta——不建立第二解析）。
+- 环境变量覆盖（若未来引入，必须经同一配置面与同一校验清单——ACP 注册表 + TUI 迁移键——不建立第二解析）。
 - 独立 ACP `SessionConfigOption` 暴露。

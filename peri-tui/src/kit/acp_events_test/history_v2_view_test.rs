@@ -20,7 +20,6 @@ struct V2Guard;
 
 impl Drop for V2Guard {
     fn drop(&mut self) {
-        atoms::HISTORY_V2.set(false);
         atoms::HISTORY_V2_CAPABLE.set(false);
         atoms::HISTORY_V2_STATE.set(crate::kit::history_v2::HistoryV2State::default());
         atoms::HISTORY_DETAIL.set(None);
@@ -30,7 +29,6 @@ impl Drop for V2Guard {
 
 fn setup() -> V2Guard {
     atoms::init_atoms();
-    atoms::HISTORY_V2.set(true);
     atoms::HISTORY_V2_CAPABLE.set(true);
     atoms::HISTORY_V2_LIMITS.set(HistoryLimits::default());
     atoms::HISTORY_V2_PREFIX_LEN.set(0);
@@ -111,7 +109,13 @@ fn admitted() -> crate::kit::history_v2::HistoryV2State {
             }
         }
     });
-    admit_load_response(&response, "s1", &HistoryLimits::default()).expect("admitted")
+    admit_load_response(
+        &response,
+        "s1",
+        DecimalU64::new(1),
+        &HistoryLimits::default(),
+    )
+    .expect("admitted")
 }
 
 fn dispatch_view(state: &mut BridgeState, v2: &crate::kit::history_v2::HistoryV2State) {
@@ -370,8 +374,9 @@ fn full_flow_pages_seeks_reads_body_and_survives_window_expiry() {
         let handle = atoms::HISTORY_DETAIL.state();
         let mut guard = handle.write();
         let detail = guard.as_mut().expect("detail open");
+        let generation = detail.attempt_generation();
         detail
-            .apply_v2_chunk(&chunk, 256 * 1024)
+            .apply_v2_chunk(&chunk, 256 * 1024, generation)
             .expect("body chunk accepted");
         assert_eq!(detail.loaded_text().expect("utf8"), "{\"ok\":true}");
     }
@@ -457,8 +462,9 @@ fn opaque_placeholder_opens_detail_and_loads_v2_chunk() {
     let handle = atoms::HISTORY_DETAIL.state();
     let mut guard = handle.write();
     let detail = guard.as_mut().expect("detail open");
+    let generation = detail.attempt_generation();
     detail
-        .apply_v2_chunk(&chunk, 256 * 1024)
+        .apply_v2_chunk(&chunk, 256 * 1024, generation)
         .expect("v2 chunk accepted");
     let text = detail.loaded_text().expect("utf8");
     assert_eq!(
@@ -591,15 +597,10 @@ fn same_epoch_page_keeps_detail_but_seek_closes_it() {
 
 #[test]
 #[serial]
-fn v2_active_disables_v1_window_path() {
+fn v2_state_is_inactive_without_server_selection() {
     let _guard = setup();
-    atoms::HISTORY_WINDOW_V1.set(true);
-    atoms::HISTORY_WINDOW_CAPABLE.set(true);
-    assert!(!crate::kit::history_page_consumer::window_path_enabled());
     atoms::HISTORY_V2_CAPABLE.set(false);
-    assert!(crate::kit::history_page_consumer::window_path_enabled());
-    atoms::HISTORY_WINDOW_V1.set(false);
-    atoms::HISTORY_WINDOW_CAPABLE.set(false);
+    assert!(!crate::kit::history_v2::consumer::v2_path_active());
 }
 
 fn tool_call(invocation: &str, title: &str) -> Value {

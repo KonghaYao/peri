@@ -32,8 +32,11 @@ pub struct HistoryBodyDescriptor {
     pub media_type: String,
     /// 该表示的已知总长度。
     ///
-    /// V2 page 的 opaque 描述符只能给出 canonical payload 的预估长度；展示表示的真实
-    /// 长度以 body 响应的 `totalBytes` 为准，客户端在首块到达后修正滚动范围。
+    /// 契约：`representation`/`mediaType` 必须与 body 响应一致；`totalBytes` 的**权威**
+    /// 含义是展示文本长度，只有 body 响应能给出。V2 page 的 opaque 描述符在页面阶段
+    /// 不读正文，只能给出 canonical payload 的字节数作为上界预估（它不是展示长度，
+    /// 也不参与 body 定位）；客户端必须在首块到达后用 body 响应的 `totalBytes` 修正
+    /// 滚动范围。body 侧超过单条读取上限时返回 `budget_exceeded`，不会把预估当成成功长度。
     pub total_bytes: DecimalU64,
     pub chunk_bytes: u32,
 }
@@ -67,6 +70,11 @@ pub struct HistoryBodyChunk {
     pub window_id: String,
     pub snapshot_token: String,
     pub body_ref: String,
+    /// canonical payload 的内容标识（SHA-256 前 16 字节的 hex）。
+    ///
+    /// 同一内容的每个 chunk 都相同，内容被改写后自然变化；客户端据此自校验
+    /// “分块是否仍属于同一正文”。页面条目上的 `contentVersion` 只是占位 `"1"`，
+    /// 不参与冲突检测；权威内容版本以本字段为准。
     pub content_version: String,
     pub representation: HistoryRepresentation,
     pub encoding: HistoryEncoding,

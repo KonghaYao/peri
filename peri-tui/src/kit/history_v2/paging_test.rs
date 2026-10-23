@@ -101,6 +101,7 @@ fn load() -> HistoryV2State {
             Some("a1"),
         ),
         "s1",
+        DecimalU64::new(1),
         &HistoryLimits::default(),
     )
     .expect("initial admitted")
@@ -358,7 +359,6 @@ fn seek_replaces_payload_and_updates_anchor_and_home_cursor() {
     );
     let anchor_state = window.paging.anchor.as_ref().expect("anchor state");
     assert!(anchor_state.retained);
-    assert!(window.paging.bodies.is_empty(), "seek 丢弃旧窗口的正文状态");
 
     let missing = HistoryEntryAnchor {
         entry_id: "e9".into(),
@@ -394,6 +394,7 @@ fn coverage_gap_is_explicit_and_never_treated_as_continuous() {
             None,
         ),
         "s1",
+        DecimalU64::new(1),
         &limits,
     )
     .expect("initial admitted");

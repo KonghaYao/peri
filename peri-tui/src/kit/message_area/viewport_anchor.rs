@@ -69,8 +69,16 @@ use crate::kit::tui_render_unit::{FoldKey, TuiAssistantBubble, TuiRenderUnit};
 
 use super::entry_nav::fold_key_of;
 use super::selection::SlotIndex;
-use crate::kit::history_window::WindowUnitToken;
 use std::hash::{Hash, Hasher};
+
+/// 渲染单元的稳定身份 token（种类 + 内容/折叠键 hash）。
+///
+/// 供选区锚点与视口锚点共用：它不是历史窗口身份，也不写入任何历史协议字段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UnitToken {
+    pub kind: u8,
+    pub hash: u64,
+}
 
 /// 单元身份：优先既有折叠键，其次既有内容身份。
 ///
@@ -152,27 +160,6 @@ impl ViewportAnchor {
         let start = index.slot_visual_start(slot)?;
         Some(start.saturating_add(self.offset_within_unit))
     }
-
-    pub(super) fn window_token(&self) -> WindowUnitToken {
-        match &self.identity {
-            UnitIdentity::Fold(key) => {
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                key.hash(&mut hasher);
-                WindowUnitToken {
-                    kind: 0,
-                    hash: hasher.finish(),
-                }
-            }
-            UnitIdentity::Content { kind, hash } => WindowUnitToken {
-                kind: *kind,
-                hash: *hash,
-            },
-        }
-    }
-
-    pub(super) fn offset_within_unit(&self) -> usize {
-        self.offset_within_unit
-    }
 }
 
 /// 一次并入的重定位结果（渲染侧派生，effect 消费；一次性值）。
@@ -206,18 +193,18 @@ fn identity_of(vm: &TuiRenderUnit) -> UnitIdentity {
     }
 }
 
-/// 渲染单元的稳定 token；桥接侧与视口侧共用同一口径。
-pub(crate) fn window_identity_token(vm: &TuiRenderUnit) -> WindowUnitToken {
+/// 渲染单元的稳定 token；选区锚点与视口侧共用同一口径。
+pub(crate) fn unit_identity_token(vm: &TuiRenderUnit) -> UnitToken {
     match identity_of(vm) {
         UnitIdentity::Fold(key) => {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             key.hash(&mut hasher);
-            WindowUnitToken {
+            UnitToken {
                 kind: 0,
                 hash: hasher.finish(),
             }
         }
-        UnitIdentity::Content { kind, hash } => WindowUnitToken { kind, hash },
+        UnitIdentity::Content { kind, hash } => UnitToken { kind, hash },
     }
 }
 
@@ -249,9 +236,6 @@ fn content_kind(vm: &TuiRenderUnit) -> u8 {
     }
 }
 
-#[cfg(test)]
-#[path = "viewport_anchor_e2e_test.rs"]
-mod e2e_tests;
 #[cfg(test)]
 #[path = "viewport_anchor_test.rs"]
 mod tests;

@@ -1,4 +1,5 @@
 use super::*;
+use crate::acp_client::client::test_support::{install_history_v2, with_history_v2_initial};
 use crate::kit::atoms::{self, CONFIRM_PAYLOAD};
 use peri_acp::transport::{
     AcpTransport,
@@ -78,6 +79,12 @@ fn interactive_client() -> (AcpTuiClient, MpscServerTransport) {
     (client, server)
 }
 
+fn v2_interactive_client() -> (AcpTuiClient, MpscServerTransport) {
+    let (client, server) = interactive_client();
+    install_history_v2(&client);
+    (client, server)
+}
+
 fn context(cwd: &str) -> Value {
     json!({"version":1,"workspace":{
         "project_id":"00000000-0000-0000-0000-000000000001",
@@ -142,6 +149,7 @@ async fn reach_load(server: &MpscServerTransport, response: Result<Value, AcpErr
         .unwrap();
     let (id, method, params) = next_request(server).await;
     assert_eq!(method, "session/load");
+    let response = response.map(|value| with_history_v2_initial(value, TARGET, &params));
     server.send_response(id, response).await.unwrap();
     params
 }
@@ -150,7 +158,7 @@ async fn reach_load(server: &MpscServerTransport, response: Result<Value, AcpErr
 #[serial_test::serial]
 async fn load_by_id_has_no_recovery_popup_or_reset_request() {
     let _guard = UiAtomsGuard::capture();
-    let (client, server) = interactive_client();
+    let (client, server) = v2_interactive_client();
     let (load, params) = tokio::time::timeout(Duration::from_secs(5), async {
         tokio::join!(
             client.load_session(TARGET, "/another-machine", None),
@@ -174,7 +182,7 @@ async fn load_by_id_has_no_recovery_popup_or_reset_request() {
 #[serial_test::serial]
 async fn load_ignores_legacy_execution_admission_metadata() {
     let _guard = UiAtomsGuard::capture();
-    let (client, server) = interactive_client();
+    let (client, server) = v2_interactive_client();
     let (load, params) = tokio::time::timeout(Duration::from_secs(5), async {
         tokio::join!(
             client.load_session(TARGET, "/startup", None),
@@ -318,7 +326,7 @@ async fn incomplete_close_failure_keeps_old_session_pending() {
 #[serial_test::serial]
 async fn incomplete_close_keeps_pending_load_target() {
     let _guard = UiAtomsGuard::capture();
-    let (client, server) = interactive_client();
+    let (client, server) = v2_interactive_client();
     let opener = client.clone();
     let first = tokio::spawn(async move { opener.new_session("/w", None).await });
     let (id, method, _) = next_request(&server).await;
@@ -378,7 +386,10 @@ async fn incomplete_close_keeps_pending_load_target() {
         "必须完成被打断的加载，而不是新建空会话"
     );
     assert_eq!(params["sessionId"], TARGET);
-    server.send_response(id, Ok(json!({}))).await.unwrap();
+    server
+        .send_response(id, Ok(with_history_v2_initial(json!({}), TARGET, &params)))
+        .await
+        .unwrap();
     assert_eq!(resumed.await.unwrap().unwrap(), TARGET);
     assert_eq!(client.current_session_id().as_deref(), Some(TARGET));
     assert!(client.check_restore_error().is_ok());

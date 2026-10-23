@@ -1,5 +1,5 @@
 use super::TuiReplaySender;
-use crate::dispatch::{replay_persisted_session_history, LoadGeneration};
+use crate::dispatch::replay_persisted_session_history;
 use crate::transport::{mpsc::mpsc_transport_pair, stdio::StdioTransport, AcpTransport};
 use peri_acp_types::{messages::BaseMessage, store::PersistedPayload, PeriCaps};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -17,8 +17,8 @@ fn history() -> Vec<PersistedPayload> {
 fn assert_reminder(params: &serde_json::Value, canonical: bool, body: &str) {
     assert_eq!(params["sessionId"], "replay-test");
     assert_eq!(params["data"]["replay"], true);
-    // REQ-H04：reminder 出口与 `session/update` 出口带同一个代次（紧挨 replay 标记）。
-    assert_eq!(params["data"]["periLoadGeneration"], "gen-1");
+    // 旧回放代次已删除：reminder 出口不再携带该字段。
+    assert!(params["data"].get("periLoadGeneration").is_none());
     if canonical {
         assert_eq!(params["event"], "system-reminder");
         assert_eq!(params["data"]["reminder"]["category"], "legacy");
@@ -38,15 +38,10 @@ async fn test_compact_reminder_replay_mpsc_wire() {
         let sender = TuiReplaySender { transport: &server };
         let caps = PeriCaps {
             system_reminder: canonical,
-            // 协商过回放标记的连接才带代次（与 `session/update` 出口同一个门）。
             replay: true,
             ..Default::default()
         };
-        let generation = LoadGeneration::from_client("gen-1");
-        // 位置表留空：本条用例只验证通知出口的字段与受众规则（存储序位置由历史分页用例覆盖）。
-        let positions = std::collections::HashMap::new();
-        let marks = crate::dispatch::ReplayMarks::new(&generation, "replay-test", &positions);
-        replay_persisted_session_history("replay-test", &history(), &sender, &caps, &marks)
+        replay_persisted_session_history("replay-test", &history(), &sender, &caps)
             .await
             .unwrap();
         for index in 0..3 {
@@ -87,15 +82,10 @@ async fn test_compact_reminder_replay_stdio_wire() {
         };
         let caps = PeriCaps {
             system_reminder: canonical,
-            // 与 mpsc 用例同契约：两条承载共享同一 replay 门（含代次）。
             replay: true,
             ..Default::default()
         };
-        let generation = LoadGeneration::from_client("gen-1");
-        // 位置表留空：本条用例只验证通知出口的字段与受众规则（存储序位置由历史分页用例覆盖）。
-        let positions = std::collections::HashMap::new();
-        let marks = crate::dispatch::ReplayMarks::new(&generation, "replay-test", &positions);
-        replay_persisted_session_history("replay-test", &history(), &sender, &caps, &marks)
+        replay_persisted_session_history("replay-test", &history(), &sender, &caps)
             .await
             .unwrap();
         let mut lines = BufReader::new(output_reader).lines();

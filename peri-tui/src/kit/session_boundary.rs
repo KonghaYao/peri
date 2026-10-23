@@ -17,18 +17,8 @@ pub fn project_session_boundary(target_session_id: Option<&str>) {
         target_session_id.unwrap_or_default(),
         atoms::BRIDGE_RESET_COUNTER.get(),
     );
-    // 历史分页浏览与 committed 同生命周期：边界清空浏览器状态与区间索引，上一会话
-    // 在途的页响应因此在消费侧与桥接侧都被判为过期（REQ-C01-5、A11）。
-    crate::kit::history_paging::reset_browsing_state();
-    crate::kit::history_page_consumer::reset_window_paging_state();
-    // 只有本连接协商过 V2 才存在 V2 首屏状态；V1/标准连接不触碰它。
-    if atoms::HISTORY_V2_CAPABLE.get() {
-        // best-effort：请求关闭旧窗口后再丢身份；关闭失败不阻塞会话边界。
-        let _ = crate::kit::history_v2::consumer::request_close_current();
-        crate::kit::history_v2::reset_state();
-        crate::kit::history_v2::consumer::reset_consumer_state();
-    }
-    crate::kit::history_window::clear_window_viewport();
+    // V2 历史窗口的替换由 `session/load` 的候选准入负责：边界本身不得提前清空
+    // 已发布窗口，否则 initial 失败会让旧窗口不可读。
     atoms::FOCUSED_ENTRY.set(None);
     atoms::HISTORY_DETAIL.set(None);
     acp_events::push_view_models_for_reset();

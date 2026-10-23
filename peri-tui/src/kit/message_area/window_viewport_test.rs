@@ -1,4 +1,4 @@
-//! S5.6：真实视口发布窗口身份，宽度变化后仍按身份重定位。
+//! 渲染缓存与结构性代次的回归用例。
 
 use super::grid::GridSpec;
 use super::transcript::Transcript;
@@ -28,88 +28,6 @@ fn snapshot(count: usize) -> ViewModelsSnapshot {
             })
             .collect(),
     }
-}
-
-#[test]
-#[serial_test::serial]
-fn real_viewport_publishes_window_identity_and_survives_width_change() {
-    use crate::kit::history_window::{
-        WindowUnitMapping, clear_window_viewport, publish_window_unit_mappings,
-    };
-
-    crate::kit::atoms::init_atoms();
-    crate::kit::atoms::HISTORY_WINDOW_V1.set(true);
-    crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(true);
-    crate::kit::atoms::HISTORY_WINDOW_GENERATION.set(3);
-    clear_window_viewport();
-    let mut snapshot = snapshot(1);
-    snapshot.generation = 1;
-    let token = crate::kit::message_area::window_identity_token(&snapshot.items[0]);
-    publish_window_unit_mappings(vec![WindowUnitMapping {
-        token,
-        entry: crate::kit::history_window::PersistentEntryKey::own("s1:m1"),
-    }]);
-    let mut transcript = Transcript::default();
-    let mut caches = Vec::new();
-    let context = context();
-    let grid = GridSpec::grid_for(80);
-    transcript.prepare(
-        &snapshot,
-        &TranscriptPublication::default(),
-        &mut caches,
-        grid,
-        grid.line_width(),
-        context.clone(),
-        1,
-        0,
-        0,
-        2,
-        0,
-    );
-    let viewport = crate::kit::atoms::WINDOW_VIEWPORT
-        .state()
-        .read()
-        .clone()
-        .expect("viewport published");
-    assert_eq!(viewport.window_generation, 3);
-    assert_eq!(
-        viewport
-            .anchor
-            .as_ref()
-            .map(|anchor| &anchor.entry.entry_id),
-        Some(&"s1:m1".to_string())
-    );
-
-    // 宽度变化后仍按同一持久身份发布，不按行号补偿。
-    let narrow = GridSpec::grid_for(40);
-    transcript.prepare(
-        &snapshot,
-        &TranscriptPublication::default(),
-        &mut caches,
-        narrow,
-        narrow.line_width(),
-        context,
-        1,
-        0,
-        0,
-        2,
-        0,
-    );
-    let viewport = crate::kit::atoms::WINDOW_VIEWPORT
-        .state()
-        .read()
-        .clone()
-        .expect("viewport republished");
-    assert_eq!(
-        viewport
-            .anchor
-            .as_ref()
-            .map(|anchor| &anchor.entry.entry_id),
-        Some(&"s1:m1".to_string())
-    );
-    crate::kit::atoms::HISTORY_WINDOW_V1.set(false);
-    crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(false);
-    clear_window_viewport();
 }
 
 #[test]

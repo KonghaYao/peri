@@ -447,6 +447,7 @@ async fn test_startup_restore_reservation_wins_submit_ensure_both_orders() {
         let (client_transport, server_transport) = mpsc_transport_pair();
         let (client, _notification_tx, _notification_rx) =
             AcpTuiClient::new_interactive(client_transport);
+        crate::acp_client::client::test_support::install_history_v2(&client);
         client.reserve_startup_restore().await;
 
         let submit_client = client.clone();
@@ -479,7 +480,16 @@ async fn test_startup_restore_reservation_wins_submit_ensure_both_orders() {
         let (load_id, params) = receive_lifecycle_request(&server_transport, "session/load").await;
         assert_eq!(params["sessionId"], "restored");
         server_transport
-            .send_response(load_id, Ok(json!({})))
+            .send_response(
+                load_id,
+                Ok(
+                    crate::acp_client::client::test_support::with_history_v2_initial(
+                        json!({}),
+                        "restored",
+                        &params,
+                    ),
+                ),
+            )
             .await
             .unwrap();
         assert_eq!(load.await.unwrap().unwrap(), "restored");
@@ -524,6 +534,7 @@ async fn test_ordinary_load_reservation_blocks_prompt_until_target_commits() {
     // Arrange
     let (client_transport, server_transport) = mpsc_transport_pair();
     let (client, _notification_tx, _notification_rx) = AcpTuiClient::new(client_transport);
+    crate::acp_client::client::test_support::install_history_v2(&client);
     let create_client = client.clone();
     let create = tokio::spawn(async move { create_client.ensure_session("/tmp", None).await });
     let (new_id, _) = receive_lifecycle_request(&server_transport, "session/new").await;
@@ -563,7 +574,16 @@ async fn test_ordinary_load_reservation_blocks_prompt_until_target_commits() {
     let (load_id, load_params) = receive_lifecycle_request(&server_transport, "session/load").await;
     assert_eq!(load_params["sessionId"], "target");
     server_transport
-        .send_response(load_id, Ok(json!({})))
+        .send_response(
+            load_id,
+            Ok(
+                crate::acp_client::client::test_support::with_history_v2_initial(
+                    json!({}),
+                    "target",
+                    &load_params,
+                ),
+            ),
+        )
         .await
         .unwrap();
     assert_eq!(load.await.unwrap().unwrap(), "target");

@@ -6,11 +6,11 @@
 //!
 //! 公开路径由父模块 `pub use` 保持为 `peri_acp_types::session_resources::*`。
 
-use crate::history_page::{HistoryEntryRole, HistoryPageItem};
-use crate::history_window::{
+use crate::history_common::{
     HistoryCheckpoint, HistoryCommittedTail, HistoryInheritedWindow, HistorySource,
     HistoryWindowDirection,
 };
+use crate::history_page::{HistoryEntryRole, HistoryPageItem};
 use crate::messages::MessageId;
 
 /// 一次有界读取的窗口边界事实（不读正文）。
@@ -30,6 +30,20 @@ impl SessionHistoryWindowBounds {
     pub fn committed_tail(&self) -> Option<&HistoryCommittedTail> {
         self.own_latest.as_ref()
     }
+}
+
+/// 条目的存储元数据：不取正文即可得到的事实。
+///
+/// 这是 body 定位的**唯一**依据：页是否内联、页预算如何拆分都不参与正文存在性判断。
+/// `canonical_bytes` 是 canonical 编码的存储字节数，**不是**展示文本长度；展示长度只能
+/// 由 body 的有界投影给出（见 `HistoryBodySlice::total_bytes`）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HistoryEntryMetadata {
+    /// canonical payload 的存储字节数（`sqlite3_blob_bytes` 口径）。
+    pub canonical_bytes: u64,
+    /// own 行的存储 `role` 粗分类；inherited 没有 role 列时为
+    /// [`HistoryEntryRole::Unknown`]。
+    pub role: HistoryEntryRole,
 }
 
 /// 本次读取的入口，用来决定锚点消失时的失败分类与是否包含锚点自身。

@@ -20,7 +20,7 @@
 //! 语义（不反序列化、不校验正文转义）。正文合法性由消费/解析路径负责；非 canonical 或
 //! 结构异常的信封回退 SQL，后者按原有语义反序列化首尾 payload。
 
-use peri_acp_types::history_window::HistoryWindowError;
+use peri_acp_types::history_common::HistoryWindowError;
 use peri_acp_types::messages::MessageId;
 use std::sync::Arc;
 

@@ -27,7 +27,6 @@ use peri_acp_types::ports::{AgentCatalogPort, McpPoolPort, McpTaskOwnerPort, Too
 use tokio_util::sync::CancellationToken;
 
 use crate::provider::{LlmProvider, PeriConfig};
-use history_window::HistoryWindowCoordinator;
 
 pub mod assemble;
 pub(crate) mod compact_config;
@@ -52,15 +51,11 @@ mod execution;
 #[cfg(test)]
 #[path = "executor_flow_test.rs"]
 mod executor_flow_tests;
-mod history_page;
-/// 连接级 History V2 协议服务（H2）：窗口、幂等、cursor、预算与后端 port。
 mod history_service;
 /// History V2 own 历史适配器（H3a1）：复用窗口读取端口，不开新表/列。
 mod history_v2_adapter;
 /// `session/load` 的 History V2 initial 准入（H4b）：生命周期装配前解析与拒绝。
 mod history_v2_load;
-/// `peri.historyWindowV1` 的 Host coordinator 与 open/page/seek 路由。
-mod history_window;
 /// session-owned 交互路由（按可信归属选审批 endpoint；投递失败原因的诚实产出点：
 /// `NoOnlineEndpoint` / `OwnerUnmatched` / `AttachmentDetached`，见 `interaction_router.rs`）。
 mod interaction_router;
@@ -203,19 +198,11 @@ pub(crate) struct SessionState {
     /// 正文容器；命令与展示所需的 `BaseMessage` 投影按需短暂派生。
     /// 完整 canonical 历史（含 excluded 原文）只从存储读取。
     pub(crate) history_payloads: Vec<peri_acp_types::store::PersistedPayload>,
-    /// 会话结构版本：**破坏历史范围**的提交（rewind / 精确删除）成功一次即 `+1`
-    /// （REQ-T04 末段、验收 A19「旧 cursor 失效」）。
-    ///
-    /// 内存计数器，不落盘：本仓不加 DDL，且它保护的正是「本次运行内已发出的游标」。
-    /// 进程重启后归零——重启后的旧游标仍要过存储那一关（锚点/范围身份查表）。
-    /// **追加消息与 Full/Smart compact 不推进它**：REQ-H02 要求一次在途浏览不被它们打断。
-    pub(crate) structure_version: u64,
     /// live session 实例代次：每次发布新 `SessionState` 或显式 `session/load` 重新对齐时
-    /// 生成。与既有 `LoadGeneration` 无关（后者只标记一次初始回放）。
+    /// 生成。
     pub(crate) session_generation: u64,
-    /// `peri.historyWindowV1` 的轻量运行期事实：ticket、committed tail、checkpoint、
-    /// rewind 状态。**不保存历史正文**。
-    pub(crate) history_window: HistoryWindowCoordinator,
+    /// 一次 Handoff 的活跃标记（见 `ownership.rs`）。**不保存历史正文**。
+    pub(crate) handed_off_alive: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// 本会话当前绑定的实时投递注册表（V2 `session/load` 成功装配时写入）。
     ///
     /// 注册表归**连接**所有；这里只保存 `Arc` 供执行轮的事件 sink 选用。非 V2 会话为
@@ -256,21 +243,6 @@ pub(crate) struct SessionState {
 impl SessionState {
     pub(crate) fn event_health(&self) -> peri_acp_types::event_v2::BusHealthSnapshot {
         self.event_health.snapshot()
-    }
-
-    /// 测试专用：模拟结构/代次变化并撤销窗口票据。
-    ///
-    /// 生产 warm load **不得**调用本方法（那会撤销其他连接的固定读取视图）：
-    /// 冷恢复发布新 `SessionState` 时已自然推进 generation，真实 rewind/delete
-    /// 走各自的票据撤销路径。
-    #[cfg(test)]
-    pub(crate) fn refresh_session_generation(&mut self) {
-        self.session_generation = next_session_generation();
-        self.history_window.revoke_ticket();
-        self.history_window.committed_tail = None;
-        self.history_window.checkpoint_id = None;
-        self.history_window.summary_entry_id = None;
-        self.history_window.last_notified_checkpoint = None;
     }
 
     /// 派生当前有效消息投影（提醒等无消息形态的条目不在此列）。

@@ -14,10 +14,10 @@
 //!
 //! ## 开关
 //!
-//! [`history_v2_beta_enabled`] 默认 **false**（`history-v2` 本地 beta）。本地开关
-//! 与连接协商结果必须同时为真才启用 V2（[`active`]）；否则旧 V1 / 标准路径逐字节
-//! 保持不变。V2 协商成功时客户端不再声明 `peri.historyWindowV1`，服务端也不回放
-//! V1 历史，因此 `load_session` 必须使用 initial 首屏而不是再发一次 open。
+//! TUI 始终请求 V2；启用与否只由连接协商结果决定（[`crate::kit::atoms::HISTORY_V2_CAPABLE`]）。
+//! 未协商到 V2 时启动显式失败，不回落到旧协议或标准全量回放。V2 协商成功时客户端
+//! 不再声明旧私有历史能力，服务端也不回放 V1 历史，因此 `load_session` 必须使用
+//! initial 首屏而不是再发一次 open。
 //!
 //! ## 可执行与可阅读
 //!
@@ -30,6 +30,7 @@ pub mod consumer;
 pub mod error;
 pub mod initial;
 pub mod live;
+pub mod outbound;
 pub mod paging;
 pub mod request;
 mod validate;
@@ -54,13 +55,6 @@ mod initial_test;
 #[cfg(test)]
 #[path = "paging_test.rs"]
 mod paging_test;
-
-#[cfg(test)]
-#[path = "body_test.rs"]
-mod body_test;
-
-/// TUI 本地 V2 beta 键；未配置 = 关闭。
-pub const HISTORY_V2_BETA: &str = peri_config::betas::HISTORY_V2;
 
 /// V2 状态机的会话级阶段。首屏只产生 `Idle → Ready | Failed`；H5b 的
 /// live 连续性与窗口刷新阶段在此扩展。
@@ -143,23 +137,6 @@ impl HistoryV2State {
     pub fn window_mut(&mut self) -> Option<&mut HistoryV2Window> {
         self.window.as_mut()
     }
-}
-
-/// 读取本地 beta 配置；与 V1 的「未配置视为开启」不同，V2 默认关闭。
-pub fn history_v2_beta_enabled(config: &crate::config::PeriConfig) -> bool {
-    config.config.betas.get(HISTORY_V2_BETA).unwrap_or(false)
-}
-
-/// 从合并快照的 beta 投影读取同一语义：只有显式 `true` 才开启。
-pub fn history_v2_beta_enabled_from_flags(flags: &peri_config::betas::BetaFlags) -> bool {
-    flags
-        .value(HISTORY_V2_BETA)
-        .is_some_and(|value| value.enabled)
-}
-
-/// 启动时写入本地开关（只写一次；无热重载）。
-pub fn apply_history_v2_beta(enabled: bool) {
-    atoms::HISTORY_V2.set(enabled);
 }
 
 /// 唯一写入点：initial 接纳成功。

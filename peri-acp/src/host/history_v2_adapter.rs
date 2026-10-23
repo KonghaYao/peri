@@ -24,6 +24,11 @@ mod view;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use peri_acp_types::history_common::{
+    HistoryBodyChunk as WindowBodyChunk, HistoryCommittedTail, HistoryEntryId, HistoryReadTicket,
+    HistorySource as WindowSource, HistoryWindowDirection, HistoryWindowError,
+    HISTORY_WINDOW_MAX_BYTE_BUDGET,
+};
 use peri_acp_types::history_v2::{
     DecimalU64, HistoryAnchor, HistoryBackendError, HistoryBodySlice, HistoryBoundary,
     HistoryBoundaryPosition, HistoryBoundarySide, HistoryCommittedTailRef, HistoryCoverage,
@@ -32,32 +37,31 @@ use peri_acp_types::history_v2::{
     HistoryPageData, HistoryProgress, HistoryProgressReason, HistorySnapshotRef,
     HistorySource as V2Source, HistoryV2Backend, HISTORY_V2_PROJECTION_VERSION,
 };
-use peri_acp_types::history_window::{
-    HistoryBodyChunk as WindowBodyChunk, HistoryCommittedTail, HistoryEntryId, HistoryReadTicket,
-    HistorySource as WindowSource, HistoryWindowDirection, HistoryWindowError,
-    HISTORY_WINDOW_MAX_BYTE_BUDGET,
-};
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
-    HistoryWindowEntry, HistoryWindowPagePlan, HistoryWindowReadIntent, HistoryWindowRows,
-    HistoryWindowTailExpectation, InheritedHistoryEntry, SessionHistoryWindowBounds,
-    SessionResourceError, SessionResourceErrorKind, SessionResources,
+    HistoryEntryMetadata, HistoryWindowEntry, HistoryWindowPagePlan, HistoryWindowReadIntent,
+    HistoryWindowRows, HistoryWindowTailExpectation, InheritedHistoryEntry,
+    SessionHistoryWindowBounds, SessionResourceError, SessionResourceErrorKind, SessionResources,
 };
 use peri_acp_types::thread::ThreadId;
 use peri_acp_types::PeriCaps;
 
 use crate::dispatch;
 
+#[cfg(test)]
+pub(crate) use self::projection::PrefixVerdict;
+pub(crate) use self::projection::PrefixVisibility;
 use self::refs::{EntryRef, InheritedRef, INHERITED_REGION, OWN_REGION};
+use self::view::undetermined_visibility;
 
 /// 描述符默认块大小（设计 §10.5：默认 64 KiB）。
 const DEFAULT_CHUNK_BYTES: u32 = 64 * 1024;
 
-/// 测试探针：直接验证 inherited oversize 的前缀判定；真实存储无法构造「无法判定」的
-/// payload，因此仅在此暴露纯函数，不改变生产路径。
+/// 测试探针：直接验证前缀判定纯函数（真实存储无法覆盖所有畸形 payload，
+/// 因此仅在此暴露，不改变生产路径）。
 #[cfg(test)]
-pub(crate) fn inherited_prefix_visible(prefix: &[u8]) -> bool {
-    projection::inherited_prefix_visible(prefix)
+pub(crate) fn inherited_prefix_verdict(prefix: &[u8]) -> PrefixVerdict {
+    projection::prefix_verdict(prefix)
 }
 
 /// 用现有窗口读取端口实现 History V2 `HistoryV2Backend` 的本地适配器。
@@ -67,6 +71,9 @@ pub(crate) struct HistoryV2BackendAdapter {
     max_body_chunk_bytes: u32,
     #[cfg(test)]
     visibility_reads: parking_lot::Mutex<Vec<u32>>,
+    /// 测试探针：注入前缀读取失败（模拟瞬态 I/O），验证页面失败而不是把条目当隐藏。
+    #[cfg(test)]
+    visibility_read_failures: std::sync::atomic::AtomicUsize,
     /// 测试探针：记录 body 读取 canonical payload 时实际请求的字节数。
     #[cfg(test)]
     payload_reads: parking_lot::Mutex<Vec<u32>>,
@@ -112,6 +119,8 @@ impl HistoryV2BackendAdapter {
             #[cfg(test)]
             visibility_reads: parking_lot::Mutex::new(Vec::new()),
             #[cfg(test)]
+            visibility_read_failures: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
             payload_reads: parking_lot::Mutex::new(Vec::new()),
         }
     }
@@ -125,6 +134,23 @@ impl HistoryV2BackendAdapter {
     #[cfg(test)]
     pub(crate) fn reset_visibility_reads(&self) {
         self.visibility_reads.lock().clear();
+    }
+
+    /// 测试探针：让接下来的 `count` 次前缀读取返回瞬态错误。
+    #[cfg(test)]
+    pub(crate) fn inject_visibility_read_failures(&self, count: usize) {
+        self.visibility_read_failures
+            .store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(super) fn visibility_read_fails(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.visibility_read_failures
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
     }
 
     /// 测试探针：body 为拼接 canonical payload 实际请求的分块大小。
@@ -166,6 +192,26 @@ impl HistoryV2BackendAdapter {
                 max_bytes,
                 tail,
                 // 票据由 H2 负责授权；存储实现不解释该值，这里只提供一个非空占位。
+                &HistoryReadTicket::new("history-v2"),
+            )
+            .await
+            .map_err(|error| map_resource_error(&error))
+    }
+
+    /// body 定位的独立元数据读取：长度 + own role，不依赖页面预算或内联状态。
+    async fn entry_metadata(
+        &self,
+        id: &ThreadId,
+        source: &WindowSource,
+        entry_id: MessageId,
+        tail: Option<&HistoryCommittedTail>,
+    ) -> Result<HistoryEntryMetadata, HistoryBackendError> {
+        self.resources
+            .read_history_entry_metadata(
+                id,
+                source.clone(),
+                entry_id,
+                tail,
                 &HistoryReadTicket::new("history-v2"),
             )
             .await
@@ -317,15 +363,27 @@ impl HistoryV2Backend for HistoryV2BackendAdapter {
             EntryRef::Own(entry_id) => {
                 let tail = snapshot_tail(snapshot, &thread_id)?
                     .ok_or(HistoryBackendError::AnchorUnavailable)?;
-                let (canonical_total, role) = self
-                    .descriptor(&thread_id, snapshot, &tail, entry_id)
+                // 正文定位只依赖稳定条目身份与固定 tail；页是否内联、页预算如何拆分
+                // 都不参与判断。
+                let metadata = self
+                    .entry_metadata(&thread_id, &WindowSource::Own, entry_id, Some(&tail))
                     .await?;
                 // page 过滤不是授权：body 必须按同一 role 口径再判一次。
-                if !self
-                    .oversized_visible(&thread_id, Some(&tail), entry_id, role)
-                    .await
+                match self
+                    .oversized_visibility(
+                        &thread_id,
+                        Some(&tail),
+                        entry_id,
+                        metadata.role,
+                        metadata.canonical_bytes,
+                    )
+                    .await?
                 {
-                    return Err(HistoryBackendError::NotFound);
+                    PrefixVisibility::Visible => {}
+                    PrefixVisibility::Hidden => return Err(HistoryBackendError::NotFound),
+                    PrefixVisibility::Undetermined => {
+                        return Err(undetermined_visibility(&thread_id, entry_id));
+                    }
                 }
                 let canonical = self
                     .read_canonical_payload(
@@ -333,22 +391,31 @@ impl HistoryV2Backend for HistoryV2BackendAdapter {
                         &WindowSource::Own,
                         entry_id,
                         Some(&tail),
-                        canonical_total,
+                        metadata.canonical_bytes,
                     )
                     .await?;
                 self.body_slice(body_ref, offset, max_bytes, &canonical)
             }
             EntryRef::Inherited { source, entry_id } => {
                 self.ensure_snapshot_tail(&thread_id, snapshot).await?;
-                let total = self
-                    .inherited_descriptor_total(&thread_id, snapshot, &source, entry_id)
+                let metadata = self
+                    .entry_metadata(&thread_id, &source.window_source(), entry_id, None)
                     .await?;
-                // inherited 没有 role 列：用 ≤1024 字节前缀复核受众，未知 fail-closed。
-                if !self
-                    .inherited_oversized_visible(&thread_id, &source, entry_id)
-                    .await
+                // inherited 没有 role 列：用 ≤1024 字节前缀复核受众，无法判定时失败关闭。
+                match self
+                    .inherited_oversized_visibility(
+                        &thread_id,
+                        &source,
+                        entry_id,
+                        metadata.canonical_bytes,
+                    )
+                    .await?
                 {
-                    return Err(HistoryBackendError::NotFound);
+                    PrefixVisibility::Visible => {}
+                    PrefixVisibility::Hidden => return Err(HistoryBackendError::NotFound),
+                    PrefixVisibility::Undetermined => {
+                        return Err(undetermined_visibility(&thread_id, entry_id));
+                    }
                 }
                 let canonical = self
                     .read_canonical_payload(
@@ -356,7 +423,7 @@ impl HistoryV2Backend for HistoryV2BackendAdapter {
                         &source.window_source(),
                         entry_id,
                         None,
-                        total,
+                        metadata.canonical_bytes,
                     )
                     .await?;
                 self.body_slice(body_ref, offset, max_bytes, &canonical)

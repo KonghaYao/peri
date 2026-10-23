@@ -27,7 +27,7 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 | 方法 | 参数 | 返回值 | 语义 |
 |------|------|--------|------|
 | `session/new` | `{ cwd?, mcpServers? }` | `{ sessionId, ... }` | 创建新会话；可返回 modes、models、configOptions 等协商字段 |
-| `session/load` | `{ sessionId, cwd?, mcpServers? }`；分页时 `{ sessionId, cursor, limit? }`；窗口时 `{ sessionId, history: { kind: "open" \| "page" \| "seek", ... } }` | `{ ... }` | 加载指定会话并重放历史；响应可含 modes、models、configOptions，不创建新身份。带 `cursor` 时是旧历史页模式，带 `history` 时是 `peri.historyWindowV1` 只读窗口模式（两者互斥，见 §2.1.1）。声明窗口能力的连接不带 `history` 的 load **不回放历史**，首屏由 `history.open` 提供 |
+| `session/load` | `{ sessionId, cwd?, mcpServers? }`；History V2 连接另带 `_meta["peri.history"]` 的 `initial` 请求 | `{ ... }` | 加载指定会话并重放历史；响应可含 modes、models、configOptions，不创建新身份。协商到 History V2 的连接以 `initial` 首屏替代标准回放（见 §2.1.1）；未声明 `peri.history` 的连接仍走标准完整回放。旧顶层 `cursor`/`limit`/`history`/`loadGeneration` 不再解释，一律 `-32602` |
 | `session/resume` | `{ sessionId, cwd? }` | `{}` | 复用已有 session_id 继续会话；经统一 host lifecycle handler 处理 |
 | `session/close` | `{ sessionId }` | `{}` | 关闭会话 |
 | `session/fork` | `{ sessionId, cwd?, mcpServers? }` | `{ sessionId, ... }` | 指定源会话并复制到新线程；返回值中的 sessionId 是新身份 |
@@ -48,187 +48,205 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 
 工作区扩展的门控事实源是**进程级协商值**（`SessionManager::effective_host_caps`）：同一 host 内
 完成过 initialize 的连接所属请求面共享该值，从未 initialize 的连接按 [`PeriCaps::all_enabled`]
-兜底（A25 保留③，实现见 `peri-acp/src/session/caps.rs`）。历史分页与历史窗口相反：按**发起连接**的
-`ConnectionFacts::history_pagination()` / `history_window_v1()` 失败关闭判定。两者差异是有意的——
-分页与窗口决定这次 `session/load` 回放什么内容，必须与连接绑定；工作区扩展表达的是本 host 的
-装配事实。同进程多连接接管的部署形态一旦出现，工作区门控需与分页、窗口一起改为按连接判定。
+兜底（A25 保留③，实现见 `peri-acp/src/session/caps.rs`）。History V2 相反：是否协商、预算与
+窗口都按**发起连接**判定（`ConnectionFacts`），重连后重新协商。工作区扩展表达的是本 host 的
+装配事实；同进程多连接接管的部署形态一旦出现，两类门控都按连接判定。
 
-历史分页由 initialize 的 `peri.historyPagination: true` 显式协商，**不改标准 `session/load`
-语义**：未协商的连接始终得到标准完整回放。协商过的连接可带非空 `cursor` 请求更早一页，
-此时 `session/load` 不重新装配会话（不占执行生命周期锁、不做任务绑定 / MCP 接纳 / 命令广播 /
-continuation 调度），响应改为 `{ sessionId, snapshotToken, nextCursor, items }`；`nextCursor`
-为 `null` 只表示更早方向没有可展示内容。能力按**当前连接**的协商结果判定，重连后重新分流；
-未协商却带 `cursor`/`limit`、游标坏 / 跨会话 / 已失效、`cursor` 与 setup 参数同现都明确拒绝，
-不降级为初始 load。字段语义、页预算与条目身份的事实源是 `peri-acp-types::history_page` 与
-`docs/code-index/peri-acp.md`。初始 load 后补写 `nextCursor`/`snapshotToken` 的既有语义未改变。
+标准 `session/load` 语义保持不变：未声明 `_meta["peri.history"]` 的连接仍得到标准完整回放。
+`caps.replay` 下标准回放用 `_meta.periReplay` 标识；`loadGeneration` 与
+`_meta.periLoadGeneration` 已删除，History V2 initial 用 `requestKey`/`deliveryId`/`liveBoundary`
+配对。历史重放投递失败使 `session/load` 失败（`-32603`），不返回半回放的成功响应；已装配
+会话态保持完整，留给下一次 load 原位修复。
 
-初始 `session/load` 可带可选 `loadGeneration`（非空字符串，缺省由服务端生成）：它在协商过
-`replay` 的连接上以 `_meta.periLoadGeneration` 同时出现在成功响应与本次全部重放通知（含
-reminder 出口），客户端据此把通知与那次 load 配对；历史页带该字段是坏请求。历史重放投递
-失败使 `session/load` 失败（`-32603`），不返回半回放的「成功」响应；服务端已装配的会话态
-保持完整，留给下一次 load 原位修复。
+#### 2.1.1 History V2（本地唯一历史路径）
 
-#### 2.1.1 历史窗口 `peri.historyWindowV1`（默认关闭）
+History V2 是本地 SQLite 后端与 TUI 的唯一历史扩展，方法名 `_peri/history`，协商键
+`_meta["peri.history"]`。它不修改标准 ACP 方法：未声明该键的连接仍走标准完整回放；声明后
+服务端必须显式选择 `version=2` 与 `selectedProfile="windowed"`，否则 `initialize` 失败关闭。
+TUI 始终请求 V2，未协商到时启动失败，不发送旧私有请求，也不回退标准全量回放。
 
-窗口协议是 `session/load` 上的只读扩展，用于双向浏览与按需回读；它与旧 `cursor` 分页是两套
-独立语义。`PeriCaps::history_window_v1` 的 wire key 为 `peri.historyWindowV1`，只接受显式
-`true`，缺省/非布尔值为 false；准入按**当前连接**判定，失败关闭。TUI 另以内部开关
-`HISTORY_WINDOW_V1`（来自 settings beta `history-window-v1`；未配置视为开启、显式 false 关闭）决定是否采用窗口模型；
-协议协商成功不等于启用淘汰。旧 `historyPagination` 路径不因本能力改变。
-
-**load 不回放**：声明 `peri.historyWindowV1` 的连接，`session/load`（不带 `history`）只装配
-会话，不产生任何历史回放；首屏由随后的一次 `history.open` 提供。这是协议契约而非可选优化：
-客户端声明能力却不 open 会看到空首屏。`historyPagination` 与本能力独立、不能互相替代——
-是否跳过回放只看本连接的 `historyWindowV1` 协商结果。
-
-**请求分流**
-
-`session/load` 带 `history` 即进入窗口分类；未协商该能力返回 `-32601`
-（`data.reason = "history_window_not_negotiated"`）。`sessionId` 必填；会话不存在
-`-32602`，关闭中 `-32010`。`history` 与旧顶层 `cursor`、`limit`、
-`loadGeneration`、`cwd`、`mcpServers` 互斥；格式错误、未知 `kind`、未知字段直接 `-32602`，
-绝不降级为初始 load。窗口请求只读：不装配会话、不取执行锁、不广播命令、不重连订阅。
-
-`history.kind` 为 `"open"`、`"page"`、`"seek"`：
+**协商与预算**
 
 ```json
-{ "sessionId": "s", "history": { "kind": "open", "anchor": { "kind": "latest" },
-  "direction": "around", "limit": 50, "beforeLimit": 50, "afterLimit": 50,
-  "byteBudget": 524288 } }
+// initialize.clientCapabilities._meta["peri.history"]
+{ "versions": [2], "requestedProfile": "windowed" }
+
+// initialize.agentCapabilities._meta["peri.history"]
+{ "version": 2, "selectedProfile": "windowed",
+  "method": "_peri/history", "notification": "_peri/history/changed",
+  "limits": { "defaultItems": 50, "maxItems": 100,
+              "targetPageBytes": 524288, "maxResponseBytes": 1048576,
+              "defaultBodyChunkBytes": 65536, "maxBodyChunkBytes": 262144,
+              "maxWindowsPerConnection": 8 } }
 ```
 
-- `open`：`direction` 必填（`around`/`before`/`after`）；`anchor` 缺省 `latest`，或
-  `{ "kind": "entry", "entryId": "...", "source": ... }`。`limit` 缺省 50，范围 1–100；
-  `beforeLimit`/`afterLimit` 优先；`byteBudget` 范围 1–4 MiB，缺省 512 KiB。`open` 不要求
-  客户端携带 ticket/snapshot。
-- `page`：`snapshotToken`、`readTicket`、`limit` 必填；`beforeCursor` 与 `afterCursor` 必须
-  恰好一个非空。
-- `seek`：`snapshotToken`、`readTicket`、`anchor.entryId`、`anchor.source` 必填；
-  `beforeLimit`/`afterLimit` 可选。锚点不存在、已被 rewind 删除、来源不符或越出冻结范围返回
-  `-32016`，不得从 latest 静默降级。
+- `maxItems` 上限 100；`targetPageBytes` 范围 64 KiB–512 KiB；`maxResponseBytes` 不得小于
+  `targetPageBytes`；正文块上限 256 KiB；每连接窗口数至少 1。
+- 客户端只请求 V2 + `windowed`；服务端只回显自己兑现的能力。后端 `supports_history_v2()`
+  为 false（remote/emscripten）时返回领域错误 `unsupported_version`，不回显半截能力。
+- 客户端同时显式声明任一已删除的旧私有历史能力（值为 `true`），`initialize` 返回 `-32000`
+  `unsupported_version`，不产生任何 server capability。
+- initial 与只读 RPC 只在协商成功后可用；任何失败都不静默降级为 V1 或标准模式。
+
+**initial（`session/load` 首屏）**
+
+```json
+// session/load.params._meta["peri.history"]
+{ "version": 2, "action": "initial", "requestKey": "1",
+  "limit": 50, "targetBytes": 524288 }
+```
+
+成功结果位于同一 `_meta` 键：`{ version, kind:"initial", requestKey, executionReady,
+runtimeGeneration, deliveryId, liveBoundary:{streamId,afterSeq}, page }`。`page` 与
+`_peri/history` 的页面同形。`executionReady=false` 只表示执行环境未就绪，历史页仍完整可读。
+
+- 准入发生在会话恢复、MCP 装配与历史读取之前。V2 连接缺少 `_meta["peri.history"]` 返回
+  `-32602`；未协商连接携带 initial 返回领域错误 `protocol_not_negotiated`。
+- 同一 `requestKey` 重放返回字节等价结果且不更换 `deliveryId`；窗口已关闭或交付记录已淘汰
+  返回 `delivery_expired`。请求参数不同而复用同一 key 返回 `request_conflict`。
+- 同一会话的新 initial 先准备候选窗口/页面/预算与候选实时流，提交成功后才关闭旧窗口并切换
+  实时边界；准备、预算、序列化、取消失败都保留旧窗口与旧 `streamId`/`afterSeq`。
+- 窗口配额已满时，initial 可用一个替换预留槽（`max + 1`）完成候选读取；成功后关闭旧窗口，
+  失败或被取消时候选资源全部回收。
+
+**只读 RPC `_peri/history`**
+
+请求公共字段：`version`、`sessionId`、`requestKey`（十进制字符串，≥1）。根对象以 `action`
+判别，每个变体都拒绝未知字段；序列化参数上限 64 KiB。`open/page/seek/body/close` 共用 10 秒
+总期限。接收循环内同步完成解码、参数校验与 requestKey 账本登记；后端读取在连接所有权任务中
+执行。同时执行的历史读上限为 4，饱和时立即返回可重试的 `capacity_exceeded`；`close` 走快速
+路径，不占配额，也不等待慢读。
+
+| action | 参数 | 结果 |
+| --- | --- | --- |
+| `open` | `anchor`（`latest` 或 `entry{entryId,source}`）、`before`、`after`、`targetBytes` | 新窗口 + 首页 |
+| `page` | `windowId`、`snapshotToken`、`readTicket`、`cursor?`、`direction`、`limit`、`targetBytes` | 同窗口一页 |
+| `seek` | `windowId`、`snapshotToken`、`readTicket`、`anchor{entryId,source}`、`before`、`after`、`targetBytes` | 重定位后的页 |
+| `body` | `windowId`、`snapshotToken`、`readTicket`、`bodyRef`、`offset?`、`maxBytes?` | 正文块 |
+| `close` | `windowId`、`snapshotToken`、`readTicket` | `{version,kind:"closed",windowId}` |
+
+- `open(latest)` 要求 `after = 0`；entry 锚点同时给 `before`/`after`，且
+  `before + after + 1 ≤ maxItems`。`latest` 不要求客户端预带 ticket/snapshot。
+- `page` 的 `cursor` 缺省表示该方向的 home 边界；`direction` 必须与 cursor 方向一致。游标是
+  带每连接 MAC 的不透明值：损坏返回 `invalid_cursor`，来自其他窗口返回
+  `cross_window_cursor`。
+- `seek` 只接受 entry 锚点；锚点不存在、被 rewind 删除、来源不符或越出冻结范围返回
+  `anchor_unavailable`，不得从 latest 静默降级。
+- `body` 的 `bodyRef` 必须由本窗口签发；`maxBytes` 不得超过协商的正文块上限。own 与
+  inherited 都可读取，是否内联到页面不影响正文可达性。
+- `close` 幂等；已关闭窗口再次 `close` 重放原成功响应。关闭后 `page`/`seek`/`body` 返回
+  `window_closed`。
 
 `source` 的 wire 形状是 `"own"` 或
-`{"inherited":{"frozenSnapshotId":"...","ancestorThreadId":"..."}}`。旧 frozen 事实没有
-`ancestorThreadId` 时省略该字段，不伪造。
+`{"inherited":{"snapshotId":"...","ancestorSessionId":"..."}}`；继承条目只读子会话冻结快照，
+不读取父会话当前历史。
 
-**响应**
+**页面、条目与正文**
 
-成功响应是轻量元信息 + 条目投影：
+页面响应是轻量元信息 + 有序条目：
 
 ```json
 {
-  "sessionId": "s",
-  "sessionGeneration": "opaque-live-instance",
-  "structureVersion": 7,
-  "snapshotToken": "opaque-window",
-  "committedTail": "opaque-tail-or-null",
-  "checkpointId": "opaque-checkpoint-or-null",
-  "readTicket": "opaque-ticket",
-  "beforeCursor": "opaque-or-null",
-  "afterCursor": "opaque-or-null",
-  "items": [],
-  "inherited": null,
-  "inheritedUnsupported": false,
-  "rewindInvalidation": { "status": "active", "reopenRequired": false }
+  "version": 2, "kind": "window", "windowId": "w", "snapshotToken": "st",
+  "readTicket": "rt", "historyRevision": "42", "committedTail": "41",
+  "projectionVersion": 1, "beforeCursor": "opaque-or-null",
+  "afterCursor": "opaque-or-null", "items": [],
+  "coverage": { "kind": "interval",
+    "from": { "kind": "head" },
+    "to": { "kind": "position", "region": "own", "ordinal": "42", "side": "before" } },
+  "progress": { "reason": "complete", "scannedEntries": 50, "consumedEntries": 50 }
 }
 ```
 
-- `committedTail`/`checkpointId` 可为 `null`；没有已确认 Full checkpoint 时不得伪造。
-- `snapshotToken` 由服务端铸造，绑定投影/预算版本、source、范围身份、`committedTail` 与
-  `sessionGeneration`；客户端不可解析、不可自造，只能原样回传。
-- `beforeCursor`/`afterCursor` 必须出现，且分别锚定**本页最旧/最新行**：非空表示该邻接方向
-  仍有可读行，`null` 只表示该方向在当前 snapshot 内没有更多可读行。两个游标可以同时非空；
-  `open(latest, before)` 的页包含 durable tail 时 `afterCursor=null` 是预期结果。
-  `beforeCursor`/`afterCursor`/`readTicket`/`committedTail` 均为不透明值，客户端只可原样回传，
-  不得解释或跨 snapshot 比较。
-- `items[]` 含 `entryId`、`source`、`position`（inherited 为 `null`）、`oversize`、
-  `subItems[]`。`entryId` 与旧页/回放共用 `<threadId>:<messageId>` 格式；inherited 条目使用
-  子会话 id 作为前缀。`position` 只在同一 `snapshotToken` 内可比较；客户端不得解释数值或跨快照比较。
-- `rewindInvalidation` 正常为 `{status:"active",reopenRequired:false}`；若返回前发现窗口已被
-  失效，应返回错误而不是用旧正文伪造 `reopenRequired` 成功响应。
-- oversize 条目在 `items[].body` 内联描述符，字段为 `totalBytes`、`chunkSize`、`readTicket`、
-  `snapshotToken`；**不存在顶层 `bodyDescriptors`**，也不得先解码完整正文再切片。
-- `inherited` 是冻结前缀摘要（`snapshotId`、`ancestorThreadId`、`firstEntryId`、`lastEntryId`、
-  `entryCount`、`supported`）；`snapshotId` 由子会话、字节数、条数、祖先与首尾条目做 SHA-256
-  派生。`inheritedUnsupported=true` 表示当前来源未提供分段读取。继承条目只读子会话
-  冻结快照，父会话后续 append/compact/rewind 不改变该视图。
+- `beforeCursor`/`afterCursor` 分别锚定本页最旧/最新条目；`null` 只表示该方向在当前快照内
+  没有更多可读条目。游标、`snapshotToken`、`readTicket` 都是不透明值，只能原样回传。
+- `historyRevision` 是 own 存储序 tail position，不是持久结构版本；`committedTail` 固定本次
+  读取的持久上界；`projectionVersion` 标识展示口径，读取与返回时必须一致。
+- `items[]` 含稳定 `entryId`、`source`、`contentVersion`、`durability`、`order` 与
+  `subItems[]`；子项变体为 text/reasoning/toolCall/toolResult/reminder/summary/attachment/
+  opaque。`entryId` 与标准回放共用 `<sessionId>:<messageId>` 格式。
+- `coverage` 描述已消费的半开区间；不得由 items 首尾推导连续。`progress` 显式给出扫描预算
+  是否耗尽；连续空页必须推进游标，不能伪装成同一位置。
+- 超预算条目在页面上只返回 `HistorySubItem::Opaque` 与内联 `body` 描述符
+  （`bodyRef`/`representation`/`mediaType`/`totalBytes`/`chunkBytes`），不内联正文。page
+  描述符的 `totalBytes` 是 canonical payload 的字节预估；body 响应的 `totalBytes` 才是
+  投影展示长度的权威，客户端在首块到达后修正滚动范围。
+- `body` 成功响应为 `{version,kind:"body",sessionId,windowId,snapshotToken,bodyRef,
+  contentVersion,representation,encoding:"base64",offset,data,nextOffset,complete,
+  totalBytes}`。`complete=true` 时 `nextOffset` 必为 null；未完成时必须严格前进。块边界可
+  落在多字节 UTF-8 字符中间，客户端按原始字节重组后再解码。
+- body 定位只使用窗口签发的 `bodyRef` 与独立条目元数据读取，不依赖该条目在某一页是内联
+  还是 opaque；own/inherited 使用同一表示规则，descriptor 与 body 的
+  `representation`/`mediaType` 必须一致。
 
-**正文分块**
+**预算与幂等**
 
-`session/history/body` 的请求为 `{ sessionId, entryId, source, offset?, maxBytes?, readTicket,
-snapshotToken }`；`source` 参与客户端请求形状，服务端以 readTicket 绑定的 source/snapshot 为准，
-不信任客户端自行改写。`offset` 缺省 0，`maxBytes` 缺省 64 KiB、最大 256 KiB。响应为
-`{ entryId, offset, bytes: number[], nextOffset: null | number, complete: bool }`，`bytes` 是
-JSON 数字数组（原始 UTF-8 字节），`complete=false` 时 `nextOffset` 必须等于 `offset + bytes.len()`。
-分块按原始字节切分，块边界可能落在多字节字符中间；客户端负责跨块重组，并在展示/导出前按
-UTF-8 边界裁剪（只允许跳过开头 1–3 字节的跨块残片并显式标记，真实损坏必须报错）。
-读取受当前 snapshot tail 与本次 open/page/seek 返回的 oversize descriptor 白名单约束；
-非 oversize 条目、越 tail 或非本 snapshot 的条目返回 `-32016`，不退回完整历史读取。未协商
-`peri.historyWindowV1` 时该方法与 `history` 请求一样返回 `-32601`。
+- 单页最终序列化结果不得超过协商的 `maxResponseBytes`；超限返回 `budget_exceeded` 并保留
+  窗口，不返回半页。正文按块读取，单条 canonical payload 超过实现上限（本地 8 MiB）返回
+  `budget_exceeded`，不静默截断。
+- requestKey 账本是连接级的：成功响应原样重放（上限 256 条 / 8 MiB / 30 分钟），高水位在
+  淘汰后仍保留。同键同指纹重放；同键异指纹 `request_conflict`；仍在执行返回
+  `operation_in_progress`（120 秒后可按同一 key 重试）；记录被淘汰后返回
+  `operation_expired`，initial 返回 `delivery_expired`。
+- 参数/形状错误在占用 requestKey 之前返回；失败不写入成功账本。
 
-**提交通知**
+**错误域与拒绝边界**
 
-持久 Full 确认后，Host 只向当前持票连接发送私有通知 `peri/history_committed`：
+领域失败统一使用 JSON-RPC `-32000`，`error.data` 为
+`{domain:"peri.history",version:2,reason,recovery,effect:{execution,history,runtimeGeneration}}`；
+格式、字段与预算校验失败使用 `-32602`；未知方法（含已删除的 `session/history/body`）使用
+`-32601`。错误文本与 `data` 不回显 ticket、cursor 或正文。
 
-```json
-{ "sessionId": "s", "sessionGeneration": "...", "structureVersion": 7,
-  "checkpointId": "...", "summaryEntryId": "...", "committedTail": "...",
-  "hint": { "kind": "open", "anchor": { "kind": "latest" } } }
-```
+| `reason` | `recovery` | 条件 |
+| --- | --- | --- |
+| `protocol_not_negotiated` | `renegotiate` | 未协商 V2 却发送 initial 或 `_peri/history` |
+| `unsupported_version` | `renegotiate` | 版本/profile 不受支持、后端未兑现能力或混入旧能力 |
+| `invalid_cursor` / `cross_window_cursor` | `none` | 游标损坏或不属于本窗口 |
+| `snapshot_invalidated` / `window_expired` / `window_closed` | `reopen` | 快照、期限或窗口已失效 |
+| `ticket_invalid` / `permission_denied` | `reopen` / `none` | 票据不匹配或窗口不属于本会话 |
+| `anchor_unavailable` / `not_found` / `index_not_ready` / `source_unavailable` | `none` / `retry` | 锚点、条目或来源不可读 |
+| `capacity_exceeded` / `budget_exceeded` | `retry` / `reduce_scope` | 窗口/在途配额或字节预算超限 |
+| `backend_unavailable` / `timeout` | `retry` | 后端不可用或总期限耗尽 |
+| `request_conflict` / `operation_expired` / `operation_in_progress` / `delivery_expired` | `none` / `retry` | 幂等账本冲突、淘汰或并发 |
 
-通知按 `checkpointId` 幂等；`summaryEntryId` 可为 `null`。丢失不影响 durable commit，客户端用
-`open(latest)` 重新对齐。`CompactCompleted` 不是提交事实，不触发窗口封印或释放。
+在途配额饱和使用 `capacity_exceeded`；类型层另有 `busy`，当前服务端不单独发送。
 
-**ticket 与失效**
+`effect.execution` 为 `notReady`/`ready`/`unchanged`，`effect.history` 为
+`notPublished`/`published`/`unchanged`；`execution=ready` 必须携带 `runtimeGeneration`。
+initial 失败时执行事实如实取自恢复结果，历史固定为 `notPublished`。
 
-- 每个 session 只有一个活动 `readTicket`，且绑定发起 open 的连接；新 open 成功才原子替换
-  旧 ticket，失败保留旧 ticket/snapshot/generation 继续可用。
-- `page`/`seek`/`body` 在进入存储前和返回前校验 `sessionGeneration`、`structureVersion`、
-  ticket epoch、`snapshotToken` 与 `committedTail`；任一变化丢弃已读正文。
-- rewind/精确删除 durable 成功恰好推进 `structureVersion + 1` 并撤销 ticket；失败不推进；
-  持久化结果不确定撤销 ticket 并进入 `ReloadRequired`：旧 ticket 不再续用，但只读的
-  `open`/`page`/`seek`/`body` 仍按 Store 事实服务（`HandedOff` 同样不因执行上下文不驻留而
-  拒绝只读）。关闭后重新 load 必须改变 `sessionGeneration`，旧 ticket/window/事件全部丢弃。
-- ticket 是进程内不透明值 + 精确匹配，绑定 connection/session/generation/structure/snapshot/
-  source/tail/投影版本/时间/nonce；没有密码学签名，也不是访问授权。
+| 输入 | 预期 |
+| --- | --- |
+| initialize 只声明已删除的旧私有历史能力 | 不选择、不回显 V2；不把它当作 V2 请求 |
+| V2 客户端同时显式声明旧私有能力（true） | `-32000` `unsupported_version`，不产生混合能力 |
+| `session/load` 顶层带 `cursor`/`limit`/`loadGeneration`/`history` | `-32602`，发生在恢复、MCP 装配与历史读取之前 |
+| V2 连接的 `session/load` 缺少 `_meta["peri.history"]` | `-32602` `history_initial_required` |
+| 未协商连接携带 initial | `-32000` `protocol_not_negotiated` |
+| `session/history/body` | `-32601` method not found |
+| V2 字段中放入旧 token/cursor | 按 V2 身份与 MAC 规则拒绝，无旧解析器回退 |
+| TUI 未协商到 V2 | 启动失败；不发送旧分页请求，也不启动标准全量回放 |
 
-**错误码**
+**通知、失效与后端边界**
 
-| code | `data.reason` | 条件 |
-|---:|---|---|
-| `-32601` | `history_window_not_negotiated` | 未协商 V1 却带 `history` |
-| `-32602` | `invalid_history_request` / `session_not_found` | schema、互斥字段、limit、会话不存在 |
-| `-32010` | `session_closing` / `history_mutation_in_progress` | 关闭或 rewind 正在占用变更门 |
-| `-32011` | `cross_session_cursor` | cursor/ticket 的 session 身份不符 |
-| `-32012` | `history_window_invalidated` | generation/structure 变化、rewind/精确删除、关闭重开 |
-| `-32014` | `history_read_ticket_invalid` / `history_read_ticket_expired` | ticket 不存在、过期、撤销或连接不匹配 |
-| `-32015` | `history_snapshot_mismatch` | snapshot/tail/来源/投影版本不一致 |
-| `-32016` | `history_anchor_unavailable` | seek 锚点不可用、body 非 oversize 或越 tail |
-| `-32603` | `history_read_failed` | 存储损坏、不可用、超时或后端未实现 |
+- `_peri/history/changed` 只在协商结果中作为通知名回显，当前服务端不发送；客户端以
+  `window_closed`/`window_expired`/`snapshot_invalidated` 响应错误作为失效事实并重新
+  `open`。不得把 `CompactCompleted` 当作历史提交或窗口封印通知。
+- `page`/`seek`/`body` 在读取前与返回前复核窗口身份、snapshot、ticket、`historyRevision`、
+  `committedTail` 与 `projectionVersion`；关闭、删除、rewind 或会话关闭优先使旧窗口失效。
+  连接断开时取消在途读并回收窗口与实时流，迟到结果不发布。
+- 窗口期限：5 分钟空闲 + 30 分钟绝对期限；`Opening` 占位 60 秒回收；每连接最多 8 个窗口；
+  initial 替换允许 `max + 1` 候选槽。窗口与实时流都是进程内状态，服务端重启即清空。
+- 本机 SQLite 实现窗口读取、独立条目元数据读取、有界正文读取与 inherited 冻结读取；不新增
+  表或列。remote/emscripten 的 `supports_history_v2()` 为 false，协商阶段显式失败，不返回
+  空页；跨实例失效不在本协议承诺内。
+- 旧私有历史协议已删除：`peri.historyPagination`、`peri.historyWindowV1`、
+  `history-window-v1`、`session/load + cursor/limit`、`session/history/body`、
+  `peri/history_committed` 与 `_meta.periLoadGeneration` 不再有可执行实现。共用读取与详情基础
+  已迁入中性模块 `peri-acp-types::history_common`、`session_resources::history_window` 与
+  TUI `history_detail_binding`；回滚只能回退软件版本或撤销提交，不能通过配置开关重新启用
+  旧协议。
 
-旧 `cursor` 分页继续使用既有 `-32011`/`-32012` 映射，不把 V1 错误码倒灌到旧 SDK。
-
-**后端边界**
-
-本机 SQLite 实现 `history_window_bounds`/`load_history_window_page`/`seek_history_window`/
-`load_history_body_chunk` 与 inherited 冻结读取；canonical inherited 分页/seek 按冻结布局的
-数组下标与原始 span 增量计算长度，正文分块经 blob 句柄增量读取；只有非 canonical 信封才
-回退 `json_each` keyset 与 `substr`。`ancestor_thread_id` 取 `threads.parent_thread_id`（旧数据
-无该字段时为 `null`）。remote/emscripten adapter 未覆写这些端口，默认返回 `Unsupported`
-（出口 `-32603`），不得返回空页或空历史；能力协商成功不等于后端支持，因此这些后端不构成
-可用的窗口/继承实现。窗口能力默认关闭；未启用时旧分页路径保持原行为。
-
-
-协商过分页的连接在同一份 `_meta` 上还会拿到条目身份与位置：`periEntryId`（`{会话}:{payload}`，
-与历史页 `items[].entryId` 共用 `dispatch::entry_id` 这一份格式）与 `periPosition`（该条目在**存储序**中的位置，`rowid` 原样给出的不透明整数；继承条目
-在本线程没有行，因此只有身份、没有位置）。历史页 `items[].position` 给的是同一把尺子，
-`subItems[].position` 则是该子项在本条 payload 投影序列中的下标。客户端只能在同一个
-`snapshotToken` 内比较 `position`（用于排序与区间合并，把后到的页并进稀疏首屏的正确区间），
-不得解释其数值、不得跨快照比较（rewind / 精确删除会删尾部行并让新行复用 rowid），也不要
-把它当成时间戳或行号。页严格更早于上一页，页内按历史正序，合并契约的完整表述见
-`peri-acp::host::history_page` 模块文档。
-
-类型事实源为 `peri-acp-types::workspace`；身份、恢复与执行准入约束见
+类型事实源为 `peri-acp-types::history_v2` 与 `peri-acp-types::history_common`；身份、恢复与执行准入约束见
 [会话身份与工作区设计](session-id-environment.md)。
 
 ### 2.2 交互
@@ -319,8 +337,9 @@ ACP 事件映射 / EventSink
 
 - `session/update` 使用标准 ACP `SessionUpdate` payload，承载流式内容、工具调用与 usage 更新。
 - `peri/agent_event` 使用 ACP 的 TUI 专用 DTO，承载低频状态、结构和扩展事件。
-- `peri/history_committed` 是 `peri.historyWindowV1` 的私有提交通知，只发给当前持票连接；
-  字段与幂等语义见 §2.1.1。
+- History V2 的实时 transcript 更新仍是标准 `session/update`，只在通知顶层附带
+  `_meta["peri.delivery"] = {streamId,deliveryId,eventSeq}`；`_peri/history/changed`
+  当前不发送，历史变更由请求错误与重新 `open` 收敛。字段与边界见 §2.1.1。
 - `peri/agent_event_done` 承载本轮终止状态，并可带 `requestId` 关联提交请求。
 
 不要为新 Agent 事件定义平行的 `{event, data}` 协议；需要新增或扩展时，按 ARC-EVENT-001 同步更新事件类型、ACP 映射与 TUI 消费。
@@ -358,7 +377,7 @@ ACP 事件映射 / EventSink
 | turn 终止 | `peri/agent_event_done` | 客户端离开 loading 状态；可携带 `requestId` 用于关联 |
 | `TurnSuspended` | `peri/agent_event` | Agent 等待后台任务、cron 或 workflow 时更新 TUI 状态 |
 | rewind | `peri/agent_event` + `session/rewind*` RPC | 候选、预览与执行结果由 RPC 和事件共同驱动 |
-| 历史窗口提交 | `peri/history_committed`（私有） | 只发当前持票连接；按 checkpointId 幂等封印 durable 段，丢失可用 `open` 对齐 |
+| 历史实时交付 | `session/update` 的 `_meta["peri.delivery"]` | 每连接每会话一条有序流；首屏装配期间有界暂停缓冲，`load` 响应后按序续号；缺口显式暴露 |
 | 上下文使用量 | `session/update` 的 usage 更新与状态快照 | 当前没有单独的用户可见 `budget-warning` 生产路径 |
 | compact、subagent、后台任务、workflow | `peri/agent_event` | 由 TUI 专用 DTO 消费 |
 
@@ -372,7 +391,7 @@ HITL 与 AskUser 通过标准交互协议（`UserInteractionBroker`、`RequestPe
 
 ## 5. 事件映射职责
 
-事件映射收敛在 `peri-acp/src/event/` 的 EventSink 与协议化层：负责把 Agent v2 事件转换为标准更新、TUI 专用 DTO 或终止通知。transport 的 router 只负责消息编解码与分发，不应作为 Agent 事件映射事实源。`peri/history_committed` 是 Host 窗口协调器在 durable commit 确认后直接发送的私有通知，不经过 Agent v2 EventBus；它不是 `CompactCompleted` 的替代，也不改变 ARC-EVENT-001 的 Agent 事件链。
+事件映射收敛在 `peri-acp/src/event/` 的 EventSink 与协议化层：负责把 Agent v2 事件转换为标准更新、TUI 专用 DTO 或终止通知。transport 的 router 只负责消息编解码与分发，不应作为 Agent 事件映射事实源。History V2 的实时交付不新增事件类型：`live_delivery` 在标准 transcript 通知上附加 `_meta["peri.delivery"]`，不经过第二套事件通道，也不改变 ARC-EVENT-001 的 Agent 事件链。
 
 ---
 
@@ -387,7 +406,7 @@ HITL 与 AskUser 通过标准交互协议（`UserInteractionBroker`、`RequestPe
 | 标准 ACP JSON-RPC | `session/new`、`session/prompt` 等 | `{method, params, id?}` | TUI → 服务请求或 notification |
 | 标准 ACP notification | `session/update` | `{method: "session/update", params: {sessionId, update}}` | 服务 → 客户端流式与使用量更新 |
 | TUI 专用 DTO | `peri/agent_event` | `{method: "peri/agent_event", params: {sessionId, event_json}}` | 服务 → TUI 低频状态、结构与扩展事件 |
-| 历史窗口提交 | `peri/history_committed` | `{method: "peri/history_committed", params: {sessionId, sessionGeneration, structureVersion, checkpointId, summaryEntryId, committedTail, hint}}` | 服务 → 当前持票连接；按 checkpoint 幂等，丢失不影响 durable commit |
+| 历史实时交付 | `session/update` | 标准通知 + 顶层 `_meta["peri.delivery"] = {streamId, deliveryId, eventSeq}` | 服务 → 客户端；每连接每会话一条有序流，暂停期有界缓冲，缺口显式 |
 | 标准交互 | `session/request_permission`、`elicitation/create` | ACP method/response | HITL 与 AskUser 往返 |
 | 兼容/扩展 | `peri/unstable_event` | 兼容或特定扩展 payload | 不作为新 Agent 事件的默认通道 |
 | 输入预测 | `peri/prediction_ready` | `{method: "peri/prediction_ready", params: {sessionId, text, actions}}` | 服务 → 客户端输入预测建议 |

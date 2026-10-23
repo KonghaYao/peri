@@ -24,6 +24,10 @@ pub(crate) struct ConnectionContext {
     pub(crate) history_v2: std::sync::Arc<super::history_service::HistoryV2Service>,
     /// 本连接的实时投递注册表（按会话索引；连接关闭时整体清理）。
     pub(crate) live: std::sync::Arc<super::live_delivery::LiveDelivery>,
+    /// 测试专用历史后端注入点；生产连接恒为 `None`（`#[cfg(test)]`，不进入 API）。
+    #[cfg(test)]
+    pub(crate) history_v2_backend_override:
+        Option<std::sync::Arc<dyn peri_acp_types::history_v2::HistoryV2Backend>>,
     cancellation: tokio_util::sync::CancellationToken,
 }
 
@@ -38,6 +42,8 @@ impl ConnectionContext {
             acp_mcp: Default::default(),
             history_v2: std::sync::Arc::new(super::history_service::HistoryV2Service::system()),
             live: std::sync::Arc::new(super::live_delivery::LiveDelivery::new()),
+            #[cfg(test)]
+            history_v2_backend_override: None,
             cancellation: tokio_util::sync::CancellationToken::new(),
         }
     }
@@ -69,42 +75,10 @@ impl ConnectionContext {
         }
     }
 
-    /// 历史分页能力：**当前连接**是否协商过它（REQ §5.3、验收 A25）。
-    ///
-    /// 与 [`Self::caps`] 刻意不同：[`Self::caps`] 是「进程内路径保持历史全能力」的展示判据，
-    /// 未协商的连接在那里拿到的是一份**兜底**能力集；分页是**准入**判定，兜底会把
-    /// 「从未协商」变成「默认获得分页语义」——那样的连接会收到游标、拿到 `snapshotToken`，
-    /// 并按分页语义解析 load，正是 REQ §5.3 要挡住的静默降级。因此这里失败关闭：
-    /// 没有成功的 `initialize`（或声明里没有该键）一律 false。
-    ///
-    /// 调用约定：`session/load` 的模式分流（[`crate::host::history_page::classify`]）与
-    /// 初始 load 的游标附加（[`crate::host::history_page::attach_initial_cursor`]）**必须**
-    /// 用本方法判定，不得改用 [`Self::caps`] 或进程/会话级 caps 注册表——那两者会把别的
-    /// 连接（或旧连接）的协商值带给当前连接。
-    pub(crate) fn history_pagination(&self) -> bool {
-        self.initialized
-            && self
-                .negotiated_caps
-                .as_ref()
-                .is_some_and(|caps| caps.history_pagination)
-    }
-
-    /// `peri.historyWindowV1` 准入：与分页同一套失败关闭规则。
-    ///
-    /// 未 `initialize` 的进程内路径也不默认获得窗口协议；只有当前连接显式声明
-    /// `peri.historyWindowV1=true` 才允许 `session/load` 携带 `history`。
-    pub(crate) fn history_window_v1(&self) -> bool {
-        self.initialized
-            && self
-                .negotiated_caps
-                .as_ref()
-                .is_some_and(|caps| caps.history_window_v1)
-    }
-
     /// `peri.history` V2 准入：只有本连接成功协商出 `HistoryServerCapability` 才为 true。
     ///
-    /// 与分页/窗口同一失败关闭规则：未 `initialize`、未请求 V2，或协商失败（不提交
-    /// caps）都不会把连接变成 V2。后续 `_peri/history` 分流必须读本方法。
+    /// 未 `initialize`、未请求 V2，或协商失败（不提交 caps）都不会把连接变成 V2。
+    /// 后续 `_peri/history` 分流必须读本方法。
     pub(crate) fn history_v2(&self) -> bool {
         self.initialized
             && self
@@ -137,8 +111,25 @@ impl ConnectionContext {
             acp_mcp: self.acp_mcp.clone(),
             history_v2: self.history_v2.clone(),
             live: self.live.clone(),
+            #[cfg(test)]
+            history_v2_backend_override: self.history_v2_backend_override.clone(),
             cancellation: self.cancellation.clone(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_history_v2_backend_override(
+        &mut self,
+        backend: std::sync::Arc<dyn peri_acp_types::history_v2::HistoryV2Backend>,
+    ) {
+        self.history_v2_backend_override = Some(backend);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn history_v2_backend_for_test(
+        &self,
+    ) -> Option<std::sync::Arc<dyn peri_acp_types::history_v2::HistoryV2Backend>> {
+        self.history_v2_backend_override.clone()
     }
 
     pub(crate) fn cancellation(&self) -> tokio_util::sync::CancellationToken {
@@ -161,21 +152,12 @@ impl ConnectionContext {
 
     /// 请求路由可依赖的连接事实快照（一次请求取一份）。
     ///
-    /// 只装**按连接分流**的判定结果：分页准入（失败关闭，见 [`Self::history_pagination`]）与
-    /// 本连接的协商能力集（[`Self::caps`]，未 `initialize` 的进程内路径是兜底的全能力）。
+    /// 只装**按连接分流**的判定结果与本连接的协商能力集。
     /// 路由每个请求都会取一份，因此不整份 [`Self::snapshot_for_request`]（它还要克隆 app
     /// session 表，路由不需要），也不能传 `&ConnectionContext`（它在本循环里由 `Mutex` 持有，
     /// 跨请求派发持锁会与 `initialize` 的 `commit_initialize` 互相等待）。
-    ///
-    /// 两个字段刻意并存、不可互相推导：分页是**准入**（兜底会把「从未协商」变成「默认获得
-    /// 分页语义」），回放标记（`periReplay` / `periLoadGeneration`）是**展示**能力
-    /// （未 `initialize` 的 MpscTransport / TUI 保持历史全能力）。两者都只回答
-    /// 「**当前连接**声明了什么」，不回读进程 / 会话级 caps 注册表。
     pub(crate) fn facts(&self) -> ConnectionFacts {
         ConnectionFacts {
-            connection_id: self.id.clone(),
-            history_pagination: self.history_pagination(),
-            history_window_v1: self.history_window_v1(),
             history_v2: self.history_v2(),
             mcp_control_v1: self.mcp_control_v1(),
             caps: self.caps(),
@@ -187,20 +169,10 @@ impl ConnectionContext {
 /// 请求路由需要的连接事实快照，见 [`ConnectionContext::facts`]。
 #[derive(Clone, Debug)]
 pub(crate) struct ConnectionFacts {
-    /// 连接身份：V1 ticket 绑定到签发它的连接，通知也只投递到该连接。
-    pub(crate) connection_id: String,
-    /// 历史分页是否由**当前连接**协商（REQ §5.3、验收 A25）。失败关闭。
-    pub(crate) history_pagination: bool,
-    /// `peri.historyWindowV1` 是否由**当前连接**协商。与分页独立、失败关闭。
-    pub(crate) history_window_v1: bool,
     /// `peri.history` V2 是否由**当前连接**成功协商（存在服务端回显）。失败关闭。
     pub(crate) history_v2: bool,
     pub(crate) mcp_control_v1: bool,
     /// **当前连接**的 peri 能力集（[`ConnectionContext::caps`] 的原样取值）。
-    ///
-    /// 回放标记与代次戳（`periReplay` / `periLoadGeneration`）由它门控：判据必须是本连接
-    /// `initialize` 的协商结果，不得回读会话级 `caps_registry`——后者的旧值会被先前连接写死，
-    /// 未协商的标准连接因此可能继承到 Peri 私有字段（REQ §5.3、验收 A25）。
     pub(crate) caps: PeriCaps,
     /// Explicit negotiation for admission; absent or closed connections have no capabilities.
     pub(crate) admission_caps: PeriCaps,
@@ -209,16 +181,10 @@ pub(crate) struct ConnectionFacts {
 impl ConnectionFacts {
     /// 没有连接上下文的调用方（进程内直接调用、单测）：按**未协商**处理。
     ///
-    /// 这类调用方没有连接，也就没有协商事实可以继承——分页准入因此 false，正是
-    /// REQ §5.3 要求的失败关闭方向。展示能力集按 [`ConnectionContext::caps`] 的同一判据取
-    /// `all_enabled`：没有连接 = 进程内路径（MpscTransport / TUI）的历史全能力语义，回放标记
-    /// 因此照常出现；两者来源不同，不能用一个布尔值互相替代。
+    /// 这类调用方没有连接，也就没有协商事实可以继承——V2 准入因此 false。
     #[cfg(test)]
     pub(crate) fn unnegotiated() -> Self {
         Self {
-            connection_id: "unnegotiated-test".into(),
-            history_pagination: false,
-            history_window_v1: false,
             history_v2: false,
             mcp_control_v1: false,
             caps: PeriCaps::all_enabled(),

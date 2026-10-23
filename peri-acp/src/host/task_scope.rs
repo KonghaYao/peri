@@ -39,6 +39,8 @@ pub(crate) enum HostTaskKind {
     UserInputEvents,
     SessionRequest,
     CompactHook,
+    /// History V2 只读请求（open/page/seek/body）的后端读取与提交。
+    History,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

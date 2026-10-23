@@ -7,8 +7,7 @@ use peri_acp_types::{
     session_resources::{
         ChildResumeClaim, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, NewSession,
         NewSessionMeta, PersistenceRecovery, RewindBoundary, RewindOutcome, SessionAvailability,
-        SessionHistoryWindowBounds, SessionMetaPatch, SessionResourceResult, SessionResources,
-        SessionSnapshot,
+        SessionMetaPatch, SessionResourceResult, SessionResources, SessionSnapshot,
     },
     store::{CompactionChange, MessageFlags, PersistedPayload},
     thread::{ThreadId, ThreadMeta},
@@ -59,10 +58,6 @@ struct CompactStore {
     compact_commits: AtomicUsize,
     fail_append_after_compact: std::sync::atomic::AtomicBool,
     failed_appends: AtomicUsize,
-    bounds_calls: AtomicUsize,
-    bounds_delay: std::sync::atomic::AtomicBool,
-    bounds_started: Arc<tokio::sync::Notify>,
-    bounds_release: Arc<tokio::sync::Notify>,
 }
 
 #[async_trait]
@@ -152,26 +147,6 @@ impl SessionResources for CompactStore {
         id: &ThreadId,
     ) -> SessionResourceResult<Vec<PersistedPayload>> {
         self.inner.load_session_history(id).await
-    }
-
-    async fn history_window_bounds(
-        &self,
-        id: &ThreadId,
-    ) -> SessionResourceResult<SessionHistoryWindowBounds> {
-        self.bounds_calls.fetch_add(1, Ordering::SeqCst);
-        if self.bounds_delay.load(Ordering::SeqCst) {
-            self.bounds_started.notify_one();
-            self.bounds_release.notified().await;
-        }
-        self.inner.history_window_bounds(id).await
-    }
-
-    async fn load_history_window_page(
-        &self,
-        id: &ThreadId,
-        plan: &peri_acp_types::session_resources::HistoryWindowPagePlan,
-    ) -> SessionResourceResult<peri_acp_types::session_resources::HistoryWindowRows> {
-        self.inner.load_history_window_page(id, plan).await
     }
 
     async fn load_session_meta(&self, id: &ThreadId) -> SessionResourceResult<ThreadMeta> {
@@ -338,9 +313,8 @@ fn make_host_sessions(ctx: &SessionContext, payloads: Vec<PersistedPayload>) -> 
         closing: false,
         context_ownership: crate::host::ContextOwnership::Resident,
         history_payloads: payloads,
-        structure_version: 0,
         session_generation: crate::host::next_session_generation(),
-        history_window: Default::default(),
+        handed_off_alive: None,
         live_delivery: None,
         event_health: Default::default(),
         cancel_token: Some(ctx.cancel.clone()),
@@ -377,10 +351,6 @@ async fn make_compact_context(
         compact_commits: AtomicUsize::new(0),
         fail_append_after_compact: std::sync::atomic::AtomicBool::new(false),
         failed_appends: AtomicUsize::new(0),
-        bounds_calls: AtomicUsize::new(0),
-        bounds_delay: std::sync::atomic::AtomicBool::new(false),
-        bounds_started: Arc::new(tokio::sync::Notify::new()),
-        bounds_release: Arc::new(tokio::sync::Notify::new()),
     });
     let cwd = dir.path().to_str().unwrap();
     let meta = ThreadMeta::new_at(cwd, peri_time::now_wall());
@@ -508,90 +478,4 @@ fn synthetic_result(compact: bool) -> peri_acp_types::session::PromptResult {
         recall_items: Vec::new(),
         pending_tasks: 0,
     }
-}
-
-#[tokio::test]
-#[serial]
-async fn ordinary_append_after_full_does_not_read_window_bounds() {
-    let dir = tempfile::tempdir().unwrap();
-    let _home = HomeGuard::set(dir.path());
-    let (ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
-    let resources: Arc<dyn SessionResources> = store.clone();
-
-    finish_prompt_turn(
-        &sessions,
-        &ctx.session_id,
-        false,
-        synthetic_result(true),
-        Some(resources.clone()),
-    )
-    .await
-    .expect("compact turn");
-    assert_eq!(
-        store.bounds_calls.load(Ordering::SeqCst),
-        1,
-        "the Full turn reads bounds exactly once"
-    );
-
-    for _ in 0..2 {
-        finish_prompt_turn(
-            &sessions,
-            &ctx.session_id,
-            false,
-            synthetic_result(false),
-            Some(resources.clone()),
-        )
-        .await
-        .expect("ordinary append turn");
-    }
-    assert_eq!(
-        store.bounds_calls.load(Ordering::SeqCst),
-        1,
-        "ordinary append turns must not read bounds after a prior Full"
-    );
-}
-
-/// F6：bounds 读取期间发生 rewind（structureVersion 变化）时，不能把旧 checkpoint/tail
-/// 写回 coordinator。
-#[tokio::test]
-#[serial]
-async fn concurrent_rewind_discards_compact_bounds_metadata() {
-    let dir = tempfile::tempdir().unwrap();
-    let _home = HomeGuard::set(dir.path());
-    let (ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
-    let resources: Arc<dyn SessionResources> = store.clone();
-    store.bounds_delay.store(true, Ordering::SeqCst);
-
-    let task_sessions = sessions.clone();
-    let task_id = ctx.session_id.clone();
-    let task = tokio::spawn(async move {
-        finish_prompt_turn(
-            &task_sessions,
-            &task_id,
-            false,
-            synthetic_result(true),
-            Some(resources),
-        )
-        .await
-    });
-
-    store.bounds_started.notified().await;
-    {
-        let mut states = sessions.lock().await;
-        let state = states.get_mut(&ctx.session_id).unwrap();
-        // 模擬 durable rewind：结构版本前进，窗口提交元数据被清空。
-        state.structure_version = state.structure_version.saturating_add(1);
-        state.history_window.checkpoint_id = None;
-        state.history_window.committed_tail = None;
-    }
-    store.bounds_release.notify_one();
-    task.await.unwrap().expect("turn itself remains successful");
-
-    let states = sessions.lock().await;
-    let state = states.get(&ctx.session_id).unwrap();
-    assert!(
-        state.history_window.checkpoint_id.is_none(),
-        "stale bounds must not be published across a rewind"
-    );
-    assert!(state.history_window.committed_tail.is_none());
 }

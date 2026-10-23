@@ -11,7 +11,7 @@ use super::inherited_read::{
 use super::*;
 use crate::sessions::data::SessionDataPort;
 use crate::sessions::sqlite_store::SqliteThreadStore;
-use peri_acp_types::history_window::{HistorySource, HistoryWindowDirection};
+use peri_acp_types::history_common::{HistorySource, HistoryWindowDirection};
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::session_resources::{
     HistoryWindowPagePlan, HistoryWindowReadIntent, HistoryWindowTailExpectation,
@@ -82,7 +82,7 @@ fn assert_index_not_ready(error: SessionResourceError) {
 }
 
 fn inherited_plan(
-    snapshot: &peri_acp_types::history_window::HistoryInheritedSnapshot,
+    snapshot: &peri_acp_types::history_common::HistoryInheritedSnapshot,
 ) -> HistoryWindowPagePlan {
     HistoryWindowPagePlan {
         intent: HistoryWindowReadIntent::Page,

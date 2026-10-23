@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use peri_acp_types::history_window::{HistoryReadTicket, HistorySource};
+use peri_acp_types::history_common::{HistoryReadTicket, HistorySource};
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::store::{InheritedContext, PersistedPayload, ThreadStore};
 use sqlx::{AssertSqlSafe, Row};
@@ -243,7 +243,7 @@ async fn read_body(
                 source.clone(),
                 entry,
                 offset,
-                peri_acp_types::history_window::HISTORY_WINDOW_MAX_CHUNK_SIZE,
+                peri_acp_types::history_common::HISTORY_WINDOW_MAX_CHUNK_SIZE,
                 None,
                 &ticket,
             )

@@ -21,6 +21,8 @@ mod pump;
 mod requests;
 mod session;
 mod steer;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod workspace;
 
 pub(crate) use session::SessionLoadReservation;
@@ -79,8 +81,6 @@ pub enum AcpNotification {
         event: String,
         data: Value,
     },
-    /// S4 私有通知 `peri/history_committed`（展示提交事实）。
-    HistoryCommitted { session_id: String, params: Value },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,12 +116,8 @@ pub struct AcpTuiClient {
     user_input_queue: Arc<std::sync::atomic::AtomicBool>,
     session_workspace: Arc<std::sync::atomic::AtomicBool>,
     mcp_control: Arc<std::sync::atomic::AtomicBool>,
-    /// History V2 连接事实：本地开关、服务端选择与协商预算都按连接持有。
+    /// History V2 连接事实：服务端选择与协商预算都按连接持有。
     /// 不读进程级 atom，避免另一条连接/测试切换全局开关改变本连接的 load 语义。
-    ///
-    /// `None` 表示 initialize 尚未落账：此时按启动配置（atom）取值。测试可先写入
-    /// `Some`，不触碰进程级 beta 开关。
-    history_v2_enabled: Arc<Mutex<Option<bool>>>,
     history_v2_capable: Arc<std::sync::atomic::AtomicBool>,
     history_v2_limits: Arc<Mutex<peri_acp_types::history_v2::HistoryLimits>>,
     execution_cwd: watch::Sender<Option<String>>,
@@ -137,44 +133,20 @@ pub struct AcpTuiClient {
 }
 
 impl AcpTuiClient {
-    /// 本连接是否请求 History V2（initialize 时按启动配置固定）。
-    ///
-    /// initialize 尚未落账（`None`）时回退启动配置 atom；落账后只认连接事实，
-    /// 其他连接或测试改动进程级开关不会改变本连接的 load 语义。
-    pub(crate) fn history_v2_enabled(&self) -> bool {
-        self.history_v2_enabled
-            .lock()
-            .unwrap()
-            .unwrap_or_else(|| crate::kit::atoms::HISTORY_V2.get())
-    }
-
-    /// 本连接是否真正使用 V2：请求过且服务端明确选择。
+    /// 本连接是否真正使用 V2：服务端明确选择。
     pub(crate) fn history_v2_active(&self) -> bool {
-        self.history_v2_enabled()
-            && self
-                .history_v2_capable
-                .load(std::sync::atomic::Ordering::Acquire)
+        self.history_v2_capable
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
-    /// beta 开启时，initialize 必须被服务端明确选中 V2；否则启动必须失败关闭。
+    /// 本地 TUI 只支持 History V2；initialize 未被服务端明确选中时必须失败关闭。
     ///
-    /// 返回 `Err` 的文案直接展示给用户：不得静默落回标准全量回放，那会让
-    /// 「beta 已开」与「实际走了旧协议」同时成立而无人知晓。
+    /// 返回 `Err` 的文案直接展示给用户：不得静默落回标准全量回放。
     pub(crate) fn require_history_v2_startup(&self) -> Result<(), String> {
-        if self.history_v2_enabled() {
-            if self
-                .history_v2_capable
-                .load(std::sync::atomic::Ordering::Acquire)
-            {
-                Ok(())
-            } else {
-                Err(
-                    "服务端未启用/不支持 History V2；关闭 beta 后重试 (history-v2 beta is enabled but the server did not select V2)"
-                        .to_owned(),
-                )
-            }
-        } else {
+        if self.history_v2_active() {
             Ok(())
+        } else {
+            Err("服务端未启用/不支持 History V2；本地 TUI 仅支持 History V2".to_owned())
         }
     }
 
@@ -197,11 +169,9 @@ impl AcpTuiClient {
     #[cfg(test)]
     pub(crate) fn install_history_v2_for_test(
         &self,
-        enabled: bool,
         capable: bool,
         limits: peri_acp_types::history_v2::HistoryLimits,
     ) {
-        *self.history_v2_enabled.lock().unwrap() = Some(enabled);
         self.set_history_v2_negotiation(capable, limits);
     }
 
@@ -274,7 +244,6 @@ impl AcpTuiClient {
             user_input_queue: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             session_workspace: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_control: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            history_v2_enabled: Arc::new(Mutex::new(None)),
             history_v2_capable: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             history_v2_limits: Arc::new(Mutex::new(
                 peri_acp_types::history_v2::HistoryLimits::default(),

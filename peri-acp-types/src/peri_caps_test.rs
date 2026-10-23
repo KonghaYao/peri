@@ -16,19 +16,22 @@ fn test_session_workspace_v1_requires_explicit_negotiation() {
 }
 
 #[test]
-fn test_history_pagination_requires_explicit_negotiation() {
-    for value in [
-        serde_json::json!({}),
-        serde_json::json!({"peri.historyPagination":"true"}),
-        serde_json::json!({"peri.historyPagination":false}),
-    ] {
-        assert!(!PeriCaps::from_client_meta(value.as_object().unwrap()).history_pagination);
-    }
-    let value = serde_json::json!({"peri.historyPagination":true});
+fn test_retired_history_capability_keys_are_not_parsed_or_echoed() {
+    let value = serde_json::json!({
+        "peri.historyPagination": true,
+        "peri.historyWindowV1": true,
+    });
     let caps = PeriCaps::from_client_meta(value.as_object().unwrap());
-    assert!(caps.history_pagination);
-    assert_eq!(caps.to_agent_meta()["peri.historyPagination"], true);
-    assert!(PeriCaps::all_enabled().history_pagination);
+    assert!(caps.history_v2.is_none(), "旧私有能力不得被当成 V2");
+    let meta = caps.to_agent_meta();
+    assert!(
+        meta.get("peri.historyPagination").is_none(),
+        "已删除的旧能力不得被回显"
+    );
+    assert!(
+        meta.get("peri.historyWindowV1").is_none(),
+        "已删除的旧能力不得被回显"
+    );
 }
 
 #[test]
@@ -237,20 +240,9 @@ fn test_ui_commands_roundtrip() {
 }
 
 #[test]
-fn test_history_window_v1_requires_explicit_negotiation() {
-    for value in [
-        serde_json::json!({}),
-        serde_json::json!({"peri.historyWindowV1": "true"}),
-        serde_json::json!({"peri.historyWindowV1": false}),
-    ] {
-        assert!(
-            !PeriCaps::from_client_meta(value.as_object().unwrap()).history_window_v1,
-            "only an explicit boolean true negotiates V1: {value}"
-        );
-    }
+fn test_history_window_v1_is_retired() {
     let value = serde_json::json!({"peri.historyWindowV1": true});
     let caps = PeriCaps::from_client_meta(value.as_object().unwrap());
-    assert!(caps.history_window_v1);
-    assert_eq!(caps.to_agent_meta()["peri.historyWindowV1"], true);
-    assert!(PeriCaps::all_enabled().history_window_v1);
+    assert!(caps.history_v2.is_none());
+    assert!(caps.to_agent_meta().get("peri.historyWindowV1").is_none());
 }
