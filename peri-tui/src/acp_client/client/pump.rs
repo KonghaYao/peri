@@ -587,13 +587,29 @@ impl AcpTuiClient {
         }
     }
 
-    pub(super) fn flush_buffered(&self, notifications: Vec<AcpNotification>) {
+    /// 立即投递客户端自己合成、不经过 wire 路由的通知。
+    pub(super) fn deliver_immediate(&self, notification: AcpNotification) {
         let weak = self.notification_weak.lock().unwrap().clone();
         if let Some(weak) = weak
             && let Some(tx) = weak.upgrade()
         {
+            deliver_or_close(&self.transport, &tx, notification);
+        }
+    }
+
+    /// 逐批投递初始化期间缓存的通知，直到 lifecycle 确认队列为空。
+    ///
+    /// 取批与 pending 清除由 [`InteractionLifecycle::take_buffered_batch`] 在同一
+    /// 临界区完成：投递当前批时到达的新通知会进入下一批，因而不会插到旧帧之前。
+    pub(super) fn flush_buffered(&self) {
+        let weak = self.notification_weak.lock().unwrap().clone();
+        let tx = weak.and_then(|weak| weak.upgrade());
+        while let Some(notifications) = self.lifecycle.take_buffered_batch() {
+            let Some(tx) = tx.as_ref() else {
+                continue;
+            };
             for notification in notifications {
-                if !deliver_or_close(&self.transport, &tx, notification) {
+                if !deliver_or_close(&self.transport, tx, notification) {
                     break;
                 }
             }

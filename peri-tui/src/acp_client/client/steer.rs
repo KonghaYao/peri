@@ -207,13 +207,13 @@ impl AcpTuiClient {
                     .open_execution(session_id, &snapshot.generation, request_id, true)
         {
             self.settle_claims_owned(claims).await;
-            self.flush_buffered(vec![AcpNotification::AgentEvent {
+            self.deliver_immediate(AcpNotification::AgentEvent {
                 session_id: session_id.to_owned(),
                 event: AcpEvent::UserInputRunStarted {
                     generation: snapshot.generation.clone(),
                     request_id: request_id.clone(),
                 },
-            }]);
+            });
         }
         Ok(snapshot)
     }

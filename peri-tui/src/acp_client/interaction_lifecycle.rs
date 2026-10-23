@@ -193,6 +193,9 @@ struct InteractionLifecycleState {
     active_prompt: Option<PromptMarker>,
     execution_runs: HashMap<String, ExecutionRuns>,
     new_buffer: VecDeque<BufferedOrdinaryNotification>,
+    /// `commit_stable` 已切路由，但调用方的初始化（可能等待 RPC）尚未结束。
+    /// 置位期间到达的通知继续排入 `new_buffer`，保证 flush 期间 FIFO 不被插队。
+    new_flush_pending: bool,
     warned_buffer_full: bool,
 }
 
@@ -226,6 +229,7 @@ impl InteractionLifecycle {
                 active_prompt: None,
                 execution_runs: HashMap::new(),
                 new_buffer: VecDeque::new(),
+                new_flush_pending: false,
                 warned_buffer_full: false,
             })),
             drop_settlement_tx: Arc::new(Mutex::new(None)),
@@ -309,6 +313,7 @@ impl InteractionLifecycle {
         };
         state.active_prompt = None;
         state.new_buffer.clear();
+        state.new_flush_pending = false;
         state.warned_buffer_full = false;
         let claims = drain_pending(&mut state, ClaimCause::LifecycleDrain, |_| true);
         Ok(TransitionStart {
@@ -326,24 +331,55 @@ impl InteractionLifecycle {
         }
     }
 
-    pub fn commit_stable(&self, generation: u64, session_id: String) -> Vec<AcpNotification> {
+    /// 切到 Stable 路由，但保留 New 期间缓存的普通通知。
+    ///
+    /// 调用方随后仍要完成初始化（可能等待 `session/input/snapshot`）。这段窗口
+    /// 内到达的通知必须继续入队，否则会先于缓存帧投递并破坏 wire FIFO；缓存由
+    /// [`Self::take_buffered_batch`] 在初始化结束后原子排空。
+    pub fn commit_stable(&self, generation: u64, session_id: String) {
         let mut state = self.state.lock().unwrap();
         if state.route.generation() != generation {
-            return Vec::new();
+            return;
         }
         state.route = SessionRoute::Stable {
-            session_id: session_id.clone(),
+            session_id,
             generation,
             accepting_reverse: false,
             prompt_epoch: 0,
         };
         state.active_prompt = None;
         state.warned_buffer_full = false;
-        state
+        state.new_flush_pending = true;
+    }
+
+    /// 原子取出一批待投递的普通通知。
+    ///
+    /// 非空批次返回后 pending 仍为真：调用方投递这批通知期间到达的新通知会继续
+    /// 入队，下一批因此保持 wire 顺序。只有再次加锁发现队列为空时，才在同一临界区
+    /// 清除 pending 并返回 `None`；此后通知恢复即时 Forward。
+    pub fn take_buffered_batch(&self) -> Option<Vec<AcpNotification>> {
+        let mut state = self.state.lock().unwrap();
+        if !state.new_flush_pending {
+            return None;
+        }
+        let SessionRoute::Stable { session_id, .. } = &state.route else {
+            state.new_buffer.clear();
+            state.new_flush_pending = false;
+            return None;
+        };
+        let session_id = session_id.clone();
+        let batch: Vec<AcpNotification> = state
             .new_buffer
             .drain(..)
-            .filter_map(|item| (item.session_id == session_id).then_some(item.notification))
-            .collect()
+            .filter(|item| item.session_id == session_id)
+            .map(|item| item.notification)
+            .collect();
+        if batch.is_empty() {
+            state.new_flush_pending = false;
+            None
+        } else {
+            Some(batch)
+        }
     }
 
     pub fn fail_transition(&self, generation: u64) -> Vec<ClaimedInteraction> {
@@ -354,6 +390,8 @@ impl InteractionLifecycle {
         state.route = SessionRoute::NoSession { generation };
         state.active_prompt = None;
         state.new_buffer.clear();
+        state.new_flush_pending = false;
+        state.warned_buffer_full = false;
         drain_pending(&mut state, ClaimCause::LifecycleDrain, |_| true)
     }
 
@@ -400,7 +438,14 @@ impl InteractionLifecycle {
             SessionRoute::Stable {
                 session_id: current,
                 ..
-            } if current == &session_id => OrdinaryDecision::Forward(Box::new(notification)),
+            } if current == &session_id => {
+                if !state.new_flush_pending {
+                    OrdinaryDecision::Forward(Box::new(notification))
+                } else {
+                    buffer_ordinary(&mut state, session_id, notification);
+                    OrdinaryDecision::Buffered
+                }
+            }
             SessionRoute::Transitioning {
                 kind: TransitionKind::Load,
                 target: Some(target),
@@ -411,18 +456,7 @@ impl InteractionLifecycle {
                 target: None,
                 ..
             } => {
-                if state.new_buffer.len() < NEW_SESSION_EVENT_BUFFER_CAPACITY {
-                    state.new_buffer.push_back(BufferedOrdinaryNotification {
-                        session_id,
-                        notification,
-                    });
-                } else if !state.warned_buffer_full {
-                    state.warned_buffer_full = true;
-                    tracing::warn!(
-                        capacity = NEW_SESSION_EVENT_BUFFER_CAPACITY,
-                        "ACP client: new-session ordinary notification buffer full"
-                    );
-                }
+                buffer_ordinary(&mut state, session_id, notification);
                 OrdinaryDecision::Buffered
             }
             _ => OrdinaryDecision::Drop,
@@ -859,6 +893,25 @@ fn retire_execution(
 impl Default for InteractionLifecycle {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn buffer_ordinary(
+    state: &mut InteractionLifecycleState,
+    session_id: String,
+    notification: AcpNotification,
+) {
+    if state.new_buffer.len() < NEW_SESSION_EVENT_BUFFER_CAPACITY {
+        state.new_buffer.push_back(BufferedOrdinaryNotification {
+            session_id,
+            notification,
+        });
+    } else if !state.warned_buffer_full {
+        state.warned_buffer_full = true;
+        tracing::warn!(
+            capacity = NEW_SESSION_EVENT_BUFFER_CAPACITY,
+            "ACP client: new-session ordinary notification buffer full"
+        );
     }
 }
 

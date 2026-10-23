@@ -22,6 +22,24 @@ fn register(lifecycle: &InteractionLifecycle, id: RequestId) -> RegisteredRevers
     }
 }
 
+fn ordinary(lifecycle: &InteractionLifecycle, msg: &str) -> OrdinaryDecision {
+    lifecycle.route_ordinary("new".into(), AcpNotification::Other { msg: msg.into() })
+}
+
+fn buffered_messages(lifecycle: &InteractionLifecycle) -> Vec<String> {
+    lifecycle
+        .take_buffered_batch()
+        .expect("pending 期间应能取出缓存批次")
+        .into_iter()
+        .map(|notification| {
+            let AcpNotification::Other { msg } = notification else {
+                panic!("unexpected notification")
+            };
+            msg
+        })
+        .collect()
+}
+
 #[test]
 fn test_reverse_registers_before_forward_and_owner_is_monotonic() {
     let (lifecycle, _lease) = started();
@@ -181,16 +199,14 @@ fn test_new_transition_buffers_only_bounded_ordinary_notifications_fifo() {
         .unwrap();
     for index in 0..(NEW_SESSION_EVENT_BUFFER_CAPACITY + 1) {
         assert!(matches!(
-            lifecycle.route_ordinary(
-                "new".into(),
-                AcpNotification::Other {
-                    msg: index.to_string()
-                },
-            ),
+            ordinary(&lifecycle, &index.to_string()),
             OrdinaryDecision::Buffered
         ));
     }
-    let buffered = lifecycle.commit_stable(start.generation, "new".into());
+    lifecycle.commit_stable(start.generation, "new".into());
+    let buffered = lifecycle
+        .take_buffered_batch()
+        .expect("commit 保留的缓存应在 flush 时取出");
     assert_eq!(buffered.len(), NEW_SESSION_EVENT_BUFFER_CAPACITY);
     for (index, notification) in buffered.into_iter().enumerate() {
         let AcpNotification::Other { msg } = notification else {
@@ -198,6 +214,68 @@ fn test_new_transition_buffers_only_bounded_ordinary_notifications_fifo() {
         };
         assert_eq!(msg, index.to_string());
     }
+    assert!(lifecycle.take_buffered_batch().is_none());
+}
+
+/// commit 只切路由、不取缓存：初始化等待期间的新通知继续入队，flush 按旧→新投递。
+#[test]
+fn test_commit_stable_keeps_buffering_until_flush_in_wire_order() {
+    let lifecycle = InteractionLifecycle::new();
+    lifecycle.force_stable("old", false);
+    let start = lifecycle
+        .begin_transition(TransitionKind::New, None)
+        .unwrap();
+    assert!(matches!(
+        ordinary(&lifecycle, "old-1"),
+        OrdinaryDecision::Buffered
+    ));
+    assert!(matches!(
+        ordinary(&lifecycle, "old-2"),
+        OrdinaryDecision::Buffered
+    ));
+    lifecycle.commit_stable(start.generation, "new".into());
+    assert!(matches!(
+        ordinary(&lifecycle, "new-1"),
+        OrdinaryDecision::Buffered
+    ));
+    assert_eq!(
+        buffered_messages(&lifecycle),
+        vec!["old-1", "old-2", "new-1"],
+        "flush 必须保持 wire 顺序"
+    );
+    // 批次取出后 pending 仍为真：投递期间到达的通知进入下一批。
+    assert!(matches!(
+        ordinary(&lifecycle, "new-2"),
+        OrdinaryDecision::Buffered
+    ));
+    assert_eq!(buffered_messages(&lifecycle), vec!["new-2"]);
+    assert!(lifecycle.take_buffered_batch().is_none());
+    assert!(matches!(
+        ordinary(&lifecycle, "live"),
+        OrdinaryDecision::Forward(_)
+    ));
+}
+
+#[test]
+fn test_fail_transition_clears_buffer_and_pending() {
+    let lifecycle = InteractionLifecycle::new();
+    lifecycle.force_stable("old", false);
+    let start = lifecycle
+        .begin_transition(TransitionKind::New, None)
+        .unwrap();
+    assert!(matches!(
+        ordinary(&lifecycle, "stale"),
+        OrdinaryDecision::Buffered
+    ));
+    lifecycle.fail_transition(start.generation);
+    // force_stable 不触碰 flush 状态：若 fail_transition 未清缓存/pending，
+    // 下一条通知会被当成待 flush 的缓存帧，而不是即时 Forward。
+    lifecycle.force_stable("new", false);
+    assert!(matches!(
+        ordinary(&lifecycle, "live"),
+        OrdinaryDecision::Forward(_)
+    ));
+    assert!(lifecycle.take_buffered_batch().is_none());
 }
 
 #[test]
