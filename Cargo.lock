@@ -3409,6 +3409,8 @@ dependencies = [
 name = "peri-mcp-common"
 version = "0.2.0"
 dependencies = [
+ "anyhow",
+ "axum",
  "base64 0.23.1",
  "chrono",
  "fs4",

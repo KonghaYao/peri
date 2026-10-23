@@ -1,51 +1,90 @@
-//! Dispatches an MCP capability before Peri configuration or Agent startup.
+//! `peri mcp-start <instance>`: serve a builtin MCP instance in-process.
+//!
+//! Dispatched before Peri configuration or Agent startup, so the standalone
+//! service consumes no Peri config and needs no sibling worker binary.
 
-use std::{ffi::OsString, path::PathBuf, process::Command};
+use std::ffi::OsString;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+use clap::{ArgGroup, Parser};
+use peri_acp_types::builtin_mcp::BUILTIN_RESERVED_INSTANCE_NAMES;
+use peri_middlewares::mcp::standalone::{self, Options, Transport};
 
-const WORKSPACE_BINARY: &str = if cfg!(windows) {
-    "peri-mcp-workspace.exe"
-} else {
-    "peri-mcp-workspace"
-};
-
-fn worker_path(peri_executable: PathBuf) -> Result<PathBuf> {
-    let directory = peri_executable
-        .parent()
-        .context("cannot locate the Peri executable directory")?;
-    let worker = directory.join(WORKSPACE_BINARY);
-    if !worker.is_file() {
-        bail!(
-            "Workspace MCP executable is missing from the Peri installation: {}",
-            worker.display()
-        );
-    }
-    Ok(worker)
+#[derive(Debug, Parser)]
+#[command(
+    name = "peri mcp-start",
+    about = "Serve a builtin MCP instance without the Peri Agent"
+)]
+#[command(group(ArgGroup::new("transport").required(true).args(["stdio", "http"])))]
+struct Args {
+    /// Builtin instance to serve (web, artifact, cron, workspace, workflow).
+    instance: String,
+    /// Serve MCP over stdin/stdout.
+    #[arg(long, conflicts_with = "http")]
+    stdio: bool,
+    /// Serve MCP Streamable HTTP at /mcp.
+    #[arg(long, conflicts_with = "stdio")]
+    http: bool,
+    /// HTTP listen host (default 127.0.0.1). A non-loopback host is
+    /// unauthenticated: only use it on an isolated network.
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+    /// HTTP listen port (default 8765).
+    #[arg(long, default_value_t = 8765)]
+    port: u16,
+    /// Extra HTTP `Host` header values accepted by the server (repeatable).
+    /// The loopback defaults stay accepted; use `*` to disable Host validation.
+    #[arg(long = "allowed-host", value_name = "HOST")]
+    allowed_host: Vec<String>,
+    /// Working directory for the served instance (default: current directory).
+    /// This is not an OS sandbox.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
 }
 
 pub(super) fn run(args: &[OsString]) -> Result<()> {
-    let Some(capability) = args.first() else {
-        bail!("expected an MCP capability: peri mcp-start workspace --stdio|--http");
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.push(OsString::from("peri mcp-start"));
+    argv.extend_from_slice(args);
+    let args = Args::try_parse_from(argv)?;
+    if !BUILTIN_RESERVED_INSTANCE_NAMES.contains(&args.instance.as_str()) {
+        bail!(
+            "unknown builtin MCP instance: {} (expected one of: {})",
+            args.instance,
+            BUILTIN_RESERVED_INSTANCE_NAMES.join(", ")
+        );
+    }
+    if !args.allowed_host.is_empty() && !args.http {
+        bail!("--allowed-host requires --http");
+    }
+    let workspace = match args.workspace {
+        Some(path) => path,
+        None => std::env::current_dir().context("cannot determine current directory")?,
     };
-    if capability != "workspace" {
-        bail!("unknown MCP capability: {}", capability.to_string_lossy());
+    let workspace = workspace
+        .canonicalize()
+        .with_context(|| format!("cannot resolve workspace {}", workspace.display()))?;
+    if !workspace.is_dir() {
+        bail!("workspace is not a directory: {}", workspace.display());
     }
-    let executable = std::env::current_exe().context("cannot locate the Peri executable")?;
-    let worker = worker_path(executable)?;
-    let mut command = Command::new(worker);
-    command.args(&args[1..]);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        Err(command.exec().into())
-    }
-    #[cfg(not(unix))]
-    {
-        let status = command.status().context("cannot start Workspace MCP")?;
-        std::process::exit(status.code().unwrap_or(1));
-    }
+    let transport = if args.stdio {
+        Transport::Stdio
+    } else {
+        Transport::Http {
+            host: args.host,
+            port: args.port,
+            allowed_hosts: args.allowed_host,
+        }
+    };
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(standalone::run(Options {
+        instance: args.instance,
+        transport,
+        workspace,
+    }))
 }
 
 #[cfg(test)]

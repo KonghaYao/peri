@@ -12,13 +12,15 @@ peri-time = { path = "../../peri-time" }
 peri-agent = { path = "../../peri-agent" }
 peri-acp-types = { path = "../../peri-acp-types" }
 peri-process = { path = "../../peri-process" }
+anyhow.workspace = true
+axum.workspace = true
 chrono.workspace = true
 base64 = { version = "0.23.1", features = ["alloc"] }
 fs4 = { version = "1.1.0", features = ["sync"] }
 futures.workspace = true
 libc = "0.2"
 parking_lot.workspace = true
-rmcp.workspace = true
+rmcp = { workspace = true, features = ["transport-streamable-http-server"] }
 serde.workspace = true
 serde_json.workspace = true
 serde_norway.workspace = true
