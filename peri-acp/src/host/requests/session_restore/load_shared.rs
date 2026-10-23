@@ -117,7 +117,6 @@ async fn prepare_cold_shared(
         ));
     }
 
-    open_workspace_scope_shared(cfg, sessions, &id).await?;
     Ok(PreparedSession { id, identity })
 }
 
@@ -390,67 +389,6 @@ pub(crate) async fn cleanup_unpublished_restore(
     if let Some(environment) = environment {
         let _ = environment.shutdown().await;
     }
-}
-
-/// 冷发布成功后的 Workspace task scope；失败时清理并移除未交付的会话。
-async fn open_workspace_scope_shared(
-    cfg: &AcpServerConfig,
-    sessions: &SharedSessions,
-    session_id: &str,
-) -> Result<(), AcpError> {
-    let (environment, pool) = {
-        let states = sessions.lock().await;
-        let state = states
-            .get(session_id)
-            .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
-        let environment = state.environment.clone();
-        let pool = environment
-            .as_ref()
-            .map(|env| env.cfg.mcp_pool.clone())
-            .unwrap_or_else(|| cfg.mcp_pool.clone());
-        (environment, pool)
-    };
-    let scope_result = async {
-        if let Some(pool) = pool {
-            pool.open_workspace_task_scope(session_id).await?;
-        }
-        Ok::<(), String>(())
-    }
-    .await;
-    if let Err(error) = scope_result {
-        {
-            let mut states = sessions.lock().await;
-            if let Some(state) = states.get_mut(session_id) {
-                state.closing = true;
-            }
-        }
-        let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
-        let cleanup = async {
-            local
-                .session_manager
-                .close_session(session_id)
-                .await
-                .map_err(|cause| cause.to_string())?;
-            if let Some(environment) = environment.as_ref() {
-                if !environment.shutdown().await {
-                    return Err("restored environment remains active".to_owned());
-                }
-            }
-            Ok::<(), String>(())
-        }
-        .await;
-        if cleanup.is_ok() {
-            sessions.lock().await.remove(session_id);
-        }
-        return Err(AcpError::new(
-            -32010,
-            match cleanup {
-                Ok(()) => format!("Session restore incomplete: Workspace task scope unavailable: {error}"),
-                Err(cause) => format!("Session restore incomplete: Workspace task scope unavailable: {error}; cleanup incomplete: {cause}"),
-            },
-        ));
-    }
-    Ok(())
 }
 
 async fn finish_load_response(

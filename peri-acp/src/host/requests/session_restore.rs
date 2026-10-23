@@ -550,13 +550,7 @@ pub(crate) async fn handle_load(
     connection: ConnectionFacts,
 ) -> Result<Value, AcpError> {
     reject_incomplete_local_close(params, sessions)?;
-    let already_loaded = params
-        .get("sessionId")
-        .and_then(Value::as_str)
-        .and_then(|id| sessions.get(id))
-        .is_some();
     let prepared = prepare_existing(params, cfg, sessions).await?;
-    reopen_workspace_scope_after_restore(cfg, sessions, &prepared, already_loaded).await?;
     let PreparedSession { id, identity } = prepared;
     let req_session_id = id.as_str();
     let state = sessions.get(req_session_id).expect("prepared session");
@@ -725,13 +719,7 @@ pub(crate) async fn handle_resume(
     transport: &Arc<dyn crate::transport::AcpTransport>,
 ) -> Result<Value, AcpError> {
     reject_incomplete_local_close(params, sessions)?;
-    let already_loaded = params
-        .get("sessionId")
-        .and_then(Value::as_str)
-        .and_then(|id| sessions.get(id))
-        .is_some();
     let prepared = prepare_existing(params, cfg, sessions).await?;
-    reopen_workspace_scope_after_restore(cfg, sessions, &prepared, already_loaded).await?;
     let req_session_id = prepared.id.as_str();
     let environment = sessions
         .get(req_session_id)
@@ -774,56 +762,6 @@ fn reject_incomplete_local_close(
             -32010,
             "Session restore incomplete: prior runtime cleanup is pending",
         ));
-    }
-    Ok(())
-}
-
-async fn reopen_workspace_scope_after_restore(
-    cfg: &AcpServerConfig,
-    sessions: &mut HashMap<String, SessionState>,
-    prepared: &PreparedSession,
-    already_loaded: bool,
-) -> Result<(), AcpError> {
-    if already_loaded {
-        return Ok(());
-    }
-    let id = prepared.id.as_str();
-    let state = sessions.get(id).expect("prepared session");
-    let environment = state.environment.clone();
-    let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
-    let pool = local.mcp_pool.clone();
-    let scope_result = async {
-        if let Some(pool) = pool {
-            pool.open_workspace_task_scope(id).await?;
-        }
-        Ok::<(), String>(())
-    }
-    .await;
-    if let Err(error) = scope_result {
-        // The restored runtime has not been reported to the client. Keep it
-        // inaccessible while draining its runtime resources.
-        sessions.get_mut(id).expect("prepared session").closing = true;
-        let cleanup = async {
-            local
-                .session_manager
-                .close_session(id)
-                .await
-                .map_err(|cause| cause.to_string())?;
-            if let Some(environment) = environment.as_ref() {
-                if !environment.shutdown().await {
-                    return Err("restored environment remains active".to_owned());
-                }
-            }
-            Ok::<(), String>(())
-        }
-        .await;
-        if cleanup.is_ok() {
-            sessions.remove(id);
-        }
-        return Err(AcpError::new(-32010, match cleanup {
-            Ok(()) => format!("Session restore incomplete: Workspace task scope unavailable: {error}"),
-            Err(cause) => format!("Session restore incomplete: Workspace task scope unavailable: {error}; cleanup incomplete: {cause}"),
-        }));
     }
     Ok(())
 }

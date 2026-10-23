@@ -32,7 +32,6 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
 
     fn release_agent_session(&self, session_id: &str) -> Result<(), String> {
         self.session_bindings.write().release(session_id);
-        self.task_scope_tokens.write().remove(session_id);
         Ok(())
     }
     fn as_any(&self) -> &dyn std::any::Any {
@@ -157,20 +156,12 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
         Ok(McpClientPool::cancel_oauth_callback(self, server_name))
     }
 
-    async fn open_workspace_task_scope(&self, session_id: &str) -> Result<(), String> {
-        McpClientPool::open_workspace_task_scope(self, session_id).await
-    }
-
-    async fn close_workspace_task_scope(self: Arc<Self>, session_id: &str) -> Result<(), String> {
-        McpClientPool::close_workspace_task_scope(&self, session_id).await
-    }
-
     async fn close_agent_session_scope(self: Arc<Self>, session_id: &str) -> Result<(), String> {
-        McpClientPool::close_workspace_task_scope(&self, session_id).await
+        self.cancel_session_external_tasks(session_id).await
     }
 
-    async fn reconcile_closing_workspace_scope(&self, session_id: &str) -> Result<(), String> {
-        McpClientPool::reconcile_closing_workspace_scope(self, session_id).await
+    async fn cancel_session_external_tasks(&self, session_id: &str) -> Result<(), String> {
+        McpClientPool::cancel_session_external_tasks(self, session_id).await
     }
 
     fn bind_session_task_manager(&self, session_id: &str, manager: &Arc<dyn TaskManager>) {
@@ -373,7 +364,6 @@ impl McpSubscriptionPort for McpClientPool {
 
     fn unregister_inbox(&self, session_id: &str) {
         self.session_bindings.write().unregister(session_id);
-        self.task_scope_tokens.write().remove(session_id);
     }
 
     fn as_any(&self) -> &dyn Any {

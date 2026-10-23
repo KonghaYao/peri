@@ -172,10 +172,10 @@ impl McpClientPool {
             .ok_or_else(|| "session task manager unavailable".to_owned())?;
         let raw_id_for_cancel = raw_task_id.to_owned();
         let meta = scoped_workspace
-            .then(|| self.task_scope_meta_for(server, session_id))
+            .then(|| self.task_owner_meta_for(server, session_id))
             .flatten();
         if scoped_workspace && meta.is_none() {
-            return Err("workspace task scope unavailable".into());
+            return Err("workspace task owner unavailable".into());
         }
         let weak_for_cancel = Arc::downgrade(self);
         let server_for_cancel = server.to_owned();

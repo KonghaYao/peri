@@ -41,41 +41,53 @@ fn connected_test_handle(name: &str) -> Arc<McpClientHandle> {
 }
 
 #[test]
-fn task_scope_metadata_is_session_scoped_without_store_ownership() {
+fn task_owner_metadata_is_scoped_to_workspace_sources() {
     let pool = McpClientPool::new_pending();
-    let first = pool.task_scope_meta_for("workspace", "session-a").unwrap();
-    let repeated = pool.task_scope_meta_for("workspace", "session-a").unwrap();
-    let other = pool.task_scope_meta_for("workspace", "session-b").unwrap();
-    assert_eq!(first, repeated);
-    assert_ne!(first, other);
-    assert_eq!(
-        pool.task_scope_authority
-            .resolve_capability(&first)
-            .unwrap()
-            .session_id,
-        "session-a"
+    assert!(
+        pool.task_owner_meta_for("workspace", "session-a").is_none(),
+        "unknown source must not receive Peri metadata"
     );
+    let mut builtin = connected_test_handle("workspace");
+    Arc::get_mut(&mut builtin).unwrap().source = Some(crate::mcp::config::ConfigSource::Builtin {
+        instance: "workspace".into(),
+    });
+    pool.clients.write().insert("workspace".into(), builtin);
+    let meta = pool
+        .task_owner_meta_for("workspace", "session-a")
+        .expect("builtin workspace owner");
     assert_eq!(
-        pool.task_scope_authority
-            .resolve_capability(&other)
-            .unwrap()
-            .session_id,
-        "session-b"
+        meta.0
+             .0
+            .get(peri_mcp_core::task_owner::TASK_OWNER_META_KEY),
+        Some(&serde_json::json!("session-a"))
     );
 }
 
 #[test]
-fn remote_task_scope_metadata_survives_pool_recreation_without_store_ownership() {
+fn task_owner_metadata_covers_remote_workspace_and_skips_other_sources() {
     let pool = McpClientPool::new_pending();
-    let mut client = connected_test_handle("workspace");
-    Arc::get_mut(&mut client).unwrap().source =
+    let mut remote = connected_test_handle("remote");
+    Arc::get_mut(&mut remote).unwrap().source =
         Some(crate::mcp::config::ConfigSource::WorkspaceRemote);
-    pool.clients.write().insert("workspace".into(), client);
-    let meta = pool.task_scope_meta_for("workspace", "session-a").unwrap();
-    let authority = peri_mcp_core::task_scope::TaskScopeAuthority::trusted_connection();
+    pool.clients.write().insert("remote".into(), remote);
+    let meta = pool
+        .task_owner_meta_for("remote", "session-a")
+        .expect("remote workspace owner");
     assert_eq!(
-        authority.resolve_capability(&meta).unwrap().session_id,
-        "session-a"
+        meta.0
+             .0
+            .get(peri_mcp_core::task_owner::TASK_OWNER_META_KEY),
+        Some(&serde_json::json!("session-a"))
+    );
+
+    let mut web = connected_test_handle("web");
+    Arc::get_mut(&mut web).unwrap().source = Some(crate::mcp::config::ConfigSource::Builtin {
+        instance: "web".into(),
+    });
+    pool.clients.write().insert("web".into(), web);
+    assert!(
+        pool.task_owner_meta_for("web", "session-a").is_none(),
+        "non-workspace servers stay generic"
     );
 }
 

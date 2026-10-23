@@ -1,7 +1,4 @@
-use super::{
-    lost_owner_retry_due, pending_tasks_for_closed_epoch, McpClientPool, ScopeTaskRow,
-    ScopeTaskSnapshot, LOST_ABANDON_ATTEMPTS,
-};
+use super::{lost_owner_retry_due, McpClientPool, LOST_ABANDON_ATTEMPTS};
 use peri_acp_types::{
     event::{BackgroundTaskResult, ShellOutput},
     mcp::McpSubscriptionPort,
@@ -31,48 +28,6 @@ fn unobservable_owner_retry_counter_saturates() {
     let mut attempts = usize::MAX;
     assert!(lost_owner_retry_due(&mut attempts));
     assert_eq!(attempts, usize::MAX);
-}
-
-#[test]
-fn close_reconciliation_rejects_reopened_epoch_before_selecting_cancel_targets() {
-    use rmcp::model::{DetailedTask, Task, TaskPayload, TaskStatus};
-    let snapshot = |epoch, closing| ScopeTaskSnapshot {
-        cursor: 2,
-        epoch,
-        closing,
-        resources_settled: Some(false),
-        tasks: vec![ScopeTaskRow {
-            task: DetailedTask::new(
-                Task::new(
-                    "new-epoch-task",
-                    TaskStatus::Working,
-                    "2026-01-01T00:00:00Z",
-                    "2026-01-01T00:00:00Z",
-                ),
-                TaskPayload::Working,
-            ),
-        }],
-    };
-    assert!(pending_tasks_for_closed_epoch("workspace", 0, snapshot(1, false)).is_err());
-    assert!(pending_tasks_for_closed_epoch("workspace", 0, snapshot(1, true)).is_err());
-    assert_eq!(
-        pending_tasks_for_closed_epoch("workspace", 0, snapshot(0, true)).unwrap(),
-        vec!["new-epoch-task"]
-    );
-}
-
-#[test]
-fn missing_resource_settlement_cannot_be_inferred_from_empty_directory() {
-    let snapshot = ScopeTaskSnapshot {
-        cursor: 2,
-        epoch: 0,
-        closing: true,
-        resources_settled: None,
-        tasks: vec![],
-    };
-    assert!(pending_tasks_for_closed_epoch("workspace", 0, snapshot)
-        .unwrap_err()
-        .contains("Incomplete"));
 }
 
 #[tokio::test]

@@ -2,7 +2,7 @@
 
 Builtin MCP 的工具与 server handler 由独立 crate 持有；配置来源 I/O 由独立 `peri-mcp-config` 数据面持有，session MCP 实例注册、配置投影、transport、宿主 context、policy 与生命周期仍由 `peri-middlewares` 装配。每个 crate 的依赖方向面向 `peri-mcp-common`、`peri-agent` / `peri-acp-types` / `peri-resources` 等稳定能力接口，不依赖 `peri-middlewares`。
 
-Workspace scope 关闭的真实资源证明见 `workspace/src/shell_tasks.rs`：任务 owner 在进程退出、管道回收和终态通知完成后登记 `resources_settled`，scope barrier 不以客户端取消意图或模型任务状态替代资源结算。主会话共享环境不能绕过历史子会话资源/required 工作检查；冷关闭缺失可信 owner 连接时保留 Incomplete，不提前删除关闭意图。
+Workspace 后台任务的资源结算以 `workspace/src/shell_tasks.rs` 为准：owner 在进程退出、管道回收和终态通知完成后结算；会话释放只取消 TaskManager 已知 external task 并等待 settled。没有 scope close barrier、旧 owner 扫描、连接重建或跨进程恢复；generic 模式无 owner，不参与 session 隔离。
 
 宿主侧入口见 [`peri-middlewares` 代码索引](peri-middlewares.md)。本文是插件包的当前路径索引；设计契约见 [`architecture-contracts.md`](../standards/architecture-contracts.md) 与 [`MCP 适配设计`](../design/mcp-adaptation-v4-part-1.md)。
 
@@ -24,10 +24,12 @@ Emscripten 目标引入 MCP 通用映射、配置数据面与凭证 bootstrap MC
 [`peri-config`](peri-config.md) 已持有核心 settings/provider/MCP/Langfuse/UI 的纯 typed
 规则与资源开关 projection、scoped snapshot/revision/explain/updateCAS；输入 provider 不获得组装权威。
 
-Workspace Shell Tasks 的直接发起会话由可信 task scope capability 绑定；
-`mcp-packages/workspace/src/shell_tasks.rs` 的 snapshot/changes 显式携带 `initiatorSessionId`，
-支持客户端连接重建后恢复归属，不从模型参数、父会话或 transcript 猜测。wire 契约见
-`mcp-packages/workspace/src/workspace_tasks_wire_test.rs`；owner 记录仍驻内存，不承诺 owner 进程重启恢复。
+Workspace Shell Tasks 的归属只有一个身份：`_meta["peri/taskOwner"]`，值 = 直接发起会话的
+session id。Peri 宿主只为 builtin workspace 与 `WorkspaceRemote` 注入该字段；通用 MCP 客户端
+不发送任何 `peri/*` 元数据时走 generic 模式，7 个基础工具照常可用，后台任务不做 session 隔离。
+owner 只是身份，不是秘密或 capability：没有 token 表、签发/解析或调用一致性校验，远程部署
+依赖连接级认证。wire 契约见 `mcp-packages/workspace/src/workspace_tasks_wire_test.rs`；owner
+仅在当前进程内存在，不跨连接重建、不随进程重启恢复，也不扫描旧任务恢复归属。
 插件生命周期、hook 格式、OS 执行环境与存储 locator/credentials 仍按专属边界维护。
 
 | 能力 | crate 与入口 | 主要实现 | 说明 |
@@ -36,7 +38,7 @@ Workspace Shell Tasks 的直接发起会话由可信 task scope capability 绑�
 | MCP 通用映射 | `peri-mcp-common`：`mcp-packages/common/src/lib.rs` | `server_info`、`rmcp_tool_from_base`、`list_tools_of`、`invoke_tool_call`、`parse_optional_u64`；`failure.rs`、`result_mapping.rs`、`process_env.rs` | 多个实例共用的 server metadata、schema 映射、IF-D14 结果映射、保留实际原因的失败类型和 process environment lock；不依赖宿主 middleware。 |
 | 只读上下文归档服务 | `peri-mcp-common`：`mcp-packages/common/src/context_archive.rs` | `ContextArchiveMcpServer` | 仅注入会话绑定的 `ContextArchiveReadPort`，公开 ReadContextArchive 的 schema 与 tools/call；模型请求不含 session ID，不持有可写 transcript；客户端与生命周期位于 `peri-middlewares/src/mcp/context_archive.rs`，端到端回归 `context_archive_test.rs`。 |
 | Agent 定义格式 | `peri-mcp-core`：`peri-mcp-core/src/agent_definition/` | `ClaudeAgent`、`ClaudeAgentFrontmatter`、`ToolsValue`、`parse_agent_file`、`frontmatter`（`split_frontmatter` / `frontmatter_json` / `frontmatter_summary`） | 本地与远端 MCP Agent 共用的纯数据与 Markdown/YAML 解析，不扫描目录、不读取文件、不签发授权；保留 omitted / explicit zero / allowlist 三态。`frontmatter` 纯函数同时供 workspace 技能/本地 agent 与 web 实例的 builtin agent 资源面使用。workspace 提供扫描与原始资源，宿主 registry 消费定义并按来源实施信任、批准和执行策略；不向计算核心添加 YAML 依赖。 |
-| Workspace 宿主读取与回退 | `peri-mcp-workspace`：`mcp-packages/workspace/src/{image,file_observation,file_rewind}.rs` | custom request `image/read` / `workspace/readText` / `workspace/readMention` / `workspace/rewindFiles`，由 `workspace.rs::on_custom_request` 分派 | 图片附件、归因正文和 `@path` 内容由工具环境读取，关闭/不可得不回落宿主磁盘；`workspace/readMention` 按含端点行范围（起止相同仍读该行，回归见 `file_observation_test.rs::mention_equal_range_endpoints_returns_requested_line`）+ 行数上限 + 模型可见正文的 UTF-8 字节预算读取（按行跳读，不整文件进内存），截断返回 `truncated` 与可继续读取行号；项目指令 `@import` 展开共享累计读取预算，最终文本另有字节预算与有界截断说明，`scan_local` / `read_bounded_text` 区分「正常不存在」与读取/编码/超预算错误。Rewind 在 Workspace 端以 task scope capability 准入，预检历史变更后回退文件；ACP 只编排历史。 |
+| Workspace 宿主读取与回退 | `peri-mcp-workspace`：`mcp-packages/workspace/src/{image,file_observation,file_rewind}.rs` | custom request `image/read` / `workspace/readText` / `workspace/readMention` / `workspace/rewindFiles`，由 `workspace.rs::on_custom_request` 分派 | 图片附件、归因正文和 `@path` 内容由工具环境读取，关闭/不可得不回落宿主磁盘；`workspace/readMention` 按含端点行范围（起止相同仍读该行，回归见 `file_observation_test.rs::mention_equal_range_endpoints_returns_requested_line`）+ 行数上限 + 模型可见正文的 UTF-8 字节预算读取（按行跳读，不整文件进内存），截断返回 `truncated` 与可继续读取行号；项目指令 `@import` 展开共享累计读取预算，最终文本另有字节预算与有界截断说明，`scan_local` / `read_bounded_text` 区分「正常不存在」与读取/编码/超预算错误。Rewind 在 Workspace 端计算，owner 可选；存在 `_meta["peri/taskOwner"]` 时按 owner 准入，generic 客户端无元数据也可使用；ACP 只编排历史。 |
 | Workspace 输出与分支 | `mcp-packages/workspace/src/{output_store,git_branch}.rs`；契约 `peri-acp-types/src/workspace_output.rs` | `output/store`、`workspace/gitBranch`；`resources/read` 的 `peri-output://` URI | 输出仅在工具环境持久化；URI 绑定实例，路径供同一环境的 Read 分页；不增加模型工具。宿主适配 `peri-middlewares/src/mcp/client/output_store.rs` 与 `workspace_io.rs` 门控会话可见性、关闭与换代，不可得不回落本机；git 超时与进程树清理归 provider。 |
 | Web | `peri-mcp-web`：`mcp-packages/web/src/lib.rs` | `WebMcpServer`、`web_fetch.rs`、`web_search.rs`、`web_common.rs`、`agents.rs`、`agents/web-researcher.md` | 公共工具面为 `WebMcpServer`、`WebFetchTool`、`WebSearchTool`；工具描述位于 `src/descriptions/`；后端地址与可选 Bearer 凭据经 MCP 实例 env（`WebMcpServer::with_instance_env` → 各工具的 `from_instance_env`，变量名见 `docs/standards/environment-variables.md`）。资源面由 `agents.rs` 发布 `agent://builtin/web-researcher/agent.md`（scope = builtin、`io.peri/frontmatter` 投影），能力位声明 `resources`；定义随 web 实例可用性开闭，宿主 Agent registry 只信任宿主绑定的 builtin 实例来源。 |
 | Artifact | `peri-mcp-artifact`：`mcp-packages/artifact/src/lib.rs` | `ArtifactMcpServer`、`ArtifactTool`、`ArtifactClient` | 上传协议与 Markdown 转 HTML 归该 crate；模板位于 `src/descriptions/md_to_html_template.html`。 |
@@ -50,7 +52,7 @@ Workspace Shell Tasks 的直接发起会话由可信 task scope capability 绑�
 
 Workspace 后台 Bash 当前运行时入口：`workspace/src/shell_tasks.rs` 持有任务状态并通过 `workspace.rs` 实现 `tasks/get|cancel`、`subscriptions/listen` 的 `taskIds` 通知；独立 CLI 与 builtin dispatch 都构造 `WorkspaceMcpServer::standalone`。Peri 的客户端能力声明在 `peri-middlewares/src/mcp/client/service.rs`，工具回执与订阅消费在 `tool_bridge.rs`、`client/subscription.rs`。ACP 会话装配不再向 Workspace 注入 TaskManager/完成回调。`WorkspaceInstanceInput` 只保留在直接构造器供旧工具测试使用，尚非编译依赖清理。后台 shell 启动失败在模型面只投影分类（launch worker panic/取消、注册表并发上限背压、未分类兜底），模型响应与该错误映射处的 tracing 均不输出底层 boxed error / JoinError 自由文本，tracing 保留稳定 failure_class；并发上限是独立背压，不因该投影改变。
 
-会话任务 scope 的资源 owner 入口在 `peri-mcp-core/src/task_scope.rs` 与 `workspace/src/{shell_tasks,workspace}.rs`：宿主创建 `TaskScopeAuthority`，调用 `issue(session_id)` 签发 capability；`WorkspaceMcpServer::with_task_scope_authority` 按请求解析 `_meta["peri/taskScope"]`，隔离 session 身份，不接受模型自造身份。capability 不携带 Store execution owner token 或 epoch/nonce，已无 `workspace/taskFence` 执行代际协议；Peri 不提供跨重启执行接管，SDK alpha 的协调机制不在本次支持范围。`workspace/taskSnapshot` 返回 scoped 任务、cursor、epoch 与 closing 状态，`workspace/taskChanges` 从 cursor 取变更并可有界等待。`workspace/taskClose(epoch)` 关闭准入，待在途创建登记完成后返回 barrier cursor；`workspace/taskOpen(epoch)` 仅在全部任务终态且无在途创建时推进 scope epoch 并恢复准入，旧 scope epoch 的 close/open 请求被拒绝。Workspace 资源 owner 在请求取消后仍持有创建 admission 直到任务登记，防止 close barrier 漏掉已发起的 shell。终态 transition ID 由 owner 固定；`tasks/cancel` 只置 cancellation requested，executor 清理完成才发布 Cancelled。独立 CLI 经部署可信的 MCP 连接接收 scope 元数据；已删除 `OwnerIncarnationGuard`、owner marker 写入及遗留 marker 启动阻断，不以本机 marker 判定接管资格；任务排空仍由资源 owner 负责。无认证独立 HTTP CLI 只绑定 loopback，跨主机依赖部署受信传输。未注入 authority 的 standalone 仍属 legacy 非 scoped 模式，不具备按 session 冷恢复。目标语义见 [Session 异步任务架构](../design/session-async-tasks.md)。
+会话任务 owner 的入口在 `peri-mcp-core/src/task_owner.rs`（`TASK_OWNER_META_KEY`、`task_owner_from_meta`）与 `workspace/src/{shell_tasks,workspace}.rs`：`WorkspaceMcpServer` 不持有 authority，每次请求从 `_meta["peri/taskOwner"]` 读取可选 owner；后台 Bash、`tasks/get|cancel` 与 `subscriptions/listen` 的任务事件在 owner 存在时按 owner 过滤，模型不能通过工具参数伪造身份。没有 owner 的 generic 模式不参与 session 隔离。已无 per-session token、`TaskScopeAuthority`、`validate_current_invocation` 或 `workspace/taskFence` 执行代际协议；也不再提供 `workspace/taskSnapshot|taskChanges|taskClose|taskOpen` 自定义生命周期（epoch、close barrier、连接重建恢复一并删除），旧客户端得到标准 method-not-found。终态 transition 由 owner 固定；`tasks/cancel` 只置 cancellation requested，executor 清理完成才发布 Cancelled。独立 CLI 缺省即通用 MCP 服务，不要求任何 `peri/*` 元数据，也已删除 `--trusted-task-scope`；显式 owner 只能经请求 `_meta` 传入。`workspace/rewindFiles` 保留非标准能力：客户端计算变更集，服务端校验并应用，owner 可选。会话释放只取消 TaskManager 已知 external task 并等待 settled，不做 snapshot/close barrier。无认证独立 HTTP CLI 只绑定 loopback，跨主机依赖部署受信传输。目标语义见 [Session 异步任务架构](../design/session-async-tasks.md)。
 
 - `peri-middlewares/src/mcp/builtin/mod.rs` 持有 builtin 配置 overlay、实例关闭策略与名称映射；`dispatch.rs` 构造新 crate 导出的 handler。
 - `context.rs` 持有注入给 server 的宿主上下文，`runtime.rs` 持有内存 transport、server task 与有界关闭；Cron tick 监督也在这里。

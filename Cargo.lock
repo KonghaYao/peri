@@ -3452,14 +3452,12 @@ dependencies = [
 name = "peri-mcp-core"
 version = "0.2.0"
 dependencies = [
- "base64 0.23.1",
  "parking_lot",
  "rmcp",
  "serde",
  "serde_json",
  "serde_norway",
  "tracing",
- "uuid",
 ]
 
 [[package]]

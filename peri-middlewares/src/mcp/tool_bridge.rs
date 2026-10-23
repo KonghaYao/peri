@@ -335,19 +335,13 @@ impl BaseTool for McpToolBridge {
         let arguments = input.as_object().cloned().unwrap_or_default();
         let mut request = rmcp::model::CallToolRequestParams::new(self.tool_name.clone())
             .with_arguments(arguments);
-        // per-call 会话身份（`peri/taskScope` 能力令牌）随源接线：workspace 工具面
-        // 与 builtin `workflow` 实例面共用同一签发面（design `workflow-mcp` §3
-        // 「per-call 身份沿用 `_meta["peri/taskScope"]`」，为 workflow 源接线）。
-        let task_scope_source = matches!(
+        // per-call 会话身份（`peri/taskOwner`）随源接线：只有 Workspace 实例
+        // 按直接发起会话隔离后台任务，其他 server 不注入 Peri 元数据。
+        if let Some(owner) = super::client::task_owner_metadata::task_owner_meta(
             self.client.source.as_ref(),
-            Some(super::config::ConfigSource::Builtin { instance })
-                if instance == "workspace" || instance == "workflow"
-        ) || matches!(
-            self.client.source.as_ref(),
-            Some(super::config::ConfigSource::WorkspaceRemote)
-        );
-        if task_scope_source {
-            request.meta = pool.task_scope_meta_for(&self.server_name, session_id);
+            session_id,
+        ) {
+            request.meta = Some(owner);
         }
         request.meta = Some(super::invocation::request_meta(&ctx, request.meta)?);
 

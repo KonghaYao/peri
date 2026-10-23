@@ -101,7 +101,6 @@ fn set_closed_instances(pool: &Arc<McpClientPool>, instances: &[&str]) {
             workflow: None,
             workspace_resources: None,
             workspace_bash_default_run_in_background: false,
-            task_scope_authority: std::sync::OnceLock::new(),
             skills_face_closed: false,
         },
     ))

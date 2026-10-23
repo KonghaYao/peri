@@ -302,12 +302,13 @@ async fn child_scope_metadata_ignores_owner_parameters_and_captured_root() {
     {
         let calls = calls.lock();
         assert_eq!(calls.len(), 1);
-        let capability = pool
-            .task_scope_authority
-            .resolve_capability(calls[0].meta.as_ref().expect("wire task scope metadata"))
-            .expect("wire task scope must be issued by the trusted authority");
-        assert_eq!(capability.session_id, "child-thread");
-        assert_ne!(capability.session_id, "root-session");
+        let meta = calls[0].meta.as_ref().expect("wire task owner metadata");
+        assert_eq!(
+            meta.0
+                 .0
+                .get(peri_mcp_core::task_owner::TASK_OWNER_META_KEY),
+            Some(&serde_json::json!("child-thread"))
+        );
     }
     assert!(root.is_execution_idle());
     assert!(child.is_execution_idle());

@@ -26,7 +26,7 @@ mod rewind;
 mod service;
 mod status;
 mod subscription;
-mod task_scope_metadata;
+pub(crate) mod task_owner_metadata;
 mod transport;
 mod types;
 
@@ -174,9 +174,6 @@ pub struct McpClientPool {
     /// SessionManager（peri-acp）经 `McpSubscriptionPort` 注册；订阅通知到达
     /// 时向全部注册 inbox 推送 Defer 消息并唤醒 idle agent。
     pub(crate) session_bindings: parking_lot::RwLock<session_bindings::SessionBindings>,
-    /// One session runtime handle per session; task records remain owned by Agent.
-    pub(crate) task_scope_authority: peri_mcp_core::task_scope::TaskScopeAuthority,
-    pub(crate) task_scope_tokens: parking_lot::RwLock<HashMap<String, String>>,
     /// 跨进程的 MCP Resource Cache；是否写入由响应 scope 与安全上下文共同决定。
     pub(crate) resource_cache: super::resource_cache::McpResourceCache,
     /// 进程启动时冻结的 deployment capability profile；初始连接和重连复用。
@@ -314,8 +311,6 @@ impl McpClientPool {
             pending_oauth_callbacks: parking_lot::Mutex::new(HashMap::new()),
             active_oauth_flows: parking_lot::Mutex::new(HashMap::new()),
             session_bindings: parking_lot::RwLock::new(session_bindings::SessionBindings::default()),
-            task_scope_authority: peri_mcp_core::task_scope::TaskScopeAuthority::new(),
-            task_scope_tokens: parking_lot::RwLock::new(HashMap::new()),
             resource_cache: super::resource_cache::McpResourceCache::new(),
             capability_profile,
             app_binding_leases: Arc::new(super::apps::McpAppBindingRegistry::default()),
@@ -596,9 +591,6 @@ impl McpClientPool {
         if slot.context.is_some() {
             return Err(BuiltinContextError::AlreadyInjected);
         }
-        let _ = context
-            .task_scope_authority
-            .set(self.task_scope_authority.clone());
         slot.context = Some(context);
         Ok(())
     }

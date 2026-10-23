@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use peri_acp_types::tasks::TaskShutdownReport;
 use peri_agent::agent::async_tasks::{BackgroundTaskRegistry, TaskManager};
-use rmcp::model::{TaskPayload, TaskStatus};
+use rmcp::model::{Task, TaskPayload, TaskStatus};
 
 use super::ShellTasks;
 
@@ -36,207 +36,44 @@ impl peri_agent::agent::async_tasks::ShellExecutor for FailedCreationExecutor {
     }
 }
 
-async fn assert_failed_creation_keeps_scope_unconfirmed(panics: bool) {
-    let mut owner = ShellTasks::new();
-    owner.manager = Arc::new(
-        peri_agent::agent::async_tasks::TaskManager::with_shell_executor(Arc::new(
-            FailedCreationExecutor { panics },
-        )),
-    );
-    assert!(owner
-        .spawn_scoped("command".into(), "/tmp".into(), None, Some("child"))
-        .await
-        .is_err());
-    let cursor = owner.close_scope("child", 0).await.unwrap();
-    let snapshot = owner.snapshot("child");
-    assert!(snapshot.closing);
-    assert_eq!(snapshot.epoch, 0);
-    assert!(snapshot.cursor >= cursor);
-    assert!(snapshot.tasks.is_empty());
-    assert!(!snapshot.resources_settled);
-    assert!(owner
-        .open_scope("child", 0)
-        .err()
-        .unwrap()
-        .message
-        .contains("Incomplete"));
-    assert!(owner.snapshot("other-child").resources_settled);
-    assert!(!owner.snapshot("other-child").closing);
-}
-
 #[tokio::test]
-async fn failed_creation_without_task_row_cannot_report_scope_settled() {
-    assert_failed_creation_keeps_scope_unconfirmed(false).await;
-}
-
-#[tokio::test]
-async fn panicked_creation_without_task_row_cannot_report_scope_settled() {
-    assert_failed_creation_keeps_scope_unconfirmed(true).await;
-}
-
-#[tokio::test]
-async fn scoped_resource_settlement_waits_for_shell_cleanup_not_cancel_acceptance() {
+async fn task_owner_isolation_covers_get_cancel_and_membership() {
+    let dir = tempfile::tempdir().expect("workspace");
     let owner = ShellTasks::new();
-    let directory = tempfile::tempdir().unwrap();
     let task = owner
-        .spawn_scoped(
+        .spawn_owned(
             "sleep 30".into(),
-            directory.path().to_string_lossy().into_owned(),
+            dir.path().to_string_lossy().into_owned(),
             None,
-            Some("closing-child"),
+            Some("session-a"),
         )
         .await
-        .unwrap();
-    let other = owner
-        .spawn_scoped(
-            "sleep 30".into(),
-            directory.path().to_string_lossy().into_owned(),
-            None,
-            Some("independent-child"),
-        )
-        .await
-        .unwrap();
-    let cursor = owner.close_scope("closing-child", 0).await.unwrap();
-    assert!(!owner.snapshot("closing-child").resources_settled);
-    owner.cancel_scoped(&task.task_id, "closing-child").unwrap();
+        .expect("start task");
+    assert!(owner.belongs_to(&task.task_id, "session-a"));
+    assert!(!owner.belongs_to(&task.task_id, "session-b"));
+    owner
+        .get_owned(&task.task_id, "session-a")
+        .expect("owner can read its task");
+    assert!(owner.get_owned(&task.task_id, "session-b").is_err());
+    assert!(owner.cancel_owned(&task.task_id, "session-b").is_err());
+    assert!(
+        owner.get(&task.task_id).is_ok(),
+        "generic reads stay global"
+    );
+    owner
+        .cancel_owned(&task.task_id, "session-a")
+        .expect("owner cancels");
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let snapshot = owner.snapshot("closing-child");
-            assert!(snapshot.closing);
-            assert_eq!(snapshot.epoch, 0);
-            assert!(snapshot.cursor >= cursor);
-            if snapshot.resources_settled {
-                assert!(snapshot
-                    .tasks
-                    .iter()
-                    .all(|task| task.task.status().is_terminal()));
+            if owner.get(&task.task_id).expect("task").task.status() == TaskStatus::Cancelled {
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("shell cleanup must settle before close succeeds");
-    assert!(!owner.snapshot("independent-child").resources_settled);
-    assert!(!owner.snapshot("independent-child").closing);
-    owner
-        .cancel_scoped(&other.task_id, "independent-child")
-        .unwrap();
-    owner.manager().shutdown().await;
-}
-#[test]
-fn session_admissions_do_not_require_an_execution_owner() {
-    let owner = ShellTasks::new();
-    let first = owner.admit("session-a").expect("first request");
-    let second = owner.admit("session-a").expect("second request");
-    assert_eq!(owner.state.lock().inflight["session-a"], 2);
-    drop(first);
-    drop(second);
-    assert!(!owner.state.lock().inflight.contains_key("session-a"));
-}
-
-#[tokio::test]
-async fn close_gate_waits_for_admitted_creation_and_rejects_later_work() {
-    let owner = ShellTasks::new();
-    let admitted = owner.admit("session-a").expect("admission");
-    let closing_owner = owner.clone();
-    let close = tokio::spawn(async move { closing_owner.close_scope("session-a", 0).await });
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while !owner.state.lock().closing.contains("session-a") {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("close gate activated");
-    assert!(owner.admit("session-a").is_err());
-    assert!(!close.is_finished());
-    drop(admitted);
-    let cursor = tokio::time::timeout(Duration::from_secs(1), close)
-        .await
-        .expect("close barrier")
-        .expect("join close")
-        .expect("close accepted");
-    assert_eq!(cursor, owner.snapshot("session-a").cursor);
-    assert!(owner.admit("session-a").is_err());
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn delayed_close_cannot_report_success_after_scope_reopens() {
-    let owner = ShellTasks::new();
-    let admitted = owner.admit("session-a").expect("admission");
-    let closing_owner = owner.clone();
-    let close = tokio::spawn(async move { closing_owner.close_scope("session-a", 0).await });
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while !owner.snapshot("session-a").closing {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("close gate activated");
-    drop(admitted);
-    let reopened = owner
-        .open_scope("session-a", 0)
-        .expect("settled scope reopens");
-    assert_eq!(reopened.epoch, 1);
-    assert!(
-        close.await.expect("join close").is_err(),
-        "old close is stale"
-    );
-    assert!(!owner.snapshot("session-a").closing);
-}
-
-#[tokio::test]
-async fn cancelled_request_cannot_escape_scope_close_barrier() {
-    let directory = tempfile::tempdir().unwrap();
-    let gate = Arc::new(tokio::sync::Notify::new());
-    let mut owner = ShellTasks::new();
-    owner.spawn_gate = Some(Arc::clone(&gate));
-    let launch_owner = owner.clone();
-    let cwd = directory.path().to_string_lossy().into_owned();
-    let caller = tokio::spawn(async move {
-        launch_owner
-            .spawn_scoped("sleep 30".into(), cwd, None, Some("session-a"))
-            .await
-    });
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while owner
-            .state
-            .lock()
-            .inflight
-            .get("session-a")
-            .copied()
-            .unwrap_or(0)
-            == 0
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("owner admitted spawn");
-    caller.abort();
-    let closing_owner = owner.clone();
-    let close = tokio::spawn(async move { closing_owner.close_scope("session-a", 0).await });
-    tokio::task::yield_now().await;
-    assert!(
-        !close.is_finished(),
-        "barrier must wait for detached registration"
-    );
-    gate.notify_one();
-    tokio::time::timeout(Duration::from_secs(5), close)
-        .await
-        .expect("barrier")
-        .expect("join")
-        .expect("epoch");
-    let snapshot = owner.snapshot("session-a");
-    assert_eq!(
-        snapshot.tasks.len(),
-        1,
-        "cancelled request must leave a discoverable task"
-    );
-    owner.cancel(&snapshot.tasks[0].task.task.task_id).unwrap();
-    tokio::time::timeout(Duration::from_secs(5), owner.shutdown())
-        .await
-        .expect("cleanup");
+    .expect("cancelled after process cleanup");
+    assert_eq!(owner.shutdown().await, TaskShutdownReport::Complete);
 }
 
 #[tokio::test]
@@ -281,11 +118,11 @@ async fn shell_completion_is_queryable_after_client_like_owner_clone_is_dropped(
 }
 
 #[tokio::test]
-async fn cancellation_is_scoped_to_known_task_id() {
+async fn cancellation_targets_known_task_id() {
     let dir = tempfile::tempdir().expect("workspace");
     let owner = ShellTasks::new();
     let task = owner
-        .spawn_scoped(
+        .spawn_owned(
             "trap '' TERM; printf ready > ready; while :; do sleep 1; done".into(),
             dir.path().to_string_lossy().into_owned(),
             None,
@@ -306,9 +143,6 @@ async fn cancellation_is_scoped_to_known_task_id() {
         owner.get(&task.task_id).expect("task").task.status(),
         TaskStatus::Working
     );
-    assert!(owner.snapshot("session-a").tasks[0]
-        .terminal_transition_id
-        .is_none());
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if owner.get(&task.task_id).expect("task").task.status() == TaskStatus::Cancelled {
@@ -319,9 +153,6 @@ async fn cancellation_is_scoped_to_known_task_id() {
     })
     .await
     .expect("cancelled after process cleanup");
-    assert!(owner.snapshot("session-a").tasks[0]
-        .terminal_transition_id
-        .is_some());
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(5), owner.shutdown())
             .await
@@ -371,31 +202,35 @@ async fn cancelling_after_completion_preserves_terminal_result() {
     );
 }
 
-/// 占满 Shell 并发位（真实进程），用于制造注册表拒绝；调用方负责 `settle_shell_capacity`。
-async fn fill_shell_capacity(owner: &ShellTasks, cwd: &str) {
+/// 占满 Shell 并发位（真实进程），返回占位任务；调用方负责 `settle_shell_capacity`。
+async fn fill_shell_capacity(owner: &ShellTasks, cwd: &str) -> Vec<Task> {
+    let mut tasks = Vec::new();
     for _ in 0..BackgroundTaskRegistry::SHELL_LIMIT {
-        owner
-            .spawn_scoped("sleep 30".into(), cwd.to_owned(), None, Some("capacity"))
-            .await
-            .expect("capacity shell starts");
+        tasks.push(
+            owner
+                .spawn_owned("sleep 30".into(), cwd.to_owned(), None, Some("capacity"))
+                .await
+                .expect("capacity shell starts"),
+        );
     }
+    tasks
 }
 
-/// 取消占位任务并等待终态与进程清理。调用方另行断言 scope 结算。
-async fn settle_shell_capacity(owner: &ShellTasks) {
-    for task in owner.snapshot("capacity").tasks {
-        owner
-            .cancel(&task.task.task.task_id)
-            .expect("cancel capacity shell");
+/// 取消占位任务并等待终态与进程清理。
+async fn settle_shell_capacity(owner: &ShellTasks, tasks: &[Task]) {
+    for task in tasks {
+        owner.cancel(&task.task_id).expect("cancel capacity shell");
     }
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if owner
-                .snapshot("capacity")
-                .tasks
-                .iter()
-                .all(|task| task.task.status().is_terminal())
-            {
+            if tasks.iter().all(|task| {
+                owner
+                    .get(&task.task_id)
+                    .expect("capacity task")
+                    .task
+                    .status()
+                    .is_terminal()
+            }) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -421,7 +256,7 @@ async fn panicked_launch_worker_reports_classification_without_raw_payload() {
         FailedCreationExecutor { panics: true },
     )));
     let error = owner
-        .spawn_scoped("fixture-command".into(), "/tmp".into(), None, Some("child"))
+        .spawn_owned("fixture-command".into(), "/tmp".into(), None, Some("child"))
         .await
         .expect_err("panicked worker must fail the launch");
     assert!(
@@ -447,7 +282,7 @@ async fn unclassified_launch_failure_does_not_echo_underlying_error_text() {
         FailedCreationExecutor { panics: false },
     )));
     let error = owner
-        .spawn_scoped("fixture-command".into(), "/tmp".into(), None, Some("child"))
+        .spawn_owned("fixture-command".into(), "/tmp".into(), None, Some("child"))
         .await
         .expect_err("failing executor must fail the launch");
     assert!(
@@ -463,16 +298,15 @@ async fn unclassified_launch_failure_does_not_echo_underlying_error_text() {
 }
 
 /// [回归测试] `KindConcurrentLimit` 是正常背压：拒绝必须报告结构化上限事实，
-/// 不改变上限，也不影响已注册任务。拒绝发生在创建进程之前，不得让 scope
-/// 永久停在未确认结算，否则 ACP close 会超时。
+/// 不改变上限，也不影响已注册任务。
 #[tokio::test]
 async fn concurrent_limit_rejection_is_reported_as_backpressure_not_launch_failure() {
     let directory = tempfile::tempdir().unwrap();
     let owner = ShellTasks::new();
     let cwd = directory.path().to_string_lossy().into_owned();
-    fill_shell_capacity(&owner, &cwd).await;
+    let capacity = fill_shell_capacity(&owner, &cwd).await;
     let error = owner
-        .spawn_scoped("sleep 30".into(), cwd.clone(), None, Some("capacity"))
+        .spawn_owned("sleep 30".into(), cwd.clone(), None, Some("capacity"))
         .await
         .expect_err("over-limit launch must be rejected");
     let limit = BackgroundTaskRegistry::SHELL_LIMIT;
@@ -497,27 +331,7 @@ async fn concurrent_limit_rejection_is_reported_as_backpressure_not_launch_failu
         20,
         "shell 并发上限按容量决策固定为 20"
     );
-    settle_shell_capacity(&owner).await;
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if owner.snapshot("capacity").resources_settled {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("deterministic rejection must not block scope settlement");
-    let cursor = owner
-        .close_scope("capacity", 0)
-        .await
-        .expect("settled scope closes");
-    assert!(owner.snapshot("capacity").resources_settled);
-    let opened = owner
-        .open_scope("capacity", 0)
-        .expect("deterministic rejection leaves nothing to settle");
-    assert_eq!(opened.epoch, 1);
-    assert!(opened.cursor >= cursor);
+    settle_shell_capacity(&owner, &capacity).await;
 }
 
 /// [行为边界] spawn 失败与注册失败叠加时底层类型已丢失（执行环境把 io 错误与
@@ -527,9 +341,9 @@ async fn composite_spawn_and_registration_failure_stays_unclassified() {
     let directory = tempfile::tempdir().unwrap();
     let owner = ShellTasks::new();
     let cwd = directory.path().to_string_lossy().into_owned();
-    fill_shell_capacity(&owner, &cwd).await;
+    let capacity = fill_shell_capacity(&owner, &cwd).await;
     let error = owner
-        .spawn_scoped(
+        .spawn_owned(
             "sleep 30".into(),
             directory
                 .path()
@@ -551,5 +365,76 @@ async fn composite_spawn_and_registration_failure_stays_unclassified() {
         "composite underlying text must not reach the model: {}",
         error.message
     );
-    settle_shell_capacity(&owner).await;
+    settle_shell_capacity(&owner, &capacity).await;
+}
+
+#[tokio::test]
+async fn cancellation_during_spawn_cancels_only_initiating_owner() {
+    let mut tasks = ShellTasks::new();
+    let gate = Arc::new(super::SpawnAfterGate::new());
+    tasks.hold_spawn_after_gate(gate.clone());
+    let mut updates = tasks.subscribe();
+
+    let request = tokio::spawn({
+        let tasks = tasks.clone();
+        async move {
+            tasks
+                .spawn_owned(
+                    "sleep 30".to_string(),
+                    ".".to_string(),
+                    None,
+                    Some("session-a"),
+                )
+                .await
+        }
+    });
+
+    // The blocking worker has spawned the process and is paused after
+    // registration, before the request future can observe the handle.
+    gate.entered.notified().await;
+    request.abort();
+    gate.release.wait();
+
+    let task_a = tokio::time::timeout(Duration::from_secs(2), updates.recv())
+        .await
+        .expect("started task update")
+        .expect("task update")
+        .task
+        .task_id;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let terminal = tasks
+                .get(&task_a)
+                .map(|result| result.task.status().is_terminal())
+                .unwrap_or(true);
+            if terminal {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled task must terminate");
+
+    tasks.clear_spawn_after_gate();
+    let task_b = tasks
+        .spawn_owned(
+            "sleep 30".to_string(),
+            ".".to_string(),
+            None,
+            Some("session-b"),
+        )
+        .await
+        .expect("session b task starts");
+    assert!(!task_b.status.is_terminal());
+
+    tasks
+        .cancel_and_wait(&task_b.task_id)
+        .await
+        .expect("cancel session b task");
+    assert!(tasks
+        .get(&task_b.task_id)
+        .map(|result| result.task.status().is_terminal())
+        .unwrap_or(true));
+    assert_eq!(tasks.tracked_count(), 0);
 }

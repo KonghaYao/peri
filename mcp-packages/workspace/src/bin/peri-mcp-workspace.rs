@@ -5,7 +5,7 @@ use std::{net::SocketAddr, path::PathBuf};
 use anyhow::{bail, Context, Result};
 use clap::{ArgGroup, Parser};
 use peri_mcp_workspace::{
-    ResourceRoot, ResourceScope, TaskScopeAuthority, WorkspaceMcpServer, WorkspaceResourcesInput,
+    ResourceRoot, ResourceScope, WorkspaceMcpServer, WorkspaceResourcesInput,
 };
 use rmcp::{
     transport::streamable_http_server::{
@@ -180,10 +180,10 @@ async fn main() -> Result<()> {
     let workspace = canonical_directory(&args.workspace, "workspace")?;
     let resources = resource_input(&args, &workspace)?;
     // 独立 CLI 不消费 Peri 配置面（beta flag 只经会话装配注入）：缺省恒为前台，
-    // 与 flag 引入前的行为一致。
+    // 与 flag 引入前的行为一致。它也是通用 MCP 服务：不要求任何 `peri/*` 元数据，
+    // 显式 owner 只能由请求 `_meta` 传入。
     let server = WorkspaceMcpServer::standalone(workspace.to_string_lossy().into_owned(), false)
-        .with_resources(resources)
-        .with_task_scope_authority(TaskScopeAuthority::trusted_connection());
+        .with_resources(resources);
     let task_owner = server.clone();
     let result = if args.stdio {
         serve_stdio(server).await

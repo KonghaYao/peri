@@ -5,9 +5,8 @@
 //! service and can be queried after a client disconnects.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     sync::Arc,
-    time::Duration,
 };
 
 use parking_lot::Mutex;
@@ -22,96 +21,40 @@ use rmcp::{
     },
     ErrorData as McpError,
 };
-use serde::Serialize;
-
-const CHANGE_LIMIT: usize = 512;
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ScopedTask {
-    pub task: DetailedTask,
-    pub summary: String,
-    pub initiator_session_id: String,
-    pub revision: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub terminal_transition_id: Option<String>,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ScopeSnapshot {
-    pub cursor: u64,
-    pub epoch: u64,
-    pub closing: bool,
-    pub resources_settled: bool,
-    pub tasks: Vec<ScopedTask>,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ScopeChanges {
-    pub cursor: u64,
-    pub changes: Vec<ScopedTask>,
-}
-
-#[derive(Serialize)]
-pub(crate) struct ScopeOpened {
-    pub cursor: u64,
-    pub epoch: u64,
-}
 
 #[derive(Default)]
 struct ShellState {
-    resources_settled: HashSet<String>,
     records: HashMap<String, DetailedTask>,
-    scopes: HashMap<String, String>,
-    summaries: HashMap<String, String>,
-    revisions: HashMap<String, u64>,
-    terminal_ids: HashMap<String, String>,
-    changes: VecDeque<(u64, String, ScopedTask)>,
-    cursor: u64,
-    closing: HashSet<String>,
-    epochs: HashMap<String, u64>,
-    inflight: HashMap<String, usize>,
-    failed_creation_unconfirmed: HashSet<String>,
+    owners: HashMap<String, String>,
     cancel_pending: HashSet<String>,
     cancel_accepted: HashSet<String>,
     pending_results: HashMap<String, BackgroundTaskResult>,
+    /// Tasks whose process has started but whose request future may not have
+    /// registered a visible record yet (cancellation during spawn).
+    tracked: HashSet<String>,
 }
 
 impl ShellState {
-    fn publish(&mut self, task_id: &str) -> Option<DetailedTask> {
-        let task = self.records.get(task_id)?.clone();
-        let scope = self.scopes.get(task_id)?.clone();
-        let revision = self.revisions.entry(task_id.into()).or_default();
-        *revision += 1;
-        if task.task.status.is_terminal() {
-            self.terminal_ids
-                .entry(task_id.into())
-                .or_insert_with(|| format!("{task_id}:{revision}"));
-        }
-        self.cursor += 1;
-        self.changes.push_back((
-            self.cursor,
-            scope.clone(),
-            ScopedTask {
-                task: task.clone(),
-                summary: self.summaries.get(task_id).cloned().unwrap_or_default(),
-                initiator_session_id: scope,
-                revision: *revision,
-                terminal_transition_id: self.terminal_ids.get(task_id).cloned(),
-            },
-        ));
-        while self.changes.len() > CHANGE_LIMIT {
-            self.changes.pop_front();
-        }
-        Some(task)
-    }
-
-    fn scoped(&self, id: &str, scope: &str) -> bool {
-        self.scopes
+    fn owned_by(&self, id: &str, owner: &str) -> bool {
+        self.owners
             .get(id)
-            .is_some_and(|existing| existing == scope)
+            .is_some_and(|existing| existing == owner)
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct SpawnAfterGate {
+    pub(crate) entered: tokio::sync::Notify,
+    pub(crate) release: std::sync::Barrier,
+}
+
+#[cfg(test)]
+impl SpawnAfterGate {
+    pub(crate) fn new() -> Self {
+        Self {
+            entered: tokio::sync::Notify::new(),
+            release: std::sync::Barrier::new(2),
+        }
     }
 }
 
@@ -119,11 +62,47 @@ impl ShellState {
 pub(crate) struct ShellTasks {
     manager: Arc<dyn TaskManager>,
     state: Arc<Mutex<ShellState>>,
-    changed: Arc<tokio::sync::Notify>,
     updates: tokio::sync::broadcast::Sender<DetailedTask>,
     owner_references: Arc<()>,
     #[cfg(test)]
-    spawn_gate: Option<Arc<tokio::sync::Notify>>,
+    spawn_after_gate: Option<Arc<SpawnAfterGate>>,
+}
+
+struct SpawnCancelGuard {
+    tasks: ShellTasks,
+    started: Option<tokio::sync::oneshot::Receiver<String>>,
+    armed: bool,
+}
+
+impl SpawnCancelGuard {
+    fn new(tasks: ShellTasks, started: tokio::sync::oneshot::Receiver<String>) -> Self {
+        Self {
+            tasks,
+            started: Some(started),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SpawnCancelGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Some(started) = self.started.take() else {
+            return;
+        };
+        let tasks = self.tasks.clone();
+        tokio::spawn(async move {
+            if let Ok(task_id) = started.await {
+                let _ = tasks.cancel_and_wait(&task_id).await;
+            }
+        });
+    }
 }
 
 impl ShellTasks {
@@ -132,12 +111,26 @@ impl ShellTasks {
         Self {
             manager: Arc::new(peri_mcp_common::create_local_task_manager()),
             state: Arc::new(Mutex::new(ShellState::default())),
-            changed: Arc::new(tokio::sync::Notify::new()),
             updates,
             owner_references: Arc::new(()),
             #[cfg(test)]
-            spawn_gate: None,
+            spawn_after_gate: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_spawn_after_gate(&mut self, gate: Arc<SpawnAfterGate>) {
+        self.spawn_after_gate = Some(gate);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn clear_spawn_after_gate(&mut self) {
+        self.spawn_after_gate = None;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracked_count(&self) -> usize {
+        self.state.lock().tracked.len()
     }
 
     pub(crate) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<DetailedTask> {
@@ -149,34 +142,22 @@ impl ShellTasks {
     }
 
     pub(crate) fn completion_callback(&self) -> OnBgCompleteFn {
-        self.completion_callback_for(None, None)
+        self.completion_callback_for(None)
     }
 
-    pub(crate) fn completion_callback_for(
-        &self,
-        scope: Option<String>,
-        summary: Option<String>,
-    ) -> OnBgCompleteFn {
+    pub(crate) fn completion_callback_for(&self, owner: Option<String>) -> OnBgCompleteFn {
         let state = Arc::clone(&self.state);
         let updates = self.updates.clone();
-        let changed = Arc::clone(&self.changed);
         Arc::new(move |result: &BackgroundTaskResult, kind: BgTaskKind| {
             if kind != BgTaskKind::Shell {
                 return Err("shell task owner received a non-shell result".into());
             }
             let mut state = state.lock();
-            state.resources_settled.insert(result.task_id.clone());
-            if let Some(scope) = &scope {
+            if let Some(owner) = &owner {
                 state
-                    .scopes
+                    .owners
                     .entry(result.task_id.clone())
-                    .or_insert_with(|| scope.clone());
-            }
-            if let Some(summary) = &summary {
-                state
-                    .summaries
-                    .entry(result.task_id.clone())
-                    .or_insert_with(|| summary.clone());
+                    .or_insert_with(|| owner.clone());
             }
             if state.cancel_pending.contains(&result.task_id) {
                 state
@@ -196,6 +177,7 @@ impl ShellTasks {
                     )
                 });
             if record.task.status.is_terminal() {
+                state.tracked.remove(&result.task_id);
                 return Ok(());
             }
             record.task.last_updated_at = peri_time::now_utc_rfc3339();
@@ -226,30 +208,48 @@ impl ShellTasks {
                 };
                 record.task.status = TaskStatus::Completed;
             }
-            let task = state.publish(&result.task_id).unwrap_or_else(|| {
-                state
-                    .records
-                    .get(&result.task_id)
-                    .expect("completed shell record")
-                    .clone()
-            });
-            let _ = updates.send(task);
-            changed.notify_waiters();
+            let detail = record.clone();
+            state.tracked.remove(&result.task_id);
+            drop(state);
+            let _ = updates.send(detail);
             Ok(())
         })
     }
 
-    pub(crate) fn admit(&self, scope: &str) -> Result<ScopeAdmission, McpError> {
-        let mut state = self.state.lock();
-        if state.closing.contains(scope) {
-            return Err(McpError::invalid_params("task scope is closing", None));
+    pub(crate) async fn spawn_owned(
+        &self,
+        command: String,
+        cwd: String,
+        timeout_ms: Option<u64>,
+        owner: Option<&str>,
+    ) -> Result<Task, McpError> {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let mut guard = SpawnCancelGuard::new(self.clone(), started_rx);
+        let result = self
+            .spawn_owned_inner(command, cwd, timeout_ms, owner, Some(started_tx))
+            .await;
+        if result.is_ok() {
+            guard.disarm();
         }
-        *state.inflight.entry(scope.into()).or_default() += 1;
-        Ok(ScopeAdmission {
-            owner: self.clone(),
-            scope: scope.into(),
-            creation_unconfirmed: false,
-        })
+        result
+    }
+
+    pub(crate) async fn cancel_and_wait(&self, task_id: &str) -> Result<(), McpError> {
+        let result = self.cancel(task_id);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let terminal = self
+                .state
+                .lock()
+                .records
+                .get(task_id)
+                .is_none_or(|record| record.task.status.is_terminal());
+            if terminal || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        result
     }
 
     #[cfg(test)]
@@ -259,105 +259,90 @@ impl ShellTasks {
         cwd: String,
         timeout_ms: Option<u64>,
     ) -> Result<Task, McpError> {
-        self.spawn_scoped(command, cwd, timeout_ms, None).await
+        self.spawn_owned(command, cwd, timeout_ms, None).await
     }
 
-    pub(crate) async fn spawn_scoped(
+    async fn spawn_owned_inner(
         &self,
         command: String,
         cwd: String,
         timeout_ms: Option<u64>,
-        scope: Option<&str>,
+        owner: Option<&str>,
+        started: Option<tokio::sync::oneshot::Sender<String>>,
     ) -> Result<Task, McpError> {
-        // The MCP request may be cancelled while spawn_blocking is running.
-        // Admission and registration must outlive that request future so a
-        // closing barrier cannot miss a process already accepted by the owner.
-        let mut admission = scope.map(|scope| self.admit(scope)).transpose()?;
-        if let Some(admission) = &mut admission {
-            admission.creation_unconfirmed = true;
-        }
-        let owner = self.clone();
-        let scope = scope.map(str::to_owned);
-        let (reply, receive) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let mut admission = admission;
-            let result = owner
-                .spawn_scoped_owned(command, cwd, timeout_ms, scope.as_deref())
-                .await;
-            if let Some(admission) = &mut admission {
-                match &result {
-                    Ok(_) => admission.creation_unconfirmed = false,
-                    Err(failure) if failure.rejected_before_creation() => {
-                        admission.creation_unconfirmed = false;
-                    }
-                    Err(_) => {}
-                }
-            }
-            let _ = reply.send(result.map_err(ShellLaunchError::into_mcp_error));
-        });
-        receive.await.map_err(|_| {
-            McpError::internal_error("shell task owner stopped before registration", None)
-        })?
-    }
-
-    async fn spawn_scoped_owned(
-        &self,
-        command: String,
-        cwd: String,
-        timeout_ms: Option<u64>,
-        scope: Option<&str>,
-    ) -> Result<Task, ShellLaunchError> {
-        #[cfg(test)]
-        if let Some(gate) = &self.spawn_gate {
-            gate.notified().await;
-        }
         let manager = self.manager();
-        let summary: String = command.chars().take(160).collect();
-        let callback =
-            self.completion_callback_for(scope.map(str::to_string), Some(summary.clone()));
+        let callback = self.completion_callback_for(owner.map(str::to_owned));
+        let state = Arc::clone(&self.state);
+        let updates = self.updates.clone();
+        let owner = owner.map(str::to_owned);
+        #[cfg(test)]
+        let spawn_after_gate = self.spawn_after_gate.clone();
         let handle: BgShellHandle = tokio::task::spawn_blocking(move || {
-            manager.spawn_shell(command, cwd, timeout_ms, Some(callback))
+            let handle = manager.spawn_shell(command, cwd, timeout_ms, Some(callback))?;
+            #[cfg(test)]
+            if let Some(gate) = &spawn_after_gate {
+                gate.entered.notify_one();
+                gate.release.wait();
+            }
+            // Register before returning from the blocking worker. The request
+            // future may be cancelled while this worker is running; session
+            // cleanup must still be able to find the process.
+            let now = peri_time::now_utc_rfc3339();
+            let record = DetailedTask::new(
+                Task::new(&handle.task_id, TaskStatus::Working, &now, &now)
+                    .with_status_message("Background shell command is running.")
+                    .with_poll_interval_ms(1000),
+                TaskPayload::Working,
+            );
+            let mut state = state.lock();
+            let already_terminal = state
+                .records
+                .get(&handle.task_id)
+                .is_some_and(|detail| detail.task.status.is_terminal());
+            if !already_terminal {
+                state.tracked.insert(handle.task_id.clone());
+            }
+            if let Some(owner) = &owner {
+                state.owners.insert(handle.task_id.clone(), owner.clone());
+            }
+            let inserted = !state.records.contains_key(&handle.task_id);
+            let detail = state
+                .records
+                .entry(handle.task_id.clone())
+                .or_insert(record)
+                .clone();
+            drop(state);
+            if let Some(started) = started {
+                let _ = started.send(handle.task_id.clone());
+            }
+            if inserted {
+                let _ = updates.send(detail);
+            }
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(handle)
         })
         .await
         .map_err(shell_launch_worker_error)?
         .map_err(shell_launch_registration_error)?;
-        let now = peri_time::now_utc_rfc3339();
-        let mut record = DetailedTask::new(
-            Task::new(&handle.task_id, TaskStatus::Working, &now, &now)
-                .with_status_message("Background shell command is running.")
-                .with_poll_interval_ms(1000),
-            TaskPayload::Working,
-        );
-        // A fast command can complete before spawn_shell returns. Keep its
-        // terminal result rather than overwriting it with a working seed.
-        let mut state = self.state.lock();
-        if let Some(scope) = scope {
-            state.scopes.insert(handle.task_id.clone(), scope.into());
-        }
-        state
-            .summaries
-            .entry(handle.task_id.clone())
-            .or_insert(summary);
-        if let Some(existing) = state.records.get(&handle.task_id) {
-            record = existing.clone();
-        } else {
-            state.records.insert(handle.task_id.clone(), record.clone());
-            if let Some(task) = state.publish(&handle.task_id) {
-                let _ = self.updates.send(task);
-                self.changed.notify_waiters();
-            }
-        }
-        Ok(record.task)
+        // A fast command can complete before the blocking worker registers it;
+        // keep the terminal result instead of seeding a working record.
+        let task = self
+            .state
+            .lock()
+            .records
+            .get(&handle.task_id)
+            .map(|detail| detail.task.clone())
+            .ok_or_else(|| {
+                McpError::internal_error(
+                    "background shell task registration missing after launch",
+                    None,
+                )
+            })?;
+        Ok(task)
     }
 
     /// Register a foreground call that the Bash executor already promoted to
     /// its owned background manager. The callback may have won the race.
-    pub(crate) fn track_promoted_scoped(
-        &self,
-        task_id: &str,
-        scope: Option<&str>,
-        command: Option<&str>,
-    ) -> Task {
+    pub(crate) fn track_promoted_owned(&self, task_id: &str, owner: Option<&str>) -> Task {
         let now = peri_time::now_utc_rfc3339();
         let record = DetailedTask::new(
             Task::new(task_id, TaskStatus::Working, &now, &now)
@@ -366,29 +351,26 @@ impl ShellTasks {
             TaskPayload::Working,
         );
         let mut state = self.state.lock();
-        if let Some(scope) = scope {
-            state.scopes.insert(task_id.into(), scope.into());
+        let already_terminal = state
+            .records
+            .get(task_id)
+            .is_some_and(|detail| detail.task.status.is_terminal());
+        if !already_terminal {
+            state.tracked.insert(task_id.into());
         }
-        if let Some(command) = command {
-            state
-                .summaries
-                .insert(task_id.into(), command.chars().take(160).collect());
+        if let Some(owner) = owner {
+            state.owners.insert(task_id.into(), owner.into());
         }
         let inserted = !state.records.contains_key(task_id);
-        let task = state
+        let detail = state
             .records
             .entry(task_id.into())
             .or_insert(record)
-            .task
             .clone();
-        // The BashTool callback can finish before timeout promotion returns.
-        // It has no per-request scope, so publish its retained terminal record
-        // as soon as the promoted task is bound to this trusted scope.
-        if inserted || (scope.is_some() && !state.revisions.contains_key(task_id)) {
-            if let Some(detail) = state.publish(task_id) {
-                let _ = self.updates.send(detail);
-                self.changed.notify_waiters();
-            }
+        let task = detail.task.clone();
+        drop(state);
+        if inserted {
+            let _ = self.updates.send(detail);
         }
         task
     }
@@ -407,19 +389,23 @@ impl ShellTasks {
         self.cancel_inner(task_id, None)
     }
 
-    fn cancel_inner(&self, task_id: &str, scoped: Option<&str>) -> Result<(), McpError> {
+    fn cancel_inner(&self, task_id: &str, owner: Option<&str>) -> Result<(), McpError> {
         {
             let mut state = self.state.lock();
-            if let Some(scope) = scoped {
-                if !state.scoped(task_id, scope) {
+            if let Some(owner) = owner {
+                if !state.owned_by(task_id, owner) {
                     return Err(McpError::invalid_params("unknown task", None));
                 }
             }
-            let record = state
+            if state
                 .records
                 .get(task_id)
-                .ok_or_else(|| McpError::invalid_params("unknown task", None))?;
-            if record.task.status.is_terminal() {
+                .ok_or_else(|| McpError::invalid_params("unknown task", None))?
+                .task
+                .status
+                .is_terminal()
+            {
+                state.tracked.remove(task_id);
                 return Ok(());
             }
             if state.cancel_accepted.contains(task_id) {
@@ -440,20 +426,22 @@ impl ShellTasks {
         let mut state = self.state.lock();
         state.cancel_pending.remove(task_id);
         let pending = state.pending_results.remove(task_id);
+        let mut updated = None;
         if cancelled.is_ok() {
+            state.tracked.remove(task_id);
             state.cancel_accepted.insert(task_id.into());
             if let Some(record) = state.records.get_mut(task_id) {
                 record.task.status_message = Some(
                     "Background shell cancellation requested; waiting for process cleanup.".into(),
                 );
                 record.task.last_updated_at = peri_time::now_utc_rfc3339();
-            }
-            if let Some(task) = state.publish(task_id) {
-                let _ = self.updates.send(task);
-                self.changed.notify_waiters();
+                updated = Some(record.clone());
             }
         }
         drop(state);
+        if let Some(task) = updated {
+            let _ = self.updates.send(task);
+        }
         if let Some(result) = pending {
             self.completion_callback()(&result, BgTaskKind::Shell)
                 .map_err(|reason| McpError::internal_error(reason, None))?;
@@ -470,165 +458,26 @@ impl ShellTasks {
             .ok_or_else(|| McpError::invalid_params("unknown task", None))
     }
 
-    pub(crate) fn get_scoped(&self, id: &str, scope: &str) -> Result<GetTaskResult, McpError> {
-        if !self.state.lock().scoped(id, scope) {
+    pub(crate) fn get_owned(&self, id: &str, owner: &str) -> Result<GetTaskResult, McpError> {
+        if !self.state.lock().owned_by(id, owner) {
             return Err(McpError::invalid_params("unknown task", None));
         }
         self.get(id)
     }
 
-    pub(crate) fn belongs_to(&self, id: &str, scope: &str) -> bool {
-        self.state.lock().scoped(id, scope)
+    pub(crate) fn belongs_to(&self, id: &str, owner: &str) -> bool {
+        self.state.lock().owned_by(id, owner)
     }
 
-    pub(crate) fn cancel_scoped(&self, id: &str, scope: &str) -> Result<(), McpError> {
-        self.cancel_inner(id, Some(scope))
+    pub(crate) fn cancel_owned(&self, id: &str, owner: &str) -> Result<(), McpError> {
+        self.cancel_inner(id, Some(owner))
     }
 
-    pub(crate) fn update_scoped(&self, id: &str, scope: &str) -> Result<(), McpError> {
-        if !self.state.lock().scoped(id, scope) {
+    pub(crate) fn update_owned(&self, id: &str, owner: &str) -> Result<(), McpError> {
+        if !self.state.lock().owned_by(id, owner) {
             return Err(McpError::invalid_params("unknown task", None));
         }
         self.update(id)
-    }
-
-    pub(crate) fn snapshot(&self, scope: &str) -> ScopeSnapshot {
-        let state = self.state.lock();
-        let mut tasks: Vec<ScopedTask> = state
-            .scopes
-            .iter()
-            .filter(|(_, s)| s.as_str() == scope)
-            .filter_map(|(id, _)| {
-                Some(ScopedTask {
-                    task: state.records.get(id)?.clone(),
-                    summary: state.summaries.get(id).cloned().unwrap_or_default(),
-                    initiator_session_id: scope.to_owned(),
-                    revision: *state.revisions.get(id).unwrap_or(&0),
-                    terminal_transition_id: state.terminal_ids.get(id).cloned(),
-                })
-            })
-            .collect();
-        tasks.sort_by(|left, right| left.task.task.task_id.cmp(&right.task.task.task_id));
-        ScopeSnapshot {
-            cursor: state.cursor,
-            epoch: *state.epochs.get(scope).unwrap_or(&0),
-            closing: state.closing.contains(scope),
-            resources_settled: state.inflight.get(scope).copied().unwrap_or(0) == 0
-                && !state.failed_creation_unconfirmed.contains(scope)
-                && state
-                    .scopes
-                    .iter()
-                    .filter(|(_, owner)| owner.as_str() == scope)
-                    .all(|(task_id, _)| {
-                        state.resources_settled.contains(task_id)
-                            && !state.cancel_pending.contains(task_id)
-                    }),
-            tasks,
-        }
-    }
-
-    pub(crate) async fn changes(
-        &self,
-        scope: &str,
-        cursor: u64,
-        wait_ms: u64,
-    ) -> Result<ScopeChanges, McpError> {
-        let deadline = peri_time::monotonic_now() + Duration::from_millis(wait_ms.min(30_000));
-        loop {
-            let notified = self.changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            {
-                let state = self.state.lock();
-                if cursor > state.cursor
-                    || state
-                        .changes
-                        .front()
-                        .is_some_and(|(first, _, _)| cursor < first.saturating_sub(1))
-                {
-                    return Err(McpError::invalid_params("task cursor expired", None));
-                }
-                let changes: Vec<_> = state
-                    .changes
-                    .iter()
-                    .filter(|(seq, s, _)| *seq > cursor && s == scope)
-                    .map(|(_, _, change)| change.clone())
-                    .collect();
-                if !changes.is_empty() || wait_ms == 0 || peri_time::monotonic_now() >= deadline {
-                    return Ok(ScopeChanges {
-                        cursor: state.cursor,
-                        changes,
-                    });
-                }
-            }
-            let _ = peri_time::timeout_at(deadline, notified).await;
-        }
-    }
-
-    pub(crate) async fn close_scope(&self, scope: &str, epoch: u64) -> Result<u64, McpError> {
-        {
-            let mut state = self.state.lock();
-            if *state.epochs.get(scope).unwrap_or(&0) != epoch {
-                return Err(McpError::invalid_params("stale task scope epoch", None));
-            }
-            state.closing.insert(scope.into());
-        }
-        loop {
-            let notified = self.changed.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            {
-                let state = self.state.lock();
-                if *state.epochs.get(scope).unwrap_or(&0) != epoch || !state.closing.contains(scope)
-                {
-                    return Err(McpError::invalid_params("stale task scope epoch", None));
-                }
-                if state.inflight.get(scope).copied().unwrap_or(0) == 0 {
-                    return Ok(state.cursor);
-                }
-            }
-            notified.await;
-        }
-    }
-
-    pub(crate) fn open_scope(&self, scope: &str, epoch: u64) -> Result<ScopeOpened, McpError> {
-        let mut state = self.state.lock();
-        if *state.epochs.get(scope).unwrap_or(&0) != epoch {
-            return Err(McpError::invalid_params("stale task scope epoch", None));
-        }
-        if !state.closing.contains(scope) {
-            return Err(McpError::invalid_params("task scope is not closing", None));
-        }
-        if state.failed_creation_unconfirmed.contains(scope) {
-            return Err(McpError::invalid_params(
-                "Incomplete: failed shell creation resource settlement unconfirmed",
-                None,
-            ));
-        }
-        if state.inflight.get(scope).copied().unwrap_or(0) != 0
-            || state.scopes.iter().any(|(id, task_scope)| {
-                task_scope == scope
-                    && (!state.resources_settled.contains(id)
-                        || state
-                            .records
-                            .get(id)
-                            .is_none_or(|task| !task.task.status.is_terminal()))
-            })
-        {
-            return Err(McpError::invalid_params(
-                "task scope has unsettled work",
-                None,
-            ));
-        }
-        let next = epoch
-            .checked_add(1)
-            .ok_or_else(|| McpError::internal_error("task scope epoch exhausted", None))?;
-        state.closing.remove(scope);
-        state.epochs.insert(scope.into(), next);
-        Ok(ScopeOpened {
-            cursor: state.cursor,
-            epoch: next,
-        })
     }
 
     pub(crate) async fn shutdown(&self) -> TaskShutdownReport {
@@ -716,68 +565,22 @@ impl ShellLaunchFailure {
     }
 }
 
-/// 启动失败：保留结构化分类，供准入者判断进程是否可能已被接受。
-///
-/// `McpError` 较大，装箱以避免 `Result` 的错误分支超过 clippy 阈值。
-struct ShellLaunchError {
-    failure: ShellLaunchFailure,
-    error: Box<McpError>,
-}
-
-impl ShellLaunchError {
-    /// 注册表在创建进程前拒绝的确定性背压。没有进程需要结算，scope 可以
-    /// 立即视为已确认；其他失败仍可能已接受进程，不能据此放行 close。
-    fn rejected_before_creation(&self) -> bool {
-        matches!(self.failure, ShellLaunchFailure::ConcurrentLimit { .. })
-    }
-
-    fn into_mcp_error(self) -> McpError {
-        *self.error
-    }
-}
-
-fn shell_launch_worker_error(error: tokio::task::JoinError) -> ShellLaunchError {
+fn shell_launch_worker_error(error: tokio::task::JoinError) -> McpError {
     let failure = ShellLaunchFailure::of_join_error(&error);
     tracing::error!(
         failure_class = failure.class(),
         "background shell launch worker did not return"
     );
-    let error = Box::new(McpError::internal_error(failure.message(), None));
-    ShellLaunchError { failure, error }
+    McpError::internal_error(failure.message(), None)
 }
 
-fn shell_launch_registration_error(
-    error: Box<dyn std::error::Error + Send + Sync>,
-) -> ShellLaunchError {
+fn shell_launch_registration_error(error: Box<dyn std::error::Error + Send + Sync>) -> McpError {
     let failure = ShellLaunchFailure::of_registration_error(error.as_ref());
     tracing::error!(
         failure_class = failure.class(),
         "background shell task launch failed before registration"
     );
-    let error = Box::new(McpError::internal_error(failure.message(), None));
-    ShellLaunchError { failure, error }
-}
-
-pub(crate) struct ScopeAdmission {
-    owner: ShellTasks,
-    scope: String,
-    creation_unconfirmed: bool,
-}
-
-impl Drop for ScopeAdmission {
-    fn drop(&mut self) {
-        let mut state = self.owner.state.lock();
-        if self.creation_unconfirmed {
-            state.failed_creation_unconfirmed.insert(self.scope.clone());
-        }
-        if let Some(count) = state.inflight.get_mut(&self.scope) {
-            *count -= 1;
-            if *count == 0 {
-                state.inflight.remove(&self.scope);
-            }
-        }
-        self.owner.changed.notify_waiters();
-    }
+    McpError::internal_error(failure.message(), None)
 }
 
 impl Drop for ShellTasks {
