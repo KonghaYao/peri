@@ -210,3 +210,46 @@ fn tool_boundary_flushes_text_before_tool_and_starts_new_bubble() {
         matches!(&units[2], TuiRenderUnit::TuiAssistantBubble(bubble) if bubble.text == "after")
     );
 }
+
+/// [M07 回归] BgLiveDetail 分层计量：stream 与 nested 是两份真实分配，
+/// tool_cards 计入累积器实际持有的字段。
+#[test]
+#[serial_test::serial]
+fn detail_memory_bytes_separates_stream_nested_and_raw_input() {
+    let fixture = Fixture::new();
+    for _ in 0..10 {
+        fixture.text(&"stream-body-".repeat(64));
+    }
+    let before = BG_LIVE_DETAIL.state().read()["stream-test"].memory_bytes();
+    assert!(before.stream_bytes > 0, "未投影 stream 必须计入");
+    assert_eq!(before.nested_units_bytes, 0, "未发布时没有嵌套投影");
+
+    publish_pending_streams();
+    let projected = BG_LIVE_DETAIL.state().read()["stream-test"].memory_bytes();
+    assert!(
+        projected.stream_bytes > 0,
+        "projected 后 stream 仍持有自己的 clone，必须计入"
+    );
+    assert!(projected.nested_units_bytes > 0);
+
+    handle_bg_tool_started(
+        "stream-agent",
+        &TuiToolStarted {
+            tool_id: "raw-tool".into(),
+            tool_name: "Bash".into(),
+            input_summary: "large".into(),
+            raw_input: serde_json::json!({"command": "x".repeat(64 * 1024)}),
+            agent_id: Some("stream-agent".into()),
+        },
+        None,
+    );
+    let with_tool = BG_LIVE_DETAIL.state().read()["stream-test"].memory_bytes();
+    assert!(
+        with_tool.tool_cards_bytes >= 64 * 1024,
+        "大 raw_input 必须可区分"
+    );
+    assert!(
+        with_tool.tool_cards_bytes >= 64 * 1024 + "raw-tool".len() + "Bash".len() + "large".len(),
+        "tool_cards 计量必须覆盖累积器实际字段"
+    );
+}

@@ -12,8 +12,112 @@ use ratatui_kit::ratatui::text::Line;
 
 use super::tui_render_unit::{
     TuiAskUserBlock, TuiAssistantBubble, TuiCollapsedGroup, TuiDivider, TuiRenderUnit,
-    TuiSubAgentGroup, TuiSystemNote, TuiSystemReminder, TuiTodoSummary, TuiToolCard, TuiUserBubble,
+    TuiSubAgentGroup, TuiSystemNote, TuiSystemReminder, TuiTodoSummary, TuiToolCard,
+    TuiToolPresentation, TuiUserBubble,
 };
+
+/// `body` = 已使用正文字节；`reserved` = `String`/容器的 capacity 下界。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BodyReserved {
+    pub body: usize,
+    pub reserved: usize,
+}
+
+impl std::ops::Add for BodyReserved {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self {
+            body: self.body + rhs.body,
+            reserved: self.reserved + rhs.reserved,
+        }
+    }
+}
+
+impl std::ops::AddAssign for BodyReserved {
+    fn add_assign(&mut self, rhs: Self) {
+        self.body += rhs.body;
+        self.reserved += rhs.reserved;
+    }
+}
+
+pub fn string_body_reserved(value: &String) -> BodyReserved {
+    BodyReserved {
+        body: value.len(),
+        reserved: value.capacity(),
+    }
+}
+
+pub fn option_string_body_reserved(value: &Option<String>) -> BodyReserved {
+    value.as_ref().map(string_body_reserved).unwrap_or_default()
+}
+
+/// 结构化 JSON 的逻辑字节（不分配序列化临时体）。
+pub fn json_value_bytes(value: &serde_json::Value) -> BodyReserved {
+    use serde_json::Value;
+    match value {
+        Value::Null => BodyReserved {
+            body: 4,
+            reserved: 4,
+        },
+        Value::Bool(true) => BodyReserved {
+            body: 4,
+            reserved: 4,
+        },
+        Value::Bool(false) => BodyReserved {
+            body: 5,
+            reserved: 5,
+        },
+        Value::Number(_) => BodyReserved {
+            body: 8,
+            reserved: 8,
+        },
+        Value::String(text) => BodyReserved {
+            body: text.len() + 2,
+            reserved: text.capacity() + 2,
+        },
+        Value::Array(items) => {
+            let mut bytes = BodyReserved {
+                body: 2 + items.len(),
+                reserved: 2 + items.len(),
+            };
+            for item in items {
+                bytes += json_value_bytes(item);
+            }
+            bytes
+        }
+        Value::Object(map) => {
+            let mut bytes = BodyReserved {
+                body: 2 + map.len(),
+                reserved: 2 + map.len(),
+            };
+            for (key, item) in map {
+                let item = json_value_bytes(item);
+                bytes.body += key.len() + 4 + item.body;
+                bytes.reserved += key.len() + 4 + item.reserved;
+            }
+            bytes
+        }
+    }
+}
+
+pub fn presentation_bytes(presentation: &TuiToolPresentation) -> BodyReserved {
+    match presentation {
+        TuiToolPresentation::Generic => BodyReserved::default(),
+        TuiToolPresentation::Skill(skill) => string_body_reserved(&skill.name),
+        TuiToolPresentation::Todo(todo) => {
+            let mut bytes = BodyReserved::default();
+            for item in &todo.current_items {
+                bytes += string_body_reserved(&item.content);
+                bytes += option_string_body_reserved(&item.active_form);
+            }
+            for change in &todo.changes {
+                bytes += string_body_reserved(&change.content);
+            }
+            bytes
+        }
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct SeenAllocations {

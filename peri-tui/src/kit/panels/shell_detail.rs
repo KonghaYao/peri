@@ -27,17 +27,10 @@ pub fn ShellDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let sv = hooks.use_state(ScrollViewState::default);
 
     let selected_id = SELECTED_BG_TASK_ID.state().read().clone();
+    // 只注册订阅，不在帧开始时复制整张表；渲染前直接借用读取。
     let tasks_store = hooks.use_atom(&BG_TASKS);
-    let tasks = tasks_store.read().clone();
-    let _ = tasks_store;
-
     let display_store = hooks.use_atom(&BG_DISPLAY);
-    let display = display_store.read().clone();
-    let _ = display_store;
-
     let live_store = hooks.use_atom(&BG_LIVE_DETAIL);
-    let live = live_store.read().clone();
-    let _ = live_store;
 
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, move |event| {
         let Event::Key(key) = event else {
@@ -53,17 +46,22 @@ pub fn ShellDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     });
 
     let area = hooks.use_previous_size();
-    let theme = theme_def.read();
-    let mut lines =
-        build_shell_detail_lines(selected_id.as_deref(), &tasks, &display, &live, &theme);
-
-    if lines.is_empty() {
-        lines.push(Line::from(vec![Span::styled(
-            i18n::tr("shell-detail-not-found"),
-            Style::new().fg(theme.semantic.text.muted),
-        )]));
-    }
-    drop(theme);
+    // 借用读守卫覆盖构建行所需的三张表：不再做三次全量 clone。
+    let lines = {
+        let theme = theme_def.read();
+        let tasks = tasks_store.read();
+        let display = display_store.read();
+        let live = live_store.read();
+        let mut lines =
+            build_shell_detail_lines(selected_id.as_deref(), &tasks, &display, &live, &theme);
+        if lines.is_empty() {
+            lines.push(Line::from(vec![Span::styled(
+                i18n::tr("shell-detail-not-found"),
+                Style::new().fg(theme.semantic.text.muted),
+            )]));
+        }
+        lines
+    };
 
     let content = Paragraph::new(ratatui::text::Text::from(lines));
     crate::kit::panel_scroll::register_panel_scroll(PanelKind::ShellDetail, area, sv);

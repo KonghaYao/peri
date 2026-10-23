@@ -136,6 +136,230 @@ fn test_commit_does_not_release_without_viewport_anchor() {
     );
 }
 
+/// 当前 turn 已有带持久 message_id 的正文、窗口已启用的状态。
+fn state_with_live_message_text(message_id: &str, text: &str) -> BridgeState {
+    let mut state = make_fold_test_state();
+    state.active_session_id = "s1".into();
+    state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
+    state
+        .window
+        .begin_window(WindowIdentity::new("s1", "gen-1", 7, "snap-1"));
+    state.current_turn.append_text(text, Some(message_id));
+    state
+}
+
+/// 带 message_id 的正文归档后，窗口 resident body 必须与本次新增正文精确一致。
+#[test]
+#[serial]
+fn test_turn_suspended_registers_exact_body_bytes_for_message() {
+    let text = "exact-suspend-body-".repeat(16);
+    let mut state = state_with_live_message_text("m-suspend", &text);
+    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    assert_eq!(state.window.budget().resident_body_bytes, text.len());
+}
+
+#[test]
+#[serial]
+fn test_turn_interrupted_registers_exact_body_bytes_for_message() {
+    let text = "exact-cancel-body-".repeat(16);
+    let mut state = state_with_live_message_text("m-cancel", &text);
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "cancel".into(),
+            request_id: None,
+        },
+    );
+    assert_eq!(state.window.budget().resident_body_bytes, text.len());
+}
+
+#[test]
+#[serial]
+fn test_stale_turn_interrupted_registers_exact_body_bytes_for_message() {
+    let text = "exact-stale-body-".repeat(16);
+    let mut state = state_with_live_message_text("m-stale", &text);
+    state.turn_generation = 2;
+    state.last_prompt_generation = 1;
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "cancel".into(),
+            request_id: None,
+        },
+    );
+    assert_eq!(state.window.budget().resident_body_bytes, text.len());
+}
+
+/// 重复 suspend / flush 不得重复登记同一正文（segment 与字节都不翻倍）。
+#[test]
+#[serial]
+fn test_repeated_suspend_and_flush_do_not_double_register() {
+    let text = "repeat-body-".repeat(16);
+    let mut state = state_with_live_message_text("m-repeat", &text);
+    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    let segments_once = state.window.segment_count();
+    let bytes_once = state.window.budget().resident_body_bytes;
+    assert_eq!(bytes_once, text.len());
+
+    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    assert_eq!(state.window.segment_count(), segments_once);
+    assert_eq!(state.window.budget().resident_body_bytes, bytes_once);
+    assert_eq!(state.window.sealed_segment_count(), 0);
+}
+
+/// 当前 turn 已有未归档正文、窗口已启用的状态（suspend / stale 归档用例共用）。
+fn state_with_live_text() -> BridgeState {
+    let mut state = make_fold_test_state();
+    state.active_session_id = "s1".into();
+    state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
+    state
+        .window
+        .begin_window(WindowIdentity::new("s1", "gen-1", 7, "snap-1"));
+    state
+        .current_turn
+        .append_text(&"suspend-body-".repeat(32), None);
+    state
+}
+
+/// [回归测试] 挂起归档必须与正常结束共用窗口登记：正文驻留不能被漏记。
+#[test]
+#[serial]
+fn test_turn_suspended_archive_registers_resident_bytes() {
+    let mut state = state_with_live_text();
+    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    assert!(!state.committed.is_empty(), "挂起前产出的正文必须归档");
+    assert!(
+        state.window.budget().unattributed_live_bytes > 0,
+        "没有持久身份的子组/正文也必须计入驻留预算"
+    );
+    assert_eq!(
+        state.window.diagnostics().tui_unattributed_live_bytes,
+        state.window.budget().unattributed_live_bytes
+    );
+}
+
+/// [回归测试] 非 stale 中断的归档路径同样必须登记窗口预算。
+#[test]
+#[serial]
+fn test_turn_interrupted_archive_registers_resident_bytes() {
+    let mut state = state_with_live_text();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "cancel".into(),
+            request_id: None,
+        },
+    );
+    assert!(!state.committed.is_empty(), "中断前产出的正文必须归档");
+    assert!(
+        state.window.budget().unattributed_live_bytes > 0,
+        "非 stale 中断归档同样不得绕过驻留预算登记"
+    );
+}
+
+/// [回归测试] 挂起时同步 subagent 仍在运行：稳定前缀归档、活动组保留在
+/// current_turn，后续 stopped/done 仍能找到它并完成归档。
+#[test]
+#[serial]
+fn test_turn_suspended_preserves_running_sync_subagent_and_registers_bytes() {
+    let mut state = make_fold_test_state();
+    state.active_session_id = "s1".into();
+    state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
+    state
+        .window
+        .begin_window(WindowIdentity::new("s1", "gen-1", 7, "snap-1"));
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+            text: "stable-prefix".into(),
+            message_id: None,
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "child".into(),
+            agent_name: "coder".into(),
+            is_background: false,
+            parent_tool_call_id: Some("parent-call-1".into()),
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+            text: "child-streaming-body".repeat(8),
+            message_id: Some("child-message".into()),
+            agent_id: Some("child".into()),
+        }),
+    );
+    assert!(state.current_turn.has_running_sync_subagent());
+
+    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    assert!(
+        state.current_turn.has_running_sync_subagent(),
+        "挂起不得 reset 仍在运行的同步组"
+    );
+    assert!(
+        state.committed.iter().any(|unit| matches!(
+            unit,
+            TuiRenderUnit::TuiAssistantBubble(bubble) if bubble.text == "stable-prefix"
+        )),
+        "子组之前的稳定正文必须归档"
+    );
+    assert!(
+        state.window.budget().unattributed_live_bytes > 0,
+        "归档正文必须计入驻留预算"
+    );
+    assert!(
+        state
+            .current_turn
+            .view_models()
+            .iter()
+            .any(|unit| matches!(unit, TuiRenderUnit::TuiSubAgentGroup(_))),
+        "活动组必须保留在 current_turn 等待后续事件"
+    );
+
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "child".into(),
+            result: "done".into(),
+            is_error: false,
+        },
+    );
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    assert!(
+        state.committed.iter().any(|unit| matches!(
+            unit,
+            TuiRenderUnit::TuiSubAgentGroup(group) if group.agent_id == "child"
+        )),
+        "stopped 后活动组必须在 turn 结束时完成归档"
+    );
+}
+
+/// [回归测试] 迟到（stale）中断的归档路径同样必须登记窗口预算。
+#[test]
+#[serial]
+fn test_stale_turn_interrupted_archive_registers_resident_bytes() {
+    let mut state = state_with_live_text();
+    state.turn_generation = 2;
+    state.last_prompt_generation = 1;
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "cancel".into(),
+            request_id: None,
+        },
+    );
+    assert!(!state.committed.is_empty(), "stale 前产出的正文必须归档");
+    assert!(
+        state.window.budget().unattributed_live_bytes > 0,
+        "stale 归档不得绕过驻留预算登记"
+    );
+}
+
 #[test]
 #[serial]
 fn test_tool_only_archive_counts_toward_budget_without_live_segment() {
@@ -283,9 +507,9 @@ fn live_archive_groups_split_message_and_releases_only_its_bubbles() {
     assert!(segment.reserved_bytes > segment.body_bytes);
     assert_eq!(state.committed.len(), 5);
     for (id, position) in [("anchor", 5), ("neighbor", 10), ("split", 15)] {
-        assert!(state.window.promote_live_seal_position(
-            &PersistentEntryKey::own(format!("s1:{id}")), position,
-        ));
+        assert!(state
+            .window
+            .promote_live_seal_position(&PersistentEntryKey::own(format!("s1:{id}")), position,));
     }
     state.window.set_anchor(Some(WindowAnchor::new(
         PersistentEntryKey::own("s1:anchor"),

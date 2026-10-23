@@ -143,6 +143,8 @@ impl super::SubAgentTool {
     /// Prefer the current ToolContext over the before_agent snapshot. Remove only
     /// the trailing AI tool call whose ToolResult has not arrived yet.
     pub(super) fn current_messages(&self, live_messages: &[BaseMessage]) -> Vec<BaseMessage> {
+        #[cfg(test)]
+        CURRENT_MESSAGES_CALLS.with(|calls| calls.set(calls.get() + 1));
         let mut msgs: Vec<peri_agent::messages::BaseMessage> = if !live_messages.is_empty() {
             live_messages.to_vec()
         } else if let Some(ref pm) = self.parent_messages {
@@ -157,4 +159,24 @@ impl super::SubAgentTool {
         }
         msgs
     }
+}
+
+// 测试观测点：`current_messages` 的调用次数（仅测试构建存在）。
+//
+// 命名子 agent（同步/后台）不得物化父历史；fork 恰调用一次。计数只用于
+// 回归断言，不改变生产行为。使用线程局部计数，避免并行测试互相污染；
+// 调用发生在 invoke future 的当前 runtime 线程（调用后才 spawn 后台任务）。
+#[cfg(test)]
+thread_local! {
+    static CURRENT_MESSAGES_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn current_messages_calls() -> usize {
+    CURRENT_MESSAGES_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_current_messages_calls() {
+    CURRENT_MESSAGES_CALLS.with(|calls| calls.set(0));
 }

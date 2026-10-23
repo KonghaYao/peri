@@ -157,14 +157,26 @@ impl SessionResources for MockSessionResources {
     }
 
     async fn load_session_binding(&self, id: &ThreadId) -> SessionResourceResult<BindingState> {
-        // 替身不建模本机登记：已登记的会话按「有绑定」回答，未登记按真实门面语义报
-        // `NotFound`（不冒充 legacy 或「没有绑定」）。
-        match self.region(id).and_then(|region| region.meta) {
-            Some(meta) => Ok(BindingState::Bound(fixture_binding(&meta.cwd))),
-            None => Err(SessionResourceError::new(
+        // 与生产门面同口径：绑定只来自记录的 binding 区；无 binding 但有父会话
+        // 的 region 归为外部/未注册，其余未登记会话仍按真实语义报 `NotFound`。
+        // 直接读区数据，不经过 `region()`：预检契约不含历史，不能在这里克隆 payload。
+        let regions = self.regions.lock().unwrap();
+        let Some(region) = regions.get(id) else {
+            return Err(SessionResourceError::new(
                 SessionResourceErrorKind::NotFound,
-            )),
-        }
+            ));
+        };
+        Ok(match region.binding.as_ref() {
+            Some(binding) => BindingState::Bound(binding.clone()),
+            None if region
+                .meta
+                .as_ref()
+                .is_some_and(|meta| meta.parent_thread_id.is_some()) =>
+            {
+                BindingState::ExternalOrUnregistered
+            }
+            None => BindingState::Missing,
+        })
     }
 
     async fn validate_bound_workspace(

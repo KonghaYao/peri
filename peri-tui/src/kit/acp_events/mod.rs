@@ -209,6 +209,8 @@ impl BridgeState {
     /// current_turn 之前，抽走会让它跨越仍在运行的分组，破坏原时间线顺序（R05）。
     fn archive_current_turn(&mut self) {
         let start = self.committed.len();
+        // 任何运行中的分组（含后台）都可能继续增长，只能搬稳定前缀；调用方
+        // 在此路径不得 reset current_turn。后台组跨 turn 由全局 live 明细维护。
         if self.current_turn.has_running_subagent() {
             // 运行中 subagent 不应让整轮常驻：只把第一个仍会增长的实体之前的稳定
             // 前缀按 segment 顺序交给 committed——文本、已完成工具，以及已停止且已
@@ -218,17 +220,53 @@ impl BridgeState {
                 self.committed.push_back(vm);
             }
         } else {
-            // 整轮归档沿用 segment 顺序，不能先抽走子 Agent 再追加根内容。
-            if !self.current_turn.committed && !self.current_turn.is_empty() {
-                self.current_turn.deactivate();
-                for vm in self.current_turn.view_models() {
-                    self.committed.push_back(vm.clone());
-                }
-            }
-            self.current_turn.take_completed_subagents();
+            self.archive_current_turn_fully();
+            return;
         }
         let range = start..self.committed.len();
         self.register_live_seal_segments(range);
+    }
+
+    /// 冻结整轮：所有展示单元搬入 committed，活动容器由调用方 reset。
+    ///
+    /// 用于 turn 边界（stale / cancel / suspend）没有同步运行组的情况；此时
+    /// 后台组也必须整体归档，否则调用方的 reset 会把它丢掉。
+    fn archive_current_turn_fully(&mut self) {
+        let start = self.committed.len();
+        // 整轮归档沿用 segment 顺序，不能先抽走子 Agent 再追加根内容。
+        if !self.current_turn.committed && !self.current_turn.is_empty() {
+            self.current_turn.deactivate();
+            for vm in self.current_turn.view_models() {
+                self.committed.push_back(vm.clone());
+            }
+        }
+        self.current_turn.take_completed_subagents();
+        let range = start..self.committed.len();
+        self.register_live_seal_segments(range);
+    }
+
+    /// 已产出轮次归档的统一入口：先搬 VM，再按实际槽位登记窗口预算。
+    ///
+    /// stale / cancel / suspend 等直接归档路径必须共用，避免绕过
+    /// `register_live_seal_segments` 形成未记账的驻留正文。
+    ///
+    /// 返回是否仍有运行中的**同步** subagent。调用方在 true 时不得重置
+    /// `current_turn`：同步运行组仍在累积正文，重置会让后续 chunk /
+    /// SubagentStopped 丢失，UI 永久停在 running 且缺最终输出。
+    /// 后台组跨 turn 由全局 live 明细维护，这里必须按可冻结处理。
+    fn commit_current_turn_units(&mut self) -> bool {
+        let has_running_sync_subagent = self.current_turn.has_running_sync_subagent();
+        if self.current_turn.committed || self.current_turn.is_empty() {
+            return has_running_sync_subagent;
+        }
+        // 同步运行组只归档稳定前缀并保留容器；无同步运行组时整轮冻结，
+        // 后台组也必须随之归档，调用方才能安全 reset。
+        if has_running_sync_subagent {
+            self.archive_current_turn();
+        } else {
+            self.archive_current_turn_fully();
+        }
+        has_running_sync_subagent
     }
 
     fn register_live_seal_segments(&mut self, slots: impl Iterator<Item = usize>) {

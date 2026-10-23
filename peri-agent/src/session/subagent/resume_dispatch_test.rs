@@ -603,3 +603,23 @@ async fn test_resume_provenance_overlap_rolls_back_claim_before_retry() {
             .unwrap();
     assert_eq!(resumed.child_thread_id, thread_id);
 }
+
+/// [回归测试] 绑定预检只读 binding，不得为校验物化有效正文；
+/// 成功恢复只做一次执行用完整快照读取。
+#[tokio::test]
+async fn test_resume_binding_preflight_reads_no_session_snapshot() {
+    let store = MockSessionResources::new();
+    let thread_id = uuid::Uuid::now_v7().to_string();
+    preset_resumable_thread(&store, &thread_id, None).await;
+
+    let config = resume_config(store.clone(), thread_id.clone());
+    let spawned = SessionFactory::resume_subagent(None, config)
+        .await
+        .expect("恢复成功");
+    assert_eq!(spawned.child_thread_id, thread_id);
+    assert_eq!(
+        store.snapshot_reads(),
+        1,
+        "预检只能读 binding；完整快照只用于认领后的执行装载"
+    );
+}
