@@ -161,11 +161,11 @@ impl super::SubAgentTool {
     }
 }
 
-/// 测试观测点：`current_messages` 的调用次数（仅测试构建存在）。
-///
-/// 命名子 agent（同步/后台）不得物化父历史；fork 恰调用一次。计数只用于
-/// 回归断言，不改变生产行为。使用线程局部计数，避免并行测试互相污染；
-/// 调用发生在 invoke future 的当前 runtime 线程（调用后才 spawn 后台任务）。
+// 测试观测点：`current_messages` 的调用次数（仅测试构建存在）。
+//
+// 命名子 agent（同步/后台）不得物化父历史；fork 恰调用一次。计数只用于
+// 回归断言，不改变生产行为。使用线程局部计数，避免并行测试互相污染；
+// 调用发生在 invoke future 的当前 runtime 线程（调用后才 spawn 后台任务）。
 #[cfg(test)]
 thread_local! {
     static CURRENT_MESSAGES_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
