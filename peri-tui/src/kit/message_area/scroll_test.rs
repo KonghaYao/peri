@@ -809,7 +809,7 @@ fn test_scroll_lands_at_top_dispatches_v2_older_page_request() {
         &HistoryLimits::default(),
     )
     .expect("admitted");
-    crate::kit::atoms::HISTORY_V2_STATE.set(state);
+    crate::kit::history_v2::publish_initial(state);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     *crate::kit::atoms::HISTORY_V2_TX
         .lock()
@@ -886,7 +886,7 @@ fn test_scroll_away_from_top_does_not_dispatch() {
         &HistoryLimits::default(),
     )
     .expect("admitted");
-    crate::kit::atoms::HISTORY_V2_STATE.set(state);
+    crate::kit::history_v2::publish_initial(state);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<OutboundCommand>();
     *crate::kit::atoms::HISTORY_V2_TX
         .lock()
