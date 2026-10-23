@@ -33,7 +33,9 @@ Peri 运行数据的离线分析归 `side-projects/agent-defect-analyzer/`，本
 | 探测 SQLite 契约、读取并归一化消息 | `agent-defect-analyzer/src/data/loader.ts`：`DataLoader`、`normalizeMessage` |
 | 检查数据质量与观测缺口 | `agent-defect-analyzer/src/reporting/quality.ts`：`inspectDatabase` |
 | 工具配对、`is_error` 工具错误、执行证据覆盖/状态、重复调用和输出体积 | `agent-defect-analyzer/src/analysis/metrics.ts`：`analyzeDatabase`；执行证据由 `src/data/loader.ts` 归一化 |
+| shell `sleep` 等待频率、形态、等待类型、月/周趋势与超时冲突 | `agent-defect-analyzer/src/analysis/waiting.ts`：`analyzeShellWaiting`；纯命令解析在 `src/analysis/shell_command.ts` |
 | 生成统计与候选报告 | `agent-defect-analyzer/src/reporting/report.ts`：`reportDatabase` |
+| 生成等待分析报告（JSON/Markdown/HTML） | `agent-defect-analyzer/src/reporting/waiting.ts`：`buildWaitingDto`、`writeWaitingReports`；HTML 在 `src/reporting/waiting_html.ts` |
 | 校验口径并比较两个报告 | `agent-defect-analyzer/src/reporting/compare.ts`：`compareReportFiles`、`compareReports` |
 | 确定性抽样与有限上下文回查（含共享脱敏 execution projection） | `agent-defect-analyzer/src/research/evidence.ts`：`sampleThreads`、`evidenceForMessage` |
 | 分层抽样、带正文指纹的任务事实包 schema 2（含独立 execution facts） | `agent-defect-analyzer/src/research/task-packets.ts`：`sampleTaskPackets`、`exportTaskPacket`、`computeTaskPacketHash` |

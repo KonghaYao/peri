@@ -1,7 +1,9 @@
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import type { AnalysisOptions, AnalysisScope } from "./analysis/metrics.js";
+import { analyzeShellWaiting } from "./analysis/waiting.js";
 import { inspectDatabase, writeQualityReports } from "./reporting/quality.js";
 import { reportDatabase, writeReportReports } from "./reporting/report.js";
+import { buildWaitingDto, writeWaitingReports } from "./reporting/waiting.js";
 import { compareReportFiles, writeCompareReports } from "./reporting/compare.js";
 import { evidenceForMessage, sampleThreads } from "./research/evidence.js";
 import { sampleTaskPackets, exportTaskPacket, writeTaskPacketBundle } from "./research/task-packets.js";
@@ -18,27 +20,28 @@ interface EvidenceArgs extends CommonArgs {
 interface CompareArgs { command: "compare"; baseline: string; candidate: string; out: string; }
 interface InspectArgs extends CommonArgs { command: "inspect"; }
 interface ReportArgs extends CommonArgs { command: "report"; }
+interface WaitingArgs extends CommonArgs, AnalysisOptions { command: "waiting"; }
 interface TaskSampleArgs extends CommonArgs { command: "task-sample"; seed: string; perStratum: number; scope: AnalysisScope; includeHidden: boolean; includeContent: boolean; since?: string; until?: string; }
 interface TaskPacketArgs extends CommonArgs { command: "task-packet"; threadId: string; includeContent: boolean; }
 interface TaskReviewArgs { command: "task-review"; packets: string; reviews: string; out: string; }
 
-export type CliArgs = InspectArgs | (ReportArgs & AnalysisOptions) | SampleArgs | EvidenceArgs | CompareArgs | TaskSampleArgs | TaskPacketArgs | TaskReviewArgs;
+export type CliArgs = InspectArgs | (ReportArgs & AnalysisOptions) | WaitingArgs | SampleArgs | EvidenceArgs | CompareArgs | TaskSampleArgs | TaskPacketArgs | TaskReviewArgs;
 
 function usage(): string {
-  return "Usage: bun run src/cli.ts inspect|report|sample|evidence|compare|task-sample|task-packet|task-review ...";
+  return "Usage: bun run src/cli.ts inspect|report|waiting|sample|evidence|compare|task-sample|task-packet|task-review ...";
 }
 
 export function parseCliArgs(argv: string[]): CliArgs {
   const command = argv[0];
-  const commands = ["inspect", "report", "sample", "evidence", "compare", "task-sample", "task-packet", "task-review"];
-  if (!commands.includes(command)) throw new Error(`expected 'inspect', 'report', 'sample', 'evidence', 'compare', 'task-sample', 'task-packet', or 'task-review' command\n${usage()}`);
+  const commands = ["inspect", "report", "waiting", "sample", "evidence", "compare", "task-sample", "task-packet", "task-review"];
+  if (!commands.includes(command)) throw new Error(`expected 'inspect', 'report', 'waiting', 'sample', 'evidence', 'compare', 'task-sample', 'task-packet', or 'task-review' command\n${usage()}`);
   const values = new Map<string, string>();
   let includeHidden = false;
   let includeContent = false;
   for (let i = 1; i < argv.length; i++) {
     const flag = argv[i];
     if (flag === "--include-hidden") {
-      if (!["report", "sample", "task-sample"].includes(command) || includeHidden) throw new Error(`unknown or duplicate argument: ${flag}\n${usage()}`);
+      if (!["report", "waiting", "sample", "task-sample"].includes(command) || includeHidden) throw new Error(`unknown or duplicate argument: ${flag}\n${usage()}`);
       includeHidden = true;
       continue;
     }
@@ -49,6 +52,7 @@ export function parseCliArgs(argv: string[]): CliArgs {
     }
     const allowedByCommand: Record<string, string[]> = {
       inspect: ["--db", "--out"], report: ["--db", "--out", "--scope", "--since", "--until"],
+      waiting: ["--db", "--out", "--scope", "--since", "--until"],
       sample: ["--db", "--out", "--seed", "--size", "--scope", "--since", "--until", "--min-messages"],
       evidence: ["--db", "--out", "--thread", "--message", "--radius"],
       compare: ["--baseline", "--candidate", "--out"],
@@ -89,6 +93,7 @@ export function parseCliArgs(argv: string[]): CliArgs {
   const scope = values.get("--scope") ?? "roots";
   if (scope !== "roots" && scope !== "children" && scope !== "all") throw new Error(`--scope must be roots, children, or all\n${usage()}`);
   if (command === "report") return { command: "report", db: db!, out, includeHidden, scope: scope as AnalysisScope, ...(values.has("--since") ? { since: values.get("--since") } : {}), ...(values.has("--until") ? { until: values.get("--until") } : {}) };
+  if (command === "waiting") return { command: "waiting", db: db!, out, includeHidden, scope: scope as AnalysisScope, ...(values.has("--since") ? { since: values.get("--since") } : {}), ...(values.has("--until") ? { until: values.get("--until") } : {}) };
   if (command === "sample") {
     const seed = values.get("--seed"); const sizeText = values.get("--size");
     if (seed === undefined || sizeText === undefined) throw new Error(`--seed and --size are required\n${usage()}`);
@@ -124,6 +129,10 @@ export function run(argv: string[]): void {
     const report = reportDatabase(args.db, { scope: args.scope, includeHidden: args.includeHidden, since: args.since, until: args.until });
     writeReportReports(report, args.out);
     process.stdout.write(`report complete: ${args.out}/report.json\n`);
+  } else if (args.command === "waiting") {
+    const report = analyzeShellWaiting(args.db, { scope: args.scope, includeHidden: args.includeHidden, since: args.since, until: args.until });
+    writeWaitingReports(buildWaitingDto(report), args.out);
+    process.stdout.write(`waiting complete: ${args.out}/waiting.json\n`);
   } else if (args.command === "sample") {
     const result = sampleThreads(args.db, { seed: args.seed, size: args.size, scope: args.scope, includeHidden: args.includeHidden, minMessages: args.minMessages, since: args.since, until: args.until });
     mkdirSync(args.out, { recursive: true });

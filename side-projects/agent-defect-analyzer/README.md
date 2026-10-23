@@ -15,6 +15,7 @@ cd side-projects/agent-defect-analyzer
 bun install --frozen-lockfile
 bun run inspect --db ~/.peri/threads/threads.db --out output/quality
 bun run report --db ~/.peri/threads/threads.db --out output/behavior
+bun run waiting --db ~/.peri/threads/threads.db --out output/waiting
 # 指定会话创建窗口，UTC 半开区间
 bun run report --db ~/.peri/threads/threads.db --since 2026-09-01T00:00:00Z --until 2026-09-13T00:00:00Z --out output/recent
 bun run sample --db ~/.peri/threads/threads.db --out output/sample --seed review-1 --size 5 --scope roots
@@ -26,9 +27,11 @@ bun run compare --baseline output/baseline/report.json --candidate output/candid
 
 `report` 输出 `report.json` 与 `report.md`，默认分析可见主会话自己持久化的历史。可选 `--scope roots|children|all`、`--include-hidden`；子会话通常隐藏，分析子会话时显式加 `--include-hidden`。时间筛选依据会话创建时间，纳入该会话的全部持久化消息，不能解释为窗口内发生的工具事件。
 
+`waiting` 输出 `waiting.json`、`waiting.md` 与自包含的 `waiting.html`，统计 shell `sleep` 等待的频率与形态，使用与 `report` 相同的范围过滤器和时间筛选项。命令检测是保守的：只把简单命令段的有效首 token 为 `sleep` 的调用计入主指标；`bash -c 'sleep 5'`、`xargs`、`sudo` 等包装形态单独输出为敏感性计数，不混入主分母。`by_wait_kind` 区分纯等待、仅 echo/printf/true/false/:/date 的无信息等待，以及至少包含其他命令的等待。`sleep` 秒数是字面值合计，循环次数、并行、取消和实际墙钟未折算；命令成功也不表示等待目标达成。分母是顶层参数带 `command`/`cmd`/`script`/`shell_command` 的工具调用；工具通过 `ExecuteExtraTool` 嵌套调用 shell 时不会被解包。
+
 错误率的分母是已配对且明确记录成功/错误状态的结果。重复调用与连续失败规则输出达到阈值的候选位置数，不能解释为已经确认的缺陷数量。JSON 包含有界的 `threadId/messageId/callId` 证据与 `nextVerification`；按证据复核后再创建修复任务。
 
-`sample` 与 `report` 使用相同的范围过滤器；抽样要求 `--seed` 与 `--size`（1–50），可加 `--min-messages` 限定会话消息数。时间参数必须是带时区的 ISO 时间戳，统一换算为 UTC，并拒绝无效日期或逆序范围。固定 seed、候选集合与算法产生相同样本；样本指纹只覆盖候选和选中会话元数据，不代表全库内容。
+`sample` 与 `report` 使用相同的范围过滤器；抽样要求 `--seed` 与 `--size`（1–50），可加 `--min-messages` 限定会话消息数。时间参数必须是带时区的 ISO 时间戳，统一换算为 UTC，并拒绝无效日期或逆序范围。固定 seed、候选集合与算法产生相同样本；样本指纹只覆盖候选和选中会话元数据，不代表全库内容。`waiting` 指纹覆盖筛选范围、选中会话元数据以及被分析的调用/结果事实，不覆盖未被统计的正文。
 
 `evidence` 按自有消息的 `--thread`、`--message` 定位，`--radius` 默认为 2、范围为 0–20。默认仅输出 metadata；`--include-content` 才输出正文、参数和结果。最终 JSON 最多 64 KiB，截断与省略通过标志和 `omissions` 明示；证据指纹覆盖窗口元数据。继承上下文可在 viewer 中阅读。
 

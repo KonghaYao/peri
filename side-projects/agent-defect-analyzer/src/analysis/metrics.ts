@@ -76,11 +76,11 @@ function quantile(values: number[], fraction: number): number | null {
   const sorted = [...values].sort((a, b) => a - b);
   return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * fraction))] ?? 0;
 }
-function issueCategory(issue: string): string {
+export function issueCategory(issue: string): string {
   const separator = issue.indexOf(":");
   return separator < 0 ? issue : issue.slice(0, separator);
 }
-function selectedThreads(rows: ThreadSummary[], options: Required<Pick<AnalysisOptions, "scope" | "includeHidden">> & { since: number | null; until: number | null }): ThreadSummary[] {
+export function selectedThreads(rows: ThreadSummary[], options: Required<Pick<AnalysisOptions, "scope" | "includeHidden">> & { since: number | null; until: number | null }): ThreadSummary[] {
   return rows.filter((thread) => {
     const created = Date.parse(thread.created_at);
     if (!Number.isFinite(created)) throw new RangeError(`thread ${thread.id} has invalid created_at`);

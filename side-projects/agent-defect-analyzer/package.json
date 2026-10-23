@@ -5,6 +5,7 @@
   "scripts": {
     "inspect": "bun run src/cli.ts inspect",
     "report": "bun run src/cli.ts report",
+    "waiting": "bun run src/cli.ts waiting",
     "sample": "bun run src/cli.ts sample",
     "evidence": "bun run src/cli.ts evidence",
     "compare": "bun run src/cli.ts compare",

@@ -20,6 +20,7 @@
 | --- | --- | --- |
 | 数据体检 | `inspect --db DB --out output/quality` | 结构、可选字段、格式覆盖、双写、继承、解析/配对质量；命令成功不等于所有 check 通过 |
 | 计算行为候选 | `report --db DB --out output/behavior` | 主/子会话、hidden、创建窗口；默认可见主会话；工具错误以已配对且状态已知的结果为分母 |
+| 统计 shell 等待 | `waiting --db DB --out output/waiting` | 与 `report` 相同的范围与创建窗口；主计数只认简单命令首 token `sleep`，包装形态单列；不把 sleep 成功当等待目标达成 |
 | 确定性抽样 | `sample --db DB --out output/sample --seed SEED --size N` | 候选集合、最小消息数、seed 与实际阅读数量；只输出样本不等于完成案例复核 |
 | 回查邻近证据 | `evidence --db DB --out output/evidence --thread THREAD_ID --message MESSAGE_ID` | 自有消息的完整 ID、radius、截断与 omissions；正文需 `--include-content` |
 | 比较研究结果 | `compare --baseline BASELINE_JSON --candidate CANDIDATE_JSON --out output/comparison` | 先生成兼容报告；零事件规则、缺席工具、两侧分母与版本；差异仅为描述性证据 |
@@ -28,7 +29,7 @@
 
 命令结束后核对退出状态并读取对应 JSON 中的质量、来源与范围。当前 `report` 用会话创建时间筛选，再包含该会话全部持久化历史，不能表述为“这几天发生的工具事件”。主会话与子会话、隐藏与非隐藏是不同维度；子会话通常需要显式包含 hidden。
 
-`report` 指纹覆盖分析输入；`sample` 与 `evidence` 的指纹分别覆盖声明的元数据集合，不能要求不同 scope 的指纹相等。对相同范围与算法的重复产物，应检查来源、指标与分母一致；若不同，先解释数据或口径变化。
+`report` 指纹覆盖分析输入；`waiting` 使用同一范围过滤器，指纹覆盖筛选范围、选中会话元数据以及被分析的调用/结果事实；`sample` 与 `evidence` 的指纹分别覆盖声明的元数据集合，不能要求不同 scope 的指纹相等。对相同范围与算法的重复产物，应检查来源、指标与分母一致；若不同，先解释数据或口径变化。
 
 ## 阅读上下文与延伸调查
 
