@@ -367,3 +367,36 @@ async fn composite_spawn_and_registration_failure_stays_unclassified() {
     );
     settle_shell_capacity(&owner, &capacity).await;
 }
+
+#[tokio::test]
+async fn cancellation_during_spawn_is_still_tracked_and_cancelled() {
+    let mut tasks = ShellTasks::new();
+    let gate = Arc::new(super::SpawnAfterGate::new());
+    tasks.hold_spawn_after_gate(gate.clone());
+    let tasks = Arc::new(tasks);
+    let request = tokio::spawn({
+        let tasks = tasks.clone();
+        async move {
+            tasks
+                .spawn("sleep 30".to_string(), ".".to_string(), None)
+                .await
+        }
+    });
+
+    // The blocking worker has spawned the process and is paused after
+    // registration, before the request future can observe the handle.
+    gate.entered.notified().await;
+    request.abort();
+    gate.release.wait();
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while tasks.tracked_count() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("task must be tracked after the request future is cancelled");
+
+    assert_eq!(tasks.shutdown().await, TaskShutdownReport::Complete);
+    assert_eq!(tasks.tracked_count(), 0);
+}

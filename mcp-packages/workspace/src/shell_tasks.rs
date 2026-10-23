@@ -29,6 +29,9 @@ struct ShellState {
     cancel_pending: HashSet<String>,
     cancel_accepted: HashSet<String>,
     pending_results: HashMap<String, BackgroundTaskResult>,
+    /// Tasks whose process has started but whose request future may not have
+    /// registered a visible record yet (cancellation during spawn).
+    tracked: HashSet<String>,
 }
 
 impl ShellState {
@@ -39,6 +42,22 @@ impl ShellState {
     }
 }
 
+#[cfg(test)]
+pub(crate) struct SpawnAfterGate {
+    pub(crate) entered: tokio::sync::Notify,
+    pub(crate) release: std::sync::Barrier,
+}
+
+#[cfg(test)]
+impl SpawnAfterGate {
+    pub(crate) fn new() -> Self {
+        Self {
+            entered: tokio::sync::Notify::new(),
+            release: std::sync::Barrier::new(2),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ShellTasks {
     manager: Arc<dyn TaskManager>,
@@ -46,7 +65,7 @@ pub(crate) struct ShellTasks {
     updates: tokio::sync::broadcast::Sender<DetailedTask>,
     owner_references: Arc<()>,
     #[cfg(test)]
-    spawn_gate: Option<Arc<tokio::sync::Notify>>,
+    spawn_after_gate: Option<Arc<SpawnAfterGate>>,
 }
 
 impl ShellTasks {
@@ -58,8 +77,18 @@ impl ShellTasks {
             updates,
             owner_references: Arc::new(()),
             #[cfg(test)]
-            spawn_gate: None,
+            spawn_after_gate: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_spawn_after_gate(&mut self, gate: Arc<SpawnAfterGate>) {
+        self.spawn_after_gate = Some(gate);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tracked_count(&self) -> usize {
+        self.state.lock().tracked.len()
     }
 
     pub(crate) fn subscribe(&self) -> tokio::sync::broadcast::Receiver<DetailedTask> {
@@ -106,6 +135,7 @@ impl ShellTasks {
                     )
                 });
             if record.task.status.is_terminal() {
+                state.tracked.remove(&result.task_id);
                 return Ok(());
             }
             record.task.last_updated_at = peri_time::now_utc_rfc3339();
@@ -137,6 +167,7 @@ impl ShellTasks {
                 record.task.status = TaskStatus::Completed;
             }
             let detail = record.clone();
+            state.tracked.remove(&result.task_id);
             drop(state);
             let _ = updates.send(detail);
             Ok(())
@@ -171,42 +202,64 @@ impl ShellTasks {
         timeout_ms: Option<u64>,
         owner: Option<&str>,
     ) -> Result<Task, McpError> {
-        #[cfg(test)]
-        if let Some(gate) = &self.spawn_gate {
-            gate.notified().await;
-        }
         let manager = self.manager();
         let callback = self.completion_callback_for(owner.map(str::to_owned));
+        let state = Arc::clone(&self.state);
+        let updates = self.updates.clone();
+        let owner = owner.map(str::to_owned);
+        #[cfg(test)]
+        let spawn_after_gate = self.spawn_after_gate.clone();
         let handle: BgShellHandle = tokio::task::spawn_blocking(move || {
-            manager.spawn_shell(command, cwd, timeout_ms, Some(callback))
+            let handle = manager.spawn_shell(command, cwd, timeout_ms, Some(callback))?;
+            #[cfg(test)]
+            if let Some(gate) = &spawn_after_gate {
+                gate.entered.notify_one();
+                gate.release.wait();
+            }
+            // Register before returning from the blocking worker. The request
+            // future may be cancelled while this worker is running; session
+            // cleanup must still be able to find the process.
+            let now = peri_time::now_utc_rfc3339();
+            let record = DetailedTask::new(
+                Task::new(&handle.task_id, TaskStatus::Working, &now, &now)
+                    .with_status_message("Background shell command is running.")
+                    .with_poll_interval_ms(1000),
+                TaskPayload::Working,
+            );
+            let mut state = state.lock();
+            state.tracked.insert(handle.task_id.clone());
+            if let Some(owner) = &owner {
+                state.owners.insert(handle.task_id.clone(), owner.clone());
+            }
+            let inserted = !state.records.contains_key(&handle.task_id);
+            let detail = state
+                .records
+                .entry(handle.task_id.clone())
+                .or_insert(record)
+                .clone();
+            drop(state);
+            if inserted {
+                let _ = updates.send(detail);
+            }
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(handle)
         })
         .await
         .map_err(shell_launch_worker_error)?
         .map_err(shell_launch_registration_error)?;
-        let now = peri_time::now_utc_rfc3339();
-        let record = DetailedTask::new(
-            Task::new(&handle.task_id, TaskStatus::Working, &now, &now)
-                .with_status_message("Background shell command is running.")
-                .with_poll_interval_ms(1000),
-            TaskPayload::Working,
-        );
-        // A fast command can complete before spawn_shell returns. Keep its
-        // terminal result rather than overwriting it with a working seed.
-        let mut state = self.state.lock();
-        if let Some(owner) = owner {
-            state.owners.insert(handle.task_id.clone(), owner.into());
-        }
-        let inserted = !state.records.contains_key(&handle.task_id);
-        let detail = state
+        // A fast command can complete before the blocking worker registers it;
+        // keep the terminal result instead of seeding a working record.
+        let task = self
+            .state
+            .lock()
             .records
-            .entry(handle.task_id.clone())
-            .or_insert(record)
-            .clone();
-        let task = detail.task.clone();
-        drop(state);
-        if inserted {
-            let _ = self.updates.send(detail);
-        }
+            .get(&handle.task_id)
+            .map(|detail| detail.task.clone())
+            .ok_or_else(|| {
+                McpError::internal_error(
+                    "background shell task registration missing after launch",
+                    None,
+                )
+            })?;
         Ok(task)
     }
 
@@ -221,6 +274,7 @@ impl ShellTasks {
             TaskPayload::Working,
         );
         let mut state = self.state.lock();
+        state.tracked.insert(task_id.into());
         if let Some(owner) = owner {
             state.owners.insert(task_id.into(), owner.into());
         }
@@ -260,11 +314,15 @@ impl ShellTasks {
                     return Err(McpError::invalid_params("unknown task", None));
                 }
             }
-            let record = state
+            if state
                 .records
                 .get(task_id)
-                .ok_or_else(|| McpError::invalid_params("unknown task", None))?;
-            if record.task.status.is_terminal() {
+                .ok_or_else(|| McpError::invalid_params("unknown task", None))?
+                .task
+                .status
+                .is_terminal()
+            {
+                state.tracked.remove(task_id);
                 return Ok(());
             }
             if state.cancel_accepted.contains(task_id) {
@@ -287,6 +345,7 @@ impl ShellTasks {
         let pending = state.pending_results.remove(task_id);
         let mut updated = None;
         if cancelled.is_ok() {
+            state.tracked.remove(task_id);
             state.cancel_accepted.insert(task_id.into());
             if let Some(record) = state.records.get_mut(task_id) {
                 record.task.status_message = Some(
