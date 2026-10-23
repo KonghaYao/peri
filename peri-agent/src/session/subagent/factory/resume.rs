@@ -92,12 +92,13 @@ pub(super) async fn resume_subagent_impl(
         frozen_date: frozen_date_cfg,
     } = config;
 
-    // 绑定校验用一次一致快照：child 的绑定必须与 owning parent 完全相同，且两者同根。
-    // 存在性是本函数的第一个校验分支：快照读取报 `NotFound` 即「thread not found」，
+    // 绑定校验只读 binding：不再为预检物化 child/parent 的有效正文。
+    // 存在性是本函数的第一个校验分支：binding 读取报 `NotFound` 即「thread not found」，
     // 与后续 `ResumeClaim` 的状态校验分开报错（不能把「不存在」说成「仍处于运行态」）。
-    // 本步只消费 binding：读有效视图，不加载 own 正文。
-    let child_snapshot = match session_resources.load_active_snapshot(&thread_id).await {
-        Ok(snapshot) => snapshot,
+    let binding = match session_resources.load_session_binding(&thread_id).await {
+        Ok(peri_acp_types::session_resources::BindingState::Bound(binding)) => Some(binding),
+        // 无绑定（legacy / 外来登记 / 缺失）保留旧行为：不当作 bound child 处理。
+        Ok(_) => None,
         Err(error)
             if matches!(
                 error.kind(),
@@ -110,17 +111,11 @@ pub(super) async fn resume_subagent_impl(
         }
         Err(error) => return Err(error.into()),
     };
-    let binding = match &child_snapshot.binding {
-        peri_acp_types::session_resources::BindingState::Bound(binding) => Some(binding.clone()),
-        // 无绑定（legacy / 外来登记 / 缺失）保留旧行为：不当作 bound child 处理。
-        _ => None,
-    };
     if binding.is_some() {
         let parent_id = super::spawn::parent_thread_id_of(parent)
             .ok_or("bound child resume requires its owning parent session")?;
-        let parent_snapshot = session_resources.load_active_snapshot(&parent_id).await?;
-        let parent_binding = match &parent_snapshot.binding {
-            peri_acp_types::session_resources::BindingState::Bound(binding) => binding.clone(),
+        let parent_binding = match session_resources.load_session_binding(&parent_id).await? {
+            peri_acp_types::session_resources::BindingState::Bound(binding) => binding,
             _ => return Err("bound subagent parent has no execution binding".into()),
         };
         if binding.as_ref() != Some(&parent_binding) {

@@ -166,6 +166,7 @@ fn subagent_group(
         instance_id: "instance-agent-1".into(),
         agent_id: "agent-1".into(),
         agent_name: "Agent explorer".into(),
+        parent_tool_call_id: None,
         view_models: children,
         collapsed: false,
         is_running,

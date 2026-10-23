@@ -89,6 +89,7 @@ fn test_vm_to_lines_all_variants_width_1() {
         instance_id: "instance-test-agent".to_string(),
         agent_id: "test-agent".to_string(),
         agent_name: "Test Agent".to_string(),
+        parent_tool_call_id: None,
         view_models: im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(
             "Bash",
             "bash test",

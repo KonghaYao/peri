@@ -382,6 +382,7 @@ fn subagent(id: &str) -> TuiRenderUnit {
         instance_id: format!("instance-{id}"),
         agent_id: id.to_string(),
         agent_name: id.to_string(),
+        parent_tool_call_id: None,
         view_models: im::Vector::new(),
         collapsed: false,
         is_running: false,

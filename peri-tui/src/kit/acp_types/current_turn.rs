@@ -6,6 +6,10 @@ mod streaming;
 mod subagents;
 
 use super::tool_card::{SubAgentAccumulator, ToolCardAccumulator};
+use crate::kit::retained_bytes::{
+    BodyReserved, json_value_bytes, option_string_body_reserved, presentation_bytes,
+    string_body_reserved,
+};
 use crate::kit::tui_render_unit::{TuiNoteLevel, TuiRenderUnit};
 use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 use std::time::Instant;
@@ -150,6 +154,48 @@ impl Default for CurrentTurn {
             cache_dirty: false,
         }
     }
+}
+
+impl CurrentTurn {
+    /// 原始累积器的只读计量。
+    ///
+    /// 只覆盖真正持有正文的原始字段：`text`/`reasoning`、`tool_cards` 的
+    /// `raw_input`/presentation、`subagents` 的 `child_turn` 递归。刻意不计
+    /// `cached_view_models`（投影缓存），避免投影与原始正文重复相加。
+    pub(crate) fn raw_memory_bytes(&self) -> BodyReserved {
+        let mut bytes = string_body_reserved(&self.text) + string_body_reserved(&self.reasoning);
+        bytes.body += self.tool_cards.len() * std::mem::size_of::<ToolCardAccumulator>();
+        bytes.reserved += self.tool_cards.capacity() * std::mem::size_of::<ToolCardAccumulator>();
+        for card in &self.tool_cards {
+            bytes += tool_card_raw_bytes(card);
+        }
+        bytes.body += self.subagents.len() * std::mem::size_of::<SubAgentAccumulator>();
+        bytes.reserved += self.subagents.capacity() * std::mem::size_of::<SubAgentAccumulator>();
+        for subagent in &self.subagents {
+            bytes += subagent_raw_bytes(subagent);
+        }
+        bytes
+    }
+}
+
+fn tool_card_raw_bytes(card: &ToolCardAccumulator) -> BodyReserved {
+    let mut bytes = string_body_reserved(&card.tool_id)
+        + string_body_reserved(&card.tool_name)
+        + string_body_reserved(&card.input_summary)
+        + option_string_body_reserved(&card.output_summary);
+    bytes += json_value_bytes(&card.raw_input);
+    bytes += presentation_bytes(&card.presentation);
+    bytes
+}
+
+fn subagent_raw_bytes(subagent: &SubAgentAccumulator) -> BodyReserved {
+    let mut bytes = string_body_reserved(&subagent.instance_id)
+        + string_body_reserved(&subagent.agent_id)
+        + string_body_reserved(&subagent.agent_name)
+        + option_string_body_reserved(&subagent.parent_tool_call_id)
+        + option_string_body_reserved(&subagent.error_reason);
+    bytes += subagent.child_turn.raw_memory_bytes();
+    bytes
 }
 
 /// 尚未与父 Agent 工具卡片配对的子分组。

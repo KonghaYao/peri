@@ -114,6 +114,7 @@ fn test_fold_key_of_maps_vm_identities() {
         instance_id: "instance-agent-7".into(),
         agent_id: "agent-7".into(),
         agent_name: "explorer".into(),
+        parent_tool_call_id: None,
         view_models: im::Vector::new(),
         collapsed: false,
         is_running: false,

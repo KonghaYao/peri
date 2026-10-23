@@ -69,6 +69,8 @@ pub(super) fn handle_subagent_stopped(
                 .write()
                 .retain(|task| task.task_id != task_id);
         }
+        // 终态详情收缩：子组仍在 current_turn/committed 时释放重复正文。
+        state.compact_terminal_bg_details();
     }
     // 清理后台 agent_id 注册
     BG_AGENT_IDS.state().write().remove(agent_id);

@@ -210,3 +210,109 @@ fn tool_boundary_flushes_text_before_tool_and_starts_new_bubble() {
         matches!(&units[2], TuiRenderUnit::TuiAssistantBubble(bubble) if bubble.text == "after")
     );
 }
+
+/// [M07 回归] BgLiveDetail 分层计量：未投影 stream 与 projected nested 不重复，
+/// tool_cards 只补充 nested 未持有的 raw_input。
+#[test]
+#[serial_test::serial]
+fn detail_memory_bytes_separates_stream_nested_and_raw_input() {
+    let fixture = Fixture::new();
+    for _ in 0..10 {
+        fixture.text(&"stream-body-".repeat(64));
+    }
+    let before = BG_LIVE_DETAIL.state().read()["stream-test"].memory_bytes();
+    assert!(before.stream_bytes > 0, "未投影 stream 必须计入");
+    assert_eq!(before.nested_units_bytes, 0, "未发布时没有嵌套投影");
+
+    publish_pending_streams();
+    let projected = BG_LIVE_DETAIL.state().read()["stream-test"].memory_bytes();
+    let projected_nested_units = BG_LIVE_DETAIL.state().read()["stream-test"]
+        .nested_units
+        .len();
+    assert_eq!(
+        projected.stream_bytes, 0,
+        "projected stream 已由 nested_units 持有，不得重复相加"
+    );
+    assert!(projected.nested_units_bytes > 0);
+
+    handle_bg_tool_started(
+        "stream-agent",
+        &TuiToolStarted {
+            tool_id: "raw-tool".into(),
+            tool_name: "Bash".into(),
+            input_summary: "large".into(),
+            raw_input: serde_json::json!({"command": "x".repeat(64 * 1024)}),
+            agent_id: Some("stream-agent".into()),
+        },
+        None,
+    );
+    let with_tool = BG_LIVE_DETAIL.state().read()["stream-test"].memory_bytes();
+    assert!(
+        with_tool.tool_cards_bytes >= 64 * 1024,
+        "大 raw_input 必须可区分"
+    );
+
+    mark_task_completed("stream-test", true, 5, Some("preview".into()));
+    let compaction = compact_terminal_detail("stream-test", false).expect("terminal compaction");
+    assert!(!compaction.over_cap);
+    let after = BG_LIVE_DETAIL.state().read()["stream-test"].clone();
+    assert!(after.tool_cards.is_empty(), "终态累积器必须去重");
+    assert_eq!(
+        after.nested_units.len(),
+        projected_nested_units + 1,
+        "无第二持有者时唯一展示正文必须保留"
+    );
+    assert_eq!(after.memory_bytes().tool_cards_bytes, 0);
+    assert_eq!(after.output_preview.as_deref(), Some("preview"));
+}
+
+/// [M05 回归] 有第二持有者时终态收缩清空 nested；清空后 capacity 不再计入
+/// nested 正文字节（与 memory 字段可区分）。
+#[test]
+#[serial_test::serial]
+fn detail_terminal_compaction_releases_duplicated_body_only() {
+    crate::kit::atoms::BG_TASK_IDENTITY.state().write().insert(
+        "dup-detail".into(),
+        crate::kit::atoms::BgTaskIdentity {
+            agent_id: Some("dup-agent".into()),
+            ..Default::default()
+        },
+    );
+    init_agent_live_detail("dup-detail", "dup-agent", "coder", Some("dup-occurrence"));
+    append_bg_text_chunk(
+        "dup-agent",
+        &TuiTextChunk {
+            text: "duplicated-body-".repeat(128),
+            message_id: Some("m".into()),
+            agent_id: Some("dup-agent".into()),
+        },
+    );
+    publish_pending_streams();
+    handle_bg_tool_started(
+        "dup-agent",
+        &TuiToolStarted {
+            tool_id: "t".into(),
+            tool_name: "Read".into(),
+            input_summary: "f".into(),
+            raw_input: serde_json::json!({"file_path": "/tmp/f"}),
+            agent_id: Some("dup-agent".into()),
+        },
+        None,
+    );
+    mark_task_completed("dup-detail", true, 3, None);
+    let before = BG_LIVE_DETAIL.state().read()["dup-detail"].memory_bytes();
+    assert!(before.nested_units_bytes > 0);
+
+    let compaction = compact_terminal_detail("dup-detail", true).expect("terminal compaction");
+    assert!(compaction.released_units > 0);
+    assert!(compaction.released_body_bytes > 0);
+    let after = BG_LIVE_DETAIL.state().read()["dup-detail"].clone();
+    assert!(after.terminal_body_released);
+    assert!(after.nested_units.is_empty());
+    assert!(after.tool_cards.is_empty());
+    assert_eq!(after.memory_bytes().nested_units_bytes, 0);
+    assert_eq!(after.status, BgLiveStatus::Succeeded);
+
+    BG_TASK_IDENTITY.state().write().remove("dup-detail");
+    BG_LIVE_DETAIL.state().write().remove("dup-detail");
+}

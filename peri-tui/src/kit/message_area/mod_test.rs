@@ -630,6 +630,7 @@ fn test_apply_fold_toggle_subagent_opens_detail_panel() {
         instance_id: "instance-agent-9".into(),
         agent_id: "agent-9".into(),
         agent_name: "explorer".into(),
+        parent_tool_call_id: None,
         view_models: im::Vector::new(),
         collapsed: false,
         is_running: false,

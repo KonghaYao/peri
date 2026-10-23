@@ -190,6 +190,11 @@ pub struct SubAgentAccumulator {
     pub instance_id: String,
     pub agent_id: String,
     pub agent_name: String,
+    /// 父 Agent 工具调用 id（`SubagentStarted.parent_tool_call_id`）。
+    ///
+    /// 仅作本次 occurrence 与父卡片的关联信息：它不等于持久 execution 身份，
+    /// 不能单独用于持久回读或正文释放；当前只做透传，不改变任何行为。
+    pub parent_tool_call_id: Option<String>,
     pub is_running: bool,
     /// 已从父 turn 消费并交给归档入口，不再接受该轮次的事件路由。
     pub archived: bool,
@@ -206,6 +211,15 @@ pub struct SubAgentAccumulator {
 
 impl SubAgentAccumulator {
     pub fn new(agent_id: String, agent_name: String) -> Self {
+        Self::with_parent_tool_call_id(agent_id, agent_name, None)
+    }
+
+    /// 带父工具调用身份构造本次 occurrence（`parent_tool_call_id` 仅透传保存）。
+    pub(crate) fn with_parent_tool_call_id(
+        agent_id: String,
+        agent_name: String,
+        parent_tool_call_id: Option<String>,
+    ) -> Self {
         let child_turn = CurrentTurn::new();
         Self {
             instance_id: format!(
@@ -214,6 +228,7 @@ impl SubAgentAccumulator {
             ),
             agent_id,
             agent_name,
+            parent_tool_call_id,
             is_running: true,
             archived: false,
             is_error: false,
@@ -276,6 +291,7 @@ impl SubAgentAccumulator {
             instance_id: self.instance_id.clone(),
             agent_id: self.agent_id.clone(),
             agent_name: self.agent_name.clone(),
+            parent_tool_call_id: self.parent_tool_call_id.clone(),
             view_models: child_vms.clone(),
             collapsed: false,
             is_running: self.is_running,

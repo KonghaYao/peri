@@ -157,10 +157,20 @@ impl SessionResources for MockSessionResources {
     }
 
     async fn load_session_binding(&self, id: &ThreadId) -> SessionResourceResult<BindingState> {
-        // 替身不建模本机登记：已登记的会话按「有绑定」回答，未登记按真实门面语义报
-        // `NotFound`（不冒充 legacy 或「没有绑定」）。
-        match self.region(id).and_then(|region| region.meta) {
-            Some(meta) => Ok(BindingState::Bound(fixture_binding(&meta.cwd))),
+        // 与生产门面同口径：绑定只来自记录的 binding 区；无 binding 但有父会话
+        // 的 region 归为外部/未注册，其余未登记会话仍按真实语义报 `NotFound`。
+        match self.region(id) {
+            Some(region) => Ok(match region.binding {
+                Some(binding) => BindingState::Bound(binding),
+                None if region
+                    .meta
+                    .as_ref()
+                    .is_some_and(|meta| meta.parent_thread_id.is_some()) =>
+                {
+                    BindingState::ExternalOrUnregistered
+                }
+                None => BindingState::Missing,
+            }),
             None => Err(SessionResourceError::new(
                 SessionResourceErrorKind::NotFound,
             )),

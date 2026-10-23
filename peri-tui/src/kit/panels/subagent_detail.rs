@@ -505,6 +505,7 @@ fn find_live_detail_subagent(
             .agent_name
             .clone()
             .unwrap_or_else(|| detail.summary.clone()),
+        parent_tool_call_id: None,
         view_models: detail.nested_units.clone(),
         collapsed: false,
         is_running: detail.status == crate::kit::atoms::BgLiveStatus::Running,

@@ -19,6 +19,7 @@ fn group(instance_id: &str, text: &str) -> TuiSubAgentGroup {
         instance_id: instance_id.into(),
         agent_id: "agent".into(),
         agent_name: "coder".into(),
+        parent_tool_call_id: None,
         view_models: im::vector![TuiRenderUnit::TuiAssistantBubble(bubble.into())],
         collapsed: false,
         is_running: false,

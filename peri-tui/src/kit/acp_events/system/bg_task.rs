@@ -121,6 +121,7 @@ pub(crate) fn handle_bg_task_snapshot(
     if !apply_bg_task_snapshot(tasks, revision, source) {
         return;
     }
+    state.compact_terminal_bg_details();
     crate::kit::acp_events::render::push_acp_state(state);
 }
 

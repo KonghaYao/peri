@@ -75,6 +75,8 @@ pub fn project_session_boundary(target_session_id: Option<&str>) {
         atoms::BG_AGENT_IDS.state().write().clear();
         atoms::BG_TASK_IDENTITY.state().write().clear();
         atoms::BG_LIVE_DETAIL.state().write().clear();
+        atoms::BG_LIVE_TOMBSTONES.state().write().clear();
+        *atoms::BG_LIVE_DISCARDED_EVENTS.state().write() = 0;
         *atoms::SELECTED_BG_TASK_ID.state().write() = None;
         *atoms::SELECTED_SUBAGENT_ID.state().write() = None;
         *atoms::SELECTED_WORKFLOW_RUN_ID.state().write() = None;

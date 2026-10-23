@@ -64,14 +64,18 @@ impl CurrentTurn {
             // （见 adopt_pending_subagent_group）。
             self.pending_subagent_groups.push(PendingSubagentGroup {
                 subagent_idx: idx,
-                parent_tool_call_id,
+                parent_tool_call_id: parent_tool_call_id.clone(),
             });
             self.segments
                 .push(TurnSegment::SubAgent { subagent_idx: idx });
         }
 
         self.subagents
-            .push(SubAgentAccumulator::new(agent_id, agent_name));
+            .push(SubAgentAccumulator::with_parent_tool_call_id(
+                agent_id,
+                agent_name,
+                parent_tool_call_id,
+            ));
         self.active = true;
         self.invalidate_cache();
     }

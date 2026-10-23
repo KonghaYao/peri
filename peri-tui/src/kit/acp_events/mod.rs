@@ -106,10 +106,27 @@ fn has_md_block_boundary_since(full_text: &str, published: usize, chunk_start: u
     new_lines >= 2 || (new_lines == 1 && bytes[published..new_start].contains(&b'\n'))
 }
 
+/// 展示单元（含折叠组/子组嵌套）中是否存在满足身份谓词的 subagent 组。
+fn render_unit_contains_group(unit: &TuiRenderUnit, matches: &dyn Fn(&str, &str) -> bool) -> bool {
+    match unit {
+        TuiRenderUnit::TuiSubAgentGroup(group) => {
+            matches(&group.instance_id, &group.agent_id)
+                || group
+                    .view_models
+                    .iter()
+                    .any(|child| render_unit_contains_group(child, matches))
+        }
+        TuiRenderUnit::TuiCollapsedGroup(group) => group
+            .view_models
+            .iter()
+            .any(|child| render_unit_contains_group(child, matches)),
+        _ => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // BridgeState — ACP 事件桥接内部状态
 // ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionPhase {
     Idle,
@@ -229,6 +246,79 @@ impl BridgeState {
         }
         let range = start..self.committed.len();
         self.register_live_seal_segments(range);
+    }
+
+    /// 已产出轮次归档的统一入口：先搬 VM，再按实际槽位登记窗口预算。
+    ///
+    /// stale / cancel / suspend 等直接归档路径必须共用，避免绕过
+    /// `register_live_seal_segments` 形成未记账的驻留正文。
+    fn commit_current_turn_units(&mut self) {
+        if self.current_turn.committed || self.current_turn.is_empty() {
+            return;
+        }
+        let start = self.committed.len();
+        self.current_turn.deactivate();
+        for vm in self.current_turn.view_models() {
+            self.committed.push_back(vm.clone());
+        }
+        let range = start..self.committed.len();
+        self.register_live_seal_segments(range);
+    }
+
+    /// 终态 BG 详情的安全收缩入口。
+    ///
+    /// 只对 `stream` 已清空的终态详情执行：先确认同一 subagent 组正文是否仍由
+    /// `committed`/`current_turn` 持有，再决定是否淘汰重复正文；最后按终态条目
+    /// 上限把已释放正文的旧条目降为墓碑。
+    pub(crate) fn compact_terminal_bg_details(&mut self) {
+        let terminal_ids: Vec<String> = BG_LIVE_DETAIL
+            .state()
+            .read()
+            .iter()
+            .filter(|(_, detail)| detail.status.is_terminal() && detail.stream.is_none())
+            .map(|(task_id, _)| task_id.clone())
+            .collect();
+        for task_id in terminal_ids {
+            let duplicated = {
+                let live = BG_LIVE_DETAIL.state();
+                let map = live.read();
+                map.get(&task_id)
+                    .is_some_and(|detail| self.bg_detail_body_has_secondary_holder(detail))
+            };
+            crate::kit::bg_task_live::compact_terminal_detail(&task_id, duplicated);
+        }
+        crate::kit::bg_task_live::evict_excess_terminal_details(
+            crate::kit::bg_task_live::TERMINAL_DETAILS_MAX,
+        );
+    }
+
+    /// 同一 subagent 组的正文是否仍在 `committed` 或 `current_turn` 中。
+    ///
+    /// 只有存在第二持有者时才允许淘汰 BG 详情的重复正文；仅凭 agent_id 相同
+    /// 不足以判定（resume 复用 agent_id，必须优先按 occurrence instance 匹配）。
+    fn bg_detail_body_has_secondary_holder(&self, detail: &BgLiveDetail) -> bool {
+        if detail.nested_units.is_empty() {
+            return false;
+        }
+        let Some(agent_id) = detail.agent_id.as_deref() else {
+            return false;
+        };
+        let instance = detail.subagent_instance_id.as_deref();
+        let matches = |group_instance: &str, group_agent: &str| match instance {
+            Some(instance) => group_instance == instance,
+            None => group_agent == agent_id,
+        };
+        if self
+            .current_turn
+            .subagents
+            .iter()
+            .any(|subagent| matches(&subagent.instance_id, &subagent.agent_id))
+        {
+            return true;
+        }
+        self.committed
+            .iter()
+            .any(|unit| render_unit_contains_group(unit, &matches))
     }
 
     fn register_live_seal_segments(&mut self, slots: impl Iterator<Item = usize>) {
@@ -719,18 +809,24 @@ pub(crate) fn dispatch_for_bridge(
             duration_ms,
             output_preview,
             revision,
-        } => system::handle_bg_task_completed(
-            task_id,
-            *success,
-            *duration_ms,
-            output_preview.clone(),
-            *revision,
-        ),
+        } => {
+            system::handle_bg_task_completed(
+                task_id,
+                *success,
+                *duration_ms,
+                output_preview.clone(),
+                *revision,
+            );
+            state.compact_terminal_bg_details();
+        }
         BgTaskCancelled {
             task_id,
             reason,
             revision,
-        } => system::handle_bg_task_cancelled(task_id, reason, *revision),
+        } => {
+            system::handle_bg_task_cancelled(task_id, reason, *revision);
+            state.compact_terminal_bg_details();
+        }
         BgTaskUpdated {
             task_id,
             status,

@@ -34,6 +34,7 @@ fn group(children: Vec<TuiRenderUnit>, reason: Option<&str>) -> TuiRenderUnit {
         instance_id: "occurrence".into(),
         agent_id: "child".into(),
         agent_name: "Child".into(),
+        parent_tool_call_id: None,
         view_models: children.into(),
         collapsed: false,
         is_running: false,

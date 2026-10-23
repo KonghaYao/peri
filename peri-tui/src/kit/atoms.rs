@@ -751,6 +751,13 @@ pub enum BgLiveStatus {
     Cancelled,
 }
 
+impl BgLiveStatus {
+    /// 终态判定：终态详情不再增长，可安全收缩。
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BgLiveDetail {
     pub status: BgLiveStatus,
@@ -771,6 +778,11 @@ pub struct BgLiveDetail {
     pub(crate) tool_cards: Vec<crate::kit::acp_types::ToolCardAccumulator>,
     pub(crate) subagent_result: Option<String>,
     pub(crate) subagent_is_error: bool,
+    /// 终态正文已释放：同一 subagent 组仍持有该正文（第二持有者），
+    /// 详情只保留轻量状态与结果。释放后到达的事件不得重建正文。
+    pub(crate) terminal_body_released: bool,
+    /// 终态正文释放/收缩后到达并被拒绝改写的事件数（诊断，不丢静默）。
+    pub(crate) late_events_discarded: u64,
     pub(crate) stream: Option<crate::kit::bg_task_live::BgStream>,
 }
 
@@ -791,7 +803,45 @@ impl Default for BgLiveDetail {
             tool_cards: Vec::new(),
             subagent_result: None,
             subagent_is_error: false,
+            terminal_body_released: false,
+            late_events_discarded: 0,
             stream: None,
+        }
+    }
+}
+
+/// 被淘汰的后台 live 明细留下的轻量墓碑。
+///
+/// 迟到的文本/工具事件不再静默消失：命中墓碑时累计丢弃计数，供诊断区分
+/// 「事件没来」与「事件被有界淘汰」。墓碑不保存正文。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BgLiveTombstone {
+    pub agent_id: Option<String>,
+    pub subagent_instance_id: Option<String>,
+    /// 淘汰时的终态（不会再有非终态条目被淘汰）。
+    pub terminal: BgLiveStatus,
+    /// 命中墓碑后被拒绝改写的迟到事件数。
+    pub discarded_events: u64,
+    /// 淘汰时释放的展示单元数与正文字节（诊断）。
+    pub discarded_units: usize,
+    pub discarded_body_bytes: usize,
+}
+
+impl BgLiveTombstone {
+    pub(crate) fn from_detail(detail: &BgLiveDetail) -> Self {
+        let mut seen = crate::kit::retained_bytes::SeenAllocations::default();
+        let nested =
+            crate::kit::retained_bytes::retained_units_bytes(detail.nested_units.iter(), &mut seen);
+        let metadata = detail.summary.len()
+            + detail.output_preview.as_ref().map_or(0, String::len)
+            + detail.subagent_result.as_ref().map_or(0, String::len);
+        Self {
+            agent_id: detail.agent_id.clone(),
+            subagent_instance_id: detail.subagent_instance_id.clone(),
+            terminal: detail.status,
+            discarded_events: 0,
+            discarded_units: detail.nested_units.len(),
+            discarded_body_bytes: nested + metadata,
         }
     }
 }
@@ -831,6 +881,13 @@ pub static BG_TASK_IDENTITY: AtomStatic<std::collections::HashMap<String, BgTask
 
 pub static BG_LIVE_DETAIL: AtomStatic<std::collections::HashMap<String, BgLiveDetail>> =
     AtomStatic::new(std::collections::HashMap::new);
+
+/// 已淘汰终态详情的墓碑（按 task_id）；只保留身份、终态与丢弃计数。
+pub static BG_LIVE_TOMBSTONES: AtomStatic<std::collections::HashMap<String, BgLiveTombstone>> =
+    AtomStatic::new(std::collections::HashMap::new);
+
+/// 命中墓碑或被终态详情拒绝的迟到事件总数（诊断计数）。
+pub static BG_LIVE_DISCARDED_EVENTS: AtomStatic<u64> = AtomStatic::new(|| 0);
 
 pub static SELECTED_BG_TASK_ID: AtomStatic<Option<String>> = AtomStatic::new(|| None);
 

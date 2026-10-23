@@ -539,6 +539,7 @@ fn test_subagent_completed_shows_tool_lines_only() {
         instance_id: "instance-a1".into(),
         agent_id: "a1".into(),
         agent_name: "general-purpose".into(),
+        parent_tool_call_id: None,
         view_models: im::Vector::from(vec![TuiRenderUnit::TuiToolCard(tool_card(
             "Bash",
             "echo hello-subagent-internal",

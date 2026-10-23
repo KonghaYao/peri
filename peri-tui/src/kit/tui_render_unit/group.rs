@@ -30,6 +30,11 @@ pub struct TuiSubAgentGroup {
     pub instance_id: String,
     pub agent_id: String,
     pub agent_name: String,
+    /// 父 Agent 工具调用 id（来自 `SubagentStarted.parent_tool_call_id`）。
+    ///
+    /// 仅作本次 occurrence 与父卡片的关联信息，不参与渲染/hash；持久回读需要
+    /// execution 级正文范围，不能只用本字段定位。
+    pub parent_tool_call_id: Option<String>,
     /// Nested view models produced by the sub-agent.
     pub view_models: im::Vector<TuiRenderUnit>,
     /// Whether the group is currently collapsed（详情面板语义；消息区折叠由 fold 驱动）。

@@ -1,6 +1,9 @@
 use super::*;
 use crate::kit::acp_types::{AcpEventData, BgTaskSnapshotSource};
-use crate::kit::atoms::{BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_REVISION, BgLiveStatus};
+use crate::kit::atoms::{
+    BG_DISPLAY, BG_LIVE_DETAIL, BG_LIVE_DISCARDED_EVENTS, BG_LIVE_TOMBSTONES, BG_TASK_REVISION,
+    BgLiveStatus,
+};
 use crate::kit::stream_data::{TuiTextChunk, TuiToolEnded, TuiToolStarted};
 use crate::kit::tui_render_unit::TuiRenderUnit;
 use serial_test::serial;
@@ -9,6 +12,8 @@ struct RestoreSnapshotAtoms {
     tasks: Vec<crate::kit::acp_types::BgTaskEntry>,
     display: Vec<crate::kit::atoms::BgDisplayEntry>,
     live: std::collections::HashMap<String, crate::kit::atoms::BgLiveDetail>,
+    tombstones: std::collections::HashMap<String, crate::kit::atoms::BgLiveTombstone>,
+    discarded_events: u64,
     identity: std::collections::HashMap<String, crate::kit::atoms::BgTaskIdentity>,
     agent_ids: std::collections::HashSet<String>,
     revision: Option<u64>,
@@ -21,6 +26,8 @@ impl RestoreSnapshotAtoms {
             tasks: crate::kit::atoms::BG_TASKS.state().read().clone(),
             display: BG_DISPLAY.state().read().clone(),
             live: BG_LIVE_DETAIL.state().read().clone(),
+            tombstones: BG_LIVE_TOMBSTONES.state().read().clone(),
+            discarded_events: *BG_LIVE_DISCARDED_EVENTS.state().read(),
             identity: crate::kit::atoms::BG_TASK_IDENTITY.state().read().clone(),
             agent_ids: crate::kit::atoms::BG_AGENT_IDS.state().read().clone(),
             revision: *BG_TASK_REVISION.state().read(),
@@ -28,6 +35,8 @@ impl RestoreSnapshotAtoms {
         crate::kit::atoms::BG_TASKS.state().write().clear();
         BG_DISPLAY.state().write().clear();
         BG_LIVE_DETAIL.state().write().clear();
+        BG_LIVE_TOMBSTONES.state().write().clear();
+        *BG_LIVE_DISCARDED_EVENTS.state().write() = 0;
         crate::kit::atoms::BG_TASK_IDENTITY.state().write().clear();
         crate::kit::atoms::BG_AGENT_IDS.state().write().clear();
         BG_TASK_REVISION.set(None);
@@ -40,6 +49,8 @@ impl Drop for RestoreSnapshotAtoms {
         crate::kit::atoms::BG_TASKS.set(self.tasks.clone());
         BG_DISPLAY.set(self.display.clone());
         BG_LIVE_DETAIL.set(self.live.clone());
+        BG_LIVE_TOMBSTONES.set(self.tombstones.clone());
+        BG_LIVE_DISCARDED_EVENTS.set(self.discarded_events);
         crate::kit::atoms::BG_TASK_IDENTITY.set(self.identity.clone());
         crate::kit::atoms::BG_AGENT_IDS.set(self.agent_ids.clone());
         BG_TASK_REVISION.set(self.revision);
@@ -807,4 +818,204 @@ fn make_state() -> BridgeState {
         folded_history: Default::default(),
         window: Default::default(),
     }
+}
+
+/// [M05 回归] 终态 BG 子 agent 的重复正文在第二持有者存在时释放；元数据保留，
+/// committed 中的子组正文不受影响。
+#[test]
+#[serial]
+fn terminal_bg_subagent_detail_releases_only_duplicate_body() {
+    let _restore = RestoreSnapshotAtoms::empty();
+    let mut state = make_fold_test_state();
+    state.active_session_id = "s1".into();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
+            task_id: "bg-child".into(),
+            kind: "agent".into(),
+            summary: "child task".into(),
+            started_at: String::new(),
+            pid: None,
+            revision: None,
+            status: Some("running".into()),
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStarted {
+            agent_id: "bg-child-agent".into(),
+            agent_name: "coder".into(),
+            is_background: true,
+            parent_tool_call_id: Some("parent-call".into()),
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(TuiTextChunk {
+            text: "child-stream-body-".repeat(8),
+            message_id: Some("child-message".into()),
+            agent_id: Some("bg-child-agent".into()),
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::SubagentStopped {
+            agent_id: "bg-child-agent".into(),
+            result: "child result".into(),
+            is_error: false,
+        },
+    );
+
+    let detail = BG_LIVE_DETAIL.state().read()["bg-child"].clone();
+    assert_eq!(detail.status, BgLiveStatus::Succeeded);
+    assert!(
+        detail.terminal_body_released,
+        "子组仍在 current_turn 时必须释放重复正文"
+    );
+    assert!(detail.nested_units.is_empty(), "重复正文必须清空");
+    assert!(detail.tool_cards.is_empty(), "累积器必须去重");
+    assert_eq!(
+        detail.subagent_result.as_deref(),
+        Some("child result"),
+        "结果元数据必须保留"
+    );
+
+    let discarded_before = *BG_LIVE_DISCARDED_EVENTS.state().read();
+    crate::kit::bg_task_live::append_bg_text_chunk(
+        "bg-child-agent",
+        &TuiTextChunk {
+            text: "late-chunk".into(),
+            message_id: Some("child-message".into()),
+            agent_id: Some("bg-child-agent".into()),
+        },
+    );
+    assert_eq!(
+        *BG_LIVE_DISCARDED_EVENTS.state().read(),
+        discarded_before + 1,
+        "迟到事件必须计入诊断，不能静默丢失"
+    );
+    assert_eq!(
+        BG_LIVE_DETAIL.state().read()["bg-child"].late_events_discarded,
+        1,
+        "迟到事件计数必须落在终态详情上"
+    );
+
+    // 第二持有者：TurnDone 后 committed 中的子组仍有完整正文。
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let group = state
+        .committed
+        .iter()
+        .find_map(|unit| match unit {
+            TuiRenderUnit::TuiSubAgentGroup(group) => Some(group),
+            _ => None,
+        })
+        .expect("committed 必须保留子组");
+    assert!(
+        group
+            .view_models
+            .iter()
+            .any(|unit| matches!(unit, TuiRenderUnit::TuiAssistantBubble(bubble) if bubble.text.contains("child-stream-body"))),
+        "不得删除 committed 中子组的唯一正文"
+    );
+}
+
+/// [M05 回归] 没有第二持有者时不得丢弃唯一正文，只做 tool_cards 去重。
+#[test]
+#[serial]
+fn terminal_detail_without_secondary_holder_keeps_unique_body() {
+    let _restore = RestoreSnapshotAtoms::empty();
+    crate::kit::atoms::BG_TASK_IDENTITY.state().write().insert(
+        "task-unique".into(),
+        crate::kit::atoms::BgTaskIdentity {
+            agent_id: Some("agent-unique".into()),
+            ..Default::default()
+        },
+    );
+    crate::kit::bg_task_live::init_agent_live_detail(
+        "task-unique",
+        "agent-unique",
+        "coder",
+        Some("occurrence-unique"),
+    );
+    crate::kit::bg_task_live::append_bg_text_chunk(
+        "agent-unique",
+        &TuiTextChunk {
+            text: "unique-body-".repeat(16),
+            message_id: Some("m1".into()),
+            agent_id: Some("agent-unique".into()),
+        },
+    );
+    crate::kit::bg_task_live::publish_pending_streams();
+    crate::kit::bg_task_live::mark_task_completed("task-unique", true, 12, Some("preview".into()));
+
+    let mut state = make_fold_test_state();
+    state.compact_terminal_bg_details();
+
+    let detail = BG_LIVE_DETAIL.state().read()["task-unique"].clone();
+    assert!(!detail.terminal_body_released, "没有第二持有者不得释放正文");
+    assert_eq!(detail.nested_units.len(), 1, "唯一正文必须原样保留");
+    assert!(detail.tool_cards.is_empty(), "累积器仍可安全去重");
+    assert_eq!(detail.output_preview.as_deref(), Some("preview"));
+    assert_eq!(detail.duration_ms, Some(12));
+    assert_eq!(detail.status, BgLiveStatus::Succeeded);
+}
+
+/// [M05 回归] 终态条目上限只淘汰正文已释放的详情，并留下可诊断的墓碑。
+#[test]
+#[serial]
+fn evicted_terminal_detail_leaves_tombstone_and_counts_late_events() {
+    let _restore = RestoreSnapshotAtoms::empty();
+    let mut state = make_fold_test_state();
+    let total = crate::kit::bg_task_live::TERMINAL_DETAILS_MAX + 1;
+    for index in 0..total {
+        crate::kit::bg_task_live::mark_task_completed(&format!("t{index:03}"), true, 1, None);
+    }
+    assert_eq!(BG_LIVE_DETAIL.state().read().len(), total);
+
+    state.compact_terminal_bg_details();
+    assert_eq!(
+        BG_LIVE_DETAIL.state().read().len(),
+        crate::kit::bg_task_live::TERMINAL_DETAILS_MAX,
+        "终态条目数必须收敛到上限"
+    );
+    let tombstones = BG_LIVE_TOMBSTONES.state().read().clone();
+    assert_eq!(tombstones.len(), 1, "被淘汰条目必须留下墓碑");
+    let (task_id, tombstone) = tombstones.iter().next().unwrap();
+    assert_eq!(tombstone.terminal, BgLiveStatus::Succeeded);
+    assert_eq!(tombstone.discarded_events, 0);
+    assert_eq!(tombstone.discarded_units, 0);
+
+    // 让迟到事件解析到被淘汰任务：命中墓碑 → 诊断计数，而不是重建详情。
+    crate::kit::atoms::BG_TASK_IDENTITY.state().write().insert(
+        task_id.clone(),
+        crate::kit::atoms::BgTaskIdentity {
+            agent_id: Some("late-agent".into()),
+            ..Default::default()
+        },
+    );
+    let before = *BG_LIVE_DISCARDED_EVENTS.state().read();
+    crate::kit::bg_task_live::handle_bg_tool_started(
+        "late-agent",
+        &TuiToolStarted {
+            tool_id: "late-tool".into(),
+            tool_name: "Bash".into(),
+            input_summary: "pwd".into(),
+            raw_input: serde_json::json!({"command": "pwd"}),
+            agent_id: Some("late-agent".into()),
+        },
+        None,
+    );
+    assert_eq!(
+        *BG_LIVE_DISCARDED_EVENTS.state().read(),
+        before + 1,
+        "墓碑命中的迟到事件必须计入诊断"
+    );
+    assert_eq!(
+        BG_LIVE_TOMBSTONES.state().read()[task_id].discarded_events,
+        1
+    );
+    assert!(
+        !BG_LIVE_DETAIL.state().read().contains_key(task_id),
+        "墓碑命中不得重建详情"
+    );
 }

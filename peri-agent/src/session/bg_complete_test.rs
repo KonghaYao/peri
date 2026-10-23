@@ -67,6 +67,62 @@ fn same_terminal_identity_cannot_acknowledge_changed_payload() {
     assert_eq!(queue.drain_batch(64).len(), 1);
 }
 
+/// [回归测试] 去重指纹是固定长度摘要，不随通知正文体积增长；
+/// 相同内容稳定，不同内容仍能区分（冲突检测依赖这一语义）。
+#[test]
+fn publication_fingerprint_is_bounded_and_content_sensitive() {
+    let mut result = shell_result("shell-fingerprint");
+    result.output = "first-result-".repeat(8);
+    let fingerprint = publication_fingerprint(&result, BgTaskKind::Shell).expect("fingerprint");
+
+    assert_eq!(fingerprint.len(), 64, "Sha256 十六进制摘要长度固定");
+    assert!(
+        !fingerprint.contains("first-result"),
+        "指纹不得保留通知正文: {fingerprint}"
+    );
+    assert_eq!(
+        publication_fingerprint(&result, BgTaskKind::Shell).expect("fingerprint"),
+        fingerprint,
+        "相同内容必须稳定"
+    );
+
+    result.output = "second-result-".repeat(8);
+    assert_ne!(
+        publication_fingerprint(&result, BgTaskKind::Shell).expect("fingerprint"),
+        fingerprint,
+        "内容变化必须改变指纹，冲突检测不能失效"
+    );
+
+    result.output = "first-result-".repeat(8);
+    assert_ne!(
+        publication_fingerprint(&result, BgTaskKind::Agent).expect("fingerprint"),
+        fingerprint,
+        "类别变化必须改变指纹，不能把不同来源当成重复"
+    );
+}
+
+/// [回归测试] 大输出下：相同内容只投递一次，内容变化仍报 conflicting。
+#[test]
+fn large_output_dedup_is_idempotent_and_still_detects_conflicts() {
+    let queue = MessageQueue::new();
+    let callback = task_bg_complete_callback(SessionTerminalDelivery::for_queue(queue.clone()));
+    let mut result = shell_result("shell-large-output");
+    // 指纹基于完整结果对象；大输出仍应幂等，且内容变化必须冲突。
+    result.output = "y".repeat(64 * 1024);
+    callback(&result, BgTaskKind::Shell).unwrap();
+    callback(&result, BgTaskKind::Shell).unwrap();
+    assert_eq!(queue.drain_batch(64).len(), 1, "相同大输出重试只能投递一次");
+
+    result.output.push('z');
+    assert!(
+        callback(&result, BgTaskKind::Shell)
+            .unwrap_err()
+            .contains("conflicting"),
+        "同一 identity 的不同大输出仍必须拒绝"
+    );
+    assert_eq!(queue.drain_batch(64).len(), 0, "冲突不得追加投递");
+}
+
 fn registered_manager(task_id: &str) -> crate::agent::async_tasks::TaskManager {
     let manager = crate::agent::async_tasks::TaskManager::new();
     manager

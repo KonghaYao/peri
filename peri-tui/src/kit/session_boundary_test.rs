@@ -58,7 +58,7 @@ fn test_session_boundary_clears_goal_projection_and_panel() {
 #[serial]
 fn session_switch_removes_previous_session_background_tasks() {
     use crate::kit::acp_types::BgTaskEntry;
-    use crate::kit::atoms::{BgDisplayEntry, BgLiveDetail};
+    use crate::kit::atoms::{BgDisplayEntry, BgLiveDetail, BgLiveStatus, BgLiveTombstone};
     use std::time::Instant;
 
     let old_active = atoms::ACTIVE_SESSION_ID.state().read().clone();
@@ -66,6 +66,8 @@ fn session_switch_removes_previous_session_background_tasks() {
     let old_tasks = atoms::BG_TASKS.state().read().clone();
     let old_display = atoms::BG_DISPLAY.state().read().clone();
     let old_live = atoms::BG_LIVE_DETAIL.state().read().clone();
+    let old_tombstones = atoms::BG_LIVE_TOMBSTONES.state().read().clone();
+    let old_discarded = *atoms::BG_LIVE_DISCARDED_EVENTS.state().read();
     let old_selected = atoms::SELECTED_BG_TASK_ID.state().read().clone();
 
     atoms::BG_TASKS.state().write().push(BgTaskEntry {
@@ -93,6 +95,18 @@ fn session_switch_removes_previous_session_background_tasks() {
         .state()
         .write()
         .insert("previous-shell".into(), BgLiveDetail::default());
+    atoms::BG_LIVE_TOMBSTONES.state().write().insert(
+        "previous-shell".into(),
+        BgLiveTombstone {
+            agent_id: None,
+            subagent_instance_id: None,
+            terminal: BgLiveStatus::Succeeded,
+            discarded_events: 2,
+            discarded_units: 0,
+            discarded_body_bytes: 0,
+        },
+    );
+    *atoms::BG_LIVE_DISCARDED_EVENTS.state().write() = 2;
     *atoms::SELECTED_BG_TASK_ID.state().write() = Some("previous-shell".into());
 
     project_session_boundary(Some("next-session"));
@@ -100,6 +114,11 @@ fn session_switch_removes_previous_session_background_tasks() {
     assert!(atoms::BG_TASKS.state().read().is_empty());
     assert!(atoms::BG_DISPLAY.state().read().is_empty());
     assert!(atoms::BG_LIVE_DETAIL.state().read().is_empty());
+    assert!(
+        atoms::BG_LIVE_TOMBSTONES.state().read().is_empty(),
+        "会话边界必须清理上一会话的墓碑"
+    );
+    assert_eq!(*atoms::BG_LIVE_DISCARDED_EVENTS.state().read(), 0);
     assert!(atoms::SELECTED_BG_TASK_ID.state().read().is_none());
 
     *atoms::ACTIVE_SESSION_ID.state().write() = old_active;
@@ -107,6 +126,8 @@ fn session_switch_removes_previous_session_background_tasks() {
     *atoms::BG_TASKS.state().write() = old_tasks;
     *atoms::BG_DISPLAY.state().write() = old_display;
     *atoms::BG_LIVE_DETAIL.state().write() = old_live;
+    *atoms::BG_LIVE_TOMBSTONES.state().write() = old_tombstones;
+    *atoms::BG_LIVE_DISCARDED_EVENTS.state().write() = old_discarded;
     *atoms::SELECTED_BG_TASK_ID.state().write() = old_selected;
 }
 

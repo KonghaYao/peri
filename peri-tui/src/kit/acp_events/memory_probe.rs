@@ -6,7 +6,10 @@
 //! 这些数字不改变任何释放/折叠语义。
 
 use super::BridgeState;
-use crate::kit::atoms::FOLD_OVERRIDES;
+use crate::kit::atoms::{
+    BG_LIVE_DETAIL, BG_LIVE_DISCARDED_EVENTS, BG_LIVE_TOMBSTONES, FOLD_OVERRIDES,
+};
+use crate::kit::bg_task_live::BgLiveMemoryBytes;
 use crate::kit::tui_render_unit::{
     TuiAskUserBlock, TuiCollapsedGroup, TuiDivider, TuiRenderUnit, TuiSubAgentGroup,
     TuiSystemReminder, TuiToolCard, TuiToolPresentation,
@@ -105,9 +108,14 @@ fn measure_unit(
     seen: &mut HashSet<usize>,
     dedup_hits: &mut usize,
 ) -> LayerBytes {
-    // 按分配地址去重：committed 与 folded_history 共享 im 节点时只计一次；
-    // 同一 Arc bubble 重复出现时也只计一次。
-    if !seen.insert(unit as *const TuiRenderUnit as usize) {
+    // 按分配身份去重：committed 与 folded_history 共享 im 节点时只计一次；
+    // 同一 Arc bubble 重复出现时也只计一次。Arc 的槽位地址每次 clone 都不同，
+    // 必须用 payload 指针，否则跨层 unique_* 会重复计入共享正文。
+    let identity = match unit {
+        TuiRenderUnit::TuiAssistantBubble(arc) => std::sync::Arc::as_ptr(arc) as usize,
+        _ => unit as *const TuiRenderUnit as usize,
+    };
+    if !seen.insert(identity) {
         *dedup_hits += 1;
         return LayerBytes::default();
     }
@@ -164,6 +172,7 @@ fn subagent_group_bytes(group: &TuiSubAgentGroup) -> LayerBytes {
     string_layer_bytes(&group.instance_id)
         + string_layer_bytes(&group.agent_id)
         + string_layer_bytes(&group.agent_name)
+        + option_string_layer_bytes(&group.parent_tool_call_id)
         + option_string_layer_bytes(&group.error_reason)
         + im_vector_slot_layer_bytes(&group.view_models)
 }
@@ -222,12 +231,28 @@ pub(crate) struct BridgeMemorySnapshot {
     pub(crate) current_turn_entries: usize,
     pub(crate) current_turn_body_bytes: usize,
     pub(crate) current_turn_reserved_bytes: usize,
+    /// 原始累积器（text/reasoning/raw_input/presentation/child_turn 递归），
+    /// 不含 `cached_view_models` 投影。
+    pub(crate) current_turn_raw_body_bytes: usize,
+    pub(crate) current_turn_raw_reserved_bytes: usize,
     pub(crate) folded_entries: usize,
     pub(crate) folded_body_bytes: usize,
     pub(crate) folded_reserved_bytes: usize,
     pub(crate) unique_body_bytes: usize,
     pub(crate) unique_reserved_bytes: usize,
     pub(crate) deduped_allocations: usize,
+    /// `BG_LIVE_DETAIL` 的分层驻留计量。
+    pub(crate) bg_live_entries: usize,
+    pub(crate) bg_live_body_bytes: usize,
+    pub(crate) bg_live_reserved_bytes: usize,
+    pub(crate) bg_live_summary_bytes: usize,
+    pub(crate) bg_live_output_preview_bytes: usize,
+    pub(crate) bg_live_subagent_result_bytes: usize,
+    pub(crate) bg_live_nested_units_bytes: usize,
+    pub(crate) bg_live_stream_bytes: usize,
+    pub(crate) bg_live_tool_cards_bytes: usize,
+    pub(crate) bg_live_tombstones: usize,
+    pub(crate) bg_live_discarded_events: u64,
 }
 
 impl BridgeState {
@@ -261,6 +286,27 @@ impl BridgeState {
         unique += measure_layer(&current_units, &mut unique_seen, &mut unique_dedup);
         unique += measure_layer(&folded_units, &mut unique_seen, &mut unique_dedup);
 
+        let raw = self.current_turn.raw_memory_bytes();
+        let mut bg_live = BgLiveMemoryBytes::default();
+        let bg_live_entries = {
+            let live = BG_LIVE_DETAIL.state();
+            let map = live.read();
+            for detail in map.values() {
+                let bytes = detail.memory_bytes();
+                bg_live.summary_bytes += bytes.summary_bytes;
+                bg_live.output_preview_bytes += bytes.output_preview_bytes;
+                bg_live.subagent_result_bytes += bytes.subagent_result_bytes;
+                bg_live.nested_units_bytes += bytes.nested_units_bytes;
+                bg_live.stream_bytes += bytes.stream_bytes;
+                bg_live.tool_cards_bytes += bytes.tool_cards_bytes;
+                bg_live.body += bytes.body;
+                bg_live.reserved += bytes.reserved;
+            }
+            map.len()
+        };
+        let bg_live_tombstones = BG_LIVE_TOMBSTONES.state().read().len();
+        let bg_live_discarded_events = *BG_LIVE_DISCARDED_EVENTS.state().read();
+
         BridgeMemorySnapshot {
             committed_entries: self.committed.len(),
             committed_body_bytes: committed.body,
@@ -268,12 +314,25 @@ impl BridgeState {
             current_turn_entries: current_entries,
             current_turn_body_bytes: current.body,
             current_turn_reserved_bytes: current.reserved,
+            current_turn_raw_body_bytes: raw.body,
+            current_turn_raw_reserved_bytes: raw.reserved,
             folded_entries,
             folded_body_bytes: folded.body,
             folded_reserved_bytes: folded.reserved,
             unique_body_bytes: unique.body,
             unique_reserved_bytes: unique.reserved,
             deduped_allocations: unique_dedup + layer_dedup,
+            bg_live_entries,
+            bg_live_body_bytes: bg_live.body,
+            bg_live_reserved_bytes: bg_live.reserved,
+            bg_live_summary_bytes: bg_live.summary_bytes,
+            bg_live_output_preview_bytes: bg_live.output_preview_bytes,
+            bg_live_subagent_result_bytes: bg_live.subagent_result_bytes,
+            bg_live_nested_units_bytes: bg_live.nested_units_bytes,
+            bg_live_stream_bytes: bg_live.stream_bytes,
+            bg_live_tool_cards_bytes: bg_live.tool_cards_bytes,
+            bg_live_tombstones,
+            bg_live_discarded_events,
         }
     }
 
@@ -295,12 +354,25 @@ impl BridgeState {
             current_turn_entries = snapshot.current_turn_entries,
             current_turn_body_bytes = snapshot.current_turn_body_bytes,
             current_turn_reserved_bytes = snapshot.current_turn_reserved_bytes,
+            current_turn_raw_body_bytes = snapshot.current_turn_raw_body_bytes,
+            current_turn_raw_reserved_bytes = snapshot.current_turn_raw_reserved_bytes,
             folded_entries = snapshot.folded_entries,
             folded_body_bytes = snapshot.folded_body_bytes,
             folded_reserved_bytes = snapshot.folded_reserved_bytes,
             unique_body_bytes = snapshot.unique_body_bytes,
             unique_reserved_bytes = snapshot.unique_reserved_bytes,
             deduped_allocations = snapshot.deduped_allocations,
+            bg_live_entries = snapshot.bg_live_entries,
+            bg_live_body_bytes = snapshot.bg_live_body_bytes,
+            bg_live_reserved_bytes = snapshot.bg_live_reserved_bytes,
+            bg_live_summary_bytes = snapshot.bg_live_summary_bytes,
+            bg_live_output_preview_bytes = snapshot.bg_live_output_preview_bytes,
+            bg_live_subagent_result_bytes = snapshot.bg_live_subagent_result_bytes,
+            bg_live_nested_units_bytes = snapshot.bg_live_nested_units_bytes,
+            bg_live_stream_bytes = snapshot.bg_live_stream_bytes,
+            bg_live_tool_cards_bytes = snapshot.bg_live_tool_cards_bytes,
+            bg_live_tombstones = snapshot.bg_live_tombstones,
+            bg_live_discarded_events = snapshot.bg_live_discarded_events,
             rss_bytes = allocator.map(|stats| stats.current_rss),
             allocator_allocated_bytes = allocator.map(|stats| stats.current_allocated),
             "object-memory tui bridge"

@@ -8,6 +8,7 @@ fn make_subagent(id: &str, name: &str) -> TuiSubAgentGroup {
         instance_id: format!("instance-{id}"),
         agent_id: id.to_string(),
         agent_name: name.to_string(),
+        parent_tool_call_id: None,
         view_models: im::Vector::new(),
         collapsed: false,
         is_running: false,

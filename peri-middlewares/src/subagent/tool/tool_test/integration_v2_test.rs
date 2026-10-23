@@ -981,3 +981,144 @@ async fn test_integration_fork_plus_background_priority() {
         "fork directive should wrap original prompt 'do both'"
     );
 }
+
+/// [M01 回归] 命名（非 fork）同步调用不得继承父消息：父历史只应出现在 fork 路径。
+#[tokio::test]
+async fn test_named_sync_does_not_inherit_parent_messages() {
+    let dir = tempfile::tempdir().unwrap();
+    let agents_dir = dir.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(
+        agents_dir.join("named-sync.md"),
+        "---\nname: named-sync\ndescription: named sync agent\n---\n\nNamed sync.\n",
+    )
+    .unwrap();
+    let host = HostFixture::open_in(dir.path(), "fixture-named-sync").await;
+    let model = super::mock_model::RecordingModel::new("named sync done");
+    let tool = SubAgentTool::new(
+        Arc::new(vec![]),
+        None,
+        Arc::new({
+            let model = Arc::clone(&model);
+            move |_: Option<&str>| {
+                SubagentLlmSource::model(model.clone() as Arc<dyn peri_model::Model>, "mock-model")
+            }
+        }),
+        dir.path().to_string_lossy().into_owned(),
+    );
+    let tool = host.bind(with_agent_face(tool, dir.path()).await);
+
+    // 父侧 ToolContext 携带大父历史；命名子 agent 只应看到自己的 prompt。
+    let parent_history = vec![
+        BaseMessage::human("PARENT-HISTORY-MARKER-Q1"),
+        BaseMessage::ai("PARENT-HISTORY-MARKER-A1"),
+        BaseMessage::human("PARENT-HISTORY-MARKER-Q2"),
+    ];
+    let result = tool
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "named-sync",
+                "prompt": "named child task",
+                "cwd": dir.path().to_str().unwrap(),
+            }),
+            host.context(&parent_history),
+        )
+        .await
+        .expect("named sync should run");
+    assert!(result.contains("named sync done"), "{result}");
+
+    let texts = super::mock_model::conversation_texts(&model.last_messages());
+    assert!(
+        texts
+            .iter()
+            .all(|text| !text.contains("PARENT-HISTORY-MARKER")),
+        "命名子 agent 不得继承父历史: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|text| text.contains("named child task")),
+        "命名子 agent 必须收到自己的 prompt: {texts:?}"
+    );
+}
+
+/// [M01 回归] 命名后台调用同样不得继承父消息。
+#[tokio::test]
+async fn test_named_background_does_not_inherit_parent_messages() {
+    let dir = tempfile::tempdir().unwrap();
+    let agents_dir = dir.path().join(".claude").join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(
+        agents_dir.join("named-bg.md"),
+        "---\nname: named-bg\ndescription: named background agent\n---\n\nNamed bg.\n",
+    )
+    .unwrap();
+    let (bg_tx, mut bg_rx) =
+        tokio::sync::mpsc::unbounded_channel::<peri_agent::agent::events::ExecutorEvent>();
+    let manager = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    let host = HostFixture::open_in_with_background(
+        dir.path(),
+        "fixture-named-bg",
+        Arc::clone(&manager),
+        bg_tx,
+    )
+    .await;
+    let model = super::mock_model::RecordingModel::new("named bg done");
+    let tool = SubAgentTool::new(
+        Arc::new(vec![]),
+        None,
+        Arc::new({
+            let model = Arc::clone(&model);
+            move |_: Option<&str>| {
+                SubagentLlmSource::model(model.clone() as Arc<dyn peri_model::Model>, "mock-model")
+            }
+        }),
+        dir.path().to_string_lossy().into_owned(),
+    );
+    let tool = host.bind(with_agent_face(tool, dir.path()).await);
+
+    let parent_history = vec![
+        BaseMessage::human("PARENT-HISTORY-MARKER-BG-Q1"),
+        BaseMessage::ai("PARENT-HISTORY-MARKER-BG-A1"),
+    ];
+    let started = tool
+        .invoke(
+            serde_json::json!({
+                "subagent_type": "named-bg",
+                "prompt": "named background task",
+                "run_in_background": true,
+                "cwd": dir.path().to_str().unwrap(),
+            }),
+            host.context(&parent_history),
+        )
+        .await
+        .expect("named background should start");
+    assert!(started.contains("Background task"), "{started}");
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(event) = bg_rx.recv().await {
+            if matches!(
+                event,
+                peri_agent::agent::events::ExecutorEvent::BackgroundTaskCompleted(_)
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("named background must complete within timeout");
+
+    let texts = super::mock_model::conversation_texts(&model.last_messages());
+    assert!(!texts.is_empty(), "后台命名子 agent 必须实际发起模型请求");
+    assert!(
+        texts
+            .iter()
+            .all(|text| !text.contains("PARENT-HISTORY-MARKER")),
+        "命名后台子 agent 不得继承父历史: {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("named background task")),
+        "命名后台子 agent 必须收到自己的 prompt: {texts:?}"
+    );
+    peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref()).await;
+}
