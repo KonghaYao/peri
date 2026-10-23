@@ -916,6 +916,16 @@ async fn test_new_session_flushes_notifications_in_wire_order_across_initializat
         .send_notification("session/update", command_update(&["help"]))
         .await
         .unwrap();
+    // 未路由的通知作为屏障：它被直接投递，收到即证明前一条 update 已经过
+    // route_ordinary，避免测试在竞态下空转通过。
+    server
+        .send_notification("test/unbuffered-barrier", json!({}))
+        .await
+        .unwrap();
+    assert!(matches!(
+        notification_rx.recv().await,
+        Some(AcpNotification::Other { .. })
+    ));
     server
         .send_response(id, Ok(json!({"sessionId": "new"})))
         .await
@@ -936,6 +946,14 @@ async fn test_new_session_flushes_notifications_in_wire_order_across_initializat
         .send_notification("session/update", command_update(&["help", "fix-bug"]))
         .await
         .unwrap();
+    server
+        .send_notification("test/unbuffered-barrier", json!({}))
+        .await
+        .unwrap();
+    assert!(matches!(
+        notification_rx.recv().await,
+        Some(AcpNotification::Other { .. })
+    ));
     server
         .send_response(
             snapshot_id,
