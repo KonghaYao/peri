@@ -67,6 +67,34 @@ fn http_accepts_host_port_and_workspace() {
 }
 
 #[test]
+fn allowed_host_parses_repeatedly() {
+    let args = Args::try_parse_from([
+        "peri mcp-start",
+        "workspace",
+        "--http",
+        "--allowed-host",
+        "sandbox.local",
+        "--allowed-host",
+        "sandbox.local:8765",
+    ])
+    .unwrap();
+    assert_eq!(args.allowed_host, ["sandbox.local", "sandbox.local:8765"]);
+}
+
+#[test]
+fn allowed_host_requires_http() {
+    let error = run(&[
+        OsString::from("web"),
+        OsString::from("--stdio"),
+        OsString::from("--allowed-host"),
+        OsString::from("sandbox.local"),
+    ])
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("--allowed-host requires --http"), "{error}");
+}
+
+#[test]
 fn every_reserved_instance_parses() {
     for name in BUILTIN_RESERVED_INSTANCE_NAMES {
         let args = Args::try_parse_from(["peri mcp-start", name, "--stdio"])

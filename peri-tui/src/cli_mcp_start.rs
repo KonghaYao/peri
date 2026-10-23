@@ -33,6 +33,10 @@ struct Args {
     /// HTTP listen port (default 8765).
     #[arg(long, default_value_t = 8765)]
     port: u16,
+    /// Extra HTTP `Host` header values accepted by the server (repeatable).
+    /// The loopback defaults stay accepted; use `*` to disable Host validation.
+    #[arg(long = "allowed-host", value_name = "HOST")]
+    allowed_host: Vec<String>,
     /// Working directory for the served instance (default: current directory).
     /// This is not an OS sandbox.
     #[arg(long)]
@@ -51,6 +55,9 @@ pub(super) fn run(args: &[OsString]) -> Result<()> {
             BUILTIN_RESERVED_INSTANCE_NAMES.join(", ")
         );
     }
+    if !args.allowed_host.is_empty() && !args.http {
+        bail!("--allowed-host requires --http");
+    }
     let workspace = match args.workspace {
         Some(path) => path,
         None => std::env::current_dir().context("cannot determine current directory")?,
@@ -67,6 +74,7 @@ pub(super) fn run(args: &[OsString]) -> Result<()> {
         Transport::Http {
             host: args.host,
             port: args.port,
+            allowed_hosts: args.allowed_host,
         }
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()

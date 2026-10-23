@@ -22,7 +22,12 @@ use super::builtin::standalone::StandaloneFactory;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Transport {
     Stdio,
-    Http { host: String, port: u16 },
+    Http {
+        host: String,
+        port: u16,
+        /// Extra `Host` values accepted by rmcp; `"*"` disables the check.
+        allowed_hosts: Vec<String>,
+    },
 }
 
 /// Inputs for one standalone builtin instance.
@@ -41,7 +46,11 @@ pub async fn run(options: Options) -> Result<()> {
     let workspace = factory.workspace_handle();
     let served = match options.transport {
         Transport::Stdio => serve_stdio(factory.create()?).await,
-        Transport::Http { host, port } => serve_http(move || factory.create(), &host, port).await,
+        Transport::Http {
+            host,
+            port,
+            allowed_hosts,
+        } => serve_http(move || factory.create(), &host, port, &allowed_hosts).await,
     };
     let cleanup = match workspace {
         Some(server) => server.shutdown_shell_tasks().await,

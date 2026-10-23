@@ -32,8 +32,15 @@ where
 
 /// Serve a fresh `server` per session over MCP Streamable HTTP at `/mcp`.
 ///
-/// Shutdown is graceful on Ctrl-C / SIGTERM.
-pub async fn serve_http<S, F>(factory: F, host: &str, port: u16) -> Result<()>
+/// `allowed_hosts` extends rmcp's loopback-only `Host` allowlist. Passing `"*"`
+/// disables the check; leave empty to keep the loopback default. Shutdown is
+/// graceful on Ctrl-C / SIGTERM.
+pub async fn serve_http<S, F>(
+    factory: F,
+    host: &str,
+    port: u16,
+    allowed_hosts: &[String],
+) -> Result<()>
 where
     S: ServerHandler + Send + 'static,
     F: Fn() -> Result<S, io::Error> + Send + Sync + 'static,
@@ -45,6 +52,15 @@ where
     let mut config = StreamableHttpServerConfig::default();
     config.legacy_session_mode = true;
     config.cancellation_token = shutdown.clone();
+    if allowed_hosts.iter().any(|value| value == "*") {
+        config = config.disable_allowed_hosts();
+    } else if !allowed_hosts.is_empty() {
+        let hosts = ["localhost", "127.0.0.1", "::1"]
+            .into_iter()
+            .map(str::to_owned)
+            .chain(allowed_hosts.iter().cloned());
+        config = config.with_allowed_hosts(hosts);
+    }
     let service: StreamableHttpService<S, LocalSessionManager> =
         StreamableHttpService::new(factory, Default::default(), config);
     let router = axum::Router::new().nest_service("/mcp", service);

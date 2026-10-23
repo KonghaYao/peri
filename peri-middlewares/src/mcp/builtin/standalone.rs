@@ -127,13 +127,15 @@ fn spawn_tick_loop(
     triggers: tokio::sync::mpsc::UnboundedReceiver<CronTrigger>,
 ) {
     tokio::spawn(async move {
-        // Standalone mode has no trigger consumer. Hold the receiver so firings do
-        // not log a closed-channel warning; `cron://triggers` remains readable.
-        let _triggers = triggers;
+        // Standalone mode has no trigger consumer; drain firings so the unbounded
+        // channel cannot retain them after pending triggers are acknowledged.
+        // `cron://triggers` remains readable.
+        let mut triggers = triggers;
         let mut ticker = tokio::time::interval(Duration::from_secs(1));
         loop {
             ticker.tick().await;
             scheduler.lock().tick();
+            while triggers.try_recv().is_ok() {}
         }
     });
 }
