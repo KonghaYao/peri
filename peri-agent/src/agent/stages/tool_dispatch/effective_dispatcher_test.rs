@@ -98,6 +98,7 @@ async fn nested_dispatch_keeps_pinned_target_and_does_not_commit_outer_batch() {
         &ctx,
         ExecutionEntryOrigin::ModelBatch,
         ctx.session.turn.cancel_token.as_ref().clone(),
+        None,
     );
     let dispatcher = StageEffectiveToolDispatcher::new(invocation.clone(), catalog);
     assert_eq!(
@@ -212,6 +213,7 @@ async fn reported_in_band_result_keeps_raw_fact_instead_of_protocol_error() {
         &ctx,
         ExecutionEntryOrigin::ModelBatch,
         ctx.session.turn.cancel_token.as_ref().clone(),
+        None,
     );
     let dispatcher = StageEffectiveToolDispatcher::new(invocation, catalog);
 
@@ -243,4 +245,84 @@ async fn reported_in_band_result_keeps_raw_fact_instead_of_protocol_error() {
         }
         other => panic!("已报告结果必须保留 typed outcome，实际: {other:?}"),
     }
+}
+
+/// nested / App / Host 的 synthetic AI 与轮次入口绑定的批次尾部不同：分派必须
+/// 回退为「历史 + synthetic AI」，不得复用带外层批次 AI 的快照。
+#[tokio::test]
+async fn nested_synthetic_ai_uses_owned_fallback_not_outer_batch_tail() {
+    type Seen = Arc<parking_lot::Mutex<Vec<Vec<crate::messages::MessageId>>>>;
+    struct Probe(Seen);
+    #[async_trait::async_trait]
+    impl BaseTool for Probe {
+        fn name(&self) -> &str {
+            "Probe"
+        }
+        fn description(&self) -> &str {
+            "snapshot probe"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            json!({})
+        }
+        async fn invoke(
+            &self,
+            _input: serde_json::Value,
+            context: crate::tools::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            self.0
+                .lock()
+                .push(context.messages.iter().map(BaseMessage::id).collect());
+            Ok("ok".into())
+        }
+    }
+
+    let transcript = Arc::new(parking_lot::RwLock::new(MessageTranscript::new()));
+    let history_id = transcript.write().append(BaseMessage::human("history"));
+    let turn = TurnContext::new(Arc::from("/tmp"), Arc::new(CancellationToken::new()));
+    let ctx = StageContext::builder(turn, Arc::clone(&transcript), MessageQueue::new()).build();
+    let seen: Seen = Arc::default();
+    ctx.runtime
+        .tools
+        .write()
+        .insert("Probe".into(), Arc::new(Probe(seen.clone())));
+    let catalog = ctx
+        .runtime
+        .tool_catalog
+        .pin_working_tools(&ctx.runtime.tools.read())
+        .unwrap();
+    let outer_batch = BaseMessage::ai("outer batch");
+    let invocation = InvocationContext::from_stage(
+        &ctx,
+        ExecutionEntryOrigin::ModelBatch,
+        ctx.session.turn.cancel_token.as_ref().clone(),
+        Some(&outer_batch),
+    );
+    let dispatcher = StageEffectiveToolDispatcher::new(invocation, catalog);
+
+    dispatcher
+        .dispatch(
+            EffectiveToolCall {
+                invocation_id: "inner".into(),
+                tool_name: "Probe".into(),
+                input: json!({}),
+                origin: InvocationOrigin::Nested {
+                    parent_invocation_id: "outer".into(),
+                },
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+
+    let seen = seen.lock();
+    assert_eq!(seen.len(), 1);
+    let ids = &seen[0];
+    assert_eq!(ids.len(), 2, "分派快照 = 历史 + synthetic AI");
+    assert_eq!(ids[0], history_id);
+    assert_ne!(ids[1], history_id);
+    assert_ne!(
+        ids[1],
+        outer_batch.id(),
+        "不得复用外层批次绑定的 AI 尾部快照"
+    );
 }

@@ -386,11 +386,7 @@ async fn dispatch_concurrent(
         return Vec::new();
     }
 
-    let messages_snapshot: Arc<Vec<BaseMessage>> = {
-        let mut msgs = ctx.messages().to_vec();
-        msgs.push(ai_msg.clone());
-        Arc::new(msgs)
-    };
+    let messages_snapshot = ctx.messages_for_dispatch(ai_msg);
     let cwd_snapshot = ctx.cwd().to_owned();
     // 会话上下文用量快照（dispatch 时刻的只读事实，与 StateSnapshot / 自动 Compact
     // 同口径）：工具在启动子执行前据此评估父会话上下文压力；无预算或无估算时为 None。

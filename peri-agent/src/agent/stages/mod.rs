@@ -827,3 +827,7 @@ mod micro_exposure_tests;
 #[cfg(test)]
 #[path = "micro_turn_exposure_test.rs"]
 mod micro_turn_exposure_tests;
+
+#[cfg(test)]
+#[path = "resident_budget_test.rs"]
+mod resident_budget_tests;

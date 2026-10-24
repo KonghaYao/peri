@@ -30,7 +30,7 @@ use peri_acp_types::mcp_apps::SkippedPostHook;
 use super::StageContext;
 use crate::agent::events_v2::{EventBus, RenderEvent};
 use crate::error::{AgentError, AgentResult};
-use crate::messages::BaseMessage;
+use crate::messages::{BaseMessage, MessageId};
 use crate::middleware::MiddlewareChain;
 use crate::session::turn::TurnId;
 use crate::session::{MessageQueue, QueuedMessage};
@@ -138,7 +138,14 @@ pub struct InvocationContext {
     /// dispatch 时刻的工作目录。
     cwd: Arc<str>,
     /// dispatch 时刻的可见消息快照（**不含**本批 AI 消息：提交前视图）。
+    ///
+    /// 轮次入口在包 `Arc` 前追加本批 AI 消息；`history_len` 记录提交前前缀，
+    /// 因此 `messages()` 的 hook 语义不变，而工具分派可复用同一份 `Arc`。
     messages: Arc<Vec<BaseMessage>>,
+    /// 提交前可见历史长度（`messages[..history_len]`）。
+    history_len: usize,
+    /// 已绑定到快照尾部的本批 AI 消息身份；`None` = 未绑定。
+    dispatch_message_id: Option<MessageId>,
     /// dispatch 时刻的上下文用量；无预算或无估算时为 `None`。
     context_usage: Option<ContextUsage>,
     /// 会话资源端口（idempotent reminder 等）。
@@ -209,10 +216,14 @@ impl InvocationContext {
     /// `cancellation` 是本次执行入口的取消令牌（Act 批次 = turn 令牌；嵌套 / App
     /// 调用 = `EffectiveToolDispatcher::dispatch` 收到的令牌），执行管线与
     /// interruptible hook 都以它作为中断事实源。
+    ///
+    /// `dispatch_message` 是本批 AI 消息：轮次入口在构造时追加到同一份快照，
+    /// 工具分派只克隆 `Arc`；`None` 的测试/回退入口在分派时走一次 owned 回退。
     pub(crate) fn from_stage(
         stage: &StageContext,
         entry_origin: ExecutionEntryOrigin,
         cancellation: CancellationToken,
+        dispatch_message: Option<&BaseMessage>,
     ) -> Self {
         // metrics / tracing 键值对的显式投影：键值表本身不进调用期事实，
         // 只保留调用期真正读取的两项（session 身份与 run 关联键）。
@@ -242,12 +253,22 @@ impl InvocationContext {
         let attribution = session_id.clone().map(|session_id| {
             InteractionAttribution::model_turn(session_id, turn.execution_binding())
         });
+        // 一次物化：提交前历史 + 本批 AI 尾部。`messages()` 只暴露前缀，
+        // 工具分派在身份匹配时直接共享这同一个 `Arc`。
+        let mut messages = stage.visible_messages();
+        let history_len = messages.len();
+        let dispatch_message_id = dispatch_message.map(BaseMessage::id);
+        if let Some(dispatch) = dispatch_message {
+            messages.push(dispatch.clone());
+        }
         Self {
             session_id,
             run_id,
             agent_id: stage.session.agent_id,
             cwd: Arc::clone(&stage.session.turn.cwd),
-            messages: Arc::new(stage.visible_messages()),
+            messages: Arc::new(messages),
+            history_len,
+            dispatch_message_id,
             context_usage,
             session_resources,
             async_result_mailbox: Some(Arc::clone(&stage.session.async_result_mailbox)),
@@ -386,7 +407,22 @@ impl InvocationContext {
     /// 侧的空 ⇒ 回落 `parent_messages` 即属此列）；要在消费侧区分，需改本访问器与
     /// `StateView::messages()` 的签名，条件见实现日志「4b 批 H」。
     pub(crate) fn messages(&self) -> &[BaseMessage] {
-        &self.messages
+        &self.messages[..self.history_len]
+    }
+
+    /// 工具分派用的只读历史 + 当前 AI 消息快照。
+    ///
+    /// 轮次入口已把同一批 AI 消息追加进构造期快照，此时仅克隆 `Arc`；嵌套 /
+    /// App / Host synthetic AI（或测试）在身份不匹配时回退为一次 owned 拼接，
+    /// 不改变原 `messages()` 的提交前语义。
+    pub(crate) fn messages_for_dispatch(&self, ai_msg: &BaseMessage) -> Arc<Vec<BaseMessage>> {
+        if self.dispatch_message_id == Some(ai_msg.id()) {
+            return Arc::clone(&self.messages);
+        }
+        let mut messages = Vec::with_capacity(self.history_len + 1);
+        messages.extend_from_slice(&self.messages[..self.history_len]);
+        messages.push(ai_msg.clone());
+        Arc::new(messages)
     }
 
     pub(crate) fn context_usage(&self) -> Option<ContextUsage> {
@@ -463,17 +499,22 @@ impl InvocationContext {
     /// 不写 `step`、不写 `turn_generation`。
     pub fn from_source(source: SessionInvocationSource) -> Self {
         let attribution = InteractionAttribution::from_invocation_origin(&source.origin);
+        // `None`（未知）⇒ 视图退化为空切片：**这是保守化，不是等价事实**。
+        // 「未知」与「空历史」在本结构内仍不可区分（`messages()` 返回切片，
+        // 剩余半面的收敛条件见实现日志「4b 批 H」）。
+        let messages = source
+            .messages
+            .unwrap_or_else(|| Arc::new(Vec::<BaseMessage>::new()));
+        let history_len = messages.len();
         Self {
             session_id: source.session_id,
             run_id: source.run_id,
             agent_id: source.agent_id,
             cwd: source.cwd,
-            // `None`（未知）⇒ 视图退化为空切片：**这是保守化，不是等价事实**。
-            // 「未知」与「空历史」在本结构内仍不可区分（`messages()` 返回切片，
-            // 剩余半面的收敛条件见实现日志「4b 批 H」）。
-            messages: source
-                .messages
-                .unwrap_or_else(|| Arc::new(Vec::<BaseMessage>::new())),
+            messages,
+            history_len,
+            // idle 入口没有本批 AI 消息；分派 synthetic AI 时走 owned 回退。
+            dispatch_message_id: None,
             context_usage: source.context_usage,
             session_resources: source.session_resources,
             async_result_mailbox: None,

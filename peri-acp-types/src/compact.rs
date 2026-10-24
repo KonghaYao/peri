@@ -18,6 +18,8 @@ pub enum FullEscalationReason {
     InsufficientReclaim,
     /// 达到强制 Full 阈值
     ForceThresholdExceeded,
+    /// 历史驻留字节超过独立预算
+    ResidentHistoryBudgetExceeded,
     /// 手动触发
     ManualForce,
 }
@@ -149,6 +151,10 @@ fn default_smart_keep_recent_tools() -> usize {
 fn default_headroom_tokens() -> u64 {
     8192
 }
+/// 历史正文驻留预算默认 128 MiB（`own + inherited` 的 `reserved` 下界）。
+fn default_max_resident_history_bytes() -> u64 {
+    128 * 1024 * 1024
+}
 fn default_tool_result_keep_chars() -> usize {
     2000
 }
@@ -239,6 +245,12 @@ pub struct CompactConfig {
     /// 目标上下文余量 token 数（用于 ContextPressure 计算）
     #[serde(default = "default_headroom_tokens")]
     pub target_headroom_tokens: u64,
+    /// 历史正文驻留字节上限（`own + inherited` 的 `reserved` 下界之和）。
+    ///
+    /// 与 token 压力独立：超过后强制一次 Full，Full 成功后仍超限只记录残余，
+    /// 不做硬准入或终止运行。0 表示关闭该门控。
+    #[serde(default = "default_max_resident_history_bytes")]
+    pub max_resident_history_bytes: u64,
     /// 工具结果保留的最小字符数
     #[serde(default = "default_tool_result_keep_chars")]
     pub tool_result_keep_chars: usize,
@@ -281,6 +293,7 @@ impl Default for CompactConfig {
             smart_keep_recent_msgs: default_smart_keep_recent_msgs(),
             smart_keep_recent_tools: default_smart_keep_recent_tools(),
             target_headroom_tokens: default_headroom_tokens(),
+            max_resident_history_bytes: default_max_resident_history_bytes(),
             tool_result_keep_chars: default_tool_result_keep_chars(),
             micro_field_threshold_chars: default_micro_field_threshold_chars(),
             micro_field_keep_head_chars: default_micro_field_keep_head_chars(),

@@ -17,6 +17,7 @@ fn model_batch_context(stage: &StageContext) -> InvocationContext {
         stage,
         ExecutionEntryOrigin::ModelBatch,
         stage.session.turn.cancel_token.as_ref().clone(),
+        None,
     )
 }
 
@@ -233,4 +234,57 @@ fn idle_source_has_no_turn_and_typed_rules_fail_closed() {
         panic!("必须是 typed 不可用错误");
     };
     assert_eq!(session_id, None);
+}
+
+/// 轮次入口只物化一份历史快照：hook 视图仍是不含本批 AI 的前缀，工具分派在
+/// 同一 AI 身份下仅克隆 `Arc`；不同 synthetic AI 才走 owned 回退。
+#[test]
+fn dispatch_snapshot_is_one_arc_and_hook_view_stays_prefix_only() {
+    let stage = test_stage();
+    let history_id = stage.session.transcript.read().entries()[0].id();
+    let batch = BaseMessage::ai("batch");
+    let context = InvocationContext::from_stage(
+        &stage,
+        ExecutionEntryOrigin::ModelBatch,
+        stage.session.turn.cancel_token.as_ref().clone(),
+        Some(&batch),
+    );
+
+    assert_eq!(context.messages().len(), 1, "hook 只见提交前历史");
+    assert_eq!(context.messages()[0].id(), history_id);
+
+    let first = context.messages_for_dispatch(&batch);
+    let second = context.messages_for_dispatch(&batch);
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "同一批 AI 消息必须共享同一份 dispatch 快照"
+    );
+    assert_eq!(first.len(), 2);
+    assert_eq!(first[1].id(), batch.id());
+
+    let synthetic = BaseMessage::ai("nested");
+    let fallback = context.messages_for_dispatch(&synthetic);
+    assert!(
+        !Arc::ptr_eq(&first, &fallback),
+        "不同 AI 身份必须回退为独立快照，不能复用带旧尾部的快照"
+    );
+    assert_eq!(fallback.len(), 2);
+    assert_eq!(fallback[0].id(), history_id);
+    assert_eq!(fallback[1].id(), synthetic.id());
+}
+
+/// idle（App / Host）入口没有绑定本批 AI：`messages()` 仍是完整历史，
+/// 分派 synthetic AI 时回退拼接，且不改变 hook 视图。
+#[test]
+fn idle_source_dispatch_keeps_history_view_and_owned_fallback() {
+    let stage = test_stage();
+    let context = idle_context(&stage);
+    let synthetic = BaseMessage::ai("host call");
+
+    assert_eq!(context.messages().len(), 1, "idle 视图仍是已知历史");
+    let dispatch = context.messages_for_dispatch(&synthetic);
+    assert_eq!(dispatch.len(), 2);
+    assert_eq!(dispatch[0].id(), context.messages()[0].id());
+    assert_eq!(dispatch[1].id(), synthetic.id());
+    assert_eq!(context.messages().len(), 1, "回退不改变 hook 视图");
 }

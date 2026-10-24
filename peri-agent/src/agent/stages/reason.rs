@@ -26,6 +26,10 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     // 固定准备阶段之前的视图；Full reset/Micro 缩减本身不应触发第二次评估。
     super::compact::context_pressure::refresh(ctx)?;
 
+    // hooks 前的 canonical 修订：准备阶段新增历史是驻留预算补检的独立证据，
+    // 不要求投影 token 增长（例如低 token 但大正文）。
+    let canonical_revision_before_hooks = ctx.session.transcript.read().view_revision();
+
     // Apply a new session capability generation only at the Reason boundary.
     let refreshed = match ctx.runtime.tool_catalog.refresh() {
         Ok(snapshot) => snapshot,
@@ -54,7 +58,22 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     // before_model 和动态工具发布在常规 Compact 之后。只有准备阶段确实新增
     // 压力且达到 Full 阈值时补检一次；不重复运行模型/compact hooks。
     let prepared_input_grew = super::compact::context_pressure::refresh(ctx)?;
-    let needs_compact = prepared_input_grew
+    let canonical_changed =
+        ctx.session.transcript.read().view_revision() != canonical_revision_before_hooks;
+    let resident_exceeded = ctx
+        .compact
+        .compact_config
+        .as_ref()
+        .filter(|config| config.auto_compact_enabled)
+        .map(|config| {
+            crate::agent::compact_v2::ResidentHistoryPressure::from_transcript(
+                config.max_resident_history_bytes,
+                &ctx.session.transcript.read(),
+            )
+            .is_exceeded()
+        })
+        .unwrap_or(false);
+    let needs_compact = (prepared_input_grew
         && ctx
             .compact
             .compact_config
@@ -71,7 +90,8 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                             tokens as f64 / f64::from(budget.context_window)
                                 >= config.auto_compact_threshold
                         })
-            });
+            }))
+        || (canonical_changed && resident_exceeded);
     if needs_compact {
         super::compact::run_compact_core(super::CompactInput {
             context: ctx.clone(),

@@ -254,7 +254,7 @@ fn persisted_v2_preview_without_catalog_keeps_legacy_bytes() {
     );
     let restored =
         render_persisted_llm_view(&transcript, &ProviderCapabilities::default()).unwrap();
-    let expected = super::super::apply_head_tail(&text, 80, 30).unwrap();
+    let expected = super::super::render::apply_head_tail(&text, 80, 30).unwrap();
     assert_eq!(
         restored
             .iter()

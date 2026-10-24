@@ -8,6 +8,9 @@
 //! - Tool input 投影后保持 JSON object 根类型
 //! - CJK 截断用字符边界而非字节切片
 //! - Image/Document Base64 payload 移除
+//!
+//! 消息/内容构造（借用式 `MessageDraft` 与逐块投影）在 sibling `projection_render`；
+//! 本模块保留计划类型、指令恢复、估算与渲染编排。
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -21,8 +24,15 @@ pub use peri_acp_types::projection::{
 
 pub const PROJECTION_POLICY_VERSION: u32 = 3;
 
+pub(super) fn invalid(detail: impl std::fmt::Display) -> crate::error::AgentError {
+    crate::error::AgentError::LlmError(format!("invalid context projection: {detail}"))
+}
+
 #[path = "projection_archive.rs"]
 mod archive;
+
+#[path = "projection_render.rs"]
+mod render;
 
 /// Provider 消息协议类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -469,338 +479,9 @@ pub fn render_micro_plan(
     )
 }
 
-// ─── project_message ──────────────────────────────────────────────────────────
-
-/// 对单条消息应用投影 action。
-///
-/// 消费 owned 消息：不需要投影的分支直接移动原对象，需要投影的分支才重建内容。
-fn project_message(
-    msg: BaseMessage,
-    entries: &[&ProjectionActionEntry],
-    caps: &ProviderCapabilities,
-) -> BaseMessage {
-    // 按 target 分类 actions
-    let mut block_actions: HashMap<usize, &ProjectionActionEntry> = HashMap::new();
-
-    for e in entries {
-        match &e.target {
-            ProjectionTarget::Message => {}
-            ProjectionTarget::ContentBlock { index } => {
-                block_actions.insert(*index, e);
-            }
-            ProjectionTarget::ToolCall { .. } => {}
-        }
-    }
-
-    match msg {
-        // Human/System 消息不做消息级投影，但 ContentBlock 级的 ReplaceMedia 仍需应用
-        // （移除 Base64 payload，保留占位符）
-        BaseMessage::Human { id, content } => {
-            if block_actions.is_empty() {
-                return BaseMessage::Human { id, content };
-            }
-            BaseMessage::Human {
-                id,
-                content: project_content(&content, &block_actions, caps),
-            }
-        }
-        BaseMessage::System { id, content } => {
-            if block_actions.is_empty() {
-                return BaseMessage::System { id, content };
-            }
-            BaseMessage::System {
-                id,
-                content: project_content(&content, &block_actions, caps),
-            }
-        }
-
-        BaseMessage::Ai {
-            id,
-            content,
-            tool_calls,
-        } => {
-            // ToolCall 与 ToolUse 是 canonical execution data。无论 plan 中包含何种
-            // legacy/非法组合，renderer 都只允许投影独立的非 ToolUse content block。
-            // 无 block action 时内容不变，直接移动（不改写正文与 tool_calls）。
-            if block_actions.is_empty() {
-                return BaseMessage::Ai {
-                    id,
-                    content,
-                    tool_calls,
-                };
-            }
-            BaseMessage::Ai {
-                id,
-                content: project_content(&content, &block_actions, caps),
-                tool_calls,
-            }
-        }
-
-        BaseMessage::Tool {
-            id,
-            tool_call_id,
-            content,
-            is_error,
-            execution,
-            subagent_failure,
-        } => {
-            // 错误与成功结果均按已验证动作逐块预览。
-            let content = {
-                // Message 与 block 0 是同一逻辑 ToolResult 文本；重复或冲突时
-                // fail-closed，不执行任何投影。estimator 复用同一选择函数。
-                let content_action =
-                    effective_tool_result_action(entries).unwrap_or(&ProjectionAction::Keep);
-                let projected = project_tool_result_content(content, content_action);
-                // Message/block 0 的 CompactToolResult 已统一处理，不能在冲突时
-                // 又通过 block 路径执行，更不能对正常动作重复裁剪。
-                block_actions.retain(|index, entry| {
-                    !(*index == 0
-                        && matches!(entry.action, ProjectionAction::CompactToolResult { .. }))
-                });
-                if block_actions.is_empty() {
-                    projected
-                } else {
-                    project_content(&projected, &block_actions, caps)
-                }
-            };
-
-            BaseMessage::Tool {
-                id,
-                tool_call_id,
-                content,
-                is_error,
-                execution,
-                subagent_failure,
-            }
-        }
-    }
-}
-
-// ─── project_content ──────────────────────────────────────────────────────────
-
-/// 对 MessageContent 中的每个 ContentBlock 应用对应 action
-fn project_content(
-    content: &MessageContent,
-    block_actions: &HashMap<usize, &ProjectionActionEntry>,
-    caps: &ProviderCapabilities,
-) -> MessageContent {
-    let blocks = content.content_blocks();
-    if blocks.is_empty() {
-        return content.clone();
-    }
-
-    let mut projected_blocks = Vec::with_capacity(blocks.len());
-
-    for (i, block) in blocks.iter().enumerate() {
-        let action = block_actions.get(&i).map(|a| &a.action);
-        projected_blocks.push(project_block(block, action, caps));
-    }
-
-    // 保留原始 variant：原先是 Text → 保持 Text（但已被截断处理），
-    // 原先是 Blocks → 保持 Blocks
-    match content {
-        MessageContent::Text(_) => {
-            // Text 消息只有一个块（在 content_blocks() 中展开为单个 Text block）
-            // 截断已在 project_block 中处理
-            if projected_blocks.len() == 1 {
-                if let ContentBlock::Text { ref text } = projected_blocks[0] {
-                    return MessageContent::text(text.clone());
-                }
-            }
-            MessageContent::Blocks(projected_blocks)
-        }
-        MessageContent::Blocks(_) => MessageContent::Blocks(projected_blocks),
-        MessageContent::Raw(_) => {
-            // Raw 内容无法逐块投影——原样保留
-            content.clone()
-        }
-    }
-}
-
-/// 对 tool result 的完整文本流应用 CompactToolResult action。
-///
-/// 消费 owned 内容：不需要截断时原样返回（不复制正文）。
-fn project_tool_result_content(
-    content: MessageContent,
-    action: &ProjectionAction,
-) -> MessageContent {
-    let ProjectionAction::CompactToolResult {
-        keep_head,
-        keep_tail,
-        ..
-    } = action
-    else {
-        return content;
-    };
-
-    match content {
-        // 纯文本是常见情形：直接切片截断，避免拼接后再复制。
-        MessageContent::Text(text) => match apply_head_tail(&text, *keep_head, *keep_tail) {
-            Some(projected) => MessageContent::text(projected),
-            None => MessageContent::Text(text),
-        },
-        MessageContent::Blocks(blocks) => MessageContent::Blocks(
-            blocks
-                .into_iter()
-                .map(|block| match block {
-                    ContentBlock::Text { text } => ContentBlock::Text {
-                        text: apply_head_tail(&text, *keep_head, *keep_tail).unwrap_or(text),
-                    },
-                    ContentBlock::ToolResult {
-                        id,
-                        tool_use_id,
-                        content,
-                        is_error,
-                    } => ContentBlock::ToolResult {
-                        id,
-                        tool_use_id,
-                        content: match project_tool_result_content(
-                            MessageContent::Blocks(content),
-                            action,
-                        ) {
-                            MessageContent::Blocks(blocks) => blocks,
-                            _ => unreachable!(),
-                        },
-                        is_error,
-                    },
-                    other => other,
-                })
-                .collect(),
-        ),
-        raw @ MessageContent::Raw(_) => raw,
-    }
-}
-
-// ─── project_block ────────────────────────────────────────────────────────────
-
-/// 投影单个 ContentBlock
-fn project_block(
-    block: &ContentBlock,
-    action: Option<&ProjectionAction>,
-    _caps: &ProviderCapabilities,
-) -> ContentBlock {
-    if matches!(block, ContentBlock::ToolUse { .. }) {
-        return block.clone();
-    }
-
-    match action {
-        None | Some(ProjectionAction::Keep) => block.clone(),
-
-        Some(ProjectionAction::ReplaceMedia { placeholder }) => match block {
-            ContentBlock::Image { .. } => ContentBlock::Text {
-                text: format!("[图片已压缩: {}]", placeholder),
-            },
-            ContentBlock::Document { title, .. } => ContentBlock::Text {
-                text: format!(
-                    "[文档已压缩{}: {}]",
-                    title
-                        .as_ref()
-                        .map(|t| format!(" ({})", t))
-                        .unwrap_or_default(),
-                    placeholder
-                ),
-            },
-            _ => block.clone(),
-        },
-
-        Some(ProjectionAction::CompactToolResult {
-            keep_head,
-            keep_tail,
-            ..
-        }) => match block {
-            ContentBlock::Text { text } => apply_head_tail(text, *keep_head, *keep_tail)
-                .map(|text| ContentBlock::Text { text })
-                .unwrap_or_else(|| block.clone()),
-            ContentBlock::ToolResult {
-                id,
-                tool_use_id,
-                content,
-                is_error,
-            } => ContentBlock::ToolResult {
-                id: id.clone(),
-                tool_use_id: tool_use_id.clone(),
-                content: match project_tool_result_content(
-                    MessageContent::Blocks(content.clone()),
-                    action.unwrap(),
-                ) {
-                    MessageContent::Blocks(blocks) => blocks,
-                    _ => unreachable!(),
-                },
-                is_error: *is_error,
-            },
-            _ => block.clone(),
-        },
-
-        Some(ProjectionAction::Exclude) => ContentBlock::Text {
-            text: "[已排除]".to_string(),
-        },
-
-        Some(ProjectionAction::CompactText { max_chars }) => match block {
-            ContentBlock::Text { text } => {
-                let chars: Vec<char> = text.chars().collect();
-                if chars.len() <= *max_chars {
-                    return block.clone();
-                }
-                let truncated: String = chars[..*max_chars].iter().collect();
-                ContentBlock::Text {
-                    text: format!("{}\n[内容已压缩]", truncated),
-                }
-            }
-            _ => block.clone(),
-        },
-
-        _ => {
-            if let ContentBlock::Reasoning {
-                ref signature,
-                ref text,
-            } = block
-            {
-                if signature.is_some() {
-                    tracing::warn!(
-                        len = text.chars().count(),
-                        "Reasoning block with signature received projection action; \
-                         block preserved unchanged because signed reasoning must remain whole"
-                    );
-                }
-            }
-            block.clone()
-        }
-    }
-}
-
-// ─── apply_head_tail ──────────────────────────────────────────────────────────
-
-/// 安全的 head/tail 截断（CJK 安全）。
-///
-/// 仅当截断后的文本确实更短时返回 Some，避免省略标记使短文本膨胀。
-fn apply_head_tail(text: &str, head_chars: usize, tail_chars: usize) -> Option<String> {
-    let total: usize = text.chars().count();
-    let (_, projected) = head_tail_geometry(total, head_chars, tail_chars)?;
-
-    let head: String = text.chars().take(head_chars).collect();
-    let tail: String = text
-        .chars()
-        .rev()
-        .take(tail_chars)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    let skipped = total.saturating_sub(head_chars + tail_chars);
-    let sentinel = peri_acp_types::sentinel::format_projection_sentinel_v1(skipped);
-    let projected_text = format!("{head}\n{sentinel}\n{tail}");
-    debug_assert_eq!(
-        projected_text.chars().count(),
-        projected,
-        "head/tail 几何与实际渲染必须一致"
-    );
-
-    Some(projected_text)
-}
-
 /// head/tail 投影的几何：`(原始字符数, 投影后字符数)`；`None` 表示不缩短。
 ///
-/// 与 [`apply_head_tail`] 共用同一几何规则（sentinel 由同一格式化函数给出），
+/// 与 `render::apply_head_tail` 共用同一几何规则（sentinel 由同一格式化函数给出），
 /// 供只统计字符数、不复制正文的调用方使用。
 fn head_tail_geometry(
     total: usize,
@@ -903,17 +584,35 @@ fn validate_projected_view(
     // 3. Signed reasoning 完整性（Anthropic）
     if caps.signed_reasoning_must_be_whole {
         for msg in messages {
-            let blocks = msg.message_content().content_blocks();
-            for block in blocks {
-                if let ContentBlock::Reasoning { signature, text } = block {
-                    if signature.is_some() {
-                        // 验证策略：project_block（见下文）对 reasoning 块的非 Keep 动作
-                        // 会静默 fallthrough 到 _ => block.clone()，因此此处只做防御性日志；
-                        // 实际安全由 provider adapter 的签名校验保证。
-                        tracing::debug!(
-                            len = text.chars().count(),
-                            "已投影视图中出现带签名的 reasoning block"
-                        );
+            match msg.message_content() {
+                MessageContent::Text(_) => {}
+                MessageContent::Blocks(blocks) => {
+                    for block in blocks {
+                        if let ContentBlock::Reasoning {
+                            signature: Some(_),
+                            text,
+                        } = block
+                        {
+                            // 验证策略：project_block 对 reasoning 块的非 Keep 动作
+                            // 会静默 fallthrough 克隆，因此此处只做防御性日志；
+                            // 实际安全由 provider adapter 的签名校验保证。
+                            tracing::debug!(
+                                len = text.chars().count(),
+                                "已投影视图中出现带签名的 reasoning block"
+                            );
+                        }
+                    }
+                }
+                MessageContent::Raw(values) => {
+                    for value in values {
+                        if value["type"].as_str() == Some("reasoning")
+                            && value["signature"].as_str().is_some()
+                        {
+                            tracing::debug!(
+                                len = value["text"].as_str().unwrap_or_default().chars().count(),
+                                "已投影视图中出现带签名的 reasoning block"
+                            );
+                        }
                     }
                 }
             }
@@ -922,3 +621,7 @@ fn validate_projected_view(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "projection_borrowed_test.rs"]
+mod borrowed_tests;
