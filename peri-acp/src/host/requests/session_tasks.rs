@@ -1,12 +1,20 @@
 //! Background task query/cancel handlers for the owning session tree.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::Value;
 use tracing::info;
 
 use super::super::AcpServerConfig;
 use crate::transport::types::AcpError;
+
+/// Outer bound for one ACP `session/cancel-bg-task` response.
+///
+/// The MCP `tasks/cancel` RPC has its own shorter timeout; this bound keeps the
+/// ACP request finite even if another external cancel implementation stays
+/// pending. Expiry is a cancellation failure, not a terminal state.
+const BG_TASK_CANCEL_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub(crate) async fn handle_cancel_bg_task(
     params: &Value,
@@ -38,9 +46,17 @@ pub(crate) async fn handle_cancel_bg_task(
     } else {
         manager
     };
-    manager
-        .cancel_async(task_id)
+    peri_time::timeout(BG_TASK_CANCEL_TIMEOUT, manager.cancel_async(task_id))
         .await
+        .map_err(|_| {
+            AcpError::new(
+                -32603,
+                format!(
+                    "background task cancellation timed out after {}s",
+                    BG_TASK_CANCEL_TIMEOUT.as_secs()
+                ),
+            )
+        })?
         .map_err(|e| AcpError::new(-32603, e.to_string()))?;
     info!(session_id = %req_session_id, task_id = %task_id, "Background task cancelled via ACP");
     Ok(serde_json::json!({ "success": true }))

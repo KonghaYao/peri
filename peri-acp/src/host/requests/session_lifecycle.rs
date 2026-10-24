@@ -650,7 +650,7 @@ pub(crate) async fn handle_list(params: &Value, cfg: &AcpServerConfig) -> Result
 
 #[path = "session_tasks.rs"]
 mod session_tasks;
-pub(super) use session_tasks::{handle_bg_tasks, handle_cancel_bg_task};
+pub(crate) use session_tasks::{handle_bg_tasks, handle_cancel_bg_task};
 
 #[path = "session_close.rs"]
 mod close;

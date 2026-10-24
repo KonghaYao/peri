@@ -221,6 +221,10 @@ pub(crate) const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::fr
 /// Subscription handshakes are best-effort; a slow server must not block connection readiness.
 pub(crate) const SUBSCRIPTION_LISTEN_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(10);
+/// One `tasks/cancel` RPC. Cancellation is cooperative and the ack is not the
+/// task's terminal state; a silent owner must not hold the caller forever.
+/// rmcp's native request timeout also emits `notifications/cancelled`.
+pub(crate) const MCP_TASK_CANCEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// 有界重采集（M9，list→read TOCTOU）：首次采集失败后**只**重采集一次。
 ///

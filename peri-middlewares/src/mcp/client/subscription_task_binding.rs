@@ -7,8 +7,11 @@ use peri_acp_types::system_reminder::{
     SYSTEM_REMINDER_VERSION,
 };
 use peri_acp_types::tasks::{BgTaskKind, ExternalTaskRegistration, TaskManager};
-use rmcp::model::CancelTaskParams;
+use rmcp::model::{CancelTaskParams, CancelTaskRequest, ClientRequest, ServerResult};
+use rmcp::service::PeerRequestOptions;
 use serde_json::json;
+
+use crate::mcp::client::MCP_TASK_CANCEL_TIMEOUT;
 use std::sync::Arc;
 
 impl McpClientPool {
@@ -196,9 +199,21 @@ impl McpClientPool {
                     .ok_or_else(|| "MCP task owner disconnected".to_owned())?;
                 let mut params = CancelTaskParams::new(raw_id);
                 params.meta = meta;
-                peer.cancel_task(params)
+                let request = ClientRequest::CancelTaskRequest(CancelTaskRequest::new(params));
+                let response = peer
+                    .send_request_with_option(
+                        request,
+                        PeerRequestOptions::with_timeout(MCP_TASK_CANCEL_TIMEOUT),
+                    )
                     .await
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| format!("tasks/cancel send failed: {error}"))?
+                    .await_response()
+                    .await
+                    .map_err(|error| format!("tasks/cancel failed: {error}"))?;
+                match response {
+                    ServerResult::TaskAckResult(_) | ServerResult::EmptyResult(_) => Ok(()),
+                    _ => Err("tasks/cancel returned an unexpected response".to_owned()),
+                }
             })
                 as std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
         });
