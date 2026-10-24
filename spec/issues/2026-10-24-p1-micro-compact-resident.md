@@ -145,7 +145,15 @@ worktree `.worktrees/micro-compact-resident`，基线 `e598d178` + 第一段未�
 - **测试稳定性**：两个 `resident_budget_test.rs` 的 `capture_logs` 在进程内安装一次 sink 全局 subscriber，避免并行测试 drop thread-local guard 时重建 callsite interest、使日志断言偶发丢事件。修复后 `--lib -- resident` 连续 10 次 **23 passed**。
 - **复审命令结果**：`check-file-size.sh` exit 1，仅列出 9 个既有超限文件（源码 3 / 测试 6），本次修改与新增文件均不在列表；基线 golden 副本 **6 passed**；`--lib -- resident` **23 passed**；`--lib -- compact` **276 passed; 3 ignored**；`--lib` **1319 passed; 5 ignored**；`--test projection_allocation_test` **3 passed**；`check -p peri-agent -p peri-acp-types -p peri-tui` 成功；`fmt --all -- --check`、`git diff --check` 成功。
 
-**结论**：修复与验证完成，待 PR 合并。
+### CI 专属失败修复（2026-10-24）
+
+- **现象**：PR #285 的 macOS `Build` 在 peri-agent lib 测试步骤失败，`malformed_raw_blocks_keep_bytes_and_degrade_projection` 报告键序不一致；本地单包测试全部通过。
+- **根因**：CI 以 `--workspace` 构建，feature 统一启用 `serde_json/preserve_order`，`serde_json::Value` 的对象改为插入序；golden 常量按默认 BTreeMap 键序书写，因此只在单包构建下匹配。
+- **修复**：`assert_golden` 解析两侧 JSON 后比较 `serde_json::Value` 结构，投影语义不依赖键序；6 个 golden 用例在两种 feature 投影下均通过。
+- **验证**：`cargo test --locked --workspace --lib --no-run` 后用生成的 `peri_agent` 测试二进制跑全量 lib 套件 → **1319 passed; 0 failed; 5 ignored**（workspace feature 投影）。
+- **无关失败**：同次 Linux job 的 `peri-js-runtime` 3 个 host lifecycle 用例等待 READY 超时，该 crate 不在本改动范围；新 run 若再次出现按环境抖动重跑并记录。
+
+**结论**：修复与验证完成，已提交 PR #285，待合并。
 
 ## 残余风险
 

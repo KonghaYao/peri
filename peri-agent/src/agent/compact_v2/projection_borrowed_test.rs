@@ -100,9 +100,18 @@ fn rendered(
 }
 
 fn assert_golden(actual: &str, golden: &str) {
+    // `serde_json::Value` 对象的键序随编译期 `preserve_order` 特性变化，而 workspace
+    // 全量构建会启用该特性（单包构建不会）。投影语义不依赖键序，因此比较解析后的
+    // 结构，避免测试只在单包构建下通过。
+    let actual: serde_json::Value =
+        serde_json::from_str(actual).expect("actual projection must be JSON");
+    let golden: serde_json::Value = serde_json::from_str(golden).expect("golden must be JSON");
     assert_eq!(
-        actual, golden,
-        "\n--- actual serialized projection ---\n{actual}\n--- end actual ---"
+        actual,
+        golden,
+        "\n--- actual serialized projection ---\n{}\n--- golden ---\n{}\n--- end ---",
+        serde_json::to_string_pretty(&actual).unwrap(),
+        serde_json::to_string_pretty(&golden).unwrap()
     );
 }
 
