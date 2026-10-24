@@ -24,7 +24,6 @@ use crate::agent::compact_v2::{
 use crate::agent::events::CompactStrategy;
 use crate::messages::{BaseMessage, MessageContent};
 use crate::session::async_result_mailbox::ProtectedResults;
-use crate::session::memory_probe::{ObjectBytes, TranscriptMemorySnapshot};
 use crate::session::test_resources::TestSession;
 use crate::session::transcript::MessageTranscript;
 
@@ -210,24 +209,18 @@ fn capture_logs() -> (LogBuffer, tracing::subscriber::DefaultGuard) {
 
 #[test]
 fn resident_pressure_uses_own_plus_inherited_reserved_without_excluded() {
-    let snapshot = TranscriptMemorySnapshot {
-        own_bytes: ObjectBytes {
-            body: 1,
-            reserved: 4,
-        },
-        inherited_bytes: ObjectBytes {
-            body: 1,
-            reserved: 6,
-        },
-        // excluded 是 own/inherited 的子集，重复相加会虚增压力。
-        excluded_bytes: ObjectBytes {
-            body: 100,
-            reserved: 100,
-        },
-        ..Default::default()
+    let pressure = ResidentHistoryPressure {
+        limit_bytes: 10,
+        // Full 可归档 own。
+        reclaimable_own_bytes: 4,
+        // Full 保留的 own（System/protected/已 excluded）。
+        irreducible_own_bytes: 0,
+        irreducible_inherited_bytes: 6,
     };
-    let pressure = ResidentHistoryPressure::from_snapshot(10, &snapshot);
     assert_eq!(pressure.total_reserved_bytes(), 10);
+    assert_eq!(pressure.reclaimable_own_reserved_bytes(), 4);
+    assert_eq!(pressure.irreducible_own_reserved_bytes(), 0);
+    assert_eq!(pressure.irreducible_inherited_reserved_bytes(), 6);
     assert!(!pressure.is_exceeded(), "恰好等于上限不触发");
 
     let over = ResidentHistoryPressure {
@@ -243,8 +236,9 @@ fn resident_pressure_uses_own_plus_inherited_reserved_without_excluded() {
     );
     let zero_limit_with_data = ResidentHistoryPressure {
         limit_bytes: 0,
-        own_reserved_bytes: 100,
-        inherited_reserved_bytes: 100,
+        reclaimable_own_bytes: 100,
+        irreducible_own_bytes: 100,
+        irreducible_inherited_bytes: 100,
     };
     assert!(
         !zero_limit_with_data.is_exceeded(),
@@ -253,10 +247,40 @@ fn resident_pressure_uses_own_plus_inherited_reserved_without_excluded() {
 
     let saturated = ResidentHistoryPressure {
         limit_bytes: u64::MAX,
-        own_reserved_bytes: u64::MAX,
-        inherited_reserved_bytes: u64::MAX,
+        reclaimable_own_bytes: u64::MAX,
+        irreducible_own_bytes: u64::MAX,
+        irreducible_inherited_bytes: u64::MAX,
     };
     assert_eq!(saturated.total_reserved_bytes(), u64::MAX, "饱和相加");
+}
+
+#[test]
+fn resident_pressure_separates_system_and_protected_own() {
+    let mut transcript = MessageTranscript::new();
+    transcript.append(BaseMessage::system("s".repeat(512)));
+    let protected = make_human("async result");
+    let protected_id = protected.id();
+    transcript.append(protected);
+    transcript.append(make_human("reclaimable own"));
+    let protected_ids = std::collections::HashSet::from([protected_id]);
+
+    let pressure =
+        ResidentHistoryPressure::from_transcript_with_protected(1, &transcript, &protected_ids);
+    assert!(
+        pressure.irreducible_own_reserved_bytes() > 0,
+        "System 与 protected 必须计入不可回收 own"
+    );
+    assert!(
+        pressure.reclaimable_own_reserved_bytes() > 0,
+        "普通 own 必须计入可回收"
+    );
+    assert_eq!(pressure.irreducible_inherited_reserved_bytes(), 0);
+    assert_eq!(
+        pressure.own_reserved_bytes(),
+        pressure
+            .reclaimable_own_reserved_bytes()
+            .saturating_add(pressure.irreducible_own_reserved_bytes())
+    );
 }
 
 #[tokio::test]

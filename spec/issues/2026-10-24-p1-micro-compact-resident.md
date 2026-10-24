@@ -58,7 +58,7 @@
 ### 阶段二（本 PR）：独立于 token 的驻留字节预算
 
 - `CompactConfig` 新增 `max_resident_history_bytes: u64`，serde 默认与 `Default` 同为 128 MiB（134217728），0 表示关闭；不新增环境变量，不改数据库 schema。**0 值语义已决策为关闭门控，不是立即超限**：`ResidentHistoryPressure::is_enabled()` 要求 `limit_bytes > 0`，与 `ResidentHistoryPressure::DISABLED` 及既有调用方默认行为一致，测试/嵌入方可显式禁用而无需构造极大阈值。
-- 计量口径为 `memory_snapshot().own_bytes.reserved + inherited_bytes.reserved` 的饱和和；`excluded_bytes` 是前两者的子集，不重复相加。`ResidentHistoryPressure` 是只读 helper，不扩 `ContextPressure`。
+- 计量口径为 `ResidentHistoryPressure::from_transcript_with_protected` 对自有区与祖先区的 `reserved` 逐条汇总；自有区按 Full 归档谓词再分为可回收/不可回收，`excluded_bytes` 是两者的子集，不重复相加。`ResidentHistoryPressure` 是只读 helper，不扩 `ContextPressure`。
 - Compact 阶段在 token refresh 前采集驻留压力（超限时无需物化模型视图），绕过 token Skip 与已消费压力样本；该路径不构建 Micro facts，避免远程 `read_archive_metadata` 探测失败把驻留 Full 提前变成 `micro_failure`。`compact_v2` 在 cache-aware、Micro planner 与 Micro 达标返回之前直接复用 `run_full_or_degrade()`（`FullEscalationReason::ResidentHistoryBudgetExceeded`）。
 - `context_budget` 缺失时 token 压力按 0 处理（`estimated_tokens=0`、`context_window=0`、`output_reserve=0`，不执行 token refresh），但驻留压力仍独立采集，超限时照常执行 resident Full；未超限时保持原 Skip 行为。`compact_config` 缺失时无法判断阈值、自动开关与驻留上限，阶段明确跳过并记录 `缺少 compact_config`，不伪造默认配置。
 - `run_compact_with_facts` 以 `ResidentHistoryPressure::DISABLED` 兼容既有入口；该入口不只用于测试：手动 `/compact` 的 `session/exec/compact_pipeline.rs:441 → run_compact_with_protected` 也经它进入。由于 `force=true` 在驻留判断之前返回 `FullEscalationReason::ManualForce`，驻留门控实际不参与，行为无变化。
@@ -153,6 +153,30 @@ worktree `.worktrees/micro-compact-resident`，基线 `e598d178` + 第一段未�
 - **验证**：`cargo test --locked --workspace --lib --no-run` 后用生成的 `peri_agent` 测试二进制跑全量 lib 套件 → **1319 passed; 0 failed; 5 ignored**（workspace feature 投影）。
 - **无关失败**：同次 Linux job 的 `peri-js-runtime` 3 个 host lifecycle 用例等待 READY 超时，该 crate 不在本改动范围；新 run 若再次出现按环境抖动重跑并记录。
 
+### 残余主导门控修复（2026-10-24，含独立复核整改）
+
+- **问题**：预算按 `own + inherited` 计量，但 Full 只归档自有区（skip ancestor）且保留 System/protected 后台结果。不可回收部分本身 ≥ 上限时，Full 后总量仍超限；此后任何新增非空 Human/Tool 消息都让 `new_work_since_full` 成立，下一轮再次 Full。内存不降，子 Agent 反复支付摘要延迟与模型成本。
+- **计量**：`is_full_archivable_entry` 成为 Full 归档谓词的单一权威（非 excluded、非 System、非 protected）；Full 与 `ResidentHistoryPressure` 共用。压力拆为 `reclaimable_own_reserved_bytes`、`irreducible_own_reserved_bytes`（System/protected）与 `irreducible_inherited_reserved_bytes`，日志与残余记录分别输出三类字节及总量。已 excluded 的非 System 条目会在 Full 提交后由 `shrink_after_full_commit` 释放，不作为稳定残余。
+- **门控**：`CompactBudgetRecovery` 记录每次**实际应用** Full（含 `InterruptedAfterCommit`；shadow/失败/未提交不记录）后的压力快照，并新增 `resident_gate_state().decide(...)`：
+  - 未超限 → 不 Full；`limit_bytes == 0` 仍关闭门控。
+  - 上次 Full 后快照按当前 limit 仍超限（残余主导）→ 只有**可回收 own 相对上次 Full 后的增长**严格超过完整 limit（`current.reclaimable_own > snapshot.reclaimable_own + limit`）**且**出现新工作时才允许下一次 Full；System/protected/继承区不参与该阈值，连续小工具结果与同一工作单元均不重复触发（摘要自身即使 > limit 也不触发）。
+  - 其他 → 维持「总量超限且存在新工作」。
+- **快照失效**：快照绑定记录时的 limit、transcript 实例身份、watermark 条目 id 与其内容指纹（kind + 正文长度 + 稳定哈希）。指纹覆盖 watermark 的同 id 替换；`shrink_after_full_commit` 或 rewind 删除 watermark 时按 id 查不到，同样失效。limit 变化、实例替换、watermark 替换/删除时回到普通门控；追加与非 watermark 条目替换不影响快照。内容 revision 每次追加都会变化，不能作为失效依据。
+- **锁顺序**：transcript → `budget_recovery`，无反向路径。Compact 与 Reason 共用 `resident_gate`；gate 所需事实（pressure、snapshot 有效性、new_work/watermark）先在各自 guard 内取出并释放，再做纯判定/记录。记录快照同样先读 transcript 再锁状态；代码中不存在 transcript guard 存活时锁 `budget_recovery` 的路径。该设计以「同一任务串行、无并发 record」为前提；若未来并发修改 transcript 或记录快照，需要重新评估两个快照的时点一致性。
+- **回归**：
+  - `resident_inherited_residual_does_not_repeat_full_for_small_new_work`（继承区 > limit，首次 Full 后连续 5 轮小工具结果不再 Full）
+  - `resident_full_resumes_after_own_region_exceeds_limit`（可回收 own > limit 后恢复 Full）
+  - `resident_irreducible_own_does_not_repeat_full_for_small_new_work`（System 不可回收 own > limit，连续小工具结果不再 Full；可回收 own > limit 后恢复）
+  - `resident_below_inherited_limit_keeps_new_work_gate`（继承区 < limit 时仍按原逻辑触发）
+  - `resident_shadow_does_not_record_pressure_snapshot`（shadow 不更新快照）
+  - `resident_snapshot_invalidates_when_limit_changes`、`resident_snapshot_invalidates_when_transcript_replaced`、`resident_snapshot_invalidates_on_watermark_replacement`（limit/实例/watermark 替换使快照失效）
+  - `resident_snapshot_survives_non_watermark_replacement`（非 watermark 同 id 同内容替换后追加小结果不重新 Full）
+  - `resident_summary_growth_over_limit_does_not_repeat_full`（Full 后摘要自身 > limit，连续小结果不再 Full；相对增长 > limit 后恢复）
+  - `resident_interrupted_after_commit_records_pressure_snapshot`（已提交后取消仍记录快照）
+  - `resident_pressure_separates_system_and_protected_own`（System/protected 不计入可回收）
+- **变异验证**：把残余阈值改回「全部 own > limit」，`resident_irreducible_own_...` 在第 0 轮失败；把增长阈值改回绝对 `reclaimable > limit`，`resident_summary_growth_over_limit_...` 在第 0 轮失败；移除 watermark 指纹比较，`resident_snapshot_invalidates_on_watermark_replacement` 失败；把指纹改为覆盖全部条目（任意条目变更失效），`resident_snapshot_survives_non_watermark_replacement` 失败。恢复后通过。
+- **验证**：`--lib -- resident` **35 passed**；`--lib -- compact` **277 passed; 3 ignored**；`--lib` **1331 passed; 0 failed; 5 ignored**；`check -p peri-agent -p peri-acp-types`、`fmt --all -- --check`、`git diff --check` 成功；`check-file-size.sh` 仅列出既有 9 个超限文件。
+
 **结论**：修复与验证完成，已提交 PR #285，待合并。
 
 ## 残余风险
@@ -163,7 +187,7 @@ worktree `.worktrees/micro-compact-resident`，基线 `e598d178` + 第一段未�
 4. **未做 RSS 端到端实测**：本 issue 不提供线上内存数字，`planner_test` 的 24 MB 夹具仍只是单元输入规模。
 5. **工作单元去重语义**：`new_work_since_full` 只把非空 Human/Tool 消息视为新工作；仅有 reminder 或 AI 文本增量时不会因驻留重复 Full（与 token Full 的“新工作”定义一致）。
 6. **枚举兼容性**：`ResidentHistoryBudgetExceeded` 只新增在内部 `ObserveEvent` 路径；ACP `ExecutorEvent::CompactCompleted` 不携带 `full_escalation_reason`，外部严格客户端 wire 不受影响。若未来把该枚举直接暴露给外部协议，旧严格解码器会拒绝新值。
-7. **inherited 区无法被 Full 缩减**：Full 只归档 own 历史；若 inherited 区的 `reserved` 本身超过上限，触发一次 Full 后残余仍超限，后续每次出现新工作仍会再触发 Full。当前只记录残余，不提供 inherited 淘汰策略。
+7. **不可回收 own 与 inherited 无法被 Full 缩减**：Full 保留 System、受保护后台结果与祖先区；这些部分本身超过上限时 Full 无法把总量降回预算。残余主导门控会阻止连续小工作反复 Full，但不提供淘汰策略。快照锚定 watermark 条目的 id + 内容指纹；非 watermark 条目替换不会失效，这是有意的保守取舍，可能让增长基线略偏保守（少触发一次 Full）。删除 watermark 条目（shrink/rewind）与实例替换仍会失效。
 8. **`compact_llm` 缺失**：低 token 且驻留超限时会进入 Full 并可能返回 `CompactNoLlm`；这是驻留门控绕过 token 阈值后的显式失败，不会静默跳过。
-9. **Reason 每轮快照成本**：Reason 的补检每轮调用 `memory_snapshot()`，需遍历条目并汇总容量；相对模型请求延迟很小，但历史极长时是可观测的 CPU 成本。
-10. **锁顺序反转当前不可触发**：Compact 的 `new_work_since_full` 先持 `budget_recovery` 锁再读 transcript；Reason 的 resident 检查持 transcript 读锁后计算快照。两条路径当前由同一 turn 串行调用，未观测到锁顺序反转；若未来并行调用这两个阶段，需重新审查锁顺序。
+9. **Reason 每轮快照成本**：Reason 的补检每轮调用 `ResidentHistoryPressure::from_transcript_with_protected`，需遍历条目并汇总容量；相对模型请求延迟很小，但历史极长时是可观测的 CPU 成本。
+10. **锁顺序**：transcript 与 `budget_recovery` 不嵌套；gate 所需事实（pressure、snapshot 有效性、new_work/watermark）先在各自 guard 内取出并释放，再做纯判定/记录，无反向路径。若未来新增持锁回调，需重新审查。

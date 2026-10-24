@@ -75,13 +75,19 @@ fn build_transcript(bound: &TestSession) -> MessageTranscript {
 struct RecordingModel {
     requests: AtomicUsize,
     fail: bool,
+    summary: String,
 }
 
 impl RecordingModel {
     fn new(fail: bool) -> Arc<Self> {
+        Self::with_summary(fail, "stage resident full summary")
+    }
+
+    fn with_summary(fail: bool, summary: &str) -> Arc<Self> {
         Arc::new(Self {
             requests: AtomicUsize::new(0),
             fail,
+            summary: summary.to_string(),
         })
     }
 
@@ -121,7 +127,7 @@ impl Model for RecordingModel {
             ));
         }
         Ok(ModelResponse::new(
-            ModelMessage::assistant_text("<summary>stage resident full summary</summary>"),
+            ModelMessage::assistant_text(format!("<summary>{}</summary>", self.summary)),
             StopReason::EndTurn,
             None,
             None,
@@ -214,6 +220,55 @@ fn resident_config(limit: u64) -> CompactConfig {
         max_resident_history_bytes: limit,
         ..Default::default()
     }
+}
+
+/// 继承区主导的夹具用的小预算：不分配 128 MiB，靠 `limit` 与继承区容量区分。
+const RESIDUAL_LIMIT: u64 = 1_000;
+
+fn make_small_tool_call(tool_id: &str) -> BaseMessage {
+    BaseMessage::ai_with_tool_calls(
+        MessageContent::text(String::new()),
+        vec![crate::messages::ToolCallRequest::new(
+            tool_id,
+            "Bash",
+            serde_json::json!({}),
+        )],
+    )
+}
+
+fn make_small_tool_result(tool_call_id: &str, body: &str) -> BaseMessage {
+    BaseMessage::tool_result(
+        tool_call_id.to_string(),
+        MessageContent::text(body.to_string()),
+    )
+}
+
+fn append_small_tool_exchange(transcript: &mut MessageTranscript, round: usize) {
+    let id = format!("residual_call_{round}");
+    transcript.append(make_small_tool_call(&id));
+    transcript.append(make_small_tool_result(
+        &id,
+        &format!("small result {round}"),
+    ));
+}
+
+/// 继承区本身超过预算、自有区很小的 transcript：Full 只能回收自有区。
+fn build_residual_dominant_transcript(bound: &TestSession, limit: u64) -> MessageTranscript {
+    let inherited = make_human(&"i".repeat(limit as usize * 3));
+    let mut transcript = MessageTranscript::new()
+        .with_persistence(bound.resources(), bound.thread_id.clone())
+        .with_ancestor(vec![inherited]);
+    transcript.append(make_human("own start"));
+    transcript
+}
+
+/// own 只有 Full 不归档的 System（没有继承区）：残余完全来自不可回收 own。
+fn build_irreducible_own_transcript(bound: &TestSession, limit: u64) -> MessageTranscript {
+    let mut transcript =
+        MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
+    transcript.append(BaseMessage::system("s".repeat(limit as usize * 3)));
+    transcript.append(make_human("own start"));
+    transcript
 }
 
 #[tokio::test]
@@ -405,6 +460,256 @@ async fn resident_full_is_not_repeated_without_new_work() {
     let third = run_stage(&context).await.unwrap();
     assert!(third.compacted, "出现新 Human/Tool 后应可再次 Full");
     assert_eq!(model.request_count(), 2, "新工作单元允许第二次 Full");
+}
+
+/// 回归：继承区本身超过预算时，Full 无法把总量降回预算内。此后连续新增的小工具
+/// 结果虽构成 new_work，也不得反复 Full；否则子 Agent 每轮都支付摘要延迟与模型成本。
+#[tokio::test]
+async fn resident_inherited_residual_does_not_repeat_full_for_small_new_work() {
+    let bound = TestSession::open().await;
+    let transcript = build_residual_dominant_transcript(&bound, RESIDUAL_LIMIT);
+    let pressure = ResidentHistoryPressure::from_transcript(RESIDUAL_LIMIT, &transcript);
+    assert!(
+        pressure.irreducible_inherited_reserved_bytes() > RESIDUAL_LIMIT,
+        "夹具必须让继承区本身超过完整预算"
+    );
+    assert!(
+        pressure.reclaimable_own_reserved_bytes() < RESIDUAL_LIMIT,
+        "夹具自有区必须小于完整预算"
+    );
+
+    let model = RecordingModel::new(false);
+    let (session, context) = build_context(
+        &bound,
+        transcript,
+        resident_config(RESIDUAL_LIMIT),
+        model.clone(),
+    );
+
+    let first = run_stage(&context).await.unwrap();
+    assert!(first.compacted, "首次超限必须执行一次 Full");
+    assert_eq!(model.request_count(), 1);
+
+    for round in 0..5 {
+        {
+            let handle = session.transcript();
+            let mut transcript = handle.write();
+            append_small_tool_exchange(&mut transcript, round);
+        }
+        let output = run_stage(&context).await.unwrap();
+        assert!(
+            !output.compacted,
+            "第 {round} 轮：Full 后残余主导，小工具结果不得触发 Full"
+        );
+        assert_eq!(
+            model.request_count(),
+            1,
+            "第 {round} 轮：不得再次调用摘要模型"
+        );
+    }
+}
+
+/// 同一残余主导场景下，可回收自有区自身超过完整预算后才允许下一次 Full。
+#[tokio::test]
+async fn resident_full_resumes_after_own_region_exceeds_limit() {
+    let bound = TestSession::open().await;
+    let transcript = build_residual_dominant_transcript(&bound, RESIDUAL_LIMIT);
+    let model = RecordingModel::new(false);
+    let (session, context) = build_context(
+        &bound,
+        transcript,
+        resident_config(RESIDUAL_LIMIT),
+        model.clone(),
+    );
+
+    let first = run_stage(&context).await.unwrap();
+    assert!(first.compacted, "首次超限必须执行一次 Full");
+    assert_eq!(model.request_count(), 1);
+
+    {
+        let handle = session.transcript();
+        let mut transcript = handle.write();
+        transcript.append(make_ai_with_tool("", "Bash", "own_growth_call"));
+        transcript.append(BaseMessage::tool_result(
+            "own_growth_call".to_string(),
+            MessageContent::text("o".repeat(RESIDUAL_LIMIT as usize + 400)),
+        ));
+    }
+    let pressure =
+        ResidentHistoryPressure::from_transcript(RESIDUAL_LIMIT, &session.transcript().read());
+    assert!(
+        pressure.reclaimable_exceeds_limit(),
+        "自有区必须超过完整预算才允许恢复 Full"
+    );
+
+    let second = run_stage(&context).await.unwrap();
+    assert!(second.compacted, "自有区超过完整预算后应再次 Full");
+    assert_eq!(model.request_count(), 2);
+}
+
+/// 回归：Full 会保留 System（以及 protected 后台结果）。这些不可回收 own 超过预算
+/// 时，Full 后残余仍超限，但连续小工具结果不得反复 Full；只有可回收 own 自身
+/// 超过完整预算才允许下一次 Full。
+#[tokio::test]
+async fn resident_irreducible_own_does_not_repeat_full_for_small_new_work() {
+    let bound = TestSession::open().await;
+    let transcript = build_irreducible_own_transcript(&bound, RESIDUAL_LIMIT);
+    let pressure = ResidentHistoryPressure::from_transcript(RESIDUAL_LIMIT, &transcript);
+    assert!(
+        pressure.irreducible_own_reserved_bytes() > RESIDUAL_LIMIT,
+        "夹具必须让 System 本身超过完整预算"
+    );
+    assert!(
+        !pressure.reclaimable_exceeds_limit(),
+        "可回收 own 必须小于完整预算"
+    );
+    assert!(pressure.is_exceeded(), "总量仍须超限");
+
+    let model = RecordingModel::new(false);
+    let (session, context) = build_context(
+        &bound,
+        transcript,
+        resident_config(RESIDUAL_LIMIT),
+        model.clone(),
+    );
+
+    let first = run_stage(&context).await.unwrap();
+    assert!(first.compacted, "首次超限必须执行一次 Full");
+    assert_eq!(model.request_count(), 1);
+
+    let after_full =
+        ResidentHistoryPressure::from_transcript(RESIDUAL_LIMIT, &session.transcript().read());
+    assert!(
+        after_full.irreducible_own_reserved_bytes() > RESIDUAL_LIMIT,
+        "Full 必须保留 System"
+    );
+    assert!(
+        after_full.reclaimable_own_reserved_bytes() < RESIDUAL_LIMIT,
+        "Full 后残留的可回收正文必须低于预算"
+    );
+
+    for round in 0..5 {
+        {
+            let handle = session.transcript();
+            let mut transcript = handle.write();
+            append_small_tool_exchange(&mut transcript, round);
+        }
+        let output = run_stage(&context).await.unwrap();
+        assert!(
+            !output.compacted,
+            "第 {round} 轮：不可回收 own 主导，小工具结果不得触发 Full"
+        );
+        assert_eq!(
+            model.request_count(),
+            1,
+            "第 {round} 轮：不得再次调用摘要模型"
+        );
+    }
+
+    {
+        let handle = session.transcript();
+        let mut transcript = handle.write();
+        transcript.append(make_ai_with_tool("", "Bash", "own_reclaimable_growth"));
+        transcript.append(BaseMessage::tool_result(
+            "own_reclaimable_growth".to_string(),
+            MessageContent::text("r".repeat(RESIDUAL_LIMIT as usize + 400)),
+        ));
+    }
+    let grown =
+        ResidentHistoryPressure::from_transcript(RESIDUAL_LIMIT, &session.transcript().read());
+    assert!(
+        grown.reclaimable_exceeds_limit(),
+        "可回收 own 超过完整预算后才允许恢复 Full"
+    );
+
+    let resumed = run_stage(&context).await.unwrap();
+    assert!(resumed.compacted, "可回收 own 超过完整预算后应再次 Full");
+    assert_eq!(model.request_count(), 2);
+}
+
+/// 快照失效与已提交取消路径见 `resident_residual_test` 子模块。
+#[path = "resident_residual_test.rs"]
+mod residual_tests;
+
+/// 防过度修改：继承区低于预算时，一次成功 Full 回到预算内，之后再次超限仍按
+/// 「总量超限且存在新工作」触发 Full，而不是要求自有区单独超过预算。
+#[tokio::test]
+async fn resident_below_inherited_limit_keeps_new_work_gate() {
+    const LIMIT: u64 = 2_000;
+    let bound = TestSession::open().await;
+    let mut transcript = MessageTranscript::new()
+        .with_persistence(bound.resources(), bound.thread_id.clone())
+        .with_ancestor(vec![make_human(&"i".repeat(400))]);
+    transcript.append(make_human(&"o".repeat(1_800)));
+    let pressure = ResidentHistoryPressure::from_transcript(LIMIT, &transcript);
+    assert!(
+        pressure.irreducible_inherited_reserved_bytes() < LIMIT,
+        "夹具继承区必须低于预算"
+    );
+    assert!(pressure.is_exceeded(), "夹具初始总量必须超限");
+
+    let model = RecordingModel::new(false);
+    let (session, context) =
+        build_context(&bound, transcript, resident_config(LIMIT), model.clone());
+
+    let first = run_stage(&context).await.unwrap();
+    assert!(first.compacted, "首次超限必须 Full");
+    assert_eq!(model.request_count(), 1);
+    let after_full = ResidentHistoryPressure::from_transcript(LIMIT, &session.transcript().read());
+    assert!(
+        !after_full.is_exceeded(),
+        "继承区低于预算时 Full 后总量应回到预算内"
+    );
+
+    {
+        let handle = session.transcript();
+        let mut transcript = handle.write();
+        transcript.append(make_ai_with_tool("", "Bash", "below_limit_call"));
+        transcript.append(make_small_tool_result(
+            "below_limit_call",
+            &"n".repeat(1_000),
+        ));
+    }
+    let before_second =
+        ResidentHistoryPressure::from_transcript(LIMIT, &session.transcript().read());
+    assert!(before_second.is_exceeded(), "新增工作后总量必须再次超限");
+    assert!(
+        !before_second.reclaimable_exceeds_limit(),
+        "自有区本身仍未超过完整预算"
+    );
+
+    let second = run_stage(&context).await.unwrap();
+    assert!(
+        second.compacted,
+        "继承区低于预算时，新工作触发的总量超限仍应 Full"
+    );
+    assert_eq!(model.request_count(), 2);
+}
+
+/// Shadow 只拟执行、不提交，因此不得更新「上次应用 Full 后的压力快照」。
+#[tokio::test]
+async fn resident_shadow_does_not_record_pressure_snapshot() {
+    let bound = TestSession::open().await;
+    let transcript = build_residual_dominant_transcript(&bound, RESIDUAL_LIMIT);
+    let model = RecordingModel::new(false);
+    let config = CompactConfig {
+        max_resident_history_bytes: RESIDUAL_LIMIT,
+        shadow_mode_enabled: true,
+        ..Default::default()
+    };
+    let (_session, mut context) = build_context(&bound, transcript, config, model.clone());
+
+    let shadowed = run_stage(&context).await.unwrap();
+    assert!(!shadowed.compacted, "shadow 不得提交 Full");
+    assert_eq!(model.request_count(), 0);
+
+    context.compact.compact_config = Some(resident_config(RESIDUAL_LIMIT));
+    let applied = run_stage(&context).await.unwrap();
+    assert!(
+        applied.compacted,
+        "shadow 未记录 Full 后快照，下一次超限必须按首次门控执行 Full"
+    );
+    assert_eq!(model.request_count(), 1);
 }
 
 struct ArchiveReadTool;

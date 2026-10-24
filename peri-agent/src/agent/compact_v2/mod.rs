@@ -790,8 +790,9 @@ async fn run_resident_full(
 ) -> CompactResult {
     warn!(
         resident_limit_bytes = resident.limit_bytes,
-        resident_own_reserved_bytes = resident.own_reserved_bytes,
-        resident_inherited_reserved_bytes = resident.inherited_reserved_bytes,
+        resident_reclaimable_own_bytes = resident.reclaimable_own_reserved_bytes(),
+        resident_irreducible_own_bytes = resident.irreducible_own_reserved_bytes(),
+        resident_irreducible_inherited_bytes = resident.irreducible_inherited_reserved_bytes(),
         resident_total_reserved_bytes = resident.total_reserved_bytes(),
         estimated_context_tokens = pressure.estimated_tokens,
         context_window = pressure.context_window,
@@ -836,15 +837,25 @@ async fn run_resident_full(
     .await;
 
     // Full 成功但残余仍超限只记录事实并返回；不做硬准入，也不在本次调用内重复 Full。
-    let residual =
-        ResidentHistoryPressure::from_transcript(config.max_resident_history_bytes, transcript);
+    let protected_ids: std::collections::HashSet<_> = protected
+        .items
+        .iter()
+        .map(|item| item.delivery_id)
+        .collect();
+    let residual = ResidentHistoryPressure::from_transcript_with_protected(
+        config.max_resident_history_bytes,
+        transcript,
+        &protected_ids,
+    );
     if result.outcome().is_full_applied() {
         if residual.is_exceeded() {
             warn!(
                 full_outcome = ?result.outcome,
                 resident_limit_bytes = residual.limit_bytes,
-                resident_residual_own_reserved_bytes = residual.own_reserved_bytes,
-                resident_residual_inherited_reserved_bytes = residual.inherited_reserved_bytes,
+                resident_reclaimable_own_bytes = residual.reclaimable_own_reserved_bytes(),
+                resident_irreducible_own_bytes = residual.irreducible_own_reserved_bytes(),
+                resident_irreducible_inherited_bytes =
+                    residual.irreducible_inherited_reserved_bytes(),
                 resident_residual_total_reserved_bytes = residual.total_reserved_bytes(),
                 resident_residual_excess_bytes = residual.excess_bytes(),
                 "Resident history still above budget after Full; recording residual"
@@ -853,8 +864,10 @@ async fn run_resident_full(
             info!(
                 full_outcome = ?result.outcome,
                 resident_limit_bytes = residual.limit_bytes,
-                resident_residual_own_reserved_bytes = residual.own_reserved_bytes,
-                resident_residual_inherited_reserved_bytes = residual.inherited_reserved_bytes,
+                resident_reclaimable_own_bytes = residual.reclaimable_own_reserved_bytes(),
+                resident_irreducible_own_bytes = residual.irreducible_own_reserved_bytes(),
+                resident_irreducible_inherited_bytes =
+                    residual.irreducible_inherited_reserved_bytes(),
                 resident_residual_total_reserved_bytes = residual.total_reserved_bytes(),
                 "Resident history budget restored after Full"
             );
@@ -863,6 +876,9 @@ async fn run_resident_full(
         warn!(
             full_outcome = ?result.outcome,
             resident_limit_bytes = residual.limit_bytes,
+            resident_reclaimable_own_bytes = residual.reclaimable_own_reserved_bytes(),
+            resident_irreducible_own_bytes = residual.irreducible_own_reserved_bytes(),
+            resident_irreducible_inherited_bytes = residual.irreducible_inherited_reserved_bytes(),
             resident_residual_total_reserved_bytes = residual.total_reserved_bytes(),
             "Resident Full Compact did not complete"
         );

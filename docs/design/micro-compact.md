@@ -35,7 +35,9 @@ flowchart LR
 
 自动门控保持 `P / C >= micro_compact_threshold`：`P` 是现有 `TokenTracker::estimated_context_tokens()`，`C` 是完整 `context_window`。默认 Micro 为 75%，Full 为 95%。分母不扣输出预留；零/未知窗口、环境覆盖、自动开关、shadow、cache-aware 延迟及同一 `pressure_sample_key` 去重沿用原路径。
 
-驻留字节预算是与 token 独立的前置门控：`CompactConfig::max_resident_history_bytes` 默认 128 MiB，只计 `memory_snapshot()` 的 `own_bytes.reserved + inherited_bytes.reserved`（饱和相加；`excluded_bytes` 是前两者的子集，不重复计），不新增环境变量。严格超过上限（恰好等于不触发；0 关闭）时，Compact 阶段在 token refresh **之前**读取快照，跳过模型视图物化、token Skip、已消费压力样本与 Micro planner，直接强制一次 Full。该路径不调用 `stages/micro_facts.rs::snapshot`，因此远程 archive metadata 探测失败不会把驻留 Full 提前变成 `micro_failure`。手动 force 优先；`auto_compact_enabled=false` 不因驻留触发；shadow 只记录拟执行的 Full、不提交。同一工作单元内以 `new_work_since_full` 去重，避免 Full 后残余在无新工作时反复摘要。Full 成功后仍超限只记录 limit、own/inherited reserved、总量与残余并继续请求，不做硬准入或终止运行；Full 失败按既有失败语义显式传播。
+驻留字节预算是与 token 独立的前置门控：`CompactConfig::max_resident_history_bytes` 默认 128 MiB，只计 transcript 自有区与继承祖先区的 `reserved` 饱和和（`excluded_bytes` 是两者的子集，不重复计），不新增环境变量。自有区按 **Full 的实际归档谓词**拆成可回收 own（非 excluded、非 System、非 protected）与不可回收 own（System、受保护后台结果）；祖先区整体是不可回收继承残余。已 excluded 的非 System 条目会在 Full 提交后由 `shrink_after_full_commit` 释放，不作为稳定残余。三部分分别进入 `ResidentHistoryPressure` 访问器与日志。严格超过上限（恰好等于不触发；0 关闭）时，Compact 阶段在 token refresh **之前**读取快照，跳过模型视图物化、token Skip、已消费压力样本与 Micro planner，直接强制一次 Full。该路径不调用 `stages/micro_facts.rs::snapshot`，因此远程 archive metadata 探测失败不会把驻留 Full 提前变成 `micro_failure`。手动 force 优先；`auto_compact_enabled=false` 不因驻留触发；shadow 只记录拟执行的 Full、不提交。
+
+每次**实际应用**的 Full（含 `InterruptedAfterCommit`；shadow、失败与未提交不算）都会记录 Full 后的驻留压力快照，并绑定记录时的 limit、transcript 实例身份、watermark 条目 id 与其内容指纹（kind + 正文长度 + 稳定哈希）。门控据此判断：快照总量按**当前** limit 仍超限时视为残余主导；但该状态并非只由继承区造成——limit 降低、受保护 own（System/protected）同样会造成。因此 snapshot 的 limit 与当前 limit 不一致、transcript 实例被替换、watermark 条目被替换（同 id 内容指纹变化）或删除（shrink/rewind）时快照失效，直接回到「总量超限且存在新工作」的普通门控；追加与非 watermark 条目替换不影响快照。残余主导成立时，下一次 Full 只有在**可回收 own 相对上次 Full 后的增长**严格超过完整 limit（`current.reclaimable_own > snapshot.reclaimable_own + limit`）**且**出现新工作时才允许；因此 Full 后摘要自身即使已大于极小 limit，连续追加小结果也不会重复 Full。一旦某次 Full 后总量回到预算内，门控自动恢复原逻辑。Full 成功后仍超限只记录 limit、可回收/不可回收 own、继承残余与总量并继续请求，不做硬准入或终止运行；Full 失败按既有失败语义显式传播。Compact 阶段与 Reason hooks 后补检共用同一门控与同一保护集合。
 
 `max_resident_history_bytes = 0` 是已决策的“关闭门控”语义，不是“立即超限”：`ResidentHistoryPressure::is_enabled()` 要求 `limit_bytes > 0`，与 `ResidentHistoryPressure::DISABLED` 及既有调用方默认行为一致，测试与嵌入方可用 0 显式禁用而无需构造极大阈值。`context_budget` 缺失时 token 压力按 0 处理，驻留字节门控仍独立采集并可在超限时触发 resident Full；`compact_config` 缺失时无法判断阈值、开关与驻留上限，阶段明确跳过并记录，不伪造默认配置。
 
@@ -43,7 +45,7 @@ Reason 在 `before_model` 与工具目录发布后，仅在可见压力确有增
 
 | 数值 | 用途 |
 | --- | --- |
-| `max_resident_history_bytes`（默认 128 MiB） | 独立驻留门控；超过后强制一次 Full，Full 后残余只记录 |
+| `max_resident_history_bytes`（默认 128 MiB） | 独立驻留门控；总量超限触发；残余主导时按可回收 own 相对上次 Full 的增长 > limit 且存在新工作才重试 |
 | `ContextPressure::target_reclaim_tokens()` | 必要回收量，保留预留和 2% 窗口下限，供既有 Full 决策使用 |
 | `min(45% × C, pressure.target_tokens())` | 触发后的尽力目标；达到目标停止更强整组省略，未达目标报告缺口，不作为触发或 Full 升级条件 |
 | 最近已完成 Step | 默认保护最近 2 步，可由 `micro_compact_stale_steps` 配置；软预算 `min(8192, 10% × C)` |

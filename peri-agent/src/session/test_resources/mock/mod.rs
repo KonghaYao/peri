@@ -158,6 +158,8 @@ pub(crate) struct MockSessionResources {
     /// 只读能力面：置位后 `inspect_availability` 报告 [`DataCapabilities::HistoryReadOnly`]，
     /// 且所有 mutation 在副作用前返回 `Unsupported`（契约要求，不是「静默 no-op」）。
     history_read_only: AtomicBool,
+    /// 单次 compaction 成功写入替身数据区后、返回前触发（测试精确取消时序用）。
+    compaction_applied_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
 impl MockSessionResources {
@@ -180,7 +182,13 @@ impl MockSessionResources {
             fail_snapshot_at: AtomicUsize::new(0),
             snapshot_reads: AtomicUsize::new(0),
             history_read_only: AtomicBool::new(false),
+            compaction_applied_hook: Mutex::new(None),
         })
+    }
+
+    /// 注册一次 compaction 已写入后的回调；回调在成功返回前执行一次。
+    pub(crate) fn on_compaction_applied(&self, hook: impl Fn() + Send + Sync + 'static) {
+        *self.compaction_applied_hook.lock().unwrap() = Some(Box::new(hook));
     }
 
     /// 当前 meta 状态序列（`(thread_id, status)`），只含真实发生变更的写入。

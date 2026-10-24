@@ -65,14 +65,18 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         .compact_config
         .as_ref()
         .filter(|config| config.auto_compact_enabled)
-        .map(|config| {
-            crate::agent::compact_v2::ResidentHistoryPressure::from_transcript(
-                config.max_resident_history_bytes,
-                &ctx.session.transcript.read(),
-            )
-            .is_exceeded()
-        })
-        .unwrap_or(false);
+        .is_some_and(|config| {
+            // 与 Compact 阶段共用同一入口与锁序：先取 protected，再在
+            // `resident_gate` 内短暂拷贝 recovery 状态、读 transcript、纯判定。
+            let protected = ctx.session.async_result_mailbox.protected_snapshot();
+            let protected_ids: std::collections::HashSet<_> = protected
+                .items
+                .iter()
+                .map(|item| item.delivery_id)
+                .collect();
+            super::compact::resident_gate(ctx, config.max_resident_history_bytes, &protected_ids)
+                .is_exceeded()
+        });
     let needs_compact = (prepared_input_grew
         && ctx
             .compact
@@ -191,13 +195,30 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     });
 
     // 将本次实际请求与最近成功的 Full 对齐；不得借用 tracker 的旧 usage。
-    let budget_probe = {
+    // 锁序：先拷贝 watermark 并释放 recovery 锁，再读 transcript 取事实，
+    // 最后短暂锁 recovery 提交 probe；不得嵌套。
+    let watermark = ctx
+        .compact
+        .budget_recovery
+        .lock()
+        .resident_gate_state()
+        .watermark;
+    let (new_visible_work, last_entry) = {
         let transcript = ctx.session.transcript.read();
-        ctx.compact
-            .budget_recovery
-            .lock()
-            .begin_request(&transcript)
+        (
+            super::compact_progress::CompactBudgetRecovery::has_new_work_after(
+                watermark,
+                &transcript,
+                true,
+            ),
+            transcript.entries().last().map(|entry| entry.id()),
+        )
     };
+    let budget_probe = ctx
+        .compact
+        .budget_recovery
+        .lock()
+        .begin_request(new_visible_work, last_entry);
 
     // LLM 调用（与 cancel 竞争）。
     // 使用 generate_reasoning_with_observed_body：观测体复用本次调用已构建的
