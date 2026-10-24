@@ -387,3 +387,60 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
         }
     }
 }
+
+/// 回退必须作废旧 V2 窗口与投影前缀：否则旧窗口的页响应会在回退后重新
+/// 覆盖已删除的历史，旧前缀长度还可能吞掉回退后新增的消息。
+#[test]
+#[serial]
+fn test_rewind_completed_invalidates_v2_window() {
+    crate::kit::atoms::init_atoms();
+    *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
+    crate::kit::atoms::HISTORY_V2_STATE.set(crate::kit::history_v2::HistoryV2State {
+        status: crate::kit::history_v2::HistoryV2Status::Ready,
+        session_id: Some("s-rewind".to_owned()),
+        execution_ready: true,
+        ..Default::default()
+    });
+    crate::kit::atoms::HISTORY_V2_PREFIX_LEN.set(3);
+    crate::kit::atoms::ACTIVE_SESSION_ID.set("s-rewind".to_owned());
+
+    let mut state = BridgeState {
+        variant: 1,
+        committed: im::Vector::new(),
+        current_turn: CurrentTurn::new(),
+        phase: SessionPhase::PromptRunning,
+        popup_kind: None,
+        generation: 0,
+        active_session_id: String::new(),
+        compact_just_completed: false,
+        last_submitted_text: None,
+        last_pushed_text_len: 0,
+        last_pushed_reasoning_len: 0,
+        last_successful_todos: None,
+        last_successful_todo_sequence: None,
+        next_todo_sequence: 0,
+        todo_call_inputs: std::collections::HashMap::new(),
+        turn_generation: 0,
+        last_prompt_generation: 0,
+        current_request_id: None,
+        pending_cache_usage: None,
+        publication_intent: Default::default(),
+        folded_history: Default::default(),
+    };
+    let messages_json = serde_json::json!([
+        {"role": "user", "id": "msg-1", "content": "回退后的消息"},
+    ])
+    .to_string();
+
+    dispatch_and_notify(&mut state, &AcpEventData::RewindCompleted { messages_json });
+
+    assert!(
+        !crate::kit::history_v2::snapshot().is_ready(),
+        "rewind 后旧 V2 窗口必须作废"
+    );
+    assert_eq!(
+        crate::kit::atoms::HISTORY_V2_PREFIX_LEN.get(),
+        0,
+        "rewind 后投影前缀必须清零"
+    );
+}

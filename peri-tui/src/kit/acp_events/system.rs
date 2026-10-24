@@ -262,6 +262,16 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
     let messages: Result<Vec<Value>, _> = serde_json::from_str(messages_json);
     match messages {
         Ok(msgs) => {
+            // rewind 改变了会话有效范围：旧窗口、在途请求与投影前缀全部作废，
+            // 再重新 open 最新窗口。旧页/旧 open 响应由会话与窗口身份及
+            // consumer epoch 拦截，不能回写到回退后的历史。
+            crate::kit::history_v2::consumer::request_close_current();
+            crate::kit::history_v2::reset_state();
+            crate::kit::history_v2::consumer::reset_consumer_state();
+            let session_id = crate::kit::atoms::ACTIVE_SESSION_ID.state().read().clone();
+            if !session_id.is_empty() {
+                crate::kit::history_v2::consumer::request_open_latest(&session_id);
+            }
             state.committed.clear();
             for msg in &msgs {
                 let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");

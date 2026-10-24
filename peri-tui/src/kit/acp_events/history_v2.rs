@@ -162,15 +162,20 @@ fn live_unit_matches(page: &TuiRenderUnit, live: &TuiRenderUnit) -> bool {
     match (page, live) {
         (TuiRenderUnit::TuiUserBubble(page), TuiRenderUnit::TuiUserBubble(live)) => {
             same_identity(page.message_id.as_deref(), live.message_id.as_deref())
-                || page.text == live.text
+                || (identity_absent(page.message_id.as_deref(), live.message_id.as_deref())
+                    && page.text == live.text)
         }
         (TuiRenderUnit::TuiAssistantBubble(page), TuiRenderUnit::TuiAssistantBubble(live)) => {
             same_identity(page.message_id.as_deref(), live.message_id.as_deref())
-                || assistant_matches(page, live)
+                || (identity_absent(page.message_id.as_deref(), live.message_id.as_deref())
+                    && assistant_matches(page, live))
         }
         (TuiRenderUnit::TuiToolCard(page), TuiRenderUnit::TuiToolCard(live)) => {
-            (!live.tool_id.is_empty() && page.tool_id == live.tool_id)
-                || (page.tool_name == live.tool_name && page.input_summary == live.input_summary)
+            if !page.tool_id.is_empty() && !live.tool_id.is_empty() {
+                page.tool_id == live.tool_id
+            } else {
+                page.tool_name == live.tool_name && page.input_summary == live.input_summary
+            }
         }
         (TuiRenderUnit::TuiSystemNote(page), TuiRenderUnit::TuiSystemNote(live)) => {
             page.text == live.text
@@ -181,6 +186,15 @@ fn live_unit_matches(page: &TuiRenderUnit, live: &TuiRenderUnit) -> bool {
 
 fn same_identity(page: Option<&str>, live: Option<&str>) -> bool {
     matches!((page, live), (Some(page), Some(live)) if !live.is_empty() && page == live)
+}
+
+/// 至少一方缺少稳定身份时，才允许退回内容指纹。双方身份都存在且不同，
+/// 说明是两条不同消息，文本/摘要相同也不能当作重复删除。
+fn identity_absent(page: Option<&str>, live: Option<&str>) -> bool {
+    match (page, live) {
+        (Some(page), Some(live)) => page.is_empty() || live.is_empty(),
+        _ => true,
+    }
 }
 
 fn assistant_matches(
@@ -602,5 +616,92 @@ fn paging_note(window: &HistoryV2Window) -> Option<TuiRenderUnit> {
 pub(crate) fn view_event(state: HistoryV2State) -> AcpEventData {
     AcpEventData::HistoryV2ViewChanged {
         state: Box::new(state),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kit::tui_render_unit::{
+        FoldState, TuiAssistantBubble, TuiToolCard, TuiToolPresentation, TuiUserBubble,
+    };
+
+    fn user(text: &str, id: Option<&str>) -> TuiRenderUnit {
+        let mut bubble = TuiUserBubble::new(text.to_owned());
+        bubble.message_id = id.map(str::to_owned);
+        TuiRenderUnit::TuiUserBubble(bubble)
+    }
+
+    fn assistant(text: &str, id: Option<&str>) -> TuiRenderUnit {
+        TuiRenderUnit::TuiAssistantBubble(
+            TuiAssistantBubble {
+                text: text.to_owned(),
+                reasoning: None,
+                message_id: id.map(str::to_owned),
+                started_at: None,
+                duration_ms: None,
+                content_hash: 0,
+            }
+            .into(),
+        )
+    }
+
+    fn tool(id: &str, name: &str, summary: &str) -> TuiRenderUnit {
+        TuiRenderUnit::TuiToolCard(TuiToolCard {
+            tool_id: id.to_owned(),
+            tool_name: name.to_owned(),
+            input_summary: summary.to_owned(),
+            output_summary: String::new(),
+            is_error: false,
+            is_running: false,
+            running_duration_ms: None,
+            completed_duration_ms: None,
+            diff: None,
+            presentation: TuiToolPresentation::Generic,
+            fold: FoldState::Collapsed,
+            user_modified: false,
+            tool_calls_count: 0,
+            content_hash: 0,
+        })
+    }
+
+    #[test]
+    fn same_text_with_distinct_identity_is_not_deduped() {
+        assert!(!live_unit_matches(
+            &user("继续", Some("msg-2")),
+            &user("继续", Some("msg-1")),
+        ));
+    }
+
+    #[test]
+    fn same_text_without_identity_still_dedupes_local_echo() {
+        assert!(live_unit_matches(
+            &user("继续", Some("msg-1")),
+            &user("继续", None),
+        ));
+    }
+
+    #[test]
+    fn same_assistant_text_with_distinct_identity_is_not_deduped() {
+        assert!(!live_unit_matches(
+            &assistant("继续", Some("msg-2")),
+            &assistant("继续", Some("msg-1")),
+        ));
+    }
+
+    #[test]
+    fn same_tool_summary_with_distinct_invocation_is_not_deduped() {
+        assert!(!live_unit_matches(
+            &tool("call-2", "Bash", "ls"),
+            &tool("call-1", "Bash", "ls"),
+        ));
+    }
+
+    #[test]
+    fn same_tool_invocation_is_deduped() {
+        assert!(live_unit_matches(
+            &tool("call-1", "Bash", "ls"),
+            &tool("call-1", "Bash", "pwd"),
+        ));
     }
 }
