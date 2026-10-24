@@ -1,8 +1,9 @@
 //! dispatch/rewind_candidates 单元测试。
 
 use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::session_resources::RewindCandidate;
 
-use super::rewind_candidates;
+use super::{rewind_candidate_response, rewind_candidates, REWIND_CANDIDATE_LIMIT};
 
 #[test]
 fn test_candidates_extracts_only_user_messages() {
@@ -121,4 +122,68 @@ fn test_candidates_are_bounded_to_latest_64_user_messages() {
     assert_eq!(messages.len(), 64);
     assert_eq!(messages[0]["preview"], "message-99");
     assert_eq!(messages[63]["preview"], "message-36");
+}
+
+/// 尾部纯注入不占候选名额：删除纯 reminder 后仍能取满 64 条有效候选。
+#[test]
+fn test_trailing_pure_reminders_do_not_consume_the_limit() {
+    let mut history: Vec<BaseMessage> = (0..70)
+        .map(|index| BaseMessage::human(format!("valid-{index}")))
+        .collect();
+    history.extend((0..10).map(|index| {
+        BaseMessage::human(format!("<system-reminder>notice-{index}</system-reminder>"))
+    }));
+
+    let result = rewind_candidates(&history).unwrap();
+    let messages = result["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), REWIND_CANDIDATE_LIMIT);
+    assert_eq!(messages[0]["preview"], "valid-69");
+    assert_eq!(messages[63]["preview"], "valid-6");
+}
+
+/// 存储已经给出有界候选时，响应层仍做防御：最多 64 条、剥离注入、200 字符截断、顺序不变。
+#[test]
+fn test_candidate_response_is_bounded_and_cleans_previews() {
+    let mut candidates: Vec<RewindCandidate> = (0..70)
+        .map(|index| RewindCandidate {
+            message_id: peri_acp_types::messages::MessageId::new(),
+            text: format!("候选-{index}"),
+        })
+        .collect();
+    candidates.insert(
+        0,
+        RewindCandidate {
+            message_id: peri_acp_types::messages::MessageId::new(),
+            text: format!(
+                "带注入的问题\n<system-reminder>权限通知</system-reminder>\n{}",
+                "x".repeat(500)
+            ),
+        },
+    );
+    candidates.insert(
+        1,
+        RewindCandidate {
+            message_id: peri_acp_types::messages::MessageId::new(),
+            text: "<system-reminder>纯注入</system-reminder>".to_owned(),
+        },
+    );
+
+    let value = rewind_candidate_response(&candidates);
+    let messages = value["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), REWIND_CANDIDATE_LIMIT, "防御性上限仍生效");
+
+    let preview = messages[0]["preview"].as_str().unwrap();
+    assert!(
+        !preview.contains("<system-reminder>"),
+        "注入块不得进入 preview: {preview}"
+    );
+    assert_eq!(preview.chars().count(), 200, "200 字符截断");
+    assert!(
+        preview.starts_with("带注入的问题"),
+        "用户文本保留在前: {preview}"
+    );
+    assert_eq!(
+        messages[1]["preview"], "候选-0",
+        "纯注入候选被丢弃，且不改变后续顺序"
+    );
 }

@@ -253,7 +253,10 @@ pub struct SessionSnapshot {
 // ─── 定向更新 ──────────────────────────────────────────────────────────────────
 
 // rewind 与有界读取视图的类型本体（本交付新增）在同名子模块 `history`。
-pub use history::{ActiveSessionSnapshot, RewindBoundary, RewindOutcome};
+pub use history::{
+    collect_rewind_candidates, rewind_candidate, rewind_candidate_text, ActiveSessionSnapshot,
+    RewindBoundary, RewindCandidate, RewindOutcome,
+};
 
 /// 定向 metadata 更新：`None` 表示不更新，`Some(None)` 表示清除。
 ///
@@ -548,6 +551,27 @@ pub trait SessionResources: Send + Sync {
         &self,
         id: &ThreadId,
     ) -> SessionResourceResult<Vec<PersistedPayload>>;
+
+    /// 有界读取会话级回退候选：只返回 `Human` 且剥离 `system-reminder` 后仍有用户文本的
+    /// 条目，最新在前，最多 `limit` 条。
+    ///
+    /// - **不过滤 `excluded`**：被 Full Compact 归档的 user 消息仍是合法回退目标。
+    /// - 返回的 `text` 是原始正文，预览清洗（剥离注入块、200 字符截断）留给 ACP。
+    /// - 实现**不得**为了取出 user 行而解码 Ai/Tool 正文；生产后端必须用读取条件把
+    ///   非 user 行挡在解码之前。
+    /// - 继承区 Human 条目仍可出现（与 [`Self::load_session_history`] 的逆序口径一致），
+    ///   排在自有条目之后。
+    ///
+    /// 默认实现回退到 [`Self::load_session_history`] 后过滤：语义正确但会读入全部正文，
+    /// 只供测试替身或尚未实现有界读取的后端使用；生产后端必须覆写为有界读取。
+    async fn load_rewind_candidates(
+        &self,
+        id: &ThreadId,
+        limit: usize,
+    ) -> SessionResourceResult<Vec<RewindCandidate>> {
+        let history = self.load_session_history(id).await?;
+        Ok(collect_rewind_candidates(&history, limit))
+    }
 
     /// 有界读取一页历史（向「更早」方向）：**包含已排除的归档条目**。
     ///

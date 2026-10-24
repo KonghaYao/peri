@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use super::{BindingState, FrozenState};
-use crate::messages::MessageId;
+use crate::messages::{strip_system_reminders, BaseMessage, MessageId};
 use crate::store::{InheritedContext, MessageFlags, PersistedPayload};
 use crate::thread::ThreadMeta;
 
@@ -63,4 +63,55 @@ pub enum RewindOutcome {
     Applied,
     /// 边界目标不在本会话历史里：本次没有删除、也没有清零，存储保持原样。
     BoundaryMissing,
+}
+
+/// 回退候选：user 消息的权威身份与**原始**正文。
+///
+/// `text` 与 `BaseMessage::content()` 同一口径，尚未做预览清洗——剥离
+/// `system-reminder` 注入块、200 字符截断属于 ACP 展示层，不进入存储契约。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RewindCandidate {
+    pub message_id: MessageId,
+    pub text: String,
+}
+
+/// 回退候选的资格规则：`Human` 且剥离 legacy `<system-reminder>` 后仍有用户文本。
+///
+/// 返回**原始**正文（未剥离），调用方仍要按展示规则清洗；纯注入消息返回 `None`。
+/// 这条规则是存储读取与 ACP 纯函数共用的唯一一份，避免两个 adapter 各自判断一次。
+pub fn rewind_candidate_text(message: &BaseMessage) -> Option<String> {
+    if !matches!(message, BaseMessage::Human { .. }) {
+        return None;
+    }
+    let text = message.content();
+    if strip_system_reminders(&text).trim().is_empty() {
+        return None;
+    }
+    Some(text)
+}
+
+/// 从一个持久化条目投影回退候选；非消息/非 user/纯注入条目返回 `None`。
+pub fn rewind_candidate(payload: &PersistedPayload) -> Option<RewindCandidate> {
+    let message = payload.as_message()?;
+    let text = rewind_candidate_text(message)?;
+    Some(RewindCandidate {
+        message_id: message.id(),
+        text,
+    })
+}
+
+/// 从完整逻辑上下文收集候选（默认回退实现）：最新在前，最多 `limit` 条。
+///
+/// `payloads` 的顺序与 [`super::SessionResources::load_session_history`] 一致
+/// （继承区在前、自有区在后），因此逆序迭代先给出最新自有条目，再给出继承区条目。
+pub fn collect_rewind_candidates(
+    payloads: &[PersistedPayload],
+    limit: usize,
+) -> Vec<RewindCandidate> {
+    payloads
+        .iter()
+        .rev()
+        .filter_map(rewind_candidate)
+        .take(limit)
+        .collect()
 }
