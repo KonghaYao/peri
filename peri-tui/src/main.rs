@@ -158,7 +158,11 @@ enum Commands {
         action: MetaAction,
     },
     /// 更新：从 GitHub 下载并安装最新版本
-    Update,
+    Update {
+        /// 通过 README 中的中国大陆 GitHub 代理下载与查询
+        #[arg(long)]
+        use_proxy: bool,
+    },
     /// 插件管理
     Plugin {
         #[command(subcommand)]
@@ -847,11 +851,11 @@ fn main() -> Result<()> {
         Some(Commands::Workflow { .. }) => {
             unreachable!("Workflow 在配置读取前完成 dispatch")
         }
-        Some(Commands::Update) => {
+        Some(Commands::Update { use_proxy }) => {
             // 限制 worker 数（默认=CPU 核数，18 核=72MB 栈空间浪费），4 MB stack
             let rt = build_runtime()?;
             rt.block_on(async {
-                match peri_tui::update::run_update().await {
+                match peri_tui::update::run_update(use_proxy).await {
                     Ok(tag) => println!("Updated to {tag}"),
                     Err(e) => {
                         eprintln!("Update failed: {e:#}");
