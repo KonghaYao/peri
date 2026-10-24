@@ -14,6 +14,10 @@ use super::super::McpClientPool;
 /// known terminal result must never be replaced by an unresolved reminder.
 const LOST_ABANDON_ATTEMPTS: usize = 300;
 
+/// One settlement budget shared by every external task owned by a closing
+/// session. Per-task waits consume the remaining budget; they never add up.
+const EXTERNAL_TASK_CLOSE_BUDGET: Duration = Duration::from_secs(20);
+
 fn lost_owner_retry_due(attempts: &mut usize) -> bool {
     *attempts = attempts.saturating_add(1);
     *attempts >= LOST_ABANDON_ATTEMPTS
@@ -31,18 +35,26 @@ impl McpClientPool {
             return Ok(());
         };
         let mut failures = Vec::new();
+        let deadline = peri_time::monotonic_now() + EXTERNAL_TASK_CLOSE_BUDGET;
         for task_id in manager.external_task_ids() {
-            if let Err(err) = manager.cancel_async(&task_id).await {
-                failures.push(format!("{task_id}: {err}"));
+            let remaining = deadline.saturating_duration_since(peri_time::monotonic_now());
+            if remaining.is_zero() {
+                failures.push(format!("{task_id}: cancellation budget exhausted"));
+                continue;
+            }
+            match peri_time::timeout(remaining, manager.cancel_async(&task_id)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => failures.push(format!("{task_id}: {err}")),
+                Err(_) => failures.push(format!("{task_id}: cancellation timed out")),
             }
         }
-        let until = peri_time::monotonic_now() + Duration::from_secs(20);
         while manager.has_unsettled_external() {
-            if peri_time::monotonic_now() >= until {
+            let remaining = deadline.saturating_duration_since(peri_time::monotonic_now());
+            if remaining.is_zero() {
                 failures.push("external task close incomplete".into());
                 break;
             }
-            peri_time::sleep(Duration::from_millis(200)).await;
+            peri_time::sleep(remaining.min(Duration::from_millis(200))).await;
         }
         if failures.is_empty() {
             Ok(())

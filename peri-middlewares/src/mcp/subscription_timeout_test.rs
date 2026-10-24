@@ -58,13 +58,23 @@ async fn read_mcp_request(socket: &mut TcpStream) -> Option<serde_json::Value> {
     serde_json::from_slice(&request[header_end..header_end + content_length]).ok()
 }
 
-async fn handle_mcp_request(mut socket: TcpStream, listen_requests: Arc<AtomicUsize>) {
+async fn handle_mcp_request(
+    mut socket: TcpStream,
+    listen_requests: Arc<AtomicUsize>,
+    cancel_requests: Arc<AtomicUsize>,
+) {
     let Some(message) = read_mcp_request(&mut socket).await else {
         return;
     };
     let method = message["method"].as_str().unwrap_or_default();
     if method == "subscriptions/listen" {
         listen_requests.fetch_add(1, Ordering::SeqCst);
+        std::future::pending::<()>().await;
+        return;
+    }
+    if method == "tasks/cancel" {
+        // An owner that accepts the connection but never settles the cancel.
+        cancel_requests.fetch_add(1, Ordering::SeqCst);
         std::future::pending::<()>().await;
         return;
     }
@@ -134,6 +144,7 @@ async fn handle_mcp_request(mut socket: TcpStream, listen_requests: Arc<AtomicUs
 async fn serve_unresponsive_subscription_server(
     listener: TcpListener,
     listen_requests: Arc<AtomicUsize>,
+    cancel_requests: Arc<AtomicUsize>,
 ) {
     let mut requests = JoinSet::new();
     loop {
@@ -142,7 +153,11 @@ async fn serve_unresponsive_subscription_server(
                 let Ok((socket, _)) = accepted else {
                     return;
                 };
-                requests.spawn(handle_mcp_request(socket, listen_requests.clone()));
+                requests.spawn(handle_mcp_request(
+                    socket,
+                    listen_requests.clone(),
+                    cancel_requests.clone(),
+                ));
             }
             Some(_) = requests.join_next(), if !requests.is_empty() => {}
         }
@@ -161,15 +176,22 @@ fn subscription_config(url: String) -> super::super::config::McpConfigFile {
     .unwrap()
 }
 
-async fn start_subscription_server() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+async fn start_subscription_server() -> (
+    String,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    tokio::task::JoinHandle<()>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/mcp", listener.local_addr().unwrap());
     let listen_requests = Arc::new(AtomicUsize::new(0));
+    let cancel_requests = Arc::new(AtomicUsize::new(0));
     let server = tokio::spawn(serve_unresponsive_subscription_server(
         listener,
         listen_requests.clone(),
+        cancel_requests.clone(),
     ));
-    (url, listen_requests, server)
+    (url, listen_requests, cancel_requests, server)
 }
 
 async fn initialize_pool(url: String) -> Arc<McpClientPool> {
@@ -213,6 +235,19 @@ async fn wait_for_listen_request(listen_requests: &AtomicUsize, expected_count: 
     );
 }
 
+async fn wait_for_cancel_request(cancel_requests: &AtomicUsize, expected_count: usize) {
+    for _ in 0..5_000 {
+        if cancel_requests.load(Ordering::SeqCst) >= expected_count {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        cancel_requests.load(Ordering::SeqCst) >= expected_count,
+        "fixture server did not receive the tasks/cancel request"
+    );
+}
+
 async fn wait_for_task<T>(task: tokio::task::JoinHandle<T>, description: &str) -> T {
     for _ in 0..5_000 {
         if task.is_finished() {
@@ -226,7 +261,7 @@ async fn wait_for_task<T>(task: tokio::task::JoinHandle<T>, description: &str) -
 #[tokio::test(start_paused = true)]
 async fn initialize_continues_after_unanswered_subscription_handshake() {
     let timeout = super::super::client::SUBSCRIPTION_LISTEN_TIMEOUT;
-    let (url, listen_requests, server) = start_subscription_server().await;
+    let (url, listen_requests, _cancel_requests, server) = start_subscription_server().await;
     let initialization = tokio::spawn(async move { initialize_pool(url).await });
     wait_for_listen_request(&listen_requests, 1).await;
     tokio::time::advance(timeout).await;
@@ -242,7 +277,7 @@ async fn initialize_continues_after_unanswered_subscription_handshake() {
 #[tokio::test(start_paused = true)]
 async fn reconnect_continues_after_unanswered_subscription_handshake() {
     let timeout = super::super::client::SUBSCRIPTION_LISTEN_TIMEOUT;
-    let (url, listen_requests, server) = start_subscription_server().await;
+    let (url, listen_requests, _cancel_requests, server) = start_subscription_server().await;
     let initialization = tokio::spawn(async move { initialize_pool(url).await });
     wait_for_listen_request(&listen_requests, 1).await;
     tokio::time::advance(timeout).await;
@@ -259,6 +294,67 @@ async fn reconnect_continues_after_unanswered_subscription_handshake() {
         .expect("connection remains usable after subscription timeout");
     assert_connected_with_fixture_tool(&pool);
     assert_eq!(listen_requests.load(Ordering::SeqCst), 2);
+
+    let _ = pool.shutdown().await;
+    server.abort();
+    let _ = server.await;
+}
+
+/// A connected owner that accepts `tasks/cancel` but never replies must not
+/// hold the cancellation future forever.
+#[tokio::test(start_paused = true)]
+async fn cancel_task_rpc_returns_after_its_own_deadline() {
+    use peri_acp_types::tasks::{BgTaskKind, TaskManager};
+
+    let listen_timeout = super::super::client::SUBSCRIPTION_LISTEN_TIMEOUT;
+    let cancel_timeout = super::super::client::MCP_TASK_CANCEL_TIMEOUT;
+    let (url, listen_requests, cancel_requests, server) = start_subscription_server().await;
+    let initialization = tokio::spawn(async move { initialize_pool(url).await });
+    wait_for_listen_request(&listen_requests, 1).await;
+    tokio::time::advance(listen_timeout).await;
+    let pool = wait_for_task(initialization, "initialization task should finish").await;
+    assert_connected_with_fixture_tool(&pool);
+
+    let manager: Arc<dyn TaskManager> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    pool.bind_session_task_manager("session", &manager);
+    let task_id = pool
+        .register_external_task(
+            "session",
+            Some("session"),
+            None,
+            "server",
+            "remote-task",
+            BgTaskKind::Mcp,
+            "cancel fixture",
+            false,
+            "2026-10-24T00:00:00Z",
+        )
+        .unwrap();
+
+    let cancellation = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move { manager.cancel_async(&task_id).await }
+    });
+    wait_for_cancel_request(&cancel_requests, 1).await;
+    tokio::time::advance(cancel_timeout).await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), cancellation)
+        .await
+        .expect("tasks/cancel must return after its own deadline")
+        .expect("cancellation task must not panic");
+    assert!(
+        result.is_err(),
+        "an unanswered tasks/cancel must fail instead of hanging"
+    );
+    assert!(
+        manager.has_unsettled_external(),
+        "a cancel timeout must not settle the task"
+    );
+    assert_eq!(
+        manager.snapshot().tasks[0].status,
+        "running",
+        "cancel timeout must not fabricate a terminal state"
+    );
 
     let _ = pool.shutdown().await;
     server.abort();

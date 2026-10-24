@@ -34,6 +34,11 @@ impl ServerLoop<'_> {
                     "session/input/snapshot" => {
                         self.spawn_session_io(id, method, params).await;
                     }
+                    // 取消可能等待外部 owner 的 RPC。只做短锁存在性校验，执行放到
+                    // 请求 task，避免接收循环被取消等待占住。
+                    "session/cancel-bg-task" => {
+                        self.spawn_cancel_bg_task(id, params).await;
+                    }
                     // MCP Apps：七个新方法 + 旧 4 名薄别名（同一执行链，见
                     // `host/mcp_apps.rs`）。新方法一律按 `sessionId` 定位会话环境。
                     "peri/mcp/apps/list"
@@ -126,6 +131,69 @@ impl ServerLoop<'_> {
                     biased;
                     _ = cancellation.cancelled() => Err(crate::transport::types::AcpError::new(-32800, "request cancelled")),
                     result = request => result,
+                };
+                let _ = diagnostics.send(transport.as_ref(), result).await;
+            },
+        );
+        if spawned.is_err() {
+            let _ = rejected_diagnostics
+                .send(
+                    rejected_transport.as_ref(),
+                    Err(crate::transport::types::AcpError::new(
+                        -32800,
+                        "session request host is closing",
+                    )),
+                )
+                .await;
+        }
+    }
+
+    async fn spawn_cancel_bg_task(&self, id: RequestId, params: Value) {
+        let diagnostics = ResponseDiagnostics::new(id, "session/cancel-bg-task", &params);
+        let environment = {
+            let sessions = self.sessions.lock().await;
+            match params.get("sessionId").and_then(Value::as_str) {
+                None => Err(crate::transport::types::AcpError::new(
+                    -32602,
+                    "missing sessionId",
+                )),
+                Some(session_id) => match sessions.get(session_id) {
+                    Some(state) if state.closing => Err(crate::transport::types::AcpError::new(
+                        -32010,
+                        "Session is closing",
+                    )),
+                    Some(state) => Ok(state.environment.clone()),
+                    None => Err(crate::transport::types::AcpError::new(
+                        -32602,
+                        "session not found",
+                    )),
+                },
+            }
+        };
+        let environment = match environment {
+            Ok(environment) => environment,
+            Err(error) => {
+                let _ = diagnostics.send(self.transport.as_ref(), Err(error)).await;
+                return;
+            }
+        };
+        let cfg = Arc::clone(self.cfg);
+        let transport = Arc::clone(self.transport);
+        let rejected_transport = Arc::clone(&transport);
+        let rejected_diagnostics = diagnostics.clone();
+        let cancellation = self.connection_cancellation.clone();
+        let spawned = self.cfg.host_task_spawner.spawn(
+            task_scope::HostTaskOwnerKind::Session,
+            task_scope::HostTaskKind::SessionRequest,
+            async move {
+                let local_cfg = environment
+                    .as_ref()
+                    .map(|environment| &environment.cfg)
+                    .unwrap_or(cfg.as_ref());
+                let result = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => Err(crate::transport::types::AcpError::new(-32800, "request cancelled")),
+                    result = requests::session_lifecycle::handle_cancel_bg_task(&params, local_cfg) => result,
                 };
                 let _ = diagnostics.send(transport.as_ref(), result).await;
             },

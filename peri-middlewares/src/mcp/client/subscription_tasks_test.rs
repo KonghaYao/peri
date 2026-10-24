@@ -5,7 +5,7 @@ use peri_acp_types::{
     messages::MessageId,
     session::{MessageQueue, MessageSource, QueuedPayload, SessionInbox},
     system_reminder::TrustedSystemReminder,
-    tasks::{BgTaskKind, TaskTerminalDelivery},
+    tasks::{BgTaskKind, ExternalTaskRegistration, TaskManager, TaskTerminalDelivery},
 };
 use std::sync::Arc;
 
@@ -424,4 +424,62 @@ async fn failed_canonical_commit_does_not_enqueue_the_reminder() {
         .unwrap_err();
     assert_eq!(error, "canonical reminder commit failed");
     assert!(owner_inbox.queue().drain_all().is_empty());
+}
+
+/// Close settlement has one shared deadline: a pending external cancel on the
+/// first task must not grant every later task its own 20-second window.
+#[tokio::test(start_paused = true)]
+async fn cancel_session_external_tasks_uses_one_total_deadline() {
+    fn pending_registration(owner_task_id: &str) -> ExternalTaskRegistration {
+        ExternalTaskRegistration {
+            session_id: "session".into(),
+            initiator_session_id: Some("session".into()),
+            owner_identity: "fixture".into(),
+            owner_task_id: owner_task_id.into(),
+            kind: BgTaskKind::Mcp,
+            summary: "pending cancel".into(),
+            started_at: Some("2026-10-24T00:00:00Z".into()),
+            cancel: Arc::new(|| Box::pin(std::future::pending::<Result<(), String>>())),
+            on_terminal: Arc::new(|_, _| Box::pin(async { Ok(()) })),
+        }
+    }
+
+    let pool = McpClientPool::new_pending();
+    let manager: Arc<dyn TaskManager> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    pool.bind_session_task_manager("session", &manager);
+    for owner_task_id in ["owner-1", "owner-2"] {
+        manager
+            .register_external(pending_registration(owner_task_id))
+            .unwrap();
+    }
+
+    let started = tokio::time::Instant::now();
+    let error = pool
+        .cancel_session_external_tasks("session")
+        .await
+        .unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed <= std::time::Duration::from_secs(21),
+        "per-task waits must share one budget, elapsed {elapsed:?}"
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_secs(20),
+        "the shared budget should be spent before giving up, elapsed {elapsed:?}"
+    );
+    assert!(error.contains("cancellation timed out"), "{error}");
+    assert!(error.contains("cancellation budget exhausted"), "{error}");
+    assert!(
+        manager.has_unsettled_external(),
+        "a timed-out cancel must not fabricate a terminal state"
+    );
+    assert!(
+        manager
+            .snapshot()
+            .tasks
+            .iter()
+            .all(|task| task.status == "running"),
+        "both tasks stay running after bounded cancellation failure"
+    );
 }
