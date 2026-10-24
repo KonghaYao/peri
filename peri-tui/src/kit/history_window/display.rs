@@ -74,10 +74,11 @@ impl DisplayLedger {
             self.entries.insert(key);
             return true;
         }
-        if let Some((existing, existing_len)) = self.slots.get(&start) {
-            if existing == &key && *existing_len == len {
-                return true;
-            }
+        if let Some((existing, existing_len)) = self.slots.get(&start)
+            && existing == &key
+            && *existing_len == len
+        {
+            return true;
         }
         if self.overlaps(start, len) {
             return false;
