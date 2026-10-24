@@ -48,8 +48,6 @@ pub enum UnifiedLangfuseEvent {
         delay_ms: u64,
         error: String,
     },
-    /// 文本块（流式最终回答）
-    TextChunk { chunk: String },
     /// 工具调用开始
     ToolStart {
         /// 事件来源 agent（主 agent / subagent 的 AgentId 字符串）。

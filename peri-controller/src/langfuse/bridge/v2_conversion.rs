@@ -11,7 +11,6 @@ impl UnifiedLangfuseEvent {
     /// 无 Langfuse 映射的变体返回 `None`。
     pub fn from_render_event(ev: RenderEvent) -> Option<Self> {
         match ev {
-            RenderEvent::TextChunk { chunk, .. } => Some(UnifiedLangfuseEvent::TextChunk { chunk }),
             RenderEvent::BudgetWarning {
                 percentage,
                 used_tokens,

@@ -59,9 +59,6 @@ impl UnifiedLangfuseEvent {
                 delay_ms,
                 error,
             }),
-            ExecutorEvent::TextChunk { chunk, .. } => {
-                Some(UnifiedLangfuseEvent::TextChunk { chunk })
-            }
             ExecutorEvent::ToolStart {
                 tool_call_id,
                 name,
@@ -160,7 +157,8 @@ impl UnifiedLangfuseEvent {
                 tool_calls,
             }),
             // 无 Langfuse 映射的事件
-            ExecutorEvent::TurnStarted { .. }
+            ExecutorEvent::TextChunk { .. }
+            | ExecutorEvent::TurnStarted { .. }
             | ExecutorEvent::UserInputRunStarted { .. }
             | ExecutorEvent::UserInputQueueChanged(_)
             | ExecutorEvent::UserInputDelivered { .. }

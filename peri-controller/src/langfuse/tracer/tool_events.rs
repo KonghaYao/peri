@@ -8,11 +8,6 @@ use langfuse_client::{IngestionEvent, ObservationBody, ObservationType, SpanBody
 impl LangfuseTracer {
     // ── 工具调用事件 ────────────────────────────────────────────────────────
 
-    /// TextChunk 事件：累积最终回答（不区分采样，始终累积）
-    pub fn on_text_chunk(&mut self, chunk: &str) {
-        self.final_answer.push_str(chunk);
-    }
-
     /// 工具调用开始
     pub fn on_tool_start(
         &mut self,
