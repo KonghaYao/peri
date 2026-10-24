@@ -64,8 +64,17 @@ pub(super) async fn handle_rewind_candidates(
     require_rewind_cap(&cfg.session_manager.get_caps(session_id))?;
     require_registered_session(sessions, session_id)?;
     // 候选来自存储的完整历史：被 Full 归档的 user 消息仍是合法回退目标。
-    let history = dispatch::load_canonical_session_payloads(&cfg.controller, session_id).await?;
-    dispatch::rewind_persisted_candidates(&history)
+    // 读取在存储层有界完成（role 过滤 + keyset 分批），不物化 Ai/Tool 正文。
+    let candidates = cfg
+        .controller
+        .sessions()
+        .load_rewind_candidates(
+            &ThreadId::from(session_id.to_string()),
+            dispatch::REWIND_CANDIDATE_LIMIT,
+        )
+        .await
+        .map_err(|error| AcpError::new(-32603, format!("session history load failed: {error}")))?;
+    Ok(dispatch::rewind_candidate_response(&candidates))
 }
 
 pub(super) async fn handle_rewind_preview(

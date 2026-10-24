@@ -17,7 +17,7 @@ use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes,
     FrozenState, HistoryWindowPagePlan, HistoryWindowRows, NewSession, PersistenceRecovery,
-    RewindBoundary, RewindOutcome, SessionHistoryWindowBounds, SessionMetaPatch,
+    RewindBoundary, RewindCandidate, RewindOutcome, SessionHistoryWindowBounds, SessionMetaPatch,
     SessionResourceResult, SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
@@ -186,6 +186,17 @@ pub(crate) trait SessionDataPort: Send + Sync {
         &self,
         id: &ThreadId,
     ) -> SessionResourceResult<Vec<PersistedPayload>>;
+
+    /// 有界读取回退候选（最新在前，最多 `limit` 条）；语义见
+    /// [`SessionResources::load_rewind_candidates`]。
+    ///
+    /// 必须用读取条件排除非 user 行，**不得**先物化全部历史再在内存里筛选；归档
+    /// （`excluded = 1`）的 user 行仍要返回。
+    async fn load_rewind_candidates(
+        &self,
+        id: &ThreadId,
+        limit: usize,
+    ) -> SessionResourceResult<Vec<RewindCandidate>>;
 
     /// 有界读取一页历史（更早方向），含已排除的归档条目；语义见
     /// [`peri_acp_types::session_resources::SessionResources::load_history_page`]。

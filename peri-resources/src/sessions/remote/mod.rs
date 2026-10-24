@@ -188,6 +188,10 @@ mod session_shape_tests;
 mod session_history_page_tests;
 
 #[cfg(test)]
+#[path = "session_rewind_candidates_test.rs"]
+mod session_rewind_candidates_tests;
+
+#[cfg(test)]
 #[path = "session_history_rewind_test.rs"]
 mod session_history_rewind_tests;
 

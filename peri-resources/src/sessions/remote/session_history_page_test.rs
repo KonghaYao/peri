@@ -32,6 +32,9 @@ const NO_BUDGET_LIMIT: usize = usize::MAX;
 
 const PAGE_SESSION: &str = "remote-history-page";
 
+/// 回退候选测试复用同一套远端夹具与会话 id。
+pub(super) const REWIND_CANDIDATES_SESSION: &str = PAGE_SESSION;
+
 fn ids(page: &HistoryPage) -> Vec<MessageId> {
     page.items.iter().map(|item| item.id).collect()
 }
@@ -106,7 +109,7 @@ fn remote_data(transport: &Arc<SqliteTransport>) -> RemoteSessionData {
 }
 
 /// 建库 + 一条新会话（历史为空时不发空批）。返回临时目录，调用方须持有它。
-async fn remote_with_history(
+pub(super) async fn remote_with_history(
     history: &[PersistedPayload],
 ) -> (tempfile::TempDir, RemoteSessionData) {
     remote_fixture(Some("{}"), history).await

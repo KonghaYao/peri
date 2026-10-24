@@ -21,7 +21,7 @@ pub use init::build_initialize_response;
 pub use list_sessions::list_sessions_as_info;
 pub use prompt::{extract_prompt_params, handle_prompt};
 pub use rewind::{rewind_execute, rewind_preview};
-pub use rewind_candidates::{rewind_candidates, rewind_persisted_candidates};
+pub use rewind_candidates::{rewind_candidate_response, rewind_candidates, REWIND_CANDIDATE_LIMIT};
 pub(crate) use session_fork::{fork_bound_session, load_fork_source};
 pub use session_load::{
     history_page_error, initial_history_cursor, load_active_session_payloads,

@@ -425,6 +425,14 @@ impl SessionDataPort for SqliteSessionData {
         Ok(payloads)
     }
 
+    async fn load_rewind_candidates(
+        &self,
+        id: &ThreadId,
+        limit: usize,
+    ) -> SessionResourceResult<Vec<RewindCandidate>> {
+        self.read_rewind_candidates(id, limit).await
+    }
+
     async fn load_history_page(
         &self,
         id: &ThreadId,

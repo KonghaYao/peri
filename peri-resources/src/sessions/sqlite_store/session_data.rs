@@ -26,7 +26,7 @@ use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, BindingState, ChildSnapshot, CloseSettlement, ForkSnapshot,
     FrozenSnapshotBytes, FrozenState, NewSession, NewSessionDraft, PersistenceRecovery,
-    RewindBoundary, RewindOutcome, SessionMetaPatch, SessionResourceError,
+    RewindBoundary, RewindCandidate, RewindOutcome, SessionMetaPatch, SessionResourceError,
     SessionResourceErrorKind, SessionResourceResult, SessionSnapshot,
 };
 use peri_acp_types::store::{
@@ -65,6 +65,8 @@ pub(super) mod inherited_index;
 mod inherited_page;
 #[path = "session_data/lifecycle.rs"]
 mod lifecycle;
+#[path = "session_data/rewind_candidates.rs"]
+mod rewind_candidates;
 
 #[path = "session_data/handle.rs"]
 mod handle;

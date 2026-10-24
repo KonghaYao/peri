@@ -19,8 +19,8 @@ use peri_acp_types::history_page::{
 };
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
-    ActiveSessionSnapshot, BindingState, FrozenSnapshotBytes, FrozenState, SessionResourceResult,
-    SessionSnapshot,
+    rewind_candidate, ActiveSessionSnapshot, BindingState, FrozenSnapshotBytes, FrozenState,
+    RewindCandidate, SessionResourceResult, SessionSnapshot,
 };
 use peri_acp_types::store::{InheritedContext, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{ThreadId, ThreadListEntry, ThreadMeta};
@@ -175,6 +175,98 @@ impl RemoteSessionData {
         let mut payloads = inherited.payloads;
         payloads.extend(own);
         Ok(payloads)
+    }
+
+    /// 有界读取会话级回退候选：keyset 分批取 user 行身份，再按命中 id 取正文。
+    ///
+    /// 与 SQLite adapter 同一套语义（最新在前、最多 `limit`、不过滤 `excluded`、
+    /// 纯 reminder 不占名额、继承区 Human 补在末尾）。执行器差异只在批次形状：
+    /// 每批一次只读请求（阶段一身份一批，阶段二正文一批），不把全部历史打进一个回复。
+    pub(super) async fn read_rewind_candidates(
+        &self,
+        id: &ThreadId,
+        limit: usize,
+    ) -> SessionResourceResult<Vec<RewindCandidate>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        const SCAN_BATCH: i64 = 128;
+        let store = self.store().await?;
+        let mut candidates = Vec::with_capacity(limit.min(SCAN_BATCH as usize));
+        let mut cursor: Option<i64> = None;
+        'scan: loop {
+            let mut batches = store
+                .read_batch(vec![session_sql::rewind_candidate_rows_statement(
+                    id.as_str(),
+                    cursor,
+                    SCAN_BATCH,
+                )])
+                .await?
+                .into_iter();
+            let rows = batches
+                .next()
+                .ok_or_else(|| incomplete_reply("expected 1 result set, got 0"))?;
+            if rows.is_empty() {
+                break;
+            }
+            let exhausted = rows.len() < SCAN_BATCH as usize;
+            let mut identities = Vec::with_capacity(rows.len());
+            for row in &rows {
+                let message_id = text_at(row, 0)
+                    .ok_or_else(|| codec::corrupt("rewind candidate row has no id"))?;
+                let rowid = int_at(row, 1)
+                    .ok_or_else(|| codec::corrupt("rewind candidate row has no position"))?;
+                identities.push((message_id.to_owned(), rowid));
+            }
+            cursor = identities.last().map(|(_, rowid)| *rowid);
+
+            let body_statements = identities
+                .iter()
+                .map(|(message_id, _)| {
+                    session_sql::rewind_candidate_body_statement(id.as_str(), message_id)
+                })
+                .collect::<Vec<_>>();
+            let bodies = store.read_batch(body_statements).await?;
+            for ((expected_id, _), batch) in identities.iter().zip(bodies) {
+                let row = sole_row(batch)?
+                    .ok_or_else(|| codec::corrupt("rewind candidate body is missing"))?;
+                let content = text_at(&row, 0)
+                    .ok_or_else(|| codec::corrupt("rewind candidate body has no content"))?;
+                // 行身份与正文身份一致由解码处复核（不把 role 列当权威身份）。
+                let payload = codec::decode_payload_text(content, expected_id)?;
+                if let Some(candidate) = rewind_candidate(&payload) {
+                    candidates.push(candidate);
+                    if candidates.len() == limit {
+                        break 'scan;
+                    }
+                }
+            }
+            if exhausted {
+                break;
+            }
+        }
+
+        if candidates.len() < limit {
+            let mut batches = store
+                .read_batch(vec![session_sql::inherited_context_statement(id.as_str())])
+                .await?
+                .into_iter();
+            let facts = batches
+                .next()
+                .ok_or_else(|| incomplete_reply("expected 1 result set, got 0"))?;
+            // 没有会话行：与只读快照同一分类（会话不存在），不是「没有继承区」。
+            let facts = sole_row(facts)?.ok_or_else(not_found)?;
+            let inherited = codec::decode_inherited(text_at(&facts, 0))?;
+            for payload in inherited.payloads.iter().rev() {
+                if let Some(candidate) = rewind_candidate(payload) {
+                    candidates.push(candidate);
+                    if candidates.len() == limit {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(candidates)
     }
 
     /// 有界读取一页历史（更早方向），分两阶段：
