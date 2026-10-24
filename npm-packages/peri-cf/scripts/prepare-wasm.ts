@@ -36,14 +36,16 @@ export async function prepareWasm(packageRoot: string): Promise<void> {
   const repoRoot = resolve(packageRoot, "../..");
   await requirePublicTransport(packageRoot);
   const source = resolve(packageRoot, ".cache/wasm", DEFAULT_WASM_PROFILE);
-  const destination = resolve(packageRoot, "worker/wasm/generated");
+  // 产物只服务服务端 ACP 宿主：Bun 通过 moduleUrl 直接加载胶水与 wasm。
+  const destinations = [resolve(packageRoot, "wasm/generated")];
   await withDirectoryLock(resolve(packageRoot, ".cache/wasm/build.lock"), async () => {
     const versions = await toolchainVersions(repoRoot);
     const inputs = await buildInputs(repoRoot, DEFAULT_WASM_PROFILE, versions);
-    await prepareArtifacts(source, destination, inputs,
-      async () => assertSameInputs(inputs, await buildInputs(repoRoot, DEFAULT_WASM_PROFILE, versions)));
+    for (const destination of destinations)
+      await prepareArtifacts(source, destination, inputs,
+        async () => assertSameInputs(inputs, await buildInputs(repoRoot, DEFAULT_WASM_PROFILE, versions)));
   });
-  console.log(`Prepared verified CF WASM artifacts in ${destination}`);
+  console.log(`Prepared verified CF WASM artifacts in ${destinations.join(", ")}`);
 }
 
 if (import.meta.main)

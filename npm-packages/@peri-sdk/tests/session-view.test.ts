@@ -24,11 +24,13 @@ describe("transport independent session view", () => {
         Y.applyUpdate(mirrorChat, Y.encodeStateAsUpdate(source.chat));
         Y.applyUpdate(mirrorSession, Y.encodeStateAsUpdate(source.session));
         const view = readSessionView(mirrorChat, mirrorSession);
+        expect(view.readiness).toBe("ready");
+        expect(view.schemaVersions).toEqual({ chat: 3, session: 2 });
         expect(view.entries.map((entry) => entry.role)).toEqual(["user", "assistant"]);
         expect(view.entries[0]?.blocks[0]).toMatchObject({ type: "text", text: "Build" });
         expect(view.entries[1]?.blocks.map((block) => block.type)).toEqual(["text", "tool_call"]);
         expect(view.entries[1]?.blocks[1]).toMatchObject({ toolCallId: "tool-1", tool: { name: "Read", status: "completed", arguments: { path: "README.md" }, result: { contentText: "File" } } });
-        expect(view.plansByTurn[view.activeTurnId!]?.[0]).toMatchObject({ activeForm: "Inspecting" });
+        expect(view.plansByTurn[view.activeTurn.turnId!]?.[0]).toMatchObject({ activeForm: "Inspecting" });
         expect(view.tasks[0]).toMatchObject({ taskId: "task-1", title: "Checking", status: "unobserved:running" });
     });
 
@@ -68,7 +70,7 @@ describe("transport independent session view", () => {
         await Promise.resolve();
         expect(notifications).toBe(1);
         expect(store.getSnapshot().entries[0]?.blocks[0]).toMatchObject({ text: "Remote" });
-        expect(store.getSnapshot().activeTurnId).toBeTruthy();
+        expect(store.getSnapshot().activeTurn.turnId).toBeTruthy();
         store.destroy();
     });
 
@@ -95,15 +97,36 @@ describe("transport independent session view", () => {
         expect(readSessionView(docs.chat, docs.session).pendingInteractions).toEqual([]);
     });
 
-    test("empty peer docs have an empty safe view", () => {
+    test("empty peer docs are not-ready instead of a fake empty history", () => {
         const chat = new Y.Doc();
         const session = new Y.Doc();
         const view = readSessionView(chat, session);
+        expect(view.readiness).toBe("not-ready");
+        expect(view.schemaVersions).toEqual({ chat: null, session: null });
         expect(view.entries).toEqual([]);
         expect(view.tasks).toEqual([]);
         expect(view.pendingInteractions).toEqual([]);
-        expect(view.activeTurnId).toBeNull();
+        expect(view.activeTurn).toEqual({ turnId: null, status: null });
         expect(chat.share.size).toBe(0);
         expect(session.share.size).toBe(0);
+    });
+
+    test("a complete but unsupported pair reports unsupported and never pretends empty history", () => {
+        const source = new SessionDocs();
+        source.accept(update("user_message_chunk", { content: { type: "text", text: "Old" } }));
+        const chat = new Y.Doc();
+        const session = new Y.Doc();
+        Y.applyUpdate(chat, Y.encodeStateAsUpdate(source.chat));
+        Y.applyUpdate(session, Y.encodeStateAsUpdate(source.session));
+        session.getMap("root").set("schemaVersion", 1);
+        const view = readSessionView(chat, session);
+        expect(view.readiness).toBe("unsupported");
+        expect(view.schemaVersions).toEqual({ chat: 3, session: 1 });
+        expect(view.entries).toEqual([]);
+        // 只应用了一半的文档对属未就绪，不冒充不受支持。
+        const partialChat = new Y.Doc();
+        const partialSession = new Y.Doc();
+        Y.applyUpdate(partialChat, Y.encodeStateAsUpdate(source.chat));
+        expect(readSessionView(partialChat, partialSession).readiness).toBe("not-ready");
     });
 });
