@@ -182,12 +182,14 @@ impl HistoryV2BackendAdapter {
         };
 
         // before 游标指向本页最旧条目（已消费）。页内只有 own 时，游标取 own 最旧
-        // 条目，下一页 before 才会跨回 inherited 而不是跳过其末条。
+        // 条目，下一页 before 才会跨回 inherited 而不是跳过其末条。全隐藏页没有
+        // 可见条目，也必须按实际扫描边界推进；边界为空说明已经到头。
         let before_cursor = if view.entries.is_empty() {
-            match own_fill.as_ref().and_then(|own| own.oldest) {
-                Some(own_oldest) => Some(encode_own_ref(own_oldest)),
-                None => Some(encode_inherited_ref(source, anchor)),
-            }
+            own_fill
+                .as_ref()
+                .and_then(|own| own.oldest)
+                .map(encode_own_ref)
+                .or_else(|| view_before.map(|entry_id| encode_inherited_ref(source, entry_id)))
         } else {
             view_before.map(|entry_id| encode_inherited_ref(source, entry_id))
         };

@@ -378,3 +378,56 @@ async fn reminder_that_fails_decode_fails_the_page_instead_of_leaking_a_descript
         "body would also return source_unavailable for the same content"
     );
 }
+
+/// 全隐藏页没有可见条目，也必须按实际扫描边界推进 before 游标；
+/// 否则重试会一直读到同一页，更早的可见历史永远无法到达。
+#[tokio::test]
+#[serial]
+async fn all_hidden_page_advances_before_cursor() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let fixture = PageFixture::new(&tmp).await;
+    append_payload(
+        &fixture,
+        PersistedPayload::Message(BaseMessage::human("older visible message")),
+    )
+    .await;
+    append_payload(
+        &fixture,
+        PersistedPayload::SystemReminder {
+            id: MessageId::new(),
+            reminder: reminder_with_body(&"m".repeat(4 * 1024), vec![ReminderAudience::Model]),
+        },
+    )
+    .await;
+
+    let backend = adapter(&fixture);
+    let opened = backend
+        .open(&fixture.sid, &HistoryAnchor::Latest, 1, 0, 64)
+        .await
+        .expect("open latest");
+    assert!(
+        opened.page.entries.is_empty(),
+        "首屏应被 model-only reminder 占满"
+    );
+
+    let snapshot = HistorySnapshotRef {
+        session_id: fixture.sid.clone(),
+        committed_tail: opened.committed_tail.clone(),
+        history_revision: opened.history_revision,
+        projection_version: opened.projection_version,
+        target_bytes: 64 * 1024,
+    };
+    let next = backend
+        .page(
+            &snapshot,
+            opened.page.before_cursor.as_deref().expect("before cursor"),
+            HistoryDirection::Before,
+            10,
+        )
+        .await
+        .expect("page before");
+    assert!(
+        !next.entries.is_empty(),
+        "向前翻页必须越过全隐藏页并返回更早的可见消息"
+    );
+}
