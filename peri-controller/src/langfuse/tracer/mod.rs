@@ -62,8 +62,6 @@ pub struct LangfuseTracer {
     pub(crate) trace_id: String,
     /// 主 Agent Observation 的 ID
     pub(crate) agent_observation_id: String,
-    /// 累积的最终回答
-    pub(crate) final_answer: String,
     /// 配置（采样率、ErrorSpan 策略等）
     pub(crate) config: LangfuseConfig,
     /// 自定义 user 维度（来自 LANGFUSE_USER_ID 或 settings.json）
@@ -104,7 +102,6 @@ impl LangfuseTracer {
             session_id,
             trace_id: uuid::Uuid::now_v7().to_string(),
             agent_observation_id: uuid::Uuid::now_v7().to_string(),
-            final_answer: String::new(),
             config,
             user_id,
             sampling: crate::langfuse::tracer::sampling::SamplingDecider::new(rate),

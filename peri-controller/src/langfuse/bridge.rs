@@ -154,9 +154,6 @@ impl LangfuseBridge {
                     error,
                 );
             }
-            UnifiedLangfuseEvent::TextChunk { chunk } => {
-                t.on_text_chunk(chunk);
-            }
             UnifiedLangfuseEvent::ToolStart {
                 agent_id,
                 tool_call_id,
