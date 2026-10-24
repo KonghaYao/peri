@@ -28,9 +28,10 @@ fn script_url_with_proxy_matches_readme_example() {
 }
 
 #[test]
-fn proxy_env_matches_readme_example() {
+fn installer_env_matches_readme_example() {
+    let env = installer_env(true);
     assert_eq!(
-        proxy_env(true),
+        env.vars,
         &[
             ("GITHUB_PROXY", "https://github-proxy-5ad00a.netlify.app"),
             (
@@ -39,9 +40,12 @@ fn proxy_env_matches_readme_example() {
             ),
         ]
     );
+    assert!(env.drop_github_token, "代理镜像不得收到 GITHUB_TOKEN");
 }
 
 #[test]
-fn proxy_env_is_empty_without_proxy() {
-    assert!(proxy_env(false).is_empty());
+fn installer_env_keeps_direct_install_untouched() {
+    let env = installer_env(false);
+    assert!(env.vars.is_empty());
+    assert!(!env.drop_github_token);
 }

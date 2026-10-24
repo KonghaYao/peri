@@ -1,7 +1,7 @@
 //! Update mechanism: downloads and runs the remote install script.
 //!
-//! On Unix: curl install.sh | bash
-//! On Windows: irm install.ps1 | iex
+//! On Unix: download install.sh with curl, then run it with bash via stdin
+//! On Windows: download install.ps1 with Invoke-RestMethod and invoke it
 //!
 //! Delegates all update logic (download, checksum, extract, symlink)
 //! to the remote install scripts.
@@ -10,7 +10,7 @@ use std::process::Stdio;
 
 use anyhow::{Context, Result};
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
 };
 
@@ -37,17 +37,43 @@ fn script_url(use_proxy: bool, windows: bool) -> &'static str {
     }
 }
 
+/// Environment applied to the install-script child process.
+struct InstallerEnv {
+    vars: &'static [(&'static str, &'static str)],
+    drop_github_token: bool,
+}
+
 /// Proxy variables consumed by the install scripts for release downloads
 /// and GitHub API queries. Empty when the proxy is not requested, so the
 /// scripts keep their direct behaviour and still inherit any user-set values.
-fn proxy_env(use_proxy: bool) -> &'static [(&'static str, &'static str)] {
+///
+/// The proxied API URL belongs to a third-party mirror, so the user's
+/// `GITHUB_TOKEN` must not reach it; direct installs keep the token for
+/// GitHub API rate-limit bypass.
+fn installer_env(use_proxy: bool) -> InstallerEnv {
     if use_proxy {
-        &[
-            ("GITHUB_PROXY", GITHUB_PROXY),
-            ("GITHUB_API_PROXY", GITHUB_API_PROXY),
-        ]
+        InstallerEnv {
+            vars: &[
+                ("GITHUB_PROXY", GITHUB_PROXY),
+                ("GITHUB_API_PROXY", GITHUB_API_PROXY),
+            ],
+            drop_github_token: true,
+        }
     } else {
-        &[]
+        InstallerEnv {
+            vars: &[],
+            drop_github_token: false,
+        }
+    }
+}
+
+fn apply_installer_env(command: &mut Command, use_proxy: bool) {
+    let env = installer_env(use_proxy);
+    for (key, value) in env.vars {
+        command.env(key, value);
+    }
+    if env.drop_github_token {
+        command.env_remove("GITHUB_TOKEN");
     }
 }
 
@@ -68,25 +94,61 @@ pub async fn run_update(use_proxy: bool) -> Result<String> {
     }
 }
 
+/// Download the install script before running it so a failed download is
+/// reported instead of being masked by bash exiting successfully on empty input.
+async fn fetch_install_script(url: &str) -> Result<Vec<u8>> {
+    let output = Command::new("curl")
+        .args(["-fsSL", url])
+        .output()
+        .await
+        .with_context(|| format!("Failed to spawn curl to download {url}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let detail = stderr.trim();
+        if detail.is_empty() {
+            anyhow::bail!(
+                "Failed to download install script from {url}: {}",
+                output.status
+            );
+        }
+        anyhow::bail!(
+            "Failed to download install script from {url}: {} ({detail})",
+            output.status
+        );
+    }
+    if output.stdout.is_empty() {
+        anyhow::bail!("Install script download returned no content: {url}");
+    }
+
+    Ok(output.stdout)
+}
+
 async fn run_update_unix(use_proxy: bool) -> Result<String> {
     println!("  Running remote install script...");
 
+    let script = fetch_install_script(script_url(use_proxy, false)).await?;
+
     let mut command = Command::new("bash");
     command
-        .arg("-c")
-        .arg(format!(
-            "curl -fsSL {} | bash",
-            script_url(use_proxy, false)
-        ))
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    for (key, value) in proxy_env(use_proxy) {
-        command.env(key, value);
-    }
+    apply_installer_env(&mut command, use_proxy);
 
     let mut child = command
         .spawn()
-        .context("Failed to spawn update process. Is bash/curl available?")?;
+        .context("Failed to spawn update process. Is bash available?")?;
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .context("Failed to open stdin for the install script")?;
+        stdin
+            .write_all(&script)
+            .await
+            .context("Failed to pass the install script to bash")?;
+    }
 
     stream_output(&mut child).await?;
     read_installed_version()
@@ -95,7 +157,10 @@ async fn run_update_unix(use_proxy: bool) -> Result<String> {
 async fn run_update_windows(use_proxy: bool) -> Result<String> {
     println!("  Running remote install script...");
 
-    let ps_command = format!("irm {} | iex", script_url(use_proxy, true));
+    let ps_command = format!(
+        "$ErrorActionPreference = 'Stop'; irm {} | iex",
+        script_url(use_proxy, true)
+    );
 
     let mut command = Command::new("powershell");
     command
@@ -108,9 +173,7 @@ async fn run_update_windows(use_proxy: bool) -> Result<String> {
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    for (key, value) in proxy_env(use_proxy) {
-        command.env(key, value);
-    }
+    apply_installer_env(&mut command, use_proxy);
 
     let mut child = command
         .spawn()
