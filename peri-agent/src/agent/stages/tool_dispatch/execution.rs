@@ -183,6 +183,9 @@ pub(super) async fn collect_tool_results(
     // 所属 assistant 消息身份：模型批次由 `dispatch_tools` 给出真实消息 id；
     // 嵌套执行入口没有独立的 assistant 消息，保持 None，不用 turn_id 冒充。
     origin_message_id: Option<MessageId>,
+    // 与 `origin_message_id` 配套的 wire 三态可回读性：模型批次 Some(true)，
+    // 嵌套入口 Some(false)（确认无持久 origin），无 render 端口的调用为 None。
+    origin_readable: Option<bool>,
     ai_msg: &BaseMessage,
     model_tool_call_id: Option<&str>,
 ) -> AgentResult<CollectOutcome> {
@@ -202,6 +205,7 @@ pub(super) async fn collect_tool_results(
         all_tools,
         cancel,
         origin_message_id,
+        origin_readable,
     )
     .await?;
 
@@ -253,6 +257,7 @@ async fn run_before_tool_approvals(
     targets: &HashMap<String, Arc<dyn BaseTool>>,
     cancel: &CancellationToken,
     origin_message_id: Option<MessageId>,
+    origin_readable: Option<bool>,
 ) -> AgentResult<ApprovalOutcome> {
     // 审批输入全是 session 级事实（会话身份 + 归属 + 工具表）：无 turn 的 App /
     // Host 入口照常审批；模型来源缺 turn 时逐条 typed 不可用（由
@@ -310,6 +315,7 @@ async fn run_before_tool_approvals(
                         name: raw_call.name.clone(),
                         input: modified_call.input.clone(),
                         origin_message_id,
+                        origin_readable,
                     });
                 }
                 ready_calls.push(modified_call);
@@ -334,6 +340,7 @@ async fn run_before_tool_approvals(
                         name: raw_call.name.clone(),
                         input: raw_call.input.clone(),
                         origin_message_id,
+                        origin_readable,
                     });
                     ctx.emit_render(RenderEvent::ToolEnded {
                         turn_id,

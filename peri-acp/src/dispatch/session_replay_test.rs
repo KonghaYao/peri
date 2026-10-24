@@ -435,6 +435,7 @@ async fn test_replay_tool_start_kind_matches_live_across_history_encodings() {
                 input: input.clone(),
                 source_agent_id: None,
                 origin_message_id: None,
+                origin_readable: None,
             },
             200_000,
             &PeriCaps::default(),

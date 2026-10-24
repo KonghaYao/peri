@@ -62,6 +62,7 @@ async fn test_forwarder_injects_source_agent_id_for_tool_events() {
         name: "Read".to_string(),
         input: serde_json::Value::Null,
         origin_message_id: None,
+        origin_readable: None,
     });
 
     wait_for_event_count(&captured, 1).await;
@@ -345,6 +346,7 @@ async fn test_forwarder_no_handler_does_not_panic() {
         name: "Read".to_string(),
         input: serde_json::Value::Null,
         origin_message_id: None,
+        origin_readable: None,
     });
 
     // 给 forwarder 一点时间处理
@@ -466,6 +468,7 @@ async fn test_forwarder_biased_consumes_render_before_state_when_both_ready() {
         name: "Read".to_string(),
         input: serde_json::Value::Null,
         origin_message_id: None,
+        origin_readable: None,
     });
     bus.emit_render(RenderEvent::ToolEnded {
         turn_id,
@@ -561,6 +564,7 @@ async fn test_forwarder_observes_before_render_when_both_ready() {
         name: "Read".to_string(),
         input: serde_json::Value::Null,
         origin_message_id: None,
+        origin_readable: None,
     });
     bus.emit_observe(ObserveEvent::LlmCallStart {
         turn_id,
@@ -769,6 +773,7 @@ async fn test_forwarder_drains_buffered_render_and_state_after_producer_drop() {
         name: "Read".into(),
         input: serde_json::Value::Null,
         origin_message_id: None,
+        origin_readable: None,
     });
     bus.emit_render(RenderEvent::ToolEnded {
         turn_id,

@@ -400,6 +400,7 @@ fn test_tool_card_archive_joins_assistant_message_segment_and_releases() {
             raw_input: serde_json::json!({}),
             agent_id: None,
             origin_message_id: None,
+            origin_readable: None,
         }),
     );
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
@@ -494,6 +495,7 @@ fn late_tool_end_updates_archived_card_and_segment_bytes() {
             raw_input: serde_json::json!({}),
             agent_id: None,
             origin_message_id: None,
+            origin_readable: None,
         }),
     );
     dispatch_and_notify(
@@ -617,6 +619,7 @@ fn test_tool_card_without_message_identity_stays_unattributed() {
             raw_input: serde_json::json!({}),
             agent_id: None,
             origin_message_id: None,
+            origin_readable: None,
         }),
     );
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
@@ -863,6 +866,7 @@ fn cross_turn_tool_ownership_does_not_bleed() {
             input_summary: "file".into(),
             raw_input: serde_json::json!({}),
             origin_message_id: None,
+            origin_readable: None,
             agent_id: None,
         }),
     );
@@ -877,6 +881,7 @@ fn cross_turn_tool_ownership_does_not_bleed() {
             input_summary: "pattern".into(),
             raw_input: serde_json::json!({}),
             origin_message_id: Some("m-second".into()),
+            origin_readable: Some(true),
             agent_id: None,
         }),
     );

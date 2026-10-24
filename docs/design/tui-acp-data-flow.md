@@ -266,15 +266,19 @@ assistant 消息的 `messageId`。live 路径的归属链路是：
 
 1. Agent 侧三个发射点写入真实消息身份：流式提前 `ToolStarted`（`model_bridge`）、正式
    dispatch 的审批通过/拒绝补发 `ToolStarted`（`tool_dispatch/execution.rs`）、结算路径
-   `emit_settled_tool_render`。嵌套执行入口（`StageEffectiveToolDispatcher`）没有独立
-   assistant 消息，显式传 `None`，不得用 turn/shell 消息 id 冒充。
-2. v2 `ExecutorEvent::ToolStart.origin_message_id` 为独立可选字段，v1 映射原样透传；
-   `message_id` 仍由 `turn_id` 派生，两套语义不互相替代。
-3. `peri-acp` mapper 只对 live 工具事件写 `ToolCall._meta.peri.originMessageId`；历史 replay
-   由持久 transcript 重建工具投影，不写该 key（否则会把回放条目误挂到实时消息）。
-4. TUI notifier 解析 `_meta` 写入 `TuiToolStarted.origin_message_id`；
-   `live_tool_links` 记录 `tool_id → assistant message`。字段缺失/空串时回退到同一流式
-   assistant 消息身份；两者都没有则保持未归属，按 `unattributed_live_bytes` 计入总预算。
+   `emit_settled_tool_render`，并标 `origin_readable=Some(true)`。嵌套执行入口
+   （`StageEffectiveToolDispatcher`）没有独立 assistant 消息，显式传 `origin_message_id=None`
+   与 `origin_readable=Some(false)`，不得用 turn/shell 消息 id 冒充。
+2. v2 `ExecutorEvent::ToolStart.origin_message_id` 与 `origin_readable` 为独立可选字段，
+   v1 映射原样透传；`message_id` 仍由 `turn_id` 派生，两套语义不互相替代。
+3. `peri-acp` mapper 只对 live 工具事件写 `ToolCall._meta.peri.originMessageId` 与
+   `originReadable`；历史 replay 由持久 transcript 重建工具投影，不写这些 key
+   （否则会把回放条目误挂到实时消息）。
+4. TUI notifier 解析 `_meta` 写入 `TuiToolStarted.origin_message_id / origin_readable`；
+   `live_tool_links` 记录 `tool_id → assistant message`。`Some(false)` 表示发射点确认
+   无可回读持久身份：不使用 origin，也不回退流式身份，卡片保持未归属、不可淘汰；
+   字段缺失（旧服务端）才回退到同一流式 assistant 消息身份；两者都没有则保持未归属，
+   按 `unattributed_live_bytes` 计入总预算。
 5. 归档时同身份的文本与工具卡共用一个 `LiveSeal` 条目（`extend_live_entry`），归属成功
    立即把工具卡字节从 `unattributed_live_bytes` 移出；预算重置按窗口实例+代次隔离旧记录。
 6. open 页按 `tool_id` 给出条目身份时，`RetainedLiveEntries` 绑定 `tool_id → 页条目/位置`。

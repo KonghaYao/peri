@@ -27,6 +27,7 @@ fn test_edit_with_diff_not_grouped() {
             raw_input: serde_json::json!({"file_path": "src/main.rs"}),
             agent_id: None,
             origin_message_id: None,
+            origin_readable: None,
         }),
     );
     dispatch_and_notify(
@@ -48,6 +49,7 @@ fn test_edit_with_diff_not_grouped() {
             raw_input: serde_json::json!({"path": "b.rs"}),
             agent_id: None,
             origin_message_id: None,
+            origin_readable: None,
         }),
     );
     dispatch_and_notify(
@@ -122,6 +124,7 @@ fn test_edit_plain_output_grouped_normally() {
             raw_input: serde_json::json!({"file_path": "src/x.rs"}),
             agent_id: None,
             origin_message_id: None,
+            origin_readable: None,
         }),
     );
     dispatch_and_notify(
@@ -142,6 +145,7 @@ fn test_edit_plain_output_grouped_normally() {
             raw_input: serde_json::json!({"file_path": "src/y.rs"}),
             agent_id: None,
             origin_message_id: None,
+            origin_readable: None,
         }),
     );
     dispatch_and_notify(
@@ -212,6 +216,7 @@ fn test_edit_with_real_summary_diff_not_grouped() {
             raw_input: serde_json::json!({"file_path": "src/s.rs"}),
             agent_id: None,
             origin_message_id: None,
+            origin_readable: None,
         }),
     );
     dispatch_and_notify(
@@ -246,6 +251,7 @@ fn test_edit_with_real_summary_diff_not_grouped() {
             raw_input: serde_json::json!({"file_path": "src/r.rs"}),
             agent_id: None,
             origin_message_id: None,
+            origin_readable: None,
         }),
     );
     dispatch_and_notify(
@@ -289,6 +295,7 @@ fn test_edit_same_line_replacement_with_count_not_grouped() {
                 raw_input: serde_json::json!({"file_path": format!("src/{}.rs", id)}),
                 agent_id: None,
                 origin_message_id: None,
+                origin_readable: None,
             }),
         );
         dispatch_and_notify(

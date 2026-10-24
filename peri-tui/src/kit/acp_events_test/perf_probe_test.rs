@@ -16,6 +16,7 @@ fn tool_started(i: usize) -> AcpEventData {
         raw_input: serde_json::json!({"command": "echo hi"}),
         agent_id: None,
         origin_message_id: None,
+        origin_readable: None,
     })
 }
 

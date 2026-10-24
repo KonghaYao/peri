@@ -679,6 +679,7 @@ async fn bridge_emits_tool_started_on_first_tool_call_delta() {
             name,
             input,
             origin_message_id,
+            origin_readable,
             ..
         } => {
             assert_eq!(tool_call_id, "call_1");
@@ -688,6 +689,11 @@ async fn bridge_emits_tool_started_on_first_tool_call_delta() {
                 origin_message_id,
                 Some(chunk_message_id),
                 "提前的工具事件必须携带真实 assistant 消息身份（纯工具轮次的唯一归属来源）"
+            );
+            assert_eq!(
+                origin_readable,
+                Some(true),
+                "模型批次提前发射的 origin 是本次调用的持久消息，必须标记可回读"
             );
         }
         other => panic!("第 2 个应为 ToolStarted，实际：{other:?}"),

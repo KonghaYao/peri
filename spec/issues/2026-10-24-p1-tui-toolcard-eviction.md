@@ -130,6 +130,62 @@
   清身份，避免迟到 `ToolEnded` 擦掉下一轮；`note_turn_boundary`（`:183`）
   只清启发式，保留 `tool_id` 归属到卡片释放。
 
+## 复审阻塞修复：嵌套执行不得借用外层消息归属（第五轮）
+
+**阻塞问题（P1）**：嵌套执行入口（`StageEffectiveToolDispatcher`）显式传
+`origin_message_id=None`，但 TUI 在 origin 缺失时回退到当前流式 assistant 消息
+ID，把嵌套工具卡挂到外层消息上。外层消息一旦取得持久位置并封印，嵌套卡会随该
+段一起被淘汰；重新读页只能恢复外层条目，嵌套卡无法重建。**展示归属不能证明
+可回读**：卡片所在的段可释放，但页协议里没有它的持久记录。
+
+**wire 三态**：`RenderEvent::ToolStarted` / `ExecutorEvent::ToolStart` 新增
+`origin_readable: Option<bool>`（`#[serde(default, skip_serializing_if)]`）：
+
+1. `Some(true)`：发射点确认 origin 是已持久化、可由历史页回读的消息。
+2. `Some(false)`：发射点确认没有可回读的持久 origin（嵌套执行），消费方不得
+   使用 origin，也不得回退其他消息身份。
+3. `None`：旧服务端/旧事件，语义未知，TUI 维持现有启发式回退。
+
+`peri-acp` mapper 只扩展 `ToolCall._meta.peri`：`Some(x)` 写
+`originReadable: x`；`Some(false)` 时不写 `originMessageId`（避免自相矛盾），
+`None` 时不补写 `originReadable`。标准 ACP ToolCall 字段不变；replay 路径不写。
+
+**修复**：
+
+1. 模型批次入口（`model_bridge` 流式提前发射、`tool_dispatch` 结算路径、
+   `collect_tool_results` 正式 dispatch）发 `Some(true)`。
+2. 嵌套入口 `effective_dispatcher.rs` 发 `Some(false)`。
+3. TUI notifier 解析 `_meta.peri.originReadable` 到
+   `TuiToolStarted.origin_readable`；`note_root_tool_started` 在
+   `Some(false)` 时直接返回：不登记 `tool_id -> message`，不使用 origin，也不
+   回退 `current_message_id`。`Some(true)` / `None` 行为不变。
+
+**回归**：
+
+- `live_tool_links::tests::unreadable_origin_never_falls_back`：`Some(false)` 下
+  `owner_for_tool(...).is_none()`（含事件误带 origin 的情况）。
+- `history_window_page_test::nested_tool_without_readable_origin_is_not_evicted_with_outer_message`：
+  嵌套卡字节计入 `unattributed_live_bytes`；commit 后 `plan_eviction` 只选中外层
+  段；释放外层段后嵌套卡仍在 `committed`；页补读恢复外层记录后嵌套卡仍保留；
+  上滚换锚后的保留计划也不选中它。同一用例覆盖 `Some(true)` 顶层卡可归属、
+  可随外层段淘汰。
+- `test_tool_started_origin_message_identity_survives_mapping_and_legacy_payload`、
+  `test_tool_start_origin_message_id_is_carried_in_acp_meta`、
+  `test_session_update_tool_call_reads_unreadable_origin_from_meta` 覆盖三态
+  wire 往返与旧载荷解析。
+- 变异：临时移除 `note_root_tool_started` 的 `Some(false)` 提前返回后，
+  `unreadable_origin_never_falls_back` 与嵌套淘汰集成用例均失败（断言
+  `owner_for_tool` 为 `None` / 嵌套卡不得回退）；还原后通过。
+
+**残余**：
+
+- 旧服务端仍缺 `originReadable`，维持启发式回退（兼容路径，不是缺失）。
+- 嵌套卡不可淘汰，会一直留在 live/`committed` 未归属区，直到会话边界
+  （rewind/reset/会话切换）或卡片被直接摘除；这是“不可回读 ⇒ 不释放”的
+  保守代价。它没有持久段，页协议也不需要补读它。
+- 中断轮次的 origin 可回读性仍来自发射点声明；消息最终未落库时，`Some(true)`
+  的保证依赖提交链，本轮未增加服务端回执校验。
+
 ## 验收标准
 
 1. 有 assistant `messageId`（含纯工具轮次的 `originMessageId`）的 live 工具卡
@@ -235,6 +291,24 @@
 - `... check --locked -p peri-tui` → 成功；`fmt --all -- --check` → 退出码 0；
   `git diff --check` → 无输出。
 
+第五轮（阻塞修复：嵌套执行 origin 可回读三态）：
+
+- `... -p peri-tui --lib -- history_window` → `124 passed; 0 failed`。
+- `... -p peri-tui --lib -- live_tool_links` → `9 passed; 0 failed`。
+- `... -p peri-tui --lib -- same_identity` → `3 passed; 0 failed`。
+- `... -p peri-tui --lib -- --test-threads=1` → `2359 passed; 0 failed; 9 ignored`。
+- `... -p peri-acp-types --lib -- event_v2` → `63 passed; 0 failed`。
+- `... -p peri-acp --lib -- mapper` → `38 passed; 0 failed`。
+- `... -p peri-agent --lib -- tool_dispatch` → `37 passed; 0 failed`。
+- `... -p peri-agent --lib -- subagent_event_forwarder` → `14 passed; 0 failed`。
+- `... check --locked -p peri-tui -p peri-acp -p peri-acp-types -p peri-agent`
+  → 成功；`check --locked --tests -p peri-controller -p peri-middlewares` → 成功
+  （事件新增字段的机械构造点同步）。
+- `fmt --all -- --check` → 退出码 0；`git diff --check` → 无输出。
+- 变异（临时移除 `Some(false)` 提前返回）：`unreadable_origin_never_falls_back`
+  与 `nested_tool_without_readable_origin_is_not_evicted_with_outer_message`
+  均 FAILED；还原后通过。
+
 ## 遗留 / 风险
 
 - **同一条目混合文本 + 未归属工具卡**：open 页条目同时含兄弟文本与 live 工具卡时，
@@ -247,10 +321,12 @@
   `originMessageId` 可用时很少见：带 origin 的工具卡会先建立自己的 LiveSeal。
 - **P1 遗留：同步子 Agent 正文仍不可淘汰。** 缺少 child-thread 补读通道，
   本 PR 明确不释放；需要单独的 ACP 子会话历史能力，不能靠本 issue 的页协议硬补。
-- **旧服务端/旧事件回退**：没有 `originMessageId` 时，纯工具轮次仍只能依赖流式
-  启发式，未发生 open 页回填前保持未归属（不伪造身份）。这是兼容路径，不是缺失。
+- **旧服务端/旧事件回退**：没有 `originMessageId` / `originReadable` 时，纯工具
+  轮次仍只能依赖流式启发式，未发生 open 页回填前保持未归属（不伪造身份）。
+  这是兼容路径，不是缺失。
 - **嵌套执行入口**：`StageEffectiveToolDispatcher` 没有独立 assistant 消息，
-  显式传 `None`；其工具卡不建立持久归属。外层工具仍由真实消息归属。
+  显式发 `origin_readable=Some(false)`；TUI 不建立归属、不回退外层消息，卡片
+  保持未归属且不可淘汰（见第五轮）。外层工具仍由真实消息归属。
 - **自测覆盖边界**：纯工具轮次用例通过桥接事件（带 origin）覆盖了 TUI 归属、
   淘汰与补读；wire 往返分别由 `peri-acp-types`/`peri-acp`/notifier 单测覆盖。
   没有启动真实模型/ACP 进程做端到端验证。

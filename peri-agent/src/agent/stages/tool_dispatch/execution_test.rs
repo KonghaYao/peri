@@ -593,6 +593,8 @@ async fn idle_entry_returns_typed_not_available_without_turn() {
         &stage.runtime.tool_catalog.snapshot(),
         &CancellationToken::new(),
         Some(crate::messages::MessageId::new()),
+        // 无 turn 的执行不发 render，可回读性保持未知。
+        None,
         &BaseMessage::ai("call"),
         None,
     )
@@ -663,6 +665,8 @@ async fn idle_app_invocation_runs_without_turn_facts_or_model_ownership() {
         &HashMap::from([("call-1".to_string(), tool)]),
         &stage.runtime.tool_catalog.snapshot(),
         &CancellationToken::new(),
+        None,
+        // 无 turn 的执行不发 render，可回读性保持未知。
         None,
         &BaseMessage::ai("call"),
         None,

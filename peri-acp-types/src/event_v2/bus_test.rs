@@ -281,6 +281,7 @@ async fn test_event_bus_multiple_events_in_order() {
         name: "Bash".to_string(),
         input: serde_json::Value::Null,
         origin_message_id: None,
+        origin_readable: None,
     });
 
     // 按 FIFO 顺序消费
@@ -323,6 +324,7 @@ async fn test_event_bus_turn_completed_in_render_channel_preserves_cross_iter_or
         name: "Read".to_string(),
         input: serde_json::Value::Null,
         origin_message_id: None,
+        origin_readable: None,
     });
     bus.emit_render(RenderEvent::ToolEnded {
         turn_id: turn1,

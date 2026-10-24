@@ -159,6 +159,7 @@ mod tests {
             name: "Agent".to_string(),
             input: serde_json::json!({"task": "读取文件内容"}),
             origin_message_id: None,
+            origin_readable: None,
         });
         // SubagentStart:join → AGENT obs 开始快照缓存
         bridge.process_observe_event(&ObserveEvent::SubagentStart {
@@ -202,6 +203,7 @@ mod tests {
             name: "Read".to_string(),
             input: serde_json::json!({"file_path": "/tmp/test.txt"}),
             origin_message_id: None,
+            origin_readable: None,
         });
         bridge.process_render_event(&RenderEvent::ToolEnded {
             turn_id,
@@ -319,6 +321,7 @@ mod tests {
             name: "Agent".to_string(),
             input: serde_json::json!({"task": "后台搜索代码"}),
             origin_message_id: None,
+            origin_readable: None,
         });
         // SubagentStart:join → AGENT obs create
         bridge.process_observe_event(&ObserveEvent::SubagentStart {
@@ -455,6 +458,7 @@ mod tests {
             name: "Agent".to_string(),
             input: serde_json::json!({"task": "层次测试任务"}),
             origin_message_id: None,
+            origin_readable: None,
         });
         bridge.process_observe_event(&ObserveEvent::SubagentStart {
             turn_id,
@@ -496,6 +500,7 @@ mod tests {
             name: "Bash".to_string(),
             input: serde_json::json!({"command": "ls"}),
             origin_message_id: None,
+            origin_readable: None,
         });
         bridge.process_render_event(&RenderEvent::ToolEnded {
             turn_id,

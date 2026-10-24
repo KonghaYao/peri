@@ -448,6 +448,7 @@ async fn test_resolution_error_emits_tool_started_and_ended() {
                 tool_call_id,
                 name,
                 origin_message_id,
+                origin_readable,
                 ..
             } => {
                 assert_eq!(tool_call_id, "missing-1");
@@ -456,6 +457,11 @@ async fn test_resolution_error_emits_tool_started_and_ended() {
                     origin_message_id,
                     Some(ai_msg_id),
                     "结算路径的 ToolStarted 必须携带真实 assistant 消息身份"
+                );
+                assert_eq!(
+                    origin_readable,
+                    Some(true),
+                    "结算路径归属模型批次，必须显式标记可回读"
                 );
                 started = true;
             }
@@ -793,8 +799,15 @@ async fn assert_dual_path_schema_survives_dispatch(approved_path: Option<&str>, 
                 name,
                 input,
                 origin_message_id,
+                origin_readable,
                 ..
-            } => Some((tool_call_id, name, input, origin_message_id)),
+            } => Some((
+                tool_call_id,
+                name,
+                input,
+                origin_message_id,
+                origin_readable,
+            )),
             _ => None,
         })
         .collect();
@@ -805,8 +818,9 @@ async fn assert_dual_path_schema_survives_dispatch(approved_path: Option<&str>, 
             "DualPath".into(),
             json!({"path": approved_path.unwrap_or("requested/root")}),
             Some(source_message_id),
+            Some(true),
         )],
-        "审批通过后补发的 ToolStarted 必须描述同一 approved target input，并携带 assistant 消息身份"
+        "审批通过后补发的 ToolStarted 必须描述同一 approved target input，并携带 assistant 消息身份与可回读标记"
     );
 }
 
@@ -917,9 +931,10 @@ async fn test_approval_rejection_started_carries_origin_message_id() {
             RenderEvent::ToolStarted {
                 tool_call_id,
                 origin_message_id,
+                origin_readable,
                 ..
             } if tool_call_id == "call-rejected" => {
-                started_origin = Some(origin_message_id);
+                started_origin = Some((origin_message_id, origin_readable));
             }
             RenderEvent::ToolEnded {
                 tool_call_id,
@@ -934,8 +949,8 @@ async fn test_approval_rejection_started_carries_origin_message_id() {
     }
     assert_eq!(
         started_origin,
-        Some(Some(source_message_id)),
-        "审批拒绝补发的 ToolStarted 必须携带 assistant 消息身份"
+        Some((Some(source_message_id), Some(true))),
+        "审批拒绝补发的 ToolStarted 必须携带 assistant 消息身份与可回读标记"
     );
     assert!(ended, "rejection must emit ToolEnded");
 }

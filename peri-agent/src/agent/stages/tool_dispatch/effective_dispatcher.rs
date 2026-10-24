@@ -89,6 +89,8 @@ impl StageEffectiveToolDispatcher {
             // 嵌套执行没有独立的 assistant 消息：不把合成外壳消息 id 冒充为
             // 持久归属（TUI 侧会据此建立可淘汰段，必须指向真实消息）。
             None,
+            // 显式告知消费方「确实没有可回读 origin」，禁止回退到外层消息身份。
+            Some(false),
             &ai_message,
             self.model_tool_call_id.as_ref().map(ToolCallId::as_str),
         )

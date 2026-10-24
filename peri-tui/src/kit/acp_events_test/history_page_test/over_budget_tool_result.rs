@@ -96,6 +96,7 @@ async fn test_live_tool_card_with_persistent_position_defers_result_with_source(
             raw_input: serde_json::json!({}),
             agent_id: None,
             origin_message_id: None,
+            origin_readable: None,
         }),
     );
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);

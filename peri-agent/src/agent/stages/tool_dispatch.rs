@@ -78,6 +78,8 @@ fn emit_settled_tool_render(
         name: call.name.clone(),
         input: call.input.clone(),
         origin_message_id: Some(origin_message_id),
+        // 模型批次的工具调用归属于本次 LLM 调用的持久 assistant 消息。
+        origin_readable: Some(true),
     });
     ctx.runtime.event_bus.emit_render(RenderEvent::ToolEnded {
         turn_id,
@@ -224,6 +226,8 @@ pub async fn dispatch_tools(
         catalog,
         cancel,
         Some(ai_msg_id),
+        // 模型批次：归属本次 LLM 调用的真实持久 assistant 消息。
+        Some(true),
         &ai_msg,
         None,
     )

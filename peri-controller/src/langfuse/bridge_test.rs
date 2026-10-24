@@ -142,6 +142,7 @@ impl Harness {
             name: name.to_string(),
             input: serde_json::json!({}),
             origin_message_id: None,
+            origin_readable: None,
         });
     }
 
@@ -233,6 +234,7 @@ impl Harness {
             name: name.to_string(),
             input: serde_json::json!({}),
             origin_message_id: None,
+            origin_readable: None,
         });
     }
 

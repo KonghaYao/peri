@@ -251,6 +251,7 @@ fn open_page_binds_unattributed_tool_card_to_page_entry() {
             raw_input: serde_json::json!({}),
             agent_id: None,
             origin_message_id: None,
+            origin_readable: None,
         }),
     );
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
@@ -350,6 +351,7 @@ fn open_page_backfill_keeps_trailing_text_slot_and_layout_order() {
             raw_input: serde_json::json!({}),
             agent_id: None,
             origin_message_id: None,
+            origin_readable: None,
         }),
     );
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
@@ -713,6 +715,7 @@ fn bridge_event_attribution_then_budget_pressure_admits_page() {
             raw_input: serde_json::json!({}),
             agent_id: None,
             origin_message_id: None,
+            origin_readable: None,
         }),
     );
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
@@ -878,6 +881,7 @@ fn open_page_does_not_extend_already_attributed_tool_card() {
             raw_input: serde_json::json!({}),
             agent_id: None,
             origin_message_id: None,
+            origin_readable: None,
         }),
     );
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
@@ -1534,6 +1538,7 @@ fn rewind_forgets_live_tool_links() {
         "s1",
         "tool-rewind",
         Some("m-rewind"),
+        None,
     );
     assert!(crate::kit::acp_events::live_tool_links::owner_for_tool("s1", "tool-rewind").is_some());
 
@@ -1558,6 +1563,7 @@ fn open_removing_displayed_tool_card_forgets_live_link() {
         "s1",
         "tool-page-removed",
         Some("m-origin"),
+        None,
     );
     load_page(
         &mut state,
@@ -1825,6 +1831,7 @@ fn tool_only_turn_origin_message_is_evictable_and_page_refetchable() {
             input_summary: "file".into(),
             raw_input: serde_json::json!({ "file_path": "/tmp/x" }),
             origin_message_id: Some("m-pure".into()),
+            origin_readable: Some(true),
             agent_id: None,
         }),
     );
@@ -1959,5 +1966,223 @@ fn tool_only_turn_origin_message_is_evictable_and_page_refetchable() {
             |unit| matches!(unit, TuiRenderUnit::TuiToolCard(card) if card.tool_id == "tool-pure")
         ),
         "补读后工具卡回到展示流"
+    );
+}
+
+/// P1 阻塞回归：嵌套执行显式声明 `originReadable=false`。该卡不得回退到外层
+/// assistant 身份，不进入可淘汰段；外层记录被 commit + 预算压力淘汰后，嵌套卡
+/// 仍留在展示流（页补读只能恢复外层记录）。
+#[test]
+#[serial]
+fn nested_tool_without_readable_origin_is_not_evicted_with_outer_message() {
+    use crate::kit::history_window::{
+        CommitOutcome, HistoryCommitInfo, PersistentEntryKey, ReleaseReason, WindowAnchor,
+        WindowAnchorOffset, WindowLimits,
+    };
+    use peri_acp_types::{
+        history_window::HistoryCommittedTail, messages::MessageId, thread::ThreadId,
+    };
+
+    let identity = WindowIdentity::new("s1", "gen-1", 7, "snap-1");
+    let _guard = setup_atoms(&identity);
+    let mut state = make_fold_test_state();
+    state.active_session_id = "s1".into();
+    state.window = HistoryWindow::new(HistoryWindowConfig {
+        history_window_v1: true,
+        limits: WindowLimits {
+            body_bytes: 6 * 1024,
+            ..Default::default()
+        },
+    });
+    state.window.begin_window(identity);
+    state.phase = SessionPhase::PromptRunning;
+    state.current_request_id = Some("req-1".into());
+    state.turn_generation = 9;
+
+    // 外层文本建立 current_message_id；嵌套卡紧随其后且显式不可回读；
+    // 顶层工具卡携带真实可回读 origin。三者同一轮归档。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+            text: "outer body".into(),
+            message_id: Some("m-outer".into()),
+            agent_id: None,
+        }),
+    );
+    let nested_summary = "n".repeat(300);
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
+            tool_id: "tool-nested".into(),
+            tool_name: "Read".into(),
+            input_summary: nested_summary.clone(),
+            raw_input: serde_json::json!({"file_path": "/tmp/nested.rs"}),
+            origin_message_id: None,
+            origin_readable: Some(false),
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+            tool_id: "tool-nested".into(),
+            output_summary: "nested output".into(),
+            is_error: false,
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
+            tool_id: "tool-top".into(),
+            tool_name: "Read".into(),
+            input_summary: "x".repeat(8 * 1024),
+            raw_input: serde_json::json!({}),
+            origin_message_id: Some("m-outer".into()),
+            origin_readable: Some(true),
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+            tool_id: "tool-top".into(),
+            output_summary: "top output".into(),
+            is_error: false,
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+
+    // 1) 嵌套卡没有任何归属；字节计入未归属预算。
+    assert!(
+        crate::kit::acp_events::live_tool_links::owner_for_tool("s1", "tool-nested").is_none(),
+        "Some(false) 的嵌套卡不得回退到外层消息身份"
+    );
+    assert!(
+        state.window.budget().unattributed_live_bytes >= nested_summary.len(),
+        "嵌套卡正文必须计入未归属预算，实际 {}",
+        state.window.budget().unattributed_live_bytes
+    );
+
+    // 2) 外层消息 + 顶层工具卡进入同一个可淘汰段。
+    let key = PersistentEntryKey::own("s1:m-outer");
+    let locator = *state
+        .window
+        .index()
+        .locate_entry(&key)
+        .expect("顶层工具卡归属外层消息");
+    assert_eq!(
+        state.window.segment(locator.segment).unwrap().unit_count,
+        2,
+        "外层段只含文本与顶层工具卡，不得包含嵌套卡"
+    );
+    assert!(state.window.promote_live_seal_position(&key, 10));
+
+    let info = HistoryCommitInfo {
+        session_id: "s1".into(),
+        session_generation: "gen-1".into(),
+        structure_version: 7,
+        checkpoint_id: "nested-cp".into(),
+        summary_entry_id: None,
+        committed_tail: HistoryCommittedTail::new(
+            &ThreadId::from("s1".to_string()),
+            MessageId::new(),
+            10,
+        )
+        .encode(),
+    };
+    assert_eq!(
+        state.window.apply_commit(&info),
+        CommitOutcome::Applied { sealed_segments: 1 }
+    );
+
+    // 3) 预算压力下的淘汰计划只能选中外层段，嵌套卡没有可释放段。
+    let plan = state.window.plan_eviction(0);
+    assert!(
+        plan.plans.iter().any(|plan| plan.entries.contains(&key)),
+        "外层段应成为淘汰候选"
+    );
+    assert!(
+        plan.plans
+            .iter()
+            .flat_map(|plan| plan.entries.iter())
+            .all(|entry| !entry.entry_id.contains("tool-nested")),
+        "嵌套卡不得进入任何释放计划"
+    );
+    let released = crate::kit::history_window::release_window_plans(
+        &mut state,
+        plan.plans,
+        ReleaseReason::BudgetPressure,
+    );
+    assert_eq!(released.released_entries, 1);
+    // 渲染侧 ack 归还保守额度，页接纳才能重新获得预算容量。
+    state.window.ack_release_epoch(released.structural_epoch);
+    assert!(
+        state.window.budget().unattributed_live_bytes >= nested_summary.len(),
+        "释放外层段不得吞掉嵌套卡的未归属字节"
+    );
+    assert!(
+        !state.committed.iter().any(
+            |unit| matches!(unit, TuiRenderUnit::TuiAssistantBubble(bubble) if bubble.message_id.as_deref() == Some("m-outer"))
+        ),
+        "外层正文已随段释放"
+    );
+    assert!(
+        !state.committed.iter().any(
+            |unit| matches!(unit, TuiRenderUnit::TuiToolCard(card) if card.tool_id == "tool-top")
+        ),
+        "可回读的顶层工具卡随段释放"
+    );
+    assert!(
+        state.committed.iter().any(
+            |unit| matches!(unit, TuiRenderUnit::TuiToolCard(card) if card.tool_id == "tool-nested")
+        ),
+        "嵌套卡不得随外层段一起消失"
+    );
+
+    // 4) 页接纳只恢复外层记录；嵌套卡仍在展示流。
+    let context = context("req-nested-refetch", state.window.generation());
+    let page = response(
+        state.window.identity().cloned().expect("identity"),
+        vec![text_item("m-outer", 10, "outer body")],
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::HistoryWindowPageLoaded {
+            context: Box::new(context),
+            response: Box::new(page),
+        },
+    );
+    assert!(
+        state.window.index().locate_entry(&key).is_some(),
+        "页补读恢复外层记录"
+    );
+    assert!(
+        state.committed.iter().any(
+            |unit| matches!(unit, TuiRenderUnit::TuiToolCard(card) if card.tool_id == "tool-nested")
+        ),
+        "页补读后嵌套卡仍保留（不能只恢复外层记录）"
+    );
+
+    // 5) 上滚换锚并再次计算保留计划：嵌套卡仍不是可释放对象。
+    state.window.set_anchor(Some(WindowAnchor::new(
+        key.clone(),
+        None,
+        WindowAnchorOffset::CharOffset(0),
+    )));
+    let scroll_plans = state.window.retention_plan_after_commit();
+    assert!(
+        scroll_plans
+            .iter()
+            .flat_map(|plan| plan.entries.iter())
+            .all(|entry| !entry.entry_id.contains("tool-nested")),
+        "上滚后的保留计划也不得选中嵌套卡（它没有持久段）"
+    );
+    assert!(
+        state.committed.iter().any(
+            |unit| matches!(unit, TuiRenderUnit::TuiToolCard(card) if card.tool_id == "tool-nested")
+        ),
+        "上滚后嵌套卡仍保留"
     );
 }

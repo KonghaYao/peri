@@ -372,6 +372,7 @@ fn bg_tool_duplicate_start_upgrades_input_without_restarting() {
         raw_input: serde_json::Value::Null,
         agent_id: Some("child-upgrade".into()),
         origin_message_id: None,
+        origin_readable: None,
     };
     crate::kit::bg_task_live::handle_bg_tool_started("child-upgrade", &started, None);
     let started_at = BG_LIVE_DETAIL.state().read()["task-upgrade"].tool_cards[0].started_at;
@@ -645,6 +646,7 @@ fn test_bg_tool_sync_preserves_event_order() {
             raw_input: serde_json::Value::Null,
             agent_id: Some("bg-order".into()),
             origin_message_id: None,
+            origin_readable: None,
         },
         None,
     );

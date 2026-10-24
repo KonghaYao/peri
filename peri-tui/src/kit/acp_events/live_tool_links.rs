@@ -138,11 +138,19 @@ pub(crate) fn note_assistant_chunk(session_id: &str, message_id: Option<&str>) {
 /// 根 agent 工具开始：优先使用事件携带的真实所属 assistant 消息身份
 /// （`originMessageId`，纯工具轮次也能归属）；缺失时才回退到流式 chunk 记录的
 /// 当前消息身份。两者都没有则保持未归属，不用 turn 身份冒充。
+///
+/// `origin_readable == Some(false)` 表示发射点确认没有可回读的持久 origin
+/// （嵌套执行）：不得使用 origin，也不得回退当前流式身份，卡片保持未归属。
+/// `Some(true)` 与 `None`（旧服务端）保持既有行为。
 pub(crate) fn note_root_tool_started(
     session_id: &str,
     tool_id: &str,
     origin_message_id: Option<&str>,
+    origin_readable: Option<bool>,
 ) {
+    if origin_readable == Some(false) {
+        return;
+    }
     with_links(session_id, |links| {
         let message_id = origin_message_id
             .filter(|id| !id.is_empty())
@@ -321,7 +329,7 @@ mod tests {
     fn explicit_origin_wins_over_streaming_identity() {
         let session = "links-origin-priority";
         note_assistant_chunk(session, Some("m-stream"));
-        note_root_tool_started(session, "tool", Some("m-origin"));
+        note_root_tool_started(session, "tool", Some("m-origin"), Some(true));
         assert_eq!(
             owner_entry(session, "tool").as_deref(),
             Some("links-origin-priority:m-origin")
@@ -334,14 +342,14 @@ mod tests {
     fn missing_origin_falls_back_to_streaming_identity() {
         let session = "links-fallback";
         note_assistant_chunk(session, Some("m-stream"));
-        note_root_tool_started(session, "tool", None);
+        note_root_tool_started(session, "tool", None, None);
         assert_eq!(
             owner_entry(session, "tool").as_deref(),
             Some("links-fallback:m-stream")
         );
 
         // 空串不是可靠身份，同样回退。
-        note_root_tool_started(session, "tool-empty", Some(""));
+        note_root_tool_started(session, "tool-empty", Some(""), None);
         assert_eq!(
             owner_entry(session, "tool-empty").as_deref(),
             Some("links-fallback:m-stream")
@@ -355,8 +363,30 @@ mod tests {
     fn no_identity_stays_unattributed() {
         let session = "links-unattributed";
         note_turn_boundary(session);
-        note_root_tool_started(session, "tool", None);
+        note_root_tool_started(session, "tool", None, None);
         assert!(owner_entry(session, "tool").is_none());
+    }
+
+    /// 嵌套执行显式声明 origin 不可回读：不得使用 origin，也不得回退到当前
+    /// 流式 assistant 身份（否则会随外层消息段一起被淘汰）。
+    #[test]
+    fn unreadable_origin_never_falls_back() {
+        let session = "links-unreadable";
+        note_assistant_chunk(session, Some("m-outer"));
+        note_root_tool_started(session, "tool-nested", None, Some(false));
+        assert!(
+            owner_entry(session, "tool-nested").is_none(),
+            "Some(false) 不得回退到 current_message_id"
+        );
+
+        // 即使事件误带 origin，也不得建立归属。
+        note_root_tool_started(session, "tool-nested-origin", Some("m-origin"), Some(false));
+        assert!(
+            owner_entry(session, "tool-nested-origin").is_none(),
+            "Some(false) 也不得使用 originMessageId"
+        );
+        forget_tool(session, "tool-nested");
+        forget_tool(session, "tool-nested-origin");
     }
 
     /// 迟到 ToolEnded 不得擦掉下一轮已由 chunk 建立的身份，也不得把旧工具
@@ -365,11 +395,11 @@ mod tests {
     fn late_tool_end_does_not_clear_newer_identity() {
         let session = "links-late-end";
         note_assistant_chunk(session, Some("m-first"));
-        note_root_tool_started(session, "tool-first", None);
+        note_root_tool_started(session, "tool-first", None, None);
         // 下一轮（例如纯工具轮次）先记录新消息身份。
         note_assistant_chunk(session, Some("m-second"));
         note_root_tool_ended(session, "tool-first");
-        note_root_tool_started(session, "tool-second", None);
+        note_root_tool_started(session, "tool-second", None, None);
         assert_eq!(
             owner_entry(session, "tool-second").as_deref(),
             Some("links-late-end:m-second"),
@@ -383,7 +413,7 @@ mod tests {
 
         // 本轮工具结束后，后续没有身份的卡片不再沿用旧消息。
         note_root_tool_ended(session, "tool-second");
-        note_root_tool_started(session, "tool-third", None);
+        note_root_tool_started(session, "tool-third", None, None);
         assert!(owner_entry(session, "tool-third").is_none());
         forget_tool(session, "tool-first");
         forget_tool(session, "tool-second");
@@ -394,9 +424,9 @@ mod tests {
     fn turn_boundary_clears_heuristic_but_keeps_tool_links() {
         let session = "links-turn-boundary";
         note_assistant_chunk(session, Some("m-live"));
-        note_root_tool_started(session, "tool", None);
+        note_root_tool_started(session, "tool", None, None);
         note_turn_boundary(session);
-        note_root_tool_started(session, "tool-next", None);
+        note_root_tool_started(session, "tool-next", None, None);
         assert!(owner_entry(session, "tool-next").is_none());
         assert_eq!(
             owner_entry(session, "tool").as_deref(),
@@ -409,7 +439,7 @@ mod tests {
     #[test]
     fn forget_tool_drops_all_links() {
         let session = "links-forget";
-        note_root_tool_started(session, "tool", Some("m-origin"));
+        note_root_tool_started(session, "tool", Some("m-origin"), None);
         forget_tool(session, "tool");
         assert!(owner_entry(session, "tool").is_none());
     }
@@ -422,7 +452,7 @@ mod tests {
         let total = MAX_TOOL_LINKS_PER_SESSION + 32;
         for index in 0..total {
             let tool_id = format!("tool-{index}");
-            note_root_tool_started(session, &tool_id, Some("m"));
+            note_root_tool_started(session, &tool_id, Some("m"), None);
             bind_page_entries(
                 session,
                 &[(

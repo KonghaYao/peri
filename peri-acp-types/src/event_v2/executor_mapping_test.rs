@@ -153,6 +153,7 @@ fn test_tool_started_maps() {
         name: "Read".to_string(),
         input: serde_json::json!("test input"),
         origin_message_id: None,
+        origin_readable: None,
     };
     match render_event_to_executor(r).unwrap() {
         ExecutorEvent::ToolStart {
@@ -547,7 +548,7 @@ fn test_observe_subagent_lifecycle_maps() {
 }
 
 /// 工具事件必须把“真实所属 assistant 消息”与 v1 兼容的 turn 身份分开透传；
-/// 旧事件（无新字段）仍可解析，且不回退成 turn 身份。
+/// 三态可回读性原样透传；旧事件（无新字段）仍可解析为未知，且不回退成 turn 身份。
 #[test]
 fn test_tool_started_origin_message_identity_survives_mapping_and_legacy_payload() {
     let (turn_id, agent_id) = ids();
@@ -559,20 +560,23 @@ fn test_tool_started_origin_message_identity_survives_mapping_and_legacy_payload
         name: "Read".to_string(),
         input: serde_json::json!({}),
         origin_message_id: Some(origin),
+        origin_readable: Some(true),
     };
 
     // 旧服务端/旧事件没有该字段：serde 默认 None，仍可解析。
     let mut legacy_value = serde_json::to_value(&event).unwrap();
-    legacy_value
+    let legacy_fields = legacy_value
         .get_mut("ToolStarted")
         .and_then(serde_json::Value::as_object_mut)
-        .expect("RenderEvent 按变体序列化")
-        .remove("origin_message_id");
+        .expect("RenderEvent 按变体序列化");
+    legacy_fields.remove("origin_message_id");
+    legacy_fields.remove("origin_readable");
     let legacy_render: RenderEvent = serde_json::from_value(legacy_value).unwrap();
     assert!(matches!(
         legacy_render,
         RenderEvent::ToolStarted {
             origin_message_id: None,
+            origin_readable: None,
             ..
         }
     ));
@@ -581,6 +585,7 @@ fn test_tool_started_origin_message_identity_survives_mapping_and_legacy_payload
     let ExecutorEvent::ToolStart {
         message_id,
         origin_message_id,
+        origin_readable,
         ..
     } = mapped
     else {
@@ -588,12 +593,37 @@ fn test_tool_started_origin_message_identity_survives_mapping_and_legacy_payload
     };
     assert_eq!(origin_message_id, Some(origin), "真实消息身份不得丢失");
     assert_eq!(
+        origin_readable,
+        Some(true),
+        "可回读性必须原样透传，不得在映射层丢失"
+    );
+    assert_eq!(
         message_id.as_uuid(),
         turn_id.as_uuid(),
         "v1 `message_id` 仍是 turn 派生值，语义不变"
     );
 
-    // v1 wire 旧载荷（无 `origin_message_id`）解析为 None。
+    // 嵌套执行：没有 origin，但显式声明不可回读。
+    let nested = render_event_to_executor(RenderEvent::ToolStarted {
+        turn_id,
+        agent_id,
+        tool_call_id: "tc-nested".to_string(),
+        name: "Read".to_string(),
+        input: serde_json::json!({}),
+        origin_message_id: None,
+        origin_readable: Some(false),
+    })
+    .unwrap();
+    assert!(matches!(
+        nested,
+        ExecutorEvent::ToolStart {
+            origin_message_id: None,
+            origin_readable: Some(false),
+            ..
+        }
+    ));
+
+    // v1 wire 旧载荷（无 `origin_message_id` / `origin_readable`）解析为 None。
     let legacy_wire: ExecutorEvent = serde_json::from_value(serde_json::json!({
         "type": "tool_start",
         "value": {
@@ -609,6 +639,7 @@ fn test_tool_started_origin_message_identity_survives_mapping_and_legacy_payload
         legacy_wire,
         ExecutorEvent::ToolStart {
             origin_message_id: None,
+            origin_readable: None,
             ..
         }
     ));

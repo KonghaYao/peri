@@ -297,6 +297,7 @@ fn test_dispatch_sync_subagent_tool_routed_to_group() {
             input_summary: "path: foo.rs".into(),
             raw_input: serde_json::Value::Null,
             origin_message_id: None,
+            origin_readable: None,
         }),
     );
     // 工具结束
@@ -353,6 +354,7 @@ fn test_late_agent_tool_card_adopts_early_subagent_group() {
             input_summary: summary.into(),
             raw_input: serde_json::json!({ "prompt": summary }),
             origin_message_id: None,
+            origin_readable: None,
         })
     };
     let child_tool = |agent_id: &str, tool_id: &str, name: &str| {
@@ -363,6 +365,7 @@ fn test_late_agent_tool_card_adopts_early_subagent_group() {
             input_summary: format!("{name} input"),
             raw_input: serde_json::Value::Null,
             origin_message_id: None,
+            origin_readable: None,
         })
     };
 
@@ -451,6 +454,7 @@ fn test_concurrent_agent_calls_pair_by_parent_tool_call_id() {
                 input_summary: summary.into(),
                 raw_input: serde_json::json!({ "prompt": summary }),
                 origin_message_id: None,
+                origin_readable: None,
             }),
         );
     }
@@ -478,6 +482,7 @@ fn test_concurrent_agent_calls_pair_by_parent_tool_call_id() {
                 input_summary: "file.rs".into(),
                 raw_input: serde_json::Value::Null,
                 origin_message_id: None,
+                origin_readable: None,
             }),
         );
     }
@@ -549,6 +554,7 @@ fn test_flush_does_not_reorder_completed_subagent_after_running_group() {
                 input_summary: format!("start {agent_id}"),
                 raw_input: serde_json::json!({ "prompt": agent_id }),
                 origin_message_id: None,
+                origin_readable: None,
             }),
         );
         dispatch_and_notify(

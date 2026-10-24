@@ -95,6 +95,14 @@ pub enum RenderEvent {
         /// 执行入口），消费方不得用 `turn_id` 冒充。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin_message_id: Option<crate::messages::MessageId>,
+        /// 发射点对 `origin_message_id` 可回读性的确认（wire 三态）。
+        ///
+        /// - `Some(true)`：origin 是已持久化、可由历史页回读的消息；
+        /// - `Some(false)`：发射点确认没有可回读的持久 origin（如嵌套执行），
+        ///   消费方不得回退到当前流式消息或其他身份；
+        /// - `None`：旧服务端/旧事件，语义未知，消费方维持原有启发式回退。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_readable: Option<bool>,
     },
     /// 工具调用结束
     ///

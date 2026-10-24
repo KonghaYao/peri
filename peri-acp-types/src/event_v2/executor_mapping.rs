@@ -52,12 +52,16 @@ pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
             name,
             input,
             origin_message_id,
+            origin_readable,
             ..
         } => Some(ExecutorEvent::ToolStart {
             // `message_id` 保持既有 turn_id 语义（v1 兼容），真实所属 assistant
             // 消息另经 `origin_message_id` 透传；发射点不可知时保持 None。
             message_id: MessageId::from(turn_id.as_uuid()),
             origin_message_id,
+            // 可回读性原样透传：`Some(false)`（嵌套执行）必须让消费方知道
+            // origin 确实不存在，而不是旧载荷的「未知」。
+            origin_readable,
             tool_call_id,
             name,
             input,

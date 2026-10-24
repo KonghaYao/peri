@@ -913,6 +913,12 @@ pub enum ExecutorEvent {
         /// 该字段时按 `None` 解析，消费方不得回退为 `message_id` 冒充消息归属。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         origin_message_id: Option<crate::messages::MessageId>,
+        /// origin 是否可回读（三态语义同 v2 `RenderEvent::ToolStarted`）。
+        ///
+        /// `Some(true)` 已持久化可回读；`Some(false)` 确认无持久 origin（嵌套
+        /// 执行），消费方不得回退；`None` 为旧载荷，语义未知。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_readable: Option<bool>,
         tool_call_id: String,
         name: String,
         input: serde_json::Value,

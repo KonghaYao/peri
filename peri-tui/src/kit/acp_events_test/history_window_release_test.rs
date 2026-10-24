@@ -103,6 +103,7 @@ fn release_removes_tool_card_with_message_segment() {
             raw_input: serde_json::json!({}),
             agent_id: None,
             origin_message_id: None,
+            origin_readable: None,
         }),
     );
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);

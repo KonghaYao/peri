@@ -84,6 +84,7 @@ pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) 
             &state.active_session_id,
             &ts.tool_id,
             ts.origin_message_id.as_deref(),
+            ts.origin_readable,
         );
         state
             .current_turn

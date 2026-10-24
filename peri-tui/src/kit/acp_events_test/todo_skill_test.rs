@@ -40,6 +40,7 @@ fn test_todo_snapshot_advances_only_after_successful_tool_end() {
             }),
             agent_id: None,
             origin_message_id: None,
+            origin_readable: None,
         })
     };
     let end = |id: &str, is_error: bool| {
@@ -110,6 +111,7 @@ fn test_duplicate_todo_end_cannot_roll_back_newer_successful_snapshot() {
             raw_input: json!({"todos": [{"content": "任务", "status": status}]}),
             agent_id: None,
             origin_message_id: None,
+            origin_readable: None,
         })
     };
     let end = |id: &str| {
@@ -236,6 +238,7 @@ fn test_later_started_todo_wins_when_successful_ends_arrive_out_of_order() {
             raw_input: json!({"todos": [{"content": "任务", "status": status}]}),
             agent_id: None,
             origin_message_id: None,
+            origin_readable: None,
         })
     };
     let end = |id: &str| {

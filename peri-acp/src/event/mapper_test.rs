@@ -554,6 +554,7 @@ fn test_tool_start_maps_to_session_update_with_tool_info() {
         input: serde_json::json!({"command": "ls -la"}),
         source_agent_id: Some("sub-agent-2".to_string()),
         origin_message_id: None,
+        origin_readable: None,
     };
     let mapped = map_event(&event, 200_000, &PeriCaps::default());
     assert_eq!(mapped.len(), 1);
@@ -621,6 +622,7 @@ fn test_tool_start_infer_tool_kind_variants() {
             input: serde_json::Value::Null,
             source_agent_id: None,
             origin_message_id: None,
+            origin_readable: None,
         };
         let mapped = map_event(&event, 200_000, &PeriCaps::default());
         match &mapped[0].updates[0] {
@@ -648,6 +650,7 @@ fn test_tool_start_infer_tool_kind_variants() {
         input: serde_json::Value::Null,
         source_agent_id: None,
         origin_message_id: None,
+        origin_readable: None,
     };
     match &map_event(&event, 200_000, &PeriCaps::default())[0].updates[0] {
         SessionUpdate::ToolCall(tc) => {
@@ -897,6 +900,7 @@ fn test_tool_start_origin_message_id_is_carried_in_acp_meta() {
     let event = ExecutorEvent::ToolStart {
         message_id: MessageId::new(),
         origin_message_id: Some(origin),
+        origin_readable: Some(true),
         tool_call_id: "tc-meta".to_string(),
         name: "Read".to_string(),
         input: serde_json::json!({"file_path": "/tmp/a"}),
@@ -914,6 +918,13 @@ fn test_tool_start_origin_message_id_is_carried_in_acp_meta() {
         Some(origin_text.as_str()),
         "origin message id 必须进入 ACP _meta"
     );
+    assert_eq!(
+        meta.get("peri")
+            .and_then(|peri| peri.get("originReadable"))
+            .and_then(serde_json::Value::as_bool),
+        Some(true),
+        "可回读 origin 必须显式写 originReadable=true"
+    );
 
     // wire key 是 `_meta`（ACP SDK 的 serde rename），不是 `meta`。
     let wire = serde_json::to_value(SessionUpdate::ToolCall(tool_call.clone())).unwrap();
@@ -925,9 +936,61 @@ fn test_tool_start_origin_message_id_is_carried_in_acp_meta() {
         Some(origin_text.as_str())
     );
 
+    // 嵌套执行：确认无持久 origin，只写 originReadable=false。
+    let nested = ExecutorEvent::ToolStart {
+        message_id: MessageId::new(),
+        origin_message_id: None,
+        origin_readable: Some(false),
+        tool_call_id: "tc-nested".to_string(),
+        name: "Read".to_string(),
+        input: serde_json::json!({}),
+        source_agent_id: None,
+    };
+    let mapped = map_event(&nested, 200_000, &PeriCaps::default());
+    let SessionUpdate::ToolCall(tool_call) = &mapped[0].updates[0] else {
+        panic!("ToolStart 应映射为 ToolCall");
+    };
+    let meta = tool_call.meta.as_ref().expect("_meta 必须存在");
+    assert_eq!(
+        meta.get("peri")
+            .and_then(|peri| peri.get("originReadable"))
+            .and_then(serde_json::Value::as_bool),
+        Some(false),
+        "嵌套执行必须显式写 originReadable=false"
+    );
+    assert!(
+        meta.get("peri")
+            .and_then(|peri| peri.get("originMessageId"))
+            .is_none(),
+        "不可回读时不得写 originMessageId"
+    );
+
+    // 旧服务端事件：origin 存在但没有三态字段，只写 originMessageId（不补造 true）。
+    let legacy_origin = ExecutorEvent::ToolStart {
+        message_id: MessageId::new(),
+        origin_message_id: Some(origin),
+        origin_readable: None,
+        tool_call_id: "tc-legacy-origin".to_string(),
+        name: "Read".to_string(),
+        input: serde_json::json!({}),
+        source_agent_id: None,
+    };
+    let mapped = map_event(&legacy_origin, 200_000, &PeriCaps::default());
+    let SessionUpdate::ToolCall(tool_call) = &mapped[0].updates[0] else {
+        panic!("ToolStart 应映射为 ToolCall");
+    };
+    let meta = tool_call.meta.as_ref().expect("_meta 必须存在");
+    assert!(
+        meta.get("peri")
+            .and_then(|peri| peri.get("originReadable"))
+            .is_none(),
+        "旧事件语义未知，不得补写 originReadable"
+    );
+
     let legacy = ExecutorEvent::ToolStart {
         message_id: MessageId::new(),
         origin_message_id: None,
+        origin_readable: None,
         tool_call_id: "tc-legacy".to_string(),
         name: "Read".to_string(),
         input: serde_json::json!({}),

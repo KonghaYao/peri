@@ -227,6 +227,14 @@ pub(super) fn decode_stream_update_with(
                 .and_then(Value::as_str)
                 .filter(|id| !id.is_empty())
                 .map(ToOwned::to_owned);
+            // 三态可回读性：缺失（旧服务端）→ None，由 bridge 维持启发式回退；
+            // `false` 表示嵌套执行，客户端不得建立任何归属。
+            let origin_readable = update
+                .get("_meta")
+                .or_else(|| update.get("meta"))
+                .and_then(|meta| meta.get("peri"))
+                .and_then(|peri| peri.get("originReadable"))
+                .and_then(Value::as_bool);
             if is_session_replay {
                 Some(AcpEventData::ReplayToolStarted {
                     tool_id,
@@ -241,6 +249,7 @@ pub(super) fn decode_stream_update_with(
                     input_summary,
                     raw_input,
                     origin_message_id,
+                    origin_readable,
                     agent_id,
                 };
                 Some(AcpEventData::ToolStarted(tool_started))

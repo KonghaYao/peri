@@ -40,6 +40,12 @@ pub struct TuiToolStarted {
     /// 工具卡据此进入可淘汰段。`None` 表示服务端未提供，客户端回退到当前
     /// 流式 assistant 身份，不得用 turn 身份冒充。
     pub origin_message_id: Option<String>,
+    /// origin 是否可回读（`_meta.peri.originReadable` 三态）。
+    ///
+    /// `Some(false)` 表示发射点确认没有可回读的持久 origin（嵌套执行）：
+    /// 不得使用 `origin_message_id`，也不得回退到当前流式身份。
+    /// `Some(true)` 与 `None`（旧服务端）保持既有行为。
+    pub origin_readable: Option<bool>,
     /// 当事件来自子 agent 时存在。
     pub agent_id: Option<String>,
 }

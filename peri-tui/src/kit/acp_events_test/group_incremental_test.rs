@@ -20,6 +20,7 @@ fn tool_started(id: &str, name: &str) -> AcpEventData {
         raw_input: serde_json::json!({ "id": id }),
         agent_id: None,
         origin_message_id: None,
+        origin_readable: None,
     })
 }
 

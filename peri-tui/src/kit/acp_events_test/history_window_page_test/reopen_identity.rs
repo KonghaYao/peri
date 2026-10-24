@@ -571,6 +571,7 @@ fn same_identity_open_retry_does_not_duplicate_tool_cards() {
             raw_input: serde_json::json!({}),
             agent_id: None,
             origin_message_id: None,
+            origin_readable: None,
         }),
     );
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
@@ -726,6 +727,7 @@ fn same_identity_open_keeps_page_text_around_adopted_tool_card() {
             raw_input: serde_json::json!({}),
             agent_id: None,
             origin_message_id: None,
+            origin_readable: None,
         }),
     );
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
