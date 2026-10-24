@@ -2,9 +2,8 @@
 
 use super::*;
 use crate::host::{
-    connection::ConnectionFacts, history_window, ownership, prompt,
-    prompt_dispatch::admission_gate, requests::session_lifecycle, AcpServerConfig,
-    ContextOwnership,
+    connection::ConnectionFacts, ownership, prompt, prompt_dispatch::admission_gate,
+    requests::session_lifecycle, AcpServerConfig, ContextOwnership,
 };
 use crate::transport::{mpsc::mpsc_transport_pair, AcpTransport};
 use serde_json::json;
@@ -73,6 +72,7 @@ async fn restore(
         sessions,
         transport,
         ConnectionFacts::unnegotiated(),
+        None,
     )
     .await
     .unwrap();
@@ -110,35 +110,12 @@ async fn assert_active_store_matches(
     assert!(!state.history_payloads.is_empty());
 }
 
-async fn open_ticket(cfg: &AcpServerConfig, sessions: &SharedSessions, sid: &str) {
-    let (_client, server) = mpsc_transport_pair();
-    let connection = history_window::WindowConnection::new(
-        "ownership-test",
-        Arc::new(history_window::TransportWindowSink::new(Arc::new(server))),
-    );
-    history_window::handle(
-        cfg,
-        sessions,
-        &peri_acp_types::PeriCaps::all_enabled(),
-        sid,
-        peri_acp_types::history_window::HistoryWindowRequest::decode(
-            &json!({"kind": "open", "direction": "before", "limit": 10}),
-        )
-        .unwrap(),
-        &connection,
-    )
-    .await
-    .unwrap();
-    assert!(sessions.lock().await[sid].history_window.has_ticket());
-}
-
 async fn assert_reload_required(sessions: &SharedSessions, sid: &str) {
     let states = sessions.lock().await;
     let state = &states[sid];
     assert_eq!(state.context_ownership, ContextOwnership::ReloadRequired);
     assert!(state.history_payloads.is_empty());
     assert!(state.cancel_token.is_none());
-    assert!(!state.history_window.has_ticket());
 }
 
 #[tokio::test]
@@ -185,7 +162,6 @@ async fn a08_abort_after_take_with_lock_contention_recovers_on_next_prompt() {
         ContextOwnership::HandedOff
     );
     assert!(!states[&ctx.session_id]
-        .history_window
         .handed_off_alive
         .as_ref()
         .unwrap()
@@ -298,14 +274,7 @@ async fn a08_finished_or_superseded_guard_does_not_invalidate_current_context() 
                 "模型失败",
             ));
         }
-        let response = finish_prompt_turn(
-            &sessions,
-            &ctx.session_id,
-            false,
-            result,
-            Some(store.clone()),
-        )
-        .await;
+        let response = finish_prompt_turn(&sessions, &ctx.session_id, false, result).await;
         assert_eq!(response.is_err(), outcome == 2);
         if outcome == 1 {
             assert_eq!(response.unwrap()["stopReason"], "cancelled");
@@ -323,15 +292,9 @@ async fn a08_finished_or_superseded_guard_does_not_invalidate_current_context() 
     };
     let mut result = synthetic_result(false);
     result.persisted_payloads = payloads;
-    finish_prompt_turn(
-        &sessions,
-        &ctx.session_id,
-        false,
-        result,
-        Some(store.clone()),
-    )
-    .await
-    .unwrap();
+    finish_prompt_turn(&sessions, &ctx.session_id, false, result)
+        .await
+        .unwrap();
     let (_, current_guard) = {
         let mut states = sessions.lock().await;
         ownership::begin_handoff(
@@ -356,19 +319,12 @@ async fn a05_inconsistent_result_revokes_ticket_then_restores_sqlite_active_set(
     let _home = HomeGuard::set(dir.path());
     let (ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
     let cfg = config(&dir, &ctx, store.clone()).await;
-    open_ticket(&cfg, &sessions, &ctx.session_id).await;
     let mut result = synthetic_result(false);
     result.persistence_inconsistent = true;
     result.persisted_payloads = vec![PersistedPayload::Message(BaseMessage::human("不可信热态"))];
-    finish_prompt_turn(
-        &sessions,
-        &ctx.session_id,
-        false,
-        result,
-        Some(store.clone()),
-    )
-    .await
-    .unwrap();
+    finish_prompt_turn(&sessions, &ctx.session_id, false, result)
+        .await
+        .unwrap();
     assert_reload_required(&sessions, &ctx.session_id).await;
     let (_client, server) = mpsc_transport_pair();
     let transport: Arc<dyn AcpTransport> = Arc::new(server);
@@ -383,7 +339,6 @@ async fn a06_full_commit_then_flush_failure_preserves_archive_and_restores_only_
     let _home = HomeGuard::set(dir.path());
     let (ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
     let cfg = config(&dir, &ctx, store.clone()).await;
-    open_ticket(&cfg, &sessions, &ctx.session_id).await;
     store
         .fail_append_after_compact
         .store(true, Ordering::SeqCst);
@@ -408,15 +363,11 @@ async fn a06_full_commit_then_flush_failure_preserves_archive_and_restores_only_
     // flush 失败时结果不声明可采纳的 compact 快照；提交事实由 SQLite 断言。
     assert!(!result.history_replaced_by_compaction);
     assert!(result.failure.is_some());
-    assert!(finish_prompt_turn(
-        &sessions,
-        &ctx.session_id,
-        false,
-        result,
-        Some(store.clone())
-    )
-    .await
-    .is_err());
+    assert!(
+        finish_prompt_turn(&sessions, &ctx.session_id, false, result,)
+            .await
+            .is_err()
+    );
     drop(guard);
     assert_reload_required(&sessions, &ctx.session_id).await;
     let snapshot = store
@@ -591,17 +542,10 @@ async fn sticky_unknown_prompt_case(recover: bool) {
         "RecoveryProbe".into(),
         Arc::new(RecoveryTool(tools.clone())),
     );
-    // 无 historyWindowV1 协商，且 PeriConfig 使用默认 beta 关闭配置。
+    // 未协商任何 peri 扩展。
     cfg.session_manager
         .set_pending_caps(peri_acp_types::PeriCaps::default());
     cfg.session_manager.consume_pending_caps(&ctx.session_id);
-    assert!(
-        !cfg.session_manager
-            .get_caps(&ctx.session_id)
-            .history_window_v1
-    );
-    assert!(!peri_config::betas::from_merged(&cfg.peri_config.read())
-        .is_enabled(peri_config::betas::HISTORY_WINDOW_V1));
     let pool = Arc::new(parking_lot::Mutex::new(AgentPool::new()));
     let fingerprint = crate::session::agent_pool::fingerprint(&cfg.provider.read());
     pool.lock()

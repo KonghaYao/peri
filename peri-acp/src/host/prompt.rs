@@ -370,6 +370,7 @@ async fn run_prompt_attempt(
         interaction_gate,
         interaction_router,
         event_health,
+        live_delivery,
     ) = {
         let mut states = sessions.lock().await;
         let state = states
@@ -408,6 +409,8 @@ async fn run_prompt_attempt(
                 .as_ref()
                 .map(|env| Arc::clone(env.interaction_router())),
             Arc::clone(&state.event_health),
+            // History V2 实时投递注册表：仅 V2 load 装配过的会话有值。
+            state.live_delivery.clone(),
         )
     };
     #[cfg(test)]
@@ -431,15 +434,13 @@ async fn run_prompt_attempt(
             None,
         ),
     };
-    let event_sink = Arc::new(
-        TransportEventSink::new(Arc::clone(transport), session_manager.caps_registry())
-            .with_compact_commit_observer(Arc::new(
-                super::history_window::StoreCompactCommitObserver::new(
-                    Arc::clone(sessions),
-                    Arc::clone(&session_resources),
-                ),
-            )),
-    );
+    let event_sink = Arc::new(match live_delivery {
+        Some(live) => {
+            TransportEventSink::new(Arc::clone(transport), session_manager.caps_registry())
+                .with_live_delivery(live)
+        }
+        None => TransportEventSink::new(Arc::clone(transport), session_manager.caps_registry()),
+    });
 
     let provider_snapshot = provider.read().clone();
     let peri_config_snapshot = Arc::new(peri_config.read().clone());
@@ -681,20 +682,13 @@ async fn run_prompt_attempt(
     }
     input_attempt_guard.finish(&result);
 
-    let compact_committed =
-        result.history_replaced_by_compaction && !result.persistence_inconsistent;
     let response = finish_prompt_turn(
         sessions,
         &session_id,
         continuation && !managed_input,
         result,
-        Some(deployment.session_resources.clone()),
     )
     .await?;
-    if compact_committed {
-        // 幂等轻量通知：只发给仍有活动 V1 window ticket 的会话；失败不影响 durable commit。
-        super::history_window::notify_commit_if_open(sessions, &session_id).await;
-    }
     Ok(response)
 }
 
@@ -771,7 +765,6 @@ async fn mark_reload_required(sessions: &SharedSessions, session_id: &str) {
         state.history_payloads.clear();
         state.context_ownership = super::ContextOwnership::ReloadRequired;
         state.cancel_token = None;
-        super::history_window::invalidate(state);
     }
 }
 
@@ -780,13 +773,7 @@ pub(super) async fn finish_prompt_turn(
     session_id: &str,
     continuation: bool,
     result: executor::PromptResult,
-    session_resources: Option<Arc<dyn peri_acp_types::session_resources::SessionResources>>,
 ) -> Result<Value, AcpError> {
-    let compact_committed =
-        result.history_replaced_by_compaction && !result.persistence_inconsistent;
-    let mut commit_thread = None;
-    let mut commit_generation = None;
-    let mut commit_structure = None;
     let adoption_memory = {
         let mut sessions = sessions.lock().await;
         let mut adoption_memory = None;
@@ -794,11 +781,9 @@ pub(super) async fn finish_prompt_turn(
             if result.persistence_inconsistent {
                 // 提交结果不确定：不保留任何可继续执行的旧正文，也不删除身份。
                 // 下一次 prompt / restore 从权威存储恢复（ReloadRequired）。
-                // 窗口票据立即撤销：旧 snapshot/ticket 不再可信。
                 state.history_payloads.clear();
                 state.context_ownership = super::ContextOwnership::ReloadRequired;
                 state.cancel_token = None;
-                super::history_window::invalidate(state);
             } else {
                 info!(
                     session_id,
@@ -826,59 +811,12 @@ pub(super) async fn finish_prompt_turn(
                     state.recall_items = result.recall_items;
                 }
                 state.cancel_token = None;
-                if compact_committed {
-                    commit_thread = Some(state.thread_id.clone());
-                    commit_generation = Some(state.session_generation);
-                    commit_structure = Some(state.structure_version);
-                }
             }
         }
         adoption_memory
     };
     if let Some((before, after)) = adoption_memory {
         peri_agent::session::memory_probe::log_payload_adoption(session_id, &before, &after);
-    }
-    // Full compact 的 durable 确认已经在 PromptResult 构造前完成；这里只读取**存储事实**
-    // 更新轻量 checkpoint/tail，不由 UI 事件反推提交成功。失败只撤销窗口可信元数据，
-    // 不把已经提交成功的 turn 改成失败。
-    if let (Some(resources), Some(thread_id), Some(generation), Some(structure)) = (
-        session_resources,
-        commit_thread,
-        commit_generation,
-        commit_structure,
-    ) {
-        match resources
-            .history_window_bounds(&peri_acp_types::thread::ThreadId::from(thread_id))
-            .await
-        {
-            Ok(bounds) => {
-                let mut sessions = sessions.lock().await;
-                if let Some(state) = sessions.get_mut(session_id) {
-                    if state.session_generation == generation
-                        && state.structure_version == structure
-                        && !state.history_window.rewind_in_progress
-                    {
-                        super::history_window::publish_commit(
-                            state,
-                            bounds.checkpoint.as_ref(),
-                            bounds.own_latest.as_ref(),
-                        );
-                    } else {
-                        tracing::debug!(
-                            session_id,
-                            "discarding compact metadata read across a concurrent rewind"
-                        );
-                    }
-                }
-            }
-            Err(error) => {
-                tracing::warn!(session_id, error = %error, "history window commit metadata read failed");
-                let mut sessions = sessions.lock().await;
-                if let Some(state) = sessions.get_mut(session_id) {
-                    super::history_window::revoke(state);
-                }
-            }
-        }
     }
     // Fatal failures still use the standard JSON-RPC error; cancellation/max-iterations
     // retain their existing PromptResponse stop reasons after state cleanup.

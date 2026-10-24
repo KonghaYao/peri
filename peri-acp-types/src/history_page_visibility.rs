@@ -4,6 +4,35 @@ use crate::messages::{BaseMessage, MessageId};
 use crate::store::{PersistedPayload, PERSISTED_PAYLOAD_VERSION};
 use crate::system_reminder::{SystemReminder, TrustedSystemReminderFactory};
 
+/// 持久化行在 `messages.role` 列上的粗分类。
+///
+/// 只用于有界可见性判定（尤其 oversize 行）；展示投影仍以 payload 为准。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HistoryEntryRole {
+    User,
+    Assistant,
+    Tool,
+    System,
+    SystemReminder,
+    /// 未知/空 role：可见性判定必须 fail-closed 或读取前缀后判定。
+    #[default]
+    Unknown,
+}
+
+impl HistoryEntryRole {
+    /// 由存储列值解析；未知值不猜测。
+    pub fn from_stored(role: &str) -> Self {
+        match role {
+            "user" => Self::User,
+            "assistant" => Self::Assistant,
+            "tool" => Self::Tool,
+            "system" => Self::System,
+            "system_reminder" => Self::SystemReminder,
+            _ => Self::Unknown,
+        }
+    }
+}
+
 // 消息正文由 serde 的 IgnoredAny 流式跳过，不随 oversize 大小分配内存。
 // reminder 仍通过既有 DTO 校验和出口规则，不另写一份受众逻辑。
 #[derive(Deserialize)]

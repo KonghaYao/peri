@@ -26,7 +26,7 @@ async fn streamed_canonical_replay_delivers_the_archived_bodies_in_canonical_ord
     );
     fixture.reset_reads();
 
-    fixture.load_unnegotiated().await.unwrap();
+    fixture.load().await.unwrap();
 
     let expected: Vec<String> = canonical.iter().map(payload_text).collect();
     assert_eq!(expected.len(), 4);
@@ -57,7 +57,7 @@ async fn streamed_canonical_replay_wire_carries_no_peri_private_fields_for_a_sta
         .await;
     fixture.set_caps(PeriCaps::default());
 
-    let response = fixture.load_unnegotiated().await.unwrap();
+    let response = fixture.load().await.unwrap();
 
     let keys = replay_keys(&fixture);
     assert!(!keys.is_empty(), "回放通知上确实有内容可查");
@@ -76,23 +76,19 @@ async fn streamed_canonical_replay_wire_carries_no_peri_private_fields_for_a_sta
     assert_eq!(fixture.texts(), vec!["首屏问题", "首屏回答"]);
 }
 
-/// `periLoadGeneration` 的门是 `caps.replay`（回放扩展），**不是**分页能力：这是本切片之前
-/// 就成立的契约（`docs/design/peri-acp-protocol.md`：代次「在协商过 `replay` 的连接上」以
-/// `_meta.periLoadGeneration` 出现），本切片没有改动它。
+/// `periReplay` 的门是 `caps.replay`（回放扩展）：声明后回放通知带标记，但不再携带
+/// 已删除的 `periLoadGeneration`，也不带任何分页私有字段。
 ///
-/// 因此「声明了 `peri.replay`、没声明 `peri.historyPagination`」的连接仍有代次，但**没有**
-/// 任何分页私有字段（条目身份 / 位置 / 游标 / 快照身份）。
-///
-/// `caps.replay` 取自**当前连接**（S9c 起）：本用例显式声明连接 caps，同时刻意把会话级
+/// `caps.replay` 取自**当前连接**：本用例显式声明连接 caps，同时刻意把会话级
 /// 注册表写成 `PeriCaps::default()`——门若回读注册表，这里就会一条标记都收不到。
 #[tokio::test]
-async fn streamed_canonical_replay_keeps_the_generation_gated_by_the_replay_capability() {
+async fn streamed_canonical_replay_carries_only_the_replay_marker() {
     let mut fixture = ReplayFixture::new(SpyMode::Forward).await;
     fixture
-        .create_session("streamed-canonical-generation")
+        .create_session("streamed-canonical-replay-marker")
         .await;
     fixture
-        .append(&[BaseMessage::human("代次问题"), BaseMessage::ai("代次回答")])
+        .append(&[BaseMessage::human("标记问题"), BaseMessage::ai("标记回答")])
         .await;
     fixture.set_connection_caps(PeriCaps {
         replay: true,
@@ -100,27 +96,26 @@ async fn streamed_canonical_replay_keeps_the_generation_gated_by_the_replay_capa
     });
     fixture.set_caps(PeriCaps::default());
 
-    let response = fixture.load_unnegotiated().await.unwrap();
+    let response = fixture.load().await.unwrap();
 
-    let generation = response["_meta"]["periLoadGeneration"]
-        .as_str()
-        .expect("协商过 replay 的连接在响应里拿到代次")
-        .to_owned();
+    assert!(
+        response["_meta"].get("periLoadGeneration").is_none(),
+        "旧回放代次不再写入响应: {response}"
+    );
     let updates = fixture.updates();
     assert_eq!(updates.len(), 2);
     for params in &updates {
         let meta = &params["update"]["_meta"];
         assert_eq!(meta["periReplay"], Value::Bool(true));
-        assert_eq!(
-            meta["periLoadGeneration"],
-            Value::String(generation.clone())
+        assert!(
+            meta.get("periLoadGeneration").is_none(),
+            "旧回放代次不再写入通知: {meta}"
         );
         assert!(
             meta.get("periEntryId").is_none() && meta.get("periPosition").is_none(),
-            "未协商分页的连接不得到条目身份 / 位置戳: {meta}"
+            "标准回放不得到条目身份 / 位置戳: {meta}"
         );
     }
-    // 代次之外一个分页私有字段都没有：声明了回放扩展 ≠ 拿到分页语义。
     assert_no_pagination_fields(&wire_keys(&fixture, &response));
 }
 
@@ -132,7 +127,7 @@ async fn streamed_canonical_replay_of_an_empty_session_succeeds_without_notifica
     fixture.set_caps(PeriCaps::default());
     fixture.reset_reads();
 
-    fixture.load_unnegotiated().await.unwrap();
+    fixture.load().await.unwrap();
 
     assert!(fixture.texts().is_empty());
     assert_eq!(
@@ -162,7 +157,7 @@ async fn streamed_canonical_replay_delivers_an_inherited_only_segment() {
     );
     fixture.reset_reads();
 
-    fixture.load_unnegotiated().await.unwrap();
+    fixture.load().await.unwrap();
 
     assert_eq!(fixture.texts(), vec!["继承区问题", "继承区回答"]);
     let calls = fixture.spy.segment_calls();
@@ -183,7 +178,7 @@ async fn streamed_canonical_replay_delivers_an_oversized_body_whole() {
     fixture.set_caps(PeriCaps::default());
     fixture.reset_reads();
 
-    fixture.load_unnegotiated().await.unwrap();
+    fixture.load().await.unwrap();
 
     let texts = fixture.texts();
     assert_eq!(texts.len(), 2);
@@ -224,7 +219,7 @@ async fn streamed_canonical_replay_of_a_live_session_still_reads_storage() {
     }
     fixture.reset_reads();
 
-    fixture.load_unnegotiated().await.unwrap();
+    fixture.load().await.unwrap();
 
     assert_eq!(
         fixture.texts(),
@@ -232,64 +227,4 @@ async fn streamed_canonical_replay_of_a_live_session_still_reads_storage() {
         "AlreadyLive 也必须交付存储里的 canonical 历史（含归档原文）"
     );
     assert_eq!(fixture.spy.full_reads(), 0);
-}
-
-/// 协商连接回归：有效集合 + 条目身份 / 位置戳 + 代次，语义与改动前一致
-/// （未协商路径的改动不得泄漏到这条路径）。
-///
-/// 刻意走冷恢复（会话不在内存）：首屏与位置表才会同出于存储的有效视图，而不是夹具内存里
-/// 那份尚未被归档改写的 `history_payloads`。
-///
-/// 声明在**连接**上（S9c 起的唯一门）：peri TUI 就是这样一条连接（协商分页与回放）。
-#[tokio::test]
-async fn negotiated_initial_load_keeps_the_effective_set_and_the_entry_marks() {
-    let mut fixture = ReplayFixture::new(SpyMode::Forward).await;
-    fixture
-        .create_session("streamed-canonical-negotiated")
-        .await;
-    fixture
-        .append(&[
-            BaseMessage::human("归档问题"),
-            BaseMessage::ai("归档回答"),
-            BaseMessage::human("有效问题"),
-        ])
-        .await;
-    let canonical = fixture.canonical().await;
-    let live_id = canonical[2].id();
-    fixture.archive(&payload_ids(&canonical)[..2]).await;
-    fixture.set_connection_caps(PeriCaps {
-        replay: true,
-        history_pagination: true,
-        ..PeriCaps::default()
-    });
-    fixture.reset_reads();
-
-    let sid = fixture.id.clone();
-    let response = fixture.load_negotiated().await.unwrap();
-
-    let generation = response["_meta"]["periLoadGeneration"]
-        .as_str()
-        .expect("协商连接在响应里拿到代次")
-        .to_owned();
-    assert_eq!(
-        fixture.texts(),
-        vec!["有效问题"],
-        "协商连接回放的是**有效集合**（归档正文不重放）"
-    );
-    let updates = fixture.updates();
-    assert_eq!(updates.len(), 1);
-    let meta = &updates[0]["update"]["_meta"];
-    assert_eq!(meta["periReplay"], Value::Bool(true));
-    assert_eq!(meta["periLoadGeneration"], Value::String(generation));
-    assert_eq!(meta["periEntryId"], format!("{sid}:{}", live_id.as_uuid()));
-    assert!(
-        meta["periPosition"].as_u64().is_some(),
-        "协商连接的条目必须带存储序位置戳: {meta}"
-    );
-    assert_eq!(fixture.spy.full_reads(), 0, "协商路径不读全量 canonical");
-    assert_eq!(
-        fixture.spy.segment_calls().len(),
-        0,
-        "协商路径不走向前段读取"
-    );
 }

@@ -42,7 +42,7 @@ pub(super) fn request_older_page_at_scroll_facts(
     content_length: usize,
     viewport_length: usize,
 ) -> bool {
-    use crate::kit::history_paging::viewport_at_forward_boundary;
+    use super::geometry::viewport_at_forward_boundary;
     let at_boundary =
         viewport_at_forward_boundary(follow_bottom, offset, content_length, viewport_length) || {
             let (landed_offset, landed_follow) = super::project_viewport_after_pending(
@@ -61,7 +61,7 @@ pub(super) fn request_older_page_at_scroll_facts(
     if !at_boundary {
         return false;
     }
-    crate::kit::history_paging::request_older_page_if_due(true)
+    crate::kit::history_v2::consumer::request_older_page_if_due()
 }
 
 /// [REQ-C01-1] 滚动落定后的历史翻页触发口（滚动事件路径）——从 `State` 读事实，
@@ -97,7 +97,7 @@ pub(super) fn request_newer_page_at_scroll_facts(
     content_length: usize,
     viewport_length: usize,
 ) -> bool {
-    use crate::kit::history_paging::viewport_at_backward_boundary;
+    use super::geometry::viewport_at_backward_boundary;
     let at_boundary =
         viewport_at_backward_boundary(follow_bottom, offset, content_length, viewport_length) || {
             let (landed_offset, landed_follow) = super::project_viewport_after_pending(
@@ -113,7 +113,7 @@ pub(super) fn request_newer_page_at_scroll_facts(
                 viewport_length,
             )
         };
-    at_boundary && crate::kit::history_page_consumer::request_window_newer_page_if_due()
+    at_boundary && crate::kit::history_v2::consumer::request_newer_page_if_due()
 }
 
 fn request_newer_page_after_scroll(
@@ -153,33 +153,13 @@ fn request_pages_after_scroll(
         scroll_throttle,
         follow_bottom,
     );
-    // gap 回读需要方向：向上滚填缺口上端，向下滚填缺口下端。
-    let pending_delta = scroll_throttle.read().pending_delta;
-    let gap_direction = match pending_delta {
-        delta if delta < 0 => Some(crate::kit::history_window::GapSeekDirection::Before),
-        delta if delta > 0 => Some(crate::kit::history_window::GapSeekDirection::After),
-        _ => None,
-    };
-    let gap = request_gap_page_after_scroll(gap_direction);
+    let gap = request_gap_page_after_scroll();
     older || gap
 }
 
-/// 视口没有可映射锚点（gap/淘汰后的占位）时，按桥接发布的 gap 目标重读。
-pub(super) fn request_gap_page_after_scroll(
-    direction: Option<crate::kit::history_window::GapSeekDirection>,
-) -> bool {
-    if !crate::kit::history_page_consumer::window_path_enabled() {
-        return false;
-    }
-    let anchored = crate::kit::atoms::WINDOW_VIEWPORT
-        .state()
-        .read()
-        .as_ref()
-        .is_some_and(|viewport| viewport.anchor.is_some());
-    if anchored {
-        return false;
-    }
-    crate::kit::history_page_consumer::request_window_gap_if_due(direction)
+/// 视口没有可映射锚点时按 V2 reducer 的 coverage 判定重读缺口。
+pub(super) fn request_gap_page_after_scroll() -> bool {
+    crate::kit::history_v2::consumer::request_gap_if_due()
 }
 
 /// 统一取消入口：结束任何未完成/已升级的左键手势，不触发复制或折叠。

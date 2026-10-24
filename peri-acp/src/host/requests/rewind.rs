@@ -6,13 +6,8 @@
 //! 判成不存在。候选、预览与执行一律在存储的完整历史上定位目标（REQ-T04 明确允许
 //! 显式历史操作读取归档正文）；Host 快照只在提交成功后按同一结果重建，仍是展示投影。
 //!
-//! **破坏历史范围的操作推进结构版本**（REQ-T04 末段、验收 A19「旧 cursor 失效」）：
-//! durable 提交成功一次，本会话的 `SessionState::structure_version` 就 `+1`（**恰好一次**，
-//! 与提交共用同一个成功分支；失败分支不碰它——内存不得领先于已提交事实）。已发出的
-//! 历史分页游标在**进入存储之前**按这个版本被拒（`HistoryCursorEnvelope`）。
-//! 精确删除（`DurableRewindCommit::RemovedIds`，slash `/rewind` 专用）同样破坏范围，
-//! 但它与 RPC 路径共用本模块的提交点语义；当前 checkout 中 slash 执行入口没有生产调用者
-//! （见 `.recon/R4-verification.md` §I1 CAVEAT），接入时必须走同一处递增。
+//! **重启后不恢复执行**：durable 提交成功后才重建热态展示投影；失败分支不碰热态，
+//! 内存不得领先于已提交事实。
 //!
 //! **「提交没生效」不是成功**（F1）：存储的未知边界语义是「什么都不做」，而本 handler 在
 //! 提交返回后会把热态改写成「已截断 + 已清零」的那份。两条路径一旦分叉，冷恢复与运行中的
@@ -308,10 +303,6 @@ pub(super) async fn handle_rewind(
             cfg.session_manager.caps_registry(),
         ));
     let peri_config_snapshot = Arc::new(cfg.peri_config.read().clone());
-    if let Some(state) = sessions.get_mut(&session_id) {
-        // 窗口读取进入 mutation gate：新请求显式等待/拒绝，旧票据在结论出来前保留。
-        super::super::history_window::begin_rewind(state);
-    }
     let commit = dispatch::rewind_execute(
         params,
         history,
@@ -344,16 +335,11 @@ pub(super) async fn handle_rewind(
             // 持久化 uncertain 的错误由 `SessionResourceError` 的稳定 Display 进入
             // 共享执行体的 feedback；这里据此进入既有 ReloadRequired 语义。
             let uncertain = is_persistence_uncertain(&error);
-            if let Some(state) = sessions.get_mut(&session_id) {
-                super::super::history_window::finish_rewind(state, false);
-                // 失败/未证明的提交不得继续信任旧窗口票据；structureVersion 仍只在
-                // durable 成功分支推进。
-                super::super::history_window::revoke(state);
-                if uncertain {
+            if uncertain {
+                if let Some(state) = sessions.get_mut(&session_id) {
                     state.history_payloads.clear();
                     state.context_ownership = super::super::ContextOwnership::ReloadRequired;
                     state.cancel_token = None;
-                    super::super::history_window::invalidate(state);
                 }
             }
             return Err(error);
@@ -362,11 +348,8 @@ pub(super) async fn handle_rewind(
     // 提交成功之后才重建热态；失败路径已在上面返回（含「边界已不在存储里」的
     // `BoundaryMissing`：存储一行未动，热态不得前进，结构版本也不得递增）。
     if let Some(state) = sessions.get_mut(&session_id) {
-        // 结构版本与热态重建在同一个成功分支里推进：范围已变，已发出的分页游标作废。
-        // 这里**只能递增一次**（本函数是 RPC rewind 的唯一成功出口）。
-        state.structure_version = state.structure_version.saturating_add(1);
+        // 热态重建与成功响应在同一分支推进：失败路径已在上面返回。
         publish_rewind_view(state, effective);
-        super::super::history_window::finish_rewind(state, true);
         // wire 里的 `history` 与热态投影共用同一份重建结果：执行体看到的是含归档正文的
         // 完整历史，直接把它当结果返回会把已归档的正文重新暴露给调用方。
         response["history"] = json!(state.effective_messages());

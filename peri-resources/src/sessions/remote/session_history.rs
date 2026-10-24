@@ -64,7 +64,7 @@ const GUARD_MESSAGE_FOREIGN_SQL: &str = "INSERT INTO peri_store_meta(singleton)
 /// rewind 的删除下界必须仍是批外读到的**同一行**：中止整批。
 ///
 /// 边界 `rowid` 是在批外解析的，而删掉尾部行之后新追加的行会复用这些 `rowid`
-/// （本机同一事实，见 `HISTORY_PAGE_ROWS_SQL` 的注记）。少了这条守卫，一次并发追加
+/// （本机同一事实，见 `HISTORY_WINDOW_BEFORE_SQL` 的注记）。少了这条守卫，一次并发追加
 /// 的合规条目会落进 `rowid >= 边界` 的删除区间，被这次 rewind 一并删掉——它从未被
 /// 本次操作看见，也没有任何前置一致读或清零守卫能拦住它。
 const GUARD_BOUNDARY_ROWID_SQL: &str = "INSERT INTO peri_store_meta(singleton)

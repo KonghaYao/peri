@@ -143,8 +143,8 @@ pub(crate) async fn handle_request_for_connection(
         // 生产 `ServerLoop` 在进入本分派前已把 session/load、session/resume、
         // session/fork 分流到 `*_shared` 路径；以下三个分支只服务进程内/测试入口，
         // 因此旧 `prepare_existing` 的锁内 I/O 不在生产路径上。
-        // 初始 load 的回放标记与代次戳按**当前连接**的协商结果决定（REQ §5.3）：
-        // 分页准入（`history_pagination`）与回放能力集（`caps`）都来自本连接的事实快照。
+        // 初始 load 的回放标记按**当前连接**的协商结果决定（REQ §5.3）：
+        // 回放能力集（`caps`）来自本连接的事实快照。
         "session/load" => {
             session_lifecycle::handle_load(params, cfg, sessions, transport, connection).await
         }

@@ -310,23 +310,6 @@ impl AcpTuiClient {
                                 );
                             }
                         }
-                    } else if method == "peri/history_committed" {
-                        let session_id = params
-                            .get("sessionId")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
-                        debug!(
-                            session_id = %session_id,
-                            "ACP client pump: received history_committed"
-                        );
-                        Self::deliver_ordinary(
-                            &lifecycle,
-                            &transport,
-                            &notification_tx,
-                            session_id.clone(),
-                            AcpNotification::HistoryCommitted { session_id, params },
-                        );
                     } else if method == "peri/agent_activity" {
                         // Compact GUI projection. The TUI already owns richer
                         // native event rendering, so consume this negotiated

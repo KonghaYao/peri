@@ -17,6 +17,27 @@ use peri_acp_types::thread::ThreadId;
 use super::blob_reader::{BlobReadError, BlobReader};
 use super::inherited_blob::{read_payload_id, Cursor, PayloadDecoding};
 
+// 测试探针：线程内记录全列回退扫描次数，避免并行测试互相污染。
+#[cfg(test)]
+thread_local! {
+    static FALLBACK_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn reset_fallback_scan_probe() {
+    FALLBACK_SCANS.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(super) fn fallback_scan_count() -> usize {
+    FALLBACK_SCANS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_fallback_scan() {
+    FALLBACK_SCANS.with(|count| count.set(count.get() + 1));
+}
+
 /// 一条 payload 在列内的转义原文区间（不含两端引号）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct PayloadSpan {
@@ -152,6 +173,8 @@ fn walk_payload_spans(
 
 /// 轻量摘要：只读取首尾 payload 的身份，不为中间条目构造布局。
 pub(super) fn scan_summary(reader: &BlobReader) -> Result<InheritedSummary, BlobReadError> {
+    #[cfg(test)]
+    record_fallback_scan();
     let mut first = None;
     let mut last = None;
     let walk = walk_payload_spans(reader, |span| {
@@ -184,6 +207,8 @@ pub(super) fn scan_summary(reader: &BlobReader) -> Result<InheritedSummary, Blob
 
 /// 完整布局：遍历一次 span，再为每条 payload 读取稳定身份并建立位置映射。
 pub(super) fn scan_layout(reader: &BlobReader) -> Result<InheritedLayout, BlobReadError> {
+    #[cfg(test)]
+    record_fallback_scan();
     let mut spans = Vec::new();
     let walk = walk_payload_spans(reader, |span| {
         spans.push(span);

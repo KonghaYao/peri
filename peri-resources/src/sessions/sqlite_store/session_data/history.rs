@@ -1,42 +1,9 @@
 use super::*;
-use peri_acp_types::history_window::{
+use peri_acp_types::history_common::{
     HistoryBodyChunk, HistoryEntryId, HistoryInheritedSnapshot, HistoryWindowError,
 };
 
-// ─── 分页读取（archive 视图） ──────────────────────────────────────────────────
-
-/// 浏览范围的边界事实（分页读取与初始 load 共用的**唯一**一条边界语句）：目标会话存在吗、
-/// 浏览范围起点是谁、锚点行在不在。
-///
-/// 会话不存在时**没有行**（`NotFound`）；起点缺失为 NULL，锚点列只是**存在性判据**
-/// （`NULL` = 锚点已不在）。刻意不写 `COALESCE(..., MAX(rowid) + 1)` 这类兜底：锚点消失
-/// 必须失败关闭，不能悄悄把它变成「从最新一页开始」。
-/// 计划证据要取的就是这条语句（见 `session_history_perf_test.rs`）：可见性提到 `crate::sessions`，
-/// 让测试拿到的文本与生产执行的**同一条**，不复制 SQL。
-pub(in crate::sessions) const HISTORY_PAGE_BOUNDS_SQL: &str = "SELECT
-        (SELECT m.message_id FROM messages m WHERE m.thread_id = t.id ORDER BY m.rowid ASC LIMIT 1),
-        (SELECT m.rowid FROM messages m WHERE m.thread_id = t.id AND m.message_id = ?2)
-    FROM threads t WHERE t.id = ?1";
-
-/// 一页候选行（更早方向，含不可展示行）的**阶段一**读取：身份 + 存储序键 + 正文长度，
-/// 最多 `limit + 1` 行，**不取正文**。
-///
-/// `?2` 为空 = 首屏，从最新一行开始——只有首屏允许这条路径：带游标时锚点行的 rowid 已由
-/// [`HISTORY_PAGE_BOUNDS_SQL`] 证明存在，`None` 在那里已经变成失败。锚点用**子查询按
-/// `message_id` 定位**（同一条语句内完成，两次语句之间不引入新的时间点），排序才用
-/// `rowid`：删掉尾部行之后新插入的行会复用这些 rowid，rowid 不是稳定的条目身份。
-///
-/// 长度是**字节数**，与页预算和 `content.len()` 同一口径；`rowid` 只作为客户端可见的
-/// 不透明位置返回（见 `HistoryPageItem::position`），不参与条目身份。
-///
-/// 阶段一**不**在 SQL 里计算长度：`length(CAST(content AS BLOB))` 会让 SQLite 物化整条
-/// 正文（16 MiB 行每次多分配约 16 MiB）。身份与存储序先取回，长度逐行由 blob 句柄的
-/// `sqlite3_blob_bytes` 给出（O(1)，不读正文），见 [`read_content_lengths`]。
-pub(in crate::sessions) const HISTORY_PAGE_ROWS_SQL: &str = "SELECT message_id, rowid
-    FROM messages
-    WHERE thread_id = ?1 AND (?2 IS NULL OR rowid < (
-        SELECT m.rowid FROM messages m WHERE m.thread_id = ?1 AND m.message_id = ?2))
-    ORDER BY rowid DESC LIMIT ?3";
+// ─── 正文与位置读取 ────────────────────────────────────────────────────────────
 
 /// 阶段二的正文读取语句原文（主键单行；计划证据与生产读取同一份文本）。
 pub(in crate::sessions) const HISTORY_PAGE_BODY_SQL: &str =
@@ -110,8 +77,9 @@ pub(in crate::sessions) const HISTORY_WINDOW_TAIL_CHECK_SQL: &str =
 
 /// before 方向候选：`rowid <= tail`，并按锚点身份定位；`?4` 为 1 时包含锚点自身
 /// （seek/open(entry)），为 0 时严格更早（游标翻页）。最多 `limit + 1` 行，不取正文；
-/// 长度由 blob 句柄逐行给出（理由见 [`HISTORY_PAGE_ROWS_SQL`]）。
-pub(in crate::sessions) const HISTORY_WINDOW_BEFORE_SQL: &str = "SELECT message_id, rowid
+/// `role` 随行返回，供 History V2 在不读正文时判定 oversize 可见性。长度由 blob 句柄
+/// 逐行给出（长度表达式不进 SQL，理由见 [`read_content_lengths`]）。
+pub(in crate::sessions) const HISTORY_WINDOW_BEFORE_SQL: &str = "SELECT message_id, rowid, role
     FROM messages
     WHERE thread_id = ?1 AND rowid <= ?2
       AND (?3 IS NULL OR rowid < ?3 OR (?4 <> 0 AND rowid = ?3))
@@ -119,8 +87,8 @@ pub(in crate::sessions) const HISTORY_WINDOW_BEFORE_SQL: &str = "SELECT message_
 
 /// after 方向候选：`anchor < rowid <= tail`，升序，最多 `limit + 1` 行，不取正文；
 /// 长度由 blob 句柄逐行给出；`?4` 为 1 时包含锚点自身（`open(entry, after)` 且
-/// before 半段不存在），保证锚点恰好返回一次。
-pub(in crate::sessions) const HISTORY_WINDOW_AFTER_SQL: &str = "SELECT message_id, rowid
+/// before 半段不存在），保证锚点恰好返回一次。`role` 口径同 before。
+pub(in crate::sessions) const HISTORY_WINDOW_AFTER_SQL: &str = "SELECT message_id, rowid, role
     FROM messages
     WHERE thread_id = ?1 AND rowid <= ?2
       AND (rowid > ?3 OR (?4 <> 0 AND rowid = ?3))
@@ -141,12 +109,18 @@ pub(in crate::sessions) const HISTORY_WINDOW_NEWER_EXISTS_SQL: &str =
 pub(in crate::sessions) const HISTORY_WINDOW_BODY_ROWID_SQL: &str = "SELECT rowid FROM messages
     WHERE thread_id = ?1 AND message_id = ?2 AND rowid <= ?3";
 
+/// 条目元数据定位：主键 + 固定 tail，同时取出存储 role。长度仍由 blob 句柄给出，
+/// 不读取正文；这是 body 定位的独立入口，不受页预算影响。
+pub(in crate::sessions) const HISTORY_WINDOW_ENTRY_METADATA_SQL: &str = "SELECT rowid, role
+    FROM messages
+    WHERE thread_id = ?1 AND message_id = ?2 AND rowid <= ?3";
+
 // ─── 向前段读取（canonical 完整回放，REQ §5.3） ──────────────────────────────
 
 /// 段读取的边界事实：会话存在吗 + 本次回放的固定上界（该线程自有行的最大 `rowid`，
 /// 没有自有行时为 NULL）。
 ///
-/// 与 [`HISTORY_PAGE_BOUNDS_SQL`] 同形（`threads` 单行 + 子查询）：会话不存在时**没有行**
+/// 与窗口边界读取同形（`threads` 单行 + 子查询）：会话不存在时**没有行**
 /// （`NotFound`），存在性判定因此不需要额外一次读取。上界在这里读出来交给游标，行则由
 /// [`HISTORY_SEGMENT_HEAD_SQL`] 在**同一条语句内**再算一次 `MAX(rowid)` 作谓词——两条语句
 /// 落在同一个只读事务里，区间与行同源（不写 `COALESCE(MAX(rowid), …)` 这类兜底：没有自有行
@@ -155,7 +129,7 @@ pub(in crate::sessions) const HISTORY_SEGMENT_TAIL_SQL: &str = "SELECT
         (SELECT MAX(m.rowid) FROM messages m WHERE m.thread_id = t.id)
     FROM threads t WHERE t.id = ?1";
 
-/// 首段候选行（**阶段一**：身份 + 存储序键，记忆同 [`HISTORY_PAGE_ROWS_SQL`]），
+/// 首段候选行（**阶段一**：身份 + 存储序键，长度按 blob 长度逐行读取），
 /// 最多 `limit + 1` 行，**升序**（canonical 完整回放方向），**不取正文**。
 ///
 /// 与非首段同形，只是去掉 `rowid > ?2`，并把上界交给同一条语句内的 `MAX(rowid)` 子查询：
@@ -184,54 +158,6 @@ pub(in crate::sessions) const HISTORY_SEGMENT_NEXT_SQL: &str = "SELECT message_i
     ORDER BY rowid ASC LIMIT ?4";
 
 impl SqliteSessionData {
-    /// 边界事实的**唯一**读取：目标会话存在吗、浏览范围起点是谁、锚点行在不在。
-    ///
-    /// 分页读取与 [`Self::read_history_page_bounds`] 都走这里：浏览范围的起点在代码里只有一份
-    /// 定义，两条路径不会各自演化成两种「起点」。锚点列（`Option<i64>`）只是**存在性判据**：
-    /// 它不参与任何身份判定，游标身份始终是 `message_id`。
-    ///
-    /// 调用方必须已开事务并确认会话存在（[`Self::require_session`]），使这条单行读取与
-    /// 它服务的候选行/回答落在同一时刻。
-    async fn read_page_bounds(
-        connection: &mut SqliteConnection,
-        id: &ThreadId,
-        anchor: Option<&str>,
-    ) -> SessionResourceResult<(Option<String>, bool)> {
-        let bounds: Option<(Option<String>, Option<i64>)> = sqlx::query_as(HISTORY_PAGE_BOUNDS_SQL)
-            .bind(id.as_str())
-            .bind(anchor)
-            .fetch_optional(&mut *connection)
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        // 会话不存在时边界语句一行都没有；起点缺失为 NULL。
-        let (range_head, anchor_rowid) = bounds.ok_or_else(not_found)?;
-        Ok((range_head, anchor_rowid.is_some()))
-    }
-
-    /// 一次有界单行读取：浏览范围边界（见 [`HistoryPageBounds`]）。
-    ///
-    /// 回答「更早方向还有没有内容」（`range_head = None` 即没有）并给出初始游标要携带的
-    /// 范围身份；与分页读取同一条边界语句、同一份解码。锚点这一档固定为空：调用方还没有
-    /// 游标，也不该在这里模拟一次带锚点的读取。
-    pub(super) async fn read_history_page_bounds(
-        &self,
-        id: &ThreadId,
-    ) -> SessionResourceResult<HistoryPageBounds> {
-        let mut connection = self
-            .database
-            .pool
-            .acquire()
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        let mut tx = sqlx::Connection::begin(&mut *connection)
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        self.require_session(&mut tx, id).await?;
-        let (range_head, _) = Self::read_page_bounds(&mut tx, id, None).await?;
-        tx.commit().await.map_err(|error| map_sqlx(&error))?;
-        HistoryPageBounds::new(range_head.as_deref())
-    }
-
     /// 自有**有效**条目的存储序键（`message_id → rowid`）：一次有界读取，**不读正文**。
     ///
     /// 只服务初始 load 的回放：客户端要按位置把后到的页并进稀疏首屏（REQ-H01-3），
@@ -260,73 +186,11 @@ impl SqliteSessionData {
             .collect()
     }
 
-    /// 有界读取一页历史（更早方向）：边界事实、阶段一的候选行与阶段二的正文取自**同一个**
-    /// 只读事务（REQ-H02「固定范围 + 变更校验」，不引入长事务，也不允许两阶段跨快照）。
-    ///
-    /// 阶段二按 [`HistoryPagePlan::body_ids`] 逐 id 取正文：多读的那一条候选行的正文
-    /// **永远不出库**（REQ-H03）。回复行数或身份对不上即损坏，见
-    /// [`Self::read_page_bodies`]。
-    pub(super) async fn read_history_page(
-        &self,
-        id: &ThreadId,
-        cursor: Option<&HistoryCursor>,
-        limit: usize,
-        byte_budget: usize,
-    ) -> SessionResourceResult<HistoryPage> {
-        if let Some(cursor) = cursor {
-            if cursor.thread_id != *id {
-                return Err(HistoryCursorError::CrossSession {
-                    expected: id.clone(),
-                    cursor: cursor.thread_id.clone(),
-                }
-                .into());
-            }
-        }
-        let mut connection = self
-            .database
-            .pool
-            .acquire()
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        let mut tx = sqlx::Connection::begin(&mut *connection)
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        self.require_session(&mut tx, id).await?;
-        let anchor_target = cursor.map(|cursor| cursor.anchor.as_uuid().to_string());
-        let (range_head, anchor_present) =
-            Self::read_page_bounds(&mut tx, id, anchor_target.as_deref()).await?;
-        // 锚点行在不在：rowid 只作存在性判据，游标身份始终是 message_id（游标身份规则见
-        // [`resolve_browsing_range`]）。
-        let range_token = resolve_browsing_range(cursor, range_head, anchor_present)?;
-        // 阶段一：`limit + 1` 是「多出的那一条候选行」，只用来判断更早方向还有没有内容。
-        let candidates: Vec<(String, i64)> = sqlx::query_as(HISTORY_PAGE_ROWS_SQL)
-            .bind(id.as_str())
-            .bind(anchor_target.as_deref())
-            .bind(limit.saturating_add(1) as i64)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(|error| map_sqlx(&error))?;
-        let candidates = read_content_lengths(&mut tx, candidates).await?;
-        let candidates = candidates
-            .into_iter()
-            .map(|(message_id, position, encoded_bytes)| {
-                HistoryPageCandidate::new(&message_id, position, encoded_bytes)
-            })
-            .collect::<SessionResourceResult<Vec<_>>>()?;
-        let plan = HistoryPagePlan::plan(id, &range_token, candidates, limit, byte_budget);
-        // 阶段二：只取本页那些行，同一事务（同一快照）。
-        let rows = Self::read_page_bodies(&mut tx, id, &plan.body_ids()).await?;
-        // 只读事务：没有写入效果可以证明，提交失败仍按原因分类。
-        tx.commit().await.map_err(|error| map_sqlx(&error))?;
-        plan.materialize(rows)
-    }
-
     /// 有界读取**一段** canonical 完整历史（向前方向）：首段的继承区、固定上界与候选行取自
     /// **同一个**只读事务（REQ §5.3 的「`tail` 与返回的行同源」），阶段二只取本段那些行的正文。
     ///
-    /// 与 [`Self::read_history_page`] 的差别只有方向与过滤规则：这里读完整历史（不过滤
-    /// `excluded`、不过滤 System），阶段二则复用同一份 [`Self::read_page_bodies`]（同一条
-    /// 主键单行语句），多读的那一条候选行的正文永远不出库。
+    /// 阶段二只取本段那些行的正文，复用同一份 [`Self::read_page_bodies`]（同一条主键单行
+    /// 语句），多读的那一条候选行的正文永远不出库。
     ///
     /// 锚点行不在了即 `Expired`（与分页读取的游标过期同一处置）：不回退成首段，也不用空段
     /// 冒充回放结束。
@@ -415,7 +279,7 @@ impl SqliteSessionData {
 
     /// 阶段二：**只**取计划里那些行的正文（按 id 集合，逐 id 一条语句）。
     ///
-    /// 与 [`Self::read_history_page`] 的调用方同一事务：两阶段必须落在同一个快照上，否则
+    /// 与段读取的调用方同一事务：两阶段必须落在同一个快照上，否则
     /// 「按长度定的页」与「取回的正文」可能来自两个时刻。每个 id 恰好一行、行内 id 必须
     /// 与请求一致，否则是损坏——不完整读取绝不能降级成「这一行没有正文」。
     pub(super) async fn read_page_bodies(
@@ -457,7 +321,30 @@ pub(super) async fn read_content_lengths(
     Ok(measured)
 }
 
-async fn read_content_length(
+/// 窗口候选：除长度外保留 `messages.role`，不读正文。
+///
+/// 与 [`read_content_lengths`] 同一份 blob 长度读取；`role` 只是可见性粗分类，
+/// 不参与身份或排序。
+pub(super) async fn read_window_candidates(
+    connection: &mut SqliteConnection,
+    rows: Vec<(String, i64, String)>,
+) -> SessionResourceResult<Vec<HistoryPageCandidate>> {
+    let mut candidates = Vec::with_capacity(rows.len());
+    for (message_id, rowid, role) in rows {
+        let total = read_content_length(connection, rowid).await?;
+        let encoded_bytes = i64::try_from(total)
+            .map_err(|_| corrupt("history entry length exceeds the supported range"))?;
+        candidates.push(HistoryPageCandidate::new_with_role(
+            &message_id,
+            rowid,
+            encoded_bytes,
+            HistoryEntryRole::from_stored(&role),
+        )?);
+    }
+    Ok(candidates)
+}
+
+pub(super) async fn read_content_length(
     connection: &mut SqliteConnection,
     rowid: i64,
 ) -> SessionResourceResult<u64> {
@@ -758,6 +645,13 @@ pub(in crate::sessions) const HISTORY_WINDOW_INHERITED_BODY_SQL: &str = "SELECT 
 pub(in crate::sessions) const HISTORY_WINDOW_INHERITED_CHUNK_SQL: &str =
     "SELECT length(CAST(je.value AS BLOB)),
             substr(CAST(je.value AS BLOB), ?3 + 1, ?4)
+    FROM threads t, json_each(t.inherited_context, '$.payloads') je
+    WHERE t.id = ?1 AND je.key = ?2";
+
+/// 非 canonical inherited 信封的条目长度（body 定位的独立回退入口）。
+/// 与 [`HISTORY_WINDOW_INHERITED_CHUNK_SQL`] 的 `length` 口径相同，但不取正文块。
+pub(in crate::sessions) const HISTORY_WINDOW_INHERITED_LENGTH_SQL: &str =
+    "SELECT length(CAST(je.value AS BLOB))
     FROM threads t, json_each(t.inherited_context, '$.payloads') je
     WHERE t.id = ?1 AND je.key = ?2";
 

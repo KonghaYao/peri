@@ -26,9 +26,6 @@ pub(super) fn update_follow_on_scroll(
     offset_y: usize,
 ) {
     *follow_bottom.write_no_update() = should_follow_after_user_scroll(max_scroll, offset_y);
-    if crate::kit::history_page_consumer::window_path_enabled() {
-        crate::kit::history_window::update_window_viewport_follow(*follow_bottom.read());
-    }
 }
 
 /// §8.1 `↓ New output` 指示器判定：浏览态（用户滚离底部，follow=false）且
@@ -279,22 +276,16 @@ pub(in crate::kit::message_area) fn run_auto_follow(ctx: &AutoFollowCtx) {
         return;
     }
     // 向前边界：视口顶端贴着已载入窗口的最早一行。内容不足一屏时同样算贴边——
-    // 稀疏首屏的旧历史空缺正是这种形态（REQ-C01-1）。相同 cursor 的并发触发在
-    // 认领处合并，退避窗口内的重复触发是 no-op（REQ-C01-2）。
+    // 稀疏首屏的旧历史空缺正是这种形态（REQ-C01-1）。相同游标的并发触发在
+    // reducer 认领处合并，退避窗口内的重复触发是 no-op（REQ-C01-2）。
     //
     // 这里只覆盖「内容变化驱动的触发」（含稀疏首屏自动续读）；**空闲会话**里
     // 用户滚到顶端由滚动事件路径触发（`scroll/event.rs` 的
-    // `request_older_page_at_scroll_facts`，见 `history_paging::request_older_page_at_boundary`
-    // 的调用路径说明）。
-    crate::kit::history_paging::request_older_page_at_boundary(
-        !browsing,
-        scroll_y,
-        ctx.total_visual_rows,
-        ctx.vis_height as usize,
-    );
-    // 跟随态在底部：窗口模式按 after_cursor 拉取更新的一页；consumer 自己合并/退避。
+    // `request_older_page_at_scroll_facts`）。
+    crate::kit::history_v2::consumer::request_older_page_if_due();
+    // 跟随态在底部：按 after_cursor 拉取更新的一页；consumer 自己合并/退避。
     if !browsing {
-        crate::kit::history_page_consumer::request_window_newer_page_if_due();
+        crate::kit::history_v2::consumer::request_newer_page_if_due();
     }
 
     // ── 粘性跟随 guard ──

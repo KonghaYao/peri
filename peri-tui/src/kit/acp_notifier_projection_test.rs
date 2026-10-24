@@ -22,8 +22,7 @@ async fn available_commands_update_refreshes_mcp_slash_cache_immediately() {
             }]
         }
     });
-    let (bridge_tx, _bridge_rx) = tokio::sync::mpsc::channel(4);
-    let _ = handle_session_update(payload, &bridge_tx, "test").await;
+    let _ = handle_session_update(payload, "test").await;
 
     let items = crate::kit::input_area::get_cached_slash_items();
     assert!(
@@ -49,8 +48,7 @@ async fn test_handle_session_update_parses_available_commands() {
             ]
         }
     });
-    let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::channel(4);
-    let _ = handle_session_update(payload, &dummy_tx, "test").await;
+    let _ = handle_session_update(payload, "test").await;
     let entries = AVAILABLE_SLASH_COMMANDS.state().read().clone();
     assert_eq!(entries.len(), 3);
     // Phase 4 步骤 1：投影 DTO 结构化后按字段断言；缺 _meta 的条目
@@ -100,8 +98,7 @@ async fn test_handle_session_update_parses_projection_fields() {
             ]
         }
     });
-    let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::channel(4);
-    let _ = handle_session_update(payload, &dummy_tx, "test").await;
+    let _ = handle_session_update(payload, "test").await;
     let entries = AVAILABLE_SLASH_COMMANDS.state().read().clone();
     assert_eq!(entries.len(), 1);
     let e = &entries[0];
@@ -151,8 +148,7 @@ async fn test_handle_session_update_projection_missing_meta_defaults() {
             ]
         }
     });
-    let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::channel(4);
-    let _ = handle_session_update(payload, &dummy_tx, "test").await;
+    let _ = handle_session_update(payload, "test").await;
     let entries = AVAILABLE_SLASH_COMMANDS.state().read().clone();
     assert_eq!(entries.len(), 2);
     for e in &entries {
@@ -183,8 +179,7 @@ async fn test_handle_session_update_skips_non_command_update() {
             "total": 200000
         }
     });
-    let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::channel(4);
-    let _ = handle_session_update(payload, &dummy_tx, "test").await;
+    let _ = handle_session_update(payload, "test").await;
     let entries = AVAILABLE_SLASH_COMMANDS.state().read().clone();
     assert_eq!(entries.len(), 0, "非 commands update 不应写入 atom");
 }
@@ -206,8 +201,7 @@ async fn test_usage_update_decodes_root_cache_sample_without_per_step_notificati
             }
         }
     });
-    let (dummy_tx, mut dummy_rx) = tokio::sync::mpsc::channel(4);
-    let result = handle_session_update(payload, &dummy_tx, "test").await;
+    let result = handle_session_update(payload, "test").await;
     match result {
         Some(AcpEventData::CacheUsageUpdated(Some(sample))) => {
             assert_eq!(sample.input_tokens, 20_000);
@@ -216,15 +210,10 @@ async fn test_usage_update_decodes_root_cache_sample_without_per_step_notificati
         }
         other => panic!("expected cache usage sample, got {other:?}"),
     }
-    assert!(
-        dummy_rx.try_recv().is_err(),
-        "notifier must not push a per-step cache warning"
-    );
 }
 
 #[tokio::test]
 async fn test_usage_update_ignores_auxiliary_and_preserves_explicit_zero_cache_read() {
-    let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::channel(4);
     let payload = |usage_meta: serde_json::Value, params_meta: serde_json::Value| {
         json!({
             "_meta": params_meta,
@@ -240,7 +229,6 @@ async fn test_usage_update_ignores_auxiliary_and_preserves_explicit_zero_cache_r
                 json!({"inputTokens": 100, "outputTokens": 1, "cacheReadTokens": 70}),
                 json!({"peri": {"sourceAgentId": "child"}})
             ),
-            &dummy_tx,
             "test"
         )
         .await
@@ -251,7 +239,6 @@ async fn test_usage_update_ignores_auxiliary_and_preserves_explicit_zero_cache_r
             json!({"inputTokens": 100, "outputTokens": 1, "cacheReadTokens": 0}),
             json!({}),
         ),
-        &dummy_tx,
         "test",
     )
     .await;
@@ -266,7 +253,7 @@ async fn test_usage_update_ignores_auxiliary_and_preserves_explicit_zero_cache_r
     let invalid_meta = json!({"inputTokens": 100, "outputTokens": 1, "cacheReadTokens": 101});
     assert!(
         matches!(
-            handle_session_update(payload(invalid_meta, json!({})), &dummy_tx, "test").await,
+            handle_session_update(payload(invalid_meta, json!({})), "test").await,
             Some(AcpEventData::CacheUsageUpdated(None))
         ),
         "inconsistent root usage must remain unavailable"
@@ -274,7 +261,6 @@ async fn test_usage_update_ignores_auxiliary_and_preserves_explicit_zero_cache_r
     assert!(
         handle_session_update(
             payload(json!({"inputTokens": 100, "outputTokens": 1}), json!({})),
-            &dummy_tx,
             "test"
         )
         .await
@@ -303,8 +289,7 @@ async fn test_handle_session_update_parses_plan() {
         }
     });
 
-    let (dummy_tx, _dummy_rx) = tokio::sync::mpsc::channel(4);
-    let _ = handle_session_update(payload, &dummy_tx, "test").await;
+    let _ = handle_session_update(payload, "test").await;
 
     let items = crate::kit::atoms::TODO_ITEMS.state().read().clone();
     assert_eq!(items.len(), 3, "应包含 3 个条目，实际: {items:?}");

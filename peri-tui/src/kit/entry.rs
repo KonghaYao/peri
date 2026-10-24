@@ -76,20 +76,8 @@ pub async fn run_kit_fullscreen(
     //     App::new 时一次性确定）。TUI 面板保存经 save_effective 走此句柄，
     //     ACP host 的 persist_config 与它共享同一 Arc——两处写回不可能分叉。
     let _ = atoms::CONFIG_SOURCE_HANDLE.set(app.config_source.clone());
-    // S7.5：TUI 本地投影默认开启（未配置 = 开启，显式 false = 关闭）；启动时只写一次。
-    // 本开关与服务端 `peri.historyWindowV1` 协商结果相互独立，后者 fail-closed。
-    let history_window_beta = app
-        .config_source
-        .snapshot()
-        .map(|snapshot| {
-            crate::kit::history_window::history_window_beta_enabled_from_flags(snapshot.flags())
-        })
-        .unwrap_or_else(|| {
-            crate::kit::history_window::history_window_beta_enabled(
-                &app.services.peri_config.read(),
-            )
-        });
-    crate::kit::history_window::apply_history_window_beta(history_window_beta);
+    // 本地 TUI 始终请求 History V2；没有新旧实现选择开关，也不读取旧 beta。
+    // 是否真正启用由 initialize 的服务端回显决定（fail-closed）。
     // 2b0. 从 AppConfig.extra 提取旧 TUI 键初始化 TuiConfig（向后兼容）
     {
         let cfg = app.services.peri_config.read();
@@ -371,26 +359,16 @@ pub async fn run_kit_fullscreen(
         let _ =
             atoms::THREAD_LOAD_TX.set(ThreadLoadDispatcher::new(thread_load_tx, client.clone()));
 
-        // 4b2a. HISTORY_PAGES channel：message_area 滚动触发 → history_page_consumer。
-        // 与 THREAD_LOAD 分开：历史页只读浏览，不参与会话装配、生命周期锁与 load
-        // reservation（未取 reservation 的请求不阻塞提交，也不改会话绑定）。
-        let (history_pages_tx, history_pages_rx) = mpsc::unbounded_channel();
-        let _ = atoms::HISTORY_PAGES_TX.set(history_pages_tx);
-        let _history_page_consumer = crate::kit::history_page_consumer::spawn_history_page_consumer(
+        // 4b2c. HISTORY_V2 channel：open/page/seek/详情正文（唯一历史入口）。
+        let (history_v2_tx, history_v2_rx) = mpsc::unbounded_channel();
+        *atoms::HISTORY_V2_TX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(history_v2_tx);
+        let _history_v2_consumer = crate::kit::history_v2::consumer::spawn_history_v2_consumer(
             client.clone(),
-            history_pages_rx,
+            history_v2_rx,
             shutdown.clone(),
         );
-
-        // 4b2b. HISTORY_WINDOW channel：S5.4 窗口 open/page/seek（默认开关关闭）。
-        let (history_window_tx, history_window_rx) = mpsc::unbounded_channel();
-        let _ = atoms::HISTORY_WINDOW_TX.set(history_window_tx);
-        let _history_window_consumer =
-            crate::kit::history_page_consumer::spawn_history_window_consumer(
-                client.clone(),
-                history_window_rx,
-                shutdown.clone(),
-            );
 
         // 4a2. CANCEL channel：event_handlers Ctrl+C → cancel_consumer
         let (cancel_tx, cancel_rx) = mpsc::unbounded_channel::<()>();
@@ -443,7 +421,19 @@ pub async fn run_kit_fullscreen(
             )
             .collect();
         if let Err(error) = client.register_ui_commands(&specs).await {
-            tracing::warn!(error = %error, "kit: ui command capability negotiation failed");
+            // History V2 是本 TUI 唯一的历史协议；initialize 失败意味着无法协商 V2，
+            // 继续启动只会落到不可用的历史路径。启动期显式失败。
+            shutdown.cancel();
+            client.close();
+            teardown_app(&mut app).await;
+            return Err(anyhow::anyhow!(
+                "History V2 initialize failed: {error}. 服务端未启用/不支持 History V2"
+            ));
+        } else if let Err(message) = client.require_history_v2_startup() {
+            shutdown.cancel();
+            client.close();
+            teardown_app(&mut app).await;
+            return Err(anyhow::anyhow!(message));
         }
         let _steer_handle = crate::kit::steer_consumer::spawn_steer_consumer(
             client.clone(),

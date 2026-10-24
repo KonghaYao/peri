@@ -36,6 +36,8 @@ async fn removed_execution_protocols_are_unsupported() {
         "session/work/resolve",
         "session/execute",
         "session/execute/resolve",
+        // 旧私有历史正文方法：已删除，必须与未知方法同处置。
+        "session/history/body",
     ] {
         let error = handle_request(
             method,

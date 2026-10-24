@@ -84,135 +84,93 @@ BridgeState.committed + CurrentTurn
 固定帧预算内合并连续主 Agent 更新，但首块边界、终态和 reset 必须及时发布。Markdown、wrap
 和 viewport 性能契约见 [TUI 流式 Markdown 性能设计](tui-streaming-markdown-performance.md)。
 
-## 历史窗口与段生命周期（服务端能力门控）
+## 历史：History V2 唯一链路
 
-`peri.historyWindowV1` 复用 `session/load` 的 `history` 字段（`open`/`page`/`seek`），正文分块
-走 `session/history/body`；提交事实经私有通知 `peri/history_committed` 送达。该路径由服务端能力
-门控：`initialize` 响应未明确回显 `peri.historyWindowV1: true` 时一律 fail-closed，客户端请求值
-不能替代服务端能力事实。TUI 本地投影开关未开启时，旧 `HISTORY_PAGING` 分页与渲染路径保持不变，
-所有已加载历史继续固定、不淘汰。开关只决定是否采用窗口模型，不改变协议协商结果。
-`HISTORY_WINDOW_V1` 由 settings beta `history-window-v1` 在启动时读取一次并写入 atom；未配置视为
-开启（发布启用绑定 S7），只有显式配置 `false` 才关闭。设置变更不热重载，重启后生效。仍要求
-服务端明确回显 `peri.historyWindowV1: true`。Beta 设置面板仍只列
-`peri-acp-types::beta_flags::BETA_FLAGS`，该键需手动写入 settings。
+本地 TUI 始终在 `initialize` 请求 `_meta["peri.history"]`，服务端显式选择 `version=2` +
+`windowed` 后才建立历史状态；未协商到时 `require_history_v2_startup` 让启动失败，不发送旧
+私有请求，也不回退标准全量回放。服务端 `session/load` 的 initial 是首屏唯一来源，后续浏览
+只走 `_peri/history` 的 `open/page/seek/body/close`。旧分页、旧窗口与 `peri/history_committed`
+消费路径已删除，不存在新旧两套状态并存。
 
-声明 `peri.historyWindowV1` 的连接，其 `session/load` **不回放历史**；TUI 在 load 响应后先完成
-用户输入快照等本地初始化，成功后才 `enqueue_window_open`，初始化失败不得 open。首屏因此完全
-由随后的 `history.open` 提供；第三方客户端声明能力却不 open 会看到空首屏。
+### 出站调度与顺序（FIX-01）
 
-### 请求与通知时序
+所有 V2 RPC 进入 `kit/history_v2/outbound.rs` 的同一个 FIFO 队列，由消费者任务严格按入队
+顺序发送，并逐条等待响应（`send + await`）：慢 page/body 会阻塞后续 close/load，慢请求
+最长 10 s。
 
-1. `initialize` 协商 `peri.historyWindowV1`（响应未回显一律按不支持处理）；TUI 启动时已从 beta
-   `history-window-v1` 写入 `HISTORY_WINDOW_V1`（只写一次，无热重载），它（未配置默认开启、
-   显式 false 关闭）与服务端协商结果同时为真才走窗口路径。
-2. `history_page_consumer/window.rs` 在发请求前登记 `PageReservation`（目标 512 KiB + 解码开销），
-   受 `in_flight + pending_merge` 上限约束；预算不足先尝试释放，仍不足则不发送请求。
-3. `session/load` 的 `history.open/page/seek` 经 ACP transport 到达 Host；Host 在生命周期路由
-   之前分流，短锁校验 session/ticket 后在锁外读取存储，返回前再次校验并投影为 `items[]`。
-4. consumer 只在响应自带的 `sessionId`、`sessionGeneration`、`snapshotToken`、
-   `windowGeneration`、`requestId` 全部匹配时交给 bridge；bridge 再校验当前浏览身份。
-   迟到页整页丢弃并归还预留，不合并、不留下半页。
-5. bridge 通过一次释放/接纳事务把新段并入 `committed`，登记 `DisplayLedger`、`ResidentIndex`、
-   段边界游标与 `WINDOW_UNIT_KEYS`，随后只发布一次快照。
-6. `peri/history_committed` 到达后按 `checkpointId` 幂等封印 durable 段；通知丢失时下一次
-   `history.open` 的 `committedTail` 是唯一重新对齐入口。
+1. `requestKey` 的分配与入队在同一临界区完成；原子自增只保证唯一，不能保证先分配的 key
+   先上线。
+2. 窗口类请求（open/page/seek/close）由消费者结算本地状态；`body` 与 `session/load`
+   只发送并把原始响应经 oneshot 回传调用方。
+3. 窗口替换顺序固定为 **Open → 接纳 → Close**：Open 失败或迟到时不发送 Close，旧窗口继续
+   可读；新 Open 被接纳后才为被替换窗口入队 Close。
+4. initial 替换同理：先准备候选窗口/页面/预算与候选实时流，提交成功后才关闭旧窗口并切换
+   live 边界；失败保留旧窗口、旧 `streamId` 与 `afterSeq`。
+5. 迟到响应按 session/window/requestKey/`view_epoch` 丢弃；`operation_in_progress` 保留原
+   在途认领，不分配新 key 重发。
 
-### 窗口模型、预算与释放
+### initial、翻页与实时尾部
 
-1. `BridgeState.committed: im::Vector<TuiRenderUnit>` 仍是展示正文的唯一强持有者。
-   `HistoryWindow` 只保存持久身份（`source + entryId + subItem`）、`SegmentKey`、条目/单元计数、
-   字节账目、`durable/sealed/pins`、gap 与锚点，不复制正文。
-2. 段来源区分 `Replay`、`Page`、`LiveSeal`；`SegmentKey` 是本地生命周期句柄，不进入 wire、
-   不参与锚点或工具配对。窗口换代后旧键全部作废。
-3. 初始预算（实施初值，不是性能结论）：历史展示正文 16 MiB、页预留上限 2 MiB、
-   普通页目标 512 KiB、页条目 50/最多 100、未配对工具结果 1 MiB/256 条、详情窗口 4 MiB、
-   释放水位 75%、预取门槛 8 MiB、渲染缓存 8 MiB 且超限降到 6 MiB。live、运行中、未持久化
-   与继承段计入 `pinned_bytes`（不可淘汰，但仍是 body 占用）；全部固定时接纳显式失败，
-   不能把归档正文长期计为固定。
-4. 接纳先按字节判断再构造展示单元；超预算时按“距锚点最远 → 最久未访问 → 最早创建”生成
-   `ReleasePlan`，跳过所有 pin。全固定时拒绝接纳并记录 `evict_blocked_pinned`，不释放未持久化内容。
-5. 统一释放事务只允许在 bridge 串行链调用。顺序是：移除 `committed` 对应槽位范围 → 清
-   `DisplayLedger`/`HistorySpans`/`ResidentIndex` → 失效折叠历史、装饰历史与分组缓存 →
-   清未配对工具结果、选择/焦点与 `WINDOW_UNIT_KEYS` → 递增 `structural_epoch` 并发布局部快照。
-   正文与派生缓存释放后先记入 `pending_release`；渲染侧观察到新 `STRUCTURAL_EPOCH`、清空
-   受影响 slot 并写回 `RENDER_ACHIEVED_EPOCH` 后，预算才归还。
-6. 释放段变成 `HistoryGap`，保存前后稳定身份与内侧邻居游标：`beforeCursor` 取更晚驻留段的
-   `beforeCursor`（page(Before) 从缺口上端回填），`afterCursor` 取更早驻留段的 `afterCursor`
-   （page(After) 从缺口下端回填）；相邻 gap 合并。翻到 gap 时按滚动方向选择 page，锚点在
-   中间时用 `seek` 按稳定 `entryId` 重新定位；锚点缺失不跳底。
-7. 窗口边界游标由**驻留布局两端段**派生（最早段的 `beforeCursor`、最晚段的 `afterCursor`），
-   在每次 admission/release 后重算并写入 consumer；单页响应只推进它负责的那一端。淘汰端段后，
-   新的边缘段游标天然指向被淘汰区间，`request_window_newer_page_if_due` /
-   `request_window_older_page_if_due` 据此继续双向翻页。
-8. 视口所在段与其相邻段在 compact 后保留；其余已 durable/sealed 段才可释放。释放不写回
-   存储，不调用工具完成、Todo、审批、workflow 或输入队列 handler，不改变 phase/request/turn 身份。
+1. `initialize` 协商 V2 与预算；TUI 不读取本地 beta 开关做协议选择。
+2. `session/load` 携带 `_meta["peri.history"]` 的 `initial` 请求；发送前登记本会话的实时
+   暂存，首屏发布前到达的 transcript 更新进入每会话有界缓冲（64 条 / 256 KiB）。
+3. 响应经 `initial::admit_load_response` 一次性建立窗口身份（window/ticket/snapshot/游标/
+   coverage）与交付边界（deliveryId/liveBoundary）；失败只记录类型化原因，不发布半份首屏。
+4. initial 接纳成功后，才关闭被替换的旧窗口；旧窗口在失败路径保持可读。
+5. live 只接受顶层 `_meta["peri.delivery"]` 的 `streamId/deliveryId/eventSeq`，从
+   `afterSeq + 1` 起连续；缺口进入 detached 并记录，不自动恢复。
+6. 首屏中的 opaque 条目只显示占位；详情经统一调度器发送 `body`，不绕过队列。
 
-### 提交、失效与降级
+### 窗口状态、预算与失效
 
-1. `CompactCompleted` 仍只显示提示，不触发段释放，也不作为核心提交依据。`TurnDone` 只把
-   `current_turn` 归档并标记未确认；没有持久身份回执的内容不淘汰。
-2. `peri/history_committed` 只发给当前持票连接，按 `checkpointId` 幂等；它封印位置
-   `<= committedTail` 的段，并把未持久化 pin 升级为 durable。缺口由下一次 `open` 对齐。
-3. 每个 session 只有一个活动 ticket，且绑定发起 open 的连接。新 open 成功才原子替换旧 ticket；
-   open 失败保留旧 ticket/snapshot/generation 继续可用。
-4. `page`/`seek`/`body` 在存储读取前和返回前校验 `sessionGeneration`、`structureVersion`、
-   ticket epoch、`snapshotToken` 与 `committedTail`。rewind durable 成功恰好推进
-   `structureVersion + 1` 并撤销 ticket；失败不推进；持久化不确定撤销票据并进入
-   `ReloadRequired`：旧 ticket 不再续用，但只读的 `open`/`page`/`seek`/`body` 仍按 Store
-   事实服务（`HandedOff` 同样不拒绝只读）。
-5. rewind、关闭重开、session 切换或身份不匹配时递增 `window_generation`，取消在途请求，
-   丢弃迟到页；旧页不得合入新窗口。能力缺失、游标失效或通知丢失进入 `Degraded`：停止淘汰、
-   保留可读内容与重试入口，禁止自动回退完整 `session/load`。
+1. `kit/history_v2/` 是历史唯一状态源：`HISTORY_V2_STATE` 保存 `HistoryV2State` 与唯一
+   `HistoryV2Window`，不另建第二份窗口。
+2. 保留预算：最多 200 条 / 16 MiB / 64 页段，详情正文 4 MiB；单页条数与目标字节取服务端
+   协商值。淘汰以整页段为单位，保留阅读锚点与可重载游标。
+3. `beforeCursor`/`afterCursor` 只来自服务端；`null` 表示该方向已耗尽。`coverage` 只在
+   同 region 且可比较时合并，空洞显式进入 `gaps`，不从条目首尾推导连续。
+4. `seek` 是唯一改变导航代次的用户动作，抢占旧 page 并清空旧正文状态；同代次 before/after
+   只替换前缀。
+5. `window_expired`/`window_closed`/`snapshot_invalidated` 保留旧页并进入 `ReopenRequired`，
+   由 `open` 建立新窗口；协议未协商或服务端不支持是启动失败，不是可重开状态。
+6. `acp_events/history_v2.rs` 把保留窗口投影为 `committed` 前缀；尚未持久化的 live 尾部
+   按稳定身份/指纹去重后保留，并标注「实时内容 · 尚未写入历史」。
 
-### 超大条目与详情（S7.3 已交付）
+### 正文详情
 
-服务端定义 `items[].body` 内联描述符（`totalBytes`/`chunkSize`/`readTicket`/`snapshotToken`）
-与 `session/history/body` 有界分块（默认 64 KiB、最大 256 KiB，`bytes` 为 JSON 数字数组），
-并受当前 snapshot tail 与 descriptor 白名单约束；非 oversize 条目或越过 tail 的读取返回 `-32016`。
+服务端页面只给 opaque 条目的 `body` descriptor；详情面板
+（`PanelKind::HistoryDetail` + `HistoryDetailPanel`）通过中性绑定
+`kit/history_detail_binding.rs::HistoryV2BodyBinding`（session/window/snapshot/ticket/source/
+entry/subItem/bodyRef）发 `body` 请求：
 
-TUI 侧由 `PanelKind::HistoryDetail` + `HistoryDetailPanel`（`kit/panels/history_detail.rs`）承接，
-复用现有 `PanelOverlay`：
+1. 请求按 `offset`/`maxBytes` 分块；同一 descriptor 单在途，失败保留已确认偏移以便重试。
+2. 响应 `data` 为 base64，按原始字节拼接后再解码；`nextOffset`/`complete` 自洽，首块到达后
+   用 body 的 `totalBytes` 修正滚动范围，页面 descriptor 的预估值不当作展示长度。
+3. 详情预算 4 MiB，超预算淘汰离视口最远的块；关闭面板、session 边界或窗口换代清空 chunks。
+4. 同代次翻页保持详情打开；seek/reopen 使旧 window/snapshot/bodyRef 失效时自动收起。
 
-1. 占位 note 按 `content_hash` 命中 descriptor，Enter 打开；Esc/q 关闭；Up/Down/PageUp/PageDown
-   滚动，滚动到未加载区间时发 `session/history/body` 请求；`e` 按现有剪贴板惯例复制已加载正文。
-2. `load_history_body` 请求带 `sessionId/entryId/source/snapshotToken/readTicket/offset/maxBytes`，
-   响应 `{entryId, offset, bytes, nextOffset, complete}`；同一 descriptor 单在途请求。
-3. 跨块字节按连续前缀重组，UTF-8 在整体解码时校验；详情窗口预算 4 MiB，超预算淘汰离视口最远的块；
-   关闭面板/session 边界/失败路径清空 chunks，`Weak` 证据见 `detail_close_releases_chunk_allocations`。
-4. inherited 来源使用 `HistorySource::Inherited { frozen_snapshot_id, ancestor_thread_id }`；
-   open 响应 `inherited` 对象、条目 `position:null`；inherited 段固定不释放，详情按冻结 snapshot
-   读取。`inheritedUnsupported=true` 在详情面板与通知中显式提示，不回退父会话当前历史。
-5. 限制：鼠标单击只设焦点，需再 Enter 打开；`e` 是复制已加载正文，文件导出/超窗流式导出尚未接
-   入 UI（模型 `export_stream` 已支持分块）；未做 JSON 字段级展示；inherited 段内部不插入独立
-   占位行，使用全局 inherited notice。TUI 解码仍接受旧顶层 `bodyDescriptors` 兼容输入，服务端已
-   不再发送该形状。
+### 证据与限制
 
-### 对象级证据与已知限制
+V2 链路回归入口：`kit/history_v2/{initial,paging,body,consumer,live}_test.rs`、
+`acp_events_test/history_v2_view_test.rs`、`acp_client/client/{history_v2_test,requests_caps_test}.rs`。
+真实 ServerLoop 与 SQLite 的组合证据在 `peri-acp` 的 `history_v2_end_to_end_test`、
+`history_v2_load_test` 与 `server_loop_history_test`。
 
-进度与验收记录见 active spec；本节只固定当前实现边界，避免把目标写成现状。
+已知限制（不得写成已完成）：
 
-释放验收不以条目数或 RSS 为唯一证据。`release_removes_committed_and_invalidates_holders_before_ack`
-在释放 + 渲染 ack 后断言 `Weak<TuiAssistantBubble>` 无法升级、各 holder 指纹清空；
-`structural_epoch_drops_old_slot_lines_and_uses_8mib_to_6mib_budget` 与
-`structural_epoch_with_empty_snapshot_reaches_zero_retained_bytes` 断言旧 slot 行缓存被丢弃且
-`retained_bytes() == 0`；`pending_release_keeps_budget_conservative_until_ack` 与
-`release_ack_is_idempotent_and_late_ack_does_not_double_credit` 断言预算结算；页链路由
-`bidirectional_page_requests_keep_placement_and_cursors`、
-`stale_or_late_response_is_dropped_and_reservation_released`、
-`one_in_flight_and_one_pending_merge_are_enforced` 覆盖。
-
-已知未完成项：
-
-- 折叠组/子 Agent 组尚未真正惰性化：构造时 `im::Vector` 结构共享、不深复制正文，但释放只
-  整体失效 `FoldedHistory`/分组缓存，没有按段惰性物化与精准清理。
-- `structural_epoch` 目前清空全部渲染 slot，未按段精准清理。
-- 旧分页路径仍使用轻量静态 `PENDING_TOOL_ENDS`，未完全迁移到 `ResidentIndex`。
-- 详情交互限制：鼠标单击只设焦点，需再 Enter 打开；`e` 复制已加载正文，文件导出/超窗流式
-  导出尚未接入 UI（模型 `export_stream` 已支持分块）；未做 JSON 字段级展示；inherited 段内部
-  不插入独立占位行。
-- beta 设置面板仍只列 `BETA_FLAGS`；`history-window-v1` 未配置默认开启，如需关闭须手动写入 settings `false`，且 TUI 只在启动读取一次、无热重载。
-- remote/emscripten adapter 未实现窗口/继承读取，默认 `Unsupported`；readTicket 无密码学签名；
-  rewind 不确定态仍依赖集中文本 marker。
+- 真实 socket 断连未单独做端到端用例；当前断连语义由连接取消、本地 ServerLoop 断连治理
+  （`server_loop_history_disconnect_*`）与进程内 mpsc 测试覆盖。
+- TUI 出站调度器逐条 `send + await`；慢 page/body 会延迟后续 close/load（最多 10 s）。
+  FIX-04 只解决服务端接收循环阻塞。
+- 页面条目 `contentVersion` 恒为 `"1"`，不用于冲突检测；body chunk 的 `contentVersion`
+  是 canonical hash，用于分块自校验。
+- body 每个分块都会重读并重投影最多 8 MiB canonical；128 个 64 KiB 块约 1 GiB 读取量
+  （单次有界，需后续优化）。
+- `session/load` 仍在连接接收循环内 `await`（最长 60 s，本轮未改），initial 读取期间同连接
+  的其它请求要等它完成；只有 `_peri/history` 读取移到了连接所有权任务。
+- `_peri/history/changed` 未发送，失效发现依赖后续请求错误。
+- `HISTORY_V2_STATE` 是进程级 atom；多连接共享同一 TUI 状态，切换连接时按协商结果重置。
+- 未做长时间滚动 RSS、真实 100 MiB 工具输出与多实例/远端 V2 验收。
 
 ## 状态模型
 
@@ -247,8 +205,8 @@ snapshot/event 重建。
 | tool start/update | 按调用 identity 原地更新 tool activity；历史 replay 走同一语义归约 |
 | plan / usage / context metadata | 更新计划或资源投影，不伪装成普通消息 |
 | turn terminal / suspended / execution failure | 归档、回滚或保留当前回合，并退出 loading |
-| compact / rewind | `CompactCompleted` 只显示提示；`peri/history_committed` 按提交水位封印 durable 段并驱动预算释放；rewind 以服务端 snapshot 重建 transcript 并失效旧窗口与游标 |
-| 历史窗口 | `open/page/seek` 响应按稳定身份并入段窗口；gap/seek 恢复被释放区间；`session/history/body` 只读详情分块 |
+| compact / rewind | `CompactCompleted` 只显示提示；rewind 以服务端 snapshot 重建 transcript，旧 V2 窗口按错误重新 `open`，不复用旧窗口身份 |
+| 历史 | V2 `initial` 建立首屏，`open/page/seek` 响应按稳定身份并入同一窗口；gap 由显式 coverage/seek 恢复；`body` 只读详情分块 |
 | SubAgent | 按 source/instance 归组并更新生命周期 |
 | background task / workflow / plugin | 更新独立 atom、通知或管理面板 snapshot |
 | AskUser / permission / OAuth | 注册 durable interaction owner，再发布对应交互 surface |
@@ -265,8 +223,8 @@ Root cache coverage 只使用当前 root turn 最近一次有效 observation；a
 Bridge 的 session phase 至少区分 idle、prompt running 与 history replay；渲染 variant 不等于
 执行 phase。正常终态、取消、中断、挂起和执行失败必须有明确处理：
 
-- 正常结束：归档 `CurrentTurn`，停止 loading，再按队列策略继续；窗口路径只有拿到持久提交回执
-  的段才可封印/淘汰；
+- 正常结束：归档 `CurrentTurn`，停止 loading，再按队列策略继续；V2 历史内容来自服务端快照与
+  页响应，不依赖本地提交回执做封印；
 - 中断：按 request/session identity 拒绝 stale terminal；有输出时保留可审计内容，无输出时
   才恢复对应输入，不影响更新一代提交；
 - 挂起：归档可见内容并停止 loading，但不把仍存活 Agent 误判为完成，也不提前 drain 输入；
@@ -326,9 +284,8 @@ SubAgent、后台 task、Cron、Workflow 和 plugin 数据不应混入 `CurrentT
    认证、受众授权、限长和终端控制字符处理独立有效。
 9. **增量渲染**：流式更新只失效变化 slot；viewport 外内容不做无界重复 wrap/clone。
 10. **可验证变更**：跨层事件修改同步更新协议、mapper、TUI decoder/reducer、caps 和测试。
-11. **服务端能力门控**：服务端未明确回显 `peri.historyWindowV1: true` 或 TUI 本地开关显式关闭时，
-    旧分页/渲染路径不变；
-    窗口失败进入 `Degraded`，不以完整 `session/load` 兜底。
+11. **历史协议单一**：TUI 始终请求 History V2，服务端未显式选择时启动失败；不发送旧私有
+    请求，也不以完整 `session/load` 兜底。窗口失效保留旧页并按 `open` 重建，不混用两套状态。
 12. **释放有界**：只有 durable/sealed 且无 pin 的段可释放；正文唯一强持有者是 `committed`，
     释放必须走统一事务并等待渲染 ack，存储历史不因 UI 淘汰而改变。
 
@@ -338,7 +295,7 @@ SubAgent、后台 task、Cron、Workflow 和 plugin 数据不应混入 `CurrentT
 - ACP host/session/event：[`docs/code-index/peri-acp.md`](../code-index/peri-acp.md)
 - Agent loop/session：[`docs/code-index/peri-agent.md`](../code-index/peri-agent.md)
 - ACP wire：[peri-acp-protocol.md](peri-acp-protocol.md)
-- 历史窗口/段生命周期：本文「历史窗口与段生命周期」与 [消息存储](message-transcript.md) §2.8
+- 历史窗口/详情：本文「历史：History V2 唯一链路」与 [消息存储](message-transcript.md) §2.8
 - transcript 持久化：[message-transcript.md](message-transcript.md)
 - TUI 工具与交互目标：[tui-chat-workbench.md](tui-chat-workbench.md)
 - SubAgent 目标展示：[tui-subagent-activity.md](tui-subagent-activity.md)

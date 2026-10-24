@@ -805,6 +805,5 @@ fn make_state() -> BridgeState {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
-        window: Default::default(),
     }
 }

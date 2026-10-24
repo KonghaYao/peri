@@ -2,7 +2,6 @@ import type { Agent } from "./agent";
 import { SendReceipt } from "./send-receipt";
 import type { JsonRpcNotification, Transport } from "../transport/types";
 import type { SessionDocs } from "../state/session-docs";
-import { historyGenerationOf } from "../state/history-merge";
 import { EventQueue } from "../transport/event-queue";
 import { initializeAcpClient } from "./acp-handshake";
 import { closeDrainBudget, closeUntilSettled, type CloseOptions } from "./session-close";
@@ -68,8 +67,6 @@ export class Session {
     private streamEnded = false;
     private readonly pendingDeliveries = new Map<string, PendingDelivery>();
     private readonly pendingInputText = new Map<string, string>();
-    /** 相同 cursor + 相同 limit 的并发翻页合并为一次请求（REQ-C01-2、验收 A08）。 */
-    private readonly pendingPages = new Map<string, Promise<HistoryPageOutcome>>();
 
     constructor(private readonly agent: Agent) {}
 
@@ -113,13 +110,6 @@ export class Session {
             this.transport = transport;
             transport.setRequestHandler((method, params) => this.docs.handleRequest(method, params, this.sessionId, this.agent.options));
             let replayTurnPending = false;
-            // 初始 load 的代次（REQ-H04、验收 A22）：订阅在本请求**之前**建立，所以
-            // 回放通知一条都不会漏；本代次的通知先暂存，响应成功后才一次安装。
-            const loadGeneration = requestedSessionId === null
-                ? undefined
-                : this.agent.beginLoadGeneration(crypto.randomUUID());
-            const stagedReplay: JsonRpcNotification[] = [];
-            let replayInstalled = false;
             this.unsubscribe = transport.subscribe((event) => {
                 const rawEvent = event.method === "session/update" || event.method === "peri/agent_event";
                 const stateEvent = rawEvent ||
@@ -127,22 +117,6 @@ export class Session {
                     event.method === "peri/unstable_event";
                 if (!stateEvent) return;
                 if (this.sessionId && (event.params as { sessionId?: string } | undefined)?.sessionId !== this.sessionId) return;
-                const generation = historyGenerationOf(event);
-                if (generation !== null) {
-                    // 历史回放：非本代次（迟到 / 被取代）直接丢弃；本代次在响应前只暂存。
-                    if (generation !== loadGeneration || !this.agent.isCurrentLoadGeneration(generation)) return;
-                    // 暂存只约束**文档安装**：原始诊断流不是投影，连接收到什么就流什么，
-                    // 首屏回放同样不得缺席（否则 README/examples 的原始事件流会缺首屏）。
-                    if (rawEvent) {
-                        this.acceptDeliveryEvent(event);
-                        this.notifications.push(event);
-                    }
-                    // 响应已把整批回放一次安装：之后同代次再来的回放通知是重复投递。
-                    // 回放路径没有子项下标，重复投影只会把同一段内容复制成两个块，这里整条丢弃。
-                    if (replayInstalled) return;
-                    stagedReplay.push(event);
-                    return;
-                }
                 if (event.method === "session/update") {
                     const update = (event.params as { update?: { sessionUpdate?: string; _meta?: { periReplay?: boolean } } } | undefined)?.update;
                     if (update?.sessionUpdate === "user_message_chunk" || update?.sessionUpdate === "agent_message_chunk" ||
@@ -167,10 +141,6 @@ export class Session {
                     "peri.tokenStats": true,
                     "peri.planEntryActiveForm": true,
                     "peri.unstableEvent": true,
-                    // REQ-C01 / REQ §5.3：分页走协商通道。少声明一项就等于放弃该通道——
-                    // 服务端对未协商的连接拒绝带 cursor 的 session/load，且初始回放不带
-                    // 条目位置戳（periEntryId / periPosition），客户端无法做区间合并。
-                    "peri.historyPagination": true,
                 },
             });
             const params = { cwd: path, mcpServers: this.agent.mcpServers() };
@@ -187,24 +157,13 @@ export class Session {
                 this.docs.seedConfig(created);
                 await claims.claimSession(id);
             } else {
-                const loaded = await transport.request<SessionSetup & { _meta?: { periLoadGeneration?: string } }>(
+                const loaded = await transport.request<SessionSetup>(
                     "session/load",
-                    { ...params, sessionId: requestedSessionId, loadGeneration },
+                    { ...params, sessionId: requestedSessionId },
                 );
-                // 响应必须属于本次代次：被新 load 取代后，这一份既不能安装也不能宣称就绪。
-                const echoed = loaded._meta?.periLoadGeneration;
-                if (loadGeneration && echoed !== undefined && echoed !== loadGeneration)
-                    throw new Error("session/load response belongs to a superseded load generation");
-                if (loadGeneration && !this.agent.isCurrentLoadGeneration(loadGeneration))
-                    throw new Error("session/load was superseded by a newer load generation");
-                // 回放完整后**一次安装**：整批一个 Yjs 事务，之后才发布窗口身份与游标。
-                if (stagedReplay.length) this.docs.acceptHistoryBatch(stagedReplay);
-                replayInstalled = true;
-                stagedReplay.length = 0;
                 this.docs.seedConfig(loaded);
-                this.docs.seedHistoryWindow(loaded);
                 // ACP 在 load 响应前完成历史回放，且没有独立的回放 turn-done 通知。
-                // 只有未带条目身份的回放（未协商分页的连接）才需要收口实时 turn。
+                // 标准完整回放的 HTTP/stdio 客户端据此收口实时 turn。
                 if (replayTurnPending) this.docs.completeTurn();
                 id = requestedSessionId;
             }
@@ -247,65 +206,21 @@ export class Session {
         }
     }
 
-    /** 更早方向是否还有可用游标（翻页入口的前置判断，不发起请求）。 */
-    get canLoadEarlierHistory(): boolean { return this.docs.historyCursor() !== null; }
+    /** 旧私有分页已删除：SDK 不再声明或发送 `session/load + cursor`。 */
+    get canLoadEarlierHistory(): boolean { return false; }
 
     /**
-     * 向上读取更早一页历史（REQ-C01、验收 A11/A20/A23/A24）。
+     * 旧私有分页已删除。
      *
-     * 入口仍是 `session/load`，只带 `{sessionId, cursor, limit}`——cursor 由 SDK 持有并推进，
-     * 调用方只表达「还要更早的一页」。相同 cursor + 相同 limit 的并发调用合并为一次请求；
-     * 失败保留当前画面与运行状态（游标不动），可直接重试。切会话／rewind 之后到达的旧页
-     * 抛 [`StaleHistoryPageError`]，不并入视图。
+     * 服务端不再协商 `peri.historyPagination`，也不再接受 `session/load` 顶层的
+     * `cursor`/`limit`。这里显式失败，避免调用方误以为可以静默回退到旧协议。
      */
-    async loadEarlierHistory(limit?: number): Promise<HistoryPageOutcome> {
-        const transport = this.activeTransport();
-        const sessionId = this.id;
-        const cursor = this.docs.historyCursor();
-        if (!cursor) {
-            // 三种「没有游标」不是一回事：窗口被作废、确实没有更早内容（A15）、本连接未协商。
-            const reason: HistoryPageUnavailableReason = this.docs.historyWindowInvalidated()
-                ? "invalidated"
-                : this.docs.historyWindowOpen() ? "exhausted" : "not_negotiated";
-            throw new HistoryPageUnavailableError(reason, {
-                invalidated: "History window is invalidated; reload the session before paging further",
-                exhausted: "This browsing window has no earlier history left",
-                not_negotiated: "This connection has no history pagination window",
-            }[reason]);
-        }
-        const key = `${cursor}|${limit ?? "default"}`;
-        const inFlight = this.pendingPages.get(key);
-        if (inFlight) return inFlight;
-        const pending = this.fetchHistoryPage(transport, sessionId, cursor, limit);
-        this.pendingPages.set(key, pending);
-        try {
-            return await pending;
-        } finally {
-            if (this.pendingPages.get(key) === pending) this.pendingPages.delete(key);
-        }
-    }
-
-    private async fetchHistoryPage(
-        transport: Transport,
-        sessionId: string,
-        cursor: string,
-        limit: number | undefined,
-    ): Promise<HistoryPageOutcome> {
-        // 历史页请求不得携带 setup 参数：分页不重新装配、不改绑定（REQ §5.2）。
-        const response = await transport.request<unknown>("session/load", {
-            sessionId,
-            cursor,
-            ...(limit === undefined ? {} : { limit }),
-        });
-        // 切会话／关闭之后到达的页整页丢弃（REQ-C01-5、验收 A11）。
-        if (this.state !== "active" || this.sessionId !== sessionId)
-            throw new StaleHistoryPageError("session", "History page arrived after the session changed");
-        const merged = this.docs.mergeHistoryPage(sessionId, response);
-        if (merged.status === "stale")
-            throw new StaleHistoryPageError("window", "History page belongs to an expired browsing snapshot");
-        if (merged.status === "malformed")
-            throw new Error("session/load returned a malformed history page");
-        return { applied: merged.applied, nextCursor: merged.nextCursor };
+    async loadEarlierHistory(_limit?: number): Promise<HistoryPageOutcome> {
+        this.activeTransport();
+        throw new HistoryPageUnavailableError(
+            "not_negotiated",
+            "History pagination has been removed; use the Peri History V2 protocol",
+        );
     }
 
     private async releaseResources(): Promise<void> {

@@ -140,11 +140,11 @@ fn test_selection_anchor_missing_or_ambiguous_cancels() {
 fn test_selection_anchor_rejects_row_offset_beyond_unit() {
     let anchor = {
         SelectionAnchor {
-            unit_kind: crate::kit::message_area::window_identity_token(&anchor_test_bubble(
+            unit_kind: crate::kit::message_area::unit_identity_token(&anchor_test_bubble(
                 "history",
             ))
             .kind,
-            unit_hash: crate::kit::message_area::window_identity_token(&anchor_test_bubble(
+            unit_hash: crate::kit::message_area::unit_identity_token(&anchor_test_bubble(
                 "history",
             ))
             .hash,

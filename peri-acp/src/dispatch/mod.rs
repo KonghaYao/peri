@@ -23,15 +23,11 @@ pub use prompt::{extract_prompt_params, handle_prompt};
 pub use rewind::{rewind_execute, rewind_preview};
 pub use rewind_candidates::{rewind_candidates, rewind_persisted_candidates};
 pub(crate) use session_fork::{fork_bound_session, load_fork_source};
-pub use session_load::{
-    history_page_error, initial_history_cursor, load_active_session_payloads,
-    load_canonical_session_payloads, load_history_page, InitialHistoryCursor,
-};
+pub use session_load::{load_active_session_payloads, load_canonical_session_payloads};
 pub use session_replay::{
     entry_id, project_payload_updates, reminder_visible_to_client,
     replay_canonical_history_streamed, replay_persisted_session_history, replay_session_history,
-    write_entry_marks, EntryMarks, LoadGeneration, ProjectedUpdate, ReplayError, ReplayMarks,
-    ReplaySender,
+    ProjectedUpdate, ReplayError, ReplaySender,
 };
 
 #[cfg(test)]

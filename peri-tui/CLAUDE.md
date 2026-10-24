@@ -20,7 +20,7 @@ ACP notification → acp_notifier → acp_bridge / BridgeState
 | 入口、任务启动、ACP client 生命周期 | `src/kit/entry.rs`、`src/acp_client/` |
 | ACP notification 解码与状态发布 | `src/kit/acp_notifier.rs`、`src/kit/acp_bridge.rs`、`src/kit/acp_events/` |
 | 全局状态与 ViewModel | `src/kit/atoms.rs`、`src/kit/acp_types.rs` |
-| 输入、提交、历史、@mention、slash | `src/kit/input_area.rs`、`src/kit/input_history.rs`、`src/kit/submit_consumer.rs` |
+| 输入、提交、历史、@mention、slash | `src/kit/input_area.rs`、`src/kit/input_history.rs`、`src/kit/submit_consumer.rs`、`src/kit/history_v2/` |
 | 消息渲染、滚动、选择 | `src/kit/message_area/`、`src/kit/markdown/`、`src/kit/text_selection.rs` |
 | 增量布局与派生缓存预算 | `src/kit/message_area/transcript.rs`、`transcript_index.rs`、`src/kit/entry_render_cache.rs` |
 | 键盘、鼠标、焦点与事件优先级 | `src/kit/event_handlers.rs`、`src/kit/focus_router.rs` |
@@ -38,6 +38,7 @@ ACP notification → acp_notifier → acp_bridge / BridgeState
 - 会话列表经 ACP 的 `peri.sessionWorkspaceV1` scope 查询：默认 Project、可切 Workspace / All；分页未结束时数量标明“已加载/还有更多”，向下键、PageDown 或 End 接近已加载末尾时追加下一页，重复按键合并同页请求。未绑定旧历史继续列出，`v` 通过只读 history RPC 预览且不切换执行会话；`-c` 精确选择启动工作区内当前相对目录，`-r` / 普通恢复先查询保存 binding 或旧会话保存的 cwd，再由 load 接纳旧根。查询或恢复失败不得通过 `ensure_session` 无声新建或把排队输入发给旧会话。会话执行唯一性与接管由 `peri-sdk` 负责；TUI 不投影 ownership 只读准入、不请求取回执行权或接管 proof、不维护 `SESSION_READ_ONLY`。执行环境不可用时 load 明确失败，history 预览仍可读。宿主在响应 `session/load` 前回放历史，每次可能回放的 load 前均须 `project_session_boundary`，防止消息区重复；客户端 prompt request lease、load reservation 与 operation gate 只协调请求和交互生命周期，不代表会话执行所有权。
 - `ACTIVE_EXECUTION_CWD` 仅在 session 初始化提交后发布，驱动路径展示、文件补全和本地导出；启动 cwd 独立保留给新会话。Hooks / Plugin / MCP 面板按 active session ID 查询实际环境，不能持续回写启动快照。
 - History 面板使用单行会话列表与固定详情/操作栏；按容器高度计算视口，列表和只读预览各持有独立滚动状态。刷新按 thread ID 保留选择，执行操作使用已选身份，删除确认固定待删 ID，不能用旧索引查新列表决定目标。
+- History V2 是唯一历史路径：TUI 始终在 initialize 请求 `_meta["peri.history"]`，服务端未显式选择 `version=2/windowed` 时 `require_history_v2_startup` 启动失败，不读 beta、不发旧请求、不回退全量回放。`kit/history_v2/` 是唯一状态源：`session/load` 的 initial 建立首屏，`open/page/seek/body/close` 全部经 `outbound` 的同一 FIFO 调度器，requestKey 在入队临界区分配；窗口替换固定 **Open → 接纳 → Close**，initial 先准备候选再提交，失败保留旧窗口与旧 `streamId`/`afterSeq`。`acp_events/history_v2.rs` 把保留窗口投影为 `committed` 前缀，`view_epoch` 变化替换前缀但保留未持久化 live 尾部并按稳定身份去重；live 只接受顶层 `_meta["peri.delivery"]` 的连续 `streamId/eventSeq`，initial 发布前更新进入每会话有界暂存（64 条 / 256 KiB）；迟到响应/失败按 session/window/requestKey/viewEpoch 丢弃。正文不内联，详情经 `history_detail_binding.rs::HistoryV2BodyBinding` 走 V2 `body` 分块，首块后以 body 的 `totalBytes` 为准；seek/reopen 收起旧详情，同代次翻页保持打开。
 - 面板列表的可见范围、滚动起点与鼠标命中由 `kit/panels/shared/list.rs` 的同一次推导给出（`ListMetrics` + `ListViewport`），不写死可见项常量；面板高度以 `panel_overlay::panel_height` 为唯一权威。详情与操作绑定业务稳定身份（id/name/path）而非列表下标；目标消失由 `use_effect` 在更新阶段收敛，渲染只读状态。分段列表、可变行高与无列表面板可不接入该机制，但须在面板内写明理由与替代做法。契约见 [TUI 面板架构](../docs/design/tui-panel-architecture.md)。
 - 面板操作的作用域与完成门由 `application/operations/` 统一表达（`OperationScope` / `CompletionGate` / `OperationOutcome`）：发起取票、完成校验代次与作用域、取消按结果未知表达；面板不自建票据或代次，同作用域同目标的在途重复触发判定为拒绝（不发、不提示）。确认执行只按确认时固定的稳定身份，目标消失则不执行并给可见提示，不回退为按下标取当前项。事件判定集中在 `handle_<panel>_event(event, ctx)`，组件只做注册。
 - Config / Model / Login / Theme 的持久配置仍编辑宿主启动时选中的 `ConfigSource`，面板明确标识“宿主配置”和实际保存路径；权限切换（配置行、Shift+Tab、slash）及会话模型选择等运行请求继续按 session ID 路由。整份配置上送不带 session ID；切换会话不重定位宿主配置写入。同配置源会话刷新 provider 连接并失效模型缓存，保留各自的模型/profile 选择和 frozen 数据。四个面板的落盘与可见提示只有一份实现（`src/kit/config_service.rs`）：候选先落盘，成功才提交内存句柄、投影与 ACP，失败只提示不改可见状态——不可逆动作（删除 provider）同样适用。
@@ -66,6 +67,7 @@ cargo run -p peri-tui
 cargo build -p peri-tui
 cargo check -p peri-tui
 cargo test -p peri-tui --lib
+cargo test -p peri-tui --lib -- history_v2
 ```
 
 ## 按需引用 / Verify

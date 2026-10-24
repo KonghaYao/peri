@@ -107,7 +107,6 @@ fn test_push_view_models_uses_bridge_state() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
-        window: Default::default(),
     };
 
     // push_view_models: 用 BridgeState 数据（空 committed + 空 current_turn）→ 空 items
@@ -208,7 +207,6 @@ fn test_prediction_writes_prediction_atom() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
-        window: Default::default(),
     };
 
     use peri_acp_types::event_data::{Prediction, PredictionAction};

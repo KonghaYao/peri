@@ -1,40 +1,5 @@
 use super::*;
 use serde_json::json;
-#[tokio::test]
-async fn test_history_committed_notification_forwards_typed_event() {
-    use peri_acp_types::history_window::HistoryCommittedTail;
-    use peri_acp_types::messages::MessageId;
-    use peri_acp_types::thread::ThreadId;
-
-    let (bridge_tx, mut bridge_rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
-    let tail =
-        HistoryCommittedTail::new(&ThreadId::from("s1".to_string()), MessageId::new(), 10).encode();
-    let payload = json!({
-        "sessionId": "s1",
-        "sessionGeneration": "gen-1",
-        "structureVersion": 7,
-        "checkpointId": "cp-1",
-        "summaryEntryId": null,
-        "committedTail": tail,
-        "hint": { "kind": "open", "anchor": { "kind": "latest" } }
-    });
-    let owner = forward_notification(
-        &bridge_tx,
-        AcpNotification::HistoryCommitted {
-            session_id: "s1".into(),
-            params: payload,
-        },
-    )
-    .await;
-    assert!(owner.is_none());
-    let event = bridge_rx.try_recv().expect("commit event");
-    assert_eq!(event.active_session_id, "s1");
-    assert!(matches!(
-        event.event,
-        AcpEventData::HistoryCommitted(info)
-            if info.checkpoint_id == "cp-1" && info.structure_version == 7
-    ));
-}
 
 fn spawn_test_notifier() -> (
     mpsc::Sender<AcpNotification>,
@@ -380,11 +345,9 @@ async fn test_non_terminal_tool_update_is_not_forwarded_as_tool_end() {
     shutdown.cancel();
 }
 
-/// REQ-H01-6 / A20：`peri/unstable_event`（回放 reminder）的条目戳摊在 `data` 顶层，
-/// 必须先于内容事件注入 `ReplayEntryMarked`——首屏「自有条目只有 reminder」时，
-/// 这是区间索引的唯一来源（缺了它更早历史会越过继承前缀）。
+/// 旧 `periEntryId` / `periPosition` 回放标记不再注入桥接：reminder 是唯一事件。
 #[tokio::test]
-async fn test_unstable_event_reminder_entry_marks_precede_content() {
+async fn test_unstable_event_reminder_no_longer_emits_legacy_entry_marks() {
     let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
     notif_tx
         .send(AcpNotification::UnstableEvent {
@@ -412,25 +375,10 @@ async fn test_unstable_event_reminder_entry_marks_precede_content() {
         .await
         .unwrap();
 
-    let mark = bridge_rx
-        .recv()
-        .await
-        .expect("entry mark must arrive first");
-    assert!(
-        matches!(
-            mark.event,
-            AcpEventData::ReplayEntryMarked { ref entry_id, position }
-                if entry_id == "s1:own-reminder" && position == 42
-        ),
-        "unexpected first event: {mark:?}"
-    );
-    let reminder = bridge_rx
-        .recv()
-        .await
-        .expect("reminder must follow its mark");
+    let reminder = bridge_rx.recv().await.expect("reminder must be forwarded");
     assert!(
         matches!(reminder.event, AcpEventData::SystemReminder { .. }),
-        "unexpected second event: {reminder:?}"
+        "unexpected first event: {reminder:?}"
     );
     shutdown.cancel();
 }

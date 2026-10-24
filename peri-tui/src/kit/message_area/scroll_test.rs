@@ -1,6 +1,5 @@
 //! Tests
 use super::*;
-use crate::kit::history_paging::tests::{drain_pages_channel, pages_channel};
 use ratatui_kit::crossterm::event::{MouseButton, MouseEventKind};
 use serial_test::serial;
 
@@ -762,23 +761,62 @@ fn test_project_pending_scroll_lands_at_top() {
     assert_eq!(landed, 0);
 }
 
-/// 滚动事件路径的决策层：当帧事实未贴边、pending 落地后贴边 → 必须派发取页，
-/// 且请求带冻结的会话身份与游标（走真实 `HISTORY_PAGES_TX` 通道观察）。
+// ── [REQ-C01-3 / A20] 阅读锚点不跳动 ────────────────────────────────────
+//
+// 用例不在这里：锚点补偿由渲染侧身份重定位实现
+// （`message_area::viewport_anchor`），判据不再能被一份手工构造的槽位表表达。
+// 覆盖位置：`viewport_anchor_test.rs`（捕获 / 重定位 / 单元内位移 / 认不出身份的安全方向）。
+
 #[test]
 #[serial]
-fn test_scroll_lands_at_top_dispatches_older_page_request() {
-    crate::kit::atoms::init_atoms();
-    crate::kit::history_paging::reset_browsing_state();
-    drain_pages_channel();
-    crate::kit::history_paging::note_initial_cursor(
-        "s1",
-        Some("tok".to_string()),
-        Some("c1".to_string()),
-    );
+fn test_scroll_lands_at_top_dispatches_v2_older_page_request() {
+    use crate::kit::history_v2::consumer::HistoryV2ConsumerRequest;
+    use crate::kit::history_v2::outbound::OutboundCommand;
+    use peri_acp_types::history_v2::{HISTORY_V2_VERSION, HistoryDirection, HistoryLimits};
 
-    // 当帧事实（offset 尚未落地，仍在向前边界 2 行之外）判定为「未贴边」——
-    // 修复前的事件路径只看它，因此这一次滚动不派发任何请求。
-    assert!(!crate::kit::history_paging::viewport_at_forward_boundary(
+    crate::kit::atoms::init_atoms();
+    crate::kit::atoms::HISTORY_V2_CAPABLE.set(true);
+    let state = crate::kit::history_v2::initial::admit_load_response(
+        &serde_json::json!({
+            "_meta": {"peri.history": {
+                "version": HISTORY_V2_VERSION,
+                "kind": "initial",
+                "requestKey": "1",
+                "executionReady": true,
+                "runtimeGeneration": "runtime-1",
+                "deliveryId": "delivery-1",
+                "liveBoundary": {"streamId": "live-1", "afterSeq": "0"},
+                "page": {
+                    "version": HISTORY_V2_VERSION,
+                    "kind": "window",
+                    "sessionId": "s1",
+                    "windowId": "w1",
+                    "snapshotToken": "snapshot-1",
+                    "historyRevision": "3",
+                    "committedTail": "3",
+                    "projectionVersion": 1,
+                    "readTicket": "ticket-1",
+                    "beforeCursor": "before-1",
+                    "afterCursor": "after-1",
+                    "items": [],
+                    "coverage": {"kind": "interval", "from": {"kind": "head"}, "to": {"kind": "tail"}},
+                    "progress": {"reason": "complete", "scannedEntries": 0, "consumedEntries": 0},
+                },
+            }}
+        }),
+        "s1",
+        peri_acp_types::history_v2::DecimalU64::new(1),
+        &HistoryLimits::default(),
+    )
+    .expect("admitted");
+    crate::kit::history_v2::publish_initial(state);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    *crate::kit::atoms::HISTORY_V2_TX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tx);
+
+    // 当帧事实（offset 尚未落地，仍在向前边界 2 行之外）判定为「未贴边」。
+    assert!(!super::geometry::viewport_at_forward_boundary(
         false, 5, 100, 20
     ));
 
@@ -787,172 +825,72 @@ fn test_scroll_lands_at_top_dispatches_older_page_request() {
         event::request_older_page_at_scroll_facts(false, 5, -(SCROLL_LINES as i32) * 2, 100, 20),
         "pending 落地后贴向前边界 → 派发取页"
     );
-    let rx = pages_channel();
-    let request = rx.lock().try_recv().expect("one dispatched request");
-    assert_eq!(request.session_id, "s1");
-    assert_eq!(request.snapshot_token, "tok");
-    assert_eq!(request.cursor, "c1");
-    assert_eq!(request.limit, crate::kit::history_paging::PAGE_LIMIT);
-    // 相同 cursor 已在途 → 后续滚动事件合并为 no-op（REQ-C01-2）。
+    let OutboundCommand::Request(HistoryV2ConsumerRequest::Page(request)) =
+        rx.try_recv().expect("one dispatched request")
+    else {
+        panic!("expected V2 page request");
+    };
+    assert_eq!(request.direction, HistoryDirection::Before);
+    assert_eq!(request.cursor, "before-1");
+    assert_eq!(request.limit, HistoryLimits::default().default_items);
+    // 相同窗口已有在途页 → 后续滚动事件合并为 no-op。
     assert!(!event::request_older_page_at_scroll_facts(
         false, 0, 0, 100, 20
     ));
-    assert!(rx.lock().try_recv().is_err(), "在途请求只派发一次");
-}
+    assert!(rx.try_recv().is_err(), "在途请求只派发一次");
 
-/// 离开向前边界时不触发（避免滚动事件路径无谓发请求）。
-/// 向下滚动到最底部：窗口模式派发 after 页；到达末尾/在途时停止。
-#[test]
-#[serial]
-fn test_scroll_at_bottom_dispatches_window_after_page_and_stops() {
-    use crate::kit::history_page_consumer::WindowConsumerRequest;
-    use crate::kit::history_paging::WindowPageCursor;
-    use crate::kit::history_window::WindowIdentity;
-
-    crate::kit::atoms::init_atoms();
-    crate::kit::atoms::HISTORY_WINDOW_V1.set(true);
-    crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(true);
-    crate::kit::history_page_consumer::reset_window_paging_state();
-    crate::kit::atoms::HISTORY_WINDOW_GENERATION.set(1);
-    {
-        let handle = crate::kit::atoms::HISTORY_WINDOW_PAGING.state();
-        let mut state = handle.write();
-        state.session_id = "s1".into();
-        state.identity = Some(WindowIdentity::new("s1", "gen-1", 7, "snap-1"));
-        state.window_generation = 1;
-        state.read_ticket = Some("ticket-1".into());
-        state.after_cursor = Some("after-1".into());
-    }
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    assert!(crate::kit::atoms::HISTORY_WINDOW_TX.set(tx).is_ok());
-
-    assert!(event::request_newer_page_at_scroll_facts(
-        false, 80, 0, 100, 20
-    ));
-    let request = rx.try_recv().expect("after page request");
-    let request_id = match &request {
-        WindowConsumerRequest::Page {
-            context, cursor, ..
-        } => {
-            assert_eq!(cursor, &WindowPageCursor::After("after-1".into()));
-            context.request_id.clone()
-        }
-        other => panic!("expected after page, got {other:?}"),
-    };
-    assert!(
-        !event::request_newer_page_at_scroll_facts(false, 80, 0, 100, 20),
-        "same in-flight window page must merge"
-    );
-    assert!(rx.try_recv().is_err());
-
-    crate::kit::history_page_consumer::fail_window_request(&request_id, "test done", false);
-    crate::kit::atoms::HISTORY_WINDOW_PAGING
-        .state()
-        .write()
-        .after_cursor = None;
-    assert!(!event::request_newer_page_at_scroll_facts(
-        false, 80, 0, 100, 20
-    ));
-
-    // 视口无锚点 + 桥接发布 gap 目标：滚动触发 seek，内容返回前不跳底。
-    crate::kit::atoms::WINDOW_VIEWPORT.set(None);
-    crate::kit::atoms::WINDOW_GAP_REQUEST.set(vec![
-        crate::kit::history_paging::WindowGapRequest::Seek {
-            gap_id: crate::kit::history_window::GapId(1),
-            anchor: crate::kit::history_window::PersistentEntryKey::own("s1:missing"),
-        },
-    ]);
-    assert!(event::request_gap_page_after_scroll(None));
-    let gap_request = rx.try_recv().expect("gap request");
-    assert!(matches!(
-        &gap_request,
-        WindowConsumerRequest::Seek { anchor, .. }
-            if anchor == &crate::kit::history_window::PersistentEntryKey::own("s1:missing")
-    ));
-    assert!(
-        crate::kit::atoms::WINDOW_GAP_REQUEST
-            .state()
-            .read()
-            .is_empty()
-    );
-
-    // 双向缺口候选：向下滚只消费 Page(After)，向上滚消费 Page(Before)。
-    crate::kit::history_page_consumer::fail_window_request(
-        match &gap_request {
-            WindowConsumerRequest::Seek { context, .. } => &context.request_id,
-            other => panic!("expected seek, got {other:?}"),
-        },
-        "test done",
-        false,
-    );
-    crate::kit::atoms::WINDOW_GAP_REQUEST.set(vec![
-        crate::kit::history_paging::WindowGapRequest::Page {
-            gap_id: crate::kit::history_window::GapId(2),
-            cursor: WindowPageCursor::Before("before-gap".into()),
-        },
-        crate::kit::history_paging::WindowGapRequest::Page {
-            gap_id: crate::kit::history_window::GapId(2),
-            cursor: WindowPageCursor::After("after-gap".into()),
-        },
-    ]);
-    assert!(event::request_gap_page_after_scroll(Some(
-        crate::kit::history_window::GapSeekDirection::After
-    )));
-    let after_request = rx.try_recv().expect("after gap request");
-    let after_request_id = match &after_request {
-        WindowConsumerRequest::Page {
-            context, cursor, ..
-        } => {
-            assert_eq!(cursor, &WindowPageCursor::After("after-gap".into()));
-            context.request_id.clone()
-        }
-        other => panic!("expected after gap page, got {other:?}"),
-    };
-    assert!(
-        crate::kit::atoms::WINDOW_GAP_REQUEST
-            .state()
-            .read()
-            .iter()
-            .all(|request| request
-                .matches_direction(Some(crate::kit::history_window::GapSeekDirection::Before))),
-        "consuming one direction must keep the other candidate"
-    );
-
-    crate::kit::history_page_consumer::fail_window_request(&after_request_id, "test done", false);
-    assert!(event::request_gap_page_after_scroll(Some(
-        crate::kit::history_window::GapSeekDirection::Before
-    )));
-    let before_request = rx.try_recv().expect("before gap request");
-    assert!(matches!(
-        before_request,
-        WindowConsumerRequest::Page {
-            cursor: WindowPageCursor::Before(ref cursor),
-            ..
-        } if cursor == "before-gap"
-    ));
-    assert!(
-        crate::kit::atoms::WINDOW_GAP_REQUEST
-            .state()
-            .read()
-            .is_empty()
-    );
-
-    crate::kit::atoms::HISTORY_WINDOW_V1.set(false);
-    crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(false);
-    crate::kit::history_page_consumer::reset_window_paging_state();
+    crate::kit::atoms::HISTORY_V2_CAPABLE.set(false);
+    *crate::kit::atoms::HISTORY_V2_TX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
 }
 
 #[test]
 #[serial]
 fn test_scroll_away_from_top_does_not_dispatch() {
+    use crate::kit::history_v2::outbound::OutboundCommand;
+    use peri_acp_types::history_v2::{HISTORY_V2_VERSION, HistoryLimits};
+
     crate::kit::atoms::init_atoms();
-    crate::kit::history_paging::reset_browsing_state();
-    drain_pages_channel();
-    crate::kit::history_paging::note_initial_cursor(
+    crate::kit::atoms::HISTORY_V2_CAPABLE.set(true);
+    let state = crate::kit::history_v2::initial::admit_load_response(
+        &serde_json::json!({
+            "_meta": {"peri.history": {
+                "version": HISTORY_V2_VERSION,
+                "kind": "initial",
+                "requestKey": "1",
+                "executionReady": true,
+                "runtimeGeneration": "runtime-1",
+                "deliveryId": "delivery-1",
+                "liveBoundary": {"streamId": "live-1", "afterSeq": "0"},
+                "page": {
+                    "version": HISTORY_V2_VERSION,
+                    "kind": "window",
+                    "sessionId": "s1",
+                    "windowId": "w1",
+                    "snapshotToken": "snapshot-1",
+                    "historyRevision": "3",
+                    "committedTail": "3",
+                    "projectionVersion": 1,
+                    "readTicket": "ticket-1",
+                    "beforeCursor": "before-1",
+                    "afterCursor": "after-1",
+                    "items": [],
+                    "coverage": {"kind": "interval", "from": {"kind": "head"}, "to": {"kind": "tail"}},
+                    "progress": {"reason": "complete", "scannedEntries": 0, "consumedEntries": 0},
+                },
+            }}
+        }),
         "s1",
-        Some("tok".to_string()),
-        Some("c1".to_string()),
-    );
+        peri_acp_types::history_v2::DecimalU64::new(1),
+        &HistoryLimits::default(),
+    )
+    .expect("admitted");
+    crate::kit::history_v2::publish_initial(state);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<OutboundCommand>();
+    *crate::kit::atoms::HISTORY_V2_TX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(tx);
 
     // 浏览态、视口离顶端很远、pending 也只向上走一小段 → 不派发。
     assert!(!event::request_older_page_at_scroll_facts(
@@ -966,21 +904,10 @@ fn test_scroll_away_from_top_does_not_dispatch() {
     assert!(!event::request_older_page_at_scroll_facts(
         true, 180, 0, 200, 20
     ));
-    assert!(pages_channel().lock().try_recv().is_err(), "不派发任何请求");
-    assert!(
-        crate::kit::atoms::HISTORY_PAGING
-            .state()
-            .read()
-            .in_flight
-            .is_none()
-    );
-}
+    assert!(rx.try_recv().is_err(), "不派发任何请求");
 
-// ── [REQ-C01-3 / A20] 阅读锚点不跳动 ────────────────────────────────────
-//
-// 用例不在这里：锚点补偿已由「桥接槽位包络 + 高度差」改为**渲染侧身份重定位**
-// （`message_area::viewport_anchor`），判据不再能被一份手工构造的槽位表表达。
-// 覆盖位置：
-//   - `viewport_anchor_test.rs`：捕获 / 重定位 / 单元内位移 / 认不出身份的安全方向；
-//   - `viewport_anchor_e2e_test.rs`：真实发布路径（`handle_history_page_loaded` →
-//     `push_view_models` → `Transcript::prepare`），含折叠组导致的槽位数变化形状。
+    crate::kit::atoms::HISTORY_V2_CAPABLE.set(false);
+    *crate::kit::atoms::HISTORY_V2_TX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}

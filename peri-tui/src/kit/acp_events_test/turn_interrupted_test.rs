@@ -42,7 +42,6 @@ fn test_stale_turn_interrupted_does_not_rollback_new_turn() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
-        window: Default::default(),
     };
     dispatch_and_notify(
         &mut state,
@@ -181,7 +180,6 @@ fn test_turn_interrupted_zero_output_rollback_still_works() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
-        window: Default::default(),
     };
     dispatch_and_notify(
         &mut state,
@@ -277,7 +275,6 @@ fn test_turn_interrupted_archive_branch_drains_input_buffer() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
-        window: Default::default(),
     };
     dispatch_and_notify(
         &mut state,
@@ -367,7 +364,6 @@ fn test_stale_turn_interrupted_request_id_mismatch() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
-        window: Default::default(),
     };
     // turn A：LocalUserBubble + PromptSubmitted(A1)
     dispatch_and_notify(
@@ -494,7 +490,6 @@ fn test_stale_turn_interrupted_queued_branch_still_stale() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
-        window: Default::default(),
     };
     dispatch_and_notify(
         &mut state,
@@ -591,7 +586,6 @@ fn test_stale_turn_interrupted_drain_is_idempotent() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
-        window: Default::default(),
     };
     // turn A 运行中
     dispatch_and_notify(
@@ -702,7 +696,6 @@ fn test_turn_interrupted_current_request_id_rollback() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
-        window: Default::default(),
     };
     dispatch_and_notify(
         &mut state,
@@ -792,7 +785,6 @@ fn test_turn_interrupted_none_request_id_falls_back() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
-        window: Default::default(),
     };
     dispatch_and_notify(
         &mut state,
@@ -867,7 +859,6 @@ fn test_double_cancel_request_id_pairs() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
-        window: Default::default(),
     };
     // A 提交并运行
     dispatch_and_notify(

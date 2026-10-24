@@ -18,9 +18,8 @@ use crate::sessions::data::ChildResumeRecord;
 use crate::sessions::data::SessionDataPort;
 use async_trait::async_trait;
 use peri_acp_types::history_page::{
-    message_id_of, resolve_browsing_range, HistoryCursor, HistoryCursorError, HistoryForwardCursor,
-    HistoryPage, HistoryPageBounds, HistoryPageCandidate, HistoryPagePlan, HistoryPageRow,
-    HistorySegment, HistorySegmentPlan,
+    message_id_of, HistoryCursorError, HistoryEntryRole, HistoryForwardCursor, HistoryPage,
+    HistoryPageCandidate, HistoryPagePlan, HistoryPageRow, HistorySegment, HistorySegmentPlan,
 };
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
@@ -63,6 +62,8 @@ mod inherited_facts;
 pub(super) mod inherited_index;
 #[path = "session_data/inherited_page.rs"]
 mod inherited_page;
+#[path = "session_data/inherited_read.rs"]
+mod inherited_read;
 #[path = "session_data/lifecycle.rs"]
 mod lifecycle;
 
@@ -97,6 +98,10 @@ mod inherited_facts_tests;
 #[cfg(test)]
 #[path = "session_data/inherited_index_test.rs"]
 mod inherited_index_tests;
+
+#[cfg(test)]
+#[path = "session_data/inherited_index_gate_test.rs"]
+mod inherited_index_gate_tests;
 
 #[cfg(test)]
 #[path = "session_data/inherited_perf_test.rs"]

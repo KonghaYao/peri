@@ -7,12 +7,10 @@
 //!   选择机制实现。
 //! - 业务侧拿不到本 trait：门面（`SessionResourcesImpl`）是唯一调用方，也是唯一注入点。
 use async_trait::async_trait;
-use peri_acp_types::history_page::{
-    HistoryCursor, HistoryForwardCursor, HistoryPage, HistoryPageBounds, HistorySegment,
-};
-use peri_acp_types::history_window::{
+use peri_acp_types::history_common::{
     HistoryBodyChunk, HistoryCommittedTail, HistoryReadTicket, HistorySource,
 };
+use peri_acp_types::history_page::{HistoryForwardCursor, HistorySegment};
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes,
@@ -171,8 +169,11 @@ pub(crate) trait SessionDataPort: Send + Sync {
         )
     }
 
-    /// 后端是否实现窗口读取端口；默认 false，覆写者与窗口读取实现保持同一判据。
-    fn supports_history_window(&self) -> bool {
+    /// 后端是否实现 History V2 读取端口；默认 false。
+    ///
+    /// 本地 SQLite 复用窗口读取端口（`load_history_window_page` /
+    /// `load_history_body_chunk`）并覆写为 true；远端/其他实现保持 fail-closed。
+    fn supports_history_v2(&self) -> bool {
         false
     }
 
@@ -187,25 +188,6 @@ pub(crate) trait SessionDataPort: Send + Sync {
         id: &ThreadId,
     ) -> SessionResourceResult<Vec<PersistedPayload>>;
 
-    /// 有界读取一页历史（更早方向），含已排除的归档条目；语义见
-    /// [`peri_acp_types::session_resources::SessionResources::load_history_page`]。
-    ///
-    /// 默认失败：空页在契约里是「更早方向没有内容了」的合法含义，没有实现分页读取的后端
-    /// 不得拿它冒充，也不得只读一段再截断。
-    async fn load_history_page(
-        &self,
-        _id: &ThreadId,
-        _cursor: Option<&HistoryCursor>,
-        _limit: usize,
-        _byte_budget: usize,
-    ) -> SessionResourceResult<HistoryPage> {
-        Err(
-            peri_acp_types::session_resources::SessionResourceError::new(
-                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
-            ),
-        )
-    }
-
     /// 自有有效条目的存储序键（`message_id → 存储序键`），语义见
     /// [`peri_acp_types::session_resources::SessionResources::load_entry_positions`]。
     ///
@@ -216,22 +198,6 @@ pub(crate) trait SessionDataPort: Send + Sync {
         _id: &ThreadId,
     ) -> SessionResourceResult<std::collections::HashMap<peri_acp_types::messages::MessageId, u64>>
     {
-        Err(
-            peri_acp_types::session_resources::SessionResourceError::new(
-                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
-            ),
-        )
-    }
-
-    /// 有界读取浏览范围边界（一次单行查询），语义见
-    /// [`peri_acp_types::session_resources::SessionResources::history_page_bounds`]。
-    ///
-    /// 默认失败：没有这条读取的后端给不出「有没有更早内容」的事实，不得用猜出来的起点
-    /// 或空范围冒充。
-    async fn history_page_bounds(
-        &self,
-        _id: &ThreadId,
-    ) -> SessionResourceResult<HistoryPageBounds> {
         Err(
             peri_acp_types::session_resources::SessionResourceError::new(
                 peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
@@ -303,6 +269,22 @@ pub(crate) trait SessionDataPort: Send + Sync {
             committed_tail.clone(),
         );
         self.load_history_window_page(id, &plan).await
+    }
+
+    /// 按稳定身份读取条目元数据（长度 + own role）；默认失败，不得退回整页重读。
+    async fn read_history_entry_metadata(
+        &self,
+        _id: &ThreadId,
+        _source: HistorySource,
+        _entry_id: MessageId,
+        _committed_tail: Option<&HistoryCommittedTail>,
+        _read_ticket: &HistoryReadTicket,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::HistoryEntryMetadata> {
+        Err(
+            peri_acp_types::session_resources::SessionResourceError::new(
+                peri_acp_types::session_resources::SessionResourceErrorKind::Unsupported,
+            ),
+        )
     }
 
     /// 有界正文分块；默认失败，不得退回完整历史读取。

@@ -374,9 +374,7 @@ impl SessionDataPort for SqliteSessionData {
             .map_err(|error| map_sqlx(&error))?;
         frozen_state_on(&mut connection, id).await
     }
-
-    fn supports_history_window(&self) -> bool {
-        // 本机 SQLite 覆写了 bounds/page/body 全部窗口读取端口。
+    fn supports_history_v2(&self) -> bool {
         true
     }
 
@@ -425,20 +423,6 @@ impl SessionDataPort for SqliteSessionData {
         Ok(payloads)
     }
 
-    async fn load_history_page(
-        &self,
-        id: &ThreadId,
-        cursor: Option<&HistoryCursor>,
-        limit: usize,
-        byte_budget: usize,
-    ) -> SessionResourceResult<HistoryPage> {
-        self.read_history_page(id, cursor, limit, byte_budget).await
-    }
-
-    async fn history_page_bounds(&self, id: &ThreadId) -> SessionResourceResult<HistoryPageBounds> {
-        self.read_history_page_bounds(id).await
-    }
-
     async fn load_history_segment(
         &self,
         id: &ThreadId,
@@ -468,12 +452,12 @@ impl SessionDataPort for SqliteSessionData {
     async fn seek_history_window(
         &self,
         id: &ThreadId,
-        source: peri_acp_types::history_window::HistorySource,
+        source: peri_acp_types::history_common::HistorySource,
         anchor: MessageId,
         before_limit: usize,
         after_limit: usize,
         byte_budget: usize,
-        committed_tail: &peri_acp_types::history_window::HistoryCommittedTail,
+        committed_tail: &peri_acp_types::history_common::HistoryCommittedTail,
     ) -> SessionResourceResult<peri_acp_types::session_resources::HistoryWindowRows> {
         self.read_history_window_seek(
             id,
@@ -487,16 +471,34 @@ impl SessionDataPort for SqliteSessionData {
         .await
     }
 
+    async fn read_history_entry_metadata(
+        &self,
+        id: &ThreadId,
+        source: peri_acp_types::history_common::HistorySource,
+        entry_id: MessageId,
+        committed_tail: Option<&peri_acp_types::history_common::HistoryCommittedTail>,
+        read_ticket: &peri_acp_types::history_common::HistoryReadTicket,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::HistoryEntryMetadata> {
+        self.read_history_entry_metadata_from_store(
+            id,
+            source,
+            entry_id,
+            committed_tail,
+            read_ticket,
+        )
+        .await
+    }
+
     async fn load_history_body_chunk(
         &self,
         id: &ThreadId,
-        source: peri_acp_types::history_window::HistorySource,
+        source: peri_acp_types::history_common::HistorySource,
         entry_id: MessageId,
         offset: u64,
         max_bytes: u32,
-        committed_tail: Option<&peri_acp_types::history_window::HistoryCommittedTail>,
-        read_ticket: &peri_acp_types::history_window::HistoryReadTicket,
-    ) -> SessionResourceResult<peri_acp_types::history_window::HistoryBodyChunk> {
+        committed_tail: Option<&peri_acp_types::history_common::HistoryCommittedTail>,
+        read_ticket: &peri_acp_types::history_common::HistoryReadTicket,
+    ) -> SessionResourceResult<peri_acp_types::history_common::HistoryBodyChunk> {
         self.read_history_body_chunk(
             id,
             source,

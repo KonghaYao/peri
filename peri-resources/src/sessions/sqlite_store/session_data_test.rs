@@ -723,9 +723,6 @@ mod legacy_adoption_tests;
 #[path = "session_history_test.rs"]
 mod history_tests;
 
-#[path = "session_history_page_test.rs"]
-mod history_page_tests;
-
 #[path = "session_history_window_test.rs"]
 mod history_window_tests;
 

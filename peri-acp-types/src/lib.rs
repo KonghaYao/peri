@@ -10,7 +10,8 @@
 //! - `store` — ThreadStore 持久化契约（trait + CompactionChange + MessageFlags）；
 //!   纯历史变换见 `store::history`
 //! - `session_resources` — 会话资源门面契约（SessionResources + 中性领域 I/O、错误与能力枚举）
-//! - `history_page` — 历史分页契约（HistoryCursor/HistoryPage/HistoryPageBounds + 页装配与边界事实的唯一规则）
+//! - `history_page` — 历史存储读取契约（keyset 行读取、窗口页装配与标准回放段）
+//! - `history_v2` — Peri History V2 wire 契约（协商 / initial / open/page/seek/body/close / WindowPage / 错误）
 //! - `projection` — compact 投影指令纯数据契约
 //! - `identity` — §9 身份标识契约（AgentId/EventEnvelope/CancelRequest/...）
 //! - `event` / `event_v2` — 事件契约（ExecutorEvent + v2 三层事件 + EventBus + v1 兼容映射）
@@ -58,8 +59,9 @@ pub mod event_data;
 pub mod event_v2;
 pub mod frozen;
 pub mod goal;
+pub mod history_common;
 pub mod history_page;
-pub mod history_window;
+pub mod history_v2;
 pub mod hooks;
 pub mod identity;
 pub mod interaction;

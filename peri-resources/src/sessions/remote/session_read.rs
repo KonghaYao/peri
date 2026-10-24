@@ -13,8 +13,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use peri_acp_types::history_page::{
-    message_id_of, resolve_browsing_range, HistoryCursor, HistoryCursorError, HistoryForwardCursor,
-    HistoryPage, HistoryPageBounds, HistoryPageCandidate, HistoryPagePlan, HistoryPageRow,
+    message_id_of, HistoryCursorError, HistoryForwardCursor, HistoryPageCandidate, HistoryPageRow,
     HistorySegment, HistorySegmentPlan,
 };
 use peri_acp_types::messages::MessageId;
@@ -177,85 +176,6 @@ impl RemoteSessionData {
         Ok(payloads)
     }
 
-    /// 有界读取一页历史（更早方向），分两阶段：
-    ///
-    /// 1. 边界事实 + 候选行（身份 + 存储序键 + 正文长度，最多 `limit + 1` 行）走**同一次**
-    ///    一致读取（`read_batch` 已保证结果集数量与请求一致，回复不完整即错误）。
-    /// 2. 正文只按 [`HistoryPagePlan::body_ids`] 取：一条语句一个 id，同一批次读出，
-    ///    因此多读的那一条候选行的正文**永不出库**（REQ-H03）。
-    ///
-    /// 阶段二单独一批是执行器的形状决定的：批次内的语句必须在发出请求**之前**就定好，
-    /// 拿不到阶段一的输出。两阶段的固定范围由游标锚点（keyset）与**按 id 取值**保证：
-    /// 阶段二只问「本页那些 id」，追加上来的行不影响它，被并发删掉/换掉的行在
-    /// [`decode_page_bodies`] 处失败关闭，不会悄悄变成另一页。
-    ///
-    /// 与 SQLite adapter 共用同一份页规则（[`HistoryPagePlan`]），差别只有执行器。
-    pub(super) async fn read_history_page(
-        &self,
-        id: &ThreadId,
-        cursor: Option<&HistoryCursor>,
-        limit: usize,
-        byte_budget: usize,
-    ) -> SessionResourceResult<HistoryPage> {
-        if let Some(cursor) = cursor {
-            if cursor.thread_id != *id {
-                return Err(HistoryCursorError::CrossSession {
-                    expected: id.clone(),
-                    cursor: cursor.thread_id.clone(),
-                }
-                .into());
-            }
-        }
-        let anchor = cursor.map(|cursor| cursor.anchor.as_uuid().to_string());
-        let store = self.store().await?;
-        let mut batches = store
-            .read_batch(vec![
-                session_sql::history_page_bounds_statement(id.as_str(), anchor.as_deref()),
-                session_sql::history_page_rows_statement(
-                    id.as_str(),
-                    anchor.as_deref(),
-                    limit.saturating_add(1) as i64,
-                ),
-            ])
-            .await?
-            .into_iter();
-        let bounds = batches
-            .next()
-            .ok_or_else(|| incomplete_reply("expected 2 result sets, got 1"))?;
-        let rows = batches
-            .next()
-            .ok_or_else(|| incomplete_reply("expected 2 result sets, got 1"))?;
-        // 会话不存在：边界语句一行都没有（与只读快照同一分类）。
-        let bounds = sole_row(bounds)?.ok_or_else(not_found)?;
-        // 锚点行在不在：rowid 只作存在性判据，游标身份始终是 message_id（游标身份规则见
-        // [`resolve_browsing_range`]）。
-        let (range_head, anchor_present) = decode_page_bounds(&bounds);
-        let range_token = resolve_browsing_range(cursor, range_head, anchor_present)?;
-        let candidates = rows
-            .iter()
-            .map(|row| decode_page_row(row))
-            .collect::<SessionResourceResult<Vec<_>>>()?;
-        let plan = HistoryPagePlan::plan(id, &range_token, candidates, limit, byte_budget);
-        let body_ids = plan.body_ids();
-        if body_ids.is_empty() {
-            // 本页没有要推进的行（空会话或 limit 为 0）：阶段二没有可问的 id，
-            // 不发空批次（空批次会被执行器当作形状不符）。
-            return plan.materialize(Vec::new());
-        }
-        let statements = body_ids
-            .iter()
-            .map(|message_id| {
-                session_sql::history_page_body_statement(
-                    id.as_str(),
-                    &message_id.as_uuid().to_string(),
-                )
-            })
-            .collect();
-        let bodies = store.read_batch(statements).await?;
-        let rows = decode_page_bodies(&body_ids, bodies)?;
-        plan.materialize(rows)
-    }
-
     /// 有界读取**一段** canonical 完整历史（向前方向），分两阶段：
     ///
     /// 1. 边界事实 + 候选行（身份 + 存储序键 + 正文长度，最多 `limit + 1` 行，**升序**）
@@ -373,28 +293,6 @@ impl RemoteSessionData {
             tail.map(|tail| tail.to_string()).as_deref(),
             rows,
         )
-    }
-
-    /// 一次有界单行读取：浏览范围边界（见 [`HistoryPageBounds`]）。
-    ///
-    /// 与 [`Self::read_history_page`] 共用同一条边界语句与同一份解码
-    /// （[`decode_page_bounds`]）：「有没有更早内容」与页读取的起点在远端只有一份口径。
-    /// 会话不存在时边界语句没有行（`NotFound`）；回复出现多行是**不完整回复**，不是「取第一行」。
-    pub(super) async fn read_history_page_bounds(
-        &self,
-        id: &ThreadId,
-    ) -> SessionResourceResult<HistoryPageBounds> {
-        let store = self.store().await?;
-        // 锚点这一档固定为空：调用方还没有游标，也不在这里模拟一次带锚点的读取。
-        let bounds = store
-            .fetch_rows(&session_sql::history_page_bounds_statement(
-                id.as_str(),
-                None,
-            ))
-            .await?;
-        let bounds = sole_row(bounds)?.ok_or_else(not_found)?;
-        let (range_head, _) = decode_page_bounds(&bounds);
-        HistoryPageBounds::new(range_head.as_deref())
     }
 
     /// 自有**有效**条目的存储序键（`message_id → rowid`）：一次有界读取，**不读正文**。
@@ -650,17 +548,6 @@ fn decode_entry_position(row: &[Value]) -> SessionResourceResult<(MessageId, u64
         message_id_of(message_id)?,
         u64::try_from(position).map_err(|_| codec::corrupt("history row position is negative"))?,
     ))
-}
-
-/// 边界事实的解码（**唯一**一处）：浏览范围起点文本 + 锚点行存在性。
-///
-/// 页读取与边界读取共用它，两条路径不会各自解释一次边界行。锚点列只是存在性判据：
-/// 缺失即 `false`，由调用方按游标规则判 `Expired`。
-fn decode_page_bounds(bounds: &[Value]) -> (Option<String>, bool) {
-    (
-        text_at(bounds, 0).map(str::to_owned),
-        int_at(bounds, 1).is_some(),
-    )
 }
 
 /// 绑定列 + 父关系 → 绑定分类。

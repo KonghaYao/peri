@@ -23,16 +23,6 @@ mod agent_event;
 mod interaction;
 mod session_update;
 
-/// 解码一条**历史投影**子项（历史页 `subItems[].update`）为回放语义事件。
-///
-/// 形状解释与实时 `session/update` 共用一份实现（[`session_update`]），但强制走回放
-/// 分支：历史页子项本来就是历史，不能因为 wire 上缺少 `periReplay` 标记就落成流式变体
-/// （那会把历史当成正在产出的内容）。`token_count` 与历史投影无关，丢弃。
-pub(crate) fn decode_history_sub_item(update: &Value) -> Option<AcpEventData> {
-    let params = serde_json::json!({ "update": update });
-    session_update::decode_stream_update_with(&params, "", true).event
-}
-
 use crate::acp_client::{AcpNotification, AcpTuiClient, InteractionOwner};
 use crate::i18n;
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
@@ -146,19 +136,6 @@ async fn forward_notification(
                 debug!(event = %event, "kit ACP notifier: unknown unstable_event, dropping");
                 return None;
             }
-            // 回放条目位置标记与 `session/update` 路径同一份提取（`_meta` 或 data 顶层）；
-            // reminder 的戳摊在 data 顶层（`session_restore` 与 session/update 同一份拼装）。
-            // 必须先于内容事件到达桥接任务：没有它，首屏「自有条目只有 reminder」时区间
-            // 索引为空，更早历史会被插到继承前缀之前（REQ-H01-6、A20）。
-            if let Some((entry_id, position)) = session_update::decode_entry_marks(&data) {
-                let mark = AcpEventWithEpoch {
-                    event: AcpEventData::ReplayEntryMarked { entry_id, position },
-                    active_session_id: session_id.clone(),
-                };
-                if let Err(e) = bridge_tx.send(mark).await {
-                    warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping entry mark");
-                }
-            }
             let wrapped = wrap_with_session(decoded, session_id);
             if let Err(e) = bridge_tx.send(wrapped).await {
                 warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping event");
@@ -167,7 +144,7 @@ async fn forward_notification(
         // kit notifier: extract AvailableCommandsUpdate / plan / streaming
         // from SessionUpdate.
         AcpNotification::SessionUpdate { session_id, params } => {
-            if let Some(decoded) = handle_session_update(params, bridge_tx, &session_id).await {
+            if let Some(decoded) = handle_session_update(params, &session_id).await {
                 let wrapped = wrap_with_session(decoded, session_id);
                 if let Err(e) = bridge_tx.send(wrapped).await {
                     warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping session/update streaming event");
@@ -251,20 +228,6 @@ async fn forward_notification(
                 warn!(error = %error, "kit ACP notifier: bridge closed, dropping interaction terminal");
             }
         }
-        AcpNotification::HistoryCommitted { session_id, params } => {
-            match crate::kit::history_window::HistoryCommitInfo::decode(&params) {
-                Some(info) => {
-                    let wrapped =
-                        wrap_with_session(AcpEventData::HistoryCommitted(info), session_id);
-                    if let Err(e) = bridge_tx.send(wrapped).await {
-                        warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping history commit");
-                    }
-                }
-                None => {
-                    warn!("kit ACP notifier: history_committed payload is malformed, dropping");
-                }
-            }
-        }
         AcpNotification::Peri { .. } | AcpNotification::Other { .. } => {
             debug!("kit ACP notifier: notification variant not yet handled, dropping");
         }
@@ -296,13 +259,17 @@ fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
 
 /// Apply status updates before returning the event to the bridge sender.
 /// Decoding is pure; commands, plan, and spinner publication stay synchronous here.
-async fn handle_session_update(
-    params: Value,
-    bridge_tx: &mpsc::Sender<AcpEventWithEpoch>,
-    session_id: &str,
-) -> Option<AcpEventData> {
+async fn handle_session_update(params: Value, session_id: &str) -> Option<AcpEventData> {
     let update = params.get("update")?;
-    match update.get("sessionUpdate").and_then(Value::as_str) {
+    let tag = update.get("sessionUpdate").and_then(Value::as_str);
+    // F2b：带 `_meta["peri.delivery"]` 的 transcript 更新先过接纳门；没有元数据的
+    // V1 路径直接放行。判定必须在 decode / bridge send 之前，跳过即整条不渲染。
+    if crate::kit::history_v2::live::gate_session_update(session_id, tag, &params)
+        == crate::kit::history_v2::live::LiveGate::Skip
+    {
+        return None;
+    }
+    match tag {
         Some("available_commands_update") => {
             let entries = session_update::decode_commands(update)?;
             let len = entries.len();
@@ -324,20 +291,85 @@ async fn handle_session_update(
             if let Some(token_count) = decoded.token_count {
                 *SPINNER_TOKEN_COUNT.state().write() = token_count;
             }
-            if decoded.event.is_some()
-                && let Some((entry_id, position)) = session_update::decode_entry_marks(update)
-            {
-                // 条目位置标记必须先于内容事件到达桥接任务：桥接用它登记该条目的
-                // 展示区间（首屏区间索引的唯一来源，见 `history_paging`）。
-                let mark = AcpEventWithEpoch {
-                    event: AcpEventData::ReplayEntryMarked { entry_id, position },
-                    active_session_id: session_id.to_string(),
-                };
-                if let Err(e) = bridge_tx.send(mark).await {
-                    warn!(error = %e, "kit ACP notifier: bridge_tx closed, dropping entry mark");
-                }
-            }
             decoded.event
+        }
+    }
+}
+
+/// F2b：initial 发布后重放暂存的 live 更新。
+///
+/// 只重放与 initial `liveBoundary.streamId` 相同的 stream；每条先走与实时路径相同
+/// 的接纳门，只有连续的 `Accepted` 才解码为 bridge 事件。返回的事件仍由调用方按
+/// 顺序发送（`publish_initial` 经 `LOCAL_EVENT_TX` 与视图发布同序）。
+pub(crate) fn replay_pending_initial(
+    state: &crate::kit::history_v2::HistoryV2State,
+) -> Vec<AcpEventWithEpoch> {
+    let Some(session_id) = state.session_id.as_deref() else {
+        return Vec::new();
+    };
+    let Some(stream_id) = state
+        .window
+        .as_ref()
+        .and_then(|window| window.paging.live.stream_id.as_deref())
+    else {
+        return Vec::new();
+    };
+    let mut events = Vec::new();
+    for (meta, params) in crate::kit::history_v2::live::take_pending(session_id) {
+        if meta.stream_id != stream_id {
+            debug!(
+                session_id = %session_id,
+                expected = %stream_id,
+                received = %meta.stream_id,
+                "history v2: dropping buffered update from a stale stream"
+            );
+            continue;
+        }
+        match crate::kit::history_v2::live::admit_live_delivery(session_id, &meta) {
+            crate::kit::history_v2::live::HistoryV2LiveAdmission::Accepted { .. } => {
+                events.extend(decode_live_update(&params, session_id));
+            }
+            admission => {
+                debug!(
+                    session_id = %session_id,
+                    seq = meta.seq.get(),
+                    ?admission,
+                    "history v2: buffered live update not replayed"
+                );
+            }
+        }
+    }
+    events
+}
+
+/// 与实时 notifier 同一套解码。
+fn decode_live_update(params: &Value, session_id: &str) -> Vec<AcpEventWithEpoch> {
+    let decoded = session_update::decode_stream_update(params, session_id);
+    let Some(event) = decoded.event else {
+        return Vec::new();
+    };
+    vec![AcpEventWithEpoch {
+        event,
+        active_session_id: session_id.to_string(),
+    }]
+}
+
+/// 把重放事件按顺序送入 bridge（与 `HistoryV2ViewChanged` 共用 LOCAL_EVENT_TX）。
+pub(crate) fn dispatch_local_events(events: Vec<AcpEventWithEpoch>) {
+    if events.is_empty() {
+        return;
+    }
+    let Some(tx) = crate::kit::atoms::LOCAL_EVENT_TX.get() else {
+        debug!(
+            count = events.len(),
+            "history v2: LOCAL_EVENT_TX unavailable; replayed live updates dropped"
+        );
+        return;
+    };
+    for event in events {
+        if tx.send(event).is_err() {
+            debug!("history v2: LOCAL_EVENT_TX closed; stopping replay");
+            break;
         }
     }
 }
@@ -345,6 +377,10 @@ async fn handle_session_update(
 #[cfg(test)]
 #[path = "acp_notifier_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "acp_notifier_live_test.rs"]
+mod live_tests;
 
 #[cfg(test)]
 #[path = "acp_notifier_agent_test.rs"]

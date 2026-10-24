@@ -41,15 +41,9 @@ async fn run_manual_compact(ctx: SessionContext, sessions: SharedSessions) -> se
                 .collect::<Vec<_>>()
         );
     }
-    let response = finish_prompt_turn(
-        &sessions,
-        &ctx.session_id,
-        false,
-        result,
-        ctx.session_resources.clone(),
-    )
-    .await
-    .unwrap();
+    let response = finish_prompt_turn(&sessions, &ctx.session_id, false, result)
+        .await
+        .unwrap();
     // 使用真实 EventSink + MPSC wire，避免只在记录型 sink 上验证映射。
     loop {
         let notification = tokio::time::timeout(std::time::Duration::from_secs(5), client.recv())
@@ -120,15 +114,9 @@ async fn test_auto_full_then_manual_compact_through_host() {
     let turn = make_compact_turn(&ctx, &sessions, true).await;
     let result = run_session_loop(ctx.clone(), turn).await;
     assert!(result.history_replaced_by_compaction);
-    finish_prompt_turn(
-        &sessions,
-        &ctx.session_id,
-        false,
-        result,
-        ctx.session_resources.clone(),
-    )
-    .await
-    .unwrap();
+    finish_prompt_turn(&sessions, &ctx.session_id, false, result)
+        .await
+        .unwrap();
     run_manual_compact(ctx.clone(), sessions.clone()).await;
     assert_eq!(store.compact_commits.load(Ordering::SeqCst), 2);
     assert_next_turn_sees_summary(ctx, &sessions).await;
@@ -295,10 +283,10 @@ async fn test_finish_prompt_turn_adopts_only_active_set_and_reports_memory_shrin
         .any(|message| message.content() == OLD));
 }
 
-/// Full compact 的 checkpoint/tail 只能来自 durable commit 之后的存储事实。
+/// Full compact 的 durable 提交必须真正追加摘要 payload。
 #[tokio::test]
 #[serial]
-async fn test_manual_compact_publishes_history_window_checkpoint() {
+async fn test_manual_compact_appends_the_summary_payload() {
     let dir = tempfile::tempdir().unwrap();
     let _home = HomeGuard::set(dir.path());
     let (mut ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
@@ -311,31 +299,12 @@ async fn test_manual_compact_publishes_history_window_checkpoint() {
         .clone()
         .expect("compact fixture binds a thread");
     let snapshot = store.inner.load_session_snapshot(&thread_id).await.unwrap();
-    let summary = snapshot
-        .payloads
-        .iter()
-        .find(|payload| {
+    assert!(
+        snapshot.payloads.iter().any(|payload| {
             payload
                 .as_message()
                 .is_some_and(|message| message.content().contains(SUMMARY))
-        })
-        .expect("durable compact must append the summary payload");
-    let expected =
-        peri_acp_types::history_window::HistoryEntryId::new(&thread_id, summary.id()).encode();
-
-    let states = sessions.lock().await;
-    let state = states.get(&ctx.session_id).expect("session remains live");
-    assert_eq!(
-        state.history_window.checkpoint_id.as_deref(),
-        Some(expected.as_str()),
-        "checkpointId must be the durable summary entry identity"
-    );
-    assert_eq!(
-        state.history_window.summary_entry_id.as_deref(),
-        Some(expected.as_str())
-    );
-    assert!(
-        state.history_window.committed_tail.is_some(),
-        "compact must publish a committed tail"
+        }),
+        "durable compact must append the summary payload"
     );
 }

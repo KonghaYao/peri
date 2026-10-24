@@ -17,7 +17,7 @@ mod tool_card;
 pub use current_turn::CurrentTurn;
 pub use event_data::{
     AcpEventData, AcpEventWithEpoch, BgTaskEntry, BgTaskSnapshotSource, CacheUsageSample,
-    FeedbackChannel, FeedbackLevel, PendingInteraction, ToolResultRefetch, TuiCommandFeedback,
+    FeedbackChannel, FeedbackLevel, PendingInteraction, TuiCommandFeedback,
 };
 pub(crate) use tool_card::build_tool_card;
 pub(crate) use tool_card::parse_tool_diff;

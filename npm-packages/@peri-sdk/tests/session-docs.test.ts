@@ -466,8 +466,6 @@ describe("ACP to Yjs session documents", () => {
 
   test("compact keeps the loaded window, live turn, and pending interactions", () => {
     const docs = new SessionDocs();
-    // 翻页进度是浏览身份的一部分：Compact 不得把下一 cursor 跳回已加载的区间（REQ-C02）。
-    docs.seedHistoryWindow({ snapshotToken: "snapshot-1", nextCursor: "cursor-earlier" });
     docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Old question"));
     docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "Old answer"));
     docs.accept(update("s1", "tool_call", { toolCallId: "call-live", title: "Read", status: "in_progress" }));
@@ -507,9 +505,6 @@ describe("ACP to Yjs session documents", () => {
     // 未完成工具保持实时状态，不因 Compact 被批量中止。
     const tools = docs.chat.getMap<unknown>("root").get("toolCalls") as Y.Map<Y.Map<unknown>>;
     expect(tools.get("call-live")?.get("status")).toBe("running");
-    // 已加载窗口由翻页扩大过：Compact 不能重置游标进度。
-    expect(docs.historyCursor()).toBe("cursor-earlier");
-    expect(docs.historyWindowInvalidated()).toBe(false);
   });
 
   test("compact failure only updates the failure display", () => {
@@ -600,7 +595,6 @@ describe("ACP to Yjs session documents", () => {
 
   test("after a compact the live turn keeps streaming into the same entry (REQ-C02)", () => {
     const docs = new SessionDocs();
-    docs.seedHistoryWindow({ snapshotToken: "snapshot-1", nextCursor: "cursor-earlier" });
     docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Question"));
     docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "partial answer"));
     const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
@@ -618,7 +612,6 @@ describe("ACP to Yjs session documents", () => {
     expect(textOf(entries(docs)[1]!, "text")).toBe("partial answer continued");
     expect(info.get("activeTurnId")).toBe(liveTurn);
     expect(info.get("activeAssistantEntryId")).toBe(liveEntry);
-    expect(docs.historyCursor()).toBe("cursor-earlier");
   });
 
   test("unknown and malformed notifications leave both documents unchanged", () => {

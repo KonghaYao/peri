@@ -31,16 +31,10 @@ mod diff_grouping_test;
 mod fold_test;
 #[path = "acp_events_test/group_incremental_test.rs"]
 mod group_incremental_test;
-#[path = "acp_events_test/history_page_test.rs"]
-mod history_page_test;
 #[path = "acp_events_test/history_runtime_test.rs"]
 mod history_runtime_test;
-#[path = "acp_events_test/history_window_commit_test.rs"]
-mod history_window_commit_test;
-#[path = "acp_events_test/history_window_page_test.rs"]
-mod history_window_page_test;
-#[path = "acp_events_test/history_window_release_test.rs"]
-mod history_window_release_test;
+#[path = "acp_events_test/history_v2_view_test.rs"]
+mod history_v2_view_test;
 #[path = "acp_events_test/input_buffer_test.rs"]
 mod input_buffer_test;
 #[path = "acp_events_test/interaction_test.rs"]
@@ -49,8 +43,6 @@ mod interaction_test;
 mod legacy_group_probe_test;
 #[path = "acp_events_test/memory_probe_test.rs"]
 mod memory_probe_test;
-#[path = "acp_events_test/pending_tool_ends_test.rs"]
-mod pending_tool_ends_test;
 #[path = "acp_events_test/perf_probe_test.rs"]
 mod perf_probe_test;
 #[path = "acp_events_test/prefix_archive_test.rs"]
@@ -133,7 +125,6 @@ pub(crate) fn make_fold_test_state() -> BridgeState {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
-        window: Default::default(),
     }
 }
 

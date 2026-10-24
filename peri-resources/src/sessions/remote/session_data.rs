@@ -50,9 +50,7 @@ use super::session_schema;
 use super::sql::StatementSpec;
 use crate::sessions::data::{ChildResumeRecord, SessionDataPort};
 use async_trait::async_trait;
-use peri_acp_types::history_page::{
-    HistoryCursor, HistoryForwardCursor, HistoryPage, HistoryPageBounds, HistorySegment,
-};
+use peri_acp_types::history_page::{HistoryForwardCursor, HistorySegment};
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes,
@@ -720,20 +718,6 @@ impl SessionDataPort for RemoteSessionData {
         id: &ThreadId,
     ) -> SessionResourceResult<Vec<PersistedPayload>> {
         self.read_history(id).await
-    }
-
-    async fn load_history_page(
-        &self,
-        id: &ThreadId,
-        cursor: Option<&HistoryCursor>,
-        limit: usize,
-        byte_budget: usize,
-    ) -> SessionResourceResult<HistoryPage> {
-        self.read_history_page(id, cursor, limit, byte_budget).await
-    }
-
-    async fn history_page_bounds(&self, id: &ThreadId) -> SessionResourceResult<HistoryPageBounds> {
-        self.read_history_page_bounds(id).await
     }
 
     async fn load_history_segment(
