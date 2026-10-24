@@ -125,9 +125,9 @@
 - **TUI 解析与归属**：`peri-tui/src/kit/acp_notifier/session_update.rs:222-243`
   解析 `_meta.peri.originMessageId` 到 `TuiToolStarted.origin_message_id`；
   `acp_events/tool.rs:82-87` 交给 `live_tool_links::note_root_tool_started`
-  （`live_tool_links.rs:109-123`）：显式 origin 优先，缺失才回退流式身份；
-  空串按缺失处理。`note_root_tool_ended`（`:130`）只在结束工具属于当前消息时
-  清身份，避免迟到 `ToolEnded` 擦掉下一轮；`note_turn_boundary`（`:149`）
+  （`live_tool_links.rs:141-161`）：显式 origin 优先，缺失才回退流式身份；
+  空串按缺失处理。`note_root_tool_ended`（`:164`）只在结束工具属于当前消息时
+  清身份，避免迟到 `ToolEnded` 擦掉下一轮；`note_turn_boundary`（`:183`）
   只清启发式，保留 `tool_id` 归属到卡片释放。
 
 ## 验收标准
