@@ -155,6 +155,7 @@ pub(super) fn handle_turn_interrupted(
         return;
     }
     state.current_request_id = None;
+    super::live_tool_links::note_turn_boundary(&state.active_session_id);
     if is_stale {
         tracing::info!(
             turn_generation = state.turn_generation,
@@ -258,6 +259,7 @@ pub(super) fn handle_turn_suspended(state: &mut BridgeState) {
     // Turn 挂起（idle/await_wake）——与 TurnDone 类似但 Agent 保持存活。
     // 归档 current_turn → committed，停止 loading，但不 drain_input_buffer
     // （Agent 还在 await_wake，新 turn 的流事件会自动恢复 loading）
+    super::live_tool_links::note_turn_boundary(&state.active_session_id);
     let has_running_sync_subagent = state.current_turn.has_running_sync_subagent();
     if !state.current_turn.committed && !state.current_turn.is_empty() {
         state.commit_current_turn_units();
@@ -315,6 +317,7 @@ pub(super) fn handle_execution_started(state: &mut BridgeState, request_id: &Opt
 
 pub(super) fn handle_session_replay_started(state: &mut BridgeState) {
     tracing::trace!("dead path: SessionReplayStarted not emitted by notifier");
+    super::live_tool_links::note_turn_boundary(&state.active_session_id);
     state.phase = SessionPhase::ReplayingHistory;
     state.variant = 0;
     state.current_turn.reset();

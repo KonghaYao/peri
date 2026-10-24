@@ -45,6 +45,8 @@ fn duplicate_end_and_late_start_preserve_terminal_background_task() {
         input_summary: "null".into(),
         raw_input: serde_json::Value::Null,
         agent_id: Some("stream-agent".into()),
+        origin_message_id: None,
+        origin_readable: None,
     };
     handle_bg_tool_started("stream-agent", &started, None);
     handle_bg_tool_ended(
@@ -193,6 +195,8 @@ fn tool_boundary_flushes_text_before_tool_and_starts_new_bubble() {
             input_summary: "echo".into(),
             raw_input: serde_json::json!({}),
             agent_id: None,
+            origin_message_id: None,
+            origin_readable: None,
         },
         None,
     );
@@ -240,6 +244,8 @@ fn detail_memory_bytes_separates_stream_nested_and_raw_input() {
             input_summary: "large".into(),
             raw_input: serde_json::json!({"command": "x".repeat(64 * 1024)}),
             agent_id: Some("stream-agent".into()),
+            origin_message_id: None,
+            origin_readable: None,
         },
         None,
     );

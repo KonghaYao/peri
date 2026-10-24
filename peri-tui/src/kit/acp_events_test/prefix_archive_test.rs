@@ -11,6 +11,8 @@ fn todo_start() -> AcpEventData {
             "todos": [{"content": "任务", "status": "pending"}]
         }),
         agent_id: None,
+        origin_message_id: None,
+        origin_readable: None,
     })
 }
 

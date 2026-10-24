@@ -260,6 +260,9 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
     // 因此下一次翻页要等新的初始 load 建立浏览身份——旧 cursor 本已失效。
     crate::kit::history_paging::reset_browsing_state();
     state.window.reset();
+    // rewind 会替换整段 `committed`：live 工具归属（tool_id → assistant 消息 /
+    // 页条目 / 未归属字节）不再有展示对象，整体丢弃，避免长进程累积。
+    super::live_tool_links::forget_session(&state.active_session_id);
     crate::kit::history_page_consumer::reset_window_paging_state();
     crate::kit::history_window::clear_window_viewport();
     crate::kit::atoms::FOCUSED_ENTRY.set(None);

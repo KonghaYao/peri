@@ -22,16 +22,19 @@ fn texts(committed: &im::Vector<TuiRenderUnit>) -> Vec<String> {
 #[test]
 fn removes_displayed_ranges_in_place_and_keeps_live_units() {
     let mut committed = units(5);
-    let slot = remove_displayed_ranges(&mut committed, &[(1, 2)]).expect("valid ranges");
+    let (slot, removed_tools) =
+        remove_displayed_ranges(&mut committed, &[(1, 2)]).expect("valid ranges");
     assert_eq!(slot, 1, "open 页插到首个被摘除区间的起点");
+    assert!(removed_tools.is_empty());
     assert_eq!(texts(&committed), vec!["u0", "u3", "u4"]);
 }
 
 #[test]
 fn empty_ranges_insert_at_tail_without_mutation() {
     let mut committed = units(3);
-    let slot = remove_displayed_ranges(&mut committed, &[]).expect("empty ranges");
+    let (slot, removed_tools) = remove_displayed_ranges(&mut committed, &[]).expect("empty ranges");
     assert_eq!(slot, 3);
+    assert!(removed_tools.is_empty());
     assert_eq!(texts(&committed), vec!["u0", "u1", "u2"]);
 }
 

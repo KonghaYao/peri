@@ -660,6 +660,8 @@ fn test_pending_history_tool_end_never_completes_live_card() {
             input_summary: "live input".to_string(),
             raw_input: json!({"file_path": "/tmp/live"}),
             agent_id: None,
+            origin_message_id: None,
+            origin_readable: None,
         }),
     );
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);

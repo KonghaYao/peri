@@ -93,6 +93,53 @@ fn over_budget_admission_evicts_farthest_segment_first_and_reports_plans() {
     window.settle_pending_merge();
 }
 
+/// 工具卡归属后成为可淘汰 LiveSeal 段：同一批字节从「只增不减的 unattributed」
+/// 转入可释放段，预算压力能生成释放计划并接纳新页。
+#[test]
+fn tool_live_seal_segment_is_evictable_while_unattributed_bytes_are_not() {
+    let mut window = enabled_window(small_limits(1_000));
+    window.note_unattributed_live_bytes(1_000);
+    let rejected = admit(
+        &mut window,
+        "r1",
+        segment("page-a", 10, 200, 220),
+        PagePlacement::Tail,
+    );
+    assert!(
+        matches!(
+            rejected,
+            AdmissionDecision::Rejected(AdmissionRejection {
+                reason: AdmissionRejectionReason::EvictionBlocked(_),
+                ..
+            })
+        ),
+        "unattributed live bytes cannot free capacity"
+    );
+
+    // 归属成功：字节移出 unattributed，登记为带持久位置的 LiveSeal 工具段。
+    window.release_unattributed_live_bytes(1_000);
+    window
+        .register_segment(
+            segment("tool-entry", 5, 900, 940).origin(SegmentOrigin::LiveSeal),
+            SegmentPlacement::Tail,
+        )
+        .expect("live tool segment");
+
+    let admitted = admit(
+        &mut window,
+        "r2",
+        segment("page-b", 20, 200, 220),
+        PagePlacement::Tail,
+    );
+    let released = match admitted {
+        AdmissionDecision::Accepted { released, .. } => released,
+        other => panic!("attributed tool bytes must be evictable, got {other:?}"),
+    };
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0].entries[0].entry_id, "s1:tool-entry");
+    assert_eq!(window.budget().unattributed_live_bytes, 0);
+}
+
 #[test]
 fn all_pinned_segments_reject_admission_and_report_reasons() {
     let mut window = enabled_window(small_limits(1_000));

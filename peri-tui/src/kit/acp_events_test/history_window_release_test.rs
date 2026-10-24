@@ -5,8 +5,8 @@ use std::sync::{Arc, Weak};
 
 use super::*;
 use crate::kit::history_window::{
-    HistoryEntryView, HistorySource, HistoryWindow, HistoryWindowConfig, PersistentEntryKey,
-    ReleasePlan, ReleaseReason, SegmentDraft, SegmentPlacement, WindowIdentity,
+    HistoryCommitInfo, HistoryEntryView, HistorySource, HistoryWindow, HistoryWindowConfig,
+    PersistentEntryKey, ReleasePlan, ReleaseReason, SegmentDraft, SegmentPlacement, WindowIdentity,
 };
 use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiRenderUnit};
 use serial_test::serial;
@@ -70,6 +70,130 @@ fn release_fixture() -> (BridgeState, Weak<TuiAssistantBubble>, PersistentEntryK
         .apply_release_plan(&plan)
         .expect("model release");
     (state, weak, key)
+}
+
+/// 工具卡与正文同属一个 LiveSeal 条目：释放后正文、卡片与字节账目一起消失。
+#[test]
+#[serial]
+fn release_removes_tool_card_with_message_segment() {
+    use peri_acp_types::history_window::HistoryCommittedTail;
+    use peri_acp_types::messages::MessageId;
+    use peri_acp_types::thread::ThreadId;
+
+    let mut state = make_fold_test_state();
+    state.active_session_id = "s1".into();
+    state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
+    state
+        .window
+        .begin_window(WindowIdentity::new("s1", "gen-1", 7, "snap-1"));
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+            text: "released live body".into(),
+            message_id: Some("m-tool".into()),
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
+            tool_id: "tool-release".into(),
+            tool_name: "Read".into(),
+            input_summary: "file".into(),
+            raw_input: serde_json::json!({}),
+            agent_id: None,
+            origin_message_id: None,
+            origin_readable: None,
+        }),
+    );
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    let key = PersistentEntryKey::own("s1:m-tool");
+    let locator = *state
+        .window
+        .index()
+        .locate_entry(&key)
+        .expect("tool entry registered");
+    let segment = state
+        .window
+        .segment(locator.segment)
+        .expect("segment")
+        .clone();
+    assert_eq!(locator.unit_count, 2);
+    let body_before = state.window.budget().resident_body_bytes;
+    let weak = state
+        .committed
+        .iter()
+        .find_map(|unit| match unit {
+            TuiRenderUnit::TuiAssistantBubble(bubble) => Some(Arc::downgrade(bubble)),
+            _ => None,
+        })
+        .expect("live bubble");
+
+    assert!(state.window.promote_live_seal_position(&key, 10));
+    let tail =
+        HistoryCommittedTail::new(&ThreadId::from("s1".to_string()), MessageId::new(), 10).encode();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::HistoryCommitted(HistoryCommitInfo {
+            session_id: "s1".into(),
+            session_generation: "gen-1".into(),
+            structure_version: 7,
+            checkpoint_id: "cp-tool".into(),
+            summary_entry_id: None,
+            committed_tail: tail,
+        }),
+    );
+    assert!(
+        state
+            .window
+            .segment(locator.segment)
+            .expect("sealed")
+            .sealed
+    );
+    crate::kit::acp_events::push_view_models(&mut state);
+
+    let plan = ReleasePlan {
+        segment: locator.segment,
+        source: segment.source.clone(),
+        entries: segment.entry_keys(),
+        unit_count: segment.unit_count,
+        body_bytes: segment.body_bytes,
+        reserved_bytes: segment.reserved_bytes,
+        slot_range: state.window.index().slot_range(locator.segment),
+        before: None,
+        after: None,
+        before_cursor: None,
+        after_cursor: None,
+    };
+    let outcome = crate::kit::history_window::release_window_plans(
+        &mut state,
+        vec![plan],
+        ReleaseReason::BudgetPressure,
+    );
+    assert_eq!(outcome.released_entries, 1);
+    assert_eq!(outcome.released_units, 2, "text + tool card");
+    assert_eq!(outcome.body_bytes, segment.body_bytes);
+    assert!(
+        !state
+            .committed
+            .iter()
+            .any(|unit| matches!(unit, TuiRenderUnit::TuiToolCard(card) if card.tool_id == "tool-release")),
+        "released tool card leaves committed"
+    );
+    assert!(state.committed.is_empty());
+    assert_eq!(state.window.budget().resident_body_bytes, 0);
+    assert_eq!(state.window.budget().unattributed_live_bytes, 0);
+    assert!(
+        state.window.budget().resident_body_bytes < body_before,
+        "tool card bytes were part of the released body account"
+    );
+
+    crate::kit::atoms::RENDER_ACHIEVED_EPOCH.set(outcome.structural_epoch);
+    crate::kit::acp_events::push_view_models(&mut state);
+    assert!(
+        weak.upgrade().is_none(),
+        "released assistant bubble must not remain reachable after render ack"
+    );
 }
 
 #[test]

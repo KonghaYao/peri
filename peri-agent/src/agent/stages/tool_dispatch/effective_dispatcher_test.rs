@@ -150,14 +150,30 @@ async fn nested_dispatch_keeps_pinned_target_and_does_not_commit_outer_batch() {
         4
     );
     let mut ids = Vec::new();
+    let mut started_origin = None;
     while let Some(event) = handles.try_render() {
-        if let crate::agent::events_v2::RenderEvent::ToolStarted { tool_call_id, .. }
-        | crate::agent::events_v2::RenderEvent::ToolEnded { tool_call_id, .. } = event
-        {
-            ids.push(tool_call_id);
+        match event {
+            crate::agent::events_v2::RenderEvent::ToolStarted {
+                tool_call_id,
+                origin_message_id,
+                origin_readable,
+                ..
+            } => {
+                started_origin = Some((origin_message_id, origin_readable));
+                ids.push(tool_call_id);
+            }
+            crate::agent::events_v2::RenderEvent::ToolEnded { tool_call_id, .. } => {
+                ids.push(tool_call_id)
+            }
+            _ => {}
         }
     }
     assert_eq!(ids, vec!["outer/inner", "outer/inner"]);
+    assert_eq!(
+        started_origin,
+        Some((None, Some(false))),
+        "嵌套执行没有持久 origin：必须显式标记不可回读，禁止消费方回退"
+    );
 }
 
 #[tokio::test]

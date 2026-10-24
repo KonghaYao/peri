@@ -660,23 +660,52 @@ async fn bridge_emits_tool_started_on_first_tool_call_delta() {
         .render_rx
         .try_recv()
         .expect("应收到 RenderEvent::ThinkingChunk");
-    assert!(matches!(
-        first,
-        RenderEvent::ThinkingChunk { chunk, .. } if chunk == "think"
-    ));
+    let chunk_message_id = match first {
+        RenderEvent::ThinkingChunk {
+            chunk, message_id, ..
+        } => {
+            assert_eq!(chunk, "think");
+            message_id
+        }
+        other => panic!("第 1 个应为 ThinkingChunk，实际：{other:?}"),
+    };
     let started = handles
         .render_rx
         .try_recv()
         .expect("应收到提前的 RenderEvent::ToolStarted");
-    assert!(matches!(
-        started,
+    match started {
         RenderEvent::ToolStarted {
             tool_call_id,
             name,
             input,
+            origin_message_id,
+            origin_readable,
             ..
-        } if tool_call_id == "call_1" && name == "shell" && input == serde_json::Value::Null
-    ));
+        } => {
+            assert_eq!(tool_call_id, "call_1");
+            assert_eq!(name, "shell");
+            assert_eq!(input, serde_json::Value::Null);
+            assert_eq!(
+                origin_message_id,
+                Some(chunk_message_id),
+                "提前的工具事件必须携带真实 assistant 消息身份（纯工具轮次的唯一归属来源）"
+            );
+            assert_eq!(
+                origin_readable,
+                Some(true),
+                "模型批次提前发射的 origin 是本次调用的持久消息，必须标记可回读"
+            );
+        }
+        other => panic!("第 2 个应为 ToolStarted，实际：{other:?}"),
+    }
+    assert_eq!(
+        reasoning
+            .source_message
+            .as_ref()
+            .map(|message| message.id()),
+        Some(chunk_message_id),
+        "流式 chunk 与最终 assistant 消息必须是同一身份"
+    );
     // 第二个 ToolCallDelta（无 id/name）幂等：不再发；Usage/Completed 无 Render
     assert!(
         handles.render_rx.try_recv().is_err(),

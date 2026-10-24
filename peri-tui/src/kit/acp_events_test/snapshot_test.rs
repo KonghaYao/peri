@@ -81,6 +81,8 @@ fn p0_new_prompt_preserves_running_tool_result() {
             input_summary: "file.rs".into(),
             raw_input: serde_json::json!({"path": "file.rs"}),
             agent_id: None,
+            origin_message_id: None,
+            origin_readable: None,
         }),
     );
     dispatch_and_notify(
@@ -332,6 +334,8 @@ fn test_snapshot_group_successful_tools() {
                 input_summary: path.into(),
                 raw_input: serde_json::json!({"path": path}),
                 agent_id: None,
+                origin_message_id: None,
+                origin_readable: None,
             }),
         );
     };
@@ -408,6 +412,8 @@ fn test_snapshot_group_successful_tools() {
                 input_summary: "x".into(),
                 raw_input: serde_json::json!({"path": "x"}),
                 agent_id: None,
+                origin_message_id: None,
+                origin_readable: None,
             }),
         );
     };
@@ -463,6 +469,8 @@ fn test_snapshot_group_excludes_semantic_cards() {
                 input_summary: "x".into(),
                 raw_input: serde_json::json!({"skill": "s", "todos": []}),
                 agent_id: None,
+                origin_message_id: None,
+                origin_readable: None,
             }),
         );
         dispatch_and_notify(
@@ -504,6 +512,8 @@ fn test_snapshot_group_excludes_focused_tool() {
                 input_summary: path.into(),
                 raw_input: serde_json::json!({"path": path}),
                 agent_id: None,
+                origin_message_id: None,
+                origin_readable: None,
             }),
         );
     };
@@ -572,6 +582,8 @@ fn test_probe_two_reads_then_text_grouped() {
                 input_summary: "Cargo.toml".into(),
                 raw_input: serde_json::json!({"path": "Cargo.toml"}),
                 agent_id: None,
+                origin_message_id: None,
+                origin_readable: None,
             }),
         );
         dispatch_and_notify(
