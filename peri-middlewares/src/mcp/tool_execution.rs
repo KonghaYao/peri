@@ -14,7 +14,7 @@ fn evidence(status: ToolExecutionStatus, task_id: Option<String>) -> ToolExecuti
 
 pub(super) fn task_started(public_id: String, delivery_note: &str) -> ToolOutput {
     ToolOutput::with_execution(
-        format!("Background task started: {public_id}. {delivery_note}"),
+        format!("Background task started: {public_id}. {delivery_note} Continue independent work; use TaskOutput for diagnosis, do not sleep or query in a polling loop, and rely on completion notifications. Report success only after an actual terminal result. Use health checks for service readiness; use a bounded background watch for CI."),
         evidence(ToolExecutionStatus::Running, Some(public_id)),
     )
 }

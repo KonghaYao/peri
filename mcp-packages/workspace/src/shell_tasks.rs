@@ -25,6 +25,9 @@ use rmcp::{
 #[derive(Default)]
 struct ShellState {
     records: HashMap<String, DetailedTask>,
+    output_logs: HashMap<String, crate::task_output::TaskOutputLogs>,
+    queries: HashMap<String, crate::task_output::QueryProgress>,
+    cancelled_results: HashMap<String, BackgroundTaskResult>,
     owners: HashMap<String, String>,
     cancel_pending: HashSet<String>,
     cancel_accepted: HashSet<String>,
@@ -166,6 +169,11 @@ impl ShellTasks {
                 return Ok(());
             }
             let cancelled = state.cancel_accepted.remove(&result.task_id);
+            if cancelled {
+                state
+                    .cancelled_results
+                    .insert(result.task_id.clone(), result.clone());
+            }
             let record = state
                 .records
                 .entry(result.task_id.clone())
@@ -295,6 +303,13 @@ impl ShellTasks {
                 TaskPayload::Working,
             );
             let mut state = state.lock();
+            state.output_logs.insert(
+                handle.task_id.clone(),
+                crate::task_output::TaskOutputLogs {
+                    stdout_log: handle.stdout_log.clone(),
+                    stderr_log: handle.stderr_log.clone(),
+                },
+            );
             let already_terminal = state
                 .records
                 .get(&handle.task_id)
@@ -338,6 +353,38 @@ impl ShellTasks {
                 )
             })?;
         Ok(task)
+    }
+
+    pub(crate) fn retain_promoted_output(&self, output: &crate::terminal::PromotedTaskOutput) {
+        self.state.lock().output_logs.insert(
+            output.task_id.clone(),
+            crate::task_output::TaskOutputLogs {
+                stdout_log: output.stdout_log.clone(),
+                stderr_log: output.stderr_log.clone(),
+            },
+        );
+    }
+
+    pub(crate) fn cancelled_result(&self, id: &str) -> Option<BackgroundTaskResult> {
+        self.state.lock().cancelled_results.get(id).cloned()
+    }
+
+    pub(crate) fn output_logs(&self, id: &str) -> crate::task_output::TaskOutputLogs {
+        self.state
+            .lock()
+            .output_logs
+            .get(id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn query_progress(&self, id: &str, status: &str, sizes: (u64, u64)) -> (bool, u64) {
+        self.state
+            .lock()
+            .queries
+            .entry(id.into())
+            .or_default()
+            .observe(status, sizes)
     }
 
     /// Register a foreground call that the Bash executor already promoted to

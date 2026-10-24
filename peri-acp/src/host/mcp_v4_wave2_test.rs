@@ -661,6 +661,7 @@ const WAVE2_INSTANCES: [(&str, &[&str]); 4] = [
             "Grep",
             "folder_operations",
             "Bash",
+            "TaskOutput",
         ],
     ),
 ];

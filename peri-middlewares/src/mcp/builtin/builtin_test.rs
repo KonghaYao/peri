@@ -83,6 +83,7 @@ fn effective_tool_names_covers_registry() {
             "Grep".to_string(),
             "folder_operations".to_string(),
             "Bash".to_string(),
+            "TaskOutput".to_string(),
         ]),
         "workspace 的 7 个有效名（裸名不得出现在此集合里）"
     );
@@ -115,7 +116,7 @@ fn declared_direct_tools_is_derived_from_registry() {
             // wave 3：workspace 的 7 项全部 direct（AW3-03：迁移前即在首个请求的直连表内）。
             "workspace" => assert_eq!(
                 declared.len(),
-                7,
+                8,
                 "workspace 的 7 个本地工具必须全部 declared direct（AW3-03）"
             ),
             // wave 2：cron 零 direct —— `system_mcp_tools` 恒为空集（A5）。
@@ -158,6 +159,7 @@ fn is_declared_direct_true_for_implemented_false_for_unknown() {
         "Grep",
         "folder_operations",
         "Bash",
+        "TaskOutput",
     ] {
         assert!(
             is_declared_direct("workspace", tool),

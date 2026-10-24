@@ -560,7 +560,7 @@ fn mutation_tool_matches_original_name_policy_for_builtin_names() {
 
     // wave 3 冻结结果：workspace 七工具（Write/Edit/folder_operations/Bash 是写能力，
     // Read/Glob/Grep 不是），两种名字形态逐项绝对判定——等价断言之外再锁方向。
-    let workspace_frozen: [(&str, bool); 7] = [
+    let workspace_frozen: [(&str, bool); 8] = [
         ("Read", false),
         ("Write", true),
         ("Edit", true),
@@ -568,6 +568,7 @@ fn mutation_tool_matches_original_name_policy_for_builtin_names() {
         ("Grep", false),
         ("folder_operations", true),
         ("Bash", true),
+        ("TaskOutput", false),
     ];
     let workspace = peri_acp_types::builtin_mcp::find("workspace").expect("workspace 实例应有声明");
     for (original, mutation) in workspace_frozen {

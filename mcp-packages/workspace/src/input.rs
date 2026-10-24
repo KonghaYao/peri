@@ -5,7 +5,7 @@ use peri_acp_types::tasks::{OnBgCompleteFn, TaskManager};
 /// Session-scoped inputs delivered to the workspace instance's `BashTool`.
 ///
 /// Both values are passed to the existing tool unchanged. Missing input is a supported degraded
-/// mode: the workspace server still exposes all seven tools, while Bash lacks the corresponding
+/// mode: the workspace server still exposes all eight tools, while Bash lacks the corresponding
 /// background-task behavior.
 ///
 /// `run_in_background` 的有效缺省不是本类型的成员：它只经生产构造器

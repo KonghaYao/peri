@@ -8,15 +8,15 @@ import { buildPeriForE2e } from "../../helpers/build.js";
  *
  * 覆盖（计划 §8.2 必测矩阵的可观测子集）：
  * - ① 首请求：system 含冻结技能摘要（workspace 本地来源）+ 项目指令；tools 面
- *   含宿主 SkillTool/DiscoverSkillsTool 与 workspace 七工具（裸名）；workspace
+ *   含宿主 SkillTool/DiscoverSkillsTool 与 workspace 八工具（裸名）；workspace
  *   不注册同名技能工具；发现阶段技能正文 `resources/read` 计数 = 0（fixture 端）；
  * - ② 显式 token（X1=R1）：`/skill-name`（本地）与 `/server:skill`（外部）触发
  *   首轮全文注入；外部形态经 `resources/read`（fixture 端计数 ≥1）；
  * - ③ 批准/拒绝：fixture 远端 Agent 的 HITL 批准面（stdio ACP 的
  *   `session/request_permission`）——批准后子代理启动、拒绝后不启动且不注入；
  * - ④ 关闭矩阵：workspace 关闭（`meta_harness.WorkspaceMiddleware=false`）时
- *   七工具/摘要/指令全部不可得、磁盘技能正文不回落；
- * - ⑤ 回归：七工具表与 resources 面（`workspace://git/ref`）不回归；
+ *   八工具/摘要/指令全部不可得、磁盘技能正文不回落；
+ * - ⑤ 回归：八工具表与 resources 面（`workspace://git/ref`）不回归；
  * - ⑥ 子代理 preload 缺口（W6）：项目本地 agent 声明未命中技能 ⇒ 子代理首轮
  *   注入 is_error 回执（不静默启动不完整配置），父会话不因缺口中止。
  *
@@ -180,7 +180,7 @@ describe("workspace MCP resources：真实二进制验收（print / stdio）", (
     return created;
   }
 
-  it("① 首请求：system 含技能摘要与项目指令，tools 含七工具与宿主技能工具，发现阶段零正文读取", async () => {
+  it("① 首请求：system 含技能摘要与项目指令，tools 含八工具与宿主技能工具，发现阶段零正文读取", async () => {
     const w = await world();
     const run = await runPrint(w, "hello w6");
     expect(run.exitCode, `print 退出码；stderr=${run.stderr.slice(0, 400)}`).toBe(0);
@@ -196,10 +196,10 @@ describe("workspace MCP resources：真实二进制验收（print / stdio）", (
     // 项目指令经资源面进入 system（peri-instruction://workspace/main）
     expect(system).toContain(INSTRUCTION_SENTINEL);
 
-    // 宿主两工具 + workspace 七工具（裸名投影）
+    // 宿主两工具 + workspace 八工具（裸名投影）
     expect(names).toContain("SkillTool");
     expect(names).toContain("DiscoverSkillsTool");
-    for (const tool of WORKSPACE_TOOLS) expect(names, `七工具表含 ${tool}`).toContain(tool);
+    for (const tool of WORKSPACE_TOOLS) expect(names, `八工具表含 ${tool}`).toContain(tool);
     // workspace 不注册同名技能工具（宿主是唯一技能工具面）
     expect(names.filter((name) => name.startsWith("mcp__workspace__") && /skill/i.test(name))).toEqual([]);
 
@@ -379,7 +379,7 @@ describe("workspace MCP resources：真实二进制验收（print / stdio）", (
     const system = systemText(firstMainRequest(w));
     // deferred 工具 mcp_read_resource 的可用资源清单仍含既有 workspace 资源
     expect(system).toContain("workspace://git/ref");
-    // 七工具与宿主技能工具表（与 ① 同口径）
+    // 八工具与宿主技能工具表（与 ① 同口径）
     const names = toolNames(firstMainRequest(w));
     for (const tool of WORKSPACE_TOOLS) expect(names).toContain(tool);
     expect(names).toContain("SkillTool");

@@ -46,6 +46,7 @@ fn build_tool(original_name: &str) -> Box<dyn BaseTool> {
         "Grep" => Box::new(GrepTool::new(cwd)),
         "folder_operations" => Box::new(FolderOperationsTool::new(cwd)),
         "Bash" => Box::new(BashTool::new(cwd)),
+        "TaskOutput" => Box::new(peri_mcp_workspace::task_output::TaskOutputTool),
         other => panic!(
             "workspace 实例声明了本测试未覆盖的工具 `{other}`：注册表新增工具时必须同步 \
              `build_tool`（否则该工具的公开构造面无人守护）"

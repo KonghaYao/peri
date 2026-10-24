@@ -45,9 +45,9 @@ async fn test_bash_timeout_returns_quickly() {
 
     // Windows 用 ping 模拟 sleep，Unix 用 sleep
     let (sleep_cmd, timeout_ms) = if cfg!(target_os = "windows") {
-        ("ping -n 60 127.0.0.1", 1000)
+        ("ping -n 30 127.0.0.1", 1000)
     } else {
-        ("sleep 60", 1000)
+        ("sleep 30", 1000)
     };
 
     let result = tool
