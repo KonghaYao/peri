@@ -252,6 +252,7 @@ fn test_turn_done_archives_orphan_tool_not_running() {
             input_summary: String::new(),
             raw_input: serde_json::Value::Null,
             agent_id: None,
+            origin_message_id: None,
         }),
     );
     let running = VIEW_MODELS.state().read().clone();

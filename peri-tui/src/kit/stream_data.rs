@@ -34,6 +34,12 @@ pub struct TuiToolStarted {
     pub input_summary: String,
     /// 原始结构化输入；仅供专属语义卡片消费，禁止从工具输出反推。
     pub raw_input: Value,
+    /// 该工具所属 assistant 消息的稳定身份（ACP `_meta.peri.originMessageId`）。
+    ///
+    /// 纯工具响应轮次没有文本/推理 chunk，只有该字段能给出真实归属；超预算
+    /// 工具卡据此进入可淘汰段。`None` 表示服务端未提供，客户端回退到当前
+    /// 流式 assistant 身份，不得用 turn 身份冒充。
+    pub origin_message_id: Option<String>,
     /// 当事件来自子 agent 时存在。
     pub agent_id: Option<String>,
 }

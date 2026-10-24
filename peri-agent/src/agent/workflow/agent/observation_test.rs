@@ -76,6 +76,7 @@ fn handler_projects_cumulative_progress_before_langfuse_callback() {
         name: "Read".into(),
         input: json!({}),
         source_agent_id: None,
+        origin_message_id: None,
     });
     handler.on_event(llm_end("first", Some(12)));
     handler.on_event(llm_end("second", Some(5)));

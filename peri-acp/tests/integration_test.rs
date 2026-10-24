@@ -93,6 +93,7 @@ async fn test_event_mapper_tool_start() {
         name: "Read".into(),
         input: json!({"path": "/tmp/test.txt"}),
         source_agent_id: None,
+        origin_message_id: None,
     };
 
     let mapped = map_event(&event, 200000, &PeriCaps::default());

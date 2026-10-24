@@ -263,6 +263,31 @@ impl ResidentIndex {
         }
     }
 
+    /// 段内新增展示单元后的正文字节增量（条目/段计数由 `HistoryWindow` 维护，
+    /// 这里只同步索引自身的字节账目与 pin 子账）。
+    pub fn extend_segment_bytes(&mut self, key: SegmentKey, body_bytes: usize) {
+        if let Some(meta) = self.segment_meta.get_mut(&key) {
+            meta.body_bytes = meta.body_bytes.saturating_add(body_bytes);
+            if meta.pinned {
+                self.pinned_bytes = self.pinned_bytes.saturating_add(body_bytes);
+            }
+        }
+        self.body_bytes = self.body_bytes.saturating_add(body_bytes);
+    }
+
+    /// 已有段正文大小变化（迟到工具终点）；正负均可，按饱和处理。
+    pub fn adjust_segment_bytes(&mut self, key: SegmentKey, delta: i64) {
+        let Some(meta) = self.segment_meta.get_mut(&key) else {
+            return;
+        };
+        let next = apply_delta(meta.body_bytes, delta);
+        if meta.pinned {
+            self.pinned_bytes = apply_delta(self.pinned_bytes, delta);
+        }
+        meta.body_bytes = next;
+        self.body_bytes = apply_delta(self.body_bytes, delta);
+    }
+
     /// 按布局顺序重建槽位前缀和；段顺序必须与 `committed` 一致。
     pub fn rebuild_slots(
         &mut self,
@@ -310,5 +335,13 @@ impl ResidentIndex {
 impl Default for ResidentIndex {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn apply_delta(value: usize, delta: i64) -> usize {
+    if delta >= 0 {
+        value.saturating_add(delta as usize)
+    } else {
+        value.saturating_sub(delta.unsigned_abs() as usize)
     }
 }

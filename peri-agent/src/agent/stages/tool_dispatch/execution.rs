@@ -180,12 +180,12 @@ pub(super) async fn collect_tool_results(
     all_tools: &HashMap<String, Arc<dyn BaseTool>>,
     catalog: &Arc<SessionToolCatalogSnapshot>,
     cancel: &CancellationToken,
-    // ai_msg_id 保留为 API 契约（未来 ToolEnd 事件可携带 message_id）
-    ai_msg_id: MessageId,
+    // 所属 assistant 消息身份：模型批次由 `dispatch_tools` 给出真实消息 id；
+    // 嵌套执行入口没有独立的 assistant 消息，保持 None，不用 turn_id 冒充。
+    origin_message_id: Option<MessageId>,
     ai_msg: &BaseMessage,
     model_tool_call_id: Option<&str>,
 ) -> AgentResult<CollectOutcome> {
-    let _ = ai_msg_id;
     // turn 是**可选事实**：模型来源的执行（模型批次 / 显式模型调用）必须提供真实
     // turn（render 事件纽带、step、turn_generation 都绑定它），缺失即 typed 不可用；
     // App / Host / 嵌套来源按构造没有 turn 绑定义务，管线照常执行但：
@@ -195,8 +195,15 @@ pub(super) async fn collect_tool_results(
     let turn = ctx.require_model_turn("tool dispatch")?;
 
     // 阶段一：批量 before_tool 审批
-    let approval =
-        run_before_tool_approvals(ctx, original_calls, event_calls, all_tools, cancel).await?;
+    let approval = run_before_tool_approvals(
+        ctx,
+        original_calls,
+        event_calls,
+        all_tools,
+        cancel,
+        origin_message_id,
+    )
+    .await?;
 
     // yield 使 EventBus forwarder task 排空 render_tx 中由阶段一 emit 的
     // ToolStarted 事件（转发到 event_tx），保证在 SubAgent 工具 invoke 内部
@@ -245,6 +252,7 @@ async fn run_before_tool_approvals(
     event_calls: &HashMap<String, ToolCall>,
     targets: &HashMap<String, Arc<dyn BaseTool>>,
     cancel: &CancellationToken,
+    origin_message_id: Option<MessageId>,
 ) -> AgentResult<ApprovalOutcome> {
     // 审批输入全是 session 级事实（会话身份 + 归属 + 工具表）：无 turn 的 App /
     // Host 入口照常审批；模型来源缺 turn 时逐条 typed 不可用（由
@@ -301,6 +309,7 @@ async fn run_before_tool_approvals(
                         tool_call_id: raw_call.id.clone(),
                         name: raw_call.name.clone(),
                         input: modified_call.input.clone(),
+                        origin_message_id,
                     });
                 }
                 ready_calls.push(modified_call);
@@ -324,6 +333,7 @@ async fn run_before_tool_approvals(
                         tool_call_id: raw_call.id.clone(),
                         name: raw_call.name.clone(),
                         input: raw_call.input.clone(),
+                        origin_message_id,
                     });
                     ctx.emit_render(RenderEvent::ToolEnded {
                         turn_id,

@@ -87,6 +87,14 @@ pub enum RenderEvent {
         tool_call_id: String,
         name: String,
         input: serde_json::Value,
+        /// 该工具调用所属 assistant 消息的稳定身份。
+        ///
+        /// 与 `turn_id` 区分：同一 turn 可包含多次 LLM 调用（多条 assistant
+        /// 消息）。纯工具响应轮次没有文本/推理 chunk 提供消息边界，只有发射点
+        /// 知道真实所属消息，故必须显式携带。`None` 表示发射点不可知（例如嵌套
+        /// 执行入口），消费方不得用 `turn_id` 冒充。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_message_id: Option<crate::messages::MessageId>,
     },
     /// 工具调用结束
     ///

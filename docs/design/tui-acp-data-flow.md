@@ -127,7 +127,10 @@ BridgeState.committed + CurrentTurn
 3. 初始预算（实施初值，不是性能结论）：历史展示正文 16 MiB、页预留上限 2 MiB、
    普通页目标 512 KiB、页条目 50/最多 100、未配对工具结果 1 MiB/256 条、详情窗口 4 MiB、
    释放水位 75%、预取门槛 8 MiB、渲染缓存 8 MiB 且超限降到 6 MiB。live、运行中、未持久化
-   与继承段计入 `pinned_bytes`（不可淘汰，但仍是 body 占用）；全部固定时接纳显式失败，
+   与继承段计入 `pinned_bytes`（不可淘汰，但仍是 body 占用）；已按真实 assistant 消息归属的
+   `LiveSeal` 工具卡在 `peri/history_committed` 解除 `Unpersisted` pin 后转为可淘汰。
+   `unattributed_live_bytes` 只承载仍无可核实身份的工具/子 Agent 正文，工具卡每次归属都
+   按窗口实例+代次扣减，不再只增不减。全部固定时接纳显式失败，
    不能把归档正文长期计为固定。
 4. 接纳先按字节判断再构造展示单元；超预算时按“距锚点最远 → 最久未访问 → 最早创建”生成
    `ReleasePlan`，跳过所有 pin。全固定时拒绝接纳并记录 `evict_blocked_pinned`，不释放未持久化内容。
@@ -244,7 +247,7 @@ snapshot/event 重建。
 | 事件族 | TUI 归约 |
 | --- | --- |
 | assistant text / thought chunk | 追加到当前 message segment；维持 message 与 source identity |
-| tool start/update | 按调用 identity 原地更新 tool activity；历史 replay 走同一语义归约 |
+| tool start/update | 按调用 identity 原地更新 tool activity；历史 replay 走同一语义归约。live `ToolCall` 经 ACP 扩展位 `ToolCall._meta.peri.originMessageId` 携带真实所属 assistant 消息（纯工具轮次唯一归属来源）；replay 路径不写该字段 |
 | plan / usage / context metadata | 更新计划或资源投影，不伪装成普通消息 |
 | turn terminal / suspended / execution failure | 归档、回滚或保留当前回合，并退出 loading |
 | compact / rewind | `CompactCompleted` 只显示提示；`peri/history_committed` 按提交水位封印 durable 段并驱动预算释放；rewind 以服务端 snapshot 重建 transcript 并失效旧窗口与游标 |
@@ -255,6 +258,47 @@ snapshot/event 重建。
 
 `session/update` 承载标准 ACP 流式内容、工具、计划和 usage；Peri 扩展只用于 ACP 标准面不能
 表达的低频语义。扩展不得建立第二条语义不一致的 tool/turn 终态通道。
+
+### Live 工具卡归属、回填与释放
+
+工具卡在 wire 上没有独立持久身份：ACP `ToolCall.toolCallId` 是调用身份，持久归属是所属
+assistant 消息的 `messageId`。live 路径的归属链路是：
+
+1. Agent 侧三个发射点写入真实消息身份：流式提前 `ToolStarted`（`model_bridge`）、正式
+   dispatch 的审批通过/拒绝补发 `ToolStarted`（`tool_dispatch/execution.rs`）、结算路径
+   `emit_settled_tool_render`。嵌套执行入口（`StageEffectiveToolDispatcher`）没有独立
+   assistant 消息，显式传 `None`，不得用 turn/shell 消息 id 冒充。
+2. v2 `ExecutorEvent::ToolStart.origin_message_id` 为独立可选字段，v1 映射原样透传；
+   `message_id` 仍由 `turn_id` 派生，两套语义不互相替代。
+3. `peri-acp` mapper 只对 live 工具事件写 `ToolCall._meta.peri.originMessageId`；历史 replay
+   由持久 transcript 重建工具投影，不写该 key（否则会把回放条目误挂到实时消息）。
+4. TUI notifier 解析 `_meta` 写入 `TuiToolStarted.origin_message_id`；
+   `live_tool_links` 记录 `tool_id → assistant message`。字段缺失/空串时回退到同一流式
+   assistant 消息身份；两者都没有则保持未归属，按 `unattributed_live_bytes` 计入总预算。
+5. 归档时同身份的文本与工具卡共用一个 `LiveSeal` 条目（`extend_live_entry`），归属成功
+   立即把工具卡字节从 `unattributed_live_bytes` 移出；预算重置按窗口实例+代次隔离旧记录。
+6. open 页按 `tool_id` 给出条目身份时，`RetainedLiveEntries` 绑定 `tool_id → 页条目/位置`。
+   adopt 判据是 `committed` 非空，与本次 open 是否切换窗口身份无关；同身份重试也按现有
+   live 卡片去重，不重置窗口、不重复入段。**回填必须发生在页正文与展示账本落定之后**：
+   `DisplayLedger::insert_existing_slot` 原地登记已存在槽位，不移动其他区间；新段插入到
+   「首个更晚展示区间所属段」之前，使 `layout`/`index` 顺序与 `committed` 一致。使用会
+   右移区间的 `insert_block` 会让释放事务按错误区间删除正文（预算已归还但正文残留）。
+   同一条目只有部分工具子项被 live 持有时，只跳过这些子项，兄弟正文仍随页插入；若该
+   条目已作为页段驻留，`LiveSeal` 不能并入同一身份，工具卡按既有保守路径继续计入
+   `unattributed_live_bytes`，不得因此丢弃兄弟正文。
+7. 释放/rewind：统一释放事务按展示区间删除 `committed` 中的工具卡并清理 live 归属；
+   rewind 替换整段 transcript 时整体丢弃会话归属（`forget_session`）。replay 只清启发式
+   消息身份（`note_turn_boundary`），不清 `tool_id` 映射。`live_tool_links` 单会话两份
+   映射的并集上限 1024，超出淘汰最旧关联，长进程不会无界累积。
+
+回归：`history_window_page_test/open_page_backfill_keeps_trailing_text_slot_and_layout_order`
+（布局/索引/释放一致性，释放计划为手构造 `ReleasePlan`）、
+`bridge_event_attribution_then_budget_pressure_admits_page`（真实事件驱动的归属 → 封印 →
+预算压力 → 页接纳，commit 由测试直接调用 `apply_commit`）、
+`same_identity_open_retry_does_not_duplicate_tool_cards`（同身份 open 两次：一张卡、
+`unattributed=0`、真实 `plan_eviction` 只释放一次）、`live_tool_links::tests`（含
+`tool_links_per_session_are_bounded`）、`rewind_forgets_live_tool_links`、
+`open_removing_displayed_tool_card_forgets_live_link`。
 
 Root cache coverage 只使用当前 root turn 最近一次有效 observation；auxiliary agent usage 不得
 覆盖父 turn。missing、zero 或不一致 observation 要显式清除旧样本。低覆盖提示在回合终态前

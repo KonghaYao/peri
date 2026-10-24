@@ -56,6 +56,7 @@ impl Harness {
             tool_call_id: tool_call_id.to_string(),
             name: name.to_string(),
             input: serde_json::json!({}),
+            origin_message_id: None,
         });
     }
 
@@ -144,6 +145,7 @@ impl Harness {
             tool_call_id: tool_call_id.to_string(),
             name: name.to_string(),
             input: serde_json::json!({}),
+            origin_message_id: None,
         });
     }
 

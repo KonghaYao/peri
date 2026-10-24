@@ -213,6 +213,7 @@ fn p0_delivered_prompt_preserves_running_tool_result() {
             input_summary: "file.rs".into(),
             raw_input: serde_json::json!({"path": "file.rs"}),
             agent_id: None,
+            origin_message_id: None,
         }),
     );
     dispatch_and_notify(&mut state, &delivered());

@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use super::{HistoryEntryView, HistoryWindow, PersistentEntryKey};
+use super::{HistoryEntryView, HistoryWindow, PersistentEntryKey, SegmentKey};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DisplayLedger {
@@ -57,6 +57,44 @@ impl DisplayLedger {
             }
             cursor = cursor.saturating_add(*len);
         }
+    }
+
+    /// 登记 `committed` 中**已存在**的展示单元：槽位保持不变，不移动其他区间。
+    ///
+    /// 回填（open 页、迟到归属）只补记账，不重排 `committed`，因此不得使用会右移
+    /// 既有区间的 [`Self::insert_block`]；否则位于回填槽位之后的条目会整体错位，
+    /// 释放时按错误区间删除正文。槽位与其他条目重叠时不写入并返回 `false`。
+    pub fn insert_existing_slot(
+        &mut self,
+        key: PersistentEntryKey,
+        start: usize,
+        len: usize,
+    ) -> bool {
+        if len == 0 {
+            self.entries.insert(key);
+            return true;
+        }
+        if let Some((existing, existing_len)) = self.slots.get(&start) {
+            if existing == &key && *existing_len == len {
+                return true;
+            }
+        }
+        if self.overlaps(start, len) {
+            return false;
+        }
+        self.positions.remove(&key);
+        self.entries.insert(key.clone());
+        self.slots.insert(start, (key, len));
+        true
+    }
+
+    /// `[start, start + len)` 是否已被其他区间占用。
+    pub fn overlaps(&self, start: usize, len: usize) -> bool {
+        let end = start.saturating_add(len);
+        self.slots.iter().any(|(other_start, (_, other_len))| {
+            let other_end = other_start.saturating_add(*other_len);
+            *other_start < end && start < other_end
+        })
     }
 
     pub fn range_for(&self, key: &PersistentEntryKey) -> Option<(usize, usize)> {
@@ -169,6 +207,36 @@ impl HistoryWindow {
 
     pub fn mark_display_block(&mut self, entries: &[(PersistentEntryKey, usize)], at: usize) {
         self.display.insert_block(entries, at);
+    }
+
+    /// 登记 `committed` 中已存在的单元：不移动任何既有展示区间。
+    ///
+    /// 与 [`Self::mark_display_block`] 的区别是**不重排**：调用方保证槽位已经真实
+    /// 存在于 `committed`，只缺展示账目（open 页回填、迟到归属）。
+    pub fn mark_existing_display_slot(
+        &mut self,
+        key: PersistentEntryKey,
+        slot: usize,
+        len: usize,
+    ) -> bool {
+        self.display.insert_existing_slot(key, slot, len)
+    }
+
+    /// 槽位是否尚未被展示账目占用（回填前预检，避免注册段后才发现冲突）。
+    pub fn display_slot_available(&self, slot: usize) -> bool {
+        !self.display.overlaps(slot, 1)
+    }
+
+    /// 第一个展示起点晚于 `slot` 的驻留段。
+    ///
+    /// 回填既有槽位时用于确定段的布局位置：段的顺序必须与 `committed` 一致
+    /// （见 [`super::index::ResidentIndex::rebuild_slots`]），不能一律追加到尾部。
+    pub fn segment_after_display_slot(&self, slot: usize) -> Option<SegmentKey> {
+        self.display
+            .debug_ranges()
+            .into_iter()
+            .find(|(start, _, _)| *start > slot)
+            .and_then(|(_, key, _)| self.index.locate_entry(&key).map(|locator| locator.segment))
     }
 
     pub fn displayed_range(&self, key: &PersistentEntryKey) -> Option<(usize, usize)> {

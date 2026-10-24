@@ -196,6 +196,51 @@ async fn test_session_update_tool_call_to_tool_started() {
             assert_eq!(ts.tool_id, "tc-1");
             assert_eq!(ts.tool_name, "Read");
             assert_eq!(ts.input_summary, "/tmp/foo.rs");
+            assert!(
+                ts.origin_message_id.is_none(),
+                "旧消息没有 originMessageId 时必须为 None（触发 TUI 启发式回退）"
+            );
+        }
+        other => panic!("expected ToolStarted, got {other:?}"),
+    }
+
+    shutdown.cancel();
+}
+
+/// 服务端经 ACP `_meta.peri.originMessageId` 给出真实所属 assistant 消息：
+/// notifier 必须解析并带到事件上（纯工具轮次没有 chunk 可推断归属）。
+#[tokio::test]
+async fn test_session_update_tool_call_reads_origin_message_id_from_meta() {
+    let (notif_tx, mut bridge_rx, shutdown) = spawn_test_notifier();
+
+    notif_tx
+        .send(AcpNotification::SessionUpdate {
+            session_id: "s1".into(),
+            params: json!({
+                "sessionId": "s1",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "tc-pure",
+                    "title": "Read",
+                    "rawInput": {"file_path": "/tmp/foo.rs"},
+                    "_meta": {
+                        "peri": { "originMessageId": "m-pure-tools" }
+                    }
+                }
+            }),
+        })
+        .await
+        .unwrap();
+
+    let ev = bridge_rx.recv().await.expect("expected one event");
+    match ev.event {
+        AcpEventData::ToolStarted(ts) => {
+            assert_eq!(ts.tool_id, "tc-pure");
+            assert_eq!(
+                ts.origin_message_id.as_deref(),
+                Some("m-pure-tools"),
+                "真实所属 assistant 消息必须从 _meta 透传到 TUI 事件"
+            );
         }
         other => panic!("expected ToolStarted, got {other:?}"),
     }

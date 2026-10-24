@@ -592,7 +592,7 @@ async fn idle_entry_returns_typed_not_available_without_turn() {
         &HashMap::new(),
         &stage.runtime.tool_catalog.snapshot(),
         &CancellationToken::new(),
-        crate::messages::MessageId::new(),
+        Some(crate::messages::MessageId::new()),
         &BaseMessage::ai("call"),
         None,
     )
@@ -663,7 +663,7 @@ async fn idle_app_invocation_runs_without_turn_facts_or_model_ownership() {
         &HashMap::from([("call-1".to_string(), tool)]),
         &stage.runtime.tool_catalog.snapshot(),
         &CancellationToken::new(),
-        crate::messages::MessageId::new(),
+        None,
         &BaseMessage::ai("call"),
         None,
     )

@@ -487,6 +487,9 @@ impl AgentModelBridge {
                                     tool_call_id: id.clone(),
                                     name: name.clone(),
                                     input: serde_json::Value::Null,
+                                    // 本次 LLM 调用的稳定消息身份：纯工具响应轮次
+                                    // 没有文本/推理 chunk，TUI 只能靠该字段归属。
+                                    origin_message_id: Some(message_id),
                                 });
                             }
                         }

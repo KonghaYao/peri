@@ -250,6 +250,7 @@ fn test_bg_events_after_turn_suspended_keep_idle_loading() {
             tool_id: "bg-tc-1".into(),
             input_summary: "ls".into(),
             raw_input: serde_json::Value::Null,
+            origin_message_id: None,
         }),
     );
     assert_eq!(

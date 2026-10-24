@@ -111,6 +111,7 @@ async fn test_forwarder_branches_to_bridge_before_mapper() {
         tool_call_id: "call_1".to_string(),
         name: "Read".to_string(),
         input: serde_json::json!({"path": "/tmp/x"}),
+        origin_message_id: None,
     });
     bus.emit_render(RenderEvent::TextChunk {
         turn_id,
@@ -292,6 +293,7 @@ async fn test_forwarder_stage_events_reach_bridge() {
         tool_call_id: "call_stage".to_string(),
         name: "Agent".to_string(),
         input: serde_json::json!({}),
+        origin_message_id: None,
     });
     bus.emit_observe(ObserveEvent::StageEnded {
         turn_id,

@@ -9,6 +9,7 @@ fn start_parent(state: &mut BridgeState, index: usize) {
             input_summary: "code-reviewer".into(),
             raw_input: serde_json::Value::Null,
             agent_id: None,
+            origin_message_id: None,
         }),
     );
 }
@@ -79,6 +80,7 @@ fn three_same_named_subagents_keep_distinct_owners_across_arrival_orders() {
                             input_summary: format!("owner-{index}-{tool_index}.rs"),
                             raw_input: serde_json::Value::Null,
                             agent_id: Some(format!("child:{index}")),
+                            origin_message_id: None,
                         }),
                     );
                 }

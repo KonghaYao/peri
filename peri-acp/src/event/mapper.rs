@@ -92,12 +92,23 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
             name,
             input,
             source_agent_id,
+            origin_message_id,
             ..
         } => {
+            let mut tool_call = project_tool_start(tool_call_id, name, input);
+            // 真实所属 assistant 消息经 ACP `_meta` 扩展透传；标准 `ToolCall`
+            // 没有消息归属字段，且 `message_id` 仍是 turn 派生的 v1 兼容值。
+            // 旧服务端/旧事件缺该字段时不写 `_meta`，客户端自行回退。
+            if let Some(message_id) = origin_message_id {
+                tool_call = tool_call.meta(serde_json::Map::from_iter([(
+                    "peri".to_string(),
+                    serde_json::json!({
+                        "originMessageId": message_id.as_uuid().to_string(),
+                    }),
+                )]));
+            }
             vec![MappedEvent::standard_with_src(
-                vec![SessionUpdate::ToolCall(
-                    project_tool_start(tool_call_id, name, input),
-                )],
+                vec![SessionUpdate::ToolCall(tool_call)],
                 source_agent_id.clone(),
             )]
         }

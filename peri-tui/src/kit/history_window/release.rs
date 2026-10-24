@@ -65,6 +65,14 @@ pub fn release_window_plans(
         let tail = state.committed.split_off(start.saturating_add(*len));
         let removed = state.committed.split_off(*start);
         removed_units = removed_units.saturating_add(removed.len());
+        for unit in &removed {
+            if let crate::kit::tui_render_unit::TuiRenderUnit::TuiToolCard(card) = unit {
+                crate::kit::acp_events::history_window::forget_released_tool(
+                    &state.active_session_id,
+                    &card.tool_id,
+                );
+            }
+        }
         state.committed.append(tail);
     }
     state.folded_history.invalidate();

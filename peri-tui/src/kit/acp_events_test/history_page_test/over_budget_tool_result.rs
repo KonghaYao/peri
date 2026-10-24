@@ -68,6 +68,78 @@ fn card_output(state: &BridgeState, tool_id: &str) -> (String, bool) {
 /// 超过内存预算的跨页结果保留来源页请求定位；用户展开后按该 cursor 补读完整正文。
 #[tokio::test]
 #[serial]
+async fn test_live_tool_card_with_persistent_position_defers_result_with_source() {
+    use crate::kit::history_window::{
+        HistoryWindow, HistoryWindowConfig, PersistentEntryKey, WindowIdentity,
+    };
+
+    let mut state = browsing_state("tok");
+    state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
+    state
+        .window
+        .begin_window(WindowIdentity::new("s1", "gen-1", 7, "snap-1"));
+    history_page::clear_pending_tool_ends_for_tests();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
+            text: "live answer".into(),
+            message_id: Some("m-live".into()),
+            agent_id: None,
+        }),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
+            tool_id: "t-live".into(),
+            tool_name: "Bash".into(),
+            input_summary: "run".into(),
+            raw_input: serde_json::json!({}),
+            agent_id: None,
+            origin_message_id: None,
+        }),
+    );
+    dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
+    // 页回执给同一持久条目的位置；live 卡随条目进入可补读区间。
+    let key = PersistentEntryKey::own("s1:m-live");
+    assert!(state.window.promote_live_seal_position(&key, 10));
+    crate::kit::history_paging::sync_spans_from_window(&state.window);
+
+    let tail_text = "TAIL-LIVE-END";
+    let output = format!("{}{tail_text}", "x".repeat(9 * 1024 * 1024));
+    dispatch_landing_page_with_origin(
+        &mut state,
+        "tok",
+        page(
+            "tok",
+            Some("cursor-2"),
+            vec![(
+                "s1:result",
+                20,
+                vec![sub(0, tool_end("t-live", &output, false))],
+            )],
+        ),
+        Some(origin("cursor-result", 50)),
+    );
+
+    let (summary, is_error) = card_output(&state, "t-live");
+    assert_eq!(
+        summary, DEFERRED_TOOL_RESULT_TEXT,
+        "live card with a persistent position must take the deferred placeholder"
+    );
+    assert!(!is_error);
+    let deferred_source =
+        crate::kit::acp_events::history_window::deferred_tool_result_source_for_tests("t-live")
+            .expect("live card keeps the result page source");
+    assert_eq!(deferred_source.cursor, "cursor-result");
+    assert_eq!(deferred_source.limit, 50);
+    assert_eq!(deferred_source.session_id, "s1");
+    assert_eq!(deferred_source.snapshot_token, "tok");
+    assert_eq!(deferred_source.entry_id, "s1:result");
+    history_page::clear_pending_tool_ends_for_tests();
+}
+
+#[tokio::test]
+#[serial]
 async fn test_history_page_over_budget_result_defers_then_refetches_by_origin_cursor() {
     use crate::acp_client::AcpTuiClient;
     use peri_acp::transport::{AcpTransport, mpsc::mpsc_transport_pair, types::IncomingMessage};

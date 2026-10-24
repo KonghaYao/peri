@@ -86,7 +86,9 @@ impl StageEffectiveToolDispatcher {
             &target_tools,
             &self.catalog,
             &cancel,
-            ai_message.id(),
+            // 嵌套执行没有独立的 assistant 消息：不把合成外壳消息 id 冒充为
+            // 持久归属（TUI 侧会据此建立可淘汰段，必须指向真实消息）。
+            None,
             &ai_message,
             self.model_tool_call_id.as_ref().map(ToolCallId::as_str),
         )

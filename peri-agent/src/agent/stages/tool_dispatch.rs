@@ -63,7 +63,12 @@ fn should_emit_settled_tool_render(call: &ToolCall) -> bool {
 ///
 /// 流式 Reason 可能已提前 emit `ToolStarted`；此处仍成对发送 Started/Ended，
 /// TUI 侧对同 id 的 Started 做 upsert，Ended 负责结束 loading。
-fn emit_settled_tool_render(ctx: &StageContext, call: &ToolCall, result: &ToolResult) {
+fn emit_settled_tool_render(
+    ctx: &StageContext,
+    call: &ToolCall,
+    result: &ToolResult,
+    origin_message_id: crate::messages::MessageId,
+) {
     let turn_id = ctx.turn_id();
     let agent_id = ctx.session.agent_id;
     ctx.runtime.event_bus.emit_render(RenderEvent::ToolStarted {
@@ -72,6 +77,7 @@ fn emit_settled_tool_render(ctx: &StageContext, call: &ToolCall, result: &ToolRe
         tool_call_id: call.id.clone(),
         name: call.name.clone(),
         input: call.input.clone(),
+        origin_message_id: Some(origin_message_id),
     });
     ctx.runtime.event_bus.emit_render(RenderEvent::ToolEnded {
         turn_id,
@@ -176,7 +182,7 @@ pub async fn dispatch_tools(
             "tool call resolution failed"
         );
         if should_emit_settled_tool_render(call) {
-            emit_settled_tool_render(ctx, call, result);
+            emit_settled_tool_render(ctx, call, result, ai_msg_id);
         }
     }
     // Invocation events/tool cards project the effective canonical target. The LLM's
@@ -217,7 +223,7 @@ pub async fn dispatch_tools(
         &target_tools,
         catalog,
         cancel,
-        ai_msg_id,
+        Some(ai_msg_id),
         &ai_msg,
         None,
     )
