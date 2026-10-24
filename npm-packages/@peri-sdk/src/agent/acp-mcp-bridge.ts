@@ -96,13 +96,23 @@ class AcpMcpBridgeTransport implements AcpMcpTransport {
 type BridgeEntry = {
     serverId: string;
     instance: AcpMcpServerInstance;
+    /** 工厂创建：bridge 拥有并在关闭成功时释放；声明对象：调用方借用的单次实例。 */
+    owned: boolean;
     transport: AcpMcpBridgeTransport;
     connecting?: Promise<void>;
+    closed: boolean;
+};
+
+/** 每次激活解析后的 acp server 绑定；构造函数不再接受原始声明。 */
+export type AcpMcpBinding = {
+    serverId: string;
+    instance: AcpMcpServerInstance;
+    owned: boolean;
 };
 
 /**
  * 同一 server 实例只能绑定一条官方 transport：官方 `Protocol.connect` 会拒绝重复连接，
- * 重连语义不在 SDK 内模拟。实例只被弱引用，调用方仍持有其生命周期。
+ * 重连语义不在 SDK 内模拟。owned 实例关闭成功后解除绑定；借用实例保留绑定。
  */
 const boundInstances = new WeakMap<object, AcpMcpBridgeTransport>();
 
@@ -110,29 +120,32 @@ const boundInstances = new WeakMap<object, AcpMcpBridgeTransport>();
  * 反向 ACP `mcp/message` 桥接：把 Agent 声明的官方 MCP server 实例投影到 ACP 客户端请求上。
  *
  * 只处理 `{serverId, requestId, method, params}`；身份校验失败返回明确错误，不静默成功。
- * 关闭 Session 只 reject 未决请求，不关闭外部 server 实例。
+ * 关闭 Session 只 reject 未决请求；owned 实例由本桥接关闭，借用实例留给调用方。
  */
 export class AcpMcpBridge {
     private readonly entries = new Map<string, BridgeEntry>();
+    private closed = false;
+    private closing?: Promise<void>;
 
-    constructor(servers: Record<string, AcpMcpServer> | undefined) {
-        for (const [name, server] of Object.entries(servers ?? {})) {
-            if (server.type !== "acp") continue;
-            if (typeof server.server?.connect !== "function")
-                throw new TypeError(`mcpServers["${name}"].server must expose connect(transport)`);
-            const serverId = server.serverId ?? name;
-            if (this.entries.has(serverId))
-                throw new Error(`Duplicate MCP serverId: ${serverId}`);
-            this.entries.set(serverId, {
-                serverId,
-                instance: server.server,
-                transport: new AcpMcpBridgeTransport(serverId),
+    constructor(bindings: readonly AcpMcpBinding[]) {
+        for (const binding of bindings) {
+            if (typeof binding.instance?.connect !== "function")
+                throw new TypeError(`MCP server "${binding.serverId}" must expose connect(transport)`);
+            if (this.entries.has(binding.serverId))
+                throw new Error(`Duplicate MCP serverId: ${binding.serverId}`);
+            this.entries.set(binding.serverId, {
+                serverId: binding.serverId,
+                instance: binding.instance,
+                owned: binding.owned,
+                transport: new AcpMcpBridgeTransport(binding.serverId),
+                closed: false,
             });
         }
     }
 
     /** 连接全部声明；重复调用只等待同一个连接结果。 */
     async connect(): Promise<void> {
+        if (this.closed) throw new Error("MCP bridge is closed");
         await Promise.all([...this.entries.values()].map((entry) => this.connectEntry(entry)));
     }
 
@@ -142,6 +155,8 @@ export class AcpMcpBridge {
      * `notifications/*` 投递后立即返回空 result；普通请求等待官方 server 的响应。
      */
     async handle(params: unknown): Promise<AcpMcpResponse> {
+        if (this.closed)
+            return { error: { code: -32603, message: "MCP bridge is closed" } };
         const message = asRecord(params);
         const serverId = typeof message?.serverId === "string" ? message.serverId : undefined;
         const entry = serverId === undefined ? undefined : this.entries.get(serverId);
@@ -209,22 +224,118 @@ export class AcpMcpBridge {
         for (const entry of this.entries.values()) entry.transport.abortPending(error);
     }
 
+    /**
+     * 一次激活结束：拒绝在途请求并关闭 transport。
+     * owned 实例关闭成功才解除绑定；失败保留绑定，下一次 close 重试。
+     */
+    async close(reason = "ACP session ended before the MCP request completed"): Promise<void> {
+        this.closed = true;
+        if (this.closing) return this.closing;
+        const attempt = this.closeOnce(reason).finally(() => {
+            if (this.closing === attempt) this.closing = undefined;
+        });
+        this.closing = attempt;
+        return attempt;
+    }
+
+    private async closeOnce(reason: string): Promise<void> {
+        const failures: unknown[] = [];
+        for (const entry of this.entries.values()) {
+            entry.transport.abortPending(new Error(reason));
+            try { await entry.transport.close(); }
+            catch (error) { failures.push(error); }
+            if (!entry.owned || entry.closed) continue;
+            try { await this.closeOwnedEntry(entry); }
+            catch (error) { failures.push(error); }
+        }
+        if (failures.length > 0)
+            throw new AggregateError(failures, `MCP bridge close was not confirmed: ${reason}`);
+    }
+
+    private async closeOwnedEntry(entry: BridgeEntry): Promise<void> {
+        if (entry.closed) return;
+        if (typeof entry.instance.close !== "function")
+            throw new TypeError(`MCP server "${entry.serverId}" is owned but has no close()`);
+        await entry.instance.close();
+        entry.closed = true;
+        if (boundInstances.get(entry.instance) === entry.transport)
+            boundInstances.delete(entry.instance);
+    }
+
     private connectEntry(entry: BridgeEntry): Promise<void> {
+        if (this.closed) return Promise.reject(new Error("MCP bridge is closed"));
         if (entry.connecting) return entry.connecting;
         const bound = boundInstances.get(entry.instance);
         if (bound && bound !== entry.transport) {
-            entry.connecting = Promise.reject(new Error(
-                `MCP server instance for serverId "${entry.serverId}" is already connected; use a separate server instance per Agent`,
+            entry.connecting = Promise.reject(new Error(entry.owned
+                ? `MCP server instance for serverId "${entry.serverId}" is already bound; the factory must return a fresh instance per activation`
+                : `MCP server instance for serverId "${entry.serverId}" was already used; direct acp instances are single-use—provide a factory for reuse`,
             ));
             return entry.connecting;
         }
         boundInstances.set(entry.instance, entry.transport);
         entry.connecting = Promise.resolve()
             .then(() => entry.instance.connect(entry.transport))
-            .catch((error) => {
-                throw new Error(`MCP server "${entry.serverId}" connect failed: ${errorMessage(error)}`, { cause: error });
+            .catch(async (error) => {
+                const connectionError = new Error(
+                    `MCP server "${entry.serverId}" connect failed: ${errorMessage(error)}`,
+                    { cause: error },
+                );
+                // 借用实例视为已消费、保留绑定；owned 实例负责清理并在成功后解绑。
+                if (!entry.owned) throw connectionError;
+                const failures: unknown[] = [connectionError];
+                try { await this.closeOwnedEntry(entry); }
+                catch (closeError) { failures.push(closeError); }
+                throw failures.length > 1
+                    ? new AggregateError(failures, `MCP server "${entry.serverId}" connect and close failed`)
+                    : connectionError;
             });
         return entry.connecting;
+    }
+}
+
+/** 每次激活解析一次 acp 声明：工厂实例由激活拥有，直接实例是调用方借用的单次实例。 */
+export async function resolveAcpMcpBindings(
+    servers: Record<string, AcpMcpServer> | undefined,
+): Promise<AcpMcpBinding[]> {
+    const bindings: AcpMcpBinding[] = [];
+    const owned: AcpMcpServerInstance[] = [];
+    const seen = new Set<string>();
+    try {
+        for (const [name, server] of Object.entries(servers ?? {})) {
+            if (server.type !== "acp") continue;
+            const serverId = server.serverId ?? name;
+            if (seen.has(serverId)) throw new Error(`Duplicate MCP serverId: ${serverId}`);
+            seen.add(serverId);
+            let instance: AcpMcpServerInstance;
+            let isOwned = false;
+            if (typeof server.server === "function") {
+                const created = await server.server();
+                if (typeof created?.close !== "function")
+                    throw new TypeError(
+                        `mcpServers["${name}"].server factory must return an instance with close()`,
+                    );
+                instance = created;
+                isOwned = true;
+                owned.push(created);
+            } else {
+                instance = server.server;
+            }
+            if (typeof instance?.connect !== "function")
+                throw new TypeError(`mcpServers["${name}"].server must expose connect(transport)`);
+            bindings.push({ serverId, instance, owned: isOwned });
+        }
+        return bindings;
+    } catch (error) {
+        const failures: unknown[] = [error];
+        for (const instance of owned) {
+            if (typeof instance.close !== "function") continue;
+            try { await instance.close(); }
+            catch (closeError) { failures.push(closeError); }
+        }
+        throw failures.length > 1
+            ? new AggregateError(failures, "MCP server resolution failed and owned instance cleanup was not confirmed")
+            : error;
     }
 }
 

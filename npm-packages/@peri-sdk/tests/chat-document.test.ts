@@ -1,12 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import * as Y from "yjs";
-import { SessionDocs } from "../src/state/session-docs";
+import { ChatDocument } from "../src/view/chat-document";
+import { readSessionView } from "../src/view/session-view";
+import type { ChatFact, ChatFactEnvelope } from "../src/chat/facts";
 import { COMPACTION_STATUS } from "../src/state/session-projection";
-import { MemoryKV } from "../src/kv/memory-kv";
-import { ManagedAgents } from "../src/managed/managed-agents";
-import { Sandbox } from "../src/sandbox/sandbox";
 import type { JsonRpcNotification } from "../src/transport/types";
-import type { Transport } from "../src/transport/types";
 
 function update(
   sessionId: string,
@@ -29,7 +27,7 @@ function textChunk(sessionId: string, kind: string, messageId: string, text: str
   return update(sessionId, kind, { messageId, content: { type: "text", text } }, eventId);
 }
 
-function entries(docs: SessionDocs): Array<Y.Map<unknown>> {
+function entries(docs: ChatDocument): Array<Y.Map<unknown>> {
   const root = docs.chat.getMap<unknown>("root");
   const order = root.get("entryOrder") as Y.Array<string>;
   const byId = root.get("entries") as Y.Map<Y.Map<unknown>>;
@@ -64,7 +62,7 @@ function legacyEvent(sessionId: string, type: string, value: Record<string, unkn
 
 describe("ACP to Yjs session documents", () => {
   test("streams user, thought, and answer chunks into ordered Yjs entries", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(textChunk("s1", "user_message_chunk", "user-1", "Build it"));
     docs.accept(textChunk("s1", "agent_thought_chunk", "assistant-1", "First "));
     docs.accept(textChunk("s1", "agent_thought_chunk", "assistant-1", "inspect"));
@@ -82,11 +80,11 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("tool calls keep their identity and a terminal status cannot regress", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(textChunk("s1", "user_message_chunk", "user-1", "Read README.md"));
     docs.accept(update("s1", "tool_call", {
       toolCallId: "call-1", title: "Read", status: "in_progress",
-      rawInput: { path: "README.md" },
+      arguments: { path: "README.md" },
     }));
     docs.accept(update("s1", "tool_call_update", {
       toolCallId: "call-1", status: "completed", title: "Read",
@@ -106,7 +104,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("a canonical rewind snapshot does not claim an unpaired tool call succeeded", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(legacyEvent("s1", "rewind_completed", {
       messages_json: JSON.stringify([
         { role: "user", id: USER_ONE, content: "Run a tool" },
@@ -122,7 +120,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("a new user turn cancels the unfinished assistant and its tool", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "First request"));
     docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "Working"));
     docs.accept(update("s1", "tool_call", {
@@ -138,7 +136,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("a late chunk from a terminal turn does not create a phantom turn", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Question"));
     docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "Answer"));
     docs.accept({
@@ -154,7 +152,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("rewind keeps the live turn, its request identity, and pending interactions", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Before rewind"));
     docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "partial answer"));
     const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
@@ -181,7 +179,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("replayed notifications with an explicit event id do not append text twice", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     const first = textChunk("s1", "user_message_chunk", "user-1", "Hello", "event-1");
     const second = textChunk("s1", "agent_message_chunk", "assistant-1", "World", "event-2");
     docs.accept(first);
@@ -196,7 +194,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("ACP replay chunks carrying the same messageId replace prior live text", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(textChunk("s1", "user_message_chunk", "user-1", "Hello"));
     docs.accept(textChunk("s1", "agent_message_chunk", "assistant-1", "World"));
 
@@ -218,7 +216,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("multiple replay chunks of one user message preserve every text block", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "live draft"));
     docs.accept(update("s1", "user_message_chunk", {
       messageId: USER_ONE, content: { type: "text", text: "first " }, _meta: { periReplay: true },
@@ -230,7 +228,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("a later replayed user turn completes the prior historical assistant", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     const replay = (kind: string, messageId: string, text: string) => update("s1", kind, {
       messageId, content: { type: "text", text }, _meta: { periReplay: true },
     });
@@ -241,7 +239,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("different assistant messageIds in one turn remain separate entries", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Run tool, then answer"));
     docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "I will inspect."));
     docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_TWO, "Inspection complete."));
@@ -253,7 +251,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("adjacent identical text blocks in one replayed assistant message both survive", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(update("s1", "user_message_chunk", {
       messageId: USER_ONE, content: { type: "text", text: "Echo" },
       _meta: { periReplay: true },
@@ -269,7 +267,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("ACP turn completion finalizes the assistant entry without adding a message", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(textChunk("s1", "user_message_chunk", "user-1", "Question"));
     docs.accept(textChunk("s1", "agent_message_chunk", "assistant-1", "Answer"));
     docs.accept({
@@ -285,7 +283,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("max_tokens turn done keeps an incomplete terminal state", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Long answer"));
     docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "Partial answer"));
     docs.accept({
@@ -300,7 +298,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("late done from an older input request cannot finish the next turn", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(legacyEvent("s1", "user_input_run_started", {
       generation: "generation-1", request_id: "old-request",
     }));
@@ -329,7 +327,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("a late identified done cannot finish a later turn without a run-started event", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "First"));
     docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "First reply"));
     docs.accept(textChunk("s1", "user_message_chunk", USER_TWO, "Second"));
@@ -346,10 +344,10 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("cancel requested stops new deltas and done closes the same turn", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Stop"));
     docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "Before"));
-    expect(docs.requestCancel()).not.toBeNull();
+    expect(docs.applyFact({ kind: "turn-cancel", restore: false })).toBe(true);
     docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, " after"));
     docs.accept({ jsonrpc: "2.0", method: "peri/agent_event_done", params: { sessionId: "s1", stopReason: "cancelled" } });
     expect(textOf(entries(docs)[1]!, "text")).toBe("Before");
@@ -357,8 +355,8 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("separate Agent session document pairs do not share state", () => {
-    const first = new SessionDocs();
-    const second = new SessionDocs();
+    const first = new ChatDocument();
+    const second = new ChatDocument();
     first.accept(textChunk("s1", "user_message_chunk", "user-1", "Only first"));
     second.accept(textChunk("s2", "user_message_chunk", "user-2", "Only second"));
 
@@ -369,7 +367,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("subagent lifecycle is mirrored as safe task state", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(legacyEvent("s1", "subagent_started", {
       instance_id: "child-1", agent_name: "reviewer", is_background: true,
     }));
@@ -390,7 +388,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("background task snapshot recovers a missed start and update", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept({
       jsonrpc: "2.0", method: "peri/unstable_event",
       params: {
@@ -421,7 +419,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("rewind replaces streamed chat with exactly the retained canonical messages", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Keep question"));
     docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "Keep answer"));
     docs.accept(textChunk("s1", "user_message_chunk", USER_TWO, "Remove question"));
@@ -452,7 +450,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("rewind keeps root collection handles for Yjs observers", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     const root = docs.chat.getMap<unknown>("root");
     const order = root.get("entryOrder");
     const entriesMap = root.get("entries");
@@ -465,9 +463,8 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("compact keeps the loaded window, live turn, and pending interactions", () => {
-    const docs = new SessionDocs();
-    // 翻页进度是浏览身份的一部分：Compact 不得把下一 cursor 跳回已加载的区间（REQ-C02）。
-    docs.seedHistoryWindow({ snapshotToken: "snapshot-1", nextCursor: "cursor-earlier" });
+    const docs = new ChatDocument();
+    // 翻页光标由运行侧持有；Compact 不触达 View。
     docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Old question"));
     docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "Old answer"));
     docs.accept(update("s1", "tool_call", { toolCallId: "call-live", title: "Read", status: "in_progress" }));
@@ -507,13 +504,10 @@ describe("ACP to Yjs session documents", () => {
     // 未完成工具保持实时状态，不因 Compact 被批量中止。
     const tools = docs.chat.getMap<unknown>("root").get("toolCalls") as Y.Map<Y.Map<unknown>>;
     expect(tools.get("call-live")?.get("status")).toBe("running");
-    // 已加载窗口由翻页扩大过：Compact 不能重置游标进度。
-    expect(docs.historyCursor()).toBe("cursor-earlier");
-    expect(docs.historyWindowInvalidated()).toBe(false);
   });
 
   test("compact failure only updates the failure display", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Keep me"));
     docs.accept(update("s1", "tool_call", { toolCallId: "call-live", title: "Read", status: "in_progress" }));
     docs.accept(legacyEvent("s1", "compact_started", {}));
@@ -533,7 +527,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("a manual compact failure converges the compact display (A12)", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Keep me"));
     docs.accept(update("s1", "tool_call", { toolCallId: "call-live", title: "Read", status: "in_progress" }));
     docs.accept(legacyEvent("s1", "compact_started", {}));
@@ -559,7 +553,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("a cancelled manual compact converges the compact display (A12)", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Keep me"));
     docs.accept(legacyEvent("s1", "compact_started", {}));
     const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
@@ -580,7 +574,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("feedback from another command never rewrites the compact display (A12)", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(legacyEvent("s1", "compact_started", {}));
     docs.accept(legacyEvent("s1", "compact_completed", {
       trigger: "manual", strategy: "full", affected_count: 2, estimated_tokens_saved: 100,
@@ -599,8 +593,7 @@ describe("ACP to Yjs session documents", () => {
   });
 
   test("after a compact the live turn keeps streaming into the same entry (REQ-C02)", () => {
-    const docs = new SessionDocs();
-    docs.seedHistoryWindow({ snapshotToken: "snapshot-1", nextCursor: "cursor-earlier" });
+    const docs = new ChatDocument();
     docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Question"));
     docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "partial answer"));
     const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
@@ -618,11 +611,10 @@ describe("ACP to Yjs session documents", () => {
     expect(textOf(entries(docs)[1]!, "text")).toBe("partial answer continued");
     expect(info.get("activeTurnId")).toBe(liveTurn);
     expect(info.get("activeAssistantEntryId")).toBe(liveEntry);
-    expect(docs.historyCursor()).toBe("cursor-earlier");
   });
 
   test("unknown and malformed notifications leave both documents unchanged", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(textChunk("s1", "user_message_chunk", "user-1", "Retain me"));
     const chatBefore = docs.chat.getMap("root").toJSON();
     const sessionBefore = docs.session.getMap("root").toJSON();
@@ -636,130 +628,148 @@ describe("ACP to Yjs session documents", () => {
   });
 });
 
-class ReplayTransport implements Transport {
-  private readonly listeners = new Set<(notification: JsonRpcNotification) => void>();
-  readonly calls: Array<{ method: string; params?: unknown }> = [];
-  failLoad = false;
-
-  async request<T>(method: string, params?: unknown): Promise<T> {
-    this.calls.push({ method, params });
-    if (method === "initialize") return { protocolVersion: 1 } as T;
-    if (method === "session/new") return { sessionId: "s1" } as T;
-    if (method === "session/input/enqueue") {
-      const inputId = (params as { inputId: string }).inputId;
-      this.emit(legacyEvent("s1", "user_input_delivered", { input_id: inputId, generation: "generation-1" }));
-      return { results: [{ inputId, state: "delivered" }] } as T;
-    }
-    if (method === "session/load") {
-      // ACP sends replay notifications before its session/load response.
-      this.emit(update("s1", "user_message_chunk", {
-        messageId: "user-1", content: { type: "text", text: "Saved prompt" },
-        _meta: { periReplay: true },
-      }));
-      this.emit(update("s1", "agent_message_chunk", {
-        messageId: "assistant-1", content: { type: "text", text: "Saved answer" },
-        _meta: { periReplay: true },
-      }));
-      if (this.failLoad) throw new Error("session/load failed");
-      return {} as T;
-    }
-    if (method === "session/input/snapshot") return { generation: "generation-1" } as T;
-    if (method === "session/close") return {} as T;
-    throw new Error(`Unexpected ACP request: ${method}`);
-  }
-
-  async sendRequest<T>(method: string, params?: unknown): Promise<{ response: Promise<T> }> {
-    return { response: this.request<T>(method, params) };
-  }
-  async notify(): Promise<void> {}
-  subscribe(listener: (notification: JsonRpcNotification) => void): () => void {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
-  }
-  emit(notification: JsonRpcNotification): void {
-    for (const listener of this.listeners) listener(notification);
-  }
-  async *events(): AsyncIterable<JsonRpcNotification> {}
-  setRequestHandler(): void {}
-  async close(): Promise<void> {}
+function envelope(sequence: number, fact: ChatFact, bindingRevision = 7): ChatFactEnvelope {
+  return { chatId: "chat-1", sessionId: "s1", bindingRevision, sequence, fact };
 }
 
-const replayStorage = {
-  getSessions: async () => [],
-  getSession: async (id: string) => ({ id, cwd: "/tmp/workspace", title: null, messageCount: 0, createdAt: "now", updatedAt: "now" }),
-};
+describe("ChatDocument facts", () => {
+  test("replays seed, history, queue, tasks, interaction and run state into one display pair", () => {
+    const docs = new ChatDocument({ binding: { chatId: "chat-1", sessionId: "s1", bindingRevision: 7 } });
+    docs.applyFacts([
+      envelope(1, { kind: "seed-config", response: {
+        configOptions: [{ id: "model", name: "Model", type: "select", currentValue: "m1", options: [] }],
+        modes: { currentModeId: "code", availableModes: [{ id: "code", name: "Code" }] },
+      } }),
+      envelope(2, { kind: "history-batch", notifications: [
+        textChunk("s1", "user_message_chunk", USER_ONE, "Saved prompt"),
+        textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "Saved answer"),
+      ] }),
+      envelope(3, { kind: "input-queue", snapshot: { generation: "g", revision: 1, items: [{ inputId: "i1", state: "queued" }] } }),
+      envelope(4, { kind: "task-snapshot", snapshot: { revision: 1, tasks: [
+        { task_id: "bg", status: "running", kind: "shell", summary: "Build" },
+      ] } }),
+      envelope(5, { kind: "interaction-began", record: {
+        id: "interaction:1", kind: "elicitation", sessionId: "s1", message: "Choose",
+        fields: [{ key: "name", title: "Name", description: "", type: "string", required: true }],
+      } }),
+      envelope(6, { kind: "run-state", running: true, executionBlocked: false }),
+    ]);
 
-test("Session projects load replay and later live ACP events without a stream consumer", async () => {
-  const transport = new ReplayTransport();
-  const sandbox = new Sandbox({
-    id: "workspace-1",
-    storage: replayStorage,
-    transportFactory: () => transport,
+    const view = readSessionView(docs.chat, docs.session);
+    expect(view.readiness).toBe("ready");
+    expect(view.sessionId).toBe("s1");
+    expect(view.bindingRevision).toBe(7);
+    expect(view.running).toBe(true);
+    expect(view.executionBlocked).toBe(false);
+    expect(view.entries.map((entry) => entry.role)).toEqual(["user", "assistant"]);
+    expect(view.inputQueue).toMatchObject({ generation: "g", items: [{ inputId: "i1", state: "queued" }] });
+    expect(view.tasks[0]).toMatchObject({ taskId: "bg", title: "Build", status: "unobserved:running" });
+    expect(view.pendingInteractions[0]).toMatchObject({ id: "interaction:1", kind: "elicitation" });
+    expect(view.session.configOptions).toHaveLength(1);
+    expect(view.session.modeState).toMatchObject({ currentModeId: "code" });
   });
-  const agent = new ManagedAgents({ kv: new MemoryKV() }).createAgent({
-    path: "/tmp/workspace",
-    id: "agent-1",
-    sandbox,
+
+  test("history page merge is idempotent and does not create an active turn", () => {
+    const docs = new ChatDocument({ binding: { chatId: "chat-1", sessionId: "s1", bindingRevision: 1 } });
+    const items = [
+      {
+        entryId: "s1:message:old-user", position: 1,
+        subItems: [{ position: 0, update: { sessionUpdate: "user_message_chunk", messageId: "old", content: { type: "text", text: "Past" } } }],
+      },
+      {
+        entryId: "s1:message:old-assistant", position: 2,
+        subItems: [{ position: 0, update: { sessionUpdate: "agent_message_chunk", messageId: "old", content: { type: "text", text: "Reply" } } }],
+      },
+    ];
+    docs.applyFact({ kind: "history-page", items, nextCursor: "cursor-1" });
+    docs.applyFact({ kind: "history-page", items, nextCursor: "cursor-1" });
+    const view = readSessionView(docs.chat, docs.session);
+    expect(view.entries).toHaveLength(2);
+    expect(view.activeTurn).toEqual({ turnId: null, status: null });
+    expect(view.turns).toEqual([]);
   });
-  const docs = agent.docs;
-  await agent.session.start("s1");
 
-  expect(agent.docs).toBe(docs);
-  expect(agent.session.docs).toBe(docs);
-  expect(entries(docs).map((entry) => entry.get("role"))).toEqual(["user", "assistant"]);
-  expect(textOf(entries(docs)[0]!, "text")).toBe("Saved prompt");
-  expect(textOf(entries(docs)[1]!, "text")).toBe("Saved answer");
-  expect(entries(docs)[1]!.get("status")).toBe("completed");
-  const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
-  expect(info.get("activeTurnStatus")).toBe("completed");
+  test("stale binding revisions and duplicate sequences are ignored", () => {
+    const docs = new ChatDocument({ binding: { chatId: "chat-1", sessionId: "s1", bindingRevision: 2 } });
+    expect(docs.applyEnvelope(envelope(1, { kind: "run-state", running: true, executionBlocked: false }, 1))).toBe(false);
+    expect(docs.applyEnvelope(envelope(1, { kind: "run-state", running: true, executionBlocked: false }, 2))).toBe(true);
+    expect(docs.applyEnvelope(envelope(1, { kind: "run-state", running: false, executionBlocked: true }, 2))).toBe(false);
+    const view = readSessionView(docs.chat, docs.session);
+    expect(view.running).toBe(true);
+    expect(view.executionBlocked).toBe(false);
+  });
 
-  transport.emit(textChunk("s1", "user_message_chunk", "user-2", "Follow up"));
-  transport.emit(textChunk("s1", "agent_message_chunk", "assistant-2", "New answer"));
-  transport.emit(textChunk("unrelated", "agent_message_chunk", "other", "ignore"));
-  expect(textOf(entries(docs)[1]!, "text")).toBe("Saved answer");
-  expect(textOf(entries(docs)[3]!, "text")).toBe("New answer");
-  expect(entries(docs)).toHaveLength(4);
+  test("interaction facts carry structured ask_user questions without resolvers", () => {
+    const docs = new ChatDocument({ binding: { chatId: "chat-1", sessionId: "s1", bindingRevision: 1 } });
+    docs.applyFact({ kind: "interaction-began", record: {
+      id: "interaction:ask", kind: "elicitation", sessionId: "s1", title: "Question",
+      variant: "ask_user", formSupport: "unsupported", formReason: "multi_step",
+      questions: [
+        {
+          id: "ask_user_question_0", header: "Language", question: "Which language?", multiSelect: false,
+          options: [{ value: "ts", label: "TypeScript", description: "typed" }, { value: "rs", label: "Rust" }],
+        },
+        {
+          id: "ask_user_question_1", header: "Features", question: "Pick features", multiSelect: true,
+          options: [{ value: "a", label: "A" }, { value: "b", label: "B" }],
+        },
+      ],
+    } });
+    docs.applyFact({ kind: "interaction-settled", id: "interaction:ask", status: "resolved", outcome: "accept" });
+    const [interaction] = readSessionView(docs.chat, docs.session).interactions;
+    expect(interaction).toMatchObject({
+      id: "interaction:ask", variant: "ask_user", status: "resolved", outcome: "accept",
+      formUnsupported: "multi_step",
+    });
+    expect(interaction!.fields).toEqual([]);
+    expect(interaction!.questions).toEqual([
+      {
+        id: "ask_user_question_0", header: "Language", question: "Which language?", multiSelect: false,
+        options: [{ value: "ts", label: "TypeScript", description: "typed" }, { value: "rs", label: "Rust" }],
+      },
+      {
+        id: "ask_user_question_1", header: "Features", question: "Pick features", multiSelect: true,
+        options: [{ value: "a", label: "A" }, { value: "b", label: "B" }],
+      },
+    ]);
+  });
 
-  const initialize = transport.calls.find((call) => call.method === "initialize")?.params as {
-    clientCapabilities?: { _meta?: Record<string, unknown> };
-  };
-  expect(initialize.clientCapabilities?._meta?.["peri.replay"]).toBe(true);
-  await agent.close();
-  expect(textOf(entries(agent.docs)[3]!, "text")).toBe("New answer");
-  expect(entries(agent.docs)[3]!.get("status")).toBe("cancelled");
-  expect(info.get("activeTurnStatus")).toBe("cancelled");
+  test("closed and run-state are terminal display facts", () => {
+    const docs = new ChatDocument({ binding: { chatId: "chat-1", sessionId: "s1", bindingRevision: 1 } });
+    docs.applyFact({ kind: "run-state", running: true, executionBlocked: true });
+    docs.applyFact({ kind: "closed", reason: { code: "execution_interrupted", message: "执行已中断" } });
+    const view = readSessionView(docs.chat, docs.session);
+    expect(view.closed).toBe(true);
+    expect(view.closedReason).toEqual({ code: "execution_interrupted", message: "执行已中断" });
+    expect(view.running).toBe(false);
+    expect(view.executionBlocked).toBe(true);
+    expect(docs.closed).toBe(true);
+    expect(docs.applyFact({ kind: "run-state", running: true, executionBlocked: false })).toBe(false);
+    expect(readSessionView(docs.chat, docs.session).running).toBe(false);
+  });
+
+  test("checkpoint round-trips display data without payload contents", () => {
+    const docs = new ChatDocument({ binding: { chatId: "chat-1", sessionId: "s1", bindingRevision: 3 } });
+    docs.applyFact({ kind: "run-state", running: true, executionBlocked: false });
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Use a tool"));
+    docs.accept(update("s1", "tool_call", {
+      toolCallId: "call-1", title: "Read", status: "completed",
+      arguments: { path: "README.md" },
+      resultRef: { id: "payload:1", bytes: 12, preview: "contents" },
+    }));
+    docs.completeTurn();
+
+    const checkpoint = docs.exportCheckpoint();
+    expect("payloadValues" in checkpoint).toBe(false);
+    expect(checkpoint.session).toMatchObject({ sessionId: "s1", bindingRevision: 3, running: true });
+    const restored = ChatDocument.fromCheckpoint(checkpoint);
+    const view = readSessionView(restored.chat, restored.session);
+    expect(view.sessionId).toBe("s1");
+    expect(view.bindingRevision).toBe(3);
+    expect(view.running).toBe(false);
+    expect(view.entries[1]?.blocks[0]).toMatchObject({
+      type: "tool_call", tool: { arguments: { path: "README.md" }, resultRef: { id: "payload:1" } },
+    });
+  });
 });
 
-test("failed session/load discards replay from the rejected attempt", async () => {
-  const transport = new ReplayTransport();
-  transport.failLoad = true;
-  const agent = new ManagedAgents({ kv: new MemoryKV() }).createAgent({
-    path: "/tmp/workspace",
-    id: "failed-agent",
-    sandbox: new Sandbox({
-      id: "failed-workspace", storage: replayStorage, transportFactory: () => transport,
-    }),
-  });
-  const attemptedDocs = agent.docs;
-
-  await expect(agent.session.start("s1")).rejects.toThrow("session/load failed");
-  expect(agent.docs).not.toBe(attemptedDocs);
-  expect(entries(agent.docs)).toHaveLength(0);
-  await agent.session.cleanupStartup();
-});
-
-test("real mailbox delivery creates the user entry before assistant output", async () => {
-  const transport = new ReplayTransport();
-  const agent = new ManagedAgents({ kv: new MemoryKV() }).createAgent({
-    path: "/tmp/workspace",
-    id: "delivered-agent",
-    sandbox: new Sandbox({ id: "delivered-workspace", transportFactory: () => transport }),
-  });
-  await agent.session.start(null);
-  await agent.session.send("Implement the feature");
-  transport.emit(textChunk("s1", "agent_message_chunk", "assistant-1", "Done"));
-  expect(entries(agent.docs).map((entry) => entry.get("role"))).toEqual(["user", "assistant"]);
-  expect(textOf(entries(agent.docs)[0]!, "text")).toBe("Implement the feature");
-  expect(textOf(entries(agent.docs)[1]!, "text")).toBe("Done");
-  await agent.close();
-});

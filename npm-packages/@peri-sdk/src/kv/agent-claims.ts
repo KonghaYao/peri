@@ -1,12 +1,11 @@
 import type { AtomicManagedAgentKv } from "./types";
-import { AgentClaimConflictError } from "./agent-claim-conflict-error";
+import { SessionClaimConflictError } from "./session-claim-conflict-error";
+import { sessionClaimKey } from "./session-claim-key";
+
+export { sessionClaimKey } from "./session-claim-key";
 
 export function agentClaimKey(sandboxId: string, agentId: string): string {
   return `peri:managed-agent:${encodeURIComponent(sandboxId)}:agent:${encodeURIComponent(agentId)}`;
-}
-
-export function sessionClaimKey(sessionId: string): string {
-  return `peri:managed-agent:session:${encodeURIComponent(sessionId)}`;
 }
 
 /** A single Agent's claims are acquired in deterministic order and released by owner. */
@@ -29,7 +28,7 @@ export class AgentClaims {
   }
 
   private async claim(key: string): Promise<void> {
-    if (!(await this.kv.claimIfAbsent(key, this.owner))) throw new AgentClaimConflictError(key);
+    if (!(await this.kv.claimIfAbsent(key, this.owner))) throw new SessionClaimConflictError(key);
     this.keys.push(key);
   }
 

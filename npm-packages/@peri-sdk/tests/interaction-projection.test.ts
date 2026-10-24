@@ -1,19 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import * as Y from "yjs";
-import type { AgentOptions } from "../src/agent/types";
 import { DocModel } from "../src/state/doc-model";
-import { INTERACTION_HISTORY_LIMIT, InteractionProjection, validateElicitationContent, type FormField } from "../src/state/interaction-projection";
+import {
+    evaluateElicitationForm, INTERACTION_HISTORY_LIMIT, InteractionProjection,
+    validateElicitationContent, type FormField,
+} from "../src/state/interaction-projection";
 import { TurnMachine } from "../src/state/turn-machine";
 import { readSessionView } from "../src/view/session-view";
-
-const options = (callbacks: Partial<AgentOptions> = {}): AgentOptions => ({ id: "a", sandbox: {} as AgentOptions["sandbox"], ...callbacks });
-const permission = (id: string) => ({
-    sessionId: "s1", toolCall: { toolCallId: id, title: "Run", rawInput: { command: "echo private" } },
-    options: [{ optionId: "allow_once", name: "Allow once" }, { optionId: "reject_once", name: "Reject" }],
-});
-const question = { sessionId: "s1", mode: "form", message: "Please answer", requestedSchema: {
-    properties: { answer: { title: "Answer", description: "Choose an answer", type: "string" } },
-} };
 
 function fixture() {
     const model = new DocModel();
@@ -24,34 +17,32 @@ function fixture() {
     tool.set("status", "running");
     return { model, turns, projection, tool };
 }
-
 function records(model: DocModel): Y.Map<Y.Map<unknown>> { return model.interactions(); }
 function turnStatus(model: DocModel, turnId = "turn:1"): unknown { return model.turns().get(turnId)?.get("interactionStatus"); }
 
-describe("reverse ACP interaction projection", () => {
-    test("permission carries a stable string id into the doc, the tool and the view", async () => {
+describe("interaction display projection", () => {
+    test("permission carries a stable id into the doc, the tool and the view", () => {
         const { model, projection, tool } = fixture();
-        let resolve!: (value: "allow_once") => void;
-        const answer = projection.handle("session/request_permission", permission("call-1"), "s1", options({
-            onPermissionRequest: () => new Promise((done) => { resolve = done; }),
-        }));
-        const pending = records(model);
-        expect(pending.size).toBe(1);
-        const id = String([...pending.keys()][0]);
-        expect(id.startsWith("interaction:")).toBe(true);
-        const record = pending.get(id)!;
+        expect(projection.begin({
+            id: "interaction:1", kind: "permission", sessionId: "s1", toolCallId: "call-1", title: "Run",
+            options: [{ optionId: "allow_once", name: "Allow once" }, { optionId: "reject_once", name: "Reject" }],
+        })).toBe(true);
+        const record = records(model).get("interaction:1")!;
         expect(record.get("status")).toBe("pending");
         expect(record.get("turnId")).toBe("turn:1");
         expect(record.get("toolCallId")).toBe("call-1");
-        expect(tool.get("permissionId")).toBe(id);
+        expect(record.get("fields")).toBeUndefined();
+        expect(record.get("questions")).toBeUndefined();
+        expect(tool.get("permissionId")).toBe("interaction:1");
         expect(tool.get("status")).toBe("pending");
         expect(turnStatus(model)).toBe("awaiting_permission");
         const view = readSessionView(model.chat, model.session);
-        expect(view.pendingInteractions[0]).toMatchObject({ id, kind: "permission", sessionId: "s1", toolCallId: "call-1" });
+        expect(view.pendingInteractions[0]).toMatchObject({
+            id: "interaction:1", kind: "permission", sessionId: "s1", toolCallId: "call-1",
+        });
         expect(view.session.activeTurnInteractionStatus).toBe("awaiting_permission");
-        expect(JSON.stringify(model.session.toJSON())).not.toContain("echo private");
-        resolve("allow_once");
-        expect(await answer).toEqual({ outcome: { outcome: "selected", optionId: "allow_once" } });
+
+        expect(projection.settle("interaction:1", "resolved", "allow_once")).toBe(true);
         expect(record.get("status")).toBe("resolved");
         expect(record.get("outcome")).toBe("allow_once");
         expect(typeof record.get("resolvedAt")).toBe("string");
@@ -60,141 +51,139 @@ describe("reverse ACP interaction projection", () => {
         expect(readSessionView(model.chat, model.session).pendingInteractions).toEqual([]);
     });
 
-    test("overlapping requests settle independently; absent callbacks reject and decline", async () => {
+    test("overlapping interactions settle independently and expiry never approves", () => {
         const { model, projection } = fixture();
-        let finish!: (value: { action: "accept"; content: Record<string, unknown> }) => void;
-        const form = projection.handle("elicitation/create", question, "s1", options({
-            onElicitation: () => new Promise((done) => { finish = done; }),
-        }));
-        const rejected = projection.handle("session/request_permission", permission("call-1"), "s1", options());
-        const pending = records(model);
-        expect(pending.size).toBe(2);
-        const pendingCount = (): number => [...pending.values()].filter((record) => record.get("status") === "pending").length;
-        expect(pendingCount()).toBe(2);
-        expect(await rejected).toEqual({ outcome: { outcome: "selected", optionId: "reject_once" } });
-        expect(pendingCount()).toBe(1);
-        expect(turnStatus(model)).toBe("awaiting_input");
-        finish({ action: "accept", content: { answer: "yes" } });
-        expect(await form).toEqual({ action: "accept", content: { answer: "yes" } });
-        expect(pendingCount()).toBe(0);
-        expect(await projection.handle("elicitation/create", question, "s1", options())).toEqual({ action: "decline" });
-        expect(JSON.stringify(model.session.toJSON())).not.toContain("yes");
+        projection.begin({ id: "interaction:form", kind: "elicitation", sessionId: "s1", message: "Please answer",
+            fields: [{ key: "answer", title: "Answer", description: "", type: "string", required: true }] });
+        projection.begin({ id: "interaction:permission", kind: "permission", sessionId: "s1", toolCallId: "call-1", title: "Run" });
+        expect(records(model).size).toBe(2);
+        expect(records(model).get("interaction:form")?.get("questions")).toBeUndefined();
+        expect(records(model).get("interaction:form")?.get("options")).toBeUndefined();
+        expect(records(model).get("interaction:form")?.get("fields")).toHaveLength(1);
+        expect(records(model).get("interaction:permission")?.get("fields")).toBeUndefined();
+        expect(records(model).get("interaction:permission")?.get("questions")).toBeUndefined();
+        expect(projection.settle("interaction:permission", "resolved", "reject_once")).toBe(true);
+        expect(records(model).get("interaction:form")?.get("status")).toBe("pending");
+        expect(projection.expireAll()).toBe(true);
+        expect(records(model).get("interaction:form")?.get("status")).toBe("expired");
+        expect(records(model).get("interaction:permission")?.get("status")).toBe("resolved");
+        // 终态不能再次进入。
+        expect(projection.settle("interaction:form", "resolved", "accept")).toBe(false);
+        expect(records(model).get("interaction:form")?.get("outcome")).toBeUndefined();
     });
 
-    test("failed callbacks and mismatched session cannot approve", async () => {
+    test("ask_user stores structured questions instead of text fields or permission options", () => {
         const { model, projection } = fixture();
-        expect(await projection.handle("session/request_permission", permission("call-1"), "s1", options({
-            onPermissionRequest: () => { throw new Error("UI closed"); },
-        }))).toEqual({ outcome: { outcome: "selected", optionId: "reject_once" } });
-        expect(projection.handle("elicitation/create", question, "s2", options())).rejects.toThrow("sessionId");
-    });
-
-    test("turn cancellation expires pending records before late callbacks can approve", async () => {
-        const { model, projection } = fixture();
-        const pending = projection.handle("session/request_permission", permission("call-1"), "s1", options({
-            onPermissionRequest: () => new Promise<"allow_once">(() => {}),
-        }));
-        projection.abortAll();
-        const recordsMap = records(model);
-        const record = recordsMap.get(String([...recordsMap.keys()][0]))!;
-        expect(record.get("status")).toBe("expired");
-        expect(turnStatus(model)).toBe("none");
-        expect(await pending).toEqual({ outcome: { outcome: "selected", optionId: "reject_once" } });
-        // 迟到的结算不重新激活已失效记录，也不授予权限。
-        expect(record.get("status")).toBe("expired");
-        expect(readSessionView(model.chat, model.session).pendingInteractions).toEqual([]);
-    });
-
-    test("不支持的整表单默认拒绝：嵌套/数组/组合 schema 不误发 accept", async () => {
-        const { model, projection } = fixture();
-        const accept = options({ onElicitation: () => ({ action: "accept", content: { anything: true } }) });
-        const nested = await projection.handle("elicitation/create", { ...question,
-            requestedSchema: { properties: { profile: { type: "object", title: "Profile" } } } }, "s1", accept);
-        expect(nested).toEqual({ action: "decline" });
-        const arrays = await projection.handle("elicitation/create", { ...question,
-            requestedSchema: { properties: { tags: { type: "array", items: { type: "string" } } } } }, "s1", accept);
-        expect(arrays).toEqual({ action: "decline" });
-        const composed = await projection.handle("elicitation/create", { ...question,
-            requestedSchema: { properties: { value: { type: "string", anyOf: [{ type: "string" }] } } } }, "s1", accept);
-        expect(composed).toEqual({ action: "decline" });
-        const recordsList = [...records(model).values()];
-        const unsupported = recordsList.find((record) => record.get("formSupport") === "unsupported");
-        expect(unsupported).toBeDefined();
-        expect(typeof unsupported!.get("formReason")).toBe("string");
-        expect(unsupported!.get("status")).toBe("resolved");
-        expect(unsupported!.get("outcome")).toBe("decline");
-        const supported = await projection.handle("elicitation/create", { ...question,
-            requestedSchema: { properties: { level: { type: "string", enum: ["a", "b"], title: "Level" } }, required: ["level"] } }, "s1",
-            options({ onElicitation: () => ({ action: "accept", content: { level: "a" } }) }));
-        expect(supported).toEqual({ action: "accept", content: { level: "a" } });
-    });
-
-    test("表单窗口暴露类型/必填/enum，答案内容不满足约束时不误发 accept", async () => {
-        const { model, projection } = fixture();
-        const schema = {
-            properties: {
-                level: { type: "string", enum: ["a", "b"], title: "Level" },
-                count: { type: "integer", title: "Count" },
-                note: { type: "string", title: "Note" },
-                flag: { type: "boolean", title: "Flag" },
-            },
-            required: ["level", "count"],
-        };
-        const ask = (content: Record<string, unknown>, action: "accept" | "decline" = "accept") =>
-            projection.handle("elicitation/create", { ...question, requestedSchema: schema }, "s1",
-                options({ onElicitation: () => action === "accept" ? { action: "accept", content } : { action: "decline" } }));
-
-        // 合法答案（含可选项）→ 接受。
-        expect(await ask({ level: "a", count: 2, flag: true })).toEqual({ action: "accept", content: { level: "a", count: 2, flag: true } });
-        // 缺必填、类型不符、enum 越界、未知字段 → 一律按拒绝结算，不误发 accept。
-        expect(await ask({ count: 2 })).toEqual({ action: "decline" });
-        expect(await ask({ level: "a", count: 1.5 })).toEqual({ action: "decline" });
-        expect(await ask({ level: "c", count: 2 })).toEqual({ action: "decline" });
-        expect(await ask({ level: "a", count: 2, extra: "x" })).toEqual({ action: "decline" });
-        // 用户显式拒绝仍是拒绝；视图暴露字段描述供前端渲染。
-        expect(await ask({}, "decline")).toEqual({ action: "decline" });
+        projection.begin({
+            id: "interaction:ask", kind: "elicitation", sessionId: "s1", title: "Questions",
+            variant: "ask_user", formSupport: "unsupported", formReason: "multi_step",
+            // 旧形态的 fields/options 即使混入也不写入：三者不互相冒充。
+            fields: [{ key: "ask_user_question_0", title: "Language", description: "Which language?", type: "string", required: true }],
+            options: [{ optionId: "a", name: "A" }],
+            questions: [
+                {
+                    id: "ask_user_question_0", header: "Language", question: "Which language?", multiSelect: false,
+                    options: [{ value: "ts", label: "TypeScript", description: "typed" }, { value: "rs", label: "Rust" }],
+                },
+                {
+                    id: "ask_user_question_1", header: "Features", question: "Pick features", multiSelect: true,
+                    options: [{ value: "a", label: "A" }, { value: "b", label: "B" }],
+                },
+            ],
+        });
+        const record = records(model).get("interaction:ask")!;
+        expect(record.get("fields")).toBeUndefined();
+        expect(record.get("options")).toBeUndefined();
         const view = readSessionView(model.chat, model.session);
-        expect(view.interactions.at(-1)?.fields).toEqual([
-            { key: "level", title: "Level", description: "", type: "string", required: true, enum: ["a", "b"] },
-            { key: "count", title: "Count", description: "", type: "integer", required: true },
-            { key: "note", title: "Note", description: "", type: "string", required: false },
-            { key: "flag", title: "Flag", description: "", type: "boolean", required: false },
+        const interaction = view.pendingInteractions[0]!;
+        expect(interaction).toMatchObject({
+            id: "interaction:ask", variant: "ask_user", formUnsupported: "multi_step",
+        });
+        expect(interaction.fields).toEqual([]);
+        expect(interaction.options).toBeUndefined();
+        expect(interaction.questions).toEqual([
+            {
+                id: "ask_user_question_0", header: "Language", question: "Which language?", multiSelect: false,
+                options: [{ value: "ts", label: "TypeScript", description: "typed" }, { value: "rs", label: "Rust" }],
+            },
+            {
+                id: "ask_user_question_1", header: "Features", question: "Pick features", multiSelect: true,
+                options: [{ value: "a", label: "A" }, { value: "b", label: "B" }],
+            },
         ]);
+        expect(JSON.stringify(model.session.toJSON())).not.toContain("resolver");
     });
 
-    test("答案校验是纯函数：类型/必填/enum/未知字段逐项判定", () => {
-        const fields: FormField[] = [
-            { key: "name", title: "Name", description: "", type: "string", required: true },
-            { key: "n", title: "N", description: "", type: "number", required: false, enum: [1, 2] },
-            { key: "b", title: "B", description: "", type: "boolean", required: true },
-        ];
-        expect(validateElicitationContent(fields, { name: "x", b: false })).toBe(true);
-        expect(validateElicitationContent(fields, { name: "x", b: false, n: 2 })).toBe(true);
-        expect(validateElicitationContent(fields, { name: "x", b: false, n: 3 })).toBe(false);
-        expect(validateElicitationContent(fields, { name: "x" })).toBe(false);
-        expect(validateElicitationContent(fields, { name: "", b: true })).toBe(false);
-        expect(validateElicitationContent(fields, { name: "x", b: true, other: 1 })).toBe(false);
+    test("legacy ask_user documents with only fields still render a text form", () => {
+        const { model } = fixture();
+        const legacyFields = [{
+            key: "ask_user_question_0", title: "Language",
+            description: "Which language?\n- TypeScript：typed\n- Rust", type: "string", required: true,
+        }];
+        model.session.transact(() => {
+            const legacy = new Y.Map<unknown>();
+            legacy.set("id", "interaction:legacy");
+            legacy.set("kind", "elicitation");
+            legacy.set("sessionId", "s1");
+            legacy.set("status", "pending");
+            legacy.set("createdAt", "2026-10-01T00:00:00.000Z");
+            legacy.set("resolvedAt", null);
+            legacy.set("variant", "ask_user");
+            legacy.set("fields", legacyFields);
+            model.interactions().set("interaction:legacy", legacy);
+        });
+        const interaction = readSessionView(model.chat, model.session).pendingInteractions[0]!;
+        expect(interaction).toMatchObject({ id: "interaction:legacy", variant: "ask_user" });
+        expect(interaction.questions).toBeUndefined();
+        expect(interaction.fields).toEqual(legacyFields);
+        expect(interaction.options).toBeUndefined();
     });
 
-    test("resolved history is bounded while pending records survive pruning", async () => {
-        const { model, projection } = fixture();
-        const held = projection.handle("session/request_permission", permission("call-1"), "s1", options({
-            onPermissionRequest: () => new Promise<"allow_once">(() => {}),
-        }));
-        const ids: string[] = [];
+    test("resolved history is bounded while pending records survive pruning", () => {
+        let tick = 0;
+        const model = new DocModel(() => new Date(1_700_000_000_000 + tick++).toISOString());
+        const turns = new TurnMachine(model);
+        const projection = new InteractionProjection(model);
+        turns.start("read");
+        projection.begin({ id: "interaction:pending", kind: "permission", sessionId: "s1", title: "Pending" });
         for (let index = 0; index < INTERACTION_HISTORY_LIMIT + 5; index++) {
-            const before = new Set(records(model).keys());
-            await projection.handle("session/request_permission", permission("call-1"), "s1", options({
-                onPermissionRequest: () => "reject_once",
-            }));
-            const created = [...records(model).keys()].find((id) => !before.has(id));
-            if (created) ids.push(created);
+            const id = `interaction:${index}`;
+            projection.begin({ id, kind: "elicitation", sessionId: "s1", message: "m" });
+            projection.settle(id, "resolved", "decline");
         }
-        const map = records(model);
-        expect(map.size).toBe(INTERACTION_HISTORY_LIMIT);
-        expect(map.get(ids[0]!)).toBeUndefined();
-        expect([...map.values()].filter((record) => record.get("status") === "pending")).toHaveLength(1);
-        projection.abortAll();
-        await held;
+        expect(records(model).size).toBeLessThanOrEqual(INTERACTION_HISTORY_LIMIT);
+        expect(records(model).get("interaction:pending")?.get("status")).toBe("pending");
+        expect(records(model).get(`interaction:${INTERACTION_HISTORY_LIMIT + 4}`)).toBeDefined();
+    });
+});
+
+describe("elicitation form window", () => {
+    test("unsupported shapes are rejected without an answerable form", () => {
+        expect(evaluateElicitationForm({ properties: { value: { type: "array" } } }))
+            .toMatchObject({ supported: false, reason: "unsupported_property_type" });
+        expect(evaluateElicitationForm({ properties: { value: { type: "string", properties: {} } } }))
+            .toMatchObject({ supported: false, reason: "nested_schema" });
+        expect(evaluateElicitationForm({ properties: { value: { type: "string" } }, anyOf: [] }))
+            .toMatchObject({ supported: false, reason: "unsupported_anyOf" });
+        expect(evaluateElicitationForm({ properties: {} }))
+            .toMatchObject({ supported: false, reason: "missing_properties" });
+    });
+
+    test("fields expose type/required/enum and answer validation is pure", () => {
+        const form = evaluateElicitationForm({
+            properties: {
+                answer: { title: "Answer", description: "Choose", type: "string", enum: ["yes", "no"] },
+                count: { type: "integer" },
+            },
+            required: ["answer"],
+        });
+        expect(form.supported).toBe(true);
+        const fields: FormField[] = form.fields;
+        expect(fields.find((field) => field.key === "answer")).toMatchObject({ required: true, enum: ["yes", "no"] });
+        expect(validateElicitationContent(fields, { answer: "yes" })).toBe(true);
+        expect(validateElicitationContent(fields, {})).toBe(false);
+        expect(validateElicitationContent(fields, { answer: "maybe" })).toBe(false);
+        expect(validateElicitationContent(fields, { answer: "yes", count: 1.5 })).toBe(false);
+        expect(validateElicitationContent(fields, { answer: "yes", unknown: 1 })).toBe(false);
     });
 });

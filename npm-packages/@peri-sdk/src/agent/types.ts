@@ -19,7 +19,14 @@ export interface AcpMcpTransport {
 /** 官方 `Server` / `McpServer` 的最小结构契约：桥接只依赖 `connect(transport)`。 */
 export interface AcpMcpServerInstance {
     connect(transport: AcpMcpTransport): Promise<void>;
+    /** 仅工厂创建的实例必须实现；由 SDK 在激活结束时关闭。 */
+    close?(): Promise<void>;
 }
+
+/** 每次激活解析一个新实例；工厂结果缺 `close()` 视为契约错误。 */
+export type AcpMcpServerInstanceFactory = () =>
+    | AcpMcpServerInstance
+    | Promise<AcpMcpServerInstance>;
 
 export type AcpMcpServer =
     | { type: "http"; url: string; headers?: Record<string, string> }
@@ -30,9 +37,14 @@ export type AcpMcpServer =
           env?: Record<string, string>;
       }
     | {
-          /** 由调用方持有生命周期的官方 MCP server 实例，经反向 ACP `mcp/message` 桥接。 */
+          /**
+           * 经反向 ACP `mcp/message` 桥接的官方 MCP server。
+           *
+           * 直接实例是调用方借用的单次使用实例：bridge close 后保留绑定，不能安全重连；
+           * 需要跨 reload/多 Chat 使用时必须给工厂，由激活拥有并关闭。
+           */
           type: "acp";
-          server: AcpMcpServerInstance;
+          server: AcpMcpServerInstance | AcpMcpServerInstanceFactory;
           /** 缺省使用 `mcpServers` 的 Record key。 */
           serverId?: string;
       };

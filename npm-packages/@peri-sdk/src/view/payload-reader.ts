@@ -15,7 +15,7 @@ export class PayloadReadError extends Error {
 
 export type ToolPayloadReadRef = { id: string; bytes: number };
 export type ToolPayloadResponse = { id: string; bytes: number; json: string };
-/** 注入的 transport-neutral reader；服务端 adapter 用 SessionDocs.readPayload，浏览器 adapter 走鉴权 HTTP。 */
+/** 注入的 transport-neutral reader；服务端 adapter 用 ChatService.readPayload，浏览器 adapter 走鉴权 HTTP。 */
 export type ToolPayloadReader = (request: { id: string; signal?: AbortSignal }) => Promise<ToolPayloadResponse>;
 export type ReadPayloadOptions = { signal?: AbortSignal; maxBytes?: number };
 

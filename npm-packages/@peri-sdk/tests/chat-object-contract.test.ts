@@ -1,19 +1,15 @@
 import { afterEach, expect, test } from "bun:test";
 import * as Y from "yjs";
-import { SessionDocs, type SessionDocsOptions } from "../src/state/session-docs";
-import {
-    SESSION_EXTERNAL_PAYLOAD_BUDGET_BYTES, SESSION_INLINE_PAYLOAD_BUDGET_BYTES,
-    TOOL_PAYLOAD_INLINE_BYTES, TOOL_PAYLOAD_MAX_BYTES, TOOL_PAYLOAD_PREVIEW_CHARS,
-} from "../src/state/tool-payloads";
+import { ChatDocument } from "../src/view/chat-document";
 import type { JsonRpcNotification } from "../src/transport/types";
 
 // ACP fixture 留在本文件，禁止把真实会话或凭据录入测试。
 const CREATED = "2026-10-10T01:00:00.000Z";
 const COMPLETED = "2026-10-10T01:00:01.000Z";
 let now = CREATED;
-const instances: SessionDocs[] = [];
-function create(options: SessionDocsOptions = {}) {
-    const docs = new SessionDocs({ now: () => now, ...options });
+const instances: ChatDocument[] = [];
+function create() {
+    const docs = new ChatDocument({ now: () => now });
     instances.push(docs);
     return docs;
 }
@@ -39,12 +35,12 @@ function history(messages: unknown[]): JsonRpcNotification {
         } }),
     } };
 }
-function entries(docs: SessionDocs): Y.Map<unknown>[] {
+function entries(docs: ChatDocument): Y.Map<unknown>[] {
     const root = docs.chat.getMap("root");
     const map = root.get("entries") as Y.Map<Y.Map<unknown>>;
     return (root.get("entryOrder") as Y.Array<string>).toArray().map((id) => map.get(id)!);
 }
-function tool(docs: SessionDocs, id = "t1") {
+function tool(docs: ChatDocument, id = "t1") {
     return (docs.chat.getMap("root").get("toolCalls") as Y.Map<Y.Map<unknown>>).get(id)!;
 }
 function blocks(entry: Y.Map<unknown>) {
@@ -122,7 +118,7 @@ test("缺失工具 status 的补丁不推进 pending，终态补元数据不改�
     now = COMPLETED;
     docs.accept(update("tool_call_update", { toolCallId: "t1", status: "completed" }));
     now = "2026-10-10T01:00:02.000Z";
-    docs.accept(update("tool_call_update", { toolCallId: "t1", title: "Read complete", rawOutput: null }));
+    docs.accept(update("tool_call_update", { toolCallId: "t1", title: "Read complete", result: { rawOutput: null } }));
     expect(tool(docs).get("name")).toBe("Read complete");
     expect(tool(docs).get("result")).toEqual({ rawOutput: null });
     expect(tool(docs).get("completedAt")).toBe(COMPLETED);
@@ -130,10 +126,10 @@ test("缺失工具 status 的补丁不推进 pending，终态补元数据不改�
 
 test("旧 turn 的工具 ID 不得被新 turn 重绑或更新", () => {
     const docs = create(); docs.acceptDeliveredUserInput("u1", "read");
-    docs.accept(update("tool_call", { toolCallId: "t1", status: "completed", rawOutput: "first" }));
+    docs.accept(update("tool_call", { toolCallId: "t1", status: "completed", result: { contentText: "first" } }));
     const before = tool(docs).toJSON(); docs.completeTurn();
     docs.acceptDeliveredUserInput("u2", "next");
-    docs.accept(update("tool_call_update", { toolCallId: "t1", status: "completed", rawOutput: "late" }));
+    docs.accept(update("tool_call_update", { toolCallId: "t1", status: "completed", result: { contentText: "late" } }));
     expect(tool(docs).toJSON()).toEqual(before);
     expect(blocks(entries(docs)[3]!)).toEqual([]);
     expect(() => docs.accept(update("tool_call", { toolCallId: "t1", status: "pending" })))
@@ -192,9 +188,9 @@ test("turn 记录随生命周推进，终态保留 stopReason 且不重复收敛
 test("取消与失败分别写 cancelled 与 execution_failed，重放 turn 无伪造开始时间", () => {
     const docs = create(); docs.acceptDeliveredUserInput("u", "read");
     const turns = docs.session.getMap("root").get("turns") as Y.Map<Y.Map<unknown>>;
-    const token = docs.requestCancel()!;
+    expect(docs.applyFact({ kind: "turn-cancel", restore: false })).toBe(true);
     expect(turns.get("turn:u")!.get("status")).toBe("cancelling");
-    docs.restoreCancel(token);
+    expect(docs.applyFact({ kind: "turn-cancel", restore: true })).toBe(true);
     expect(turns.get("turn:u")!.get("status")).toBe("accepting");
     now = COMPLETED;
     docs.accept({ jsonrpc: "2.0", method: "peri/agent_event", params: { sessionId: "s1",
@@ -209,43 +205,16 @@ test("取消与失败分别写 cancelled 与 execution_failed，重放 turn 无�
     expect(replayed.get("status")).toBe("accepting");
 });
 
-test("载荷预算常量按设计评审起点冻结为默认待确认值", () => {
-    expect(TOOL_PAYLOAD_INLINE_BYTES).toBe(4096);
-    expect(TOOL_PAYLOAD_PREVIEW_CHARS).toBe(512);
-    expect(SESSION_INLINE_PAYLOAD_BUDGET_BYTES).toBe(1_048_576);
-    expect(TOOL_PAYLOAD_MAX_BYTES).toBe(8_388_608);
-    expect(SESSION_EXTERNAL_PAYLOAD_BUDGET_BYTES).toBe(33_554_432);
-});
-
-test("inline 累计预算内联；超限时降级为外置引用且全文仍可读", () => {
-    const docs = create({ payloadBudgets: { inlineBytes: 200 } });
-    docs.acceptDeliveredUserInput("u", "read");
-    docs.accept(update("tool_call", { toolCallId: "t1", status: "in_progress", rawInput: { note: "x".repeat(120) } }));
-    expect(tool(docs).get("arguments")).toEqual({ note: "x".repeat(120) });
-    docs.accept(update("tool_call", { toolCallId: "t2", status: "in_progress", rawInput: { note: "y".repeat(120) } }));
-    const ref = tool(docs, "t2").get("argumentsRef") as { id: string; preview: string; bytes: number };
-    expect(tool(docs, "t2").get("arguments")).toBeUndefined();
-    expect(ref.preview.length).toBeLessThanOrEqual(512);
-    expect(JSON.parse(docs.readPayload(ref.id)!)).toEqual({ note: "y".repeat(120) });
-});
-
-test("超出单项或累计外置预算的载荷被拒绝且保留前一个版本", () => {
-    const docs = create({ payloadBudgets: { maxPayloadBytes: 6000, externalBytes: 6000 } });
-    docs.acceptDeliveredUserInput("u", "read");
-    docs.accept(update("tool_call", { toolCallId: "t1", status: "in_progress", rawInput: { keep: true } }));
-    docs.accept(update("tool_call", { toolCallId: "t1", status: "completed", rawOutput: "z".repeat(5000) }));
-    const ref = (tool(docs).get("resultRef") as { id: string }).id;
-    expect(docs.readPayload(ref)).toBeDefined();
-    const accepted = tool(docs).toJSON();
-    // 单项上限：更大的结果被拒绝，前一个可读版本保持。
-    docs.accept(update("tool_call", { toolCallId: "t1", status: "completed", rawOutput: "q".repeat(7000) }));
-    expect(tool(docs).get("resultRef")).toEqual((accepted as Record<string, unknown>).resultRef);
-    expect(tool(docs).get("error")).toEqual({ code: "payload_too_large", message: "工具载荷超出会话接纳预算" });
-    expect(tool(docs).get("status")).toBe("completed");
-    expect(docs.readPayload(ref)).toBeDefined();
-    // 累计上限：外置总量超预算时同样拒绝，且不产生新引用。
-    docs.accept(update("tool_call", { toolCallId: "t2", status: "in_progress", rawInput: { big: "w".repeat(4200) } }));
-    expect(tool(docs, "t2").get("argumentsRef")).toBeUndefined();
-    expect(tool(docs, "t2").get("error")).toEqual({ code: "payload_too_large", message: "工具载荷超出会话接纳预算" });
-    expect(docs.exportCheckpoint().payloadValues).toHaveLength(1);
+test("rewind payload_too_large maps to a public tool error without inline arguments", () => {
+    const docs = create();
+    docs.accept(history([
+        { id: "u", role: "user", content: "read" },
+        { id: "a", role: "assistant",
+            content: [{ type: "tool_use", id: "call", name: "Read", argumentsError: "payload_too_large" }] },
+    ]));
+    expect(tool(docs, "call").get("arguments")).toBeUndefined();
+    expect(tool(docs, "call").get("argumentsRef")).toBeUndefined();
+    expect(tool(docs, "call").get("error")).toEqual({
+        code: "payload_too_large", message: "工具载荷超出会话接纳预算",
+    });
 });

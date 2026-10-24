@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import * as Y from "yjs";
-import { SessionDocs } from "../src/state/session-docs";
-import { AWAITING_RESULT_STATUS } from "../src/sdk/index";
+import { ChatDocument } from "../src/view/chat-document";
+import { AWAITING_RESULT_STATUS } from "../src/state/history-merge";
 import { readSessionView } from "../src/view/session-view";
 import type { JsonRpcNotification } from "../src/transport/types";
 
@@ -43,24 +43,27 @@ function historyPage(items: ReturnType<typeof item>[], nextCursor: string | null
   return { sessionId: "s1", snapshotToken: TOKEN, nextCursor, items };
 }
 
-function entryIds(docs: SessionDocs): string[] {
+function entryIds(docs: ChatDocument): string[] {
   const root = docs.chat.getMap<unknown>("root");
   const order = root.get("entryOrder") as Y.Array<string>;
   const entries = root.get("entries") as Y.Map<Y.Map<unknown>>;
   return order.toArray().map((id) => String(entries.get(id)?.get("entryId")));
 }
 
-function texts(docs: SessionDocs): string[] {
+function texts(docs: ChatDocument): string[] {
   return docs.chat.getMap<unknown>("root").get("entryOrder")
     ? readSessionView(docs.chat, docs.session).entries.flatMap((entry) =>
         entry.blocks.flatMap((block) => block.type === "text" || block.type === "reasoning" ? [block.text] : []))
     : [];
 }
 
-function withWindow(): SessionDocs {
-  const docs = new SessionDocs();
-  docs.seedHistoryWindow({ snapshotToken: TOKEN, nextCursor: "cursor-1" });
-  return docs;
+function withWindow(): ChatDocument {
+  return new ChatDocument();
+}
+
+/** 运行侧校验窗口后的展示合并；View 只接收已接纳条目。 */
+function mergeHistoryPage(docs: ChatDocument, page: ReturnType<typeof historyPage>) {
+  return { applied: docs.mergeHistoryItems(page.items), status: "merged" as const };
 }
 
 describe("history projection merge", () => {
@@ -71,7 +74,7 @@ describe("history projection merge", () => {
     docs.accept(replay("s1", "s1:summary", { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "S" } }, 20));
     expect(entryIds(docs)).toEqual(["s1:inherited", "s1:summary"]);
 
-    const merged = docs.mergeHistoryPage("s1", historyPage([
+    const merged = mergeHistoryPage(docs, historyPage([
       item("s1:old-own", 10, [{ position: 0, update: text("agent_message_chunk", "H") }]),
     ]));
 
@@ -87,7 +90,7 @@ describe("history projection merge", () => {
     docs.accept(replay("s1", "s1:summary", { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "S" } }, 30));
     docs.accept(replay("s1", "s1:recent", { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "R" } }, 60));
 
-    docs.mergeHistoryPage("s1", historyPage([
+    mergeHistoryPage(docs, historyPage([
       item("s1:mid-a", 40, [{ position: 0, update: text("agent_message_chunk", "40") }]),
       item("s1:mid-b", 50, [{ position: 0, update: text("agent_message_chunk", "50") }]),
     ]));
@@ -101,7 +104,7 @@ describe("history projection merge", () => {
     docs.accept(replay("s1", "s1:summary", { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "S" } }, 50));
     docs.accept(replay("s1", "s1:recent", { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "R" } }, 60));
 
-    docs.mergeHistoryPage("s1", historyPage([
+    mergeHistoryPage(docs, historyPage([
       item("s1:older-a", 10, [{ position: 0, update: text("agent_message_chunk", "10") }]),
       item("s1:older-b", 20, [{ position: 0, update: text("agent_message_chunk", "20") }]),
     ]));
@@ -117,9 +120,9 @@ describe("history projection merge", () => {
       item("s1:a", 10, [{ position: 0, update: text("agent_message_chunk", "A") }]),
       item("s1:b", 20, [{ position: 0, update: text("agent_message_chunk", "B") }]),
     ]);
-    docs.mergeHistoryPage("s1", page);
-    docs.mergeHistoryPage("s1", page);
-    docs.mergeHistoryPage("s1", historyPage([
+    mergeHistoryPage(docs, page);
+    mergeHistoryPage(docs, page);
+    mergeHistoryPage(docs, historyPage([
       item("s1:b", 20, [{ position: 0, update: text("agent_message_chunk", "B") }]),
       item("s1:c", 30, [{ position: 0, update: text("agent_message_chunk", "C") }]),
     ]));
@@ -136,13 +139,13 @@ describe("history projection merge", () => {
       { position: 0, update: text("agent_thought_chunk", "thinking", messageId) },
       { position: 1, update: text("agent_message_chunk", "answer", messageId) },
     ]);
-    docs.mergeHistoryPage("s1", historyPage([entry]));
+    mergeHistoryPage(docs, historyPage([entry]));
     const view = readSessionView(docs.chat, docs.session);
     expect(view.entries[0]!.blocks.map((block) => block.type)).toEqual(["reasoning", "text"]);
     expect(view.entries[0]!.blocks.map((block) => block.type === "tool_call" ? "" : block.text)).toEqual(["thinking", "answer"]);
 
     // 重试同一页：两个 block 都不得被对方覆盖或重复。
-    docs.mergeHistoryPage("s1", historyPage([entry]));
+    mergeHistoryPage(docs, historyPage([entry]));
     const retried = readSessionView(docs.chat, docs.session);
     expect(retried.entries).toHaveLength(1);
     expect(retried.entries[0]!.blocks.map((block) => block.type)).toEqual(["reasoning", "text"]);
@@ -153,7 +156,7 @@ describe("history projection merge", () => {
   test("assistant and tool entries render without a Human prefix or an active turn (A23)", () => {
     const docs = withWindow();
     docs.seedInputQueue({ generation: "g1", revision: 1, items: [{ inputId: "live", state: "delivered" }] });
-    docs.mergeHistoryPage("s1", historyPage([
+    mergeHistoryPage(docs, historyPage([
       item("s1:summary", 10, [{ position: 0, update: text("agent_message_chunk", "compacted summary") }]),
       item("s1:tool", 20, [{
         position: 0,
@@ -175,7 +178,7 @@ describe("history projection merge", () => {
 
   test("a tool result that arrives in a later page completes the earlier call without faking failure (A10)", () => {
     const docs = withWindow();
-    docs.mergeHistoryPage("s1", historyPage([
+    mergeHistoryPage(docs, historyPage([
       item("s1:call", 10, [{
         position: 0,
         update: { sessionUpdate: "tool_call", toolCallId: "call-9", title: "Bash", status: "in_progress" },
@@ -184,10 +187,10 @@ describe("history projection merge", () => {
     expect(readSessionView(docs.chat, docs.session).entries[0]!.blocks[0])
       .toMatchObject({ tool: { status: "awaiting_result" } });
 
-    docs.mergeHistoryPage("s1", historyPage([
+    mergeHistoryPage(docs, historyPage([
       item("s1:result", 20, [{ position: 0, update: {
         sessionUpdate: "tool_call_update", toolCallId: "call-9", status: "completed",
-        content: [{ type: "text", text: "tests passed" }],
+        result: { contentText: "tests passed" },
       } }]),
     ]));
     const view = readSessionView(docs.chat, docs.session);
@@ -200,14 +203,14 @@ describe("history projection merge", () => {
   });
 
   test("a replay result payload does not duplicate the tool block on a second entry", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(replay("s1", "s1:call", {
       sessionUpdate: "tool_call", toolCallId: "call-11", title: "Read", status: "in_progress",
-      rawInput: { path: "/demo/notes.txt" },
+      arguments: { path: "/demo/notes.txt" },
     }, 10));
     docs.accept(replay("s1", "s1:result", {
       sessionUpdate: "tool_call_update", toolCallId: "call-11", status: "completed",
-      content: [{ type: "text", text: "alpha" }],
+      result: { contentText: "alpha" },
     }, 20));
 
     const view = readSessionView(docs.chat, docs.session);
@@ -220,13 +223,13 @@ describe("history projection merge", () => {
 
   test("a result payload with its own text keeps the text entry but reuses the tool's owner block", () => {
     const docs = withWindow();
-    docs.mergeHistoryPage("s1", historyPage([
+    mergeHistoryPage(docs, historyPage([
       item("s1:call", 10, [{
         position: 0,
         update: { sessionUpdate: "tool_call", toolCallId: "call-10", title: "Bash", status: "in_progress" },
       }]),
     ]));
-    docs.mergeHistoryPage("s1", historyPage([
+    mergeHistoryPage(docs, historyPage([
       item("s1:result", 20, [
         { position: 0, update: { sessionUpdate: "tool_call_update", toolCallId: "call-10", status: "completed" } },
         { position: 1, update: text("agent_message_chunk", "命令已完成") },
@@ -248,7 +251,7 @@ describe("history projection merge", () => {
     const subItem = { position: 0, update: text("agent_message_chunk", "Answer", messageId) };
 
     // 页路径先落库（带子项下标），随后回放路径带着同一条目身份到达（没有子项下标）。
-    docs.mergeHistoryPage("s1", historyPage([item("s1:m1", 10, [subItem])]));
+    mergeHistoryPage(docs, historyPage([item("s1:m1", 10, [subItem])]));
     expect(texts(docs)).toEqual(["Answer"]);
     docs.accept(replay("s1", "s1:m1", subItem.update, 10));
 
@@ -264,7 +267,7 @@ describe("history projection merge", () => {
     const update = text("agent_message_chunk", "Answer", messageId);
 
     docs.accept(replay("s1", "s1:m1", update, 10));
-    docs.mergeHistoryPage("s1", historyPage([item("s1:m1", 10, [{ position: 0, update }])]));
+    mergeHistoryPage(docs, historyPage([item("s1:m1", 10, [{ position: 0, update }])]));
 
     expect(texts(docs)).toEqual(["Answer"]);
     expect(readSessionView(docs.chat, docs.session).entries[0]!.blocks).toHaveLength(1);
@@ -273,7 +276,7 @@ describe("history projection merge", () => {
 
   test("a page flags an oversized entry, and the marker is readable from the view (REQ §5.2)", () => {
     const docs = withWindow();
-    docs.mergeHistoryPage("s1", historyPage([
+    mergeHistoryPage(docs, historyPage([
       item("s1:big", 10, [{ position: 0, update: text("agent_message_chunk", "huge") }], true),
       item("s1:small", 20, [{ position: 0, update: text("agent_message_chunk", "small") }]),
     ]));
@@ -285,7 +288,7 @@ describe("history projection merge", () => {
 
   test("the awaiting-result tool status is consumable as a constant (REQ-C01-6)", () => {
     const docs = withWindow();
-    docs.mergeHistoryPage("s1", historyPage([
+    mergeHistoryPage(docs, historyPage([
       item("s1:call", 10, [{
         position: 0,
         update: { sessionUpdate: "tool_call", toolCallId: "call-awaiting", title: "Read", status: "in_progress" },
@@ -299,8 +302,7 @@ describe("history projection merge", () => {
   });
 
   test("history pages never advance the live plan, tasks, queue, or current turn (A24)", () => {
-    const docs = new SessionDocs();
-    docs.seedHistoryWindow({ snapshotToken: TOKEN, nextCursor: "cursor-1" });
+    const docs = new ChatDocument();
     docs.accept(update("s1", "user_message_chunk", { messageId: "live-user", content: { type: "text", text: "current work" } }));
     docs.accept(update("s1", "plan", { entries: [{ content: "Current todo", status: "in_progress" }] }));
     docs.accept({ jsonrpc: "2.0", method: "peri/unstable_event", params: { sessionId: "s1", event: "bg-task-started", data: {
@@ -311,11 +313,11 @@ describe("history projection merge", () => {
     const planBefore = JSON.stringify(info.get("plan"));
     const queueBefore = JSON.stringify(info.get("inputQueue") ?? null);
 
-    docs.mergeHistoryPage("s1", historyPage([
+    mergeHistoryPage(docs, historyPage([
       item("s1:old-todo", 5, [{
         position: 0,
         update: { sessionUpdate: "tool_call", toolCallId: "call-todo", title: "TodoWrite", status: "in_progress",
-          rawInput: { todos: [{ content: "Old todo", status: "pending" }] } },
+          arguments: { todos: [{ content: "Old todo", status: "pending" }] } },
       }]),
       item("s1:old-answer", 6, [{ position: 0, update: text("agent_message_chunk", "older answer") }]),
     ]));

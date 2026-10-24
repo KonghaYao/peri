@@ -1,5 +1,4 @@
 import * as Y from "yjs";
-import { ToolPayloads } from "./tool-payloads";
 
 export type EntryRole = "user" | "assistant";
 export type ProjectionClock = () => string;
@@ -33,12 +32,10 @@ export function isTerminal(status: unknown): boolean {
 export class DocModel {
     readonly chat = new Y.Doc();
     readonly session = new Y.Doc();
-    readonly payloads: ToolPayloads;
     private readonly entriesByTurn = new Map<string, Set<string>>();
     private readonly toolsByTurn = new Map<string, Set<string>>();
 
-    constructor(readonly now: ProjectionClock = () => new Date().toISOString(), payloads?: ToolPayloads) {
-        this.payloads = payloads ?? new ToolPayloads();
+    constructor(readonly now: ProjectionClock = () => new Date().toISOString()) {
         this.chat.transact(() => {
             const root = this.chatRoot();
             root.set("schemaVersion", CHAT_SCHEMA_VERSION);
@@ -58,7 +55,7 @@ export class DocModel {
         });
     }
 
-    destroy(): void { this.payloads.clear(); this.chat.destroy(); this.session.destroy(); }
+    destroy(): void { this.chat.destroy(); this.session.destroy(); }
     chatRoot(): Y.Map<unknown> { return this.chat.getMap("root"); }
     sessionRoot(): Y.Map<unknown> { return this.session.getMap("root"); }
     info(): Y.Map<unknown> { return this.sessionRoot().get("session") as Y.Map<unknown>; }
@@ -84,7 +81,6 @@ export class DocModel {
     resetChat(): void {
         this.entriesByTurn.clear();
         this.toolsByTurn.clear();
-        this.payloads.clear();
         const root = this.chatRoot();
         const order = root.get("entryOrder") as Y.Array<string>;
         order.delete(0, order.length);

@@ -1,6 +1,6 @@
 import type * as Y from "yjs";
 
-/** An immutable JSON version, scoped to one SessionDocs lifetime. */
+/** An immutable JSON version, scoped to one runtime payload store lifetime. */
 export type ToolPayloadRef = { id: string; bytes: number; preview: string };
 /** 设计固定的 inline 分界；更小的值留在 Yjs，不产生引用。 */
 export const TOOL_PAYLOAD_INLINE_BYTES = 4096;

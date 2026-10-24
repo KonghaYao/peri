@@ -32,6 +32,16 @@ export class SessionProjection {
         return false;
     }
 
+    /** 运行侧上报的展示状态；不代表 View 可授予执行资格。 */
+    acceptRunState(running: boolean, executionBlocked: boolean): boolean {
+        this.docs.session.transact(() => {
+            const info = this.docs.info();
+            info.set("running", running);
+            info.set("executionBlocked", executionBlocked);
+        });
+        return true;
+    }
+
     seedConfig(response: unknown): void {
         const value = object(response);
         if (!value) return;

@@ -1,5 +1,4 @@
 import * as Y from "yjs";
-import type { ElicitationDecision, ElicitationRequest, InteractionCallbacks, PermissionRequest } from "../agent/types";
 import { DocModel } from "./doc-model";
 import { object, string } from "./protocol";
 import type { TurnInteractionStatus } from "./turn-machine";
@@ -22,6 +21,50 @@ export type FormField = {
     required: boolean;
     enum?: Array<string | number | boolean>;
 };
+
+/** AskUserQuestion 的结构化展示问题；与运行侧 `InteractionQuestion` 同构。 */
+export type InteractionQuestionDisplay = {
+    id: string;
+    header: string;
+    question: string;
+    multiSelect: boolean;
+    options: Array<{ value: string; label: string; description?: string }>;
+};
+
+/** 展示层只需要运行侧给出的公开字段；resolver 与回答正文不进入文档。 */
+export type InteractionDisplayRecord = {
+    id: string;
+    kind: "permission" | "elicitation";
+    sessionId: string;
+    turnId?: string;
+    toolCallId?: string;
+    title?: string;
+    message?: string;
+    /** 仅 permission。 */
+    options?: Array<{ optionId: string; name: string }>;
+    /** 仅普通 elicitation。 */
+    fields?: FormField[];
+    variant?: "ask_user";
+    /** 仅 `variant === "ask_user"`；不回退写入 `fields`。 */
+    questions?: InteractionQuestionDisplay[];
+    formSupport?: "unsupported";
+    formReason?: string;
+};
+
+/** 复制成文档自有的普通数据，避免跨层共享可变引用。 */
+function displayQuestions(questions: InteractionQuestionDisplay[]): InteractionQuestionDisplay[] {
+    return questions.map((question) => ({
+        id: question.id,
+        header: question.header,
+        question: question.question,
+        multiSelect: question.multiSelect,
+        options: question.options.map((option) => ({
+            value: option.value,
+            label: option.label,
+            ...(option.description === undefined ? {} : { description: option.description }),
+        })),
+    }));
+}
 
 /** 首版表单窗口：单步基本类型；嵌套、数组、组合式 schema 与多步形态不支持。 */
 export function evaluateElicitationForm(schema: Record<string, unknown> | null): { supported: boolean; fields: FormField[]; reason?: string } {
@@ -70,8 +113,6 @@ export function evaluateElicitationForm(schema: Record<string, unknown> | null):
     return { supported: true, fields };
 }
 
-function interactionId(): string { return `interaction:${crypto.randomUUID()}`; }
-
 /** 答案内容必须满足表单窗口的类型/必填/enum 约束；未知字段拒绝。 */
 export function validateElicitationContent(fields: FormField[], content: Record<string, unknown>): boolean {
     const declared = new Map(fields.map((field) => [field.key, field]));
@@ -103,170 +144,106 @@ export function turnInteractionStatusFor(interactions: Y.Map<Y.Map<unknown>>, tu
 }
 
 /**
- * Reverse ACP requests are the source of pending human interaction state.
- * Records carry stable string ids; answers, resolvers and abort controllers never enter Yjs.
+ * 交互的纯展示投影。
+ *
+ * 运行侧 InteractionBroker 持有 resolver/AbortController，并通过事实把公开字段送进来；
+ * 这里只写展示记录与 turn/tool 的等待状态，不调用回调、不决定权限。
  */
 export class InteractionProjection {
-    private readonly cancellations = new Map<string, () => void>();
-
     constructor(private readonly docs: DocModel) {}
 
-    async handle(method: string, raw: unknown, expectedSessionId: string | undefined, options: InteractionCallbacks): Promise<unknown> {
-        const params = object(raw);
-        const sessionId = string(params?.sessionId);
-        if (!sessionId || (expectedSessionId && sessionId !== expectedSessionId)) {
-            throw new Error("ACP interaction has an invalid sessionId");
-        }
-        if (method === "session/request_permission") return this.permission(params!, sessionId, options);
-        if (method === "elicitation/create") return this.elicitation(params!, sessionId, options);
-        throw new Error(`Unsupported ACP client request: ${method}`);
-    }
-
-    private async permission(params: Record<string, unknown>, sessionId: string, options: InteractionCallbacks): Promise<unknown> {
-        const tool = object(params.toolCall);
-        const toolCallId = string(tool?.toolCallId);
-        if (!toolCallId) throw new Error("ACP permission has no toolCallId");
-        const choices = Array.isArray(params.options) ? params.options.flatMap((raw) => {
-            const choice = object(raw);
-            const optionId = string(choice?.optionId);
-            return optionId ? [{ optionId, name: string(choice?.name) ?? optionId }] : [];
-        }) : [];
-        const id = interactionId();
-        const abort = new AbortController();
-        const request: PermissionRequest = {
-            interactionId: id, sessionId, toolCallId, title: string(tool?.title) ?? "Tool",
-            input: tool?.rawInput, options: choices, signal: abort.signal,
-        };
-        this.begin(id, { kind: "permission", sessionId, toolCallId, title: request.title, options: choices });
-        let decision: "allow_once" | "reject_once" = "reject_once";
-        try {
-            const result = await this.awaitDecision(id, options.onPermissionRequest?.(request), abort);
-            if (result === "allow_once" && choices.some((choice) => choice.optionId === "allow_once")) decision = result;
-        } catch { /* An unanswered or failed callback never grants a tool permission. */ }
-        finally {
-            this.cancellations.delete(id);
-            if (!this.isPending(id)) decision = "reject_once";
-            this.converge(id, "resolved", decision);
-        }
-        return { outcome: { outcome: "selected", optionId: decision } };
-    }
-
-    private async elicitation(params: Record<string, unknown>, sessionId: string, options: InteractionCallbacks): Promise<unknown> {
-        const schema = object(params.requestedSchema);
-        const id = interactionId();
-        const abort = new AbortController();
-        const request: ElicitationRequest = {
-            interactionId: id, sessionId, message: string(params.message) ?? "",
-            requestedSchema: schema ?? {}, signal: abort.signal,
-        };
-        const form = evaluateElicitationForm(schema);
-        this.begin(id, { kind: "elicitation", sessionId, message: request.message, fields: form.fields,
-            ...(form.supported ? {} : { formSupport: "unsupported", formReason: form.reason }) });
-        let decision: ElicitationDecision = { action: "decline" };
-        try {
-            // 不支持的表单没有可作答的界面：不调用回调，直接按拒绝结算（不挂起、不误发 accept）。
-            const result = form.supported ? await this.awaitDecision(id, options.onElicitation?.(request), abort) : undefined;
-            const content = result?.action === "accept" ? object(result.content) : null;
-            if (form.supported && content && validateElicitationContent(form.fields, content)) decision = { action: "accept", content };
-            else if (result?.action === "cancel" || result?.action === "decline") decision = { action: result.action };
-            // 其余情况（含不支持表单的 accept）保持默认拒绝，不误发接受。
-        } catch { /* A failed callback declines the form without exposing its content. */ }
-        finally {
-            this.cancellations.delete(id);
-            if (!this.isPending(id)) decision = { action: "decline" };
-            this.converge(id, "resolved", decision.action);
-        }
-        return decision;
-    }
-
-    abortAll(): void {
-        const pending = this.pendingIds();
-        if (!pending.length && this.cancellations.size === 0) return;
-        for (const cancel of [...this.cancellations.values()]) cancel();
-        this.cancellations.clear();
-        this.docs.transactBoth(() => {
-            for (const id of pending) this.converge(id, "expired");
-        });
-    }
-
-    private awaitDecision<T>(id: string, value: T | Promise<T> | undefined, controller: AbortController): Promise<T | undefined> {
-        return Promise.race([
-            Promise.resolve(value),
-            new Promise<undefined>((resolve) => this.cancellations.set(id, () => {
-                controller.abort();
-                resolve(undefined);
-            })),
-        ]);
-    }
-
-    private pendingIds(): string[] {
-        const ids: string[] = [];
-        for (const [id, record] of this.docs.interactions()) {
-            if (record.get("status") === "pending") ids.push(id);
-        }
-        return ids;
-    }
-
-    private isPending(id: string): boolean {
-        return this.docs.interactions().get(id)?.get("status") === "pending";
-    }
-
-    private begin(id: string, pending: Record<string, unknown>): void {
+    /** 幂等接纳一条待决交互；相同 id 的迟到重复不覆盖已写入的记录。 */
+    begin(input: InteractionDisplayRecord): boolean {
+        const kind = input.kind;
+        if (!input.id || (kind !== "permission" && kind !== "elicitation")) return false;
+        if (this.docs.interactions().has(input.id)) return false;
         this.docs.transactBoth(() => {
             const record = new Y.Map<unknown>();
-            record.set("id", id);
-            record.set("kind", pending.kind);
-            record.set("sessionId", pending.sessionId);
+            record.set("id", input.id);
+            record.set("kind", kind);
+            record.set("sessionId", input.sessionId);
             record.set("status", "pending");
             record.set("createdAt", this.docs.now());
             record.set("resolvedAt", null);
-            for (const key of ["toolCallId", "title", "message", "formSupport", "formReason"] as const) {
-                if (typeof pending[key] === "string") record.set(key, pending[key]);
+            const turnId = input.turnId ?? string(this.docs.info().get("activeTurnId"));
+            if (turnId) record.set("turnId", turnId);
+            for (const key of ["toolCallId", "title", "message", "variant", "formSupport", "formReason"] as const) {
+                const value = input[key];
+                if (typeof value === "string" && value) record.set(key, value);
             }
-            if (Array.isArray(pending.options)) record.set("options", pending.options);
-            if (Array.isArray(pending.fields)) record.set("fields", pending.fields);
-            const turnId = string(this.docs.info().get("activeTurnId"));
+            if (kind === "permission") {
+                if (input.options?.length) {
+                    record.set("options", input.options.map((option) => ({ optionId: option.optionId, name: option.name })));
+                }
+            } else if (input.variant === "ask_user") {
+                if (input.questions?.length) record.set("questions", displayQuestions(input.questions));
+            } else if (input.fields?.length) {
+                record.set("fields", input.fields.map((field) => ({ ...field, ...(field.enum ? { enum: [...field.enum] } : {}) })));
+            }
+            this.docs.interactions().set(input.id, record);
             if (turnId) {
-                record.set("turnId", turnId);
                 const turn = this.docs.turns().get(turnId);
-                if (turn) turn.set("interactionStatus", pending.kind === "permission" ? "awaiting_permission" : "awaiting_input");
+                if (turn) turn.set("interactionStatus", kind === "permission" ? "awaiting_permission" : "awaiting_input");
             }
-            this.docs.interactions().set(id, record);
-            if (pending.kind === "permission") {
-                const tool = this.docs.tools().get(String(pending.toolCallId));
+            if (kind === "permission" && input.toolCallId) {
+                const tool = this.docs.tools().get(input.toolCallId);
                 if (tool) {
-                    tool.set("permissionId", id);
+                    tool.set("permissionId", input.id);
                     if (tool.get("status") === "running") tool.set("status", "pending");
                 }
             }
         });
+        return true;
     }
 
     /** 终态只能从 pending 进入一次；迟到的回答不会重新激活已失效的 interaction。 */
-    private converge(id: string, status: Exclude<InteractionStatus, "pending">, outcome?: string): void {
-        const map = this.docs.interactions();
-        const record = map.get(id);
-        if (!record || record.get("status") !== "pending") return;
-        record.set("status", status);
-        record.set("resolvedAt", this.docs.now());
-        if (outcome) record.set("outcome", outcome);
-        const turnId = string(record.get("turnId"));
-        if (turnId) this.refreshTurnInteractionStatus(turnId);
-        const toolCallId = string(record.get("toolCallId"));
-        if (record.get("kind") === "permission" && toolCallId) {
-            const tool = this.docs.tools().get(toolCallId);
-            if (tool?.get("status") === "pending") tool.set("status", "running");
-        }
-        this.prune(map);
+    settle(id: string, status: Exclude<InteractionStatus, "pending">, outcome?: string): boolean {
+        const record = this.docs.interactions().get(id);
+        if (!record || record.get("status") !== "pending") return false;
+        this.docs.transactBoth(() => {
+            record.set("status", status);
+            record.set("resolvedAt", this.docs.now());
+            if (outcome) record.set("outcome", outcome);
+            const turnId = string(record.get("turnId"));
+            if (turnId) {
+                const turn = this.docs.turns().get(turnId);
+                if (turn) turn.set("interactionStatus", turnInteractionStatusFor(this.docs.interactions(), turnId));
+            }
+            const toolCallId = string(record.get("toolCallId"));
+            if (record.get("kind") === "permission" && toolCallId) {
+                const tool = this.docs.tools().get(toolCallId);
+                if (tool?.get("status") === "pending") tool.set("status", "running");
+            }
+            this.prune();
+        });
+        return true;
     }
 
-    private refreshTurnInteractionStatus(turnId: string): void {
-        const turn = this.docs.turns().get(turnId);
-        if (turn) turn.set("interactionStatus", turnInteractionStatusFor(this.docs.interactions(), turnId));
+    /** 运行侧关闭/abort 时发出；不回答、不批准，只把展示状态收敛为 expired。 */
+    expireAll(): boolean {
+        const pending = [...this.docs.interactions().entries()]
+            .filter(([, record]) => record.get("status") === "pending")
+            .map(([id]) => id);
+        if (!pending.length) return false;
+        this.docs.transactBoth(() => {
+            for (const id of pending) {
+                const record = this.docs.interactions().get(id)!;
+                record.set("status", "expired");
+                record.set("resolvedAt", this.docs.now());
+                const turnId = string(record.get("turnId"));
+                if (turnId) {
+                    const turn = this.docs.turns().get(turnId);
+                    if (turn) turn.set("interactionStatus", turnInteractionStatusFor(this.docs.interactions(), turnId));
+                }
+            }
+            this.prune();
+        });
+        return true;
     }
 
     /** pending 记录永不回收；超出上限时按 resolvedAt 从最旧的终态记录开始删除。 */
-    private prune(map: Y.Map<Y.Map<unknown>>): void {
+    private prune(): void {
+        const map = this.docs.interactions();
         if (map.size <= INTERACTION_HISTORY_LIMIT) return;
         const terminal = [...map.entries()]
             .filter(([, record]) => record.get("status") !== "pending")

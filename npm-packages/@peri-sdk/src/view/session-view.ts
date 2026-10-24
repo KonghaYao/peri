@@ -72,6 +72,14 @@ export type InteractionFieldView = {
     required: boolean;
     enum?: Array<string | number | boolean>;
 };
+/** `InteractionQuestion` 的镜像；供浏览器卡片直接渲染。 */
+export type InteractionQuestionView = {
+    id: string;
+    header: string;
+    question: string;
+    multiSelect: boolean;
+    options: Array<{ value: string; label: string; description?: string }>;
+};
 export type InteractionView = {
     id: string;
     kind: "permission" | "elicitation";
@@ -85,8 +93,12 @@ export type InteractionView = {
     title?: string;
     message?: string;
     formUnsupported?: string;
+    /** AskUserQuestion 兼容形态；普通 permission/elicitation 不设置。 */
+    variant?: "ask_user";
     options?: Array<{ optionId: string; name: string }>;
     fields?: InteractionFieldView[];
+    /** 仅 `variant === "ask_user"`；旧文档只有 `fields` 时按文本表单渲染。 */
+    questions?: InteractionQuestionView[];
 };
 export type InputQueueView = {
     generation: string;
@@ -118,6 +130,9 @@ export type SessionViewReadiness = "not-ready" | "ready" | "unsupported";
 export type SessionView = {
     readiness: SessionViewReadiness;
     schemaVersions: { chat: number | null; session: number | null };
+    /** 当前绑定身份；副本尚无绑定事实时为 null。 */
+    sessionId: string | null;
+    bindingRevision: number | null;
     entries: EntryView[];
     toolCalls: ToolView[];
     turns: TurnView[];
@@ -132,6 +147,12 @@ export type SessionView = {
     interactions: InteractionView[];
     pendingInteractions: InteractionView[];
     inputQueue: InputQueueView | null;
+    /** 运行侧最近一次上报的运行状态；不代表可执行资格。 */
+    running: boolean;
+    executionBlocked: boolean;
+    /** 会话已关闭；断线/TTL 不是停止证明。 */
+    closed: boolean;
+    closedReason: PublicError | null;
 };
 
 function map(value: unknown): Y.Map<unknown> | null { return value instanceof Y.Map ? value : null; }
@@ -298,6 +319,27 @@ function taskView(value: unknown): TaskView | null {
     return result;
 }
 
+function interactionQuestionView(value: unknown): InteractionQuestionView | null {
+    const row = obj(value);
+    const id = str(row?.id);
+    const header = str(row?.header);
+    const question = str(row?.question);
+    if (!row || !id || !header || !question || typeof row.multiSelect !== "boolean") return null;
+    return {
+        id, header, question, multiSelect: row.multiSelect,
+        options: list(row.options, (value) => {
+            const option = obj(value);
+            const optionValue = str(option?.value);
+            if (!optionValue) return null;
+            const description = str(option?.description);
+            return {
+                value: optionValue, label: str(option?.label) ?? optionValue,
+                ...(description === null ? {} : { description }),
+            };
+        }),
+    };
+}
+
 function interactionView(value: unknown): InteractionView | null {
     const record = map(value);
     const id = str(record?.get("id"));
@@ -316,6 +358,7 @@ function interactionView(value: unknown): InteractionView | null {
         if (field) result[key] = field;
     }
     if (record.get("formSupport") === "unsupported") result.formUnsupported = str(record.get("formReason")) ?? "unsupported_form";
+    if (record.get("variant") === "ask_user") result.variant = "ask_user";
     if (kind === "permission") result.options = list(record.get("options"), (value) => {
         const row = obj(value); const optionId = str(row?.optionId);
         return optionId ? { optionId, name: str(row?.name) ?? optionId } : null;
@@ -332,6 +375,10 @@ function interactionView(value: unknown): InteractionView | null {
             required: row?.required === true, ...(options?.length ? { enum: options } : {}),
         };
     });
+    // 旧 ask_user 文档只有 fields：保留文本表单；新文档的结构化问题单独读取，二者不互相冒充。
+    if (kind === "elicitation" && result.variant === "ask_user" && record.has("questions")) {
+        result.questions = list(record.get("questions"), interactionQuestionView);
+    }
     return result;
 }
 
@@ -372,8 +419,8 @@ function sessionInfo(value: Y.Map<unknown> | null): SessionInfoView {
 }
 
 /** One read-only, transport-neutral view over a pair of Y.Doc replicas. */
-export function readSessionView(chat: Y.Doc, session: Y.Doc): SessionView {
-    return readView(chat, session, new ReadCache());
+export function readSessionView(chat: Y.Doc, session: Y.Doc, cache: ReadCache = new ReadCache()): SessionView {
+    return readView(chat, session, cache);
 }
 
 function readView(chat: Y.Doc, session: Y.Doc, cache: ReadCache): SessionView {
@@ -388,10 +435,12 @@ function readView(chat: Y.Doc, session: Y.Doc, cache: ReadCache): SessionView {
         : schemaVersions.chat === CHAT_SCHEMA_VERSION && schemaVersions.session === SESSION_SCHEMA_VERSION ? "ready"
         : "unsupported";
     const empty: SessionView = {
-        readiness, schemaVersions, entries: [], toolCalls: [], turns: [],
+        readiness, schemaVersions, sessionId: null, bindingRevision: null,
+        entries: [], toolCalls: [], turns: [],
         activeTurn: { turnId: null, status: null }, activeTurnId: null, activeTurnStatus: null,
         session: {}, tasks: [], plan: [], plansByTurn: {},
         interactions: [], pendingInteractions: [], inputQueue: null,
+        running: false, executionBlocked: false, closed: false, closedReason: null,
     };
     // 不支持或未完成的文档对不得伪装成空历史：调用方必须按 readiness 分支。
     if (readiness !== "ready") return empty;
@@ -429,6 +478,8 @@ function readView(chat: Y.Doc, session: Y.Doc, cache: ReadCache): SessionView {
     return {
         readiness,
         schemaVersions,
+        sessionId: str(info?.get("sessionId")),
+        bindingRevision: num(info?.get("bindingRevision")),
         entries: cache.read(chatRoot, () => list(chatRoot?.get("entryOrder"), (id) => entryView(entries?.get(String(id)), tools, cache))),
         toolCalls: cache.read(tools, () => tools
             ? Array.from(tools.values()).flatMap((item) => { const parsed = toolView(item, cache); return parsed ? [parsed] : []; })
@@ -445,6 +496,10 @@ function readView(chat: Y.Doc, session: Y.Doc, cache: ReadCache): SessionView {
         interactions: interactionViews,
         pendingInteractions,
         inputQueue: inputQueueView(info?.get("inputQueue")),
+        running: info?.get("running") === true,
+        executionBlocked: info?.get("executionBlocked") === true,
+        closed: info?.get("closed") === true,
+        closedReason: publicErrorView(info?.get("closedReason")),
     };
 }
 
@@ -467,66 +522,4 @@ export function selectPlanForTurn(view: SessionView, turnId: string): PlanEntryV
 /** 纯查询：未决交互（派生视图，不新增缓存）。 */
 export function selectPendingInteractions(view: SessionView): InteractionView[] {
     return view.pendingInteractions;
-}
-
-/** A framework-neutral external store; one microtask coalesces updates to both documents. */
-export class SessionViewStore {
-    private listeners = new Set<() => void>();
-    private snapshot: SessionView;
-    private generation = 0;
-    private pending = false;
-    private closed = false;
-    private cache = new ReadCache();
-    private readonly onTransaction = (transaction: Y.Transaction) => {
-        if (!transaction.changed.size) return;
-        // Replacing a root collection also replaces reference targets beneath that collection.
-        if ([...transaction.changed.keys()].some((type) => type.parent === null)) this.cache = new ReadCache();
-        else this.cache.invalidate(transaction);
-        this.schedule();
-    };
-
-    constructor(private chat: Y.Doc, private session: Y.Doc) {
-        this.snapshot = readView(chat, session, this.cache);
-        this.attach();
-    }
-
-    getSnapshot(): SessionView { return this.snapshot; }
-    subscribe(listener: () => void): () => void {
-        if (this.closed) return () => {};
-        this.listeners.add(listener);
-        return () => this.listeners.delete(listener);
-    }
-    replaceDocs(chat: Y.Doc, session: Y.Doc): void {
-        if (this.closed) return;
-        this.detach();
-        this.generation++;
-        this.pending = false;
-        this.chat = chat;
-        this.session = session;
-        this.cache = new ReadCache();
-        this.snapshot = readView(chat, session, this.cache);
-        this.attach();
-        this.emit();
-    }
-    destroy(): void {
-        if (this.closed) return;
-        this.closed = true;
-        this.generation++;
-        this.detach();
-        this.listeners.clear();
-    }
-    private attach(): void { this.chat.on("afterTransaction", this.onTransaction); this.session.on("afterTransaction", this.onTransaction); }
-    private detach(): void { this.chat.off("afterTransaction", this.onTransaction); this.session.off("afterTransaction", this.onTransaction); }
-    private emit(): void { for (const listener of this.listeners) listener(); }
-    private schedule(): void {
-        if (this.pending || this.closed) return;
-        this.pending = true;
-        const generation = this.generation;
-        queueMicrotask(() => {
-            if (this.closed || generation !== this.generation) return;
-            this.pending = false;
-            this.snapshot = readView(this.chat, this.session, this.cache);
-            this.emit();
-        });
-    }
 }

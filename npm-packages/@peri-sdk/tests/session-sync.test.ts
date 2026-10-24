@@ -1,14 +1,14 @@
 import { expect, test } from "bun:test";
 import * as Y from "yjs";
-import { SessionDocs } from "../src/state/session-docs";
-import { readSessionView, SessionViewStore } from "../src/view/session-view";
+import { ChatDocument } from "../src/view/chat-document";
+import { readSessionView } from "../src/view/session-view";
 import { SessionDocSync, SessionDocReplica, SyncBackpressureError, type DocUpdate } from "../src/sync/index";
 
 const update = (kind: string, fields: Record<string, unknown>) => ({ jsonrpc: "2.0" as const, method: "session/update",
     params: { sessionId: "s1", update: { sessionUpdate: kind, ...fields } } });
 
-test("bounded binary batches preserve Unicode streaming, tool payload refs, and the terminal tail", async () => {
-    const docs = new SessionDocs();
+test("bounded binary batches preserve Unicode streaming, normalized tool results, and the terminal tail", async () => {
+    const docs = new ChatDocument();
     const sync = new SessionDocSync(docs.chat, docs.session, { maxBatchBytes: 8192, maxBatchUpdates: 32 });
     const replica = new SessionDocReplica();
     const frames: DocUpdate[] = [];
@@ -17,7 +17,7 @@ test("bounded binary batches preserve Unicode streaming, tool payload refs, and 
     docs.accept(update("user_message_chunk", { content: { text: "go" } }));
     const pieces = Array.from({ length: 1000 }, (_, index) => `片段 ${index} 🌙\n`);
     for (const text of pieces) docs.accept(update("agent_message_chunk", { content: { text } }));
-    docs.accept(update("tool_call", { toolCallId: "large", status: "completed", rawOutput: "x".repeat(100_000) }));
+    docs.accept(update("tool_call", { toolCallId: "large", status: "completed", result: { contentText: "done" } }));
     docs.completeTurn();
     await sync.close();
     const view = readSessionView(replica.chat, replica.session);
@@ -27,7 +27,7 @@ test("bounded binary batches preserve Unicode streaming, tool payload refs, and 
     const card = view.entries[1]?.blocks[1];
     expect(card?.type).toBe("tool_call");
     if (card?.type !== "tool_call") throw new Error("Missing tool card");
-    expect(JSON.parse(docs.readPayload(card.tool!.resultRef!.id)!)).toEqual({ rawOutput: "x".repeat(100_000) });
+    expect(card?.tool?.result).toEqual({ contentText: "done" });
     expect(frames.length).toBeLessThan(50);
     expect(frames.every((frame) => (frame.chat?.byteLength ?? 0) + (frame.session?.byteLength ?? 0) < 8192)).toBe(true);
     expect(() => sync.subscribe(() => {})).toThrow("closed");
@@ -86,22 +86,20 @@ test("Yjs V2 updates converge when a binary transport reorders and duplicates ba
     unsubscribe(); await sync.close(); copy.destroy(); chat.destroy(); session.destroy();
 });
 
-test("replacing a producer generation requires a fresh pair and detaches an existing view store", async () => {
-    const first = new SessionDocs(); first.acceptDeliveredUserInput("one", "first");
+test("replacing a producer generation requires a fresh pair and rebuilds the read view", async () => {
+    const first = new ChatDocument(); first.acceptDeliveredUserInput("one", "first");
     const firstSync = new SessionDocSync(first.chat, first.session);
     const replica = new SessionDocReplica();
     replica.applySnapshot(firstSync.subscribe(() => {}).snapshot);
-    const store = new SessionViewStore(replica.chat, replica.session);
     const oldChat = replica.chat;
-    const next = new SessionDocs(); next.acceptDeliveredUserInput("two", "second");
+    const next = new ChatDocument(); next.acceptDeliveredUserInput("two", "second");
     const nextSync = new SessionDocSync(next.chat, next.session);
-    const connection = nextSync.subscribe((frame) => replica.applyUpdate(frame), { resume: replica.stateVector() });
+    const connection = nextSync.subscribe((frame) => { replica.applyUpdate(frame); }, { resume: replica.stateVector() });
     expect(connection.snapshot.mode).toBe("snapshot");
     replica.applySnapshot(connection.snapshot);
-    store.replaceDocs(replica.chat, replica.session);
     expect(replica.chat).not.toBe(oldChat);
-    expect(store.getSnapshot().entries[0]?.blocks[0]).toMatchObject({ text: "second" });
-    store.destroy(); connection.unsubscribe(); await firstSync.close(); await nextSync.close();
+    expect(readSessionView(replica.chat, replica.session).entries[0]?.blocks[0]).toMatchObject({ text: "second" });
+    connection.unsubscribe(); await firstSync.close(); await nextSync.close();
     replica.destroy(); first.destroy(); next.destroy();
 });
 

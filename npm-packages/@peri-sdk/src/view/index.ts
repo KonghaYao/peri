@@ -1,5 +1,10 @@
 export * as Y from "yjs";
-export { readSessionView, SessionViewStore, selectEntry, selectToolCall, selectTurn, selectPlanForTurn, selectPendingInteractions } from "./session-view";
+export { readSessionView, selectEntry, selectToolCall, selectTurn, selectPlanForTurn, selectPendingInteractions } from "./session-view";
+export { ChatView } from "./chat-view";
+export { ChatReplica } from "./chat-replica";
+export type { ChatViewOptions, ChatViewSync } from "./chat-view";
+export type { ChatReplicaStatus, ChatReplicaConnection } from "./chat-replica";
+export type { ChatYjsChannel } from "./channel";
 export {
     readPayload, limitPayloadReads, PayloadReadError,
     VIEW_PAYLOAD_MAX_BYTES, VIEW_PAYLOAD_MAX_CONCURRENCY,

@@ -1,5 +1,15 @@
 export type RecordValue = Record<string, unknown>;
-export type SnapshotBlock = { type: "text" | "reasoning"; text: string } | { type: "tool"; id: string; name: string; arguments?: unknown };
+export type SnapshotToolRef = { id: string; bytes: number; preview: string };
+export type SnapshotBlock = { type: "text" | "reasoning"; text: string }
+    | {
+        type: "tool";
+        id: string;
+        name: string;
+        arguments?: unknown;
+        argumentsRef?: SnapshotToolRef;
+        /** 参数超出会话载荷预算，未写内联值；由投影映射为公开 tool error。 */
+        argumentsError?: "payload_too_large";
+    };
 export type SnapshotMessage = {
     id: string;
     role: "user" | "assistant" | "tool";
@@ -27,6 +37,19 @@ export function toolContentText(raw: unknown): string | null {
         if (block?.type === "text" && typeof block.text === "string") parts.push(block.text);
     }
     return parts.length ? parts.join("\n") : null;
+}
+
+/** Normalized external payload reference supplied by the runtime. */
+function snapshotToolRef(raw: unknown): SnapshotToolRef | null {
+    const ref = object(raw);
+    const id = string(ref?.id);
+    return ref && id && typeof ref.bytes === "number" && Number.isFinite(ref.bytes) && typeof ref.preview === "string"
+        ? { id, bytes: ref.bytes, preview: ref.preview } : null;
+}
+
+/** Only the frozen budget-error marker is admitted; other runtime text stays out of the document. */
+function snapshotArgumentsError(raw: unknown): "payload_too_large" | undefined {
+    return raw === "payload_too_large" ? raw : undefined;
 }
 
 /** BaseMessage content is a string or a list of standard content blocks. */
@@ -64,8 +87,12 @@ export function decodeMessagesJson(raw: unknown): SnapshotMessage[] | null {
                     blocks.push({ type: block.type, text: block.text });
                 } else if (block.type === "tool_use") {
                     const callId = string(block.id);
+                    const ref = snapshotToolRef(block.argumentsRef);
+                    const argsError = snapshotArgumentsError(block.argumentsError);
                     if (callId) blocks.push({ type: "tool", id: callId, name: string(block.name) ?? "Tool",
-                        ...(block.input !== undefined ? { arguments: block.input } : {}) });
+                        ...(block.input !== undefined ? { arguments: block.input } : {}),
+                        ...(ref ? { argumentsRef: ref } : {}),
+                        ...(argsError ? { argumentsError: argsError } : {}) });
                 }
             }
         } else return null;
@@ -76,8 +103,12 @@ export function decodeMessagesJson(raw: unknown): SnapshotMessage[] | null {
                 const callId = string(call?.id);
                 if (callId && !toolIds.has(callId)) {
                     toolIds.add(callId);
+                    const ref = snapshotToolRef(call?.argumentsRef);
+                    const argsError = snapshotArgumentsError(call?.argumentsError);
                     blocks.push({ type: "tool", id: callId, name: string(call?.name) ?? "Tool",
-                        ...(call?.arguments !== undefined ? { arguments: call.arguments } : {}) });
+                        ...(call?.arguments !== undefined ? { arguments: call.arguments } : {}),
+                        ...(ref ? { argumentsRef: ref } : {}),
+                        ...(argsError ? { argumentsError: argsError } : {}) });
                 }
             }
         }

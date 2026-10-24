@@ -1,6 +1,20 @@
 import * as Y from "yjs";
-import { DocModel } from "./doc-model";
-import { object, string, toolContentText, type RecordValue } from "./protocol";
+import { DocModel, publicError } from "./doc-model";
+import { object, string, type RecordValue } from "./protocol";
+
+type PayloadRef = { id: string; bytes: number; preview: string };
+function jsonCopy(value: unknown): unknown {
+    const json = JSON.stringify(value);
+    if (json === undefined) throw new TypeError("Tool payload must be JSON serializable");
+    return JSON.parse(json);
+}
+function payloadRef(value: unknown): PayloadRef | null {
+    const record = object(value);
+    const id = string(record?.id);
+    return record && id && typeof record.bytes === "number" && Number.isFinite(record.bytes)
+        && typeof record.preview === "string"
+        ? { id, bytes: record.bytes, preview: record.preview } : null;
+}
 
 /**
  * 历史投影（初始回放与 cursor 历史页共用）到 Chat 文档的幂等合并。
@@ -330,15 +344,34 @@ export class HistoryMerge {
             tool.set("status", status);
             changed = true;
         }
-        if (update.rawInput !== undefined) { this.docs.payloads.set(tool, "arguments", update.rawInput); changed = true; }
+        // 运行侧归一化时拒绝的字段不写入；用公开容量错误告知界面，旧版本保持可读。
+        const rejected = object(update._meta)?.periPayloadTooLarge;
+        if (Array.isArray(rejected) && rejected.length > 0) {
+            tool.set("error", publicError("payload_too_large"));
+            changed = true;
+        }
+        // 运行侧已归一化载荷：inline JSON 或外置引用，二者不并存。
+        const argumentsRef = payloadRef(update.argumentsRef);
+        if (argumentsRef) {
+            tool.set("argumentsRef", argumentsRef);
+            if (tool.has("arguments")) tool.delete("arguments");
+            changed = true;
+        } else if (update.arguments !== undefined) {
+            tool.set("arguments", jsonCopy(update.arguments));
+            if (tool.has("argumentsRef")) tool.delete("argumentsRef");
+            changed = true;
+        }
         if (TERMINAL_TOOL_STATUSES.has(status)) {
-            const contentText = toolContentText(update.content);
-            const result: RecordValue = {};
-            if (contentText !== null) result.contentText = status === "error" && !contentText.trim()
-                ? "Tool execution failed" : contentText;
-            else if (status === "error") result.contentText = "Tool execution failed";
-            if (update.rawOutput !== undefined) result.rawOutput = update.rawOutput;
-            if (Object.keys(result).length) { this.docs.payloads.set(tool, "result", result); changed = true; }
+            const resultRef = payloadRef(update.resultRef);
+            if (resultRef) {
+                tool.set("resultRef", resultRef);
+                if (tool.has("result")) tool.delete("result");
+                changed = true;
+            } else if (update.result !== undefined) {
+                tool.set("result", jsonCopy(update.result));
+                if (tool.has("resultRef")) tool.delete("resultRef");
+                changed = true;
+            }
         }
         const blockId = `tool:${id}`;
         const blocks = target.get("blocks") as Y.Map<Y.Map<unknown>>;

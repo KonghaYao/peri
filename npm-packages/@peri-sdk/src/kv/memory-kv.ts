@@ -1,7 +1,7 @@
-import type { AtomicManagedAgentKv } from "./types";
+import type { AtomicSessionClaimKv } from "./types";
 
-/** Atomic claims within one process. Claims are lost when the process exits. */
-export class MemoryKV implements AtomicManagedAgentKv {
+/** 单进程原子 claim；进程退出后 claim 丢失，不能当作持久所有权。 */
+export class MemoryKV implements AtomicSessionClaimKv {
   private readonly owners = new Map<string, string>();
 
   async claimIfAbsent(key: string, owner: string): Promise<boolean> {

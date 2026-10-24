@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import * as Y from "yjs";
-import { SessionDocs } from "../src/state/session-docs";
+import { ChatDocument } from "../src/view/chat-document";
 import type { JsonRpcNotification } from "../src/transport/types";
 
 // These envelopes follow the serialization in peri-acp/src/session/event_sink.rs
@@ -23,16 +23,16 @@ function update(sessionUpdate: string, fields: Record<string, unknown>): JsonRpc
   };
 }
 
-function session(docs: SessionDocs): Y.Map<unknown> {
+function session(docs: ChatDocument): Y.Map<unknown> {
   return docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
 }
 
-function task(docs: SessionDocs, id: string): Y.Map<unknown> | undefined {
+function task(docs: ChatDocument, id: string): Y.Map<unknown> | undefined {
   const tasks = docs.session.getMap<unknown>("root").get("tasks") as Y.Map<Y.Map<unknown>>;
   return tasks.get(id);
 }
 
-function assistant(docs: SessionDocs): Y.Map<unknown> {
+function assistant(docs: ChatDocument): Y.Map<unknown> {
   const root = docs.chat.getMap<unknown>("root");
   const order = root.get("entryOrder") as Y.Array<string>;
   const entries = root.get("entries") as Y.Map<Y.Map<unknown>>;
@@ -41,7 +41,7 @@ function assistant(docs: SessionDocs): Y.Map<unknown> {
 
 describe("Peri ACP wire aggregation", () => {
   test("background snapshot restores tasks and a later snapshot repairs a revision gap", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(unstable("bg-task-snapshot", {
       revision: 10,
       tasks: [
@@ -68,7 +68,7 @@ describe("Peri ACP wire aggregation", () => {
   });
 
   test("background start uses the wire summary, and completion keeps its identity", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(unstable("bg-task-started", {
       task_id: "workflow-1", kind: "workflow", summary: "Publish docs", started_at: "2026-10-04T00:00:00Z", revision: 1,
     }));
@@ -81,7 +81,7 @@ describe("Peri ACP wire aggregation", () => {
   });
 
   test("queue snapshots and delivery follow the current generation", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(agentEvent("user_input_queue_changed", { snapshot: {
       sessionId: "s1", generation: "generation-1", revision: 3, activeRequestId: "request-1",
       items: [{ inputId: "input-1", content: "Run tests", originalDraft: "Run tests", state: "claimed" }],
@@ -103,7 +103,7 @@ describe("Peri ACP wire aggregation", () => {
   });
 
   test("agent execution failure marks the active turn before done arrives", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(update("user_message_chunk", { content: { type: "text", text: "Run tests" } }));
     docs.accept(agentEvent("agent_execution_failed", { message: "private provider diagnostic" }));
     expect(session(docs).get("activeTurnStatus")).toBe("error");
@@ -112,7 +112,7 @@ describe("Peri ACP wire aggregation", () => {
   });
 
   test("plan preserves ACP activeForm and usage preserves token metadata", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(update("user_message_chunk", { content: { type: "text", text: "Implement it" } }));
     docs.accept(update("plan", { entries: [
       { content: "Run checks", priority: "medium", status: "in_progress", _meta: { activeForm: "Running checks" } },
@@ -135,7 +135,7 @@ describe("Peri ACP wire aggregation", () => {
   });
 
   test("configuration state follows load response and live config option updates", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.seedConfig({
       modes: { currentModeId: "default", availableModes: [{ id: "default", name: "Default" }] },
       configOptions: [{ id: "model", name: "Model", type: "select", category: "model", currentValue: "fast", options: [{ value: "fast", name: "Fast" }] }],
@@ -149,7 +149,7 @@ describe("Peri ACP wire aggregation", () => {
   });
 
   test("plans retain the turn that produced them", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(update("user_message_chunk", { content: { type: "text", text: "First" } }));
     docs.accept(update("plan", { entries: [{ content: "Build", status: "in_progress" }] }));
     const firstTurn = session(docs).get("activeTurnId") as string;
@@ -161,7 +161,7 @@ describe("Peri ACP wire aggregation", () => {
   });
 
   test("available command input hint follows the ACP object shape", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept(update("available_commands_update", { availableCommands: [
       { name: "review", description: "Review code", input: { hint: "path" } },
     ] }));

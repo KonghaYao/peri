@@ -7,8 +7,8 @@ import { object, string } from "./protocol";
 import type { ToolPayloadRef } from "./tool-payloads";
 import { turnInteractionStatusFor } from "./interaction-projection";
 
-/** checkpoint 自身形状的版本；与 chat/session 文档 schema 分开管理。 */
-export const CHECKPOINT_VERSION = 1;
+/** checkpoint 自身形状的版本；与 chat/session 文档 schema 分开管理。v2 起只承载展示材料，不含载荷全文。 */
+export const CHECKPOINT_VERSION = 2;
 export const SUPPORTED_SCHEMA_VERSIONS = { chat: CHAT_SCHEMA_VERSION, session: SESSION_SCHEMA_VERSION } as const;
 
 export type CheckpointBlock =
@@ -89,11 +89,10 @@ export type DisplayCheckpoint = {
     plansByTurn: Record<string, unknown>;
     interactions: CheckpointInteraction[];
     inputQueue?: unknown;
-    payloadValues: Array<{ id: string; json: string }>;
 };
 
 export type CheckpointImportErrorCode =
-    | "unsupported_version" | "unsupported_schema" | "invalid_shape" | "missing_payload" | "broken_reference";
+    | "unsupported_version" | "unsupported_schema" | "invalid_shape" | "broken_reference";
 
 export class CheckpointImportError extends Error {
     constructor(readonly code: CheckpointImportErrorCode, message: string) {
@@ -105,9 +104,7 @@ export class CheckpointImportError extends Error {
 const SESSION_INFO_STRINGS = ["title", "model", "mode", "updatedAt", "compactionStatus", "suspendedTurnId"] as const;
 const SESSION_INFO_JSON = ["modeState", "modelState", "goal", "stateSnapshotMeta", "compaction", "configOptions", "availableCommands", "plan"] as const;
 const TASK_TERMINAL = new Set(["completed", "failed", "cancelled"]);
-const encoder = new TextEncoder();
 
-function bytesOf(json: string): number { return encoder.encode(json).byteLength; }
 function plain(value: unknown): unknown {
     if (value instanceof Y.AbstractType) return plain(value.toJSON());
     if (Array.isArray(value)) return value.map(plain);
@@ -153,6 +150,16 @@ export function exportCheckpoint(model: DocModel): DisplayCheckpoint {
     }
     const rewind = info.get("rewindRevision");
     if (typeof rewind === "number" && Number.isFinite(rewind)) session.rewindRevision = rewind;
+    const sessionId = string(info.get("sessionId"));
+    if (sessionId) session.sessionId = sessionId;
+    const bindingRevision = info.get("bindingRevision");
+    if (typeof bindingRevision === "number" && Number.isFinite(bindingRevision)) session.bindingRevision = bindingRevision;
+    for (const key of ["running", "executionBlocked"] as const) {
+        if (typeof info.get(key) === "boolean") session[key] = info.get(key);
+    }
+    if (info.get("closed") === true) session.closed = true;
+    const closedReason = publicErrorOf(info.get("closedReason"));
+    if (closedReason) session.closedReason = closedReason;
 
     const entries: CheckpointEntry[] = [];
     for (const id of (model.chatRoot().get("entryOrder") as Y.Array<string>).toArray()) {
@@ -277,7 +284,6 @@ export function exportCheckpoint(model: DocModel): DisplayCheckpoint {
         tasks,
         plansByTurn,
         interactions,
-        payloadValues: model.payloads.snapshot().map(({ id, json }) => ({ id, json })),
     };
     const queue = info.get("inputQueue");
     if (queue !== undefined) checkpoint.inputQueue = plain(queue);
@@ -333,29 +339,14 @@ export function applyCheckpoint(raw: unknown, model: DocModel): void {
     const turnsRaw = listOf(checkpoint.turns, "turns");
     const tasksRaw = listOf(checkpoint.tasks, "tasks");
     const interactionsRaw = listOf(checkpoint.interactions, "interactions");
-    const payloadValuesRaw = listOf(checkpoint.payloadValues, "payloadValues");
 
-    // 1. payload 索引：存活 checkpoint 的每个引用都必须可解析。
-    const values = new Map<string, { bytes: number; json: string }>();
-    for (const item of payloadValuesRaw) {
-        const value = object(item) ?? fail("invalid_shape", "payloadValues 条目必须是对象");
-        const id = string(value.id) ?? fail("invalid_shape", "payloadValues 缺少 id");
-        if (typeof value.json !== "string") fail("invalid_shape", `payloadValues ${id} 缺少 json 文本`);
-        values.set(id, { bytes: bytesOf(value.json as string), json: value.json as string });
-    }
-    const resolveRef = (rawRef: unknown, label: string): ToolPayloadRef => {
-        const ref = refOf(rawRef) ?? fail("broken_reference", `${label} 的载荷引用形状非法`);
-        const value = values.get(ref.id);
-        if (!value) fail("missing_payload", `${label} 引用的载荷 ${ref.id} 不在 payloadValues 中`);
-        if (value!.bytes !== ref.bytes) fail("broken_reference", `${label} 载荷 ${ref.id} 字节数与引用不符`);
-        model.payloads.restoreExternal(ref.id, value!.json, ref.bytes);
-        return ref;
-    };
-    const restoreInline = (tool: Y.Map<unknown>, field: "arguments" | "result", value: unknown, label: string): void => {
+    // 1. 展示 checkpoint 只恢复引用形状；载荷全文由运行侧 PayloadStore 持有，不进入副本。
+    const resolveRef = (rawRef: unknown, label: string): ToolPayloadRef =>
+        refOf(rawRef) ?? fail("broken_reference", `${label} 的载荷引用形状非法`);
+    const inlineJson = (value: unknown, label: string): unknown => {
         const json = JSON.stringify(value);
         if (json === undefined) fail("invalid_shape", `${label} 不是合法 JSON`);
-        model.payloads.restoreInline(bytesOf(json as string));
-        tool.set(field, JSON.parse(json as string));
+        return JSON.parse(json as string);
     };
 
     // 2. 工具先于 Entry：tool_call 块要能引用已存在的工具身份。
@@ -377,9 +368,9 @@ export function applyCheckpoint(raw: unknown, model: DocModel): void {
             if (entryId) tool.set("entryId", entryId);
             const permissionId = string(rawTool.permissionId);
             if (permissionId) tool.set("permissionId", permissionId);
-            if (rawTool.arguments !== undefined) restoreInline(tool, "arguments", rawTool.arguments, `${label} arguments`);
+            if (rawTool.arguments !== undefined) tool.set("arguments", inlineJson(rawTool.arguments, `${label} arguments`));
             else if (rawTool.argumentsRef !== undefined) tool.set("argumentsRef", resolveRef(rawTool.argumentsRef, `${label} arguments`));
-            if (rawTool.result !== undefined) restoreInline(tool, "result", rawTool.result, `${label} result`);
+            if (rawTool.result !== undefined) tool.set("result", inlineJson(rawTool.result, `${label} result`));
             else if (rawTool.resultRef !== undefined) tool.set("resultRef", resolveRef(rawTool.resultRef, `${label} result`));
         }
 
@@ -441,6 +432,18 @@ export function applyCheckpoint(raw: unknown, model: DocModel): void {
         }
         const rewind = sessionInfo.rewindRevision;
         if (typeof rewind === "number" && Number.isFinite(rewind)) info.set("rewindRevision", rewind);
+        const sessionId = string(sessionInfo.sessionId);
+        if (sessionId) info.set("sessionId", sessionId);
+        const bindingRevision = sessionInfo.bindingRevision;
+        if (typeof bindingRevision === "number" && Number.isFinite(bindingRevision)) info.set("bindingRevision", bindingRevision);
+        // 恢复的副本没有可观察的执行：running 收敛为 false，由运行侧下一条事实刷新。
+        info.set("running", false);
+        info.set("executionBlocked", false);
+        if (sessionInfo.closed === true) info.set("closed", true);
+        else info.delete("closed");
+        const closedReason = publicErrorOf(sessionInfo.closedReason);
+        if (closedReason) info.set("closedReason", closedReason);
+        else info.delete("closedReason");
         const queue = plain(checkpoint.inputQueue);
         if (queue !== undefined && queue !== null) info.set("inputQueue", queue);
         if (checkpoint.legacyIncomplete === true) info.set("legacyIncomplete", true);

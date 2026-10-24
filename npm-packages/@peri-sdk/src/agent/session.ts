@@ -1,165 +1,182 @@
-import type { Agent } from "./agent";
-import { SendReceipt } from "./send-receipt";
 import type { JsonRpcNotification, Transport } from "../transport/types";
-import type { SessionDocs } from "../state/session-docs";
-import { historyGenerationOf } from "../state/history-merge";
 import { EventQueue } from "../transport/event-queue";
+import { raceAbort, throwIfAborted } from "../util/abort";
 import { initializeAcpClient } from "./acp-handshake";
 import { closeDrainBudget, closeUntilSettled, type CloseOptions } from "./session-close";
 
-/** 一页历史的合并结果（`applied` = 本次真正并进视图的条目数）。 */
-export type HistoryPageOutcome = { applied: number; nextCursor: string | null };
-
-/** 翻页不可用的原因：能力未协商、没有更早内容，或浏览窗口已被 rewind／新 load 作废。 */
-export type HistoryPageUnavailableReason = "not_negotiated" | "exhausted" | "invalidated";
-
-/** `session/load` + cursor 无法发起（没有可用游标）。 */
-export class HistoryPageUnavailableError extends Error {
-    constructor(readonly reason: HistoryPageUnavailableReason, message: string) {
-        super(message);
-        this.name = "HistoryPageUnavailableError";
-    }
-}
-
-/** 迟到的历史页：会话已切换／已关闭，或浏览快照已变——整页丢弃，不得污染当前视图。 */
-export class StaleHistoryPageError extends Error {
-    constructor(readonly reason: "session" | "window", message: string) {
-        super(message);
-        this.name = "StaleHistoryPageError";
-    }
-}
-
-/** `session/input/*` 的队列身份、条目状态与回执；执行调度归 Rust Agent mailbox。 */
-type QueueSnapshot = {
-    generation: string;
-    revision?: number;
-    activeRequestId?: string;
-    items?: Array<{ inputId: string; state: string }>;
-};
-type QueueReceipt = {
-    results: Array<{ inputId: string; state: string }>;
-    snapshot?: QueueSnapshot;
-};
-type SessionState = "declared" | "starting" | "active" | "cleanup-pending" | "closed";
-type PendingDelivery = {
-    resolve: () => void;
-    reject: (error: Error) => void;
-};
-
-/** 一次 `session/new` 或 `session/load` 得到的会话身份。 */
-type SessionSetup = { modes?: unknown; configOptions?: unknown[]; sessionId?: string };
-
 /**
- * 单个 Session 的 ACP 客户端。传输由嵌入方注入（WASM Host 或自定义 transport），
- * SDK 只按 ACP 方法语义驱动：输入队列、取消通知、显式关闭与会话文档投影。
+ * 单个 Session 的纯 ACP 客户端。
+ *
+ * 传输由调用方注入（WASM 宿主租约或自定义 transport）；本类只做 `initialize`、
+ * `session/new|load`、输入队列命令、取消、翻页请求、`session/close` 与原始诊断流。
+ * 它不 claim、不关闭宿主、不做 Yjs 投影，也不依赖 Agent/展示门面。
  */
+
+/** 启动阶段；供上层映射为 SessionCreationError 的 `stage`。 */
+export type SessionStartStage =
+    | "initialize" | "mcp-connect" | "session/new" | "claim"
+    | "session/load" | "input-snapshot";
+
+/** `session/new|load` 后的会话身份、初始化材料与队列快照。 */
+export type SessionStartResult = {
+    sessionId: string;
+    path: string;
+    generation: string;
+    /** 原始 `session/new|load` 响应；供上层输出 seed config。 */
+    seed: unknown;
+    /** 本次 load 代次的回放通知，响应成功后一次性交付。 */
+    historyBatch: JsonRpcNotification[];
+    history: { snapshotToken: string | null; nextCursor: string | null };
+    /** `session/input/snapshot` 响应。 */
+    queueSnapshot: unknown;
+    /** 未协商分页的旧式回放需要在安装后收口 turn。 */
+    replayTurnPending: boolean;
+};
+
+export class SessionStartError extends Error {
+    constructor(
+        readonly stage: SessionStartStage,
+        readonly createdSessionId: string | null,
+        message: string,
+        options?: { cause?: unknown },
+    ) {
+        super(message, options);
+        this.name = "SessionStartError";
+    }
+}
+
+export type SessionStartRequest = {
+    path: string;
+    /** `null`/省略 = `session/new`；字符串 = `session/load`。 */
+    sessionId?: string | null;
+    instructions?: string;
+    mcpServers?: unknown;
+};
+
+/** 启动控制：取消只中止可安全脱离的等待，`session/new` 保留创建身份。 */
+export type SessionStartOptions = {
+    signal?: AbortSignal;
+    /** `session/new` 返回后、后续阶段前回调；用于先登记索引与 claim。 */
+    onSessionCreated?: (sessionId: string) => void | Promise<void>;
+};
+
+export interface SessionClientOptions {
+    /** 反向 ACP 请求（`mcp/message`、权限、elicitation）；由宿主装配路由。 */
+    requestHandler: (method: string, params: unknown) => unknown | Promise<unknown>;
+    /** 过滤/暂存后的状态通知；初始化事实发布后由 `beginLive()` 放行。 */
+    onNotification?: (notification: JsonRpcNotification) => void;
+    /** `session/input/*` 回执携带的队列快照。 */
+    onQueueSnapshot?: (snapshot: unknown) => void;
+    /** 用户输入已投递（文本为本地登记的内容；外部输入可能为空）。 */
+    onDelivered?: (inputId: string, text: string) => void;
+    /** initialize 之后、`session/new|load` 之前（MCP 反向通道就绪）。 */
+    onBeforeSession?: () => Promise<void>;
+}
+
+type SessionState = "declared" | "starting" | "active" | "cleanup-pending" | "closed";
+type PendingDelivery = { promise: Promise<void>; resolve: () => void; reject: (error: Error) => void };
+type QueueSnapshot = { generation?: unknown };
+type QueueReceipt = { results?: Array<{ inputId?: string; state?: string }>; snapshot?: unknown };
+
+const STATE_EVENTS = new Set([
+    "session/update", "peri/agent_event", "peri/agent_event_done", "peri/unstable_event",
+]);
+const RAW_EVENTS = new Set(["session/update", "peri/agent_event"]);
+const REPLAY_KINDS = new Set([
+    "user_message_chunk", "agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update",
+]);
+/** 启动期间暂存 live 通知的上限；超出显式记录，不无限增长。 */
+const MAX_DEFERRED_LIVE = 4096;
+
+function record(value: unknown): Record<string, unknown> | null {
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : null;
+}
+
+function nonEmpty(value: unknown): string | null {
+    return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/** 回放通知的 load 代次（`_meta.periLoadGeneration`）。 */
+function loadGenerationOf(notification: { params?: unknown }): string | null {
+    const params = record(notification.params);
+    if (!params) return null;
+    const updateMeta = record(record(params.update)?._meta);
+    const paramsMeta = record(params._meta);
+    return nonEmpty(updateMeta?.periLoadGeneration) ?? nonEmpty(paramsMeta?.periLoadGeneration);
+}
+
+function decodeAgentEvent(raw: unknown): { type: string; value: Record<string, unknown> } | null {
+    if (typeof raw !== "string") return null;
+    let parsed: unknown;
+    try { parsed = JSON.parse(raw); } catch { return null; }
+    const event = record(parsed);
+    const type = nonEmpty(event?.type);
+    const value = record(event?.value);
+    return type && value ? { type, value } : null;
+}
+
 export class Session {
     private state: SessionState = "declared";
-    private transport?: Transport;
+    private readonly transport: Transport;
     private sessionId?: string;
+    private createdSessionId?: string;
+    private requestedSessionId?: string;
     private currentPath?: string;
-    private generation?: string;
-    private startPromise?: Promise<Session>;
+    private queueGeneration?: string;
     private closing?: Promise<void>;
     private startupCleanupPromise?: Promise<void>;
+    private loadGeneration?: string;
+    private replayInstalled = false;
+    private replayTurnPending = false;
+    private readonly stagedReplay: JsonRpcNotification[] = [];
+    private readonly deferredLive: JsonRpcNotification[] = [];
+    private live = false;
     private notifications = new EventQueue(() => {});
     private unsubscribe?: () => void;
     private streamOpen = false;
     private streamEnded = false;
     private readonly pendingDeliveries = new Map<string, PendingDelivery>();
     private readonly pendingInputText = new Map<string, string>();
-    /** 相同 cursor + 相同 limit 的并发翻页合并为一次请求（REQ-C01-2、验收 A08）。 */
-    private readonly pendingPages = new Map<string, Promise<HistoryPageOutcome>>();
+    private readonly deliveredInputs = new Set<string>();
 
-    constructor(private readonly agent: Agent) {}
+    constructor(transport: Transport, private readonly options: SessionClientOptions) {
+        this.transport = transport;
+        transport.setRequestHandler((method, params) => options.requestHandler(method, params));
+    }
 
     get id(): string {
         if (!this.sessionId) throw new Error("Session has not started");
         return this.sessionId;
     }
 
-    get docs(): SessionDocs {
-        return this.agent.docs;
-    }
-
+    /** 已建立的会话身份（启动失败但 `session/new` 已返回时也保留，供清理）。 */
+    get establishedSessionId(): string | null { return this.sessionId ?? null; }
     get path(): string | undefined { return this.currentPath; }
+    get generation(): string | undefined { return this.queueGeneration; }
+    get isActive(): boolean { return this.state === "active" && !this.closing; }
     get isClosed(): boolean { return this.state === "closed"; }
 
-    start(requestedSessionId: string | null): Promise<Session> {
-        if (this.closing || this.startupCleanupPromise)
-            throw new Error("Session cannot start while closing");
+    start(request: SessionStartRequest, options: SessionStartOptions = {}): Promise<SessionStartResult> {
         if (this.state !== "declared")
             throw new Error(`Session cannot start from ${this.state}`);
-        if (requestedSessionId === "")
-            return Promise.reject(new TypeError("Session id must be nonempty or null"));
+        if (!request.path) throw new TypeError("Session path is required");
+        if (request.sessionId === "")
+            throw new TypeError("Session id must be nonempty or null");
         this.state = "starting";
-        this.startPromise = this.startOnce(requestedSessionId);
-        return this.startPromise;
+        this.requestedSessionId = request.sessionId ?? undefined;
+        this.currentPath = request.path;
+        return this.startOnce(request, options);
     }
 
-    private async startOnce(requestedSessionId: string | null): Promise<Session> {
-        const claims = this.agent.claims;
-        let transport: Transport | undefined;
+    private async startOnce(request: SessionStartRequest, control: SessionStartOptions): Promise<SessionStartResult> {
+        let stage: SessionStartStage = "initialize";
+        const signal = control.signal;
+        this.unsubscribe = this.transport.subscribe((event) => this.receive(event));
         try {
-            await claims.claimAgent();
-            if (requestedSessionId !== null) await claims.claimSession(requestedSessionId);
-            const path = requestedSessionId === null
-                ? this.agent.path
-                : (await this.agent.options.sandbox.getSession(requestedSessionId))?.cwd;
-            if (!path) throw new Error(requestedSessionId === null
-                ? "Agent path is required for a new Session"
-                : `Session not found: ${requestedSessionId}`);
-            transport = await this.agent.options.sandbox.createTransport(path);
-            this.transport = transport;
-            transport.setRequestHandler((method, params) => method === "mcp/message"
-                ? this.agent.mcpBridge.handle(params)
-                : this.docs.handleRequest(method, params, this.sessionId, this.agent.options));
-            let replayTurnPending = false;
-            // 初始 load 的代次（REQ-H04、验收 A22）：订阅在本请求**之前**建立，所以
-            // 回放通知一条都不会漏；本代次的通知先暂存，响应成功后才一次安装。
-            const loadGeneration = requestedSessionId === null
-                ? undefined
-                : this.agent.beginLoadGeneration(crypto.randomUUID());
-            const stagedReplay: JsonRpcNotification[] = [];
-            let replayInstalled = false;
-            this.unsubscribe = transport.subscribe((event) => {
-                const rawEvent = event.method === "session/update" || event.method === "peri/agent_event";
-                const stateEvent = rawEvent ||
-                    event.method === "peri/agent_event_done" ||
-                    event.method === "peri/unstable_event";
-                if (!stateEvent) return;
-                if (this.sessionId && (event.params as { sessionId?: string } | undefined)?.sessionId !== this.sessionId) return;
-                const generation = historyGenerationOf(event);
-                if (generation !== null) {
-                    // 历史回放：非本代次（迟到 / 被取代）直接丢弃；本代次在响应前只暂存。
-                    if (generation !== loadGeneration || !this.agent.isCurrentLoadGeneration(generation)) return;
-                    // 暂存只约束**文档安装**：原始诊断流不是投影，连接收到什么就流什么，
-                    // 首屏回放同样不得缺席（否则 README/examples 的原始事件流会缺首屏）。
-                    if (rawEvent) {
-                        this.acceptDeliveryEvent(event);
-                        this.notifications.push(event);
-                    }
-                    // 响应已把整批回放一次安装：之后同代次再来的回放通知是重复投递。
-                    // 回放路径没有子项下标，重复投影只会把同一段内容复制成两个块，这里整条丢弃。
-                    if (replayInstalled) return;
-                    stagedReplay.push(event);
-                    return;
-                }
-                if (event.method === "session/update") {
-                    const update = (event.params as { update?: { sessionUpdate?: string; _meta?: { periReplay?: boolean } } } | undefined)?.update;
-                    if (update?.sessionUpdate === "user_message_chunk" || update?.sessionUpdate === "agent_message_chunk" ||
-                        update?.sessionUpdate === "agent_thought_chunk" || update?.sessionUpdate === "tool_call" ||
-                        update?.sessionUpdate === "tool_call_update")
-                        replayTurnPending = update._meta?.periReplay === true;
-                } else if (event.method === "peri/agent_event_done") {
-                    replayTurnPending = false;
-                }
-                this.project(event);
-                if (!rawEvent) return;
-                this.acceptDeliveryEvent(event);
-                this.notifications.push(event);
-            });
-            await initializeAcpClient(transport, {
+            throwIfAborted(signal, "ACP initialize");
+            await raceAbort(initializeAcpClient(this.transport, {
                 capabilities: {
                     "peri.userInputQueue": true,
                     "peri.agentEvent": true,
@@ -169,176 +186,199 @@ export class Session {
                     "peri.tokenStats": true,
                     "peri.planEntryActiveForm": true,
                     "peri.unstableEvent": true,
-                    // REQ-C01 / REQ §5.3：分页走协商通道。少声明一项就等于放弃该通道——
-                    // 服务端对未协商的连接拒绝带 cursor 的 session/load，且初始回放不带
-                    // 条目位置戳（periEntryId / periPosition），客户端无法做区间合并。
                     "peri.historyPagination": true,
                 },
-            });
-            const params = { cwd: path, mcpServers: this.agent.mcpServers() };
-            // 声明里的 acp server 必须在 session/new|load 前接上反向 mcp/message 通道。
-            await this.agent.mcpBridge.connect();
-            let id: string;
-            if (requestedSessionId === null) {
-                const created = await transport.request<SessionSetup>("session/new", {
+            }), signal, "ACP initialize");
+            stage = "mcp-connect";
+            await raceAbort(
+                Promise.resolve().then(() => this.options.onBeforeSession?.()),
+                signal,
+                "MCP bridge connect",
+            );
+            const params = { cwd: request.path, mcpServers: request.mcpServers ?? [] };
+            let seed: unknown;
+            let historyBatch: JsonRpcNotification[] = [];
+            let history: SessionStartResult["history"] = { snapshotToken: null, nextCursor: null };
+            let replayTurnPending = false;
+            if (request.sessionId === null || request.sessionId === undefined) {
+                stage = "session/new";
+                // `session/new` 可能已经创建会话：不 race，保留 createdSessionId 交给正常清理。
+                const created = await this.transport.request<{ sessionId?: unknown }>("session/new", {
                     ...params,
-                    ...(this.agent.options.instructions
-                        ? { _meta: { "peri.instructions": this.agent.options.instructions } }
+                    ...(request.instructions
+                        ? { _meta: { "peri.instructions": request.instructions } }
                         : {}),
                 });
-                id = created.sessionId ?? "";
+                const id = nonEmpty(created.sessionId);
                 if (!id) throw new Error("Peri returned no sessionId");
-                this.docs.seedConfig(created);
-                await claims.claimSession(id);
+                this.createdSessionId = id;
+                this.sessionId = id;
+                seed = created;
+                stage = "claim";
+                throwIfAborted(signal, "Session claim");
+                await control.onSessionCreated?.(id);
             } else {
-                const loaded = await transport.request<SessionSetup & { _meta?: { periLoadGeneration?: string } }>(
-                    "session/load",
-                    { ...params, sessionId: requestedSessionId, loadGeneration },
-                );
-                // 响应必须属于本次代次：被新 load 取代后，这一份既不能安装也不能宣称就绪。
-                const echoed = loaded._meta?.periLoadGeneration;
-                if (loadGeneration && echoed !== undefined && echoed !== loadGeneration)
+                stage = "session/load";
+                const generation = crypto.randomUUID();
+                this.loadGeneration = generation;
+                const loaded = await raceAbort(this.transport.request<{
+                    _meta?: { periLoadGeneration?: unknown };
+                }>("session/load", {
+                    ...params,
+                    sessionId: request.sessionId,
+                    loadGeneration: generation,
+                }), signal, "session/load");
+                const echoed = nonEmpty(record(loaded._meta)?.periLoadGeneration);
+                if (echoed !== null && echoed !== generation)
                     throw new Error("session/load response belongs to a superseded load generation");
-                if (loadGeneration && !this.agent.isCurrentLoadGeneration(loadGeneration))
-                    throw new Error("session/load was superseded by a newer load generation");
-                // 回放完整后**一次安装**：整批一个 Yjs 事务，之后才发布窗口身份与游标。
-                if (stagedReplay.length) this.docs.acceptHistoryBatch(stagedReplay);
-                replayInstalled = true;
-                stagedReplay.length = 0;
-                this.docs.seedConfig(loaded);
-                this.docs.seedHistoryWindow(loaded);
-                // ACP 在 load 响应前完成历史回放，且没有独立的回放 turn-done 通知。
-                // 只有未带条目身份的回放（未协商分页的连接）才需要收口实时 turn。
-                if (replayTurnPending) this.docs.completeTurn();
-                id = requestedSessionId;
+                this.sessionId = request.sessionId;
+                seed = loaded;
+                historyBatch = [...this.stagedReplay];
+                this.stagedReplay.length = 0;
+                this.replayInstalled = true;
+                const loadedRecord = record(loaded);
+                history = {
+                    snapshotToken: nonEmpty(loadedRecord?.snapshotToken),
+                    nextCursor: nonEmpty(loadedRecord?.nextCursor),
+                };
+                replayTurnPending = this.replayTurnPending;
             }
-            const snapshot = await transport.request<QueueSnapshot>("session/input/snapshot", { sessionId: id });
-            if (!snapshot.generation) throw new Error("Peri returned no input queue generation");
-            this.docs.seedInputQueue(snapshot);
-            this.sessionId = id;
-            this.currentPath = path;
-            this.generation = snapshot.generation;
-            this.docs.setTaskSnapshotRequester(() => this.activeTransport().request("session/bg-tasks", { sessionId: id }));
+            stage = "input-snapshot";
+            throwIfAborted(signal, "session/input/snapshot");
+            const snapshot = await raceAbort(
+                this.transport.request<QueueSnapshot>("session/input/snapshot", {
+                    sessionId: this.id,
+                }),
+                signal,
+                "session/input/snapshot",
+            );
+            const generation = nonEmpty(snapshot.generation);
+            if (!generation) throw new Error("Peri returned no input queue generation");
+            throwIfAborted(signal, "Session startup");
+            this.queueGeneration = generation;
             this.state = "active";
-            return this;
+            return {
+                sessionId: this.id,
+                path: request.path,
+                generation,
+                seed,
+                historyBatch,
+                history,
+                queueSnapshot: snapshot,
+                replayTurnPending,
+            };
         } catch (error) {
-            this.state = "cleanup-pending";
-            this.unsubscribe?.();
-            this.unsubscribe = undefined;
-            await this.notifications.return();
-            this.notifications = new EventQueue(() => {});
-            this.agent.discardFailedSessionDocs();
-            try {
-                await this.releaseResources();
-            } catch (cleanupError) {
-                throw new AggregateError(
-                    [error, cleanupError],
-                    `Session startup failed: ${String(error)}; cleanup failed: ${String(cleanupError)}. Retry cleanupStartup before starting another Session.`,
-                    { cause: error },
-                );
-            }
-            this.state = "declared";
+            await this.failStartup(error, stage);
             throw error;
         }
     }
 
-    /** 通知进投影：失败只记录，不吞掉交付处理与原始 ACP 事件流。 */
-    private project(event: JsonRpcNotification): void {
-        try {
-            this.docs.accept(event);
-        } catch (error) {
-            console.error("Failed to project ACP notification into SessionDocs", error);
-        }
+    private async failStartup(error: unknown, stage: SessionStartStage): Promise<never> {
+        this.state = "cleanup-pending";
+        this.deferredLive.length = 0;
+        this.stagedReplay.length = 0;
+        this.unsubscribe?.();
+        this.unsubscribe = undefined;
+        this.streamEnded = true;
+        this.rejectAllDeliveries(asError(error));
+        await this.notifications.return();
+        if (error instanceof SessionStartError) throw error;
+        throw new SessionStartError(
+            stage,
+            this.createdSessionId ?? null,
+            `Session startup failed during ${stage}: ${errorMessage(error)}`,
+            { cause: error },
+        );
     }
 
-    /** 更早方向是否还有可用游标（翻页入口的前置判断，不发起请求）。 */
-    get canLoadEarlierHistory(): boolean { return this.docs.historyCursor() !== null; }
-
-    /**
-     * 向上读取更早一页历史（REQ-C01、验收 A11/A20/A23/A24）。
-     *
-     * 入口仍是 `session/load`，只带 `{sessionId, cursor, limit}`——cursor 由 SDK 持有并推进，
-     * 调用方只表达「还要更早的一页」。相同 cursor + 相同 limit 的并发调用合并为一次请求；
-     * 失败保留当前画面与运行状态（游标不动），可直接重试。切会话／rewind 之后到达的旧页
-     * 抛 [`StaleHistoryPageError`]，不并入视图。
-     */
-    async loadEarlierHistory(limit?: number): Promise<HistoryPageOutcome> {
-        const transport = this.activeTransport();
-        const sessionId = this.id;
-        const cursor = this.docs.historyCursor();
-        if (!cursor) {
-            // 三种「没有游标」不是一回事：窗口被作废、确实没有更早内容（A15）、本连接未协商。
-            const reason: HistoryPageUnavailableReason = this.docs.historyWindowInvalidated()
-                ? "invalidated"
-                : this.docs.historyWindowOpen() ? "exhausted" : "not_negotiated";
-            throw new HistoryPageUnavailableError(reason, {
-                invalidated: "History window is invalidated; reload the session before paging further",
-                exhausted: "This browsing window has no earlier history left",
-                not_negotiated: "This connection has no history pagination window",
-            }[reason]);
-        }
-        const key = `${cursor}|${limit ?? "default"}`;
-        const inFlight = this.pendingPages.get(key);
-        if (inFlight) return inFlight;
-        const pending = this.fetchHistoryPage(transport, sessionId, cursor, limit);
-        this.pendingPages.set(key, pending);
-        try {
-            return await pending;
-        } finally {
-            if (this.pendingPages.get(key) === pending) this.pendingPages.delete(key);
-        }
+    /** 初始化事实已发布；放行启动期间暂存的 live 通知（保持顺序）。 */
+    beginLive(): void {
+        if (this.live) return;
+        this.live = true;
+        const pending = this.deferredLive.splice(0);
+        for (const event of pending) this.deliverState(event);
     }
 
-    private async fetchHistoryPage(
-        transport: Transport,
-        sessionId: string,
-        cursor: string,
-        limit: number | undefined,
-    ): Promise<HistoryPageOutcome> {
-        // 历史页请求不得携带 setup 参数：分页不重新装配、不改绑定（REQ §5.2）。
-        const response = await transport.request<unknown>("session/load", {
-            sessionId,
+    private receive(event: JsonRpcNotification): void {
+        if (!event || !STATE_EVENTS.has(event.method)) return;
+        const params = record(event.params);
+        const eventSession = nonEmpty(params?.sessionId);
+        const expected = this.sessionId ?? this.requestedSessionId;
+        if (expected && eventSession && eventSession !== expected) return;
+        const generation = loadGenerationOf(event);
+        if (generation !== null) {
+            // 历史回放：非本代次（迟到/被取代）直接丢弃；本代次在响应前只暂存。
+            if (generation !== this.loadGeneration) return;
+            if (RAW_EVENTS.has(event.method)) this.notifications.push(event);
+            // 响应已安装整批回放后，同代次重复回放只影响文档，不进事实。
+            if (this.replayInstalled) return;
+            this.stagedReplay.push(event);
+            return;
+        }
+        if (RAW_EVENTS.has(event.method)) this.notifications.push(event);
+        this.noteReplayTurn(event);
+        this.deliverState(event);
+    }
+
+    private noteReplayTurn(event: JsonRpcNotification): void {
+        if (event.method === "peri/agent_event_done") {
+            this.replayTurnPending = false;
+            return;
+        }
+        if (event.method !== "session/update") return;
+        const update = record(record(event.params)?.update);
+        const replay = record(update?._meta)?.periReplay === true;
+        if (!replay) return;
+        if (REPLAY_KINDS.has(String(update?.sessionUpdate))) this.replayTurnPending = true;
+    }
+
+    private deliverState(event: JsonRpcNotification): void {
+        if (!this.live) {
+            if (this.deferredLive.length >= MAX_DEFERRED_LIVE) {
+                console.error("[peri-sdk] Session live notification overflow during startup");
+                return;
+            }
+            this.deferredLive.push(event);
+            return;
+        }
+        if (event.method === "peri/agent_event") this.acceptDeliveryEvent(event);
+        this.options.onNotification?.(event);
+    }
+
+    private acceptDeliveryEvent(event: JsonRpcNotification): void {
+        if (event.method !== "peri/agent_event") return;
+        const params = record(event.params);
+        const decoded = decodeAgentEvent(params?.event_json);
+        if (!decoded || decoded.type !== "user_input_delivered") return;
+        const inputId = nonEmpty(decoded.value.input_id);
+        if (!inputId) return;
+        const generation = nonEmpty(decoded.value.generation);
+        if (generation && this.queueGeneration && generation !== this.queueGeneration) return;
+        this.confirmDelivery(inputId);
+    }
+
+    /** 当前绑定的队列 generation；翻页请求不得改变它。 */
+    requestHistoryPage(cursor: string, limit: number | undefined): Promise<unknown> {
+        return this.activeTransport().request("session/load", {
+            sessionId: this.id,
             cursor,
             ...(limit === undefined ? {} : { limit }),
         });
-        // 切会话／关闭之后到达的页整页丢弃（REQ-C01-5、验收 A11）。
-        if (this.state !== "active" || this.sessionId !== sessionId)
-            throw new StaleHistoryPageError("session", "History page arrived after the session changed");
-        const merged = this.docs.mergeHistoryPage(sessionId, response);
-        if (merged.status === "stale")
-            throw new StaleHistoryPageError("window", "History page belongs to an expired browsing snapshot");
-        if (merged.status === "malformed")
-            throw new Error("session/load returned a malformed history page");
-        return { applied: merged.applied, nextCursor: merged.nextCursor };
     }
 
-    private async releaseResources(): Promise<void> {
-        // 未决的 MCP 请求必须结算；外部 server 实例的生命周期仍归调用方。
-        this.agent.mcpBridge.abortPending();
-        const transport = this.transport;
-        if (transport) {
-            // 关闭未确认时保留引用，重试必须能再次尝试同一个 transport。
-            await transport.close();
-            if (this.transport === transport) this.transport = undefined;
-        }
-        await this.agent.claims.release();
+    /** 后台任务快照；任务 revision 缺口由运行侧检测后调用。 */
+    requestBackgroundTasks(): Promise<unknown> {
+        return this.activeTransport().request("session/bg-tasks", { sessionId: this.id });
     }
 
     private activeTransport(): Transport {
-        if (this.closing || this.state !== "active" || !this.transport)
+        if (this.closing || this.state !== "active")
             throw new Error("Session is not active");
         return this.transport;
     }
 
     private domainTransport(): Transport {
-        if (!this.transport) throw new Error("Session has no transport");
         return this.transport;
-    }
-
-    send(text: string): SendReceipt {
-        this.activeTransport();
-        if (!text) throw new TypeError("Cannot send empty user input");
-        return new SendReceipt(this, text);
     }
 
     trackInput(inputId: string, text: string): void {
@@ -346,48 +386,56 @@ export class Session {
     }
 
     waitForDelivery(inputId: string): Promise<void> {
-        return new Promise((resolve, reject) => this.pendingDeliveries.set(inputId, { resolve, reject }));
+        if (this.deliveredInputs.delete(inputId)) return Promise.resolve();
+        const existing = this.pendingDeliveries.get(inputId);
+        if (existing) return existing.promise;
+        let resolve!: () => void;
+        let reject!: (error: Error) => void;
+        const promise = new Promise<void>((done, fail) => {
+            resolve = done;
+            reject = fail;
+        });
+        this.pendingDeliveries.set(inputId, { promise, resolve, reject });
+        return promise;
     }
 
     confirmDelivery(inputId: string): void {
         const pending = this.pendingDeliveries.get(inputId);
-        if (!pending) return;
         const text = this.pendingInputText.get(inputId);
-        if (text) this.docs.acceptDeliveredUserInput(inputId, text);
         this.pendingInputText.delete(inputId);
         this.pendingDeliveries.delete(inputId);
-        pending.resolve();
+        // 外部客户端的输入没有本地文本；事实仍要记录投递发生。
+        this.options.onDelivered?.(inputId, text ?? "");
+        if (pending) pending.resolve();
+        else {
+            this.deliveredInputs.add(inputId);
+            while (this.deliveredInputs.size > 1024) {
+                const oldest = this.deliveredInputs.values().next().value;
+                if (oldest === undefined) break;
+                this.deliveredInputs.delete(oldest);
+            }
+        }
     }
 
     rejectDelivery(inputId: string, error: unknown): void {
         this.pendingInputText.delete(inputId);
+        this.deliveredInputs.delete(inputId);
         const pending = this.pendingDeliveries.get(inputId);
         if (!pending) return;
         this.pendingDeliveries.delete(inputId);
-        pending.reject(error instanceof Error ? error : new Error(String(error)));
+        pending.reject(asError(error));
     }
 
-    private acceptDeliveryEvent(event: JsonRpcNotification): void {
-        if (event.method !== "peri/agent_event") return;
-        const eventJson = (event.params as { event_json?: unknown } | undefined)?.event_json;
-        if (typeof eventJson !== "string") return;
-        let parsed: unknown;
-        try { parsed = JSON.parse(eventJson); }
-        catch { return; }
-        if (!parsed || typeof parsed !== "object") return;
-        const payload = parsed as { type?: string; value?: { input_id?: string; generation?: string } };
-        const value = payload.value;
-        if (!value) return;
-        if (payload.type === "user_input_delivered" && value.generation === this.generation &&
-            typeof value.input_id === "string")
-            this.confirmDelivery(value.input_id);
+    private rejectAllDeliveries(error: Error): void {
+        for (const inputId of [...this.pendingDeliveries.keys()]) this.rejectDelivery(inputId, error);
+        this.pendingInputText.clear();
     }
 
     private queueReceiptState(receipt: QueueReceipt, inputId: string): string {
-        const state = receipt.results.find((item) => item.inputId === inputId)?.state;
+        const state = receipt.results?.find((item) => item.inputId === inputId)?.state;
         if (!state || state === "unknown" || state === "withdrawn")
             throw new Error(`Input not accepted: ${state ?? "missing"}`);
-        if (receipt.snapshot) this.docs.seedInputQueue(receipt.snapshot);
+        if (receipt.snapshot !== undefined) this.options.onQueueSnapshot?.(receipt.snapshot);
         return state;
     }
 
@@ -395,7 +443,7 @@ export class Session {
     async enqueue(inputId: string, text: string): Promise<string> {
         const receipt = await this.activeTransport().request<QueueReceipt>("session/input/enqueue", {
             sessionId: this.id,
-            generation: this.generation,
+            generation: this.queueGeneration,
             commandId: `${inputId}:enqueue`,
             inputId,
             content: text,
@@ -407,7 +455,7 @@ export class Session {
     async dispatch(inputId: string): Promise<void> {
         const receipt = await this.activeTransport().request<QueueReceipt>("session/input/dispatch", {
             sessionId: this.id,
-            generation: this.generation,
+            generation: this.queueGeneration,
             commandId: `${inputId}:dispatch`,
             inputIds: [inputId],
         });
@@ -418,12 +466,12 @@ export class Session {
     async takeBack(inputId: string): Promise<void> {
         const receipt = await this.activeTransport().request<QueueReceipt>("session/input/takeback", {
             sessionId: this.id,
-            generation: this.generation,
+            generation: this.queueGeneration,
             commandId: `${inputId}:takeback`,
             inputId,
         });
-        const state = receipt.results.find((item) => item.inputId === inputId)?.state;
-        if (receipt.snapshot) this.docs.seedInputQueue(receipt.snapshot);
+        const state = receipt.results?.find((item) => item.inputId === inputId)?.state;
+        if (receipt.snapshot !== undefined) this.options.onQueueSnapshot?.(receipt.snapshot);
         if (!state || state === "unknown")
             throw new Error(`Input not taken back: ${state ?? "missing"}`);
     }
@@ -433,9 +481,19 @@ export class Session {
         await this.activeTransport().notify("session/cancel", { sessionId: this.id });
     }
 
+    /** 可选标题重命名；失败保留 `createdSessionId` 供上层判定创建阶段。 */
+    async rename(title: string, options: { signal?: AbortSignal } = {}): Promise<void> {
+        throwIfAborted(options.signal, "session/rename");
+        await raceAbort(
+            this.activeTransport().request("session/rename", { sessionId: this.id, title }),
+            options.signal,
+            "session/rename",
+        );
+    }
+
     /** 原始 ACP 通知：session/update 与 peri/agent_event。 */
     async *stream(): AsyncIterable<JsonRpcNotification> {
-        this.activeTransport();
+        if (!this.sessionId && !this.requestedSessionId) throw new Error("Session is not active");
         if (this.streamOpen)
             throw new Error("This Session already has an event consumer");
         this.streamOpen = true;
@@ -444,7 +502,7 @@ export class Session {
                 const next = await this.notifications.next();
                 if (next.done) break;
                 const event = next.value;
-                if (event && (event.params as { sessionId?: string } | undefined)?.sessionId === this.id)
+                if (event && nonEmpty(record(event.params)?.sessionId) === (this.sessionId ?? null))
                     yield event;
             }
         } finally {
@@ -457,6 +515,8 @@ export class Session {
     close(options: CloseOptions = {}): Promise<void> {
         if (this.state === "closed") return Promise.resolve();
         closeDrainBudget(options);
+        if (this.state === "starting")
+            return Promise.reject(new Error("Wait for Session startup to finish before close"));
         if (!this.closing) {
             this.closing = Promise.resolve()
                 .then(() => this.closeOnce(options))
@@ -467,32 +527,48 @@ export class Session {
     }
 
     private async closeOnce(options: CloseOptions): Promise<void> {
-        const transport = this.domainTransport();
-        const sessionId = this.id;
-        await closeUntilSettled(() => transport.request("session/close", { sessionId }), options);
+        const sessionId = this.sessionId;
+        if (!sessionId) return this.finishClosed();
+        // 关闭失败时保留 transport 与订阅，下一次调用重试同一个 session/close。
+        await closeUntilSettled(
+            () => this.domainTransport().request("session/close", { sessionId }),
+            options,
+        );
         this.state = "cleanup-pending";
-        this.docs.setTaskSnapshotRequester(null);
-        await this.releaseResources();
-        this.docs.completeTurn("cancelled");
+        await this.finishClosed();
+    }
+
+    private async finishClosed(): Promise<void> {
         this.unsubscribe?.();
         this.unsubscribe = undefined;
         this.streamEnded = true;
-        for (const inputId of this.pendingDeliveries.keys())
-            this.rejectDelivery(inputId, new Error("Session closed before user input was delivered"));
+        this.deferredLive.length = 0;
+        this.stagedReplay.length = 0;
+        this.rejectAllDeliveries(new Error("Session closed before user input was delivered"));
         await this.notifications.return();
         this.state = "closed";
     }
 
     cleanupStartup(): Promise<void> {
-        if (this.sessionId || this.state === "active" || this.state === "closed")
+        if (this.sessionId)
             throw new Error("Startup cleanup cannot shut down an established Session");
         if (this.state === "starting")
             throw new Error("Wait for Session startup to finish before cleanupStartup");
+        if (this.state === "active" || this.state === "closed")
+            throw new Error(`Startup cleanup cannot run from ${this.state}`);
         if (!this.startupCleanupPromise) {
-            this.startupCleanupPromise = this.releaseResources().then(() => {
-                this.state = "declared";
-            }).finally(() => { this.startupCleanupPromise = undefined; });
+            this.startupCleanupPromise = this.finishClosed().finally(() => {
+                this.startupCleanupPromise = undefined;
+            });
         }
         return this.startupCleanupPromise;
     }
+}
+
+function asError(error: unknown): Error {
+    return error instanceof Error ? error : new Error(String(error));
+}
+
+function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
 }

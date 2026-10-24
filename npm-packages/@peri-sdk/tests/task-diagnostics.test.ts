@@ -1,21 +1,21 @@
 import { expect, test } from "bun:test";
 import * as Y from "yjs";
-import { SessionDocs } from "../src/state/session-docs";
+import { ChatDocument } from "../src/view/chat-document";
 
 const diagnostic = "/Users/fixture/project ~/fixture https://fixture.invalid/api?token=synthetic wss://fixture.invalid password=synthetic Bearer fixture-token";
 
-function tasks(docs: SessionDocs): Y.Map<Y.Map<unknown>> {
+function tasks(docs: ChatDocument): Y.Map<Y.Map<unknown>> {
     return docs.session.getMap("root").get("tasks") as Y.Map<Y.Map<unknown>>;
 }
 
-function background(docs: SessionDocs, name: string, data: Record<string, unknown>): void {
+function background(docs: ChatDocument, name: string, data: Record<string, unknown>): void {
     docs.accept({ jsonrpc: "2.0", method: "peri/unstable_event", params: {
         sessionId: "fixture", event: name, data,
     } });
 }
 
 test("background task diagnostics preserve content in live events and snapshots", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     background(docs, "bg-task-started", { task_id: "task", kind: "shell", summary: diagnostic, revision: 1 });
     expect(tasks(docs).get("task")?.get("summary")).toBe(diagnostic);
     background(docs, "bg-task-snapshot", { revision: 2, tasks: [{ task_id: "task", kind: "shell", status: "running", summary: diagnostic }] });
@@ -23,7 +23,7 @@ test("background task diagnostics preserve content in live events and snapshots"
 });
 
 test("task summaries retain their existing length and whitespace constraints", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     const summary = diagnostic + "x".repeat(600);
     background(docs, "bg-task-started", { task_id: "task", kind: "shell", summary: `  ${summary}  `, revision: 1 });
     expect(tasks(docs).get("task")?.get("summary")).toBe(summary.slice(0, 500));
@@ -31,7 +31,7 @@ test("task summaries retain their existing length and whitespace constraints", (
 });
 
 test("subagent names preserve diagnostic-shaped content within the title budget", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept({ jsonrpc: "2.0", method: "peri/agent_event", params: {
         sessionId: "fixture", event_json: JSON.stringify({ type: "subagent_started", value: {
             instance_id: "sub", agent_name: diagnostic, is_background: true,
