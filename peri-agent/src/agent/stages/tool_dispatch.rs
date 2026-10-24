@@ -208,8 +208,12 @@ pub async fn dispatch_tools(
     //
     // canonical 执行上下文只投影会话事实与端口：transcript 提交、after_tools_batch、
     // 失败计数与事件投影留在本函数（Act 侧）。
-    let invocation_context =
-        InvocationContext::from_stage(ctx, ExecutionEntryOrigin::ModelBatch, cancel.clone());
+    let invocation_context = InvocationContext::from_stage(
+        ctx,
+        ExecutionEntryOrigin::ModelBatch,
+        cancel.clone(),
+        Some(&ai_msg),
+    );
     let mut collect_outcome = collect_tool_results(
         &invocation_context,
         policy_calls,

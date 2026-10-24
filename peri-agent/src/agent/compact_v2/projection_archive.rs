@@ -1,10 +1,83 @@
 //! Archive-aware model projection. Source messages remain immutable.
+use super::render::{project_message_ref, RenderAction};
 use super::*;
+use crate::session::transcript::TranscriptEntry;
 use peri_acp_types::context_archive::{ArchiveCatalog, ArchiveReference, ArchiveRoot};
+use peri_acp_types::system_reminder::ReminderAudience;
 use sha2::{Digest, Sha256};
 
-fn invalid(detail: impl std::fmt::Display) -> crate::error::AgentError {
-    crate::error::AgentError::LlmError(format!("invalid context projection: {detail}"))
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BlockKind {
+    Text,
+    ToolResult,
+    Other,
+}
+
+/// Borrowed classification of `content_blocks()[index]` without cloning the body.
+///
+/// Matches the shared `ContentBlock` deserializer: `Raw` values with missing
+/// required fields deserialize as `Unknown`, not as their nominal type.
+fn block_kind(content: &MessageContent, index: usize) -> Option<BlockKind> {
+    match content {
+        MessageContent::Text(text) => (index == 0 && !text.is_empty()).then_some(BlockKind::Text),
+        MessageContent::Blocks(blocks) => blocks.get(index).map(|block| match block {
+            ContentBlock::Text { .. } => BlockKind::Text,
+            ContentBlock::ToolResult { .. } => BlockKind::ToolResult,
+            _ => BlockKind::Other,
+        }),
+        MessageContent::Raw(values) => {
+            values.get(index).map(|value| match value["type"].as_str() {
+                Some("text") if raw_block_parses(value) => BlockKind::Text,
+                Some("tool_result") if raw_block_parses(value) => BlockKind::ToolResult,
+                _ => BlockKind::Other,
+            })
+        }
+    }
+}
+
+/// Mirrors the shared `ContentBlock` deserializer's success conditions.
+///
+/// A raw block that fails deserialization becomes `ContentBlock::Unknown`; the
+/// pairing index and restore safety checks must not treat it as its nominal type.
+fn raw_block_parses(value: &serde_json::Value) -> bool {
+    match value["type"].as_str() {
+        Some("text") => value["text"].as_str().is_some(),
+        Some("image") => value.get("source").is_some_and(raw_image_source_parses),
+        Some("document") => value.get("source").is_some_and(raw_document_source_parses),
+        Some("tool_use") => value["id"].as_str().is_some() && value["name"].as_str().is_some(),
+        Some("tool_result") => {
+            value["tool_use_id"].as_str().is_some()
+                && value.get("content").is_none_or(|content| {
+                    content
+                        .as_array()
+                        .is_some_and(|items| items.iter().all(raw_block_parses))
+                })
+        }
+        Some("reasoning") => value["text"].as_str().is_some(),
+        // `Unknown` accepts any JSON value, including non-objects.
+        _ => true,
+    }
+}
+
+fn raw_image_source_parses(source: &serde_json::Value) -> bool {
+    match source["type"].as_str() {
+        Some("base64") => {
+            source["media_type"].as_str().is_some() && source["data"].as_str().is_some()
+        }
+        Some("url") => source["url"].as_str().is_some(),
+        _ => false,
+    }
+}
+
+fn raw_document_source_parses(source: &serde_json::Value) -> bool {
+    match source["type"].as_str() {
+        Some("base64") => {
+            source["media_type"].as_str().is_some() && source["data"].as_str().is_some()
+        }
+        Some("url") => source["url"].as_str().is_some(),
+        Some("text") => source["text"].as_str().is_some(),
+        _ => false,
+    }
 }
 
 pub(super) fn safe_action(message: &BaseMessage, entry: &ProjectionActionEntry) -> bool {
@@ -17,18 +90,17 @@ pub(super) fn safe_action(message: &BaseMessage, entry: &ProjectionActionEntry) 
             | ProjectionAction::ResultReceipt { .. },
         ) => matches!(message, BaseMessage::Tool { .. }),
         (ProjectionTarget::ContentBlock { index }, ProjectionAction::CompactToolResult { .. }) => {
-            message.content_blocks().get(*index).is_some_and(|b| {
-                matches!(b, ContentBlock::ToolResult { .. })
-                    || (matches!(message, BaseMessage::Tool { .. })
-                        && *index == 0
-                        && matches!(b, ContentBlock::Text { .. }))
-            })
+            match block_kind(message.message_content(), *index) {
+                Some(BlockKind::ToolResult) => true,
+                Some(BlockKind::Text) => matches!(message, BaseMessage::Tool { .. }) && *index == 0,
+                _ => false,
+            }
         }
         (ProjectionTarget::ContentBlock { index }, ProjectionAction::ResultReceipt { .. }) => {
-            message
-                .content_blocks()
-                .get(*index)
-                .is_some_and(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            matches!(
+                block_kind(message.message_content(), *index),
+                Some(BlockKind::ToolResult)
+            )
         }
         (_, ProjectionAction::OmitToolExchange { .. }) => {
             !matches!(message, BaseMessage::System { .. })
@@ -89,16 +161,28 @@ pub(super) fn render(
         by_id.entry(action.message_id).or_default().push(action);
     }
     validate_groups(transcript, actions, &catalogs)?;
-    let visible = transcript.visible_model_messages()?;
-    let original_pairs = pairs(&visible)?;
+    // Borrowed view: normal entries keep the canonical body; only canonical and
+    // legacy compact reminders allocate an encoded message.
+    let visible = transcript
+        .entries()
+        .iter()
+        .filter(|entry| !transcript.is_excluded(entry.id()))
+        .filter(|entry| entry.visible_to(ReminderAudience::Model))
+        .map(TranscriptEntry::project_message_ref)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut original_pairs = Pairing::default();
+    for message in &visible {
+        original_pairs.add_message(message.as_ref())?;
+    }
     let mut projected = Vec::with_capacity(visible.len());
     let mut omitted_calls = HashSet::new();
     let mut receipts = Vec::new();
     let mut emitted = HashSet::new();
-    for mut message in visible {
+    for borrowed in &visible {
+        let message = borrowed.as_ref();
         let id = message.id();
         let Some(entries) = by_id.get(&id) else {
-            projected.push(message);
+            projected.push(message.clone());
             continue;
         };
         let ordinary: Vec<_> = entries
@@ -119,13 +203,8 @@ pub(super) fn render(
                     .iter()
                     .all(|entry| directive.entries.contains(entry))
         });
-        message = if legacy {
-            legacy_result(message, &ordinary)
-        } else {
-            project_message(message, &ordinary, caps)
-        };
         let mut remove = HashSet::new();
-        let mut drop_message = false;
+        let mut resolved = Vec::new();
         for entry in entries {
             match &entry.action {
                 ProjectionAction::OmitToolExchange {
@@ -145,35 +224,26 @@ pub(super) fn render(
                     keep_head,
                     keep_tail,
                 } => {
-                    peri_acp_types::context_archive::ArchiveReference::decode(archive_ref)
-                        .map_err(invalid)?;
-                    if let BaseMessage::Tool { content, .. } = &mut message {
-                        let action = ProjectionAction::CompactToolResult {
+                    ArchiveReference::decode(archive_ref).map_err(invalid)?;
+                    resolved.push(RenderAction::Preview {
+                        action: ProjectionAction::CompactToolResult {
                             keep_head: *keep_head,
                             keep_tail: *keep_tail,
                             preserve_recovery_handle: false,
-                        };
-                        *content = project_tool_result_content(
-                            std::mem::replace(content, MessageContent::text("")),
-                            &action,
-                        );
-                        append_reference(&mut message, &ProjectionTarget::Message, &format!("\n[Incomplete recovery fragment. Original source: ReadContextArchive archive_ref={archive_ref}]"))?;
-                    } else {
-                        return Err(invalid("archive read preview requires standalone result"));
-                    }
+                        },
+                        suffix: format!("\n[Incomplete recovery fragment. Original source: ReadContextArchive archive_ref={archive_ref}]"),
+                    });
                 }
                 ProjectionAction::ResultReceipt {
                     anchor_message_id,
                     group_id,
                 } => {
                     let catalog = catalog_for(&catalogs, *anchor_message_id, group_id)?;
-                    let body = receipt_text(catalog)?;
-                    replace_result(
-                        &mut message,
-                        &entry.target,
-                        body,
-                        virtual_id(&catalog_reference(catalog)?),
-                    )?;
+                    resolved.push(RenderAction::Receipt {
+                        target: entry.target.clone(),
+                        text: receipt_text(catalog)?,
+                        receipt_id: virtual_id(&catalog_reference(catalog)?),
+                    });
                 }
                 _ => {}
             }
@@ -192,16 +262,18 @@ pub(super) fn render(
             match catalogs.get(&id) {
                 Some(catalog) => {
                     let reference = catalog_reference(catalog)?;
-                    append_reference(&mut message, &entry.target, &format!("\n[Incomplete historical preview. ReadContextArchive archive_ref={reference}]"))?;
+                    resolved.push(RenderAction::Reference {
+                        target: entry.target.clone(),
+                        suffix: format!("\n[Incomplete historical preview. ReadContextArchive archive_ref={reference}]"),
+                    });
                 }
                 None if legacy => {}
                 None => return Err(invalid("preview requires its original archive catalog")),
             }
         }
-        if !remove.is_empty() {
-            drop_message = omit(&mut message, &remove, caps)?;
-        }
-        if !drop_message {
+        if let Some(message) =
+            project_message_ref(message, &ordinary, legacy, &resolved, &remove, caps)?
+        {
             projected.push(message);
         }
     }
@@ -225,7 +297,8 @@ pub(super) fn render(
         projected.extend(receipts);
     }
     projected.extend(root_messages);
-    validate_delta(&original_pairs, &pairs(&projected)?, &omitted_calls)?;
+    let after_pairs = Pairing::from_messages(&projected)?;
+    validate_delta(&original_pairs, &after_pairs, &omitted_calls)?;
     validate_projected_view(&projected, caps)?;
     Ok(projected)
 }
@@ -267,146 +340,6 @@ fn virtual_id(reference: &str) -> MessageId {
     bytes[6] = (bytes[6] & 0x0f) | 0x80;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     MessageId::from(uuid::Uuid::from_bytes(bytes))
-}
-
-fn replace_result(
-    message: &mut BaseMessage,
-    target: &ProjectionTarget,
-    text: String,
-    receipt_id: MessageId,
-) -> AgentResult<()> {
-    match (message, target) {
-        (BaseMessage::Tool { id, content, .. }, ProjectionTarget::Message) => {
-            *id = receipt_id;
-            *content = MessageContent::text(text);
-        }
-        (
-            BaseMessage::Human {
-                content: MessageContent::Blocks(blocks),
-                ..
-            }
-            | BaseMessage::Ai {
-                content: MessageContent::Blocks(blocks),
-                ..
-            },
-            ProjectionTarget::ContentBlock { index },
-        ) => match blocks.get_mut(*index) {
-            Some(ContentBlock::ToolResult { id, content, .. }) => {
-                *id = Some(receipt_id.as_uuid().to_string());
-                *content = vec![ContentBlock::Text { text }];
-            }
-            _ => return Err(invalid("receipt target is not a tool result")),
-        },
-        _ => return Err(invalid("unsupported receipt target")),
-    }
-    Ok(())
-}
-
-fn append_reference(
-    message: &mut BaseMessage,
-    target: &ProjectionTarget,
-    suffix: &str,
-) -> AgentResult<()> {
-    match (message, target) {
-        (
-            BaseMessage::Tool { content, .. },
-            ProjectionTarget::Message | ProjectionTarget::ContentBlock { index: 0 },
-        ) => match content {
-            MessageContent::Text(text) => text.push_str(suffix),
-            MessageContent::Blocks(blocks) => blocks.push(ContentBlock::Text {
-                text: suffix.into(),
-            }),
-            MessageContent::Raw(_) => {
-                return Err(invalid(
-                    "cannot attach recovery handle to unknown raw content",
-                ))
-            }
-        },
-        (
-            BaseMessage::Human {
-                content: MessageContent::Blocks(blocks),
-                ..
-            }
-            | BaseMessage::Ai {
-                content: MessageContent::Blocks(blocks),
-                ..
-            },
-            ProjectionTarget::ContentBlock { index },
-        ) => match blocks.get_mut(*index) {
-            Some(ContentBlock::ToolResult { content, .. }) => content.push(ContentBlock::Text {
-                text: suffix.into(),
-            }),
-            _ => return Err(invalid("recovery handle target is not a tool result")),
-        },
-        _ => return Err(invalid("unsupported recovery handle target")),
-    }
-    Ok(())
-}
-
-fn omit(
-    message: &mut BaseMessage,
-    removed: &HashSet<String>,
-    caps: &ProviderCapabilities,
-) -> AgentResult<bool> {
-    if let BaseMessage::Tool { tool_call_id, .. } = message {
-        return Ok(removed.contains(tool_call_id));
-    }
-    let (content, remaining_calls) = match message {
-        BaseMessage::Ai {
-            content,
-            tool_calls,
-            ..
-        } => {
-            tool_calls.retain(|call| !removed.contains(&call.id));
-            (content, tool_calls.len())
-        }
-        BaseMessage::Human { content, .. } => (content, 0),
-        _ => return Err(invalid("cannot omit system data")),
-    };
-    match content {
-        MessageContent::Blocks(blocks) => {
-            if blocks.iter().any(|b| matches!(b, ContentBlock::Unknown(_))) {
-                return Err(invalid("unknown protocol dependency"));
-            }
-            let signed = blocks.iter().any(|b| {
-                matches!(
-                    b,
-                    ContentBlock::Reasoning {
-                        signature: Some(_),
-                        ..
-                    }
-                )
-            });
-            if signed && (remaining_calls > 0 || caps.protocol == ProviderProtocol::Generic) {
-                return Err(invalid("signed reasoning closure cannot be split"));
-            }
-            blocks.retain(|block| match block {
-                ContentBlock::ToolUse { id, .. } => !removed.contains(id),
-                ContentBlock::ToolResult { tool_use_id, .. } => !removed.contains(tool_use_id),
-                ContentBlock::Reasoning { .. } => remaining_calls > 0,
-                _ => true,
-            });
-        }
-        MessageContent::Raw(blocks) => {
-            if blocks.iter().any(|b| {
-                !matches!(
-                    b["type"].as_str(),
-                    Some("text" | "tool_use" | "tool_result")
-                )
-            }) {
-                return Err(invalid("unrecognized raw protocol dependency"));
-            }
-            blocks.retain(|b| match b["type"].as_str() {
-                Some("tool_use") => !b["id"].as_str().is_some_and(|id| removed.contains(id)),
-                Some("tool_result") => !b["tool_use_id"]
-                    .as_str()
-                    .is_some_and(|id| removed.contains(id)),
-                _ => true,
-            });
-        }
-        MessageContent::Text(_) => {}
-    }
-    Ok(remaining_calls == 0 && content.is_empty())
 }
 
 fn validate_groups(
@@ -456,15 +389,26 @@ fn validate_groups(
     Ok(())
 }
 
+type CallRepr<'a> = (&'a str, &'a serde_json::Value);
+
+/// Tool pairing over borrowed messages: no body or block clone.
 #[derive(Default)]
-struct Pairing {
-    calls: HashMap<String, (String, serde_json::Value)>,
-    results: HashSet<String>,
+struct Pairing<'a> {
+    calls: HashMap<&'a str, CallRepr<'a>>,
+    results: HashSet<&'a str>,
 }
-fn pairs(messages: &[BaseMessage]) -> AgentResult<Pairing> {
-    let mut out = Pairing::default();
-    for message in messages {
-        let mut local = HashMap::new();
+
+impl<'a> Pairing<'a> {
+    fn from_messages(messages: &'a [BaseMessage]) -> AgentResult<Self> {
+        let mut pairing = Self::default();
+        for message in messages {
+            pairing.add_message(message)?;
+        }
+        Ok(pairing)
+    }
+
+    fn add_message(&mut self, message: &'a BaseMessage) -> AgentResult<()> {
+        let mut local: HashMap<&'a str, CallRepr<'a>> = HashMap::new();
         if let BaseMessage::Ai {
             tool_calls,
             content,
@@ -473,90 +417,132 @@ fn pairs(messages: &[BaseMessage]) -> AgentResult<Pairing> {
         {
             for call in tool_calls {
                 if local
-                    .insert(call.id.clone(), (call.name.clone(), call.arguments.clone()))
+                    .insert(call.id.as_str(), (call.name.as_str(), &call.arguments))
                     .is_some()
                 {
                     return Err(invalid("duplicate cached call"));
                 }
             }
-            let mut block_ids = HashSet::new();
-            for block in content.content_blocks() {
-                if let ContentBlock::ToolUse { id, name, input } = block {
-                    if !block_ids.insert(id.clone()) {
-                        return Err(invalid("duplicate content tool use"));
+            match content {
+                MessageContent::Text(_) => {}
+                MessageContent::Blocks(blocks) => {
+                    let mut block_ids = HashSet::new();
+                    for block in blocks {
+                        if let ContentBlock::ToolUse { id, name, input } = block {
+                            if !block_ids.insert(id.as_str()) {
+                                return Err(invalid("duplicate content tool use"));
+                            }
+                            let value = (name.as_str(), input);
+                            if local
+                                .get(id.as_str())
+                                .is_some_and(|cached| *cached != value)
+                            {
+                                return Err(invalid("conflicting tool use representations"));
+                            }
+                            local.insert(id.as_str(), value);
+                        }
                     }
-                    let value = (name, input);
-                    if local.get(&id).is_some_and(|cached| cached != &value) {
-                        return Err(invalid("conflicting tool use representations"));
+                }
+                MessageContent::Raw(values) => {
+                    let mut block_ids = HashSet::new();
+                    for value in values {
+                        if value["type"].as_str() != Some("tool_use") {
+                            continue;
+                        }
+                        // Missing required fields deserialize as Unknown, whose tool
+                        // data is intentionally not trusted by the pairing index.
+                        let (Some(id), Some(name)) = (value["id"].as_str(), value["name"].as_str())
+                        else {
+                            continue;
+                        };
+                        if !block_ids.insert(id) {
+                            return Err(invalid("duplicate content tool use"));
+                        }
+                        let input: &'a serde_json::Value = match value.get("input") {
+                            Some(input) => input,
+                            None => empty_json_object(),
+                        };
+                        let value = (name, input);
+                        if local.get(id).is_some_and(|cached| *cached != value) {
+                            return Err(invalid("conflicting tool use representations"));
+                        }
+                        local.insert(id, value);
                     }
-                    local.insert(id, value);
                 }
             }
         }
         for (id, value) in local {
-            if id.is_empty() || out.calls.insert(id, value).is_some() {
+            if id.is_empty() || self.calls.insert(id, value).is_some() {
                 return Err(invalid("empty or duplicate scoped call id"));
             }
         }
         if let BaseMessage::Tool { tool_call_id, .. } = message {
-            if !out.results.insert(tool_call_id.clone()) {
+            if !self.results.insert(tool_call_id.as_str()) {
                 return Err(invalid("duplicate result"));
             }
         } else {
-            for block in message.content_blocks() {
-                if let ContentBlock::ToolResult { tool_use_id, .. } = block {
-                    if !out.results.insert(tool_use_id) {
-                        return Err(invalid("duplicate inline result"));
+            match message.message_content() {
+                MessageContent::Text(_) => {}
+                MessageContent::Blocks(blocks) => {
+                    for block in blocks {
+                        if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                            if !self.results.insert(tool_use_id.as_str()) {
+                                return Err(invalid("duplicate inline result"));
+                            }
+                        }
+                    }
+                }
+                MessageContent::Raw(values) => {
+                    for value in values {
+                        // Malformed raw results deserialize as Unknown and are not
+                        // part of the pairing index.
+                        if value["type"].as_str() != Some("tool_result") || !raw_block_parses(value)
+                        {
+                            continue;
+                        }
+                        if let Some(tool_use_id) = value["tool_use_id"].as_str() {
+                            if !self.results.insert(tool_use_id) {
+                                return Err(invalid("duplicate inline result"));
+                            }
+                        }
                     }
                 }
             }
         }
+        Ok(())
     }
-    Ok(out)
 }
-fn validate_delta(before: &Pairing, after: &Pairing, removed: &HashSet<String>) -> AgentResult<()> {
+
+fn empty_json_object() -> &'static serde_json::Value {
+    static EMPTY: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(|| serde_json::Value::Object(Default::default()))
+}
+
+fn validate_delta(
+    before: &Pairing<'_>,
+    after: &Pairing<'_>,
+    removed: &HashSet<String>,
+) -> AgentResult<()> {
     for id in removed {
-        if !before.calls.contains_key(id)
-            || !before.results.contains(id)
-            || after.calls.contains_key(id)
-            || after.results.contains(id)
+        if !before.calls.contains_key(id.as_str())
+            || !before.results.contains(id.as_str())
+            || after.calls.contains_key(id.as_str())
+            || after.results.contains(id.as_str())
         {
             return Err(invalid("archive did not remove a complete exchange"));
         }
     }
     for (id, call) in &before.calls {
-        if !removed.contains(id) && after.calls.get(id) != Some(call) {
+        if !removed.contains(*id) && after.calls.get(*id) != Some(call) {
             return Err(invalid("retained tool input changed"));
         }
     }
     for id in &before.results {
-        if !removed.contains(id) && !after.results.contains(id) {
+        if !removed.contains(*id) && !after.results.contains(*id) {
             return Err(invalid("retained result disappeared"));
         }
     }
     Ok(())
-}
-
-// Decode the committed v2 representation exactly; only new gated plans use block-wise previews.
-fn legacy_result(mut message: BaseMessage, entries: &[&ProjectionActionEntry]) -> BaseMessage {
-    if let BaseMessage::Tool {
-        content,
-        is_error: false,
-        ..
-    } = &mut message
-    {
-        if let Some(ProjectionAction::CompactToolResult {
-            keep_head,
-            keep_tail,
-            ..
-        }) = effective_tool_result_action(entries)
-        {
-            if let Some(text) = apply_head_tail(&content.text_content(), *keep_head, *keep_tail) {
-                *content = MessageContent::text(text);
-            }
-        }
-    }
-    message
 }
 
 #[cfg(test)]

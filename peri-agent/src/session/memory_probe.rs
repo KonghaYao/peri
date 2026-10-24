@@ -250,7 +250,7 @@ pub fn payload_bytes(payload: &PersistedPayload) -> ObjectBytes {
     }
 }
 
-fn transcript_entry_bytes(entry: &TranscriptEntry) -> ObjectBytes {
+pub(crate) fn transcript_entry_bytes(entry: &TranscriptEntry) -> ObjectBytes {
     match entry {
         TranscriptEntry::Message(message) => message_bytes(message),
         TranscriptEntry::Reminder { reminder, .. } => reminder_bytes(reminder),

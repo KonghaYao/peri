@@ -227,6 +227,7 @@ fn test_app_config_compact_serde_roundtrip() {
     let compact = peri_acp_types::compact::CompactConfig {
         auto_compact_enabled: false,
         auto_compact_threshold: 0.9,
+        max_resident_history_bytes: 4096,
         ..Default::default()
     };
     let cfg = AppConfig {
@@ -238,6 +239,14 @@ fn test_app_config_compact_serde_roundtrip() {
     let c = back.compact.unwrap();
     assert!(!c.auto_compact_enabled);
     assert!((c.auto_compact_threshold - 0.9).abs() < 0.001);
+    assert_eq!(c.max_resident_history_bytes, 4096);
+
+    // 缺省 compact 字段使用 128 MiB 默认值。
+    let cfg: AppConfig = serde_json::from_str(r#"{"compact": {}}"#).unwrap();
+    assert_eq!(
+        cfg.compact.unwrap().max_resident_history_bytes,
+        128 * 1024 * 1024
+    );
 }
 
 #[test]
