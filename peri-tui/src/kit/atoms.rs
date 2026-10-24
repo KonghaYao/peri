@@ -18,8 +18,6 @@ use peri_acp_types::event_data::{AskUser, HitlPending, OauthNeeded, RewindPrevie
 use ratatui_kit::prelude::{Atom as AtomStatic, AtomState};
 use ratatui_kit::ratatui::layout::Rect;
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Instant;
 use tokio::sync::mpsc::UnboundedSender;
@@ -29,11 +27,9 @@ use crate::app::setup_wizard::SetupWizardState;
 use crate::kit::acp_types::AcpEventWithEpoch;
 use crate::kit::ask_user_action::AskUserResponseAction;
 use crate::kit::hitl_response::HitlResponseAction;
-use crate::kit::image_safety::{ImageMeta, PathGrade};
 use crate::kit::rewind_action::RewindAction;
 use crate::kit::slash_projection::SlashCommandEntry;
 use crate::kit::submit_request::SubmitRequest;
-use image::DynamicImage;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PopupKind {
@@ -222,18 +218,36 @@ pub struct PendingAttachment {
     pub label: String,
     pub media_type: String,
     pub base64_data: String,
+    /// 载荷身份——创建时按 `base64_data` 算一次。
+    ///
+    /// [Why] 图片预览等消费者按「载荷是否变化」决定要不要重做（预览状态机逐帧
+    /// 比较来源身份），比较整块 base64 会把每帧变成 O(载荷)；这里只比较 u64。
+    /// 进程内身份，不跨进程稳定。
+    pub payload_id: u64,
 }
 
 impl PendingAttachment {
     /// 以图片 MIME 与标准 base64 载荷构造待发送附件。
     pub fn image(media_type: impl Into<String>, base64_data: impl Into<String>) -> Self {
         let media_type = media_type.into();
+        let base64_data = base64_data.into();
+        let payload_id = payload_id_of(&base64_data);
         Self {
             label: media_type.clone(),
             media_type,
-            base64_data: base64_data.into(),
+            base64_data,
+            payload_id,
         }
     }
+}
+
+/// 载荷身份：对 base64 文本做一次进程内哈希（粘贴路径已在后台线程完成编码，
+/// 这里的 O(载荷) 不落在 UI 线程的常规路径上）。
+pub fn payload_id_of(base64_data: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    base64_data.hash(&mut hasher);
+    hasher.finish()
 }
 
 impl std::fmt::Debug for PendingAttachment {
@@ -609,28 +623,16 @@ pub(crate) static IMAGE_PREVIEW_HOVER: AtomStatic<
     Option<crate::kit::message_area::ImageHoverState>,
 > = AtomStatic::new(|| None);
 
-/// 图片预览状态机（image-p0-p1-spec §7.3 T7）：写入边界为事件/effect 与后台
-/// 解码线程，渲染 body 只读（TUI-RENDER-001）。默认 `Idle`（无预览）。
-#[derive(Debug, Clone, Default)]
-pub enum ImagePreviewState {
-    #[default]
-    Idle,
-    /// 后台解码中（T5 全链校验已通过；`grade` 为分级结果）。
-    Loading { path: PathBuf, grade: PathGrade },
-    /// 解码完成：像素数据以 `Arc` 共享给 overlay 渲染（同路径重复请求复用）。
-    Ready {
-        path: PathBuf,
-        meta: ImageMeta,
-        img: Arc<DynamicImage>,
-    },
-    /// 手工路径/非受管理目录（§6.1 Q6）：仅文本 meta 行降级，不触发解码。
-    Degraded { path: PathBuf, reason: String },
-    /// 校验/解码失败：固定错误文案（安全降级，reason 仅内部诊断，不含路径）。
-    Error { path: PathBuf, reason: String },
-}
+// 图片预览状态机与来源身份拆至 `kit::image_preview_state`（STD-SIZE-001）；
+// 再导出保持既有 `atoms::{ImagePreviewState, PreviewSource, IMAGE_PREVIEW_STATE}` 路径。
+pub(crate) use crate::kit::image_preview_state::{
+    IMAGE_PREVIEW_STATE, ImagePreviewState, PreviewSource,
+};
 
-pub static IMAGE_PREVIEW_STATE: AtomStatic<ImagePreviewState> =
-    AtomStatic::new(ImagePreviewState::default);
+/// 已提交附件的保留载荷（有界 LRU，见
+/// [`crate::kit::attachment_retention`]）——消息区附件记录行的浮动预览数据源。
+pub static RETAINED_ATTACHMENTS: AtomStatic<crate::kit::attachment_retention::RetainedAttachments> =
+    AtomStatic::new(crate::kit::attachment_retention::RetainedAttachments::default);
 
 /// 输入区快照（§7.3 cursor 触发源）：input_area 渲染 body 每帧
 /// `write_no_update` 写入（同 keepgoing_rect 模式，TUI-RENDER-001 派生缓存），

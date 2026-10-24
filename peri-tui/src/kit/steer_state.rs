@@ -819,11 +819,14 @@ pub(crate) fn content_with_attachments(
     MessageContent::blocks(blocks)
 }
 
-/// 待发送附件 → 展示记录（提交路径）：只取渲染所需的顺序与大小，不带 base64 载荷。
+/// 待发送附件 → 展示记录（提交路径）：渲染所需的大小 + 载荷身份，不带 base64 载荷。
 pub(crate) fn attachment_displays(attachments: &[PendingAttachment]) -> Vec<UserAttachment> {
     attachments
         .iter()
-        .map(|attachment| UserAttachment::from_base64_payload(&attachment.base64_data))
+        .map(|attachment| UserAttachment {
+            payload_id: attachment.payload_id,
+            ..UserAttachment::from_base64_payload(&attachment.base64_data)
+        })
         .collect()
 }
 
@@ -838,10 +841,50 @@ pub(crate) fn attachment_displays_from_content(content: &MessageContent) -> Vec<
         .filter_map(|block| match block {
             ContentBlock::Image {
                 source: ImageSource::Base64 { data, .. },
-            } => Some(UserAttachment::from_base64_payload(data)),
+            } => Some(UserAttachment {
+                payload_id: crate::kit::atoms::payload_id_of(data),
+                ..UserAttachment::from_base64_payload(data)
+            }),
             _ => None,
         })
         .collect()
+}
+
+/// 提交路径的载荷保留：气泡出现的同刻把附件放进有界保留层（消息区 hover 预览用）。
+///
+/// 与展示记录（[`attachment_displays`]）成对调用；`retain` 自带上限与淘汰，
+/// 调用方不需要管理容量。
+pub(crate) fn retain_submitted_attachments(attachments: &[PendingAttachment]) {
+    if attachments.is_empty() {
+        return;
+    }
+    let atom = atoms::RETAINED_ATTACHMENTS.state();
+    let mut retained = atom.write();
+    for attachment in attachments {
+        retained.retain(
+            &attachment.media_type,
+            &attachment.base64_data,
+            attachment.payload_id,
+        );
+    }
+}
+
+/// 投递路径的载荷保留（用户输入队列投递的气泡）：直接按内容块保留，
+/// 不先克隆成 `Vec<PendingAttachment>`。
+pub(crate) fn retain_submitted_from_content(content: &MessageContent) {
+    let MessageContent::Blocks(blocks) = content else {
+        return;
+    };
+    let atom = atoms::RETAINED_ATTACHMENTS.state();
+    let mut retained = atom.write();
+    for block in blocks {
+        if let ContentBlock::Image {
+            source: ImageSource::Base64 { media_type, data },
+        } = block
+        {
+            retained.retain(media_type, data, crate::kit::atoms::payload_id_of(data));
+        }
+    }
 }
 
 /// 把已投递内容里的图片块还原为待发送附件（撤回路径用）。
@@ -854,11 +897,7 @@ pub(crate) fn attachments_from_content(content: &MessageContent) -> Vec<PendingA
         .filter_map(|block| match block {
             ContentBlock::Image {
                 source: ImageSource::Base64 { media_type, data },
-            } => Some(PendingAttachment {
-                label: media_type.clone(),
-                media_type: media_type.clone(),
-                base64_data: data.clone(),
-            }),
+            } => Some(PendingAttachment::image(media_type.clone(), data.clone())),
             _ => None,
         })
         .collect()
@@ -867,6 +906,10 @@ pub(crate) fn attachments_from_content(content: &MessageContent) -> Vec<PendingA
 #[cfg(test)]
 #[path = "steer_state_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "steer_state_attachment_test.rs"]
+mod attachment_tests;
 
 #[cfg(test)]
 #[path = "steer_state_idle_test.rs"]

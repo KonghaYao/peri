@@ -820,6 +820,7 @@ fn test_composer_label_non_image_keeps_file_count() {
         label: "report.pdf".to_string(),
         media_type: "application/pdf".to_string(),
         base64_data: "AQID".to_string(),
+        payload_id: crate::kit::atoms::payload_id_of("AQID"),
     };
     assert_eq!(
         build_attachments_label(&[doc]).as_deref(),

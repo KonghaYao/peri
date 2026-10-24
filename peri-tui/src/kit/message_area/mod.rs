@@ -61,8 +61,8 @@ use self::entry_nav::{
 };
 #[cfg(test)]
 use self::handlers::{ImagePreviewHoverGate, schedule_image_preview_hover};
-pub(crate) use self::hits::ImageHoverState;
 use self::hits::{CopyButtonHit, ImageLineHit, InteractionOptionHit, compute_keepgoing_rect};
+pub(crate) use self::hits::{ImageHoverState, ImageLineIdentity};
 #[cfg(test)]
 use self::image_action::hover_target_for;
 // macOS-only 符号：对应 mod_test 中 `#[cfg(target_os = "macos")]` 测试，

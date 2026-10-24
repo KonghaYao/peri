@@ -5,7 +5,7 @@
 //! 像素区经 T6 窄接口（[`crate::kit::image_preview`]）渲染（Kitty 协议，占位符
 //! 从 buffer 消失即自动清理，S2 §7）。
 //!
-//! 三态触发仲裁（§7.3）：优先级 **稳定 hover > cursor > focus**；任一来源清空 →
+//! 四态触发仲裁（§7.3）：优先级 **稳定 hover → cursor → 待发送附件 → focus**；任一来源清空 →
 //! `Idle`（隐藏清理）。消息区链接先即时高亮，只有鼠标稳定停留 300ms 后才进入
 //! hover 预览源；遮挡（`mouse_router::is_occluded`）→ `Idle`（§7.5）。
 //!
@@ -20,7 +20,7 @@
 //! [`OverlayDrawHook`]（跨帧持久，post_component_draw 在 Positioned clear
 //! 之后绘制）。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::Poll;
@@ -28,11 +28,11 @@ use std::task::Poll;
 use crate::i18n;
 use crate::kit::atoms::{
     FOCUSED_ENTRY, FocusedEntry, IMAGE_PREVIEW_HOVER, IMAGE_PREVIEW_STATE, INPUT_SNAPSHOT,
-    ImagePreviewState, InputSnapshot, RENDER_HEARTBEAT,
+    ImagePreviewState, InputSnapshot, PreviewSource, RENDER_HEARTBEAT,
 };
 use crate::kit::image_preview::{AsyncImage, picker_for, supported as preview_supported};
 use crate::kit::image_safety::{
-    PathGrade, grade_path, read_validated_image, sanitize_for_terminal,
+    ImageMeta, PathGrade, grade_path, read_validated_image, sanitize_for_terminal,
 };
 use crate::kit::message_area::render::parse_image_line;
 use crate::kit::mouse_router;
@@ -72,6 +72,26 @@ fn cached_picker() -> &'static Picker {
 
 // ── 触发仲裁（§7.3）──────────────────────────────────────────────────────
 
+/// 触发仲裁产物：本次该预览什么。
+///
+/// - [`Self::Path`]：`@image <path>` 流（消息区稳定 hover / 输入区光标行 / 焦点 entry）；
+/// - [`Self::PendingImage`]：粘贴流的待发送附件（composer 空文本时预览最后一张）——
+///   载荷不进目标（逐帧比较），只带位置与载荷身份，请求时再从
+///   [`crate::kit::atoms::PENDING_ATTACHMENTS`] 取一次。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PreviewTarget {
+    Path(String),
+    PendingImage {
+        index: usize,
+        payload_id: u64,
+    },
+    /// 已提交附件（消息区记录行 hover）：载荷按 `payload_id` 从有界保留层取。
+    SubmittedImage {
+        name: String,
+        payload_id: u64,
+    },
+}
+
 /// cursor 触发源：光标所在行（按 `\n` 切分 + `cursor_char` 定位）trim 后以
 /// `@image ` 开头 → 提取路径（与 T4 `parse_image_line` 同一判定）；其他行/空
 /// 文本 → None。
@@ -95,6 +115,25 @@ pub(crate) fn cursor_image_path(snapshot: &InputSnapshot) -> Option<String> {
     None
 }
 
+/// composer 附件触发源（粘贴流）：输入区没有文本（trim 后为空）且有待发送附件时，
+/// 预览**最后一张**（刚粘贴的那张）。
+///
+/// [Why 空文本才触发] 粘贴图片不再插入 `@image` 文本（上传式附件），触发点从
+/// 「光标停在 `@image` 行」迁移到「composer 里只有附件」：粘贴后立刻能看到是
+/// 哪张图，一旦开始输入文本即隐藏——与旧的即时反馈等价，且不会在打字时遮挡正文。
+pub(crate) fn pending_attachment_target(snapshot: &InputSnapshot) -> Option<PreviewTarget> {
+    if !snapshot.text.trim().is_empty() {
+        return None;
+    }
+    let state = crate::kit::atoms::PENDING_ATTACHMENTS.state();
+    let attachments = state.read();
+    let index = attachments.len().checked_sub(1)?;
+    Some(PreviewTarget::PendingImage {
+        index,
+        payload_id: attachments[index].payload_id,
+    })
+}
+
 /// focus 触发源：`FOCUSED_ENTRY` 指向的 slot 的 `TuiUserBubble` 文本中第一个
 /// @image 行（§7.3；与 T4 `ImageLineHit` 同源——都由 `parse_image_line` 判定，
 /// 避免判定漂移）。slot 越界 / 非 user bubble / 无 @image 行 → None。
@@ -108,24 +147,38 @@ pub(crate) fn focus_image_path(focused: &FocusedEntry) -> Option<String> {
     data.text.lines().find_map(parse_image_line)
 }
 
-/// 三态触发仲裁（§7.3）：优先级 **稳定 hover > cursor > focus**；遮挡
-/// （`mouse_router::is_occluded`）或全部来源清空 → None（→ Idle，隐藏清理）。
-/// 组件渲染 body 每帧调用；结果经 `use_effect` 驱动请求（事件边界）。
-pub(crate) fn resolve_preview_target() -> Option<String> {
+/// 四态触发仲裁（§7.3）：优先级为 **稳定 hover → cursor（`@image` 行）→ 待发送
+/// 附件 → focus**；遮挡（`mouse_router::is_occluded`）或全部来源清空 → None
+/// （→ Idle，隐藏清理）。组件渲染 body 每帧调用；结果经 `use_effect` 驱动请求
+/// （事件边界）。
+pub(crate) fn resolve_preview_target() -> Option<PreviewTarget> {
     if mouse_router::is_occluded() {
         return None;
     }
     if let Some(hover) = IMAGE_PREVIEW_HOVER.state().read().as_ref() {
-        return Some(hover.path.clone());
+        return Some(match &hover.identity {
+            crate::kit::message_area::ImageLineIdentity::Path { path, .. } => {
+                PreviewTarget::Path(path.clone())
+            }
+            crate::kit::message_area::ImageLineIdentity::Attachment { name, payload_id } => {
+                PreviewTarget::SubmittedImage {
+                    name: name.clone(),
+                    payload_id: *payload_id,
+                }
+            }
+        });
     }
     let snapshot = INPUT_SNAPSHOT.state().read().clone();
     if let Some(path) = cursor_image_path(&snapshot) {
-        return Some(path);
+        return Some(PreviewTarget::Path(path));
+    }
+    if let Some(target) = pending_attachment_target(&snapshot) {
+        return Some(target);
     }
     if let Some(focused) = FOCUSED_ENTRY.state().read().as_ref()
         && let Some(path) = focus_image_path(focused)
     {
-        return Some(path);
+        return Some(PreviewTarget::Path(path));
     }
     None
 }
@@ -182,10 +235,144 @@ fn decode_image(buf: Vec<u8>) -> Result<DynamicImage, &'static str> {
     Ok(img)
 }
 
-/// 请求预览（事件边界调用，非 render body——TUI-RENDER-001）。`path=None`
+/// 请求预览（事件边界调用，非 render body——TUI-RENDER-001）。`None`
 /// （触发清空/遮挡）→ `Idle`（隐藏清理，§7.5）。
-pub(crate) fn request_preview(path: Option<&str>) {
-    request_preview_with(path, None, decode_image);
+pub(crate) fn request_preview(target: Option<PreviewTarget>) {
+    match target {
+        None => *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Idle,
+        Some(PreviewTarget::Path(path)) => request_preview_with(Some(&path), None, decode_image),
+        Some(PreviewTarget::PendingImage { index, payload_id }) => {
+            request_pending_attachment_preview(index, payload_id)
+        }
+        Some(PreviewTarget::SubmittedImage { name, payload_id }) => {
+            request_submitted_attachment_preview(name, payload_id)
+        }
+    }
+}
+
+/// 待发送附件预览（粘贴流）：载荷来自 [`crate::kit::atoms::PENDING_ATTACHMENTS`]，
+/// 没有磁盘路径，因而跳过 T5 路径分级/校验——字节上限在粘贴时已保证
+/// （`paste.rs` 的 [`crate::kit::image_safety::MAX_IMAGE_BYTES`] 门），这里仍按
+/// 解码期上限二次判定，防内存放大。
+///
+/// 载荷身份不匹配（附件已被移除/替换）→ `Idle`：陈旧请求不得显示过期图片。
+fn request_pending_attachment_preview(index: usize, payload_id: u64) {
+    let (name, media_type, payload) = {
+        let state = crate::kit::atoms::PENDING_ATTACHMENTS.state();
+        let attachments = state.read();
+        let Some(attachment) = attachments.get(index) else {
+            *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Idle;
+            return;
+        };
+        if attachment.payload_id != payload_id {
+            *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Idle;
+            return;
+        }
+        (
+            crate::kit::tui_render_unit::user_attachment_name(index + 1),
+            attachment.media_type.clone(),
+            attachment.base64_data.clone(),
+        )
+    };
+    let source = PreviewSource::Pending { name, payload_id };
+    spawn_attachment_decode(source, &media_type, &payload);
+}
+
+/// 已提交附件预览（消息区记录行 hover）：载荷来自有界保留层
+/// （[`crate::kit::attachment_retention`]）。**取不到就不预览**——附件被淘汰或
+/// 会话边界清空时退化为 `Idle`，绝不显示别的图片。
+fn request_submitted_attachment_preview(name: String, payload_id: u64) {
+    let payload = {
+        let atom = crate::kit::atoms::RETAINED_ATTACHMENTS.state();
+        let retained = atom.read();
+        let Some(entry) = retained.get(payload_id) else {
+            // 未保留（未提交/被淘汰/超上限）：不预览，也不报错——记录行仍在。
+            *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Idle;
+            return;
+        };
+        (entry.media_type.clone(), entry.base64_data.clone())
+    };
+    let source = PreviewSource::Submitted { name, payload_id };
+    spawn_attachment_decode(source, &payload.0, &payload.1);
+}
+
+/// 附件载荷 → 后台解码 → `Ready`（composer 待发送与消息区已提交两条附件流共用）。
+fn spawn_attachment_decode(source: PreviewSource, media_type: &str, payload: &str) {
+    use base64::Engine;
+
+    let Ok(buf) = base64::engine::general_purpose::STANDARD.decode(payload) else {
+        *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Error {
+            source,
+            reason: "format".to_string(),
+        };
+        return;
+    };
+    if buf.len() as u64 > crate::kit::image_safety::MAX_IMAGE_BYTES {
+        *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Error {
+            source,
+            reason: "too-large".to_string(),
+        };
+        return;
+    }
+    let mime = static_mime_of(media_type);
+    let size_bytes = buf.len() as u64;
+    let id = PREVIEW_REQUEST_ID.fetch_add(1, Ordering::SeqCst) + 1;
+    *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Loading {
+        source: source.clone(),
+        grade: PathGrade::Managed,
+    };
+    let source_for_thread = source.clone();
+    let spawned = std::thread::Builder::new()
+        .name("peri-image-decode".to_string())
+        .spawn(move || {
+            let result = decode_image(buf);
+            if PREVIEW_REQUEST_ID.load(Ordering::SeqCst) != id {
+                return;
+            }
+            match result {
+                Ok(img) => {
+                    let (width, height) = img.dimensions();
+                    *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Ready {
+                        source: source_for_thread,
+                        meta: ImageMeta {
+                            width,
+                            height,
+                            size_bytes,
+                            mime,
+                        },
+                        img: Arc::new(img),
+                    };
+                }
+                Err(reason) => {
+                    tracing::warn!(reason, "image preview: attachment decode failed");
+                    *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Error {
+                        source: source_for_thread,
+                        reason: reason.to_string(),
+                    };
+                }
+            }
+            RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
+        });
+    if spawned.is_err() {
+        tracing::warn!("image preview: decode thread spawn failed");
+        *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Error {
+            source,
+            reason: "spawn".to_string(),
+        };
+    }
+}
+
+/// 附件 MIME → `ImageMeta.mime` 的静态串（该字段来自路径流的 magic bytes 判定，
+/// 是 `&'static str`）。粘贴路径生产 `image/png`（macOS 原生 PNG 或 arboard RGBA
+/// 编码），其余取值按字节流兜底，不臆造具体类型。
+fn static_mime_of(media_type: &str) -> &'static str {
+    match media_type {
+        "image/png" => "image/png",
+        "image/jpeg" => "image/jpeg",
+        "image/gif" => "image/gif",
+        "image/webp" => "image/webp",
+        _ => "application/octet-stream",
+    }
 }
 
 /// [`request_preview`] 注入版（单测）：`managed_root` 模拟受管理根
@@ -207,7 +394,7 @@ pub(crate) fn request_preview_with(
     };
     let Some(canonical) = canonical else {
         *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Error {
-            path: path.to_string().into(),
+            source: PreviewSource::Path(path.into()),
             reason: "invalid-path".to_string(),
         };
         return;
@@ -215,7 +402,7 @@ pub(crate) fn request_preview_with(
     // 仅受管理目录自动预览；手工路径/其他 → Degraded 文本降级（不触发解码）。
     if grade != PathGrade::Managed {
         *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Degraded {
-            path: canonical,
+            source: PreviewSource::Path(canonical),
             reason: i18n::tr("image-preview-degraded"),
         };
         return;
@@ -228,7 +415,7 @@ pub(crate) fn request_preview_with(
         Err(err) => {
             tracing::warn!(error = %err, "image preview: validation failed");
             *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Error {
-                path: canonical,
+                source: PreviewSource::Path(canonical),
                 reason: "validate".to_string(),
             };
             return;
@@ -239,7 +426,7 @@ pub(crate) fn request_preview_with(
     // spawn 失败分支仍要用原值）。
     let id = PREVIEW_REQUEST_ID.fetch_add(1, Ordering::SeqCst) + 1;
     *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Loading {
-        path: canonical.clone(),
+        source: PreviewSource::Path(canonical.clone()),
         grade,
     };
     let canonical_for_thread = canonical.clone();
@@ -255,7 +442,7 @@ pub(crate) fn request_preview_with(
             match result {
                 Ok(img) => {
                     *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Ready {
-                        path: canonical_for_thread.clone(),
+                        source: PreviewSource::Path(canonical_for_thread.clone()),
                         meta,
                         img: Arc::new(img),
                     };
@@ -263,7 +450,7 @@ pub(crate) fn request_preview_with(
                 Err(reason) => {
                     tracing::warn!(reason, "image preview: decode failed");
                     *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Error {
-                        path: canonical_for_thread,
+                        source: PreviewSource::Path(canonical_for_thread),
                         reason: reason.to_string(),
                     };
                 }
@@ -274,7 +461,7 @@ pub(crate) fn request_preview_with(
     if spawned.is_err() {
         tracing::warn!("image preview: decode thread spawn failed");
         *IMAGE_PREVIEW_STATE.state().write() = ImagePreviewState::Error {
-            path: canonical,
+            source: PreviewSource::Path(canonical),
             reason: "spawn".to_string(),
         };
     }
@@ -301,13 +488,6 @@ fn human_size(bytes: u64) -> String {
     i18n::tr_args(key, &[("count".to_string(), value)])
 }
 
-/// 文件名（§6.2-5 路径泄漏约束：meta 行不暴露绝对路径）。
-fn file_name_of(path: &Path) -> String {
-    path.file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string_lossy().into_owned())
-}
-
 /// 状态 → meta 行文本（顶部边框内一行；进终端前已由调用方按宽度截断）。
 /// - `Ready`：`[Image: 文件名 · WxH · 大小 · MIME]`（T5 `ImageMeta` 字段）；
 /// - `Loading`：`[Image: 文件名]`（解码中，无尺寸）；
@@ -316,14 +496,14 @@ fn file_name_of(path: &Path) -> String {
 fn preview_meta_text(state: &ImagePreviewState) -> String {
     match state {
         ImagePreviewState::Idle => String::new(),
-        ImagePreviewState::Loading { path, .. } => i18n::tr_args(
+        ImagePreviewState::Loading { source, .. } => i18n::tr_args(
             "image-preview-loading",
-            &[("name".to_string(), FluentValue::from(file_name_of(path)))],
+            &[("name".to_string(), FluentValue::from(source.display_name()))],
         ),
-        ImagePreviewState::Ready { path, meta, .. } => i18n::tr_args(
+        ImagePreviewState::Ready { source, meta, .. } => i18n::tr_args(
             "image-preview-meta",
             &[
-                ("name".to_string(), FluentValue::from(file_name_of(path))),
+                ("name".to_string(), FluentValue::from(source.display_name())),
                 ("w".to_string(), FluentValue::from(u64::from(meta.width))),
                 ("h".to_string(), FluentValue::from(u64::from(meta.height))),
                 (
@@ -445,7 +625,7 @@ struct OverlayDrawHook {
     /// 当前解码结果对应的 `AsyncImage`（`Ready` 且路径匹配时存在）。
     async_img: Option<AsyncImage>,
     /// `async_img` 对应的路径（切换判定）。
-    async_path: Option<PathBuf>,
+    async_source: Option<PreviewSource>,
 }
 
 impl OverlayDrawHook {
@@ -454,7 +634,7 @@ impl OverlayDrawHook {
             rect: None,
             pixel_enabled: true,
             async_img: None,
-            async_path: None,
+            async_source: None,
         }
     }
 }
@@ -468,8 +648,8 @@ impl Hook for OverlayDrawHook {
         }
         let state = IMAGE_PREVIEW_STATE.state().read().clone();
         match &state {
-            ImagePreviewState::Ready { path, img, .. } => {
-                if self.async_path.as_ref() != Some(path) {
+            ImagePreviewState::Ready { source, img, .. } => {
+                if self.async_source.as_ref() != Some(source) {
                     // 首帧/切换：重建协议（旧对象 drop → 后台线程自然退出）。
                     // F9：仅像素协议（Kitty）支持时才构造 Picker/AsyncImage——
                     // `picker_for` 的 halfblocks 构造在 TMUX 环境有 spawn 副作用，
@@ -478,7 +658,7 @@ impl Hook for OverlayDrawHook {
                     if preview_supported(&caps) {
                         let img = (**img).clone();
                         self.async_img = Some(AsyncImage::new(cached_picker(), img));
-                        self.async_path = Some(path.clone());
+                        self.async_source = Some(source.clone());
                         redraw = true;
                     }
                 }
@@ -486,7 +666,7 @@ impl Hook for OverlayDrawHook {
             _ => {
                 // Idle/Loading/Degraded/Error：清理协议（隐藏/切换语义）。
                 if self.async_img.take().is_some() {
-                    self.async_path = None;
+                    self.async_source = None;
                     redraw = true;
                 }
             }
@@ -531,7 +711,7 @@ fn overlay_clear_rect(rect: Option<Rect>, state: &ImagePreviewState) -> Option<R
     }
 }
 
-/// 上下文 overlay 预览组件（§7 T7）：订阅三态触发源，仲裁后经 effect 请求
+/// 上下文 overlay 预览组件（§7 T7）：订阅四态触发源，仲裁后经 effect 请求
 /// 预览；几何与绘制在 [`OverlayDrawHook`]。渲染为空 `Positioned`（绝对坐标，
 /// 不参与 flex）——实际内容由 hook 绘制。
 #[component]
@@ -541,6 +721,9 @@ pub fn ImageOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _hover = hooks.use_atom(&IMAGE_PREVIEW_HOVER);
     let _focus = hooks.use_atom(&FOCUSED_ENTRY);
     let _snapshot = hooks.use_atom(&INPUT_SNAPSHOT);
+    // 待发送附件（粘贴流触发源）：附件写入来自粘贴线程，必须订阅才能即时唤醒
+    // 重渲染并触发预览（否则只能等 RENDER_HEARTBEAT 心跳）。
+    let _attachments = hooks.use_atom(&crate::kit::atoms::PENDING_ATTACHMENTS);
     let _vms = hooks.use_atom(&crate::kit::atoms::VIEW_MODELS);
     let preview = hooks.use_atom(&IMAGE_PREVIEW_STATE);
     let _caps = hooks.use_atom(&crate::kit::atoms::TERMINAL_CAPS);
@@ -548,15 +731,12 @@ pub fn ImageOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _panel = hooks.use_atom(&crate::kit::atoms::ACTIVE_PANEL);
     let (term_w, term_h) = hooks.use_terminal_size();
 
-    // 三态触发仲裁（§7.3；优先级稳定 hover > cursor > focus；遮挡 → None）。
+    // 四态触发仲裁（§7.3；优先级稳定 hover → cursor → 待发送附件 → focus；遮挡 → None）。
     let target = resolve_preview_target();
     // 请求流程（use_effect = effect 边界，非 render body——TUI-RENDER-001）。
     // 闭包捕获 target 副本；deps 用原值做变化比较（use_effect 只比较不消费）。
     let target_for_effect = target.clone();
-    hooks.use_effect(
-        move || request_preview(target_for_effect.as_deref()),
-        target,
-    );
+    hooks.use_effect(move || request_preview(target_for_effect), target);
 
     // 几何 + 像素门控（§7.4）。
     let rect = preview_geometry(term_w, term_h);
@@ -578,3 +758,11 @@ pub fn ImageOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 #[cfg(test)]
 #[path = "image_overlay_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "image_overlay_test_support.rs"]
+mod test_support;
+
+#[cfg(test)]
+#[path = "image_overlay_attachment_test.rs"]
+mod attachment_tests;

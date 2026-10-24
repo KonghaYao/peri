@@ -14,6 +14,9 @@ use super::reminder::{ReminderInfo, detect_reminder};
 pub struct UserAttachment {
     /// 载荷字节数（解码后）——消息区 meta 行的大小档显示用。
     pub bytes: usize,
+    /// 载荷身份（与 `PendingAttachment::payload_id` 同源）——消息区附件记录行的
+    /// 浮动预览按它从保留层取载荷；找不到（被淘汰/超上限）即不预览，绝不张冠李戴。
+    pub payload_id: u64,
 }
 
 impl UserAttachment {
@@ -27,7 +30,12 @@ impl UserAttachment {
             .filter(|byte| **byte == b'=')
             .count();
         let bytes = (payload.len() / 4 * 3).saturating_sub(padding);
-        Self { bytes }
+        Self {
+            bytes,
+            // 载荷身份需按原始 base64 计算（本函数只处理解码后长度口径）；
+            // 调用方持有载荷时应以 `PendingAttachment::payload_id` 覆盖。
+            payload_id: 0,
+        }
     }
 }
 
@@ -81,6 +89,10 @@ impl TuiUserBubble {
         let mut content_hash = tui_hash_str(&text);
         for attachment in &attachments {
             content_hash = tui_hash_combine(content_hash, attachment.bytes as u64);
+            // 载荷身份参与哈希：渲染缓存命中时 `ImageLineInfo` 会连同
+            // `payload_id` 一起复用；若两张图字节数相同但内容不同，
+            // 只按 bytes 哈希会让记录行命中旧身份、hover 预览到别的图。
+            content_hash = tui_hash_combine(content_hash, attachment.payload_id);
         }
         if !attachments.is_empty() {
             content_hash = tui_hash_combine(content_hash, attachments.len() as u64);

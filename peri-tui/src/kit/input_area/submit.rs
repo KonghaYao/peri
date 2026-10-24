@@ -188,6 +188,8 @@ pub(crate) fn send_local_user_bubble(
     attachments: &[crate::kit::atoms::PendingAttachment],
 ) {
     use crate::kit::acp_types::AcpEventData;
+    // 有界保留载荷：消息区附件记录行的浮动预览数据源（与气泡同刻建立）。
+    crate::kit::steer_state::retain_submitted_attachments(attachments);
     if let Some(tx) = LOCAL_EVENT_TX.get() {
         let _ = tx.send(AcpEventWithEpoch {
             event: AcpEventData::LocalUserBubble {

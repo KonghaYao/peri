@@ -143,3 +143,20 @@ fn same_session_replay_keeps_running_background_task() {
     atoms::BRIDGE_RESET_COUNTER.set(old_reset);
     *atoms::BG_TASKS.state().write() = old_tasks;
 }
+
+/// 会话边界释放已提交附件的保留载荷——不为上一个会话继续占内存。
+#[test]
+#[serial]
+fn test_session_boundary_releases_retained_attachment_payloads() {
+    let atom = atoms::RETAINED_ATTACHMENTS.state();
+    atom.write().retain("image/png", "AQID", 42);
+    assert!(!atom.read().is_empty(), "前置：保留层有条目");
+
+    project_session_boundary(Some("next-session"));
+
+    assert!(
+        atom.read().is_empty(),
+        "会话边界后保留层必须为空（不跨会话堆积）"
+    );
+    assert_eq!(atom.read().get(42), None);
+}

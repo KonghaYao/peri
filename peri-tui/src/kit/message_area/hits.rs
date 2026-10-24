@@ -43,6 +43,17 @@ pub(super) struct InteractionOptionHit {
     pub(super) option_index: usize,
 }
 
+/// 图片行身份：hover 高亮与浮动预览都按它解析目标。
+///
+/// - [`Self::Path`]：文本 `@image <path>` meta 行（可打开文件、hover 显示绝对路径）；
+/// - [`Self::Attachment`]：已提交附件记录行 `[图片] 图片 N · 大小`（无路径、不可
+///   打开；预览载荷按 `payload_id` 从保留层取，见 `kit::attachment_retention`）。
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ImageLineIdentity {
+    Path { path: String, managed: bool },
+    Attachment { name: String, payload_id: u64 },
+}
+
 /// @image 行的屏幕点击区域（每帧由渲染 body 构建，点击/hover handler 实时读取
 /// ——与 CopyButtonHit 同模式；事件在上帧渲染完成后分发，读取最近一帧的位置）。
 /// 存屏幕绝对坐标（含 scroll_y / area 偏移换算），handler 无需再查 wrap_map。
@@ -58,12 +69,8 @@ pub(super) struct ImageLineHit {
     pub(super) slot_index: usize,
     /// 渲染时该 VM 的 content_hash——点击时校验（同 CopyButtonHit 防御）。
     pub(super) vm_hash: u64,
-    /// 展示路径（T5 canonicalize 后；失败时为原始文本）——open 目标。
-    pub(super) path: String,
-    /// 受管理目录内（~/.peri/images）→ 自动预览候选。本任务（T4）仅传递
-    /// 给 T7 预览资格判定，暂无读取点。
-    #[allow(dead_code)]
-    pub(super) managed: bool,
+    /// 行身份（路径 meta 行 / 附件记录行）——hover 目标与 open 目标都由它决定。
+    pub(super) identity: ImageLineIdentity,
     /// 重建期算好的大小文案（B/KB/MB 或 missing）——hover 渲染复用，
     /// hover 时不再 stat（§4.4 stat 时机取舍）。
     pub(super) size_text: String,
@@ -85,8 +92,8 @@ pub(crate) struct ImageHoverState {
     pub(crate) logical_idx: usize,
     /// 渲染时该 VM 的 content_hash（陈旧校验）。
     pub(crate) vm_hash: u64,
-    /// 展示路径（T5 canonicalize 后；失败时为原始文本）——hover 行显示。
-    pub(crate) path: String,
+    /// 行身份——hover 高亮文本与浮动预览目标都由它决定。
+    pub(crate) identity: ImageLineIdentity,
     /// 重建期算好的大小文案（B/KB/MB 或 missing）。
     pub(crate) size_text: String,
 }
@@ -195,8 +202,7 @@ pub(super) fn update_image_line_hits(
                     x_end: content_x.saturating_add(grid.content),
                     slot_index,
                     vm_hash: slot.content_hash,
-                    path: info.path.clone(),
-                    managed: info.managed,
+                    identity: info.identity.clone(),
                     size_text: info.size_text.clone(),
                     logical_idx: info.logical_idx,
                 });

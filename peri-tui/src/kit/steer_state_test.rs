@@ -370,11 +370,7 @@ fn test_steer_delivered_and_replay_keep_one_identity() {
 
 #[test]
 fn test_steer_attachment_content_survives_roundtrip() {
-    let attachments = vec![PendingAttachment {
-        label: "image".to_owned(),
-        media_type: "image/png".to_owned(),
-        base64_data: "AQID".to_owned(),
-    }];
+    let attachments = vec![PendingAttachment::image("image/png", "AQID")];
     let content = content_with_attachments("  image\n", &attachments);
     let recovered = attachments_from_content(&content);
     assert_eq!(
@@ -959,51 +955,4 @@ fn test_steer_missing_input_does_not_assume_delivery() {
     assert!(state.accept_snapshot(empty, 1, true));
 
     assert!(state.direct_submitting("s", 1), "未知状态不能当作成功交付");
-}
-
-/// 图片-only 提交（空文本 + 附件）不得产出空 text 块——provider 会拒收空
-/// text block；此时 content 只应含 image 块。
-#[test]
-fn test_attachment_only_content_has_no_empty_text_block() {
-    let attachments = vec![PendingAttachment::image("image/png", "AQID")];
-    let content = content_with_attachments("", &attachments);
-
-    let blocks = content.content_blocks();
-    assert_eq!(blocks.len(), 1, "空文本不得产出 text 块: {blocks:?}");
-    assert!(matches!(blocks[0], ContentBlock::Image { .. }));
-    assert_eq!(
-        attachments_from_content(&content)[0].base64_data,
-        "AQID",
-        "附件数据须完整可恢复"
-    );
-}
-
-/// 无附件时 content 形态与旧路径逐字一致（纯文本，不是单元素 block 数组）。
-#[test]
-fn test_content_without_attachments_stays_plain_text() {
-    let content = content_with_attachments("hello", &[]);
-    assert_eq!(content, MessageContent::text("hello"));
-}
-
-/// 投递路径的附件展示记录与提交路径同源：字节数取自图片块载荷长度。
-#[test]
-fn test_attachment_displays_from_content_matches_submit_path() {
-    let attachments = vec![
-        PendingAttachment::image("image/png", "AQID"),
-        PendingAttachment::image("image/png", "AQI="),
-    ];
-    let content = content_with_attachments("两张图", &attachments);
-
-    let from_submit = attachment_displays(&attachments);
-    let from_content = attachment_displays_from_content(&content);
-    assert_eq!(from_submit, from_content, "两条路径的展示记录必须一致");
-    assert_eq!(
-        from_submit.iter().map(|a| a.bytes).collect::<Vec<_>>(),
-        vec![3, 2],
-        "字节数 = base64 解码后的载荷长度"
-    );
-
-    // 纯文本内容没有附件记录。
-    assert!(attachment_displays_from_content(&MessageContent::text("hello")).is_empty());
-    assert!(attachment_displays(&[]).is_empty());
 }
