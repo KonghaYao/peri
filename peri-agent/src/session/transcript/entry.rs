@@ -3,6 +3,8 @@
 //! 条目直接表达 canonical 形态——普通消息与 canonical reminder 同级，reminder 不是伪造的
 //! 空 Human message；出口可见性与持久化载荷映射只在这里定义一份。
 
+use std::borrow::Cow;
+
 use crate::messages::{BaseMessage, MessageContent, MessageId};
 
 use peri_acp_types::store::PersistedPayload;
@@ -65,12 +67,16 @@ impl TranscriptEntry {
         }
     }
 
-    pub fn project_message(&self) -> anyhow::Result<BaseMessage> {
+    /// Canonical model projection shared by normal Reason and compact rendering.
+    ///
+    /// 普通消息借用 canonical 正文；only legacy compact reminders and canonical
+    /// reminders are re-encoded into an owned message.
+    pub fn project_message_ref(&self) -> anyhow::Result<Cow<'_, BaseMessage>> {
         match self {
             Self::Message(message) => {
                 let reminders = peri_acp_types::compact_reminder::legacy_compact_reminders(message);
                 if reminders.is_empty() {
-                    return Ok(message.clone());
+                    return Ok(Cow::Borrowed(message));
                 }
                 let encoded = reminders
                     .iter()
@@ -81,16 +87,20 @@ impl TranscriptEntry {
                     })
                     .collect::<Result<Vec<_>, _>>()?
                     .join("\n");
-                Ok(BaseMessage::Human {
+                Ok(Cow::Owned(BaseMessage::Human {
                     id: message.id(),
                     content: MessageContent::text(encoded),
-                })
+                }))
             }
-            Self::Reminder { id, reminder } => Ok(BaseMessage::Human {
+            Self::Reminder { id, reminder } => Ok(Cow::Owned(BaseMessage::Human {
                 id: *id,
                 content: MessageContent::text(encode_system_reminder(reminder)?),
-            }),
+            })),
         }
+    }
+
+    pub fn project_message(&self) -> anyhow::Result<BaseMessage> {
+        Ok(self.project_message_ref()?.into_owned())
     }
 }
 

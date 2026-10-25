@@ -23,6 +23,41 @@ fn test_default_values() {
     assert_eq!(config.summary_max_tokens, 16000);
     assert_eq!(config.summary_max_requests, 3);
     assert_eq!(config.max_consecutive_failures, 3);
+    assert_eq!(
+        config.max_resident_history_bytes,
+        128 * 1024 * 1024,
+        "驻留预算默认 128 MiB"
+    );
+}
+
+#[test]
+fn test_max_resident_history_bytes_default_deserialize_and_override() {
+    assert_eq!(
+        CompactConfig::default().max_resident_history_bytes,
+        134_217_728
+    );
+
+    let config: CompactConfig = serde_json::from_str(r#"{"auto_compact_threshold":0.9}"#).unwrap();
+    assert_eq!(
+        config.max_resident_history_bytes, 134_217_728,
+        "缺省 JSON 字段使用 128 MiB 默认值"
+    );
+
+    let config: CompactConfig =
+        serde_json::from_str(r#"{"max_resident_history_bytes":4096}"#).unwrap();
+    assert_eq!(config.max_resident_history_bytes, 4096);
+
+    let config: CompactConfig =
+        serde_json::from_str(r#"{"max_resident_history_bytes":0}"#).unwrap();
+    assert_eq!(config.max_resident_history_bytes, 0, "0 表示关闭驻留门控");
+
+    let serialized = serde_json::to_string(&CompactConfig {
+        max_resident_history_bytes: 8192,
+        ..Default::default()
+    })
+    .unwrap();
+    let back: CompactConfig = serde_json::from_str(&serialized).unwrap();
+    assert_eq!(back.max_resident_history_bytes, 8192);
 }
 
 #[test]

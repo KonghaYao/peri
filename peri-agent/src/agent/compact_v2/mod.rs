@@ -32,7 +32,10 @@ pub mod smart;
 pub use config::{CompactConfig, CONTINUATION_HINT};
 pub use full::{extract_file_info, extract_skill_names};
 pub use micro::micro_compact;
-pub use planner::{plan_micro, ApplyReport, CompactPolicy, ContextPressure, FullEscalationReason};
+pub use planner::{
+    plan_micro, ApplyReport, CompactPolicy, ContextPressure, FullEscalationReason,
+    ResidentHistoryPressure,
+};
 pub use projection::{
     plan_from_persisted_directives, render_llm_view, MessageProjectionDirective, MicroCompactPlan,
     PersistedDirectiveRestore, ProjectionAction, ProjectionActionEntry, ProjectionTarget,
@@ -209,6 +212,43 @@ pub async fn run_compact_with_facts(
     facts: &planner::MicroPlanningFacts,
     caps: &ProviderCapabilities,
 ) -> CompactResult {
+    run_compact_with_facts_and_resident(
+        transcript,
+        llm,
+        config,
+        pressure,
+        force,
+        consecutive_failures,
+        cwd,
+        before_full_summary,
+        protected,
+        facts,
+        caps,
+        &ResidentHistoryPressure::DISABLED,
+    )
+    .await
+}
+
+/// 带独立驻留字节压力的 Compact 入口。
+///
+/// 调用方在 token refresh 之前采集 [`ResidentHistoryPressure`]；超出上限时本函数跳过
+/// token Skip、压力样本去重与 Micro planner，直接复用 [`run_full_or_degrade`]。
+/// `force` 与自动开关仍优先：手动 force 走 `ManualForce`，关闭自动压缩不因驻留超限触发。
+#[allow(clippy::too_many_arguments)]
+pub async fn run_compact_with_facts_and_resident(
+    transcript: &mut MessageTranscript,
+    llm: Option<&dyn peri_model::Model>,
+    config: &CompactConfig,
+    pressure: &ContextPressure,
+    force: bool,
+    consecutive_failures: &mut u32,
+    cwd: &str,
+    before_full_summary: Option<FullSummaryNotice<'_>>,
+    protected: &crate::session::async_result_mailbox::ProtectedResults,
+    facts: &planner::MicroPlanningFacts,
+    caps: &ProviderCapabilities,
+    resident: &ResidentHistoryPressure,
+) -> CompactResult {
     let before_visible_len = transcript.visible_messages().len();
 
     // 自动关闭不影响显式手动 force。
@@ -241,6 +281,22 @@ pub async fn run_compact_with_facts(
             FullEscalationReason::ManualForce,
             before_full_summary,
             protected,
+        )
+        .await;
+    }
+
+    // 驻留字节预算与 token 压力独立：先于 cache-aware、Micro planner 与达标返回。
+    if resident.is_exceeded() {
+        return run_resident_full(
+            transcript,
+            llm,
+            config,
+            pressure,
+            consecutive_failures,
+            cwd,
+            before_full_summary,
+            protected,
+            resident,
         )
         .await;
     }
@@ -716,6 +772,120 @@ async fn run_full_or_degrade(
     }
 }
 
+/// 驻留字节超限路径：强制一次 Full，记录 Full 后残余，不做硬准入。
+///
+/// 只有 Full 阈值之外的独立条件会进入这里；token 压力、cache-aware、Micro 计划与
+/// `max_consecutive_failures` 的跨调用失败预算仍由 [`run_full_or_degrade`] 承担。
+#[allow(clippy::too_many_arguments)]
+async fn run_resident_full(
+    transcript: &mut MessageTranscript,
+    llm: Option<&dyn peri_model::Model>,
+    config: &CompactConfig,
+    pressure: &ContextPressure,
+    consecutive_failures: &mut u32,
+    cwd: &str,
+    before_full_summary: Option<FullSummaryNotice<'_>>,
+    protected: &crate::session::async_result_mailbox::ProtectedResults,
+    resident: &ResidentHistoryPressure,
+) -> CompactResult {
+    warn!(
+        resident_limit_bytes = resident.limit_bytes,
+        resident_reclaimable_own_bytes = resident.reclaimable_own_reserved_bytes(),
+        resident_irreducible_own_bytes = resident.irreducible_own_reserved_bytes(),
+        resident_irreducible_inherited_bytes = resident.irreducible_inherited_reserved_bytes(),
+        resident_total_reserved_bytes = resident.total_reserved_bytes(),
+        estimated_context_tokens = pressure.estimated_tokens,
+        context_window = pressure.context_window,
+        shadow = config.shadow_mode_enabled,
+        "Resident history budget exceeded"
+    );
+
+    if config.shadow_mode_enabled {
+        let visible_len = transcript.visible_messages().len();
+        info!(
+            resident_limit_bytes = resident.limit_bytes,
+            resident_total_reserved_bytes = resident.total_reserved_bytes(),
+            "Shadow mode: resident Full Compact planned but not committed"
+        );
+        return CompactResult {
+            strategy: CompactStrategy::Skip,
+            affected_count: 0,
+            estimated_tokens_saved: 0,
+            before_visible_len: visible_len,
+            after_visible_len: visible_len,
+            summary: None,
+            full_escalation_reason: Some(FullEscalationReason::ResidentHistoryBudgetExceeded),
+            outcome: CompactOutcome::Shadowed,
+            failure: None,
+            changed_messages: 0,
+            changed_fields: 0,
+            no_op_candidates: 0,
+        };
+    }
+
+    let result = run_full_or_degrade(
+        transcript,
+        llm,
+        config,
+        pressure,
+        consecutive_failures,
+        cwd,
+        FullEscalationReason::ResidentHistoryBudgetExceeded,
+        before_full_summary,
+        protected,
+    )
+    .await;
+
+    // Full 成功但残余仍超限只记录事实并返回；不做硬准入，也不在本次调用内重复 Full。
+    let protected_ids: std::collections::HashSet<_> = protected
+        .items
+        .iter()
+        .map(|item| item.delivery_id)
+        .collect();
+    let residual = ResidentHistoryPressure::from_transcript_with_protected(
+        config.max_resident_history_bytes,
+        transcript,
+        &protected_ids,
+    );
+    if result.outcome().is_full_applied() {
+        if residual.is_exceeded() {
+            warn!(
+                full_outcome = ?result.outcome,
+                resident_limit_bytes = residual.limit_bytes,
+                resident_reclaimable_own_bytes = residual.reclaimable_own_reserved_bytes(),
+                resident_irreducible_own_bytes = residual.irreducible_own_reserved_bytes(),
+                resident_irreducible_inherited_bytes =
+                    residual.irreducible_inherited_reserved_bytes(),
+                resident_residual_total_reserved_bytes = residual.total_reserved_bytes(),
+                resident_residual_excess_bytes = residual.excess_bytes(),
+                "Resident history still above budget after Full; recording residual"
+            );
+        } else {
+            info!(
+                full_outcome = ?result.outcome,
+                resident_limit_bytes = residual.limit_bytes,
+                resident_reclaimable_own_bytes = residual.reclaimable_own_reserved_bytes(),
+                resident_irreducible_own_bytes = residual.irreducible_own_reserved_bytes(),
+                resident_irreducible_inherited_bytes =
+                    residual.irreducible_inherited_reserved_bytes(),
+                resident_residual_total_reserved_bytes = residual.total_reserved_bytes(),
+                "Resident history budget restored after Full"
+            );
+        }
+    } else {
+        warn!(
+            full_outcome = ?result.outcome,
+            resident_limit_bytes = residual.limit_bytes,
+            resident_reclaimable_own_bytes = residual.reclaimable_own_reserved_bytes(),
+            resident_irreducible_own_bytes = residual.irreducible_own_reserved_bytes(),
+            resident_irreducible_inherited_bytes = residual.irreducible_inherited_reserved_bytes(),
+            resident_residual_total_reserved_bytes = residual.total_reserved_bytes(),
+            "Resident Full Compact did not complete"
+        );
+    }
+    result
+}
+
 #[cfg(test)]
 #[path = "projection_test.rs"]
 mod projection_tests;
@@ -764,3 +934,7 @@ pub(crate) fn micro_failure(visible_len: usize, error: crate::error::AgentError)
 #[cfg(test)]
 #[path = "archive_lifecycle_test.rs"]
 mod archive_lifecycle_tests;
+
+#[cfg(test)]
+#[path = "resident_budget_test.rs"]
+mod resident_budget_tests;

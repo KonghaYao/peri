@@ -288,6 +288,7 @@ async fn tool_and_agent_feedback_use_queue_capability_without_writing_history() 
         &ctx,
         ExecutionEntryOrigin::ModelBatch,
         ctx.session.turn.cancel_token.as_ref().clone(),
+        None,
     );
     let mut approved =
         middleware_runner::run_before_bound_tools_batch(&invocation, &[call], &HashMap::new())

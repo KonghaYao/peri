@@ -153,9 +153,7 @@ pub(super) async fn full_compact_inner_with_protected(
         .entries()
         .iter()
         .skip(transcript.ancestor_len())
-        .filter(|entry| !transcript.flags(entry.id()).excluded)
-        .filter(|entry| !matches!(entry.as_message(), Some(BaseMessage::System { .. })))
-        .filter(|entry| !protected_ids.contains(&entry.id()))
+        .filter(|entry| super::planner::is_full_archivable_entry(transcript, entry, &protected_ids))
         .map(|entry| {
             (
                 entry.id(),

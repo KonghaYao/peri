@@ -12,7 +12,9 @@
 
 use super::{CompactInput, CompactOutput};
 use crate::agent::compact_v2::config::CompactConfig;
-use crate::agent::compact_v2::planner::ContextPressure;
+use crate::agent::compact_v2::planner::{
+    ContextPressure, FullEscalationReason, ResidentHistoryPressure,
+};
 
 /// 运行 Compact 阶段
 pub async fn run_compact(input: CompactInput) -> crate::error::AgentResult<CompactOutput> {
@@ -68,14 +70,15 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
 
     // 用 labeled block + break 收敛所有返回路径，确保 after_compact 在函数末尾统一触发。
     let output = 'compact_core: {
-        // 必备条件：context_budget + compact_config
-        let (budget, config) = match (&ctx.compact.context_budget, &ctx.compact.compact_config) {
-            (Some(b), Some(c)) => (b, c),
-            _ => {
-                // 未配置预算或 compact_config → 跳过
-                break 'compact_core Ok(CompactOutput { compacted: false });
-            }
+        // compact_config 是自动 Compact 的开关、阈值与驻留上限来源；缺失时无法判断
+        // 任何策略，明确跳过并记录，不伪造默认配置。
+        let Some(config) = ctx.compact.compact_config.as_ref() else {
+            tracing::trace!(step, "Compact 跳过：缺少 compact_config");
+            break 'compact_core Ok(CompactOutput { compacted: false });
         };
+        // context_budget 缺失时 token 压力视为 0，但驻留字节门控与 token 独立，
+        // 仍需在下方采集；驻留超限时继续执行 resident Full。
+        let budget = ctx.compact.context_budget.as_ref();
 
         // The host resolves config and environment overrides before running the loop.
         if !config.auto_compact_enabled {
@@ -83,24 +86,55 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
             break 'compact_core Ok(CompactOutput { compacted: false });
         }
 
-        if let Err(error) = context_pressure::refresh(ctx) {
-            break 'compact_core Err(error);
+        // 驻留字节预算与 token 压力独立：在 token refresh 之前读取，超限时无需先物化
+        // 模型视图。门控区分「Full 可回收的 own」与「Full 无法回收的残余」：上次 Full
+        // 后仍超限时，只有可回收 own 相对上次 Full 后的快照增长超过完整预算才会再次
+        // Full，避免摘要自身、继承区或 System/protected own 主导时每轮新工作都重复
+        // 支付摘要成本。Full 后仍超限只记录残余（compact_v2 内），不在本阶段重试或
+        // 终止运行。
+        //
+        // 锁顺序：先拷贝 recovery 状态并释放锁，再读 transcript；判定为纯函数，
+        // 不会在 transcript guard 存活时锁 `budget_recovery`。Reason 复用同一入口。
+        let protected = ctx.session.async_result_mailbox.protected_snapshot();
+        let protected_ids: std::collections::HashSet<_> = protected
+            .items
+            .iter()
+            .map(|item| item.delivery_id)
+            .collect();
+        let resident_gate = resident_gate(ctx, config.max_resident_history_bytes, &protected_ids);
+        let resident_exceeded = resident_gate.is_exceeded();
+
+        if budget.is_some() && !resident_exceeded {
+            if let Err(error) = context_pressure::refresh(ctx) {
+                break 'compact_core Err(error);
+            }
         }
 
         // 构建 ContextPressure（从 token_tracker 和 context_budget 中提取字段）
         // P1-3: 直接读 StageContext.token_tracker，无需经过 AgentContext 适配层
-        let pressure = {
-            let tracker = ctx.compact.token_tracker.read();
-            ContextPressure {
-                estimated_tokens: tracker.estimated_context_tokens().unwrap_or(0),
-                context_window: budget.context_window,
-                output_reserve: budget.output_reserve,
-                // 已提交工具增长已计入 estimated_context_tokens；不能再从目标
-                // 预算扣除同一增长。未来工具预测需要独立的输入事实源。
+        let pressure = match budget {
+            Some(budget) => {
+                let tracker = ctx.compact.token_tracker.read();
+                ContextPressure {
+                    estimated_tokens: tracker.estimated_context_tokens().unwrap_or(0),
+                    context_window: budget.context_window,
+                    output_reserve: budget.output_reserve,
+                    // 已提交工具增长已计入 estimated_context_tokens；不能再从目标
+                    // 预算扣除同一增长。未来工具预测需要独立的输入事实源。
+                    predicted_tool_growth: 0,
+                    safety_buffer: 5000,
+                    cache_hit_rate: tracker.cache_hit_rate(),
+                }
+            }
+            // 无预算契约时没有 token 压力事实；驻留字节门控仍独立生效。
+            None => ContextPressure {
+                estimated_tokens: 0,
+                context_window: 0,
+                output_reserve: 0,
                 predicted_tool_growth: 0,
                 safety_buffer: 5000,
-                cache_hit_rate: tracker.cache_hit_rate(),
-            }
+                cache_hit_rate: 0.0,
+            },
         };
 
         // 从 pressure 计算 budget 百分比（供 determine_compact_action 使用）
@@ -115,10 +149,12 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
         // Skip 时不 emit CompactStarted——避免成对事件不对称（Start emit 了但 End 因
         // affected_count==0 不触发，导致 Langfuse compact span 始终缺失）。
         let compact_action = crate::agent::compact_v2::determine_compact_action(pct, config);
-        if matches!(
-            compact_action,
-            crate::agent::compact_v2::CompactAction::Skip
-        ) {
+        if !resident_exceeded
+            && matches!(
+                compact_action,
+                crate::agent::compact_v2::CompactAction::Skip
+            )
+        {
             break 'compact_core Ok(CompactOutput { compacted: false });
         }
 
@@ -126,24 +162,30 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
             let tracker = ctx.compact.token_tracker.read();
             tracker.pressure_sample_key()
         };
-        if pressure_sample.is_some_and(|key| {
-            ctx.compact
-                .token_tracker
-                .read()
-                .is_pressure_sample_consumed(key)
-        }) {
+        if !resident_exceeded
+            && pressure_sample.is_some_and(|key| {
+                ctx.compact
+                    .token_tracker
+                    .read()
+                    .is_pressure_sample_consumed(key)
+            })
+        {
             tracing::trace!(step, "Compact 压力样本已消费，等待新 usage 或工具增长");
             break 'compact_core Ok(CompactOutput { compacted: false });
         }
-        let compact_strategy = match compact_action {
-            crate::agent::compact_v2::CompactAction::Smart => {
-                crate::agent::events::CompactStrategy::Smart
-            }
-            crate::agent::compact_v2::CompactAction::Micro => {
-                crate::agent::events::CompactStrategy::Micro
-            }
-            crate::agent::compact_v2::CompactAction::Skip => {
-                unreachable!("Skip 已在上方 break，不会进入此分支")
+        let compact_strategy = if resident_exceeded {
+            crate::agent::events::CompactStrategy::Full
+        } else {
+            match compact_action {
+                crate::agent::compact_v2::CompactAction::Smart => {
+                    crate::agent::events::CompactStrategy::Smart
+                }
+                crate::agent::compact_v2::CompactAction::Micro => {
+                    crate::agent::events::CompactStrategy::Micro
+                }
+                crate::agent::compact_v2::CompactAction::Skip => {
+                    unreachable!("Skip 已在上方 break，不会进入此分支")
+                }
             }
         };
 
@@ -210,8 +252,6 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
 
         // 未结清的后台结果不参与归档：Full 只摘要可归档历史，未覆盖通知继续由
         // mailbox 负责并在随后请求中重新投影。
-        let protected = ctx.session.async_result_mailbox.protected_snapshot();
-
         let capabilities = ctx.runtime.llm.provider_capabilities();
 
         // 包在 select! biased 中：cancel 优先，避免 Full Compact 的长 LLM 调用阻塞中断。
@@ -282,13 +322,24 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
                 break 'compact_core Err(crate::error::AgentError::Interrupted);
             }
             r = async {
-                // Recovery probing may use a remote Store. It shares the commit path's
-                // cancellation boundary and failure events, while ownership remains here.
-                let facts = match super::micro_facts::snapshot(ctx, &transcript_owned, &protected).await {
-                    Ok(facts) => facts,
-                    Err(error) => return crate::agent::compact_v2::micro_failure(before_visible_len, error),
+                // 驻留超限路径不构建 Micro facts：该探测可能访问远程 Store，失败不应
+                // 阻断与 token 压力无关的驻留 Full；此路径也不会消费 facts。
+                let facts = if resident_exceeded {
+                    crate::agent::compact_v2::planner::MicroPlanningFacts::default()
+                } else {
+                    // Recovery probing may use a remote Store. It shares the commit path's
+                    // cancellation boundary and failure events, while ownership remains here.
+                    match super::micro_facts::snapshot(ctx, &transcript_owned, &protected).await {
+                        Ok(facts) => facts,
+                        Err(error) => {
+                            return crate::agent::compact_v2::micro_failure(
+                                before_visible_len,
+                                error,
+                            )
+                        }
+                    }
                 };
-                crate::agent::compact_v2::run_compact_with_facts(
+                crate::agent::compact_v2::run_compact_with_facts_and_resident(
                 &mut transcript_owned,
                 compact_llm_ref,
                 &config_clone,
@@ -300,6 +351,7 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
                 &protected,
                 &facts,
                 &capabilities,
+                &resident_gate,
                 ).await
             } => r,
         };
@@ -319,6 +371,16 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
                 .store(consecutive, std::sync::atomic::Ordering::Relaxed);
 
             if did_apply {
+                // 已提交的 Full 即使随后被取消，也必须记录驻留快照；否则下一次门控
+                // 仍按旧快照判断，与「每次实际应用 Full 都记录」的语义不一致。
+                if result.outcome().is_full_applied() {
+                    record_applied_full(
+                        ctx,
+                        new_work_before_full,
+                        config.max_resident_history_bytes,
+                        &protected_ids,
+                    );
+                }
                 // G6: 发射配对事件，防止 Langfuse span 孤立
                 let visible: Vec<crate::messages::BaseMessage> = ctx
                     .session
@@ -384,6 +446,10 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
 
         let micro_failed = result.outcome == crate::agent::compact_v2::CompactOutcome::MicroFailed;
         let failure = result.failure.take();
+        // 驻留触发的 Full 与 token 压力无关：低 token 下也必须传播其失败。
+        let resident_triggered = resident_exceeded
+            || result.full_escalation_reason
+                == Some(FullEscalationReason::ResidentHistoryBudgetExceeded);
         let compacted = {
             let r = result; // compact_v2::run_compact 直接返回 CompactResult
             affected_count = r.affected_count;
@@ -418,13 +484,12 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
             // compact 前的累积 token 数，导致每轮都触发 compact
             // 注：与 v1 CompactMiddleware 行为对齐（v1 已删除）
             if did_compact && r.outcome().is_full_applied() {
-                {
-                    let transcript = ctx.session.transcript.read();
-                    ctx.compact
-                        .budget_recovery
-                        .lock()
-                        .record_full_applied(&transcript, new_work_before_full);
-                }
+                record_applied_full(
+                    ctx,
+                    new_work_before_full,
+                    config.max_resident_history_bytes,
+                    &protected_ids,
+                );
                 // P1-3: 直接操作 StageContext.token_tracker
                 ctx.compact.token_tracker.write().reset();
                 // 注：token_tracker reset 为只读 token 操作，无需 drain recall
@@ -478,7 +543,7 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
             if matches!(error, crate::error::AgentError::Interrupted) {
                 break 'compact_core Err(error);
             }
-            if micro_failed || pct >= config.auto_compact_threshold {
+            if micro_failed || resident_triggered || pct >= config.auto_compact_threshold {
                 break 'compact_core Err(error);
             }
         }
@@ -486,6 +551,51 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
     };
 
     (output, affected_count)
+}
+
+/// 驻留门控的单一入口：Compact 与 Reason 共用。
+///
+/// 锁序约定：先在 `budget_recovery` 锁内拷贝状态并立即释放，再读 transcript；
+/// 判定为纯函数。实现中不得在 transcript guard 存活时调用 `budget_recovery.lock()`，
+/// 也不得在持有 `budget_recovery` guard 时调用 `transcript.read()/write()`。
+pub(super) fn resident_gate(
+    ctx: &super::StageContext,
+    resident_limit_bytes: u64,
+    protected_ids: &std::collections::HashSet<crate::messages::MessageId>,
+) -> ResidentHistoryPressure {
+    let state = ctx.compact.budget_recovery.lock().resident_gate_state();
+    let transcript = ctx.session.transcript.read();
+    let current = ResidentHistoryPressure::from_transcript_with_protected(
+        resident_limit_bytes,
+        &transcript,
+        protected_ids,
+    );
+    state.decide(current, &transcript)
+}
+
+/// 记录已应用 Full 的驻留快照。
+///
+/// 先在 transcript guard 内采集压力与结构事实并释放 guard，再锁 `budget_recovery`
+/// 写入；不在任一 guard 存活时获取另一把锁。
+fn record_applied_full(
+    ctx: &super::StageContext,
+    new_work_before_full: bool,
+    resident_limit_bytes: u64,
+    protected_ids: &std::collections::HashSet<crate::messages::MessageId>,
+) {
+    let snapshot = {
+        let transcript = ctx.session.transcript.read();
+        let pressure = ResidentHistoryPressure::from_transcript_with_protected(
+            resident_limit_bytes,
+            &transcript,
+            protected_ids,
+        );
+        super::compact_progress::ResidentFullSnapshot::capture(&transcript, pressure)
+    };
+    ctx.compact
+        .budget_recovery
+        .lock()
+        .record_full_applied(new_work_before_full, snapshot);
 }
 
 // An unacknowledged durable commit must stop the loop before Reason can consume the

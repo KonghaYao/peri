@@ -26,6 +26,10 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     // 固定准备阶段之前的视图；Full reset/Micro 缩减本身不应触发第二次评估。
     super::compact::context_pressure::refresh(ctx)?;
 
+    // hooks 前的 canonical 修订：准备阶段新增历史是驻留预算补检的独立证据，
+    // 不要求投影 token 增长（例如低 token 但大正文）。
+    let canonical_revision_before_hooks = ctx.session.transcript.read().view_revision();
+
     // Apply a new session capability generation only at the Reason boundary.
     let refreshed = match ctx.runtime.tool_catalog.refresh() {
         Ok(snapshot) => snapshot,
@@ -54,7 +58,26 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     // before_model 和动态工具发布在常规 Compact 之后。只有准备阶段确实新增
     // 压力且达到 Full 阈值时补检一次；不重复运行模型/compact hooks。
     let prepared_input_grew = super::compact::context_pressure::refresh(ctx)?;
-    let needs_compact = prepared_input_grew
+    let canonical_changed =
+        ctx.session.transcript.read().view_revision() != canonical_revision_before_hooks;
+    let resident_exceeded = ctx
+        .compact
+        .compact_config
+        .as_ref()
+        .filter(|config| config.auto_compact_enabled)
+        .is_some_and(|config| {
+            // 与 Compact 阶段共用同一入口与锁序：先取 protected，再在
+            // `resident_gate` 内短暂拷贝 recovery 状态、读 transcript、纯判定。
+            let protected = ctx.session.async_result_mailbox.protected_snapshot();
+            let protected_ids: std::collections::HashSet<_> = protected
+                .items
+                .iter()
+                .map(|item| item.delivery_id)
+                .collect();
+            super::compact::resident_gate(ctx, config.max_resident_history_bytes, &protected_ids)
+                .is_exceeded()
+        });
+    let needs_compact = (prepared_input_grew
         && ctx
             .compact
             .compact_config
@@ -71,7 +94,8 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
                             tokens as f64 / f64::from(budget.context_window)
                                 >= config.auto_compact_threshold
                         })
-            });
+            }))
+        || (canonical_changed && resident_exceeded);
     if needs_compact {
         super::compact::run_compact_core(super::CompactInput {
             context: ctx.clone(),
@@ -171,13 +195,30 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
     });
 
     // 将本次实际请求与最近成功的 Full 对齐；不得借用 tracker 的旧 usage。
-    let budget_probe = {
+    // 锁序：先拷贝 watermark 并释放 recovery 锁，再读 transcript 取事实，
+    // 最后短暂锁 recovery 提交 probe；不得嵌套。
+    let watermark = ctx
+        .compact
+        .budget_recovery
+        .lock()
+        .resident_gate_state()
+        .watermark;
+    let (new_visible_work, last_entry) = {
         let transcript = ctx.session.transcript.read();
-        ctx.compact
-            .budget_recovery
-            .lock()
-            .begin_request(&transcript)
+        (
+            super::compact_progress::CompactBudgetRecovery::has_new_work_after(
+                watermark,
+                &transcript,
+                true,
+            ),
+            transcript.entries().last().map(|entry| entry.id()),
+        )
     };
+    let budget_probe = ctx
+        .compact
+        .budget_recovery
+        .lock()
+        .begin_request(new_visible_work, last_entry);
 
     // LLM 调用（与 cancel 竞争）。
     // 使用 generate_reasoning_with_observed_body：观测体复用本次调用已构建的
