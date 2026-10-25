@@ -88,6 +88,30 @@ fn config(model: &str) -> OpenAiConfig {
     )
 }
 
+#[test]
+fn switching_from_responses_omits_opaque_state_and_keeps_typed_calls() {
+    let request = ModelRequest::new(vec![ModelMessage::assistant(
+        vec![
+            ContentBlock::text("visible"),
+            ContentBlock::ProviderState {
+                provider: "openai_responses".into(),
+                data: json!({"items":[{"type":"reasoning","encrypted_content":"foreign-opaque"}]}),
+            },
+        ],
+        vec![ToolCall::new(
+            "call_1",
+            "Read",
+            JsonObject::from_value(json!({"path":"a"})).unwrap(),
+        )],
+    )]);
+    let body = body_for_test(&config("test-model"), &request);
+    let encoded = body.to_string();
+    assert!(!encoded.contains("foreign-opaque"));
+    assert!(!encoded.contains("provider_state"));
+    assert!(encoded.contains("visible"));
+    assert_eq!(body["messages"][0]["tool_calls"][0]["id"], "call_1");
+}
+
 /// 关闭 Protocol 分类重试的配置，用于 fail-closed 分类断言（保留原始协议错误而非
 /// `RetryExhausted(Protocol)`）。
 fn config_without_protocol_retry(model: &str) -> OpenAiConfig {

@@ -546,6 +546,7 @@ async fn does_not_retry_non_transient_protocol_errors() {
         crate::ProtocolErrorKind::ToolCallInvalidArguments,
         crate::ProtocolErrorKind::AssistantMessageRequired,
         crate::ProtocolErrorKind::InvalidEndpoint,
+        crate::ProtocolErrorKind::ProviderTerminal,
         crate::ProtocolErrorKind::Other,
     ] {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -561,6 +562,67 @@ async fn does_not_retry_non_transient_protocol_errors() {
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
+}
+
+#[tokio::test]
+async fn authentication_refresh_uses_the_existing_attempt_budget() {
+    for budget in [1, 2] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let attempt = scripted_attempt(
+            vec![
+                Err(ModelError::protocol(
+                    crate::ProtocolErrorKind::AuthenticationRefreshed,
+                )),
+                Ok(vec![Ok(ModelStreamEvent::Completed(completed()))]),
+            ],
+            calls.clone(),
+        );
+        let events = retrying_stream(
+            config().with_max_attempts(budget),
+            CancellationToken::new(),
+            None,
+            attempt,
+        )
+        .collect::<Vec<_>>()
+        .await;
+        assert_eq!(calls.load(Ordering::SeqCst), budget as usize);
+        if budget == 1 {
+            assert!(matches!(events.last(), Some(Err(error))
+                if error.protocol_error().map(|value| value.kind()) == Some(crate::ProtocolErrorKind::AuthenticationRefreshed)));
+        } else {
+            assert!(matches!(
+                events.last(),
+                Some(Ok(ModelStreamEvent::Completed(_)))
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn terminal_failure_after_visible_output_is_preserved_without_retry() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let attempt = scripted_attempt(
+        vec![Ok(vec![
+            Ok(ModelStreamEvent::TextDelta {
+                text: "partial".into(),
+            }),
+            Err(ModelError::protocol(
+                crate::ProtocolErrorKind::ProviderTerminal,
+            )),
+        ])],
+        calls.clone(),
+    );
+    let events = retrying_stream(config(), CancellationToken::new(), None, attempt)
+        .collect::<Vec<_>>()
+        .await;
+    assert!(
+        matches!(events.first(), Some(Ok(ModelStreamEvent::TextDelta { text })) if text == "partial")
+    );
+    assert!(
+        matches!(events.last(), Some(Ok(ModelStreamEvent::Interrupted { error, .. }))
+        if error.is_terminal_provider_failure())
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

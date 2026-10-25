@@ -133,6 +133,36 @@ fn make_interrupted(text: &str, max_attempts: u32) -> Reasoning {
     response
 }
 
+/// 配额耗尽等明确终态保留部分输出，不能触发自动续跑或成功 hook。
+#[tokio::test]
+async fn test_terminal_provider_failure_preserves_partial_without_continuation() {
+    let mut partial = make_interrupted("partial before quota failure", 10);
+    partial.stream_interruption.as_mut().unwrap().error =
+        peri_model::ModelError::protocol(peri_model::ProtocolErrorKind::ProviderTerminal);
+    let source = partial.source_message.clone().unwrap();
+    let (ctx, model, completions) = make_context(vec![partial], None);
+    let result = run_react_loop(ctx.clone(), 10).await;
+    assert!(
+        matches!(result, LoopResult::Error(crate::error::AgentError::ModelError(ref error))
+        if error.is_terminal_provider_failure()),
+        "{result:?}"
+    );
+    assert_eq!(model.requests.lock().len(), 1);
+    assert_eq!(model.tool_executions.load(Ordering::SeqCst), 0);
+    assert_eq!(completions.load(Ordering::SeqCst), 0);
+    assert!(ctx.session.queue.is_empty());
+    assert_eq!(
+        ctx.session
+            .transcript
+            .read()
+            .visible_messages()
+            .iter()
+            .filter(|message| message.id() == source.id() && message.content() == source.content())
+            .count(),
+        1
+    );
+}
+
 /// [回归测试] 中断后的部分消息进入下一轮历史，完成 hook 只在恢复成功后运行。
 #[tokio::test]
 async fn test_stream_interruption_continues_from_saved_message() {

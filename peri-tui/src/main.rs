@@ -12,6 +12,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod cli_args;
+mod cli_auth;
 mod cli_mcp_start;
 mod cli_meta;
 mod cli_plugin;
@@ -120,6 +121,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Manage model authentication through the credentials capability
+    Auth {
+        #[command(subcommand)]
+        action: cli_auth::AuthCommand,
+    },
     /// 查看或显式采用本机 Machine 身份
     Machine {
         #[command(subcommand)]
@@ -793,6 +799,10 @@ fn main() -> Result<()> {
     }
 
     match cli.command {
+        Some(Commands::Auth { action }) => {
+            let rt = build_runtime()?;
+            rt.block_on(cli_auth::run(action, peri_tui::config::config_path()))
+        }
         Some(Commands::Machine { action }) => {
             let rt = build_runtime()?;
             rt.block_on(cli_meta::run_machine_adopt(

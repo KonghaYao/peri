@@ -88,6 +88,7 @@ peri-middlewares = { path = "../peri-middlewares", features = ["test-support"] }
 
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
 peri-mcp-common.workspace = true
+peri-mcp-credentials.workspace = true
 peri-process = { path = "../peri-process" }
 tokio = { workspace = true, features = ["full"] }
 peri-mcp-cron.workspace = true

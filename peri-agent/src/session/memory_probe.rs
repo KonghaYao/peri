@@ -162,6 +162,7 @@ fn content_block_bytes(block: &ContentBlock) -> ObjectBytes {
         ContentBlock::Reasoning { text, signature } => {
             string_bytes(text) + option_string_bytes(signature)
         }
+        ContentBlock::ProviderState { provider, data } => string_bytes(provider) + json_bytes(data),
         ContentBlock::Unknown(value) => json_bytes(value),
     }
 }

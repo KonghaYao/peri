@@ -9,7 +9,9 @@ use super::{
     FIELD_CONTEXT_1M, FIELD_EFFORT, FIELD_MAX_TOKENS, FIELD_MODEL, FIELD_PROVIDER, PROFILE_KEYS,
 };
 use crate::config::PeriConfig;
-use crate::kit::atoms::{ACP_CLIENT_HANDLE, MODEL_HIGHLIGHT_UNTIL, PERI_CONFIG_HANDLE};
+use crate::kit::atoms::{
+    ACP_CLIENT_HANDLE, MODEL_HIGHLIGHT_UNTIL, NOTIFICATION, Notification, PERI_CONFIG_HANDLE,
+};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -56,6 +58,36 @@ pub(super) fn edit_field(alias: String, field: usize, forward: bool) {
         .get(&alias)
         .map(|p| p.provider.clone())
         .unwrap_or_default();
+    let selected_provider = if profile_provider.is_empty() {
+        cfg.config.providers.first()
+    } else {
+        cfg.config
+            .providers
+            .iter()
+            .find(|provider| provider.id == profile_provider)
+    };
+    let notice = selected_provider.and_then(|provider| {
+        if provider.provider_type == "openai_responses" && field == FIELD_CONTEXT_1M {
+            Some("model-panel-explicit-window-hint")
+        } else if field == FIELD_MAX_TOKENS
+            && matches!(
+                &provider.auth,
+                Some(peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan { .. })
+            )
+        {
+            Some("model-panel-plan-output-hint")
+        } else {
+            None
+        }
+    });
+    if let Some(notice) = notice {
+        *NOTIFICATION.state().write() = Some(Notification {
+            message: crate::i18n::tr(notice),
+            until: peri_time::monotonic_now() + Duration::from_secs(3),
+        });
+        return;
+    }
+
     // 当前显示的模型名：profile.model 未手动设置时回退到 provider 同档位映射，
     // 否则 FIELD_MODEL 定位 idx 落空（unwrap_or(0)）导致首次 → 恰好选中 fallback
     // 显示值、视觉上"切换未生效"。

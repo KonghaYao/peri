@@ -68,6 +68,14 @@ pub enum ContentBlock {
         signature: Option<String>,
     },
 
+    /// Provider-owned replay state, stored together with its typed assistant
+    /// projection. Never display this block or treat it as prompt text. The
+    /// owning adapter validates its version, binding and projection before use.
+    ProviderState {
+        provider: String,
+        data: serde_json::Value,
+    },
+
     /// Provider 原生 block（透传，不做解析）
     ///
     /// 存储无法识别的原始 JSON，保证向前兼容。
@@ -136,6 +144,13 @@ impl Serialize for ContentBlock {
                 if let Some(sig) = signature {
                     m.serialize_entry("signature", sig)?;
                 }
+                m.end()
+            }
+            Self::ProviderState { provider, data } => {
+                let mut m = s.serialize_map(Some(3))?;
+                m.serialize_entry("type", "provider_state")?;
+                m.serialize_entry("provider", provider)?;
+                m.serialize_entry("data", data)?;
                 m.end()
             }
             Self::Unknown(value) => value.serialize(s),
@@ -227,12 +242,34 @@ impl<'de> Deserialize<'de> for ContentBlock {
                     .map(String::from);
                 Ok(Self::Reasoning { text, signature })
             }
+            "provider_state" => {
+                let provider = value
+                    .get("provider")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| serde::de::Error::missing_field("provider"))?
+                    .to_string();
+                let data = value
+                    .get("data")
+                    .cloned()
+                    .ok_or_else(|| serde::de::Error::missing_field("data"))?;
+                Ok(Self::ProviderState { provider, data })
+            }
             _ => Ok(Self::Unknown(value)),
         }
     }
 }
 
 impl ContentBlock {
+    /// Includes nested content so consumers cannot accidentally treat replay
+    /// state in a tool result as ordinary text or trusted assistant output.
+    pub fn has_provider_state(&self) -> bool {
+        match self {
+            Self::ProviderState { .. } => true,
+            Self::ToolResult { content, .. } => content.iter().any(Self::has_provider_state),
+            _ => false,
+        }
+    }
+
     pub fn text(text: impl Into<String>) -> Self {
         Self::Text { text: text.into() }
     }
@@ -337,6 +374,16 @@ pub enum MessageContent {
 }
 
 impl MessageContent {
+    /// Whether this content carries an atomic provider replay unit. Projection
+    /// consumers must preserve its typed siblings together with the opaque data.
+    pub fn has_provider_state(&self) -> bool {
+        match self {
+            Self::Blocks(blocks) => blocks.iter().any(ContentBlock::has_provider_state),
+            Self::Raw(values) => values.iter().any(|v| v["type"] == "provider_state"),
+            Self::Text(_) => false,
+        }
+    }
+
     /// 从字符串构建
     pub fn text(s: impl Into<String>) -> Self {
         Self::Text(s.into())

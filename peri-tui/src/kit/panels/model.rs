@@ -167,7 +167,17 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 })
                 .filter(|m| !m.is_empty())
                 .unwrap_or_else(|| key.to_string());
-            let window = if profile.context_1m { "1m" } else { "200k" };
+            let window =
+                if prov.is_some_and(|provider| provider.provider_type == "openai_responses") {
+                    profile
+                        .context_window
+                        .map(|window| window.to_string())
+                        .unwrap_or_else(|| "?".to_owned())
+                } else if profile.context_1m {
+                    "1m".to_owned()
+                } else {
+                    "200k".to_owned()
+                };
             (
                 prov.map(|p| p.display_name().to_string())
                     .unwrap_or_else(|| profile.provider.clone()),
@@ -223,7 +233,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         })
         .unwrap_or_else(|| ("xhigh".to_string(), 32000, false));
 
-    let (provider_label, model_label) = PERI_CONFIG_HANDLE
+    let (provider_label, model_label, responses_window, plan_output) = PERI_CONFIG_HANDLE
         .get()
         .map(|h| {
             let c = h.read();
@@ -247,9 +257,22 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 prov.map(|p| p.display_name().to_string())
                     .unwrap_or_else(|| profile.map(|pf| pf.provider.clone()).unwrap_or_default()),
                 model,
+                prov.filter(|provider| provider.provider_type == "openai_responses")
+                    .map(|_| {
+                        profile
+                            .and_then(|profile| profile.context_window)
+                            .map(|window| window.to_string())
+                            .unwrap_or_else(|| "?".to_owned())
+                    }),
+                prov.is_some_and(|provider| {
+                    matches!(
+                        &provider.auth,
+                        Some(peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan { .. })
+                    )
+                }),
             )
         })
-        .unwrap_or_else(|| (String::new(), active_alias.clone()));
+        .unwrap_or_else(|| (String::new(), active_alias.clone(), None, false));
 
     // ── 响应式右列宽度：窄屏时 VALUE_ALIGN_COL 收缩，避免值被截断 ──
     // 面板宽度取自与鼠标命中同一份 `AreaTracker` 区域（首帧未测量时退守宽屏对齐）。
@@ -262,12 +285,23 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         provider_label,
         model_label,
         current_effort,
-        current_max_tokens.to_string(),
-        if current_ctx { "on" } else { "off" }.to_string(),
+        if plan_output {
+            i18n::tr("model-panel-server-output-default")
+        } else {
+            current_max_tokens.to_string()
+        },
+        responses_window
+            .clone()
+            .unwrap_or_else(|| if current_ctx { "on" } else { "off" }.to_string()),
     ];
     for (fi, (label, value)) in FIELD_LABELS.iter().zip(values.iter()).enumerate() {
         let is_focus = *right_focus.read() && fi == *right_cursor.read();
         let mark = if is_focus { "❯" } else { " " };
+        let label = if fi == FIELD_CONTEXT_1M && responses_window.is_some() {
+            i18n::tr("model-panel-context-window")
+        } else {
+            (*label).to_owned()
+        };
         let key_span = format!(" {} {} ", mark, label);
         let key_len = UnicodeWidthStr::width(key_span.as_str());
         let value_len = UnicodeWidthStr::width(value.as_str());

@@ -220,7 +220,20 @@ fn content_to_anthropic(content: &[ContentBlock]) -> Value {
 }
 
 fn content_to_anthropic_parts(content: &[ContentBlock]) -> Vec<Value> {
-    content.iter().filter_map(block_to_anthropic).collect()
+    let foreign_replay = content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::ProviderState { .. }));
+    content
+        .iter()
+        .filter_map(|block| match block {
+            // A foreign reasoning summary is readable history, not an
+            // Anthropic thinking block with an Anthropic replay signature.
+            ContentBlock::Reasoning { text, .. } if foreign_replay => {
+                Some(json!({ "type": "text", "text": text }))
+            }
+            _ => block_to_anthropic(block),
+        })
+        .collect()
 }
 
 fn block_to_anthropic(block: &ContentBlock) -> Option<Value> {
@@ -259,6 +272,9 @@ fn block_to_anthropic(block: &ContentBlock) -> Option<Value> {
             "type": "redacted_thinking",
             "data": data,
         })),
+        // A different adapter owns this replay state. Typed text and calls are
+        // converted normally; foreign encrypted items never enter this wire.
+        ContentBlock::ProviderState { .. } => None,
     }
 }
 

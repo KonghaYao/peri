@@ -3,7 +3,7 @@
 模型重试的异步等待由 [peri-time](peri-time.md) 提供；可见增量、重试资格和
 取消结果仍由模型 runtime 判定。
 
-> 速查表：把「我想做什么」映射到文件。细节以代码为准。更新：2026-09-29（SSE 完成判定与中断断点保留）
+> 速查表：把「我想做什么」映射到文件。细节以代码为准。
 > 依据：docs/standards/architecture-contracts.md、源码（无 crate 级 CLAUDE.md）
 
 Emscripten 路径：`src/transport/http.rs` 复用 reqwest native/Hyper HTTP/SSE 实现；`src/runtime/retry.rs` 使用 Cloudflare Tokio 分支的任务运行时。WASM 导出需要 `wasm-bindgen` 的 `experimental_tokio` 事件循环；运行入口与验收见 [`peri-wasm`](peri-wasm.md)。
@@ -23,17 +23,29 @@ Emscripten 路径：`src/transport/http.rs` 复用 reqwest native/Hyper HTTP/SSE
 | 改流式事件 | `src/protocol/model.rs` `ModelStreamEvent`（:17：TextDelta/ReasoningDelta/ToolCallDelta/Usage/Completed/Interrupted）+ `src/runtime/stream.rs`；消费方 `peri-agent/src/agent/model_bridge.rs:230`（generate_from_request） | 各 adapter `decode_event`（anthropic/stream.rs:66、openai_compatible/stream.rs:44）；`Model::complete` 聚合（model.rs:179） | 成功以 Completed 收尾；可见增量后失败以 Interrupted 终态交付 error/attempts/max_attempts，不携带 usage、不重放请求；complete 返回底层错误（model.rs:229），agent 保存部分正文并有界 Defer 续跑；耗尽经 ExecutionFailure → ACP data.diagnostic 投影。无终态 EOF 仍报错（model.rs:233）；新增变体须同步 complete 聚合 + model_bridge 消费 + ACP 映射（ARC-EVENT-001） |
 | 改 TokenUsage/StopReason 语义 | 事实源 `src/protocol/types.rs`：`TokenUsage` :453（cache_creation/cache_read 可选，`new` :463）、`StopReason` :475（tagged，`Other{value}` 兜底） | 构造点：anthropic/stream.rs `current_usage`（:364）/`completed_response`（:378）；openai_compatible/response.rs 解码 | Anthropic start/delta/stop 的 input/cache 按字段最新值更新（缺失保留、显式零覆盖），完整 input 含缓存；usage 溢出（完整 input 超 u32）→ provider error 且不发 Completed（anthropic/mod_test.rs:604）；StopReason 语义消费方在 model_bridge（映射 agent 层 stop reason） |
 | 改消息内容模型 | 事实源 `src/protocol/types.rs`：`ContentBlock` :71（Text/Image/Document/Reasoning/ToolUse/ToolResult/RedactedReasoning）、`ModelMessage` :229（role-tagged）、`ToolCall` :152、`ToolResult` :182 | 两端映射：`content_to_anthropic`（anthropic/request.rs:222）、`block_to_openai_part`（openai_compatible/request.rs:217）；`ContentBlock::text_content`（types.rs:113） | 新增 block 变体必须同时改两端映射 + `text_content`（否则判空/文本提取漏分支）；Anthropic tool_use 只序列化一次（mod_test.rs:205）；序列化顺序须确定（ARC-SERIAL-001） |
-| 改传输层（HTTP/SSE） | `src/transport/http.rs`（`HttpTransport` :46、`ReqwestTransport` :55）、`src/transport/sse.rs`（`SseEvent` :5、`SseParser` :11） | 组装点 `runtime_http_sse_stream`（runtime/stream.rs:57）→ `retrying_http_sse_stream`（:25）→ `response_to_sse_stream`（:76） | transport 是 crate-private seam（transport/mod.rs:5-10）；两个 provider 共享同步 `SseDecoderFactory`，每次 retry 新建 decoder 状态；SSE DONE 调用 completion decoder，OpenAI 还须有效 finish_reason，流内 error 不得忽略；parser 与 decoder 按顺序交付完整增量和后续错误，Completed 后不消费尾帧；EOF 不等于成功；公共 API 不暴露 client/headers/原始请求 |
+| 改传输层（HTTP/SSE） | `src/transport/http.rs`（`HttpTransport` :46、`ReqwestTransport` :55）、`src/transport/sse.rs`（`SseEvent` :5、`SseParser` :11） | 组装点 `runtime_http_sse_stream`（runtime/stream.rs:57）→ `retrying_http_sse_stream`（:25）→ `response_to_sse_stream`（:76） | transport 是 crate-private seam（transport/mod.rs:5-10）；各 adapter 共享同步 `SseDecoderFactory`，每次 retry 新建 decoder 状态；SSE DONE 调用 completion decoder，OpenAI 还须有效 finish_reason，流内 error 不得忽略；parser 与 decoder 按顺序交付完整增量和后续错误，Completed 后不消费尾帧；EOF 不等于成功；公共 API 不暴露 client/headers/原始请求 |
 | 改重试策略 | 事实源 `src/runtime/retry.rs`：`RetryConfig` :88（`max_attempts` :134、`delay_for_retry` :138）、`RetryableErrorClasses` :12、`RetryObserver` :235 | `retrying_stream`（:253）；`ModelRuntimeConfig::with_retry`（request.rs:78） | 首个可见 delta 前按原策略重试；可见 delta 后失败 → Interrupted 终态（retry.rs:349），transport 改写为 stream_interrupted，其他错误保留类别；携带当前 attempt 与同源 max_attempts，让 Agent 保留部分输出并发起新轮次，不重试同一请求（anthropic/mod_test.rs:1237，请求数仍为 1）。可见输出后的 EOF 同样终态化（retry.rs:382/:397）；observer 保留实际失败正文、原因链与分类，不做内容脱敏 |
 | 改观测/长度边界 | `src/runtime/request.rs`：`PreparedModelRequest`、`observe`、`ObservedProviderBody`、`ModelRuntimeConfig` | 配置显式构造，不读环境变量；`AnthropicConfig::new` / `OpenAiConfig::new` | 键、路径、URL/query、data URI 和 config Debug 保留原始内容，不做内容脱敏；观测级别和长度约束独立，契约 ARC-SECRET-001 |
 | 改错误类型/分类 | `src/runtime/error.rs`：`ModelError`、`ProtocolErrorKind` | `ModelError::protocol`、`http_status`、`with_message`、`with_body`、`with_causes` | 实际错误正文和原因链与分类共存；cancelled 与 interrupted 语义区分，协议形状与长度校验不做敏感内容判断 |
 | 改模型诊断 / 重试耗尽事实 | `src/runtime/error.rs` + `src/runtime/retry.rs` | `ModelErrorDiagnostic`；`ModelError::diagnostic`；`RetryObservation::diagnostic`；`retry_exhausted_with_context` | 保留 category/status/provider/request-id/transport/protocol/retry 事实及 message/body/causes；重试与中断转换不得丢弃原始原因，字段内容不脱敏；无信息时为 None，枚举使用 snake_case |
 
+### Responses 新增入口
+
+| 我想做什么 | 主文件 | 入口与约束 |
+| --- | --- | --- |
+| Responses API / 订阅推理 | `src/openai_responses/` | `ResponsesConfig`、`ResponsesProfile`、`ResponsesModel`；一个 wire adapter、两种认证 profile，复用公共 HTTP/SSE/retry/cancel |
+| 原生输出回放 | `src/openai_responses/replay.rs` + `src/protocol/types.rs` | `ContentBlock::ProviderState`、`ProviderProtocol::OpenAiResponses`；有序 items 绑定 endpoint/model/profile/credential reference，替代 typed 投影发送 |
+| 终态 provider 失败 | `src/runtime/error.rs` + `peri-agent/src/agent/stages/mod.rs` | `ProviderTerminal`、`ModelError::is_terminal_provider_failure`；保存部分正文后失败，不自动续跑或执行半成品工具 |
+| 认证重试 | `src/runtime/stream.rs` + `src/runtime/retry.rs` | `AuthenticationRefreshed` 只允许首个可见 delta 前在现有 attempt 预算内重发；凭据文件和 OAuth 生命周期在 `mcp-packages/credentials` |
+
+契约回归位于 Responses 相邻测试、`runtime/retry_test.rs`、
+`peri-agent/src/agent/stages/truncation_test.rs` 及跨层回放测试。
+
 ## 子系统
 
 ### protocol/（协议 DTO + 模型接口事实源）
 
-`protocol/prepared.rs::PreparedModelCall` 是 RCRA 持久请求屏障使用的 opaque full-wire 请求：`Model::prepare_stream` 冻结 provider body、endpoint/model 与 credential 配置关联，`checkpoint()` 保留完整消息、system 和工具 schema，`start()` 消费同一冻结请求后才允许 HTTP effect。公开 `new` 构造器供受信跨 crate provider 实现同一精确请求契约，准备阶段无执行副作用；不允许自动降级。Anthropic/OpenAI 两个 adapter 共享此契约；不支持的 Model 默认拒绝。此类型不是经过脱敏/截断的 `PreparedModelRequest` observation，checkpoint 不含认证 headers/API keys。对应验证：`prepared_stream_test`（发送 body 等于完整 checkpoint；取消零发送）及 `PreparedModelCall::new` doc test（取消时不调用发送闭包）。
+`protocol/prepared.rs::PreparedModelCall` 是 RCRA 持久请求屏障使用的 opaque full-wire 请求：`Model::prepare_stream` 冻结 provider body、endpoint/model 与 credential 配置关联，`checkpoint()` 保留完整消息、system 和工具 schema，`start()` 消费同一冻结请求后才允许 HTTP effect。公开 `new` 构造器供受信跨 crate provider 实现同一精确请求契约，准备阶段无执行副作用；不允许自动降级。所有内置 adapter 共享此契约；不支持的 Model 默认拒绝。此类型不是经过脱敏/截断的 `PreparedModelRequest` observation，checkpoint 不含认证 headers/API keys。对应验证：`prepared_stream_test`（发送 body 等于完整 checkpoint；取消零发送）及 `PreparedModelCall::new` doc test（取消时不调用发送闭包）。
 
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |

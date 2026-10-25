@@ -98,6 +98,13 @@ pub enum ContentBlock {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         data: Option<String>,
     },
+    /// Opaque replay data owned by one provider adapter. This is not displayable
+    /// content or a tool argument. Only that adapter may interpret the payload;
+    /// other adapters retain the typed text/tool projection and omit this block.
+    ProviderState {
+        provider: String,
+        data: Value,
+    },
 }
 
 impl ContentBlock {
@@ -120,7 +127,8 @@ impl ContentBlock {
             | Self::Reasoning { .. }
             | Self::ToolUse { .. }
             | Self::ToolResult { .. }
-            | Self::RedactedReasoning { .. } => None,
+            | Self::RedactedReasoning { .. }
+            | Self::ProviderState { .. } => None,
         }
     }
 }
@@ -499,6 +507,7 @@ pub struct ModelCapabilities {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProviderProtocol {
     OpenAiCompatible,
+    OpenAiResponses,
     Anthropic,
     Other { value: String },
 }

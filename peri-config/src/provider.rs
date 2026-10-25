@@ -1,13 +1,57 @@
 use std::collections::BTreeMap;
 
-use crate::app::{AppConfig, PeriConfig, ProfileConfig, ProviderConfig};
+use crate::app::{AppConfig, PeriConfig, ProfileConfig, ProviderAuthConfig, ProviderConfig};
+use thiserror::Error;
+use url::Url;
 
 const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-5-5";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-6.1-sol";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const DEFAULT_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResponsesAuthentication {
+    ApiKey {
+        api_key: String,
+    },
+    ChatGptPlan {
+        store: std::path::PathBuf,
+        account: String,
+        subject: String,
+        client_id: String,
+    },
+}
+
+#[derive(Debug, Error)]
+pub enum ProviderError {
+    #[error("unsupported provider type; use anthropic, openai, or openai_responses")]
+    UnknownType,
+    #[error("Responses requires an explicit model and positive profile contextWindow")]
+    MissingModelCapacity,
+    #[error(
+        "Responses baseUrl must be an absolute HTTP(S) URL without user info, query, or fragment"
+    )]
+    InvalidEndpoint,
+    #[error("ChatGPT plan requires an absolute credentials store and nonempty account/subject/clientId reference, with no apiKey")]
+    InvalidSubscriptionReference,
+    #[error("ChatGPT plan requires the official https://api.openai.com/v1/responses endpoint")]
+    InvalidSubscriptionEndpoint,
+    #[error("auth configuration is only supported by openai_responses")]
+    UnexpectedAuth,
+    #[error("Responses API key mode requires apiKey; choose chatgpt_plan explicitly for subscription authentication")]
+    MissingApiKey,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedProvider {
+    Responses {
+        auth: ResponsesAuthentication,
+        endpoint: Url,
+        model: String,
+        effort: Option<String>,
+        max_tokens: u32,
+        context_window: u32,
+    },
     Anthropic {
         api_key: String,
         model: String,
@@ -30,20 +74,54 @@ pub fn resolve(
     settings: &PeriConfig,
     environment: &BTreeMap<String, String>,
 ) -> Option<ResolvedProvider> {
+    try_resolve(settings, environment).unwrap_or_else(|error| {
+        tracing::warn!(%error, "provider configuration rejected");
+        None
+    })
+}
+
+pub fn try_resolve(
+    settings: &PeriConfig,
+    environment: &BTreeMap<String, String>,
+) -> Result<Option<ResolvedProvider>, ProviderError> {
+    // Validate configured auxiliary tiers at the same authority boundary. An invalid
+    // subscription tier must not later become a factory's implicit primary fallback.
+    for alias in crate::app::Profiles::ALL {
+        if settings
+            .config
+            .profiles
+            .get(alias)
+            .is_some_and(|profile| !profile.is_default())
+        {
+            try_resolve_for_alias(settings, alias)?;
+        }
+    }
     match (
         environment.get("MODEL_PROVIDER"),
         environment.get("MODEL_TYPE"),
     ) {
-        (None, None) => resolve_for_alias(settings, &settings.config.active_alias),
+        (None, None) => try_resolve_for_alias(settings, &settings.config.active_alias),
         (Some(provider_id), Some(alias)) => {
             resolve_for_provider_alias(settings, provider_id, alias)
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
 pub fn resolve_for_alias(settings: &PeriConfig, alias: &str) -> Option<ResolvedProvider> {
-    let (provider, profile) = resolve_profile(&settings.config, alias)?;
+    try_resolve_for_alias(settings, alias).unwrap_or_else(|error| {
+        tracing::warn!(%error, "provider profile rejected");
+        None
+    })
+}
+
+pub fn try_resolve_for_alias(
+    settings: &PeriConfig,
+    alias: &str,
+) -> Result<Option<ResolvedProvider>, ProviderError> {
+    let Some((provider, profile)) = resolve_profile(&settings.config, alias) else {
+        return Ok(None);
+    };
     resolve_configured(
         provider,
         profile,
@@ -58,42 +136,58 @@ fn resolve_for_provider_alias(
     settings: &PeriConfig,
     provider_id: &str,
     alias: &str,
-) -> Option<ResolvedProvider> {
-    let provider = settings
+) -> Result<Option<ResolvedProvider>, ProviderError> {
+    let Some(provider) = settings
         .config
         .providers
         .iter()
-        .find(|provider| provider.id == provider_id && !provider_id.is_empty())?;
-    let profile = settings.config.profiles.get(alias)?;
-    let model = provider
+        .find(|provider| provider.id == provider_id && !provider_id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(profile) = settings.config.profiles.get(alias) else {
+        return Ok(None);
+    };
+    let Some(model) = provider
         .models
         .get_model(alias)
         .filter(|model| !model.is_empty())
-        .map(str::to_owned)?;
-    resolve_configured(provider, profile, model)
+    else {
+        return Ok(None);
+    };
+    resolve_configured(provider, profile, model.to_owned())
 }
 
 fn resolve_configured(
     provider: &ProviderConfig,
     profile: &ProfileConfig,
     model: String,
-) -> Option<ResolvedProvider> {
+) -> Result<Option<ResolvedProvider>, ProviderError> {
+    if provider.provider_type == "openai_responses" {
+        return resolve_responses(provider, profile, model);
+    }
+    if provider.auth.is_some() {
+        return Err(ProviderError::UnexpectedAuth);
+    }
+    if !matches!(provider.provider_type.as_str(), "anthropic" | "openai" | "") {
+        return Err(ProviderError::UnknownType);
+    }
     if provider.api_key.is_empty() {
-        return None;
+        return Ok(None);
     }
     let effort = Some(profile.effort.clone());
     let max_tokens = profile.max_tokens;
     let context_1m = profile.context_1m;
-    match provider.provider_type.as_str() {
-        "anthropic" => Some(ResolvedProvider::Anthropic {
+    Ok(Some(match provider.provider_type.as_str() {
+        "anthropic" => ResolvedProvider::Anthropic {
             api_key: provider.api_key.clone(),
             model,
             base_url: (!provider.base_url.is_empty()).then(|| provider.base_url.clone()),
             effort,
             max_tokens,
             context_1m,
-        }),
-        _ => Some(ResolvedProvider::OpenAi {
+        },
+        "openai" | "" => ResolvedProvider::OpenAi {
             api_key: provider.api_key.clone(),
             model,
             base_url: if provider.base_url.is_empty() {
@@ -104,8 +198,78 @@ fn resolve_configured(
             effort,
             max_tokens,
             context_1m,
-        }),
+        },
+        _ => return Err(ProviderError::UnknownType),
+    }))
+}
+
+fn resolve_responses(
+    provider: &ProviderConfig,
+    profile: &ProfileConfig,
+    model: String,
+) -> Result<Option<ResolvedProvider>, ProviderError> {
+    let context_window = profile
+        .context_window
+        .filter(|value| *value > 0)
+        .filter(|_| !model.trim().is_empty())
+        .ok_or(ProviderError::MissingModelCapacity)?;
+    let endpoint = Url::parse(if provider.base_url.is_empty() {
+        DEFAULT_RESPONSES_URL
+    } else {
+        &provider.base_url
+    })
+    .map_err(|_| ProviderError::InvalidEndpoint)?;
+    if !matches!(endpoint.scheme(), "http" | "https")
+        || endpoint.host_str().is_none()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+    {
+        return Err(ProviderError::InvalidEndpoint);
     }
+    let auth = match &provider.auth {
+        Some(ProviderAuthConfig::ChatGptPlan {
+            store,
+            account,
+            subject,
+            client_id,
+        }) => {
+            if !provider.api_key.is_empty()
+                || !store.is_absolute()
+                || account.trim().is_empty()
+                || subject.trim().is_empty()
+                || client_id.trim().is_empty()
+            {
+                return Err(ProviderError::InvalidSubscriptionReference);
+            }
+            if endpoint.as_str() != DEFAULT_RESPONSES_URL {
+                return Err(ProviderError::InvalidSubscriptionEndpoint);
+            }
+            ResponsesAuthentication::ChatGptPlan {
+                store: store.clone(),
+                account: account.clone(),
+                subject: subject.clone(),
+                client_id: client_id.clone(),
+            }
+        }
+        Some(ProviderAuthConfig::ApiKey) | None => {
+            if provider.api_key.is_empty() {
+                return Err(ProviderError::MissingApiKey);
+            }
+            ResponsesAuthentication::ApiKey {
+                api_key: provider.api_key.clone(),
+            }
+        }
+    };
+    Ok(Some(ResolvedProvider::Responses {
+        auth,
+        endpoint,
+        model,
+        effort: (!profile.effort.is_empty()).then(|| profile.effort.clone()),
+        max_tokens: profile.max_tokens,
+        context_window,
+    }))
 }
 
 fn resolve_profile<'a>(
@@ -138,12 +302,18 @@ fn resolve_model_name(provider: &ProviderConfig, alias: &str, profile: &ProfileC
 fn default_model_name(provider_type: &str) -> &str {
     if provider_type == "anthropic" {
         DEFAULT_ANTHROPIC_MODEL
+    } else if provider_type == "openai_responses" {
+        ""
     } else {
         DEFAULT_OPENAI_MODEL
     }
 }
 
 pub const ENVIRONMENT_KEYS: &[&str] = &["MODEL_PROVIDER", "MODEL_TYPE"];
+
+#[cfg(test)]
+#[path = "provider_responses_test.rs"]
+mod responses_tests;
 
 #[cfg(test)]
 mod tests {
@@ -268,6 +438,7 @@ mod tests {
             effort: "max".into(),
             max_tokens: 64000,
             context_1m: true,
+            context_window: None,
         };
         assert_eq!(
             resolve(&config, &BTreeMap::new()),
@@ -323,7 +494,7 @@ mod tests {
         assert!(
             matches!(resolve_for_alias(&config, "fable"), Some(ResolvedProvider::Anthropic { model, .. }) if model == DEFAULT_ANTHROPIC_MODEL)
         );
-        config.config.providers[0].provider_type = "custom".into();
+        config.config.providers[0].provider_type = "openai".into();
         config.config.providers[0].base_url = "https://configured.example/v1".into();
         assert!(
             matches!(resolve_for_alias(&config, "fable"), Some(ResolvedProvider::OpenAi { model, base_url, .. }) if model == DEFAULT_OPENAI_MODEL && base_url == "https://configured.example/v1")

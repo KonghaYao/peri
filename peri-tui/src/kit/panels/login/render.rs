@@ -238,10 +238,11 @@ pub(super) fn render_login_edit_line(
     Line::from(spans)
 }
 
-/// 将 ProviderConfig::provider_type（"anthropic"|"openai"）映射为 i18n 标签 key。
+/// 将 ProviderConfig::provider_type 映射为 i18n 标签 key。
 pub(super) fn provider_type_label(provider_type: &str) -> &'static str {
     match provider_type {
         "anthropic" => "setup-provider-anthropic",
+        "openai_responses" => "setup-provider-openai-responses",
         _ => "setup-provider-openai",
     }
 }

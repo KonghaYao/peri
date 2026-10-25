@@ -357,6 +357,15 @@ fn account_block(block: &ContentBlock) -> Result<Account, LangfuseError> {
                 .merge(Account::string(text))?
                 .merge(Account::optional_string(signature.as_ref()))
         }
+        // Replay contains provider protocol state, never an OAuth credential.
+        // Charge its real retained JSON capacity and transient serialization
+        // copy exactly like other canonical inputs; token estimates do not
+        // apply to this memory budget.
+        ContentBlock::ProviderState { provider, data } => {
+            Account::static_strs(&["type", "provider_state", "provider", "data"])
+                .merge(Account::string(provider))?
+                .merge(account_value(data)?)
+        }
         // 透传形态：源树与深拷贝副本都由同一棵树计量。
         ContentBlock::Unknown(value) => account_value(value),
     }

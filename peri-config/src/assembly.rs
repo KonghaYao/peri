@@ -187,7 +187,21 @@ pub(crate) fn resolve(
         settings.config.merge_overrides(overrides.config);
     }
     let mcp = resolve_mcp(scope, inputs, &HashMap::new())?;
-    let provider = provider::resolve(&settings, &inputs.environment);
+    let provider = provider::try_resolve(&settings, &inputs.environment).map_err(|error| {
+        ConfigurationError::InvalidInput {
+            cause: Box::new(error),
+            source_identity: if workspace.get("config").is_some_and(|config| {
+                ["providers", "profiles", "active_alias"]
+                    .iter()
+                    .any(|key| config.get(*key).is_some())
+            }) {
+                SourceIdentity::WorkspaceFile
+            } else {
+                SourceIdentity::GlobalFile
+            },
+            domain: "provider",
+        }
+    })?;
     // 新观测键的胜出值非法时拒绝整个快照，并按实际来源定位：settings 来自 global 文档，
     // 环境来自具名变量本身。
     let observability = observability::resolve(&global, &inputs.environment).map_err(|error| {

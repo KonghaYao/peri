@@ -328,6 +328,7 @@ fn from_resolved_preserves_runtime_fields_for_both_protocols() {
         assert!(runtime.context_1m());
         assert_eq!(runtime.effort_key(), ":effort=high");
         match runtime {
+            LlmProvider::Responses { .. } => panic!("legacy fixtures must remain legacy protocols"),
             LlmProvider::Anthropic {
                 api_key,
                 base_url,

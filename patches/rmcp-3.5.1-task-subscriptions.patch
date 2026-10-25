@@ -436,3 +436,35 @@ index 8d79fb1..019aa6b 100644
  #[test]
  fn listen_request_round_trips_required_fields_and_arbitrary_metadata() {
      let mut request = SubscriptionsListenRequest::new(SubscriptionsListenRequestParams::new(
+diff --git a/src/service.rs b/src/service.rs
+--- a/src/service.rs
++++ b/src/service.rs
+@@ -1460,7 +1460,18 @@
+                 }
+             };
+ 
+-            tracing::trace!(?evt, "new event");
++            // Successful custom results may carry credentials. The generic
++            // response has no method identity here, so trace only its routing
++            // metadata. Preserve complete request/notification/error diagnostics.
++            match &evt {
++                Event::ToSink(JsonRpcMessage::Response(response)) => {
++                    tracing::trace!(id = %response.id, direction = "outgoing", "response event");
++                }
++                Event::PeerMessage(JsonRpcMessage::Response(response)) => {
++                    tracing::trace!(id = %response.id, direction = "incoming", "response event");
++                }
++                _ => tracing::trace!(?evt, "new event"),
++            }
+             match evt {
+                 Event::SendTaskResult(SendTaskResult::Request { id, result }) => {
+                     if let Err(e) = result
+@@ -1606,7 +1617,7 @@
+                                 .await;
+                             let response = match result {
+                                 Ok(result) => {
+-                                    tracing::debug!(%id, ?result, "response message");
++                                    tracing::debug!(%id, "response message");
+                                     JsonRpcMessage::response(result, id)
+                                 }
+                                 Err(error) => {

@@ -56,6 +56,10 @@ pub enum ProtocolErrorKind {
     ToolCallInvalidArguments,
     InvalidEndpoint,
     Provider,
+    /// Provider 已明确终止本轮；禁止重发或用部分输出自动续跑。
+    ProviderTerminal,
+    /// 401 后凭据已刷新，允许在原有 attempt 预算内重新发送冻结请求。
+    AuthenticationRefreshed,
     Other,
 }
 
@@ -70,6 +74,8 @@ impl fmt::Display for ProtocolErrorKind {
             Self::ToolCallInvalidArguments => "tool call has invalid arguments",
             Self::InvalidEndpoint => "invalid endpoint",
             Self::Provider => "provider failure",
+            Self::ProviderTerminal => "terminal provider failure",
+            Self::AuthenticationRefreshed => "authentication refreshed",
             Self::Other => "other failure",
         };
         formatter.write_str(value)
@@ -539,6 +545,15 @@ impl ModelError {
 
     pub fn is_stream_interrupted(&self) -> bool {
         matches!(&*self.0, ModelErrorInner::StreamInterrupted { .. })
+    }
+
+    /// 包括中断投影保留的原始诊断，避免上层将终态错误误当作可续跑断流。
+    pub fn is_terminal_provider_failure(&self) -> bool {
+        self.protocol_error().map(|error| error.kind()) == Some(ProtocolErrorKind::ProviderTerminal)
+            || self
+                .interruption_diagnostic()
+                .and_then(|value| value.protocol())
+                == Some(ProtocolErrorKind::ProviderTerminal)
     }
 
     pub fn transport_kind(&self) -> Option<TransportErrorKind> {

@@ -206,6 +206,14 @@ fn test_protocol_error_kinds_are_explicit_and_stable() {
         ),
         (ProtocolErrorKind::InvalidEndpoint, "invalid endpoint"),
         (ProtocolErrorKind::Provider, "provider failure"),
+        (
+            ProtocolErrorKind::ProviderTerminal,
+            "terminal provider failure",
+        ),
+        (
+            ProtocolErrorKind::AuthenticationRefreshed,
+            "authentication refreshed",
+        ),
         (ProtocolErrorKind::Other, "other failure"),
     ];
 
@@ -217,6 +225,17 @@ fn test_protocol_error_kinds_are_explicit_and_stable() {
         assert_eq!(protocol_error.summary(), None);
         assert_eq!(protocol_error.to_string(), summary);
     }
+}
+
+#[test]
+fn terminal_provider_failure_survives_interruption_projection() {
+    let terminal = ModelError::protocol(ProtocolErrorKind::ProviderTerminal);
+    assert!(terminal.is_terminal_provider_failure());
+    let projected = ModelError::stream_interrupted(Some("openai_responses"), None::<&str>)
+        .with_interruption_diagnostic(terminal.diagnostic(), true);
+    assert!(projected.is_terminal_provider_failure());
+    assert!(!ModelError::protocol(ProtocolErrorKind::Provider).is_terminal_provider_failure());
+    assert!(!ModelError::cancelled().is_terminal_provider_failure());
 }
 
 #[test]

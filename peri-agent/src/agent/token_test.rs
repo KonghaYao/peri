@@ -14,6 +14,33 @@ fn make_usage(
     }
 }
 
+#[test]
+fn replay_budget_uses_nonzero_placeholder_then_authoritative_usage() {
+    use crate::messages::{BaseMessage, ContentBlock, MessageContent};
+    let message = |opaque: &str| {
+        BaseMessage::ai(MessageContent::Blocks(vec![
+            ContentBlock::text("text"),
+            ContentBlock::ProviderState {
+                provider: "openai_responses".into(),
+                data: serde_json::json!({"items":[{"encrypted_content":opaque}]}),
+            },
+        ]))
+    };
+    let small = estimate_request_tokens(&[message("small")], &[]);
+    let large = estimate_request_tokens(&[message(&"opaque".repeat(100_000))], &[]);
+    assert_eq!(small, PROVIDER_REPLAY_ESTIMATED_TOKENS + 1);
+    assert_eq!(small, large, "ciphertext bytes are not a tokenizer");
+    let mut tracker = TokenTracker::default();
+    tracker.begin_request(small);
+    tracker.accumulate(&make_usage(12_000, 10, None, None));
+    assert_eq!(tracker.estimated_context_tokens(), Some(12_000));
+    tracker.refresh_input_estimate(small + PROVIDER_REPLAY_ESTIMATED_TOKENS);
+    assert_eq!(
+        tracker.estimated_context_tokens(),
+        Some(12_000 + PROVIDER_REPLAY_ESTIMATED_TOKENS)
+    );
+}
+
 /// [回归测试] 冷启动没有 usage 时，当前请求视图仍须提供压力事实。
 #[test]
 fn test_cold_input_estimate_arms_compact_without_usage() {

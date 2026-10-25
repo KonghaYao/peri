@@ -100,6 +100,7 @@ impl ResultContent<'_> {
                     ..
                 }
                 | ContentBlock::Unknown(_)
+                | ContentBlock::ProviderState { .. }
                 | ContentBlock::Reasoning { .. }
                 | ContentBlock::ToolUse { .. } => true,
                 ContentBlock::ToolResult { content, .. } => content.iter().any(block_unsafe),
@@ -335,7 +336,9 @@ fn protocol_features(content: &MessageContent) -> AgentResult<(bool, bool)> {
             for block in blocks {
                 match block {
                     ContentBlock::Reasoning { .. } => signed = true,
-                    ContentBlock::Unknown(_) => unknown = true,
+                    // Opaque replay items cannot be split by generic protocol
+                    // retirement. Full compact may replace the whole history.
+                    ContentBlock::Unknown(_) | ContentBlock::ProviderState { .. } => unknown = true,
                     _ => {}
                 }
             }

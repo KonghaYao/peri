@@ -741,6 +741,12 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 if context.session.turn.is_cancelled() {
                     return interrupted(&context);
                 }
+                if interruption.error.is_terminal_provider_failure() {
+                    let failure =
+                        LoopResult::Error(crate::error::AgentError::ModelError(interruption.error));
+                    record_stage_failure(&context, "model_terminal", &failure);
+                    return failure;
+                }
                 loop_state.stream_recoveries += 1;
                 if loop_state.stream_recoveries >= interruption.max_attempts as usize {
                     let failure =

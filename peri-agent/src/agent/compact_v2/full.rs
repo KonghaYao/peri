@@ -178,6 +178,7 @@ pub(super) async fn full_compact_inner_with_protected(
             )
         })
         .collect();
+    validate_provider_replay_boundary(transcript, &flag_updates)?;
     let affected_count = flag_updates.len();
     // 只有继承上下文时没有可替换的 own 历史，沿用空历史 fallback，避免无效摘要调用。
     let has_history = !flag_updates.is_empty()
@@ -280,6 +281,65 @@ pub(super) async fn full_compact_inner_with_protected(
         changed_fields: 0,
         no_op_candidates: 0,
     })
+}
+
+/// Full may replace complete replay units with a new summary, but may not keep
+/// an ancestor's encrypted output while replacing its own result (or vice versa).
+fn validate_provider_replay_boundary(
+    transcript: &MessageTranscript,
+    flag_updates: &[(MessageId, MessageFlags)],
+) -> AgentResult<()> {
+    let archived: std::collections::HashSet<_> = flag_updates.iter().map(|(id, _)| *id).collect();
+    let mut calls = std::collections::HashMap::new();
+    for entry in transcript.entries() {
+        if transcript.is_excluded(entry.id()) {
+            continue;
+        }
+        if let Some(message) = entry.as_message() {
+            if message.message_content().has_provider_state() {
+                for call in message.tool_calls() {
+                    calls.insert(call.id.as_str(), archived.contains(&entry.id()));
+                }
+            }
+        }
+    }
+    for entry in transcript.entries() {
+        if transcript.is_excluded(entry.id()) {
+            continue;
+        }
+        let Some(message) = entry.as_message() else {
+            continue;
+        };
+        let same_boundary = |id: &str| {
+            calls
+                .get(id)
+                .is_none_or(|call_archived| *call_archived == archived.contains(&entry.id()))
+        };
+        let valid = match message {
+            BaseMessage::Tool { tool_call_id, .. } => same_boundary(tool_call_id),
+            _ => match message.message_content() {
+                crate::messages::MessageContent::Blocks(blocks) => {
+                    blocks.iter().all(|block| match block {
+                        crate::messages::ContentBlock::ToolResult { tool_use_id, .. } => {
+                            same_boundary(tool_use_id)
+                        }
+                        _ => true,
+                    })
+                }
+                crate::messages::MessageContent::Raw(blocks) => blocks.iter().all(|block| {
+                    block["type"] != "tool_result"
+                        || block["tool_use_id"].as_str().is_none_or(same_boundary)
+                }),
+                crate::messages::MessageContent::Text(_) => true,
+            },
+        };
+        if !valid {
+            return Err(AgentError::LlmError(
+                "Full Compact cannot split a provider replay unit across retained history".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Full Compact 派生请求的输出预算与恢复次数预算（H6）。
@@ -567,6 +627,9 @@ fn estimate_content_chars(block: &peri_model::ContentBlock) -> u64 {
             crate::agent::token::BINARY_MEDIA_ESTIMATED_TOKENS
         }
         ContentBlock::Reasoning { .. } | ContentBlock::RedactedReasoning { .. } => 0,
+        ContentBlock::ProviderState { .. } => {
+            crate::agent::token::PROVIDER_REPLAY_ESTIMATED_TOKENS * 4
+        }
         ContentBlock::ToolResult { result } => result
             .content
             .iter()
