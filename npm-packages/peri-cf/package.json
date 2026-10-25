@@ -9,13 +9,15 @@
     "wasm:profiles": "bun scripts/profile-wasm.ts",
     "prepare:wasm": "bun scripts/prepare-wasm.ts",
     "dev": "bun run prepare:wasm && bun scripts/dev.ts",
-    "dev:server": "bun --watch server/index.ts",
+    "dev:server": "bun --watch --tsconfig-override server/tsconfig.json server/index.ts",
     "dev:web": "vite",
     "build": "bun run prepare:wasm && vite build",
-    "start": "bun server/index.ts",
-    "preview": "bun server/index.ts",
-    "typecheck": "tsc --noEmit",
-    "test": "bun test core frontend server scripts"
+    "start": "bun --tsconfig-override server/tsconfig.json server/index.ts",
+    "preview": "bun --tsconfig-override server/tsconfig.json server/index.ts",
+    "typecheck": "tsc --noEmit && tsc -p server/tsconfig.json",
+    "typecheck:server": "tsc -p server/tsconfig.json",
+    "test": "bun test core frontend scripts && bun test --tsconfig-override server/tsconfig.json server",
+    "test:server": "bun test --tsconfig-override server/tsconfig.json server"
   },
   "dependencies": {
     "@assistant-ui/react": "^0.15.28",

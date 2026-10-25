@@ -31,9 +31,11 @@
   "include": [
     "core",
     "frontend",
-    "server",
     "scripts",
     "wasm",
     "vite.config.ts"
+  ],
+  "exclude": [
+    "server"
   ]
 }

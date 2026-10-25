@@ -1,0 +1,16 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["../frontend/*"],
+      "@core/*": ["../core/*"],
+      "@peri-code/sdk": ["../../@peri-sdk/src/sdk/index.ts"],
+      "@peri-code/sdk/portable": ["../../@peri-sdk/src/portable.ts"],
+      "@peri-code/sdk/wasm": ["../../@peri-sdk/src/wasm.ts"],
+      "@peri-code/sdk/wasm-host": ["../../@peri-sdk/src/wasm-host.ts"],
+      "@peri-code/sdk/view": ["../../@peri-sdk/src/view/index.ts"]
+    }
+  },
+  "include": ["."],
+  "exclude": []
+}

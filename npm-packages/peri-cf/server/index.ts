@@ -1,12 +1,32 @@
 import { resolve, sep } from "node:path";
-import { createApi } from "./api";
+import type { Server } from "bun";
+import {
+  SYNC_PATH_PATTERN,
+  createApi,
+  handleSyncUpgrade,
+  syncWebSocketHandlers,
+  type SyncSocketData,
+} from "./api";
+import {
+  getChatManager,
+  shutdownChatManager,
+  type AppChatManager,
+  type AppChatManagerOptions,
+} from "./agent";
 import { loadServerConfig, publicServerInfo, type ServerConfig } from "./config";
-import { ChatManager } from "./agent";
 
 /**
- * Bun 长驻服务：`/api/*` 由会话服务处理，其余路径提供 Vite 构建的前端静态资源。
+ * Bun 长驻服务：`/api/*` 由会话服务处理，`/api/chats/:chatId/sync` 升级为只读
+ * Yjs WebSocket，其余路径提供 Vite 构建的前端静态资源。
+ *
  * 凭据只从进程环境读取；停止进程即结束所有运行中的 Agent 执行（不跨进程恢复）。
  */
+
+export interface RunningServer {
+  server: Server<SyncSocketData>;
+  manager: AppChatManager;
+}
+
 function createStaticHandler(config: ServerConfig): (request: Request) => Promise<Response> {
   const root = resolve(config.staticRoot);
   const index = Bun.file(resolve(root, "index.html"));
@@ -23,36 +43,79 @@ function createStaticHandler(config: ServerConfig): (request: Request) => Promis
   };
 }
 
-const loaded = loadServerConfig();
-if (!loaded.config) {
-  for (const problem of loaded.problems) console.error(`[peri-cf] ${problem}`);
-  process.exit(1);
+/** 组装 HTTP/WS 服务；WASM 宿主仍由首个 Action 懒启动。 */
+export function createServer(
+  config: ServerConfig,
+  manager: AppChatManager,
+): Server<SyncSocketData> {
+  const logError = (
+    label: string,
+    error: unknown,
+    context?: Record<string, unknown>,
+  ): void => console.error(`[peri-cf] ${label}`, context ?? {}, error);
+  const app = createApi({ manager, info: publicServerInfo(config), logError });
+  const serveStatic = createStaticHandler(config);
+  return Bun.serve<SyncSocketData>({
+    hostname: config.hostname,
+    port: config.port,
+    async fetch(request, server) {
+      const path = new URL(request.url).pathname;
+      if (SYNC_PATH_PATTERN.test(path)) {
+        // 成功升级时返回 undefined；失败在升级前返回 HTTP 响应。
+        return handleSyncUpgrade(request, server, {
+          manager,
+          views: manager.views,
+          logError,
+        });
+      }
+      if (path === "/api" || path.startsWith("/api/")) return app.fetch(request);
+      return serveStatic(request);
+    },
+    websocket: syncWebSocketHandlers,
+  });
 }
-const config = loaded.config;
-const manager = new ChatManager(config);
-const app = createApi({ manager, info: publicServerInfo(config) });
-const serveStatic = createStaticHandler(config);
 
-const server = Bun.serve({
-  hostname: config.hostname,
-  port: config.port,
-  async fetch(request) {
-    const path = new URL(request.url).pathname;
-    if (path === "/api" || path.startsWith("/api/")) return app.fetch(request);
-    return serveStatic(request);
-  },
-});
+/** 进程级入口：先取得单例 Manager，再启动服务。 */
+export function startServer(
+  config: ServerConfig,
+  options: AppChatManagerOptions = {},
+): RunningServer {
+  const manager = getChatManager(config, options);
+  const server = createServer(config, manager);
+  return { server, manager };
+}
 
-console.log(`[peri-cf] server listening on http://${server.hostname}:${server.port}`);
-console.log(`[peri-cf] model=${config.model.provider}/${config.model.id} mcp=${config.mcpServers.map((item) => item.name).join(",") || "none"}`);
+function startFromEnvironment(): void {
+  const loaded = loadServerConfig();
+  if (!loaded.config) {
+    for (const problem of loaded.problems) console.error(`[peri-cf] ${problem}`);
+    process.exit(1);
+  }
+  const config = loaded.config;
+  const { server } = startServer(config);
+  console.log(`[peri-cf] server listening on http://${server.hostname}:${server.port}`);
+  console.log(
+    `[peri-cf] model=${config.model.provider}/${config.model.id}`
+    + ` mcp=${config.mcpServers.map((item) => item.name).join(",") || "none"}`,
+  );
 
-let stopping = false;
-for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.once(signal, async () => {
+  let stopping = false;
+  const stop = async (): Promise<void> => {
     if (stopping) return;
     stopping = true;
     server.stop();
-    await manager.shutdown();
-    process.exit(0);
-  });
+    try {
+      await shutdownChatManager();
+      process.exit(0);
+    } catch (error) {
+      console.error("[peri-cf] shutdown is incomplete; resources are preserved", error);
+      process.exit(1);
+    }
+  };
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    process.once(signal, () => { void stop(); });
+  }
 }
+
+// 测试导入模块不得启动 WASM 宿主或监听端口。
+if (import.meta.main) startFromEnvironment();

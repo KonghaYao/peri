@@ -1,161 +1,356 @@
-import { Hono } from "hono";
-import { streamSSE } from "hono/streaming";
-import { ChatCommandError, ChatNotFoundError } from "../../core/agent";
-import { chatCommandSchema, chatIdSchema, createChatBodySchema } from "../../core/shared";
+import { Hono, type Context } from "hono";
+import {
+  parseChatUserAction,
+  type ChatBindingTarget,
+  type ChatService,
+  type ChatSessionDirectoryEntry,
+  type ChatUserAction as ChatUserActionValue,
+  type ReadPayloadOptions,
+  type ToolPayloadResponse,
+} from "@peri-code/sdk";
+import { ChatCloseIncompleteError } from "@peri-code/sdk";
 import type { publicServerInfo } from "../config";
-import type { ChatManagerPort, ChatSubscription } from "../agent";
+import {
+  chatNotFound,
+  closeIncomplete,
+  mapChatActionError,
+  mapPayloadError,
+} from "./errors";
 
-export interface ApiDeps {
-  /** API 只依赖组合根端口，不接触 Store、宿主或实例。 */
-  manager: ChatManagerPort;
-  info: ReturnType<typeof publicServerInfo>;
+/** API 只依赖平台组合根端口与目录事实，不接触 Store、宿主或 View。 */
+export interface ApiChatManager {
+  listSessions(options?: { path?: string }): Promise<ChatSessionDirectoryEntry[]>;
+  createChat(options?: { path?: string }): ChatService;
+  getChat(id: string): ChatService | undefined;
+  findChatBySession(sessionId: string): ChatService | undefined;
+  closeChat(id: string): Promise<void>;
 }
 
-const NOT_FOUND = "Chat not found";
-const HEARTBEAT_MS = 15_000;
-const SNAPSHOT_INTERVAL_MS = 50;
+export interface ApiDeps {
+  manager: ApiChatManager;
+  info: ReturnType<typeof publicServerInfo>;
+  logError?: (label: string, error: unknown, context?: Record<string, unknown>) => void;
+}
 
-function isNotFound(error: unknown): boolean {
-  return error instanceof ChatNotFoundError;
+interface ActionTarget {
+  sessionId: string | null;
+  bindingRevision: number;
+}
+
+const MAX_ACTION_BODY_BYTES = 256 * 1024;
+const INVALID_ACTION = "Action body is not a valid ChatUserAction envelope";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function invalidAction(c: Context, message: string, requestId?: string) {
+  return c.json({
+    ok: false as const,
+    code: "invalid_action",
+    message,
+    disposition: "rejected" as const,
+    ...(requestId ? { requestId } : {}),
+  }, 400);
+}
+
+/** `target` 是连接所属绑定；空句柄用 `sessionId:null` + `bindingRevision:0`。 */
+function parseTarget(value: unknown): ActionTarget | string {
+  if (!isRecord(value)) return "target must be an object";
+  const sessionId = value.sessionId;
+  if (sessionId !== null && (typeof sessionId !== "string" || sessionId.length === 0)) {
+    return "target.sessionId must be a non-empty string or null";
+  }
+  const revision = value.bindingRevision;
+  if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) {
+    return "target.bindingRevision must be a non-negative safe integer";
+  }
+  return { sessionId, bindingRevision: revision };
+}
+
+function targetMatches(chat: ChatService, target: ActionTarget): boolean {
+  const binding = chat.binding;
+  if (!binding) return target.sessionId === null && target.bindingRevision === 0;
+  return binding.sessionId === target.sessionId
+    && binding.bindingRevision === target.bindingRevision;
+}
+
+function resolveChat(manager: ApiChatManager, id: string): ChatService | undefined {
+  return manager.getChat(id) ?? manager.findChatBySession(id);
+}
+
+async function readActionBody(
+  c: Context,
+): Promise<{ ok: true; value: unknown } | { ok: false; response: Response }> {
+  const length = Number(c.req.header("content-length") ?? "0");
+  if (Number.isFinite(length) && length > MAX_ACTION_BODY_BYTES) {
+    return { ok: false, response: invalidAction(c, "Action body exceeds 256 KiB") };
+  }
+  const text = await c.req.text();
+  if (new TextEncoder().encode(text).byteLength > MAX_ACTION_BODY_BYTES) {
+    return { ok: false, response: invalidAction(c, "Action body exceeds 256 KiB") };
+  }
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch {
+    return { ok: false, response: invalidAction(c, INVALID_ACTION) };
+  }
+}
+
+interface ExecutedAction {
+  target: ChatBindingTarget;
+  details: Record<string, unknown>;
+}
+
+/** 只在这里分支执行；send 只等待入队接受，不等待整轮投递。 */
+async function executeAction(
+  chat: ChatService,
+  action: ChatUserActionValue,
+  fallback: ActionTarget,
+): Promise<ExecutedAction> {
+  switch (action.type) {
+    case "send": {
+      const receipt = chat.execute(action);
+      await receipt.accepted;
+      return {
+        target: receipt.target,
+        details: { inputId: receipt.inputId, accepted: true },
+      };
+    }
+    case "create_new_session":
+    case "change_session": {
+      const result = await chat.execute(action);
+      return {
+        target: {
+          chatId: result.chatId,
+          sessionId: result.sessionId,
+          bindingRevision: result.bindingRevision,
+        },
+        details: {},
+      };
+    }
+    case "cancel": {
+      const result = await chat.execute(action);
+      return {
+        target: bindingTarget(chat, fallback),
+        details: { status: result.status },
+      };
+    }
+    case "force_send":
+    case "take_back":
+    case "answer": {
+      const result = await chat.execute(action);
+      return {
+        target: bindingTarget(chat, fallback),
+        details: { status: result.status },
+      };
+    }
+    case "load_earlier_history": {
+      const result = await chat.execute(action);
+      return {
+        target: bindingTarget(chat, fallback),
+        details: { applied: result.applied, nextCursor: result.nextCursor },
+      };
+    }
+  }
+}
+
+function bindingTarget(chat: ChatService, fallback: ActionTarget): ChatBindingTarget {
+  const binding = chat.binding;
+  if (binding) return binding;
+  return {
+    chatId: chat.id,
+    sessionId: fallback.sessionId ?? "",
+    bindingRevision: fallback.bindingRevision,
+  };
 }
 
 /**
- * 服务端 HTTP 面：会话清单/创建/读取、命令提交与投影 SSE。
- * 路由不接触 WASM 宿主；会话生命周期由 `ChatService` 的驻留实例管理。
+ * 服务端 HTTP 面：目录、句柄、Action 与工具载荷。
+ *
+ * 路由只做边界校验、目标绑定核对与错误映射；执行、绑定与关闭语义都在 SDK。
  */
 export function createApi(deps: ApiDeps): Hono {
   const app = new Hono();
+  const logError = deps.logError
+    ?? ((label: string, error: unknown, context?: Record<string, unknown>) =>
+      console.error(label, context ?? {}, error));
 
   app.get("/api/info", (c) => c.json({ ok: true, ...deps.info }));
 
-  app.get("/api/chats", async (c) => c.json({ chats: await deps.manager.list() }));
+  app.get("/api/chats", async (c) => {
+    const raw = c.req.query("path");
+    const path = raw && raw.length > 0 ? raw : undefined;
+    try {
+      const chats = await deps.manager.listSessions(path ? { path } : undefined);
+      return c.json({ chats, available: true });
+    } catch (error) {
+      logError("Peri session directory is unavailable", error);
+      return c.json({
+        chats: [],
+        available: false,
+        error: "Session directory is unavailable",
+      }, 503);
+    }
+  });
 
   app.post("/api/chats", async (c) => {
-    const body = await c.req.json().catch(() => null);
-    const parsed = createChatBodySchema.safeParse(body ?? {});
-    if (!parsed.success) return c.json({ error: "Invalid chat title" }, 400);
-    return c.json({ chat: await deps.manager.create(parsed.data.title) }, 201);
-  });
-
-  app.get("/api/chats/:id", async (c) => {
-    const id = chatIdSchema.safeParse(c.req.param("id"));
-    if (!id.success) return c.json({ error: "Invalid chat id" }, 400);
-    try {
-      return c.json({ state: await deps.manager.read(id.data) });
-    } catch (error) {
-      if (isNotFound(error)) return c.json({ error: NOT_FOUND }, 404);
-      throw error;
-    }
-  });
-
-  app.post("/api/chats/:id/commands", async (c) => {
-    const id = chatIdSchema.safeParse(c.req.param("id"));
-    if (!id.success) return c.json({ error: "Invalid chat id" }, 400);
-    const body = await c.req.json().catch(() => null);
-    const command = chatCommandSchema.safeParse(body);
-    if (!command.success)
-      return c.json({ ok: false, code: "invalid_command", message: "命令格式无效", disposition: "rejected" }, 400);
-    try {
-      const payload = await deps.manager.run(id.data, command.data);
-      return c.json({ ok: true, ...(payload ? { payload } : {}) });
-    } catch (error) {
-      if (error instanceof ChatCommandError)
-        return c.json({
-          ok: false, code: error.code, message: error.message, disposition: error.disposition,
-        }, error.code === "not_found" ? 404 : 409);
-      if (isNotFound(error))
-        return c.json({ ok: false, code: "not_found", message: NOT_FOUND, disposition: "rejected" }, 404);
-      console.error("Peri chat command failed", { chatId: id.data, op: command.data.op }, error);
-      return c.json({
-        ok: false, code: "internal_error", message: "命令执行失败；诊断已记录", disposition: "unknown",
-      }, 500);
-    }
-  });
-
-  app.get("/api/chats/:id/events", async (c) => {
-    const id = chatIdSchema.safeParse(c.req.param("id"));
-    if (!id.success) return c.json({ error: "Invalid chat id" }, 400);
-    // 先验证会话可复原，避免把错误塞进已经开始的 SSE 流。
-    try {
-      await deps.manager.read(id.data);
-    } catch (error) {
-      if (isNotFound(error)) return c.json({ error: NOT_FOUND }, 404);
-      throw error;
-    }
-
-    return streamSSE(c, async (stream) => {
-      let closed = false;
-      let initialized = false;
-      let latest: Awaited<ReturnType<ChatManagerPort["read"]>> | undefined;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      let heartbeat: ReturnType<typeof setInterval> | undefined;
-      let subscription: ChatSubscription | undefined;
-      let writing = Promise.resolve();
-      let settle!: () => void;
-      const done = new Promise<void>((resolve) => { settle = resolve; });
-
-      // 幂等清理：取消订阅后再结算等待，避免断开后继续持有 watcher。
-      const cleanup = (): void => {
-        if (closed) return;
-        closed = true;
-        if (timer !== undefined) clearTimeout(timer);
-        if (heartbeat !== undefined) clearInterval(heartbeat);
-        subscription?.close();
-        settle();
-      };
-      stream.onAbort(cleanup);
-      // Hono 只对注册之后的取消调用 onAbort；请求信号已中止时也要立即清理。
-      if (stream.aborted || c.req.raw.signal.aborted) cleanup();
-      else c.req.raw.signal.addEventListener("abort", cleanup, { once: true });
-
-      const write = (state: NonNullable<typeof latest>): Promise<void> => {
-        writing = writing.then(async () => {
-          if (closed) return;
-          await stream.writeSSE({ event: "state", data: JSON.stringify(state) });
-        }).catch(() => { closed = true; });
-        return writing;
-      };
-
-      const schedule = (): void => {
-        if (closed || !initialized || timer !== undefined || !latest) return;
-        timer = setTimeout(() => {
-          timer = undefined;
-          if (closed || !latest) return;
-          void write(latest);
-        }, SNAPSHOT_INTERVAL_MS);
-      };
-
-      subscription = await deps.manager.watch(id.data, (state) => {
-        latest = state;
-        schedule();
-      });
-      if (closed) {
-        subscription.close();
-        return;
+    const body = await c.req.text();
+    let parsed: unknown = {};
+    if (body.trim().length > 0) {
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        return c.json({ ok: false, code: "invalid_request", message: "Body is not valid JSON" }, 400);
       }
-      latest = subscription.initial;
+    }
+    if (!isRecord(parsed)) {
+      return c.json({ ok: false, code: "invalid_request", message: "Body must be an object" }, 400);
+    }
+    const path = parsed.path;
+    if (path !== undefined && (typeof path !== "string" || path.length === 0)) {
+      return c.json({ ok: false, code: "invalid_request", message: "path must be a non-empty string" }, 400);
+    }
+    // 只登记句柄；不新建 ACP Session，也不读取历史。
+    const chat = deps.manager.createChat(path ? { path } : undefined);
+    return c.json({
+      chat: {
+        id: chat.id,
+        sessionId: chat.sessionId,
+        bindingRevision: chat.bindingRevision,
+      },
+    }, 201);
+  });
 
-      await stream.writeSSE({ event: "state", data: JSON.stringify(subscription.initial) });
-      if (closed) return;
-      initialized = true;
-      if (latest !== subscription.initial) schedule();
+  app.post("/api/chats/:chatId/actions", async (c) => {
+    const chatId = c.req.param("chatId");
+    const chat = resolveChat(deps.manager, chatId);
+    if (!chat) return c.json(chatNotFound(chatId).body, 410);
 
-      heartbeat = setInterval(() => {
-        if (closed) return;
-        writing = writing.then(async () => {
-          if (closed) return;
-          await stream.writeSSE({ event: "ping", data: "" });
-        }).catch(() => { closed = true; });
-      }, HEARTBEAT_MS);
+    const body = await readActionBody(c);
+    if (!body.ok) return body.response;
+    if (!isRecord(body.value)) return invalidAction(c, INVALID_ACTION);
 
-      await done;
-    });
+    const target = parseTarget(body.value.target);
+    if (typeof target === "string") return invalidAction(c, target);
+
+    let action: ChatUserActionValue;
+    try {
+      action = parseChatUserAction(body.value);
+    } catch (error) {
+      const mapped = mapChatActionError(error, { chatId: chat.id });
+      return c.json(mapped.body, mapped.status as 400);
+    }
+
+    if (!targetMatches(chat, target)) {
+      return c.json({
+        ok: false,
+        code: "binding_conflict",
+        message: "Action target does not match the current binding",
+        disposition: "rejected",
+        requestId: action.requestId,
+        chatId: chat.id,
+      }, 409);
+    }
+
+    try {
+      const executed = await executeAction(chat, action, target);
+      return c.json({
+        ok: true,
+        requestId: action.requestId,
+        chatId: executed.target.chatId,
+        sessionId: executed.target.sessionId,
+        bindingRevision: executed.target.bindingRevision,
+        ...executed.details,
+      }, 202);
+    } catch (error) {
+      const mapped = mapChatActionError(error, {
+        chatId: chat.id,
+        requestId: action.requestId,
+      });
+      if (mapped.status >= 500) {
+        logError("Peri chat action failed", error, {
+          chatId: chat.id,
+          op: action.type,
+          requestId: action.requestId,
+        });
+      }
+      return c.json(mapped.body, mapped.status as 400 | 409 | 500 | 503);
+    }
+  });
+
+  app.delete("/api/chats/:chatId", async (c) => {
+    const chatId = c.req.param("chatId");
+    const chat = resolveChat(deps.manager, chatId);
+    if (!chat) return c.json(chatNotFound(chatId).body, 410);
+    try {
+      await deps.manager.closeChat(chat.id);
+      return c.body(null, 204);
+    } catch (error) {
+      if (error instanceof ChatCloseIncompleteError) {
+        logError("Peri chat close is incomplete", error, { chatId: chat.id });
+        const mapped = closeIncomplete(error, chat.id);
+        return c.json(mapped.body, 500);
+      }
+      const mapped = mapChatActionError(error, { chatId: chat.id });
+      logError("Peri chat close failed", error, { chatId: chat.id });
+      return c.json(mapped.body, mapped.status as 500);
+    }
+  });
+
+  app.get("/api/chats/:chatId/payload/:refId", async (c) => {
+    const chatId = c.req.param("chatId");
+    const chat = resolveChat(deps.manager, chatId);
+    if (!chat) return c.json(chatNotFound(chatId).body, 410);
+
+    let refId: string;
+    try {
+      refId = decodeURIComponent(c.req.param("refId"));
+    } catch {
+      return c.json({ ok: false, code: "invalid_payload_ref", message: "Invalid payload id" }, 400);
+    }
+    const rawBytes = c.req.query("bytes");
+    if (!rawBytes || !/^\d+$/.test(rawBytes)) {
+      return c.json({
+        ok: false,
+        code: "invalid_payload_ref",
+        message: "bytes must be a non-negative integer",
+      }, 400);
+    }
+    const bytes = Number(rawBytes);
+    if (!Number.isSafeInteger(bytes) || bytes < 0) {
+      return c.json({
+        ok: false,
+        code: "invalid_payload_ref",
+        message: "bytes must be a non-negative safe integer",
+      }, 400);
+    }
+
+    try {
+      const options: ReadPayloadOptions = { signal: c.req.raw.signal };
+      const payload: ToolPayloadResponse = await chat.readPayload({ id: refId, bytes }, options);
+      return c.json({ ok: true, payload });
+    } catch (error) {
+      const mapped = mapPayloadError(error);
+      if (mapped.status >= 500) {
+        logError("Peri payload read failed", error, { chatId: chat.id });
+      }
+      return c.json(mapped.body, mapped.status as 400);
+    }
   });
 
   app.onError((error, c) => {
-    console.error("Peri server request failed", error);
-    return c.json({ error: "Internal server error" }, 500);
+    logError("Peri server request failed", error);
+    return c.json({ ok: false, code: "internal_error", message: "Internal server error" }, 500);
   });
 
   return app;
 }
+
+export {
+  SYNC_PATH_PATTERN,
+  handleSyncUpgrade,
+  syncWebSocketHandlers,
+  type SyncSocketData,
+  type SyncUpgradeDeps,
+} from "./sync";

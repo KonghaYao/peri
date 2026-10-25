@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { loadServerConfig, publicServerInfo } from "./config";
+import { loadServerConfig, mcpServerDefaults, publicServerInfo } from "./config";
 
 const BASE = {
   PERI_MODEL_PROVIDER: "openai",
@@ -63,6 +63,23 @@ describe("loadServerConfig", () => {
       url: "https://mcp.example.com/mcp",
       headers: [{ name: "Authorization", value: "Bearer mcp-secret" }],
     }]);
+  });
+
+  test("MCP 默认声明使用 SDK 的 http 形状", () => {
+    const { config } = loadServerConfig({
+      ...BASE,
+      PERI_MCP_SERVERS: JSON.stringify([{
+        name: "workspace", url: "https://mcp.example.com/mcp",
+        headers: [{ name: "X-Test", value: "yes" }],
+      }]),
+    }, "/srv/peri-cf");
+    expect(mcpServerDefaults(config!)).toEqual({
+      workspace: {
+        type: "http",
+        url: "https://mcp.example.com/mcp",
+        headers: { "X-Test": "yes" },
+      },
+    });
   });
 
   test("非 http 的 MCP 条目拒绝启动", () => {

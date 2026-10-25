@@ -1,176 +1,353 @@
 import { describe, expect, test } from "bun:test";
-import type { SessionStorage, SessionSummary } from "@peri-code/sdk/portable";
-import type { WasmAcpTransport } from "@peri-code/sdk/wasm";
-import { SESSION_CWD, WORKSPACE_CWD, type ServerConfig } from "../config";
-import { ChatManager } from "./manager";
-import { TursoChatSessionStore } from "../store";
-import { SYSTEM_INSTRUCTIONS } from "../system-instructions";
-import type { AgentEnvironment, StartHost } from "../../core/agent";
+import {
+  AtomicSessionClaims,
+  ChatCloseIncompleteError,
+  MemoryKV,
+  PayloadReadError,
+  type ChatDatabase,
+  type ChatFact,
+  type ChatSessionDirectoryEntry,
+  type PeriInstancePort,
+  type ToolPayloadReadRef,
+  type ToolPayloadResponse,
+} from "@peri-code/sdk";
+import type { ServerConfig } from "../config";
+import {
+  ChatViewRegistry,
+  createAppChatManager,
+  getChatManager,
+  resetChatManagerForTest,
+  shutdownChatManager,
+  type ChatInstanceFactory,
+} from "./index";
 
 const config: ServerConfig = {
   hostname: "127.0.0.1",
   port: 8787,
   machineId: "11111111-1111-4111-8111-111111111111",
-  model: { provider: "openai", id: "gpt-test", baseUrl: "https://api.example.com/v1", apiKey: "test-key" },
-  storage: { url: "https://store.example.com", authToken: "test-token" },
-  mcpServers: [{
-    name: "remote", url: "https://mcp.example.com/mcp",
-    headers: [{ name: "Authorization", value: "Bearer test" }],
-  }],
+  model: {
+    provider: "openai",
+    id: "gpt-test",
+    baseUrl: "https://api.example.com/v1",
+    apiKey: "model-secret",
+  },
+  storage: { url: "https://store.example.com", authToken: "store-secret" },
+  mcpServers: [],
   wasmModuleUrl: "file:///tmp/peri-wasm.js",
-  staticRoot: "/tmp/dist/client",
+  staticRoot: "/tmp/peri-cf-dist",
 };
 
-function summary(id: string, overrides: Partial<SessionSummary> = {}): SessionSummary {
+function entry(
+  id: string,
+  overrides: Partial<ChatSessionDirectoryEntry> = {},
+): ChatSessionDirectoryEntry {
   return {
-    id, title: null, cwd: SESSION_CWD, messageCount: 2,
-    createdAt: "2026-10-20T12:00:00Z", updatedAt: "2026-10-20T12:00:00Z",
+    sessionId: id,
+    title: null,
+    cwd: "/persisted/workspace",
+    messageCount: 1,
+    createdAt: "2026-10-20T12:00:00Z",
+    updatedAt: "2026-10-20T12:00:00Z",
     ...overrides,
   };
 }
 
-interface RecordingStorage {
-  storage: Pick<SessionStorage, "getSessions" | "getSession">;
-  sessionCalls: string[];
-  getIds: string[];
+class FakeDatabase implements ChatDatabase {
+  readonly entries = new Map<string, ChatSessionDirectoryEntry>();
+  readonly getSessionCalls: string[] = [];
+  readonly listSessionsCalls: Array<string | undefined> = [];
+
+  async listSessions(path?: string): Promise<ChatSessionDirectoryEntry[]> {
+    this.listSessionsCalls.push(path);
+    return [...this.entries.values()].filter((item) => path === undefined || item.cwd === path);
+  }
+
+  async getSession(id: string): Promise<ChatSessionDirectoryEntry | null> {
+    this.getSessionCalls.push(id);
+    return this.entries.get(id) ?? null;
+  }
 }
 
-function recordingStorage(sessions: readonly SessionSummary[]): RecordingStorage {
-  const sessionCalls: string[] = [];
-  const getIds: string[] = [];
-  return {
-    sessionCalls,
-    getIds,
-    storage: {
-      async getSessions(cwd) {
-        sessionCalls.push(cwd);
-        return sessions.filter((session) => session.cwd === cwd);
-      },
-      async getSession(id) {
-        getIds.push(id);
-        return sessions.find((session) => session.id === id) ?? null;
-      },
+class FakePort implements PeriInstancePort {
+  closed = false;
+  closeFailures: number;
+  readonly newSessionId: string;
+  readonly pending?: Promise<void>;
+
+  constructor(options: {
+    newSessionId?: string;
+    closeFailures?: number;
+    pending?: Promise<void>;
+  } = {}) {
+    this.newSessionId = options.newSessionId ?? "new-session-id";
+    this.closeFailures = options.closeFailures ?? 0;
+    this.pending = options.pending;
+  }
+
+  attach(_sink: (fact: ChatFact) => void): () => void {
+    return () => {};
+  }
+
+  async bindNew(options: {
+    path: string;
+    onSessionCreated?: (sessionId: string) => void | Promise<void>;
+  }): Promise<{ sessionId: string }> {
+    await options.onSessionCreated?.(this.newSessionId);
+    return { sessionId: this.newSessionId };
+  }
+
+  async bindExisting(sessionId: string): Promise<{ sessionId: string }> {
+    if (this.pending) await this.pending;
+    return { sessionId };
+  }
+
+  async send(): Promise<void> {}
+  async waitForDelivery(): Promise<void> {}
+  async dispatch(): Promise<void> {}
+  async takeBack(): Promise<void> {}
+  async cancel(): Promise<"requested" | "idle"> { return "idle"; }
+  async answer(): Promise<void> {}
+  async loadEarlierHistory() { return { applied: 0, nextCursor: null }; }
+
+  async readPayload(
+    _ref: ToolPayloadReadRef,
+  ): Promise<ToolPayloadResponse> {
+    throw new PayloadReadError("unavailable", "no payload");
+  }
+
+  async close(): Promise<void> {
+    if (this.closeFailures > 0) {
+      this.closeFailures -= 1;
+      throw new Error("port close failed");
+    }
+    this.closed = true;
+  }
+
+  get running(): boolean { return false; }
+  get pendingInputCount(): number { return 0; }
+  get pendingInteractionCount(): number { return 0; }
+  get needsReload(): boolean { return false; }
+}
+
+class FakeFactory {
+  readonly contexts: Array<Parameters<ChatInstanceFactory>[0]> = [];
+  readonly ports: FakePort[] = [];
+  readonly create: ChatInstanceFactory;
+
+  constructor(private readonly options: {
+    newSessionId?: string;
+    closeFailures?: number;
+    pending?: Promise<void>;
+  } = {}) {
+    this.create = (context) => {
+      this.contexts.push(context);
+      const port = new FakePort(this.options);
+      this.ports.push(port);
+      return port;
+    };
+  }
+}
+
+function managerWith(overrides: {
+  database?: FakeDatabase;
+  factory?: FakeFactory;
+  views?: ChatViewRegistry;
+} = {}) {
+  const database = overrides.database ?? new FakeDatabase();
+  const factory = overrides.factory ?? new FakeFactory();
+  const manager = createAppChatManager(config, {
+    database,
+    sessionClaims: new AtomicSessionClaims(new MemoryKV()),
+    host: {
+      kind: "transport",
+      factory: async () => { throw new Error("transport host must not start in manager tests"); },
     },
-  };
+    instanceFactory: factory.create,
+    views: overrides.views,
+  });
+  return { manager, database, factory };
 }
 
-const unusedHost: StartHost = async () => { throw new Error("host is not started in manager tests"); };
+describe("AppChatManager", () => {
+  test("createChat 只登记句柄，不读库、不启动实例", () => {
+    const { manager, database, factory } = managerWith();
+    const chat = manager.createChat();
 
-const environment: AgentEnvironment = {
-  cwd: SESSION_CWD,
-  instructions: "test instructions",
-  initialize: async () => {},
-  openMcp: () => ({
-    servers: [],
-    handleMessage: () => { throw new Error("host is not started in manager tests"); },
-    close: async () => {},
-  }),
-  logError: () => {},
-};
-
-/** 满足 `SessionCreator` 的最小传输，并记录请求参数。 */
-function capturingStartHost(
-  sessionId: string, requests: { method: string; params: unknown }[],
-): StartHost {
-  return async () => ({
-    setRequestHandler() {},
-    request: async (method: string, params: unknown) => {
-      requests.push({ method, params });
-      if (method === "initialize") return { protocolVersion: 1 };
-      return method === "session/new"
-        ? { sessionId }
-        : { sessionId, title: (params as { title: string }).title };
-    },
-    close: async () => {},
-  }) as unknown as WasmAcpTransport;
-}
-
-describe("ChatManager 注入关系", () => {
-  test("注入的 store 原样供 ChatService.list 使用", async () => {
-    const recording = recordingStorage([
-      summary("a", { updatedAt: "2026-10-20T12:00:00Z" }),
-      summary("b", { cwd: WORKSPACE_CWD, updatedAt: "2026-10-20T13:00:00Z" }),
-    ]);
-    const manager = new ChatManager(config, {
-      store: new TursoChatSessionStore(recording.storage),
-      startHost: unusedHost,
-      createEnvironment: () => ({ ...environment }),
-    });
-
-    const listed = await manager.list();
-
-    expect(listed.map((chat) => chat.id)).toEqual(["b", "a"]);
-    expect(recording.sessionCalls).toEqual([WORKSPACE_CWD, SESSION_CWD]);
+    expect(chat.sessionId).toBeNull();
+    expect(chat.bindingRevision).toBe(0);
+    expect(factory.contexts).toEqual([]);
+    expect(database.getSessionCalls).toEqual([]);
+    expect(manager.findChatBySession("session-1")).toBeUndefined();
   });
 
-  test("同一个 store 既用于 service 也进入 PeriInstance 的会话校验", async () => {
-    const recording = recordingStorage([]);
-    const manager = new ChatManager(config, {
-      store: new TursoChatSessionStore(recording.storage),
-      startHost: unusedHost,
-      createEnvironment: () => ({ ...environment }),
+  test("加载历史使用数据库 cwd，并复用同一句柄/视图", async () => {
+    const { manager, database, factory } = managerWith();
+    database.entries.set("session-1", entry("session-1", { cwd: "/persisted/workspace" }));
+    const chat = manager.createChat();
+
+    const result = await chat.execute({
+      type: "change_session",
+      requestId: "request-1",
+      payload: { sessionId: "session-1" },
     });
 
-    await expect(manager.read("a")).rejects.toThrow("Chat not found");
+    expect(result).toMatchObject({
+      requestId: "request-1",
+      chatId: chat.id,
+      sessionId: "session-1",
+      bindingRevision: 1,
+    });
+    expect(database.getSessionCalls).toEqual(["session-1"]);
+    expect(factory.contexts[0]?.path).toBe("/persisted/workspace");
+    expect(manager.findChatBySession("session-1")?.id).toBe(chat.id);
 
-    expect(recording.getIds).toEqual(["a"]);
+    const again = await chat.execute({
+      type: "change_session",
+      requestId: "request-2",
+      payload: { sessionId: "session-1" },
+    });
+    expect(again.bindingRevision).toBe(1);
+    expect(factory.contexts).toHaveLength(1);
+    expect(chat.bindingRevision).toBe(1);
   });
 
-  test("两个 PeriInstance 获得不同的环境对象与各自的 chatId", async () => {
-    const recording = recordingStorage([]);
-    const environmentIds: (string | undefined)[] = [];
-    const environments: AgentEnvironment[] = [];
-    const manager = new ChatManager(config, {
-      store: new TursoChatSessionStore(recording.storage),
-      startHost: unusedHost,
-      createEnvironment: (chatId) => {
-        environmentIds.push(chatId);
-        const created = { ...environment };
-        environments.push(created);
-        return created;
+  test("历史 cwd 为空时回退默认 SESSION_CWD", async () => {
+    const { manager, database, factory } = managerWith();
+    database.entries.set("session-empty-cwd", entry("session-empty-cwd", { cwd: "" }));
+    const chat = manager.createChat();
+
+    await chat.execute({
+      type: "change_session",
+      requestId: "request-3",
+      payload: { sessionId: "session-empty-cwd" },
+    });
+
+    expect(factory.contexts[0]?.path).toBe("/workspace/");
+  });
+
+  test("加载中的会话可被 findChatBySession 定位", async () => {
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const { manager, database, factory } = managerWith({
+      factory: new FakeFactory({ pending }),
+    });
+    database.entries.set("session-loading", entry("session-loading"));
+    const chat = manager.createChat();
+
+    const loading = chat.execute({
+      type: "change_session",
+      requestId: "request-4",
+      payload: { sessionId: "session-loading" },
+    });
+    for (let i = 0; i < 50 && manager.findChatBySession("session-loading") === undefined; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    expect(manager.findChatBySession("session-loading")?.id).toBe(chat.id);
+    expect(chat.bindingRevision).toBe(0);
+    expect(factory.contexts).toHaveLength(1);
+
+    release();
+    await loading;
+    expect(chat.bindingRevision).toBe(1);
+  });
+
+  test("create_new_session 使用默认 path 并返回真实身份", async () => {
+    const { manager, database, factory } = managerWith({
+      factory: new FakeFactory({ newSessionId: "created-session" }),
+    });
+    const chat = manager.createChat();
+
+    const result = await chat.execute({
+      type: "create_new_session",
+      requestId: "request-5",
+      payload: { title: "新对话" },
+    });
+
+    expect(result).toMatchObject({
+      requestId: "request-5",
+      chatId: chat.id,
+      sessionId: "created-session",
+      bindingRevision: 1,
+    });
+    expect(factory.contexts[0]?.path).toBe("/workspace/");
+    expect(database.getSessionCalls).toEqual([]);
+    expect(manager.findChatBySession("created-session")?.id).toBe(chat.id);
+  });
+
+  test("close 失败保留句柄、占用与视图，重试成功后移除", async () => {
+    const views = new ChatViewRegistry();
+    const { manager, database, factory } = managerWith({
+      views,
+      factory: new FakeFactory({ closeFailures: 1 }),
+    });
+    database.entries.set("session-close", entry("session-close"));
+    const chat = manager.createChat();
+    await chat.execute({
+      type: "change_session",
+      requestId: "request-6",
+      payload: { sessionId: "session-close" },
+    });
+    expect(views.attach(chat)).toBe(views.attach(chat));
+
+    await expect(manager.closeChat(chat.id)).rejects.toBeInstanceOf(ChatCloseIncompleteError);
+    expect(manager.getChat(chat.id)).toBe(chat);
+    expect(manager.findChatBySession("session-close")?.id).toBe(chat.id);
+    expect(views.size).toBe(1);
+
+    await manager.closeChat(chat.id);
+    expect(manager.getChat(chat.id)).toBeUndefined();
+    expect(manager.findChatBySession("session-close")).toBeUndefined();
+    expect(views.size).toBe(0);
+    expect(factory.ports[0]?.closed).toBe(true);
+  });
+
+  test("listSessions 只读目录，不创建实例", async () => {
+    const { manager, database, factory } = managerWith();
+    database.entries.set("session-list", entry("session-list", { title: "列表项" }));
+
+    const listing = await manager.listSessions();
+    expect(listing.map((item) => item.sessionId)).toEqual(["session-list"]);
+    expect(database.listSessionsCalls).toEqual([undefined]);
+    expect(factory.contexts).toEqual([]);
+  });
+
+  test("shutdown 释放视图并拒绝新句柄", async () => {
+    const views = new ChatViewRegistry();
+    const { manager, database } = managerWith({ views });
+    database.entries.set("session-shutdown", entry("session-shutdown"));
+    const chat = manager.createChat();
+    await chat.execute({
+      type: "change_session",
+      requestId: "request-7",
+      payload: { sessionId: "session-shutdown" },
+    });
+    views.attach(chat);
+
+    await manager.shutdown();
+    expect(views.size).toBe(0);
+    expect(manager.getChat(chat.id)).toBeUndefined();
+    expect(() => manager.createChat()).toThrow("shut down");
+  });
+
+  test("进程级单例不重复创建，shutdown 后清空", async () => {
+    resetChatManagerForTest();
+    const database = new FakeDatabase();
+    const options = {
+      database,
+      sessionClaims: new AtomicSessionClaims(new MemoryKV()),
+      host: {
+        kind: "transport" as const,
+        factory: async () => { throw new Error("not used"); },
       },
-    });
+    };
+    const first = getChatManager(config, options);
+    const second = getChatManager(config, options);
+    expect(second).toBe(first);
 
-    await Promise.allSettled([manager.read("a"), manager.read("b")]);
-
-    expect(environmentIds).toEqual(["a", "b"]);
-    expect(environments).toHaveLength(2);
-    expect(environments[0]).not.toBe(environments[1]);
-  });
-
-  test("默认环境按配置声明远程 MCP 与系统指令", async () => {
-    const createdId = "11111111-1111-4111-8111-111111111111";
-    const recording = recordingStorage([summary(createdId, { title: "新会话" })]);
-    const requests: { method: string; params: unknown }[] = [];
-    const manager = new ChatManager(config, {
-      store: new TursoChatSessionStore(recording.storage),
-      startHost: capturingStartHost(createdId, requests),
-    });
-
-    const created = await manager.create("新会话");
-
-    expect(created).toEqual({
-      id: createdId, title: "新会话", updatedAt: "2026-10-20T12:00:00Z",
-    });
-    const newSession = requests.find((request) => request.method === "session/new");
-    expect(newSession?.params).toMatchObject({
-      cwd: SESSION_CWD,
-      mcpServers: [{
-        type: "http", name: "remote", url: "https://mcp.example.com/mcp",
-        headers: [{ name: "Authorization", value: "Bearer test" }],
-      }],
-      _meta: { "peri.instructions": SYSTEM_INSTRUCTIONS },
-    });
-  });
-
-  test("shutdown 委托给 service 且可重复调用", async () => {
-    const manager = new ChatManager(config, {
-      store: new TursoChatSessionStore(recordingStorage([]).storage),
-      startHost: unusedHost,
-      createEnvironment: () => ({ ...environment }),
-    });
-
-    await expect(manager.shutdown()).resolves.toBeUndefined();
-    await expect(manager.shutdown()).resolves.toBeUndefined();
+    await shutdownChatManager();
+    const third = getChatManager(config, options);
+    expect(third).not.toBe(first);
+    await shutdownChatManager();
+    resetChatManagerForTest();
   });
 });

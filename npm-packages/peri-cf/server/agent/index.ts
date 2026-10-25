@@ -1,5 +1,16 @@
-/** 服务端 Agent 链：唯一入口、会话服务与实例实现。 */
-export { ChatManager, type ChatManagerOptions, type ChatManagerPort } from "./manager";
+/**
+ * 服务端 Agent 组合根出口。
+ *
+ * 只暴露 CF 的平台装配：进程级 Manager、视图注册表与创建/关闭入口；
+ * 句柄、动作与事实契约由 `@peri-code/sdk` 提供。
+ */
 export {
-  ChatService, mergeChatSummaries, type ChatServiceDeps, type ChatSubscription,
-} from "./service";
+  AppChatManager,
+  createAppChatManager,
+  getChatManager,
+  resetChatManagerForTest,
+  shutdownChatManager,
+  type AppChatManagerOptions,
+  type ChatInstanceFactory,
+} from "./manager";
+export { ChatViewRegistry } from "./views";

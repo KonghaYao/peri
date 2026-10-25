@@ -5,7 +5,9 @@ const packageRoot = fileURLToPath(new URL("../", import.meta.url));
 const vite = fileURLToPath(new URL("../node_modules/.bin/vite", import.meta.url));
 
 const children = [
-  Bun.spawn(["bun", "--watch", "server/index.ts"], {
+  Bun.spawn([
+    "bun", "--watch", "--tsconfig-override", "server/tsconfig.json", "server/index.ts",
+  ], {
     cwd: packageRoot, stdin: "inherit", stdout: "inherit", stderr: "inherit",
   }),
   Bun.spawn([vite], {

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import type { SessionSummary } from "@peri-code/sdk/portable";
-import { TursoChatSessionStore, emptyStoreTolerant } from "./store";
+import type { SessionSummary } from "@peri-code/sdk";
+import { TursoChatDatabase, emptyStoreTolerant } from "./store";
 
 const summary: SessionSummary = {
   id: "01a0d141-99ba-76f0-8a94-aef2e08cdedd",
@@ -15,7 +15,9 @@ const missingSchema = new Error(
   "statement could not be prepared (SQL syntax, schema or statement shape)",
 );
 
-function session(overrides: Partial<SessionSummary> & Pick<SessionSummary, "id">): SessionSummary {
+function session(
+  overrides: Partial<SessionSummary> & Pick<SessionSummary, "id">,
+): SessionSummary {
   return { ...summary, ...overrides };
 }
 
@@ -38,40 +40,38 @@ describe("emptyStoreTolerant", () => {
     await expect(storage.getSessions("/workspace")).rejects.toThrow("store is unavailable");
     await expect(storage.getSession(summary.id)).rejects.toThrow("store is unavailable");
   });
-
-  test("有 schema 时原样返回", async () => {
-    const storage = emptyStoreTolerant({
-      getSessions: async () => [summary],
-      getSession: async () => summary,
-    });
-    expect(await storage.getSessions("/workspace")).toEqual([summary]);
-    expect(await storage.getSession(summary.id)).toEqual(summary);
-  });
 });
 
-describe("TursoChatSessionStore", () => {
-  test("空库首屏返回空列表", async () => {
-    const store = new TursoChatSessionStore(emptyStoreTolerant({
+describe("TursoChatDatabase", () => {
+  test("空库首屏返回空目录", async () => {
+    const database = new TursoChatDatabase(emptyStoreTolerant({
       getSessions: async () => { throw missingSchema; },
       getSession: async () => { throw missingSchema; },
     }));
 
-    expect(await store.list()).toEqual([]);
-    expect(await store.get(summary.id)).toBeNull();
+    expect(await database.listSessions()).toEqual([]);
+    expect(await database.getSession(summary.id)).toBeNull();
   });
 
-  test("新旧 cwd 的会话都能列出并去重", async () => {
+  test("新旧 cwd 的目录合并去重并按时间倒序", async () => {
     const legacy = session({
       id: "01a0d141-99ba-76f0-8a94-aef2e08cdee1",
-      cwd: "/workspace", updatedAt: "2026-10-20T12:00:00Z",
+      cwd: "/workspace",
+      updatedAt: "2026-10-20T12:00:00Z",
     });
     const current = session({
       id: "01a0d141-99ba-76f0-8a94-aef2e08cdee2",
-      title: "当前会话", cwd: "/workspace/", updatedAt: "2026-10-20T13:00:00Z",
+      title: "当前会话",
+      cwd: "/workspace/",
+      updatedAt: "2026-10-20T13:00:00Z",
     });
-    const duplicated = session({ ...legacy, title: "去重后的标题", cwd: "/workspace/" });
+    const duplicated = session({
+      ...legacy,
+      title: "当前 cwd 优先",
+      cwd: "/workspace/",
+    });
     const requested: string[] = [];
-    const store = new TursoChatSessionStore({
+    const database = new TursoChatDatabase({
       getSessions: async (cwd) => {
         requested.push(cwd);
         return cwd.endsWith("/") ? [current, duplicated] : [legacy];
@@ -79,70 +79,81 @@ describe("TursoChatSessionStore", () => {
       getSession: async (id) => id === current.id ? current : legacy,
     });
 
-    const chats = await store.list();
-    expect(chats.map((chat) => chat.id)).toEqual([current.id, legacy.id]);
-    expect(chats[1]?.title).toBe("去重后的标题");
-    expect(requested.sort()).toEqual(["/workspace", "/workspace/"]);
-    expect(await store.get(legacy.id)).not.toBeNull();
-    expect(await store.get(current.id)).not.toBeNull();
+    const entries = await database.listSessions();
+    expect(entries.map((entry) => entry.sessionId)).toEqual([current.id, legacy.id]);
+    expect(entries.find((entry) => entry.sessionId === legacy.id)?.title).toBe("当前 cwd 优先");
+    expect(requested).toEqual(["/workspace", "/workspace/"]);
+    expect(entries[0]).not.toHaveProperty("running");
   });
 
-  test("按 updatedAt 倒序、同时间按 id 倒序", async () => {
+  test("显式 path 只查询该目录并保留返回顺序", async () => {
     const older = session({
-      id: "01a0d141-99ba-76f0-8a94-aef2e08cdee1", cwd: "/workspace",
+      id: "01a0d141-99ba-76f0-8a94-aef2e08cdee1",
+      cwd: "/workspace",
       updatedAt: "2026-10-20T12:00:00Z",
     });
     const newer = session({
-      id: "01a0d141-99ba-76f0-8a94-aef2e08cdee2", cwd: "/workspace/",
-      updatedAt: "2026-10-20T13:00:00Z",
-    });
-    const tiedLow = session({
-      id: "01a0d141-99ba-76f0-8a94-aef2e08cdee0", cwd: "/workspace",
-      updatedAt: "2026-10-20T13:00:00Z",
-    });
-    const store = new TursoChatSessionStore({
-      getSessions: async (cwd) => cwd.endsWith("/") ? [newer] : [older, tiedLow],
-      getSession: async () => null,
-    });
-
-    expect((await store.list()).map((chat) => chat.id)).toEqual([newer.id, tiedLow.id, older.id]);
-  });
-
-  test("两次 cwd 查询串行执行，第一次完成前不发起第二次", async () => {
-    let releaseLegacy!: (sessions: SessionSummary[]) => void;
-    const pendingLegacy = new Promise<SessionSummary[]>((resolve) => { releaseLegacy = resolve; });
-    const legacy = session({
-      id: "01a0d141-99ba-76f0-8a94-aef2e08cdee1",
-      cwd: "/workspace", updatedAt: "2026-10-20T12:00:00Z",
-    });
-    const current = session({
       id: "01a0d141-99ba-76f0-8a94-aef2e08cdee2",
-      cwd: "/workspace/", updatedAt: "2026-10-20T13:00:00Z",
+      cwd: "/workspace/",
+      updatedAt: "2026-10-20T13:00:00Z",
     });
     const requested: string[] = [];
-    const store = new TursoChatSessionStore({
+    const database = new TursoChatDatabase({
       getSessions: async (cwd) => {
         requested.push(cwd);
-        return cwd.endsWith("/") ? [current] : pendingLegacy;
+        return cwd.endsWith("/") ? [newer] : [older];
       },
       getSession: async () => null,
     });
 
-    const listing = store.list();
+    const entries = await database.listSessions("/workspace/");
+    expect(entries.map((entry) => entry.sessionId)).toEqual([newer.id]);
+    expect(requested).toEqual(["/workspace/"]);
+  });
+
+  test("目录查询串行：第一次完成前不发起第二次", async () => {
+    let releaseLegacy!: (sessions: SessionSummary[]) => void;
+    const pendingLegacy = new Promise<SessionSummary[]>((resolve) => {
+      releaseLegacy = resolve;
+    });
+    const requested: string[] = [];
+    const database = new TursoChatDatabase({
+      getSessions: async (cwd) => {
+        requested.push(cwd);
+        return cwd.endsWith("/") ? [] : pendingLegacy;
+      },
+      getSession: async () => null,
+    });
+
+    const listing = database.listSessions();
     await Promise.resolve();
     expect(requested).toEqual(["/workspace"]);
-
-    releaseLegacy([legacy]);
-    expect((await listing).map((chat) => chat.id)).toEqual([current.id, legacy.id]);
+    releaseLegacy([]);
+    expect(await listing).toEqual([]);
     expect(requested).toEqual(["/workspace", "/workspace/"]);
   });
 
-  test("其它 cwd 的会话不可读取", async () => {
-    const store = new TursoChatSessionStore({
+  test("按 id 读取不追加 cwd 条件且保留可空标题", async () => {
+    const database = new TursoChatDatabase({
       getSessions: async () => [],
       getSession: async () => session({ id: summary.id, cwd: "/elsewhere" }),
     });
 
-    expect(await store.get(summary.id)).toBeNull();
+    expect(await database.getSession(summary.id)).toEqual({
+      sessionId: summary.id,
+      title: null,
+      cwd: "/elsewhere",
+      messageCount: 2,
+      createdAt: summary.createdAt,
+      updatedAt: summary.updatedAt,
+    });
+  });
+
+  test("存储不可达时目录查询向上抛错，不伪造空列表", async () => {
+    const database = new TursoChatDatabase({
+      getSessions: async () => { throw new Error("store is unavailable"); },
+      getSession: async () => { throw new Error("store is unavailable"); },
+    });
+    await expect(database.listSessions()).rejects.toThrow("store is unavailable");
   });
 });

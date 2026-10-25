@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { McpSetupServer } from "../core/agent";
+import type { AcpMcpServer } from "@peri-code/sdk";
 
 /** 宿主虚拟工作区的根；与 ACP 会话 cwd 分开（见 `SESSION_CWD`）。 */
 export const WORKSPACE_CWD = "/workspace";
@@ -228,13 +228,21 @@ export function loadServerConfig(
   };
 }
 
-export type HttpMcpSetupServer = Extract<McpSetupServer, { type: "http" }>;
-
-/** ACP `session/new|load` 的 MCP 声明；后端只产生远程 HTTP 条目。 */
-export function mcpSetupServers(config: ServerConfig): HttpMcpSetupServer[] {
-  return config.mcpServers.map((server) => ({
-    type: "http" as const, name: server.name, url: server.url, headers: server.headers,
-  }));
+/**
+ * Chat 默认 MCP 声明：后端只产生远程 HTTP 条目。
+ *
+ * 每次调用返回独立对象；服务端配置仍是唯一来源，ChatManager 只在构造时快照默认值。
+ */
+export function mcpServerDefaults(
+  config: ServerConfig,
+): Record<string, AcpMcpServer> {
+  return Object.fromEntries(config.mcpServers.map((server) => [server.name, {
+    type: "http" as const,
+    url: server.url,
+    headers: Object.fromEntries(
+      server.headers.map((header) => [header.name, header.value]),
+    ),
+  }]));
 }
 
 /** 不暴露 token / query / userinfo 的配置摘要，供前端设置页只读展示。 */
