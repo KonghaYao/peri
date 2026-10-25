@@ -1,11 +1,59 @@
 import { describe, expect, test } from "bun:test";
+import { ChatUserAction } from "../src/chat/action";
+import { AtomicSessionClaims } from "../src/chat/claims";
+import { ChatManager, type ChatManagerInternalOptions } from "../src/chat/manager";
+import { MemoryKV } from "../src/kv/memory-kv";
+import { ChatView } from "../src/view/chat-view";
 import {
     PayloadReadError, VIEW_PAYLOAD_MAX_BYTES, VIEW_PAYLOAD_MAX_CONCURRENCY, limitPayloadReads, readPayload,
-    type ToolPayloadReader,
+    type ToolPayloadReader, type ToolPayloadResponse,
 } from "../src/view/payload-reader";
+import { FakeDatabase, FakePort, directoryEntry } from "./chat-fixtures";
 
 const encoder = new TextEncoder();
 const response = (id: string, json: string) => ({ id, bytes: encoder.encode(json).byteLength, json });
+
+function controlledResponse(): {
+    promise: Promise<ToolPayloadResponse>;
+    resolve(value: ToolPayloadResponse): void;
+    reject(error: unknown): void;
+} {
+    let resolve!: (value: ToolPayloadResponse) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<ToolPayloadResponse>((onResolve, onReject) => {
+        resolve = onResolve;
+        reject = onReject;
+    });
+    return { promise, resolve, reject };
+}
+
+function chatServiceHarness(): {
+    manager: ChatManager;
+    database: FakeDatabase;
+    ports: FakePort[];
+} {
+    const ports: FakePort[] = [];
+    const database = new FakeDatabase();
+    const options: ChatManagerInternalOptions = {
+        agentConfig: {},
+        database,
+        sessionClaims: new AtomicSessionClaims(new MemoryKV()),
+        host: {
+            kind: "transport",
+            factory: () => {
+                throw new Error("ACP transport must not start");
+            },
+        },
+        defaults: { path: "/workspace" },
+        instanceFactory: () => {
+            const port = new FakePort();
+            port.bindNewSessionId = ports.length === 0 ? "session-a" : "session-b";
+            ports.push(port);
+            return port;
+        },
+    };
+    return { manager: new ChatManager(options), database, ports };
+}
 
 describe("browser payload reader contract", () => {
     test("frozen defaults match the approved review starting points", () => {
@@ -116,5 +164,74 @@ describe("payload read concurrency gate", () => {
         expect((await failing as PayloadReadError).code).toBe("unavailable");
         expect((await queued).id).toBe("good");
         expect(calls).toBe(2);
+    });
+});
+
+describe("payload reads across binding generations", () => {
+    test("a late result or error admitted on the old binding is discarded and leaves the new binding untouched", async () => {
+        const { manager, database, ports } = chatServiceHarness();
+        const chat = manager.createChat();
+        await chat.execute(ChatUserAction.createNewSession());
+        database.seed(directoryEntry("session-b"));
+
+        const firstPort = ports[0]!;
+        const lateSuccess = controlledResponse();
+        const lateError = controlledResponse();
+        let starts = 0;
+        let bothStarted!: () => void;
+        const started = new Promise<void>((resolve) => { bothStarted = resolve; });
+        firstPort.payloadReader = () => {
+            const pending = starts++ === 0 ? lateSuccess.promise : lateError.promise;
+            if (starts === 2) bothStarted();
+            return pending;
+        };
+
+        const jsonA = '{"session":"a"}';
+        const refA = { id: "payload-a", bytes: encoder.encode(jsonA).byteLength };
+        const readingSuccess = chat.readPayload(refA);
+        const readingFailure = chat.readPayload(refA);
+        await started;
+        await chat.execute(ChatUserAction.changeSessionTo("session-b"));
+
+        expect(chat.sessionId).toBe("session-b");
+        expect(chat.bindingRevision).toBe(2);
+        const view = new ChatView(chat);
+        const bindingB = view.binding;
+        expect(bindingB).toMatchObject({ sessionId: "session-b", bindingRevision: 2 });
+        const observed: string[] = [];
+        const unsubscribe = chat.subscribeFacts({
+            onBinding: () => observed.push("binding"),
+            onFact: () => observed.push("fact"),
+            onClosed: () => observed.push("closed"),
+        });
+        // 订阅时的 B 重放不算晚到读取产生的事实。
+        observed.length = 0;
+
+        // 旧读取在换绑后才结算：成功结果和错误都必须按发起时的代次丢弃。
+        lateSuccess.resolve({ id: refA.id, bytes: refA.bytes, json: jsonA });
+        lateError.reject(new PayloadReadError("transport_error", "old socket closed"));
+        const successFailure = await readingSuccess.catch((error) => error);
+        const errorFailure = await readingFailure.catch((error) => error);
+        expect(successFailure).toBeInstanceOf(PayloadReadError);
+        expect((successFailure as PayloadReadError).code).toBe("unavailable");
+        expect(errorFailure).toBeInstanceOf(PayloadReadError);
+        expect((errorFailure as PayloadReadError).code).toBe("unavailable");
+        expect(((errorFailure as PayloadReadError).cause as PayloadReadError).code).toBe("transport_error");
+
+        // 新绑定的文档目标不变，旧端口的结果没有落到新端口，也没有产生新事实。
+        expect(view.binding).toBe(bindingB);
+        expect(observed).toEqual([]);
+        expect(ports[1]?.calls.filter((call) => call.startsWith("readPayload:"))).toEqual([]);
+
+        // 新绑定自己的读取仍然可用，且只经过新端口。
+        const jsonB = '{"session":"b"}';
+        const refB = { id: "payload-b", bytes: encoder.encode(jsonB).byteLength };
+        ports[1]!.payloadReader = async (ref) => ({ ...ref, json: jsonB });
+        await expect(chat.readPayload(refB)).resolves.toEqual({ id: refB.id, bytes: refB.bytes, json: jsonB });
+        expect(ports[1]!.calls).toContain(`readPayload:${refB.id}`);
+
+        unsubscribe();
+        await view.dispose();
+        await manager.shutdown();
     });
 });

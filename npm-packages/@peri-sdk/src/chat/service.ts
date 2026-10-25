@@ -1,9 +1,10 @@
 import { SessionClaimConflictError } from "../kv/session-claim-conflict-error";
 import type { PeriWasmHostLease } from "../wasm/host-lifecycle";
-import type {
-    ReadPayloadOptions,
-    ToolPayloadReadRef,
-    ToolPayloadResponse,
+import {
+    PayloadReadError,
+    type ReadPayloadOptions,
+    type ToolPayloadReadRef,
+    type ToolPayloadResponse,
 } from "../view/payload-reader";
 import {
     parseChatUserAction,
@@ -231,7 +232,32 @@ export class ChatService implements ChatServiceContract {
         ref: ToolPayloadReadRef,
         options?: ReadPayloadOptions,
     ): Promise<ToolPayloadResponse> {
-        return readChatPayload(this.active?.port, ref, options);
+        // 读取只对发起时的绑定代次有效。换绑/关闭后，旧端口的晚到结果与错误
+        // 都不能交给调用方，否则调用方可能把旧会话的全文画进新绑定。
+        const activation = this.active;
+        const bindingRevision = this.state.bindingRevision;
+        let outcome:
+            | { response: ToolPayloadResponse }
+            | { error: unknown };
+        try {
+            outcome = {
+                response: await readChatPayload(activation?.port, ref, options),
+            };
+        } catch (error) {
+            outcome = { error };
+        }
+        if (
+            activation !== this.active ||
+            bindingRevision !== this.state.bindingRevision
+        ) {
+            throw new PayloadReadError(
+                "unavailable",
+                "载荷读取完成前绑定已切换，晚到结果已丢弃",
+                "error" in outcome ? { cause: outcome.error } : undefined,
+            );
+        }
+        if ("error" in outcome) throw outcome.error;
+        return outcome.response;
     }
 
     subscribeFacts(observer: ChatFactObserver): () => void {

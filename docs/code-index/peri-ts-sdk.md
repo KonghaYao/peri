@@ -24,7 +24,7 @@
 | 职责 | 入口 | 行为 |
 | --- | --- | --- |
 | Manager | `src/chat/manager.ts` | 同步 `createChat`；句柄目录、`findChatBySession`、目录读取、`closeChat`、`shutdown`；不接收普通执行动作 |
-| Service | `src/chat/service.ts`、`src/chat/binding.ts`、`src/chat/close-chat.ts` | 绑定状态机、八类动作分派、回执关联、事实日志、关闭预算与失败保留 |
+| Service | `src/chat/service.ts`、`src/chat/binding.ts`、`src/chat/close-chat.ts` | 绑定状态机、八类动作分派、回执关联、事实日志、关闭预算与失败保留；载荷读取按发起时的绑定代次校验，换绑后的晚到结果/错误丢弃为 `unavailable` |
 | 动作 | `src/chat/action.ts`、`src/chat/json-value.ts` | 八类纯数据 Action、`requestId`、JSON 深拷贝/冻结、`parseChatUserAction`；不依赖 `instanceof` |
 | 类型/错误 | `src/chat/types.ts`、`src/chat/errors.ts` | `ChatHost`、`ChatDefaults`、`ChatLifecycleOptions`、`PeriInstancePort`、错误 `disposition` 与 `ChatCloseIncompleteError` |
 | 事实 | `src/chat/facts.ts`、`src/chat/fact-hub.ts` | 按绑定代次编号的事实封套；晚挂 View 重放 |

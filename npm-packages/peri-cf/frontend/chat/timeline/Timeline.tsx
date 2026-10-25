@@ -224,17 +224,25 @@ export function Timeline({
     savePosition(metrics);
   }, [savePosition, followKey]);
 
-  const scrollToBottom = useCallback((animated = false) => {
+  /** 同步记录“当前会话应贴底”的事实；滚动本身可能等到下一帧。 */
+  const markAtEnd = useCallback(() => {
     pinnedRef.current = true;
     setPinned(true);
-    if (followKey) {
-      pinnedByKey.current.set(followKey, true);
-      positions.current.save(followKey, {
-        atEnd: true, rowId: null, offsetWithinRow: 0, scrollOffset: 0,
-      });
-    }
-    void listRef.current?.scrollToEnd({ animated });
+    if (!followKey) return;
+    pinnedByKey.current.set(followKey, true);
+    positions.current.save(followKey, {
+      atEnd: true, rowId: null, offsetWithinRow: 0, scrollOffset: 0,
+    });
   }, [followKey]);
+
+  const scrollToEnd = useCallback((animated = false) => {
+    void listRef.current?.scrollToEnd({ animated });
+  }, []);
+
+  const scrollToBottom = useCallback((animated = false) => {
+    markAtEnd();
+    scrollToEnd(animated);
+  }, [markAtEnd, scrollToEnd]);
 
   // 进入会话先同步恢复后的贴底状态，必须排在内容增长 effect 之前。
   useLayoutEffect(() => {
@@ -257,9 +265,12 @@ export function Timeline({
     previousScrollSignal.current = scrollSignal;
     if (!scrollSignal || previous?.token === scrollSignal.token) return;
     if (scrollSignal.chatId !== followKey) return;
-    const frame = requestAnimationFrame(() => scrollToBottom(false));
+    // 贴底状态与本轮信号同步提交：主线程繁忙时动画帧可能晚到，不能让“回到底部”
+    // 按钮在信号已生效后仍然可见。滚动本身仍等一帧，让新内容先完成布局。
+    markAtEnd();
+    const frame = requestAnimationFrame(() => scrollToEnd(false));
     return () => cancelAnimationFrame(frame);
-  }, [scrollSignal, followKey, scrollToBottom]);
+  }, [scrollSignal, followKey, markAtEnd, scrollToEnd]);
 
   // 离开会话时只记录该 key 自己的贴底事实；上滚位置已由滚动事件保存。
   // cleanup 捕获旧 key，并读取按 key 保存的状态，因此切到 null/加载态不会覆盖旧位置。

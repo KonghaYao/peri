@@ -179,16 +179,22 @@ describe('Timeline virtualization in a real DOM', () => {
     // A 的 prompt 迟到结算：信号目标不是当前会话 B，滚动位置与回底按钮都必须保持。
     await act(async () => {
       view.rerender(createElement(Timeline, props({ token: 1, chatId: 'chat-a' })));
-      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+    // 给可能的延后动作一个真实帧；跨会话信号不应触发任何滚动。
+    await act(async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     });
     expect(scroller.scrollTop).toBe(1_000);
     expect(screen.getByText('回到底部')).toBeTruthy();
 
-    // 当前会话自己的新信号仍然有效。
+    // 当前会话自己的新信号同步收起按钮，滚动在下一帧回到底部。
     await act(async () => {
       view.rerender(createElement(Timeline, props({ token: 2, chatId: 'chat-b' })));
-      await new Promise((resolve) => setTimeout(resolve, 40));
     });
     expect(screen.queryByText('回到底部')).toBeNull();
+    await act(async () => {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
+    expect(scroller.scrollTop).toBeGreaterThan(1_000);
   });
 });
