@@ -59,9 +59,9 @@
 
 - `bun run typecheck`：`tsc --noEmit` + demo tsconfig；测试目录不在 include 内。
 - `bun test tests test`：单元/行为测试；`test/` 覆盖执行准入、Session 关闭/启动与 claim。
-- `bun run test`：先 `bun run build`（含 peri-wasm 构建）再全量测试。
-- `bun run test:wasm`：先 build，再跑真实 WASM ACP 集成；旧 `dist` 无效。当前环境因 Emscripten
-  shim 失败而 BLOCKED，干净 CI 不可复现，不能宣称已通过。
+- `bun run test`：在 `MISE_ENV=wasm mise exec --` 下先 build（含 peri-wasm）再全量测试。
+- `bun run test:wasm`：先 build，再跑真实 WASM ACP 集成；本轮 8 pass / 0 fail（真实打包 WASM + 真实 Turso listener + fixture 模型）。
+- `bun run smoke:workers`：本地 workerd 探针；本轮 `passed:true`、`modelCalls:3`、`persistedAcrossRestart:true`。Hosted Workers 未部署。
 - 关键回归：`tests/chat-{action,manager,binding,actions,close-bounded,view,replica,document,instance-factory}.test.ts`、`tests/peri-instance.test.ts`、`tests/history-pagination.test.ts`、`tests/acp-mcp-lifecycle.test.ts`、`tests/wasm-acp-integration.test.ts`。
 - 公共出口负向断言：`tests/public-view.test.ts`。
 

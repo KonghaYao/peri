@@ -112,7 +112,7 @@ defaults: {
 - `/wasm`：平台无关的 Emscripten ACP Host、loader 与 transport；`/wasm-host` 额外提供 Node-compatible 网络/DNS 端口。
 - `/portable`：不装配 Bun/stdio 进程或本地 SQLite；Chat 控制面 + 执行准入核心。准入摘要仍使用 `node:crypto`，不能宣称纯浏览器支持。
 
-`bun run build` 构建 `peri-wasm` release 产物，并把 `peri-wasm.js` 与 `peri_wasm.wasm` 放入 `dist/wasm/`。构建依赖 Emscripten 6.0.10 与已准备的工具链；工具链不满足时构建失败，不能用旧 `dist` 冒充。默认 [demo.ts](examples/demo/demo.ts) 使用 `host.kind="wasm"`；[demo-wasm.ts](examples/demo/demo-wasm.ts) 使用 `host.kind="transport"` 注入 `WasmAcpTransport`。两者都通过 `ChatView` + 二进制同步帧驱动浏览器 `ChatReplica`；示例用 SSE 适配器承载逻辑帧，生产消费端使用 WebSocket。
+`MISE_ENV=wasm mise exec -- bun run build` 构建 `peri-wasm` release 产物，并把 `peri-wasm.js` 与 `peri_wasm.wasm` 放入 `dist/wasm/`。构建依赖 Emscripten 6.0.10；`mise exec` 会注入 `EMSDK`，直接 `bun run build` 在仅有 mise shim 的环境会把 shim 路径当作工具链并失败。工具链不满足时构建失败，不能用旧 `dist` 冒充。默认 [demo.ts](examples/demo/demo.ts) 使用 `host.kind="wasm"`；[demo-wasm.ts](examples/demo/demo-wasm.ts) 使用 `host.kind="transport"` 注入 `WasmAcpTransport`。两者都通过 `ChatView` + 二进制同步帧驱动浏览器 `ChatReplica`；示例用 SSE 适配器承载逻辑帧，生产消费端使用 WebSocket。
 
 ## Durable Execution Admission
 

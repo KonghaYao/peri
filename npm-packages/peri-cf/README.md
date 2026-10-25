@@ -76,11 +76,11 @@ bun run dev                                  # prepare:wasm + Bun 服务 + Vite
 bun run start                                # 需要已构建的 wasm/generated 与 dist/client
 ```
 
-SDK 构建依赖 Emscripten 6.0.10 与已准备的工具链。CF 通过 `file:../@peri-sdk` 解析
-`node_modules/@peri-code/sdk`；干净 CI 必须先把最新 SDK 包安装/复制到 CF，否则会使用旧 dist 并出现
-“导出不存在”或类型漂移。旧 dist 或临时 `node_modules` 副本不能冒充干净构建。
-当前工具链下 `bun run test:wasm` / SDK build 因 Emscripten shim 失败而 BLOCKED；本工作树的
-CF typecheck/test 使用的是预构建依赖，**干净 CI 不可复现**，不能据此宣称发布门禁已通过。
+SDK 构建依赖 Emscripten 6.0.10，需在 `npm-packages/@peri-sdk` 执行
+`MISE_ENV=wasm mise exec -- bun run build`（`mise exec` 注入 `EMSDK`）。CF 通过
+`file:../@peri-sdk` 解析 `node_modules/@peri-code/sdk`；执行 `bun install --force` 后该条目为指向
+工作区包的符号链接，CF 直接消费最新 `dist`。干净 CI 顺序：SDK build → CF `bun install --force` →
+`bun run typecheck && bun test`；不要手工复制 `node_modules` 副本。
 
 ## 验证
 

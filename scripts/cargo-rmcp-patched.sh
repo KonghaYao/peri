@@ -181,9 +181,20 @@ if [[ "$patch_present" != yes ]]; then
     exit 1
 fi
 
-python_bin="python"
-if ! command -v "$python_bin" >/dev/null 2>&1; then
-    python_bin="python3"
+python_bin=""
+# `command -v` 会命中目录（如 emsdk 根下的 python/），也可能命中未配置版本的
+# mise shim；两者都不可执行。逐个探测，优先 python3，最后回退系统解释器。
+for candidate in python3 python /usr/bin/python3; do
+    path="$(command -v "$candidate" 2>/dev/null || true)"
+    if [[ -n "$path" && -f "$path" && -x "$path" ]] &&
+       "$candidate" -c 'import sys' >/dev/null 2>&1; then
+        python_bin="$candidate"
+        break
+    fi
+done
+if [[ -z "$python_bin" ]]; then
+    echo "python3 is required to generate the patched Cargo config" >&2
+    exit 1
 fi
 cargo_crate_dir="$crate_dir"
 hyper_cargo_crate_dir="$hyper_crate_dir"

@@ -77,11 +77,11 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 
 ## 构建前置
 
-CF 的 `typecheck`/`test` 通过 `file:../@peri-sdk` 解析到 `node_modules/@peri-code/sdk`。干净 CI 必须先
-在 `npm-packages/@peri-sdk` 执行 `bun run build`，再把最新包安装/复制到 CF；否则会使用旧 dist 并出现
-“导出不存在”或类型漂移。SDK build 依赖 Emscripten 6.0.10 与 peri-wasm 产物；当前环境
-`bun run test:wasm`/SDK build 因 Emscripten shim 失败而 BLOCKED，CF 验证只能用预构建依赖，
-**干净 CI 不可复现**，不能用旧 dist 或临时副本冒充干净构建。
+CF 的 `typecheck`/`test` 通过 `file:../@peri-sdk` 解析到 `node_modules/@peri-code/sdk`。干净 CI 先在
+`npm-packages/@peri-sdk` 执行 `MISE_ENV=wasm mise exec -- bun run build`，再在 CF 执行
+`bun install --force`；该条目会变成指向工作区包的符号链接，直接消费最新 `dist`。SDK build 依赖
+Emscripten 6.0.10 与 peri-wasm 产物；本轮官方 build、`test:wasm`（8/8）与 `smoke:workers` 均通过，
+CF typecheck 0、287/0 通过。Hosted Workers 部署仍未验收。
 
 ## 验证入口
 

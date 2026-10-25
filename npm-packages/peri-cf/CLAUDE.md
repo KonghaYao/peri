@@ -89,9 +89,10 @@ Emscripten fetch 执行器发起。SDK 不感知 assistant-ui。
 `core/shared/chat.ts` 与 `sync.ts` 的 Zod schema 是 wire/展示 DTO 的单一来源。ACP 投影由 SDK
 `ChatView`/`ChatReplica` 负责，应用只做展示适配。
 
-**SDK dist 前置**：CF 通过 `file:../@peri-sdk` 解析 `node_modules/@peri-code/sdk`。干净 CI 必须先
-在 SDK 执行 `bun run build` 并安装/复制最新包；否则会使用旧 dist，表现为导出缺失或类型漂移。SDK
-build 依赖 Emscripten 6.0.10 与 peri-wasm 产物，工具链不满足时标记 blocked，不能用旧 dist 冒充。
+**SDK dist 前置**：CF 通过 `file:../@peri-sdk` 解析 `node_modules/@peri-code/sdk`。干净 CI 先在 SDK
+执行 `MISE_ENV=wasm mise exec -- bun run build`，再在 CF 执行 `bun install --force`（file 依赖变为
+指向工作区的符号链接）；否则会使用旧 dist，表现为导出缺失或类型漂移。SDK build 依赖 Emscripten
+6.0.10 与 peri-wasm 产物，工具链不满足时构建失败，不能用旧 dist 冒充。
 
 ## 路由与命令
 

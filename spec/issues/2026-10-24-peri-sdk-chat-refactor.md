@@ -1,8 +1,8 @@
 # Peri SDK Chat 架构重构
 
-- 状态：**实现已提交（Phase 0–6）；P1（CF Timeline 间歇失败、A15 组合证据）与 P2（证据校准）已修复；终轮独立复验代码/测试全绿；真实 WASM/宿主与 SDK 发布门禁仍 BLOCKED；受保护未跟踪文件 `docker-compose.yml` 的基线哈希变化待用户确认**
+- 状态：**实现已提交（Phase 0–6）；A01-A22 全部 PASS；官方 WASM build、真实 WASM/workerd 宿主与 CF 干净依赖已恢复；Hosted Workers/真实浏览器部署不在本轮范围**
 - 分支：`feature/peri-cf-browser-agent`
-- 实施提交：`64bfcbc48`（契约）、`e6ccbcd3d`（SDK 三层）、`c0520f625`（SDK 出口/工厂）、`cc447f789`（CF 服务端）、`966b6c7d7`（CF 前端）、`179677996`（文档）、`fb0535e34`（终验修复）、`272e2dcb4`（Timeline/A15 修复）
+- 实施提交：`64bfcbc48`（契约）、`e6ccbcd3d`（SDK 三层）、`c0520f625`（SDK 出口/工厂）、`cc447f789`（CF 服务端）、`966b6c7d7`（CF 前端）、`179677996`（文档）、`fb0535e34`（终验修复）、`272e2dcb4`（Timeline/A15 修复）；工具链/宿主修复见本 issue 后续提交
 - 事实源：本 issue；用户裁决与实施计划见工作区 `.peri/plans/`（非仓库长期事实源）。
 - 本阶段边界：完成终验指出的换绑有界关闭、View 释放重试、A07/A10/A15 组合用例，修复 CF Timeline 计时竞态并同步文档/证据；不重构业务逻辑，不改 Rust/ACP wire/数据库表；提交由协调者按检查点执行，subagent 不 commit/push。
 
@@ -32,13 +32,13 @@
 | 阶段 | 内容 | 当前状态 |
 | --- | --- | --- |
 | Phase 0 | 契约冻结与脚手架（action/types/errors/facts/channel 与定向测试） | 已提交 `64bfcbc48`；定向契约测试通过 |
-| Phase 1 | 运行侧：Session 纯 ACP 客户端、PeriInstance、交互/历史/任务/载荷 | 已提交 `e6ccbcd3d`；单元/行为测试通过；真实 WASM BLOCKED |
+| Phase 1 | 运行侧：Session 纯 ACP 客户端、PeriInstance、交互/历史/任务/载荷 | 已提交 `e6ccbcd3d`；单元/行为测试通过；真实 WASM 由 A18/A22 覆盖 |
 | Phase 2 | Chat 控制面：Manager、Service、绑定状态机、claims、回执 | 已提交 `e6ccbcd3d`/`c0520f625`；单元/行为测试通过 |
 | Phase 3 | View/Yjs：ChatDocument、ChatView、ChatReplica、同步协议 | 已提交 `e6ccbcd3d`；单元/行为测试通过 |
 | Phase 4 | SDK 集成：公开出口切换、删除旧层、工厂 | 已提交 `c0520f625`；`public-view` 负向断言通过 |
-| Phase 5 | CF 服务端：ChatManager 接线、Action 路由、WS | 已提交 `cc447f789`；typecheck/test 通过；真实宿主 BLOCKED |
+| Phase 5 | CF 服务端：ChatManager 接线、Action 路由、WS | 已提交 `cc447f789`；typecheck/test 通过；真实宿主由 A22 覆盖 |
 | Phase 6 | CF 前端：Remote Action/回执、Replica 选择器、WS 客户端 | 已提交 `966b6c7d7`；typecheck/test/Vite build 通过；浏览器验收未执行 |
-| Phase 7 | 删除旧层、文档更新与验收证据 | 完成：换绑旧激活有界关闭、View 释放失败可重试（manager 与 HTTP DELETE 均可重试）；A07/A10/A15 组合用例补齐；CF Timeline 贴底状态改为随信号同步提交，全量测试连续 10 次稳定；WASM/真实宿主/发布门禁 BLOCKED |
+| Phase 7 | 删除旧层、文档更新与验收证据 | 完成：换绑旧激活有界关闭、View 释放失败可重试（manager 与 HTTP DELETE 均可重试）；A07/A10/A15 组合用例补齐；CF Timeline 贴底状态改为随信号同步提交，全量测试连续 10 次稳定；官方 WASM build、真实 WASM/workerd 宿主与 CF 干净依赖已验证 |
 
 ## 4. 已裁决与待决
 
@@ -78,13 +78,13 @@ typecheck 或旧 dist 冒充。测试名省略文件时均为 `npm-packages/@per
 | A15 | 载荷读取中切会话 | 新增 `payload-reader.test.ts` 组合用例：旧绑定上的两个读取（一个晚到成功、一个晚到失败）在 `changeSessionTo` 后都按发起代次丢弃为 `unavailable`，新 binding/文档目标不变、未产生新事实、新端口未收到旧读取；`chat-actions.test.ts`：late result target；`payload-reader.test.ts`：字节/JSON/预算；`peri-instance.test.ts`：content-addressed refs、integrity/unavailable、budget；CF `payloadReader.test.ts`：引用不在当前会话时显式失败 | PASS |
 | A16 | 启动失败/关闭未确认再清理 | `chat-close-bounded.test.ts`：startup close incomplete retains claim/index、later close confirms；`chat-binding.test.ts`：换绑旧激活 close 挂起时有界返回 incomplete、保留旧 claim/索引、恢复 close 后重试成功；`chat-manager.test.ts`：close failure retains；`peri-instance.test.ts`：unconfirmed cleanup blocks execution、retry | PASS |
 | A17 | URL/factory-only/custom transport/不同配置 | `chat-instance-factory.test.ts`：transport/wasm、persisted cwd、abort；`wasm-loader.test.ts`：factory-only 不解析 moduleUrl；`session-start-cleanup.test.ts`：load persisted path | PASS |
-| A18 | 进程重启加载历史 | 单元：`history-pagination.test.ts`、`session-start-cleanup.test.ts`、`chat-manager.test.ts` 覆盖 load/续聊与不重放旧输入；真实进程重启/WASM 证据需 `tests/wasm-acp-integration.test.ts`，当前 BLOCKED | BLOCKED |
+| A18 | 进程重启加载历史 | 单元：`history-pagination.test.ts`、`session-start-cleanup.test.ts`、`chat-manager.test.ts` 覆盖 load/续聊与不重放旧输入；`tests/wasm-acp-integration.test.ts` 8/8 通过（真实打包 WASM + 真实 Turso listener + fixture 模型）：关闭后新 Chat/新 WASM 实例加载同一 Session，历史含前两轮输入与回复；`smoke:workers` 冷恢复 `session/list`→`session/load` 通过（`persistedAcrossRestart:true`）。OS 进程级重启未单独建模，证据为 WASM 宿主重实例化与 workerd 冷恢复 | PASS |
 | A19 | 沿生产链检查 send/cancel/close | `chat-actions.test.ts`、`peri-instance.test.ts`、CF `server/api/index.test.ts`；实现只走 ACP input/cancel/close，无 SDK dispatcher 或平行会话表 | PASS |
 | A20 | cancel 写出但未结束；close 未完成 | `chat-actions.test.ts`：cancel requested≠stopped；`peri-instance.test.ts`：session/host close failure retains；`chat-close-bounded.test.ts`：incomplete preserves claim/cause；CF controller：cancel requested | PASS |
 | A21 | 加载历史、双会话 MCP、延迟事件 | `history-pagination.test.ts`：持久 cwd/分页；`acp-mcp-lifecycle.test.ts`：工厂双激活、owned close、失败清理；`peri-instance.test.ts`：late done；`chat-document.test.ts`：late chunk 不造幽灵 turn | PASS |
-| A22 | CF 编译、真实宿主、浏览器包检查 | `bun run typecheck` exit 0；修复后 `bun test` 连续 10 次均为 287 pass / 0 fail；独立复验的 `vite build` exit 0 与浏览器包关键词检查通过。真实 WASM/模型/Store 宿主未执行，SDK build 仍 BLOCKED | BLOCKED |
+| A22 | CF 编译、真实宿主、浏览器包检查 | SDK `MISE_ENV=wasm mise exec -- bun run build` exit 0（新 `dist`，无旧门面导出）；`test:wasm` 8/8；`smoke:workers` 在本地 workerd 通过（fixture 模型 3 次调用、sqld、SDK 宿主、queue/prompt/冷恢复）；CF `bun run typecheck` 0、`bun test` 287 pass / 0 fail、`vite build` exit 0；浏览器包关键词检查无旧门面/SSE。Hosted Workers 部署未执行 | PASS |
 
-汇总：**20 PASS / 0 PARTIAL / 2 BLOCKED**。独立复验指出的 A15 证据缺口已由组合用例补齐；CF 全量测试在修复后连续 10 次稳定通过。BLOCKED 项仍是 A18（真实进程重启/WASM）与 A22（真实宿主）。发布门禁仍因 SDK 官方 build/干净 CI 不可复现而 BLOCKED，不能用 A01-A22 的 PASS 代替发布验收。
+汇总：**22 PASS / 0 PARTIAL / 0 BLOCKED**。A18/A22 的 PASS 以本轮真实 WASM、workerd、fixture 模型与 sqld 证据为准；Hosted Workers、真实浏览器部署与多实例 claim 仍不在验收范围。独立复验指出的 A15 证据缺口已由组合用例补齐；CF 全量测试在修复后连续 10 次稳定通过。
 
 ## 6. 验证证据（2026-10-24 独立复验与修复）
 
@@ -130,35 +130,30 @@ typecheck 或旧 dist 冒充。测试名省略文件时均为 `npm-packages/@per
   两个 Promise 均为 `unavailable`，`ChatView.binding` 仍是 B、事实观察器没有收到新绑定/事实、
   新端口没有收到旧读取，随后 B 的读取只经新端口成功返回。
 
-### 6.2 失败/阻塞项
+### 6.2 工具链与发布门禁（本轮修复后）
 
 | 命令 | exit | 关键输出 |
 | --- | --- | --- |
-| `cd npm-packages/@peri-sdk && bun run build` | 1 | 首个错误：`Cloudflare Tokio patches require Emscripten 6.0.10: /Users/mino/.local/share/mise/shims`；随后 `scripts/cargo-wasm.sh exited with status 1`，未进入 peri-wasm 构建与 SDK 打包 |
-| `cd npm-packages/@peri-sdk && bun run test:wasm` | 1 | 同一 Emscripten 前置失败；真实 WASM ACP 未运行 |
-| 干净 CI 发布门禁 | BLOCKED | 官方 SDK build 无法完成；CF 的 typecheck/test 依赖预构建 `node_modules/@peri-code/sdk`，**干净 CI 不可复现**，不能宣称发布门禁通过 |
-| `bash scripts/check-file-size.sh` | 1 | `❌ 需要 ripgrep (rg)`；改用 `wc -l` 人工核对 |
+| `MISE_ENV=wasm mise exec -- ./scripts/cargo-wasm.sh check -p peri-middlewares --lib --locked --target wasm32-unknown-emscripten` | 0 | `Finished … target(s) in 35.08s`；`context_archive` 仅在非 emscripten 目标编译 |
+| `cd npm-packages/@peri-sdk && MISE_ENV=wasm mise exec -- bun run build` | 0 | release 构建完成；新 `dist/sdk/index.d.ts` 1.3 KB、无旧门面导出；`dist/view/index.js` 含 `pendingConnections`；`dist/wasm/{peri-wasm.js,peri_wasm.wasm}` 为新产物 |
+| `cd npm-packages/@peri-sdk && bun test tests/wasm-acp-integration.test.ts tests/wasm-transport.test.ts` | 0 | 8 pass / 0 fail（真实打包 WASM、真实 Turso listener、fixture 模型） |
+| `cd npm-packages/@peri-sdk && MISE_ENV=wasm mise exec -- bun run smoke:workers` | 0 | `{"passed":true,"modelCalls":3,"queueTurn":"queue","promptTurn":"prompt","persistedAcrossRestart":true}`（本地 workerd） |
+| `cd npm-packages/peri-cf && bun install --force` | 0 | `node_modules/@peri-code/sdk` 为指向 `../@peri-sdk` 的符号链接，CF 直接消费最新 `dist` |
+| `cd npm-packages/peri-cf && bun run typecheck && bun test` | 0 | typecheck 0；287 pass / 0 fail |
+| `cd npm-packages/peri-cf && bun node_modules/vite/bin/vite.js build --outDir /tmp/peri-cf-dist --emptyOutDir` | 0 | 3441 modules；浏览器包无旧门面/SSE 关键词 |
+| `bash scripts/check-file-size.sh` | 1 | 环境缺 `ripgrep (rg)`；改用 `wc -l` 人工核对 |
 
-**SDK dist 前置与发布面**：官方 `bun run build` 仍未完成。独立复验确认：
+**修复点**：
 
-- 根 `dist/index.js` 与 HEAD 源码重新 bundle 的哈希一致，CF 副本主入口也一致；
-- 但根 `dist/sdk/index.d.ts` 仍导出已删除的 `agent/agent`/`session-docs`；
-- `dist/portable.js`/`.d.ts`、`dist/view/index.js`/`.d.ts`（根 `/view` 没有 `ChatView`/`ChatReplica`）
-  与 `dist/wasm/*` 仍是旧产物；
-- CF 预构建副本 `dist/view/index.js` 不含终验的 retry 逻辑（`pendingConnections` 为 0 处）。
-
-为让 CF 测试覆盖本轮 SDK 源码，本轮额外执行了局部 JS bundle（只替换 `dist/index.js`，未重建
-wasm/声明）：
-
-```bash
-cd npm-packages/@peri-sdk
-bun -e 'const r = await Bun.build({ entrypoints: ["./src/sdk/index.ts"], outdir: "./dist", target: "bun", format: "esm", external: ["yjs"] }); if (!r.success) { console.error(r.logs); process.exit(1); }'
-cp dist/index.js ../peri-cf/node_modules/@peri-code/sdk/dist/index.js
-```
-
-这是**本地局部预构建**，不是干净构建，也不能作为发布证据。CF 结果只证明当前源码在该预构建依赖下
-通过；干净 CI 必须先成功执行官方 SDK build 并把最新包安装/复制到 CF，当前工具链下不可复现。
-因此 **SDK 发布门禁 BLOCKED**。
+- `peri-middlewares/src/mcp/{mod,middleware}.rs` 将 `context_archive` 模块与工具注册加
+  `cfg(not(target_os = "emscripten"))`，与仅非 emscripten 的 `peri-mcp-common` 依赖一致；`E0433` 与连带
+  的 `waiting()` 类型错误消失。
+- `scripts/cargo-rmcp-patched.sh` 不再把目录或未配置版本的 mise shim 当 Python；优先可执行的
+  `python3`，回退 `python`/`/usr/bin/python3`。
+- `examples/workers/wrangler.toml` 把 `snippets/**/*.js` 纳入 ESModule 规则，workerd 能附加
+  Emscripten 生成的 `turso_serverless-*/inline0.js`。
+- 官方 build 需在 `mise exec` 下运行，以注入 `EMSDK`：`MISE_ENV=wasm mise exec -- bun run build`。
+  CF 通过 `file:../@peri-sdk` + `bun install --force` 链接工作区包，无需手工复制。
 
 ### 6.3 文件规模与残留
 
@@ -166,7 +161,7 @@ cp dist/index.js ../peri-cf/node_modules/@peri-code/sdk/dist/index.js
   `src/chat/service.ts` 967 行（A15 修复前 941）。
 - 全量 `wc -l` 仍列出两个既有超限 vendored 文件：`frontend/components/assistant-ui/elements/tool-fallback.aui.tsx`（1431）、`thread.aui.tsx`（1166）。本轮未改动；按 `STD-SIZE-001` 另立任务治理，不宣称全库通过。
 - 生产源码无 `TODO`/`FIXME`，无新增兼容 shim；旧符号只保留在负向测试与明确标注的历史文档中。
-- `npm-packages/peri-cf/docker-compose.yml` 为未跟踪文件，未纳入本轮任何提交。工作树副本在 2026-10-25 22:26:02 发生外部变更（size 2765→3082，sha256 `a8af2136…`→`655be552…`，同时间段存在 `/tmp/peri-loom-data-v3-backup-20261025-2217.tar.gz`）；变更来源待用户确认，确认前不改动、不恢复该文件。
+- `npm-packages/peri-cf/docker-compose.yml` 为未跟踪文件，未纳入任何提交。工作树副本在 2026-10-25 22:26:02 发生外部变更（size 2765→3082，sha256 `a8af2136…`→`655be552…`）；用户裁决不处理该变更，本轮不修改、不恢复该文件。
 - **CF 测试稳定性**：`Timeline.dom.test.tsx` 的“迟到跨会话信号”用例在修复前 8 路并发压力下
   32 次全量失败 4 次；修复后单文件连续 10 次、全量连续 10 次均为 0 fail，压力下 32/32 通过。
 - **HTTP DELETE 重试已打通**：首次关闭移除句柄后若 View 释放失败，`AppChatManager` 保留 View 条目并
@@ -177,12 +172,12 @@ cp dist/index.js ../peri-cf/node_modules/@peri-code/sdk/dist/index.js
 ## 7. 已知限制
 
 1. `tests/` 不在任一 tsconfig 的 `include` 中，`bun run typecheck` 不检查测试类型。
-2. 真实 WASM ACP、进程重启续聊、hosted Workers 与浏览器/真实模型验收未完成；A18/A22 标记 BLOCKED。
-3. CF 的单测与 typecheck 依赖预构建 SDK dist；根 `dist` 的 declaration、`/portable`、`/view` 与
-   `dist/wasm/*` 仍是旧产物，CF 副本 `/view` 不含终验 retry；官方 build 与干净 CI 仍 BLOCKED，
-   不能用该结果宣称发布门禁通过。
-4. 独立复验已完成，其 P1/P2 两项已在本轮修复；A01-A22 的 PASS 仍只覆盖所列自动化证据，
-   A07/A10/A15 的 PASS 来自新增组合单测，不代表浏览器/真实宿主验收。
+2. A18/A22 的 PASS 覆盖真实打包 WASM、真实 Turso listener、fixture 模型与本地 workerd；Hosted
+   Workers 部署、真实浏览器与真实模型供应商未执行。OS 进程级重启未单独建模，A18 以 WASM 宿主
+   重实例化与 workerd 冷恢复为证据。
+3. 官方 build 依赖 `MISE_ENV=wasm mise exec --` 注入 `EMSDK`；直接 `bun run build` 在仅有 mise shim
+   的环境会把 shim 路径当作工具链并失败，文档已给出正确命令。
+4. 独立复验已完成；A01-A22 的 PASS 仍只覆盖所列自动化/本机宿主证据，不代表托管部署验收。
 5. `sessionClaimKey` 保留既有协调域前缀 `peri:managed-agent:session:`。它是存储 key，不是公开符号；改名会破坏升级期跨版本 claim 互斥，需单独迁移，不在本轮修改。
 6. HTTP DELETE 的残留重试按 `chatId` 寻址；若首次 DELETE 使用 Session ID 且句柄移除后 View 仍残留，
    需用 500 响应体中的 `chatId` 重试（GC/app 入口均使用 chat id，不提供 Session ID tombstone）。
