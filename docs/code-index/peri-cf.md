@@ -39,9 +39,9 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 | --- | --- | --- |
 | GET | `/api/info` | 去敏后的服务信息 |
 | GET | `/api/chats` | 只读 Store 目录；不可达返回 503 + `available:false`，不伪造空列表 |
-| POST | `/api/chats` | 只登记句柄，返回 `{id,sessionId:null,bindingRevision:0}`；不新建 Session |
+| POST | `/api/chats` | 只登记句柄，返回 201 + `{chat:{id,sessionId:null,bindingRevision:0}}`；不新建 Session |
 | POST | `/api/chats/:chatId/actions` | `ChatUserAction` + 目标绑定；202 回执带 `inputId`/`status`/`applied` 等纯数据 |
-| DELETE | `/api/chats/:chatId` | `closeChat`；成功 204；未确认关闭 500 + `incomplete`/`errors` |
+| DELETE | `/api/chats/:chatId` | `closeChat`；成功 204；未确认关闭 500 + `incomplete`/`errors`；句柄已移除但 View 未释放时，同一 `chatId` 的 DELETE 会重试释放并返回 204 |
 | GET | `/api/chats/:chatId/payload/:refId?bytes=` | 当前激活的载荷仓库；错误映射为公开 payload code |
 | WS | `/api/chats/:chatId/sync` | 只读 Yjs 同步；未知 Chat 在升级前 410 |
 
@@ -79,8 +79,9 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 
 CF 的 `typecheck`/`test` 通过 `file:../@peri-sdk` 解析到 `node_modules/@peri-code/sdk`。干净 CI 必须先
 在 `npm-packages/@peri-sdk` 执行 `bun run build`，再把最新包安装/复制到 CF；否则会使用旧 dist 并出现
-“导出不存在”或类型漂移。SDK build 依赖 Emscripten 6.0.10 与 peri-wasm 产物，工具链不满足时只能标记
-blocked，不能用旧 dist 冒充干净构建。
+“导出不存在”或类型漂移。SDK build 依赖 Emscripten 6.0.10 与 peri-wasm 产物；当前环境
+`bun run test:wasm`/SDK build 因 Emscripten shim 失败而 BLOCKED，CF 验证只能用预构建依赖，
+**干净 CI 不可复现**，不能用旧 dist 或临时副本冒充干净构建。
 
 ## 验证入口
 

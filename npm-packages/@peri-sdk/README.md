@@ -4,7 +4,7 @@
 
 Bun SDK for Peri's ACP Host over a host-injected transport. `ChatManager` 同步登记 Chat 句柄；`ChatService.execute()` 在首次绑定动作时通过默认实例工厂装配一次 `PeriInstance`，claim Session、初始化 ACP，并创建或加载会话。Peri 负责模型执行与会话持久化；SDK 只做控制面、事实与展示契约。
 
-主入口公开 `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatYjsChannel`、公开类型与错误。旧 `Agent`、`ManagedAgents`、`SessionDocs`、`SessionViewStore`、`Sandbox` 门面已删除，不在任何发布入口提供。
+主入口公开 `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatYjsChannel`、公开类型与错误。旧 `Agent`、`ManagedAgents`、`SessionDocs`、`SessionViewStore` 已删除，不在任何发布入口提供。内部 `src/sandbox/sandbox.ts` 仍保留 `Sandbox` 与正向测试 `tests/sandbox.test.ts`，但未从发布入口导出；是否删除待用户裁决。
 
 ```ts
 import {
@@ -128,4 +128,4 @@ defaults: {
 
 `PeriConfig` 描述 WASM ACP 启动配置；settings、storage 与 machineId 一起经 `agentConfig` 交给 Peri。`BareHarnessConfig` 是冻结的全关闭预设，按需开启能力。`instructions` 使用 `session/new._meta["peri.instructions"]`；HTTP Workspace 与额外 MCP 使用 `session/new.mcpServers`。
 
-`Sandbox.id` 与 machine identity 无关；SDK 不把它作为 `machine_id` 传给 Peri。Machine/workspace 绑定检查与 SDK 执行所有权是两件独立职责。
+内部 `Sandbox.id` 与 machine identity 无关；SDK 不把它作为 `machine_id` 传给 Peri。Machine/workspace 绑定检查与 SDK 执行所有权是两件独立职责。

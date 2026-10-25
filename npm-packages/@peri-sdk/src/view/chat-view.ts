@@ -24,6 +24,9 @@ export class ChatView {
     private syncSource: SessionDocSync | null = null;
     private target: ChatBindingTarget | null = null;
     private readonly connections = new Set<ChatSyncConnection>();
+    private readonly pendingConnections = new Set<ChatSyncConnection>();
+    private pendingSync: SessionDocSync | null = null;
+    private pendingDocument: ChatDocument | null = null;
     private unsubscribeFacts: (() => void) | null = null;
     private disposed = false;
     private sourceClosed = false;
@@ -55,28 +58,70 @@ export class ChatView {
         return { close: () => connection.close() };
     }
 
+    /**
+     * 释放订阅、连接与文档。
+     *
+     * 首次调用同步封闭 View 并取走资源；任一释放步骤失败时保留失败资源，
+     * 清除 rejected 缓存并抛错，下一次调用只重试未完成的部分。
+     */
     dispose(): Promise<void> {
         if (this.disposal) return this.disposal;
-        this.disposed = true;
-        this.unsubscribeFacts?.();
-        this.unsubscribeFacts = null;
-        const connections = [...this.connections];
-        this.connections.clear();
-        const sync = this.syncSource;
-        const document = this.document;
-        this.syncSource = null;
-        this.document = null;
-        this.target = null;
-        this.disposal = (async () => {
-            const results = await Promise.allSettled(connections.map((connection) => connection.close()));
-            try { await sync?.close(); } catch (error) { results.push({ status: "rejected", reason: error }); }
-            document?.destroy();
-            const failures = results.flatMap((result) => result.status === "rejected" ? [result.reason] : []);
-            if (failures.length) {
-                throw new AggregateError(failures, "ChatView disposal failed to close every sync connection");
+        if (!this.disposed) {
+            this.disposed = true;
+            this.unsubscribeFacts?.();
+            this.unsubscribeFacts = null;
+            for (const connection of this.connections) {
+                this.pendingConnections.add(connection);
             }
-        })();
-        return this.disposal;
+            this.connections.clear();
+            this.pendingSync = this.syncSource;
+            this.pendingDocument = this.document;
+            this.syncSource = null;
+            this.document = null;
+            this.target = null;
+        }
+        const attempt = this.releasePending();
+        this.disposal = attempt;
+        void attempt.catch(() => {
+            if (this.disposal === attempt) this.disposal = null;
+        });
+        return attempt;
+    }
+
+    private async releasePending(): Promise<void> {
+        const failures: unknown[] = [];
+        const connections = [...this.pendingConnections];
+        const results = await Promise.allSettled(
+            connections.map(async (connection) => {
+                await connection.close();
+                this.pendingConnections.delete(connection);
+            }),
+        );
+        for (const result of results) {
+            if (result.status === "rejected") failures.push(result.reason);
+        }
+        if (this.pendingSync) {
+            try {
+                await this.pendingSync.close();
+                this.pendingSync = null;
+            } catch (error) {
+                failures.push(error);
+            }
+        }
+        if (this.pendingDocument) {
+            try {
+                this.pendingDocument.destroy();
+                this.pendingDocument = null;
+            } catch (error) {
+                failures.push(error);
+            }
+        }
+        if (failures.length > 0) {
+            throw new AggregateError(
+                failures,
+                "ChatView disposal failed to close every sync connection",
+            );
+        }
     }
 
     private install(target: ChatBindingTarget, replay: readonly ChatFactEnvelope[]): void {

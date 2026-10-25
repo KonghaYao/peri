@@ -37,7 +37,7 @@ Peri WASM Agent 的 Bun 长驻服务 + 浏览器 Chat。服务端持有 `ChatMan
 | GET | `/api/chats` | Store 目录；不可达 503 + `available:false` |
 | POST | `/api/chats` | 只登记句柄，不创建 Session |
 | POST | `/api/chats/:chatId/actions` | `ChatUserAction`；202 回执 |
-| DELETE | `/api/chats/:chatId` | 关闭句柄；成功 204，未确认 500 |
+| DELETE | `/api/chats/:chatId` | 关闭句柄并释放 View；成功 204，未确认 500；View 释放失败后可用同一 `chatId` 重试 |
 | GET | `/api/chats/:chatId/payload/:refId?bytes=` | 按引用读取工具全文 |
 | WS | `/api/chats/:chatId/sync` | 只读 Yjs 同步；未知 Chat 升级前 410 |
 
@@ -79,6 +79,8 @@ bun run start                                # 需要已构建的 wasm/generated
 SDK 构建依赖 Emscripten 6.0.10 与已准备的工具链。CF 通过 `file:../@peri-sdk` 解析
 `node_modules/@peri-code/sdk`；干净 CI 必须先把最新 SDK 包安装/复制到 CF，否则会使用旧 dist 并出现
 “导出不存在”或类型漂移。旧 dist 或临时 `node_modules` 副本不能冒充干净构建。
+当前工具链下 `bun run test:wasm` / SDK build 因 Emscripten shim 失败而 BLOCKED；本工作树的
+CF typecheck/test 使用的是预构建依赖，**干净 CI 不可复现**，不能据此宣称发布门禁已通过。
 
 ## 验证
 

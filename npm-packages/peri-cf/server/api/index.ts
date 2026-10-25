@@ -24,6 +24,8 @@ export interface ApiChatManager {
   getChat(id: string): ChatService | undefined;
   findChatBySession(sessionId: string): ChatService | undefined;
   closeChat(id: string): Promise<void>;
+  /** 句柄已移除但关闭资源仍有残留（如 View 未释放）；按 chatId 重试 DELETE。 */
+  hasPendingClose(chatId: string): boolean;
 }
 
 export interface ApiDeps {
@@ -280,20 +282,25 @@ export function createApi(deps: ApiDeps): Hono {
   });
 
   app.delete("/api/chats/:chatId", async (c) => {
-    const chatId = c.req.param("chatId");
-    const chat = resolveChat(deps.manager, chatId);
-    if (!chat) return c.json(chatNotFound(chatId).body, 410);
+    const requestedId = c.req.param("chatId");
+    const chat = resolveChat(deps.manager, requestedId);
+    const chatId = chat?.id ?? requestedId;
+    // 首次关闭可能已移除句柄、只留下待释放的 View；此时同一 DELETE 必须继续重试，
+    // 不能把“部分关闭”误报为未知 Chat。
+    if (!chat && !deps.manager.hasPendingClose(chatId)) {
+      return c.json(chatNotFound(requestedId).body, 410);
+    }
     try {
-      await deps.manager.closeChat(chat.id);
+      await deps.manager.closeChat(chatId);
       return c.body(null, 204);
     } catch (error) {
       if (error instanceof ChatCloseIncompleteError) {
-        logError("Peri chat close is incomplete", error, { chatId: chat.id });
-        const mapped = closeIncomplete(error, chat.id);
+        logError("Peri chat close is incomplete", error, { chatId });
+        const mapped = closeIncomplete(error, chatId);
         return c.json(mapped.body, 500);
       }
-      const mapped = mapChatActionError(error, { chatId: chat.id });
-      logError("Peri chat close failed", error, { chatId: chat.id });
+      const mapped = mapChatActionError(error, { chatId });
+      logError("Peri chat close failed", error, { chatId });
       return c.json(mapped.body, mapped.status as 500);
     }
   });

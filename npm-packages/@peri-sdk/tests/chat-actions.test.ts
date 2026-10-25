@@ -206,6 +206,79 @@ describe("control actions", () => {
         expect(port.calls.filter((call) => call === "cancel")).toHaveLength(2);
     });
 
+    test("waiting inputs do not serialize or cross-wire concurrent cancel and answer", async () => {
+        let releaseA!: () => void;
+        let releaseB!: () => void;
+        const gateA = new Promise<void>((resolve) => {
+            releaseA = resolve;
+        });
+        const gateB = new Promise<void>((resolve) => {
+            releaseB = resolve;
+        });
+        const setupValue = setup((port, index) => {
+            port.bindNewSessionId = index === 0 ? "session-a" : "session-b";
+            port.sendGate = index === 0 ? gateA : gateB;
+            port.runningValue = true;
+            port.pendingInteractionValue = 1;
+        });
+        const chatA = setupValue.manager.createChat();
+        const chatB = setupValue.manager.createChat();
+        await chatA.execute(ChatUserAction.createNewSession());
+        await chatB.execute(ChatUserAction.createNewSession());        const [portA, portB] = setupValue.ports;
+
+        const inputA = chatA.execute(
+            ChatUserAction.send({ text: "a", requestId: "send-a" }),
+        ) as SendReceipt;
+        const inputB = chatB.execute(
+            ChatUserAction.send({ text: "b", requestId: "send-b" }),
+        ) as SendReceipt;
+        while (portA.sendCalls.length === 0 || portB.sendCalls.length === 0) {
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        }
+
+        const [cancel, answer] = await Promise.all([
+            chatA.execute(
+                ChatUserAction.cancel({ requestId: "cancel-a" }),
+            ),
+            chatB.execute(
+                ChatUserAction.answer({
+                    interactionId: "interaction-b",
+                    answer: { kind: "permission", decision: "allow_once" },
+                    requestId: "answer-b",
+                }),
+            ),
+        ]);
+
+        expect(cancel.status).toBe("requested");
+        expect(answer.status).toBe("accepted");
+        expect(portA.calls.filter((call) => call === "cancel")).toHaveLength(1);
+        expect(portA.calls.some((call) => call.startsWith("answer:"))).toBe(
+            false,
+        );
+        expect(portA.answers).toEqual([]);
+        expect(portB.calls.filter((call) => call === "cancel")).toHaveLength(0);
+        expect(portB.answers).toEqual([
+            {
+                interactionId: "interaction-b",
+                answer: { kind: "permission", decision: "allow_once" },
+            },
+        ]);
+        // cancel 只是请求，不取消另一会话，也不撤回等待中的输入。
+        expect(portA.running).toBe(true);
+        expect(portB.running).toBe(true);
+        expect(inputA.isSent).toBe(false);
+        expect(inputB.isSent).toBe(false);
+
+        releaseA();
+        releaseB();
+        await Promise.all([inputA.accepted, inputB.accepted]);
+        portA.deliver(inputA.inputId, "a");
+        portB.deliver(inputB.inputId, "b");
+        await Promise.all([inputA, inputB]);
+        expect(inputA.isSent).toBe(true);
+        expect(inputB.isSent).toBe(true);
+    });
+
     test("force_send, answer and history forward to the active binding", async () => {
         const { chat, port } = await readyChat();
         port.historyResult = { applied: 2, nextCursor: "cursor-2" };

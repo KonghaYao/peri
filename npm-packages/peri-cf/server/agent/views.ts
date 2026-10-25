@@ -52,20 +52,22 @@ export class ChatViewRegistry {
     return entry.view.binding?.bindingRevision ?? null;
   }
 
-  /** 释放单个视图；不存在是幂等 no-op。失败时不重新登记。 */
+  /** 释放单个视图；不存在是幂等 no-op。只有释放成功才移除条目，失败保留供重试。 */
   async dispose(chatId: string): Promise<void> {
     const entry = this.entries.get(chatId);
     if (!entry) return;
-    this.entries.delete(chatId);
     await entry.view.dispose();
+    if (this.entries.get(chatId) === entry) this.entries.delete(chatId);
   }
 
-  /** 关闭所有连接并销毁文档；聚合失败，保留已释放的部分。 */
+  /** 关闭所有连接并销毁文档；聚合失败，失败的条目保留供重试。 */
   async disposeAll(): Promise<void> {
-    const entries = [...this.entries.values()];
-    this.entries.clear();
+    const entries = [...this.entries.entries()];
     const results = await Promise.allSettled(
-      entries.map((entry) => entry.view.dispose()),
+      entries.map(async ([chatId, entry]) => {
+        await entry.view.dispose();
+        if (this.entries.get(chatId) === entry) this.entries.delete(chatId);
+      }),
     );
     const failures = results.flatMap((result) =>
       result.status === "rejected" ? [result.reason] : []);

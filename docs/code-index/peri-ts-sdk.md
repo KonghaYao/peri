@@ -14,9 +14,10 @@
 | `/wasm-host` | `src/wasm-host.ts` | `/wasm` + Node 网络/DNS 端口 |
 
 旧 `Agent`、`ManagedAgents`、`SessionDocs`、`SessionViewStore`、`AtomicManagedAgentKv`、
-`agent-claim-conflict-error` 以及 `Sandbox` 业务门面均已删除，不在任何发布入口导出；仅保留
-`tests/public-view.test.ts` 的负向断言。stdlib/Workspace 进程管理、本地数据库、JSONL dispatcher
-与执行恢复账本也不在 SDK 内。
+`agent-claim-conflict-error` 已删除，不在任何发布入口导出；`tests/public-view.test.ts` 只对这些
+旧符号做负向断言。`src/sandbox/sandbox.ts` 的 `Sandbox` 仍保留并有正向测试
+`tests/sandbox.test.ts`，但未从任何发布入口导出；是否删除待用户裁决。stdlib/Workspace 进程管理、
+本地数据库、JSONL dispatcher 与执行恢复账本也不在 SDK 内。
 
 ## 控制面
 
@@ -59,7 +60,8 @@
 - `bun run typecheck`：`tsc --noEmit` + demo tsconfig；测试目录不在 include 内。
 - `bun test tests test`：单元/行为测试；`test/` 覆盖执行准入、Session 关闭/启动与 claim。
 - `bun run test`：先 `bun run build`（含 peri-wasm 构建）再全量测试。
-- `bun run test:wasm`：先 build，再跑真实 WASM ACP 集成；旧 `dist` 无效。
+- `bun run test:wasm`：先 build，再跑真实 WASM ACP 集成；旧 `dist` 无效。当前环境因 Emscripten
+  shim 失败而 BLOCKED，干净 CI 不可复现，不能宣称已通过。
 - 关键回归：`tests/chat-{action,manager,binding,actions,close-bounded,view,replica,document,instance-factory}.test.ts`、`tests/peri-instance.test.ts`、`tests/history-pagination.test.ts`、`tests/acp-mcp-lifecycle.test.ts`、`tests/wasm-acp-integration.test.ts`。
 - 公共出口负向断言：`tests/public-view.test.ts`。
 

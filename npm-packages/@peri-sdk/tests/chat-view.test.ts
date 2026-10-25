@@ -202,6 +202,46 @@ describe("ChatView", () => {
         await secondConnection.replica.dispose();
     });
 
+    test("two Views share a pending interaction; a late View rebuilds it and one dispose leaves the other live", async () => {
+        const source = new FakeFactSource();
+        source.bind(TARGET);
+        source.emit({ kind: "input-delivered", inputId: "u1", text: "Start" });
+        const early = new ChatView(source);
+        const earlyConnection = connect(early);
+        await waitFor(() => earlyConnection.replica.status === "synced");
+
+        source.emit({ kind: "interaction-began", record: {
+            id: "interaction:pending", kind: "permission", sessionId: "s1",
+            toolCallId: "t1", title: "Write file",
+            options: [{ optionId: "allow_once", name: "Allow" }],
+        } });
+        await waitFor(() => earlyConnection.replica.read().pendingInteractions.length === 1);
+
+        const late = new ChatView(source);
+        const lateConnection = connect(late);
+        await waitFor(() => lateConnection.replica.status === "synced");
+        expect(lateConnection.replica.read().pendingInteractions).toMatchObject([
+            { id: "interaction:pending", kind: "permission" },
+        ]);
+        expect(earlyConnection.replica.read().pendingInteractions).toHaveLength(1);
+
+        await early.dispose();
+        earlyConnection.replica.dispose();
+        expect(source.observerCount).toBe(1);
+        expect(lateConnection.replica.status).toBe("synced");
+        expect(lateConnection.replica.read().pendingInteractions).toHaveLength(1);
+
+        source.emit({ kind: "notice", notification: update("agent_message_chunk", {
+            messageId: "a1", content: { type: "text", text: "Still live" },
+        }) });
+        await waitFor(() => lateConnection.replica.read().entries[1]?.blocks[0]?.type === "text");
+        expect(lateConnection.replica.read().pendingInteractions).toHaveLength(1);
+
+        lateConnection.connection.close();
+        await late.dispose();
+        await lateConnection.replica.dispose();
+    });
+
     test("binding generations replace the replica pair without reusing old entries", async () => {
         const source = new FakeFactSource();
         source.bind(TARGET);

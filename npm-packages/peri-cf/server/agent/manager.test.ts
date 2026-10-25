@@ -7,11 +7,13 @@ import {
   type ChatDatabase,
   type ChatFact,
   type ChatSessionDirectoryEntry,
+  type ChatYjsChannel,
   type PeriInstancePort,
   type ToolPayloadReadRef,
   type ToolPayloadResponse,
 } from "@peri-code/sdk";
-import type { ServerConfig } from "../config";
+import { publicServerInfo, type ServerConfig } from "../config";
+import { createApi } from "../api";
 import {
   ChatViewRegistry,
   createAppChatManager,
@@ -145,6 +147,29 @@ class FakeFactory {
       this.ports.push(port);
       return port;
     };
+  }
+}
+
+class FlakyChannel implements ChatYjsChannel {
+  closed = false;
+  failures = 1;
+
+  send(_frame: Uint8Array): void {}
+
+  onMessage(_listener: (frame: Uint8Array) => void): () => void {
+    return () => {};
+  }
+
+  onClose(_listener: (error?: Error) => void): () => void {
+    return () => {};
+  }
+
+  close(_reason?: Error): void {
+    if (this.failures > 0) {
+      this.failures -= 1;
+      throw new Error("channel close failed");
+    }
+    this.closed = true;
   }
 }
 
@@ -293,12 +318,48 @@ describe("AppChatManager", () => {
     expect(manager.getChat(chat.id)).toBe(chat);
     expect(manager.findChatBySession("session-close")?.id).toBe(chat.id);
     expect(views.size).toBe(1);
+    expect(manager.hasPendingClose(chat.id)).toBe(false);
 
     await manager.closeChat(chat.id);
     expect(manager.getChat(chat.id)).toBeUndefined();
     expect(manager.findChatBySession("session-close")).toBeUndefined();
     expect(views.size).toBe(0);
     expect(factory.ports[0]?.closed).toBe(true);
+  });
+
+  test("view 释放失败保留条目，HTTP DELETE 重试可释放", async () => {
+    const views = new ChatViewRegistry();
+    const { manager, database } = managerWith({ views });
+    database.entries.set("session-view", entry("session-view"));
+    const chat = manager.createChat();
+    await chat.execute({
+      type: "change_session",
+      requestId: "request-view",
+      payload: { sessionId: "session-view" },
+    });
+    const view = views.attach(chat);
+    const channel = new FlakyChannel();
+    view.sync(channel);
+
+    await expect(manager.closeChat(chat.id)).rejects.toBeInstanceOf(
+      ChatCloseIncompleteError,
+    );
+    expect(manager.getChat(chat.id)).toBeUndefined();
+    expect(views.size).toBe(1);
+    expect(channel.closed).toBe(false);
+    expect(manager.hasPendingClose(chat.id)).toBe(true);
+
+    // 句柄已移除后，HTTP DELETE 仍应进入残留条目重试而不是 410。
+    const app = createApi({
+      manager,
+      info: publicServerInfo(config),
+      logError: () => {},
+    });
+    const retried = await app.request(`/api/chats/${chat.id}`, { method: "DELETE" });
+    expect(retried.status).toBe(204);
+    expect(views.size).toBe(0);
+    expect(channel.closed).toBe(true);
+    expect(manager.hasPendingClose(chat.id)).toBe(false);
   });
 
   test("listSessions 只读目录，不创建实例", async () => {

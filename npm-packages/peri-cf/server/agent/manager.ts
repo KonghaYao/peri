@@ -205,6 +205,17 @@ export class AppChatManager {
     }
   }
 
+  /**
+   * 句柄已移除、View 仍待释放：DELETE 重试的残留下沉入口。
+   *
+   * 在线 Chat 由 `getChat`/`findChatBySession` 解析，不会命中这里；只暴露是否存在，
+   * 不把 View 交给 HTTP 层。View 释放成功后条目会被删除，信号自然消失。
+   */
+  hasPendingClose(chatId: string): boolean {
+    return this.chats.getChat(chatId) === undefined
+      && this.views.get(chatId) !== undefined;
+  }
+
   viewFor(chat: ChatService) {
     return this.views.attach(chat);
   }

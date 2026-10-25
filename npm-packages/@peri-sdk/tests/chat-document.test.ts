@@ -772,4 +772,3 @@ describe("ChatDocument facts", () => {
     });
   });
 });
-

@@ -1,8 +1,8 @@
 /**
  * Chat 控制面的模块内出口。
  *
- * 主入口何时公开这些符号由 Phase 4 的 `src/sdk/index.ts` 决定；这里不修改
- * package exports，也不把 Manager/Service 暴露给 `/portable`。
+ * 公开面由 `chat/public.ts` 定义，主入口与 `/portable` 共用（含
+ * `ChatManager`/`ChatService`）；本文件只汇总模块内符号，不自行增减导出。
  */
 export * from "./action";
 export * from "./errors";

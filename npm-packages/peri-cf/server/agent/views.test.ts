@@ -57,6 +57,18 @@ class TestChannel implements ChatYjsChannel {
   }
 }
 
+class FlakyCloseChannel extends TestChannel {
+  failures = 1;
+
+  override close(reason?: Error): void {
+    if (this.failures > 0) {
+      this.failures -= 1;
+      throw new Error("channel close failed");
+    }
+    super.close(reason);
+  }
+}
+
 function channelPair(): { server: TestChannel; client: TestChannel } {
   const server = new TestChannel();
   const client = new TestChannel();
@@ -214,6 +226,29 @@ describe("ChatViewRegistry", () => {
     await registry.dispose("chat-1");
     expect(registry.get("chat-1")).toBeUndefined();
     expect(source.observerCount).toBe(0);
+  });
+
+  test("dispose 失败保留条目，重试成功后才删除并关闭 channel", async () => {
+    const source = new FakeFactSource();
+    source.bind(TARGET);
+    const chat = fakeChat("chat-1", source);
+    const registry = new ChatViewRegistry();
+    const view = registry.attach(chat);
+    const channel = new FlakyCloseChannel();
+    view.sync(channel);
+
+    await expect(registry.dispose("chat-1")).rejects.toBeInstanceOf(
+      AggregateError,
+    );
+    expect(registry.get("chat-1")).toBe(view);
+    expect(registry.size).toBe(1);
+    expect(source.observerCount).toBe(0);
+    expect(channel.closed).toBe(false);
+
+    await registry.dispose("chat-1");
+    expect(registry.get("chat-1")).toBeUndefined();
+    expect(registry.size).toBe(0);
+    expect(channel.closed).toBe(true);
   });
 
   test("同一 Chat id 的不同 ChatService 实例被拒绝", () => {

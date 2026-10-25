@@ -720,14 +720,14 @@ export class ChatService implements ChatServiceContract {
         const previousSessionId = previousTarget?.sessionId ?? null;
         const old = this.active;
         if (old) {
-            old.abandoned = true;
-            old.detach();
             this.active = undefined;
-            try {
-                await old.port.close();
-                this.pendingCleanups.delete(old);
-                this.startupControllers.delete(old.controller);
-            } catch (error) {
+            const closed = await closeActivation(
+                old,
+                this.lifecycleOptions.activationCloseTimeoutMs,
+            );
+            if (!closed.confirmed) {
+                // 旧激活关闭未确认：保留旧资源与 claim/索引，先完成候选清理再进入
+                // blocked，绝不把超时当成已停止。
                 this.pendingCleanups.add(old);
                 const cleanup = await this.disposeActivation(activation);
                 const release = await candidate.release(cleanup);
@@ -735,11 +735,13 @@ export class ChatService implements ChatServiceContract {
                 throw bindingFailure(
                     requestId,
                     "binding_cleanup_failed",
-                    error,
-                    release.released,
+                    closed.error,
+                    false,
                     release.error,
                 );
             }
+            this.pendingCleanups.delete(old);
+            this.startupControllers.delete(old.controller);
             if (previousSessionId !== null) {
                 try {
                     await this.releaseClaim(previousSessionId);

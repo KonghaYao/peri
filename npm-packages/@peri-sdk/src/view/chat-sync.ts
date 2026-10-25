@@ -65,6 +65,8 @@ export class ChatSyncConnection {
     private detachClose: () => void;
     private closed = false;
     private failure: Error | undefined;
+    private closePromise: Promise<void> | null = null;
+    private channelCloseDone = false;
     private timer: ReturnType<typeof setTimeout> | undefined;
     private readonly waiters = new Set<() => void>();
     private readonly onTerminated: (() => void) | undefined;
@@ -111,23 +113,45 @@ export class ChatSyncConnection {
 
     flush(): void { this.source?.flush(); }
 
-    async close(): Promise<void> {
-        if (this.closed) return;
-        this.source?.flush();
-        if (this.closed) return;
-        this.unsubscribeSource?.();
-        this.unsubscribeSource = null;
-        if (this.ledger.pending.length) {
-            try {
-                await withDeadline(this.drained(), this.closeTimeoutMs, "Chat sync close");
-            } catch (error) {
-                this.failure ??= error instanceof Error ? error : new Error("Chat sync close failed");
+    /**
+     * 关闭连接并关闭底层 channel。
+     *
+     * 清理只执行一次；channel.close 失败时保留可重试状态，后续 close 只重试
+     * 未完成的 channel 关闭，不会让 rejected 结果永久缓存。
+     */
+    close(): Promise<void> {
+        if (this.closePromise) return this.closePromise;
+        const attempt = this.finishClose();
+        this.closePromise = attempt;
+        void attempt.catch(() => {
+            if (this.closePromise === attempt) this.closePromise = null;
+        });
+        return attempt;
+    }
+
+    private async finishClose(): Promise<void> {
+        if (!this.closed) {
+            this.source?.flush();
+            if (!this.closed) {
+                this.unsubscribeSource?.();
+                this.unsubscribeSource = null;
+                if (this.ledger.pending.length) {
+                    try {
+                        await withDeadline(this.drained(), this.closeTimeoutMs, "Chat sync close");
+                    } catch (error) {
+                        this.failure ??= error instanceof Error ? error : new Error("Chat sync close failed");
+                    }
+                }
+                this.cleanup();
+                this.onTerminated?.();
             }
         }
-        this.cleanup();
-        this.onTerminated?.();
-        if (this.channel.closed) return;
+        if (this.channelCloseDone || this.channel.closed) {
+            this.channelCloseDone = true;
+            return;
+        }
         await this.channel.close(this.failure);
+        this.channelCloseDone = true;
     }
 
     private receive(raw: Uint8Array): void {

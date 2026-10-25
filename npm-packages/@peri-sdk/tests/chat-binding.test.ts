@@ -7,8 +7,9 @@ import {
 } from "../src/chat/errors";
 import { ChatManager } from "../src/chat/manager";
 import type { ChatManagerInternalOptions } from "../src/chat/manager";
-import type { SendReceipt } from "../src/chat/types";
+import type { ChatLifecycleOptions, SendReceipt } from "../src/chat/types";
 import { MemoryKV } from "../src/kv/memory-kv";
+import { DeadlineError } from "../src/util/deadline";
 import {
     FakeDatabase,
     FakePort,
@@ -25,6 +26,7 @@ interface Setup {
 function setup(
     configure?: (port: FakePort) => void,
     claims?: AtomicSessionClaims,
+    lifecycle?: ChatLifecycleOptions,
 ): Setup {
     const kv = new MemoryKV();
     const database = new FakeDatabase();
@@ -41,6 +43,7 @@ function setup(
             },
         },
         defaults: { path: "/workspace" },
+        ...(lifecycle ? { lifecycle } : {}),
         instanceFactory: () => {
             const port = new FakePort();
             configure?.(port);
@@ -395,5 +398,58 @@ describe("binding concurrency and revision", () => {
         await chat.close();
         expect(setupValue.claims.size).toBe(0);
         expect(portA.closeCalls).toBe(2);
+    });
+
+    test("old close that never resolves is bounded and retryable after it settles", async () => {
+        const setupValue = setup(undefined, undefined, {
+            activationCloseTimeoutMs: 25,
+        });
+        setupValue.database.seed(directoryEntry("session-a"));
+        setupValue.database.seed(directoryEntry("session-b"));
+        const chat = await toggle(setupValue, "session-a");
+        const portA = setupValue.ports[0];
+        const originalClose = portA.close.bind(portA);
+        let closeAttempts = 0;
+        portA.close = () => {
+            closeAttempts += 1;
+            return new Promise<void>(() => {});
+        };
+
+        const started = performance.now();
+        let failure: unknown;
+        try {
+            await chat.execute(ChatUserAction.changeSessionTo("session-b"));
+        } catch (error) {
+            failure = error;
+        }
+        const elapsed = performance.now() - started;
+
+        expect(failure).toMatchObject({
+            code: "binding_cleanup_failed",
+            disposition: "unknown",
+        });
+        expect((failure as { cause?: unknown }).cause).toBeInstanceOf(
+            DeadlineError,
+        );
+        expect(elapsed).toBeLessThan(1000);
+        expect(chat.phase).toBe("blocked");
+        expect(chat.sessionId).toBe("session-a");
+        expect(chat.bindingRevision).toBe(1);
+        expect(setupValue.claims.has("session-a")).toBe(true);
+        expect(setupValue.manager.findChatBySession("session-a")).toBe(chat);
+        expect(setupValue.manager.getChat(chat.id)).toBe(chat);
+        // 新候选的清理已确认，因此只释放候选；旧激活的 claim/索引必须保留。
+        expect(setupValue.ports[1].closeCalls).toBe(1);
+        expect(setupValue.claims.has("session-b")).toBe(false);
+        expect(closeAttempts).toBe(1);
+
+        portA.close = originalClose;
+        await chat.close();
+        expect(setupValue.claims.size).toBe(0);
+        expect(setupValue.manager.getChat(chat.id)).toBeUndefined();
+        expect(
+            setupValue.manager.findChatBySession("session-a"),
+        ).toBeUndefined();
+        expect(portA.closeCalls).toBe(1);
     });
 });
