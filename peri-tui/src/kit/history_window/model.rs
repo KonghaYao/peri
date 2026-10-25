@@ -18,6 +18,9 @@ use super::display::DisplayLedger;
 use super::index::ResidentIndex;
 pub(crate) use super::source::{HistorySource, PersistentEntryKey, PersistentSubItemKey};
 
+/// 窗口实例序号：只用于把跨实例的未归属账目隔离开，不进入 wire 或持久化。
+static NEXT_WINDOW_INSTANCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// 本地生命周期句柄：`window_generation + seq`。
 ///
 /// 不是消息身份，不进入 wire、锚点、工具配对或持久化；窗口换代后旧键全部作废。
@@ -513,6 +516,8 @@ impl WindowStatus {
 #[derive(Clone, Debug)]
 pub struct HistoryWindow {
     enabled: bool,
+    /// 进程内唯一的窗口实例标识（不进入 wire）：预算重建后用于作废旧未归属记录。
+    instance_id: u64,
     identity: Option<WindowIdentity>,
     generation: u64,
     pub(crate) layout: VecDeque<RegionKey>,
@@ -549,6 +554,7 @@ impl HistoryWindow {
         let index = ResidentIndex::new();
         Self {
             enabled: config.history_window_v1,
+            instance_id: NEXT_WINDOW_INSTANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             identity: None,
             generation: 0,
             layout: VecDeque::new(),
@@ -575,6 +581,11 @@ impl HistoryWindow {
 
     pub fn is_enabled(&self) -> bool {
         self.enabled
+    }
+
+    /// 进程内唯一的实例标识；预算重置（reset / 身份切换）后旧未归属记录作废。
+    pub fn instance_id(&self) -> u64 {
+        self.instance_id
     }
 
     pub fn identity(&self) -> Option<&WindowIdentity> {
@@ -612,6 +623,93 @@ impl HistoryWindow {
     pub fn note_unattributed_live_bytes(&mut self, bytes: usize) {
         self.budget.unattributed_live_bytes =
             self.budget.unattributed_live_bytes.saturating_add(bytes);
+    }
+
+    /// 归属成功后从无持久身份账目移出；`unattributed_live_bytes` 必须能回落，
+    /// 否则同一批正文会同时占用可淘汰与不可淘汰两份额度。
+    pub fn release_unattributed_live_bytes(&mut self, bytes: usize) {
+        self.budget.unattributed_live_bytes =
+            self.budget.unattributed_live_bytes.saturating_sub(bytes);
+    }
+
+    /// 迟到工具更新改变未归属正文大小时同步账目（正负均可）。
+    pub fn adjust_unattributed_live_bytes(&mut self, delta: i64) {
+        self.budget.unattributed_live_bytes =
+            apply_signed_delta(self.budget.unattributed_live_bytes, delta);
+    }
+
+    /// 把同一持久条目的新增展示单元并入已驻留的 LiveSeal 段。
+    ///
+    /// 驻留索引要求条目身份唯一，因此同一消息的文本与工具卡不能各登记一个段；
+    /// 后到的单元并入原段，随原段一起封印/淘汰。返回 `false` 表示该条目不存在
+    /// 或驻留在页段（不可并入，调用方须继续按未归属正文记账）。
+    pub fn extend_live_entry(
+        &mut self,
+        key: &PersistentEntryKey,
+        unit_count: usize,
+        body_bytes: usize,
+        reserved_bytes: usize,
+    ) -> bool {
+        let Some(locator) = self.index.locate_entry(key).copied() else {
+            return false;
+        };
+        let Some(segment) = self.segments.get_mut(&locator.segment) else {
+            return false;
+        };
+        if segment.origin != SegmentOrigin::LiveSeal {
+            return false;
+        }
+        let Some(entry) = segment.entries.iter_mut().find(|entry| &entry.key == key) else {
+            return false;
+        };
+        entry.unit_count = entry.unit_count.saturating_add(unit_count);
+        entry.body_bytes = entry.body_bytes.saturating_add(body_bytes);
+        entry.reserved_bytes = entry.reserved_bytes.saturating_add(reserved_bytes);
+        segment.unit_count = segment.unit_count.saturating_add(unit_count);
+        segment.body_bytes = segment.body_bytes.saturating_add(body_bytes);
+        segment.reserved_bytes = segment.reserved_bytes.saturating_add(reserved_bytes);
+        self.index.extend_segment_bytes(locator.segment, body_bytes);
+        self.budget.resident_body_bytes =
+            self.budget.resident_body_bytes.saturating_add(body_bytes);
+        self.budget.resident_reserved_bytes = self
+            .budget
+            .resident_reserved_bytes
+            .saturating_add(reserved_bytes);
+        self.rebuild_slots();
+        self.refresh_pinned_budget();
+        true
+    }
+
+    /// 已归属条目的正文大小变化（迟到工具终点）：只调账目，不改身份与槽位。
+    pub fn adjust_live_entry_bytes(
+        &mut self,
+        key: &PersistentEntryKey,
+        body_delta: i64,
+        reserved_delta: i64,
+    ) -> bool {
+        let Some(locator) = self.index.locate_entry(key).copied() else {
+            return false;
+        };
+        let Some(segment) = self.segments.get_mut(&locator.segment) else {
+            return false;
+        };
+        if segment.origin != SegmentOrigin::LiveSeal {
+            return false;
+        }
+        let Some(entry) = segment.entries.iter_mut().find(|entry| &entry.key == key) else {
+            return false;
+        };
+        entry.body_bytes = apply_signed_delta(entry.body_bytes, body_delta);
+        entry.reserved_bytes = apply_signed_delta(entry.reserved_bytes, reserved_delta);
+        segment.body_bytes = apply_signed_delta(segment.body_bytes, body_delta);
+        segment.reserved_bytes = apply_signed_delta(segment.reserved_bytes, reserved_delta);
+        self.index.adjust_segment_bytes(locator.segment, body_delta);
+        self.budget.resident_body_bytes =
+            apply_signed_delta(self.budget.resident_body_bytes, body_delta);
+        self.budget.resident_reserved_bytes =
+            apply_signed_delta(self.budget.resident_reserved_bytes, reserved_delta);
+        self.refresh_pinned_budget();
+        true
     }
 
     pub fn anchor(&self) -> Option<&WindowAnchor> {
@@ -994,5 +1092,14 @@ impl HistoryWindow {
 
     pub(crate) fn stats_mut(&mut self) -> &mut WindowStats {
         &mut self.stats
+    }
+}
+
+/// 有符号字节调节：负值按饱和减法处理，账目绝不回绕。
+fn apply_signed_delta(value: usize, delta: i64) -> usize {
+    if delta >= 0 {
+        value.saturating_add(delta as usize)
+    } else {
+        value.saturating_sub(delta.unsigned_abs() as usize)
     }
 }

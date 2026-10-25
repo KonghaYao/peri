@@ -120,6 +120,8 @@ fn live_tool_still_runs_after_history_replay() {
             input_summary: "src/main.rs".into(),
             raw_input: json!({"file_path": "src/main.rs"}),
             agent_id: None,
+            origin_message_id: None,
+            origin_readable: None,
         }),
     );
     assert_eq!(state.phase, SessionPhase::PromptRunning);

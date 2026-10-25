@@ -217,6 +217,24 @@ pub(super) fn decode_stream_update_with(
                 summarize_input(&tool_name, raw_input)
             };
             let raw_input = update.get("rawInput").cloned().unwrap_or(Value::Null);
+            // 真实所属 assistant 消息（服务端经 `_meta.peri.originMessageId` 透传）。
+            // 旧服务端/旧事件没有该字段 → None，由 bridge 回退到流式启发式。
+            let origin_message_id = update
+                .get("_meta")
+                .or_else(|| update.get("meta"))
+                .and_then(|meta| meta.get("peri"))
+                .and_then(|peri| peri.get("originMessageId"))
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(ToOwned::to_owned);
+            // 三态可回读性：缺失（旧服务端）→ None，由 bridge 维持启发式回退；
+            // `false` 表示嵌套执行，客户端不得建立任何归属。
+            let origin_readable = update
+                .get("_meta")
+                .or_else(|| update.get("meta"))
+                .and_then(|meta| meta.get("peri"))
+                .and_then(|peri| peri.get("originReadable"))
+                .and_then(Value::as_bool);
             if is_session_replay {
                 Some(AcpEventData::ReplayToolStarted {
                     tool_id,
@@ -230,6 +248,8 @@ pub(super) fn decode_stream_update_with(
                     tool_name,
                     input_summary,
                     raw_input,
+                    origin_message_id,
+                    origin_readable,
                     agent_id,
                 };
                 Some(AcpEventData::ToolStarted(tool_started))

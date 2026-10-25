@@ -905,7 +905,20 @@ pub enum ExecutorEvent {
     },
     /// 工具调用开始（工具名 + 参数），携带所属 AI 消息的 message_id
     ToolStart {
+        /// v1 兼容身份：工具事件沿用 `turn_id` 派生值。
         message_id: crate::messages::MessageId,
+        /// 真实所属 assistant 消息身份（与 `message_id` 的 turn 语义区分）。
+        ///
+        /// 由 Agent 发射点在知道所属 assistant 消息时填充；旧客户端/旧事件缺失
+        /// 该字段时按 `None` 解析，消费方不得回退为 `message_id` 冒充消息归属。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_message_id: Option<crate::messages::MessageId>,
+        /// origin 是否可回读（三态语义同 v2 `RenderEvent::ToolStarted`）。
+        ///
+        /// `Some(true)` 已持久化可回读；`Some(false)` 确认无持久 origin（嵌套
+        /// 执行），消费方不得回退；`None` 为旧载荷，语义未知。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_readable: Option<bool>,
         tool_call_id: String,
         name: String,
         input: serde_json::Value,
