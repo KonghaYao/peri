@@ -166,7 +166,7 @@ cp dist/index.js ../peri-cf/node_modules/@peri-code/sdk/dist/index.js
   `src/chat/service.ts` 967 行（A15 修复前 941）。
 - 全量 `wc -l` 仍列出两个既有超限 vendored 文件：`frontend/components/assistant-ui/elements/tool-fallback.aui.tsx`（1431）、`thread.aui.tsx`（1166）。本轮未改动；按 `STD-SIZE-001` 另立任务治理，不宣称全库通过。
 - 生产源码无 `TODO`/`FIXME`，无新增兼容 shim；旧符号只保留在负向测试与明确标注的历史文档中。
-- `npm-packages/peri-cf/docker-compose.yml` 为未跟踪文件，未纳入本轮任何提交。工作树副本在 2026-10-25 22:26:02 发生外部变更（size 2765→3082，sha256 `a8af2136…`→`655be552…`，同时间段存在 `/tmp/peri-loom-data-v3-backup-20261025-2217.tar.gz`）；本轮未执行该变更，来源待用户确认，确认前不改动、不恢复该文件。
+- `npm-packages/peri-cf/docker-compose.yml` 为未跟踪文件，未纳入本轮任何提交。工作树副本在 2026-10-25 22:26:02 发生外部变更（size 2765→3082，sha256 `a8af2136…`→`655be552…`，同时间段存在 `/tmp/peri-loom-data-v3-backup-20261025-2217.tar.gz`）；变更来源待用户确认，确认前不改动、不恢复该文件。
 - **CF 测试稳定性**：`Timeline.dom.test.tsx` 的“迟到跨会话信号”用例在修复前 8 路并发压力下
   32 次全量失败 4 次；修复后单文件连续 10 次、全量连续 10 次均为 0 fail，压力下 32/32 通过。
 - **HTTP DELETE 重试已打通**：首次关闭移除句柄后若 View 释放失败，`AppChatManager` 保留 View 条目并
