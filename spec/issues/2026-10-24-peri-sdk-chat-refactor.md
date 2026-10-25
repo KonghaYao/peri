@@ -1,10 +1,10 @@
 # Peri SDK Chat 架构重构
 
-- 状态：**实现已提交（Phase 0–6）；独立复验指出的 P1（CF Timeline 间歇失败、A15 组合证据）与 P2（证据校准）已修复；真实 WASM/宿主与 SDK 发布门禁仍 BLOCKED**
+- 状态：**实现已提交（Phase 0–6）；P1（CF Timeline 间歇失败、A15 组合证据）与 P2（证据校准）已修复；终轮独立复验代码/测试全绿；真实 WASM/宿主与 SDK 发布门禁仍 BLOCKED；受保护未跟踪文件 `docker-compose.yml` 的基线哈希变化待用户确认**
 - 分支：`feature/peri-cf-browser-agent`
-- 实施提交：`64bfcbc48`（契约）、`e6ccbcd3d`（SDK 三层）、`c0520f625`（SDK 出口/工厂）、`cc447f789`（CF 服务端）、`966b6c7d7`（CF 前端）
+- 实施提交：`64bfcbc48`（契约）、`e6ccbcd3d`（SDK 三层）、`c0520f625`（SDK 出口/工厂）、`cc447f789`（CF 服务端）、`966b6c7d7`（CF 前端）、`179677996`（文档）、`fb0535e34`（终验修复）、`272e2dcb4`（Timeline/A15 修复）
 - 事实源：本 issue；用户裁决与实施计划见工作区 `.peri/plans/`（非仓库长期事实源）。
-- 本阶段边界：完成终验指出的换绑有界关闭、View 释放重试、A07/A10/A15 组合用例，修复 CF Timeline 计时竞态并同步文档/证据；不重构业务逻辑，不改 Rust/ACP wire/数据库表，不 commit/push。
+- 本阶段边界：完成终验指出的换绑有界关闭、View 释放重试、A07/A10/A15 组合用例，修复 CF Timeline 计时竞态并同步文档/证据；不重构业务逻辑，不改 Rust/ACP wire/数据库表；提交由协调者按检查点执行，subagent 不 commit/push。
 
 ## 1. 范围
 
@@ -166,7 +166,7 @@ cp dist/index.js ../peri-cf/node_modules/@peri-code/sdk/dist/index.js
   `src/chat/service.ts` 967 行（A15 修复前 941）。
 - 全量 `wc -l` 仍列出两个既有超限 vendored 文件：`frontend/components/assistant-ui/elements/tool-fallback.aui.tsx`（1431）、`thread.aui.tsx`（1166）。本轮未改动；按 `STD-SIZE-001` 另立任务治理，不宣称全库通过。
 - 生产源码无 `TODO`/`FIXME`，无新增兼容 shim；旧符号只保留在负向测试与明确标注的历史文档中。
-- `npm-packages/peri-cf/docker-compose.yml` 为未跟踪文件，本轮未触碰。
+- `npm-packages/peri-cf/docker-compose.yml` 为未跟踪文件，未纳入本轮任何提交。工作树副本在 2026-10-25 22:26:02 发生外部变更（size 2765→3082，sha256 `a8af2136…`→`655be552…`，同时间段存在 `/tmp/peri-loom-data-v3-backup-20261025-2217.tar.gz`）；本轮未执行该变更，来源待用户确认，确认前不改动、不恢复该文件。
 - **CF 测试稳定性**：`Timeline.dom.test.tsx` 的“迟到跨会话信号”用例在修复前 8 路并发压力下
   32 次全量失败 4 次；修复后单文件连续 10 次、全量连续 10 次均为 0 fail，压力下 32/32 通过。
 - **HTTP DELETE 重试已打通**：首次关闭移除句柄后若 View 释放失败，`AppChatManager` 保留 View 条目并
