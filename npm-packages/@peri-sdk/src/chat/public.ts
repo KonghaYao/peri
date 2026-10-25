@@ -1,8 +1,8 @@
 /**
  * Chat 控制面的公开符号（主入口与 portable 共用）。
  *
- * 只包含 Chat 句柄、动作、事实/视图契约与错误；不导出旧 Agent、
- * ManagedAgents、SessionDocs 或 SessionViewStore 门面。
+ * 只包含 Chat 句柄、动作、事实/视图契约与错误；已删除的旧业务门面
+ * 不再从任何发布入口导出。
  */
 
 export { ChatManager } from "./manager";

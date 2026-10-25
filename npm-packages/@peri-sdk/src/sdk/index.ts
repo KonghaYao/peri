@@ -1,8 +1,8 @@
 /**
  * @peri-code/sdk 主入口：Chat 控制面、展示契约与宿主装配类型。
  *
- * 运行实例由 `ChatManager` 按激活装配；旧 `Agent`/`ManagedAgents`/`SessionDocs`
- * 门面已删除。浏览器安全展示出口见 `/view`，WASM 宿主表面见 `/wasm` 与
+ * 运行实例由 `ChatManager` 按激活装配；旧业务门面已删除。
+ * 浏览器安全展示出口见 `/view`，WASM 宿主表面见 `/wasm` 与
  * `/wasm-host`，无进程装配入口见 `/portable`。
  */
 

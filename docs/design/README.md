@@ -48,7 +48,8 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | Git Watch 中间件 | [git-watch-middleware.md](git-watch-middleware.md) | 分支/HEAD 变化 Info 注入（异步采样 + 60s 节流） |
 | System Reminder | [system-reminder.md](system-reminder.md) | canonical DTO、可信生产、队列/持久化、ACP/TUI 投影与 legacy fallback |
 | Beta Flag 系统 | [beta-flags.md](beta-flags.md) | 注册表、`config.betas` 配置面投影与装配期消费注入；不做远程下发、灰度与会话内热生效，安全与兼容语义不使用 flag；验收记录与剩余跟进项见 [2026-10-08 实施 issue](../../spec/issues/2026-10-08-beta-flags-implementation.md) |
-| peri-cf 服务端 Agent 执行 | [peri-cf-server-agent.md](peri-cf-server-agent.md) | Bun 长驻服务承载 WASM ACP Host 与会话运行期；前端只消费 HTTP/SSE；凭据与远程 MCP 由服务端环境变量管理 |
+| Peri SDK Chat | [peri-sdk-chat.md](peri-sdk-chat.md) | `ChatManager`/`ChatService`/`ChatUserAction`/`PeriInstance`/`ChatView` 与 `ChatReplica` 的职责、事实/同步、宿主与关闭边界；公开入口见 [TS SDK 索引](../code-index/peri-ts-sdk.md) |
+| peri-cf 服务端 Agent 执行 | [peri-cf-server-agent.md](peri-cf-server-agent.md) | Bun 长驻服务承载 WASM ACP Host 与 SDK Chat 控制面；浏览器经 HTTP Action 与 WebSocket + Yjs 只读副本消费；凭据与远程 MCP 由服务端环境变量管理 |
 
 ## 已批准目标设计
 
@@ -63,9 +64,9 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | SubAgent 活动行 | [tui-subagent-activity.md](tui-subagent-activity.md) | TUI redesign active issue |
 | Workflow as MCP | [workflow-mcp.md](workflow-mcp.md) | [Workflow as MCP 实施](../../spec/issues/2026-10-11-workflow-as-mcp.md)；builtin 实例迁移、任务资源 + 回填信道与旧链删除进行中 |
 | TUI 面板架构 | [tui-panel-architecture.md](tui-panel-architecture.md) | [TUI 面板架构重构](../../spec/issues/2026-10-15-tui-architecture-refactor.md)；面板外壳、共享视口、事件入口、操作作用域与完成门、快照发布单点、确认版本守卫已落地；未完成项见该 issue |
-| peri-cf 聊天对象契约 | [peri-cf-chat-objects.md](peri-cf-chat-objects.md) | 前端消费面与对象契约完整性；升级/双身份已批准，2026-10-10 转向「无 DO、零表、零持久化、按需 ACP 重放复原」；实施进度与验收见 [实施 issue](../../spec/issues/2026-10-10-peri-cf-chat-objects-implementation.md) 与 [无 DO 转向 issue](../../spec/issues/2026-10-10-peri-cf-no-durable-object.md) |
+| peri-cf 聊天对象契约 | [peri-cf-chat-objects.md](peri-cf-chat-objects.md) | 前端消费面与对象契约完整性；对象语义继续有效，Worker/DO 与旧控制通道已标注为历史；当前实现见 [Peri SDK Chat](peri-sdk-chat.md) 与 [服务端 Agent](peri-cf-server-agent.md) |
 | peri-cf 浏览器宿主 Agent（已被取代） | [peri-cf-browser-agent.md](peri-cf-browser-agent.md) | 2026-10-11 浏览器宿主时期的历史设计；2026-10-21 起由 [peri-cf-server-agent.md](peri-cf-server-agent.md) 取代 |
-| peri-cf Chat 前端 | [peri-cf-chat-ui.md](peri-cf-chat-ui.md) | 以 assistant-ui registry 组件全量替换 chat 区域（消息流/输入/会话列表）；SDK 保持独立，适配层在应用侧；进度与未决项见 [active issue](../../spec/issues/2026-10-13-peri-cf-chat-ui-assistant-ui.md) |
+| peri-cf Chat 前端 | [peri-cf-chat-ui.md](peri-cf-chat-ui.md) | assistant-ui registry 组件承担渲染；状态来自 SDK `ChatReplica` 经 `ChatProjection` 物化的展示 DTO；SDK 保持独立，适配层在应用侧；浏览器验收见 [active issue](../../spec/issues/2026-10-13-peri-cf-chat-ui-assistant-ui.md) |
 
 ## 维护要求
 

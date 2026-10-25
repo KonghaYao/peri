@@ -18,7 +18,7 @@ export interface ProjectionSummary {
 /**
  * 浏览器展示投影：只读 `ChatReplica`（其底层为 SDK `ChatDocument` 文档对）。
  *
- * 不持有 `SessionDocs`/`SessionViewStore`，不反向控制执行。每次读取都经
+ * 不持有服务端投影门面，不反向控制执行。每次读取都经
  * schema 校验；副本未就绪或版本不受支持时保留 `readiness`，不伪造空历史。
  */
 export class ChatProjection {

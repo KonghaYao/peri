@@ -3,6 +3,12 @@
 > **已被取代（2026-10-21）**：执行位置与配置边界改由
 > [peri-cf-server-agent.md](peri-cf-server-agent.md) 约束。本文件保留浏览器宿主时期的
 > 生命周期、重放与命令语义作为历史依据；与现行设计冲突处以新文件为准。
+>
+> **历史符号（已删除）**：本文提到的 `ManagedAgents`、`AgentManager`、`SessionDocs`、
+> `SessionViewStore`、`SyncState`、`/commands`、`/events`（SSE）与 Worker/DO 路径均不代表
+> 当前实现。当前入口是 SDK `ChatManager`/`ChatService`/`ChatView`/`ChatReplica`、HTTP Action
+> 与 WebSocket `/api/chats/:id/sync`；见 [Peri SDK Chat](peri-sdk-chat.md) 与
+> [Peri CF 索引](../code-index/peri-cf.md)。
 
 状态：已批准目标设计（2026-10-11）。本文件替代 [peri-cf-chat-objects.md](peri-cf-chat-objects.md)
 中「Worker 承载 ACP 宿主、浏览器为只读副本、WS 同步」的执行与同步结构；产品语义（消息
@@ -76,7 +82,11 @@
    控制帧、浏览器 SessionDocReplica/SessionDocSync 的传输用途、`/api/v2/*` 会话面与实例
    观测端点。
 
-## Agent 管理模块（2026-10-20）
+## Agent 管理模块（2026-10-20，历史；已删除）
+
+> 本节描述的 `AgentManager` 及其 `frontend/agent/` 边界已在 SDK Chat 重构中删除，不得作为
+> 当前入口。现行页面控制器是 `frontend/remote/controller.ts`，服务端控制面是 SDK
+> `ChatManager`/`ChatService`。
 
 为后续后端迁移，浏览器内的会话管理逻辑已收敛到平台无关的 `frontend/agent/`：
 

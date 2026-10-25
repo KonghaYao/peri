@@ -1,5 +1,10 @@
 # peri-cf 聊天对象实施：P0 冻结与 P1 对象权威
 
+> **当前实现（2026-10-25）**：SDK Chat 重构已落地，入口为 `ChatManager`/`ChatService`/
+> `ChatView`/`ChatReplica`，动作走 HTTP、副本走 WebSocket + Yjs；本文的 `SessionDocs`、
+> `SessionViewStore`、`SyncState`、WS 文本控制帧与 DO/Worker 描述均为历史。见
+> [2026-10-24 SDK Chat 重构](2026-10-24-peri-sdk-chat-refactor.md)。
+
 > **状态更新（2026-10-10，架构转向后）**：本 issue 的对象契约（P0/P1/P2）与交互闭环（P4）结论仍有效；**P3「DO 记录切换/payload 持久化/容量/版本化存储」与 P5 中把 DO 记录、DO Hibernation socket 当作展示持久化/连接恢复基线的部分已作废（superseded）**，由 [无 DO 转向 issue](2026-10-10-peri-cf-no-durable-object.md) 取代：零表、零持久化、按需 ACP 重放复原、会话命令走 WS 文本控制帧。P3 原交付物 `worker/chat/record.ts` 与相关测试已删除；下文 P3/P5 段落保留为历史记录，不得作为实施依据。
 
 状态：进行中。P0–P4 与 **P5 本地范围**均已交付并通过测试：本地已跑通真实 WASM × workerd × DO × WebSocket × libSQL × 模型 fixture 的闭环（`scripts/smoke.mjs`），workerd 上的载荷端点、权限往返与断宿主验收亦通过（均基于已作废的 DO 基线，见上）。**生产切换（维护窗口、部署端验收、真实浏览器）未执行**，不得称为生产验证。

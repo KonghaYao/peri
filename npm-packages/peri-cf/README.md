@@ -1,110 +1,102 @@
-# Peri CF
+# @peri-code/peri-cf
 
-Peri 的前后端分离示例：**Bun 长驻服务承载 Agent 执行**，React + Vite 只做展示、命令转发与交互回答。
+Peri WASM Agent 的 Bun 长驻服务 + 浏览器 Chat。服务端持有 `ChatManager`、`ChatService`、
+`PeriInstance`、`ChatView` 与 WASM ACP Host；浏览器只消费目录、HTTP Action 回执与只读 Yjs 副本。
+模型、Store 与 MCP 凭据只存在于服务端环境变量。设计见
+[服务端 Agent](../../docs/design/peri-cf-server-agent.md) 与
+[Chat 前端](../../docs/design/peri-cf-chat-ui.md)；入口见
+[peri-cf 代码索引](../../docs/code-index/peri-cf.md)。
 
-服务端在进程内启动 peri-wasm ACP Host（每个执行/复原一个实例），`ChatManager` 装配只读 Turso/libSQL 适配并交给 `ChatService` 驻留会话实例；投影、命令处理与交互队列位于服务端；浏览器通过 HTTP 提交命令、通过 SSE 接收投影。模型与存储凭据只存在于服务端环境变量，前端不再保存密钥。
+## 架构
 
-这是待部署验收的单可信用户示例，不是已完成生产验证的服务。服务没有内置认证与多租户隔离，部署入口控制（反向代理鉴权或等效设施）是必要条件。
+```text
+浏览器
+  → frontend/remote：HTTP Action + WebSocket 二进制同步
+  → server/api：目录 / 句柄 / Action / payload / WS upgrade
+  → @peri-code/sdk：ChatManager → ChatService → PeriInstance → ACP
+  → peri-wasm Host（每次激活一个）→ 模型 / Turso Store / 远程 MCP
+```
 
-## 运行模型
+- **服务端**：`server/index.ts` 是 Bun 入口；`server/agent/manager.ts` 是组合根（SDK Manager +
+  `ChatViewRegistry`）；`server/api/index.ts` 只做 HTTP 边界校验与错误映射；`server/api/sync.ts` 把
+  Bun WebSocket 适配为 SDK `ChatYjsChannel`。
+- **前端**：`frontend/remote/controller.ts` 是页面控制器；`frontend/chat/runtime/useChat.ts` 装配控制器、
+  目录查询与载荷读取；`frontend/chat/` 是 assistant-ui 适配与展示。
+- **同步**：客户端只发 HELLO/ACK；服务端发 SNAPSHOT/UPDATE；客户端不能写 Y.Doc。慢客户端由 SDK
+  交付信用/背压显式关闭。
+- **打开历史**：先 `POST /api/chats` 得到空句柄，再 `change_session`；202 后才连 WS。已有控制者返回
+  `binding_conflict`，前端改用 Session ID 寻址既有句柄。
+- **运行态**：列表只返回 Store 目录事实；选中会话的 running/交互/队列只来自副本，不从列表推断。
+- **没有访问控制**：服务不提供认证、限流或多租户隔离；入口鉴权是部署必要条件。
 
-- **服务端是唯一计算实例**：`server/` 的 `ChatManager` 装配 `TursoChatSessionStore`、宿主启动器与环境工厂，`ChatService` 驻留 `PeriInstance`；冷启动经 ACP `session/load` 重放历史，在途执行不因客户端断开而终止。
-- **前端只消费投影**：`frontend/remote/client.ts` 的 `AgentManager` 仍是浏览器会话门面，注入的是 HTTP 仓储与远程运行期；命令经 `POST /api/chats/:id/commands`，投影经 `GET /api/chats/:id/events`（SSE，整帧快照，50 ms 合并推送）。一次会话选择只复用一个 `RemoteChatRuntime`。
-- **刷新/关闭页面不再结束执行**：执行属于服务端；重新打开页面会重新订阅同一会话并收到当前完整投影。
-- **工具面只有远程 MCP**：`McpMiddleware` + `ToolSearch` 开启，后端从 `PERI_MCP_SERVERS` 声明远程 Streamable HTTP server；不存在浏览器 local-fs、模拟 Bash、stdio 或进程内 builtin 工具。
-- **命令语义不变**：单轮互斥、取消需宿主关闭确认、交互回答失败码稳定（`busy` / `blocked` / `settled` / `invalid_answer` / `unavailable` / `integrity_error` / `too_large` / `not_found` / `internal_error`）。失败以 `disposition` 表达执行是否生效：`rejected`（明确未生效）与 `unknown`（执行状态未知）；客户端预检失败另记 `not_sent`（未离开客户端，可安全重试）。
+## HTTP / WS
 
-## 服务端配置
+| 方法 | 路径 | 行为 |
+| --- | --- | --- |
+| GET | `/api/info` | 去敏后的服务信息 |
+| GET | `/api/chats` | Store 目录；不可达 503 + `available:false` |
+| POST | `/api/chats` | 只登记句柄，不创建 Session |
+| POST | `/api/chats/:chatId/actions` | `ChatUserAction`；202 回执 |
+| DELETE | `/api/chats/:chatId` | 关闭句柄；成功 204，未确认 500 |
+| GET | `/api/chats/:chatId/payload/:refId?bytes=` | 按引用读取工具全文 |
+| WS | `/api/chats/:chatId/sync` | 只读 Yjs 同步；未知 Chat 升级前 410 |
 
-全部从进程环境变量读取；任一必填项缺失或非法都会拒绝启动。
+Action 封套为 `{ ...action, target: { sessionId, bindingRevision } }`；空句柄用
+`{sessionId:null,bindingRevision:0}`。`send` 回执的 `accepted` 是入队，不表示已投递；`cancel` 的
+`requested` 不是 stopped。动作失败以 `disposition`（`rejected`/`unknown`/`not_sent`）表达可重试性，
+HTTP 状态不单独决定重试。
+
+## 环境变量
 
 | 变量 | 必填 | 说明 |
 | --- | --- | --- |
 | `PERI_MODEL_PROVIDER` | 否 | `openai`（默认）或 `anthropic` |
 | `PERI_MODEL_ID` | 是 | 模型 ID |
-| `PERI_MODEL_BASE_URL` | 是 | 模型端点，必须是 `http(s)` |
-| `PERI_MODEL_API_KEY` | 是 | 模型密钥 |
-| `PERI_STORAGE_URL` | 是 | libSQL/Turso HTTP 端点，必须是 `http(s)` |
-| `PERI_STORAGE_TOKEN` | 是 | 存储凭据 |
-| `PERI_MACHINE_ID` | 是 | 规范 UUID；Store 内的机器身份，必须持久不变 |
-| `PERI_MCP_SERVERS` | 否 | JSON 数组：`[{"name","url","token?","headers?"}]`；只接受 `http(s)`，`token` 写成 `Authorization: Bearer` |
-| `PERI_SERVER_HOST` | 否 | 默认 `127.0.0.1`；容器内监听可设 `0.0.0.0` |
-| `PERI_SERVER_PORT` | 否 | 默认 `8787` |
-| `PERI_WASM_MODULE_URL` | 否 | 默认 `wasm/generated/peri-wasm.js`；可给绝对路径、`file:` 或 `http(s)` URL |
-| `PERI_STATIC_ROOT` | 否 | 默认 `dist/client`；不存在时只提供 API |
+| `PERI_MODEL_BASE_URL` | 是 | http(s) 上游 |
+| `PERI_MODEL_API_KEY` | 是 | 模型凭据，只在服务端 |
+| `PERI_STORAGE_URL` | 是 | Turso/libSQL http(s) 地址 |
+| `PERI_STORAGE_TOKEN` | 是 | Store 凭据，只在服务端 |
+| `PERI_MACHINE_ID` | 是 | 持久 UUID；服务端不随机生成 |
+| `PERI_MCP_SERVERS` | 否 | JSON 数组：`[{name,url,token?,headers?}]`，只接受 http(s) |
+| `PERI_SERVER_HOST` / `PERI_SERVER_PORT` | 否 | 默认 `127.0.0.1:8787` |
+| `PERI_STATIC_ROOT` | 否 | 前端静态目录，默认 `dist/client` |
+| `PERI_WASM_MODULE_URL` | 否 | WASM 胶水位置（file/http），默认 `wasm/generated/peri-wasm.js` |
+| `LANGFUSE_*` | 否 | 只有此前缀的变量会交给 WASM 实例 |
 
-`LANGFUSE_*` 会传给 WASM 实例；其余环境变量不会进入模块环境。
+任何配置解析问题都会拒绝启动并一次性报告缺失项；密钥不进入前端、不写日志。
 
-## HTTP 接口
-
-| 方法 | 路径 | 说明 |
-| --- | --- | --- |
-| GET | `/api/info` | 去敏后的模型/存储/MCP 摘要；设置页只读展示 |
-| GET | `/api/chats` | 会话清单 |
-| POST | `/api/chats` | 创建会话并执行 `session/new` + `session/rename` |
-| GET | `/api/chats/:id` | 复原并返回完整 `SyncState` |
-| GET | `/api/chats/:id/events` | SSE：`event: state`（完整投影）、`event: ping`（15 s） |
-| POST | `/api/chats/:id/commands` | `prompt` / `cancel` / `interaction` / `payload`；契约见 `core/shared/chat.ts` |
-
-`:id` 必须是 UUID。命令失败返回 `{ok:false, code, message, disposition}`：明确未生效为 `409`（会话缺失为 `404`），`disposition:"rejected"`；执行状态未知为 `500`，`disposition:"unknown"`。格式错误返回 `400` 与 `disposition:"rejected"`。
-非 `/api/*` 路径由同一进程提供 SPA 静态资源与 `index.html` 回退。
-
-## 本地启动
+## 本地运行
 
 ```bash
+cd npm-packages/@peri-sdk && bun run build   # 先构建 SDK（含 peri-wasm）
+cd npm-packages/peri-cf
 bun install
-bun run prepare:wasm   # 校验并发布 WASM 到 wasm/generated（需要 Rust/Emscripten 工具链）
-bun run dev            # Bun 服务（watch）+ Vite，Vite 把 /api 代理到 127.0.0.1:8787
+bun run dev                                  # prepare:wasm + Bun 服务 + Vite
+# 或
+bun run start                                # 需要已构建的 wasm/generated 与 dist/client
 ```
 
-生产构建与启动：
+SDK 构建依赖 Emscripten 6.0.10 与已准备的工具链。CF 通过 `file:../@peri-sdk` 解析
+`node_modules/@peri-code/sdk`；干净 CI 必须先把最新 SDK 包安装/复制到 CF，否则会使用旧 dist 并出现
+“导出不存在”或类型漂移。旧 dist 或临时 `node_modules` 副本不能冒充干净构建。
+
+## 验证
 
 ```bash
-bun run build          # prepare:wasm + vite build → dist/client
-bun run start          # bun server/index.ts（需先导出上面的环境变量）
+bun run typecheck
+bun test
+./node_modules/.bin/vite build
+bun run build        # prepare:wasm + Vite；需要 WASM 工具链
 ```
 
-只改前端时可分开运行：`bun run dev:server` 与 `bun run dev:web`。
-`bun run typecheck`、`bun run test` 是验证入口。
+- `bun test` 覆盖 core、frontend、scripts 与 server；真实模型/Store/远程 MCP 不在单测内。
+- 浏览器包检查：`dist/client` 不应出现 `PERI_MODEL_API_KEY`、`PERI_STORAGE_TOKEN`、`node:fs` 或
+  `@tursodatabase`。
+- 真实宿主验收需要匹配源码的 WASM 产物与可用模型/Store；未验证平台必须标记 blocked。
 
-WASM 产物必须与当前源码一致：`prepare:wasm` 校验源码、锁文件、工具链、构建参数与产物哈希后原子发布；缺失、过期或混合产物直接失败。纳入哈希的输入包括 `peri-wasm` 及其本地依赖闭包、`Cargo.toml`/`Cargo.lock`、`patches/`、`.cargo/`、仓库脚本与 `core/shared/runtime-limits.ts`。
+## 部署限制
 
-## 目录职责
-
-模块规则：**文件夹是模块边界，目录根的 `index.ts` 是唯一公共出口**；跨模块只能引用出口，测试跟随模块放置。`core/agent/boundary.test.ts` 静态扫描生产代码，并强制 `frontend/` 与 `server/` 互不引用。
-
-- `core/agent/`：平台无关的会话内核（不依赖 React/DOM/localStorage）。`types.ts` 定义平台端口；`session/`（`PeriInstance`、运行期端口、创建、defer）、`view/`（投影、交互、AskUserQuestion）、`transport/`（ACP 初始化）是子模块。
-- `core/shared/`：前后端共用的 Zod 契约与展示 DTO（`chat.ts`、`sync.ts`、`sync-state.ts`）以及 WASM 构建输入常量。
-- `server/`：Bun 组合根（`index.ts`）、环境配置（`config.ts`）、组合根与宿主/MCP 装配（`manager.ts`）、会话服务与驻留 LRU（`service.ts`）、Turso 只读适配（`store.ts`）与 Hono API（`api/`）。
-- `frontend/remote/`：HTTP 仓储、SSE 运行期、`client.ts` 的浏览器 `AgentManager` 门面与 `createRemoteAgent()` 组合根。
-- `frontend/chat/`：assistant-ui 适配、查询缓存、载荷读取、交互表单与消息组件。
-- `frontend/settings/`：只读服务端信息弹层，不保存凭据。
-- `frontend/app/`：SPA 入口与应用外壳；没有首次运行门禁。
-- `frontend/components/`、`hooks/`、`lib/`、`shims/`、`styles/`：assistant-ui/shadcn 组件、通用工具、构建替身与样式。
-- `scripts/`：WASM 构建/provenance、开发启动与探针；每个脚本是独立命令入口。
-- `wasm/generated/`：构建产物（gitignored），只由服务端加载。
-
-## SDK 消费边界
-
-只消费已发布 SDK 入口，不引用 `@peri-sdk/src`、不新增 entry、不在应用复制准入或同步规则：
-
-| 入口 | 用途 |
-| --- | --- |
-| `@peri-code/sdk/wasm` | 服务端 Emscripten 宿主启动、调度器端口、ACP transport、截止时间与关闭证据 |
-| `@peri-code/sdk/portable` | 平台无关语义：ACP 初始化、`SessionDocs` 投影、`TursoStorage`、交互规则 |
-| `@peri-code/sdk/view` | 只读视图与载荷读取 |
-
-服务端宿主只注入调度器端口（`createSchedulerPort`）；网络由 WASM 的 Emscripten fetch 执行器发起，模型与 Store 直连配置的上游。SDK `/portable` 重导出的准入模块引用 `crypto`；浏览器构建用 `frontend/shims/nodeCrypto.ts` 替换为显式失败的替身，前端不消费准入面。
-
-## WASM 限制
-
-WASM 运行的是 ACP Host，不是本地终端工具环境：没有宿主项目文件系统、任意 shell/子进程或本地 builtin MCP 服务。文件、终端、Web、Artifact、Cron、Workflow 与 Skills 只有在远程 MCP 提供时存在。
-
-每个 CF WASM 线性内存最大 64 MiB、栈 8 MiB、增长步长 1 MiB（`core/shared/runtime-limits.ts` 是构建输入）。命令型 hook 在 Emscripten 下明确报错，不静默放行。
-
-## 已知限制
-
-- 没有认证、授权、限流与多租户隔离；只适合单可信用户或受入口控制保护的部署。
-- SSE 每帧发送完整 `SyncState`（50 ms 合并），长会话的带宽与序列化开销高于 Yjs 增量同步。
-- 服务进程退出时 `ChatManager.shutdown()` 先释放驻留实例，再兜底关闭仍存活的宿主并结束在途执行；重启后会话历史仍在 Store，执行不恢复。
-- `ChatService` 默认最多驻留 8 个空闲实例，超限按 LRU 回收；正在执行的实例不会被回收。
+- 单进程 Session claim：默认 `MemoryKV`，多实例部署必须注入共享原子 KV；不能宣称跨实例接管。
+- 进程退出会结束在途执行；历史仍在 Store，可重新加载续聊，但不恢复旧执行。
+- 工具面只保留远程 Streamable HTTP MCP；WASM 部署没有进程内文件/终端 builtin。
+- hosted Workers/DO 路径已删除；Bun 服务是唯一后端入口。没有认证、限流或多租户隔离。

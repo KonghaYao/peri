@@ -181,7 +181,7 @@ function parseSuccess(response: Response, body: unknown, action: ChatUserAction)
 /**
  * 新 HTTP 面：句柄创建、Action、载荷与显式关闭。
  *
- * 不接触旧 Agent 门面、旧命令/事件路由或目录运行态。
+ * 不接触旧业务门面、旧命令/事件路由或目录运行态。
  */
 export function createRemoteActions(options: RemoteActionClientOptions = {}) {
   const base = options.origin ?? "";

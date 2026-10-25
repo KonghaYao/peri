@@ -1,5 +1,11 @@
 # 2026-10-11 peri-cf 浏览器宿主 Agent 迁移
 
+> **状态：superseded（2026-10-25）。** 浏览器宿主/Worker relay 路径已不在工作树；当前实现是
+> Bun 服务端 + SDK ChatManager/ChatService + HTTP Action + WebSocket/Yjs，见
+> [2026-10-24 SDK Chat 重构](2026-10-24-peri-sdk-chat-refactor.md) 与
+> [服务端 Agent 设计](../../docs/design/peri-cf-server-agent.md)。本文只保留迁移历史，不得作为
+> 当前入口或验收依据。
+
 目标设计：[docs/design/peri-cf-browser-agent.md](../../docs/design/peri-cf-browser-agent.md)。
 范围：仅 `npm-packages/peri-cf`（含其依赖的 peri-wasm / peri-resources / peri-model 接线）。
 

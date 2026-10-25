@@ -1,12 +1,17 @@
 # peri-cf 聊天对象契约与前端消费面目标设计
 
-> 状态：**已批准目标设计；本文的执行与同步结构已由 [浏览器宿主 Agent 设计](peri-cf-browser-agent.md)（2026-10-11 批准）取代。**
-> 取代范围：Worker 承载 ACP 宿主、浏览器为只读副本、WS 文档同步与文本控制帧命令、`/api/v2/*` 会话面与实例观测端点、isolate 容量/实例观测。**产品语义继续有效**：对象契约（Entry / ContentBlock / ToolCall / Turn / Task / Plan / Interaction）、消息展示、命令语义（prompt/cancel/interaction/payload）、交互回答、载荷读取与「唯一持久权威是 Turso/libSQL 的 Rust Store」；冲突处以 [服务端 Agent 设计](peri-cf-server-agent.md) 为准（2026-10-21 起；浏览器宿主设计已取代）。实施与验收见 [迁移 issue](../../spec/issues/2026-10-11-peri-cf-browser-agent-migration.md)。
->
-> 原文状态（历史）：**已批准目标设计；对象契约、view/消费面与「零持久化 + 按需 ACP 重放复原」架构基线已落地（本地验证），生产切换与部署端验收未完成。**
-> 用户已批准三项裁决：(1) 升级策略：chat schema 2→3 / session schema 1→2，消费端拒绝旧 schema、版本化应用入口 + 短维护窗口、不长期双写；(2) **展示权威与持久化（2026-10-10 转向）**：无 Durable Object、零表、零持久化，Yjs 展示态不持久化，历史由 ACP `session/load` 重放按需复原，Turso/libSQL 的 Rust Store 是唯一跨 isolate 持久权威，会话命令走 WS 文本控制帧；(3) Entry 双身份：`entryId` 为对象 key、新增稳定展示 `id`，新数据两者默认同值。
-> **已作废（superseded）**：本文原「DO 展示 checkpoint（`recordVersion:2` 单键索引 + `payload:<id>:<n>` 1 MiB 分段 + `record:v1-backup` 7 天回滚窗口）」「5.3.4 平台结构裁决」「四张表草案」及其容量数值，全部由裁决 (2) 取代，不再具有设计效力。它们只作为决策历史保留在 [P3 批准包](../../spec/issues/2026-10-10-peri-cf-chat-objects-p3-approval.md)，取代关系与证据见 [无 DO 转向 issue](../../spec/issues/2026-10-10-peri-cf-no-durable-object.md)；不得按旧基线创建 DO、表、bucket 或绑定。
-> 实施进度、验收边界与遗留项只写 `spec/issues/`；本文件不记录实施叙事。原文「本次交付仅文档」等历史表述已随实施落地作废。
+> 状态：**已批准目标设计；对象契约与展示消费面仍有效，传输/控制实现已更新（2026-10-25）。**
+> 现行实现以 [Peri SDK Chat](peri-sdk-chat.md)、[服务端 Agent](peri-cf-server-agent.md) 与
+> [Chat 前端](peri-cf-chat-ui.md) 为准：Chat 控制面由 SDK `ChatManager/ChatService/PeriInstance`
+> 承担，浏览器经 `ChatReplica` 消费 WebSocket + Yjs 只读副本，Action 经 HTTP 提交。
+> 本文中出现的 `SessionDocs`、`SessionViewStore`、`SyncState`、WS 文本控制帧与旧 `/api/v2/*`
+> 路径均为**历史实现（已删除）**，只用于解释对象契约的演进，不得作为当前入口或实现依据。
+> 旧 `ManagedAgents`/`AgentManager` 及 SSE `/events`、`/commands` 路由同样已删除；当前只有
+> `ChatManager`、`ChatService`、`ChatView`/`ChatReplica`、HTTP Action 与 WS `/sync`。
+> 原「浏览器宿主 / Worker / DO」执行结构已由 [服务端 Agent](peri-cf-server-agent.md) 取代；
+> 对象契约（Entry / ContentBlock / ToolCall / Turn / Task / Plan / Interaction）、消息展示、交互
+> 回答、载荷读取与「唯一持久权威是 Turso/libSQL 的 Rust Store」继续有效。
+> 实施进度、验收边界与遗留项只写 `spec/issues/`；本文件不记录实施叙事。
 >
 > Scope：`@peri-code/sdk` 实时 Yjs 对象面（Entry / ContentBlock / ToolCall / Turn / Task / Plan / Interaction）与 `peri-cf` 的展示消费面、工具载荷可达性、无持久化解构下的复原与传输边界。
 > 边界：不对齐 rcs 的同步机制、generation 换代算法与 selector 缓存层；聚合权威在 SDK 状态层，peri-cf 不建立第二套对象规则。
@@ -55,62 +60,49 @@
 
 ## 3. 目标数据流
 
-`*` 标记本轮新增或修改；未标记的同步链路沿用（不新增 generation 算法与缓存协议）。
+现行实现为「服务端执行 + 浏览器只读副本」；以下是当前结构的对象流，不是历史 Worker/DO 路径。
 
 ```text
-[Turso/libSQL Rust Store]  ← 唯一跨 isolate 持久权威（会话、消息、执行数据）
+[Turso/libSQL Rust Store]  ← 唯一持久权威（会话、消息、执行数据）
     ↑ ACP session/load：在响应之前以 session/update 重放持久历史
-[Peri WASM / ACP 后端]（驻留在接受连接/请求的 isolate 内，随 isolate 回收丢失）
+[peri-wasm ACP Host]（Bun 服务进程内，每次激活一个；进程退出不恢复旧执行）
   ACP JSON-RPC notification / reverse request / response
     ↓
-[SDK transport]
-  解码、request/notification 分流，不聚合 UI 对象
+[SDK PeriInstance / Session]
+  绑定、输入队列、取消、关闭、历史分页与交互；不聚合 UI 对象
     ↓
-[peri-cf 应用：isolate 内 runtime 注册表 + worker/chat/session]
-  会话绑定、sessionId/sourceAgent 过滤、预算、在途执行登记
-  * 无持久化：先建 runtime 并订阅，再触发 session/load 重放（重放不丢）
-  * 接好任务快照/config；reverse request 交 SDK 交互入口
+[SDK ChatService]
+  按绑定代次发布 ChatFact：seed / history / notice / queue / task / interaction / run-state / closed
+  外置 payload：{id,bytes,preview}；全文只在运行侧内存，不进 Yjs
     ↓
-[peri-cf 应用：worker/chat/projection]
-  * 删除 presentation/entryMetadata 聚合；只传生命周期元数据
-  * 展示态只在内存；不写 record、不写 checkpoint、不落表
+[SDK ChatView] → ChatDocument（一对话 Y.Doc）+ SessionDocSync
+  二进制 HELLO/SNAPSHOT/UPDATE/ACK；交付信用与有界背压
     ↓
-[SDK 状态层：SessionDocs → projections / TurnMachine → DocModel]
-  * 身份/时间/error、resource、permission 关联、终态收敛
-  chat Y.Doc：entries + blockOrder/blocks + toolCalls
-  session Y.Doc：session + turns + tasks/plans + interactions/queue
-  外置 payload：{id,bytes,preview}；全文只在 isolate 内存，不进 Yjs
+[WebSocket /api/chats/:id/sync] → [浏览器 ChatReplica]
+  只读 apply；校验 protocol/generation/schema，断线用 HELLO resume 补齐
     ↓
-[SDK SessionDocSync] → [peri-cf 无状态 WS 连接（仅 isolate 内存）]
-  沿用 snapshot/delta/update、generation/sequence、交付信用
-  二进制帧 = 文档同步；文本帧 = 应用控制帧
+[SDK /view：readSessionView / 纯选择器 / readPayload]
     ↓
-[浏览器：SDK SessionDocReplica]
-  apply；* 发布 view 前校验 schema pair，无浏览器迁移
+[peri-cf ChatProjection → ChatDisplayState（Zod）]
+  纯展示适配，不 flatten，不补造对象身份或运行态
     ↓
-[SDK /view：readSessionView / SessionViewStore]
-  * 完整对象 + 纯选择器 + readPayload(ref, reader, options)
-    ↓
-[peri-cf 应用：shared/sync-state]
-  * 纯展示适配，不 flatten，不补造对象身份
-    ↓
-[浏览器：web/chat]
+[assistant-ui 组件]
   Entry → Text / Reasoning / Tool / Resource（按顺序）
   会话/任务/计划/队列/交互面板
 
-会话命令通道（WS 文本控制帧；HTTP 无会话亲和性，命令不能走 HTTP）：
-  浏览器 → prompt / cancel / interaction 回答 / payload 读取（同一 WS 连接）
-    → isolate 内 runtime → SDK live responder / SessionDocs.readPayload
-    → command_result{ok,...} 回执；断线/超时即未确认，不自动重放
+Action（HTTP，独立于同步通道）：
+  浏览器 → POST /api/chats/:id/actions（ChatUserAction + target）
+    → ChatService → PeriInstance → ACP
+    → 202 回执携带 requestId / inputId / status / applied 等纯数据
+  失败以 disposition 表达可重试性；断线/未知结果不自动重放
 
-载荷读取：
-  浏览器 SDK reader → WS 控制帧 op:"payload"
-    → 校验 chat/tool/field/ref → isolate 内存全文（重放重建）
-  不通过 Yjs 传全文，不经 HTTP 端点，不持久化。
+载荷读取（HTTP）：
+  浏览器 SDK reader → GET /api/chats/:id/payload/:refId?bytes=
+    → 校验当前绑定与引用 → 运行侧按需读取全文
+  不通过 Yjs 传全文，不持久化；旧会话/丢失引用的 ID 明确失败。
 
-交互命令：
-  用户回答 → WS 控制帧 → SDK live responder
-    → 原 ACP reverse request response
+交互回答（HTTP Action）：
+  用户回答 → answer Action → ChatService → PeriInstance → 原 ACP reverse request response
   浏览器不可写 Y.Doc，不经副本授权工具执行。
 ```
 
@@ -224,7 +216,12 @@ TurnProjection = {
 7. 发布先停止接纳新 turn、等待在途结算；未确认关闭的会话保持 blocked，不为升级强制重跑。**〔superseded 半句〕** 原「完成 DO 记录转换」步骤删除；旧 socket 关闭后直接开放新版入口。
 8. 默认不长期双写/双 producer；若要求零维护窗口，须另审有限期双版本服务与清理条件。
 
-### 5.3 展示复原与载荷边界（新基线：零持久化）
+### 5.3 展示复原与载荷边界（历史：Worker/isolate 时期，已作废）
+
+> 本小节描述的 `/api/v2/*`、WS 文本控制帧、isolate 内存与 DO 替代方案均为历史设计，**已被
+> 2026-10-25 的 Bun 服务 + HTTP Action + WebSocket/Yjs 实现取代**。当前载荷经
+> `GET /api/chats/:id/payload/:refId?bytes=` 读取，动作经 `POST /api/chats/:id/actions` 提交；
+> 入口见 [peri-cf 代码索引](../code-index/peri-cf.md)。以下保留原文只作决策历史。
 
 **取代声明（superseded）**：本节的旧版本（SDK display checkpoint 取代 DO 纯文本、DO 记录结构未决、分段/R2 选型、容量与 GC 预算、写入顺序、回滚备份）**全部作废**，由 2026-10-10 用户裁决取代；对应的 P3 批准决定（`recordVersion:2`、`payload:<id>:<n>` 1 MiB 分段、`record:v1-backup` 7 天窗口、四张表草案）只作决策历史，见 [P3 批准包](../../spec/issues/2026-10-10-peri-cf-chat-objects-p3-approval.md) 与 [无 DO 转向 issue](../../spec/issues/2026-10-10-peri-cf-no-durable-object.md)。不得据旧版本创建 DO、表、bucket、绑定或分段存储。
 
@@ -268,19 +265,21 @@ readPayload(ref, reader, { signal, maxBytes })
 
 ## 7. 前端消费路径
 
-### 7.1 shared/sync-state → web/chat
+### 7.1 ChatReplica → ChatProjection → assistant-ui
 
-1. `shared/chat.ts`：消息 DTO 带 id/entryId/kind/status/time/error/blocks；SyncState 带 tools/turns/session/tasks/plans/interactions/queue；SDK 领域类型与应用 DTO 显式边界转换。
-2. `shared/sync-state.ts`：删除 flatten 与 entryMetadata 回填；复制文本仅点击时派生，不做第二份同步/持久化正文。
-3. `web/chat/session.ts`、`useChat.ts`：传完整状态；HTTP 首屏（触发复原）与 WS 实时同 DTO、同身份，避免接通后换消息；命令只经 WS 控制帧端口（`ChatCommandPort`），HTTP 客户端只读。
-4. `MessageList.tsx`：Entry 卡片内按 blockOrder 逐块渲染 Text/Reasoning/Tool/Resource；text 沿用现有 Markdown 安全设置；summary reasoning 可折叠；tool 显示状态/preview/全文入口；resource 显示安全描述与可用性。
-5. React key 用 Entry.id/blockId/toolCallId，不用数组位置；工具晚到更新原卡片不移动；纯工具/纯 reasoning/仅错误 Entry 不提示“没有文本”。
-6. Entry 错误显示一次，Turn 错误独立表达；复制默认仅可见 text，不含 hidden reasoning、工具秘密或原始错误。
-7. 展开/loading/重试/复制反馈/滚动/表单草稿留浏览器；切会话或登出取消旧请求、关闭旧连接并作废在途命令（未确认不重放），拒绝旧响应写入新会话。
+1. `core/shared/chat.ts`：消息 DTO 带 id/entryId/kind/status/time/error/blocks；展示状态带 tools/turns/session/tasks/plans/interactions/queue；SDK 领域类型与应用 DTO 显式边界转换。
+2. `core/shared/chat-display-state.ts`：只复制 SDK 副本已确认的公开对象；`readiness !== "ready"` 时不提供条目内容，不补造身份、时间或运行态。
+3. `core/agent/view/projection.ts`：持有 `ChatReplica`，按绑定代次缓存 `ChatDisplayState`；不反向控制执行、不写文档。
+4. `frontend/remote/controller.ts`：两步打开历史、Action 目标核对、连接与错误状态；切换会话只释放本地连接，不 cancel、不 close。
+5. `frontend/chat/runtime/useChat.ts`：装配 `ChatController`、目录查询缓存与 payload reader；选中会话的运行/交互只来自副本。
+6. `frontend/chat/timeline/*` 与 composer：Entry 卡片内按 blockOrder 逐块渲染 Text/Reasoning/Tool/Resource；text 沿用 Markdown 安全设置；summary reasoning 可折叠；tool 显示状态/preview/全文入口。
+7. React key 用 Entry.id/blockId/toolCallId，不用数组位置；工具晚到更新原卡片不移动；纯工具/纯 reasoning/仅错误 Entry 不提示“没有文本”。
+8. Entry 错误显示一次，Turn 错误独立表达；复制默认仅可见 text，不含 hidden reasoning、工具秘密或原始错误。
+9. 展开/loading/重试/复制反馈/滚动/表单草稿留浏览器；切会话或登出取消旧请求、关闭旧连接并作废在途命令（未确认不重放），拒绝旧响应写入新会话。
 
-### 7.2 本轮消费取舍
+### 7.2 消费范围
 
-| 对象 | 本轮目标 | 不在本轮 |
+| 对象 | 当前目标 | 不在范围 |
 |---|---|---|
 | Entry/Block/Tool | 保序展示、状态/error/usage、全文读取 | 工具执行重放、自动执行资源 URI |
 | Session/Turn | 状态、模型/模式等只读信息、等待/失败说明 | 执行恢复、配置编辑 |
@@ -300,28 +299,27 @@ readPayload(ref, reader, { signal, maxBytes })
 | entryMetadata.createdAt | SDK Entry.createdAt + source；导入保留旧值。 |
 | entryMetadata.error | SDK Entry/Turn PublicError；旧字符串经安全转换，不直接信任。 |
 | chat | 暂留应用 map：来自应用会话目录（Turso）的 Chat DTO；明确其与 ACP session info 的来源，不混为一份实时元数据。 |
-| running | 暂留应用**内存**：宿主执行/结算流程仍占用，不等于 activeTurnStatus；随 isolate 回收消失，不持久化、不跨 isolate 一致。 |
-| executionBlocked | 留应用**内存**：宿主停止/执行资格判断，不由 SDK 展示投影推断；isolate 回收后不保留。 |
-| 顶层 error | 留应用**内存**：仅启动、清理、连接等公开运行错误；生成失败归 Entry/Turn。 |
+| running | 来自 SDK 副本 `SessionView.running`，由 `ChatProjection` 物化；不由列表或应用状态补造。 |
+| executionBlocked | 来自 SDK 副本 `SessionView.executionBlocked`；不由展示投影另行推断。 |
+| 顶层 error | 留应用内存：仅目录、打开、Action、连接等公开错误；生成失败归 Entry/Turn。 |
 
 收敛采用**单写新权威**：展示身份/时间/错误由 SDK Entry 提供，应用不再发布 entryMetadata；旧 record/metadata 的 import 输入路径已随裁决 (2) 作废（无持久化可迁）。版本切换期旧客户端由版本化入口拒绝。
 
-## 9. 实施里程碑（依赖顺序、各阶段验收判据）
+## 9. 实施历史
 
-以下为实施拆分范围与各阶段验收判据；进度事实源为对应 `spec/issues/`，本设计不记录勾选状态与实施叙事。依赖：P0 → P1 → P2/P3；P4 依赖 P1/P3；P5 依赖全部。P3 的存储判据已按裁决 (2) 改为「零持久化 + 重放复原」（见 §5.3），原 DO 记录验收判据作废。
+对象契约与消费面的实施批次已完成并收敛到现行实现；旧 P0–P5 里程碑表、Worker/DO 路径与
+WS 文本控制帧方案**已作废**，不再作为计划或验收依据。当前结构与验收入口见
+[Peri SDK Chat](peri-sdk-chat.md)、[服务端 Agent](peri-cf-server-agent.md) 与
+[active issue](../../spec/issues/2026-10-24-peri-sdk-chat-refactor.md)；完整历史由 Git 保留。
 
-| 阶段 | 范围 | 独立验收判据 / 须先补的测试 |
-|---|---|---|
-| P0 契约冻结 | 批准身份规则、版本 pair、公开数据政策、interaction 支持类型与预算；建立 ACP fixtures。 | **先补失败样例**：text→reasoning→tool→text 交错、同 turn 多 Entry 退出、晚到更新、重放缺事件、丢失 payload；测试先揭示现缺口；**不得引入任何展示持久化或 CF 专有原语**。 |
-| P1 SDK 对象权威 | schema/projections/TurnMachine 扩展；显式错误与时钟注入；统一关联身份；重放路径（`SessionDocs` 消费 ACP 历史通知）。 | **先补 SDK 契约测试**；实时与历史生成相同有序对象；重复终态不改时间；取消不污染已完成 Entry；无 system prompt/secret 泄漏；不依赖 peri-cf metadata。 |
-| P2 view + 展示消费 | 新 SessionView/纯选择器；shared DTO；块组件与任务/计划/会话/队列面板。 | **先补 DTO/组件测试**；纯工具、hidden reasoning、仅错误、工具更新、未知对象均有明确结果；HTTP/WS 同身份；现有缓存回归通过，不新增缓存架构。 |
-| P3 复原与载荷通道 | `/view` reader 接 WS 控制帧、按需 ACP 重放复原、版本门禁；**零持久化**（原 DO 记录/分段/回滚方案已作废）。 | **先补边界测试**：越权/跨 chat ref、字节不符、超限、取消、并发；重放重建后既有全文可达（或显式 unavailable）；旧客户端明确升级；不恢复旧执行；不得出现任何持久化写入。 |
-| P4 interactions 接线 | reverse request → SDK projection/responder → DTO/表单 → WS 控制帧命令 → ACP response；接好 tasks snapshot/config 能力源。 | **先补往返测试**：允许/拒绝、问题提交、timeout、turn 退出、重复/迟到/跨 session 回答；重连/重启后全部失效；无 callback/不支持表单默认拒绝；能力声明最后开启。 |
-| P5 真实闭环与清理 | workerd/WASM + 无状态 WS + 浏览器验收；部署端验收（免费档 CPU、长时保活、远程 Turso）；移除应用旧 metadata/flatten 写回。 | 真实交错工具全文、刷新/重连、断宿主、isolate 回收、容量与安全用例通过；记录未覆盖的 provider/resource 类型，不宣称全量支持。 |
+## 10. 历史风险记录（Worker/isolate 时期）
 
-## 10. 未决问题与风险
+> 以下内容记录 2026-10 早期 Worker/isolate 方案的风险与未决项，**不再描述当前实现**。当前执行在
+> Bun 服务进程，动作走 HTTP、副本走 WebSocket + Yjs；不再有 DO、isolate 命令通道或每 isolate WASM
+> 预算。`SessionDocs` checkpoint API 已随旧展示门面删除；当前载荷与关闭语义见
+> [Peri SDK Chat](peri-sdk-chat.md)。
 
-### 10.1 未决问题（本设计不裁定，保留待批）
+### 10.1 历史未决问题（已不再适用）
 
 1. **interaction 表单支持范围**：首版支持的字段类型/校验/多步形态，及不支持的降级交互（仅提示 vs 阻断）。
 2. **resource 类型范围**：可读资源的 ACP 来源、安全标识、允许的读取路径与不可读展示契约。
@@ -353,6 +351,6 @@ readPayload(ref, reader, { signal, maxBytes })
 
 ## 落位与维护
 
-1. 本文正式位置为 `docs/design/peri-cf-chat-objects.md`，并按 `docs/design/README.md`「已批准目标设计」登记（进度事实源指向对应 active issue：对象契约见 [实施 issue](../../spec/issues/2026-10-10-peri-cf-chat-objects-implementation.md)，无 DO 转向见 [转向 issue](../../spec/issues/2026-10-10-peri-cf-no-durable-object.md)）。
+1. 本文正式位置为 `docs/design/peri-cf-chat-objects.md`，按 `docs/design/README.md`「已批准目标设计」登记；对象契约的稳定结论已并入现行 [Peri SDK Chat](peri-sdk-chat.md)、[服务端 Agent](peri-cf-server-agent.md) 与 [Chat 前端](peri-cf-chat-ui.md)。
 2. 实施完成后只保留稳定结果；动态 inventory、固定源码行号与命令输出不入本文，定位信息进 `docs/code-index/peri-ts-sdk.md` 与 `docs/code-index/peri-cf.md`。
 3. 文件改名/合并/删除按 DOC-LINK-001 同步根与模块路由、standards、code-index 与 active spec，并运行本地 Markdown 链接检查。

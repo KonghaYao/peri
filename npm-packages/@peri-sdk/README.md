@@ -4,7 +4,7 @@
 
 Bun SDK for Peri's ACP Host over a host-injected transport. `ChatManager` 同步登记 Chat 句柄；`ChatService.execute()` 在首次绑定动作时通过默认实例工厂装配一次 `PeriInstance`，claim Session、初始化 ACP，并创建或加载会话。Peri 负责模型执行与会话持久化；SDK 只做控制面、事实与展示契约。
 
-主入口公开 `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatYjsChannel`、公开类型与错误。`Sandbox`、`Agent`、`ManagedAgents`、`SessionDocs`、`SessionViewStore` 不再是公开门面。
+主入口公开 `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatYjsChannel`、公开类型与错误。旧 `Agent`、`ManagedAgents`、`SessionDocs`、`SessionViewStore`、`Sandbox` 门面已删除，不在任何发布入口提供。
 
 ```ts
 import {
@@ -68,7 +68,7 @@ await manager.shutdown();
 ```ts
 const view = new ChatView(chat);
 
-// 服务端：把 Yjs 同步帧写到 WebSocket/SSE/HTTP。
+// 服务端：把 Yjs 同步帧写到 WebSocket（或其它二进制通道）。
 const connection = view.sync(channel); // channel: ChatYjsChannel
 
 // 浏览器：ChatReplica 收 HELLO/SNAPSHOT/UPDATE/ACK，提供只读 SessionView。
@@ -112,7 +112,7 @@ defaults: {
 - `/wasm`：平台无关的 Emscripten ACP Host、loader 与 transport；`/wasm-host` 额外提供 Node-compatible 网络/DNS 端口。
 - `/portable`：不装配 Bun/stdio 进程或本地 SQLite；Chat 控制面 + 执行准入核心。准入摘要仍使用 `node:crypto`，不能宣称纯浏览器支持。
 
-`bun run build` 构建 `peri-wasm` release 产物，并把 `peri-wasm.js` 与 `peri_wasm.wasm` 放入 `dist/wasm/`。默认 [demo.ts](examples/demo/demo.ts) 使用 `host.kind="wasm"`；[demo-wasm.ts](examples/demo/demo-wasm.ts) 使用 `host.kind="transport"` 注入 `WasmAcpTransport`。两者都通过 `ChatView` + SSE 同步帧驱动浏览器 `ChatReplica`，不启动 Workspace 子进程。
+`bun run build` 构建 `peri-wasm` release 产物，并把 `peri-wasm.js` 与 `peri_wasm.wasm` 放入 `dist/wasm/`。构建依赖 Emscripten 6.0.10 与已准备的工具链；工具链不满足时构建失败，不能用旧 `dist` 冒充。默认 [demo.ts](examples/demo/demo.ts) 使用 `host.kind="wasm"`；[demo-wasm.ts](examples/demo/demo-wasm.ts) 使用 `host.kind="transport"` 注入 `WasmAcpTransport`。两者都通过 `ChatView` + 二进制同步帧驱动浏览器 `ChatReplica`；示例用 SSE 适配器承载逻辑帧，生产消费端使用 WebSocket。
 
 ## Durable Execution Admission
 

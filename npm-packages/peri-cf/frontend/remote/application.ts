@@ -16,7 +16,7 @@ export type { ChatView };
 /**
  * 浏览器组合根：Agent 在服务端执行，前端只消费目录、Action 回执与只读 Yjs 副本。
  *
- * 没有本地 WASM 宿主、SSE、localStorage 配置或旧 Agent 门面。
+ * 没有本地 WASM 宿主、事件流订阅、localStorage 配置或旧业务门面。
  */
 export function createChatApplication(options: ChatApplicationOptions = {}): ChatController {
   const base = options.origin ?? globalThis.location.origin;
