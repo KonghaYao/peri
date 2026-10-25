@@ -1,29 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { AcpMcpBridge } from "../src/agent/acp-mcp-bridge";
-import { Agent } from "../src/agent/agent";
+import { AcpMcpBridge, resolveAcpMcpBindings } from "../src/agent/acp-mcp-bridge";
+import { acpMcpServers } from "../src/agent/peri-instance";
 import type { AcpMcpServer, AcpMcpServerInstance, AcpMcpTransport } from "../src/agent/types";
-import { MemoryKV } from "../src/kv/memory-kv";
-import { Sandbox } from "../src/sandbox/sandbox";
-
-function agentWith(mcpServers: Record<string, AcpMcpServer>, workspace?: { url: string }): Agent {
-    const sandbox = new Sandbox({
-        id: "workspace",
-        ...(workspace ? { workspace } : {}),
-        transportFactory: () => { throw new Error("transport is not used by serialization tests"); },
-    });
-    return new Agent({ id: "agent", sandbox, path: "/workspace", mcpServers }, new MemoryKV());
-}
 
 const idleServer: AcpMcpServerInstance = { connect: async () => {} };
 
 describe("mcpServers serialization", () => {
     test("acp declarations expose only name/type/serverId, never the server instance", () => {
-        const agent = agentWith({
+        const serialized = acpMcpServers({
             "sdk-fetch": { type: "acp", server: idleServer },
             custom: { type: "acp", server: idleServer, serverId: "custom-id" },
         });
 
-        const serialized = agent.mcpServers();
         expect(serialized).toEqual([
             { name: "sdk-fetch", type: "acp", serverId: "sdk-fetch" },
             { name: "custom", type: "acp", serverId: "custom-id" },
@@ -32,13 +20,13 @@ describe("mcpServers serialization", () => {
     });
 
     test("http and stdio declarations keep their existing wire shape", () => {
-        const agent = agentWith({
+        const serialized = acpMcpServers({
             remote: { type: "http", url: "https://example.test/mcp", headers: { Authorization: "Bearer x" } },
             local: { type: "stdio", command: "node", args: ["server.js"], env: { TOKEN: "secret" } },
             minimal: { type: "stdio", command: "node" },
         });
 
-        expect(agent.mcpServers()).toEqual([
+        expect(serialized).toEqual([
             {
                 name: "remote", type: "http", url: "https://example.test/mcp",
                 headers: [{ name: "Authorization", value: "Bearer x" }],
@@ -51,25 +39,27 @@ describe("mcpServers serialization", () => {
         ]);
     });
 
-    test("workspace still owns the reserved server name", () => {
-        const agent = agentWith(
-            { workspace: { type: "acp", server: idleServer } },
-            { url: "https://workspace.test/mcp" },
-        );
-        expect(() => agent.mcpServers()).toThrow("Extra MCP server cannot override Sandbox workspace");
-    });
-
-    test("an acp declaration requires a connectable server instance", () => {
-        expect(() => agentWith({
+    test("an acp declaration requires a connectable server instance", async () => {
+        await expect(resolveAcpMcpBindings({
             broken: { type: "acp", server: {} as AcpMcpServerInstance },
-        })).toThrow('mcpServers["broken"].server must expose connect(transport)');
+        })).rejects.toThrow('mcpServers["broken"].server must expose connect(transport)');
     });
 
-    test("duplicate explicit serverIds are rejected", () => {
-        expect(() => agentWith({
+    test("duplicate explicit serverIds are rejected", async () => {
+        await expect(resolveAcpMcpBindings({
             one: { type: "acp", server: idleServer, serverId: "same" },
             two: { type: "acp", server: idleServer, serverId: "same" },
-        })).toThrow("Duplicate MCP serverId: same");
+        })).rejects.toThrow("Duplicate MCP serverId: same");
+    });
+
+    test("factory instances are owned and closed on resolution failure", async () => {
+        let closed = 0;
+        const broken = { connect: async () => {}, close: async () => { closed += 1; } };
+        await expect(resolveAcpMcpBindings({
+            first: { type: "acp", server: async () => broken },
+            second: { type: "acp", server: {} as AcpMcpServerInstance },
+        })).rejects.toThrow('mcpServers["second"].server must expose connect(transport)');
+        expect(closed).toBe(1);
     });
 });
 
@@ -103,9 +93,9 @@ class FakeMcpServer implements AcpMcpServerInstance {
     }
 }
 
-const acpDeclaration = (server: AcpMcpServerInstance): Record<string, AcpMcpServer> => ({
-    "sdk-fetch": { type: "acp", server },
-});
+const acpDeclaration = (server: AcpMcpServerInstance) => ([
+    { serverId: "sdk-fetch", instance: server, owned: false },
+]);
 
 async function waitFor(predicate: () => boolean, timeoutMs = 1000): Promise<void> {
     const startedAt = Date.now();
@@ -228,12 +218,12 @@ describe("mcp/message bridge", () => {
         expect(server.closed).toBe(false);
     });
 
-    test("a second Agent cannot reuse an already connected server instance", async () => {
+    test("a second activation cannot reuse an already connected server instance", async () => {
         const server = new FakeMcpServer();
         const first = new AcpMcpBridge(acpDeclaration(server));
         const second = new AcpMcpBridge(acpDeclaration(server));
 
         await first.connect();
-        await expect(second.connect()).rejects.toThrow("is already connected");
+        await expect(second.connect()).rejects.toThrow("direct acp instances are single-use");
     });
 });

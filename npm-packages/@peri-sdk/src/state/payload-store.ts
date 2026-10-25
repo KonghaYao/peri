@@ -27,7 +27,11 @@ export type NormalizedPayload =
     | { kind: "inline"; value: unknown }
     | { kind: "external"; ref: ToolPayloadRef };
 
-export type PayloadStoreErrorCode = "unavailable" | "too_large" | "invalid_json";
+export type PayloadStoreErrorCode =
+    | "unavailable"
+    | "too_large"
+    | "integrity_error"
+    | "invalid_json";
 
 export class PayloadStoreError extends Error {
     constructor(readonly code: PayloadStoreErrorCode, message: string) {
@@ -101,7 +105,7 @@ export class PayloadStore {
         if (json === undefined) throw new PayloadStoreError("unavailable", `Unknown payload: ${ref.id}`);
         const bytes = bytesOf(json);
         if (bytes !== ref.bytes)
-            throw new PayloadStoreError("unavailable", `Payload bytes changed for ${ref.id}: stored ${bytes}, ref ${ref.bytes}`);
+            throw new PayloadStoreError("integrity_error", `Payload bytes changed for ${ref.id}: stored ${bytes}, ref ${ref.bytes}`);
         if (options.maxBytes !== undefined && bytes > options.maxBytes)
             throw new PayloadStoreError("too_large", `Payload ${ref.id} exceeds ${options.maxBytes} bytes`);
         try {

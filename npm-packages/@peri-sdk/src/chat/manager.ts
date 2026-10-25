@@ -20,6 +20,7 @@ import type {
     SessionClaims,
 } from "./types";
 import { ChatService } from "./service";
+import { createPeriInstanceFactory } from "./instance-factory";
 import {
     resolveChatLifecycle,
     type ChatInstanceFactory,
@@ -29,8 +30,8 @@ import {
 /**
  * Phase 4 接入真实 PeriInstance 的内部入口。
  *
- * 公开的 `ChatManagerOptions` 不含该字段：Manager 只依赖 `PeriInstancePort`，
- * 真实装配由 SDK 集成阶段注入；测试注入 fake port。
+ * 公开的 `ChatManagerOptions` 不含该字段：Manager 默认装配真实工厂；
+ * 测试可通过该字段注入 fake port。
  */
 export interface ChatManagerInternalOptions extends ChatManagerOptions {
     readonly instanceFactory?: ChatInstanceFactory;
@@ -53,7 +54,7 @@ export class ChatManager implements ChatManagerContract {
     private readonly sessionClaims: SessionClaims;
     private readonly host: ChatHost;
     private readonly defaults: ChatDefaults;
-    private readonly instanceFactory?: ChatInstanceFactory;
+    private readonly instanceFactory: ChatInstanceFactory;
     private readonly now?: () => string;
     private readonly wasmHosts?: PeriWasmHostManager;
     private readonly lifecycle: Required<ChatLifecycleOptions>;
@@ -93,9 +94,10 @@ export class ChatManager implements ChatManagerContract {
         // 宿主配置在构造时快照；端口/模块工厂等实例仍由外部借用。
         this.host = { ...options.host };
         this.defaults = { ...options.defaults };
-        this.instanceFactory = options.instanceFactory;
         this.now = options.now;
         this.lifecycle = resolveChatLifecycle(options.lifecycle);
+        this.instanceFactory = options.instanceFactory
+            ?? createPeriInstanceFactory(this.lifecycle);
         this.index = {
             reserve: (chatId, sessionId) =>
                 this.sessions.reserve(sessionId, chatId),

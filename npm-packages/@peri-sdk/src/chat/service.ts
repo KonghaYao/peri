@@ -76,7 +76,7 @@ export class ChatService implements ChatServiceContract {
     private readonly database: ChatServiceOptions["database"];
     private readonly claims: ChatServiceOptions["claims"];
     private readonly index: ChatServiceOptions["index"];
-    private readonly instanceFactory?: ChatInstanceFactory;
+    private readonly instanceFactory: ChatInstanceFactory;
     private readonly acquireWasmHost: (
         signal?: AbortSignal,
     ) => Promise<PeriWasmHostLease>;
@@ -305,12 +305,6 @@ export class ChatService implements ChatServiceContract {
     ): Promise<SessionReadyResult> {
         const { requestId } = action;
         this.assertOpen(requestId);
-        if (!this.instanceFactory) {
-            throw new ChatNotReadyError(
-                requestId,
-                "ChatManager has no PeriInstance factory; Phase 4 integration is pending",
-            );
-        }
         const phase = this.state.phase;
         if (phase === "binding" || phase === "switching") {
             throw new ChatBusyError(
@@ -789,12 +783,6 @@ export class ChatService implements ChatServiceContract {
     }
 
     private createActivation(path: string): Activation {
-        if (!this.instanceFactory) {
-            throw new ChatNotReadyError(
-                "",
-                "ChatManager has no PeriInstance factory; Phase 4 integration is pending",
-            );
-        }
         const controller = new AbortController();
         this.startupControllers.add(controller);
         let port: PeriInstancePort;

@@ -90,8 +90,8 @@ export interface ChatServiceOptions {
     readonly claims: SessionClaims;
     readonly index: ChatSessionIndex;
     readonly lifecycle?: ChatLifecycleOptions;
-    /** Phase 4 注入真实 PeriInstance；测试注入 fake port。 */
-    readonly instanceFactory?: ChatInstanceFactory;
+    /** Manager 默认装配真实 PeriInstance；测试注入 fake port。 */
+    readonly instanceFactory: ChatInstanceFactory;
     acquireWasmHost(signal?: AbortSignal): Promise<PeriWasmHostLease>;
     onClosed(chatId: string): void;
     readonly now?: () => string;

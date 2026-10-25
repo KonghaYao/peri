@@ -156,9 +156,9 @@ export interface ChatService {
     execute(action: HistoryAction): Promise<HistoryPageOutcome>;
 
     readPayload(
-        ref: { id: string; bytes: number },
-        options?: { signal?: AbortSignal; maxBytes?: number },
-    ): Promise<{ id: string; bytes: number; json: string }>;
+        ref: ToolPayloadReadRef,
+        options?: ReadPayloadOptions,
+    ): Promise<ToolPayloadResponse>;
 
     close(): Promise<void>;
     /** 包内事实接入；公开文档标记 internal。 */

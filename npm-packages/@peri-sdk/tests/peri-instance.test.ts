@@ -629,7 +629,7 @@ test("tool payloads are externalized by content-addressed refs and stay readable
   expect(update.resultRef).toMatchObject({ bytes: expect.any(Number) });
   expect((await instance.readPayload(readableRef)).json).toBe(JSON.stringify(argumentsValue));
   await expect(instance.readPayload({ id: readableRef.id, bytes: readableRef.bytes + 1 }))
-    .rejects.toMatchObject({ name: "PayloadReadError", code: "unavailable" });
+    .rejects.toMatchObject({ name: "PayloadReadError", code: "integrity_error" });
 
   transport.emit(sessionUpdate({
     sessionUpdate: "tool_call",
@@ -642,6 +642,20 @@ test("tool payloads are externalized by content-addressed refs and stay readable
     notification: { params: { update: Record<string, unknown> } };
   };
   expect(small.notification.params.update.arguments).toEqual({ ok: true });
+  await instance.close();
+});
+
+test("invalid stored JSON maps to integrity_error rather than unavailable", async () => {
+  const { instance } = setup();
+  await instance.bindNew({ path: "/workspace" });
+  const store = (instance as unknown as {
+    payloads: { values: Map<string, string> };
+  }).payloads;
+  store.values.set("payload:broken", "{");
+  await expect(instance.readPayload({ id: "payload:broken", bytes: 1 }))
+    .rejects.toMatchObject({ name: "PayloadReadError", code: "integrity_error" });
+  await expect(instance.readPayload({ id: "payload:missing", bytes: 1 }))
+    .rejects.toMatchObject({ name: "PayloadReadError", code: "unavailable" });
   await instance.close();
 });
 

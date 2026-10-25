@@ -3,7 +3,7 @@
  *
  * 只用当前 Host 方法表（`peri-acp/src/host/server_loop.rs` 的请求分派）：
  *  - 会话：`session/new` / `session/list` / `session/load` / `session/close`
- *  - Turn：默认走 `session/input/{snapshot,enqueue}` 队列路径，与 SDK `Session.send` 相同；
+ *  - Turn：默认走 `session/input/{snapshot,enqueue}` 队列路径，与 SDK `ChatService` 的输入队列相同；
  *    `?turn=prompt` 走 `session/prompt`，这是 SDK 之外的直连 turn 路径（peri-cf 也在用），不是遗留方法。
  *  - 取消：`session/cancel` 是通知，不是请求。
  *  - `?host=sdk`：peri-cf 形态——调用 SDK 的 `startPeriWasmHost` 且**只注入 `moduleFactory`**，

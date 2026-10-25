@@ -14,7 +14,7 @@ export type {
 } from "./payload-reader";
 export type { ToolPayloadRef } from "../state/tool-payloads";
 export type { InteractionAnswer } from "../agent/interaction-responder";
-export type { InteractionFieldView } from "./session-view";
+export type { InteractionFieldView, InteractionQuestionView } from "./session-view";
 export * from "../sync/index";
 export type {
     SessionView, SessionViewReadiness, EntryView, EntryBlockView, ToolView, TurnView, PlanEntryView,

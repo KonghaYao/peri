@@ -1,244 +1,131 @@
 # @peri-code/sdk
 
-> 边界：SDK 不再包含任何进程控制。stdio transport、Workspace 进程管理、本机进程停止证明、JSONL dispatcher 与本地 SQLite 存储均已删除，不留 shim、别名或双写。ACP 连接的装配只有一条路径：宿主注入 `transportFactory`（WASM 用 `startPeriWasmHost`，其他部署注入自有实现）。
+> 边界：SDK 不再包含进程控制。stdio transport、Workspace 进程管理、本机进程停止证明、JSONL dispatcher 与本地 SQLite 存储均已删除，不留 shim、别名或双写。ACP 连接只有一条装配路径：宿主注入 `transportFactory`（WASM 用 `startPeriWasmHost`，其他部署注入自有实现）。
 
-`Sandbox.transportFactory` 是必需的注入点，SDK 不启动 Peri 或 Workspace 进程。`bun run build` 构建 `peri-wasm` release 产物，并将 `peri-wasm.js` 与 `peri_wasm.wasm` 放入包内 `dist/wasm/`。模型请求仍由 Rust `peri-model` 发出，Agent 运行现有 RCRA loop。
+Bun SDK for Peri's ACP Host over a host-injected transport. `ChatManager` 同步登记 Chat 句柄；`ChatService.execute()` 在首次绑定动作时通过默认实例工厂装配一次 `PeriInstance`，claim Session、初始化 ACP，并创建或加载会话。Peri 负责模型执行与会话持久化；SDK 只做控制面、事实与展示契约。
 
-`@peri-code/sdk/wasm` 提供不依赖 Node/Bun 的 transport 与 loader；`instantiatePeriWasm({ moduleFactory, env, moduleOptions })` 支持静态 factory 和独立实例，环境在调用时取快照并仅在启动前注入，不读取宿主环境变量。**注入 `moduleFactory` 时 `moduleUrl` 既不解析也不要求可解析**——workerd 打包模块的 `import.meta.url` 是 `undefined`，这类宿主只能走 factory 入口；未注入 factory 而又无法解析产物 URL 时，错误会明确说明该约束而不是抛出裸 `TypeError`。`WasmAcpTransport.start({ module, configJson })` 可直接消费该实例，不能同时指定 `env` 或 `moduleUrl`。`startPeriWasmHost` 由主入口、`/wasm` 与 `/wasm-host` 共同导出；平台无关的 `createSchedulerPort` 与关闭证据/截止时间工具在 `/wasm`（浏览器与 Workers 只注入 scheduler 端口），`/wasm-host` 额外提供 Node-compatible 网络与 DNS 端口。`/portable` 暴露准入规则、注册表、投影与 Store 读取，但准入摘要仍依赖 `node:crypto`，不能宣称纯浏览器支持。
-
-Bun SDK for Peri's ACP Host over a host-injected transport. `ManagedAgents.createAgent()` synchronously declares an Agent with one Session. `Session.start()` asynchronously claims their identities in the configured atomic KV, asks the injected transport factory for a connection, initializes ACP, and creates or loads the Session. Peri owns model execution and Session persistence.
+主入口公开 `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatYjsChannel`、公开类型与错误。`Sandbox`、`Agent`、`ManagedAgents`、`SessionDocs`、`SessionViewStore` 不再是公开门面。
 
 ```ts
-import { ManagedAgents, MemoryKV, Sandbox, startPeriWasmHost } from "@peri-code/sdk";
+import {
+  AtomicSessionClaims, ChatManager, ChatUserAction, ChatView, MemoryKV, TursoStorage,
+  type ChatDatabase,
+} from "@peri-code/sdk";
 
-const sandbox = new Sandbox({
-  id: "local-workspace",
-  // 凭证与 Store 位置由调用方显式提供；SDK 不读宿主环境变量。
-  storage: new TursoStorage({ url: "http://127.0.0.1:8081", authToken: "local-dev" }),
-  transportFactory: (path) => startPeriWasmHost({
-    configJson: JSON.stringify({
-      cwd: path,
-      settings: myPeriConfig,
-      storage: { url: "http://127.0.0.1:8081", authToken: "local-dev" },
-      machineId: "00000000-0000-4000-8000-000000000001",
-    }),
-  }),
+const storage = new TursoStorage({ url: "http://127.0.0.1:8081", authToken: "local-dev" });
+const database: ChatDatabase = {
+  listSessions: (path) => storage.getSessions(path ?? "/workspace"),
+  getSession: (id) => storage.getSession(id),
+};
+const manager = new ChatManager({
+  agentConfig: {
+    cwd: "/workspace",
+    settings: myPeriConfig,
+    storage: { url: "http://127.0.0.1:8081", authToken: "local-dev" },
+    machineId: "00000000-0000-4000-8000-000000000001",
+  },
+  database,
+  // 每个 Manager 一个 claims 实例；多个实例共享同一个原子 KV 驱动。
+  sessionClaims: new AtomicSessionClaims(new MemoryKV()),
+  host: { kind: "wasm", moduleUrl: new URL("./dist/wasm/peri-wasm.js", import.meta.url) },
+  defaults: {
+    path: "/workspace",
+    instructions: "Help with this workspace.",
+  },
 });
-const managed = new ManagedAgents({ kv: new MemoryKV() });
-const agent = managed.createAgent({
-  id: "agent-42",
-  sandbox,
-  path: "/absolute/existing/workspace",
-  instructions: "Help with this workspace.",
-});
-const session = await agent.session.start(null); // Supply an existing ID to load.
-try {
-  const { chat, session: sessionDoc } = agent.docs;
-  chat.on("update", (update) => console.log("chat update", update));
-  sessionDoc.on("update", (update) => console.log("session update", update));
-  void (async () => {
-    for await (const notification of session.stream()) console.log(notification);
-  })();
-  await session.send("Inspect the repository"); // Resolves when Peri emits user_input_delivered.
-  await session.send("Now inspect the tests");
-} finally {
-  await managed.closeAgent(agent.id, { drainTimeoutMs: 10_000 });
+
+const chat = manager.createChat({ path: "/workspace" });
+const ready = await chat.execute(ChatUserAction.createNewSession({}));
+const view = new ChatView(chat);
+
+const receipt = chat.execute(ChatUserAction.send({ text: "Inspect the repository" }));
+await receipt; // 等待本次输入被投递；accepted 只表示已入队。
+console.log(receipt.inputId, receipt.isSent);
+
+await chat.execute(ChatUserAction.cancel({}));
+await view.dispose();
+await chat.close();
+await manager.shutdown();
+```
+
+`execute` 只接受 `ChatUserAction` 的八类动作：`create_new_session`、`change_session`、`send`、`force_send`、`take_back`、`load_earlier_history`、`cancel`、`answer`。传入普通 wire 对象时先经 `parseChatUserAction` 校验；Manager 不接收 `execute`。执行调度属于 Peri：SDK 只发布输入，不实现 dispatcher、工作查询或准入票据。
+
+`ChatManagerOptions.host` 有两种装配：
+
+- `{ kind: "wasm" }`：Manager 为每次激活启动独立 WASM 宿主，并把 `agentConfig` 序列化为启动配置；可注入 `moduleUrl`、`moduleFactory`、`env`、`ports` 与生命周期回调。
+- `{ kind: "transport", factory }`：由宿主按 `path` 创建 transport；SDK 不启动 Peri 或 Workspace 进程。`factory` 的 `close()` 成功即视为停止证明，失败保留原因供重试。
+
+`ChatService` 的绑定动作只在空闲时允许换绑；新会话使用句柄/默认 `path`，加载历史用 Store 中的持久 `cwd`，不回退句柄 path。`findChatBySession` 覆盖 binding/cleanup 中的候选；关闭未确认时保留 claim 与索引供重试。
+
+`AtomicSessionClaims` 包装共享原子 KV：Session claim key 只含 Session ID，不含 path/Sandbox/Chat ID。`MemoryKV` 只适用于单进程；跨进程必须注入实现 `claimIfAbsent(key, owner)` / `releaseIfOwner(key, owner)` 的原子适配器。普通 unjs `Storage` 没有 compare-and-set，会被拒绝。同一 Session 的并发绑定失败抛 `SessionBindingConflictError`，且不会启动 transport。适配器负责自己的崩溃恢复或租约策略；过期本身不是旧执行已停止的证明。
+
+关闭是有预算的所有权事务：`ChatLifecycleOptions` 提供 `closeDrainTimeoutMs`、`startupSettleTimeoutMs`、`activationCloseTimeoutMs`、`shutdownChatTimeoutMs`。`session/close` 在预算内重放；超时返回 `ChatCloseIncompleteError`，保留 claim、索引与资源，不产生 `closed` 事实。`manager.shutdown()` 先封闭新准入，再聚合清理；可重试。
+
+## 展示与同步
+
+`ChatView` 消费 `ChatFact` 并维护一对 Y.Doc；晚挂 View 由事实日志重放重建。View 只读事实：不执行动作、不决定权限、不取消任务、不关闭宿主。
+
+```ts
+const view = new ChatView(chat);
+
+// 服务端：把 Yjs 同步帧写到 WebSocket/SSE/HTTP。
+const connection = view.sync(channel); // channel: ChatYjsChannel
+
+// 浏览器：ChatReplica 收 HELLO/SNAPSHOT/UPDATE/ACK，提供只读 SessionView。
+import { ChatReplica } from "@peri-code/sdk/view";
+const replica = new ChatReplica();
+replica.connect(channel);
+const unsubscribe = replica.subscribe(() => render(replica.read()));
+await replica.dispose();
+```
+
+`ChatYjsChannel` 只约定帧收发与关闭，不创建物理连接；鉴权与传输由应用负责。`ChatReplica.read()` 返回 `SessionView`：`readiness`（`not-ready`/`ready`/`unsupported`）、完整 entries/blocks/tools/turns/tasks/plans、session info、input queue、interaction 记录与 `pendingInteractions`。未知块与孤立工具引用显式标记为 `unknown`/`unavailable`，不静默丢弃。`readSessionView`、`selectEntry`、`selectToolCall`、`selectTurn`、`selectPlanForTurn`、`selectPendingInteractions` 仍从 `/view` 导出；`SessionViewStore` 已删除，用 `ChatReplica.subscribe()` 获取流式通知。
+
+`readPayload(ref, reader, { signal, maxBytes })` 校验返回 id、UTF-8 字节数与 JSON；`ChatService.readPayload({id, bytes})` 直接读取当前激活的载荷仓库，错误码为 `unauthorized`、`unavailable`、`too_large`、`integrity_error`、`aborted`、`transport_error`。引用字节数与存储不一致或非法 JSON 属于 `integrity_error`，不是 `unavailable`。默认单次展示上限 1 MiB；`limitPayloadReads` 默认并发 2。
+
+载荷预算仍是投影级默认值（待设计评审确认）：inline JSON ≤4096 字节留在文档；更大的值或超出会话 inline 预算（1 MiB）后变成 `{id,bytes,preview}`（preview 512 字符），全文留在运行侧；单次外置 >8 MiB 或超过会话外置预算 32 MiB 时拒绝，工具卡保留上一个可读版本并显示公开 `payload_too_large`。
+
+## MCP over ACP
+
+`defaults.mcpServers` 支持 `http`、`stdio` 与 `acp` 声明。`acp` 声明只序列化 `{type:"acp", name, serverId}`，Peri 的反向 `mcp/message` 由 SDK 桥接到官方 server 实例；`serverId` 缺省使用 Record key。
+
+直接实例是调用方借用的单次使用实例：bridge 关闭后保留绑定，不能安全重连。跨 reload 或多个 Chat 使用时必须提供工厂：
+
+```ts
+defaults: {
+  mcpServers: {
+    "my-tools": {
+      type: "acp",
+      // 每次激活解析新实例；由激活拥有并关闭。
+      server: async () => createMyMcpServer(),
+    },
+  },
 }
 ```
 
-`MemoryKV` is only for one process. For multiple host processes, inject an `AtomicManagedAgentKv` adapter whose shared backend implements `claimIfAbsent(key, owner)` and `releaseIfOwner(key, owner)` atomically. A plain unjs `Storage` object cannot guarantee first-wins ownership and is rejected. The shared KV keyspace is the coordination domain: the Session claim key must use only the Session ID, without `Sandbox.id`; the Agent claim key remains Sandbox + Agent. Every instance that might execute the same Session must share this KV. Equal Session IDs in different databases sharing the KV are conservatively rejected; isolate KV by business domain when needed, but never use a different Sandbox to bypass a claim for the same Session. The adapter owns its crash recovery or lease policy; the SDK does not renew or expire claims. Expiry alone is not proof that old execution has stopped.
+工厂返回的实例必须实现 `close()`；解析失败时已创建实例会被关闭。SDK 不依赖官方 MCP 包运行时。
 
-`close({ drainTimeoutMs: 3000 })` sends `session/close` and replays it while the Host reports the close as incomplete (`-32010`), so the server CloseCoordinator can advance after a prompt unwinds. A three-second drain budget is the default; a zero budget performs exactly one attempt. Deadline expiry preserves transport and claims and throws `SessionCloseIncompleteError` carrying the last reason; a new failure after an incomplete attempt keeps both causes in an `AggregateError`. Non-retryable ACP errors propagate unchanged. Closing an already closed Session is a no-op, and concurrent calls share one operation. These options also apply to `Agent.close`, `ManagedAgents.closeAgent` and `closeAll`.
+## 入口与示例
 
-Execution scheduling belongs to Peri: the SDK publishes input and never drives a dispatcher, work query or admission ticket. If startup fails and transport cleanup is unconfirmed, the Session retains claims and transport in `cleanup-pending`, reporting the original and cleanup errors together. The narrow `cleanupStartup` APIs reject established Sessions. Close acceptance means the Host confirmed the CloseCoordinator settled; an incomplete Close is retried inside the drain budget and preserves claims and transport. `closeAll()` reports all failures rather than swallowing them. Unknown owner proof never authorizes takeover, and claims are released only after the transport is confirmed closed. See the [SDK code index](../../docs/code-index/peri-ts-sdk.md) for validation routes and boundaries.
+- 主入口：Chat 控制面、展示契约、config/storage 读取工具。
+- `/view`：浏览器安全展示出口；与主入口共享包内 Yjs 依赖，直接服务浏览器时需要打包该依赖。
+- `/wasm`：平台无关的 Emscripten ACP Host、loader 与 transport；`/wasm-host` 额外提供 Node-compatible 网络/DNS 端口。
+- `/portable`：不装配 Bun/stdio 进程或本地 SQLite；Chat 控制面 + 执行准入核心。准入摘要仍使用 `node:crypto`，不能宣称纯浏览器支持。
 
-A Sandbox receives a `SessionStorage` interface and an explicit `transportFactory`; it never starts a process and never resolves local paths. An Agent receives the Sandbox and supplies `path` for a new Session. On load, the SDK looks up the Session by ID in the Store and uses its persisted `cwd`; a loading Agent does not need `path`. `TursoStorage({ url, authToken })` reads metadata over the official `@tursodatabase/serverless` driver with credentials the caller supplies explicitly; there is no local SQLite file backend, no CLI deployment path and no environment-variable fallback for tokens. `agent.getSessions()` reads Session metadata directly from the Store for the Agent's path or loaded Session path; it does not call ACP `session/list`. Workspace-ID lookup is deferred until the Workspace persistence contract is settled.
-
-`PeriConfig` 描述 WASM ACP 启动配置；settings、storage 与 machineId 一起经启动对象交给 Peri。`BareHarnessConfig` 是冻结的全关闭预设，按需开启能力。默认 [demo.ts](examples/demo/demo.ts) 为每个 Session 创建独立 WASM 实例，启用 `McpMiddleware` 与 `ToolSearch`；通过必填的 `PERI_WORKSPACE_MCP_URL` 连接外部 HTTP Workspace，不启动或关闭 Workspace 子进程。Workspace 服务由部署方负责就绪与生命周期。
-
-`Sandbox.id` scopes Agent claims, not the Session execution coordination domain. The SDK does not pass it to Peri as `machine_id`; Peri resolves that identity itself. Do not assume `Sandbox.id` equals the Store's machine identity. Machine/workspace binding checks and SDK execution ownership are separate responsibilities.
-
-`settings` is delivered to Peri inside the startup object the embedder builds (for WASM, `configJson`); omitting it lets Peri load its normal global and workspace configuration. `instructions` uses Peri's `session/new._meta["peri.instructions"]`; HTTP Workspace and extra MCP servers use `session/new.mcpServers`. `stream()` yields raw `session/update` and `peri/agent_event` notifications. Its diagnostic replay buffer retains at most 1,024 events and approximately 4 MiB; an absent or slow consumer exceeding either bound receives `EventStreamOverflowError`. The state projection and input delivery continue. After handling that error, opening a new `stream()` starts a fresh live diagnostic stream. Use the documents for current history.
-
-### MCP over ACP
-
-Declare an official `@modelcontextprotocol/sdk` server instance as `{ type: "acp", server }`. The SDK serializes only `{ type: "acp", name, serverId }` and bridges Peri's reverse `mcp/message` requests to the instance; `serverId` defaults to the `mcpServers` key. The SDK does not depend on the official package at runtime and keeps the instance's lifecycle with the caller: closing the Session rejects unfinished calls but never closes the server. Use one server instance per Agent, because the official `Protocol.connect` refuses a second transport.
-
-```ts
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
-
-const server = new McpServer({ name: "my-tools", version: "1" });
-server.registerTool(
-  "fetch",
-  { inputSchema: { url: z.string() } },
-  async ({ url }) => ({ content: [{ type: "text", text: `fetched ${url}` }] }),
-);
-
-managed.createAgent({
-  id: "agent-1",
-  sandbox,
-  path: "/workspace/",
-  mcpServers: { "my-tools": { type: "acp", server } },
-});
-```
-
-Input and control use only the current ACP surface: `send(text)` enqueues through `session/input/enqueue` and resolves once Peri emits `user_input_delivered` for the same queue generation; `forceSend()` issues `session/input/dispatch` for that exact input; `takeBack(inputId)` withdraws a queued input and reports `withdrawn` as success. Scheduling belongs to Peri's mailbox, so the SDK has no execution admission, no `ensureProcessing`, no `stop`/`pause`/`resume`/`reopen`, no `controlState` and no `resolveControl`. `cancel()` sends the session-scoped `session/cancel` notification, and how an unfinished turn converges is Peri's decision. A Session whose transport has already shut down must be loaded through a new Agent. No turn-level `wait()` exists because one Session can receive multiple inputs over time.
-
-`agent.docs` and `session.docs` reference the same `SessionDocs` object. Its `chat` and `session` fields are Yjs `Y.Doc` instances for the current Agent Session. The SDK projects ACP notifications into these documents as they arrive, including history replay during `session/load`; consuming `stream()` is not required. Replay belonging to a cold `load` is staged per load generation and installed as one batch only after the response is accepted; that staging constrains document installation alone, so the raw `stream()` still carries every first-screen notification. The documents are process-local live projections. Peri's Session Store remains the durable source for messages and execution recovery, so after a process restart start the Session again to rebuild them from ACP history. These documents may contain conversation text and other private session data; a Web or Hub transport needs its own authorized, versioned projection rather than forwarding raw Yjs updates.
-
-The Chat Doc (schema 3) keeps ordered user/assistant entries and tool calls. The Session Doc carries schema 2. The documents include the full object contract (Entry `id`/`kind`/`createdAt`/`completedAt`/`error`; `turns` and `interactions` maps; tool `permissionId`) and the consumer gate (`readiness`/`UnsupportedSchema`); resource blocks remain unsupported pending a verified ACP source and are reported as explicit `unknown` blocks. The Session Doc keeps the per-turn records, current turn index, input queue, plans by turn, tasks, configuration, and interaction records. Real mailbox input is added to chat when delivered. If a background task notification skips a revision, the SDK requests `session/bg-tasks` and repairs the task projection. `onPermissionRequest` and `onElicitation` on `AgentOptions` handle Peri's reverse ACP requests; pending requests appear in the Session Doc under stable `interaction:<uuid>` ids, the linked tool carries `permissionId`, and requests are rejected or declined when no callback is provided. Cancelling a turn expires pending interactions and converges only unfinished entries; entries already completed keep their status and completion time. Permission inputs and form answers are not copied into Yjs.
-
-Paging earlier history is opt-in through the negotiated `peri.historyPagination` capability: `session.canLoadEarlierHistory` and `loadEarlierHistory(limit?)` call `session/load` with `{ sessionId, cursor, limit }` only, and merge the page into the Chat Doc by stable entry id plus sub-item position (pages may overlap or fill gaps; retrying the same page is idempotent). Replay and a page derive the same block identity for the same sub-item (`h:{messageId}:{type}:{slot}`), so the two paths converge on one block instead of duplicating it. With no usable cursor `loadEarlierHistory` throws `HistoryPageUnavailableError`, whose `reason` distinguishes `not_negotiated` (this connection did not negotiate a browsing window), `exhausted` (the window is current but its `nextCursor` was `null` — the earlier direction really has nothing displayable) and `invalidated` (rewind or a new load voided the window). A page that arrives after the Session changed, or after the browsing snapshot was invalidated by rewind, is rejected whole (`StaleHistoryPageError`) and leaves the view and the running turn untouched: history projection never opens a turn, fakes user input, or advances plan/task/queue state. A tool restored from history whose result is not loaded carries status `awaiting_result` (`AWAITING_RESULT_STATUS`), and an entry that alone exceeded the page byte budget arrives `oversize` and surfaces as `EntryView.historyOversize`. Compact is not a reload: `compact_completed` only updates the `compaction` display metadata and keeps the loaded window, its cursor progress, live output and pending interactions. A compact that fails or is cancelled must leave the running state: manual compact reports it as `command_feedback`, `compactionStatus` converges to `failed`/`cancelled` (`COMPACTION_STATUS`), and a reported terminal status is never rewritten by later feedback. Only `rewind_completed` rebuilds the window (rewind really dropped history and invalidates the cursor) while still preserving execution state and pending interactions.
-
-`SessionDocs.exportCheckpoint()` returns the public display material (entries with string blocks, tool calls with refs, turns, tasks, plans, interactions, session info, queue) together with the full external payload values, so surviving references stay resolvable; `SessionDocs.fromCheckpoint(checkpoint)` builds a fresh document pair from it, rebuilding turn/tool indexes and converging what a restart cannot observe: active turns and unfinished assistant entries become `error`/`execution_interrupted`, unfinished tools become `cancelled`, pending interactions become `expired`, and running tasks are marked `unobserved:`. Import rejects unknown `checkpointVersion`, unsupported document schema pairs, and any reference whose payload value is missing or byte-mismatched (`CheckpointImportError`). The checkpoint is plain data — the platform decides how to store it — and import never replays a Yjs update into an initialized document.
-
-Payload budgets are projection-level defaults, marked provisional until the design review confirms them: inline JSON up to 4096 bytes stays in the document while a session inline budget (1 MiB) allows; larger or over-budget values become `{id,bytes,preview}` references (512-character preview) whose full text lives outside the replicated document; a single external payload above 8 MiB, or one that would exceed the 32 MiB per-session external budget, is refused and reported as a public `payload_too_large` error on the tool call while the previous readable version is retained. Tool payload data is filtered before projection: only the public JSON round-trip is stored, hidden reasoning never reaches the document, and public errors use fixed codes/messages. No secret scanning is claimed.
-
-`/view` exports the browser-safe payload helper: `readPayload(ref, reader, { signal, maxBytes })` takes an injected `ToolPayloadReader` (a server adapter can wrap `SessionDocs.readPayload`; browsers use an authorized HTTP reader), validates the returned id, UTF-8 byte length and JSON validity against the reference, defaults to a 1 MiB single-display budget, and raises typed `PayloadReadError` codes (`unauthorized`, `unavailable`, `too_large`, `integrity_error`, `aborted`, `transport_error`). `limitPayloadReads(reader)` gates concurrency at two by default. Both numbers are provisional review starting points.
-
-`readSessionView(chatDoc, sessionDoc)` and `SessionViewStore` are the shared, transport-independent frontend state layer. The reader returns `readiness` (`not-ready` for an empty replica, `ready`, or `unsupported` when the pair is complete but its versions are not this SDK's) plus `schemaVersions`, full entries (id/kind/turn/status/createdAt/completedAt/error and ordered blocks), standalone tool calls, turn records with `activeTurn` (mirrored flat as `activeTurnId`/`activeTurnStatus`), session info, tasks, plans, input queue, interaction records and the derived `pendingInteractions`. Unknown blocks and orphaned tool references are reported with an explicit `unknown`/`unavailable` marker instead of being dropped. Consumers must branch on `readiness`: an unsupported pair must not be rendered as empty history. `selectEntry`, `selectToolCall`, `selectTurn`, `selectPlanForTurn` (null means no plan recorded for that turn) and `selectPendingInteractions` are pure queries over a view; no cache or subscription is added. The store observes transactions without forcing an extra Yjs wire encoding. It invalidates changed types and tool reference edges, reuses unchanged entries/blocks/tools, coalesces notifications in a microtask, and replaces the pair together when a connection changes generation. The main SDK and `/view` builds share the package Yjs dependency; bundle that dependency when serving the view directly to a browser. Cached values are immutable; consumers must not modify snapshots. `readSessionView` is a one-shot reader; use `SessionViewStore` for streaming. A browser mirror starts from two empty `Y.Doc` instances and applies an authorized snapshot and subsequent updates; it must not construct `SessionDocs` or write a permission decision into Yjs. Hosts can connect `InteractionResponder` to `AgentOptions` and pass validated decisions through their chosen command transport.
+`bun run build` 构建 `peri-wasm` release 产物，并把 `peri-wasm.js` 与 `peri_wasm.wasm` 放入 `dist/wasm/`。默认 [demo.ts](examples/demo/demo.ts) 使用 `host.kind="wasm"`；[demo-wasm.ts](examples/demo/demo-wasm.ts) 使用 `host.kind="transport"` 注入 `WasmAcpTransport`。两者都通过 `ChatView` + SSE 同步帧驱动浏览器 `ChatReplica`，不启动 Workspace 子进程。
 
 ## Durable Execution Admission
 
-This section describes the portable admission core that embedders (`/portable`) may drive themselves. The SDK `Session` does not use it: input publication is an ACP queue command, and Peri's mailbox decides scheduling, so there is no SDK-side ticket, dispatcher generation or reverse admission endpoint.
+`/portable` 额外公开可自行驱动的准入核心。SDK Chat 不使用它：输入发布是 ACP 队列命令，调度由 Peri mailbox 决定，因此没有 SDK 侧票据、dispatcher generation 或反向准入端点。
 
-`KvExecutionRegistry` and `MemoryExecutionRegistry` expose the same durable read/CAS apply/resolve contract; the KV adapter needs atomic versioned CAS, not just claim/release. `MemoryExecutionRegistry` is explicitly `bestEffort` and requires an explicit coordinator opt-in. Registry writes and receipts are atomic; resolving an absent original mutation seals NotApplied against late execution. Durable backends, ledgers and proof providers are injected by the embedder; the SDK ships no local database file and no process-based stopped proof.
+`KvExecutionRegistry` 与 `MemoryExecutionRegistry` 暴露同一套 durable read/CAS apply/resolve 契约；KV 适配器需要原子版本化 CAS，而不只是 claim/release。`MemoryExecutionRegistry` 明确是 `bestEffort`，需要协调器显式选择。注册表写入与回执原子；解析不存在的原始 mutation 会把 NotApplied 封印，防止迟到执行。durable backend、账本与停止证明由嵌入方注入；SDK 不提供本地数据库文件，也不提供基于进程的停止证明。
 
-Tickets bind the exact session, instance/generation, lifecycle/control generation, stable work/revision and `{turnId, attemptId}`. The persistent attempt moves through queued/entering/running. Pause/control changes invalidate unentered work, and the execution entry rechecks qualification. Replaying an original admission does not spend the stable-work budget again. Unknown execution entry resolves the original ticket; it never issues a blind second execute. Budgets survive instance replacement. Missing stopped proof yields Blocked, with no lease/TTL takeover.
+票据绑定精确的 session、instance/generation、lifecycle/control generation、稳定 work/revision 与 `{turnId, attemptId}`。持久 attempt 经过 queued/entering/running；pause/control 变化使未进入的 work 失效，execution entry 重新校验资格。重放原始准入不会再次消耗稳定 work 预算；未知执行入口只解析原始票据，绝不盲目签发第二次执行。预算跨实例替换保留；缺失停止证明返回 Blocked，不做 lease/TTL 接管。
 
-`RpcError` preserves ACP `code` and `data`, including domain Incomplete responses, so a host-side controller can act on them without parsing messages.
+## Store 与配置
 
-A dispatcher instance is a generation plus its executor, and the embedder owns that lifecycle: the SDK ships no sidecar, no PID/process-group proof and no local registry database. `InstanceDescriptor.proofRoute` accepts `wasmHost` or `external` only; a stopped-instance proof is the embedder's responsibility through `InstanceProofProvider`. `startPeriWasmHost` reports `closed` only after the native port, injected ports and `free()` have all settled, and a timeout is not a stopped proof.
+`TursoStorage({ url, authToken })` 通过官方 `@tursodatabase/serverless` 驱动读取会话元数据，凭证由调用方显式提供；没有本地 SQLite 文件后端、CLI 部署路径或环境变量 token 回退。`ChatDatabase.listSessions/getSession` 是 Manager 唯一读取目录的入口，不调用 ACP `session/list`。
 
-Admission snapshots contain only `sessionId`, `control`, `candidates`, and `blocked`; they never carry the message body or whole domain WorkState.
+`PeriConfig` 描述 WASM ACP 启动配置；settings、storage 与 machineId 一起经 `agentConfig` 交给 Peri。`BareHarnessConfig` 是冻结的全关闭预设，按需开启能力。`instructions` 使用 `session/new._meta["peri.instructions"]`；HTTP Workspace 与额外 MCP 使用 `session/new.mcpServers`。
 
-An accepted durable entry ACK is retained as `enteredEvidenceId`. If recovery of a running/exiting or previously entered ticket finds the domain admission missing (`NotApplied`), the coordinator persists a permanent typed `dataLoss` disaster, keeping its original ticket, entry/stopped evidence and accumulated budget. `coordinator.ensureProcessing` returns `status:"disaster"`, and recovery scans never clear it, mint replacement tickets or replay effects. Admission replies stay blocked with the persisted typed disaster attached. Only entering attempts with no confirmed entry evidence may safely settle an original `NotApplied` as never entered. `test/execution-disaster.test.ts` covers this invariant over the portable registry and ledger.
-
-## Tool Payloads And Replication
-
-Tool `arguments` and `result` values whose JSON encoding is at most 4,096 UTF-8 bytes stay inline. Larger values use `argumentsRef` / `resultRef`: `{ id, bytes, preview }`. Previews contain at most 512 UTF-16 code units and are explicitly incomplete. `session.docs.readPayload(ref.id)` returns the exact JSON string for that immutable version. Resolve it only when the user expands a tool card; do not fetch all references on every render. Small values are copied at admission so mutating the incoming ACP object cannot change replicated state.
-
-References are scoped to one `SessionDocs` lifetime. Replacing a payload retires its previous reference; rewind and destroy release discarded payloads. An unknown/stale reference returns `undefined`, so a remote endpoint should return 404 and refresh the card. The host retains current large payloads in memory. They are rebuilt from Rust's canonical history on a new process; the blob collection is not durable storage or a filesystem cache. Retaining or reading every payload still costs space proportional to the complete session.
-
-`SessionDocSync` supplies a transport-neutral binary protocol (version 2) with Yjs V2 snapshots and updates. It batches to a 16 ms deadline, 64 KiB target or 256 updates, whichever comes first. An indivisible Yjs update can exceed the target. It attaches update encoders only while subscribers exist. `SessionDocs.acceptBatch(events)` additionally lets transports admitting an already collected ACP batch publish one transaction per document. Existing `accept` remains synchronous.
-
-```ts
-import { SessionDocSync, SessionDocReplica, SessionViewStore } from "@peri-code/sdk";
-
-const sync = new SessionDocSync(agent.docs.chat, agent.docs.session);
-const replica = new SessionDocReplica(); // Empty read-only replicas, including in a browser.
-const connection = sync.subscribe((frame) => replica.applyUpdate(frame));
-replica.applySnapshot(connection.snapshot);
-const view = new SessionViewStore(replica.chat, replica.session);
-
-// After a disconnect, retain the replica and supply its actual state vectors.
-connection.unsubscribe();
-const resumed = sync.subscribe((frame) => replica.applyUpdate(frame), {
-  resume: replica.stateVector(),
-  onError: (error) => console.error(error), // Close the wire and reconnect.
-});
-if (replica.applySnapshot(resumed.snapshot) === "replaced")
-  view.replaceDocs(replica.chat, replica.session);
-
-sync.flush(); // Explicit terminal boundary; includes pending tail text.
-resumed.unsubscribe();
-await sync.close(); // Drains admitted asynchronous sends. Unsubscribe aborts a subscriber.
-view.destroy();
-replica.destroy();
-```
-
-A resumed connection receives missing structs **and deletions**, including deletions that did not change a state vector. A different producer generation sends a fresh pair. Frames have one sequence across both documents; the replica rejects gaps and unknown generations so the transport can reconnect and repair with state vectors. This is one-way state replication; commands and permission decisions still use ACP. Authenticate/authorize the session before sending its snapshots or serving payload references.
-
-Subscriber callbacks may return a promise, resolved only when the transport has accepted the frame. Each subscriber owns its frame buffers and may transfer them to a Worker. Each has a 4 MiB queue budget, including its in-flight update; overflow detaches that subscriber with `SyncBackpressureError`. A failing/slow callback does not stop other subscribers. `close()` waits for admitted sends, so transport aborts must settle their pending sends or unsubscribe. Initial snapshots are sent separately and can exceed the live queue budget. Tune limits with `DocSyncOptions`.
-
-The [benchmark CLI](benchmarks/README.md) reproduces 12,000 tools, large payloads and 16 MiB streaming with exact content checks. Measurements and limits are recorded in the [experiment report](../../docs/experiment-yjs-sdk/conclusion.md).
-
-The [Bun demo](examples/demo/demo.ts) serves a [single HTML page](examples/demo/demo.html) through Hono at `http://127.0.0.1:3000`; Hono logs HTTP requests to the terminal. Its management API uses POST throughout: `/api/session/list` reads Session metadata from storage without starting an Agent; `/api/session/create` accepts `{ sessionId: null, after: 0, requestId }` for a new Session or an existing ID to load, then streams `session`, `docs:snapshot` and batched `docs:update` events over SSE; `/api/session/send` accepts `{ sessionId, text }` and returns `{ inputId, delivered }` with HTTP 202 after delivery. `/api/session/interaction/respond` accepts `{ sessionId, interactionId, kind, decision }` for a pending permission or question. The browser renders the shared Session view from mirrored Y.Docs; reconnect sends state vectors to receive missing changes, while a new generation replaces both documents. The page initially renders the latest 200 blocks, reuses unchanged DOM nodes and offers earlier history on demand. Very long text has a bounded visible tail and a full-output download. Expanding a tool fetches its referenced JSON from `/api/session/payload`. Raw diagnostic `notification` events are opt in (`diagnostics: true`, or open the page with `?diagnostics=1`); the diagnostic log retains at most 256 events and approximately 1 MiB. The SSE adapter is limited to this loopback demo; it base64-encodes the SDK binary frames and bounds pending writes. Production clients can carry the same SDK frames directly over a binary transport with their own authorization. `requestId` makes retries of new Session creation reuse the same Agent within this demo process. The browser uses `@microsoft/fetch-event-source` to POST and resume the stream from an in-memory event cursor. Clicking a Session opens `/?sessionId=...` and loads the persisted Session through an Agent bound to it. The demo uses `MemoryKV`, which only guards one process, and stores sessions in a local libSQL HTTP server at `127.0.0.1:8081`, backed by `target/peri-sdk-local-turso`. On macOS arm64, `mise install` installs the pinned Turso CLI and its `sqld` server. Set `PERI_WORKSPACE` to an existing directory and configure `ANTHROPIC_API_KEY` and `ANTHROPIC_BASE_URL` in the package's ignored `.env` file. Bun loads it when run from this directory:
-
-```bash
-cd npm-packages/@peri-sdk
-mise install
-bun install --frozen-lockfile
-bun run build # 构建 SDK 与 WASM；Workspace HTTP 服务由部署方提供
-bun run db:dev # Keep this running in a separate terminal.
-bun run dev
-bun run typecheck
-bun run test
-bun run build
-```
-
-打开 `http://127.0.0.1:3000`。`PORT` 配置 demo HTTP 端口；必填 `PERI_WORKSPACE_MCP_URL` 指向部署方运行的 HTTP Workspace，`PERI_WORKSPACE` 是该工具环境中的路径。demo 不再读取 `PERI_BIN` 或 `PERI_WORKSPACE_BIND`，也不管理 Workspace 进程。`PERI_WASM_MODULE_URL` 可指定产物，默认使用包内 `dist/wasm/peri-wasm.js`；`PERI_WASM_MACHINE_ID` 显式设置实例机器身份。会话存储仍使用本地 libSQL HTTP listener，`PERI_DEMO_TURSO_URL` 可改为另一 loopback 地址。demo 使用未认证本地服务的占位凭证；不要据此部署公开数据库。
-
-## WASM ACP transport demo
-
-[demo-wasm.ts](examples/demo/demo-wasm.ts) 展示按 URL 缓存模块的 `WasmAcpTransport.start(...)`；默认 [demo.ts](examples/demo/demo.ts) 使用 `startPeriWasmHost` 为每个 Session 装配独立实例。两者共享 `Sandbox`、`ManagedAgents`、`Agent`、`Session` 和 [demo.html](examples/demo/demo.html)。factory 接收新 Agent 路径或历史 Session 的持久路径，ACP 传输仍是完整 JSON-RPC 帧。启动配置包含 `{ cwd, settings, storage: { url, authToken }, machineId }`；`session/new` 仍经 ACP 传入 instructions 和 MCP servers。
-
-```bash
-cd npm-packages/@peri-sdk
-bun run db:dev # Separate terminal, or set PERI_DEMO_TURSO_URL.
-PERI_WORKSPACE=/absolute/workspace ANTHROPIC_API_KEY=... ANTHROPIC_BASE_URL=... bun run demo:wasm
-```
-
-The server checks for the `PeriWasmAcp` export before listening and reports a missing ACP Host explicitly. `PERI_WASM_MODULE_URL` selects another WASM glue module; `PERI_WASM_MACHINE_ID` sets a persistent UUID execution identity (the demo defaults to `00000000-0000-4000-8000-000000000001`). `PERI_WORKSPACE_MCP_URL` can supply an external HTTP Workspace MCP endpoint. Builtin MCP servers are not started in WASM.
-
-### WASM Langfuse 上报
-
-通过 `WasmAcpTransport.start({ env })` 在 Emscripten 模块初始化时注入环境变量。SDK 使用 `preRun` 写入构建时导出的 `ENV`，Rust 继续复用现有配置解析、Controller 观测旁路和 Langfuse HTTP exporter，不需要 JS Langfuse SDK，也不修改 Rust 配置规则。
-
-```ts
-const transport = await WasmAcpTransport.start({
-  env: {
-    LANGFUSE_PUBLIC_KEY: "pk-lf-...",
-    LANGFUSE_SECRET_KEY: "sk-lf-...",
-    LANGFUSE_BASE_URL: "https://cloud.langfuse.com",
-    LANGFUSE_USER_ID: "sdk-service",
-    LANGFUSE_TRACE_SAMPLING: "1",
-  },
-  configJson: JSON.stringify({ cwd, settings, storage, machineId }),
-});
-```
-
-`env` 的值必须为字符串，两把 key 都配置后才启用。`LANGFUSE_BASE_URL` 是服务根地址，不是完整 OTLP 路径；Rust exporter 上报到 `/api/public/otel/v1/traces`。采样、批次、容量和刷新周期的配置仍以[环境变量规范](../../docs/standards/environment-variables.md)为准。JavaScript 宿主的环境不会自动传播到 Rust，`settings.config.env` 也不是此注入入口。
-
-Bun demo 自动显式传入宿主的 `LANGFUSE_*` 变量：在包内未跟踪的 `.env` 中配置凭证和可选服务地址，然后执行 `bun run demo:wasm`。首次使用新入口需要 `bun run build` 重建导出 `ENV` 的产物；旧的自定义 `PERI_WASM_MODULE_URL` 也需要重建。
-
-环境属于 **WASM 模块实例**，不是 ACP Session。同一模块 URL 缓存并共享一个实例，重复加载只能传相同环境；显式传入不同环境会报错，不会静默覆盖其他 Agent 的凭证。先调用 `loadPeriWasm(moduleUrl, env)` 预加载时必须使用相同环境；省略 `env` 则复用已初始化环境。需要不同环境的部署应使用独立模块 URL 或独立 Worker/进程，初始化后不修改环境。
-
-凭证只应由受信的 Bun 服务或 Workers secret binding 注入，不能把 Langfuse secret 放入浏览器前端或日志。浏览器直接运行 WASM 时应改为服务端执行或受鉴权的遥测代理，把凭证留在服务端。上报可能包含模型输入、输出及工具数据，启用前确认数据策略和网络可达性。
-
-正常退出调用 `managed.closeAgent(id, { drainTimeoutMs })` / `managed.closeAll({ drainTimeoutMs })`：先让 Host 结算 `session/close`，再排空 transport、释放 claims 和遥测。直接 transport 的 `close()` 只关闭连接，不构成会话关闭；不要依赖强杀进程或页面卸载。遥测失败保持旁路诊断，不能把业务成功当成上报成功。`tests/wasm-acp-integration.test.ts` 使用本地模拟 OTLP 服务检查实际 WASM 上报，无需真实 Langfuse 凭证。
-
-## Local Cloudflare Workers probe
-
-The [Workers example](examples/workers/worker.js) uses the same SDK package and
-its `bun.lock`. It starts the Peri ACP Host in Wrangler's local `workerd`, with
-a local sqld and simulated model endpoint. Credentials and the Store location are
-passed explicitly through `STORAGE_URL` / `MODEL_URL` vars; the example never
-reads host process environment.
-
-Each request performs one bounded probe, and every probe closes its Session with the
-same bounded `session/close` replay the SDK uses:
-
-| Probe | ACP path |
-| --- | --- |
-| `/` (default) | `session/new` → `session/input/snapshot` → `session/input/enqueue` → wait for `user_input_delivered` and `peri/agent_event_done` → `session/close` |
-| `/?turn=prompt` | `session/new` → `session/prompt` → `session/close` |
-| `/?sessionId=<id>` | `session/list` → `session/load` → `session/close` |
-| `/?host=sdk` | SDK `startPeriWasmHost` 只注入 `moduleFactory`（peri-cf 形态）→ `initialize` → `session/new` → `session/close`；响应回带该运行时的 `import.meta.url`（workerd 为 `undefined`） |
-
-The queue path is the one `Session.send` uses; the input queue and the event channels are
-negotiated through `clientCapabilities._meta` at `initialize`. `session/prompt` is a current
-Host method (`peri-acp/src/host/server_loop.rs` dispatches it) used by other clients, not a
-legacy entry point. A failed turn is cancelled with the `session/cancel` notification before
-closing, because an active turn keeps `session/close` incomplete.
-
-```bash
-cd npm-packages/@peri-sdk
-bun install --frozen-lockfile
-bun run smoke:workers
-```
-
-`bun run build:workers` builds the SDK's WASM artifact and copies it into the
-example's ignored `dist/` directory for Wrangler. The probe does not validate
-a hosted Cloudflare deployment.
+`Sandbox.id` 与 machine identity 无关；SDK 不把它作为 `machine_id` 传给 Peri。Machine/workspace 绑定检查与 SDK 执行所有权是两件独立职责。
