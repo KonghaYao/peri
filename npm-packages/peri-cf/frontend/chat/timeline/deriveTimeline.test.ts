@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type { Entry, EntryBlock, SyncState, ToolCall, Turn } from '../runtime';
+import type { Entry, EntryBlock, ChatDisplayState, ToolCall, Turn } from '../runtime';
 import { deriveTimeline, formatWorkDuration, turnFoldLabel } from './deriveTimeline';
 
 const chat = { id: 'chat-timeline', title: '时间线测试', updatedAt: '2026-10-20T00:00:00Z' };
@@ -49,9 +49,9 @@ function turn(turnId: string, overrides: Partial<Turn> = {}): Turn {
   };
 }
 
-function state(entries: Entry[], overrides: Partial<SyncState> = {}): SyncState {
+function state(entries: Entry[], overrides: Partial<ChatDisplayState> = {}): ChatDisplayState {
   return {
-    chat, running: false, executionBlocked: false, readiness: 'ready', revision: 1,
+    chat, sessionId: chat.id, bindingRevision: 1, running: false, executionBlocked: false, readiness: 'ready',
     entries, toolCalls: [], turns: [], activeTurn: { turnId: null, status: null }, session: {},
     tasks: [], plans: { current: [], byTurn: {} }, interactions: [], pendingInteractions: [], inputQueue: null,
     ...overrides,

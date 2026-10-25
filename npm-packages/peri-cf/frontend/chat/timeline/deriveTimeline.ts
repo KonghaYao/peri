@@ -1,4 +1,4 @@
-import type { SyncState } from '../runtime';
+import type { ChatDisplayState } from '../runtime';
 import { toolPresentation } from './toolPresentation';
 import type { TimelineRow, TimelineWorkItem } from './types';
 
@@ -56,7 +56,7 @@ interface TurnWorkFacts {
  * fold 摘要必须按整轮汇总事实，而不是只看 fold 发出时的当前 work 组：
  * 「工具 → 文本 → 失败工具」里的失败发生在后一组，摘要仍要显示 Failed。
  */
-function collectTurnWorkFacts(state: SyncState): Map<string, TurnWorkFacts> {
+function collectTurnWorkFacts(state: ChatDisplayState): Map<string, TurnWorkFacts> {
   const facts = new Map<string, TurnWorkFacts>();
   for (const entry of state.entries) {
     if (entry.role === 'user') continue;
@@ -74,7 +74,7 @@ function collectTurnWorkFacts(state: SyncState): Map<string, TurnWorkFacts> {
 
 /** 运行中的 turn 永不折叠：运行元数据优先于可能残留的 activeTurnId。 */
 const LIVE_TURN_STATUSES = new Set(['accepting', 'running', 'cancelling']);
-function liveTurnId(state: SyncState): string | null {
+function liveTurnId(state: ChatDisplayState): string | null {
   if (state.running === true) return state.activeTurn.turnId;
   const status = state.activeTurn.status;
   return status !== null && LIVE_TURN_STATUSES.has(status) ? state.activeTurn.turnId : null;
@@ -99,8 +99,8 @@ function isTurnExpanded(
 }
 
 function toolWorkItem(
-  entry: SyncState['entries'][number],
-  block: Extract<SyncState['entries'][number]['blocks'][number], { type: 'tool_call' }>,
+  entry: ChatDisplayState['entries'][number],
+  block: Extract<ChatDisplayState['entries'][number]['blocks'][number], { type: 'tool_call' }>,
 ): TimelineWorkItem {
   const tool = block.tool;
   const presentation = toolPresentation(tool);
@@ -123,8 +123,8 @@ function toolWorkItem(
 }
 
 function reasoningWorkItem(
-  entry: SyncState['entries'][number],
-  block: Extract<SyncState['entries'][number]['blocks'][number], { type: 'reasoning' }>,
+  entry: ChatDisplayState['entries'][number],
+  block: Extract<ChatDisplayState['entries'][number]['blocks'][number], { type: 'reasoning' }>,
 ): TimelineWorkItem {
   return {
     kind: 'reasoning',
@@ -141,13 +141,13 @@ function reasoningWorkItem(
 }
 
 /**
- * 从全量 `SyncState` 派生时间线行：只读、无副作用，行序与投影 entries 一致。
+ * 从全量 `ChatDisplayState` 派生时间线行：只读、无副作用，行序与投影 entries 一致。
  * reasoning/tool 连续出现时合并为一个 work 组；text、unknown、error 与 user 行都会打断组。
  * 已结算 turn 的 work 折叠为一条 `Worked for X`；live turn 永不折叠。
  * 失败/取消 turn 默认展开，折叠摘要保留终态；失败工具始终可见。
  */
 export function deriveTimeline(
-  state: SyncState | null, options: DeriveTimelineOptions = {},
+  state: ChatDisplayState | null, options: DeriveTimelineOptions = {},
 ): TimelineRow[] {
   if (!state || state.readiness !== 'ready') return [];
   const rows: TimelineRow[] = [];
@@ -155,7 +155,7 @@ export function deriveTimeline(
   const expandedTurnIds = options.expandedTurnIds ?? new Set<string>();
   const collapsedTurnIds = options.collapsedTurnIds ?? new Set<string>();
   // 只有可确认结算、且不是 live 的 turn 才折叠；失败/取消默认展开但仍提供摘要。
-  const settledTurns = new Map<string, SyncState['turns'][number]>();
+  const settledTurns = new Map<string, ChatDisplayState['turns'][number]>();
   for (const turn of state.turns) {
     if (turn.turnId === activeTurnId) continue;
     if (turn.status !== 'completed' && turn.status !== 'error' && turn.status !== 'cancelled') continue;

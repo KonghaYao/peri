@@ -5,13 +5,13 @@ import { ChatHeader } from './ChatHeader';
 import { ChatRightPanel } from './ChatRightPanel';
 import { Sidebar, type SidebarProps } from './Sidebar';
 
-const summary = (id: string, title: string, running: boolean): ChatSummary => ({
-  id, title, updatedAt: '2026-10-20T00:00:00Z',
-  messageCount: 1, running, pendingInteractionCount: 0, lastTurnStatus: null, lastCompletedAt: null,
+const summary = (id: string, title: string): ChatSummary => ({
+  id, sessionId: id, title, updatedAt: '2026-10-20T00:00:00Z',
+  cwd: '/workspace', messageCount: 1, createdAt: '2026-10-20T00:00:00Z',
 });
 
-const selected = summary('chat-a', '选中会话', true);
-const other = summary('chat-b', '另一个会话', true);
+const selected = summary('chat-a', '选中会话');
+const other = summary('chat-b', '另一个会话');
 
 function renderSidebar(overrides: Partial<SidebarProps> = {}): string {
   return renderToStaticMarkup(
@@ -36,17 +36,17 @@ function rowOf(html: string, title: string): string {
   return html.split('data-slot="peri-sidebar-thread-row"').find((row) => row.includes(title)) ?? '';
 }
 
-describe('Sidebar live running authority', () => {
-  test('the selected row uses live running state instead of stale list facts', () => {
+describe('Sidebar running indicator', () => {
+  test('only the selected row can show replica running state', () => {
     const html = renderSidebar({ selectedRunning: false });
     expect(rowOf(html, '选中会话')).toContain('data-running="false"');
-    expect(rowOf(html, '另一个会话')).toContain('data-running="true"');
+    expect(rowOf(html, '另一个会话')).toContain('data-running="false"');
   });
 
-  test('a live running selected row shows the indicator even if the list is stale', () => {
-    const stale = { ...selected, running: false };
-    const html = renderSidebar({ chats: [stale, other], selectedRunning: true });
+  test('the selected row shows the replica running fact', () => {
+    const html = renderSidebar({ selectedRunning: true });
     expect(rowOf(html, '选中会话')).toContain('data-running="true"');
+    expect(rowOf(html, '另一个会话')).toContain('data-running="false"');
   });
 });
 

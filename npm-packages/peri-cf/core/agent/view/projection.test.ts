@@ -1,216 +1,134 @@
 import { describe, expect, test } from 'bun:test';
-import type { InteractionCallbacks } from '@peri-code/sdk/portable';
-import { ChatInteractionQueue } from './interactions';
+import {
+  Y, encodeSyncFrame, type ChatYjsChannel, type DocSnapshot, type DocUpdate,
+} from '@peri-code/sdk/view';
 import { ChatProjection } from './projection';
 
 const chat = { id: 'session-1', title: '投影测试', updatedAt: '2026-10-20T00:00:00Z' };
 
-function elicitation(properties: Record<string, unknown>) {
+class LoopbackChannel implements ChatYjsChannel {
+  closed = false;
+  readonly frames: Uint8Array[] = [];
+  private readonly messages = new Set<(frame: Uint8Array) => void>();
+  private readonly closes = new Set<(error?: Error) => void>();
+
+  send(frame: Uint8Array): void { this.frames.push(frame); }
+  onMessage(listener: (frame: Uint8Array) => void): () => void {
+    this.messages.add(listener);
+    return () => this.messages.delete(listener);
+  }
+  onClose(listener: (error?: Error) => void): () => void {
+    this.closes.add(listener);
+    return () => this.closes.delete(listener);
+  }
+  close(reason?: Error): void {
+    if (this.closed) return;
+    this.closed = true;
+    for (const listener of this.closes) listener(reason);
+  }
+  deliver(frame: Uint8Array): void { for (const listener of this.messages) listener(frame); }
+}
+
+function docs(options: { sessionId?: string; running?: boolean; schema?: number } = {}) {
+  const chatDoc = new Y.Doc();
+  const sessionDoc = new Y.Doc();
+  const chatRoot = chatDoc.getMap('root');
+  chatRoot.set('schemaVersion', 3);
+  chatRoot.set('entries', new Y.Map());
+  chatRoot.set('entryOrder', new Y.Array());
+  const sessionRoot = sessionDoc.getMap('root');
+  sessionRoot.set('schemaVersion', options.schema ?? 2);
+  const info = new Y.Map();
+  info.set('sessionId', options.sessionId ?? 'session-1');
+  info.set('bindingRevision', 1);
+  info.set('running', options.running ?? false);
+  sessionRoot.set('session', info);
+  return { chatDoc, sessionDoc, chatRoot, sessionRoot, info };
+}
+
+function snapshot(pair: ReturnType<typeof docs>, generation = 'g1', sequence = 0): DocSnapshot {
   return {
-    mode: 'form', sessionId: chat.id, message: 'Please provide the requested information',
-    requestedSchema: { type: 'object', properties },
+    protocol: 2, generation, sequence, mode: 'snapshot',
+    chat: Y.encodeStateAsUpdateV2(pair.chatDoc), session: Y.encodeStateAsUpdateV2(pair.sessionDoc),
   };
 }
 
-const askUserPayload = (index = 0) => elicitation({
-  [`ask_user_question_${index}`]: {
-    type: 'string', title: '部署环境', description: '选择部署环境？',
-    oneOf: [{ const: '生产', title: '生产' }, { const: '测试', title: '测试' }],
-  },
-});
-
-const genericPayload = elicitation({ name: { type: 'string', title: '名字' } });
-
-function setup() {
-  const projection = new ChatProjection();
-  projection.setRunState({ chat, running: true, executionBlocked: false });
-  const queue = new ChatInteractionQueue();
-  const callbacks: InteractionCallbacks = {
-    onPermissionRequest: (request) => queue.requestPermission(request),
-    onElicitation: (request) => queue.requestElicitation(request),
-  };
-  return { projection, queue, callbacks };
+function frame(snapshotValue: DocSnapshot, delivery = 1): Uint8Array {
+  return encodeSyncFrame({ type: 'snapshot', delivery, snapshot: snapshotValue });
 }
 
-const tick = () => new Promise<void>((resolve) => queueMicrotask(() => queueMicrotask(resolve)));
+function update(pair: ReturnType<typeof docs>, generation = 'g1', sequence = 1): DocUpdate {
+  return {
+    protocol: 2, generation, sequence,
+    chat: Y.encodeStateAsUpdateV2(pair.chatDoc), session: Y.encodeStateAsUpdateV2(pair.sessionDoc),
+  };
+}
 
-describe('ChatProjection AskUserQuestion bridge', () => {
-  test('publishes a question card and round-trips the exact accept content', async () => {
-    const { projection, queue, callbacks } = setup();
-    const response = projection.handleRequest('elicitation/create', askUserPayload(), chat.id, callbacks);
-    const pending = projection.state().pendingInteractions;
-    expect(pending).toHaveLength(1);
-    expect(pending[0]).toMatchObject({
-      kind: 'elicitation', sessionId: chat.id, status: 'pending',
-      questions: [{
-        id: 'ask_user_question_0', header: '部署环境', question: '选择部署环境？', multiSelect: false,
-        options: [{ value: '生产', label: '生产' }, { value: '测试', label: '测试' }],
-      }],
+async function settle(): Promise<void> {
+  for (let index = 0; index < 4; index += 1) await Promise.resolve();
+}
+
+describe('ChatProjection over ChatReplica', () => {
+  test('starts not-ready without fabricating entries or running state', () => {
+    const projection = new ChatProjection(chat);
+    expect(projection.state()).toMatchObject({
+      chat, readiness: 'not-ready', sessionId: null, bindingRevision: null,
+      running: false, entries: [], pendingInteractions: [],
     });
-
-    expect(queue.answer(chat.id, pending[0]!.id, {
-      kind: 'elicitation',
-      decision: { action: 'accept', content: { ask_user_question_0: '生产' } },
-    })).toBe('accepted');
-    expect(await response).toEqual({ action: 'accept', content: { ask_user_question_0: '生产' } });
-    expect(projection.state().pendingInteractions).toHaveLength(0);
-    // 重复回答同一个交互不再生效（不会二次结算）。
-    expect(queue.answer(chat.id, pending[0]!.id, {
-      kind: 'elicitation', decision: { action: 'accept', content: { ask_user_question_0: '测试' } },
-    })).toBe('unknown');
-  });
-
-  test('keeps concurrent requests independent and settles each once', async () => {
-    const { projection, queue, callbacks } = setup();
-    const first = projection.handleRequest('elicitation/create', askUserPayload(0), chat.id, callbacks);
-    const second = projection.handleRequest('elicitation/create', askUserPayload(1), chat.id, callbacks);
-    const pending = projection.state().pendingInteractions;
-    expect(pending).toHaveLength(2);
-    expect(pending[0]!.id).not.toBe(pending[1]!.id);
-    const [firstId, secondId] = pending.map((interaction) => interaction.id);
-
-    expect(queue.answer(chat.id, firstId!, {
-      kind: 'elicitation', decision: { action: 'accept', content: { ask_user_question_0: '生产' } },
-    })).toBe('accepted');
-    expect(await first).toEqual({ action: 'accept', content: { ask_user_question_0: '生产' } });
-    expect(projection.state().pendingInteractions.map((interaction) => interaction.id)).toEqual([secondId]);
-
-    expect(queue.answer(chat.id, secondId!, {
-      kind: 'elicitation', decision: { action: 'decline' },
-    })).toBe('accepted');
-    expect(await second).toEqual({ action: 'decline' });
-    expect(projection.state().pendingInteractions).toHaveLength(0);
-  });
-
-  test('turn completion aborts pending questions and removes their cards', async () => {
-    const { projection, queue, callbacks } = setup();
-    const response = projection.handleRequest('elicitation/create', askUserPayload(), chat.id, callbacks);
-    expect(projection.state().pendingInteractions).toHaveLength(1);
-
-    await projection.complete('cancelled');
-    expect(await response).toEqual({ action: 'decline' });
-    expect(projection.state().pendingInteractions).toHaveLength(0);
-    // 已失效的交互不再接受迟到回答。
-    expect(queue.answer(chat.id, 'interaction:missing', { kind: 'elicitation', decision: { action: 'decline' } }))
-      .toBe('unknown');
-  });
-
-  test('runtime disposal aborts pending questions and rejects later requests', async () => {
-    const { projection, callbacks } = setup();
-    const response = projection.handleRequest('elicitation/create', askUserPayload(), chat.id, callbacks);
-    projection.dispose();
-    expect(await response).toEqual({ action: 'decline' });
-    await expect(projection.handleRequest('elicitation/create', askUserPayload(), chat.id, callbacks))
-      .rejects.toThrow('disposed');
-  });
-
-  test('malformed AskUserQuestion payload is declined without prompting the user', async () => {
-    let called = 0;
-    const projection = new ChatProjection();
-    projection.setRunState({ chat, running: true, executionBlocked: false });
-    const callbacks: InteractionCallbacks = {
-      onElicitation: async () => { called++; return { action: 'decline' }; },
-    };
-    const broken = elicitation({
-      ask_user_question_0: { type: 'array', title: 'A', description: 'Q' },
-    });
-    expect(await projection.handleRequest('elicitation/create', broken, chat.id, callbacks))
-      .toEqual({ action: 'decline' });
-    expect(called).toBe(0);
-    expect(projection.state().pendingInteractions).toHaveLength(0);
-  });
-
-  test('accept content that does not match the question types is declined', async () => {
-    const projection = new ChatProjection();
-    projection.setRunState({ chat, running: true, executionBlocked: false });
-    const callbacks: InteractionCallbacks = {
-      onElicitation: async () => ({
-        action: 'accept', content: { ask_user_question_0: ['生产'] },
-      }),
-    };
-    expect(await projection.handleRequest('elicitation/create', askUserPayload(), chat.id, callbacks))
-      .toEqual({ action: 'decline' });
-    expect(projection.state().pendingInteractions).toHaveLength(0);
-  });
-
-  test('generic elicitation still flows through the SDK form projection', async () => {
-    const { projection, queue, callbacks } = setup();
-    const response = projection.handleRequest('elicitation/create', genericPayload, chat.id, callbacks);
-    await tick();
-    const pending = projection.state().pendingInteractions;
-    expect(pending).toHaveLength(1);
-    expect(pending[0]!.questions).toBeUndefined();
-    expect(pending[0]!.fields).toEqual([
-      { key: 'name', title: '名字', description: '', type: 'string', required: false },
-    ]);
-
-    expect(queue.answer(chat.id, pending[0]!.id, {
-      kind: 'elicitation', decision: { action: 'accept', content: { name: 'Ada' } },
-    })).toBe('accepted');
-    expect(await response).toEqual({ action: 'accept', content: { name: 'Ada' } });
-  });
-
-  test('rejects cross-session elicitation and unknown reverse methods', async () => {
-    const { projection, callbacks } = setup();
-    await expect(projection.handleRequest(
-      'elicitation/create', { ...askUserPayload(), sessionId: 'other' }, chat.id, callbacks,
-    )).rejects.toThrow('invalid sessionId');
-    expect(projection.state().pendingInteractions).toHaveLength(0);
-    await expect(projection.handleRequest('session/unknown', { sessionId: chat.id }, chat.id, callbacks))
-      .rejects.toThrow('Unsupported ACP client request');
-  });
-});
-
-describe('ChatProjection revision and summary', () => {
-  test('increments revision on every publish and keeps the epoch stable', () => {
-    const projection = new ChatProjection();
-    projection.setRunState({ chat, running: false, executionBlocked: false });
-    const first = projection.state();
-    expect(first.revision).toBe(1);
-    expect(first.projectionEpoch).toBeTruthy();
-
-    projection.setRunState({ chat, running: true, executionBlocked: false });
-    const second = projection.state();
-    expect(second.revision).toBe(2);
-    expect(second.projectionEpoch).toBe(first.projectionEpoch);
-  });
-
-  test('summary counts pending questions without materializing the state', async () => {
-    const { projection, callbacks } = setup();
     expect(projection.summary()).toEqual({
-      pendingInteractionCount: 0, lastTurnStatus: null, lastCompletedAt: null,
+      running: false, pendingInteractionCount: 0, lastTurnStatus: null, lastCompletedAt: null,
     });
-    const response = projection.handleRequest('elicitation/create', askUserPayload(), chat.id, callbacks);
-    expect(projection.summary().pendingInteractionCount).toBe(1);
-    projection.dispose();
-    expect(await response).toEqual({ action: 'decline' });
   });
 
-  test('lastCompletedAt tracks the last successfully completed turn, not the active one', async () => {
-    const projection = new ChatProjection();
-    projection.setRunState({ chat, running: true, executionBlocked: false });
-
-    await projection.start('第一轮');
-    await projection.complete('completed');
-    const firstCompletedAt = projection.state().turns[0]?.completedAt ?? null;
-    expect(firstCompletedAt).toBeTruthy();
-    expect(projection.summary().lastCompletedAt).toBe(firstCompletedAt);
-
-    // cancelled 是终态但不是「已完成」，不得覆盖最后成功完成时间。
-    await projection.start('第二轮');
-    await projection.complete('cancelled');
-    expect(projection.summary().lastCompletedAt).toBe(firstCompletedAt);
-
-    // 新一轮运行中时，仍保留上一轮成功完成时间。
-    await projection.start('第三轮');
-    expect(projection.summary()).toMatchObject({
-      lastTurnStatus: 'accepting', lastCompletedAt: firstCompletedAt,
+  test('applies a snapshot, sends ACK, and exposes replica facts', async () => {
+    const projection = new ChatProjection(chat);
+    const channel = new LoopbackChannel();
+    projection.connect(channel);
+    const pair = docs({ running: true });
+    channel.deliver(frame(snapshot(pair)));
+    await settle();
+    expect(projection.status).toBe('synced');
+    expect(projection.state()).toMatchObject({
+      readiness: 'ready', sessionId: 'session-1', bindingRevision: 1, running: true,
     });
+    expect(projection.summary().running).toBe(true);
+    // 客户端只回 ACK，不写业务文档。
+    expect(channel.frames).toHaveLength(2);
+    expect(channel.frames[0]?.[0]).toBe(0x01);
+    expect(channel.frames[1]?.[0]).toBe(0x04);
+  });
 
-    await projection.complete('completed');
-    const thirdCompletedAt = projection.state().turns.at(-1)?.completedAt ?? null;
-    expect(thirdCompletedAt).toBeTruthy();
-    expect(projection.summary().lastCompletedAt).toBe(thirdCompletedAt);
-    projection.dispose();
+  test('applies updates without replacing the binding identity', async () => {
+    const projection = new ChatProjection(chat);
+    const channel = new LoopbackChannel();
+    projection.connect(channel);
+    const pair = docs({ running: true });
+    channel.deliver(frame(snapshot(pair)));
+    await settle();
+    pair.info.set('running', false);
+    channel.deliver(encodeSyncFrame({ type: 'update', delivery: 2, update: update(pair) }));
+    await settle();
+    expect(projection.state()).toMatchObject({ running: false, sessionId: 'session-1', bindingRevision: 1 });
+  });
+
+  test('marks unsupported schema without turning it into empty history', async () => {
+    const projection = new ChatProjection(chat);
+    const channel = new LoopbackChannel();
+    projection.connect(channel);
+    channel.deliver(frame(snapshot(docs({ schema: 99 }))));
+    await settle();
+    expect(projection.state()).toMatchObject({
+      readiness: 'unsupported', entries: [], running: false,
+    });
+  });
+
+  test('replaces its chat metadata when the caller supplies a new directory identity', async () => {
+    const projection = new ChatProjection(chat);
+    const channel = new LoopbackChannel();
+    projection.connect(channel);
+    channel.deliver(frame(snapshot(docs())));
+    await settle();
+    projection.setChat({ ...chat, title: '目录标题', updatedAt: '2026-10-21T00:00:00Z' });
+    expect(projection.state().chat).toMatchObject({ title: '目录标题', updatedAt: '2026-10-21T00:00:00Z' });
   });
 });

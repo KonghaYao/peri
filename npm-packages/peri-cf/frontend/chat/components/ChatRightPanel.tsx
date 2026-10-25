@@ -2,7 +2,7 @@ import { useRef, useState, type KeyboardEvent } from 'react';
 import { X } from 'lucide-react';
 import { cn } from '@/lib';
 import { useFocusTrap, useMediaQuery } from '@/hooks';
-import type { SyncState } from '../runtime';
+import type { ChatDisplayState } from '../runtime';
 import { DetailsPanel, type DetailsPanelMode } from './DetailsPanel';
 
 /**
@@ -13,7 +13,7 @@ export const RIGHT_PANEL_INLINE_MEDIA_QUERY = '(min-width: 981px)';
 
 export interface ChatRightPanelProps {
   open: boolean;
-  state: SyncState | null;
+  state: ChatDisplayState | null;
   onClose: () => void;
 }
 

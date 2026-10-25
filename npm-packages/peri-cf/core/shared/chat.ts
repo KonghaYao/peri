@@ -1,58 +1,99 @@
 import { z } from "zod";
 
+/** 会话目录身份：公开聊天 ID 是真实 ACP Session ID；应用不再用标题/时间之外的运行态派生它。 */
 export const chatIdSchema = z.guid().transform((id) => id.toLowerCase());
-export const chatSchema = z.object({ id: z.string(), title: z.string(), updatedAt: z.string() });
+
+/** 展示身份：`id` 与目录会话 ID 一致，标题/时间只来自目录或已绑定的副本。 */
+export const chatSchema = z.object({
+  id: z.string().min(1),
+  title: z.string(),
+  updatedAt: z.string(),
+});
+
 /**
- * 列表展示的事实字段：`messageCount` 来自存储层会话摘要；运行态字段只代表
- * 当前实例驻留运行期的事实，非驻留会话为 false/0/null，不伪造。
+ * 目录条目：仅服务端存储可提供的会话事实。
+ *
+ * 运行态不在列表里伪造；当前选中会话的运行/交互事实只能来自 Yjs 副本。
  */
 export const chatSummarySchema = chatSchema.extend({
+  sessionId: z.string().min(1),
+  title: z.string().nullable(),
+  cwd: z.string(),
   messageCount: z.number().int().nonnegative(),
-  running: z.boolean(),
-  pendingInteractionCount: z.number().int().nonnegative(),
-  lastTurnStatus: z.string().nullable(),
-  lastCompletedAt: z.string().nullable(),
-});
-export const chatListSchema = z.object({ chats: z.array(chatSummarySchema) });
-export const createChatBodySchema = z.object({
-  title: z.string().max(200).refine((title) => title.trim().length > 0).transform((title) => title.trim()).default("New chat"),
-});
-export const sendMessageBodySchema = z.object({
-  content: z.string().max(32_768).refine((content) => content.trim().length > 0),
+  createdAt: z.string(),
 });
 
-/** 会话命令的 wire 契约：前端 HTTP 客户端与服务端共用同一份校验。 */
-export const chatCommandSchema = z.discriminatedUnion("op", [
-  z.object({ op: z.literal("prompt"), content: z.string().max(32_768).refine((content) => content.trim().length > 0) }),
-  z.object({ op: z.literal("cancel") }),
-  z.object({ op: z.literal("interaction"), interactionId: z.string().min(1), answer: z.unknown() }),
-  z.object({ op: z.literal("payload"), refId: z.string().min(1), bytes: z.number().int().nonnegative().optional() }),
-]);
-
-export type ChatCommand = z.infer<typeof chatCommandSchema>;
-export const chatCommandPayloadSchema = z.object({
-  id: z.string().min(1), bytes: z.number().int().nonnegative(), json: z.string(),
+export const chatDirectoryResponseSchema = z.object({
+  chats: z.array(chatSummarySchema),
+  available: z.boolean(),
+  error: z.string().optional(),
 });
-export type ChatCommandPayload = z.infer<typeof chatCommandPayloadSchema>;
+
+/** `POST /api/chats` 只登记句柄；`sessionId:null` + `bindingRevision:0` 表示尚未绑定。 */
+export const chatHandleSchema = z.object({
+  id: z.string().min(1),
+  sessionId: z.string().min(1).nullable(),
+  bindingRevision: z.number().int().nonnegative(),
+});
+
+export const createChatRequestSchema = z.object({
+  path: z.string().min(1).optional(),
+});
+
+/** Action 封套里的目标绑定；空句柄固定 `{sessionId:null,bindingRevision:0}`。 */
+export const actionTargetSchema = z.object({
+  sessionId: z.string().min(1).nullable(),
+  bindingRevision: z.number().int().nonnegative(),
+});
+
+/** 202 回执：send 额外带 inputId；控制/历史动作带各自的纯数据结果。 */
+export const chatActionSuccessSchema = z.object({
+  ok: z.literal(true),
+  requestId: z.string().min(1),
+  chatId: z.string().min(1),
+  sessionId: z.string(),
+  bindingRevision: z.number().int().nonnegative(),
+  inputId: z.string().min(1).optional(),
+  accepted: z.boolean().optional(),
+  status: z.string().min(1).optional(),
+  applied: z.number().int().nonnegative().optional(),
+  nextCursor: z.string().nullable().optional(),
+});
 
 /**
- * 命令失败的处置语义，也是 wire 上判断可重试性的唯一权威：
- * `rejected` 命令明确未生效；`unknown` 执行状态未知，不得自动重试。
- * 客户端另有 `not_sent`（命令未离开客户端），只存在于浏览器侧，不进入 wire。
+ * HTTP 错误封套：`disposition` 是唯一可重试性权威。
+ *
+ * `not_sent` 只由客户端在请求未提交时产生；服务端只返回 `rejected`/`unknown`。
  */
-export const commandDispositionSchema = z.enum(["rejected", "unknown"]);
-export const commandFailureSchema = z.object({
-  ok: z.literal(false), code: z.string().min(1), message: z.string(), disposition: commandDispositionSchema,
+export const chatErrorResponseSchema = z.object({
+  ok: z.literal(false),
+  code: z.string().min(1),
+  message: z.string(),
+  disposition: z.enum(["rejected", "unknown", "not_sent"]),
+  requestId: z.string().optional(),
+  chatId: z.string().optional(),
+  createdSessionId: z.string().optional(),
+  stage: z.string().optional(),
+  incomplete: z.boolean().optional(),
+  errors: z.array(z.string()).optional(),
 });
-export const commandSuccessSchema = z.object({ ok: z.literal(true), payload: chatCommandPayloadSchema.optional() });
-export const commandResponseSchema = z.discriminatedUnion("ok", [commandSuccessSchema, commandFailureSchema]);
-export type CommandDisposition = z.infer<typeof commandDispositionSchema>;
-export type CommandFailureDTO = z.infer<typeof commandFailureSchema>;
 
-export type Chat = z.infer<typeof chatSchema>;
-export type ChatSummary = z.infer<typeof chatSummarySchema>;
+export const payloadResponseSchema = z.object({
+  ok: z.literal(true),
+  payload: z.object({
+    id: z.string().min(1),
+    bytes: z.number().int().nonnegative(),
+    json: z.string(),
+  }),
+});
 
-// —— 公开展示 DTO：首屏读取与运行期投影同源，由 SDK view 物化，不额外持久化。——
+export const payloadErrorResponseSchema = z.object({
+  ok: z.literal(false),
+  code: z.string().min(1),
+  message: z.string(),
+});
+
+// —— 公开展示 DTO：由 SDK SessionView 物化，不额外持久化。——
 
 export const publicErrorSchema = z.object({ code: z.string().min(1), message: z.string() });
 export const toolPayloadRefSchema = z.object({
@@ -100,7 +141,7 @@ export const taskSchema = z.object({
   startedAt: z.string().optional(), completedAt: z.string().optional(), updatedAt: z.string().optional(),
   durationMs: z.number().optional(),
 });
-/** AskUserQuestion 选项的 wire 值（`const`）与展示文本（`title`）；description 可选。 */
+/** AskUserQuestion 选项的 wire 值（`value`）与展示文本（`label`）；description 可选。 */
 export const askUserQuestionOptionSchema = z.object({
   value: z.string().min(1), label: z.string().min(1), description: z.string().optional(),
 });
@@ -115,13 +156,14 @@ export const interactionSchema = z.object({
   status: z.enum(["pending", "resolved", "expired"]),
   createdAt: z.string().nullable(), resolvedAt: z.string().nullable(), outcome: z.string().optional(),
   title: z.string().optional(), message: z.string().optional(), formUnsupported: z.string().optional(),
+  variant: z.literal("ask_user").optional(),
   options: z.array(z.object({ optionId: z.string(), name: z.string() })).optional(),
   fields: z.array(z.object({
     key: z.string(), title: z.string(), description: z.string(),
     type: z.enum(["string", "number", "integer", "boolean"]), required: z.boolean(),
     enum: z.array(z.union([z.string(), z.number(), z.boolean()])).optional(),
   })).optional(),
-  /** AskUserQuestion 请求的题目；与通用 elicitation `fields` 互斥（由客户端投影注入）。 */
+  /** AskUserQuestion 请求的题目；与通用 elicitation `fields` 互斥（来自 SDK view）。 */
   questions: z.array(askUserQuestionSchema).optional(),
 });
 export const inputQueueSchema = z.object({
@@ -176,3 +218,11 @@ export type PlanEntryDTO = z.infer<typeof planEntrySchema>;
 export type InputQueueDTO = z.infer<typeof inputQueueSchema>;
 export type SessionInfoDTO = z.infer<typeof sessionInfoSchema>;
 export type ActiveTurnDTO = z.infer<typeof activeTurnSchema>;
+
+export type Chat = z.infer<typeof chatSchema>;
+export type ChatSummary = z.infer<typeof chatSummarySchema>;
+export type ChatHandleDTO = z.infer<typeof chatHandleSchema>;
+export type ActionTargetDTO = z.infer<typeof actionTargetSchema>;
+export type ChatActionSuccessDTO = z.infer<typeof chatActionSuccessSchema>;
+export type ChatErrorResponseDTO = z.infer<typeof chatErrorResponseSchema>;
+export type PayloadResponseDTO = z.infer<typeof payloadResponseSchema>;

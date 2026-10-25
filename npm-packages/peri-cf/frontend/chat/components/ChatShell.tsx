@@ -26,7 +26,6 @@ export interface ChatShellViewProps {
   onOpenSettings: () => void;
 }
 
-const RUNNING_PHASES = new Set(['streaming', 'cancelling', 'blocked']);
 const NAVIGATION_BLOCKED_PHASES = new Set(['cancelling', 'syncing']);
 
 /** 三栏外壳：左侧线程列表、中间 Chat 列、右侧可收起的详情面板。 */
@@ -53,8 +52,7 @@ export function ChatShellView({ chat, onOpenSettings }: ChatShellViewProps) {
   /** 本次导航是否在创建新会话；创建成功后即使读面失败也要迁移草稿。 */
   const pendingNewChat = useRef(false);
 
-  const running = RUNNING_PHASES.has(chat.phase);
-  const optimisticRunning = chat.phase === 'streaming' || chat.phase === 'cancelling';
+  const running = chat.state?.running === true || chat.phase === 'cancelling';
   const canSend = chat.historyReady && chat.phase === 'idle';
   const navigationDisabled = NAVIGATION_BLOCKED_PHASES.has(chat.phase);
   const pendingInteractions = chat.state?.pendingInteractions ?? [];
@@ -161,7 +159,7 @@ export function ChatShellView({ chat, onOpenSettings }: ChatShellViewProps) {
       <Sidebar
         chats={chat.chats}
         selectedId={chat.selected?.id}
-        selectedRunning={chat.state?.running === true || (optimisticRunning && chat.selected !== null)}
+        selectedRunning={chat.state?.running === true}
         loading={chat.listLoading}
         disabled={navigationDisabled}
         open={sidebarOpen}
@@ -179,9 +177,11 @@ export function ChatShellView({ chat, onOpenSettings }: ChatShellViewProps) {
           sidebarTrigger={sidebarTrigger}
           detailsTrigger={detailsTrigger}
           syncLabel={
-            chat.loadState === 'failed' || chat.liveSync === 'failed'
-              ? '同步失败'
-              : chat.selected && !chat.historyReady ? '同步中…' : undefined
+            chat.loadState === 'unsupported'
+              ? '版本不支持'
+              : chat.loadState === 'failed' || chat.liveSync === 'failed'
+                ? '同步失败'
+                : chat.selected && !chat.historyReady ? '同步中…' : undefined
           }
           onOpenSidebar={() => setSidebarOpen(true)}
           onToggleDetails={() => setDetailsOpen((value) => !value)}
@@ -261,7 +261,8 @@ export function ChatShellView({ chat, onOpenSettings }: ChatShellViewProps) {
           </div>
         )}
 
-        {!chatBanner && syncRetry === 'none' && chat.selected && !chat.historyReady && chat.phase !== 'loading' && (
+        {!chatBanner && syncRetry === 'none' && chat.selected && !chat.historyReady
+          && chat.phase !== 'loading' && chat.loadState !== 'unsupported' && (
           <div
             role="status"
             data-slot="peri-sync-banner"

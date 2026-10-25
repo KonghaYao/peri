@@ -1,42 +1,33 @@
 import {
   readPayload, PayloadReadError,
-  type PayloadReadErrorCode, type ToolPayloadReadRef, type ToolPayloadReader,
+  type ToolPayloadReadRef, type ToolPayloadReader, type ToolPayloadResponse,
 } from '@peri-code/sdk/view';
-import type { CommandFailure, CommandOutcome } from '../../remote';
 
-/** 端点不可用时的占位 reader（未选择会话或宿主尚未就绪）。 */
+/** 端点不可用时的占位 reader（未选择会话或同步尚未就绪）。 */
 export const unavailablePayloadReader: ToolPayloadReader = async () => {
   throw new PayloadReadError('unavailable', '当前没有可用的全文读取端点。');
 };
 
-const KNOWN_CODES: PayloadReadErrorCode[] = ["unauthorized", "unavailable", "too_large", "integrity_error", "aborted", "transport_error"];
-
-/** 全文读取只依赖「会话命令通道」这一窄接口，由 AgentManager 实现；不直接触碰宿主。 */
-export interface PayloadCommandSource {
-  readPayload(refId: string, signal?: AbortSignal): Promise<CommandOutcome>;
+/** 全文读取只依赖控制器的窄接口；字节数由副本里的引用事实决定。 */
+export interface PayloadSource {
+  readPayloadById(id: string, signal?: AbortSignal): Promise<ToolPayloadResponse>;
 }
 
 /**
- * 浏览器全文读取：经当前会话命令通道下发 `{op:"payload", refId}`；未就绪时报告 unavailable。
+ * 浏览器全文读取：经鉴权 HTTP 端点读取；未选择会话时报告 unavailable，
+ * 引用已不在副本中时同样明确失败，不猜测字节数。
  */
-export function commandPayloadReader(source: () => PayloadCommandSource | undefined): ToolPayloadReader {
+export function chatPayloadReader(source: () => PayloadSource | undefined): ToolPayloadReader {
   return async ({ id, signal }) => {
     const channel = source();
     if (!channel) throw new PayloadReadError('unavailable', '会话尚未就绪，无法读取全文。');
-    const result = await channel.readPayload(id, signal);
-    if (!result.ok) throw payloadFailure(result);
-    if (!result.payload) throw new PayloadReadError('integrity_error', '载荷响应缺少正文。');
-    return { id: result.payload.id, bytes: result.payload.bytes, json: result.payload.json };
+    try {
+      return await channel.readPayloadById(id, signal);
+    } catch (error) {
+      if (error instanceof PayloadReadError) throw error;
+      throw new PayloadReadError('unavailable', error instanceof Error ? error.message : '全文读取失败。');
+    }
   };
-}
-
-/** 处置优先于失败码：not_sent 表示未提交，unknown 表示结果未知；明确拒绝再沿用 SDK 契约。 */
-function payloadFailure(failure: CommandFailure): PayloadReadError {
-  const message = failure.message || '载荷读取失败。';
-  if (failure.disposition === 'not_sent') return new PayloadReadError('unavailable', message);
-  if (failure.disposition === 'unknown') return new PayloadReadError('transport_error', message);
-  if ((KNOWN_CODES as string[]).includes(failure.code)) return new PayloadReadError(failure.code as PayloadReadErrorCode, message);
-  return new PayloadReadError('integrity_error', `载荷读取被拒绝（${failure.code}）：${message}`);
 }
 
 let current: ToolPayloadReader = unavailablePayloadReader;

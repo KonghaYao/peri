@@ -1,27 +1,34 @@
-import { AgentManager } from "./client";
+import { createRemoteActions } from "./actions";
+import { ChatController, type ChatStateCache, type ChatView } from "./controller";
 import { createHttpRepository } from "./repository";
-import { RemoteChatRuntime } from "./runtime";
+import type { WebSocketLike } from "./sync";
 
-export interface RemoteAgentOptions {
-  /** API 同源 base；测试可注入。 */
+export interface ChatApplicationOptions {
+  /** API/WS 同源 base；测试可注入。 */
   origin?: string;
+  cache?: ChatStateCache;
+  webSocketFactory?: (url: string) => WebSocketLike;
+  now?: () => Date;
 }
 
+export type { ChatView };
+
 /**
- * 浏览器组合根：Agent 在服务端执行，前端只提供读面、命令与交互回答。
- * 没有本地 WASM 宿主、localStorage 配置或本地 MCP。
+ * 浏览器组合根：Agent 在服务端执行，前端只消费目录、Action 回执与只读 Yjs 副本。
+ *
+ * 没有本地 WASM 宿主、SSE、localStorage 配置或旧 Agent 门面。
  */
-export function createRemoteAgent(options: RemoteAgentOptions = {}): AgentManager {
-  const origin = options.origin ?? globalThis.location.origin;
-  // 最近一次会话的运行期复用：读面与订阅共用实例，一次选择不会各自建立一条 SSE 流。
-  // 只保留一个，避免历史会话的完整投影长期驻留浏览器内存。
-  let cached: { chatId: string; runtime: RemoteChatRuntime } | undefined;
-  const runtimeFor = (chatId: string): RemoteChatRuntime => {
-    if (cached?.chatId !== chatId) cached = { chatId, runtime: new RemoteChatRuntime(chatId, origin) };
-    return cached.runtime;
-  };
-  return new AgentManager({
-    repository: createHttpRepository(origin),
-    runtimeFor,
+export function createChatApplication(options: ChatApplicationOptions = {}): ChatController {
+  const base = options.origin ?? globalThis.location.origin;
+  const repository = createHttpRepository(base);
+  return new ChatController({
+    actions: createRemoteActions({ origin: options.origin }),
+    list: (signal) => repository.list(signal),
+    syncUrl: (address) => new URL(
+      `/api/chats/${encodeURIComponent(address)}/sync`, base,
+    ).href.replace(/^http/, "ws"),
+    ...(options.cache ? { cache: options.cache } : {}),
+    ...(options.webSocketFactory ? { webSocketFactory: options.webSocketFactory } : {}),
+    ...(options.now ? { now: options.now } : {}),
   });
 }

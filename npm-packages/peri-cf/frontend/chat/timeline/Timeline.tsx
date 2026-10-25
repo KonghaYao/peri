@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ChevronDown } from 'lucide-react';
 import { LegendList, type LegendListRef } from '@legendapp/list/react';
-import type { ChatLoadState, SyncState, ToolPayloadReader } from '../runtime';
+import type { ChatLoadState, ChatDisplayState, ToolPayloadReader } from '../runtime';
 import { deriveTimeline } from './deriveTimeline';
 import { isTimelinePinned, type ScrollMetrics } from './timelineFollow';
 import {
@@ -116,7 +116,7 @@ export function TimelineRows({
 }
 
 export interface TimelineProps {
-  state: SyncState | null;
+  state: ChatDisplayState | null;
   /** 独立读面状态：错误横幅被关闭后，失败态仍然成立。 */
   loadState: ChatLoadState;
   /** 同步失败原因：没有内容时显示错误态，而不是永久骨架。 */
@@ -143,7 +143,7 @@ interface TimelineScrollEvent {
 }
 
 /**
- * 自有时间线：全量 SyncState → 行，LegendList 只挂载窗口内行。
+ * 自有时间线：全量 ChatDisplayState → 行，LegendList 只挂载窗口内行。
  * 默认贴底，用户上滚后不被流式内容拉回；位置按 chatId 保存在内存中。
  */
 export function Timeline({

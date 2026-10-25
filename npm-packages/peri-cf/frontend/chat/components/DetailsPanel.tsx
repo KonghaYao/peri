@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { ListChecks, MessageCircleQuestion, Timer } from 'lucide-react';
-import type { Interaction, SyncState } from '../runtime';
+import type { Interaction, ChatDisplayState } from '../runtime';
 
 const TERMINAL_TASK = new Set(['completed', 'failed', 'cancelled']);
 
@@ -30,9 +30,9 @@ export type DetailsPanelMode = 'all' | 'details' | 'plan' | 'tasks';
 
 /**
  * 右面板内容：只读复用现有会话、任务、计划、队列与交互记录。
- * `mode` 让右面板的详情/计划/任务 tab 各自只展示一组事实；数据全部来自 `SyncState`。
+ * `mode` 让右面板的详情/计划/任务 tab 各自只展示一组事实；数据全部来自 `ChatDisplayState`。
  */
-export function DetailsPanel({ state, mode = 'all' }: { state: SyncState | null; mode?: DetailsPanelMode }) {
+export function DetailsPanel({ state, mode = 'all' }: { state: ChatDisplayState | null; mode?: DetailsPanelMode }) {
   if (!state) return <p className={emptyClass} data-slot="peri-details-panel">会话尚未加载。</p>;
   if (state.readiness !== 'ready')
     return <p className={emptyClass} data-slot="peri-details-panel">会话数据尚未就绪。</p>;

@@ -1,9 +1,18 @@
-/** 远程 Agent 客户端：HTTP 仓储、SSE 运行期与浏览器组合根。 */
-export { createRemoteAgent, type RemoteAgentOptions } from "./application";
-export { AgentManager, type AgentManagerDeps, type AgentView, type ChatLoadState, type ChatView, type Phase } from "./client";
+/** 远程 Chat 客户端：HTTP Action、WebSocket + Yjs 同步与页面控制器。 */
+export { createChatApplication, type ChatApplicationOptions } from "./application";
 export {
-  clientCommandFailure, fromCommandError,
-  type ClientCommandDisposition, type CommandFailure, type CommandOutcome,
-} from "./commandFailure";
-export { createHttpRepository } from "./repository";
-export { RemoteChatRuntime } from "./runtime";
+  RemoteActionError, RemoteSendReceipt, assertTargetMatches, createRemoteActions, notSentError,
+  parseActionTarget, type ActionReceipt, type RemoteActions, type RemoteChatHandle, type RemoteDisposition,
+} from "./actions";
+export {
+  ChatController,
+  type ChatLoadState, type ChatStateCache, type ChatView, type Phase, type SyncStatus,
+} from "./controller";
+export {
+  ChatDirectoryUnavailableError, createHttpRepository,
+  type ChatDirectoryRepository,
+} from "./repository";
+export {
+  ChatSyncProvider, SyncBackpressureError, WebSocketChatChannel, readHello,
+  type ChatSyncOptions, type SyncConnectionStatus, type WebSocketLike,
+} from "./sync";

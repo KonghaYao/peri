@@ -130,7 +130,7 @@ export function Sidebar({
                     key={chat.id}
                     chat={chat}
                     selected={chat.id === selectedId}
-                    running={chat.id === selectedId ? selectedRunning : chat.running}
+                    running={chat.id === selectedId ? selectedRunning : false}
                     disabled={disabled}
                     onSelect={() => onSelect(chat)}
                   />

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { renderToStaticMarkup } from 'react-dom/server';
-import type { Entry, SyncState } from '../runtime';
+import type { Entry, ChatDisplayState } from '../runtime';
 import { deriveTimeline } from './deriveTimeline';
 import { Timeline, TimelineRows } from './Timeline';
 import { ToolRow } from './rows/ToolRow';
@@ -38,8 +38,8 @@ const entries: Entry[] = [
   },
 ];
 
-const state: SyncState = {
-  chat, running: true, executionBlocked: false, readiness: 'ready', revision: 4,
+const state: ChatDisplayState = {
+  chat, sessionId: chat.id, bindingRevision: 4, running: true, executionBlocked: false, readiness: 'ready',
   entries, toolCalls: [], turns: [{
     turnId: 'turn:live', status: 'streaming', startedAt: '2026-10-20T00:00:00Z', completedAt: null,
     error: null, interactionStatus: 'idle',
@@ -95,7 +95,7 @@ describe('TimelineRows static rendering', () => {
 });
 
 describe('Timeline states', () => {
-  const empty: SyncState = {
+  const empty: ChatDisplayState = {
     ...state, entries: [], turns: [], activeTurn: { turnId: null, status: null }, running: false,
   };
 
@@ -183,7 +183,7 @@ describe('Timeline states', () => {
 });
 
 describe('Timeline turn folds', () => {
-  const finished: SyncState = {
+  const finished: ChatDisplayState = {
     ...state,
     running: false,
     activeTurn: { turnId: null, status: null },

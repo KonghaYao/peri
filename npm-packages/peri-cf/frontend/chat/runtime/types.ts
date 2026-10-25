@@ -3,7 +3,7 @@ export type {
   InteractionDTO as Interaction, TaskDTO as Task, PlanEntryDTO as PlanEntry, InputQueueDTO as InputQueue,
   SessionInfoDTO as SessionInfo, AskUserQuestionDTO as AskUserQuestion,
 } from '@core/shared';
-export type { SyncState, SyncReadiness } from '@core/shared';
+export type { ChatDisplayState, ChatReadiness } from '@core/shared';
 export type { PayloadReadError, ToolPayloadReader, ToolPayloadResponse, ToolPayloadReadRef, InteractionFieldView, InteractionAnswer } from '@peri-code/sdk/view';
 
-export type { Phase } from '../../remote';
+export type { ChatLoadState, Phase } from '../../remote';

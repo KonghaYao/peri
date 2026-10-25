@@ -1,6 +1,5 @@
-/** 投影与交互视图：把同步事件折叠为展示状态，并处理征询/问答。 */
-export { ChatProjection } from "./projection";
-export { ChatInteractionQueue } from "./interactions";
+/** 投影与交互视图：只读副本投影与 AskUserQuestion 展示适配。 */
+export { ChatProjection, type ProjectionSummary } from "./projection";
 export {
   MAX_ASK_USER_QUESTIONS,
   buildAskUserQuestionContent,

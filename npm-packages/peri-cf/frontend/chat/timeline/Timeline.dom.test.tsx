@@ -20,7 +20,7 @@ function bigState(chatId: string, count: number) {
   }));
   return {
     chat: { id: chatId, title: '大时间线', updatedAt: '2026-10-20T00:00:00Z' },
-    running: false, executionBlocked: false, readiness: 'ready', revision: 1,
+    sessionId: chatId, bindingRevision: 1, running: false, executionBlocked: false, readiness: 'ready',
     entries, toolCalls: [], turns: [], activeTurn: { turnId: null, status: null },
     session: {}, tasks: [], plans: { current: [], byTurn: {} }, interactions: [],
     pendingInteractions: [], inputQueue: null,

@@ -12,13 +12,13 @@ const { createElement, useRef, useState } = await import('react');
 afterEach(() => cleanup());
 
 const summary = (id: string, title = id) => ({
-  id, title, updatedAt: '2026-10-20T00:00:00Z',
-  messageCount: 0, running: false, pendingInteractionCount: 0,
-  lastTurnStatus: null, lastCompletedAt: null,
+  id, sessionId: id, title, updatedAt: '2026-10-20T00:00:00Z',
+  cwd: '/workspace', messageCount: 0, createdAt: '2026-10-20T00:00:00Z',
 });
 
 const emptyState = (id: string) => ({
-  chat: summary(id), running: false, executionBlocked: false, readiness: 'ready', revision: 0,
+  chat: { id, title: id, updatedAt: '2026-10-20T00:00:00Z' },
+  sessionId: id, bindingRevision: 0, running: false, executionBlocked: false, readiness: 'ready',
   entries: [], toolCalls: [], turns: [], activeTurn: { turnId: null, status: null },
   session: {}, tasks: [], plans: { current: [], byTurn: {} }, interactions: [],
   pendingInteractions: [], inputQueue: null,

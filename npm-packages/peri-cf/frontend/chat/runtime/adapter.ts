@@ -7,7 +7,7 @@ import {
 import type { Chat, Entry, EntryBlock, Phase } from './types';
 
 /**
- * assistant-ui 与 SyncState 的唯一结合点：只做「投影 DTO → assistant-ui 消息」的单向转换与回调接线。
+ * assistant-ui 与 ChatDisplayState 的唯一结合点：只做「投影 DTO → assistant-ui 消息」的单向转换与回调接线。
  * 状态权威仍在 core；不提供 onEdit / onReload / queue / 附件，对应 UI 特性随 handler 缺失自动关闭。
  */
 

@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import type { InteractionAnswer } from '@peri-code/sdk/view';
-import { createRemoteAgent, type AgentManager } from '../../remote';
+import { createChatApplication, type ChatController } from '../../remote';
 import { errorText } from '@core/agent';
-import { createChatQueries, LIST_POLL_ACTIVITY_MS, listRefetchInterval, summaryFacts } from './queries';
-import { commandPayloadReader } from './payloadReader';
-import type { Chat } from './types';
+import { createChatQueries, LIST_POLL_ACTIVITY_MS, listRefetchInterval } from './queries';
+import { chatPayloadReader } from './payloadReader';
+import type { Chat, ChatSummary } from './types';
 
 /** 错误横幅的重试路由：列表错误刷新列表；只有读面失败才重新加载会话。 */
 export type ChatRetryAction = 'refresh-list' | 'reload-chat' | 'none';
@@ -29,7 +29,7 @@ export interface ChatErrorBanners {
 export function errorBanners(input: {
   listError: string;
   chatError: string;
-  loadState: 'idle' | 'loading' | 'ready' | 'failed';
+  loadState: 'idle' | 'loading' | 'ready' | 'failed' | 'unsupported';
 }): ChatErrorBanners {
   const banners: ChatErrorBanners = {};
   if (input.listError) {
@@ -47,12 +47,13 @@ export function errorBanners(input: {
   return banners;
 }
 
-/** 实时事件流中断的入口：已有内容时也保留重连，不让 Header 永远停在“同步中”。 */
+/** 实时同步中断的入口：已有内容时也保留重连，不让 Header 永远停在“同步中”。 */
 export function syncRetryAction(input: {
-  loadState: 'idle' | 'loading' | 'ready' | 'failed';
+  loadState: 'idle' | 'loading' | 'ready' | 'failed' | 'unsupported';
   liveSync: 'connecting' | 'synced' | 'failed';
 }): ChatRetryAction {
   if (input.loadState === 'failed') return 'reload-chat';
+  if (input.loadState === 'unsupported') return 'none';
   if (input.liveSync === 'failed') return 'reload-chat';
   return 'none';
 }
@@ -71,26 +72,23 @@ function documentVisible(): boolean {
 export function useChat() {
   const [dismissedListError, setDismissedListError] = useState(0);
   const [activityUntil, setActivityUntil] = useState(0);
-  const agentRef = useRef<AgentManager | null>(null);
-  agentRef.current ??= createRemoteAgent();
-  const agent = agentRef.current;
+  const controllerRef = useRef<ChatController | null>(null);
   const api = useMemo(() => ({
-    list: (signal?: AbortSignal) => agent.listChats(signal),
-    detail: (chatId: string, signal?: AbortSignal) => agent.readChat(chatId, signal),
-  }), [agent]);
+    list: (signal?: AbortSignal) => controllerRef.current?.listChats(signal) ?? Promise.resolve([]),
+  }), []);
   const queries = useMemo(() => createChatQueries(api), [api]);
-  const view = useSyncExternalStore(agent.subscribe, agent.getState, agent.getState);
+  const controller = useMemo(() => createChatApplication({
+    cache: { write: state => queries.writeHistory(state) },
+  }), [queries]);
+  controllerRef.current = controller;
+  const view = useSyncExternalStore(controller.subscribe, controller.getState, controller.getState);
   const visible = useSyncExternalStore(subscribeVisibility, documentVisible, () => true);
-  const runningPhase = view.phase === 'streaming' || view.phase === 'cancelling' || view.phase === 'blocked';
   const list = useQuery({
     ...queries.list,
-    refetchInterval: query => listRefetchInterval(query.state.data, {
-      liveRunning: runningPhase, activeUntil: activityUntil, visible,
-    }),
-    // 隐藏 tab 不轮询；可见 tab 空闲时 15s 低频轮询，用于发现外部客户端启动的后台运行。
-    // 没有服务端推送，因此外部启动最多要等一个空闲轮询周期才会出现在列表里。
+    refetchInterval: query => listRefetchInterval(query.state.data, { activeUntil: activityUntil, visible }),
+    // 隐藏 tab 不轮询；可见 tab 空闲时低频刷新目录事实。
     refetchIntervalInBackground: false,
-    // 回到页面时立即补一次清单事实，缩短外部启动的发现延迟。
+    // 回到页面时立即补一次目录事实。
     refetchOnWindowFocus: true,
   }, queries.client);
   const cleanupTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -101,7 +99,7 @@ export function useChat() {
 
   useEffect(() => {
     // StrictMode 会连续执行 setup → cleanup → setup：把释放推迟到下一轮事件循环，
-    // 重挂载时取消，真实卸载时才释放宿主连接与查询缓存。
+    // 重挂载时取消，真实卸载时才释放连接与查询缓存。
     if (cleanupTimer.current !== null) {
       clearTimeout(cleanupTimer.current);
       cleanupTimer.current = null;
@@ -110,59 +108,51 @@ export function useChat() {
     return () => {
       cleanupTimer.current = setTimeout(() => {
         cleanupTimer.current = null;
-        agent.dispose();
+        void controller.dispose();
         queries.client.unmount();
         void queries.dispose();
       }, 0);
     };
-  }, [agent, queries]);
-
-  // 会话元数据与实时运行事实变化都同步到列表缓存；列表仍是读侧缓存，不是状态权威。
-  useEffect(() => {
-    if (view.selected) queries.mergeChat(view.selected, view.state ? summaryFacts(view.state) : undefined);
-  }, [queries, view.selected, view.state]);
+  }, [controller, queries]);
 
   // 全文读取按调用时刻取当前会话；切换会话不需要重建 reader。
-  const payloadReader = useMemo(() => commandPayloadReader(() => agent), [agent]);
+  const payloadReader = useMemo(() => chatPayloadReader(() => controller), [controller]);
   const answerInteraction = useCallback(async (interactionId: string, answer: InteractionAnswer) => {
-    await agent.answerInteraction(interactionId, answer);
-  }, [agent]);
+    await controller.answerInteraction(interactionId, answer);
+  }, [controller]);
 
   const refreshList = useCallback(async () => {
     await list.refetch({ cancelRefetch: true });
   }, [list.refetch]);
-  const selectChat = useCallback(async (chat: Chat | null) => {
-    const opened = await agent.openChat(chat);
-    // 切换会话时刷新列表：发现外部客户端启动或刚结算的后台运行。
+  const selectChat = useCallback(async (chat: ChatSummary | null) => {
+    const opened = await controller.openChat(chat);
+    // 切换会话时刷新目录：发现外部客户端新建/结算的后台会话。
     bumpActivity();
     void list.refetch({ cancelRefetch: true });
     return opened;
-  }, [agent, bumpActivity, list.refetch]);
+  }, [controller, bumpActivity, list.refetch]);
   const reloadChat = useCallback(async () => {
-    const opened = await agent.reloadChat();
+    const opened = await controller.reloadChat();
     bumpActivity();
     void list.refetch({ cancelRefetch: true });
     return opened;
-  }, [agent, bumpActivity, list.refetch]);
-  const currentChatId = useCallback(() => agent.getState().selected?.id ?? null, [agent]);
+  }, [controller, bumpActivity, list.refetch]);
+  const currentChatId = useCallback(() => controller.currentChatId(), [controller]);
   const send = useCallback(async (content: string) => {
-    // 身份以 AgentManager 实际提交的会话为准：隐式创建期间即使视图已切走，也不会记错会话。
-    const chatId = await agent.send(content);
-    if (chatId) {
-      queries.markRunning(chatId);
-      bumpActivity();
-    }
+    // 身份以控制器实际提交的会话为准：隐式创建期间即使视图已切走，也不会记错会话。
+    const chatId = await controller.send(content);
+    if (chatId) bumpActivity();
     return chatId;
-  }, [agent, bumpActivity, queries]);
-  const stop = useCallback(() => agent.stop(), [agent]);
-  const dismissChatError = useCallback(() => agent.dismissError(), [agent]);
+  }, [controller, bumpActivity]);
+  const stop = useCallback(() => controller.stop(), [controller]);
+  const dismissChatError = useCallback(() => controller.dismissError(), [controller]);
   const dismissListError = useCallback(() => {
     setDismissedListError(list.errorUpdatedAt);
   }, [list.errorUpdatedAt]);
   const dismissError = useCallback(() => {
-    agent.dismissError();
+    controller.dismissError();
     setDismissedListError(list.errorUpdatedAt);
-  }, [agent, list.errorUpdatedAt]);
+  }, [controller, list.errorUpdatedAt]);
 
   const chatError = view.error;
   const listError = list.error && dismissedListError !== list.errorUpdatedAt ? errorText(list.error) : '';
@@ -176,3 +166,6 @@ export function useChat() {
     dismissError, dismissChatError, dismissListError,
   };
 }
+
+/** `Chat` 仍用于草稿/滚动信号的展示身份。 */
+export type { Chat };

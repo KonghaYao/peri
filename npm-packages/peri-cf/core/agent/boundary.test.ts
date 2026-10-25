@@ -12,7 +12,7 @@ const sourceRoots = ['core', 'frontend', 'server', 'scripts'];
 const skippedDirectories = new Set(['node_modules', 'dist', '.cache', '.wrangler', 'logs']);
 
 const moduleRoots = [
-  'core/agent', 'core/agent/session', 'core/agent/view', 'core/agent/transport',
+  'core/agent', 'core/agent/view',
   'core/shared',
   'server', 'server/api', 'server/agent',
   'frontend/chat', 'frontend/chat/runtime', 'frontend/chat/components',
@@ -165,11 +165,28 @@ describe('agent module purity', () => {
 
   test('keeps the browser client facade in frontend/remote', () => {
     const agentEntry = withoutComments(readFileSync(resolve(packageRoot, 'core/agent/index.ts'), 'utf8'));
-    for (const symbol of ['AgentManager', 'AgentView', 'ChatView', 'ChatConnection', 'Phase'])
+    for (const symbol of ['AgentManager', 'AgentView', 'ChatView', 'Phase', 'EventSource'])
       expect(agentEntry).not.toMatch(new RegExp(`\\b${symbol}\\b`));
 
     const remoteEntry = withoutComments(readFileSync(resolve(packageRoot, 'frontend/remote/index.ts'), 'utf8'));
-    for (const symbol of ['AgentManager', 'AgentView', 'ChatView', 'Phase'])
+    for (const symbol of ['ChatController', 'ChatView', 'Phase', 'ChatLoadState'])
       expect(remoteEntry).toMatch(new RegExp(`\\b${symbol}\\b`));
+    for (const symbol of ['AgentManager', 'RemoteChatRuntime', 'createRemoteAgent'])
+      expect(remoteEntry).not.toMatch(new RegExp(`\\b${symbol}\\b`));
+  });
+});
+
+describe('legacy chat transport removal', () => {
+  test('production frontend/core sources contain no SSE, AgentManager, or old command/event routes', () => {
+    const legacy = [/\bEventSource\b/, /\bAgentManager\b/, /\/commands\b/, /\/events\b/,
+      /\bRemoteChatRuntime\b/, /\bChatCommand\b/, /\bSyncState\b/];
+    const violations: string[] = [];
+    for (const file of files) {
+      const path = relative(packageRoot, file);
+      if (!/^(frontend|core)[\\/]/.test(path) || /\.test\.(ts|tsx)$/.test(path)) continue;
+      const code = withoutComments(readFileSync(file, 'utf8'));
+      for (const pattern of legacy) if (pattern.test(code)) violations.push(`${path} → ${pattern}`);
+    }
+    expect(violations).toEqual([]);
   });
 });

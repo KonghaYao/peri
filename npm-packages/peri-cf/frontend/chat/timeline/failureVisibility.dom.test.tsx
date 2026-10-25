@@ -9,20 +9,11 @@ const { deriveTimeline } = await import('./deriveTimeline');
 const { TimelineRows } = await import('./Timeline');
 const { WorkGroupRow } = await import('./rows/WorkGroupRow');
 const { ToolRow } = await import('./rows/ToolRow');
-const { ChatProjection } = await import('@core/agent');
 const { fireEvent, act } = await import('@testing-library/react');
 
 afterEach(() => cleanup());
 
 const chat = { id: 'chat-failure', title: '失败可见性', updatedAt: '2026-10-20T00:00:00Z' };
-
-function notification(update: Record<string, unknown>) {
-  return {
-    jsonrpc: '2.0' as const,
-    method: 'session/update',
-    params: { sessionId: chat.id, update },
-  };
-}
 
 function toolEntry(options: {
   status: string; error?: { code: string; message: string } | null; result?: unknown;
@@ -47,7 +38,7 @@ function toolEntry(options: {
 
 function state(options: { turnStatus: string; entryStatus: string; error?: { code: string; message: string } | null; result?: unknown }): unknown {
   return {
-    chat, running: false, executionBlocked: false, readiness: 'ready', revision: 1,
+    chat, sessionId: chat.id, bindingRevision: 1, running: false, executionBlocked: false, readiness: 'ready',
     entries: [{
       entryId: 'turn:1:user', id: 'turn:1:user', kind: 'message', turnId: 'turn:1',
       role: 'user', status: 'completed', createdAt: '2026-10-20T00:00:00Z',
@@ -133,113 +124,7 @@ describe('failed and cancelled work is visible on the first screen', () => {
   });
 });
 
-describe('failure visibility over the real ChatProjection', () => {
-  test('a failed tool shows its real stderr text and exit code on the first screen', async () => {
-    const projection = new ChatProjection();
-    projection.setRunState({ chat, running: true, executionBlocked: false });
-    await projection.start('跑一下测试');
-    projection.accept(notification({
-      sessionUpdate: 'tool_call', toolCallId: 'bash-real', title: 'Bash', status: 'in_progress',
-      rawInput: { command: 'npm test' },
-    }));
-    projection.accept(notification({
-      sessionUpdate: 'tool_call_update', toolCallId: 'bash-real', status: 'failed',
-      content: [{ type: 'content', content: { type: 'text', text: '[stderr]\ncommand not found\n[Exit code: 127]' } }],
-    }));
-    await projection.complete('error');
-    projection.setRunState({ chat, running: false, executionBlocked: false });
-
-    const state = projection.state();
-    const tool = state.toolCalls.find((item) => item.toolCallId === 'bash-real');
-    // 真实投影：error 只有公开文案，具体错误与退出码在 contentText 的标记文本里。
-    expect(tool?.error).toEqual({ code: 'tool_failed', message: '工具执行失败' });
-    expect(tool?.result).toEqual({ contentText: '[stderr]\ncommand not found\n[Exit code: 127]' });
-
-    render(createElement(TimelineRows, { rows: deriveTimeline(state) }));
-    expect(screen.getByText(/Failed after/)).toBeTruthy();
-    expect(screen.getByText('command not found · exit code 127')).toBeTruthy();
-    expect(screen.queryByText('工具执行失败')).toBeNull();
-    const failure = document.querySelector('[data-slot="peri-tool-failure"]')!;
-    expect(failure.textContent).not.toContain('[stderr]');
-    expect(document.querySelector('[data-tool-failed="true"]')).toBeTruthy();
-    projection.dispose();
-  });
-
-  test('a failed JSON tool result surfaces stderr instead of the raw object', async () => {
-    const projection = new ChatProjection();
-    projection.setRunState({ chat, running: true, executionBlocked: false });
-    await projection.start('跑一下测试');
-    projection.accept(notification({
-      sessionUpdate: 'tool_call', toolCallId: 'bash-json', title: 'Bash', status: 'in_progress',
-      rawInput: { command: 'npm test' },
-    }));
-    projection.accept(notification({
-      sessionUpdate: 'tool_call_update', toolCallId: 'bash-json', status: 'failed',
-      content: [{
-        type: 'content',
-        content: { type: 'text', text: '{"stdout":"","stderr":"permission denied","exitCode":1}' },
-      }],
-    }));
-    await projection.complete('error');
-    projection.setRunState({ chat, running: false, executionBlocked: false });
-
-    const state = projection.state();
-    const tool = state.toolCalls.find((item) => item.toolCallId === 'bash-json');
-    expect(tool?.result).toEqual({
-      contentText: '{"stdout":"","stderr":"permission denied","exitCode":1}',
-    });
-
-    render(createElement(TimelineRows, { rows: deriveTimeline(state) }));
-    expect(screen.getByText('permission denied · exit code 1')).toBeTruthy();
-    const failure = document.querySelector('[data-slot="peri-tool-failure"]')!;
-    expect(failure.textContent).not.toContain('{');
-    expect(failure.textContent).not.toContain('stdout');
-    projection.dispose();
-  });
-
-  test('a failure in a later work group colors the whole-turn fold and stays visible', async () => {
-    const projection = new ChatProjection();
-    projection.setRunState({ chat, running: true, executionBlocked: false });
-    await projection.start('先读再跑');
-    projection.accept(notification({
-      sessionUpdate: 'tool_call', toolCallId: 'read-1', title: 'Read', status: 'in_progress',
-      rawInput: { file_path: '/workspace/README.md' },
-    }));
-    projection.accept(notification({
-      sessionUpdate: 'tool_call_update', toolCallId: 'read-1', status: 'completed',
-      content: [{ type: 'content', content: { type: 'text', text: 'ok' } }],
-    }));
-    projection.accept(notification({
-      sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: '中间回答' },
-    }));
-    projection.accept(notification({
-      sessionUpdate: 'tool_call', toolCallId: 'bash-late', title: 'Bash', status: 'in_progress',
-      rawInput: { command: 'npm test' },
-    }));
-    projection.accept(notification({
-      sessionUpdate: 'tool_call_update', toolCallId: 'bash-late', status: 'failed',
-      content: [{ type: 'content', content: { type: 'text', text: '[stderr]\npermission denied\n[Exit code: 2]' } }],
-    }));
-    await projection.complete('completed');
-    projection.setRunState({ chat, running: false, executionBlocked: false });
-
-    const rows = deriveTimeline(projection.state());
-    const fold = rows.find((row) => row.kind === 'turn-fold');
-    expect(fold).toMatchObject({ kind: 'turn-fold', failed: true });
-    expect(fold?.kind === 'turn-fold' ? fold.label : '').toMatch(/^Failed after/);
-    // 失败工具位于第二个 work 组，仍必须在首屏可见。
-    const failedWork = rows.find((row) => row.kind === 'work' && row.items.some((item) => item.failed));
-    expect(failedWork).toBeDefined();
-
-    render(createElement(TimelineRows, { rows }));
-    expect(screen.getByText(/Failed after/)).toBeTruthy();
-    expect(document.querySelector('[data-turn-failed="true"]')).toBeTruthy();
-    expect(screen.getByText('permission denied · exit code 2')).toBeTruthy();
-    expect(document.querySelector('[data-work-failed="true"]')).toBeTruthy();
-    expect(document.querySelector('[data-tool-failed="true"]')).toBeTruthy();
-    projection.dispose();
-  });
-
+describe('tool payload detail visibility', () => {
   test('an expanded failed tool loads the full result through payloadReader', async () => {
     const json = JSON.stringify({
       contentText: '[stderr]\npermission denied\nfull failure detail\n[Exit code: 3]',

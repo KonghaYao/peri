@@ -10,9 +10,8 @@ const { createElement } = await import('react');
 afterEach(() => cleanup());
 
 const chat = (id: string, title: string) => ({
-  id, title, updatedAt: '2026-10-20T00:00:00Z',
-  messageCount: 1, running: false, pendingInteractionCount: 0,
-  lastTurnStatus: null, lastCompletedAt: null,
+  id, sessionId: id, title, updatedAt: '2026-10-20T00:00:00Z',
+  cwd: '/workspace', messageCount: 1, createdAt: '2026-10-20T00:00:00Z',
 });
 
 function setup(overrides: Record<string, unknown> = {}) {
