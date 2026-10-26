@@ -124,9 +124,23 @@ describe("chatManagerOptions", () => {
     expect(options.chatConfig.lifecycle).toBeUndefined();
   });
 
-  test("默认只把 LANGFUSE_ 变量交给 WASM，诊断走 [peri-cf] 日志", () => {
-    const originalTracing = process.env.LANGFUSE_TRACING;
+  test("只把 Rust 读取的 LANGFUSE_ 键交给 WASM，诊断走 [peri-cf] 日志", () => {
+    const originalLangfuse = Object.entries(process.env).filter(
+      (entry): entry is [string, string] =>
+        entry[0].startsWith("LANGFUSE_") && entry[1] !== undefined,
+    );
     const originalSecret = process.env.PERI_SERVER_SECRET;
+    const clearLangfuse = () => {
+      for (const key of Object.keys(process.env)) {
+        if (key.startsWith("LANGFUSE_")) delete process.env[key];
+      }
+    };
+
+    clearLangfuse();
+    process.env.LANGFUSE_PUBLIC_KEY = "pk-test";
+    process.env.LANGFUSE_SECRET_KEY = "sk-test";
+    process.env.LANGFUSE_BASE_URL = "https://langfuse.example.com";
+    process.env.LANGFUSE_TRACE_SAMPLING = "0.25";
     process.env.LANGFUSE_TRACING = "true";
     process.env.PERI_SERVER_SECRET = "must-not-leak";
     const logged = spyOn(console, "error").mockImplementation(() => {});
@@ -134,7 +148,14 @@ describe("chatManagerOptions", () => {
       const runtime = wasmRuntime(chatManagerOptions(config));
 
       expect(runtime.moduleUrl).toBe(config.wasmModuleUrl);
-      expect(runtime.env).toEqual({ LANGFUSE_TRACING: "true" });
+      // 只转发允许列表中的已设置键：未设置的键被跳过，LANGFUSE_TRACING 与
+      // PERI_SERVER_SECRET 不进入 WASM。
+      expect(runtime.env).toEqual({
+        LANGFUSE_PUBLIC_KEY: "pk-test",
+        LANGFUSE_SECRET_KEY: "sk-test",
+        LANGFUSE_BASE_URL: "https://langfuse.example.com",
+        LANGFUSE_TRACE_SAMPLING: "0.25",
+      });
 
       const diagnostic = new Error("runtime startup failed");
       runtime.onDiagnostic?.("startup", diagnostic);
@@ -146,8 +167,8 @@ describe("chatManagerOptions", () => {
       );
     } finally {
       logged.mockRestore();
-      if (originalTracing === undefined) delete process.env.LANGFUSE_TRACING;
-      else process.env.LANGFUSE_TRACING = originalTracing;
+      clearLangfuse();
+      for (const [key, value] of originalLangfuse) process.env[key] = value;
       if (originalSecret === undefined) delete process.env.PERI_SERVER_SECRET;
       else process.env.PERI_SERVER_SECRET = originalSecret;
     }

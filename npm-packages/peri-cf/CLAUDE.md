@@ -65,7 +65,8 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 `PERI_STORAGE_TOKEN`、`PERI_MACHINE_ID`。可选：`PERI_MODEL_PROVIDER`、四档模型
 `PERI_MODEL_ID_FABLE`/`_OPUS`/`_SONNET`/`_HAIKU`（缺省回退 `PERI_MODEL_ID`）、`PERI_MCP_SERVERS`、
 `PERI_SERVER_HOST`、`PERI_SERVER_PORT`、`PERI_WASM_MODULE_URL`、`PERI_STATIC_ROOT`。任一解析问题
-拒绝启动；只有 `LANGFUSE_*` 传入 WASM 实例。
+拒绝启动；只有 `peri-config` 实际读取的 Langfuse 键传入 WASM 实例，未读取的同前缀键（如
+`LANGFUSE_TRACING`）不转发。
 
 ## Chat 前端
 

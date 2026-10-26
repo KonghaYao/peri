@@ -65,7 +65,7 @@ HTTP 状态不单独决定重试。加载路径的绑定冲突映射 409 `bindin
 | `PERI_SERVER_HOST` / `PERI_SERVER_PORT` | 否 | 默认 `127.0.0.1:8787` |
 | `PERI_STATIC_ROOT` | 否 | 前端静态目录，默认 `dist/client` |
 | `PERI_WASM_MODULE_URL` | 否 | WASM 胶水位置（file/http），默认 `wasm/generated/peri-wasm.js` |
-| `LANGFUSE_*` | 否 | 只有此前缀的变量会交给 WASM 实例 |
+| Langfuse 键 | 否 | 只转发 `peri-config` 实际读取的键（`LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_BASE_URL` 及可选调优键）；未读取的同前缀键（如 `LANGFUSE_TRACING`）不传给 WASM 实例 |
 
 任何配置解析问题都会拒绝启动并一次性报告缺失项；密钥不进入前端、不写日志。
 

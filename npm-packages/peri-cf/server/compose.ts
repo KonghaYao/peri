@@ -26,7 +26,40 @@ const DEFAULT_MODEL_ALIAS = "sonnet";
 const HARNESS_PROVIDER_ID = "model";
 const RUNTIME_DIAGNOSTIC_LABEL = "[peri-cf] Peri server runtime diagnostic";
 const RUNTIME_START_PHASE = "runtime-start";
-const WASM_ENV_PREFIX = "LANGFUSE_";
+
+/**
+ * 转发给 WASM 的遥测环境变量允许列表。
+ *
+ * 单一权威是 `peri-config/src/observability.rs::ENVIRONMENT_KEYS`（spool 相关键定义在
+ * `observability_spool.rs`）；Rust 新增或删除环境键时必须同步本列表。只列入确有 Rust
+ * 读取点的键，`LANGFUSE_TRACING` 等同前缀但无人读取的键不转发。
+ */
+const LANGFUSE_ENV_KEYS = [
+  "LANGFUSE_PUBLIC_KEY",
+  "LANGFUSE_SECRET_KEY",
+  "LANGFUSE_BASE_URL",
+  "LANGFUSE_TRACE_SAMPLING",
+  "LANGFUSE_ERROR_SPAN_ALWAYS",
+  "LANGFUSE_BATCH_MAX_EVENTS",
+  "LANGFUSE_BATCH_QUEUE_CAPACITY",
+  "LANGFUSE_BATCH_MAX_IN_FLIGHT",
+  "LANGFUSE_BATCH_MAX_EVENT_BYTES",
+  "LANGFUSE_BATCH_MAX_BYTES",
+  "LANGFUSE_BATCH_MAX_QUEUE_BYTES",
+  "LANGFUSE_BATCH_FLUSH_INTERVAL",
+  "LANGFUSE_USER_ID",
+  "LANGFUSE_SPOOL_ENABLED",
+  "LANGFUSE_COMPRESSION",
+  "LANGFUSE_INPUT_SPOOL_THRESHOLD_BYTES",
+  "LANGFUSE_PAYLOAD_MEMORY_THRESHOLD_BYTES",
+  "LANGFUSE_MEMORY_BUDGET_BYTES",
+  "LANGFUSE_PREPARE_MAX_IN_FLIGHT",
+  "LANGFUSE_STREAM_CHUNK_BYTES",
+  "LANGFUSE_SPOOL_QUOTA_BYTES",
+  "LANGFUSE_SPOOL_TTL_SECS",
+  "LANGFUSE_MAX_WIRE_BYTES",
+  "LANGFUSE_SHUTDOWN_GRACE_SECS",
+] as const;
 
 /**
  * 服务端运行后端的工具面：对话、Agent、工具搜索与 goal 直接可见；文件/终端/Web 等
@@ -43,14 +76,16 @@ const SERVER_HARNESS_CONFIG = Object.freeze({
   GoalMiddleware: true,
 });
 
-/** 只把遥测变量交给 WASM 实例，避免服务端凭据扩散到模块环境。 */
+/** 只把有 Rust 读取点的遥测变量交给 WASM 实例，避免服务端凭据扩散到模块环境。 */
 function wasmEnvironment(
   env: Readonly<Record<string, string | undefined>> = process.env,
 ): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(env).filter((entry): entry is [string, string] =>
-      entry[0].startsWith(WASM_ENV_PREFIX) && entry[1] !== undefined),
-  );
+  const selected: Record<string, string> = {};
+  for (const key of LANGFUSE_ENV_KEYS) {
+    const value = env[key];
+    if (value !== undefined) selected[key] = value;
+  }
+  return selected;
 }
 
 /** 纯装配：返回 SDK `ChatManager` 的完整构造选项，不启动运行后端。 */
