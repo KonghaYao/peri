@@ -8,7 +8,7 @@
 
 export * from "./chat";
 
-export { BareHarnessConfig } from "../config/bare-harness-config";
+export { BareHarnessConfig } from "../config/peri-bare-harness-config";
 export type { MetaHarnessKey, PeriConfig } from "../config/peri-config";
 export { TursoStorage } from "../storage/turso-storage";
 export {
