@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { WasmAcpTransport } from "../src/transport/wasm-transport";
+import type { WasmAcpTransport } from "../src/wasm/transport";
 import { DeadlineError } from "../src/util/deadline";
 import {
   WasmRuntimeLease, WasmRuntimePool, type WasmRuntimeStarter,

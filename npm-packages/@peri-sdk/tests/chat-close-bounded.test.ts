@@ -7,7 +7,7 @@ import {
 } from "../src/chat/errors";
 import { ChatManager } from "../src/chat/manager";
 import type { ChatManagerInternalOptions } from "../src/chat/manager";
-import type { ChatFactObserver } from "../src/chat/facts";
+import type { ChatFactObserver } from "../src/contracts/chat";
 import type { ChatRuntime, ChatLifecycleOptions } from "../src/chat/types";
 import { DeadlineError } from "../src/util/deadline";
 import {

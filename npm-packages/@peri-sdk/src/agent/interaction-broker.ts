@@ -1,6 +1,6 @@
-import type { ChatFact, InteractionFactRecord } from "../chat/facts";
-import type { ElicitationDecision } from "./types";
-import { parseInteractionAnswer, type InteractionAnswer } from "./interaction-responder";
+import type { ChatFact, InteractionFactRecord } from "../contracts/chat";
+import type { ElicitationDecision } from "../contracts/acp";
+import { parseInteractionAnswer, type InteractionAnswer } from "../contracts/interaction";
 import {
     evaluateElicitationForm,
     normalizeAskUserQuestionDecision,

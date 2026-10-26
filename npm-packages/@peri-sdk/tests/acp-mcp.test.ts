@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { AcpMcpBridge, resolveAcpMcpBindings } from "../src/agent/acp-mcp-bridge";
 import { acpMcpServers } from "../src/agent/peri-instance";
-import type { AcpMcpServer, AcpMcpServerInstance, AcpMcpTransport } from "../src/agent/types";
+import type { AcpMcpServer, AcpMcpServerInstance, AcpMcpTransport } from "../src/contracts/acp";
 
 const idleServer: AcpMcpServerInstance = { connect: async () => {} };
 

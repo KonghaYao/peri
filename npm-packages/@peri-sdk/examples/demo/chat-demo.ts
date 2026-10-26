@@ -17,7 +17,7 @@ import {
     type ChatService,
     type ChatYjsChannel,
     type SessionStorage,
-} from "../../src/sdk/index";
+} from "../../src/entries/index";
 import { DemoSessionNotFoundError } from "./demo-session-not-found-error";
 
 /** Store 只读目录 → ChatDatabase 契约。 */

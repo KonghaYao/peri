@@ -1,9 +1,6 @@
 import { ChatNotReadyError } from "./errors";
-import {
-    asActionError,
-    type ChatSessionIndex,
-    type CleanupOutcome,
-} from "./service-support";
+import { asActionError } from "./error-mapping";
+import type { ChatSessionIndex, CleanupOutcome } from "./service-context";
 import type { ChatDatabase, ChatDefaults } from "./types";
 
 /** 候选 Session 的登记/acquire/释放依赖；由 ChatService 提供。 */

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import * as Y from "yjs";
 import { ChatDocument } from "../src/view/chat-document";
 import { readSessionView } from "../src/view/session-view";
-import type { ChatFact, ChatFactEnvelope } from "../src/chat/facts";
+import type { ChatFact, ChatFactEnvelope } from "../src/contracts/chat";
 import { COMPACTION_STATUS } from "../src/state/session-projection";
 import type { JsonRpcNotification } from "../src/transport/types";
 

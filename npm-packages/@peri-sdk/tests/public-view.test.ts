@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import * as Y from "yjs";
-import * as view from "../src/view/index";
-import * as sdk from "../src/sdk/index";
+import * as view from "../src/entries/view";
+import * as sdk from "../src/entries/index";
 
 test("the browser view entrypoint exposes ChatView/ChatReplica and shared Yjs identity", () => {
     expect(view.Y).toBe(Y);

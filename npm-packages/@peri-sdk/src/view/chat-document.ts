@@ -1,6 +1,10 @@
 import type * as Y from "yjs";
-import type { ChatBindingTarget } from "../chat/types";
-import type { ChatFact, ChatFactEnvelope, InteractionFactRecord } from "../chat/facts";
+import type {
+    ChatBindingTarget,
+    ChatFact,
+    ChatFactEnvelope,
+    InteractionFactRecord,
+} from "../contracts/chat";
 import type { JsonRpcNotification } from "../transport/types";
 import { ChatProjection } from "../state/chat-projection";
 import { applyCheckpoint, exportCheckpoint, type DisplayCheckpoint } from "../state/checkpoint";

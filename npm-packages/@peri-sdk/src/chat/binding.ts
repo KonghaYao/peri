@@ -1,4 +1,4 @@
-import type { ChatBindingTarget } from "./types";
+import type { ChatBindingTarget } from "../contracts/chat";
 
 /**
  * ChatService 的绑定状态。

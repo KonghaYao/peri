@@ -5,8 +5,8 @@ import {
     type ReadPayloadOptions,
     type ToolPayloadReadRef,
     type ToolPayloadResponse,
-} from "../view/payload-reader";
-import type { PeriInstancePort } from "./types";
+} from "../payload/reader";
+import type { PeriInstancePort } from "../agent/port";
 
 const PAYLOAD_ERROR_CODES: ReadonlySet<string> = new Set<PayloadReadErrorCode>([
     "unauthorized",

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { WasmAcpTransport } from "../src/transport/wasm-transport";
+import { WasmAcpTransport } from "../src/wasm/transport";
 import { startWasmRuntime } from "../src/wasm/runtime";
 import type { NativeWasmAcp } from "../src/wasm/loader";
 

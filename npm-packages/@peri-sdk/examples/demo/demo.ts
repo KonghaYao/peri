@@ -7,7 +7,7 @@ import {
     TursoStorage,
     type PeriConfig,
     type SessionStorage,
-} from "../../src/sdk/index";
+} from "../../src/entries/index";
 import { createDemoApp, sessionDatabase } from "./chat-demo";
 import { DemoOwnershipStorage } from "./demo-storage";
 
@@ -34,7 +34,7 @@ const sseClient = await Bun.build({
 if (!sseClient.success) throw new Error(`Cannot bundle SSE client: ${sseClient.logs.join("; ")}`);
 const sseClientJs = await sseClient.outputs[0]!.text();
 const sessionView = await Bun.build({
-    entrypoints: [resolve(import.meta.dir, "../../src/view/index.ts")],
+    entrypoints: [resolve(import.meta.dir, "../../src/entries/view.ts")],
     target: "browser",
     format: "esm",
 });

@@ -1,4 +1,4 @@
-import { cloneJsonValue } from "./json-value";
+import { cloneJsonValue } from "../util/json-value";
 import { KvSessionOwnership, LocalSessionIndex } from "./ownership";
 import {
     WasmRuntimePool,
@@ -18,11 +18,8 @@ import type {
 } from "./types";
 import { ChatService } from "./service";
 import { createChatInstance } from "./instance-factory";
-import {
-    resolveChatLifecycle,
-    type ChatInstanceFactory,
-    type ChatSessionIndex,
-} from "./service-support";
+import { resolveChatLifecycle } from "./lifecycle";
+import type { ChatInstanceFactory, ChatSessionIndex } from "./service-context";
 
 /**
  * Phase 4 接入真实 PeriInstance 的内部入口。

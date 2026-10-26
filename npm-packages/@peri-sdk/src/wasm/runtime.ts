@@ -1,4 +1,4 @@
-import { WasmAcpTransport } from "../transport/wasm-transport";
+import { WasmAcpTransport } from "./transport";
 import { DeadlineError, withDeadline } from "../util/deadline";
 import { instantiatePeriWasm, type PeriWasmModule } from "./loader";
 import type { WasmDnsPort, WasmNetworkPort } from "./ports";

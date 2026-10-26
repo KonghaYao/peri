@@ -10,7 +10,7 @@ import {
 import { Session } from "../src/agent/session";
 import { ChatDocument } from "../src/view/chat-document";
 import { readSessionView } from "../src/view/session-view";
-import type { ChatFact } from "../src/chat/facts";
+import type { ChatFact } from "../src/contracts/chat";
 import type { JsonRpcNotification, Transport } from "../src/transport/types";
 
 // 契约出处：peri-acp/src/host/history_page.rs 模块文档（初始 load 响应带

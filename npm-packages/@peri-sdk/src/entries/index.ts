@@ -6,7 +6,7 @@
  * `/wasm-node`，无进程装配入口见 `/portable`。
  */
 
-export * from "../chat/public";
+export * from "./chat";
 
 export { BareHarnessConfig } from "../config/bare-harness-config";
 export type { MetaHarnessKey, PeriConfig } from "../config/peri-config";
@@ -26,7 +26,7 @@ export type {
     ElicitationDecision,
     ElicitationRequest,
     PermissionRequest,
-} from "../agent/types";
+} from "../contracts/acp";
 
 export { RpcError } from "../transport/rpc-error";
 export type {

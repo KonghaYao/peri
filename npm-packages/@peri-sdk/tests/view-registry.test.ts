@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { ChatReplica } from "../src/view/chat-replica";
-import type { ChatFactObserver, ChatFactSource } from "../src/chat/facts";
-import type { ChatBindingTarget } from "../src/chat/types";
+import type { ChatFactObserver, ChatFactSource } from "../src/contracts/chat";
+import type { ChatBindingTarget } from "../src/contracts/chat";
 import { ChatViewRegistry } from "../src/view/view-registry";
 import {
     FakeFactSource,

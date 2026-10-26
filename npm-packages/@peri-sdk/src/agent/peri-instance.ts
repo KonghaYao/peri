@@ -1,19 +1,19 @@
-import type { ChatFact } from "../chat/facts";
-import type { HistoryPageOutcome, PeriInstancePort } from "../chat/types";
+import type { ChatFact } from "../contracts/chat";
+import type { HistoryPageOutcome, PeriInstancePort } from "./port";
 import type { HistoryPageItem } from "../state/history-merge";
 import { toolContentText } from "../state/protocol";
 import { HistoryBrowser } from "../state/history-browser";
 import { PayloadStore, PayloadStoreError, type PayloadField } from "../state/payload-store";
 import { TaskGapDetector } from "../state/task-gap";
 import { ToolPayloadCapacityError, type ToolPayloadBudgets } from "../state/tool-payloads";
-import { PayloadReadError } from "../view/payload-reader";
+import { PayloadReadError } from "../payload/reader";
 import { AbortRaceError, DeadlineError, raceAbort, throwIfAborted, withDeadline } from "../util/abort";
 import { AcpMcpBridge, resolveAcpMcpBindings, type AcpMcpBinding } from "./acp-mcp-bridge";
 import { InteractionBroker } from "./interaction-broker";
-import type { InteractionAnswer } from "./interaction-responder";
+import type { InteractionAnswer } from "../contracts/interaction";
 import { Session, SessionStartError, type SessionStartResult } from "./session";
 import type { CloseOptions } from "./session-close";
-import type { AcpMcpServer } from "./types";
+import type { AcpMcpServer } from "../contracts/acp";
 import type { JsonRpcNotification, Transport } from "../transport/types";
 
 /**

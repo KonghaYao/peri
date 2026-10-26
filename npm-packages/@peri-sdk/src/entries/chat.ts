@@ -5,11 +5,11 @@
  * 不再从任何发布入口导出。
  */
 
-export { ChatManager } from "./manager";
-export { ChatService } from "./service";
-export { ChatUserAction, parseChatUserAction } from "./action";
-export { clearSessionOwnership } from "./ownership";
-export * from "./errors";
+export { ChatManager } from "../chat/manager";
+export { ChatService } from "../chat/service";
+export { ChatUserAction, parseChatUserAction } from "../chat/action";
+export { clearSessionOwnership } from "../chat/ownership";
+export * from "../chat/errors";
 
 export type {
     AnswerAction,
@@ -25,10 +25,9 @@ export type {
     SendAction,
     SessionAction,
     TakeBackAction,
-} from "./action";
+} from "../chat/action";
 export type {
     CancelRequestResult,
-    ChatBindingTarget,
     ChatConfig,
     ChatDatabase,
     ChatDefaults,
@@ -39,20 +38,20 @@ export type {
     ChatSessionDirectoryEntry,
     ChatService as ChatServiceContract,
     ControlResult,
-    HistoryPageOutcome,
-    PeriInstancePort,
     SendReceipt,
     SessionOwnershipStorage,
     SessionReadyResult,
-} from "./types";
+} from "../chat/types";
+export type { HistoryPageOutcome, PeriInstancePort } from "../agent/port";
 export type {
+    ChatBindingTarget,
     ChatFact,
     ChatFactEnvelope,
     ChatFactObserver,
     ChatFactSource,
     InteractionFactRecord,
     InteractionQuestion,
-} from "./facts";
+} from "../contracts/chat";
 
 export {
     PayloadReadError,
@@ -60,14 +59,14 @@ export {
     limitPayloadReads,
     VIEW_PAYLOAD_MAX_BYTES,
     VIEW_PAYLOAD_MAX_CONCURRENCY,
-} from "../view/payload-reader";
+} from "../payload/reader";
 export type {
     PayloadReadErrorCode,
     ReadPayloadOptions,
     ToolPayloadReadRef,
     ToolPayloadReader,
     ToolPayloadResponse,
-} from "../view/payload-reader";
+} from "../payload/reader";
 export { ToolPayloadCapacityError } from "../state/tool-payloads";
 export {
     TOOL_PAYLOAD_INLINE_BYTES,
@@ -107,5 +106,5 @@ export type {
     TurnView,
 } from "../view/session-view";
 
-export { parseInteractionAnswer } from "../agent/interaction-responder";
-export type { InteractionAnswer } from "../agent/interaction-responder";
+export { parseInteractionAnswer } from "../contracts/interaction";
+export type { InteractionAnswer } from "../contracts/interaction";
