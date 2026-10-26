@@ -9,6 +9,10 @@ use crate::kit::panels::login::auth::AuthViewState;
 use crate::kit::panels::login::edit_handler::auth_scope;
 use crate::kit::panels::login::edit_state::{AuthChoice, LoginError};
 
+fn plan_store() -> std::path::PathBuf {
+    std::env::temp_dir().join("peri-login-commit")
+}
+
 fn isolated(name: &str, scenario: impl std::future::Future<Output = ()>) {
     super::run_isolated(name, module_path!().split_once("::").unwrap().1, scenario);
 }
@@ -21,7 +25,7 @@ fn new_plan_state(fixture: &Fixture) -> LoginEditState {
     state.raw_type = ProviderKind::OpenAiResponses.as_str().to_string();
     state.provider_id = "new-plan".into();
     state.auth_choice = AuthChoice::ChatGptPlan;
-    state.plan.store = "/tmp/peri-login-commit".into();
+    state.plan.store = plan_store().to_string_lossy().into_owned();
     state.plan.account = "work".into();
     state.plan.subject.clear();
     state.plan.client_id.clear();
@@ -130,7 +134,7 @@ fn login_commit_signed_in_empty_identity_saves_once_with_four_models() {
             else {
                 panic!("plan identity must be saved");
             };
-            assert_eq!(store, &PathBuf::from("/tmp/peri-login-commit"));
+            assert_eq!(store, &plan_store());
             assert_eq!(account, "work");
             assert_eq!(subject, "verified-subject");
             assert_eq!(client_id, "verified-client");
@@ -332,7 +336,7 @@ fn login_commit_ctrl_r_syncs_auth_scope_and_requests_status() {
                 auth.sync_scope(crate::kit::panels::login::auth::HostConfigAuthScope::new(
                     "old-source",
                     crate::chatgpt_auth::AuthTarget::new(
-                        PathBuf::from("/tmp/old-store"),
+                        std::env::temp_dir().join("old-store"),
                         "old-account".to_string(),
                     ),
                 ))
@@ -391,7 +395,7 @@ fn login_commit_new_plan_provider_seeds_models_before_saving() {
             assert_eq!(state.models.opus, "plan-opus");
             assert_eq!(state.models.sonnet, "plan-sonnet");
             assert_eq!(state.models.haiku, "plan-haiku");
-            state.ensure_plan_defaults(Some(PathBuf::from("/tmp/peri-login-commit")));
+            state.ensure_plan_defaults(Some(plan_store()));
             assert_eq!(state.models.opus, "plan-opus", "预填后再次触发不覆盖");
 
             let mut auth = AuthController::new();

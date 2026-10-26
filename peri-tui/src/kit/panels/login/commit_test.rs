@@ -95,7 +95,7 @@ fn initial_config() -> PeriConfig {
             {"id":"base", "type":"anthropic", "apiKey":"base-key",
              "models":{"fable":"base-fable", "opus":"base-opus", "sonnet":"base-sonnet", "haiku":"base-haiku"}},
             {"id":"plan", "type":"openai_responses", "apiKey":"",
-             "auth":{"kind":"chatgpt_plan", "store":"/tmp/peri-login-commit", "account":"work",
+             "auth":{"kind":"chatgpt_plan", "store":std::env::temp_dir().join("peri-login-commit"), "account":"work",
                      "subject":"subject", "clientId":"client"},
              "models":{"fable":"plan-fable", "opus":"plan-opus", "sonnet":"plan-sonnet", "haiku":"plan-haiku"}}
         ],
@@ -366,7 +366,10 @@ fn login_commit_plan_reference_is_preserved_and_has_empty_api_key() {
             assert!(encoded.get("accessToken").is_none());
             assert!(encoded.get("refreshToken").is_none());
             // 隐藏字段仍完整落盘：渲染不展示，但草稿与磁盘 JSON 不丢值。
-            assert_eq!(encoded["auth"]["store"], "/tmp/peri-login-commit");
+            assert_eq!(
+                encoded["auth"]["store"],
+                json!(std::env::temp_dir().join("peri-login-commit"))
+            );
             assert_eq!(encoded["auth"]["account"], "work");
             assert_eq!(encoded["auth"]["subject"], "subject");
             assert_eq!(encoded["auth"]["clientId"], "client");

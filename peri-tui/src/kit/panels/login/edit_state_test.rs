@@ -559,7 +559,7 @@ fn plan_provider(id: &str, models: serde_json::Value) -> serde_json::Value {
         "apiKey": "",
         "auth": {
             "kind": "chatgpt_plan",
-            "store": "/tmp/peri-login-edit-state",
+            "store": std::env::temp_dir().join("peri-login-edit-state"),
             "account": "work",
             "subject": "subject",
             "clientId": "client"
@@ -658,7 +658,7 @@ fn existing_plan_provider_never_auto_fills_empty_models() {
         ]
     }}));
     let mut edit = LoginEditState::edit_provider(&cfg, "target", None).unwrap();
-    edit.ensure_plan_defaults(Some(PathBuf::from("/tmp/peri-login-edit-state")));
+    edit.ensure_plan_defaults(Some(std::env::temp_dir().join("peri-login-edit-state")));
 
     assert_eq!(
         edit.models,

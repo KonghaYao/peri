@@ -12,6 +12,10 @@ use ratatui_kit::ratatui::text::Line;
 use std::path::PathBuf;
 use unicode_width::UnicodeWidthStr;
 
+fn sentinel_store() -> PathBuf {
+    std::env::temp_dir().join("sentinel-store")
+}
+
 fn plan_state_with_sentinels() -> (PeriConfig, LoginEditState) {
     let mut cfg = login_config();
     let provider = cfg
@@ -21,7 +25,7 @@ fn plan_state_with_sentinels() -> (PeriConfig, LoginEditState) {
         .find(|provider| provider.id == "plan")
         .expect("fixture must contain the plan provider");
     provider.auth = Some(ProviderAuthConfig::ChatGptPlan {
-        store: PathBuf::from("/tmp/sentinel-store"),
+        store: sentinel_store(),
         account: "sentinel-account".to_string(),
         subject: "sentinel-subject".to_string(),
         client_id: "sentinel-client".to_string(),
@@ -82,7 +86,7 @@ fn edit_never_renders_hidden_credentials_but_keeps_them_in_candidate() {
     assert!(!text.contains("login-"), "不得出现裸 i18n key:\n{text}");
     // 凭据目录仍以只读形式出现在“高级”区。
     assert!(
-        text.contains("/tmp/sentinel-store"),
+        text.contains(sentinel_store().to_string_lossy().as_ref()),
         "只读凭据目录必须可见:\n{text}"
     );
 
@@ -102,7 +106,7 @@ fn edit_never_renders_hidden_credentials_but_keeps_them_in_candidate() {
     else {
         panic!("candidate must keep the plan reference");
     };
-    assert_eq!(store, &PathBuf::from("/tmp/sentinel-store"));
+    assert_eq!(store, &sentinel_store());
     assert_eq!(account.as_str(), "sentinel-account");
     assert_eq!(subject.as_str(), "sentinel-subject");
     assert_eq!(client_id.as_str(), "sentinel-client");
@@ -111,7 +115,10 @@ fn edit_never_renders_hidden_credentials_but_keeps_them_in_candidate() {
     assert_eq!(encoded["auth"]["account"], "sentinel-account");
     assert_eq!(encoded["auth"]["subject"], "sentinel-subject");
     assert_eq!(encoded["auth"]["clientId"], "sentinel-client");
-    assert_eq!(encoded["auth"]["store"], "/tmp/sentinel-store");
+    assert_eq!(
+        encoded["auth"]["store"],
+        serde_json::json!(sentinel_store())
+    );
 }
 
 #[test]
@@ -159,16 +166,17 @@ fn signed_in_without_email_never_falls_back_to_subject() {
 fn auth_detail_and_logout_confirmation_hide_account_reference() {
     let colors = render::LoginRenderColors::reset();
     let mut controller = AuthController::new();
-    assert!(controller.sync_scope(HostConfigAuthScope::new(
-        "fixture-config".to_string(),
-        crate::chatgpt_auth::AuthTarget::new(
-            PathBuf::from(format!(
-                "/tmp/{}/credentials",
-                "very-long-store-name-".repeat(8)
-            )),
-            "sentinel-account".to_string(),
-        ),
-    )));
+    assert!(
+        controller.sync_scope(HostConfigAuthScope::new(
+            "fixture-config".to_string(),
+            crate::chatgpt_auth::AuthTarget::new(
+                std::env::temp_dir()
+                    .join("very-long-store-name-".repeat(8))
+                    .join("credentials"),
+                "sentinel-account".to_string(),
+            ),
+        ))
+    );
     controller.set_view_for_test(AuthViewState::WaitingCallback {
         url: "https://auth.example.test/authorize?state=synthetic".into(),
     });
@@ -182,10 +190,7 @@ fn auth_detail_and_logout_confirmation_hide_account_reference() {
 
     let mut logout = AuthController::new();
     assert!(logout.open_logout_confirm(
-        crate::chatgpt_auth::AuthTarget::new(
-            PathBuf::from("/tmp/sentinel-store"),
-            "sentinel-account".to_string(),
-        ),
+        crate::chatgpt_auth::AuthTarget::new(sentinel_store(), "sentinel-account".to_string(),),
         vec!["plan".to_string()],
     ));
     let layout = auth_render::build_logout_layout(logout.logout_confirm().unwrap(), &colors);
@@ -315,7 +320,7 @@ fn status_warning_and_readonly_rows_have_no_mouse_target() {
                         .collect();
                     let passive = text.contains('●')
                         || text.contains('⚠')
-                        || text.contains("/tmp/sentinel-store");
+                        || text.contains(sentinel_store().to_string_lossy().as_ref());
                     if passive {
                         assert!(
                             layout.hits[row].is_none(),
