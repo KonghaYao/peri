@@ -5,15 +5,11 @@
 //! save commits the handle, the local projection and the ACP push — a failed
 //! save must not leave the panel showing a switch that never reached disk.
 
-use super::window_edit::WindowEditState;
 use super::{
     FIELD_CONTEXT_1M, FIELD_EFFORT, FIELD_MAX_TOKENS, FIELD_MODEL, FIELD_PROVIDER, PROFILE_KEYS,
 };
 use crate::config::PeriConfig;
-use crate::kit::atoms::{
-    ACP_CLIENT_HANDLE, MODEL_HIGHLIGHT_UNTIL, NOTIFICATION, Notification, PERI_CONFIG_HANDLE,
-};
-use crate::kit::config_service::DraftSaveError;
+use crate::kit::atoms::{ACP_CLIENT_HANDLE, MODEL_HIGHLIGHT_UNTIL, PERI_CONFIG_HANDLE};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,6 +20,27 @@ type PeriHandle = Arc<parking_lot::RwLock<PeriConfig>>;
 const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 /// Max tokens 预设
 const MAX_TOKEN_PRESETS: &[u32] = &[4096, 8192, 16000, 32000, 64000];
+
+/// 档位实际归属的 provider（空引用回退首 provider）。
+pub(super) fn effective_provider_id(cfg: &PeriConfig, alias: &str) -> Option<String> {
+    cfg.config.profiles.get(alias).and_then(|profile| {
+        if profile.provider.is_empty() {
+            cfg.config
+                .providers
+                .first()
+                .map(|provider| provider.id.clone())
+        } else if cfg
+            .config
+            .providers
+            .iter()
+            .any(|provider| provider.id == profile.provider)
+        {
+            Some(profile.provider.clone())
+        } else {
+            None
+        }
+    })
+}
 
 /// 仅修改 provider/model 的候选副本；供 UI 在必要时先补 contextWindow 再一起提交。
 pub(super) fn provider_switch_candidate(
@@ -65,18 +82,6 @@ pub(super) fn provider_switch_candidate(
     Some(candidate)
 }
 
-/// 提交候选配置并按档位投影；保存失败时保持句柄不变。
-pub(super) fn commit_profile_candidate(alias: &str, candidate: PeriConfig) -> bool {
-    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
-        return false;
-    };
-    commit_snapshot(
-        handle,
-        candidate,
-        ModelChange::ProfileField(alias.to_string()),
-    )
-}
-
 /// 切换左侧光标指向的档位为 active profile（先落盘、成功才切换内存并推送 ACP）。
 /// pub(crate)：状态栏模型快速切换弹窗复用此切换逻辑。
 pub(crate) fn switch_active_alias(idx: usize) {
@@ -111,22 +116,6 @@ pub(super) fn edit_field(alias: String, field: usize, forward: bool) {
         .get(&alias)
         .map(|p| p.provider.clone())
         .unwrap_or_default();
-    let selected_provider = if profile_provider.is_empty() {
-        cfg.config.providers.first()
-    } else {
-        cfg.config
-            .providers
-            .iter()
-            .find(|provider| provider.id == profile_provider)
-    };
-
-    // Responses contextWindow 由内联 editor 处理；这里不落盘、不显示不可操作提示。
-    if field == FIELD_CONTEXT_1M
-        && selected_provider.is_some_and(|provider| provider.provider_type == "openai_responses")
-    {
-        return;
-    }
-
     // 当前显示的模型名：profile.model 未手动设置时回退到 provider 同档位映射，
     // 否则 FIELD_MODEL 定位 idx 落空（unwrap_or(0)）导致首次 → 恰好选中 fallback
     // 显示值、视觉上"切换未生效"。
@@ -278,68 +267,6 @@ fn publish_accepted(handle: &PeriHandle, accepted: PeriConfig, change: ModelChan
             ));
         }
     });
-}
-
-/// 校验失败时给出一闪而过的摘要；字段本身保留 inline error。
-fn notify_field_error(message: &str) {
-    *NOTIFICATION.state().write() = Some(Notification {
-        message: message.to_string(),
-        until: peri_time::monotonic_now() + Duration::from_secs(2),
-    });
-}
-
-/// 提交 contextWindow 内联 editor：只改指定 alias，显式 revision，失败不发布。
-pub(super) fn submit_window_edit(state: &mut WindowEditState) -> bool {
-    // 被拒绝的输入尚未由后续编辑清除时不得提交：否则编辑框里的合法旧值会旁路
-    // 提示直接落盘。持久化错误不设此标记，仍可按键重试。
-    if state.input_blocked {
-        return false;
-    }
-    let candidate = match state.validate_and_patch() {
-        Ok(candidate) => candidate,
-        Err(error) => {
-            notify_field_error(&error);
-            state.error = Some(error);
-            state.conflict = false;
-            return false;
-        }
-    };
-    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
-        state.error = Some(crate::i18n::tr("model-panel-save-failed-error"));
-        state.conflict = false;
-        return false;
-    };
-    let Some(revision) = state.revision else {
-        state.error = Some(crate::i18n::tr("model-panel-save-failed-error"));
-        state.conflict = false;
-        return false;
-    };
-    match crate::kit::config_service::persist_draft(&candidate, revision) {
-        Ok(accepted) => {
-            publish_accepted(
-                handle,
-                accepted,
-                ModelChange::ProfileField(state.alias.clone()),
-            );
-            true
-        }
-        Err(DraftSaveError::Conflict) => {
-            state.error = Some(crate::i18n::tr("config-draft-conflict"));
-            state.conflict = true;
-            false
-        }
-        Err(DraftSaveError::Failed(error)) => {
-            state.conflict = false;
-            state.error = Some(crate::i18n::tr_args(
-                "model-panel-save-failed",
-                &[(
-                    "error".to_string(),
-                    fluent_bundle::FluentValue::from(error.to_string().as_str()),
-                )],
-            ));
-            false
-        }
-    }
 }
 
 fn project_model_change(snap: &PeriConfig, change: ModelChange) {

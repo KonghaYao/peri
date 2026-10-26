@@ -2,16 +2,12 @@
 //!
 //! 左右分栏 Profile 编辑器：
 //! - 左侧：4 个固定档位卡片（fable / opus / sonnet / haiku），↑/↓ 选择即切换 active profile；
-//! - 右侧：当前 profile 的 K/V 编辑行（Provider / Model / Effort / Max tokens / 1m）。
+//! - 右侧：当前 profile 的 K/V 编辑行（Provider / Model / Effort / Max tokens / 1m enable）。
 //!
 //! 右侧 `→`/`←` 切换字段值并立即写入内存 + 持久化 + 推送 ACP（无 Enter/Save 步骤）。
-//! 所有 provider（含 Responses / ChatGPT plan）共用这条路径，Provider / Model 行
-//! 没有订阅专属草稿。contextWindow 是任意正整数，无法用左右键枚举，因此该行用
-//! 内联数值 editor，以进入时捕获的 revision 保存。右栏 K/V 行点击 = 聚焦并执行与
-//! 键盘相同的动作；内联 editor 的行与按钮同样按同帧语义行命中。底部“管理 Provider”
-//! 按钮与 `Ctrl+L` 等价：经 panel_registry 打开 Login 管理当前 provider，有未保存
-//! editor 时只提示保存或取消。冲突后的 `Ctrl+R` 重读权威配置并离开 editor。单行窗口
-//! editor 拒绝多行与控制字符粘贴，留下可见错误并在修正前阻断保存。
+//! 所有 provider（含 Responses / ChatGPT plan）共用同一套行与动作，没有按 provider
+//! 类型分叉的编辑面板或字段。右栏 K/V 行点击 = 聚焦并执行与键盘相同的动作；底部
+//! “管理 Provider”按钮与 `Ctrl+L` 等价：经 panel_registry 打开 Login 管理当前 provider。
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
@@ -34,10 +30,7 @@ mod edit;
 mod editor_view;
 mod panel_input;
 mod panel_render;
-mod window_edit;
 pub(crate) use edit::switch_active_alias;
-use editor_view::render_window_editor;
-use window_edit::WindowEditState;
 
 // ---------------------------------------------------------------------------
 // 静态常量
@@ -90,8 +83,6 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 渲染版本计数器——edit_field/switch_active_alias 修改 PERI_CONFIG_HANDLE 后
     // 递增此计数，触发 ModelPanel 重渲染以显示最新值。
     let render_version = hooks.use_state(|| 0u64);
-    // Responses contextWindow 内联 editor：冻结 alias/provider/model/revision。
-    let window_editor = hooks.use_state(|| None::<WindowEditState>);
     // Model 面板编辑宿主配置；active alias 必须来自配置事实源，不能混用会话状态栏
     // 的 SERVICE_SNAPSHOT（会话可能仍为另一档模型）。订阅 snapshot 仅用于会话变化时
     // 触发重绘，面板选择和编辑始终读取 PERI_CONFIG_HANDLE。
@@ -149,7 +140,6 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     right_cursor,
                     right_focus,
                     render_version,
-                    window_editor,
                     right_scroll,
                     viewport,
                 },
@@ -162,7 +152,6 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         right_cursor,
         right_focus,
         render_version,
-        window_editor,
         right_scroll,
     });
 
@@ -200,17 +189,11 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 })
                 .filter(|m| !m.is_empty())
                 .unwrap_or_else(|| key.to_string());
-            let window =
-                if prov.is_some_and(|provider| provider.provider_type == "openai_responses") {
-                    profile
-                        .context_window
-                        .map(|window| window.to_string())
-                        .unwrap_or_else(|| "?".to_owned())
-                } else if profile.context_1m {
-                    "1m".to_owned()
-                } else {
-                    "200k".to_owned()
-                };
+            let window = if profile.context_1m {
+                "1m".to_owned()
+            } else {
+                "200k".to_owned()
+            };
             (
                 prov.map(|p| p.display_name().to_string())
                     .unwrap_or_else(|| profile.provider.clone()),
@@ -266,7 +249,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         })
         .unwrap_or_else(|| ("xhigh".to_string(), 32000, false));
 
-    let (provider_label, model_label, responses_window) = PERI_CONFIG_HANDLE
+    let (provider_label, model_label) = PERI_CONFIG_HANDLE
         .get()
         .map(|h| {
             let c = h.read();
@@ -290,16 +273,9 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 prov.map(|p| p.display_name().to_string())
                     .unwrap_or_else(|| profile.map(|pf| pf.provider.clone()).unwrap_or_default()),
                 model,
-                prov.filter(|provider| provider.provider_type == "openai_responses")
-                    .map(|_| {
-                        profile
-                            .and_then(|profile| profile.context_window)
-                            .map(|window| window.to_string())
-                            .unwrap_or_else(|| "?".to_owned())
-                    }),
             )
         })
-        .unwrap_or_else(|| (String::new(), active_alias.clone(), None));
+        .unwrap_or_else(|| (String::new(), active_alias.clone()));
 
     // ── 响应式右列宽度：窄屏时 VALUE_ALIGN_COL 收缩，避免值被截断 ──
     // 面板宽度取自与鼠标命中同一份 `AreaTracker` 区域（首帧未测量时退守宽屏对齐）。
@@ -313,24 +289,18 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         model_label,
         current_effort,
         current_max_tokens.to_string(),
-        responses_window
-            .clone()
-            .unwrap_or_else(|| if current_ctx { "on" } else { "off" }.to_string()),
+        if current_ctx { "on" } else { "off" }.to_string(),
     ];
+    // 右栏始终是同一张 K/V 表，所有 provider 共用同一渲染路径。
     for (fi, (label, value)) in FIELD_LABELS.iter().zip(values.iter()).enumerate() {
         let is_focus = *right_focus.read() && fi == *right_cursor.read();
         let mark = if is_focus { "❯" } else { " " };
-        let label = if fi == FIELD_CONTEXT_1M && responses_window.is_some() {
-            i18n::tr("model-panel-context-window")
-        } else {
-            (*label).to_owned()
-        };
         let key_span = format!(" {} {} ", mark, label);
         let key_len = UnicodeWidthStr::width(key_span.as_str());
         let value_len = UnicodeWidthStr::width(value.as_str());
         // key 宽度 + 填充 + 值宽度 = align，值右边缘对齐到同一列
         let pad = align.saturating_sub(key_len + value_len);
-        right_lines.push(Line::from(vec![
+        let spans = vec![
             Span::styled(
                 key_span,
                 if is_focus {
@@ -339,27 +309,12 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     Style::new().fg(theme.semantic.text.muted)
                 },
             ),
-            Span::styled(
-                format!("{}{}", " ".repeat(pad), value),
-                Style::new().fg(theme.semantic.text.primary),
-            ),
-        ]));
+            Span::raw(" ".repeat(pad)),
+            Span::styled(value.clone(), Style::new().fg(theme.semantic.text.primary)),
+        ];
+        right_lines.push(Line::from(spans));
     }
-
-    // ── 内联 contextWindow editor（替代右栏 K/V）──
-    let mut hint_text = i18n::tr("panel-model-nav-hint");
-    if let Some(editor) = window_editor.read().as_ref() {
-        right_lines = render_window_editor(editor, &theme).lines;
-        hint_text = i18n::tr_args(
-            "model-panel-window-editing",
-            &[(
-                "alias".to_string(),
-                fluent_bundle::FluentValue::from(editor.alias.as_str()),
-            )],
-        );
-    } else if responses_window.is_some() {
-        hint_text = i18n::tr("model-panel-edit-window-manage-hint");
-    }
+    let hint_text = i18n::tr("panel-model-nav-hint");
 
     // ── 中间分隔线 ──
     let divider_style = Style::new().fg(theme.semantic.border.default);

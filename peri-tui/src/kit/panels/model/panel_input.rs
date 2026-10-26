@@ -1,5 +1,5 @@
 //! Model panel event handling: hit geometry, keyboard/mouse actions and the
-//! provider/draft state transitions they trigger.
+//! provider state transitions they trigger.
 //!
 //! The component in `model.rs` owns hooks and rendering only. `State<T>` has no
 //! public constructor, so the event context below is built by the component and
@@ -7,10 +7,7 @@
 //! mount probe.
 
 use crate::app::panel_types::PanelKind;
-use crate::i18n;
-use crate::kit::atoms::{
-    LOGIN_PANEL_REQUEST, LoginPanelRequest, NOTIFICATION, Notification, PERI_CONFIG_HANDLE,
-};
+use crate::kit::atoms::{LOGIN_PANEL_REQUEST, LoginPanelRequest, PERI_CONFIG_HANDLE};
 use crate::kit::list_nav::{next_selection, previous_selection};
 use crate::kit::panel_mouse::hit_item;
 use crate::kit::panels::shared::list::ListViewport;
@@ -23,14 +20,10 @@ use ratatui_kit::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use super::edit::{
-    commit_profile_candidate, edit_field, provider_switch_candidate, submit_window_edit,
-    switch_active_alias,
-};
+use super::edit::{edit_field, effective_provider_id, switch_active_alias};
 use super::editor_view::{PaneHit, kv_row_hits};
-use super::panel_render::{provider_button_label, window_editor_layout};
-use super::window_edit::{WindowEditState, effective_provider_id, provider_by_id};
-use super::{FIELD_CONTEXT_1M, FIELD_COUNT, FIELD_PROVIDER, PROFILE_KEYS};
+use super::panel_render::provider_button_label;
+use super::{FIELD_COUNT, PROFILE_KEYS};
 
 /// 右栏内容区几何：标题 1 行 + 空行 1 行 + 主区 + 底部提示 1 行。
 ///
@@ -57,8 +50,7 @@ fn right_pane_geometry(area: Rect) -> RightPaneGeometry {
 
 /// 右栏语义行命中：滚动偏移与绘制共用同一 `ScrollViewState`，空白/边框/滚动条不命中。
 ///
-/// `hits` 是逐行命中表：普通 K/V 行用 [`kv_row_hits`]，内联 editor / 档位草稿用
-/// `PaneLayout::hits`——两者都与本帧绘制行同源。
+/// `hits` 是逐行命中表，与右栏 K/V 绘制行同序。
 fn hit_right_pane(
     hits: &[Option<PaneHit>],
     mouse: &MouseEvent,
@@ -117,11 +109,6 @@ pub(super) fn handle_model_event_with(
     ctx: &ModelEventCtx,
     switch_alias: impl Fn(usize),
 ) -> EventResult {
-    // 内联 contextWindow editor 独占事件：方向键不得切换 active alias。
-    if ctx.window_editor.read().is_some() {
-        return handle_window_editor_event(event, ctx);
-    }
-
     // 鼠标：区域内左键点击左侧 profile 卡片行 = 选中并切换（click as enter）；
     // 右栏 K/V 行 = 聚焦该字段并执行与键盘相同的行为；底部按钮 = Ctrl+L。
     if let Event::Mouse(mouse) = event {
@@ -138,7 +125,7 @@ pub(super) fn handle_model_event_with(
                 {
                     *ctx.right_cursor.write() = field;
                     *ctx.right_focus.write() = true;
-                    activate_right_field(ctx, &current_active_alias(), true);
+                    edit_field(current_active_alias(), field, true);
                     *ctx.render_version.write() += 1;
                     return EventResult::Consumed;
                 }
@@ -180,11 +167,6 @@ pub(super) fn handle_model_event_with(
                 return EventResult::Ignored;
             }
         }
-        KeyCode::Enter => {
-            if *ctx.right_focus.read() && *ctx.right_cursor.read() == FIELD_CONTEXT_1M {
-                enter_window_editor(ctx, &current_alias);
-            }
-        }
         KeyCode::Up => {
             if *ctx.right_focus.read() {
                 let mut c = ctx.right_cursor.write();
@@ -220,7 +202,7 @@ pub(super) fn handle_model_event_with(
         }
         KeyCode::Right => {
             if *ctx.right_focus.read() {
-                activate_right_field(ctx, &current_alias, true);
+                edit_field(current_alias.clone(), *ctx.right_cursor.read(), true);
                 *ctx.render_version.write() += 1;
             } else {
                 // 进入右侧编辑焦点
@@ -229,7 +211,7 @@ pub(super) fn handle_model_event_with(
         }
         KeyCode::Left => {
             if *ctx.right_focus.read() {
-                activate_right_field(ctx, &current_alias, false);
+                edit_field(current_alias.clone(), *ctx.right_cursor.read(), false);
                 *ctx.render_version.write() += 1;
             } else {
                 *ctx.right_focus.write() = false;
@@ -240,88 +222,6 @@ pub(super) fn handle_model_event_with(
     EventResult::Consumed
 }
 
-/// 右侧字段动作：contextWindow 打开数值 editor，其余字段即时保存。
-///
-/// 所有 provider 共用同一条路径——Responses / ChatGPT plan 不进入专属草稿，
-/// Provider / Model 与其它 provider 一样按左右键枚举并立即落盘。
-fn activate_right_field(ctx: &ModelEventCtx, alias: &str, forward: bool) {
-    let field = *ctx.right_cursor.read();
-    if field == FIELD_PROVIDER {
-        let Some(handle) = PERI_CONFIG_HANDLE.get() else {
-            return;
-        };
-        let cfg = handle.read().clone();
-        let Some(candidate) = provider_switch_candidate(&cfg, alias, forward) else {
-            return;
-        };
-        let target_id = candidate
-            .config
-            .profiles
-            .get(alias)
-            .map(|profile| profile.provider.clone())
-            .unwrap_or_default();
-        let target_is_responses = provider_by_id(&candidate, &target_id)
-            .is_some_and(|provider| provider.provider_type == "openai_responses");
-        let window_missing = candidate
-            .config
-            .profiles
-            .get(alias)
-            .and_then(|profile| profile.context_window)
-            .filter(|window| *window > 0)
-            .is_none();
-        if target_is_responses && window_missing {
-            // 切到 Responses 时先补必备窗口，再与新 provider/model 原子保存；
-            // 取消编辑则 provider/model 也不落盘。
-            let revision = crate::config::configuration_revision().ok();
-            if let Some(state) = WindowEditState::enter(&candidate, alias, revision) {
-                *ctx.window_editor.write() = Some(state);
-                *ctx.right_focus.write() = true;
-                return;
-            }
-        }
-        commit_profile_candidate(alias, candidate);
-        return;
-    }
-    if field == FIELD_CONTEXT_1M {
-        let Some(handle) = PERI_CONFIG_HANDLE.get() else {
-            return;
-        };
-        let cfg = handle.read().clone();
-        let is_responses = effective_provider_id(&cfg, alias)
-            .and_then(|provider_id| provider_by_id(&cfg, &provider_id))
-            .is_some_and(|provider| provider.provider_type == "openai_responses");
-        if is_responses {
-            enter_window_editor(ctx, alias);
-            return;
-        }
-    }
-    edit_field(alias.to_string(), field, forward);
-}
-
-fn enter_window_editor(ctx: &ModelEventCtx, alias: &str) {
-    refresh_before_editor();
-    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
-        return;
-    };
-    let revision = crate::config::configuration_revision().ok();
-    let cfg = handle.read();
-    if let Some(state) = WindowEditState::enter(&cfg, alias, revision) {
-        *ctx.window_editor.write() = Some(state);
-        *ctx.right_focus.write() = true;
-    }
-}
-
-/// 进入长草稿/内联 editor 前重读权威配置：expected revision 与基线都来自最新快照，
-/// 因而“Esc 后重新进入”是真实可用的 revision 冲突恢复路径。
-fn refresh_before_editor() {
-    if crate::kit::atoms::CONFIG_SOURCE_HANDLE.get().is_none() {
-        return;
-    }
-    if let Err(error) = crate::kit::config_service::reload_configuration() {
-        crate::kit::config_service::notify_reload_failed(&error);
-    }
-}
-
 /// 打开 Login 面板管理 Provider，并传递一次性目标身份。
 fn open_provider_management(alias: &str) {
     let provider_id = PERI_CONFIG_HANDLE.get().and_then(|handle| {
@@ -330,107 +230,6 @@ fn open_provider_management(alias: &str) {
     });
     *LOGIN_PANEL_REQUEST.state().write() = Some(LoginPanelRequest { provider_id });
     crate::kit::panel_registry::open_panel(PanelKind::Login);
-}
-
-fn notify_transient(key: &str, seconds: u64) {
-    *NOTIFICATION.state().write() = Some(Notification {
-        message: i18n::tr(key),
-        until: peri_time::monotonic_now() + std::time::Duration::from_secs(seconds),
-    });
-}
-
-fn handle_window_editor_event(event: Event, ctx: &ModelEventCtx) -> EventResult {
-    let mut guard = ctx.window_editor.write();
-    let Some(editor) = guard.as_mut() else {
-        return EventResult::Ignored;
-    };
-    if let Event::Mouse(mouse) = event {
-        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
-            // 滚轮/抬起等交给 ScrollView 与面板滚动仲裁。
-            return EventResult::Ignored;
-        }
-        if let Some(area) = ctx.area {
-            // 底部按钮与 Ctrl+L 等价：editor 未提交时只提示先保存或取消。
-            if hit_provider_button(&mouse, area) {
-                notify_transient("model-panel-editor-exit-first", 3);
-                *ctx.render_version.write() += 1;
-                return EventResult::Consumed;
-            }
-            let layout = window_editor_layout(editor);
-            let offset = ctx.right_scroll.read().offset().y;
-            if let Some(hit) = hit_right_pane(&layout.hits, &mouse, area, offset) {
-                match hit {
-                    PaneHit::Save => {
-                        if submit_window_edit(editor) {
-                            *guard = None;
-                        }
-                    }
-                    PaneHit::Cancel => *guard = None,
-                    PaneHit::Field(_) => {}
-                }
-            }
-        }
-        *ctx.render_version.write() += 1;
-        return EventResult::Consumed;
-    }
-    if let Event::Paste(text) = event {
-        // 单行数值字段：多行/控制字符/非数字整段拒绝，保留原文本并显示既有错误。
-        editor.paste(&text);
-        *ctx.render_version.write() += 1;
-        return EventResult::Consumed;
-    }
-    let Event::Key(key) = event else {
-        return EventResult::Consumed;
-    };
-    if key.kind != KeyEventKind::Press {
-        return EventResult::Consumed;
-    }
-    let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let mut reload_conflict = false;
-    let mut exit_editor_first = false;
-    match key.code {
-        KeyCode::Esc => *guard = None,
-        KeyCode::Enter => {
-            if submit_window_edit(editor) {
-                *guard = None;
-            }
-        }
-        KeyCode::Char('s') if is_ctrl => {
-            if submit_window_edit(editor) {
-                *guard = None;
-            }
-        }
-        // 冲突提示指向的操作：重读权威配置并离开本 editor，随后重新进入即可用新
-        // revision 保存。非冲突输入错误不提供此动作。
-        KeyCode::Char('r') if is_ctrl && editor.conflict => reload_conflict = true,
-        KeyCode::Char('l') if is_ctrl => exit_editor_first = true,
-        KeyCode::Char('w') if is_ctrl => editor.word_backspace(),
-        KeyCode::Char(ch) if !is_ctrl => {
-            editor.insert(ch);
-        }
-        KeyCode::Backspace if !is_ctrl => editor.backspace(),
-        KeyCode::Delete => editor.delete(),
-        KeyCode::Left if !is_ctrl => editor.move_left(),
-        KeyCode::Right if !is_ctrl => editor.move_right(),
-        KeyCode::Home if !is_ctrl => editor.home(),
-        KeyCode::End if !is_ctrl => editor.end(),
-        // 方向键不切换 active alias；其余键不穿透。
-        _ => {}
-    }
-    if reload_conflict {
-        match crate::kit::config_service::reload_configuration() {
-            Ok(_) => {
-                *guard = None;
-                crate::kit::config_service::notify_reloaded();
-            }
-            Err(error) => crate::kit::config_service::notify_reload_failed(&error),
-        }
-    }
-    if exit_editor_first {
-        notify_transient("model-panel-editor-exit-first", 3);
-    }
-    *ctx.render_version.write() += 1;
-    EventResult::Consumed
 }
 
 /// 当前激活档位（配置事实源 `PERI_CONFIG_HANDLE`）——会话状态栏的
@@ -470,7 +269,6 @@ pub(super) struct ModelEventCtx {
     pub(super) right_cursor: State<usize>,
     pub(super) right_focus: State<bool>,
     pub(super) render_version: State<u64>,
-    pub(super) window_editor: State<Option<WindowEditState>>,
     /// 右栏滚动偏移——内联视图命中与绘制共用同一本帧几何。
     pub(super) right_scroll: State<ScrollViewState>,
     pub(super) viewport: ListViewport,

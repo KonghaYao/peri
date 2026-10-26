@@ -19,32 +19,31 @@
    2. 观察当前行、状态栏与错误提示，再恢复保存能力并重试。
    3. 核对失败明确可见且不宣称已保存；成功后面板与状态栏显示同一实际值。
 5. **P0-86 Model 内联窗口与 provider/model/window 原子保存**
-   1. 打开 `/model`，选择 Responses 档位，Tab 进入右栏 `Context window`，Enter 进入内联
-      编辑；分别输入 `0` 与 `128k` 尝试保存，再按 Esc 放弃一次有效输入。
-   2. 重新进入并输入正整数保存；随后改变该档 provider 或 model，确认为新目标输入的
-      window 为空，必须重新输入后才能保存；在保存前按 Esc 核对磁盘未变化。
-   3. 核对 provider/model/window 三项一次落盘，其他档位与 active alias 不变；重启后显示
-      同一组值。先在 Login 保存四档默认 model、不改任何 profile，再打开 Model 草稿：核对
-      已绑定档位的 model 用 Provider 同档默认预填，显式 `profile.model` 优先且不被覆盖；
-      保存 Model 后仅目标档位变化。对 ChatGPT plan provider 再核对 Provider/Model/
+   1. 打开 `/model`，选择 Responses 档位，Tab 进入右栏，把光标移到 `Context window` 行
+      直接输入；分别输入 `0` 与 `128k` 尝试提交，再按 Esc 放弃一次有效输入。
+   2. 重新进入并输入正整数提交；随后只改变该档 provider 或 model（即时保存）。切到缺
+      窗口的 Responses provider 时先输入窗口；在输入窗口前按 Esc，核对 provider/model
+      均未变化。
+   3. 核对切到缺窗口 provider 时 window 与 provider/model 一次落盘，其他档位与 active
+      alias 不变；重启后显示同一组值。先在 Login 保存四档默认 model、不改任何 profile，
+      再打开 Model：核对已绑定档位的 model 用 Provider 同档默认预填，显式
+      `profile.model` 优先且不被覆盖。对 ChatGPT plan provider 再核对 Provider/Model/
       contextWindow/Max tokens 均与其它 Responses provider 行为一致：Max tokens 走同一预设
       循环，窗口缺失按通用规则提示，不出现订阅特例 UI 或阻断。
-   4. 在 Model 草稿的 Model 行按 Enter 进入任意文本编辑，改写后按 Esc 核对恢复原值；
-      再次改写并按 Enter 确认，界面落到 Save；为新目标重新填写 window 后按 Enter/Ctrl+S，
-      核对三项一次提交。有未保存草稿时按 Ctrl+L，核对只提示先保存或取消、不切换面板；
-      取消草稿后按 Ctrl+L，核对 Login 打开并定向到当前 provider。
-   5. 保持草稿打开并由另一个进程写入产生新 revision 后再保存；核对草稿保留且提示 Ctrl+R；
-      按 Ctrl+R 核对离开草稿并重读权威配置，重新进入后可用新 revision 保存。
+   4. 在 Model 的 Model 行直接输入任意文本，Enter 提交、Esc 恢复；再次修改后提交，核对
+      立即落盘。有未提交的窗口输入时按 Ctrl+L，核对只提示先完成或取消、不切换面板；
+      取消后按 Ctrl+L，核对 Login 打开并定向到当前 provider。
+   5. 保持窗口输入打开并由另一个进程写入产生新 revision 后再提交；核对只提示冲突、
+      不覆盖外部新值；按 Ctrl+R 重读权威配置后重新输入并提交。
    6. 用鼠标点击右栏 Provider / Model / Effort / Max tokens / Context window 行：核对先聚焦
-      该行，再执行与键盘相同的动作（Responses context 进入内联 editor、model 进入草稿，
-      其他字段沿用即时保存）；滚动右栏后点击可见行仍命中该字段；点击空白、边框、分隔线与
-      滚动条不聚焦、不改字段、不写配置。
+      该行，再执行与键盘相同的动作（Context window 进入行内编辑，其他字段沿用即时保存）；
+      滚动右栏后点击可见行仍命中该字段；点击空白、边框、分隔线与滚动条不聚焦、不改字段、
+      不写配置。
    7. 点击底部 `[Ctrl+L 管理 Provider · 认证：/login]` 按钮，核对与 Ctrl+L 一致：Login
-      打开并定向当前 provider。保留未保存草稿或内联 editor 时点击，核对只提示先保存或
-      取消，面板不切换且草稿/editor 保留。
-   8. 在 window 数值 editor 与 Model 文本 editor 粘贴多行或含控制字符的文本：核对文本不变、
-      可见错误出现，Enter/Ctrl+S 被阻断且磁盘未变；用退格或输入合法字符修正后再次保存，
-      核对成功落盘。
+      打开并定向当前 provider。保留未提交的窗口输入时点击，核对只提示先完成或取消，
+      面板不切换且输入保留。
+   8. 在 Context window 行粘贴多行或含控制字符的文本：核对文本不变、可见错误出现、
+      磁盘未变；用退格或输入合法字符修正后按 Enter 提交，核对成功落盘。
 6. **P0-87 Login ChatGPT 授权 URL、浏览器、复制与取消**
    1. 在 `/login` 选择 Responses provider 并切换到 `ChatGPT plan`，使用“高级”区的默认
       凭据目录（缺失/非法时恢复为可编辑），按 `Sign in to ChatGPT` 进入认证子视图。

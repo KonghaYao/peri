@@ -63,7 +63,7 @@
 事件类型。
 
 鼠标只加速已有命令：列表区域内左键点击等价于“选中该行并执行该行的 Enter 动作”，
-滚动条所在列不参与列表命中。动态表单与内联 editor 的字段、选项与按钮按同一帧语义行
+滚动条所在列不参与列表命中。动态表单与行内编辑的字段、选项与交互行按同一帧语义行
 命中；普通右栏 K/V 行的点击先聚焦该行，再执行与键盘相同的字段动作；底部动作按钮有
 独立命中区，不把整行提示都当作按钮。空白、边框、分隔线与滚动条不触发动作。
 
@@ -132,10 +132,10 @@ ChatGPT 登录/状态/注销。同作用域同目标的在途请求不再重复�
    持久化的值。不可逆动作同样适用（删除 provider 落盘失败则不删：不能显示一个重启后
    会复活的结果）。
 
-长草稿（Login provider 编辑、Model 的 Responses 档位与内联 contextWindow）在进入编辑时
-捕获 `expected_revision`，经 `persist_draft(expected, candidate)` 保存；成功后只发布
-authority 返回的 accepted snapshot。revision 冲突单独提示 `config-draft-conflict`，草稿
-保留且不覆盖外部新值；`persist_candidate` 仍用于删除等即时动作，提交时取最新 revision。
+长草稿（Login provider 编辑）在进入编辑时捕获 `expected_revision`，经
+`persist_draft(expected, candidate)` 保存；成功后只发布 authority 返回的 accepted
+snapshot。revision 冲突单独提示 `config-draft-conflict`，草稿保留且不覆盖外部新值；
+`persist_candidate` 仍用于删除等即时动作，提交时取最新 revision。
 落盘成功但 ACP 推送失败时提示 `config-runtime-sync-failed`，不回滚、不重发已落盘配置。
 
 打开 Login/Model 面板会先显式 reload（不写文件）。冲突后 `Ctrl+R` 丢弃当前草稿（Login

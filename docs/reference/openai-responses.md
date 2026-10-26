@@ -31,21 +31,21 @@
    对应提示；认证状态变化会清除陈旧的身份/引用错误。长草稿使用进入表单时的配置 revision，
    出现 revision 冲突时按 Ctrl+R 从 authority 重读并重新基线化（同时同步认证作用域），
    不会用旧草稿覆盖外部新值，只有该冲突显示重新载入提示。
-7. 在 `/model` 右栏选择要绑定的档位并编辑 provider/model/contextWindow：Responses 的
-   provider/model/window 会作为一个草稿原子保存。右栏选择 `Context window` 按 Enter 可
-   内联编辑该档窗口。Model 草稿的 Model 行按 Enter 进入任意文本编辑，再按 Enter 确认并
-   转到 Save（Esc 恢复原值），最终由 Save/Ctrl+S 提交。Login 落盘的四档默认模型会用于
-   Model 面板预填；已有显式 `profile.model` 优先，不会被预填覆盖。底部
+7. 在 `/model` 右栏选择要绑定的档位并编辑 provider/model/contextWindow：所有 provider
+   （含 Responses / ChatGPT plan）共用同一张 K/V 表，Provider/Model 行即时保存，不出现
+   档位草稿或专属保存面板。Context window 行按 Enter 或直接输入即可行内编辑；Enter
+   提交，Esc 恢复原值。切到缺窗口的 Responses provider 时先完成窗口编辑再落盘，取消则
+   provider/model 一并放弃。Login 落盘的四档默认模型会用于 Model 面板预填；已有显式
+   `profile.model` 优先，不会被预填覆盖。底部
    `[Ctrl+L 管理 Provider · 认证：/login]` 是按钮，点击与 Ctrl+L 相同：打开 Login
-   并定向编辑当前 provider；有未保存草稿时两者都只提示先保存或取消，草稿保留。
-8. Login Edit 的字段、类型/认证方式/Confirm，以及 Model 草稿的 Save/Cancel 与内联 window
-   editor 的保存/取消都可用鼠标点击，语义与键盘一致。Model 普通右栏
+   并定向编辑当前 provider；有未提交的窗口输入时两者都只提示先完成或取消，内容保留。
+8. Login Edit 的字段、类型/认证方式/Confirm 可用鼠标点击，语义与键盘一致。Model 右栏
    Provider/Model/Effort/Max tokens/Context window 行也可点击：先聚焦该行，再执行与
-   键盘相同的动作（Responses context/model 进入既有 editor/草稿，其他字段沿用即时保存）。
-   空白、边框、分隔线与滚动条不触发动作；右栏滚动后点击可见行仍命中该字段。
-9. Model 的窗口数值 editor 与 Model 文本 editor 是单行字段：换行/控制字符不会写入——
-   按键被拒绝，终端粘贴整段拒绝——保留原文本并显示既有错误，修正前 Enter/Ctrl+S 保存
-   被阻断；窗口字段还拒绝非数字。修正（退格或输入合法字符）后可继续保存。
+   键盘相同的动作（Context window 进入行内编辑，其他字段沿用即时保存）。空白、边框、
+   分隔线与滚动条不触发动作；右栏滚动后点击可见行仍命中该字段。
+9. Model 的 Context window 是单行数值字段：换行/控制字符不会写入——按键被拒绝，终端
+   粘贴整段拒绝——保留原文本并显示既有错误；非数字同样被拒绝。修正（退格或输入合法
+   字符）后按 Enter 提交。
 
 ChatGPT 登录、状态查询与注销都在 Login 面板内完成，不启动 `peri auth chatgpt` 子进程，
 也不读取或显示 token。登录成功后凭据已保存，但 provider 配置仍需按上一步保存；两者不是

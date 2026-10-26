@@ -1,4 +1,4 @@
-use super::edit::{edit_field, submit_window_edit};
+use super::edit::edit_field;
 use super::*;
 
 #[test]
@@ -44,18 +44,16 @@ mod commit;
 // cron 面板测试）；档位切换经 `handle_model_event_with` 注入捕获闭包断言「点了
 // 哪一行 → 切哪一档」，真实持久化由 `model/commit_test.rs` 覆盖。
 
-use super::editor_view::{PaneHit, PaneLayout, render_window_editor};
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{NOTIFICATION, Notification, PANEL_SCROLL_OWNER, PERI_CONFIG_HANDLE};
 use crate::kit::panels::shared::list::{ListViewport, content_rows};
-use peri_theme::atoms::THEME_ATOM;
 use ratatui_kit::components::scroll_view::ScrollViewState;
 use ratatui_kit::crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui_kit::prelude::{EventResult, State, element};
 use ratatui_kit::ratatui::buffer::Buffer;
-use ratatui_kit::ratatui::layout::{Position, Rect};
+use ratatui_kit::ratatui::layout::Rect;
 use serial_test::serial;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -192,7 +190,6 @@ pub(super) struct MountedPanel {
     pub(super) right_cursor: State<usize>,
     pub(super) right_focus: State<bool>,
     pub(super) render_version: State<u64>,
-    pub(super) window_editor: State<Option<WindowEditState>>,
     pub(super) right_scroll: State<ScrollViewState>,
 }
 
@@ -257,7 +254,6 @@ impl MountedPanel {
                 right_cursor: self.right_cursor,
                 right_focus: self.right_focus,
                 render_version: self.render_version,
-                window_editor: self.window_editor,
                 right_scroll: self.right_scroll,
                 viewport,
             },
@@ -308,30 +304,6 @@ fn responses_config() -> crate::config::PeriConfig {
     .unwrap()
 }
 
-// ── 内联 editor 的鼠标语义 ─────────────────────────────────────────────────
-
-fn test_window_layout(editor: &WindowEditState) -> PaneLayout {
-    let theme_state = THEME_ATOM.state();
-    let theme = theme_state.read();
-    render_window_editor(editor, &theme)
-}
-
-fn pane_hit_row(layout: &PaneLayout, hit: PaneHit) -> u16 {
-    layout
-        .hits
-        .iter()
-        .position(|candidate| *candidate == Some(hit))
-        .unwrap_or_else(|| panic!("右栏命中区必须包含 {hit:?}")) as u16
-}
-
-fn pane_click_row(area: Rect, layout: &PaneLayout, hit: PaneHit, offset: u16) -> u16 {
-    area.y + 3 + pane_hit_row(layout, hit) - offset
-}
-
-fn right_content_column(area: Rect) -> u16 {
-    area.x + area.width * 45 / 100 + 3
-}
-
 #[path = "model/hit_test.rs"]
 mod hit;
 
@@ -343,6 +315,3 @@ mod mouse;
 
 #[path = "model/provider_test.rs"]
 mod provider;
-
-#[path = "model/paste_test.rs"]
-mod paste;

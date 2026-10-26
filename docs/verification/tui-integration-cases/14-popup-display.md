@@ -24,7 +24,7 @@
       `Open browser`、`Copy link`、`Cancel sign-in`，并检查点击背景面板不会穿透。
    2. 等待授权期间在 en 与 zh-CN 间切换；核对 URL、提示、按钮、状态与错误均为当前语言完整
       文案，不出现原始 key 或半截多字节字符；`Copy link` 复制完整 URL。
-   3. 在 Login Edit 与 Model 的 Responses contextWindow 内联 editor 上重复窄屏检查：
+   3. 在 Login Edit 与 Model 的 Responses contextWindow 行内编辑上重复窄屏检查：
       用键盘和鼠标分别聚焦/切换字段、选择类型与认证方式、勾选档位、点击 Confirm/Save/Cancel，
       结果一致；点击空白、边框、分隔线与滚动条不触发动作。Model 普通右栏 K/V 行点击先聚焦
       再执行键盘同义动作；底部“管理 Provider”按钮与 Ctrl+L 等价，窄屏下仍可点击。向 choice、

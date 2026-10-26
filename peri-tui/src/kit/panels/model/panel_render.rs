@@ -5,25 +5,15 @@
 //! text width and column geometry never drift between draw and hit.
 
 use crate::i18n;
-use peri_theme::atoms::THEME_ATOM;
 use peri_theme::theme::ThemeDefinition;
 use ratatui_kit::ratatui::style::Style;
 use ratatui_kit::ratatui::text::Span;
 
 use super::VALUE_ALIGN_COL;
-use super::editor_view::{PaneLayout, render_window_editor};
-use super::window_edit::WindowEditState;
 
 /// 底部“管理 Provider”按钮文本——渲染与鼠标命中同源，避免两处文本宽度漂移。
 pub(super) fn provider_button_label() -> String {
     format!("[{}]", i18n::tr("model-panel-provider-manage-hint"))
-}
-
-/// 右栏内联视图的绘制布局（命中只取行位置，颜色不参与判定）。
-pub(super) fn window_editor_layout(editor: &WindowEditState) -> PaneLayout {
-    let theme_state = THEME_ATOM.state();
-    let theme = theme_state.read();
-    render_window_editor(editor, &theme)
 }
 
 /// 模型名内嵌 effort 后缀（如 "gpt-5.6-luna high"）：主色用 model_info，后缀用 model accent 色高亮。

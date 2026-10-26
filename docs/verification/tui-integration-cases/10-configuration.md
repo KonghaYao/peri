@@ -18,9 +18,9 @@
    3. 核对提示为保存成功；读取实际 settings，确认 provider 类型、API key auth 与四档默认
       model 已写入（plan provider 的预填模型也应落盘），四个 profile 逐字段与保存前完全一致
       （没有新增/改写绑定、model 或 contextWindow）。重启或重开 `/login` 后显示与磁盘一致。
-   4. 打开 `/model`，为目标档选择新 provider，确认 Provider/Model 立即保存且不出现
-      “档位配置草稿”面板；Responses 档位按 Enter 用内联 editor 填写 contextWindow，
-      保存后确认窗口写入；再重启核对一致。未绑定档位继续使用已有的首 provider 回退，
+   4. 打开 `/model`，为目标档选择新 provider，确认 Provider/Model 立即保存且右栏始终是
+      同一张 K/V 表；把光标移到 Responses 档位的 Context window 行直接输入并 Enter 提交，
+      确认窗口写入；再重启核对一致。未绑定档位继续使用已有的首 provider 回退，
       不因 Login 保存被写死。
    5. 视觉核对：各分区标题、标签列与值列对齐；80/100 列下长 Base URL 不被硬裁切；
       `Type` 的锁定提示落在字段续行，点击续行仍聚焦类型行。
