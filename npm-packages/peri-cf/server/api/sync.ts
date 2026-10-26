@@ -1,12 +1,12 @@
 import type { Server, ServerWebSocket, WebSocketHandler } from "bun";
 import {
   ChatViewReplayOverflowError,
+  type ChatManagerContract,
   type ChatServiceContract,
   type ChatViewRegistry,
   type ChatYjsChannel,
 } from "@peri-code/sdk";
 import { logError } from "../logging";
-import type { ChatRegistry } from "../registry";
 import { chatNotFound } from "./errors";
 
 /**
@@ -30,6 +30,12 @@ export interface SyncSocketData {
   readonly channel: WebSocketSyncChannel;
   readonly view: ReturnType<ChatViewRegistry["attach"]>;
 }
+
+/** WS 升级所需的注册表能力；不依赖父层具体装配类。 */
+type SyncRegistry = {
+  readonly chats: Pick<ChatManagerContract, "getChat" | "findChatBySession">;
+  readonly views: Pick<ChatViewRegistry, "attach">;
+};
 
 /**
  * Bun ServerWebSocket → SDK 逻辑通道。
@@ -117,7 +123,7 @@ export async function handleSyncUpgrade(
   request: Request,
   server: Server<SyncSocketData>,
   chatId: string,
-  registry: ChatRegistry,
+  registry: SyncRegistry,
 ): Promise<Response | undefined> {
   if (request.method !== "GET") {
     return new Response("Method not allowed", {

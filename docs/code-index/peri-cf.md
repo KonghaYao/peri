@@ -75,9 +75,9 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 | HTTP 路由与错误映射 | `server/api/index.ts`、`server/api/errors.ts` |
 | WebSocket 同步适配 | `server/api/sync.ts` |
 | 共享 Zod DTO / HTTP 契约 | `frontend/remote/contracts.ts`、`frontend/remote/display-state.ts` |
-| 浏览器投影与问答适配 | `frontend/remote/projection.ts`、`frontend/remote/askUserQuestion.ts` |
+| 浏览器投影 | `frontend/remote/projection.ts` |
 | 远程客户端与页面控制器 | `frontend/remote/{application,actions,controller,repository,sync}.ts` |
-| Chat 运行时与 useChat | `frontend/chat/runtime/useChat.ts`、`frontend/chat/runtime/queries.ts`、`frontend/chat/runtime/payloadReader.ts` |
+| Chat 运行时与 useChat | `frontend/chat/runtime/{useChat,queries,payloadReader,askUserQuestion}.ts` |
 | Chat 展示与交互 | `frontend/chat/{components,timeline,composer}/`；`frontend/components/assistant-ui/` 只保留 vendored 审批/问答卡片 |
 | SPA 外壳与只读服务信息 | `frontend/app/App.tsx`、`frontend/settings/ServerInfoDialog.tsx` |
 | Vite 构建与 `/api` 代理 | `vite.config.ts` |
@@ -99,5 +99,5 @@ Emscripten 6.0.10 与 peri-wasm 产物。最近一次记录（2026-10-26）：SD
 - `bun test`：`frontend`、`scripts`，再以 server tsconfig 跑 `server`。
 - `./node_modules/.bin/vite build`：只构建前端；`bun run build` 额外执行 `prepare:wasm`。
 - 服务端冒烟：`GET /api/info`、`GET /api/chats`、WS `/api/chats/:id/sync`；真实执行需模型端点与 Store。
-- 边界回归：`scripts/module-boundary.test.ts` 扫描生产源码，禁止旧命令/事件路由、旧门面和跨层引用。
+- 边界回归：`scripts/module-boundary.test.ts` 扫描生产源码，强制依赖方向、禁止循环与自有 index 引用，并拦截旧命令/事件路由和旧门面。
 - 浏览器包检查：`dist/client` 不应出现模型/Store 凭据变量、`node:fs` 或 `@tursodatabase`。

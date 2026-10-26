@@ -31,18 +31,18 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 
 - `frontend/remote/`：HTTP Action、WebSocket 客户端、页面控制器、目录仓储与组合根；同目录承载
   `contracts.ts`（Zod wire/展示 DTO 与 `ServerInfo`）、`display-state.ts`（`ChatDisplayState` 物化）、
-  `projection.ts`（`ChatReplica` 投影）、`askUserQuestion.ts`（问答适配）与 `logging.ts`。
+  `projection.ts`（`ChatReplica` 投影）与 `logging.ts`。
 - `server/`：`index.ts`（Hono 应用：API、静态资源与 WS 升级）、`config.ts`（环境变量与启动校验）、
   `compose.ts`（`chatManagerOptions` 平台装配）、`registry.ts`（`ChatRegistry`：View 生命周期与关闭/停机）、
   `api/index.ts`（Hono 目录/句柄/Action/payload）、`api/sync.ts`（WS → ChatYjsChannel）、
   `api/errors.ts`（错误映射）。
 - `frontend/chat/`、`frontend/components/`、`frontend/app/`：Chat 展示外壳、时间线与交互卡片；
-  `frontend/settings/` 只读服务端信息。
+  `frontend/chat/runtime/askUserQuestion.ts` 承载问答表单适配；`frontend/settings/` 只读服务端信息。
 - `scripts/`：WASM 构建/provenance、开发启动与探针；`wasm/generated/` 是构建产物（gitignored），
   只由服务端加载。
 
 模块规则：文件夹是模块，目录根 `index.ts` 是唯一公共出口；`scripts/module-boundary.test.ts` 扫描生产
-代码，强制 `frontend/` 与 `server/` 互不引用。
+代码，强制依赖方向、禁止循环，并保证 `frontend/`、`server/`、`scripts/` 互不越界。
 
 ## 数据流与生命周期
 

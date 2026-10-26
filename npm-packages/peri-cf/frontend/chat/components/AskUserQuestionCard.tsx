@@ -4,12 +4,9 @@ import { cn } from '@/lib';
 import { field, inkButton, mono, paper } from '../../components/assistant-ui';
 import {
   buildAskUserQuestionContent,
-  type AskUserQuestionDecision,
-  type AskUserQuestionDraft,
-  type AskUserQuestionDrafts,
-} from '../../remote';
-import type { InteractionAnswerHandler } from '../runtime';
-import type { AskUserQuestion, Interaction } from '../runtime';
+  type AskUserQuestion, type Interaction, type InteractionAnswerHandler,
+  type AskUserQuestionDecision, type AskUserQuestionDraft, type AskUserQuestionDrafts,
+} from '../runtime';
 
 type Settled = 'accepted' | 'declined';
 

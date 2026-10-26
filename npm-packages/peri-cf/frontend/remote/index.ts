@@ -19,5 +19,4 @@ export {
 export * from "./contracts";
 export * from "./display-state";
 export * from "./projection";
-export * from "./askUserQuestion";
 export { logError } from "./logging";

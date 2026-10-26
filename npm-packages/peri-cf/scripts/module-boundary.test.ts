@@ -6,6 +6,18 @@ import { dirname, relative, resolve, sep } from 'node:path';
  * 模块边界回归：文件夹是模块，`index.ts` 是唯一公共出口。
  * 跨模块必须走出口；`frontend/remote/` 承载 DTO、投影与客户端门面；
  * `frontend/` 与 `server/` 互不引用。
+ *
+ * 生产代码依赖方向（从稳定到易变）：
+ * - `frontend/lib` / `frontend/hooks` / `frontend/components/assistant-ui` 不依赖 feature；
+ * - `frontend/remote` 不依赖任何其他 frontend 模块，也不依赖 React/UI 包；
+ * - `frontend/chat/runtime` 不依赖展示/组件层；
+ * - `frontend/chat/timeline` 与 `frontend/chat/composer` 互不依赖，也不依赖 components；
+ * - `frontend/chat/components` 只经 runtime 使用 remote；
+ * - `server/api` 不依赖 registry/compose/index；
+ * - `scripts` 不依赖 frontend/server。
+ *
+ * 生产依赖图不得有环；模块内文件不得导入自己的 index。
+ * 测试文件与 `frontend/test` 不参与方向与环规则（测试可构造真实注册表）。
  */
 const packageRoot = resolve(import.meta.dir, '..');
 const sourceRoots = ['frontend', 'server', 'scripts'];
@@ -14,6 +26,7 @@ const skippedDirectories = new Set(['node_modules', 'dist', '.cache', '.wrangler
 const moduleRoots = [
   'server', 'server/api',
   'frontend/chat', 'frontend/chat/runtime', 'frontend/chat/components',
+  'frontend/chat/timeline', 'frontend/chat/composer',
   'frontend/remote', 'frontend/settings',
   'frontend/hooks', 'frontend/lib',
   'frontend/components/assistant-ui',
@@ -74,6 +87,87 @@ function boundaryOf(target: string, importer: string): string {
   return `${nested.reduce((a, b) => (a.length >= b.length ? a : b))}${sep}index.ts`;
 }
 
+const modulePath = (path: string): string => path.split('/').join(sep);
+const frontendTestRoot = modulePath('frontend/test');
+
+function isProduction(path: string): boolean {
+  return !/\.test\.(ts|tsx)$/.test(path) && !within(frontendTestRoot, path);
+}
+
+const production = new Set(
+  files.map((file) => relative(packageRoot, file)).filter(isProduction),
+);
+
+interface ProductionImport {
+  importer: string;
+  specifier: string;
+  target: string | undefined;
+}
+
+const productionImports: ProductionImport[] = files.flatMap((file) => {
+  const importer = relative(packageRoot, file);
+  if (!production.has(importer)) return [];
+  return importsOf(withoutComments(readFileSync(file, 'utf8')))
+    .filter((specifier) => !specifier.includes('?') && !/\.(css|wasm|js)$/.test(specifier))
+    .map((specifier) => ({ importer, specifier, target: resolveImport(specifier, importer) }));
+});
+
+const inModule = (module: string, path: string): boolean => within(modulePath(module), path);
+
+const featureModules = ['frontend/remote', 'frontend/chat', 'frontend/settings', 'frontend/app'];
+
+/** 只统计生产文件中“从 importer 到已解析 target”的违规边。 */
+function directionViolations(
+  importerIn: (importer: string) => boolean,
+  targetIn: (target: string) => boolean,
+): string[] {
+  return productionImports
+    .filter(({ importer, target }) => target !== undefined
+      && importerIn(importer) && targetIn(target))
+    .map(({ importer, specifier }) => `${importer} → ${specifier}`);
+}
+
+/** Tarjan：返回所有大小 > 1 或带自环的强连通分量。 */
+function cyclicComponents(edges: ReadonlyMap<string, readonly string[]>): string[][] {
+  let nextIndex = 0;
+  const indices = new Map<string, number>();
+  const lowLinks = new Map<string, number>();
+  const stack: string[] = [];
+  const onStack = new Set<string>();
+  const components: string[][] = [];
+
+  const visit = (node: string): void => {
+    indices.set(node, nextIndex);
+    lowLinks.set(node, nextIndex);
+    nextIndex += 1;
+    stack.push(node);
+    onStack.add(node);
+    for (const successor of edges.get(node) ?? []) {
+      const known = indices.get(successor);
+      if (known === undefined) {
+        visit(successor);
+        lowLinks.set(node, Math.min(lowLinks.get(node)!, lowLinks.get(successor)!));
+      } else if (onStack.has(successor)) {
+        lowLinks.set(node, Math.min(lowLinks.get(node)!, known));
+      }
+    }
+    if (lowLinks.get(node) !== indices.get(node)) return;
+    const component: string[] = [];
+    for (;;) {
+      const member = stack.pop()!;
+      onStack.delete(member);
+      component.push(member);
+      if (member === node) break;
+    }
+    if (component.length > 1 || (edges.get(node) ?? []).includes(node)) {
+      components.push(component.sort());
+    }
+  };
+
+  for (const node of edges.keys()) if (!indices.has(node)) visit(node);
+  return components;
+}
+
 describe('folder module boundary', () => {
   test('every module folder exposes index.ts', () => {
     const missing = moduleRoots.filter((root) => !existsSync(resolve(packageRoot, root, 'index.ts')));
@@ -114,6 +208,113 @@ describe('frontend/server separation', () => {
       }
     }
     expect(violations).toEqual([]);
+  });
+});
+
+describe('production dependency direction', () => {
+  test('frontend/remote does not import any other frontend module', () => {
+    const violations = directionViolations(
+      (importer) => inModule('frontend/remote', importer),
+      (target) => inModule('frontend', target) && !inModule('frontend/remote', target),
+    );
+    expect(violations).toEqual([]);
+  });
+
+  test('frontend/remote does not import React or UI packages', () => {
+    const packages = productionImports
+      .filter(({ importer, target }) => target === undefined && inModule('frontend/remote', importer))
+      .map(({ specifier }) => specifier)
+      .filter((specifier) => /^react(\/|$)/.test(specifier)
+        || /^react-dom(\/|$)/.test(specifier)
+        || /^@tanstack\//.test(specifier)
+        || /^lucide-react(\/|$)/.test(specifier)
+        || /^@assistant-ui\//.test(specifier));
+    expect(packages).toEqual([]);
+  });
+
+  test('leaf frontend modules do not import any feature', () => {
+    const leaves = ['frontend/lib', 'frontend/hooks', 'frontend/components/assistant-ui'];
+    const violations = directionViolations(
+      (importer) => leaves.some((leaf) => inModule(leaf, importer)),
+      (target) => featureModules.some((feature) => inModule(feature, target)),
+    );
+    expect(violations).toEqual([]);
+  });
+
+  test('chat/runtime does not import components, timeline or composer', () => {
+    const violations = directionViolations(
+      (importer) => inModule('frontend/chat/runtime', importer),
+      (target) => ['frontend/chat/components', 'frontend/chat/timeline', 'frontend/chat/composer']
+        .some((view) => inModule(view, target))
+        || target === modulePath('frontend/chat/index.ts'),
+    );
+    expect(violations).toEqual([]);
+  });
+
+  test('timeline and composer do not depend on each other or on components', () => {
+    const forbiddenFor = (sibling: string): string[] => directionViolations(
+      (importer) => inModule(sibling, importer),
+      (target) => inModule('frontend/chat/components', target)
+        || ['frontend/chat/timeline', 'frontend/chat/composer']
+          .filter((view) => view !== sibling)
+          .some((view) => inModule(view, target)),
+    );
+    expect([...forbiddenFor('frontend/chat/timeline'),
+      ...forbiddenFor('frontend/chat/composer')]).toEqual([]);
+  });
+
+  test('chat/components reaches remote only through chat/runtime', () => {
+    const violations = directionViolations(
+      (importer) => inModule('frontend/chat/components', importer),
+      (target) => inModule('frontend/remote', target),
+    );
+    expect(violations).toEqual([]);
+  });
+
+  test('server/api does not import registry, compose or index', () => {
+    const orchestration = new Set([
+      modulePath('server/registry.ts'),
+      modulePath('server/compose.ts'),
+      modulePath('server/index.ts'),
+    ]);
+    const violations = directionViolations(
+      (importer) => inModule('server/api', importer),
+      (target) => orchestration.has(target),
+    );
+    expect(violations).toEqual([]);
+  });
+
+  test('scripts do not import frontend or server code', () => {
+    const violations = directionViolations(
+      (importer) => inModule('scripts', importer),
+      (target) => inModule('frontend', target) || inModule('server', target),
+    );
+    expect(violations).toEqual([]);
+  });
+
+  test('module files do not import their own entry', () => {
+    const violations: string[] = [];
+    for (const { importer, specifier, target } of productionImports) {
+      if (target === undefined || target === importer) continue;
+      const containing = moduleRoots.filter((root) => within(root, importer));
+      const own = containing.reduce<string | undefined>(
+        (deepest, root) => (deepest === undefined || root.length >= deepest.length ? root : deepest),
+        undefined,
+      );
+      if (!own) continue;
+      const entries = [`${own}${sep}index.ts`, `${own}${sep}index.tsx`];
+      if (entries.includes(target)) violations.push(`${importer} → ${specifier}`);
+    }
+    expect(violations).toEqual([]);
+  });
+
+  test('production dependency graph is acyclic', () => {
+    const edges = new Map<string, string[]>();
+    for (const path of production) edges.set(path, []);
+    for (const { importer, target } of productionImports) {
+      if (target !== undefined && production.has(target)) edges.get(importer)!.push(target);
+    }
+    expect(cyclicComponents(edges)).toEqual([]);
   });
 });
 

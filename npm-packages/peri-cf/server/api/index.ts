@@ -2,6 +2,7 @@ import { Hono, type Context } from "hono";
 import {
   parseChatUserAction,
   type ChatBindingTarget,
+  type ChatManagerContract,
   type ChatServiceContract,
   type ChatUserAction as ChatUserActionValue,
   type ReadPayloadOptions,
@@ -10,7 +11,6 @@ import {
 import { ChatCloseIncompleteError } from "@peri-code/sdk";
 import { logError } from "../logging";
 import type { ServerInfo } from "../config";
-import type { ChatRegistry } from "../registry";
 import {
   chatNotFound,
   closeIncomplete,
@@ -18,8 +18,15 @@ import {
   mapPayloadError,
 } from "./errors";
 
+/** HTTP 适配所需的注册表能力；不依赖父层具体装配类。 */
+type ApiRegistry = {
+  chats: Pick<ChatManagerContract, "createChat" | "getChat" | "findChatBySession" | "listSessions">;
+  closeChat(id: string): Promise<void>;
+  hasPendingClose(id: string): boolean;
+};
+
 export interface ApiOptions {
-  registry: ChatRegistry;
+  registry: ApiRegistry;
   info: ServerInfo;
 }
 
