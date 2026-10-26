@@ -9,6 +9,7 @@ import {
   SessionCreationError,
   type ChatDisposition,
 } from "@peri-code/sdk";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 
 /** HTTP 边界只负责把领域错误映射为状态与稳定 code；disposition 不反推。 */
 interface ChatErrorBody {
@@ -28,11 +29,11 @@ interface ChatErrorContext {
 }
 
 interface MappedError {
-  status: number;
+  status: ContentfulStatusCode;
   body: ChatErrorBody;
 }
 
-function statusFor(error: ChatActionError): number {
+function statusFor(error: ChatActionError): ContentfulStatusCode {
   if (error instanceof ChatActionValidationError) return 400;
   if (
     error instanceof ChatBusyError
@@ -145,7 +146,7 @@ export function closeIncomplete(
   };
 }
 
-const PAYLOAD_STATUS: Record<PayloadReadError["code"], number> = {
+const PAYLOAD_STATUS: Record<PayloadReadError["code"], ContentfulStatusCode> = {
   unauthorized: 403,
   unavailable: 404,
   too_large: 413,
@@ -155,7 +156,7 @@ const PAYLOAD_STATUS: Record<PayloadReadError["code"], number> = {
 };
 
 export function mapPayloadError(error: unknown): {
-  status: number;
+  status: ContentfulStatusCode;
   body: { ok: false; code: string; message: string };
 } {
   if (error instanceof PayloadReadError) {

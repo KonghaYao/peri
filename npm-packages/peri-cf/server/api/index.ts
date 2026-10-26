@@ -224,7 +224,7 @@ export function createApi(deps: ApiOptions): Hono {
       action = parseChatUserAction(body.value);
     } catch (error) {
       const mapped = mapChatActionError(error, { chatId: chat.id });
-      return c.json(mapped.body, mapped.status as 400);
+      return c.json(mapped.body, mapped.status);
     }
 
     const binding = chat.binding;
@@ -265,7 +265,7 @@ export function createApi(deps: ApiOptions): Hono {
           requestId: action.requestId,
         });
       }
-      return c.json(mapped.body, mapped.status as 400 | 409 | 500 | 503);
+      return c.json(mapped.body, mapped.status);
     }
   });
 
@@ -290,7 +290,7 @@ export function createApi(deps: ApiOptions): Hono {
       }
       const mapped = mapChatActionError(error, { chatId });
       logError("[peri-cf] Peri chat close failed", error, { chatId });
-      return c.json(mapped.body, mapped.status as 500);
+      return c.json(mapped.body, mapped.status);
     }
   });
 
@@ -332,7 +332,7 @@ export function createApi(deps: ApiOptions): Hono {
       if (mapped.status >= 500) {
         logError("[peri-cf] Peri payload read failed", error, { chatId: chat.id });
       }
-      return c.json(mapped.body, mapped.status as 400);
+      return c.json(mapped.body, mapped.status);
     }
   });
 
@@ -345,7 +345,11 @@ export function createApi(deps: ApiOptions): Hono {
 }
 
 export {
-  handleSyncUpgrade,
-  syncWebSocketHandlers,
-  type SyncSocketData,
+  MAX_CLIENT_SYNC_FRAME_BYTES,
+  SYNC_PATH,
+  syncEvents,
+  syncUpgradeGuard,
+  WebSocketSyncChannel,
+  type SyncConnection,
+  type SyncEnv,
 } from "./sync";

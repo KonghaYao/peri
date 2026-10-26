@@ -1,12 +1,18 @@
 import type { Server } from "bun";
 import { ChatManager } from "@peri-code/sdk";
 import { Hono } from "hono";
-import { getBunServer, serveStatic } from "@hono/bun";
+import {
+  serveStatic,
+  upgradeWebSocket,
+  websocket,
+  type BunWebSocketData,
+} from "@hono/bun";
 import {
   createApi,
-  handleSyncUpgrade,
-  syncWebSocketHandlers,
-  type SyncSocketData,
+  SYNC_PATH,
+  syncEvents,
+  syncUpgradeGuard,
+  type SyncEnv,
 } from "./api";
 import { MODEL_TIERS, loadServerConfig, publicServerInfo, type ServerConfig } from "./config";
 import { chatManagerOptions } from "./compose";
@@ -21,37 +27,52 @@ import { ChatRegistry } from "./registry";
 
 const NOT_FOUND_TEXT = "404 Not Found";
 
-/** 组装 HTTP/WS 服务；WASM 宿主仍由首个 Action 懒启动。 */
+/** 组装路由；`fetch` 必须由 `Bun.serve` 提供 server 才能完成 WS 升级。 */
+export function createApp(config: ServerConfig, registry: ChatRegistry): Hono<SyncEnv> {
+  const app = new Hono<SyncEnv>();
+  app.route("/", createApi({ registry, info: publicServerInfo(config) }));
+
+  // 精确匹配的升级前置条件（405/426/410/500）与逐连接状态。
+  app.all(SYNC_PATH, syncUpgradeGuard(registry));
+  // 官方 helper 在 server.upgrade() 返回 false 时 next() 到同路由的 400 回退，
+  // 不会落到下方的 `/api/*` 404。
+  app.get(
+    SYNC_PATH,
+    upgradeWebSocket((c) => {
+      const connection = c.get("syncConnection");
+      if (!connection) throw new Error("sync upgrade guard did not run");
+      return syncEvents(connection);
+    }),
+    (c) => c.text("WebSocket upgrade rejected", 400),
+  );
+
+  // 未匹配的 API 不得落到 SPA 回退。
+  app.all("/api", (c) => c.notFound());
+  app.all("/api/*", (c) => c.notFound());
+  // 静态资源保持 `app.all`：改成 `app.get` 会让 POST/OPTIONS 未知路径从 200 变 404。
+  app.all("*", serveStatic({ root: config.staticRoot }));
+  app.all("*", serveStatic({ root: config.staticRoot, path: "index.html" }));
+  app.notFound((c) => c.text(NOT_FOUND_TEXT, 404));
+  return app;
+}
+
+/** 启动 HTTP/WS 服务；WASM 宿主仍由首个 Action 懒启动。 */
 export function createServer(
   config: ServerConfig,
   registry: ChatRegistry,
-): Server<SyncSocketData> {
-  const app = new Hono();
-  app.route("/", createApi({ registry, info: publicServerInfo(config) }));
-  app.all("/api/chats/:chatId/sync", async (c) => {
-    const server = getBunServer<Server<SyncSocketData>>(c);
-    if (!server) return c.text("WebSocket upgrade unavailable", 500);
-    // 升级成功后由 Bun 接管连接；返回空响应与 Hono 的 Bun 适配器一致。
-    return (await handleSyncUpgrade(c.req.raw, server, c.req.param("chatId"), registry))
-      ?? new Response(null);
-  });
-  // 未匹配的 API 不得落到 SPA 回退。
-  app.all("/api", () => new Response(NOT_FOUND_TEXT, { status: 404 }));
-  app.all("/api/*", () => new Response(NOT_FOUND_TEXT, { status: 404 }));
-  app.all("*", serveStatic({ root: config.staticRoot }));
-  app.all("*", serveStatic({ root: config.staticRoot, path: "index.html" }));
-  return Bun.serve<SyncSocketData>({
+): Server<BunWebSocketData> {
+  return Bun.serve<BunWebSocketData>({
     hostname: config.hostname,
     port: config.port,
-    fetch: app.fetch,
-    websocket: syncWebSocketHandlers,
+    fetch: createApp(config, registry).fetch,
+    websocket,
   });
 }
 
 /** 进程级入口：构造注册表，再启动服务。 */
 export function startServer(
   config: ServerConfig,
-): { server: Server<SyncSocketData>; registry: ChatRegistry } {
+): { server: Server<BunWebSocketData>; registry: ChatRegistry } {
   const registry = new ChatRegistry(new ChatManager(chatManagerOptions(config)));
   return { server: createServer(config, registry), registry };
 }

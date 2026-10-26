@@ -128,6 +128,10 @@ describe("server wiring", () => {
       expect(index.status).toBe(200);
       expect(await index.text()).toContain("peri");
 
+      const head = await fetch(`http://127.0.0.1:${server.port}/`, { method: "HEAD" });
+      expect(head.status).toBe(200);
+      expect(await head.text()).toBe("");
+
       const asset = await fetch(`http://127.0.0.1:${server.port}/asset.txt`);
       expect(asset.status).toBe(200);
       expect(await asset.text()).toBe("asset-body");
@@ -136,9 +140,32 @@ describe("server wiring", () => {
       expect(spa.status).toBe(200);
       expect(await spa.text()).toContain("peri");
 
+      // 未知非 API 路径对所有方法都回退 index.html（静态路由保持 `app.all`）。
+      const spaPost = await fetch(`http://127.0.0.1:${server.port}/chats/123`, {
+        method: "POST",
+      });
+      expect(spaPost.status).toBe(200);
+      expect(await spaPost.text()).toContain("peri");
+
+      const spaOptions = await fetch(`http://127.0.0.1:${server.port}/chats/123`, {
+        method: "OPTIONS",
+      });
+      expect(spaOptions.status).toBe(200);
+      expect(await spaOptions.text()).toContain("peri");
+
+      const apiRoot = await fetch(`http://127.0.0.1:${server.port}/api`);
+      expect(apiRoot.status).toBe(404);
+      expect(await apiRoot.text()).toBe("404 Not Found");
+
       const apiMissing = await fetch(`http://127.0.0.1:${server.port}/api/missing`);
       expect(apiMissing.status).toBe(404);
       expect(await apiMissing.text()).toBe("404 Not Found");
+
+      const apiPost = await fetch(`http://127.0.0.1:${server.port}/api/unknown`, {
+        method: "POST",
+      });
+      expect(apiPost.status).toBe(404);
+      expect(await apiPost.text()).toBe("404 Not Found");
     } finally {
       server.stop(true);
       await registry.shutdown();

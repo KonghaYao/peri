@@ -24,7 +24,9 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
   `ChatView`；同一 Chat 的多个 WS 连接共享视图，断开连接不释放视图；绑定换代由 View 成对替换文档。
   `closeChat` 先关句柄再释放视图，`shutdown` 先 `disposeAll` 再关闭 SDK 端口。
 - **HTTP**：`server/api/index.ts` 只做边界校验、目标绑定核对与错误映射；执行、绑定与关闭语义在 SDK。
-- **WS + Yjs**：`server/api/sync.ts` 把 Bun `ServerWebSocket` 适配为 `ChatYjsChannel`；客户端只能发
+- **WS + Yjs**：`server/index.ts` 用 `@hono/bun` 的 `upgradeWebSocket` + `websocket` 升级；
+  `server/api/sync.ts` 的 `syncUpgradeGuard` 先校验方法/Upgrade 头并把逐连接状态挂到
+  `SyncConnection`，`syncEvents` 再把每连接 `WSContext` 适配为 `ChatYjsChannel`；客户端只能发
   HELLO/ACK，任何文档更新帧都被拒绝；慢客户端由 SDK 交付信用/背压显式关闭。
 - **前端**：`frontend/remote/controller.ts` 是页面控制器（句柄身份、两步打开历史、绑定代次、Action、
   连接）；`actions.ts` 是 HTTP 客户端；`sync.ts` 是 WebSocket → SDK 副本；`application.ts` 是前端组合根。
