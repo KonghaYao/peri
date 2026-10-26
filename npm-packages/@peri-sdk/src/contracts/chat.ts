@@ -2,7 +2,13 @@ import type { PublicError } from "../state/doc-model";
 import type { HistoryPageItem } from "../state/history-merge";
 import type { TurnExitStatus } from "../state/turn-machine";
 import type { JsonRpcNotification } from "../transport/types";
-import type { ChatBindingTarget } from "./types";
+
+/** Chat 绑定身份与代次；事实源与视图共用的最小快照。 */
+export interface ChatBindingTarget {
+    chatId: string;
+    sessionId: string;
+    bindingRevision: number;
+}
 
 /**
  * ChatService 向 View 暴露的运行事实（Phase 0 冻结）。

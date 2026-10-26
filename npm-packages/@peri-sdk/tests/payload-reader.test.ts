@@ -5,7 +5,7 @@ import { ChatView } from "../src/view/chat-view";
 import {
     PayloadReadError, VIEW_PAYLOAD_MAX_BYTES, VIEW_PAYLOAD_MAX_CONCURRENCY, limitPayloadReads, readPayload,
     type ToolPayloadReader, type ToolPayloadResponse,
-} from "../src/view/payload-reader";
+} from "../src/payload/reader";
 import { FakeDatabase, FakePort, directoryEntry } from "./chat-fixtures";
 import { OwnershipProbe } from "./ownership-probe";
 

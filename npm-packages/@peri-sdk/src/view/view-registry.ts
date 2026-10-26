@@ -1,4 +1,4 @@
-import type { ChatFactSource } from "../chat/facts";
+import type { ChatFactSource } from "../contracts/chat";
 import { ChatView, type ChatViewOptions } from "./chat-view";
 
 /** 注册表只需要事实源与稳定身份；不依赖具体 Chat 句柄实现。 */

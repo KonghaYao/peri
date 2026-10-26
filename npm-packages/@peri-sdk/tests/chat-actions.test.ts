@@ -4,11 +4,11 @@ import {
     ChatActionValidationError,
     ChatClosedError,
 } from "../src/chat/errors";
-import type { ChatFactEnvelope, ChatFactObserver } from "../src/chat/facts";
+import type { ChatFactEnvelope, ChatFactObserver } from "../src/contracts/chat";
 import { ChatManager } from "../src/chat/manager";
 import type { ChatManagerInternalOptions } from "../src/chat/manager";
 import type { SendReceipt } from "../src/chat/types";
-import { PayloadReadError } from "../src/view/payload-reader";
+import { PayloadReadError } from "../src/payload/reader";
 import {
     FakeDatabase,
     FakePort,

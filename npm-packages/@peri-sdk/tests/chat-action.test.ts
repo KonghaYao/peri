@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { InteractionAnswer } from "../src/agent/interaction-responder";
+import type { InteractionAnswer } from "../src/contracts/interaction";
 import {
     ChatUserAction,
     parseChatUserAction,

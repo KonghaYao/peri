@@ -1,10 +1,10 @@
-import type { ChatBindingTarget } from "../src/chat/types";
 import type {
+    ChatBindingTarget,
     ChatFact,
     ChatFactEnvelope,
     ChatFactObserver,
     ChatFactSource,
-} from "../src/chat/facts";
+} from "../src/contracts/chat";
 import type { ChatYjsChannel } from "../src/view/channel";
 
 /** `session/update` 通知帧；`sessionId` 必须与当前绑定一致。 */

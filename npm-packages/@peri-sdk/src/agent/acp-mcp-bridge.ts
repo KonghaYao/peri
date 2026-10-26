@@ -1,4 +1,4 @@
-import type { AcpMcpServer, AcpMcpServerInstance, AcpMcpTransport } from "./types";
+import type { AcpMcpServer, AcpMcpServerInstance, AcpMcpTransport } from "../contracts/acp";
 
 /** ACP `mcp/message` 的响应体：`{result}` 或包装后的 JSON-RPC 错误。 */
 type AcpMcpResponse =

@@ -1,4 +1,5 @@
-import type { ChatBindingTarget, SendReceipt } from "./types";
+import type { ChatBindingTarget } from "../contracts/chat";
+import type { SendReceipt } from "./types";
 
 interface ChatSendReceiptOptions {
     readonly requestId: string;

@@ -69,13 +69,15 @@ SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行
 
 ## 7. 发布入口
 
-| 入口 | 内容 |
-| --- | --- |
-| 主入口 | `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatViewRegistry`、公开类型/错误（含 `ChatManagerContract`）、Store 读取工具 |
-| `/portable` | 同一 Chat 公共面 + 嵌入方驱动的执行准入核心；仍依赖 `node:crypto`，不是纯浏览器入口 |
-| `/view` | 浏览器安全展示出口：副本、`readSessionView`、载荷读取、同步协议；不引入 Node 运行时依赖，也不导出 `ChatViewRegistry` |
-| `/wasm` | 平台无关的 Emscripten 运行后端、loader、transport、scheduler 端口 |
-| `/wasm-node` | `/wasm` + Node 网络/DNS 端口 |
+| 入口 | 源码入口 | 内容 |
+| --- | --- | --- |
+| 主入口 | `src/entries/index.ts` | `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatViewRegistry`、公开类型/错误（含 `ChatManagerContract`）、Store 读取工具 |
+| `/portable` | `src/entries/portable.ts` | 同一 Chat 公共面 + 嵌入方驱动的执行准入核心；仍依赖 `node:crypto`，不是纯浏览器入口 |
+| `/view` | `src/entries/view.ts` | 浏览器安全展示出口：副本、`readSessionView`、载荷读取、同步协议；不引入 Node 运行时依赖，也不导出 `ChatViewRegistry` |
+| `/wasm` | `src/entries/wasm.ts` | 平台无关的 Emscripten 运行后端、loader、transport、scheduler 端口 |
+| `/wasm-node` | `src/entries/wasm-node.ts` | `/wasm` + Node 网络/DNS 端口 |
+
+主入口与 `/portable` 共用的 Chat 门面在 `src/entries/chat.ts`。
 
 ## 8. 非目标
 

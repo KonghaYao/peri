@@ -1,4 +1,4 @@
-import type { ElicitationDecision } from "./types";
+import type { ElicitationDecision } from "./acp";
 
 export type InteractionAnswer =
     | { kind: "permission"; decision: "allow_once" | "reject_once" }

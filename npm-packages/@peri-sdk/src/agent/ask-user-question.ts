@@ -6,7 +6,7 @@
  * 单选/无选项为 string（后者无 oneOf/anyOf），多选为 array；答案按同一属性键回传。
  */
 
-import type { InteractionQuestion } from "../chat/facts";
+import type { InteractionQuestion } from "../contracts/chat";
 
 const QUESTION_KEY = /^ask_user_question_(\d+)$/;
 export const MAX_ASK_USER_QUESTIONS = 4;

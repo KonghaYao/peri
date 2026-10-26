@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { ChatFact } from "../src/chat/facts";
+import type { ChatFact } from "../src/contracts/chat";
 import { InteractionAnswerError } from "../src/agent/interaction-broker";
 import {
   PeriHostCleanupError,

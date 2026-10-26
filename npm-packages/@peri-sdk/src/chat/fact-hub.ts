@@ -1,7 +1,6 @@
 import { ChatClosedError, ChatViewReplayOverflowError } from "./errors";
-import type { ChatFact, ChatFactObserver } from "./facts";
-import { FactLog } from "./service-support";
-import type { ChatBindingTarget } from "./types";
+import type { ChatBindingTarget, ChatFact, ChatFactObserver } from "../contracts/chat";
+import { FactLog } from "./fact-log";
 
 /**
  * ChatService 的事实 fan-out 与代次日志。

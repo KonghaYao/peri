@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import * as Y from "yjs";
 import { PeriInstance } from "../src/agent/peri-instance";
 import { ChatFactHub } from "../src/chat/fact-hub";
-import type { ChatFact } from "../src/chat/facts";
+import type { ChatFact } from "../src/contracts/chat";
 import { ChatDocument } from "../src/view/chat-document";
 import { readSessionView } from "../src/view/session-view";
 import type { JsonRpcNotification, Transport } from "../src/transport/types";
