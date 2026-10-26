@@ -28,19 +28,21 @@ const manager = new ChatManager({
         listSessions: (path) => storage.getSessions(path ?? workspacePath),
         getSession: (id) => storage.getSession(id),
     },
-    sessionOwnership: new AtomicSessionOwnership(managedAgentKv),
-    // 执行装配由调用方选择：WASM 部署用 runtime.kind="wasm"；
-    // 其他部署用 runtime.kind="transport" 注入自有 transport。SDK 不启动 Peri 或 Workspace 进程。
-    runtime: {
-        kind: "wasm",
-        moduleUrl: new URL("./peri-wasm.js", import.meta.url),
-    },
-    defaults: {
-        path: workspacePath,
-        // ACP 无标准 instructions 字段；Peri 用 session/new._meta["peri.instructions"] 传递并冻结。
-        instructions: "你是一个有趣的 AI 助手，能回答用户的问题",
-        // 这里是额外 MCP；HTTP Workspace 由部署方另行提供。
-        mcpServers: {},
+    sessionOwnershipKv: managedAgentKv,
+    chatConfig: {
+        // 执行装配由调用方选择：WASM 部署用 runtime.kind="wasm"；
+        // 其他部署用 runtime.kind="transport" 注入自有 transport。SDK 不启动 Peri 或 Workspace 进程。
+        runtime: {
+            kind: "wasm",
+            moduleUrl: new URL("./peri-wasm.js", import.meta.url),
+        },
+        defaults: {
+            path: workspacePath,
+            // ACP 无标准 instructions 字段；Peri 用 session/new._meta["peri.instructions"] 传递并冻结。
+            instructions: "你是一个有趣的 AI 助手，能回答用户的问题",
+            // 这里是额外 MCP；HTTP Workspace 由部署方另行提供。
+            mcpServers: {},
+        },
     },
 });
 

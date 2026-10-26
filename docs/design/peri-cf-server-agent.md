@@ -32,7 +32,7 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
 
 ## 组合根与装配
 
-- **平台装配**：`server/agent/compose.ts` 读取 `ServerConfig`，构造 Store 适配、`AtomicSessionOwnership`、
+- **平台装配**：`server/agent/compose.ts` 读取 `ServerConfig`，构造 Store 适配、ownership 原子 KV（`MemoryKV`）、
   WASM `ChatRuntime`、默认 path/instructions/MCP 与关闭预算；server 内只有这里构造具体 `ChatManager`。
 - **编排层**：`server/agent/manager.ts` 的 `AppChatManager` 只持有注入的 `ChatManagerContract` 与
   `ChatViewRegistry`。四个查询/登记方法直接转发；`closeChat` 先关 SDK 句柄再释放 View；

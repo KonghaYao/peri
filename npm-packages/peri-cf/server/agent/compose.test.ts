@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  AtomicSessionOwnership,
   MemoryKV,
   PayloadReadError,
   type ChatDatabase,
@@ -146,11 +145,13 @@ function assembled(options: {
   const logs = options.logs ?? [];
   const manager = createSdkChatManager(config, {
     database,
-    sessionOwnership: new AtomicSessionOwnership(new MemoryKV()),
-    runtime: options.useDefaultRuntime
-      ? undefined
-      : options.runtime ?? transportRuntime,
-    lifecycle: options.lifecycle,
+    sessionOwnershipKv: new MemoryKV(),
+    chatConfig: {
+      runtime: options.useDefaultRuntime
+        ? undefined
+        : options.runtime ?? transportRuntime,
+      lifecycle: options.lifecycle,
+    },
     instanceFactory: factory.create,
     logError: options.logError ?? ((label, error, context) => logs.push({ label, error, context })),
   });

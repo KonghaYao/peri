@@ -1,7 +1,7 @@
 import { cloneJsonValue } from "./json-value";
 import {
+    AtomicSessionOwnership,
     LocalSessionIndex,
-    requireSessionOwnership,
 } from "./ownership";
 import {
     WasmRuntimePool,
@@ -79,26 +79,31 @@ export class ChatManager implements ChatManagerContract {
                 "ChatManager requires a ChatDatabase with listSessions/getSession",
             );
         }
-        requireSessionOwnership(options.sessionOwnership);
+        // 调用方只注入原子 KV；每个 Manager 自建 ownership，owner 身份不共享。
+        const sessionOwnership = new AtomicSessionOwnership(
+            options.sessionOwnershipKv,
+        );
         if (
-            !options.runtime ||
-            (options.runtime.kind !== "wasm" &&
-                options.runtime.kind !== "transport")
+            !options.chatConfig ||
+            typeof options.chatConfig !== "object" ||
+            !options.chatConfig.runtime ||
+            (options.chatConfig.runtime.kind !== "wasm" &&
+                options.chatConfig.runtime.kind !== "transport")
         ) {
             throw new TypeError(
-                'ChatManager runtime must be { kind: "wasm" } or { kind: "transport" }',
+                'ChatManager requires chatConfig.runtime of { kind: "wasm" } or { kind: "transport" }',
             );
         }
 
         this.agentConfig = cloneJsonValue(options.agentConfig, "agentConfig");
         this.agentConfigJson = JSON.stringify(this.agentConfig);
         this.database = options.database;
-        this.sessionOwnership = options.sessionOwnership;
+        this.sessionOwnership = sessionOwnership;
         // 运行后端配置在构造时快照；端口/模块工厂等实例仍由外部借用。
-        this.runtime = { ...options.runtime };
-        this.defaults = { ...options.defaults };
+        this.runtime = { ...options.chatConfig.runtime };
+        this.defaults = { ...options.chatConfig.defaults };
         this.now = options.now;
-        this.lifecycle = resolveChatLifecycle(options.lifecycle);
+        this.lifecycle = resolveChatLifecycle(options.chatConfig.lifecycle);
         // 默认工厂只绑定 Manager 的生命周期预算；测试仍可注入 fake port。
         const lifecycle = this.lifecycle;
         this.instanceFactory = options.instanceFactory

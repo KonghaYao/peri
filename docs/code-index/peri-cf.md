@@ -33,7 +33,7 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 - **静态资源**：非 `/api/*` 路径由 Bun 入口提供 `dist/client` 与 `index.html` 回退；Vite 开发服务器把
   `/api` 代理到 Bun 服务。
 - **没有访问控制**：服务不提供认证、限流或多租户隔离；部署入口鉴权是必要条件。
-- **单进程 ownership**：CF 使用 `MemoryKV`/`AtomicSessionOwnership`；多实例部署必须注入共享原子 KV，不能宣称
+- **单进程 ownership**：CF 传入 `MemoryKV` 作为 ownership KV，由 `ChatManager` 内部构造协调器；多实例部署必须注入共享原子 KV，不能宣称
   跨实例接管。
 
 ## 路由

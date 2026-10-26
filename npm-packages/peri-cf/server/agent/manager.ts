@@ -11,7 +11,7 @@ import { createSdkChatManager, type SdkChatManagerOptions } from "./compose";
 /**
  * 服务端编排层：注入的 `ChatManagerContract` + 宿主的 `ChatViewRegistry`。
  *
- * 平台依赖（WASM 运行后端、Store、SessionOwnership、默认配置）由 `./compose` 装配成
+ * 平台依赖（WASM 运行后端、Store、ownership KV、默认配置）由 `./compose` 装配成
  * 具体实现后注入；这里只负责句柄目录的转发与 View 生命周期编排。
  */
 

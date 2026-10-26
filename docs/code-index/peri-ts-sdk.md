@@ -29,7 +29,7 @@
 | 类型/错误 | `src/chat/types.ts`、`src/chat/errors.ts` | `ChatRuntime`、`ChatDefaults`、`ChatLifecycleOptions`、`PeriInstancePort`、错误 `disposition` 与 `ChatCloseIncompleteError` |
 | 事实 | `src/chat/facts.ts`、`src/chat/fact-hub.ts` | 按绑定代次编号的事实封套；晚挂 View 重放 |
 | 回执 | `src/chat/send-receipt.ts` | `inputId` 稳定；`accepted` 是入队，投递等待是另一件事 |
-| SessionOwnership | `src/chat/ownership.ts`、`src/kv/{types,memory-kv,session-ownership-key,session-ownership-conflict-error}.ts` | `AtomicSessionOwnership` 只接受原子 `acquireIfAbsent`/`releaseIfOwner`；`MemoryKV` 仅单进程 |
+| SessionOwnership | `src/chat/ownership.ts`、`src/kv/{types,memory-kv,session-ownership-key,session-ownership-conflict-error}.ts` | `ChatManager` 接收 `AtomicSessionOwnershipKv` 并在内部构造 `AtomicSessionOwnership`；后者只接受原子 `acquireIfAbsent`/`releaseIfOwner`；`MemoryKV` 仅单进程 |
 | 工厂 | `src/chat/instance-factory.ts`、`src/chat/service-support.ts` | 把 Manager 上下文转换为一次 `PeriInstance`；生产默认装配，测试可注入 |
 | 生命周期预算 | `src/util/deadline.ts`、`src/chat/service-lifecycle.ts` | 关闭/启动/shutdown 的有界等待；超时是 Incomplete，不是停止证明 |
 

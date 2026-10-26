@@ -1,13 +1,13 @@
 import {
-  AtomicSessionOwnership,
   BareHarnessConfig,
   ChatManager,
   MemoryKV,
+  type AtomicSessionOwnershipKv,
+  type ChatConfig,
   type ChatDatabase,
   type ChatDefaults,
   type ChatRuntime,
   type ChatLifecycleOptions,
-  type SessionOwnership,
 } from "@peri-code/sdk";
 import {
   createSchedulerPort,
@@ -45,9 +45,8 @@ export type LogError = (
 /** 平台 seam：省略时使用 CF 的生产默认值。 */
 export interface SdkChatManagerOptions {
   readonly database?: ChatDatabase;
-  readonly sessionOwnership?: SessionOwnership;
-  readonly runtime?: ChatRuntime;
-  readonly lifecycle?: ChatLifecycleOptions;
+  readonly sessionOwnershipKv?: AtomicSessionOwnershipKv;
+  readonly chatConfig?: Partial<Pick<ChatConfig, "runtime" | "lifecycle">>;
   readonly now?: () => string;
   readonly instanceFactory?: ChatInstanceFactory;
   readonly logError?: LogError;
@@ -155,11 +154,15 @@ export function createSdkChatManager(
   return new ChatManager({
     agentConfig: harnessConfig(config),
     database: options.database ?? createChatDatabase(config),
-    sessionOwnership: options.sessionOwnership
-      ?? new AtomicSessionOwnership(new MemoryKV()),
-    runtime: options.runtime ?? defaultRuntime(config, logError),
-    defaults: defaultChatDefaults(config),
-    lifecycle: { ...DEFAULT_LIFECYCLE, ...options.lifecycle },
+    sessionOwnershipKv: options.sessionOwnershipKv ?? new MemoryKV(),
+    chatConfig: {
+      runtime: options.chatConfig?.runtime ?? defaultRuntime(config, logError),
+      defaults: defaultChatDefaults(config),
+      lifecycle: {
+        ...DEFAULT_LIFECYCLE,
+        ...options.chatConfig?.lifecycle,
+      },
+    },
     now: options.now,
     instanceFactory: options.instanceFactory,
   });

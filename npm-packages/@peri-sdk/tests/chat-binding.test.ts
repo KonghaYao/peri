@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { ChatUserAction } from "../src/chat/action";
-import { AtomicSessionOwnership } from "../src/chat/ownership";
 import {
     ChatBusyError,
     ChatNotReadyError,
@@ -8,42 +7,43 @@ import {
 import { ChatManager } from "../src/chat/manager";
 import type { ChatManagerInternalOptions } from "../src/chat/manager";
 import type { ChatLifecycleOptions, SendReceipt } from "../src/chat/types";
-import { MemoryKV } from "../src/kv/memory-kv";
 import { DeadlineError } from "../src/util/deadline";
 import {
     FakeDatabase,
     FakePort,
     directoryEntry,
 } from "./chat-fixtures";
+import { OwnershipProbe } from "./ownership-probe";
 
 interface Setup {
     readonly manager: ChatManager;
-    readonly ownership: AtomicSessionOwnership;
+    readonly ownership: OwnershipProbe;
     readonly database: FakeDatabase;
     readonly ports: FakePort[];
 }
 
 function setup(
     configure?: (port: FakePort) => void,
-    ownership?: AtomicSessionOwnership,
+    ownership?: OwnershipProbe,
     lifecycle?: ChatLifecycleOptions,
 ): Setup {
-    const kv = new MemoryKV();
     const database = new FakeDatabase();
     const portList: FakePort[] = [];
-    const managerOwnership = ownership ?? new AtomicSessionOwnership(kv);
+    const managerOwnership = ownership ?? new OwnershipProbe();
     const options: ChatManagerInternalOptions = {
         agentConfig: {},
         database,
-        sessionOwnership: managerOwnership,
-        runtime: {
-            kind: "transport",
-            factory: () => {
-                throw new Error("ACP transport must not start");
+        sessionOwnershipKv: managerOwnership,
+        chatConfig: {
+            runtime: {
+                kind: "transport",
+                factory: () => {
+                    throw new Error("ACP transport must not start");
+                },
             },
+            defaults: { path: "/workspace" },
+            lifecycle,
         },
-        defaults: { path: "/workspace" },
-        ...(lifecycle ? { lifecycle } : {}),
         instanceFactory: () => {
             const port = new FakePort();
             configure?.(port);
@@ -328,14 +328,8 @@ describe("binding concurrency and revision", () => {
     });
 
     test("ownership release failure is preserved in the binding error cause", async () => {
-        const kv = new MemoryKV();
-        const ownership = new AtomicSessionOwnership(kv);
-        const originalRelease = ownership.release.bind(ownership);
-        ownership.release = async (sessionId) => {
-            if (sessionId === "session-1")
-                throw new Error("ownership release failed");
-            return originalRelease(sessionId);
-        };
+        const ownership = new OwnershipProbe();
+        ownership.failRelease("session-1");
         const setupValue = setup(
             (port) => {
                 port.bindExistingError = new Error("load failed");

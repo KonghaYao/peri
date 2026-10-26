@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { ChatUserAction } from "../src/chat/action";
-import { AtomicSessionOwnership } from "../src/chat/ownership";
 import {
     ChatActionValidationError,
     ChatClosedError,
@@ -10,35 +9,37 @@ import { ChatManager } from "../src/chat/manager";
 import type { ChatManagerInternalOptions } from "../src/chat/manager";
 import type { SendReceipt } from "../src/chat/types";
 import { PayloadReadError } from "../src/view/payload-reader";
-import { MemoryKV } from "../src/kv/memory-kv";
 import {
     FakeDatabase,
     FakePort,
     directoryEntry,
 } from "./chat-fixtures";
+import { OwnershipProbe } from "./ownership-probe";
 
 function setup(
     configure?: (port: FakePort, index: number) => void,
 ): {
     manager: ChatManager;
-    ownership: AtomicSessionOwnership;
+    ownership: OwnershipProbe;
     database: FakeDatabase;
     ports: FakePort[];
 } {
-    const kv = new MemoryKV();
+    const ownership = new OwnershipProbe();
     const database = new FakeDatabase();
     const ports: FakePort[] = [];
     const options: ChatManagerInternalOptions = {
         agentConfig: {},
         database,
-        sessionOwnership: new AtomicSessionOwnership(kv),
-        runtime: {
-            kind: "transport",
-            factory: () => {
-                throw new Error("ACP transport must not start");
+        sessionOwnershipKv: ownership,
+        chatConfig: {
+            runtime: {
+                kind: "transport",
+                factory: () => {
+                    throw new Error("ACP transport must not start");
+                },
             },
+            defaults: { path: "/workspace" },
         },
-        defaults: { path: "/workspace" },
         instanceFactory: () => {
             const port = new FakePort();
             configure?.(port, ports.length);
@@ -47,7 +48,7 @@ function setup(
         },
     };
     const manager = new ChatManager(options);
-    return { manager, ownership: options.sessionOwnership as AtomicSessionOwnership, database, ports };
+    return { manager, ownership, database, ports };
 }
 
 async function readyChat(

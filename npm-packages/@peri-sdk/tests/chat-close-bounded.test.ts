@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { ChatUserAction } from "../src/chat/action";
-import { AtomicSessionOwnership } from "../src/chat/ownership";
 import {
     ChatClosedError,
     ChatCloseIncompleteError,
@@ -10,17 +9,17 @@ import { ChatManager } from "../src/chat/manager";
 import type { ChatManagerInternalOptions } from "../src/chat/manager";
 import type { ChatFactObserver } from "../src/chat/facts";
 import type { ChatRuntime, ChatLifecycleOptions } from "../src/chat/types";
-import { MemoryKV } from "../src/kv/memory-kv";
 import { DeadlineError } from "../src/util/deadline";
 import {
     FakeDatabase,
     FakePort,
     directoryEntry,
 } from "./chat-fixtures";
+import { OwnershipProbe } from "./ownership-probe";
 
 interface Setup {
     readonly manager: ChatManager;
-    readonly ownership: AtomicSessionOwnership;
+    readonly ownership: OwnershipProbe;
     readonly database: FakeDatabase;
     readonly ports: FakePort[];
 }
@@ -30,22 +29,23 @@ function setup(
     lifecycle?: ChatLifecycleOptions,
     runtime?: ChatRuntime,
 ): Setup {
-    const kv = new MemoryKV();
     const database = new FakeDatabase();
     const ports: FakePort[] = [];
-    const ownership = new AtomicSessionOwnership(kv);
+    const ownership = new OwnershipProbe();
     const options: ChatManagerInternalOptions = {
         agentConfig: {},
         database,
-        sessionOwnership: ownership,
-        runtime: runtime ?? {
-            kind: "transport",
-            factory: () => {
-                throw new Error("ACP transport must not start");
+        sessionOwnershipKv: ownership,
+        chatConfig: {
+            runtime: runtime ?? {
+                kind: "transport",
+                factory: () => {
+                    throw new Error("ACP transport must not start");
+                },
             },
+            defaults: { path: "/workspace" },
+            lifecycle,
         },
-        defaults: { path: "/workspace" },
-        lifecycle,
         instanceFactory: () => {
             const port = new FakePort();
             configure?.(port);

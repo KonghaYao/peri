@@ -8,7 +8,7 @@ Bun SDK for Peri's ACP Host over a host-injected transport. `ChatManager` 同步
 
 ```ts
 import {
-  AtomicSessionOwnership, ChatManager, ChatUserAction, ChatView, MemoryKV, TursoStorage,
+  ChatManager, ChatUserAction, ChatView, MemoryKV, TursoStorage,
   type ChatDatabase,
 } from "@peri-code/sdk";
 
@@ -25,12 +25,14 @@ const manager = new ChatManager({
     machineId: "00000000-0000-4000-8000-000000000001",
   },
   database,
-  // 每个 Manager 一个 ownership 实例；多个实例共享同一个原子 KV 驱动。
-  sessionOwnership: new AtomicSessionOwnership(new MemoryKV()),
-  runtime: { kind: "wasm", moduleUrl: new URL("./dist/wasm/peri-wasm.js", import.meta.url) },
-  defaults: {
-    path: "/workspace",
-    instructions: "Help with this workspace.",
+  // 调用方注入原子 KV；Manager 内部为每个实例构造 ownership。
+  sessionOwnershipKv: new MemoryKV(),
+  chatConfig: {
+    runtime: { kind: "wasm", moduleUrl: new URL("./dist/wasm/peri-wasm.js", import.meta.url) },
+    defaults: {
+      path: "/workspace",
+      instructions: "Help with this workspace.",
+    },
   },
 });
 
@@ -50,7 +52,7 @@ await manager.shutdown();
 
 `execute` 只接受 `ChatUserAction` 的八类动作：`create_new_session`、`change_session`、`send`、`force_send`、`take_back`、`load_earlier_history`、`cancel`、`answer`。传入普通 wire 对象时先经 `parseChatUserAction` 校验；Manager 不接收 `execute`。执行调度属于 Peri：SDK 只发布输入，不实现 dispatcher、工作查询或准入票据。
 
-`ChatManagerOptions.runtime` 有两种装配：
+`ChatManagerOptions.chatConfig.runtime` 有两种装配：
 
 - `{ kind: "wasm" }`：Manager 为每次激活启动独立 WASM 运行后端，并把 `agentConfig` 序列化为启动配置；可注入 `moduleUrl`、`moduleFactory`、`env`、`ports` 与生命周期回调。
 - `{ kind: "transport", factory }`：由调用方按 `path` 创建 transport；SDK 不启动 Peri 或 Workspace 进程。`factory` 的 `close()` 成功即视为停止证明，失败保留原因供重试。
@@ -77,7 +79,7 @@ function createHost(chats: ChatManagerContract) {
 
 `ChatService` 的绑定动作只在空闲时允许换绑；新会话使用句柄/默认 `path`，加载历史用 Store 中的持久 `cwd`，不回退句柄 path。`findChatBySession` 覆盖 binding/cleanup 中的候选；关闭未确认时保留 ownership 与索引供重试。
 
-`AtomicSessionOwnership` 包装共享原子 KV：Session ownership key 只含 Session ID，不含 path 或 Chat ID。`MemoryKV` 只适用于单进程；跨进程必须注入实现 `acquireIfAbsent(key, owner)` / `releaseIfOwner(key, owner)` 的原子适配器。普通 unjs `Storage` 没有 compare-and-set，会被拒绝。同一 Session 的并发绑定失败抛 `SessionBindingConflictError`，且不会启动 transport。适配器负责自己的崩溃恢复或租约策略；过期本身不是旧执行已停止的证明。
+`ChatManager` 接收原子 KV（`AtomicSessionOwnershipKv`）并在内部为每个实例构造 `SessionOwnership` 协调器：Session ownership key 只含 Session ID，不含 path 或 Chat ID。`MemoryKV` 只适用于单进程；跨进程必须传入实现 `acquireIfAbsent(key, owner)` / `releaseIfOwner(key, owner)` 的原子适配器。普通 unjs `Storage` 没有 compare-and-set，会被拒绝。同一 Session 的并发绑定失败抛 `SessionBindingConflictError`，且不会启动 transport。适配器负责自己的崩溃恢复或租约策略；过期本身不是旧执行已停止的证明。
 
 关闭是有预算的所有权事务：`ChatLifecycleOptions` 提供 `closeDrainTimeoutMs`、`startupSettleTimeoutMs`、`activationCloseTimeoutMs`、`shutdownChatTimeoutMs`。`session/close` 在预算内重放；超时返回 `ChatCloseIncompleteError`，保留 ownership、索引与资源，不产生 `closed` 事实。`manager.shutdown()` 先封闭新准入，再聚合清理；可重试。
 
@@ -107,17 +109,19 @@ await replica.dispose();
 
 ## MCP over ACP
 
-`defaults.mcpServers` 支持 `http`、`stdio` 与 `acp` 声明。`acp` 声明只序列化 `{type:"acp", name, serverId}`，Peri 的反向 `mcp/message` 由 SDK 桥接到官方 server 实例；`serverId` 缺省使用 Record key。
+`chatConfig.defaults.mcpServers` 支持 `http`、`stdio` 与 `acp` 声明。`acp` 声明只序列化 `{type:"acp", name, serverId}`，Peri 的反向 `mcp/message` 由 SDK 桥接到官方 server 实例；`serverId` 缺省使用 Record key。
 
 直接实例是调用方借用的单次使用实例：bridge 关闭后保留绑定，不能安全重连。跨 reload 或多个 Chat 使用时必须提供工厂：
 
 ```ts
-defaults: {
-  mcpServers: {
-    "my-tools": {
-      type: "acp",
-      // 每次激活解析新实例；由激活拥有并关闭。
-      server: async () => createMyMcpServer(),
+chatConfig: {
+  defaults: {
+    mcpServers: {
+      "my-tools": {
+        type: "acp",
+        // 每次激活解析新实例；由激活拥有并关闭。
+        server: async () => createMyMcpServer(),
+      },
     },
   },
 }

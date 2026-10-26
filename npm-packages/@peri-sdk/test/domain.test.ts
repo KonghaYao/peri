@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { ChatUserAction } from "../src/chat/action";
-import { AtomicSessionOwnership } from "../src/chat/ownership";
 import { SessionBindingConflictError } from "../src/chat/errors";
 import { ChatManager } from "../src/chat/manager";
 import type { ChatManagerInternalOptions } from "../src/chat/manager";
@@ -10,34 +9,36 @@ import {
     FakePort,
     directoryEntry,
 } from "../tests/chat-fixtures";
+import { OwnershipProbe } from "../tests/ownership-probe";
 
 interface Harness {
     manager: ChatManager;
-    ownership: AtomicSessionOwnership;
+    ownership: OwnershipProbe;
     database: FakeDatabase;
     ports: FakePort[];
 }
 
 function harness(options: {
-    kv?: MemoryKV;
+    ownership?: OwnershipProbe;
     path?: string;
     database?: FakeDatabase;
 } = {}): Harness {
-    const kv = options.kv ?? new MemoryKV();
-    const ownership = new AtomicSessionOwnership(kv);
+    const ownership = options.ownership ?? new OwnershipProbe();
     const database = options.database ?? new FakeDatabase();
     const ports: FakePort[] = [];
     const managerOptions: ChatManagerInternalOptions = {
         agentConfig: { model: "test" },
         database,
-        sessionOwnership: ownership,
-        runtime: {
-            kind: "transport",
-            factory: () => {
-                throw new Error("ACP transport must not start");
+        sessionOwnershipKv: ownership,
+        chatConfig: {
+            runtime: {
+                kind: "transport",
+                factory: () => {
+                    throw new Error("ACP transport must not start");
+                },
             },
+            defaults: options.path ? { path: options.path } : {},
         },
-        defaults: options.path ? { path: options.path } : {},
         instanceFactory: () => {
             const port = new FakePort();
             ports.push(port);
@@ -156,11 +157,11 @@ describe("ChatManager lifecycle", () => {
 
 describe("Session ownership", () => {
     test("two managers racing for the same Session: exactly one loads it", async () => {
-        const kv = new MemoryKV();
+        const ownership = new OwnershipProbe();
         const database = new FakeDatabase();
         database.seed(directoryEntry("session-1"));
-        const first = harness({ kv, database });
-        const second = harness({ kv, database });
+        const first = harness({ ownership, database });
+        const second = harness({ ownership, database });
         const firstChat = first.manager.createChat();
         const secondChat = second.manager.createChat();
 
@@ -183,11 +184,11 @@ describe("Session ownership", () => {
     });
 
     test("different handle paths cannot bypass SessionOwnership", async () => {
-        const kv = new MemoryKV();
+        const ownership = new OwnershipProbe();
         const database = new FakeDatabase();
         database.seed(directoryEntry("session-1", "/persisted"));
-        const first = harness({ kv, database, path: "/first" });
-        const second = harness({ kv, database, path: "/second" });
+        const first = harness({ ownership, database, path: "/first" });
+        const second = harness({ ownership, database, path: "/second" });
         const firstChat = first.manager.createChat({ path: "/first" });
         const secondChat = second.manager.createChat({ path: "/second" });
 
@@ -202,11 +203,12 @@ describe("Session ownership", () => {
         expect(
             results.find((result) => result.status === "rejected")?.reason,
         ).toBeInstanceOf(SessionBindingConflictError);
-        expect(first.ownership.has("session-1")).toBe(
-            firstChat.sessionId === "session-1",
-        );
-        expect(second.ownership.has("session-1")).toBe(
-            secondChat.sessionId === "session-1",
-        );
+        expect(first.ownership.has("session-1")).toBe(true);
+        expect(first.ownership.size).toBe(1);
+        expect(
+            [firstChat.sessionId, secondChat.sessionId].filter(
+                (sessionId) => sessionId === "session-1",
+            ),
+        ).toHaveLength(1);
     });
 });

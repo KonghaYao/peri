@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { ChatUserAction } from "../src/chat/action";
-import { AtomicSessionOwnership } from "../src/chat/ownership";
 import { ChatManager, type ChatManagerInternalOptions } from "../src/chat/manager";
 import { MemoryKV } from "../src/kv/memory-kv";
 import { ChatView } from "../src/view/chat-view";
@@ -37,14 +36,16 @@ function chatServiceHarness(): {
     const options: ChatManagerInternalOptions = {
         agentConfig: {},
         database,
-        sessionOwnership: new AtomicSessionOwnership(new MemoryKV()),
-        runtime: {
-            kind: "transport",
-            factory: () => {
-                throw new Error("ACP transport must not start");
+        sessionOwnershipKv: new MemoryKV(),
+        chatConfig: {
+            runtime: {
+                kind: "transport",
+                factory: () => {
+                    throw new Error("ACP transport must not start");
+                },
             },
+            defaults: { path: "/workspace" },
         },
-        defaults: { path: "/workspace" },
         instanceFactory: () => {
             const port = new FakePort();
             port.bindNewSessionId = ports.length === 0 ? "session-a" : "session-b";

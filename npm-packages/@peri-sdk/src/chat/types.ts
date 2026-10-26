@@ -12,6 +12,7 @@ import type {
     AnswerAction, CancelAction, ForceSendAction, HistoryAction, SendAction, SessionAction, TakeBackAction,
 } from "./action";
 import type { ChatFact, ChatFactObserver } from "./facts";
+import type { AtomicSessionOwnershipKv } from "../kv/types";
 
 /**
  * Chat 控制面与 View 的冻结契约（Phase 0）。
@@ -69,6 +70,13 @@ export interface ChatDatabase {
     getSession(id: string): Promise<ChatSessionDirectoryEntry | null>;
 }
 
+/**
+ * Manager 内部的 Session 执行权协调器。
+ *
+ * 调用方只注入底层原子 KV（`ChatManagerOptions.sessionOwnershipKv`），
+ * 由 `ChatManager` 为每个实例构造独立的 ownership，避免多个 Manager
+ * 共享同一个 owner 身份。此接口不对外导出。
+ */
 export interface SessionOwnership {
     acquire(sessionId: string): Promise<void>;
     release(sessionId: string): Promise<void>;
@@ -119,14 +127,21 @@ export interface ChatLifecycleOptions {
     shutdownChatTimeoutMs?: number;
 }
 
+/** Chat 运行配置：运行后端、默认值与生命周期预算。 */
+export interface ChatConfig {
+    runtime: ChatRuntime;
+    defaults?: ChatDefaults;
+    lifecycle?: ChatLifecycleOptions;
+}
+
 export interface ChatManagerOptions {
     /** 纯 JSON 配置；构造时序列化快照，拒绝函数/循环/不可序列化值。 */
     agentConfig: unknown;
     database: ChatDatabase;
-    sessionOwnership: SessionOwnership;
-    runtime: ChatRuntime;
-    defaults?: ChatDefaults;
-    lifecycle?: ChatLifecycleOptions;
+    /** 跨 Manager/进程裁决 Session 执行权的原子 KV；Manager 内部构造 ownership。 */
+    sessionOwnershipKv: AtomicSessionOwnershipKv;
+    /** Chat 运行配置；runtime 必填。 */
+    chatConfig: ChatConfig;
     now?: () => string;
 }
 

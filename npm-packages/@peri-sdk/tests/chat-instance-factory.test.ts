@@ -5,7 +5,6 @@ import {
     type PeriInstanceOptions,
 } from "../src/agent/peri-instance";
 import { ChatUserAction } from "../src/chat/action";
-import { AtomicSessionOwnership } from "../src/chat/ownership";
 import { createChatInstance } from "../src/chat/instance-factory";
 import { ChatManager } from "../src/chat/manager";
 import type { ChatInstanceContext } from "../src/chat/service-support";
@@ -199,15 +198,17 @@ describe("default factory wiring", () => {
         const manager = new ChatManager({
             agentConfig: {},
             database: new FakeDatabase(),
-            sessionOwnership: new AtomicSessionOwnership(new MemoryKV()),
-            runtime: {
-                kind: "transport",
-                factory: (path) => {
-                    paths.push(path);
-                    return transport;
+            sessionOwnershipKv: new MemoryKV(),
+            chatConfig: {
+                runtime: {
+                    kind: "transport",
+                    factory: (path) => {
+                        paths.push(path);
+                        return transport;
+                    },
                 },
+                defaults: { path: "/workspace" },
             },
-            defaults: { path: "/workspace" },
         });
         const chat = manager.createChat();
 
@@ -227,9 +228,11 @@ describe("default factory wiring", () => {
         const manager = new ChatManager({
             agentConfig: {},
             database: new FakeDatabase(),
-            sessionOwnership: new AtomicSessionOwnership(new MemoryKV()),
-            runtime: { kind: "transport", factory: () => transport },
-            defaults: { path: "/workspace" },
+            sessionOwnershipKv: new MemoryKV(),
+            chatConfig: {
+                runtime: { kind: "transport", factory: () => transport },
+                defaults: { path: "/workspace" },
+            },
         });
         const chat = manager.createChat();
         const notices: string[] = [];

@@ -5,7 +5,6 @@ import { resolve } from "node:path";
 import { createServer, connect } from "node:net";
 import { once } from "node:events";
 import {
-  AtomicSessionOwnership,
   ChatManager,
   ChatUserAction,
   MemoryKV,
@@ -154,10 +153,12 @@ async function fixture() {
   const managerFor = (kv: MemoryKV): ChatManager => new ChatManager({
     agentConfig,
     database: databaseOver(storage),
-    sessionOwnership: new AtomicSessionOwnership(kv),
-    runtime: wasmRuntime,
-    defaults: { path: workspace },
-    lifecycle: { activationCloseTimeoutMs: 20_000, closeDrainTimeoutMs: 20_000 },
+    sessionOwnershipKv: kv,
+    chatConfig: {
+      runtime: wasmRuntime,
+      defaults: { path: workspace },
+      lifecycle: { activationCloseTimeoutMs: 20_000, closeDrainTimeoutMs: 20_000 },
+    },
   });
   const dispose = async (primaryError?: unknown, cleanupErrors: unknown[] = []) => {
     model.stop(true);
@@ -247,15 +248,17 @@ test("a second manager cannot own the same real Session and never starts its tra
     const transportManager = new ChatManager({
       agentConfig: { cwd: f.workspace, settings: {}, storage: { url: "http://127.0.0.1:1", authToken: "x" }, machineId: "m" },
       database: databaseOver(f.storage),
-      sessionOwnership: new AtomicSessionOwnership(kv),
-      runtime: {
-        kind: "transport",
-        factory: () => {
-          secondTransportStarted = true;
-          throw new Error("transport must not start before ownership acquisition succeeds");
+      sessionOwnershipKv: kv,
+      chatConfig: {
+        runtime: {
+          kind: "transport",
+          factory: () => {
+            secondTransportStarted = true;
+            throw new Error("transport must not start before ownership acquisition succeeds");
+          },
         },
+        defaults: { path: f.workspace },
       },
-      defaults: { path: f.workspace },
     });
     const second = transportManager.createChat({ path: f.workspace });
     await expect(second.execute(ChatUserAction.changeSessionTo(session.sessionId)))

@@ -83,22 +83,6 @@ export class AtomicSessionOwnership implements SessionOwnership {
   }
 }
 
-export function requireSessionOwnership(
-  value: unknown,
-): asserts value is SessionOwnership {
-  if (
-    !value ||
-    typeof value !== "object" ||
-    typeof (value as Partial<SessionOwnership>).acquire !== "function" ||
-    typeof (value as Partial<SessionOwnership>).release !== "function" ||
-    typeof (value as Partial<SessionOwnership>).releaseAll !== "function"
-  ) {
-    throw new TypeError(
-      "ChatManager requires sessionOwnership with acquire/release/releaseAll",
-    );
-  }
-}
-
 /**
  * Manager 本地 Session → 句柄索引。
  *

@@ -36,12 +36,12 @@ SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行
 
 - `createChat` 只同步登记句柄，不启动 ACP、不取得 SessionOwnership、不读取历史。
 - 首次绑定由 `create_new_session` 或 `change_session` 触发；新会话使用句柄/默认 path，加载历史使用 Store 中的持久 cwd。
-- 同一 Session 同时至多一个执行所有者。`SessionOwnership` 由外部注入原子 KV；`LocalSessionIndex` 覆盖 binding/cleanup 候选，冲突带 `ownerChatId`。
+- 同一 Session 同时至多一个执行所有者。调用方只注入原子 KV（`ChatManagerOptions.sessionOwnershipKv`），`ChatManager` 内部构造 `SessionOwnership`；`LocalSessionIndex` 覆盖 binding/cleanup 候选，冲突带 `ownerChatId`。
 - 空闲才允许换绑；运行中、存在未处理输入、待决交互或未确认清理时拒绝换绑，不 cancel、不 close 旧绑定。
 - 关闭是有界所有权事务：`session/close` 在预算内重放。超时返回 `ChatCloseIncompleteError` 并保留 ownership、索引与资源；不产生 `closed` 事实，可重试。
 - `shutdown` 先封闭新准入，再分别结算在途绑定/关闭，最后释放 WASM 运行后端；失败聚合上报，可重试。
 
-`SessionOwnership` 解决同一个 Session 被多个 Chat 句柄或服务实例同时绑定的问题：重复执行会造成消息双写与工具重复调用。绑定前向共享原子 KV 以 Session ID 为唯一 key 写入 owner（Manager 实例 UUID），`acquireIfAbsent` 成功者获得执行权，其他实例得到冲突并在 CF 映射为 409。ownership 只在清理确认后释放；关闭超时或失败时保留，避免其他实例接管半关闭会话。`MemoryKV` 仅单进程有效，跨进程必须注入支持 `acquireIfAbsent`/`releaseIfOwner` 的持久原子 KV。
+`ChatManager` 接收调用方注入的原子 KV，并在内部为每个实例构造 `SessionOwnership` 协调器。它解决同一个 Session 被多个 Chat 句柄或服务实例同时绑定的问题：重复执行会造成消息双写与工具重复调用。绑定前向共享原子 KV 以 Session ID 为唯一 key 写入 owner（Manager 实例 UUID），`acquireIfAbsent` 成功者获得执行权，其他实例得到冲突并在 CF 映射为 409。ownership 只在清理确认后释放；关闭超时或失败时保留，避免其他实例接管半关闭会话。`MemoryKV` 仅单进程有效，跨进程必须注入支持 `acquireIfAbsent`/`releaseIfOwner` 的持久原子 KV。
 
 ## 5. 事实与同步
 

@@ -2,7 +2,6 @@
 import { readFile, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
-    AtomicSessionOwnership,
     BareHarnessConfig,
     ChatManager,
     MemoryKV,
@@ -88,26 +87,28 @@ const manager = new ChatManager({
         machineId,
     },
     database: sessionDatabase(storage),
-    sessionOwnership: new AtomicSessionOwnership(new MemoryKV()),
-    // transport 入口按 path 装配独立运行后端；ChatManager 不持有 WASM 运行后端池。
-    runtime: {
-        kind: "transport",
-        factory: (path) => WasmAcpTransport.start({
-            moduleUrl: wasmModuleUrl,
-            env: wasmEnv,
-            configJson: JSON.stringify({
-                cwd: path,
-                settings: config,
-                storage: { url: databaseUrl, authToken: "local-dev" },
-                machineId,
+    sessionOwnershipKv: new MemoryKV(),
+    chatConfig: {
+        // transport 入口按 path 装配独立运行后端；ChatManager 不持有 WASM 运行后端池。
+        runtime: {
+            kind: "transport",
+            factory: (path) => WasmAcpTransport.start({
+                moduleUrl: wasmModuleUrl,
+                env: wasmEnv,
+                configJson: JSON.stringify({
+                    cwd: path,
+                    settings: config,
+                    storage: { url: databaseUrl, authToken: "local-dev" },
+                    machineId,
+                }),
             }),
-        }),
-    },
-    defaults: {
-        path: workspace,
-        instructions: "你是 Peri。请用清晰、简洁的中文帮助用户完成任务。",
-        mcpServers: {
-            demo: { type: "http", url: "https://demo-day.mcp.cloudflare.com/mcp" },
+        },
+        defaults: {
+            path: workspace,
+            instructions: "你是 Peri。请用清晰、简洁的中文帮助用户完成任务。",
+            mcpServers: {
+                demo: { type: "http", url: "https://demo-day.mcp.cloudflare.com/mcp" },
+            },
         },
     },
 });

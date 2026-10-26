@@ -7,7 +7,6 @@
 
 export { ChatManager } from "./manager";
 export { ChatService } from "./service";
-export { AtomicSessionOwnership } from "./ownership";
 export { ChatUserAction, parseChatUserAction } from "./action";
 export * from "./errors";
 
@@ -29,6 +28,7 @@ export type {
 export type {
     CancelRequestResult,
     ChatBindingTarget,
+    ChatConfig,
     ChatDatabase,
     ChatDefaults,
     ChatRuntime,
@@ -41,7 +41,6 @@ export type {
     HistoryPageOutcome,
     PeriInstancePort,
     SendReceipt,
-    SessionOwnership,
     SessionReadyResult,
 } from "./types";
 export type {

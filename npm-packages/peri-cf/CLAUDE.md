@@ -11,7 +11,7 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 ## 边界
 
 **服务端是唯一计算实例**：`server/index.ts` 启动 Bun 进程；`server/agent/compose.ts` 把平台依赖
-（WASM 运行后端、Store、SessionOwnership、默认配置）装配成 SDK `ChatManager`，是 server 内唯一构造具体实现的
+（WASM 运行后端、Store、ownership KV、默认配置）装配成 SDK `ChatManager`，是 server 内唯一构造具体实现的
 位置；`server/agent/manager.ts` 的 `AppChatManager` 只接收注入的 `ChatManagerContract` 与
 `ChatViewRegistry`，`getChatManager` 是唯一注入点。句柄、绑定、Action、事实与关闭语义都在 SDK。
 浏览器不启动 WASM 运行后端，刷新/关闭页面不结束执行；服务进程退出会结束在途执行，历史仍在 Store。

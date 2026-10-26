@@ -1,45 +1,43 @@
 import { describe, expect, test } from "bun:test";
 import { ChatUserAction } from "../src/chat/action";
-import { AtomicSessionOwnership } from "../src/chat/ownership";
 import {
     SessionBindingConflictError,
 } from "../src/chat/errors";
 import { ChatManager } from "../src/chat/manager";
 import type { ChatManagerInternalOptions } from "../src/chat/manager";
-import { MemoryKV } from "../src/kv/memory-kv";
 import {
     FakeDatabase,
     FakePort,
     directoryEntry,
 } from "./chat-fixtures";
+import { OwnershipProbe } from "./ownership-probe";
 
 function setup(options: {
-    kv?: MemoryKV;
-    ownership?: AtomicSessionOwnership;
+    ownership?: OwnershipProbe;
     database?: FakeDatabase;
     configure?: (port: FakePort) => void;
 } = {}): {
     manager: ChatManager;
-    kv: MemoryKV;
-    ownership: AtomicSessionOwnership;
+    ownership: OwnershipProbe;
     database: FakeDatabase;
     ports: FakePort[];
 } {
-    const kv = options.kv ?? new MemoryKV();
-    const ownership = options.ownership ?? new AtomicSessionOwnership(kv);
+    const ownership = options.ownership ?? new OwnershipProbe();
     const database = options.database ?? new FakeDatabase();
     const ports: FakePort[] = [];
     const managerOptions: ChatManagerInternalOptions = {
         agentConfig: {},
         database,
-        sessionOwnership: ownership,
-        runtime: {
-            kind: "transport",
-            factory: () => {
-                throw new Error("ACP transport must not start");
+        sessionOwnershipKv: ownership,
+        chatConfig: {
+            runtime: {
+                kind: "transport",
+                factory: () => {
+                    throw new Error("ACP transport must not start");
+                },
             },
+            defaults: { path: "/workspace" },
         },
-        defaults: { path: "/workspace" },
         instanceFactory: () => {
             const port = new FakePort();
             options.configure?.(port);
@@ -49,7 +47,6 @@ function setup(options: {
     };
     return {
         manager: new ChatManager(managerOptions),
-        kv,
         ownership,
         database,
         ports,
@@ -268,11 +265,11 @@ describe("ChatManager ownership coordination", () => {
     });
 
     test("two managers racing for one session: one wins, the other has no owner id", async () => {
-        const kv = new MemoryKV();
+        const ownership = new OwnershipProbe();
         const database = new FakeDatabase();
         database.seed(directoryEntry("session-1"));
-        const first = setup({ kv, database });
-        const second = setup({ kv, database });
+        const first = setup({ ownership, database });
+        const second = setup({ ownership, database });
         const firstChat = first.manager.createChat();
         const secondChat = second.manager.createChat();
 
