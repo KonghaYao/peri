@@ -17,9 +17,9 @@ Peri WASM Agent 的 Bun 长驻服务 + 浏览器 Chat。服务端持有 `ChatMan
   → peri-wasm Host（每次激活一个）→ 模型 / Turso Store / 远程 MCP
 ```
 
-- **服务端**：`server/index.ts` 是 Bun 入口；`server/agent/compose.ts` 是平台装配（唯一构造具体
-  `ChatManager` 的位置）；`server/agent/manager.ts` 编排注入的 `ChatManagerContract` 与
-  `ChatViewRegistry`，`getChatManager` 是唯一注入点；`server/api/index.ts` 只做 HTTP 边界校验与错误
+- **服务端**：`server/index.ts` 是 Bun 入口；`server/compose.ts` 是平台装配（唯一构造具体
+  `ChatManager` 的位置）；`server/host.ts` 的 `ChatHost` 持有 `ChatManagerContract` 与
+  `ChatViewRegistry`，编排句柄转发、View 生命周期与关闭；`server/api/index.ts` 只做 HTTP 边界校验与错误
   映射；`server/api/sync.ts` 把 Bun WebSocket 适配为 SDK `ChatYjsChannel`。
 - **前端**：`frontend/remote/controller.ts` 是页面控制器；`frontend/chat/runtime/useChat.ts` 装配控制器、
   目录查询与载荷读取；`frontend/chat/` 是展示外壳与时间线。
@@ -115,7 +115,7 @@ bun run build        # prepare:wasm + Vite；需要 WASM 工具链
 
 ## 部署限制
 
-- 单进程 ownership：默认 `createStorage()`（unstorage memory driver）作为 `kv`，由 `ChatManager` 内部构造协调器；多实例部署必须提供共享 storage 与路由层串行化/崩溃清理；不能宣称跨实例接管。
+- 单进程 ownership：生产固定 `createStorage()`（unstorage memory driver）作为 `kv`，由 `ChatManager` 内部构造协调器；多实例部署需要改造 `server/compose.ts` 接入共享 storage，并由路由层做串行化/崩溃清理；不能宣称跨实例接管。
 - 进程退出会结束在途执行；历史仍在 Store，可重新加载续聊，但不恢复旧执行。
 - 工具面只保留远程 Streamable HTTP MCP；WASM 部署没有进程内文件/终端 builtin。
 - hosted Workers/DO 路径已删除；Bun 服务是唯一后端入口。没有认证、限流或多租户隔离。

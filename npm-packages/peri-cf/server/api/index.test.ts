@@ -23,7 +23,7 @@ import {
   type ToolPayloadReadRef,
   type ToolPayloadResponse,
 } from "@peri-code/sdk";
-import type { publicServerInfo } from "../config";
+import type { ServerInfo } from "@core/shared";
 import { createApi, type ApiChatManager } from ".";
 
 const info = {
@@ -36,7 +36,7 @@ const info = {
   mcp: [],
   workspace: "/workspace",
   sessionCwd: "/workspace/",
-} satisfies ReturnType<typeof publicServerInfo>;
+} satisfies ServerInfo;
 
 const entry: ChatSessionDirectoryEntry = {
   sessionId: "session-1",
@@ -201,7 +201,7 @@ function apiWith(options: {
     },
     hasPendingClose: (id) => pendingCloses.has(id),
   };
-  const app = createApi({ manager, info, logError: () => {} });
+  const app = createApi({ manager, info });
   return {
     app,
     chats,

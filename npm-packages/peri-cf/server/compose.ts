@@ -3,51 +3,28 @@ import {
   BareHarnessConfig,
   ChatManager,
   TursoStorage,
-  type ChatConfig,
-  type ChatDatabase,
-  type KvStorage,
+  type ChatManagerOptions,
 } from "@peri-code/sdk";
+import { logError } from "@core/agent";
 import {
   SESSION_CWD,
   WORKSPACE_CWD,
   MODEL_TIERS,
   mcpServerDefaults,
   type ServerConfig,
-} from "../config";
-import { SYSTEM_INSTRUCTIONS } from "../system-instructions";
+} from "./config";
+import { SYSTEM_INSTRUCTIONS } from "./system-instructions";
 
 /**
  * 平台装配：把 CF 的配置、Store、WASM 运行后端与默认工具面装配成 SDK `ChatManager`。
  *
- * 这是 server 内唯一构造具体 `ChatManager` 的位置。配置在这里按字段读取，
- * 不再向编排层传递整棵 `ServerConfig` 或派生的窄配置对象。
+ * 这是 server 内唯一构造具体 `ChatManager` 的位置。`chatManagerOptions` 只做纯装配，
+ * 测试可直接断言；生产路径不提供替换 Store、KV、运行后端或日志的注入 seam。
  */
-
-type ChatManagerConstructorOptions = ConstructorParameters<typeof ChatManager>[0];
-
-/** SDK 内部工厂入口仅用于测试注入；生产由 ChatManager 默认装配。 */
-export type ChatInstanceFactory = NonNullable<
-  ChatManagerConstructorOptions["instanceFactory"]
->;
-
-export type LogError = (
-  label: string,
-  error: unknown,
-  context?: Record<string, unknown>,
-) => void;
-
-/** 平台 seam：省略时使用 CF 的生产默认值。 */
-export interface SdkChatManagerOptions {
-  readonly database?: ChatDatabase;
-  readonly kv?: KvStorage;
-  readonly chatConfig?: Partial<Pick<ChatConfig, "runtime" | "lifecycle">>;
-  readonly instanceFactory?: ChatInstanceFactory;
-  readonly logError?: LogError;
-}
 
 const DEFAULT_MODEL_ALIAS = "sonnet";
 const HARNESS_PROVIDER_ID = "model";
-const RUNTIME_DIAGNOSTIC_LABEL = "Peri server runtime diagnostic";
+const RUNTIME_DIAGNOSTIC_LABEL = "[peri-cf] Peri server runtime diagnostic";
 const RUNTIME_START_PHASE = "runtime-start";
 const WASM_ENV_PREFIX = "LANGFUSE_";
 
@@ -76,22 +53,14 @@ function wasmEnvironment(
   );
 }
 
-function consoleLogError(label: string, error: unknown, context?: Record<string, unknown>): void {
-  console.error(`[peri-cf] ${label}`, context ?? {}, error);
-}
-
-/** 装配 SDK 默认实现；测试与其它宿主通过 `SdkChatManagerOptions` 替换平台 seam。 */
-export function createSdkChatManager(
-  config: ServerConfig,
-  options: SdkChatManagerOptions = {},
-): ChatManager {
-  const logError = options.logError ?? consoleLogError;
+/** 纯装配：返回 SDK `ChatManager` 的完整构造选项，不启动运行后端。 */
+export function chatManagerOptions(config: ServerConfig): ChatManagerOptions {
   const defaultDatabase = new TursoStorage({
     ...config.storage,
     legacyCwd: WORKSPACE_CWD,
     currentCwd: SESSION_CWD,
   });
-  return new ChatManager({
+  return {
     // 与宿主 `configJson` 的形状一致；模型与存储直连上游，凭据只存在于服务端进程。
     agentConfig: {
       cwd: WORKSPACE_CWD,
@@ -115,11 +84,11 @@ export function createSdkChatManager(
         },
       },
     },
-    database: options.database ?? defaultDatabase,
+    database: defaultDatabase,
     // 默认进程内 memory storage；跨实例接管需要路由层与共享 storage，本轮不接入。
-    kv: options.kv ?? createStorage(),
+    kv: createStorage(),
     chatConfig: {
-      runtime: options.chatConfig?.runtime ?? {
+      runtime: {
         kind: "wasm",
         moduleUrl: config.wasmModuleUrl,
         env: wasmEnvironment(),
@@ -133,8 +102,11 @@ export function createSdkChatManager(
         instructions: SYSTEM_INSTRUCTIONS,
         mcpServers: mcpServerDefaults(config),
       },
-      lifecycle: options.chatConfig?.lifecycle,
     },
-    instanceFactory: options.instanceFactory,
-  });
+  };
+}
+
+/** 生产入口：用固定的 CF 平台装配构造 SDK 默认实现。 */
+export function createSdkChatManager(config: ServerConfig): ChatManager {
+  return new ChatManager(chatManagerOptions(config));
 }

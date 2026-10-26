@@ -14,7 +14,7 @@ const skippedDirectories = new Set(['node_modules', 'dist', '.cache', '.wrangler
 const moduleRoots = [
   'core/agent', 'core/agent/view',
   'core/shared',
-  'server', 'server/api', 'server/agent',
+  'server', 'server/api',
   'frontend/chat', 'frontend/chat/runtime', 'frontend/chat/components',
   'frontend/remote', 'frontend/settings',
   'frontend/hooks', 'frontend/lib',

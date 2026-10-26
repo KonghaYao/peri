@@ -15,12 +15,10 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
   → peri-wasm Host（每次激活一个）→ 模型 / Turso Store / 远程 MCP
 ```
 
-- **平台装配**：`server/agent/compose.ts` 是 server 内唯一构造具体 `ChatManager` 的位置，把 WASM 运行后端、
-  Store、SessionOwnership 与默认配置装配成 SDK 实现；`getChatManager` 是唯一的注入点。
-- **服务端编排**：`server/agent/manager.ts` 的 `AppChatManager` 只接收注入的 `ChatManagerContract` 与
-  `ChatViewRegistry`，转发 create/get/find/list，编排 close 与 shutdown；`createChat` 不启动 WASM，
-  不读历史。
-- **进程单例**：`getChatManager` 首次构造；`shutdownChatManager` 成功关闭后清空，失败保留供重试。
+- **平台装配**：`server/compose.ts` 是 server 内唯一构造具体 `ChatManager` 的位置，把 WASM 运行后端、
+  Store、memory KV 与默认配置装配成 SDK 实现；`chatManagerOptions(config)` 是可直接断言的纯装配。
+- **服务端宿主**：`server/host.ts` 的 `ChatHost` 持有 `ChatManagerContract` 与 `ChatViewRegistry`，
+  转发 create/get/find/list，编排 close 与 shutdown；`createChat` 不启动 WASM，不读历史。
 - **视图**：`ChatViewRegistry` 由 SDK 提供（主入口与 `/portable`，不在 `/view`），每个 Chat 一个
   `ChatView`；同一 Chat 的多个 WS 连接共享视图，断开连接不释放视图；绑定换代由 View 成对替换文档。
   `closeChat` 先关句柄再释放视图，`shutdown` 先 `disposeAll` 再关闭 SDK 端口。
@@ -33,7 +31,7 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 - **静态资源**：非 `/api/*` 路径由 Bun 入口提供 `dist/client` 与 `index.html` 回退；Vite 开发服务器把
   `/api` 代理到 Bun 服务。
 - **没有访问控制**：服务不提供认证、限流或多租户隔离；部署入口鉴权是必要条件。
-- **单进程 ownership**：`compose.ts` 默认使用 `createStorage()`（unstorage memory driver）作为 `kv`，由 `ChatManager` 内部构造协调器；多实例部署必须提供共享 storage 与路由层串行化/崩溃清理，不能宣称
+- **单进程 ownership**：`server/compose.ts` 固定使用 `createStorage()`（unstorage memory driver）作为 `kv`，由 `ChatManager` 内部构造协调器；多实例部署需要改造装配接入共享 storage，并由路由层做串行化/崩溃清理，不能宣称
   跨实例接管。
 
 ## 路由
@@ -71,9 +69,8 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 | 包命令、依赖 | `npm-packages/peri-cf/package.json` |
 | Bun 入口（HTTP + 静态资源 + WS + 信号） | `server/index.ts` |
 | 环境变量解析与启动校验 | `server/config.ts` |
-| 平台装配（唯一 `new ChatManager`） | `server/agent/compose.ts` |
-| 服务端编排（注入端口 + View 生命周期） | `server/agent/manager.ts` |
-| Store 目录/读取与缺表容忍 | `server/store.ts` |
+| 平台装配（唯一 `new ChatManager`） | `server/compose.ts` |
+| 服务端宿主（句柄转发 + View 生命周期） | `server/host.ts` |
 | HTTP 路由与错误映射 | `server/api/index.ts`、`server/api/errors.ts` |
 | WebSocket 同步适配 | `server/api/sync.ts` |
 | 共享 Zod DTO / HTTP 契约 | `core/shared/chat.ts`、`core/shared/sync.ts`、`core/shared/chat-display-state.ts` |
@@ -91,8 +88,8 @@ CF 的 `typecheck`/`test` 通过 `file:../@peri-sdk` 解析到 `node_modules/@pe
 `npm-packages/@peri-sdk` 执行 `MISE_ENV=wasm mise exec -- bun run build`，再在 CF 执行
 `bun install --force`；该条目会变成指向工作区包的符号链接，直接消费最新 `dist`。SDK build 依赖
 Emscripten 6.0.10 与 peri-wasm 产物。最近一次记录（2026-10-26）：SDK typecheck 通过、`bun test`
-407 pass / 0 fail（49 files、2947 expect）；CF typecheck 通过、`bun run test` 261 pass / 0 fail
-（根测试 203 + server 58；30 + 7 files）；CF `vite build` 通过（2408 modules）；未运行 emcc build、
+407 pass / 0 fail（49 files、2947 expect）；CF typecheck 通过、`bun run test` 248 pass / 0 fail
+（根测试 203 + server 45；30 + 6 files）；CF `vite build` 通过（2408 modules）；未运行 emcc build、
 `test:wasm` 与 E2E，Hosted Workers 部署未验收。
 
 ## 验证入口

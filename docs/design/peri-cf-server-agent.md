@@ -25,22 +25,22 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
   → GET /api/chats/:id/payload/:refId
   → WS /api/chats/:id/sync
   → server/api（Hono + Bun WebSocket）
-  → AppChatManager（注入 ChatManagerContract + ChatViewRegistry）
+  → ChatHost（持有 ChatManagerContract + ChatViewRegistry）
   → SDK ChatManager → ChatService → PeriInstance → WasmAcpTransport → peri-wasm ACP Host
   → 模型 / Turso Store / 远程 MCP
 ```
 
 ## 组合根与装配
 
-- **平台装配**：`server/agent/compose.ts` 读取 `ServerConfig`，构造 Store 适配、ownership 存储（默认 `createStorage()`）、
-  WASM `ChatRuntime`、`sessionInit`（path/instructions/MCP）与关闭预算；server 内只有这里构造具体 `ChatManager`。
-- **编排层**：`server/agent/manager.ts` 的 `AppChatManager` 只持有注入的 `ChatManagerContract` 与
+- **平台装配**：`server/compose.ts` 读取 `ServerConfig`，构造 Store、memory KV（默认 `createStorage()`）、
+  WASM `ChatRuntime`、`sessionInit`（path/instructions/MCP）；`chatManagerOptions(config)` 是纯装配，
+  `createSdkChatManager(config)` 是 server 内唯一构造具体 `ChatManager` 的位置。
+- **服务端宿主**：`server/host.ts` 的 `ChatHost` 持有 `ChatManagerContract` 与
   `ChatViewRegistry`。四个查询/登记方法直接转发；`closeChat` 先关 SDK 句柄再释放 View；
   `hasPendingClose` 暴露「句柄已移除、View 仍待释放」的残留；`shutdown` 先 `disposeAll` 再
-  `chats.shutdown()`。编排层不重写领域规则。
-- **唯一注入点**：`getChatManager` 首次调用才装配进程单例；测试经 `ServerChatOptions` 注入端口，
-  生产入口只在 `server/index.ts` 调用。审核 ports 与生命周期时以 `manager.ts` 为主，平台默认值集中在
-  `compose.ts`。
+  `chats.shutdown()`。宿主不重写领域规则，也不提供替换端口或注册表的注入 seam。
+- **入口**：`startServer(config)` 构造 `ChatHost` 并组装 HTTP/WS；测试直接构造 `ChatHost` 或断言
+  `chatManagerOptions(config)`，生产路径没有可选注入参数。
 - **应用只装配平台**：句柄、绑定、动作、事实与关闭语义都在 SDK；应用不复制准入、同步或关闭规则。
 - **视图**：`ChatViewRegistry` 由 SDK 主入口与 `/portable` 提供（`/view` 不含），每个 Chat 一个
   `ChatView`；同一 Chat 的所有 WS 连接共享视图，连接断开不释放视图；绑定换代由 View 成对替换文档。
@@ -60,12 +60,12 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
   `ownerChatId`），KV 读/写失败返回 `claim_failed` 500；新会话路径（`create_new_session`）claim 阶段失败
   （本地/KV 冲突或 KV 读/写失败）返回 `session_creation_failed` 500（stage `claim`，带 `createdSessionId`）。
   加载路径不启动 transport；新会话 claim 失败会启动并关闭临时 transport；两条路径都不提交绑定。没有通用 503 ownership 错误码。
-- CF 默认 `createStorage()`（unstorage memory driver）只覆盖单进程；多实例需要共享 storage，并由路由层保证
-  单实例绑定、换绑前 drain/清记录与崩溃清理。acquire 是读后写、非原子，KV 记录是绑定标记/防御路由 bug，
+- CF 固定 `createStorage()`（unstorage memory driver），只覆盖单进程；多实例需要改造装配接入共享 storage，
+  并由路由层保证单实例绑定、换绑前 drain/清记录与崩溃清理。acquire 是读后写、非原子，KV 记录是绑定标记/防御路由 bug，
   不是互斥原语。
 - 关闭复用正常关闭与启动失败清理，并发关闭合并；确认清理后才移除索引与占用。`session/close` 超时
   返回 `ChatCloseIncompleteError`，保留 ownership、资源与原因，可重试。
-- `shutdown` 分两段：编排层先释放全部 View（断开同步连接与文档），再让 SDK 封闭新准入、结算在途
+- `shutdown` 分两段：`ChatHost` 先释放全部 View（断开同步连接与文档），再让 SDK 封闭新准入、结算在途
   关闭并释放 WASM 运行后端；两段失败都聚合并保留资源，可重试。
 - `cancel` 的 `requested` 不是停止证明；应用不能把 202 回执映射成 stopped。
 - 动作错误以 `disposition` 表达可重试性：`rejected` 明确未生效，`unknown` 可能已执行且不得自动重试，
@@ -90,7 +90,7 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
   必要条件。
 - Bun 服务是唯一后端入口；Cloudflare Worker relay 与 `wrangler.jsonc` 已删除。
 - `/api/info` 只返回去敏后的地址（去掉 userinfo、query 与 token），设置页只读展示。
-- 单进程 ownership 不能宣称跨实例接管；多实例部署必须由部署方提供共享 storage 与路由层串行化/崩溃清理。
+- 单进程 ownership 不能宣称跨实例接管；多实例部署需要改造装配接入共享 storage，并由路由层做串行化/崩溃清理。
 - 真实模型/Store/远程 MCP、浏览器验收与 hosted 部署仍需环境验收；单元测试或类型检查不替代真实运行后端。
 
 ## 与其他文档的关系

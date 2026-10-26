@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { AcpMcpServer } from "@peri-code/sdk";
+import type { ServerInfo } from "@core/shared";
 
 /** 宿主虚拟工作区的根；与 ACP 会话 cwd 分开（见 `SESSION_CWD`）。 */
 export const WORKSPACE_CWD = "/workspace";
@@ -252,10 +253,10 @@ export function mcpServerDefaults(
   }]));
 }
 
-export type PublicServerInfoSource = Pick<ServerConfig, "model" | "storage" | "mcpServers">;
-
 /** 不暴露 token / query / userinfo 的配置摘要，供前端设置页只读展示。 */
-export function publicServerInfo(config: PublicServerInfoSource) {
+export function publicServerInfo(
+  config: Pick<ServerConfig, "model" | "storage" | "mcpServers">,
+) {
   const origin = (raw: string) => {
     try {
       const url = new URL(raw);
@@ -270,5 +271,5 @@ export function publicServerInfo(config: PublicServerInfoSource) {
     mcp: config.mcpServers.map((server) => ({ name: server.name, url: origin(server.url) })),
     workspace: WORKSPACE_CWD,
     sessionCwd: SESSION_CWD,
-  };
+  } satisfies ServerInfo;
 }

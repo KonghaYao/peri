@@ -9,7 +9,8 @@ import {
   type ToolPayloadResponse,
 } from "@peri-code/sdk";
 import { ChatCloseIncompleteError } from "@peri-code/sdk";
-import type { publicServerInfo } from "../config";
+import { logError } from "@core/agent";
+import type { ServerInfo } from "@core/shared";
 import {
   chatNotFound,
   closeIncomplete,
@@ -30,8 +31,7 @@ export type ApiChatManager =
 
 export interface ApiDeps {
   manager: ApiChatManager;
-  info: ReturnType<typeof publicServerInfo>;
-  logError?: (label: string, error: unknown, context?: Record<string, unknown>) => void;
+  info: ServerInfo;
 }
 
 interface ActionTarget {
@@ -174,9 +174,6 @@ function bindingTarget(chat: ChatServiceContract, fallback: ActionTarget): ChatB
  */
 export function createApi(deps: ApiDeps): Hono {
   const app = new Hono();
-  const logError = deps.logError
-    ?? ((label: string, error: unknown, context?: Record<string, unknown>) =>
-      console.error(label, context ?? {}, error));
 
   app.get("/api/info", (c) => c.json({ ok: true, ...deps.info }));
 
@@ -187,7 +184,7 @@ export function createApi(deps: ApiDeps): Hono {
       const chats = await deps.manager.listSessions(path ? { path } : undefined);
       return c.json({ chats, available: true });
     } catch (error) {
-      logError("Peri session directory is unavailable", error);
+      logError("[peri-cf] Peri session directory is unavailable", error);
       return c.json({
         chats: [],
         available: false,
@@ -271,7 +268,7 @@ export function createApi(deps: ApiDeps): Hono {
         requestId: action.requestId,
       });
       if (mapped.status >= 500) {
-        logError("Peri chat action failed", error, {
+        logError("[peri-cf] Peri chat action failed", error, {
           chatId: chat.id,
           op: action.type,
           requestId: action.requestId,
@@ -295,12 +292,12 @@ export function createApi(deps: ApiDeps): Hono {
       return c.body(null, 204);
     } catch (error) {
       if (error instanceof ChatCloseIncompleteError) {
-        logError("Peri chat close is incomplete", error, { chatId });
+        logError("[peri-cf] Peri chat close is incomplete", error, { chatId });
         const mapped = closeIncomplete(error, chatId);
         return c.json(mapped.body, 500);
       }
       const mapped = mapChatActionError(error, { chatId });
-      logError("Peri chat close failed", error, { chatId });
+      logError("[peri-cf] Peri chat close failed", error, { chatId });
       return c.json(mapped.body, mapped.status as 500);
     }
   });
@@ -340,14 +337,14 @@ export function createApi(deps: ApiDeps): Hono {
     } catch (error) {
       const mapped = mapPayloadError(error);
       if (mapped.status >= 500) {
-        logError("Peri payload read failed", error, { chatId: chat.id });
+        logError("[peri-cf] Peri payload read failed", error, { chatId: chat.id });
       }
       return c.json(mapped.body, mapped.status as 400);
     }
   });
 
   app.onError((error, c) => {
-    logError("Peri server request failed", error);
+    logError("[peri-cf] Peri server request failed", error);
     return c.json({ ok: false, code: "internal_error", message: "Internal server error" }, 500);
   });
 

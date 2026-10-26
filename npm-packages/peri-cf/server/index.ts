@@ -7,14 +7,9 @@ import {
   syncWebSocketHandlers,
   type SyncSocketData,
 } from "./api";
-import {
-  createSdkChatManager,
-  getChatManager,
-  shutdownChatManager,
-  type AppChatManager,
-  type ServerChatOptions,
-} from "./agent";
 import { MODEL_TIERS, loadServerConfig, publicServerInfo, type ServerConfig } from "./config";
+import { createSdkChatManager } from "./compose";
+import { ChatHost } from "./host";
 
 /**
  * Bun 长驻服务：`/api/*` 由会话服务处理，`/api/chats/:chatId/sync` 升级为只读
@@ -22,19 +17,6 @@ import { MODEL_TIERS, loadServerConfig, publicServerInfo, type ServerConfig } fr
  *
  * 凭据只从进程环境读取；停止进程即结束所有运行中的 Agent 执行（不跨进程恢复）。
  */
-
-export interface RunningServer {
-  server: Server<SyncSocketData>;
-  manager: AppChatManager;
-}
-
-/** HTTP/WS 层真正需要的配置切片；与 Agent 运行配置解耦。 */
-export interface ServerWiring {
-  hostname: string;
-  port: number;
-  staticRoot: string;
-  info: ReturnType<typeof publicServerInfo>;
-}
 
 function createStaticHandler(staticRoot: string): (request: Request) => Promise<Response> {
   const root = resolve(staticRoot);
@@ -54,27 +36,21 @@ function createStaticHandler(staticRoot: string): (request: Request) => Promise<
 
 /** 组装 HTTP/WS 服务；WASM 宿主仍由首个 Action 懒启动。 */
 export function createServer(
-  wiring: ServerWiring,
-  manager: AppChatManager,
+  config: ServerConfig,
+  host: ChatHost,
 ): Server<SyncSocketData> {
-  const logError = (
-    label: string,
-    error: unknown,
-    context?: Record<string, unknown>,
-  ): void => console.error(`[peri-cf] ${label}`, context ?? {}, error);
-  const app = createApi({ manager, info: wiring.info, logError });
-  const serveStatic = createStaticHandler(wiring.staticRoot);
+  const app = createApi({ manager: host, info: publicServerInfo(config) });
+  const serveStatic = createStaticHandler(config.staticRoot);
   return Bun.serve<SyncSocketData>({
-    hostname: wiring.hostname,
-    port: wiring.port,
+    hostname: config.hostname,
+    port: config.port,
     async fetch(request, server) {
       const path = new URL(request.url).pathname;
       if (SYNC_PATH_PATTERN.test(path)) {
         // 成功升级时返回 undefined；失败在升级前返回 HTTP 响应。
         return handleSyncUpgrade(request, server, {
-          manager,
-          views: manager.views,
-          logError,
+          manager: host.chats,
+          views: host.views,
         });
       }
       if (path === "/api" || path.startsWith("/api/")) return app.fetch(request);
@@ -84,22 +60,12 @@ export function createServer(
   });
 }
 
-/** 进程级入口：在唯一装配点构造 Manager，再启动服务。 */
+/** 进程级入口：构造具体宿主，再启动服务。 */
 export function startServer(
   config: ServerConfig,
-  options: ServerChatOptions = {},
-): RunningServer {
-  const manager = getChatManager({
-    chats: options.chats ?? createSdkChatManager(config, options),
-    views: options.views,
-  });
-  const server = createServer({
-    hostname: config.hostname,
-    port: config.port,
-    staticRoot: config.staticRoot,
-    info: publicServerInfo(config),
-  }, manager);
-  return { server, manager };
+): { server: Server<SyncSocketData>; host: ChatHost } {
+  const host = new ChatHost(createSdkChatManager(config));
+  return { server: createServer(config, host), host };
 }
 
 function startFromEnvironment(): void {
@@ -109,7 +75,7 @@ function startFromEnvironment(): void {
     process.exit(1);
   }
   const config = loaded.config;
-  const { server } = startServer(config);
+  const { server, host } = startServer(config);
   console.log(`[peri-cf] server listening on http://${server.hostname}:${server.port}`);
   console.log(
     `[peri-cf] model=${config.model.provider}`
@@ -123,7 +89,7 @@ function startFromEnvironment(): void {
     stopping = true;
     server.stop();
     try {
-      await shutdownChatManager();
+      await host.shutdown();
       process.exit(0);
     } catch (error) {
       console.error("[peri-cf] shutdown is incomplete; resources are preserved", error);

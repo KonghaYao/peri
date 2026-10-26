@@ -10,10 +10,10 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 
 ## 边界
 
-**服务端是唯一计算实例**：`server/index.ts` 启动 Bun 进程；`server/agent/compose.ts` 把平台依赖
-（WASM 运行后端、Store、ownership KV、默认配置）装配成 SDK `ChatManager`，是 server 内唯一构造具体实现的
-位置；`server/agent/manager.ts` 的 `AppChatManager` 只接收注入的 `ChatManagerContract` 与
-`ChatViewRegistry`，`getChatManager` 是唯一注入点。句柄、绑定、Action、事实与关闭语义都在 SDK。
+**服务端是唯一计算实例**：`server/index.ts` 启动 Bun 进程；`server/compose.ts` 把平台依赖
+（WASM 运行后端、Store、memory KV、默认配置）装配成 SDK `ChatManager`，是 server 内唯一构造具体实现的
+位置；`server/host.ts` 的 `ChatHost` 持有 `ChatManagerContract` 与 `ChatViewRegistry`，编排句柄转发、
+View 释放与关闭。句柄、绑定、Action、事实与关闭语义都在 SDK。
 浏览器不启动 WASM 运行后端，刷新/关闭页面不结束执行；服务进程退出会结束在途执行，历史仍在 Store。
 
 **凭据与工具面只在服务端**：模型、Store、machineId 与远程 MCP 全部来自环境变量
@@ -33,9 +33,10 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
   WASM 构建常量。
 - `core/agent/`：平台无关展示内核（不依赖 React/DOM/localStorage）。`view/projection.ts` 持有
   `ChatReplica` 并物化 `ChatDisplayState`；`view/askUserQuestion.ts` 做问答适配。
-- `server/`：`config.ts`（环境变量与启动校验）、`agent/compose.ts`（平台装配，唯一 `new ChatManager`）、
-  `agent/manager.ts`（编排注入端口、View 生命周期与进程单例）、`store.ts`（Store 只读适配与缺表容忍）、
-  `api/index.ts`（Hono 目录/句柄/Action/payload）、`api/sync.ts`（WS → ChatYjsChannel）。
+- `server/`：`index.ts`（Bun 入口与静态资源）、`config.ts`（环境变量与启动校验）、
+  `compose.ts`（平台装配，唯一 `new ChatManager`）、`host.ts`（`ChatHost`：句柄转发与 View 生命周期）、
+  `api/index.ts`（Hono 目录/句柄/Action/payload）、`api/sync.ts`（WS → ChatYjsChannel）、
+  `api/errors.ts`（错误映射）。
 - `frontend/remote/`：HTTP Action、WebSocket 客户端、页面控制器、目录仓储与组合根。
 - `frontend/chat/`、`frontend/components/`、`frontend/app/`：Chat 展示外壳、时间线与交互卡片；
   `frontend/settings/` 只读服务端信息。

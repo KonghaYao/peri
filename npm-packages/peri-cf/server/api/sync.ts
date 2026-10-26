@@ -6,6 +6,7 @@ import {
   type ChatViewRegistry,
   type ChatYjsChannel,
 } from "@peri-code/sdk";
+import { logError } from "@core/agent";
 import { chatNotFound } from "./errors";
 
 /**
@@ -24,12 +25,9 @@ const UNSUPPORTED_DATA = 1003;
 const TOO_LARGE = 1009;
 const INTERNAL_ERROR = 1011;
 
-export type SyncChatLookup = Pick<ChatManagerContract, "getChat" | "findChatBySession">;
-
 export interface SyncUpgradeDeps {
-  manager: SyncChatLookup;
+  manager: Pick<ChatManagerContract, "getChat" | "findChatBySession">;
   views: ChatViewRegistry;
-  logError?: (label: string, error: unknown, context?: Record<string, unknown>) => void;
 }
 
 export interface SyncSocketData {
@@ -161,7 +159,7 @@ export async function handleSyncUpgrade(
   try {
     view = deps.views.attach(chat);
   } catch (error) {
-    deps.logError?.("Peri chat view attach failed", error, { chatId: chat.id });
+    logError("[peri-cf] Peri chat view attach failed", error, { chatId: chat.id });
     return Response.json({
       ok: false,
       code: error instanceof ChatViewReplayOverflowError

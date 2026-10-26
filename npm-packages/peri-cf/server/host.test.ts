@@ -10,28 +10,7 @@ import {
   type ChatSessionDirectoryEntry,
   type ChatYjsChannel,
 } from "@peri-code/sdk";
-import {
-  AppChatManager,
-  getChatManager,
-  shutdownChatManager,
-} from "./index";
-import type { ServerConfig } from "../config";
-
-const config: ServerConfig = {
-  hostname: "127.0.0.1",
-  port: 0,
-  staticRoot: "/tmp/peri-cf-missing-static",
-  machineId: "11111111-1111-4111-8111-111111111111",
-  model: {
-    provider: "openai",
-    tiers: { fable: "gpt-test", opus: "gpt-test", sonnet: "gpt-test", haiku: "gpt-test" },
-    baseUrl: "https://api.example.com/v1",
-    apiKey: "model-secret",
-  },
-  storage: { url: "https://store.example.com", authToken: "store-secret" },
-  mcpServers: [],
-  wasmModuleUrl: "file:///tmp/peri-wasm.js",
-};
+import { ChatHost } from "./host";
 
 const TARGET: ChatBindingTarget = {
   chatId: "chat-1",
@@ -66,7 +45,7 @@ class FakeFactSource implements ChatFactSource {
   }
 }
 
-/** 只实现编排层会触达的成员；其余动作在 fake 中显式失败。 */
+/** 只实现宿主会触达的成员；其余动作在 fake 中显式失败。 */
 function stubChat(
   id: string,
   source = new FakeFactSource(),
@@ -155,7 +134,7 @@ class RecordingChannel implements ChatYjsChannel {
   }
 }
 
-/** 在端口与注册表中登记同一个句柄，并挂一条可观察的同步连接。 */
+/** 在 Manager 与宿主注册表中登记同一个句柄，并挂一条可观察的同步连接。 */
 function attachChat(
   chats: FakeChatManager,
   views: ChatViewRegistry,
@@ -169,53 +148,52 @@ function attachChat(
   return chat;
 }
 
-function orchestrated(options: {
+function hosted(options: {
   events?: string[];
-  views?: ChatViewRegistry;
   chats?: FakeChatManager;
 } = {}) {
   const events = options.events ?? [];
   const chats = options.chats ?? new FakeChatManager(events);
-  const views = options.views ?? new ChatViewRegistry();
-  return { manager: new AppChatManager({ chats, views }), chats, views, events };
+  const host = new ChatHost(chats);
+  return { host, chats, views: host.views, events };
 }
 
-describe("AppChatManager", () => {
+describe("ChatHost", () => {
   test("四个透传方法直接委托注入的端口", async () => {
-    const { manager, chats } = orchestrated();
+    const { host, chats } = hosted();
 
-    const created = manager.createChat({ path: "/workspace/" });
+    const created = host.createChat({ path: "/workspace/" });
     expect(chats.events).toEqual(["port.createChat:/workspace/"]);
-    expect(manager.getChat(created.id)).toBe(created);
+    expect(host.getChat(created.id)).toBe(created);
 
     chats.findResult = created;
-    expect(manager.findChatBySession("session-1")).toBe(created);
+    expect(host.findChatBySession("session-1")).toBe(created);
 
-    const listing = await manager.listSessions({ path: "/workspace/" });
+    const listing = await host.listSessions({ path: "/workspace/" });
     expect(listing).toBe(chats.listResult);
     expect(chats.listCalls).toEqual([{ path: "/workspace/" }]);
   });
 
   test("createChat 的端口错误原样向上抛出", () => {
-    const { manager, chats } = orchestrated();
+    const { host, chats } = hosted();
     chats.createError = new Error("create failed");
-    expect(() => manager.createChat()).toThrow("create failed");
+    expect(() => host.createChat()).toThrow("create failed");
   });
 
   test("closeChat 先关闭端口句柄，再释放 View", async () => {
     const events: string[] = [];
-    const { manager, chats, views } = orchestrated({ events });
+    const { host, chats, views } = hosted({ events });
     const chat = attachChat(chats, views, "chat-1", { events });
 
-    await manager.closeChat(chat.id);
+    await host.closeChat(chat.id);
 
     expect(events).toEqual([
       `port.closeChat:${chat.id}`,
       "view.close",
     ]);
-    expect(manager.getChat(chat.id)).toBeUndefined();
+    expect(host.getChat(chat.id)).toBeUndefined();
     expect(views.get(chat.id)).toBeUndefined();
-    expect(manager.hasPendingClose(chat.id)).toBe(false);
+    expect(host.hasPendingClose(chat.id)).toBe(false);
     expect(chats.chats.has(chat.id)).toBe(false);
   });
 
@@ -224,31 +202,31 @@ describe("AppChatManager", () => {
     const chats = new FakeChatManager(events);
     const failure = new Error("port close failed");
     chats.closeError = failure;
-    const { manager, views } = orchestrated({ events, chats });
+    const { host, views } = hosted({ events, chats });
     const chat = attachChat(chats, views, "chat-1", { events });
 
-    const error = await manager.closeChat(chat.id).catch((reason: unknown) => reason);
+    const error = await host.closeChat(chat.id).catch((reason: unknown) => reason);
     expect(error).toBe(failure);
     expect(events).toEqual([`port.closeChat:${chat.id}`]);
     expect(views.get(chat.id)).toBeDefined();
-    expect(manager.getChat(chat.id)).toBe(chat);
+    expect(host.getChat(chat.id)).toBe(chat);
   });
 
   test("View 释放失败包装为 ChatCloseIncompleteError，重试后清除残留", async () => {
     const events: string[] = [];
-    const { manager, chats, views } = orchestrated({ events });
+    const { host, chats, views } = hosted({ events });
     const chat = attachChat(chats, views, "chat-1", { events, closeFailures: 1 });
 
-    await expect(manager.closeChat(chat.id)).rejects.toBeInstanceOf(
+    await expect(host.closeChat(chat.id)).rejects.toBeInstanceOf(
       ChatCloseIncompleteError,
     );
-    expect(manager.getChat(chat.id)).toBeUndefined();
+    expect(host.getChat(chat.id)).toBeUndefined();
     expect(views.get(chat.id)).toBeDefined();
-    expect(manager.hasPendingClose(chat.id)).toBe(true);
+    expect(host.hasPendingClose(chat.id)).toBe(true);
 
-    await manager.closeChat(chat.id);
+    await host.closeChat(chat.id);
     expect(views.get(chat.id)).toBeUndefined();
-    expect(manager.hasPendingClose(chat.id)).toBe(false);
+    expect(host.hasPendingClose(chat.id)).toBe(false);
     expect(events).toEqual([
       `port.closeChat:${chat.id}`,
       "view.close",
@@ -259,27 +237,27 @@ describe("AppChatManager", () => {
 
   test("hasPendingClose 只在句柄消失而 View 仍存在时为真", async () => {
     const events: string[] = [];
-    const { manager, chats, views } = orchestrated({ events });
+    const { host, chats, views } = hosted({ events });
     const chat = attachChat(chats, views, "chat-1", { events, closeFailures: 1 });
 
-    expect(manager.hasPendingClose(chat.id)).toBe(false);
-    expect(manager.hasPendingClose("missing")).toBe(false);
+    expect(host.hasPendingClose(chat.id)).toBe(false);
+    expect(host.hasPendingClose("missing")).toBe(false);
 
-    await expect(manager.closeChat(chat.id)).rejects.toBeInstanceOf(
+    await expect(host.closeChat(chat.id)).rejects.toBeInstanceOf(
       ChatCloseIncompleteError,
     );
-    expect(manager.hasPendingClose(chat.id)).toBe(true);
-    await manager.closeChat(chat.id);
-    expect(manager.hasPendingClose(chat.id)).toBe(false);
+    expect(host.hasPendingClose(chat.id)).toBe(true);
+    await host.closeChat(chat.id);
+    expect(host.hasPendingClose(chat.id)).toBe(false);
   });
 
   test("shutdown 先释放全部 View，再关闭端口", async () => {
     const events: string[] = [];
-    const { manager, chats, views } = orchestrated({ events });
+    const { host, chats, views } = hosted({ events });
     const first = attachChat(chats, views, "chat-1", { events });
     const second = attachChat(chats, views, "chat-2", { events });
 
-    await manager.shutdown();
+    await host.shutdown();
 
     expect(events).toEqual([
       "view.close",
@@ -294,10 +272,10 @@ describe("AppChatManager", () => {
     const events: string[] = [];
     const chats = new FakeChatManager(events);
     chats.shutdownError = new Error("port shutdown failed");
-    const { manager, views } = orchestrated({ events, chats });
+    const { host, views } = hosted({ events, chats });
     const chat = attachChat(chats, views, "chat-1", { events, closeFailures: 1 });
 
-    const failure = await manager.shutdown().catch((error: unknown) => error);
+    const failure = await host.shutdown().catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(AggregateError);
     expect((failure as AggregateError).errors).toHaveLength(2);
     expect((failure as AggregateError).message).toBe(
@@ -309,39 +287,12 @@ describe("AppChatManager", () => {
 
   test("shutdown 只有 View 失败时仍聚合上报", async () => {
     const events: string[] = [];
-    const { manager, chats, views } = orchestrated({ events });
+    const { host, chats, views } = hosted({ events });
     attachChat(chats, views, "chat-1", { events, closeFailures: 1 });
 
-    const failure = await manager.shutdown().catch((error: unknown) => error);
+    const failure = await host.shutdown().catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(AggregateError);
     expect((failure as AggregateError).errors).toHaveLength(1);
     expect(events).toEqual(["view.close", "port.shutdown"]);
-  });
-});
-
-describe("进程级单例", () => {
-  test("注入端口后不重复创建，shutdown 成功后清空", async () => {
-    const chats = new FakeChatManager();
-    const first = getChatManager({ chats });
-    expect(getChatManager({ chats: new FakeChatManager() })).toBe(first);
-
-    await shutdownChatManager();
-    const second = getChatManager({ chats });
-    expect(second).not.toBe(first);
-    await shutdownChatManager();
-  });
-
-  test("shutdown 失败保留单例，允许再次关闭", async () => {
-    const chats = new FakeChatManager();
-    chats.shutdownError = new Error("port shutdown failed");
-    const manager = getChatManager({ chats });
-
-    await expect(shutdownChatManager()).rejects.toBeInstanceOf(AggregateError);
-    expect(getChatManager({ chats })).toBe(manager);
-
-    chats.shutdownError = undefined;
-    await shutdownChatManager();
-    expect(getChatManager({ chats })).not.toBe(manager);
-    await shutdownChatManager();
   });
 });

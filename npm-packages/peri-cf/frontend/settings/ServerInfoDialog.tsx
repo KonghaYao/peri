@@ -1,13 +1,6 @@
 import { useEffect, useState } from "react";
 import { Sparkles, X } from "lucide-react";
-
-interface ServerInfo {
-  model: { provider: string; tiers: Record<string, string>; baseUrl: string };
-  storage: { url: string };
-  mcp: { name: string; url: string }[];
-  workspace: string;
-  sessionCwd: string;
-}
+import type { ServerInfo } from "@core/shared";
 
 /**
  * 只读服务端信息：模型、存储与 MCP 由后端环境变量配置，前端不再保存任何凭据。

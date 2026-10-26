@@ -33,6 +33,23 @@ export const chatHandleSchema = z.object({
   bindingRevision: z.number().int().nonnegative(),
 });
 
+/**
+ * `GET /api/info` 的去敏配置摘要。
+ *
+ * 服务端 `publicServerInfo` 与设置页共用这一形状；地址在服务端去掉 userinfo、query 与 token。
+ */
+export const serverInfoSchema = z.object({
+  model: z.object({
+    provider: z.string().min(1),
+    tiers: z.record(z.string(), z.string()),
+    baseUrl: z.string(),
+  }),
+  storage: z.object({ url: z.string() }),
+  mcp: z.array(z.object({ name: z.string().min(1), url: z.string() })),
+  workspace: z.string(),
+  sessionCwd: z.string(),
+});
+
 /** Action 封套里的目标绑定；空句柄固定 `{sessionId:null,bindingRevision:0}`。 */
 export const actionTargetSchema = z.object({
   sessionId: z.string().min(1).nullable(),
@@ -185,6 +202,7 @@ export type ToolCallDTO = z.infer<typeof toolCallSchema>;
 export type TurnDTO = z.infer<typeof turnSchema>;
 export type InteractionDTO = z.infer<typeof interactionSchema>;
 export type AskUserQuestionDTO = z.infer<typeof askUserQuestionSchema>;
+export type ServerInfo = z.infer<typeof serverInfoSchema>;
 export type Chat = z.infer<typeof chatSchema>;
 export type ChatSummary = z.infer<typeof chatSummarySchema>;
 export type ChatHandleDTO = z.infer<typeof chatHandleSchema>;
