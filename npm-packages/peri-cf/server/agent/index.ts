@@ -8,12 +8,12 @@ export {
   AppChatManager,
   getChatManager,
   shutdownChatManager,
+  type AppChatManagerOptions,
   type ServerChatOptions,
 } from "./manager";
 export {
   createSdkChatManager,
   type ChatInstanceFactory,
-  type ChatPlatformConfig,
   type LogError,
   type SdkChatManagerOptions,
 } from "./compose";

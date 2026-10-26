@@ -13,15 +13,18 @@ import { DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS } from "@peri-code/sdk/wasm";
 import {
   SESSION_CWD,
   WORKSPACE_CWD,
+  type ServerConfig,
 } from "../config";
 import { SYSTEM_INSTRUCTIONS } from "../system-instructions";
 import {
   createSdkChatManager,
   type ChatInstanceFactory,
-  type ChatPlatformConfig,
 } from "./index";
 
-const config: ChatPlatformConfig = {
+const config: ServerConfig = {
+  hostname: "127.0.0.1",
+  port: 0,
+  staticRoot: "/tmp/peri-cf-missing-static",
   machineId: "11111111-1111-4111-8111-111111111111",
   model: {
     provider: "openai",

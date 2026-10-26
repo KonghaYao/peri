@@ -8,10 +8,10 @@ import {
   type SyncSocketData,
 } from "./api";
 import {
+  createSdkChatManager,
   getChatManager,
   shutdownChatManager,
   type AppChatManager,
-  type ChatPlatformConfig,
   type ServerChatOptions,
 } from "./agent";
 import { loadServerConfig, publicServerInfo, type ServerConfig } from "./config";
@@ -84,18 +84,15 @@ export function createServer(
   });
 }
 
-/** 启动入口是唯一知道完整 ServerConfig 的地方；Chat 平台只接收运行切片。 */
-function chatPlatformConfig(config: ServerConfig): ChatPlatformConfig {
-  const { machineId, model, storage, mcpServers, wasmModuleUrl } = config;
-  return { machineId, model, storage, mcpServers, wasmModuleUrl };
-}
-
-/** 进程级入口：先取得单例 Manager，再启动服务。 */
+/** 进程级入口：在唯一装配点构造 Manager，再启动服务。 */
 export function startServer(
   config: ServerConfig,
   options: ServerChatOptions = {},
 ): RunningServer {
-  const manager = getChatManager(chatPlatformConfig(config), options);
+  const manager = getChatManager({
+    chats: options.chats ?? createSdkChatManager(config, options),
+    views: options.views,
+  });
   const server = createServer({
     hostname: config.hostname,
     port: config.port,

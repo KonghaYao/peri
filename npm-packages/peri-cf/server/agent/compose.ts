@@ -5,8 +5,6 @@ import {
   type AtomicSessionOwnershipKv,
   type ChatConfig,
   type ChatDatabase,
-  type ChatDefaults,
-  type ChatRuntime,
   type ChatLifecycleOptions,
 } from "@peri-code/sdk";
 import {
@@ -17,9 +15,7 @@ import {
   SESSION_CWD,
   WORKSPACE_CWD,
   mcpServerDefaults,
-  type ServerMcpServer,
-  type ServerModelConfig,
-  type ServerStorageConfig,
+  type ServerConfig,
 } from "../config";
 import { createChatDatabase } from "../store";
 import { SYSTEM_INSTRUCTIONS } from "../system-instructions";
@@ -27,8 +23,8 @@ import { SYSTEM_INSTRUCTIONS } from "../system-instructions";
 /**
  * 平台装配：把 CF 的配置、Store、WASM 运行后端与默认工具面装配成 SDK `ChatManager`。
  *
- * 这是 server 内唯一构造具体 `ChatManager` 的位置。编排层只接收注入的
- * `ChatManagerContract`，本文件承担全部平台读取（env、WASM、Store、默认配置）。
+ * 这是 server 内唯一构造具体 `ChatManager` 的位置。配置在这里按字段读取，
+ * 不再向编排层传递整棵 `ServerConfig` 或派生的窄配置对象。
  */
 
 type ChatManagerConstructorOptions = ConstructorParameters<typeof ChatManager>[0];
@@ -51,15 +47,6 @@ export interface SdkChatManagerOptions {
   readonly chatConfig?: Partial<Pick<ChatConfig, "runtime" | "lifecycle">>;
   readonly instanceFactory?: ChatInstanceFactory;
   readonly logError?: LogError;
-}
-
-/** Chat 平台运行所需的窄配置；由启动入口从 `ServerConfig` 分解。 */
-export interface ChatPlatformConfig {
-  machineId: string;
-  model: ServerModelConfig;
-  storage: ServerStorageConfig;
-  mcpServers: ServerMcpServer[];
-  wasmModuleUrl: string;
 }
 
 const DEFAULT_MODEL_ALIAS = "sonnet";
@@ -99,75 +86,63 @@ function wasmEnvironment(
   );
 }
 
-/** 与宿主 `configJson` 的形状一致；模型与存储直连上游，凭据只存在于服务端进程。 */
-function harnessConfig(config: ChatPlatformConfig): Record<string, unknown> {
-  return {
-    cwd: WORKSPACE_CWD,
-    machineId: config.machineId,
-    storage: {
-      url: config.storage.url,
-      authToken: config.storage.authToken,
-    },
-    settings: {
-      config: {
-        active_alias: DEFAULT_MODEL_ALIAS,
-        providers: [{
-          id: HARNESS_PROVIDER_ID,
-          type: config.model.provider,
-          apiKey: config.model.apiKey,
-          baseUrl: config.model.baseUrl,
-        }],
-        profiles: {
-          [DEFAULT_MODEL_ALIAS]: {
-            provider: HARNESS_PROVIDER_ID,
-            model: config.model.id,
-          },
-        },
-        meta_harness: SERVER_HARNESS_CONFIG,
-      },
-    },
-  };
-}
-
-function defaultRuntime(config: ChatPlatformConfig, logError: LogError): ChatRuntime {
-  return {
-    kind: "wasm",
-    moduleUrl: config.wasmModuleUrl,
-    env: wasmEnvironment(),
-    ports: { scheduler: createSchedulerPort() },
-    cleanupTimeoutMs: DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS,
-    onDiagnostic: (kind, error) => logError(RUNTIME_DIAGNOSTIC_LABEL, error, {
-      phase: RUNTIME_START_PHASE,
-      kind,
-    }),
-  };
-}
-
-function defaultChatDefaults(config: ChatPlatformConfig): ChatDefaults {
-  return {
-    path: SESSION_CWD,
-    instructions: SYSTEM_INSTRUCTIONS,
-    mcpServers: mcpServerDefaults(config),
-  };
-}
-
 function consoleLogError(label: string, error: unknown, context?: Record<string, unknown>): void {
   console.error(`[peri-cf] ${label}`, context ?? {}, error);
 }
 
 /** 装配 SDK 默认实现；测试与其它宿主通过 `SdkChatManagerOptions` 替换平台 seam。 */
 export function createSdkChatManager(
-  config: ChatPlatformConfig,
+  config: ServerConfig,
   options: SdkChatManagerOptions = {},
 ): ChatManager {
   const logError = options.logError ?? consoleLogError;
   return new ChatManager({
-    agentConfig: harnessConfig(config),
+    // 与宿主 `configJson` 的形状一致；模型与存储直连上游，凭据只存在于服务端进程。
+    agentConfig: {
+      cwd: WORKSPACE_CWD,
+      machineId: config.machineId,
+      storage: {
+        url: config.storage.url,
+        authToken: config.storage.authToken,
+      },
+      settings: {
+        config: {
+          active_alias: DEFAULT_MODEL_ALIAS,
+          providers: [{
+            id: HARNESS_PROVIDER_ID,
+            type: config.model.provider,
+            apiKey: config.model.apiKey,
+            baseUrl: config.model.baseUrl,
+          }],
+          profiles: {
+            [DEFAULT_MODEL_ALIAS]: {
+              provider: HARNESS_PROVIDER_ID,
+              model: config.model.id,
+            },
+          },
+          meta_harness: SERVER_HARNESS_CONFIG,
+        },
+      },
+    },
     database: options.database ?? createChatDatabase(config.storage),
     sessionOwnershipKv: options.sessionOwnershipKv ?? new MemoryKV(),
     chatConfig: {
-      runtime: options.chatConfig?.runtime ?? defaultRuntime(config, logError),
-      defaults: defaultChatDefaults(config),
+      runtime: options.chatConfig?.runtime ?? {
+        kind: "wasm",
+        moduleUrl: config.wasmModuleUrl,
+        env: wasmEnvironment(),
+        ports: { scheduler: createSchedulerPort() },
+        cleanupTimeoutMs: DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS,
+        onDiagnostic: (kind, error) => logError(RUNTIME_DIAGNOSTIC_LABEL, error, {
+          phase: RUNTIME_START_PHASE,
+          kind,
+        }),
+      },
+      defaults: {
+        path: SESSION_CWD,
+        instructions: SYSTEM_INSTRUCTIONS,
+        mcpServers: mcpServerDefaults(config),
+      },
       lifecycle: {
         ...DEFAULT_LIFECYCLE,
         ...options.chatConfig?.lifecycle,

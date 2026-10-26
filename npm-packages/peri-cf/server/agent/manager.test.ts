@@ -14,10 +14,13 @@ import {
   AppChatManager,
   getChatManager,
   shutdownChatManager,
-  type ChatPlatformConfig,
 } from "./index";
+import type { ServerConfig } from "../config";
 
-const config: ChatPlatformConfig = {
+const config: ServerConfig = {
+  hostname: "127.0.0.1",
+  port: 0,
+  staticRoot: "/tmp/peri-cf-missing-static",
   machineId: "11111111-1111-4111-8111-111111111111",
   model: {
     provider: "openai",
@@ -319,11 +322,11 @@ describe("AppChatManager", () => {
 describe("进程级单例", () => {
   test("注入端口后不重复创建，shutdown 成功后清空", async () => {
     const chats = new FakeChatManager();
-    const first = getChatManager(config, { chats });
-    expect(getChatManager(config, { chats: new FakeChatManager() })).toBe(first);
+    const first = getChatManager({ chats });
+    expect(getChatManager({ chats: new FakeChatManager() })).toBe(first);
 
     await shutdownChatManager();
-    const second = getChatManager(config, { chats });
+    const second = getChatManager({ chats });
     expect(second).not.toBe(first);
     await shutdownChatManager();
   });
@@ -331,14 +334,14 @@ describe("进程级单例", () => {
   test("shutdown 失败保留单例，允许再次关闭", async () => {
     const chats = new FakeChatManager();
     chats.shutdownError = new Error("port shutdown failed");
-    const manager = getChatManager(config, { chats });
+    const manager = getChatManager({ chats });
 
     await expect(shutdownChatManager()).rejects.toBeInstanceOf(AggregateError);
-    expect(getChatManager(config, { chats })).toBe(manager);
+    expect(getChatManager({ chats })).toBe(manager);
 
     chats.shutdownError = undefined;
     await shutdownChatManager();
-    expect(getChatManager(config, { chats })).not.toBe(manager);
+    expect(getChatManager({ chats })).not.toBe(manager);
     await shutdownChatManager();
   });
 });

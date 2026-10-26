@@ -5,7 +5,7 @@ import {
   type ChatServiceContract,
   type ChatSessionDirectoryEntry,
 } from "@peri-code/sdk";
-import { createSdkChatManager, type ChatPlatformConfig, type SdkChatManagerOptions } from "./compose";
+import type { SdkChatManagerOptions } from "./compose";
 
 /**
  * 服务端编排层：注入的 `ChatManagerContract` + 宿主的 `ChatViewRegistry`。
@@ -15,7 +15,7 @@ import { createSdkChatManager, type ChatPlatformConfig, type SdkChatManagerOptio
  */
 
 /** 编排层端口：`chats` 必填，`views` 缺省时新建空注册表。 */
-interface AppChatManagerOptions {
+export interface AppChatManagerOptions {
   readonly chats: ChatManagerContract;
   readonly views?: ChatViewRegistry;
 }
@@ -99,9 +99,9 @@ export class AppChatManager {
 
 let processManager: AppChatManager | undefined;
 
-/** 服务端入口的装配选项；`chats` 省略时由 `createSdkChatManager` 构造默认实现。 */
+/** 服务端入口的装配选项；`chats` 省略时由 `startServer` 构造默认实现。 */
 export interface ServerChatOptions extends SdkChatManagerOptions {
-  /** 生产/测试替换实现；省略时装配 SDK 默认 `ChatManager`。 */
+  /** 生产/测试替换实现；省略时由入口装配 SDK 默认 `ChatManager`。 */
   readonly chats?: ChatManagerContract;
   /** 测试替换共享注册表；省略时由编排层新建。 */
   readonly views?: ChatViewRegistry;
@@ -110,17 +110,12 @@ export interface ServerChatOptions extends SdkChatManagerOptions {
 /**
  * 进程级单例：同一进程只创建一个编排器，这是唯一的注入点。
  *
- * 首次调用才构造依赖；WASM 宿主仍由首次激活懒启动。测试用 `shutdownChatManager`
- * 隔离，生产入口只在 `server/index.ts` 调用。
+ * 调用方必须传入已构造的 `chats`；本函数不读取平台配置。WASM 宿主仍由首次
+ * 激活懒启动。测试用 `shutdownChatManager` 隔离，生产入口只在
+ * `server/index.ts` 调用。
  */
-export function getChatManager(
-  config: ChatPlatformConfig,
-  options: ServerChatOptions = {},
-): AppChatManager {
-  processManager ??= new AppChatManager({
-    chats: options.chats ?? createSdkChatManager(config, options),
-    views: options.views,
-  });
+export function getChatManager(options: AppChatManagerOptions): AppChatManager {
+  processManager ??= new AppChatManager(options);
   return processManager;
 }
 
