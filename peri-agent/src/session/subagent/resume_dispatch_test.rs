@@ -412,17 +412,26 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
         stops_hook.fetch_add(1, Ordering::SeqCst);
     }));
     cancel_resume_at_gate(config, &cancel, entered_rx, &store, &thread_id).await;
-    assert!(llm_dropped.load(Ordering::SeqCst));
+    // dispatch 取消后 wrapper 被 drop；子执行由独立任务继续，异步走正常
+    // Interrupted 收尾（flush / close / 终态 / Stop hook），
+    // claim Drop 不再是最终收尾者。这里等待收尾，而不是同步断言。
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !llm_dropped.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled child execution must drop the in-flight model call");
     assert_eq!(
         starts.load(Ordering::SeqCst),
         1,
         "this cancellation happens after lifecycle Start"
     );
-    wait_for_resume_status(&store, &thread_id, AgentStatus::Cancelled).await;
+    wait_for_resume_status(&store, &thread_id, AgentStatus::Error).await;
     assert_eq!(
         stops.load(Ordering::SeqCst),
-        0,
-        "claim cleanup must not invent or duplicate the normal Stop hook"
+        1,
+        "normal Interrupted tail emits exactly one Stop; claim cleanup must not duplicate it"
     );
 }
 
