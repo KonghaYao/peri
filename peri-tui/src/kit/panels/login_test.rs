@@ -198,13 +198,14 @@ fn buffer_line(buf: &Buffer, y: u16) -> String {
 }
 
 fn login_config() -> crate::config::PeriConfig {
+    let store = std::env::temp_dir().join("peri-login-test");
     serde_json::from_value(serde_json::json!({"config": {
         "active_alias": "sonnet",
         "providers": [
             {"id":"resp", "type":"openai_responses", "apiKey":"fixture-key",
              "models":{"fable":"fable-model", "opus":"opus-model", "sonnet":"sonnet-model", "haiku":"haiku-model"}},
             {"id":"plan", "type":"openai_responses", "apiKey":"",
-             "auth":{"kind":"chatgpt_plan", "store":"/tmp/peri-login-test", "account":"work",
+             "auth":{"kind":"chatgpt_plan", "store":store, "account":"work",
                      "subject":"subject", "clientId":"client"},
              "models":{"fable":"plan-fable", "opus":"plan-opus", "sonnet":"plan-sonnet", "haiku":"plan-haiku"}}
         ],
