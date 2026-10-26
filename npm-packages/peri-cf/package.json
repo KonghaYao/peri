@@ -20,6 +20,7 @@
     "test:server": "bun test --tsconfig-override server/tsconfig.json server"
   },
   "dependencies": {
+    "@hono/bun": "^1.0.1",
     "@legendapp/list": "^3.6.0",
     "@peri-code/sdk": "file:../@peri-sdk",
     "@tanstack/react-query": "^5.104.1",

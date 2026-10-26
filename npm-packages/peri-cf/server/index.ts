@@ -1,7 +1,7 @@
 import type { Server } from "bun";
 import { ChatManager } from "@peri-code/sdk";
 import { Hono } from "hono";
-import { getBunServer, serveStatic } from "hono/bun";
+import { getBunServer, serveStatic } from "@hono/bun";
 import {
   createApi,
   handleSyncUpgrade,
