@@ -4,12 +4,12 @@ import { resolve } from "node:path";
 import {
     BareHarnessConfig,
     ChatManager,
-    MemoryKV,
     TursoStorage,
     type PeriConfig,
     type SessionStorage,
 } from "../../src/sdk/index";
 import { createDemoApp, sessionDatabase } from "./chat-demo";
+import { DemoOwnershipStorage } from "./demo-storage";
 
 const configuredWorkspace = Bun.env.PERI_WORKSPACE;
 if (!configuredWorkspace) throw new Error("PERI_WORKSPACE is required");
@@ -87,7 +87,7 @@ const manager = new ChatManager({
         machineId: Bun.env.PERI_WASM_MACHINE_ID ?? "00000000-0000-4000-8000-000000000001",
     },
     database: sessionDatabase(storage),
-    sessionOwnershipKv: new MemoryKV(),
+    sessionOwnershipStorage: new DemoOwnershipStorage(),
     chatConfig: {
         runtime: { kind: "wasm", moduleUrl: wasmModuleUrl, env: wasmEnv },
         defaults: {

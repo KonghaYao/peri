@@ -2,7 +2,6 @@ import { expect, test } from "bun:test";
 import { ExecutionAdmissionCore, type AdmissionLedger, type AdmissionRequestRecord } from "../src/execution/admission-core";
 import { ExecutionCoordinator } from "../src/execution/coordinator";
 import { KvExecutionRegistry, type AtomicExecutionKv, type ExecutionKvValue } from "../src/execution/kv-registry";
-import { MemoryKV } from "../src/kv/memory-kv";
 import type { ExecutionAction, ExecutionMutation, ExecutionRegistry, ExecutionTicket, ExecutionDomainPort } from "../src/execution/types";
 
 const instance = { instanceId: "rollback-instance", generationId: "rollback-generation", proofRoute: { kind: "external" as const, reference: "kv-domain-fixture" } };
@@ -33,7 +32,7 @@ class FixtureLedger implements AdmissionLedger {
 /** durable registry：与部署方的版本化 envelope 共用同一契约。 */
 function durableRegistry() {
     const values = new Map<string, ExecutionKvValue>();
-    const kv: AtomicExecutionKv = Object.assign(new MemoryKV(), {
+    const kv: AtomicExecutionKv = {
         durability: "durable" as const,
         readExecutionValue: async (key: string) => structuredClone(values.get(key) ?? null),
         compareAndSetExecutionValue: async (key: string, version: number | null, next: ExecutionKvValue) => {
@@ -41,7 +40,7 @@ function durableRegistry() {
             values.set(key, structuredClone(next));
             return true;
         },
-    });
+    };
     return new KvExecutionRegistry(kv);
 }
 

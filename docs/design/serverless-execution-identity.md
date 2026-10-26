@@ -32,7 +32,7 @@ flowchart LR
     end
 
     subgraph External["外部依赖"]
-        Kv[("共享原子 Session KV<br/>SDK Chat claim 协调")]
+        Kv[("共享 Session KV<br/>归属绑定标记（非互斥原语）")]
         Store[("Turso 远端 Store<br/>Machine → Workspace → Session")]
         Model["模型端点"]
         Mcp["外部远程 MCP<br/>工作区文件工具"]
@@ -40,7 +40,7 @@ flowchart LR
 
     Host <-->|"JSON-RPC 帧"| BridgeA
     Host -.->|"启动装配：cwd · settings · storage · machineId"| BridgeA
-    Host -->|"原子 claim · 按 owner 释放"| Kv
+    Host -->|"读后写记录绑定（非原子）· 按 owner 释放"| Kv
     AuthorityA -->|"canonical 历史 · 归属 · binding"| Store
     AcpA -->|"模型 HTTP/SSE"| Model
     AcpA -->|"工具调用（HTTP）"| Mcp
@@ -54,7 +54,8 @@ flowchart LR
 
 一个 JS 宿主可承载多个模块实例，每实例一次 `start` 装配、一个 Machine 身份与一份独立
 执行准入；实线为运行时数据流，虚线为启动装配；实例可整体替换——canonical 历史与归属
-在远端 Store，SDK 经共享 KV 协调执行权；Peri 只校验绑定与路径并管理本实例的任务资源。
+在远端 Store，SDK 经共享 storage 记录执行权并由路由层串行化；KV 记录是绑定标记/防御路由 bug，不是互斥原语。
+Peri 只校验绑定与路径并管理本实例的任务资源。
 
 ## 1. 部署形态与启动契约
 
@@ -92,7 +93,7 @@ WASM 是兼容性目标，不是第二套 Peri：`wasm32-unknown-emscripten` 模
 
 - Machine ID 是归属标签，**不是**认证凭证、租约或工具权限；服务端仍须单独鉴权
   Session 与 Workspace。SDK 不把 `ChatService.id` 传给 Peri 当 `machine_id`，两者在
-  部署配置中显式区分；Session claim key 只含 Session ID，不以 Chat ID 或路径分区。
+  部署配置中显式区分；Session 归属记录 key 只含 Session ID，不以 Chat ID 或路径分区。
 - 一个 peri-wasm 模块实例只承载一个 Machine 身份：`start` 注入后在实例内固定，变更被
   确定拒绝。一个 JS 宿主可承载多个模块实例，各实例独立 wasm 内存、独立身份与执行状态；
   多 Machine 身份并行必须隔离为多个模块实例，不能依赖宿主进程全局状态或运行期修改
@@ -148,22 +149,24 @@ SDK 的 `ChatView` 把 ACP 通知（含冷 `session/load` 的历史重放）投�
 版本化投影，不能转发原始 Yjs 更新；跨实例同步协议不在本设计的现行保证内。接口与验证入口见
 [SDK 代码索引](../code-index/peri-ts-sdk.md)，不以某个分支的提交状态描述当前能力。
 
-SDK 的 `ChatManager` 使用外部注入的 `SessionOwnership` 原子协调会话归属，并按 owner 释放；它负责 Chat
-句柄与会话归属，不是 RCRA 执行准入的完整权威。契约要求 Session ownership key 仅含 Session ID，共享 keyspace
-即归属协调域，不含 path 或 Chat ID。部署必须共享 KV 覆盖可能执行同一 Session 的全部实例；不同数据库
-的相同 ID 共 KV 时保守拒绝，可按业务隔离 KV。启动失败若 transport 清理未确认，SDK 保留 ownership 与
+SDK 的 `ChatManager` 使用外部注入的存储端口记录 `{ sessionId, owner }`，并按 owner 释放；它负责 Chat
+句柄与会话归属记录，不是 RCRA 执行准入的完整权威。契约要求 Session ownership key 仅含 Session ID，共享 keyspace
+即归属协调域，不含 path 或 Chat ID。SDK 不做 TTL、续租或原子 CAS；acquire 是读后写、非原子，
+KV 记录是绑定标记/防御路由 bug，不是互斥原语。同一 Session 单实例绑定由路由层串行化，
+崩溃遗留记录由路由层清理。部署必须共享 storage 覆盖可能执行同一 Session 的全部实例；不同数据库
+的相同 ID 共 keyspace 时保守拒绝，可按业务隔离存储。启动失败若 transport 清理未确认，SDK 保留 ownership 与
 transport，进入可重试的 incomplete 状态，以 `AggregateError`/`cause` 保留原错误和清理错误；`close`
 共享可重试的清理事务，确认清理后释放，以免仍存活的旧执行与新实例重叠。
 
 RCRA 执行准入不进入 SDK Chat 普通输入路径；`/portable` 只公开嵌入方可自行驱动的准入核心，ledger、
-registry 后端与 stopped proof 由调用方注入，SDK 不内置 SQLite registry。共享 Session claim 不能代替
+registry 后端与 stopped proof 由调用方注入，SDK 不内置 SQLite registry。共享 Session 归属记录不能代替
 执行准入，也不能证明旧执行已经停止。部署须明确协调域和 proof provider，不能把进程内默认配置解释为
 跨宿主保证。
 
-KV claim 与执行准入都不改变 Peri 的机器归属、binding/path 校验或「上次工具是否完成」的事实；SDK
+KV 归属记录与执行准入都不改变 Peri 的机器归属、binding/path 校验或「上次工具是否完成」的事实；SDK
 执行准入不是 Peri Store owner/lease。Yjs 是实时投影，transcript 与持久工具结果仍以 Peri Store 为准。
 实现与测试路由见 [SDK 代码索引](../code-index/peri-ts-sdk.md)。跨实例进程接管与生产崩溃恢复仍未
-验收；无法证明旧执行停止时保留不确定性，不从 claim 或历史存在推断可安全接管。
+验收；无法证明旧执行停止时保留不确定性，不从记录或历史存在推断可安全接管。
 
 ## 5. 与现有设计的关系
 
@@ -189,4 +192,4 @@ KV claim 与执行准入都不改变 Peri 的机器归属、binding/path 校验�
 - 托管 Cloudflare 部署、生产 Turso／模型端点、资源限制与 Workers 上的 TypeScript
   SDK 入口尚未验收；Node socket 路线不支持浏览器。
 - `ChatView`/`ChatReplica` 是进程内投影与只读副本，不替代 Store 恢复，也不承诺跨实例实时同步；
-  SDK 的 Session claim 协调域独立于 Peri Machine 归属，完整跨实例接管仍未验收。
+  SDK 的 Session 归属记录域独立于 Peri Machine 归属，完整跨实例接管仍未验收。

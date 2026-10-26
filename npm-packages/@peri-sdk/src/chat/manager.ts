@@ -1,8 +1,5 @@
 import { cloneJsonValue } from "./json-value";
-import {
-    AtomicSessionOwnership,
-    LocalSessionIndex,
-} from "./ownership";
+import { KvSessionOwnership, LocalSessionIndex } from "./ownership";
 import {
     WasmRuntimePool,
     type WasmRuntimeLease,
@@ -78,9 +75,9 @@ export class ChatManager implements ChatManagerContract {
                 "ChatManager requires a ChatDatabase with listSessions/getSession",
             );
         }
-        // 调用方只注入原子 KV；每个 Manager 自建 ownership，owner 身份不共享。
-        const sessionOwnership = new AtomicSessionOwnership(
-            options.sessionOwnershipKv,
+        // 调用方只注入存储端口；每个 Manager 自建 ownership，owner 身份不共享。
+        const sessionOwnership = new KvSessionOwnership(
+            options.sessionOwnershipStorage,
         );
         if (
             !options.chatConfig ||

@@ -104,7 +104,7 @@ test("WASM port close rejects a pending request and ends event stream", async ()
 test("ChatManager runs over an injected WASM frame port", async () => {
   const { ChatManager } = await import("../src/chat/manager");
   const { ChatUserAction } = await import("../src/chat/action");
-  const { MemoryKV } = await import("../src/kv/memory-kv");
+  const { OwnershipProbe } = await import("./ownership-probe");
   const wire = framePort();
   const methods: string[] = [];
   const sendFrame = wire.port.send;
@@ -131,7 +131,7 @@ test("ChatManager runs over an injected WASM frame port", async () => {
       listSessions: async () => [],
       getSession: async () => null,
     },
-    sessionOwnershipKv: new MemoryKV(),
+    sessionOwnershipStorage: new OwnershipProbe(),
     chatConfig: {
       runtime: { kind: "transport", factory: () => WasmAcpTransport.fromPort(wire.port) },
       defaults: { path: "/tmp", instructions: "hello" },

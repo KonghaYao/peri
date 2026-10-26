@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { ChatUserAction } from "../src/chat/action";
 import { ChatManager, type ChatManagerInternalOptions } from "../src/chat/manager";
-import { MemoryKV } from "../src/kv/memory-kv";
 import { ChatView } from "../src/view/chat-view";
 import {
     PayloadReadError, VIEW_PAYLOAD_MAX_BYTES, VIEW_PAYLOAD_MAX_CONCURRENCY, limitPayloadReads, readPayload,
     type ToolPayloadReader, type ToolPayloadResponse,
 } from "../src/view/payload-reader";
 import { FakeDatabase, FakePort, directoryEntry } from "./chat-fixtures";
+import { OwnershipProbe } from "./ownership-probe";
 
 const encoder = new TextEncoder();
 const response = (id: string, json: string) => ({ id, bytes: encoder.encode(json).byteLength, json });
@@ -36,7 +36,7 @@ function chatServiceHarness(): {
     const options: ChatManagerInternalOptions = {
         agentConfig: {},
         database,
-        sessionOwnershipKv: new MemoryKV(),
+        sessionOwnershipStorage: new OwnershipProbe(),
         chatConfig: {
             runtime: {
                 kind: "transport",

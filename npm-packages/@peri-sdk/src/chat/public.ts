@@ -8,6 +8,7 @@
 export { ChatManager } from "./manager";
 export { ChatService } from "./service";
 export { ChatUserAction, parseChatUserAction } from "./action";
+export { clearSessionOwnership } from "./ownership";
 export * from "./errors";
 
 export type {
@@ -41,6 +42,7 @@ export type {
     HistoryPageOutcome,
     PeriInstancePort,
     SendReceipt,
+    SessionOwnershipStorage,
     SessionReadyResult,
 } from "./types";
 export type {

@@ -36,12 +36,15 @@ SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行
 
 - `createChat` 只同步登记句柄，不启动 ACP、不取得 SessionOwnership、不读取历史。
 - 首次绑定由 `create_new_session` 或 `change_session` 触发；新会话使用句柄/默认 path，加载历史使用 Store 中的持久 cwd。
-- 同一 Session 同时至多一个执行所有者。调用方只注入原子 KV（`ChatManagerOptions.sessionOwnershipKv`），`ChatManager` 内部构造 `SessionOwnership`；`LocalSessionIndex` 覆盖 binding/cleanup 候选，冲突带 `ownerChatId`。
+- 同一 Session 同时至多一个执行所有者。调用方注入 3 方法存储端口（`ChatManagerOptions.sessionOwnershipStorage`），`ChatManager` 内部构造 `SessionOwnership`；`LocalSessionIndex` 覆盖 binding/cleanup 候选，同 Manager 内冲突带 `ownerChatId`。
+- 归属记录 key 为 `ownership:<base64url(sessionId)>`，value 为 `{ sessionId, owner }`；owner 是 Manager 内部随机 UUID。acquire 是读后写、非原子；KV 记录是绑定标记/防御路由 bug，不是互斥原语，跨 Manager/进程的单实例绑定由路由层串行化，SDK 只做顺序冲突检测。`SessionOwnership` 协调器是内部实现，公开面只有 `SessionOwnershipStorage` 与 `clearSessionOwnership`。
+- 无 TTL、续租或心跳：崩溃遗留记录由路由层调用 `clearSessionOwnership(storage, sessionId)` 清理，且只能在旧实例已停止或已被 fence 后调用。
+- 旧 key `peri:managed-agent:session:*` 与新 `ownership:*` 互不可见；升级/回滚必须全量停机切换，不做双读兼容。
 - 空闲才允许换绑；运行中、存在未处理输入、待决交互或未确认清理时拒绝换绑，不 cancel、不 close 旧绑定。
 - 关闭是有界所有权事务：`session/close` 在预算内重放。超时返回 `ChatCloseIncompleteError` 并保留 ownership、索引与资源；不产生 `closed` 事实，可重试。
 - `shutdown` 先封闭新准入，再分别结算在途绑定/关闭，最后释放 WASM 运行后端；失败聚合上报，可重试。
 
-`ChatManager` 接收调用方注入的原子 KV，并在内部为每个实例构造 `SessionOwnership` 协调器。它解决同一个 Session 被多个 Chat 句柄或服务实例同时绑定的问题：重复执行会造成消息双写与工具重复调用。绑定前向共享原子 KV 以 Session ID 为唯一 key 写入 owner（Manager 实例 UUID），`acquireIfAbsent` 成功者获得执行权，其他实例得到冲突并在 CF 映射为 409。ownership 只在清理确认后释放；关闭超时或失败时保留，避免其他实例接管半关闭会话。`MemoryKV` 仅单进程有效，跨进程必须注入支持 `acquireIfAbsent`/`releaseIfOwner` 的持久原子 KV。
+`ChatManager` 接收调用方注入的存储端口，并在内部为每个实例构造 `SessionOwnership` 协调器。它解决同一个 Session 被多个 Chat 句柄或服务实例同时绑定的问题：重复执行会造成消息双写与工具重复调用。绑定前向共享存储写入以 Session ID 为唯一 key 的记录（Manager 实例 owner），加载路径读到其他 owner 时冲突并在 CF 映射为 409；不覆盖已有记录。ownership 只在清理确认后释放；关闭超时或失败时保留，避免其他实例接管半关闭会话。unstorage memory driver 仅单进程有效；跨实例需要共享 storage，并由路由层保证同一 Session 的单实例绑定与崩溃清理。加载路径已有控制者时冲突映射 409 `binding_conflict`；加载路径（`change_session`）的 KV 读/写失败映射 500 `claim_failed`；新会话路径（`create_new_session`）claim 阶段失败（本地/KV 冲突或 KV 读/写失败）映射 500 `session_creation_failed`（stage `claim`，带 `createdSessionId`）。没有通用 503 ownership 错误码。release 故障保留记录供重试。
 
 ## 5. 事实与同步
 

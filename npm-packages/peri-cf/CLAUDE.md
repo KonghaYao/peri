@@ -107,5 +107,5 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
   `prepare:wasm` 只校验并原子发布到 `wasm/generated`。`core/shared/runtime-limits.ts` 属于 wasm
   构建输入。
 
-默认没有本地文件/终端工具；远程能力需经 `PERI_MCP_SERVERS` 单独配置。单进程 `MemoryKV` 不能宣称
+默认没有本地文件/终端工具；远程能力需经 `PERI_MCP_SERVERS` 单独配置。单进程 memory storage 不能宣称
 多实例接管；工具环境、真实模型/Store 与部署端资源仍需环境验收。

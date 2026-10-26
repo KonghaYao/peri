@@ -30,7 +30,7 @@ function setup(
     const options: ChatManagerInternalOptions = {
         agentConfig: {},
         database,
-        sessionOwnershipKv: ownership,
+        sessionOwnershipStorage: ownership,
         chatConfig: {
             runtime: {
                 kind: "transport",

@@ -1,4 +1,4 @@
-import { SessionOwnershipConflictError } from "../kv/session-ownership-conflict-error";
+import { SessionOwnershipConflictError } from "./ownership";
 import type { WasmRuntimeLease } from "../wasm/runtime-pool";
 import {
     PayloadReadError,

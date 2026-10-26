@@ -45,7 +45,9 @@ Peri WASM Agent 的 Bun 长驻服务 + 浏览器 Chat。服务端持有 `ChatMan
 Action 封套为 `{ ...action, target: { sessionId, bindingRevision } }`；空句柄用
 `{sessionId:null,bindingRevision:0}`。`send` 回执的 `accepted` 是入队，不表示已投递；`cancel` 的
 `requested` 不是 stopped。动作失败以 `disposition`（`rejected`/`unknown`/`not_sent`）表达可重试性，
-HTTP 状态不单独决定重试。
+HTTP 状态不单独决定重试。加载路径的绑定冲突映射 409 `binding_conflict`，KV 读/写失败映射 500 `claim_failed`；
+新会话 claim 阶段失败（本地/KV 冲突或 KV 读/写失败）映射 500 `session_creation_failed`（stage `claim`）。
+没有通用 503 ownership 错误码；本轮不新增 503。
 
 ## 环境变量
 
@@ -99,7 +101,7 @@ bun run build        # prepare:wasm + Vite；需要 WASM 工具链
 
 ## 部署限制
 
-- 单进程 ownership：默认 `MemoryKV` 作为原子 KV，由 `ChatManager` 内部构造协调器；多实例部署必须注入共享原子 KV；不能宣称跨实例接管。
+- 单进程 ownership：默认 `createStorage()`（unstorage memory driver）作为 `sessionOwnershipStorage`，由 `ChatManager` 内部构造协调器；多实例部署必须提供共享 storage 与路由层串行化/崩溃清理；不能宣称跨实例接管。
 - 进程退出会结束在途执行；历史仍在 Store，可重新加载续聊，但不恢复旧执行。
 - 工具面只保留远程 Streamable HTTP MCP；WASM 部署没有进程内文件/终端 builtin。
 - hosted Workers/DO 路径已删除；Bun 服务是唯一后端入口。没有认证、限流或多租户隔离。

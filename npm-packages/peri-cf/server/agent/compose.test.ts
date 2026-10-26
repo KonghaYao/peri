@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  MemoryKV,
   PayloadReadError,
   type ChatDatabase,
   type ChatRuntime,
@@ -148,7 +147,6 @@ function assembled(options: {
   const logs = options.logs ?? [];
   const manager = createSdkChatManager(config, {
     database,
-    sessionOwnershipKv: new MemoryKV(),
     chatConfig: {
       runtime: options.useDefaultRuntime
         ? undefined

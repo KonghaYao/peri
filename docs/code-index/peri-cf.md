@@ -33,7 +33,7 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 - **静态资源**：非 `/api/*` 路径由 Bun 入口提供 `dist/client` 与 `index.html` 回退；Vite 开发服务器把
   `/api` 代理到 Bun 服务。
 - **没有访问控制**：服务不提供认证、限流或多租户隔离；部署入口鉴权是必要条件。
-- **单进程 ownership**：CF 传入 `MemoryKV` 作为 ownership KV，由 `ChatManager` 内部构造协调器；多实例部署必须注入共享原子 KV，不能宣称
+- **单进程 ownership**：`compose.ts` 默认使用 `createStorage()`（unstorage memory driver）作为 `sessionOwnershipStorage`，由 `ChatManager` 内部构造协调器；多实例部署必须提供共享 storage 与路由层串行化/崩溃清理，不能宣称
   跨实例接管。
 
 ## 路由
@@ -56,6 +56,13 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 4. 若服务端已有该 Session 的控制者，`change_session` 返回 `binding_conflict`；前端释放候选句柄，改用
    Session ID 寻址既有句柄，不重复绑定。切换页面只释放本地连接，不 cancel、不 close。
 5. 新会话走 `create_new_session`，同样等待 202 后才连接；失败时清理候选句柄。
+
+## 错误映射
+
+- 加载路径已有控制者：409 `binding_conflict`。
+- 加载路径 KV 读/写失败：500 `claim_failed`。
+- 新会话 claim 阶段失败（本地/KV 冲突或 KV 读/写失败）：500 `session_creation_failed`（stage `claim`）。
+- 没有通用 503 ownership 错误码；`closed` 仍是独立的 503。
 
 ## 入口
 

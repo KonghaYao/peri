@@ -2,7 +2,6 @@ import { expect, test } from "bun:test";
 import { MemoryExecutionKv } from "../src/execution/memory-registry";
 import { ExecutionCoordinator } from "../src/execution/coordinator";
 import { KvExecutionRegistry, type AtomicExecutionKv, type ExecutionKvValue } from "../src/execution/kv-registry";
-import { MemoryKV } from "../src/kv/memory-kv";
 import type { DomainWorkCommand, ExecutionAction, ExecutionMutation, ExecutionRegistry, ExecutionTicket, ExecutionDomainPort } from "../src/execution/types";
 
 const instance = { instanceId: "instance", generationId: "generation", proofRoute: { kind: "external" as const, reference: "owner" } };
@@ -42,7 +41,7 @@ async function contract(registry: ExecutionRegistry) {
 /** 原子 KV 适配器：与部署方的 durable 后端共用同一份 envelope 契约。 */
 function kvAdapter(durability: "durable" | "bestEffort") {
     const values = new Map<string, ExecutionKvValue>();
-    const kv: AtomicExecutionKv = Object.assign(new MemoryKV(), {
+    const kv: AtomicExecutionKv = {
         durability,
         readExecutionValue: async (key: string) => structuredClone(values.get(key) ?? null),
         compareAndSetExecutionValue: async (key: string, version: number | null, next: ExecutionKvValue) => {
@@ -50,7 +49,7 @@ function kvAdapter(durability: "durable" | "bestEffort") {
             values.set(key, structuredClone(next));
             return true;
         },
-    });
+    };
     return { values, registry: new KvExecutionRegistry(kv) };
 }
 

@@ -8,9 +8,9 @@ import { ChatUserAction } from "../src/chat/action";
 import { createChatInstance } from "../src/chat/instance-factory";
 import { ChatManager } from "../src/chat/manager";
 import type { ChatInstanceContext } from "../src/chat/service-support";
-import { MemoryKV } from "../src/kv/memory-kv";
 import type { JsonRpcNotification, Transport } from "../src/transport/types";
 import { FakeDatabase, directoryEntry } from "./chat-fixtures";
+import { OwnershipProbe } from "./ownership-probe";
 
 class TestTransport implements Transport {
     readonly requests: Array<{ method: string; params?: unknown }> = [];
@@ -198,7 +198,7 @@ describe("default factory wiring", () => {
         const manager = new ChatManager({
             agentConfig: {},
             database: new FakeDatabase(),
-            sessionOwnershipKv: new MemoryKV(),
+            sessionOwnershipStorage: new OwnershipProbe(),
             chatConfig: {
                 runtime: {
                     kind: "transport",
@@ -228,7 +228,7 @@ describe("default factory wiring", () => {
         const manager = new ChatManager({
             agentConfig: {},
             database: new FakeDatabase(),
-            sessionOwnershipKv: new MemoryKV(),
+            sessionOwnershipStorage: new OwnershipProbe(),
             chatConfig: {
                 runtime: { kind: "transport", factory: () => transport },
                 defaults: { path: "/workspace" },

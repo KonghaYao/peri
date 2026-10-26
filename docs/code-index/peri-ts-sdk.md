@@ -7,7 +7,7 @@
 
 | 入口 | 文件 | 内容 |
 | --- | --- | --- |
-| 主入口 | `npm-packages/@peri-sdk/src/sdk/index.ts` → `src/chat/public.ts` | `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatViewRegistry`、公开类型/错误（含 `ChatManagerContract`）、Store/KV/transport 类型 |
+| 主入口 | `npm-packages/@peri-sdk/src/sdk/index.ts` → `src/chat/public.ts` | `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatViewRegistry`、公开类型/错误（含 `ChatManagerContract`）、ownership 公开面（`SessionOwnershipStorage` 类型、`clearSessionOwnership` 函数）、Store/KV/transport 类型 |
 | `/portable` | `src/portable.ts` | 主入口的 Chat 公共面 + 嵌入方驱动的执行准入核心；准入摘要仍依赖 `node:crypto` |
 | `/view` | `src/view/index.ts` | 浏览器安全展示：`ChatView`、`ChatReplica`、`readSessionView`、载荷读取、同步协议；不引入 Node 运行时依赖，也不导出 `ChatViewRegistry` |
 | `/wasm` | `src/wasm.ts` | Emscripten ACP 运行后端、loader、`WasmAcpTransport`、scheduler 端口 |
@@ -29,7 +29,7 @@
 | 类型/错误 | `src/chat/types.ts`、`src/chat/errors.ts` | `ChatRuntime`、`ChatDefaults`、`ChatLifecycleOptions`、`PeriInstancePort`、错误 `disposition` 与 `ChatCloseIncompleteError` |
 | 事实 | `src/chat/facts.ts`、`src/chat/fact-hub.ts` | 按绑定代次编号的事实封套；晚挂 View 重放 |
 | 回执 | `src/chat/send-receipt.ts` | `inputId` 稳定；`accepted` 是入队，投递等待是另一件事 |
-| SessionOwnership | `src/chat/ownership.ts`、`src/kv/{types,memory-kv,session-ownership-key,session-ownership-conflict-error}.ts` | `ChatManager` 接收 `AtomicSessionOwnershipKv` 并在内部构造 `AtomicSessionOwnership`；后者只接受原子 `acquireIfAbsent`/`releaseIfOwner`；`MemoryKV` 仅单进程 |
+| Session ownership（内部） | `src/chat/ownership.ts`、`src/chat/types.ts` | `ChatManager` 接收 3 方法 `SessionOwnershipStorage` 并在内部构造 `KvSessionOwnership`（owner 为实例随机 UUID）；key 为 `ownership:<base64url(sessionId)>`，value 为 `{ sessionId, owner }`；acquire 是读后写、非原子，KV 记录是绑定标记/防御路由 bug，不是互斥原语；无 TTL/续租/CAS，路由层负责串行化与 `clearSessionOwnership`；`LocalSessionIndex` 负责同 Manager 内句柄互斥。`SessionOwnership`/`KvSessionOwnership`/`SessionOwnershipConflictError`/key 函数仅模块内使用；入口只导出 `SessionOwnershipStorage` 与 `clearSessionOwnership` |
 | 工厂 | `src/chat/instance-factory.ts`、`src/chat/service-support.ts` | 把 Manager 上下文转换为一次 `PeriInstance`；生产默认装配，测试可注入 |
 | 生命周期预算 | `src/util/deadline.ts`、`src/chat/service-lifecycle.ts` | 关闭/启动/shutdown 的有界等待；超时是 Incomplete，不是停止证明 |
 

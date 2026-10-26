@@ -7,7 +7,6 @@ import { once } from "node:events";
 import {
   ChatManager,
   ChatUserAction,
-  MemoryKV,
   SessionBindingConflictError,
   TursoStorage,
   startWasmRuntime,
@@ -16,6 +15,7 @@ import {
 } from "../dist/index.js";
 import { ChatDocument } from "../src/view/chat-document";
 import { readSessionView } from "../src/view/session-view";
+import { OwnershipProbe } from "./ownership-probe";
 
 async function unusedPort(): Promise<number> {
   const listener = createServer();
@@ -150,10 +150,10 @@ async function fixture() {
       LANGFUSE_USER_ID: "wasm-test-user",
     },
   };
-  const managerFor = (kv: MemoryKV): ChatManager => new ChatManager({
+  const managerFor = (storagePort: OwnershipProbe): ChatManager => new ChatManager({
     agentConfig,
     database: databaseOver(storage),
-    sessionOwnershipKv: kv,
+    sessionOwnershipStorage: storagePort,
     chatConfig: {
       runtime: wasmRuntime,
       defaults: { path: workspace },
@@ -177,7 +177,7 @@ async function fixture() {
 
 test("create, send two inputs, cancel, close and reload run through the bundled WASM ACP Host", async () => {
   const f = await fixture();
-  const manager = f.managerFor(new MemoryKV());
+  const manager = f.managerFor(new OwnershipProbe());
   let primaryError: unknown;
   try {
     const chat = manager.createChat({ path: f.workspace });
@@ -236,7 +236,7 @@ test("create, send two inputs, cancel, close and reload run through the bundled 
 
 test("a second manager cannot own the same real Session and never starts its transport", async () => {
   const f = await fixture();
-  const kv = new MemoryKV();
+  const kv = new OwnershipProbe();
   const firstManager = f.managerFor(kv);
   let secondTransportStarted = false;
   let primaryError: unknown;
@@ -248,7 +248,7 @@ test("a second manager cannot own the same real Session and never starts its tra
     const transportManager = new ChatManager({
       agentConfig: { cwd: f.workspace, settings: {}, storage: { url: "http://127.0.0.1:1", authToken: "x" }, machineId: "m" },
       database: databaseOver(f.storage),
-      sessionOwnershipKv: kv,
+      sessionOwnershipStorage: kv,
       chatConfig: {
         runtime: {
           kind: "transport",

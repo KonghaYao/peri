@@ -56,8 +56,9 @@ function statusFor(error: ChatActionError): number {
  * Action 错误映射。
  *
  * `invalid_action` → 400；busy/binding_conflict/not_ready → 409；closed → 503；
- * 绑定失败、session 创建失败与 unknown/internal → 500。未知错误统一 unknown，
- * 绝不声称动作未生效。
+ * 加载路径 ownership 读/写故障（`claim_failed`）、session 创建失败
+ * （`session_creation_failed`，含 stage `claim`）与 unknown/internal → 500。
+ * 未知错误统一 unknown，绝不声称动作未生效。
  */
 export function mapChatActionError(
   error: unknown,

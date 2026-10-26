@@ -88,8 +88,9 @@ Session。读取历史可以有多个 `ChatView`/`ChatReplica` 观察者，但�
 | 责任方 | 提供什么 |
 | --- | --- |
 | 使用方的业务服务与部署平台 | User 身份和授权；User 与 SessionDB 的 1:1 配置；Workspace 归属；Volume、microVM/远端环境、挂载、网络与生命周期；部署 Workspace MCP。 |
+| 使用方的路由层 | 同一 Session 单实例绑定：串行化 acquire，换绑前 drain 旧实例或清除旧记录，崩溃后清理 `clearSessionOwnership`；KV 故障 fail closed。SDK 的 acquire 是读后写、非原子，路由层不得依赖 KV 记录提供互斥。 |
 | Peri | SessionDB 的 Workspace / Session 归属、消息和执行数据；Agent 执行核心；Workspace MCP 服务程序、工具与任务语义。 |
-| TypeScript SDK | `ChatManager`/`ChatService`/`ChatUserAction`/`ChatView`/`ChatReplica`、SessionOwnership 协调、WASM ACP 运行后端装配、`ChatDatabase` 目录读取、载荷与同步契约。 |
+| TypeScript SDK | `ChatManager`/`ChatService`/`ChatUserAction`/`ChatView`/`ChatReplica`、SessionOwnership 记录与顺序冲突检测（公开面仅 `SessionOwnershipStorage`/`clearSessionOwnership`）、WASM ACP 运行后端装配、`ChatDatabase` 目录读取、载荷与同步契约。 |
 
 因此，审查 SDK 是否符合本图时，microVM、Volume、User 鉴权和专属数据库配置应检查**接入边界是否
 可由使用方提供**，不能把它们列为 SDK 尚未实现的功能。Peri 的 Store 和 Workspace MCP 规则也应在
@@ -113,13 +114,20 @@ Peri 层验证。
 
 1. **身份分离**：`SessionId` 是持久身份；`ChatService.id` 不是持久身份，不能写进 Store 或用于跨进程
    恢复。公开聊天 ID 继续使用真实 ACP Session ID。
-2. **单执行者**：SessionOwnership 由使用方注入的原子 KV 协调。`MemoryKV` 只适用于单进程；跨进程必须
-   注入支持 `acquireIfAbsent(key, owner)` / `releaseIfOwner(key, owner)` 的实现。过期不是旧执行已停止的证明。
+2. **单执行者**：SessionOwnership 由使用方注入的 3 方法存储端口记录。SDK 不做 TTL、续租或原子 CAS；
+   acquire 是读后写、非原子，KV 记录是绑定标记/防御路由 bug，不是互斥原语。同一 Session 的单实例绑定由
+   路由层串行化，同一 Manager 内两个 Chat 句柄由 `LocalSessionIndex` 同步互斥。
+   错误映射：加载路径冲突 409 `binding_conflict`、KV 读/写失败 500 `claim_failed`；新会话 claim 阶段失败
+   500 `session_creation_failed`（stage `claim`）；没有 ownership 专用 503。
+   崩溃遗留记录必须由路由层调用 `clearSessionOwnership` 清理；只在旧实例已停止或已被 fence 后调用。
+   ownership 的公开面只有 `SessionOwnershipStorage` 与 `clearSessionOwnership`；协调器 `SessionOwnership`
+   与 `KvSessionOwnership` 是内部实现。
 3. **共享 MCP 地址 ≠ 共享 client**：地址与服务端实例可共享；client、声明路由、审批状态按会话隔离。
    SDK 不启动或销毁外部 Workspace 环境。
 4. **DB 连接共享 ≠ TS 对象进 Rust Store**：PeriInstance 的存储配置沿用原有部署配置；SDK 不把 TS
    对象直接传进 Rust Store。
 5. **运行后端回收与句柄身份分开**：当前只做手动 `closeChat`/`shutdown`，不启用自动 idle 回收。活动运行、
    未处理输入、待决交互、未确认清理不可被回收。
-6. **单进程 CF 部署**：CF 默认 `MemoryKV`，不能宣称多实例接管；需要多实例时由部署注入共享原子 KV。
+6. **单进程 CF 部署**：CF 默认 `createStorage()`（unstorage memory driver），不能宣称多实例接管；
+   需要多实例时由部署提供共享 storage，并在路由层完成串行化与崩溃清理。
 7. **WASM 目标不等于 hosted 验收**：WASM 部署是已实现路径；普通浏览器或托管 Workers 的生产部署未验收。

@@ -12,7 +12,6 @@ import type {
     AnswerAction, CancelAction, ForceSendAction, HistoryAction, SendAction, SessionAction, TakeBackAction,
 } from "./action";
 import type { ChatFact, ChatFactObserver } from "./facts";
-import type { AtomicSessionOwnershipKv } from "../kv/types";
 
 /**
  * Chat 控制面与 View 的冻结契约（Phase 0）。
@@ -71,16 +70,27 @@ export interface ChatDatabase {
 }
 
 /**
+ * 宿主提供的 Session ownership 存储端口。
+ *
+ * 只要求 3 个方法；unstorage 的 `Storage` 结构化满足该端口。SDK 不 import
+ * unstorage，也不做 TTL、续租或 CAS。读后写非原子：同一 Session 的单实例
+ * 绑定由路由层串行化保证。
+ */
+export interface SessionOwnershipStorage {
+    getItem(key: string): Promise<unknown>;
+    setItem(key: string, value: unknown): Promise<void>;
+    removeItem(key: string): Promise<void>;
+}
+
+/**
  * Manager 内部的 Session 执行权协调器。
  *
- * 调用方只注入底层原子 KV（`ChatManagerOptions.sessionOwnershipKv`），
- * 由 `ChatManager` 为每个实例构造独立的 ownership，避免多个 Manager
- * 共享同一个 owner 身份。此接口不对外导出。
+ * 由 `ChatManager` 为每个实例构造独立的 ownership（owner 为内部随机
+ * UUID），避免多个 Manager 共享同一个 owner 身份。此接口不对外导出。
  */
 export interface SessionOwnership {
     acquire(sessionId: string): Promise<void>;
     release(sessionId: string): Promise<void>;
-    releaseAll(): Promise<void>;
 }
 
 export interface ChatDefaults {
@@ -138,8 +148,8 @@ export interface ChatManagerOptions {
     /** 纯 JSON 配置；构造时序列化快照，拒绝函数/循环/不可序列化值。 */
     agentConfig: unknown;
     database: ChatDatabase;
-    /** 跨 Manager/进程裁决 Session 执行权的原子 KV；Manager 内部构造 ownership。 */
-    sessionOwnershipKv: AtomicSessionOwnershipKv;
+    /** Session 归属记录存储；Manager 内部构造 ownership 并生成 owner。 */
+    sessionOwnershipStorage: SessionOwnershipStorage;
     /** Chat 运行配置；runtime 必填。 */
     chatConfig: ChatConfig;
 }

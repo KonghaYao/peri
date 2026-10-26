@@ -1,4 +1,4 @@
-// 详细设计用的场景伪代码；managedAgentKv 等由宿主提供。
+// 详细设计用的场景伪代码；sessionOwnershipStorage 等由宿主提供。
 // 实际就是 meta_harness 全部关闭
 const bearHarness = BareHarnessConfig;
 
@@ -15,7 +15,7 @@ const storage = new TursoStorage({ url: "turso://<database>.turso.io", authToken
 
 const workspaceId = "workspaceId";
 const workspacePath = "/tmp/peri-workspace";
-// 调用方注入共享 KV；其占位适配器必须提供原子 acquire-if-absent。
+// 调用方注入存储端口；unstorage 由宿主安装，SDK 不 import 其实现。
 const manager = new ChatManager({
     agentConfig: {
         cwd: workspacePath,
@@ -28,7 +28,7 @@ const manager = new ChatManager({
         listSessions: (path) => storage.getSessions(path ?? workspacePath),
         getSession: (id) => storage.getSession(id),
     },
-    sessionOwnershipKv: managedAgentKv,
+    sessionOwnershipStorage: managedAgentStorage,
     chatConfig: {
         // 执行装配由调用方选择：WASM 部署用 runtime.kind="wasm"；
         // 其他部署用 runtime.kind="transport" 注入自有 transport。SDK 不启动 Peri 或 Workspace 进程。

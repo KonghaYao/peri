@@ -32,7 +32,7 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
 
 ## 组合根与装配
 
-- **平台装配**：`server/agent/compose.ts` 读取 `ServerConfig`，构造 Store 适配、ownership 原子 KV（`MemoryKV`）、
+- **平台装配**：`server/agent/compose.ts` 读取 `ServerConfig`，构造 Store 适配、ownership 存储（默认 `createStorage()`）、
   WASM `ChatRuntime`、默认 path/instructions/MCP 与关闭预算；server 内只有这里构造具体 `ChatManager`。
 - **编排层**：`server/agent/manager.ts` 的 `AppChatManager` 只持有注入的 `ChatManagerContract` 与
   `ChatViewRegistry`。四个查询/登记方法直接转发；`closeChat` 先关 SDK 句柄再释放 View；
@@ -56,8 +56,13 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
 ## 生命周期与失败语义
 
 - `createChat` 同步登记，不启动 WASM、不取得 SessionOwnership；首次绑定动作才激活运行后端与 Session。
-- 同一 Session 同时至多一个执行所有者；ownership 冲突返回 `binding_conflict` 与 `ownerChatId`，不启动
-  transport。跨进程协调由部署注入的原子 KV 决定；CF 默认 `MemoryKV` 只覆盖单进程。
+- 同一 Session 同时至多一个执行所有者。加载路径（`change_session`）冲突返回 `binding_conflict` 409（跨 Manager 不带
+  `ownerChatId`），KV 读/写失败返回 `claim_failed` 500；新会话路径（`create_new_session`）claim 阶段失败
+  （本地/KV 冲突或 KV 读/写失败）返回 `session_creation_failed` 500（stage `claim`，带 `createdSessionId`）。
+  加载路径不启动 transport；新会话 claim 失败会启动并关闭临时 transport；两条路径都不提交绑定。没有通用 503 ownership 错误码。
+- CF 默认 `createStorage()`（unstorage memory driver）只覆盖单进程；多实例需要共享 storage，并由路由层保证
+  单实例绑定、换绑前 drain/清记录与崩溃清理。acquire 是读后写、非原子，KV 记录是绑定标记/防御路由 bug，
+  不是互斥原语。
 - 关闭复用正常关闭与启动失败清理，并发关闭合并；确认清理后才移除索引与占用。`session/close` 超时
   返回 `ChatCloseIncompleteError`，保留 ownership、资源与原因，可重试。
 - `shutdown` 分两段：编排层先释放全部 View（断开同步连接与文档），再让 SDK 封闭新准入、结算在途
@@ -85,7 +90,7 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
   必要条件。
 - Bun 服务是唯一后端入口；Cloudflare Worker relay 与 `wrangler.jsonc` 已删除。
 - `/api/info` 只返回去敏后的地址（去掉 userinfo、query 与 token），设置页只读展示。
-- 单进程 ownership 不能宣称跨实例接管；多实例部署必须由部署方提供共享原子 KV。
+- 单进程 ownership 不能宣称跨实例接管；多实例部署必须由部署方提供共享 storage 与路由层串行化/崩溃清理。
 - 真实模型/Store/远程 MCP、浏览器验收与 hosted 部署仍需环境验收；单元测试或类型检查不替代真实运行后端。
 
 ## 与其他文档的关系

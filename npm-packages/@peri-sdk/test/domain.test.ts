@@ -3,7 +3,6 @@ import { ChatUserAction } from "../src/chat/action";
 import { SessionBindingConflictError } from "../src/chat/errors";
 import { ChatManager } from "../src/chat/manager";
 import type { ChatManagerInternalOptions } from "../src/chat/manager";
-import { MemoryKV } from "../src/kv/memory-kv";
 import {
     FakeDatabase,
     FakePort,
@@ -29,7 +28,7 @@ function harness(options: {
     const managerOptions: ChatManagerInternalOptions = {
         agentConfig: { model: "test" },
         database,
-        sessionOwnershipKv: ownership,
+        sessionOwnershipStorage: ownership,
         chatConfig: {
             runtime: {
                 kind: "transport",
@@ -47,18 +46,6 @@ function harness(options: {
     };
     return { manager: new ChatManager(managerOptions), ownership, database, ports };
 }
-
-test("MemoryKV acquires once and releases only for its owner", async () => {
-    const kv = new MemoryKV();
-    const results = await Promise.all([
-        kv.acquireIfAbsent("session", "first"),
-        kv.acquireIfAbsent("session", "second"),
-    ]);
-    expect(results).toEqual([true, false]);
-    expect(await kv.releaseIfOwner("session", "second")).toBe(false);
-    expect(await kv.releaseIfOwner("session", "first")).toBe(true);
-    expect(await kv.acquireIfAbsent("session", "second")).toBe(true);
-});
 
 describe("ChatManager lifecycle", () => {
     test("declaration is synchronous and starts nothing", () => {
@@ -156,7 +143,9 @@ describe("ChatManager lifecycle", () => {
 });
 
 describe("Session ownership", () => {
-    test("two managers racing for the same Session: exactly one loads it", async () => {
+    // 读后写非原子：跨 Manager 的并发 acquire 不由 SDK 串行化；路由层负责
+    // 单实例绑定。这里验证顺序冲突。
+    test("a second manager cannot load a Session already held by another manager", async () => {
         const ownership = new OwnershipProbe();
         const database = new FakeDatabase();
         database.seed(directoryEntry("session-1"));
@@ -165,21 +154,17 @@ describe("Session ownership", () => {
         const firstChat = first.manager.createChat();
         const secondChat = second.manager.createChat();
 
-        const results = await Promise.allSettled([
-            firstChat.execute(ChatUserAction.changeSessionTo("session-1")),
-            secondChat.execute(ChatUserAction.changeSessionTo("session-1")),
-        ]);
+        await firstChat.execute(
+            ChatUserAction.changeSessionTo("session-1"),
+        );
+        await expect(
+            secondChat.execute(
+                ChatUserAction.changeSessionTo("session-1"),
+            ),
+        ).rejects.toBeInstanceOf(SessionBindingConflictError);
 
-        expect(
-            results.filter((result) => result.status === "fulfilled"),
-        ).toHaveLength(1);
-        const loser = results.find(
-            (result) => result.status === "rejected",
-        ) as PromiseRejectedResult;
-        expect(loser.reason).toBeInstanceOf(SessionBindingConflictError);
-        expect(
-            (loser.reason as SessionBindingConflictError).ownerChatId,
-        ).toBeUndefined();
+        expect(firstChat.sessionId).toBe("session-1");
+        expect(secondChat.sessionId).toBeNull();
         expect(first.ports.length + second.ports.length).toBe(1);
     });
 
@@ -192,23 +177,21 @@ describe("Session ownership", () => {
         const firstChat = first.manager.createChat({ path: "/first" });
         const secondChat = second.manager.createChat({ path: "/second" });
 
-        const results = await Promise.allSettled([
-            firstChat.execute(ChatUserAction.changeSessionTo("session-1")),
-            secondChat.execute(ChatUserAction.changeSessionTo("session-1")),
-        ]);
+        await firstChat.execute(
+            ChatUserAction.changeSessionTo("session-1"),
+        );
+        await expect(
+            secondChat.execute(
+                ChatUserAction.changeSessionTo("session-1"),
+            ),
+        ).rejects.toBeInstanceOf(SessionBindingConflictError);
 
-        expect(
-            results.filter((result) => result.status === "fulfilled"),
-        ).toHaveLength(1);
-        expect(
-            results.find((result) => result.status === "rejected")?.reason,
-        ).toBeInstanceOf(SessionBindingConflictError);
         expect(first.ownership.has("session-1")).toBe(true);
         expect(first.ownership.size).toBe(1);
         expect(
             [firstChat.sessionId, secondChat.sessionId].filter(
                 (sessionId) => sessionId === "session-1",
             ),
-        ).toHaveLength(1);
+        ).toEqual(["session-1"]);
     });
 });

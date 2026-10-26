@@ -35,7 +35,7 @@ function setup(
     const options: ChatManagerInternalOptions = {
         agentConfig: {},
         database,
-        sessionOwnershipKv: ownership,
+        sessionOwnershipStorage: ownership,
         chatConfig: {
             runtime: runtime ?? {
                 kind: "transport",
@@ -305,5 +305,43 @@ describe("bounded shutdown", () => {
         expect(closeAllCalls).toBe(1);
         expect(setupValue.manager.getChat(chat.id)).toBeUndefined();
         expect(setupValue.ownership.size).toBe(0);
+    });
+});
+
+describe("ownership storage failure", () => {
+    test("claim read/write failures leave the chat unbound and allow a clean retry", async () => {
+        for (const failure of ["failRead", "failWrite"] as const) {
+            const setupValue = setup();
+            setupValue.ownership[failure]("session-new");
+            const chat = setupValue.manager.createChat();
+
+            await expect(
+                chat.execute(
+                    ChatUserAction.createNewSession({ requestId: failure }),
+                ),
+            ).rejects.toMatchObject({
+                name: "SessionCreationError",
+                stage: "claim",
+                createdSessionId: "session-new",
+            });
+
+            expect(chat.sessionId).toBeNull();
+            expect(chat.binding).toBeNull();
+            expect(
+                setupValue.manager.findChatBySession("session-new"),
+            ).toBeUndefined();
+            expect(setupValue.ownership.has("session-new")).toBe(false);
+            // 失败后运行后端已关闭，没有留下可继续执行的旧实例。
+            expect(setupValue.ports[0].closeCalls).toBe(1);
+
+            setupValue.ownership.clearFailure("session-new");
+            const ready = await chat.execute(
+                ChatUserAction.createNewSession({
+                    requestId: `${failure}-retry`,
+                }),
+            );
+            expect(ready.sessionId).toBe("session-new");
+            expect(setupValue.ownership.has("session-new")).toBe(true);
+        }
     });
 });

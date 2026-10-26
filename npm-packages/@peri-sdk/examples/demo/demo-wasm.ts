@@ -4,12 +4,12 @@ import { resolve } from "node:path";
 import {
     BareHarnessConfig,
     ChatManager,
-    MemoryKV,
     TursoStorage,
     type PeriConfig,
     type SessionStorage,
 } from "../../src/sdk/index";
 import { WasmAcpTransport } from "../../src/wasm";
+import { DemoOwnershipStorage } from "./demo-storage";
 import { createDemoApp, sessionDatabase } from "./chat-demo";
 
 const configuredWorkspace = Bun.env.PERI_WORKSPACE;
@@ -87,7 +87,7 @@ const manager = new ChatManager({
         machineId,
     },
     database: sessionDatabase(storage),
-    sessionOwnershipKv: new MemoryKV(),
+    sessionOwnershipStorage: new DemoOwnershipStorage(),
     chatConfig: {
         // transport 入口按 path 装配独立运行后端；ChatManager 不持有 WASM 运行后端池。
         runtime: {

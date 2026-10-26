@@ -51,7 +51,8 @@
 | D5 | 已按本阶段任务执行：旧公开门面删除，不留 shim；对外发布说明需标注 breaking change。 |
 | D6 | 已执行：`listSessions` 只返回目录事实，不再提供每会话运行态；选中会话运行态来自副本。 |
 | D7 | 已实现：内容寻址 payload ref 与运行侧预算；回归见 `tests/peri-instance.test.ts`、`tests/tool-payloads.test.ts`。 |
-| D8 | 部署限制：CF SessionOwnership 默认单进程 `MemoryKV`；多实例需注入共享原子 KV。 |
+| D8 | 部署限制：CF SessionOwnership 默认 `createStorage()`（unstorage memory driver），仍是单进程；多实例需共享 storage，并由路由层保证单实例绑定、换绑/崩溃清理。 |
+| D9 | 公开面：Session ownership 只公开 `SessionOwnershipStorage`（type）与 `clearSessionOwnership`（function）；`SessionOwnership` 协调器、`KvSessionOwnership`、`SessionOwnershipConflictError` 与 key 函数均为内部实现，不从主入口、`/portable` 或 `/view` 导出。 |
 
 ## 5. 验收 A01-A22
 
@@ -98,7 +99,7 @@ typecheck 或旧 dist 冒充。测试名省略文件时均为 `npm-packages/@per
 | `cd npm-packages/@peri-sdk && bun run typecheck` | 0 | `tsc --noEmit` 与 demo tsconfig 均通过 |
 | `cd npm-packages/@peri-sdk && bun test tests/chat-close-bounded.test.ts tests/chat-binding.test.ts tests/chat-manager.test.ts tests/chat-actions.test.ts tests/chat-view.test.ts` | 0 | 52 pass / 0 fail；273 expect；5 files |
 | `cd npm-packages/@peri-sdk && bun test tests/chat-*.test.ts tests/session-sync.test.ts tests/public-view.test.ts tests/sandbox.test.ts` | 0 | 150 pass / 0 fail；806 expect；13 files |
-| `cd npm-packages/@peri-sdk && bun test tests test` | 0 | 409 pass / 0 fail；2945 expect；49 files（含 A15 新增组合用例） |
+| `cd npm-packages/@peri-sdk && bun test tests test` | 0 | 427 pass / 0 fail；3017 expect；49 files（含 A15 新增组合用例） |
 | `cd npm-packages/peri-cf && bun run typecheck` | 0 | 根 TS 与 `server/tsconfig.json` 均通过 |
 | `cd npm-packages/peri-cf && bun test server/agent/views.test.ts server/api/index.test.ts` | 0 | 20 pass / 0 fail；73 expect；2 files |
 | `cd npm-packages/peri-cf && bun test frontend/chat/timeline/Timeline.dom.test.tsx` | 0 | 连续 10 次均为 4 pass / 0 fail |
@@ -181,6 +182,6 @@ typecheck 或旧 dist 冒充。测试名省略文件时均为 `npm-packages/@per
 3. 官方 build 依赖 `MISE_ENV=wasm mise exec --` 注入 `EMSDK`；直接 `bun run build` 在仅有 mise shim
    的环境会把 shim 路径当作工具链并失败，文档已给出正确命令。
 4. 独立复验已完成；A01-A22 的 PASS 仍只覆盖所列自动化/本机运行后端证据，不代表托管部署验收。
-5. `sessionOwnershipKey` 保留既有协调域前缀 `peri:managed-agent:session:`。它是存储 key，不是公开符号；函数名变更不改 key 字符串，以维持升级期跨版本 ownership 互斥。
+5. Session ownership key 改为 `ownership:<base64url(sessionId)>`，value 为 `{ sessionId, owner }`。旧 key `peri:managed-agent:session:<encodeURIComponent(id)>` 与新 key 互不可见；混合版本会各自 acquire 成功，**必须停机切换**（drain 旧实例 → 全量部署 → 放开准入），回滚同样需要全量停机。SDK 不做 TTL/续租/CAS；acquire 是读后写、非原子，KV 记录是绑定标记/防御路由 bug，不是互斥原语；跨 Manager 并发 acquire 不再保证互斥，只有路由层串行化能保证单实例绑定。错误映射：加载路径冲突 409 `binding_conflict`、KV 读/写失败 500 `claim_failed`；新会话 claim 阶段失败 500 `session_creation_failed`（stage `claim`）；没有 ownership 专用 503。
 6. HTTP DELETE 的残留重试按 `chatId` 寻址；若首次 DELETE 使用 Session ID 且句柄移除后 View 仍残留，
    需用 500 响应体中的 `chatId` 重试（GC/app 入口均使用 chat id，不提供 Session ID tombstone）。

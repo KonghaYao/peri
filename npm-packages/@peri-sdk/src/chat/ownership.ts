@@ -1,46 +1,87 @@
-import { SessionOwnershipConflictError } from "../kv/session-ownership-conflict-error";
-import { sessionOwnershipKey } from "../kv/session-ownership-key";
-import type { AtomicSessionOwnershipKv } from "../kv/types";
-import type { SessionOwnership } from "./types";
+import type { SessionOwnership, SessionOwnershipStorage } from "./types";
 
-export { sessionOwnershipKey } from "../kv/session-ownership-key";
+const OWNERSHIP_KEY_PREFIX = "ownership:";
 
 /**
- * 包装底层原子 KV：同一实例内按 Session 去重，跨实例由 KV 的
- * `acquireIfAbsent`/`releaseIfOwner` 裁决。
+ * 共享协调域中的 Session 归属 key（内部符号，不从包入口导出）。
  *
- * 每个 Manager 必须持有自己的 `AtomicSessionOwnership` 实例；共享同一个实例会让
- * 第二个 Manager 被误认为同一 owner。多个实例可以共享同一个 KV 驱动。
+ * base64url 只产生 `[A-Za-z0-9_-]`，不会被 unstorage 的 key normalize 改写；
+ * key 只含 Session ID，不含 path 或 Chat ID。
  */
-export class AtomicSessionOwnership implements SessionOwnership {
+export function sessionOwnershipKey(sessionId: string): string {
+  const bytes = new TextEncoder().encode(sessionId);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return `${OWNERSHIP_KEY_PREFIX}${btoa(binary)
+    .replace(/\+/gu, "-")
+    .replace(/\//gu, "_")
+    .replace(/=+$/u, "")}`;
+}
+
+interface SessionOwnershipRecord {
+  readonly sessionId: string;
+  readonly owner: string;
+}
+
+/**
+ * 本实例要绑定的 Session 已被其他 owner 登记。
+ *
+ * 内部错误：Chat 调用方只会收到 `SessionBindingConflictError`。
+ */
+export class SessionOwnershipConflictError extends Error {
+  constructor(readonly sessionId: string) {
+    super(`Session is already owned by another instance: ${sessionId}`);
+    this.name = "SessionOwnershipConflictError";
+  }
+}
+
+/**
+ * 基于 3 方法存储端口的 Session ownership（内部实现）。
+ *
+ * 读后写不是原子操作：两个实例同时读到空记录时会都写成功。SDK 不检测这种
+ * 竞态；同一 Session 单实例绑定由路由层串行化保证。这里只负责记录读取、
+ * owner 校验与幂等重试。
+ */
+export class KvSessionOwnership implements SessionOwnership {
   private readonly owner = crypto.randomUUID();
   private readonly owned = new Set<string>();
 
-  constructor(private readonly kv: AtomicSessionOwnershipKv) {
+  constructor(private readonly storage: SessionOwnershipStorage) {
     if (
-      !kv ||
-      typeof kv.acquireIfAbsent !== "function" ||
-      typeof kv.releaseIfOwner !== "function"
+      !storage ||
+      typeof storage.getItem !== "function" ||
+      typeof storage.setItem !== "function" ||
+      typeof storage.removeItem !== "function"
     ) {
       throw new TypeError(
-        "AtomicSessionOwnership requires acquireIfAbsent/releaseIfOwner",
+        "Session ownership requires storage with getItem/setItem/removeItem",
       );
     }
   }
 
-  /** 同一实例重复 acquire 同一 Session 是幂等的；跨实例冲突抛错。 */
+  /** 同一实例重复 acquire 幂等；记录属于其他 owner 时冲突且不覆盖。 */
   async acquire(sessionId: string): Promise<void> {
-    if (typeof sessionId !== "string" || sessionId.length === 0) {
-      throw new TypeError("Session id must be a non-empty string");
-    }
+    assertSessionId(sessionId);
     if (this.owned.has(sessionId)) return;
     const key = sessionOwnershipKey(sessionId);
-    if (!(await this.kv.acquireIfAbsent(key, this.owner))) {
-      throw new SessionOwnershipConflictError(key, sessionId);
+    const value = await this.storage.getItem(key);
+    if (value !== null && value !== undefined) {
+      const record = parseRecord(value, sessionId);
+      if (record.owner !== this.owner) {
+        throw new SessionOwnershipConflictError(sessionId);
+      }
+      this.owned.add(sessionId);
+      return;
     }
+    await this.storage.setItem(key, { sessionId, owner: this.owner });
     this.owned.add(sessionId);
   }
 
+  /**
+   * owner 匹配才删除；记录缺失或已属于其他 owner 时只清理本地状态。
+   *
+   * 读/删失败向上抛出并保留本地 owned，供调用方重试。
+   */
   async release(sessionId: string): Promise<void> {
     if (!this.owned.has(sessionId)) {
       throw new Error(
@@ -48,46 +89,72 @@ export class AtomicSessionOwnership implements SessionOwnership {
       );
     }
     const key = sessionOwnershipKey(sessionId);
-    if (!(await this.kv.releaseIfOwner(key, this.owner))) {
-      throw new Error(
-        `Cannot release session ownership held by another instance: ${key}`,
-      );
+    const value = await this.storage.getItem(key);
+    if (value !== null && value !== undefined) {
+      const record = parseRecord(value, sessionId);
+      if (record.owner === this.owner) {
+        await this.storage.removeItem(key);
+      }
     }
     this.owned.delete(sessionId);
   }
+}
 
-  /** 逆序释放；失败项保留，聚合上报，便于 shutdown 重试。 */
-  async releaseAll(): Promise<void> {
-    const failures: unknown[] = [];
-    for (const sessionId of [...this.owned].reverse()) {
-      try {
-        await this.release(sessionId);
-      } catch (error) {
-        failures.push(error);
-      }
-    }
-    if (failures.length > 0) {
-      throw new AggregateError(
-        failures,
-        "Session ownership release is incomplete",
-      );
-    }
+/**
+ * 路由层清理入口：删除指定 Session 的归属记录，不校验 owner。
+ *
+ * 只能在旧实例已停止或已被 fence 后调用；误调用可能造成双控制者。
+ * 换绑优先让旧实例优雅 release，本函数用于崩溃恢复或强制换绑。
+ */
+export async function clearSessionOwnership(
+  storage: SessionOwnershipStorage,
+  sessionId: string,
+): Promise<void> {
+  if (!storage || typeof storage.removeItem !== "function") {
+    throw new TypeError(
+      "clearSessionOwnership requires storage with removeItem",
+    );
   }
+  assertSessionId(sessionId);
+  await storage.removeItem(sessionOwnershipKey(sessionId));
+}
 
-  has(sessionId: string): boolean {
-    return this.owned.has(sessionId);
+function assertSessionId(sessionId: string): void {
+  if (typeof sessionId !== "string" || sessionId.length === 0) {
+    throw new TypeError("Session id must be a non-empty string");
   }
+}
 
-  get size(): number {
-    return this.owned.size;
+/** 非法记录 fail closed：不当作空记录，也不覆盖。 */
+function parseRecord(value: unknown, sessionId: string): SessionOwnershipRecord {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError(
+      `Invalid session ownership record for ${sessionId}: expected an object`,
+    );
   }
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.sessionId !== "string" ||
+    typeof record.owner !== "string" ||
+    record.owner.length === 0
+  ) {
+    throw new TypeError(
+      `Invalid session ownership record for ${sessionId}: missing sessionId/owner`,
+    );
+  }
+  if (record.sessionId !== sessionId) {
+    throw new TypeError(
+      `Invalid session ownership record for ${sessionId}: sessionId mismatch`,
+    );
+  }
+  return { sessionId: record.sessionId, owner: record.owner };
 }
 
 /**
  * Manager 本地 Session → 句柄索引。
  *
  * 它只回答“本 Manager 的哪个句柄正在加载/绑定/清理该 Session”，
- * 不替代共享 ownership：跨 Manager 的冲突仍由 `SessionOwnership` 决定。
+ * 不替代共享 ownership：跨 Manager 的冲突由 ownership 记录决定。
  * 条目在 binding 开始时写入，确认清理后才移除。
  */
 export class LocalSessionIndex {

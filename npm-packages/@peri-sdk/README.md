@@ -4,18 +4,26 @@
 
 Bun SDK for Peri's ACP Host over a host-injected transport. `ChatManager` 同步登记 Chat 句柄；`ChatService.execute()` 在首次绑定动作时通过默认实例工厂装配一次 `PeriInstance`，取得 Session ownership、初始化 ACP，并创建或加载会话。Peri 负责模型执行与会话持久化；SDK 只做控制面、事实与展示契约。
 
-主入口公开 `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatViewRegistry`、`ChatYjsChannel`、公开类型与错误；需要替换管理器实现时面向类型导出 `ChatManagerContract`。旧 `Agent`、`ManagedAgents`、`SessionDocs`、`SessionViewStore` 与 `Sandbox` 已删除，不在任何发布入口提供，也不保留 shim、别名或双写。
+主入口公开 `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatViewRegistry`、`ChatYjsChannel`、ownership 公开面 `SessionOwnershipStorage` 与 `clearSessionOwnership`、公开类型与错误；需要替换管理器实现时面向类型导出 `ChatManagerContract`。旧 `Agent`、`ManagedAgents`、`SessionDocs`、`SessionViewStore` 与 `Sandbox` 已删除，不在任何发布入口提供，也不保留 shim、别名或双写。
 
 ```ts
 import {
-  ChatManager, ChatUserAction, ChatView, MemoryKV, TursoStorage,
+  ChatManager, ChatUserAction, ChatView, TursoStorage,
   type ChatDatabase,
+  type SessionOwnershipStorage,
 } from "@peri-code/sdk";
 
 const storage = new TursoStorage({ url: "http://127.0.0.1:8081", authToken: "local-dev" });
 const database: ChatDatabase = {
   listSessions: (path) => storage.getSessions(path ?? "/workspace"),
   getSession: (id) => storage.getSession(id),
+};
+// 宿主提供共享存储；Map 只适用于单进程 demo，多实例必须换成 KV/Redis/DO 等。
+const ownershipValues = new Map<string, unknown>();
+const sessionOwnershipStorage: SessionOwnershipStorage = {
+  getItem: async (key) => ownershipValues.get(key) ?? null,
+  setItem: async (key, value) => { ownershipValues.set(key, value); },
+  removeItem: async (key) => { ownershipValues.delete(key); },
 };
 const manager = new ChatManager({
   agentConfig: {
@@ -25,8 +33,8 @@ const manager = new ChatManager({
     machineId: "00000000-0000-4000-8000-000000000001",
   },
   database,
-  // 调用方注入原子 KV；Manager 内部为每个实例构造 ownership。
-  sessionOwnershipKv: new MemoryKV(),
+  // 调用方注入 3 方法存储端口；SDK 不 import 任何具体实现。
+  sessionOwnershipStorage,
   chatConfig: {
     runtime: { kind: "wasm", moduleUrl: new URL("./dist/wasm/peri-wasm.js", import.meta.url) },
     defaults: {
@@ -79,7 +87,7 @@ function createHost(chats: ChatManagerContract) {
 
 `ChatService` 的绑定动作只在空闲时允许换绑；新会话使用句柄/默认 `path`，加载历史用 Store 中的持久 `cwd`，不回退句柄 path。`findChatBySession` 覆盖 binding/cleanup 中的候选；关闭未确认时保留 ownership 与索引供重试。
 
-`ChatManager` 接收原子 KV（`AtomicSessionOwnershipKv`）并在内部为每个实例构造 `SessionOwnership` 协调器：Session ownership key 只含 Session ID，不含 path 或 Chat ID。`MemoryKV` 只适用于单进程；跨进程必须传入实现 `acquireIfAbsent(key, owner)` / `releaseIfOwner(key, owner)` 的原子适配器。普通 unjs `Storage` 没有 compare-and-set，会被拒绝。同一 Session 的并发绑定失败抛 `SessionBindingConflictError`，且不会启动 transport。适配器负责自己的崩溃恢复或租约策略；过期本身不是旧执行已停止的证明。
+`ChatManager` 接收 `SessionOwnershipStorage`（`getItem`/`setItem`/`removeItem`）并在内部为每个实例构造 `SessionOwnership` 协调器，owner 是 Manager 内部的随机 UUID：Session ownership key 只含 Session ID（`ownership:<base64url(sessionId)>`），不含 path 或 Chat ID。unstorage 的 `Storage` 结构化满足该端口；SDK 不 import unstorage，也不做过期判断。记录写入与检查读后写非原子，KV 记录是绑定标记/防御路由 bug，不是互斥原语：同一 Session 的单实例绑定必须由路由层串行化保证，SDK 只负责顺序冲突检测。加载路径的绑定冲突抛 `SessionBindingConflictError`，且不会启动 transport；加载路径的 KV 读/写失败抛 `ChatActionError`（code `claim_failed`，CF 映射 500），新会话 claim 阶段失败（本地/KV 冲突或 KV 读/写失败）会启动并关闭临时 transport，抛 `session_creation_failed`（stage `claim`，CF 映射 500）。没有通用 503 ownership 错误码。无 TTL：崩溃遗留记录需要路由层调用 `clearSessionOwnership(storage, sessionId)` 清理；只能在旧实例已停止或已被 fence 后调用，否则可能造成双控制者。`LocalSessionIndex` 仍负责同一 Manager 内两个 Chat 句柄的同步互斥。Session ownership 的公开面只有 `SessionOwnershipStorage`（type）与 `clearSessionOwnership`（function）；`SessionOwnership`/`KvSessionOwnership`/`SessionOwnershipConflictError` 是内部实现，不从主入口、`/portable` 或 `/view` 导出。
 
 关闭是有预算的所有权事务：`ChatLifecycleOptions` 提供 `closeDrainTimeoutMs`、`startupSettleTimeoutMs`、`activationCloseTimeoutMs`、`shutdownChatTimeoutMs`。`session/close` 在预算内重放；超时返回 `ChatCloseIncompleteError`，保留 ownership、索引与资源，不产生 `closed` 事实。`manager.shutdown()` 先封闭新准入，再聚合清理；可重试。
 
@@ -142,7 +150,7 @@ chatConfig: {
 
 `/portable` 额外公开可自行驱动的准入核心。SDK Chat 不使用它：输入发布是 ACP 队列命令，调度由 Peri mailbox 决定，因此没有 SDK 侧票据、dispatcher generation 或反向准入端点。
 
-`KvExecutionRegistry` 包装 `AtomicExecutionKv` 提供 durable read/CAS apply/resolve；适配器必须实现版本化读取与 compare-and-set，只实现 ownership acquire/release 会被拒绝。`MemoryExecutionKv` 是单进程 `bestEffort` 实现，需要协调器显式用 `allowBestEffort` 选择。注册表写入与回执原子；解析不存在的原始 mutation 会把 NotApplied 封印，防止迟到执行。durable backend、账本与停止证明由嵌入方注入；SDK 不提供本地数据库文件，也不提供基于进程的停止证明。
+`KvExecutionRegistry` 包装 `AtomicExecutionKv` 提供 durable read/CAS apply/resolve；适配器必须实现 `readExecutionValue` 与 `compareAndSetExecutionValue`。`MemoryExecutionKv` 是单进程 `bestEffort` 实现，需要协调器显式用 `allowBestEffort` 选择。注册表写入与回执原子；解析不存在的原始 mutation 会把 NotApplied 封印，防止迟到执行。durable backend、账本与停止证明由嵌入方注入；SDK 不提供本地数据库文件，也不提供基于进程的停止证明。
 
 票据绑定精确的 session、instance/generation、lifecycle/control generation、稳定 work/revision 与 `{turnId, attemptId}`。持久 attempt 经过 queued/entering/running；pause/control 变化使未进入的 work 失效，execution entry 重新校验资格。重放原始准入不会再次消耗稳定 work 预算；未知执行入口只解析原始票据，绝不盲目签发第二次执行。预算跨实例替换保留；缺失停止证明返回 Blocked，不做 lease/TTL 接管。
 

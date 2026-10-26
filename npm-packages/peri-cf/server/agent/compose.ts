@@ -1,11 +1,11 @@
+import { createStorage } from "unstorage";
 import {
   BareHarnessConfig,
   ChatManager,
-  MemoryKV,
-  type AtomicSessionOwnershipKv,
   type ChatConfig,
   type ChatDatabase,
   type ChatLifecycleOptions,
+  type SessionOwnershipStorage,
 } from "@peri-code/sdk";
 import {
   createSchedulerPort,
@@ -43,7 +43,7 @@ export type LogError = (
 /** 平台 seam：省略时使用 CF 的生产默认值。 */
 export interface SdkChatManagerOptions {
   readonly database?: ChatDatabase;
-  readonly sessionOwnershipKv?: AtomicSessionOwnershipKv;
+  readonly sessionOwnershipStorage?: SessionOwnershipStorage;
   readonly chatConfig?: Partial<Pick<ChatConfig, "runtime" | "lifecycle">>;
   readonly instanceFactory?: ChatInstanceFactory;
   readonly logError?: LogError;
@@ -125,7 +125,8 @@ export function createSdkChatManager(
       },
     },
     database: options.database ?? createChatDatabase(config.storage),
-    sessionOwnershipKv: options.sessionOwnershipKv ?? new MemoryKV(),
+    // 默认进程内 memory storage；跨实例接管需要路由层与共享 storage，本轮不接入。
+    sessionOwnershipStorage: options.sessionOwnershipStorage ?? createStorage(),
     chatConfig: {
       runtime: options.chatConfig?.runtime ?? {
         kind: "wasm",

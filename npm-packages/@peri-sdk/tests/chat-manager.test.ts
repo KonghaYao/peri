@@ -28,7 +28,7 @@ function setup(options: {
     const managerOptions: ChatManagerInternalOptions = {
         agentConfig: {},
         database,
-        sessionOwnershipKv: ownership,
+        sessionOwnershipStorage: ownership,
         chatConfig: {
             runtime: {
                 kind: "transport",
@@ -264,7 +264,7 @@ describe("ChatManager ownership coordination", () => {
         await loading;
     });
 
-    test("two managers racing for one session: one wins, the other has no owner id", async () => {
+    test("a second manager cannot acquire a Session already held by another manager", async () => {
         const ownership = new OwnershipProbe();
         const database = new FakeDatabase();
         database.seed(directoryEntry("session-1"));
@@ -273,26 +273,51 @@ describe("ChatManager ownership coordination", () => {
         const firstChat = first.manager.createChat();
         const secondChat = second.manager.createChat();
 
-        const results = await Promise.allSettled([
-            firstChat.execute(ChatUserAction.changeSessionTo("session-1")),
-            secondChat.execute(ChatUserAction.changeSessionTo("session-1")),
-        ]);
+        await firstChat.execute(
+            ChatUserAction.changeSessionTo("session-1"),
+        );
+        // 读后写不是原子操作；跨 Manager 的并发由路由层串行化。这里验证
+        // 第一个 Manager 完成登记后，第二个按顺序 acquire 会冲突。
+        await expect(
+            secondChat.execute(
+                ChatUserAction.changeSessionTo("session-1"),
+            ),
+        ).rejects.toBeInstanceOf(SessionBindingConflictError);
 
-        expect(
-            results.filter((result) => result.status === "fulfilled"),
-        ).toHaveLength(1);
-        const loser = results.find(
-            (result) => result.status === "rejected",
-        ) as PromiseRejectedResult;
-        expect(loser.reason).toBeInstanceOf(SessionBindingConflictError);
-        expect(
-            (loser.reason as SessionBindingConflictError).ownerChatId,
-        ).toBeUndefined();
-        const winner =
-            firstChat.sessionId === "session-1" ? firstChat : secondChat;
-        const losing = winner === firstChat ? secondChat : firstChat;
-        expect(winner.sessionId).toBe("session-1");
-        expect(losing.sessionId).toBeNull();
+        expect(firstChat.sessionId).toBe("session-1");
+        expect(secondChat.sessionId).toBeNull();
+        expect(ownership.has("session-1")).toBe(true);
+    });
+
+    test("load-path storage failures fail closed with claim_failed and allow retry", async () => {
+        for (const failure of ["failRead", "failWrite"] as const) {
+            const { manager, ownership, database, ports } = setup();
+            database.seed(directoryEntry("session-1"));
+            ownership[failure]("session-1");
+            const chat = manager.createChat();
+
+            await expect(
+                chat.execute(
+                    ChatUserAction.changeSessionTo("session-1"),
+                ),
+            ).rejects.toMatchObject({
+                code: "claim_failed",
+                disposition: "rejected",
+            });
+
+            expect(chat.sessionId).toBeNull();
+            expect(chat.binding).toBeNull();
+            expect(manager.findChatBySession("session-1")).toBeUndefined();
+            expect(ownership.has("session-1")).toBe(false);
+            expect(ports).toHaveLength(0);
+
+            ownership.clearFailure("session-1");
+            const ready = await chat.execute(
+                ChatUserAction.changeSessionTo("session-1"),
+            );
+            expect(ready.sessionId).toBe("session-1");
+            expect(ownership.has("session-1")).toBe(true);
+        }
     });
 });
 

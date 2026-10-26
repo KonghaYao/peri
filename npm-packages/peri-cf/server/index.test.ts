@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  MemoryKV,
   type ChatDatabase,
   type ChatSessionDirectoryEntry,
 } from "@peri-code/sdk";
@@ -44,7 +43,6 @@ describe("server wiring", () => {
     const manager = new AppChatManager({
       chats: createSdkChatManager(config, {
         database,
-        sessionOwnershipKv: new MemoryKV(),
         chatConfig: {
           runtime: {
             kind: "transport",
