@@ -1,46 +1,72 @@
 # Peri TS SDK 代码索引
 
-唤醒合并回归：`src/execution/coordinator.ts::ensureProcessing` 为同会话 active operation 保留 dirty wake，旧查询返回 idle 时继续检查新工作；单执行、Unknown、退役与 drain 上界保持。`test/execution-wake.test.ts` 用屏障覆盖重叠 notification、控制观察、预算与封闭边界。该 coordinator 是嵌入方可用的可移植准入核心，SDK 自身不再驱动它：废弃的本地 SQLite registry/busy 装配与对应测试已删除。
+状态：现行实现。权威结构见 [Peri SDK Chat 架构](../design/peri-sdk-chat.md)，使用说明见
+[SDK README](../../npm-packages/@peri-sdk/README.md)。本文只给入口与职责，不复制动态 inventory 或行号。
 
-Cloudflare 网页聊天消费端：[`peri-cf`](peri-cf.md)。SDK 公开 `/portable`（准入规则、注册表、存储读取与投影）、`/wasm-host`（实例启动、注入端口与关闭证据）、`/wasm`（浏览器 transport/loader）、`/view`（复制与视图）。`execution/admission-core.ts` 是可移植的唯一执行准入规则及 async ledger 契约，ledger/registry 后端由嵌入方注入。`/portable` 的准入摘要仍依赖 `node:crypto`，`/wasm-host` 的默认端口依赖 Node 网络/DNS，不能宣称这两个入口纯浏览器可用。`peri-cf` 的接入与平台验收归消费端 owner。
+## 发布入口
 
-进程控制不在 SDK 契约内：stdio transport、`Sandbox.stdio`/`workspaceProcess`、进程 broker/supervisor、本机停止证明、JSONL dispatcher 与本地 SQLite 存储（含 turso CLI 部署参数、`Bun.env` token 回退、`realpathSync` 路径规范化）均已删除且不留 shim；ACP 连接只能由宿主经 `Sandbox.transportFactory` 注入。消费端迁移状态见 [`peri-cf` 索引](peri-cf.md)（已改用宿主生命周期 + `session/cancel`）。数据库表结构未变更。
+| 入口 | 文件 | 内容 |
+| --- | --- | --- |
+| 主入口 | `npm-packages/@peri-sdk/src/sdk/index.ts` → `src/chat/public.ts` | `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatViewRegistry`、公开类型/错误（含 `ChatManagerContract`）、ownership 公开面（`SessionOwnershipStorage` 类型、`clearSessionOwnership` 函数）、Store/KV/transport 类型 |
+| `/portable` | `src/portable.ts` | 主入口的 Chat 公共面 + 嵌入方驱动的执行准入核心；准入摘要仍依赖 `node:crypto` |
+| `/view` | `src/view/index.ts` | 浏览器安全展示：`ChatView`、`ChatReplica`、`readSessionView`、载荷读取、同步协议；不引入 Node 运行时依赖，也不导出 `ChatViewRegistry` |
+| `/wasm` | `src/wasm.ts` | Emscripten ACP 运行后端、loader、`WasmAcpTransport`、scheduler 端口 |
+| `/wasm-node` | `src/wasm-node.ts` | `/wasm` + Node 网络/DNS 端口 |
 
-Workers 消费端通过应用 facade 接入原有 `TursoStorage`，显式传入凭证，直接查询 Rust Store 会话元数据，复用未改动的 `storage/session-summary.ts` SQL 与映射；不创建 DO 会话目录，也不维护应用自己的会话表。元数据写入仍由 Peri 的 ACP 生命周期管理。
+旧 `Agent`、`ManagedAgents`、`SessionDocs`、`SessionViewStore`、`AtomicManagedAgentKv`、
+`agent-claim-conflict-error`、`Sandbox` 已删除，不在任何发布入口导出；`tests/public-view.test.ts`
+只对旧符号做负向断言。stdlib/Workspace 进程管理、本地数据库、JSONL dispatcher 与执行恢复账本
+也不在 SDK 内。
 
-状态：ACP 连接只由宿主注入的 transport 提供（WASM 用 `startPeriWasmHost`，其他部署注入自有实现）；`SessionDocs` 只投影展示状态。SDK 的 `Session` 已按当前 ACP 契约改写：输入走 `session/input/{enqueue,dispatch,takeback,snapshot}`，控制只剩 `session/cancel` 通知，关闭用 `session/close` 在有界预算内重放直到 Host 结算。真实链路验收为 `tests/wasm-acp-integration.test.ts`（打包 peri-wasm + 真实 libSQL Store + 模拟模型端点）。权威语义见 [RCRA 设计](../design/rcra-message-activation.md)，部署接口见 [SDK README](../../npm-packages/@peri-sdk/README.md)。
+## 控制面
 
 | 职责 | 入口 | 行为 |
 | --- | --- | --- |
-| 公开 API | `npm-packages/@peri-sdk/src/sdk/index.ts` | 导出 Agent、Session、ManagedAgents、Sandbox、`WasmAcpTransport`、`startPeriWasmHost`、`TursoStorage`、同步/视图与可移植准入核心 |
-| 输入、取消与关闭 | `src/agent/{session,session-close,send-receipt}.ts` + `src/managed/managed-agents.ts` | send/forceSend/takeBack 走 input 队列命令，投递以 `user_input_delivered` 同代次确认；`cancel()` 是会话级通知。Close 只重放 `session/close`，`-32010` 视为可重试，预算耗尽抛 `SessionCloseIncompleteError` 并保留 transport/claim；非重试错误原样抛出，incomplete 后再失败用 `AggregateError` 保留两个原因。启动清理独立 |
-| WASM 产物装配 | `src/wasm/{loader,host,ports}.ts` + `scripts/build.ts` | 从根 workspace 编译 Emscripten release，打包 JS/WASM。`loadPeriWasm` 按 URL 复用；`instantiatePeriWasm` 支持独立实例、静态 factory、显式环境与 Emscripten hooks；`WasmAcpTransport.start({ module })` 消费已初始化实例。`startPeriWasmHost` 注入网络/DNS/timer，关闭等待 native、网络 drain 与 free；超时不等于停止证明。注入 `moduleFactory` 时 `moduleUrl` 不参与解析：workerd 打包模块没有 `import.meta.url`，只有 factory 入口可用；无 factory 且无法解析产物 URL 时报可操作错误。回归入口：`tests/wasm-{loader,transport,host,ports,package}.test.ts` |
-| 传输装配 | `src/sandbox/sandbox.ts` + `src/transport/{json-rpc-transport,wasm-transport}.ts` | `Sandbox.transportFactory` 是必需注入点，SDK 不启动进程；`createTransport(path)` 每次返回宿主提供的连接。`JsonRpcTransport` 共用 ID、反向请求、通知与关闭语义；`WasmAcpTransport` 走 `PeriWasmAcp` 原始帧端口。Sandbox 原样保存调用方路径，不做本机 realpath |
-| Peri 配置类型 | `src/config/` | `PeriConfig` 是 Peri 的启动设置文档，WASM 部署经 ACP 启动对象一次性传入（stdio 前置帧已不存在）；`MetaHarnessKey` 限定能力键；`BareHarnessConfig` 是冻结的全关闭预设，demo 按需重新开启 MCP 与 ToolSearch |
-| 会话与输入 | `src/agent/{agent,session,send-receipt,types}.ts` | `session/new|load` 后读取 `session/input/snapshot` 作为队列代次；`send` 入队后等待同代次投递事件，`dispatch` 显式推动指定输入。初始 `session/load` 带本次 `loadGeneration`（回放通知按 `_meta.periLoadGeneration` 配对）；更早历史经同一方法 `loadEarlierHistory(limit)`（只带 `{sessionId,cursor,limit}`），相同 cursor + limit 合并为一次请求；没有可用游标时抛 `HistoryPageUnavailableError`，`reason` 区分 `not_negotiated`／`exhausted`（窗口有效但 `nextCursor===null`）／`invalidated`（rewind 或新 load 作废）。调度属于 Peri mailbox，SDK 不再申请执行准入、不发送 work 查询、不自行推进生命周期。Agent 按持久 cwd 经 Sandbox 列举，不走 ACP `session/list` |
-| 可移植准入核心（嵌入方驱动） | `src/execution/{types,registry-model,coordinator,admission-core,registry-ledger}.ts` | ticket 完整绑定 session/instance/generation/lifecycle/control generation/work revision/exact execution；queued/entering/running 入口重验，预算按同一 work 累计；Unknown 只 resolve 原 ticket，不重发 execute。SDK `Session` 不再驱动该核心，也不内置 domain 端口实现：`ExecutionDomainPort`、ledger 与 stopped proof 全部由嵌入方注入。回归入口：`test/execution-{registry,wake,disaster}.test.ts` |
-| 注册表后端 | `src/execution/{kv-registry,memory-registry}.ts` | 原子 KV envelope（协议版本 1，不支持的版本 fail closed）与 CAS apply/resolve；记录与 stable mutation receipt 原子提交，resolve 缺失命令封存 NotApplied。Memory 明示 bestEffort，需显式 opt-in，不是生产恢复证据。durable 后端与 ledger 由嵌入方提供；SDK 不再内置 SQLite/Turso registry，也不再内置 JSONL dispatcher |
-| 实时 Yjs 投影 | `src/state/` + `src/agent/{agent,session,send-receipt}.ts` | `session-docs.ts` 分发 ACP 通知，`protocol.ts` 解码白名单，`doc-model.ts` 管理两个 Y.Doc 的 schema；`tool-payloads.ts` 把超过 4 KiB 的工具 JSON 以版本引用隔离，`SessionDocs.readPayload` 按需读完整内容；`doc-model.ts` 保留工具归属和按 turn 的索引，`turn-machine.ts` 统一轮次终止，chat/session/task/input-queue/interaction projection 分别聚合聊天、会话、任务、输入队列和反向权限/提问。真实输入交付时写入 Chat Doc；后台任务修订缺口经 `session/bg-tasks` 补快照。Agent/Session 暴露同一组文档；冷 `session/load` 的历史通知按本次 load 代次暂存，响应成功且确认代次未被取代后一次安装（失败/取代整批丢弃，不发布半份首屏）；初始回放与带 `cursor` 的历史页共用条目身份（回放 `_meta.periEntryId`/`periPosition`、页 `entryId`/`position`）做幂等区间合并（`history-merge.ts`），同一子项在两条路径收敛到同一块身份 `h:{messageId}:{type}:{slot}`（页路径先按下标命中、回放路径按正文认领另一路径已建的块），结果未加载的历史工具状态为 `AWAITING_RESULT_STATUS`（`awaiting_result`）；历史投影不建 active turn、不伪造用户输入、不推进 plan/任务/输入队列。按代次暂存只约束文档安装：`session.stream()` 仍逐条投递首屏回放，不因暂存缺条。Compact 展示状态（`COMPACTION_STATUS`：`running`/`completed`/`failed`/`cancelled`）在 `command_feedback` 的 error／warning 或轮次失败时离开 `running`，终态不被后续信号改写；旧分页路径完成只更新 `compaction` 元数据并保留窗口与游标，只有 rewind 重建窗口并作废游标；`peri.historyWindowV1` 的 `HistoryCommitted` 与段释放尚未接入 SDK，不能据此宣称 SDK 已支持窗口淘汰。Y.Doc 承载 SDK 实时展示状态；Rust Session Store 继续负责可恢复的 canonical 会话数据 |
-| 前端会话读模型 | `src/view/{session-view,index}.ts` | 从授权的 Chat/Session Y.Doc 对读取有序消息块、工具、轮次、任务、计划、输入队列和待处理交互；历史条目的超预算标记经 `EntryView.historyOversize` 暴露；`read-cache.ts` 沿 Yjs 所有权和工具引用失效缓存，`SessionViewStore` 复用未改变的不可变值、批量通知并成对切换文档，DOM/React/传输均在外层 |
-| Yjs 复制 | `src/sync/{session-doc-sync,session-doc-replica,peer,index}.ts` | 二进制版本 2；有界批处理、按状态向量补齐和 generation 换代。单订阅者字节预算/异步写入控制慢消费者；每个 adapter 拥有其 frame buffer；关闭排空尾部，错误或缺帧重连恢复 |
-| 并发占位 | `src/managed/` + `src/kv/{agent-claims,types,memory-kv}.ts` | ManagedAgents 同步声明 Agent，异步 start 时共享 KV 原子 claim，冲突报错，按 owner 释放；`sessionClaimKey` 仅 Session ID，`agentClaimKey` 保持 Sandbox + Agent；MemoryKV 仅单进程使用 |
-| Sandbox 与存储 | `src/sandbox/sandbox.ts` + `src/storage/{types,turso-storage,session-summary}.ts` | `Sandbox` 持有 `SessionStorage` 与必需的 `transportFactory`，自身不启动进程、不解析本机路径：`createTransport(path)` 返回宿主注入的连接，`getSessions(path)` 按 Agent path、`getSession(id)` 按 Session ID 读取 Store，恢复时用持久 cwd。`TursoStorage({ url, authToken })` 用官方 `@tursodatabase/serverless` 与显式凭证读 `threads`，SQL 与映射在 `session-summary.ts`（经主入口与 `/portable` 导出）；没有本地文件后端、CLI 部署参数或环境变量 token 回退。`workspace` 只接受部署方提供的 HTTP Workspace，SDK 不启动也不关闭 Workspace 进程 |
-| ACP 传输 | `src/transport/{json-rpc-transport,wasm-transport,event-queue,types}.ts` | 共用 JSON-RPC ID、反向请求、通知和关闭语义；`event-queue.ts` 为可选原始事件流提供有界缓冲和显式 overflow，状态投影独立继续；WASM 用 `PeriWasmAcp` 的原始帧端口，`close()` 失败可重试且不重开准入。stdio transport 与进程 broker 已删除 |
-| 可运行示例 | `examples/demo/{demo.ts,demo-wasm.ts,demo.html,session-doc-stream.ts}` + `mise.toml` | 两个 Hono/Bun 服务复用同一前端、Session 管理与 POST/SSE 路由；loopback demo 的 `session-doc-stream.ts` 适配 SDK 二进制复制为 SSE，`session-sse.ts` 限制写队列；页面按需获取工具全文、复用 DOM 并限制初始可见历史，原始 ACP 诊断为可选有界日志。反向交互由 `InteractionResponder` 关联请求 ID 后通过 POST 回复。`demo.ts` 为每个 Session 启动独立 WASM ACP Host，必须提供外部 Workspace HTTP MCP URL；不管理 Peri/Workspace 子进程。`demo-wasm.ts` 展示按 URL 复用 WASM 模块，可选外部 Workspace。本地 builtin 不启动；侧栏从 SessionStorage 查询会话 |
-| 验证 | `test/*.test.ts` + `tests/*.test.ts` | `domain.test.ts` 覆盖声明、claim、输入投递与取消；`session-close.test.ts` 覆盖关闭重放、预算、错误保留与 claim 释放；`execution-{registry,wake,disaster}.test.ts` 覆盖可移植准入核心；`wasm-{acp-integration,loader,transport,host,ports,package}.test.ts` 覆盖真实 WASM 端到端（含 send/cancel/close/load 与 telemetry）及产物契约。`session-sync.test.ts`、`tool-payloads.test.ts`、`session-view-incremental.test.ts` 和 demo 的真实 HTTP SSE 测试覆盖复制、按需全文及缓存失效；`history-{merge,pagination}.test.ts` 覆盖历史页区间合并/幂等去重（含页与回放对同一子项收敛到同一块、`oversize` 标记与 `awaiting_result`）、初始回放代次暂存与迟到丢弃、首屏回放仍进原始事件流、三种无游标原因（`exhausted`／`not_negotiated`／`invalidated`）与 rewind 作废游标；`session-docs.test.ts` 覆盖 Compact 失败/取消收敛（`command_feedback` 真实载体）与终态不可改写；`benchmarks/README.md` 路由到可复现压力场景。`bun run smoke:workers` 是本包的本地 `workerd` 验收（`examples/workers/`，需 wrangler + 本地 sqld），按当前 Host 方法表跑队列 turn、`session/prompt` turn 与冷恢复三条路径，`/?host=sdk` 另按 peri-cf 形态（只注入 `moduleFactory`、无 `moduleUrl`）在 workerd 上启动 SDK 宿主，各自以有界 `session/close` 收尾；仓库根 `scripts/smoke-wasm-*.mjs` 是独立的 Node ACP smoke，不在本包测试范围内 |
-| 执行占位与清理验证 | `test/{agent-claims,session-start-cleanup,session-close,transport-close-retry}.test.ts` | 跨 Sandbox 的同 Session 竞争与 owner 释放、Agent 作用域与独立 KV；启动原错误与清理错误聚合、claims 保留、并发 close 共享事务及失败重试；关闭重放与 incomplete 预算；JSON-RPC wire close 失败重试且不重开准入 |
+| Manager | `src/chat/manager.ts` | 同步 `createChat`；句柄目录、`findChatBySession`、目录读取、`closeChat`、`shutdown`；不接收普通执行动作 |
+| Manager 契约 | `src/chat/types.ts`、`src/chat/public.ts` | `ChatManager`/`ChatService` 接口；对外类型名 `ChatManagerContract`，具体类 `src/chat/manager.ts` 实现它，调用方可注入自有实现 |
+| Service | `src/chat/service.ts`、`src/chat/binding.ts`、`src/chat/close-chat.ts` | 绑定状态机、八类动作分派、回执关联、事实日志、关闭预算与失败保留；载荷读取按发起时的绑定代次校验，换绑后的晚到结果/错误丢弃为 `unavailable` |
+| 动作 | `src/chat/action.ts`、`src/chat/json-value.ts` | 八类纯数据 Action、`requestId`、JSON 深拷贝/冻结、`parseChatUserAction`；不依赖 `instanceof` |
+| 类型/错误 | `src/chat/types.ts`、`src/chat/errors.ts` | `ChatRuntime`、`ChatDefaults`、`ChatLifecycleOptions`、`PeriInstancePort`、错误 `disposition` 与 `ChatCloseIncompleteError` |
+| 事实 | `src/chat/facts.ts`、`src/chat/fact-hub.ts` | 按绑定代次编号的事实封套；晚挂 View 重放 |
+| 回执 | `src/chat/send-receipt.ts` | `inputId` 稳定；`accepted` 是入队，投递等待是另一件事 |
+| Session ownership（内部） | `src/chat/ownership.ts`、`src/chat/types.ts` | `ChatManager` 接收 3 方法 `SessionOwnershipStorage` 并在内部构造 `KvSessionOwnership`（owner 为实例随机 UUID）；key 为 `ownership:<base64url(sessionId)>`，value 为 `{ sessionId, owner }`；acquire 是读后写、非原子，KV 记录是绑定标记/防御路由 bug，不是互斥原语；无 TTL/续租/CAS，路由层负责串行化与 `clearSessionOwnership`；`LocalSessionIndex` 负责同 Manager 内句柄互斥。`SessionOwnership`/`KvSessionOwnership`/`SessionOwnershipConflictError`/key 函数仅模块内使用；入口只导出 `SessionOwnershipStorage` 与 `clearSessionOwnership` |
+| 工厂 | `src/chat/instance-factory.ts`、`src/chat/service-support.ts` | 把 Manager 上下文转换为一次 `PeriInstance`；生产默认装配，测试可注入 |
+| 生命周期预算 | `src/util/deadline.ts`、`src/chat/service-lifecycle.ts` | 关闭/启动/shutdown 的有界等待；超时是 Incomplete，不是停止证明 |
 
+## 运行侧
 
-协调域契约：共享 `AtomicManagedAgentKv` keyspace 覆盖可能执行同一 Session 的全部实例；Session key 不含 `Sandbox.id`。不同数据库相同 ID 共用 KV 时保守拒绝，可按业务隔离 KV，不能通过不同 Sandbox 绕过同 Session claim。`Sandbox.id` 仅用于 Agent key，不是 Peri `machine_id`，SDK 不将其注入 Peri；机器归属校验、并发 claim 与嵌入方的准入裁决互不替代。claim 过期、旧 socket 不可连接和 TTL 均不是停止证明；跨实例替换必须先得到旧 exact generation 的可信 stopped proof，且该证明由嵌入方提供。
+| 职责 | 入口 | 行为 |
+| --- | --- | --- |
+| PeriInstance | `src/agent/peri-instance.ts` | 一次激活的 Session/运行后端/交互/队列/历史/载荷控制；剥离 Yjs，只输出事实 |
+| Session | `src/agent/session.ts`、`src/agent/session-close.ts` | 纯 ACP 客户端：`session/new|load`、input 队列命令、`session/cancel`、有界 `session/close`、历史分页 |
+| 交互 | `src/agent/{interaction-broker,interaction-responder,ask-user-question}.ts` | 权限/elicitation/AskUserQuestion 的 ACP 反向请求与回答；turn 结束用安全默认收敛 |
+| MCP over ACP | `src/agent/acp-mcp-bridge.ts`、`src/agent/types.ts` | `acp` 声明走反向 `mcp/message`；直接实例单次借用，跨激活必须用工厂；owned 实例由激活关闭 |
+| 载荷 | `src/state/tool-payloads.ts`、`src/chat/payload-access.ts`、`src/view/payload-reader.ts` | 内容寻址引用、inline/单项/会话预算、`readPayload` 字节与 JSON 校验；错误码 `unauthorized`/`unavailable`/`too_large`/`integrity_error`/`aborted`/`transport_error` |
+| 运行后端 | `src/wasm/{runtime,runtime-pool,loader,ports,scheduler}.ts`、`src/transport/wasm-transport.ts` | WASM 启动/租约/关闭证据；`moduleFactory` 时无需 `moduleUrl`；HTTP/DNS 端口由部署注入 |
 
-清理实现：`src/agent/session.ts::startOnce` 启动失败且清理未确认时保留 `cleanup-pending`、claims 与 transport，以 `AggregateError` 同时报告原错误和清理错误；`close` 共享清理事务，失败后可重试，`releaseResources` 在确认 transport 关闭后才按 owner 释放 claims（关闭抛错时保留引用以便重试）。`src/transport/json-rpc-transport.ts::close` 在 wire 清理失败后允许重试，不重新开放 ACP 准入。
+## 展示与同步
 
-恢复与 RPO：可移植注册表的 KV envelope 协议版本为 1，不是 Rust Session Store schema 版本；记录与 mutation receipt 在同一 CAS 中提交。durable 后端由嵌入方提供，已确认 receipt 的恢复依赖该后端兑现持久提交承诺；未确认的写入只能 resolve 原命令，不能推导零丢失或执行成功。Memory 的 bestEffort 声明不提供崩溃 RPO。Rust Store 与嵌入方 ledger 不共享分布式事务，须分别恢复 domain 状态与 instance/attempt/budget/receipt，再通过原命令、原 ticket 和 Store entry ACK 收敛；不可从 transcript 重造义务、重新 mint 命令或重置同 work 预算。SDK 不再自带本地数据库文件或 JSONL dispatcher。
+| 职责 | 入口 | 行为 |
+| --- | --- | --- |
+| View | `src/view/chat-view.ts` | 订阅 `ChatFactSource`；每个绑定代次一对 Y.Doc 与 `SessionDocSync`；换代成对替换；`dispose` 释放连接与文档 |
+| View 共享 | `src/view/view-registry.ts` | `ChatViewRegistry`：按 Chat id 复用同一个 `ChatView`；提供 attach/get/dispose/disposeAll；从主入口与 `/portable` 导出，不从 `/view` 导出 |
+| 同步连接 | `src/view/chat-sync.ts`、`src/view/channel.ts` | `ChatYjsChannel` 只做逻辑帧；HELLO/SNAPSHOT/UPDATE/ACK、交付信用、有界背压与终止 |
+| 副本 | `src/view/chat-replica.ts` | 浏览器只读：HELLO resume、gap repair、generation/schema 校验、`read()`/`subscribe()` |
+| 文档模型 | `src/view/chat-document.ts`、`src/state/{doc-model,protocol,session-projection,task-projection,interaction-projection,turn-machine}.ts` | ACP 通知 → Entry/Block/Tool/Turn/Task/Plan/Interaction；历史幂等合并、终态收敛、closed 展示事实 |
+| 只读视图 | `src/view/session-view.ts`、`src/view/read-cache.ts` | `readSessionView` 纯读取完整 `SessionView`；不再导出按身份选择器，未知块/孤立工具引用显式诊断；无 `getSnapshot`/`subscribe` 门面 |
+| 同步协议 | `src/sync/{wire,peer,delivery,session-doc-sync,session-doc-replica}.ts` | 二进制帧、协议版本、状态向量、离线补齐与慢客户端上界 |
 
-恢复步骤（嵌入方驱动可移植核心时）：读取版本及稳定回执 → 确认原 instance 已持久 Stopped 或取得真实停止证明 → 注册新 generation → resolve 原 pendingCommands/entering ticket → 重读权威 work/control → CAS 准入。未知 proof、缺失 child runtime 或可信 owner route 必须 Blocked/Incomplete。SDK `Session.close` 只负责把 `session/close` 推到 Host 结算：Host 未结算时重放，预算耗尽保留 claims 与 transport 并抛 `SessionCloseIncompleteError`。
+## 验证入口
 
-超 RPO 回退：已确认的 entry ACK 将 `enteredEvidenceId` 持久写入 registry attempt。Running/Exiting 或仍保有 entered evidence 的已结清/历史 attempt，若 cold domain resolve 原 ticket 返回 NotApplied，coordinator 记录永久 `disaster:{kind:dataLoss,reason:enteredAdmissionMissing,ticket,enteredEvidenceId}`。`coordinator.ensureProcessing` 返回 typed disaster；SDK 不再把该状态绑定到输入投递。保留原 entered/stopped proof 与预算，拒绝重新注册/准入，不当作 NeverEntered，不因重启或 scan 消失。admit 保留 Blocked 结果并附 typed disaster；真正未收到 entry ACK 的 entering 才可按原 NotApplied 安全封存。新 generation 替换复用 coordinator 的历史证据核验。
+- `bun run typecheck`：`tsc --noEmit` + demo tsconfig；测试目录不在 include 内。
+- `bun test tests test`：单元/行为测试；`test/` 覆盖执行准入、Session 关闭/启动与 SessionOwnership。
+- `bun run test`：在 `MISE_ENV=wasm mise exec --` 下先 build（含 peri-wasm）再全量测试。
+- `bun run test:wasm`：先 build，再跑真实 WASM ACP 集成（真实打包 WASM + 真实 Turso listener + fixture 模型）。
+- `bun run smoke:workers`：本地 workerd 探针；Hosted Workers 未部署。
+- 关键回归：`tests/chat-{action,manager,binding,actions,close-bounded,view,replica,document,instance-factory}.test.ts`、`tests/view-registry.test.ts`、`tests/peri-instance.test.ts`、`tests/history-pagination.test.ts`、`tests/acp-mcp-lifecycle.test.ts`、`tests/wasm-acp-integration.test.ts`。
+- 公共出口负向断言：`tests/public-view.test.ts`，同时确认 `ChatViewRegistry` 只在主入口、不在 `/view`。
 
-验证边界：`test/execution-{registry,wake,disaster}.test.ts` 用内存 durable envelope 与测试内 ledger 覆盖 CAS、预算与 DataLoss 不变量；不覆盖生产网络故障、跨 host owner 恢复或分布式 RPO。durable 后端与 proof provider 由部署方提供，SDK 测试不替代其验收。`tests/wasm-acp-integration.test.ts` 用当前源码构建的 peri-wasm 产物、真实 loopback libSQL Store 与模拟模型端点验证真实 send/takeBack/cancel/close/load 与 telemetry；WASM 产物必须与源码同步构建，不以旧产物通过替代协议变更验收。
+## 消费者
 
-实时投影边界：`task-projection.ts` 将缺少本次 started 证据的后台非终态快照标为 `unobserved:<原状态>`，保留历史事实但不宣称当前运行；终态事实与真实 started 驱动的活动仍投影，失去观察后仅靠 running 快照不能复活活动。回归见 `tests/task-snapshot-activity.test.ts`。Peri 的 `session/load` 历史逐条回放若中途发送失败，Host 当前只记录告警后仍返回成功；SDK 只能按代次证明「这批暂存未发布」，不能证明回放内容完整。长期会话反复 rewind 会在同一 Y.Doc 内产生删除记录（Compact 不再整表替换，不产生这类删除）；当前保持根集合对象身份以供订阅者使用，尚无 Fenix Doc Hub 式文档换代与快照压缩协议。
+- `npm-packages/peri-cf` 通过主入口与 `/view` 消费 Manager/Action/View/Replica；平台装配、HTTP/WS 与鉴权留在应用。索引见 [peri-cf](peri-cf.md)。
+- Workers smoke 入口在 `examples/workers/`；只证明当前 Host 方法表与本地 `workerd` 路径，不代表 hosted Workers 验收。

@@ -115,6 +115,7 @@ mod workspace_recovery_tests;
 #[path = "builtin_cron_runtime_test.rs"]
 mod builtin_cron_runtime_tests;
 
+#[cfg(not(target_os = "emscripten"))]
 mod context_archive;
 
 #[cfg(test)]

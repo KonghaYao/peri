@@ -5,8 +5,17 @@ import { resolve } from "node:path";
 import { createServer, connect } from "node:net";
 import { once } from "node:events";
 import {
-  AgentClaimConflictError, ManagedAgents, MemoryKV, Sandbox, TursoStorage, startPeriWasmHost,
+  ChatManager,
+  ChatUserAction,
+  SessionBindingConflictError,
+  TursoStorage,
+  startWasmRuntime,
+  type ChatDatabase,
+  type SessionStorage,
 } from "../dist/index.js";
+import { ChatDocument } from "../src/view/chat-document";
+import { readSessionView } from "../src/view/session-view";
+import { OwnershipProbe } from "./ownership-probe";
 
 async function unusedPort(): Promise<number> {
   const listener = createServer();
@@ -39,18 +48,52 @@ async function settled(model: () => number, expected: number, budgetMs = 20_000)
   expect(model(), "the fixture model endpoint was not reached in time").toBeGreaterThanOrEqual(expected);
 }
 
+async function until(predicate: () => boolean, budgetMs = 20_000): Promise<void> {
+  const deadline = Date.now() + budgetMs;
+  while (!predicate() && Date.now() < deadline) await Bun.sleep(50);
+  expect(predicate(), "the expected document state was not reached in time").toBe(true);
+}
+
 /** 正文按 magic 判压缩：遥测默认 gzip，两种情况都解出 OTLP JSON（同 langfuse-client 的 batcher_concurrency_test.rs）。 */
 function otlpBody(bytes: Uint8Array): unknown {
   const raw = bytes[0] === 0x1f && bytes[1] === 0x8b ? Bun.gunzipSync(bytes) : bytes;
   return JSON.parse(new TextDecoder().decode(raw));
 }
 
+function databaseOver(storage: SessionStorage): ChatDatabase {
+  return {
+    async listSessions(path) {
+      return (await storage.getSessions(path ?? "/")).map((entry) => ({
+        sessionId: entry.id,
+        title: entry.title,
+        cwd: entry.cwd,
+        messageCount: entry.messageCount,
+        createdAt: entry.createdAt,
+        updatedAt: entry.updatedAt,
+      }));
+    },
+    async getSession(id) {
+      const entry = await storage.getSession(id);
+      return entry && {
+        sessionId: entry.id,
+        title: entry.title,
+        cwd: entry.cwd,
+        messageCount: entry.messageCount,
+        createdAt: entry.createdAt,
+        updatedAt: entry.updatedAt,
+      };
+    },
+  };
+}
+
+/** Chat 事实 → 纯展示文档；测试不直接读运行侧内部状态。 */
+
 /**
  * 真实链路：打包的 peri-wasm 产物 + 真实 Turso listener + 模拟模型端点。
- * SDK 不启动任何 Peri 或 Workspace 子进程；每个 Session 由 `transportFactory` 装配独立 WASM 实例。
+ * ChatManager 按激活装配独立 WASM 宿主；SDK 不启动任何 Peri 或 Workspace 子进程。
  */
 async function fixture() {
-  const root = await mkdtemp(resolve(tmpdir(), "peri-sdk-wasm-acp-"));
+  const root = await mkdtemp(resolve(tmpdir(), "peri-sdk-wasm-chat-"));
   const sqlPort = await unusedPort();
   const sqld = Bun.spawn([
     "mise", "exec", "--", "sqld", "--no-welcome", "--http-listen-addr",
@@ -79,7 +122,7 @@ async function fixture() {
   } });
   try { await waitForSqld(sqlPort, sqld); }
   catch (error) { model.stop(true); langfuse.stop(true); await rm(root, { recursive: true, force: true }); throw error; }
-  // ACP cwd 必须与 Agent path 一致；macOS 的 /var 是指向 /private/var 的符号链接。
+  // ACP cwd 必须与 Chat path 一致；macOS 的 /var 是指向 /private/var 的符号链接。
   const workspace = await realpath(root);
   const moduleUrl = resolve(import.meta.dir, "../dist/wasm/peri-wasm.js");
   const databaseUrl = `http://127.0.0.1:${sqlPort}`;
@@ -91,23 +134,31 @@ async function fixture() {
     },
   };
   const storage = new TursoStorage({ url: databaseUrl, authToken: "local-dev" });
-  const sandboxFor = (id: string) => new Sandbox({
-    id,
-    storage,
-    transportFactory: (path) => startPeriWasmHost({
-      moduleUrl,
-      env: {
-        LANGFUSE_PUBLIC_KEY: "pk-test",
-        LANGFUSE_SECRET_KEY: "sk-test",
-        LANGFUSE_BASE_URL: `http://127.0.0.1:${langfuse.port}`,
-        LANGFUSE_USER_ID: "wasm-test-user",
-      },
-      configJson: JSON.stringify({
-        cwd: path, settings,
-        storage: { url: databaseUrl, authToken: "local-dev" },
-        machineId: "00000000-0000-4000-8000-000000000003",
-      }),
-    }),
+  const agentConfig = {
+    cwd: workspace,
+    settings,
+    storage: { url: databaseUrl, authToken: "local-dev" },
+    machineId: "00000000-0000-4000-8000-000000000003",
+  };
+  const wasmRuntime = {
+    kind: "wasm" as const,
+    moduleUrl,
+    env: {
+      LANGFUSE_PUBLIC_KEY: "pk-test",
+      LANGFUSE_SECRET_KEY: "sk-test",
+      LANGFUSE_BASE_URL: `http://127.0.0.1:${langfuse.port}`,
+      LANGFUSE_USER_ID: "wasm-test-user",
+    },
+  };
+  const managerFor = (storagePort: OwnershipProbe): ChatManager => new ChatManager({
+    agentConfig,
+    database: databaseOver(storage),
+    sessionOwnershipStorage: storagePort,
+    chatConfig: {
+      runtime: wasmRuntime,
+      defaults: { path: workspace },
+      lifecycle: { activationCloseTimeoutMs: 20_000, closeDrainTimeoutMs: 20_000 },
+    },
   });
   const dispose = async (primaryError?: unknown, cleanupErrors: unknown[] = []) => {
     model.stop(true);
@@ -121,99 +172,107 @@ async function fixture() {
       "WASM integration domain or startup cleanup failed", { cause: primaryError });
     if (primaryError) throw primaryError;
   };
-  return { workspace, sandboxFor, storage, prompts: () => prompts.length, telemetry, dispose };
+  return { workspace, storage, managerFor, prompts: () => prompts.length, telemetry, dispose };
 }
 
-test("start, send two inputs, cancel, list, close and reload run through the bundled WASM ACP Host", async () => {
+test("create, send two inputs, cancel, close and reload run through the bundled WASM ACP Host", async () => {
   const f = await fixture();
-  const manager = new ManagedAgents({ kv: new MemoryKV() });
-  const agents: Array<ReturnType<typeof manager.createAgent>> = [];
-  const started = new Set<string>();
+  const manager = f.managerFor(new OwnershipProbe());
   let primaryError: unknown;
-  let sessionId = "";
   try {
-    const sandbox = f.sandboxFor("wasm-acp-integration");
-    const createdAgent = manager.createAgent({ path: f.workspace, id: "created", sandbox });
-    agents.push(createdAgent);
-    const created = await createdAgent.session.start(null);
-    started.add(createdAgent.id);
-    sessionId = created.id;
+    const chat = manager.createChat({ path: f.workspace });
+    const display = new ChatDocument();
+    chat.subscribeFacts({
+      onBinding(_target, replay) { display.applyFacts(replay); },
+      onFact(envelope) { display.applyEnvelope(envelope); },
+      onClosed() {},
+    });
+    const ready = await chat.execute(ChatUserAction.createNewSession({}));
+    const sessionId = ready.sessionId;
     expect(sessionId).toBeTruthy();
 
-    const receipt = created.send("Reply once");
+    const receipt = chat.execute(ChatUserAction.send({ text: "Reply once" }));
     await receipt;
     expect(receipt.isSent).toBe(true);
     await settled(f.prompts, 1);
     expect(f.prompts()).toBeGreaterThanOrEqual(1);
 
-    const second = created.send("Reply twice");
+    const second = chat.execute(ChatUserAction.send({ text: "Reply twice" }));
     await second;
     expect(second.isSent).toBe(true);
 
-    await created.cancel();
-    await manager.closeAgent(createdAgent.id, { drainTimeoutMs: 20_000 });
-    expect(createdAgent.session.isClosed).toBe(true);
+    const cancelled = await chat.execute(ChatUserAction.cancel({}));
+    expect(["requested", "idle"]).toContain(cancelled.status);
+    await chat.close();
     expect(f.telemetry.length).toBeGreaterThan(0);
     expect(JSON.stringify(f.telemetry)).toContain("resourceSpans");
-    expect((await sandbox.getSessions(f.workspace)).some((entry) => entry.id === sessionId)).toBe(true);
+    expect((await f.storage.getSessions(f.workspace)).some((entry) => entry.id === sessionId)).toBe(true);
 
-    // 新 Agent 用新的 WASM 实例加载同一会话：身份保持，历史回放进入文档投影。
-    const loadedAgent = manager.createAgent({ id: "loaded", sandbox });
-    agents.push(loadedAgent);
-    const loaded = await loadedAgent.session.start(sessionId);
-    started.add(loadedAgent.id);
-    expect(loaded.id).toBe(sessionId);
-    const transcript = JSON.stringify(loaded.docs.chat.toJSON());
+    // 新 Chat 用新的 WASM 实例加载同一会话：身份保持，历史回放进入展示文档。
+    const loadedChat = manager.createChat({ path: f.workspace });
+    const loaded = new ChatDocument();
+    loadedChat.subscribeFacts({
+      onBinding(_target, replay) { loaded.applyFacts(replay); },
+      onFact(envelope) { loaded.applyEnvelope(envelope); },
+      onClosed() {},
+    });
+    const changed = await loadedChat.execute(ChatUserAction.changeSessionTo(sessionId));
+    expect(changed.sessionId).toBe(sessionId);
+    await until(() => JSON.stringify(loaded.chat.toJSON()).includes("Reply once"));
+    const transcript = JSON.stringify(loaded.chat.toJSON());
     expect(transcript).toContain("Reply once");
     expect(transcript).toContain("WASM_SDK_REPLY");
+    expect(readSessionView(loaded.chat, loaded.session).entries.length).toBeGreaterThan(0);
+    await loadedChat.close();
   } catch (error) {
     primaryError = error;
     throw error;
   } finally {
     const cleanupErrors: unknown[] = [];
-    for (const agent of agents) {
-      if (agent.session.isClosed) continue;
-      try {
-        if (started.has(agent.id)) await manager.closeAgent(agent.id, { drainTimeoutMs: 20_000 });
-        else await agent.session.cleanupStartup();
-      } catch (error) { cleanupErrors.push(error); }
-    }
+    try { await manager.shutdown(); } catch (error) { cleanupErrors.push(error); }
     await f.dispose(primaryError, cleanupErrors);
   }
 }, 120_000);
 
-test("a second ManagedAgents owner cannot claim the same real Session and never starts its transport", async () => {
+test("a second manager cannot own the same real Session and never starts its transport", async () => {
   const f = await fixture();
-  const kv = new MemoryKV();
-  const firstManager = new ManagedAgents({ kv });
-  const secondManager = new ManagedAgents({ kv });
-  const sandbox = f.sandboxFor("wasm-acp-claims");
-  const first = firstManager.createAgent({ path: f.workspace, id: "one-agent", sandbox });
+  const kv = new OwnershipProbe();
+  const firstManager = f.managerFor(kv);
   let secondTransportStarted = false;
-  const secondSandbox = new Sandbox({
-    id: sandbox.id,
-    storage: f.storage,
-    transportFactory: (path) => {
-      secondTransportStarted = true;
-      return sandbox.createTransport(path);
-    },
-  });
-  const second = secondManager.createAgent({ path: f.workspace, id: "one-agent", sandbox: secondSandbox });
   let primaryError: unknown;
   try {
-    const session = await first.session.start(null);
-    expect(session.id).toBeTruthy();
-    await expect(second.session.start(session.id)).rejects.toBeInstanceOf(AgentClaimConflictError);
+    const first = firstManager.createChat({ path: f.workspace });
+    const session = await first.execute(ChatUserAction.createNewSession({}));
+
+    // 第二管理器只提供会记录启动的 transport 运行后端；ownership 必须先于激活。
+    const transportManager = new ChatManager({
+      agentConfig: { cwd: f.workspace, settings: {}, storage: { url: "http://127.0.0.1:1", authToken: "x" }, machineId: "m" },
+      database: databaseOver(f.storage),
+      sessionOwnershipStorage: kv,
+      chatConfig: {
+        runtime: {
+          kind: "transport",
+          factory: () => {
+            secondTransportStarted = true;
+            throw new Error("transport must not start before ownership acquisition succeeds");
+          },
+        },
+        defaults: { path: f.workspace },
+      },
+    });
+    const second = transportManager.createChat({ path: f.workspace });
+    await expect(second.execute(ChatUserAction.changeSessionTo(session.sessionId)))
+      .rejects.toBeInstanceOf(SessionBindingConflictError);
     expect(secondTransportStarted).toBe(false);
+
+    await first.close();
+    await transportManager.shutdown();
   } catch (error) {
     primaryError = error;
     throw error;
   } finally {
     const cleanupErrors: unknown[] = [];
-    try { await firstManager.closeAgent(first.id, { drainTimeoutMs: 20_000 }); }
-    catch (error) { cleanupErrors.push(error); }
-    try { await secondManager.cleanupStartupAgent(second.id); }
-    catch (error) { cleanupErrors.push(error); }
+    try { await firstManager.shutdown(); } catch (error) { cleanupErrors.push(error); }
     await f.dispose(primaryError, cleanupErrors);
   }
 }, 120_000);

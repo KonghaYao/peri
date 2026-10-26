@@ -26,7 +26,7 @@ export function notificationBytes(value: unknown, limit: number): number {
 
 export class EventStreamOverflowError extends Error {
     constructor() {
-        super("Raw ACP event stream exceeded its buffer budget; read SessionDocs for current state or open a new live stream");
+        super("Raw ACP event stream exceeded its buffer budget; read the Chat view for current state or open a new live stream");
         this.name = "EventStreamOverflowError";
     }
 }

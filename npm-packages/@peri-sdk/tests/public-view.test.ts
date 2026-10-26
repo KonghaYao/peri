@@ -1,21 +1,32 @@
 import { expect, test } from "bun:test";
 import * as Y from "yjs";
-import { SessionDocs, SessionDocSync } from "../dist/index.js";
-import { SessionViewStore, SessionDocReplica } from "../dist/view/index.js";
+import * as view from "../src/view/index";
+import * as sdk from "../src/sdk/index";
 
-test("the SDK and browser view package entrypoints share Yjs type identity", async () => {
-    const docs = new SessionDocs(); docs.acceptDeliveredUserInput("user", "public entrypoints");
-    expect(docs.chat).toBeInstanceOf(Y.Doc);
-    const direct = new SessionViewStore(docs.chat, docs.session);
-    expect(direct.getSnapshot().entries[0]?.blocks[0]).toMatchObject({ text: "public entrypoints" });
-    const sync = new SessionDocSync(docs.chat, docs.session);
-    const replica = new SessionDocReplica();
-    const connection = sync.subscribe((frame) => replica.applyUpdate(frame)); replica.applySnapshot(connection.snapshot);
-    const remote = new SessionViewStore(replica.chat, replica.session);
-    docs.accept({ jsonrpc: "2.0", method: "session/update", params: { update: {
-        sessionUpdate: "agent_message_chunk", content: { text: "stream" },
-    } } });
-    sync.flush(); await Promise.resolve();
-    expect(remote.getSnapshot().entries[1]?.blocks[0]).toMatchObject({ text: "stream" });
-    direct.destroy(); remote.destroy(); connection.unsubscribe(); await sync.close(); replica.destroy(); docs.destroy();
+test("the browser view entrypoint exposes ChatView/ChatReplica and shared Yjs identity", () => {
+    expect(view.Y).toBe(Y);
+    expect(view.Y.Doc).toBe(Y.Doc);
+    expect(typeof view.ChatView).toBe("function");
+    expect(typeof view.ChatReplica).toBe("function");
+    expect(typeof view.readSessionView).toBe("function");
+    expect("selectEntry" in view).toBe(false);
+    expect("SessionViewStore" in view).toBe(false);
+    expect("SessionDocs" in view).toBe(false);
+    // 宿主共享策略不属于纯浏览器视图面。
+    expect("ChatViewRegistry" in view).toBe(false);
+});
+
+test("the main entrypoint exposes the Chat surface and no old execution facades", () => {
+    expect(typeof sdk.ChatManager).toBe("function");
+    expect(typeof sdk.ChatService).toBe("function");
+    expect(typeof sdk.ChatUserAction).toBe("object");
+    expect(typeof sdk.ChatView).toBe("function");
+    expect(typeof sdk.ChatReplica).toBe("function");
+    expect(typeof sdk.ChatViewRegistry).toBe("function");
+    expect("Agent" in sdk).toBe(false);
+    expect("ManagedAgents" in sdk).toBe(false);
+    expect("SessionDocs" in sdk).toBe(false);
+    expect("SessionViewStore" in sdk).toBe(false);
+    expect("AtomicManagedAgentKv" in sdk).toBe(false);
+    expect("AgentOptions" in sdk).toBe(false);
 });

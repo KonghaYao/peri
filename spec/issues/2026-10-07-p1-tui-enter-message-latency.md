@@ -165,7 +165,7 @@ WHERE reconciled=0;
 ### LAT-11 / P1：SDK 合并 activation 吞掉收尾中的新唤醒（生产实现隔离复现）
 
 - 证据：`npm-packages/@peri-sdk/src/execution/coordinator.ts:95` 同 session 已有 active Promise 时直接返回，不记 pending/dirty wake；`:146` query 后跨 await 持久化 observeControl，`:160` 仍基于之前的空快照返回 idle。
-- 复现：`bun run -` 直接导入生产 `ExecutionCoordinator` 与 `MemoryExecutionRegistry`，允许 bestEffort；第一次 query 返回空，在 observeControl mutation 上用屏障暂停。发布新 work、调用第二次 notification activation，再释放屏障。
+- 复现：`bun run -` 直接导入生产 `ExecutionCoordinator` 与 `MemoryExecutionRegistry`，允许 bestEffort；第一次 query 返回空，在 observeControl mutation 上用屏障暂停。发布新 work、调用第二次 notification activation，再释放屏障。（历史基线：`MemoryExecutionRegistry` 已随 SDK 重构删除，本命令不可运行。）
 - 结果：两次 activation 得到同一个 Promise，均 idle，`queries=1/executions=0`，新 work 仍存在；主动第三次 activation 后 `queries=3/executions=1`。execute 刻意抛错的 mock 仅计启动，不执行真实 Agent。探针 exit 0；复现脚本见后续验证记录。
 - 影响：证明“旧查询后到达的新通知”可以失去即时重新检查，不证明每次 Enter 都命中，也不是固定 1 秒等待。`peri-acp/src/host/continuation.rs:203` 的 2 秒周期发现可在满足 observer floor/可用性条件时重新通知 SDK，可能掩盖缺陷；不是所有 work 都保证靠它恢复。
 - 修复建议：为合并 activation 保存 wake generation/dirty，在返回 idle/释放 active slot 前重验并重新查询；保留 ticket/预算/Unknown/单执行约束，不能用无条件并发执行替代。
@@ -306,9 +306,10 @@ SQLite 3.51.0、22,223 条历史命令、随机主键、11 次交替采样；每
 
 ### SDK lost-wake 可复现探针（LAT-11）
 
-以下是调查基线的复现命令，仅使用内存 registry，5 秒超时；最后的 `unknown` 是 execute mock 主动抛错，不运行真实 Agent。断言刻意描述旧缺陷，**修复后预期不再满足旧断言**，正确行为验收改用 `test/execution-wake.test.ts`；不将 `REPRODUCED` 当作修复通过，也不在已修代码上把旧探针失败当回归。
+以下是调查基线的复现命令，仅使用内存 registry，5 秒超时；最后的 `unknown` 是 execute mock 主动抛错，不运行真实 Agent。断言刻意描述旧缺陷，**修复后预期不再满足旧断言**，正确行为验收改用 `test/execution-wake.test.ts`；不将 `REPRODUCED` 当作修复通过，也不在已修代码上把旧探针失败当回归。该探针所依赖的 `MemoryExecutionRegistry` 已在 SDK 重构中删除，因此命令保留为历史证据、**不可运行**。
 
 ```bash
+# 历史基线：MemoryExecutionRegistry 已删除，本命令不可运行。
 cd npm-packages/@peri-sdk || exit 1
 bun run - <<'TS'
 import { ExecutionCoordinator } from "./src/execution/coordinator.ts";

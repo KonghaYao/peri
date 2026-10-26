@@ -1,20 +1,20 @@
 import { expect, test } from "bun:test";
 import { SESSION_BY_ID_SQL, SESSION_LIST_SQL } from "../dist/portable.js";
 import { instantiatePeriWasm } from "../dist/wasm.js";
-import { startPeriWasmHost } from "../dist/wasm-host.js";
+import { startWasmRuntime } from "../dist/wasm-node.js";
 
 test("公开 Store 查询常量保留参数化查询契约", () => {
   expect(SESSION_LIST_SQL).toContain("WHERE hidden = 0 AND cwd = ?");
   expect(SESSION_BY_ID_SQL).toContain("WHERE id = ?");
 });
 
-test("宿主产物保留 node: 端口说明符且不引入进程控制", async () => {
-  const source = await Bun.file(new URL("../dist/wasm-host.js", import.meta.url)).text();
+test("运行后端产物保留 node: 端口说明符且不引入进程控制", async () => {
+  const source = await Bun.file(new URL("../dist/wasm-node.js", import.meta.url)).text();
   expect(source).toContain('"node:dns"');
   expect(source).toContain('"node:net"');
   expect(source).not.toMatch(/(?:from\s*|import\s*\()\s*["'](?:dns|net)["']/);
   expect(source).not.toMatch(/child_process|Bun\.spawn|process\.kill|bun:sqlite/);
-  expect(startPeriWasmHost).toBeFunction();
+  expect(startWasmRuntime).toBeFunction();
 });
 
 test("WASM 公共入口支持静态 factory 而不加载本机文件", async () => {

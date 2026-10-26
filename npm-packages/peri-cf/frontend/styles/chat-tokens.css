@@ -1,0 +1,128 @@
+/*
+ * Peri Chat 信息流 token。
+ *
+ * 加载顺序：`main.tsx` 在 tailwind.css / styles.css 之后引入本文件（本文件再引入
+ * chat-stream.css），因此这里的变量与规则覆盖既有全局样式。设置页、侧边栏与欢迎页
+ * 的品牌选择器不在本层范围内。
+ *
+ * 深色主题跟随项目既有 `.dark` 约定；项目当前没有运行时主题切换，故同时提供
+ * `prefers-color-scheme` 回退（`.light` 可显式退出系统深色）。
+ */
+@import "./chat-stream.css";
+
+:root {
+  /* 颜色（Light） */
+  --chat-bg: #ffffff;
+  --chat-fg: #0f1115;
+  --chat-fg-2: #61666b;
+  --chat-fg-3: #81858c;
+  --chat-caption: #adb2b8;
+  --chat-user-bubble: #edf3fe;
+  --chat-code-bg: #f9fafb;
+  --chat-code-header: #f9fafb;
+  --chat-inline-code: #fafafa;
+  --chat-border-1: rgba(0, 0, 0, 0.04);
+  --chat-border-2: rgba(0, 0, 0, 0.1);
+  --chat-border-3: rgba(0, 0, 0, 0.12);
+  --chat-hover: rgba(38, 49, 72, 0.06);
+  --chat-hover-solid: #f1f3f5;
+  --chat-link: #4176e6;
+  --chat-error: #ec1313;
+  --chat-success: #22c55e;
+  --chat-warn: #f59e0b;
+  --chat-running: #4176e6;
+  --chat-floating: #ffffff;
+  --chat-focus: #4176e6;
+
+  /* 字体与排版 */
+  --chat-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  --chat-font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas,
+    "Liberation Mono", monospace;
+  --chat-text-body: 14px;
+  --chat-leading-body: 24px;
+  --chat-text-secondary: 13px;
+  --chat-leading-secondary: 20px;
+  --chat-text-small: 12px;
+  --chat-leading-small: 18px;
+  --chat-leading-user: 22px;
+  --chat-weight-link: 500;
+  --chat-weight-strong: 600;
+  --chat-weight-heading: 700;
+
+  /* 圆角 */
+  --chat-radius-bubble: 20px;
+  --chat-radius-composer: 28px;
+  --chat-radius-code: 16px;
+  --chat-radius-inline: 8px;
+
+  /* 间距 */
+  --chat-space-1: 4px;
+  --chat-space-2: 6px;
+  --chat-space-3: 8px;
+  --chat-space-4: 12px;
+  --chat-space-5: 16px;
+  --chat-space-6: 24px;
+  --chat-space-7: 32px;
+  --chat-space-8: 36px;
+
+  /* 列宽与滚动 */
+  --chat-column-width: clamp(680px, 64%, 920px);
+  --chat-column-fallback: min(calc(100% - 32px), 920px);
+  --chat-composer-max-width: 952px;
+  --chat-follow-threshold: 24px;
+  --chat-scrollbar-size: 5px;
+  --chat-composer-fade: 36px;
+  --chat-action-row-height: 28px;
+  --chat-transition-fast: 120ms;
+}
+
+.dark {
+  --chat-bg: #151517;
+  --chat-fg: #f9fafb;
+  --chat-fg-2: #cfd3d6;
+  --chat-fg-3: #adb2b8;
+  --chat-caption: #81858c;
+  --chat-user-bubble: #2c2c2e;
+  --chat-code-bg: #1b1b1c;
+  --chat-code-header: #2c2c2e;
+  --chat-inline-code: #292929;
+  --chat-border-1: rgba(255, 255, 255, 0.06);
+  --chat-border-2: rgba(255, 255, 255, 0.12);
+  --chat-border-3: rgba(255, 255, 255, 0.16);
+  --chat-hover: rgba(255, 255, 255, 0.08);
+  --chat-hover-solid: #353638;
+  --chat-link: #7aaaff;
+  --chat-error: #f25a5a;
+  --chat-success: #22c55e;
+  --chat-warn: #f59e0b;
+  --chat-running: #7aaaff;
+  --chat-floating: #2c2c2e;
+  --chat-focus: #7aaaff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) {
+    --chat-bg: #151517;
+    --chat-fg: #f9fafb;
+    --chat-fg-2: #cfd3d6;
+    --chat-fg-3: #adb2b8;
+    --chat-caption: #81858c;
+    --chat-user-bubble: #2c2c2e;
+    --chat-code-bg: #1b1b1c;
+    --chat-code-header: #2c2c2e;
+    --chat-inline-code: #292929;
+    --chat-border-1: rgba(255, 255, 255, 0.06);
+    --chat-border-2: rgba(255, 255, 255, 0.12);
+    --chat-border-3: rgba(255, 255, 255, 0.16);
+    --chat-hover: rgba(255, 255, 255, 0.08);
+    --chat-hover-solid: #353638;
+    --chat-link: #7aaaff;
+    --chat-error: #f25a5a;
+    --chat-success: #22c55e;
+    --chat-warn: #f59e0b;
+    --chat-running: #7aaaff;
+    --chat-floating: #2c2c2e;
+    --chat-focus: #7aaaff;
+  }
+}

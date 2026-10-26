@@ -1,10 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import * as Y from "yjs";
-import { HistoryPageUnavailableError, StaleHistoryPageError } from "../src/agent/session";
-import { MemoryKV } from "../src/kv/memory-kv";
-import { ManagedAgents } from "../src/managed/managed-agents";
-import { Sandbox } from "../src/sandbox/sandbox";
-import type { SessionDocs } from "../src/state/session-docs";
+import {
+  HistoryPageUnavailableError,
+  StaleHistoryPageError,
+} from "../src/state/history-browser";
+import {
+  PeriInstance,
+  type PeriInstanceCloseOptions,
+} from "../src/agent/peri-instance";
+import { Session } from "../src/agent/session";
+import { ChatDocument } from "../src/view/chat-document";
+import { readSessionView } from "../src/view/session-view";
+import type { ChatFact } from "../src/chat/facts";
 import type { JsonRpcNotification, Transport } from "../src/transport/types";
 
 // 契约出处：peri-acp/src/host/history_page.rs 模块文档（初始 load 响应带
@@ -60,16 +66,9 @@ function pageResponse(
   return { sessionId: SESSION, snapshotToken, nextCursor, items };
 }
 
-function entryTexts(docs: SessionDocs): string[] {
-  const root = docs.chat.getMap<unknown>("root");
-  const order = root.get("entryOrder") as Y.Array<string>;
-  const entries = root.get("entries") as Y.Map<Y.Map<unknown>>;
-  return order.toArray().map((id) => {
-    const entry = entries.get(id)!;
-    const blockOrder = entry.get("blockOrder") as Y.Array<string>;
-    const blocks = entry.get("blocks") as Y.Map<Y.Map<unknown>>;
-    return blockOrder.toArray().map((blockId) => String(blocks.get(blockId)?.get("text"))).join("");
-  });
+function entryTexts(document: ChatDocument): string[] {
+  return readSessionView(document.chat, document.session).entries.map((entry) =>
+    entry.blocks.map((block) => block.text ?? "").join(""));
 }
 
 class PagedTransport implements Transport {
@@ -147,20 +146,46 @@ const storage = {
   }),
 };
 
-function makeAgent(transport: PagedTransport, id: string) {
-  return new ManagedAgents({ kv: new MemoryKV() }).createAgent({
-    path: "/tmp/workspace",
-    id,
-    sandbox: new Sandbox({ id: `${id}-workspace`, storage, transportFactory: () => transport }),
+const closeOptions: PeriInstanceCloseOptions = {
+  drainTimeoutMs: 1000,
+  bindingSettleTimeoutMs: 1000,
+  activationCloseTimeoutMs: 1000,
+};
+
+function makeInstance(
+  transport: PagedTransport,
+  paths: string[] = [],
+): PeriInstance {
+  return new PeriInstance({
+    acquireHost: async (path) => {
+      paths.push(path);
+      return { transport, close: async () => ({ confirmed: true }) };
+    },
+    resolveSessionPath: async (sessionId) => (await storage.getSession(sessionId)).cwd,
+    defaultMcpServers: {},
+    close: closeOptions,
   });
+}
+
+/** 事实 → 展示文档；PeriInstance 只发事实，测试不直接摸运行侧历史缓冲。 */
+function attachDisplay(instance: PeriInstance): ChatDocument {
+  const document = new ChatDocument();
+  instance.attach((fact: ChatFact) => {
+    document.applyFact(fact);
+  });
+  return document;
 }
 
 describe("history load staging and pagination", () => {
   test("declares peri.historyPagination and pages with only sessionId, cursor, and limit", async () => {
     const transport = new PagedTransport();
-    const agent = makeAgent(transport, "paged-agent");
-    await agent.session.start(SESSION);
+    const paths: string[] = [];
+    const instance = makeInstance(transport, paths);
+    const document = attachDisplay(instance);
+    await instance.bindExisting(SESSION);
 
+    // session/load 的 cwd 来自 Store 中的持久路径，而不是调用方句柄 path。
+    expect(paths).toEqual(["/tmp/workspace"]);
     const initialize = transport.calls.find((call) => call.method === "initialize")?.params as {
       clientCapabilities?: { _meta?: Record<string, unknown> };
     };
@@ -169,64 +194,58 @@ describe("history load staging and pagination", () => {
     expect(typeof load.loadGeneration).toBe("string");
     expect(load.cursor).toBeUndefined();
 
-    expect(agent.session.canLoadEarlierHistory).toBe(true);
-    const paging = agent.session.loadEarlierHistory(2);
+    const paging = instance.loadEarlierHistory(2);
     expect(transport.pages).toHaveLength(1);
     // 历史页不得携带装配参数（REQ §5.2）。
     expect(transport.pages[0]!.params).toEqual({ sessionId: SESSION, cursor: "cursor-1", limit: 2 });
 
     transport.pages[0]!.settle(pageResponse([pageItem("s1:older", 10, "older answer")], null));
     await expect(paging).resolves.toEqual({ applied: 1, nextCursor: null });
-    expect(entryTexts(agent.docs)).toEqual(["older answer"]);
-    // nextCursor = null 表示更早方向确实没有内容，入口随即关闭：这是「翻完了」，
-    // 不是「本连接没有分页窗口」（A15）。
-    expect(agent.session.canLoadEarlierHistory).toBe(false);
-    await expect(agent.session.loadEarlierHistory()).rejects.toBeInstanceOf(HistoryPageUnavailableError);
-    await expect(agent.session.loadEarlierHistory()).rejects.toMatchObject({ reason: "exhausted" });
-    await agent.close();
+    expect(entryTexts(document)).toEqual(["older answer"]);
+    // nextCursor = null 表示更早方向确实没有内容，入口随即关闭。
+    await expect(instance.loadEarlierHistory()).rejects.toBeInstanceOf(HistoryPageUnavailableError);
+    await expect(instance.loadEarlierHistory()).rejects.toMatchObject({ reason: "exhausted" });
+    await instance.close();
   });
 
   test("a first screen with no earlier content reports an exhausted window, not a missing capability (A15)", async () => {
     const transport = new PagedTransport();
     transport.initialNextCursor = null;
-    const agent = makeAgent(transport, "exhausted-agent");
-    await agent.session.start(SESSION);
+    const instance = makeInstance(transport);
+    const document = attachDisplay(instance);
+    await instance.bindExisting(SESSION);
 
-    expect(agent.session.canLoadEarlierHistory).toBe(false);
-    expect(agent.docs.historyWindowInvalidated()).toBe(false);
-    await expect(agent.session.loadEarlierHistory()).rejects.toBeInstanceOf(HistoryPageUnavailableError);
-    await expect(agent.session.loadEarlierHistory()).rejects.toMatchObject({
+    await expect(instance.loadEarlierHistory()).rejects.toBeInstanceOf(HistoryPageUnavailableError);
+    await expect(instance.loadEarlierHistory()).rejects.toMatchObject({
       reason: "exhausted",
       message: expect.stringContaining("no earlier history"),
     });
-    // 窗口存在且没有被作废：再启动一次 load 才有新的窗口，这里状态必须可分辨。
-    expect(agent.docs.historyCursor()).toBeNull();
-    await agent.close();
+    expect(entryTexts(document)).toEqual([]);
+    await instance.close();
   });
 
   test("a load response without a browsing window reports a missing capability", async () => {
     const transport = new PagedTransport();
     transport.initialSnapshotToken = null;
-    const agent = makeAgent(transport, "unnegotiated-agent");
-    await agent.session.start(SESSION);
+    const instance = makeInstance(transport);
+    await instance.bindExisting(SESSION);
 
-    expect(agent.session.canLoadEarlierHistory).toBe(false);
-    await expect(agent.session.loadEarlierHistory()).rejects.toBeInstanceOf(HistoryPageUnavailableError);
-    await expect(agent.session.loadEarlierHistory()).rejects.toMatchObject({
+    await expect(instance.loadEarlierHistory()).rejects.toBeInstanceOf(HistoryPageUnavailableError);
+    await expect(instance.loadEarlierHistory()).rejects.toMatchObject({
       reason: "not_negotiated",
       message: expect.stringContaining("no history pagination window"),
     });
-    await agent.close();
+    await instance.close();
   });
 
   test("the staged first-screen replay still reaches the raw event stream (REQ-H04)", async () => {
+    // 原始诊断流是 Session 层契约；PeriInstance 只向 View 发归一化事实。
     const transport = new PagedTransport();
     transport.replayEntries = [{ entryId: "s1:summary", position: 20, text: "compacted summary" }];
-    const agent = makeAgent(transport, "stream-agent");
-    await agent.session.start(SESSION);
+    const session = new Session(transport, { requestHandler: () => undefined });
+    await session.start({ path: "/tmp/workspace", sessionId: SESSION });
 
-    // 按代次暂存只约束文档安装：原始诊断流仍是「连接收到什么就有什么」，首屏回放不缺条。
-    const stream = agent.session.stream()[Symbol.asyncIterator]();
+    const stream = session.stream()[Symbol.asyncIterator]();
     const first = await stream.next();
     expect(first.done).toBe(false);
     expect(first.value.method).toBe("session/update");
@@ -234,7 +253,7 @@ describe("history load staging and pagination", () => {
     expect(params.update?.content?.text).toBe("compacted summary");
     expect(params.update?._meta?.periLoadGeneration).toBe(transport.lastLoadGeneration);
     await stream.return?.();
-    await agent.close();
+    await session.close();
   });
 
   test("replay is staged until the load response installs it in one pass (A22)", async () => {
@@ -242,113 +261,116 @@ describe("history load staging and pagination", () => {
     transport.replayEntries = [{ entryId: "s1:summary", position: 20, text: "compacted summary" }];
     const gate = deferred<void>();
     transport.initialLoadGate = gate.promise;
-    const agent = makeAgent(transport, "staged-agent");
+    const instance = makeInstance(transport);
+    const document = attachDisplay(instance);
 
-    const starting = agent.session.start(SESSION);
+    const starting = instance.bindExisting(SESSION);
     await transport.initialLoadSeen.promise;
     // 回放已到达但响应未回：窗口不得半截呈现。
-    expect(entryTexts(agent.docs)).toEqual([]);
+    expect(entryTexts(document)).toEqual([]);
     gate.resolve();
     await starting;
 
-    expect(entryTexts(agent.docs)).toEqual(["compacted summary"]);
-    expect(agent.session.canLoadEarlierHistory).toBe(true);
+    expect(entryTexts(document)).toEqual(["compacted summary"]);
 
     // 安装之后同一代次再来的回放是重复投递：整条丢弃，窗口不变。
     transport.emit(replayUpdate("s1:summary", 20, "compacted summary", transport.lastLoadGeneration!));
-    expect(entryTexts(agent.docs)).toEqual(["compacted summary"]);
-    await agent.close();
+    expect(entryTexts(document)).toEqual(["compacted summary"]);
+    await instance.close();
   });
 
   test("replay from a superseded generation never reaches the window", async () => {
     const transport = new PagedTransport();
     transport.replayEntries = [{ entryId: "s1:stale", position: 10, text: "stale replay" }];
     transport.replayGeneration = "superseded-generation";
-    const agent = makeAgent(transport, "stale-generation-agent");
-    await agent.session.start(SESSION);
+    const instance = makeInstance(transport);
+    const document = attachDisplay(instance);
+    await instance.bindExisting(SESSION);
 
-    expect(entryTexts(agent.docs)).toEqual([]);
-    await agent.close();
+    expect(entryTexts(document)).toEqual([]);
+    await instance.close();
   });
 
   test("a failed load leaves no staged replay behind", async () => {
     const transport = new PagedTransport();
     transport.replayEntries = [{ entryId: "s1:summary", position: 20, text: "compacted summary" }];
     transport.initialLoadError = new Error("session/load failed");
-    const agent = makeAgent(transport, "failed-load-agent");
+    const instance = makeInstance(transport);
+    const document = attachDisplay(instance);
 
-    await expect(agent.session.start(SESSION)).rejects.toThrow("session/load failed");
-    expect(entryTexts(agent.docs)).toEqual([]);
-    await agent.session.cleanupStartup();
+    await expect(instance.bindExisting(SESSION)).rejects.toThrow("session/load failed");
+    expect(entryTexts(document)).toEqual([]);
+    await instance.close();
   });
 
   test("a failed load discards its staged replay, and a retry installs exactly one copy (A22)", async () => {
     const transport = new PagedTransport();
     transport.replayEntries = [{ entryId: "s1:summary", position: 20, text: "compacted summary" }];
     transport.initialLoadError = new Error("session/load failed");
-    const agent = makeAgent(transport, "failed-load-retry-agent");
+    const instance = makeInstance(transport);
+    const document = attachDisplay(instance);
 
-    await expect(agent.session.start(SESSION)).rejects.toThrow("session/load failed");
+    await expect(instance.bindExisting(SESSION)).rejects.toThrow("session/load failed");
     const failedGeneration = transport.lastLoadGeneration!;
     expect(failedGeneration.length).toBeGreaterThan(0);
-    expect(entryTexts(agent.docs)).toEqual([]);
+    expect(entryTexts(document)).toEqual([]);
 
     // 同一 Session 重试：失败代次的暂存不得被沿用，成功代次恰好安装一份。
     transport.initialLoadError = null;
-    await agent.session.start(SESSION);
+    await instance.bindExisting(SESSION);
     expect(transport.lastLoadGeneration).not.toBe(failedGeneration);
-    expect(entryTexts(agent.docs)).toEqual(["compacted summary"]);
-    expect(agent.docs.historyCursor()).toBe("cursor-1");
+    expect(entryTexts(document)).toEqual(["compacted summary"]);
 
     // 失败代次的迟到回放不得污染新快照。
     transport.emit(replayUpdate("s1:summary", 20, "stale copy", failedGeneration));
-    expect(entryTexts(agent.docs)).toEqual(["compacted summary"]);
-    await agent.close();
+    expect(entryTexts(document)).toEqual(["compacted summary"]);
+    await instance.close();
   });
 
   test("concurrent calls with the same cursor and limit share one request", async () => {
     const transport = new PagedTransport();
-    const agent = makeAgent(transport, "coalesced-agent");
-    await agent.session.start(SESSION);
+    const instance = makeInstance(transport);
+    const document = attachDisplay(instance);
+    await instance.bindExisting(SESSION);
 
-    const first = agent.session.loadEarlierHistory(5);
-    const second = agent.session.loadEarlierHistory(5);
+    const first = instance.loadEarlierHistory(5);
+    const second = instance.loadEarlierHistory(5);
     expect(transport.pages).toHaveLength(1);
 
     transport.pages[0]!.settle(pageResponse([pageItem("s1:older", 10, "older answer")], "cursor-2"));
     const [a, b] = await Promise.all([first, second]);
     expect(a).toEqual({ applied: 1, nextCursor: "cursor-2" });
     expect(b).toEqual(a);
-    expect(entryTexts(agent.docs)).toEqual(["older answer"]);
-    expect(agent.docs.historyCursor()).toBe("cursor-2");
-    await agent.close();
+    expect(entryTexts(document)).toEqual(["older answer"]);
+    await instance.close();
   });
 
   test("a failed page keeps the window and the same cursor can be retried", async () => {
     const transport = new PagedTransport();
-    const agent = makeAgent(transport, "retry-agent");
-    await agent.session.start(SESSION);
+    const instance = makeInstance(transport);
+    const document = attachDisplay(instance);
+    await instance.bindExisting(SESSION);
 
-    const failing = agent.session.loadEarlierHistory();
+    const failing = instance.loadEarlierHistory();
     transport.pages[0]!.fail(new Error("history page unavailable"));
     await expect(failing).rejects.toThrow("history page unavailable");
-    expect(entryTexts(agent.docs)).toEqual([]);
-    expect(agent.docs.historyCursor()).toBe("cursor-1");
+    expect(entryTexts(document)).toEqual([]);
 
-    const retrying = agent.session.loadEarlierHistory();
+    const retrying = instance.loadEarlierHistory();
     expect(transport.pages[1]!.params.cursor).toBe("cursor-1");
     transport.pages[1]!.settle(pageResponse([pageItem("s1:older", 10, "older answer")], null));
     await expect(retrying).resolves.toEqual({ applied: 1, nextCursor: null });
-    expect(entryTexts(agent.docs)).toEqual(["older answer"]);
-    await agent.close();
+    expect(entryTexts(document)).toEqual(["older answer"]);
+    await instance.close();
   });
 
   test("a page that arrives after rewind is rejected and the window is cleared", async () => {
     const transport = new PagedTransport();
-    const agent = makeAgent(transport, "rewind-agent");
-    await agent.session.start(SESSION);
+    const instance = makeInstance(transport);
+    const document = attachDisplay(instance);
+    await instance.bindExisting(SESSION);
 
-    const paging = agent.session.loadEarlierHistory();
+    const paging = instance.loadEarlierHistory();
     transport.emit({
       jsonrpc: "2.0",
       method: "peri/agent_event",
@@ -357,39 +379,39 @@ describe("history load staging and pagination", () => {
         event_json: JSON.stringify({ type: "rewind_completed", value: { messages_json: "[]" } }),
       },
     });
-    expect(agent.session.canLoadEarlierHistory).toBe(false);
-    await expect(agent.session.loadEarlierHistory()).rejects.toMatchObject({
+    await expect(instance.loadEarlierHistory()).rejects.toMatchObject({
       name: "HistoryPageUnavailableError", reason: "invalidated",
     });
 
     transport.pages[0]!.settle(pageResponse([pageItem("s1:older", 10, "older answer")], null));
     await expect(paging).rejects.toMatchObject({ name: "StaleHistoryPageError", reason: "window" });
-    expect(entryTexts(agent.docs)).toEqual([]);
-    await agent.close();
+    expect(entryTexts(document)).toEqual([]);
+    await instance.close();
   });
 
   test("a page from a different snapshot is rejected whole (A11)", async () => {
     const transport = new PagedTransport();
-    const agent = makeAgent(transport, "snapshot-agent");
-    await agent.session.start(SESSION);
+    const instance = makeInstance(transport);
+    const document = attachDisplay(instance);
+    await instance.bindExisting(SESSION);
 
-    const paging = agent.session.loadEarlierHistory();
+    const paging = instance.loadEarlierHistory();
     transport.pages[0]!.settle(pageResponse([pageItem("s1:older", 10, "older answer")], null, "9:1:other-token"));
     await expect(paging).rejects.toBeInstanceOf(StaleHistoryPageError);
-    expect(entryTexts(agent.docs)).toEqual([]);
-    expect(agent.docs.historyCursor()).toBe("cursor-1");
-    await agent.close();
+    expect(entryTexts(document)).toEqual([]);
+    await instance.close();
   });
 
   test("a page that arrives after close is dropped", async () => {
     const transport = new PagedTransport();
-    const agent = makeAgent(transport, "closed-agent");
-    await agent.session.start(SESSION);
+    const instance = makeInstance(transport);
+    const document = attachDisplay(instance);
+    await instance.bindExisting(SESSION);
 
-    const paging = agent.session.loadEarlierHistory();
-    await agent.session.close();
+    const paging = instance.loadEarlierHistory();
+    await instance.close();
     transport.pages[0]!.settle(pageResponse([pageItem("s1:older", 10, "older answer")], null));
-    await expect(paging).rejects.toMatchObject({ name: "StaleHistoryPageError", reason: "session" });
-    expect(entryTexts(agent.docs)).toEqual([]);
+    await expect(paging).rejects.toBeInstanceOf(StaleHistoryPageError);
+    expect(entryTexts(document)).toEqual([]);
   });
 });

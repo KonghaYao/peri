@@ -1,0 +1,121 @@
+:root {
+  font-family: 'Noto Sans SC', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', sans-serif;
+  color: #282b29;
+  background: #fcfcfa;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  /* 外壳/设置页自有 token 带前缀：--muted、--border 归 tailwind.css 的主题（styles.css 在后加载会覆盖它们的主题值）。 */
+  --shell-muted: #8a8c86;
+  --green: #34684f;
+}
+
+/*
+ * 全局重置与元素级行为放进 base 层：Tailwind utilities 优先于这些规则。
+ * 否则 `button { color: inherit }` / `button:disabled { opacity: .45 }` 会盖掉
+ * vendored 卡片（registry 源码）在按钮上的 text-* / disabled:opacity-* 等工具类。
+ * 外壳与设置页不使用 utilities，渲染结果不变。
+ */
+@layer base {
+  * { box-sizing: border-box; }
+  body { margin: 0; }
+  button, input, textarea { font: inherit; }
+  button { cursor: pointer; color: inherit; }
+  button:disabled { cursor: not-allowed; opacity: .45; }
+  button, a, input, textarea { -webkit-tap-highlight-color: transparent; }
+  button:focus-visible, a:focus-visible { outline: 2px solid #5c9275; outline-offset: 3px; }
+  input:focus-visible, textarea:focus-visible { outline: none; }
+  svg { flex-shrink: 0; }
+  button { transition: background .16s, border-color .16s, opacity .16s; }
+}
+.app-shell { display: flex; height: 100dvh; min-height: 420px; overflow: hidden; }
+.sidebar { width: 268px; flex-shrink: 0; background: #f3f4ef; padding: 27px 17px 16px; display: flex; flex-direction: column; border-right: 1px solid #e7e9e1; }
+.sidebar-brand { display: flex; align-items: center; gap: 9px; padding: 0 11px; font-size: 29px; font-weight: 650; letter-spacing: -1.4px; }
+.brand-mark { display: grid; place-items: center; height: 33px; width: 33px; background: var(--green); border-radius: 11px; color: #fff; }
+/* 新建入口与会话条目由 Sidebar / SidebarThreadRow 渲染（自带 Tailwind 样式），这里只给外层间距。 */
+.sidebar-new { margin: 22px 2px 16px; }
+.sidebar-section-heading { display: flex; align-items: center; justify-content: space-between; padding: 0 11px; font-size: 11px; color: var(--shell-muted); letter-spacing: 1px; }
+.icon-button { display: inline-flex; align-items: center; justify-content: center; padding: 7px; border: 0; border-radius: 7px; background: transparent; color: #83877e; }
+.icon-button:hover:not(:disabled) { background: #e8ece2; color: #3a483b; }
+.chat-list { flex: 1; overflow-y: auto; padding-top: 6px; scrollbar-width: thin; }
+.sidebar-empty { text-align: center; padding: 53px 8px; color: #a4ab9a; }
+.sidebar-empty p { color: #868e7e; font-size: 12px; margin: 14px 0 7px; }
+.sidebar-empty > span { font-size: 10px; line-height: 1.8; }
+.main-panel { display: flex; flex: 1; min-width: 0; flex-direction: column; background: var(--chat-bg); }
+.topbar { height: 77px; flex-shrink: 0; padding: 0 34px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #f0f0eb; gap: 16px; }
+.topbar-left { display: flex; align-items: center; min-width: 0; gap: 14px; }
+.topbar-name { display: flex; align-items: center; gap: 7px; font-size: 16px; font-weight: 550; }
+.topbar-name > svg { color: #a4a69f; }
+.topbar-divider { width: 1px; height: 14px; background: #e1e3da; }
+.topbar-subtitle { color: #92958b; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.content-area { display: flex; flex-direction: column; flex: 1; min-height: 0; position: relative; }
+.error-banner { display: flex; align-items: center; gap: 10px; margin: 12px 24px 0; padding: 10px 14px; border: 1px solid #ecd9c8; border-radius: 10px; background: #fff6ee; color: #996039; font-size: 12px; line-height: 1.7; flex-shrink: 0; }
+.error-banner > span { flex: 1; overflow-wrap: anywhere; }
+.muted { color: #969e8c; font-size: 12px; line-height: 1.8; }
+.text-button { border: 0; border-radius: 8px; background: transparent; color: #8a967c; padding: 9px 13px; font-size: 12px; }
+.text-button:hover:not(:disabled) { background: #eef1e7; }
+.primary-button { display: flex; align-items: center; gap: 6px; padding: 10px 15px; border: 0; border-radius: 9px; color: white; background: #426848; font-size: 12px; }
+.primary-button:hover { background: #315637; }
+.mobile-only { display: none; }
+.settings-shell { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 24px; overflow-y: auto; background: #f6f7f2f0; backdrop-filter: blur(3px); }
+.settings-card { width: min(100%, 540px); max-height: 100%; overflow-y: auto; padding: 24px 26px 20px; background: #fff; border: 1px solid #e7e9e1; border-radius: 18px; box-shadow: 0 14px 44px #2b3a2012; }
+.settings-head { display: flex; align-items: center; gap: 12px; }
+.settings-head h1 { margin: 0; font-size: 17px; font-weight: 550; }
+.settings-head > .icon-button { margin-left: auto; }
+.settings-intro { margin: 12px 0 18px; color: #95988d; font-size: 11px; line-height: 1.9; }
+.settings-group { border: 1px solid #eceee6; border-radius: 13px; padding: 14px 15px; margin-bottom: 12px; }
+.settings-group h2 { margin: 0 0 11px; font-size: 10px; font-weight: 500; letter-spacing: 1.4px; color: #8f9884; }
+.settings-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 11px; }
+.settings-field:last-child { margin-bottom: 0; }
+.settings-field > span { font-size: 11px; color: #6f7566; }
+.settings-field input, .settings-field select, .settings-field textarea { width: 100%; padding: 9px 11px; border: 1px solid #e0e4d8; border-radius: 9px; background: #fdfefb; color: #3e4638; font-size: 12px; }
+.settings-field input:focus, .settings-field select:focus, .settings-field textarea:focus { border-color: #a5b998; }
+.settings-field input[readonly] { background: #f4f6ef; color: #808874; }
+.settings-field textarea { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.6; }
+.settings-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 16px; }
+.settings-foot .muted { font-size: 10px; }
+.settings-problems { margin: 12px 0 0; color: #9c6238; font-size: 11px; line-height: 1.8; }
+.settings-group-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 9px; }
+.settings-group-head h2 { margin: 0; }
+.settings-add { display: inline-flex; align-items: center; gap: 4px; padding: 5px 9px; }
+.settings-hint { margin: 0 0 11px; color: #95988d; font-size: 10px; line-height: 1.8; }
+.settings-empty { margin: 0; color: #9aa191; font-size: 11px; line-height: 1.8; }
+.mcp-server-card { border: 1px solid #e9ece2; border-radius: 11px; padding: 12px 12px 13px; margin-top: 10px; background: #fcfdfa; }
+.mcp-server-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.mcp-server-head h3 { flex: 1; margin: 0; font-size: 12px; font-weight: 550; color: #4d5845; overflow-wrap: anywhere; }
+.mcp-server-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 10px; }
+.mcp-problems { margin: 8px 0 0; padding-left: 17px; color: #9c6238; font-size: 10px; line-height: 1.8; }
+.spinning { animation: spin 1.2s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+/* pulse 仅由 Tailwind animate-pulse 消费（tailwind.css 先加载，此定义覆盖其同名 keyframes）。 */
+@keyframes pulse { 50% { opacity: .35; transform: translateY(-2px); } }
+
+@media (min-width: 1400px) {
+  .sidebar { width: 286px; padding-left: 21px; padding-right: 21px; }
+}
+
+@media (max-width: 1050px) {
+  .sidebar { width: 230px; padding-left: 12px; padding-right: 12px; }
+  .topbar { padding: 0 24px; }
+}
+
+@media (max-width: 760px) {
+  .app-shell { min-height: 320px; }
+  .mobile-only { display: inline-flex; }
+  .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 30; width: min(290px, 85vw); visibility: hidden; transform: translateX(-100%); transition: transform .22s ease; box-shadow: 10px 0 30px #1e2d1612; }
+  .sidebar.is-open { visibility: visible; transform: translateX(0); }
+  .sidebar-brand > .icon-button { margin-left: auto; }
+  .sidebar-backdrop { position: fixed; inset: 0; background: #25362055; z-index: 20; backdrop-filter: blur(2px); }
+  .topbar { height: 61px; padding: 0 17px; }
+  .topbar-left { gap: 12px; }
+  .topbar-name { font-size: 15px; }
+  .topbar-subtitle { font-size: 10px; }
+  .error-banner { margin: 10px 16px 0; padding: 8px 10px; font-size: 11px; }
+  .mcp-server-grid { grid-template-columns: 1fr; gap: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+
+.topbar-actions { display: flex; align-items: center; gap: 6px; }

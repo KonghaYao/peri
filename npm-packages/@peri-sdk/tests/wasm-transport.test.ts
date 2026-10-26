@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { WasmAcpTransport } from "../src/transport/wasm-transport";
-import { startPeriWasmHost } from "../src/wasm/host";
+import { startWasmRuntime } from "../src/wasm/runtime";
 import type { NativeWasmAcp } from "../src/wasm/loader";
 
 function framePort() {
@@ -51,7 +51,7 @@ test("宿主 factory 接收显式环境，关闭依次等待 native、网络和�
   const close = wire.port.close;
   wire.port.close = async () => { order.push("native"); await close(); };
   wire.port.free = () => { order.push("free"); };
-  const transport = await startPeriWasmHost({
+  const transport = await startWasmRuntime({
     configJson: "{}", env: { INSTANCE: "host" },
     moduleFactory: async (options) => {
       const module = { ENV: {} as Record<string, string>, PeriWasmAcp: { start: async () => wire.port } };
@@ -101,10 +101,10 @@ test("WASM port close rejects a pending request and ends event stream", async ()
   expect((await events.next()).done).toBe(true);
 });
 
-test("existing Agent and Session APIs run over an injected WASM frame port", async () => {
-  const { Sandbox } = await import("../src/sandbox/sandbox");
-  const { ManagedAgents } = await import("../src/managed/managed-agents");
-  const { MemoryKV } = await import("../src/kv/memory-kv");
+test("ChatManager runs over an injected WASM frame port", async () => {
+  const { ChatManager } = await import("../src/chat/manager");
+  const { ChatUserAction } = await import("../src/chat/action");
+  const { OwnershipProbe } = await import("./ownership-probe");
   const wire = framePort();
   const methods: string[] = [];
   const sendFrame = wire.port.send;
@@ -125,21 +125,31 @@ test("existing Agent and Session APIs run over an injected WASM frame port", asy
     }
     wire.push({ jsonrpc: "2.0", id: request.id, result });
   };
-  const sandbox = new Sandbox({ id: "wasm-test", transportFactory: () => WasmAcpTransport.fromPort(wire.port) });
-  const manager = new ManagedAgents({ kv: new MemoryKV() });
-  const agent = manager.createAgent({ path: "/tmp", id: "a1", sandbox, instructions: "hello" });
+  const manager = new ChatManager({
+    agentConfig: {},
+    database: {
+      listSessions: async () => [],
+      getSession: async () => null,
+    },
+    sessionOwnershipStorage: new OwnershipProbe(),
+    chatConfig: {
+      runtime: { kind: "transport", factory: () => WasmAcpTransport.fromPort(wire.port) },
+      defaults: { path: "/tmp", instructions: "hello" },
+    },
+  });
+  const chat = manager.createChat();
   try {
-    await agent.session.start(null);
-    expect(agent.session.id).toBe("s1");
-    const receipt = agent.session.send("question");
+    const ready = await chat.execute(ChatUserAction.createNewSession({}));
+    expect(ready.sessionId).toBe("s1");
+    const receipt = chat.execute(ChatUserAction.send({ text: "question" }));
     await receipt;
     expect(receipt.isSent).toBe(true);
-    await agent.session.cancel();
+    await expect(chat.execute(ChatUserAction.cancel({}))).resolves.toMatchObject({ status: "requested" });
     expect(methods).toEqual(["initialize", "session/new", "session/input/snapshot", "session/input/enqueue"]);
     const notifications = wire.sent.map((frame) => JSON.parse(frame) as { method?: string; params?: unknown })
       .filter((frame) => frame.id === undefined);
     expect(notifications).toEqual([{ jsonrpc: "2.0", method: "session/cancel", params: { sessionId: "s1" } }]);
-  } finally { await manager.closeAll(); }
+  } finally { await manager.shutdown(); }
 });
 
 test("WASM receive failure settles pending requests and closes native port once", async () => {
