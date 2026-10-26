@@ -62,6 +62,7 @@ fn confirm_logout_defaults_to_cancel_and_only_explicit_confirm_dispatches() {
                 &crate::config::PeriConfig::default(),
                 None,
             ));
+            *panel.auth.write() = test_auth_controller();
             *panel.mode.write() = LoginPanelMode::ConfirmLogout;
             assert!(
                 panel
@@ -512,6 +513,7 @@ fn scrolled_logout_confirm_buttons_match_keyboard_actions() {
                 &crate::config::PeriConfig::default(),
                 None,
             ));
+            *panel.auth.write() = test_auth_controller();
             *panel.mode.write() = LoginPanelMode::ConfirmLogout;
             assert!(
                 panel
@@ -544,6 +546,7 @@ fn scrolled_logout_confirm_buttons_match_keyboard_actions() {
                 &crate::config::PeriConfig::default(),
                 None,
             ));
+            *panel.auth.write() = test_auth_controller();
             *panel.mode.write() = LoginPanelMode::ConfirmLogout;
             assert!(
                 panel
