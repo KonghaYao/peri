@@ -56,7 +56,6 @@ export interface ChatInstanceContext {
     readonly defaults: ChatDefaults;
     readonly runtime: ChatRuntime;
     readonly signal: AbortSignal;
-    readonly now?: () => string;
     readonly database: ChatDatabase;
     readonly lifecycle: Required<ChatLifecycleOptions>;
     /** 仅 runtime.kind === "wasm" 可用；租约由 PeriInstance 关闭并检查 confirmed。 */
@@ -94,7 +93,6 @@ export interface ChatServiceOptions {
     readonly instanceFactory: ChatInstanceFactory;
     acquireWasmRuntime(signal?: AbortSignal): Promise<WasmRuntimeLease>;
     onClosed(chatId: string): void;
-    readonly now?: () => string;
 }
 
 export interface Activation {

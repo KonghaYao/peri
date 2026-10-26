@@ -1,13 +1,11 @@
 import type { ChatBindingTarget } from "../chat/types";
 import type { ChatFactEnvelope, ChatFactObserver, ChatFactSource } from "../chat/facts";
 import { SessionDocSync } from "../sync/index";
-import type { ProjectionClock } from "../state/doc-model";
 import { ChatDocument } from "./chat-document";
 import { ChatSyncConnection, type ChatSyncOptions } from "./chat-sync";
 import type { ChatYjsChannel } from "./channel";
 
 export type ChatViewOptions = {
-    now?: ProjectionClock;
     sync?: ChatSyncOptions;
 };
 
@@ -130,7 +128,7 @@ export class ChatView {
             && this.target.sessionId === target.sessionId
             && this.document) return;
         // 先构建新代次；失败时不替换当前展示。
-        const document = new ChatDocument({ now: this.options.now, binding: target });
+        const document = new ChatDocument({ binding: target });
         try {
             document.applyFacts(replay);
         } catch (error) {

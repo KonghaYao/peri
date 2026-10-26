@@ -142,7 +142,6 @@ export interface ChatManagerOptions {
     sessionOwnershipKv: AtomicSessionOwnershipKv;
     /** Chat 运行配置；runtime 必填。 */
     chatConfig: ChatConfig;
-    now?: () => string;
 }
 
 export interface ChatManager {

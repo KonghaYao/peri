@@ -82,7 +82,6 @@ export class ChatService implements ChatServiceContract {
         signal?: AbortSignal,
     ) => Promise<WasmRuntimeLease>;
     private readonly onClosedHandler: (chatId: string) => void;
-    private readonly now?: () => string;
     private readonly lifecycleOptions: Required<ChatLifecycleOptions>;
 
     private readonly state: ChatBinding;
@@ -116,7 +115,6 @@ export class ChatService implements ChatServiceContract {
         this.instanceFactory = options.instanceFactory;
         this.acquireWasmRuntime = options.acquireWasmRuntime;
         this.onClosedHandler = options.onClosed;
-        this.now = options.now;
         this.lifecycleOptions = resolveChatLifecycle(options.lifecycle);
         this.candidateContext = {
             chatId: this.id,
@@ -822,7 +820,6 @@ export class ChatService implements ChatServiceContract {
                 defaults: this.defaults,
                 runtime: this.runtime,
                 signal: controller.signal,
-                now: this.now,
                 database: this.database,
                 lifecycle: this.lifecycleOptions,
                 acquireWasmRuntime: (signal) => this.acquireWasmRuntime(signal),

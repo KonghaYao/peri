@@ -47,7 +47,6 @@ export interface SdkChatManagerOptions {
   readonly database?: ChatDatabase;
   readonly sessionOwnershipKv?: AtomicSessionOwnershipKv;
   readonly chatConfig?: Partial<Pick<ChatConfig, "runtime" | "lifecycle">>;
-  readonly now?: () => string;
   readonly instanceFactory?: ChatInstanceFactory;
   readonly logError?: LogError;
 }
@@ -163,7 +162,6 @@ export function createSdkChatManager(
         ...options.chatConfig?.lifecycle,
       },
     },
-    now: options.now,
     instanceFactory: options.instanceFactory,
   });
 }

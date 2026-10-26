@@ -30,7 +30,7 @@ export type ChatSyncOptions = {
     maxOutstandingBytes?: number;
     /** 未确认帧的最长等待时间。 */
     ackTimeoutMs?: number;
-    now?: () => number;
+    nowMs?: () => number;
     /** 连接终止（失败或主动关闭）后的通知；用于从 ChatView 的连接表移除。 */
     onTerminated?: () => void;
 };
@@ -83,7 +83,7 @@ export class ChatSyncConnection {
             maxFrames: positive(options.maxOutstandingFrames ?? DEFAULTS.maxOutstandingFrames, "maxOutstandingFrames"),
             maxBytes: positive(options.maxOutstandingBytes ?? DEFAULTS.maxOutstandingBytes, "maxOutstandingBytes"),
             timeoutMs: positive(options.ackTimeoutMs ?? DEFAULTS.ackTimeoutMs, "ackTimeoutMs"),
-            now: options.now,
+            nowMs: options.nowMs,
         };
         this.detachMessage = channel.onMessage((frame) => this.receive(frame));
         this.detachClose = channel.onClose((error) => this.terminate(
@@ -203,12 +203,12 @@ export class ChatSyncConnection {
     private scheduleDeadline(): void {
         if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
         if (this.closed || !this.ledger.pending.length) return;
-        const now = this.policy.now?.() ?? Date.now();
+        const now = this.policy.nowMs?.() ?? Date.now();
         const deadline = this.ledger.pending[0]!.deadline;
         this.timer = setTimeout(() => {
             this.timer = undefined;
             if (this.closed) return;
-            if ((this.policy.now?.() ?? Date.now()) >= deadline) {
+            if ((this.policy.nowMs?.() ?? Date.now()) >= deadline) {
                 this.terminate(new ChatSyncTimeoutError(), true);
                 return;
             }
@@ -220,7 +220,7 @@ export class ChatSyncConnection {
 
     private assertDeadlines(): void {
         const pending = this.ledger.pending[0];
-        if (pending && (this.policy.now?.() ?? Date.now()) >= pending.deadline) {
+        if (pending && (this.policy.nowMs?.() ?? Date.now()) >= pending.deadline) {
             throw new ChatSyncTimeoutError();
         }
     }

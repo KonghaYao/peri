@@ -18,7 +18,7 @@ export interface DeliveryCreditPolicy {
     maxFrames: number;
     maxBytes: number;
     timeoutMs: number;
-    now?: () => number;
+    nowMs?: () => number;
 }
 
 export function reserveDeliveryFrame(ledger: DeliveryLedger, frame: SyncFramePayload,
@@ -30,7 +30,7 @@ export function reserveDeliveryFrame(ledger: DeliveryLedger, frame: SyncFramePay
     const outstanding = ledger.pending.reduce((total, pending) => total + pending.bytes, 0);
     if (ledger.pending.length >= policy.maxFrames || outstanding + bytes > policy.maxBytes)
         throw new Error("Sync peer exceeded outstanding delivery credit");
-    ledger.pending.push({ delivery, bytes, deadline: (policy.now?.() ?? Date.now()) + policy.timeoutMs });
+    ledger.pending.push({ delivery, bytes, deadline: (policy.nowMs?.() ?? Date.now()) + policy.timeoutMs });
     ledger.nextDelivery++;
     return encoded;
 }

@@ -58,7 +58,6 @@ export class ChatManager implements ChatManagerContract {
     private readonly runtime: ChatRuntime;
     private readonly defaults: ChatDefaults;
     private readonly instanceFactory: ChatInstanceFactory;
-    private readonly now?: () => string;
     private readonly wasmRuntimes?: WasmRuntimePool;
     private readonly lifecycle: Required<ChatLifecycleOptions>;
 
@@ -102,7 +101,6 @@ export class ChatManager implements ChatManagerContract {
         // 运行后端配置在构造时快照；端口/模块工厂等实例仍由外部借用。
         this.runtime = { ...options.chatConfig.runtime };
         this.defaults = { ...options.chatConfig.defaults };
-        this.now = options.now;
         this.lifecycle = resolveChatLifecycle(options.chatConfig.lifecycle);
         // 默认工厂只绑定 Manager 的生命周期预算；测试仍可注入 fake port。
         const lifecycle = this.lifecycle;
@@ -164,7 +162,6 @@ export class ChatManager implements ChatManagerContract {
             lifecycle: this.lifecycle,
             acquireWasmRuntime: (signal) => this.acquireWasmRuntime(signal),
             onClosed: (chatId) => this.removeChat(chatId),
-            now: this.now,
         });
         this.chats.set(id, chat);
         return chat;
