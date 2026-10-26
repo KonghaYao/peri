@@ -18,12 +18,14 @@
    四档默认模型会从已保存的同类 plan provider（其次其他 Responses provider）预填；只填充
    空字段，手动输入优先，没有可靠来源时保留未设置并给出提示。预填只写 Login 草稿，不写
    任何 profile。
-4. Login 只保存 provider：档位绑定、该档 model 与正整数 `Context window (tokens)` 由
-   `/model` 面板负责。新建 provider 不自动绑定任何档位，已有 provider 的绑定与其参数保持
+4. Login 只保存 provider：档位绑定、该档 model 与正整数 `Context window (tokens)` 归
+   settings 的 `profiles`（`/model` 面板只编辑 Provider/Model/Effort/Max tokens/1m，
+   不提供 Responses 专属字段）。新建 provider 不自动绑定任何档位，已有 provider 的绑定与其参数保持
    不变；改名时所有显式引用随新 id 更新，空引用继续走首 provider 回退。保存只阻断“本次
    新弄坏”的已有绑定：原本就可解析、本次变为不可解析时显示精确错误（模型缺失指向 Login
-   默认模型字段，窗口缺失指向 Model 面板）；原本就不可解析的绑定允许保存并给非阻断提示，
-   不会自动补绑定或清空引用。
+   默认模型字段，窗口缺失指向 settings 的 `profile.contextWindow`；Model 面板不提供
+   Responses 专属字段）；原本就不可解析的绑定允许保存并给非阻断提示，不会自动补绑定或
+   清空引用。
 5. 已登录且作用域一致时，空/兼容的 plan 身份会在状态查询成功或保存门自动采用，一次保存
    即可完成；已有不同身份必须显式选择“使用此账号”，不会自动覆盖。`Checking` 期间保存只
    提示等待，不写红字。`SignedOut`/查询失败/作用域变化各有对应文案与推荐动作。
@@ -31,21 +33,18 @@
    对应提示；认证状态变化会清除陈旧的身份/引用错误。长草稿使用进入表单时的配置 revision，
    出现 revision 冲突时按 Ctrl+R 从 authority 重读并重新基线化（同时同步认证作用域），
    不会用旧草稿覆盖外部新值，只有该冲突显示重新载入提示。
-7. 在 `/model` 右栏选择要绑定的档位并编辑 provider/model/contextWindow：所有 provider
-   （含 Responses / ChatGPT plan）共用同一张 K/V 表，Provider/Model 行即时保存，不出现
-   档位草稿或专属保存面板。Context window 行按 Enter 或直接输入即可行内编辑；Enter
-   提交，Esc 恢复原值。切到缺窗口的 Responses provider 时先完成窗口编辑再落盘，取消则
-   provider/model 一并放弃。Login 落盘的四档默认模型会用于 Model 面板预填；已有显式
-   `profile.model` 优先，不会被预填覆盖。底部
+7. 在 `/model` 右栏选择要绑定的档位并编辑 Provider / Model / Effort / Max tokens /
+   1m enable：所有 provider（含 Responses / ChatGPT plan）共用同一张 K/V 表与即时保存
+   路径，不出现档位草稿、专属保存面板或 Responses 专属字段。Login 落盘的四档默认模型
+   会用于 Model 面板预填；已有显式 `profile.model` 优先，不会被预填覆盖。底部
    `[Ctrl+L 管理 Provider · 认证：/login]` 是按钮，点击与 Ctrl+L 相同：打开 Login
-   并定向编辑当前 provider；有未提交的窗口输入时两者都只提示先完成或取消，内容保留。
+   并定向编辑当前 provider。
 8. Login Edit 的字段、类型/认证方式/Confirm 可用鼠标点击，语义与键盘一致。Model 右栏
-   Provider/Model/Effort/Max tokens/Context window 行也可点击：先聚焦该行，再执行与
-   键盘相同的动作（Context window 进入行内编辑，其他字段沿用即时保存）。空白、边框、
-   分隔线与滚动条不触发动作；右栏滚动后点击可见行仍命中该字段。
-9. Model 的 Context window 是单行数值字段：换行/控制字符不会写入——按键被拒绝，终端
-   粘贴整段拒绝——保留原文本并显示既有错误；非数字同样被拒绝。修正（退格或输入合法
-   字符）后按 Enter 提交。
+   Provider/Model/Effort/Max tokens/1m enable 行也可点击：先聚焦该行，再执行与键盘
+   相同的动作。空白、边框、分隔线与滚动条不触发动作；右栏滚动后点击可见行仍命中该字段。
+9. 保存不要求先填窗口：切到缺窗口的 Responses provider 会落盘该绑定，但在补齐
+   `profile.contextWindow` 前该档位没有运行 provider（其它档位的保存与编辑不受影响）。
+   补齐窗口后重新打开 `/model` 或重启即可使用。
 
 ChatGPT 登录、状态查询与注销都在 Login 面板内完成，不启动 `peri auth chatgpt` 子进程，
 也不读取或显示 token。登录成功后凭据已保存，但 provider 配置仍需按上一步保存；两者不是
@@ -58,7 +57,8 @@ ChatGPT 登录、状态查询与注销都在 Login 面板内完成，不启动 `
 `https://api.openai.com/v1/responses`。API key 可指向兼容的 HTTP(S) 服务。
 
 下面的模型名、密钥和窗口数字是示例，请替换为所选模型的实际值。Peri 不按模型名
-猜测窗口；每个使用 Responses 的 profile 都必须声明正整数 `contextWindow`。
+猜测窗口；每个使用 Responses 的 profile 都必须声明正整数 `contextWindow`。未填窗口
+的绑定可以保存（作为未完成绑定），但补齐前该 profile 不能解析为运行 provider。
 
 ```json
 {
@@ -84,6 +84,12 @@ ChatGPT 登录、状态查询与注销都在 Login 面板内完成，不启动 `
 `effort` 和 `max_tokens` 继续由 profile 管理。Responses 不读取旧 `context_1m`
 开关；主模型、摘要和子模型工厂都消费同一已解析配置。切换别名时会重新使用目标
 profile 的模型、推理强度和窗口。
+
+流式 `response.metadata` 只承载元数据，不改变文本或完成态；若附带 response 身份，
+仍须匹配当前响应。若 `response.completed.output` 缺少此前已发送的 item，仅当该 item
+已收到完整 `response.output_item.done` 时，以完成快照重建结果和 replay；未完成的
+item、冲突的快照或无匹配身份仍按协议错误处理，不把丢失的工具调用静默当作成功。
+未知 SSE 事件和失败终态仍按协议错误处理。
 
 ## ChatGPT 计划
 

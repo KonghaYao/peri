@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use peri_acp::provider::config::{ProviderAuthConfig, ProviderConfig};
 
-use crate::chatgpt_auth::AccountStatus;
+use crate::chatgpt_auth::{AccountStatus, AuthIdentityDraft};
 use crate::i18n;
 
 use super::edit_types::{LoginError, LoginField};
@@ -156,6 +156,20 @@ impl PlanDraft {
         provider.api_key.clear();
         provider.base_url.clear();
         Ok(())
+    }
+}
+
+impl AuthIdentityDraft for PlanDraft {
+    fn needs_identity(&self) -> bool {
+        Self::needs_identity(self)
+    }
+
+    fn identity_mismatch(&self, status: &AccountStatus) -> bool {
+        Self::identity_mismatch(self, status)
+    }
+
+    fn set_identity(&mut self, status: &AccountStatus) -> bool {
+        Self::set_identity(self, status)
     }
 }
 

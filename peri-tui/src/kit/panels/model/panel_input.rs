@@ -20,10 +20,10 @@ use ratatui_kit::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use super::edit::{edit_field, effective_provider_id, switch_active_alias};
+use super::edit::{edit_field, effective_provider_id, set_context_window, switch_active_alias};
 use super::editor_view::{PaneHit, kv_row_hits};
 use super::panel_render::provider_button_label;
-use super::{FIELD_COUNT, PROFILE_KEYS};
+use super::{FIELD_CONTEXT_WINDOW, FIELD_COUNT, PROFILE_KEYS};
 
 /// 右栏内容区几何：标题 1 行 + 空行 1 行 + 主区 + 底部提示 1 行。
 ///
@@ -109,6 +109,63 @@ pub(super) fn handle_model_event_with(
     ctx: &ModelEventCtx,
     switch_alias: impl Fn(usize),
 ) -> EventResult {
+    if ctx.window_edit.read().is_some() {
+        match event {
+            Event::Paste(text) => {
+                let mut draft = ctx.window_edit.write();
+                let value = draft.as_mut().expect("active context window editor");
+                if text.bytes().all(|byte| byte.is_ascii_digit()) && value.len() + text.len() <= 10
+                {
+                    value.push_str(&text);
+                } else {
+                    crate::chatgpt_auth::notify_key("model-panel-window-invalid", 4);
+                }
+            }
+            Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                KeyCode::Esc => *ctx.window_edit.write() = None,
+                KeyCode::Enter => {
+                    let value = ctx
+                        .window_edit
+                        .read()
+                        .as_ref()
+                        .and_then(|text| text.parse::<u32>().ok())
+                        .filter(|value| *value > 0);
+                    match value {
+                        Some(value) if set_context_window(&current_active_alias(), value) => {
+                            *ctx.window_edit.write() = None;
+                        }
+                        Some(_) => {}
+                        None => crate::chatgpt_auth::notify_key("model-panel-window-invalid", 4),
+                    }
+                }
+                KeyCode::Backspace => {
+                    ctx.window_edit
+                        .write()
+                        .as_mut()
+                        .expect("active context window editor")
+                        .pop();
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    ctx.window_edit
+                        .write()
+                        .as_mut()
+                        .expect("active context window editor")
+                        .clear();
+                }
+                KeyCode::Char(digit) if digit.is_ascii_digit() => {
+                    let mut draft = ctx.window_edit.write();
+                    let value = draft.as_mut().expect("active context window editor");
+                    if value.len() < 10 {
+                        value.push(digit);
+                    }
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+        *ctx.render_version.write() += 1;
+        return EventResult::Consumed;
+    }
     // 鼠标：区域内左键点击左侧 profile 卡片行 = 选中并切换（click as enter）；
     // 右栏 K/V 行 = 聚焦该字段并执行与键盘相同的行为；底部按钮 = Ctrl+L。
     if let Event::Mouse(mouse) = event {
@@ -125,7 +182,11 @@ pub(super) fn handle_model_event_with(
                 {
                     *ctx.right_cursor.write() = field;
                     *ctx.right_focus.write() = true;
-                    edit_field(current_active_alias(), field, true);
+                    if field == FIELD_CONTEXT_WINDOW {
+                        begin_window_edit(ctx, &current_active_alias());
+                    } else {
+                        edit_field(current_active_alias(), field, true);
+                    }
                     *ctx.render_version.write() += 1;
                     return EventResult::Consumed;
                 }
@@ -202,7 +263,11 @@ pub(super) fn handle_model_event_with(
         }
         KeyCode::Right => {
             if *ctx.right_focus.read() {
-                edit_field(current_alias.clone(), *ctx.right_cursor.read(), true);
+                if *ctx.right_cursor.read() == FIELD_CONTEXT_WINDOW {
+                    begin_window_edit(ctx, &current_alias);
+                } else {
+                    edit_field(current_alias.clone(), *ctx.right_cursor.read(), true);
+                }
                 *ctx.render_version.write() += 1;
             } else {
                 // 进入右侧编辑焦点
@@ -211,15 +276,36 @@ pub(super) fn handle_model_event_with(
         }
         KeyCode::Left => {
             if *ctx.right_focus.read() {
-                edit_field(current_alias.clone(), *ctx.right_cursor.read(), false);
+                if *ctx.right_cursor.read() == FIELD_CONTEXT_WINDOW {
+                    begin_window_edit(ctx, &current_alias);
+                } else {
+                    edit_field(current_alias.clone(), *ctx.right_cursor.read(), false);
+                }
                 *ctx.render_version.write() += 1;
             } else {
                 *ctx.right_focus.write() = false;
             }
         }
+        KeyCode::Enter
+            if *ctx.right_focus.read() && *ctx.right_cursor.read() == FIELD_CONTEXT_WINDOW =>
+        {
+            begin_window_edit(ctx, &current_alias);
+        }
         _ => {}
     }
     EventResult::Consumed
+}
+
+fn begin_window_edit(ctx: &ModelEventCtx, alias: &str) {
+    let value = PERI_CONFIG_HANDLE.get().and_then(|handle| {
+        handle
+            .read()
+            .config
+            .profiles
+            .get(alias)
+            .and_then(|profile| profile.context_window)
+    });
+    *ctx.window_edit.write() = Some(value.map(|window| window.to_string()).unwrap_or_default());
 }
 
 /// 打开 Login 面板管理 Provider，并传递一次性目标身份。
@@ -268,6 +354,7 @@ pub(super) struct ModelEventCtx {
     pub(super) area: Option<Rect>,
     pub(super) right_cursor: State<usize>,
     pub(super) right_focus: State<bool>,
+    pub(super) window_edit: State<Option<String>>,
     pub(super) render_version: State<u64>,
     /// 右栏滚动偏移——内联视图命中与绘制共用同一本帧几何。
     pub(super) right_scroll: State<ScrollViewState>,

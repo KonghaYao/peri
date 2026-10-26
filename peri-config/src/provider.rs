@@ -91,6 +91,14 @@ pub fn resolve(
     })
 }
 
+/// Runtime resolution: the effective profile must resolve strictly.
+///
+/// Configured auxiliary tiers are scanned at the same boundary so an invalid subscription
+/// tier cannot later become a factory's implicit primary fallback. Provider-level errors
+/// (endpoint/auth) reject resolution; a missing model/window on an auxiliary tier is an
+/// unfinished binding and is ignored until edited. Persistence uses
+/// [`try_resolve_snapshot`], which additionally tolerates a capacity gap on the effective
+/// profile.
 pub fn try_resolve(
     settings: &PeriConfig,
     environment: &BTreeMap<String, String>,
@@ -129,6 +137,62 @@ pub fn try_resolve(
         }
         _ => Ok(None),
     }
+}
+
+/// Resolve a candidate configuration document at the persistence boundary.
+///
+/// Provider-level defects (unknown type, unexpected auth, invalid endpoint or
+/// subscription, missing API key) still reject the document. A profile that only lacks
+/// model capacity is an unfinished binding: it yields no effective provider, but must not
+/// turn every configuration save into a failure. Runtime resolution ([`try_resolve`])
+/// stays strict for the effective profile.
+///
+/// Validate every configured provider before resolving profiles: unbound providers and
+/// unfinished profile bindings cannot hide provider-level errors.
+pub(crate) fn try_resolve_snapshot(
+    settings: &PeriConfig,
+    environment: &BTreeMap<String, String>,
+) -> Result<Option<ResolvedProvider>, ProviderError> {
+    for provider in &settings.config.providers {
+        validate_provider(provider)?;
+    }
+    for alias in crate::app::Profiles::ALL {
+        let Some(profile) = settings.config.profiles.get(alias) else {
+            continue;
+        };
+        if profile.is_default() {
+            continue;
+        }
+        match try_resolve_for_alias(settings, alias) {
+            Ok(_) => {}
+            Err(ProviderError::MissingModelCapacity) => {
+                tracing::warn!(
+                    alias,
+                    "profile lacks model or context window; ignoring until edited"
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let selected = match (
+        environment.get("MODEL_PROVIDER"),
+        environment.get("MODEL_TYPE"),
+    ) {
+        (None, None) => try_resolve_for_alias(settings, &settings.config.active_alias),
+        (Some(provider_id), Some(alias)) => {
+            resolve_for_provider_alias(settings, provider_id, alias)
+        }
+        _ => Ok(None),
+    };
+    selected.or_else(|error| match error {
+        ProviderError::MissingModelCapacity => {
+            tracing::warn!(
+                "effective profile lacks model or context window; provider unavailable until edited"
+            );
+            Ok(None)
+        }
+        error => Err(error),
+    })
 }
 
 pub fn resolve_for_alias(settings: &PeriConfig, alias: &str) -> Option<ResolvedProvider> {
@@ -189,12 +253,7 @@ fn resolve_configured(
     if provider.provider_type == "openai_responses" {
         return resolve_responses(provider, profile, model);
     }
-    if provider.auth.is_some() {
-        return Err(ProviderError::UnexpectedAuth);
-    }
-    if !matches!(provider.provider_type.as_str(), "anthropic" | "openai" | "") {
-        return Err(ProviderError::UnknownType);
-    }
+    validate_provider(provider)?;
     if provider.api_key.is_empty() {
         return Ok(None);
     }
@@ -224,6 +283,19 @@ fn resolve_configured(
         },
         _ => return Err(ProviderError::UnknownType),
     }))
+}
+
+fn validate_provider(provider: &ProviderConfig) -> Result<(), ProviderError> {
+    if provider.provider_type == "openai_responses" {
+        return validate_responses_provider(provider).map(|_| ());
+    }
+    if provider.auth.is_some() {
+        return Err(ProviderError::UnexpectedAuth);
+    }
+    if !matches!(provider.provider_type.as_str(), "anthropic" | "openai" | "") {
+        return Err(ProviderError::UnknownType);
+    }
+    Ok(())
 }
 
 fn resolve_responses(

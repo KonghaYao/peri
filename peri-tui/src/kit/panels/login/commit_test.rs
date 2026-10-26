@@ -56,10 +56,17 @@ pub(super) fn run_isolated(name: &str, test_module: &str, scenario: impl Future<
     }
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("child.log");
+    let home = dir.path().join("home");
+    let cwd = dir.path().join("cwd");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&cwd).unwrap();
     let log = std::fs::File::create(&log_path).unwrap();
     let child = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", &format!("{test_module}::{name}"), "--nocapture"])
         .env(CHILD_CASE, name)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .current_dir(&cwd)
         .stdout(log.try_clone().unwrap())
         .stderr(log)
         .spawn()

@@ -38,7 +38,7 @@ use ratatui_kit::{
 };
 use std::time::Duration;
 
-mod auth;
+use crate::chatgpt_auth as auth;
 mod auth_policy;
 mod auth_render;
 mod auth_ui;
@@ -50,6 +50,9 @@ mod edit_state;
 mod edit_types;
 mod edit_view;
 mod plan;
+#[cfg(test)]
+#[path = "login/plan_test.rs"]
+mod plan_tests;
 mod render;
 
 use self::auth::AuthController;

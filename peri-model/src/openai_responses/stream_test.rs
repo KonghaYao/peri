@@ -94,6 +94,45 @@ fn delta_done_and_completed_snapshots_are_not_accumulated_twice() {
 }
 
 #[test]
+fn metadata_does_not_interrupt_stream_or_change_response_identity() {
+    let (decode, complete) = decoder();
+    feed(
+        &decode,
+        json!({"type":"response.created","response":{"id":"resp_a"}}),
+    )
+    .unwrap();
+    assert!(feed(
+        &decode,
+        json!({"type":"response.metadata","metadata":{"service_tier":"default"}})
+    )
+    .unwrap()
+    .is_empty());
+    assert!(feed(
+        &decode,
+        json!({"type":"response.metadata","response":{"id":"resp_a"},"metadata":{}})
+    )
+    .unwrap()
+    .is_empty());
+    assert!(feed(&decode, completed(Vec::new()))
+        .unwrap()
+        .iter()
+        .any(|event| matches!(event, ModelStreamEvent::Completed(_))));
+    complete().unwrap();
+
+    let (decode, _) = decoder();
+    feed(
+        &decode,
+        json!({"type":"response.created","response":{"id":"resp_a"}}),
+    )
+    .unwrap();
+    assert!(feed(
+        &decode,
+        json!({"type":"response.metadata","response":{"id":"other"}})
+    )
+    .is_err());
+}
+
+#[test]
 fn parallel_calls_keep_item_ids_separate_from_call_ids_and_done_can_supply_arguments() {
     let (decode, _) = decoder();
     let call = |id: &str, call_id: &str, arguments: &str| json!({"id":id,"type":"function_call","name":"read_file","call_id":call_id,"arguments":arguments});
@@ -358,6 +397,100 @@ fn reasoning_summary_stream_and_encrypted_item_survive_completion() {
         unreachable!()
     };
     assert!(content.iter().any(|block| matches!(block, crate::ContentBlock::ProviderState {data,..} if data["items"][0]["encrypted_content"]=="cipher")));
+}
+
+#[test]
+fn completed_compacted_output_recovers_only_finished_stream_items() {
+    let (decode, eof) = decoder();
+    let reasoning = json!({"type":"reasoning","id":"reason_0","status":"completed","summary":[{"type":"summary_text","text":"checked"}],"encrypted_content":"cipher"});
+    let message = json!({"type":"message","id":"message_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"answer"}]});
+    for event in [
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"reason_0","summary":[]}}),
+        json!({"type":"response.reasoning_summary_text.delta","output_index":0,"item_id":"reason_0","summary_index":0,"delta":"checked"}),
+        json!({"type":"response.output_item.done","output_index":0,"item":reasoning}),
+        json!({"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"message_1","role":"assistant","content":[]}}),
+        json!({"type":"response.output_text.delta","output_index":1,"item_id":"message_1","content_index":0,"delta":"answer"}),
+        json!({"type":"response.output_item.done","output_index":1,"item":message.clone()}),
+    ] {
+        feed(&decode, event).unwrap();
+    }
+    let events = feed(&decode, completed(vec![message])).unwrap();
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        ModelStreamEvent::TextDelta { .. } | ModelStreamEvent::ReasoningDelta { .. }
+    )));
+    let Some(ModelStreamEvent::Completed(result)) = events.last() else {
+        panic!("completion expected");
+    };
+    let ModelMessage::Assistant { content, .. } = result.message() else {
+        unreachable!();
+    };
+    assert!(content.iter().any(|block| matches!(block, crate::ContentBlock::ProviderState { data, .. } if data["items"].as_array().is_some_and(|items| items.len() == 2) && data["items"][0]["encrypted_content"] == "cipher")));
+    eof().unwrap();
+}
+
+#[test]
+fn completed_cannot_omit_unfinished_emitted_output() {
+    let (decode, _) = decoder();
+    feed(&decode, json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"reason_0","summary":[]}})).unwrap();
+    feed(&decode, json!({"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"message_1","role":"assistant","content":[]}})).unwrap();
+    let message = json!({"type":"message","id":"message_1","role":"assistant","content":[{"type":"output_text","text":"answer"}]});
+    let error = feed(&decode, completed(vec![message])).unwrap_err();
+    assert!(error.to_string().contains("unfinished output item"));
+}
+
+#[test]
+fn compacted_completion_preserves_finished_tool_call() {
+    let (decode, _) = decoder();
+    let call = json!({"type":"function_call","id":"call_item","call_id":"call_id","name":"read_file","arguments":"{\"path\":\"doc\"}"});
+    for event in [
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"call_item","call_id":"call_id","name":"read_file","arguments":""}}),
+        json!({"type":"response.output_item.done","output_index":0,"item":call}),
+        json!({"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"message","role":"assistant","content":[]}}),
+        json!({"type":"response.output_item.done","output_index":1,"item":{"type":"message","id":"message","role":"assistant","content":[{"type":"output_text","text":"Reading"}]}}),
+    ] {
+        feed(&decode, event).unwrap();
+    }
+    let events = feed(&decode, completed(vec![json!({"type":"message","id":"message","role":"assistant","content":[{"type":"output_text","text":"Reading"}]})])).unwrap();
+    let Some(ModelStreamEvent::Completed(result)) = events.last() else {
+        panic!("completion expected");
+    };
+    let ModelMessage::Assistant { tool_calls, .. } = result.message() else {
+        unreachable!();
+    };
+    assert_eq!(tool_calls.len(), 1);
+    assert_eq!(tool_calls[0].id(), "call_id");
+}
+
+#[tokio::test]
+async fn compacted_completion_finishes_public_stream_without_protocol_failure() {
+    let reasoning = json!({"type":"reasoning","id":"reason","status":"completed","summary":[{"type":"summary_text","text":"inspect"}]});
+    let message = json!({"type":"message","id":"answer","role":"assistant","status":"completed","content":[{"type":"output_text","text":"done"}]});
+    let chunks = [
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"reason","summary":[]}}),
+        json!({"type":"response.output_item.done","output_index":0,"item":reasoning}),
+        json!({"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"answer","role":"assistant","content":[]}}),
+        json!({"type":"response.output_item.done","output_index":1,"item":message.clone()}),
+        completed(vec![message]),
+    ].into_iter().flat_map(fragmented).collect();
+    let transport = Arc::new(QueueTransport {
+        responses: Mutex::new(VecDeque::from([chunks])),
+        requests: Mutex::new(Vec::new()),
+    });
+    let model = ResponsesModel::with_transport(config(), transport);
+    let events: Vec<_> = model
+        .stream(ModelRequest::default(), CancellationToken::new())
+        .await
+        .unwrap()
+        .collect()
+        .await;
+    assert!(
+        events.iter().all(Result::is_ok),
+        "stream should not fail: {events:?}"
+    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Ok(ModelStreamEvent::Completed(_)))));
 }
 
 #[tokio::test]

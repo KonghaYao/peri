@@ -50,7 +50,7 @@ JSON merge。`ConfigurationSnapshot::resolve(scope, inputs)` 不进行 I/O，校
 | 领域 | 核心规则 |
 | --- | --- |
 | Settings | workspace 按领域覆盖 global；profiles 整体替换，MetaHarness 逐 key 合并 |
-| Provider | `MODEL_PROVIDER` + `MODEL_TYPE` 成对指定配置中的 provider ID 与档位；未指定时取 active profile；默认值与 alias 规则归 core |
+| Provider | `MODEL_PROVIDER` + `MODEL_TYPE` 成对指定配置中的 provider ID 与档位；未指定时取 active profile；默认值与 alias 规则归 core。快照/保存边界只拒绝 provider 级缺陷（type/endpoint/auth），缺 model/`contextWindow` 的未完成绑定只让 provider 不可用，不拒绝整份文档；运行时解析对生效档位保持严格 |
 | MCP | global → plugin → project；手动内容去重插件，typed 准入；cache 任一来源 false 关闭 |
 | Langfuse | global settings 后具名环境覆盖；维持 clamp、非法数值 fallback 与 batch 语义 |
 | UI | 从合并 settings extra 投影 `TuiConfig`；bool 写回与可选键移除规则归 core |

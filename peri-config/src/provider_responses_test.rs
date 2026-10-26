@@ -141,6 +141,189 @@ fn test_subscription_alias_without_verified_identity_is_rejected() {
     assert!(error.to_string().contains("missing field"));
 }
 
+/// 持久化边界：生效档位缺 model/contextWindow 属于未完成绑定，不能让整份配置保存失败；
+/// 运行时解析仍按既有契约严格拒绝（截图中「切到 Responses provider 后保存失败」的根因）。
+#[test]
+fn test_snapshot_resolution_tolerates_missing_capacity_on_effective_profile() {
+    let mut settings = settings();
+    settings.config.profiles.opus.context_window = None;
+    assert!(matches!(
+        try_resolve(&settings, &BTreeMap::new()),
+        Err(ProviderError::MissingModelCapacity)
+    ));
+    assert_eq!(
+        try_resolve_snapshot(&settings, &BTreeMap::new()).unwrap(),
+        None,
+        "未完成绑定只让 provider 不可用，不拒绝配置文档"
+    );
+}
+
+/// 持久化边界：非生效档位缺容量不影响生效档位保存（截图场景在 workspace 保存路径的同一规则）。
+#[test]
+fn test_snapshot_resolution_tolerates_auxiliary_capacity_gap() {
+    let mut settings = settings();
+    settings.config.providers.push(ProviderConfig {
+        id: "cursor".into(),
+        provider_type: "openai".into(),
+        api_key: "cursor-key".into(),
+        models: crate::app::ProviderModels {
+            opus: "grok-4.6".into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    settings.config.profiles.opus.provider = "cursor".into();
+    settings.config.profiles.opus.model = Some("grok-4.6".into());
+    settings.config.profiles.opus.context_window = None;
+    settings.config.profiles.haiku.context_window = None;
+
+    let resolved = try_resolve_snapshot(&settings, &BTreeMap::new()).unwrap();
+    assert!(
+        matches!(resolved, Some(ResolvedProvider::OpenAi { ref model, .. }) if model == "grok-4.6"),
+        "生效档位必须仍按自身绑定解析：{resolved:?}"
+    );
+}
+
+/// 持久化边界：环境选择指定了缺容量的档位时同样视为未完成绑定，不阻断保存。
+#[test]
+fn test_snapshot_resolution_tolerates_capacity_gap_for_environment_selection() {
+    let mut settings = settings();
+    settings.config.providers[0].models.sonnet = "env-model".into();
+    let selection = BTreeMap::from([
+        ("MODEL_PROVIDER".to_owned(), "responses".to_owned()),
+        ("MODEL_TYPE".to_owned(), "sonnet".to_owned()),
+    ]);
+    assert!(matches!(
+        try_resolve(&settings, &selection),
+        Err(ProviderError::MissingModelCapacity)
+    ));
+    assert_eq!(try_resolve_snapshot(&settings, &selection).unwrap(), None);
+}
+
+/// provider 级错误（缺 API key）即使同时缺容量也必须拒绝持久化，容量缺失不得掩盖它。
+#[test]
+fn test_snapshot_resolution_rejects_auxiliary_provider_error_hidden_by_missing_capacity() {
+    let mut settings = settings();
+    settings.config.providers.push(ProviderConfig {
+        id: "other".into(),
+        provider_type: "anthropic".into(),
+        api_key: "other-key".into(),
+        ..Default::default()
+    });
+    settings.config.profiles.opus.provider = "other".into();
+    settings.config.profiles.opus.context_window = None;
+    settings.config.profiles.haiku.context_window = None;
+    settings.config.providers[0].api_key.clear();
+    assert!(matches!(
+        try_resolve_snapshot(&settings, &BTreeMap::new()),
+        Err(ProviderError::MissingApiKey)
+    ));
+}
+
+/// 生效档位的 provider 级错误仍拒绝持久化（不能因容量容错而放宽认证/端点校验）。
+#[test]
+fn test_snapshot_resolution_rejects_effective_provider_error() {
+    let mut settings = settings();
+    settings.config.profiles.haiku.context_window = None;
+    settings.config.providers[0].api_key.clear();
+    assert!(matches!(
+        try_resolve_snapshot(&settings, &BTreeMap::new()),
+        Err(ProviderError::MissingApiKey)
+    ));
+}
+
+#[test]
+fn test_snapshot_resolution_rejects_unbound_responses_provider_errors() {
+    let mut settings = settings();
+    let mut invalid_providers = Vec::new();
+
+    let mut missing_key = settings.config.providers[0].clone();
+    missing_key.api_key.clear();
+    invalid_providers.push((missing_key, "missing key", ProviderError::MissingApiKey));
+
+    let mut bad_endpoint = settings.config.providers[0].clone();
+    bad_endpoint.base_url = "not-a-url".into();
+    invalid_providers.push((
+        bad_endpoint,
+        "invalid endpoint",
+        ProviderError::InvalidEndpoint,
+    ));
+
+    let mut bad_reference = settings.config.providers[0].clone();
+    bad_reference.api_key.clear();
+    bad_reference.auth = Some(ProviderAuthConfig::ChatGptPlan {
+        store: "relative/store".into(),
+        account: "work".into(),
+        subject: "subject-test".into(),
+        client_id: "issued-client-test".into(),
+    });
+    invalid_providers.push((
+        bad_reference.clone(),
+        "invalid subscription reference",
+        ProviderError::InvalidSubscriptionReference,
+    ));
+
+    bad_reference.auth = Some(ProviderAuthConfig::ChatGptPlan {
+        store: "/tmp/peri-test-credentials".into(),
+        account: "work".into(),
+        subject: "subject-test".into(),
+        client_id: "issued-client-test".into(),
+    });
+    bad_reference.base_url = "https://example.invalid/v1/responses".into();
+    invalid_providers.push((
+        bad_reference,
+        "invalid subscription endpoint",
+        ProviderError::InvalidSubscriptionEndpoint,
+    ));
+
+    for (mut provider, case, expected) in invalid_providers {
+        provider.id = "unbound".into();
+        provider.models = Default::default();
+        settings.config.providers.push(provider);
+        let result = try_resolve_snapshot(&settings, &BTreeMap::new());
+        assert!(
+            matches!(&result, Err(error) if std::mem::discriminant(error) == std::mem::discriminant(&expected)),
+            "{case}: {result:?}"
+        );
+        settings.config.providers.pop();
+    }
+}
+
+#[test]
+fn test_snapshot_resolution_rejects_unbound_non_responses_provider_errors() {
+    let mut settings = settings();
+    settings.config.providers.push(ProviderConfig {
+        id: "unbound".into(),
+        provider_type: "unknown".into(),
+        ..Default::default()
+    });
+    assert!(matches!(
+        try_resolve_snapshot(&settings, &BTreeMap::new()),
+        Err(ProviderError::UnknownType)
+    ));
+
+    let unbound = settings.config.providers.last_mut().unwrap();
+    unbound.provider_type = "openai".into();
+    unbound.auth = Some(ProviderAuthConfig::ApiKey);
+    assert!(matches!(
+        try_resolve_snapshot(&settings, &BTreeMap::new()),
+        Err(ProviderError::UnexpectedAuth)
+    ));
+}
+
+#[test]
+fn test_snapshot_resolution_accepts_valid_unbound_responses_provider() {
+    let mut settings = settings();
+    let mut provider = settings.config.providers[0].clone();
+    provider.id = "unbound".into();
+    provider.models = Default::default();
+    settings.config.providers.push(provider);
+    assert!(matches!(
+        try_resolve_snapshot(&settings, &BTreeMap::new()),
+        Ok(Some(ResolvedProvider::Responses { .. }))
+    ));
+}
+
 /// 辅助档位缺少 Responses 模型/窗口属于未完成编辑：不阻断快照解析，也不影响
 /// 其它配置保存；当前生效档位仍然必须可解析。
 #[test]

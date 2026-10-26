@@ -120,6 +120,32 @@ pub(crate) fn default_backend() -> Arc<dyn ChatGptAuthBackend> {
     Arc::new(NativeChatGptAuth)
 }
 
+/// Safe identity projection used by the shared ChatGPT authentication controller.
+///
+/// Implementations own their configuration draft; authentication only supplies a
+/// verified `AccountStatus` and never reads provider settings or credentials.
+pub(crate) trait AuthIdentityDraft {
+    fn needs_identity(&self) -> bool;
+    fn identity_mismatch(&self, status: &AccountStatus) -> bool;
+    fn set_identity(&mut self, status: &AccountStatus) -> bool;
+}
+
+mod controller;
+pub(crate) use controller::{
+    AuthAction, AuthController, AuthEffect, AuthFailure, AuthViewState, DetailAction,
+    HostConfigAuthScope, LogoutConfirm, LogoutFocus,
+};
+
+#[cfg(test)]
+pub(crate) use actions::{take_test_dispatches, take_test_url_actions};
+#[cfg(test)]
+pub(crate) use controller::AuthEvent;
+
+mod actions;
+mod dispatch;
+pub(crate) use actions::{copy_url, notify_key, notify_logout_outcome, notify_text, open_browser};
+pub(crate) use dispatch::{dispatch_login, dispatch_logout, dispatch_status};
+
 #[cfg(test)]
 mod tests {
     use super::*;

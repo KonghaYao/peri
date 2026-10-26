@@ -1,5 +1,6 @@
 //! Real model actions, layered configuration files and ACP MPSC frames.
 //! Each scenario owns a process because the production handles are OnceLocks.
+use super::edit::set_context_window;
 use super::*;
 use crate::acp_client::{AcpNotification, AcpTuiClient};
 use crate::config::{ConfigSource, PeriConfig, ProviderConfig, ProviderModels};
@@ -384,6 +385,51 @@ fn model_commit_unrelated_broken_responses_tier_does_not_block_save() {
             assert_eq!(
                 cfg.config.profiles.haiku.context_window, None,
                 "不得为修好其它档位而擅自改坏档位的窗口"
+            );
+            fixture.expect_request(false).await;
+            fixture.finish().await;
+        },
+    );
+}
+
+/// 截图根因回归：生效档位切到缺 contextWindow 的 Responses provider 时，统一的
+/// 即时保存路径仍必须落盘并推送；该绑定是未完成编辑，不得让整份配置保存失败。
+/// 容量只影响运行时 provider 是否可用，不在配置保存边界伪造默认值。
+#[test]
+fn model_commit_unfinished_responses_binding_persists_without_special_ui() {
+    isolated(
+        "model_commit_unfinished_responses_binding_persists_without_special_ui",
+        async {
+            let fixture = Fixture::new(false);
+            fixture.create_session().await;
+            // providers 顺序 a、b、r；从 a 后退即 r（Responses，档位无 contextWindow）。
+            edit_field("sonnet".into(), FIELD_PROVIDER, false);
+            let profile = fixture.config.read().config.profiles.sonnet.clone();
+            assert_eq!(profile.provider, "r");
+            assert_eq!(profile.model.as_deref(), Some("r-sonnet"));
+            assert_eq!(profile.context_window, None, "不得为保存成功擅自填写窗口");
+            fixture.expect_request(false).await;
+            fixture.finish().await;
+        },
+    );
+}
+
+#[test]
+fn model_commit_context_window_persists_for_responses_profile() {
+    isolated(
+        "model_commit_context_window_persists_for_responses_profile",
+        async {
+            let fixture = Fixture::new(false);
+            fixture.create_session().await;
+            assert!(set_context_window("sonnet", 128_000));
+            assert_eq!(
+                fixture.config.read().config.profiles.sonnet.context_window,
+                Some(128_000)
+            );
+            let persisted = crate::config::load_from(&fixture.target).unwrap();
+            assert_eq!(
+                persisted.config.profiles.sonnet.context_window,
+                Some(128_000)
             );
             fixture.expect_request(false).await;
             fixture.finish().await;

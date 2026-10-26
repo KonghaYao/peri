@@ -2,7 +2,7 @@
 //!
 //! 左右分栏 Profile 编辑器：
 //! - 左侧：4 个固定档位卡片（fable / opus / sonnet / haiku），↑/↓ 选择即切换 active profile；
-//! - 右侧：当前 profile 的 K/V 编辑行（Provider / Model / Effort / Max tokens / 1m enable）。
+//! - 右侧：当前 profile 的 K/V 编辑行（Provider / Model / Effort / Max tokens / Context window / 1m enable）。
 //!
 //! 右侧 `→`/`←` 切换字段值并立即写入内存 + 持久化 + 推送 ACP（无 Enter/Save 步骤）。
 //! 所有 provider（含 Responses / ChatGPT plan）共用同一套行与动作，没有按 provider
@@ -45,13 +45,20 @@ const FIELD_PROVIDER: usize = 0;
 const FIELD_MODEL: usize = 1;
 const FIELD_EFFORT: usize = 2;
 const FIELD_MAX_TOKENS: usize = 3;
-const FIELD_CONTEXT_1M: usize = 4;
-const FIELD_COUNT: usize = 5;
+const FIELD_CONTEXT_WINDOW: usize = 4;
+const FIELD_CONTEXT_1M: usize = 5;
+const FIELD_COUNT: usize = 6;
 
 /// 右栏字段标签——顺序即 `FIELD_*` 索引顺序（编辑动作按索引定位字段，
 /// 数组长度绑定 `FIELD_COUNT`，字段增删在编译期同步）。
-const FIELD_LABELS: [&str; FIELD_COUNT] =
-    ["Provider", "Model", "Effort", "Max tokens", "1m enable"];
+const FIELD_LABELS: [&str; FIELD_COUNT] = [
+    "Provider",
+    "Model",
+    "Effort",
+    "Max tokens",
+    "Context window",
+    "1m enable",
+];
 
 /// 右侧 K/V 值右边缘目标列——所有行的值右对齐到该列（key 宽度不同也能对齐）。
 /// 宽屏目标值；窄屏时按右列可用宽度收缩（见渲染处 `right_w` 计算）。
@@ -80,6 +87,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // active ≠ fable 时按 ↓ 会从当前档位跳到错误的下一档。
     let right_cursor = hooks.use_state(|| 0usize); // 右侧字段光标
     let right_focus = hooks.use_state(|| false); // 是否在右侧编辑焦点
+    let window_edit = hooks.use_state(|| None::<String>);
     // 渲染版本计数器——edit_field/switch_active_alias 修改 PERI_CONFIG_HANDLE 后
     // 递增此计数，触发 ModelPanel 重渲染以显示最新值。
     let render_version = hooks.use_state(|| 0u64);
@@ -139,6 +147,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     area,
                     right_cursor,
                     right_focus,
+                    window_edit,
                     render_version,
                     right_scroll,
                     viewport,
@@ -151,6 +160,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     tests::visit_mounted_panel(tests::MountedPanel {
         right_cursor,
         right_focus,
+        window_edit,
         render_version,
         right_scroll,
     });
@@ -234,7 +244,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // ── 右侧：当前 profile 的 K/V 编辑行 ──
     let mut right_lines: Vec<Line<'static>> = Vec::new();
-    let (current_effort, current_max_tokens, current_ctx) = PERI_CONFIG_HANDLE
+    let (current_effort, current_max_tokens, context_window, current_ctx) = PERI_CONFIG_HANDLE
         .get()
         .map(|h| {
             let c = h.read();
@@ -244,10 +254,11 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     .map(|p| p.effort.clone())
                     .unwrap_or_else(|| "xhigh".to_string()),
                 profile.map(|p| p.max_tokens).unwrap_or(32000),
+                profile.and_then(|p| p.context_window),
                 profile.map(|p| p.context_1m).unwrap_or(false),
             )
         })
-        .unwrap_or_else(|| ("xhigh".to_string(), 32000, false));
+        .unwrap_or_else(|| ("xhigh".to_string(), 32000, None, false));
 
     let (provider_label, model_label) = PERI_CONFIG_HANDLE
         .get()
@@ -282,17 +293,27 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let panel_w = area.map_or(FALLBACK_PANEL_W, |rect| rect.width as usize);
     let align = right_align_col(panel_w);
 
-    // 值按 `FIELD_*` 索引顺序排列（Provider / Model / Effort / Max tokens / 1m enable）；
+    // 值按 `FIELD_*` 索引顺序排列（Provider / Model / Effort / Max tokens / Context window / 1m enable）；
     // 数组长度绑定 `FIELD_COUNT`，字段增删在编译期与本表同步。
     let values: [String; FIELD_COUNT] = [
         provider_label,
         model_label,
         current_effort,
         current_max_tokens.to_string(),
+        window_edit.read().clone().unwrap_or_else(|| {
+            context_window
+                .map(|window| window.to_string())
+                .unwrap_or_default()
+        }),
         if current_ctx { "on" } else { "off" }.to_string(),
     ];
     // 右栏始终是同一张 K/V 表，所有 provider 共用同一渲染路径。
     for (fi, (label, value)) in FIELD_LABELS.iter().zip(values.iter()).enumerate() {
+        let label = if fi == FIELD_CONTEXT_WINDOW {
+            i18n::tr("model-panel-context-window")
+        } else {
+            (*label).to_owned()
+        };
         let is_focus = *right_focus.read() && fi == *right_cursor.read();
         let mark = if is_focus { "❯" } else { " " };
         let key_span = format!(" {} {} ", mark, label);
@@ -310,7 +331,14 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 },
             ),
             Span::raw(" ".repeat(pad)),
-            Span::styled(value.clone(), Style::new().fg(theme.semantic.text.primary)),
+            Span::styled(
+                if fi == FIELD_CONTEXT_WINDOW && window_edit.read().is_some() {
+                    format!("{value}▌")
+                } else {
+                    value.clone()
+                },
+                Style::new().fg(theme.semantic.text.primary),
+            ),
         ];
         right_lines.push(Line::from(spans));
     }
@@ -324,16 +352,23 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // ── 底部：“管理 Provider”按钮 + 键盘提示 ──
     // 按钮文本与命中区共用 `provider_button_label()`；点击与 Ctrl+L 同一动作。
-    let hint_line = Line::from(vec![
-        Span::styled(
-            provider_button_label(),
-            Style::new().fg(theme.component.panel.title).bold(),
-        ),
-        Span::styled(
-            format!("  {hint_text}"),
-            Style::new().fg(theme.semantic.text.dim),
-        ),
-    ]);
+    let hint_line = if window_edit.read().is_some() {
+        Line::from(Span::styled(
+            i18n::tr("model-panel-window-edit-controls"),
+            Style::new().fg(theme.component.panel.title),
+        ))
+    } else {
+        Line::from(vec![
+            Span::styled(
+                provider_button_label(),
+                Style::new().fg(theme.component.panel.title).bold(),
+            ),
+            Span::styled(
+                format!("  {hint_text}"),
+                Style::new().fg(theme.semantic.text.dim),
+            ),
+        ])
+    };
 
     let left_para = Paragraph::new(ratatui::text::Text::from(left_lines));
     let right_para = Paragraph::new(ratatui::text::Text::from(right_lines));

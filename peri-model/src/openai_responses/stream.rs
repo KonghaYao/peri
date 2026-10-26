@@ -87,6 +87,12 @@ impl ResponsesStream {
                 self.set_response_id(&value["response"])?;
                 Ok(Vec::new())
             }
+            "response.metadata" => {
+                if !value["response"].is_null() {
+                    self.set_response_id(&value["response"])?;
+                }
+                Ok(Vec::new())
+            }
             "response.output_item.added" => {
                 self.add_item(index(&value, "output_index")?, &value["item"])
             }
@@ -223,6 +229,44 @@ impl ResponsesStream {
         request_id: Option<String>,
     ) -> ModelResult<Vec<ModelStreamEvent>> {
         self.set_response_id(response)?;
+        let output = required_array(response, "output")?;
+        let compacted = self.items.keys().any(|index| *index >= output.len());
+        let mut recovered = None;
+        if compacted {
+            let mut items = Vec::with_capacity(self.items.len());
+            let mut supplied = BTreeSet::new();
+            for value in output {
+                let id = required_string(value, "id")?;
+                let Some((&index, _)) = self.items.iter().find(|(_, item)| item.id() == id) else {
+                    return Err(invalid(
+                        "response.completed mixed omitted and untracked output items",
+                    ));
+                };
+                if !supplied.insert(index) {
+                    return Err(invalid("response.completed repeated an output item"));
+                }
+            }
+            for (&index, item) in &self.items {
+                let value = if supplied.contains(&index) {
+                    output
+                        .iter()
+                        .find(|value| value["id"] == item.id())
+                        .expect("matched item")
+                } else {
+                    item.finished_snapshot().ok_or_else(|| {
+                        invalid("response.completed omitted an unfinished output item")
+                    })?
+                };
+                items.push(value.clone());
+            }
+            let mut snapshot = response.clone();
+            snapshot
+                .as_object_mut()
+                .ok_or_else(|| invalid("response.completed response must be an object"))?
+                .insert("output".to_owned(), Value::Array(items));
+            recovered = Some(snapshot);
+        }
+        let response = recovered.as_ref().unwrap_or(response);
         let result = response::complete(
             response,
             &self.binding,
@@ -230,11 +274,13 @@ impl ResponsesStream {
             request_id.or_else(|| self.response_id.clone()),
         )?;
         let output = required_array(response, "output")?;
-        if self.items.keys().any(|index| *index >= output.len()) {
-            return Err(invalid("response.completed omitted an emitted output item"));
-        }
         let mut events = Vec::new();
-        for (index, value) in output.iter().enumerate() {
+        let indices: Vec<usize> = if compacted {
+            self.items.keys().copied().collect()
+        } else {
+            (0..output.len()).collect()
+        };
+        for (index, value) in indices.into_iter().zip(output) {
             if !self.items.contains_key(&index) {
                 events.extend(self.add_item(index, value)?);
             }

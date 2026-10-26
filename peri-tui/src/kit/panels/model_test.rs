@@ -189,6 +189,7 @@ thread_local! {
 pub(super) struct MountedPanel {
     pub(super) right_cursor: State<usize>,
     pub(super) right_focus: State<bool>,
+    pub(super) window_edit: State<Option<String>>,
     pub(super) render_version: State<u64>,
     pub(super) right_scroll: State<ScrollViewState>,
 }
@@ -253,6 +254,7 @@ impl MountedPanel {
                 area: Some(area),
                 right_cursor: self.right_cursor,
                 right_focus: self.right_focus,
+                window_edit: self.window_edit,
                 render_version: self.render_version,
                 right_scroll: self.right_scroll,
                 viewport,

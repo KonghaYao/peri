@@ -11,8 +11,8 @@ use fluent_bundle::FluentValue;
 use crate::chatgpt_auth::AccountStatus;
 use crate::i18n;
 
-use super::auth::{AuthAction, AuthFailure, AuthViewState, HostConfigAuthScope};
 use super::plan::PlanDraft;
+use crate::chatgpt_auth::{AuthAction, AuthFailure, AuthViewState, HostConfigAuthScope};
 
 /// 本地记录中的 access token 新鲜度。
 ///

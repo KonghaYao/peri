@@ -26,7 +26,7 @@ ACP notification → acp_notifier → acp_bridge / BridgeState
 | 键盘、鼠标、焦点与事件优先级 | `src/kit/event_handlers.rs`、`src/kit/focus_router.rs` |
 | 面板、弹窗与确认交互 | `src/kit/panels/`、`src/kit/popups/`、`src/kit/panel_overlay.rs`；面板操作的作用域与完成门在 `src/application/operations/` |
 | 配置落盘与保存提示（Config / Model / Login / Theme） | `src/kit/config_service.rs`（即时 `persist_candidate`；长草稿 `persist_draft` + expected revision/accepted；显式 `reload_configuration`）+ 各面板动作入口 |
-| ChatGPT 登录/状态/注销能力边界 | `src/chatgpt_auth.rs`（typed backend、共享凭据目录）+ `src/kit/panels/login/{auth,auth_policy,auth_actions,auth_ui,auth_render}.rs`（`AuthController`、认证就绪推导、宿主作用域与认证子视图）；不读 token、不启动 CLI 子进程 |
+| ChatGPT 登录/状态/注销能力边界 | `src/chatgpt_auth/{mod,controller,dispatch,actions}.rs`（typed backend、共享凭据目录、`AuthController`、后台派发）+ `src/kit/panels/login/{auth_policy,auth_ui,auth_render}.rs`（认证就绪推导、宿主作用域与认证子视图）+ `src/kit/setup_wizard/handler.rs` 与 `src/kit/app_shell.rs`（`/setup` 订阅入口与首次启动 Login → Model 接力）；不读 token、不启动 CLI 子进程 |
 | 国际化与主题 | `src/i18n/`、`locales/`、`peri-theme` atoms |
 | 测试 | 与目标模块同目录的 `*_test.rs` 或 `#[cfg(test)]` 模块 |
 

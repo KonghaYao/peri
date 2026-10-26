@@ -55,6 +55,13 @@ pub(super) fn save_login_edit(es: &mut LoginEditState) -> bool {
     match crate::kit::config_service::persist_draft(&candidate, revision) {
         Ok(accepted) => {
             publish_accepted(accepted);
+            if crate::kit::atoms::SETUP_CHATGPT_PHASE.get()
+                == Some(crate::kit::atoms::SetupChatGptPhase::Login)
+            {
+                crate::kit::atoms::SETUP_CHATGPT_PHASE
+                    .set(Some(crate::kit::atoms::SetupChatGptPhase::Model));
+                crate::kit::panel_registry::open_panel(crate::app::panel_types::PanelKind::Model);
+            }
             notify_unresolved_profiles(&unresolved);
             if es.is_new() {
                 tracing::info!(

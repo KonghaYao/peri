@@ -42,7 +42,8 @@ pub(super) fn effective_provider_id(cfg: &PeriConfig, alias: &str) -> Option<Str
     })
 }
 
-/// 仅修改 provider/model 的候选副本；供 UI 在必要时先补 contextWindow 再一起提交。
+/// 仅修改 provider/model 的候选副本；容量等档位字段保持原值。目标 provider 是
+/// Responses 且未填 `contextWindow` 时，配置层按未完成绑定保存，不伪造容量。
 pub(super) fn provider_switch_candidate(
     cfg: &PeriConfig,
     alias: &str,
@@ -230,6 +231,22 @@ pub(super) fn edit_field(alias: String, field: usize, forward: bool) {
         _ => return,
     }
     commit_snapshot(handle, cfg, ModelChange::ProfileField(alias));
+}
+
+pub(super) fn set_context_window(alias: &str, window: u32) -> bool {
+    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
+        return false;
+    };
+    let mut candidate = handle.read().clone();
+    let Some(profile) = candidate.config.profiles.get_mut(alias) else {
+        return false;
+    };
+    profile.context_window = Some(window);
+    commit_snapshot(
+        handle,
+        candidate,
+        ModelChange::ProfileField(alias.to_owned()),
+    )
 }
 
 /// Describes only the immediate display changes made by this action.

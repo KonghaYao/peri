@@ -9,12 +9,15 @@ use peri_acp::provider::auth::LogoutOutcome;
 use crate::i18n;
 use crate::kit::atoms::{NOTIFICATION, Notification};
 
-use super::runtime_handle;
+use super::controller::runtime_handle;
 
 #[cfg(test)]
 thread_local! {
     static TEST_DISPATCHES: std::cell::RefCell<Vec<&'static str>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// 默认拦截 dispatch，避免测试触碰真实运行时；需要验证「没有 runtime 时
+    /// 释放完成门」的用例临时关闭拦截。线程局部，不影响并行用例。
+    static DISPATCH_INTERCEPT_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -22,8 +25,30 @@ pub(crate) fn take_test_dispatches() -> Vec<&'static str> {
     TEST_DISPATCHES.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
 }
 
+/// 临时放行真实 dispatch 路径；Drop 时恢复进入前的拦截状态。
+#[cfg(test)]
+pub(crate) struct DispatchInterceptDisabled(bool);
+
+#[cfg(test)]
+impl DispatchInterceptDisabled {
+    pub(crate) fn new() -> Self {
+        let previous = DISPATCH_INTERCEPT_DISABLED.with(|flag| flag.replace(true));
+        Self(previous)
+    }
+}
+
+#[cfg(test)]
+impl Drop for DispatchInterceptDisabled {
+    fn drop(&mut self) {
+        DISPATCH_INTERCEPT_DISABLED.with(|flag| flag.set(self.0));
+    }
+}
+
 #[cfg(test)]
 pub(super) fn intercept_dispatch(kind: &'static str) -> bool {
+    if DISPATCH_INTERCEPT_DISABLED.with(|flag| flag.get()) {
+        return false;
+    }
     TEST_DISPATCHES.with(|slot| slot.borrow_mut().push(kind));
     true
 }
@@ -59,8 +84,8 @@ pub(crate) fn open_browser(url: String) {
     };
     handle.spawn_blocking(move || match crate::kit::auth_browser::open_browser(&url) {
         Ok(()) => notify_key("login-auth-browser-requested", 2),
-        Err(error) => {
-            tracing::warn!(%error, "failed to launch browser for ChatGPT sign-in");
+        Err(_) => {
+            tracing::warn!("failed to launch browser for ChatGPT sign-in");
             notify_key("login-auth-browser-failed", 3);
         }
     });
@@ -78,8 +103,8 @@ pub(crate) fn copy_url(url: String) {
     };
     handle.spawn_blocking(move || match crate::kit::clipboard::copy_text(&url) {
         Ok(()) => notify_key("login-auth-url-copied", 2),
-        Err(error) => {
-            tracing::warn!(%error, "failed to copy ChatGPT authorization URL");
+        Err(_) => {
+            tracing::warn!("failed to copy ChatGPT authorization URL");
             notify_key("login-auth-copy-failed", 3);
         }
     });

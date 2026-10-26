@@ -589,6 +589,13 @@ pub static WORKFLOW_SNAPSHOT: AtomStatic<Option<WorkflowSnapshot>> = AtomStatic:
 /// 缺省回退 kind=Command/level=1），写入后立即 `refresh_slash_items()`。
 pub static AVAILABLE_SLASH_COMMANDS: AtomStatic<Vec<SlashCommandEntry>> = AtomStatic::new(Vec::new);
 pub static WIZARD_ACTIVE: AtomStatic<bool> = AtomStatic::new(|| false);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupChatGptPhase {
+    Login,
+    Model,
+}
+
+pub static SETUP_CHATGPT_PHASE: AtomStatic<Option<SetupChatGptPhase>> = AtomStatic::new(|| None);
 /// True while the first-run wizard owns a temporary fullscreen pass. Closing
 /// that wizard ends the pass; entry attaches ACP only when [`SETUP_COMPLETED`]
 /// is true, and otherwise tears down the process.

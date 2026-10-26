@@ -70,6 +70,10 @@ impl StreamItem {
         self.identity["id"].as_str().expect("validated item id")
     }
 
+    pub(super) fn finished_snapshot(&self) -> Option<&Value> {
+        self.done.as_ref()
+    }
+
     pub(super) fn check_id(&self, event: &Value) -> ModelResult<()> {
         if required_string(event, "item_id")? != self.id() {
             return Err(invalid("Responses output_index and item_id disagree"));

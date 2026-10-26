@@ -78,6 +78,24 @@ pub(super) fn wizard_click(
                 return true;
             }
         }
+        SetupStep::ChatGpt => {
+            if let Some(idx) = hit_item(
+                mouse,
+                area,
+                ListLayout {
+                    header_rows: 11,
+                    item_rows: 2,
+                    footer_rows: 0,
+                    visible_items: 2,
+                    scroll_start: 0,
+                    item_count: 2,
+                },
+            ) {
+                state.chatgpt_cursor = idx;
+                handle_chatgpt_keys(state, enter);
+                return true;
+            }
+        }
         SetupStep::Preset => {
             // 布局：空行 + prompt + 空行（header 3），每预设 1 行
             if let Some(idx) = hit_item(
@@ -218,6 +236,7 @@ pub(super) fn handle_wizard_event(event: Event, mut state: SetupWizardState) -> 
     match state.step {
         SetupStep::Language => handle_language_keys(&mut state, key),
         SetupStep::Choose => handle_choose_keys(&mut state, key),
+        SetupStep::ChatGpt => handle_chatgpt_keys(&mut state, key),
         SetupStep::Preset => handle_preset_keys(&mut state, key),
         SetupStep::Form => handle_form_keys(&mut state, key),
         SetupStep::Done => handle_done_keys(&mut state, key),
@@ -281,6 +300,11 @@ fn handle_choose_keys(state: &mut SetupWizardState, key: ratatui_kit::crossterm:
                         return;
                     }
                 }
+                SetupSource::ChatGptSubscription => {
+                    state.chatgpt_cursor = 0;
+                    state.step = SetupStep::ChatGpt;
+                    return;
+                }
                 SetupSource::ProviderPreset => {
                     // 预设来源：先进入 Preset 步骤挑选供应商，provider 列表在确认预设后重建
                     state.submit_error = None;
@@ -289,7 +313,11 @@ fn handle_choose_keys(state: &mut SetupWizardState, key: ratatui_kit::crossterm:
                     return;
                 }
                 SetupSource::CustomApi => {
-                    state.providers = vec![MigratedProvider::new(ProviderType::Anthropic)];
+                    // 已有 provider 的草稿优先：从 Choose 显式选择 CustomApi 也不能
+                    // 用默认 provider 覆盖用户尚未编辑的配置。
+                    if state.providers.is_empty() {
+                        state.providers = vec![MigratedProvider::new(ProviderType::Anthropic)];
+                    }
                     state.active_provider = 0;
                 }
             }
@@ -302,6 +330,28 @@ fn handle_choose_keys(state: &mut SetupWizardState, key: ratatui_kit::crossterm:
             state.submit_error = None;
             state.step = SetupStep::Language;
         }
+        _ => {}
+    }
+}
+
+fn handle_chatgpt_keys(state: &mut SetupWizardState, key: ratatui_kit::crossterm::event::KeyEvent) {
+    use KeyCode::*;
+    match key.code {
+        Up | Left | Down | Right | Tab | BackTab => {
+            state.chatgpt_cursor = 1 - state.chatgpt_cursor.min(1);
+        }
+        Enter | Char(' ') => {
+            if state.chatgpt_cursor == 0 {
+                if atoms::SETUP_PREFLIGHT.get() {
+                    atoms::SETUP_CHATGPT_PHASE.set(Some(atoms::SetupChatGptPhase::Login));
+                }
+                crate::kit::panel_registry::open_panel(crate::app::panel_types::PanelKind::Login);
+                atoms::WIZARD_ACTIVE.set(false);
+            } else {
+                state.step = SetupStep::Choose;
+            }
+        }
+        Esc => state.step = SetupStep::Choose,
         _ => {}
     }
 }

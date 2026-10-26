@@ -2,8 +2,7 @@
 
 use super::*;
 
-/// 第五行对所有 provider 都是通用 `1m enable`：Enter 不打开专属面板，
-/// 右栏保持同一张 K/V 表。
+/// 所有 provider 共用 Context window 与 1m enable 行。
 #[test]
 #[serial]
 fn responses_context_row_keeps_the_generic_kv_pane() {
@@ -23,7 +22,14 @@ fn responses_context_row_keeps_the_generic_kv_pane() {
 
     assert_eq!(rx.try_recv().unwrap(), EventResult::Consumed);
     let text = buffer_text(&buffer);
-    for label in ["Provider", "Model", "Effort", "Max tokens", "1m enable"] {
+    for label in [
+        "Provider",
+        "Model",
+        "Effort",
+        "Max tokens",
+        "Context window",
+        "1m enable",
+    ] {
         assert!(
             text.contains(label),
             "右栏必须保持统一 K/V 行 {label}:\n{text}"
@@ -34,10 +40,35 @@ fn responses_context_row_keeps_the_generic_kv_pane() {
         "不得再出现专属保存/取消按钮:\n{text}"
     );
     assert!(!text.contains("正在编辑"), "不得再出现专属标题:\n{text}");
-    assert!(
-        !text.contains("上下文窗口"),
-        "第五行必须是通用 1m enable:\n{text}"
-    );
+}
+
+#[test]
+#[serial]
+fn context_window_editor_accepts_digits_and_escape_discards_changes() {
+    let guard = ModelPanelGuard::install();
+    guard.set_config(responses_config());
+    let handle = Arc::clone(&guard.handle);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    mount_panel_frames(TEST_AREA, 1, move |_, panel| {
+        *panel.right_focus.write() = true;
+        *panel.right_cursor.write() = FIELD_CONTEXT_WINDOW;
+        assert_eq!(
+            panel.event(key(KeyCode::Enter), TEST_AREA, &switched()),
+            EventResult::Consumed
+        );
+        assert_eq!(panel.window_edit.read().as_deref(), Some("3000"));
+        panel.event(Event::Paste("128".into()), TEST_AREA, &switched());
+        panel.event(Event::Paste("bad".into()), TEST_AREA, &switched());
+        assert_eq!(panel.window_edit.read().as_deref(), Some("3000128"));
+        panel.event(key(KeyCode::Esc), TEST_AREA, &switched());
+        sender
+            .send((
+                panel.window_edit.read().is_none(),
+                handle.read().config.profiles.sonnet.context_window,
+            ))
+            .unwrap();
+    });
+    assert_eq!(receiver.recv().unwrap(), (true, Some(3000)));
 }
 
 fn max_tokens_after_right(plan_auth: bool) -> (u32, Option<String>) {

@@ -10,12 +10,32 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use ratatui_kit::prelude::{Component, ComponentUpdater, Hooks, Props, State, UseState, element};
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
 use crate::chatgpt_auth::{ChatGptAuthBackend, ChatGptAuthSession};
-use crate::kit::panels::login::edit_state::{AuthChoice, LoginEditState, LoginField};
+#[derive(Clone, Default)]
+struct PlanDraft {
+    subject: String,
+    client_id: String,
+}
+
+impl AuthIdentityDraft for PlanDraft {
+    fn needs_identity(&self) -> bool {
+        self.subject.is_empty() || self.client_id.is_empty()
+    }
+    fn identity_mismatch(&self, status: &AccountStatus) -> bool {
+        (!self.subject.is_empty() && self.subject != status.subject)
+            || (!self.client_id.is_empty() && self.client_id != status.client_id)
+    }
+    fn set_identity(&mut self, status: &AccountStatus) -> bool {
+        self.subject = status.subject.clone();
+        self.client_id = status.client_id.clone();
+        true
+    }
+}
 
 struct FakeState {
     finish_results: Mutex<VecDeque<AuthResult<AccountStatus>>>,
@@ -199,6 +219,26 @@ fn status(subject: &str, client_id: &str, plan_enabled: bool) -> AccountStatus {
     }
 }
 
+/// [回归测试] 后台任务未能 spawn 时必须释放 `prepare_*` 建立的完成门。
+#[test]
+fn unspawned_request_releases_completion_gate() {
+    let (mut controller, _) = controller();
+    controller.prepare_login().unwrap();
+    assert!(controller.gate.is_pending());
+
+    controller.abort_unspawned(AuthFailure::Unavailable);
+
+    assert!(matches!(
+        controller.view(),
+        AuthViewState::Failed(AuthFailure::Unavailable)
+    ));
+    assert!(!controller.gate.is_pending());
+    assert!(
+        controller.prepare_login().is_ok(),
+        "清理后应允许重新发起登录"
+    );
+}
+
 #[tokio::test]
 async fn login_publishes_url_then_signed_in_identity() {
     let (mut controller, state) = controller();
@@ -291,8 +331,6 @@ async fn status_identity_is_explicitly_adoptable_but_never_overwrites() {
     controller.receive(request.ticket, AuthEvent::StatusChecked(result));
 
     let mut plan = PlanDraft {
-        store: "/tmp/peri-auth-test".into(),
-        account: "work".into(),
         subject: "old-subject".into(),
         client_id: "old-client".into(),
     };
@@ -327,8 +365,6 @@ async fn use_account_requires_current_scope() {
     controller.receive(request.ticket, AuthEvent::StatusChecked(result));
 
     let mut plan = PlanDraft {
-        store: "/tmp/peri-auth-test".into(),
-        account: "work".into(),
         ..Default::default()
     };
     assert!(
@@ -503,8 +539,6 @@ async fn action_group_skips_use_account_until_identity_differs() {
     controller.receive(request.ticket, AuthEvent::StatusChecked(result));
 
     let matching = PlanDraft {
-        store: "/tmp/peri-auth-test".into(),
-        account: "work".into(),
         subject: "verified-subject".into(),
         client_id: "verified-client".into(),
     };
@@ -527,191 +561,6 @@ async fn action_group_skips_use_account_until_identity_differs() {
         Some(AuthAction::UseAccount)
     );
     assert_eq!(state.status_checks.load(Ordering::SeqCst), 1);
-}
-
-// ── Plan candidate serialization ──────────────────────────────────────────────
-
-fn responses_config() -> peri_acp::provider::config::PeriConfig {
-    serde_json::from_value(serde_json::json!({"config": {
-        "active_alias": "sonnet",
-        "providers": [
-            {"id":"resp", "type":"openai_responses", "apiKey":"fixture-key",
-             "models":{"fable":"fable-model", "opus":"opus-model", "sonnet":"sonnet-model", "haiku":"haiku-model"}}
-        ],
-        "profiles": {
-            "fable":{"provider":"resp", "contextWindow":1000},
-            "opus":{"provider":"resp", "contextWindow":2000},
-            "sonnet":{"provider":"resp", "contextWindow":3000},
-            "haiku":{"provider":"resp", "contextWindow":4000}
-        }
-    }}))
-    .unwrap()
-}
-
-#[test]
-fn plan_mode_writes_tagged_auth_with_empty_api_key_and_official_endpoint() {
-    let cfg = responses_config();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
-    edit.cycle_auth_mode();
-    edit.plan.store = "/tmp/peri-plan-store".into();
-    edit.plan.account = "work".into();
-    edit.plan.subject = "subject-one".into();
-    edit.plan.client_id = "client-one".into();
-    edit.base_url = "https://custom.invalid/v1/responses".into();
-
-    let candidate = edit.build_candidate().unwrap();
-    let provider = candidate
-        .config
-        .providers
-        .iter()
-        .find(|provider| provider.id == "resp")
-        .unwrap();
-    match &provider.auth {
-        Some(peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan {
-            store,
-            account,
-            subject,
-            client_id,
-        }) => {
-            assert_eq!(store, &PathBuf::from("/tmp/peri-plan-store"));
-            assert_eq!(account, "work");
-            assert_eq!(subject, "subject-one");
-            assert_eq!(client_id, "client-one");
-        }
-        other => panic!("expected tagged chatgpt_plan auth, got {other:?}"),
-    }
-    assert!(
-        provider.api_key.is_empty(),
-        "plan mode must not persist apiKey"
-    );
-    assert!(
-        provider.base_url.is_empty(),
-        "plan mode clears custom endpoints and uses the official default"
-    );
-}
-
-#[test]
-fn plan_mode_rejects_relative_store_and_missing_identity() {
-    let cfg = responses_config();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
-    edit.cycle_auth_mode();
-    edit.plan.store = "relative/store".into();
-    edit.plan.account = "work".into();
-    let error = edit.build_candidate().unwrap_err();
-    assert_eq!(error.field, LoginField::PlanStore);
-
-    edit.plan.store = "/tmp/peri-plan-store".into();
-    edit.plan.subject.clear();
-    let error = edit.build_candidate().unwrap_err();
-    assert_eq!(error.field, LoginField::AuthActions);
-
-    edit.plan.subject = "subject".into();
-    edit.plan.client_id = "client".into();
-    assert!(edit.build_candidate().is_ok());
-}
-
-#[test]
-fn plan_mode_rejects_invalid_account_reference() {
-    let cfg = responses_config();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
-    edit.cycle_auth_mode();
-    edit.plan.store = "/tmp/peri-plan-store".into();
-    edit.plan.account = "work/slash".into();
-    edit.plan.subject = "subject".into();
-    edit.plan.client_id = "client".into();
-    let error = edit.build_candidate().unwrap_err();
-    assert_eq!(error.field, LoginField::AuthActions);
-    assert_eq!(
-        error.message,
-        crate::i18n::tr("login-error-account-reference")
-    );
-}
-
-#[test]
-fn switching_back_to_api_key_drops_plan_reference() {
-    let cfg = responses_config();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
-    edit.cycle_auth_mode();
-    edit.plan.store = "/tmp/peri-plan-store".into();
-    edit.plan.account = "work".into();
-    edit.plan.subject = "subject".into();
-    edit.plan.client_id = "client".into();
-    edit.cycle_auth_mode();
-    assert_eq!(edit.auth_choice, AuthChoice::ApiKey);
-    edit.api_key = "api-mode-key".into();
-    edit.base_url = "https://api.openai.com/v1/responses".into();
-
-    let candidate = edit.build_candidate().unwrap();
-    let provider = candidate
-        .config
-        .providers
-        .iter()
-        .find(|provider| provider.id == "resp")
-        .unwrap();
-    assert!(!matches!(
-        provider.auth,
-        Some(peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan { .. })
-    ));
-    assert_eq!(provider.api_key, "api-mode-key");
-}
-
-#[test]
-fn auth_mode_cycle_keeps_both_drafts() {
-    let cfg = responses_config();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
-    edit.api_key = "api-key-draft".into();
-    edit.cycle_auth_mode();
-    edit.plan.store = "/tmp/peri-plan-store".into();
-    edit.plan.account = "work".into();
-    edit.cycle_auth_mode();
-    assert_eq!(edit.api_key, "api-key-draft");
-    edit.cycle_auth_mode();
-    assert_eq!(edit.plan.store, "/tmp/peri-plan-store");
-}
-
-#[test]
-fn plan_defaults_only_fill_empty_fields() {
-    let cfg = responses_config();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
-    edit.cycle_auth_mode();
-    edit.plan.store = "/custom/store".into();
-    edit.plan.account = "custom".into();
-    edit.ensure_plan_defaults(Some(PathBuf::from("/tmp/default-store")));
-    assert_eq!(edit.plan.store, "/custom/store");
-    assert_eq!(edit.plan.account, "custom");
-
-    edit.plan.store.clear();
-    edit.plan.account.clear();
-    edit.ensure_plan_defaults(Some(PathBuf::from("/tmp/default-store")));
-    assert_eq!(edit.plan.store, "/tmp/default-store");
-    assert_eq!(edit.plan.account, "default");
-}
-
-#[test]
-fn plan_mode_navigation_uses_plan_fields_and_never_api_key() {
-    let cfg = responses_config();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
-    edit.cycle_auth_mode();
-    edit.ensure_plan_defaults(Some(PathBuf::from("/tmp/default-store")));
-    let fields = edit.visible_fields();
-    assert!(fields.contains(&LoginField::AuthMode));
-    assert!(
-        !fields.contains(&LoginField::PlanStore),
-        "合法 store 默认只读，不进入导航"
-    );
-    assert!(!fields.contains(&LoginField::PlanAccount), "账号引用不展示");
-    assert!(fields.contains(&LoginField::AuthActions));
-    assert!(
-        !fields.contains(&LoginField::BaseUrl) && !fields.contains(&LoginField::ApiKey),
-        "plan mode hides API-key fields"
-    );
-
-    edit.cycle_auth_mode();
-    let fields = edit.visible_fields();
-    assert!(fields.contains(&LoginField::BaseUrl));
-    assert!(fields.contains(&LoginField::ApiKey));
-    assert!(!fields.contains(&LoginField::PlanStore));
-    assert!(!fields.contains(&LoginField::AuthActions));
 }
 
 #[tokio::test]
@@ -756,4 +605,117 @@ async fn duplicate_logout_while_in_flight_is_rejected() {
         controller.prepare_logout().is_none(),
         "a second logout while the first is pending must not be sent"
     );
+}
+
+// ── dispatch 入口（无 Tokio runtime）──────────────────────────────────────
+//
+// `State<T>` 没有公开构造 API，只能从真实挂载的组件里取得；探针组件在 update
+// 阶段把句柄交给同步 visitor，测试就在没有 runtime 的线程里直接调用 dispatch。
+
+type DispatchProbeVisitor = Box<dyn FnMut(State<AuthController>)>;
+
+thread_local! {
+    static DISPATCH_PROBE_VISITOR: std::cell::RefCell<Option<DispatchProbeVisitor>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// 断言 panic 时清空 visitor，避免污染同线程后续用例。
+struct DispatchProbeGuard;
+
+impl Drop for DispatchProbeGuard {
+    fn drop(&mut self) {
+        DISPATCH_PROBE_VISITOR.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+#[derive(Default, Props)]
+struct DispatchProbeProps;
+
+struct DispatchProbe;
+
+impl Component for DispatchProbe {
+    type Props<'a> = DispatchProbeProps;
+
+    fn new(_props: &Self::Props<'_>) -> Self {
+        Self
+    }
+
+    fn update(
+        &mut self,
+        _props: &mut Self::Props<'_>,
+        mut hooks: Hooks,
+        _updater: &mut ComponentUpdater,
+    ) {
+        let auth = hooks.use_state(|| {
+            AuthController::with_backend(Arc::new(FakeBackend {
+                state: FakeState::new(),
+            }))
+        });
+        DISPATCH_PROBE_VISITOR.with(|slot| {
+            if let Some(visitor) = slot.borrow_mut().as_mut() {
+                visitor(auth);
+            }
+        });
+    }
+}
+
+fn probe_dispatch(visitor: impl FnMut(State<AuthController>) + 'static) {
+    let _guard = DispatchProbeGuard;
+    DISPATCH_PROBE_VISITOR.with(|slot| *slot.borrow_mut() = Some(Box::new(visitor)));
+    let _ = ratatui_kit::test_util::render_frame(element!(DispatchProbe()), 1, 1);
+}
+
+/// `dispatch_login` 在没有 runtime 时走 `abort_unspawned`：必须释放完成门，
+/// 后续（同一 controller）可以再次发起登录。
+#[test]
+fn dispatch_login_without_runtime_releases_gate() {
+    let _intercept = super::super::actions::DispatchInterceptDisabled::new();
+    probe_dispatch(|auth| {
+        auth.write().sync_scope(scope());
+        assert!(
+            !super::super::dispatch_login(auth),
+            "无 runtime 的 spawn 必须返回 false"
+        );
+        assert!(matches!(
+            auth.read().view(),
+            AuthViewState::Failed(AuthFailure::Unavailable)
+        ));
+        assert!(!auth.read().gate.is_pending(), "完成门必须已释放");
+        assert!(
+            auth.write().prepare_login().is_ok(),
+            "释放后必须能重新发起登录"
+        );
+    });
+}
+
+/// `dispatch_status` 同样受无 runtime 保护，且不得阻断后续登录。
+#[test]
+fn dispatch_status_without_runtime_releases_gate() {
+    let _intercept = super::super::actions::DispatchInterceptDisabled::new();
+    probe_dispatch(|auth| {
+        auth.write().sync_scope(scope());
+        assert!(!super::super::dispatch_status(auth, false));
+        assert!(matches!(
+            auth.read().view(),
+            AuthViewState::Failed(AuthFailure::Unavailable)
+        ));
+        assert!(!auth.read().gate.is_pending(), "完成门必须已释放");
+        assert!(auth.write().prepare_login().is_ok());
+    });
+}
+
+/// `dispatch_logout` 同样受无 runtime 保护，且不得阻断后续登录。
+#[test]
+fn dispatch_logout_without_runtime_releases_gate() {
+    let _intercept = super::super::actions::DispatchInterceptDisabled::new();
+    probe_dispatch(|auth| {
+        auth.write().sync_scope(scope());
+        assert!(!super::super::dispatch_logout(auth));
+        assert!(matches!(
+            auth.read().view(),
+            AuthViewState::Failed(AuthFailure::Unavailable)
+        ));
+        assert!(!auth.read().gate.is_pending(), "完成门必须已释放");
+        assert!(auth.write().prepare_login().is_ok());
+    });
 }

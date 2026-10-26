@@ -16,37 +16,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use peri_acp::provider::auth::{AccountStatus, AuthError, AuthResult, LogoutOutcome};
-use ratatui_kit::prelude::State;
 
 use crate::application::operations::{CompletionGate, OperationTicket, OutcomeUnknownReason};
-use crate::chatgpt_auth::{AuthTarget, ChatGptAuthBackend, ChatGptAuthSession, default_backend};
-use crate::kit::atoms::AUTH_EVENT_REVISION;
-use crate::kit::panels::login::plan::PlanDraft;
-
-#[path = "auth_actions.rs"]
-mod auth_actions;
-
-#[cfg(test)]
-use auth_actions::intercept_dispatch;
-pub(super) use auth_actions::{
-    copy_url, notify_key, notify_logout_outcome, notify_text, open_browser,
+use crate::chatgpt_auth::{
+    AuthIdentityDraft, AuthTarget, ChatGptAuthBackend, ChatGptAuthSession, default_backend,
 };
-#[cfg(test)]
-pub(super) use auth_actions::{take_test_dispatches, take_test_url_actions};
+use crate::kit::atoms::AUTH_EVENT_REVISION;
 
 /// Host-scoped request identity: config authority + frozen credentials target.
 ///
 /// Session ids are deliberately not reused here; host configuration does not
 /// belong to a conversation.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) struct HostConfigAuthScope {
+pub(crate) struct HostConfigAuthScope {
     source: String,
     store: PathBuf,
     account: String,
 }
 
 impl HostConfigAuthScope {
-    pub(super) fn new(source: impl Into<String>, target: AuthTarget) -> Self {
+    pub(crate) fn new(source: impl Into<String>, target: AuthTarget) -> Self {
         Self {
             source: source.into(),
             store: target.store,
@@ -54,7 +43,7 @@ impl HostConfigAuthScope {
         }
     }
 
-    pub(super) fn target(&self) -> Option<AuthTarget> {
+    pub(crate) fn target(&self) -> Option<AuthTarget> {
         if self.store.as_os_str().is_empty() || self.account.trim().is_empty() {
             return None;
         }
@@ -68,7 +57,7 @@ impl HostConfigAuthScope {
 /// Authentication failure categories. Server-provided descriptions are never
 /// displayed because they may contain sensitive content.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum AuthFailure {
+pub(crate) enum AuthFailure {
     Storage,
     PlatformUnsupported,
     Unavailable,
@@ -82,7 +71,7 @@ pub(super) enum AuthFailure {
 }
 
 impl AuthFailure {
-    pub(super) fn i18n_key(self) -> &'static str {
+    pub(crate) fn i18n_key(self) -> &'static str {
         match self {
             Self::Storage => "login-auth-error-storage",
             Self::PlatformUnsupported => "login-auth-platform-unsupported",
@@ -107,9 +96,8 @@ impl AuthFailure {
             AuthError::InvalidCallback => Self::Callback,
             AuthError::AccountChanged | AuthError::InvalidIdToken => Self::Identity,
             AuthError::MissingScope => Self::NoPlanScope,
-            AuthError::OAuth { code, .. } => {
-                // Never log the description or the raw response body.
-                tracing::warn!(code = %code, "ChatGPT OAuth request failed");
+            AuthError::OAuth { .. } => {
+                tracing::warn!("ChatGPT OAuth request failed");
                 Self::Generic
             }
             AuthError::LoginRequired | AuthError::InvalidResponse => Self::Generic,
@@ -119,7 +107,7 @@ impl AuthFailure {
 
 /// Current authentication step and its safe display payload.
 #[derive(Clone)]
-pub(super) enum AuthViewState {
+pub(crate) enum AuthViewState {
     Unchecked,
     Checking,
     SignedOut,
@@ -137,7 +125,7 @@ pub(super) enum AuthViewState {
 impl AuthViewState {
     /// Credential-mutating operation in flight. Status checks do not block a
     /// configuration save.
-    pub(super) fn blocks_config_save(&self) -> bool {
+    pub(crate) fn blocks_config_save(&self) -> bool {
         matches!(
             self,
             Self::StartingLogin
@@ -148,7 +136,7 @@ impl AuthViewState {
         )
     }
 
-    pub(super) fn url(&self) -> Option<&str> {
+    pub(crate) fn url(&self) -> Option<&str> {
         match self {
             Self::WaitingCallback { url } => Some(url),
             _ => None,
@@ -158,7 +146,7 @@ impl AuthViewState {
 
 /// Actions in the plan authentication button group.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum AuthAction {
+pub(crate) enum AuthAction {
     Login,
     Status,
     UseAccount,
@@ -167,7 +155,7 @@ pub(super) enum AuthAction {
 }
 
 impl AuthAction {
-    pub(super) fn i18n_key(self) -> &'static str {
+    pub(crate) fn i18n_key(self) -> &'static str {
         match self {
             Self::Login => "login-auth-login",
             Self::Status => "login-auth-status",
@@ -180,14 +168,14 @@ impl AuthAction {
 
 /// Buttons in the dedicated authorization view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum DetailAction {
+pub(crate) enum DetailAction {
     OpenBrowser,
     CopyUrl,
     CancelLogin,
 }
 
 impl DetailAction {
-    pub(super) fn i18n_key(self) -> &'static str {
+    pub(crate) fn i18n_key(self) -> &'static str {
         match self {
             Self::OpenBrowser => "login-auth-open-browser",
             Self::CopyUrl => "login-auth-copy-url",
@@ -211,21 +199,21 @@ impl DetailAction {
 
 /// Logout confirmation focus; defaults to cancel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum LogoutFocus {
+pub(crate) enum LogoutFocus {
     Cancel,
     Confirm,
 }
 
 #[derive(Clone)]
-pub(super) struct LogoutConfirm {
-    pub(super) target: AuthTarget,
-    pub(super) providers: Vec<String>,
-    pub(super) focus: LogoutFocus,
+pub(crate) struct LogoutConfirm {
+    pub(crate) target: AuthTarget,
+    pub(crate) providers: Vec<String>,
+    pub(crate) focus: LogoutFocus,
 }
 
 /// Outcome of one delivered auth event, consumed by the panel owner.
 #[derive(Clone)]
-pub(super) enum AuthEffect {
+pub(crate) enum AuthEffect {
     LoginSucceeded,
     LoginFailed(AuthFailure),
     LoginCancelled,
@@ -240,7 +228,7 @@ pub(super) enum AuthEffect {
     OutcomeUnknown(OutcomeUnknownReason),
 }
 
-pub(super) enum AuthEvent {
+pub(crate) enum AuthEvent {
     AuthorizationUrl(String),
     LoginFinished(AuthResult<AccountStatus>),
     StatusChecked(AuthResult<Option<AccountStatus>>),
@@ -250,15 +238,15 @@ pub(super) enum AuthEvent {
 type Inbox = Arc<Mutex<Vec<(OperationTicket<HostConfigAuthScope>, AuthEvent)>>>;
 
 /// Prepared async request; the panel dispatches it so tests can intercept.
-pub(super) struct AuthRequest {
-    pub(super) ticket: OperationTicket<HostConfigAuthScope>,
-    session: Box<dyn ChatGptAuthSession>,
+pub(crate) struct AuthRequest {
+    pub(crate) ticket: OperationTicket<HostConfigAuthScope>,
+    pub(super) session: Box<dyn ChatGptAuthSession>,
 }
 
-pub(super) struct AuthController {
+pub(crate) struct AuthController {
     backend: Arc<dyn ChatGptAuthBackend>,
-    inbox: Inbox,
-    observer: Arc<AtomicBool>,
+    pub(super) inbox: Inbox,
+    pub(super) observer: Arc<AtomicBool>,
     gate: CompletionGate<HostConfigAuthScope>,
     scope: HostConfigAuthScope,
     view: AuthViewState,
@@ -273,11 +261,11 @@ pub(super) struct AuthController {
 }
 
 impl AuthController {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::with_backend(default_backend())
     }
 
-    pub(super) fn with_backend(backend: Arc<dyn ChatGptAuthBackend>) -> Self {
+    pub(crate) fn with_backend(backend: Arc<dyn ChatGptAuthBackend>) -> Self {
         Self {
             backend,
             inbox: Arc::new(Mutex::new(Vec::new())),
@@ -294,29 +282,29 @@ impl AuthController {
         }
     }
 
-    pub(super) fn view(&self) -> &AuthViewState {
+    pub(crate) fn view(&self) -> &AuthViewState {
         &self.view
     }
 
-    pub(super) fn scope(&self) -> &HostConfigAuthScope {
+    pub(crate) fn scope(&self) -> &HostConfigAuthScope {
         &self.scope
     }
 
-    pub(super) fn login_succeeded(&self) -> bool {
+    pub(crate) fn login_succeeded(&self) -> bool {
         self.login_succeeded
     }
 
-    pub(super) fn blocks_config_save(&self) -> bool {
+    pub(crate) fn blocks_config_save(&self) -> bool {
         self.view.blocks_config_save()
     }
 
-    pub(super) fn outcome_unknown(&self) -> bool {
+    pub(crate) fn outcome_unknown(&self) -> bool {
         matches!(self.view, AuthViewState::OutcomeUnknown(_))
     }
 
     /// Adopt a new frozen target. A changed target cancels old work and clears
     /// every target-specific display; same-target calls are no-ops.
-    pub(super) fn sync_scope(&mut self, scope: HostConfigAuthScope) -> bool {
+    pub(crate) fn sync_scope(&mut self, scope: HostConfigAuthScope) -> bool {
         if self.scope == scope {
             return false;
         }
@@ -335,7 +323,7 @@ impl AuthController {
     }
 
     /// Store/account text changed: stop showing stale status until re-checked.
-    pub(super) fn invalidate_target(&mut self) {
+    pub(crate) fn invalidate_target(&mut self) {
         if self.view.blocks_config_save() {
             return;
         }
@@ -346,11 +334,11 @@ impl AuthController {
     }
 
     /// No status result for the frozen target yet.
-    pub(super) fn needs_status_query(&self) -> bool {
+    pub(crate) fn needs_status_query(&self) -> bool {
         matches!(self.view, AuthViewState::Unchecked)
     }
 
-    pub(super) fn available_actions(&self, plan: &PlanDraft) -> Vec<AuthAction> {
+    pub(crate) fn available_actions<D: AuthIdentityDraft>(&self, plan: &D) -> Vec<AuthAction> {
         if matches!(
             self.view,
             AuthViewState::LoggingOut | AuthViewState::CancellingLogout
@@ -377,7 +365,7 @@ impl AuthController {
         actions
     }
 
-    pub(super) fn selected_action(&self, plan: &PlanDraft) -> Option<AuthAction> {
+    pub(crate) fn selected_action<D: AuthIdentityDraft>(&self, plan: &D) -> Option<AuthAction> {
         let actions = self.available_actions(plan);
         if actions.is_empty() {
             return None;
@@ -388,7 +376,11 @@ impl AuthController {
     }
 
     /// 鼠标点击动作行：只有该动作当前可用时才选中，随后由调用方执行同一 Enter 动作。
-    pub(super) fn select_action(&mut self, action: AuthAction, plan: &PlanDraft) -> bool {
+    pub(crate) fn select_action<D: AuthIdentityDraft>(
+        &mut self,
+        action: AuthAction,
+        plan: &D,
+    ) -> bool {
         let actions = self.available_actions(plan);
         let Some(index) = actions.iter().position(|candidate| *candidate == action) else {
             return false;
@@ -397,7 +389,7 @@ impl AuthController {
         true
     }
 
-    pub(super) fn cycle_action(&mut self, forward: bool, plan: &PlanDraft) {
+    pub(crate) fn cycle_action<D: AuthIdentityDraft>(&mut self, forward: bool, plan: &D) {
         let actions = self.available_actions(plan);
         if actions.is_empty() {
             self.action_index = 0;
@@ -414,9 +406,9 @@ impl AuthController {
     ///
     /// Refuses to write an identity read from another store/account: showing a
     /// stale "signed in" must never leak into the draft being saved.
-    pub(super) fn use_account(
+    pub(crate) fn use_account<D: AuthIdentityDraft>(
         &mut self,
-        plan: &mut PlanDraft,
+        plan: &mut D,
         current_scope: &HostConfigAuthScope,
     ) -> bool {
         if &self.scope != current_scope {
@@ -428,7 +420,7 @@ impl AuthController {
         plan.set_identity(status)
     }
 
-    pub(super) fn detail_focus(&self) -> DetailAction {
+    pub(crate) fn detail_focus(&self) -> DetailAction {
         let actions = self.detail_actions();
         if actions.contains(&self.detail_focus) {
             self.detail_focus
@@ -440,7 +432,7 @@ impl AuthController {
         }
     }
 
-    pub(super) fn detail_actions(&self) -> Vec<DetailAction> {
+    pub(crate) fn detail_actions(&self) -> Vec<DetailAction> {
         let mut actions = Vec::new();
         if self.view.url().is_some() {
             actions.push(DetailAction::OpenBrowser);
@@ -450,7 +442,7 @@ impl AuthController {
         actions
     }
 
-    pub(super) fn cycle_detail(&mut self, forward: bool) {
+    pub(crate) fn cycle_detail(&mut self, forward: bool) {
         let actions = self.detail_actions();
         if actions.is_empty() {
             return;
@@ -465,13 +457,13 @@ impl AuthController {
         }
     }
 
-    pub(super) fn set_detail_focus(&mut self, action: DetailAction) {
+    pub(crate) fn set_detail_focus(&mut self, action: DetailAction) {
         if self.detail_actions().contains(&action) {
             self.detail_focus = action;
         }
     }
 
-    pub(super) fn open_logout_confirm(
+    pub(crate) fn open_logout_confirm(
         &mut self,
         target: AuthTarget,
         providers: Vec<String>,
@@ -487,20 +479,20 @@ impl AuthController {
         true
     }
 
-    pub(super) fn logout_confirm(&self) -> Option<&LogoutConfirm> {
+    pub(crate) fn logout_confirm(&self) -> Option<&LogoutConfirm> {
         self.logout_confirm.as_ref()
     }
 
-    pub(super) fn logout_confirm_mut(&mut self) -> Option<&mut LogoutConfirm> {
+    pub(crate) fn logout_confirm_mut(&mut self) -> Option<&mut LogoutConfirm> {
         self.logout_confirm.as_mut()
     }
 
-    pub(super) fn clear_logout_confirm(&mut self) {
+    pub(crate) fn clear_logout_confirm(&mut self) {
         self.logout_confirm = None;
     }
 
     /// Prepare a login attempt. The caller spawns it.
-    pub(super) fn prepare_login(&mut self) -> Result<AuthRequest, AuthFailure> {
+    pub(crate) fn prepare_login(&mut self) -> Result<AuthRequest, AuthFailure> {
         if self.view.blocks_config_save() || self.gate.is_pending() {
             return Err(AuthFailure::Generic);
         }
@@ -527,7 +519,7 @@ impl AuthController {
 
     /// Prepare a status query. `reconcile` marks the post-cancel check: a
     /// failure then means the real outcome is unknown, not "signed out".
-    pub(super) fn prepare_status(&mut self, reconcile: bool) -> Option<AuthRequest> {
+    pub(crate) fn prepare_status(&mut self, reconcile: bool) -> Option<AuthRequest> {
         if matches!(
             self.view,
             AuthViewState::StartingLogin
@@ -566,7 +558,7 @@ impl AuthController {
     }
 
     /// Prepare logout using the frozen confirmation target.
-    pub(super) fn prepare_logout(&mut self) -> Option<AuthRequest> {
+    pub(crate) fn prepare_logout(&mut self) -> Option<AuthRequest> {
         if self.view.blocks_config_save() {
             return None;
         }
@@ -593,7 +585,7 @@ impl AuthController {
 
     /// Cancel login/status waiting; the caller then issues a reconciliation
     /// status query with a new ticket.
-    pub(super) fn cancel_login(&mut self) -> bool {
+    pub(crate) fn cancel_login(&mut self) -> bool {
         if !matches!(
             self.view,
             AuthViewState::StartingLogin | AuthViewState::WaitingCallback { .. }
@@ -608,7 +600,7 @@ impl AuthController {
 
     /// Stop waiting for remote revocation while keeping the logout ticket, so
     /// the local-clear result is still delivered.
-    pub(super) fn cancel_logout_wait(&mut self) -> bool {
+    pub(crate) fn cancel_logout_wait(&mut self) -> bool {
         if !matches!(self.view, AuthViewState::LoggingOut) {
             return false;
         }
@@ -620,7 +612,7 @@ impl AuthController {
     }
 
     /// Drain queued background events, applying only current tickets.
-    pub(super) fn drain(&mut self) -> Vec<AuthEffect> {
+    pub(crate) fn drain(&mut self) -> Vec<AuthEffect> {
         let events = {
             let mut inbox = lock_inbox(&self.inbox);
             std::mem::take(&mut *inbox)
@@ -631,7 +623,7 @@ impl AuthController {
             .collect()
     }
 
-    pub(super) fn receive(
+    pub(crate) fn receive(
         &mut self,
         ticket: OperationTicket<HostConfigAuthScope>,
         event: AuthEvent,
@@ -745,15 +737,24 @@ impl AuthController {
         }
     }
 
-    fn fail(&mut self, failure: AuthFailure) -> AuthFailure {
+    pub(super) fn fail(&mut self, failure: AuthFailure) -> AuthFailure {
         self.view = AuthViewState::Failed(failure);
         failure
+    }
+
+    /// Abandon a ticket whose background task could not be spawned.
+    ///
+    /// `prepare_login`/`prepare_status`/`prepare_logout` already opened a
+    /// completion gate; leaving it pending would block every later action.
+    pub(super) fn abort_unspawned(&mut self, failure: AuthFailure) -> AuthFailure {
+        self.gate.cancel();
+        self.fail(failure)
     }
 
     /// Panel close/edit exit: stop all waits. A logout already in flight keeps its
     /// ticket and inbox slot, so the terminal local-clear result still reaches the
     /// owner exactly once (notification only; the view is left untouched).
-    pub(super) fn shutdown(&mut self) {
+    pub(crate) fn shutdown(&mut self) {
         if matches!(
             self.view,
             AuthViewState::LoggingOut | AuthViewState::CancellingLogout
@@ -787,14 +788,14 @@ impl AuthController {
     }
 
     #[cfg(test)]
-    pub(super) fn prepare_logout_for_test(
+    pub(crate) fn prepare_logout_for_test(
         &mut self,
     ) -> Option<OperationTicket<HostConfigAuthScope>> {
         self.prepare_logout().map(|request| request.ticket)
     }
 
     #[cfg(test)]
-    pub(super) fn push_event_for_test(
+    pub(crate) fn push_event_for_test(
         &self,
         ticket: OperationTicket<HostConfigAuthScope>,
         event: AuthEvent,
@@ -803,7 +804,7 @@ impl AuthController {
     }
 
     #[cfg(test)]
-    pub(super) fn set_view_for_test(&mut self, view: AuthViewState) {
+    pub(crate) fn set_view_for_test(&mut self, view: AuthViewState) {
         self.view = view;
     }
 }
@@ -825,7 +826,8 @@ impl Drop for AuthController {
 }
 
 /// Keep only the safe transport shape: strip control characters and bound the
-/// length shown to the terminal. The full URL is still used for copy/open.
+/// length. This sanitized value is the only URL retained by the view and the
+/// one used for display, copy and browser open; no unsanitized copy is kept.
 fn sanitize_url(url: String) -> String {
     url.chars()
         .filter(|ch| !ch.is_control())
@@ -833,128 +835,19 @@ fn sanitize_url(url: String) -> String {
         .collect()
 }
 
-// ── Dispatch (production) ─────────────────────────────────────────────────────
-
-/// Start login for the current frozen target. Returns false when no dispatch
-/// happened (busy or invalid target).
-pub(super) fn dispatch_login(state: State<AuthController>) -> bool {
-    let request = match state.write().prepare_login() {
-        Ok(request) => request,
-        Err(_) => return false,
-    };
-    if !spawn_login(state, request) {
-        return false;
-    }
-    true
-}
-
-/// Query status. `reconcile` is used after cancelling a login wait.
-pub(super) fn dispatch_status(state: State<AuthController>, reconcile: bool) -> bool {
-    let request = match state.write().prepare_status(reconcile) {
-        Some(request) => request,
-        None => return false,
-    };
-    #[cfg(test)]
-    if intercept_dispatch(if reconcile {
-        "status-reconcile"
-    } else {
-        "status"
-    }) {
-        return true;
-    }
-    let Some(handle) = runtime_handle() else {
-        state.write().fail(AuthFailure::Unavailable);
-        return false;
-    };
-    let inbox = state.read().inbox.clone();
-    handle.spawn(async move {
-        let token = request.ticket.token().clone();
-        let result = request.session.status(token).await;
-        queue_into(&inbox, request.ticket, AuthEvent::StatusChecked(result));
-    });
-    true
-}
-
-/// Start logout using the frozen confirmation target.
-pub(super) fn dispatch_logout(state: State<AuthController>) -> bool {
-    let request = match state.write().prepare_logout() {
-        Some(request) => request,
-        None => return false,
-    };
-    if !spawn_logout(state, request) {
-        return false;
-    }
-    true
-}
-
-fn spawn_login(state: State<AuthController>, request: AuthRequest) -> bool {
-    #[cfg(test)]
-    if intercept_dispatch("login") {
-        return true;
-    }
-    let Some(handle) = runtime_handle() else {
-        state.write().fail(AuthFailure::Unavailable);
-        return false;
-    };
-    let inbox = state.read().inbox.clone();
-    let AuthRequest { ticket, session } = request;
-    let url_inbox = inbox.clone();
-    let url_ticket = ticket.clone();
-    let on_url = Box::new(move |url: String| {
-        queue_into(
-            &url_inbox,
-            url_ticket.clone(),
-            AuthEvent::AuthorizationUrl(url),
-        );
-    });
-    handle.spawn(async move {
-        let token = ticket.token().clone();
-        let result = session.login(token, on_url).await;
-        queue_into(&inbox, ticket, AuthEvent::LoginFinished(result));
-    });
-    true
-}
-
-fn spawn_logout(state: State<AuthController>, request: AuthRequest) -> bool {
-    #[cfg(test)]
-    if intercept_dispatch("logout") {
-        return true;
-    }
-    let Some(handle) = runtime_handle() else {
-        state.write().fail(AuthFailure::Unavailable);
-        return false;
-    };
-    let inbox = state.read().inbox.clone();
-    let observer = state.read().observer.clone();
-    handle.spawn(async move {
-        let token = request.ticket.token().clone();
-        let result = request.session.logout(token).await;
-        if !observer.load(Ordering::SeqCst) {
-            // Panel closed: keep the user-visible outcome without touching a
-            // different form. Local cleanup is mandatory; remote revocation may
-            // be unconfirmed.
-            match &result {
-                Ok(outcome) => notify_logout_outcome(outcome),
-                Err(_) => {
-                    tracing::warn!("ChatGPT logout finished after the panel closed");
-                    notify_key("login-auth-outcome-unknown", 3);
-                }
-            }
-        }
-        queue_into(&inbox, request.ticket, AuthEvent::LoggedOut(result));
-    });
-    true
-}
-
-fn queue_into(inbox: &Inbox, ticket: OperationTicket<HostConfigAuthScope>, event: AuthEvent) {
+pub(super) fn queue_into(
+    inbox: &Inbox,
+    ticket: OperationTicket<HostConfigAuthScope>,
+    event: AuthEvent,
+) {
     lock_inbox(inbox).push((ticket, event));
     AUTH_EVENT_REVISION.set(AUTH_EVENT_REVISION.get().wrapping_add(1));
 }
 
-fn runtime_handle() -> Option<tokio::runtime::Handle> {
+pub(super) fn runtime_handle() -> Option<tokio::runtime::Handle> {
     tokio::runtime::Handle::try_current().ok()
 }
 
 #[cfg(test)]
-#[path = "auth_test.rs"]
+#[path = "controller_test.rs"]
 mod tests;
