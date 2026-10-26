@@ -43,6 +43,55 @@ pub(super) enum SyncCompletion {
     Pending(SyncPending),
 }
 
+type SyncExecutionResult = Result<ChildRunOutcome, Box<dyn std::error::Error + Send + Sync>>;
+type SyncExecutionTask = tokio::task::JoinHandle<SyncExecutionResult>;
+
+/// 父 future 只消费已 spawn 的子执行结果；JoinError 只可能来自子任务 panic
+/// （cancel 只 detach，不 abort），必须显式转成 typed 失败并留日志。
+fn join_error(error: tokio::task::JoinError) -> Box<dyn std::error::Error + Send + Sync> {
+    tracing::error!(%error, "sync child execution task failed");
+    format!("sync child execution task failed: {error}").into()
+}
+
+fn flatten_execution(
+    joined: Result<SyncExecutionResult, tokio::task::JoinError>,
+) -> SyncExecutionResult {
+    joined.map_err(join_error)?
+}
+
+async fn await_execution(execution: SyncExecutionTask) -> SyncExecutionResult {
+    flatten_execution(execution.await)
+}
+
+/// 父工具调用 future 被 drop 时必须终止子执行：子任务由独立 tokio 任务持有，
+/// drop JoinHandle 只会 detach。成功交接后 disarm——此后的执行由 session 资源
+/// owner 持有，父调用 drop 不再代表取消。
+struct SyncChildCancelGuard {
+    session: Option<Arc<Session>>,
+}
+
+impl SyncChildCancelGuard {
+    fn new(session: Arc<Session>) -> Self {
+        Self {
+            session: Some(session),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.session = None;
+    }
+}
+
+impl Drop for SyncChildCancelGuard {
+    fn drop(&mut self) {
+        if let Some(session) = self.session.take() {
+            // 生产 cancel 路径已由父 token cascade 取消，这里是幂等的二次取消；
+            // 同时覆盖 caller 被 drop 而自身令牌未取消（abort / 宿主放弃）的场景。
+            session.config().cancel_token.cancel();
+        }
+    }
+}
+
 pub(super) fn new_sync_task_id() -> String {
     format!("sync-{}", uuid::Uuid::now_v7())
 }
@@ -91,22 +140,38 @@ where
         .ok_or("sync child host unavailable")?;
     let (handoff_sender, mut handoff_ready) = oneshot::channel();
     let handed_off = Arc::new(AtomicBool::new(false));
-    let mut execution = Box::pin(run(handoff_sender, Arc::clone(&handed_off)));
+    // 子执行由独立任务持有：父工具调用 future 因 cancel 被 drop 时 JoinHandle
+    // 只 detach，子任务仍能观察到已取消的 child token，走完 flush / close /
+    // 终态持久化 / SubagentStop / permit 结算的既有收尾。
+    let mut cancel_guard = SyncChildCancelGuard::new(Arc::clone(&session));
+    let mut execution = tokio::spawn(run(handoff_sender, Arc::clone(&handed_off)));
     let receipt = tokio::select! {
         biased;
-        outcome = &mut execution => return Ok(SyncCompletion::Finished(outcome?)),
+        // 交接 receipt 优先于执行终态：spawn 后两者独立完成，已提交的交接
+        // 不能被「执行恰好先结束」误判成同步完成。
         receipt = &mut handoff_ready => match receipt {
             Ok(receipt) => receipt,
             // runner 在交接提交前失败；等待其 typed 终态，不制造瞬时后台任务。
-            Err(_) => return Ok(SyncCompletion::Finished(execution.await?)),
+            Err(_) => {
+                let outcome = await_execution(execution).await?;
+                cancel_guard.disarm();
+                return Ok(SyncCompletion::Finished(outcome));
+            }
         },
+        outcome = &mut execution => {
+            let outcome = flatten_execution(outcome)?;
+            cancel_guard.disarm();
+            return Ok(SyncCompletion::Finished(outcome));
+        }
     };
     if receipt.reason == ChildHandoffReason::ExecutionFailed {
         // RCRA has already failed. Finish its existing lifecycle barriers so
         // the original typed error reaches the caller; a residual receipt is
         // not permission to report this execution as merely Pending. This
         // does not start another settlement window or wait for residual tasks.
-        return Ok(SyncCompletion::Finished(execution.await?));
+        let outcome = await_execution(execution).await?;
+        cancel_guard.disarm();
+        return Ok(SyncCompletion::Finished(outcome));
     }
     handed_off.store(true, Ordering::Release);
 
@@ -116,7 +181,9 @@ where
             %child_thread_id,
             "sync child handoff has no live parent delivery owner; finishing synchronously"
         );
-        return Ok(SyncCompletion::Finished(execution.await?));
+        let outcome = await_execution(execution).await?;
+        cancel_guard.disarm();
+        return Ok(SyncCompletion::Finished(outcome));
     }
     let manager = parent_manager.expect("checked above");
     let worker_task_id = task_id.expect("checked above");
@@ -128,7 +195,9 @@ where
         pid: None,
     }) {
         tracing::error!(%error, task_id = %worker_task_id, "sync child parent task registration failed; finishing synchronously");
-        return Ok(SyncCompletion::Finished(execution.await?));
+        let outcome = await_execution(execution).await?;
+        cancel_guard.disarm();
+        return Ok(SyncCompletion::Finished(outcome));
     }
 
     let log_task_id = worker_task_id.clone();
@@ -140,13 +209,7 @@ where
     let close_task_id = worker_task_id.clone();
     host.close_state
         .spawn_sync_worker(close_task_id, async move {
-            let outcome = std::panic::AssertUnwindSafe(execution)
-                .catch_unwind()
-                .await
-                .unwrap_or_else(|_| {
-                    tracing::error!(child_thread_id = %worker_thread_id, "sync child worker panicked");
-                    Err("sync child worker panicked".into())
-                });
+            let outcome = await_execution(execution).await;
             let result = parent_result(
                 &outcome,
                 &worker_session,
@@ -209,6 +272,8 @@ where
             )
         })
         .collect();
+    // 交接已成功：worker 持有执行，父调用 future 的 drop 不再终止子任务。
+    cancel_guard.disarm();
     Ok(SyncCompletion::Pending(SyncPending {
         receipt,
         pending_tasks,
@@ -494,6 +559,10 @@ pub(super) async fn run_sync_subagent(
     if let Some(error) = &close_error {
         tracing::error!(thread_id = %child_thread_id, %error, "child close incomplete; finalizing terminal while retaining evidence");
     }
+    // 真实资源关闭失败时不写终态：资源未释放的事实必须保持可见（与 background
+    // 路径的 terminal withheld 一致），resume 仍由 Active 状态拒绝。
+    let close_failed = close_error.is_some();
+    let stop_resources = if close_failed { None } else { stop_resources };
 
     let (mut stop_result, mut stop_is_error, mut stop_failure) =
         stop_projection(&outcome, &agent_name, child_thread_id, &session);
@@ -520,7 +589,12 @@ pub(super) async fn run_sync_subagent(
             settlement_error = Some(anyhow::anyhow!("child close incomplete: {error}").into());
         }
     }
-    if let Some(claim) = resume_claim.take() {
+    let claim = if close_failed {
+        None
+    } else {
+        resume_claim.take()
+    };
+    if let Some(claim) = claim {
         let status = if stop_is_error {
             peri_acp_types::thread::AgentStatus::Error
         } else {
@@ -531,6 +605,8 @@ pub(super) async fn run_sync_subagent(
                 Some(anyhow::anyhow!("terminal_status_persist_failed: {error}").into());
         }
     }
+    // 关闭失败时认领不在此结清：Drop 以 CancelRunning 重试关闭，且失败时保留
+    // 原状态，避免把未释放的资源报告成可 resume。
     if let Some(error) = settlement_error.as_ref() {
         stop_result = error.to_string();
         stop_is_error = true;
@@ -556,9 +632,16 @@ pub(super) async fn run_sync_subagent(
     if let Err(error) = drain_subagent_events(event_bus, forwarder_handle, langfuse_bridge).await {
         tracing::error!(thread_id = %child_thread_id, error = %error.user_facing_message(), causes = ?error.cause_chain(), "sync child event forwarding barrier incomplete");
         settlement_error = Some(anyhow::anyhow!("child event drain failed: {error}").into());
+        // 关闭失败时即使 drain 也失败，仍不得写终态：资源未释放的事实必须保持
+        // 可见，resume 继续由 Active 状态拒绝。
+        let fallback_resources = if close_failed {
+            None
+        } else {
+            terminal_resources.clone()
+        };
         if let Err(status_error) = on_subagent_stop_handler(
             &None,
-            &terminal_resources,
+            &fallback_resources,
             &agent_name,
             child_thread_id,
             "child event drain failed",
