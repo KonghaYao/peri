@@ -47,26 +47,22 @@ fn test_subscription_factory_exposes_unknown_output_limit_and_no_api_key_fallbac
         subject: "subject-test".into(),
         client_id: "issued-client-test".into(),
     });
-    let provider = LlmProvider::from_config_for_alias(&settings, "opus");
+    let model = LlmProvider::from_config_for_alias(&settings, "opus")
+        .unwrap()
+        .with_max_tokens(512)
+        .into_model();
+    assert_eq!(model.output_token_limit(), None);
+    assert_eq!(model.context_window(), Some(120000));
+    let request = model.prepare_request(&ModelRequest::default());
     #[cfg(windows)]
-    {
-        let error = provider
-            .err()
-            .expect("Windows must reject subscription credential storage");
-        assert!(
-            error
-                .to_string()
-                .contains("requires Unix owner-only file permissions"),
-            "{error}"
-        );
-    }
+    assert!(request
+        .err()
+        .expect("Windows must reject subscription credential storage")
+        .to_string()
+        .contains("requires Unix owner-only file permissions"));
     #[cfg(not(windows))]
     {
-        let provider = provider.unwrap();
-        let model = provider.with_max_tokens(512).into_model();
-        assert_eq!(model.output_token_limit(), None);
-        assert_eq!(model.context_window(), Some(120000));
-        let request = model.prepare_request(&ModelRequest::default()).unwrap();
+        let request = request.unwrap();
         assert!(request.body().as_value().get("max_output_tokens").is_none());
         assert!(request.body().as_value().get("temperature").is_none());
     }
@@ -83,34 +79,28 @@ async fn test_unlogged_subscription_fails_before_any_model_request() {
         subject: "subject-test".into(),
         client_id: "issued-client-test".into(),
     });
-    let provider = LlmProvider::from_config_for_alias(&settings, "opus");
+    let model = LlmProvider::from_config_for_alias(&settings, "opus")
+        .unwrap()
+        .into_model();
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        model.complete(
+            ModelRequest::new(vec![ModelMessage::user_text("hello")]),
+            CancellationToken::new(),
+        ),
+    )
+    .await
+    .expect("未登录必须在凭据能力边界立即失败")
+    .unwrap_err();
     #[cfg(windows)]
-    {
-        let error = provider
-            .err()
-            .expect("Windows must reject subscription credential storage");
-        assert!(
-            error
-                .to_string()
-                .contains("requires Unix owner-only file permissions"),
-            "{error}"
-        );
-    }
+    assert!(
+        error
+            .to_string()
+            .contains("requires Unix owner-only file permissions"),
+        "{error}"
+    );
     #[cfg(not(windows))]
-    {
-        let model = provider.unwrap().into_model();
-        let error = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            model.complete(
-                ModelRequest::new(vec![ModelMessage::user_text("hello")]),
-                CancellationToken::new(),
-            ),
-        )
-        .await
-        .expect("未登录必须在凭据能力边界立即失败")
-        .unwrap_err();
-        assert!(error.to_string().contains("Sign in to ChatGPT"), "{error}");
-    }
+    assert!(error.to_string().contains("Sign in to ChatGPT"), "{error}");
 }
 
 #[tokio::test]
