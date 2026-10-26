@@ -358,3 +358,22 @@ fn test_app_config_claude_md_excludes_roundtrip() {
         Some(vec!["node_modules/**".to_string()])
     );
 }
+
+#[test]
+fn save_effective_error_classifies_revision_conflicts() {
+    use peri_config::settings::SettingsError;
+
+    assert!(SaveEffectiveError::Settings(SettingsError::Conflict).is_conflict());
+    assert!(
+        !SaveEffectiveError::Settings(SettingsError::GlobalBaselineChanged).is_conflict(),
+        "global baseline 变化需要重启，重新载入不能恢复，不得提示重载"
+    );
+    assert!(
+        SaveEffectiveError::Settings(SettingsError::Resolution(
+            peri_config::ConfigurationError::Conflict
+        ))
+        .is_conflict()
+    );
+    assert!(!SaveEffectiveError::SourceUnavailable.is_conflict());
+    assert!(!SaveEffectiveError::Settings(SettingsError::AuthorityUnavailable).is_conflict());
+}

@@ -192,6 +192,8 @@ pub struct ProviderSummary {
     pub provider_type: String,
     pub is_active: bool,
     pub has_api_key: bool,
+    /// Responses provider 使用 ChatGPT plan 引用（凭据状态不在 Browse 批量查询）。
+    pub has_chatgpt_plan: bool,
     pub base_url: Option<String>,
 }
 
@@ -352,6 +354,16 @@ pub static PLUGIN_LIST: AtomStatic<Vec<PluginSummary>> = AtomStatic::new(Vec::ne
 pub static MCP_SERVERS: AtomStatic<Vec<McpServerSummary>> = AtomStatic::new(Vec::new);
 pub static SUBAGENT_LIST: AtomStatic<Vec<SubagentSummary>> = AtomStatic::new(Vec::new);
 pub static PROVIDER_LIST: AtomStatic<Vec<ProviderSummary>> = AtomStatic::new(Vec::new);
+
+/// Model → Login 的一次性导航请求。
+///
+/// 只携带目标 provider 身份，不复制任何配置编辑状态：Login 打开后仍从权威配置
+/// 构建自己的草稿，并在消费后清空本值（一次有效）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginPanelRequest {
+    pub provider_id: Option<String>,
+}
+pub static LOGIN_PANEL_REQUEST: AtomStatic<Option<LoginPanelRequest>> = AtomStatic::new(|| None);
 pub static MEMORY_LIST: AtomStatic<Vec<MemoryEntry>> = AtomStatic::new(Vec::new);
 
 /// Todo 列表数据（来自 ACP SessionUpdate::Plan）
@@ -649,6 +661,10 @@ pub static INPUT_SNAPSHOT: AtomStatic<InputSnapshot> = AtomStatic::new(InputSnap
 /// 即使终端无输入、atom 无变化，也能防止 `futures::select` 在 EventStream 阻塞时
 /// 永久卡死。AppShell 组件 `use_atom` 订阅此 atom。
 pub static RENDER_HEARTBEAT: AtomStatic<u64> = AtomStatic::new(|| 0);
+
+/// ChatGPT 认证后台任务的完成事件计数：任务只投递到 auth inbox 并递增此值，
+/// Login 面板订阅后在自己的 effect 边界取值、过完成门并更新视图。
+pub static AUTH_EVENT_REVISION: AtomStatic<u64> = AtomStatic::new(|| 0);
 
 /// 当前活跃 session 的 ID。由 submit_consumer/thread_load_consumer 在 session 变更时设置。
 /// acp_bridge 在 reset 后用于过滤陈旧事件（event.active_session_id != ACTIVE_SESSION_ID → 丢弃）。

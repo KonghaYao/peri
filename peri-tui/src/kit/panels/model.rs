@@ -2,23 +2,27 @@
 //!
 //! 左右分栏 Profile 编辑器：
 //! - 左侧：4 个固定档位卡片（fable / opus / sonnet / haiku），↑/↓ 选择即切换 active profile；
-//! - 右侧：当前 profile 的 K/V 编辑行（Provider / Model / Effort / Max tokens / 1m enable）。
+//! - 右侧：当前 profile 的 K/V 编辑行（Provider / Model / Effort / Max tokens / 1m）。
 //!
 //! 右侧 `→`/`←` 切换字段值并立即写入内存 + 持久化 + 推送 ACP（无 Enter/Save 步骤）。
+//! Responses provider 例外：provider/model 变更与 contextWindow 走显式草稿，
+//! contextWindow 行用内联数值 editor；两者都以进入时捕获的 revision 原子保存。
+//! 右栏 K/V 行点击 = 聚焦并执行与键盘相同的动作；内联 editor/草稿的行与按钮同样
+//! 按同帧语义行命中。底部“管理 Provider”按钮与 `Ctrl+L` 等价：经 panel_registry
+//! 打开 Login 管理当前 provider，有未保存草稿时只提示保存或取消。冲突后的 `Ctrl+R`
+//! 重读权威配置并离开草稿/editor。单行窗口/model editor 拒绝多行与控制字符粘贴，
+//! 留下可见错误并在修正前阻断保存。
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{LANG_VERSION, PERI_CONFIG_HANDLE, SERVICE_SNAPSHOT};
-use crate::kit::list_nav::{next_selection, previous_selection};
-use crate::kit::panel_mouse::{AreaTracker, hit_item};
+use crate::kit::panel_mouse::AreaTracker;
 use crate::kit::panels::shared::list::{ListMetrics, ListViewport, content_rows};
 use peri_theme::atoms::THEME_ATOM;
-use peri_theme::theme::ThemeDefinition;
 use ratatui_kit::{
-    crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind},
     prelude::*,
     ratatui::{
-        layout::{Constraint, Direction, Rect},
+        layout::{Constraint, Direction},
         style::{Style, Stylize},
         text::{Line, Span},
         widgets::Paragraph,
@@ -27,8 +31,13 @@ use ratatui_kit::{
 use unicode_width::UnicodeWidthStr;
 
 mod edit;
-use edit::edit_field;
+mod editor_view;
+mod panel_input;
+mod panel_render;
+mod profile_draft;
 pub(crate) use edit::switch_active_alias;
+use editor_view::{render_profile_draft, render_window_editor};
+use profile_draft::{ProfileDraftState, WindowEditState};
 
 // ---------------------------------------------------------------------------
 // 静态常量
@@ -62,6 +71,8 @@ const VALUE_ALIGN_COL: usize = 40;
 /// `ListViewport`；此前命中布局把 `visible_items` 写死为 4 档，面板变矮后仍按
 /// 4 档反推行号。
 const LIST_METRICS: ListMetrics = ListMetrics::new(2, 3, 1);
+use panel_input::{ModelEventCtx, active_profile_idx, current_active_alias, handle_model_event};
+use panel_render::{provider_button_label, right_align_col, styled_model_name};
 
 /// 首帧未测量自身区域时的面板宽度兜底（`use_previous_size` 首帧 width=0 的同一退守）。
 const FALLBACK_PANEL_W: usize = 80;
@@ -79,6 +90,10 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 渲染版本计数器——edit_field/switch_active_alias 修改 PERI_CONFIG_HANDLE 后
     // 递增此计数，触发 ModelPanel 重渲染以显示最新值。
     let render_version = hooks.use_state(|| 0u64);
+    // Responses contextWindow 内联 editor：冻结 alias/provider/model/revision。
+    let window_editor = hooks.use_state(|| None::<WindowEditState>);
+    // Responses provider/model 变更草稿：候选先不发布，显式保存才原子落盘。
+    let profile_draft = hooks.use_state(|| None::<ProfileDraftState>);
     // Model 面板编辑宿主配置；active alias 必须来自配置事实源，不能混用会话状态栏
     // 的 SERVICE_SNAPSHOT（会话可能仍为另一档模型）。订阅 snapshot 仅用于会话变化时
     // 触发重绘，面板选择和编辑始终读取 PERI_CONFIG_HANDLE。
@@ -88,6 +103,22 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 上的 key，配置刷新不会让下标指向别的档位。
     let active_idx = active_profile_idx(&active_alias);
     let _lang_ver = hooks.use_atom(&LANG_VERSION);
+
+    // 打开面板即重读权威配置：外部写入后重新打开 /model 必须看到最新快照与新
+    // revision，而不是进程启动时的缓存。无配置源（单测/lenient）时保持原值。
+    hooks.use_effect(
+        move || {
+            if crate::kit::atoms::CONFIG_SOURCE_HANDLE.get().is_some() {
+                match crate::kit::config_service::reload_configuration() {
+                    Ok(_) => *render_version.write() += 1,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "ModelPanel: 打开面板时重新载入配置失败")
+                    }
+                }
+            }
+        },
+        (),
+    );
 
     // 左侧 profile 列表的滚动状态（ScrollView 自身状态；列表窗口由
     // `viewport` 推导，鼠标命中不再读这里的偏移）。
@@ -120,6 +151,9 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     right_cursor,
                     right_focus,
                     render_version,
+                    window_editor,
+                    profile_draft,
+                    right_scroll,
                     viewport,
                 },
             )
@@ -131,6 +165,9 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         right_cursor,
         right_focus,
         render_version,
+        window_editor,
+        profile_draft,
+        right_scroll,
     });
 
     // ── 渲染（只读状态：TUI-RENDER-001，写状态只在事件与 effect 边界）──
@@ -323,14 +360,46 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ]));
     }
 
+    // ── 内联 editor / Responses 档位草稿（替代右栏 K/V）──
+    let mut hint_text = i18n::tr("panel-model-nav-hint");
+    if let Some(editor) = window_editor.read().as_ref() {
+        right_lines = render_window_editor(editor, &theme).lines;
+        hint_text = i18n::tr_args(
+            "model-panel-window-editing",
+            &[(
+                "alias".to_string(),
+                fluent_bundle::FluentValue::from(editor.alias.as_str()),
+            )],
+        );
+    } else if let Some(draft) = profile_draft.read().as_ref() {
+        right_lines = render_profile_draft(draft, &theme).lines;
+        hint_text = if draft.model_editing {
+            i18n::tr("model-panel-model-editing-hint")
+        } else {
+            i18n::tr("model-panel-draft-hint")
+        };
+    } else if responses_window.is_some() {
+        hint_text = i18n::tr("model-panel-edit-window-manage-hint");
+    }
+
     // ── 中间分隔线 ──
     let divider_style = Style::new().fg(theme.semantic.border.default);
     let divider_lines: Vec<Line<'_>> = (0..30_usize)
         .map(|_| Line::from(Span::styled("│", divider_style)))
         .collect();
 
-    // ── 底部导航提示 ──
-    let hint_line = Line::from(i18n::tr("panel-model-nav-hint")).fg(theme.semantic.text.dim);
+    // ── 底部：“管理 Provider”按钮 + 键盘提示 ──
+    // 按钮文本与命中区共用 `provider_button_label()`；点击与 Ctrl+L 同一动作。
+    let hint_line = Line::from(vec![
+        Span::styled(
+            provider_button_label(),
+            Style::new().fg(theme.component.panel.title).bold(),
+        ),
+        Span::styled(
+            format!("  {hint_text}"),
+            Style::new().fg(theme.semantic.text.dim),
+        ),
+    ]);
 
     let left_para = Paragraph::new(ratatui::text::Text::from(left_lines));
     let right_para = Paragraph::new(ratatui::text::Text::from(right_lines));
@@ -395,188 +464,6 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             Text(text: hint_line)
         }
     })
-}
-
-/// 面板事件处理——判定集中在这里、组件只做注册，测试可经 `tests::mount_panel`
-/// 捕获真实句柄后直接投喂事件（`State<T>` 无公开构造 API）。
-///
-/// 鼠标命中与绘制共用 `ctx.viewport`（`hit_layout()` / `window()` 同源），
-/// 面板高度变化后两者看到的档位数一致。
-fn handle_model_event(event: Event, ctx: &ModelEventCtx) -> EventResult {
-    handle_model_event_with(event, ctx, switch_active_alias)
-}
-
-/// 事件判定本体（档位切换入口注入）。
-///
-/// 注入只为测试：单测进程没有 `CONFIG_SOURCE_HANDLE`，真实切换必然保存失败，
-/// 因此「点击哪一行 → 切换哪个档位」只能在动作出口可断言；真实分支由人工/E2E 验证。
-fn handle_model_event_with(
-    event: Event,
-    ctx: &ModelEventCtx,
-    switch_alias: impl Fn(usize),
-) -> EventResult {
-    // 鼠标：区域内左键点击左侧 profile 卡片行 = 选中并切换（click as enter）。
-    if let Event::Mouse(mouse) = event {
-        if let Some(area) = ctx.area
-            && mouse.column < left_column_end(area)
-            && let Some(idx) = hit_item(&mouse, area, ctx.viewport.hit_layout())
-        {
-            switch_alias(idx);
-            *ctx.render_version.write() += 1;
-            return EventResult::Consumed;
-        }
-        // 面板区域内未命中行/右侧 K/V 区：消费防穿透（与其它面板一致）
-        return match mouse.kind {
-            MouseEventKind::Down(MouseButton::Left) => EventResult::Consumed,
-            _ => EventResult::Ignored,
-        };
-    }
-    let Event::Key(key) = event else {
-        return EventResult::Ignored;
-    };
-    if key.kind != KeyEventKind::Press {
-        return EventResult::Ignored;
-    }
-    // 编辑动作按 `active_alias` 定位档位（配置事实源；不从列表下标推导）
-    let current_alias = current_active_alias();
-    match key.code {
-        KeyCode::Esc => {
-            if *ctx.right_focus.read() {
-                // 退出右侧编辑焦点
-                *ctx.right_focus.write() = false;
-            } else {
-                // 全局 Esc 由 panel_overlay 处理；此处返回 Ignored 让其关闭面板
-                return EventResult::Ignored;
-            }
-        }
-        KeyCode::Up => {
-            if *ctx.right_focus.read() {
-                let mut c = ctx.right_cursor.write();
-                *c = previous_selection(*c);
-            } else {
-                // 从当前 active 档位出发上移（与渲染高亮一致）
-                let idx = PROFILE_KEYS
-                    .iter()
-                    .position(|k| *k == current_alias)
-                    .unwrap_or(1);
-                switch_active_alias(previous_selection(idx));
-                *ctx.render_version.write() += 1;
-            }
-        }
-        KeyCode::Down => {
-            if *ctx.right_focus.read() {
-                let mut c = ctx.right_cursor.write();
-                *c = next_selection(*c, FIELD_COUNT);
-            } else {
-                // 从当前 active 档位出发下移（与渲染高亮一致）
-                let idx = PROFILE_KEYS
-                    .iter()
-                    .position(|k| *k == current_alias)
-                    .unwrap_or(1);
-                switch_active_alias(next_selection(idx, PROFILE_KEYS.len()));
-                *ctx.render_version.write() += 1;
-            }
-        }
-        KeyCode::Tab => {
-            // 左右焦点切换：左侧 → 右侧，右侧 → 左侧
-            let rf = *ctx.right_focus.read();
-            *ctx.right_focus.write() = !rf;
-        }
-        KeyCode::Right => {
-            if *ctx.right_focus.read() {
-                edit_field(current_alias, *ctx.right_cursor.read(), true);
-                *ctx.render_version.write() += 1;
-            } else {
-                // 进入右侧编辑焦点
-                *ctx.right_focus.write() = true;
-            }
-        }
-        KeyCode::Left => {
-            if *ctx.right_focus.read() {
-                edit_field(current_alias, *ctx.right_cursor.read(), false);
-                *ctx.render_version.write() += 1;
-            } else {
-                *ctx.right_focus.write() = false;
-            }
-        }
-        _ => {}
-    }
-    EventResult::Consumed
-}
-
-/// 当前激活档位（配置事实源 `PERI_CONFIG_HANDLE`）——会话状态栏的
-/// `SERVICE_SNAPSHOT` 可能仍是另一档模型，不参与本面板的选择与编辑。
-fn current_active_alias() -> String {
-    PERI_CONFIG_HANDLE
-        .get()
-        .map(|h| h.read().config.active_alias.clone())
-        .unwrap_or_else(|| PROFILE_KEYS[1].to_string())
-}
-
-/// `active_alias` 在静态档位表里的下标——左栏高亮、键盘导航起点与视口跟随的
-/// 唯一推导处（未知 alias 落在 sonnet，与默认档位一致）。
-fn active_profile_idx(active_alias: &str) -> usize {
-    PROFILE_KEYS
-        .iter()
-        .position(|key| *key == active_alias)
-        .unwrap_or(1)
-}
-
-/// 左栏（profile 卡片）命中的列上界（不含）：主区宽 45%（`panel_shell` 左右边框
-/// 各 1 列）；ScrollView 滚动条占其最右 1 列，落在该列的点击不参与列表命中。
-fn left_column_end(area: Rect) -> u16 {
-    let left_w = (area.width.saturating_sub(2)) * 45 / 100;
-    area.x
-        .saturating_add(1)
-        .saturating_add(left_w)
-        .saturating_sub(1)
-}
-
-/// 事件处理上下文：本帧视口 + 面板句柄 + 面板区域。
-///
-/// `State<T>` 无公开构造 API，只能从组件挂载取得；集中成一个结构体，事件入口
-/// 签名不再随状态/视口增长（渲染、鼠标命中与滚轮仲裁必须共用同一份区域与视口）。
-struct ModelEventCtx {
-    area: Option<Rect>,
-    right_cursor: State<usize>,
-    right_focus: State<bool>,
-    render_version: State<u64>,
-    viewport: ListViewport,
-}
-
-/// 模型名内嵌 effort 后缀（如 "gpt-5.6-luna high"）：主色用 model_info，后缀用 model accent 色高亮。
-fn styled_model_name(model: &str, theme: &ThemeDefinition) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    let lower = model.to_lowercase();
-    for level in [" low", " medium", " high", " xhigh", " max"] {
-        if let Some(pos) = lower.rfind(level) {
-            let (head, tail) = model.split_at(pos + 1);
-            spans.push(Span::styled(
-                head.to_string(),
-                Style::new().fg(theme.semantic.model_info),
-            ));
-            spans.push(Span::styled(
-                tail.to_string(),
-                Style::new().fg(theme.semantic.model_accent).bold(),
-            ));
-            return spans;
-        }
-    }
-    spans.push(Span::styled(
-        model.to_string(),
-        Style::new().fg(theme.semantic.model_info),
-    ));
-    spans
-}
-
-/// 右侧 K/V 行对齐列：宽屏保持 VALUE_ALIGN_COL 右对齐；窄屏收缩到右列可容纳的最大宽度。
-///
-/// 布局为 `Percentage(45) | Length(1) | Fill(1)`，右列宽 = 面板宽 - 45% - 1。
-/// 行总宽 = key_span + pad + value = align，故 align 上限为右列宽 - 4（mark + 两侧空格余量），
-/// 保证窄屏下行宽不超过右列可视区域，值不被截断。
-fn right_align_col(panel_width: usize) -> usize {
-    let right_w = panel_width.saturating_sub(panel_width * 45 / 100 + 1);
-    VALUE_ALIGN_COL.min(right_w.saturating_sub(4))
 }
 
 #[cfg(test)]

@@ -32,6 +32,9 @@
 20. [复制通道与远程剪贴板](16-clipboard-transport.md)：P0-77～P0-80。确认本机系统剪贴板、SSH 终端 OSC 52、tmux 双路径、显式通道覆盖与远程 Ctrl+V 引导。
 21. [首次配置向导](17-setup-wizard.md)：P0-81。确认预设填充、四档模型与落盘配置一致，未填 Key 不能提交。
 22. [消息区与覆盖层](06-transcript-ui.md)：P0-82。确认滚到已载入窗口顶端加载更早历史后阅读位置不跳、迟到页不串会话。
+23. [配置与能力开关](10-configuration.md)：P0-83～P0-85。确认仅用 TUI 完成 Responses provider 配置、类型防误改、四档隔离与 revision 冲突不落盘。
+24. [面板与详情显示](13-panel-display.md)：P0-86～P0-88。确认 Model 内联窗口原子保存、ChatGPT 登录取消竞态、状态身份与注销两阶段结果。
+25. [阻塞交互与弹出层显示](14-popup-display.md)：P0-89。确认 Login 认证子视图与 Model 草稿在窄屏、长 URL 和双语下键鼠可用。
 
 ## 后续优先级
 

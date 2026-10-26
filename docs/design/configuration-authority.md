@@ -120,9 +120,14 @@ ACP 持久 configOptions 分支与 `update_config` 按 candidate → 验证 → 
 用 accepted snapshot 发布处理；保存失败不更新 live provider 或 agent cache，
 不发送配置通知、不返回成功。该失败顺序已修复，但不意味着客户端延迟编辑的
 revision token 已通过远程 wire 传递。
-TUI `save_effective` 当前为串行当前视图便利入口，仍在提交时读取 snapshot revision；
-延迟编辑器必须保留编辑开始的 token，远程请求也须携带对应基线。这些接线审计
-见 active issue，不能把 public core 接受 expected revision 等同于全链路已闭环。
+TUI `save_effective` 仍为即时编辑便利入口，提交时读取 snapshot revision；Login provider
+编辑与 Model 的 Responses 档位/contextWindow 长草稿改用 `save_effective_at(expected, cfg)`：
+进入编辑时捕获 token，成功后只发布 authority 返回的 accepted snapshot，冲突要求重新载入。
+打开 Login/Model 与冲突后的 `Ctrl+R` 走显式 `reload_merged` 并刷新缓存，不写文件；重载
+使当前草稿失效，再次进入编辑以新 revision 为基线，不自动 rebase 或重试保存。只有
+revision/authority 冲突显示重新载入提示，字段错误不提供该动作。
+ACP `update_config` 仍不携带草稿 revision token，远程延迟编辑的 wire 级 CAS 尚未闭环；
+这些接线审计见 active issue，不能把 public core 接受 expected revision 等同于全链路已闭环。
 
 ACP 宿主装配将同一 `ConfigSource` snapshot 注入其新建 MCP pool，并从该快照
 取 provider/观测投影。pool 初始化前一次绑定 revision；middleware 消费冻结的

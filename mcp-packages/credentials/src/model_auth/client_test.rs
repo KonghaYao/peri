@@ -156,7 +156,7 @@ impl MockIssuer {
     }
 
     async fn pending(&self, manager: &ChatGptAuthManager) -> (PendingLogin, url::Url) {
-        let pending = manager.begin_login().await.unwrap();
+        let pending = manager.begin_login(CancellationToken::new()).await.unwrap();
         let url = url::Url::parse(pending.authorization_url()).unwrap();
         let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
         *self.state.nonce.lock().unwrap() = query["nonce"].clone();
@@ -652,4 +652,101 @@ async fn second_real_http_401_is_terminal_and_refresh_does_not_expand_attempt_bu
         assert_eq!(server.await.unwrap().len(), expected_sends);
         assert_eq!(mock.state.refreshes.load(Ordering::SeqCst), 1);
     }
+}
+
+#[tokio::test]
+async fn cancelled_begin_login_releases_the_account_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager =
+        ChatGptAuthManager::new(dir.path().join("credentials"), "default".into()).unwrap();
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    assert_eq!(
+        manager.begin_login(cancellation).await.unwrap_err(),
+        AuthError::Cancelled
+    );
+    // A cancelled request must not leave the account lease or pending state behind.
+    let pending = manager.begin_login(CancellationToken::new()).await.unwrap();
+    assert!(pending
+        .authorization_url()
+        .starts_with("https://auth.openai.com"));
+}
+
+#[tokio::test]
+async fn cancelled_status_while_lock_is_held_can_retry_after_release() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager =
+        ChatGptAuthManager::new(dir.path().join("credentials"), "default".into()).unwrap();
+    let lease = manager
+        .server
+        .store
+        .lease(&CancellationToken::new())
+        .await
+        .unwrap();
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    assert_eq!(
+        manager.status(cancellation).await.unwrap_err(),
+        AuthError::Cancelled
+    );
+    drop(lease);
+    assert!(manager
+        .status(CancellationToken::new())
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn cancelled_begin_login_while_lock_is_held_does_not_poison_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager =
+        ChatGptAuthManager::new(dir.path().join("credentials"), "default".into()).unwrap();
+    let lease = manager
+        .server
+        .store
+        .lease(&CancellationToken::new())
+        .await
+        .unwrap();
+    let cancellation = CancellationToken::new();
+    cancellation.cancel();
+    assert_eq!(
+        manager.begin_login(cancellation).await.unwrap_err(),
+        AuthError::Cancelled
+    );
+    drop(lease);
+    assert!(manager.begin_login(CancellationToken::new()).await.is_ok());
+}
+
+#[tokio::test]
+async fn cancelling_finish_login_releases_the_loopback_port() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager =
+        ChatGptAuthManager::new(dir.path().join("credentials"), "default".into()).unwrap();
+    let pending = manager.begin_login(CancellationToken::new()).await.unwrap();
+    let authorize = url::Url::parse(pending.authorization_url()).unwrap();
+    let query: HashMap<_, _> = authorize.query_pairs().into_owned().collect();
+    let redirect = url::Url::parse(&query["redirect_uri"]).unwrap();
+    let port = redirect.port().expect("loopback callback port");
+
+    let cancellation = CancellationToken::new();
+    let finishing = manager.finish_login(pending, cancellation.clone());
+    let cancel = async {
+        tokio::task::yield_now().await;
+        cancellation.cancel();
+    };
+    let (result, ()) = tokio::join!(finishing, cancel);
+    assert_eq!(result.unwrap_err(), AuthError::Cancelled);
+
+    let rebound = peri_time::timeout(Duration::from_secs(5), async {
+        loop {
+            match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
+                Ok(listener) => return listener,
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await
+    .expect("cancelled finish must drop the callback listener");
+    drop(rebound);
 }

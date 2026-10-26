@@ -12,6 +12,7 @@ pub mod acp_types;
 pub mod app_shell;
 pub mod ask_user_action;
 pub mod atoms;
+pub(crate) mod auth_browser;
 pub mod bg_task_area;
 pub mod bg_task_click;
 pub mod bg_task_identity;

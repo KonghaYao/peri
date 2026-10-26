@@ -5,6 +5,7 @@
 //! save commits the handle, the local projection and the ACP push — a failed
 //! save must not leave the panel showing a switch that never reached disk.
 
+use super::profile_draft::{ProfileDraftState, WindowEditState};
 use super::{
     FIELD_CONTEXT_1M, FIELD_EFFORT, FIELD_MAX_TOKENS, FIELD_MODEL, FIELD_PROVIDER, PROFILE_KEYS,
 };
@@ -12,6 +13,7 @@ use crate::config::PeriConfig;
 use crate::kit::atoms::{
     ACP_CLIENT_HANDLE, MODEL_HIGHLIGHT_UNTIL, NOTIFICATION, Notification, PERI_CONFIG_HANDLE,
 };
+use crate::kit::config_service::DraftSaveError;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -67,9 +69,7 @@ pub(super) fn edit_field(alias: String, field: usize, forward: bool) {
             .find(|provider| provider.id == profile_provider)
     };
     let notice = selected_provider.and_then(|provider| {
-        if provider.provider_type == "openai_responses" && field == FIELD_CONTEXT_1M {
-            Some("model-panel-explicit-window-hint")
-        } else if field == FIELD_MAX_TOKENS
+        if field == FIELD_MAX_TOKENS
             && matches!(
                 &provider.auth,
                 Some(peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan { .. })
@@ -85,6 +85,13 @@ pub(super) fn edit_field(alias: String, field: usize, forward: bool) {
             message: crate::i18n::tr(notice),
             until: peri_time::monotonic_now() + Duration::from_secs(3),
         });
+        return;
+    }
+
+    // Responses contextWindow 由内联 editor 处理；这里不落盘、不显示不可操作提示。
+    if field == FIELD_CONTEXT_1M
+        && selected_provider.is_some_and(|provider| provider.provider_type == "openai_responses")
+    {
         return;
     }
 
@@ -239,16 +246,140 @@ fn commit_snapshot(handle: &PeriHandle, candidate: PeriConfig, change: ModelChan
     if !crate::kit::config_service::persist_candidate(&candidate) {
         return false;
     }
-    *handle.write() = candidate.clone();
-    project_model_change(&candidate, change);
+    publish_accepted(handle, candidate, change);
+    true
+}
+
+/// 发布 authority 接纳后的配置：内存、投影、ACP。
+///
+/// ACP 失败只提示“配置已保存，运行端同步失败”，不回滚、不重发，也不发布原始 candidate。
+fn publish_accepted(handle: &PeriHandle, accepted: PeriConfig, change: ModelChange) {
+    *handle.write() = accepted.clone();
+    project_model_change(&accepted, change);
     tokio::spawn(async move {
         if let Some(client) = ACP_CLIENT_HANDLE.get()
-            && let Err(e) = client.update_config(&candidate).await
+            && let Err(error) = client.update_config(&accepted).await
         {
-            tracing::warn!(error = %e, "ModelPanel: update_config push failed");
+            crate::kit::config_service::notify_runtime_sync_failed(&anyhow::anyhow!(
+                error.to_string()
+            ));
         }
     });
-    true
+}
+
+/// 校验失败时给出一闪而过的摘要；字段本身保留 inline error。
+fn notify_field_error(message: &str) {
+    *NOTIFICATION.state().write() = Some(Notification {
+        message: message.to_string(),
+        until: peri_time::monotonic_now() + Duration::from_secs(2),
+    });
+}
+
+/// 提交 contextWindow 内联 editor：只改指定 alias，显式 revision，失败不发布。
+pub(super) fn submit_window_edit(state: &mut WindowEditState) -> bool {
+    // 被拒绝的输入尚未由后续编辑清除时不得提交：否则编辑框里的合法旧值会旁路
+    // 提示直接落盘。持久化错误不设此标记，仍可按键重试。
+    if state.input_blocked {
+        return false;
+    }
+    let candidate = match state.validate_and_patch() {
+        Ok(candidate) => candidate,
+        Err(error) => {
+            notify_field_error(&error);
+            state.error = Some(error);
+            state.conflict = false;
+            return false;
+        }
+    };
+    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
+        state.error = Some(crate::i18n::tr("model-panel-save-failed-error"));
+        state.conflict = false;
+        return false;
+    };
+    let Some(revision) = state.revision else {
+        state.error = Some(crate::i18n::tr("model-panel-save-failed-error"));
+        state.conflict = false;
+        return false;
+    };
+    match crate::kit::config_service::persist_draft(&candidate, revision) {
+        Ok(accepted) => {
+            publish_accepted(
+                handle,
+                accepted,
+                ModelChange::ProfileField(state.alias.clone()),
+            );
+            true
+        }
+        Err(DraftSaveError::Conflict) => {
+            state.error = Some(crate::i18n::tr("config-draft-conflict"));
+            state.conflict = true;
+            false
+        }
+        Err(DraftSaveError::Failed(error)) => {
+            state.conflict = false;
+            state.error = Some(crate::i18n::tr_args(
+                "model-panel-save-failed",
+                &[(
+                    "error".to_string(),
+                    fluent_bundle::FluentValue::from(error.to_string().as_str()),
+                )],
+            ));
+            false
+        }
+    }
+}
+
+/// 提交 Responses provider/model/window 草稿：三项一起落盘，失败保留草稿。
+pub(super) fn submit_profile_draft(state: &mut ProfileDraftState) -> bool {
+    // 同内联 editor：被拒绝的输入未清除前拒绝提交，避免合法文本掩盖已拒绝的输入。
+    if state.input_blocked {
+        return false;
+    }
+    let candidate = match state.validate_and_patch() {
+        Ok(candidate) => candidate,
+        Err(error) => {
+            notify_field_error(&error);
+            state.error = Some(error);
+            state.conflict = false;
+            return false;
+        }
+    };
+    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
+        state.error = Some(crate::i18n::tr("model-panel-save-failed-error"));
+        state.conflict = false;
+        return false;
+    };
+    let Some(revision) = state.revision else {
+        state.error = Some(crate::i18n::tr("model-panel-save-failed-error"));
+        state.conflict = false;
+        return false;
+    };
+    match crate::kit::config_service::persist_draft(&candidate, revision) {
+        Ok(accepted) => {
+            publish_accepted(
+                handle,
+                accepted,
+                ModelChange::ProfileField(state.alias.clone()),
+            );
+            true
+        }
+        Err(DraftSaveError::Conflict) => {
+            state.error = Some(crate::i18n::tr("config-draft-conflict"));
+            state.conflict = true;
+            false
+        }
+        Err(DraftSaveError::Failed(error)) => {
+            state.conflict = false;
+            state.error = Some(crate::i18n::tr_args(
+                "model-panel-save-failed",
+                &[(
+                    "error".to_string(),
+                    fluent_bundle::FluentValue::from(error.to_string().as_str()),
+                )],
+            ));
+            false
+        }
+    }
 }
 
 fn project_model_change(snap: &PeriConfig, change: ModelChange) {

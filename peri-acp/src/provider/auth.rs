@@ -6,7 +6,9 @@ use peri_model::{ModelError, ModelResult, ProtocolErrorKind, RequestAuth, Reques
 use tokio_util::sync::CancellationToken;
 
 #[cfg(not(target_os = "emscripten"))]
-pub use peri_mcp_credentials::model_auth::ChatGptAuthManager;
+pub use peri_mcp_credentials::model_auth::{
+    AccountStatus, AuthError, AuthResult, ChatGptAuthManager, LogoutOutcome, PendingLogin,
+};
 
 pub(super) fn request_auth(
     store: PathBuf,

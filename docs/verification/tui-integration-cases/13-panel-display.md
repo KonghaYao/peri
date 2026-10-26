@@ -18,6 +18,46 @@
    1. 在 Config 或 Model 面板改变设置，令持久保存失败。
    2. 观察当前行、状态栏与错误提示，再恢复保存能力并重试。
    3. 核对失败明确可见且不宣称已保存；成功后面板与状态栏显示同一实际值。
+5. **P0-86 Model 内联窗口与 provider/model/window 原子保存**
+   1. 打开 `/model`，选择 Responses 档位，Tab 进入右栏 `Context window`，Enter 进入内联
+      编辑；分别输入 `0` 与 `128k` 尝试保存，再按 Esc 放弃一次有效输入。
+   2. 重新进入并输入正整数保存；随后改变该档 provider 或 model，确认为新目标输入的
+      window 为空，必须重新输入后才能保存；在保存前按 Esc 核对磁盘未变化。
+   3. 核对 provider/model/window 三项一次落盘，其他档位与 active alias 不变；重启后显示
+      同一组值。对 ChatGPT plan provider 再核对 Max tokens 显示服务器默认，切换该行只提示
+      不写入数值。
+   4. 在 Model 草稿的 Model 行按 Enter 进入任意文本编辑，改写后按 Esc 核对恢复原值；
+      再次改写并按 Enter 确认，界面落到 Save；为新目标重新填写 window 后按 Enter/Ctrl+S，
+      核对三项一次提交。有未保存草稿时按 Ctrl+L，核对只提示先保存或取消、不切换面板；
+      取消草稿后按 Ctrl+L，核对 Login 打开并定向到当前 provider。
+   5. 保持草稿打开并由另一个进程写入产生新 revision 后再保存；核对草稿保留且提示 Ctrl+R；
+      按 Ctrl+R 核对离开草稿并重读权威配置，重新进入后可用新 revision 保存。
+   6. 用鼠标点击右栏 Provider / Model / Effort / Max tokens / Context window 行：核对先聚焦
+      该行，再执行与键盘相同的动作（Responses context 进入内联 editor、model 进入草稿，
+      其他字段沿用即时保存）；滚动右栏后点击可见行仍命中该字段；点击空白、边框、分隔线与
+      滚动条不聚焦、不改字段、不写配置。
+   7. 点击底部 `[Ctrl+L 管理 Provider · 认证：/login]` 按钮，核对与 Ctrl+L 一致：Login
+      打开并定向当前 provider。保留未保存草稿或内联 editor 时点击，核对只提示先保存或
+      取消，面板不切换且草稿/editor 保留。
+   8. 在 window 数值 editor 与 Model 文本 editor 粘贴多行或含控制字符的文本：核对文本不变、
+      可见错误出现，Enter/Ctrl+S 被阻断且磁盘未变；用退格或输入合法字符修正后再次保存，
+      核对成功落盘。
+6. **P0-87 Login ChatGPT 授权 URL、浏览器、复制与取消**
+   1. 在 `/login` 选择 Responses provider 并切换到 `ChatGPT plan`，填写绝对凭据目录与
+      ASCII 账号引用，按 `Sign in to ChatGPT` 进入认证子视图。
+   2. 核对完整授权 URL、本机回调提示和按钮可见；等待期间导航与重绘仍响应，执行
+      `Open browser` 与 `Copy link`，核对成功或失败提示不冒充授权完成。
+   3. 按 Esc 取消等待并返回编辑态，再修改 store/account 并让旧登录结果晚到；核对显示停止
+      等待与状态对账，旧结果不会写入新目标；无法确认时显示结果未知与查询入口，不显示
+      虚假的已登录/已注销。
+7. **P0-88 Login 状态身份、两阶段保存与注销确认**
+   1. 分别构造未登录、已登录、过期与身份不匹配的凭据状态，执行 `Check status`；核对安全
+      身份与 plan 权限可见，身份不匹配时只有显式 `Use this account` 才写入引用。
+   2. 完成一次登录后令 settings 只读再保存 provider；核对“凭据已保存、配置尚未保存”
+      提示，恢复写入后重试保存不重跑 OAuth；失败重试期间 provider 未显示假成功。
+   3. 按 `Sign out` 核对确认框固定 store/account 与共享该引用的 providers，默认焦点为
+      取消；Esc 返回不执行。确认后在远端撤销失败时核对合并提示同时包含“本地已清除、
+      远端未确认”；取消注销等待后本地清理仍完成，provider 配置与整个凭据目录未被删除。
 
 ## P1 补充场景
 

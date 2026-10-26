@@ -318,7 +318,7 @@ async fn logout_in_another_process_fences_an_already_pending_first_login() {
     let directory = tempfile::tempdir().unwrap();
     let store = directory.path().join("credentials");
     let parent = manager(&store, issuer.base.clone());
-    let pending = parent.begin_login().await.unwrap();
+    let pending = parent.begin_login(CancellationToken::new()).await.unwrap();
     let authorize = url::Url::parse(pending.authorization_url()).unwrap();
     let fields: HashMap<_, _> = authorize.query_pairs().into_owned().collect();
     *issuer.nonce.lock().unwrap() = fields["nonce"].clone();

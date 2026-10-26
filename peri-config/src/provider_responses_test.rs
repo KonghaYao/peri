@@ -160,3 +160,83 @@ fn test_missing_responses_api_key_is_an_error_not_a_factory_fallback() {
         Err(ProviderError::MissingApiKey)
     ));
 }
+
+#[test]
+fn provider_level_responses_validation_is_reusable_without_profiles() {
+    let settings = settings();
+    let access = validate_responses_provider(&settings.config.providers[0]).unwrap();
+    assert_eq!(access.endpoint.as_str(), DEFAULT_RESPONSES_URL);
+    assert_eq!(
+        access.auth,
+        ResponsesAuthentication::ApiKey {
+            api_key: "fixture-key".into()
+        }
+    );
+
+    let mut missing_key = settings.config.providers[0].clone();
+    missing_key.api_key.clear();
+    assert!(matches!(
+        validate_responses_provider(&missing_key),
+        Err(ProviderError::MissingApiKey)
+    ));
+
+    let mut bad_endpoint = settings.config.providers[0].clone();
+    bad_endpoint.base_url = "not-a-url".into();
+    assert!(matches!(
+        validate_responses_provider(&bad_endpoint),
+        Err(ProviderError::InvalidEndpoint)
+    ));
+}
+
+#[test]
+fn provider_level_subscription_validation_matches_resolver_contract() {
+    let settings = settings();
+    let mut provider = settings.config.providers[0].clone();
+    provider.api_key.clear();
+    provider.auth = Some(ProviderAuthConfig::ChatGptPlan {
+        store: "/tmp/peri-test-credentials".into(),
+        account: "work".into(),
+        subject: "subject-test".into(),
+        client_id: "issued-client-test".into(),
+    });
+    let access = validate_responses_provider(&provider).unwrap();
+    assert!(matches!(
+        access.auth,
+        ResponsesAuthentication::ChatGptPlan { .. }
+    ));
+
+    let mut relative_store = provider.clone();
+    if let Some(ProviderAuthConfig::ChatGptPlan { store, .. }) = &mut relative_store.auth {
+        *store = "relative/store".into();
+    }
+    assert!(matches!(
+        validate_responses_provider(&relative_store),
+        Err(ProviderError::InvalidSubscriptionReference)
+    ));
+
+    let mut custom_endpoint = provider;
+    custom_endpoint.base_url = "https://example.invalid/v1/responses".into();
+    assert!(matches!(
+        validate_responses_provider(&custom_endpoint),
+        Err(ProviderError::InvalidSubscriptionEndpoint)
+    ));
+}
+
+#[test]
+fn provider_level_validation_does_not_change_profile_capacity_contract() {
+    let mut settings = settings();
+    let access = validate_responses_provider(&settings.config.providers[0]).unwrap();
+    assert_eq!(access.endpoint.as_str(), DEFAULT_RESPONSES_URL);
+
+    // Provider-level validation intentionally ignores profiles; the resolver still owns
+    // the profile capacity requirement.
+    settings.config.profiles.opus.context_window = Some(0);
+    assert!(
+        validate_responses_provider(&settings.config.providers[0]).is_ok(),
+        "provider-level validation has no profile input"
+    );
+    assert!(matches!(
+        try_resolve_for_alias(&settings, "opus"),
+        Err(ProviderError::MissingModelCapacity)
+    ));
+}

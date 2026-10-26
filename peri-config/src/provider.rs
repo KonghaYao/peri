@@ -7,7 +7,7 @@ use url::Url;
 const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-5-5";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-6.1-sol";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
-const DEFAULT_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
+pub const DEFAULT_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResponsesAuthentication {
@@ -40,6 +40,17 @@ pub enum ProviderError {
     UnexpectedAuth,
     #[error("Responses API key mode requires apiKey; choose chatgpt_plan explicitly for subscription authentication")]
     MissingApiKey,
+}
+
+/// Provider-level Responses endpoint and authentication, validated independently of any
+/// profile.
+///
+/// This is the single implementation shared by [`resolve_responses`] and configuration
+/// editors: a Responses provider must be valid even before it owns a profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResponsesProviderAccess {
+    pub endpoint: Url,
+    pub auth: ResponsesAuthentication,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +224,26 @@ fn resolve_responses(
         .filter(|value| *value > 0)
         .filter(|_| !model.trim().is_empty())
         .ok_or(ProviderError::MissingModelCapacity)?;
+    let ResponsesProviderAccess { endpoint, auth } = validate_responses_provider(provider)?;
+    Ok(Some(ResolvedProvider::Responses {
+        auth,
+        endpoint,
+        model,
+        effort: (!profile.effort.is_empty()).then(|| profile.effort.clone()),
+        max_tokens: profile.max_tokens,
+        context_window,
+    }))
+}
+
+/// Validate the endpoint and authentication of a Responses provider without consulting a
+/// profile.
+///
+/// Editors use this to locate provider-field errors before any profile is bound; the
+/// resolver calls it at the same authority boundary so both paths accept exactly the same
+/// configurations. Profile model/capacity remains the caller's responsibility.
+pub fn validate_responses_provider(
+    provider: &ProviderConfig,
+) -> Result<ResponsesProviderAccess, ProviderError> {
     let endpoint = Url::parse(if provider.base_url.is_empty() {
         DEFAULT_RESPONSES_URL
     } else {
@@ -262,14 +293,7 @@ fn resolve_responses(
             }
         }
     };
-    Ok(Some(ResolvedProvider::Responses {
-        auth,
-        endpoint,
-        model,
-        effort: (!profile.effort.is_empty()).then(|| profile.effort.clone()),
-        max_tokens: profile.max_tokens,
-        context_window,
-    }))
+    Ok(ResponsesProviderAccess { endpoint, auth })
 }
 
 fn resolve_profile<'a>(

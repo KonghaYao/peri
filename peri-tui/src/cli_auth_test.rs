@@ -28,7 +28,8 @@ fn test_auth_cli_parses_account_and_explicit_store() {
 
 #[test]
 fn test_auth_store_default_tracks_selected_config_file() {
-    let store = credential_store(Path::new("/tmp/isolated/settings.json"), None).unwrap();
+    let store =
+        credential_store(std::path::Path::new("/tmp/isolated/settings.json"), None).unwrap();
     assert_eq!(store, PathBuf::from("/tmp/isolated/credentials/chatgpt"));
 }
 

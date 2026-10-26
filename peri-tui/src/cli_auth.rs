@@ -1,7 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Args, Subcommand};
+use peri_tui::chatgpt_auth::resolve_credential_store;
 
 #[derive(Subcommand)]
 pub(super) enum AuthCommand {
@@ -32,14 +33,8 @@ pub(super) struct ChatGptOptions {
     account: String,
 }
 
-fn credential_store(config_path: &Path, explicit: Option<PathBuf>) -> Result<PathBuf> {
-    let path = explicit.unwrap_or_else(|| {
-        config_path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join("credentials/chatgpt")
-    });
-    std::path::absolute(path).context("resolve credentials directory")
+fn credential_store(config_path: &std::path::Path, explicit: Option<PathBuf>) -> Result<PathBuf> {
+    resolve_credential_store(config_path, explicit)
 }
 
 pub(super) async fn run(action: AuthCommand, config_path: PathBuf) -> Result<()> {
@@ -62,7 +57,7 @@ pub(super) async fn run(action: AuthCommand, config_path: PathBuf) -> Result<()>
         let manager = ChatGptAuthManager::new(store.clone(), options.account.clone())?;
         match action {
             ChatGptAction::Login(options) => {
-                let pending = manager.begin_login().await?;
+                let pending = manager.begin_login(CancellationToken::new()).await?;
                 eprintln!(
                     "Open this URL in your browser and choose your ChatGPT account:\n{}",
                     pending.authorization_url()
@@ -88,7 +83,7 @@ pub(super) async fn run(action: AuthCommand, config_path: PathBuf) -> Result<()>
                 );
             }
             ChatGptAction::Status(options) => {
-                let status = manager.status().await?;
+                let status = manager.status(CancellationToken::new()).await?;
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&serde_json::json!({

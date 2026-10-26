@@ -4,6 +4,41 @@
 与 [configuration-authority](../design/configuration-authority.md)；配置定义由
 `peri-config/src/app.rs`、`provider.rs` 维护。
 
+## 在 TUI 中配置
+
+常规本机使用不需要手工编辑 settings 或执行 CLI：
+
+1. 打开 `/login`（面板打开时会从配置 authority 重读最新配置），Ctrl+N 新建 provider
+   （或在列表选中已有 Responses provider 后 Enter；编辑已有 provider 时焦点默认在
+   Provider ID）。
+2. 新建时用 Left/Right/Space 选择 `OpenAI Responses`；已有 provider 的类型在编辑态锁定，
+   只有 Enter 打开类型确认、再按 Enter 才改变。
+3. 选择认证方式：`API key` 填写 Base URL 与 Key；`ChatGPT plan` 填写凭据目录与账号引用，
+   再按 `Sign in to ChatGPT` 完成浏览器授权。
+4. 在 `Profile configuration` 子区选择要绑定的档位，填写该档 model 与正整数
+   `Context window (tokens)`；新建 provider 默认只勾选进入表单时的 active 档位。若基线
+   没有任何 provider，四档都会经首 provider 回退，需要为每档填写有效 model 与窗口。
+5. 按 Ctrl+S 或 `Confirm` 保存。字段错误（含多行粘贴被清洗的输入）会阻断保存并只显示
+   对应提示；长草稿使用进入表单时的配置 revision，出现 revision 冲突时按 Ctrl+R 从
+   authority 重读并重新基线化，不会用旧草稿覆盖外部新值，只有该冲突显示重新载入提示。
+6. 也可在 `/model` 右栏选择 `Context window`，按 Enter 内联编辑该档窗口；Responses 的
+   provider/model/window 会作为一个草稿原子保存。Model 草稿的 Model 行按 Enter 进入任意
+   文本编辑，再按 Enter 确认并转到 Save（Esc 恢复原值），最终由 Save/Ctrl+S 提交。
+   底部 `[Ctrl+L 管理 Provider · 认证：/login]` 是按钮，点击与 Ctrl+L 相同：打开 Login
+   并定向编辑当前 provider；有未保存草稿时两者都只提示先保存或取消，草稿保留。
+7. Login Edit 的字段、类型/认证方式/档位/绑定/Confirm，以及 Model 草稿的 Save/Cancel 与
+   内联 window editor 的保存/取消都可用鼠标点击，语义与键盘一致。Model 普通右栏
+   Provider/Model/Effort/Max tokens/Context window 行也可点击：先聚焦该行，再执行与
+   键盘相同的动作（Responses context/model 进入既有 editor/草稿，其他字段沿用即时保存）。
+   空白、边框、分隔线与滚动条不触发动作；右栏滚动后点击可见行仍命中该字段。
+8. Model 的窗口数值 editor 与 Model 文本 editor 是单行字段：换行/控制字符不会写入——
+   按键被拒绝，终端粘贴整段拒绝——保留原文本并显示既有错误，修正前 Enter/Ctrl+S 保存
+   被阻断；窗口字段还拒绝非数字。修正（退格或输入合法字符）后可继续保存。
+
+ChatGPT 登录、状态查询与注销都在 Login 面板内完成，不启动 `peri auth chatgpt` 子进程，
+也不读取或显示 token。登录成功后凭据已保存，但 provider 配置仍需按上一步保存；两者不是
+一个事务。CLI 命令保留给无 TUI、脚本化或排障场景。
+
 ## API key
 
 在选中的 settings 文件中声明 `type: "openai_responses"`。旧 `type: "openai"`
@@ -39,6 +74,8 @@
 profile 的模型、推理强度和窗口。
 
 ## ChatGPT 计划
+
+以下 CLI 命令是无 TUI、脚本化或排障时的替代路径：
 
 ```sh
 peri --config-file /absolute/path/settings.json auth chatgpt login --account work
@@ -79,12 +116,10 @@ state 不会跨绑定重放；可用的通用消息仍按适配器契约处理�
 
 ChatGPT plan profile 不发送 `max_output_tokens` 或 `temperature`；`max_tokens`
 不会成为该模式的服务器输出上限，预算层把它标记为未知。`contextWindow` 仍需明确
-配置。授权、凭据文件、刷新与注销均由原生 credentials MCP 能力负责。当前原生凭据
-存储仅支持 Unix 的 owner-only 文件权限；Windows DACL 尚未实现，会明确返回不支持。
-WASM 不提供原生浏览器登录或凭据文件能力。
+配置。授权、凭据文件、刷新与注销均由原生 credentials MCP 能力负责。
 
-注销先清除本地 grant，并尝试撤销远端授权，输出分别报告两项结果。同一个认证 manager
-可以立即取消其请求；独立 CLI 进程不能立即取消另一进程已经在途的 HTTP，但其后续取
+注销先清除本地 grant，并尝试撤销远端授权，输出分别报告两项结果。同一进程内的认证
+manager 可以取消等待；独立 CLI 进程不能立即取消另一进程已经在途的 HTTP，但其后续取
 token 会失败。
 
 工具名限 1–64 个 ASCII 字符，使用字母、数字、下划线或连字符。Responses opaque state
@@ -92,6 +127,20 @@ token 会失败。
 服务器计费或实际占用上限。包含 opaque state 的工具交换不会进行可能破坏闭包的 Micro
 省略，需要压缩时转用 Full 摘要。
 
-现有 Login 面板能显示与保留 Responses provider；新增 Responses 配置和账户绑定
-使用上述 CLI 与 settings。不要把 access token、refresh token 或 Codex 凭据粘贴进
-`apiKey` 字段。
+TUI 的 Login 面板可完成 Responses provider 创建、API key / ChatGPT plan 认证选择、四档
+model 与 `contextWindow` 配置，以及登录、状态与注销；`/model` 可内联编辑当前档窗口。
+平台与远程环境仍有明确限制：
+
+- 原生凭据存储目前仅支持 Unix；Windows DACL 尚未实现，会返回不支持，API key 模式仍可用。
+  WASM 不提供原生浏览器登录或凭据文件能力。
+- 浏览器授权回调固定在本机 `127.0.0.1` 随机端口，等待上限 600 秒。SSH、容器或其他机器
+  上的 TUI 需要端口转发才能完成回调；仅复制授权 URL 到另一台机器不能保证回调可达。
+- 凭据保存与 provider 配置保存是两阶段：登录成功后凭据已落盘，配置仍可能保存失败；界面
+  会明确提示，重试保存不会重跑 OAuth。取消登录等待只停止本地等待，结果未确认时按未知
+  处理并可再次查询状态。
+- `status` 读取本地凭据与身份绑定，不代表实时 inference 已成功；身份不匹配时必须显式
+  “Use this account” 才写入引用。
+- 注销先清除本地 grant，再尝试远端撤销；远端失败会如实显示“未确认”，本地清理不会因
+  取消等待而跳过。注销不会删除 provider 配置或整个凭据目录。
+
+不要把 access token、refresh token 或 Codex 凭据粘贴进 `apiKey` 字段。

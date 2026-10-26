@@ -9,4 +9,5 @@
 //! - **业务身份由功能层提供**：公共组件不得用列表 index、显示标签替代业务 key。
 //! - 不建设 JSON 驱动的页面解释器，也不建立覆盖所有面板的巨型 action 枚举。
 
+pub(crate) mod context_window;
 pub(crate) mod list;

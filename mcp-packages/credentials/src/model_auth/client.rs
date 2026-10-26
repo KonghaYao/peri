@@ -62,11 +62,8 @@ impl ChatGptAuthManager {
         self
     }
 
-    pub async fn begin_login(&self) -> AuthResult<PendingLogin> {
-        match self
-            .request(Request::BeginLogin, CancellationToken::new())
-            .await?
-        {
+    pub async fn begin_login(&self, cancellation: CancellationToken) -> AuthResult<PendingLogin> {
+        match self.request(Request::BeginLogin, cancellation).await? {
             Response::Pending(value) => Ok(value),
             _ => Err(AuthError::InvalidResponse),
         }
@@ -91,11 +88,11 @@ impl ChatGptAuthManager {
         }
     }
 
-    pub async fn status(&self) -> AuthResult<Option<AccountStatus>> {
-        match self
-            .request(Request::Status, CancellationToken::new())
-            .await?
-        {
+    pub async fn status(
+        &self,
+        cancellation: CancellationToken,
+    ) -> AuthResult<Option<AccountStatus>> {
+        match self.request(Request::Status, cancellation).await? {
             Response::Status(value) => Ok(value),
             _ => Err(AuthError::InvalidResponse),
         }

@@ -3,128 +3,111 @@ use crate::kit::atoms::{
     ACP_CLIENT_HANDLE, NOTIFICATION, Notification, PERI_CONFIG_HANDLE, PROVIDER_LIST,
     ProviderSummary,
 };
-use peri_acp::provider::config::{ProviderConfig, ProviderModels};
+use peri_acp::provider::config::{PeriConfig, ProviderAuthConfig};
 use std::time::Duration;
 
-use super::LoginEditState;
+use super::edit_state::{LoginEditState, LoginError, LoginField};
+use crate::kit::config_service::DraftSaveError;
 
-/// 保存编辑结果：先持久化到磁盘，成功后才发布到 PERI_CONFIG_HANDLE /
-/// PROVIDER_LIST / ACP。返回 `true` 表示保存成功；`false` 表示校验失败、
-/// 配置句柄缺失或持久化失败（不退出编辑，防止"假保存成功"）。
-pub(super) fn save_login_edit(es: &LoginEditState) -> bool {
-    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
-        return false;
-    };
-
-    let is_new = es.original_provider_id.is_empty();
-
-    // 构建 detached 配置快照（在副本上修改，落盘成功前不动全局 handle）
-    let snap = {
-        let mut cfg = handle.write().clone();
-
-        if is_new {
-            // New 路径：校验 provider_id 非空后 push 新 ProviderConfig，自动激活
-            if es.provider_id.trim().is_empty() {
-                *NOTIFICATION.state().write() = Some(Notification {
-                    message: i18n::tr("app-provider-name-empty"),
-                    until: peri_time::monotonic_now() + Duration::from_secs(2),
-                });
-                return false;
-            }
-            let new_config = ProviderConfig {
-                provider_type: es.provider_type.clone(),
-                id: es.provider_id.clone(),
-                api_key: es.api_key.clone(),
-                base_url: es.base_url.clone(),
-                models: ProviderModels {
-                    fable: es.fable_model.clone(),
-                    opus: es.opus_model.clone(),
-                    sonnet: es.sonnet_model.clone(),
-                    haiku: es.haiku_model.clone(),
-                },
-                ..Default::default()
-            };
-            cfg.config.providers.push(new_config);
-            // 激活：写入 active profile 的 provider
-            let alias = cfg.config.active_alias.clone();
-            if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
-                profile.provider = es.provider_id.clone();
-            }
-        } else {
-            // Edit 路径：查找并更新已有 provider
-            if let Some(provider) = cfg
-                .config
-                .providers
-                .iter_mut()
-                .find(|p| p.id == es.original_provider_id)
-            {
-                provider.provider_type = es.provider_type.clone();
-                provider.id = es.provider_id.clone();
-                provider.api_key = es.api_key.clone();
-                provider.base_url = es.base_url.clone();
-                provider.models.fable = es.fable_model.clone();
-                provider.models.opus = es.opus_model.clone();
-                provider.models.sonnet = es.sonnet_model.clone();
-                provider.models.haiku = es.haiku_model.clone();
-
-                // 如果 id 变化且该 provider 是当前激活的，同步更新 active profile 的 provider
-                let active_profile_provider = cfg
-                    .config
-                    .profiles
-                    .get(&cfg.config.active_alias)
-                    .map(|p| p.provider.clone())
-                    .unwrap_or_default();
-                if active_profile_provider == es.original_provider_id
-                    && es.provider_id != es.original_provider_id
-                {
-                    let alias = cfg.config.active_alias.clone();
-                    if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
-                        profile.provider = es.provider_id.clone();
-                    }
-                }
-            }
-        }
-
-        cfg
-    };
-
-    // 先持久化：失败则不发布任何变更（handle / PROVIDER_LIST / ACP 均不动）
-    if !crate::kit::config_service::persist_candidate(&snap) {
+/// 保存编辑结果：构造候选 → 显式 expected revision 落盘 → 只发布 accepted 快照。
+///
+/// 返回 `true` 表示保存成功；`false` 表示校验失败、revision 冲突或持久化失败
+/// （不退出编辑，防止“假保存成功”）。失败时草稿保留，字段错误写入 `inline_error`。
+pub(super) fn save_login_edit(es: &mut LoginEditState) -> bool {
+    // 输入级错误（例如多行粘贴被清洗）没有可重算的来源，错误未清除时不得提交；
+    // 字段校验错误同样保留到用户修正为止。文本编辑、choice 切换与干净粘贴会清除
+    // 错误，因此这里不会形成永久阻断。
+    if let Some(error) = &es.inline_error {
+        notify_validation_error(&error.message);
         return false;
     }
+    // 先做字段定位校验：错误必须在检查配置源之前就能显示（不依赖全局句柄）。
+    let candidate = match es.build_candidate() {
+        Ok(candidate) => candidate,
+        Err(error) => {
+            notify_validation_error(&error.message);
+            es.inline_error = Some(error);
+            return false;
+        }
+    };
+    if PERI_CONFIG_HANDLE.get().is_none() {
+        es.inline_error = Some(LoginError {
+            field: LoginField::Confirm,
+            message: i18n::tr("login-error-authority"),
+            alias: None,
+            kind: super::edit_types::LoginErrorKind::Field,
+        });
+        return false;
+    }
+    let Some(revision) = es.expected_revision else {
+        es.inline_error = Some(LoginError {
+            field: LoginField::Confirm,
+            message: i18n::tr("login-error-authority"),
+            alias: None,
+            kind: super::edit_types::LoginErrorKind::Field,
+        });
+        return false;
+    };
 
-    // 持久化成功后：发布到全局 handle + 刷新 PROVIDER_LIST + 推送 ACP
-    *handle.write() = snap.clone();
-    refresh_provider_list();
+    match crate::kit::config_service::persist_draft(&candidate, revision) {
+        Ok(accepted) => {
+            publish_accepted(accepted);
+            if es.is_new() {
+                tracing::info!(
+                    provider_id = %es.provider_id,
+                    "LoginPanel: new provider created"
+                );
+            } else {
+                tracing::info!(
+                    provider_id = %es.original_provider_id,
+                    "LoginPanel: provider edit saved"
+                );
+            }
+            true
+        }
+        Err(DraftSaveError::Conflict) => {
+            es.inline_error = Some(LoginError::conflict(i18n::tr("config-draft-conflict")));
+            false
+        }
+        Err(DraftSaveError::Failed(_)) => {
+            // 普通保存失败已由 config_service 写入 NOTIFICATION；草稿与焦点保持不变。
+            false
+        }
+    }
+}
 
+fn notify_validation_error(message: &str) {
+    *NOTIFICATION.state().write() = Some(Notification {
+        message: message.to_string(),
+        until: peri_time::monotonic_now() + Duration::from_secs(2),
+    });
+}
+
+/// 发布 authority 接纳后的配置：内存句柄、Provider 投影、ACP 运行端。
+///
+/// ACP 推送失败只提示“已保存但同步失败”，不回滚已落盘配置，也不发布原始 candidate。
+fn publish_accepted(accepted: PeriConfig) {
+    if let Some(handle) = PERI_CONFIG_HANDLE.get() {
+        *handle.write() = accepted.clone();
+    }
+    refresh_provider_list(&accepted);
+    push_config_to_acp(accepted);
+}
+
+fn push_config_to_acp(snapshot: PeriConfig) {
     if let Some(client) = ACP_CLIENT_HANDLE.get() {
         tokio::spawn(async move {
-            if let Err(e) = client.update_config(&snap).await {
-                tracing::warn!(error = %e, "LoginPanel: update_config push failed");
+            if let Err(error) = client.update_config(&snapshot).await {
+                crate::kit::config_service::notify_runtime_sync_failed(&anyhow::anyhow!(
+                    error.to_string()
+                ));
             }
         });
     }
-
-    if is_new {
-        tracing::info!(
-            provider_id = %es.provider_id,
-            "LoginPanel: new provider created"
-        );
-    } else {
-        tracing::info!(
-            provider_id = %es.original_provider_id,
-            "LoginPanel: provider edit saved"
-        );
-    }
-    true
 }
 
-/// 从 PERI_CONFIG_HANDLE 刷新 PROVIDER_LIST atom（避免多处重复 25 行）
-fn refresh_provider_list() {
-    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
-        return;
-    };
-    let cfg = handle.read();
+/// 从给定配置刷新 PROVIDER_LIST atom（发布值必须来自 accepted snapshot）。
+pub(super) fn refresh_provider_list(cfg: &PeriConfig) {
     let active_profile_provider = cfg
         .config
         .profiles
@@ -135,20 +118,13 @@ fn refresh_provider_list() {
         .config
         .providers
         .iter()
-        .map(|p| {
-            let has_api_key = !p.api_key.is_empty();
-            let base_url = if p.base_url.is_empty() {
-                None
-            } else {
-                Some(p.base_url.clone())
-            };
-            ProviderSummary {
-                id: p.id.clone(),
-                provider_type: p.provider_type.clone(),
-                is_active: p.id == active_profile_provider,
-                has_api_key,
-                base_url,
-            }
+        .map(|p| ProviderSummary {
+            id: p.id.clone(),
+            provider_type: p.provider_type.clone(),
+            is_active: p.id == active_profile_provider,
+            has_api_key: !p.api_key.is_empty(),
+            has_chatgpt_plan: matches!(&p.auth, Some(ProviderAuthConfig::ChatGptPlan { .. })),
+            base_url: (!p.base_url.is_empty()).then(|| p.base_url.clone()),
         })
         .collect();
     *PROVIDER_LIST.state().write() = updated_providers;
@@ -187,21 +163,11 @@ pub(super) fn delete_provider(provider_id: &str) {
         }
     };
 
+    // 删除是即时动作：沿用“保存时取最新 revision”的入口语义。
     if !crate::kit::config_service::persist_candidate(&candidate) {
         return;
     }
 
-    *handle.write() = candidate.clone();
-    refresh_provider_list();
-
-    // 推送 ACP
-    if let Some(client) = ACP_CLIENT_HANDLE.get() {
-        tokio::spawn(async move {
-            if let Err(e) = client.update_config(&candidate).await {
-                tracing::warn!(error = %e, "LoginPanel: update_config push failed after delete");
-            }
-        });
-    }
-
+    publish_accepted(candidate);
     tracing::info!(provider_id = %provider_id, "LoginPanel: provider deleted");
 }
