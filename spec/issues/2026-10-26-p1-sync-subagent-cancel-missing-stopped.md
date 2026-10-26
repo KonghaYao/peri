@@ -90,6 +90,9 @@ Stopped。
   - `running_caller_drop_resource_failure_keeps_close_and_claim_unfinished`、
     `test_resume_running_cancelled_by_dispatch_finalizes_claim` 通过。
   - `./scripts/check-changed.sh` 通过；`fmt --check` 通过。
+- PR #292（head `40c246f37`）：macOS / Ubuntu / Windows 构建、CI result 与 CodeRabbit 全部通过。
+  Ubuntu 首次运行失败于无关的 `peri-js-runtime` 生命周期用例（descendant READY 超时），重跑通过。
+- CodeRabbit 指出的事件 drain 失败回退路径已修复：关闭失败时回退 stop handler 不再写终态。
 - 未运行 workspace 全量测试、e2e 与 TUI 手测。
 
 ## 剩余风险
