@@ -11,6 +11,7 @@ import {
   getChatManager,
   shutdownChatManager,
   type AppChatManager,
+  type ChatPlatformConfig,
   type ServerChatOptions,
 } from "./agent";
 import { loadServerConfig, publicServerInfo, type ServerConfig } from "./config";
@@ -27,8 +28,16 @@ export interface RunningServer {
   manager: AppChatManager;
 }
 
-function createStaticHandler(config: ServerConfig): (request: Request) => Promise<Response> {
-  const root = resolve(config.staticRoot);
+/** HTTP/WS 层真正需要的配置切片；与 Agent 运行配置解耦。 */
+export interface ServerWiring {
+  hostname: string;
+  port: number;
+  staticRoot: string;
+  info: ReturnType<typeof publicServerInfo>;
+}
+
+function createStaticHandler(staticRoot: string): (request: Request) => Promise<Response> {
+  const root = resolve(staticRoot);
   const index = Bun.file(resolve(root, "index.html"));
   return async (request) => {
     const pathname = decodeURIComponent(new URL(request.url).pathname);
@@ -45,7 +54,7 @@ function createStaticHandler(config: ServerConfig): (request: Request) => Promis
 
 /** 组装 HTTP/WS 服务；WASM 宿主仍由首个 Action 懒启动。 */
 export function createServer(
-  config: ServerConfig,
+  wiring: ServerWiring,
   manager: AppChatManager,
 ): Server<SyncSocketData> {
   const logError = (
@@ -53,11 +62,11 @@ export function createServer(
     error: unknown,
     context?: Record<string, unknown>,
   ): void => console.error(`[peri-cf] ${label}`, context ?? {}, error);
-  const app = createApi({ manager, info: publicServerInfo(config), logError });
-  const serveStatic = createStaticHandler(config);
+  const app = createApi({ manager, info: wiring.info, logError });
+  const serveStatic = createStaticHandler(wiring.staticRoot);
   return Bun.serve<SyncSocketData>({
-    hostname: config.hostname,
-    port: config.port,
+    hostname: wiring.hostname,
+    port: wiring.port,
     async fetch(request, server) {
       const path = new URL(request.url).pathname;
       if (SYNC_PATH_PATTERN.test(path)) {
@@ -75,13 +84,24 @@ export function createServer(
   });
 }
 
+/** 启动入口是唯一知道完整 ServerConfig 的地方；Chat 平台只接收运行切片。 */
+function chatPlatformConfig(config: ServerConfig): ChatPlatformConfig {
+  const { machineId, model, storage, mcpServers, wasmModuleUrl } = config;
+  return { machineId, model, storage, mcpServers, wasmModuleUrl };
+}
+
 /** 进程级入口：先取得单例 Manager，再启动服务。 */
 export function startServer(
   config: ServerConfig,
   options: ServerChatOptions = {},
 ): RunningServer {
-  const manager = getChatManager(config, options);
-  const server = createServer(config, manager);
+  const manager = getChatManager(chatPlatformConfig(config), options);
+  const server = createServer({
+    hostname: config.hostname,
+    port: config.port,
+    staticRoot: config.staticRoot,
+    info: publicServerInfo(config),
+  }, manager);
   return { server, manager };
 }
 

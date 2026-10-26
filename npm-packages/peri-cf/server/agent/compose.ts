@@ -17,7 +17,9 @@ import {
   SESSION_CWD,
   WORKSPACE_CWD,
   mcpServerDefaults,
-  type ServerConfig,
+  type ServerMcpServer,
+  type ServerModelConfig,
+  type ServerStorageConfig,
 } from "../config";
 import { createChatDatabase } from "../store";
 import { SYSTEM_INSTRUCTIONS } from "../system-instructions";
@@ -49,6 +51,15 @@ export interface SdkChatManagerOptions {
   readonly chatConfig?: Partial<Pick<ChatConfig, "runtime" | "lifecycle">>;
   readonly instanceFactory?: ChatInstanceFactory;
   readonly logError?: LogError;
+}
+
+/** Chat 平台运行所需的窄配置；由启动入口从 `ServerConfig` 分解。 */
+export interface ChatPlatformConfig {
+  machineId: string;
+  model: ServerModelConfig;
+  storage: ServerStorageConfig;
+  mcpServers: ServerMcpServer[];
+  wasmModuleUrl: string;
 }
 
 const DEFAULT_MODEL_ALIAS = "sonnet";
@@ -89,7 +100,7 @@ function wasmEnvironment(
 }
 
 /** 与宿主 `configJson` 的形状一致；模型与存储直连上游，凭据只存在于服务端进程。 */
-function harnessConfig(config: ServerConfig): Record<string, unknown> {
+function harnessConfig(config: ChatPlatformConfig): Record<string, unknown> {
   return {
     cwd: WORKSPACE_CWD,
     machineId: config.machineId,
@@ -118,7 +129,7 @@ function harnessConfig(config: ServerConfig): Record<string, unknown> {
   };
 }
 
-function defaultRuntime(config: ServerConfig, logError: LogError): ChatRuntime {
+function defaultRuntime(config: ChatPlatformConfig, logError: LogError): ChatRuntime {
   return {
     kind: "wasm",
     moduleUrl: config.wasmModuleUrl,
@@ -132,7 +143,7 @@ function defaultRuntime(config: ServerConfig, logError: LogError): ChatRuntime {
   };
 }
 
-function defaultChatDefaults(config: ServerConfig): ChatDefaults {
+function defaultChatDefaults(config: ChatPlatformConfig): ChatDefaults {
   return {
     path: SESSION_CWD,
     instructions: SYSTEM_INSTRUCTIONS,
@@ -146,13 +157,13 @@ function consoleLogError(label: string, error: unknown, context?: Record<string,
 
 /** 装配 SDK 默认实现；测试与其它宿主通过 `SdkChatManagerOptions` 替换平台 seam。 */
 export function createSdkChatManager(
-  config: ServerConfig,
+  config: ChatPlatformConfig,
   options: SdkChatManagerOptions = {},
 ): ChatManager {
   const logError = options.logError ?? consoleLogError;
   return new ChatManager({
     agentConfig: harnessConfig(config),
-    database: options.database ?? createChatDatabase(config),
+    database: options.database ?? createChatDatabase(config.storage),
     sessionOwnershipKv: options.sessionOwnershipKv ?? new MemoryKV(),
     chatConfig: {
       runtime: options.chatConfig?.runtime ?? defaultRuntime(config, logError),

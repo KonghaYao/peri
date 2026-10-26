@@ -5,7 +5,7 @@ import type {
   SessionSummary,
 } from "@peri-code/sdk";
 import { TursoStorage } from "@peri-code/sdk";
-import { SESSION_CWD, WORKSPACE_CWD, type ServerConfig } from "./config";
+import { SESSION_CWD, WORKSPACE_CWD, type ServerStorageConfig } from "./config";
 
 /**
  * 服务端只读会话目录：数据库事实 → `ChatDatabase`。
@@ -108,10 +108,10 @@ export class TursoChatDatabase implements ChatDatabase {
 }
 
 /** 生产装配：缺表容忍只包裹固定目录查询，其它错误继续上抛。 */
-export function createChatDatabase(config: ServerConfig): ChatDatabase {
-  const storage = emptyStoreTolerant(new TursoStorage({
-    url: config.storage.url,
-    authToken: config.storage.authToken,
+export function createChatDatabase(storage: ServerStorageConfig): ChatDatabase {
+  const store = emptyStoreTolerant(new TursoStorage({
+    url: storage.url,
+    authToken: storage.authToken,
   }));
-  return new TursoChatDatabase(storage);
+  return new TursoChatDatabase(store);
 }

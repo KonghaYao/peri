@@ -10,16 +10,14 @@ import {
   type ChatSessionDirectoryEntry,
   type ChatYjsChannel,
 } from "@peri-code/sdk";
-import type { ServerConfig } from "../config";
 import {
   AppChatManager,
   getChatManager,
   shutdownChatManager,
+  type ChatPlatformConfig,
 } from "./index";
 
-const config: ServerConfig = {
-  hostname: "127.0.0.1",
-  port: 8787,
+const config: ChatPlatformConfig = {
   machineId: "11111111-1111-4111-8111-111111111111",
   model: {
     provider: "openai",
@@ -30,7 +28,6 @@ const config: ServerConfig = {
   storage: { url: "https://store.example.com", authToken: "store-secret" },
   mcpServers: [],
   wasmModuleUrl: "file:///tmp/peri-wasm.js",
-  staticRoot: "/tmp/peri-cf-dist",
 };
 
 const TARGET: ChatBindingTarget = {

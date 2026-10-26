@@ -13,6 +13,7 @@ export {
 export {
   createSdkChatManager,
   type ChatInstanceFactory,
+  type ChatPlatformConfig,
   type LogError,
   type SdkChatManagerOptions,
 } from "./compose";

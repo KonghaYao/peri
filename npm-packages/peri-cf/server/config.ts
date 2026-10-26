@@ -234,7 +234,7 @@ export function loadServerConfig(
  * 每次调用返回独立对象；服务端配置仍是唯一来源，ChatManager 只在构造时快照默认值。
  */
 export function mcpServerDefaults(
-  config: ServerConfig,
+  config: Pick<ServerConfig, "mcpServers">,
 ): Record<string, AcpMcpServer> {
   return Object.fromEntries(config.mcpServers.map((server) => [server.name, {
     type: "http" as const,
@@ -245,8 +245,10 @@ export function mcpServerDefaults(
   }]));
 }
 
+export type PublicServerInfoSource = Pick<ServerConfig, "model" | "storage" | "mcpServers">;
+
 /** 不暴露 token / query / userinfo 的配置摘要，供前端设置页只读展示。 */
-export function publicServerInfo(config: ServerConfig) {
+export function publicServerInfo(config: PublicServerInfoSource) {
   const origin = (raw: string) => {
     try {
       const url = new URL(raw);

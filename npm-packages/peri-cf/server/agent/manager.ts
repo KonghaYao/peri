@@ -5,8 +5,7 @@ import {
   type ChatServiceContract,
   type ChatSessionDirectoryEntry,
 } from "@peri-code/sdk";
-import type { ServerConfig } from "../config";
-import { createSdkChatManager, type SdkChatManagerOptions } from "./compose";
+import { createSdkChatManager, type ChatPlatformConfig, type SdkChatManagerOptions } from "./compose";
 
 /**
  * 服务端编排层：注入的 `ChatManagerContract` + 宿主的 `ChatViewRegistry`。
@@ -115,7 +114,7 @@ export interface ServerChatOptions extends SdkChatManagerOptions {
  * 隔离，生产入口只在 `server/index.ts` 调用。
  */
 export function getChatManager(
-  config: ServerConfig,
+  config: ChatPlatformConfig,
   options: ServerChatOptions = {},
 ): AppChatManager {
   processManager ??= new AppChatManager({

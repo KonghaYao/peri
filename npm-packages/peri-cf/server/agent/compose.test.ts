@@ -13,14 +13,15 @@ import { DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS } from "@peri-code/sdk/wasm";
 import {
   SESSION_CWD,
   WORKSPACE_CWD,
-  type ServerConfig,
 } from "../config";
 import { SYSTEM_INSTRUCTIONS } from "../system-instructions";
-import { createSdkChatManager, type ChatInstanceFactory } from "./index";
+import {
+  createSdkChatManager,
+  type ChatInstanceFactory,
+  type ChatPlatformConfig,
+} from "./index";
 
-const config: ServerConfig = {
-  hostname: "127.0.0.1",
-  port: 8787,
+const config: ChatPlatformConfig = {
   machineId: "11111111-1111-4111-8111-111111111111",
   model: {
     provider: "openai",
@@ -35,7 +36,6 @@ const config: ServerConfig = {
     headers: [{ name: "Authorization", value: "Bearer mcp-token" }],
   }],
   wasmModuleUrl: "file:///tmp/peri-wasm.js",
-  staticRoot: "/tmp/peri-cf-dist",
 };
 
 const transportRuntime: ChatRuntime = {

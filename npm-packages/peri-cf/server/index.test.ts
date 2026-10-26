@@ -4,8 +4,8 @@ import {
   type ChatDatabase,
   type ChatSessionDirectoryEntry,
 } from "@peri-code/sdk";
-import type { ServerConfig } from "./config";
-import { AppChatManager, createSdkChatManager } from "./agent";
+import { publicServerInfo, type ServerConfig } from "./config";
+import { AppChatManager, createSdkChatManager, type ChatPlatformConfig } from "./agent";
 import { createServer } from ".";
 
 const config: ServerConfig = {
@@ -22,6 +22,14 @@ const config: ServerConfig = {
   mcpServers: [],
   wasmModuleUrl: "file:///tmp/peri-wasm.js",
   staticRoot: "/tmp/peri-cf-missing-static",
+};
+
+const platform: ChatPlatformConfig = {
+  machineId: config.machineId,
+  model: config.model,
+  storage: config.storage,
+  mcpServers: config.mcpServers,
+  wasmModuleUrl: config.wasmModuleUrl,
 };
 
 const directory: ChatSessionDirectoryEntry = {
@@ -42,7 +50,7 @@ describe("server wiring", () => {
   test("HTTP、目录与 WS 410 路由在同一服务中工作", async () => {
     // 测试只装配 transport 宿主；不启动 WASM。
     const manager = new AppChatManager({
-      chats: createSdkChatManager(config, {
+      chats: createSdkChatManager(platform, {
         database,
         sessionOwnershipKv: new MemoryKV(),
         chatConfig: {
@@ -53,7 +61,12 @@ describe("server wiring", () => {
         },
       }),
     });
-    const server = createServer(config, manager);
+    const server = createServer({
+      hostname: config.hostname,
+      port: config.port,
+      staticRoot: config.staticRoot,
+      info: publicServerInfo(config),
+    }, manager);
     try {
       const info = await fetch(`http://127.0.0.1:${server.port}/api/info`);
       expect(info.status).toBe(200);
