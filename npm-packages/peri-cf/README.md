@@ -54,8 +54,9 @@ HTTP 状态不单独决定重试。加载路径的绑定冲突映射 409 `bindin
 | 变量 | 必填 | 说明 |
 | --- | --- | --- |
 | `PERI_MODEL_PROVIDER` | 否 | `openai`（默认）或 `anthropic` |
-| `PERI_MODEL_ID` | 是 | 模型 ID |
-| `PERI_MODEL_BASE_URL` | 是 | http(s) 上游 |
+| `PERI_MODEL_ID` | 是 | 主模型 ID，同时是四档未单独配置时的回退值 |
+| `PERI_MODEL_ID_FABLE` / `_OPUS` / `_SONNET` / `_HAIKU` | 否 | 各档模型 ID；缺省回退 `PERI_MODEL_ID` |
+| `PERI_MODEL_BASE_URL` | 是 | http(s) 上游；Anthropic 填 `https://api.anthropic.com`，SDK 追加 `/v1/messages` |
 | `PERI_MODEL_API_KEY` | 是 | 模型凭据，只在服务端 |
 | `PERI_STORAGE_URL` | 是 | Turso/libSQL http(s) 地址 |
 | `PERI_STORAGE_TOKEN` | 是 | Store 凭据，只在服务端 |
@@ -67,6 +68,19 @@ HTTP 状态不单独决定重试。加载路径的绑定冲突映射 409 `bindin
 | `LANGFUSE_*` | 否 | 只有此前缀的变量会交给 WASM 实例 |
 
 任何配置解析问题都会拒绝启动并一次性报告缺失项；密钥不进入前端、不写日志。
+
+四档示例（Anthropic 官方端点；实际请求发送到 `https://api.anthropic.com/v1/messages`）：
+
+```bash
+PERI_MODEL_PROVIDER=anthropic
+PERI_MODEL_BASE_URL=https://api.anthropic.com
+PERI_MODEL_API_KEY=...
+PERI_MODEL_ID=claude-sonnet-5-5
+PERI_MODEL_ID_FABLE=claude-fable-5-1
+PERI_MODEL_ID_OPUS=claude-opus-5-5
+PERI_MODEL_ID_SONNET=claude-sonnet-5-5
+PERI_MODEL_ID_HAIKU=claude-haiku-5-5
+```
 
 ## 本地运行
 
@@ -101,7 +115,7 @@ bun run build        # prepare:wasm + Vite；需要 WASM 工具链
 
 ## 部署限制
 
-- 单进程 ownership：默认 `createStorage()`（unstorage memory driver）作为 `sessionOwnershipStorage`，由 `ChatManager` 内部构造协调器；多实例部署必须提供共享 storage 与路由层串行化/崩溃清理；不能宣称跨实例接管。
+- 单进程 ownership：默认 `createStorage()`（unstorage memory driver）作为 `kv`，由 `ChatManager` 内部构造协调器；多实例部署必须提供共享 storage 与路由层串行化/崩溃清理；不能宣称跨实例接管。
 - 进程退出会结束在途执行；历史仍在 Store，可重新加载续聊，但不恢复旧执行。
 - 工具面只保留远程 Streamable HTTP MCP；WASM 部署没有进程内文件/终端 builtin。
 - hosted Workers/DO 路径已删除；Bun 服务是唯一后端入口。没有认证、限流或多租户隔离。

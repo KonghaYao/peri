@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   PayloadReadError,
+  TursoStorage,
   type ChatDatabase,
   type ChatRuntime,
   type ChatSessionDirectoryEntry,
@@ -8,7 +9,6 @@ import {
   type ToolPayloadReadRef,
   type ToolPayloadResponse,
 } from "@peri-code/sdk";
-import { DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS } from "@peri-code/sdk/wasm";
 import {
   SESSION_CWD,
   WORKSPACE_CWD,
@@ -27,7 +27,12 @@ const config: ServerConfig = {
   machineId: "11111111-1111-4111-8111-111111111111",
   model: {
     provider: "openai",
-    id: "gpt-test",
+    tiers: {
+      fable: "gpt-fable-test",
+      opus: "gpt-opus-test",
+      sonnet: "gpt-sonnet-test",
+      haiku: "gpt-haiku-test",
+    },
     baseUrl: "https://api.example.com/v1",
     apiKey: "model-secret",
   },
@@ -206,7 +211,7 @@ describe("createSdkChatManager", () => {
     expect(context.chatId).toBe(chat.id);
     expect(context.path).toBe("/persisted/workspace");
     expect(context.database).toBe(database);
-    expect(context.defaults).toEqual({
+    expect(context.sessionInit).toEqual({
       path: SESSION_CWD,
       instructions: SYSTEM_INSTRUCTIONS,
       mcpServers: {
@@ -268,9 +273,13 @@ describe("createSdkChatManager", () => {
             type: config.model.provider,
             apiKey: config.model.apiKey,
             baseUrl: config.model.baseUrl,
+            models: config.model.tiers,
           }],
           profiles: {
-            sonnet: { provider: "model", model: config.model.id },
+            fable: { provider: "model" },
+            opus: { provider: "model" },
+            sonnet: { provider: "model" },
+            haiku: { provider: "model" },
           },
           meta_harness: expect.objectContaining({
             "01_intro": false,
@@ -286,6 +295,39 @@ describe("createSdkChatManager", () => {
         },
       },
     });
+  });
+
+  test("agentConfig.storage 来自默认 database 实例的纯 JSON storageConfig", async () => {
+    const factory = new FakeFactory();
+    const manager = createSdkChatManager(config, {
+      chatConfig: { runtime: transportRuntime },
+      instanceFactory: factory.create,
+    });
+    try {
+      const chat = manager.createChat();
+      await chat.execute({
+        type: "create_new_session",
+        requestId: "request-storage",
+        payload: {},
+      });
+
+      const context = factory.contexts[0]!;
+      expect(context.database).toBeInstanceOf(TursoStorage);
+      const database = context.database as TursoStorage;
+      const agentStorage = (context.agentConfig as { storage: unknown }).storage;
+
+      expect(agentStorage).toEqual(database.storageConfig);
+      expect(agentStorage).toEqual({
+        url: config.storage.url,
+        authToken: config.storage.authToken,
+      });
+      expect(Object.keys(agentStorage as object).sort()).toEqual(["authToken", "url"]);
+      expect(JSON.parse(JSON.stringify(agentStorage))).toEqual(agentStorage);
+      expect(agentStorage).not.toHaveProperty("legacyCwd");
+      expect(agentStorage).not.toHaveProperty("currentCwd");
+    } finally {
+      await manager.shutdown();
+    }
   });
 
   test("默认宿主只把 LANGFUSE_ 变量交给 WASM，并上报启动诊断", async () => {
@@ -304,8 +346,10 @@ describe("createSdkChatManager", () => {
       if (runtime.kind !== "wasm") throw new Error("expected wasm runtime");
       expect(runtime.moduleUrl).toBe(config.wasmModuleUrl);
       expect(runtime.env).toEqual({ LANGFUSE_TRACING: "true" });
-      expect(runtime.cleanupTimeoutMs).toBe(DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS);
-      expect(runtime.ports?.scheduler).toBeDefined();
+      expect(factory.contexts[0]!.lifecycle).toMatchObject({
+        activationCloseTimeoutMs: 25_000,
+        shutdownChatTimeoutMs: 30_000,
+      });
 
       const diagnostic = new Error("runtime startup failed");
       runtime.onDiagnostic?.("startup", diagnostic);
@@ -322,22 +366,26 @@ describe("createSdkChatManager", () => {
     }
   });
 
-  test("生命周期预算默认与 WASM 清理预算对齐，并允许覆盖", async () => {
-    const defaults = assembled();
+  test("生命周期预算按 wasm 运行后端默认解析，并允许覆盖", async () => {
+    const defaults = assembled({ useDefaultRuntime: true });
     defaults.database.entries.set("session-1", entry("session-1"));
     await activate(defaults.manager, "session-1");
     expect(defaults.factory.contexts[0]?.lifecycle).toMatchObject({
       closeDrainTimeoutMs: 3000,
       startupSettleTimeoutMs: 5000,
-      activationCloseTimeoutMs: DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS,
+      activationCloseTimeoutMs: 25_000,
+      shutdownChatTimeoutMs: 30_000,
     });
 
-    const overridden = assembled({ lifecycle: { activationCloseTimeoutMs: 1234 } });
+    const overridden = assembled({
+      useDefaultRuntime: true,
+      lifecycle: { activationCloseTimeoutMs: 1234 },
+    });
     overridden.database.entries.set("session-1", entry("session-1"));
     await activate(overridden.manager, "session-1");
     expect(overridden.factory.contexts[0]?.lifecycle).toMatchObject({
       activationCloseTimeoutMs: 1234,
-      shutdownChatTimeoutMs: DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS + 10_000,
+      shutdownChatTimeoutMs: 30_000,
     });
   });
 });

@@ -14,7 +14,7 @@ import {
   type AppChatManager,
   type ServerChatOptions,
 } from "./agent";
-import { loadServerConfig, publicServerInfo, type ServerConfig } from "./config";
+import { MODEL_TIERS, loadServerConfig, publicServerInfo, type ServerConfig } from "./config";
 
 /**
  * Bun 长驻服务：`/api/*` 由会话服务处理，`/api/chats/:chatId/sync` 升级为只读
@@ -112,7 +112,8 @@ function startFromEnvironment(): void {
   const { server } = startServer(config);
   console.log(`[peri-cf] server listening on http://${server.hostname}:${server.port}`);
   console.log(
-    `[peri-cf] model=${config.model.provider}/${config.model.id}`
+    `[peri-cf] model=${config.model.provider}`
+    + ` tiers=${MODEL_TIERS.map((tier) => `${tier}:${config.model.tiers[tier]}`).join(",")}`
     + ` mcp=${config.mcpServers.map((item) => item.name).join(",") || "none"}`,
   );
 

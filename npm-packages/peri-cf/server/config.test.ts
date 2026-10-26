@@ -19,7 +19,11 @@ describe("loadServerConfig", () => {
       hostname: "127.0.0.1",
       port: 8787,
       machineId: BASE.PERI_MACHINE_ID,
-      model: { provider: "openai", id: "gpt-test", apiKey: "model-secret" },
+      model: {
+        provider: "openai",
+        tiers: { fable: "gpt-test", opus: "gpt-test", sonnet: "gpt-test", haiku: "gpt-test" },
+        apiKey: "model-secret",
+      },
       storage: { url: "https://store.example.com", authToken: "store-secret" },
       mcpServers: [],
       wasmModuleUrl: "file:///srv/peri-cf/wasm/generated/peri-wasm.js",

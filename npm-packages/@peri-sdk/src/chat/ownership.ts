@@ -1,4 +1,4 @@
-import type { SessionOwnership, SessionOwnershipStorage } from "./types";
+import type { KvStorage, SessionOwnership } from "./types";
 
 const OWNERSHIP_KEY_PREFIX = "ownership:";
 
@@ -46,7 +46,7 @@ export class KvSessionOwnership implements SessionOwnership {
   private readonly owner = crypto.randomUUID();
   private readonly owned = new Set<string>();
 
-  constructor(private readonly storage: SessionOwnershipStorage) {
+  constructor(private readonly storage: KvStorage) {
     if (
       !storage ||
       typeof storage.getItem !== "function" ||
@@ -107,7 +107,7 @@ export class KvSessionOwnership implements SessionOwnership {
  * 换绑优先让旧实例优雅 release，本函数用于崩溃恢复或强制换绑。
  */
 export async function clearSessionOwnership(
-  storage: SessionOwnershipStorage,
+  storage: KvStorage,
   sessionId: string,
 ): Promise<void> {
   if (!storage || typeof storage.removeItem !== "function") {

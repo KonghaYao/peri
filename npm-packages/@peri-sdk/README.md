@@ -1,163 +1,376 @@
 # @peri-code/sdk
 
-> 边界：SDK 不再包含进程控制。stdio transport、Workspace 进程管理、本机进程停止证明、JSONL dispatcher 与本地 SQLite 存储均已删除，不留 shim、别名或双写。ACP 连接只有一条装配路径：宿主注入 `transportFactory`（WASM 用 `startWasmRuntime`，其他部署注入自有实现）。
+在宿主提供的 ACP transport 上运行 Peri，并给应用一套可读的 Chat 控制面、事实流和只读视图。
 
-Bun SDK for Peri's ACP Host over a host-injected transport. `ChatManager` 同步登记 Chat 句柄；`ChatService.execute()` 在首次绑定动作时通过默认实例工厂装配一次 `PeriInstance`，取得 Session ownership、初始化 ACP，并创建或加载会话。Peri 负责模型执行与会话持久化；SDK 只做控制面、事实与展示契约。
+SDK 不启动或停止 Peri CLI、Workspace 进程，也不提供本地 SQLite 后端。宿主负责提供 transport、持久化 Store，并在路由层保证同一 Session 只落在一个实例上。
 
-主入口公开 `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatViewRegistry`、`ChatYjsChannel`、ownership 公开面 `SessionOwnershipStorage` 与 `clearSessionOwnership`、公开类型与错误；需要替换管理器实现时面向类型导出 `ChatManagerContract`。旧 `Agent`、`ManagedAgents`、`SessionDocs`、`SessionViewStore` 与 `Sandbox` 已删除，不在任何发布入口提供，也不保留 shim、别名或双写。
+下面的接入代码来自 [`peri-cf`](../peri-cf/server/agent/compose.ts) 的真实装配，而不是抽象伪代码。
+
+## 适合什么场景
+
+| 适合 | 不适合 |
+| --- | --- |
+| 在 Bun/Node/浏览器宿主里嵌入 Peri | 用 SDK 启动/停止 Peri CLI |
+| 多个 Chat 句柄、历史加载、取消、交互回答 | 多实例调度、租约或 fencing |
+| 服务端事实流 + 浏览器只读视图 | 由 SDK 管理 Workspace 文件系统 |
+
+## 安装
+
+```bash
+bun add @peri-code/sdk
+# 宿主自己选择具体实现；SDK 不依赖 unstorage
+bun add unstorage
+```
+
+## 快速开始
+
+完整例子按 `peri-cf/server/agent/compose.ts` 的装配顺序展开。`storage` 与 `machineId` 是接入时最容易混淆的两个字段，注释里写明了区别。
 
 ```ts
+import { createStorage } from "unstorage";
 import {
-  ChatManager, ChatUserAction, ChatView, TursoStorage,
-  type ChatDatabase,
-  type SessionOwnershipStorage,
+  BareHarnessConfig, ChatManager, ChatUserAction, ChatViewRegistry, TursoStorage,
+  type PeriConfig, type KvStorage,
 } from "@peri-code/sdk";
 
-const storage = new TursoStorage({ url: "http://127.0.0.1:8081", authToken: "local-dev" });
-const database: ChatDatabase = {
-  listSessions: (path) => storage.getSessions(path ?? "/workspace"),
-  getSession: (id) => storage.getSession(id),
+// 1. Store 连接只声明一次：database 同时提供 SDK 只读目录与 Peri 写侧配置。
+//    本地 sqld 也要求非空 authToken；生产从环境变量或密钥管理读取。
+const store = {
+  url: process.env.PERI_STORAGE_URL ?? "http://127.0.0.1:8081",
+  authToken: process.env.PERI_STORAGE_TOKEN ?? "local-dev",
 };
-// 宿主提供共享存储；Map 只适用于单进程 demo，多实例必须换成 KV/Redis/DO 等。
-const ownershipValues = new Map<string, unknown>();
-const sessionOwnershipStorage: SessionOwnershipStorage = {
-  getItem: async (key) => ownershipValues.get(key) ?? null,
-  setItem: async (key, value) => { ownershipValues.set(key, value); },
-  removeItem: async (key) => { ownershipValues.delete(key); },
+
+// 2. SDK 的会话目录：TursoStorage 直接实现 ChatDatabase（只读）。
+//    agentConfig.storage 使用它的 storageConfig 纯 JSON 快照；写入仍由 Peri 完成。
+const database = new TursoStorage(store);
+
+// 3. Session ownership：只需 getItem/setItem/removeItem。
+//    peri-cf 默认用 unstorage 的进程内 memory storage；
+//    多实例必须换共享 driver，并由路由层保证单实例绑定。
+const kv: KvStorage = createStorage();
+
+// 4. machineId：宿主持久化的 UUID，标识一个逻辑执行环境。
+//    peri-cf 从 PERI_MACHINE_ID 读取并校验 UUID。
+//    不要用 sessionId/workspaceId 代替，也不要每次启动随机生成；
+//    换 machineId 后，旧 Workspace/Session 可能无法按原身份找到。
+const machineId = process.env.PERI_MACHINE_ID ?? "00000000-0000-4000-8000-000000000001";
+
+// 5. PeriConfig：与 peri-cf 一样，模型与 Store 凭据只存在于服务端进程。
+const settings: PeriConfig = {
+  config: {
+    active_alias: "sonnet",
+    providers: [{
+      id: "model",
+      type: "openai",
+      apiKey: process.env.PERI_MODEL_API_KEY!,
+      baseUrl: process.env.PERI_MODEL_BASE_URL!,
+    }],
+    profiles: {
+      sonnet: {
+        provider: "model",
+        model: process.env.PERI_MODEL_ID!,
+      },
+    },
+    // peri-cf 按部署开启需要的 harness；这里只保留最小对话能力。
+    meta_harness: {
+      ...BareHarnessConfig,
+      TodoMiddleware: true,
+      McpMiddleware: true,
+      ToolSearch: true,
+    },
+  },
 };
+
 const manager = new ChatManager({
   agentConfig: {
-    cwd: "/workspace",
-    settings: myPeriConfig,
-    storage: { url: "http://127.0.0.1:8081", authToken: "local-dev" },
-    machineId: "00000000-0000-4000-8000-000000000001",
+    cwd: "/workspace",   // Peri 虚拟工作区的绝对路径身份
+    machineId,
+    storage: database.storageConfig, // 纯 JSON 连接配置；Peri 写侧使用同一 Store
+    settings,
   },
   database,
-  // 调用方注入 3 方法存储端口；SDK 不 import 任何具体实现。
-  sessionOwnershipStorage,
+  kv,
   chatConfig: {
-    runtime: { kind: "wasm", moduleUrl: new URL("./dist/wasm/peri-wasm.js", import.meta.url) },
-    defaults: {
-      path: "/workspace",
+    runtime: {
+      kind: "wasm",
+      moduleUrl: process.env.PERI_WASM_MODULE_URL
+        ?? new URL("./dist/wasm/peri-wasm.js", import.meta.url),
+      // 可选：只把遥测变量交给 WASM 实例，避免服务端凭据扩散到模块环境。
+      // 未配置 Langfuse 时删除整个 env。
+      env: {
+        LANGFUSE_PUBLIC_KEY: process.env.LANGFUSE_PUBLIC_KEY!,
+        LANGFUSE_SECRET_KEY: process.env.LANGFUSE_SECRET_KEY!,
+        LANGFUSE_BASE_URL: process.env.LANGFUSE_BASE_URL ?? "https://cloud.langfuse.com",
+      },
+      onDiagnostic: (kind, error) => console.error("[peri]", kind, error),
+    },
+    sessionInit: {
+      path: "/workspace/", // 会话 cwd；peri-cf 用带尾斜杠的 SESSION_CWD
       instructions: "Help with this workspace.",
+      mcpServers: {},
     },
   },
 });
 
-const chat = manager.createChat({ path: "/workspace" });
+// 6. 每个 Chat 一个共享 View；同 Chat 的所有同步连接复用它。
+const views = new ChatViewRegistry();
+const chat = manager.createChat({ path: "/workspace/" });
+
+// 首次 execute 才绑定 Session。
 const ready = await chat.execute(ChatUserAction.createNewSession({}));
-const view = new ChatView(chat);
+console.log(ready.sessionId);
 
+// accepted 表示输入已入队，不表示 Peri 已执行完成。
 const receipt = chat.execute(ChatUserAction.send({ text: "Inspect the repository" }));
-await receipt; // 等待本次输入被投递；accepted 只表示已入队。
-console.log(receipt.inputId, receipt.isSent);
+await receipt.accepted;
+console.log(receipt.inputId);
 
-await chat.execute(ChatUserAction.cancel({}));
-await view.dispose();
-await chat.close();
+// 加载历史会话。
+await chat.execute(ChatUserAction.changeSessionTo(ready.sessionId));
+
+// 服务端把 Yjs 同步帧写到 WebSocket 或其它二进制通道。
+const view = views.attach(chat);
+view.sync(channel); // channel: ChatYjsChannel
+
+// 关闭：先关 Chat，再释放 View。
+await manager.closeChat(chat.id);
+await views.dispose(chat.id);
+
+// 进程退出：先释放所有 View，再让 Manager 聚合关闭。
+await views.disposeAll();
 await manager.shutdown();
 ```
 
-`execute` 只接受 `ChatUserAction` 的八类动作：`create_new_session`、`change_session`、`send`、`force_send`、`take_back`、`load_earlier_history`、`cancel`、`answer`。传入普通 wire 对象时先经 `parseChatUserAction` 校验；Manager 不接收 `execute`。执行调度属于 Peri：SDK 只发布输入，不实现 dispatcher、工作查询或准入票据。
+## 四个必填输入
 
-`ChatManagerOptions.chatConfig.runtime` 有两种装配：
+| 选项 | 作用 | 消费者 |
+| --- | --- | --- |
+| `agentConfig` | Peri 启动配置：`cwd`、`settings`、`storage`、`machineId` | Peri 运行时 |
+| `database` | 会话目录读取：`listSessions`、`getSession` | `ChatManager` |
+| `kv` | Session 绑定记录，3 个 KV 方法 | `ChatManager` |
+| `chatConfig` | 运行后端、Session 建立输入、生命周期预算 | `ChatManager` |
 
-- `{ kind: "wasm" }`：Manager 为每次激活启动独立 WASM 运行后端，并把 `agentConfig` 序列化为启动配置；可注入 `moduleUrl`、`moduleFactory`、`env`、`ports` 与生命周期回调。
-- `{ kind: "transport", factory }`：由调用方按 `path` 创建 transport；SDK 不启动 Peri 或 Workspace 进程。`factory` 的 `close()` 成功即视为停止证明，失败保留原因供重试。
+### `agentConfig`
 
-宿主如需替换管理器实现或共享视图，面向契约与注册表，而不是具体类：
+纯 JSON，构造 `ChatManager` 时序列化快照；不要放函数或循环引用。Peri 启动对象要求四项齐全（SDK 不校验其内部结构）：
+
+| 字段 | 说明 |
+| --- | --- |
+| `cwd` | Peri 虚拟工作区的绝对路径身份 |
+| `settings` | 整份 `PeriConfig`；替换 Peri 的全局配置 |
+| `storage` | `{ url, authToken }`，Peri 运行时使用的 Store；可由 `database.storageConfig` 提供 |
+| `machineId` | 宿主持久化的 UUID 执行身份 |
+
+`storage` 不是 `database`：
+
+1. `agentConfig.storage` 由 Peri 消费，用来写 Session、消息与运行状态。
+2. `database` 由 SDK 消费，只用来读会话目录；SDK 不调用 ACP `session/list`。
+3. 两者可以指向同一个 libSQL 端点，但契约不同，不能互相替代。
+4. `TursoStorage` 同时提供两者：`database` 传实例，`agentConfig.storage` 传 `database.storageConfig`；默认 database 只构造一次。
+
+`machineId` 不是 Session、Workspace 或 Chat 的标识：
+
+1. 它标识一份可跨实例持续使用的逻辑执行环境，必须由宿主持久化并复用。
+2. 同一次部署重启后应保持不变；换值等于换了一个执行环境。
+3. 一个 WASM 模块实例只承载一个 `machineId`，运行期不能切换。
+4. 本地 demo 的固定 UUID 只用于演示，生产必须从配置或密钥管理读取。
+
+### `database`
 
 ```ts
-import { ChatViewRegistry, type ChatManagerContract } from "@peri-code/sdk";
-
-function createHost(chats: ChatManagerContract) {
-  const views = new ChatViewRegistry(); // 每个 Chat 一个 ChatView，同 Chat 的所有同步连接共享
-  return {
-    chats,
-    views,
-    async shutdown() {
-      await views.disposeAll(); // 先断开同步连接与文档
-      await chats.shutdown();   // 再关闭句柄、在途激活与运行后端
-    },
-  };
+class TursoStorage implements ChatDatabase {
+  constructor(options: {
+    url: string;
+    authToken?: string;
+    legacyCwd?: string;   // 默认 "/workspace"
+    currentCwd?: string;  // 默认 "/workspace/"
+  });
+  get storageConfig(): { url: string; authToken?: string };
+  listSessions(path?: string): Promise<ChatSessionDirectoryEntry[]>;
+  getSession(id: string): Promise<ChatSessionDirectoryEntry | null>;
 }
 ```
 
-`ChatManagerContract` 是 `src/chat/types.ts` 的接口，SDK 的 `ChatManager` 类实现它；`new ChatManager(options)` 只应出现在宿主装配层，测试或其它宿主可以注入自己的实现。`ChatViewRegistry` 只是可选的宿主策略，不是 SDK 不变量：宿主也可以为每条连接各建 `ChatView`，连接数仍由 `ChatView` 管理。两者都从主入口与 `/portable` 导出；`/view` 保持纯浏览器视图面，不导出注册表。
+`TursoStorage` 直接实现 `ChatDatabase`，是 Manager 读取会话目录的唯一入口。显式 `path` 只查该 cwd；省略时串行读取 `legacyCwd` 与 `currentCwd`，同 id 以当前 cwd 为准并按 `updatedAt` 倒序。缺表错误收敛为空目录，其它错误照常抛出。凭证由调用方显式提供，没有本地 SQLite 文件后端、CLI 部署路径或环境变量 token 回退。
 
-`ChatService` 的绑定动作只在空闲时允许换绑；新会话使用句柄/默认 `path`，加载历史用 Store 中的持久 `cwd`，不回退句柄 path。`findChatBySession` 覆盖 binding/cleanup 中的候选；关闭未确认时保留 ownership 与索引供重试。
+`storageConfig` 返回只含 `url` 与 `authToken` 的普通 JSON 对象；`authToken` 未设置时省略该键，也不包含 `legacyCwd`/`currentCwd`。每次读取返回新对象，可直接作为 `agentConfig.storage`。
 
-`ChatManager` 接收 `SessionOwnershipStorage`（`getItem`/`setItem`/`removeItem`）并在内部为每个实例构造 `SessionOwnership` 协调器，owner 是 Manager 内部的随机 UUID：Session ownership key 只含 Session ID（`ownership:<base64url(sessionId)>`），不含 path 或 Chat ID。unstorage 的 `Storage` 结构化满足该端口；SDK 不 import unstorage，也不做过期判断。记录写入与检查读后写非原子，KV 记录是绑定标记/防御路由 bug，不是互斥原语：同一 Session 的单实例绑定必须由路由层串行化保证，SDK 只负责顺序冲突检测。加载路径的绑定冲突抛 `SessionBindingConflictError`，且不会启动 transport；加载路径的 KV 读/写失败抛 `ChatActionError`（code `claim_failed`，CF 映射 500），新会话 claim 阶段失败（本地/KV 冲突或 KV 读/写失败）会启动并关闭临时 transport，抛 `session_creation_failed`（stage `claim`，CF 映射 500）。没有通用 503 ownership 错误码。无 TTL：崩溃遗留记录需要路由层调用 `clearSessionOwnership(storage, sessionId)` 清理；只能在旧实例已停止或已被 fence 后调用，否则可能造成双控制者。`LocalSessionIndex` 仍负责同一 Manager 内两个 Chat 句柄的同步互斥。Session ownership 的公开面只有 `SessionOwnershipStorage`（type）与 `clearSessionOwnership`（function）；`SessionOwnership`/`KvSessionOwnership`/`SessionOwnershipConflictError` 是内部实现，不从主入口、`/portable` 或 `/view` 导出。
+### `kv`
 
-关闭是有预算的所有权事务：`ChatLifecycleOptions` 提供 `closeDrainTimeoutMs`、`startupSettleTimeoutMs`、`activationCloseTimeoutMs`、`shutdownChatTimeoutMs`。`session/close` 在预算内重放；超时返回 `ChatCloseIncompleteError`，保留 ownership、索引与资源，不产生 `closed` 事实。`manager.shutdown()` 先封闭新准入，再聚合清理；可重试。
+```ts
+interface KvStorage {
+  getItem(key: string): Promise<unknown>;
+  setItem(key: string, value: unknown): Promise<void>;
+  removeItem(key: string): Promise<void>;
+}
+```
+
+`ChatManager` 用它记录“这个 Session 当前由哪个 Manager 持有”。记录 key 为 `ownership:<base64url(sessionId)>`，value 为 `{ sessionId, owner }`。
+
+1. 只做读后写，非原子；记录是绑定标记，不是互斥原语。
+2. 同一 Session 的单实例绑定由路由层串行化保证；SDK 只做顺序冲突检测。
+3. 没有 TTL、续租或心跳；崩溃遗留记录由路由层在旧实例停止后调用 `clearSessionOwnership(storage, sessionId)` 清理。
+4. 公开面只有 `KvStorage` 与 `clearSessionOwnership`；`SessionOwnership` 等协调器是内部实现。
+5. 错误映射：加载路径冲突 → 409 `binding_conflict`；加载路径 KV 故障 → 500 `claim_failed`；新会话 claim 失败 → 500 `session_creation_failed`（stage `claim`）。没有 ownership 专用的 503。
+
+`unstorage` 的 `Storage` 结构化满足这个端口；SDK 不 import unstorage，具体实现由宿主安装。`createStorage()` 默认是进程内 memory storage，只适合单进程；多实例必须换共享 driver。
+
+### `chatConfig`
+
+| 字段 | 说明 |
+| --- | --- |
+| `runtime` | 必填。`{ kind: "wasm" }` 在进程内启动 WASM 模块；`{ kind: "transport", factory }` 由宿主按 path 创建 transport |
+| `sessionInit` | `path`、`instructions`、`mcpServers` |
+| `lifecycle` | `closeDrainTimeoutMs`、`startupSettleTimeoutMs`、`activationCloseTimeoutMs`、`shutdownChatTimeoutMs` |
+
+`runtime.kind="wasm"` 时，Manager 为每次激活启动独立 WASM 运行后端，并把 `agentConfig` 序列化为启动配置；可注入 `moduleUrl`、`moduleFactory`、`env` 与 `onDiagnostic`。scheduler 与清理/启动超时由 SDK 内部管理，用户不可配置。`lifecycle` 未显式给出时按 runtime kind 取默认值：wasm 为 activation 25s、shutdown 30s；transport 为 5s、15s。
+
+`runtime.kind="transport"` 时，SDK 不启动 Peri 或 Workspace 进程；`factory` 的 `close()` 成功即视为停止证明，失败保留原因供重试。
+
+## 核心概念
+
+1. **Chat 句柄**：`manager.createChat()` 同步登记，不启动 ACP、不取得 ownership、不读历史。
+2. **Session**：Peri 持久化的会话；只有首次绑定动作才会创建或加载。
+3. **绑定**：`create_new_session` 使用句柄 path 或 `sessionInit.path`；`change_session` 使用 Store 中的持久 cwd，不回退句柄 path。
+4. **ownership**：同一 Session 同时至多一个执行所有者；只在清理确认后释放，关闭超时或失败时保留。
+5. **事实与 View**：`ChatService` 发布 `ChatFact`；`ChatView` 重放事实并维护只读 Y.Doc。View 不执行动作、不决定权限、不取消任务。
+
+## 常用操作
+
+`execute` 只接受 `ChatUserAction` 的八类动作；推荐用工厂方法构造：
+
+| 动作 | 工厂方法 | 用途 |
+| --- | --- | --- |
+| `create_new_session` | `ChatUserAction.createNewSession({ title? })` | 创建并绑定新 Session |
+| `change_session` | `ChatUserAction.changeSessionTo(sessionId)` | 加载已有 Session |
+| `send` | `ChatUserAction.send({ text })` | 发送输入；`accepted` 只表示已入队 |
+| `force_send` | `ChatUserAction.forceSend(inputId)` | 立即派发队列中的输入 |
+| `take_back` | `ChatUserAction.takeBack(inputId)` | 撤回队列中的输入 |
+| `load_earlier_history` | `ChatUserAction.loadEarlierHistory({ limit? })` | 向前加载历史 |
+| `cancel` | `ChatUserAction.cancel()` | 取消当前执行 |
+| `answer` | `ChatUserAction.answer({ interactionId, answer })` | 回答待决交互 |
+
+`ChatUserAction.send()` 返回 `SendReceipt`：`accepted` 表示已入队，不是执行完成。`create_new_session` 与 `change_session` 返回 `SessionReadyResult`，包含 `chatId`、`sessionId`、`bindingRevision`。
+
+传入普通 wire 对象时先经 `parseChatUserAction` 校验。Manager 不接收 `execute`；执行调度属于 Peri。`peri-cf` 的 HTTP 层还会用 `chat.binding` 与 `bindingRevision` 拒绝过期连接的动作。
 
 ## 展示与同步
 
-`ChatView` 消费 `ChatFact` 并维护一对 Y.Doc；晚挂 View 由事实日志重放重建。View 只读事实：不执行动作、不决定权限、不取消任务、不关闭运行后端。
-
 ```ts
-const view = new ChatView(chat);
+import { ChatReplica } from "@peri-code/sdk/view";
 
-// 服务端：把 Yjs 同步帧写到 WebSocket（或其它二进制通道）。
-const connection = view.sync(channel); // channel: ChatYjsChannel
+const views = new ChatViewRegistry();
+const view = views.attach(chat);          // 同 Chat 复用同一个 View
+view.sync(channel);                       // channel: ChatYjsChannel
 
 // 浏览器：ChatReplica 收 HELLO/SNAPSHOT/UPDATE/ACK，提供只读 SessionView。
-import { ChatReplica } from "@peri-code/sdk/view";
 const replica = new ChatReplica();
 replica.connect(channel);
 const unsubscribe = replica.subscribe(() => render(replica.read()));
 await replica.dispose();
 ```
 
-`ChatYjsChannel` 只约定帧收发与关闭，不创建物理连接；鉴权与传输由应用负责。`ChatReplica.read()` 返回 `SessionView`：`readiness`（`not-ready`/`ready`/`unsupported`）、完整 entries/blocks/tools/turns/tasks/plans、session info、input queue、interaction 记录与 `pendingInteractions`。未知块与孤立工具引用显式标记为 `unknown`/`unavailable`，不静默丢弃。`readSessionView` 与 `readPayload` 从 `/view` 导出；`SessionViewStore` 和按身份选择器（`selectEntry`、`selectToolCall`、`selectTurn`、`selectPlanForTurn`、`selectPendingInteractions`）已删除，消费方直接读取 `SessionView` 的数组，或按 id 自建索引；流式通知用 `ChatReplica.subscribe()`。
+`ChatYjsChannel` 只约定帧收发与关闭，不创建物理连接；鉴权与传输由应用负责。`ChatReplica.read()` 返回 `SessionView`，包含 readiness、entries/blocks/tools/turns/tasks/plans、session info、输入队列、交互记录与 `pendingInteractions`。未知块与孤立工具引用显式标记为 `unknown`/`unavailable`，不静默丢弃。
 
-`readPayload(ref, reader, { signal, maxBytes })` 校验返回 id、UTF-8 字节数与 JSON；`ChatService.readPayload({id, bytes})` 直接读取当前激活的载荷仓库，错误码为 `unauthorized`、`unavailable`、`too_large`、`integrity_error`、`aborted`、`transport_error`。引用字节数与存储不一致或非法 JSON 属于 `integrity_error`，不是 `unavailable`。默认单次展示上限 1 MiB；`limitPayloadReads` 默认并发 2。
+`readSessionView` 与 `readPayload` 从 `/view` 导出。`SessionViewStore` 和按身份选择器已删除；消费方直接读取 `SessionView` 的数组，或按 id 自建索引。
 
-载荷预算仍是投影级默认值（待设计评审确认）：inline JSON ≤4096 字节留在文档；更大的值或超出会话 inline 预算（1 MiB）后变成 `{id,bytes,preview}`（preview 512 字符），全文留在运行侧；单次外置 >8 MiB 或超过会话外置预算 32 MiB 时拒绝，工具卡保留上一个可读版本并显示公开 `payload_too_large`。
+`readPayload(ref, reader, { signal, maxBytes })` 校验返回 id、UTF-8 字节数与 JSON；`ChatService.readPayload({id, bytes})` 直接读取当前激活的载荷仓库，错误码为 `unauthorized`、`unavailable`、`too_large`、`integrity_error`、`aborted`、`transport_error`。默认单次展示上限 1 MiB；`limitPayloadReads` 默认并发 2。
 
 ## MCP over ACP
 
-`chatConfig.defaults.mcpServers` 支持 `http`、`stdio` 与 `acp` 声明。`acp` 声明只序列化 `{type:"acp", name, serverId}`，Peri 的反向 `mcp/message` 由 SDK 桥接到官方 server 实例；`serverId` 缺省使用 Record key。
+`chatConfig.sessionInit.mcpServers` 支持 `http`、`stdio` 与 `acp` 声明。`acp` 声明只序列化 `{type:"acp", name, serverId}`，Peri 的反向 `mcp/message` 由 SDK 桥接到官方 server 实例；`serverId` 缺省使用 Record key。
 
-直接实例是调用方借用的单次使用实例：bridge 关闭后保留绑定，不能安全重连。跨 reload 或多个 Chat 使用时必须提供工厂：
+### 配合官方 McpServer
+
+`acp` 声明把应用进程内已有的官方 MCP Server 通过 ACP 反向 `mcp/message` 暴露给 Peri：
 
 ```ts
+import { McpServer } from "@modelcontextprotocol/server";
+
+// 每次激活创建新实例；SDK 负责 connect/close，不要自己连接 stdio/HTTP。
+const createMyMcpServer = () => {
+  const server = new McpServer({ name: "my-tools", version: "1.0.0" });
+  server.registerTool("echo", { description: "Echo text" }, async () => ({
+    content: [{ type: "text", text: "ok" }],
+  }));
+  return server;
+};
+
 chatConfig: {
-  defaults: {
+  sessionInit: {
     mcpServers: {
       "my-tools": {
         type: "acp",
-        // 每次激活解析新实例；由激活拥有并关闭。
-        server: async () => createMyMcpServer(),
+        server: createMyMcpServer,
       },
     },
   },
 }
 ```
 
-工厂返回的实例必须实现 `close()`；解析失败时已创建实例会被关闭。SDK 不依赖官方 MCP 包运行时。
+1. 官方 `McpServer` 负责 tools/resources/prompts；桥接只依赖实例的 `connect(transport)`，不需要适配层，直接把实例或工厂放进 `type:"acp"` 的 `server`。
+2. 不要手动 `connect()`：SDK 在 `session/new|load` 前连接。
+   - 工厂实例由激活拥有，结束时由 SDK `close()`。
+   - 直接传入的实例由调用方持有，SDK 不会关闭它；不再使用时由调用方自行 `close()`。
+3. 直接传实例是单次借用，bridge 关闭后不能安全重连；跨 reload 或多个 Chat 必须用工厂，工厂结果必须有 `close()`（`McpServer` 已提供）。
+4. 边界：ACP 只承载 `{serverId, requestId, method, params}`，不重新定义 MCP；sampling/roots 等 server→client 请求返回 `-32601`。
 
-## 入口与示例
+`@peri-code/sdk` 不自带官方 MCP 包，使用方自行安装：v2 用 `bun add @modelcontextprotocol/server`；v1 单包路径为 `@modelcontextprotocol/sdk/server/mcp.js`，两版都可直接传入。
 
-- 主入口：Chat 控制面、展示契约、config/storage 读取工具。
-- `/view`：浏览器安全展示出口；与主入口共享包内 Yjs 依赖，直接服务浏览器时需要打包该依赖。`ChatViewRegistry` 是宿主共享策略，只在主入口与 `/portable` 导出，不在此入口。
-- `/wasm`：平台无关的 Emscripten ACP 运行后端、loader 与 transport；`/wasm-node` 额外提供 Node-compatible 网络/DNS 端口。
-- `/portable`：不装配 Bun/stdio 进程或本地 SQLite；Chat 控制面 + 执行准入核心。准入摘要仍使用 `node:crypto`，不能宣称纯浏览器支持。
+## 发布入口
 
-`MISE_ENV=wasm mise exec -- bun run build` 构建 `peri-wasm` release 产物，并把 `peri-wasm.js` 与 `peri_wasm.wasm` 放入 `dist/wasm/`。构建依赖 Emscripten 6.0.10；`mise exec` 会注入 `EMSDK`，直接 `bun run build` 在仅有 mise shim 的环境会把 shim 路径当作工具链并失败。工具链不满足时构建失败，不能用旧 `dist` 冒充。默认 [demo.ts](examples/demo/demo.ts) 使用 `runtime.kind="wasm"`；[demo-wasm.ts](examples/demo/demo-wasm.ts) 使用 `runtime.kind="transport"` 注入 `WasmAcpTransport`。两者都通过 `ChatView` + 二进制同步帧驱动浏览器 `ChatReplica`；示例用 SSE 适配器承载逻辑帧，生产消费端使用 WebSocket。
+| 入口 | 源码 | 内容 |
+| --- | --- | --- |
+| `@peri-code/sdk` | `src/entries/index.ts` | Chat 控制面、展示契约、config/storage 读取工具 |
+| `@peri-code/sdk/view` | `src/entries/view.ts` | 浏览器安全展示出口；需要打包包内 Yjs 依赖 |
+| `@peri-code/sdk/wasm` | `src/entries/wasm.ts` | 平台无关的 Emscripten ACP 运行后端、loader 与 transport |
+| `@peri-code/sdk/wasm-node` | `src/entries/wasm-node.ts` | `/wasm` 加 Node 兼容的网络/DNS 端口 |
+| `@peri-code/sdk/portable` | `src/entries/portable.ts` | 不装配 Bun/stdio 进程或本地 SQLite；Chat 控制面 + 执行准入核心 |
 
-## Durable Execution Admission
+`src/entries/chat.ts` 是主入口与 `/portable` 共用的 Chat 门面，不对应独立包 subpath。`ChatViewRegistry` 只在主入口与 `/portable` 导出，`/view` 保持纯浏览器视图面。
 
-`/portable` 额外公开可自行驱动的准入核心。SDK Chat 不使用它：输入发布是 ACP 队列命令，调度由 Peri mailbox 决定，因此没有 SDK 侧票据、dispatcher generation 或反向准入端点。
+## 源码结构
 
-`KvExecutionRegistry` 包装 `AtomicExecutionKv` 提供 durable read/CAS apply/resolve；适配器必须实现 `readExecutionValue` 与 `compareAndSetExecutionValue`。`MemoryExecutionKv` 是单进程 `bestEffort` 实现，需要协调器显式用 `allowBestEffort` 选择。注册表写入与回执原子；解析不存在的原始 mutation 会把 NotApplied 封印，防止迟到执行。durable backend、账本与停止证明由嵌入方注入；SDK 不提供本地数据库文件，也不提供基于进程的停止证明。
+`src/` 按依赖方向分层，发布入口集中在 `src/entries/`：
 
-票据绑定精确的 session、instance/generation、lifecycle/control generation、稳定 work/revision 与 `{turnId, attemptId}`。持久 attempt 经过 queued/entering/running；pause/control 变化使未进入的 work 失效，execution entry 重新校验资格。重放原始准入不会再次消耗稳定 work 预算；未知执行入口只解析原始票据，绝不盲目签发第二次执行。预算跨实例替换保留；缺失停止证明返回 Blocked，不做 lease/TTL 接管。
+| 目录 | 职责 |
+| --- | --- |
+| `src/contracts/` | ACP、Chat 事实与交互回答等跨层契约；不依赖控制面或视图 |
+| `src/payload/` | 工具载荷读取契约与校验 |
+| `src/agent/` | 一次激活的 ACP Session、交互、MCP 桥接，以及运行时端口 `PeriInstancePort` |
+| `src/chat/` | Chat 控制面：绑定状态机、动作、ownership、事实日志、生命周期与错误映射 |
+| `src/view/` | 事实到 Yjs 文档的投影与浏览器只读副本 |
+| `src/state/`、`src/sync/`、`src/transport/` | 对象状态、同步协议、通用 JSON-RPC 与帧端口 |
+| `src/wasm/` | Emscripten ACP 运行后端、loader、端口与 `WasmAcpTransport` |
+| `src/execution/` | durable execution admission（仅 `/portable` 使用） |
+| `src/storage/`、`src/config/`、`src/util/` | 目录读取、启动配置与通用工具 |
+| `src/entries/` | 唯一发布入口；`chat.ts` 是主入口与 `/portable` 共用的门面 |
 
-## Store 与配置
+依赖方向：基础层（`contracts`/`payload`/`state`/`sync`/`transport`/`util`/`storage`/`config`/`execution`）不依赖控制面；`wasm` 不依赖 `agent`/`chat`/`view`；`agent` 不依赖 `chat`/`view`；`chat` 不依赖 `view`；`view` 不依赖 `chat`/`agent`。只有 `entries` 可以依赖所有层，任何模块都不依赖 `entries`。
 
-`TursoStorage({ url, authToken })` 通过官方 `@tursodatabase/serverless` 驱动读取会话元数据，凭证由调用方显式提供；没有本地 SQLite 文件后端、CLI 部署路径或环境变量 token 回退。`ChatDatabase.listSessions/getSession` 是 Manager 唯一读取目录的入口，不调用 ACP `session/list`。
+## 构建与示例
 
-`PeriConfig` 描述 WASM ACP 启动配置；settings、storage 与 machineId 一起经 `agentConfig` 交给 Peri。`BareHarnessConfig` 是冻结的全关闭预设，按需开启能力。`instructions` 使用 `session/new._meta["peri.instructions"]`；HTTP Workspace 与额外 MCP 使用 `session/new.mcpServers`。
+`MISE_ENV=wasm mise exec -- bun run build` 构建 `peri-wasm` release 产物，并把 `peri-wasm.js` 与 `peri_wasm.wasm` 放入 `dist/wasm/`。构建依赖 Emscripten 6.0.10；`mise exec` 会注入 `EMSDK`，直接 `bun run build` 在仅有 mise shim 的环境会把 shim 路径当作工具链并失败。
+
+默认 [demo.ts](examples/demo/demo.ts) 使用 `runtime.kind="wasm"`；[demo-wasm.ts](examples/demo/demo-wasm.ts) 使用 `runtime.kind="transport"` 注入 `WasmAcpTransport`。两者都通过 `ChatView` + 二进制同步帧驱动浏览器 `ChatReplica`；示例用 SSE 适配器承载逻辑帧，生产消费端使用 WebSocket。
+
+## 进阶
+
+`/portable` 额外公开可自行驱动的 durable execution admission，SDK Chat 不使用它。`KvExecutionRegistry` 包装 `AtomicExecutionKv` 提供 durable read/CAS apply/resolve；适配器必须实现 `readExecutionValue` 与 `compareAndSetExecutionValue`。`MemoryExecutionKv` 是单进程 `bestEffort` 实现，需要显式 `allowBestEffort`。票据绑定 session、instance/generation、lifecycle/control generation、稳定 work/revision 与 `{turnId, attemptId}`；预算跨实例替换保留，缺失停止证明返回 Blocked，不做 lease/TTL 接管。
 
 Machine/workspace 绑定与 SDK 执行所有权是两件独立职责，不能互相推导。
+
+## 限制
+
+1. SDK 不管理 Peri 或 Workspace 进程；Workspace 文件工具必须由外部 MCP 提供。
+2. 没有 TTL、续租或心跳；崩溃清理是路由层责任。
+3. 没有共享 KV 与路由亲和时，不保证多实例安全。
+4. `agentConfig` 是构造时快照，运行期修改不会生效。
+5. `/view` 依赖 Yjs，浏览器使用需要打包；`/portable` 的准入摘要仍用 `node:crypto`。
+
+## 参考
+
+- [Chat 架构设计](../../docs/design/peri-sdk-chat.md)
+- [Ownership 模型](OWNERSHIP-MODEL.md)
+- [代码索引](../../docs/code-index/peri-ts-sdk.md)
+- [peri-cf 服务端装配](../peri-cf/server/agent/compose.ts)

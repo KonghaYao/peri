@@ -70,7 +70,7 @@ Session。读取历史可以有多个 `ChatView`/`ChatReplica` 观察者，但�
 | --- | --- | --- |
 | User | 使用方业务层的主体；专属持有一个 SessionDB，可拥有多个 Workspace。 | 独立于运行实例；由使用方识别并授权。 |
 | Workspace | 业务上归属 User 的一份文件树；Peri Store 以 `WorkspaceId` 标识，并记录其 Machine 环境。 | 文件树和持久登记可跨运行实例存在。 |
-| SessionDB | Peri 的持久化后端，可为本地 SQLite 或 Turso；管理 Workspace 与 Session 的归属关系，以及消息和执行数据。 | 独立于 PeriInstance。`SessionStorage`/`ChatDatabase` 是 SDK 的部署与目录读取接口，写入由 Peri 完成。 |
+| SessionDB | Peri 的持久化后端，可为本地 SQLite 或 Turso；管理 Workspace 与 Session 的归属关系，以及消息和执行数据。 | 独立于 PeriInstance。`ChatDatabase` 是 SDK 的只读目录接口，`TursoStorage` 直接实现它；写入由 Peri 完成。 |
 | Workspace 环境 | 使用方部署的 Volume、microVM/远端环境与其中的 Workspace MCP。 | 独立于 Chat 运行，可跨多个 Session 使用；由使用方负责启动、挂载、监控与回收。 |
 | Session | `SessionId` 是持久身份；读取历史与取得执行资格是不同操作。 | 可在运行实例退出后按 ID 加载；同一时刻至多由一个 PeriInstance 持有并执行。 |
 | Chat 句柄 | `ChatService.id`；由 `ChatManager.createChat` 同步登记，绑定后可指向一个 Session。 | 进程内对象；关闭确认后移除，不持久化，不能冒充 Session 身份。 |
@@ -90,7 +90,7 @@ Session。读取历史可以有多个 `ChatView`/`ChatReplica` 观察者，但�
 | 使用方的业务服务与部署平台 | User 身份和授权；User 与 SessionDB 的 1:1 配置；Workspace 归属；Volume、microVM/远端环境、挂载、网络与生命周期；部署 Workspace MCP。 |
 | 使用方的路由层 | 同一 Session 单实例绑定：串行化 acquire，换绑前 drain 旧实例或清除旧记录，崩溃后清理 `clearSessionOwnership`；KV 故障 fail closed。SDK 的 acquire 是读后写、非原子，路由层不得依赖 KV 记录提供互斥。 |
 | Peri | SessionDB 的 Workspace / Session 归属、消息和执行数据；Agent 执行核心；Workspace MCP 服务程序、工具与任务语义。 |
-| TypeScript SDK | `ChatManager`/`ChatService`/`ChatUserAction`/`ChatView`/`ChatReplica`、SessionOwnership 记录与顺序冲突检测（公开面仅 `SessionOwnershipStorage`/`clearSessionOwnership`）、WASM ACP 运行后端装配、`ChatDatabase` 目录读取、载荷与同步契约。 |
+| TypeScript SDK | `ChatManager`/`ChatService`/`ChatUserAction`/`ChatView`/`ChatReplica`、SessionOwnership 记录与顺序冲突检测（公开面仅 `KvStorage`/`clearSessionOwnership`）、WASM ACP 运行后端装配、`TursoStorage` 直接实现 `ChatDatabase` 目录读取、载荷与同步契约。 |
 
 因此，审查 SDK 是否符合本图时，microVM、Volume、User 鉴权和专属数据库配置应检查**接入边界是否
 可由使用方提供**，不能把它们列为 SDK 尚未实现的功能。Peri 的 Store 和 Workspace MCP 规则也应在
@@ -105,7 +105,7 @@ Peri 层验证。
 | Workspace MCP | 固定服务一个 Workspace 根，暴露文件、终端和资源能力，并管理其工具任务。 | 可服务多个 Chat 的独立 MCP 连接；不随某个 Chat 关闭。 |
 | 工具进程与任务 | 由 Workspace MCP 在微环境中启动和管理，作用于已挂载的文件树。 | 归 Workspace MCP 管理，不能把 Chat 断开等同于任务结束。 |
 
-使用方可在 Workspace 环境中部署 Peri Workspace MCP；SDK 的 `ChatDefaults.mcpServers` 接收其地址，并把
+使用方可在 Workspace 环境中部署 Peri Workspace MCP；SDK 的 `ChatSessionInit.mcpServers` 接收其地址，并把
 它作为每个 Session 的 MCP 声明。每个 PeriInstance 自行建立连接；共享的是服务端和固定的 Workspace 根，
 不是同一个 MCP client 连接或一个可被请求切换的工作区。Chat 也可用自身的 `mcpServers` 增加其他 MCP
 服务；不能覆盖 `workspace` 名称。
@@ -120,7 +120,7 @@ Peri 层验证。
    错误映射：加载路径冲突 409 `binding_conflict`、KV 读/写失败 500 `claim_failed`；新会话 claim 阶段失败
    500 `session_creation_failed`（stage `claim`）；没有 ownership 专用 503。
    崩溃遗留记录必须由路由层调用 `clearSessionOwnership` 清理；只在旧实例已停止或已被 fence 后调用。
-   ownership 的公开面只有 `SessionOwnershipStorage` 与 `clearSessionOwnership`；协调器 `SessionOwnership`
+   ownership 的公开面只有 `KvStorage` 与 `clearSessionOwnership`；协调器 `SessionOwnership`
    与 `KvSessionOwnership` 是内部实现。
 3. **共享 MCP 地址 ≠ 共享 client**：地址与服务端实例可共享；client、声明路由、审批状态按会话隔离。
    SDK 不启动或销毁外部 Workspace 环境。

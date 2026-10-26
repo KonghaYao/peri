@@ -1,15 +1,15 @@
 import type { WasmAcpTransport } from "./transport";
 import { withDeadline } from "../util/deadline";
-import { DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS, type WasmRuntimeCleanupOutcome } from "./runtime";
+import {
+  DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS, DEFAULT_WASM_RUNTIME_STARTUP_TIMEOUT_MS,
+} from "./budget";
+import type { WasmRuntimeCleanupOutcome } from "./runtime";
 
 /** 运行后端启动器：只依赖取消信号，便于替换模块工厂或测试桩。 */
 export type WasmRuntimeStarter = (options: { signal: AbortSignal }) => Promise<WasmAcpTransport>;
 
 /** 单运行后端状态：`live → closing → closed | close-unconfirmed`。 */
 export type WasmRuntimeState = "live" | "closing" | "closed" | "close-unconfirmed";
-
-/** 默认启动超时；与调用方既有预算保持一致。 */
-export const DEFAULT_WASM_RUNTIME_STARTUP_TIMEOUT_MS = 20_000;
 
 export interface WasmRuntimeLeaseOptions {
   /** 启动超时；超时后中止启动并拒绝 `start`。 */

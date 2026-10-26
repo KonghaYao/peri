@@ -13,7 +13,7 @@ const config: ServerConfig = {
   machineId: "11111111-1111-4111-8111-111111111111",
   model: {
     provider: "openai",
-    id: "gpt-test",
+    tiers: { fable: "gpt-test", opus: "gpt-test", sonnet: "gpt-test", haiku: "gpt-test" },
     baseUrl: "https://api.example.com/v1",
     apiKey: "model-secret",
   },

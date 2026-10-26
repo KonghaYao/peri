@@ -27,7 +27,11 @@ import type { publicServerInfo } from "../config";
 import { createApi, type ApiChatManager } from ".";
 
 const info = {
-  model: { provider: "openai" as const, id: "gpt-test", baseUrl: "https://api.example.com/v1" },
+  model: {
+    provider: "openai" as const,
+    tiers: { fable: "gpt-test", opus: "gpt-test", sonnet: "gpt-test", haiku: "gpt-test" },
+    baseUrl: "https://api.example.com/v1",
+  },
   storage: { url: "https://store.example.com" },
   mcp: [],
   workspace: "/workspace",

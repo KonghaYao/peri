@@ -33,7 +33,7 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
 ## 组合根与装配
 
 - **平台装配**：`server/agent/compose.ts` 读取 `ServerConfig`，构造 Store 适配、ownership 存储（默认 `createStorage()`）、
-  WASM `ChatRuntime`、默认 path/instructions/MCP 与关闭预算；server 内只有这里构造具体 `ChatManager`。
+  WASM `ChatRuntime`、`sessionInit`（path/instructions/MCP）与关闭预算；server 内只有这里构造具体 `ChatManager`。
 - **编排层**：`server/agent/manager.ts` 的 `AppChatManager` 只持有注入的 `ChatManagerContract` 与
   `ChatViewRegistry`。四个查询/登记方法直接转发；`closeChat` 先关 SDK 句柄再释放 View；
   `hasPendingClose` 暴露「句柄已移除、View 仍待释放」的残留；`shutdown` 先 `disposeAll` 再
@@ -48,7 +48,7 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
   只来自选中会话的 Yjs 副本。
 - **打开历史**：先 `POST /api/chats` 登记空句柄，再 `change_session`；202 回执给出真实 Session ID 与
   绑定代次后才连 WS。已有控制者返回 `binding_conflict`，前端改用 Session ID 寻址既有句柄。
-- **新会话**：`create_new_session` 使用默认 path；历史加载使用 Store 中的持久 cwd，不回退句柄 path。
+- **新会话**：`create_new_session` 使用句柄 path 或 `sessionInit.path`；历史加载使用 Store 中的持久 cwd，不回退句柄 path。
 - **同步**：WS 二进制帧为 HELLO/SNAPSHOT/UPDATE/ACK；客户端只读，不能写 Y.Doc 或提交业务命令。
   动作回执与投影是两条通道，不能用同步帧代替 Action 回执。
 - **机器身份**：`PERI_MACHINE_ID` 必须是持久 UUID，由部署方提供；服务端不随机生成。

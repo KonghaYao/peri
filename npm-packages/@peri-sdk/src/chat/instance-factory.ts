@@ -56,7 +56,7 @@ function runtimeActivator(context: ChatInstanceContext): PeriHostActivator {
  * 单次激活装配。
  *
  * - `resolveSessionPath` 只读数据库中的持久 cwd，不回退句柄 path；
- * - `defaultMcpServers` 来自 Manager defaults，由 PeriInstance 逐激活解析；
+ * - `defaultMcpServers` 来自 Manager sessionInit，由 PeriInstance 逐激活解析；
  * - 外层 signal 只中止启动等待，生命周期预算映射到关闭选项；
  * - `agentConfig` 由 Manager 序列化为 WASM 启动配置；transport 运行后端的配置归工厂。
  */
@@ -67,7 +67,7 @@ export function createChatInstance(context: ChatInstanceContext): PeriInstance {
             const entry = await context.database.getSession(sessionId);
             return entry?.cwd ?? null;
         },
-        defaultMcpServers: context.defaults.mcpServers,
+        defaultMcpServers: context.sessionInit.mcpServers,
         signal: context.signal,
         close: {
             drainTimeoutMs: context.lifecycle.closeDrainTimeoutMs,

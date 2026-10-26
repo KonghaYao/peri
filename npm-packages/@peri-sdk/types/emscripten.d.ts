@@ -10,7 +10,6 @@ declare module "*peri-wasm.js" {
 
 declare module "*wasm-node.js" {
   export const startWasmRuntime: typeof import("../src/entries/wasm-node").startWasmRuntime;
-  export const createSchedulerPort: typeof import("../src/entries/wasm-node").createSchedulerPort;
 }
 
 declare module "*.wasm" {

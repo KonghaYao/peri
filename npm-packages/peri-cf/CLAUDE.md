@@ -63,7 +63,8 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 ## 服务端配置
 
 必填：`PERI_MODEL_ID`、`PERI_MODEL_BASE_URL`、`PERI_MODEL_API_KEY`、`PERI_STORAGE_URL`、
-`PERI_STORAGE_TOKEN`、`PERI_MACHINE_ID`。可选：`PERI_MODEL_PROVIDER`、`PERI_MCP_SERVERS`、
+`PERI_STORAGE_TOKEN`、`PERI_MACHINE_ID`。可选：`PERI_MODEL_PROVIDER`、四档模型
+`PERI_MODEL_ID_FABLE`/`_OPUS`/`_SONNET`/`_HAIKU`（缺省回退 `PERI_MODEL_ID`）、`PERI_MCP_SERVERS`、
 `PERI_SERVER_HOST`、`PERI_SERVER_PORT`、`PERI_WASM_MODULE_URL`、`PERI_STATIC_ROOT`。任一解析问题
 拒绝启动；只有 `LANGFUSE_*` 传入 WASM 实例。
 
@@ -86,8 +87,9 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 
 只消费已发布 SDK 入口：主入口（`ChatManager`/`ChatService`/`ChatUserAction`/`ChatView` 契约、
 `ChatViewRegistry`、`ChatManagerContract`）、`/view`（只读副本、载荷读取、同步协议）、`/wasm`
-（运行后端启动、调度器端口、transport、关闭证据）。不引用 `@peri-sdk/src`、不新增 entry、不复制准入或
-同步规则。服务端只注入调度器端口；网络由 Emscripten fetch 执行器发起。SDK 不感知 assistant-ui。
+（运行后端启动、transport、关闭证据）。不引用 `@peri-sdk/src`、不新增 entry、不复制准入或
+同步规则。调度器与清理/启动超时由 SDK 内部自持，服务端不注入；网络由 Emscripten fetch 执行器发起。
+SDK 不感知 assistant-ui。
 
 `core/shared/chat.ts` 与 `sync.ts` 的 Zod schema 是 wire/展示 DTO 的单一来源。ACP 投影由 SDK
 `ChatView`/`ChatReplica` 负责，应用只做展示适配。

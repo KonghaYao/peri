@@ -231,7 +231,7 @@ TurnProjection = {
 4. **执行归属与丢失语义**：执行驻留在接受连接/请求的 isolate；isolate 回收即在途执行丢失且**不复原**，不得由展示历史重造 Rust 工作义务。长时保活只依赖平台尽力而为的机制（WS 消息 await 与升级请求的 `waitUntil`），没有平台保证，部署端才能验证。
 5. **载荷全文**：工具参数/结果全文只在 isolate 内存，经 WS 文本控制帧（`op:"payload"`）按需读取，不通过 Yjs、不经 HTTP 端点、不持久化；重放后由历史重建。若上游历史不含完整载荷，则读取不可用必须显式失败，不得伪装成功（重建覆盖范围待验证）。
 6. **命令通道**：prompt/cancel/interaction 回答/payload 读取一律走 WS 文本控制帧（HTTP 无会话亲和性）；旧 HTTP 命令/载荷端点返回 426。命令结果只在服务端明确答否时为确定失败；断线、超时、未同步视为未确认，调用方必须阻断重跑。
-7. **端口化边界**：平台能力经显式端口注入，不在业务内直接触达 CF 原语——`SocketHost`（WS 升级、保活、时钟）在连接层，`RuntimeDeps`（`startTransport` / repository）在运行期注册表，SDK 运行后端经 `moduleFactory` / `ports` / `onLifecycle` 注入。测试以内存实现替换这些端口，不依赖 workerd 专有行为。
+7. **端口化边界**：平台能力经显式端口注入，不在业务内直接触达 CF 原语——`SocketHost`（WS 升级、保活、时钟）在连接层，`RuntimeDeps`（`startTransport` / repository）在运行期注册表，SDK 运行后端经 `moduleFactory` / 诊断回调接入；scheduler 与清理/启动超时由 SDK 自持。测试以内存实现替换这些端口，不依赖 workerd 专有行为。
 8. **不做的事**：不恢复旧 Agent 执行、不做跨 isolate 接管、不把观测当存活探测、不为回滚保留任何展示持久层（转向时未部署，无旧数据可迁移）。
 
 ## 6. SDK view 与安全 readPayload

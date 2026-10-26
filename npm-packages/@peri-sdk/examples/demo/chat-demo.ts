@@ -16,36 +16,8 @@ import {
     type ChatDatabase,
     type ChatService,
     type ChatYjsChannel,
-    type SessionStorage,
 } from "../../src/entries/index";
 import { DemoSessionNotFoundError } from "./demo-session-not-found-error";
-
-/** Store 只读目录 → ChatDatabase 契约。 */
-export function sessionDatabase(storage: SessionStorage): ChatDatabase {
-    return {
-        async listSessions(path) {
-            return (await storage.getSessions(path ?? "/")).map((entry) => ({
-                sessionId: entry.id,
-                title: entry.title,
-                cwd: entry.cwd,
-                messageCount: entry.messageCount,
-                createdAt: entry.createdAt,
-                updatedAt: entry.updatedAt,
-            }));
-        },
-        async getSession(id) {
-            const entry = await storage.getSession(id);
-            return entry && {
-                sessionId: entry.id,
-                title: entry.title,
-                cwd: entry.cwd,
-                messageCount: entry.messageCount,
-                createdAt: entry.createdAt,
-                updatedAt: entry.updatedAt,
-            };
-        },
-    };
-}
 
 const MAX_QUEUED_SYNC_BYTES = 4 * 1024 * 1024;
 
@@ -138,7 +110,7 @@ class SseChannel implements ChatYjsChannel {
 
 export interface DemoAppOptions {
     manager: ChatManager;
-    storage: SessionStorage;
+    database: ChatDatabase;
     workspace: string;
     workspaceMcpUrl?: string;
     html: string;
@@ -155,7 +127,7 @@ export function createDemoApp(options: DemoAppOptions): {
     app: Hono;
     close(): Promise<void>;
 } {
-    const { manager, storage, workspace } = options;
+    const { manager, database, workspace } = options;
     const sessions = new Map<string, Promise<OpenSession>>();
     const creationRequests = new Map<string, Promise<OpenSession>>();
     const connections = new Map<string, SseChannel>();
@@ -167,7 +139,7 @@ export function createDemoApp(options: DemoAppOptions): {
             if (existing) return existing;
         }
         const opening = (async (): Promise<OpenSession> => {
-            if (sessionId !== null && !(await storage.getSession(sessionId)))
+            if (sessionId !== null && !(await database.getSession(sessionId)))
                 throw new DemoSessionNotFoundError();
             const chat = manager.createChat({ path: workspace });
             const view = new ChatView(chat);

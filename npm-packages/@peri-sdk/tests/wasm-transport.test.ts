@@ -131,10 +131,10 @@ test("ChatManager runs over an injected WASM frame port", async () => {
       listSessions: async () => [],
       getSession: async () => null,
     },
-    sessionOwnershipStorage: new OwnershipProbe(),
+    kv: new OwnershipProbe(),
     chatConfig: {
       runtime: { kind: "transport", factory: () => WasmAcpTransport.fromPort(wire.port) },
-      defaults: { path: "/tmp", instructions: "hello" },
+      sessionInit: { path: "/tmp", instructions: "hello" },
     },
   });
   const chat = manager.createChat();

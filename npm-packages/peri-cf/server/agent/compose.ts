@@ -2,22 +2,18 @@ import { createStorage } from "unstorage";
 import {
   BareHarnessConfig,
   ChatManager,
+  TursoStorage,
   type ChatConfig,
   type ChatDatabase,
-  type ChatLifecycleOptions,
-  type SessionOwnershipStorage,
+  type KvStorage,
 } from "@peri-code/sdk";
-import {
-  createSchedulerPort,
-  DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS,
-} from "@peri-code/sdk/wasm";
 import {
   SESSION_CWD,
   WORKSPACE_CWD,
+  MODEL_TIERS,
   mcpServerDefaults,
   type ServerConfig,
 } from "../config";
-import { createChatDatabase } from "../store";
 import { SYSTEM_INSTRUCTIONS } from "../system-instructions";
 
 /**
@@ -43,7 +39,7 @@ export type LogError = (
 /** 平台 seam：省略时使用 CF 的生产默认值。 */
 export interface SdkChatManagerOptions {
   readonly database?: ChatDatabase;
-  readonly sessionOwnershipStorage?: SessionOwnershipStorage;
+  readonly kv?: KvStorage;
   readonly chatConfig?: Partial<Pick<ChatConfig, "runtime" | "lifecycle">>;
   readonly instanceFactory?: ChatInstanceFactory;
   readonly logError?: LogError;
@@ -54,12 +50,6 @@ const HARNESS_PROVIDER_ID = "model";
 const RUNTIME_DIAGNOSTIC_LABEL = "Peri server runtime diagnostic";
 const RUNTIME_START_PHASE = "runtime-start";
 const WASM_ENV_PREFIX = "LANGFUSE_";
-
-/** 生产关闭预算与 WASM 运行后端的清理预算对齐，避免把正常清理误报为 Incomplete。 */
-const DEFAULT_LIFECYCLE: ChatLifecycleOptions = {
-  activationCloseTimeoutMs: DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS,
-  shutdownChatTimeoutMs: DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS + 10_000,
-};
 
 /**
  * 服务端运行后端的工具面：对话、Agent、工具搜索与 goal 直接可见；文件/终端/Web 等
@@ -96,15 +86,17 @@ export function createSdkChatManager(
   options: SdkChatManagerOptions = {},
 ): ChatManager {
   const logError = options.logError ?? consoleLogError;
+  const defaultDatabase = new TursoStorage({
+    ...config.storage,
+    legacyCwd: WORKSPACE_CWD,
+    currentCwd: SESSION_CWD,
+  });
   return new ChatManager({
     // 与宿主 `configJson` 的形状一致；模型与存储直连上游，凭据只存在于服务端进程。
     agentConfig: {
       cwd: WORKSPACE_CWD,
       machineId: config.machineId,
-      storage: {
-        url: config.storage.url,
-        authToken: config.storage.authToken,
-      },
+      storage: defaultDatabase.storageConfig,
       settings: {
         config: {
           active_alias: DEFAULT_MODEL_ALIAS,
@@ -113,41 +105,35 @@ export function createSdkChatManager(
             type: config.model.provider,
             apiKey: config.model.apiKey,
             baseUrl: config.model.baseUrl,
+            // 四档模型 ID 只在这里声明一次；profiles 只绑定 provider，避免两处漂移。
+            models: config.model.tiers,
           }],
-          profiles: {
-            [DEFAULT_MODEL_ALIAS]: {
-              provider: HARNESS_PROVIDER_ID,
-              model: config.model.id,
-            },
-          },
+          profiles: Object.fromEntries(
+            MODEL_TIERS.map((tier) => [tier, { provider: HARNESS_PROVIDER_ID }]),
+          ),
           meta_harness: SERVER_HARNESS_CONFIG,
         },
       },
     },
-    database: options.database ?? createChatDatabase(config.storage),
+    database: options.database ?? defaultDatabase,
     // 默认进程内 memory storage；跨实例接管需要路由层与共享 storage，本轮不接入。
-    sessionOwnershipStorage: options.sessionOwnershipStorage ?? createStorage(),
+    kv: options.kv ?? createStorage(),
     chatConfig: {
       runtime: options.chatConfig?.runtime ?? {
         kind: "wasm",
         moduleUrl: config.wasmModuleUrl,
         env: wasmEnvironment(),
-        ports: { scheduler: createSchedulerPort() },
-        cleanupTimeoutMs: DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS,
         onDiagnostic: (kind, error) => logError(RUNTIME_DIAGNOSTIC_LABEL, error, {
           phase: RUNTIME_START_PHASE,
           kind,
         }),
       },
-      defaults: {
+      sessionInit: {
         path: SESSION_CWD,
         instructions: SYSTEM_INSTRUCTIONS,
         mcpServers: mcpServerDefaults(config),
       },
-      lifecycle: {
-        ...DEFAULT_LIFECYCLE,
-        ...options.chatConfig?.lifecycle,
-      },
+      lifecycle: options.chatConfig?.lifecycle,
     },
     instanceFactory: options.instanceFactory,
   });

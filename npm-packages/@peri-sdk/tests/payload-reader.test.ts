@@ -36,7 +36,7 @@ function chatServiceHarness(): {
     const options: ChatManagerInternalOptions = {
         agentConfig: {},
         database,
-        sessionOwnershipStorage: new OwnershipProbe(),
+        kv: new OwnershipProbe(),
         chatConfig: {
             runtime: {
                 kind: "transport",
@@ -44,7 +44,7 @@ function chatServiceHarness(): {
                     throw new Error("ACP transport must not start");
                 },
             },
-            defaults: { path: "/workspace" },
+            sessionInit: { path: "/workspace" },
         },
         instanceFactory: () => {
             const port = new FakePort();

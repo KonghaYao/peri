@@ -1,5 +1,5 @@
 import { sessionOwnershipKey } from "../src/chat/ownership";
-import type { SessionOwnershipStorage } from "../src/chat/types";
+import type { KvStorage } from "../src/chat/types";
 
 /**
  * 测试用 Session ownership 存储：实现生产 3 方法端口，并在内存中记录 key。
@@ -7,7 +7,7 @@ import type { SessionOwnershipStorage } from "../src/chat/types";
  * Manager 内部会据此构造 ownership；测试通过 `has`/`size` 观察结果，
  * 通过 `failRead`/`failWrite`/`failRelease` 注入存储故障。
  */
-export class OwnershipProbe implements SessionOwnershipStorage {
+export class OwnershipProbe implements KvStorage {
     private readonly values = new Map<string, unknown>();
     private readonly readFailures = new Map<string, Error>();
     private readonly writeFailures = new Map<string, Error>();

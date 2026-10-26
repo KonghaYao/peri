@@ -14,14 +14,18 @@ export const SESSION_CWD = "/workspace/";
 const MACHINE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 const MODEL_PROVIDERS = ["openai", "anthropic"] as const;
+/** 与 peri-config 的 `Profiles` 四档一致；子 Agent 按档位取模型。 */
+export const MODEL_TIERS = ["fable", "opus", "sonnet", "haiku"] as const;
 
 export type ModelProvider = (typeof MODEL_PROVIDERS)[number];
+export type ModelTier = (typeof MODEL_TIERS)[number];
 
 export interface ServerModelConfig {
   provider: ModelProvider;
-  id: string;
   baseUrl: string;
   apiKey: string;
+  /** 四档模型 ID；未单独配置的档位回退 `PERI_MODEL_ID`。 */
+  tiers: Record<ModelTier, string>;
 }
 
 export interface ServerStorageConfig {
@@ -91,7 +95,10 @@ function parseModel(env: ServerEnvironment, problems: string[]): ServerModelConf
   else if (!baseUrlValid) problems.push("PERI_MODEL_BASE_URL 必须是 http(s) 地址");
   if (!apiKey) problems.push("缺少 PERI_MODEL_API_KEY");
   if (!providerValid || !id || !baseUrl || !baseUrlValid || !apiKey) return undefined;
-  return { provider: provider as ModelProvider, id, baseUrl, apiKey };
+  const tiers = Object.fromEntries(
+    MODEL_TIERS.map((tier) => [tier, text(env[`PERI_MODEL_ID_${tier.toUpperCase()}`]) || id]),
+  ) as Record<ModelTier, string>;
+  return { provider: provider as ModelProvider, tiers, baseUrl, apiKey };
 }
 
 function parseStorage(env: ServerEnvironment, problems: string[]): ServerStorageConfig | undefined {
@@ -258,7 +265,7 @@ export function publicServerInfo(config: PublicServerInfoSource) {
     }
   };
   return {
-    model: { provider: config.model.provider, id: config.model.id, baseUrl: origin(config.model.baseUrl) },
+    model: { provider: config.model.provider, tiers: config.model.tiers, baseUrl: origin(config.model.baseUrl) },
     storage: { url: origin(config.storage.url) },
     mcp: config.mcpServers.map((server) => ({ name: server.name, url: origin(server.url) })),
     workspace: WORKSPACE_CWD,

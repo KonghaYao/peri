@@ -60,7 +60,7 @@ function context(
         chatId: "chat-1",
         path: "/handle-path",
         agentConfig: {},
-        defaults: {},
+        sessionInit: {},
         runtime: {
             kind: "transport",
             factory: () => {
@@ -198,7 +198,7 @@ describe("default factory wiring", () => {
         const manager = new ChatManager({
             agentConfig: {},
             database: new FakeDatabase(),
-            sessionOwnershipStorage: new OwnershipProbe(),
+            kv: new OwnershipProbe(),
             chatConfig: {
                 runtime: {
                     kind: "transport",
@@ -207,7 +207,7 @@ describe("default factory wiring", () => {
                         return transport;
                     },
                 },
-                defaults: { path: "/workspace" },
+                sessionInit: { path: "/workspace" },
             },
         });
         const chat = manager.createChat();
@@ -228,10 +228,10 @@ describe("default factory wiring", () => {
         const manager = new ChatManager({
             agentConfig: {},
             database: new FakeDatabase(),
-            sessionOwnershipStorage: new OwnershipProbe(),
+            kv: new OwnershipProbe(),
             chatConfig: {
                 runtime: { kind: "transport", factory: () => transport },
-                defaults: { path: "/workspace" },
+                sessionInit: { path: "/workspace" },
             },
         });
         const chat = manager.createChat();

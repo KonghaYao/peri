@@ -20,10 +20,10 @@ WASM 依赖图按平台排除 SQLx、进程执行、stdio 和本地工具 MCP pa
 | Emscripten 日期格式 | `peri-time/src/calendar.rs` |
 | 不依赖 package 的 MCP 共用规则 | `peri-mcp-core/src/{agent_definition,task_scope.rs}` |
 | 配置与 OAuth 浏览器适配 | `peri-config/src/io/wasm.rs`、`mcp-packages/credentials/src/client.rs`；凭证 worker 经当前 Tokio Handle 调度，保持 MCP server 和 rmcp 子任务的运行时上下文，回归入口为 `client_test.rs` |
-| 网页聊天消费端 | [Peri CF 索引](peri-cf.md)：Bun 服务端运行后端（`startWasmRuntime` + `moduleUrl`，只注入调度器端口），浏览器经 HTTP Action + WebSocket/Yjs 只读副本消费；无 DO、无表 |
+| 网页聊天消费端 | [Peri CF 索引](peri-cf.md)：Bun 服务端运行后端（`startWasmRuntime` + `moduleUrl`，调度器由运行后端自持），浏览器经 HTTP Action + WebSocket/Yjs 只读副本消费；无 DO、无表 |
 | 部署环境注入与 Langfuse | `npm-packages/@peri-sdk/src/wasm/loader.ts`、`src/wasm/transport.ts`（同包）；`scripts/cargo-wasm.sh` 导出 `ENV` |
 
-`@peri-code/sdk` 的 `scripts/build.ts` 构建本产物并复制到 npm 包的 `dist/wasm/`。SDK 的 WASM 出口分两层：`/wasm` 提供 `instantiatePeriWasm`/`loadPeriWasm`、`WasmAcpTransport`、scheduler 与 `startWasmRuntime`/运行后端租约；`/wasm-node` 额外提供 Node 网络/DNS 端口。Chat 控制面通过 `ChatRuntime` 的 `kind:"wasm"` 分支按激活启动运行后端，`WasmRuntimePool` 管理租约与关闭证据，`PeriInstance` 消费租约 transport；SDK 不再提供进程内 Agent/Session 门面。示例服务器是 `npm-packages/@peri-sdk/examples/demo/demo-wasm.ts`，复用 `demo.html`。
+`@peri-code/sdk` 的 `scripts/build.ts` 构建本产物并复制到 npm 包的 `dist/wasm/`。SDK 的 WASM 出口分两层：`/wasm` 提供 `instantiatePeriWasm`/`loadPeriWasm`、`WasmAcpTransport` 与 `startWasmRuntime`/运行后端租约（scheduler 与清理/启动超时由运行后端自持，不从公开入口导出）；`/wasm-node` 额外提供 Node 网络/DNS 端口。Chat 控制面通过 `ChatRuntime` 的 `kind:"wasm"` 分支按激活启动运行后端，`WasmRuntimePool` 管理租约与关闭证据，`PeriInstance` 消费租约 transport；SDK 不再提供进程内 Agent/Session 门面。示例服务器是 `npm-packages/@peri-sdk/examples/demo/demo-wasm.ts`，复用 `demo.html`。
 
 Peri CF 独立构建 `peri-wasm --features cloudflare`，限制线性内存最大 64 MiB 并记录源码/锁文件/工具链/参数/产物 provenance，SDK 默认构建不变。模型 Fetch adapter 只更换传输，不更换提供商与 ACP 规则；Store 网络仍走既有路径。Emscripten 不支持命令 hook，显式失败而非放行；Skill preload registry 查询避免 `spawn_blocking`。应用只保留平台装配、HTTP/WS 与鉴权；句柄、绑定、Action、View 与关闭证据由 SDK Chat 层负责，不以超时或账本存在代替退出证明。
 

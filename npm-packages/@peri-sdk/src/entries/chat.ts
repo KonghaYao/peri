@@ -29,19 +29,18 @@ export type {
 export type {
     CancelRequestResult,
     ChatConfig,
-    ChatDatabase,
-    ChatDefaults,
+    ChatSessionInit,
     ChatRuntime,
     ChatLifecycleOptions,
     ChatManager as ChatManagerContract,
     ChatManagerOptions,
-    ChatSessionDirectoryEntry,
     ChatService as ChatServiceContract,
     ControlResult,
     SendReceipt,
-    SessionOwnershipStorage,
+    KvStorage,
     SessionReadyResult,
 } from "../chat/types";
+export type { ChatDatabase, ChatSessionDirectoryEntry } from "../contracts/chat";
 export type { HistoryPageOutcome, PeriInstancePort } from "../agent/port";
 export type {
     ChatBindingTarget,

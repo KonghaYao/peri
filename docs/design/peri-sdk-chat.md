@@ -35,9 +35,9 @@ SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行
 ## 4. 绑定、SessionOwnership 与关闭
 
 - `createChat` 只同步登记句柄，不启动 ACP、不取得 SessionOwnership、不读取历史。
-- 首次绑定由 `create_new_session` 或 `change_session` 触发；新会话使用句柄/默认 path，加载历史使用 Store 中的持久 cwd。
-- 同一 Session 同时至多一个执行所有者。调用方注入 3 方法存储端口（`ChatManagerOptions.sessionOwnershipStorage`），`ChatManager` 内部构造 `SessionOwnership`；`LocalSessionIndex` 覆盖 binding/cleanup 候选，同 Manager 内冲突带 `ownerChatId`。
-- 归属记录 key 为 `ownership:<base64url(sessionId)>`，value 为 `{ sessionId, owner }`；owner 是 Manager 内部随机 UUID。acquire 是读后写、非原子；KV 记录是绑定标记/防御路由 bug，不是互斥原语，跨 Manager/进程的单实例绑定由路由层串行化，SDK 只做顺序冲突检测。`SessionOwnership` 协调器是内部实现，公开面只有 `SessionOwnershipStorage` 与 `clearSessionOwnership`。
+- 首次绑定由 `create_new_session` 或 `change_session` 触发；新会话使用句柄 path 或 `sessionInit.path`，加载历史使用 Store 中的持久 cwd。
+- 同一 Session 同时至多一个执行所有者。调用方注入 3 方法存储端口（`ChatManagerOptions.kv`），`ChatManager` 内部构造 `SessionOwnership`；`LocalSessionIndex` 覆盖 binding/cleanup 候选，同 Manager 内冲突带 `ownerChatId`。
+- 归属记录 key 为 `ownership:<base64url(sessionId)>`，value 为 `{ sessionId, owner }`；owner 是 Manager 内部随机 UUID。acquire 是读后写、非原子；KV 记录是绑定标记/防御路由 bug，不是互斥原语，跨 Manager/进程的单实例绑定由路由层串行化，SDK 只做顺序冲突检测。`SessionOwnership` 协调器是内部实现，公开面只有 `KvStorage` 与 `clearSessionOwnership`。
 - 无 TTL、续租或心跳：崩溃遗留记录由路由层调用 `clearSessionOwnership(storage, sessionId)` 清理，且只能在旧实例已停止或已被 fence 后调用。
 - 旧 key `peri:managed-agent:session:*` 与新 `ownership:*` 互不可见；升级/回滚必须全量停机切换，不做双读兼容。
 - 空闲才允许换绑；运行中、存在未处理输入、待决交互或未确认清理时拒绝换绑，不 cancel、不 close 旧绑定。
@@ -60,7 +60,7 @@ SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行
 
 `ChatRuntime` 描述一次 Chat 的运行实例来源，不是网络主机名；两个分支都产出可供 ACP 使用的 transport。
 
-1. `{ kind: "wasm" }`：Manager 为每次激活启动独立 WASM 运行后端；可注入 `moduleUrl`、`moduleFactory`、`env`、`ports` 与生命周期/诊断回调。
+1. `{ kind: "wasm" }`：Manager 为每次激活启动独立 WASM 运行后端；可注入 `moduleUrl`、`moduleFactory`、`env` 与 `onDiagnostic`。scheduler 与清理/启动超时由运行后端自持，调用方不可配置；`lifecycle` 未显式给出时按 runtime kind 取默认值（wasm 为 activation 25s、shutdown 30s），显式传入仍优先。
 2. `{ kind: "transport", factory }`：调用方按 path 创建 transport；`factory.close()` 成功即停止证明，失败保留原因供重试。
 
 `PeriInstance` 是内部实现，不是发布门面。工厂把句柄的路径、Store、运行后端与生命周期上下文转换为一次运行装配；`WasmRuntimePool` 负责运行后端租约与释放证据。共享 MCP server 地址不共享 MCP client、声明路由或审批状态。
@@ -74,7 +74,7 @@ SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行
 | 主入口 | `src/entries/index.ts` | `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatViewRegistry`、公开类型/错误（含 `ChatManagerContract`）、Store 读取工具 |
 | `/portable` | `src/entries/portable.ts` | 同一 Chat 公共面 + 嵌入方驱动的执行准入核心；仍依赖 `node:crypto`，不是纯浏览器入口 |
 | `/view` | `src/entries/view.ts` | 浏览器安全展示出口：副本、`readSessionView`、载荷读取、同步协议；不引入 Node 运行时依赖，也不导出 `ChatViewRegistry` |
-| `/wasm` | `src/entries/wasm.ts` | 平台无关的 Emscripten 运行后端、loader、transport、scheduler 端口 |
+| `/wasm` | `src/entries/wasm.ts` | 平台无关的 Emscripten 运行后端、loader、transport |
 | `/wasm-node` | `src/entries/wasm-node.ts` | `/wasm` + Node 网络/DNS 端口 |
 
 主入口与 `/portable` 共用的 Chat 门面在 `src/entries/chat.ts`。

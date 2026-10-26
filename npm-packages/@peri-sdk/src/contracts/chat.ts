@@ -10,6 +10,22 @@ export interface ChatBindingTarget {
     bindingRevision: number;
 }
 
+/** 只读会话目录条目；标题保持可空，不伪造缺失标题。 */
+export interface ChatSessionDirectoryEntry {
+    sessionId: string;
+    title: string | null;
+    cwd: string;
+    messageCount: number;
+    createdAt: string;
+    updatedAt: string;
+}
+
+/** 只读会话目录；`path` 省略时交给适配器决定。 */
+export interface ChatDatabase {
+    listSessions(path?: string): Promise<ChatSessionDirectoryEntry[]>;
+    getSession(id: string): Promise<ChatSessionDirectoryEntry | null>;
+}
+
 /**
  * ChatService 向 View 暴露的运行事实（Phase 0 冻结）。
  *
