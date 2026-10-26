@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { Y, encodeSyncFrame, type DocSnapshot } from '@peri-code/sdk/view';
-import type { ChatSummary } from '@core/shared';
+import type { ChatSummary } from './contracts';
 import { ChatController } from './controller';
 import { RemoteActionError, RemoteSendReceipt, type ActionReceipt, type RemoteActions } from './actions';
 import type { WebSocketLike } from './sync';

@@ -18,7 +18,7 @@
 > 参考（结构对照，不引为本仓库事实源）：`/Users/konghayao/code/pazhou/remote-control-server/packages/chat-channel/src/`（该仓库不在本仓库内，路径保留绝对前缀）。
 > 相邻设计：TUI 侧同类展示目标见 [TUI Chat 与 Tool Activity Workbench](tui-chat-workbench.md)；Session 与执行归属见 [Session 异步任务统一入口](session-async-tasks.md)、[RCRA 消息、任务归属与激活](rcra-message-activation.md)；代码定位以 [TS SDK 索引](../code-index/peri-ts-sdk.md) 与 [Peri CF 索引](../code-index/peri-cf.md) 为准。
 
-本文只定义稳定对象契约与消费面边界，不记录实施批次、勾选清单或运行结果。当前实现、入口与动态 inventory 以代码索引和源码为准：`npm-packages/@peri-sdk/src/state/`、`src/view/`、`src/sync/`、`npm-packages/peri-cf/core/`、`frontend/`。
+本文只定义稳定对象契约与消费面边界，不记录实施批次、勾选清单或运行结果。当前实现、入口与动态 inventory 以代码索引和源码为准：`npm-packages/@peri-sdk/src/state/`、`src/view/`、`src/sync/`、`npm-packages/peri-cf/frontend/remote/`、`frontend/`。
 
 ## 1. 前提与已定基线
 
@@ -268,9 +268,9 @@ readPayload(ref, reader, { signal, maxBytes })
 
 ### 7.1 ChatReplica → ChatProjection → 展示组件
 
-1. `core/shared/chat.ts`：消息 DTO 带 id/entryId/kind/status/time/error/blocks；展示状态带 tools/turns/session/tasks/plans/interactions/queue；SDK 领域类型与应用 DTO 显式边界转换。
-2. `core/shared/chat-display-state.ts`：只复制 SDK 副本已确认的公开对象；`readiness !== "ready"` 时不提供条目内容，不补造身份、时间或运行态。
-3. `core/agent/view/projection.ts`：持有 `ChatReplica`，按绑定代次缓存 `ChatDisplayState`；不反向控制执行、不写文档。
+1. `frontend/remote/contracts.ts`：消息 DTO 带 id/entryId/kind/status/time/error/blocks；展示状态带 tools/turns/session/tasks/plans/interactions/queue；SDK 领域类型与应用 DTO 显式边界转换。
+2. `frontend/remote/display-state.ts`：只复制 SDK 副本已确认的公开对象；`readiness !== "ready"` 时不提供条目内容，不补造身份、时间或运行态。
+3. `frontend/remote/projection.ts`：持有 `ChatReplica`，按绑定代次缓存 `ChatDisplayState`；不反向控制执行、不写文档。
 4. `frontend/remote/controller.ts`：两步打开历史、Action 目标核对、连接与错误状态；切换会话只释放本地连接，不 cancel、不 close。
 5. `frontend/chat/runtime/useChat.ts`：装配 `ChatController`、目录查询缓存与 payload reader；选中会话的运行/交互只来自副本。
 6. `frontend/chat/timeline/*` 与 composer：Entry 卡片内按 blockOrder 逐块渲染 Text/Reasoning/Tool/Resource；text 沿用 Markdown 安全设置；summary reasoning 可折叠；tool 显示状态/preview/全文入口。

@@ -1,7 +1,6 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { AcpMcpServer } from "@peri-code/sdk";
-import type { ServerInfo } from "@core/shared";
 
 /** 宿主虚拟工作区的根；与 ACP 会话 cwd 分开（见 `SESSION_CWD`）。 */
 export const WORKSPACE_CWD = "/workspace";
@@ -251,6 +250,15 @@ export function mcpServerDefaults(
       server.headers.map((header) => [header.name, header.value]),
     ),
   }]));
+}
+
+/** `GET /api/info` 的去敏配置摘要；与前端 `frontend/remote/contracts.ts` 的 `serverInfoSchema` 同形。 */
+export interface ServerInfo {
+  model: { provider: string; tiers: Record<string, string>; baseUrl: string };
+  storage: { url: string };
+  mcp: { name: string; url: string }[];
+  workspace: string;
+  sessionCwd: string;
 }
 
 /** 不暴露 token / query / userinfo 的配置摘要，供前端设置页只读展示。 */

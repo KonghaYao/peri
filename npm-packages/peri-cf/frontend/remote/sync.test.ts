@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   Y, decodeAckFrame, decodeHelloFrame, encodeSyncFrame, type DocSnapshot,
 } from '@peri-code/sdk/view';
-import { ChatProjection } from '@core/agent';
+import { ChatProjection } from './projection';
 import { ChatSyncProvider, SyncBackpressureError, WebSocketChatChannel, type WebSocketLike } from './sync';
 
 const chat = { id: 'session-1', title: '同步测试', updatedAt: '2026-10-20T00:00:00Z' };

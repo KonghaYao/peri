@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Sparkles, X } from "lucide-react";
-import type { ServerInfo } from "@core/shared";
+import type { ServerInfo } from "../remote";
 
 /**
  * 只读服务端信息：模型、存储与 MCP 由后端环境变量配置，前端不再保存任何凭据。

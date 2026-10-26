@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 
-// 应用源码按 `@/...` 约定导入前端根，`@core/...` 指向共享契约。
+// 应用源码按 `@/...` 约定导入前端根。
 const frontendRoot = fileURLToPath(new URL("./frontend", import.meta.url));
 
 // SDK `/portable` 的准入模块引用 `crypto`；浏览器侧不消费该面，用显式失败的替身替换。
@@ -13,7 +13,7 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
-      "@": frontendRoot, "@core": fileURLToPath(new URL("./core", import.meta.url)),
+      "@": frontendRoot,
       crypto: nodeCryptoShim, "node:crypto": nodeCryptoShim,
     },
   },

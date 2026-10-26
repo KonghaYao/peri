@@ -11,7 +11,7 @@ import {
   actionTargetSchema, chatActionSuccessSchema, chatErrorResponseSchema, chatHandleSchema,
   payloadErrorResponseSchema, payloadResponseSchema,
   type ActionTargetDTO, type ChatActionSuccessDTO, type ChatHandleDTO,
-} from "@core/shared";
+} from "./contracts";
 
 /** Action 失败：`disposition` 是唯一可重试性权威，HTTP 状态不反推。 */
 export type RemoteDisposition = "rejected" | "unknown" | "not_sent";

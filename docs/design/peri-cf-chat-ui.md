@@ -34,7 +34,7 @@
     ↓
 [浏览器 ChatReplica]（只读；readiness / schema / gap repair）
     ↓
-[core/agent ChatProjection]（Zod 校验的 ChatDisplayState，按 bindingRevision 缓存）
+[frontend/remote ChatProjection]（Zod 校验的 ChatDisplayState，按 bindingRevision 缓存）
     ↓
 [frontend/chat/runtime/useChat]（ChatController + TanStack Query 目录缓存）
     ↓
@@ -106,6 +106,6 @@
 
 - 行为验证：发送、流式、停止、工具卡片（含载荷展开）、推理折叠、交互回答、会话切换与新建、
   刷新/断线恢复、版本不支持与错误态。
-- 自动化基线：`frontend/remote/*.test.ts`（Action/WS/两步打开/A-B 隔离）、`core/agent/view/*.test.ts`
+- 自动化基线：`frontend/remote/*.test.ts`（Action/WS/两步打开/A-B 隔离）、`frontend/remote/{projection,askUserQuestion}.test.ts`
   （投影/问答）、`frontend/chat/**/*.test.tsx`（组件与 DOM）。
 - 用户验收：浏览器完成一轮真实对话与一次会话切换；真实模型/Store 未配置时只能标记 blocked。

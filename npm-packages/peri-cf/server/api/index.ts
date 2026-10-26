@@ -9,8 +9,8 @@ import {
   type ToolPayloadResponse,
 } from "@peri-code/sdk";
 import { ChatCloseIncompleteError } from "@peri-code/sdk";
-import { logError } from "@core/agent";
-import type { ServerInfo } from "@core/shared";
+import { logError } from "../logging";
+import type { ServerInfo } from "../config";
 import {
   chatNotFound,
   closeIncomplete,

@@ -2,10 +2,16 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { useQuery } from '@tanstack/react-query';
 import type { InteractionAnswer } from '@peri-code/sdk/view';
 import { createChatApplication, type ChatController } from '../../remote';
-import { errorText } from '@core/agent';
 import { createChatQueries, LIST_POLL_ACTIVITY_MS, listRefetchInterval } from './queries';
 import { chatPayloadReader } from './payloadReader';
 import type { Chat, ChatSummary } from './types';
+
+/** 错误文案单一出口：宿主字符串与 Error 用同一条清洗规则，避免控制字符进入视图。 */
+function errorText(error: unknown): string {
+  const text = typeof error === "string" ? error
+    : error instanceof Error ? error.message : "本地宿主调用失败，请稍后重试。";
+  return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "").slice(0, 512);
+}
 
 /** 错误横幅的重试路由：列表错误刷新列表；只有读面失败才重新加载会话。 */
 export type ChatRetryAction = 'refresh-list' | 'reload-chat' | 'none';

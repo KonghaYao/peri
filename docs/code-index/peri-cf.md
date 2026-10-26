@@ -27,7 +27,7 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
   HELLO/ACK，任何文档更新帧都被拒绝；慢客户端由 SDK 交付信用/背压显式关闭。
 - **前端**：`frontend/remote/controller.ts` 是页面控制器（句柄身份、两步打开历史、绑定代次、Action、
   连接）；`actions.ts` 是 HTTP 客户端；`sync.ts` 是 WebSocket → SDK 副本；`application.ts` 是前端组合根。
-  `core/agent/view/projection.ts` 把 `ChatReplica` 物化为展示 DTO，不反向控制执行。
+  `frontend/remote/projection.ts` 把 `ChatReplica` 物化为展示 DTO，不反向控制执行。
 - **静态资源**：非 `/api/*` 路径由 Bun 入口提供 `dist/client` 与 `index.html` 回退；Vite 开发服务器把
   `/api` 代理到 Bun 服务。
 - **没有访问控制**：服务不提供认证、限流或多租户隔离；部署入口鉴权是必要条件。
@@ -73,8 +73,8 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 | 服务端宿主（句柄转发 + View 生命周期） | `server/host.ts` |
 | HTTP 路由与错误映射 | `server/api/index.ts`、`server/api/errors.ts` |
 | WebSocket 同步适配 | `server/api/sync.ts` |
-| 共享 Zod DTO / HTTP 契约 | `core/shared/chat.ts`、`core/shared/sync.ts`、`core/shared/chat-display-state.ts` |
-| 浏览器投影与问答适配 | `core/agent/view/projection.ts`、`core/agent/view/askUserQuestion.ts` |
+| 共享 Zod DTO / HTTP 契约 | `frontend/remote/contracts.ts`、`frontend/remote/display-state.ts` |
+| 浏览器投影与问答适配 | `frontend/remote/projection.ts`、`frontend/remote/askUserQuestion.ts` |
 | 远程客户端与页面控制器 | `frontend/remote/{application,actions,controller,repository,sync}.ts` |
 | Chat 运行时与 useChat | `frontend/chat/runtime/useChat.ts`、`frontend/chat/runtime/queries.ts`、`frontend/chat/runtime/payloadReader.ts` |
 | Chat 展示与交互 | `frontend/chat/{components,timeline,composer}/`；`frontend/components/assistant-ui/` 只保留 vendored 审批/问答卡片 |
@@ -95,8 +95,8 @@ Emscripten 6.0.10 与 peri-wasm 产物。最近一次记录（2026-10-26）：SD
 ## 验证入口
 
 - `bun run typecheck`：根 TS + `server/tsconfig.json`。
-- `bun test`：`core`、`frontend`、`scripts`，再以 server tsconfig 跑 `server`。
+- `bun test`：`frontend`、`scripts`，再以 server tsconfig 跑 `server`。
 - `./node_modules/.bin/vite build`：只构建前端；`bun run build` 额外执行 `prepare:wasm`。
 - 服务端冒烟：`GET /api/info`、`GET /api/chats`、WS `/api/chats/:id/sync`；真实执行需模型端点与 Store。
-- 边界回归：`core/agent/boundary.test.ts` 扫描生产源码，禁止旧命令/事件路由、旧门面和跨层引用。
+- 边界回归：`scripts/module-boundary.test.ts` 扫描生产源码，禁止旧命令/事件路由、旧门面和跨层引用。
 - 浏览器包检查：`dist/client` 不应出现模型/Store 凭据变量、`node:fs` 或 `@tursodatabase`。

@@ -6,7 +6,7 @@ import {
   type ChatViewRegistry,
   type ChatYjsChannel,
 } from "@peri-code/sdk";
-import { logError } from "@core/agent";
+import { logError } from "../logging";
 import { chatNotFound } from "./errors";
 
 /**

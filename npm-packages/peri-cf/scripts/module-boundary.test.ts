@@ -4,16 +4,14 @@ import { dirname, relative, resolve, sep } from 'node:path';
 
 /**
  * 模块边界回归：文件夹是模块，`index.ts` 是唯一公共出口。
- * 跨模块必须走出口；`core/agent/` 保持平台无关且不承载浏览器门面；
- * 客户端门面归 `frontend/remote/`；`frontend/` 与 `server/` 互不引用。
+ * 跨模块必须走出口；`frontend/remote/` 承载 DTO、投影与客户端门面；
+ * `frontend/` 与 `server/` 互不引用。
  */
-const packageRoot = resolve(import.meta.dir, '../..');
-const sourceRoots = ['core', 'frontend', 'server', 'scripts'];
+const packageRoot = resolve(import.meta.dir, '..');
+const sourceRoots = ['frontend', 'server', 'scripts'];
 const skippedDirectories = new Set(['node_modules', 'dist', '.cache', '.wrangler', 'logs']);
 
 const moduleRoots = [
-  'core/agent', 'core/agent/view',
-  'core/shared',
   'server', 'server/api',
   'frontend/chat', 'frontend/chat/runtime', 'frontend/chat/components',
   'frontend/remote', 'frontend/settings',
@@ -47,8 +45,7 @@ function importsOf(source: string): string[] {
 
 function resolveImport(specifier: string, importer: string): string | undefined {
   let base: string;
-  if (specifier.startsWith('@core/')) base = resolve(packageRoot, 'core', specifier.slice(6));
-  else if (specifier.startsWith('@/')) base = resolve(packageRoot, 'frontend', specifier.slice(2));
+  if (specifier.startsWith('@/')) base = resolve(packageRoot, 'frontend', specifier.slice(2));
   else if (specifier.startsWith('.')) base = resolve(dirname(resolve(packageRoot, importer)), specifier);
   else return undefined;
   const baseRelative = relative(packageRoot, base);
@@ -120,70 +117,14 @@ describe('frontend/server separation', () => {
   });
 });
 
-describe('agent module purity', () => {
-  const agentProduction = files.filter((file) => {
-    const path = relative(packageRoot, file);
-    return path.startsWith(`core${sep}agent${sep}`) && !/\.test\.(ts|tsx)$/.test(path);
-  });
-
-  test('only imports its own sources, shared DTOs, and the SDK', () => {
-    const violations: string[] = [];
-    for (const file of agentProduction) {
-      const importer = relative(packageRoot, file);
-      for (const specifier of importsOf(withoutComments(readFileSync(file, 'utf8')))) {
-        if (specifier.startsWith('@peri-code/sdk')) continue;
-        const target = resolveImport(specifier, importer);
-        if (target && (within(`core${sep}agent`, target) || within(`core${sep}shared`, target))) continue;
-        violations.push(`${importer} → ${specifier}`);
-      }
-    }
-    expect(violations).toEqual([]);
-  });
-
-  test('does not touch browser storage, DOM, or React', () => {
-    const forbidden = [
-      /\blocalStorage\b/,
-      /\bsessionStorage\b/,
-      /\bindexedDB\b/,
-      /\bglobalThis\.location\b/,
-      /\bdocument\./,
-      /\bwindow\./,
-      /\bnavigator\./,
-      /\bfrom\s+["']react/,
-      /\bfrom\s+["']@assistant-ui/,
-      /\bfrom\s+["']@tanstack/,
-    ];
-    const violations: string[] = [];
-    for (const file of agentProduction) {
-      const code = withoutComments(readFileSync(file, 'utf8'));
-      for (const pattern of forbidden) {
-        if (pattern.test(code)) violations.push(`${relative(packageRoot, file)} → ${pattern}`);
-      }
-    }
-    expect(violations).toEqual([]);
-  });
-
-  test('keeps the browser client facade in frontend/remote', () => {
-    const agentEntry = withoutComments(readFileSync(resolve(packageRoot, 'core/agent/index.ts'), 'utf8'));
-    for (const symbol of ['AgentManager', 'AgentView', 'ChatView', 'Phase', 'EventSource'])
-      expect(agentEntry).not.toMatch(new RegExp(`\\b${symbol}\\b`));
-
-    const remoteEntry = withoutComments(readFileSync(resolve(packageRoot, 'frontend/remote/index.ts'), 'utf8'));
-    for (const symbol of ['ChatController', 'ChatView', 'Phase', 'ChatLoadState'])
-      expect(remoteEntry).toMatch(new RegExp(`\\b${symbol}\\b`));
-    for (const symbol of ['AgentManager', 'RemoteChatRuntime', 'createRemoteAgent'])
-      expect(remoteEntry).not.toMatch(new RegExp(`\\b${symbol}\\b`));
-  });
-});
-
 describe('legacy chat transport removal', () => {
-  test('production frontend/core sources contain no SSE, AgentManager, or old command/event routes', () => {
+  test('production frontend sources contain no SSE, AgentManager, or old command/event routes', () => {
     const legacy = [/\bEventSource\b/, /\bAgentManager\b/, /\/commands\b/, /\/events\b/,
       /\bRemoteChatRuntime\b/, /\bChatCommand\b/, /\bSyncState\b/];
     const violations: string[] = [];
     for (const file of files) {
       const path = relative(packageRoot, file);
-      if (!/^(frontend|core)[\\/]/.test(path) || /\.test\.(ts|tsx)$/.test(path)) continue;
+      if (!/^frontend[\\/]/.test(path) || /\.test\.(ts|tsx)$/.test(path)) continue;
       const code = withoutComments(readFileSync(file, 'utf8'));
       for (const pattern of legacy) if (pattern.test(code)) violations.push(`${path} → ${pattern}`);
     }

@@ -139,7 +139,7 @@ export async function sourceChecksums(repoRoot: string): Promise<Record<string, 
   for (const directory of await wasmSourceRoots(repoRoot)) await walk(directory, add);
   for (const directory of ["patches", ".cargo"]) await walk(resolve(repoRoot, directory), add);
   for (const file of ["Cargo.toml", "Cargo.lock", "scripts/cargo-wasm.sh", "scripts/cargo-rmcp-patched.sh",
-    "scripts/prepare-emscripten.sh", "npm-packages/peri-cf/core/shared/runtime-limits.ts"])
+    "scripts/prepare-emscripten.sh"])
     await add(resolve(repoRoot, file));
   await walk(resolve(repoRoot, "npm-packages/peri-cf/scripts"), async (path) => {
     if (/\/(?:build-wasm|wasm-provenance|wasm-profile|wasm-tools|worker-glue|worker-runtime-glue)\.ts$/.test(path)) await add(path);

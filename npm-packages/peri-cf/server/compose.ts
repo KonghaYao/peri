@@ -5,7 +5,7 @@ import {
   TursoStorage,
   type ChatManagerOptions,
 } from "@peri-code/sdk";
-import { logError } from "@core/agent";
+import { logError } from "./logging";
 import {
   SESSION_CWD,
   WORKSPACE_CWD,

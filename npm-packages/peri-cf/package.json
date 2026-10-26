@@ -16,7 +16,7 @@
     "preview": "bun --tsconfig-override server/tsconfig.json server/index.ts",
     "typecheck": "tsc --noEmit && tsc -p server/tsconfig.json",
     "typecheck:server": "tsc -p server/tsconfig.json",
-    "test": "bun test core frontend scripts && bun test --tsconfig-override server/tsconfig.json server",
+    "test": "bun test frontend scripts && bun test --tsconfig-override server/tsconfig.json server",
     "test:server": "bun test --tsconfig-override server/tsconfig.json server"
   },
   "dependencies": {

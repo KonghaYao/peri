@@ -29,22 +29,20 @@ View 释放与关闭。句柄、绑定、Action、事实与关闭语义都在 SD
 
 ## 代码布局
 
-- `core/shared/`：前后端共用 Zod 契约与展示 DTO（`chat.ts`、`sync.ts`、`chat-display-state.ts`）与
-  WASM 构建常量。
-- `core/agent/`：平台无关展示内核（不依赖 React/DOM/localStorage）。`view/projection.ts` 持有
-  `ChatReplica` 并物化 `ChatDisplayState`；`view/askUserQuestion.ts` 做问答适配。
+- `frontend/remote/`：HTTP Action、WebSocket 客户端、页面控制器、目录仓储与组合根；同目录承载
+  `contracts.ts`（Zod wire/展示 DTO 与 `ServerInfo`）、`display-state.ts`（`ChatDisplayState` 物化）、
+  `projection.ts`（`ChatReplica` 投影）、`askUserQuestion.ts`（问答适配）与 `logging.ts`。
 - `server/`：`index.ts`（Bun 入口与静态资源）、`config.ts`（环境变量与启动校验）、
   `compose.ts`（平台装配，唯一 `new ChatManager`）、`host.ts`（`ChatHost`：句柄转发与 View 生命周期）、
   `api/index.ts`（Hono 目录/句柄/Action/payload）、`api/sync.ts`（WS → ChatYjsChannel）、
   `api/errors.ts`（错误映射）。
-- `frontend/remote/`：HTTP Action、WebSocket 客户端、页面控制器、目录仓储与组合根。
 - `frontend/chat/`、`frontend/components/`、`frontend/app/`：Chat 展示外壳、时间线与交互卡片；
   `frontend/settings/` 只读服务端信息。
 - `scripts/`：WASM 构建/provenance、开发启动与探针；`wasm/generated/` 是构建产物（gitignored），
   只由服务端加载。
 
-模块规则：文件夹是模块，目录根 `index.ts` 是唯一公共出口；`core/agent/boundary.test.ts` 扫描生产
-代码，强制 `frontend/` 与 `server/` 互不引用，`core/agent` 不得引入浏览器/React 依赖。
+模块规则：文件夹是模块，目录根 `index.ts` 是唯一公共出口；`scripts/module-boundary.test.ts` 扫描生产
+代码，强制 `frontend/` 与 `server/` 互不引用。
 
 ## 数据流与生命周期
 
@@ -72,7 +70,7 @@ View 释放与关闭。句柄、绑定、Action、事实与关闭语义都在 SD
 ## Chat 前端
 
 设计见 `../../docs/design/peri-cf-chat-ui.md`；状态权威是 SDK `/view` 的 `SessionView` 经
-`core/agent` 物化后的展示 DTO，前端不复制状态机。
+`frontend/remote` 物化后的展示 DTO，前端不复制状态机。
 
 - `frontend/chat/runtime/useChat.ts`：装配 `ChatController`、目录查询缓存与 payload reader。
 - `frontend/chat/components/`：消息流、工具卡片、会话列表、欢迎页与交互面板；`ChatShell` 组合侧栏、
@@ -92,8 +90,8 @@ View 释放与关闭。句柄、绑定、Action、事实与关闭语义都在 SD
 同步规则。调度器与清理/启动超时由 SDK 内部自持，服务端不注入；网络由 Emscripten fetch 执行器发起。
 SDK 不感知 assistant-ui。
 
-`core/shared/chat.ts` 与 `sync.ts` 的 Zod schema 是 wire/展示 DTO 的单一来源。ACP 投影由 SDK
-`ChatView`/`ChatReplica` 负责，应用只做展示适配。
+`frontend/remote/contracts.ts` 与 `display-state.ts` 的 Zod schema 是浏览器侧 wire/展示 DTO 的单一
+来源。ACP 投影由 SDK `ChatView`/`ChatReplica` 负责，应用只做展示适配。
 
 **SDK dist 前置**：CF 通过 `file:../@peri-sdk` 解析 `node_modules/@peri-code/sdk`。干净 CI 先在 SDK
 执行 `MISE_ENV=wasm mise exec -- bun run build`，再在 CF 执行 `bun install --force`（file 依赖变为
@@ -107,7 +105,7 @@ SDK 不感知 assistant-ui。
 - `bun run start`：生产启动 Bun 服务（需环境变量与已构建资源）。
 - `bun run typecheck`、`bun test`、`./node_modules/.bin/vite build`：TS、行为测试与前端构建。
 - `bun run build`：`prepare:wasm` + Vite；`build:wasm` 构建 CF 专用 profile 与 provenance；
-  `prepare:wasm` 只校验并原子发布到 `wasm/generated`。`core/shared/runtime-limits.ts` 属于 wasm
+  `prepare:wasm` 只校验并原子发布到 `wasm/generated`。`scripts/wasm-profile.ts` 的内存常量属于 wasm
   构建输入。
 
 默认没有本地文件/终端工具；远程能力需经 `PERI_MCP_SERVERS` 单独配置。单进程 memory storage 不能宣称

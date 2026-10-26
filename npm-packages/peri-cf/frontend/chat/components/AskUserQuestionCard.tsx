@@ -7,7 +7,7 @@ import {
   type AskUserQuestionDecision,
   type AskUserQuestionDraft,
   type AskUserQuestionDrafts,
-} from '@core/agent';
+} from '../../remote';
 import type { InteractionAnswerHandler } from '../runtime';
 import type { AskUserQuestion, Interaction } from '../runtime';
 

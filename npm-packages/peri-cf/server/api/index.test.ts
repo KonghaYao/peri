@@ -23,7 +23,7 @@ import {
   type ToolPayloadReadRef,
   type ToolPayloadResponse,
 } from "@peri-code/sdk";
-import type { ServerInfo } from "@core/shared";
+import type { ServerInfo } from "../config";
 import { createApi, type ApiChatManager } from ".";
 
 const info = {

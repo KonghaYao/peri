@@ -108,7 +108,7 @@ bun test
 bun run build        # prepare:wasm + Vite；需要 WASM 工具链
 ```
 
-- `bun test` 覆盖 core、frontend、scripts 与 server；真实模型/Store/远程 MCP 不在单测内。
+- `bun test` 覆盖 frontend、scripts 与 server；真实模型/Store/远程 MCP 不在单测内。
 - 浏览器包检查：`dist/client` 不应出现 `PERI_MODEL_API_KEY`、`PERI_STORAGE_TOKEN`、`node:fs` 或
   `@tursodatabase`。
 - 真实运行后端验收需要匹配源码的 WASM 产物与可用模型/Store；未验证平台必须标记 blocked。
