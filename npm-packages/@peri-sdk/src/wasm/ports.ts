@@ -3,15 +3,15 @@ import * as net from "node:net";
 import { isIP } from "node:net";
 
 /**
- * Host ports for the Emscripten ACP Host. Each port owns one piece of platform state
- * (sockets, name resolution) and is injected into the module factory by `startPeriWasmHost`.
+ * Ports for the Emscripten ACP runtime. Each port owns one piece of platform state
+ * (sockets, name resolution) and is injected into the module factory by `startWasmRuntime`.
  * 定时器端口与平台无关，见 `./scheduler`。
  */
 
 export interface WasmNetworkPort {
     /** Module-shaped `node:net` replacement handed to the Emscripten glue. */
     module: Record<string, unknown>;
-    /** Destroy every socket this host still owns; throws when destruction is unconfirmed. */
+    /** Destroy every socket this runtime still owns; throws when destruction is unconfirmed. */
     close(): void;
     /** Resolve once every destroyed socket reported its close event. */
     drain(): Promise<void>;
@@ -32,7 +32,7 @@ export interface WasmDnsPort {
         callback: (error: Error | null, addresses?: WasmDnsAddress[]) => void): void;
 }
 
-/** Sockets stay owned by the host so shutdown closes only the connections it created. */
+/** Sockets stay owned by the runtime so shutdown closes only the connections it created. */
 export function createNodeNetworkPort(): WasmNetworkPort {
     const sockets = new Set<net.Socket>();
     const closing = new Map<net.Socket, Promise<void>>();

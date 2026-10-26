@@ -22,11 +22,11 @@ export interface PeriWasmInstantiateOptions {
   /** Environment fixed for this module instance; merged into the artifact's `ENV` before startup. */
   env?: Readonly<Record<string, string>>;
   /**
-   * 静态导入的 Emscripten factory；注入时宿主已拥有产物位置，`moduleUrl` 既不解析也不要求可解析。
-   * workerd 打包模块的 `import.meta.url` 是 `undefined`，这类宿主只能走本入口。
+   * 静态导入的 Emscripten factory；注入时运行后端已拥有产物位置，`moduleUrl` 既不解析也不要求可解析。
+   * workerd 打包模块的 `import.meta.url` 是 `undefined`，这类运行后端只能走本入口。
    */
   moduleFactory?: (options: Record<string, unknown>) => Promise<PeriWasmModule>;
-  /** Host-owned Emscripten options (network, timers, DNS, `instantiateWasm`) for this instance. */
+  /** Runtime-owned Emscripten options (network, timers, DNS, `instantiateWasm`) for this instance. */
   moduleOptions?: Readonly<Record<string, unknown>>;
 }
 
@@ -44,7 +44,7 @@ function normalizeEnvironment(env?: Readonly<Record<string, string>>): Record<st
 
 const DEFAULT_ARTIFACT = "./wasm/peri-wasm.js";
 
-/** 解析产物位置；失败时给出宿主可执行的结论，而不是裸 `TypeError: Invalid URL string`。 */
+/** 解析产物位置；失败时给出运行后端可执行的结论，而不是裸 `TypeError: Invalid URL string`。 */
 function artifactUrl(moduleUrl?: string | URL): URL {
   const specifier = String(moduleUrl ?? DEFAULT_ARTIFACT);
   try {
@@ -53,7 +53,7 @@ function artifactUrl(moduleUrl?: string | URL): URL {
     throw new Error(
       `Cannot resolve the Peri WASM artifact URL from ${JSON.stringify(specifier)}: this runtime does not ` +
       `provide a usable import.meta.url (workerd reports undefined for bundled modules). Pass an absolute ` +
-      `artifact URL, or inject moduleFactory so the host owns the artifact location.`,
+      `artifact URL, or inject moduleFactory so the runtime owns the artifact location.`,
       { cause },
     );
   }
@@ -85,7 +85,7 @@ async function instantiate(url: URL | undefined, environment: Record<string, str
 }
 
 /**
- * Build a fresh module instance for one host; nothing is shared with other instances or URLs.
+ * Build a fresh module instance for one runtime; nothing is shared with other instances or URLs.
  *
  * 环境在调用时同步取快照，失败一律以 reject 结算（`loadPeriWasm` 的校验失败仍是同步抛出）。
  */

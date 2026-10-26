@@ -1,8 +1,8 @@
 # Peri SDK Chat 架构重构
 
-- 状态：**实现已提交（Phase 0–6）；A01-A22 全部 PASS；官方 WASM build、真实 WASM/workerd 宿主与 CF 干净依赖已恢复；Hosted Workers/真实浏览器部署不在本轮范围**
+- 状态：**实现已提交（Phase 0–6）；A01-A22 全部 PASS；官方 WASM build、真实 WASM/workerd 运行后端与 CF 干净依赖已恢复；Hosted Workers/真实浏览器部署不在本轮范围**
 - 分支：`feature/peri-cf-browser-agent`
-- 实施提交：`64bfcbc48`（契约）、`e6ccbcd3d`（SDK 三层）、`c0520f625`（SDK 出口/工厂）、`cc447f789`（CF 服务端）、`966b6c7d7`（CF 前端）、`179677996`（文档）、`fb0535e34`（终验修复）、`272e2dcb4`（Timeline/A15 修复）；工具链/宿主修复见本 issue 后续提交
+- 实施提交：`64bfcbc48`（契约）、`e6ccbcd3d`（SDK 三层）、`c0520f625`（SDK 出口/工厂）、`cc447f789`（CF 服务端）、`966b6c7d7`（CF 前端）、`179677996`（文档）、`fb0535e34`（终验修复）、`272e2dcb4`（Timeline/A15 修复）；工具链/运行后端修复见本 issue 后续提交
 - 事实源：本 issue；用户裁决与实施计划见工作区 `.peri/plans/`（非仓库长期事实源）。
 - 本阶段边界：完成终验指出的换绑有界关闭、View 释放重试、A07/A10/A15 组合用例，修复 CF Timeline 计时竞态并同步文档/证据；不重构业务逻辑，不改 Rust/ACP wire/数据库表；提交由协调者按检查点执行，subagent 不 commit/push。
 
@@ -10,10 +10,10 @@
 
 把 SDK 的 Chat 能力收敛为五个核心对象：
 
-1. `ChatManager`：共享依赖快照、句柄目录、Session claim 协调、单个/整体释放；不接收普通执行动作。
+1. `ChatManager`：共享依赖快照、句柄目录、SessionOwnership 协调、单个/整体释放；不接收普通执行动作。
 2. `ChatService`：单 Chat 的绑定、动作分派、事实日志与载荷读取；不持有 Manager，不依赖 Yjs。
 3. `ChatUserAction`：八类可序列化用户意图，携带稳定 `requestId` 与纯数据 `payload`。
-4. `PeriInstance`：一次激活的宿主/Session 装配、交互/队列/历史/载荷控制与事实输出；内部实现。
+4. `PeriInstance`：一次激活的运行后端/Session 装配、交互/队列/历史/载荷控制与事实输出；内部实现。
 5. `ChatView` / `ChatReplica`：服务端事实投影到 Yjs，浏览器副本只读并经选择器读取。
 
 依赖方向固定为 `ChatManager → ChatService → PeriInstance → Session → Transport`；`ChatView` 只依赖
@@ -25,7 +25,7 @@
 - 不恢复 main 的 Cloudflare Worker/DO 目录；CF 消费方沿用工作树 `server/`、`core/`、`frontend/`。
 - 不恢复 SSE `/events`、`/commands`、旧 Agent/ManagedAgents/SessionDocs 门面或兼容 shim。
 - 不让 SDK 变成第二个调度器，不新增持久执行恢复状态。
-- 不声明多实例 claim、托管 Workers 或生产浏览器部署已验收。
+- 不声明多实例 ownership、托管 Workers 或生产浏览器部署已验收。
 
 ## 3. 阶段状态
 
@@ -33,12 +33,12 @@
 | --- | --- | --- |
 | Phase 0 | 契约冻结与脚手架（action/types/errors/facts/channel 与定向测试） | 已提交 `64bfcbc48`；定向契约测试通过 |
 | Phase 1 | 运行侧：Session 纯 ACP 客户端、PeriInstance、交互/历史/任务/载荷 | 已提交 `e6ccbcd3d`；单元/行为测试通过；真实 WASM 由 A18/A22 覆盖 |
-| Phase 2 | Chat 控制面：Manager、Service、绑定状态机、claims、回执 | 已提交 `e6ccbcd3d`/`c0520f625`；单元/行为测试通过 |
+| Phase 2 | Chat 控制面：Manager、Service、绑定状态机、SessionOwnership、回执 | 已提交 `e6ccbcd3d`/`c0520f625`；单元/行为测试通过 |
 | Phase 3 | View/Yjs：ChatDocument、ChatView、ChatReplica、同步协议 | 已提交 `e6ccbcd3d`；单元/行为测试通过 |
 | Phase 4 | SDK 集成：公开出口切换、删除旧层、工厂 | 已提交 `c0520f625`；`public-view` 负向断言通过 |
-| Phase 5 | CF 服务端：ChatManager 接线、Action 路由、WS | 已提交 `cc447f789`；typecheck/test 通过；真实宿主由 A22 覆盖 |
+| Phase 5 | CF 服务端：ChatManager 接线、Action 路由、WS | 已提交 `cc447f789`；typecheck/test 通过；真实运行后端由 A22 覆盖 |
 | Phase 6 | CF 前端：Remote Action/回执、Replica 选择器、WS 客户端 | 已提交 `966b6c7d7`；typecheck/test/Vite build 通过；浏览器验收未执行 |
-| Phase 7 | 删除旧层、文档更新与验收证据 | 完成：换绑旧激活有界关闭、View 释放失败可重试（manager 与 HTTP DELETE 均可重试）；A07/A10/A15 组合用例补齐；CF Timeline 贴底状态改为随信号同步提交，全量测试连续 10 次稳定；官方 WASM build、真实 WASM/workerd 宿主与 CF 干净依赖已验证 |
+| Phase 7 | 删除旧层、文档更新与验收证据 | 完成：换绑旧激活有界关闭、View 释放失败可重试（manager 与 HTTP DELETE 均可重试）；A07/A10/A15 组合用例补齐；CF Timeline 贴底状态改为随信号同步提交，全量测试连续 10 次稳定；官方 WASM build、真实 WASM/workerd 运行后端与 CF 干净依赖已验证 |
 
 ## 4. 已裁决与待决
 
@@ -46,23 +46,23 @@
 | --- | --- |
 | D1 | 已裁决：CF 按工作树 `server/` + `core/` + `frontend/` 实施，不恢复 Worker/DO。 |
 | D2 | 已裁决：同步采用 WebSocket + Yjs；SSE 路由已删除，`ChatYjsChannel` 只承载逻辑帧。 |
-| D3 | 已裁决（本轮范围）：只做手动 `closeChat`/`shutdown`，不启用宿主空闲自动回收。 |
+| D3 | 已裁决（本轮范围）：只做手动 `closeChat`/`shutdown`，不启用运行后端空闲自动回收。 |
 | D4 | 已裁决：加载历史保留持久 cwd、不发送 `_meta.peri.instructions`；MCP 声明随 load 重发（连接环境，不是 prompt 冻结内容）。 |
 | D5 | 已按本阶段任务执行：旧公开门面删除，不留 shim；对外发布说明需标注 breaking change。 |
 | D6 | 已执行：`listSessions` 只返回目录事实，不再提供每会话运行态；选中会话运行态来自副本。 |
 | D7 | 已实现：内容寻址 payload ref 与运行侧预算；回归见 `tests/peri-instance.test.ts`、`tests/tool-payloads.test.ts`。 |
-| D8 | 部署限制：CF Session claim 默认单进程 `MemoryKV`；多实例需注入共享原子 KV。 |
+| D8 | 部署限制：CF SessionOwnership 默认单进程 `MemoryKV`；多实例需注入共享原子 KV。 |
 
 ## 5. 验收 A01-A22
 
-状态口径：PASS 表示有声明的自动化行为证据；BLOCKED 表示关键平台/真实宿主证据不可得，不能以
+状态口径：PASS 表示有声明的自动化行为证据；BLOCKED 表示关键平台/真实运行后端证据不可得，不能以
 typecheck 或旧 dist 冒充。测试名省略文件时均为 `npm-packages/@peri-sdk/tests/` 或
 `npm-packages/peri-cf/` 下同名文件。
 
 | 编号 | 场景 | 证据 | 状态 |
 | --- | --- | --- | --- |
-| A01 | 声明句柄 → 新建 → 发送 | `chat-manager.test.ts`：createChat 同步/不启动，create_new_session 绑定并 claim；`chat-actions.test.ts`：execute 同步、accepted ≠ delivery；`chat-instance-factory.test.ts`：默认工厂；CF `server/api/index.test.ts`：空句柄 create_new_session。真实 WASM 证据归 A18/A22（BLOCKED） | PASS |
-| A02 | 空闲 A 换 B，B 加载失败 | `chat-binding.test.ts`：candidate failure keeps old binding/revision/claim；old close failure blocks；CF `frontend/remote/controller.test.ts`：A/B 隔离 | PASS |
+| A01 | 声明句柄 → 新建 → 发送 | `chat-manager.test.ts`：createChat 同步/不启动，create_new_session 绑定并取得 ownership；`chat-actions.test.ts`：execute 同步、accepted ≠ delivery；`chat-instance-factory.test.ts`：默认工厂；CF `server/api/index.test.ts`：空句柄 create_new_session。真实 WASM 证据归 A18/A22（BLOCKED） | PASS |
+| A02 | 空闲 A 换 B，B 加载失败 | `chat-binding.test.ts`：candidate failure keeps old binding/revision/ownership；old close failure blocks；CF `frontend/remote/controller.test.ts`：A/B 隔离 | PASS |
 | A03 | A 执行时打开 B 再返回 A | `chat-binding.test.ts`：running rejects switch without cancelling/closing A；CF controller：opening B releases local connection only | PASS |
 | A04 | 两句柄并发加载同 Session | `chat-binding.test.ts`：index visible during path resolution；`chat-manager.test.ts`：same manager ownerChatId、two managers one winner | PASS |
 | A05 | 同句柄并发加载同目标 | `chat-binding.test.ts`：concurrent loads merge into one ACP load | PASS |
@@ -76,15 +76,15 @@ typecheck 或旧 dist 冒充。测试名省略文件时均为 `npm-packages/@per
 | A13 | 断线、换代、schema 不支持 | `chat-replica.test.ts`：HELLO resume、gap repair、generation mismatch、unsupported ≠ empty；`session-sync.test.ts`：resume/替换；CF `server/api/sync.test.ts`：reconnect resume；controller unsupported | PASS |
 | A14 | 高频输出 + 慢客户端 | `chat-view.test.ts`：mute client credit/deadline close；`session-sync.test.ts`：slow subscriber bounded queue、fast subscribers current；CF sync：backpressure close；`chat-replica.test.ts`：read coalescing | PASS |
 | A15 | 载荷读取中切会话 | 新增 `payload-reader.test.ts` 组合用例：旧绑定上的两个读取（一个晚到成功、一个晚到失败）在 `changeSessionTo` 后都按发起代次丢弃为 `unavailable`，新 binding/文档目标不变、未产生新事实、新端口未收到旧读取；`chat-actions.test.ts`：late result target；`payload-reader.test.ts`：字节/JSON/预算；`peri-instance.test.ts`：content-addressed refs、integrity/unavailable、budget；CF `payloadReader.test.ts`：引用不在当前会话时显式失败 | PASS |
-| A16 | 启动失败/关闭未确认再清理 | `chat-close-bounded.test.ts`：startup close incomplete retains claim/index、later close confirms；`chat-binding.test.ts`：换绑旧激活 close 挂起时有界返回 incomplete、保留旧 claim/索引、恢复 close 后重试成功；`chat-manager.test.ts`：close failure retains；`peri-instance.test.ts`：unconfirmed cleanup blocks execution、retry | PASS |
+| A16 | 启动失败/关闭未确认再清理 | `chat-close-bounded.test.ts`：startup close incomplete retains ownership/index、later close confirms；`chat-binding.test.ts`：换绑旧激活 close 挂起时有界返回 incomplete、保留旧 ownership/索引、恢复 close 后重试成功；`chat-manager.test.ts`：close failure retains；`peri-instance.test.ts`：unconfirmed cleanup blocks execution、retry | PASS |
 | A17 | URL/factory-only/custom transport/不同配置 | `chat-instance-factory.test.ts`：transport/wasm、persisted cwd、abort；`wasm-loader.test.ts`：factory-only 不解析 moduleUrl；`session-start-cleanup.test.ts`：load persisted path | PASS |
-| A18 | 进程重启加载历史 | 单元：`history-pagination.test.ts`、`session-start-cleanup.test.ts`、`chat-manager.test.ts` 覆盖 load/续聊与不重放旧输入；`tests/wasm-acp-integration.test.ts` 8/8 通过（真实打包 WASM + 真实 Turso listener + fixture 模型）：关闭后新 Chat/新 WASM 实例加载同一 Session，历史含前两轮输入与回复；`smoke:workers` 冷恢复 `session/list`→`session/load` 通过（`persistedAcrossRestart:true`）。OS 进程级重启未单独建模，证据为 WASM 宿主重实例化与 workerd 冷恢复 | PASS |
+| A18 | 进程重启加载历史 | 单元：`history-pagination.test.ts`、`session-start-cleanup.test.ts`、`chat-manager.test.ts` 覆盖 load/续聊与不重放旧输入；`tests/wasm-acp-integration.test.ts` 8/8 通过（真实打包 WASM + 真实 Turso listener + fixture 模型）：关闭后新 Chat/新 WASM 实例加载同一 Session，历史含前两轮输入与回复；`smoke:workers` 冷恢复 `session/list`→`session/load` 通过（`persistedAcrossRestart:true`）。OS 进程级重启未单独建模，证据为 WASM 运行后端重实例化与 workerd 冷恢复 | PASS |
 | A19 | 沿生产链检查 send/cancel/close | `chat-actions.test.ts`、`peri-instance.test.ts`、CF `server/api/index.test.ts`；实现只走 ACP input/cancel/close，无 SDK dispatcher 或平行会话表 | PASS |
-| A20 | cancel 写出但未结束；close 未完成 | `chat-actions.test.ts`：cancel requested≠stopped；`peri-instance.test.ts`：session/host close failure retains；`chat-close-bounded.test.ts`：incomplete preserves claim/cause；CF controller：cancel requested | PASS |
+| A20 | cancel 写出但未结束；close 未完成 | `chat-actions.test.ts`：cancel requested≠stopped；`peri-instance.test.ts`：session/runtime close failure retains；`chat-close-bounded.test.ts`：incomplete preserves ownership/cause；CF controller：cancel requested | PASS |
 | A21 | 加载历史、双会话 MCP、延迟事件 | `history-pagination.test.ts`：持久 cwd/分页；`acp-mcp-lifecycle.test.ts`：工厂双激活、owned close、失败清理；`peri-instance.test.ts`：late done；`chat-document.test.ts`：late chunk 不造幽灵 turn | PASS |
-| A22 | CF 编译、真实宿主、浏览器包检查 | SDK `MISE_ENV=wasm mise exec -- bun run build` exit 0（新 `dist`，无旧门面导出）；`test:wasm` 8/8；`smoke:workers` 在本地 workerd 通过（fixture 模型 3 次调用、sqld、SDK 宿主、queue/prompt/冷恢复）；CF `bun run typecheck` 0、`bun test` 287 pass / 0 fail、`vite build` exit 0；浏览器包关键词检查无旧门面/SSE。Hosted Workers 部署未执行 | PASS |
+| A22 | CF 编译、真实运行后端、浏览器包检查 | SDK `MISE_ENV=wasm mise exec -- bun run build` exit 0（新 `dist`，无旧门面导出）；`test:wasm` 8/8；`smoke:workers` 在本地 workerd 通过（fixture 模型 3 次调用、sqld、SDK 运行后端、queue/prompt/冷恢复）；CF `bun run typecheck` 0、`bun test` 287 pass / 0 fail、`vite build` exit 0；浏览器包关键词检查无旧门面/SSE。Hosted Workers 部署未执行 | PASS |
 
-汇总：**22 PASS / 0 PARTIAL / 0 BLOCKED**。A18/A22 的 PASS 以本轮真实 WASM、workerd、fixture 模型与 sqld 证据为准；Hosted Workers、真实浏览器部署与多实例 claim 仍不在验收范围。独立复验指出的 A15 证据缺口已由组合用例补齐；CF 全量测试在修复后连续 10 次稳定通过。
+汇总：**22 PASS / 0 PARTIAL / 0 BLOCKED**。A18/A22 的 PASS 以本轮真实 WASM、workerd、fixture 模型与 sqld 证据为准；Hosted Workers、真实浏览器部署与多实例 ownership 仍不在验收范围。独立复验指出的 A15 证据缺口已由组合用例补齐；CF 全量测试在修复后连续 10 次稳定通过。
 
 ## 6. 验证证据（2026-10-24 独立复验与修复）
 
@@ -111,8 +111,8 @@ typecheck 或旧 dist 冒充。测试名省略文件时均为 `npm-packages/@per
 
 - **换绑有界关闭**：`chat-binding.test.ts` 新增用例让 `portA.close` 永不 resolve，`changeSessionTo("session-b")`
   在 25ms 预算内以 `binding_cleanup_failed`/`unknown` 返回；`phase=blocked`（不停留在 `switching`），
-  `session-a` 的 claim/索引/句柄保留，候选 `session-b` 清理确认后释放；恢复 `portA.close` 后
-  `chat.close()` 成功释放全部 claim。
+  `session-a` 的 ownership/索引/句柄保留，候选 `session-b` 清理确认后释放；恢复 `portA.close` 后
+  `chat.close()` 成功释放全部 ownership。
 - **View 释放重试**：`views.test.ts` 首次 `channel.close` 抛错时条目保留、source 已退订；第二次
   `dispose` 重试并删除条目，channel 关闭。`manager.test.ts` 验证 View 释放失败后句柄已移除、
   `hasPendingClose` 为 true，随后通过 HTTP DELETE 重试返回 204；`api/index.test.ts` 覆盖
@@ -176,11 +176,11 @@ typecheck 或旧 dist 冒充。测试名省略文件时均为 `npm-packages/@per
 
 1. `tests/` 不在任一 tsconfig 的 `include` 中，`bun run typecheck` 不检查测试类型。
 2. A18/A22 的 PASS 覆盖真实打包 WASM、真实 Turso listener、fixture 模型与本地 workerd；Hosted
-   Workers 部署、真实浏览器与真实模型供应商未执行。OS 进程级重启未单独建模，A18 以 WASM 宿主
+   Workers 部署、真实浏览器与真实模型供应商未执行。OS 进程级重启未单独建模，A18 以 WASM 运行后端
    重实例化与 workerd 冷恢复为证据。
 3. 官方 build 依赖 `MISE_ENV=wasm mise exec --` 注入 `EMSDK`；直接 `bun run build` 在仅有 mise shim
    的环境会把 shim 路径当作工具链并失败，文档已给出正确命令。
-4. 独立复验已完成；A01-A22 的 PASS 仍只覆盖所列自动化/本机宿主证据，不代表托管部署验收。
-5. `sessionClaimKey` 保留既有协调域前缀 `peri:managed-agent:session:`。它是存储 key，不是公开符号；改名会破坏升级期跨版本 claim 互斥，需单独迁移，不在本轮修改。
+4. 独立复验已完成；A01-A22 的 PASS 仍只覆盖所列自动化/本机运行后端证据，不代表托管部署验收。
+5. `sessionOwnershipKey` 保留既有协调域前缀 `peri:managed-agent:session:`。它是存储 key，不是公开符号；函数名变更不改 key 字符串，以维持升级期跨版本 ownership 互斥。
 6. HTTP DELETE 的残留重试按 `chatId` 寻址；若首次 DELETE 使用 Session ID 且句柄移除后 View 仍残留，
    需用 500 响应体中的 `chatId` 重试（GC/app 入口均使用 chat id，不提供 Session ID tombstone）。

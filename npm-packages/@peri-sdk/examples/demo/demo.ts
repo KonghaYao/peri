@@ -2,7 +2,7 @@
 import { readFile, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
-    AtomicSessionClaims,
+    AtomicSessionOwnership,
     BareHarnessConfig,
     ChatManager,
     MemoryKV,
@@ -88,8 +88,8 @@ const manager = new ChatManager({
         machineId: Bun.env.PERI_WASM_MACHINE_ID ?? "00000000-0000-4000-8000-000000000001",
     },
     database: sessionDatabase(storage),
-    sessionClaims: new AtomicSessionClaims(new MemoryKV()),
-    host: { kind: "wasm", moduleUrl: wasmModuleUrl, env: wasmEnv },
+    sessionOwnership: new AtomicSessionOwnership(new MemoryKV()),
+    runtime: { kind: "wasm", moduleUrl: wasmModuleUrl, env: wasmEnv },
     defaults: {
         path: workspace,
         instructions: "你是 Peri。请用清晰、简洁的中文帮助用户完成任务。",

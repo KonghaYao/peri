@@ -1,7 +1,7 @@
 /**
- * Platform-neutral Emscripten Host surface: the ACP transport plus host startup, usable from any
- * runtime that provides `fetch`, timers and WebAssembly (browsers included). Platform-specific
- * ports (sockets, DNS) live in `./wasm-host` and are not reachable from this entry.
+ * Platform-neutral Emscripten WASM runtime surface: the ACP transport plus runtime startup, usable
+ * from any runtime that provides `fetch`, timers and WebAssembly (browsers included). Platform-specific
+ * ports (sockets, DNS) live in `./wasm-node` and are not reachable from this entry.
  */
 export { instantiatePeriWasm, loadPeriWasm } from "./wasm/loader";
 export type { NativeWasmAcp, PeriWasmInstantiateOptions, PeriWasmModule, PeriWasmModuleFactory } from "./wasm/loader";
@@ -12,18 +12,18 @@ export type { WasmAcpTransportOptions } from "./transport/wasm-transport";
 export { createSchedulerPort } from "./wasm/scheduler";
 export type { WasmSchedulerPort } from "./wasm/scheduler";
 
-export { DEFAULT_WASM_HOST_CLEANUP_TIMEOUT_MS, PeriWasmHostStartupError, startPeriWasmHost } from "./wasm/host";
+export { DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS, WasmRuntimeStartupError, startWasmRuntime } from "./wasm/runtime";
 export {
-  DEFAULT_WASM_HOST_STARTUP_TIMEOUT_MS, PeriWasmHostLease, PeriWasmHostManager,
-} from "./wasm/host-lifecycle";
+  DEFAULT_WASM_RUNTIME_STARTUP_TIMEOUT_MS, WasmRuntimeLease, WasmRuntimePool,
+} from "./wasm/runtime-pool";
 export type {
-  PeriWasmHostCloseReport, PeriWasmHostLeaseOptions, PeriWasmHostManagerOptions, PeriWasmHostStarter,
-  PeriWasmHostState,
-} from "./wasm/host-lifecycle";
+  WasmRuntimeCloseReport, WasmRuntimeLeaseOptions, WasmRuntimePoolOptions, WasmRuntimeStarter,
+  WasmRuntimeState,
+} from "./wasm/runtime-pool";
 export type {
-  PeriWasmHostCleanupOutcome, PeriWasmHostDiagnosticKind, PeriWasmHostLifecycleEvent, PeriWasmHostOptions,
-  PeriWasmHostPhase, PeriWasmHostPorts,
-} from "./wasm/host";
+  WasmRuntimeCleanupOutcome, WasmRuntimeDiagnosticKind, WasmRuntimeLifecycleEvent, WasmRuntimeOptions,
+  WasmRuntimePhase, WasmRuntimePorts,
+} from "./wasm/runtime";
 
 export { DeadlineError, withDeadline } from "./util/deadline";
 export type { Transport, JsonRpcNotification, ReverseRequestHandler } from "./transport/types";

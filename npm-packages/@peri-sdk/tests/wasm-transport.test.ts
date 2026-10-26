@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { WasmAcpTransport } from "../src/transport/wasm-transport";
-import { startPeriWasmHost } from "../src/wasm/host";
+import { startWasmRuntime } from "../src/wasm/runtime";
 import type { NativeWasmAcp } from "../src/wasm/loader";
 
 function framePort() {
@@ -51,7 +51,7 @@ test("宿主 factory 接收显式环境，关闭依次等待 native、网络和�
   const close = wire.port.close;
   wire.port.close = async () => { order.push("native"); await close(); };
   wire.port.free = () => { order.push("free"); };
-  const transport = await startPeriWasmHost({
+  const transport = await startWasmRuntime({
     configJson: "{}", env: { INSTANCE: "host" },
     moduleFactory: async (options) => {
       const module = { ENV: {} as Record<string, string>, PeriWasmAcp: { start: async () => wire.port } };
@@ -104,7 +104,7 @@ test("WASM port close rejects a pending request and ends event stream", async ()
 test("ChatManager runs over an injected WASM frame port", async () => {
   const { ChatManager } = await import("../src/chat/manager");
   const { ChatUserAction } = await import("../src/chat/action");
-  const { AtomicSessionClaims } = await import("../src/chat/claims");
+  const { AtomicSessionOwnership } = await import("../src/chat/ownership");
   const { MemoryKV } = await import("../src/kv/memory-kv");
   const wire = framePort();
   const methods: string[] = [];
@@ -132,8 +132,8 @@ test("ChatManager runs over an injected WASM frame port", async () => {
       listSessions: async () => [],
       getSession: async () => null,
     },
-    sessionClaims: new AtomicSessionClaims(new MemoryKV()),
-    host: { kind: "transport", factory: () => WasmAcpTransport.fromPort(wire.port) },
+    sessionOwnership: new AtomicSessionOwnership(new MemoryKV()),
+    runtime: { kind: "transport", factory: () => WasmAcpTransport.fromPort(wire.port) },
     defaults: { path: "/tmp", instructions: "hello" },
   });
   const chat = manager.createChat();

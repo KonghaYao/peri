@@ -3,11 +3,11 @@ import type { AtomicExecutionKv, ExecutionKvValue } from "./kv-registry";
 
 export class MemoryExecutionKv implements AtomicExecutionKv {
     readonly durability = "bestEffort" as const;
-    private readonly claims = new MemoryKV();
+    private readonly ownership = new MemoryKV();
     private readonly values = new Map<string, ExecutionKvValue>();
 
-    claimIfAbsent(key: string, owner: string): Promise<boolean> { return this.claims.claimIfAbsent(key, owner); }
-    releaseIfOwner(key: string, owner: string): Promise<boolean> { return this.claims.releaseIfOwner(key, owner); }
+    acquireIfAbsent(key: string, owner: string): Promise<boolean> { return this.ownership.acquireIfAbsent(key, owner); }
+    releaseIfOwner(key: string, owner: string): Promise<boolean> { return this.ownership.releaseIfOwner(key, owner); }
     async readExecutionValue(key: string): Promise<ExecutionKvValue | null> {
         return structuredClone(this.values.get(key) ?? null);
     }

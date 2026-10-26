@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ChatUserAction } from "../src/chat/action";
-import { AtomicSessionClaims } from "../src/chat/claims";
+import { AtomicSessionOwnership } from "../src/chat/ownership";
 import {
     ChatActionValidationError,
     ChatClosedError,
@@ -21,7 +21,7 @@ function setup(
     configure?: (port: FakePort, index: number) => void,
 ): {
     manager: ChatManager;
-    claims: AtomicSessionClaims;
+    ownership: AtomicSessionOwnership;
     database: FakeDatabase;
     ports: FakePort[];
 } {
@@ -31,8 +31,8 @@ function setup(
     const options: ChatManagerInternalOptions = {
         agentConfig: {},
         database,
-        sessionClaims: new AtomicSessionClaims(kv),
-        host: {
+        sessionOwnership: new AtomicSessionOwnership(kv),
+        runtime: {
             kind: "transport",
             factory: () => {
                 throw new Error("ACP transport must not start");
@@ -47,7 +47,7 @@ function setup(
         },
     };
     const manager = new ChatManager(options);
-    return { manager, claims: options.sessionClaims as AtomicSessionClaims, database, ports };
+    return { manager, ownership: options.sessionOwnership as AtomicSessionOwnership, database, ports };
 }
 
 async function readyChat(

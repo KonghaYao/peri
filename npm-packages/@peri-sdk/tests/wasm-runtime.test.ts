@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { startPeriWasmHost, PeriWasmHostStartupError, type PeriWasmHostLifecycleEvent } from "../src/wasm/host";
+import { startWasmRuntime, WasmRuntimeStartupError, type WasmRuntimeLifecycleEvent } from "../src/wasm/runtime";
 import type { NativeWasmAcp, PeriWasmModule } from "../src/wasm/loader";
 
 function deferred<T>() {
@@ -23,9 +23,9 @@ function nativePort() {
 test("ready 不提供停止证明，close 与 free 完成后才宣告 closed", async () => {
   const native = nativePort();
   const closing = deferred<void>();
-  const events: PeriWasmHostLifecycleEvent[] = [];
+  const events: WasmRuntimeLifecycleEvent[] = [];
   native.port.close = () => closing.promise;
-  const transport = await startPeriWasmHost({ configJson: "{}",
+  const transport = await startWasmRuntime({ configJson: "{}",
     moduleFactory: async () => ({ PeriWasmAcp: { start: async () => native.port } }),
     onLifecycle: (event) => events.push(event),
   });
@@ -42,10 +42,10 @@ test("ready 不提供停止证明，close 与 free 完成后才宣告 closed", a
 
 test("加载前 abort 不调用 factory", async () => {
   let loads = 0;
-  const error = await startPeriWasmHost({ configJson: "{}", signal: AbortSignal.abort(),
+  const error = await startWasmRuntime({ configJson: "{}", signal: AbortSignal.abort(),
     moduleFactory: async () => { loads++; throw new Error("不应加载"); },
   }).catch((error) => error);
-  expect(error).toBeInstanceOf(PeriWasmHostStartupError);
+  expect(error).toBeInstanceOf(WasmRuntimeStartupError);
   expect(await error.cleanup).toEqual({ confirmed: true });
   expect(loads).toBe(0);
 });
@@ -56,7 +56,7 @@ test("模块加载期间 abort 关闭回调且不启动 native", async () => {
   const started = deferred<void>();
   let starts = 0;
   let schedulerClosed = 0;
-  const opening = startPeriWasmHost({ configJson: "{}", signal: controller.signal,
+  const opening = startWasmRuntime({ configJson: "{}", signal: controller.signal,
     moduleFactory: () => { started.resolve(); return loading.promise; },
     ports: { scheduler: { schedule() {}, cancel() {}, close() { schedulerClosed++; } } },
   }).catch((error) => error);
@@ -74,7 +74,7 @@ test("native 启动期间 abort，迟到端口必须 close 和 free", async () =
   const loading = deferred<NativeWasmAcp>();
   const started = deferred<void>();
   const native = nativePort();
-  const opening = startPeriWasmHost({ configJson: "{}", signal: controller.signal,
+  const opening = startWasmRuntime({ configJson: "{}", signal: controller.signal,
     moduleFactory: async () => ({ PeriWasmAcp: { start: () => { started.resolve(); return loading.promise; } } }),
   }).catch((error) => error);
   await started.promise;
@@ -93,8 +93,8 @@ for (const operation of ["close", "free"] as const) {
     const failure = new Error(`${operation} failed`);
     if (operation === "close") native.port.close = async () => { throw failure; };
     else native.port.free = () => { throw failure; };
-    const events: PeriWasmHostLifecycleEvent[] = [];
-    const transport = await startPeriWasmHost({ configJson: "{}",
+    const events: WasmRuntimeLifecycleEvent[] = [];
+    const transport = await startWasmRuntime({ configJson: "{}",
       moduleFactory: async () => ({ PeriWasmAcp: { start: async () => native.port } }),
       onLifecycle: (event) => events.push(event),
     });
@@ -107,7 +107,7 @@ for (const operation of ["close", "free"] as const) {
 
 test("加载失败仅在自有网络清理后确认", async () => {
   const drained = deferred<void>();
-  const error = await startPeriWasmHost({ configJson: "{}",
+  const error = await startWasmRuntime({ configJson: "{}",
     moduleFactory: async () => { throw new Error("load failed"); },
     ports: { network: { module: {}, close() {}, drain: () => drained.promise } },
   }).catch((error) => error);
@@ -124,7 +124,7 @@ test("清理超时不算停止，迟到 native 完成后 eventualCleanup 才确�
   const loading = deferred<NativeWasmAcp>();
   const started = deferred<void>();
   const native = nativePort();
-  const opening = startPeriWasmHost({ configJson: "{}", signal: controller.signal, cleanupTimeoutMs: 5,
+  const opening = startWasmRuntime({ configJson: "{}", signal: controller.signal, cleanupTimeoutMs: 5,
     moduleFactory: async () => ({ PeriWasmAcp: { start: () => { started.resolve(); return loading.promise; } } }),
   }).catch((error) => error);
   await started.promise;
@@ -138,7 +138,7 @@ test("清理超时不算停止，迟到 native 完成后 eventualCleanup 才确�
 
 test("EOF 与显式关闭共享同一次清理", async () => {
   const native = nativePort();
-  const transport = await startPeriWasmHost({ configJson: "{}",
+  const transport = await startWasmRuntime({ configJson: "{}",
     moduleFactory: async () => ({ PeriWasmAcp: { start: async () => native.port } }),
   });
   native.reader.resolve(null);
@@ -149,7 +149,7 @@ test("EOF 与显式关闭共享同一次清理", async () => {
 });
 
 test("native 部分启动后拒绝不构成停止证据", async () => {
-  const error = await startPeriWasmHost({ configJson: "{}",
+  const error = await startWasmRuntime({ configJson: "{}",
     moduleFactory: async () => ({ PeriWasmAcp: { start: async () => { throw new Error("partial startup"); } } }),
   }).catch((error) => error);
   expect((await error.cleanup).confirmed).toBe(false);
@@ -157,7 +157,7 @@ test("native 部分启动后拒绝不构成停止证据", async () => {
 });
 
 test("加载失败且端口清理失败不能确认释放", async () => {
-  const error = await startPeriWasmHost({ configJson: "{}",
+  const error = await startWasmRuntime({ configJson: "{}",
     moduleFactory: async () => { throw new Error("load failed"); },
     ports: { network: { module: {}, close() { throw new Error("destroy failed"); }, async drain() {} } },
   }).catch((error) => error);

@@ -1,17 +1,17 @@
 import {
-  AtomicSessionClaims,
+  AtomicSessionOwnership,
   BareHarnessConfig,
   ChatManager,
   MemoryKV,
   type ChatDatabase,
   type ChatDefaults,
-  type ChatHost,
+  type ChatRuntime,
   type ChatLifecycleOptions,
-  type SessionClaims,
+  type SessionOwnership,
 } from "@peri-code/sdk";
 import {
   createSchedulerPort,
-  DEFAULT_WASM_HOST_CLEANUP_TIMEOUT_MS,
+  DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS,
 } from "@peri-code/sdk/wasm";
 import {
   SESSION_CWD,
@@ -23,7 +23,7 @@ import { createChatDatabase } from "../store";
 import { SYSTEM_INSTRUCTIONS } from "../system-instructions";
 
 /**
- * 平台装配：把 CF 的配置、Store、WASM 宿主与默认工具面装配成 SDK `ChatManager`。
+ * 平台装配：把 CF 的配置、Store、WASM 运行后端与默认工具面装配成 SDK `ChatManager`。
  *
  * 这是 server 内唯一构造具体 `ChatManager` 的位置。编排层只接收注入的
  * `ChatManagerContract`，本文件承担全部平台读取（env、WASM、Store、默认配置）。
@@ -45,8 +45,8 @@ export type LogError = (
 /** 平台 seam：省略时使用 CF 的生产默认值。 */
 export interface SdkChatManagerOptions {
   readonly database?: ChatDatabase;
-  readonly sessionClaims?: SessionClaims;
-  readonly host?: ChatHost;
+  readonly sessionOwnership?: SessionOwnership;
+  readonly runtime?: ChatRuntime;
   readonly lifecycle?: ChatLifecycleOptions;
   readonly now?: () => string;
   readonly instanceFactory?: ChatInstanceFactory;
@@ -55,18 +55,18 @@ export interface SdkChatManagerOptions {
 
 const DEFAULT_MODEL_ALIAS = "sonnet";
 const HARNESS_PROVIDER_ID = "model";
-const HOST_DIAGNOSTIC_LABEL = "Peri server host diagnostic";
-const HOST_START_PHASE = "host-start";
+const RUNTIME_DIAGNOSTIC_LABEL = "Peri server runtime diagnostic";
+const RUNTIME_START_PHASE = "runtime-start";
 const WASM_ENV_PREFIX = "LANGFUSE_";
 
-/** 生产关闭预算与 WASM 宿主的清理预算对齐，避免把正常清理误报为 Incomplete。 */
+/** 生产关闭预算与 WASM 运行后端的清理预算对齐，避免把正常清理误报为 Incomplete。 */
 const DEFAULT_LIFECYCLE: ChatLifecycleOptions = {
-  activationCloseTimeoutMs: DEFAULT_WASM_HOST_CLEANUP_TIMEOUT_MS,
-  shutdownChatTimeoutMs: DEFAULT_WASM_HOST_CLEANUP_TIMEOUT_MS + 10_000,
+  activationCloseTimeoutMs: DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS,
+  shutdownChatTimeoutMs: DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS + 10_000,
 };
 
 /**
- * 服务端宿主的工具面：对话、Agent、工具搜索与 goal 直接可见；文件/终端/Web 等
+ * 服务端运行后端的工具面：对话、Agent、工具搜索与 goal 直接可见；文件/终端/Web 等
  * 进程内 builtin 在 WASM 部署不可用（`IN_PROCESS_BUILTINS=false`），只能由远程 MCP server 提供。
  */
 const SERVER_HARNESS_CONFIG = Object.freeze({
@@ -120,15 +120,15 @@ function harnessConfig(config: ServerConfig): Record<string, unknown> {
   };
 }
 
-function defaultHost(config: ServerConfig, logError: LogError): ChatHost {
+function defaultRuntime(config: ServerConfig, logError: LogError): ChatRuntime {
   return {
     kind: "wasm",
     moduleUrl: config.wasmModuleUrl,
     env: wasmEnvironment(),
     ports: { scheduler: createSchedulerPort() },
-    cleanupTimeoutMs: DEFAULT_WASM_HOST_CLEANUP_TIMEOUT_MS,
-    onDiagnostic: (kind, error) => logError(HOST_DIAGNOSTIC_LABEL, error, {
-      phase: HOST_START_PHASE,
+    cleanupTimeoutMs: DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS,
+    onDiagnostic: (kind, error) => logError(RUNTIME_DIAGNOSTIC_LABEL, error, {
+      phase: RUNTIME_START_PHASE,
       kind,
     }),
   };
@@ -155,9 +155,9 @@ export function createSdkChatManager(
   return new ChatManager({
     agentConfig: harnessConfig(config),
     database: options.database ?? createChatDatabase(config),
-    sessionClaims: options.sessionClaims
-      ?? new AtomicSessionClaims(new MemoryKV()),
-    host: options.host ?? defaultHost(config, logError),
+    sessionOwnership: options.sessionOwnership
+      ?? new AtomicSessionOwnership(new MemoryKV()),
+    runtime: options.runtime ?? defaultRuntime(config, logError),
     defaults: defaultChatDefaults(config),
     lifecycle: { ...DEFAULT_LIFECYCLE, ...options.lifecycle },
     now: options.now,

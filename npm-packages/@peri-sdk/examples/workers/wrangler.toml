@@ -8,5 +8,5 @@ base_dir = "dist"
 [[rules]]
 type = "ESModule"
 # Emscripten 的 wasm-bindgen 片段由 peri-wasm.js 以相对路径导入，必须按模块附加。
-globs = ["peri-wasm.js", "wasm-host.js", "snippets/**/*.js"]
+globs = ["peri-wasm.js", "wasm-node.js", "snippets/**/*.js"]
 fallthrough = true

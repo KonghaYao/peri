@@ -11,7 +11,7 @@ import { createSdkChatManager, type SdkChatManagerOptions } from "./compose";
 /**
  * 服务端编排层：注入的 `ChatManagerContract` + 宿主的 `ChatViewRegistry`。
  *
- * 平台依赖（WASM 宿主、Store、Session claim、默认配置）由 `./compose` 装配成
+ * 平台依赖（WASM 运行后端、Store、SessionOwnership、默认配置）由 `./compose` 装配成
  * 具体实现后注入；这里只负责句柄目录的转发与 View 生命周期编排。
  */
 
@@ -24,7 +24,7 @@ interface AppChatManagerOptions {
 /**
  * CF 的进程级编排器：SDK `ChatManager` 端口 + 视图注册表。
  *
- * `shutdown` 先释放 View（断开同步连接），再让 SDK 聚合关闭句柄与宿主；
+ * `shutdown` 先释放 View（断开同步连接），再让 SDK 聚合关闭句柄与运行后端；
  * 两步失败都上报，失败时保留编排器供再次重试。
  */
 export class AppChatManager {

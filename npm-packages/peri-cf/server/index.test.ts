@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
-  AtomicSessionClaims,
+  AtomicSessionOwnership,
   MemoryKV,
   type ChatDatabase,
   type ChatSessionDirectoryEntry,
@@ -45,8 +45,8 @@ describe("server wiring", () => {
     const manager = new AppChatManager({
       chats: createSdkChatManager(config, {
         database,
-        sessionClaims: new AtomicSessionClaims(new MemoryKV()),
-        host: {
+        sessionOwnership: new AtomicSessionOwnership(new MemoryKV()),
+        runtime: {
           kind: "transport",
           factory: async () => { throw new Error("not used"); },
         },

@@ -164,12 +164,12 @@ TurnProjection = {
 // status: accepting/running/cancelling/completed/cancelled/error
 ```
 
-1. 不机械复制 rcs 的 failed/interrupted 枚举；宿主中断用 `status=error + error.code=execution_interrupted`；interactionStatus 与运行状态正交。
+1. 不机械复制 rcs 的 failed/interrupted 枚举；运行后端中断用 `status=error + error.code=execution_interrupted`；interactionStatus 与运行状态正交。
 2. TurnMachine 是退出唯一权威；SessionDocs 协调指定 turn 的 interactions/responder 失效；所有入口绑定 turnId/requestId，不影响新 turn。
 3. **只收敛未终态 assistant Entry**（契约变更，需先补测试）：已完成前序 Entry 保持 completed；退出错误归 Turn 与当前未完成/占位 assistant，不污染同 turn 已完成消息。
 4. 未终态工具在任何 turn 退出时 cancelled；已 completed/error 保持；正常完成却残留工具应记录安全诊断，不伪造成功。
-5. 未完成 interactions 置 expired 并撤销 responder；新 turn/取消/超时/断宿主复用同一入口；晚到回答不得授予权限。
-6. 请求取消不等于已取消：沿用宿主关闭确认与执行阻断；取消请求失败可恢复活动状态，但已失效 interaction 不自动重活。
+5. 未完成 interactions 置 expired 并撤销 responder；新 turn/取消/超时/断运行后端复用同一入口；晚到回答不得授予权限。
+6. 请求取消不等于已取消：沿用运行后端关闭确认与执行阻断；取消请求失败可恢复活动状态，但已失效 interaction 不自动重活。
 7. 终态幂等不回退；模型已完成后的保存/清理失败体现为应用 executionBlocked/error，不改写模型生成结果。
 8. 两份 Y.Doc 无跨文档原子提交（`npm-packages/@peri-sdk/src/state/doc-model.ts:48-50`）；沿用批处理，在完整 frame apply 后发布 view；短暂缺引用显示 pending。
 
@@ -177,7 +177,7 @@ TurnProjection = {
 
 1. Session 的模型/模式、goal/compaction、usage、inputQueue 暴露只读消费面；本轮不新增模型切换等命令。
 2. tasks/plans **本轮消费**：任务状态/摘要/时间；计划按 turn 展示；沿用背景任务 revision/snapshot 修复规则。计划维持“当前 info.plan + plansByTurn”由同一 SDK projection 维护，不再复制到各 Entry。
-3. Agent 做语义映射而非复制 rcs：子 Agent 活动由 TaskView 展示；当前会话运行状态由 TurnView 展示；WASM 实例资源/宿主可用性仍属 peri-cf。需要独立 Agent 对象时须先确定真实来源，禁止由 running 布尔值虚构“Agent 在线”。
+3. Agent 做语义映射而非复制 rcs：子 Agent 活动由 TaskView 展示；当前会话运行状态由 TurnView 展示；WASM 实例资源/运行后端可用性仍属 peri-cf。需要独立 Agent 对象时须先确定真实来源，禁止由 running 布尔值虚构“Agent 在线”。
 4. **interactions 纳入目标消费面**：session doc 新增 `interactions` Map——稳定 id、kind、turnId、sessionId、toolCallId?、status `pending|resolved|expired`、createdAt/resolvedAt、公开问题/选项与安全表单 schema。
 5. `pendingInteractions` 改为 view 从 interactions 派生；工具 permissionId 与之关联。数字 callback ID 可留 SDK live 内部；网络契约使用不碰撞的稳定 ID。回答正文、批准令牌、resolver/AbortController 不入 Yjs；结束只保留 outcome 摘要。
 6. 表单契约保留必要 type/required/enum 约束；首版明确有限支持类型；不支持时提示无法回答，不误发 accept。interaction 记录须有获批的数量/保留预算，不建立无限历史。
@@ -201,7 +201,7 @@ TurnProjection = {
 | SDK view | `+ schemaVersions:{chat,session}`，移除含混单值 schemaVersion；新增完整 tools/turns/interactions 读面；公开 API 破坏性变更，SDK 与应用协调发布。 |
 | 应用展示持久层 | **〔superseded，见文首状态块〕** 原「DO SessionRecord + `recordVersion` + display checkpoint」基线作废：**无持久化**，无 record/表/分段，展示态按需由 ACP 重放重建（见 §5.3）。Yjs schemaVersion 与同步 protocol 仍分别管理。 |
 
-全文载荷、浏览器展开/复制状态、认证信息、网络请求、宿主执行恢复状态均不进 Yjs。
+全文载荷、浏览器展开/复制状态、认证信息、网络请求、运行后端执行恢复状态均不进 Yjs。
 
 ### 5.2 升级策略（已批准；应用侧持久化迁移部分已作废）
 
@@ -231,7 +231,7 @@ TurnProjection = {
 4. **执行归属与丢失语义**：执行驻留在接受连接/请求的 isolate；isolate 回收即在途执行丢失且**不复原**，不得由展示历史重造 Rust 工作义务。长时保活只依赖平台尽力而为的机制（WS 消息 await 与升级请求的 `waitUntil`），没有平台保证，部署端才能验证。
 5. **载荷全文**：工具参数/结果全文只在 isolate 内存，经 WS 文本控制帧（`op:"payload"`）按需读取，不通过 Yjs、不经 HTTP 端点、不持久化；重放后由历史重建。若上游历史不含完整载荷，则读取不可用必须显式失败，不得伪装成功（重建覆盖范围待验证）。
 6. **命令通道**：prompt/cancel/interaction 回答/payload 读取一律走 WS 文本控制帧（HTTP 无会话亲和性）；旧 HTTP 命令/载荷端点返回 426。命令结果只在服务端明确答否时为确定失败；断线、超时、未同步视为未确认，调用方必须阻断重跑。
-7. **端口化边界**：平台能力经显式端口注入，不在业务内直接触达 CF 原语——`SocketHost`（WS 升级、保活、时钟）在连接层，`RuntimeDeps`（`startTransport` / repository）在运行期注册表，SDK 宿主经 `moduleFactory` / `ports` / `onLifecycle` 注入。测试以内存实现替换这些端口，不依赖 workerd 专有行为。
+7. **端口化边界**：平台能力经显式端口注入，不在业务内直接触达 CF 原语——`SocketHost`（WS 升级、保活、时钟）在连接层，`RuntimeDeps`（`startTransport` / repository）在运行期注册表，SDK 运行后端经 `moduleFactory` / `ports` / `onLifecycle` 注入。测试以内存实现替换这些端口，不依赖 workerd 专有行为。
 8. **不做的事**：不恢复旧 Agent 执行、不做跨 isolate 接管、不把观测当存活探测、不为回滚保留任何展示持久层（转向时未部署，无旧数据可迁移）。
 
 ## 6. SDK view 与安全 readPayload
@@ -243,7 +243,7 @@ TurnProjection = {
 3. 暴露 interactions 与派生 pendingInteractions；保留 tasks/plan/plansByTurn/inputQueue/session。历史缺失、不支持、暂不可观测不得全部伪装为空数组。
 4. 消费方直接读取 `SessionView` 的 `entries`、`toolCalls`、`turns`、`plansByTurn`、`pendingInteractions` 等数组，并按 id 自建局部索引；SDK 不再导出 `selectEntry` 等按身份选择器，也不提供 selector 缓存/订阅机制。
 5. 孤立工具引用/未知对象显示诊断或 unavailable，不静默隐藏整块；只补现有 ReadCache 的必要失效依赖，不改缓存设计。
-6. 宿主侧「每个 Chat 共享一个 `ChatView`」由 SDK `ChatViewRegistry` 提供，从主入口与 `/portable` 导出；`/view` 只含浏览器视图面，不导出该注册表。
+6. 服务端「每个 Chat 共享一个 `ChatView`」由 SDK `ChatViewRegistry` 提供，从主入口与 `/portable` 导出；`/view` 只含浏览器视图面，不导出该注册表。
 
 ### 6.2 readPayload 契约与安全边界
 
@@ -344,7 +344,7 @@ WS 文本控制帧方案**已作废**，不再作为计划或验收依据。当�
 | payload 生命周期与过期 ref | 重放后旧 ref 不得返回新内容；不可读必须显式失败；仅内存不等于内存有界（预算见 §10.1.3）。 |
 | 秘密经 preview/error 泄漏 | 现有 publicError 只是拼接截断（F17）；本轮触及的错误出口改为白名单 PublicError，日志只留安全 code/id；明确工具公开载荷过滤政策。 |
 | 无持久层后的写入失败面 | 零持久化消除了 checkpoint/分段写入的一致性问题；新失败面是 isolate 回收导致的内存态丢失与命令未确认（见上两行），必须按"未确认即阻断重跑"处理，不伪装成功。 |
-| 任务与 Agent 语义差异 | 前端消费 SDK 实际拥有的 Task/Turn/宿主状态；独立 Agent 同构需求另审数据源，不能从 running 布尔值造对象。 |
+| 任务与 Agent 语义差异 | 前端消费 SDK 实际拥有的 Task/Turn/运行后端状态；独立 Agent 同构需求另审数据源，不能从 running 布尔值造对象。 |
 | “齐全”的验收范围 | resource 可读类型、interaction 表单类型与 Agent 语义映射确认前，不支持能力必须可观察，不计作已完成。 |
 | **部署端未验收** | 本地 workerd/测试不能证明平台 CPU、保活、真实 Turso、真实浏览器；状态块必须如实标注「已落地（本地验证）/未验证（部署端）」。 |
 | **未决配置与孤儿 API** | 远程 Turso DB 地址与令牌尚未提供（部署前必须补齐）；SDK checkpoint API（`SessionDocs.fromCheckpoint/exportCheckpoint`）已无生产消费方，去留待用户裁决（§10.1.6）。 |

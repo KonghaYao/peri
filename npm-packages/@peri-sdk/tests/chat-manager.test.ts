@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ChatUserAction } from "../src/chat/action";
-import { AtomicSessionClaims } from "../src/chat/claims";
+import { AtomicSessionOwnership } from "../src/chat/ownership";
 import {
     SessionBindingConflictError,
 } from "../src/chat/errors";
@@ -15,25 +15,25 @@ import {
 
 function setup(options: {
     kv?: MemoryKV;
-    claims?: AtomicSessionClaims;
+    ownership?: AtomicSessionOwnership;
     database?: FakeDatabase;
     configure?: (port: FakePort) => void;
 } = {}): {
     manager: ChatManager;
     kv: MemoryKV;
-    claims: AtomicSessionClaims;
+    ownership: AtomicSessionOwnership;
     database: FakeDatabase;
     ports: FakePort[];
 } {
     const kv = options.kv ?? new MemoryKV();
-    const claims = options.claims ?? new AtomicSessionClaims(kv);
+    const ownership = options.ownership ?? new AtomicSessionOwnership(kv);
     const database = options.database ?? new FakeDatabase();
     const ports: FakePort[] = [];
     const managerOptions: ChatManagerInternalOptions = {
         agentConfig: {},
         database,
-        sessionClaims: claims,
-        host: {
+        sessionOwnership: ownership,
+        runtime: {
             kind: "transport",
             factory: () => {
                 throw new Error("ACP transport must not start");
@@ -50,7 +50,7 @@ function setup(options: {
     return {
         manager: new ChatManager(managerOptions),
         kv,
-        claims,
+        ownership,
         database,
         ports,
     };
@@ -66,21 +66,21 @@ async function bindNew(
 }
 
 describe("ChatManager handle directory", () => {
-    test("createChat is synchronous and starts no ACP, claim or session", () => {
-        const { manager, claims, database, ports } = setup();
+    test("createChat is synchronous and starts no ACP, ownership acquisition or session", () => {
+        const { manager, ownership, database, ports } = setup();
         const chat = manager.createChat({ path: "/custom" });
 
         expect(chat.id).toBeTruthy();
         expect(manager.getChat(chat.id)).toBe(chat);
         expect(manager.findChatBySession("missing")).toBeUndefined();
         expect(ports).toHaveLength(0);
-        expect(claims.size).toBe(0);
+        expect(ownership.size).toBe(0);
         expect(database.getCalls).toHaveLength(0);
         expect("execute" in manager).toBe(false);
     });
 
-    test("create_new_session binds, claims and indexes without a prefilled session id", async () => {
-        const { manager, claims, ports } = setup();
+    test("create_new_session binds, acquires ownership and indexes without a prefilled session id", async () => {
+        const { manager, ownership, ports } = setup();
         const chat = manager.createChat();
         const action = ChatUserAction.createNewSession({ requestId: "req-1" });
 
@@ -95,12 +95,12 @@ describe("ChatManager handle directory", () => {
         expect(chat.sessionId).toBe("session-new");
         expect(chat.bindingRevision).toBe(1);
         expect(ports[0].calls).toContain("bindNew");
-        expect(claims.has("session-new")).toBe(true);
+        expect(ownership.has("session-new")).toBe(true);
         expect(manager.findChatBySession("session-new")).toBe(chat);
     });
 
     test("partial creation surfaces createdSessionId and stage without retrying", async () => {
-        const { manager, claims } = setup({
+        const { manager, ownership } = setup({
             configure: (port) => {
                 port.bindNewError = Object.assign(
                     new Error("rename failed"),
@@ -122,7 +122,7 @@ describe("ChatManager handle directory", () => {
             disposition: "unknown",
         });
         expect(chat.phase).toBe("empty");
-        expect(claims.has("session-partial")).toBe(false);
+        expect(ownership.has("session-partial")).toBe(false);
     });
 
     test("getChat is stable for the manager lifetime", () => {
@@ -153,7 +153,7 @@ describe("ChatManager handle directory", () => {
         const gate = new Promise<void>((resolve) => {
             release = resolve;
         });
-        const { manager, claims, database } = setup({
+        const { manager, ownership, database } = setup({
             configure: (port) => {
                 port.bindExistingGate = gate;
             },
@@ -168,8 +168,8 @@ describe("ChatManager handle directory", () => {
 
         await waitFor(() => manager.findChatBySession("session-1") === chat);
         expect(chat.phase).toBe("switching");
-        // 索引先于 path resolve/claim 写入；claim 在其后结算。
-        await waitFor(() => claims.has("session-1"));
+        // 索引先于 path resolve/ownership 写入；acquire 在其后结算。
+        await waitFor(() => ownership.has("session-1"));
 
         release();
         await loading;
@@ -180,7 +180,7 @@ describe("ChatManager handle directory", () => {
     test("failed binding removes the index only after confirmed cleanup", async () => {
         const database = new FakeDatabase();
         database.seed(directoryEntry("session-1"));
-        const { manager, claims } = setup({
+        const { manager, ownership } = setup({
             database,
             configure: (port) => {
                 port.bindExistingError = new Error("load failed");
@@ -193,13 +193,13 @@ describe("ChatManager handle directory", () => {
         expect(chat.binding).toBeNull();
         expect(chat.phase).toBe("empty");
         expect(manager.findChatBySession("session-1")).toBeUndefined();
-        expect(claims.size).toBe(0);
+        expect(ownership.size).toBe(0);
     });
 
-    test("unconfirmed binding cleanup retains the index and claim for retry", async () => {
+    test("unconfirmed binding cleanup retains the index and ownership for retry", async () => {
         const database = new FakeDatabase();
         database.seed(directoryEntry("session-1"));
-        const { manager, claims, ports } = setup({
+        const { manager, ownership, ports } = setup({
             database,
             configure: (port) => {
                 port.bindExistingError = new Error("load failed");
@@ -216,13 +216,13 @@ describe("ChatManager handle directory", () => {
         });
         expect(chat.phase).toBe("cleanup-pending");
         expect(manager.findChatBySession("session-1")).toBe(chat);
-        expect(claims.has("session-1")).toBe(true);
+        expect(ownership.has("session-1")).toBe(true);
 
         delete ports[0].closeError;
         await manager.closeChat(chat.id);
         expect(manager.getChat(chat.id)).toBeUndefined();
         expect(manager.findChatBySession("session-1")).toBeUndefined();
-        expect(claims.size).toBe(0);
+        expect(ownership.size).toBe(0);
     });
 });
 
@@ -301,7 +301,7 @@ describe("ChatManager ownership coordination", () => {
 
 describe("ChatManager close and shutdown", () => {
     test("closeChat is idempotent for unknown ids and removes only confirmed closes", async () => {
-        const { manager, claims, database } = setup();
+        const { manager, ownership, database } = setup();
         await manager.closeChat("unknown");
         database.seed(directoryEntry("session-1"));
         const chat = manager.createChat();
@@ -311,12 +311,12 @@ describe("ChatManager close and shutdown", () => {
 
         expect(manager.getChat(chat.id)).toBeUndefined();
         expect(manager.findChatBySession("session-1")).toBeUndefined();
-        expect(claims.size).toBe(0);
+        expect(ownership.size).toBe(0);
         await manager.closeChat(chat.id);
     });
 
-    test("close failure retains the handle, index and claim; retry succeeds", async () => {
-        const { manager, claims, database, ports } = setup();
+    test("close failure retains the handle, index and ownership; retry succeeds", async () => {
+        const { manager, ownership, database, ports } = setup();
         database.seed(directoryEntry("session-1"));
         const chat = manager.createChat();
         await chat.execute(ChatUserAction.changeSessionTo("session-1"));
@@ -327,18 +327,18 @@ describe("ChatManager close and shutdown", () => {
         );
         expect(manager.getChat(chat.id)).toBe(chat);
         expect(manager.findChatBySession("session-1")).toBe(chat);
-        expect(claims.has("session-1")).toBe(true);
+        expect(ownership.has("session-1")).toBe(true);
         expect(chat.phase).toBe("cleanup-pending");
 
         delete ports[0].closeError;
         await manager.closeChat(chat.id);
         expect(manager.getChat(chat.id)).toBeUndefined();
-        expect(claims.size).toBe(0);
+        expect(ownership.size).toBe(0);
         expect(ports[0].closeCalls).toBe(2);
     });
 
     test("shutdown stops admission, aggregates failures and can retry", async () => {
-        const { manager, claims, database, ports } = setup();
+        const { manager, ownership, database, ports } = setup();
         database.seed(directoryEntry("session-1"));
         database.seed(directoryEntry("session-2"));
         const first = manager.createChat();
@@ -359,7 +359,7 @@ describe("ChatManager close and shutdown", () => {
         await manager.shutdown();
         expect(manager.getChat(first.id)).toBeUndefined();
         expect(manager.findChatBySession("session-1")).toBeUndefined();
-        expect(claims.size).toBe(0);
+        expect(ownership.size).toBe(0);
         await manager.shutdown();
     });
 });

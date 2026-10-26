@@ -32,23 +32,23 @@ interface ChatCloseResources {
     /** 取走当前激活；实现方必须同步清空，避免关闭期间仍收事实。 */
     takeActive(): Activation | undefined;
     readonly pendingCleanups: Set<Activation>;
-    readonly claimedSessions: Set<string>;
-    releaseClaim(sessionId: string): Promise<void>;
+    readonly ownedSessions: Set<string>;
+    releaseOwnership(sessionId: string): Promise<void>;
     releaseIndex(sessionId: string): void;
     onActivationClosed(activation: Activation): void;
 }
 
 interface ChatCloseOptions {
-    /** 单个激活（宿主/transport）关闭等待；超时即 Incomplete。 */
+    /** 单个激活（运行后端/transport）关闭等待；超时即 Incomplete。 */
     readonly activationCloseTimeoutMs: number;
-    /** 只有调用方确认绑定已结算时才允许释放 claim/索引。 */
-    readonly releaseClaims: boolean;
+    /** 只有调用方确认绑定已结算时才允许释放 ownership/索引。 */
+    readonly releaseOwnership: boolean;
 }
 
 /**
  * 结算一个 Chat 的全部资源。
  *
- * 任一宿主/端口关闭未确认时不释放 claim，防止出现双控制者；
+ * 任一运行后端/端口关闭未确认时不释放 ownership，防止出现双控制者；
  * 返回全部失败项，由调用方决定聚合上报与是否允许重试。
  */
 export async function closeChatResources(
@@ -74,10 +74,10 @@ export async function closeChatResources(
         }
     }
 
-    if (options.releaseClaims && failures.length === 0) {
-        for (const sessionId of [...resources.claimedSessions]) {
+    if (options.releaseOwnership && failures.length === 0) {
+        for (const sessionId of [...resources.ownedSessions]) {
             try {
-                await resources.releaseClaim(sessionId);
+                await resources.releaseOwnership(sessionId);
                 resources.releaseIndex(sessionId);
             } catch (error) {
                 failures.push(error);

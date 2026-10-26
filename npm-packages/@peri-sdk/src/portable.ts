@@ -9,9 +9,9 @@
 export * from "./chat/public";
 
 export { MemoryKV } from "./kv/memory-kv";
-export type { AtomicSessionClaimKv } from "./kv/types";
-export { SessionClaimConflictError } from "./kv/session-claim-conflict-error";
-export { sessionClaimKey } from "./kv/session-claim-key";
+export type { AtomicSessionOwnershipKv } from "./kv/types";
+export { SessionOwnershipConflictError } from "./kv/session-ownership-conflict-error";
+export { sessionOwnershipKey } from "./kv/session-ownership-key";
 
 export { BareHarnessConfig } from "./config/bare-harness-config";
 export type { MetaHarnessKey, PeriConfig } from "./config/peri-config";

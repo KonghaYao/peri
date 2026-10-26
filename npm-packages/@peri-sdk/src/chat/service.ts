@@ -1,5 +1,5 @@
-import { SessionClaimConflictError } from "../kv/session-claim-conflict-error";
-import type { PeriWasmHostLease } from "../wasm/host-lifecycle";
+import { SessionOwnershipConflictError } from "../kv/session-ownership-conflict-error";
+import type { WasmRuntimeLease } from "../wasm/runtime-pool";
 import {
     PayloadReadError,
     type ReadPayloadOptions,
@@ -73,14 +73,14 @@ export class ChatService implements ChatServiceContract {
     private readonly path?: string;
     private readonly defaults: ChatServiceOptions["defaults"];
     private readonly agentConfig: unknown;
-    private readonly host: ChatServiceOptions["host"];
+    private readonly runtime: ChatServiceOptions["runtime"];
     private readonly database: ChatServiceOptions["database"];
-    private readonly claims: ChatServiceOptions["claims"];
+    private readonly ownership: ChatServiceOptions["ownership"];
     private readonly index: ChatServiceOptions["index"];
     private readonly instanceFactory: ChatInstanceFactory;
-    private readonly acquireWasmHost: (
+    private readonly acquireWasmRuntime: (
         signal?: AbortSignal,
-    ) => Promise<PeriWasmHostLease>;
+    ) => Promise<WasmRuntimeLease>;
     private readonly onClosedHandler: (chatId: string) => void;
     private readonly now?: () => string;
     private readonly lifecycleOptions: Required<ChatLifecycleOptions>;
@@ -89,7 +89,7 @@ export class ChatService implements ChatServiceContract {
     private readonly mutex = new AsyncMutex();
     private readonly facts: ChatFactHub;
     private readonly inputs = new InputCorrelation();
-    private readonly claimedSessions = new Set<string>();
+    private readonly ownedSessions = new Set<string>();
     private readonly pendingTargets = new Map<
         string,
         Promise<ChatBindingTarget>
@@ -109,12 +109,12 @@ export class ChatService implements ChatServiceContract {
         this.path = options.path;
         this.defaults = options.defaults;
         this.agentConfig = options.agentConfig;
-        this.host = options.host;
+        this.runtime = options.runtime;
         this.database = options.database;
-        this.claims = options.claims;
+        this.ownership = options.ownership;
         this.index = options.index;
         this.instanceFactory = options.instanceFactory;
-        this.acquireWasmHost = options.acquireWasmHost;
+        this.acquireWasmRuntime = options.acquireWasmRuntime;
         this.onClosedHandler = options.onClosed;
         this.now = options.now;
         this.lifecycleOptions = resolveChatLifecycle(options.lifecycle);
@@ -124,8 +124,8 @@ export class ChatService implements ChatServiceContract {
             path: this.path,
             defaults: this.defaults,
             index: this.index,
-            claimSession: (sessionId) => this.claimSession(sessionId),
-            releaseClaim: (sessionId) => this.releaseClaim(sessionId),
+            acquireSession: (sessionId) => this.acquireSession(sessionId),
+            releaseOwnership: (sessionId) => this.releaseOwnership(sessionId),
         };
         this.closeController = new ChatCloseController({
             id: this.id,
@@ -134,13 +134,13 @@ export class ChatService implements ChatServiceContract {
             facts: this.facts,
             lifecycle: this.lifecycleOptions,
             pendingCleanups: this.pendingCleanups,
-            claimedSessions: this.claimedSessions,
+            ownedSessions: this.ownedSessions,
             takeActive: () => {
                 const active = this.active;
                 this.active = undefined;
                 return active;
             },
-            releaseClaim: (sessionId) => this.releaseClaim(sessionId),
+            releaseOwnership: (sessionId) => this.releaseOwnership(sessionId),
             releaseIndex: (sessionId) =>
                 this.index.release(this.id, sessionId),
             onActivationClosed: (activation) =>
@@ -500,7 +500,7 @@ export class ChatService implements ChatServiceContract {
         let createdSessionId: string | undefined;
         let stage: SessionCreationError["stage"] = "session/new";
 
-        // session/new 返回后、rename 前登记索引与 claim；不等待整个 bindNew 完成。
+        // session/new 返回后、rename 前登记索引与 ownership；不等待整个 bindNew 完成。
         const registerCreated = async (sessionId: string): Promise<void> => {
             if (createdSessionId !== undefined) {
                 if (createdSessionId !== sessionId) {
@@ -526,7 +526,7 @@ export class ChatService implements ChatServiceContract {
             }
             candidate = next;
             try {
-                await next.claim();
+                await next.acquire();
             } catch (error) {
                 throw new SessionCreationError(
                     requestId,
@@ -691,12 +691,12 @@ export class ChatService implements ChatServiceContract {
                 );
             }
             try {
-                await candidate.claim();
+                await candidate.acquire();
             } catch (error) {
-                if (error instanceof SessionClaimConflictError) {
+                if (error instanceof SessionOwnershipConflictError) {
                     throw new SessionBindingConflictError(
                         requestId,
-                        `Session ${sessionId} is claimed by another manager`,
+                        `Session ${sessionId} is owned by another manager`,
                     );
                 }
                 throw asActionError(
@@ -752,7 +752,7 @@ export class ChatService implements ChatServiceContract {
                 this.lifecycleOptions.activationCloseTimeoutMs,
             );
             if (!closed.confirmed) {
-                // 旧激活关闭未确认：保留旧资源与 claim/索引，先完成候选清理再进入
+                // 旧激活关闭未确认：保留旧资源与 ownership/索引，先完成候选清理再进入
                 // blocked，绝不把超时当成已停止。
                 this.pendingCleanups.add(old);
                 const cleanup = await this.disposeActivation(activation);
@@ -770,7 +770,7 @@ export class ChatService implements ChatServiceContract {
             this.startupControllers.delete(old.controller);
             if (previousSessionId !== null) {
                 try {
-                    await this.releaseClaim(previousSessionId);
+                    await this.releaseOwnership(previousSessionId);
                 } catch (error) {
                     const cleanup = await this.disposeActivation(activation);
                     const release = await candidate.release(cleanup);
@@ -800,14 +800,14 @@ export class ChatService implements ChatServiceContract {
         return this.activate(activation!, sessionId, previousSessionId);
     }
 
-    private async claimSession(sessionId: string): Promise<void> {
-        await this.claims.claim(sessionId);
-        this.claimedSessions.add(sessionId);
+    private async acquireSession(sessionId: string): Promise<void> {
+        await this.ownership.acquire(sessionId);
+        this.ownedSessions.add(sessionId);
     }
 
-    private async releaseClaim(sessionId: string): Promise<void> {
-        await this.claims.release(sessionId);
-        this.claimedSessions.delete(sessionId);
+    private async releaseOwnership(sessionId: string): Promise<void> {
+        await this.ownership.release(sessionId);
+        this.ownedSessions.delete(sessionId);
     }
 
     private createActivation(path: string): Activation {
@@ -820,12 +820,12 @@ export class ChatService implements ChatServiceContract {
                 path,
                 agentConfig: this.agentConfig,
                 defaults: this.defaults,
-                host: this.host,
+                runtime: this.runtime,
                 signal: controller.signal,
                 now: this.now,
                 database: this.database,
                 lifecycle: this.lifecycleOptions,
-                acquireWasmHost: (signal) => this.acquireWasmHost(signal),
+                acquireWasmRuntime: (signal) => this.acquireWasmRuntime(signal),
             });
         } catch (error) {
             this.startupControllers.delete(controller);

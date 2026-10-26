@@ -15,8 +15,8 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
   → peri-wasm Host（每次激活一个）→ 模型 / Turso Store / 远程 MCP
 ```
 
-- **平台装配**：`server/agent/compose.ts` 是 server 内唯一构造具体 `ChatManager` 的位置，把 WASM 宿主、
-  Store、Session claim 与默认配置装配成 SDK 实现；`getChatManager` 是唯一的注入点。
+- **平台装配**：`server/agent/compose.ts` 是 server 内唯一构造具体 `ChatManager` 的位置，把 WASM 运行后端、
+  Store、SessionOwnership 与默认配置装配成 SDK 实现；`getChatManager` 是唯一的注入点。
 - **服务端编排**：`server/agent/manager.ts` 的 `AppChatManager` 只接收注入的 `ChatManagerContract` 与
   `ChatViewRegistry`，转发 create/get/find/list，编排 close 与 shutdown；`createChat` 不启动 WASM，
   不读历史。
@@ -33,7 +33,7 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 - **静态资源**：非 `/api/*` 路径由 Bun 入口提供 `dist/client` 与 `index.html` 回退；Vite 开发服务器把
   `/api` 代理到 Bun 服务。
 - **没有访问控制**：服务不提供认证、限流或多租户隔离；部署入口鉴权是必要条件。
-- **单进程 claim**：CF 使用 `MemoryKV`/`AtomicSessionClaims`；多实例部署必须注入共享原子 KV，不能宣称
+- **单进程 ownership**：CF 使用 `MemoryKV`/`AtomicSessionOwnership`；多实例部署必须注入共享原子 KV，不能宣称
   跨实例接管。
 
 ## 路由

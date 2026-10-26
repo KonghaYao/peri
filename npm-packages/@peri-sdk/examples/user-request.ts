@@ -15,7 +15,7 @@ const storage = new TursoStorage({ url: "turso://<database>.turso.io", authToken
 
 const workspaceId = "workspaceId";
 const workspacePath = "/tmp/peri-workspace";
-// 宿主注入共享 KV；其占位适配器必须提供原子 claim-if-absent。
+// 调用方注入共享 KV；其占位适配器必须提供原子 acquire-if-absent。
 const manager = new ChatManager({
     agentConfig: {
         cwd: workspacePath,
@@ -28,10 +28,10 @@ const manager = new ChatManager({
         listSessions: (path) => storage.getSessions(path ?? workspacePath),
         getSession: (id) => storage.getSession(id),
     },
-    sessionClaims: new AtomicSessionClaims(managedAgentKv),
-    // 执行装配由宿主选择：WASM 部署用 host.kind="wasm"；
-    // 其他部署用 host.kind="transport" 注入自有 transport。SDK 不启动 Peri 或 Workspace 进程。
-    host: {
+    sessionOwnership: new AtomicSessionOwnership(managedAgentKv),
+    // 执行装配由调用方选择：WASM 部署用 runtime.kind="wasm"；
+    // 其他部署用 runtime.kind="transport" 注入自有 transport。SDK 不启动 Peri 或 Workspace 进程。
+    runtime: {
         kind: "wasm",
         moduleUrl: new URL("./peri-wasm.js", import.meta.url),
     },
@@ -44,7 +44,7 @@ const manager = new ChatManager({
     },
 });
 
-// ChatManager.createChat 同步登记句柄；不启动 ACP、不 claim Session。
+// ChatManager.createChat 同步登记句柄；不启动 ACP、不取得 Session ownership。
 const chat = manager.createChat({ path: workspacePath });
 // 已有 Session 用 change_session；cwd 从 Store 读取，不回退句柄 path。
 const requestedSessionId: string | null = null; // 业务请求传已有 ID 时恢复，否则新建。
@@ -74,9 +74,9 @@ await chat.execute(ChatUserAction.takeBack(followup.inputId)).catch(() => {});
 // 场景 4：取消是会话级 ACP 通知；未完成 turn 的收敛由 Peri 决定。
 await chat.execute(ChatUserAction.cancel({}));
 
-// 场景 5：另一实例同时 change_session 同一 Session 时，claim 失败并明确报冲突。
+// 场景 5：另一实例同时 change_session 同一 Session 时，ownership 获取失败并明确报冲突。
 // 场景 6：服务不再需要此 Chat 时先关闭展示，再关闭句柄。
-// close 发送 session/close 并在预算内重放；超时抛 ChatCloseIncompleteError 并保留 claims。
+// close 发送 session/close 并在预算内重放；超时抛 ChatCloseIncompleteError 并保留 ownership。
 // Store 中的会话数据仍保留，Workspace 由部署方独立管理。
 async function releaseChat() {
     await view.dispose();

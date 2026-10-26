@@ -5,7 +5,7 @@ import {
     type PeriInstanceOptions,
 } from "../src/agent/peri-instance";
 import { ChatUserAction } from "../src/chat/action";
-import { AtomicSessionClaims } from "../src/chat/claims";
+import { AtomicSessionOwnership } from "../src/chat/ownership";
 import { createChatInstance } from "../src/chat/instance-factory";
 import { ChatManager } from "../src/chat/manager";
 import type { ChatInstanceContext } from "../src/chat/service-support";
@@ -62,10 +62,10 @@ function context(
         path: "/handle-path",
         agentConfig: {},
         defaults: {},
-        host: {
+        runtime: {
             kind: "transport",
             factory: () => {
-                throw new Error("host factory must be provided");
+                throw new Error("runtime factory must be provided");
             },
         },
         signal: new AbortController().signal,
@@ -76,19 +76,19 @@ function context(
             activationCloseTimeoutMs: 5000,
             shutdownChatTimeoutMs: 15000,
         },
-        acquireWasmHost: () => {
-            throw new Error("WASM host must not be acquired in transport tests");
+        acquireWasmRuntime: () => {
+            throw new Error("WASM runtime must not be acquired in transport tests");
         },
         ...overrides,
     };
 }
 
 describe("createChatInstance", () => {
-    test("transport host receives the handle path and close confirms transport shutdown", async () => {
+    test("transport runtime receives the handle path and close confirms transport shutdown", async () => {
         const transport = new TestTransport();
         const calls: Array<{ path: string; aborted: boolean }> = [];
         const instance = createChatInstance(context({
-            host: {
+            runtime: {
                 kind: "transport",
                 factory: (path, options) => {
                     calls.push({ path, aborted: options?.signal?.aborted ?? false });
@@ -110,7 +110,7 @@ describe("createChatInstance", () => {
         const failure = new Error("transport close failed");
         transport.closeError = failure;
         const instance = createChatInstance(context({
-            host: { kind: "transport", factory: () => transport },
+            runtime: { kind: "transport", factory: () => transport },
         }));
 
         await instance.bindNew({ path: "/workspace" });
@@ -122,13 +122,13 @@ describe("createChatInstance", () => {
         expect(transport.closeCalls).toBe(2);
     });
 
-    test("WASM host uses the lease transport and maps its close report", async () => {
+    test("WASM runtime uses the lease transport and maps its close report", async () => {
         const transport = new TestTransport();
         let closed = 0;
         let signal: AbortSignal | undefined;
         const instance = createChatInstance(context({
-            host: { kind: "wasm" },
-            acquireWasmHost: async (value) => {
+            runtime: { kind: "wasm" },
+            acquireWasmRuntime: async (value) => {
                 signal = value;
                 return {
                     transport,
@@ -155,7 +155,7 @@ describe("createChatInstance", () => {
         const paths: string[] = [];
         const instance = createChatInstance(context({
             database,
-            host: {
+            runtime: {
                 kind: "transport",
                 factory: (path) => {
                     paths.push(path);
@@ -170,13 +170,13 @@ describe("createChatInstance", () => {
         await instance.close();
     });
 
-    test("an aborted startup signal rejects before acquiring a host", async () => {
+    test("an aborted startup signal rejects before acquiring a runtime", async () => {
         const controller = new AbortController();
         controller.abort(new Error("cancelled"));
         let acquired = 0;
         const instance = createChatInstance(context({
             signal: controller.signal,
-            host: {
+            runtime: {
                 kind: "transport",
                 factory: () => {
                     acquired += 1;
@@ -199,8 +199,8 @@ describe("default factory wiring", () => {
         const manager = new ChatManager({
             agentConfig: {},
             database: new FakeDatabase(),
-            sessionClaims: new AtomicSessionClaims(new MemoryKV()),
-            host: {
+            sessionOwnership: new AtomicSessionOwnership(new MemoryKV()),
+            runtime: {
                 kind: "transport",
                 factory: (path) => {
                     paths.push(path);
@@ -227,8 +227,8 @@ describe("default factory wiring", () => {
         const manager = new ChatManager({
             agentConfig: {},
             database: new FakeDatabase(),
-            sessionClaims: new AtomicSessionClaims(new MemoryKV()),
-            host: { kind: "transport", factory: () => transport },
+            sessionOwnership: new AtomicSessionOwnership(new MemoryKV()),
+            runtime: { kind: "transport", factory: () => transport },
             defaults: { path: "/workspace" },
         });
         const chat = manager.createChat();

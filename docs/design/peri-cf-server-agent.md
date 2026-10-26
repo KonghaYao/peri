@@ -32,8 +32,8 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
 
 ## 组合根与装配
 
-- **平台装配**：`server/agent/compose.ts` 读取 `ServerConfig`，构造 Store 适配、`AtomicSessionClaims`、
-  WASM `ChatHost`、默认 path/instructions/MCP 与关闭预算；server 内只有这里构造具体 `ChatManager`。
+- **平台装配**：`server/agent/compose.ts` 读取 `ServerConfig`，构造 Store 适配、`AtomicSessionOwnership`、
+  WASM `ChatRuntime`、默认 path/instructions/MCP 与关闭预算；server 内只有这里构造具体 `ChatManager`。
 - **编排层**：`server/agent/manager.ts` 的 `AppChatManager` 只持有注入的 `ChatManagerContract` 与
   `ChatViewRegistry`。四个查询/登记方法直接转发；`closeChat` 先关 SDK 句柄再释放 View；
   `hasPendingClose` 暴露「句柄已移除、View 仍待释放」的残留；`shutdown` 先 `disposeAll` 再
@@ -55,13 +55,13 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
 
 ## 生命周期与失败语义
 
-- `createChat` 同步登记，不启动 WASM、不 claim Session；首次绑定动作才激活宿主与 Session。
-- 同一 Session 同时至多一个执行所有者；claim 冲突返回 `binding_conflict` 与 `ownerChatId`，不启动
+- `createChat` 同步登记，不启动 WASM、不取得 SessionOwnership；首次绑定动作才激活运行后端与 Session。
+- 同一 Session 同时至多一个执行所有者；ownership 冲突返回 `binding_conflict` 与 `ownerChatId`，不启动
   transport。跨进程协调由部署注入的原子 KV 决定；CF 默认 `MemoryKV` 只覆盖单进程。
 - 关闭复用正常关闭与启动失败清理，并发关闭合并；确认清理后才移除索引与占用。`session/close` 超时
-  返回 `ChatCloseIncompleteError`，保留 claim、资源与原因，可重试。
+  返回 `ChatCloseIncompleteError`，保留 ownership、资源与原因，可重试。
 - `shutdown` 分两段：编排层先释放全部 View（断开同步连接与文档），再让 SDK 封闭新准入、结算在途
-  关闭并释放 WASM 宿主；两段失败都聚合并保留资源，可重试。
+  关闭并释放 WASM 运行后端；两段失败都聚合并保留资源，可重试。
 - `cancel` 的 `requested` 不是停止证明；应用不能把 202 回执映射成 stopped。
 - 动作错误以 `disposition` 表达可重试性：`rejected` 明确未生效，`unknown` 可能已执行且不得自动重试，
   `not_sent` 只由客户端在提交前产生。HTTP 状态不单独决定重试。
@@ -85,8 +85,8 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
   必要条件。
 - Bun 服务是唯一后端入口；Cloudflare Worker relay 与 `wrangler.jsonc` 已删除。
 - `/api/info` 只返回去敏后的地址（去掉 userinfo、query 与 token），设置页只读展示。
-- 单进程 claim 不能宣称跨实例接管；多实例部署必须由部署方提供共享原子 KV。
-- 真实模型/Store/远程 MCP、浏览器验收与 hosted 部署仍需环境验收；单元测试或类型检查不替代真实宿主。
+- 单进程 ownership 不能宣称跨实例接管；多实例部署必须由部署方提供共享原子 KV。
+- 真实模型/Store/远程 MCP、浏览器验收与 hosted 部署仍需环境验收；单元测试或类型检查不替代真实运行后端。
 
 ## 与其他文档的关系
 

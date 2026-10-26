@@ -58,7 +58,7 @@ export class ChatClosedError extends ChatActionError {
 
 /**
  * 同一 Session 已有控制者。
- * 本地冲突带 `ownerChatId`；跨 Manager 的 claim 冲突不带。
+ * 本地冲突带 `ownerChatId`；跨 Manager 的 ownership 冲突不带。
  */
 export class SessionBindingConflictError extends ChatActionError {
     constructor(requestId: string, message: string, readonly ownerChatId?: string) {
@@ -69,7 +69,7 @@ export class SessionBindingConflictError extends ChatActionError {
 
 /**
  * `session/new` 已取得 sessionId，但后续阶段失败。
- * 清理确认后 SDK 会关闭已创建会话；清理未确认时保留资源与 claim 供重试；
+ * 清理确认后 SDK 会关闭已创建会话；清理未确认时保留资源与 ownership 供重试；
  * 调用方不得盲目重复新建。
  */
 export class SessionCreationError extends ChatActionError {
@@ -88,7 +88,7 @@ export class SessionCreationError extends ChatActionError {
 /**
  * `ChatService.close()` 未能确认全部资源已释放。
  *
- * 不是“已停止”的证明：claim、索引与未确认的激活必须保留，供再次 close/shutdown 重试。
+ * 不是“已停止”的证明：ownership、索引与未确认的激活必须保留，供再次 close/shutdown 重试。
  * `failures` 保留每个失败的原始原因；`cause` 在多个失败时聚合为 `AggregateError`。
  */
 export class ChatCloseIncompleteError extends Error {
@@ -96,7 +96,7 @@ export class ChatCloseIncompleteError extends Error {
 
     constructor(
         failures: readonly unknown[] = [],
-        message = "Chat close is incomplete; resources and claims are preserved for retry",
+        message = "Chat close is incomplete; resources and ownership are preserved for retry",
         options?: { cause?: unknown },
     ) {
         const chain = failures.length === 0

@@ -2,7 +2,7 @@
 import { readFile, realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
-    AtomicSessionClaims,
+    AtomicSessionOwnership,
     BareHarnessConfig,
     ChatManager,
     MemoryKV,
@@ -88,9 +88,9 @@ const manager = new ChatManager({
         machineId,
     },
     database: sessionDatabase(storage),
-    sessionClaims: new AtomicSessionClaims(new MemoryKV()),
-    // transport 入口按 path 装配独立宿主；ChatManager 不持有 WASM 宿主管家。
-    host: {
+    sessionOwnership: new AtomicSessionOwnership(new MemoryKV()),
+    // transport 入口按 path 装配独立运行后端；ChatManager 不持有 WASM 运行后端池。
+    runtime: {
         kind: "transport",
         factory: (path) => WasmAcpTransport.start({
             moduleUrl: wasmModuleUrl,

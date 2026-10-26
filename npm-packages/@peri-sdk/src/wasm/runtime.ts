@@ -5,41 +5,41 @@ import type { WasmDnsPort, WasmNetworkPort } from "./ports";
 import type { WasmSchedulerPort } from "./scheduler";
 
 /**
- * Owned Emscripten ACP Host startup for platform-neutral runtimes (browsers, Workers with
+ * Owned Emscripten ACP runtime startup for platform-neutral runtimes (browsers, Workers with
  * `nodejs_compat`, Node): only `fetch`, timers and WebAssembly are required; sockets and DNS are
  * optional injected ports.
  *
  * The SDK owns startup ordering, callback/socket ownership and close evidence; the embedder owns
- * the platform module factory, ports and the capacity policy around them. A host is only reported
- * as cleaned up after `native.close()`, port cleanup and `native.free()` all settled.
+ * the platform module factory, ports and the capacity policy around them. A runtime is only
+ * reported as cleaned up after `native.close()`, port cleanup and `native.free()` all settled.
  */
 
-export type PeriWasmHostPhase = "module-ready" | "native-ready";
+export type WasmRuntimePhase = "module-ready" | "native-ready";
 
-export type PeriWasmHostLifecycleEvent =
-  | { type: "phase"; phase: PeriWasmHostPhase; elapsedMs: number }
+export type WasmRuntimeLifecycleEvent =
+  | { type: "phase"; phase: WasmRuntimePhase; elapsedMs: number }
   | { type: "ready"; generationId: string }
   | { type: "closing" }
   | { type: "closed" }
   | { type: "failed" }
   | { type: "close-unconfirmed"; error: unknown };
 
-export type PeriWasmHostDiagnosticKind = "startup" | "cleanup-unconfirmed";
+export type WasmRuntimeDiagnosticKind = "startup" | "cleanup-unconfirmed";
 
-export interface PeriWasmHostCleanupOutcome {
+export interface WasmRuntimeCleanupOutcome {
   confirmed: boolean;
   error?: unknown;
 }
 
 /** Startup failed; the owner must still await `cleanup` or `eventualCleanup` before reusing capacity. */
-export class PeriWasmHostStartupError extends Error {
-  constructor(cause: unknown, readonly cleanup: Promise<PeriWasmHostCleanupOutcome>,
-    readonly eventualCleanup: Promise<PeriWasmHostCleanupOutcome> = cleanup) {
-    super("Peri WASM host startup failed; ownership cleanup must be checked", { cause });
+export class WasmRuntimeStartupError extends Error {
+  constructor(cause: unknown, readonly cleanup: Promise<WasmRuntimeCleanupOutcome>,
+    readonly eventualCleanup: Promise<WasmRuntimeCleanupOutcome> = cleanup) {
+    super("Peri WASM runtime startup failed; ownership cleanup must be checked", { cause });
   }
 }
 
-export interface PeriWasmHostPorts {
+export interface WasmRuntimePorts {
   dns?: WasmDnsPort;
   network?: WasmNetworkPort;
   scheduler?: WasmSchedulerPort;
@@ -47,27 +47,27 @@ export interface PeriWasmHostPorts {
   workerSockets?: boolean;
 }
 
-export interface PeriWasmHostOptions {
+export interface WasmRuntimeOptions {
   configJson: string;
   moduleUrl?: string | URL;
   env?: Readonly<Record<string, string>>;
   /**
-   * Host-owned module factory; the default loads the packaged artifact at `moduleUrl`.
+   * Runtime-owned module factory; the default loads the packaged artifact at `moduleUrl`.
    * 注入时不解析 `moduleUrl`：workerd 打包模块没有 `import.meta.url`，只能走本入口。
    */
   moduleFactory?: (options: Readonly<Record<string, unknown>>) => Promise<PeriWasmModule>;
   /** Extra Emscripten options merged with the injected ports. */
   moduleOptions?: Readonly<Record<string, unknown>>;
-  ports?: PeriWasmHostPorts;
+  ports?: WasmRuntimePorts;
   signal?: AbortSignal;
   cleanupTimeoutMs?: number;
-  onLifecycle?: (event: PeriWasmHostLifecycleEvent) => void;
-  onDiagnostic?: (kind: PeriWasmHostDiagnosticKind, error: unknown) => void;
+  onLifecycle?: (event: WasmRuntimeLifecycleEvent) => void;
+  onDiagnostic?: (kind: WasmRuntimeDiagnosticKind, error: unknown) => void;
 }
 
-export const DEFAULT_WASM_HOST_CLEANUP_TIMEOUT_MS = 20_000;
+export const DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS = 20_000;
 
-function hostModuleOptions(options: PeriWasmHostOptions): Record<string, unknown> {
+function runtimeModuleOptions(options: WasmRuntimeOptions): Record<string, unknown> {
   const ports = options.ports ?? {};
   const merged: Record<string, unknown> = { ...options.moduleOptions };
   if (ports.dns) merged.periDns = ports.dns;
@@ -82,19 +82,19 @@ function hostModuleOptions(options: PeriWasmHostOptions): Record<string, unknown
   return merged;
 }
 
-export async function startPeriWasmHost(options: PeriWasmHostOptions): Promise<WasmAcpTransport> {
+export async function startWasmRuntime(options: WasmRuntimeOptions): Promise<WasmAcpTransport> {
   const startedAt = performance.now();
   const elapsed = (): number => Math.round(performance.now() - startedAt);
-  const notify = (event: PeriWasmHostLifecycleEvent): void => options.onLifecycle?.(event);
-  const diagnose = (kind: PeriWasmHostDiagnosticKind, error: unknown): void => options.onDiagnostic?.(kind, error);
+  const notify = (event: WasmRuntimeLifecycleEvent): void => options.onLifecycle?.(event);
+  const diagnose = (kind: WasmRuntimeDiagnosticKind, error: unknown): void => options.onDiagnostic?.(kind, error);
   const signal = options.signal;
   const network = options.ports?.network;
   const scheduler = options.ports?.scheduler;
-  const timeout = options.cleanupTimeoutMs ?? DEFAULT_WASM_HOST_CLEANUP_TIMEOUT_MS;
+  const timeout = options.cleanupTimeoutMs ?? DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS;
 
   if (signal?.aborted) {
     notify({ type: "failed" });
-    throw new PeriWasmHostStartupError(signal.reason, Promise.resolve({ confirmed: true }));
+    throw new WasmRuntimeStartupError(signal.reason, Promise.resolve({ confirmed: true }));
   }
 
   let native: Awaited<ReturnType<PeriWasmModule["PeriWasmAcp"]["start"]>> | undefined;
@@ -122,10 +122,10 @@ export async function startPeriWasmHost(options: PeriWasmHostOptions): Promise<W
         network?.close();
         await network?.drain();
       });
-      closeNative = withDeadline(actualNativeClose, timeout, "Peri WASM native host and network close")
+      closeNative = withDeadline(actualNativeClose, timeout, "Peri WASM native runtime and network close")
         .catch((error) => {
           try { stopOwnedPorts(); }
-          catch (ownedError) { error = new AggregateError([error, ownedError], "Peri WASM host and callback cleanup failed"); }
+          catch (ownedError) { error = new AggregateError([error, ownedError], "Peri WASM runtime and callback cleanup failed"); }
           recordCleanupFailure(error, !(error instanceof DeadlineError));
           if (error instanceof DeadlineError)
             void actualNativeClose!.then(freePort).catch((lateError) => recordCleanupFailure(lateError, true));
@@ -160,7 +160,7 @@ export async function startPeriWasmHost(options: PeriWasmHostOptions): Promise<W
 
   const starting = Promise.resolve().then(async (): Promise<WasmAcpTransport> => {
     if (signal?.aborted) throw signal.reason;
-    const moduleOptions = hostModuleOptions(options);
+    const moduleOptions = runtimeModuleOptions(options);
     const module = await instantiatePeriWasm({
       moduleUrl: options.moduleUrl, env: options.env, moduleOptions,
       moduleFactory: options.moduleFactory,
@@ -213,18 +213,18 @@ export async function startPeriWasmHost(options: PeriWasmHostOptions): Promise<W
         freePort();
       } else if (nativeStartupIssued) {
         stopOwnedPorts();
-        throw new Error("Native startup rejected after execution began; no host exit proof is available", { cause: error });
+        throw new Error("Native startup rejected after execution began; no runtime exit proof is available", { cause: error });
       } else await finishWithoutNative();
     });
     const eventualCleanup = finishing.then(
-      (): PeriWasmHostCleanupOutcome => ({ confirmed: closed }),
-      (cleanupError): PeriWasmHostCleanupOutcome => {
+      (): WasmRuntimeCleanupOutcome => ({ confirmed: closed }),
+      (cleanupError): WasmRuntimeCleanupOutcome => {
         recordCleanupFailure(cleanupError);
         return { confirmed: false, error: cleanupError };
       },
     );
     const cleanup = withDeadline(eventualCleanup, timeout, "Peri WASM startup ownership cleanup").catch(
-      (cleanupError): PeriWasmHostCleanupOutcome => {
+      (cleanupError): WasmRuntimeCleanupOutcome => {
         try { stopOwnedPorts(); }
         catch (ownedError) {
           cleanupError = new AggregateError([cleanupError, ownedError], "Peri WASM startup and callback cleanup unconfirmed");
@@ -233,7 +233,7 @@ export async function startPeriWasmHost(options: PeriWasmHostOptions): Promise<W
         return { confirmed: false, error: cleanupError };
       },
     );
-    throw new PeriWasmHostStartupError(error, cleanup, eventualCleanup);
+    throw new WasmRuntimeStartupError(error, cleanup, eventualCleanup);
   } finally {
     if (abortListener) signal?.removeEventListener("abort", abortListener);
   }

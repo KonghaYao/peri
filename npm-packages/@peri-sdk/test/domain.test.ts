@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ChatUserAction } from "../src/chat/action";
-import { AtomicSessionClaims } from "../src/chat/claims";
+import { AtomicSessionOwnership } from "../src/chat/ownership";
 import { SessionBindingConflictError } from "../src/chat/errors";
 import { ChatManager } from "../src/chat/manager";
 import type { ChatManagerInternalOptions } from "../src/chat/manager";
@@ -13,7 +13,7 @@ import {
 
 interface Harness {
     manager: ChatManager;
-    claims: AtomicSessionClaims;
+    ownership: AtomicSessionOwnership;
     database: FakeDatabase;
     ports: FakePort[];
 }
@@ -24,14 +24,14 @@ function harness(options: {
     database?: FakeDatabase;
 } = {}): Harness {
     const kv = options.kv ?? new MemoryKV();
-    const claims = new AtomicSessionClaims(kv);
+    const ownership = new AtomicSessionOwnership(kv);
     const database = options.database ?? new FakeDatabase();
     const ports: FakePort[] = [];
     const managerOptions: ChatManagerInternalOptions = {
         agentConfig: { model: "test" },
         database,
-        sessionClaims: claims,
-        host: {
+        sessionOwnership: ownership,
+        runtime: {
             kind: "transport",
             factory: () => {
                 throw new Error("ACP transport must not start");
@@ -44,24 +44,24 @@ function harness(options: {
             return port;
         },
     };
-    return { manager: new ChatManager(managerOptions), claims, database, ports };
+    return { manager: new ChatManager(managerOptions), ownership, database, ports };
 }
 
-test("MemoryKV claims once and releases only for its owner", async () => {
+test("MemoryKV acquires once and releases only for its owner", async () => {
     const kv = new MemoryKV();
     const results = await Promise.all([
-        kv.claimIfAbsent("session", "first"),
-        kv.claimIfAbsent("session", "second"),
+        kv.acquireIfAbsent("session", "first"),
+        kv.acquireIfAbsent("session", "second"),
     ]);
     expect(results).toEqual([true, false]);
     expect(await kv.releaseIfOwner("session", "second")).toBe(false);
     expect(await kv.releaseIfOwner("session", "first")).toBe(true);
-    expect(await kv.claimIfAbsent("session", "second")).toBe(true);
+    expect(await kv.acquireIfAbsent("session", "second")).toBe(true);
 });
 
 describe("ChatManager lifecycle", () => {
     test("declaration is synchronous and starts nothing", () => {
-        const { manager, claims, database, ports } = harness();
+        const { manager, ownership, database, ports } = harness();
         const chat = manager.createChat({ path: "/workspace" });
 
         expect(chat.id).toBeTruthy();
@@ -69,7 +69,7 @@ describe("ChatManager lifecycle", () => {
         expect(chat.sessionId).toBeNull();
         expect(chat.bindingRevision).toBe(0);
         expect(ports).toHaveLength(0);
-        expect(claims.size).toBe(0);
+        expect(ownership.size).toBe(0);
         expect(database.getCalls).toHaveLength(0);
         expect("execute" in manager).toBe(false);
     });
@@ -106,8 +106,8 @@ describe("ChatManager lifecycle", () => {
         expect(ports[0].closeCalls).toBe(0);
     });
 
-    test("new Sessions use the handle path and claim the returned identity", async () => {
-        const { manager, claims } = harness();
+    test("new Sessions use the handle path and acquire the returned identity", async () => {
+        const { manager, ownership } = harness();
         const chat = manager.createChat({ path: "/custom" });
 
         const ready = await chat.execute(
@@ -115,12 +115,12 @@ describe("ChatManager lifecycle", () => {
         );
 
         expect(ready.sessionId).toBe("session-new");
-        expect(claims.has("session-new")).toBe(true);
+        expect(ownership.has("session-new")).toBe(true);
         expect(manager.findChatBySession("session-new")).toBe(chat);
     });
 
-    test("close failure retains the handle and claim; retry succeeds", async () => {
-        const { manager, claims, database, ports } = harness();
+    test("close failure retains the handle and ownership; retry succeeds", async () => {
+        const { manager, ownership, database, ports } = harness();
         database.seed(directoryEntry("session-1"));
         const chat = manager.createChat();
         await chat.execute(ChatUserAction.changeSessionTo("session-1"));
@@ -131,12 +131,12 @@ describe("ChatManager lifecycle", () => {
         );
         expect(manager.getChat(chat.id)).toBe(chat);
         expect(manager.findChatBySession("session-1")).toBe(chat);
-        expect(claims.has("session-1")).toBe(true);
+        expect(ownership.has("session-1")).toBe(true);
 
         delete ports[0].closeError;
         await manager.closeChat(chat.id);
         expect(manager.getChat(chat.id)).toBeUndefined();
-        expect(claims.size).toBe(0);
+        expect(ownership.size).toBe(0);
     });
 
     test("shutdown closes handles after stopping admission", async () => {
@@ -182,7 +182,7 @@ describe("Session ownership", () => {
         expect(first.ports.length + second.ports.length).toBe(1);
     });
 
-    test("different handle paths cannot bypass the Session claim", async () => {
+    test("different handle paths cannot bypass SessionOwnership", async () => {
         const kv = new MemoryKV();
         const database = new FakeDatabase();
         database.seed(directoryEntry("session-1", "/persisted"));
@@ -202,10 +202,10 @@ describe("Session ownership", () => {
         expect(
             results.find((result) => result.status === "rejected")?.reason,
         ).toBeInstanceOf(SessionBindingConflictError);
-        expect(first.claims.has("session-1")).toBe(
+        expect(first.ownership.has("session-1")).toBe(
             firstChat.sessionId === "session-1",
         );
-        expect(second.claims.has("session-1")).toBe(
+        expect(second.ownership.has("session-1")).toBe(
             secondChat.sessionId === "session-1",
         );
     });

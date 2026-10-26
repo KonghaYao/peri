@@ -1,5 +1,5 @@
 import { notificationBytes } from "../transport/notification-budget";
-import type { PeriWasmHostLease } from "../wasm/host-lifecycle";
+import type { WasmRuntimeLease } from "../wasm/runtime-pool";
 import {
     ChatActionError,
     ChatBusyError,
@@ -14,10 +14,10 @@ import type {
     ChatBindingTarget,
     ChatDatabase,
     ChatDefaults,
-    ChatHost,
+    ChatRuntime,
     ChatLifecycleOptions,
     PeriInstancePort,
-    SessionClaims,
+    SessionOwnership,
 } from "./types";
 
 const MAX_FACT_COUNT = 4096;
@@ -54,20 +54,20 @@ export interface ChatInstanceContext {
     /** Manager 构造时的纯 JSON 快照。 */
     readonly agentConfig: unknown;
     readonly defaults: ChatDefaults;
-    readonly host: ChatHost;
+    readonly runtime: ChatRuntime;
     readonly signal: AbortSignal;
     readonly now?: () => string;
     readonly database: ChatDatabase;
     readonly lifecycle: Required<ChatLifecycleOptions>;
-    /** 仅 host.kind === "wasm" 可用；租约由 PeriInstance 关闭并检查 confirmed。 */
-    acquireWasmHost(signal?: AbortSignal): Promise<PeriWasmHostLease>;
+    /** 仅 runtime.kind === "wasm" 可用；租约由 PeriInstance 关闭并检查 confirmed。 */
+    acquireWasmRuntime(signal?: AbortSignal): Promise<WasmRuntimeLease>;
 }
 
 export type ChatInstanceFactory = (
     context: ChatInstanceContext,
 ) => PeriInstancePort;
 
-/** Manager 提供的本地 Session → 句柄索引；不替代共享 claim。 */
+/** Manager 提供的本地 Session → 句柄索引；不替代共享 ownership。 */
 export interface ChatSessionIndex {
     /** 返回冲突句柄 id；`null` 表示登记成功。 */
     reserve(chatId: string, sessionId: string): string | null;
@@ -85,14 +85,14 @@ export interface ChatServiceOptions {
     readonly path?: string;
     readonly defaults: ChatDefaults;
     readonly agentConfig: unknown;
-    readonly host: ChatHost;
+    readonly runtime: ChatRuntime;
     readonly database: ChatDatabase;
-    readonly claims: SessionClaims;
+    readonly ownership: SessionOwnership;
     readonly index: ChatSessionIndex;
     readonly lifecycle?: ChatLifecycleOptions;
     /** Manager 默认装配真实 PeriInstance；测试注入 fake port。 */
     readonly instanceFactory: ChatInstanceFactory;
-    acquireWasmHost(signal?: AbortSignal): Promise<PeriWasmHostLease>;
+    acquireWasmRuntime(signal?: AbortSignal): Promise<WasmRuntimeLease>;
     onClosed(chatId: string): void;
     readonly now?: () => string;
 }
@@ -227,7 +227,7 @@ export function withCleanupFailure(
 
 /**
  * 绑定失败的错误映射：清理未确认时不得向调用方声称动作未生效。
- * 清理/claim 释放失败通过 `AggregateError` 进入 `cause`。
+ * 清理/ownership 释放失败通过 `AggregateError` 进入 `cause`。
  */
 export function bindingFailure(
     requestId: string,

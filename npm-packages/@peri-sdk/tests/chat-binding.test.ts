@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ChatUserAction } from "../src/chat/action";
-import { AtomicSessionClaims } from "../src/chat/claims";
+import { AtomicSessionOwnership } from "../src/chat/ownership";
 import {
     ChatBusyError,
     ChatNotReadyError,
@@ -18,25 +18,25 @@ import {
 
 interface Setup {
     readonly manager: ChatManager;
-    readonly claims: AtomicSessionClaims;
+    readonly ownership: AtomicSessionOwnership;
     readonly database: FakeDatabase;
     readonly ports: FakePort[];
 }
 
 function setup(
     configure?: (port: FakePort) => void,
-    claims?: AtomicSessionClaims,
+    ownership?: AtomicSessionOwnership,
     lifecycle?: ChatLifecycleOptions,
 ): Setup {
     const kv = new MemoryKV();
     const database = new FakeDatabase();
     const portList: FakePort[] = [];
-    const managerClaims = claims ?? new AtomicSessionClaims(kv);
+    const managerOwnership = ownership ?? new AtomicSessionOwnership(kv);
     const options: ChatManagerInternalOptions = {
         agentConfig: {},
         database,
-        sessionClaims: managerClaims,
-        host: {
+        sessionOwnership: managerOwnership,
+        runtime: {
             kind: "transport",
             factory: () => {
                 throw new Error("ACP transport must not start");
@@ -53,7 +53,7 @@ function setup(
     };
     return {
         manager: new ChatManager(options),
-        claims: managerClaims,
+        ownership: managerOwnership,
         database,
         ports: portList,
     };
@@ -258,8 +258,8 @@ describe("binding concurrency and revision", () => {
 
         expect(chat.phase).toBe("switching");
         expect(setupValue.manager.findChatBySession("session-a")).toBe(chat);
-        // 索引先于 claim：path gate 期间 claim 尚未发生。
-        expect(setupValue.claims.has("session-a")).toBe(false);
+        // 索引先于 ownership：path gate 期间尚未 acquire。
+        expect(setupValue.ownership.has("session-a")).toBe(false);
 
         const contender = setupValue.manager.createChat();
         await expect(
@@ -278,7 +278,7 @@ describe("binding concurrency and revision", () => {
         expect(setupValue.manager.findChatBySession("session-a")).toBe(chat);
     });
 
-    test("successful switch closes A, releases its claim and increments revision", async () => {
+    test("successful switch closes A, releases its ownership and increments revision", async () => {
         const setupValue = setup();
         setupValue.database.seed(directoryEntry("session-a"));
         setupValue.database.seed(directoryEntry("session-b"));
@@ -292,15 +292,15 @@ describe("binding concurrency and revision", () => {
         expect(result.bindingRevision).toBe(2);
         expect(chat.sessionId).toBe("session-b");
         expect(portA.closeCalls).toBe(1);
-        expect(setupValue.claims.has("session-a")).toBe(false);
-        expect(setupValue.claims.has("session-b")).toBe(true);
+        expect(setupValue.ownership.has("session-a")).toBe(false);
+        expect(setupValue.ownership.has("session-b")).toBe(true);
         expect(setupValue.ports).toHaveLength(2);
         expect(setupValue.ports[1].calls).toContain(
             "bindExisting:session-b",
         );
     });
 
-    test("candidate failure keeps the old binding, revision and claim", async () => {
+    test("candidate failure keeps the old binding, revision and ownership", async () => {
         let attempts = 0;
         const setupValue = setup((port) => {
             attempts += 1;
@@ -320,27 +320,27 @@ describe("binding concurrency and revision", () => {
         expect(chat.sessionId).toBe("session-a");
         expect(chat.bindingRevision).toBe(1);
         expect(chat.phase).toBe("ready");
-        expect(setupValue.claims.has("session-a")).toBe(true);
-        expect(setupValue.claims.has("session-b")).toBe(false);
+        expect(setupValue.ownership.has("session-a")).toBe(true);
+        expect(setupValue.ownership.has("session-b")).toBe(false);
         expect(portA.closeCalls).toBe(0);
         expect(setupValue.ports).toHaveLength(2);
         expect(setupValue.ports[1].closeCalls).toBe(1);
     });
 
-    test("claim release failure is preserved in the binding error cause", async () => {
+    test("ownership release failure is preserved in the binding error cause", async () => {
         const kv = new MemoryKV();
-        const claims = new AtomicSessionClaims(kv);
-        const originalRelease = claims.release.bind(claims);
-        claims.release = async (sessionId) => {
+        const ownership = new AtomicSessionOwnership(kv);
+        const originalRelease = ownership.release.bind(ownership);
+        ownership.release = async (sessionId) => {
             if (sessionId === "session-1")
-                throw new Error("claim release failed");
+                throw new Error("ownership release failed");
             return originalRelease(sessionId);
         };
         const setupValue = setup(
             (port) => {
                 port.bindExistingError = new Error("load failed");
             },
-            claims,
+            ownership,
         );
         setupValue.database.seed(directoryEntry("session-1"));
         const chat = setupValue.manager.createChat();
@@ -366,13 +366,13 @@ describe("binding concurrency and revision", () => {
             ((cause as AggregateError).errors as Error[]).map(
                 (error) => error.message,
             ),
-        ).toEqual(["load failed", "claim release failed"]);
+        ).toEqual(["load failed", "ownership release failed"]);
         expect(chat.phase).toBe("cleanup-pending");
         expect(setupValue.manager.findChatBySession("session-1")).toBe(chat);
-        expect(claims.has("session-1")).toBe(true);
+        expect(ownership.has("session-1")).toBe(true);
     });
 
-    test("old close failure blocks the handle and keeps the old claim", async () => {
+    test("old close failure blocks the handle and keeps the old ownership", async () => {
         const setupValue = setup();
         setupValue.database.seed(directoryEntry("session-a"));
         setupValue.database.seed(directoryEntry("session-b"));
@@ -387,8 +387,8 @@ describe("binding concurrency and revision", () => {
         expect(chat.phase).toBe("blocked");
         expect(chat.sessionId).toBe("session-a");
         expect(chat.bindingRevision).toBe(1);
-        expect(setupValue.claims.has("session-a")).toBe(true);
-        expect(setupValue.claims.has("session-b")).toBe(false);
+        expect(setupValue.ownership.has("session-a")).toBe(true);
+        expect(setupValue.ownership.has("session-b")).toBe(false);
         expect(setupValue.ports[1].closeCalls).toBe(1);
         expect(() =>
             chat.execute(ChatUserAction.send({ text: "blocked" })),
@@ -396,7 +396,7 @@ describe("binding concurrency and revision", () => {
 
         delete portA.closeError;
         await chat.close();
-        expect(setupValue.claims.size).toBe(0);
+        expect(setupValue.ownership.size).toBe(0);
         expect(portA.closeCalls).toBe(2);
     });
 
@@ -435,17 +435,17 @@ describe("binding concurrency and revision", () => {
         expect(chat.phase).toBe("blocked");
         expect(chat.sessionId).toBe("session-a");
         expect(chat.bindingRevision).toBe(1);
-        expect(setupValue.claims.has("session-a")).toBe(true);
+        expect(setupValue.ownership.has("session-a")).toBe(true);
         expect(setupValue.manager.findChatBySession("session-a")).toBe(chat);
         expect(setupValue.manager.getChat(chat.id)).toBe(chat);
-        // 新候选的清理已确认，因此只释放候选；旧激活的 claim/索引必须保留。
+        // 新候选的清理已确认，因此只释放候选；旧激活的 ownership/索引必须保留。
         expect(setupValue.ports[1].closeCalls).toBe(1);
-        expect(setupValue.claims.has("session-b")).toBe(false);
+        expect(setupValue.ownership.has("session-b")).toBe(false);
         expect(closeAttempts).toBe(1);
 
         portA.close = originalClose;
         await chat.close();
-        expect(setupValue.claims.size).toBe(0);
+        expect(setupValue.ownership.size).toBe(0);
         expect(setupValue.manager.getChat(chat.id)).toBeUndefined();
         expect(
             setupValue.manager.findChatBySession("session-a"),

@@ -9,9 +9,9 @@
 | --- | --- | --- |
 | 主入口 | `npm-packages/@peri-sdk/src/sdk/index.ts` → `src/chat/public.ts` | `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatViewRegistry`、公开类型/错误（含 `ChatManagerContract`）、Store/KV/transport 类型 |
 | `/portable` | `src/portable.ts` | 主入口的 Chat 公共面 + 嵌入方驱动的执行准入核心；准入摘要仍依赖 `node:crypto` |
-| `/view` | `src/view/index.ts` | 浏览器安全展示：`ChatView`、`ChatReplica`、`readSessionView`、载荷读取、同步协议；不引入 Node 宿主，也不导出 `ChatViewRegistry` |
-| `/wasm` | `src/wasm.ts` | Emscripten ACP Host、loader、`WasmAcpTransport`、scheduler 端口 |
-| `/wasm-host` | `src/wasm-host.ts` | `/wasm` + Node 网络/DNS 端口 |
+| `/view` | `src/view/index.ts` | 浏览器安全展示：`ChatView`、`ChatReplica`、`readSessionView`、载荷读取、同步协议；不引入 Node 运行时依赖，也不导出 `ChatViewRegistry` |
+| `/wasm` | `src/wasm.ts` | Emscripten ACP 运行后端、loader、`WasmAcpTransport`、scheduler 端口 |
+| `/wasm-node` | `src/wasm-node.ts` | `/wasm` + Node 网络/DNS 端口 |
 
 旧 `Agent`、`ManagedAgents`、`SessionDocs`、`SessionViewStore`、`AtomicManagedAgentKv`、
 `agent-claim-conflict-error`、`Sandbox` 已删除，不在任何发布入口导出；`tests/public-view.test.ts`
@@ -23,13 +23,13 @@
 | 职责 | 入口 | 行为 |
 | --- | --- | --- |
 | Manager | `src/chat/manager.ts` | 同步 `createChat`；句柄目录、`findChatBySession`、目录读取、`closeChat`、`shutdown`；不接收普通执行动作 |
-| Manager 契约 | `src/chat/types.ts`、`src/chat/public.ts` | `ChatManager`/`ChatService` 接口；对外类型名 `ChatManagerContract`，具体类 `src/chat/manager.ts` 实现它，宿主可注入自有实现 |
+| Manager 契约 | `src/chat/types.ts`、`src/chat/public.ts` | `ChatManager`/`ChatService` 接口；对外类型名 `ChatManagerContract`，具体类 `src/chat/manager.ts` 实现它，调用方可注入自有实现 |
 | Service | `src/chat/service.ts`、`src/chat/binding.ts`、`src/chat/close-chat.ts` | 绑定状态机、八类动作分派、回执关联、事实日志、关闭预算与失败保留；载荷读取按发起时的绑定代次校验，换绑后的晚到结果/错误丢弃为 `unavailable` |
 | 动作 | `src/chat/action.ts`、`src/chat/json-value.ts` | 八类纯数据 Action、`requestId`、JSON 深拷贝/冻结、`parseChatUserAction`；不依赖 `instanceof` |
-| 类型/错误 | `src/chat/types.ts`、`src/chat/errors.ts` | `ChatHost`、`ChatDefaults`、`ChatLifecycleOptions`、`PeriInstancePort`、错误 `disposition` 与 `ChatCloseIncompleteError` |
+| 类型/错误 | `src/chat/types.ts`、`src/chat/errors.ts` | `ChatRuntime`、`ChatDefaults`、`ChatLifecycleOptions`、`PeriInstancePort`、错误 `disposition` 与 `ChatCloseIncompleteError` |
 | 事实 | `src/chat/facts.ts`、`src/chat/fact-hub.ts` | 按绑定代次编号的事实封套；晚挂 View 重放 |
 | 回执 | `src/chat/send-receipt.ts` | `inputId` 稳定；`accepted` 是入队，投递等待是另一件事 |
-| Claim | `src/chat/claims.ts`、`src/kv/{types,memory-kv,session-claim-key,session-claim-conflict-error}.ts` | `AtomicSessionClaims` 只接受原子 `claimIfAbsent`/`releaseIfOwner`；`MemoryKV` 仅单进程 |
+| SessionOwnership | `src/chat/ownership.ts`、`src/kv/{types,memory-kv,session-ownership-key,session-ownership-conflict-error}.ts` | `AtomicSessionOwnership` 只接受原子 `acquireIfAbsent`/`releaseIfOwner`；`MemoryKV` 仅单进程 |
 | 工厂 | `src/chat/instance-factory.ts`、`src/chat/service-support.ts` | 把 Manager 上下文转换为一次 `PeriInstance`；生产默认装配，测试可注入 |
 | 生命周期预算 | `src/util/deadline.ts`、`src/chat/service-lifecycle.ts` | 关闭/启动/shutdown 的有界等待；超时是 Incomplete，不是停止证明 |
 
@@ -37,12 +37,12 @@
 
 | 职责 | 入口 | 行为 |
 | --- | --- | --- |
-| PeriInstance | `src/agent/peri-instance.ts` | 一次激活的 Session/宿主/交互/队列/历史/载荷控制；剥离 Yjs，只输出事实 |
+| PeriInstance | `src/agent/peri-instance.ts` | 一次激活的 Session/运行后端/交互/队列/历史/载荷控制；剥离 Yjs，只输出事实 |
 | Session | `src/agent/session.ts`、`src/agent/session-close.ts` | 纯 ACP 客户端：`session/new|load`、input 队列命令、`session/cancel`、有界 `session/close`、历史分页 |
 | 交互 | `src/agent/{interaction-broker,interaction-responder,ask-user-question}.ts` | 权限/elicitation/AskUserQuestion 的 ACP 反向请求与回答；turn 结束用安全默认收敛 |
 | MCP over ACP | `src/agent/acp-mcp-bridge.ts`、`src/agent/types.ts` | `acp` 声明走反向 `mcp/message`；直接实例单次借用，跨激活必须用工厂；owned 实例由激活关闭 |
 | 载荷 | `src/state/tool-payloads.ts`、`src/chat/payload-access.ts`、`src/view/payload-reader.ts` | 内容寻址引用、inline/单项/会话预算、`readPayload` 字节与 JSON 校验；错误码 `unauthorized`/`unavailable`/`too_large`/`integrity_error`/`aborted`/`transport_error` |
-| 宿主 | `src/wasm/{host,host-lifecycle,loader,ports,scheduler}.ts`、`src/transport/wasm-transport.ts` | WASM 启动/租约/关闭证据；`moduleFactory` 时无需 `moduleUrl`；HTTP/DNS 端口由部署注入 |
+| 运行后端 | `src/wasm/{runtime,runtime-pool,loader,ports,scheduler}.ts`、`src/transport/wasm-transport.ts` | WASM 启动/租约/关闭证据；`moduleFactory` 时无需 `moduleUrl`；HTTP/DNS 端口由部署注入 |
 
 ## 展示与同步
 
@@ -59,7 +59,7 @@
 ## 验证入口
 
 - `bun run typecheck`：`tsc --noEmit` + demo tsconfig；测试目录不在 include 内。
-- `bun test tests test`：单元/行为测试；`test/` 覆盖执行准入、Session 关闭/启动与 claim。
+- `bun test tests test`：单元/行为测试；`test/` 覆盖执行准入、Session 关闭/启动与 SessionOwnership。
 - `bun run test`：在 `MISE_ENV=wasm mise exec --` 下先 build（含 peri-wasm）再全量测试。
 - `bun run test:wasm`：先 build，再跑真实 WASM ACP 集成（真实打包 WASM + 真实 Turso listener + fixture 模型）。
 - `bun run smoke:workers`：本地 workerd 探针；Hosted Workers 未部署。

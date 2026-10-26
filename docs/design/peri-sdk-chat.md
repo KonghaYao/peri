@@ -15,10 +15,10 @@ SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行
 
 | 对象 | 职责 | 生命周期 |
 | --- | --- | --- |
-| `ChatManager` | 共享依赖快照、句柄目录、Session claim 协调、整体释放；不接收普通执行动作 | 进程/宿主内可重建；`shutdown` 后封闭新准入 |
+| `ChatManager` | 共享依赖快照、句柄目录、SessionOwnership 协调、整体释放；不接收普通执行动作 | 进程/宿主内可重建；`shutdown` 后封闭新准入 |
 | `ChatService` | 单 Chat 的绑定状态机、动作分派、事实日志、载荷读取；不持有 Manager，不依赖 Yjs | 由 `createChat` 同步登记；绑定在首次动作时建立 |
 | `ChatUserAction` | 八类纯数据用户意图，携带稳定 `requestId` | 单次请求；结果按 `disposition` 判断可重试性 |
-| `PeriInstance` | 一次激活的 ACP Session/宿主装配，交互、队列、历史与载荷控制 | 由 `ChatService` 拥有；绑定换代或关闭时释放 |
+| `PeriInstance` | 一次激活的 ACP Session/运行后端装配，交互、队列、历史与载荷控制 | 由 `ChatService` 拥有；绑定换代或关闭时释放 |
 | `ChatView` / `ChatReplica` | 服务端事实到 Yjs 的投影、逻辑同步连接与浏览器只读副本 | `ChatView` 由 Chat 所有者释放；`ChatReplica` 由浏览器释放 |
 
 依赖方向固定为 `ChatManager → ChatService → PeriInstance → Session → Transport`。`ChatView` 只依赖 `ChatFactSource` 与 `ChatYjsChannel`；`ChatReplica` 只消费同步帧与只读 `SessionView`。
@@ -32,18 +32,20 @@ SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行
 - 动作失败携带 `disposition`：`rejected` 明确未生效；`unknown` 可能已写出/执行且不得自动重试；`not_sent` 只由调用端在提交前产生。
 - CF HTTP 层只做边界校验、目标绑定核对与错误映射，不重写领域规则。
 
-## 4. 绑定、claim 与关闭
+## 4. 绑定、SessionOwnership 与关闭
 
-- `createChat` 只同步登记句柄，不启动 ACP、不 claim Session、不读取历史。
+- `createChat` 只同步登记句柄，不启动 ACP、不取得 SessionOwnership、不读取历史。
 - 首次绑定由 `create_new_session` 或 `change_session` 触发；新会话使用句柄/默认 path，加载历史使用 Store 中的持久 cwd。
-- 同一 Session 同时至多一个执行所有者。`SessionClaims` 由外部注入原子 KV；`LocalSessionIndex` 覆盖 binding/cleanup 候选，冲突带 `ownerChatId`。
+- 同一 Session 同时至多一个执行所有者。`SessionOwnership` 由外部注入原子 KV；`LocalSessionIndex` 覆盖 binding/cleanup 候选，冲突带 `ownerChatId`。
 - 空闲才允许换绑；运行中、存在未处理输入、待决交互或未确认清理时拒绝换绑，不 cancel、不 close 旧绑定。
-- 关闭是有界所有权事务：`session/close` 在预算内重放。超时返回 `ChatCloseIncompleteError` 并保留 claim、索引与资源；不产生 `closed` 事实，可重试。
-- `shutdown` 先封闭新准入，再分别结算在途绑定/关闭，最后释放 WASM 宿主；失败聚合上报，可重试。
+- 关闭是有界所有权事务：`session/close` 在预算内重放。超时返回 `ChatCloseIncompleteError` 并保留 ownership、索引与资源；不产生 `closed` 事实，可重试。
+- `shutdown` 先封闭新准入，再分别结算在途绑定/关闭，最后释放 WASM 运行后端；失败聚合上报，可重试。
+
+`SessionOwnership` 解决同一个 Session 被多个 Chat 句柄或服务实例同时绑定的问题：重复执行会造成消息双写与工具重复调用。绑定前向共享原子 KV 以 Session ID 为唯一 key 写入 owner（Manager 实例 UUID），`acquireIfAbsent` 成功者获得执行权，其他实例得到冲突并在 CF 映射为 409。ownership 只在清理确认后释放；关闭超时或失败时保留，避免其他实例接管半关闭会话。`MemoryKV` 仅单进程有效，跨进程必须注入支持 `acquireIfAbsent`/`releaseIfOwner` 的持久原子 KV。
 
 ## 5. 事实与同步
 
-`ChatService` 发布按绑定代次编号的 `ChatFactEnvelope`（seed、历史批次、通知、队列、任务、交互、运行态、关闭）。事实日志供晚挂 View 重放；View 不执行动作、不决定权限、不取消任务、不关闭宿主。
+`ChatService` 发布按绑定代次编号的 `ChatFactEnvelope`（seed、历史批次、通知、队列、任务、交互、运行态、关闭）。事实日志供晚挂 View 重放；View 不执行动作、不决定权限、不取消任务、不关闭运行后端。
 
 - 每个绑定代次拥有独立的一对 Y.Doc 与同步源；换代时成对替换，旧代次条目不能混入新代次。
 - `ChatYjsChannel` 只是逻辑帧通道：不创建 WebSocket/HTTP，不携带凭据，鉴权与物理连接由应用完成。
@@ -51,16 +53,16 @@ SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行
 - `ChatReplica` 只读：`readiness` 明确区分 `not-ready`、`ready`、`unsupported`；版本不支持不是空历史。公开读取为 `read()` 与 `subscribe()`；`readSessionView` 提供无状态纯读取，不提供可写文档、按身份选择器或快照门面。
 - 客户端断线状态由物理传输适配器报告；断线不停止执行，重连通过 HELLO resume 补齐。
 
-## 6. 宿主、端口与工厂
+## 6. 运行后端、端口与工厂
 
-`ChatHost` 只有两个分支：
+`ChatRuntime` 描述一次 Chat 的运行实例来源，不是网络主机名；两个分支都产出可供 ACP 使用的 transport。
 
-1. `{ kind: "wasm" }`：Manager 为每次激活启动独立 WASM 宿主；可注入 `moduleUrl`、`moduleFactory`、`env`、`ports` 与生命周期/诊断回调。
-2. `{ kind: "transport", factory }`：宿主按 path 创建 transport；`factory.close()` 成功即停止证明，失败保留原因供重试。
+1. `{ kind: "wasm" }`：Manager 为每次激活启动独立 WASM 运行后端；可注入 `moduleUrl`、`moduleFactory`、`env`、`ports` 与生命周期/诊断回调。
+2. `{ kind: "transport", factory }`：调用方按 path 创建 transport；`factory.close()` 成功即停止证明，失败保留原因供重试。
 
-`PeriInstance` 是内部实现，不是发布门面。工厂把句柄的路径、Store、宿主与生命周期上下文转换为一次运行装配；`PeriWasmHostManager` 负责宿主租约与释放证据。共享 MCP server 地址不共享 MCP client、声明路由或审批状态。
+`PeriInstance` 是内部实现，不是发布门面。工厂把句柄的路径、Store、运行后端与生命周期上下文转换为一次运行装配；`WasmRuntimePool` 负责运行后端租约与释放证据。共享 MCP server 地址不共享 MCP client、声明路由或审批状态。
 
-宿主可用 SDK `ChatViewRegistry` 按 Chat 复用同一个 `ChatView`：这是可选的宿主策略，不是 SDK 不变量；注册表从主入口与 `/portable` 导出，不从 `/view` 导出。
+调用方可用 SDK `ChatViewRegistry` 按 Chat 复用同一个 `ChatView`：这是可选的部署策略，不是 SDK 不变量；注册表从主入口与 `/portable` 导出，不从 `/view` 导出。
 
 ## 7. 发布入口
 
@@ -68,13 +70,13 @@ SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行
 | --- | --- |
 | 主入口 | `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatViewRegistry`、公开类型/错误（含 `ChatManagerContract`）、Store 读取工具 |
 | `/portable` | 同一 Chat 公共面 + 嵌入方驱动的执行准入核心；仍依赖 `node:crypto`，不是纯浏览器入口 |
-| `/view` | 浏览器安全展示出口：副本、`readSessionView`、载荷读取、同步协议；不引入 Node 宿主，也不导出 `ChatViewRegistry` |
-| `/wasm` | 平台无关的 Emscripten 宿主、loader、transport、scheduler 端口 |
-| `/wasm-host` | `/wasm` + Node 网络/DNS 端口 |
+| `/view` | 浏览器安全展示出口：副本、`readSessionView`、载荷读取、同步协议；不引入 Node 运行时依赖，也不导出 `ChatViewRegistry` |
+| `/wasm` | 平台无关的 Emscripten 运行后端、loader、transport、scheduler 端口 |
+| `/wasm-node` | `/wasm` + Node 网络/DNS 端口 |
 
 ## 8. 非目标
 
 - 不恢复 stdio/Workspace 进程管理、本地数据库后端、JSONL dispatcher 或执行恢复账本。
-- 不让浏览器直接持有模型/Store 凭据，也不把宿主执行搬进浏览器。
-- 不声明跨实例 claim、共享内存 Manager 或多租户隔离已实现；这些由部署注入或另行设计。
+- 不让浏览器直接持有模型/Store 凭据，也不把运行后端执行搬进浏览器。
+- 不声明跨实例 ownership、共享内存 Manager 或多租户隔离已实现；这些由部署注入或另行设计。
 - 不用兼容 shim 维持两套业务入口；删除的公开门面按 breaking change 处理。

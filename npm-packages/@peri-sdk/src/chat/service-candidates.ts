@@ -6,33 +6,33 @@ import {
 } from "./service-support";
 import type { ChatDatabase, ChatDefaults } from "./types";
 
-/** 候选 Session 的登记/claim/释放依赖；由 ChatService 提供。 */
+/** 候选 Session 的登记/acquire/释放依赖；由 ChatService 提供。 */
 export interface CandidateContext {
     readonly chatId: string;
     readonly database: ChatDatabase;
     readonly path?: string;
     readonly defaults: ChatDefaults;
     readonly index: ChatSessionIndex;
-    claimSession(sessionId: string): Promise<void>;
-    releaseClaim(sessionId: string): Promise<void>;
+    acquireSession(sessionId: string): Promise<void>;
+    releaseOwnership(sessionId: string): Promise<void>;
 }
 
 interface CandidateRelease {
-    /** 清理已确认且 claim/索引均已释放。 */
+    /** 清理已确认且 ownership/索引均已释放。 */
     readonly released: boolean;
     /** 首个或聚合的清理失败原因；`released === true` 时为空。 */
     readonly error?: unknown;
 }
 
 /**
- * 单个 Session 候选的索引与 claim 登记。
+ * 单个 Session 候选的索引与 ownership 登记。
  *
- * `reserve` 是同步的：Session ID 一确定就写入索引，覆盖 path resolve、claim、
+ * `reserve` 是同步的：Session ID 一确定就写入索引，覆盖 path resolve、acquire、
  * bind、rename 与清理未确认期；只有清理确认后才移除。
  */
 export class SessionCandidate {
     private reserved = false;
-    private claimed = false;
+    private acquired = false;
 
     constructor(
         private readonly context: CandidateContext,
@@ -49,14 +49,14 @@ export class SessionCandidate {
         return owner;
     }
 
-    /** 取得共享 claim；失败原样抛出，由调用方按阶段映射错误。 */
-    async claim(): Promise<void> {
-        await this.context.claimSession(this.sessionId);
-        this.claimed = true;
+    /** 取得共享 ownership；失败原样抛出，由调用方按阶段映射错误。 */
+    async acquire(): Promise<void> {
+        await this.context.acquireSession(this.sessionId);
+        this.acquired = true;
     }
 
     /**
-     * 候选清理确认后才释放 claim/索引。
+     * 候选清理确认后才释放 ownership/索引。
      *
      * 清理未确认或释放失败都返回失败原因；绝不 `catch` 后静默返回成功。
      */
@@ -65,10 +65,10 @@ export class SessionCandidate {
             return { released: false, error: cleanup.error };
         }
         const failures: unknown[] = [];
-        if (this.claimed) {
+        if (this.acquired) {
             try {
-                await this.context.releaseClaim(this.sessionId);
-                this.claimed = false;
+                await this.context.releaseOwnership(this.sessionId);
+                this.acquired = false;
             } catch (error) {
                 failures.push(error);
             }

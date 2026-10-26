@@ -95,11 +95,11 @@ bun run build        # prepare:wasm + Vite；需要 WASM 工具链
 - `bun test` 覆盖 core、frontend、scripts 与 server；真实模型/Store/远程 MCP 不在单测内。
 - 浏览器包检查：`dist/client` 不应出现 `PERI_MODEL_API_KEY`、`PERI_STORAGE_TOKEN`、`node:fs` 或
   `@tursodatabase`。
-- 真实宿主验收需要匹配源码的 WASM 产物与可用模型/Store；未验证平台必须标记 blocked。
+- 真实运行后端验收需要匹配源码的 WASM 产物与可用模型/Store；未验证平台必须标记 blocked。
 
 ## 部署限制
 
-- 单进程 Session claim：默认 `MemoryKV`，多实例部署必须注入共享原子 KV；不能宣称跨实例接管。
+- 单进程 SessionOwnership：默认 `MemoryKV`，多实例部署必须注入共享原子 KV；不能宣称跨实例接管。
 - 进程退出会结束在途执行；历史仍在 Store，可重新加载续聊，但不恢复旧执行。
 - 工具面只保留远程 Streamable HTTP MCP；WASM 部署没有进程内文件/终端 builtin。
 - hosted Workers/DO 路径已删除；Bun 服务是唯一后端入口。没有认证、限流或多租户隔离。

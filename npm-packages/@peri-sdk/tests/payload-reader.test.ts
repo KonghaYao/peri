@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ChatUserAction } from "../src/chat/action";
-import { AtomicSessionClaims } from "../src/chat/claims";
+import { AtomicSessionOwnership } from "../src/chat/ownership";
 import { ChatManager, type ChatManagerInternalOptions } from "../src/chat/manager";
 import { MemoryKV } from "../src/kv/memory-kv";
 import { ChatView } from "../src/view/chat-view";
@@ -37,8 +37,8 @@ function chatServiceHarness(): {
     const options: ChatManagerInternalOptions = {
         agentConfig: {},
         database,
-        sessionClaims: new AtomicSessionClaims(new MemoryKV()),
-        host: {
+        sessionOwnership: new AtomicSessionOwnership(new MemoryKV()),
+        runtime: {
             kind: "transport",
             factory: () => {
                 throw new Error("ACP transport must not start");

@@ -35,7 +35,7 @@ export class WasmAcpTransport extends JsonRpcTransport {
   }
 
   /**
-   * 宿主构造入口：由 `src/wasm/host.ts` 用宿主自有的端口包装出 transport，
+   * 运行后端构造入口：由 `src/wasm/runtime.ts` 用运行后端自有的端口包装出 transport，
    * 统一实例化与 `start` 的关闭/接收帧路径。线协议契约测试也用它注入假端口。
    */
   static fromPort(native: NativeWasmAcp): WasmAcpTransport {

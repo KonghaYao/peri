@@ -1,6 +1,6 @@
 /**
- * Scheduler port for the Emscripten ACP Host. Timers stay owned by the host so a closed host
- * cannot run callbacks afterwards.
+ * Scheduler port for the Emscripten ACP runtime. Timers stay owned by the runtime so a closed
+ * runtime cannot run callbacks afterwards.
  *
  * 定时器不是平台专属能力：Node 兼容运行时与浏览器都提供 `setTimeout`，浏览器宿主同样注入本端口
  * （WASM glue 的 `setImmediate`/`setTimeout` 均映射到它）。
@@ -9,7 +9,7 @@
 export interface WasmSchedulerPort {
     schedule(callback: () => void, delayMs?: number): unknown;
     cancel(timer: unknown): void;
-    /** Stop accepting callbacks and drop every pending timer owned by the host. */
+    /** Stop accepting callbacks and drop every pending timer owned by the runtime. */
     close(): void;
 }
 

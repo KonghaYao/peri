@@ -1,23 +1,23 @@
 import { cloneJsonValue } from "./json-value";
 import {
     LocalSessionIndex,
-    requireSessionClaims,
-} from "./claims";
+    requireSessionOwnership,
+} from "./ownership";
 import {
-    PeriWasmHostManager,
-    type PeriWasmHostLease,
-} from "../wasm/host-lifecycle";
-import { startPeriWasmHost } from "../wasm/host";
+    WasmRuntimePool,
+    type WasmRuntimeLease,
+} from "../wasm/runtime-pool";
+import { startWasmRuntime } from "../wasm/runtime";
 import { withDeadline } from "../util/deadline";
 import type {
     ChatDatabase,
     ChatDefaults,
-    ChatHost,
+    ChatRuntime,
     ChatLifecycleOptions,
     ChatManager as ChatManagerContract,
     ChatManagerOptions,
     ChatSessionDirectoryEntry,
-    SessionClaims,
+    SessionOwnership,
 } from "./types";
 import { ChatService } from "./service";
 import { createChatInstance } from "./instance-factory";
@@ -41,7 +41,7 @@ export interface ChatManagerInternalOptions extends ChatManagerOptions {
  * 多个 Chat 句柄的目录、占用协调与资源释放。
  *
  * 不接收普通执行动作，不决定 UI 选中项；`createChat` 只同步登记句柄，
- * 不启动 ACP、不 claim Session、不读取历史。
+ * 不启动 ACP、不取得 Session ownership、不读取历史。
  *
  * 这是 SDK 的默认实现；宿主编排层应依赖 `ChatManagerContract` 端口注入，
  * 不要把自己的组合规则写进本类。
@@ -54,12 +54,12 @@ export class ChatManager implements ChatManagerContract {
     private readonly agentConfig: unknown;
     private readonly agentConfigJson: string;
     private readonly database: ChatDatabase;
-    private readonly sessionClaims: SessionClaims;
-    private readonly host: ChatHost;
+    private readonly sessionOwnership: SessionOwnership;
+    private readonly runtime: ChatRuntime;
     private readonly defaults: ChatDefaults;
     private readonly instanceFactory: ChatInstanceFactory;
     private readonly now?: () => string;
-    private readonly wasmHosts?: PeriWasmHostManager;
+    private readonly wasmRuntimes?: WasmRuntimePool;
     private readonly lifecycle: Required<ChatLifecycleOptions>;
 
     private accepting = true;
@@ -79,23 +79,23 @@ export class ChatManager implements ChatManagerContract {
                 "ChatManager requires a ChatDatabase with listSessions/getSession",
             );
         }
-        requireSessionClaims(options.sessionClaims);
+        requireSessionOwnership(options.sessionOwnership);
         if (
-            !options.host ||
-            (options.host.kind !== "wasm" &&
-                options.host.kind !== "transport")
+            !options.runtime ||
+            (options.runtime.kind !== "wasm" &&
+                options.runtime.kind !== "transport")
         ) {
             throw new TypeError(
-                'ChatManager host must be { kind: "wasm" } or { kind: "transport" }',
+                'ChatManager runtime must be { kind: "wasm" } or { kind: "transport" }',
             );
         }
 
         this.agentConfig = cloneJsonValue(options.agentConfig, "agentConfig");
         this.agentConfigJson = JSON.stringify(this.agentConfig);
         this.database = options.database;
-        this.sessionClaims = options.sessionClaims;
-        // 宿主配置在构造时快照；端口/模块工厂等实例仍由外部借用。
-        this.host = { ...options.host };
+        this.sessionOwnership = options.sessionOwnership;
+        // 运行后端配置在构造时快照；端口/模块工厂等实例仍由外部借用。
+        this.runtime = { ...options.runtime };
         this.defaults = { ...options.defaults };
         this.now = options.now;
         this.lifecycle = resolveChatLifecycle(options.lifecycle);
@@ -116,31 +116,31 @@ export class ChatManager implements ChatManagerContract {
                 this.sessions.release(sessionId, chatId),
         };
 
-        if (this.host.kind === "wasm") {
-            const host = this.host;
-            this.wasmHosts = new PeriWasmHostManager(
+        if (this.runtime.kind === "wasm") {
+            const runtime = this.runtime;
+            this.wasmRuntimes = new WasmRuntimePool(
                 ({ signal }) =>
-                    startPeriWasmHost({
+                    startWasmRuntime({
                         configJson: this.agentConfigJson,
-                        moduleUrl: host.moduleUrl,
-                        moduleFactory: host.moduleFactory,
-                        env: host.env,
-                        moduleOptions: host.moduleOptions,
-                        ports: host.ports,
+                        moduleUrl: runtime.moduleUrl,
+                        moduleFactory: runtime.moduleFactory,
+                        env: runtime.env,
+                        moduleOptions: runtime.moduleOptions,
+                        ports: runtime.ports,
                         signal,
-                        cleanupTimeoutMs: host.cleanupTimeoutMs,
-                        onLifecycle: host.onLifecycle,
-                        onDiagnostic: host.onDiagnostic,
+                        cleanupTimeoutMs: runtime.cleanupTimeoutMs,
+                        onLifecycle: runtime.onLifecycle,
+                        onDiagnostic: runtime.onDiagnostic,
                     }),
                 {
-                    startupTimeoutMs: host.startupTimeoutMs,
-                    closeTimeoutMs: host.cleanupTimeoutMs,
+                    startupTimeoutMs: runtime.startupTimeoutMs,
+                    closeTimeoutMs: runtime.cleanupTimeoutMs,
                 },
             );
         }
     }
 
-    /** 同步声明句柄；不启动 ACP、不 claim Session。 */
+    /** 同步声明句柄；不启动 ACP、不取得 Session ownership。 */
     createChat(options?: { path?: string }): ChatService {
         if (!this.accepting) {
             throw new Error("ChatManager is shut down; no new chat handles");
@@ -151,13 +151,13 @@ export class ChatManager implements ChatManagerContract {
             path: options?.path,
             defaults: this.defaults,
             agentConfig: this.agentConfig,
-            host: this.host,
+            runtime: this.runtime,
             database: this.database,
-            claims: this.sessionClaims,
+            ownership: this.sessionOwnership,
             index: this.index,
             instanceFactory: this.instanceFactory,
             lifecycle: this.lifecycle,
-            acquireWasmHost: (signal) => this.acquireWasmHost(signal),
+            acquireWasmRuntime: (signal) => this.acquireWasmRuntime(signal),
             onClosed: (chatId) => this.removeChat(chatId),
             now: this.now,
         });
@@ -190,8 +190,8 @@ export class ChatManager implements ChatManagerContract {
     }
 
     /**
-     * 先封闭新准入，再结算在途绑定与关闭，最后关闭宿主。
-     * 失败聚合上报并保留句柄/claim；可再次调用重试。
+     * 先封闭新准入，再结算在途绑定与关闭，最后关闭 WASM 运行后端。
+     * 失败聚合上报并保留句柄/ownership；可再次调用重试。
      */
     shutdown(): Promise<void> {
         this.accepting = false;
@@ -227,15 +227,15 @@ export class ChatManager implements ChatManagerContract {
             if (result.status === "rejected") failures.push(result.reason);
         }
 
-        // 任一 Chat 未确认关闭时保留宿主：宿主可能仍被未释放的激活使用。
-        if (failures.length === 0 && this.wasmHosts) {
+        // 任一 Chat 未确认关闭时保留运行后端：其可能仍被未释放的激活使用。
+        if (failures.length === 0 && this.wasmRuntimes) {
             try {
-                const reports = await this.wasmHosts.closeAll();
+                const reports = await this.wasmRuntimes.closeAll();
                 for (const report of reports) {
                     if (report.confirmed) continue;
                     failures.push(
                         new Error(
-                            `Peri WASM host ${report.generationId} close is unconfirmed`,
+                            `Peri WASM runtime ${report.generationId} close is unconfirmed`,
                             { cause: report.error },
                         ),
                     );
@@ -254,15 +254,15 @@ export class ChatManager implements ChatManagerContract {
         this.sessions.clear();
     }
 
-    private acquireWasmHost(
+    private acquireWasmRuntime(
         signal?: AbortSignal,
-    ): Promise<PeriWasmHostLease> {
-        if (!this.wasmHosts) {
+    ): Promise<WasmRuntimeLease> {
+        if (!this.wasmRuntimes) {
             throw new Error(
-                'host.kind "transport" does not use a WASM host manager',
+                'runtime.kind "transport" does not use a WASM runtime pool',
             );
         }
-        return this.wasmHosts.acquire({ signal });
+        return this.wasmRuntimes.acquire({ signal });
     }
 
     private removeChat(id: string): void {

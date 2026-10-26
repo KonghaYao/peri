@@ -1,14 +1,14 @@
 # @peri-code/sdk
 
-> 边界：SDK 不再包含进程控制。stdio transport、Workspace 进程管理、本机进程停止证明、JSONL dispatcher 与本地 SQLite 存储均已删除，不留 shim、别名或双写。ACP 连接只有一条装配路径：宿主注入 `transportFactory`（WASM 用 `startPeriWasmHost`，其他部署注入自有实现）。
+> 边界：SDK 不再包含进程控制。stdio transport、Workspace 进程管理、本机进程停止证明、JSONL dispatcher 与本地 SQLite 存储均已删除，不留 shim、别名或双写。ACP 连接只有一条装配路径：宿主注入 `transportFactory`（WASM 用 `startWasmRuntime`，其他部署注入自有实现）。
 
-Bun SDK for Peri's ACP Host over a host-injected transport. `ChatManager` 同步登记 Chat 句柄；`ChatService.execute()` 在首次绑定动作时通过默认实例工厂装配一次 `PeriInstance`，claim Session、初始化 ACP，并创建或加载会话。Peri 负责模型执行与会话持久化；SDK 只做控制面、事实与展示契约。
+Bun SDK for Peri's ACP Host over a host-injected transport. `ChatManager` 同步登记 Chat 句柄；`ChatService.execute()` 在首次绑定动作时通过默认实例工厂装配一次 `PeriInstance`，取得 Session ownership、初始化 ACP，并创建或加载会话。Peri 负责模型执行与会话持久化；SDK 只做控制面、事实与展示契约。
 
 主入口公开 `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatViewRegistry`、`ChatYjsChannel`、公开类型与错误；需要替换管理器实现时面向类型导出 `ChatManagerContract`。旧 `Agent`、`ManagedAgents`、`SessionDocs`、`SessionViewStore` 与 `Sandbox` 已删除，不在任何发布入口提供，也不保留 shim、别名或双写。
 
 ```ts
 import {
-  AtomicSessionClaims, ChatManager, ChatUserAction, ChatView, MemoryKV, TursoStorage,
+  AtomicSessionOwnership, ChatManager, ChatUserAction, ChatView, MemoryKV, TursoStorage,
   type ChatDatabase,
 } from "@peri-code/sdk";
 
@@ -25,9 +25,9 @@ const manager = new ChatManager({
     machineId: "00000000-0000-4000-8000-000000000001",
   },
   database,
-  // 每个 Manager 一个 claims 实例；多个实例共享同一个原子 KV 驱动。
-  sessionClaims: new AtomicSessionClaims(new MemoryKV()),
-  host: { kind: "wasm", moduleUrl: new URL("./dist/wasm/peri-wasm.js", import.meta.url) },
+  // 每个 Manager 一个 ownership 实例；多个实例共享同一个原子 KV 驱动。
+  sessionOwnership: new AtomicSessionOwnership(new MemoryKV()),
+  runtime: { kind: "wasm", moduleUrl: new URL("./dist/wasm/peri-wasm.js", import.meta.url) },
   defaults: {
     path: "/workspace",
     instructions: "Help with this workspace.",
@@ -50,10 +50,10 @@ await manager.shutdown();
 
 `execute` 只接受 `ChatUserAction` 的八类动作：`create_new_session`、`change_session`、`send`、`force_send`、`take_back`、`load_earlier_history`、`cancel`、`answer`。传入普通 wire 对象时先经 `parseChatUserAction` 校验；Manager 不接收 `execute`。执行调度属于 Peri：SDK 只发布输入，不实现 dispatcher、工作查询或准入票据。
 
-`ChatManagerOptions.host` 有两种装配：
+`ChatManagerOptions.runtime` 有两种装配：
 
-- `{ kind: "wasm" }`：Manager 为每次激活启动独立 WASM 宿主，并把 `agentConfig` 序列化为启动配置；可注入 `moduleUrl`、`moduleFactory`、`env`、`ports` 与生命周期回调。
-- `{ kind: "transport", factory }`：由宿主按 `path` 创建 transport；SDK 不启动 Peri 或 Workspace 进程。`factory` 的 `close()` 成功即视为停止证明，失败保留原因供重试。
+- `{ kind: "wasm" }`：Manager 为每次激活启动独立 WASM 运行后端，并把 `agentConfig` 序列化为启动配置；可注入 `moduleUrl`、`moduleFactory`、`env`、`ports` 与生命周期回调。
+- `{ kind: "transport", factory }`：由调用方按 `path` 创建 transport；SDK 不启动 Peri 或 Workspace 进程。`factory` 的 `close()` 成功即视为停止证明，失败保留原因供重试。
 
 宿主如需替换管理器实现或共享视图，面向契约与注册表，而不是具体类：
 
@@ -67,7 +67,7 @@ function createHost(chats: ChatManagerContract) {
     views,
     async shutdown() {
       await views.disposeAll(); // 先断开同步连接与文档
-      await chats.shutdown();   // 再关闭句柄、在途激活与宿主
+      await chats.shutdown();   // 再关闭句柄、在途激活与运行后端
     },
   };
 }
@@ -75,15 +75,15 @@ function createHost(chats: ChatManagerContract) {
 
 `ChatManagerContract` 是 `src/chat/types.ts` 的接口，SDK 的 `ChatManager` 类实现它；`new ChatManager(options)` 只应出现在宿主装配层，测试或其它宿主可以注入自己的实现。`ChatViewRegistry` 只是可选的宿主策略，不是 SDK 不变量：宿主也可以为每条连接各建 `ChatView`，连接数仍由 `ChatView` 管理。两者都从主入口与 `/portable` 导出；`/view` 保持纯浏览器视图面，不导出注册表。
 
-`ChatService` 的绑定动作只在空闲时允许换绑；新会话使用句柄/默认 `path`，加载历史用 Store 中的持久 `cwd`，不回退句柄 path。`findChatBySession` 覆盖 binding/cleanup 中的候选；关闭未确认时保留 claim 与索引供重试。
+`ChatService` 的绑定动作只在空闲时允许换绑；新会话使用句柄/默认 `path`，加载历史用 Store 中的持久 `cwd`，不回退句柄 path。`findChatBySession` 覆盖 binding/cleanup 中的候选；关闭未确认时保留 ownership 与索引供重试。
 
-`AtomicSessionClaims` 包装共享原子 KV：Session claim key 只含 Session ID，不含 path 或 Chat ID。`MemoryKV` 只适用于单进程；跨进程必须注入实现 `claimIfAbsent(key, owner)` / `releaseIfOwner(key, owner)` 的原子适配器。普通 unjs `Storage` 没有 compare-and-set，会被拒绝。同一 Session 的并发绑定失败抛 `SessionBindingConflictError`，且不会启动 transport。适配器负责自己的崩溃恢复或租约策略；过期本身不是旧执行已停止的证明。
+`AtomicSessionOwnership` 包装共享原子 KV：Session ownership key 只含 Session ID，不含 path 或 Chat ID。`MemoryKV` 只适用于单进程；跨进程必须注入实现 `acquireIfAbsent(key, owner)` / `releaseIfOwner(key, owner)` 的原子适配器。普通 unjs `Storage` 没有 compare-and-set，会被拒绝。同一 Session 的并发绑定失败抛 `SessionBindingConflictError`，且不会启动 transport。适配器负责自己的崩溃恢复或租约策略；过期本身不是旧执行已停止的证明。
 
-关闭是有预算的所有权事务：`ChatLifecycleOptions` 提供 `closeDrainTimeoutMs`、`startupSettleTimeoutMs`、`activationCloseTimeoutMs`、`shutdownChatTimeoutMs`。`session/close` 在预算内重放；超时返回 `ChatCloseIncompleteError`，保留 claim、索引与资源，不产生 `closed` 事实。`manager.shutdown()` 先封闭新准入，再聚合清理；可重试。
+关闭是有预算的所有权事务：`ChatLifecycleOptions` 提供 `closeDrainTimeoutMs`、`startupSettleTimeoutMs`、`activationCloseTimeoutMs`、`shutdownChatTimeoutMs`。`session/close` 在预算内重放；超时返回 `ChatCloseIncompleteError`，保留 ownership、索引与资源，不产生 `closed` 事实。`manager.shutdown()` 先封闭新准入，再聚合清理；可重试。
 
 ## 展示与同步
 
-`ChatView` 消费 `ChatFact` 并维护一对 Y.Doc；晚挂 View 由事实日志重放重建。View 只读事实：不执行动作、不决定权限、不取消任务、不关闭宿主。
+`ChatView` 消费 `ChatFact` 并维护一对 Y.Doc；晚挂 View 由事实日志重放重建。View 只读事实：不执行动作、不决定权限、不取消任务、不关闭运行后端。
 
 ```ts
 const view = new ChatView(chat);
@@ -129,16 +129,16 @@ defaults: {
 
 - 主入口：Chat 控制面、展示契约、config/storage 读取工具。
 - `/view`：浏览器安全展示出口；与主入口共享包内 Yjs 依赖，直接服务浏览器时需要打包该依赖。`ChatViewRegistry` 是宿主共享策略，只在主入口与 `/portable` 导出，不在此入口。
-- `/wasm`：平台无关的 Emscripten ACP Host、loader 与 transport；`/wasm-host` 额外提供 Node-compatible 网络/DNS 端口。
+- `/wasm`：平台无关的 Emscripten ACP 运行后端、loader 与 transport；`/wasm-node` 额外提供 Node-compatible 网络/DNS 端口。
 - `/portable`：不装配 Bun/stdio 进程或本地 SQLite；Chat 控制面 + 执行准入核心。准入摘要仍使用 `node:crypto`，不能宣称纯浏览器支持。
 
-`MISE_ENV=wasm mise exec -- bun run build` 构建 `peri-wasm` release 产物，并把 `peri-wasm.js` 与 `peri_wasm.wasm` 放入 `dist/wasm/`。构建依赖 Emscripten 6.0.10；`mise exec` 会注入 `EMSDK`，直接 `bun run build` 在仅有 mise shim 的环境会把 shim 路径当作工具链并失败。工具链不满足时构建失败，不能用旧 `dist` 冒充。默认 [demo.ts](examples/demo/demo.ts) 使用 `host.kind="wasm"`；[demo-wasm.ts](examples/demo/demo-wasm.ts) 使用 `host.kind="transport"` 注入 `WasmAcpTransport`。两者都通过 `ChatView` + 二进制同步帧驱动浏览器 `ChatReplica`；示例用 SSE 适配器承载逻辑帧，生产消费端使用 WebSocket。
+`MISE_ENV=wasm mise exec -- bun run build` 构建 `peri-wasm` release 产物，并把 `peri-wasm.js` 与 `peri_wasm.wasm` 放入 `dist/wasm/`。构建依赖 Emscripten 6.0.10；`mise exec` 会注入 `EMSDK`，直接 `bun run build` 在仅有 mise shim 的环境会把 shim 路径当作工具链并失败。工具链不满足时构建失败，不能用旧 `dist` 冒充。默认 [demo.ts](examples/demo/demo.ts) 使用 `runtime.kind="wasm"`；[demo-wasm.ts](examples/demo/demo-wasm.ts) 使用 `runtime.kind="transport"` 注入 `WasmAcpTransport`。两者都通过 `ChatView` + 二进制同步帧驱动浏览器 `ChatReplica`；示例用 SSE 适配器承载逻辑帧，生产消费端使用 WebSocket。
 
 ## Durable Execution Admission
 
 `/portable` 额外公开可自行驱动的准入核心。SDK Chat 不使用它：输入发布是 ACP 队列命令，调度由 Peri mailbox 决定，因此没有 SDK 侧票据、dispatcher generation 或反向准入端点。
 
-`KvExecutionRegistry` 包装 `AtomicExecutionKv` 提供 durable read/CAS apply/resolve；适配器必须实现版本化读取与 compare-and-set，只实现 claim/release 会被拒绝。`MemoryExecutionKv` 是单进程 `bestEffort` 实现，需要协调器显式用 `allowBestEffort` 选择。注册表写入与回执原子；解析不存在的原始 mutation 会把 NotApplied 封印，防止迟到执行。durable backend、账本与停止证明由嵌入方注入；SDK 不提供本地数据库文件，也不提供基于进程的停止证明。
+`KvExecutionRegistry` 包装 `AtomicExecutionKv` 提供 durable read/CAS apply/resolve；适配器必须实现版本化读取与 compare-and-set，只实现 ownership acquire/release 会被拒绝。`MemoryExecutionKv` 是单进程 `bestEffort` 实现，需要协调器显式用 `allowBestEffort` 选择。注册表写入与回执原子；解析不存在的原始 mutation 会把 NotApplied 封印，防止迟到执行。durable backend、账本与停止证明由嵌入方注入；SDK 不提供本地数据库文件，也不提供基于进程的停止证明。
 
 票据绑定精确的 session、instance/generation、lifecycle/control generation、稳定 work/revision 与 `{turnId, attemptId}`。持久 attempt 经过 queued/entering/running；pause/control 变化使未进入的 work 失效，execution entry 重新校验资格。重放原始准入不会再次消耗稳定 work 预算；未知执行入口只解析原始票据，绝不盲目签发第二次执行。预算跨实例替换保留；缺失停止证明返回 Blocked，不做 lease/TTL 接管。
 

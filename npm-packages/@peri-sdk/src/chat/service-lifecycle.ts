@@ -11,16 +11,16 @@ import type { Activation } from "./service-support";
 import type { ChatLifecycleOptions } from "./types";
 
 /** ChatCloseController 访问 ChatService 资源的窄接口。 */
-interface ChatCloseHost {
+interface ChatCloseContext {
     readonly id: string;
     readonly mutex: AsyncMutex;
     readonly state: ChatBinding;
     readonly facts: ChatFactHub;
     readonly lifecycle: Required<ChatLifecycleOptions>;
     readonly pendingCleanups: Set<Activation>;
-    readonly claimedSessions: Set<string>;
+    readonly ownedSessions: Set<string>;
     takeActive(): Activation | undefined;
-    releaseClaim(sessionId: string): Promise<void>;
+    releaseOwnership(sessionId: string): Promise<void>;
     releaseIndex(sessionId: string): void;
     onActivationClosed(activation: Activation): void;
     abortStartups(): void;
@@ -33,25 +33,25 @@ interface ChatCloseHost {
  *
  * `close()` 同步封闭准入并中止启动，然后给在途绑定一个有界出口；
  * finalizeClose **不进入 AsyncMutex**，否则卡住的 loadSession 会永久挡住关闭。
- * 超时一律是 Incomplete：保留 claim/索引/未确认激活供再次 close/shutdown 重试。
+ * 超时一律是 Incomplete：保留 ownership/索引/未确认激活供再次 close/shutdown 重试。
  */
 export class ChatCloseController {
     private closePromise?: Promise<void>;
     private requested = false;
 
-    constructor(private readonly host: ChatCloseHost) {}
+    constructor(private readonly context: ChatCloseContext) {}
 
     get closingRequested(): boolean {
         return this.requested;
     }
 
     close(): Promise<void> {
-        if (this.host.state.phase === "closed") return Promise.resolve();
+        if (this.context.state.phase === "closed") return Promise.resolve();
         if (this.closePromise) return this.closePromise;
         this.requested = true;
-        this.host.state.beginClose();
-        this.host.abortStartups();
-        this.host.failInputs(
+        this.context.state.beginClose();
+        this.context.abortStartups();
+        this.context.failInputs(
             (requestId) =>
                 new ChatClosedError(
                     requestId,
@@ -74,41 +74,41 @@ export class ChatCloseController {
     private async finalizeClose(): Promise<void> {
         try {
             await withDeadline(
-                this.host.mutex.settled(),
-                this.host.lifecycle.startupSettleTimeoutMs,
+                this.context.mutex.settled(),
+                this.context.lifecycle.startupSettleTimeoutMs,
                 "Chat startup settlement",
             );
         } catch (error) {
-            this.host.state.cleanupPending();
+            this.context.state.cleanupPending();
             throw new ChatCloseIncompleteError([error]);
         }
 
         const failures = await closeChatResources(
             {
-                takeActive: () => this.host.takeActive(),
-                pendingCleanups: this.host.pendingCleanups,
-                claimedSessions: this.host.claimedSessions,
-                releaseClaim: (sessionId) =>
-                    this.host.releaseClaim(sessionId),
+                takeActive: () => this.context.takeActive(),
+                pendingCleanups: this.context.pendingCleanups,
+                ownedSessions: this.context.ownedSessions,
+                releaseOwnership: (sessionId) =>
+                    this.context.releaseOwnership(sessionId),
                 releaseIndex: (sessionId) =>
-                    this.host.releaseIndex(sessionId),
+                    this.context.releaseIndex(sessionId),
                 onActivationClosed: (activation) =>
-                    this.host.onActivationClosed(activation),
+                    this.context.onActivationClosed(activation),
             },
             {
                 activationCloseTimeoutMs:
-                    this.host.lifecycle.activationCloseTimeoutMs,
-                releaseClaims: true,
+                    this.context.lifecycle.activationCloseTimeoutMs,
+                releaseOwnership: true,
             },
         );
 
         if (failures.length > 0) {
-            this.host.state.cleanupPending();
+            this.context.state.cleanupPending();
             throw new ChatCloseIncompleteError(failures);
         }
 
-        this.host.facts.close();
-        this.host.state.closeConfirmed();
-        this.host.onClosed(this.host.id);
+        this.context.facts.close();
+        this.context.state.closeConfirmed();
+        this.context.onClosed(this.context.id);
     }
 }

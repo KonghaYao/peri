@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ChatUserAction } from "../src/chat/action";
-import { AtomicSessionClaims } from "../src/chat/claims";
+import { AtomicSessionOwnership } from "../src/chat/ownership";
 import {
     ChatClosedError,
     ChatCloseIncompleteError,
@@ -9,7 +9,7 @@ import {
 import { ChatManager } from "../src/chat/manager";
 import type { ChatManagerInternalOptions } from "../src/chat/manager";
 import type { ChatFactObserver } from "../src/chat/facts";
-import type { ChatHost, ChatLifecycleOptions } from "../src/chat/types";
+import type { ChatRuntime, ChatLifecycleOptions } from "../src/chat/types";
 import { MemoryKV } from "../src/kv/memory-kv";
 import { DeadlineError } from "../src/util/deadline";
 import {
@@ -20,7 +20,7 @@ import {
 
 interface Setup {
     readonly manager: ChatManager;
-    readonly claims: AtomicSessionClaims;
+    readonly ownership: AtomicSessionOwnership;
     readonly database: FakeDatabase;
     readonly ports: FakePort[];
 }
@@ -28,17 +28,17 @@ interface Setup {
 function setup(
     configure?: (port: FakePort) => void,
     lifecycle?: ChatLifecycleOptions,
-    host?: ChatHost,
+    runtime?: ChatRuntime,
 ): Setup {
     const kv = new MemoryKV();
     const database = new FakeDatabase();
     const ports: FakePort[] = [];
-    const claims = new AtomicSessionClaims(kv);
+    const ownership = new AtomicSessionOwnership(kv);
     const options: ChatManagerInternalOptions = {
         agentConfig: {},
         database,
-        sessionClaims: claims,
-        host: host ?? {
+        sessionOwnership: ownership,
+        runtime: runtime ?? {
             kind: "transport",
             factory: () => {
                 throw new Error("ACP transport must not start");
@@ -53,7 +53,7 @@ function setup(
             return port;
         },
     };
-    return { manager: new ChatManager(options), claims, database, ports };
+    return { manager: new ChatManager(options), ownership, database, ports };
 }
 
 function deferred(): {
@@ -90,7 +90,7 @@ function recorder(): { observer: ChatFactObserver; closed: () => boolean } {
 }
 
 describe("bounded close during startup", () => {
-    test("close after session/new but before rename is incomplete within budget and retains claim/index", async () => {
+    test("close after session/new but before rename is incomplete within budget and retains ownership/index", async () => {
         const createdGate = deferred();
         const setupValue = setup(
             (port) => {
@@ -108,7 +108,7 @@ describe("bounded close during startup", () => {
             ChatUserAction.createNewSession({ requestId: "create-1" }),
         );
 
-        await waitFor(() => setupValue.claims.has("session-new"));
+        await waitFor(() => setupValue.ownership.has("session-new"));
         expect(chat.phase).toBe("binding");
         expect(setupValue.manager.findChatBySession("session-new")).toBe(chat);
 
@@ -127,14 +127,14 @@ describe("bounded close during startup", () => {
         );
         expect(elapsed).toBeLessThan(2000);
         expect(chat.phase).toBe("cleanup-pending");
-        expect(setupValue.claims.has("session-new")).toBe(true);
+        expect(setupValue.ownership.has("session-new")).toBe(true);
         expect(setupValue.manager.findChatBySession("session-new")).toBe(chat);
         expect(setupValue.manager.getChat(chat.id)).toBe(chat);
         expect(recorded.closed()).toBe(false);
 
         createdGate.resolve();
         await expect(creating).rejects.toBeInstanceOf(SessionCreationError);
-        await waitFor(() => !setupValue.claims.has("session-new"));
+        await waitFor(() => !setupValue.ownership.has("session-new"));
 
         await chat.close();
         expect(recorded.closed()).toBe(true);
@@ -144,7 +144,7 @@ describe("bounded close during startup", () => {
         ).toBeUndefined();
     });
 
-    test("close during path resolution times out with index retained, before any claim", async () => {
+    test("close during path resolution times out with index retained, before any ownership acquisition", async () => {
         const setupValue = setup(undefined, {
             startupSettleTimeoutMs: 20,
         });
@@ -176,7 +176,7 @@ describe("bounded close during startup", () => {
             closeError = error;
         }
         expect(closeError).toBeInstanceOf(ChatCloseIncompleteError);
-        expect(setupValue.claims.has("session-1")).toBe(false);
+        expect(setupValue.ownership.has("session-1")).toBe(false);
         expect(setupValue.manager.findChatBySession("session-1")).toBe(chat);
 
         pathGate.resolve();
@@ -210,14 +210,14 @@ describe("bounded close during startup", () => {
             DeadlineError,
         );
         expect(chat.phase).toBe("cleanup-pending");
-        expect(setupValue.claims.has("session-1")).toBe(true);
+        expect(setupValue.ownership.has("session-1")).toBe(true);
         expect(setupValue.manager.findChatBySession("session-1")).toBe(chat);
         expect(setupValue.manager.getChat(chat.id)).toBe(chat);
 
         port.close = originalClose;
         await chat.close();
         expect(setupValue.manager.getChat(chat.id)).toBeUndefined();
-        expect(setupValue.claims.size).toBe(0);
+        expect(setupValue.ownership.size).toBe(0);
         expect(
             setupValue.manager.findChatBySession("session-1"),
         ).toBeUndefined();
@@ -241,7 +241,7 @@ describe("bounded shutdown", () => {
         const creating = chat.execute(
             ChatUserAction.createNewSession({ requestId: "create-1" }),
         );
-        await waitFor(() => setupValue.claims.has("session-new"));
+        await waitFor(() => setupValue.ownership.has("session-new"));
 
         const started = performance.now();
         let shutdownError: unknown;
@@ -254,14 +254,14 @@ describe("bounded shutdown", () => {
         expect(performance.now() - started).toBeLessThan(2000);
         expect(() => setupValue.manager.createChat()).toThrow("shut down");
         expect(setupValue.manager.getChat(chat.id)).toBe(chat);
-        expect(setupValue.claims.has("session-new")).toBe(true);
+        expect(setupValue.ownership.has("session-new")).toBe(true);
         expect(
             setupValue.manager.findChatBySession("session-new"),
         ).toBe(chat);
 
         createdGate.resolve();
         await expect(creating).rejects.toBeInstanceOf(SessionCreationError);
-        await waitFor(() => !setupValue.claims.has("session-new"));
+        await waitFor(() => !setupValue.ownership.has("session-new"));
         await setupValue.manager.shutdown();
         expect(setupValue.manager.getChat(chat.id)).toBeUndefined();
         expect(
@@ -284,9 +284,9 @@ describe("bounded shutdown", () => {
         let closeAllCalls = 0;
         (
             setupValue.manager as unknown as {
-                wasmHosts: { closeAll(): Promise<[]> };
+                wasmRuntimes: { closeAll(): Promise<[]> };
             }
-        ).wasmHosts = {
+        ).wasmRuntimes = {
             closeAll: async () => {
                 closeAllCalls += 1;
                 return [];
@@ -297,13 +297,13 @@ describe("bounded shutdown", () => {
             AggregateError,
         );
         expect(closeAllCalls).toBe(0);
-        expect(setupValue.claims.has("session-1")).toBe(true);
+        expect(setupValue.ownership.has("session-1")).toBe(true);
         expect(setupValue.manager.getChat(chat.id)).toBe(chat);
 
         delete setupValue.ports[0].closeError;
         await setupValue.manager.shutdown();
         expect(closeAllCalls).toBe(1);
         expect(setupValue.manager.getChat(chat.id)).toBeUndefined();
-        expect(setupValue.claims.size).toBe(0);
+        expect(setupValue.ownership.size).toBe(0);
     });
 });

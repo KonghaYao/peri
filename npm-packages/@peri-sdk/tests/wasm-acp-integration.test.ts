@@ -5,13 +5,13 @@ import { resolve } from "node:path";
 import { createServer, connect } from "node:net";
 import { once } from "node:events";
 import {
-  AtomicSessionClaims,
+  AtomicSessionOwnership,
   ChatManager,
   ChatUserAction,
   MemoryKV,
   SessionBindingConflictError,
   TursoStorage,
-  startPeriWasmHost,
+  startWasmRuntime,
   type ChatDatabase,
   type SessionStorage,
 } from "../dist/index.js";
@@ -141,7 +141,7 @@ async function fixture() {
     storage: { url: databaseUrl, authToken: "local-dev" },
     machineId: "00000000-0000-4000-8000-000000000003",
   };
-  const wasmHost = {
+  const wasmRuntime = {
     kind: "wasm" as const,
     moduleUrl,
     env: {
@@ -154,8 +154,8 @@ async function fixture() {
   const managerFor = (kv: MemoryKV): ChatManager => new ChatManager({
     agentConfig,
     database: databaseOver(storage),
-    sessionClaims: new AtomicSessionClaims(kv),
-    host: wasmHost,
+    sessionOwnership: new AtomicSessionOwnership(kv),
+    runtime: wasmRuntime,
     defaults: { path: workspace },
     lifecycle: { activationCloseTimeoutMs: 20_000, closeDrainTimeoutMs: 20_000 },
   });
@@ -233,7 +233,7 @@ test("create, send two inputs, cancel, close and reload run through the bundled 
   }
 }, 120_000);
 
-test("a second manager cannot claim the same real Session and never starts its transport", async () => {
+test("a second manager cannot own the same real Session and never starts its transport", async () => {
   const f = await fixture();
   const kv = new MemoryKV();
   const firstManager = f.managerFor(kv);
@@ -243,16 +243,16 @@ test("a second manager cannot claim the same real Session and never starts its t
     const first = firstManager.createChat({ path: f.workspace });
     const session = await first.execute(ChatUserAction.createNewSession({}));
 
-    // 第二管理器只提供会记录启动的 transport 宿主；claim 必须先于激活。
+    // 第二管理器只提供会记录启动的 transport 运行后端；ownership 必须先于激活。
     const transportManager = new ChatManager({
       agentConfig: { cwd: f.workspace, settings: {}, storage: { url: "http://127.0.0.1:1", authToken: "x" }, machineId: "m" },
       database: databaseOver(f.storage),
-      sessionClaims: new AtomicSessionClaims(kv),
-      host: {
+      sessionOwnership: new AtomicSessionOwnership(kv),
+      runtime: {
         kind: "transport",
         factory: () => {
           secondTransportStarted = true;
-          throw new Error("transport must not start before a claim succeeds");
+          throw new Error("transport must not start before ownership acquisition succeeds");
         },
       },
       defaults: { path: f.workspace },

@@ -136,8 +136,8 @@ Peri 执行 lease 与 Workspace fencing 均已删除；binding/path 校验、事
 按 ID load 不以当前计算实例或其 `cwd` 认领 Session；跨 Machine 或环境缺失时保留
 只读历史。仅凭知道 Session ID 不授予访问权。
 
-SDK 复用同一组 ACP 装配：`WasmAcpTransport` 只替换底层传输，`ChatHost` 的 `kind:"wasm"` 分支
-按激活启动宿主，`kind:"transport"` 分支接受部署注入的 transport。旧 `Sandbox`、`ManagedAgents`、
+SDK 复用同一组 ACP 装配：`WasmAcpTransport` 只替换底层传输，`ChatRuntime` 的 `kind:"wasm"` 分支
+按激活启动运行后端，`kind:"transport"` 分支接受部署注入的 transport。旧 `Sandbox`、`ManagedAgents`、
 `Agent` 与 `Session` 业务门面已删除；公开对象是 `ChatManager`、`ChatService`、`ChatUserAction`、
 `ChatView` 与 `ChatReplica`。构建产物（JS 与 WASM）放入 npm 包内 `dist/wasm/`，示例服务与 Workers
 probe 复用同一装配接口。
@@ -148,10 +148,10 @@ SDK 的 `ChatView` 把 ACP 通知（含冷 `session/load` 的历史重放）投�
 版本化投影，不能转发原始 Yjs 更新；跨实例同步协议不在本设计的现行保证内。接口与验证入口见
 [SDK 代码索引](../code-index/peri-ts-sdk.md)，不以某个分支的提交状态描述当前能力。
 
-SDK 的 `ChatManager` 使用外部注入的 `SessionClaims` 原子协调会话占位，并按 owner 释放；它负责 Chat
-句柄与会话占位，不是 RCRA 执行准入的完整权威。契约要求 Session key 仅含 Session ID，共享 keyspace
-即占位协调域，不含 path 或 Chat ID。部署必须共享 KV 覆盖可能执行同一 Session 的全部实例；不同数据库
-的相同 ID 共 KV 时保守拒绝，可按业务隔离 KV。启动失败若 transport 清理未确认，SDK 保留 claim 与
+SDK 的 `ChatManager` 使用外部注入的 `SessionOwnership` 原子协调会话归属，并按 owner 释放；它负责 Chat
+句柄与会话归属，不是 RCRA 执行准入的完整权威。契约要求 Session ownership key 仅含 Session ID，共享 keyspace
+即归属协调域，不含 path 或 Chat ID。部署必须共享 KV 覆盖可能执行同一 Session 的全部实例；不同数据库
+的相同 ID 共 KV 时保守拒绝，可按业务隔离 KV。启动失败若 transport 清理未确认，SDK 保留 ownership 与
 transport，进入可重试的 incomplete 状态，以 `AggregateError`/`cause` 保留原错误和清理错误；`close`
 共享可重试的清理事务，确认清理后释放，以免仍存活的旧执行与新实例重叠。
 

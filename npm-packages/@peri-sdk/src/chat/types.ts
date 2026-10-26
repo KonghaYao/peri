@@ -5,8 +5,8 @@ import type {
     ReadPayloadOptions, ToolPayloadReadRef, ToolPayloadResponse,
 } from "../view/payload-reader";
 import type {
-    PeriWasmHostDiagnosticKind, PeriWasmHostLifecycleEvent, PeriWasmHostPorts,
-} from "../wasm/host";
+    WasmRuntimeDiagnosticKind, WasmRuntimeLifecycleEvent, WasmRuntimePorts,
+} from "../wasm/runtime";
 import type { PeriWasmModuleFactory } from "../wasm/loader";
 import type {
     AnswerAction, CancelAction, ForceSendAction, HistoryAction, SendAction, SessionAction, TakeBackAction,
@@ -69,8 +69,8 @@ export interface ChatDatabase {
     getSession(id: string): Promise<ChatSessionDirectoryEntry | null>;
 }
 
-export interface SessionClaims {
-    claim(sessionId: string): Promise<void>;
+export interface SessionOwnership {
+    acquire(sessionId: string): Promise<void>;
     release(sessionId: string): Promise<void>;
     releaseAll(): Promise<void>;
 }
@@ -82,18 +82,18 @@ export interface ChatDefaults {
     mcpServers?: Record<string, AcpMcpServer>;
 }
 
-export type ChatHost =
+export type ChatRuntime =
     | {
           kind: "wasm";
           moduleUrl?: string | URL;
           moduleFactory?: PeriWasmModuleFactory;
           env?: Readonly<Record<string, string>>;
           moduleOptions?: Readonly<Record<string, unknown>>;
-          ports?: PeriWasmHostPorts;
+          ports?: WasmRuntimePorts;
           cleanupTimeoutMs?: number;
           startupTimeoutMs?: number;
-          onLifecycle?: (event: PeriWasmHostLifecycleEvent) => void;
-          onDiagnostic?: (kind: PeriWasmHostDiagnosticKind, error: unknown) => void;
+          onLifecycle?: (event: WasmRuntimeLifecycleEvent) => void;
+          onDiagnostic?: (kind: WasmRuntimeDiagnosticKind, error: unknown) => void;
       }
     | {
           kind: "transport";
@@ -106,7 +106,7 @@ export type ChatHost =
 /**
  * 关闭/启动的有界等待预算；单一权威，调用方不再各自发明超时。
  *
- * 超时一律表达为 Incomplete：保留 claim、索引与资源供重试，不产生 `closed` 事实。
+ * 超时一律表达为 Incomplete：保留 ownership、索引与资源供重试，不产生 `closed` 事实。
  */
 export interface ChatLifecycleOptions {
     /** session/close 有界重放预算；默认 3000ms。 */
@@ -123,15 +123,15 @@ export interface ChatManagerOptions {
     /** 纯 JSON 配置；构造时序列化快照，拒绝函数/循环/不可序列化值。 */
     agentConfig: unknown;
     database: ChatDatabase;
-    sessionClaims: SessionClaims;
-    host: ChatHost;
+    sessionOwnership: SessionOwnership;
+    runtime: ChatRuntime;
     defaults?: ChatDefaults;
     lifecycle?: ChatLifecycleOptions;
     now?: () => string;
 }
 
 export interface ChatManager {
-    /** 同步声明句柄；不启动 ACP、不 claim Session。 */
+    /** 同步声明句柄；不启动 ACP、不取得 Session ownership。 */
     createChat(options?: { path?: string }): ChatService;
     getChat(id: string): ChatService | undefined;
     /** 包含 binding/cleanup 中的候选句柄。 */
@@ -174,7 +174,7 @@ export interface PeriInstancePort {
         title?: string;
         instructions?: string;
         mcpServers?: Record<string, AcpMcpServer>;
-        /** `session/new` 返回后、后续阶段前回调；用于先登记索引与 claim。 */
+        /** `session/new` 返回后、后续阶段前回调；用于先登记索引与 ownership。 */
         onSessionCreated?: (sessionId: string) => void | Promise<void>;
     }): Promise<{ sessionId: string }>;
     bindExisting(sessionId: string): Promise<{ sessionId: string }>;

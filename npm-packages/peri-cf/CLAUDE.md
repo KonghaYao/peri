@@ -11,10 +11,10 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 ## 边界
 
 **服务端是唯一计算实例**：`server/index.ts` 启动 Bun 进程；`server/agent/compose.ts` 把平台依赖
-（WASM 宿主、Store、claim、默认配置）装配成 SDK `ChatManager`，是 server 内唯一构造具体实现的
+（WASM 运行后端、Store、SessionOwnership、默认配置）装配成 SDK `ChatManager`，是 server 内唯一构造具体实现的
 位置；`server/agent/manager.ts` 的 `AppChatManager` 只接收注入的 `ChatManagerContract` 与
 `ChatViewRegistry`，`getChatManager` 是唯一注入点。句柄、绑定、Action、事实与关闭语义都在 SDK。
-浏览器不启动 WASM 宿主，刷新/关闭页面不结束执行；服务进程退出会结束在途执行，历史仍在 Store。
+浏览器不启动 WASM 运行后端，刷新/关闭页面不结束执行；服务进程退出会结束在途执行，历史仍在 Store。
 
 **凭据与工具面只在服务端**：模型、Store、machineId 与远程 MCP 全部来自环境变量
 （`server/config.ts`）；前端没有 localStorage 凭据、relay 或首次运行门禁。`PERI_MCP_SERVERS` 只接受
@@ -56,9 +56,9 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 - 运行/交互/队列事实只来自选中会话的副本；列表不提供每会话运行态。
 - 命令失败契约以 `disposition` 为唯一权威：`rejected` 明确未生效，`unknown` 执行状态未知（不得
   自动重试）；`not_sent` 只存在于浏览器预检。不要用 HTTP status 反推可重试性。
-- `cancel` 的 `requested` 不是 stopped；关闭未确认会保留句柄、claim 与资源，可重试。
+- `cancel` 的 `requested` 不是 stopped；关闭未确认会保留句柄、ownership 与资源，可重试。
 - `DELETE` 先关 SDK 句柄再释放 View；进程 `shutdown` 先 `disposeAll` 释放全部 View，再关闭 SDK
-  端口与 WASM 宿主；任一段失败都上报并保留资源。
+  端口与 WASM 运行后端；任一段失败都上报并保留资源。
 
 ## 服务端配置
 
@@ -86,7 +86,7 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 
 只消费已发布 SDK 入口：主入口（`ChatManager`/`ChatService`/`ChatUserAction`/`ChatView` 契约、
 `ChatViewRegistry`、`ChatManagerContract`）、`/view`（只读副本、载荷读取、同步协议）、`/wasm`
-（宿主启动、调度器端口、transport、关闭证据）。不引用 `@peri-sdk/src`、不新增 entry、不复制准入或
+（运行后端启动、调度器端口、transport、关闭证据）。不引用 `@peri-sdk/src`、不新增 entry、不复制准入或
 同步规则。服务端只注入调度器端口；网络由 Emscripten fetch 执行器发起。SDK 不感知 assistant-ui。
 
 `core/shared/chat.ts` 与 `sync.ts` 的 Zod schema 是 wire/展示 DTO 的单一来源。ACP 投影由 SDK

@@ -6,7 +6,7 @@
  *  - Turn：默认走 `session/input/{snapshot,enqueue}` 队列路径，与 SDK `ChatService` 的输入队列相同；
  *    `?turn=prompt` 走 `session/prompt`，这是 SDK 之外的直连 turn 路径（peri-cf 也在用），不是遗留方法。
  *  - 取消：`session/cancel` 是通知，不是请求。
- *  - `?host=sdk`：peri-cf 形态——调用 SDK 的 `startPeriWasmHost` 且**只注入 `moduleFactory`**，
+ *  - `?host=sdk`：peri-cf 形态——调用 SDK 的 `startWasmRuntime` 且**只注入 `moduleFactory`**，
  *    不提供可解析的 `moduleUrl`。workerd 里 `import.meta.url` 是 undefined，SDK 不得在注入
  *    factory 时再去解析产物 URL。
  *
@@ -16,7 +16,7 @@
  */
 import Module from './peri-wasm.js';
 import wasmModule from './peri_wasm.wasm';
-import { createSchedulerPort, startPeriWasmHost } from './wasm-host.js';
+import { createSchedulerPort, startWasmRuntime } from './wasm-node.js';
 
 const CWD = '/workspace';
 const TURN_BUDGET_MS = 60_000;
@@ -126,7 +126,7 @@ async function closeSession(acp, sessionId, observe) {
 
 /** peri-cf 形态：宿主只注入 moduleFactory，没有可解析的产物 URL。 */
 async function probeSdkHost(env) {
-  const transport = await startPeriWasmHost({
+  const transport = await startWasmRuntime({
     configJson: JSON.stringify(hostConfig(env)),
     moduleFactory: (options) => Module({
       mainScriptUrlOrBlob: 'file:///bundle/peri-wasm.js',

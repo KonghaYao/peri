@@ -1,16 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import {
-  AtomicSessionClaims,
+  AtomicSessionOwnership,
   MemoryKV,
   PayloadReadError,
   type ChatDatabase,
-  type ChatHost,
+  type ChatRuntime,
   type ChatSessionDirectoryEntry,
   type PeriInstancePort,
   type ToolPayloadReadRef,
   type ToolPayloadResponse,
 } from "@peri-code/sdk";
-import { DEFAULT_WASM_HOST_CLEANUP_TIMEOUT_MS } from "@peri-code/sdk/wasm";
+import { DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS } from "@peri-code/sdk/wasm";
 import {
   SESSION_CWD,
   WORKSPACE_CWD,
@@ -39,9 +39,9 @@ const config: ServerConfig = {
   staticRoot: "/tmp/peri-cf-dist",
 };
 
-const transportHost: ChatHost = {
+const transportRuntime: ChatRuntime = {
   kind: "transport",
-  factory: async () => { throw new Error("transport host must not start in compose tests"); },
+  factory: async () => { throw new Error("transport runtime must not start in compose tests"); },
 };
 
 function entry(
@@ -134,8 +134,8 @@ class FakeFactory {
 }
 
 function assembled(options: {
-  useDefaultHost?: boolean;
-  host?: ChatHost;
+  useDefaultRuntime?: boolean;
+  runtime?: ChatRuntime;
   lifecycle?: { activationCloseTimeoutMs?: number };
   factory?: FakeFactory;
   logError?: (label: string, error: unknown, context?: Record<string, unknown>) => void;
@@ -146,10 +146,10 @@ function assembled(options: {
   const logs = options.logs ?? [];
   const manager = createSdkChatManager(config, {
     database,
-    sessionClaims: new AtomicSessionClaims(new MemoryKV()),
-    host: options.useDefaultHost
+    sessionOwnership: new AtomicSessionOwnership(new MemoryKV()),
+    runtime: options.useDefaultRuntime
       ? undefined
-      : options.host ?? transportHost,
+      : options.runtime ?? transportRuntime,
     lifecycle: options.lifecycle,
     instanceFactory: factory.create,
     logError: options.logError ?? ((label, error, context) => logs.push({ label, error, context })),
@@ -293,24 +293,24 @@ describe("createSdkChatManager", () => {
     process.env.PERI_SERVER_SECRET = "must-not-leak";
     try {
       const logs: Array<{ label: string; error: unknown; context?: Record<string, unknown> }> = [];
-      const { manager, database, factory } = assembled({ useDefaultHost: true, logs });
+      const { manager, database, factory } = assembled({ useDefaultRuntime: true, logs });
       database.entries.set("session-1", entry("session-1"));
       await activate(manager, "session-1");
 
-      const host = factory.contexts[0]!.host;
-      expect(host.kind).toBe("wasm");
-      if (host.kind !== "wasm") throw new Error("expected wasm host");
-      expect(host.moduleUrl).toBe(config.wasmModuleUrl);
-      expect(host.env).toEqual({ LANGFUSE_TRACING: "true" });
-      expect(host.cleanupTimeoutMs).toBe(DEFAULT_WASM_HOST_CLEANUP_TIMEOUT_MS);
-      expect(host.ports?.scheduler).toBeDefined();
+      const runtime = factory.contexts[0]!.runtime;
+      expect(runtime.kind).toBe("wasm");
+      if (runtime.kind !== "wasm") throw new Error("expected wasm runtime");
+      expect(runtime.moduleUrl).toBe(config.wasmModuleUrl);
+      expect(runtime.env).toEqual({ LANGFUSE_TRACING: "true" });
+      expect(runtime.cleanupTimeoutMs).toBe(DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS);
+      expect(runtime.ports?.scheduler).toBeDefined();
 
-      const diagnostic = new Error("host startup failed");
-      host.onDiagnostic?.("startup", diagnostic);
+      const diagnostic = new Error("runtime startup failed");
+      runtime.onDiagnostic?.("startup", diagnostic);
       expect(logs).toEqual([{
-        label: "Peri server host diagnostic",
+        label: "Peri server runtime diagnostic",
         error: diagnostic,
-        context: { phase: "host-start", kind: "startup" },
+        context: { phase: "runtime-start", kind: "startup" },
       }]);
     } finally {
       if (originalTracing === undefined) delete process.env.LANGFUSE_TRACING;
@@ -327,7 +327,7 @@ describe("createSdkChatManager", () => {
     expect(defaults.factory.contexts[0]?.lifecycle).toMatchObject({
       closeDrainTimeoutMs: 3000,
       startupSettleTimeoutMs: 5000,
-      activationCloseTimeoutMs: DEFAULT_WASM_HOST_CLEANUP_TIMEOUT_MS,
+      activationCloseTimeoutMs: DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS,
     });
 
     const overridden = assembled({ lifecycle: { activationCloseTimeoutMs: 1234 } });
@@ -335,7 +335,7 @@ describe("createSdkChatManager", () => {
     await activate(overridden.manager, "session-1");
     expect(overridden.factory.contexts[0]?.lifecycle).toMatchObject({
       activationCloseTimeoutMs: 1234,
-      shutdownChatTimeoutMs: DEFAULT_WASM_HOST_CLEANUP_TIMEOUT_MS + 10_000,
+      shutdownChatTimeoutMs: DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS + 10_000,
     });
   });
 });
