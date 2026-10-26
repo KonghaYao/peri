@@ -13,7 +13,7 @@ import { InteractionBroker } from "./interaction-broker";
 import type { InteractionAnswer } from "./interaction-responder";
 import { Session, SessionStartError, type SessionStartResult } from "./session";
 import type { CloseOptions } from "./session-close";
-import type { AcpMcpServer, AcpMcpServerInstance } from "./types";
+import type { AcpMcpServer } from "./types";
 import type { JsonRpcNotification, Transport } from "../transport/types";
 
 /**
@@ -35,7 +35,7 @@ export type PeriHostActivator = (
     options: { signal: AbortSignal },
 ) => Promise<PeriHostActivation>;
 
-export type PeriInstanceBindStage =
+type PeriInstanceBindStage =
     | "mcp-connect" | "session/new" | "claim" | "session/load" | "rename" | "input-snapshot";
 
 /** 绑定阶段失败；`createdSessionId` 已创建时上层不得盲目重复新建。 */

@@ -194,7 +194,7 @@
 
 /* ---------- 代码块 ---------- */
 
-/* assistant-ui 把 CodeHeader 与 pre 渲染为同级节点：header 负责吸顶名称栏，
+/* 代码块 header 与 pre 同级渲染（沿用上游 aui 样式命名）：header 负责吸顶名称栏，
    pre 负责主体，两者用同一圆角拼成一个无外边框的代码块。 */
 .aui-md .aui-code-header-root {
   position: sticky;

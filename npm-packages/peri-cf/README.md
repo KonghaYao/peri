@@ -17,11 +17,12 @@ Peri WASM Agent 的 Bun 长驻服务 + 浏览器 Chat。服务端持有 `ChatMan
   → peri-wasm Host（每次激活一个）→ 模型 / Turso Store / 远程 MCP
 ```
 
-- **服务端**：`server/index.ts` 是 Bun 入口；`server/agent/manager.ts` 是组合根（SDK Manager +
-  `ChatViewRegistry`）；`server/api/index.ts` 只做 HTTP 边界校验与错误映射；`server/api/sync.ts` 把
-  Bun WebSocket 适配为 SDK `ChatYjsChannel`。
+- **服务端**：`server/index.ts` 是 Bun 入口；`server/agent/compose.ts` 是平台装配（唯一构造具体
+  `ChatManager` 的位置）；`server/agent/manager.ts` 编排注入的 `ChatManagerContract` 与
+  `ChatViewRegistry`，`getChatManager` 是唯一注入点；`server/api/index.ts` 只做 HTTP 边界校验与错误
+  映射；`server/api/sync.ts` 把 Bun WebSocket 适配为 SDK `ChatYjsChannel`。
 - **前端**：`frontend/remote/controller.ts` 是页面控制器；`frontend/chat/runtime/useChat.ts` 装配控制器、
-  目录查询与载荷读取；`frontend/chat/` 是 assistant-ui 适配与展示。
+  目录查询与载荷读取；`frontend/chat/` 是展示外壳与时间线。
 - **同步**：客户端只发 HELLO/ACK；服务端发 SNAPSHOT/UPDATE；客户端不能写 Y.Doc。慢客户端由 SDK
   交付信用/背压显式关闭。
 - **打开历史**：先 `POST /api/chats` 得到空句柄，再 `change_session`；202 后才连 WS。已有控制者返回

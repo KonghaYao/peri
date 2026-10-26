@@ -10,22 +10,6 @@ export interface TimelinePosition {
   scrollOffset: number;
 }
 
-export class TimelinePositionStore {
-  private readonly positions = new Map<string, TimelinePosition>();
-
-  get(chatId: string): TimelinePosition | undefined {
-    return this.positions.get(chatId);
-  }
-
-  save(chatId: string, position: TimelinePosition): void {
-    this.positions.set(chatId, position);
-  }
-
-  clear(): void {
-    this.positions.clear();
-  }
-}
-
 /** 滚动事实 → 位置：贴底只记终态，上滚后记锚点行，便于恢复不跳动。 */
 export function rememberTimelinePosition(
   metrics: ScrollMetrics, rowId: string | null, rowTop: number | null,

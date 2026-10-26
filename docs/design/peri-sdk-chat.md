@@ -1,6 +1,6 @@
 # Peri SDK Chat 架构
 
-> 状态：**现行设计**（2026-10-25）。实现与验收证据见
+> 状态：**现行设计**（2026-10-26）。实现与验收证据见
 > [Peri SDK Chat 重构 issue](../../spec/issues/2026-10-24-peri-sdk-chat-refactor.md)；
 > 代码入口以 [TS SDK 索引](../code-index/peri-ts-sdk.md) 为准。
 > 本文只描述稳定结构与边界，不记录实施批次、测试计数或平台验收结果。
@@ -48,7 +48,7 @@ SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行
 - 每个绑定代次拥有独立的一对 Y.Doc 与同步源；换代时成对替换，旧代次条目不能混入新代次。
 - `ChatYjsChannel` 只是逻辑帧通道：不创建 WebSocket/HTTP，不携带凭据，鉴权与物理连接由应用完成。
 - 同步帧为二进制 `HELLO/SNAPSHOT/UPDATE/ACK`；用户可恢复向量、全量/增量快照、交付信用与有界背压由同步层负责。
-- `ChatReplica` 只读：`readiness` 明确区分 `not-ready`、`ready`、`unsupported`；版本不支持不是空历史。公开读取为 `read()`、`subscribe()` 与纯选择器，不提供可写文档或快照门面。
+- `ChatReplica` 只读：`readiness` 明确区分 `not-ready`、`ready`、`unsupported`；版本不支持不是空历史。公开读取为 `read()` 与 `subscribe()`；`readSessionView` 提供无状态纯读取，不提供可写文档、按身份选择器或快照门面。
 - 客户端断线状态由物理传输适配器报告；断线不停止执行，重连通过 HELLO resume 补齐。
 
 ## 6. 宿主、端口与工厂
@@ -60,13 +60,15 @@ SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行
 
 `PeriInstance` 是内部实现，不是发布门面。工厂把句柄的路径、Store、宿主与生命周期上下文转换为一次运行装配；`PeriWasmHostManager` 负责宿主租约与释放证据。共享 MCP server 地址不共享 MCP client、声明路由或审批状态。
 
+宿主可用 SDK `ChatViewRegistry` 按 Chat 复用同一个 `ChatView`：这是可选的宿主策略，不是 SDK 不变量；注册表从主入口与 `/portable` 导出，不从 `/view` 导出。
+
 ## 7. 发布入口
 
 | 入口 | 内容 |
 | --- | --- |
-| 主入口 | `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、公开类型/错误、Store 读取工具 |
+| 主入口 | `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatViewRegistry`、公开类型/错误（含 `ChatManagerContract`）、Store 读取工具 |
 | `/portable` | 同一 Chat 公共面 + 嵌入方驱动的执行准入核心；仍依赖 `node:crypto`，不是纯浏览器入口 |
-| `/view` | 浏览器安全展示出口：副本、选择器、载荷读取、同步协议；不引入 Node 宿主 |
+| `/view` | 浏览器安全展示出口：副本、`readSessionView`、载荷读取、同步协议；不引入 Node 宿主，也不导出 `ChatViewRegistry` |
 | `/wasm` | 平台无关的 Emscripten 宿主、loader、transport、scheduler 端口 |
 | `/wasm-host` | `/wasm` + Node 网络/DNS 端口 |
 

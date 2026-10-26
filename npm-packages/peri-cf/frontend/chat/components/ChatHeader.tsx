@@ -1,7 +1,7 @@
 import type { RefObject } from 'react';
 import { Menu, PanelRight, Settings } from 'lucide-react';
 
-export interface ChatHeaderProps {
+interface ChatHeaderProps {
   title: string;
   detailsOpen: boolean;
   sidebarOpen: boolean;

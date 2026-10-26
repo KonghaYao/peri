@@ -1,5 +1,12 @@
 # 2026-10-13 peri-cf Chat 前端接入 assistant-ui
 
+> **历史实现记录，已被 2026-10-26 重构取代。** 本文保留当时的接入过程与验收结论（结论不改写），
+> 但下列文件/依赖**已删除**，不要按现行代码查找：`@assistant-ui/react`、
+> `@assistant-ui/react-markdown`、`components.json`、`web/chat/adapter.ts`、`MessageThread`、
+> `ConversationPanels`、`web/components/ui/`。`web/` 目录已不在仓库中（现为 `frontend/`，消息流由
+> `frontend/chat/{timeline,composer,components}` 自绘）。现行设计见
+> [peri-cf-chat-ui.md](../../docs/design/peri-cf-chat-ui.md)。
+
 目标设计：[docs/design/peri-cf-chat-ui.md](../../docs/design/peri-cf-chat-ui.md)。
 范围：仅 `npm-packages/peri-cf`（`web/` 与 `shared/`；SDK 不改动）。
 
@@ -19,6 +26,9 @@
 6. **收尾**：`styles.css` 清理、组件测试迁移、README / CLAUDE.md / code-index 同步。
 
 ## 实施状态
+
+> 以下按当时 `web/` 目录记录；`web/` 现为 `frontend/`，文中的 adapter、`MessageThread`、
+> `ConversationPanels`、`*.aui.tsx` 与 assistant-ui runtime 均已删除。
 
 分步（截至 2026-10-14）：
 
@@ -101,6 +111,9 @@
 未做（2026-10-20 更新）：空会话欢迎页已完成（`Welcome.tsx` + `web/styles/chat-welcome.css`）；英文工具文案（composer tooltip 等）仍未扩展。
 
 ## 视觉定稿（2026-10-20）
+
+> 本节记录当时的 `web/` 实现；`web/` 现为 `frontend/`，`tool-fallback.aui.tsx` / `thread.aui.tsx`
+> 等 `*.aui.tsx` 与 assistant-ui runtime 均已删除。
 
 方向：参考 deepseek-harness（MIT，commit 687f282）的 chat 信息流排版与交互密度，保留 assistant-ui registry 结构；只借鉴观感，不引入其架构或代码。
 

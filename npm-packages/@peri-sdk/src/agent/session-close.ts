@@ -21,7 +21,7 @@ export class SessionCloseIncompleteError extends Error {
     }
 }
 
-export type CloseRetryClock = {
+type CloseRetryClock = {
     now: () => number;
     sleep: (milliseconds: number) => Promise<unknown>;
 };

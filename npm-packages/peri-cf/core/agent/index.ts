@@ -4,17 +4,9 @@
  */
 export {
   ChatProjection,
-  MAX_ASK_USER_QUESTIONS,
   buildAskUserQuestionContent,
-  normalizeAskUserQuestionDecision,
-  parseAskUserQuestionElicitation,
-  type AskUserQuestionContent,
   type AskUserQuestionDecision,
   type AskUserQuestionDraft,
   type AskUserQuestionDrafts,
-  type AskUserQuestionElicitation,
-  type AskUserQuestionParse,
-  type ProjectionSummary,
 } from "./view";
-export { errorText, logError, publicError } from "./logging";
-export type { Chat, ChatSummary, ChatDisplayState } from "../shared";
+export { errorText, logError } from "./logging";

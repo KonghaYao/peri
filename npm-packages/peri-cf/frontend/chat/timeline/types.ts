@@ -46,5 +46,3 @@ export type TimelineRow =
   | { kind: 'working'; id: string; turnId: string | null; startedAt: string | null }
   | { kind: 'error'; id: string; entryId: string; message: string }
   | { kind: 'unknown'; id: string; entryId: string; blockId: string; reason: string };
-
-export type TimelineRowKind = TimelineRow['kind'];

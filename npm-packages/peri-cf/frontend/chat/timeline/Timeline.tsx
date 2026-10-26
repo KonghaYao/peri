@@ -5,8 +5,8 @@ import type { ChatLoadState, ChatDisplayState, ToolPayloadReader } from '../runt
 import { deriveTimeline } from './deriveTimeline';
 import { isTimelinePinned, type ScrollMetrics } from './timelineFollow';
 import {
-  rememberTimelinePosition, restoreTimelinePosition, TimelinePositionStore,
-  type TimelineRestoreProps,
+  rememberTimelinePosition, restoreTimelinePosition,
+  type TimelinePosition, type TimelineRestoreProps,
 } from './timelinePositions';
 import { AssistantMessageRow } from './rows/AssistantMessageRow';
 import { ErrorRow } from './rows/ErrorRow';
@@ -115,7 +115,7 @@ export function TimelineRows({
   </div>;
 }
 
-export interface TimelineProps {
+interface TimelineProps {
   state: ChatDisplayState | null;
   /** 独立读面状态：错误横幅被关闭后，失败态仍然成立。 */
   loadState: ChatLoadState;
@@ -183,7 +183,7 @@ export function Timeline({
   );
 
   const listRef = useRef<LegendListRef>(null);
-  const positions = useRef(new TimelinePositionStore());
+  const positions = useRef(new Map<string, TimelinePosition>());
   const pinnedRef = useRef(true);
   const [pinned, setPinned] = useState(true);
   const firstVisibleRow = useRef<string | null>(null);
@@ -205,7 +205,7 @@ export function Timeline({
     const list = listRef.current;
     const rowId = firstVisibleRow.current;
     const rowTop = rowId && list ? list.getState().positionByKey(rowId) ?? null : null;
-    positions.current.save(followKey, rememberTimelinePosition(metrics, rowId, rowTop));
+    positions.current.set(followKey, rememberTimelinePosition(metrics, rowId, rowTop));
   }, [followKey]);
 
   const onScroll = useCallback((event: TimelineScrollEvent) => {
@@ -230,7 +230,7 @@ export function Timeline({
     setPinned(true);
     if (!followKey) return;
     pinnedByKey.current.set(followKey, true);
-    positions.current.save(followKey, {
+    positions.current.set(followKey, {
       atEnd: true, rowId: null, offsetWithinRow: 0, scrollOffset: 0,
     });
   }, [followKey]);
@@ -278,7 +278,7 @@ export function Timeline({
     const key = followKey;
     return () => {
       if (!key || pinnedByKey.current.get(key) !== true) return;
-      positions.current.save(key, { atEnd: true, rowId: null, offsetWithinRow: 0, scrollOffset: 0 });
+      positions.current.set(key, { atEnd: true, rowId: null, offsetWithinRow: 0, scrollOffset: 0 });
     };
   }, [followKey]);
 

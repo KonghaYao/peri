@@ -75,9 +75,6 @@ describe('ChatProjection over ChatReplica', () => {
       chat, readiness: 'not-ready', sessionId: null, bindingRevision: null,
       running: false, entries: [], pendingInteractions: [],
     });
-    expect(projection.summary()).toEqual({
-      running: false, pendingInteractionCount: 0, lastTurnStatus: null, lastCompletedAt: null,
-    });
   });
 
   test('applies a snapshot, sends ACK, and exposes replica facts', async () => {
@@ -91,7 +88,6 @@ describe('ChatProjection over ChatReplica', () => {
     expect(projection.state()).toMatchObject({
       readiness: 'ready', sessionId: 'session-1', bindingRevision: 1, running: true,
     });
-    expect(projection.summary().running).toBe(true);
     // 客户端只回 ACK，不写业务文档。
     expect(channel.frames).toHaveLength(2);
     expect(channel.frames[0]?.[0]).toBe(0x01);
@@ -120,15 +116,5 @@ describe('ChatProjection over ChatReplica', () => {
     expect(projection.state()).toMatchObject({
       readiness: 'unsupported', entries: [], running: false,
     });
-  });
-
-  test('replaces its chat metadata when the caller supplies a new directory identity', async () => {
-    const projection = new ChatProjection(chat);
-    const channel = new LoopbackChannel();
-    projection.connect(channel);
-    channel.deliver(frame(snapshot(docs())));
-    await settle();
-    projection.setChat({ ...chat, title: '目录标题', updatedAt: '2026-10-21T00:00:00Z' });
-    expect(projection.state().chat).toMatchObject({ title: '目录标题', updatedAt: '2026-10-21T00:00:00Z' });
   });
 });

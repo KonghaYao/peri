@@ -10,14 +10,14 @@ import type { Chat, ChatSummary } from './types';
 /** 错误横幅的重试路由：列表错误刷新列表；只有读面失败才重新加载会话。 */
 export type ChatRetryAction = 'refresh-list' | 'reload-chat' | 'none';
 
-export interface ChatErrorBanner {
+interface ChatErrorBanner {
   message: string;
   action: ChatRetryAction;
   /** 读面失败必须保留重试入口：关闭横幅后仍显示失败态。 */
   dismissible: boolean;
 }
 
-export interface ChatErrorBanners {
+interface ChatErrorBanners {
   list?: ChatErrorBanner;
   chat?: ChatErrorBanner;
 }
@@ -77,9 +77,7 @@ export function useChat() {
     list: (signal?: AbortSignal) => controllerRef.current?.listChats(signal) ?? Promise.resolve([]),
   }), []);
   const queries = useMemo(() => createChatQueries(api), [api]);
-  const controller = useMemo(() => createChatApplication({
-    cache: { write: state => queries.writeHistory(state) },
-  }), [queries]);
+  const controller = useMemo(() => createChatApplication(), []);
   controllerRef.current = controller;
   const view = useSyncExternalStore(controller.subscribe, controller.getState, controller.getState);
   const visible = useSyncExternalStore(subscribeVisibility, documentVisible, () => true);
@@ -149,10 +147,6 @@ export function useChat() {
   const dismissListError = useCallback(() => {
     setDismissedListError(list.errorUpdatedAt);
   }, [list.errorUpdatedAt]);
-  const dismissError = useCallback(() => {
-    controller.dismissError();
-    setDismissedListError(list.errorUpdatedAt);
-  }, [controller, list.errorUpdatedAt]);
 
   const chatError = view.error;
   const listError = list.error && dismissedListError !== list.errorUpdatedAt ? errorText(list.error) : '';
@@ -163,9 +157,6 @@ export function useChat() {
     chatError, listError, error: chatError || listError, banners,
     payloadReader, answerInteraction,
     refreshList, selectChat, reloadChat, currentChatId, send, stop,
-    dismissError, dismissChatError, dismissListError,
+    dismissChatError, dismissListError,
   };
 }
-
-/** `Chat` 仍用于草稿/滚动信号的展示身份。 */
-export type { Chat };

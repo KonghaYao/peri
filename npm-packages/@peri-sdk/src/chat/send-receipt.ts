@@ -1,6 +1,6 @@
 import type { ChatBindingTarget, SendReceipt } from "./types";
 
-export interface ChatSendReceiptOptions {
+interface ChatSendReceiptOptions {
     readonly requestId: string;
     readonly inputId: string;
     /** 调用 execute 时固定；之后的迟到结果只归该目标。 */
@@ -96,7 +96,7 @@ export class ChatSendReceipt implements SendReceipt {
     }
 }
 
-export interface CorrelatedInput {
+interface CorrelatedInput {
     readonly receipt: ChatSendReceipt;
     readonly target: ChatBindingTarget;
 }

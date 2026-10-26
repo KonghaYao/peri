@@ -33,6 +33,7 @@ export type {
     ChatDefaults,
     ChatHost,
     ChatLifecycleOptions,
+    ChatManager as ChatManagerContract,
     ChatManagerOptions,
     ChatSessionDirectoryEntry,
     ChatService as ChatServiceContract,
@@ -79,17 +80,16 @@ export type { PublicError, PublicErrorCode } from "../state/doc-model";
 
 export { ChatView } from "../view/chat-view";
 export { ChatReplica } from "../view/chat-replica";
+/**
+ * 宿主侧的 View 共享表：按 Chat id 复用同一个 `ChatView`。
+ *
+ * 只在主入口与 `/portable` 导出；`/view` 保持纯浏览器视图面，不含宿主策略。
+ */
+export { ChatViewRegistry } from "../view/view-registry";
 export type { ChatViewOptions, ChatViewSync } from "../view/chat-view";
 export type { ChatReplicaConnection, ChatReplicaStatus } from "../view/chat-replica";
 export type { ChatYjsChannel } from "../view/channel";
-export {
-    readSessionView,
-    selectEntry,
-    selectPendingInteractions,
-    selectPlanForTurn,
-    selectToolCall,
-    selectTurn,
-} from "../view/session-view";
+export { readSessionView } from "../view/session-view";
 export type {
     EntryBlockView,
     EntryView,

@@ -13,7 +13,7 @@ import { SessionProjection } from "../state/session-projection";
 import { TaskProjection } from "../state/task-projection";
 import { TurnMachine, type TurnExitStatus } from "../state/turn-machine";
 
-export type ChatDocumentOptions = {
+type ChatDocumentOptions = {
     now?: ProjectionClock;
     /** 当前绑定代次；文档只在单一代次内累积事实。 */
     binding?: ChatBindingTarget;

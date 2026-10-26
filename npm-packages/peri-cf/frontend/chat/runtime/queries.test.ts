@@ -3,26 +3,15 @@
 import '../../test/install-dom';
 import { afterEach, describe, expect, jest, test } from 'bun:test';
 import {
-  LIST_POLL_IDLE_INTERVAL_MS, LIST_POLL_INTERVAL_MS, createChatQueries, historyKey,
+  LIST_POLL_IDLE_INTERVAL_MS, LIST_POLL_INTERVAL_MS, createChatQueries,
   listRefetchInterval,
 } from './queries';
-import type { ChatDisplayState, ChatSummary } from './types';
+import type { ChatSummary } from './types';
 
 function summary(sessionId: string, title = sessionId, updatedAt = '2026-10-06T00:00:00Z'): ChatSummary {
   return {
     id: sessionId, sessionId, title, updatedAt,
     cwd: '/workspace', messageCount: 0, createdAt: '2026-10-05T00:00:00Z',
-  };
-}
-
-function state(sessionId: string, bindingRevision: number, extra: Partial<ChatDisplayState> = {}): ChatDisplayState {
-  return {
-    chat: { id: sessionId, title: sessionId, updatedAt: '2026-10-06T00:00:00Z' },
-    sessionId, bindingRevision, running: false, executionBlocked: false, readiness: 'ready',
-    entries: [], toolCalls: [], turns: [], activeTurn: { turnId: null, status: null },
-    session: {}, tasks: [], plans: { current: [], byTurn: {} },
-    interactions: [], pendingInteractions: [], inputQueue: null,
-    ...extra,
   };
 }
 
@@ -63,39 +52,6 @@ describe('chat directory cache', () => {
     resolve([summary('first')]);
     expect(await firstRead).toEqual([summary('first')]);
     expect(await concurrentRead).toEqual([summary('first')]);
-  });
-});
-
-describe('replica cache by chatId + bindingRevision', () => {
-  test('writes the snapshot under the binding generation and reads it back', () => {
-    const queries = scope();
-    const value = state('session-1', 3);
-    queries.writeHistory(value);
-    expect(queries.readHistory('session-1', 3)).toEqual(value);
-    expect(queries.readHistory('session-1', 2)).toBeUndefined();
-  });
-
-  test('a new binding generation drops the previous generation cache', () => {
-    const queries = scope();
-    queries.writeHistory(state('session-1', 1));
-    queries.writeHistory(state('session-1', 2));
-    expect(queries.readHistory('session-1', 1)).toBeUndefined();
-    expect(queries.readHistory('session-1', 2)?.bindingRevision).toBe(2);
-  });
-
-  test('unsupported readiness is cached as a distinct state, not an empty ready state', () => {
-    const queries = scope();
-    const unsupported = state('session-1', 1, {
-      readiness: 'unsupported', entries: [], running: false,
-    });
-    queries.writeHistory(unsupported);
-    const cached = queries.readHistory('session-1', 1);
-    expect(cached?.readiness).toBe('unsupported');
-    expect(cached?.entries).toEqual([]);
-  });
-
-  test('history key includes the binding revision', () => {
-    expect(historyKey('session-1', 4)).toEqual(['chats', 'history', 'session-1', 4]);
   });
 });
 

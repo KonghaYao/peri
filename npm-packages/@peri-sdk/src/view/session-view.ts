@@ -420,10 +420,6 @@ function sessionInfo(value: Y.Map<unknown> | null): SessionInfoView {
 
 /** One read-only, transport-neutral view over a pair of Y.Doc replicas. */
 export function readSessionView(chat: Y.Doc, session: Y.Doc, cache: ReadCache = new ReadCache()): SessionView {
-    return readView(chat, session, cache);
-}
-
-function readView(chat: Y.Doc, session: Y.Doc, cache: ReadCache): SessionView {
     // A browser replica starts empty. Reading it must not create competing root keys.
     const chatRoot = root(chat);
     const sessionRoot = root(session);
@@ -501,25 +497,4 @@ function readView(chat: Y.Doc, session: Y.Doc, cache: ReadCache): SessionView {
         closed: info?.get("closed") === true,
         closedReason: publicErrorView(info?.get("closedReason")),
     };
-}
-
-/** 纯查询：按身份取 Entry；未找到返回 null。 */
-export function selectEntry(view: SessionView, entryId: string): EntryView | null {
-    return view.entries.find((entry) => entry.entryId === entryId || entry.id === entryId) ?? null;
-}
-/** 纯查询：按身份取独立 ToolCall；未找到返回 null。 */
-export function selectToolCall(view: SessionView, toolCallId: string): ToolView | null {
-    return view.toolCalls.find((tool) => tool.toolCallId === toolCallId) ?? null;
-}
-/** 纯查询：按身份取 Turn；未找到返回 null。 */
-export function selectTurn(view: SessionView, turnId: string): TurnView | null {
-    return view.turns.find((turn) => turn.turnId === turnId) ?? null;
-}
-/** 纯查询：按 turn 取计划；该 turn 无计划记录返回 null，区别于空计划。 */
-export function selectPlanForTurn(view: SessionView, turnId: string): PlanEntryView[] | null {
-    return view.plansByTurn[turnId] ?? null;
-}
-/** 纯查询：未决交互（派生视图，不新增缓存）。 */
-export function selectPendingInteractions(view: SessionView): InteractionView[] {
-    return view.pendingInteractions;
 }

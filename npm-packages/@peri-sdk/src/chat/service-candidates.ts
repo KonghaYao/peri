@@ -17,7 +17,7 @@ export interface CandidateContext {
     releaseClaim(sessionId: string): Promise<void>;
 }
 
-export interface CandidateRelease {
+interface CandidateRelease {
     /** 清理已确认且 claim/索引均已释放。 */
     readonly released: boolean;
     /** 首个或聚合的清理失败原因；`released === true` 时为空。 */

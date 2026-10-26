@@ -1,8 +1,8 @@
 import * as Y from "yjs";
 
-export type EntryRole = "user" | "assistant";
+type EntryRole = "user" | "assistant";
 export type ProjectionClock = () => string;
-export const PUBLIC_ERROR_CODES = ["execution_failed", "execution_interrupted", "tool_failed", "payload_too_large"] as const;
+const PUBLIC_ERROR_CODES = ["execution_failed", "execution_interrupted", "tool_failed", "payload_too_large"] as const;
 export type PublicErrorCode = (typeof PUBLIC_ERROR_CODES)[number];
 export type PublicError = { code: PublicErrorCode; message: string };
 const PUBLIC_ERRORS: Record<PublicErrorCode, string> = {

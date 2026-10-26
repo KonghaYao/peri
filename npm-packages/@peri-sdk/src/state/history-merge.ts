@@ -36,7 +36,7 @@ function payloadRef(value: unknown): PayloadRef | null {
  */
 
 /** 一条页条目 / 一次回放戳的条目身份。 */
-export type HistoryEntryRef = {
+type HistoryEntryRef = {
     entryId: string;
     /** 存储序键；`null` = 继承区条目（本线程没有行）。 */
     position: number | null;
@@ -50,15 +50,6 @@ export type HistorySubItem = { position: number | null; update: RecordValue };
 export const AWAITING_RESULT_STATUS = "awaiting_result";
 
 const TERMINAL_TOOL_STATUSES = new Set(["completed", "error", "cancelled"]);
-
-/** 回放通知的 load 代次（`_meta.periLoadGeneration`，REQ-H04）。 */
-export function historyGenerationOf(notification: { params?: unknown }): string | null {
-    const params = object(notification.params);
-    if (!params) return null;
-    const updateMeta = object(object(params.update)?._meta);
-    const paramsMeta = object(params._meta);
-    return string(updateMeta?.periLoadGeneration) ?? string(paramsMeta?.periLoadGeneration);
-}
 
 /** 一条 `session/update` 的条目身份；没有 `periEntryId` 说明它不是历史投影。 */
 export function historyEntryRefOf(update: RecordValue): HistoryEntryRef | null {

@@ -45,7 +45,7 @@ function writePayloadField(
  * 规范历史替换（`replaceHistory`）的两种语义。Compact 不再走这条路（REQ-C02）：
  * 只有 rewind 这种「服务端真的删掉了尾部行、范围变了」的调用才会重建窗口。
  */
-export type HistoryReplaceMode =
+type HistoryReplaceMode =
     /** 默认：历史是唯一事实源，实时执行状态随之清空（首窗安装等冷路径）。 */
     | "reset-execution"
     /** rewind：窗口失效并刷新，但当前 turn／request 与未决交互保留（REQ-C02）。 */

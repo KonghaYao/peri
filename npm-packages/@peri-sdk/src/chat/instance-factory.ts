@@ -2,11 +2,9 @@ import {
     PeriInstance,
     type PeriHostActivation,
     type PeriHostActivator,
-    type PeriInstanceOptions,
 } from "../agent/peri-instance";
 import type { Transport } from "../transport/types";
-import type { ChatInstanceContext, ChatInstanceFactory } from "./service-support";
-import type { ChatLifecycleOptions } from "./types";
+import type { ChatInstanceContext } from "./service-support";
 
 /**
  * Phase 4 装配：把 Chat 句柄的宿主/Store/生命周期上下文转换成一次 `PeriInstance`。
@@ -77,25 +75,4 @@ export function createChatInstance(context: ChatInstanceContext): PeriInstance {
             activationCloseTimeoutMs: context.lifecycle.activationCloseTimeoutMs,
         },
     });
-}
-
-/**
- * 默认工厂：绑定 Manager 的生命周期预算，每次激活调用 `createChatInstance`。
- *
- * Manager 默认使用它，测试仍可通过 `ChatManagerInternalOptions.instanceFactory` 覆盖。
- */
-export class DefaultChatInstanceFactory {
-    readonly create: ChatInstanceFactory;
-
-    constructor(private readonly lifecycle: Required<ChatLifecycleOptions>) {
-        this.create = (context) =>
-            createChatInstance({ ...context, lifecycle: this.lifecycle });
-    }
-}
-
-/** 计划 §1.7 的工厂构造入口；Manager 默认装配使用。 */
-export function createPeriInstanceFactory(
-    lifecycle: Required<ChatLifecycleOptions>,
-): ChatInstanceFactory {
-    return new DefaultChatInstanceFactory(lifecycle).create;
 }

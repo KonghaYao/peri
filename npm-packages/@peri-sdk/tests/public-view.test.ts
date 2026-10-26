@@ -9,9 +9,11 @@ test("the browser view entrypoint exposes ChatView/ChatReplica and shared Yjs id
     expect(typeof view.ChatView).toBe("function");
     expect(typeof view.ChatReplica).toBe("function");
     expect(typeof view.readSessionView).toBe("function");
-    expect(typeof view.selectEntry).toBe("function");
+    expect("selectEntry" in view).toBe(false);
     expect("SessionViewStore" in view).toBe(false);
     expect("SessionDocs" in view).toBe(false);
+    // 宿主共享策略不属于纯浏览器视图面。
+    expect("ChatViewRegistry" in view).toBe(false);
 });
 
 test("the main entrypoint exposes the Chat surface and no old execution facades", () => {
@@ -20,6 +22,7 @@ test("the main entrypoint exposes the Chat surface and no old execution facades"
     expect(typeof sdk.ChatUserAction).toBe("object");
     expect(typeof sdk.ChatView).toBe("function");
     expect(typeof sdk.ChatReplica).toBe("function");
+    expect(typeof sdk.ChatViewRegistry).toBe("function");
     expect("Agent" in sdk).toBe(false);
     expect("ManagedAgents" in sdk).toBe(false);
     expect("SessionDocs" in sdk).toBe(false);

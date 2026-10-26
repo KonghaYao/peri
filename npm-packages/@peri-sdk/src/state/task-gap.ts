@@ -6,7 +6,7 @@
  * 快照请求在途时去重：同一时刻最多一个；失败后由后续 delta 再触发。
  */
 
-export type TaskEventVerdict = "accepted" | "duplicate" | "gap" | "ignored";
+type TaskEventVerdict = "accepted" | "duplicate" | "gap" | "ignored";
 
 const DELTA_EVENTS = new Set([
     "bg-task-started", "bg-task-completed", "bg-task-cancelled", "bg-task-updated",

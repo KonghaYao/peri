@@ -1,5 +1,5 @@
 import { MemoryKV } from "../kv/memory-kv";
-import { KvExecutionRegistry, type AtomicExecutionKv, type ExecutionKvValue } from "./kv-registry";
+import type { AtomicExecutionKv, ExecutionKvValue } from "./kv-registry";
 
 export class MemoryExecutionKv implements AtomicExecutionKv {
     readonly durability = "bestEffort" as const;
@@ -16,8 +16,4 @@ export class MemoryExecutionKv implements AtomicExecutionKv {
         this.values.set(key, structuredClone(next));
         return true;
     }
-}
-
-export class MemoryExecutionRegistry extends KvExecutionRegistry {
-    constructor(kv = new MemoryExecutionKv()) { super(kv); }
 }

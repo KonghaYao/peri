@@ -1,6 +1,6 @@
 import { useEffect, useRef, type ReactNode } from 'react';
 
-export interface ComposerShellProps {
+interface ComposerShellProps {
   children: ReactNode;
   onHeightChange?: (height: number) => void;
 }

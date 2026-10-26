@@ -102,7 +102,7 @@ const components: Components = {
   pre: PreBlock,
 };
 
-export interface MarkdownTextProps {
+interface MarkdownTextProps {
   text: string;
   className?: string;
 }

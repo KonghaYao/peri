@@ -2,12 +2,12 @@
  * Tailwind 入口与主题。
  *
  * 来源：shadcn registry `base-nova` 风格（Base UI 分支）的初始主题（neutral 基色），
- * 与 assistant-ui 官方 registry 组件（https://r.assistant-ui.com/base/*）配套。
- * 主题 token 变更时同步此文件；`components.json` 的 style/baseColor 必须与此保持一致。
+ * 后续由项目自有组件沿用；不再是 shadcn CLI 的生成入口（`components.json` 已删除）。
+ * 主题 token 变更时直接修改本文件。
  */
 @import "tailwindcss";
 @import "tw-animate-css";
-/* tw-shimmer 提供 `shimmer` 工具类，assistant-ui 组件的运行中状态使用它 */
+/* tw-shimmer 提供 `shimmer` 工具类，运行态状态行使用它 */
 @import "tw-shimmer";
 
 @custom-variant dark (&:is(.dark *));
@@ -61,7 +61,7 @@
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
 
-  /* assistant-ui registry 声明的折叠动画；高度变量同时兼容 Radix 与 Base UI */
+  /* 折叠动画（vendored 组件沿用 registry 的动画变量）；高度变量同时兼容 Radix 与 Base UI */
   @keyframes collapsible-down {
     from {
       height: 0;

@@ -14,14 +14,14 @@ import { Sidebar } from './Sidebar';
 import { Welcome } from './Welcome';
 import type { ChatSummary } from '../runtime';
 
-export interface ChatShellProps {
+interface ChatShellProps {
   onOpenSettings: () => void;
 }
 
 /** `useChat` 的完整读面；DOM 测试可注入同形对象。 */
 export type ChatShellChat = ReturnType<typeof useChat>;
 
-export interface ChatShellViewProps {
+interface ChatShellViewProps {
   chat: ChatShellChat;
   onOpenSettings: () => void;
 }

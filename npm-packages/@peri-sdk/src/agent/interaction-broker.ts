@@ -19,7 +19,7 @@ import {
  * （权限拒绝、表单 decline），绝不误批准。
  */
 
-export type InteractionAnswerErrorCode = "unknown_interaction" | "kind_mismatch" | "invalid_answer" | "closed";
+type InteractionAnswerErrorCode = "unknown_interaction" | "kind_mismatch" | "invalid_answer" | "closed";
 
 export class InteractionAnswerError extends Error {
     constructor(readonly code: InteractionAnswerErrorCode, message: string) {
@@ -28,7 +28,7 @@ export class InteractionAnswerError extends Error {
     }
 }
 
-export interface InteractionBrokerOptions {
+interface InteractionBrokerOptions {
     emit: (fact: ChatFact) => void;
     /** 当前 turn id；只用于事实展示，不参与身份判定。 */
     currentTurnId?: () => string | null;

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-export function formatElapsed(startedAt: string, now: number): string {
+function formatElapsed(startedAt: string, now: number): string {
   const started = Date.parse(startedAt);
   if (Number.isNaN(started)) return '';
   const totalSeconds = Math.max(0, Math.floor((now - started) / 1000));

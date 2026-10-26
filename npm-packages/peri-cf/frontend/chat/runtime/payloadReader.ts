@@ -4,7 +4,7 @@ import {
 } from '@peri-code/sdk/view';
 
 /** 端点不可用时的占位 reader（未选择会话或同步尚未就绪）。 */
-export const unavailablePayloadReader: ToolPayloadReader = async () => {
+const unavailablePayloadReader: ToolPayloadReader = async () => {
   throw new PayloadReadError('unavailable', '当前没有可用的全文读取端点。');
 };
 
@@ -30,17 +30,12 @@ export function chatPayloadReader(source: () => PayloadSource | undefined): Tool
   };
 }
 
-let current: ToolPayloadReader = unavailablePayloadReader;
-export function setPayloadReader(reader: ToolPayloadReader): void { current = reader; }
-export function getPayloadReader(): ToolPayloadReader { return current; }
-
-export type PayloadTextResult = { ok: true; text: string } | { ok: false; error: string };
-export type PayloadValueResult = { ok: true; value: unknown } | { ok: false; error: string };
+type PayloadValueResult = { ok: true; value: unknown } | { ok: false; error: string };
 
 /** 读取并校验全文，保留原始 JSON 值供展示层按领域语义格式化。 */
 export async function loadPayloadValue(
   ref: ToolPayloadReadRef,
-  reader: ToolPayloadReader = getPayloadReader(),
+  reader: ToolPayloadReader = unavailablePayloadReader,
   signal?: AbortSignal,
 ): Promise<PayloadValueResult> {
   try {
@@ -50,15 +45,4 @@ export async function loadPayloadValue(
   } catch (error) {
     return { ok: false, error: error instanceof PayloadReadError ? error.message : '全文读取失败，请稍后重试。' };
   }
-}
-
-/** 校验与错误映射都在 SDK helper 内；这里只把结果收敛成可渲染的文本或原因。 */
-export async function loadPayloadText(
-  ref: ToolPayloadReadRef,
-  reader: ToolPayloadReader = getPayloadReader(),
-  signal?: AbortSignal,
-): Promise<PayloadTextResult> {
-  const result = await loadPayloadValue(ref, reader, signal);
-  if (!result.ok) return result;
-  return { ok: true, text: JSON.stringify(result.value, null, 2) };
 }

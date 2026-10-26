@@ -11,7 +11,7 @@ import type { InteractionQuestion } from "../chat/facts";
 const QUESTION_KEY = /^ask_user_question_(\d+)$/;
 export const MAX_ASK_USER_QUESTIONS = 4;
 /** 默认待确认（设计评审起点）：单步表达式的字段数量上限。 */
-export const ELICITATION_FORM_MAX_FIELDS = 32;
+const ELICITATION_FORM_MAX_FIELDS = 32;
 
 export type AskUserQuestionOption = { value: string; label: string; description?: string };
 export type AskUserQuestion = {
@@ -220,7 +220,7 @@ export function toInteractionQuestions(
 /* 通用 elicitation 表单（首版只支持单步基本类型）                      */
 /* ------------------------------------------------------------------ */
 
-export type ElicitationFormField = {
+type ElicitationFormField = {
     key: string;
     title: string;
     description: string;

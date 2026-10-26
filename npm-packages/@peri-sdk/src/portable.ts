@@ -23,7 +23,7 @@ export type {
 } from "./execution/admission-core";
 export { KvExecutionRegistry } from "./execution/kv-registry";
 export type { AtomicExecutionKv, ExecutionKvValue } from "./execution/kv-registry";
-export { MemoryExecutionRegistry, MemoryExecutionKv } from "./execution/memory-registry";
+export { MemoryExecutionKv } from "./execution/memory-registry";
 export { ExecutionCoordinator } from "./execution/coordinator";
 export type { ExecutionCoordinatorOptions, AdmissionResult } from "./execution/coordinator";
 export { ExecutionMutationConflictError } from "./execution/registry-ledger";

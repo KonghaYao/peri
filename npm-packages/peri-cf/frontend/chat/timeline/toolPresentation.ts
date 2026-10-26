@@ -3,7 +3,7 @@ import type { ToolCall } from '../runtime';
 export type ToolCategory =
   | 'command' | 'read' | 'write' | 'edit' | 'search' | 'web' | 'task' | 'ask' | 'plan' | 'other';
 
-export interface ToolPresentation {
+interface ToolPresentation {
   category: ToolCategory;
   /** 动作标题，例如「运行命令」。 */
   action: string;
@@ -24,7 +24,7 @@ function text(value: unknown): string | undefined {
 }
 
 /** MCP 工具名 `mcp__server__Tool` 取末段；其余保持原名。 */
-export function effectiveToolName(name: string): string {
+function effectiveToolName(name: string): string {
   const parts = name.split('__').filter(Boolean);
   return parts.length > 1 ? parts[parts.length - 1]! : name;
 }
@@ -69,7 +69,7 @@ export function toolPresentation(tool: ToolCall | null): ToolPresentation {
   return { category: mapping.category, action: mapping.action, ...(target ? { target } : {}) };
 }
 
-export interface ToolResultPresentation {
+interface ToolResultPresentation {
   /** 可直接展示的纯文本；不把 contentText 包进 JSON 引号与转义。 */
   text: string;
   /** 从文本或结构化 rawOutput 提取的退出码。 */

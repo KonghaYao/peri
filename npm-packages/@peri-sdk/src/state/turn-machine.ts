@@ -18,8 +18,6 @@ export class TurnMachine {
         return status === "accepting" || status === "running";
     }
 
-    turn(turnId: string): Y.Map<unknown> | undefined { return this.docs.turns().get(turnId); }
-
     /** A turn record only advances inside its lifecycle; terminal states never move. */
     private advanceTurn(turnId: string, status: string): void {
         const turn = this.docs.turns().get(turnId);

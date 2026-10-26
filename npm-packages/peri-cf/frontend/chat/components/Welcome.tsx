@@ -8,7 +8,7 @@ const suggestions = [
   { icon: Sparkles, title: '给想法一点新灵感', description: '打开思路，发现更多可能', prompt: '我想和你一起头脑风暴。请先问我目标和限制条件，再帮我拓展思路。' },
 ];
 
-export interface WelcomeProps {
+interface WelcomeProps {
   disabled?: boolean;
   onSelectPrompt: (prompt: string) => void;
 }

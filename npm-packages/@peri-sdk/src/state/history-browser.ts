@@ -11,7 +11,7 @@ import type { HistoryPageItem, HistorySubItem } from "./history-merge";
 export type HistoryPageOutcome = { applied: number; nextCursor: string | null };
 
 /** 翻页不可用的原因：能力未协商、没有更早内容，或浏览窗口已被 rewind／新 load 作废。 */
-export type HistoryPageUnavailableReason = "not_negotiated" | "exhausted" | "invalidated";
+type HistoryPageUnavailableReason = "not_negotiated" | "exhausted" | "invalidated";
 
 /** 没有可用游标（未协商／已作废／确实没有更早内容）。 */
 export class HistoryPageUnavailableError extends Error {
@@ -30,7 +30,7 @@ export class StaleHistoryPageError extends Error {
 }
 
 /** 响应形状不符合 ACP 分页扩展契约。 */
-export class HistoryPageMalformedError extends Error {
+class HistoryPageMalformedError extends Error {
     constructor(message: string) {
         super(message);
         this.name = "HistoryPageMalformedError";
@@ -38,11 +38,11 @@ export class HistoryPageMalformedError extends Error {
 }
 
 /** 一页历史的内容与推进结果；`applied` 只按首次出现的 `entryId` 计数。 */
-export type HistoryPageLoad = HistoryPageOutcome & { items: HistoryPageItem[] };
+type HistoryPageLoad = HistoryPageOutcome & { items: HistoryPageItem[] };
 
 type HistoryWindow = { snapshotToken: string; nextCursor: string | null };
 
-export type HistoryPageFetch = (sessionId: string, cursor: string, limit: number | undefined) => Promise<unknown>;
+type HistoryPageFetch = (sessionId: string, cursor: string, limit: number | undefined) => Promise<unknown>;
 
 function record(value: unknown): Record<string, unknown> | null {
     return value !== null && typeof value === "object" && !Array.isArray(value)

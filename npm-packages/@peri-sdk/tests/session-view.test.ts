@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import * as Y from "yjs";
 import { ChatDocument } from "../src/view/chat-document";
-import { readSessionView, selectEntry, selectPendingInteractions, selectPlanForTurn, selectToolCall, selectTurn } from "../src/view/session-view";
+import { readSessionView } from "../src/view/session-view";
 
 function update(kind: string, fields: Record<string, unknown>) {
     return { jsonrpc: "2.0" as const, method: "session/update", params: {
@@ -94,25 +94,5 @@ describe("transport independent session view", () => {
         expect(JSON.stringify(view)).not.toContain("private draft");
         docs.applyFact({ kind: "interaction-settled", id: "interaction:1", status: "resolved", outcome: "allow_once" });
         expect(readSessionView(docs.chat, docs.session).pendingInteractions).toEqual([]);
-        expect(selectPendingInteractions(readSessionView(docs.chat, docs.session))).toEqual([]);
-    });
-
-    test("selectors distinguish missing identities from empty collections", () => {
-        const docs = new ChatDocument();
-        docs.accept(update("user_message_chunk", { content: { type: "text", text: "Ask" } }));
-        docs.accept(update("agent_message_chunk", { content: { type: "text", text: "Answer" } }));
-        docs.accept(update("tool_call", { toolCallId: "t1", title: "Read", status: "pending" }));
-        docs.accept(update("plan", { entries: [{ content: "Inspect", status: "in_progress" }] }));
-        const view = readSessionView(docs.chat, docs.session);
-        const assistant = view.entries[1]!;
-        expect(selectEntry(view, assistant.entryId)?.entryId).toBe(assistant.entryId);
-        expect(selectEntry(view, "missing")).toBeNull();
-        expect(selectToolCall(view, "t1")?.name).toBe("Read");
-        expect(selectToolCall(view, "missing")).toBeNull();
-        expect(selectTurn(view, view.activeTurn.turnId!)?.status).toBe("running");
-        expect(selectTurn(view, "missing")).toBeNull();
-        expect(selectPlanForTurn(view, view.activeTurn.turnId!)?.[0]).toMatchObject({ content: "Inspect" });
-        expect(selectPlanForTurn(view, "missing")).toBeNull();
-        docs.destroy();
     });
 });

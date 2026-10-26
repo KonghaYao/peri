@@ -1,8 +1,5 @@
 import { z } from "zod";
 
-/** 会话目录身份：公开聊天 ID 是真实 ACP Session ID；应用不再用标题/时间之外的运行态派生它。 */
-export const chatIdSchema = z.guid().transform((id) => id.toLowerCase());
-
 /** 展示身份：`id` 与目录会话 ID 一致，标题/时间只来自目录或已绑定的副本。 */
 export const chatSchema = z.object({
   id: z.string().min(1),
@@ -15,7 +12,7 @@ export const chatSchema = z.object({
  *
  * 运行态不在列表里伪造；当前选中会话的运行/交互事实只能来自 Yjs 副本。
  */
-export const chatSummarySchema = chatSchema.extend({
+const chatSummarySchema = chatSchema.extend({
   sessionId: z.string().min(1),
   title: z.string().nullable(),
   cwd: z.string(),
@@ -34,10 +31,6 @@ export const chatHandleSchema = z.object({
   id: z.string().min(1),
   sessionId: z.string().min(1).nullable(),
   bindingRevision: z.number().int().nonnegative(),
-});
-
-export const createChatRequestSchema = z.object({
-  path: z.string().min(1).optional(),
 });
 
 /** Action 封套里的目标绑定；空句柄固定 `{sessionId:null,bindingRevision:0}`。 */
@@ -95,8 +88,8 @@ export const payloadErrorResponseSchema = z.object({
 
 // —— 公开展示 DTO：由 SDK SessionView 物化，不额外持久化。——
 
-export const publicErrorSchema = z.object({ code: z.string().min(1), message: z.string() });
-export const toolPayloadRefSchema = z.object({
+const publicErrorSchema = z.object({ code: z.string().min(1), message: z.string() });
+const toolPayloadRefSchema = z.object({
   id: z.string().min(1), bytes: z.number().int().nonnegative(), preview: z.string(),
 });
 export const toolCallSchema = z.object({
@@ -108,7 +101,7 @@ export const toolCallSchema = z.object({
   arguments: z.unknown().optional(), result: z.unknown().optional(),
   argumentsRef: toolPayloadRefSchema.optional(), resultRef: toolPayloadRefSchema.optional(),
 });
-export const entryBlockSchema = z.discriminatedUnion("type", [
+const entryBlockSchema = z.discriminatedUnion("type", [
   z.object({ blockId: z.string().min(1), type: z.literal("text"), text: z.string() }),
   z.object({
     blockId: z.string().min(1), type: z.literal("reasoning"), text: z.string(),
@@ -142,11 +135,11 @@ export const taskSchema = z.object({
   durationMs: z.number().optional(),
 });
 /** AskUserQuestion 选项的 wire 值（`value`）与展示文本（`label`）；description 可选。 */
-export const askUserQuestionOptionSchema = z.object({
+const askUserQuestionOptionSchema = z.object({
   value: z.string().min(1), label: z.string().min(1), description: z.string().optional(),
 });
 /** AskUserQuestion 单题：id 是 elicitation schema 的属性键（`ask_user_question_<index>`）。 */
-export const askUserQuestionSchema = z.object({
+const askUserQuestionSchema = z.object({
   id: z.string().min(1), header: z.string(), question: z.string().min(1),
   multiSelect: z.boolean(), options: z.array(askUserQuestionOptionSchema),
 });
@@ -187,42 +180,13 @@ export const sessionInfoSchema = z.object({
 });
 export const activeTurnSchema = z.object({ turnId: z.string().nullable(), status: z.string().nullable() });
 
-/** turn 摘要事实的唯一规则：当前 turn 与最后一条成功完成的 turn。 */
-export interface TurnFacts {
-  turnId: string;
-  status: string;
-  completedAt: string | null;
-}
-
-export function turnPresentationFacts<T extends TurnFacts>(
-  turns: readonly T[], activeTurnId: string | null,
-): { current: T | undefined; lastCompletedAt: string | null } {
-  const current = activeTurnId
-    ? turns.find((turn) => turn.turnId === activeTurnId) ?? turns.at(-1)
-    : turns.at(-1);
-  // 只认成功完成的 turn：运行中/失败/cancelled 的完成时间不冒充「最后完成」。
-  const completed = [...turns].reverse().find((turn) => turn.status === "completed");
-  return { current, lastCompletedAt: completed?.completedAt ?? null };
-}
-
-export type PublicErrorDTO = z.infer<typeof publicErrorSchema>;
-export type EntryBlockDTO = z.infer<typeof entryBlockSchema>;
 export type EntryDTO = z.infer<typeof entrySchema>;
 export type ToolCallDTO = z.infer<typeof toolCallSchema>;
 export type TurnDTO = z.infer<typeof turnSchema>;
 export type InteractionDTO = z.infer<typeof interactionSchema>;
 export type AskUserQuestionDTO = z.infer<typeof askUserQuestionSchema>;
-export type AskUserQuestionOptionDTO = z.infer<typeof askUserQuestionOptionSchema>;
-export type TaskDTO = z.infer<typeof taskSchema>;
-export type PlanEntryDTO = z.infer<typeof planEntrySchema>;
-export type InputQueueDTO = z.infer<typeof inputQueueSchema>;
-export type SessionInfoDTO = z.infer<typeof sessionInfoSchema>;
-export type ActiveTurnDTO = z.infer<typeof activeTurnSchema>;
-
 export type Chat = z.infer<typeof chatSchema>;
 export type ChatSummary = z.infer<typeof chatSummarySchema>;
 export type ChatHandleDTO = z.infer<typeof chatHandleSchema>;
 export type ActionTargetDTO = z.infer<typeof actionTargetSchema>;
 export type ChatActionSuccessDTO = z.infer<typeof chatActionSuccessSchema>;
-export type ChatErrorResponseDTO = z.infer<typeof chatErrorResponseSchema>;
-export type PayloadResponseDTO = z.infer<typeof payloadResponseSchema>;

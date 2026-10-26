@@ -10,10 +10,11 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 
 ## 边界
 
-**服务端是唯一计算实例**：`server/index.ts` 启动 Bun 进程；`server/agent/manager.ts` 的
-`AppChatManager` 是组合根，持有 SDK `ChatManager` 与 `ChatViewRegistry`；句柄、绑定、Action、事实与
-关闭语义都在 SDK。浏览器不启动 WASM 宿主，刷新/关闭页面不结束执行；服务进程退出会结束在途执行，
-历史仍在 Store。
+**服务端是唯一计算实例**：`server/index.ts` 启动 Bun 进程；`server/agent/compose.ts` 把平台依赖
+（WASM 宿主、Store、claim、默认配置）装配成 SDK `ChatManager`，是 server 内唯一构造具体实现的
+位置；`server/agent/manager.ts` 的 `AppChatManager` 只接收注入的 `ChatManagerContract` 与
+`ChatViewRegistry`，`getChatManager` 是唯一注入点。句柄、绑定、Action、事实与关闭语义都在 SDK。
+浏览器不启动 WASM 宿主，刷新/关闭页面不结束执行；服务进程退出会结束在途执行，历史仍在 Store。
 
 **凭据与工具面只在服务端**：模型、Store、machineId 与远程 MCP 全部来自环境变量
 （`server/config.ts`）；前端没有 localStorage 凭据、relay 或首次运行门禁。`PERI_MCP_SERVERS` 只接受
@@ -32,11 +33,11 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
   WASM 构建常量。
 - `core/agent/`：平台无关展示内核（不依赖 React/DOM/localStorage）。`view/projection.ts` 持有
   `ChatReplica` 并物化 `ChatDisplayState`；`view/askUserQuestion.ts` 做问答适配。
-- `server/`：`config.ts`（环境变量与启动校验）、`agent/manager.ts`（SDK Manager + View 注册表）、
-  `agent/views.ts`（每 Chat 一个 ChatView）、`store.ts`（Store 只读适配与缺表容忍）、`api/index.ts`
-  （Hono 目录/句柄/Action/payload）、`api/sync.ts`（WS → ChatYjsChannel）。
+- `server/`：`config.ts`（环境变量与启动校验）、`agent/compose.ts`（平台装配，唯一 `new ChatManager`）、
+  `agent/manager.ts`（编排注入端口、View 生命周期与进程单例）、`store.ts`（Store 只读适配与缺表容忍）、
+  `api/index.ts`（Hono 目录/句柄/Action/payload）、`api/sync.ts`（WS → ChatYjsChannel）。
 - `frontend/remote/`：HTTP Action、WebSocket 客户端、页面控制器、目录仓储与组合根。
-- `frontend/chat/`、`frontend/components/`、`frontend/app/`：assistant-ui 适配与展示外壳；
+- `frontend/chat/`、`frontend/components/`、`frontend/app/`：Chat 展示外壳、时间线与交互卡片；
   `frontend/settings/` 只读服务端信息。
 - `scripts/`：WASM 构建/provenance、开发启动与探针；`wasm/generated/` 是构建产物（gitignored），
   只由服务端加载。
@@ -56,6 +57,8 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 - 命令失败契约以 `disposition` 为唯一权威：`rejected` 明确未生效，`unknown` 执行状态未知（不得
   自动重试）；`not_sent` 只存在于浏览器预检。不要用 HTTP status 反推可重试性。
 - `cancel` 的 `requested` 不是 stopped；关闭未确认会保留句柄、claim 与资源，可重试。
+- `DELETE` 先关 SDK 句柄再释放 View；进程 `shutdown` 先 `disposeAll` 释放全部 View，再关闭 SDK
+  端口与 WASM 宿主；任一段失败都上报并保留资源。
 
 ## 服务端配置
 
@@ -64,27 +67,27 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 `PERI_SERVER_HOST`、`PERI_SERVER_PORT`、`PERI_WASM_MODULE_URL`、`PERI_STATIC_ROOT`。任一解析问题
 拒绝启动；只有 `LANGFUSE_*` 传入 WASM 实例。
 
-## Chat 前端（assistant-ui）
+## Chat 前端
 
 设计见 `../../docs/design/peri-cf-chat-ui.md`；状态权威是 SDK `/view` 的 `SessionView` 经
 `core/agent` 物化后的展示 DTO，前端不复制状态机。
 
 - `frontend/chat/runtime/useChat.ts`：装配 `ChatController`、目录查询缓存与 payload reader。
-- `frontend/chat/runtime/adapter.ts`：Entry → assistant-ui 消息的单向转换与回调接线；不提供
-  编辑/重生成/队列/附件/语音 handler。
 - `frontend/chat/components/`：消息流、工具卡片、会话列表、欢迎页与交互面板；`ChatShell` 组合侧栏、
   时间线、输入区与右面板，`PendingInteractions`/`InteractionCard` 承载交互，`ChatRightPanel` 汇总
   详情、计划与任务。
-- `frontend/components/assistant-ui/`、`ui/`、`hooks/`、`lib/`：vendored registry 源码，上游升级
-  手动同步；改动前读文件头定制记录。
+- `frontend/chat/{timeline,composer}/`：Entry → 展示行与输入区；不提供编辑/重生成/队列/附件/语音
+  handler。
+- `frontend/components/assistant-ui/` 只保留 vendored 审批/问答卡片与样式常量；`frontend/hooks/`、
+  `frontend/lib/` 提供共用工具。上游升级手动同步，改动前读文件头定制记录。
 - 样式：`frontend/tailwind.css` 是 Tailwind 入口与主题 token；`frontend/styles.css` 保留外壳与设置页。
 
 ## SDK 消费边界
 
-只消费已发布 SDK 入口：主入口（`ChatManager`/`ChatService`/`ChatUserAction`/`ChatView` 契约）、
-`/view`（只读副本、选择器、载荷读取、同步协议）、`/wasm`（宿主启动、调度器端口、transport、关闭
-证据）。不引用 `@peri-sdk/src`、不新增 entry、不复制准入或同步规则。服务端只注入调度器端口；网络由
-Emscripten fetch 执行器发起。SDK 不感知 assistant-ui。
+只消费已发布 SDK 入口：主入口（`ChatManager`/`ChatService`/`ChatUserAction`/`ChatView` 契约、
+`ChatViewRegistry`、`ChatManagerContract`）、`/view`（只读副本、载荷读取、同步协议）、`/wasm`
+（宿主启动、调度器端口、transport、关闭证据）。不引用 `@peri-sdk/src`、不新增 entry、不复制准入或
+同步规则。服务端只注入调度器端口；网络由 Emscripten fetch 执行器发起。SDK 不感知 assistant-ui。
 
 `core/shared/chat.ts` 与 `sync.ts` 的 Zod schema 是 wire/展示 DTO 的单一来源。ACP 投影由 SDK
 `ChatView`/`ChatReplica` 负责，应用只做展示适配。

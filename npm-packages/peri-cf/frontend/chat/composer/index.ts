@@ -1,6 +1,5 @@
-export { ChatComposer, type ChatComposerProps } from './ChatComposer';
-export { ComposerShell, type ComposerShellProps } from './ComposerShell';
+export { ChatComposer } from './ChatComposer';
 export {
-  NEW_CHAT_DRAFT_KEY, adoptNewChatDraft, composerDraft, composerDraftKey, withComposerDraft,
+  adoptNewChatDraft, composerDraft, composerDraftKey, withComposerDraft,
   type ComposerDrafts,
 } from './drafts';

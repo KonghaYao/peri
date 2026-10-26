@@ -2,7 +2,7 @@ import { cn } from '@/lib';
 import type { ChatSummary } from '../runtime';
 
 /** 相对时间：只做展示，不改变排序事实。 */
-export function formatRelativeTime(iso: string, now = Date.now()): string {
+function formatRelativeTime(iso: string, now = Date.now()): string {
   const time = Date.parse(iso);
   if (Number.isNaN(time)) return '';
   const diff = Math.max(0, now - time);
@@ -46,7 +46,7 @@ export function groupChatsByDate(
   return groups.filter((group) => group.chats.length > 0);
 }
 
-export interface SidebarThreadRowProps {
+interface SidebarThreadRowProps {
   chat: ChatSummary;
   selected: boolean;
   running: boolean;

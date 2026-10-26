@@ -1,12 +1,11 @@
 import { createRemoteActions } from "./actions";
-import { ChatController, type ChatStateCache, type ChatView } from "./controller";
+import { ChatController, type ChatView } from "./controller";
 import { createHttpRepository } from "./repository";
 import type { WebSocketLike } from "./sync";
 
 export interface ChatApplicationOptions {
   /** API/WS 同源 base；测试可注入。 */
   origin?: string;
-  cache?: ChatStateCache;
   webSocketFactory?: (url: string) => WebSocketLike;
   now?: () => Date;
 }
@@ -27,7 +26,6 @@ export function createChatApplication(options: ChatApplicationOptions = {}): Cha
     syncUrl: (address) => new URL(
       `/api/chats/${encodeURIComponent(address)}/sync`, base,
     ).href.replace(/^http/, "ws"),
-    ...(options.cache ? { cache: options.cache } : {}),
     ...(options.webSocketFactory ? { webSocketFactory: options.webSocketFactory } : {}),
     ...(options.now ? { now: options.now } : {}),
   });

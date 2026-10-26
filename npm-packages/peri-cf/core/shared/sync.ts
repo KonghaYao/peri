@@ -11,7 +11,7 @@ import {
  * 不是客户端乐观推断。`readiness` 不区分「空历史」与「不支持的文档」。
  */
 
-export const chatReadinessSchema = z.enum(["not-ready", "ready", "unsupported"]);
+const chatReadinessSchema = z.enum(["not-ready", "ready", "unsupported"]);
 
 export const chatDisplayStateSchema = z.object({
   chat: chatSchema,
@@ -35,4 +35,3 @@ export const chatDisplayStateSchema = z.object({
 });
 
 export type ChatDisplayState = z.infer<typeof chatDisplayStateSchema>;
-export type ChatReadiness = z.infer<typeof chatReadinessSchema>;

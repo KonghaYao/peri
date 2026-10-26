@@ -23,11 +23,11 @@ const bytesOf = (json: string): number => encoder.encode(json).byteLength;
 
 export type PayloadField = "arguments" | "result";
 
-export type NormalizedPayload =
+type NormalizedPayload =
     | { kind: "inline"; value: unknown }
     | { kind: "external"; ref: ToolPayloadRef };
 
-export type PayloadStoreErrorCode =
+type PayloadStoreErrorCode =
     | "unavailable"
     | "too_large"
     | "integrity_error"

@@ -15,17 +15,20 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
   → peri-wasm Host（每次激活一个）→ 模型 / Turso Store / 远程 MCP
 ```
 
-- **服务端组合根**：`server/agent/manager.ts` 的 `AppChatManager` 持有 SDK `ChatManager` 与
-  `ChatViewRegistry`，只装配平台依赖（WASM 宿主、Store、claim、默认配置）。`createChat` 同步登记，
-  不启动 WASM，不读历史。
+- **平台装配**：`server/agent/compose.ts` 是 server 内唯一构造具体 `ChatManager` 的位置，把 WASM 宿主、
+  Store、Session claim 与默认配置装配成 SDK 实现；`getChatManager` 是唯一的注入点。
+- **服务端编排**：`server/agent/manager.ts` 的 `AppChatManager` 只接收注入的 `ChatManagerContract` 与
+  `ChatViewRegistry`，转发 create/get/find/list，编排 close 与 shutdown；`createChat` 不启动 WASM，
+  不读历史。
 - **进程单例**：`getChatManager` 首次构造；`shutdownChatManager` 成功关闭后清空，失败保留供重试。
-- **视图**：`server/agent/views.ts` 每个 Chat 一个 `ChatView`；同一 Chat 的多个 WS 连接共享视图，
-  断开连接不释放视图；绑定换代由 View 成对替换文档。
+- **视图**：`ChatViewRegistry` 由 SDK 提供（主入口与 `/portable`，不在 `/view`），每个 Chat 一个
+  `ChatView`；同一 Chat 的多个 WS 连接共享视图，断开连接不释放视图；绑定换代由 View 成对替换文档。
+  `closeChat` 先关句柄再释放视图，`shutdown` 先 `disposeAll` 再关闭 SDK 端口。
 - **HTTP**：`server/api/index.ts` 只做边界校验、目标绑定核对与错误映射；执行、绑定与关闭语义在 SDK。
 - **WS + Yjs**：`server/api/sync.ts` 把 Bun `ServerWebSocket` 适配为 `ChatYjsChannel`；客户端只能发
   HELLO/ACK，任何文档更新帧都被拒绝；慢客户端由 SDK 交付信用/背压显式关闭。
 - **前端**：`frontend/remote/controller.ts` 是页面控制器（句柄身份、两步打开历史、绑定代次、Action、
-  连接）；`actions.ts` 是 HTTP 客户端；`sync.ts` 是 WebSocket → SDK 副本；`application.ts` 是组合根。
+  连接）；`actions.ts` 是 HTTP 客户端；`sync.ts` 是 WebSocket → SDK 副本；`application.ts` 是前端组合根。
   `core/agent/view/projection.ts` 把 `ChatReplica` 物化为展示 DTO，不反向控制执行。
 - **静态资源**：非 `/api/*` 路径由 Bun 入口提供 `dist/client` 与 `index.html` 回退；Vite 开发服务器把
   `/api` 代理到 Bun 服务。
@@ -61,8 +64,8 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 | 包命令、依赖 | `npm-packages/peri-cf/package.json` |
 | Bun 入口（HTTP + 静态资源 + WS + 信号） | `server/index.ts` |
 | 环境变量解析与启动校验 | `server/config.ts` |
-| 服务端组合根 | `server/agent/manager.ts` |
-| 每 Chat 一个 View | `server/agent/views.ts` |
+| 平台装配（唯一 `new ChatManager`） | `server/agent/compose.ts` |
+| 服务端编排（注入端口 + View 生命周期） | `server/agent/manager.ts` |
 | Store 目录/读取与缺表容忍 | `server/store.ts` |
 | HTTP 路由与错误映射 | `server/api/index.ts`、`server/api/errors.ts` |
 | WebSocket 同步适配 | `server/api/sync.ts` |
@@ -70,7 +73,7 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 | 浏览器投影与问答适配 | `core/agent/view/projection.ts`、`core/agent/view/askUserQuestion.ts` |
 | 远程客户端与页面控制器 | `frontend/remote/{application,actions,controller,repository,sync}.ts` |
 | Chat 运行时与 useChat | `frontend/chat/runtime/useChat.ts`、`frontend/chat/runtime/queries.ts`、`frontend/chat/runtime/payloadReader.ts` |
-| assistant-ui 适配与展示 | `frontend/chat/runtime/adapter.ts`；`frontend/chat/{components,timeline,composer}/` |
+| Chat 展示与交互 | `frontend/chat/{components,timeline,composer}/`；`frontend/components/assistant-ui/` 只保留 vendored 审批/问答卡片 |
 | SPA 外壳与只读服务信息 | `frontend/app/App.tsx`、`frontend/settings/ServerInfoDialog.tsx` |
 | Vite 构建与 `/api` 代理 | `vite.config.ts` |
 | WASM 构建与 provenance | `scripts/{build-wasm,prepare-wasm,wasm-provenance,wasm-profile}.ts` |
@@ -80,8 +83,10 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 CF 的 `typecheck`/`test` 通过 `file:../@peri-sdk` 解析到 `node_modules/@peri-code/sdk`。干净 CI 先在
 `npm-packages/@peri-sdk` 执行 `MISE_ENV=wasm mise exec -- bun run build`，再在 CF 执行
 `bun install --force`；该条目会变成指向工作区包的符号链接，直接消费最新 `dist`。SDK build 依赖
-Emscripten 6.0.10 与 peri-wasm 产物；本轮官方 build、`test:wasm`（8/8）与 `smoke:workers` 均通过，
-CF typecheck 0、287/0 通过。Hosted Workers 部署仍未验收。
+Emscripten 6.0.10 与 peri-wasm 产物。最近一次记录（2026-10-26）：SDK typecheck 通过、`bun test`
+407 pass / 0 fail（49 files、2947 expect）；CF typecheck 通过、`bun run test` 261 pass / 0 fail
+（根测试 203 + server 58；30 + 7 files）；CF `vite build` 通过（2408 modules）；未运行 emcc build、
+`test:wasm` 与 E2E，Hosted Workers 部署未验收。
 
 ## 验证入口
 

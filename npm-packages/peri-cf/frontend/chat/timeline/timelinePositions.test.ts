@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
-  rememberTimelinePosition, restoreTimelinePosition, TimelinePositionStore,
+  rememberTimelinePosition, restoreTimelinePosition, type TimelinePosition,
 } from './timelinePositions';
 import type { TimelineRow } from './types';
 
@@ -19,9 +19,9 @@ const rows = [workRow('work:a'), workRow('work:b'), workRow('work:c')];
 
 describe('timeline position restore model', () => {
   test('positions are isolated per chat and survive as in-memory facts', () => {
-    const store = new TimelinePositionStore();
-    store.save('chat-a', { atEnd: true, rowId: null, offsetWithinRow: 0, scrollOffset: 0 });
-    store.save('chat-b', { atEnd: false, rowId: 'work:b', offsetWithinRow: 40, scrollOffset: 500 });
+    const store = new Map<string, TimelinePosition>();
+    store.set('chat-a', { atEnd: true, rowId: null, offsetWithinRow: 0, scrollOffset: 0 });
+    store.set('chat-b', { atEnd: false, rowId: 'work:b', offsetWithinRow: 40, scrollOffset: 500 });
     expect(store.get('chat-a')?.atEnd).toBe(true);
     expect(store.get('chat-b')).toMatchObject({ atEnd: false, rowId: 'work:b', offsetWithinRow: 40 });
     expect(store.get('chat-c')).toBeUndefined();
@@ -49,9 +49,9 @@ describe('timeline position restore model', () => {
   });
 
   test('returning to the bottom overwrites the saved scroll-away position', () => {
-    const store = new TimelinePositionStore();
-    store.save('chat-a', { atEnd: false, rowId: 'work:b', offsetWithinRow: 40, scrollOffset: 500 });
-    store.save('chat-a', rememberTimelinePosition(
+    const store = new Map<string, TimelinePosition>();
+    store.set('chat-a', { atEnd: false, rowId: 'work:b', offsetWithinRow: 40, scrollOffset: 500 });
+    store.set('chat-a', rememberTimelinePosition(
       { scrollHeight: 1_200, scrollTop: 1_080, clientHeight: 120 }, 'work:c', 1_000,
     ));
     expect(restoreTimelinePosition(store.get('chat-a'), rows)).toEqual({ initialScrollAtEnd: true });

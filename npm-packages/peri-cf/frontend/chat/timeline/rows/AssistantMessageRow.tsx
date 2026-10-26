@@ -2,7 +2,7 @@ import { Check, Copy } from 'lucide-react';
 import { MarkdownText } from '../MarkdownText';
 import { useCopyToClipboard } from '../../../hooks';
 
-export interface AssistantMessageRowProps {
+interface AssistantMessageRowProps {
   text: string;
   streaming: boolean;
 }

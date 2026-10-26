@@ -1,5 +1,5 @@
 import { QueryClient, queryOptions } from '@tanstack/react-query';
-import type { ChatSummary, ChatDisplayState } from './types';
+import type { ChatSummary } from './types';
 
 /** 列表读面只返回目录事实；运行态来自选中会话的副本。 */
 export interface ChatReadApi {
@@ -34,9 +34,6 @@ export function listRefetchInterval(
 }
 
 const listKey = ['chats', 'list'] as const;
-/** 展示副本按会话身份 + 绑定代次分代；换代后旧缓存不得冒充当前画面。 */
-export const historyKey = (chatId: string, bindingRevision: number) =>
-  ['chats', 'history', chatId, bindingRevision] as const;
 
 export function createChatQueries(api: ChatReadApi) {
   const client = new QueryClient({
@@ -63,21 +60,6 @@ export function createChatQueries(api: ChatReadApi) {
   return {
     client,
     list,
-    /**
-     * 写入副本物化结果；同一会话只保留当前绑定代次，旧代次缓存立即删除。
-     * readiness `unsupported` 也缓存，避免 UI 把它误当成空历史。
-     */
-    writeHistory(state: ChatDisplayState): void {
-      if (!state.sessionId || state.bindingRevision === null) return;
-      const key = historyKey(state.sessionId, state.bindingRevision);
-      client.setQueryData(key, state);
-      for (const query of client.getQueryCache().findAll({ queryKey: ['chats', 'history', state.sessionId] })) {
-        if (query.queryKey.at(-1) !== state.bindingRevision) client.removeQueries({ queryKey: query.queryKey, exact: true });
-      }
-    },
-    readHistory(chatId: string, bindingRevision: number): ChatDisplayState | undefined {
-      return client.getQueryData<ChatDisplayState>(historyKey(chatId, bindingRevision));
-    },
     dispose() {
       const cancelled = client.cancelQueries();
       client.clear();

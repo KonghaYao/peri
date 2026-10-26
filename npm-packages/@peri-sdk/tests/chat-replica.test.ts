@@ -7,7 +7,6 @@ import { ChatSyncConnection } from "../src/view/chat-sync";
 import {
     encodeSyncFrame, SessionDocSync, type DocSnapshot, type DocUpdate,
 } from "../src/sync/index";
-import { selectEntry, selectPendingInteractions } from "../src/view/session-view";
 
 const TARGET = { chatId: "chat-1", sessionId: "s1", bindingRevision: 1 };
 
@@ -79,7 +78,7 @@ async function waitFor(check: () => boolean, timeoutMs = 1500): Promise<void> {
 }
 
 describe("ChatReplica", () => {
-    test("receives full then incremental updates and exposes selectors", async () => {
+    test("receives full then incremental updates and exposes the session view", async () => {
         const document = new ChatDocument({ binding: TARGET });
         document.applyFact({ kind: "input-delivered", inputId: "u1", text: "Read" });
         const { sync, connection, client } = serverConnection(document);
@@ -95,8 +94,8 @@ describe("ChatReplica", () => {
         await waitFor(() => replica.read().entries[1]?.blocks[0]?.type === "text");
         const view = replica.read();
         expect(view.entries[1]?.blocks[0]).toMatchObject({ text: "Done" });
-        expect(selectEntry(view, view.entries[1]!.entryId)?.entryId).toBe(view.entries[1]!.entryId);
-        expect(selectPendingInteractions(view)).toEqual([]);
+        expect(view.entries[1]?.entryId).toMatch(/:assistant$/);
+        expect(view.pendingInteractions).toEqual([]);
 
         await replicaConnection.close();
         expect(replica.status).toBe("failed");

@@ -1,4 +1,4 @@
-import { decodeHelloFrame, frameBytes, MAX_SYNC_FRAME_BYTES, type ChatYjsChannel } from "@peri-code/sdk/view";
+import { frameBytes, MAX_SYNC_FRAME_BYTES, type ChatYjsChannel } from "@peri-code/sdk/view";
 import type { ChatProjection } from "@core/agent";
 
 /** 连接状态只描述物理通道；副本 readiness/首次同步由投影另行报告。 */
@@ -263,9 +263,4 @@ export class ChatSyncProvider {
     if (error) this.error = error;
     this.options.onStatus?.(status, error);
   }
-}
-
-/** 供测试与诊断：断言首帧是 HELLO 并读取可选 resume vector。 */
-export function readHello(frame: Uint8Array): ReturnType<typeof decodeHelloFrame> {
-  return decodeHelloFrame(frame);
 }

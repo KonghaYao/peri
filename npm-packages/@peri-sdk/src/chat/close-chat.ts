@@ -28,7 +28,7 @@ export async function closeActivation(
     }
 }
 
-export interface ChatCloseResources {
+interface ChatCloseResources {
     /** 取走当前激活；实现方必须同步清空，避免关闭期间仍收事实。 */
     takeActive(): Activation | undefined;
     readonly pendingCleanups: Set<Activation>;
@@ -38,7 +38,7 @@ export interface ChatCloseResources {
     onActivationClosed(activation: Activation): void;
 }
 
-export interface ChatCloseOptions {
+interface ChatCloseOptions {
     /** 单个激活（宿主/transport）关闭等待；超时即 Incomplete。 */
     readonly activationCloseTimeoutMs: number;
     /** 只有调用方确认绑定已结算时才允许释放 claim/索引。 */

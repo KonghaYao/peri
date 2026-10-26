@@ -1,5 +1,5 @@
 export * as Y from "yjs";
-export { readSessionView, selectEntry, selectToolCall, selectTurn, selectPlanForTurn, selectPendingInteractions } from "./session-view";
+export { readSessionView } from "./session-view";
 export { ChatView } from "./chat-view";
 export { ChatReplica } from "./chat-replica";
 export type { ChatViewOptions, ChatViewSync } from "./chat-view";

@@ -9,7 +9,7 @@ import type { ChatBindingTarget } from "./types";
  * - `cleanup-pending` / `blocked`：资源清理未确认或旧运行已失效；禁止新执行。
  * - `closing` / `closed`：关闭中/已确认关闭。
  */
-export type ChatBindingPhase =
+type ChatBindingPhase =
     | "empty"
     | "binding"
     | "ready"
@@ -99,7 +99,7 @@ export class ChatBinding {
     }
 }
 
-export interface ChatIdleFacts {
+interface ChatIdleFacts {
     running: boolean;
     pendingInputs: number;
     pendingInteractions: number;

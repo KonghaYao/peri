@@ -6,11 +6,7 @@ import {
 } from "../src/agent/peri-instance";
 import { ChatUserAction } from "../src/chat/action";
 import { AtomicSessionClaims } from "../src/chat/claims";
-import {
-    createChatInstance,
-    createPeriInstanceFactory,
-    DefaultChatInstanceFactory,
-} from "../src/chat/instance-factory";
+import { createChatInstance } from "../src/chat/instance-factory";
 import { ChatManager } from "../src/chat/manager";
 import type { ChatInstanceContext } from "../src/chat/service-support";
 import { MemoryKV } from "../src/kv/memory-kv";
@@ -197,14 +193,6 @@ describe("createChatInstance", () => {
 });
 
 describe("default factory wiring", () => {
-    test("factories bind lifecycle under one implementation", () => {
-        const lifecycle = context().lifecycle;
-        const fromFunction = createPeriInstanceFactory(lifecycle);
-        const fromClass = new DefaultChatInstanceFactory(lifecycle).create;
-        expect(typeof fromFunction).toBe("function");
-        expect(typeof fromClass).toBe("function");
-    });
-
     test("ChatManager assembles the default PeriInstance when no factory is injected", async () => {
         const transport = new TestTransport();
         const paths: string[] = [];

@@ -6,7 +6,7 @@ import type { TurnInteractionStatus } from "./turn-machine";
 /** 默认待确认（设计评审起点）：每个 session 文档保留的 interaction 记录数量上限。 */
 export const INTERACTION_HISTORY_LIMIT = 50;
 /** 默认待确认（设计评审起点）：单步表达式的字段数量上限。 */
-export const INTERACTION_FORM_MAX_FIELDS = 32;
+const INTERACTION_FORM_MAX_FIELDS = 32;
 
 type InteractionStatus = "pending" | "resolved" | "expired";
 
@@ -23,7 +23,7 @@ export type FormField = {
 };
 
 /** AskUserQuestion 的结构化展示问题；与运行侧 `InteractionQuestion` 同构。 */
-export type InteractionQuestionDisplay = {
+type InteractionQuestionDisplay = {
     id: string;
     header: string;
     question: string;
@@ -32,7 +32,7 @@ export type InteractionQuestionDisplay = {
 };
 
 /** 展示层只需要运行侧给出的公开字段；resolver 与回答正文不进入文档。 */
-export type InteractionDisplayRecord = {
+type InteractionDisplayRecord = {
     id: string;
     kind: "permission" | "elicitation";
     sessionId: string;

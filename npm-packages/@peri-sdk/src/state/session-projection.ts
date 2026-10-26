@@ -15,7 +15,7 @@ export const COMPACTION_STATUS = {
     cancelled: "cancelled",
 } as const;
 
-export type CompactionStatus = typeof COMPACTION_STATUS[keyof typeof COMPACTION_STATUS];
+type CompactionStatus = typeof COMPACTION_STATUS[keyof typeof COMPACTION_STATUS];
 
 /** Display-safe session metadata; chat content and task lifecycles live in their own modules. */
 export class SessionProjection {

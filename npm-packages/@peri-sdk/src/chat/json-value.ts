@@ -11,7 +11,7 @@
  * 非法值抛 `NonJsonValueError`，由调用方转换为领域错误（`invalid_action`）。
  */
 
-export type JsonValue =
+type JsonValue =
     | null | boolean | number | string
     | readonly JsonValue[]
     | { readonly [key: string]: JsonValue };

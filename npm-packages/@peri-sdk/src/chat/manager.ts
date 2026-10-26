@@ -20,7 +20,7 @@ import type {
     SessionClaims,
 } from "./types";
 import { ChatService } from "./service";
-import { createPeriInstanceFactory } from "./instance-factory";
+import { createChatInstance } from "./instance-factory";
 import {
     resolveChatLifecycle,
     type ChatInstanceFactory,
@@ -42,6 +42,9 @@ export interface ChatManagerInternalOptions extends ChatManagerOptions {
  *
  * 不接收普通执行动作，不决定 UI 选中项；`createChat` 只同步登记句柄，
  * 不启动 ACP、不 claim Session、不读取历史。
+ *
+ * 这是 SDK 的默认实现；宿主编排层应依赖 `ChatManagerContract` 端口注入，
+ * 不要把自己的组合规则写进本类。
  */
 export class ChatManager implements ChatManagerContract {
     private readonly chats = new Map<string, ChatService>();
@@ -96,8 +99,10 @@ export class ChatManager implements ChatManagerContract {
         this.defaults = { ...options.defaults };
         this.now = options.now;
         this.lifecycle = resolveChatLifecycle(options.lifecycle);
+        // 默认工厂只绑定 Manager 的生命周期预算；测试仍可注入 fake port。
+        const lifecycle = this.lifecycle;
         this.instanceFactory = options.instanceFactory
-            ?? createPeriInstanceFactory(this.lifecycle);
+            ?? ((context) => createChatInstance({ ...context, lifecycle }));
         this.index = {
             reserve: (chatId, sessionId) =>
                 this.sessions.reserve(sessionId, chatId),

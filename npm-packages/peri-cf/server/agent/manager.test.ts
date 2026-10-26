@@ -1,26 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import {
-  AtomicSessionClaims,
   ChatCloseIncompleteError,
-  MemoryKV,
-  PayloadReadError,
-  type ChatDatabase,
-  type ChatFact,
+  ChatViewRegistry,
+  type ChatBindingTarget,
+  type ChatFactObserver,
+  type ChatFactSource,
+  type ChatManagerContract,
+  type ChatServiceContract,
   type ChatSessionDirectoryEntry,
   type ChatYjsChannel,
-  type PeriInstancePort,
-  type ToolPayloadReadRef,
-  type ToolPayloadResponse,
 } from "@peri-code/sdk";
-import { publicServerInfo, type ServerConfig } from "../config";
-import { createApi } from "../api";
+import type { ServerConfig } from "../config";
 import {
-  ChatViewRegistry,
-  createAppChatManager,
+  AppChatManager,
   getChatManager,
-  resetChatManagerForTest,
   shutdownChatManager,
-  type ChatInstanceFactory,
 } from "./index";
 
 const config: ServerConfig = {
@@ -39,376 +33,315 @@ const config: ServerConfig = {
   staticRoot: "/tmp/peri-cf-dist",
 };
 
-function entry(
-  id: string,
-  overrides: Partial<ChatSessionDirectoryEntry> = {},
-): ChatSessionDirectoryEntry {
+const TARGET: ChatBindingTarget = {
+  chatId: "chat-1",
+  sessionId: "session-1",
+  bindingRevision: 1,
+};
+
+function entry(id: string): ChatSessionDirectoryEntry {
   return {
     sessionId: id,
     title: null,
-    cwd: "/persisted/workspace",
+    cwd: "/workspace/",
     messageCount: 1,
     createdAt: "2026-10-20T12:00:00Z",
     updatedAt: "2026-10-20T12:00:00Z",
-    ...overrides,
   };
 }
 
-class FakeDatabase implements ChatDatabase {
-  readonly entries = new Map<string, ChatSessionDirectoryEntry>();
-  readonly getSessionCalls: string[] = [];
-  readonly listSessionsCalls: Array<string | undefined> = [];
+class FakeFactSource implements ChatFactSource {
+  binding: ChatBindingTarget | null = null;
+  private readonly observers = new Set<ChatFactObserver>();
 
-  async listSessions(path?: string): Promise<ChatSessionDirectoryEntry[]> {
-    this.listSessionsCalls.push(path);
-    return [...this.entries.values()].filter((item) => path === undefined || item.cwd === path);
+  subscribeFacts(observer: ChatFactObserver): () => void {
+    this.observers.add(observer);
+    if (this.binding) observer.onBinding(this.binding, []);
+    return () => this.observers.delete(observer);
   }
 
-  async getSession(id: string): Promise<ChatSessionDirectoryEntry | null> {
-    this.getSessionCalls.push(id);
-    return this.entries.get(id) ?? null;
+  bind(target: ChatBindingTarget): void {
+    this.binding = { ...target };
+    for (const observer of [...this.observers]) observer.onBinding(this.binding, []);
   }
 }
 
-class FakePort implements PeriInstancePort {
+/** 只实现编排层会触达的成员；其余动作在 fake 中显式失败。 */
+function stubChat(
+  id: string,
+  source = new FakeFactSource(),
+): ChatServiceContract & { readonly source: FakeFactSource } {
+  return {
+    id,
+    sessionId: null,
+    bindingRevision: 0,
+    binding: null,
+    execute(): never { throw new Error("stub chat cannot execute actions"); },
+    readPayload(): Promise<never> { throw new Error("stub chat has no payload store"); },
+    async close(): Promise<void> {},
+    subscribeFacts: (observer) => source.subscribeFacts(observer),
+    source,
+  };
+}
+
+class FakeChatManager implements ChatManagerContract {
+  readonly chats = new Map<string, ChatServiceContract>();
+  readonly listCalls: Array<{ path?: string } | undefined> = [];
+  listResult: ChatSessionDirectoryEntry[] = [entry("session-1")];
+  findResult: ChatServiceContract | undefined;
+  createError: unknown;
+  closeError: unknown;
+  shutdownError: unknown;
+  private created = 0;
+
+  constructor(readonly events: string[] = []) {}
+
+  createChat(options?: { path?: string }): ChatServiceContract {
+    this.events.push(`port.createChat:${options?.path ?? ""}`);
+    if (this.createError !== undefined) throw this.createError;
+    const chat = stubChat(`chat-${++this.created}`);
+    this.chats.set(chat.id, chat);
+    return chat;
+  }
+
+  getChat(id: string): ChatServiceContract | undefined {
+    return this.chats.get(id);
+  }
+
+  findChatBySession(_sessionId: string): ChatServiceContract | undefined {
+    return this.findResult;
+  }
+
+  async listSessions(options?: { path?: string }): Promise<ChatSessionDirectoryEntry[]> {
+    this.listCalls.push(options);
+    return this.listResult;
+  }
+
+  async closeChat(id: string): Promise<void> {
+    this.events.push(`port.closeChat:${id}`);
+    if (this.closeError !== undefined) throw this.closeError;
+    this.chats.delete(id);
+  }
+
+  async shutdown(): Promise<void> {
+    this.events.push("port.shutdown");
+    if (this.shutdownError !== undefined) throw this.shutdownError;
+  }
+}
+
+/** 只记录 View 释放顺序；`failures` 控制前几次 close 抛错。 */
+class RecordingChannel implements ChatYjsChannel {
   closed = false;
-  closeFailures: number;
-  readonly newSessionId: string;
-  readonly pending?: Promise<void>;
+  failures: number;
 
-  constructor(options: {
-    newSessionId?: string;
-    closeFailures?: number;
-    pending?: Promise<void>;
-  } = {}) {
-    this.newSessionId = options.newSessionId ?? "new-session-id";
-    this.closeFailures = options.closeFailures ?? 0;
-    this.pending = options.pending;
+  constructor(
+    private readonly events: string[],
+    failures = 0,
+  ) {
+    this.failures = failures;
   }
-
-  attach(_sink: (fact: ChatFact) => void): () => void {
-    return () => {};
-  }
-
-  async bindNew(options: {
-    path: string;
-    onSessionCreated?: (sessionId: string) => void | Promise<void>;
-  }): Promise<{ sessionId: string }> {
-    await options.onSessionCreated?.(this.newSessionId);
-    return { sessionId: this.newSessionId };
-  }
-
-  async bindExisting(sessionId: string): Promise<{ sessionId: string }> {
-    if (this.pending) await this.pending;
-    return { sessionId };
-  }
-
-  async send(): Promise<void> {}
-  async waitForDelivery(): Promise<void> {}
-  async dispatch(): Promise<void> {}
-  async takeBack(): Promise<void> {}
-  async cancel(): Promise<"requested" | "idle"> { return "idle"; }
-  async answer(): Promise<void> {}
-  async loadEarlierHistory() { return { applied: 0, nextCursor: null }; }
-
-  async readPayload(
-    _ref: ToolPayloadReadRef,
-  ): Promise<ToolPayloadResponse> {
-    throw new PayloadReadError("unavailable", "no payload");
-  }
-
-  async close(): Promise<void> {
-    if (this.closeFailures > 0) {
-      this.closeFailures -= 1;
-      throw new Error("port close failed");
-    }
-    this.closed = true;
-  }
-
-  get running(): boolean { return false; }
-  get pendingInputCount(): number { return 0; }
-  get pendingInteractionCount(): number { return 0; }
-  get needsReload(): boolean { return false; }
-}
-
-class FakeFactory {
-  readonly contexts: Array<Parameters<ChatInstanceFactory>[0]> = [];
-  readonly ports: FakePort[] = [];
-  readonly create: ChatInstanceFactory;
-
-  constructor(private readonly options: {
-    newSessionId?: string;
-    closeFailures?: number;
-    pending?: Promise<void>;
-  } = {}) {
-    this.create = (context) => {
-      this.contexts.push(context);
-      const port = new FakePort(this.options);
-      this.ports.push(port);
-      return port;
-    };
-  }
-}
-
-class FlakyChannel implements ChatYjsChannel {
-  closed = false;
-  failures = 1;
 
   send(_frame: Uint8Array): void {}
-
-  onMessage(_listener: (frame: Uint8Array) => void): () => void {
-    return () => {};
-  }
-
-  onClose(_listener: (error?: Error) => void): () => void {
-    return () => {};
-  }
+  onMessage(_listener: (frame: Uint8Array) => void): () => void { return () => {}; }
+  onClose(_listener: (error?: Error) => void): () => void { return () => {}; }
 
   close(_reason?: Error): void {
+    this.events.push("view.close");
     if (this.failures > 0) {
       this.failures -= 1;
-      throw new Error("channel close failed");
+      throw new Error("view close failed");
     }
     this.closed = true;
   }
 }
 
-function managerWith(overrides: {
-  database?: FakeDatabase;
-  factory?: FakeFactory;
+/** 在端口与注册表中登记同一个句柄，并挂一条可观察的同步连接。 */
+function attachChat(
+  chats: FakeChatManager,
+  views: ChatViewRegistry,
+  id: string,
+  options: { events: string[]; closeFailures?: number },
+): ChatServiceContract & { readonly source: FakeFactSource } {
+  const chat = stubChat(id);
+  chat.source.bind({ ...TARGET, chatId: id });
+  chats.chats.set(id, chat);
+  views.attach(chat).sync(new RecordingChannel(options.events, options.closeFailures));
+  return chat;
+}
+
+function orchestrated(options: {
+  events?: string[];
   views?: ChatViewRegistry;
+  chats?: FakeChatManager;
 } = {}) {
-  const database = overrides.database ?? new FakeDatabase();
-  const factory = overrides.factory ?? new FakeFactory();
-  const manager = createAppChatManager(config, {
-    database,
-    sessionClaims: new AtomicSessionClaims(new MemoryKV()),
-    host: {
-      kind: "transport",
-      factory: async () => { throw new Error("transport host must not start in manager tests"); },
-    },
-    instanceFactory: factory.create,
-    views: overrides.views,
-  });
-  return { manager, database, factory };
+  const events = options.events ?? [];
+  const chats = options.chats ?? new FakeChatManager(events);
+  const views = options.views ?? new ChatViewRegistry();
+  return { manager: new AppChatManager({ chats, views }), chats, views, events };
 }
 
 describe("AppChatManager", () => {
-  test("createChat 只登记句柄，不读库、不启动实例", () => {
-    const { manager, database, factory } = managerWith();
-    const chat = manager.createChat();
+  test("四个透传方法直接委托注入的端口", async () => {
+    const { manager, chats } = orchestrated();
 
-    expect(chat.sessionId).toBeNull();
-    expect(chat.bindingRevision).toBe(0);
-    expect(factory.contexts).toEqual([]);
-    expect(database.getSessionCalls).toEqual([]);
-    expect(manager.findChatBySession("session-1")).toBeUndefined();
+    const created = manager.createChat({ path: "/workspace/" });
+    expect(chats.events).toEqual(["port.createChat:/workspace/"]);
+    expect(manager.getChat(created.id)).toBe(created);
+
+    chats.findResult = created;
+    expect(manager.findChatBySession("session-1")).toBe(created);
+
+    const listing = await manager.listSessions({ path: "/workspace/" });
+    expect(listing).toBe(chats.listResult);
+    expect(chats.listCalls).toEqual([{ path: "/workspace/" }]);
   });
 
-  test("加载历史使用数据库 cwd，并复用同一句柄/视图", async () => {
-    const { manager, database, factory } = managerWith();
-    database.entries.set("session-1", entry("session-1", { cwd: "/persisted/workspace" }));
-    const chat = manager.createChat();
-
-    const result = await chat.execute({
-      type: "change_session",
-      requestId: "request-1",
-      payload: { sessionId: "session-1" },
-    });
-
-    expect(result).toMatchObject({
-      requestId: "request-1",
-      chatId: chat.id,
-      sessionId: "session-1",
-      bindingRevision: 1,
-    });
-    expect(database.getSessionCalls).toEqual(["session-1"]);
-    expect(factory.contexts[0]?.path).toBe("/persisted/workspace");
-    expect(manager.findChatBySession("session-1")?.id).toBe(chat.id);
-
-    const again = await chat.execute({
-      type: "change_session",
-      requestId: "request-2",
-      payload: { sessionId: "session-1" },
-    });
-    expect(again.bindingRevision).toBe(1);
-    expect(factory.contexts).toHaveLength(1);
-    expect(chat.bindingRevision).toBe(1);
+  test("createChat 的端口错误原样向上抛出", () => {
+    const { manager, chats } = orchestrated();
+    chats.createError = new Error("create failed");
+    expect(() => manager.createChat()).toThrow("create failed");
   });
 
-  test("历史 cwd 为空时回退默认 SESSION_CWD", async () => {
-    const { manager, database, factory } = managerWith();
-    database.entries.set("session-empty-cwd", entry("session-empty-cwd", { cwd: "" }));
-    const chat = manager.createChat();
-
-    await chat.execute({
-      type: "change_session",
-      requestId: "request-3",
-      payload: { sessionId: "session-empty-cwd" },
-    });
-
-    expect(factory.contexts[0]?.path).toBe("/workspace/");
-  });
-
-  test("加载中的会话可被 findChatBySession 定位", async () => {
-    let release!: () => void;
-    const pending = new Promise<void>((resolve) => { release = resolve; });
-    const { manager, database, factory } = managerWith({
-      factory: new FakeFactory({ pending }),
-    });
-    database.entries.set("session-loading", entry("session-loading"));
-    const chat = manager.createChat();
-
-    const loading = chat.execute({
-      type: "change_session",
-      requestId: "request-4",
-      payload: { sessionId: "session-loading" },
-    });
-    for (let i = 0; i < 50 && manager.findChatBySession("session-loading") === undefined; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 1));
-    }
-    expect(manager.findChatBySession("session-loading")?.id).toBe(chat.id);
-    expect(chat.bindingRevision).toBe(0);
-    expect(factory.contexts).toHaveLength(1);
-
-    release();
-    await loading;
-    expect(chat.bindingRevision).toBe(1);
-  });
-
-  test("create_new_session 使用默认 path 并返回真实身份", async () => {
-    const { manager, database, factory } = managerWith({
-      factory: new FakeFactory({ newSessionId: "created-session" }),
-    });
-    const chat = manager.createChat();
-
-    const result = await chat.execute({
-      type: "create_new_session",
-      requestId: "request-5",
-      payload: { title: "新对话" },
-    });
-
-    expect(result).toMatchObject({
-      requestId: "request-5",
-      chatId: chat.id,
-      sessionId: "created-session",
-      bindingRevision: 1,
-    });
-    expect(factory.contexts[0]?.path).toBe("/workspace/");
-    expect(database.getSessionCalls).toEqual([]);
-    expect(manager.findChatBySession("created-session")?.id).toBe(chat.id);
-  });
-
-  test("close 失败保留句柄、占用与视图，重试成功后移除", async () => {
-    const views = new ChatViewRegistry();
-    const { manager, database, factory } = managerWith({
-      views,
-      factory: new FakeFactory({ closeFailures: 1 }),
-    });
-    database.entries.set("session-close", entry("session-close"));
-    const chat = manager.createChat();
-    await chat.execute({
-      type: "change_session",
-      requestId: "request-6",
-      payload: { sessionId: "session-close" },
-    });
-    expect(views.attach(chat)).toBe(views.attach(chat));
-
-    await expect(manager.closeChat(chat.id)).rejects.toBeInstanceOf(ChatCloseIncompleteError);
-    expect(manager.getChat(chat.id)).toBe(chat);
-    expect(manager.findChatBySession("session-close")?.id).toBe(chat.id);
-    expect(views.size).toBe(1);
-    expect(manager.hasPendingClose(chat.id)).toBe(false);
+  test("closeChat 先关闭端口句柄，再释放 View", async () => {
+    const events: string[] = [];
+    const { manager, chats, views } = orchestrated({ events });
+    const chat = attachChat(chats, views, "chat-1", { events });
 
     await manager.closeChat(chat.id);
+
+    expect(events).toEqual([
+      `port.closeChat:${chat.id}`,
+      "view.close",
+    ]);
     expect(manager.getChat(chat.id)).toBeUndefined();
-    expect(manager.findChatBySession("session-close")).toBeUndefined();
-    expect(views.size).toBe(0);
-    expect(factory.ports[0]?.closed).toBe(true);
+    expect(views.get(chat.id)).toBeUndefined();
+    expect(manager.hasPendingClose(chat.id)).toBe(false);
+    expect(chats.chats.has(chat.id)).toBe(false);
   });
 
-  test("view 释放失败保留条目，HTTP DELETE 重试可释放", async () => {
-    const views = new ChatViewRegistry();
-    const { manager, database } = managerWith({ views });
-    database.entries.set("session-view", entry("session-view"));
-    const chat = manager.createChat();
-    await chat.execute({
-      type: "change_session",
-      requestId: "request-view",
-      payload: { sessionId: "session-view" },
-    });
-    const view = views.attach(chat);
-    const channel = new FlakyChannel();
-    view.sync(channel);
+  test("端口关闭失败时不释放 View，也不包装错误", async () => {
+    const events: string[] = [];
+    const chats = new FakeChatManager(events);
+    const failure = new Error("port close failed");
+    chats.closeError = failure;
+    const { manager, views } = orchestrated({ events, chats });
+    const chat = attachChat(chats, views, "chat-1", { events });
+
+    const error = await manager.closeChat(chat.id).catch((reason: unknown) => reason);
+    expect(error).toBe(failure);
+    expect(events).toEqual([`port.closeChat:${chat.id}`]);
+    expect(views.get(chat.id)).toBeDefined();
+    expect(manager.getChat(chat.id)).toBe(chat);
+  });
+
+  test("View 释放失败包装为 ChatCloseIncompleteError，重试后清除残留", async () => {
+    const events: string[] = [];
+    const { manager, chats, views } = orchestrated({ events });
+    const chat = attachChat(chats, views, "chat-1", { events, closeFailures: 1 });
 
     await expect(manager.closeChat(chat.id)).rejects.toBeInstanceOf(
       ChatCloseIncompleteError,
     );
     expect(manager.getChat(chat.id)).toBeUndefined();
-    expect(views.size).toBe(1);
-    expect(channel.closed).toBe(false);
+    expect(views.get(chat.id)).toBeDefined();
     expect(manager.hasPendingClose(chat.id)).toBe(true);
 
-    // 句柄已移除后，HTTP DELETE 仍应进入残留条目重试而不是 410。
-    const app = createApi({
-      manager,
-      info: publicServerInfo(config),
-      logError: () => {},
-    });
-    const retried = await app.request(`/api/chats/${chat.id}`, { method: "DELETE" });
-    expect(retried.status).toBe(204);
-    expect(views.size).toBe(0);
-    expect(channel.closed).toBe(true);
+    await manager.closeChat(chat.id);
+    expect(views.get(chat.id)).toBeUndefined();
+    expect(manager.hasPendingClose(chat.id)).toBe(false);
+    expect(events).toEqual([
+      `port.closeChat:${chat.id}`,
+      "view.close",
+      `port.closeChat:${chat.id}`,
+      "view.close",
+    ]);
+  });
+
+  test("hasPendingClose 只在句柄消失而 View 仍存在时为真", async () => {
+    const events: string[] = [];
+    const { manager, chats, views } = orchestrated({ events });
+    const chat = attachChat(chats, views, "chat-1", { events, closeFailures: 1 });
+
+    expect(manager.hasPendingClose(chat.id)).toBe(false);
+    expect(manager.hasPendingClose("missing")).toBe(false);
+
+    await expect(manager.closeChat(chat.id)).rejects.toBeInstanceOf(
+      ChatCloseIncompleteError,
+    );
+    expect(manager.hasPendingClose(chat.id)).toBe(true);
+    await manager.closeChat(chat.id);
     expect(manager.hasPendingClose(chat.id)).toBe(false);
   });
 
-  test("listSessions 只读目录，不创建实例", async () => {
-    const { manager, database, factory } = managerWith();
-    database.entries.set("session-list", entry("session-list", { title: "列表项" }));
-
-    const listing = await manager.listSessions();
-    expect(listing.map((item) => item.sessionId)).toEqual(["session-list"]);
-    expect(database.listSessionsCalls).toEqual([undefined]);
-    expect(factory.contexts).toEqual([]);
-  });
-
-  test("shutdown 释放视图并拒绝新句柄", async () => {
-    const views = new ChatViewRegistry();
-    const { manager, database } = managerWith({ views });
-    database.entries.set("session-shutdown", entry("session-shutdown"));
-    const chat = manager.createChat();
-    await chat.execute({
-      type: "change_session",
-      requestId: "request-7",
-      payload: { sessionId: "session-shutdown" },
-    });
-    views.attach(chat);
+  test("shutdown 先释放全部 View，再关闭端口", async () => {
+    const events: string[] = [];
+    const { manager, chats, views } = orchestrated({ events });
+    const first = attachChat(chats, views, "chat-1", { events });
+    const second = attachChat(chats, views, "chat-2", { events });
 
     await manager.shutdown();
-    expect(views.size).toBe(0);
-    expect(manager.getChat(chat.id)).toBeUndefined();
-    expect(() => manager.createChat()).toThrow("shut down");
+
+    expect(events).toEqual([
+      "view.close",
+      "view.close",
+      "port.shutdown",
+    ]);
+    expect(views.get(first.id)).toBeUndefined();
+    expect(views.get(second.id)).toBeUndefined();
   });
 
-  test("进程级单例不重复创建，shutdown 后清空", async () => {
-    resetChatManagerForTest();
-    const database = new FakeDatabase();
-    const options = {
-      database,
-      sessionClaims: new AtomicSessionClaims(new MemoryKV()),
-      host: {
-        kind: "transport" as const,
-        factory: async () => { throw new Error("not used"); },
-      },
-    };
-    const first = getChatManager(config, options);
-    const second = getChatManager(config, options);
-    expect(second).toBe(first);
+  test("shutdown 聚合 View 与端口的失败，且两段都会尝试", async () => {
+    const events: string[] = [];
+    const chats = new FakeChatManager(events);
+    chats.shutdownError = new Error("port shutdown failed");
+    const { manager, views } = orchestrated({ events, chats });
+    const chat = attachChat(chats, views, "chat-1", { events, closeFailures: 1 });
+
+    const failure = await manager.shutdown().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors).toHaveLength(2);
+    expect((failure as AggregateError).message).toBe(
+      "Peri CF chat manager shutdown is incomplete",
+    );
+    expect(events).toEqual(["view.close", "port.shutdown"]);
+    expect(views.get(chat.id)).toBeDefined();
+  });
+
+  test("shutdown 只有 View 失败时仍聚合上报", async () => {
+    const events: string[] = [];
+    const { manager, chats, views } = orchestrated({ events });
+    attachChat(chats, views, "chat-1", { events, closeFailures: 1 });
+
+    const failure = await manager.shutdown().catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect((failure as AggregateError).errors).toHaveLength(1);
+    expect(events).toEqual(["view.close", "port.shutdown"]);
+  });
+});
+
+describe("进程级单例", () => {
+  test("注入端口后不重复创建，shutdown 成功后清空", async () => {
+    const chats = new FakeChatManager();
+    const first = getChatManager(config, { chats });
+    expect(getChatManager(config, { chats: new FakeChatManager() })).toBe(first);
 
     await shutdownChatManager();
-    const third = getChatManager(config, options);
-    expect(third).not.toBe(first);
+    const second = getChatManager(config, { chats });
+    expect(second).not.toBe(first);
     await shutdownChatManager();
-    resetChatManagerForTest();
+  });
+
+  test("shutdown 失败保留单例，允许再次关闭", async () => {
+    const chats = new FakeChatManager();
+    chats.shutdownError = new Error("port shutdown failed");
+    const manager = getChatManager(config, { chats });
+
+    await expect(shutdownChatManager()).rejects.toBeInstanceOf(AggregateError);
+    expect(getChatManager(config, { chats })).toBe(manager);
+
+    chats.shutdownError = undefined;
+    await shutdownChatManager();
+    expect(getChatManager(config, { chats })).not.toBe(manager);
+    await shutdownChatManager();
   });
 });

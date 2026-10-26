@@ -1,10 +1,11 @@
 import type { Server, ServerWebSocket, WebSocketHandler } from "bun";
 import {
   ChatViewReplayOverflowError,
-  type ChatService,
+  type ChatManagerContract,
+  type ChatServiceContract,
+  type ChatViewRegistry,
   type ChatYjsChannel,
 } from "@peri-code/sdk";
-import type { ChatViewRegistry } from "../agent";
 import { chatNotFound } from "./errors";
 
 /**
@@ -23,10 +24,7 @@ const UNSUPPORTED_DATA = 1003;
 const TOO_LARGE = 1009;
 const INTERNAL_ERROR = 1011;
 
-export interface SyncChatLookup {
-  getChat(id: string): ChatService | undefined;
-  findChatBySession(sessionId: string): ChatService | undefined;
-}
+export type SyncChatLookup = Pick<ChatManagerContract, "getChat" | "findChatBySession">;
 
 export interface SyncUpgradeDeps {
   manager: SyncChatLookup;
@@ -36,7 +34,7 @@ export interface SyncUpgradeDeps {
 
 export interface SyncSocketData {
   readonly chatId: string;
-  readonly chat: ChatService;
+  readonly chat: ChatServiceContract;
   readonly channel: SyncSocketChannel;
   readonly view: ReturnType<ChatViewRegistry["attach"]>;
 }

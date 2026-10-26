@@ -1,6 +1,6 @@
 export type RecordValue = Record<string, unknown>;
-export type SnapshotToolRef = { id: string; bytes: number; preview: string };
-export type SnapshotBlock = { type: "text" | "reasoning"; text: string }
+type SnapshotToolRef = { id: string; bytes: number; preview: string };
+type SnapshotBlock = { type: "text" | "reasoning"; text: string }
     | {
         type: "tool";
         id: string;
@@ -10,7 +10,7 @@ export type SnapshotBlock = { type: "text" | "reasoning"; text: string }
         /** 参数超出会话载荷预算，未写内联值；由投影映射为公开 tool error。 */
         argumentsError?: "payload_too_large";
     };
-export type SnapshotMessage = {
+type SnapshotMessage = {
     id: string;
     role: "user" | "assistant" | "tool";
     blocks: SnapshotBlock[];

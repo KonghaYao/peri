@@ -7,23 +7,23 @@
 
 | 入口 | 文件 | 内容 |
 | --- | --- | --- |
-| 主入口 | `npm-packages/@peri-sdk/src/sdk/index.ts` → `src/chat/public.ts` | `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、公开类型/错误、Store/KV/transport 类型 |
+| 主入口 | `npm-packages/@peri-sdk/src/sdk/index.ts` → `src/chat/public.ts` | `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatViewRegistry`、公开类型/错误（含 `ChatManagerContract`）、Store/KV/transport 类型 |
 | `/portable` | `src/portable.ts` | 主入口的 Chat 公共面 + 嵌入方驱动的执行准入核心；准入摘要仍依赖 `node:crypto` |
-| `/view` | `src/view/index.ts` | 浏览器安全展示：`ChatView`、`ChatReplica`、选择器、载荷读取、同步协议；不引入 Node 宿主 |
+| `/view` | `src/view/index.ts` | 浏览器安全展示：`ChatView`、`ChatReplica`、`readSessionView`、载荷读取、同步协议；不引入 Node 宿主，也不导出 `ChatViewRegistry` |
 | `/wasm` | `src/wasm.ts` | Emscripten ACP Host、loader、`WasmAcpTransport`、scheduler 端口 |
 | `/wasm-host` | `src/wasm-host.ts` | `/wasm` + Node 网络/DNS 端口 |
 
 旧 `Agent`、`ManagedAgents`、`SessionDocs`、`SessionViewStore`、`AtomicManagedAgentKv`、
-`agent-claim-conflict-error` 已删除，不在任何发布入口导出；`tests/public-view.test.ts` 只对这些
-旧符号做负向断言。`src/sandbox/sandbox.ts` 的 `Sandbox` 仍保留并有正向测试
-`tests/sandbox.test.ts`，但未从任何发布入口导出；是否删除待用户裁决。stdlib/Workspace 进程管理、
-本地数据库、JSONL dispatcher 与执行恢复账本也不在 SDK 内。
+`agent-claim-conflict-error`、`Sandbox` 已删除，不在任何发布入口导出；`tests/public-view.test.ts`
+只对旧符号做负向断言。stdlib/Workspace 进程管理、本地数据库、JSONL dispatcher 与执行恢复账本
+也不在 SDK 内。
 
 ## 控制面
 
 | 职责 | 入口 | 行为 |
 | --- | --- | --- |
 | Manager | `src/chat/manager.ts` | 同步 `createChat`；句柄目录、`findChatBySession`、目录读取、`closeChat`、`shutdown`；不接收普通执行动作 |
+| Manager 契约 | `src/chat/types.ts`、`src/chat/public.ts` | `ChatManager`/`ChatService` 接口；对外类型名 `ChatManagerContract`，具体类 `src/chat/manager.ts` 实现它，宿主可注入自有实现 |
 | Service | `src/chat/service.ts`、`src/chat/binding.ts`、`src/chat/close-chat.ts` | 绑定状态机、八类动作分派、回执关联、事实日志、关闭预算与失败保留；载荷读取按发起时的绑定代次校验，换绑后的晚到结果/错误丢弃为 `unavailable` |
 | 动作 | `src/chat/action.ts`、`src/chat/json-value.ts` | 八类纯数据 Action、`requestId`、JSON 深拷贝/冻结、`parseChatUserAction`；不依赖 `instanceof` |
 | 类型/错误 | `src/chat/types.ts`、`src/chat/errors.ts` | `ChatHost`、`ChatDefaults`、`ChatLifecycleOptions`、`PeriInstancePort`、错误 `disposition` 与 `ChatCloseIncompleteError` |
@@ -49,10 +49,11 @@
 | 职责 | 入口 | 行为 |
 | --- | --- | --- |
 | View | `src/view/chat-view.ts` | 订阅 `ChatFactSource`；每个绑定代次一对 Y.Doc 与 `SessionDocSync`；换代成对替换；`dispose` 释放连接与文档 |
+| View 共享 | `src/view/view-registry.ts` | `ChatViewRegistry`：按 Chat id 复用同一个 `ChatView`；提供 attach/get/dispose/disposeAll；从主入口与 `/portable` 导出，不从 `/view` 导出 |
 | 同步连接 | `src/view/chat-sync.ts`、`src/view/channel.ts` | `ChatYjsChannel` 只做逻辑帧；HELLO/SNAPSHOT/UPDATE/ACK、交付信用、有界背压与终止 |
 | 副本 | `src/view/chat-replica.ts` | 浏览器只读：HELLO resume、gap repair、generation/schema 校验、`read()`/`subscribe()` |
 | 文档模型 | `src/view/chat-document.ts`、`src/state/{doc-model,protocol,session-projection,task-projection,interaction-projection,turn-machine}.ts` | ACP 通知 → Entry/Block/Tool/Turn/Task/Plan/Interaction；历史幂等合并、终态收敛、closed 展示事实 |
-| 选择器 | `src/view/session-view.ts`、`src/view/read-cache.ts` | 纯读取 `SessionView`、按身份选择、未知块/孤立工具引用显式诊断；无 `getSnapshot`/`subscribe` 门面 |
+| 只读视图 | `src/view/session-view.ts`、`src/view/read-cache.ts` | `readSessionView` 纯读取完整 `SessionView`；不再导出按身份选择器，未知块/孤立工具引用显式诊断；无 `getSnapshot`/`subscribe` 门面 |
 | 同步协议 | `src/sync/{wire,peer,delivery,session-doc-sync,session-doc-replica}.ts` | 二进制帧、协议版本、状态向量、离线补齐与慢客户端上界 |
 
 ## 验证入口
@@ -60,10 +61,10 @@
 - `bun run typecheck`：`tsc --noEmit` + demo tsconfig；测试目录不在 include 内。
 - `bun test tests test`：单元/行为测试；`test/` 覆盖执行准入、Session 关闭/启动与 claim。
 - `bun run test`：在 `MISE_ENV=wasm mise exec --` 下先 build（含 peri-wasm）再全量测试。
-- `bun run test:wasm`：先 build，再跑真实 WASM ACP 集成；本轮 8 pass / 0 fail（真实打包 WASM + 真实 Turso listener + fixture 模型）。
-- `bun run smoke:workers`：本地 workerd 探针；本轮 `passed:true`、`modelCalls:3`、`persistedAcrossRestart:true`。Hosted Workers 未部署。
-- 关键回归：`tests/chat-{action,manager,binding,actions,close-bounded,view,replica,document,instance-factory}.test.ts`、`tests/peri-instance.test.ts`、`tests/history-pagination.test.ts`、`tests/acp-mcp-lifecycle.test.ts`、`tests/wasm-acp-integration.test.ts`。
-- 公共出口负向断言：`tests/public-view.test.ts`。
+- `bun run test:wasm`：先 build，再跑真实 WASM ACP 集成（真实打包 WASM + 真实 Turso listener + fixture 模型）。
+- `bun run smoke:workers`：本地 workerd 探针；Hosted Workers 未部署。
+- 关键回归：`tests/chat-{action,manager,binding,actions,close-bounded,view,replica,document,instance-factory}.test.ts`、`tests/view-registry.test.ts`、`tests/peri-instance.test.ts`、`tests/history-pagination.test.ts`、`tests/acp-mcp-lifecycle.test.ts`、`tests/wasm-acp-integration.test.ts`。
+- 公共出口负向断言：`tests/public-view.test.ts`，同时确认 `ChatViewRegistry` 只在主入口、不在 `/view`。
 
 ## 消费者
 

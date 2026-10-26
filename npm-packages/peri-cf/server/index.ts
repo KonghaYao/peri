@@ -11,7 +11,7 @@ import {
   getChatManager,
   shutdownChatManager,
   type AppChatManager,
-  type AppChatManagerOptions,
+  type ServerChatOptions,
 } from "./agent";
 import { loadServerConfig, publicServerInfo, type ServerConfig } from "./config";
 
@@ -78,7 +78,7 @@ export function createServer(
 /** 进程级入口：先取得单例 Manager，再启动服务。 */
 export function startServer(
   config: ServerConfig,
-  options: AppChatManagerOptions = {},
+  options: ServerChatOptions = {},
 ): RunningServer {
   const manager = getChatManager(config, options);
   const server = createServer(config, manager);

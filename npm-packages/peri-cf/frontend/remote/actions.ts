@@ -85,7 +85,7 @@ function transportFailure(error: unknown, message = "网络请求失败，动作
 }
 
 /** 客户端预检/本地校验失败：请求未提交，可安全修正后重试。 */
-export function notSentError(code: string, message: string): RemoteActionError {
+function notSentError(code: string, message: string): RemoteActionError {
   return new RemoteActionError(code, message, "not_sent");
 }
 
@@ -94,16 +94,6 @@ export function parseActionTarget(raw: unknown): ActionTargetDTO {
   const parsed = actionTargetSchema.safeParse(raw);
   if (!parsed.success) throw notSentError("invalid_target", "动作目标绑定格式不合法，命令未发送。");
   return parsed.data;
-}
-
-/** 发送前核对预期绑定，避免把动作交给已换代的会话。 */
-export function assertTargetMatches(current: ActionTargetDTO | null, requested: ActionTargetDTO): void {
-  if (!current) {
-    if (requested.sessionId === null && requested.bindingRevision === 0) return;
-    throw notSentError("binding_not_ready", "会话尚未绑定，命令未发送。");
-  }
-  if (current.sessionId !== requested.sessionId || current.bindingRevision !== requested.bindingRevision)
-    throw notSentError("binding_conflict", "会话绑定已变化，命令未发送；请等待同步后重试。");
 }
 
 export interface ActionReceipt {

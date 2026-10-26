@@ -15,7 +15,7 @@ export class ChatSyncTimeoutError extends Error {
 }
 
 /** 客户端发来非 HELLO/ACK 帧，或重复握手。 */
-export class ChatSyncProtocolError extends Error {
+class ChatSyncProtocolError extends Error {
     constructor(message: string) {
         super(message);
         this.name = "ChatSyncProtocolError";

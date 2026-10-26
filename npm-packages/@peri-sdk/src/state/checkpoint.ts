@@ -9,14 +9,14 @@ import { turnInteractionStatusFor } from "./interaction-projection";
 
 /** checkpoint 自身形状的版本；与 chat/session 文档 schema 分开管理。v2 起只承载展示材料，不含载荷全文。 */
 export const CHECKPOINT_VERSION = 2;
-export const SUPPORTED_SCHEMA_VERSIONS = { chat: CHAT_SCHEMA_VERSION, session: SESSION_SCHEMA_VERSION } as const;
+const SUPPORTED_SCHEMA_VERSIONS = { chat: CHAT_SCHEMA_VERSION, session: SESSION_SCHEMA_VERSION } as const;
 
-export type CheckpointBlock =
+type CheckpointBlock =
     | { blockId: string; type: "text"; text: string }
     | { blockId: string; type: "reasoning"; text: string; visibility: "summary" | "hidden" }
     | { blockId: string; type: "tool_call"; toolCallId: string };
 
-export type CheckpointEntry = {
+type CheckpointEntry = {
     entryId: string;
     id: string;
     kind: "message" | "tool" | "system";
@@ -32,7 +32,7 @@ export type CheckpointEntry = {
     blocks: CheckpointBlock[];
 };
 
-export type CheckpointToolCall = {
+type CheckpointToolCall = {
     toolCallId: string;
     entryId?: string;
     turnId: string;
@@ -49,7 +49,7 @@ export type CheckpointToolCall = {
     resultRef?: ToolPayloadRef;
 };
 
-export type CheckpointTurn = {
+type CheckpointTurn = {
     turnId: string;
     requestId?: string;
     status: string;
@@ -60,7 +60,7 @@ export type CheckpointTurn = {
     interactionStatus: "none" | "awaiting_permission" | "awaiting_input";
 };
 
-export type CheckpointInteraction = {
+type CheckpointInteraction = {
     id: string;
     kind: "permission" | "elicitation";
     sessionId: string;
@@ -91,7 +91,7 @@ export type DisplayCheckpoint = {
     inputQueue?: unknown;
 };
 
-export type CheckpointImportErrorCode =
+type CheckpointImportErrorCode =
     | "unsupported_version" | "unsupported_schema" | "invalid_shape" | "broken_reference";
 
 export class CheckpointImportError extends Error {

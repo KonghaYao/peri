@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import type { Entry, EntryBlock, ChatDisplayState, ToolCall, Turn } from '../runtime';
+import type { Entry, ChatDisplayState, ToolCall, Turn } from '../runtime';
+
+type EntryBlock = Entry['blocks'][number];
 import { deriveTimeline, formatWorkDuration, turnFoldLabel } from './deriveTimeline';
 
 const chat = { id: 'chat-timeline', title: '时间线测试', updatedAt: '2026-10-20T00:00:00Z' };

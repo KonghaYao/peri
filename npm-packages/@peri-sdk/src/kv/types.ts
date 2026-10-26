@@ -9,20 +9,3 @@ export interface AtomicSessionClaimKv {
   claimIfAbsent(key: string, owner: string): Promise<boolean>;
   releaseIfOwner(key: string, owner: string): Promise<boolean>;
 }
-
-export function requireAtomicKv(
-  value: unknown,
-): asserts value is AtomicSessionClaimKv {
-  if (
-    !value ||
-    typeof value !== "object" ||
-    typeof (value as Partial<AtomicSessionClaimKv>).claimIfAbsent !==
-      "function" ||
-    typeof (value as Partial<AtomicSessionClaimKv>).releaseIfOwner !==
-      "function"
-  ) {
-    throw new TypeError(
-      "Session claims require an atomic claimIfAbsent/releaseIfOwner KV adapter",
-    );
-  }
-}

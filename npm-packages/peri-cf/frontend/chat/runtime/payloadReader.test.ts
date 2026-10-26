@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { PayloadReadError } from '@peri-code/sdk/view';
-import { chatPayloadReader, loadPayloadText, type PayloadSource } from './payloadReader';
+import { chatPayloadReader, loadPayloadValue, type PayloadSource } from './payloadReader';
 
 function source(read: (id: string) => Promise<{ id: string; bytes: number; json: string }>): PayloadSource {
   return { readPayloadById: (id) => read(id) };
@@ -36,15 +36,15 @@ describe('HTTP payload reader', () => {
   });
 });
 
-describe('payload text helpers', () => {
+describe('payload value helpers', () => {
   test('validates JSON and byte count through the SDK helper', async () => {
     const reader = chatPayloadReader(() => source(async () => ({ id: 'ref-1', bytes: 2, json: '{}' })));
-    expect(await loadPayloadText(ref, reader)).toEqual({ ok: true, text: '{}' });
+    expect(await loadPayloadValue(ref, reader)).toEqual({ ok: true, value: {} });
   });
 
   test('reports an integrity error when the server body does not match the reference', async () => {
     const reader = chatPayloadReader(() => source(async () => ({ id: 'ref-1', bytes: 999, json: '{}' })));
-    const result = await loadPayloadText(ref, reader);
+    const result = await loadPayloadValue(ref, reader);
     expect(result).toMatchObject({ ok: false });
     if (!result.ok) expect(result.error).toContain('字节数');
   });

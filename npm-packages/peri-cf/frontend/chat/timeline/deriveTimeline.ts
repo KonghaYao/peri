@@ -80,7 +80,7 @@ function liveTurnId(state: ChatDisplayState): string | null {
   return status !== null && LIVE_TURN_STATUSES.has(status) ? state.activeTurn.turnId : null;
 }
 
-export interface DeriveTimelineOptions {
+interface DeriveTimelineOptions {
   /** 用户已展开的 turn fold；未列出的已完成 turn 隐藏 work 行。 */
   expandedTurnIds?: ReadonlySet<string>;
   /** 用户显式折叠的 turn；失败/取消 turn 默认展开，因此需要单独的折叠集合。 */

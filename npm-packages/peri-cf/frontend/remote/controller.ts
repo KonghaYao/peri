@@ -34,11 +34,6 @@ export interface ChatView {
   error: string;
 }
 
-/** 查询缓存端口：键由 sessionId + bindingRevision 唯一确定。 */
-export interface ChatStateCache {
-  write(state: ChatDisplayState): void;
-}
-
 interface ChatHandleRecord {
   /** Action/WS 地址：新句柄用 handle id；409 复用已有控制者时用 sessionId。 */
   address: string;
@@ -66,7 +61,6 @@ export interface ChatControllerDeps {
   actions: RemoteActions;
   list(signal?: AbortSignal): Promise<ChatSummary[]>;
   syncUrl(chatAddress: string): string;
-  cache?: ChatStateCache;
   webSocketFactory?: (url: string) => WebSocketLike;
   /** 首次同步预算；超时只报告失败，不关闭服务端句柄。 */
   initialSyncTimeoutMs?: number;
@@ -168,13 +162,8 @@ export class ChatController {
     this.uncertain = false;
     this.actionError = "";
     this.connectionError = "";
-    return await this.openSession(selected);
-  }
-
-  /** 重新打开一个已知会话身份；不要求目录条目。 */
-  async openSession(chat: Chat): Promise<boolean> {
     return await this.openChat({
-      ...chat, sessionId: chat.id, title: chat.title, cwd: "", messageCount: 0, createdAt: chat.updatedAt,
+      ...selected, sessionId: selected.id, title: selected.title, cwd: "", messageCount: 0, createdAt: selected.updatedAt,
     });
   }
 
@@ -191,11 +180,7 @@ export class ChatController {
    * 返回远程发送回执与目标会话。回执本身是 thenable（等待投递），
    * 因此用包装对象跨 async 边界，避免 `await` 把回执摊平成 `void`。
    */
-  dispatchSend(content: string): Promise<{ receipt: RemoteSendReceipt; sessionId: string } | null> {
-    return this.performSend(content);
-  }
-
-  private async performSend(content: string): Promise<{ receipt: RemoteSendReceipt; sessionId: string } | null> {
+  async dispatchSend(content: string): Promise<{ receipt: RemoteSendReceipt; sessionId: string } | null> {
     const text = content.trim();
     if (this.disposed || !text || this.sending || this.uncertain || this.cancelRequested) return null;
     if (this.view.loadState !== "ready" && this.active) return null;
@@ -299,14 +284,6 @@ export class ChatController {
       if (tool.resultRef?.id === id) return Promise.resolve(tool.resultRef.bytes);
     }
     return Promise.resolve(undefined);
-  }
-  /** 显式结束句柄；页面切换/卸载不调用它。 */
-  async closeChat(sessionId = this.view.selected?.id): Promise<void> {
-    if (!sessionId) return;
-    const record = this.handles.get(sessionId);
-    if (this.active?.chat.id === sessionId) this.releaseActive();
-    this.handles.delete(sessionId);
-    if (record?.handleId) await this.deps.actions.close(record.handleId);
   }
 
   dismissError(): void {
@@ -438,8 +415,6 @@ export class ChatController {
       active.everReady = true;
       active.initialResolve?.(true);
     }
-    if (state.sessionId && state.bindingRevision !== null)
-      this.deps.cache?.write(state);
     this.settleDelivery(active, state);
     this.refresh();
   }

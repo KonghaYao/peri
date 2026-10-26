@@ -20,11 +20,11 @@ import type {
     SessionClaims,
 } from "./types";
 
-export const MAX_FACT_COUNT = 4096;
-export const MAX_FACT_BYTES = 4 * 1024 * 1024;
+const MAX_FACT_COUNT = 4096;
+const MAX_FACT_BYTES = 4 * 1024 * 1024;
 
 /** 关闭/启动预算的单一权威默认值；调用方只按需覆盖，不各自发明超时。 */
-export const DEFAULT_CHAT_LIFECYCLE: Required<ChatLifecycleOptions> =
+const DEFAULT_CHAT_LIFECYCLE: Required<ChatLifecycleOptions> =
     Object.freeze({
         closeDrainTimeoutMs: 3000,
         startupSettleTimeoutMs: 5000,

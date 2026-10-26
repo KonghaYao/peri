@@ -1,9 +1,9 @@
 import type { Transport } from "../transport/types";
 
 /** ACP protocol version this SDK client speaks. */
-export const ACP_PROTOCOL_VERSION = 1;
+const ACP_PROTOCOL_VERSION = 1;
 
-export interface AcpInitializeOptions {
+interface AcpInitializeOptions {
     clientName?: string;
     clientVersion?: string;
     /** Peri capability flags declared to the host under `clientCapabilities._meta`. */

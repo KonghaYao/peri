@@ -2,8 +2,8 @@ import { Hono, type Context } from "hono";
 import {
   parseChatUserAction,
   type ChatBindingTarget,
-  type ChatService,
-  type ChatSessionDirectoryEntry,
+  type ChatManagerContract,
+  type ChatServiceContract,
   type ChatUserAction as ChatUserActionValue,
   type ReadPayloadOptions,
   type ToolPayloadResponse,
@@ -17,16 +17,16 @@ import {
   mapPayloadError,
 } from "./errors";
 
-/** API 只依赖平台组合根端口与目录事实，不接触 Store、宿主或 View。 */
-export interface ApiChatManager {
-  listSessions(options?: { path?: string }): Promise<ChatSessionDirectoryEntry[]>;
-  createChat(options?: { path?: string }): ChatService;
-  getChat(id: string): ChatService | undefined;
-  findChatBySession(sessionId: string): ChatService | undefined;
-  closeChat(id: string): Promise<void>;
-  /** 句柄已移除但关闭资源仍有残留（如 View 未释放）；按 chatId 重试 DELETE。 */
-  hasPendingClose(chatId: string): boolean;
-}
+/** API 只依赖平台编排端口与目录事实，不接触 Store、宿主或 View。 */
+export type ApiChatManager =
+  Pick<
+    ChatManagerContract,
+    "listSessions" | "createChat" | "getChat" | "findChatBySession" | "closeChat"
+  >
+  & {
+    /** 句柄已移除但关闭资源仍有残留（如 View 未释放）；按 chatId 重试 DELETE。 */
+    hasPendingClose(chatId: string): boolean;
+  };
 
 export interface ApiDeps {
   manager: ApiChatManager;
@@ -70,14 +70,14 @@ function parseTarget(value: unknown): ActionTarget | string {
   return { sessionId, bindingRevision: revision };
 }
 
-function targetMatches(chat: ChatService, target: ActionTarget): boolean {
+function targetMatches(chat: ChatServiceContract, target: ActionTarget): boolean {
   const binding = chat.binding;
   if (!binding) return target.sessionId === null && target.bindingRevision === 0;
   return binding.sessionId === target.sessionId
     && binding.bindingRevision === target.bindingRevision;
 }
 
-function resolveChat(manager: ApiChatManager, id: string): ChatService | undefined {
+function resolveChat(manager: ApiChatManager, id: string): ChatServiceContract | undefined {
   return manager.getChat(id) ?? manager.findChatBySession(id);
 }
 
@@ -106,7 +106,7 @@ interface ExecutedAction {
 
 /** 只在这里分支执行；send 只等待入队接受，不等待整轮投递。 */
 async function executeAction(
-  chat: ChatService,
+  chat: ChatServiceContract,
   action: ChatUserActionValue,
   fallback: ActionTarget,
 ): Promise<ExecutedAction> {
@@ -157,7 +157,7 @@ async function executeAction(
   }
 }
 
-function bindingTarget(chat: ChatService, fallback: ActionTarget): ChatBindingTarget {
+function bindingTarget(chat: ChatServiceContract, fallback: ActionTarget): ChatBindingTarget {
   const binding = chat.binding;
   if (binding) return binding;
   return {

@@ -4,10 +4,22 @@ import {
   ChatCloseIncompleteError,
   PayloadReadError,
   SessionCreationError,
+  type AnswerAction,
+  type CancelAction,
+  type CancelRequestResult,
   type ChatBindingTarget,
-  type ChatService,
+  type ChatServiceContract,
   type ChatSessionDirectoryEntry,
   type ChatUserAction,
+  type ControlResult,
+  type ForceSendAction,
+  type HistoryAction,
+  type HistoryPageOutcome,
+  type SendAction,
+  type SendReceipt,
+  type SessionAction,
+  type SessionReadyResult,
+  type TakeBackAction,
   type ToolPayloadReadRef,
   type ToolPayloadResponse,
 } from "@peri-code/sdk";
@@ -31,7 +43,7 @@ const entry: ChatSessionDirectoryEntry = {
   updatedAt: "2026-10-20T13:00:00Z",
 };
 
-interface StubChat extends ChatService {
+interface StubChat extends ChatServiceContract {
   readonly calls: ChatUserAction[];
   readonly closeCalls: { value: number };
   failNext?: unknown;
@@ -58,6 +70,53 @@ function stubChat(
       : null,
   };
 
+  function execute(action: SendAction): SendReceipt;
+  function execute(action: SessionAction): Promise<SessionReadyResult>;
+  function execute(action: CancelAction): Promise<CancelRequestResult>;
+  function execute(action: ForceSendAction | TakeBackAction | AnswerAction): Promise<ControlResult>;
+  function execute(action: HistoryAction): Promise<HistoryPageOutcome>;
+  function execute(action: ChatUserAction): unknown {
+    calls.push(action);
+    if (state.failNext !== undefined) throw state.failNext;
+    const target = (): ChatBindingTarget => {
+      if (!state.binding) throw new Error("stub has no binding");
+      return state.binding;
+    };
+    switch (action.type) {
+      case "send": {
+        const binding = target();
+        return Object.assign(Promise.resolve(), {
+          requestId: action.requestId,
+          inputId: "input-1",
+          target: binding,
+          accepted: Promise.resolve(),
+          isSent: false,
+        });
+      }
+      case "create_new_session":
+      case "change_session": {
+        const sessionId = action.type === "change_session"
+          ? action.payload.sessionId
+          : "created-session";
+        state.sessionId = sessionId;
+        state.bindingRevision += 1;
+        state.binding = { chatId: id, sessionId, bindingRevision: state.bindingRevision };
+        return Promise.resolve({
+          requestId: action.requestId,
+          ...state.binding,
+        });
+      }
+      case "cancel":
+        return Promise.resolve({ requestId: action.requestId, status: "idle" });
+      case "force_send":
+      case "take_back":
+      case "answer":
+        return Promise.resolve({ requestId: action.requestId, status: "accepted" });
+      case "load_earlier_history":
+        return Promise.resolve({ applied: 1, nextCursor: "next" });
+    }
+  }
+
   const chat = {
     id,
     get sessionId() { return state.sessionId; },
@@ -70,47 +129,7 @@ function stubChat(
     get payloadError() { return state.payloadError; },
     set payloadError(value: unknown) { state.payloadError = value; },
 
-    execute(action: ChatUserAction) {
-      calls.push(action);
-      if (state.failNext !== undefined) throw state.failNext;
-      const target = (): ChatBindingTarget => {
-        if (!state.binding) throw new Error("stub has no binding");
-        return state.binding;
-      };
-      switch (action.type) {
-        case "send": {
-          const binding = target();
-          return Object.assign(Promise.resolve(), {
-            requestId: action.requestId,
-            inputId: "input-1",
-            target: binding,
-            accepted: Promise.resolve(),
-            isSent: false,
-          });
-        }
-        case "create_new_session":
-        case "change_session": {
-          const sessionId = action.type === "change_session"
-            ? action.payload.sessionId
-            : "created-session";
-          state.sessionId = sessionId;
-          state.bindingRevision += 1;
-          state.binding = { chatId: id, sessionId, bindingRevision: state.bindingRevision };
-          return Promise.resolve({
-            requestId: action.requestId,
-            ...state.binding,
-          });
-        }
-        case "cancel":
-          return Promise.resolve({ requestId: action.requestId, status: "idle" });
-        case "force_send":
-        case "take_back":
-        case "answer":
-          return Promise.resolve({ requestId: action.requestId, status: "accepted" });
-        case "load_earlier_history":
-          return Promise.resolve({ applied: 1, nextCursor: "next" });
-      }
-    },
+    execute,
 
     async readPayload(ref: ToolPayloadReadRef): Promise<ToolPayloadResponse> {
       if (state.payloadError !== undefined) throw state.payloadError;
@@ -123,7 +142,7 @@ function stubChat(
 
     subscribeFacts() { return () => {}; },
   };
-  return chat as unknown as StubChat;
+  return chat;
 }
 
 interface ApiFixture {

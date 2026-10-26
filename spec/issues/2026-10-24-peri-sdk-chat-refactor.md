@@ -90,6 +90,9 @@ typecheck 或旧 dist 冒充。测试名省略文件时均为 `npm-packages/@per
 
 ### 6.1 成功项
 
+> 下表是 2026-10-24 复验的历史记录。其中 `views.test.ts`、`sandbox.test.ts` 已在后续重构删除，
+> 对应命令不可复跑；行内结论保留，不改写历史。
+
 | 命令 | exit | 结果 |
 | --- | --- | --- |
 | `cd npm-packages/@peri-sdk && bun run typecheck` | 0 | `tsc --noEmit` 与 demo tsconfig 均通过 |
@@ -159,7 +162,7 @@ typecheck 或旧 dist 冒充。测试名省略文件时均为 `npm-packages/@per
 
 - 本轮修改的源码/测试/文档文件均 ≤1000 行；最大 `src/agent/peri-instance.ts` 999 行，
   `src/chat/service.ts` 967 行（A15 修复前 941）。
-- 全量 `wc -l` 仍列出两个既有超限 vendored 文件：`frontend/components/assistant-ui/elements/tool-fallback.aui.tsx`（1431）、`thread.aui.tsx`（1166）。本轮未改动；按 `STD-SIZE-001` 另立任务治理，不宣称全库通过。
+- 全量 `wc -l` 仍列出两个既有超限 vendored 文件：`frontend/components/assistant-ui/elements/tool-fallback.aui.tsx`（1431）、`thread.aui.tsx`（1166）。这是**截至 2026-10-24 的历史文件清单；两者已于 2026-10-26 删除**。本轮未改动；按 `STD-SIZE-001` 另立任务治理，不宣称全库通过。
 - 生产源码无 `TODO`/`FIXME`，无新增兼容 shim；旧符号只保留在负向测试与明确标注的历史文档中。
 - `npm-packages/peri-cf/docker-compose.yml` 为未跟踪文件，未纳入任何提交。工作树副本在 2026-10-25 22:26:02 发生外部变更（size 2765→3082，sha256 `a8af2136…`→`655be552…`）；用户裁决不处理该变更，本轮不修改、不恢复该文件。
 - **CF 测试稳定性**：`Timeline.dom.test.tsx` 的“迟到跨会话信号”用例在修复前 8 路并发压力下

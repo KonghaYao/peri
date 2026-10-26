@@ -4,7 +4,7 @@
 
 Bun SDK for Peri's ACP Host over a host-injected transport. `ChatManager` 同步登记 Chat 句柄；`ChatService.execute()` 在首次绑定动作时通过默认实例工厂装配一次 `PeriInstance`，claim Session、初始化 ACP，并创建或加载会话。Peri 负责模型执行与会话持久化；SDK 只做控制面、事实与展示契约。
 
-主入口公开 `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatYjsChannel`、公开类型与错误。旧 `Agent`、`ManagedAgents`、`SessionDocs`、`SessionViewStore` 已删除，不在任何发布入口提供。内部 `src/sandbox/sandbox.ts` 仍保留 `Sandbox` 与正向测试 `tests/sandbox.test.ts`，但未从发布入口导出；是否删除待用户裁决。
+主入口公开 `ChatManager`、`ChatService`、`ChatUserAction`、`ChatView`、`ChatReplica`、`ChatViewRegistry`、`ChatYjsChannel`、公开类型与错误；需要替换管理器实现时面向类型导出 `ChatManagerContract`。旧 `Agent`、`ManagedAgents`、`SessionDocs`、`SessionViewStore` 与 `Sandbox` 已删除，不在任何发布入口提供，也不保留 shim、别名或双写。
 
 ```ts
 import {
@@ -55,9 +55,29 @@ await manager.shutdown();
 - `{ kind: "wasm" }`：Manager 为每次激活启动独立 WASM 宿主，并把 `agentConfig` 序列化为启动配置；可注入 `moduleUrl`、`moduleFactory`、`env`、`ports` 与生命周期回调。
 - `{ kind: "transport", factory }`：由宿主按 `path` 创建 transport；SDK 不启动 Peri 或 Workspace 进程。`factory` 的 `close()` 成功即视为停止证明，失败保留原因供重试。
 
+宿主如需替换管理器实现或共享视图，面向契约与注册表，而不是具体类：
+
+```ts
+import { ChatViewRegistry, type ChatManagerContract } from "@peri-code/sdk";
+
+function createHost(chats: ChatManagerContract) {
+  const views = new ChatViewRegistry(); // 每个 Chat 一个 ChatView，同 Chat 的所有同步连接共享
+  return {
+    chats,
+    views,
+    async shutdown() {
+      await views.disposeAll(); // 先断开同步连接与文档
+      await chats.shutdown();   // 再关闭句柄、在途激活与宿主
+    },
+  };
+}
+```
+
+`ChatManagerContract` 是 `src/chat/types.ts` 的接口，SDK 的 `ChatManager` 类实现它；`new ChatManager(options)` 只应出现在宿主装配层，测试或其它宿主可以注入自己的实现。`ChatViewRegistry` 只是可选的宿主策略，不是 SDK 不变量：宿主也可以为每条连接各建 `ChatView`，连接数仍由 `ChatView` 管理。两者都从主入口与 `/portable` 导出；`/view` 保持纯浏览器视图面，不导出注册表。
+
 `ChatService` 的绑定动作只在空闲时允许换绑；新会话使用句柄/默认 `path`，加载历史用 Store 中的持久 `cwd`，不回退句柄 path。`findChatBySession` 覆盖 binding/cleanup 中的候选；关闭未确认时保留 claim 与索引供重试。
 
-`AtomicSessionClaims` 包装共享原子 KV：Session claim key 只含 Session ID，不含 path/Sandbox/Chat ID。`MemoryKV` 只适用于单进程；跨进程必须注入实现 `claimIfAbsent(key, owner)` / `releaseIfOwner(key, owner)` 的原子适配器。普通 unjs `Storage` 没有 compare-and-set，会被拒绝。同一 Session 的并发绑定失败抛 `SessionBindingConflictError`，且不会启动 transport。适配器负责自己的崩溃恢复或租约策略；过期本身不是旧执行已停止的证明。
+`AtomicSessionClaims` 包装共享原子 KV：Session claim key 只含 Session ID，不含 path 或 Chat ID。`MemoryKV` 只适用于单进程；跨进程必须注入实现 `claimIfAbsent(key, owner)` / `releaseIfOwner(key, owner)` 的原子适配器。普通 unjs `Storage` 没有 compare-and-set，会被拒绝。同一 Session 的并发绑定失败抛 `SessionBindingConflictError`，且不会启动 transport。适配器负责自己的崩溃恢复或租约策略；过期本身不是旧执行已停止的证明。
 
 关闭是有预算的所有权事务：`ChatLifecycleOptions` 提供 `closeDrainTimeoutMs`、`startupSettleTimeoutMs`、`activationCloseTimeoutMs`、`shutdownChatTimeoutMs`。`session/close` 在预算内重放；超时返回 `ChatCloseIncompleteError`，保留 claim、索引与资源，不产生 `closed` 事实。`manager.shutdown()` 先封闭新准入，再聚合清理；可重试。
 
@@ -79,7 +99,7 @@ const unsubscribe = replica.subscribe(() => render(replica.read()));
 await replica.dispose();
 ```
 
-`ChatYjsChannel` 只约定帧收发与关闭，不创建物理连接；鉴权与传输由应用负责。`ChatReplica.read()` 返回 `SessionView`：`readiness`（`not-ready`/`ready`/`unsupported`）、完整 entries/blocks/tools/turns/tasks/plans、session info、input queue、interaction 记录与 `pendingInteractions`。未知块与孤立工具引用显式标记为 `unknown`/`unavailable`，不静默丢弃。`readSessionView`、`selectEntry`、`selectToolCall`、`selectTurn`、`selectPlanForTurn`、`selectPendingInteractions` 仍从 `/view` 导出；`SessionViewStore` 已删除，用 `ChatReplica.subscribe()` 获取流式通知。
+`ChatYjsChannel` 只约定帧收发与关闭，不创建物理连接；鉴权与传输由应用负责。`ChatReplica.read()` 返回 `SessionView`：`readiness`（`not-ready`/`ready`/`unsupported`）、完整 entries/blocks/tools/turns/tasks/plans、session info、input queue、interaction 记录与 `pendingInteractions`。未知块与孤立工具引用显式标记为 `unknown`/`unavailable`，不静默丢弃。`readSessionView` 与 `readPayload` 从 `/view` 导出；`SessionViewStore` 和按身份选择器（`selectEntry`、`selectToolCall`、`selectTurn`、`selectPlanForTurn`、`selectPendingInteractions`）已删除，消费方直接读取 `SessionView` 的数组，或按 id 自建索引；流式通知用 `ChatReplica.subscribe()`。
 
 `readPayload(ref, reader, { signal, maxBytes })` 校验返回 id、UTF-8 字节数与 JSON；`ChatService.readPayload({id, bytes})` 直接读取当前激活的载荷仓库，错误码为 `unauthorized`、`unavailable`、`too_large`、`integrity_error`、`aborted`、`transport_error`。引用字节数与存储不一致或非法 JSON 属于 `integrity_error`，不是 `unavailable`。默认单次展示上限 1 MiB；`limitPayloadReads` 默认并发 2。
 
@@ -108,7 +128,7 @@ defaults: {
 ## 入口与示例
 
 - 主入口：Chat 控制面、展示契约、config/storage 读取工具。
-- `/view`：浏览器安全展示出口；与主入口共享包内 Yjs 依赖，直接服务浏览器时需要打包该依赖。
+- `/view`：浏览器安全展示出口；与主入口共享包内 Yjs 依赖，直接服务浏览器时需要打包该依赖。`ChatViewRegistry` 是宿主共享策略，只在主入口与 `/portable` 导出，不在此入口。
 - `/wasm`：平台无关的 Emscripten ACP Host、loader 与 transport；`/wasm-host` 额外提供 Node-compatible 网络/DNS 端口。
 - `/portable`：不装配 Bun/stdio 进程或本地 SQLite；Chat 控制面 + 执行准入核心。准入摘要仍使用 `node:crypto`，不能宣称纯浏览器支持。
 
@@ -118,7 +138,7 @@ defaults: {
 
 `/portable` 额外公开可自行驱动的准入核心。SDK Chat 不使用它：输入发布是 ACP 队列命令，调度由 Peri mailbox 决定，因此没有 SDK 侧票据、dispatcher generation 或反向准入端点。
 
-`KvExecutionRegistry` 与 `MemoryExecutionRegistry` 暴露同一套 durable read/CAS apply/resolve 契约；KV 适配器需要原子版本化 CAS，而不只是 claim/release。`MemoryExecutionRegistry` 明确是 `bestEffort`，需要协调器显式选择。注册表写入与回执原子；解析不存在的原始 mutation 会把 NotApplied 封印，防止迟到执行。durable backend、账本与停止证明由嵌入方注入；SDK 不提供本地数据库文件，也不提供基于进程的停止证明。
+`KvExecutionRegistry` 包装 `AtomicExecutionKv` 提供 durable read/CAS apply/resolve；适配器必须实现版本化读取与 compare-and-set，只实现 claim/release 会被拒绝。`MemoryExecutionKv` 是单进程 `bestEffort` 实现，需要协调器显式用 `allowBestEffort` 选择。注册表写入与回执原子；解析不存在的原始 mutation 会把 NotApplied 封印，防止迟到执行。durable backend、账本与停止证明由嵌入方注入；SDK 不提供本地数据库文件，也不提供基于进程的停止证明。
 
 票据绑定精确的 session、instance/generation、lifecycle/control generation、稳定 work/revision 与 `{turnId, attemptId}`。持久 attempt 经过 queued/entering/running；pause/control 变化使未进入的 work 失效，execution entry 重新校验资格。重放原始准入不会再次消耗稳定 work 预算；未知执行入口只解析原始票据，绝不盲目签发第二次执行。预算跨实例替换保留；缺失停止证明返回 Blocked，不做 lease/TTL 接管。
 
@@ -128,4 +148,4 @@ defaults: {
 
 `PeriConfig` 描述 WASM ACP 启动配置；settings、storage 与 machineId 一起经 `agentConfig` 交给 Peri。`BareHarnessConfig` 是冻结的全关闭预设，按需开启能力。`instructions` 使用 `session/new._meta["peri.instructions"]`；HTTP Workspace 与额外 MCP 使用 `session/new.mcpServers`。
 
-内部 `Sandbox.id` 与 machine identity 无关；SDK 不把它作为 `machine_id` 传给 Peri。Machine/workspace 绑定检查与 SDK 执行所有权是两件独立职责。
+Machine/workspace 绑定与 SDK 执行所有权是两件独立职责，不能互相推导。

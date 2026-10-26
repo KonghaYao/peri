@@ -13,7 +13,7 @@
 /*
  * 全局重置与元素级行为放进 base 层：Tailwind utilities 优先于这些规则。
  * 否则 `button { color: inherit }` / `button:disabled { opacity: .45 }` 会盖掉
- * assistant-ui 组件（registry 源码）在按钮上的 text-* / disabled:opacity-* 等工具类。
+ * vendored 卡片（registry 源码）在按钮上的 text-* / disabled:opacity-* 等工具类。
  * 外壳与设置页不使用 utilities，渲染结果不变。
  */
 @layer base {

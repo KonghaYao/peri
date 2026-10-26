@@ -11,7 +11,7 @@ import type { Activation } from "./service-support";
 import type { ChatLifecycleOptions } from "./types";
 
 /** ChatCloseController 访问 ChatService 资源的窄接口。 */
-export interface ChatCloseHost {
+interface ChatCloseHost {
     readonly id: string;
     readonly mutex: AsyncMutex;
     readonly state: ChatBinding;

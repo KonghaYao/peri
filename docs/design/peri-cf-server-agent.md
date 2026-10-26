@@ -1,6 +1,6 @@
 # peri-cf 服务端 Agent 执行
 
-> 状态：**现行设计**（2026-10-25）。取代 [peri-cf 浏览器宿主 Agent](peri-cf-browser-agent.md)
+> 状态：**现行设计**（2026-10-26）。取代 [peri-cf 浏览器宿主 Agent](peri-cf-browser-agent.md)
 > 中的执行位置与配置边界；浏览器宿主时期的设计只作历史依据。
 > 对象契约见 [peri-cf 聊天对象](peri-cf-chat-objects.md)，Chat 控制面见
 > [Peri SDK Chat](peri-sdk-chat.md)，入口以 [peri-cf 索引](../code-index/peri-cf.md) 为准。
@@ -25,15 +25,25 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
   → GET /api/chats/:id/payload/:refId
   → WS /api/chats/:id/sync
   → server/api（Hono + Bun WebSocket）
-  → AppChatManager（SDK ChatManager + ChatViewRegistry）
-  → ChatService → PeriInstance → WasmAcpTransport → peri-wasm ACP Host
+  → AppChatManager（注入 ChatManagerContract + ChatViewRegistry）
+  → SDK ChatManager → ChatService → PeriInstance → WasmAcpTransport → peri-wasm ACP Host
   → 模型 / Turso Store / 远程 MCP
 ```
 
-- **应用只装配平台**：`server/agent/manager.ts` 注入 WASM 宿主、Store 目录、Session claim 与默认配置；
-  句柄、绑定、动作、事实与关闭语义都在 SDK。
-- **视图**：`ChatViewRegistry` 每个 Chat 一个 `ChatView`；同一 Chat 的所有 WS 连接共享视图，连接断开
-  不释放视图；绑定换代由 View 成对替换文档。
+## 组合根与装配
+
+- **平台装配**：`server/agent/compose.ts` 读取 `ServerConfig`，构造 Store 适配、`AtomicSessionClaims`、
+  WASM `ChatHost`、默认 path/instructions/MCP 与关闭预算；server 内只有这里构造具体 `ChatManager`。
+- **编排层**：`server/agent/manager.ts` 的 `AppChatManager` 只持有注入的 `ChatManagerContract` 与
+  `ChatViewRegistry`。四个查询/登记方法直接转发；`closeChat` 先关 SDK 句柄再释放 View；
+  `hasPendingClose` 暴露「句柄已移除、View 仍待释放」的残留；`shutdown` 先 `disposeAll` 再
+  `chats.shutdown()`。编排层不重写领域规则。
+- **唯一注入点**：`getChatManager` 首次调用才装配进程单例；测试经 `ServerChatOptions` 注入端口，
+  生产入口只在 `server/index.ts` 调用。审核 ports 与生命周期时以 `manager.ts` 为主，平台默认值集中在
+  `compose.ts`。
+- **应用只装配平台**：句柄、绑定、动作、事实与关闭语义都在 SDK；应用不复制准入、同步或关闭规则。
+- **视图**：`ChatViewRegistry` 由 SDK 主入口与 `/portable` 提供（`/view` 不含），每个 Chat 一个
+  `ChatView`；同一 Chat 的所有 WS 连接共享视图，连接断开不释放视图；绑定换代由 View 成对替换文档。
 - **目录**：`GET /api/chats` 只读 Store，不启动历史运行实例；列表不提供每会话运行态，运行/交互事实
   只来自选中会话的 Yjs 副本。
 - **打开历史**：先 `POST /api/chats` 登记空句柄，再 `change_session`；202 回执给出真实 Session ID 与
@@ -50,7 +60,8 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
   transport。跨进程协调由部署注入的原子 KV 决定；CF 默认 `MemoryKV` 只覆盖单进程。
 - 关闭复用正常关闭与启动失败清理，并发关闭合并；确认清理后才移除索引与占用。`session/close` 超时
   返回 `ChatCloseIncompleteError`，保留 claim、资源与原因，可重试。
-- `shutdown` 先封闭新准入，再结算在途关闭，最后释放 WASM 宿主；任一步未确认都聚合并保留资源。
+- `shutdown` 分两段：编排层先释放全部 View（断开同步连接与文档），再让 SDK 封闭新准入、结算在途
+  关闭并释放 WASM 宿主；两段失败都聚合并保留资源，可重试。
 - `cancel` 的 `requested` 不是停止证明；应用不能把 202 回执映射成 stopped。
 - 动作错误以 `disposition` 表达可重试性：`rejected` 明确未生效，`unknown` 可能已执行且不得自动重试，
   `not_sent` 只由客户端在提交前产生。HTTP 状态不单独决定重试。
@@ -80,6 +91,6 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
 ## 与其他文档的关系
 
 - 对象契约与展示语义见 [peri-cf-chat-objects.md](peri-cf-chat-objects.md)。
-- 前端渲染与 assistant-ui 边界见 [peri-cf-chat-ui.md](peri-cf-chat-ui.md)。
+- 前端渲染与 vendored 卡片边界见 [peri-cf-chat-ui.md](peri-cf-chat-ui.md)。
 - SDK 的五个核心对象、事实/同步与关闭预算见 [peri-sdk-chat.md](peri-sdk-chat.md)。
 - 入口与目录职责见 [peri-cf 代码索引](../code-index/peri-cf.md)。

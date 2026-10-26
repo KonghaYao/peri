@@ -11,7 +11,7 @@ import {
 } from "@peri-code/sdk";
 
 /** HTTP 边界只负责把领域错误映射为状态与稳定 code；disposition 不反推。 */
-export interface ChatErrorBody {
+interface ChatErrorBody {
   ok: false;
   code: string;
   message: string;
@@ -22,12 +22,12 @@ export interface ChatErrorBody {
   stage?: string;
 }
 
-export interface ChatErrorContext {
+interface ChatErrorContext {
   chatId?: string;
   requestId?: string;
 }
 
-export interface MappedError {
+interface MappedError {
   status: number;
   body: ChatErrorBody;
 }
@@ -115,7 +115,7 @@ function describeFailure(error: unknown, depth = 0): string {
   return `${error.name}: ${error.message}${cause}`;
 }
 
-export interface CloseIncompleteBody {
+interface CloseIncompleteBody {
   ok: false;
   code: "close_incomplete";
   message: string;

@@ -18,7 +18,7 @@ const moduleRoots = [
   'frontend/chat', 'frontend/chat/runtime', 'frontend/chat/components',
   'frontend/remote', 'frontend/settings',
   'frontend/hooks', 'frontend/lib',
-  'frontend/components/ui', 'frontend/components/assistant-ui',
+  'frontend/components/assistant-ui',
 ].map((root) => root.split('/').join(sep));
 
 function sourceFiles(directory: string): string[] {

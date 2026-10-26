@@ -9,9 +9,9 @@ import { DetailsPanel, type DetailsPanelMode } from './DetailsPanel';
  * 与 CSS `min-[981px]` 使用同一断点：981px 起内联，其余宽度（含 980–981 的小数像素）
  * 保持 overlay。JS 若用 `max-width: 980px`，小数宽度会同时落空，产生定位缝隙。
  */
-export const RIGHT_PANEL_INLINE_MEDIA_QUERY = '(min-width: 981px)';
+const RIGHT_PANEL_INLINE_MEDIA_QUERY = '(min-width: 981px)';
 
-export interface ChatRightPanelProps {
+interface ChatRightPanelProps {
   open: boolean;
   state: ChatDisplayState | null;
   onClose: () => void;

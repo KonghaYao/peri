@@ -3,12 +3,13 @@ import type { Server } from "bun";
 import {
   ChatReplica,
   ChatView,
+  ChatViewRegistry,
   type ChatBindingTarget,
   type ChatFact,
   type ChatFactEnvelope,
   type ChatFactObserver,
   type ChatFactSource,
-  type ChatService,
+  type ChatServiceContract,
   type ChatYjsChannel,
 } from "@peri-code/sdk";
 import {
@@ -16,7 +17,6 @@ import {
   encodeAckFrame,
   encodeHelloFrame,
 } from "@peri-code/sdk/view";
-import { ChatViewRegistry } from "../agent";
 import {
   MAX_CLIENT_SYNC_FRAME_BYTES,
   handleSyncUpgrade,
@@ -68,12 +68,19 @@ class FakeFactSource implements ChatFactSource {
   get observerCount(): number { return this.observers.size; }
 }
 
-function fakeChat(id: string, source?: ChatFactSource): ChatService {
+/** 同步入口只读取身份与事实源；动作成员显式失败。 */
+function fakeChat(id: string, source?: ChatFactSource): ChatServiceContract {
   return {
     id,
+    sessionId: null,
+    bindingRevision: 0,
+    binding: null,
+    execute(): never { throw new Error("sync fixture cannot execute actions"); },
+    readPayload(): Promise<never> { throw new Error("sync fixture has no payload store"); },
+    async close(): Promise<void> {},
     subscribeFacts: (observer: ChatFactObserver) =>
       source ? source.subscribeFacts(observer) : () => {},
-  } as unknown as ChatService;
+  };
 }
 
 class TestChannel implements ChatYjsChannel {
@@ -183,7 +190,7 @@ function nextClose(ws: WebSocket, timeoutMs = 2000): Promise<{ code: number; rea
 
 function startSyncServer(inputs: {
   registry: ChatViewRegistry;
-  chat?: ChatService;
+  chat?: ChatServiceContract;
 }): Server<SyncSocketData> {
   const chat = inputs.chat ?? fakeChat("chat-1");
   return Bun.serve<SyncSocketData>({
@@ -245,7 +252,7 @@ describe("sync WebSocket", () => {
       ws.close();
       await closed;
       await waitFor(() => source.observerCount === 1);
-      expect(registry.size).toBe(1);
+      expect(registry.get("chat-1")).toBeDefined();
     } finally {
       ws.close();
       await registry.disposeAll();

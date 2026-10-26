@@ -1,6 +1,6 @@
 # peri-cf 聊天对象契约与前端消费面目标设计
 
-> 状态：**已批准目标设计；对象契约与展示消费面仍有效，传输/控制实现已更新（2026-10-25）。**
+> 状态：**已批准目标设计；对象契约与展示消费面仍有效，传输/控制实现已更新（2026-10-26）。**
 > 现行实现以 [Peri SDK Chat](peri-sdk-chat.md)、[服务端 Agent](peri-cf-server-agent.md) 与
 > [Chat 前端](peri-cf-chat-ui.md) 为准：Chat 控制面由 SDK `ChatManager/ChatService/PeriInstance`
 > 承担，浏览器经 `ChatReplica` 消费 WebSocket + Yjs 只读副本，Action 经 HTTP 提交。
@@ -18,7 +18,7 @@
 > 参考（结构对照，不引为本仓库事实源）：`/Users/konghayao/code/pazhou/remote-control-server/packages/chat-channel/src/`（该仓库不在本仓库内，路径保留绝对前缀）。
 > 相邻设计：TUI 侧同类展示目标见 [TUI Chat 与 Tool Activity Workbench](tui-chat-workbench.md)；Session 与执行归属见 [Session 异步任务统一入口](session-async-tasks.md)、[RCRA 消息、任务归属与激活](rcra-message-activation.md)；代码定位以 [TS SDK 索引](../code-index/peri-ts-sdk.md) 与 [Peri CF 索引](../code-index/peri-cf.md) 为准。
 
-本文只定义稳定对象契约与消费面边界，不记录实施批次、勾选清单或运行结果。当前实现、入口与动态 inventory 以代码索引和源码为准：`npm-packages/@peri-sdk/src/state/`、`src/view/`、`src/sync/`、`npm-packages/peri-cf/web/runtime/`、`shared/`、`web/chat/`。
+本文只定义稳定对象契约与消费面边界，不记录实施批次、勾选清单或运行结果。当前实现、入口与动态 inventory 以代码索引和源码为准：`npm-packages/@peri-sdk/src/state/`、`src/view/`、`src/sync/`、`npm-packages/peri-cf/core/`、`frontend/`。
 
 ## 1. 前提与已定基线
 
@@ -81,12 +81,12 @@
 [WebSocket /api/chats/:id/sync] → [浏览器 ChatReplica]
   只读 apply；校验 protocol/generation/schema，断线用 HELLO resume 补齐
     ↓
-[SDK /view：readSessionView / 纯选择器 / readPayload]
+[SDK /view：readSessionView / readPayload]
     ↓
 [peri-cf ChatProjection → ChatDisplayState（Zod）]
   纯展示适配，不 flatten，不补造对象身份或运行态
     ↓
-[assistant-ui 组件]
+[展示组件（frontend/chat/timeline、composer 与交互卡片）]
   Entry → Text / Reasoning / Tool / Resource（按顺序）
   会话/任务/计划/队列/交互面板
 
@@ -241,8 +241,9 @@ TurnProjection = {
 1. 暴露 `schemaVersions`、完整 entries、独立 toolCalls、turns、activeTurn；Entry 带 id/time/error/kind/ordered blocks。
 2. tool block 可保留已有 tool 快照关联，但只是独立 ToolCall 的只读派生，不成为写源。
 3. 暴露 interactions 与派生 pendingInteractions；保留 tasks/plan/plansByTurn/inputQueue/session。历史缺失、不支持、暂不可观测不得全部伪装为空数组。
-4. 纯选择器：`selectEntry`、`selectToolCall`、`selectTurn`、`selectPlanForTurn`、`selectPendingInteractions`；只做查询，不新增 selector 缓存/订阅机制。
-5. 孤立工具引用/未知对象显示诊断或 unavailable，不静默隐藏整块；只补现有 ReadCache/SessionViewStore 的必要失效依赖，不改缓存设计。
+4. 消费方直接读取 `SessionView` 的 `entries`、`toolCalls`、`turns`、`plansByTurn`、`pendingInteractions` 等数组，并按 id 自建局部索引；SDK 不再导出 `selectEntry` 等按身份选择器，也不提供 selector 缓存/订阅机制。
+5. 孤立工具引用/未知对象显示诊断或 unavailable，不静默隐藏整块；只补现有 ReadCache 的必要失效依赖，不改缓存设计。
+6. 宿主侧「每个 Chat 共享一个 `ChatView`」由 SDK `ChatViewRegistry` 提供，从主入口与 `/portable` 导出；`/view` 只含浏览器视图面，不导出该注册表。
 
 ### 6.2 readPayload 契约与安全边界
 
@@ -265,7 +266,7 @@ readPayload(ref, reader, { signal, maxBytes })
 
 ## 7. 前端消费路径
 
-### 7.1 ChatReplica → ChatProjection → assistant-ui
+### 7.1 ChatReplica → ChatProjection → 展示组件
 
 1. `core/shared/chat.ts`：消息 DTO 带 id/entryId/kind/status/time/error/blocks；展示状态带 tools/turns/session/tasks/plans/interactions/queue；SDK 领域类型与应用 DTO 显式边界转换。
 2. `core/shared/chat-display-state.ts`：只复制 SDK 副本已确认的公开对象；`readiness !== "ready"` 时不提供条目内容，不补造身份、时间或运行态。

@@ -13,7 +13,7 @@ import { closeDrainBudget, closeUntilSettled, type CloseOptions } from "./sessio
  */
 
 /** 启动阶段；供上层映射为 SessionCreationError 的 `stage`。 */
-export type SessionStartStage =
+type SessionStartStage =
     | "initialize" | "mcp-connect" | "session/new" | "claim"
     | "session/load" | "input-snapshot";
 
@@ -45,7 +45,7 @@ export class SessionStartError extends Error {
     }
 }
 
-export type SessionStartRequest = {
+type SessionStartRequest = {
     path: string;
     /** `null`/省略 = `session/new`；字符串 = `session/load`。 */
     sessionId?: string | null;
@@ -54,13 +54,13 @@ export type SessionStartRequest = {
 };
 
 /** 启动控制：取消只中止可安全脱离的等待，`session/new` 保留创建身份。 */
-export type SessionStartOptions = {
+type SessionStartOptions = {
     signal?: AbortSignal;
     /** `session/new` 返回后、后续阶段前回调；用于先登记索引与 claim。 */
     onSessionCreated?: (sessionId: string) => void | Promise<void>;
 };
 
-export interface SessionClientOptions {
+interface SessionClientOptions {
     /** 反向 ACP 请求（`mcp/message`、权限、elicitation）；由宿主装配路由。 */
     requestHandler: (method: string, params: unknown) => unknown | Promise<unknown>;
     /** 过滤/暂存后的状态通知；初始化事实发布后由 `beginLive()` 放行。 */

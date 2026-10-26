@@ -66,7 +66,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | TUI 面板架构 | [tui-panel-architecture.md](tui-panel-architecture.md) | [TUI 面板架构重构](../../spec/issues/2026-10-15-tui-architecture-refactor.md)；面板外壳、共享视口、事件入口、操作作用域与完成门、快照发布单点、确认版本守卫已落地；未完成项见该 issue |
 | peri-cf 聊天对象契约 | [peri-cf-chat-objects.md](peri-cf-chat-objects.md) | 前端消费面与对象契约完整性；对象语义继续有效，Worker/DO 与旧控制通道已标注为历史；当前实现见 [Peri SDK Chat](peri-sdk-chat.md) 与 [服务端 Agent](peri-cf-server-agent.md) |
 | peri-cf 浏览器宿主 Agent（已被取代） | [peri-cf-browser-agent.md](peri-cf-browser-agent.md) | 2026-10-11 浏览器宿主时期的历史设计；2026-10-21 起由 [peri-cf-server-agent.md](peri-cf-server-agent.md) 取代 |
-| peri-cf Chat 前端 | [peri-cf-chat-ui.md](peri-cf-chat-ui.md) | assistant-ui registry 组件承担渲染；状态来自 SDK `ChatReplica` 经 `ChatProjection` 物化的展示 DTO；SDK 保持独立，适配层在应用侧；浏览器验收见 [active issue](../../spec/issues/2026-10-13-peri-cf-chat-ui-assistant-ui.md) |
+| peri-cf Chat 前端 | [peri-cf-chat-ui.md](peri-cf-chat-ui.md) | 自有 `frontend/chat/{timeline,composer,components}` 渲染；状态来自 SDK `ChatReplica` 经 `ChatProjection` 物化的展示 DTO；`frontend/components/assistant-ui/` 只保留 vendored 审批/问答卡片（无 `@assistant-ui/*` 运行时依赖）；SDK 保持独立；assistant-ui runtime 时期的验收记录见 [历史 spec（已被取代）](../../spec/issues/2026-10-13-peri-cf-chat-ui-assistant-ui.md) |
 
 ## 维护要求
 

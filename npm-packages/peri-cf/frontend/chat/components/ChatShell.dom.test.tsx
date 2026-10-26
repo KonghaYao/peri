@@ -48,7 +48,7 @@ function fakeChat(options: FakeOptions = {}) {
       currentChatId: () => ref.id,
       send: async () => ref.id ?? null,
       stop: async () => true,
-      dismissError: () => {}, dismissChatError: () => {}, dismissListError: () => {},
+      dismissChatError: () => {}, dismissListError: () => {},
     } as unknown as ChatFacade,
   };
 }

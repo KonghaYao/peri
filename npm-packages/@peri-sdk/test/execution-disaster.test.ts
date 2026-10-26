@@ -49,8 +49,7 @@ function durableRegistry() {
 function createPair(registry: ExecutionRegistry, ledger: AdmissionLedger, domainOf: (core: () => ExecutionAdmissionCore) => ExecutionDomainPort) {
     let core: ExecutionAdmissionCore;
     const domain = domainOf(() => core);
-    core = new ExecutionAdmissionCore({ registry, ledger, instance, maxAttempts: 8,
-        verifyEntered: (record) => coordinator.verifyRecordedEntries(record) });
+    core = new ExecutionAdmissionCore({ registry, ledger, instance, maxAttempts: 8 });
     const coordinator = new ExecutionCoordinator({ registry: core.registry, domain, instance, maxAttemptsPerWork: 8,
         proofProvider: { proveStopped: async () => ({ status: "unknown" }) } });
     return { core, coordinator };
