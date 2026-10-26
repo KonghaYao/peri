@@ -632,9 +632,16 @@ pub(super) async fn run_sync_subagent(
     if let Err(error) = drain_subagent_events(event_bus, forwarder_handle, langfuse_bridge).await {
         tracing::error!(thread_id = %child_thread_id, error = %error.user_facing_message(), causes = ?error.cause_chain(), "sync child event forwarding barrier incomplete");
         settlement_error = Some(anyhow::anyhow!("child event drain failed: {error}").into());
+        // 关闭失败时即使 drain 也失败，仍不得写终态：资源未释放的事实必须保持
+        // 可见，resume 继续由 Active 状态拒绝。
+        let fallback_resources = if close_failed {
+            None
+        } else {
+            terminal_resources.clone()
+        };
         if let Err(status_error) = on_subagent_stop_handler(
             &None,
-            &terminal_resources,
+            &fallback_resources,
             &agent_name,
             child_thread_id,
             "child event drain failed",
