@@ -24,7 +24,7 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
   → POST /api/chats、POST /api/chats/:id/actions、DELETE /api/chats/:id
   → GET /api/chats/:id/payload/:refId
   → WS /api/chats/:id/sync
-  → server/api（Hono + Bun WebSocket）
+  → server/index.ts（Hono 路由 + 静态资源 + Bun WebSocket）
   → ChatRegistry（持有 ChatManagerContract + ChatViewRegistry）
   → SDK ChatManager → ChatService → PeriInstance → WasmAcpTransport → peri-wasm ACP Host
   → 模型 / Turso Store / 远程 MCP

@@ -1,8 +1,8 @@
-import { resolve, sep } from "node:path";
 import type { Server } from "bun";
 import { ChatManager } from "@peri-code/sdk";
+import { Hono } from "hono";
+import { getBunServer, serveStatic } from "hono/bun";
 import {
-  SYNC_PATH_PATTERN,
   createApi,
   handleSyncUpgrade,
   syncWebSocketHandlers,
@@ -13,47 +13,37 @@ import { chatManagerOptions } from "./compose";
 import { ChatRegistry } from "./registry";
 
 /**
- * Bun 长驻服务：`/api/*` 由会话服务处理，`/api/chats/:chatId/sync` 升级为只读
- * Yjs WebSocket，其余路径提供 Vite 构建的前端静态资源。
+ * Bun 长驻服务：Hono 统一处理 `/api/*`、`/api/chats/:chatId/sync` 的 WS 升级
+ * 与其余路径的前端静态资源（含 SPA 回退）。
  *
  * 凭据只从进程环境读取；停止进程即结束所有运行中的 Agent 执行（不跨进程恢复）。
  */
 
-function createStaticHandler(staticRoot: string): (request: Request) => Promise<Response> {
-  const root = resolve(staticRoot);
-  const index = Bun.file(resolve(root, "index.html"));
-  return async (request) => {
-    const pathname = decodeURIComponent(new URL(request.url).pathname);
-    const target = resolve(root, `.${pathname}`);
-    if (target !== root && !target.startsWith(`${root}${sep}`))
-      return new Response("Not found", { status: 404 });
-    const file = Bun.file(target);
-    if (await file.exists()) return new Response(file);
-    if (await index.exists())
-      return new Response(index, { headers: { "content-type": "text/html; charset=utf-8" } });
-    return new Response("Not found", { status: 404 });
-  };
-}
+const NOT_FOUND_TEXT = "404 Not Found";
 
 /** 组装 HTTP/WS 服务；WASM 宿主仍由首个 Action 懒启动。 */
 export function createServer(
   config: ServerConfig,
   registry: ChatRegistry,
 ): Server<SyncSocketData> {
-  const app = createApi({ registry, info: publicServerInfo(config) });
-  const serveStatic = createStaticHandler(config.staticRoot);
+  const app = new Hono();
+  app.route("/", createApi({ registry, info: publicServerInfo(config) }));
+  app.all("/api/chats/:chatId/sync", async (c) => {
+    const server = getBunServer<Server<SyncSocketData>>(c);
+    if (!server) return c.text("WebSocket upgrade unavailable", 500);
+    // 升级成功后由 Bun 接管连接；返回空响应与 Hono 的 Bun 适配器一致。
+    return (await handleSyncUpgrade(c.req.raw, server, c.req.param("chatId"), registry))
+      ?? new Response(null);
+  });
+  // 未匹配的 API 不得落到 SPA 回退。
+  app.all("/api", () => new Response(NOT_FOUND_TEXT, { status: 404 }));
+  app.all("/api/*", () => new Response(NOT_FOUND_TEXT, { status: 404 }));
+  app.all("*", serveStatic({ root: config.staticRoot }));
+  app.all("*", serveStatic({ root: config.staticRoot, path: "index.html" }));
   return Bun.serve<SyncSocketData>({
     hostname: config.hostname,
     port: config.port,
-    async fetch(request, server) {
-      const path = new URL(request.url).pathname;
-      if (SYNC_PATH_PATTERN.test(path)) {
-        // 成功升级时返回 undefined；失败在升级前返回 HTTP 响应。
-        return handleSyncUpgrade(request, server, registry);
-      }
-      if (path === "/api" || path.startsWith("/api/")) return app.fetch(request);
-      return serveStatic(request);
-    },
+    fetch: app.fetch,
     websocket: syncWebSocketHandlers,
   });
 }

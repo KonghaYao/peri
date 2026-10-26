@@ -32,7 +32,7 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 - `frontend/remote/`：HTTP Action、WebSocket 客户端、页面控制器、目录仓储与组合根；同目录承载
   `contracts.ts`（Zod wire/展示 DTO 与 `ServerInfo`）、`display-state.ts`（`ChatDisplayState` 物化）、
   `projection.ts`（`ChatReplica` 投影）、`askUserQuestion.ts`（问答适配）与 `logging.ts`。
-- `server/`：`index.ts`（Bun 入口与静态资源）、`config.ts`（环境变量与启动校验）、
+- `server/`：`index.ts`（Hono 应用：API、静态资源与 WS 升级）、`config.ts`（环境变量与启动校验）、
   `compose.ts`（`chatManagerOptions` 平台装配）、`registry.ts`（`ChatRegistry`：View 生命周期与关闭/停机）、
   `api/index.ts`（Hono 目录/句柄/Action/payload）、`api/sync.ts`（WS → ChatYjsChannel）、
   `api/errors.ts`（错误映射）。

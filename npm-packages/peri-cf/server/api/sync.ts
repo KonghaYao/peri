@@ -17,7 +17,6 @@ import { chatNotFound } from "./errors";
  * 客户端只能发 HELLO/ACK；任何 Yjs 更新或其它帧都由 SDK 拒绝。
  */
 
-export const SYNC_PATH_PATTERN = /^\/api\/chats\/([^/]+)\/sync$/;
 /** 与 SDK HELLO 上限一致；客户端帧只允许握手与 ACK。 */
 export const MAX_CLIENT_SYNC_FRAME_BYTES = 192 * 1024;
 const NORMAL_CLOSE = 1000;
@@ -109,20 +108,17 @@ export class WebSocketSyncChannel implements ChatYjsChannel {
 }
 
 /**
- * 处理 `/api/chats/:chatId/sync` 的 WS 升级。
+ * 处理 `/api/chats/:chatId/sync` 的 WS 升级；`chatId` 由 Hono 路由解码后传入。
  *
- * 返回 `undefined` 表示已成功升级；其它路径返回 `undefined` 由调用方继续路由。
+ * 成功时返回 `undefined`（Bun 已接管连接）；失败时返回 HTTP 响应。
  * 未登记的 Chat 在升级前以 410 拒绝，不创建空句柄、不自动绑定历史。
  */
 export async function handleSyncUpgrade(
   request: Request,
   server: Server<SyncSocketData>,
+  chatId: string,
   registry: ChatRegistry,
 ): Promise<Response | undefined> {
-  const pathname = new URL(request.url).pathname;
-  const match = SYNC_PATH_PATTERN.exec(pathname);
-  if (!match) return undefined;
-
   if (request.method !== "GET") {
     return new Response("Method not allowed", {
       status: 405,
@@ -136,12 +132,6 @@ export async function handleSyncUpgrade(
     });
   }
 
-  let chatId: string;
-  try {
-    chatId = decodeURIComponent(match[1]!);
-  } catch {
-    return new Response("Invalid chat id", { status: 400 });
-  }
   const chat = registry.chats.getChat(chatId)
     ?? registry.chats.findChatBySession(chatId);
   if (!chat) {

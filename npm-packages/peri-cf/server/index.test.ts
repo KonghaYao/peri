@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   type ChatManagerContract,
   type ChatServiceContract,
@@ -111,6 +114,35 @@ describe("server wiring", () => {
     } finally {
       server.stop(true);
       await registry.shutdown();
+    }
+  });
+
+  test("Hono 提供静态资源、SPA 回退，并隔离未匹配的 API", async () => {
+    const root = mkdtempSync(join(tmpdir(), "peri-cf-static-"));
+    writeFileSync(join(root, "index.html"), "<h1>peri</h1>");
+    writeFileSync(join(root, "asset.txt"), "asset-body");
+    const registry = new ChatRegistry(new FakeChatManager());
+    const server = createServer({ ...config, staticRoot: root }, registry);
+    try {
+      const index = await fetch(`http://127.0.0.1:${server.port}/`);
+      expect(index.status).toBe(200);
+      expect(await index.text()).toContain("peri");
+
+      const asset = await fetch(`http://127.0.0.1:${server.port}/asset.txt`);
+      expect(asset.status).toBe(200);
+      expect(await asset.text()).toBe("asset-body");
+
+      const spa = await fetch(`http://127.0.0.1:${server.port}/chats/123`);
+      expect(spa.status).toBe(200);
+      expect(await spa.text()).toContain("peri");
+
+      const apiMissing = await fetch(`http://127.0.0.1:${server.port}/api/missing`);
+      expect(apiMissing.status).toBe(404);
+      expect(await apiMissing.text()).toBe("404 Not Found");
+    } finally {
+      server.stop(true);
+      await registry.shutdown();
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

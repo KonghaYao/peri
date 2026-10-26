@@ -206,7 +206,9 @@ function startSyncServer(
     hostname: "127.0.0.1",
     port: 0,
     fetch(request, server) {
-      return handleSyncUpgrade(request, server, registry);
+      const match = /^\/api\/chats\/([^/]+)\/sync$/.exec(new URL(request.url).pathname);
+      if (!match) return new Response("Not found", { status: 404 });
+      return handleSyncUpgrade(request, server, decodeURIComponent(match[1]!), registry);
     },
     websocket: syncWebSocketHandlers,
   });

@@ -29,7 +29,7 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 - **前端**：`frontend/remote/controller.ts` 是页面控制器（句柄身份、两步打开历史、绑定代次、Action、
   连接）；`actions.ts` 是 HTTP 客户端；`sync.ts` 是 WebSocket → SDK 副本；`application.ts` 是前端组合根。
   `frontend/remote/projection.ts` 把 `ChatReplica` 物化为展示 DTO，不反向控制执行。
-- **静态资源**：非 `/api/*` 路径由 Bun 入口提供 `dist/client` 与 `index.html` 回退；Vite 开发服务器把
+- **静态资源**：非 `/api/*` 路径由 `server/index.ts` 的 Hono `serveStatic` 提供 `dist/client` 与 `index.html` 回退；Vite 开发服务器把
   `/api` 代理到 Bun 服务。
 - **没有访问控制**：服务不提供认证、限流或多租户隔离；部署入口鉴权是必要条件。
 - **单进程 ownership**：`server/compose.ts` 固定使用 `createStorage()`（unstorage memory driver）作为 `kv`，由 `ChatManager` 内部构造协调器；多实例部署需要改造装配接入共享 storage，并由路由层做串行化/崩溃清理，不能宣称
@@ -68,7 +68,7 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 | 职责 | 入口 |
 | --- | --- |
 | 包命令、依赖 | `npm-packages/peri-cf/package.json` |
-| Bun 入口（HTTP + 静态资源 + WS + 信号） | `server/index.ts` |
+| Hono 应用 + Bun 入口（HTTP + 静态资源 + WS + 信号） | `server/index.ts` |
 | 环境变量解析与启动校验 | `server/config.ts` |
 | 平台装配（`chatManagerOptions`） | `server/compose.ts` |
 | 服务端注册表（句柄端口 + View 生命周期） | `server/registry.ts` |

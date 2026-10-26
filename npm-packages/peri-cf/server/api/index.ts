@@ -338,7 +338,6 @@ export function createApi(deps: ApiOptions): Hono {
 }
 
 export {
-  SYNC_PATH_PATTERN,
   handleSyncUpgrade,
   syncWebSocketHandlers,
   type SyncSocketData,
