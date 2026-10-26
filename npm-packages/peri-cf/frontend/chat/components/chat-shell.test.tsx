@@ -5,8 +5,8 @@ import { ChatHeader } from './ChatHeader';
 import { ChatRightPanel } from './ChatRightPanel';
 import { Sidebar, type SidebarProps } from './Sidebar';
 
-const summary = (id: string, title: string): ChatSummary => ({
-  id, sessionId: id, title, updatedAt: '2026-10-20T00:00:00Z',
+const summary = (sessionId: string, title: string): ChatSummary => ({
+  sessionId, title, updatedAt: '2026-10-20T00:00:00Z',
   cwd: '/workspace', messageCount: 1, createdAt: '2026-10-20T00:00:00Z',
 });
 
@@ -17,7 +17,7 @@ function renderSidebar(overrides: Partial<SidebarProps> = {}): string {
   return renderToStaticMarkup(
     <Sidebar
       chats={[selected, other]}
-      selectedId={selected.id}
+      selectedId={selected.sessionId}
       selectedRunning={false}
       loading={false}
       disabled={false}

@@ -28,7 +28,7 @@ function setup(options: {
     const managerOptions: ChatManagerInternalOptions = {
         agentConfig: {},
         database,
-        sessionOwnershipStorage: ownership,
+        kv: ownership,
         chatConfig: {
             runtime: {
                 kind: "transport",
@@ -36,7 +36,7 @@ function setup(options: {
                     throw new Error("ACP transport must not start");
                 },
             },
-            defaults: { path: "/workspace" },
+            sessionInit: { path: "/workspace" },
         },
         instanceFactory: () => {
             const port = new FakePort();

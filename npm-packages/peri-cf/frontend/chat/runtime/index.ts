@@ -5,6 +5,10 @@ export {
 } from "./useChat";
 export { loadPayloadValue } from "./payloadReader";
 export {
+  buildAskUserQuestionContent,
+  type AskUserQuestionDecision, type AskUserQuestionDraft, type AskUserQuestionDrafts,
+} from "./askUserQuestion";
+export {
   buildElicitationContent, initialElicitationValues, SUPPORTED_PERMISSION_OPTIONS,
   type ElicitationValues, type InteractionAnswerHandler,
 } from "./interactionForm";

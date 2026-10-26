@@ -1,13 +1,16 @@
 import type { HistoryPageOutcome } from "../agent/port";
 import type { AcpMcpServer } from "../contracts/acp";
-import type { ChatBindingTarget, ChatFactObserver } from "../contracts/chat";
+import type {
+    ChatBindingTarget,
+    ChatDatabase,
+    ChatFactObserver,
+    ChatSessionDirectoryEntry,
+} from "../contracts/chat";
 import type {
     ReadPayloadOptions, ToolPayloadReadRef, ToolPayloadResponse,
 } from "../payload/reader";
 import type { Transport } from "../transport/types";
-import type {
-    WasmRuntimeDiagnosticKind, WasmRuntimeLifecycleEvent, WasmRuntimePorts,
-} from "../wasm/runtime";
+import type { WasmRuntimeDiagnosticKind } from "../wasm/runtime";
 import type { PeriWasmModuleFactory } from "../wasm/loader";
 import type {
     AnswerAction, CancelAction, ForceSendAction, HistoryAction, SendAction, SessionAction, TakeBackAction,
@@ -43,29 +46,13 @@ export interface ControlResult {
     status: "accepted";
 }
 
-export interface ChatSessionDirectoryEntry {
-    sessionId: string;
-    title: string | null;
-    cwd: string;
-    messageCount: number;
-    createdAt: string;
-    updatedAt: string;
-}
-
-/** 只读会话目录；`path` 省略时交给适配器决定（SDK 默认实现不猜 cwd）。 */
-export interface ChatDatabase {
-    listSessions(path?: string): Promise<ChatSessionDirectoryEntry[]>;
-    getSession(id: string): Promise<ChatSessionDirectoryEntry | null>;
-}
-
 /**
- * 宿主提供的 Session ownership 存储端口。
+ * 宿主提供的 KV 存储端口。
  *
  * 只要求 3 个方法；unstorage 的 `Storage` 结构化满足该端口。SDK 不 import
- * unstorage，也不做 TTL、续租或 CAS。读后写非原子：同一 Session 的单实例
- * 绑定由路由层串行化保证。
+ * unstorage，也不做 TTL/续租/CAS。
  */
-export interface SessionOwnershipStorage {
+export interface KvStorage {
     getItem(key: string): Promise<unknown>;
     setItem(key: string, value: unknown): Promise<void>;
     removeItem(key: string): Promise<void>;
@@ -82,7 +69,8 @@ export interface SessionOwnership {
     release(sessionId: string): Promise<void>;
 }
 
-export interface ChatDefaults {
+/** Session 建立输入：新会话 cwd、系统指令与 MCP 声明。 */
+export interface ChatSessionInit {
     path?: string;
     instructions?: string;
     /** `acp` 型 server 实例由调用方持有；Manager 不深拷贝/冻结实例。 */
@@ -95,11 +83,6 @@ export type ChatRuntime =
           moduleUrl?: string | URL;
           moduleFactory?: PeriWasmModuleFactory;
           env?: Readonly<Record<string, string>>;
-          moduleOptions?: Readonly<Record<string, unknown>>;
-          ports?: WasmRuntimePorts;
-          cleanupTimeoutMs?: number;
-          startupTimeoutMs?: number;
-          onLifecycle?: (event: WasmRuntimeLifecycleEvent) => void;
           onDiagnostic?: (kind: WasmRuntimeDiagnosticKind, error: unknown) => void;
       }
     | {
@@ -126,10 +109,10 @@ export interface ChatLifecycleOptions {
     shutdownChatTimeoutMs?: number;
 }
 
-/** Chat 运行配置：运行后端、默认值与生命周期预算。 */
+/** Chat 运行配置：运行后端、Session 建立输入与生命周期预算。 */
 export interface ChatConfig {
     runtime: ChatRuntime;
-    defaults?: ChatDefaults;
+    sessionInit?: ChatSessionInit;
     lifecycle?: ChatLifecycleOptions;
 }
 
@@ -138,7 +121,7 @@ export interface ChatManagerOptions {
     agentConfig: unknown;
     database: ChatDatabase;
     /** Session 归属记录存储；Manager 内部构造 ownership 并生成 owner。 */
-    sessionOwnershipStorage: SessionOwnershipStorage;
+    kv: KvStorage;
     /** Chat 运行配置；runtime 必填。 */
     chatConfig: ChatConfig;
 }

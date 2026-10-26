@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import type { Server } from "bun";
 import {
   ChatReplica,
   ChatView,
   ChatViewRegistry,
+  ChatViewReplayOverflowError,
   type ChatBindingTarget,
   type ChatFact,
   type ChatFactEnvelope,
@@ -17,11 +17,14 @@ import {
   encodeAckFrame,
   encodeHelloFrame,
 } from "@peri-code/sdk/view";
+import { Hono } from "hono";
+import { createApp, createServer } from "..";
+import type { ServerConfig } from "../config";
+import { ChatRegistry } from "../registry";
 import {
   MAX_CLIENT_SYNC_FRAME_BYTES,
-  handleSyncUpgrade,
-  syncWebSocketHandlers,
-  type SyncSocketData,
+  SYNC_PATH,
+  syncUpgradeGuard,
 } from "./sync";
 
 const TARGET: ChatBindingTarget = {
@@ -29,6 +32,24 @@ const TARGET: ChatBindingTarget = {
   sessionId: "session-1",
   bindingRevision: 1,
 };
+
+const config: ServerConfig = {
+  hostname: "127.0.0.1",
+  port: 0,
+  machineId: "11111111-1111-4111-8111-111111111111",
+  model: {
+    provider: "openai",
+    tiers: { fable: "gpt-test", opus: "gpt-test", sonnet: "gpt-test", haiku: "gpt-test" },
+    baseUrl: "https://api.example.com/v1",
+    apiKey: "model-secret",
+  },
+  storage: { url: "https://store.example.com", authToken: "store-secret" },
+  mcpServers: [],
+  wasmModuleUrl: "file:///tmp/peri-wasm.js",
+  staticRoot: "/tmp/peri-cf-missing-static",
+};
+
+const UPGRADE_HEADERS = { upgrade: "websocket", connection: "Upgrade" };
 
 const update = (kind: string, fields: Record<string, unknown>) => ({
   jsonrpc: "2.0" as const,
@@ -188,25 +209,27 @@ function nextClose(ws: WebSocket, timeoutMs = 2000): Promise<{ code: number; rea
   });
 }
 
-function startSyncServer(inputs: {
-  registry: ChatViewRegistry;
-  chat?: ChatServiceContract;
-}): Server<SyncSocketData> {
-  const chat = inputs.chat ?? fakeChat("chat-1");
-  return Bun.serve<SyncSocketData>({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch(request, server) {
-      return handleSyncUpgrade(request, server, {
-        manager: {
-          getChat: (id) => id === chat.id ? chat : undefined,
-          findChatBySession: () => undefined,
-        },
-        views: inputs.registry,
-      });
+function makeRegistry(chat?: ChatServiceContract): ChatRegistry {
+  return new ChatRegistry({
+    createChat(): ChatServiceContract {
+      throw new Error("sync fixture cannot create chats");
     },
-    websocket: syncWebSocketHandlers,
+    getChat: (id) => (chat && id === chat.id ? chat : undefined),
+    findChatBySession: () => undefined,
+    async listSessions() { return []; },
+    async closeChat() {},
+    async shutdown() {},
   });
+}
+
+function startSyncServer(chat: ChatServiceContract = fakeChat("chat-1")) {
+  const registry = makeRegistry(chat);
+  return { server: createServer(config, registry), registry };
+}
+
+function appFixture(): { app: ReturnType<typeof createApp>; registry: ChatRegistry } {
+  const registry = makeRegistry(fakeChat("chat-1"));
+  return { app: createApp(config, registry), registry };
 }
 
 async function openSocket(url: string): Promise<WebSocket> {
@@ -219,6 +242,155 @@ async function openSocket(url: string): Promise<WebSocket> {
   return ws;
 }
 
+describe("sync upgrade guard", () => {
+  const fakeServer = (upgrade: () => boolean) => ({ server: { upgrade } });
+  const SYNC_URL = "/api/chats/chat-1/sync";
+
+  /** 只保留 guard 需要的 SyncRegistry 结构；attach 替身用于覆盖 500 分支。 */
+  const attachFailureApp = (attach: () => never): Hono => {
+    const chat = fakeChat("chat-1");
+    const app = new Hono();
+    app.all(SYNC_PATH, syncUpgradeGuard({
+      chats: {
+        getChat: (id) => (id === chat.id ? chat : undefined),
+        findChatBySession: () => undefined,
+      },
+      views: { attach },
+    }));
+    return app;
+  };
+
+  test("非 GET 返回 405 + Allow: GET", async () => {
+    const { app, registry } = appFixture();
+    try {
+      for (const method of ["POST", "DELETE", "PUT"]) {
+        const response = await app.request(
+          SYNC_URL,
+          { method, headers: UPGRADE_HEADERS },
+          fakeServer(() => false),
+        );
+        expect(response.status).toBe(405);
+        expect(response.headers.get("allow")).toBe("GET");
+        expect(await response.text()).toBe("Method not allowed");
+      }
+    } finally {
+      await registry.views.disposeAll();
+    }
+  });
+
+  test("HEAD 返回 405", async () => {
+    const { app, registry } = appFixture();
+    try {
+      const response = await app.request(
+        SYNC_URL,
+        { method: "HEAD" },
+        fakeServer(() => false),
+      );
+      expect(response.status).toBe(405);
+      expect(response.headers.get("allow")).toBe("GET");
+    } finally {
+      await registry.views.disposeAll();
+    }
+  });
+
+  test("GET 无 Upgrade 头返回 426 + Upgrade: websocket", async () => {
+    const { app, registry } = appFixture();
+    try {
+      const response = await app.request(SYNC_URL, {}, fakeServer(() => false));
+      expect(response.status).toBe(426);
+      expect(response.headers.get("upgrade")).toBe("websocket");
+      expect(await response.text()).toBe("WebSocket upgrade required");
+    } finally {
+      await registry.views.disposeAll();
+    }
+  });
+
+  test("升级成功返回 200 且 body 为 null", async () => {
+    const { app, registry } = appFixture();
+    let upgrades = 0;
+    try {
+      const response = await app.request(
+        SYNC_URL,
+        { headers: UPGRADE_HEADERS },
+        fakeServer(() => {
+          upgrades += 1;
+          return true;
+        }),
+      );
+      expect(upgrades).toBe(1);
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("");
+    } finally {
+      await registry.views.disposeAll();
+    }
+  });
+
+  test("server.upgrade 返回 false 时落到 400", async () => {
+    const { app, registry } = appFixture();
+    try {
+      const response = await app.request(
+        SYNC_URL,
+        { headers: UPGRADE_HEADERS },
+        fakeServer(() => false),
+      );
+      expect(response.status).toBe(400);
+      expect(await response.text()).toBe("WebSocket upgrade rejected");
+    } finally {
+      await registry.views.disposeAll();
+    }
+  });
+
+  test("attach 溢出返回 500 view_replay_overflow", async () => {
+    const app = attachFailureApp(() => {
+      throw new ChatViewReplayOverflowError("fact log overflowed");
+    });
+    const response = await app.request(
+      SYNC_URL,
+      { headers: UPGRADE_HEADERS },
+      fakeServer(() => false),
+    );
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({
+      ok: false,
+      code: "view_replay_overflow",
+      message: "Chat view fact log overflowed; rebind before connecting",
+      chatId: "chat-1",
+    });
+  });
+
+  test("attach 普通失败返回 500 view_attach_failed", async () => {
+    const app = attachFailureApp(() => {
+      throw new Error("attach failed");
+    });
+    const response = await app.request(
+      SYNC_URL,
+      { headers: UPGRADE_HEADERS },
+      fakeServer(() => false),
+    );
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({
+      ok: false,
+      code: "view_attach_failed",
+      message: "Chat view could not be attached",
+      chatId: "chat-1",
+    });
+  });
+
+  test("子路径不命中升级前置条件", async () => {
+    const { app, registry } = appFixture();
+    try {
+      const response = await app.request(
+        `${SYNC_URL}/extra`,
+        { headers: UPGRADE_HEADERS },
+        fakeServer(() => false),
+      );
+      expect(response.status).toBe(404);
+    } finally {
+      await registry.views.disposeAll();
+    }
+  });
+});
+
 describe("sync WebSocket", () => {
   test("HELLO → SNAPSHOT → UPDATE → ACK，断开不释放 View", async () => {
     const source = new FakeFactSource();
@@ -229,8 +401,7 @@ describe("sync WebSocket", () => {
         update("user_message_chunk", { messageId: "u1", content: { type: "text", text: "Saved" } }),
       ],
     });
-    const registry = new ChatViewRegistry();
-    const server = startSyncServer({ registry, chat: fakeChat("chat-1", source) });
+    const { server, registry } = startSyncServer(fakeChat("chat-1", source));
     const ws = await openSocket(
       `ws://127.0.0.1:${server.port}/api/chats/chat-1/sync`,
     );
@@ -252,10 +423,10 @@ describe("sync WebSocket", () => {
       ws.close();
       await closed;
       await waitFor(() => source.observerCount === 1);
-      expect(registry.get("chat-1")).toBeDefined();
+      expect(registry.views.get("chat-1")).toBeDefined();
     } finally {
       ws.close();
-      await registry.disposeAll();
+      await registry.views.disposeAll();
       server.stop(true);
     }
   });
@@ -263,8 +434,7 @@ describe("sync WebSocket", () => {
   test("客户端 Yjs 更新帧被显式关闭", async () => {
     const source = new FakeFactSource();
     source.bind(TARGET);
-    const registry = new ChatViewRegistry();
-    const server = startSyncServer({ registry, chat: fakeChat("chat-1", source) });
+    const { server, registry } = startSyncServer(fakeChat("chat-1", source));
     const ws = await openSocket(
       `ws://127.0.0.1:${server.port}/api/chats/chat-1/sync`,
     );
@@ -283,23 +453,28 @@ describe("sync WebSocket", () => {
       expect(closed.reason).toContain("Unexpected chat sync frame tag 3");
     } finally {
       ws.close();
-      await registry.disposeAll();
+      await registry.views.disposeAll();
       server.stop(true);
     }
   });
 
   test("未知 Chat 在升级前返回 410", async () => {
-    const registry = new ChatViewRegistry();
-    const server = startSyncServer({ registry });
+    const { server, registry } = startSyncServer();
     try {
       const response = await fetch(
         `http://127.0.0.1:${server.port}/api/chats/missing/sync`,
         { headers: { upgrade: "websocket", connection: "Upgrade" } },
       );
       expect(response.status).toBe(410);
-      expect(await response.json()).toMatchObject({ code: "chat_not_found" });
+      expect(await response.json()).toEqual({
+        ok: false,
+        code: "chat_not_found",
+        message: "Chat not found",
+        disposition: "rejected",
+        chatId: "missing",
+      });
     } finally {
-      await registry.disposeAll();
+      await registry.views.disposeAll();
       server.stop(true);
     }
   });
@@ -371,12 +546,31 @@ describe("sync delivery", () => {
   });
 });
 
-describe("SyncSocketChannel", () => {
+describe("WebSocketSyncChannel", () => {
+  test("文本帧以 1003 显式关闭", async () => {
+    const source = new FakeFactSource();
+    source.bind(TARGET);
+    const { server, registry } = startSyncServer(fakeChat("chat-1", source));
+    const ws = await openSocket(
+      `ws://127.0.0.1:${server.port}/api/chats/chat-1/sync`,
+    );
+    try {
+      const closed = nextClose(ws);
+      ws.send("not a binary frame");
+      const event = await closed;
+      expect(event.code).toBe(1003);
+      expect(event.reason).toBe("Binary frames required");
+    } finally {
+      ws.close();
+      await registry.views.disposeAll();
+      server.stop(true);
+    }
+  });
+
   test("超限客户端帧以 1009 显式关闭", async () => {
     const source = new FakeFactSource();
     source.bind(TARGET);
-    const registry = new ChatViewRegistry();
-    const server = startSyncServer({ registry, chat: fakeChat("chat-1", source) });
+    const { server, registry } = startSyncServer(fakeChat("chat-1", source));
     const ws = await openSocket(
       `ws://127.0.0.1:${server.port}/api/chats/chat-1/sync`,
     );
@@ -386,7 +580,7 @@ describe("SyncSocketChannel", () => {
       expect((await closed).code).toBe(1009);
     } finally {
       ws.close();
-      await registry.disposeAll();
+      await registry.views.disposeAll();
       server.stop(true);
     }
   });

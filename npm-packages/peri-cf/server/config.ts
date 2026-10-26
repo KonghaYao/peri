@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { AcpMcpServer } from "@peri-code/sdk";
+import type { AcpMcpServer, PeriConfig, TursoStorage } from "@peri-code/sdk";
 
 /** 宿主虚拟工作区的根；与 ACP 会话 cwd 分开（见 `SESSION_CWD`）。 */
 export const WORKSPACE_CWD = "/workspace";
@@ -13,48 +13,37 @@ export const SESSION_CWD = "/workspace/";
 
 const MACHINE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HEADER_NAME_PATTERN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
-const MODEL_PROVIDERS = ["openai", "anthropic"] as const;
+/** 档位与供应商联合直接取自 SDK 启动对象，避免两处漂移。 */
+export type ModelProvider = NonNullable<PeriConfig["config"]["providers"]>[number]["type"];
+export type ModelTier = NonNullable<PeriConfig["config"]["active_alias"]>;
 
-export type ModelProvider = (typeof MODEL_PROVIDERS)[number];
+const MODEL_PROVIDERS = ["openai", "anthropic"] as const satisfies readonly ModelProvider[];
+/** 与 peri-config 的 `Profiles` 四档一致；子 Agent 按档位取模型。 */
+export const MODEL_TIERS = ["fable", "opus", "sonnet", "haiku"] as const satisfies readonly ModelTier[];
 
-export interface ServerModelConfig {
-  provider: ModelProvider;
-  id: string;
-  baseUrl: string;
-  apiKey: string;
-}
-
-export interface ServerStorageConfig {
-  url: string;
-  authToken: string;
-}
-
-export interface ServerMcpServer {
-  name: string;
-  url: string;
-  headers: { name: string; value: string }[];
-}
-
+/** 服务端进程配置；进程内字段形状只在这里声明一次。 */
 export interface ServerConfig {
   hostname: string;
   port: number;
   machineId: string;
-  model: ServerModelConfig;
-  storage: ServerStorageConfig;
+  model: {
+    provider: ModelProvider;
+    baseUrl: string;
+    apiKey: string;
+    /** 四档模型 ID；未单独配置的档位回退 `PERI_MODEL_ID`。 */
+    tiers: Record<ModelTier, string>;
+  };
+  /** 与 SDK `TursoStorage#storageConfig` 同形；目录 cwd 由 `compose.ts` 补齐。 */
+  storage: TursoStorage["storageConfig"];
   /** 只支持远程 Streamable HTTP；本地 ACP/stdio 不随后端执行。 */
-  mcpServers: ServerMcpServer[];
+  mcpServers: { name: string; url: string; headers: { name: string; value: string }[] }[];
   /** 服务端 Emscripten 胶水位置（file URL 或 http(s) URL）。 */
   wasmModuleUrl: string;
   /** 生产环境的前端静态目录；不存在时只提供 API。 */
   staticRoot: string;
 }
 
-export interface ServerConfigResult {
-  config?: ServerConfig;
-  problems: string[];
-}
-
-export type ServerEnvironment = Readonly<Record<string, string | undefined>>;
+export type ServerEnvironment = Readonly<NodeJS.ProcessEnv>;
 
 const DEFAULT_PORT = 8787;
 const DEFAULT_HOSTNAME = "127.0.0.1";
@@ -78,7 +67,7 @@ function parsePort(value: string | undefined): number | undefined {
   return Number.isInteger(port) && port > 0 && port <= 65_535 ? port : undefined;
 }
 
-function parseModel(env: ServerEnvironment, problems: string[]): ServerModelConfig | undefined {
+function parseModel(env: ServerEnvironment, problems: string[]): ServerConfig["model"] | undefined {
   const provider = text(env.PERI_MODEL_PROVIDER) || "openai";
   const id = text(env.PERI_MODEL_ID);
   const baseUrl = text(env.PERI_MODEL_BASE_URL);
@@ -91,10 +80,13 @@ function parseModel(env: ServerEnvironment, problems: string[]): ServerModelConf
   else if (!baseUrlValid) problems.push("PERI_MODEL_BASE_URL 必须是 http(s) 地址");
   if (!apiKey) problems.push("缺少 PERI_MODEL_API_KEY");
   if (!providerValid || !id || !baseUrl || !baseUrlValid || !apiKey) return undefined;
-  return { provider: provider as ModelProvider, id, baseUrl, apiKey };
+  const tiers = Object.fromEntries(
+    MODEL_TIERS.map((tier) => [tier, text(env[`PERI_MODEL_ID_${tier.toUpperCase()}`]) || id]),
+  ) as Record<ModelTier, string>;
+  return { provider: provider as ModelProvider, tiers, baseUrl, apiKey };
 }
 
-function parseStorage(env: ServerEnvironment, problems: string[]): ServerStorageConfig | undefined {
+function parseStorage(env: ServerEnvironment, problems: string[]): ServerConfig["storage"] | undefined {
   const url = text(env.PERI_STORAGE_URL);
   const authToken = typeof env.PERI_STORAGE_TOKEN === "string" ? env.PERI_STORAGE_TOKEN : "";
   if (!url) problems.push("缺少 PERI_STORAGE_URL");
@@ -135,7 +127,7 @@ function parseMcpHeaders(raw: unknown, serverName: string, problems: string[]): 
 }
 
 /** `PERI_MCP_SERVERS` 是 JSON 数组；只接受远程 HTTP，token 是 Authorization 头的简写。 */
-function parseMcpServers(env: ServerEnvironment, problems: string[]): ServerMcpServer[] {
+function parseMcpServers(env: ServerEnvironment, problems: string[]): ServerConfig["mcpServers"] {
   const raw = text(env.PERI_MCP_SERVERS);
   if (!raw) return [];
   let parsed: unknown;
@@ -149,7 +141,7 @@ function parseMcpServers(env: ServerEnvironment, problems: string[]): ServerMcpS
     problems.push("PERI_MCP_SERVERS 必须是数组");
     return [];
   }
-  const servers: ServerMcpServer[] = [];
+  const servers: ServerConfig["mcpServers"] = [];
   const names = new Set<string>();
   for (const entry of parsed) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
@@ -195,7 +187,7 @@ function parseWasmModuleUrl(env: ServerEnvironment, packageRoot: string): string
 export function loadServerConfig(
   env: ServerEnvironment = process.env,
   packageRoot = resolve(import.meta.dir, ".."),
-): ServerConfigResult {
+): { config?: ServerConfig; problems: string[] } {
   const problems: string[] = [];
   const port = parsePort(text(env.PERI_SERVER_PORT));
   if (port === undefined) problems.push("PERI_SERVER_PORT 必须是 1..65535 的整数");
@@ -245,10 +237,10 @@ export function mcpServerDefaults(
   }]));
 }
 
-export type PublicServerInfoSource = Pick<ServerConfig, "model" | "storage" | "mcpServers">;
-
 /** 不暴露 token / query / userinfo 的配置摘要，供前端设置页只读展示。 */
-export function publicServerInfo(config: PublicServerInfoSource) {
+export function publicServerInfo(
+  config: Pick<ServerConfig, "model" | "storage" | "mcpServers">,
+) {
   const origin = (raw: string) => {
     try {
       const url = new URL(raw);
@@ -258,10 +250,13 @@ export function publicServerInfo(config: PublicServerInfoSource) {
     }
   };
   return {
-    model: { provider: config.model.provider, id: config.model.id, baseUrl: origin(config.model.baseUrl) },
+    model: { provider: config.model.provider, tiers: config.model.tiers, baseUrl: origin(config.model.baseUrl) },
     storage: { url: origin(config.storage.url) },
     mcp: config.mcpServers.map((server) => ({ name: server.name, url: origin(server.url) })),
     workspace: WORKSPACE_CWD,
     sessionCwd: SESSION_CWD,
   };
 }
+
+/** `GET /api/info` 的去敏响应；形状由实现推导，避免再维护一份声明。 */
+export type ServerInfo = ReturnType<typeof publicServerInfo>;

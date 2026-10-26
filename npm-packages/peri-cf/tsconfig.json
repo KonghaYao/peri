@@ -15,9 +15,6 @@
     "paths": {
       "@/*": [
         "./frontend/*"
-      ],
-      "@core/*": [
-        "./core/*"
       ]
     },
     "skipLibCheck": true,
@@ -29,7 +26,6 @@
     ]
   },
   "include": [
-    "core",
     "frontend",
     "scripts",
     "wasm",

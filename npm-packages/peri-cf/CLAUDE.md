@@ -10,10 +10,10 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 
 ## 边界
 
-**服务端是唯一计算实例**：`server/index.ts` 启动 Bun 进程；`server/agent/compose.ts` 把平台依赖
-（WASM 运行后端、Store、ownership KV、默认配置）装配成 SDK `ChatManager`，是 server 内唯一构造具体实现的
-位置；`server/agent/manager.ts` 的 `AppChatManager` 只接收注入的 `ChatManagerContract` 与
-`ChatViewRegistry`，`getChatManager` 是唯一注入点。句柄、绑定、Action、事实与关闭语义都在 SDK。
+**服务端是唯一计算实例**：`server/index.ts` 启动 Bun 进程；`server/compose.ts` 把平台依赖
+（WASM 运行后端、Store、memory KV、默认配置）装配成 SDK `ChatManager` 的构造选项，入口用这些选项
+构造具体实现；`server/registry.ts` 的 `ChatRegistry` 持有 `ChatManagerContract` 与
+`ChatViewRegistry`，编排 View 释放与关闭/停机。句柄、绑定、Action、事实与关闭语义都在 SDK。
 浏览器不启动 WASM 运行后端，刷新/关闭页面不结束执行；服务进程退出会结束在途执行，历史仍在 Store。
 
 **凭据与工具面只在服务端**：模型、Store、machineId 与远程 MCP 全部来自环境变量
@@ -29,21 +29,20 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 
 ## 代码布局
 
-- `core/shared/`：前后端共用 Zod 契约与展示 DTO（`chat.ts`、`sync.ts`、`chat-display-state.ts`）与
-  WASM 构建常量。
-- `core/agent/`：平台无关展示内核（不依赖 React/DOM/localStorage）。`view/projection.ts` 持有
-  `ChatReplica` 并物化 `ChatDisplayState`；`view/askUserQuestion.ts` 做问答适配。
-- `server/`：`config.ts`（环境变量与启动校验）、`agent/compose.ts`（平台装配，唯一 `new ChatManager`）、
-  `agent/manager.ts`（编排注入端口、View 生命周期与进程单例）、`store.ts`（Store 只读适配与缺表容忍）、
-  `api/index.ts`（Hono 目录/句柄/Action/payload）、`api/sync.ts`（WS → ChatYjsChannel）。
-- `frontend/remote/`：HTTP Action、WebSocket 客户端、页面控制器、目录仓储与组合根。
+- `frontend/remote/`：HTTP Action、WebSocket 客户端、页面控制器、目录仓储与组合根；同目录承载
+  `contracts.ts`（Zod wire/展示 DTO 与 `ServerInfo`）、`display-state.ts`（`ChatDisplayState` 物化）、
+  `projection.ts`（`ChatReplica` 投影）与 `logging.ts`。
+- `server/`：`index.ts`（Hono 应用：API、静态资源与 WS 升级）、`config.ts`（环境变量与启动校验）、
+  `compose.ts`（`chatManagerOptions` 平台装配）、`registry.ts`（`ChatRegistry`：View 生命周期与关闭/停机）、
+  `api/index.ts`（Hono 目录/句柄/Action/payload）、`api/sync.ts`（WS → ChatYjsChannel）、
+  `api/errors.ts`（错误映射）。
 - `frontend/chat/`、`frontend/components/`、`frontend/app/`：Chat 展示外壳、时间线与交互卡片；
-  `frontend/settings/` 只读服务端信息。
+  `frontend/chat/runtime/askUserQuestion.ts` 承载问答表单适配；`frontend/settings/` 只读服务端信息。
 - `scripts/`：WASM 构建/provenance、开发启动与探针；`wasm/generated/` 是构建产物（gitignored），
   只由服务端加载。
 
-模块规则：文件夹是模块，目录根 `index.ts` 是唯一公共出口；`core/agent/boundary.test.ts` 扫描生产
-代码，强制 `frontend/` 与 `server/` 互不引用，`core/agent` 不得引入浏览器/React 依赖。
+模块规则：文件夹是模块，目录根 `index.ts` 是唯一公共出口；`scripts/module-boundary.test.ts` 扫描生产
+代码，强制依赖方向、禁止循环，并保证 `frontend/`、`server/`、`scripts/` 互不越界。
 
 ## 数据流与生命周期
 
@@ -63,14 +62,16 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 ## 服务端配置
 
 必填：`PERI_MODEL_ID`、`PERI_MODEL_BASE_URL`、`PERI_MODEL_API_KEY`、`PERI_STORAGE_URL`、
-`PERI_STORAGE_TOKEN`、`PERI_MACHINE_ID`。可选：`PERI_MODEL_PROVIDER`、`PERI_MCP_SERVERS`、
+`PERI_STORAGE_TOKEN`、`PERI_MACHINE_ID`。可选：`PERI_MODEL_PROVIDER`、四档模型
+`PERI_MODEL_ID_FABLE`/`_OPUS`/`_SONNET`/`_HAIKU`（缺省回退 `PERI_MODEL_ID`）、`PERI_MCP_SERVERS`、
 `PERI_SERVER_HOST`、`PERI_SERVER_PORT`、`PERI_WASM_MODULE_URL`、`PERI_STATIC_ROOT`。任一解析问题
-拒绝启动；只有 `LANGFUSE_*` 传入 WASM 实例。
+拒绝启动；只有 `peri-config` 实际读取的 Langfuse 键传入 WASM 实例，未读取的同前缀键（如
+`LANGFUSE_TRACING`）不转发。
 
 ## Chat 前端
 
 设计见 `../../docs/design/peri-cf-chat-ui.md`；状态权威是 SDK `/view` 的 `SessionView` 经
-`core/agent` 物化后的展示 DTO，前端不复制状态机。
+`frontend/remote` 物化后的展示 DTO，前端不复制状态机。
 
 - `frontend/chat/runtime/useChat.ts`：装配 `ChatController`、目录查询缓存与 payload reader。
 - `frontend/chat/components/`：消息流、工具卡片、会话列表、欢迎页与交互面板；`ChatShell` 组合侧栏、
@@ -86,11 +87,12 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 
 只消费已发布 SDK 入口：主入口（`ChatManager`/`ChatService`/`ChatUserAction`/`ChatView` 契约、
 `ChatViewRegistry`、`ChatManagerContract`）、`/view`（只读副本、载荷读取、同步协议）、`/wasm`
-（运行后端启动、调度器端口、transport、关闭证据）。不引用 `@peri-sdk/src`、不新增 entry、不复制准入或
-同步规则。服务端只注入调度器端口；网络由 Emscripten fetch 执行器发起。SDK 不感知 assistant-ui。
+（运行后端启动、transport、关闭证据）。不引用 `@peri-sdk/src`、不新增 entry、不复制准入或
+同步规则。调度器与清理/启动超时由 SDK 内部自持，服务端不注入；网络由 Emscripten fetch 执行器发起。
+SDK 不感知 assistant-ui。
 
-`core/shared/chat.ts` 与 `sync.ts` 的 Zod schema 是 wire/展示 DTO 的单一来源。ACP 投影由 SDK
-`ChatView`/`ChatReplica` 负责，应用只做展示适配。
+`frontend/remote/contracts.ts` 与 `display-state.ts` 的 Zod schema 是浏览器侧 wire/展示 DTO 的单一
+来源。ACP 投影由 SDK `ChatView`/`ChatReplica` 负责，应用只做展示适配。
 
 **SDK dist 前置**：CF 通过 `file:../@peri-sdk` 解析 `node_modules/@peri-code/sdk`。干净 CI 先在 SDK
 执行 `MISE_ENV=wasm mise exec -- bun run build`，再在 CF 执行 `bun install --force`（file 依赖变为
@@ -104,7 +106,7 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 - `bun run start`：生产启动 Bun 服务（需环境变量与已构建资源）。
 - `bun run typecheck`、`bun test`、`./node_modules/.bin/vite build`：TS、行为测试与前端构建。
 - `bun run build`：`prepare:wasm` + Vite；`build:wasm` 构建 CF 专用 profile 与 provenance；
-  `prepare:wasm` 只校验并原子发布到 `wasm/generated`。`core/shared/runtime-limits.ts` 属于 wasm
+  `prepare:wasm` 只校验并原子发布到 `wasm/generated`。`scripts/wasm-profile.ts` 的内存常量属于 wasm
   构建输入。
 
 默认没有本地文件/终端工具；远程能力需经 `PERI_MCP_SERVERS` 单独配置。单进程 memory storage 不能宣称

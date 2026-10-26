@@ -17,9 +17,9 @@ Peri WASM Agent 的 Bun 长驻服务 + 浏览器 Chat。服务端持有 `ChatMan
   → peri-wasm Host（每次激活一个）→ 模型 / Turso Store / 远程 MCP
 ```
 
-- **服务端**：`server/index.ts` 是 Bun 入口；`server/agent/compose.ts` 是平台装配（唯一构造具体
-  `ChatManager` 的位置）；`server/agent/manager.ts` 编排注入的 `ChatManagerContract` 与
-  `ChatViewRegistry`，`getChatManager` 是唯一注入点；`server/api/index.ts` 只做 HTTP 边界校验与错误
+- **服务端**：`server/index.ts` 是 Bun 入口；`server/compose.ts` 装配 `chatManagerOptions`；
+  `server/registry.ts` 的 `ChatRegistry` 持有 `ChatManagerContract` 与 `ChatViewRegistry`，
+  编排 View 生命周期与关闭/停机；`server/api/index.ts` 只做 HTTP 边界校验与错误
   映射；`server/api/sync.ts` 把 Bun WebSocket 适配为 SDK `ChatYjsChannel`。
 - **前端**：`frontend/remote/controller.ts` 是页面控制器；`frontend/chat/runtime/useChat.ts` 装配控制器、
   目录查询与载荷读取；`frontend/chat/` 是展示外壳与时间线。
@@ -54,8 +54,9 @@ HTTP 状态不单独决定重试。加载路径的绑定冲突映射 409 `bindin
 | 变量 | 必填 | 说明 |
 | --- | --- | --- |
 | `PERI_MODEL_PROVIDER` | 否 | `openai`（默认）或 `anthropic` |
-| `PERI_MODEL_ID` | 是 | 模型 ID |
-| `PERI_MODEL_BASE_URL` | 是 | http(s) 上游 |
+| `PERI_MODEL_ID` | 是 | 主模型 ID，同时是四档未单独配置时的回退值 |
+| `PERI_MODEL_ID_FABLE` / `_OPUS` / `_SONNET` / `_HAIKU` | 否 | 各档模型 ID；缺省回退 `PERI_MODEL_ID` |
+| `PERI_MODEL_BASE_URL` | 是 | http(s) 上游；Anthropic 填 `https://api.anthropic.com`，SDK 追加 `/v1/messages` |
 | `PERI_MODEL_API_KEY` | 是 | 模型凭据，只在服务端 |
 | `PERI_STORAGE_URL` | 是 | Turso/libSQL http(s) 地址 |
 | `PERI_STORAGE_TOKEN` | 是 | Store 凭据，只在服务端 |
@@ -64,9 +65,22 @@ HTTP 状态不单独决定重试。加载路径的绑定冲突映射 409 `bindin
 | `PERI_SERVER_HOST` / `PERI_SERVER_PORT` | 否 | 默认 `127.0.0.1:8787` |
 | `PERI_STATIC_ROOT` | 否 | 前端静态目录，默认 `dist/client` |
 | `PERI_WASM_MODULE_URL` | 否 | WASM 胶水位置（file/http），默认 `wasm/generated/peri-wasm.js` |
-| `LANGFUSE_*` | 否 | 只有此前缀的变量会交给 WASM 实例 |
+| Langfuse 键 | 否 | 只转发 `peri-config` 实际读取的键（`LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_BASE_URL` 及可选调优键）；未读取的同前缀键（如 `LANGFUSE_TRACING`）不传给 WASM 实例 |
 
 任何配置解析问题都会拒绝启动并一次性报告缺失项；密钥不进入前端、不写日志。
+
+四档示例（Anthropic 官方端点；实际请求发送到 `https://api.anthropic.com/v1/messages`）：
+
+```bash
+PERI_MODEL_PROVIDER=anthropic
+PERI_MODEL_BASE_URL=https://api.anthropic.com
+PERI_MODEL_API_KEY=...
+PERI_MODEL_ID=claude-sonnet-5-5
+PERI_MODEL_ID_FABLE=claude-fable-5-1
+PERI_MODEL_ID_OPUS=claude-opus-5-5
+PERI_MODEL_ID_SONNET=claude-sonnet-5-5
+PERI_MODEL_ID_HAIKU=claude-haiku-5-5
+```
 
 ## 本地运行
 
@@ -94,14 +108,14 @@ bun test
 bun run build        # prepare:wasm + Vite；需要 WASM 工具链
 ```
 
-- `bun test` 覆盖 core、frontend、scripts 与 server；真实模型/Store/远程 MCP 不在单测内。
+- `bun test` 覆盖 frontend、scripts 与 server；真实模型/Store/远程 MCP 不在单测内。
 - 浏览器包检查：`dist/client` 不应出现 `PERI_MODEL_API_KEY`、`PERI_STORAGE_TOKEN`、`node:fs` 或
   `@tursodatabase`。
 - 真实运行后端验收需要匹配源码的 WASM 产物与可用模型/Store；未验证平台必须标记 blocked。
 
 ## 部署限制
 
-- 单进程 ownership：默认 `createStorage()`（unstorage memory driver）作为 `sessionOwnershipStorage`，由 `ChatManager` 内部构造协调器；多实例部署必须提供共享 storage 与路由层串行化/崩溃清理；不能宣称跨实例接管。
+- 单进程 ownership：生产固定 `createStorage()`（unstorage memory driver）作为 `kv`，由 `ChatManager` 内部构造协调器；多实例部署需要改造 `server/compose.ts` 接入共享 storage，并由路由层做串行化/崩溃清理；不能宣称跨实例接管。
 - 进程退出会结束在途执行；历史仍在 Store，可重新加载续聊，但不恢复旧执行。
 - 工具面只保留远程 Streamable HTTP MCP；WASM 部署没有进程内文件/终端 builtin。
 - hosted Workers/DO 路径已删除；Bun 服务是唯一后端入口。没有认证、限流或多租户隔离。

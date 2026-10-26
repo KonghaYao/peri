@@ -2,7 +2,7 @@ import type { PeriInstancePort } from "../src/agent/port";
 import type {
     ChatDatabase,
     ChatSessionDirectoryEntry,
-} from "../src/chat/types";
+} from "../src/contracts/chat";
 import type { ChatFact } from "../src/contracts/chat";
 import type { InteractionAnswer } from "../src/contracts/interaction";
 import {

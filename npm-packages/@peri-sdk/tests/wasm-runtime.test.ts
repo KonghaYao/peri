@@ -163,3 +163,40 @@ test("加载失败且端口清理失败不能确认释放", async () => {
   }).catch((error) => error);
   expect((await error.cleanup).confirmed).toBe(false);
 });
+
+test("未注入 scheduler 时每个运行后端自持调度器，连续启动均可用", async () => {
+  const schedulers: Array<(callback: () => void) => unknown> = [];
+  const moduleFactory = async (options: Readonly<Record<string, unknown>>) => {
+    schedulers.push(options.periSetImmediate as (callback: () => void) => unknown);
+    return { PeriWasmAcp: { start: async () => nativePort().port } };
+  };
+
+  const first = await startWasmRuntime({ configJson: "{}", moduleFactory });
+  await first.close();
+  expect(() => schedulers[0]!(() => {})).toThrow("WASM scheduler is closed");
+
+  const second = await startWasmRuntime({ configJson: "{}", moduleFactory });
+  expect(() => schedulers[1]!(() => {})).not.toThrow();
+  await second.close();
+  expect(() => schedulers[1]!(() => {})).toThrow("WASM scheduler is closed");
+});
+
+test("加载期间 abort 关闭运行后端自持的 scheduler", async () => {
+  const controller = new AbortController();
+  const loading = deferred<PeriWasmModule>();
+  const started = deferred<void>();
+  let schedule: ((callback: () => void) => unknown) | undefined;
+  const opening = startWasmRuntime({ configJson: "{}", signal: controller.signal,
+    moduleFactory: (options) => {
+      schedule = options.periSetImmediate as (callback: () => void) => unknown;
+      started.resolve();
+      return loading.promise;
+    },
+  }).catch((error) => error);
+  await started.promise;
+  controller.abort();
+  const error = await opening;
+  expect(() => schedule!(() => {})).toThrow("WASM scheduler is closed");
+  loading.resolve({ PeriWasmAcp: { start: async () => nativePort().port } });
+  expect(await error.eventualCleanup).toEqual({ confirmed: true });
+});

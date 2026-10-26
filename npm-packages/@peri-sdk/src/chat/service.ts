@@ -71,7 +71,7 @@ export class ChatService implements ChatServiceContract {
     readonly id: string;
 
     private readonly path?: string;
-    private readonly defaults: ChatServiceOptions["defaults"];
+    private readonly sessionInit: ChatServiceOptions["sessionInit"];
     private readonly agentConfig: unknown;
     private readonly runtime: ChatServiceOptions["runtime"];
     private readonly database: ChatServiceOptions["database"];
@@ -106,7 +106,7 @@ export class ChatService implements ChatServiceContract {
         this.state = new ChatBinding(options.id);
         this.facts = new ChatFactHub(options.id);
         this.path = options.path;
-        this.defaults = options.defaults;
+        this.sessionInit = options.sessionInit;
         this.agentConfig = options.agentConfig;
         this.runtime = options.runtime;
         this.database = options.database;
@@ -115,12 +115,15 @@ export class ChatService implements ChatServiceContract {
         this.instanceFactory = options.instanceFactory;
         this.acquireWasmRuntime = options.acquireWasmRuntime;
         this.onClosedHandler = options.onClosed;
-        this.lifecycleOptions = resolveChatLifecycle(options.lifecycle);
+        this.lifecycleOptions = resolveChatLifecycle(
+            this.runtime.kind,
+            options.lifecycle,
+        );
         this.candidateContext = {
             chatId: this.id,
             database: this.database,
             path: this.path,
-            defaults: this.defaults,
+            sessionInit: this.sessionInit,
             index: this.index,
             acquireSession: (sessionId) => this.acquireSession(sessionId),
             releaseOwnership: (sessionId) => this.releaseOwnership(sessionId),
@@ -342,7 +345,7 @@ export class ChatService implements ChatServiceContract {
                 "create_new_session requires an empty chat handle",
             );
         }
-        const path = this.path ?? this.defaults.path;
+        const path = this.path ?? this.sessionInit.path;
         if (!path) {
             throw new ChatNotReadyError(
                 requestId,
@@ -547,8 +550,8 @@ export class ChatService implements ChatServiceContract {
             const result = await activation.port.bindNew({
                 path,
                 title,
-                instructions: this.defaults.instructions,
-                mcpServers: this.defaults.mcpServers,
+                instructions: this.sessionInit.instructions,
+                mcpServers: this.sessionInit.mcpServers,
                 onSessionCreated: registerCreated,
             });
             const returned =
@@ -817,7 +820,7 @@ export class ChatService implements ChatServiceContract {
                 chatId: this.id,
                 path,
                 agentConfig: this.agentConfig,
-                defaults: this.defaults,
+                sessionInit: this.sessionInit,
                 runtime: this.runtime,
                 signal: controller.signal,
                 database: this.database,

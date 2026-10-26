@@ -1,13 +1,6 @@
 import { useEffect, useState } from "react";
 import { Sparkles, X } from "lucide-react";
-
-interface ServerInfo {
-  model: { provider: string; id: string; baseUrl: string };
-  storage: { url: string };
-  mcp: { name: string; url: string }[];
-  workspace: string;
-  sessionCwd: string;
-}
+import type { ServerInfo } from "../remote";
 
 /**
  * 只读服务端信息：模型、存储与 MCP 由后端环境变量配置，前端不再保存任何凭据。
@@ -46,7 +39,11 @@ export function ServerInfoDialog({ onClose }: { onClose: () => void }) {
           <div className="settings-group">
             <h2>模型服务</h2>
             <label className="settings-field"><span>Provider</span><input readOnly value={info.model.provider} /></label>
-            <label className="settings-field"><span>模型 ID</span><input readOnly value={info.model.id} /></label>
+            {Object.entries(info.model.tiers).map(([tier, model]) => (
+              <label className="settings-field" key={tier}>
+                <span>模型 ID（{tier}）</span><input readOnly value={model} />
+              </label>
+            ))}
             <label className="settings-field"><span>Base URL</span><input readOnly value={info.model.baseUrl} /></label>
           </div>
           <div className="settings-group">

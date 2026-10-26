@@ -4,7 +4,8 @@ import {
   type ChatReplicaStatus,
   type ChatYjsChannel,
 } from "@peri-code/sdk/view";
-import { materializeChatDisplayState, type Chat, type ChatDisplayState } from "../../shared";
+import type { Chat } from "./contracts";
+import { materializeChatDisplayState, type ChatDisplayState } from "./display-state";
 
 /**
  * 浏览器展示投影：只读 `ChatReplica`（其底层为 SDK `ChatDocument` 文档对）。

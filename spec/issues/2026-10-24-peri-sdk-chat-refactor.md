@@ -52,7 +52,7 @@
 | D6 | 已执行：`listSessions` 只返回目录事实，不再提供每会话运行态；选中会话运行态来自副本。 |
 | D7 | 已实现：内容寻址 payload ref 与运行侧预算；回归见 `tests/peri-instance.test.ts`、`tests/tool-payloads.test.ts`。 |
 | D8 | 部署限制：CF SessionOwnership 默认 `createStorage()`（unstorage memory driver），仍是单进程；多实例需共享 storage，并由路由层保证单实例绑定、换绑/崩溃清理。 |
-| D9 | 公开面：Session ownership 只公开 `SessionOwnershipStorage`（type）与 `clearSessionOwnership`（function）；`SessionOwnership` 协调器、`KvSessionOwnership`、`SessionOwnershipConflictError` 与 key 函数均为内部实现，不从主入口、`/portable` 或 `/view` 导出。 |
+| D9 | 公开面：Session ownership 只公开 `KvStorage`（type）与 `clearSessionOwnership`（function）；`SessionOwnership` 协调器、`KvSessionOwnership`、`SessionOwnershipConflictError` 与 key 函数均为内部实现，不从主入口、`/portable` 或 `/view` 导出。 |
 
 ## 5. 验收 A01-A22
 

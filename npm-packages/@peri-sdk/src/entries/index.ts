@@ -8,11 +8,9 @@
 
 export * from "./chat";
 
-export { BareHarnessConfig } from "../config/bare-harness-config";
+export { BareHarnessConfig } from "../config/peri-bare-harness-config";
 export type { MetaHarnessKey, PeriConfig } from "../config/peri-config";
 export { TursoStorage } from "../storage/turso-storage";
-export type { SessionStorage } from "../storage/types";
-export type { SessionSummary } from "../storage/session-summary";
 export {
     SESSION_BY_ID_SQL,
     SESSION_LIST_SQL,

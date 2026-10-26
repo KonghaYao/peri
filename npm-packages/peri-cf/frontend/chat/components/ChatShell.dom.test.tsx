@@ -11,9 +11,14 @@ const { createElement, useRef, useState } = await import('react');
 
 afterEach(() => cleanup());
 
-const summary = (id: string, title = id) => ({
-  id, sessionId: id, title, updatedAt: '2026-10-20T00:00:00Z',
+const summary = (sessionId: string, title = sessionId) => ({
+  sessionId, title, updatedAt: '2026-10-20T00:00:00Z',
   cwd: '/workspace', messageCount: 0, createdAt: '2026-10-20T00:00:00Z',
+});
+
+/** 展示身份 `Chat` 由 `sessionId` 派生，和 `toChat` 一致。 */
+const selectedChat = (sessionId: string, title = sessionId) => ({
+  id: sessionId, title, updatedAt: '2026-10-20T00:00:00Z',
 });
 
 const emptyState = (id: string) => ({
@@ -33,7 +38,7 @@ type ChatFacade = ChatShellChat;
 function fakeChat(options: FakeOptions = {}) {
   const ref = { id: options.initialId ?? null };
   const calls = { reload: 0, refresh: 0, selected: [] as (string | null)[] };
-  const selected = () => (ref.id ? summary(ref.id) : null);
+  const selected = () => (ref.id ? selectedChat(ref.id) : null);
   return {
     ref,
     calls,
@@ -92,17 +97,17 @@ function Harness({
   const chat = {
     ...fakeChat().chat,
     chats: [...existingChats, ...createdIds].map((id) => summary(id)),
-    selected: selectedId ? summary(selectedId) : null,
+    selected: selectedId ? selectedChat(selectedId) : null,
     historyReady: !failed,
     loadState: failed ? 'failed' : 'ready',
     chatError: failed ? '创建失败' : '',
     error: failed ? '创建失败' : '',
     banners: errorBanners({ listError: '', chatError: failed ? '创建失败' : '', loadState: failed ? 'failed' : 'ready' }),
     currentChatId: () => selectedRef.current,
-    selectChat: async (target: { id: string } | null) => {
+    selectChat: async (target: { sessionId: string } | null) => {
       calls.selected += 1;
       if (target === null && createFailsOnce && attempts.current++ === 0) return choose(null, false);
-      return choose(target?.id ?? createId());
+      return choose(target?.sessionId ?? createId());
     },
     reloadChat: async () => {
       calls.reload += 1;

@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import {
   buildAskUserQuestionContent, type AskUserQuestionDrafts,
 } from './askUserQuestion';
-import type { AskUserQuestionDTO as AskUserQuestion } from '../../shared';
+import type { AskUserQuestionDTO as AskUserQuestion } from '../../remote';
 
 function questions(): AskUserQuestion[] {
   return [

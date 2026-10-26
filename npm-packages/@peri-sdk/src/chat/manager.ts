@@ -6,14 +6,13 @@ import {
 } from "../wasm/runtime-pool";
 import { startWasmRuntime } from "../wasm/runtime";
 import { withDeadline } from "../util/deadline";
+import type { ChatDatabase, ChatSessionDirectoryEntry } from "../contracts/chat";
 import type {
-    ChatDatabase,
-    ChatDefaults,
+    ChatSessionInit,
     ChatRuntime,
     ChatLifecycleOptions,
     ChatManager as ChatManagerContract,
     ChatManagerOptions,
-    ChatSessionDirectoryEntry,
     SessionOwnership,
 } from "./types";
 import { ChatService } from "./service";
@@ -50,7 +49,7 @@ export class ChatManager implements ChatManagerContract {
     private readonly database: ChatDatabase;
     private readonly sessionOwnership: SessionOwnership;
     private readonly runtime: ChatRuntime;
-    private readonly defaults: ChatDefaults;
+    private readonly sessionInit: ChatSessionInit;
     private readonly instanceFactory: ChatInstanceFactory;
     private readonly wasmRuntimes?: WasmRuntimePool;
     private readonly lifecycle: Required<ChatLifecycleOptions>;
@@ -74,7 +73,7 @@ export class ChatManager implements ChatManagerContract {
         }
         // 调用方只注入存储端口；每个 Manager 自建 ownership，owner 身份不共享。
         const sessionOwnership = new KvSessionOwnership(
-            options.sessionOwnershipStorage,
+            options.kv,
         );
         if (
             !options.chatConfig ||
@@ -94,8 +93,11 @@ export class ChatManager implements ChatManagerContract {
         this.sessionOwnership = sessionOwnership;
         // 运行后端配置在构造时快照；端口/模块工厂等实例仍由外部借用。
         this.runtime = { ...options.chatConfig.runtime };
-        this.defaults = { ...options.chatConfig.defaults };
-        this.lifecycle = resolveChatLifecycle(options.chatConfig.lifecycle);
+        this.sessionInit = { ...options.chatConfig.sessionInit };
+        this.lifecycle = resolveChatLifecycle(
+            this.runtime.kind,
+            options.chatConfig.lifecycle,
+        );
         // 默认工厂只绑定 Manager 的生命周期预算；测试仍可注入 fake port。
         const lifecycle = this.lifecycle;
         this.instanceFactory = options.instanceFactory
@@ -122,17 +124,9 @@ export class ChatManager implements ChatManagerContract {
                         moduleUrl: runtime.moduleUrl,
                         moduleFactory: runtime.moduleFactory,
                         env: runtime.env,
-                        moduleOptions: runtime.moduleOptions,
-                        ports: runtime.ports,
                         signal,
-                        cleanupTimeoutMs: runtime.cleanupTimeoutMs,
-                        onLifecycle: runtime.onLifecycle,
                         onDiagnostic: runtime.onDiagnostic,
                     }),
-                {
-                    startupTimeoutMs: runtime.startupTimeoutMs,
-                    closeTimeoutMs: runtime.cleanupTimeoutMs,
-                },
             );
         }
     }
@@ -146,7 +140,7 @@ export class ChatManager implements ChatManagerContract {
         const chat = new ChatService({
             id,
             path: options?.path,
-            defaults: this.defaults,
+            sessionInit: this.sessionInit,
             agentConfig: this.agentConfig,
             runtime: this.runtime,
             database: this.database,

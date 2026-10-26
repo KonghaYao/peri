@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
-import { buildSettings, cleanBuildEnvironment, DEFAULT_WASM_PROFILE, wasmMemory, wasmProfile } from "./wasm-profile";
-import { CF_WASM_MAX_MEMORY_BYTES, CF_WASM_STACK_BYTES } from "../core/shared";
+import {
+  buildSettings, CF_WASM_MAX_MEMORY_BYTES, CF_WASM_STACK_BYTES, cleanBuildEnvironment,
+  DEFAULT_WASM_PROFILE, wasmMemory, wasmProfile,
+} from "./wasm-profile";
 import { capture } from "./wasm-tools";
 
 const repoRoot = resolve(import.meta.dir, "../../..");

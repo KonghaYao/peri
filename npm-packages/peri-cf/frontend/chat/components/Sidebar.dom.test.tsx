@@ -9,8 +9,8 @@ const { createElement } = await import('react');
 
 afterEach(() => cleanup());
 
-const chat = (id: string, title: string) => ({
-  id, sessionId: id, title, updatedAt: '2026-10-20T00:00:00Z',
+const chat = (sessionId: string, title: string) => ({
+  sessionId, title, updatedAt: '2026-10-20T00:00:00Z',
   cwd: '/workspace', messageCount: 1, createdAt: '2026-10-20T00:00:00Z',
 });
 
@@ -21,7 +21,7 @@ function setup(overrides: Record<string, unknown> = {}) {
     chats: [chat('a', '会话 A'), chat('b', '会话 B')],
     selectedId: 'a', selectedRunning: false, loading: false, disabled: false, open: true,
     onClose: () => {}, onNew: () => {}, onRefresh: () => refreshed.push(1),
-    onSelect: (target: { id: string }) => selected.push(target.id),
+    onSelect: (target: { sessionId: string }) => selected.push(target.sessionId),
     ...overrides,
   }));
   return { selected, refreshed };

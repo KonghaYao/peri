@@ -1,4 +1,4 @@
-import { chatDirectoryResponseSchema, type ChatSummary } from "@core/shared";
+import { chatDirectoryResponseSchema, type ChatSummary } from "./contracts";
 
 /** 目录不可达：保留明确失败，不返回伪造的空列表。 */
 export class ChatDirectoryUnavailableError extends Error {

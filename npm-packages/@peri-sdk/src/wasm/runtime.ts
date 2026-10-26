@@ -2,7 +2,8 @@ import { WasmAcpTransport } from "./transport";
 import { DeadlineError, withDeadline } from "../util/deadline";
 import { instantiatePeriWasm, type PeriWasmModule } from "./loader";
 import type { WasmDnsPort, WasmNetworkPort } from "./ports";
-import type { WasmSchedulerPort } from "./scheduler";
+import { createSchedulerPort, type WasmSchedulerPort } from "./scheduler";
+import { DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS } from "./budget";
 
 /**
  * Owned Emscripten ACP runtime startup for platform-neutral runtimes (browsers, Workers with
@@ -65,19 +66,18 @@ export interface WasmRuntimeOptions {
   onDiagnostic?: (kind: WasmRuntimeDiagnosticKind, error: unknown) => void;
 }
 
-export const DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS = 20_000;
-
-function runtimeModuleOptions(options: WasmRuntimeOptions): Record<string, unknown> {
+function runtimeModuleOptions(
+  options: WasmRuntimeOptions,
+  scheduler: WasmSchedulerPort,
+): Record<string, unknown> {
   const ports = options.ports ?? {};
   const merged: Record<string, unknown> = { ...options.moduleOptions };
   if (ports.dns) merged.periDns = ports.dns;
   if (ports.network) merged.periNet = ports.network.module;
-  if (ports.scheduler) {
-    merged.periSetImmediate = ports.scheduler.schedule;
-    merged.periClearImmediate = ports.scheduler.cancel;
-    merged.periSetTimeout = ports.scheduler.schedule;
-    merged.periClearTimeout = ports.scheduler.cancel;
-  }
+  merged.periSetImmediate = scheduler.schedule;
+  merged.periClearImmediate = scheduler.cancel;
+  merged.periSetTimeout = scheduler.schedule;
+  merged.periClearTimeout = scheduler.cancel;
   if (ports.workerSockets !== undefined) merged.periWorkerSockets = ports.workerSockets;
   return merged;
 }
@@ -89,13 +89,21 @@ export async function startWasmRuntime(options: WasmRuntimeOptions): Promise<Was
   const diagnose = (kind: WasmRuntimeDiagnosticKind, error: unknown): void => options.onDiagnostic?.(kind, error);
   const signal = options.signal;
   const network = options.ports?.network;
-  const scheduler = options.ports?.scheduler;
   const timeout = options.cleanupTimeoutMs ?? DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS;
 
   if (signal?.aborted) {
     notify({ type: "failed" });
     throw new WasmRuntimeStartupError(signal.reason, Promise.resolve({ confirmed: true }));
   }
+
+  // 调用方未注入时由本次运行后端自持，并在关闭/中止路径只关一次。
+  const scheduler = options.ports?.scheduler ?? createSchedulerPort();
+  let schedulerClosed = false;
+  const closeScheduler = (): void => {
+    if (schedulerClosed) return;
+    schedulerClosed = true;
+    scheduler.close();
+  };
 
   let native: Awaited<ReturnType<PeriWasmModule["PeriWasmAcp"]["start"]>> | undefined;
   let transport: WasmAcpTransport | undefined;
@@ -106,7 +114,7 @@ export async function startWasmRuntime(options: WasmRuntimeOptions): Promise<Was
   let cleanupFailure: unknown;
 
   const stopOwnedPorts = (): void => {
-    scheduler?.close();
+    closeScheduler();
     network?.close();
   };
   const recordCleanupFailure = (error: unknown, permanent = false): void => {
@@ -160,7 +168,7 @@ export async function startWasmRuntime(options: WasmRuntimeOptions): Promise<Was
 
   const starting = Promise.resolve().then(async (): Promise<WasmAcpTransport> => {
     if (signal?.aborted) throw signal.reason;
-    const moduleOptions = runtimeModuleOptions(options);
+    const moduleOptions = runtimeModuleOptions(options, scheduler);
     const module = await instantiatePeriWasm({
       moduleUrl: options.moduleUrl, env: options.env, moduleOptions,
       moduleFactory: options.moduleFactory,
@@ -182,7 +190,7 @@ export async function startWasmRuntime(options: WasmRuntimeOptions): Promise<Was
   const aborted = new Promise<never>((_, reject) => {
     if (!signal) return;
     abortListener = () => {
-      if (!nativeStartupIssued) scheduler?.close();
+      if (!nativeStartupIssued) closeScheduler();
       try { network?.close(); }
       catch (error) { recordCleanupFailure(error); }
       reject(signal.reason ?? new Error("Peri WASM startup aborted"));

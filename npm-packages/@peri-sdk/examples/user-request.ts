@@ -1,4 +1,4 @@
-// 详细设计用的场景伪代码；sessionOwnershipStorage 等由宿主提供。
+// 详细设计用的场景伪代码；kv 等由宿主提供。
 // 实际就是 meta_harness 全部关闭
 const bearHarness = BareHarnessConfig;
 
@@ -13,22 +13,20 @@ const config = {
 // session 的存储器配置，只需传递给 peri，peri 会自动连接
 const storage = new TursoStorage({ url: "turso://<database>.turso.io", authToken: "<secret>" });
 
-const workspaceId = "workspaceId";
+// 宿主持久化的 UUID，标识逻辑执行环境；不要用 workspaceId/sessionId 代替。
+const machineId = "<stable-machine-uuid>";
 const workspacePath = "/tmp/peri-workspace";
 // 调用方注入存储端口；unstorage 由宿主安装，SDK 不 import 其实现。
 const manager = new ChatManager({
     agentConfig: {
         cwd: workspacePath,
         settings: { config: { ...config, active_alias: "sonnet" } },
-        storage: { url: "turso://<database>.turso.io", authToken: "<secret>" },
-        machineId: workspaceId,
+        storage: storage.storageConfig,
+        machineId,
     },
-    database: {
-        // 只读目录：业务侧按 Store 的 threads 表实现。
-        listSessions: (path) => storage.getSessions(path ?? workspacePath),
-        getSession: (id) => storage.getSession(id),
-    },
-    sessionOwnershipStorage: managedAgentStorage,
+    // 只读 Session 目录：TursoStorage 直接实现 ChatDatabase。
+    database: storage,
+    kv: managedAgentStorage,
     chatConfig: {
         // 执行装配由调用方选择：WASM 部署用 runtime.kind="wasm"；
         // 其他部署用 runtime.kind="transport" 注入自有 transport。SDK 不启动 Peri 或 Workspace 进程。
@@ -36,7 +34,7 @@ const manager = new ChatManager({
             kind: "wasm",
             moduleUrl: new URL("./peri-wasm.js", import.meta.url),
         },
-        defaults: {
+        sessionInit: {
             path: workspacePath,
             // ACP 无标准 instructions 字段；Peri 用 session/new._meta["peri.instructions"] 传递并冻结。
             instructions: "你是一个有趣的 AI 助手，能回答用户的问题",

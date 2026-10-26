@@ -5,7 +5,7 @@ import {
   clearSessionOwnership,
   sessionOwnershipKey,
 } from "../src/chat/ownership";
-import type { SessionOwnershipStorage } from "../src/chat/types";
+import type { KvStorage } from "../src/chat/types";
 import { OwnershipProbe } from "../tests/ownership-probe";
 
 // 读后写不是原子操作：两个 Manager 并发 acquire 可能都成功。SDK 不检测该
@@ -315,7 +315,7 @@ describe("clearSessionOwnership", () => {
 
   test("requires a storage with removeItem", async () => {
     await expect(
-      clearSessionOwnership({} as SessionOwnershipStorage, "session-1"),
+      clearSessionOwnership({} as KvStorage, "session-1"),
     ).rejects.toBeInstanceOf(TypeError);
   });
 });
@@ -323,7 +323,7 @@ describe("clearSessionOwnership", () => {
 describe("KvSessionOwnership storage validation", () => {
   test("rejects objects without the 3-method port", () => {
     expect(
-      () => new KvSessionOwnership({} as SessionOwnershipStorage),
+      () => new KvSessionOwnership({} as KvStorage),
     ).toThrow(TypeError);
   });
 });

@@ -127,10 +127,10 @@ export function Sidebar({
               <div className="flex flex-col gap-0.5">
                 {group.chats.map((chat) => (
                   <SidebarThreadRow
-                    key={chat.id}
+                    key={chat.sessionId}
                     chat={chat}
-                    selected={chat.id === selectedId}
-                    running={chat.id === selectedId ? selectedRunning : false}
+                    selected={chat.sessionId === selectedId}
+                    running={chat.sessionId === selectedId ? selectedRunning : false}
                     disabled={disabled}
                     onSelect={() => onSelect(chat)}
                   />

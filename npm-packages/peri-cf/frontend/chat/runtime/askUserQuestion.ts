@@ -1,4 +1,4 @@
-import type { AskUserQuestionDTO as AskUserQuestion } from "../../shared";
+import type { AskUserQuestionDTO as AskUserQuestion } from "../../remote";
 
 /**
  * AskUserQuestion 的回答内容契约：答案按问题 ID 回传，单选题为 string，

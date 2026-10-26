@@ -35,7 +35,7 @@ async function fixture() {
   await file("Cargo.toml", '[workspace]\nmembers=["peri-wasm"]\n[profile.release]\nopt-level="z"\nlto="thin"\ncodegen-units=16\n[profile.cf-wasm-size]\ninherits="release"\nopt-level="z"\nlto="thin"\ncodegen-units=16\n[profile.cf-wasm-speed]\ninherits="release"\nopt-level=3\nlto="thin"\ncodegen-units=16\n');
   for (const name of ["Cargo.lock", "peri-wasm/Cargo.toml", "peri-wasm/src/lib.rs", "peri-wasm/build.rs",
     ".cargo/config.toml", "patches/tokio.patch", "scripts/cargo-wasm.sh", "scripts/cargo-rmcp-patched.sh",
-    "scripts/prepare-emscripten.sh", "npm-packages/peri-cf/core/shared/runtime-limits.ts",
+    "scripts/prepare-emscripten.sh", "npm-packages/peri-cf/scripts/wasm-profile.ts",
     "npm-packages/peri-cf/scripts/build-wasm.ts", "npm-packages/peri-cf/scripts/wasm-tools.ts"])
     await file(name, name);
   await file("scripts/cargo-wasm.sh", await readFile(resolve(import.meta.dir, "../../../scripts/cargo-wasm.sh"), "utf8"));
@@ -63,7 +63,7 @@ describe("CF WASM build provenance", () => {
 
   for (const name of ["peri-wasm/src/lib.rs", "peri-wasm/src/new-untracked.rs", "Cargo.lock",
     "scripts/cargo-wasm.sh", "patches/tokio.patch", ".cargo/config.toml",
-    "npm-packages/peri-cf/core/shared/runtime-limits.ts", "npm-packages/peri-cf/scripts/wasm-tools.ts"])
+    "npm-packages/peri-cf/scripts/wasm-profile.ts", "npm-packages/peri-cf/scripts/wasm-tools.ts"])
     test(`rejects changed or newly added input ${name}`, async () => {
       const setup = await fixture();
       await writeProvenance(setup.source, setup.inputs, 10);

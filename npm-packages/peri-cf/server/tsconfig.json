@@ -3,11 +3,7 @@
   "compilerOptions": {
     "paths": {
       "@/*": ["../frontend/*"],
-      "@core/*": ["../core/*"],
       "@peri-code/sdk": ["../../@peri-sdk/src/entries/index.ts"],
-      "@peri-code/sdk/portable": ["../../@peri-sdk/src/entries/portable.ts"],
-      "@peri-code/sdk/wasm": ["../../@peri-sdk/src/entries/wasm.ts"],
-      "@peri-code/sdk/wasm-node": ["../../@peri-sdk/src/entries/wasm-node.ts"],
       "@peri-code/sdk/view": ["../../@peri-sdk/src/entries/view.ts"]
     }
   },

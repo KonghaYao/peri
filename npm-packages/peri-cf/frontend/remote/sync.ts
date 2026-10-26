@@ -1,5 +1,5 @@
 import { frameBytes, MAX_SYNC_FRAME_BYTES, type ChatYjsChannel } from "@peri-code/sdk/view";
-import type { ChatProjection } from "@core/agent";
+import type { ChatProjection } from "./projection";
 
 /** 连接状态只描述物理通道；副本 readiness/首次同步由投影另行报告。 */
 export type SyncConnectionStatus = "connecting" | "open" | "closed" | "failed";

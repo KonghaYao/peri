@@ -6,11 +6,10 @@ import {
     ChatManager,
     TursoStorage,
     type PeriConfig,
-    type SessionStorage,
 } from "../../src/entries/index";
 import { WasmAcpTransport } from "../../src/entries/wasm";
-import { DemoOwnershipStorage } from "./demo-storage";
-import { createDemoApp, sessionDatabase } from "./chat-demo";
+import { DemoKvStorage } from "./demo-storage";
+import { createDemoApp } from "./chat-demo";
 
 const configuredWorkspace = Bun.env.PERI_WORKSPACE;
 if (!configuredWorkspace) throw new Error("PERI_WORKSPACE is required");
@@ -36,7 +35,7 @@ const sessionView = await Bun.build({
 if (!sessionView.success) throw new Error(`Cannot bundle Session view: ${sessionView.logs.join("; ")}`);
 const sessionViewJs = await sessionView.outputs[0]!.text();
 
-const storage: SessionStorage = new TursoStorage({
+const database = new TursoStorage({
     url: databaseUrl,
     // Peri currently requires a nonempty remote credential even for local sqld without auth.
     authToken: "local-dev",
@@ -77,17 +76,18 @@ const config = {
         },
     },
 } satisfies PeriConfig;
+// 本地 demo 固定 UUID；生产必须持久化并复用，不要每次启动随机。
 const machineId = Bun.env.PERI_WASM_MACHINE_ID ?? "00000000-0000-4000-8000-000000000001";
 
 const manager = new ChatManager({
     agentConfig: {
         cwd: workspace,
         settings: config,
-        storage: { url: databaseUrl, authToken: "local-dev" },
+        storage: database.storageConfig,
         machineId,
     },
-    database: sessionDatabase(storage),
-    sessionOwnershipStorage: new DemoOwnershipStorage(),
+    database,
+    kv: new DemoKvStorage(),
     chatConfig: {
         // transport 入口按 path 装配独立运行后端；ChatManager 不持有 WASM 运行后端池。
         runtime: {
@@ -98,12 +98,12 @@ const manager = new ChatManager({
                 configJson: JSON.stringify({
                     cwd: path,
                     settings: config,
-                    storage: { url: databaseUrl, authToken: "local-dev" },
+                    storage: database.storageConfig,
                     machineId,
                 }),
             }),
         },
-        defaults: {
+        sessionInit: {
             path: workspace,
             instructions: "你是 Peri。请用清晰、简洁的中文帮助用户完成任务。",
             mcpServers: {
@@ -116,7 +116,7 @@ const manager = new ChatManager({
 let server: ReturnType<typeof Bun.serve> | undefined;
 const demo = createDemoApp({
     manager,
-    storage,
+    database,
     workspace,
     ...(Bun.env.PERI_WORKSPACE_MCP_URL ? { workspaceMcpUrl: Bun.env.PERI_WORKSPACE_MCP_URL } : {}),
     html,
@@ -125,7 +125,7 @@ const demo = createDemoApp({
 });
 try {
     try {
-        await storage.getSessions(workspace);
+        await database.listSessions(workspace);
     } catch {
         throw new Error("Local Session Store is unavailable; run `bun run db:dev` or check PERI_DEMO_TURSO_URL");
     }

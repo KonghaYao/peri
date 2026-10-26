@@ -3,11 +3,10 @@ import {
   type InteractionAnswer,
   type ToolPayloadResponse,
 } from "@peri-code/sdk";
-import { logError } from "@core/agent";
-import {
-  type ActionTargetDTO, type Chat, type ChatSummary, type ChatDisplayState,
-} from "@core/shared";
-import { ChatProjection } from "@core/agent";
+import { logError } from "./logging";
+import { type ActionTargetDTO, type Chat, type ChatSummary } from "./contracts";
+import type { ChatDisplayState } from "./display-state";
+import { ChatProjection } from "./projection";
 import {
   RemoteActionError, RemoteSendReceipt, createRemoteActions,
   type ActionReceipt, type RemoteActions,

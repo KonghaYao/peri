@@ -8,7 +8,7 @@
 
 export * from "./chat";
 
-export { BareHarnessConfig } from "../config/bare-harness-config";
+export { BareHarnessConfig } from "../config/peri-bare-harness-config";
 export type { MetaHarnessKey, PeriConfig } from "../config/peri-config";
 
 export { ExecutionAdmissionCore } from "../execution/admission-core";
@@ -26,8 +26,6 @@ export type * from "../execution/types";
 
 export { TursoStorage } from "../storage/turso-storage";
 export { SESSION_BY_ID_SQL, SESSION_LIST_SQL } from "../storage/session-summary";
-export type { SessionStorage } from "../storage/types";
-export type { SessionSummary } from "../storage/session-summary";
 
 export { RpcError } from "../transport/rpc-error";
 export type {

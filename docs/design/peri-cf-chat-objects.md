@@ -18,7 +18,7 @@
 > 参考（结构对照，不引为本仓库事实源）：`/Users/konghayao/code/pazhou/remote-control-server/packages/chat-channel/src/`（该仓库不在本仓库内，路径保留绝对前缀）。
 > 相邻设计：TUI 侧同类展示目标见 [TUI Chat 与 Tool Activity Workbench](tui-chat-workbench.md)；Session 与执行归属见 [Session 异步任务统一入口](session-async-tasks.md)、[RCRA 消息、任务归属与激活](rcra-message-activation.md)；代码定位以 [TS SDK 索引](../code-index/peri-ts-sdk.md) 与 [Peri CF 索引](../code-index/peri-cf.md) 为准。
 
-本文只定义稳定对象契约与消费面边界，不记录实施批次、勾选清单或运行结果。当前实现、入口与动态 inventory 以代码索引和源码为准：`npm-packages/@peri-sdk/src/state/`、`src/view/`、`src/sync/`、`npm-packages/peri-cf/core/`、`frontend/`。
+本文只定义稳定对象契约与消费面边界，不记录实施批次、勾选清单或运行结果。当前实现、入口与动态 inventory 以代码索引和源码为准：`npm-packages/@peri-sdk/src/state/`、`src/view/`、`src/sync/`、`npm-packages/peri-cf/frontend/remote/`、`frontend/`。
 
 ## 1. 前提与已定基线
 
@@ -231,7 +231,7 @@ TurnProjection = {
 4. **执行归属与丢失语义**：执行驻留在接受连接/请求的 isolate；isolate 回收即在途执行丢失且**不复原**，不得由展示历史重造 Rust 工作义务。长时保活只依赖平台尽力而为的机制（WS 消息 await 与升级请求的 `waitUntil`），没有平台保证，部署端才能验证。
 5. **载荷全文**：工具参数/结果全文只在 isolate 内存，经 WS 文本控制帧（`op:"payload"`）按需读取，不通过 Yjs、不经 HTTP 端点、不持久化；重放后由历史重建。若上游历史不含完整载荷，则读取不可用必须显式失败，不得伪装成功（重建覆盖范围待验证）。
 6. **命令通道**：prompt/cancel/interaction 回答/payload 读取一律走 WS 文本控制帧（HTTP 无会话亲和性）；旧 HTTP 命令/载荷端点返回 426。命令结果只在服务端明确答否时为确定失败；断线、超时、未同步视为未确认，调用方必须阻断重跑。
-7. **端口化边界**：平台能力经显式端口注入，不在业务内直接触达 CF 原语——`SocketHost`（WS 升级、保活、时钟）在连接层，`RuntimeDeps`（`startTransport` / repository）在运行期注册表，SDK 运行后端经 `moduleFactory` / `ports` / `onLifecycle` 注入。测试以内存实现替换这些端口，不依赖 workerd 专有行为。
+7. **端口化边界**：平台能力经显式端口注入，不在业务内直接触达 CF 原语——`SocketHost`（WS 升级、保活、时钟）在连接层，`RuntimeDeps`（`startTransport` / repository）在运行期注册表，SDK 运行后端经 `moduleFactory` / 诊断回调接入；scheduler 与清理/启动超时由 SDK 自持。测试以内存实现替换这些端口，不依赖 workerd 专有行为。
 8. **不做的事**：不恢复旧 Agent 执行、不做跨 isolate 接管、不把观测当存活探测、不为回滚保留任何展示持久层（转向时未部署，无旧数据可迁移）。
 
 ## 6. SDK view 与安全 readPayload
@@ -268,9 +268,9 @@ readPayload(ref, reader, { signal, maxBytes })
 
 ### 7.1 ChatReplica → ChatProjection → 展示组件
 
-1. `core/shared/chat.ts`：消息 DTO 带 id/entryId/kind/status/time/error/blocks；展示状态带 tools/turns/session/tasks/plans/interactions/queue；SDK 领域类型与应用 DTO 显式边界转换。
-2. `core/shared/chat-display-state.ts`：只复制 SDK 副本已确认的公开对象；`readiness !== "ready"` 时不提供条目内容，不补造身份、时间或运行态。
-3. `core/agent/view/projection.ts`：持有 `ChatReplica`，按绑定代次缓存 `ChatDisplayState`；不反向控制执行、不写文档。
+1. `frontend/remote/contracts.ts`：消息 DTO 带 id/entryId/kind/status/time/error/blocks；展示状态带 tools/turns/session/tasks/plans/interactions/queue；SDK 领域类型与应用 DTO 显式边界转换。
+2. `frontend/remote/display-state.ts`：只复制 SDK 副本已确认的公开对象；`readiness !== "ready"` 时不提供条目内容，不补造身份、时间或运行态。
+3. `frontend/remote/projection.ts`：持有 `ChatReplica`，按绑定代次缓存 `ChatDisplayState`；不反向控制执行、不写文档。
 4. `frontend/remote/controller.ts`：两步打开历史、Action 目标核对、连接与错误状态；切换会话只释放本地连接，不 cancel、不 close。
 5. `frontend/chat/runtime/useChat.ts`：装配 `ChatController`、目录查询缓存与 payload reader；选中会话的运行/交互只来自副本。
 6. `frontend/chat/timeline/*` 与 composer：Entry 卡片内按 blockOrder 逐块渲染 Text/Reasoning/Tool/Resource；text 沿用 Markdown 安全设置；summary reasoning 可折叠；tool 显示状态/preview/全文入口。

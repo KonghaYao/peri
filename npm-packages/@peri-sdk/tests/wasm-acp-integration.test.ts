@@ -10,8 +10,6 @@ import {
   SessionBindingConflictError,
   TursoStorage,
   startWasmRuntime,
-  type ChatDatabase,
-  type SessionStorage,
 } from "../dist/index.js";
 import { ChatDocument } from "../src/view/chat-document";
 import { readSessionView } from "../src/view/session-view";
@@ -58,32 +56,6 @@ async function until(predicate: () => boolean, budgetMs = 20_000): Promise<void>
 function otlpBody(bytes: Uint8Array): unknown {
   const raw = bytes[0] === 0x1f && bytes[1] === 0x8b ? Bun.gunzipSync(bytes) : bytes;
   return JSON.parse(new TextDecoder().decode(raw));
-}
-
-function databaseOver(storage: SessionStorage): ChatDatabase {
-  return {
-    async listSessions(path) {
-      return (await storage.getSessions(path ?? "/")).map((entry) => ({
-        sessionId: entry.id,
-        title: entry.title,
-        cwd: entry.cwd,
-        messageCount: entry.messageCount,
-        createdAt: entry.createdAt,
-        updatedAt: entry.updatedAt,
-      }));
-    },
-    async getSession(id) {
-      const entry = await storage.getSession(id);
-      return entry && {
-        sessionId: entry.id,
-        title: entry.title,
-        cwd: entry.cwd,
-        messageCount: entry.messageCount,
-        createdAt: entry.createdAt,
-        updatedAt: entry.updatedAt,
-      };
-    },
-  };
 }
 
 /** Chat 事实 → 纯展示文档；测试不直接读运行侧内部状态。 */
@@ -152,11 +124,11 @@ async function fixture() {
   };
   const managerFor = (storagePort: OwnershipProbe): ChatManager => new ChatManager({
     agentConfig,
-    database: databaseOver(storage),
-    sessionOwnershipStorage: storagePort,
+    database: storage,
+    kv: storagePort,
     chatConfig: {
       runtime: wasmRuntime,
-      defaults: { path: workspace },
+      sessionInit: { path: workspace },
       lifecycle: { activationCloseTimeoutMs: 20_000, closeDrainTimeoutMs: 20_000 },
     },
   });
@@ -206,7 +178,7 @@ test("create, send two inputs, cancel, close and reload run through the bundled 
     await chat.close();
     expect(f.telemetry.length).toBeGreaterThan(0);
     expect(JSON.stringify(f.telemetry)).toContain("resourceSpans");
-    expect((await f.storage.getSessions(f.workspace)).some((entry) => entry.id === sessionId)).toBe(true);
+    expect((await f.storage.listSessions(f.workspace)).some((entry) => entry.sessionId === sessionId)).toBe(true);
 
     // 新 Chat 用新的 WASM 实例加载同一会话：身份保持，历史回放进入展示文档。
     const loadedChat = manager.createChat({ path: f.workspace });
@@ -247,8 +219,8 @@ test("a second manager cannot own the same real Session and never starts its tra
     // 第二管理器只提供会记录启动的 transport 运行后端；ownership 必须先于激活。
     const transportManager = new ChatManager({
       agentConfig: { cwd: f.workspace, settings: {}, storage: { url: "http://127.0.0.1:1", authToken: "x" }, machineId: "m" },
-      database: databaseOver(f.storage),
-      sessionOwnershipStorage: kv,
+      database: f.storage,
+      kv: kv,
       chatConfig: {
         runtime: {
           kind: "transport",
@@ -257,7 +229,7 @@ test("a second manager cannot own the same real Session and never starts its tra
             throw new Error("transport must not start before ownership acquisition succeeds");
           },
         },
-        defaults: { path: f.workspace },
+        sessionInit: { path: f.workspace },
       },
     });
     const second = transportManager.createChat({ path: f.workspace });

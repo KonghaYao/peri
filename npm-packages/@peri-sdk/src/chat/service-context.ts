@@ -1,9 +1,8 @@
 import type { WasmRuntimeLease } from "../wasm/runtime-pool";
 import type { PeriInstancePort } from "../agent/port";
-import type { ChatFact } from "../contracts/chat";
+import type { ChatDatabase, ChatFact } from "../contracts/chat";
 import type {
-    ChatDatabase,
-    ChatDefaults,
+    ChatSessionInit,
     ChatRuntime,
     ChatLifecycleOptions,
     SessionOwnership,
@@ -15,7 +14,7 @@ export interface ChatInstanceContext {
     readonly path: string;
     /** Manager 构造时的纯 JSON 快照。 */
     readonly agentConfig: unknown;
-    readonly defaults: ChatDefaults;
+    readonly sessionInit: ChatSessionInit;
     readonly runtime: ChatRuntime;
     readonly signal: AbortSignal;
     readonly database: ChatDatabase;
@@ -44,7 +43,7 @@ export interface ChatServiceOptions {
     readonly id: string;
     /** createChat({path}) 的句柄级 path；新会话优先使用，加载历史仅兜底。 */
     readonly path?: string;
-    readonly defaults: ChatDefaults;
+    readonly sessionInit: ChatSessionInit;
     readonly agentConfig: unknown;
     readonly runtime: ChatRuntime;
     readonly database: ChatDatabase;

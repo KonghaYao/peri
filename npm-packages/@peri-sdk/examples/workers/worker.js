@@ -16,7 +16,7 @@
  */
 import Module from './peri-wasm.js';
 import wasmModule from './peri_wasm.wasm';
-import { createSchedulerPort, startWasmRuntime } from './wasm-node.js';
+import { startWasmRuntime } from './wasm-node.js';
 
 const CWD = '/workspace';
 const TURN_BUDGET_MS = 60_000;
@@ -73,6 +73,7 @@ function hostConfig(env) {
       profiles: { sonnet: { provider: 'fixture', model: 'fixture-model' } },
     } },
     storage: { url: env.STORAGE_URL, authToken: 'local-dev' },
+    // smoke fixture 的固定身份；仅用于示例。
     machineId: '00000000-0000-4000-8000-000000000004',
   };
 }
@@ -135,7 +136,6 @@ async function probeSdkHost(env) {
       },
       ...options,
     }),
-    ports: { scheduler: createSchedulerPort() },
   });
   try {
     // transport.request<T> 的默认返回类型是 unknown，这里显式标注用到的响应字段。

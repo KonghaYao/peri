@@ -16,3 +16,7 @@ export {
   ChatSyncProvider, SyncBackpressureError, WebSocketChatChannel,
   type ChatSyncOptions, type SyncConnectionStatus, type WebSocketLike,
 } from "./sync";
+export * from "./contracts";
+export * from "./display-state";
+export * from "./projection";
+export { logError } from "./logging";
