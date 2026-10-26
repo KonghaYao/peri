@@ -152,19 +152,19 @@ mod tests {
 
     #[test]
     fn explicit_store_wins_and_is_absolute() {
-        let resolved = resolve_credential_store(
-            Path::new("/tmp/peri/settings.json"),
-            Some("relative".into()),
-        )
-        .unwrap();
+        let settings = std::env::temp_dir().join("peri/settings.json");
+        let resolved = resolve_credential_store(&settings, Some("relative".into())).unwrap();
         assert!(resolved.is_absolute());
         assert!(resolved.ends_with("relative"));
     }
 
     #[test]
     fn default_store_sits_beside_settings() {
-        let resolved =
-            resolve_credential_store(Path::new("/tmp/peri/settings.json"), None).unwrap();
-        assert_eq!(resolved, PathBuf::from("/tmp/peri/credentials/chatgpt"));
+        let settings = std::env::temp_dir().join("peri/settings.json");
+        let resolved = resolve_credential_store(&settings, None).unwrap();
+        assert_eq!(
+            resolved,
+            settings.parent().unwrap().join("credentials/chatgpt")
+        );
     }
 }
