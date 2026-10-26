@@ -95,8 +95,11 @@ pub fn try_resolve(
     settings: &PeriConfig,
     environment: &BTreeMap<String, String>,
 ) -> Result<Option<ResolvedProvider>, ProviderError> {
-    // Validate configured auxiliary tiers at the same authority boundary. An invalid
-    // subscription tier must not later become a factory's implicit primary fallback.
+    // Validate configured auxiliary tiers at the same authority boundary. Provider-level
+    // errors (endpoint/auth) still reject the whole snapshot: an invalid subscription tier
+    // must not later become a factory's implicit primary fallback. A missing model/window is
+    // an unfinished auxiliary binding; it is reported by the editing panel and must not block
+    // saving unrelated configuration (the active provider still has to resolve below).
     for alias in crate::app::Profiles::ALL {
         if settings
             .config
@@ -104,7 +107,16 @@ pub fn try_resolve(
             .get(alias)
             .is_some_and(|profile| !profile.is_default())
         {
-            try_resolve_for_alias(settings, alias)?;
+            match try_resolve_for_alias(settings, alias) {
+                Ok(_) => {}
+                Err(ProviderError::MissingModelCapacity) => {
+                    tracing::warn!(
+                        alias,
+                        "auxiliary profile lacks model or context window; ignoring until edited"
+                    );
+                }
+                Err(error) => return Err(error),
+            }
         }
     }
     match (

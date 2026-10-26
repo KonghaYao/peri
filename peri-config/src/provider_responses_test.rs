@@ -141,13 +141,40 @@ fn test_subscription_alias_without_verified_identity_is_rejected() {
     assert!(error.to_string().contains("missing field"));
 }
 
+/// 辅助档位缺少 Responses 模型/窗口属于未完成编辑：不阻断快照解析，也不影响
+/// 其它配置保存；当前生效档位仍然必须可解析。
 #[test]
-fn test_bad_explicit_auxiliary_profile_rejects_snapshot_resolution() {
+fn test_auxiliary_profile_missing_capacity_does_not_reject_snapshot_resolution() {
     let mut settings = settings();
     settings.config.profiles.haiku.context_window = None;
+    let resolved = try_resolve(&settings, &BTreeMap::new()).unwrap();
+    assert!(resolved.is_some(), "当前生效档位仍应解析成功");
+
+    settings.config.profiles.opus.context_window = None;
+    settings.config.active_alias = "opus".into();
     assert!(matches!(
         try_resolve(&settings, &BTreeMap::new()),
         Err(ProviderError::MissingModelCapacity)
+    ));
+}
+
+/// provider 级错误（缺少 API key）仍然拒绝整个快照，避免坏 provider
+/// 成为隐式回退。
+#[test]
+fn test_auxiliary_provider_level_error_still_rejects_snapshot_resolution() {
+    let mut settings = settings();
+    settings.config.providers.push(ProviderConfig {
+        id: "other".into(),
+        provider_type: "anthropic".into(),
+        api_key: "other-key".into(),
+        ..Default::default()
+    });
+    // active 档位走另一个 provider；坏的是辅助档位绑定的 Responses provider。
+    settings.config.profiles.opus.provider = "other".into();
+    settings.config.providers[0].api_key.clear();
+    assert!(matches!(
+        try_resolve(&settings, &BTreeMap::new()),
+        Err(ProviderError::MissingApiKey)
     ));
 }
 
