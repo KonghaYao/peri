@@ -3,15 +3,16 @@ use clap::Parser;
 
 #[test]
 fn test_auth_cli_parses_account_and_explicit_store() {
-    let cli = crate::Cli::try_parse_from([
-        "peri",
-        "auth",
-        "chatgpt",
-        "login",
-        "--store",
-        "/tmp/auth-test",
-        "--account",
-        "work",
+    let explicit_store = std::env::temp_dir().join("auth-test");
+    let cli = crate::Cli::try_parse_from(vec![
+        std::ffi::OsString::from("peri"),
+        "auth".into(),
+        "chatgpt".into(),
+        "login".into(),
+        "--store".into(),
+        explicit_store.as_os_str().to_owned(),
+        "--account".into(),
+        "work".into(),
     ])
     .unwrap();
     let Some(crate::Commands::Auth {
@@ -23,14 +24,14 @@ fn test_auth_cli_parses_account_and_explicit_store() {
         panic!("应选择 ChatGPT login");
     };
     assert_eq!(options.account, "work");
-    assert_eq!(options.store, Some(PathBuf::from("/tmp/auth-test")));
+    assert_eq!(options.store, Some(explicit_store));
 }
 
 #[test]
 fn test_auth_store_default_tracks_selected_config_file() {
-    let store =
-        credential_store(std::path::Path::new("/tmp/isolated/settings.json"), None).unwrap();
-    assert_eq!(store, PathBuf::from("/tmp/isolated/credentials/chatgpt"));
+    let config = std::env::temp_dir().join("isolated/settings.json");
+    let store = credential_store(&config, None).unwrap();
+    assert_eq!(store, config.parent().unwrap().join("credentials/chatgpt"));
 }
 
 #[test]
