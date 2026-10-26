@@ -42,14 +42,14 @@
     "smoke:workers": "bun examples/workers/smoke.mjs"
   },
   "devDependencies": {
-    "bun-types": "^1.4.2",
-    "hono": "^4.6",
-    "typescript": "^7.0.0",
-    "wrangler": "4.147.0"
+    "bun-types": "^1.4.4",
+    "hono": "^4.13.14",
+    "typescript": "^7.0.2",
+    "wrangler": "4.152.0"
   },
   "dependencies": {
     "@microsoft/fetch-event-source": "2.0.1",
-    "@tursodatabase/serverless": "1.4.0",
+    "@tursodatabase/serverless": "1.4.1",
     "lib0": "^0.2.119",
     "yjs": "^13.6.33"
   }
