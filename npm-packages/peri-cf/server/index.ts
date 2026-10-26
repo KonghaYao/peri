@@ -71,16 +71,17 @@ function startFromEnvironment(): void {
     + ` mcp=${config.mcpServers.map((item) => item.name).join(",") || "none"}`,
   );
 
-  let stopping = false;
+  // SIGINT/SIGTERM 可能并发到达（终端进程组与 scripts/dev.ts 的 child.kill）。
+  // ChatManager.shutdown 与 ChatView.dispose 都会合并并发关闭，因此不设防重入闸门；
+  // 同一信号重复到达时 process.once 已移除监听，交给默认行为立即退出。
   const stop = async (): Promise<void> => {
-    if (stopping) return;
-    stopping = true;
-    server.stop();
+    // 只停新准入；不等待 Promise。进程会在 registry.shutdown() 结算后退出。
+    void server.stop();
     try {
       await registry.shutdown();
       process.exit(0);
     } catch (error) {
-      console.error("[peri-cf] shutdown is incomplete; resources are preserved", error);
+      console.error("[peri-cf] shutdown is incomplete; exiting", error);
       process.exit(1);
     }
   };

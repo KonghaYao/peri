@@ -257,4 +257,14 @@ describe("ChatRegistry", () => {
     expect((failure as AggregateError).errors).toHaveLength(1);
     expect(events).toEqual(["view.close", "port.shutdown"]);
   });
+
+  test("shutdown 并发调用完成且 View 被释放", async () => {
+    const events: string[] = [];
+    const { registry, chats, views } = hosted({ events });
+    const chat = attachChat(chats, views, "chat-1", { events });
+
+    await Promise.all([registry.shutdown(), registry.shutdown()]);
+
+    expect(views.get(chat.id)).toBeUndefined();
+  });
 });
