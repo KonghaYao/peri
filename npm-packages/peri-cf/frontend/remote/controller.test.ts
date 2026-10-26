@@ -27,7 +27,7 @@ class FakeSocket implements WebSocketLike {
 
 function summary(sessionId: string, title = sessionId): ChatSummary {
   return {
-    id: sessionId, sessionId, title, cwd: '/workspace', messageCount: 1,
+    sessionId, title, cwd: '/workspace', messageCount: 1,
     createdAt: '2026-10-20T00:00:00Z', updatedAt: '2026-10-20T01:00:00Z',
   };
 }

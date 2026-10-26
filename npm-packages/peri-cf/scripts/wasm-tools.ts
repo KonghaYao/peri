@@ -47,12 +47,33 @@ export async function canonicalRustflags(repoRoot: string, settings: Record<stri
   return capture(["bash", resolve(repoRoot, "scripts/cargo-wasm.sh"), "--print-rustflags"], repoRoot, env);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** WASM 入口以 SDK `package.json#exports["./wasm"]` 为唯一权威，不假设 dist 布局。 */
+async function publicWasmExports(packageRoot: string): Promise<{ sdkRoot: string; runtime: string; types: string }> {
+  const sdkRoot = resolve(packageRoot, "../@peri-sdk");
+  const manifestPath = resolve(sdkRoot, "package.json");
+  let manifest: unknown;
+  try { manifest = await Bun.file(manifestPath).json(); }
+  catch (error) {
+    throw new Error(`Cannot read @peri-code/sdk manifest at ${manifestPath}; prepare the SDK package before building CF.`, { cause: error });
+  }
+  const wasm = isRecord(manifest) && isRecord(manifest.exports) ? manifest.exports["./wasm"] : undefined;
+  const types = isRecord(wasm) && typeof wasm.types === "string" ? wasm.types : undefined;
+  const runtime = isRecord(wasm) && typeof wasm.import === "string" ? wasm.import : undefined;
+  if (!types || !runtime)
+    throw new Error(`@peri-code/sdk package.json must declare exports["./wasm"].types and exports["./wasm"].import (${manifestPath}).`);
+  return { sdkRoot, runtime, types };
+}
+
 export async function requirePublicTransport(packageRoot: string): Promise<void> {
-  for (const file of ["wasm.js", "wasm.d.ts"]) {
-    try { await Bun.file(resolve(packageRoot, "../@peri-sdk/dist", file)).text(); }
-    catch (error) {
-      throw new Error(`Missing SDK public WASM entry dist/${file}; prepare @peri-code/sdk JS entries before building CF (reuse an existing SDK dist).`, { cause: error });
-    }
+  const { sdkRoot, runtime, types } = await publicWasmExports(packageRoot);
+  for (const [kind, relative] of [["types", types], ["import", runtime]] as const) {
+    const target = resolve(sdkRoot, relative);
+    if (!(await Bun.file(target).exists()))
+      throw new Error(`Missing @peri-code/sdk WASM ${kind} entry ${relative} (resolved to ${target}); rebuild @peri-code/sdk before building CF.`);
   }
 }
 

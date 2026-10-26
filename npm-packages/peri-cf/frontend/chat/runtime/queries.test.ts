@@ -10,7 +10,7 @@ import type { ChatSummary } from './types';
 
 function summary(sessionId: string, title = sessionId, updatedAt = '2026-10-06T00:00:00Z'): ChatSummary {
   return {
-    id: sessionId, sessionId, title, updatedAt,
+    sessionId, title, updatedAt,
     cwd: '/workspace', messageCount: 0, createdAt: '2026-10-05T00:00:00Z',
   };
 }
@@ -35,7 +35,7 @@ describe('chat directory cache', () => {
       summary('second', '新的思考', '2026-10-06T01:00:00Z'),
     ]);
     const chats = await queries.client.fetchQuery(queries.list);
-    expect(chats.map(chat => chat.id)).toEqual(['second', 'first']);
+    expect(chats.map(chat => chat.sessionId)).toEqual(['second', 'first']);
     // 运行态字段不得出现在目录条目上。
     expect(chats[0]).not.toHaveProperty('running');
     expect(chats[0]).not.toHaveProperty('pendingInteractionCount');
