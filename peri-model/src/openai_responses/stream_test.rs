@@ -133,6 +133,139 @@ fn metadata_does_not_interrupt_stream_or_change_response_identity() {
 }
 
 #[test]
+fn compact_terminal_reconstructs_finished_items_without_output_or_status() {
+    let (decode, eof) = decoder();
+    let item = json!({"id":"msg_compact","type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]});
+    let events = feed(
+        &decode,
+        json!({"type":"response.output_item.done","item":item}),
+    )
+    .unwrap();
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, ModelStreamEvent::TextDelta { text } if text == "done")));
+    let events = feed(
+        &decode,
+        json!({"type":"response.completed","response":{"id":"resp_a"}}),
+    )
+    .unwrap();
+    let Some(ModelStreamEvent::Completed(result)) = events.last() else {
+        panic!("completion expected")
+    };
+    assert_eq!(result.assistant_text().as_deref(), Some("done"));
+    eof().unwrap();
+}
+
+#[test]
+fn done_only_tool_call_retains_its_identity_and_replay_without_final_output() {
+    let (decode, eof) = decoder();
+    let item = json!({"id":"fc_compact","type":"function_call","name":"read_file","call_id":"call_compact","arguments":"{}"});
+    let events = feed(
+        &decode,
+        json!({"type":"response.output_item.done","item":item}),
+    )
+    .unwrap();
+    assert!(events.iter().any(|event| matches!(event, ModelStreamEvent::ToolCallDelta { id: Some(id), name: Some(name), .. } if id == "call_compact" && name == "read_file")));
+    let events = feed(
+        &decode,
+        json!({"type":"response.completed","response":{"id":"resp_a"}}),
+    )
+    .unwrap();
+    let Some(ModelStreamEvent::Completed(response)) = events.last() else {
+        panic!("completion expected")
+    };
+    let ModelMessage::Assistant { tool_calls, .. } = response.message() else {
+        panic!("assistant expected")
+    };
+    assert_eq!(tool_calls[0].id(), "call_compact");
+    eof().unwrap();
+}
+
+#[test]
+fn done_only_message_without_item_id_keeps_native_replay() {
+    let (decode, eof) = decoder();
+    let item = json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]});
+    feed(
+        &decode,
+        json!({"type":"response.output_item.done","item":item}),
+    )
+    .unwrap();
+    let events = feed(
+        &decode,
+        json!({"type":"response.completed","response":{"id":"resp_a"}}),
+    )
+    .unwrap();
+    let Some(ModelStreamEvent::Completed(response)) = events.last() else {
+        panic!("completion expected")
+    };
+    assert_eq!(response.assistant_text().as_deref(), Some("hello"));
+    let ModelMessage::Assistant { content, .. } = response.message() else {
+        panic!("assistant expected")
+    };
+    assert!(content.iter().any(|block| matches!(block, crate::ContentBlock::ProviderState { data, .. } if data["items"][0].get("id").is_none())));
+    eof().unwrap();
+}
+
+#[test]
+fn compact_terminal_refuses_unfinished_items_and_accepts_empty_output() {
+    let (decode, _) = decoder();
+    feed(&decode, json!({"type":"response.output_item.added","output_index":0,"item":{"id":"msg","type":"message","role":"assistant","content":[]}})).unwrap();
+    assert!(feed(
+        &decode,
+        json!({"type":"response.completed","response":{"id":"resp_a"}})
+    )
+    .is_err());
+    let (decode, eof) = decoder();
+    assert!(feed(
+        &decode,
+        json!({"type":"response.completed","response":{"id":"resp_a"}})
+    )
+    .is_ok());
+    eof().unwrap();
+}
+
+#[test]
+fn partial_turn_is_not_projected_as_final_answer() {
+    let (decode, _) = decoder();
+    let events = feed(
+        &decode,
+        json!({"type":"response.completed","response":{"id":"resp_a","end_turn":false}}),
+    )
+    .unwrap();
+    let Some(ModelStreamEvent::Completed(result)) = events.last() else {
+        panic!("completion expected")
+    };
+    assert_eq!(result.stop_reason(), &crate::StopReason::Continue);
+}
+
+#[test]
+fn metadata_extensions_do_not_interrupt_but_unknown_output_does() {
+    let (decode, _) = decoder();
+    assert!(feed(
+        &decode,
+        json!({"type":"codex.response.metadata","metadata":{"tier":"default"}})
+    )
+    .unwrap()
+    .is_empty());
+    assert!(feed(
+        &decode,
+        json!({"type":"response.queue_metadata","metadata":{}})
+    )
+    .unwrap()
+    .is_empty());
+    assert!(feed(
+        &decode,
+        json!({"type":"response.output_tool.delta","delta":"{}"})
+    )
+    .is_err());
+    assert!(feed(
+        &decode,
+        json!({"type":"response.unknown_event","item":{"type":"function_call"}})
+    )
+    .is_err());
+}
+
+#[test]
 fn parallel_calls_keep_item_ids_separate_from_call_ids_and_done_can_supply_arguments() {
     let (decode, _) = decoder();
     let call = |id: &str, call_id: &str, arguments: &str| json!({"id":id,"type":"function_call","name":"read_file","call_id":call_id,"arguments":arguments});

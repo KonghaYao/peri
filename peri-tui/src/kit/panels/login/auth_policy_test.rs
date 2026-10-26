@@ -1,21 +1,25 @@
 //! `auth_policy` 纯函数回归：自动采用、作用域、状态化阻断与 token 新鲜度。
 
-use std::path::PathBuf;
-
 use super::*;
 use crate::application::operations::OutcomeUnknownReason;
 use crate::chatgpt_auth::{AccountStatus, AuthTarget, LogoutOutcome};
 
 fn scope(account: &str) -> HostConfigAuthScope {
     HostConfigAuthScope::new(
-        "/tmp/peri/settings.json",
-        AuthTarget::new(PathBuf::from("/tmp/peri-auth-test"), account),
+        std::env::temp_dir()
+            .join("peri/settings.json")
+            .to_string_lossy()
+            .into_owned(),
+        AuthTarget::new(std::env::temp_dir().join("peri-auth-test"), account),
     )
 }
 
 fn plan(subject: &str, client_id: &str) -> PlanDraft {
     PlanDraft {
-        store: "/tmp/peri-auth-test".into(),
+        store: std::env::temp_dir()
+            .join("peri-auth-test")
+            .to_string_lossy()
+            .into_owned(),
         account: "work".into(),
         subject: subject.into(),
         client_id: client_id.into(),

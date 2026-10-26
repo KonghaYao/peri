@@ -1,6 +1,10 @@
 use super::*;
 use serde_json::json;
 
+fn subscription_store() -> std::path::PathBuf {
+    std::env::temp_dir().join("peri-test-credentials")
+}
+
 fn settings() -> PeriConfig {
     serde_json::from_value(json!({"config": {
         "active_alias": "opus",
@@ -39,7 +43,7 @@ fn test_subscription_reference_roundtrips_without_api_key() {
     let provider = &mut settings.config.providers[0];
     provider.api_key.clear();
     provider.auth = Some(ProviderAuthConfig::ChatGptPlan {
-        store: "/tmp/peri-test-credentials".into(),
+        store: subscription_store(),
         account: "work".into(),
         subject: "subject-test".into(),
         client_id: "issued-client-test".into(),
@@ -62,7 +66,7 @@ fn test_subscription_reference_roundtrips_without_api_key() {
 fn test_subscription_never_falls_back_to_configured_api_key() {
     let mut settings = settings();
     settings.config.providers[0].auth = Some(ProviderAuthConfig::ChatGptPlan {
-        store: "/tmp/peri-test-credentials".into(),
+        store: subscription_store(),
         account: "work".into(),
         subject: "subject-test".into(),
         client_id: "issued-client-test".into(),
@@ -111,7 +115,7 @@ fn test_subscription_cannot_send_credentials_to_custom_endpoint() {
     let provider = &mut settings.config.providers[0];
     provider.api_key.clear();
     provider.auth = Some(ProviderAuthConfig::ChatGptPlan {
-        store: "/tmp/peri-test-credentials".into(),
+        store: subscription_store(),
         account: "work".into(),
         subject: "subject-test".into(),
         client_id: "issued-client-test".into(),
@@ -264,7 +268,7 @@ fn test_snapshot_resolution_rejects_unbound_responses_provider_errors() {
     ));
 
     bad_reference.auth = Some(ProviderAuthConfig::ChatGptPlan {
-        store: "/tmp/peri-test-credentials".into(),
+        store: subscription_store(),
         account: "work".into(),
         subject: "subject-test".into(),
         client_id: "issued-client-test".into(),
@@ -404,7 +408,7 @@ fn provider_level_subscription_validation_matches_resolver_contract() {
     let mut provider = settings.config.providers[0].clone();
     provider.api_key.clear();
     provider.auth = Some(ProviderAuthConfig::ChatGptPlan {
-        store: "/tmp/peri-test-credentials".into(),
+        store: subscription_store(),
         account: "work".into(),
         subject: "subject-test".into(),
         client_id: "issued-client-test".into(),

@@ -508,6 +508,41 @@ fn make_truncated(answer: &str) -> Reasoning {
     response
 }
 
+#[tokio::test]
+async fn model_partial_turn_continues_without_completing_or_repeating_output() {
+    let mut partial = Reasoning::with_answer("", "partial");
+    partial.stop_reason = peri_model::StopReason::Continue;
+    let (ctx, model, completions) =
+        make_context(vec![partial, Reasoning::with_answer("", "done")], None);
+    assert!(matches!(
+        run_react_loop(ctx, 10).await,
+        LoopResult::Completed
+    ));
+    let requests = model.requests.lock();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1]
+        .iter()
+        .any(|message| message.content().to_string().contains("partial")));
+    assert!(requests[1].iter().any(|message| message
+        .content()
+        .to_string()
+        .contains("not the end of the turn")));
+    assert_eq!(completions.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn repeated_model_partial_turns_stop_at_the_continuation_budget() {
+    let mut partial = Reasoning::with_answer("", "partial");
+    partial.stop_reason = peri_model::StopReason::Continue;
+    let (ctx, model, completions) = make_context(vec![partial; 3], None);
+    assert!(matches!(
+        run_react_loop(ctx, 10).await,
+        LoopResult::Error(crate::error::AgentError::OutputTruncated { attempts: 3 })
+    ));
+    assert_eq!(model.requests.lock().len(), 3);
+    assert_eq!(completions.load(Ordering::SeqCst), 0);
+}
+
 fn make_context(
     responses: Vec<Reasoning>,
     cancel_on_call: Option<usize>,

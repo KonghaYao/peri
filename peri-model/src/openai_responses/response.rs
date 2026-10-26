@@ -26,9 +26,15 @@ pub(super) fn project_items(
     let mut ids = BTreeSet::new();
     let mut call_ids = BTreeSet::new();
     for item in items {
-        let id = required_string(item, "id")?;
-        if !ids.insert(id) {
-            return Err(invalid("Responses output contains duplicate item IDs"));
+        if let Some(id) = item.get("id") {
+            let id = id
+                .as_str()
+                .ok_or_else(|| invalid("Responses item id must be a string"))?;
+            if id.is_empty() || !ids.insert(id) {
+                return Err(invalid(
+                    "Responses output contains empty or duplicate item IDs",
+                ));
+            }
         }
         match required_string(item, "type")? {
             "message" => {
@@ -105,13 +111,18 @@ pub(super) fn complete(
     allowed_tools: &BTreeSet<String>,
     request_id: Option<String>,
 ) -> ModelResult<ModelResponse> {
-    if required_string(response, "status")? != "completed" {
+    if response
+        .get("status")
+        .is_some_and(|status| status.as_str() != Some("completed"))
+    {
         return Err(invalid("response.completed carried a non-completed status"));
     }
     let items = required_array(response, "output")?;
     let (mut content, calls) = project_items(items, binding.profile, Some(allowed_tools))?;
     content.push(replay::state_block(binding, items));
-    let reason = if calls.is_empty() {
+    let reason = if calls.is_empty() && response.get("end_turn") == Some(&Value::Bool(false)) {
+        StopReason::Continue
+    } else if calls.is_empty() {
         StopReason::EndTurn
     } else {
         StopReason::ToolUse

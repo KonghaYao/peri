@@ -5,17 +5,68 @@ use super::*;
 use serial_test::serial;
 use std::collections::VecDeque;
 
-fn setup() {
+/// 用例级隔离 HOME：持有 TempDir 与恢复守卫。
+///
+/// 字段顺序保证先恢复 HOME、再删除临时目录。
+struct IsolatedHome {
+    _guard: HomeGuard,
+    dir: tempfile::TempDir,
+}
+
+impl IsolatedHome {
+    fn path(&self) -> &std::path::Path {
+        self.dir.path()
+    }
+}
+
+/// 重置 atom，并把 HOME 指向用例独占的临时目录。
+///
+/// 返回的守卫必须绑定到局部变量：`push_history` 会异步写 `~/.peri/input-history.json`，
+/// 不隔离 HOME 就会覆盖真实用户历史。
+fn setup() -> IsolatedHome {
+    let dir = tempfile::tempdir().unwrap();
+    let guard = HomeGuard::redirect_to(dir.path());
     crate::kit::atoms::init_atoms();
     *INPUT_HISTORY.state().write() = VecDeque::new();
     *INPUT_HISTORY_INDEX.state().write() = None;
     *HISTORY_DRAFT.state().write() = None;
+    IsolatedHome { _guard: guard, dir }
+}
+
+/// RAII guard：测试期间改 HOME，Drop 时恢复进入前的值。
+///
+/// 断言失败或提前 panic 时 Drop 仍会执行，不会把临时 HOME 残留给其他测试。
+struct HomeGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl HomeGuard {
+    fn redirect_to(path: &std::path::Path) -> Self {
+        let previous = std::env::var_os("HOME");
+        // SAFETY: #[serial] 保证 HOME 修改与其他测试互斥。
+        unsafe {
+            std::env::set_var("HOME", path);
+        }
+        Self { previous }
+    }
+}
+
+impl Drop for HomeGuard {
+    fn drop(&mut self) {
+        // SAFETY: 同上。守卫由测试线程在 panic 展开时析构。
+        unsafe {
+            match self.previous.take() {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
 }
 
 #[test]
 #[serial]
 fn test_push_history_grows_stack() {
-    setup();
+    let _home = setup();
     push_history("hello");
     push_history("world");
     assert_eq!(INPUT_HISTORY.state().read().len(), 2);
@@ -24,7 +75,7 @@ fn test_push_history_grows_stack() {
 #[test]
 #[serial]
 fn test_push_history_ignores_empty() {
-    setup();
+    let _home = setup();
     push_history("   ");
     push_history("");
     assert_eq!(INPUT_HISTORY.state().read().len(), 0);
@@ -33,7 +84,7 @@ fn test_push_history_ignores_empty() {
 #[test]
 #[serial]
 fn test_push_history_dedup_consecutive() {
-    setup();
+    let _home = setup();
     push_history("hello");
     push_history("hello"); // 重复不入栈
     assert_eq!(INPUT_HISTORY.state().read().len(), 1);
@@ -42,7 +93,7 @@ fn test_push_history_dedup_consecutive() {
 #[test]
 #[serial]
 fn test_push_history_trims_whitespace() {
-    setup();
+    let _home = setup();
     push_history("  hello  ");
     assert_eq!(INPUT_HISTORY.state().read().len(), 1);
     let stored: VecDeque<String> = INPUT_HISTORY.state().read().clone();
@@ -52,7 +103,7 @@ fn test_push_history_trims_whitespace() {
 #[test]
 #[serial]
 fn test_history_up_navigation() {
-    setup();
+    let _home = setup();
     push_history("first");
     push_history("second");
     push_history("third");
@@ -70,7 +121,7 @@ fn test_history_up_navigation() {
 #[test]
 #[serial]
 fn test_history_down_restores_empty_draft_at_bottom() {
-    setup();
+    let _home = setup();
     push_history("a");
     push_history("b");
 
@@ -84,7 +135,7 @@ fn test_history_down_restores_empty_draft_at_bottom() {
 #[test]
 #[serial]
 fn test_reset_history_cursor() {
-    setup();
+    let _home = setup();
     push_history("x");
     history_up(None);
     assert!(INPUT_HISTORY_INDEX.state().read().is_some());
@@ -95,7 +146,7 @@ fn test_reset_history_cursor() {
 #[test]
 #[serial]
 fn test_history_up_empty_stack() {
-    setup();
+    let _home = setup();
     assert_eq!(history_up(None), None);
     assert_eq!(history_down(), None);
 }
@@ -103,7 +154,7 @@ fn test_history_up_empty_stack() {
 #[test]
 #[serial]
 fn test_max_history_capacity() {
-    setup();
+    let _home = setup();
     for i in 0..1050 {
         push_history(&format!("cmd-{}", i));
     }
@@ -116,7 +167,7 @@ fn test_max_history_capacity() {
 #[test]
 #[serial]
 fn test_draft_saved_on_history_entry_and_restored() {
-    setup();
+    let _home = setup();
     push_history("old");
     assert_eq!(history_up(Some("current draft")).as_deref(), Some("old"));
     assert_eq!(DRAFT.state().read().as_deref(), Some("current draft"));
@@ -127,7 +178,7 @@ fn test_draft_saved_on_history_entry_and_restored() {
 #[test]
 #[serial]
 fn test_draft_cleared_on_reset() {
-    setup();
+    let _home = setup();
     push_history("x");
     history_up(Some("draft"));
     assert!(DRAFT.state().read().is_some());
@@ -138,7 +189,7 @@ fn test_draft_cleared_on_reset() {
 #[test]
 #[serial]
 fn test_empty_draft_is_preserved_for_restore() {
-    setup();
+    let _home = setup();
     push_history("old");
     history_up(Some(""));
     // 空草稿也要保存，否则 Down 回到底部时无法清空旧历史项。
@@ -155,44 +206,21 @@ fn test_empty_draft_is_preserved_for_restore() {
 #[test]
 #[serial]
 fn test_save_history_does_not_block_and_persists_async() {
-    setup();
-
-    // 临时 HOME：创建 tempdir 并 set_var。
-    let tempdir = std::env::temp_dir().join(format!(
-        "peri-input-history-async-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&tempdir).unwrap();
-    let prev_home = std::env::var("HOME").ok();
-    // SAFETY: #[serial] 保证与其他使用 HOME 的测试互斥；prev_home 用于后续恢复。
-    unsafe {
-        std::env::set_var("HOME", &tempdir);
-    }
+    // setup() 已把 HOME 指向用例独占的临时目录（守卫在用例结束时恢复）。
+    let home = setup();
 
     // 用唯一 marker 避免与其他测试串扰。
     let marker = "async-persist-marker-7E3A";
     push_history(marker);
 
     // spawn 线程 rename 通常 <10ms，给一个宽松的等待窗口。
-    let history_path = tempdir.join(".peri").join("input-history.json");
+    let history_path = home.path().join(".peri").join("input-history.json");
     let mut waited_ms = 0u64;
     let content = loop {
         if let Ok(c) = std::fs::read_to_string(&history_path) {
             break c;
         }
         if waited_ms >= 1000 {
-            // 恢复 HOME 再失败。
-            unsafe {
-                if let Some(ref h) = prev_home {
-                    std::env::set_var("HOME", h);
-                } else {
-                    std::env::remove_var("HOME");
-                }
-            }
             panic!(
                 "input_history async persist 未在 1s 内落盘: {:?}",
                 history_path
@@ -202,22 +230,10 @@ fn test_save_history_does_not_block_and_persists_async() {
         waited_ms += 10;
     };
 
-    // 还原 HOME。
-    unsafe {
-        if let Some(h) = prev_home {
-            std::env::set_var("HOME", h);
-        } else {
-            std::env::remove_var("HOME");
-        }
-    }
-
     assert!(
         content.contains(marker),
         "持久化文件应包含 marker {:?}，实际内容：{}",
         marker,
         content
     );
-
-    // 清理 tempdir（best-effort）。
-    let _ = std::fs::remove_dir_all(&tempdir);
 }

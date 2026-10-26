@@ -26,7 +26,9 @@ impl StreamItem {
         profile: ResponsesProfile,
         tools: &BTreeSet<String>,
     ) -> ModelResult<(Self, Vec<ModelStreamEvent>)> {
-        required_string(item, "id")?;
+        if item.get("id").is_some() {
+            required_string(item, "id")?;
+        }
         let kind = required_string(item, "type")?.to_owned();
         let mut events = Vec::new();
         match kind.as_str() {
@@ -66,8 +68,8 @@ impl StreamItem {
         Ok((state, events))
     }
 
-    pub(super) fn id(&self) -> &str {
-        self.identity["id"].as_str().expect("validated item id")
+    pub(super) fn id(&self) -> Option<&str> {
+        self.identity["id"].as_str()
     }
 
     pub(super) fn finished_snapshot(&self) -> Option<&Value> {
@@ -75,7 +77,7 @@ impl StreamItem {
     }
 
     pub(super) fn check_id(&self, event: &Value) -> ModelResult<()> {
-        if required_string(event, "item_id")? != self.id() {
+        if Some(required_string(event, "item_id")?) != self.id() {
             return Err(invalid("Responses output_index and item_id disagree"));
         }
         Ok(())

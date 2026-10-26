@@ -437,6 +437,7 @@ fn test_stop_reason_wire_format() {
         (StopReason::EndTurn, "end_turn"),
         (StopReason::ToolUse, "tool_use"),
         (StopReason::MaxTokens, "max_tokens"),
+        (StopReason::Continue, "continue"),
         (
             StopReason::Other {
                 value: "custom".to_string(),

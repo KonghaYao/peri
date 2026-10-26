@@ -87,7 +87,7 @@ impl ResponsesStream {
                 self.set_response_id(&value["response"])?;
                 Ok(Vec::new())
             }
-            "response.metadata" => {
+            "response.metadata" | "codex.response.metadata" => {
                 if !value["response"].is_null() {
                     self.set_response_id(&value["response"])?;
                 }
@@ -97,16 +97,33 @@ impl ResponsesStream {
                 self.add_item(index(&value, "output_index")?, &value["item"])
             }
             "response.output_item.done" => {
-                let index = index(&value, "output_index")?;
-                if !self.items.contains_key(&index) {
-                    return Err(invalid(
-                        "output_item.done has no matching output_item.added",
-                    ));
-                }
-                self.items
-                    .get_mut(&index)
-                    .expect("item checked")
-                    .finish(&value["item"])
+                let item_id = value["item"]
+                    .get("id")
+                    .map(|_| required_string(&value["item"], "id"))
+                    .transpose()?;
+                let index = match value.get("output_index") {
+                    Some(_) => index(&value, "output_index")?,
+                    None => self
+                        .items
+                        .iter()
+                        .find(|(_, item)| item_id.is_some() && item.id() == item_id)
+                        .map(|(&index, _)| index)
+                        .unwrap_or_else(|| {
+                            self.items.keys().next_back().map_or(0, |index| index + 1)
+                        }),
+                };
+                let mut events = if self.items.contains_key(&index) {
+                    Vec::new()
+                } else {
+                    self.add_item(index, &value["item"])?
+                };
+                events.extend(
+                    self.items
+                        .get_mut(&index)
+                        .expect("item checked")
+                        .finish(&value["item"])?,
+                );
+                Ok(events)
             }
             "response.output_text.delta"
             | "response.refusal.delta"
@@ -183,7 +200,20 @@ impl ResponsesStream {
                 self.item(&value)?;
                 Ok(Vec::new())
             }
-            _ => Err(invalid(&format!("Unsupported Responses SSE event: {kind}"))),
+            _ if value.get("item").is_some()
+                || value.get("output_index").is_some()
+                || kind.contains("tool")
+                || kind.contains("call")
+                || kind.starts_with("response.output_")
+                || kind.starts_with("response.function_call_")
+                || kind.starts_with("response.reasoning_")
+                || kind.starts_with("response.custom_tool_") =>
+            {
+                Err(invalid(&format!(
+                    "Unsupported Responses SSE output event: {kind}"
+                )))
+            }
+            _ => Ok(Vec::new()),
         }
     }
 
@@ -201,11 +231,19 @@ impl ResponsesStream {
     }
 
     fn add_item(&mut self, index: usize, value: &Value) -> ModelResult<Vec<ModelStreamEvent>> {
+        if index >= 100_000 {
+            return Err(invalid(
+                "Responses output_index exceeds the supported bound",
+            ));
+        }
         if self.items.contains_key(&index) {
             return Err(invalid("Responses output_index was added twice"));
         }
-        let id = required_string(value, "id")?;
-        if self.items.values().any(|item| item.id() == id) {
+        let id = value
+            .get("id")
+            .map(|_| required_string(value, "id"))
+            .transpose()?;
+        if id.is_some() && self.items.values().any(|item| item.id() == id) {
             return Err(invalid("Responses item ID belongs to two output indices"));
         }
         let (item, events) = StreamItem::new(index, value, self.binding.profile, &self.tools)?;
@@ -229,15 +267,22 @@ impl ResponsesStream {
         request_id: Option<String>,
     ) -> ModelResult<Vec<ModelStreamEvent>> {
         self.set_response_id(response)?;
-        let output = required_array(response, "output")?;
-        let compacted = self.items.keys().any(|index| *index >= output.len());
+        let output = response
+            .get("output")
+            .map(|_| required_array(response, "output"))
+            .transpose()?;
+        let missing_output = output.is_none();
+        let empty = Vec::new();
+        let output = output.unwrap_or(&empty);
+        let compacted = missing_output || self.items.keys().any(|index| *index >= output.len());
         let mut recovered = None;
         if compacted {
             let mut items = Vec::with_capacity(self.items.len());
             let mut supplied = BTreeSet::new();
             for value in output {
                 let id = required_string(value, "id")?;
-                let Some((&index, _)) = self.items.iter().find(|(_, item)| item.id() == id) else {
+                let Some((&index, _)) = self.items.iter().find(|(_, item)| item.id() == Some(id))
+                else {
                     return Err(invalid(
                         "response.completed mixed omitted and untracked output items",
                     ));
@@ -250,7 +295,7 @@ impl ResponsesStream {
                 let value = if supplied.contains(&index) {
                     output
                         .iter()
-                        .find(|value| value["id"] == item.id())
+                        .find(|value| value["id"].as_str() == item.id())
                         .expect("matched item")
                 } else {
                     item.finished_snapshot().ok_or_else(|| {

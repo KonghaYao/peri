@@ -486,6 +486,7 @@ pub enum StopReason {
     EndTurn,
     ToolUse,
     MaxTokens,
+    Continue,
     Other { value: String },
 }
 

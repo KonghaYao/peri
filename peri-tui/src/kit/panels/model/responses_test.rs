@@ -78,7 +78,7 @@ fn max_tokens_after_right(plan_auth: bool) -> (u32, Option<String>) {
         config.config.providers[0].api_key.clear();
         config.config.providers[0].auth = Some(
             peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan {
-                store: "/tmp/peri-model-plan".into(),
+                store: std::env::temp_dir().join("peri-model-plan"),
                 account: "work".into(),
                 subject: "subject".into(),
                 client_id: "client".into(),
@@ -137,7 +137,7 @@ fn plan_provider_renders_profile_max_tokens_like_other_providers() {
     config.config.providers[0].api_key.clear();
     config.config.providers[0].auth = Some(
         peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan {
-            store: "/tmp/peri-model-plan".into(),
+            store: std::env::temp_dir().join("peri-model-plan"),
             account: "work".into(),
             subject: "subject".into(),
             client_id: "client".into(),

@@ -8,7 +8,7 @@ use crate::kit::panels::login::render;
 // ── 认证子视图交互 ────────────────────────────────────────────────────────────
 
 fn auth_target() -> crate::chatgpt_auth::AuthTarget {
-    crate::chatgpt_auth::AuthTarget::new(std::path::PathBuf::from("/tmp/peri-auth-test"), "work")
+    crate::chatgpt_auth::AuthTarget::new(std::env::temp_dir().join("peri-auth-test"), "work")
 }
 
 #[test]
@@ -217,7 +217,7 @@ fn plan_edit_state() -> LoginEditState {
             provider_type: "openai_responses".into(),
             auth: Some(
                 peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan {
-                    store: "/tmp/peri-auth-test".into(),
+                    store: std::env::temp_dir().join("peri-auth-test"),
                     account: "work".into(),
                     subject: "old-subject".into(),
                     client_id: "old-client".into(),

@@ -802,6 +802,7 @@ fn stop_reason_display_matches_legacy_wire_format() {
     assert_eq!(stop_reason_display(&StopReason::EndTurn), "end_turn");
     assert_eq!(stop_reason_display(&StopReason::ToolUse), "tool_use");
     assert_eq!(stop_reason_display(&StopReason::MaxTokens), "max_tokens");
+    assert_eq!(stop_reason_display(&StopReason::Continue), "continue");
     assert_eq!(
         stop_reason_display(&StopReason::Other {
             value: "custom".into()

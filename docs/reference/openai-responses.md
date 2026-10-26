@@ -85,11 +85,13 @@ ChatGPT 登录、状态查询与注销都在 Login 面板内完成，不启动 `
 开关；主模型、摘要和子模型工厂都消费同一已解析配置。切换别名时会重新使用目标
 profile 的模型、推理强度和窗口。
 
-流式 `response.metadata` 只承载元数据，不改变文本或完成态；若附带 response 身份，
-仍须匹配当前响应。若 `response.completed.output` 缺少此前已发送的 item，仅当该 item
-已收到完整 `response.output_item.done` 时，以完成快照重建结果和 replay；未完成的
-item、冲突的快照或无匹配身份仍按协议错误处理，不把丢失的工具调用静默当作成功。
-未知 SSE 事件和失败终态仍按协议错误处理。
+流式 `response.metadata` 和 `codex.response.metadata` 只承载元数据，不改变文本或完成态；
+若附带 response 身份，仍须匹配当前响应。允许 `response.output_item.done` 独立携带
+完整 item（消息可缺少 item ID，原生回放不伪造 ID）；`response.completed` 未提供
+`output` 或省略此前已发送的 item 时，仅以已收到完整 `output_item.done` 的快照
+重建结果和 replay。未完成的 item、冲突快照及
+未知的输出事件继续报协议错误；不产生输出的扩展事件忽略。失败终态仍报错。若上游明确
+给出 `end_turn: false` 且没有工具调用，该响应不触发完成 hook，而是有界续跑。
 
 ## ChatGPT 计划
 

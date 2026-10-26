@@ -368,7 +368,7 @@ fn responses_to_non_responses_clears_auth_but_keeps_profiles() {
     let mut cfg = responses_config();
     cfg.config.providers[0].api_key.clear();
     cfg.config.providers[0].auth = Some(ProviderAuthConfig::ChatGptPlan {
-        store: "/tmp/peri-login-edit-state".into(),
+        store: std::env::temp_dir().join("peri-login-edit-state"),
         account: "work".into(),
         subject: "subject".into(),
         client_id: "client".into(),
@@ -408,7 +408,7 @@ fn untouched_existing_plan_reference_survives_editing_other_fields() {
     let mut cfg = responses_config();
     cfg.config.providers[0].api_key.clear();
     cfg.config.providers[0].auth = Some(ProviderAuthConfig::ChatGptPlan {
-        store: "/tmp/peri-login-edit-state".into(),
+        store: std::env::temp_dir().join("peri-login-edit-state"),
         account: "work".into(),
         subject: "subject".into(),
         client_id: "client".into(),

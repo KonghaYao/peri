@@ -208,6 +208,30 @@ fn enqueue_truncation_continuation(context: &StageContext) {
     );
 }
 
+fn enqueue_model_continuation(context: &StageContext) {
+    use crate::session::queue::{MessageKind, MessageSource};
+    use peri_acp_types::system_reminder::{ReminderCategory, ReminderDelivery, ReminderSeverity};
+
+    let reminder = crate::session::producer_reminders::trusted_reminder(
+        ReminderCategory::Guidance,
+        "model_runtime",
+        "response_continuation",
+        ReminderSeverity::Warning,
+        ReminderDelivery::Required,
+        "The model marked its previous response as not the end of the turn. Continue from the saved state without repeating output or completed tool calls.".into(),
+        Some("Model turn is incomplete; continuing.".into()),
+        serde_json::json!({"stop_reason": "continue"}),
+    );
+    context.session.queue.push(
+        QueuedMessage::system_reminder(MessageKind::Defer, MessageSource::SystemInjected, reminder)
+            .with_policy(
+                peri_acp_types::session::MessagePolicy::continue_current_run(
+                    context.session.turn.execution_binding(),
+                ),
+            ),
+    );
+}
+
 /// 阶段失败时保留后台结果的处理责任：用户 Stop 进入 Suspended，其它失败进入
 /// Blocked，等待显式继续。这里不自动重试，也不把未覆盖当成已交付。
 fn record_stage_failure(context: &StageContext, stage: &str, failure: &LoopResult) {
@@ -695,9 +719,11 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             context.async_ctx.unprocessed_tool_calls.lock().clear();
 
             // 完整工具仍照常执行；无工具截断必须与自然完成区分，不能靠空队列判成功。
-            let truncated_without_tools = reason_out.reasoning.stop_reason
-                == peri_model::StopReason::MaxTokens
-                && !reason_out.reasoning.needs_tool_call();
+            let truncated_without_tools = !reason_out.reasoning.needs_tool_call()
+                && (reason_out.reasoning.stop_reason == peri_model::StopReason::MaxTokens
+                    || reason_out.reasoning.stop_reason == peri_model::StopReason::Continue);
+            let model_wants_continuation = !reason_out.reasoning.needs_tool_call()
+                && reason_out.reasoning.stop_reason == peri_model::StopReason::Continue;
 
             let stream_interruption = reason_out
                 .reasoning
@@ -776,7 +802,11 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     record_stage_failure(&context, "output_truncated", &failure);
                     return failure;
                 }
-                enqueue_truncation_continuation(&context);
+                if model_wants_continuation {
+                    enqueue_model_continuation(&context);
+                } else {
+                    enqueue_truncation_continuation(&context);
+                }
             } else {
                 loop_state.consecutive_truncations = 0;
             }
