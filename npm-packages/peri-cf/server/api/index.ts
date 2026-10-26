@@ -2,7 +2,6 @@ import { Hono, type Context } from "hono";
 import {
   parseChatUserAction,
   type ChatBindingTarget,
-  type ChatManagerContract,
   type ChatServiceContract,
   type ChatUserAction as ChatUserActionValue,
   type ReadPayloadOptions,
@@ -11,6 +10,7 @@ import {
 import { ChatCloseIncompleteError } from "@peri-code/sdk";
 import { logError } from "../logging";
 import type { ServerInfo } from "../config";
+import type { ChatRegistry } from "../registry";
 import {
   chatNotFound,
   closeIncomplete,
@@ -18,19 +18,8 @@ import {
   mapPayloadError,
 } from "./errors";
 
-/** API 只依赖平台编排端口与目录事实，不接触 Store、宿主或 View。 */
-export type ApiChatManager =
-  Pick<
-    ChatManagerContract,
-    "listSessions" | "createChat" | "getChat" | "findChatBySession" | "closeChat"
-  >
-  & {
-    /** 句柄已移除但关闭资源仍有残留（如 View 未释放）；按 chatId 重试 DELETE。 */
-    hasPendingClose(chatId: string): boolean;
-  };
-
-export interface ApiDeps {
-  manager: ApiChatManager;
+export interface ApiOptions {
+  registry: ChatRegistry;
   info: ServerInfo;
 }
 
@@ -68,17 +57,6 @@ function parseTarget(value: unknown): ActionTarget | string {
     return "target.bindingRevision must be a non-negative safe integer";
   }
   return { sessionId, bindingRevision: revision };
-}
-
-function targetMatches(chat: ChatServiceContract, target: ActionTarget): boolean {
-  const binding = chat.binding;
-  if (!binding) return target.sessionId === null && target.bindingRevision === 0;
-  return binding.sessionId === target.sessionId
-    && binding.bindingRevision === target.bindingRevision;
-}
-
-function resolveChat(manager: ApiChatManager, id: string): ChatServiceContract | undefined {
-  return manager.getChat(id) ?? manager.findChatBySession(id);
 }
 
 async function readActionBody(
@@ -172,7 +150,7 @@ function bindingTarget(chat: ChatServiceContract, fallback: ActionTarget): ChatB
  *
  * 路由只做边界校验、目标绑定核对与错误映射；执行、绑定与关闭语义都在 SDK。
  */
-export function createApi(deps: ApiDeps): Hono {
+export function createApi(deps: ApiOptions): Hono {
   const app = new Hono();
 
   app.get("/api/info", (c) => c.json({ ok: true, ...deps.info }));
@@ -181,7 +159,7 @@ export function createApi(deps: ApiDeps): Hono {
     const raw = c.req.query("path");
     const path = raw && raw.length > 0 ? raw : undefined;
     try {
-      const chats = await deps.manager.listSessions(path ? { path } : undefined);
+      const chats = await deps.registry.chats.listSessions(path ? { path } : undefined);
       return c.json({ chats, available: true });
     } catch (error) {
       logError("[peri-cf] Peri session directory is unavailable", error);
@@ -211,7 +189,7 @@ export function createApi(deps: ApiDeps): Hono {
       return c.json({ ok: false, code: "invalid_request", message: "path must be a non-empty string" }, 400);
     }
     // 只登记句柄；不新建 ACP Session，也不读取历史。
-    const chat = deps.manager.createChat(path ? { path } : undefined);
+    const chat = deps.registry.chats.createChat(path ? { path } : undefined);
     return c.json({
       chat: {
         id: chat.id,
@@ -223,7 +201,8 @@ export function createApi(deps: ApiDeps): Hono {
 
   app.post("/api/chats/:chatId/actions", async (c) => {
     const chatId = c.req.param("chatId");
-    const chat = resolveChat(deps.manager, chatId);
+    const chat = deps.registry.chats.getChat(chatId)
+      ?? deps.registry.chats.findChatBySession(chatId);
     if (!chat) return c.json(chatNotFound(chatId).body, 410);
 
     const body = await readActionBody(c);
@@ -241,7 +220,12 @@ export function createApi(deps: ApiDeps): Hono {
       return c.json(mapped.body, mapped.status as 400);
     }
 
-    if (!targetMatches(chat, target)) {
+    const binding = chat.binding;
+    const bindingMatches = binding
+      ? binding.sessionId === target.sessionId
+        && binding.bindingRevision === target.bindingRevision
+      : target.sessionId === null && target.bindingRevision === 0;
+    if (!bindingMatches) {
       return c.json({
         ok: false,
         code: "binding_conflict",
@@ -280,15 +264,16 @@ export function createApi(deps: ApiDeps): Hono {
 
   app.delete("/api/chats/:chatId", async (c) => {
     const requestedId = c.req.param("chatId");
-    const chat = resolveChat(deps.manager, requestedId);
+    const chat = deps.registry.chats.getChat(requestedId)
+      ?? deps.registry.chats.findChatBySession(requestedId);
     const chatId = chat?.id ?? requestedId;
     // 首次关闭可能已移除句柄、只留下待释放的 View；此时同一 DELETE 必须继续重试，
     // 不能把“部分关闭”误报为未知 Chat。
-    if (!chat && !deps.manager.hasPendingClose(chatId)) {
+    if (!chat && !deps.registry.hasPendingClose(chatId)) {
       return c.json(chatNotFound(requestedId).body, 410);
     }
     try {
-      await deps.manager.closeChat(chatId);
+      await deps.registry.closeChat(chatId);
       return c.body(null, 204);
     } catch (error) {
       if (error instanceof ChatCloseIncompleteError) {
@@ -304,7 +289,8 @@ export function createApi(deps: ApiDeps): Hono {
 
   app.get("/api/chats/:chatId/payload/:refId", async (c) => {
     const chatId = c.req.param("chatId");
-    const chat = resolveChat(deps.manager, chatId);
+    const chat = deps.registry.chats.getChat(chatId)
+      ?? deps.registry.chats.findChatBySession(chatId);
     if (!chat) return c.json(chatNotFound(chatId).body, 410);
 
     let refId: string;
@@ -356,5 +342,4 @@ export {
   handleSyncUpgrade,
   syncWebSocketHandlers,
   type SyncSocketData,
-  type SyncUpgradeDeps,
 } from "./sync";

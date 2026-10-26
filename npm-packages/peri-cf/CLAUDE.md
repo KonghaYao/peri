@@ -11,9 +11,9 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 ## 边界
 
 **服务端是唯一计算实例**：`server/index.ts` 启动 Bun 进程；`server/compose.ts` 把平台依赖
-（WASM 运行后端、Store、memory KV、默认配置）装配成 SDK `ChatManager`，是 server 内唯一构造具体实现的
-位置；`server/host.ts` 的 `ChatHost` 持有 `ChatManagerContract` 与 `ChatViewRegistry`，编排句柄转发、
-View 释放与关闭。句柄、绑定、Action、事实与关闭语义都在 SDK。
+（WASM 运行后端、Store、memory KV、默认配置）装配成 SDK `ChatManager` 的构造选项，入口用这些选项
+构造具体实现；`server/registry.ts` 的 `ChatRegistry` 持有 `ChatManagerContract` 与
+`ChatViewRegistry`，编排 View 释放与关闭/停机。句柄、绑定、Action、事实与关闭语义都在 SDK。
 浏览器不启动 WASM 运行后端，刷新/关闭页面不结束执行；服务进程退出会结束在途执行，历史仍在 Store。
 
 **凭据与工具面只在服务端**：模型、Store、machineId 与远程 MCP 全部来自环境变量
@@ -33,7 +33,7 @@ View 释放与关闭。句柄、绑定、Action、事实与关闭语义都在 SD
   `contracts.ts`（Zod wire/展示 DTO 与 `ServerInfo`）、`display-state.ts`（`ChatDisplayState` 物化）、
   `projection.ts`（`ChatReplica` 投影）、`askUserQuestion.ts`（问答适配）与 `logging.ts`。
 - `server/`：`index.ts`（Bun 入口与静态资源）、`config.ts`（环境变量与启动校验）、
-  `compose.ts`（平台装配，唯一 `new ChatManager`）、`host.ts`（`ChatHost`：句柄转发与 View 生命周期）、
+  `compose.ts`（`chatManagerOptions` 平台装配）、`registry.ts`（`ChatRegistry`：View 生命周期与关闭/停机）、
   `api/index.ts`（Hono 目录/句柄/Action/payload）、`api/sync.ts`（WS → ChatYjsChannel）、
   `api/errors.ts`（错误映射）。
 - `frontend/chat/`、`frontend/components/`、`frontend/app/`：Chat 展示外壳、时间线与交互卡片；

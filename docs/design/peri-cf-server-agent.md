@@ -25,7 +25,7 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
   → GET /api/chats/:id/payload/:refId
   → WS /api/chats/:id/sync
   → server/api（Hono + Bun WebSocket）
-  → ChatHost（持有 ChatManagerContract + ChatViewRegistry）
+  → ChatRegistry（持有 ChatManagerContract + ChatViewRegistry）
   → SDK ChatManager → ChatService → PeriInstance → WasmAcpTransport → peri-wasm ACP Host
   → 模型 / Turso Store / 远程 MCP
 ```
@@ -34,12 +34,12 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
 
 - **平台装配**：`server/compose.ts` 读取 `ServerConfig`，构造 Store、memory KV（默认 `createStorage()`）、
   WASM `ChatRuntime`、`sessionInit`（path/instructions/MCP）；`chatManagerOptions(config)` 是纯装配，
-  `createSdkChatManager(config)` 是 server 内唯一构造具体 `ChatManager` 的位置。
-- **服务端宿主**：`server/host.ts` 的 `ChatHost` 持有 `ChatManagerContract` 与
-  `ChatViewRegistry`。四个查询/登记方法直接转发；`closeChat` 先关 SDK 句柄再释放 View；
+  入口用它构造具体 `ChatManager`。
+- **服务端注册表**：`server/registry.ts` 的 `ChatRegistry` 持有 `ChatManagerContract` 与
+  `ChatViewRegistry`。`chats` 直接暴露句柄端口；`closeChat` 先关 SDK 句柄再释放 View；
   `hasPendingClose` 暴露「句柄已移除、View 仍待释放」的残留；`shutdown` 先 `disposeAll` 再
-  `chats.shutdown()`。宿主不重写领域规则，也不提供替换端口或注册表的注入 seam。
-- **入口**：`startServer(config)` 构造 `ChatHost` 并组装 HTTP/WS；测试直接构造 `ChatHost` 或断言
+  `chats.shutdown()`。注册表只做关闭/停机编排，不提供替换端口或注册表的注入 seam。
+- **入口**：`startServer(config)` 构造 `ChatRegistry` 并组装 HTTP/WS；测试直接构造 `ChatRegistry` 或断言
   `chatManagerOptions(config)`，生产路径没有可选注入参数。
 - **应用只装配平台**：句柄、绑定、动作、事实与关闭语义都在 SDK；应用不复制准入、同步或关闭规则。
 - **视图**：`ChatViewRegistry` 由 SDK 主入口与 `/portable` 提供（`/view` 不含），每个 Chat 一个
@@ -65,7 +65,7 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
   不是互斥原语。
 - 关闭复用正常关闭与启动失败清理，并发关闭合并；确认清理后才移除索引与占用。`session/close` 超时
   返回 `ChatCloseIncompleteError`，保留 ownership、资源与原因，可重试。
-- `shutdown` 分两段：`ChatHost` 先释放全部 View（断开同步连接与文档），再让 SDK 封闭新准入、结算在途
+- `shutdown` 分两段：`ChatRegistry` 先释放全部 View（断开同步连接与文档），再让 SDK 封闭新准入、结算在途
   关闭并释放 WASM 运行后端；两段失败都聚合并保留资源，可重试。
 - `cancel` 的 `requested` 不是停止证明；应用不能把 202 回执映射成 stopped。
 - 动作错误以 `disposition` 表达可重试性：`rejected` 明确未生效，`unknown` 可能已执行且不得自动重试，

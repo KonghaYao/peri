@@ -1,7 +1,6 @@
 import { createStorage } from "unstorage";
 import {
   BareHarnessConfig,
-  ChatManager,
   TursoStorage,
   type ChatManagerOptions,
 } from "@peri-code/sdk";
@@ -16,10 +15,11 @@ import {
 import { SYSTEM_INSTRUCTIONS } from "./system-instructions";
 
 /**
- * 平台装配：把 CF 的配置、Store、WASM 运行后端与默认工具面装配成 SDK `ChatManager`。
+ * 平台装配：把 CF 的配置、Store、WASM 运行后端与默认工具面装配成 SDK `ChatManager`
+ * 的构造选项。
  *
- * 这是 server 内唯一构造具体 `ChatManager` 的位置。`chatManagerOptions` 只做纯装配，
- * 测试可直接断言；生产路径不提供替换 Store、KV、运行后端或日志的注入 seam。
+ * `chatManagerOptions` 只做纯装配，测试可直接断言；生产路径不提供替换 Store、KV、
+ * 运行后端或日志的注入 seam。具体 `ChatManager` 由入口用这些选项构造。
  */
 
 const DEFAULT_MODEL_ALIAS = "sonnet";
@@ -104,9 +104,4 @@ export function chatManagerOptions(config: ServerConfig): ChatManagerOptions {
       },
     },
   };
-}
-
-/** 生产入口：用固定的 CF 平台装配构造 SDK 默认实现。 */
-export function createSdkChatManager(config: ServerConfig): ChatManager {
-  return new ChatManager(chatManagerOptions(config));
 }

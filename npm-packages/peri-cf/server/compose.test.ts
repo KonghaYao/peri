@@ -9,7 +9,7 @@ import {
   type ServerConfig,
 } from "./config";
 import { SYSTEM_INSTRUCTIONS } from "./system-instructions";
-import { createSdkChatManager, chatManagerOptions } from "./compose";
+import { chatManagerOptions } from "./compose";
 
 const config: ServerConfig = {
   hostname: "127.0.0.1",
@@ -151,13 +151,5 @@ describe("chatManagerOptions", () => {
       if (originalSecret === undefined) delete process.env.PERI_SERVER_SECRET;
       else process.env.PERI_SERVER_SECRET = originalSecret;
     }
-  });
-
-  test("createSdkChatManager 返回 SDK 默认实现，句柄登记不启动运行后端", () => {
-    const manager = createSdkChatManager(config);
-    const chat = manager.createChat();
-
-    expect(chat.sessionId).toBeNull();
-    expect(chat.bindingRevision).toBe(0);
   });
 });

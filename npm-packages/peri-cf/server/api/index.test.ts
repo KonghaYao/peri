@@ -8,9 +8,11 @@ import {
   type CancelAction,
   type CancelRequestResult,
   type ChatBindingTarget,
+  type ChatManagerContract,
   type ChatServiceContract,
   type ChatSessionDirectoryEntry,
   type ChatUserAction,
+  type ChatYjsChannel,
   type ControlResult,
   type ForceSendAction,
   type HistoryAction,
@@ -24,7 +26,8 @@ import {
   type ToolPayloadResponse,
 } from "@peri-code/sdk";
 import type { ServerInfo } from "../config";
-import { createApi, type ApiChatManager } from ".";
+import { ChatRegistry } from "../registry";
+import { createApi } from ".";
 
 const info = {
   model: {
@@ -151,12 +154,29 @@ function stubChat(
 
 interface ApiFixture {
   app: ReturnType<typeof createApi>;
+  registry: ChatRegistry;
   chats: Map<string, StubChat>;
   created: StubChat[];
   listCalls: Array<{ path?: string } | undefined>;
   closeErrors: Map<string, unknown>;
-  pendingCloseErrors: Map<string, unknown>;
-  pendingCloses: Set<string>;
+}
+
+/** View 首次释放失败、重试成功；其余通道成员不参与 DELETE 测试。 */
+class FailingCloseChannel implements ChatYjsChannel {
+  closed = false;
+  failures = 1;
+
+  send(): void {}
+  onMessage(): () => void { return () => {}; }
+  onClose(): () => void { return () => {}; }
+
+  close(): void {
+    if (this.failures > 0) {
+      this.failures -= 1;
+      throw new Error("view dispose failed");
+    }
+    this.closed = true;
+  }
 }
 
 function apiWith(options: {
@@ -168,9 +188,7 @@ function apiWith(options: {
   const created: StubChat[] = [];
   const listCalls: Array<{ path?: string } | undefined> = [];
   const closeErrors = new Map<string, unknown>();
-  const pendingCloseErrors = new Map<string, unknown>();
-  const pendingCloses = new Set<string>();
-  const manager: ApiChatManager = {
+  const manager: ChatManagerContract = {
     async listSessions(params) {
       listCalls.push(params);
       if (options.listError !== undefined) throw options.listError;
@@ -191,25 +209,18 @@ function apiWith(options: {
       const chat = chats.get(id);
       if (chat) await chat.close();
       chats.delete(id);
-      const pendingFailure = pendingCloseErrors.get(id);
-      if (pendingFailure !== undefined) {
-        pendingCloseErrors.delete(id);
-        pendingCloses.add(id);
-        throw pendingFailure;
-      }
-      pendingCloses.delete(id);
     },
-    hasPendingClose: (id) => pendingCloses.has(id),
+    async shutdown() {},
   };
-  const app = createApi({ manager, info });
+  const registry = new ChatRegistry(manager);
+  const app = createApi({ registry, info });
   return {
     app,
+    registry,
     chats,
     created,
     listCalls,
     closeErrors,
-    pendingCloseErrors,
-    pendingCloses,
   };
 }
 
@@ -406,7 +417,7 @@ describe("server api", () => {
     expect(missing.status).toBe(410);
 
     fixture.closeErrors.set("chat-1", new ChatCloseIncompleteError([
-      new Error("host close failed"),
+      new Error("registry close failed"),
     ]));
     const incomplete = await fixture.app.request("/api/chats/chat-1", { method: "DELETE" });
     expect(incomplete.status).toBe(500);
@@ -418,7 +429,7 @@ describe("server api", () => {
       incomplete: true,
       chatId: "chat-1",
     });
-    expect(body.errors[0]).toContain("host close failed");
+    expect(body.errors[0]).toContain("registry close failed");
 
     fixture.closeErrors.delete("chat-1");
     const closed = await fixture.app.request("/api/chats/chat-1", { method: "DELETE" });
@@ -429,9 +440,9 @@ describe("server api", () => {
   test("View 释放失败后 DELETE 以同一 chatId 重试并清理残留", async () => {
     const chat = stubChat("chat-1", { sessionId: "session-1", bindingRevision: 1 });
     const fixture = apiWith({ chats: [chat] });
-    fixture.pendingCloseErrors.set("chat-1", new ChatCloseIncompleteError([
-      new Error("view dispose failed"),
-    ]));
+    fixture.registry.views
+      .attach(chat)
+      .sync(new FailingCloseChannel());
 
     const first = await fixture.app.request("/api/chats/chat-1", { method: "DELETE" });
     expect(first.status).toBe(500);
@@ -443,14 +454,14 @@ describe("server api", () => {
       incomplete: true,
       chatId: "chat-1",
     });
-    expect(firstBody.errors[0]).toContain("view dispose failed");
+    expect(firstBody.errors[0]).toContain("ChatView disposal failed");
     // 句柄已移除（WS 不能再解析到该 Chat），但 View 残留仍可被同一 DELETE 重试。
     expect(fixture.chats.has("chat-1")).toBe(false);
-    expect(fixture.pendingCloses.has("chat-1")).toBe(true);
+    expect(fixture.registry.hasPendingClose("chat-1")).toBe(true);
 
     const second = await fixture.app.request("/api/chats/chat-1", { method: "DELETE" });
     expect(second.status).toBe(204);
-    expect(fixture.pendingCloses.size).toBe(0);
+    expect(fixture.registry.hasPendingClose("chat-1")).toBe(false);
     expect(chat.closeCalls.value).toBe(1);
   });
 

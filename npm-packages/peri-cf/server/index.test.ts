@@ -6,7 +6,7 @@ import {
 } from "@peri-code/sdk";
 import type { ServerConfig } from "./config";
 import { createServer } from ".";
-import { ChatHost } from "./host";
+import { ChatRegistry } from "./registry";
 
 const config: ServerConfig = {
   hostname: "127.0.0.1",
@@ -73,8 +73,8 @@ class FakeChatManager implements ChatManagerContract {
 
 describe("server wiring", () => {
   test("HTTP、目录与 WS 410 路由在同一服务中工作", async () => {
-    const host = new ChatHost(new FakeChatManager());
-    const server = createServer(config, host);
+    const registry = new ChatRegistry(new FakeChatManager());
+    const server = createServer(config, registry);
     try {
       const info = await fetch(`http://127.0.0.1:${server.port}/api/info`);
       expect(info.status).toBe(200);
@@ -110,7 +110,7 @@ describe("server wiring", () => {
       expect(createdBody.chat.bindingRevision).toBe(0);
     } finally {
       server.stop(true);
-      await host.shutdown();
+      await registry.shutdown();
     }
   });
 });

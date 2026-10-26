@@ -15,10 +15,11 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
   → peri-wasm Host（每次激活一个）→ 模型 / Turso Store / 远程 MCP
 ```
 
-- **平台装配**：`server/compose.ts` 是 server 内唯一构造具体 `ChatManager` 的位置，把 WASM 运行后端、
-  Store、memory KV 与默认配置装配成 SDK 实现；`chatManagerOptions(config)` 是可直接断言的纯装配。
-- **服务端宿主**：`server/host.ts` 的 `ChatHost` 持有 `ChatManagerContract` 与 `ChatViewRegistry`，
-  转发 create/get/find/list，编排 close 与 shutdown；`createChat` 不启动 WASM，不读历史。
+- **平台装配**：`server/compose.ts` 把 WASM 运行后端、Store、memory KV 与默认配置装配成
+  `chatManagerOptions(config)`，可直接断言；入口用它构造具体 `ChatManager`。
+- **服务端注册表**：`server/registry.ts` 的 `ChatRegistry` 持有 `ChatManagerContract` 与
+  `ChatViewRegistry`，`chats` 直接暴露句柄端口，编排 close 与 shutdown；`createChat` 不启动 WASM，
+  不读历史。
 - **视图**：`ChatViewRegistry` 由 SDK 提供（主入口与 `/portable`，不在 `/view`），每个 Chat 一个
   `ChatView`；同一 Chat 的多个 WS 连接共享视图，断开连接不释放视图；绑定换代由 View 成对替换文档。
   `closeChat` 先关句柄再释放视图，`shutdown` 先 `disposeAll` 再关闭 SDK 端口。
@@ -69,8 +70,8 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 | 包命令、依赖 | `npm-packages/peri-cf/package.json` |
 | Bun 入口（HTTP + 静态资源 + WS + 信号） | `server/index.ts` |
 | 环境变量解析与启动校验 | `server/config.ts` |
-| 平台装配（唯一 `new ChatManager`） | `server/compose.ts` |
-| 服务端宿主（句柄转发 + View 生命周期） | `server/host.ts` |
+| 平台装配（`chatManagerOptions`） | `server/compose.ts` |
+| 服务端注册表（句柄端口 + View 生命周期） | `server/registry.ts` |
 | HTTP 路由与错误映射 | `server/api/index.ts`、`server/api/errors.ts` |
 | WebSocket 同步适配 | `server/api/sync.ts` |
 | 共享 Zod DTO / HTTP 契约 | `frontend/remote/contracts.ts`、`frontend/remote/display-state.ts` |

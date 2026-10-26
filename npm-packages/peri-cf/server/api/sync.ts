@@ -1,12 +1,12 @@
 import type { Server, ServerWebSocket, WebSocketHandler } from "bun";
 import {
   ChatViewReplayOverflowError,
-  type ChatManagerContract,
   type ChatServiceContract,
   type ChatViewRegistry,
   type ChatYjsChannel,
 } from "@peri-code/sdk";
 import { logError } from "../logging";
+import type { ChatRegistry } from "../registry";
 import { chatNotFound } from "./errors";
 
 /**
@@ -25,21 +25,11 @@ const UNSUPPORTED_DATA = 1003;
 const TOO_LARGE = 1009;
 const INTERNAL_ERROR = 1011;
 
-export interface SyncUpgradeDeps {
-  manager: Pick<ChatManagerContract, "getChat" | "findChatBySession">;
-  views: ChatViewRegistry;
-}
-
 export interface SyncSocketData {
   readonly chatId: string;
   readonly chat: ChatServiceContract;
-  readonly channel: SyncSocketChannel;
+  readonly channel: WebSocketSyncChannel;
   readonly view: ReturnType<ChatViewRegistry["attach"]>;
-}
-
-function closeReason(reason: string | undefined): string | undefined {
-  if (!reason) return undefined;
-  return reason.length > 120 ? `${reason.slice(0, 119)}…` : reason;
 }
 
 /**
@@ -48,7 +38,7 @@ function closeReason(reason: string | undefined): string | undefined {
  * `peerClosed` 由 socket close 事件调用；`close` 是 SDK 主动终止。两者幂等，
  * 都只通知一次 close listener。
  */
-export class SyncSocketChannel implements ChatYjsChannel {
+export class WebSocketSyncChannel implements ChatYjsChannel {
   closed = false;
   private socket: ServerWebSocket<SyncSocketData> | undefined;
   private readonly messageListeners = new Set<(frame: Uint8Array) => void>();
@@ -108,7 +98,11 @@ export class SyncSocketChannel implements ChatYjsChannel {
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.close(
         reason ? INTERNAL_ERROR : NORMAL_CLOSE,
-        closeReason(reason?.message),
+        reason?.message
+          ? reason.message.length > 120
+            ? `${reason.message.slice(0, 119)}…`
+            : reason.message
+          : undefined,
       );
     }
   }
@@ -123,7 +117,7 @@ export class SyncSocketChannel implements ChatYjsChannel {
 export async function handleSyncUpgrade(
   request: Request,
   server: Server<SyncSocketData>,
-  deps: SyncUpgradeDeps,
+  registry: ChatRegistry,
 ): Promise<Response | undefined> {
   const pathname = new URL(request.url).pathname;
   const match = SYNC_PATH_PATTERN.exec(pathname);
@@ -148,8 +142,8 @@ export async function handleSyncUpgrade(
   } catch {
     return new Response("Invalid chat id", { status: 400 });
   }
-  const chat = deps.manager.getChat(chatId)
-    ?? deps.manager.findChatBySession(chatId);
+  const chat = registry.chats.getChat(chatId)
+    ?? registry.chats.findChatBySession(chatId);
   if (!chat) {
     const mapped = chatNotFound(chatId);
     return Response.json(mapped.body, { status: mapped.status });
@@ -157,7 +151,7 @@ export async function handleSyncUpgrade(
 
   let view: SyncSocketData["view"];
   try {
-    view = deps.views.attach(chat);
+    view = registry.views.attach(chat);
   } catch (error) {
     logError("[peri-cf] Peri chat view attach failed", error, { chatId: chat.id });
     return Response.json({
@@ -175,7 +169,7 @@ export async function handleSyncUpgrade(
   const data: SyncSocketData = {
     chatId: chat.id,
     chat,
-    channel: new SyncSocketChannel(),
+    channel: new WebSocketSyncChannel(),
     view,
   };
   if (!server.upgrade(request, { data })) {

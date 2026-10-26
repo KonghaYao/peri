@@ -1,5 +1,6 @@
 import { resolve, sep } from "node:path";
 import type { Server } from "bun";
+import { ChatManager } from "@peri-code/sdk";
 import {
   SYNC_PATH_PATTERN,
   createApi,
@@ -8,8 +9,8 @@ import {
   type SyncSocketData,
 } from "./api";
 import { MODEL_TIERS, loadServerConfig, publicServerInfo, type ServerConfig } from "./config";
-import { createSdkChatManager } from "./compose";
-import { ChatHost } from "./host";
+import { chatManagerOptions } from "./compose";
+import { ChatRegistry } from "./registry";
 
 /**
  * Bun 长驻服务：`/api/*` 由会话服务处理，`/api/chats/:chatId/sync` 升级为只读
@@ -37,9 +38,9 @@ function createStaticHandler(staticRoot: string): (request: Request) => Promise<
 /** 组装 HTTP/WS 服务；WASM 宿主仍由首个 Action 懒启动。 */
 export function createServer(
   config: ServerConfig,
-  host: ChatHost,
+  registry: ChatRegistry,
 ): Server<SyncSocketData> {
-  const app = createApi({ manager: host, info: publicServerInfo(config) });
+  const app = createApi({ registry, info: publicServerInfo(config) });
   const serveStatic = createStaticHandler(config.staticRoot);
   return Bun.serve<SyncSocketData>({
     hostname: config.hostname,
@@ -48,10 +49,7 @@ export function createServer(
       const path = new URL(request.url).pathname;
       if (SYNC_PATH_PATTERN.test(path)) {
         // 成功升级时返回 undefined；失败在升级前返回 HTTP 响应。
-        return handleSyncUpgrade(request, server, {
-          manager: host.chats,
-          views: host.views,
-        });
+        return handleSyncUpgrade(request, server, registry);
       }
       if (path === "/api" || path.startsWith("/api/")) return app.fetch(request);
       return serveStatic(request);
@@ -60,12 +58,12 @@ export function createServer(
   });
 }
 
-/** 进程级入口：构造具体宿主，再启动服务。 */
+/** 进程级入口：构造注册表，再启动服务。 */
 export function startServer(
   config: ServerConfig,
-): { server: Server<SyncSocketData>; host: ChatHost } {
-  const host = new ChatHost(createSdkChatManager(config));
-  return { server: createServer(config, host), host };
+): { server: Server<SyncSocketData>; registry: ChatRegistry } {
+  const registry = new ChatRegistry(new ChatManager(chatManagerOptions(config)));
+  return { server: createServer(config, registry), registry };
 }
 
 function startFromEnvironment(): void {
@@ -75,7 +73,7 @@ function startFromEnvironment(): void {
     process.exit(1);
   }
   const config = loaded.config;
-  const { server, host } = startServer(config);
+  const { server, registry } = startServer(config);
   console.log(`[peri-cf] server listening on http://${server.hostname}:${server.port}`);
   console.log(
     `[peri-cf] model=${config.model.provider}`
@@ -89,7 +87,7 @@ function startFromEnvironment(): void {
     stopping = true;
     server.stop();
     try {
-      await host.shutdown();
+      await registry.shutdown();
       process.exit(0);
     } catch (error) {
       console.error("[peri-cf] shutdown is incomplete; resources are preserved", error);

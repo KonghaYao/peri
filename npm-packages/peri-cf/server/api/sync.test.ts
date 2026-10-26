@@ -17,6 +17,7 @@ import {
   encodeAckFrame,
   encodeHelloFrame,
 } from "@peri-code/sdk/view";
+import { ChatRegistry } from "../registry";
 import {
   MAX_CLIENT_SYNC_FRAME_BYTES,
   handleSyncUpgrade,
@@ -188,25 +189,28 @@ function nextClose(ws: WebSocket, timeoutMs = 2000): Promise<{ code: number; rea
   });
 }
 
-function startSyncServer(inputs: {
-  registry: ChatViewRegistry;
-  chat?: ChatServiceContract;
-}): Server<SyncSocketData> {
-  const chat = inputs.chat ?? fakeChat("chat-1");
-  return Bun.serve<SyncSocketData>({
+function startSyncServer(
+  chat: ChatServiceContract = fakeChat("chat-1"),
+): { server: Server<SyncSocketData>; registry: ChatRegistry } {
+  const registry = new ChatRegistry({
+    createChat(): ChatServiceContract {
+      throw new Error("sync fixture cannot create chats");
+    },
+    getChat: (id) => id === chat.id ? chat : undefined,
+    findChatBySession: () => undefined,
+    async listSessions() { return []; },
+    async closeChat() {},
+    async shutdown() {},
+  });
+  const server = Bun.serve<SyncSocketData>({
     hostname: "127.0.0.1",
     port: 0,
     fetch(request, server) {
-      return handleSyncUpgrade(request, server, {
-        manager: {
-          getChat: (id) => id === chat.id ? chat : undefined,
-          findChatBySession: () => undefined,
-        },
-        views: inputs.registry,
-      });
+      return handleSyncUpgrade(request, server, registry);
     },
     websocket: syncWebSocketHandlers,
   });
+  return { server, registry };
 }
 
 async function openSocket(url: string): Promise<WebSocket> {
@@ -229,8 +233,7 @@ describe("sync WebSocket", () => {
         update("user_message_chunk", { messageId: "u1", content: { type: "text", text: "Saved" } }),
       ],
     });
-    const registry = new ChatViewRegistry();
-    const server = startSyncServer({ registry, chat: fakeChat("chat-1", source) });
+    const { server, registry } = startSyncServer(fakeChat("chat-1", source));
     const ws = await openSocket(
       `ws://127.0.0.1:${server.port}/api/chats/chat-1/sync`,
     );
@@ -252,10 +255,10 @@ describe("sync WebSocket", () => {
       ws.close();
       await closed;
       await waitFor(() => source.observerCount === 1);
-      expect(registry.get("chat-1")).toBeDefined();
+      expect(registry.views.get("chat-1")).toBeDefined();
     } finally {
       ws.close();
-      await registry.disposeAll();
+      await registry.views.disposeAll();
       server.stop(true);
     }
   });
@@ -263,8 +266,7 @@ describe("sync WebSocket", () => {
   test("客户端 Yjs 更新帧被显式关闭", async () => {
     const source = new FakeFactSource();
     source.bind(TARGET);
-    const registry = new ChatViewRegistry();
-    const server = startSyncServer({ registry, chat: fakeChat("chat-1", source) });
+    const { server, registry } = startSyncServer(fakeChat("chat-1", source));
     const ws = await openSocket(
       `ws://127.0.0.1:${server.port}/api/chats/chat-1/sync`,
     );
@@ -283,14 +285,13 @@ describe("sync WebSocket", () => {
       expect(closed.reason).toContain("Unexpected chat sync frame tag 3");
     } finally {
       ws.close();
-      await registry.disposeAll();
+      await registry.views.disposeAll();
       server.stop(true);
     }
   });
 
   test("未知 Chat 在升级前返回 410", async () => {
-    const registry = new ChatViewRegistry();
-    const server = startSyncServer({ registry });
+    const { server, registry } = startSyncServer();
     try {
       const response = await fetch(
         `http://127.0.0.1:${server.port}/api/chats/missing/sync`,
@@ -299,7 +300,7 @@ describe("sync WebSocket", () => {
       expect(response.status).toBe(410);
       expect(await response.json()).toMatchObject({ code: "chat_not_found" });
     } finally {
-      await registry.disposeAll();
+      await registry.views.disposeAll();
       server.stop(true);
     }
   });
@@ -371,12 +372,11 @@ describe("sync delivery", () => {
   });
 });
 
-describe("SyncSocketChannel", () => {
+describe("WebSocketSyncChannel", () => {
   test("超限客户端帧以 1009 显式关闭", async () => {
     const source = new FakeFactSource();
     source.bind(TARGET);
-    const registry = new ChatViewRegistry();
-    const server = startSyncServer({ registry, chat: fakeChat("chat-1", source) });
+    const { server, registry } = startSyncServer(fakeChat("chat-1", source));
     const ws = await openSocket(
       `ws://127.0.0.1:${server.port}/api/chats/chat-1/sync`,
     );
@@ -386,7 +386,7 @@ describe("SyncSocketChannel", () => {
       expect((await closed).code).toBe(1009);
     } finally {
       ws.close();
-      await registry.disposeAll();
+      await registry.views.disposeAll();
       server.stop(true);
     }
   });
