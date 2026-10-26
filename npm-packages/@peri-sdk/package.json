@@ -6,24 +6,24 @@
   "description": "Peri ACP host SDK over host-injected transports, including the Emscripten WASM runtime",
   "exports": {
     ".": {
-      "types": "./dist/sdk/index.d.ts",
+      "types": "./dist/entries/index.d.ts",
       "import": "./dist/index.js"
     },
     "./portable": {
-      "types": "./dist/portable.d.ts",
+      "types": "./dist/entries/portable.d.ts",
       "import": "./dist/portable.js"
     },
     "./wasm": {
-      "types": "./dist/wasm.d.ts",
+      "types": "./dist/entries/wasm.d.ts",
       "import": "./dist/wasm.js"
     },
     "./wasm-node": {
-      "types": "./dist/wasm-node.d.ts",
+      "types": "./dist/entries/wasm-node.d.ts",
       "import": "./dist/wasm-node.js"
     },
     "./view": {
-      "types": "./dist/view/index.d.ts",
-      "import": "./dist/view/index.js"
+      "types": "./dist/entries/view.d.ts",
+      "import": "./dist/view.js"
     }
   },
   "files": [

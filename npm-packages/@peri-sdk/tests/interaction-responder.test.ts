@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { parseInteractionAnswer } from "../src/agent/interaction-responder";
+import { parseInteractionAnswer } from "../src/contracts/interaction";
 
 test("interaction command parser accepts only supported decisions", () => {
     expect(parseInteractionAnswer({ kind: "permission", decision: "allow_once" })).toEqual({ kind: "permission", decision: "allow_once" });

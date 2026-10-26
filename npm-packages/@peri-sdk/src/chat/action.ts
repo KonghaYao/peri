@@ -1,6 +1,6 @@
-import { parseInteractionAnswer, type InteractionAnswer } from "../agent/interaction-responder";
+import { parseInteractionAnswer, type InteractionAnswer } from "../contracts/interaction";
 import { ChatActionValidationError } from "./errors";
-import { cloneJsonValue, NonJsonValueError } from "./json-value";
+import { cloneJsonValue, NonJsonValueError } from "../util/json-value";
 
 /**
  * Chat 用户动作（Phase 0 冻结）。

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { ChatBindingTarget } from "../src/chat/types";
+import type { ChatBindingTarget } from "../src/contracts/chat";
 import { ChatView } from "../src/view/chat-view";
 import { ChatReplica } from "../src/view/chat-replica";
 import { ChatSyncTimeoutError } from "../src/view/chat-sync";

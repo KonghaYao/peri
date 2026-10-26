@@ -1,5 +1,5 @@
 import { withDeadline } from "../util/deadline";
-import type { Activation, CleanupOutcome } from "./service-support";
+import type { Activation, CleanupOutcome } from "./service-context";
 
 /**
  * 关闭单个激活资源；只有 port.close 在预算内结算成功才算 confirmed。

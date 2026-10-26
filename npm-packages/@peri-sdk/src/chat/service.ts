@@ -5,7 +5,7 @@ import {
     type ReadPayloadOptions,
     type ToolPayloadReadRef,
     type ToolPayloadResponse,
-} from "../view/payload-reader";
+} from "../payload/reader";
 import {
     parseChatUserAction,
     type CancelAction,
@@ -28,7 +28,7 @@ import {
     SessionCreationError,
 } from "./errors";
 import { ChatFactHub } from "./fact-hub";
-import type { ChatFact, ChatFactObserver } from "./facts";
+import type { ChatBindingTarget, ChatFact, ChatFactObserver } from "../contracts/chat";
 import { readChatPayload } from "./payload-access";
 import { ChatSendReceipt, InputCorrelation } from "./send-receipt";
 import {
@@ -41,22 +41,22 @@ import {
     asActionError,
     bindingFailure,
     messageOf,
-    resolveChatLifecycle,
     withCleanupFailure,
     withRequestId,
-    type Activation,
-    type ChatInstanceFactory,
-    type ChatServiceOptions,
-    type CleanupOutcome,
-} from "./service-support";
+} from "./error-mapping";
+import { resolveChatLifecycle } from "./lifecycle";
+import type {
+    Activation,
+    ChatInstanceFactory,
+    ChatServiceOptions,
+    CleanupOutcome,
+} from "./service-context";
+import type { HistoryPageOutcome, PeriInstancePort } from "../agent/port";
 import type {
     CancelRequestResult,
-    ChatBindingTarget,
     ChatLifecycleOptions,
     ChatService as ChatServiceContract,
     ControlResult,
-    HistoryPageOutcome,
-    PeriInstancePort,
     SendReceipt,
     SessionReadyResult,
 } from "./types";

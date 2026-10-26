@@ -1,5 +1,4 @@
-import type { ChatBindingTarget } from "../chat/types";
-import type { ChatFactEnvelope, ChatFactObserver, ChatFactSource } from "../chat/facts";
+import type { ChatBindingTarget, ChatFactEnvelope, ChatFactObserver, ChatFactSource } from "../contracts/chat";
 import { SessionDocSync } from "../sync/index";
 import { ChatDocument } from "./chat-document";
 import { ChatSyncConnection, type ChatSyncOptions } from "./chat-sync";

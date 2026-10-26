@@ -1,16 +1,16 @@
+import type { PeriInstancePort } from "../src/agent/port";
 import type {
     ChatDatabase,
     ChatSessionDirectoryEntry,
-    PeriInstancePort,
 } from "../src/chat/types";
-import type { ChatFact } from "../src/chat/facts";
-import type { InteractionAnswer } from "../src/agent/interaction-responder";
+import type { ChatFact } from "../src/contracts/chat";
+import type { InteractionAnswer } from "../src/contracts/interaction";
 import {
     PayloadReadError,
     type ReadPayloadOptions,
     type ToolPayloadReadRef,
     type ToolPayloadResponse,
-} from "../src/view/payload-reader";
+} from "../src/payload/reader";
 
 interface Deferred {
     readonly promise: Promise<void>;

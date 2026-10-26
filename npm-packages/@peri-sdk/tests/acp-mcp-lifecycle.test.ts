@@ -4,8 +4,8 @@ import {
     PeriInstanceBindError,
     PeriInstanceCloseIncompleteError,
 } from "../src/agent/peri-instance";
-import type { AcpMcpServer, AcpMcpServerInstance, AcpMcpTransport } from "../src/agent/types";
-import type { ChatFact } from "../src/chat/facts";
+import type { AcpMcpServer, AcpMcpServerInstance, AcpMcpTransport } from "../src/contracts/acp";
+import type { ChatFact } from "../src/contracts/chat";
 import type { JsonRpcNotification, ReverseRequestHandler, Transport } from "../src/transport/types";
 
 class FakeServer implements AcpMcpServerInstance {

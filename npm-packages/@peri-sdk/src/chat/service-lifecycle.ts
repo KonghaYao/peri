@@ -7,7 +7,7 @@ import {
     ChatClosedError,
 } from "./errors";
 import type { ChatFactHub } from "./fact-hub";
-import type { Activation } from "./service-support";
+import type { Activation } from "./service-context";
 import type { ChatLifecycleOptions } from "./types";
 
 /** ChatCloseController 访问 ChatService 资源的窄接口。 */

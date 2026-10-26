@@ -4,7 +4,7 @@ import {
     type PeriHostActivator,
 } from "../agent/peri-instance";
 import type { Transport } from "../transport/types";
-import type { ChatInstanceContext } from "./service-support";
+import type { ChatInstanceContext } from "./service-context";
 
 /**
  * Phase 4 装配：把 Chat 句柄的运行后端/Store/生命周期上下文转换成一次 `PeriInstance`。

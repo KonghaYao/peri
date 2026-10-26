@@ -7,8 +7,8 @@ import {
     TursoStorage,
     type PeriConfig,
     type SessionStorage,
-} from "../../src/sdk/index";
-import { WasmAcpTransport } from "../../src/wasm";
+} from "../../src/entries/index";
+import { WasmAcpTransport } from "../../src/entries/wasm";
 import { DemoOwnershipStorage } from "./demo-storage";
 import { createDemoApp, sessionDatabase } from "./chat-demo";
 
@@ -29,7 +29,7 @@ const sseClient = await Bun.build({
 if (!sseClient.success) throw new Error(`Cannot bundle SSE client: ${sseClient.logs.join("; ")}`);
 const sseClientJs = await sseClient.outputs[0]!.text();
 const sessionView = await Bun.build({
-    entrypoints: [resolve(import.meta.dir, "../../src/view/index.ts")],
+    entrypoints: [resolve(import.meta.dir, "../../src/entries/view.ts")],
     target: "browser",
     format: "esm",
 });

@@ -1,5 +1,5 @@
-import { loadPeriWasm, type NativeWasmAcp, type PeriWasmModule } from "../wasm/loader";
-import { JsonRpcTransport } from "./json-rpc-transport";
+import { loadPeriWasm, type NativeWasmAcp, type PeriWasmModule } from "./loader";
+import { JsonRpcTransport } from "../transport/json-rpc-transport";
 
 export interface WasmAcpTransportOptions {
   /** Startup settings consumed by peri-acp; ACP messages remain opaque JSON-RPC frames. */

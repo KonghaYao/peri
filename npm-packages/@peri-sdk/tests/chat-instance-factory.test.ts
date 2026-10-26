@@ -7,7 +7,7 @@ import {
 import { ChatUserAction } from "../src/chat/action";
 import { createChatInstance } from "../src/chat/instance-factory";
 import { ChatManager } from "../src/chat/manager";
-import type { ChatInstanceContext } from "../src/chat/service-support";
+import type { ChatInstanceContext } from "../src/chat/service-context";
 import type { JsonRpcNotification, Transport } from "../src/transport/types";
 import { FakeDatabase, directoryEntry } from "./chat-fixtures";
 import { OwnershipProbe } from "./ownership-probe";

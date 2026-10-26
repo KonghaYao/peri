@@ -1,4 +1,4 @@
-import type { WasmAcpTransport } from "../transport/wasm-transport";
+import type { WasmAcpTransport } from "./transport";
 import { withDeadline } from "../util/deadline";
 import { DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS, type WasmRuntimeCleanupOutcome } from "./runtime";
 
