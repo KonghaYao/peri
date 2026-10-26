@@ -1,4 +1,4 @@
-//! `profile.contextWindow` 输入解析（Login 与 Model 面板共用同一权威）。
+//! `profile.contextWindow` 输入解析（Model 面板的权威实现）。
 
 /// 解析上下文窗口输入。
 ///

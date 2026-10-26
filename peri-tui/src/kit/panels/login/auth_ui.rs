@@ -8,7 +8,8 @@ use ratatui_kit::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, 
 use ratatui_kit::prelude::State;
 use ratatui_kit::ratatui::layout::{Position, Rect};
 
-use crate::kit::panels::login::auth::{self, AuthController, AuthEffect, LogoutFocus};
+use crate::kit::panels::login::auth::{self, AuthAction, AuthController, AuthEffect, LogoutFocus};
+use crate::kit::panels::login::auth_policy;
 use crate::kit::panels::login::auth_render;
 use crate::kit::panels::login::edit_handler::{LoginEditIntent, auth_scope};
 use crate::kit::panels::login::edit_state::{LoginEditState, LoginField};
@@ -30,12 +31,13 @@ pub(super) fn apply_auth_effects(
         let mut auth_guard = auth.write();
         auth_guard.drain()
     };
+    let had_effects = !effects.is_empty();
+    let mut login_succeeded = false;
     for effect in effects {
         match effect {
-            AuthEffect::LoginSucceeded(status) => {
-                if let Some(es) = edit_state.write().as_mut() {
-                    es.plan.set_identity(&status);
-                }
+            AuthEffect::LoginSucceeded => {
+                // 身份写入统一交给下方 auth_policy：空/兼容 + 当前作用域才采用。
+                login_succeeded = true;
                 *edit_focus.write() = LoginField::AuthActions;
                 *edit_cursor.write() = 0;
                 *mode.write() = LoginPanelMode::Edit;
@@ -79,6 +81,33 @@ pub(super) fn apply_auth_effects(
             }
             AuthEffect::StatusChecked => {}
         }
+    }
+    if !had_effects {
+        return;
+    }
+
+    // 统一的认证事实落地：清陈旧认证错误 + 对空/兼容身份静默采用。
+    let adopted = {
+        let auth_guard = auth.read();
+        let mut edit_guard = edit_state.write();
+        let Some(es) = edit_guard.as_mut() else {
+            return;
+        };
+        es.clear_auth_error();
+        if !es.is_plan_mode() {
+            return;
+        }
+        let scope = auth_scope(es);
+        auth_policy::adopt_if_verified(&mut es.plan, auth_guard.view(), auth_guard.scope(), &scope)
+    };
+    if adopted || login_succeeded {
+        // 采用后 UseAccount 消失，旧的 index 会滑到注销；复位到“查询状态”。
+        let plan = edit_state
+            .read()
+            .as_ref()
+            .map(|es| es.plan.clone())
+            .unwrap_or_default();
+        auth.write().select_action(AuthAction::Status, &plan);
     }
 }
 
@@ -302,12 +331,7 @@ fn hit_button<T: Copy>(
 }
 
 fn layout_colors() -> render::LoginRenderColors {
-    render::LoginRenderColors {
-        cursor: ratatui_kit::ratatui::style::Color::Reset,
-        dim: ratatui_kit::ratatui::style::Color::Reset,
-        text: ratatui_kit::ratatui::style::Color::Reset,
-        focus: ratatui_kit::ratatui::style::Color::Reset,
-    }
+    render::LoginRenderColors::reset()
 }
 
 /// Keep the focused sub-view button inside the visible scroll window.

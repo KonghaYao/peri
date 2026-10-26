@@ -1,5 +1,4 @@
-use super::edit::{edit_field, submit_profile_draft, submit_window_edit};
-use super::profile_draft::DraftFocus;
+use super::edit::{edit_field, submit_window_edit};
 use super::*;
 
 #[test]
@@ -45,7 +44,7 @@ mod commit;
 // cron 面板测试）；档位切换经 `handle_model_event_with` 注入捕获闭包断言「点了
 // 哪一行 → 切哪一档」，真实持久化由 `model/commit_test.rs` 覆盖。
 
-use super::editor_view::{PaneHit, PaneLayout, render_profile_draft, render_window_editor};
+use super::editor_view::{PaneHit, PaneLayout, render_window_editor};
 use crate::app::panel_types::PanelKind;
 use crate::kit::atoms::{NOTIFICATION, Notification, PANEL_SCROLL_OWNER, PERI_CONFIG_HANDLE};
 use crate::kit::panels::shared::list::{ListViewport, content_rows};
@@ -194,7 +193,6 @@ pub(super) struct MountedPanel {
     pub(super) right_focus: State<bool>,
     pub(super) render_version: State<u64>,
     pub(super) window_editor: State<Option<WindowEditState>>,
-    pub(super) profile_draft: State<Option<ProfileDraftState>>,
     pub(super) right_scroll: State<ScrollViewState>,
 }
 
@@ -260,7 +258,6 @@ impl MountedPanel {
                 right_focus: self.right_focus,
                 render_version: self.render_version,
                 window_editor: self.window_editor,
-                profile_draft: self.profile_draft,
                 right_scroll: self.right_scroll,
                 viewport,
             },
@@ -282,7 +279,7 @@ fn registered_scroll_areas() -> Vec<Rect> {
         .unwrap_or_default()
 }
 
-// ── Responses contextWindow 内联编辑与档位草稿 ──────────────────────────────
+// ── Responses contextWindow 内联编辑 ───────────────────────────────────────
 
 fn key(code: KeyCode) -> Event {
     key_with(code, KeyModifiers::NONE)
@@ -311,13 +308,7 @@ fn responses_config() -> crate::config::PeriConfig {
     .unwrap()
 }
 
-// ── 草稿/内联 editor 的鼠标语义 ─────────────────────────────────────────────
-
-fn test_profile_layout(draft: &ProfileDraftState) -> PaneLayout {
-    let theme_state = THEME_ATOM.state();
-    let theme = theme_state.read();
-    render_profile_draft(draft, &theme)
-}
+// ── 内联 editor 的鼠标语义 ─────────────────────────────────────────────────
 
 fn test_window_layout(editor: &WindowEditState) -> PaneLayout {
     let theme_state = THEME_ATOM.state();
@@ -339,20 +330,6 @@ fn pane_click_row(area: Rect, layout: &PaneLayout, hit: PaneHit, offset: u16) ->
 
 fn right_content_column(area: Rect) -> u16 {
     area.x + area.width * 45 / 100 + 3
-}
-
-fn responses_draft(
-    handle: &Arc<parking_lot::RwLock<crate::config::PeriConfig>>,
-) -> ProfileDraftState {
-    let cfg = handle.read().clone();
-    ProfileDraftState::enter(
-        &cfg,
-        "sonnet",
-        None,
-        Some("resp".into()),
-        Some("next-model".into()),
-    )
-    .expect("Responses provider/档位必须可进入草稿")
 }
 
 #[path = "model/hit_test.rs"]

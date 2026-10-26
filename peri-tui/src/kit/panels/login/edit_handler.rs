@@ -5,9 +5,10 @@ use crate::kit::atoms::{CONFIG_SOURCE_HANDLE, PERI_CONFIG_HANDLE};
 use ratatui_kit::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::LoginPanelMode;
-use super::auth::{AuthController, HostConfigAuthScope, notify_key};
+use super::auth::{AuthController, HostConfigAuthScope, notify_key, notify_text};
+use super::auth_policy;
 use super::config_store::{refresh_provider_list, save_login_edit};
-use super::edit_state::{LoginEditState, LoginErrorKind, LoginField};
+use super::edit_state::{LoginEditState, LoginError, LoginErrorKind, LoginField};
 
 /// 编辑视图产生的异步认证意图；面板在释放状态借用后执行。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -126,7 +127,7 @@ fn enter_login_new_mode_current(
     true
 }
 
-/// Ctrl+N：先重读权威配置，再以最新快照为基线新建 provider（只默认绑定 active alias）。
+/// Ctrl+N：先重读权威配置，再以最新快照为基线新建 provider（不绑定任何档位）。
 pub(super) fn enter_login_new_mode(
     edit_state: &mut Option<LoginEditState>,
     edit_focus: &mut LoginField,
@@ -235,8 +236,17 @@ pub(super) fn handle_login_edit_keys(
     if key.code == KeyCode::Char('r') && is_ctrl {
         if auth_busy {
             notify_key("login-auth-wait-before-edit", 3);
-        } else {
-            reload_login_edit(mode, edit_state, edit_focus, edit_cursor);
+            return LoginEditIntent::None;
+        }
+        let reloaded = reload_login_edit(mode, edit_state, edit_focus, edit_cursor);
+        // Ctrl+R 可能换到另一 store/account：必须同步认证作用域，不能继续显示
+        // 旧目标的“已登录”，也不能自动采用旧身份。
+        if reloaded
+            && let Some(es) = edit_state.as_ref()
+            && es.is_plan_mode()
+        {
+            auth.sync_scope(auth_scope(es));
+            return LoginEditIntent::QueryStatus;
         }
         return LoginEditIntent::None;
     }
@@ -307,9 +317,15 @@ pub(super) fn handle_login_edit_keys(
                     Some(super::auth::AuthAction::Login) => intent = LoginEditIntent::Login,
                     Some(super::auth::AuthAction::Status) => intent = LoginEditIntent::QueryStatus,
                     Some(super::auth::AuthAction::UseAccount) => {
-                        if auth.use_account(&mut es.plan) {
+                        let scope = auth_scope(es);
+                        if auth.use_account(&mut es.plan, &scope) {
                             es.inline_error = None;
+                            auth.select_action(super::auth::AuthAction::Status, &es.plan);
                             notify_key("login-auth-account-adopted", 2);
+                        } else if auth.scope() != &scope {
+                            notify_key("login-auth-identity-scope-changed", 3);
+                        } else {
+                            notify_key("login-auth-identity-incomplete", 3);
                         }
                     }
                     Some(super::auth::AuthAction::Logout) => {
@@ -322,28 +338,6 @@ pub(super) fn handle_login_edit_keys(
                     }
                     None => notify_key("login-auth-target-required", 3),
                 }
-            }
-            _ => {}
-        },
-        LoginField::ProfileSelector => match key.code {
-            KeyCode::Left if !is_ctrl => {
-                es.cycle_profile(false);
-                es.inline_error = None;
-                clamp_cursor(es, *edit_focus, edit_cursor);
-            }
-            KeyCode::Right | KeyCode::Char(' ') if !is_ctrl => {
-                es.cycle_profile(true);
-                es.inline_error = None;
-                clamp_cursor(es, *edit_focus, edit_cursor);
-            }
-            _ => {}
-        },
-        LoginField::ProfileBind => match key.code {
-            KeyCode::Enter | KeyCode::Char(' ') if !is_ctrl => {
-                es.toggle_bind();
-                es.inline_error = None;
-                es.ensure_focus_visible(edit_focus);
-                clamp_cursor(es, *edit_focus, edit_cursor);
             }
             _ => {}
         },
@@ -418,7 +412,7 @@ fn save_and_close(
     edit_state: &mut Option<LoginEditState>,
     edit_focus: &mut LoginField,
     edit_cursor: &mut usize,
-    auth: &AuthController,
+    auth: &mut AuthController,
 ) {
     if auth.blocks_config_save() {
         notify_key("login-auth-busy-save", 3);
@@ -432,38 +426,113 @@ fn save_and_close(
         *mode = LoginPanelMode::Browse;
         return;
     };
-    if es.is_plan_mode() && auth.identity_conflict(&es.plan) {
-        let message = crate::i18n::tr("login-auth-identity-mismatch");
-        es.inline_error = Some(super::edit_state::LoginError::field(
-            LoginField::AuthActions,
-            message,
-        ));
-        *edit_focus = LoginField::AuthActions;
-        clamp_cursor(es, *edit_focus, edit_cursor);
-        return;
+    if es.is_plan_mode() {
+        // 1) 不同身份绝不静默覆盖：显式“使用此账号”是唯一出口。
+        if auth_identity_conflict(es, auth) {
+            let message = crate::i18n::tr("login-auth-identity-mismatch");
+            es.inline_error = Some(LoginError::auth_reference(
+                LoginField::AuthActions,
+                message.clone(),
+            ));
+            *edit_focus = LoginField::AuthActions;
+            auth.select_action(super::auth::AuthAction::UseAccount, &es.plan);
+            notify_text(&message, 3);
+            clamp_cursor(es, *edit_focus, edit_cursor);
+            return;
+        }
+        // 2) 保存门最后机会采用：状态 effect 尚未落地时也能一次保存成功。
+        if adopt_verified_identity(es, auth) {
+            auth.select_action(super::auth::AuthAction::Status, &es.plan);
+        }
+        // 3) 认证事实已变化时，旧的身份/引用错误不得继续阻断保存。
+        es.clear_auth_error();
     }
     if save_login_edit(es) {
         *mode = LoginPanelMode::Browse;
         *edit_state = None;
         return;
     }
-    // 失败：保持草稿与焦点；字段错误定位到对应档位/字段。
-    let Some((error_field, error_alias)) = es
-        .inline_error
-        .as_ref()
-        .map(|error| (error.field, error.alias))
-    else {
+    // 身份缺失可能是“状态刚成功、effect 尚未落地”：采用后重试一次。
+    if is_identity_required(es) && adopt_verified_identity(es, auth) {
+        es.clear_auth_error();
+        auth.select_action(super::auth::AuthAction::Status, &es.plan);
+        if save_login_edit(es) {
+            *mode = LoginPanelMode::Browse;
+            *edit_state = None;
+            return;
+        }
+    }
+    if is_identity_required(es) {
+        apply_identity_block(es, auth, edit_focus, edit_cursor);
+        return;
+    }
+    // 失败：保持草稿与焦点；字段错误定位到对应可见字段。
+    let Some(error_field) = es.inline_error.as_ref().map(|error| error.field) else {
         return;
     };
-    if let Some(alias) = error_alias
-        && let Some(index) = es
-            .profiles
-            .iter()
-            .position(|profile| profile.alias == alias)
-    {
-        es.selected_profile = index;
+    // 隐藏字段不能留下不可见焦点：凭据目录错误强制打开恢复行；其余落到认证动作组。
+    let mut error_field = error_field;
+    if !es.visible_fields().contains(&error_field) {
+        if error_field == LoginField::PlanStore {
+            es.open_store_recovery();
+        }
+        if !es.visible_fields().contains(&error_field) {
+            error_field = if es.is_plan_mode() {
+                LoginField::AuthActions
+            } else {
+                LoginField::Confirm
+            };
+        }
+        if let Some(error) = es.inline_error.as_mut() {
+            error.field = error_field;
+        }
     }
     *edit_focus = error_field;
+    clamp_cursor(es, *edit_focus, edit_cursor);
+}
+
+fn is_identity_required(es: &LoginEditState) -> bool {
+    es.inline_error
+        .as_ref()
+        .is_some_and(|error| error.kind == LoginErrorKind::IdentityRequired)
+}
+
+/// 当前作用域的已验证账号与草稿身份不同。
+fn auth_identity_conflict(es: &LoginEditState, auth: &AuthController) -> bool {
+    let scope = auth_scope(es);
+    auth_policy::conflict_status(&es.plan, auth.view(), auth.scope(), &scope).is_some()
+}
+
+fn adopt_verified_identity(es: &mut LoginEditState, auth: &AuthController) -> bool {
+    let scope = auth_scope(es);
+    auth_policy::adopt_if_verified(&mut es.plan, auth.view(), auth.scope(), &scope)
+}
+
+/// 身份无法自动采用：按认证状态给出准确文案与推荐动作。
+///
+/// `Checking` 只提示等待，不写红字；其他状态写字段错误并选中推荐动作。
+fn apply_identity_block(
+    es: &mut LoginEditState,
+    auth: &mut AuthController,
+    edit_focus: &mut LoginField,
+    edit_cursor: &mut usize,
+) {
+    let scope = auth_scope(es);
+    let Some(block) = auth_policy::save_block(&es.plan, auth.view(), auth.scope(), &scope) else {
+        return;
+    };
+    let message = block.message();
+    *edit_focus = LoginField::AuthActions;
+    if block.is_wait() {
+        es.clear_auth_error();
+    } else {
+        es.inline_error = Some(LoginError::identity_required(
+            LoginField::AuthActions,
+            message.clone(),
+        ));
+    }
+    auth.select_action(block.recommended_action(), &es.plan);
+    notify_text(&message, 3);
     clamp_cursor(es, *edit_focus, edit_cursor);
 }
 
@@ -521,7 +590,6 @@ fn handle_login_text_input(
                 state.inline_error = Some(super::edit_state::LoginError {
                     field,
                     message: crate::i18n::tr("login-error-single-line"),
-                    alias: None,
                     kind: LoginErrorKind::Field,
                 });
                 return true;
@@ -604,10 +672,6 @@ fn handle_login_text_input(
             // A changed store/account cannot inherit the previous verified identity.
             state.plan.clear_identity();
         }
-        state.mark_field_edited(field);
-        if LoginEditState::is_mapping_field(field) {
-            state.sync_profile_models();
-        }
         state.inline_error = None;
     }
     true
@@ -646,7 +710,6 @@ pub(super) fn handle_login_paste(
         state.inline_error = Some(super::edit_state::LoginError {
             field,
             message: crate::i18n::tr("login-error-single-line"),
-            alias: None,
             kind: LoginErrorKind::Field,
         });
     } else {
@@ -668,8 +731,4 @@ pub(super) fn handle_login_paste(
         state.plan.clear_identity();
     }
     *edit_cursor = pos + paste_len;
-    state.mark_field_edited(field);
-    if LoginEditState::is_mapping_field(field) {
-        state.sync_profile_models();
-    }
 }

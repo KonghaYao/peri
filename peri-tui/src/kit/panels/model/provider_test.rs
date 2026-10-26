@@ -68,10 +68,10 @@ fn manage_provider_button_click_matches_ctrl_l() {
     assert_eq!(provider_id.as_deref(), Some("resp"));
 }
 
-/// 有未保存草稿/内联 editor 时，按钮与 Ctrl+L 一样阻断并提示，不静默丢弃。
+/// 有未保存的内联 editor 时，按钮与 Ctrl+L 一样阻断并提示，不静默丢弃。
 #[test]
 #[serial]
-fn manage_provider_button_click_keeps_unsaved_draft_blocked() {
+fn manage_provider_button_click_keeps_unsaved_editor_blocked() {
     let guard = ModelPanelGuard::install();
     guard.set_config(responses_config());
     let handle = Arc::clone(&guard.handle);
@@ -81,10 +81,11 @@ fn manage_provider_button_click_keeps_unsaved_draft_blocked() {
 
     mount_panel_frames(TEST_AREA, 1, move |frame, panel| {
         if frame == 0 {
-            let mut draft = responses_draft(&handle);
-            draft.text = "128000".into();
-            draft.cursor = 6;
-            *panel.profile_draft.write() = Some(draft);
+            let mut editor = WindowEditState::enter(&handle.read(), "sonnet", None)
+                .expect("Responses 档位必须有内联 editor");
+            editor.text = "9000".into();
+            editor.cursor = 4;
+            *panel.window_editor.write() = Some(editor);
 
             let click = panel.event(left_down(button_row, TEST_AREA.x + 2), TEST_AREA, &switched);
             let click_block = (
@@ -95,7 +96,7 @@ fn manage_provider_button_click_keeps_unsaved_draft_blocked() {
                     .as_ref()
                     .map(|notice| notice.message.clone()),
                 navigation_snapshot(),
-                panel.profile_draft.read().is_some(),
+                panel.window_editor.read().is_some(),
             );
 
             let key_result = panel.event(
@@ -111,42 +112,18 @@ fn manage_provider_button_click_keeps_unsaved_draft_blocked() {
                     .as_ref()
                     .map(|notice| notice.message.clone()),
                 navigation_snapshot(),
-                panel.profile_draft.read().is_some(),
-            );
-
-            // 内联 editor 同样阻断，不新增静默放弃路径。
-            *panel.profile_draft.write() = None;
-            let mut editor = WindowEditState::enter(&handle.read(), "sonnet", None)
-                .expect("Responses 档位必须有内联 editor");
-            editor.text = "9000".into();
-            editor.cursor = 4;
-            *panel.window_editor.write() = Some(editor);
-            let editor_click =
-                panel.event(left_down(button_row, TEST_AREA.x + 2), TEST_AREA, &switched);
-            let editor_block = (
-                editor_click,
-                crate::kit::atoms::NOTIFICATION
-                    .state()
-                    .read()
-                    .as_ref()
-                    .map(|notice| notice.message.clone()),
-                navigation_snapshot(),
                 panel.window_editor.read().is_some(),
             );
 
-            tx.send((click_block, key_block, editor_block)).unwrap();
+            tx.send((click_block, key_block)).unwrap();
         }
     });
 
-    let (click_block, key_block, editor_block) = rx.try_recv().unwrap();
-    let expected_notice = Some(i18n::tr("model-panel-draft-exit-first"));
+    let (click_block, key_block) = rx.try_recv().unwrap();
+    let expected_notice = Some(i18n::tr("model-panel-editor-exit-first"));
     assert_eq!(click_block.0, EventResult::Consumed);
     assert_eq!(click_block.1, expected_notice);
     assert!(click_block.2.0.is_empty() && click_block.2.1.is_none());
-    assert!(click_block.3, "点击按钮不得静默丢弃未保存草稿");
+    assert!(click_block.3, "点击按钮不得静默丢弃内联 editor");
     assert_eq!(click_block, key_block, "按钮与 Ctrl+L 的阻断结果一致");
-    assert_eq!(editor_block.0, EventResult::Consumed);
-    assert_eq!(editor_block.1, expected_notice);
-    assert!(editor_block.2.0.is_empty() && editor_block.2.1.is_none());
-    assert!(editor_block.3, "点击按钮不得静默丢弃内联 editor");
 }

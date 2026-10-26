@@ -1,8 +1,8 @@
-//! Model 面板的内联 editor / Responses 档位草稿渲染。
+//! Model 面板的内联 contextWindow editor 渲染。
 //!
-//! 纯绘制：状态与动作分别由 `profile_draft` / `edit` 持有，避免组件主文件膨胀。
+//! 纯绘制：状态与动作分别由 `window_edit` / `edit` 持有，避免组件主文件膨胀。
 
-use super::profile_draft::{DraftFocus, ProfileDraftState, WindowEditState};
+use super::window_edit::WindowEditState;
 use crate::i18n;
 use peri_theme::theme::ThemeDefinition;
 use ratatui_kit::ratatui::{
@@ -15,9 +15,6 @@ use ratatui_kit::ratatui::{
 pub(super) enum PaneHit {
     /// 普通右栏 K/V 行（值为 `FIELD_*` 索引）。
     Field(usize),
-    Provider,
-    Model,
-    Window,
     Save,
     Cancel,
 }
@@ -126,113 +123,17 @@ pub(super) fn render_window_editor(
     // 可见的保存/取消按钮：键盘 Enter/Esc 与鼠标点击走同一提交边界。
     out.push(Line::from(""));
     out.push_hit(
-        draft_action_line("model-panel-draft-save", false, theme),
+        editor_action_line("model-panel-editor-save", false, theme),
         PaneHit::Save,
     );
     out.push_hit(
-        draft_action_line("model-panel-draft-cancel", false, theme),
+        editor_action_line("model-panel-editor-cancel", false, theme),
         PaneHit::Cancel,
     );
     out
 }
 
-/// Responses provider/model/window 草稿的右栏内容。
-pub(super) fn render_profile_draft(
-    draft: &ProfileDraftState,
-    theme: &ThemeDefinition,
-) -> PaneLayout {
-    let mut out = PaneLayout::new();
-    out.push(Line::from(Span::styled(
-        i18n::tr_args(
-            "model-panel-draft-title",
-            &[(
-                "alias".to_string(),
-                fluent_bundle::FluentValue::from(draft.alias.as_str()),
-            )],
-        ),
-        Style::new().fg(theme.semantic.status.warning).bold(),
-    )));
-    out.push(Line::from(""));
-    out.push_hit(
-        draft_field_line(
-            "model-panel-draft-provider",
-            &draft.provider_id,
-            draft.focus == DraftFocus::Provider,
-            theme,
-        ),
-        PaneHit::Provider,
-    );
-    out.push_hit(
-        if draft.model_editing {
-            draft_model_line(draft, theme)
-        } else {
-            draft_field_line(
-                "model-panel-draft-model",
-                &draft.model,
-                draft.focus == DraftFocus::Model,
-                theme,
-            )
-        },
-        PaneHit::Model,
-    );
-    out.push_hit(draft_window_line(draft, theme), PaneHit::Window);
-    if let Some(error) = &draft.error {
-        out.push(Line::from(Span::styled(
-            format!("⚠ {error}"),
-            Style::new().fg(theme.semantic.status.error),
-        )));
-        if draft.conflict {
-            out.push(Line::from(Span::styled(
-                i18n::tr("model-panel-conflict-reload-hint"),
-                Style::new().fg(theme.semantic.text.dim),
-            )));
-        }
-    }
-    out.push(Line::from(""));
-    out.push_hit(
-        draft_action_line(
-            "model-panel-draft-save",
-            draft.focus == DraftFocus::Save,
-            theme,
-        ),
-        PaneHit::Save,
-    );
-    out.push_hit(
-        draft_action_line(
-            "model-panel-draft-cancel",
-            draft.focus == DraftFocus::Cancel,
-            theme,
-        ),
-        PaneHit::Cancel,
-    );
-    out
-}
-
-fn draft_field_line(
-    label_key: &str,
-    value: &str,
-    focused: bool,
-    theme: &ThemeDefinition,
-) -> Line<'static> {
-    let marker = if focused { "❯ " } else { "  " };
-    let label_style = if focused {
-        Style::new()
-            .fg(theme.component.panel.title)
-            .add_modifier(ratatui_kit::ratatui::style::Modifier::BOLD)
-    } else {
-        Style::new().fg(theme.semantic.text.muted)
-    };
-    Line::from(vec![
-        Span::styled(marker, Style::new().fg(theme.semantic.status.warning)),
-        Span::styled(format!("{}: ", i18n::tr(label_key)), label_style),
-        Span::styled(
-            value.to_string(),
-            Style::new().fg(theme.semantic.text.primary),
-        ),
-    ])
-}
-
-fn draft_action_line(label_key: &str, focused: bool, theme: &ThemeDefinition) -> Line<'static> {
+fn editor_action_line(label_key: &str, focused: bool, theme: &ThemeDefinition) -> Line<'static> {
     let marker = if focused { "❯ " } else { "  " };
     Line::from(vec![
         Span::styled(marker, Style::new().fg(theme.semantic.status.warning)),
@@ -247,77 +148,4 @@ fn draft_action_line(label_key: &str, focused: bool, theme: &ThemeDefinition) ->
             },
         ),
     ])
-}
-
-fn draft_model_line(draft: &ProfileDraftState, theme: &ThemeDefinition) -> Line<'static> {
-    let mut spans = vec![
-        Span::styled("❯ ", Style::new().fg(theme.semantic.status.warning)),
-        Span::styled(
-            format!("{}: ", i18n::tr("model-panel-draft-model")),
-            Style::new()
-                .fg(theme.component.panel.title)
-                .add_modifier(ratatui_kit::ratatui::style::Modifier::BOLD),
-        ),
-    ];
-    let chars: Vec<char> = draft.model.chars().collect();
-    let cursor = draft.model_cursor.min(chars.len());
-    for (index, ch) in chars.iter().enumerate() {
-        spans.push(Span::styled(
-            ch.to_string(),
-            if index == cursor && cursor < chars.len() {
-                Style::new()
-                    .fg(theme.semantic.text.primary)
-                    .bg(theme.semantic.status.warning)
-            } else {
-                Style::new().fg(theme.semantic.text.primary)
-            },
-        ));
-    }
-    if cursor >= chars.len() {
-        spans.push(Span::styled(
-            " ",
-            Style::new().bg(theme.semantic.status.warning),
-        ));
-    }
-    Line::from(spans)
-}
-
-fn draft_window_line(draft: &ProfileDraftState, theme: &ThemeDefinition) -> Line<'static> {
-    let focused = draft.focus == DraftFocus::Window;
-    let marker = if focused { "❯ " } else { "  " };
-    let label_style = if focused {
-        Style::new()
-            .fg(theme.component.panel.title)
-            .add_modifier(ratatui_kit::ratatui::style::Modifier::BOLD)
-    } else {
-        Style::new().fg(theme.semantic.text.muted)
-    };
-    let mut spans = vec![
-        Span::styled(marker, Style::new().fg(theme.semantic.status.warning)),
-        Span::styled(
-            format!("{}: ", i18n::tr("model-panel-draft-context-window")),
-            label_style,
-        ),
-    ];
-    let chars: Vec<char> = draft.text.chars().collect();
-    let cursor = draft.cursor.min(chars.len());
-    for (index, ch) in chars.iter().enumerate() {
-        spans.push(Span::styled(
-            ch.to_string(),
-            if focused && index == cursor {
-                Style::new()
-                    .fg(theme.semantic.text.primary)
-                    .bg(theme.semantic.status.warning)
-            } else {
-                Style::new().fg(theme.semantic.text.primary)
-            },
-        ));
-    }
-    if focused && cursor >= chars.len() {
-        spans.push(Span::styled(
-            " ",
-            Style::new().bg(theme.semantic.status.warning),
-        ));
-    }
-    Line::from(spans)
 }

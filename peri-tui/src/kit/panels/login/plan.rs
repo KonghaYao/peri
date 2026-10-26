@@ -1,8 +1,10 @@
 //! ChatGPT plan draft: editable store/account plus login-verified identity.
 //!
-//! Subject and client id are never hand-edited. They are written only by a
-//! successful login or by an explicit "use this account" action on a verified
-//! status result.
+//! Subject and client id are never hand-edited. They are written by a
+//! successful login, by an explicit "use this account" action, or by the
+//! automatic adoption of a verified status result into a vacant/compatible
+//! draft (see `auth_policy`). An existing different identity is never
+//! overwritten automatically.
 
 use std::path::{Path, PathBuf};
 
@@ -71,14 +73,30 @@ impl PlanDraft {
         self.client_id.clear();
     }
 
-    /// Adopt a verified identity (login result or explicit "use this account").
-    pub(super) fn set_identity(&mut self, status: &AccountStatus) {
-        if !status.subject.trim().is_empty() {
-            self.subject = status.subject.clone();
+    /// Atomically adopt a verified identity. Both fields must be usable.
+    ///
+    /// Returns `false` without touching the draft when the status carries no
+    /// complete identity, so a partial reference is never half-rewritten.
+    pub(super) fn set_identity(&mut self, status: &AccountStatus) -> bool {
+        let subject = status.subject.trim();
+        let client_id = status.client_id.trim();
+        if subject.is_empty() || client_id.is_empty() {
+            return false;
         }
-        if !status.client_id.trim().is_empty() {
-            self.client_id = status.client_id.clone();
+        self.subject = subject.to_owned();
+        self.client_id = client_id.to_owned();
+        true
+    }
+
+    /// Automatically adopt a verified identity into a vacant/compatible draft.
+    ///
+    /// A different existing identity is never overwritten; callers must use
+    /// the explicit "use this account" action for that case.
+    pub(super) fn adopt_verified(&mut self, status: &AccountStatus) -> bool {
+        if !self.needs_identity() || self.identity_mismatch(status) {
+            return false;
         }
+        self.set_identity(status)
     }
 
     /// Whether the draft identity differs from the verified status.
@@ -122,7 +140,7 @@ impl PlanDraft {
             ));
         }
         if self.needs_identity() {
-            return Err(LoginError::field(
+            return Err(LoginError::identity_required(
                 LoginField::AuthActions,
                 i18n::tr("login-auth-identity-required"),
             ));

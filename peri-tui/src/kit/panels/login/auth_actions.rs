@@ -86,8 +86,13 @@ pub(crate) fn copy_url(url: String) {
 }
 
 pub(crate) fn notify_key(key: &str, seconds: u64) {
+    notify_text(&i18n::tr(key), seconds);
+}
+
+/// 已构建好的安全文案（含参数）走同一单槽通知。
+pub(crate) fn notify_text(message: &str, seconds: u64) {
     *NOTIFICATION.state().write() = Some(Notification {
-        message: i18n::tr(key),
+        message: message.to_string(),
         until: peri_time::monotonic_now() + std::time::Duration::from_secs(seconds),
     });
 }

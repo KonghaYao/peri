@@ -1,4 +1,4 @@
-//! Model 档位草稿/内联 editor 的纯逻辑回归：原子候选、单档隔离与数值边界。
+//! Model 上下文窗口内联 editor 的纯逻辑回归：单档隔离与数值边界。
 
 use super::*;
 use crate::config::PeriConfig;
@@ -83,97 +83,6 @@ fn window_editor_only_accepts_ascii_digits() {
     editor.backspace();
     assert!(!editor.input_blocked, "实际编辑后错误生命周期结束");
     assert!(editor.error.is_none());
-}
-
-#[test]
-fn profile_draft_rejected_input_blocks_until_edited() {
-    let cfg = responses_config();
-    let mut draft =
-        ProfileDraftState::enter(&cfg, "sonnet", None, Some("resp".into()), None).unwrap();
-    assert!(!draft.insert('k'));
-    assert!(draft.error.is_some());
-    assert!(draft.input_blocked, "被拒绝的输入必须阻断提交");
-
-    draft.backspace();
-    assert!(!draft.input_blocked, "实际编辑后错误生命周期结束");
-    assert!(draft.error.is_none());
-}
-
-#[test]
-fn profile_draft_saves_provider_model_and_window_atomically() {
-    let cfg = responses_config();
-    let mut draft = ProfileDraftState::enter(
-        &cfg,
-        "sonnet",
-        None,
-        Some("resp".into()),
-        Some("sonnet-next".into()),
-    )
-    .unwrap();
-    assert_eq!(draft.text, "", "模型变化后不能复用旧容量");
-    assert!(draft.validate_and_patch().is_err(), "Responses 需要新容量");
-
-    draft.text = "128000".into();
-    draft.cursor = 6;
-    let candidate = draft.validate_and_patch().unwrap();
-    assert_eq!(candidate.config.active_alias, "sonnet");
-    let profile = candidate.config.profiles.sonnet.clone();
-    assert_eq!(profile.provider, "resp");
-    assert_eq!(profile.model.as_deref(), Some("sonnet-next"));
-    assert_eq!(profile.context_window, Some(128000));
-    assert_eq!(profile.max_tokens, 4096, "未编辑字段保持基线");
-
-    for alias in ["fable", "opus", "haiku"] {
-        assert_eq!(
-            candidate.config.profiles.get(alias),
-            cfg.config.profiles.get(alias),
-            "{alias} 不得被草稿覆盖"
-        );
-    }
-}
-
-#[test]
-fn profile_draft_to_non_responses_preserves_existing_capacity() {
-    let cfg = responses_config();
-    let mut draft =
-        ProfileDraftState::enter(&cfg, "sonnet", None, Some("other".into()), None).unwrap();
-    draft.text.clear();
-    let candidate = draft.validate_and_patch().unwrap();
-    let profile = candidate.config.profiles.sonnet.clone();
-    assert_eq!(profile.provider, "other");
-    assert_eq!(profile.model.as_deref(), Some("other-sonnet"));
-    assert_eq!(
-        profile.context_window,
-        Some(3000),
-        "非 Responses 目标不批量清空既有容量"
-    );
-}
-
-#[test]
-fn cycling_provider_invalidates_capacity_and_restores_it_on_return() {
-    let cfg = responses_config();
-    let mut draft = ProfileDraftState::enter(&cfg, "sonnet", None, None, None).unwrap();
-    assert_eq!(draft.provider_id, "resp");
-    assert_eq!(draft.text, "3000");
-
-    draft.cycle_provider(true);
-    assert_eq!(draft.provider_id, "other");
-    assert_eq!(draft.text, "", "更换 provider 后旧容量不作默认值");
-
-    draft.cycle_provider(false);
-    assert_eq!(draft.provider_id, "resp");
-    assert_eq!(draft.text, "3000", "回到原 provider/model 组合时恢复原容量");
-}
-
-#[test]
-fn profile_draft_requires_nonempty_model() {
-    let cfg = responses_config();
-    let mut draft = ProfileDraftState::enter(&cfg, "sonnet", None, None, None).unwrap();
-    draft.model.clear();
-    assert_eq!(
-        draft.validate_and_patch().unwrap_err(),
-        i18n::tr("model-panel-model-required")
-    );
 }
 
 #[test]

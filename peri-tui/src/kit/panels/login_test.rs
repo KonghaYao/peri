@@ -121,11 +121,14 @@ pub(super) struct MountedPanel {
 }
 
 impl MountedPanel {
-    /// 走真实事件入口：本帧列表快照与视口起点按组件同一推导。
+    /// 走真实事件入口：本帧列表快照与视口按组件同一推导。
     fn event(&self, event: Event, area: Rect) -> EventResult {
         let providers = PROVIDER_LIST.state().read().clone();
-        let scroll_start =
-            scroll_start_for_selected(*self.cursor.read(), providers.len(), VISIBLE_ITEMS);
+        let viewport = super::browse_render::viewport(
+            super::content_rows(Some(area), 0),
+            providers.len(),
+            *self.cursor.read(),
+        );
         super::handle_login_event(
             event,
             &super::LoginEventCtx {
@@ -139,7 +142,7 @@ impl MountedPanel {
                 auth: self.auth,
                 sv: self.sv,
                 providers,
-                scroll_start,
+                viewport,
             },
         )
     }
@@ -155,18 +158,25 @@ pub(super) fn visit_mounted_panel(panel: MountedPanel) {
 }
 
 /// 挂载并渲染 `frames` 帧，返回末帧缓冲。
-fn mount_panel_at(frames: usize, visitor: impl FnMut(MountedPanel) + 'static) -> Buffer {
+///
+/// 测试里组件直接铺满整个终端缓冲，因此这里的 `height` 是组件高度（= 终端高度），
+/// 而不是 `panel_overlay::panel_height` 的预测值；后者只用于首帧内容行数预测。
+fn mount_panel_sized(
+    frames: usize,
+    width: u16,
+    height: u16,
+    visitor: impl FnMut(MountedPanel) + 'static,
+) -> Buffer {
     let _guard = VisitorGuard;
     MOUNT_VISITOR.with(|slot| {
         assert!(slot.borrow().is_none(), "上一个 visitor 未清理");
         *slot.borrow_mut() = Some(Box::new(visitor));
     });
-    ratatui_kit::test_util::render_frames(
-        element!(LoginPanel()),
-        TEST_AREA.width,
-        TEST_AREA.height,
-        frames,
-    )
+    ratatui_kit::test_util::render_frames(element!(LoginPanel()), width, height, frames)
+}
+
+fn mount_panel_at(frames: usize, visitor: impl FnMut(MountedPanel) + 'static) -> Buffer {
+    mount_panel_sized(frames, TEST_AREA.width, TEST_AREA.height, visitor)
 }
 
 fn key(code: KeyCode) -> Event {
@@ -176,12 +186,15 @@ fn key(code: KeyCode) -> Event {
 fn buffer_text(buf: &Buffer) -> String {
     let mut out = String::new();
     for y in 0..buf.area.height {
-        for x in 0..buf.area.width {
-            out.push_str(buf[(x, y)].symbol());
-        }
+        out.push_str(&buffer_line(buf, y));
         out.push('\n');
     }
     out
+}
+
+/// 单行可见文本（用于断言提示行位置与整行内容）。
+fn buffer_line(buf: &Buffer, y: u16) -> String {
+    (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
 }
 
 fn login_config() -> crate::config::PeriConfig {
@@ -223,18 +236,34 @@ fn mount_edit_state(
     })
 }
 
+/// 指定宽高挂载 Edit 视图（复用同一 `mount_panel_sized` 管道）。
+fn mount_edit_state_sized(
+    state: LoginEditState,
+    focus: LoginField,
+    frames: usize,
+    width: u16,
+    height: u16,
+    mut visitor: impl FnMut(usize, MountedPanel) + 'static,
+) -> Buffer {
+    let mut frame = 0usize;
+    mount_panel_sized(frames, width, height, move |panel| {
+        if frame == 0 {
+            *panel.mode.write() = LoginPanelMode::Edit;
+            *panel.edit_state.write() = Some(state.clone());
+            *panel.edit_focus.write() = focus;
+        }
+        visitor(frame, panel);
+        frame += 1;
+    })
+}
+
 // ── 鼠标命中：Edit 动态字段 / choice / 类型确认 ─────────────────────────────
 
 fn test_render_colors() -> super::render::LoginRenderColors {
-    super::render::LoginRenderColors {
-        cursor: ratatui_kit::ratatui::style::Color::Reset,
-        dim: ratatui_kit::ratatui::style::Color::Reset,
-        text: ratatui_kit::ratatui::style::Color::Reset,
-        focus: ratatui_kit::ratatui::style::Color::Reset,
-    }
+    super::render::LoginRenderColors::reset()
 }
 
-fn edit_layout(panel: &MountedPanel) -> super::render::EditLayout {
+fn edit_layout(panel: &MountedPanel, width: u16) -> super::render::EditLayout {
     let state = panel
         .edit_state
         .read()
@@ -247,20 +276,34 @@ fn edit_layout(panel: &MountedPanel) -> super::render::EditLayout {
         *panel.edit_focus.read(),
         *panel.edit_cursor.read(),
         &test_render_colors(),
+        width,
     )
 }
 
-fn hit_semantic_row(panel: &MountedPanel, hit: super::render::EditHit) -> usize {
-    edit_layout(panel)
-        .hits
-        .iter()
-        .position(|candidate| *candidate == Some(hit))
+fn hit_semantic_row(panel: &MountedPanel, hit: super::render::EditHit, width: u16) -> usize {
+    edit_layout(panel, width)
+        .semantic_row(hit)
         .unwrap_or_else(|| panic!("命中区必须包含目标"))
+}
+
+/// 单行动作区里某动作的 (语义行, 起始内容列)。
+fn action_hit_span(
+    panel: &MountedPanel,
+    action: super::auth::AuthAction,
+    width: u16,
+) -> (usize, usize) {
+    let layout = edit_layout(panel, width);
+    let span = layout
+        .action_spans()
+        .iter()
+        .find(|span| span.action == action)
+        .unwrap_or_else(|| panic!("动作区必须包含目标 {action:?}"));
+    (span.row, span.start)
 }
 
 fn edit_hit_row(panel: &MountedPanel, hit: super::render::EditHit, area: Rect) -> u16 {
     let offset = panel.sv.read().offset().y;
-    area.y + 1 + hit_semantic_row(panel, hit) as u16 - offset
+    area.y + 1 + hit_semantic_row(panel, hit, area.width) as u16 - offset
 }
 
 fn type_change_semantic_row(panel: &MountedPanel, hit: super::render::EditHit) -> usize {
@@ -310,6 +353,9 @@ fn new_responses_mouse_state() -> LoginEditState {
 
 #[path = "login/browse_test.rs"]
 mod browse;
+
+#[path = "login/visual_test.rs"]
+mod visual;
 
 #[path = "login/form_test.rs"]
 mod form;

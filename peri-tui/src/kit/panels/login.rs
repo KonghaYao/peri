@@ -1,9 +1,10 @@
 //! ratatui-kit LoginPanel component.
 //!
 //! Login 是宿主配置的 Provider 编辑器：Browse 列表来自 `PROVIDER_LIST` 投影，
-//! Edit 使用 typed 草稿（三态类型、API key / 既有 ChatGPT plan 引用、四档
-//! profile model/contextWindow）。保存捕获进入时的 revision，只发布 authority
-//! 接纳后的快照；失败保持草稿与字段错误。
+//! Edit 使用 typed 草稿（三态类型、API key / 既有 ChatGPT plan 引用、provider 四档
+//! 默认模型）。档位绑定、模型与 contextWindow 由 Model 面板负责；新建 provider
+//! 不写任何 profile。保存捕获进入时的 revision，只发布 authority 接纳后的快照；
+//! 失败保持草稿与字段错误。
 //!
 //! Browse：只读列表 + Enter/鼠标点击进入编辑。
 //! Edit：动态字段导航、Ctrl+S/Confirm 保存、Esc 放弃；已有 provider 的类型
@@ -16,8 +17,9 @@ use crate::kit::atoms::{
     AUTH_EVENT_REVISION, LOGIN_PANEL_REQUEST, NOTIFICATION, Notification, PROVIDER_LIST,
     ProviderSummary,
 };
-use crate::kit::list_nav::{next_selection, previous_selection, scroll_start_for_selected};
-use crate::kit::panel_mouse::{AreaTracker, is_scrollbar_column};
+use crate::kit::list_nav::{next_selection, previous_selection};
+use crate::kit::panel_mouse::{AreaTracker, hit_item, is_scrollbar_column};
+use crate::kit::panels::shared::list::{ListViewport, content_rows};
 use fluent_bundle::FluentValue;
 
 use peri_theme::atoms::THEME_ATOM;
@@ -37,12 +39,16 @@ use ratatui_kit::{
 use std::time::Duration;
 
 mod auth;
+mod auth_policy;
 mod auth_render;
 mod auth_ui;
+mod browse_render;
 mod config_store;
+mod edit_errors;
 mod edit_handler;
 mod edit_state;
 mod edit_types;
+mod edit_view;
 mod plan;
 mod render;
 
@@ -81,9 +87,6 @@ enum LoginPanelMode {
 
 // ── 主组件 ────────────────────────────────────────────────────────────────────
 
-/// Browse 列表视口常量（渲染、命中与翻页共用）
-const VISIBLE_ITEMS: usize = 3;
-
 #[component]
 pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // ── hooks：无条件、稳定顺序（TUI-HOOK-001）──
@@ -114,9 +117,12 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     }
     // 面板上一帧区域（滚轮仲裁注册用）——hook 前置，渲染段不再调用 hook
     let previous_size = hooks.use_previous_size();
+    // 终端尺寸仅用于首帧预测内容行数；测量到面板区域后由实测值接管
+    let (_term_w, term_h) = hooks.use_terminal_size();
 
-    // Browse 列表视口常量（与渲染共用）
-    let browse_scroll_start = scroll_start_for_selected(*cursor.read(), count, VISIBLE_ITEMS);
+    // Browse 视口：绘制窗口与鼠标命中共用这一份结果（内容区行数随终端/面板高度变化）
+    let browse_viewport =
+        browse_render::viewport(content_rows(area, term_h), count, *cursor.read());
 
     // Edit 模式缺少编辑状态（状态异常）时回退到 Browse：写在 effect 边界而不是渲染体
     // （TUI-RENDER-001），且发生在渲染之前，本帧即渲染 Browse 视图（时机不变）
@@ -165,7 +171,16 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let request_pending = login_request.read().clone();
     let request_dependency = request_pending.clone();
     hooks.use_effect(
-        move || apply_login_request(mode, edit_state, edit_focus, edit_cursor, request_pending),
+        move || {
+            apply_login_request(
+                mode,
+                edit_state,
+                edit_focus,
+                edit_cursor,
+                auth,
+                request_pending,
+            )
+        },
         (request_dependency,),
     );
 
@@ -180,7 +195,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         auth,
         sv,
         providers: providers.clone(), // 本帧列表快照：命中与动作目标同源
-        scroll_start: browse_scroll_start,
+        viewport: browse_viewport,
     };
     hooks.use_event_handler_with_options(
         EventScope::Current,
@@ -202,101 +217,52 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     });
 
     // ── 渲染段（只读；状态写入都在上面的 effect / 事件边界，TUI-RENDER-001）──
-    let sel = *cursor.read();
     let semantic = theme_def.read().semantic;
-    let cursor_color = semantic.status.warning;
     let dim = semantic.text.dim;
     let text_color = semantic.text.primary;
     let focus_color = semantic.status.success;
-    let muted = semantic.text.muted;
 
     let mut lines: Vec<Line<'_>> = Vec::new();
 
     match *mode.read() {
         LoginPanelMode::Browse => {
+            // 三段式：计数行 Length(1) + 列表体 ScrollView Fill(1) + 提示行 Length(1)。
+            // 底部路径仍由 `panel_shell!` 的 border bottom_title 固定在面板底边。
             // S16：spec/global/domains/tui/tui-panels.md §6.2 样式——Enter::select · Esc::close
-            lines.push(Line::from(vec![Span::styled(
-                format!("  {} providers configured", count),
-                Style::new().fg(text_color).bold(),
-            )]));
-            lines.push(Line::from(""));
-
-            if providers.is_empty() {
-                lines.push(Line::from(vec![Span::styled(
-                    format!("  {}", i18n::tr("login-empty-hint")),
-                    Style::new().fg(muted),
-                )]));
-            } else {
-                // 视口跟随
-                for (i, p) in providers
-                    .iter()
-                    .enumerate()
-                    .skip(browse_scroll_start)
-                    .take(VISIBLE_ITEMS)
-                {
-                    let is_cursor = i == sel;
-                    let cursor_mark = if is_cursor { ">" } else { " " };
-                    let row_style = if is_cursor {
-                        Style::new()
-                            .fg(theme_def.read().component.panel.title)
-                            .bold()
-                    } else {
-                        Style::new().fg(text_color)
-                    };
-
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            format!(" {} ", cursor_mark),
-                            Style::new().fg(theme_def.read().component.panel.title),
-                        ),
-                        Span::styled(
-                            format!(
-                                "{}  ({})",
-                                p.id,
-                                render::provider_type_display(&p.provider_type)
-                            ),
-                            row_style,
-                        ),
-                    ]));
-
-                    let (key_marker, key_color) = if p.has_chatgpt_plan {
-                        (i18n::tr("login-browse-plan-unchecked"), semantic.text.muted)
-                    } else if p.has_api_key {
-                        ("api key: configured".to_string(), semantic.status.success)
-                    } else {
-                        ("api key: missing".to_string(), semantic.status.error)
-                    };
-                    lines.push(Line::from(vec![Span::styled(
-                        format!("   {}", key_marker),
-                        Style::new().fg(key_color),
-                    )]));
-                    if let Some(url) = &p.base_url {
-                        let url_display: String = url.chars().take(70).collect();
-                        lines.push(Line::from(vec![Span::styled(
-                            format!("   base url: {}", url_display),
-                            Style::new().fg(dim),
-                        )]));
-                    }
-                    lines.push(Line::from(""));
-                }
-            }
-
-            // S16：底部 hints（i18n 化）
-            lines.push(Line::from(""));
-            lines.push(make_hint_line_for_login(
-                vec![
-                    (
-                        "\u{2191}/\u{2193}".to_string(),
-                        i18n::tr("hint-login-browse"),
-                    ),
-                    ("Enter".to_string(), i18n::tr("hint-login-edit")),
-                    ("Ctrl+N".to_string(), i18n::tr("hint-login-new")),
-                    ("Ctrl+D".to_string(), i18n::tr("hint-login-delete")),
-                    ("Esc".to_string(), i18n::tr("hint-login-close")),
-                ],
+            let colors = browse_render::BrowseRenderColors {
+                marker: theme_def.read().component.panel.title,
+                text: text_color,
                 dim,
-                focus_color,
+                muted: semantic.text.muted,
+                success: semantic.status.success,
+                error: semantic.status.error,
+                accent: focus_color,
+            };
+            let header = browse_render::header_line(count, &colors);
+            let body = ratatui::text::Text::from(browse_render::body_lines(
+                browse_viewport,
+                &providers,
+                *cursor.read(),
+                &colors,
             ));
+            let hint = browse_render::hint_line(&colors);
+
+            return panel_shell!(PanelKind::Login, {
+                View(height: Constraint::Length(1), width: Constraint::Fill(1)) {
+                    Text(text: header)
+                }
+                ScrollView(
+                    scrollbars: crate::kit::panel_registry::clean_scrollbars(),
+                    state: Some(sv),
+                    width: Constraint::Fill(1),
+                    height: Constraint::Fill(1),
+                ) {
+                    Text(text: body)
+                }
+                View(height: Constraint::Length(1), width: Constraint::Fill(1)) {
+                    Text(text: hint)
+                }
+            });
         }
         LoginPanelMode::Edit => {
             let es_opt = edit_state.read();
@@ -307,12 +273,8 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                         &auth.read(),
                         *edit_focus.read(),
                         *edit_cursor.read(),
-                        &render::LoginRenderColors {
-                            cursor: cursor_color,
-                            dim,
-                            text: text_color,
-                            focus: focus_color,
-                        },
+                        &render::LoginRenderColors::from_semantic(&semantic),
+                        panel_width(area),
                     )
                     .lines,
                 ),
@@ -326,13 +288,8 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         LoginPanelMode::AuthDetail => {
             let layout = auth_render::build_auth_detail_layout(
                 &auth.read(),
-                area.map(|area| area.width).unwrap_or(80),
-                &render::LoginRenderColors {
-                    cursor: cursor_color,
-                    dim,
-                    text: text_color,
-                    focus: focus_color,
-                },
+                panel_width(area),
+                &render::LoginRenderColors::from_semantic(&semantic),
             );
             lines.extend(layout.lines);
         }
@@ -342,12 +299,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 Some(confirm) => {
                     let layout = auth_render::build_logout_layout(
                         confirm,
-                        &render::LoginRenderColors {
-                            cursor: cursor_color,
-                            dim,
-                            text: text_color,
-                            focus: focus_color,
-                        },
+                        &render::LoginRenderColors::from_semantic(&semantic),
                     );
                     lines.extend(layout.lines);
                 }
@@ -363,12 +315,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 Some(es) => lines.extend(
                     render::build_type_change_layout(
                         es,
-                        &render::LoginRenderColors {
-                            cursor: cursor_color,
-                            dim,
-                            text: text_color,
-                            focus: focus_color,
-                        },
+                        &render::LoginRenderColors::from_semantic(&semantic),
                     )
                     .lines,
                 ),
@@ -484,9 +431,10 @@ fn handle_login_event(event: Event, ctx: &LoginEventCtx) -> EventResult {
         }
         if current_mode == LoginPanelMode::Browse
             && !is_scrollbar_column(&mouse, area)
-            && let Some(idx) = hit_browse_item(&mouse, area, &ctx.providers, ctx.scroll_start)
+            && let Some(idx) = hit_item(&mouse, area, ctx.viewport.hit_layout())
         {
             *ctx.cursor.write() = idx;
+            reset_panel_scroll(ctx);
             enter_edit_row(ctx);
             scroll_focus_into_view(ctx);
             return EventResult::Consumed;
@@ -564,6 +512,7 @@ fn handle_login_event(event: Event, ctx: &LoginEventCtx) -> EventResult {
             }
             // Ctrl+N：新建 provider（进入编辑模式，空表单）
             KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                reset_panel_scroll(ctx);
                 ctx.auth.write().shutdown();
                 enter_login_new_mode(
                     &mut ctx.edit_state.write(),
@@ -576,8 +525,11 @@ fn handle_login_event(event: Event, ctx: &LoginEventCtx) -> EventResult {
             KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 begin_confirm_delete(ctx);
             }
-            // Enter：进入编辑模式
-            KeyCode::Enter => enter_edit_row(ctx),
+            // Enter：进入编辑模式（先归零 Browse 阶段的滚轮偏移，Edit 首行不被裁掉）
+            KeyCode::Enter => {
+                reset_panel_scroll(ctx);
+                enter_edit_row(ctx);
+            }
             _ => {}
         },
         LoginPanelMode::Edit => {
@@ -661,6 +613,7 @@ fn mouse_content_row(mouse: &MouseEvent, area: Rect, scroll_offset: u16) -> Opti
 
 fn hit_edit_target(ctx: &LoginEventCtx, mouse: &MouseEvent, area: Rect) -> Option<EditHit> {
     let row = mouse_content_row(mouse, area, ctx.sv.read().offset().y)?;
+    let column = mouse.column.saturating_sub(area.x) as usize;
     let edit_state = ctx.edit_state.read();
     let es = edit_state.as_ref()?;
     let auth = ctx.auth.read();
@@ -670,6 +623,8 @@ fn hit_edit_target(ctx: &LoginEventCtx, mouse: &MouseEvent, area: Rect) -> Optio
         *ctx.edit_focus.read(),
         *ctx.edit_cursor.read(),
         row,
+        Some(column),
+        area.width,
     )
 }
 
@@ -701,13 +656,7 @@ fn activate_edit_hit(ctx: &LoginEventCtx, hit: EditHit) {
         EditHit::Field(field) if field.is_text() => focus_edit_field(ctx, field),
         EditHit::Field(field) => {
             focus_edit_field(ctx, field);
-            // 档位选择器的键盘切换键是 Space；其余 choice/按钮用 Enter。
-            let code = if field == LoginField::ProfileSelector {
-                KeyCode::Char(' ')
-            } else {
-                KeyCode::Enter
-            };
-            apply_login_edit_key(ctx, &KeyEvent::new(code, KeyModifiers::NONE));
+            apply_login_edit_key(ctx, &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         }
         EditHit::AuthAction(action) => {
             let selected = {
@@ -738,6 +687,17 @@ fn activate_type_change_hit(ctx: &LoginEventCtx, hit: EditHit) {
     apply_type_change_key(ctx, &KeyEvent::new(code, KeyModifiers::NONE));
 }
 
+/// 面板宽度（首帧未测量时与 AuthDetail 既有回退一致，按 80 列预算）。
+fn panel_width(area: Option<Rect>) -> u16 {
+    area.map(|area| area.width).unwrap_or(80)
+}
+
+/// Browse 的窗口由选择推导，`ScrollViewState` 只服务 Edit 表单；进入 Edit 前把
+/// Browse 阶段可能残留的滚轮偏移归零，避免编辑视图首行落在视口之上。
+fn reset_panel_scroll(ctx: &LoginEventCtx) {
+    ctx.sv.write().set_offset(Position::new(0, 0));
+}
+
 /// 把当前焦点字段滚入视口（键盘焦点移动/尺寸变化后的唯一滚动入口）。
 ///
 /// 行号与绘制同源（[`render::focus_row`] / [`render::line_count`]），只在事件边界
@@ -756,8 +716,8 @@ fn scroll_focus_into_view(ctx: &LoginEventCtx) {
     let focus = *ctx.edit_focus.read();
     let height = area.height.saturating_sub(2).max(1) as usize;
     let auth = ctx.auth.read();
-    let row = render::focus_row(edit_state, &auth, focus);
-    let total = render::line_count(edit_state, &auth, focus);
+    let row = render::focus_row(edit_state, &auth, focus, area.width);
+    let total = render::line_count(edit_state, &auth, focus, area.width);
     drop(auth);
     let max_offset = total.saturating_sub(height);
     let mut sv = ctx.sv.write();
@@ -791,7 +751,8 @@ struct LoginEventCtx {
     sv: State<ScrollViewState>,
     /// 本帧 provider 快照：命中索引与动作目标同源
     providers: Vec<ProviderSummary>,
-    scroll_start: usize,
+    /// 本帧 Browse 视口：绘制窗口与鼠标命中共用（见 `browse_render`）
+    viewport: ListViewport,
 }
 
 /// 消费 Model 面板留下的一次性“管理 Provider”请求。
@@ -803,6 +764,7 @@ fn apply_login_request(
     edit_state: State<Option<LoginEditState>>,
     edit_focus: State<LoginField>,
     edit_cursor: State<usize>,
+    auth: State<AuthController>,
     request: Option<crate::kit::atoms::LoginPanelRequest>,
 ) {
     let Some(request) = request else {
@@ -813,6 +775,8 @@ fn apply_login_request(
     let Some(provider_id) = request.provider_id else {
         return;
     };
+    // 从 Model 面板进入新目标：旧目标的认证视图不能继续展示。
+    auth.write().shutdown();
     let entered = enter_login_edit_mode(
         &mut edit_state.write(),
         &mut edit_focus.write(),
@@ -821,6 +785,23 @@ fn apply_login_request(
     );
     if entered {
         *mode.write() = LoginPanelMode::Edit;
+        // Model→Login 与 Browse→Edit 一样同步认证作用域；plan 模式立即查询状态，
+        // 避免显示其他 store/account 的旧“已登录”。
+        let plan_mode = {
+            let edit_guard = edit_state.read();
+            match edit_guard.as_ref() {
+                Some(es) => {
+                    let plan_mode = es.is_plan_mode();
+                    let scope = self::edit_handler::auth_scope(es);
+                    auth.write().sync_scope(scope);
+                    plan_mode
+                }
+                None => false,
+            }
+        };
+        if plan_mode {
+            self::auth::dispatch_status(auth, false);
+        }
     }
 }
 
@@ -840,46 +821,6 @@ fn fallback_to_browse(mode: State<LoginPanelMode>, edit_state_missing: bool) {
     ) {
         *mode.write() = LoginPanelMode::Browse;
     }
-}
-
-/// Browse 行命中：每项 3 或 4 行（base_url 存在时 4），线性累加反推
-fn hit_browse_item(
-    mouse: &MouseEvent,
-    area: Rect,
-    providers: &[ProviderSummary],
-    scroll_start: usize,
-) -> Option<usize> {
-    if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
-        return None;
-    }
-    let row = mouse.row;
-    // 顶部/底部边框行不命中
-    if row <= area.y || row >= area.y + area.height.saturating_sub(1) {
-        return None;
-    }
-    let visual = row - area.y - 1;
-    let content_height = area.height.saturating_sub(2);
-    if visual >= content_height {
-        return None;
-    }
-    // header 2 行（标题 + 空行）
-    if visual < 2 {
-        return None;
-    }
-    let mut cur = 2u16;
-    for (i, p) in providers
-        .iter()
-        .enumerate()
-        .skip(scroll_start)
-        .take(VISIBLE_ITEMS)
-    {
-        let item_h = if p.base_url.is_some() { 4u16 } else { 3u16 };
-        if visual >= cur && visual < cur + item_h {
-            return Some(i);
-        }
-        cur += item_h;
-    }
-    None
 }
 
 /// Browse 进入编辑：目标取自本帧列表快照（与命中同源），编辑路径随后按稳定 id 定位。

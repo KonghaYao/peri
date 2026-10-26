@@ -1,191 +1,6 @@
-//! 档位草稿/内联 editor 与右栏 K/V 的鼠标语义回归。
+//! 内联 contextWindow editor 与右栏 K/V 的鼠标语义回归。
 
 use super::*;
-
-#[test]
-#[serial]
-fn draft_mouse_cancel_discards_without_persisting() {
-    let guard = ModelPanelGuard::install();
-    guard.set_config(responses_config());
-    let handle = Arc::clone(&guard.handle);
-    let before = handle.read().clone();
-    let switched = switched();
-    let click_handle = Arc::clone(&handle);
-    let click_switched = Rc::clone(&switched);
-
-    mount_panel_frames(TEST_AREA, 1, move |frame, panel| {
-        if frame == 0 {
-            let mut draft = responses_draft(&click_handle);
-            draft.text = "128000".into();
-            draft.cursor = draft.text.chars().count();
-            let layout = test_profile_layout(&draft);
-            let row = pane_click_row(TEST_AREA, &layout, PaneHit::Cancel, 0);
-            *panel.profile_draft.write() = Some(draft);
-            let result = panel.event(
-                left_down(row, right_content_column(TEST_AREA)),
-                TEST_AREA,
-                &click_switched,
-            );
-            assert_eq!(result, EventResult::Consumed);
-        }
-    });
-
-    assert!(
-        handle.read().config == before.config,
-        "Cancel 必须放弃草稿且不落盘/不改内存配置"
-    );
-    assert!(switched.borrow().is_none(), "Cancel 不得切换 active alias");
-}
-
-#[test]
-#[serial]
-fn draft_mouse_save_does_not_bypass_validation() {
-    let guard = ModelPanelGuard::install();
-    guard.set_config(responses_config());
-    let handle = Arc::clone(&guard.handle);
-    let before = handle.read().clone();
-    let switched = switched();
-    let click_handle = Arc::clone(&handle);
-    let (tx, rx) = std::sync::mpsc::channel();
-
-    mount_panel_frames(TEST_AREA, 1, move |frame, panel| {
-        if frame == 0 {
-            let mut draft = responses_draft(&click_handle);
-            draft.text = "12k".into();
-            draft.cursor = draft.text.chars().count();
-            let layout = test_profile_layout(&draft);
-            let row = pane_click_row(TEST_AREA, &layout, PaneHit::Save, 0);
-            *panel.profile_draft.write() = Some(draft);
-            let result = panel.event(
-                left_down(row, right_content_column(TEST_AREA)),
-                TEST_AREA,
-                &switched,
-            );
-            let mouse_saved = panel
-                .profile_draft
-                .read()
-                .as_ref()
-                .map(|draft| (draft.error.clone(), draft.conflict, draft.input_blocked));
-
-            // 同一非法草稿用键盘 Ctrl+S：结果必须与鼠标 Save 完全一致。
-            let mut draft = responses_draft(&click_handle);
-            draft.text = "12k".into();
-            draft.cursor = draft.text.chars().count();
-            *panel.profile_draft.write() = Some(draft);
-            let _ = panel.event(
-                key_with(KeyCode::Char('s'), KeyModifiers::CONTROL),
-                TEST_AREA,
-                &switched,
-            );
-            let key_saved = panel
-                .profile_draft
-                .read()
-                .as_ref()
-                .map(|draft| (draft.error.clone(), draft.conflict, draft.input_blocked));
-            tx.send((result, mouse_saved, key_saved)).unwrap();
-        }
-    });
-
-    let (result, mouse_saved, key_saved) = rx.try_recv().unwrap();
-    assert_eq!(result, EventResult::Consumed);
-    assert_eq!(
-        mouse_saved, key_saved,
-        "鼠标 Save 与键盘 Ctrl+S 必须同一结果"
-    );
-    let (error, conflict, _) = mouse_saved.expect("非法容量必须保留草稿");
-    assert!(error.is_some(), "Save 点击必须显示与键盘相同的校验错误");
-    assert!(!conflict, "字段校验错误不是 revision 冲突");
-    assert!(
-        handle.read().config == before.config,
-        "校验失败不得改动内存配置"
-    );
-}
-
-#[test]
-#[serial]
-fn draft_mouse_blank_border_and_scrollbar_do_not_act() {
-    let guard = ModelPanelGuard::install();
-    guard.set_config(responses_config());
-    let handle = Arc::clone(&guard.handle);
-    let before = handle.read().clone();
-    let switched = switched();
-    let click_handle = Arc::clone(&handle);
-    let click_switched = Rc::clone(&switched);
-    let (tx, rx) = std::sync::mpsc::channel();
-
-    mount_panel_frames(TEST_AREA, 1, move |frame, panel| {
-        if frame == 0 {
-            let draft = responses_draft(&click_handle);
-            let focus = draft.focus;
-            let layout = test_profile_layout(&draft);
-            let save_row = pane_click_row(TEST_AREA, &layout, PaneHit::Save, 0);
-            *panel.profile_draft.write() = Some(draft);
-
-            // 标题行、左栏、分隔线、右栏滚动条列、底部提示行的按钮外区域都不产生动作。
-            for (row, column) in [
-                (TEST_AREA.y + 3, right_content_column(TEST_AREA)),
-                (save_row, 2),
-                (save_row, TEST_AREA.x + TEST_AREA.width * 45 / 100),
-                (save_row, TEST_AREA.x + TEST_AREA.width - 1),
-                (
-                    TEST_AREA.y + TEST_AREA.height - 2,
-                    TEST_AREA.x + TEST_AREA.width - 3,
-                ),
-            ] {
-                let result = panel.event(left_down(row, column), TEST_AREA, &click_switched);
-                assert_eq!(result, EventResult::Consumed, "区域内点击仍消费防穿透");
-            }
-
-            let preserved = panel.profile_draft.read().as_ref().map(|draft| draft.focus);
-            tx.send((preserved, focus)).unwrap();
-        }
-    });
-
-    let (preserved, focus) = rx.try_recv().unwrap();
-    assert_eq!(preserved, Some(focus), "空白/边框/滚动条不得移动焦点");
-    assert!(
-        handle.read().config == before.config,
-        "空白/边框/滚动条不得写入配置"
-    );
-    assert!(switched.borrow().is_none(), "不得切换 active alias");
-}
-
-#[test]
-#[serial]
-fn draft_mouse_hit_uses_right_scroll_offset() {
-    let guard = ModelPanelGuard::install();
-    guard.set_config(responses_config());
-    let handle = Arc::clone(&guard.handle);
-    let switched = switched();
-    let (tx, rx) = std::sync::mpsc::channel();
-
-    mount_panel_frames(TEST_AREA, 1, move |frame, panel| {
-        if frame == 0 {
-            let draft = responses_draft(&handle);
-            let layout = test_profile_layout(&draft);
-            let semantic_row = pane_hit_row(&layout, PaneHit::Cancel);
-            let offset = 2u16;
-            assert!(semantic_row > offset);
-            panel
-                .right_scroll
-                .write()
-                .set_offset(Position::new(0, offset));
-            *panel.profile_draft.write() = Some(draft);
-            let row = pane_click_row(TEST_AREA, &layout, PaneHit::Cancel, offset);
-            let result = panel.event(
-                left_down(row, right_content_column(TEST_AREA)),
-                TEST_AREA,
-                &switched,
-            );
-            tx.send((result, panel.profile_draft.read().is_none()))
-                .unwrap();
-        }
-    });
-
-    let (result, closed) = rx.try_recv().unwrap();
-    assert_eq!(result, EventResult::Consumed);
-    assert!(closed, "滚动后点击 Cancel 仍须命中同一语义行");
-}
 
 #[test]
 #[serial]
@@ -313,7 +128,8 @@ fn model_manage_provider_opens_login_with_one_shot_target() {
 
 // ── 设计 §7.9：普通右栏 K/V 行的鼠标命中 ────────────────────────────────────
 
-/// 点击右栏字段行 = 聚焦该字段并执行与键盘相同的行为；其他字段仍是即时保存路径。
+/// 点击右栏字段行 = 聚焦该字段并执行与键盘相同的行为；Provider / Model 与
+/// 其它字段一样走即时保存，不再有订阅专属草稿。
 #[test]
 #[serial]
 fn right_pane_field_click_focuses_and_runs_keyboard_action() {
@@ -342,32 +158,26 @@ fn right_pane_field_click_focuses_and_runs_keyboard_action() {
             let context_focus = (*panel.right_focus.read(), *panel.right_cursor.read());
             let _ = panel.event(key(KeyCode::Esc), TEST_AREA, &click_switched);
 
-            // Model 行：点击与 → 相同，进入档位草稿（候选模型前进一格）。
+            // Model 行：点击即聚焦并执行 →，与其它 provider 相同。
             let model_row = TEST_AREA.y + 3 + FIELD_MODEL as u16;
             let model_result = panel.event(
                 left_down(model_row, right_content_column(TEST_AREA)),
                 TEST_AREA,
                 &click_switched,
             );
-            let draft = panel
-                .profile_draft
-                .read()
-                .as_ref()
-                .map(|draft| (draft.provider_id.clone(), draft.model.clone()));
+            let model_focus = (*panel.right_focus.read(), *panel.right_cursor.read());
+            let model_no_editor = panel.window_editor.read().is_none();
             let _ = panel.event(key(KeyCode::Esc), TEST_AREA, &click_switched);
 
-            // Provider 行：点击与 → 相同，进入草稿并切到下一个 provider 候选。
+            // Provider 行：点击即聚焦并执行 →，与其它 provider 相同。
             let provider_row = TEST_AREA.y + 3 + FIELD_PROVIDER as u16;
             let provider_result = panel.event(
                 left_down(provider_row, right_content_column(TEST_AREA)),
                 TEST_AREA,
                 &click_switched,
             );
-            let provider_draft = panel
-                .profile_draft
-                .read()
-                .as_ref()
-                .map(|draft| draft.provider_id.clone());
+            let provider_focus = (*panel.right_focus.read(), *panel.right_cursor.read());
+            let provider_no_editor = panel.window_editor.read().is_none();
             let _ = panel.event(key(KeyCode::Esc), TEST_AREA, &click_switched);
 
             // Max tokens 行：普通即时保存路径。
@@ -380,7 +190,7 @@ fn right_pane_field_click_focuses_and_runs_keyboard_action() {
             let max_tokens_focus = (*panel.right_focus.read(), *panel.right_cursor.read());
             let _ = panel.event(key(KeyCode::Esc), TEST_AREA, &click_switched);
 
-            // Effort 行：保持即时保存语义，不进入草稿/editor。
+            // Effort 行：保持即时保存语义，不进入 editor。
             let effort_row = TEST_AREA.y + 3 + FIELD_EFFORT as u16;
             let effort_result = panel.event(
                 left_down(effort_row, right_content_column(TEST_AREA)),
@@ -389,22 +199,22 @@ fn right_pane_field_click_focuses_and_runs_keyboard_action() {
             );
             let effort_focus = (*panel.right_focus.read(), *panel.right_cursor.read());
             let no_editor = panel.window_editor.read().is_none();
-            let no_draft = panel.profile_draft.read().is_none();
 
             tx.send((
                 context_result,
                 editor,
                 context_focus,
                 model_result,
-                draft,
+                model_focus,
+                model_no_editor,
                 provider_result,
-                provider_draft,
+                provider_focus,
+                provider_no_editor,
                 max_tokens_result,
                 max_tokens_focus,
                 effort_result,
                 effort_focus,
                 no_editor,
-                no_draft,
             ))
             .unwrap();
         }
@@ -415,15 +225,16 @@ fn right_pane_field_click_focuses_and_runs_keyboard_action() {
         editor,
         context_focus,
         model_result,
-        draft,
+        model_focus,
+        model_no_editor,
         provider_result,
-        provider_draft,
+        provider_focus,
+        provider_no_editor,
         max_tokens_result,
         max_tokens_focus,
         effort_result,
         focus,
         no_editor,
-        no_draft,
     ) = rx.try_recv().unwrap();
     assert_eq!(context_result, EventResult::Consumed);
     assert_eq!(
@@ -433,17 +244,11 @@ fn right_pane_field_click_focuses_and_runs_keyboard_action() {
     );
     assert_eq!(context_focus, (true, FIELD_CONTEXT_1M));
     assert_eq!(model_result, EventResult::Consumed);
-    assert_eq!(
-        draft,
-        Some(("resp".to_string(), "haiku-model".to_string())),
-        "点击 Model 行必须进入草稿，且候选与键盘 → 一致"
-    );
+    assert_eq!(model_focus, (true, FIELD_MODEL));
+    assert!(model_no_editor, "Model 行点击不得打开专属面板");
     assert_eq!(provider_result, EventResult::Consumed);
-    assert_eq!(
-        provider_draft.as_deref(),
-        Some("other"),
-        "点击 Provider 行必须进入草稿并切换到下一个候选"
-    );
+    assert_eq!(provider_focus, (true, FIELD_PROVIDER));
+    assert!(provider_no_editor, "Provider 行点击不得打开专属面板");
     assert_eq!(max_tokens_result, EventResult::Consumed);
     assert_eq!(
         max_tokens_focus,
@@ -456,7 +261,7 @@ fn right_pane_field_click_focuses_and_runs_keyboard_action() {
         (true, FIELD_EFFORT),
         "普通字段点击只聚焦并保持原保存路径"
     );
-    assert!(no_editor && no_draft, "Effort 行不得进入草稿/editor");
+    assert!(no_editor, "Effort 行不得进入 editor");
     assert!(
         handle.read().config == before.config,
         "点击本身不得写入配置（无 authority 时即时保存失败）"
@@ -499,15 +304,14 @@ fn right_pane_click_ignores_blank_border_scrollbar_and_divider() {
             tx.send((
                 (*panel.right_focus.read(), *panel.right_cursor.read()),
                 panel.window_editor.read().is_none(),
-                panel.profile_draft.read().is_none(),
             ))
             .unwrap();
         }
     });
 
-    let (focus, no_editor, no_draft) = rx.try_recv().unwrap();
+    let (focus, no_editor) = rx.try_recv().unwrap();
     assert_eq!(focus, (false, 0), "空白/边框/滚动条不得移动焦点");
-    assert!(no_editor && no_draft, "空白/边框/滚动条不得进入编辑");
+    assert!(no_editor, "空白/边框/滚动条不得进入编辑");
     assert!(
         crate::kit::atoms::OPEN_PANELS.state().read().is_empty(),
         "按钮之外的底部提示不打开 Login"

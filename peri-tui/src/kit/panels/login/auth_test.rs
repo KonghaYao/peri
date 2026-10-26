@@ -230,7 +230,7 @@ async fn login_publishes_url_then_signed_in_identity() {
         plan.subject.is_empty(),
         "login result waits for the owner to apply identity"
     );
-    assert!(controller.use_account(&mut plan));
+    assert!(controller.use_account(&mut plan, &scope()));
     assert_eq!(plan.subject, "subject-one");
     task.await.unwrap();
 }
@@ -274,7 +274,7 @@ async fn login_error_can_be_retried_without_stale_identity() {
 }
 
 #[tokio::test]
-async fn status_identity_is_exposed_but_not_adopted_automatically() {
+async fn status_identity_is_explicitly_adoptable_but_never_overwrites() {
     let (mut controller, state) = controller();
     state
         .status_results
@@ -304,9 +304,40 @@ async fn status_identity_is_exposed_but_not_adopted_automatically() {
     assert_eq!(view_subject, "verified-subject");
     assert!(plan.identity_mismatch(&status(&view_subject, &view_client, true)));
     assert_eq!(plan.subject, "old-subject", "status must not overwrite");
-    assert!(controller.use_account(&mut plan));
+    assert!(controller.use_account(&mut plan, &scope()));
     assert_eq!(plan.subject, "verified-subject");
     assert_eq!(plan.client_id, "verified-client");
+}
+
+#[tokio::test]
+async fn use_account_requires_current_scope() {
+    let (mut controller, state) = controller();
+    state
+        .status_results
+        .lock()
+        .unwrap()
+        .push_back(Ok(Some(status(
+            "verified-subject",
+            "verified-client",
+            true,
+        ))));
+    let request = controller.prepare_status(false).unwrap();
+    let token = request.ticket.token().clone();
+    let result = request.session.status(token).await;
+    controller.receive(request.ticket, AuthEvent::StatusChecked(result));
+
+    let mut plan = PlanDraft {
+        store: "/tmp/peri-auth-test".into(),
+        account: "work".into(),
+        ..Default::default()
+    };
+    assert!(
+        !controller.use_account(&mut plan, &other_scope()),
+        "other store/account must never adopt the current view identity"
+    );
+    assert!(plan.needs_identity());
+    assert!(controller.use_account(&mut plan, &scope()));
+    assert_eq!(plan.subject, "verified-subject");
 }
 
 #[tokio::test]
@@ -589,7 +620,11 @@ fn plan_mode_rejects_invalid_account_reference() {
     edit.plan.subject = "subject".into();
     edit.plan.client_id = "client".into();
     let error = edit.build_candidate().unwrap_err();
-    assert_eq!(error.field, LoginField::PlanAccount);
+    assert_eq!(error.field, LoginField::AuthActions);
+    assert_eq!(
+        error.message,
+        crate::i18n::tr("login-error-account-reference")
+    );
 }
 
 #[test]
@@ -657,10 +692,14 @@ fn plan_mode_navigation_uses_plan_fields_and_never_api_key() {
     let cfg = responses_config();
     let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
     edit.cycle_auth_mode();
+    edit.ensure_plan_defaults(Some(PathBuf::from("/tmp/default-store")));
     let fields = edit.visible_fields();
     assert!(fields.contains(&LoginField::AuthMode));
-    assert!(fields.contains(&LoginField::PlanStore));
-    assert!(fields.contains(&LoginField::PlanAccount));
+    assert!(
+        !fields.contains(&LoginField::PlanStore),
+        "合法 store 默认只读，不进入导航"
+    );
+    assert!(!fields.contains(&LoginField::PlanAccount), "账号引用不展示");
     assert!(fields.contains(&LoginField::AuthActions));
     assert!(
         !fields.contains(&LoginField::BaseUrl) && !fields.contains(&LoginField::ApiKey),

@@ -11,8 +11,8 @@ use ratatui_kit::ratatui::style::Style;
 use ratatui_kit::ratatui::text::Span;
 
 use super::VALUE_ALIGN_COL;
-use super::editor_view::{PaneLayout, render_profile_draft, render_window_editor};
-use super::profile_draft::{ProfileDraftState, WindowEditState};
+use super::editor_view::{PaneLayout, render_window_editor};
+use super::window_edit::WindowEditState;
 
 /// 底部“管理 Provider”按钮文本——渲染与鼠标命中同源，避免两处文本宽度漂移。
 pub(super) fn provider_button_label() -> String {
@@ -24,12 +24,6 @@ pub(super) fn window_editor_layout(editor: &WindowEditState) -> PaneLayout {
     let theme_state = THEME_ATOM.state();
     let theme = theme_state.read();
     render_window_editor(editor, &theme)
-}
-
-pub(super) fn profile_draft_layout(draft: &ProfileDraftState) -> PaneLayout {
-    let theme_state = THEME_ATOM.state();
-    let theme = theme_state.read();
-    render_profile_draft(draft, &theme)
 }
 
 /// 模型名内嵌 effort 后缀（如 "gpt-5.6-luna high"）：主色用 model_info，后缀用 model accent 色高亮。

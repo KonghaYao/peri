@@ -6,7 +6,7 @@ use crate::kit::atoms::{
 use peri_acp::provider::config::{PeriConfig, ProviderAuthConfig};
 use std::time::Duration;
 
-use super::edit_state::{LoginEditState, LoginError, LoginField};
+use super::edit_state::{LoginEditState, LoginError, LoginErrorKind, LoginField};
 use crate::kit::config_service::DraftSaveError;
 
 /// 保存编辑结果：构造候选 → 显式 expected revision 落盘 → 只发布 accepted 快照。
@@ -18,14 +18,19 @@ pub(super) fn save_login_edit(es: &mut LoginEditState) -> bool {
     // 字段校验错误同样保留到用户修正为止。文本编辑、choice 切换与干净粘贴会清除
     // 错误，因此这里不会形成永久阻断。
     if let Some(error) = &es.inline_error {
-        notify_validation_error(&error.message);
+        // 身份错误由保存门统一映射为状态化文案，避免先弹“请先登录”再被替换。
+        if error.kind != LoginErrorKind::IdentityRequired {
+            notify_validation_error(&error.message);
+        }
         return false;
     }
     // 先做字段定位校验：错误必须在检查配置源之前就能显示（不依赖全局句柄）。
-    let candidate = match es.build_candidate() {
+    let (candidate, unresolved) = match es.build_candidate_with_warnings() {
         Ok(candidate) => candidate,
         Err(error) => {
-            notify_validation_error(&error.message);
+            if error.kind != LoginErrorKind::IdentityRequired {
+                notify_validation_error(&error.message);
+            }
             es.inline_error = Some(error);
             return false;
         }
@@ -34,7 +39,6 @@ pub(super) fn save_login_edit(es: &mut LoginEditState) -> bool {
         es.inline_error = Some(LoginError {
             field: LoginField::Confirm,
             message: i18n::tr("login-error-authority"),
-            alias: None,
             kind: super::edit_types::LoginErrorKind::Field,
         });
         return false;
@@ -43,7 +47,6 @@ pub(super) fn save_login_edit(es: &mut LoginEditState) -> bool {
         es.inline_error = Some(LoginError {
             field: LoginField::Confirm,
             message: i18n::tr("login-error-authority"),
-            alias: None,
             kind: super::edit_types::LoginErrorKind::Field,
         });
         return false;
@@ -52,6 +55,7 @@ pub(super) fn save_login_edit(es: &mut LoginEditState) -> bool {
     match crate::kit::config_service::persist_draft(&candidate, revision) {
         Ok(accepted) => {
             publish_accepted(accepted);
+            notify_unresolved_profiles(&unresolved);
             if es.is_new() {
                 tracing::info!(
                     provider_id = %es.provider_id,
@@ -80,6 +84,24 @@ fn notify_validation_error(message: &str) {
     *NOTIFICATION.state().write() = Some(Notification {
         message: message.to_string(),
         until: peri_time::monotonic_now() + Duration::from_secs(2),
+    });
+}
+
+/// 保存已成功，但仍有原本就不可解析的档位：只提示，不回滚本次保存。
+fn notify_unresolved_profiles(aliases: &[&'static str]) {
+    if aliases.is_empty() {
+        return;
+    }
+    let list = aliases.join(", ");
+    *NOTIFICATION.state().write() = Some(Notification {
+        message: i18n::tr_args(
+            "login-warning-existing-unresolved",
+            &[(
+                "aliases".to_string(),
+                fluent_bundle::FluentValue::from(list.as_str()),
+            )],
+        ),
+        until: peri_time::monotonic_now() + Duration::from_secs(4),
     });
 }
 

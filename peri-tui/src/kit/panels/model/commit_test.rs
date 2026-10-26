@@ -1,6 +1,6 @@
 //! Real model actions, layered configuration files and ACP MPSC frames.
 //! Each scenario owns a process because the production handles are OnceLocks.
-use super::super::profile_draft::{ProfileDraftState, WindowEditState};
+use super::super::window_edit::WindowEditState;
 use super::*;
 use crate::acp_client::{AcpNotification, AcpTuiClient};
 use crate::config::{ConfigSource, PeriConfig, ProviderConfig, ProviderModels};
@@ -300,6 +300,98 @@ fn model_commit_active_provider_updates_mapping_and_request() {
     );
 }
 
+/// Responses provider 与其它 provider 共用即时保存：Provider 行切换后立刻落盘，
+/// 保留已确认的 contextWindow，不经过“档位配置草稿”。
+#[test]
+fn model_commit_responses_provider_switch_persists_immediately() {
+    isolated(
+        "model_commit_responses_provider_switch_persists_immediately",
+        async {
+            let fixture = Fixture::new(false);
+            fixture.create_session().await;
+            {
+                let mut cfg = fixture.config.write();
+                cfg.config.profiles.sonnet.provider = "a".into();
+                cfg.config.profiles.sonnet.model = None;
+                cfg.config.profiles.sonnet.context_window = Some(3000);
+            }
+            // providers 顺序 a、b、r；从 a 后退即 r。
+            edit_field("sonnet".into(), FIELD_PROVIDER, false);
+            let profile = fixture.config.read().config.profiles.sonnet.clone();
+            assert_eq!(profile.provider, "r");
+            assert_eq!(profile.model.as_deref(), Some("r-sonnet"));
+            assert_eq!(
+                profile.context_window,
+                Some(3000),
+                "即时切换必须保留已确认容量"
+            );
+            fixture.expect_request(false).await;
+            fixture.finish().await;
+        },
+    );
+}
+
+/// Responses provider 的 Model 行同样即时保存，不打开任何专属面板。
+#[test]
+fn model_commit_responses_model_switch_persists_immediately() {
+    isolated(
+        "model_commit_responses_model_switch_persists_immediately",
+        async {
+            let fixture = Fixture::new(false);
+            fixture.create_session().await;
+            {
+                let mut cfg = fixture.config.write();
+                cfg.config.profiles.sonnet.provider = "r".into();
+                cfg.config.profiles.sonnet.model = None;
+                cfg.config.profiles.sonnet.context_window = Some(3000);
+            }
+            edit_field("sonnet".into(), FIELD_MODEL, true);
+            let profile = fixture.config.read().config.profiles.sonnet.clone();
+            assert_eq!(profile.model.as_deref(), Some("r-haiku"));
+            assert_eq!(profile.context_window, Some(3000));
+            fixture.expect_request(false).await;
+            fixture.finish().await;
+        },
+    );
+}
+
+/// 截图回归：辅助档位绑定了缺 contextWindow 的 Responses provider 时，
+/// 编辑当前生效的非 Responses 档位仍必须保存成功（baseline 已坏不阻断）。
+#[test]
+fn model_commit_unrelated_broken_responses_tier_does_not_block_save() {
+    isolated(
+        "model_commit_unrelated_broken_responses_tier_does_not_block_save",
+        async {
+            let fixture = Fixture::new(false);
+            fixture.create_session().await;
+            {
+                let mut cfg = fixture.config.write();
+                cfg.config.active_alias = "sonnet".into();
+                cfg.config.profiles.sonnet.provider = "a".into();
+                cfg.config.profiles.sonnet.model = Some("a-sonnet".into());
+                cfg.config.profiles.sonnet.context_window = None;
+                cfg.config.profiles.haiku.provider = "r".into();
+                cfg.config.profiles.haiku.model = Some("r-haiku".into());
+                cfg.config.profiles.haiku.context_window = None;
+            }
+            edit_field("sonnet".into(), FIELD_MODEL, true);
+            let cfg = fixture.config.read().clone();
+            assert_eq!(
+                cfg.config.profiles.sonnet.model.as_deref(),
+                Some("a-haiku"),
+                "无关编辑必须落盘"
+            );
+            assert_eq!(cfg.config.profiles.haiku.provider, "r");
+            assert_eq!(
+                cfg.config.profiles.haiku.context_window, None,
+                "不得为修好其它档位而擅自改坏档位的窗口"
+            );
+            fixture.expect_request(false).await;
+            fixture.finish().await;
+        },
+    );
+}
+
 #[test]
 fn model_commit_inactive_edit_preserves_display_and_notifies() {
     isolated(
@@ -511,303 +603,6 @@ fn model_commit_window_editor_input_error_blocks_submit_until_corrected() {
 }
 
 #[test]
-fn model_commit_profile_draft_input_error_blocks_submit_until_corrected() {
-    isolated(
-        "model_commit_profile_draft_input_error_blocks_submit_until_corrected",
-        async {
-            let fixture = Fixture::new(false);
-            {
-                let mut cfg = fixture.config.write();
-                cfg.config.profiles.sonnet.provider = "r".into();
-                cfg.config.profiles.sonnet.context_window = Some(3000);
-                cfg.config.profiles.sonnet.model = None;
-            }
-            let revision = crate::config::configuration_revision().unwrap();
-            let cfg = fixture.config.read().clone();
-            let mut draft =
-                ProfileDraftState::enter(&cfg, "sonnet", Some(revision), Some("r".into()), None)
-                    .unwrap();
-            assert_eq!(draft.text, "3000");
-
-            assert!(!draft.insert('k'), "非数字输入必须被拒绝");
-            assert!(draft.input_blocked);
-            let before = fixture.config.read().clone();
-            assert!(
-                !submit_profile_draft(&mut draft),
-                "被拒绝的输入未清除前不得提交"
-            );
-            assert_eq!(*fixture.config.read(), before, "拒绝提交不得改动内存配置");
-
-            draft.backspace();
-            assert!(!draft.input_blocked, "实际编辑后错误生命周期结束");
-            assert!(submit_profile_draft(&mut draft));
-            assert_eq!(
-                fixture.config.read().config.profiles.sonnet.context_window,
-                Some(300)
-            );
-            fixture.expect_request(false).await;
-            fixture.finish().await;
-        },
-    );
-}
-
-#[test]
-fn model_commit_profile_draft_saves_provider_model_and_window_atomically() {
-    isolated(
-        "model_commit_profile_draft_saves_provider_model_and_window_atomically",
-        async {
-            let fixture = Fixture::new(false);
-            let before = fixture.config.read().clone();
-            let revision = crate::config::configuration_revision().unwrap();
-            let cfg = fixture.config.read().clone();
-            let mut draft = ProfileDraftState::enter(
-                &cfg,
-                "sonnet",
-                Some(revision),
-                Some("r".into()),
-                Some("r-sonnet-next".into()),
-            )
-            .unwrap();
-            draft.text = "128000".into();
-            draft.cursor = 6;
-            assert!(submit_profile_draft(&mut draft));
-
-            let saved = fixture.config.read().clone();
-            assert_eq!(saved.config.active_alias, "sonnet");
-            let profile = saved.config.profiles.sonnet.clone();
-            assert_eq!(profile.provider, "r");
-            assert_eq!(profile.model.as_deref(), Some("r-sonnet-next"));
-            assert_eq!(profile.context_window, Some(128000));
-            assert_eq!(profile.effort, before.config.profiles.sonnet.effort);
-            assert_eq!(profile.max_tokens, before.config.profiles.sonnet.max_tokens);
-            for alias in ["fable", "opus", "haiku"] {
-                assert_eq!(
-                    saved.config.profiles.get(alias),
-                    before.config.profiles.get(alias),
-                    "{alias} 不得被原子草稿覆盖"
-                );
-            }
-            fixture.expect_request(false).await;
-            fixture.finish().await;
-        },
-    );
-}
-
-#[test]
-fn model_commit_inactive_profile_draft_does_not_switch_active_alias() {
-    isolated(
-        "model_commit_inactive_profile_draft_does_not_switch_active_alias",
-        async {
-            let fixture = Fixture::new(false);
-            let before = fixture.config.read().clone();
-            let revision = crate::config::configuration_revision().unwrap();
-            let cfg = fixture.config.read().clone();
-            let mut draft =
-                ProfileDraftState::enter(&cfg, "haiku", Some(revision), Some("r".into()), None)
-                    .unwrap();
-            draft.text = "64000".into();
-            assert!(submit_profile_draft(&mut draft));
-
-            let saved = fixture.config.read().clone();
-            assert_eq!(saved.config.active_alias, "sonnet");
-            assert_eq!(saved.config.profiles.haiku.provider, "r");
-            assert_eq!(saved.config.profiles.haiku.context_window, Some(64000));
-            assert_eq!(
-                saved.config.profiles.sonnet, before.config.profiles.sonnet,
-                "非活动档编辑不得改动活动档"
-            );
-            fixture.expect_request(false).await;
-            fixture.finish().await;
-        },
-    );
-}
-
-/// 设计 §7.6 + §7.5：任意 model 文本与 provider/window 一起原子保存；
-/// 旧模型容量不得沿用，其他档位与 active alias 不变。
-#[test]
-fn model_commit_profile_draft_saves_arbitrary_model_text_atomically() {
-    isolated(
-        "model_commit_profile_draft_saves_arbitrary_model_text_atomically",
-        async {
-            let fixture = Fixture::new(false);
-            let before = fixture.config.read().clone();
-            {
-                let mut cfg = fixture.config.write();
-                cfg.config.profiles.sonnet.provider = "r".into();
-                cfg.config.profiles.sonnet.context_window = Some(3000);
-                cfg.config.profiles.sonnet.model = None;
-            }
-            let revision = crate::config::configuration_revision().unwrap();
-            let cfg = fixture.config.read().clone();
-            let mut draft =
-                ProfileDraftState::enter(&cfg, "sonnet", Some(revision), Some("r".into()), None)
-                    .unwrap();
-            assert_eq!(draft.text, "3000", "同一模型保留已确认容量");
-
-            draft.begin_model_edit();
-            // 清空目录内候选，输入任意模型名。
-            for _ in 0..draft.model.chars().count() {
-                draft.backspace_model();
-            }
-            for ch in "custom-model high".chars() {
-                assert!(draft.insert_model(ch), "普通字符必须被接受");
-            }
-            draft.confirm_model_edit();
-            assert_eq!(draft.model, "custom-model high");
-            assert!(
-                draft.text.is_empty(),
-                "目标模型变化后旧容量必须清空，要求重新确认"
-            );
-            for ch in "64000".chars() {
-                assert!(draft.insert(ch));
-            }
-            draft.focus = DraftFocus::Window;
-            assert!(submit_profile_draft(&mut draft));
-
-            let saved = fixture.config.read().clone();
-            assert_eq!(saved.config.active_alias, "sonnet");
-            let profile = saved.config.profiles.sonnet.clone();
-            assert_eq!(profile.provider, "r");
-            assert_eq!(profile.model.as_deref(), Some("custom-model high"));
-            assert_eq!(profile.context_window, Some(64000));
-            assert_eq!(profile.effort, before.config.profiles.sonnet.effort);
-            assert_eq!(profile.max_tokens, before.config.profiles.sonnet.max_tokens);
-            for alias in ["fable", "opus", "haiku"] {
-                assert_eq!(
-                    saved.config.profiles.get(alias),
-                    before.config.profiles.get(alias),
-                    "{alias} 不得被原子草稿覆盖"
-                );
-            }
-            fixture.expect_request(false).await;
-            fixture.finish().await;
-        },
-    );
-}
-
-/// P0-85（Model 路径）：旧草稿冲突后不为旧值覆盖外部写入；重新进入 editor 先重读
-/// 权威配置，用新的 revision 保存修正结果。
-#[test]
-fn model_commit_conflict_then_reopen_uses_fresh_revision() {
-    isolated(
-        "model_commit_conflict_then_reopen_uses_fresh_revision",
-        async {
-            let fixture = Fixture::new(false);
-            {
-                let mut cfg = fixture.config.write();
-                cfg.config.profiles.sonnet.provider = "r".into();
-                cfg.config.profiles.sonnet.context_window = Some(3000);
-                cfg.config.profiles.sonnet.model = None;
-            }
-            let revision = crate::config::configuration_revision().unwrap();
-            let cfg = fixture.config.read().clone();
-            let mut draft =
-                ProfileDraftState::enter(&cfg, "sonnet", Some(revision), Some("r".into()), None)
-                    .unwrap();
-            draft.text = "32000".into();
-
-            // 外部写入推进 revision，并保留一个可观察的新值。
-            let source = CONFIG_SOURCE_HANDLE.get().expect("测试必须安装配置源");
-            let mut external = fixture.config.read().clone();
-            external.config.active_alias = "haiku".into();
-            source
-                .save(source.snapshot().unwrap().revision(), &external)
-                .expect("external save");
-
-            assert!(!submit_profile_draft(&mut draft));
-            assert!(draft.conflict, "revision 冲突必须可识别");
-            assert_eq!(
-                draft.error.as_deref(),
-                Some(crate::i18n::tr("config-draft-conflict").as_str())
-            );
-
-            // 按提示重新进入 editor：refresh_before_editor 的同一路径（重载权威配置）。
-            crate::kit::config_service::reload_configuration().unwrap();
-            let cfg = fixture.config.read().clone();
-            let mut reopened = ProfileDraftState::enter(
-                &cfg,
-                "sonnet",
-                Some(crate::config::configuration_revision().unwrap()),
-                Some("r".into()),
-                None,
-            )
-            .unwrap();
-            reopened.text = "32000".into();
-            reopened.cursor = 5;
-            assert!(submit_profile_draft(&mut reopened));
-
-            let disk = ConfigSource::load_at(&fixture.cwd, fixture.global.clone())
-                .unwrap()
-                .loaded_merged();
-            assert_eq!(
-                disk.config.active_alias, "haiku",
-                "外部新值不得被旧草稿覆盖"
-            );
-            assert_eq!(
-                disk.config.profiles.sonnet.context_window,
-                Some(32000),
-                "重载后的修正结果必须用新 revision 落盘"
-            );
-            fixture.expect_request(false).await;
-            fixture.finish().await;
-        },
-    );
-}
-
-/// 鼠标点击草稿 Save 与键盘 Ctrl+S 走同一提交边界：真实落盘、发布并推送 ACP。
-#[test]
-fn model_commit_mouse_draft_save_persists_and_pushes() {
-    isolated("model_commit_mouse_draft_save_persists_and_pushes", async {
-        let fixture = Fixture::new(false);
-        let revision = crate::config::configuration_revision().unwrap();
-        let cfg = fixture.config.read().clone();
-        let mut draft = ProfileDraftState::enter(
-            &cfg,
-            "sonnet",
-            Some(revision),
-            Some("r".into()),
-            Some("r-sonnet-next".into()),
-        )
-        .unwrap();
-        draft.text = "128000".into();
-        draft.cursor = draft.text.chars().count();
-        let layout = super::test_profile_layout(&draft);
-        let row = super::pane_click_row(super::TEST_AREA, &layout, super::PaneHit::Save, 0);
-        let column = super::right_content_column(super::TEST_AREA);
-        let clicked = std::rc::Rc::new(std::cell::RefCell::new(None));
-        let clicked_for_event = std::rc::Rc::clone(&clicked);
-        let mut pending = Some(draft);
-
-        super::mount_panel_frames(super::TEST_AREA, 1, move |_frame, panel| {
-            if let Some(draft) = pending.take() {
-                *panel.profile_draft.write() = Some(draft);
-                let result = panel.event(
-                    super::left_down(row, column),
-                    super::TEST_AREA,
-                    &clicked_for_event,
-                );
-                assert_eq!(result, ratatui_kit::prelude::EventResult::Consumed);
-                assert!(
-                    panel.profile_draft.read().is_none(),
-                    "保存成功后必须释放草稿"
-                );
-            }
-        });
-
-        assert!(clicked.borrow().is_none(), "草稿保存不得切换 active alias");
-        let saved = fixture.config.read().clone();
-        let profile = saved.config.profiles.sonnet.clone();
-        assert_eq!(profile.provider, "r");
-        assert_eq!(profile.model.as_deref(), Some("r-sonnet-next"));
-        assert_eq!(profile.context_window, Some(128000));
-
-        fixture.expect_request(false).await;
-        fixture.finish().await;
-    });
-}
-
-/// 鼠标点击内联 window editor 的 Save：与键盘 Enter/Ctrl+S 同一提交边界。
-#[test]
 fn model_commit_mouse_window_editor_save_persists_and_pushes() {
     isolated(
         "model_commit_mouse_window_editor_save_persists_and_pushes",
@@ -900,63 +695,6 @@ fn model_commit_window_editor_paste_rejected_until_corrected() {
                 fixture.config.read().config.profiles.sonnet.context_window,
                 Some(3009)
             );
-            fixture.expect_request(false).await;
-            fixture.finish().await;
-        },
-    );
-}
-
-#[test]
-fn model_commit_profile_draft_model_paste_rejected_until_corrected() {
-    isolated(
-        "model_commit_profile_draft_model_paste_rejected_until_corrected",
-        async {
-            let fixture = Fixture::new(false);
-            {
-                let mut cfg = fixture.config.write();
-                cfg.config.profiles.sonnet.provider = "r".into();
-                cfg.config.profiles.sonnet.context_window = Some(3000);
-                cfg.config.profiles.sonnet.model = None;
-            }
-            let revision = crate::config::configuration_revision().unwrap();
-            let cfg = fixture.config.read().clone();
-            let mut draft =
-                ProfileDraftState::enter(&cfg, "sonnet", Some(revision), Some("r".into()), None)
-                    .unwrap();
-            assert_eq!(draft.model, "r-sonnet");
-            draft.begin_model_edit();
-
-            assert!(!draft.paste_model("evil\nmodel"), "多行粘贴必须被拒绝");
-            assert_eq!(draft.model, "r-sonnet", "被拒绝的粘贴不得写入 model");
-            assert_eq!(
-                draft.error.as_deref(),
-                Some(crate::i18n::tr("model-panel-model-single-line").as_str()),
-                "拒绝必须留下可见错误"
-            );
-            assert!(draft.input_blocked);
-            let before = fixture.config.read().clone();
-            assert!(
-                !submit_profile_draft(&mut draft),
-                "被拒绝的输入未修正前不得提交"
-            );
-            assert_eq!(*fixture.config.read(), before, "拒绝提交不得改内存配置");
-
-            draft.insert_model('x');
-            assert!(!draft.input_blocked, "修正后错误生命周期结束");
-            assert!(draft.paste_model("-next"), "单行粘贴可接受");
-            assert_eq!(draft.model, "r-sonnetx-next");
-            draft.confirm_model_edit();
-            assert!(draft.text.is_empty(), "新目标必须重新确认准确的上下文窗口");
-            draft.text = "128000".into();
-            draft.cursor = draft.text.chars().count();
-            assert!(submit_profile_draft(&mut draft));
-
-            let saved = fixture.config.read().clone();
-            assert_eq!(
-                saved.config.profiles.sonnet.model.as_deref(),
-                Some("r-sonnetx-next")
-            );
-            assert_eq!(saved.config.profiles.sonnet.context_window, Some(128000));
             fixture.expect_request(false).await;
             fixture.finish().await;
         },

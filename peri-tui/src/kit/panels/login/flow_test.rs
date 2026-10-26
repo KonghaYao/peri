@@ -9,19 +9,15 @@ use crate::kit::panels::login::edit_types::LoginError;
 fn conflict_reload_hint_is_reserved_for_conflict_errors() {
     let cfg = login_config();
     let auth = crate::kit::panels::login::auth::AuthController::new();
-    let colors = crate::kit::panels::login::render::LoginRenderColors {
-        cursor: ratatui_kit::ratatui::style::Color::Reset,
-        dim: ratatui_kit::ratatui::style::Color::Reset,
-        text: ratatui_kit::ratatui::style::Color::Reset,
-        focus: ratatui_kit::ratatui::style::Color::Reset,
-    };
+    let colors = crate::kit::panels::login::render::LoginRenderColors::reset();
     let render_text = |state: &LoginEditState| {
         crate::kit::panels::login::render::build_edit_lines(
             state,
             &auth,
-            LoginField::ProfileWindow,
+            LoginField::ProviderId,
             0,
             &colors,
+            100,
         )
         .iter()
         .flat_map(|line| line.spans.iter())
@@ -31,12 +27,12 @@ fn conflict_reload_hint_is_reserved_for_conflict_errors() {
 
     let mut field_error = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
     field_error.inline_error = Some(LoginError::field(
-        LoginField::ProfileWindow,
-        crate::i18n::tr("login-error-context-window"),
+        LoginField::ProviderId,
+        crate::i18n::tr("login-error-id-duplicate"),
     ));
     let text = render_text(&field_error);
     assert!(
-        text.contains(&crate::i18n::tr("login-error-context-window"))
+        text.contains(&crate::i18n::tr("login-error-id-duplicate"))
             && !text.contains(&crate::i18n::tr("login-conflict-reload-hint")),
         "字段错误只显示字段提示，不得显示冲突重载提示：\n{text}"
     );
@@ -74,6 +70,11 @@ fn provider_management_request_opens_target_provider_edit_once() {
     let (tx, rx) = std::sync::mpsc::channel();
     super::mount_panel_at(2, move |panel| {
         if *panel.mode.read() == LoginPanelMode::Edit {
+            let expected_scope = panel
+                .edit_state
+                .read()
+                .as_ref()
+                .map(crate::kit::panels::login::edit_handler::auth_scope);
             tx.send((
                 *panel.mode.read(),
                 *panel.edit_focus.read(),
@@ -83,16 +84,19 @@ fn provider_management_request_opens_target_provider_edit_once() {
                     .as_ref()
                     .map(|state| state.original_provider_id.clone()),
                 *panel.edit_cursor.read(),
+                expected_scope.as_ref() == Some(panel.auth.read().scope()),
             ))
             .expect("测试结果通道仍打开");
         }
     });
 
-    let (mode, focus, provider, cursor) = rx.try_recv().expect("请求必须进入编辑视图");
+    let (mode, focus, provider, cursor, scope_synced) =
+        rx.try_recv().expect("请求必须进入编辑视图");
     assert_eq!(mode, LoginPanelMode::Edit);
     assert_eq!(focus, LoginField::ProviderId);
     assert_eq!(provider.as_deref(), Some("resp"));
     assert_eq!(cursor, "resp".chars().count());
+    assert!(scope_synced, "Model→Login 必须同步认证作用域");
     assert!(
         LOGIN_PANEL_REQUEST.state().read().is_none(),
         "导航请求是一次性的"

@@ -5,13 +5,13 @@
 //! - 右侧：当前 profile 的 K/V 编辑行（Provider / Model / Effort / Max tokens / 1m）。
 //!
 //! 右侧 `→`/`←` 切换字段值并立即写入内存 + 持久化 + 推送 ACP（无 Enter/Save 步骤）。
-//! Responses provider 例外：provider/model 变更与 contextWindow 走显式草稿，
-//! contextWindow 行用内联数值 editor；两者都以进入时捕获的 revision 原子保存。
-//! 右栏 K/V 行点击 = 聚焦并执行与键盘相同的动作；内联 editor/草稿的行与按钮同样
-//! 按同帧语义行命中。底部“管理 Provider”按钮与 `Ctrl+L` 等价：经 panel_registry
-//! 打开 Login 管理当前 provider，有未保存草稿时只提示保存或取消。冲突后的 `Ctrl+R`
-//! 重读权威配置并离开草稿/editor。单行窗口/model editor 拒绝多行与控制字符粘贴，
-//! 留下可见错误并在修正前阻断保存。
+//! 所有 provider（含 Responses / ChatGPT plan）共用这条路径，Provider / Model 行
+//! 没有订阅专属草稿。contextWindow 是任意正整数，无法用左右键枚举，因此该行用
+//! 内联数值 editor，以进入时捕获的 revision 保存。右栏 K/V 行点击 = 聚焦并执行与
+//! 键盘相同的动作；内联 editor 的行与按钮同样按同帧语义行命中。底部“管理 Provider”
+//! 按钮与 `Ctrl+L` 等价：经 panel_registry 打开 Login 管理当前 provider，有未保存
+//! editor 时只提示保存或取消。冲突后的 `Ctrl+R` 重读权威配置并离开 editor。单行窗口
+//! editor 拒绝多行与控制字符粘贴，留下可见错误并在修正前阻断保存。
 
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
@@ -34,10 +34,10 @@ mod edit;
 mod editor_view;
 mod panel_input;
 mod panel_render;
-mod profile_draft;
+mod window_edit;
 pub(crate) use edit::switch_active_alias;
-use editor_view::{render_profile_draft, render_window_editor};
-use profile_draft::{ProfileDraftState, WindowEditState};
+use editor_view::render_window_editor;
+use window_edit::WindowEditState;
 
 // ---------------------------------------------------------------------------
 // 静态常量
@@ -92,8 +92,6 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let render_version = hooks.use_state(|| 0u64);
     // Responses contextWindow 内联 editor：冻结 alias/provider/model/revision。
     let window_editor = hooks.use_state(|| None::<WindowEditState>);
-    // Responses provider/model 变更草稿：候选先不发布，显式保存才原子落盘。
-    let profile_draft = hooks.use_state(|| None::<ProfileDraftState>);
     // Model 面板编辑宿主配置；active alias 必须来自配置事实源，不能混用会话状态栏
     // 的 SERVICE_SNAPSHOT（会话可能仍为另一档模型）。订阅 snapshot 仅用于会话变化时
     // 触发重绘，面板选择和编辑始终读取 PERI_CONFIG_HANDLE。
@@ -152,7 +150,6 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     right_focus,
                     render_version,
                     window_editor,
-                    profile_draft,
                     right_scroll,
                     viewport,
                 },
@@ -166,7 +163,6 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         right_focus,
         render_version,
         window_editor,
-        profile_draft,
         right_scroll,
     });
 
@@ -270,7 +266,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         })
         .unwrap_or_else(|| ("xhigh".to_string(), 32000, false));
 
-    let (provider_label, model_label, responses_window, plan_output) = PERI_CONFIG_HANDLE
+    let (provider_label, model_label, responses_window) = PERI_CONFIG_HANDLE
         .get()
         .map(|h| {
             let c = h.read();
@@ -301,15 +297,9 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                             .map(|window| window.to_string())
                             .unwrap_or_else(|| "?".to_owned())
                     }),
-                prov.is_some_and(|provider| {
-                    matches!(
-                        &provider.auth,
-                        Some(peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan { .. })
-                    )
-                }),
             )
         })
-        .unwrap_or_else(|| (String::new(), active_alias.clone(), None, false));
+        .unwrap_or_else(|| (String::new(), active_alias.clone(), None));
 
     // ── 响应式右列宽度：窄屏时 VALUE_ALIGN_COL 收缩，避免值被截断 ──
     // 面板宽度取自与鼠标命中同一份 `AreaTracker` 区域（首帧未测量时退守宽屏对齐）。
@@ -322,11 +312,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         provider_label,
         model_label,
         current_effort,
-        if plan_output {
-            i18n::tr("model-panel-server-output-default")
-        } else {
-            current_max_tokens.to_string()
-        },
+        current_max_tokens.to_string(),
         responses_window
             .clone()
             .unwrap_or_else(|| if current_ctx { "on" } else { "off" }.to_string()),
@@ -360,7 +346,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         ]));
     }
 
-    // ── 内联 editor / Responses 档位草稿（替代右栏 K/V）──
+    // ── 内联 contextWindow editor（替代右栏 K/V）──
     let mut hint_text = i18n::tr("panel-model-nav-hint");
     if let Some(editor) = window_editor.read().as_ref() {
         right_lines = render_window_editor(editor, &theme).lines;
@@ -371,13 +357,6 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 fluent_bundle::FluentValue::from(editor.alias.as_str()),
             )],
         );
-    } else if let Some(draft) = profile_draft.read().as_ref() {
-        right_lines = render_profile_draft(draft, &theme).lines;
-        hint_text = if draft.model_editing {
-            i18n::tr("model-panel-model-editing-hint")
-        } else {
-            i18n::tr("model-panel-draft-hint")
-        };
     } else if responses_window.is_some() {
         hint_text = i18n::tr("model-panel-edit-window-manage-hint");
     }

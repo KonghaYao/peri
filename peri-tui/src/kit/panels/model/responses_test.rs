@@ -1,4 +1,4 @@
-//! Responses contextWindow 内联编辑与档位草稿的键盘回归。
+//! Responses contextWindow 内联编辑与共享右栏路径的键盘回归。
 
 use super::*;
 
@@ -74,9 +74,54 @@ fn responses_context_enter_opens_numeric_editor_and_escape_restores() {
     );
 }
 
+/// 切到缺 contextWindow 的 Responses provider 时，先进入窗口编辑且不落盘；
+/// 取消则 provider/model 也不变，避免“先切 provider 再保存失败”的半截状态。
 #[test]
 #[serial]
-fn responses_provider_or_model_change_opens_profile_draft_without_publishing() {
+fn switching_to_responses_without_window_opens_window_editor_atomically() {
+    let guard = ModelPanelGuard::install();
+    let mut cfg = responses_config();
+    cfg.config.profiles.sonnet.provider = "other".into();
+    cfg.config.profiles.sonnet.context_window = None;
+    guard.set_config(cfg);
+    let handle = Arc::clone(&guard.handle);
+    let switched = switched();
+    let before = handle.read().config.clone();
+    let expected_before = before.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    mount_panel_frames(TEST_AREA, 1, move |_, panel| {
+        *panel.right_focus.write() = true;
+        *panel.right_cursor.write() = FIELD_PROVIDER;
+        let result = panel.event(key(KeyCode::Right), TEST_AREA, &switched);
+        let editor = panel
+            .window_editor
+            .read()
+            .as_ref()
+            .map(|editor| (editor.alias.clone(), editor.text.clone()));
+        tx.send((result, editor, before.clone(), handle.read().config.clone()))
+            .unwrap();
+    });
+
+    let (result, editor, before, after) = rx.try_recv().unwrap();
+    assert_eq!(result, EventResult::Consumed);
+    assert_eq!(
+        editor,
+        Some(("sonnet".to_string(), String::new())),
+        "切到缺窗口的 Responses provider 必须先补窗口"
+    );
+    assert_eq!(before, expected_before);
+    assert_eq!(
+        after, expected_before,
+        "editor 打开期间不得落盘 provider/model"
+    );
+}
+
+/// ChatGPT plan / Responses 与其它 provider 共用右栏 K/V 路径：Provider / Model
+/// 行即时编辑，不再出现“档位配置草稿”面板。
+#[test]
+#[serial]
+fn responses_provider_and_model_rows_use_the_shared_inline_path() {
     let guard = ModelPanelGuard::install();
     guard.set_config(responses_config());
     let handle = Arc::clone(&guard.handle);
@@ -84,75 +129,54 @@ fn responses_provider_or_model_change_opens_profile_draft_without_publishing() {
     let captured = Rc::clone(&switched);
     let (tx, rx) = std::sync::mpsc::channel();
 
-    mount_panel_frames(TEST_AREA, 1, move |_, panel| {
+    let buffer = mount_panel_frames(TEST_AREA, 2, move |_, panel| {
         *panel.right_focus.write() = true;
         let before = handle.read().config.clone();
 
         *panel.right_cursor.write() = FIELD_PROVIDER;
-        let provider_result = panel.event(key(KeyCode::Right), TEST_AREA, &captured);
-        let provider_draft = panel
-            .profile_draft
-            .read()
-            .as_ref()
-            .map(|draft| (draft.provider_id.clone(), draft.text.clone()));
-        let _ = panel.event(key(KeyCode::Esc), TEST_AREA, &captured);
+        let provider = panel.event(key(KeyCode::Right), TEST_AREA, &captured);
 
         *panel.right_cursor.write() = FIELD_MODEL;
-        let model_result = panel.event(key(KeyCode::Right), TEST_AREA, &captured);
-        let model_draft = panel
-            .profile_draft
-            .read()
-            .as_ref()
-            .map(|draft| (draft.model.clone(), draft.text.clone()));
-        let after = handle.read().config.clone();
-        let _ = panel.event(key(KeyCode::Esc), TEST_AREA, &captured);
+        let model = panel.event(key(KeyCode::Right), TEST_AREA, &captured);
 
         tx.send((
-            provider_result,
-            provider_draft,
-            model_result,
-            model_draft,
+            provider,
+            model,
+            panel.window_editor.read().is_none(),
             before,
-            after,
-            panel.profile_draft.read().is_none(),
+            handle.read().config.clone(),
         ))
         .unwrap();
     });
 
-    let (provider_result, provider_draft, model_result, model_draft, before, after, closed) =
-        rx.try_recv().unwrap();
-    assert_eq!(provider_result, EventResult::Consumed);
-    assert_eq!(
-        provider_draft,
-        Some(("other".to_string(), String::new())),
-        "更换到非 Responses provider 也必须先进入草稿且不自动继承旧容量"
+    let (provider, model, no_editor, before, after) = rx.try_recv().unwrap();
+    assert_eq!(provider, EventResult::Consumed);
+    assert_eq!(model, EventResult::Consumed);
+    assert!(no_editor, "Provider/Model 行不得打开任何编辑面板");
+    assert_eq!(before, after, "无 authority 时不得发布未落盘的切换");
+
+    let text = buffer_text(&buffer);
+    assert!(
+        !text.contains("档位配置草稿") && !text.contains("Profile draft"),
+        "右栏不得再出现档位配置草稿:\n{text}"
     );
-    assert_eq!(model_result, EventResult::Consumed);
-    assert_eq!(
-        model_draft,
-        Some(("haiku-model".to_string(), String::new())),
-        "模型切换后的容量必须重新填写"
-    );
-    assert_eq!(before, after, "草稿候选不得在保存前发布");
-    assert!(closed, "Esc 放弃草稿");
-    assert!(switched.borrow().is_none(), "草稿期间不得切换 active alias");
 }
 
-#[test]
-#[serial]
-fn plan_max_tokens_keeps_server_default_hint_without_writing() {
+fn max_tokens_after_right(plan_auth: bool) -> (u32, Option<String>) {
     let guard = ModelPanelGuard::install();
     let mut config = responses_config();
-    config.config.providers[0].api_key.clear();
-    config.config.providers[0].auth = Some(
-        peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan {
-            store: "/tmp/peri-model-plan".into(),
-            account: "work".into(),
-            subject: "subject".into(),
-            client_id: "client".into(),
-        },
-    );
-    guard.set_config(config.clone());
+    if plan_auth {
+        config.config.providers[0].api_key.clear();
+        config.config.providers[0].auth = Some(
+            peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan {
+                store: "/tmp/peri-model-plan".into(),
+                account: "work".into(),
+                subject: "subject".into(),
+                client_id: "client".into(),
+            },
+        );
+    }
+    guard.set_config(config);
     let handle = Arc::clone(&guard.handle);
     let (tx, rx) = std::sync::mpsc::channel();
 
@@ -162,7 +186,7 @@ fn plan_max_tokens_keeps_server_default_hint_without_writing() {
         let result = panel.event(key(KeyCode::Right), TEST_AREA, &switched());
         tx.send((
             result,
-            handle.read().clone(),
+            handle.read().config.profiles.sonnet.max_tokens,
             NOTIFICATION
                 .state()
                 .read()
@@ -172,10 +196,28 @@ fn plan_max_tokens_keeps_server_default_hint_without_writing() {
         .unwrap();
     });
 
-    let (result, after, notice) = rx.try_recv().unwrap();
+    let (result, max_tokens, notice) = rx.try_recv().unwrap();
     assert_eq!(result, EventResult::Consumed);
-    assert_eq!(after, config, "plan max_tokens 不得写入或改变配置");
-    assert_eq!(notice, Some(i18n::tr("model-panel-plan-output-hint")));
+    (max_tokens, notice)
+}
+
+#[test]
+#[serial]
+fn plan_provider_max_tokens_matches_generic_responses_provider() {
+    let plan = max_tokens_after_right(true);
+    let plain = max_tokens_after_right(false);
+    assert_eq!(
+        plan, plain,
+        "ChatGPT plan provider 在 Model 面板必须走通用 Max tokens 路径，无订阅特例"
+    );
+    assert!(
+        !plan
+            .1
+            .as_deref()
+            .unwrap_or_default()
+            .contains("model-panel-plan-output-hint"),
+        "不得再出现订阅专属的 Max tokens 提示"
+    );
 }
 
 #[test]
@@ -211,97 +253,30 @@ fn non_responses_context_field_keeps_1m_toggle_path() {
     );
 }
 
-/// 设计 §7.6：Enter 进入任意 model 文本编辑；Enter 确认，Esc 放弃。
 #[test]
 #[serial]
-fn responses_draft_model_enter_edits_arbitrary_text_and_escape_restores() {
+fn plan_provider_renders_profile_max_tokens_like_other_providers() {
     let guard = ModelPanelGuard::install();
-    guard.set_config(responses_config());
-    let handle = Arc::clone(&guard.handle);
-    let switched = switched();
-    let captured = Rc::clone(&switched);
-    let (tx, rx) = std::sync::mpsc::channel();
-
-    mount_panel_frames(TEST_AREA, 1, move |_, panel| {
-        *panel.right_focus.write() = true;
-        *panel.right_cursor.write() = FIELD_MODEL;
-        let _ = panel.event(key(KeyCode::Right), TEST_AREA, &captured);
-        {
-            let mut draft = panel.profile_draft.write();
-            let draft = draft.as_mut().expect("Responses model 行必须进入档位草稿");
-            draft.focus = DraftFocus::Model;
-            draft.model.clear();
-            draft.model_cursor = 0;
-        }
-        let before = handle.read().config.clone();
-
-        let _ = panel.event(key(KeyCode::Enter), TEST_AREA, &captured);
-        let editing = panel
-            .profile_draft
-            .read()
-            .as_ref()
-            .map(|draft| (draft.model_editing, draft.focus));
-        for ch in "gpt-9-custom high".chars() {
-            let _ = panel.event(key(KeyCode::Char(ch)), TEST_AREA, &captured);
-        }
-        let typed = panel
-            .profile_draft
-            .read()
-            .as_ref()
-            .map(|draft| draft.model.clone());
-
-        let _ = panel.event(key(KeyCode::Enter), TEST_AREA, &captured);
-        let confirmed = panel
-            .profile_draft
-            .read()
-            .as_ref()
-            .map(|draft| (draft.model.clone(), draft.model_editing, draft.focus));
-
-        // 再次编辑后 Esc：恢复确认后的文本，不关闭草稿。
-        {
-            let mut draft = panel.profile_draft.write();
-            draft.as_mut().unwrap().focus = DraftFocus::Model;
-        }
-        let _ = panel.event(key(KeyCode::Enter), TEST_AREA, &captured);
-        for ch in "junk".chars() {
-            let _ = panel.event(key(KeyCode::Char(ch)), TEST_AREA, &captured);
-        }
-        let esc = panel.event(key(KeyCode::Esc), TEST_AREA, &captured);
-        let after_esc = panel
-            .profile_draft
-            .read()
-            .as_ref()
-            .map(|draft| (draft.model.clone(), draft.model_editing));
-        let after = handle.read().config.clone();
-
-        tx.send((
-            editing,
-            typed,
-            confirmed,
-            esc,
-            after_esc,
-            panel.profile_draft.read().is_some(),
-            before,
-            after,
-        ))
-        .unwrap();
-    });
-
-    let (editing, typed, confirmed, esc, after_esc, still_open, before, after) =
-        rx.try_recv().unwrap();
-    assert_eq!(editing, Some((true, DraftFocus::Model)));
-    assert_eq!(typed.as_deref(), Some("gpt-9-custom high"));
-    assert_eq!(
-        confirmed,
-        Some(("gpt-9-custom high".to_string(), false, DraftFocus::Save)),
-        "Enter 确认文本后进入 Save，仍与容量一起原子保存"
+    let mut config = responses_config();
+    config.config.providers[0].api_key.clear();
+    config.config.providers[0].auth = Some(
+        peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan {
+            store: "/tmp/peri-model-plan".into(),
+            account: "work".into(),
+            subject: "subject".into(),
+            client_id: "client".into(),
+        },
     );
-    assert_eq!(esc, EventResult::Consumed);
-    assert_eq!(
-        after_esc,
-        Some(("gpt-9-custom high".to_string(), false)),
-        "Esc 放弃本次文本编辑并恢复确认值"
+    guard.set_config(config);
+
+    let buffer = mount_panel_frames(TEST_AREA, 2, |_, _| {});
+    let text = buffer_text(&buffer);
+    assert!(
+        text.contains("32000"),
+        "plan provider 的 Max tokens 必须显示实际 profile 值:\n{text}"
     );
-    assert!(still_open, "Esc 只退出文本编辑，不丢弃整个草稿");
-    assert_eq!(before, after, "文本编辑与放弃都不得发布配置");
+    assert!(
+        !text.contains("Server default") && !text.contains("服务器默认"),
+        "不得为订阅 provider 显示特殊占位:\n{text}"
+    );
 }

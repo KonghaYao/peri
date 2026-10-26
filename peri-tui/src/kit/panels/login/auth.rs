@@ -28,7 +28,9 @@ mod auth_actions;
 
 #[cfg(test)]
 use auth_actions::intercept_dispatch;
-pub(super) use auth_actions::{copy_url, notify_key, notify_logout_outcome, open_browser};
+pub(super) use auth_actions::{
+    copy_url, notify_key, notify_logout_outcome, notify_text, open_browser,
+};
 #[cfg(test)]
 pub(super) use auth_actions::{take_test_dispatches, take_test_url_actions};
 
@@ -224,7 +226,7 @@ pub(super) struct LogoutConfirm {
 /// Outcome of one delivered auth event, consumed by the panel owner.
 #[derive(Clone)]
 pub(super) enum AuthEffect {
-    LoginSucceeded(AccountStatus),
+    LoginSucceeded,
     LoginFailed(AuthFailure),
     LoginCancelled,
     LoggedOut(LogoutOutcome),
@@ -249,7 +251,7 @@ type Inbox = Arc<Mutex<Vec<(OperationTicket<HostConfigAuthScope>, AuthEvent)>>>;
 
 /// Prepared async request; the panel dispatches it so tests can intercept.
 pub(super) struct AuthRequest {
-    ticket: OperationTicket<HostConfigAuthScope>,
+    pub(super) ticket: OperationTicket<HostConfigAuthScope>,
     session: Box<dyn ChatGptAuthSession>,
 }
 
@@ -343,15 +345,7 @@ impl AuthController {
         self.status_reconcile = false;
     }
 
-    /// Whether the verified status disagrees with the draft identity. Saving
-    /// must not silently replace a provider reference with a different account.
-    pub(super) fn identity_conflict(&self, plan: &PlanDraft) -> bool {
-        matches!(
-            &self.view,
-            AuthViewState::SignedIn(status) if plan.identity_mismatch(status)
-        )
-    }
-
+    /// No status result for the frozen target yet.
     pub(super) fn needs_status_query(&self) -> bool {
         matches!(self.view, AuthViewState::Unchecked)
     }
@@ -416,14 +410,22 @@ impl AuthController {
         };
     }
 
-    /// Explicitly adopt the verified identity. Never called automatically by a
-    /// status result.
-    pub(super) fn use_account(&mut self, plan: &mut PlanDraft) -> bool {
+    /// Explicitly adopt the verified identity for the current credentials scope.
+    ///
+    /// Refuses to write an identity read from another store/account: showing a
+    /// stale "signed in" must never leak into the draft being saved.
+    pub(super) fn use_account(
+        &mut self,
+        plan: &mut PlanDraft,
+        current_scope: &HostConfigAuthScope,
+    ) -> bool {
+        if &self.scope != current_scope {
+            return false;
+        }
         let AuthViewState::SignedIn(status) = &self.view else {
             return false;
         };
-        plan.set_identity(status);
-        true
+        plan.set_identity(status)
     }
 
     pub(super) fn detail_focus(&self) -> DetailAction {
@@ -654,7 +656,7 @@ impl AuthController {
                     Ok(status) => {
                         self.login_succeeded = true;
                         self.view = AuthViewState::SignedIn(status.clone());
-                        Some(AuthEffect::LoginSucceeded(status))
+                        Some(AuthEffect::LoginSucceeded)
                     }
                     Err(AuthError::Cancelled) => {
                         self.view = AuthViewState::Failed(AuthFailure::Ended);

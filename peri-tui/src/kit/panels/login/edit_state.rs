@@ -1,12 +1,17 @@
-//! Login 编辑草稿：typed 选择、四档 profile 基线与候选构造。
+//! Login 编辑草稿：typed 选择、provider 候选构造。
 //!
 //! 本模块不读全局句柄、不写磁盘：所有输入从进入表单时捕获的 [`PeriConfig`] 基线
-//! 派生，候选构造与校验都是纯函数，便于在单元测试中覆盖四档隔离、回退归属和
-//! 类型切换边界。落盘与发布由 `config_store` 负责。
+//! 派生，候选构造与校验都是纯函数。Login 只编辑 provider；档位绑定、模型与
+//! contextWindow 由 Model 面板负责，新建 provider 不写任何 profile。落盘与发布由
+//! `config_store` 负责。
 
 use crate::config::ConfigurationRevision;
 use crate::i18n;
-use crate::kit::panels::shared::context_window::parse_context_window;
+
+use super::edit_errors::{
+    profile_model_missing, profile_provider_missing, profile_resolver_error,
+    profile_window_missing, provider_error, remap_hidden_field,
+};
 
 pub(super) use super::edit_types::{LoginError, LoginErrorKind, LoginField};
 pub(super) use super::plan::PlanDraft;
@@ -85,50 +90,6 @@ impl AuthChoice {
     }
 }
 
-/// 单档草稿。四档各持一份，切换 selector 不丢输入。
-#[derive(Debug, Clone)]
-pub(super) struct ProfileDraft {
-    pub(super) alias: &'static str,
-    /// 进入表单时该档的有效归属 provider id（含空引用回退首 provider）。
-    pub(super) baseline_owner: String,
-    /// 进入表单时该档是否有效绑定到正在编辑的 provider。
-    pub(super) bound: bool,
-    /// 是否通过“空 provider → 首 provider”回退绑定（显示用，不改写引用）。
-    pub(super) fallback_bound: bool,
-    /// 新建 provider 时该档是否被显式勾选绑定。
-    pub(super) bind: bool,
-    /// 新建 provider 且基线没有任何 provider 时，空引用会回退到新 provider。
-    pub(super) will_fallback: bool,
-    pub(super) baseline_model: Option<String>,
-    pub(super) baseline_window: Option<u32>,
-    /// 进入表单时该档在基线 provider 映射下的实际模型（用于映射变化重确认）。
-    pub(super) baseline_effective_model: String,
-    pub(super) model: String,
-    pub(super) model_dirty: bool,
-    pub(super) window: String,
-    pub(super) window_dirty: bool,
-}
-
-impl ProfileDraft {
-    /// 本次保存是否会把该档归属到正在编辑/新建的 provider。
-    pub(super) fn will_bind(&self, is_new: bool) -> bool {
-        if is_new {
-            self.bind || self.will_fallback
-        } else {
-            self.bound || self.bind
-        }
-    }
-
-    /// 绑定状态是否只读：既有有效绑定、首 provider 回退绑定不可在 Login 取消。
-    pub(super) fn bind_read_only(&self, is_new: bool) -> bool {
-        if is_new {
-            self.will_fallback
-        } else {
-            self.bound || self.will_fallback
-        }
-    }
-}
-
 /// Login 编辑状态。
 ///
 /// 不实现 `Debug`：草稿可能持有 API key，格式化整份结构会把秘密带进日志/断言。
@@ -136,8 +97,6 @@ impl ProfileDraft {
 pub(super) struct LoginEditState {
     /// 进入编辑时的 provider id；空表示新建。
     pub(super) original_provider_id: String,
-    /// 进入表单时的已保存类型（未知类型为 None）。
-    pub(super) baseline_kind: Option<ProviderKind>,
     /// 当前草稿类型（未知已保存类型为 None，保存会被拒绝）。
     pub(super) kind: Option<ProviderKind>,
     /// 未知类型原值（显示用；不能默认成 Anthropic）。
@@ -151,14 +110,20 @@ pub(super) struct LoginEditState {
     /// provider 的未知扩展字段 / 显示名，编辑时原样保留。
     pub(super) name: Option<String>,
     pub(super) extra: serde_json::Map<String, serde_json::Value>,
-    pub(super) profiles: Vec<ProfileDraft>,
-    pub(super) selected_profile: usize,
-    pub(super) active_alias: String,
     pub(super) baseline: PeriConfig,
     pub(super) expected_revision: Option<ConfigurationRevision>,
     pub(super) inline_error: Option<LoginError>,
     /// 显式类型更改子视图的候选类型（None 表示未打开）。
     pub(super) type_change_candidate: Option<ProviderKind>,
+    /// 凭据目录是否以可编辑恢复行展示（缺失/非法/保存错误时置位；一旦展示不再因
+    /// 当前值变化而消失，避免焦点跳走）。
+    pub(super) plan_store_editable: bool,
+}
+
+/// 凭据目录可用：非空且是绝对路径（与 `PlanDraft::apply` 同一判定）。
+fn plan_store_is_valid(store: &str) -> bool {
+    let store = store.trim();
+    !store.is_empty() && std::path::Path::new(store).is_absolute()
 }
 
 /// 空引用回退首 provider 的有效归属。
@@ -173,72 +138,15 @@ fn effective_owner<'a>(cfg: &'a PeriConfig, profile: &ProfileConfig) -> Option<&
     }
 }
 
-/// provider 映射下的实际模型（fable 空值回退 opus，与 core 一致）。
-fn mapping_model(models: &ProviderModels, alias: &str) -> String {
-    models
-        .get_model(alias)
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-        .unwrap_or("")
-        .to_string()
-}
-
-fn profile_for_alias<'a>(cfg: &'a PeriConfig, alias: &str) -> &'a ProfileConfig {
-    cfg.config
-        .profiles
-        .get(alias)
-        .expect("Profiles always contains the four fixed aliases")
-}
-
-/// 表单的“当前激活档位”：空 active_alias 与 Model 面板一致退守 opus，但不改配置。
-fn form_active_alias(cfg: &PeriConfig) -> String {
-    if cfg.config.active_alias.is_empty() {
-        Profiles::ALL[1].to_string()
-    } else {
-        cfg.config.active_alias.clone()
-    }
-}
-
 impl LoginEditState {
     pub(super) fn is_new(&self) -> bool {
         self.original_provider_id.is_empty()
     }
 
-    /// 新建 provider：只默认勾选进入表单时的 active alias。
+    /// 新建 provider：只构造 provider 草稿，不绑定任何 profile。
     pub(super) fn new_provider(cfg: &PeriConfig, revision: Option<ConfigurationRevision>) -> Self {
-        let active_alias = form_active_alias(cfg);
-        let providers_empty = cfg.config.providers.is_empty();
-        let profiles = Profiles::ALL
-            .iter()
-            .map(|alias| {
-                let profile = profile_for_alias(cfg, alias);
-                let owner = effective_owner(cfg, profile)
-                    .map(|provider| provider.id.clone())
-                    .unwrap_or_default();
-                ProfileDraft {
-                    alias,
-                    baseline_owner: owner,
-                    bound: false,
-                    fallback_bound: false,
-                    bind: *alias == active_alias,
-                    will_fallback: profile.provider.is_empty() && providers_empty,
-                    baseline_model: profile.model.clone(),
-                    baseline_window: profile.context_window,
-                    baseline_effective_model: String::new(),
-                    model: String::new(),
-                    model_dirty: false,
-                    window: String::new(),
-                    window_dirty: false,
-                }
-            })
-            .collect();
-        let selected_profile = Profiles::ALL
-            .iter()
-            .position(|alias| *alias == active_alias)
-            .unwrap_or(0);
         Self {
             original_provider_id: String::new(),
-            baseline_kind: None,
             kind: Some(ProviderKind::Anthropic),
             raw_type: ProviderKind::Anthropic.as_str().to_string(),
             provider_id: String::new(),
@@ -249,13 +157,11 @@ impl LoginEditState {
             models: ProviderModels::default(),
             name: None,
             extra: serde_json::Map::new(),
-            profiles,
-            selected_profile,
-            active_alias,
             baseline: cfg.clone(),
             expected_revision: revision,
             inline_error: None,
             type_change_candidate: None,
+            plan_store_editable: false,
         }
     }
 
@@ -284,55 +190,10 @@ impl LoginEditState {
             ),
             Some(ProviderAuthConfig::ApiKey) | None => (AuthChoice::ApiKey, PlanDraft::default()),
         };
-        let active_alias = form_active_alias(cfg);
-        let profiles = Profiles::ALL
-            .iter()
-            .map(|alias| {
-                let profile = profile_for_alias(cfg, alias);
-                let owner = effective_owner(cfg, profile)
-                    .map(|owner| owner.id.clone())
-                    .unwrap_or_default();
-                let bound = owner == provider.id;
-                let fallback_bound = bound && profile.provider.is_empty();
-                let baseline_effective_model = mapping_model(&provider.models, alias);
-                let model = profile
-                    .model
-                    .as_ref()
-                    .filter(|model| !model.trim().is_empty())
-                    .cloned()
-                    .unwrap_or_else(|| baseline_effective_model.clone());
-                let window = if bound {
-                    profile
-                        .context_window
-                        .map(|window| window.to_string())
-                        .unwrap_or_default()
-                } else {
-                    String::new()
-                };
-                ProfileDraft {
-                    alias,
-                    baseline_owner: owner,
-                    bound,
-                    fallback_bound,
-                    bind: bound,
-                    will_fallback: false,
-                    baseline_model: profile.model.clone(),
-                    baseline_window: profile.context_window,
-                    baseline_effective_model,
-                    model,
-                    model_dirty: false,
-                    window,
-                    window_dirty: false,
-                }
-            })
-            .collect();
-        let selected_profile = Profiles::ALL
-            .iter()
-            .position(|alias| *alias == active_alias)
-            .unwrap_or(0);
+        let plan_store_editable =
+            auth_choice == AuthChoice::ChatGptPlan && !plan_store_is_valid(&plan.store);
         Some(Self {
             original_provider_id: provider.id.clone(),
-            baseline_kind,
             kind: baseline_kind,
             raw_type: provider.provider_type.clone(),
             provider_id: provider.id.clone(),
@@ -343,22 +204,12 @@ impl LoginEditState {
             models: provider.models.clone(),
             name: provider.name.clone(),
             extra: provider.extra.clone(),
-            profiles,
-            selected_profile,
-            active_alias,
             baseline: cfg.clone(),
             expected_revision: revision,
             inline_error: None,
             type_change_candidate: None,
+            plan_store_editable,
         })
-    }
-
-    pub(super) fn selected(&self) -> &ProfileDraft {
-        &self.profiles[self.selected_profile]
-    }
-
-    pub(super) fn selected_mut(&mut self) -> &mut ProfileDraft {
-        &mut self.profiles[self.selected_profile]
     }
 
     pub(super) fn is_responses(&self) -> bool {
@@ -386,11 +237,63 @@ impl LoginEditState {
             return;
         }
         self.auth_choice = self.auth_choice.toggle();
+        self.seed_default_models_from_saved();
+    }
+
+    /// 新建 Responses + ChatGPT plan Provider 时，用已保存的号池映射预填四档默认模型。
+    ///
+    /// 只填空字段，用户手动输入优先保留；不写 profile、不新增绑定。
+    pub(super) fn seed_default_models_from_saved(&mut self) -> bool {
+        if !self.is_new() || !self.is_plan_mode() {
+            return false;
+        }
+        let Some(source) = saved_model_mapping(&self.baseline) else {
+            return false;
+        };
+        let mut changed = false;
+        for (target, candidate) in [
+            (&mut self.models.fable, &source.fable),
+            (&mut self.models.opus, &source.opus),
+            (&mut self.models.sonnet, &source.sonnet),
+            (&mut self.models.haiku, &source.haiku),
+        ] {
+            if target.trim().is_empty() && !candidate.trim().is_empty() {
+                *target = candidate.clone();
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// 新建 plan Provider 且没有任何可复用来源：展示一次性可操作提示。
+    pub(super) fn model_defaults_hint_visible(&self) -> bool {
+        self.is_new()
+            && self.is_plan_mode()
+            && models_are_empty(&self.models)
+            && saved_model_mapping(&self.baseline).is_none()
     }
 
     /// 切换到 plan 模式时补齐宿主默认 store/account（不创建目录）。
+    ///
+    /// 补齐后仍不是绝对路径时强制展示可编辑恢复行；合法默认值不置位。
     pub(super) fn ensure_plan_defaults(&mut self, default_store: Option<PathBuf>) {
         self.plan.ensure_defaults(default_store);
+        if self.is_plan_mode() && !plan_store_is_valid(&self.plan.store) {
+            self.plan_store_editable = true;
+        }
+        self.seed_default_models_from_saved();
+    }
+
+    /// 恢复行是否参与导航/绘制/命中（仅 plan 模式且已置位）。
+    pub(super) fn store_recovery_visible(&self) -> bool {
+        self.is_plan_mode() && self.plan_store_editable
+    }
+
+    /// 保存错误指向凭据目录时强制打开恢复行。
+    pub(super) fn open_store_recovery(&mut self) {
+        if self.is_plan_mode() {
+            self.plan_store_editable = true;
+        }
     }
 
     /// 动态可见字段：导航、绘制、粘贴与错误定位共用。
@@ -400,8 +303,6 @@ impl LoginEditState {
             fields.push(LoginField::AuthMode);
         }
         if self.is_plan_mode() {
-            fields.push(LoginField::PlanStore);
-            fields.push(LoginField::PlanAccount);
             fields.push(LoginField::AuthActions);
         } else {
             fields.push(LoginField::BaseUrl);
@@ -413,33 +314,38 @@ impl LoginEditState {
             LoginField::SonnetModel,
             LoginField::HaikuModel,
         ]);
-        if self.is_responses() {
-            fields.push(LoginField::ProfileSelector);
-            fields.push(LoginField::ProfileBind);
-            if self.selected().will_bind(self.is_new()) {
-                fields.push(LoginField::ProfileModel);
-                fields.push(LoginField::ProfileWindow);
-            }
+        // 凭据目录的恢复行在视觉上属于“高级”区，位于 Confirm 之前。
+        if self.store_recovery_visible() {
+            fields.push(LoginField::PlanStore);
         }
         fields.push(LoginField::Confirm);
         fields
     }
 
-    /// 焦点字段被隐藏（切换类型/绑定后）时收敛到最近的可操作字段。
+    /// 焦点字段被隐藏（切换类型/认证方式后）时收敛到最近的可操作字段。
+    ///
+    /// 隐藏的账号/凭据目录不能留下不可见焦点：回到认证动作组；其余回退 Confirm。
     pub(super) fn ensure_focus_visible(&self, focus: &mut LoginField) {
         let fields = self.visible_fields();
         if fields.contains(focus) {
             return;
         }
-        *focus = fields
-            .get(
-                fields
-                    .iter()
-                    .position(|field| field == &LoginField::Confirm)
-                    .unwrap_or(0),
-            )
-            .copied()
-            .unwrap_or(LoginField::Confirm);
+        *focus = match *focus {
+            LoginField::PlanAccount | LoginField::PlanStore
+                if fields.contains(&LoginField::AuthActions) =>
+            {
+                LoginField::AuthActions
+            }
+            _ => fields
+                .get(
+                    fields
+                        .iter()
+                        .position(|field| field == &LoginField::Confirm)
+                        .unwrap_or(0),
+                )
+                .copied()
+                .unwrap_or(LoginField::Confirm),
+        };
     }
 
     pub(super) fn field_text(&self, field: LoginField) -> String {
@@ -453,13 +359,9 @@ impl LoginEditState {
             LoginField::OpusModel => self.models.opus.clone(),
             LoginField::SonnetModel => self.models.sonnet.clone(),
             LoginField::HaikuModel => self.models.haiku.clone(),
-            LoginField::ProfileModel => self.selected().model.clone(),
-            LoginField::ProfileWindow => self.selected().window.clone(),
             LoginField::ProviderType
             | LoginField::AuthMode
             | LoginField::AuthActions
-            | LoginField::ProfileSelector
-            | LoginField::ProfileBind
             | LoginField::Confirm => String::new(),
         }
     }
@@ -476,35 +378,11 @@ impl LoginEditState {
             LoginField::OpusModel => Some(&mut self.models.opus),
             LoginField::SonnetModel => Some(&mut self.models.sonnet),
             LoginField::HaikuModel => Some(&mut self.models.haiku),
-            LoginField::ProfileModel => Some(&mut self.selected_mut().model),
-            LoginField::ProfileWindow => Some(&mut self.selected_mut().window),
             LoginField::ProviderType
             | LoginField::AuthMode
             | LoginField::AuthActions
-            | LoginField::ProfileSelector
-            | LoginField::ProfileBind
             | LoginField::Confirm => None,
         }
-    }
-
-    /// 标记字段发生过实际编辑（光标移动不算）。
-    pub(super) fn mark_field_edited(&mut self, field: LoginField) {
-        match field {
-            LoginField::ProfileModel => self.selected_mut().model_dirty = true,
-            LoginField::ProfileWindow => self.selected_mut().window_dirty = true,
-            _ => {}
-        }
-    }
-
-    /// provider 默认映射字段（Fable/Opus/Sonnet/Haiku）是否属于当前字段。
-    pub(super) fn is_mapping_field(field: LoginField) -> bool {
-        matches!(
-            field,
-            LoginField::FableModel
-                | LoginField::OpusModel
-                | LoginField::SonnetModel
-                | LoginField::HaikuModel
-        )
     }
 
     /// 新建 provider 的类型选择：三态环。
@@ -518,7 +396,7 @@ impl LoginEditState {
             };
             self.kind = Some(next);
             self.raw_type = next.as_str().to_string();
-            self.sync_profile_models();
+            self.seed_default_models_from_saved();
         }
     }
 
@@ -543,7 +421,7 @@ impl LoginEditState {
         if let Some(candidate) = self.type_change_candidate.take() {
             self.kind = Some(candidate);
             self.raw_type = candidate.as_str().to_string();
-            self.sync_profile_models();
+            self.seed_default_models_from_saved();
         }
     }
 
@@ -551,107 +429,60 @@ impl LoginEditState {
         self.type_change_candidate = None;
     }
 
-    pub(super) fn cycle_profile(&mut self, forward: bool) {
-        let len = self.profiles.len();
-        self.selected_profile = if forward {
-            (self.selected_profile + 1) % len
-        } else {
-            (self.selected_profile + len - 1) % len
-        };
-    }
-
-    /// 绑定复选项：既有绑定与首 provider 回退只读。
-    pub(super) fn toggle_bind(&mut self) {
-        let is_new = self.is_new();
-        if self.selected().bind_read_only(is_new) {
-            return;
+    /// 有效归属为当前 provider 的档位（显式引用或首 provider 回退）。
+    ///
+    /// 仅用于编辑已有 provider 时的 resolver 校验和类型确认提示；新建 provider
+    /// 不读取、不写回任何档位。
+    pub(super) fn bound_aliases(&self) -> Vec<&'static str> {
+        if self.is_new() {
+            return Vec::new();
         }
-        let alias = self.selected().alias;
-        let bind = !self.selected().bind;
-        let mapped = mapping_model(&self.models, alias);
-        let profile = self.selected_mut();
-        profile.bind = bind;
-        if bind && !profile.model_dirty {
-            profile.model = mapped;
-        }
-    }
-
-    /// provider 默认映射变化后同步“未手动编辑且无显式 override”的档位草稿。
-    pub(super) fn sync_profile_models(&mut self) {
-        for profile in &mut self.profiles {
-            if profile.model_dirty {
-                continue;
-            }
-            profile.model = if profile.bound {
-                profile
-                    .baseline_model
-                    .as_ref()
-                    .filter(|model| !model.trim().is_empty())
-                    .cloned()
-                    .unwrap_or_else(|| mapping_model(&self.models, profile.alias))
-            } else {
-                mapping_model(&self.models, profile.alias)
-            };
-        }
-    }
-
-    /// 类型更改影响到的档位（有效归属为当前 provider 的档位）。
-    pub(super) fn affected_aliases(&self) -> Vec<&'static str> {
-        self.profiles
+        Profiles::ALL
             .iter()
-            .filter(|profile| profile.will_bind(self.is_new()))
-            .map(|profile| profile.alias)
+            .copied()
+            .filter(|alias| {
+                self.baseline
+                    .config
+                    .profiles
+                    .get(alias)
+                    .and_then(|profile| effective_owner(&self.baseline, profile))
+                    .is_some_and(|provider| provider.id == self.original_provider_id)
+            })
             .collect()
     }
 
-    /// 渲染用：该档是否因 provider 映射变化需要重新确认容量。
-    pub(super) fn profile_needs_reconfirm(&self, profile: &ProfileDraft) -> bool {
-        if profile.model_dirty
-            && !profile.window_dirty
-            && self.baseline_kind == Some(ProviderKind::OpenAiResponses)
-        {
-            return true;
-        }
-        if !profile.bound
-            || profile.model_dirty
-            || profile.window_dirty
-            || self.baseline_kind != Some(ProviderKind::OpenAiResponses)
-            || profile
-                .baseline_model
-                .as_ref()
-                .is_some_and(|baseline| !baseline.trim().is_empty())
-        {
+    /// 认证状态变化或显式采用后清理陈旧的认证类错误。
+    ///
+    /// 只清 `IdentityRequired`/`AuthReference`：普通字段错误与 revision 冲突
+    /// 仍代表真实输入/权威问题，不能因状态刷新被掩盖。返回是否清除了身份错误。
+    pub(super) fn clear_auth_error(&mut self) -> bool {
+        let Some(error) = self.inline_error.as_ref() else {
             return false;
+        };
+        let cleared_identity = error.kind == LoginErrorKind::IdentityRequired;
+        if matches!(
+            error.kind,
+            LoginErrorKind::IdentityRequired | LoginErrorKind::AuthReference
+        ) {
+            self.inline_error = None;
         }
-        mapping_model(&self.models, profile.alias) != profile.baseline_effective_model
-    }
-
-    /// 渲染用：本次将更新的档位摘要。
-    pub(super) fn profiles_to_update(&self) -> String {
-        if !self.is_responses() {
-            return i18n::tr("login-profile-none");
-        }
-        let aliases = self.affected_aliases();
-        if aliases.is_empty() {
-            i18n::tr("login-profile-none")
-        } else {
-            aliases.join(", ")
-        }
-    }
-
-    fn owned_profiles(&self) -> Vec<&ProfileDraft> {
-        self.profiles
-            .iter()
-            .filter(|profile| profile.will_bind(self.is_new()))
-            .collect()
-    }
-
-    fn type_changed_to_responses(&self) -> bool {
-        self.is_responses() && self.baseline_kind != Some(ProviderKind::OpenAiResponses)
+        cleared_identity
     }
 
     /// 构造保存候选（纯函数，不落盘）。
+    #[cfg(test)]
     pub(super) fn build_candidate(&self) -> Result<PeriConfig, LoginError> {
+        self.build_candidate_with_warnings()
+            .map(|(candidate, _)| candidate)
+    }
+
+    /// 构造保存候选，并返回“原本就不可解析、本次也未修好”的档位。
+    ///
+    /// 这些档位不阻断保存（Login 改不了 contextWindow/绑定），但保存成功后要
+    /// 给一次非阻断提示，避免用户以为它们已经可用。
+    pub(super) fn build_candidate_with_warnings(
+        &self,
+    ) -> Result<(PeriConfig, Vec<&'static str>), LoginError> {
         let provider_id = self.provider_id.trim();
         if provider_id.is_empty() {
             return Err(LoginError::field(
@@ -712,7 +543,7 @@ impl LoginEditState {
 
         let keep_plan = self.is_plan_mode();
         if keep_plan {
-            self.plan.apply(&mut provider)?;
+            self.plan.apply(&mut provider).map_err(remap_hidden_field)?;
         } else if kind == ProviderKind::OpenAiResponses {
             provider.api_key = self.api_key.trim().to_string();
             provider.base_url = self.base_url.trim().to_string();
@@ -745,63 +576,7 @@ impl LoginEditState {
             candidate.config.providers[index] = provider;
             index
         };
-        let candidate_mappings = candidate.config.providers[provider_index].models.clone();
-
-        if self.is_responses() {
-            for profile_draft in self.owned_profiles() {
-                let alias = profile_draft.alias;
-                let model = self.resolved_model(profile_draft, &candidate_mappings);
-                if model.is_empty() {
-                    return Err(LoginError::profile(
-                        LoginField::ProfileModel,
-                        alias,
-                        i18n::tr_args(
-                            "login-error-model-required",
-                            &[("alias".to_string(), fluent_bundle::FluentValue::from(alias))],
-                        ),
-                    ));
-                }
-                let window = self.resolved_window(profile_draft).ok_or_else(|| {
-                    LoginError::profile(
-                        LoginField::ProfileWindow,
-                        alias,
-                        i18n::tr_args(
-                            "login-error-context-window",
-                            &[("alias".to_string(), fluent_bundle::FluentValue::from(alias))],
-                        ),
-                    )
-                })?;
-                if profile_draft.model_dirty && !profile_draft.window_dirty {
-                    return Err(LoginError::profile(
-                        LoginField::ProfileWindow,
-                        alias,
-                        i18n::tr("login-profile-reconfirm"),
-                    ));
-                }
-                if self.needs_window_reconfirmation(profile_draft, &model) {
-                    return Err(LoginError::profile(
-                        LoginField::ProfileWindow,
-                        alias,
-                        i18n::tr("login-profile-reconfirm"),
-                    ));
-                }
-
-                let baseline_profile = profile_for_alias(&self.baseline, alias);
-                let mut profile = baseline_profile.clone();
-                let write_provider = self.write_provider(profile_draft);
-                if write_provider {
-                    profile.provider = provider_id.to_string();
-                }
-                if profile_draft.model_dirty || write_provider {
-                    profile.model = Some(model);
-                }
-                profile.context_window = Some(window);
-                if let Some(target) = candidate.config.profiles.get_mut(alias) {
-                    *target = profile;
-                }
-            }
-        }
-
+        // 档位绑定与参数完全归 Model 面板：Login 只追加/更新 provider。
         // 改名覆盖所有显式引用；空引用继续走首 provider 回退，不写死。
         if !self.is_new() && self.original_provider_id != provider_id {
             for alias in Profiles::ALL {
@@ -814,142 +589,121 @@ impl LoginEditState {
         }
 
         // provider 级 Responses 校验与 resolver 共用同一实现（未绑定任何档位也能校验）。
+        let mut unresolved = Vec::new();
         if self.is_responses() {
             let provider = &candidate.config.providers[provider_index];
             if let Err(error) = peri_config::provider::validate_responses_provider(provider) {
-                return Err(self.provider_error(error));
+                return Err(provider_error(error));
             }
-            // profile 侧继续走 core resolver，保证 UI 与运行端接受同一组配置。
-            for alias in self.affected_aliases() {
-                match peri_config::provider::try_resolve_for_alias(&candidate, alias) {
-                    Ok(Some(_)) => {}
-                    Ok(None) => {
-                        return Err(LoginError::profile(
-                            LoginField::ProfileModel,
-                            alias,
-                            i18n::tr_args(
-                                "login-error-model-required",
-                                &[("alias".to_string(), fluent_bundle::FluentValue::from(alias))],
-                            ),
-                        ));
+            // 新建 provider 不改任何档位，不因未绑定/缺 contextWindow 阻断保存。
+            // 已有 provider 只阻断“本次新弄坏”的绑定：baseline 原本就不解析且
+            // 本次仍未修好的档位由 Model 面板负责，保存后给出非阻断提示。
+            if !self.is_new() {
+                for alias in self.bound_aliases() {
+                    let baseline_ok =
+                        peri_config::provider::try_resolve_for_alias(&self.baseline, alias)
+                            .is_ok_and(|resolved| resolved.is_some());
+                    match peri_config::provider::try_resolve_for_alias(&candidate, alias) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => {
+                            if baseline_ok {
+                                return Err(profile_provider_missing(alias));
+                            }
+                            unresolved.push(alias);
+                        }
+                        Err(error) => {
+                            if baseline_ok {
+                                return Err(resolver_error_for_candidate(&candidate, alias, error));
+                            }
+                            unresolved.push(alias);
+                        }
                     }
-                    Err(error) => return Err(self.profile_resolver_error(alias, error)),
                 }
             }
         }
 
-        Ok(candidate)
-    }
-
-    fn resolved_model(
-        &self,
-        profile: &ProfileDraft,
-        candidate_mappings: &ProviderModels,
-    ) -> String {
-        if profile.model_dirty {
-            return profile.model.trim().to_string();
-        }
-        if profile.bound
-            && let Some(model) = profile
-                .baseline_model
-                .as_ref()
-                .map(|model| model.trim())
-                .filter(|model| !model.is_empty())
-        {
-            return model.to_string();
-        }
-        mapping_model(candidate_mappings, profile.alias)
-    }
-
-    fn resolved_window(&self, profile: &ProfileDraft) -> Option<u32> {
-        if profile.window_dirty {
-            return parse_context_window(&profile.window);
-        }
-        if profile.bound
-            && self.baseline_kind == Some(ProviderKind::OpenAiResponses)
-            && !self.type_changed_to_responses()
-        {
-            return profile.baseline_window.filter(|window| *window > 0);
-        }
-        None
-    }
-
-    /// 本次保存是否把某档显式写到此 provider。
-    fn write_provider(&self, profile: &ProfileDraft) -> bool {
-        if self.is_new() {
-            // 首 provider 回退不写显式引用：新建 provider 默认只显式绑定 active alias。
-            return profile.bind;
-        }
-        if profile.bind && !profile.bound {
-            return true;
-        }
-        // 已有 provider 转为 Responses：把本次需补齐的档位归属显式化。
-        profile.bound && self.type_changed_to_responses()
-    }
-
-    /// 依赖默认映射的档位在映射模型变化后必须重新确认容量。
-    fn needs_window_reconfirmation(&self, profile: &ProfileDraft, model: &str) -> bool {
-        if !profile.bound
-            || profile.model_dirty
-            || profile.window_dirty
-            || self.baseline_kind != Some(ProviderKind::OpenAiResponses)
-            || profile
-                .baseline_model
-                .as_ref()
-                .is_some_and(|baseline| !baseline.trim().is_empty())
-        {
-            return false;
-        }
-        model != profile.baseline_effective_model
-    }
-
-    fn provider_error(&self, error: peri_config::provider::ProviderError) -> LoginError {
-        use peri_config::provider::ProviderError;
-        let field = match error {
-            ProviderError::InvalidEndpoint => LoginField::BaseUrl,
-            ProviderError::InvalidSubscriptionReference => LoginField::PlanStore,
-            ProviderError::InvalidSubscriptionEndpoint => LoginField::AuthActions,
-            ProviderError::MissingApiKey => LoginField::ApiKey,
-            ProviderError::UnknownType
-            | ProviderError::UnexpectedAuth
-            | ProviderError::MissingModelCapacity => LoginField::ProviderType,
-        };
-        LoginError::field(
-            field,
-            i18n::tr_args(
-                "login-error-provider",
-                &[(
-                    "error".to_string(),
-                    fluent_bundle::FluentValue::from(error.to_string().as_str()),
-                )],
-            ),
-        )
-    }
-
-    fn profile_resolver_error(
-        &self,
-        alias: &'static str,
-        error: peri_config::provider::ProviderError,
-    ) -> LoginError {
-        use peri_config::provider::ProviderError;
-        match error {
-            ProviderError::MissingModelCapacity => LoginError::profile(
-                LoginField::ProfileWindow,
-                alias,
-                i18n::tr_args(
-                    "login-error-context-window",
-                    &[("alias".to_string(), fluent_bundle::FluentValue::from(alias))],
-                ),
-            ),
-            other => self.provider_error(other),
-        }
+        Ok((candidate, unresolved))
     }
 }
 
-/// ASCII 十进制正整数，trim 后不接受符号、后缀、内部空格、Unicode 数字或换行。
-#[cfg(test)]
-pub(super) fn parse_window(raw: &str) -> Result<u32, ()> {
-    parse_context_window(raw).ok_or(())
+/// 把 resolver 失败精确分类到“模型缺失（Login 可修）”与“窗口缺失（Model 面板）”。
+fn resolver_error_for_candidate(
+    candidate: &PeriConfig,
+    alias: &'static str,
+    error: peri_config::provider::ProviderError,
+) -> LoginError {
+    use peri_config::provider::ProviderError;
+    match error {
+        ProviderError::MissingModelCapacity => {
+            if alias_has_model(candidate, alias) {
+                profile_window_missing(alias)
+            } else {
+                profile_model_missing(alias)
+            }
+        }
+        other => profile_resolver_error(alias, other),
+    }
+}
+
+fn alias_has_model(cfg: &PeriConfig, alias: &str) -> bool {
+    let Some(profile) = cfg.config.profiles.get(alias) else {
+        return false;
+    };
+    if profile
+        .model
+        .as_deref()
+        .is_some_and(|model| !model.trim().is_empty())
+    {
+        return true;
+    }
+    effective_owner(cfg, profile)
+        .and_then(|provider| provider.models.get_model(alias))
+        .is_some_and(|model| !model.trim().is_empty())
+}
+
+/// 新建 plan Provider 的默认模型来源：先同类 plan Provider，再其他 Responses
+/// Provider；每类选非空档位最多者（同分取配置顺序靠前者）。没有可靠来源返回
+/// `None`，绝不凭空生成模型 ID。
+fn saved_model_mapping(cfg: &PeriConfig) -> Option<&ProviderModels> {
+    let providers = cfg.config.providers.iter();
+    best_model_mapping(providers.clone().filter(|provider| {
+        provider.provider_type == "openai_responses"
+            && matches!(provider.auth, Some(ProviderAuthConfig::ChatGptPlan { .. }))
+    }))
+    .or_else(|| {
+        best_model_mapping(
+            providers.filter(|provider| provider.provider_type == "openai_responses"),
+        )
+    })
+}
+
+fn best_model_mapping<'a>(
+    providers: impl Iterator<Item = &'a ProviderConfig>,
+) -> Option<&'a ProviderModels> {
+    providers
+        .map(|provider| &provider.models)
+        .filter(|models| !models_are_empty(models))
+        .fold(
+            None,
+            |best: Option<&'a ProviderModels>, models| match best {
+                Some(current) if model_count(current) >= model_count(models) => Some(current),
+                _ => Some(models),
+            },
+        )
+}
+
+fn models_are_empty(models: &ProviderModels) -> bool {
+    models.fable.trim().is_empty()
+        && models.opus.trim().is_empty()
+        && models.sonnet.trim().is_empty()
+        && models.haiku.trim().is_empty()
+}
+
+fn model_count(models: &ProviderModels) -> usize {
+    [&models.fable, &models.opus, &models.sonnet, &models.haiku]
+        .iter()
+        .filter(|model| !model.trim().is_empty())
+        .count()
 }
 
 #[cfg(test)]

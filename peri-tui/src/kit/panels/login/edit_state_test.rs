@@ -1,6 +1,8 @@
-//! Login 草稿的纯逻辑回归：三态、四档隔离、回退归属、改名与数值边界。
+//! Login 草稿的纯逻辑回归：provider 候选、改名引用与档位隔离。
 //!
 //! 这些用例不安装全局句柄、不落盘：`build_candidate` 只从进入表单时的基线派生。
+//! Login 不再编辑档位；新建 provider 必须不写任何 profile，编辑已有 provider 必须
+//! 保持既有绑定与参数不变。
 
 use super::*;
 use serde_json::json;
@@ -41,16 +43,14 @@ fn new_responses_edit(cfg: &PeriConfig) -> LoginEditState {
     edit
 }
 
-fn select(edit: &mut LoginEditState, alias: &str) {
-    edit.selected_profile = Profiles::ALL
-        .iter()
-        .position(|candidate| *candidate == alias)
-        .unwrap();
-}
-
-fn set_window(edit: &mut LoginEditState, window: &str) {
-    edit.selected_mut().window = window.into();
-    edit.selected_mut().window_dirty = true;
+fn assert_profiles_unchanged(candidate: &PeriConfig, baseline: &PeriConfig) {
+    for alias in Profiles::ALL {
+        assert_eq!(
+            candidate.config.profiles.get(alias),
+            baseline.config.profiles.get(alias),
+            "{alias} must stay byte-for-byte unchanged"
+        );
+    }
 }
 
 #[test]
@@ -92,13 +92,11 @@ fn new_provider_cycles_three_types_and_edit_requires_explicit_change() {
 }
 
 #[test]
-fn new_responses_provider_binds_only_active_alias_and_keeps_other_profiles() {
+fn new_responses_provider_never_binds_or_rewrites_profiles() {
     let cfg = responses_config();
-    let mut edit = new_responses_edit(&cfg);
-    select(&mut edit, "sonnet");
-    set_window(&mut edit, "64000");
-
+    let edit = new_responses_edit(&cfg);
     let candidate = edit.build_candidate().unwrap();
+
     assert_eq!(candidate.config.active_alias, "sonnet");
     let new_provider = candidate
         .config
@@ -110,45 +108,78 @@ fn new_responses_provider_binds_only_active_alias_and_keeps_other_profiles() {
     assert_eq!(new_provider.auth, Some(ProviderAuthConfig::ApiKey));
     assert_eq!(new_provider.api_key, "new-key");
 
-    let sonnet = candidate.config.profiles.get("sonnet").unwrap();
-    assert_eq!(sonnet.provider, "new-responses");
-    assert_eq!(sonnet.model.as_deref(), Some("new-sonnet"));
-    assert_eq!(sonnet.context_window, Some(64000));
-
-    for alias in ["fable", "opus", "haiku"] {
-        assert_eq!(
-            candidate.config.profiles.get(alias),
-            cfg.config.profiles.get(alias),
-            "{alias} 未被显式勾选时整体保持基线"
-        );
-    }
+    assert_profiles_unchanged(&candidate, &cfg);
+    let mut expected = cfg.clone();
+    expected.config.providers.push(new_provider.clone());
+    assert_eq!(
+        candidate, expected,
+        "candidate must contain the provider addition only"
+    );
+    let value = serde_json::to_value(&candidate).unwrap();
+    assert_eq!(
+        value["config"]["profiles"],
+        serde_json::to_value(&cfg.config.profiles).unwrap(),
+        "disk projection must contain provider changes only"
+    );
 }
 
 #[test]
-fn editing_an_inactive_profile_does_not_switch_active_alias_or_touch_siblings() {
-    let cfg = responses_config();
+fn new_provider_without_any_baseline_provider_is_not_blocked_by_profiles() {
+    let mut cfg = PeriConfig::default();
+    cfg.config.active_alias = "opus".into();
+    let edit = new_responses_edit(&cfg);
+
+    let candidate = edit
+        .build_candidate()
+        .expect("新建 Responses provider 不得因档位未绑定/缺少 contextWindow 被阻断");
+    assert_profiles_unchanged(&candidate, &cfg);
+    assert_eq!(candidate.config.profiles, cfg.config.profiles);
+    assert_eq!(candidate.config.active_alias, "opus");
+}
+
+#[test]
+fn unbound_profiles_keep_first_provider_fallback_after_adding_provider() {
+    let cfg = config(json!({"config": {
+        "active_alias": "opus",
+        "providers": [{"id":"legacy", "type":"anthropic", "apiKey":"legacy-key",
+            "models":{"fable":"legacy-fable", "opus":"legacy-opus", "sonnet":"legacy-sonnet", "haiku":"legacy-haiku"}}],
+        "profiles": {"opus":{}}
+    }}));
+    let edit = new_responses_edit(&cfg);
+    let candidate = edit.build_candidate().unwrap();
+
+    assert_profiles_unchanged(&candidate, &cfg);
+    assert_eq!(
+        candidate.config.profiles.opus.provider, "",
+        "empty reference must stay empty and keep using first-provider fallback"
+    );
+    let resolved = peri_config::provider::try_resolve_for_alias(&candidate, "opus")
+        .expect("fallback resolution must keep working")
+        .expect("legacy provider must remain resolvable");
+    let peri_config::provider::ResolvedProvider::Anthropic { model, .. } = resolved else {
+        panic!("fallback must still select the first Anthropic provider");
+    };
+    assert_eq!(model, "legacy-opus");
+}
+
+#[test]
+fn editing_existing_provider_preserves_every_profile_field() {
+    let mut cfg = responses_config();
+    cfg.config.profiles.sonnet.model = Some("custom-model".into());
+    cfg.config.profiles.sonnet.effort = "low".into();
+    cfg.config.profiles.sonnet.max_tokens = 777;
     let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
-    select(&mut edit, "haiku");
-    set_window(&mut edit, "9999");
+    edit.models.sonnet = "mapped-next".into();
 
     let candidate = edit.build_candidate().unwrap();
-    assert_eq!(candidate.config.active_alias, "sonnet");
-    assert_eq!(candidate.config.profiles.haiku.context_window, Some(9999));
-    assert_eq!(
-        candidate.config.profiles.haiku.effort,
-        cfg.config.profiles.haiku.effort
-    );
-    assert_eq!(
-        candidate.config.profiles.haiku.max_tokens,
-        cfg.config.profiles.haiku.max_tokens
-    );
-    for alias in ["fable", "opus", "sonnet"] {
-        assert_eq!(
-            candidate.config.profiles.get(alias),
-            cfg.config.profiles.get(alias),
-            "{alias} 不应被未选中的编辑覆盖"
-        );
-    }
+    assert_profiles_unchanged(&candidate, &cfg);
+    let provider = candidate
+        .config
+        .providers
+        .iter()
+        .find(|provider| provider.id == "resp")
+        .unwrap();
+    assert_eq!(provider.models.sonnet, "mapped-next");
 }
 
 #[test]
@@ -189,101 +220,151 @@ fn renaming_provider_updates_every_explicit_reference_and_keeps_fallback_empty()
 }
 
 #[test]
-fn first_provider_fallback_profiles_are_recognized_when_switching_to_responses() {
+fn changing_type_to_responses_keeps_existing_bindings_and_windows() {
     let cfg = config(json!({"config": {
         "active_alias": "opus",
         "providers": [{"id":"first", "type":"anthropic", "apiKey":"legacy-key",
             "models":{"fable":"f", "opus":"o", "sonnet":"s", "haiku":"h"}}],
         "profiles": {
-            "fable":{}, "opus":{}, "sonnet":{}, "haiku":{}
+            "fable":{"provider":"first", "contextWindow":1000},
+            "opus":{"provider":"first", "contextWindow":2000},
+            "sonnet":{"provider":"first", "contextWindow":3000},
+            "haiku":{"provider":"first", "contextWindow":4000}
         }
     }}));
     let mut edit = LoginEditState::edit_provider(&cfg, "first", None).unwrap();
-    assert_eq!(
-        edit.affected_aliases(),
-        vec!["fable", "opus", "sonnet", "haiku"]
-    );
+    assert_eq!(edit.bound_aliases(), Profiles::ALL.to_vec());
     edit.kind = Some(ProviderKind::OpenAiResponses);
+    edit.api_key = "new-key".into();
 
-    let error = edit.build_candidate().unwrap_err();
-    assert_eq!(error.field, LoginField::ProfileWindow);
-    assert_eq!(error.alias, Some("fable"), "空引用回退档位必须逐档配置");
-
-    for alias in Profiles::ALL {
-        select(&mut edit, alias);
-        set_window(&mut edit, "1000");
-    }
     let candidate = edit.build_candidate().unwrap();
-    for alias in Profiles::ALL {
-        let profile = candidate.config.profiles.get(alias).unwrap();
-        assert_eq!(profile.provider, "first", "类型转为 Responses 时显式化归属");
-        assert_eq!(profile.context_window, Some(1000));
-        assert!(
-            profile
-                .model
-                .as_deref()
-                .is_some_and(|model| !model.is_empty())
-        );
-    }
+    assert_eq!(
+        candidate.config.providers[0].provider_type,
+        "openai_responses"
+    );
+    assert_profiles_unchanged(&candidate, &cfg);
 }
 
 #[test]
-fn existing_explicit_model_is_not_overwritten_by_provider_mapping() {
+fn switching_to_responses_without_capacity_points_to_model_panel() {
+    let cfg = config(json!({"config": {
+        "active_alias": "opus",
+        "providers": [{"id":"first", "type":"anthropic", "apiKey":"legacy-key",
+            "models":{"fable":"f", "opus":"o", "sonnet":"s", "haiku":"h"}}],
+        "profiles": {"fable":{}, "opus":{}, "sonnet":{}, "haiku":{}}
+    }}));
+    let mut edit = LoginEditState::edit_provider(&cfg, "first", None).unwrap();
+    edit.kind = Some(ProviderKind::OpenAiResponses);
+    edit.api_key = "new-key".into();
+
+    let error = edit.build_candidate().unwrap_err();
+    assert_eq!(error.field, LoginField::ProviderType);
+    assert_eq!(
+        error.message,
+        i18n::tr_args(
+            "login-error-profile-window-missing",
+            &[(
+                "alias".to_string(),
+                fluent_bundle::FluentValue::from("fable")
+            )],
+        )
+    );
+    assert!(
+        error.message.contains("Model panel"),
+        "error must point users at the Model panel: {}",
+        error.message
+    );
+}
+
+#[test]
+fn newly_unresolved_binding_blocks_save_with_precise_model_error() {
+    let cfg = responses_config();
+    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    edit.models.sonnet.clear();
+
+    let error = edit.build_candidate().unwrap_err();
+    assert_eq!(
+        error.field,
+        LoginField::SonnetModel,
+        "模型缺失应指向 Login 的 Sonnet 默认模型字段"
+    );
+    assert_eq!(
+        error.message,
+        i18n::tr_args(
+            "login-error-profile-model-missing",
+            &[(
+                "alias".to_string(),
+                fluent_bundle::FluentValue::from("sonnet")
+            )],
+        )
+    );
+}
+
+#[test]
+fn existing_explicit_profile_model_wins_without_rewrite() {
+    let mut cfg = responses_config();
+    cfg.config.profiles.sonnet.model = Some("explicit-model".into());
+    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    edit.models.sonnet = "mapped-model".into();
+
+    let (candidate, unresolved) = edit.build_candidate_with_warnings().unwrap();
+    assert!(unresolved.is_empty());
+    assert_eq!(
+        candidate.config.profiles.sonnet.model.as_deref(),
+        Some("explicit-model"),
+        "显式 profile.model 优先，Login 不得覆盖"
+    );
+    assert_eq!(
+        candidate.config.providers[0].models.sonnet, "mapped-model",
+        "Provider 默认模型仍要落盘"
+    );
+}
+
+#[test]
+fn fable_empty_follows_opus_mapping_without_rewrite() {
+    let cfg = responses_config();
+    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    edit.models.fable.clear();
+
+    let (candidate, unresolved) = edit.build_candidate_with_warnings().unwrap();
+    assert!(unresolved.is_empty(), "Fable 留空跟随 Opus，不是坏档位");
+    assert_eq!(candidate.config.providers[0].models.fable, "");
+    assert_eq!(candidate.config.providers[0].models.opus, "opus-model");
+    assert_profiles_unchanged(&candidate, &cfg);
+}
+
+#[test]
+fn editing_mapping_does_not_rewrite_profile_models_or_windows() {
     let mut cfg = responses_config();
     cfg.config.profiles.sonnet.model = Some("custom-model".into());
     let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
     edit.models.sonnet = "mapped-model".into();
-    edit.sync_profile_models();
-    select(&mut edit, "sonnet");
 
     let candidate = edit.build_candidate().unwrap();
+    assert_profiles_unchanged(&candidate, &cfg);
+}
+
+#[test]
+fn pre_existing_unresolved_binding_does_not_block_save_without_auto_filling() {
+    let mut cfg = responses_config();
+    cfg.config.profiles.sonnet.context_window = None;
+    let edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+
+    let (candidate, unresolved) = edit.build_candidate_with_warnings().unwrap();
     assert_eq!(
-        candidate.config.profiles.sonnet.model.as_deref(),
-        Some("custom-model"),
-        "未手动编辑的 profile.model 不能被映射变化覆盖"
+        unresolved,
+        vec!["sonnet"],
+        "原本就不可解析的档位只给非阻断警告"
     );
-    assert_eq!(candidate.config.profiles.sonnet.context_window, Some(3000));
-}
-
-#[test]
-fn mapping_change_requires_window_reconfirmation_for_mapping_only_profiles() {
-    let cfg = responses_config();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
-    select(&mut edit, "sonnet");
-    edit.models.sonnet = "sonnet-model-next".into();
-    edit.sync_profile_models();
-
-    let error = edit.build_candidate().unwrap_err();
-    assert_eq!(error.field, LoginField::ProfileWindow);
-    assert_eq!(error.alias, Some("sonnet"));
-    assert_eq!(error.message, i18n::tr("login-profile-reconfirm"));
-
-    set_window(&mut edit, "3000");
-    let candidate = edit.build_candidate().unwrap();
     assert_eq!(
-        candidate.config.profiles.sonnet.model, None,
-        "仅确认容量不强制写出显式 model override"
+        candidate.config.profiles.sonnet.context_window, None,
+        "Login 不得静默补 contextWindow"
     );
-    assert_eq!(candidate.config.profiles.sonnet.context_window, Some(3000));
+    assert_profiles_unchanged(&candidate, &cfg);
 }
 
 #[test]
-fn switching_profile_selector_keeps_per_profile_window_drafts() {
-    let cfg = responses_config();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
-    select(&mut edit, "fable");
-    set_window(&mut edit, "1111");
-    edit.cycle_profile(true);
-    edit.cycle_profile(true);
-    edit.cycle_profile(false);
-    edit.cycle_profile(false);
-    assert_eq!(edit.selected().alias, "fable");
-    assert_eq!(edit.selected().window, "1111");
-    assert!(edit.selected().window_dirty);
-}
-
-#[test]
-fn responses_to_non_responses_clears_auth_but_keeps_profile_capacity() {
+fn responses_to_non_responses_clears_auth_but_keeps_profiles() {
     let mut cfg = responses_config();
     cfg.config.providers[0].api_key.clear();
     cfg.config.providers[0].auth = Some(ProviderAuthConfig::ChatGptPlan {
@@ -304,11 +385,7 @@ fn responses_to_non_responses_clears_auth_but_keeps_profile_capacity() {
         .find(|provider| provider.id == "resp")
         .unwrap();
     assert_eq!(provider.auth, None, "最终 candidate 清除 Responses auth");
-    assert_eq!(
-        candidate.config.profiles.opus.context_window,
-        Some(2000),
-        "未编辑的 profile 容量不批量清空"
-    );
+    assert_profiles_unchanged(&candidate, &cfg);
 
     edit.kind = Some(ProviderKind::OpenAiResponses);
     let restored = edit.build_candidate().unwrap();
@@ -323,6 +400,7 @@ fn responses_to_non_responses_clears_auth_but_keeps_profile_capacity() {
         Some(ProviderAuthConfig::ChatGptPlan { .. })
     ));
     assert!(provider.api_key.is_empty());
+    assert_profiles_unchanged(&restored, &cfg);
 }
 
 #[test]
@@ -339,9 +417,6 @@ fn untouched_existing_plan_reference_survives_editing_other_fields() {
     let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
     edit.provider_id = "resp-renamed".into();
     edit.models.opus = "opus-next".into();
-    edit.sync_profile_models();
-    select(&mut edit, "opus");
-    set_window(&mut edit, "2000");
 
     let candidate = edit.build_candidate().unwrap();
     let provider = candidate
@@ -359,6 +434,26 @@ fn untouched_existing_plan_reference_survives_editing_other_fields() {
         provider.base_url.is_empty(),
         "plan 引用只允许 core 官方 endpoint（空值走默认）"
     );
+    assert_profiles_unchanged_after_rename(&candidate, &cfg, "resp", "resp-renamed");
+}
+
+fn assert_profiles_unchanged_after_rename(
+    candidate: &PeriConfig,
+    baseline: &PeriConfig,
+    old: &str,
+    new: &str,
+) {
+    for alias in Profiles::ALL {
+        let mut expected = baseline.config.profiles.get(alias).unwrap().clone();
+        if expected.provider == old {
+            expected.provider = new.to_string();
+        }
+        assert_eq!(
+            candidate.config.profiles.get(alias),
+            Some(&expected),
+            "{alias} keeps parameters with only the reference renamed"
+        );
+    }
 }
 
 #[test]
@@ -366,8 +461,6 @@ fn api_key_mode_is_fully_written_for_new_responses_provider() {
     let cfg = responses_config();
     let mut edit = new_responses_edit(&cfg);
     edit.base_url = "https://example.test/v1/responses".into();
-    select(&mut edit, "sonnet");
-    set_window(&mut edit, "128000");
 
     let candidate = edit.build_candidate().unwrap();
     let provider = candidate
@@ -393,7 +486,7 @@ fn unknown_saved_type_blocks_save_instead_of_defaulting_to_anthropic() {
 }
 
 #[test]
-fn provider_level_validation_runs_before_any_profile_is_bound() {
+fn provider_level_validation_still_runs_for_new_responses_provider() {
     let cfg = config(json!({"config": {
         "active_alias": "opus",
         "providers": [{"id":"base", "type":"anthropic", "apiKey":"key"}],
@@ -404,88 +497,10 @@ fn provider_level_validation_runs_before_any_profile_is_bound() {
     edit.provider_id = "new".into();
     edit.api_key = "key".into();
     edit.base_url = "not a url".into();
-    edit.profiles
-        .iter_mut()
-        .for_each(|profile| profile.bind = false);
-    edit.selected_profile = 1;
-    set_window(&mut edit, "1000");
 
     let error = edit.build_candidate().unwrap_err();
     assert_eq!(error.field, LoginField::BaseUrl);
     assert!(error.message.contains("baseUrl"));
-}
-
-#[test]
-fn context_window_parser_accepts_only_positive_ascii_integers() {
-    assert_eq!(parse_window("1"), Ok(1));
-    assert_eq!(parse_window(" 42 "), Ok(42));
-    assert_eq!(parse_window(&u32::MAX.to_string()), Ok(u32::MAX));
-    for invalid in [
-        "",
-        "0",
-        "-1",
-        "+1",
-        "1.5",
-        "128k",
-        "1 2",
-        "١٢",
-        "4294967296",
-        "1\n2",
-    ] {
-        assert_eq!(parse_window(invalid), Err(()), "{invalid:?}");
-    }
-}
-
-#[test]
-fn new_provider_without_baseline_providers_requires_all_fallback_profiles() {
-    let mut cfg = PeriConfig::default();
-    cfg.config.active_alias = "opus".into();
-    let mut edit = new_responses_edit(&cfg);
-    assert_eq!(edit.affected_aliases(), Profiles::ALL.to_vec());
-    select(&mut edit, "opus");
-    set_window(&mut edit, "1000");
-
-    let error = edit.build_candidate().unwrap_err();
-    assert_eq!(error.alias, Some("fable"));
-    for alias in Profiles::ALL {
-        select(&mut edit, alias);
-        set_window(&mut edit, "1000");
-    }
-    let candidate = edit.build_candidate().unwrap();
-    for alias in Profiles::ALL {
-        let profile = candidate.config.profiles.get(alias).unwrap();
-        if alias == "opus" {
-            assert_eq!(
-                profile.provider, "new-responses",
-                "进入表单时的 active alias 默认显式绑定新 provider"
-            );
-        } else {
-            assert_eq!(profile.provider, "", "首 provider 回退档不写成显式绑定");
-        }
-        assert_eq!(profile.context_window, Some(1000));
-    }
-    assert_eq!(candidate.config.active_alias, "opus");
-}
-
-#[test]
-fn editing_profile_model_requires_window_reconfirmation() {
-    let cfg = responses_config();
-    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
-    select(&mut edit, "sonnet");
-    edit.selected_mut().model = "sonnet-next".into();
-    edit.selected_mut().model_dirty = true;
-
-    let error = edit.build_candidate().unwrap_err();
-    assert_eq!(error.field, LoginField::ProfileWindow);
-    assert_eq!(error.message, i18n::tr("login-profile-reconfirm"));
-
-    set_window(&mut edit, "3000");
-    let candidate = edit.build_candidate().unwrap();
-    assert_eq!(
-        candidate.config.profiles.sonnet.model.as_deref(),
-        Some("sonnet-next")
-    );
-    assert_eq!(candidate.config.profiles.sonnet.context_window, Some(3000));
 }
 
 #[test]
@@ -498,9 +513,6 @@ fn provider_name_and_unknown_extras_survive_login_edits() {
     let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
     edit.provider_id = "resp-renamed".into();
     edit.models.opus = "opus-next".into();
-    edit.sync_profile_models();
-    select(&mut edit, "opus");
-    set_window(&mut edit, "2000");
 
     let candidate = edit.build_candidate().unwrap();
     let provider = candidate
@@ -515,27 +527,6 @@ fn provider_name_and_unknown_extras_survive_login_edits() {
         Some(&serde_json::json!(true))
     );
     assert_eq!(provider.models.opus, "opus-next");
-}
-
-#[test]
-fn context_window_serializes_only_on_profile_not_provider() {
-    let cfg = responses_config();
-    let mut edit = new_responses_edit(&cfg);
-    select(&mut edit, "sonnet");
-    set_window(&mut edit, "64000");
-    let candidate = edit.build_candidate().unwrap();
-    let value = serde_json::to_value(&candidate).unwrap();
-    assert_eq!(
-        value["config"]["profiles"]["sonnet"]["contextWindow"],
-        serde_json::json!(64000)
-    );
-    let provider = value["config"]["providers"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|provider| provider["id"] == "new-responses")
-        .unwrap();
-    assert!(provider.get("contextWindow").is_none());
 }
 
 #[test]
@@ -557,4 +548,122 @@ fn existing_api_key_modes_preserve_their_auth_shape() {
         candidate.config.providers[0].auth,
         Some(ProviderAuthConfig::ApiKey)
     );
+}
+
+// ── 新建 plan Provider 的默认模型预填 ─────────────────────────────────────────
+
+fn plan_provider(id: &str, models: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "type": "openai_responses",
+        "apiKey": "",
+        "auth": {
+            "kind": "chatgpt_plan",
+            "store": "/tmp/peri-login-edit-state",
+            "account": "work",
+            "subject": "subject",
+            "clientId": "client"
+        },
+        "models": models
+    })
+}
+
+#[test]
+fn new_plan_provider_prefills_models_from_saved_plan_provider() {
+    let cfg = config(json!({"config": {
+        "providers": [
+            plan_provider("saved", json!({
+                "fable": "plan-fable", "opus": "plan-opus",
+                "sonnet": "plan-sonnet", "haiku": "plan-haiku"
+            })),
+            {"id":"plain", "type":"openai_responses", "apiKey":"key",
+             "models":{"fable":"other-fable", "opus":"other-opus",
+                       "sonnet":"other-sonnet", "haiku":"other-haiku"}}
+        ]
+    }}));
+    let mut edit = LoginEditState::new_provider(&cfg, None);
+    edit.kind = Some(ProviderKind::OpenAiResponses);
+    edit.cycle_auth_mode();
+
+    assert_eq!(edit.models.fable, "plan-fable");
+    assert_eq!(edit.models.opus, "plan-opus");
+    assert_eq!(edit.models.sonnet, "plan-sonnet");
+    assert_eq!(edit.models.haiku, "plan-haiku");
+    assert!(!edit.model_defaults_hint_visible());
+}
+
+#[test]
+fn new_plan_provider_falls_back_to_other_responses_mapping() {
+    let cfg = config(json!({"config": {
+        "providers": [
+            {"id":"plain", "type":"openai_responses", "apiKey":"key",
+             "models":{"fable":"plain-fable", "opus":"plain-opus",
+                       "sonnet":"plain-sonnet", "haiku":"plain-haiku"}}
+        ]
+    }}));
+    let mut edit = LoginEditState::new_provider(&cfg, None);
+    edit.kind = Some(ProviderKind::OpenAiResponses);
+    edit.cycle_auth_mode();
+
+    assert_eq!(edit.models.opus, "plain-opus");
+    assert_eq!(edit.models.haiku, "plain-haiku");
+}
+
+#[test]
+fn manual_default_model_survives_auto_fill() {
+    let cfg = config(json!({"config": {
+        "providers": [plan_provider("saved", json!({
+            "fable": "plan-fable", "opus": "plan-opus",
+            "sonnet": "plan-sonnet", "haiku": "plan-haiku"
+        }))]
+    }}));
+    let mut edit = LoginEditState::new_provider(&cfg, None);
+    edit.kind = Some(ProviderKind::OpenAiResponses);
+    edit.models.opus = "manual-opus".into();
+    edit.cycle_auth_mode();
+
+    assert_eq!(edit.models.opus, "manual-opus", "手动输入优先");
+    assert_eq!(edit.models.sonnet, "plan-sonnet", "仅空字段被预填");
+
+    // 再次切换认证方式会重复触发预填，但已填字段（含手动值）不得被覆盖。
+    edit.cycle_auth_mode();
+    edit.cycle_auth_mode();
+    assert_eq!(edit.models.opus, "manual-opus");
+    assert_eq!(edit.models.sonnet, "plan-sonnet");
+}
+
+#[test]
+fn new_plan_provider_without_source_keeps_empty_models_and_shows_hint() {
+    let cfg = PeriConfig::default();
+    let mut edit = LoginEditState::new_provider(&cfg, None);
+    edit.kind = Some(ProviderKind::OpenAiResponses);
+    edit.cycle_auth_mode();
+
+    assert_eq!(edit.models, ProviderModels::default());
+    assert!(
+        edit.model_defaults_hint_visible(),
+        "没有可靠来源时不得伪造模型 ID，必须给出可操作提示"
+    );
+}
+
+#[test]
+fn existing_plan_provider_never_auto_fills_empty_models() {
+    let cfg = config(json!({"config": {
+        "providers": [
+            plan_provider("saved", json!({
+                "fable": "plan-fable", "opus": "plan-opus",
+                "sonnet": "plan-sonnet", "haiku": "plan-haiku"
+            })),
+            plan_provider("target", json!({}))
+        ]
+    }}));
+    let mut edit = LoginEditState::edit_provider(&cfg, "target", None).unwrap();
+    edit.ensure_plan_defaults(Some(PathBuf::from("/tmp/peri-login-edit-state")));
+
+    assert_eq!(
+        edit.models,
+        ProviderModels::default(),
+        "编辑已有 provider 不得静默改写其默认模型"
+    );
+    assert!(!edit.model_defaults_hint_visible());
 }

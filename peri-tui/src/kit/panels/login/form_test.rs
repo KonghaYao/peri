@@ -6,7 +6,7 @@ use super::*;
 
 #[test]
 #[serial]
-fn new_provider_cycles_three_types_and_reveals_profile_fields() {
+fn new_provider_cycles_three_types_without_revealing_profile_fields() {
     let cfg = login_config();
     let mut state = LoginEditState::new_provider(&cfg, None);
     state.provider_id = "new".into();
@@ -19,15 +19,11 @@ fn new_provider_cycles_three_types_and_reveals_profile_fields() {
             let _ = panel.event(key(KeyCode::Right), TEST_AREA);
             let second = panel.edit_state.read().as_ref().map(|state| state.kind);
             let _ = panel.event(key(KeyCode::Right), TEST_AREA);
-            let responses = panel.edit_state.read().as_ref().map(|state| {
-                (
-                    state.kind,
-                    state
-                        .visible_fields()
-                        .contains(&LoginField::ProfileSelector),
-                    state.selected().alias.to_string(),
-                )
-            });
+            let responses = panel
+                .edit_state
+                .read()
+                .as_ref()
+                .map(|state| (state.kind, state.visible_fields()));
             let _ = panel.event(key(KeyCode::Left), TEST_AREA);
             let third = panel.edit_state.read().as_ref().map(|state| state.kind);
             tx.send((second, responses, third)).unwrap();
@@ -38,13 +34,23 @@ fn new_provider_cycles_three_types_and_reveals_profile_fields() {
 
     let (second, responses, third) = rx.try_recv().unwrap();
     assert_eq!(second, Some(Some(ProviderKind::OpenAi)));
+    let (kind, visible) = responses.unwrap();
+    assert_eq!(kind, Some(ProviderKind::OpenAiResponses));
     assert_eq!(
-        responses,
-        Some((
-            Some(ProviderKind::OpenAiResponses),
-            true,
-            "sonnet".to_string()
-        ))
+        visible,
+        vec![
+            LoginField::ProviderType,
+            LoginField::ProviderId,
+            LoginField::AuthMode,
+            LoginField::BaseUrl,
+            LoginField::ApiKey,
+            LoginField::FableModel,
+            LoginField::OpusModel,
+            LoginField::SonnetModel,
+            LoginField::HaikuModel,
+            LoginField::Confirm,
+        ],
+        "Login must not expose any profile binding/window field"
     );
     assert_eq!(third, Some(Some(ProviderKind::OpenAi)));
 }
@@ -143,143 +149,20 @@ fn navigation_skips_hidden_fields_and_paste_on_choices_is_safe() {
     assert_eq!(paste_confirm, EventResult::Ignored);
     assert_eq!(before.as_deref(), Some("new"));
     assert_eq!(after_up, LoginField::HaikuModel);
-    let visible = visible.unwrap();
-    assert!(!visible.contains(&LoginField::ProfileSelector));
-    assert!(!visible.contains(&LoginField::ProfileModel));
-}
-
-#[test]
-#[serial]
-fn profile_selector_changes_only_selector_and_not_active_alias() {
-    let cfg = login_config();
-    let state = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
-    let mut frame = 0usize;
-    let (tx, rx) = std::sync::mpsc::channel();
-    mount_edit_state(
-        state,
-        LoginField::ProfileSelector,
-        2,
-        move |index, panel| {
-            if index == 0 {
-                let _ = panel.event(key(KeyCode::Right), TEST_AREA);
-                let selected = panel.edit_state.read().as_ref().map(|state| {
-                    (
-                        state.selected().alias.to_string(),
-                        state.active_alias.clone(),
-                    )
-                });
-                // 既有绑定不可取消：Space 仅消费。
-                *panel.edit_focus.write() = LoginField::ProfileBind;
-                let _ = panel.event(key(KeyCode::Char(' ')), TEST_AREA);
-                let bind = panel
-                    .edit_state
-                    .read()
-                    .as_ref()
-                    .map(|state| (state.selected().alias.to_string(), state.selected().bind));
-                tx.send((selected, bind)).unwrap();
-            }
-            frame += 1;
-            assert_eq!(frame, index + 1);
-        },
-    );
-
-    let (selected, bind) = rx.try_recv().unwrap();
     assert_eq!(
-        selected,
-        Some(("haiku".to_string(), "sonnet".to_string())),
-        "切换子区档位不得调用 switch_active_alias"
-    );
-    assert_eq!(bind, Some(("haiku".to_string(), true)));
-}
-
-#[test]
-#[serial]
-fn invalid_profile_window_keeps_edit_and_focuses_the_field() {
-    let cfg = login_config();
-    let mut state = LoginEditState::new_provider(&cfg, None);
-    state.kind = Some(ProviderKind::OpenAiResponses);
-    state.provider_id = "new".into();
-    state.api_key = "key".into();
-    state.models.sonnet = "new-sonnet".into();
-    state.selected_mut().window = "0".into();
-    state.selected_mut().window_dirty = true;
-
-    let mut frame = 0usize;
-    let (tx, rx) = std::sync::mpsc::channel();
-    mount_edit_state(state, LoginField::Confirm, 2, move |index, panel| {
-        if index == 0 {
-            let result = panel.event(key(KeyCode::Enter), TEST_AREA);
-            let (mode, focus, error) = {
-                let state = panel.edit_state.read();
-                let state = state.as_ref().unwrap();
-                (
-                    *panel.mode.read(),
-                    *panel.edit_focus.read(),
-                    state
-                        .inline_error
-                        .as_ref()
-                        .map(|error| (error.field, error.alias, error.message.clone())),
-                )
-            };
-            tx.send((result, mode, focus, error)).unwrap();
-        }
-        frame += 1;
-        assert_eq!(frame, index + 1);
-    });
-
-    let (result, mode, focus, error) = rx.try_recv().unwrap();
-    assert_eq!(result, EventResult::Consumed);
-    assert_eq!(mode, LoginPanelMode::Edit, "字段错误不得退出编辑");
-    assert_eq!(focus, LoginField::ProfileWindow);
-    let (field, alias, message) = error.expect("必须给出字段级错误");
-    assert_eq!(field, LoginField::ProfileWindow);
-    assert_eq!(alias, Some("sonnet"));
-    assert!(message.contains("sonnet"), "{message}");
-}
-
-#[test]
-#[serial]
-fn typed_invalid_window_value_keeps_edit_and_focuses_the_field() {
-    let cfg = login_config();
-    let mut state = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
-    state.selected_mut().window.clear();
-    state.selected_mut().window_dirty = true;
-
-    let mut frame = 0usize;
-    let (tx, rx) = std::sync::mpsc::channel();
-    mount_edit_state(state, LoginField::ProfileWindow, 2, move |index, panel| {
-        if index == 0 {
-            for ch in ['1', '2', '8', 'k'] {
-                let _ = panel.event(key(KeyCode::Char(ch)), TEST_AREA);
-            }
-            *panel.edit_focus.write() = LoginField::Confirm;
-            let result = panel.event(key(KeyCode::Enter), TEST_AREA);
-            let (mode, focus, error) = {
-                let state = panel.edit_state.read();
-                let state = state.as_ref().unwrap();
-                (
-                    *panel.mode.read(),
-                    *panel.edit_focus.read(),
-                    state
-                        .inline_error
-                        .as_ref()
-                        .map(|error| (error.field, error.alias)),
-                )
-            };
-            tx.send((result, mode, focus, error)).unwrap();
-        }
-        frame += 1;
-        assert_eq!(frame, index + 1);
-    });
-
-    let (result, mode, focus, error) = rx.try_recv().unwrap();
-    assert_eq!(result, EventResult::Consumed);
-    assert_eq!(mode, LoginPanelMode::Edit, "非法数值不得退出编辑");
-    assert_eq!(focus, LoginField::ProfileWindow);
-    assert_eq!(
-        error,
-        Some((LoginField::ProfileWindow, Some("sonnet"))),
-        "直接输入的非法值必须定位到当前档位"
+        visible.unwrap(),
+        vec![
+            LoginField::ProviderType,
+            LoginField::ProviderId,
+            LoginField::BaseUrl,
+            LoginField::ApiKey,
+            LoginField::FableModel,
+            LoginField::OpusModel,
+            LoginField::SonnetModel,
+            LoginField::HaikuModel,
+            LoginField::Confirm,
+        ],
+        "navigation set must contain provider fields only"
     );
 }
 
@@ -288,25 +171,15 @@ fn clean_paste_clears_the_single_line_error() {
     let cfg = login_config();
     let mut state = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
     let mut cursor = 0;
-    super::edit_handler::handle_login_paste(
-        &mut cursor,
-        &mut state,
-        LoginField::ProfileWindow,
-        "12\n34",
-    );
+    super::edit_handler::handle_login_paste(&mut cursor, &mut state, LoginField::BaseUrl, "12\n34");
     let error = state
         .inline_error
         .as_ref()
         .expect("含换行的粘贴必须给出单行提示");
-    assert_eq!(error.field, LoginField::ProfileWindow);
+    assert_eq!(error.field, LoginField::BaseUrl);
     assert_eq!(error.message, crate::i18n::tr("login-error-single-line"));
 
-    super::edit_handler::handle_login_paste(
-        &mut cursor,
-        &mut state,
-        LoginField::ProfileWindow,
-        "56",
-    );
+    super::edit_handler::handle_login_paste(&mut cursor, &mut state, LoginField::BaseUrl, "56");
     assert!(
         state.inline_error.is_none(),
         "干净粘贴必须清除上一轮单行错误，避免永久阻断保存"
@@ -339,47 +212,36 @@ fn plan_provider_hides_api_key_fields_and_browse_does_not_claim_missing_key() {
 #[test]
 fn focus_row_matches_the_rendered_marker_for_every_visible_field() {
     use super::render::{self, LoginRenderColors};
-    use ratatui_kit::ratatui::style::Color;
 
     let cfg = login_config();
-    let colors = LoginRenderColors {
-        cursor: Color::Reset,
-        dim: Color::Reset,
-        text: Color::Reset,
-        focus: Color::Reset,
-    };
+    let colors = LoginRenderColors::reset();
 
     let mut new_responses = LoginEditState::new_provider(&cfg, None);
     new_responses.kind = Some(ProviderKind::OpenAiResponses);
     new_responses.provider_id = "new".into();
     new_responses.api_key = "key".into();
     new_responses.models.sonnet = "new-sonnet".into();
-    new_responses.selected_mut().window = "1000".into();
-    new_responses.selected_mut().window_dirty = true;
 
     let mut new_openai = LoginEditState::new_provider(&cfg, None);
     new_openai.kind = Some(ProviderKind::OpenAi);
     new_openai.provider_id = "new".into();
     new_openai.api_key = "key".into();
 
-    let mut plan = LoginEditState::edit_provider(&cfg, "plan", None).unwrap();
-    plan.selected_mut().window = "4000".into();
+    let plan = LoginEditState::edit_provider(&cfg, "plan", None).unwrap();
 
     let responses = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
 
     for state in [&new_responses, &new_openai, &plan, &responses] {
         let auth = super::auth::AuthController::new();
         for field in state.visible_fields() {
-            let row = render::focus_row(state, &auth, field);
-            let lines = render::build_edit_lines(state, &auth, field, 0, &colors);
-            let marker_rows: Vec<usize> = lines
+            let width = 100;
+            let row = render::focus_row(state, &auth, field, width);
+            let layout = render::build_edit_layout(state, &auth, field, 0, &colors, width);
+            let marker_rows: Vec<usize> = layout
+                .lines
                 .iter()
                 .enumerate()
-                .filter(|(_, line)| {
-                    line.spans
-                        .first()
-                        .is_some_and(|span| span.content.starts_with('❯'))
-                })
+                .filter(|(_, line)| line.spans.iter().any(|span| span.content.contains('❯')))
                 .map(|(index, _)| index)
                 .collect();
             assert_eq!(
@@ -387,19 +249,21 @@ fn focus_row_matches_the_rendered_marker_for_every_visible_field() {
                 vec![row],
                 "field {field:?} focus row must match the rendered marker"
             );
-            assert_eq!(lines.len(), render::line_count(state, &auth, field));
+            assert_eq!(layout.focus_row, Some(row), "focus_row 必须显式记录");
+            assert_eq!(
+                layout.lines.len(),
+                render::line_count(state, &auth, field, width)
+            );
         }
 
         // 键盘可见字段与鼠标命中字段必须来自同一集合。
-        let layout = render::build_edit_layout(state, &auth, LoginField::ProviderType, 0, &colors);
+        let layout =
+            render::build_edit_layout(state, &auth, LoginField::ProviderType, 0, &colors, 100);
         let visible = state.visible_fields();
         for field in &visible {
             if *field == LoginField::AuthActions {
                 assert!(
-                    layout
-                        .hits
-                        .iter()
-                        .any(|hit| matches!(hit, Some(render::EditHit::AuthAction(_)))),
+                    !layout.action_spans().is_empty(),
                     "AuthActions must have per-action mouse hit regions"
                 );
                 continue;
@@ -425,6 +289,99 @@ fn focus_row_matches_the_rendered_marker_for_every_visible_field() {
 
 #[test]
 #[serial]
+fn tab_order_skips_removed_profile_fields_and_leaves_no_blank_gap() {
+    use super::render::{self, LoginRenderColors};
+
+    let cfg = login_config();
+    let state = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    let expected = state.visible_fields();
+    assert_eq!(
+        expected,
+        vec![
+            LoginField::ProviderType,
+            LoginField::ProviderId,
+            LoginField::AuthMode,
+            LoginField::BaseUrl,
+            LoginField::ApiKey,
+            LoginField::FableModel,
+            LoginField::OpusModel,
+            LoginField::SonnetModel,
+            LoginField::HaikuModel,
+            LoginField::Confirm,
+        ],
+        "Responses Edit must expose provider fields only"
+    );
+
+    let auth = super::auth::AuthController::new();
+    let layout = render::build_edit_layout(
+        &state,
+        &auth,
+        LoginField::ProviderType,
+        0,
+        &LoginRenderColors::reset(),
+        100,
+    );
+    let text: String = layout
+        .lines
+        .iter()
+        .flat_map(|line| line.spans.iter())
+        .map(|span| span.content.as_ref())
+        .collect();
+    for removed in [
+        "档位配置",
+        "编辑档位",
+        "绑定此 Provider",
+        "此档模型",
+        "上下文窗口",
+    ] {
+        assert!(
+            !text.contains(removed),
+            "removed UI leaked: {removed}\n{text}"
+        );
+    }
+    let mut blank_run = 0usize;
+    for (row, line) in layout.lines.iter().enumerate() {
+        let line_text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        if line_text.trim().is_empty() {
+            blank_run += 1;
+            assert!(blank_run <= 1, "consecutive blank rows at {row}");
+        } else {
+            blank_run = 0;
+        }
+    }
+
+    let mut frame = 0usize;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let expected_for_closure = expected.clone();
+    mount_edit_state(state, LoginField::ProviderType, 2, move |index, panel| {
+        if index == 0 {
+            let mut seen = vec![*panel.edit_focus.read()];
+            for _ in 1..expected_for_closure.len() {
+                let _ = panel.event(key(KeyCode::Tab), TEST_AREA);
+                seen.push(*panel.edit_focus.read());
+            }
+            let _ = panel.event(key(KeyCode::Tab), TEST_AREA);
+            tx.send((seen, *panel.edit_focus.read())).unwrap();
+        }
+        frame += 1;
+        assert_eq!(frame, index + 1);
+    });
+
+    let (seen, wrapped) = rx.try_recv().unwrap();
+    assert_eq!(seen, expected, "Tab order must equal the visible field set");
+    assert_eq!(
+        wrapped,
+        LoginField::ProviderType,
+        "Tab wraps to the first field"
+    );
+}
+
+#[test]
+#[serial]
 fn keyboard_focus_scrolls_into_the_short_panel_viewport() {
     let cfg = login_config();
     let mut state = LoginEditState::new_provider(&cfg, None);
@@ -432,8 +389,6 @@ fn keyboard_focus_scrolls_into_the_short_panel_viewport() {
     state.provider_id = "new".into();
     state.api_key = "key".into();
     state.models.sonnet = "new-sonnet".into();
-    state.selected_mut().window = "1000".into();
-    state.selected_mut().window_dirty = true;
 
     let short = Rect {
         x: 0,
@@ -455,8 +410,8 @@ fn keyboard_focus_scrolls_into_the_short_panel_viewport() {
             let offset = panel.sv.read().offset().y as usize;
             let state = panel.edit_state.read().clone().unwrap();
             let auth = panel.auth.read();
-            let row = super::render::focus_row(&state, &auth, focus);
-            let total = super::render::line_count(&state, &auth, focus);
+            let row = super::render::focus_row(&state, &auth, focus, short.width);
+            let total = super::render::line_count(&state, &auth, focus, short.width);
             let height = short.height.saturating_sub(2) as usize;
             tx.send((focus, offset, row, total, height)).unwrap();
         }

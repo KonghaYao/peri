@@ -48,8 +48,12 @@ fn mouse_click_focuses_plan_text_fields() {
         .filter(|field| field.is_text())
         .collect();
     assert!(
-        fields.contains(&LoginField::PlanStore) && fields.contains(&LoginField::PlanAccount),
-        "plan 模式的动态字段必须纳入覆盖"
+        !fields.contains(&LoginField::PlanAccount),
+        "账号引用不再渲染，也不能进入导航"
+    );
+    assert!(
+        !fields.contains(&LoginField::PlanStore),
+        "合法凭据目录默认只读，不进入导航"
     );
     let mut frame = 0usize;
     let (tx, rx) = std::sync::mpsc::channel();
@@ -72,6 +76,38 @@ fn mouse_click_focuses_plan_text_fields() {
         assert_eq!(result, EventResult::Consumed, "字段 {field:?} 点击必须消费");
         assert_eq!(focus, field, "点击 plan 文本行必须聚焦该字段");
     }
+}
+
+#[test]
+#[serial]
+fn mouse_click_focuses_the_recovery_store_row() {
+    let cfg = login_config();
+    let mut state = LoginEditState::edit_provider(&cfg, "plan", None).unwrap();
+    state.plan_store_editable = true;
+    assert!(
+        state.visible_fields().contains(&LoginField::PlanStore),
+        "恢复态必须纳入导航"
+    );
+    let mut frame = 0usize;
+    let (tx, rx) = std::sync::mpsc::channel();
+    mount_edit_state(state, LoginField::AuthActions, 1, move |index, panel| {
+        if index == 0 {
+            let area = tall_area();
+            let row = edit_hit_row(
+                &panel,
+                super::render::EditHit::Field(LoginField::PlanStore),
+                area,
+            );
+            let result = panel.event(click_at(row, 3), area);
+            tx.send((result, *panel.edit_focus.read())).unwrap();
+        }
+        frame += 1;
+        assert_eq!(frame, index + 1);
+    });
+
+    let (result, focus) = rx.try_recv().unwrap();
+    assert_eq!(result, EventResult::Consumed);
+    assert_eq!(focus, LoginField::PlanStore, "恢复行点击必须聚焦凭据目录");
 }
 
 #[test]
@@ -151,56 +187,6 @@ fn mouse_click_choices_match_keyboard_actions() {
                     )
                 });
                 assert_eq!(mouse_auth, key_auth, "认证方式点击与 Enter 必须同一语义");
-
-                // 档位选择器：键盘 Space 与鼠标点击都前移一档。
-                reset(&panel);
-                *panel.edit_focus.write() = LoginField::ProfileSelector;
-                let row = edit_hit_row(
-                    &panel,
-                    super::render::EditHit::Field(LoginField::ProfileSelector),
-                    area,
-                );
-                let _ = panel.event(click_at(row, 3), area);
-                let mouse_profile =
-                    panel.edit_state.read().as_ref().map(|state| {
-                        (state.selected().alias.to_string(), *panel.edit_focus.read())
-                    });
-                reset(&panel);
-                *panel.edit_focus.write() = LoginField::ProfileSelector;
-                let _ = panel.event(key(KeyCode::Char(' ')), area);
-                let key_profile =
-                    panel.edit_state.read().as_ref().map(|state| {
-                        (state.selected().alias.to_string(), *panel.edit_focus.read())
-                    });
-                assert_eq!(mouse_profile, key_profile, "档位点击与 Space 必须同一语义");
-
-                // 绑定复选框：点击与 Space 都只切换当前档。
-                reset(&panel);
-                *panel.edit_focus.write() = LoginField::ProfileBind;
-                let row = edit_hit_row(
-                    &panel,
-                    super::render::EditHit::Field(LoginField::ProfileBind),
-                    area,
-                );
-                let _ = panel.event(click_at(row, 3), area);
-                let mouse_bind = panel.edit_state.read().as_ref().map(|state| {
-                    (
-                        state.selected().alias.to_string(),
-                        state.selected().bind,
-                        *panel.edit_focus.read(),
-                    )
-                });
-                reset(&panel);
-                *panel.edit_focus.write() = LoginField::ProfileBind;
-                let _ = panel.event(key(KeyCode::Char(' ')), area);
-                let key_bind = panel.edit_state.read().as_ref().map(|state| {
-                    (
-                        state.selected().alias.to_string(),
-                        state.selected().bind,
-                        *panel.edit_focus.read(),
-                    )
-                });
-                assert_eq!(mouse_bind, key_bind, "绑定点击与 Space 必须同一语义");
 
                 // Confirm：鼠标点击与 Enter 走同一保存校验（无 authority 时同样保留草稿）。
                 reset(&panel);
@@ -325,8 +311,6 @@ fn mouse_click_blank_border_and_scrollbar_leave_edit_state_unchanged() {
                     state.kind,
                     state.provider_id.clone(),
                     state.auth_choice,
-                    state.selected().alias.to_string(),
-                    state.selected().bind,
                     state
                         .inline_error
                         .as_ref()
@@ -334,7 +318,7 @@ fn mouse_click_blank_border_and_scrollbar_leave_edit_state_unchanged() {
                 )
             };
             let before = snapshot(&panel);
-            let layout = edit_layout(&panel);
+            let layout = edit_layout(&panel, area.width);
             let blank_row = layout
                 .hits
                 .iter()
@@ -379,8 +363,11 @@ fn mouse_click_after_scroll_hits_the_visible_semantic_row() {
     let (tx, rx) = std::sync::mpsc::channel();
     mount_edit_state(state, LoginField::ProviderType, 1, move |index, panel| {
         if index == 0 {
-            let row =
-                hit_semantic_row(&panel, super::render::EditHit::Field(LoginField::OpusModel));
+            let row = hit_semantic_row(
+                &panel,
+                super::render::EditHit::Field(LoginField::OpusModel),
+                area.width,
+            );
             let offset = row.saturating_sub(1) as u16;
             panel.sv.write().set_offset(Position::new(0, offset));
             let screen_row = area.y + 1 + row as u16 - offset;
@@ -407,12 +394,11 @@ fn mouse_click_auth_action_executes_selected_action() {
     let (tx, rx) = std::sync::mpsc::channel();
     mount_edit_state(state, LoginField::AuthActions, 1, move |index, panel| {
         if index == 0 {
-            let row = edit_hit_row(
-                &panel,
-                super::render::EditHit::AuthAction(super::auth::AuthAction::Logout),
-                area,
-            );
-            let result = panel.event(click_at(row, 3), area);
+            let (semantic_row, start_column) =
+                action_hit_span(&panel, super::auth::AuthAction::Logout, area.width);
+            let offset = panel.sv.read().offset().y;
+            let row = area.y + 1 + semantic_row as u16 - offset;
+            let result = panel.event(click_at(row, area.x + start_column as u16 + 1), area);
             tx.send((
                 result,
                 *panel.mode.read(),

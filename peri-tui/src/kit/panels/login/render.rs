@@ -4,6 +4,7 @@ use fluent_bundle::FluentValue;
 use super::auth::{AuthAction, AuthController};
 use super::auth_render;
 use super::edit_state::{LoginEditState, LoginField, ProviderKind};
+use super::edit_view::{self, EditViewMetrics};
 use ratatui_kit::ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -18,10 +19,23 @@ pub(super) enum EditHit {
     TypeChangeConfirm,
 }
 
+/// 单行动作区里的一个动作命中区间（内容列坐标；`end` 不含）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ActionHitSpan {
+    pub(super) row: usize,
+    pub(super) start: usize,
+    pub(super) end: usize,
+    pub(super) action: AuthAction,
+}
+
 /// Edit / 类型确认视图的行与逐行命中区（`hits` 与 `lines` 等长）。
 pub(super) struct EditLayout {
     pub(super) lines: Vec<Line<'static>>,
     pub(super) hits: Vec<Option<EditHit>>,
+    /// 单行动作区的列区间命中（同一行含多个动作）。
+    pub(super) action_hits: Vec<ActionHitSpan>,
+    /// 焦点字段的语义行（0-based）。显式记录，不再扫描文本里的 `❯`。
+    pub(super) focus_row: Option<usize>,
 }
 
 impl EditLayout {
@@ -29,6 +43,8 @@ impl EditLayout {
         Self {
             lines: Vec::new(),
             hits: Vec::new(),
+            action_hits: Vec::new(),
+            focus_row: None,
         }
     }
 
@@ -37,22 +53,116 @@ impl EditLayout {
         self.hits.push(None);
     }
 
+    pub(super) fn push_all(&mut self, lines: Vec<Line<'static>>) {
+        for line in lines {
+            self.push(line);
+        }
+    }
+
     pub(super) fn push_hit(&mut self, line: Line<'static>, hit: EditHit) {
         self.lines.push(line);
         self.hits.push(Some(hit));
     }
 
-    pub(super) fn push_field(&mut self, field: LoginField, line: Line<'static>) {
-        self.push_hit(line, EditHit::Field(field));
+    /// 带焦点标记的命中行：`focused` 时把该行记为焦点行（只取第一处）。
+    pub(super) fn push_hit_flagged(&mut self, line: Line<'static>, hit: EditHit, focused: bool) {
+        if focused && self.focus_row.is_none() {
+            self.focus_row = Some(self.lines.len());
+        }
+        self.push_hit(line, hit);
+    }
+
+    /// 一个字段的多行（窄屏标签/值两行，或字段 + 锁定提示）：共用同一命中。
+    pub(super) fn push_field_lines(
+        &mut self,
+        field: LoginField,
+        lines: Vec<Line<'static>>,
+        focused: bool,
+    ) {
+        for (index, line) in lines.into_iter().enumerate() {
+            self.push_hit_flagged(line, EditHit::Field(field), focused && index == 0);
+        }
+    }
+
+    /// 单行动作区：所有动作在同一行，按列区间区分目标；行本身没有字段命中。
+    pub(super) fn push_action_row(
+        &mut self,
+        line: Line<'static>,
+        spans: &[edit_view::ActionSpan],
+        actions: &[AuthAction],
+        focused: bool,
+    ) {
+        let row = self.lines.len();
+        if focused {
+            self.mark_focus_row(row);
+        }
+        for span in spans {
+            if let Some(action) = actions.get(span.index) {
+                self.action_hits.push(ActionHitSpan {
+                    row,
+                    start: span.start,
+                    end: span.end,
+                    action: *action,
+                });
+            }
+        }
+        self.push(line);
+    }
+
+    /// 焦点没有可命中的行时（如认证进行中暂无动作），把状态区作为滚动锚点。
+    pub(super) fn mark_focus_row(&mut self, row: usize) {
+        if self.focus_row.is_none() {
+            self.focus_row = Some(row);
+        }
     }
 
     fn extend(&mut self, other: EditLayout) {
+        let base = self.lines.len();
+        if self.focus_row.is_none()
+            && let Some(row) = other.focus_row
+        {
+            self.focus_row = Some(base + row);
+        }
+        for mut span in other.action_hits {
+            span.row += base;
+            self.action_hits.push(span);
+        }
         self.lines.extend(other.lines);
         self.hits.extend(other.hits);
     }
 
-    fn hit_at(&self, row: usize) -> Option<EditHit> {
+    /// 行 + 内容列 → 语义目标。动作行先按列区间命中，其它行沿用整行命中。
+    fn hit_at(&self, row: usize, column: Option<usize>) -> Option<EditHit> {
+        if let Some(column) = column
+            && let Some(span) = self
+                .action_hits
+                .iter()
+                .find(|span| span.row == row && column >= span.start && column < span.end)
+        {
+            return Some(EditHit::AuthAction(span.action));
+        }
         self.hits.get(row).copied().flatten()
+    }
+
+    /// 测试/滚动用：某语义目标所在的语义行。
+    #[cfg(test)]
+    pub(super) fn semantic_row(&self, hit: EditHit) -> Option<usize> {
+        if let EditHit::AuthAction(action) = hit {
+            return self
+                .action_hits
+                .iter()
+                .find(|span| span.action == action)
+                .map(|span| span.row);
+        }
+        self.hits
+            .iter()
+            .position(|candidate| *candidate == Some(hit))
+    }
+
+    /// 测试用：动作区的列区间。
+    #[cfg(test)]
+    pub(super) fn action_spans(&self) -> &[ActionHitSpan] {
+        &self.action_hits
     }
 }
 
@@ -64,9 +174,38 @@ pub(super) struct LoginRenderColors {
     pub(super) dim: Color,
     pub(super) text: Color,
     pub(super) focus: Color,
+    pub(super) muted: Color,
+    pub(super) warning: Color,
+    pub(super) error: Color,
 }
 
 impl LoginRenderColors {
+    /// 从主题语义令牌派生；分区标题/警告/错误各自有独立角色。
+    pub(super) fn from_semantic(semantic: &peri_theme::semantic::SemanticTokens) -> Self {
+        Self {
+            cursor: semantic.status.warning,
+            dim: semantic.text.dim,
+            text: semantic.text.primary,
+            focus: semantic.status.success,
+            muted: semantic.text.muted,
+            warning: semantic.status.warning,
+            error: semantic.status.error,
+        }
+    }
+
+    /// 命中/行数推导只关心几何，颜色不参与。
+    pub(super) fn reset() -> Self {
+        Self {
+            cursor: Color::Reset,
+            dim: Color::Reset,
+            text: Color::Reset,
+            focus: Color::Reset,
+            muted: Color::Reset,
+            warning: Color::Reset,
+            error: Color::Reset,
+        }
+    }
+
     pub(super) fn focused_label(&self) -> Style {
         Style::default().fg(self.focus).add_modifier(Modifier::BOLD)
     }
@@ -83,200 +222,212 @@ pub(super) fn build_edit_layout(
     focus: LoginField,
     cursor_pos: usize,
     colors: &LoginRenderColors,
+    width: u16,
 ) -> EditLayout {
+    let metrics = EditViewMetrics::for_width(width);
     let mut out = EditLayout::new();
-
     let is_new = es.is_new();
-    let title_key = if is_new {
-        "login-panel-title-new"
-    } else {
-        "login-panel-title-edit"
-    };
-    let title_text = if is_new {
-        format!("  {}", i18n::tr(title_key))
-    } else {
-        format!("  {}: {}", i18n::tr(title_key), es.original_provider_id)
-    };
-    out.push(Line::from(vec![Span::styled(
-        title_text,
-        Style::default().fg(colors.focus).bold(),
-    )]));
-    out.push(Line::from(""));
 
-    // ── 类型（新建：方向键循环；已有：Enter 显式更改）──
-    out.push_field(LoginField::ProviderType, type_line(es, focus, colors));
-    if !is_new {
-        out.push_field(
-            LoginField::ProviderType,
-            Line::from(vec![Span::styled(
-                format!("    {}", i18n::tr("login-type-locked-hint")),
-                colors.label(),
-            )]),
-        );
-    }
+    // ── 页面标题 ──
+    let title = if is_new {
+        i18n::tr("login-panel-title-new")
+    } else {
+        format!(
+            "{}: {}",
+            i18n::tr("login-panel-title-edit"),
+            es.original_provider_id
+        )
+    };
+    out.push(edit_view::title_line(&metrics, &title, colors));
+    out.push(edit_view::blank_line());
 
-    // ── Provider ID ──
-    out.push_field(
+    // ── 基本信息 ──
+    out.push(edit_view::section_line(
+        &metrics,
+        &i18n::tr("login-section-basic"),
+        None,
+        colors,
+    ));
+    out.push_field_lines(
+        LoginField::ProviderType,
+        type_lines(es, focus, colors, &metrics),
+        focus == LoginField::ProviderType,
+    );
+    out.push_field_lines(
         LoginField::ProviderId,
-        render_login_edit_line(
-            i18n::tr(LoginField::ProviderId.i18n_key()),
-            es.provider_id.clone(),
-            focus == LoginField::ProviderId,
+        edit_view::text_field_lines(
+            &metrics,
+            &i18n::tr(LoginField::ProviderId.i18n_key()),
+            &es.provider_id,
             cursor_pos,
-            colors.cursor,
-            colors.dim,
-            colors.text,
-            colors.focus,
+            focus == LoginField::ProviderId,
+            colors,
         ),
+        focus == LoginField::ProviderId,
     );
 
-    // ── 认证方式 / plan 配置 ──
+    // ── 认证 ──
+    out.push(edit_view::blank_line());
+    out.push(edit_view::section_line(
+        &metrics,
+        &i18n::tr("login-section-auth"),
+        None,
+        colors,
+    ));
     if es.is_responses() {
-        let mut auth_layout = auth_render::plan_auth_layout(es, auth, focus, cursor_pos, colors);
+        out.extend(auth_render::plan_auth_layout(
+            es, auth, focus, colors, &metrics,
+        ));
         // API key 模式字段（plan 模式由认证区接管，避免残留引用）。
         if !es.is_plan_mode() {
             for field in [LoginField::BaseUrl, LoginField::ApiKey] {
-                let value = if field == LoginField::ApiKey {
-                    mask_api_key_display(&es.api_key)
-                } else {
-                    es.base_url.clone()
-                };
-                auth_layout.push_field(
+                out.push_field_lines(
                     field,
-                    render_login_edit_line(
-                        i18n::tr(field.i18n_key()),
-                        value,
-                        field == focus,
+                    edit_view::text_field_lines(
+                        &metrics,
+                        &i18n::tr(field.i18n_key()),
+                        &field_display_value(es, field),
                         cursor_pos,
-                        colors.cursor,
-                        colors.dim,
-                        colors.text,
-                        colors.focus,
+                        field == focus,
+                        colors,
                     ),
+                    field == focus,
                 );
             }
         }
-        out.extend(auth_layout);
     } else {
         // 非 Responses provider 没有认证方式选择，保留只读说明。
-        out.push(Line::from(vec![
-            Span::styled("  ", Style::default()),
-            Span::styled(
-                format!("{}: ", i18n::tr("login-field-auth-mode")),
-                colors.label(),
-            ),
-            Span::styled(
-                i18n::tr("login-auth-api-key"),
-                Style::default().fg(colors.text).bold(),
-            ),
-        ]));
+        out.push_all(edit_view::readonly_kv_lines(
+            &metrics,
+            &i18n::tr("login-field-auth-mode"),
+            &i18n::tr("login-auth-api-key"),
+            None,
+            colors,
+        ));
         for field in [LoginField::BaseUrl, LoginField::ApiKey] {
-            let value = if field == LoginField::ApiKey {
-                mask_api_key_display(&es.api_key)
-            } else {
-                es.base_url.clone()
-            };
-            out.push_field(
+            out.push_field_lines(
                 field,
-                render_login_edit_line(
-                    i18n::tr(field.i18n_key()),
-                    value,
-                    field == focus,
+                edit_view::text_field_lines(
+                    &metrics,
+                    &i18n::tr(field.i18n_key()),
+                    &field_display_value(es, field),
                     cursor_pos,
-                    colors.cursor,
-                    colors.dim,
-                    colors.text,
-                    colors.focus,
+                    field == focus,
+                    colors,
                 ),
+                field == focus,
             );
         }
     }
 
-    // ── 默认模型映射 ──
-    out.push(Line::from(""));
-    out.push(Line::from(Span::styled(
-        i18n::tr("login-model-label"),
-        Style::default().fg(colors.dim).add_modifier(Modifier::BOLD),
-    )));
+    // ── 默认模型 ──
+    out.push(edit_view::blank_line());
+    out.push(edit_view::section_line(
+        &metrics,
+        &i18n::tr("login-model-label"),
+        None,
+        colors,
+    ));
     for field in [
         LoginField::FableModel,
         LoginField::OpusModel,
         LoginField::SonnetModel,
         LoginField::HaikuModel,
     ] {
-        out.push_field(
+        out.push_field_lines(
             field,
-            render_login_edit_line(
-                i18n::tr(field.i18n_key()),
-                es.field_text(field),
-                field == focus,
+            edit_view::text_field_lines(
+                &metrics,
+                &i18n::tr(field.i18n_key()),
+                &es.field_text(field),
                 cursor_pos,
-                colors.cursor,
-                colors.dim,
-                colors.text,
-                colors.focus,
+                field == focus,
+                colors,
             ),
+            field == focus,
         );
     }
-
-    // ── Responses 档位子区 ──
-    if es.is_responses() {
-        out.push(Line::from(""));
-        out.extend(profile_section(es, focus, cursor_pos, colors));
+    if es.model_defaults_hint_visible() {
+        out.push_all(edit_view::note_lines(
+            &metrics,
+            &i18n::tr("login-model-defaults-source-missing"),
+            colors,
+        ));
     }
 
-    // ── 保存摘要 ──
-    out.push(Line::from(""));
-    out.push(Line::from(vec![Span::styled(
-        format!(
-            "  {}",
-            i18n::tr_args(
-                "login-save-summary",
-                &[
-                    (
-                        "id".to_string(),
-                        FluentValue::from(if es.provider_id.trim().is_empty() {
-                            "…"
-                        } else {
-                            es.provider_id.trim()
-                        }),
-                    ),
-                    (
-                        "profiles".to_string(),
-                        FluentValue::from(es.profiles_to_update().as_str()),
-                    ),
-                ],
-            )
-        ),
-        colors.label(),
-    )]));
-
-    if let Some(error) = &es.inline_error {
-        out.push(Line::from(vec![Span::styled(
-            format!("  ⚠ {}", error.message),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        )]));
-        // 只有 revision/authority 冲突才提示重新载入；字段校验错误重载不会改变结果。
-        if error.kind == crate::kit::panels::login::edit_state::LoginErrorKind::Conflict {
-            out.push(Line::from(vec![Span::styled(
-                format!("    {}", i18n::tr("login-conflict-reload-hint")),
-                colors.label(),
-            )]));
+    // ── 高级：凭据目录只读；缺失/非法/保存错误时恢复为可编辑 ──
+    if es.is_plan_mode() {
+        out.push(edit_view::blank_line());
+        out.push(edit_view::section_line(
+            &metrics,
+            &i18n::tr("login-section-advanced"),
+            None,
+            colors,
+        ));
+        if es.plan_store_editable {
+            out.push_field_lines(
+                LoginField::PlanStore,
+                edit_view::text_field_lines(
+                    &metrics,
+                    &i18n::tr(LoginField::PlanStore.i18n_key()),
+                    &es.plan.store,
+                    cursor_pos,
+                    focus == LoginField::PlanStore,
+                    colors,
+                ),
+                focus == LoginField::PlanStore,
+            );
+        } else {
+            out.push_all(edit_view::readonly_kv_lines(
+                &metrics,
+                &i18n::tr(LoginField::PlanStore.i18n_key()),
+                &es.plan.store,
+                None,
+                colors,
+            ));
         }
     }
 
-    // ── 确认按钮 ──
-    out.push(Line::from(""));
-    out.push_field(
+    // ── 保存 ──
+    out.push(edit_view::blank_line());
+    out.push(edit_view::summary_line(
+        &metrics,
+        i18n::tr_args(
+            "login-save-summary",
+            &[(
+                "id".to_string(),
+                FluentValue::from(if es.provider_id.trim().is_empty() {
+                    "…"
+                } else {
+                    es.provider_id.trim()
+                }),
+            )],
+        ),
+        colors,
+    ));
+    if let Some(error) = &es.inline_error {
+        out.push_all(edit_view::error_lines(&metrics, &error.message, colors));
+        // 只有 revision/authority 冲突才提示重新载入；字段校验错误重载不会改变结果。
+        if error.kind == crate::kit::panels::login::edit_state::LoginErrorKind::Conflict {
+            out.push_all(edit_view::note_lines(
+                &metrics,
+                &i18n::tr("login-conflict-reload-hint"),
+                colors,
+            ));
+        }
+    }
+    out.push_field_lines(
         LoginField::Confirm,
-        action_line(
-            i18n::tr("login-confirm"),
+        vec![edit_view::button_line(
+            &metrics,
+            &i18n::tr("login-confirm"),
             focus == LoginField::Confirm,
             colors,
-        ),
+        )],
+        focus == LoginField::Confirm,
     );
 
-    out.push(Line::from(""));
+    out.push(edit_view::blank_line());
     out.push(make_hint_line_for_login(
         vec![
             (
@@ -298,6 +449,15 @@ pub(super) fn build_edit_layout(
     out
 }
 
+/// API key 字段显示值（掩码），其它字段直接取草稿文本。
+fn field_display_value(es: &LoginEditState, field: LoginField) -> String {
+    if field == LoginField::ApiKey {
+        mask_api_key_display(&es.api_key)
+    } else {
+        es.field_text(field)
+    }
+}
+
 /// 构建 Edit 视图的行（兼容现有调用与纯文本断言；命中用 [`build_edit_layout`]）。
 #[cfg(test)]
 pub(super) fn build_edit_lines(
@@ -306,203 +466,48 @@ pub(super) fn build_edit_lines(
     focus: LoginField,
     cursor_pos: usize,
     colors: &LoginRenderColors,
+    width: u16,
 ) -> Vec<Line<'static>> {
-    build_edit_layout(es, auth, focus, cursor_pos, colors).lines
+    build_edit_layout(es, auth, focus, cursor_pos, colors, width).lines
 }
 
-fn type_line(es: &LoginEditState, focus: LoginField, colors: &LoginRenderColors) -> Line<'static> {
-    let focused = focus == LoginField::ProviderType;
-    let prefix = if focused { "❯ " } else { "  " };
+/// 类型行：新建时方向键循环；已有 provider 需要 Enter 显式确认。
+///
+/// 锁定提示作为字段续行，与类型行同一命中（点击提示也可聚焦）。
+fn type_lines(
+    es: &LoginEditState,
+    focus: LoginField,
+    colors: &LoginRenderColors,
+    metrics: &EditViewMetrics,
+) -> Vec<Line<'static>> {
     let value = match es.kind {
         Some(kind) => i18n::tr(kind.label_key()),
         None => es.raw_type.clone(),
     };
     let hint = if es.is_new() {
-        format!("  ←/→/Space: {}", i18n::tr("hint-login-toggle"))
+        Some(format!(
+            "\u{2190}/\u{2192}/Space: {}",
+            i18n::tr("hint-login-toggle")
+        ))
     } else {
-        String::new()
+        None
     };
-    Line::from(vec![
-        Span::styled(prefix, Style::default().fg(colors.cursor)),
-        Span::styled(
-            format!("{}: ", i18n::tr(LoginField::ProviderType.i18n_key())),
-            if focused {
-                colors.focused_label()
-            } else {
-                colors.label()
-            },
-        ),
-        Span::styled(
-            format!("[{}]", value),
-            Style::default()
-                .fg(colors.text)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(hint, colors.label()),
-    ])
-}
-
-fn profile_section(
-    es: &LoginEditState,
-    focus: LoginField,
-    cursor_pos: usize,
-    colors: &LoginRenderColors,
-) -> EditLayout {
-    let mut out = EditLayout::new();
-    let profile = es.selected();
-    out.push(Line::from(vec![
-        Span::styled(
-            format!("  {} ", i18n::tr("login-profile-section")),
-            Style::default()
-                .fg(colors.focus)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            i18n::tr_args(
-                "login-profile-active",
-                &[(
-                    "alias".to_string(),
-                    FluentValue::from(es.active_alias.as_str()),
-                )],
-            ),
-            colors.label(),
-        ),
-    ]));
-
-    // 档位选择器
-    out.push_field(
-        LoginField::ProfileSelector,
-        choice_line(
-            &i18n::tr("login-profile-selector"),
-            format!("[{}]", profile.alias),
-            focus == LoginField::ProfileSelector,
-            colors,
-        ),
+    let mut lines = edit_view::choice_field_lines(
+        metrics,
+        &i18n::tr(LoginField::ProviderType.i18n_key()),
+        format!("[{value}]"),
+        hint,
+        focus == LoginField::ProviderType,
+        colors,
     );
-
-    // 绑定复选项 / 已绑定状态
-    let bind_label = if profile.bound {
-        if profile.fallback_bound {
-            i18n::tr("login-profile-bound-fallback")
-        } else {
-            i18n::tr("login-profile-bound")
-        }
-    } else if profile.bind {
-        "[x]".to_string()
-    } else {
-        "[ ]".to_string()
-    };
-    out.push_field(
-        LoginField::ProfileBind,
-        choice_line(
-            &i18n::tr("login-profile-bind"),
-            bind_label,
-            focus == LoginField::ProfileBind,
+    if !es.is_new() {
+        lines.push(edit_view::continuation_line(
+            metrics,
+            &i18n::tr("login-type-locked-hint"),
             colors,
-        ),
-    );
-
-    if profile.will_bind(es.is_new()) && !profile.bound && !profile.baseline_owner.is_empty() {
-        out.push(Line::from(vec![Span::styled(
-            format!(
-                "    {}",
-                i18n::tr_args(
-                    "login-profile-rebind-warning",
-                    &[(
-                        "provider".to_string(),
-                        FluentValue::from(profile.baseline_owner.as_str()),
-                    )],
-                )
-            ),
-            Style::default().fg(colors.focus),
-        )]));
+        ));
     }
-
-    if profile.will_bind(es.is_new()) {
-        out.push_field(
-            LoginField::ProfileModel,
-            render_login_edit_line(
-                i18n::tr(LoginField::ProfileModel.i18n_key()),
-                profile.model.clone(),
-                focus == LoginField::ProfileModel,
-                cursor_pos,
-                colors.cursor,
-                colors.dim,
-                colors.text,
-                colors.focus,
-            ),
-        );
-        out.push_field(
-            LoginField::ProfileWindow,
-            render_login_edit_line(
-                i18n::tr(LoginField::ProfileWindow.i18n_key()),
-                profile.window.clone(),
-                focus == LoginField::ProfileWindow,
-                cursor_pos,
-                colors.cursor,
-                colors.dim,
-                colors.text,
-                colors.focus,
-            ),
-        );
-        if es.profile_needs_reconfirm(profile) {
-            out.push(Line::from(vec![Span::styled(
-                format!("    {}", i18n::tr("login-profile-reconfirm")),
-                Style::default().fg(colors.focus),
-            )]));
-        }
-    }
-
-    out.push(Line::from(vec![Span::styled(
-        format!(
-            "    {}",
-            i18n::tr_args(
-                "login-profile-summary",
-                &[(
-                    "profiles".to_string(),
-                    FluentValue::from(es.profiles_to_update().as_str()),
-                )],
-            )
-        ),
-        colors.label(),
-    )]));
-    out
-}
-
-fn choice_line(
-    label: &str,
-    value: String,
-    focused: bool,
-    colors: &LoginRenderColors,
-) -> Line<'static> {
-    let prefix = if focused { "❯ " } else { "  " };
-    Line::from(vec![
-        Span::styled(prefix, Style::default().fg(colors.cursor)),
-        Span::styled(
-            format!("{}: ", label),
-            if focused {
-                colors.focused_label()
-            } else {
-                colors.label()
-            },
-        ),
-        Span::styled(value, Style::default().fg(colors.text)),
-    ])
-}
-
-fn action_line(label: String, focused: bool, colors: &LoginRenderColors) -> Line<'static> {
-    let prefix = if focused { "❯ " } else { "  " };
-    let style = if focused {
-        Style::default()
-            .fg(colors.cursor)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(colors.dim)
-    };
-    Line::from(vec![
-        Span::styled(prefix, Style::default().fg(colors.cursor)),
-        Span::styled(format!("  {}", label), style),
-    ])
+    lines
 }
 
 /// 显式类型更改子视图。
@@ -512,7 +517,7 @@ pub(super) fn build_type_change_layout(
 ) -> EditLayout {
     let candidate = es.type_change_candidate.unwrap_or(ProviderKind::Anthropic);
     let current = es.kind.unwrap_or(candidate);
-    let profiles = es.affected_aliases();
+    let profiles = es.bound_aliases();
     let profiles = if profiles.is_empty() {
         i18n::tr("login-type-change-none")
     } else {
@@ -589,64 +594,6 @@ pub(super) fn make_hint_line_for_login(
     Line::from(spans)
 }
 
-/// 渲染编辑模式下的单行字段（简化自 setup_wizard 的 render_editable_line）。
-#[allow(clippy::too_many_arguments)]
-pub(super) fn render_login_edit_line(
-    label: String,
-    display_value: String,
-    is_focused: bool,
-    cursor_pos: usize,
-    cursor_color: ratatui::style::Color,
-    dim: ratatui::style::Color,
-    text_color: ratatui::style::Color,
-    focus_color: ratatui::style::Color,
-) -> Line<'static> {
-    let (prefix, label_style) = if is_focused {
-        (
-            "❯ ",
-            Style::default()
-                .fg(focus_color)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        ("  ", Style::default().fg(dim))
-    };
-
-    let mut spans: Vec<Span<'static>> = vec![
-        Span::styled(prefix, Style::default().fg(cursor_color)),
-        Span::styled(format!("{}: ", label), label_style),
-    ];
-
-    if !is_focused {
-        spans.push(Span::styled(display_value, Style::default().fg(text_color)));
-        return Line::from(spans);
-    }
-
-    // 聚焦字段：渲染文本 + 光标
-    let chars: Vec<char> = display_value.chars().collect();
-    let clamped_cursor = cursor_pos.min(chars.len());
-    for (i, ch) in chars.iter().enumerate() {
-        if i == clamped_cursor && clamped_cursor < chars.len() {
-            spans.push(Span::styled(
-                ch.to_string(),
-                Style::default()
-                    .fg(text_color)
-                    .bg(cursor_color)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        } else {
-            spans.push(Span::styled(
-                ch.to_string(),
-                Style::default().fg(text_color),
-            ));
-        }
-    }
-    if clamped_cursor >= chars.len() {
-        spans.push(Span::styled(" ", Style::default().bg(cursor_color)));
-    }
-    Line::from(spans)
-}
-
 /// Provider 类型显示：三态使用本地化标签，未知原值不猜测。
 pub(super) fn provider_type_display(provider_type: &str) -> String {
     match provider_type {
@@ -669,23 +616,29 @@ fn mask_api_key_display(value: &str) -> String {
 
 /// 焦点字段在 Edit 视图中的语义行号（0-based），与 [`build_edit_layout`] 同源。
 ///
-/// 事件边界用它把焦点滚入视口。认证区行数随状态变化，因此按“唯一 ❯ 行”定位，
-/// 不再维护第二份手写行数推导。
-pub(super) fn focus_row(es: &LoginEditState, auth: &AuthController, focus: LoginField) -> usize {
-    build_edit_layout(es, auth, focus, 0, &reset_colors())
-        .lines
-        .iter()
-        .position(|line| {
-            line.spans
-                .first()
-                .is_some_and(|span| span.content.starts_with('❯'))
-        })
+/// 焦点行由布局显式记录；找不到时回退到第一个可命中行，最后才回退 0。
+/// 事件边界用它把焦点滚入视口，不再扫描文本里的 `❯`。
+pub(super) fn focus_row(
+    es: &LoginEditState,
+    auth: &AuthController,
+    focus: LoginField,
+    width: u16,
+) -> usize {
+    let layout = build_edit_layout(es, auth, focus, 0, &LoginRenderColors::reset(), width);
+    layout
+        .focus_row
+        .or_else(|| layout.hits.iter().position(|hit| hit.is_some()))
         .unwrap_or(0)
 }
 
 /// Edit 视图总行数（与 [`build_edit_layout`] 共用同一布局实现）。
-pub(super) fn line_count(es: &LoginEditState, auth: &AuthController, focus: LoginField) -> usize {
-    build_edit_layout(es, auth, focus, 0, &reset_colors())
+pub(super) fn line_count(
+    es: &LoginEditState,
+    auth: &AuthController,
+    focus: LoginField,
+    width: u16,
+) -> usize {
+    build_edit_layout(es, auth, focus, 0, &LoginRenderColors::reset(), width)
         .lines
         .len()
 }
@@ -697,20 +650,21 @@ pub(super) fn edit_hit_at(
     focus: LoginField,
     cursor_pos: usize,
     row: usize,
+    column: Option<usize>,
+    width: u16,
 ) -> Option<EditHit> {
-    build_edit_layout(es, auth, focus, cursor_pos, &reset_colors()).hit_at(row)
+    build_edit_layout(
+        es,
+        auth,
+        focus,
+        cursor_pos,
+        &LoginRenderColors::reset(),
+        width,
+    )
+    .hit_at(row, column)
 }
 
 /// 类型确认视图的语义行号 → 鼠标目标。
 pub(super) fn type_change_hit_at(es: &LoginEditState, row: usize) -> Option<EditHit> {
-    build_type_change_layout(es, &reset_colors()).hit_at(row)
-}
-
-fn reset_colors() -> LoginRenderColors {
-    LoginRenderColors {
-        cursor: Color::Reset,
-        dim: Color::Reset,
-        text: Color::Reset,
-        focus: Color::Reset,
-    }
+    build_type_change_layout(es, &LoginRenderColors::reset()).hit_at(row, None)
 }

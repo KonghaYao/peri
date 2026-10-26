@@ -10,7 +10,7 @@ use super::super::edit_handler::{LoginEditContext, enter_login_edit_mode, handle
 use super::super::edit_state::{LoginEditState, LoginErrorKind, LoginField, ProviderKind};
 use super::super::render::provider_type_display;
 use crate::acp_client::{AcpNotification, AcpTuiClient};
-use crate::config::{ConfigSource, PeriConfig, ProviderModels};
+use crate::config::{ConfigSource, PeriConfig, Profiles, ProviderModels};
 use crate::kit::atoms::{
     ACP_CLIENT_HANDLE, CONFIG_SOURCE_HANDLE, NOTIFICATION, PERI_CONFIG_HANDLE, PROVIDER_LIST,
 };
@@ -40,6 +40,12 @@ impl Drop for ChildGuard {
 }
 
 fn isolated(name: &str, scenario: impl Future<Output = ()>) {
+    run_isolated(name, module_path!().split_once("::").unwrap().1, scenario);
+}
+
+/// 子模块（`commit::auth_save`）必须传自己的 `module_path!()`：宏在定义处展开，
+/// 不能在共享 runner 里推导调用方模块。
+pub(super) fn run_isolated(name: &str, test_module: &str, scenario: impl Future<Output = ()>) {
     if std::env::var(CHILD_CASE).as_deref() == Ok(name) {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -51,7 +57,6 @@ fn isolated(name: &str, scenario: impl Future<Output = ()>) {
     let dir = tempfile::tempdir().unwrap();
     let log_path = dir.path().join("child.log");
     let log = std::fs::File::create(&log_path).unwrap();
-    let (_, test_module) = module_path!().split_once("::").unwrap();
     let child = Command::new(std::env::current_exe().unwrap())
         .args(["--exact", &format!("{test_module}::{name}"), "--nocapture"])
         .env(CHILD_CASE, name)
@@ -235,9 +240,6 @@ fn new_responses_state(fixture: &Fixture) -> LoginEditState {
         sonnet: "new-sonnet".into(),
         haiku: "new-haiku".into(),
     };
-    state.selected_profile = 2; // sonnet (active alias)
-    state.selected_mut().window = "64000".into();
-    state.selected_mut().window_dirty = true;
     state
 }
 
@@ -274,9 +276,11 @@ fn login_commit_api_key_provider_writes_global_disk_and_frame() {
                 Some(peri_acp::provider::config::ProviderAuthConfig::ApiKey)
             );
             let sonnet = saved.config.profiles.sonnet.clone();
-            assert_eq!(sonnet.provider, "new-responses");
-            assert_eq!(sonnet.model.as_deref(), Some("new-sonnet"));
-            assert_eq!(sonnet.context_window, Some(64000));
+            assert_eq!(
+                sonnet,
+                initial_config().config.profiles.sonnet,
+                "Login must not bind or rewrite any profile"
+            );
             for alias in ["fable", "opus", "haiku"] {
                 assert_eq!(
                     saved.config.profiles.get(alias),
@@ -333,9 +337,6 @@ fn login_commit_plan_reference_is_preserved_and_has_empty_api_key() {
             let cfg = fixture.config.read().clone();
             let mut state =
                 LoginEditState::edit_provider(&cfg, "plan", Some(fixture.revision())).unwrap();
-            state.selected_profile = 3; // haiku
-            state.selected_mut().window = "5000".into();
-            state.selected_mut().window_dirty = true;
             assert!(save_login_edit(&mut state));
             fixture.expect_request(false).await;
 
@@ -357,9 +358,27 @@ fn login_commit_plan_reference_is_preserved_and_has_empty_api_key() {
             assert_eq!(encoded["apiKey"], "");
             assert!(encoded.get("accessToken").is_none());
             assert!(encoded.get("refreshToken").is_none());
+            // 隐藏字段仍完整落盘：渲染不展示，但草稿与磁盘 JSON 不丢值。
+            assert_eq!(encoded["auth"]["store"], "/tmp/peri-login-commit");
+            assert_eq!(encoded["auth"]["account"], "work");
+            assert_eq!(encoded["auth"]["subject"], "subject");
+            assert_eq!(encoded["auth"]["clientId"], "client");
+            let disk = ConfigSource::load_at(&fixture.cwd, fixture.global.clone()).unwrap();
+            let disk_provider = disk
+                .loaded_merged()
+                .config
+                .providers
+                .into_iter()
+                .find(|provider| provider.id == "plan")
+                .expect("saved provider must be on disk");
+            let disk_encoded = serde_json::to_value(&disk_provider).unwrap();
+            assert_eq!(disk_encoded["auth"]["account"], "work");
+            assert_eq!(disk_encoded["auth"]["subject"], "subject");
+            assert_eq!(disk_encoded["auth"]["clientId"], "client");
             assert_eq!(
-                fixture.config.read().config.profiles.haiku.context_window,
-                Some(5000)
+                fixture.config.read().config.profiles,
+                initial_config().config.profiles,
+                "editing a provider must not rewrite existing profile parameters"
             );
             fixture.finish().await;
         },
@@ -501,32 +520,41 @@ fn ctrl_s() -> Event {
     Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
 }
 
-/// 多行粘贴被清洗后仍可能得到合法数字：错误未修正前不得落盘或推送 ACP。
+/// 多行粘贴被清洗后仍可能改变 provider 字段：错误未修正前不得落盘或推送 ACP。
 #[test]
-fn login_commit_multiline_paste_blocks_save_until_corrected() {
+fn login_commit_multiline_provider_paste_blocks_save_until_corrected() {
     isolated(
-        "login_commit_multiline_paste_blocks_save_until_corrected",
+        "login_commit_multiline_provider_paste_blocks_save_until_corrected",
         async {
             let fixture = Fixture::new(false);
-            let state = new_responses_state(&fixture);
+            let mut state = new_responses_state(&fixture);
+            state.base_url = "https://api.openai.com/v1/responses".into();
             let config = Arc::clone(&fixture.config);
             let target = fixture.target.clone();
             let before = config.read().clone();
             let disk_before = std::fs::read(&target).unwrap();
 
             let (tx, rx) = std::sync::mpsc::channel();
-            super::mount_edit_state(state, LoginField::ProfileWindow, 2, move |index, panel| {
+            super::mount_edit_state(state, LoginField::BaseUrl, 2, move |index, panel| {
                 if index != 0 {
                     return;
                 }
-                // 光标置于末尾：清洗后的 "7" 追加成合法值 640007。
-                *panel.edit_cursor.write() = 6;
+                // 光标置于末尾：清洗后的 "7" 追加到 Base URL。
+                let base_url = panel
+                    .edit_state
+                    .read()
+                    .as_ref()
+                    .unwrap()
+                    .base_url
+                    .chars()
+                    .count();
+                *panel.edit_cursor.write() = base_url;
                 let paste_result = panel.event(Event::Paste("7\n".into()), super::TEST_AREA);
                 let pasted = {
                     let guard = panel.edit_state.read();
                     let state = guard.as_ref().unwrap();
                     (
-                        state.selected().window.clone(),
+                        state.base_url.clone(),
                         state
                             .inline_error
                             .as_ref()
@@ -545,9 +573,9 @@ fn login_commit_multiline_paste_blocks_save_until_corrected() {
                             state
                                 .inline_error
                                 .as_ref()
-                                .map(|error| (error.field, error.message.clone()))
+                                .map(|error| error.message.clone())
                         }),
-                        state.map(|state| state.selected().window.clone()),
+                        state.map(|state| state.base_url.clone()),
                     )
                 };
                 let handle_unchanged = *config.read() == before;
@@ -568,16 +596,13 @@ fn login_commit_multiline_paste_blocks_save_until_corrected() {
                 let corrected = {
                     let guard = panel.edit_state.read();
                     let state = guard.as_ref().unwrap();
-                    (
-                        state.selected().window.clone(),
-                        state.inline_error.is_some(),
-                    )
+                    (state.base_url.clone(), state.inline_error.is_some())
                 };
                 let corrected_result = panel.event(ctrl_s(), super::TEST_AREA);
                 let finished = (
                     *panel.mode.read(),
                     panel.edit_state.read().is_none(),
-                    config.read().config.profiles.sonnet.context_window,
+                    config.read().config.profiles.clone(),
                 );
                 let listed_after_save = PROVIDER_LIST
                     .state()
@@ -618,19 +643,19 @@ fn login_commit_multiline_paste_blocks_save_until_corrected() {
             let single_line = crate::i18n::tr("login-error-single-line");
 
             assert_eq!(paste_result, ratatui_kit::prelude::EventResult::Consumed);
-            assert_eq!(pasted.0, "640007", "清洗后的合法值进入草稿");
             assert_eq!(
-                pasted.1,
-                Some((LoginField::ProfileWindow, single_line.clone()))
+                pasted.0, "https://api.openai.com/v1/responses7",
+                "清洗后的单行内容进入草稿"
             );
+            assert_eq!(pasted.1, Some((LoginField::BaseUrl, single_line.clone())));
             assert_eq!(save_result, ratatui_kit::prelude::EventResult::Consumed);
             assert_eq!(
                 blocked,
                 (
                     LoginPanelMode::Edit,
-                    LoginField::ProfileWindow,
-                    Some((LoginField::ProfileWindow, single_line.clone())),
-                    Some("640007".to_string()),
+                    LoginField::BaseUrl,
+                    Some(single_line.clone()),
+                    Some("https://api.openai.com/v1/responses7".to_string()),
                 ),
                 "错误未修正时必须保持编辑视图并聚焦出错字段"
             );
@@ -643,15 +668,22 @@ fn login_commit_multiline_paste_blocks_save_until_corrected() {
                 "拒绝保存必须显示既有字段错误"
             );
 
-            assert_eq!(corrected, ("64000".to_string(), false));
+            assert_eq!(
+                corrected,
+                ("https://api.openai.com/v1/responses".to_string(), false)
+            );
             assert_eq!(
                 corrected_result,
                 ratatui_kit::prelude::EventResult::Consumed
             );
             assert_eq!(
                 finished,
-                (LoginPanelMode::Browse, true, Some(64000)),
-                "修正后保存成功并退出编辑"
+                (
+                    LoginPanelMode::Browse,
+                    true,
+                    initial_config().config.profiles,
+                ),
+                "修正后保存成功并退出编辑，且不改动任何档位"
             );
             assert!(listed_after_save, "成功保存后发布 Provider 投影");
 
@@ -659,6 +691,44 @@ fn login_commit_multiline_paste_blocks_save_until_corrected() {
             fixture.finish().await;
         },
     );
+}
+
+#[test]
+fn login_commit_rename_preserves_profile_parameters() {
+    isolated("login_commit_rename_preserves_profile_parameters", async {
+        let fixture = Fixture::new(false);
+        let cfg = fixture.config.read().clone();
+        let mut state =
+            LoginEditState::edit_provider(&cfg, "base", Some(fixture.revision())).unwrap();
+        state.provider_id = "base-renamed".into();
+        assert!(save_login_edit(&mut state));
+        fixture.expect_request(false).await;
+
+        let saved = fixture.config.read().clone();
+        assert!(
+            saved
+                .config
+                .providers
+                .iter()
+                .any(|provider| provider.id == "base-renamed"),
+            "renamed provider must be persisted"
+        );
+        let baseline = initial_config();
+        for alias in Profiles::ALL {
+            let mut expected = baseline.config.profiles.get(alias).unwrap().clone();
+            if expected.provider == "base" {
+                expected.provider = "base-renamed".to_string();
+            }
+            assert_eq!(
+                saved.config.profiles.get(alias),
+                Some(&expected),
+                "{alias} must keep model/window/effort; only its reference is renamed"
+            );
+        }
+        let disk = ConfigSource::load_at(&fixture.cwd, fixture.global.clone()).unwrap();
+        assert_eq!(disk.loaded_merged(), saved);
+        fixture.finish().await;
+    });
 }
 
 #[test]
@@ -670,9 +740,6 @@ fn login_commit_plan_reference_saves_workspace_without_rewriting_global() {
             let cfg = fixture.config.read().clone();
             let mut state =
                 LoginEditState::edit_provider(&cfg, "plan", Some(fixture.revision())).unwrap();
-            state.selected_profile = 3;
-            state.selected_mut().window = "6000".into();
-            state.selected_mut().window_dirty = true;
             assert!(save_login_edit(&mut state));
             fixture.expect_request(false).await;
             assert_eq!(
@@ -837,7 +904,6 @@ fn login_edit_existing_provider_defaults_focus_to_provider_id() {
             assert_eq!(cursor, "base".chars().count());
             let state = edit_state.expect("已有 provider 必须进入编辑");
             assert_eq!(state.original_provider_id, "base");
-            assert_eq!(state.baseline_kind, Some(ProviderKind::Anthropic));
             assert_eq!(state.kind, Some(ProviderKind::Anthropic));
             fixture.finish().await;
         },
@@ -893,16 +959,15 @@ fn login_commit_mouse_confirm_saves_provider() {
             .expect("候选必须包含新 provider");
         assert_eq!(provider, expected_provider, "键鼠必须产生同一配置结果");
         assert_eq!(
-            saved.config.profiles.sonnet.provider, "new-responses",
-            "活动档位绑定必须与候选一致"
-        );
-        assert_eq!(
-            saved.config.profiles.sonnet.context_window,
-            Some(64000),
-            "鼠标保存必须携带同一 contextWindow"
+            saved.config.profiles,
+            initial_config().config.profiles,
+            "鼠标保存也必须保持所有既有档位绑定与参数"
         );
 
         fixture.expect_request(false).await;
         fixture.finish().await;
     });
 }
+
+#[path = "auth_save_commit_test.rs"]
+mod auth_save;

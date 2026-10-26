@@ -3,10 +3,15 @@
 //! Pure line construction. The edit view and the mouse hit test both consume
 //! [`AuthDetailLayout::buttons`], so wrapped URLs and narrow terminals do not
 //! shift the action geometry.
+//!
+//! Edit 表单里的认证区只展示用户可决策的信息：认证方式、登录状态、基础 URL、
+//! 警告和动作。账号引用/身份/Client ID 属于内部凭据细节，不渲染（由草稿与
+//! 序列化完整保存）；凭据目录只在“高级”区只读展示。
 
 use fluent_bundle::FluentValue;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
 use crate::chatgpt_auth::AccountStatus;
 use crate::i18n;
@@ -14,10 +19,12 @@ use crate::kit::image_safety::sanitize_for_terminal;
 use crate::kit::panels::login::auth::{
     AuthController, AuthFailure, AuthViewState, DetailAction, LogoutConfirm, LogoutFocus,
 };
+use crate::kit::panels::login::auth_policy;
+use crate::kit::panels::login::edit_handler::auth_scope;
 use crate::kit::panels::login::edit_state::{LoginEditState, LoginField};
-use crate::kit::panels::login::render::{
-    EditHit, EditLayout, LoginRenderColors, render_login_edit_line,
-};
+use crate::kit::panels::login::edit_view::{self, EditViewMetrics, StatusEntry, StatusTone};
+use crate::kit::panels::login::render::{EditLayout, LoginRenderColors};
+use crate::truncate::{middle_truncate_by_width, wrap_by_width};
 
 /// Authorization sub-view geometry.
 pub(super) struct AuthDetailLayout {
@@ -34,297 +41,239 @@ pub(super) struct LogoutLayout {
 
 /// Render the Responses authentication block inside the edit form.
 ///
-/// 行与命中区来自同一次构造：点击认证方式/plan 字段/动作按钮的语义行不会因状态
-/// 行变化而在绘制与命中之间漂移。
+/// 行与命中区来自同一次构造：点击认证方式/动作按钮的语义行不会因状态行变化
+/// 而在绘制与命中之间漂移。账号引用、身份与 Client ID 不出现在任何一行。
 pub(super) fn plan_auth_layout(
     es: &LoginEditState,
     auth: &AuthController,
     focus: LoginField,
-    cursor_pos: usize,
     colors: &LoginRenderColors,
+    metrics: &EditViewMetrics,
 ) -> EditLayout {
     let mut out = EditLayout::new();
-    out.push_field(
+    out.push_field_lines(
         LoginField::AuthMode,
-        choice_line(
-            &i18n::tr("login-field-auth-mode"),
+        edit_view::choice_field_lines(
+            metrics,
+            &i18n::tr(LoginField::AuthMode.i18n_key()),
             format!("[{}]", auth_mode_label(es)),
+            None,
             focus == LoginField::AuthMode,
             colors,
         ),
+        focus == LoginField::AuthMode,
     );
 
     if !es.is_plan_mode() {
         return out;
     }
 
-    out.push_field(
-        LoginField::PlanStore,
-        render_login_edit_line(
-            i18n::tr(LoginField::PlanStore.i18n_key()),
-            es.plan.store.clone(),
-            focus == LoginField::PlanStore,
-            cursor_pos,
-            colors.cursor,
-            colors.dim,
-            colors.text,
-            colors.focus,
-        ),
-    );
-    out.push_field(
-        LoginField::PlanAccount,
-        render_login_edit_line(
-            i18n::tr(LoginField::PlanAccount.i18n_key()),
-            es.plan.account.clone(),
-            focus == LoginField::PlanAccount,
-            cursor_pos,
-            colors.cursor,
-            colors.dim,
-            colors.text,
-            colors.focus,
-        ),
-    );
+    let actions = auth.available_actions(&es.plan);
+    // 认证进行中可能没有任何可用动作：焦点仍停在 AuthActions，用状态组第一行作为
+    // 滚动锚点，避免出现“看不见的焦点行”。
+    if focus == LoginField::AuthActions && actions.is_empty() {
+        out.mark_focus_row(out.lines.len());
+    }
+    out.push_all(edit_view::status_lines(
+        metrics,
+        &i18n::tr("login-status-label"),
+        &status_entries(es, auth),
+        colors,
+    ));
 
-    out.push(read_only_line(
-        &i18n::tr("login-field-subject"),
-        nonempty_or(&es.plan.subject, i18n::tr("login-auth-not-verified")),
-        colors,
-    ));
-    out.push(read_only_line(
-        &i18n::tr("login-field-client-id"),
-        nonempty_or(&es.plan.client_id, i18n::tr("login-auth-not-verified")),
-        colors,
-    ));
-    out.push(read_only_line(
-        &i18n::tr("login-field-base-url"),
-        format!(
-            "{} ({})",
-            peri_config::provider::DEFAULT_RESPONSES_URL,
-            i18n::tr("login-auth-endpoint-locked")
-        ),
+    out.push_all(edit_view::readonly_kv_lines(
+        metrics,
+        &i18n::tr(LoginField::BaseUrl.i18n_key()),
+        peri_config::provider::DEFAULT_RESPONSES_URL,
+        Some(&i18n::tr("login-auth-endpoint-locked")),
         colors,
     ));
     let custom_endpoint = es.base_url.trim();
     if !custom_endpoint.is_empty()
         && custom_endpoint != peri_config::provider::DEFAULT_RESPONSES_URL
     {
-        out.push(Line::from(vec![Span::styled(
-            format!("    {}", i18n::tr("login-auth-plan-endpoint-warning")),
-            Style::default().fg(colors.focus),
-        )]));
-    }
-
-    for line in status_lines(es, auth.view(), colors) {
-        out.push(line);
+        out.push_all(edit_view::warning_lines(
+            metrics,
+            &i18n::tr("login-auth-plan-endpoint-warning"),
+            colors,
+        ));
     }
     if auth.login_succeeded() {
-        out.push(Line::from(vec![Span::styled(
-            format!("  {}", i18n::tr("login-auth-unsaved")),
-            Style::default()
-                .fg(colors.focus)
-                .add_modifier(Modifier::BOLD),
-        )]));
+        out.push_all(edit_view::warning_lines(
+            metrics,
+            &i18n::tr("login-auth-unsaved"),
+            colors,
+        ));
     }
 
-    out.push(Line::from(vec![Span::styled(
-        format!("  {}", i18n::tr("login-auth-actions")),
-        Style::default().fg(colors.dim).add_modifier(Modifier::BOLD),
-    )]));
-    let actions = auth.available_actions(&es.plan);
-    for action in actions {
-        let selected = auth.selected_action(&es.plan) == Some(action);
-        let marker = if focus == LoginField::AuthActions && selected {
-            "❯ "
-        } else if selected {
-            "» "
-        } else {
-            "  "
-        };
-        let style = if focus == LoginField::AuthActions && selected {
-            Style::default()
-                .fg(colors.focus)
-                .add_modifier(Modifier::BOLD)
-        } else if selected {
-            Style::default().fg(colors.text)
-        } else {
-            Style::default().fg(colors.dim)
-        };
-        out.push_hit(
-            Line::from(vec![
-                Span::styled(marker, Style::default().fg(colors.cursor)),
-                Span::styled(format!("[{}]", i18n::tr(action.i18n_key())), style),
-            ]),
-            EditHit::AuthAction(action),
+    if !actions.is_empty() {
+        out.push(edit_view::action_group_line(
+            metrics,
+            &i18n::tr("login-auth-actions"),
+            colors,
+        ));
+        let labels: Vec<String> = actions
+            .iter()
+            .map(|action| i18n::tr(action.i18n_key()))
+            .collect();
+        let selected = auth
+            .selected_action(&es.plan)
+            .and_then(|selected| actions.iter().position(|action| *action == selected));
+        let (line, spans) = edit_view::action_row(
+            metrics,
+            &labels,
+            selected,
+            focus == LoginField::AuthActions,
+            colors,
         );
+        out.push_action_row(line, &spans, &actions, focus == LoginField::AuthActions);
     }
-
-    out.push(Line::from(vec![Span::styled(
-        format!("    {}", i18n::tr("login-auth-plan-reference-note")),
-        colors.label(),
-    )]));
     out
 }
 
-fn status_lines(
-    es: &LoginEditState,
-    view: &AuthViewState,
-    colors: &LoginRenderColors,
-) -> Vec<Line<'static>> {
-    let mut lines = Vec::new();
-    match view {
-        AuthViewState::Unchecked => lines.push(status_line(
+fn status_entries(es: &LoginEditState, auth: &AuthController) -> Vec<StatusEntry> {
+    match auth.view() {
+        AuthViewState::Unchecked => vec![StatusEntry::new(
             i18n::tr("login-auth-unchecked"),
-            colors.dim,
-            colors,
-        )),
-        AuthViewState::Checking => lines.push(status_line(
+            StatusTone::Muted,
+        )],
+        AuthViewState::Checking => vec![StatusEntry::new(
             i18n::tr("login-auth-checking"),
-            colors.focus,
-            colors,
-        )),
+            StatusTone::Info,
+        )],
         AuthViewState::SignedOut => {
-            lines.push(status_line(
+            let mut entries = vec![StatusEntry::new(
                 i18n::tr("login-auth-signed-out"),
-                colors.dim,
-                colors,
-            ));
+                StatusTone::Muted,
+            )];
+            // 已有完整引用时保存不阻断，但运行时一定会失败：给出非阻断警告。
+            if es.is_plan_mode() && !es.plan.needs_identity() && auth.scope() == &auth_scope(es) {
+                entries.push(StatusEntry::new(
+                    i18n::tr("login-auth-credentials-missing"),
+                    StatusTone::Warning,
+                ));
+            }
+            entries
         }
-        AuthViewState::SignedIn(status) => {
-            lines.extend(signed_in_lines(es, status, colors));
-        }
-        AuthViewState::StartingLogin => lines.push(status_line(
+        AuthViewState::SignedIn(status) => signed_in_entries(es, status),
+        AuthViewState::StartingLogin => vec![StatusEntry::new(
             i18n::tr("login-auth-starting"),
-            colors.focus,
-            colors,
-        )),
-        AuthViewState::WaitingCallback { .. } => {
-            lines.push(status_line(
-                i18n::tr("login-auth-waiting"),
-                colors.focus,
-                colors,
-            ));
-        }
-        AuthViewState::Cancelling => lines.push(status_line(
+            StatusTone::Info,
+        )],
+        AuthViewState::WaitingCallback { .. } => vec![StatusEntry::new(
+            i18n::tr("login-auth-waiting"),
+            StatusTone::Info,
+        )],
+        AuthViewState::Cancelling => vec![StatusEntry::new(
             i18n::tr("login-auth-cancelling"),
-            colors.focus,
-            colors,
-        )),
-        AuthViewState::LoggingOut => lines.push(status_line(
+            StatusTone::Info,
+        )],
+        AuthViewState::LoggingOut => vec![StatusEntry::new(
             i18n::tr("login-auth-logging-out"),
-            colors.focus,
-            colors,
-        )),
-        AuthViewState::CancellingLogout => lines.push(status_line(
+            StatusTone::Info,
+        )],
+        AuthViewState::CancellingLogout => vec![StatusEntry::new(
             i18n::tr("login-auth-cancelling-logout"),
-            colors.focus,
-            colors,
-        )),
-        AuthViewState::LoggedOut(outcome) => {
-            lines.push(status_line(
-                i18n::tr("login-auth-local-cleared"),
-                colors.focus,
-                colors,
-            ));
-            lines.push(status_line(
+            StatusTone::Info,
+        )],
+        AuthViewState::LoggedOut(outcome) => vec![
+            StatusEntry::new(i18n::tr("login-auth-local-cleared"), StatusTone::Success),
+            StatusEntry::new(
                 if outcome.remote_revoked {
                     i18n::tr("login-auth-remote-revoked")
                 } else {
                     i18n::tr("login-auth-remote-unconfirmed")
                 },
                 if outcome.remote_revoked {
-                    colors.text
+                    StatusTone::Success
                 } else {
-                    colors.focus
+                    StatusTone::Warning
                 },
-                colors,
-            ));
-        }
+            ),
+        ],
         AuthViewState::OutcomeUnknown(reason) => {
             tracing::debug!(?reason, "ChatGPT authentication outcome unknown");
-            lines.push(status_line(
-                i18n::tr("login-auth-outcome-unknown"),
-                colors.focus,
-                colors,
-            ));
-            lines.push(status_line(
-                i18n::tr("login-auth-unknown-query"),
-                colors.dim,
-                colors,
-            ));
+            vec![
+                StatusEntry::new(i18n::tr("login-auth-outcome-unknown"), StatusTone::Warning),
+                StatusEntry::new(i18n::tr("login-auth-unknown-query"), StatusTone::Info),
+            ]
         }
         AuthViewState::Failed(failure) => {
-            lines.push(status_line(failure_text(*failure), Color::Red, colors))
+            vec![StatusEntry::new(failure_text(*failure), StatusTone::Error)]
         }
     }
-    lines
 }
 
-fn signed_in_lines(
-    es: &LoginEditState,
-    status: &AccountStatus,
-    colors: &LoginRenderColors,
-) -> Vec<Line<'static>> {
-    let identity = status
+fn signed_in_entries(es: &LoginEditState, status: &AccountStatus) -> Vec<StatusEntry> {
+    // 只展示 email；没有 email 时显示“已登录”，绝不回退到内部 subject。
+    let email = status
         .email
         .as_deref()
-        .or(Some(status.subject.as_str()))
-        .unwrap_or("");
-    let identity = sanitize_for_terminal(identity).into_owned();
-    let mut lines = vec![status_line(
-        i18n::tr_args(
-            "login-auth-signed-in",
-            &[("identity".to_string(), FluentValue::from(identity.as_str()))],
+        .map(sanitize_for_terminal)
+        .map(|email| email.into_owned())
+        .filter(|email| !email.trim().is_empty());
+    let mut entries = vec![match email {
+        Some(email) => StatusEntry::limited(
+            i18n::tr_args(
+                "login-auth-signed-in",
+                &[("identity".to_string(), FluentValue::from(email.as_str()))],
+            ),
+            StatusTone::Success,
+            2,
         ),
-        colors.focus,
-        colors,
-    )];
-    lines.push(status_line(
+        None => StatusEntry::new(
+            i18n::tr("login-auth-signed-in-no-email"),
+            StatusTone::Success,
+        ),
+    }];
+    entries.push(StatusEntry::new(
         i18n::tr(if status.plan_enabled {
             "login-auth-plan-enabled"
         } else {
             "login-auth-plan-disabled"
         }),
         if status.plan_enabled {
-            colors.text
+            StatusTone::Success
         } else {
-            Color::Red
+            StatusTone::Warning
         },
-        colors,
     ));
-    let expires = format_epoch(status.expires_at);
-    if status.expires_at <= now_epoch() {
-        lines.push(status_line(
+    let freshness = auth_policy::TokenFreshness::classify(status.expires_at, now_epoch());
+    match freshness {
+        auth_policy::TokenFreshness::Unknown => entries.push(StatusEntry::new(
+            i18n::tr(freshness.i18n_key()),
+            StatusTone::Muted,
+        )),
+        auth_policy::TokenFreshness::Expired => entries.push(StatusEntry::new(
             i18n::tr_args(
-                "login-auth-expired",
-                &[("time".to_string(), FluentValue::from(expires.as_str()))],
+                freshness.i18n_key(),
+                &[(
+                    "time".to_string(),
+                    FluentValue::from(format_epoch(status.expires_at).as_str()),
+                )],
             ),
-            Color::Red,
-            colors,
-        ));
-    } else {
-        lines.push(status_line(
-            i18n::tr_args(
-                "login-auth-expires",
-                &[("time".to_string(), FluentValue::from(expires.as_str()))],
-            ),
-            colors.dim,
-            colors,
-        ));
+            StatusTone::Warning,
+        )),
+        auth_policy::TokenFreshness::Valid | auth_policy::TokenFreshness::Expiring => {
+            entries.push(StatusEntry::new(
+                i18n::tr_args(
+                    freshness.i18n_key(),
+                    &[(
+                        "time".to_string(),
+                        FluentValue::from(format_epoch(status.expires_at).as_str()),
+                    )],
+                ),
+                StatusTone::Info,
+            ));
+        }
     }
     if es.plan.identity_mismatch(status) {
-        lines.push(status_line(
+        entries.push(StatusEntry::new(
             i18n::tr("login-auth-identity-mismatch"),
-            colors.focus,
-            colors,
-        ));
-    } else if !es.plan.needs_identity() {
-        lines.push(status_line(
-            i18n::tr("login-auth-identity-match"),
-            colors.dim,
-            colors,
+            StatusTone::Warning,
         ));
     }
-    lines
+    entries
 }
 
 pub(super) fn build_auth_detail_layout(
@@ -338,7 +287,9 @@ pub(super) fn build_auth_detail_layout(
 
     lines.push(Line::from(vec![Span::styled(
         format!("  {}", i18n::tr("login-auth-title")),
-        Style::default().fg(colors.focus).bold(),
+        Style::default()
+            .fg(colors.focus)
+            .add_modifier(Modifier::BOLD),
     )]));
     lines.push(Line::from(""));
 
@@ -349,7 +300,7 @@ pub(super) fn build_auth_detail_layout(
                 colors.label(),
             )]));
             let content_width = (width.saturating_sub(4) as usize).max(16);
-            for chunk in wrap_chars(&sanitize_for_terminal(url), content_width) {
+            for chunk in wrap_by_width(&sanitize_for_terminal(url), content_width) {
                 lines.push(Line::from(vec![Span::styled(
                     format!("    {chunk}"),
                     Style::default().fg(colors.text),
@@ -366,23 +317,21 @@ pub(super) fn build_auth_detail_layout(
         }
     }
 
+    // 凭据目录保留为只读信息（中间截断）；账号引用不展示。
     if let Some(scope) = auth.scope().target() {
-        lines.push(Line::from(vec![Span::styled(
-            format!(
-                "  {}: {}",
-                i18n::tr("login-field-store"),
-                sanitize_for_terminal(&scope.store.display().to_string())
+        let label = i18n::tr("login-field-store");
+        let display = scope.store.display().to_string();
+        let path = sanitize_for_terminal(&display);
+        let budget = usize::from(width)
+            .saturating_sub(2 + label.width() + 2)
+            .max(1);
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {label}: "), Style::default().fg(colors.dim)),
+            Span::styled(
+                middle_truncate_by_width(&path, budget),
+                Style::default().fg(colors.dim),
             ),
-            Style::default().fg(colors.dim),
-        )]));
-        lines.push(Line::from(vec![Span::styled(
-            format!(
-                "  {}: {}",
-                i18n::tr("login-field-account"),
-                sanitize_for_terminal(&scope.account)
-            ),
-            Style::default().fg(colors.dim),
-        )]));
+        ]));
     }
     lines.push(Line::from(vec![Span::styled(
         format!("  {}", i18n::tr("login-auth-loopback-local-hint")),
@@ -424,25 +373,24 @@ pub(super) fn build_logout_layout(
     let mut buttons = Vec::new();
     lines.push(Line::from(vec![Span::styled(
         i18n::tr("login-auth-logout-title"),
-        Style::default().fg(colors.focus).bold(),
+        Style::default()
+            .fg(colors.focus)
+            .add_modifier(Modifier::BOLD),
     )]));
     lines.push(Line::from(""));
-    let account = sanitize_for_terminal(&confirm.target.account).into_owned();
+    // 注销确认不再展示账号引用：只列共享凭据位置的 provider。
     lines.push(Line::from(vec![Span::styled(
         format!(
             "  {}",
             i18n::tr_args(
                 "login-auth-logout-confirm",
-                &[
-                    ("account".to_string(), FluentValue::from(account.as_str())),
-                    (
-                        "providers".to_string(),
-                        FluentValue::from(confirm.providers.join(", ").as_str()),
-                    ),
-                ],
+                &[(
+                    "providers".to_string(),
+                    FluentValue::from(confirm.providers.join(", ").as_str()),
+                )],
             )
         ),
-        Style::default().fg(colors.focus),
+        Style::default().fg(colors.warning),
     )]));
     lines.push(Line::from(vec![Span::styled(
         format!("  {}", i18n::tr("login-auth-logout-scope-note")),
@@ -497,75 +445,6 @@ fn auth_mode_label(es: &LoginEditState) -> String {
     } else {
         i18n::tr("login-auth-api-key")
     }
-}
-
-fn status_line(message: String, color: Color, colors: &LoginRenderColors) -> Line<'static> {
-    Line::from(vec![
-        Span::styled("  ", Style::default()),
-        Span::styled(
-            format!("● {message}"),
-            Style::default().fg(color_or(color, colors.text)),
-        ),
-    ])
-}
-
-fn color_or(color: Color, fallback: Color) -> Color {
-    if color == Color::Reset {
-        fallback
-    } else {
-        color
-    }
-}
-
-fn read_only_line(label: &str, value: String, colors: &LoginRenderColors) -> Line<'static> {
-    Line::from(vec![
-        Span::styled("  ", Style::default()),
-        Span::styled(format!("{label}: "), colors.label()),
-        Span::styled(
-            sanitize_for_terminal(&value).into_owned(),
-            Style::default().fg(colors.text),
-        ),
-    ])
-}
-
-fn choice_line(
-    label: &str,
-    value: String,
-    focused: bool,
-    colors: &LoginRenderColors,
-) -> Line<'static> {
-    let prefix = if focused { "❯ " } else { "  " };
-    Line::from(vec![
-        Span::styled(prefix, Style::default().fg(colors.cursor)),
-        Span::styled(
-            format!("{label}: "),
-            if focused {
-                colors.focused_label()
-            } else {
-                colors.label()
-            },
-        ),
-        Span::styled(value, Style::default().fg(colors.text)),
-    ])
-}
-
-fn nonempty_or(value: &str, fallback: String) -> String {
-    if value.trim().is_empty() {
-        fallback
-    } else {
-        value.to_owned()
-    }
-}
-
-fn wrap_chars(text: &str, width: usize) -> Vec<String> {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.is_empty() {
-        return vec![String::new()];
-    }
-    chars
-        .chunks(width.max(1))
-        .map(|chunk| chunk.iter().collect())
-        .collect()
 }
 
 fn now_epoch() -> u64 {

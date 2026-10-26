@@ -23,13 +23,14 @@ use ratatui_kit::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use super::edit::{edit_field, submit_profile_draft, submit_window_edit, switch_active_alias};
-use super::editor_view::{PaneHit, kv_row_hits};
-use super::panel_render::{profile_draft_layout, provider_button_label, window_editor_layout};
-use super::profile_draft::{
-    self, DraftFocus, ProfileDraftState, WindowEditState, effective_provider_id, provider_by_id,
+use super::edit::{
+    commit_profile_candidate, edit_field, provider_switch_candidate, submit_window_edit,
+    switch_active_alias,
 };
-use super::{FIELD_CONTEXT_1M, FIELD_COUNT, FIELD_MODEL, FIELD_PROVIDER, PROFILE_KEYS};
+use super::editor_view::{PaneHit, kv_row_hits};
+use super::panel_render::{provider_button_label, window_editor_layout};
+use super::window_edit::{WindowEditState, effective_provider_id, provider_by_id};
+use super::{FIELD_CONTEXT_1M, FIELD_COUNT, FIELD_PROVIDER, PROFILE_KEYS};
 
 /// 右栏内容区几何：标题 1 行 + 空行 1 行 + 主区 + 底部提示 1 行。
 ///
@@ -116,10 +117,7 @@ pub(super) fn handle_model_event_with(
     ctx: &ModelEventCtx,
     switch_alias: impl Fn(usize),
 ) -> EventResult {
-    // 内联 editor / 档位草稿各自独占事件：方向键不得切换 active alias。
-    if ctx.profile_draft.read().is_some() {
-        return handle_profile_draft_event(event, ctx);
-    }
+    // 内联 contextWindow editor 独占事件：方向键不得切换 active alias。
     if ctx.window_editor.read().is_some() {
         return handle_window_editor_event(event, ctx);
     }
@@ -242,47 +240,62 @@ pub(super) fn handle_model_event_with(
     EventResult::Consumed
 }
 
-/// 右侧字段动作：Responses provider/model/window 进入草稿，其余沿用即时保存。
+/// 右侧字段动作：contextWindow 打开数值 editor，其余字段即时保存。
+///
+/// 所有 provider 共用同一条路径——Responses / ChatGPT plan 不进入专属草稿，
+/// Provider / Model 与其它 provider 一样按左右键枚举并立即落盘。
 fn activate_right_field(ctx: &ModelEventCtx, alias: &str, forward: bool) {
     let field = *ctx.right_cursor.read();
-    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
-        return;
-    };
-    let cfg = handle.read().clone();
-    let provider = effective_provider_id(&cfg, alias)
-        .and_then(|provider_id| provider_by_id(&cfg, &provider_id).cloned());
-    let Some(provider) = provider else {
-        edit_field(alias.to_string(), field, forward);
-        return;
-    };
-    match field {
-        FIELD_PROVIDER => {
-            let Some(next_id) = profile_draft::next_provider_id(&cfg, &provider.id, forward) else {
+    if field == FIELD_PROVIDER {
+        let Some(handle) = PERI_CONFIG_HANDLE.get() else {
+            return;
+        };
+        let cfg = handle.read().clone();
+        let Some(candidate) = provider_switch_candidate(&cfg, alias, forward) else {
+            return;
+        };
+        let target_id = candidate
+            .config
+            .profiles
+            .get(alias)
+            .map(|profile| profile.provider.clone())
+            .unwrap_or_default();
+        let target_is_responses = provider_by_id(&candidate, &target_id)
+            .is_some_and(|provider| provider.provider_type == "openai_responses");
+        let window_missing = candidate
+            .config
+            .profiles
+            .get(alias)
+            .and_then(|profile| profile.context_window)
+            .filter(|window| *window > 0)
+            .is_none();
+        if target_is_responses && window_missing {
+            // 切到 Responses 时先补必备窗口，再与新 provider/model 原子保存；
+            // 取消编辑则 provider/model 也不落盘。
+            let revision = crate::config::configuration_revision().ok();
+            if let Some(state) = WindowEditState::enter(&candidate, alias, revision) {
+                *ctx.window_editor.write() = Some(state);
+                *ctx.right_focus.write() = true;
                 return;
-            };
-            let next_is_responses = provider_by_id(&cfg, &next_id)
-                .is_some_and(|provider| provider.provider_type == "openai_responses");
-            if provider.provider_type == "openai_responses" || next_is_responses {
-                enter_profile_draft(ctx, alias, Some(next_id), None);
-            } else {
-                edit_field(alias.to_string(), field, forward);
             }
         }
-        FIELD_MODEL => {
-            if provider.provider_type == "openai_responses" {
-                let current = profile_draft::actual_model(&cfg, alias);
-                let next =
-                    profile_draft::next_model_name(&cfg, alias, &provider.id, &current, forward);
-                enter_profile_draft(ctx, alias, Some(provider.id.clone()), next);
-            } else {
-                edit_field(alias.to_string(), field, forward);
-            }
-        }
-        FIELD_CONTEXT_1M if provider.provider_type == "openai_responses" => {
-            enter_window_editor(ctx, alias);
-        }
-        _ => edit_field(alias.to_string(), field, forward),
+        commit_profile_candidate(alias, candidate);
+        return;
     }
+    if field == FIELD_CONTEXT_1M {
+        let Some(handle) = PERI_CONFIG_HANDLE.get() else {
+            return;
+        };
+        let cfg = handle.read().clone();
+        let is_responses = effective_provider_id(&cfg, alias)
+            .and_then(|provider_id| provider_by_id(&cfg, &provider_id))
+            .is_some_and(|provider| provider.provider_type == "openai_responses");
+        if is_responses {
+            enter_window_editor(ctx, alias);
+            return;
+        }
+    }
+    edit_field(alias.to_string(), field, forward);
 }
 
 fn enter_window_editor(ctx: &ModelEventCtx, alias: &str) {
@@ -326,24 +339,6 @@ fn notify_transient(key: &str, seconds: u64) {
     });
 }
 
-fn enter_profile_draft(
-    ctx: &ModelEventCtx,
-    alias: &str,
-    provider_id: Option<String>,
-    model: Option<String>,
-) {
-    refresh_before_editor();
-    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
-        return;
-    };
-    let revision = crate::config::configuration_revision().ok();
-    let cfg = handle.read();
-    if let Some(state) = ProfileDraftState::enter(&cfg, alias, revision, provider_id, model) {
-        *ctx.profile_draft.write() = Some(state);
-        *ctx.right_focus.write() = true;
-    }
-}
-
 fn handle_window_editor_event(event: Event, ctx: &ModelEventCtx) -> EventResult {
     let mut guard = ctx.window_editor.write();
     let Some(editor) = guard.as_mut() else {
@@ -355,9 +350,9 @@ fn handle_window_editor_event(event: Event, ctx: &ModelEventCtx) -> EventResult 
             return EventResult::Ignored;
         }
         if let Some(area) = ctx.area {
-            // 底部按钮与 Ctrl+L 等价：草稿未提交时只提示先保存或取消。
+            // 底部按钮与 Ctrl+L 等价：editor 未提交时只提示先保存或取消。
             if hit_provider_button(&mouse, area) {
-                notify_transient("model-panel-draft-exit-first", 3);
+                notify_transient("model-panel-editor-exit-first", 3);
                 *ctx.render_version.write() += 1;
                 return EventResult::Consumed;
             }
@@ -371,7 +366,7 @@ fn handle_window_editor_event(event: Event, ctx: &ModelEventCtx) -> EventResult 
                         }
                     }
                     PaneHit::Cancel => *guard = None,
-                    PaneHit::Field(_) | PaneHit::Provider | PaneHit::Model | PaneHit::Window => {}
+                    PaneHit::Field(_) => {}
                 }
             }
         }
@@ -432,215 +427,10 @@ fn handle_window_editor_event(event: Event, ctx: &ModelEventCtx) -> EventResult 
         }
     }
     if exit_editor_first {
-        notify_transient("model-panel-draft-exit-first", 3);
+        notify_transient("model-panel-editor-exit-first", 3);
     }
     *ctx.render_version.write() += 1;
     EventResult::Consumed
-}
-
-fn handle_profile_draft_event(event: Event, ctx: &ModelEventCtx) -> EventResult {
-    let mut guard = ctx.profile_draft.write();
-    let Some(draft) = guard.as_mut() else {
-        return EventResult::Ignored;
-    };
-    if let Event::Mouse(mouse) = event {
-        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
-            // 滚轮/抬起等交给 ScrollView 与面板滚动仲裁。
-            return EventResult::Ignored;
-        }
-        let mut save = false;
-        let mut close = false;
-        if let Some(area) = ctx.area {
-            // 底部按钮与 Ctrl+L 等价：草稿未提交时只提示先保存或取消。
-            if hit_provider_button(&mouse, area) {
-                notify_transient("model-panel-draft-exit-first", 3);
-                *ctx.render_version.write() += 1;
-                return EventResult::Consumed;
-            }
-            let layout = profile_draft_layout(draft);
-            let offset = ctx.right_scroll.read().offset().y;
-            if let Some(hit) = hit_right_pane(&layout.hits, &mouse, area, offset) {
-                match hit {
-                    // 点击 choice 行与键盘 Enter/→ 语义一致：聚焦并切换。
-                    PaneHit::Provider => {
-                        move_draft_focus(draft, DraftFocus::Provider);
-                        draft.cycle_provider(true);
-                    }
-                    // 键盘 Enter：未编辑时进入文本编辑，编辑中则确认并落到 Save。
-                    PaneHit::Model => {
-                        if draft.model_editing {
-                            draft.confirm_model_edit();
-                            draft.focus = DraftFocus::Save;
-                        } else {
-                            move_draft_focus(draft, DraftFocus::Model);
-                            draft.begin_model_edit();
-                        }
-                    }
-                    PaneHit::Window => move_draft_focus(draft, DraftFocus::Window),
-                    // 与键盘 Save/Ctrl+S 共用 submit_profile_draft（校验、冲突与错误保持同源）。
-                    PaneHit::Save => {
-                        move_draft_focus(draft, DraftFocus::Save);
-                        save = true;
-                    }
-                    PaneHit::Cancel => close = true,
-                    PaneHit::Field(_) => {}
-                }
-            }
-        }
-        if save && submit_profile_draft(draft) {
-            close = true;
-        }
-        if close {
-            *guard = None;
-        }
-        *ctx.render_version.write() += 1;
-        return EventResult::Consumed;
-    }
-    if let Event::Paste(text) = event {
-        // 单行字段：多行/控制字符整段拒绝并显示既有错误；choice/按钮不接收粘贴。
-        match draft.focus {
-            DraftFocus::Window => {
-                draft.paste(&text);
-            }
-            DraftFocus::Model if draft.model_editing => {
-                draft.paste_model(&text);
-            }
-            _ => {}
-        };
-        *ctx.render_version.write() += 1;
-        return EventResult::Consumed;
-    }
-    let Event::Key(key) = event else {
-        return EventResult::Consumed;
-    };
-    if key.kind != KeyEventKind::Press {
-        return EventResult::Consumed;
-    }
-    let is_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let mut close = false;
-    let mut save = false;
-    let mut reload_conflict = false;
-    let mut exit_draft_first = false;
-    match key.code {
-        KeyCode::Esc => {
-            if draft.model_editing {
-                draft.cancel_model_edit();
-            } else {
-                close = true;
-            }
-        }
-        KeyCode::Enter => match draft.focus {
-            DraftFocus::Save => save = true,
-            DraftFocus::Cancel => close = true,
-            DraftFocus::Provider => move_draft_focus(draft, DraftFocus::Model),
-            DraftFocus::Model => {
-                if draft.model_editing {
-                    // 确认文本后进入 Save：容量也需显式确认，三字段一起原子保存。
-                    draft.confirm_model_edit();
-                    draft.focus = DraftFocus::Save;
-                } else {
-                    draft.begin_model_edit();
-                }
-            }
-            DraftFocus::Window => save = true,
-        },
-        KeyCode::Char(' ') if !is_ctrl => {
-            if draft.focus == DraftFocus::Model && draft.model_editing {
-                draft.insert_model(' ');
-            } else {
-                match draft.focus {
-                    DraftFocus::Provider => draft.cycle_provider(true),
-                    DraftFocus::Model => draft.cycle_model(true),
-                    DraftFocus::Save => save = true,
-                    DraftFocus::Cancel => close = true,
-                    DraftFocus::Window => {}
-                }
-            }
-        }
-        KeyCode::Char('s') if is_ctrl => save = true,
-        KeyCode::Char('r') if is_ctrl && draft.conflict => reload_conflict = true,
-        KeyCode::Char('l') if is_ctrl => exit_draft_first = true,
-        KeyCode::Char('w') if is_ctrl && draft.focus == DraftFocus::Window => {
-            draft.word_backspace()
-        }
-        KeyCode::Char('w')
-            if is_ctrl && draft.focus == DraftFocus::Model && draft.model_editing =>
-        {
-            draft.word_backspace_model()
-        }
-        KeyCode::Char(ch) if !is_ctrl && draft.focus == DraftFocus::Window => {
-            draft.insert(ch);
-        }
-        KeyCode::Char(ch)
-            if !is_ctrl && draft.focus == DraftFocus::Model && draft.model_editing =>
-        {
-            draft.insert_model(ch);
-        }
-        KeyCode::Up | KeyCode::BackTab => move_draft_focus(draft, draft.focus.previous()),
-        KeyCode::Down | KeyCode::Tab => move_draft_focus(draft, draft.focus.next()),
-        KeyCode::Left if !is_ctrl => match draft.focus {
-            DraftFocus::Provider => draft.cycle_provider(false),
-            DraftFocus::Model if draft.model_editing => draft.model_move_left(),
-            DraftFocus::Model => draft.cycle_model(false),
-            DraftFocus::Window => draft.move_left(),
-            DraftFocus::Save | DraftFocus::Cancel => {}
-        },
-        KeyCode::Right if !is_ctrl => match draft.focus {
-            DraftFocus::Provider => draft.cycle_provider(true),
-            DraftFocus::Model if draft.model_editing => draft.model_move_right(),
-            DraftFocus::Model => draft.cycle_model(true),
-            DraftFocus::Window => draft.move_right(),
-            DraftFocus::Save | DraftFocus::Cancel => {}
-        },
-        KeyCode::Backspace if !is_ctrl && draft.focus == DraftFocus::Window => draft.backspace(),
-        KeyCode::Backspace
-            if !is_ctrl && draft.focus == DraftFocus::Model && draft.model_editing =>
-        {
-            draft.backspace_model()
-        }
-        KeyCode::Delete if draft.focus == DraftFocus::Window => draft.delete(),
-        KeyCode::Delete if draft.focus == DraftFocus::Model && draft.model_editing => {
-            draft.delete_model()
-        }
-        KeyCode::Home if !is_ctrl && draft.focus == DraftFocus::Window => draft.home(),
-        KeyCode::Home if !is_ctrl && draft.focus == DraftFocus::Model && draft.model_editing => {
-            draft.model_home()
-        }
-        KeyCode::End if !is_ctrl && draft.focus == DraftFocus::Window => draft.end(),
-        KeyCode::End if !is_ctrl && draft.focus == DraftFocus::Model && draft.model_editing => {
-            draft.model_end()
-        }
-        _ => {}
-    }
-    if save && submit_profile_draft(draft) {
-        close = true;
-    }
-    if close {
-        *guard = None;
-    }
-    if reload_conflict {
-        match crate::kit::config_service::reload_configuration() {
-            Ok(_) => {
-                *guard = None;
-                crate::kit::config_service::notify_reloaded();
-            }
-            Err(error) => crate::kit::config_service::notify_reload_failed(&error),
-        }
-    }
-    drop(guard);
-    if exit_draft_first {
-        notify_transient("model-panel-draft-exit-first", 3);
-    }
-    *ctx.render_version.write() += 1;
-    EventResult::Consumed
-}
-
-/// 离开 Model 字段时确认正在编辑的文本，避免焦点移动后仍处于半编辑状态。
-fn move_draft_focus(draft: &mut ProfileDraftState, next: DraftFocus) {
-    if draft.focus == DraftFocus::Model && draft.model_editing && next != DraftFocus::Model {
-        draft.confirm_model_edit();
-    }
-    draft.focus = next;
 }
 
 /// 当前激活档位（配置事实源 `PERI_CONFIG_HANDLE`）——会话状态栏的
@@ -681,7 +471,6 @@ pub(super) struct ModelEventCtx {
     pub(super) right_focus: State<bool>,
     pub(super) render_version: State<u64>,
     pub(super) window_editor: State<Option<WindowEditState>>,
-    pub(super) profile_draft: State<Option<ProfileDraftState>>,
     /// 右栏滚动偏移——内联视图命中与绘制共用同一本帧几何。
     pub(super) right_scroll: State<ScrollViewState>,
     pub(super) viewport: ListViewport,

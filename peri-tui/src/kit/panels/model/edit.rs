@@ -5,7 +5,7 @@
 //! save commits the handle, the local projection and the ACP push — a failed
 //! save must not leave the panel showing a switch that never reached disk.
 
-use super::profile_draft::{ProfileDraftState, WindowEditState};
+use super::window_edit::WindowEditState;
 use super::{
     FIELD_CONTEXT_1M, FIELD_EFFORT, FIELD_MAX_TOKENS, FIELD_MODEL, FIELD_PROVIDER, PROFILE_KEYS,
 };
@@ -24,6 +24,58 @@ type PeriHandle = Arc<parking_lot::RwLock<PeriConfig>>;
 const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 /// Max tokens 预设
 const MAX_TOKEN_PRESETS: &[u32] = &[4096, 8192, 16000, 32000, 64000];
+
+/// 仅修改 provider/model 的候选副本；供 UI 在必要时先补 contextWindow 再一起提交。
+pub(super) fn provider_switch_candidate(
+    cfg: &PeriConfig,
+    alias: &str,
+    forward: bool,
+) -> Option<PeriConfig> {
+    let provider_ids: Vec<String> = cfg.config.providers.iter().map(|p| p.id.clone()).collect();
+    if provider_ids.is_empty() {
+        return None;
+    }
+    let profile_provider = cfg
+        .config
+        .profiles
+        .get(alias)
+        .map(|profile| profile.provider.clone())
+        .unwrap_or_default();
+    let idx = provider_ids
+        .iter()
+        .position(|id| *id == profile_provider)
+        .unwrap_or(0);
+    let next = provider_ids
+        [(idx + if forward { 1 } else { provider_ids.len() - 1 }) % provider_ids.len()]
+    .clone();
+    // 联动：目标 provider 同档位映射 → 覆盖 profile.model；无映射 → None 触发回退
+    let mapped = cfg
+        .config
+        .providers
+        .iter()
+        .find(|provider| provider.id == next)
+        .and_then(|provider| provider.models.get_model(alias))
+        .map(str::to_string)
+        .filter(|model| !model.is_empty());
+    let mut candidate = cfg.clone();
+    if let Some(profile) = candidate.config.profiles.get_mut(alias) {
+        profile.provider = next;
+        profile.model = mapped;
+    }
+    Some(candidate)
+}
+
+/// 提交候选配置并按档位投影；保存失败时保持句柄不变。
+pub(super) fn commit_profile_candidate(alias: &str, candidate: PeriConfig) -> bool {
+    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
+        return false;
+    };
+    commit_snapshot(
+        handle,
+        candidate,
+        ModelChange::ProfileField(alias.to_string()),
+    )
+}
 
 /// 切换左侧光标指向的档位为 active profile（先落盘、成功才切换内存并推送 ACP）。
 /// pub(crate)：状态栏模型快速切换弹窗复用此切换逻辑。
@@ -53,7 +105,6 @@ pub(super) fn edit_field(alias: String, field: usize, forward: bool) {
     let mut cfg = handle.read().clone();
 
     // 先读取当前值（不可变，纯 clone），避免跨 guard 的字段级借用冲突
-    let provider_ids: Vec<String> = cfg.config.providers.iter().map(|p| p.id.clone()).collect();
     let profile_provider = cfg
         .config
         .profiles
@@ -68,25 +119,6 @@ pub(super) fn edit_field(alias: String, field: usize, forward: bool) {
             .iter()
             .find(|provider| provider.id == profile_provider)
     };
-    let notice = selected_provider.and_then(|provider| {
-        if field == FIELD_MAX_TOKENS
-            && matches!(
-                &provider.auth,
-                Some(peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan { .. })
-            )
-        {
-            Some("model-panel-plan-output-hint")
-        } else {
-            None
-        }
-    });
-    if let Some(notice) = notice {
-        *NOTIFICATION.state().write() = Some(Notification {
-            message: crate::i18n::tr(notice),
-            until: peri_time::monotonic_now() + Duration::from_secs(3),
-        });
-        return;
-    }
 
     // Responses contextWindow 由内联 editor 处理；这里不落盘、不显示不可操作提示。
     if field == FIELD_CONTEXT_1M
@@ -133,29 +165,10 @@ pub(super) fn edit_field(alias: String, field: usize, forward: bool) {
 
     match field {
         FIELD_PROVIDER => {
-            if provider_ids.is_empty() {
+            let Some(candidate) = provider_switch_candidate(&cfg, &alias, forward) else {
                 return;
-            }
-            let idx = provider_ids
-                .iter()
-                .position(|i| *i == profile_provider)
-                .unwrap_or(0);
-            let next = provider_ids
-                [(idx + if forward { 1 } else { provider_ids.len() - 1 }) % provider_ids.len()]
-            .clone();
-            // 联动：目标 provider 同档位映射 → 覆盖 profile.model；无映射 → None 触发回退
-            let mapped = cfg
-                .config
-                .providers
-                .iter()
-                .find(|p| p.id == next)
-                .and_then(|p| p.models.get_model(&alias))
-                .map(str::to_string)
-                .filter(|m| !m.is_empty());
-            if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
-                profile.provider = next;
-                profile.model = mapped;
-            }
+            };
+            cfg = candidate;
         }
         FIELD_MODEL => {
             let provider = cfg
@@ -279,59 +292,6 @@ fn notify_field_error(message: &str) {
 pub(super) fn submit_window_edit(state: &mut WindowEditState) -> bool {
     // 被拒绝的输入尚未由后续编辑清除时不得提交：否则编辑框里的合法旧值会旁路
     // 提示直接落盘。持久化错误不设此标记，仍可按键重试。
-    if state.input_blocked {
-        return false;
-    }
-    let candidate = match state.validate_and_patch() {
-        Ok(candidate) => candidate,
-        Err(error) => {
-            notify_field_error(&error);
-            state.error = Some(error);
-            state.conflict = false;
-            return false;
-        }
-    };
-    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
-        state.error = Some(crate::i18n::tr("model-panel-save-failed-error"));
-        state.conflict = false;
-        return false;
-    };
-    let Some(revision) = state.revision else {
-        state.error = Some(crate::i18n::tr("model-panel-save-failed-error"));
-        state.conflict = false;
-        return false;
-    };
-    match crate::kit::config_service::persist_draft(&candidate, revision) {
-        Ok(accepted) => {
-            publish_accepted(
-                handle,
-                accepted,
-                ModelChange::ProfileField(state.alias.clone()),
-            );
-            true
-        }
-        Err(DraftSaveError::Conflict) => {
-            state.error = Some(crate::i18n::tr("config-draft-conflict"));
-            state.conflict = true;
-            false
-        }
-        Err(DraftSaveError::Failed(error)) => {
-            state.conflict = false;
-            state.error = Some(crate::i18n::tr_args(
-                "model-panel-save-failed",
-                &[(
-                    "error".to_string(),
-                    fluent_bundle::FluentValue::from(error.to_string().as_str()),
-                )],
-            ));
-            false
-        }
-    }
-}
-
-/// 提交 Responses provider/model/window 草稿：三项一起落盘，失败保留草稿。
-pub(super) fn submit_profile_draft(state: &mut ProfileDraftState) -> bool {
-    // 同内联 editor：被拒绝的输入未清除前拒绝提交，避免合法文本掩盖已拒绝的输入。
     if state.input_blocked {
         return false;
     }

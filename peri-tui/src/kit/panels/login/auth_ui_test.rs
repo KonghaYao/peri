@@ -133,12 +133,7 @@ fn auth_detail_buttons_hit_only_their_semantic_rows() {
                 let layout = auth_render::build_auth_detail_layout(
                     &auth,
                     TEST_AREA.width,
-                    &render::LoginRenderColors {
-                        cursor: ratatui_kit::ratatui::style::Color::Reset,
-                        dim: ratatui_kit::ratatui::style::Color::Reset,
-                        text: ratatui_kit::ratatui::style::Color::Reset,
-                        focus: ratatui_kit::ratatui::style::Color::Reset,
-                    },
+                    &render::LoginRenderColors::reset(),
                 );
                 layout
                     .buttons
@@ -188,16 +183,8 @@ fn long_auth_url_wraps_and_keeps_button_rows_semantic() {
         "x".repeat(120)
     );
     controller.set_view_for_test(auth::AuthViewState::WaitingCallback { url: long });
-    let layout = auth_render::build_auth_detail_layout(
-        &controller,
-        36,
-        &render::LoginRenderColors {
-            cursor: ratatui_kit::ratatui::style::Color::Reset,
-            dim: ratatui_kit::ratatui::style::Color::Reset,
-            text: ratatui_kit::ratatui::style::Color::Reset,
-            focus: ratatui_kit::ratatui::style::Color::Reset,
-        },
-    );
+    let layout =
+        auth_render::build_auth_detail_layout(&controller, 36, &render::LoginRenderColors::reset());
     let url_rows = layout
         .lines
         .iter()
@@ -330,12 +317,7 @@ fn long_auth_url() -> String {
 }
 
 fn detail_colors() -> render::LoginRenderColors {
-    render::LoginRenderColors {
-        cursor: ratatui_kit::ratatui::style::Color::Reset,
-        dim: ratatui_kit::ratatui::style::Color::Reset,
-        text: ratatui_kit::ratatui::style::Color::Reset,
-        focus: ratatui_kit::ratatui::style::Color::Reset,
-    }
+    render::LoginRenderColors::reset()
 }
 
 #[derive(Clone, Copy)]
@@ -908,3 +890,6 @@ fn detached_logout_result_does_not_pollute_next_login_or_logout() {
     assert!(next_logout.logged_out, "新注销结果必须写回视图");
     assert_eq!(next_logout.logged_out_remote_revoked, Some(true));
 }
+
+#[path = "auth_state_test.rs"]
+mod auth_state;

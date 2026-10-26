@@ -18,10 +18,6 @@ pub(super) enum LoginField {
     OpusModel,
     SonnetModel,
     HaikuModel,
-    ProfileSelector,
-    ProfileBind,
-    ProfileModel,
-    ProfileWindow,
     Confirm,
 }
 
@@ -40,10 +36,6 @@ impl LoginField {
             Self::OpusModel => "login-field-opus-model",
             Self::SonnetModel => "login-field-sonnet-model",
             Self::HaikuModel => "login-field-haiku-model",
-            Self::ProfileSelector => "login-profile-selector",
-            Self::ProfileBind => "login-profile-bind",
-            Self::ProfileModel => "login-profile-model",
-            Self::ProfileWindow => "login-profile-context-window",
             Self::Confirm => "login-confirm",
         }
     }
@@ -60,8 +52,6 @@ impl LoginField {
                 | Self::OpusModel
                 | Self::SonnetModel
                 | Self::HaikuModel
-                | Self::ProfileModel
-                | Self::ProfileWindow
         )
     }
 }
@@ -71,6 +61,10 @@ impl LoginField {
 pub(super) enum LoginErrorKind {
     /// 字段校验/输入拒绝；重新载入不会改变结果。
     Field,
+    /// plan 模式缺少可用身份；认证状态变化或自动采用后应清除。
+    IdentityRequired,
+    /// 凭据引用不可用；认证状态变化或显式采用后应清除。
+    AuthReference,
     /// 保存时 expected revision 已过期，必须重读权威配置。
     Conflict,
 }
@@ -80,7 +74,6 @@ pub(super) enum LoginErrorKind {
 pub(super) struct LoginError {
     pub(super) field: LoginField,
     pub(super) message: String,
-    pub(super) alias: Option<&'static str>,
     pub(super) kind: LoginErrorKind,
 }
 
@@ -89,16 +82,6 @@ impl LoginError {
         Self {
             field,
             message,
-            alias: None,
-            kind: LoginErrorKind::Field,
-        }
-    }
-
-    pub(super) fn profile(field: LoginField, alias: &'static str, message: String) -> Self {
-        Self {
-            field,
-            message,
-            alias: Some(alias),
             kind: LoginErrorKind::Field,
         }
     }
@@ -108,8 +91,25 @@ impl LoginError {
         Self {
             field: LoginField::Confirm,
             message,
-            alias: None,
             kind: LoginErrorKind::Conflict,
+        }
+    }
+
+    /// Plan 身份缺失；保存门据此做状态化文案与自动采用。
+    pub(super) fn identity_required(field: LoginField, message: String) -> Self {
+        Self {
+            field,
+            message,
+            kind: LoginErrorKind::IdentityRequired,
+        }
+    }
+
+    /// 凭据引用不可用；与身份缺失分开，便于保存门抑制重复通知。
+    pub(super) fn auth_reference(field: LoginField, message: String) -> Self {
+        Self {
+            field,
+            message,
+            kind: LoginErrorKind::AuthReference,
         }
     }
 }
