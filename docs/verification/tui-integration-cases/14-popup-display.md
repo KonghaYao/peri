@@ -24,7 +24,7 @@
       `Open browser`、`Copy link`、`Cancel sign-in`，并检查点击背景面板不会穿透。
    2. 等待授权期间在 en 与 zh-CN 间切换；核对 URL、提示、按钮、状态与错误均为当前语言完整
       文案，不出现原始 key 或半截多字节字符；`Copy link` 复制完整 URL。
-   3. 在 Login Edit 与 Model 的 Responses 档位草稿、内联 window editor 上重复窄屏检查：
+   3. 在 Login Edit 与 Model 的 Responses contextWindow 内联 editor 上重复窄屏检查：
       用键盘和鼠标分别聚焦/切换字段、选择类型与认证方式、勾选档位、点击 Confirm/Save/Cancel，
       结果一致；点击空白、边框、分隔线与滚动条不触发动作。Model 普通右栏 K/V 行点击先聚焦
       再执行键盘同义动作；底部“管理 Provider”按钮与 Ctrl+L 等价，窄屏下仍可点击。向 choice、
@@ -32,6 +32,10 @@
       保存被阻断。Model 的窗口数值 editor 与 Model 文本 editor 对多行/控制字符粘贴整段拒绝：
       文本不变、错误可见、修正前阻断保存，修正后可继续保存。认证子视图 Esc 只取消登录并
       回到编辑态，再按 Esc 才放弃草稿并停止等待。
+   4. 在窄屏下分别构造 `Checking`、`Unchecked`、`SignedOut`、查询失败与作用域不一致：
+      保存时 `Checking` 只出现等待提示、不写红字，其余状态出现对应文案且推荐动作可执行；
+      已登录且草稿身份为空时一次保存成功，无“请先登录”；过期只显示访问令牌与自动刷新文案。
+      Ctrl+R 重载到不同 store/account 后不显示旧目标的“已登录”，也不会自动采用旧身份。
 
 ## P1 补充场景
 

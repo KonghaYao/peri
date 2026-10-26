@@ -24,8 +24,11 @@
    2. 重新进入并输入正整数保存；随后改变该档 provider 或 model，确认为新目标输入的
       window 为空，必须重新输入后才能保存；在保存前按 Esc 核对磁盘未变化。
    3. 核对 provider/model/window 三项一次落盘，其他档位与 active alias 不变；重启后显示
-      同一组值。对 ChatGPT plan provider 再核对 Max tokens 显示服务器默认，切换该行只提示
-      不写入数值。
+      同一组值。先在 Login 保存四档默认 model、不改任何 profile，再打开 Model 草稿：核对
+      已绑定档位的 model 用 Provider 同档默认预填，显式 `profile.model` 优先且不被覆盖；
+      保存 Model 后仅目标档位变化。对 ChatGPT plan provider 再核对 Provider/Model/
+      contextWindow/Max tokens 均与其它 Responses provider 行为一致：Max tokens 走同一预设
+      循环，窗口缺失按通用规则提示，不出现订阅特例 UI 或阻断。
    4. 在 Model 草稿的 Model 行按 Enter 进入任意文本编辑，改写后按 Esc 核对恢复原值；
       再次改写并按 Enter 确认，界面落到 Save；为新目标重新填写 window 后按 Enter/Ctrl+S，
       核对三项一次提交。有未保存草稿时按 Ctrl+L，核对只提示先保存或取消、不切换面板；
@@ -43,19 +46,24 @@
       可见错误出现，Enter/Ctrl+S 被阻断且磁盘未变；用退格或输入合法字符修正后再次保存，
       核对成功落盘。
 6. **P0-87 Login ChatGPT 授权 URL、浏览器、复制与取消**
-   1. 在 `/login` 选择 Responses provider 并切换到 `ChatGPT plan`，填写绝对凭据目录与
-      ASCII 账号引用，按 `Sign in to ChatGPT` 进入认证子视图。
+   1. 在 `/login` 选择 Responses provider 并切换到 `ChatGPT plan`，使用“高级”区的默认
+      凭据目录（缺失/非法时恢复为可编辑），按 `Sign in to ChatGPT` 进入认证子视图。
    2. 核对完整授权 URL、本机回调提示和按钮可见；等待期间导航与重绘仍响应，执行
       `Open browser` 与 `Copy link`，核对成功或失败提示不冒充授权完成。
-   3. 按 Esc 取消等待并返回编辑态，再修改 store/account 并让旧登录结果晚到；核对显示停止
-      等待与状态对账，旧结果不会写入新目标；无法确认时显示结果未知与查询入口，不显示
-      虚假的已登录/已注销。
+   3. 按 Esc 取消等待并返回编辑态，再在恢复态修改凭据目录并让旧登录结果晚到；核对显示
+      停止等待与状态对账，旧结果不会写入新目标；无法确认时显示结果未知与查询入口，不显示
+      虚假的已登录/已注销。认证详情只显示凭据目录（中间截断），不显示账号引用。
 7. **P0-88 Login 状态身份、两阶段保存与注销确认**
-   1. 分别构造未登录、已登录、过期与身份不匹配的凭据状态，执行 `Check status`；核对安全
-      身份与 plan 权限可见，身份不匹配时只有显式 `Use this account` 才写入引用。
-   2. 完成一次登录后令 settings 只读再保存 provider；核对“凭据已保存、配置尚未保存”
+   1. 分别构造未登录、已登录、访问令牌过期与身份不匹配的凭据状态，执行 `Check status`；
+      核对邮箱（没有邮箱时只显示“已登录”，绝不回退到内部身份）与 plan 权限可见。已登录且
+      作用域一致、草稿身份为空时，状态成功后自动采用，保存一次成功且无“请先登录”红字；
+      已有不同身份时只有显式 `Use this account` 才写入引用，保存门默认选中该动作。
+   2. 过期文案只描述“访问令牌”与使用时的自动刷新，不出现“本地授权已过期”；过期状态不阻断
+      provider 保存。`Checking` 期间保存只提示等待、不写红字；`SignedOut`/查询失败/作用域
+      不一致分别显示对应文案与推荐动作。
+   3. 完成一次登录后令 settings 只读再保存 provider；核对“凭据已保存、配置尚未保存”
       提示，恢复写入后重试保存不重跑 OAuth；失败重试期间 provider 未显示假成功。
-   3. 按 `Sign out` 核对确认框固定 store/account 与共享该引用的 providers，默认焦点为
+   4. 按 `Sign out` 核对确认框只列出共享该凭据目录的 providers（不含账号引用），默认焦点为
       取消；Esc 返回不执行。确认后在远端撤销失败时核对合并提示同时包含“本地已清除、
       远端未确认”；取消注销等待后本地清理仍完成，provider 配置与整个凭据目录未被删除。
 
@@ -69,6 +77,24 @@
    1. 在窄屏中打开 Model、Login、Config 和 Theme，浏览长名称及多行描述。
    2. 使用键盘与鼠标切换选项，取消一次编辑并保存另一次。
    3. 核对高亮、实际值和提示一致；Unicode 截断不切半字，取消不改真实配置。
+   4. Login Browse 铺满：40 行终端、5 个 provider 应一次全见；改为 20 个 provider，用
+      方向键滚动并点击窗口内某行，进入的必须是该行 provider；提示行始终贴在内容区最后
+      一行，settings 路径仍固定在面板底边。
+   5. Login Edit 视觉：80/100/120 列下分区标题、标签列与值列对齐；聚焦长字段时光标始终
+      可见并出现 `‹`/`›`；只读凭据目录中间截断。核对账号引用、身份、Client ID 与引用说明
+      不出现，状态/警告/只读行点击不改变焦点。核对不再出现“档位配置/编辑档位/绑定此
+      Provider/此档模型/上下文窗口”，Tab 与鼠标命中顺序只在 provider 字段、认证动作与
+      Confirm 之间，删除后不留下空行或不可见焦点项。
+   6. Login 与 Model 的分工：新建 provider 保存后核对四个 profile 逐字段不变（不自动绑定、
+      不写 model/contextWindow），四档默认 model 已落盘并在 Model 草稿预填；到 `/model`
+      绑定档位并填写窗口后再核对运行时使用新绑定。编辑已有 provider 改名后核对既有绑定与
+      参数不变、显式引用跟随新 id；本次新弄坏一个原本可解析的 Responses 绑定时，Login 保存
+      显示精确错误（模型缺失指向 Login 字段、窗口缺失指向 Model 面板）；原本就不可解析的
+      绑定不阻断保存，只给非阻断提示，且不自动补绑定。
+   7. Login 认证动作：`Sign in to ChatGPT`、`Check status`、`Use this account`、`Sign out`
+      在同一行横向排列（间隔 3 空格），`←/→` 只在该行内移动选中项，`Enter` 执行；鼠标点击
+      每个动作标签执行对应动作，点击间隔不改变焦点。80 列中英文均完整显示；更窄时保持
+      单行、用 `‹`/`›` 水平窗口，选中动作仍可见。
 3. **P1-14 工作面板状态区分空、加载与失败**
    1. 分别让 Agent、Tasks、MCP、Plugin、Hooks、Cron 和 Workflow 返回空、慢响应、错误。
    2. 在每种状态打开面板并切换 tab 或选中项。

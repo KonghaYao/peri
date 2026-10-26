@@ -41,7 +41,10 @@
 命中布局一起产出。列表面板不再各自持有写死的可见项常量；绘制取窗口、事件取命中布局，
 两者必须来自同一实例。选择越界在选择推导处收敛，刷新缩短列表不残留越界选择。
 
-接入范围：固定行高的列表面板（Hooks、MCP、Cron、Memory、Config、Model）共用本机制；
+接入范围：固定行高的列表面板（Hooks、MCP、Cron、Memory、Config、Model、Login Browse）
+共用本机制；Login Browse 每项固定 4 行（ID、认证状态、Base URL、分隔空行），header 计数行
+与 footer 操作提示各 1 行，提示行贴内容区最后一行；Login Edit/Auth 表单仍按行语义布局，
+不接入本机制。
 分段列表（Tasks）、可变行高（Agent 逐行折行测量）与无列表的只读面板（Status、Goal）按
 「公共组件边界」不接入，在面板内写明理由与替代做法——复用既有测量结果，而不是把行高
 压成常量。
@@ -173,7 +176,7 @@ authority 返回的 accepted snapshot。revision 冲突单独提示 `config-draf
 | Goal | `GOAL_SNAPSHOT` | bridge `handle_goal_snapshot` | 内联 handler | 无 mutation（只读） |
 | Config | `PERI_CONFIG_HANDLE` | 宿主配置 handle | `handle_config_event` → `activate_row` | `persist_candidate`；失败回滚不投影 |
 | Model | `PERI_CONFIG_HANDLE` + 面板内 `WindowEditState`/`ProfileDraftState` | 宿主配置 handle | `handle_model_event` → `switch_active_alias` / `activate_right_field` / `open_provider_management` | 显式 revision + accepted 发布；Responses provider/model/window 原子保存；Model 文本 Enter 编辑、Enter 确认、Esc 恢复；`Ctrl+L` 与底部按钮共用 `open_provider_management`，经 `LOGIN_PANEL_REQUEST` 定向 Login，未保存草稿先提示；普通右栏 K/V 行点击聚焦并执行键盘同义动作；窗口/model 单行 editor 拒绝多行/控制字符粘贴并阻断保存；失败不写内存、不投影 |
-| Login | `PROVIDER_LIST` + 面板内 `LoginEditState` + `AuthController` | providers 投影 + 配置 handle + credentials 能力 | `handle_login_event` → `save_login_edit` / `reload_login_edit`；`dispatch_{login,status,logout}` | 长草稿 `persist_draft`，按 provider id 定位；打开面板重读 authority，冲突后 `Ctrl+R` 重新基线化；已有 provider 默认焦点 Provider ID；字段/选项/按钮鼠标命中与键盘同语义；认证用 `HostConfigAuthScope` 完成门，冻结 store/account |
+| Login | `PROVIDER_LIST` + 面板内 `LoginEditState` + `AuthController` + `auth_policy` | providers 投影 + 配置 handle + credentials 能力 | `handle_login_event` → `save_login_edit` / `reload_login_edit`；`dispatch_{login,status,logout}` | 长草稿 `persist_draft`，按 provider id 定位；打开面板重读 authority，冲突后 `Ctrl+R` 重新基线化并同步认证作用域；已有 provider 默认焦点 Provider ID；字段/选项/按钮鼠标命中与键盘同语义；Edit 采用分区 + 单标签列 + 值列对齐，认证动作单行横向、按列区间命中，`focus_row` 由布局显式记录；Login 只改 provider：新建不绑定、不写任何 profile，编辑保持既有绑定与参数，改名只更新显式引用；新建 Responses + ChatGPT plan 时四档默认模型从已保存的同类 plan provider（其次其他 Responses provider）只填空字段，手动输入优先，无来源时提示；保存只阻断本次新弄坏的 Responses 绑定（模型缺失指向 Login 默认模型字段，窗口缺失指向 Model 面板），原本不可解析的绑定允许保存并给非阻断提示；账号引用/身份/Client ID 不渲染但草稿与序列化完整保留，凭据目录默认在“高级”只读、异常时恢复编辑；认证用 `HostConfigAuthScope` 完成门，冻结 store/account；空/兼容身份仅在当前作用域、Plan 已授予时自动采用，已有不同身份必须显式“使用此账号”；认证状态变化清除陈旧身份/引用错误，采用后动作复位到“查询状态”；access token 过期只描述本地记录与自动刷新，不阻断保存 |
 | Theme | 面板内 `selected_theme`/`original_theme` + 模块内目录缓存 | 本地目录扫描 + 下载 | `handle_theme_event` → `trigger_download_themes` | 下载任务唯一租约（`DownloadRun::try_claim`） |
 | Plugin | `PLUGIN_LIST` + `DiscoverState`/`OperationState` | `plugin/list` 投影 + marketplace 只读缓存 | `handle_search_event` / `handle_panel_event` | `OperationScope` + `CompletionGate`；身份见 `plugin/identity.rs` |
 | ThreadBrowser | `THREAD_LIST` + 浏览作用域 atoms | `thread_list_refresh` 分页 cursor | 内联 handler + `request_more_threads` | 归档/删除按 `ThreadListViewKey` 逐项复验 |
@@ -184,15 +187,25 @@ authority 返回的 accepted snapshot。revision 冲突单独提示 `config-draf
 固定行高列表统一走 `panels/shared/list.rs` 视口；分段（Tasks）、可变行高（Agent）与无列表
 （Status、Goal）面板按「公共组件边界」自持测量，理由写在各自文件内。
 
+Login 的认证就绪状态由 `login/auth_policy.rs` 单一推导，渲染、动作可用性与保存门共用：
+只有当前作用域（配置源 + store/account）、Plan 已授予且草稿身份为空/兼容时才自动采用；
+已有不同身份返回显式冲突，默认选中“使用此账号”。认证事件落地时清除
+`IdentityRequired`/`AuthReference` 类陈旧保存错误，采用后动作索引复位到“查询状态”，
+不会滑到注销。保存门在 `build_candidate` 失败后识别身份错误，按 `Checking`/`Unchecked`/
+`SignedOut`/`Failed`/`OutcomeUnknown`/作用域不一致分别给文案与推荐动作；`Checking` 只提示
+等待，不写红字。Access token 过期只是本地记录的新鲜度，使用时自动刷新，不参与保存门。
+新建 Responses + ChatGPT plan provider 的默认模型预填只写 Login 草稿：来源优先级为同类
+plan provider、其他 Responses provider 的四档映射，只填空字段；无来源时保留未设置并提示。
+
 ## 键位与优先级约定
 
 - Esc 由面板内的子视图（详情、表单、确认）先消费，再落到面板关闭。Login 的认证详情与
   注销确认是面板内子视图：Esc 先取消登录等待或返回编辑态，不直接关闭面板；注销确认默认
   焦点为取消，确认目标固定 store/account。
 - `Ctrl+R` 在 Login Edit / Model 草稿出现 revision 冲突后从 authority 重读并丢弃当前草稿
-  （Login 重建编辑视图，Model 离开草稿/editor），再次进入时以新 revision 为基线；
-  `Ctrl+L` 在 Model 打开 Login 并定向当前 provider，有未保存草稿时先要求保存或取消，
-  底部同名按钮与之等价。
+  （Login 重建编辑视图，Model 离开草稿/editor），再次进入时以新 revision 为基线，Login
+  同时同步认证作用域并重新查询状态；`Ctrl+L` 在 Model 打开 Login 并定向当前 provider，
+  同样同步认证作用域；有未保存草稿时先要求保存或取消，底部同名按钮与之等价。
 - Model 的窗口数值 editor 与 Model 文本 editor 拒绝换行与控制字符：按键被拒绝、终端粘贴
   整段拒绝，均保留可见错误并在修正前阻断提交；窗口数值字段同时拒绝非数字。Login 文本
   字段沿用「过滤换行/控制字符并提示」的既有行为。

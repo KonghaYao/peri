@@ -14,24 +14,36 @@
 2. 新建时用 Left/Right/Space 选择 `OpenAI Responses`；已有 provider 的类型在编辑态锁定，
    只有 Enter 打开类型确认、再按 Enter 才改变。
 3. 选择认证方式：`API key` 填写 Base URL 与 Key；`ChatGPT plan` 填写凭据目录与账号引用，
-   再按 `Sign in to ChatGPT` 完成浏览器授权。
-4. 在 `Profile configuration` 子区选择要绑定的档位，填写该档 model 与正整数
-   `Context window (tokens)`；新建 provider 默认只勾选进入表单时的 active 档位。若基线
-   没有任何 provider，四档都会经首 provider 回退，需要为每档填写有效 model 与窗口。
-5. 按 Ctrl+S 或 `Confirm` 保存。字段错误（含多行粘贴被清洗的输入）会阻断保存并只显示
-   对应提示；长草稿使用进入表单时的配置 revision，出现 revision 冲突时按 Ctrl+R 从
-   authority 重读并重新基线化，不会用旧草稿覆盖外部新值，只有该冲突显示重新载入提示。
-6. 也可在 `/model` 右栏选择 `Context window`，按 Enter 内联编辑该档窗口；Responses 的
-   provider/model/window 会作为一个草稿原子保存。Model 草稿的 Model 行按 Enter 进入任意
-   文本编辑，再按 Enter 确认并转到 Save（Esc 恢复原值），最终由 Save/Ctrl+S 提交。
-   底部 `[Ctrl+L 管理 Provider · 认证：/login]` 是按钮，点击与 Ctrl+L 相同：打开 Login
+   再按 `Sign in to ChatGPT` 完成浏览器授权。新建 Responses + ChatGPT plan provider 时，
+   四档默认模型会从已保存的同类 plan provider（其次其他 Responses provider）预填；只填充
+   空字段，手动输入优先，没有可靠来源时保留未设置并给出提示。预填只写 Login 草稿，不写
+   任何 profile。
+4. Login 只保存 provider：档位绑定、该档 model 与正整数 `Context window (tokens)` 由
+   `/model` 面板负责。新建 provider 不自动绑定任何档位，已有 provider 的绑定与其参数保持
+   不变；改名时所有显式引用随新 id 更新，空引用继续走首 provider 回退。保存只阻断“本次
+   新弄坏”的已有绑定：原本就可解析、本次变为不可解析时显示精确错误（模型缺失指向 Login
+   默认模型字段，窗口缺失指向 Model 面板）；原本就不可解析的绑定允许保存并给非阻断提示，
+   不会自动补绑定或清空引用。
+5. 已登录且作用域一致时，空/兼容的 plan 身份会在状态查询成功或保存门自动采用，一次保存
+   即可完成；已有不同身份必须显式选择“使用此账号”，不会自动覆盖。`Checking` 期间保存只
+   提示等待，不写红字。`SignedOut`/查询失败/作用域变化各有对应文案与推荐动作。
+6. 按 Ctrl+S 或 `Confirm` 保存。字段错误（含多行粘贴被清洗的输入）会阻断保存并只显示
+   对应提示；认证状态变化会清除陈旧的身份/引用错误。长草稿使用进入表单时的配置 revision，
+   出现 revision 冲突时按 Ctrl+R 从 authority 重读并重新基线化（同时同步认证作用域），
+   不会用旧草稿覆盖外部新值，只有该冲突显示重新载入提示。
+7. 在 `/model` 右栏选择要绑定的档位并编辑 provider/model/contextWindow：Responses 的
+   provider/model/window 会作为一个草稿原子保存。右栏选择 `Context window` 按 Enter 可
+   内联编辑该档窗口。Model 草稿的 Model 行按 Enter 进入任意文本编辑，再按 Enter 确认并
+   转到 Save（Esc 恢复原值），最终由 Save/Ctrl+S 提交。Login 落盘的四档默认模型会用于
+   Model 面板预填；已有显式 `profile.model` 优先，不会被预填覆盖。底部
+   `[Ctrl+L 管理 Provider · 认证：/login]` 是按钮，点击与 Ctrl+L 相同：打开 Login
    并定向编辑当前 provider；有未保存草稿时两者都只提示先保存或取消，草稿保留。
-7. Login Edit 的字段、类型/认证方式/档位/绑定/Confirm，以及 Model 草稿的 Save/Cancel 与
-   内联 window editor 的保存/取消都可用鼠标点击，语义与键盘一致。Model 普通右栏
+8. Login Edit 的字段、类型/认证方式/Confirm，以及 Model 草稿的 Save/Cancel 与内联 window
+   editor 的保存/取消都可用鼠标点击，语义与键盘一致。Model 普通右栏
    Provider/Model/Effort/Max tokens/Context window 行也可点击：先聚焦该行，再执行与
    键盘相同的动作（Responses context/model 进入既有 editor/草稿，其他字段沿用即时保存）。
    空白、边框、分隔线与滚动条不触发动作；右栏滚动后点击可见行仍命中该字段。
-8. Model 的窗口数值 editor 与 Model 文本 editor 是单行字段：换行/控制字符不会写入——
+9. Model 的窗口数值 editor 与 Model 文本 editor 是单行字段：换行/控制字符不会写入——
    按键被拒绝，终端粘贴整段拒绝——保留原文本并显示既有错误，修正前 Enter/Ctrl+S 保存
    被阻断；窗口字段还拒绝非数字。修正（退格或输入合法字符）后可继续保存。
 
@@ -115,8 +127,10 @@ peri --config-file /absolute/path/settings.json auth chatgpt logout --account wo
 state 不会跨绑定重放；可用的通用消息仍按适配器契约处理。
 
 ChatGPT plan profile 不发送 `max_output_tokens` 或 `temperature`；`max_tokens`
-不会成为该模式的服务器输出上限，预算层把它标记为未知。`contextWindow` 仍需明确
-配置。授权、凭据文件、刷新与注销均由原生 credentials MCP 能力负责。
+不会成为该模式的服务器输出上限，预算层把它标记为未知。Model 面板仍与其它 Responses
+provider 一样允许编辑 Provider/Model/contextWindow/Max tokens；是否被服务端采用属于
+运行时可用性，不改变配置行为。`contextWindow` 仍需明确配置。授权、凭据文件、刷新与注销
+均由原生 credentials MCP 能力负责。
 
 注销先清除本地 grant，并尝试撤销远端授权，输出分别报告两项结果。同一进程内的认证
 manager 可以取消等待；独立 CLI 进程不能立即取消另一进程已经在途的 HTTP，但其后续取
@@ -128,8 +142,11 @@ token 会失败。
 省略，需要压缩时转用 Full 摘要。
 
 TUI 的 Login 面板可完成 Responses provider 创建、API key / ChatGPT plan 认证选择、四档
-model 与 `contextWindow` 配置，以及登录、状态与注销；`/model` 可内联编辑当前档窗口。
-平台与远程环境仍有明确限制：
+默认 model 映射以及登录、状态与注销；档位绑定与 `contextWindow` 由 `/model` 面板配置。
+新建 plan provider 的四档默认 model 会从已保存的同类 plan provider（其次其他 Responses
+provider）预填，只填空字段且不覆盖手动输入；没有来源时不伪造模型名。Login 保存不会写入
+或改写任何 profile：新建 provider 不自动绑定，已有 provider 的绑定与参数保持不变。平台与
+远程环境仍有明确限制：
 
 - 原生凭据存储目前仅支持 Unix；Windows DACL 尚未实现，会返回不支持，API key 模式仍可用。
   WASM 不提供原生浏览器登录或凭据文件能力。
@@ -138,8 +155,10 @@ model 与 `contextWindow` 配置，以及登录、状态与注销；`/model` 可
 - 凭据保存与 provider 配置保存是两阶段：登录成功后凭据已落盘，配置仍可能保存失败；界面
   会明确提示，重试保存不会重跑 OAuth。取消登录等待只停止本地等待，结果未确认时按未知
   处理并可再次查询状态。
-- `status` 读取本地凭据与身份绑定，不代表实时 inference 已成功；身份不匹配时必须显式
-  “Use this account” 才写入引用。
+- `status` 读取本地凭据与身份绑定，不代表实时 inference 已成功；已登录且作用域一致时，
+  空/兼容身份会自动采用，已有不同身份必须显式选择“Use this account”才写入引用。
+- 状态中的到期时间是 access token 的过期时间，不是登录授权失效：使用时会自动刷新，
+  只有刷新失败才需要重新登录。过期状态不阻断 provider 配置保存。
 - 注销先清除本地 grant，再尝试远端撤销；远端失败会如实显示“未确认”，本地清理不会因
   取消等待而跳过。注销不会删除 provider 配置或整个凭据目录。
 
