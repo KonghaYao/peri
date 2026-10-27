@@ -67,8 +67,12 @@ function otlpBody(bytes: Uint8Array): unknown {
 async function fixture() {
   const root = await mkdtemp(resolve(tmpdir(), "peri-sdk-wasm-chat-"));
   const sqlPort = await unusedPort();
+  // 本地走 SDK 的 mise 工具；CI 用 PERI_TEST_SQLD_BIN 指向预下载的 Linux sqld。
+  const sqldCommand = process.env.PERI_TEST_SQLD_BIN
+    ? [process.env.PERI_TEST_SQLD_BIN]
+    : ["mise", "exec", "--", "sqld"];
   const sqld = Bun.spawn([
-    "mise", "exec", "--", "sqld", "--no-welcome", "--http-listen-addr",
+    ...sqldCommand, "--no-welcome", "--http-listen-addr",
     `127.0.0.1:${sqlPort}`, "--db-path", resolve(root, "sessions"),
   ], { cwd: resolve(import.meta.dir, ".."), stdin: "ignore", stdout: "ignore", stderr: "pipe" });
   const sqldLog = new Response(sqld.stderr).text();

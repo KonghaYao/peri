@@ -144,8 +144,27 @@ jobs:
                   test -n "$(find dist/wasm/snippets -type f -print -quit)"
                   bun -e 'const sdk = await import("./dist/index.js"); if (typeof sdk.ChatManager !== "function") throw new Error("ChatManager missing from dist/index.js")'
 
+            # SDK 的 wasm-acp-integration 测试需要真实 sqld。本地由 SDK 的 mise.toml 提供；
+            # Linux runner 这里下载同版本二进制，并用 PERI_TEST_SQLD_BIN 指向它。
+            - name: Install sqld for SDK integration tests
+              env:
+                  SQLD_VERSION: 0.24.32
+                  SQLD_ASSET: libsql-server-x86_64-unknown-linux-gnu.tar.xz
+                  SQLD_SHA256: 71720fc8648c19efef416efebd47145ef59b62e198770533530a858e1336879f
+              run: |
+                  set -euo pipefail
+                  curl -fsSL -o "/tmp/${SQLD_ASSET}" \
+                      "https://github.com/tursodatabase/libsql/releases/download/libsql-server-v${SQLD_VERSION}/${SQLD_ASSET}"
+                  echo "${SQLD_SHA256}  /tmp/${SQLD_ASSET}" | sha256sum -c -
+                  mkdir -p /tmp/sqld
+                  tar -xJf "/tmp/${SQLD_ASSET}" -C /tmp/sqld --strip-components=1
+                  sudo install -m 0755 /tmp/sqld/sqld /usr/local/bin/sqld
+                  sqld --version
+
             - name: Run SDK tests
               working-directory: npm-packages/@peri-sdk
+              env:
+                  PERI_TEST_SQLD_BIN: /usr/local/bin/sqld
               run: bun test
 
             # 打包前才改版本：测试始终跑在仓库声明的版本上，避免测试结果依赖 tag。
