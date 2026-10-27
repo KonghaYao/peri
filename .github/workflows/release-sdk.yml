@@ -70,7 +70,7 @@ jobs:
                   INPUT_DRY_RUN: ${{ inputs.dry_run }}
               run: |
                   set -euo pipefail
-                  if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+                  if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "tag" ]]; then
                       [[ "${GITHUB_REF_NAME}" == sdk-v* ]] || { echo "::error::tag must start with sdk-v"; exit 1; }
                       version="${GITHUB_REF_NAME#sdk-v}"
                       dry_run=false
