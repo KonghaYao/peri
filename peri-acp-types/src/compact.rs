@@ -10,6 +10,11 @@ use crate::messages::BaseMessage;
 pub const CONTINUATION_HINT: &str =
     "[Context has been compacted. Continue working based on the summary above.]";
 
+/// 自动 Micro 最小净收益分母：完整上下文窗口的 1/10，向上取整。
+///
+/// 这是收益定义的一部分，不是可调旋钮；若需改变比例，必须作为独立决策重新评估。
+pub const MICRO_MIN_GAIN_DIVISOR: u64 = 10;
+
 /// 升级到 Full Compact 的原因（事件契约字段）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

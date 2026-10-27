@@ -305,13 +305,28 @@ pub(super) fn render(
     }
     // A root follows its visible `last_anchor`; when Full removed that member it follows
     // the message that still carries the root directive (usually the summary).
+    // If the anchor is a catalog anchor, advance past its sibling results so the root
+    // never lands between a `tool_use` and its `tool_result`.
     let mut root_positions: HashMap<MessageId, usize> = HashMap::new();
     for (root, holder) in &root_holders {
-        let position = visible_positions
-            .get(&root.last_anchor)
-            .or_else(|| holder.and_then(|id| visible_positions.get(&id)))
-            .copied()
-            .unwrap_or(tail);
+        let position = match catalogs.get(&root.last_anchor) {
+            Some(catalog) if visible_positions.contains_key(&root.last_anchor) => {
+                receipt_insertion_index(
+                    transcript,
+                    catalog,
+                    root.last_anchor,
+                    &visible_positions,
+                    &result_positions,
+                    tail,
+                )
+                .0
+            }
+            _ => visible_positions
+                .get(&root.last_anchor)
+                .or_else(|| holder.and_then(|id| visible_positions.get(&id)))
+                .copied()
+                .unwrap_or(tail),
+        };
         root_positions
             .entry(root.last_anchor)
             .and_modify(|current| *current = (*current).max(position))

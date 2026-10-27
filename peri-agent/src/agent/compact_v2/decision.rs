@@ -6,14 +6,16 @@
 
 use super::planner::ContextPressure;
 use super::CompactConfig;
-use peri_acp_types::compact::{CompactDeferral, CompactDeferralReason, FullEscalationReason};
+use peri_acp_types::compact::{
+    CompactDeferral, CompactDeferralReason, FullEscalationReason, MICRO_MIN_GAIN_DIVISOR,
+};
 
 /// 最小 Micro 净收益的门槛分母：完整上下文窗口的 1/10，向上取整。
 ///
 /// 比例只在 [`min_micro_gain_tokens`] 定义一次；planner、Full 与 Smart 分支
 /// 都复用它，避免复制出第二套经济门槛。
 pub fn min_micro_gain_tokens(context_window: u32) -> u64 {
-    u64::from(context_window).div_ceil(10)
+    u64::from(context_window).div_ceil(MICRO_MIN_GAIN_DIVISOR)
 }
 
 /// 自动压缩的决策结果。

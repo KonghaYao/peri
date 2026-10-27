@@ -290,6 +290,55 @@ fn receipt_budget_overflow_keeps_the_root_at_the_same_step() {
 }
 
 #[test]
+fn root_after_catalog_anchor_follows_all_sibling_results() {
+    let mut transcript = MessageTranscript::new();
+    let call = assistant_blocks(
+        0x20,
+        "mixed step",
+        &[("call-a", "Read"), ("call-b", "Grep")],
+    );
+    let closed = tool_text(0x21, "call-a", "closed result");
+    let pending = tool_text(0x22, "call-b", "pending result");
+    let task = human_text(0x23, "NEW TASK after mixed step");
+    transcript.append(call.clone());
+    transcript.append(closed.clone());
+    transcript.append(pending.clone());
+    transcript.append(task.clone());
+
+    let catalog = catalog("group-a", call.id(), &[&call, &closed], "mixed receipt");
+    let root = root_for(call.id(), call.id());
+    let actions = vec![
+        omit(call.id(), call.id(), &catalog.group_id, "call-a"),
+        omit(closed.id(), call.id(), &catalog.group_id, "call-a"),
+    ];
+    transcript.set_flags_projection(
+        call.id(),
+        MessageProjectionDirective {
+            policy_version: 3,
+            archive_catalog: Some(catalog),
+            entries: actions.clone(),
+            archive_roots: vec![root],
+            archive_receipt_budget_tokens: Some(1_000),
+            ..Default::default()
+        },
+    );
+
+    let messages = rendered(&transcript, &actions, &ProviderCapabilities::openai());
+    let root = text_index(&messages, "Historical data archive");
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.content().contains("closed result")),
+        "被归档的结果不进入最终请求"
+    );
+    assert!(
+        root > text_index(&messages, "pending result"),
+        "root 必须越过同一 anchor 声明的全部兄弟结果，不能插在调用与结果之间"
+    );
+    assert!(root < text_index(&messages, "NEW TASK"));
+}
+
+#[test]
 fn root_after_full_follows_the_summary_that_carries_it() {
     let mut transcript = MessageTranscript::new();
     let call = assistant_blocks(0x10, "old step", &[("call-a", "Read")]);
