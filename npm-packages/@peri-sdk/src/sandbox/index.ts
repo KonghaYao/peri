@@ -5,14 +5,14 @@ export type {
   SandboxBackend,
   SandboxBackendInstance,
   SandboxBackendStartOptions,
-  SandboxChatSessionInit,
   SandboxEndpoint,
   SandboxHandleState,
   SandboxInstanceState,
   SandboxManagerErrorCode,
   SandboxManagerOptions,
   SandboxManagerStartOptions,
+  SandboxMcpHttpServer,
+  SandboxMcpServer,
   SandboxProfile,
   SandboxStatus,
 } from "./types";
-export type { AcpMcpServer } from "../contracts/acp";

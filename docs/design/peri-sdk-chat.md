@@ -9,13 +9,13 @@
 
 SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行、调度、会话持久化与工具运行仍归 Peri。一个 Chat 句柄对应一次可替换的 Session 绑定，不把 Chat 句柄 ID 当作持久 Session 身份。
 
-不新增 SDK 调度器、持久执行恢复、平行会话表或第二套 ACP 协议。ACP 连接只有宿主注入的一条装配路径；SDK 不启动 Workspace 进程，也不提供本地数据库后端。唯一例外是显式可选的 Node 子入口 `/sandbox`：`SandboxManager` 按 `sandboxId` 管理宿主进程内的多个 `peri-sandbox` 实例，`SandboxHandle` 只把 ready 实例投影为 `ChatSessionInit.mcpServers`；session 绑定由调用方决定，不改变 ACP/Chat 契约。
+不新增 SDK 调度器、持久执行恢复、平行会话表或第二套 ACP 协议。ACP 连接只有宿主注入的一条装配路径；SDK 不启动 Workspace 进程，也不提供本地数据库后端。唯一例外是显式可选的 server-side 子入口 `/sandbox`：`SandboxManager` 按 `sandboxId` 管理宿主进程内的多个 `peri-sandbox` 实例，`SandboxHandle` 只暴露 ready 实例的 `workspacePath` 与 MCP descriptor（`SandboxMcpServer`）；sessionInit 由调用方组装并在 `createChat({ sessionInit })` 中按 chat 传入，不改变 ACP/Chat 契约。
 
 ## 2. 五个核心对象
 
 | 对象 | 职责 | 生命周期 |
 | --- | --- | --- |
-| `ChatManager` | 共享依赖快照、句柄目录、SessionOwnership 协调、整体释放；不接收普通执行动作 | 进程/宿主内可重建；`shutdown` 后封闭新准入 |
+| `ChatManager` | 共享依赖快照（含可选默认 `sessionInit`）、句柄目录、SessionOwnership 协调、整体释放；不接收普通执行动作 | 进程/宿主内可重建；`shutdown` 后封闭新准入 |
 | `ChatService` | 单 Chat 的绑定状态机、动作分派、事实日志、载荷读取；不持有 Manager，不依赖 Yjs | 由 `createChat` 同步登记；绑定在首次动作时建立 |
 | `ChatUserAction` | 八类纯数据用户意图，携带稳定 `requestId` | 单次请求；结果按 `disposition` 判断可重试性 |
 | `PeriInstance` | 一次激活的 ACP Session/运行后端装配，交互、队列、历史与载荷控制 | 由 `ChatService` 拥有；绑定换代或关闭时释放 |
@@ -34,8 +34,8 @@ SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行
 
 ## 4. 绑定、SessionOwnership 与关闭
 
-- `createChat` 只同步登记句柄，不启动 ACP、不取得 SessionOwnership、不读取历史。
-- 首次绑定由 `create_new_session` 或 `change_session` 触发；新会话使用句柄 path 或 `sessionInit.path`，加载历史使用 Store 中的持久 cwd。
+- `createChat({ path?, sessionInit? })` 只同步登记句柄，不启动 ACP、不取得 SessionOwnership、不读取历史。`sessionInit` 是该 Chat 的 Session 建立输入：传入时整体覆盖 `chatConfig.sessionInit` 默认值，不做字段合并；每个句柄持有独立顶层对象，未配置时为空对象。
+- 首次绑定由 `create_new_session` 或 `change_session` 触发；新会话使用句柄 path 或该 Chat 的 `sessionInit.path`（句柄 path 优先），加载历史使用 Store 中的持久 cwd。
 - 同一 Session 同时至多一个执行所有者。调用方注入 3 方法存储端口（`ChatManagerOptions.kv`），`ChatManager` 内部构造 `SessionOwnership`；`LocalSessionIndex` 覆盖 binding/cleanup 候选，同 Manager 内冲突带 `ownerChatId`。
 - 归属记录 key 为 `ownership:<base64url(sessionId)>`，value 为 `{ sessionId, owner }`；owner 是 Manager 内部随机 UUID。acquire 是读后写、非原子；KV 记录是绑定标记/防御路由 bug，不是互斥原语，跨 Manager/进程的单实例绑定由路由层串行化，SDK 只做顺序冲突检测。`SessionOwnership` 协调器是内部实现，公开面只有 `KvStorage` 与 `clearSessionOwnership`。
 - 无 TTL、续租或心跳：崩溃遗留记录由路由层调用 `clearSessionOwnership(storage, sessionId)` 清理，且只能在旧实例已停止或已被 fence 后调用。
@@ -76,7 +76,7 @@ SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行
 | `/view` | `src/entries/view.ts` | 浏览器安全展示出口：副本、`readSessionView`、载荷读取、同步协议；不引入 Node 运行时依赖，也不导出 `ChatViewRegistry` |
 | `/wasm` | `src/entries/wasm.ts` | 平台无关的 Emscripten 运行后端、loader、transport |
 | `/wasm-node` | `src/entries/wasm-node.ts` | `/wasm` + Node 网络/DNS 端口 |
-| `/sandbox` | `src/entries/sandbox.ts` | Node-only 的可选资源入口：`SandboxManager`（多实例、backend、`closeAll`）+ `SandboxHandle`（生命周期与 MCP 投影）；不接收 session |
+| `/sandbox` | `src/entries/sandbox.ts` | server-side 的可选资源入口：`SandboxManager`（多实例、backend、`closeAll`）+ `SandboxHandle`（生命周期、`workspacePath` 与 MCP descriptor）；不接收 session |
 
 主入口与 `/portable` 共用的 Chat 门面在 `src/entries/chat.ts`。
 

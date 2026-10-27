@@ -25,3 +25,9 @@ entryTest("sandbox bundle exists and exports the public entry", async () => {
   const declaration = resolve(dist, "entries/sandbox.d.ts");
   expect(await Bun.file(declaration).exists()).toBe(true);
 });
+
+entryTest("sandbox bundle does not pull in agent or session modules", async () => {
+  const source = await Bun.file(resolve(dist, "sandbox.js")).text();
+  for (const marker of ["agent/peri-instance", "agent/session", "contracts/acp", "ChatSessionInit", "AcpMcpServer"])
+    expect(source, `sandbox.js must not contain ${marker}`).not.toContain(marker);
+});

@@ -45,8 +45,8 @@ export function createSandboxId(): string {
  *
  * The manager knows nothing about chat sessions: it neither receives a
  * session key nor stores a session mapping. Callers decide which session
- * binds to which handle, and {@link SandboxHandle.chatSessionInit} merely
- * projects a ready sandbox into `ChatSessionInit` input.
+ * binds to which handle, and {@link SandboxHandle.mcpServer} merely exposes
+ * a ready sandbox as data; session init is assembled by the caller.
  */
 export class SandboxManager {
   private readonly options: NormalizedOptions;

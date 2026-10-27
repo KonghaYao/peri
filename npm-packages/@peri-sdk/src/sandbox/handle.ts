@@ -5,10 +5,10 @@ import {
   type SandboxBackend,
   type SandboxBackendInstance,
   type SandboxBackendStartOptions,
-  type SandboxChatSessionInit,
   type SandboxEndpoint,
   type SandboxHandleState,
   type SandboxManagerErrorCode,
+  type SandboxMcpServer,
   type SandboxProfile,
   type SandboxStatus,
 } from "./types";
@@ -122,10 +122,10 @@ function validateWorkspace(value: string): string {
 /**
  * One sandbox resource owned by a {@link SandboxManager}.
  *
- * The handle owns the instance lifecycle and the `ChatSessionInit` projection,
- * but never a session: binding the projection to a chat session is the
- * caller's decision. The bearer token leaves only through
- * `chatSessionInit()`; `status()`, `endpoint()` and errors are redacted.
+ * The handle owns the instance lifecycle but never a session: binding a
+ * ready sandbox to a chat session is the caller's decision. The bearer token
+ * leaves only through `mcpServer()`; `status()`, `endpoint()` and errors are
+ * redacted.
  */
 export class SandboxHandle {
   readonly sandboxId: string;
@@ -157,6 +157,12 @@ export class SandboxHandle {
   get state(): SandboxHandleState {
     this.syncInstanceState();
     return this.stateValue;
+  }
+
+  /** Workspace path reported by the backend, or `null` before the first start. */
+  get workspacePath(): string | null {
+    this.syncInstanceState();
+    return this.endpointValue?.workspacePath ?? this.workspacePathValue;
   }
 
   /**
@@ -201,27 +207,28 @@ export class SandboxHandle {
   }
 
   /**
-   * Ensure this sandbox is ready and project it into `ChatSessionInit` input.
+   * Project a ready sandbox into one HTTP MCP server entry.
    *
-   * `path` is the sandbox workspace as seen by the host; `mcpServers` carries
-   * the HTTP descriptor with a bearer header. This is a pure binding step and
-   * the only place the token leaves the handle.
+   * Rejects with `not_ready` unless the instance is ready and with `closed`
+   * after `close()`. This is the only place the bearer token leaves the
+   * handle; callers assemble their own session init from this value.
    */
-  async chatSessionInit(options: { instructions?: string } = {}): Promise<SandboxChatSessionInit> {
-    const endpoint = await this.start();
+  async mcpServer(): Promise<SandboxMcpServer> {
+    this.syncInstanceState();
+    if (this.stateValue === "closed" || this.closeRequested)
+      throw new SandboxManagerError("closed", "Sandbox handle is closed.");
+    const endpoint = this.endpointValue;
     const instance = this.instanceValue;
-    if (!instance) throw new SandboxManagerError("start_failed", "Sandbox instance disappeared after start.");
+    if (this.stateValue !== "ready" || !endpoint || !instance)
+      throw new SandboxManagerError("not_ready", `Sandbox is not ready (state: ${this.stateValue}).`);
     if (!instance.token)
       throw new SandboxManagerError("token_unavailable", "Sandbox instance did not provide a token.");
     return {
-      path: endpoint.workspacePath,
-      ...(options.instructions === undefined ? {} : { instructions: options.instructions }),
-      mcpServers: {
-        [this.serverName]: {
-          type: "http",
-          url: endpoint.mcpUrl,
-          headers: { Authorization: `Bearer ${instance.token}` },
-        },
+      name: this.serverName,
+      config: {
+        type: "http",
+        url: endpoint.mcpUrl,
+        headers: { Authorization: `Bearer ${instance.token}` },
       },
     };
   }

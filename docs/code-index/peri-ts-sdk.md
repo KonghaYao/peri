@@ -12,7 +12,7 @@
 | `/view` | `src/entries/view.ts` | 浏览器安全展示：`ChatView`、`ChatReplica`、`readSessionView`、载荷读取、同步协议；不引入 Node 运行时依赖，也不导出 `ChatViewRegistry` |
 | `/wasm` | `src/entries/wasm.ts` | Emscripten ACP 运行后端、loader、`WasmAcpTransport` |
 | `/wasm-node` | `src/entries/wasm-node.ts` | `/wasm` + Node 网络/DNS 端口 |
-| `/sandbox` | `src/entries/sandbox.ts` | Node-only；`SandboxManager` 按 `sandboxId` 管理多个进程内 `peri-sandbox`，`SandboxHandle` 输出 HTTP MCP `sessionInit`；动态 import optional peer |
+| `/sandbox` | `src/entries/sandbox.ts` | server-side（Node 22.12+/Bun）；`SandboxManager` 按 `sandboxId` 管理多个进程内 `peri-sandbox`，`SandboxHandle` 暴露 `workspacePath` 与 HTTP MCP descriptor，sessionInit 由调用方组装并在 `createChat` 传入；动态 import optional peer |
 
 旧 `Agent`、`ManagedAgents`、`SessionDocs`、`SessionViewStore`、`AtomicManagedAgentKv`、
 `agent-claim-conflict-error`、`Sandbox` 已删除，不在任何发布入口导出；`tests/public-view.test.ts`
@@ -34,11 +34,11 @@
 
 | 职责 | 入口 | 行为 |
 | --- | --- | --- |
-| Manager | `src/chat/manager.ts` | 同步 `createChat`；句柄目录、`findChatBySession`、目录读取、`closeChat`、`shutdown`；不接收普通执行动作 |
+| Manager | `src/chat/manager.ts` | 同步 `createChat({ path, sessionInit })`；Manager 级 `chatConfig.sessionInit` 是默认值，句柄级 `sessionInit` 整体覆盖且每个 Chat 持有独立顶层对象；句柄目录、`findChatBySession`、目录读取、`closeChat`、`shutdown`；不接收普通执行动作 |
 | Manager 契约 | `src/chat/types.ts`、`src/entries/chat.ts` | `ChatManager`/`ChatService` 接口；对外类型名 `ChatManagerContract`，具体类 `src/chat/manager.ts` 实现它，调用方可注入自有实现 |
 | Service | `src/chat/service.ts`、`src/chat/binding.ts`、`src/chat/close-chat.ts` | 绑定状态机、八类动作分派、回执关联、事实日志、关闭预算与失败保留；载荷读取按发起时的绑定代次校验，换绑后的晚到结果/错误丢弃为 `unavailable` |
 | 动作 | `src/chat/action.ts`、`src/util/json-value.ts` | 八类纯数据 Action、`requestId`、JSON 深拷贝/冻结、`parseChatUserAction`；不依赖 `instanceof` |
-| 类型/错误 | `src/chat/types.ts`、`src/agent/port.ts`、`src/chat/errors.ts` | `ChatRuntime`、`ChatSessionInit`、`ChatLifecycleOptions`、`PeriInstancePort`、错误 `disposition` 与 `ChatCloseIncompleteError` |
+| 类型/错误 | `src/chat/types.ts`、`src/agent/port.ts`、`src/chat/errors.ts` | `ChatRuntime`、`ChatSessionInit`、`ChatCreateOptions`、`ChatLifecycleOptions`、`PeriInstancePort`、错误 `disposition` 与 `ChatCloseIncompleteError` |
 | 事实 | `src/contracts/chat.ts`、`src/chat/fact-hub.ts` | 按绑定代次编号的事实封套；晚挂 View 重放 |
 | 回执 | `src/chat/send-receipt.ts` | `inputId` 稳定；`accepted` 是入队，投递等待是另一件事 |
 | Session ownership（内部） | `src/chat/ownership.ts`、`src/chat/types.ts` | `ChatManager` 接收 3 方法 `KvStorage` 并在内部构造 `KvSessionOwnership`（owner 为实例随机 UUID）；key 为 `ownership:<base64url(sessionId)>`，value 为 `{ sessionId, owner }`；acquire 是读后写、非原子，KV 记录是绑定标记/防御路由 bug，不是互斥原语；无 TTL/续租/CAS，路由层负责串行化与 `clearSessionOwnership`；`LocalSessionIndex` 负责同 Manager 内句柄互斥。`SessionOwnership`/`KvSessionOwnership`/`SessionOwnershipConflictError`/key 函数仅模块内使用；入口只导出 `KvStorage` 与 `clearSessionOwnership` |
@@ -56,7 +56,7 @@
 | MCP over ACP | `src/agent/acp-mcp-bridge.ts`、`src/contracts/acp.ts` | `acp` 声明走反向 `mcp/message`；直接实例单次借用，跨激活必须用工厂；owned 实例由激活关闭 |
 | 载荷 | `src/state/tool-payloads.ts`、`src/chat/payload-access.ts`、`src/payload/reader.ts` | 内容寻址引用、inline/单项/会话预算、`readPayload` 字节与 JSON 校验；错误码 `unauthorized`/`unavailable`/`too_large`/`integrity_error`/`aborted`/`transport_error` |
 | 运行后端 | `src/wasm/{runtime,runtime-pool,loader,ports,scheduler,transport}.ts`、`src/wasm/budget.ts` | WASM 启动/租约/关闭证据；scheduler 与清理/启动超时由运行后端自持；`moduleFactory` 时无需 `moduleUrl`；HTTP/DNS 端口仅在深层运行后端入口可注入 |
-| 沙箱 | `src/sandbox/manager.ts`、`src/sandbox/handle.ts`、`src/sandbox/backend.ts` | `SandboxManager`：handle 表、生成 `sbx_<32 hex>`、backend 懒加载、`closeAll` 聚合失败；`SandboxHandle`：单实例状态机、start/stop/close、loopback 校验、token 脱敏与 `chatSessionInit` 投影；manager 不接收 session |
+| 沙箱 | `src/sandbox/manager.ts`、`src/sandbox/handle.ts`、`src/sandbox/backend.ts` | `SandboxManager`：handle 表、生成 `sbx_<32 hex>`、backend 懒加载、`closeAll` 聚合失败；`SandboxHandle`：单实例状态机、start/stop/close、loopback 校验、token 脱敏与 `mcpServer()` descriptor（`workspacePath` 另行读取）；manager 不接收 session |
 
 ## 展示与同步
 

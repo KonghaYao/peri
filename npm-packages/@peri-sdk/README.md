@@ -2,7 +2,7 @@
 
 在宿主提供的 ACP transport 上运行 Peri，并给应用一套可读的 Chat 控制面、事实流和只读视图。
 
-SDK 主入口不启动或停止 Peri CLI、Workspace 进程，也不提供本地 SQLite 后端。可选的 `@peri-code/sdk/sandbox` Node 子入口按宿主显式调用管理 `peri-sandbox` 生命周期。宿主负责提供 transport、持久化 Store，并在路由层保证同一 Session 只落在一个实例上。
+SDK 主入口不启动或停止 Peri CLI、Workspace 进程，也不提供本地 SQLite 后端。可选的 `@peri-code/sdk/sandbox` server-side 子入口按宿主显式调用管理 `peri-sandbox` 生命周期。宿主负责提供 transport、持久化 Store，并在路由层保证同一 Session 只落在一个实例上。
 
 下面的接入代码来自 [`peri-cf`](../peri-cf/server/agent/compose.ts) 的真实装配，而不是抽象伪代码。
 
@@ -104,17 +104,18 @@ const manager = new ChatManager({
       },
       onDiagnostic: (kind, error) => console.error("[peri]", kind, error),
     },
-    sessionInit: {
-      path: "/workspace/", // 会话 cwd；peri-cf 用带尾斜杠的 SESSION_CWD
-      instructions: "Help with this workspace.",
-      mcpServers: {},
-    },
   },
 });
 
 // 6. 每个 Chat 一个共享 View；同 Chat 的所有同步连接复用它。
 const views = new ChatViewRegistry();
-const chat = manager.createChat({ path: "/workspace/" });
+const chat = manager.createChat({
+  path: "/workspace/", // 会话 cwd；peri-cf 用带尾斜杠的 SESSION_CWD
+  sessionInit: {
+    instructions: "Help with this workspace.",
+    mcpServers: {},
+  },
+});
 
 // 首次 execute 才绑定 Session。
 const ready = await chat.execute(ChatUserAction.createNewSession({}));
@@ -148,7 +149,7 @@ await manager.shutdown();
 | `agentConfig` | Peri 启动配置：`cwd`、`settings`、`storage`、`machineId` | Peri 运行时 |
 | `database` | 会话目录读取：`listSessions`、`getSession` | `ChatManager` |
 | `kv` | Session 绑定记录，3 个 KV 方法 | `ChatManager` |
-| `chatConfig` | 运行后端、Session 建立输入、生命周期预算 | `ChatManager` |
+| `chatConfig` | 运行后端、可选默认 Session 建立输入、生命周期预算 | `ChatManager` |
 
 ### `agentConfig`
 
@@ -220,16 +221,25 @@ interface KvStorage {
 | 字段 | 说明 |
 | --- | --- |
 | `runtime` | 必填。`{ kind: "wasm" }` 在进程内启动 WASM 模块；`{ kind: "transport", factory }` 由宿主按 path 创建 transport |
-| `sessionInit` | `path`、`instructions`、`mcpServers` |
+| `sessionInit` | 可选默认值：`path`、`instructions`、`mcpServers`；`createChat({ sessionInit })` 按 chat 整体覆盖，不做字段合并 |
 | `lifecycle` | `closeDrainTimeoutMs`、`startupSettleTimeoutMs`、`activationCloseTimeoutMs`、`shutdownChatTimeoutMs` |
 
 `runtime.kind="wasm"` 时，Manager 为每次激活启动独立 WASM 运行后端，并把 `agentConfig` 序列化为启动配置；可注入 `moduleUrl`、`moduleFactory`、`env` 与 `onDiagnostic`。scheduler 与清理/启动超时由 SDK 内部管理，用户不可配置。`lifecycle` 未显式给出时按 runtime kind 取默认值：wasm 为 activation 25s、shutdown 30s；transport 为 5s、15s。
 
 `runtime.kind="transport"` 时，SDK 不启动 Peri 或 Workspace 进程；`factory` 的 `close()` 成功即视为停止证明，失败保留原因供重试。
 
+### `createChat`
+
+| 字段 | 说明 |
+| --- | --- |
+| `path` | 句柄级新会话 cwd；优先于 `sessionInit.path`，加载历史不使用该值 |
+| `sessionInit` | 该 Chat 的 `path`、`instructions`、`mcpServers`；传值时整体覆盖 `chatConfig.sessionInit`，不做字段合并 |
+
+未传 `sessionInit` 时使用 Manager 默认值；两者都没有时使用 `{}`。`createChat` 同步登记句柄，不启动 ACP；每个 Chat 持有独立的顶层配置对象，互不影响。
+
 ## 核心概念
 
-1. **Chat 句柄**：`manager.createChat()` 同步登记，不启动 ACP、不取得 ownership、不读历史。
+1. **Chat 句柄**：`manager.createChat({ path, sessionInit })` 同步登记，不启动 ACP、不取得 ownership、不读历史；`sessionInit` 按 chat 覆盖 Manager 默认值。
 2. **Session**：Peri 持久化的会话；只有首次绑定动作才会创建或加载。
 3. **绑定**：`create_new_session` 使用句柄 path 或 `sessionInit.path`；`change_session` 使用 Store 中的持久 cwd，不回退句柄 path。
 4. **ownership**：同一 Session 同时至多一个执行所有者；只在清理确认后释放，关闭超时或失败时保留。
@@ -278,7 +288,7 @@ await replica.dispose();
 
 ## MCP over ACP
 
-`chatConfig.sessionInit.mcpServers` 支持 `http`、`stdio` 与 `acp` 声明。`acp` 声明只序列化 `{type:"acp", name, serverId}`，Peri 的反向 `mcp/message` 由 SDK 桥接到官方 server 实例；`serverId` 缺省使用 Record key。
+`sessionInit.mcpServers`（来自 `chatConfig.sessionInit` 默认值或 `createChat({ sessionInit })`）支持 `http`、`stdio` 与 `acp` 声明。`acp` 声明只序列化 `{type:"acp", name, serverId}`，Peri 的反向 `mcp/message` 由 SDK 桥接到官方 server 实例；`serverId` 缺省使用 Record key。
 
 ### 配合官方 McpServer
 
@@ -296,7 +306,8 @@ const createMyMcpServer = () => {
   return server;
 };
 
-chatConfig: {
+const chat = manager.createChat({
+  path: "/workspace",
   sessionInit: {
     mcpServers: {
       "my-tools": {
@@ -305,7 +316,7 @@ chatConfig: {
       },
     },
   },
-}
+});
 ```
 
 1. 官方 `McpServer` 负责 tools/resources/prompts；桥接只依赖实例的 `connect(transport)`，不需要适配层，直接把实例或工厂放进 `type:"acp"` 的 `server`。
@@ -317,11 +328,11 @@ chatConfig: {
 
 `@peri-code/sdk` 不自带官方 MCP 包，使用方自行安装：v2 用 `bun add @modelcontextprotocol/server`；v1 单包路径为 `@modelcontextprotocol/sdk/server/mcp.js`，两版都可直接传入。
 
-## 沙箱生命周期（可选，Node only）
+## 沙箱生命周期（可选，server-side / host runtime）
 
-`@peri-code/sdk/sandbox` 是独立的 Node 子入口，提供 `SandboxManager` + `SandboxHandle` 两层：`SandboxManager` 按 `sandboxId` 管理多个 `peri-sandbox` 实例，`SandboxHandle` 表示其中一个 sandbox 资源。它不是 daemon、control socket 或 SQLite registry，也不感知 session；sandbox 状态只存在于 manager 跟踪的 handle 和 workspace 文件中。主入口、`/portable`、`/wasm`、`/view` 不加载它，也不会间接加载 `peri-sandbox`、`better-sqlite3` 或 `@anthropic-ai/sandbox-runtime`。
+`@peri-code/sdk/sandbox` 是独立的 server-side（宿主运行时）子入口，提供 `SandboxManager` + `SandboxHandle` 两层：`SandboxManager` 按 `sandboxId` 管理多个 `peri-sandbox` 实例，`SandboxHandle` 表示其中一个 sandbox 资源。它不是 daemon、control socket 或 SQLite registry，也不感知 session；sandbox 状态只存在于 manager 跟踪的 handle 和 workspace 文件中。主入口、`/portable`、`/wasm`、`/view` 不加载它，也不会间接加载 `peri-sandbox`、`better-sqlite3` 或 `@anthropic-ai/sandbox-runtime`。
 
-该入口当前只支持 macOS / Linux，要求 Node >= 22.12；Linux 需要可用的 systemd user session，Windows 不支持。
+该入口要求宿主运行时为 Node 22.12+ 或 Bun；浏览器、WASM、Edge 不可用。当前只支持 macOS / Linux；Linux 需要可用的 systemd user session，Windows 不支持。
 
 ### 安装与前置条件
 
@@ -345,37 +356,45 @@ bunx peri-sandbox doctor   # 只报告环境问题，不自动清理
 
 ### 用法
 
-Manager 独立于会话：它不接收 session，也不记录 session 映射。`handle.chatSessionInit()` 只把 ready 的 sandbox 投影成 `ChatSessionInit`，绑定到哪个会话由调用方决定。
+Manager 独立于会话：它不接收 session，也不记录 session 映射。`handle.workspacePath` 返回 sandbox workspace 路径，`handle.mcpServer()` 返回 ready sandbox 的 MCP 描述符；sessionInit 由调用方组装并在 `createChat({ sessionInit })` 中按 chat 传入，绑定到哪个会话也由调用方决定。
 
 ```ts
+import { ChatManager } from "@peri-code/sdk";
 import { SandboxManager } from "@peri-code/sdk/sandbox";
 
 const sandboxes = new SandboxManager({
   // settingsPath / sandboxesRoot / profileName / profile / port / serverName 可选
 });
 
-const handle = await sandboxes.start({
+const sandbox = await sandboxes.start({
   sandboxId: "sbx_0123456789abcdef0123456789abcdef", // 可选；不传时生成新的 sbx_<32 hex>
 });
-const sessionInit = await handle.chatSessionInit({
-  instructions: "Use the sandbox workspace.",
-});
+const mcp = await sandbox.mcpServer();
+const workspacePath = sandbox.workspacePath!;
 
 const manager = new ChatManager({
-  agentConfig: { cwd: sessionInit.path, /* ... */ },
+  agentConfig: { cwd: workspacePath, /* ... */ },
   database,
   kv,
   chatConfig: {
     runtime: { /* ... */ },
-    // 调用方决定：把 handle 的投影绑定到这次会话
-    sessionInit,
+    // 可选默认值；这里不传，由每个 chat 自己决定
+  },
+});
+
+// sandbox 绑定到哪个 chat 由调用方决定。
+const chat = manager.createChat({
+  path: workspacePath,
+  sessionInit: {
+    instructions: "Use the sandbox workspace.",
+    mcpServers: { [mcp.name]: mcp.config },
   },
 });
 
 // 先关闭 Chat 控制面，再关闭沙箱
 await manager.shutdown();
-await handle.close(); // 终止实例，保留 workspace
-// 或：await handle.close({ deleteData: true }); // 同时删除 <sandboxesRoot>/<sandboxId>
+await sandbox.close(); // 终止实例，保留 workspace
+// 或：await sandbox.close({ deleteData: true }); // 同时删除 <sandboxesRoot>/<sandboxId>
 // 或：await sandboxes.closeAll(); // 关闭 manager 跟踪的全部 handle
 ```
 
@@ -399,9 +418,10 @@ Manager 选项：`settingsPath`、`sandboxesRoot`、`profileName`、`profile`、
 | --- | --- |
 | `sandboxId` / `serverName` | 该 sandbox 的稳定 id 与 MCP server key。 |
 | `state` | `idle` / `starting` / `ready` / `stopping` / `stopped` / `failed` / `closed`。 |
+| `workspacePath` | backend 报告的 workspace 宿主绝对路径；首次 `start()` 前为 `null`，停止或关闭后仍保留。 |
 | `start()` | 启动或复用该实例，返回 `{ sandboxId, serverName, mcpUrl, runId, workspacePath }`；并发调用共享同一个 Promise，失败可重试，`close()` 后拒绝。 |
 | `status()` | 同步快照 `{ sandboxId, state, mcpUrl, workspacePath, lastError }`；不返回 token。 |
-| `chatSessionInit({ instructions? })` | 确保实例 ready，返回 `{ path, instructions?, mcpServers }`；可直接作为 `ChatManager.chatConfig.sessionInit`。token 只在这里出现。 |
+| `mcpServer()` | 仅在 `ready` 时返回 `{ name, config }`；`config` 是带 Bearer token 的 loopback HTTP descriptor。非 ready 抛 `not_ready`，`close()` 后抛 `closed`。token 只在这里出现。 |
 | `endpoint()` | 当前 endpoint 或 `null`；不返回 token。 |
 | `stop()` | 关闭实例，保留 handle 与 workspace，可再次 `start()`；不从 manager 移除。 |
 | `close({ deleteData? })` | 终止操作且幂等；成功后从 manager 移除，之后不能再 `start()`；`deleteData:true` 删除 `<sandboxesRoot>/<sandboxId>`。 |
@@ -410,7 +430,7 @@ Manager 选项：`settingsPath`、`sandboxesRoot`、`profileName`、`profile`、
 
 ### 生命周期与边界
 
-1. `chatSessionInit()` 返回的 `path` 是 sandbox workspace 的宿主绝对路径；`mcpServers.workspace` 是带 Bearer token 的 loopback HTTP descriptor。descriptor 只应留在服务端进程，不要交给浏览器或不可信租户。
+1. `handle.workspacePath` 是 sandbox workspace 的宿主绝对路径；`mcpServer()` 返回的 `config` 是带 Bearer token 的 loopback HTTP descriptor。descriptor 只应留在服务端进程，不要交给浏览器或不可信租户。
 2. manager 与 session 解耦：同一个 handle 由调用方决定绑定到哪个会话、何时解除绑定；manager 不保存这种关系，也不提供 session 目录。
 3. 需要跨宿主重启复用 workspace 时，调用方应持久化 `sandboxId` 并再次传给 `start`。同一 `sandboxId` 的 workspace 在 `stop()` 和 `close()` 后保留；重新 `start()` 会得到新 `runId`、新 token，`mcpUrl` 也可能变化，已有 `ChatManager` 仍持有旧 descriptor，需要重新建立会话。
 4. `stop()` 只关闭实例，handle 仍可再次 `start()`；`close()` 成功后才从 `get`/`list` 消失。`closeAll()` 部分失败时，失败 handle 保留以便重试。
@@ -427,7 +447,7 @@ Manager 选项：`settingsPath`、`sandboxesRoot`、`profileName`、`profile`、
 | `@peri-code/sdk/wasm` | `src/entries/wasm.ts` | 平台无关的 Emscripten ACP 运行后端、loader 与 transport |
 | `@peri-code/sdk/wasm-node` | `src/entries/wasm-node.ts` | `/wasm` 加 Node 兼容的网络/DNS 端口 |
 | `@peri-code/sdk/portable` | `src/entries/portable.ts` | 不装配 Bun/stdio 进程或本地 SQLite；Chat 控制面 + 执行准入核心 |
-| `@peri-code/sdk/sandbox` | `src/entries/sandbox.ts` | Node-only；`SandboxManager` 管理多个 `peri-sandbox`，`SandboxHandle` 生成 HTTP MCP sessionInit |
+| `@peri-code/sdk/sandbox` | `src/entries/sandbox.ts` | server-side（Node 22.12+ / Bun）；`SandboxManager` 管理多个 `peri-sandbox`，`SandboxHandle` 暴露 `workspacePath` 与 HTTP MCP descriptor，sessionInit 由调用方组装并在 `createChat` 传入 |
 
 `src/entries/chat.ts` 是主入口与 `/portable` 共用的 Chat 门面，不对应独立包 subpath。`ChatViewRegistry` 只在主入口与 `/portable` 导出，`/view` 保持纯浏览器视图面。
 

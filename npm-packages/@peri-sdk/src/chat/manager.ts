@@ -11,6 +11,7 @@ import type {
     ChatSessionInit,
     ChatRuntime,
     ChatLifecycleOptions,
+    ChatCreateOptions,
     ChatManager as ChatManagerContract,
     ChatManagerOptions,
     SessionOwnership,
@@ -49,7 +50,7 @@ export class ChatManager implements ChatManagerContract {
     private readonly database: ChatDatabase;
     private readonly sessionOwnership: SessionOwnership;
     private readonly runtime: ChatRuntime;
-    private readonly sessionInit: ChatSessionInit;
+    private readonly defaultSessionInit?: ChatSessionInit;
     private readonly instanceFactory: ChatInstanceFactory;
     private readonly wasmRuntimes?: WasmRuntimePool;
     private readonly lifecycle: Required<ChatLifecycleOptions>;
@@ -93,7 +94,10 @@ export class ChatManager implements ChatManagerContract {
         this.sessionOwnership = sessionOwnership;
         // 运行后端配置在构造时快照；端口/模块工厂等实例仍由外部借用。
         this.runtime = { ...options.chatConfig.runtime };
-        this.sessionInit = { ...options.chatConfig.sessionInit };
+        // Manager 级 sessionInit 只是默认值；未配置时不伪造空配置对象。
+        this.defaultSessionInit = options.chatConfig.sessionInit
+            ? { ...options.chatConfig.sessionInit }
+            : undefined;
         this.lifecycle = resolveChatLifecycle(
             this.runtime.kind,
             options.chatConfig.lifecycle,
@@ -132,15 +136,19 @@ export class ChatManager implements ChatManagerContract {
     }
 
     /** 同步声明句柄；不启动 ACP、不取得 Session ownership。 */
-    createChat(options?: { path?: string }): ChatService {
+    createChat(options?: ChatCreateOptions): ChatService {
         if (!this.accepting) {
             throw new Error("ChatManager is shut down; no new chat handles");
         }
+        // 句柄级 sessionInit 整体覆盖默认值；每个 Chat 持有独立顶层对象。
+        const sessionInit = options?.sessionInit
+            ? { ...options.sessionInit }
+            : { ...(this.defaultSessionInit ?? {}) };
         const id = crypto.randomUUID();
         const chat = new ChatService({
             id,
             path: options?.path,
-            sessionInit: this.sessionInit,
+            sessionInit,
             agentConfig: this.agentConfig,
             runtime: this.runtime,
             database: this.database,

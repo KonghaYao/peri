@@ -112,8 +112,15 @@ export interface ChatLifecycleOptions {
 /** Chat 运行配置：运行后端、Session 建立输入与生命周期预算。 */
 export interface ChatConfig {
     runtime: ChatRuntime;
+    /** Manager 级默认 Session 建立输入；`createChat({ sessionInit })` 整体覆盖。 */
     sessionInit?: ChatSessionInit;
     lifecycle?: ChatLifecycleOptions;
+}
+
+/** `createChat` 的句柄级配置；`sessionInit` 整体覆盖 Manager 默认值，不做字段合并。 */
+export interface ChatCreateOptions {
+    path?: string;
+    sessionInit?: ChatSessionInit;
 }
 
 export interface ChatManagerOptions {
@@ -128,7 +135,7 @@ export interface ChatManagerOptions {
 
 export interface ChatManager {
     /** 同步声明句柄；不启动 ACP、不取得 Session ownership。 */
-    createChat(options?: { path?: string }): ChatService;
+    createChat(options?: ChatCreateOptions): ChatService;
     getChat(id: string): ChatService | undefined;
     /** 包含 binding/cleanup 中的候选句柄。 */
     findChatBySession(sessionId: string): ChatService | undefined;

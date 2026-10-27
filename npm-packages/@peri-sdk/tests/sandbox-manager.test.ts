@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { acpMcpServers } from "../src/agent/peri-instance";
+import { SandboxHandle } from "../src/sandbox/handle";
 import { SandboxManager } from "../src/sandbox/manager";
 import {
   SandboxManagerError,
@@ -212,27 +212,59 @@ describe("SandboxManager", () => {
     expect(manager.size).toBe(1);
   });
 
-  test("chatSessionInit produces the ACP HTTP MCP wire shape", async () => {
+  test("mcpServer returns the sandbox HTTP MCP wire shape", async () => {
     const { manager } = createManager();
     const handle = await manager.start({ sandboxId: SANDBOX_ID });
-    const init = await handle.chatSessionInit({ instructions: "Use the sandbox workspace." });
+    const mcp = await handle.mcpServer();
 
-    expect(init.path).toBe(`/tmp/peri-sandbox/sandboxes/${SANDBOX_ID}/workspace`);
-    expect(init.instructions).toBe("Use the sandbox workspace.");
-    expect(acpMcpServers(init.mcpServers)).toEqual([
-      {
-        name: "workspace",
+    expect(mcp).toEqual({
+      name: "workspace",
+      config: {
         type: "http",
         url: "http://127.0.0.1:43117/mcp",
-        headers: [{ name: "Authorization", value: `Bearer ${TOKEN}` }],
+        headers: { Authorization: `Bearer ${TOKEN}` },
       },
-    ]);
+    });
+    expect(handle.workspacePath).toBe(`/tmp/peri-sandbox/sandboxes/${SANDBOX_ID}/workspace`);
+  });
+
+  test("mcpServer requires a ready handle and reports not_ready or closed", async () => {
+    const backend = new FakeBackend();
+    const handle = new SandboxHandle(
+      { sandboxId: SANDBOX_ID, serverName: "workspace", startupTimeoutMs: 1000, stopTimeoutMs: 1000 },
+      { getBackend: async () => backend },
+    );
+
+    expect(handle.workspacePath).toBeNull();
+    await expectErrorCode(handle.mcpServer(), "not_ready");
+
+    await handle.start();
+    expect(handle.workspacePath).toBe(`/tmp/peri-sandbox/sandboxes/${SANDBOX_ID}/workspace`);
+
+    await handle.stop();
+    await expectErrorCode(handle.mcpServer(), "not_ready");
+
+    await handle.start();
+    await handle.close();
+    await expectErrorCode(handle.mcpServer(), "closed");
+  });
+
+  test("sandbox API exposes no session instructions", async () => {
+    const { manager } = createManager();
+    const handle = await manager.start({ sandboxId: SANDBOX_ID });
+    const mcp = await handle.mcpServer();
+
+    expect(Object.keys(mcp).sort()).toEqual(["config", "name"]);
+    expect(Object.keys(mcp.config).sort()).toEqual(["headers", "type", "url"]);
+    expect(JSON.stringify({ workspacePath: handle.workspacePath, mcp })).not.toContain("instructions");
   });
 
   test("custom server names are allowed and reserved names are rejected", async () => {
     const { manager } = createManager({ serverName: "sandbox" });
     await manager.start({ sandboxId: SANDBOX_ID });
-    expect((await manager.get(SANDBOX_ID)?.chatSessionInit())?.mcpServers.sandbox).toBeDefined();
+    const handle = manager.get(SANDBOX_ID);
+    expect(handle).toBeDefined();
+    expect((await handle!.mcpServer()).name).toBe("sandbox");
 
     for (const name of ["web", "artifact", "cron", "workflow", " "])
       expect(() => new SandboxManager({ serverName: name })).toThrow(SandboxManagerError);

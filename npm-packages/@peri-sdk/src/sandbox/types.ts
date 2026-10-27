@@ -1,5 +1,3 @@
-import type { AcpMcpServer } from "../contracts/acp";
-
 /** Lifecycle states reported by one {@link SandboxHandle}. */
 export type SandboxHandleState = "idle" | "starting" | "ready" | "stopping" | "stopped" | "failed" | "closed";
 
@@ -19,6 +17,7 @@ export type SandboxManagerErrorCode =
   | "backend_exited"
   | "workspace_unavailable"
   | "token_unavailable"
+  | "not_ready"
   | "limit_exceeded"
   | "closed"
   | "cancelled";
@@ -138,11 +137,19 @@ export interface SandboxStatus {
 }
 
 /**
- * Shape accepted by `ChatSessionInit`; kept structural so the sandbox layer
- * does not depend on the chat control plane.
+ * HTTP MCP descriptor for one ready sandbox.
+ *
+ * The bearer token appears only in this value; callers assemble their own
+ * session init from it and must not hand it to browsers or untrusted tenants.
  */
-export interface SandboxChatSessionInit {
-  path: string;
-  instructions?: string;
-  mcpServers: Record<string, AcpMcpServer>;
+export interface SandboxMcpHttpServer {
+  type: "http";
+  url: string;
+  headers: Record<string, string>;
+}
+
+/** One MCP server contributed by a ready sandbox. */
+export interface SandboxMcpServer {
+  name: string;
+  config: SandboxMcpHttpServer;
 }

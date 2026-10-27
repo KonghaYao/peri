@@ -29,6 +29,7 @@ export type {
 export type {
     CancelRequestResult,
     ChatConfig,
+    ChatCreateOptions,
     ChatSessionInit,
     ChatRuntime,
     ChatLifecycleOptions,
