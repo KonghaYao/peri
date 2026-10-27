@@ -8,6 +8,15 @@ const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-5-5";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-6.1-sol";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 pub const DEFAULT_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
+const DEFAULT_CHATGPT_PLAN_CONTEXT_WINDOW: u32 = 1_000_000;
+
+fn default_chatgpt_plan_context_window(model: &str) -> Option<u32> {
+    matches!(
+        model,
+        "gpt-6.1-sol" | "gpt-6.1-terra" | "gpt-6-luna" | "gpt-6-astra"
+    )
+    .then_some(DEFAULT_CHATGPT_PLAN_CONTEXT_WINDOW)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResponsesAuthentication {
@@ -26,7 +35,7 @@ pub enum ResponsesAuthentication {
 pub enum ProviderError {
     #[error("unsupported provider type; use anthropic, openai, or openai_responses")]
     UnknownType,
-    #[error("Responses requires an explicit model and positive profile contextWindow")]
+    #[error("Responses requires a model and positive profile contextWindow unless the ChatGPT plan model has a supported default")]
     MissingModelCapacity,
     #[error(
         "Responses baseUrl must be an absolute HTTP(S) URL without user info, query, or fragment"
@@ -303,12 +312,18 @@ fn resolve_responses(
     profile: &ProfileConfig,
     model: String,
 ) -> Result<Option<ResolvedProvider>, ProviderError> {
+    let ResponsesProviderAccess { endpoint, auth } = validate_responses_provider(provider)?;
     let context_window = profile
         .context_window
+        .or_else(|| match &auth {
+            ResponsesAuthentication::ChatGptPlan { .. } => {
+                default_chatgpt_plan_context_window(&model)
+            }
+            ResponsesAuthentication::ApiKey { .. } => None,
+        })
         .filter(|value| *value > 0)
         .filter(|_| !model.trim().is_empty())
         .ok_or(ProviderError::MissingModelCapacity)?;
-    let ResponsesProviderAccess { endpoint, auth } = validate_responses_provider(provider)?;
     Ok(Some(ResolvedProvider::Responses {
         auth,
         endpoint,

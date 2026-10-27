@@ -40,6 +40,18 @@ pub(crate) use edit::switch_active_alias;
 /// pub(crate)：状态栏模型快速切换弹窗（model_quick_switch.rs）复用同一顺序。
 pub(crate) const PROFILE_KEYS: [&str; 4] = ["fable", "opus", "sonnet", "haiku"];
 
+fn effective_context_window(config: &crate::config::PeriConfig, alias: &str) -> Option<u32> {
+    let profile = config.config.profiles.get(alias)?;
+    profile.context_window.or_else(
+        || match peri_acp::provider::LlmProvider::from_config_for_alias(config, alias)? {
+            peri_acp::provider::LlmProvider::Responses { context_window, .. } => {
+                Some(context_window)
+            }
+            _ => None,
+        },
+    )
+}
+
 /// 右侧字段索引
 const FIELD_PROVIDER: usize = 0;
 const FIELD_MODEL: usize = 1;
@@ -254,7 +266,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     .map(|p| p.effort.clone())
                     .unwrap_or_else(|| "xhigh".to_string()),
                 profile.map(|p| p.max_tokens).unwrap_or(32000),
-                profile.and_then(|p| p.context_window),
+                effective_context_window(&c, &active_alias),
                 profile.map(|p| p.context_1m).unwrap_or(false),
             )
         })

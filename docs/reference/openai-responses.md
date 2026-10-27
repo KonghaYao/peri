@@ -42,9 +42,8 @@
 8. Login Edit 的字段、类型/认证方式/Confirm 可用鼠标点击，语义与键盘一致。Model 右栏
    Provider/Model/Effort/Max tokens/1m enable 行也可点击：先聚焦该行，再执行与键盘
    相同的动作。空白、边框、分隔线与滚动条不触发动作；右栏滚动后点击可见行仍命中该字段。
-9. 保存不要求先填窗口：切到缺窗口的 Responses provider 会落盘该绑定，但在补齐
-   `profile.contextWindow` 前该档位没有运行 provider（其它档位的保存与编辑不受影响）。
-   补齐窗口后重新打开 `/model` 或重启即可使用。
+9. 已确认的 ChatGPT plan 模型缺窗口时按 1M 默认值立即可用；其它 Responses 模型
+   缺窗口的绑定可保存为未完成状态，但激活前须填写正整数窗口（其它档位的编辑不受影响）。
 
 ChatGPT 登录、状态查询与注销都在 Login 面板内完成，不启动 `peri auth chatgpt` 子进程，
 也不读取或显示 token。登录成功后凭据已保存，但 provider 配置仍需按上一步保存；两者不是
@@ -57,8 +56,10 @@ ChatGPT 登录、状态查询与注销都在 Login 面板内完成，不启动 `
 `https://api.openai.com/v1/responses`。API key 可指向兼容的 HTTP(S) 服务。
 
 下面的模型名、密钥和窗口数字是示例，请替换为所选模型的实际值。Peri 不按模型名
-猜测窗口；每个使用 Responses 的 profile 都必须声明正整数 `contextWindow`。未填窗口
-的绑定可以保存（作为未完成绑定），但补齐前该 profile 不能解析为运行 provider。
+猜测窗口；API key 模式及未确认的订阅模型仍须声明正整数 `contextWindow`。ChatGPT plan
+绑定 `gpt-6.1-sol`、`gpt-6.1-terra`、`gpt-6-luna`、`gpt-6-astra` 时，未设置窗口默认按
+1,000,000 解析并在 Model 面板显示，不写回配置；显式设置的正整数优先，显式零仍无效。
+其他未填窗口的绑定可以保存（作为未完成绑定），但补齐前不能解析为运行 provider。
 
 ```json
 {

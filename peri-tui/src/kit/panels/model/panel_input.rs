@@ -297,14 +297,9 @@ pub(super) fn handle_model_event_with(
 }
 
 fn begin_window_edit(ctx: &ModelEventCtx, alias: &str) {
-    let value = PERI_CONFIG_HANDLE.get().and_then(|handle| {
-        handle
-            .read()
-            .config
-            .profiles
-            .get(alias)
-            .and_then(|profile| profile.context_window)
-    });
+    let value = PERI_CONFIG_HANDLE
+        .get()
+        .and_then(|handle| super::effective_context_window(&handle.read(), alias));
     *ctx.window_edit.write() = Some(value.map(|window| window.to_string()).unwrap_or_default());
 }
 

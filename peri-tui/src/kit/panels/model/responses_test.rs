@@ -2,6 +2,45 @@
 
 use super::*;
 
+#[test]
+#[serial]
+fn subscription_default_window_is_visible_and_prefilled_without_persisting() {
+    let guard = ModelPanelGuard::install();
+    let mut config = responses_config();
+    config.config.providers[0].api_key.clear();
+    config.config.providers[0].auth = Some(
+        peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan {
+            store: std::env::temp_dir().join("peri-model-plan"),
+            account: "work".into(),
+            subject: "subject".into(),
+            client_id: "client".into(),
+        },
+    );
+    config.config.providers[0].models.sonnet = "gpt-6.1-sol".into();
+    config.config.profiles.sonnet.context_window = None;
+    assert_eq!(effective_context_window(&config, "sonnet"), Some(1_000_000));
+    guard.set_config(config);
+    let handle = Arc::clone(&guard.handle);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let wide_area = Rect {
+        width: 110,
+        ..TEST_AREA
+    };
+    let buffer = mount_panel_frames(wide_area, 1, move |_, panel| {
+        *panel.right_focus.write() = true;
+        *panel.right_cursor.write() = FIELD_CONTEXT_WINDOW;
+        panel.event(key(KeyCode::Enter), wide_area, &switched());
+        sender.send(panel.window_edit.read().clone()).unwrap();
+    });
+    assert!(
+        buffer_text(&buffer).contains("1000000"),
+        "{}",
+        buffer_text(&buffer)
+    );
+    assert_eq!(receiver.recv().unwrap().as_deref(), Some("1000000"));
+    assert_eq!(handle.read().config.profiles.sonnet.context_window, None);
+}
+
 /// 所有 provider 共用 Context window 与 1m enable 行。
 #[test]
 #[serial]

@@ -89,6 +89,56 @@ fn test_responses_requires_explicit_capacity_even_with_legacy_1m_flag() {
 }
 
 #[test]
+fn test_known_chatgpt_plan_models_default_to_one_million() {
+    let mut settings = settings();
+    settings.config.providers[0].api_key.clear();
+    settings.config.providers[0].auth = Some(ProviderAuthConfig::ChatGptPlan {
+        store: subscription_store(),
+        account: "work".into(),
+        subject: "subject-test".into(),
+        client_id: "issued-client-test".into(),
+    });
+    settings.config.profiles.opus.context_window = None;
+
+    for model in ["gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-luna", "gpt-6-astra"] {
+        settings.config.providers[0].models.opus = model.into();
+        assert!(matches!(
+            try_resolve(&settings, &BTreeMap::new()).unwrap(),
+            Some(ResolvedProvider::Responses {
+                context_window: 1_000_000,
+                ..
+            })
+        ));
+    }
+    settings.config.profiles.opus.context_window = Some(128_000);
+    assert!(matches!(
+        try_resolve_for_alias(&settings, "opus").unwrap(),
+        Some(ResolvedProvider::Responses {
+            context_window: 128_000,
+            ..
+        })
+    ));
+    settings.config.profiles.opus.context_window = Some(0);
+    assert!(matches!(
+        try_resolve_for_alias(&settings, "opus"),
+        Err(ProviderError::MissingModelCapacity)
+    ));
+    settings.config.profiles.opus.context_window = None;
+    settings.config.providers[0].models.opus = "unknown-model".into();
+    assert!(matches!(
+        try_resolve_for_alias(&settings, "opus"),
+        Err(ProviderError::MissingModelCapacity)
+    ));
+    settings.config.providers[0].models.opus = "gpt-6.1-sol".into();
+    settings.config.providers[0].auth = None;
+    settings.config.providers[0].api_key = "fixture-key".into();
+    assert!(matches!(
+        try_resolve_for_alias(&settings, "opus"),
+        Err(ProviderError::MissingModelCapacity)
+    ));
+}
+
+#[test]
 fn test_unknown_provider_type_does_not_select_chat_completions() {
     let mut settings = settings();
     settings.config.providers[0].provider_type = "openai_reponses".into();

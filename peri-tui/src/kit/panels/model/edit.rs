@@ -42,8 +42,8 @@ pub(super) fn effective_provider_id(cfg: &PeriConfig, alias: &str) -> Option<Str
     })
 }
 
-/// 仅修改 provider/model 的候选副本；容量等档位字段保持原值。目标 provider 是
-/// Responses 且未填 `contextWindow` 时，配置层按未完成绑定保存，不伪造容量。
+/// 仅修改 provider/model 的候选副本；容量等档位字段保持原值。未完成的
+/// Responses 绑定只允许作为非活动档位保存，不能切断当前运行模型。
 pub(super) fn provider_switch_candidate(
     cfg: &PeriConfig,
     alias: &str,
@@ -262,6 +262,20 @@ enum ModelChange {
 /// 的配置；失败提示由 [`crate::kit::config_service::persist_candidate`] 统一给出。
 /// 返回是否已持久化——调用方据此决定日志等本地副作用。
 fn commit_snapshot(handle: &PeriHandle, candidate: PeriConfig, change: ModelChange) -> bool {
+    let active_alias = &candidate.config.active_alias;
+    let edits_active_profile = match &change {
+        ModelChange::ActiveAlias(_) => true,
+        ModelChange::ProfileField(alias) => alias == active_alias,
+    };
+    if edits_active_profile
+        && peri_acp::provider::LlmProvider::from_config_for_alias(&candidate, active_alias)
+            .is_none()
+    {
+        crate::kit::config_service::notify_save_failed(&anyhow::anyhow!(crate::i18n::tr(
+            "model-panel-active-provider-unavailable"
+        )));
+        return false;
+    }
     if !crate::kit::config_service::persist_candidate(&candidate) {
         return false;
     }

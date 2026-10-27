@@ -18,18 +18,19 @@
    1. 在 Config 或 Model 面板改变设置，令持久保存失败。
    2. 观察当前行、状态栏与错误提示，再恢复保存能力并重试。
    3. 核对失败明确可见且不宣称已保存；成功后面板与状态栏显示同一实际值。
-5. **P0-86 Model 内联窗口与 provider/model/window 原子保存**
+5. **P0-86 Model 内联窗口与 provider/model/window 分步保存**
    1. 打开 `/model`，选择 Responses 档位，Tab 进入右栏，把光标移到 `Context window` 行
       直接输入；分别输入 `0` 与 `128k` 尝试提交，再按 Esc 放弃一次有效输入。
-   2. 重新进入并输入正整数提交；随后只改变该档 provider 或 model（即时保存）。切到缺
-      窗口的 Responses provider 时先输入窗口；在输入窗口前按 Esc，核对 provider/model
-      均未变化。
-   3. 核对切到缺窗口 provider 时 window 与 provider/model 一次落盘，其他档位与 active
-      alias 不变；重启后显示同一组值。先在 Login 保存四档默认 model、不改任何 profile，
+   2. 未填窗口时尝试将当前档位切到 Responses provider，或激活一个缺窗口的 Responses
+      档位：核对明确提示、磁盘/当前模型不变，重启不会进入 Setup。再输入正整数提交、
+      切换 provider 或档位；在输入窗口前按 Esc，核对 provider/model 均未变化。
+   3. 核对窗口先落盘，再切换 provider/model；其他档位不变，切换 active alias 后重启
+      仍可解析同一档位。先在 Login 保存四档默认 model、不改任何 profile，
       再打开 Model：核对已绑定档位的 model 用 Provider 同档默认预填，显式
       `profile.model` 优先且不被覆盖。对 ChatGPT plan provider 再核对 Provider/Model/
       contextWindow/Max tokens 均与其它 Responses provider 行为一致：Max tokens 走同一预设
-      循环，窗口缺失按通用规则提示，不出现订阅特例 UI 或阻断。
+      循环；已知订阅模型缺窗口时右栏展示 1000000、编辑框预填该值且配置不被写回；
+      未知订阅模型与 API key 模式缺窗口仍按通用规则提示，不出现专属订阅编辑面板。
    4. 在 Model 的 Model 行直接输入任意文本，Enter 提交、Esc 恢复；再次修改后提交，核对
       立即落盘。有未提交的窗口输入时按 Ctrl+L，核对只提示先完成或取消、不切换面板；
       取消后按 Ctrl+L，核对 Login 打开并定向到当前 provider。

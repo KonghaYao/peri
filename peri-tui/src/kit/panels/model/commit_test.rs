@@ -95,6 +95,7 @@ impl Fixture {
             .map(|(id, provider_type)| ProviderConfig {
                 id: id.into(),
                 provider_type: provider_type.into(),
+                api_key: "fixture-key".into(),
                 models: ProviderModels {
                     opus: format!("{id}-opus"),
                     sonnet: format!("{id}-sonnet"),
@@ -392,22 +393,135 @@ fn model_commit_unrelated_broken_responses_tier_does_not_block_save() {
     );
 }
 
-/// 截图根因回归：生效档位切到缺 contextWindow 的 Responses provider 时，统一的
-/// 即时保存路径仍必须落盘并推送；该绑定是未完成编辑，不得让整份配置保存失败。
-/// 容量只影响运行时 provider 是否可用，不在配置保存边界伪造默认值。
+/// 当前档位切到缺 contextWindow 的 Responses provider 时必须拒绝保存，
+/// 防止运行端拒绝同步、重启后误入 Setup；非活动档位仍可保留未完成绑定。
 #[test]
-fn model_commit_unfinished_responses_binding_persists_without_special_ui() {
+fn model_commit_unfinished_active_responses_binding_does_not_persist() {
     isolated(
-        "model_commit_unfinished_responses_binding_persists_without_special_ui",
+        "model_commit_unfinished_active_responses_binding_does_not_persist",
         async {
             let fixture = Fixture::new(false);
             fixture.create_session().await;
             // providers 顺序 a、b、r；从 a 后退即 r（Responses，档位无 contextWindow）。
             edit_field("sonnet".into(), FIELD_PROVIDER, false);
             let profile = fixture.config.read().config.profiles.sonnet.clone();
-            assert_eq!(profile.provider, "r");
-            assert_eq!(profile.model.as_deref(), Some("r-sonnet"));
-            assert_eq!(profile.context_window, None, "不得为保存成功擅自填写窗口");
+            assert_eq!(profile.provider, "a");
+            assert_eq!(profile.context_window, None);
+            assert!(
+                peri_acp::provider::LlmProvider::from_config_for_alias(
+                    &fixture.config.read(),
+                    "sonnet"
+                )
+                .is_some(),
+                "拒绝后仍可使用原来的活动档位"
+            );
+            assert_eq!(
+                std::fs::read(&fixture.global).unwrap(),
+                fixture.original_global
+            );
+            assert!(
+                NOTIFICATION
+                    .state()
+                    .read()
+                    .as_ref()
+                    .unwrap()
+                    .message
+                    .contains("context window")
+            );
+            fixture.finish().await;
+        },
+    );
+}
+
+#[test]
+fn model_commit_unfinished_inactive_responses_cannot_be_activated() {
+    isolated(
+        "model_commit_unfinished_inactive_responses_cannot_be_activated",
+        async {
+            let fixture = Fixture::new(false);
+            fixture.create_session().await;
+            {
+                let mut cfg = fixture.config.write();
+                cfg.config.profiles.haiku.provider = "r".into();
+                cfg.config.profiles.haiku.context_window = None;
+            }
+            switch_active_alias(3);
+            assert_eq!(fixture.config.read().config.active_alias, "sonnet");
+            assert_eq!(
+                std::fs::read(&fixture.global).unwrap(),
+                fixture.original_global
+            );
+            fixture.finish().await;
+        },
+    );
+}
+
+#[test]
+fn model_commit_known_plan_model_without_window_can_be_activated() {
+    isolated(
+        "model_commit_known_plan_model_without_window_can_be_activated",
+        async {
+            let fixture = Fixture::new(false);
+            fixture.create_session().await;
+            {
+                let mut cfg = fixture.config.write();
+                let provider = cfg
+                    .config
+                    .providers
+                    .iter_mut()
+                    .find(|provider| provider.id == "r")
+                    .unwrap();
+                provider.api_key.clear();
+                provider.auth = Some(
+                    peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan {
+                        store: std::env::temp_dir().join("peri-model-plan"),
+                        account: "work".into(),
+                        subject: "subject".into(),
+                        client_id: "client".into(),
+                    },
+                );
+                provider.models.haiku = "gpt-6.1-sol".into();
+                cfg.config.profiles.haiku.provider = "r".into();
+                cfg.config.profiles.haiku.context_window = None;
+            }
+            switch_active_alias(3);
+            let persisted = crate::config::load_from(&fixture.target).unwrap();
+            assert_eq!(persisted.config.active_alias, "haiku");
+            assert_eq!(persisted.config.profiles.haiku.context_window, None);
+            assert!(matches!(
+                peri_acp::provider::LlmProvider::from_config_for_alias(&persisted, "haiku"),
+                Some(peri_acp::provider::LlmProvider::Responses {
+                    context_window: 1_000_000,
+                    ..
+                })
+            ));
+            assert!(!crate::app::setup_wizard::needs_setup(&persisted.config));
+            fixture.expect_request(false).await;
+            fixture.finish().await;
+        },
+    );
+}
+
+#[test]
+fn model_commit_context_window_recovers_unfinished_active_responses() {
+    isolated(
+        "model_commit_context_window_recovers_unfinished_active_responses",
+        async {
+            let fixture = Fixture::new(false);
+            fixture.create_session().await;
+            {
+                let mut cfg = fixture.config.write();
+                cfg.config.profiles.sonnet.provider = "r".into();
+                cfg.config.profiles.sonnet.context_window = None;
+            }
+            assert!(set_context_window("sonnet", 128_000));
+            assert!(
+                peri_acp::provider::LlmProvider::from_config_for_alias(
+                    &fixture.config.read(),
+                    "sonnet"
+                )
+                .is_some()
+            );
             fixture.expect_request(false).await;
             fixture.finish().await;
         },

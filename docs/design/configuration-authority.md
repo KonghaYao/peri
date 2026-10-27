@@ -116,6 +116,10 @@ MCP 更新只维护 `.mcp.json` 的 MCP 键，保留同文件其他领域。`loa
 
 ## Consumer 生命周期
 
+Responses 运行时窗口由 `peri-config::provider` 统一解析：已确认的 ChatGPT plan
+模型缺失 `contextWindow` 时派生 1M 默认值，不写回 settings；其他 Responses
+绑定仍需显式窗口，显式无效值不能被默认值覆盖。
+
 ACP 持久 configOptions 分支与 `update_config` 按 candidate → 验证 → 保存成功 →
 用 accepted snapshot 发布处理；保存失败不更新 live provider 或 agent cache，
 不发送配置通知、不返回成功。该失败顺序已修复，但不意味着客户端延迟编辑的
