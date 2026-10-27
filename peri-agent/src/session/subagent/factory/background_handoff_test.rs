@@ -143,7 +143,7 @@ async fn fixture(
 async fn idle(manager: &crate::agent::async_tasks::TaskManager) {
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         while !manager.is_execution_idle() {
-            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
     })
     .await
@@ -358,5 +358,299 @@ async fn background_stop_panic_retains_active_until_terminal_and_persists_error(
             .unwrap()
             .agent_status,
         AgentStatus::Error
+    );
+}
+
+fn blocked_child(
+    store: Arc<ClaimResources>,
+    manager: Arc<crate::agent::async_tasks::TaskManager>,
+) -> (
+    Arc<crate::session::Session>,
+    Arc<crate::session::subagent::ParkedChildOwner>,
+    MessageId,
+) {
+    use crate::session::MessageSource;
+    use peri_acp_types::system_reminder::{ReminderCategory, ReminderDelivery, ReminderSeverity};
+
+    let owner = crate::session::subagent::ParkedChildOwner::new(
+        CHILD.into(),
+        "parent-thread".into(),
+        Arc::new(crate::agent::async_tasks::TaskManager::new()),
+        crate::session::MessageQueue::new(),
+        Some(store),
+        None,
+    );
+    let id = MessageId::new();
+    let reminder = crate::session::producer_reminders::trusted_reminder(
+        ReminderCategory::Task,
+        "shell",
+        "completed",
+        ReminderSeverity::Info,
+        ReminderDelivery::Required,
+        "测试中尚未覆盖的结果".into(),
+        None,
+        serde_json::json!({"task_id": "blocked-task"}),
+    );
+    owner
+        .mailbox
+        .accept(id, &reminder, MessageSource::ShellComplete)
+        .unwrap();
+    owner
+        .mailbox
+        .mark_canonical_ready(id, &reminder, MessageSource::ShellComplete, None)
+        .unwrap();
+    owner.mailbox.block_uncovered("reason", "模型失败");
+    manager.register_child_owner(owner.clone()).unwrap();
+    let parent = crate::session::Session::new(
+        Arc::from("/tmp"),
+        crate::session::FrozenContext::builder().build(),
+        Some("parent-thread".into()),
+    );
+    parent.set_subagent_host(crate::session::subagent::SubagentHost {
+        task_manager: Some(manager),
+        ..Default::default()
+    });
+    (parent, owner, id)
+}
+
+/// [回归测试] 注册放行不能在认领接收及启动确认前恢复 mailbox。
+#[tokio::test]
+async fn background_registration_waits_for_handoff_confirmation_before_resume() {
+    use crate::session::async_result_mailbox::AsyncResultState;
+    use crate::session::subagent::background::{confirm_background_start, BackgroundStartGate};
+
+    let (store, _handoff_gate, manager) = fixture(false).await;
+    let (_parent, owner, id) = blocked_child(store, manager);
+    let alive = Arc::new(parking_lot::Mutex::new(true));
+    let (confirmed_tx, confirmed_rx) = tokio::sync::oneshot::channel();
+    let mut gate = BackgroundStartGate {
+        alive: alive.clone(),
+        confirmed: confirmed_rx,
+    };
+    let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+    let (waiting_tx, waiting_rx) = tokio::sync::oneshot::channel();
+    let mailbox = owner.mailbox.clone();
+    let execution = tokio::spawn(async move {
+        registered_rx.await.unwrap().unwrap();
+        waiting_tx.send(()).unwrap();
+        gate.wait().await.unwrap();
+        mailbox.resume_scope();
+    });
+    let (accept_tx, accept_rx) = tokio::sync::oneshot::channel();
+    let handoff = super::super::BackgroundHandoff(accept_tx);
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+    let caller_alive = alive.clone();
+    let caller = std::thread::spawn(move || {
+        confirm_background_start(&caller_alive, registered_tx, confirmed_tx, || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            handoff.accept()
+        })
+    });
+    entered_rx.await.unwrap();
+    waiting_rx.await.unwrap();
+    assert_eq!(owner.mailbox.state_of(&id), Some(AsyncResultState::Blocked));
+    release_tx.send(()).unwrap();
+    accept_rx.await.unwrap();
+    caller.join().unwrap().unwrap();
+    execution.await.unwrap();
+    assert_eq!(owner.mailbox.state_of(&id), Some(AsyncResultState::Ready));
+    assert!(!*alive.lock(), "后台启动门退出后必须撤销存活标记");
+}
+
+/// [回归测试] 已注册但 handoff 接收失败时，后台门必须失败且 mailbox 保持 Blocked。
+#[tokio::test]
+async fn background_handoff_accept_failure_keeps_mailbox_blocked() {
+    use crate::session::async_result_mailbox::AsyncResultState;
+    use crate::session::subagent::background::{confirm_background_start, BackgroundStartGate};
+
+    let (store, _handoff_gate, manager) = fixture(false).await;
+    let (_parent, owner, id) = blocked_child(store, manager);
+    let alive = Arc::new(parking_lot::Mutex::new(true));
+    let (confirmed_tx, confirmed_rx) = tokio::sync::oneshot::channel();
+    let mut gate = BackgroundStartGate {
+        alive: alive.clone(),
+        confirmed: confirmed_rx,
+    };
+    let (registered_tx, registered_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+    let mailbox = owner.mailbox.clone();
+    let execution = tokio::spawn(async move {
+        registered_rx.await.unwrap().unwrap();
+        let result = gate.wait().await;
+        if result.is_ok() {
+            mailbox.resume_scope();
+        }
+        result
+    });
+    let (accept_tx, accept_rx) = tokio::sync::oneshot::channel();
+    drop(accept_rx);
+    let handoff = super::super::BackgroundHandoff(accept_tx);
+    let error = confirm_background_start(&alive, registered_tx, confirmed_tx, || handoff.accept())
+        .unwrap_err();
+    assert!(error.contains("hand-off worker stopped"));
+    assert!(execution
+        .await
+        .unwrap()
+        .unwrap_err()
+        .contains("hand-off worker stopped"));
+    assert_eq!(owner.mailbox.state_of(&id), Some(AsyncResultState::Blocked));
+}
+
+/// [回归测试] 后台接收方已退出时，不得调用 handoff.accept 消费 claim。
+#[tokio::test]
+async fn background_start_receiver_gone_does_not_accept_claim() {
+    use crate::session::subagent::background::{confirm_background_start, BackgroundStartGate};
+
+    let alive = Arc::new(parking_lot::Mutex::new(true));
+    let (confirmed_tx, confirmed_rx) = tokio::sync::oneshot::channel();
+    drop(BackgroundStartGate {
+        alive: alive.clone(),
+        confirmed: confirmed_rx,
+    });
+    let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
+    let (accept_tx, accept_rx) = tokio::sync::oneshot::channel();
+    let handoff = super::super::BackgroundHandoff(accept_tx);
+    let error = confirm_background_start(&alive, registered_tx, confirmed_tx, || handoff.accept())
+        .unwrap_err();
+    assert!(error.contains("startup acceptance"));
+    assert!(registered_rx.await.is_err());
+    assert!(accept_rx.await.is_err(), "未启动时必须丢弃而非接收 handoff");
+}
+
+struct CloseScopeDuringAssembly(Arc<crate::agent::async_tasks::TaskManager>);
+
+impl SubagentChainAssembler for CloseScopeDuringAssembly {
+    fn assemble(&self, _: &SubagentChainContext) -> MiddlewareChain {
+        self.0.begin_session_close();
+        MiddlewareChain::new()
+    }
+}
+
+/// [回归测试] owner acquire 后 spawn 注册失败，claim 回滚且 mailbox 不解阻塞。
+#[tokio::test]
+async fn background_registration_failure_after_acquire_preserves_claim_and_mailbox() {
+    use crate::session::async_result_mailbox::AsyncResultState;
+
+    let (store, gate, manager) = fixture(false).await;
+    let (parent, owner, id) = blocked_child(store.clone(), manager.clone());
+    let mut config = config(store.clone(), manager.clone());
+    config.chain_assembler = Arc::new(CloseScopeDuringAssembly(manager.clone()));
+    let error = match SessionFactory::resume_subagent(Some(&parent), config).await {
+        Ok(_) => panic!("关闭中的 scope 不得注册后台执行"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("closing"), "{error}");
+    assert_eq!(gate.compensations.load(Ordering::SeqCst), 0);
+    assert_eq!(owner.mailbox.state_of(&id), Some(AsyncResultState::Blocked));
+    assert!(owner.check_resume().is_ok(), "未启动时必须释放执行 permit");
+    assert_eq!(
+        store
+            .inner
+            .load_session_meta(&CHILD.into())
+            .await
+            .unwrap()
+            .agent_status,
+        AgentStatus::Done
+    );
+}
+
+/// [回归测试] owner 已 acquire、后台已注册但 handoff 写入失败时，准备回滚不能毒化 owner。
+#[tokio::test]
+async fn background_handoff_failure_after_acquire_keeps_blocked_mailbox() {
+    use crate::session::async_result_mailbox::AsyncResultState;
+
+    let (store, gate, manager) = fixture(true).await;
+    let (parent, owner, id) = blocked_child(store.clone(), manager.clone());
+    let config = config(store.clone(), manager.clone());
+    let mut resume =
+        tokio::spawn(async move { SessionFactory::resume_subagent(Some(&parent), config).await });
+    tokio::select! {
+        _ = gate.entered.notified() => {}
+        result = &mut resume => match result {
+            Ok(Err(error)) => panic!("进入移交阶段前失败: {error}"),
+            Ok(Ok(_)) => panic!("未进入移交阶段就启动成功"),
+            Err(error) => panic!("恢复任务异常退出: {error}"),
+        },
+        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+            panic!("恢复未能进入移交阶段");
+        }
+    }
+    assert!(owner.check_resume().unwrap_err().contains("active"));
+    assert_eq!(owner.mailbox.state_of(&id), Some(AsyncResultState::Blocked));
+    gate.release.add_permits(1);
+    let error = match resume.await.unwrap() {
+        Ok(_) => panic!("handoff 写失败必须拒绝启动"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("handoff offline"));
+    idle(&manager).await;
+    assert_eq!(gate.compensations.load(Ordering::SeqCst), 1);
+    assert_eq!(owner.mailbox.state_of(&id), Some(AsyncResultState::Blocked));
+    assert!(
+        owner.check_resume().is_ok(),
+        "未启动且回滚成功不得毒化 owner"
+    );
+    assert_eq!(
+        store
+            .inner
+            .load_session_meta(&CHILD.into())
+            .await
+            .unwrap()
+            .agent_status,
+        AgentStatus::Done
+    );
+}
+
+/// [回归测试] 认领移交等待时强制取消，claim 回滚但资源未确认仍须拒绝恢复。
+#[tokio::test(start_paused = true)]
+async fn background_cancel_during_handoff_after_acquire_rolls_back_claim() {
+    use crate::session::async_result_mailbox::AsyncResultState;
+
+    let (store, gate, manager) = fixture(false).await;
+    let (parent, owner, id) = blocked_child(store.clone(), manager.clone());
+    let config = config(store.clone(), manager.clone());
+    let mut resume =
+        tokio::spawn(async move { SessionFactory::resume_subagent(Some(&parent), config).await });
+    tokio::select! {
+        _ = gate.entered.notified() => {}
+        result = &mut resume => match result {
+            Ok(Err(error)) => panic!("进入移交阶段前失败: {error}"),
+            Ok(Ok(_)) => panic!("未进入移交阶段就启动成功"),
+            Err(error) => panic!("恢复任务异常退出: {error}"),
+        },
+        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+            panic!("恢复未能进入移交阶段");
+        }
+    }
+    let tasks = manager.registry().list_tasks_full();
+    assert_eq!(tasks.len(), 1, "后台任务必须已经注册");
+    manager.cancel(&tasks[0].task_id).unwrap();
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_secs(4)).await;
+    gate.release.add_permits(1);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), resume)
+        .await
+        .expect("取消后的恢复调用必须终结")
+        .unwrap();
+    let error = match result {
+        Ok(_) => panic!("被取消的后台启动不能成功"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("startup acceptance"), "{error}");
+    assert_eq!(gate.compensations.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        store
+            .inner
+            .load_session_meta(&CHILD.into())
+            .await
+            .unwrap()
+            .agent_status,
+        AgentStatus::Done
+    );
+    assert_eq!(owner.mailbox.state_of(&id), Some(AsyncResultState::Blocked));
+    assert!(
+        owner.check_resume().unwrap_err().contains("unconfirmed"),
+        "强制中止后的资源结算未确认，不得放行 owner"
     );
 }

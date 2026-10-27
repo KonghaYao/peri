@@ -305,12 +305,13 @@ async fn failed_child_resume_preserves_blocked_result_through_full_compact(
     tokio::time::timeout(Duration::from_secs(10), entered.notified())
         .await
         .expect("新执行必须进入主模型");
-    let requests = summaries.lock();
-    assert!(!requests.is_empty(), "新执行必须在 Reason 前实际执行 Full");
-    let summary_contains_result = serde_json::to_string(&requests[0])
-        .unwrap()
-        .contains(RESULT_A);
-    drop(requests);
+    let summary_contains_result = {
+        let requests = summaries.lock();
+        assert!(!requests.is_empty(), "新执行必须在 Reason 前实际执行 Full");
+        serde_json::to_string(&requests[0])
+            .unwrap()
+            .contains(RESULT_A)
+    };
     let excluded = store.flags(&result_a_id).excluded;
     let reason_contains_result = messages.lock()[0]
         .iter()
@@ -639,4 +640,113 @@ async fn test_sync_confirmed_handoff_terminal_write_failure_blocks_resume() {
 #[tokio::test(start_paused = true)]
 async fn test_background_confirmed_handoff_terminal_write_failure_blocks_resume() {
     confirmed_handoff_terminal_write_failure(true).await;
+}
+
+/// [回归测试] 后台 resume 已开始但未结算即被强制取消时，不得保留 Ready 责任。
+#[tokio::test(start_paused = true)]
+async fn test_background_forced_abort_reblocks_unsettled_mailbox() {
+    use crate::session::MessageSource;
+
+    let store = MockSessionResources::new();
+    let child_id = uuid::Uuid::now_v7().to_string();
+    let mut meta = ThreadMeta::new_at("/tmp", peri_time::now_wall());
+    meta.id = child_id.clone();
+    meta.parent_thread_id = Some("parent-thread".into());
+    store.create_resumable_thread(meta).await.unwrap();
+    store
+        .update_thread_status(&child_id, "error")
+        .await
+        .unwrap();
+    let parent_manager = Arc::new(TaskManager::new());
+    let owner = ParkedChildOwner::new(
+        child_id.clone(),
+        "parent-thread".into(),
+        Arc::new(TaskManager::new()),
+        MessageQueue::new(),
+        Some(store.clone()),
+        None,
+    );
+    let blocked_id = terminal_delivery_id("blocked-before-resume", "terminal");
+    let reminder = crate::session::async_router::background_result_reminder(
+        &shell_result("blocked-before-resume", RESULT_A),
+        BgTaskKind::Shell,
+    );
+    owner
+        .mailbox
+        .accept(blocked_id, &reminder, MessageSource::ShellComplete)
+        .unwrap();
+    owner
+        .mailbox
+        .mark_canonical_ready(blocked_id, &reminder, MessageSource::ShellComplete, None)
+        .unwrap();
+    owner.mailbox.block_uncovered("reason", "模型失败");
+    let delivery = crate::session::bg_complete::task_bg_complete_callback(
+        crate::session::bg_complete::queue_terminal_delivery_with_mailbox(
+            owner.queue.clone(),
+            owner.mailbox.clone(),
+        ),
+    );
+    delivery(&shell_result("receive-gate", RESULT_B), BgTaskKind::Shell).unwrap();
+    let queued_id = terminal_delivery_id("receive-gate", "terminal");
+    parent_manager.register_child_owner(owner.clone()).unwrap();
+    let parent = Session::new(
+        Arc::from("/tmp"),
+        FrozenContext::builder().build(),
+        Some("parent-thread".into()),
+    );
+    parent.set_subagent_host(SubagentHost {
+        task_manager: Some(parent_manager.clone()),
+        ..Default::default()
+    });
+    let (entered, release) = store.gate_next_reminder_append();
+    let config = resume_config_with(
+        store,
+        child_id,
+        crate::session::test_resources::mock::model::fixture_source(
+            Arc::new(EchoLLM),
+            "fixture-scripted",
+        ),
+        SubagentRunMode::Background,
+        Some(parent_manager.clone()),
+        None,
+    );
+    let spawned = SessionFactory::resume_subagent(Some(&parent), config)
+        .await
+        .expect("后台恢复必须启动");
+    tokio::time::timeout(Duration::from_secs(10), entered)
+        .await
+        .expect("Receive 必须卡在规范提交")
+        .unwrap();
+    assert_eq!(
+        owner.mailbox.state_of(&blocked_id),
+        Some(AsyncResultState::Ready)
+    );
+    assert_eq!(
+        owner.mailbox.state_of(&queued_id),
+        Some(AsyncResultState::Queued)
+    );
+    parent_manager
+        .cancel(spawned.task_id.as_deref().unwrap())
+        .unwrap();
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(4)).await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while owner.failure().is_none() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("强制 abort 必须留下未确认结算");
+    assert!(release.send(()).is_err(), "持久化 future 必须已被强制中止");
+    assert!(owner.check_resume().unwrap_err().contains("unconfirmed"));
+    assert_eq!(
+        owner.mailbox.state_of(&blocked_id),
+        Some(AsyncResultState::Blocked),
+        "未结算的强制取消不能留下 Ready 自动激活"
+    );
+    assert_eq!(
+        owner.mailbox.state_of(&queued_id),
+        Some(AsyncResultState::Queued),
+        "尚未规范提交的责任仍由队列负责"
+    );
 }

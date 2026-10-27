@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use futures::FutureExt;
 use peri_acp_types::identity::AgentId;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use super::lifecycle::drain_subagent_events;
@@ -26,6 +27,59 @@ use crate::agent::LangfuseBridgeLike;
 use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
 use peri_acp_types::session_resources::{SessionMetaPatch, SessionResources};
 use peri_acp_types::thread::{AgentStatus, ThreadId};
+
+pub(super) struct BackgroundStartGate {
+    pub(super) alive: Arc<parking_lot::Mutex<bool>>,
+    pub(super) confirmed: tokio::sync::oneshot::Receiver<Result<(), String>>,
+}
+
+impl BackgroundStartGate {
+    pub(super) async fn wait(&mut self) -> Result<(), String> {
+        (&mut self.confirmed)
+            .await
+            .map_err(|_| "background startup confirmation is unconfirmed".to_string())?
+    }
+}
+
+impl Drop for BackgroundStartGate {
+    fn drop(&mut self) {
+        *self.alive.lock() = false;
+    }
+}
+
+pub(super) fn confirm_background_start(
+    startup_alive: &parking_lot::Mutex<bool>,
+    registration: oneshot::Sender<Result<(), String>>,
+    confirmed: oneshot::Sender<Result<(), String>>,
+    accept_handoff: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    // 与 gate 的 Drop 串行化：不能先消费 claim，再发现后台接收方已退出。
+    let alive = startup_alive.lock();
+    if !*alive {
+        return Err("background execution stopped before startup acceptance".into());
+    }
+    registration
+        .send(Ok(()))
+        .map_err(|_| "background execution stopped before startup acceptance".to_string())?;
+    let result = accept_handoff();
+    confirmed
+        .send(result.clone())
+        .map_err(|_| "background execution stopped before startup confirmation".to_string())?;
+    result
+}
+
+struct ResumedMailboxGuard(Option<Arc<crate::session::async_result_mailbox::AsyncResultMailbox>>);
+
+impl Drop for ResumedMailboxGuard {
+    fn drop(&mut self) {
+        if let Some(mailbox) = &self.0 {
+            mailbox.block_uncovered(
+                "background",
+                "child execution ended without terminal settlement",
+            );
+        }
+    }
+}
 
 // ─── 后台运行 ────────────────────────────────────────────────────────────────
 
@@ -74,8 +128,14 @@ pub(super) async fn spawn_background_subagent(
 
     let prompt_summary: String = prompt.chars().take(100).collect();
 
-    // S3.1 注册门控：spawn 包装任务，闭包第一步 await 注册结果 oneshot。
+    // 注册与 claim 移交均确认后，后台任务才可以开始执行。
     let (reg_tx, reg_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+    let (confirmed_tx, confirmed_rx) = tokio::sync::oneshot::channel();
+    let startup_alive = Arc::new(parking_lot::Mutex::new(true));
+    let startup_gate = BackgroundStartGate {
+        alive: Arc::clone(&startup_alive),
+        confirmed: confirmed_rx,
+    };
 
     let task_id_for_task = task_id.clone();
     let child_thread_id_for_task = child_thread_id.clone();
@@ -108,6 +168,8 @@ pub(super) async fn spawn_background_subagent(
         let mut cleanup_guard = cleanup_guard;
         let inbox_guard = inbox_guard;
         let mut permit = execution_permit.lock().take();
+        // Drop 顺序先关闭启动门，再释放 permit；与确认路径共用同一锁。
+        let mut startup_gate = startup_gate;
         // S3.1 门控：注册结果（失败时调用方已发 Err；sender 被 drop 同样返回）
         match reg_rx.await {
             Ok(Ok(())) => {}
@@ -119,16 +181,26 @@ pub(super) async fn spawn_background_subagent(
                 return;
             }
         }
+        if let Err(error) = startup_gate.wait().await {
+            if let Some(permit) = permit.take() {
+                permit.finish(Err(error));
+            }
+            return;
+        }
 
         let started_at = peri_time::monotonic_now();
         // context 将被 move 进 run_react_loop，turn_id 提前提取（Start/Stop emit 用）
         let execution_turn = v2_ctx.context.session.turn.clone();
         let context = v2_ctx.context;
         let session = v2_ctx.session;
-        if resuming {
-            // 注册与认领移交完成后才恢复处理责任，失败的准备不得提前解阻塞。
-            session.async_result_mailbox().resume_scope();
-        }
+        let mut resumed_mailbox = if resuming {
+            let mailbox = session.async_result_mailbox();
+            let guard = ResumedMailboxGuard(Some(Arc::clone(&mailbox)));
+            mailbox.resume_scope();
+            Some(guard)
+        } else {
+            None
+        };
         // Start/Stop emit 需要 event_bus（partial move 后仍可用）+ 统一身份键
         let event_bus_for_emit = v2_ctx.event_bus;
         let subagent_agent_id = v2_ctx.agent_id;
@@ -486,6 +558,11 @@ pub(super) async fn spawn_background_subagent(
         } else {
             Ok(())
         };
+        if permit_result.is_ok() {
+            if let Some(guard) = &mut resumed_mailbox {
+                guard.0 = None;
+            }
+        }
         if let Some(permit) = permit {
             permit.finish(permit_result);
         }
@@ -583,12 +660,10 @@ pub(super) async fn spawn_background_subagent(
     if let Some(register) = &register_runtime {
         register(child_thread_id.clone(), cancel_token, "independent".into());
     }
-    reg_tx
-        .send(Ok(()))
-        .map_err(|_| "background execution stopped before startup acceptance")?;
-    if let Some(handoff) = handoff {
-        handoff.accept()?;
-    }
+    confirm_background_start(&startup_alive, reg_tx, confirmed_tx, || match handoff {
+        Some(handoff) => handoff.accept(),
+        None => Ok(()),
+    })?;
     registration.task_id = None;
     registration.runtime_cleanup = None;
 

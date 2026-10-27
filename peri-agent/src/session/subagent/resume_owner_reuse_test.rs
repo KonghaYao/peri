@@ -636,7 +636,7 @@ async fn test_post_handoff_history_flush_failure(background: bool) {
         .expect("测试 writer 必须在提交后续阶段前关闭");
     release.send(()).unwrap();
     if let Some(run) = sync_run {
-        let error = run.await.unwrap().err().expect("模型错误必须返回");
+        let error = run.await.unwrap().expect_err("模型错误必须返回");
         let failure = error.downcast_ref::<SubagentFailure>().unwrap();
         assert!(failure.handoff().is_some(), "canonical 交接已提交");
     }

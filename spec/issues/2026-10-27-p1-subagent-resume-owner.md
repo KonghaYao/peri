@@ -1,6 +1,6 @@
 # P1：子 Agent 模型失败后无法 resume
 
-**状态**：已修复，定向验证通过；全 workspace 测试交由 CI。
+**状态**：PR #298 修复轮 1 已实现，定向验证及 all-target Clippy 通过；等待 CI 复核。
 **优先级**：P1。
 **类型**：错误。
 **创建日期**：2026-10-27。
@@ -73,7 +73,7 @@
 - peri-agent build、Clippy `--lib -- -W clippy::all`、format、check-changed 与 diff 空白检查通过；不是全 workspace `--all-targets -D warnings` 验收。
 - 二次独立 review 确认 mailbox 阻塞关闭，本次限定范围无阻塞。
 - 未覆盖真实 TLS 到 resume 的端到端及独立进程重启；测试以模型错误 fixture 和无 owner 的冷恢复模拟验证。完整 workspace 测试交由 CI。
-- 非阻塞缺口：注册失败测试覆盖 acquire 前失败，尚未直接断言 acquire 后注册失败的 mailbox 状态，以及后台执行门放行与 handoff 确认失败的交错。
+- 当时的非阻塞缺口：注册失败测试只覆盖 acquire 前失败，且未直接断言后台执行门与 handoff 确认失败的交错；已在下方 PR 修复轮 1 补测。
 
 ## 独立 review：同进程 mailbox 责任
 
@@ -84,3 +84,12 @@
 5. **补充边界**：`test_cold_resume_does_not_reconstruct_mailbox_or_tasks` 和 `test_failed_resume_registration_keeps_mailbox_blocked` 各 1 项通过；`confirmed_handoff_terminal_write_failure_blocks_resume` 的 sync/background 2 项通过。冷恢复仅加载历史，不恢复旧执行、任务或 mailbox；未新增 DB 或持久状态。
 6. **最终目标验证**：同上 Cargo 环境下依次过滤 `session::subagent::tests::resume_owner_reuse::`（23 项）、`session::subagent::resource_owner::tests::`（13 项）、`session::subagent::run_sync::tests::`（11 项）、`session::subagent::child_runner::tests::`（34 项）、`session::subagent::tests::resume_cases::`（20 项）、`session::subagent::tests::resume_dispatch_cases::`（9 项）、`session::async_result_mailbox::tests::`（17 项）、`agent::compact_v2::full::protected_result_tests::`（5 项），共 132 项，均 exit 0。`./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent --doc` 15 项通过，exit 0。
 7. **最终检查**：`cargo fmt --all -- --check`、`bash scripts/check-changed.sh`、`git diff --check` 均 exit 0；`bash scripts/check-file-size.sh` 仍因 20 个既有超限文件 exit 1。`bash scripts/verify-async.sh read` exit 4，无回执；未启动异步任务，CI/全 workspace 测试未运行。
+
+## PR #298 修复轮 1
+
+1. **CI**：run 40455831881 的 Ubuntu/macOS all-target Clippy 报测试锁跨 await 与 `err().expect()`；分别用词法作用域和 `expect_err` 修复，不改无关 Debug 实现。
+2. **review 核实**：通过 `gh api repos/KonghaYao/peri/pulls/298/comments` 读取当前评论全文。原后台路径先发送注册门、再 `handoff.accept()`；多线程调度可在确认前运行 `resume_scope`。已开始执行但未完成结算时被强制 abort，permit 留下 unconfirmed，而 mailbox 仍为 Ready。
+3. **红灯与修复**：`test_background_forced_abort_reblocks_unsettled_mailbox` 修复前执行 1 项、exit 101，实际 `Ready`、期望 `Blocked`。现在后台任务等待独立的启动确认；接收方存活检查、注册信号、handoff 接收和确认在无 await 的锁内串行化。已开始的 resume 若异常结束或结算失败，仅将未覆盖的 Ready/InFlight 责任阻塞，不清除 Queued/Suspended 或已覆盖状态。
+4. **交错与失败**：`background_registration_waits_for_handoff_confirmation_before_resume` 用独立线程暂停真实确认函数中的 handoff 接收，验证注册信号已到而 mailbox 仍 Blocked；另测 handoff 接收失败、接收方已退出不消费 claim、acquire 后 spawn 注册失败、移交写失败及移交期间强制取消。取消前启动失败仍回滚 claim；强制 abort 的资源未确认时继续拒绝 owner 准入。上述回归和真实强制取消用例均通过。
+5. **测试等待记录**：开发中两次测试超时提升为后台任务 `mcp-d3960635022f71d0c48476ee44c1ea7dc68f88f0eef0a47e68e3f15b4db05cce` 和 `mcp-52968897d4b5cd0c9817c96b9305f542e6fa72201d8d069baab7eda1b62fc4d1`；已终止各自进程组并核实退出，不能计作通过。随后有界测试暴露测试错误地等待强制 abort 后 manager 完全 idle；改为验证 claim 回滚和 owner 未确认后通过。
+6. **实际验证**：`./scripts/cargo-rmcp-patched.sh clippy --locked -p peri-agent --all-targets -- -D warnings` exit 0，无依赖警告。目标 lib 测试按 claim（19）、resume owner（24）、child runner（34）、resume dispatch（9）、spawn/tail（12）、resume cases（20）、resource owner（13）、sync（11）、mailbox（17）过滤，共 159 项通过；`--doc` 15 项通过。`cargo fmt --all -- --check`、`bash scripts/check-changed.sh`、`git diff --check` 均 exit 0；全量文件大小扫描仍因 20 个既有超限文件 exit 1，本轮修改文件均不超限。`verify-async.sh read` 无回执；未运行全 workspace 测试或 CI。
