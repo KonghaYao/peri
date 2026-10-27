@@ -168,3 +168,90 @@ fn credentials_mcp_debug_omits_success_tokens_but_keeps_errors() {
 fn credentials_mcp_trace_omits_success_tokens_but_keeps_errors() {
     check_mcp_logs(LevelFilter::TRACE);
 }
+
+#[test]
+fn detached_refresh_errors_and_worker_panics_are_visible_without_tokens() {
+    let capture = Capture {
+        level: LevelFilter::TRACE,
+        text: Arc::new(Mutex::new(String::new())),
+        next_span: Arc::new(AtomicU64::new(1)),
+    };
+    let _subscriber = tracing::subscriber::set_default(capture.clone());
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mock = MockIssuer::start().await;
+            let dir = tempfile::tempdir().unwrap();
+            let manager = mock.manager(dir.path(), "detached-fixture");
+            seed(&manager, 0).await;
+            *mock.state.mode.lock().unwrap() = Mode::Pending;
+            let cancellation = CancellationToken::new();
+            let work = manager.credential(cancellation.clone());
+            let cancel = async {
+                mock.state.pending_refresh.notified().await;
+                cancellation.cancel();
+            };
+            let (result, ()) =
+                tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(work, cancel) })
+                    .await
+                    .unwrap();
+            assert!(result.unwrap_err().is_cancelled());
+            *mock.state.mode.lock().unwrap() = Mode::MissingScope;
+            mock.state.release_refresh.notify_one();
+            let account = tokio::time::timeout(Duration::from_secs(5), stored(&manager))
+                .await
+                .unwrap();
+            assert!(account.tokens.is_none() && account.binding.is_none());
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let logged = capture
+                        .text
+                        .lock()
+                        .unwrap()
+                        .contains("ChatGPT refresh transaction failed");
+                    if logged {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+
+            let other_mock = MockIssuer::start().await;
+            let mut crashing = other_mock.manager(dir.path(), "panic-fixture");
+            let calls = Arc::new(AtomicUsize::new(0));
+            Arc::get_mut(&mut crashing.server).unwrap().clock = Arc::new(move || {
+                assert_eq!(
+                    calls.fetch_add(1, Ordering::SeqCst),
+                    0,
+                    "synthetic clock failure"
+                );
+                1000
+            });
+            seed(&crashing, 0).await;
+            let error = tokio::time::timeout(
+                Duration::from_secs(5),
+                crashing.credential(CancellationToken::new()),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert!(error.to_string().contains("unavailable"));
+        });
+    let logs = capture.text.lock().unwrap();
+    assert!(logs.contains("ChatGPT refresh transaction failed"));
+    assert!(logs.contains("missing_scope"));
+    assert!(logs.contains("ChatGPT refresh task failed"));
+    for token in [
+        "synthetic-access-initial",
+        "synthetic-refresh-initial",
+        "synthetic-access-rotated",
+        "synthetic-refresh-rotated",
+        "synthetic-stored-id-token",
+    ] {
+        assert!(!logs.contains(token), "refresh diagnostics exposed a token");
+    }
+}

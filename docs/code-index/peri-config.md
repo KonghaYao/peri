@@ -1,8 +1,6 @@
 # peri-config 代码索引
 
-Responses 容量解析以 `provider.rs::resolve_responses` 为准：ChatGPT plan 绑定已确认的
-`gpt-6.1-sol`、`gpt-6.1-terra`、`gpt-6-luna`、`gpt-6-astra` 且未填写窗口时，
-使用 1,000,000 的运行时默认值；API key、未知模型以及显式零仍须明确填写正整数。
+容量权威入口为 `provider.rs::effective_context_window` 与 `ResolvedProvider::effective_context_window`：Anthropic/OpenAI 使用显式正数、缺省 200,000，旧 `context_1m` 优先 1,000,000；Responses 的已确认 ChatGPT plan 模型缺窗口时派生 1,000,000，API key、未知模型及显式零仍须正整数。`try_resolve` 与 `try_resolve_snapshot` 共用 policy：仅快照校验未绑定 provider 并容忍生效档位缺容量；两者均容忍辅助档位的容量缺口。账号引用校验复用 `peri-acp-types::model::valid_account_reference`。
 
 > Peri 内部配置权威面。模块指引见 [peri-config/CLAUDE.md](../../peri-config/CLAUDE.md)，
 > 现行设计见 [configuration-authority.md](../design/configuration-authority.md)。

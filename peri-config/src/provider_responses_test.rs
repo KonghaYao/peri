@@ -86,6 +86,11 @@ fn test_responses_requires_explicit_capacity_even_with_legacy_1m_flag() {
         try_resolve(&settings, &BTreeMap::new()),
         Err(ProviderError::MissingModelCapacity)
     ));
+    settings.config.profiles.opus.context_window = Some(0);
+    assert!(matches!(
+        try_resolve(&settings, &BTreeMap::new()),
+        Err(ProviderError::MissingModelCapacity)
+    ));
 }
 
 #[test]
@@ -483,6 +488,134 @@ fn provider_level_subscription_validation_matches_resolver_contract() {
     assert!(matches!(
         validate_responses_provider(&custom_endpoint),
         Err(ProviderError::InvalidSubscriptionEndpoint)
+    ));
+}
+
+#[test]
+fn subscription_account_reference_obeys_shared_boundaries() {
+    let mut settings = settings();
+    settings.config.providers[0].api_key.clear();
+    settings.config.providers[0].auth = Some(ProviderAuthConfig::ChatGptPlan {
+        store: subscription_store(),
+        account: String::new(),
+        subject: "subject-test".into(),
+        client_id: "issued-client-test".into(),
+    });
+    for (account, accepted) in [
+        ("a".to_owned(), true),
+        ("SYNTHETIC_account-42".to_owned(), true),
+        ("x".repeat(128), true),
+        ("".to_owned(), false),
+        ("work/team".to_owned(), false),
+        (" work".to_owned(), false),
+        ("work ".to_owned(), false),
+        (" work ".to_owned(), false),
+        (" ".to_owned(), false),
+        ("work team".to_owned(), false),
+        ("work\n".to_owned(), false),
+        ("合成".to_owned(), false),
+        ("x".repeat(129), false),
+        (format!("{} ", "x".repeat(128)), false),
+    ] {
+        if let Some(ProviderAuthConfig::ChatGptPlan {
+            account: target, ..
+        }) = &mut settings.config.providers[0].auth
+        {
+            *target = account;
+        }
+        let result = validate_responses_provider(&settings.config.providers[0]);
+        let runtime = try_resolve(&settings, &BTreeMap::new());
+        let snapshot = try_resolve_snapshot(&settings, &BTreeMap::new());
+        if accepted {
+            assert!(result.is_ok());
+            assert!(matches!(runtime, Ok(Some(_))));
+            assert!(matches!(snapshot, Ok(Some(_))));
+        } else {
+            assert!(matches!(
+                result,
+                Err(ProviderError::InvalidSubscriptionReference)
+            ));
+            assert!(matches!(
+                runtime,
+                Err(ProviderError::InvalidSubscriptionReference)
+            ));
+            assert!(matches!(
+                snapshot,
+                Err(ProviderError::InvalidSubscriptionReference)
+            ));
+        }
+    }
+}
+
+#[test]
+fn resolution_policies_differ_only_at_unbound_and_effective_capacity_boundaries() {
+    let mut settings = settings();
+    let environment = BTreeMap::new();
+    settings.config.providers.push(ProviderConfig {
+        id: "unbound".into(),
+        provider_type: "unknown".into(),
+        ..Default::default()
+    });
+    assert!(matches!(try_resolve(&settings, &environment), Ok(Some(_))));
+    assert!(matches!(
+        try_resolve_snapshot(&settings, &environment),
+        Err(ProviderError::UnknownType)
+    ));
+    settings.config.providers.pop();
+
+    settings.config.profiles.haiku.context_window = None;
+    assert!(matches!(try_resolve(&settings, &environment), Ok(Some(_))));
+    assert!(matches!(
+        try_resolve_snapshot(&settings, &environment),
+        Ok(Some(_))
+    ));
+    let mut bad_auxiliary = settings.config.providers[0].clone();
+    bad_auxiliary.id = "bad-auxiliary".into();
+    bad_auxiliary.api_key.clear();
+    settings.config.providers.push(bad_auxiliary);
+    settings.config.profiles.haiku.provider = "bad-auxiliary".into();
+    assert!(matches!(
+        try_resolve(&settings, &environment),
+        Err(ProviderError::MissingApiKey)
+    ));
+    assert!(matches!(
+        try_resolve_snapshot(&settings, &environment),
+        Err(ProviderError::MissingApiKey)
+    ));
+    settings.config.providers.pop();
+    settings.config.profiles.haiku.provider = "responses".into();
+    settings.config.profiles.opus.context_window = None;
+    assert!(matches!(
+        try_resolve(&settings, &environment),
+        Err(ProviderError::MissingModelCapacity)
+    ));
+    assert!(matches!(
+        try_resolve_snapshot(&settings, &environment),
+        Ok(None)
+    ));
+
+    settings.config.providers[0].api_key.clear();
+    assert!(matches!(
+        try_resolve(&settings, &environment),
+        Err(ProviderError::MissingApiKey)
+    ));
+    assert!(matches!(
+        try_resolve_snapshot(&settings, &environment),
+        Err(ProviderError::MissingApiKey)
+    ));
+}
+
+#[test]
+fn missing_environment_model_mapping_still_returns_none_under_both_policies() {
+    let settings = settings();
+    let environment = BTreeMap::from([
+        ("MODEL_PROVIDER".to_owned(), "responses".to_owned()),
+        ("MODEL_TYPE".to_owned(), "sonnet".to_owned()),
+    ]);
+    assert!(matches!(try_resolve(&settings, &environment), Ok(None)));
+    assert!(matches!(
+        try_resolve_snapshot(&settings, &environment),
+        Ok(None)
     ));
 }
 

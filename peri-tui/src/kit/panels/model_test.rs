@@ -190,6 +190,8 @@ pub(super) struct MountedPanel {
     pub(super) right_cursor: State<usize>,
     pub(super) right_focus: State<bool>,
     pub(super) window_edit: State<Option<String>>,
+    pub(super) window_target: State<String>,
+    pub(super) selected_alias: State<String>,
     pub(super) render_version: State<u64>,
     pub(super) right_scroll: State<ScrollViewState>,
 }
@@ -239,28 +241,35 @@ fn mount_panel_frames(
 }
 
 impl MountedPanel {
-    /// 走真实事件入口：视口按 `area` + 当前激活档位推导，与组件渲染同源。
-    fn event(&self, event: Event, area: Rect, switched: &Switched) -> EventResult {
-        let active_idx = super::active_profile_idx(&super::current_active_alias());
+    fn event_context(&self, area: Rect) -> super::panel_input::ModelEventCtx {
+        let selected_idx = super::active_profile_idx(&self.selected_alias.read());
         let viewport = ListViewport::for_content_rows(
             content_rows(Some(area), area.height),
             super::LIST_METRICS,
             PROFILE_KEYS.len(),
-            active_idx,
+            selected_idx,
         );
-        super::panel_input::handle_model_event_with(
-            event,
-            &super::panel_input::ModelEventCtx {
-                area: Some(area),
-                right_cursor: self.right_cursor,
-                right_focus: self.right_focus,
-                window_edit: self.window_edit,
-                render_version: self.render_version,
-                right_scroll: self.right_scroll,
-                viewport,
-            },
-            |idx| *switched.borrow_mut() = Some(idx),
-        )
+        super::panel_input::ModelEventCtx {
+            area: Some(area),
+            right_cursor: self.right_cursor,
+            right_focus: self.right_focus,
+            window_edit: self.window_edit,
+            window_target: self.window_target,
+            selected_alias: self.selected_alias,
+            render_version: self.render_version,
+            right_scroll: self.right_scroll,
+            viewport,
+        }
+    }
+
+    fn event(&self, event: Event, area: Rect, switched: &Switched) -> EventResult {
+        super::panel_input::handle_model_event_with(event, &self.event_context(area), |idx| {
+            *switched.borrow_mut() = Some(idx)
+        })
+    }
+
+    fn real_event(&self, event: Event, area: Rect) -> EventResult {
+        super::panel_input::handle_model_event(event, &self.event_context(area))
     }
 }
 

@@ -53,10 +53,14 @@ impl PlanDraft {
     #[cfg(test)]
     pub(super) fn reference(&self) -> Option<PlanReference> {
         let store = self.store.trim();
-        let account = self.account.trim();
+        let account = self.account.as_str();
         let subject = self.subject.trim();
         let client_id = self.client_id.trim();
-        if store.is_empty() || account.is_empty() || subject.is_empty() || client_id.is_empty() {
+        if store.is_empty()
+            || !peri_acp_types::model::valid_account_reference(account)
+            || subject.is_empty()
+            || client_id.is_empty()
+        {
             return None;
         }
         Some(PlanReference {
@@ -118,7 +122,7 @@ impl PlanDraft {
         {
             self.store = store.display().to_string();
         }
-        if self.account.trim().is_empty() {
+        if self.account.is_empty() {
             self.account = "default".to_owned();
         }
     }
@@ -132,8 +136,8 @@ impl PlanDraft {
                 i18n::tr("login-error-store-absolute"),
             ));
         }
-        let account = self.account.trim();
-        if !valid_account(account) {
+        let account = self.account.as_str();
+        if !peri_acp_types::model::valid_account_reference(account) {
             return Err(LoginError::field(
                 LoginField::PlanAccount,
                 i18n::tr("login-error-account-reference"),
@@ -171,13 +175,4 @@ impl AuthIdentityDraft for PlanDraft {
     fn set_identity(&mut self, status: &AccountStatus) -> bool {
         Self::set_identity(self, status)
     }
-}
-
-/// Account references become file names inside the credentials store.
-fn valid_account(account: &str) -> bool {
-    !account.is_empty()
-        && account.len() <= 128
-        && account
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }

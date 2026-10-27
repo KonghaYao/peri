@@ -140,7 +140,7 @@ pub(super) fn complete(
     )
 }
 
-fn parse_usage(value: &Value) -> ModelResult<TokenUsage> {
+pub(super) fn parse_usage(value: &Value) -> ModelResult<TokenUsage> {
     let number = |value: &Value| {
         value
             .as_u64()

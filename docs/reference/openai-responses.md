@@ -19,7 +19,7 @@
    空字段，手动输入优先，没有可靠来源时保留未设置并给出提示。预填只写 Login 草稿，不写
    任何 profile。
 4. Login 只保存 provider：档位绑定、该档 model 与正整数 `Context window (tokens)` 归
-   settings 的 `profiles`（`/model` 面板只编辑 Provider/Model/Effort/Max tokens/1m，
+   settings 的 `profiles`（`/model` 面板编辑 Provider/Model/Effort/Max tokens/Context window/1m，
    不提供 Responses 专属字段）。新建 provider 不自动绑定任何档位，已有 provider 的绑定与其参数保持
    不变；改名时所有显式引用随新 id 更新，空引用继续走首 provider 回退。保存只阻断“本次
    新弄坏”的已有绑定：原本就可解析、本次变为不可解析时显示精确错误（模型缺失指向 Login
@@ -90,9 +90,16 @@ profile 的模型、推理强度和窗口。
 若附带 response 身份，仍须匹配当前响应。允许 `response.output_item.done` 独立携带
 完整 item（消息可缺少 item ID，原生回放不伪造 ID）；`response.completed` 未提供
 `output` 或省略此前已发送的 item 时，仅以已收到完整 `output_item.done` 的快照
-重建结果和 replay。未完成的 item、冲突快照及
-未知的输出事件继续报协议错误；不产生输出的扩展事件忽略。失败终态仍报错。若上游明确
-给出 `end_turn: false` 且没有工具调用，该响应不触发完成 hook，而是有界续跑。
+重建结果和 replay。上述 completed 路径中的未完成 item、冲突快照及
+未知的输出事件继续报协议错误；不产生输出的扩展事件忽略。
+
+`response.incomplete` 仅在 `incomplete_details.reason` 为 `max_output_tokens` 时进入安全截断恢复：
+保留已完成 items 与部分正文，存在的 usage 仍严格校验并保留；未完成的 reasoning/function_call
+不进入历史回放或工具执行，已显示的半截工具会收到配对结束事件。部分正文以纯消息内容回放，
+不携带未完成 item 的身份或状态。安全完整工具沿用 `ToolUse` 正常执行；没有完整工具则映射
+`MaxTokens`，不触发完成 hook，最多沿用现有预算续跑两次，仍连续截断则返回未完成终态。
+`response.failed`、其他或缺失 reason 的 incomplete、畸形 usage 仍直接失败，不自动续跑。
+若上游明确给出 `end_turn: false` 且没有工具调用，该响应同样不触发完成 hook，而是有界续跑。
 
 ## ChatGPT 计划
 
@@ -138,12 +145,17 @@ state 不会跨绑定重放；可用的通用消息仍按适配器契约处理�
 ChatGPT plan profile 不发送 `max_output_tokens` 或 `temperature`；`max_tokens`
 不会成为该模式的服务器输出上限，预算层把它标记为未知。Model 面板仍与其它 Responses
 provider 一样允许编辑 Provider/Model/contextWindow/Max tokens；是否被服务端采用属于
-运行时可用性，不改变配置行为。`contextWindow` 仍需明确配置。授权、凭据文件、刷新与注销
+运行时可用性，不改变配置行为。`contextWindow` 显式配置时须为正整数；已确认的 ChatGPT plan
+模型未填写时默认 1,000,000，API key 模式与其他模型仍须明确配置。授权、凭据文件、刷新与注销
 均由原生 credentials MCP 能力负责。
 
 注销先清除本地 grant，并尝试撤销远端授权，输出分别报告两项结果。同一进程内的认证
 manager 可以取消等待；独立 CLI 进程不能立即取消另一进程已经在途的 HTTP，但其后续取
 token 会失败。
+
+取凭据时，刷新开始前的账户锁等待可以取消；刷新一旦开始，取消只结束调用方等待，
+进程内事务仍持锁接收、校验并保存轮换结果。并发注销会等待该事务后清除本地授权。
+网络超时或进程、runtime 退出仍可能使刷新结果未知，不保证已轮换的 token 能被保存。
 
 工具名限 1–64 个 ASCII 字符，使用字母、数字、下划线或连字符。Responses opaque state
 用于保留不可拆分的推理/调用顺序；本地预算对每段采用保守的 1024 token 估算，这不表示

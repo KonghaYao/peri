@@ -46,4 +46,40 @@ fn model_manage_provider_opens_login_with_one_shot_target() {
     );
 }
 
+#[test]
+#[serial]
+fn manage_provider_targets_selected_profile_even_when_active_differs() {
+    let guard = ModelPanelGuard::install();
+    let mut config = responses_config();
+    config.config.profiles.haiku.provider = "other".into();
+    guard.set_config(config);
+    let (tx, rx) = std::sync::mpsc::channel();
+    mount_panel_frames(TEST_AREA, 2, move |frame, panel| {
+        if frame == 0 {
+            panel.event(key(KeyCode::Down), TEST_AREA, &switched());
+            assert_eq!(&*panel.selected_alias.read(), "haiku");
+            panel.event(
+                key_with(KeyCode::Char('l'), KeyModifiers::CONTROL),
+                TEST_AREA,
+                &switched(),
+            );
+            tx.send(
+                crate::kit::atoms::LOGIN_PANEL_REQUEST
+                    .state()
+                    .read()
+                    .clone(),
+            )
+            .unwrap();
+        }
+    });
+    assert_eq!(guard.handle.read().config.active_alias, "sonnet");
+    assert_eq!(
+        rx.recv()
+            .unwrap()
+            .and_then(|request| request.provider_id)
+            .as_deref(),
+        Some("other")
+    );
+}
+
 // ── 设计 §7.9：普通右栏 K/V 行的鼠标命中 ────────────────────────────────────

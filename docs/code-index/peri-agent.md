@@ -1,6 +1,6 @@
 # peri-agent 代码索引
 
-Responses 未结束轮次：`agent/model_bridge.rs` 传递 `StopReason::Continue`；`agent/stages/act.rs` 提交部分响应但不触发完成 hook；`agent/stages/mod.rs` 入队有界续跑提醒，与无工具输出截断共用预算。回归测试在 `agent/stages/truncation_test.rs`。
+Responses 未结束轮次：`agent/model_bridge.rs` 传递 `StopReason::Continue`，以及模型层对 `max_output_tokens` incomplete 安全归一化后的 `MaxTokens`（有完整工具则为 `ToolUse`）；`Completed` 保留 usage，并为最终丢弃但已提前发出 `ToolStarted` 的工具补错误 `ToolEnded`，保留工具交给 dispatch。`agent/stages/act.rs` 提交部分响应但不触发完成 hook；`agent/stages/mod.rs` 入队有界续跑提醒，与无工具输出截断共用预算。回归测试在 `agent/stages/truncation_test.rs`、`tests/responses_terminal_test.rs`（真实 HTTP/SSE、usage、半截工具/replay、预算耗尽）。
 
 Responses 持久回放：`agent/model_bridge.rs` 在 `peri-model` 与 canonical `ContentBlock::ProviderState { provider, data }` 之间无损转换，只允许 assistant 顶层承载；可见文本与工具仍走 typed 投影，opaque 不进 UI 文本。`compact_v2/planner/planning.rs` 保留整批 replay call/result，`projection_render.rs` / `projection_archive.rs` 拒绝部分内容或结果投影；`messages/tool_pairing.rs` 对 rewind/fork 后缺结果的 replay 单元明确报错，不配新 placeholder。`compact_v2/full.rs` 可用完整历史生成新 Human 摘要，拒绝跨 ancestor/own 保留边界拆分 replay 单元；旧 state 随原历史持久保存，不附加到新摘要。`token.rs` 对每个 opaque state 计固定 1024-token 预算占位（非上限），typed 镜像不重复计量，后续以 provider input usage 校准；`session/memory_probe.rs` 独立计实际 JSON 内存。回归入口：`model_bridge_test.rs`、`compact_v2/{projection_render,planner,full}_test.rs`、`messages/tool_pairing_test.rs`、`token_test.rs`。
 

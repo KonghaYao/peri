@@ -268,3 +268,7 @@ mod request_test;
 #[cfg(test)]
 #[path = "stream_test.rs"]
 mod stream_test;
+
+#[cfg(test)]
+#[path = "stream_incomplete_test.rs"]
+mod stream_incomplete_test;

@@ -55,7 +55,7 @@ config-save-failed = Configuration save failed: { $error }
 config-handle-missing = Configuration unavailable: { $handle } is not initialized
 config-draft-conflict = Configuration changed; reload before saving
 config-runtime-sync-failed = Configuration saved, but runtime sync failed: { $error }
-model-panel-active-provider-unavailable = Active profile has no usable provider or model. Some Responses models require a context window before switching.
+model-panel-active-provider-unavailable = Selected profile has no usable provider or model. Some Responses models require a context window before switching.
 config-reloaded = Configuration reloaded
 config-reload-failed = Configuration reload failed: { $error }
 
@@ -587,6 +587,7 @@ bg-bar-focus-hint = Press Esc to exit focus
 # ---- Model Panel ----
 
 model-panel-title =  Select model 
+model-panel-selection-legend = ● active · ❯ selected
 model-panel-description =   Switch between models. Applies to this session.
 model-field-max-token = Max Token
 model-field-effort = Effort
@@ -596,7 +597,7 @@ model-effort-medium = Medium
 model-effort-high = High
 model-effort-xhigh = XHigh
 model-effort-max = Max
-panel-model-nav-hint =   ↑/↓::switch  Tab::side  →/←::value  Esc::exit/close
+panel-model-nav-hint =   ↑/↓::select  Enter::activate  Tab::side  →/←::value  Esc::exit/close
 panel-model-inline-toggle-hint =   Enter toggle
 
 # ---- Status Panel ----

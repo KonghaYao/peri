@@ -24,10 +24,7 @@ pub(super) enum LoginEditIntent {
 pub(super) fn auth_scope(es: &LoginEditState) -> HostConfigAuthScope {
     HostConfigAuthScope::new(
         host_source_identity().unwrap_or_default(),
-        AuthTarget::new(
-            PathBuf::from(es.plan.store.trim()),
-            es.plan.account.trim().to_owned(),
-        ),
+        AuthTarget::new(PathBuf::from(es.plan.store.trim()), es.plan.account.clone()),
     )
 }
 

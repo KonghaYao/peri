@@ -22,6 +22,7 @@ async fn config(
         effort: None,
         max_tokens: 32000,
         context_1m: false,
+        context_window: 200_000,
         retry_observer: None,
     };
     let cfg = crate::host::requests::tests::build_server_config(

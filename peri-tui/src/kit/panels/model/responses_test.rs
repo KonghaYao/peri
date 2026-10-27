@@ -41,6 +41,62 @@ fn subscription_default_window_is_visible_and_prefilled_without_persisting() {
     assert_eq!(handle.read().config.profiles.sonnet.context_window, None);
 }
 
+#[test]
+#[serial]
+fn rendered_capacities_and_active_selection_are_consistent() {
+    let guard = ModelPanelGuard::install();
+    let mut config = responses_config();
+    config.config.profiles.sonnet.context_window = Some(128_000);
+    config.config.profiles.opus.provider = "other".into();
+    config.config.profiles.opus.context_window = Some(128_000);
+    config.config.profiles.opus.context_1m = true;
+    config.config.profiles.haiku.context_window = None;
+    guard.set_config(config);
+    let area = Rect {
+        width: 110,
+        ..TEST_AREA
+    };
+    let buffer = mount_panel_frames(area, 2, |_, _| {});
+    let summary = |row: u16| -> String {
+        (0..area.width * 45 / 100)
+            .map(|x| buffer[(x, row + 2)].symbol())
+            .collect()
+    };
+    let (sonnet_row, _) = rendered_line_of(&buffer, "sonnet ·");
+    let (opus_row, _) = rendered_line_of(&buffer, "opus ·");
+    let (haiku_row, _) = rendered_line_of(&buffer, "haiku ·");
+    assert!(summary(sonnet_row).contains("128k"));
+    assert!(summary(opus_row).contains("1m"));
+    assert!(summary(haiku_row).contains('—'));
+    assert!(
+        rendered_line_of(&buffer, "Context window")
+            .1
+            .contains("128000")
+    );
+    assert!(buffer_text(&buffer).contains(&i18n::tr("model-panel-selection-legend")));
+
+    let one_million = mount_panel_frames(area, 3, move |frame, panel| {
+        if frame == 1 {
+            panel.event(left_down(opus_row, 5), area, &switched());
+        }
+    });
+    assert!(
+        rendered_line_of(&one_million, "Context window")
+            .1
+            .contains("1000000")
+    );
+    let buffer = mount_panel_frames(area, 3, move |frame, panel| {
+        if frame == 1 {
+            panel.event(left_down(haiku_row, 5), area, &switched());
+        }
+    });
+    let (_, active) = rendered_line_of(&buffer, "sonnet ·");
+    let (_, selected) = rendered_line_of(&buffer, "haiku ·");
+    assert!(active.trim_start().starts_with("● "));
+    assert!(selected.trim_start().starts_with("○❯"));
+    assert!(rendered_line_of(&buffer, "Context window").1.contains('—'));
+}
+
 /// 所有 provider 共用 Context window 与 1m enable 行。
 #[test]
 #[serial]

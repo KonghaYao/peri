@@ -101,8 +101,12 @@ fork 与 rewind 使用同一校验边界。无法解释的可执行 output item 
 - SSE parser 与 decoder 保持事件顺序：后续坏帧不能丢弃此前完整增量，完成后的尾帧
   不再消费。OpenAI-compatible 的 `[DONE]` 还须有有效 `finish_reason`，流内 error
   不得忽略或转为正常完成；
-- Responses 只有 `response.completed` 能提交成功；`[DONE]`、EOF、`response.failed`
-  和 `response.incomplete` 均不能伪造成功。配额耗尽和不支持的能力为明确终态；
+- Responses 的 `response.completed` 提供正常完成证据；`response.incomplete` 仅在
+  `incomplete_details.reason=max_output_tokens` 时按 ARC-OUTPUT-COMPLETION-001 安全归一化：
+  已完成 items、部分正文与严格 usage 得以保留，未完成 reasoning/function_call 不回灌或执行；
+  有完整工具时沿用 `ToolUse`，否则以 `MaxTokens` 进入现有有界续跑，不代表任务成功。
+  `[DONE]`、EOF、`response.failed`、其他或缺失 reason 的 incomplete 不能伪造完成证据。
+  配额耗尽和不支持的能力仍为明确失败终态；
 - retry observer 保留失败分类、时序、实际错误内容与原因链，不能在重试或中断转换时丢弃底层原因；
 - jitter、最大尝试次数与错误分类由 `ModelRuntimeConfig` 提供，Agent 不复制重试器。
 

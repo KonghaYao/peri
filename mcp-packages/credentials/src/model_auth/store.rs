@@ -30,13 +30,7 @@ impl Store {
         if !cfg!(unix) {
             return Err(AuthError::UnsupportedPlatform);
         }
-        if !root.is_absolute()
-            || account.is_empty()
-            || account.len() > 128
-            || !account
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        {
+        if !root.is_absolute() || !peri_acp_types::model::valid_account_reference(&account) {
             return Err(AuthError::InvalidReference);
         }
         Ok(Self { root, account })

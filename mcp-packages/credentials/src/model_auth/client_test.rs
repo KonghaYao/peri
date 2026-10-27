@@ -40,6 +40,8 @@ struct MockState {
     mode: Mutex<Mode>,
     requests: Mutex<Vec<(String, String)>>,
     pending_refresh: Notify,
+    release_refresh: Notify,
+    refresh_spent: std::sync::atomic::AtomicBool,
     pending_revoke: Notify,
     block_revoke: std::sync::atomic::AtomicBool,
 }
@@ -67,6 +69,8 @@ impl MockIssuer {
             mode: Mutex::new(Mode::Normal),
             requests: Mutex::new(Vec::new()),
             pending_refresh: Notify::new(),
+            release_refresh: Notify::new(),
+            refresh_spent: std::sync::atomic::AtomicBool::new(false),
             pending_revoke: Notify::new(),
             block_revoke: std::sync::atomic::AtomicBool::new(false),
         });
@@ -117,18 +121,24 @@ impl MockIssuer {
                                 shared.refreshes.fetch_add(1, Ordering::SeqCst);
                                 assert!(!form.contains_key("scope"));
                                 let mode = *shared.mode.lock().unwrap();
+                                let reused = shared.refresh_spent.load(Ordering::SeqCst)
+                                    && form.get("refresh_token").map(String::as_str) == Some("synthetic-refresh-initial");
+                                if matches!(mode, Mode::Pending) && !reused {
+                                    assert_eq!(form.get("refresh_token").map(String::as_str), Some("synthetic-refresh-initial"));
+                                    shared.refresh_spent.store(true, Ordering::SeqCst);
+                                    shared.pending_refresh.notify_one();
+                                    shared.release_refresh.notified().await;
+                                }
+                                let mode = *shared.mode.lock().unwrap();
                                 match mode {
+                                    _ if reused => (400, json!({"error":"invalid_grant"})),
                                     Mode::InvalidGrant => (400, json!({"error":"invalid_grant","error_description":"synthetic OAuth provider diagnosis"})),
                                     Mode::Temporary => (503, json!({"error":"temporarily_unavailable","error_description":"synthetic OAuth provider diagnosis"})),
-                                    Mode::Pending => {
-                                        shared.pending_refresh.notify_one();
-                                        std::future::pending::<()>().await;
-                                        unreachable!()
-                                    }
                                     _ => {
                                         let mut value = json!({"access_token":"synthetic-access-rotated","refresh_token":"synthetic-refresh-rotated","token_type":"Bearer","expires_in":3600});
                                         if matches!(mode, Mode::MissingScope) { value["scope"] = json!("openid"); }
                                         if matches!(mode, Mode::ChangedIdentity) { value["id_token"] = json!(sign(&issuer,"other-subject",None)); }
+                                        if matches!(mode, Mode::Pending) { value["id_token"] = json!(sign(&issuer,"subject-one",None)); }
                                         (200, value)
                                     }
                                 }
@@ -417,28 +427,204 @@ async fn independent_logout_tombstone_prevents_late_first_login_commit() {
 }
 
 #[tokio::test]
-async fn cancellation_stops_pending_refresh_without_poisoning_lock() {
+async fn cancelled_refresh_finishes_rotation_and_releases_waiting_clients() {
     let mock = MockIssuer::start().await;
     let dir = tempfile::tempdir().unwrap();
     let manager = mock.manager(dir.path(), "one");
+    let second = mock.manager(dir.path(), "one");
+    let third = mock.manager(dir.path(), "one");
     seed(&manager, 0).await;
     *mock.state.mode.lock().unwrap() = Mode::Pending;
     let cancellation = CancellationToken::new();
-    let work = manager.credential(cancellation.clone());
-    let cancel = async {
-        mock.state.pending_refresh.notified().await;
-        cancellation.cancel();
+    let work = {
+        let manager = manager.clone();
+        let cancellation = cancellation.clone();
+        tokio::spawn(async move { manager.credential(cancellation).await })
     };
-    let (result, ()) = tokio::join!(work, cancel);
-    assert!(result.unwrap_err().is_cancelled());
-    *mock.state.mode.lock().unwrap() = Mode::Normal;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        mock.state.pending_refresh.notified(),
+    )
+    .await
+    .unwrap();
+    cancellation.cancel();
+    assert!(tokio::time::timeout(Duration::from_secs(2), work)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err()
+        .is_cancelled());
+
+    let mut waiting =
+        tokio::spawn(async move { second.credential(CancellationToken::new()).await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), &mut waiting)
+            .await
+            .is_err()
+    );
+    let waiting_cancellation = CancellationToken::new();
+    let waiting_cancel = waiting_cancellation.clone();
+    let mut cancelled_waiter = tokio::spawn(async move { third.credential(waiting_cancel).await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), &mut cancelled_waiter)
+            .await
+            .is_err()
+    );
+    waiting_cancellation.cancel();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), cancelled_waiter)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err()
+            .is_cancelled()
+    );
+    assert_eq!(mock.state.refreshes.load(Ordering::SeqCst), 1);
+
+    mock.state.release_refresh.notify_one();
     assert_eq!(
-        manager
+        tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .bearer(),
+        "synthetic-access-rotated"
+    );
+    let account = stored(&manager).await;
+    assert!(account.binding.is_some());
+    let tokens = account.tokens.unwrap();
+    assert_eq!(tokens.access_token, "synthetic-access-rotated");
+    assert_eq!(tokens.refresh_token, "synthetic-refresh-rotated");
+    assert_eq!(mock.state.refreshes.load(Ordering::SeqCst), 1);
+    assert!(mock
+        .state
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|(path, _)| path == "/jwks"));
+}
+
+#[tokio::test]
+async fn cancelled_unauthorized_refresh_persists_before_other_client_retries() {
+    let mock = MockIssuer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let first = mock.manager(dir.path(), "one");
+    let second = mock.manager(dir.path(), "one");
+    seed(&first, 5000).await;
+    let rejected = first.credential(CancellationToken::new()).await.unwrap();
+    let other_rejected = second.credential(CancellationToken::new()).await.unwrap();
+    *mock.state.mode.lock().unwrap() = Mode::Pending;
+    let cancellation = CancellationToken::new();
+    let work = {
+        let first = first.clone();
+        let cancellation = cancellation.clone();
+        tokio::spawn(async move {
+            first
+                .refresh_after_unauthorized(&rejected, cancellation)
+                .await
+        })
+    };
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        mock.state.pending_refresh.notified(),
+    )
+    .await
+    .unwrap();
+    cancellation.cancel();
+    assert!(tokio::time::timeout(Duration::from_secs(2), work)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err()
+        .is_cancelled());
+
+    let other = second.clone();
+    let mut waiting = tokio::spawn(async move {
+        other
+            .refresh_after_unauthorized(&other_rejected, CancellationToken::new())
+            .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), &mut waiting)
+            .await
+            .is_err()
+    );
+    assert_eq!(mock.state.refreshes.load(Ordering::SeqCst), 1);
+    mock.state.release_refresh.notify_one();
+    assert!(tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap());
+    assert_eq!(
+        second
             .credential(CancellationToken::new())
             .await
             .unwrap()
             .bearer(),
         "synthetic-access-rotated"
+    );
+    assert_eq!(
+        stored(&first).await.tokens.unwrap().refresh_token,
+        "synthetic-refresh-rotated"
+    );
+    assert_eq!(mock.state.refreshes.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn logout_waits_for_cancelled_session_refresh_then_clears_rotated_tokens() {
+    let mock = MockIssuer::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let manager = mock.manager(dir.path(), "one");
+    let other = mock.manager(dir.path(), "one");
+    seed(&manager, 0).await;
+    *mock.state.mode.lock().unwrap() = Mode::Pending;
+    let work = {
+        let manager = manager.clone();
+        tokio::spawn(async move { manager.credential(CancellationToken::new()).await })
+    };
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        mock.state.pending_refresh.notified(),
+    )
+    .await
+    .unwrap();
+    let mut logout = {
+        let manager = manager.clone();
+        tokio::spawn(async move { manager.logout(CancellationToken::new()).await })
+    };
+    assert!(tokio::time::timeout(Duration::from_secs(2), work)
+        .await
+        .unwrap()
+        .unwrap()
+        .is_err());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), &mut logout)
+            .await
+            .is_err()
+    );
+    assert_eq!(mock.state.refreshes.load(Ordering::SeqCst), 1);
+    mock.state.release_refresh.notify_one();
+    let outcome = tokio::time::timeout(Duration::from_secs(5), logout)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(outcome.local_cleared && outcome.remote_revoked);
+    let account = stored(&other).await;
+    assert!(account.tokens.is_none());
+    assert!(account.binding.is_none());
+    assert!(other.credential(CancellationToken::new()).await.is_err());
+    let requests = mock.state.requests.lock().unwrap();
+    let revoked = requests.iter().find(|(path, _)| path == "/revoke").unwrap();
+    let form: HashMap<_, _> = url::form_urlencoded::parse(revoked.1.as_bytes())
+        .into_owned()
+        .collect();
+    assert_eq!(
+        form.get("token").map(String::as_str),
+        Some("synthetic-refresh-rotated")
     );
 }
 

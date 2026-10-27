@@ -44,13 +44,12 @@ impl HostConfigAuthScope {
     }
 
     pub(crate) fn target(&self) -> Option<AuthTarget> {
-        if self.store.as_os_str().is_empty() || self.account.trim().is_empty() {
+        if self.store.as_os_str().is_empty()
+            || !peri_acp_types::model::valid_account_reference(&self.account)
+        {
             return None;
         }
-        Some(AuthTarget::new(
-            self.store.clone(),
-            self.account.trim().to_owned(),
-        ))
+        Some(AuthTarget::new(self.store.clone(), self.account.clone()))
     }
 }
 

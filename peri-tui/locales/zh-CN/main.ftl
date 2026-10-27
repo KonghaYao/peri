@@ -54,7 +54,7 @@ config-save-failed = 配置保存失败: { $error }
 config-handle-missing = 配置不可用: { $handle } 未初始化
 config-draft-conflict = 配置已变化，重新载入后再保存
 config-runtime-sync-failed = 配置已保存，但运行端同步失败: { $error }
-model-panel-active-provider-unavailable = 当前档位缺少可用的 Provider 或模型。部分 Responses 模型需要先填写上下文窗口。
+model-panel-active-provider-unavailable = 选中档位缺少可用的 Provider 或模型。部分 Responses 模型需要先填写上下文窗口。
 config-reloaded = 配置已重新载入
 config-reload-failed = 配置重新载入失败: { $error }
 
@@ -588,6 +588,7 @@ bg-bar-focus-hint = 按 Esc 退出聚焦
 # ---- 模型面板 ----
 
 model-panel-title =  选择模型 
+model-panel-selection-legend = ● 生效 · ❯ 选中
 model-panel-description =   切换模型。仅对当前会话生效。
 model-field-max-token = 最大 Token
 model-field-effort = 推理力度
@@ -597,7 +598,7 @@ model-effort-medium = 中
 model-effort-high = 高
 model-effort-xhigh = 超高
 model-effort-max = 最大
-panel-model-nav-hint =   ↑/↓::切换  Tab::左右  →/←::改值  Esc::退出/关闭
+panel-model-nav-hint =   ↑/↓::选择  Enter::激活  Tab::左右  →/←::改值  Esc::退出/关闭
 panel-model-inline-toggle-hint =   Enter 切换
 
 # ---- 状态面板 ----

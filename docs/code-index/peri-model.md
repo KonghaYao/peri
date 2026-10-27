@@ -34,7 +34,7 @@ Emscripten 路径：`src/transport/http.rs` 复用 reqwest native/Hyper HTTP/SSE
 | 我想做什么 | 主文件 | 入口与约束 |
 | --- | --- | --- |
 | Responses API / 订阅推理 | `src/openai_responses/` | `ResponsesConfig`、`ResponsesProfile`、`ResponsesModel`；一个 wire adapter、两种认证 profile，复用公共 HTTP/SSE/retry/cancel |
-| Responses SSE 生命周期 | `src/openai_responses/stream.rs` + `stream_test.rs` | 元数据不产生文本；精简终止事件从完整 done item 重建输出，未完成 item 拒绝；无输出的扩展事件忽略、未知输出事件拒绝；`end_turn:false` 映射 `StopReason::Continue` |
+| Responses SSE 生命周期 | `src/openai_responses/stream.rs`、`stream_item.rs` + `stream_test.rs`、`stream_incomplete_test.rs` | completed 精简终端仅从完整 done item 重建；incomplete 仅 `max_output_tokens` 安全归一化：保留完成 items、部分正文与严格 usage，丢弃未完成 reasoning/function_call；完整工具仍为 `ToolUse`，否则 `MaxTokens`；其他失败仍严格处理；元数据/无输出扩展忽略、未知输出拒绝；`end_turn:false` 为 `Continue` |
 | 原生输出回放 | `src/openai_responses/replay.rs` + `src/protocol/types.rs` | `ContentBlock::ProviderState`、`ProviderProtocol::OpenAiResponses`；有序 items 绑定 endpoint/model/profile/credential reference，替代 typed 投影发送 |
 | 终态 provider 失败 | `src/runtime/error.rs` + `peri-agent/src/agent/stages/mod.rs` | `ProviderTerminal`、`ModelError::is_terminal_provider_failure`；保存部分正文后失败，不自动续跑或执行半成品工具 |
 | 认证重试 | `src/runtime/stream.rs` + `src/runtime/retry.rs` | `AuthenticationRefreshed` 只允许首个可见 delta 前在现有 attempt 预算内重发；凭据文件和 OAuth 生命周期在 `mcp-packages/credentials` |

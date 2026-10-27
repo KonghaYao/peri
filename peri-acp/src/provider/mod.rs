@@ -45,6 +45,7 @@ pub enum LlmProvider {
         effort: Option<String>,
         max_tokens: u32,
         context_1m: bool,
+        context_window: u32,
         retry_observer: Option<Arc<dyn peri_model::RetryObserver>>,
     },
     Anthropic {
@@ -54,6 +55,7 @@ pub enum LlmProvider {
         effort: Option<String>,
         max_tokens: u32,
         context_1m: bool,
+        context_window: u32,
         retry_observer: Option<Arc<dyn peri_model::RetryObserver>>,
     },
 }
@@ -94,6 +96,7 @@ impl LlmProvider {
                 effort,
                 max_tokens,
                 context_1m,
+                context_window,
             } => Self::Anthropic {
                 api_key,
                 model,
@@ -101,6 +104,7 @@ impl LlmProvider {
                 effort,
                 max_tokens,
                 context_1m,
+                context_window,
                 retry_observer: None,
             },
             ResolvedProvider::OpenAi {
@@ -110,6 +114,7 @@ impl LlmProvider {
                 effort,
                 max_tokens,
                 context_1m,
+                context_window,
             } => Self::OpenAi {
                 api_key,
                 base_url,
@@ -117,6 +122,7 @@ impl LlmProvider {
                 effort,
                 max_tokens,
                 context_1m,
+                context_window,
                 retry_observer: None,
             },
         }
@@ -220,26 +226,17 @@ impl LlmProvider {
         self
     }
 
-    /// 获取模型的上下文窗口大小（不消费 self）。
-    ///
-    /// OpenAI Chat Completions 与 Anthropic 保留历史 200_000 默认值；
-    /// Responses 必须使用配置权威面已验证的显式 profile contextWindow。
+    /// 配置权威面已解析的有效容量；模型 metadata 与宿主预算消费相同值。
     pub fn context_window(&self) -> u32 {
         match self {
-            Self::Responses { context_window, .. } => *context_window,
-            _ => 200_000,
+            Self::Responses { context_window, .. }
+            | Self::OpenAi { context_window, .. }
+            | Self::Anthropic { context_window, .. } => *context_window,
         }
     }
 
-    /// 装配处已解析的有效上下文窗口：`context_1m` 生效后的值。
-    ///
-    /// 这是唯一权威，装配出的模型与宿主预算都用它，避免两处各算一遍。
     pub fn effective_context_window(&self) -> u32 {
-        if self.context_1m() {
-            1_000_000
-        } else {
-            self.context_window()
-        }
+        self.context_window()
     }
 
     pub fn into_model(self) -> Box<dyn peri_model::Model> {

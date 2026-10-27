@@ -8,7 +8,8 @@ use serde_json::Value;
 use crate::{
     runtime::stream::{SseDecoderFactory, SseDecoders},
     transport::SseEvent,
-    ModelError, ModelResult, ModelStreamEvent, ProtocolErrorKind,
+    ModelError, ModelMessage, ModelResponse, ModelResult, ModelStreamEvent, ProtocolErrorKind,
+    StopReason,
 };
 
 use super::{
@@ -190,6 +191,11 @@ impl ResponsesStream {
                 Ok(Vec::new())
             }
             "response.completed" => self.finish(&value["response"], request_id),
+            "response.incomplete"
+                if value["response"]["incomplete_details"]["reason"] == "max_output_tokens" =>
+            {
+                self.truncate(&value["response"], request_id)
+            }
             "response.failed" | "response.incomplete" | "error" => {
                 Err(invalid(&format!("OpenAI Responses terminal event: {kind}"))
                     .with_body(event.data))
@@ -259,6 +265,103 @@ impl ResponsesStream {
             .ok_or_else(|| invalid("Responses delta has no matching output item"))?;
         item.check_id(event)?;
         Ok(item)
+    }
+
+    fn truncate(
+        &mut self,
+        response: &Value,
+        request_id: Option<String>,
+    ) -> ModelResult<Vec<ModelStreamEvent>> {
+        if response
+            .get("status")
+            .is_some_and(|status| status.as_str() != Some("incomplete"))
+        {
+            return Err(invalid(
+                "response.incomplete carried a non-incomplete status",
+            ));
+        }
+        self.set_response_id(response)?;
+        let usage = response
+            .get("usage")
+            .filter(|usage| !usage.is_null())
+            .map(response::parse_usage)
+            .transpose()?;
+        let output = response
+            .get("output")
+            .map(|_| required_array(response, "output"))
+            .transpose()?;
+        let compacted = output.is_none()
+            || self
+                .items
+                .keys()
+                .any(|index| *index >= output.map_or(0, Vec::len));
+        let mut supplied = BTreeSet::new();
+        let mut events = Vec::new();
+        for (position, value) in output.into_iter().flatten().enumerate() {
+            let index = if compacted {
+                let id = required_string(value, "id")?;
+                self.items
+                    .iter()
+                    .find(|(_, item)| item.id() == Some(id))
+                    .map(|(&index, _)| index)
+                    .ok_or_else(|| {
+                        invalid("response.incomplete mixed omitted and untracked output items")
+                    })?
+            } else {
+                position
+            };
+            if !supplied.insert(index) {
+                return Err(invalid("response.incomplete repeated an output item"));
+            }
+            if !self.items.contains_key(&index) {
+                events.extend(self.add_item(index, value)?);
+            }
+            events.extend(
+                self.items
+                    .get_mut(&index)
+                    .expect("item inserted")
+                    .truncate(value)?,
+            );
+        }
+        // 丢弃半截工具不能掩盖重复调用身份，否则提前工具事件会配到另一调用。
+        let mut call_ids = BTreeSet::new();
+        for call_id in self.items.values().filter_map(StreamItem::call_id) {
+            if !call_ids.insert(call_id) {
+                return Err(invalid(
+                    "Responses output contains duplicate call_id values",
+                ));
+            }
+        }
+        let items = self
+            .items
+            .values()
+            .map(StreamItem::truncated_snapshot)
+            .collect::<ModelResult<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let (mut content, calls) =
+            response::project_items(&items, self.binding.profile, Some(&self.tools))?;
+        if !items.is_empty() {
+            content.push(super::replay::state_block(&self.binding, &items));
+        }
+        let reason = if calls.is_empty() {
+            StopReason::MaxTokens
+        } else {
+            StopReason::ToolUse
+        };
+        let result = ModelResponse::new(
+            ModelMessage::assistant(content, calls),
+            reason,
+            usage,
+            request_id.or_else(|| self.response_id.clone()),
+        )?;
+        if let Some(usage) = result.usage() {
+            events.push(ModelStreamEvent::Usage(usage.clone()));
+        }
+        self.completed = true;
+        events.push(ModelStreamEvent::Completed(result));
+        Ok(events)
     }
 
     fn finish(

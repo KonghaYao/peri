@@ -1,8 +1,8 @@
 # peri-tui 代码索引
 
-Model 面板的 `effective_context_window` 使用配置解析器的同一容量规则显示并预填
-ChatGPT plan 已知模型的 1M 默认值，不把推导值写回 profile；未知模型及 API key
-Responses 仍须显式窗口才可激活。
+Model 面板的 `effective_context_window` 使用配置权威的同一容量规则显示和预填，不把推导值写回 profile；未知模型及 API key Responses 仍须显式窗口才可激活。面板 `selected_alias` 与配置 `active_alias` 分离：可解析档位选择即激活，未完成档位仍可选中修复；窗口编辑绑定打开时的档位。真实鼠标/键盘、保存及 ACP 推送回归见 `kit/panels/model/commit_test.rs`，渲染容量与选中标记见 `model/responses_test.rs`。
+
+Login 的账号引用原样校验、保存和构造认证目标，不 trim 或归一化；`login/plan.rs` 与 `chatgpt_auth/controller.rs` 均使用 `peri-acp-types` 的共享校验，非法目标不会发起认证。
 
 Turn 分隔线由 `kit/acp_events/render.rs::insert_turn_dividers` 按完整消息顺序投影，位置固定在第二条及之后的真实 user prompt 前；`committed` 只存真实消息。`message_area/render/system.rs::render_divider_lines` 画连接左侧竖线的横线，颜色与 user 左侧竖线同为 `text.secondary`；`render/user.rs::render_user_bubble_lines` 在所有宽度下直接绘制 prompt 正文。回归见 `acp_events_test/snapshot_test.rs::test_snapshot_turn_divider_before_new_user_prompt` 与 `message_area/render_subagent_groups_test.rs::test_divider_lines`。
 

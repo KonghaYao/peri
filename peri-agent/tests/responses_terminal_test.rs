@@ -11,7 +11,7 @@ use std::{
 
 use peri_agent::{
     agent::{
-        events_v2::{EventBus, RenderEvent},
+        events_v2::{EventBus, ObserveEvent, RenderEvent},
         model_bridge::AgentModelBridge,
         react::AgentOutput,
         stages::{run_react_loop, LoopResult, StageContext},
@@ -149,6 +149,7 @@ struct Evidence {
     requests: Vec<Value>,
     messages: Vec<BaseMessage>,
     events: Vec<RenderEvent>,
+    observations: Vec<ObserveEvent>,
     executions: usize,
     completions: usize,
     queue_empty: bool,
@@ -216,11 +217,16 @@ async fn run_script(responses: Vec<String>) -> Evidence {
     while let Some(event) = handles.try_render() {
         events.push(event);
     }
+    let mut observations = Vec::new();
+    while let Some(event) = handles.try_observe() {
+        observations.push(event);
+    }
     Evidence {
         result,
         requests,
         messages: context.visible_messages(),
         events,
+        observations,
         executions: executions.load(Ordering::SeqCst),
         completions: completions.load(Ordering::SeqCst),
         queue_empty: context.session.queue.is_empty(),
@@ -271,6 +277,266 @@ async fn quota_failure_after_text_and_partial_tool_is_terminal_over_real_http() 
     );
     assert!(evidence.events.iter().any(|event| matches!(event, RenderEvent::ToolStarted { tool_call_id, .. } if tool_call_id == "call_execute")));
     assert!(evidence.events.iter().any(|event| matches!(event, RenderEvent::ToolEnded { tool_call_id, is_error: true, .. } if tool_call_id == "call_execute")), "close the provisional tool indicator");
+}
+
+fn incomplete_terminal(reason: Value, usage: Value) -> String {
+    event(
+        "response.incomplete",
+        json!({"response":{"id":"resp_1","status":"incomplete",
+            "incomplete_details":{"reason":reason},"usage":usage}}),
+    )
+}
+
+fn assert_discarded_tool_closed(events: &[RenderEvent]) {
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event,
+        RenderEvent::ToolStarted { tool_call_id, .. } if tool_call_id == "call_execute"))
+            .count(),
+        1
+    );
+    assert_eq!(events.iter().filter(|event| matches!(event,
+        RenderEvent::ToolEnded { tool_call_id, is_error: true, .. } if tool_call_id == "call_execute")).count(), 1);
+}
+
+#[tokio::test]
+async fn max_output_tokens_preserves_usage_and_continues_without_partial_tool_over_real_http() {
+    let body = partial_stream()
+        + &incomplete_terminal(
+            json!("max_output_tokens"),
+            json!({"input_tokens":30,"output_tokens":8,
+            "input_tokens_details":{"cached_tokens":12,"cache_write_tokens":3}}),
+        );
+    let evidence = run_script(vec![body, completed_stream("done", None)]).await;
+    assert!(
+        matches!(evidence.result, LoopResult::Completed),
+        "{:?}",
+        evidence.result
+    );
+    assert_eq!(evidence.requests.len(), 2);
+    assert_eq!(evidence.executions, 0);
+    assert_eq!(evidence.completions, 1, "截断不触发完成 hook");
+    assert_discarded_tool_closed(&evidence.events);
+    let input = evidence.requests[1]["input"].as_array().unwrap();
+    assert!(!input
+        .iter()
+        .any(|item| item["type"] == "function_call" || item["type"] == "function_call_output"));
+    assert_eq!(
+        input
+            .iter()
+            .filter(|item| item["role"] == "assistant" && item["content"][0]["text"] == PARTIAL)
+            .count(),
+        1
+    );
+    let answers: Vec<_> = evidence
+        .messages
+        .iter()
+        .filter(|msg| matches!(msg, BaseMessage::Ai { .. }))
+        .map(|msg| msg.content().to_string())
+        .collect();
+    assert_eq!(answers, [PARTIAL, "done"]);
+    let chunks: String = evidence
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            RenderEvent::TextChunk { chunk, .. } => Some(chunk.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(chunks, format!("{PARTIAL}done"), "正文不重复渲染");
+    let first_end = evidence
+        .observations
+        .iter()
+        .find(|event| matches!(event, ObserveEvent::LlmCallEnd { .. }))
+        .unwrap();
+    assert!(matches!(first_end, ObserveEvent::LlmCallEnd {
+        input_tokens:30, output_tokens:8, cache_read_input_tokens:Some(12),
+        cache_creation_input_tokens:Some(3), output, ..
+    } if serde_json::from_str::<Value>(output).unwrap()["stop_reason"] == "max_tokens"));
+}
+
+#[tokio::test]
+async fn repeated_max_output_tokens_exhausts_existing_budget_over_real_http() {
+    let body = partial_stream() + &incomplete_terminal(json!("max_output_tokens"), Value::Null);
+    let evidence = run_script(vec![body]).await;
+    assert!(
+        matches!(
+            evidence.result,
+            LoopResult::Error(AgentError::OutputTruncated { attempts: 3 })
+        ),
+        "{:?}",
+        evidence.result
+    );
+    assert_eq!(
+        evidence.requests.len(),
+        3,
+        "只允许两次续跑，不使用 transport retry 预算"
+    );
+    assert_eq!(evidence.executions, 0);
+    assert_eq!(evidence.completions, 0);
+    assert_eq!(
+        evidence
+            .events
+            .iter()
+            .filter(|event| matches!(event, RenderEvent::ToolStarted { .. }))
+            .count(),
+        3
+    );
+    assert_eq!(
+        evidence
+            .events
+            .iter()
+            .filter(|event| matches!(event, RenderEvent::ToolEnded { is_error: true, .. }))
+            .count(),
+        3
+    );
+    for request in &evidence.requests {
+        assert!(!request["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "function_call"));
+    }
+}
+
+#[tokio::test]
+async fn non_token_incomplete_and_malformed_usage_stay_terminal_over_real_http() {
+    for (reason, usage) in [
+        (json!("content_filter"), Value::Null),
+        (Value::Null, Value::Null),
+        (json!("max_output_tokens"), json!({"input_tokens":30})),
+    ] {
+        let body = partial_stream() + &incomplete_terminal(reason, usage);
+        let evidence = run_script(vec![body]).await;
+        assert!(
+            matches!(&evidence.result, LoopResult::Error(AgentError::ModelError(error)) if error.is_terminal_provider_failure()),
+            "{:?}",
+            evidence.result
+        );
+        assert_eq!(evidence.requests.len(), 1);
+        assert_eq!(evidence.executions, 0);
+        assert_eq!(evidence.completions, 0);
+        assert!(evidence.queue_empty);
+        assert_discarded_tool_closed(&evidence.events);
+    }
+}
+
+#[tokio::test]
+async fn incomplete_retains_complete_tool_but_closes_discarded_tool_over_real_http() {
+    let safe = json!({"id":"fc_safe","type":"function_call","call_id":"call_safe","name":"Count",
+        "arguments":"{}","status":"completed"});
+    let body = partial_stream()
+        + &event(
+            "response.output_item.done",
+            json!({"output_index":2,"item":safe}),
+        )
+        + &incomplete_terminal(json!("max_output_tokens"), Value::Null);
+    let evidence = run_script(vec![body, completed_stream("done", None)]).await;
+    assert!(
+        matches!(evidence.result, LoopResult::Completed),
+        "{:?}",
+        evidence.result
+    );
+    assert_eq!(evidence.requests.len(), 2);
+    assert_eq!(evidence.executions, 1);
+    assert_eq!(evidence.completions, 1);
+    assert_discarded_tool_closed(&evidence.events);
+    assert_eq!(
+        evidence
+            .events
+            .iter()
+            .filter(|event| matches!(event,
+        RenderEvent::ToolEnded { tool_call_id, is_error:false, .. } if tool_call_id == "call_safe"))
+            .count(),
+        1
+    );
+    let input = evidence.requests[1]["input"].as_array().unwrap();
+    assert!(!input.iter().any(|item| item["call_id"] == "call_execute"));
+    assert_eq!(
+        input
+            .iter()
+            .filter(|item| item["type"] == "function_call" && item["call_id"] == "call_safe")
+            .count(),
+        1
+    );
+    assert_eq!(
+        input
+            .iter()
+            .filter(|item| item["type"] == "function_call_output" && item["call_id"] == "call_safe")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn incomplete_complete_tool_uses_dispatch_to_close_provisional_start_over_real_http() {
+    let body = event(
+        "response.incomplete",
+        json!({"response":{
+        "id":"resp_1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},
+        "output":[call_item("{}")]}}),
+    );
+    let evidence = run_script(vec![body, completed_stream("done", None)]).await;
+    assert!(
+        matches!(evidence.result, LoopResult::Completed),
+        "{:?}",
+        evidence.result
+    );
+    assert_eq!(evidence.requests.len(), 2);
+    assert_eq!(evidence.executions, 1);
+    assert_eq!(evidence.completions, 1);
+    assert!(evidence.events.iter().any(|event| matches!(event,
+        RenderEvent::ToolStarted { tool_call_id, input:Value::Null, .. } if tool_call_id == "call_execute")));
+    assert_eq!(evidence.events.iter().filter(|event| matches!(event,
+        RenderEvent::ToolEnded { tool_call_id, is_error:false, .. } if tool_call_id == "call_execute")).count(), 1);
+    assert!(
+        !evidence
+            .events
+            .iter()
+            .any(|event| matches!(event, RenderEvent::ToolEnded { is_error: true, .. })),
+        "保留的工具不得由 bridge 提前结束"
+    );
+}
+
+#[tokio::test]
+async fn incomplete_without_text_drops_partial_reasoning_and_tools_over_real_http() {
+    let body = event(
+        "response.output_item.added",
+        json!({"output_index":0,
+        "item":{"id":"rs_a","type":"reasoning","status":"in_progress","summary":[]}}),
+    ) + &event(
+        "response.reasoning_summary_text.delta",
+        json!({"output_index":0,"item_id":"rs_a","summary_index":0,"delta":"半截思考"}),
+    ) + &event(
+        "response.output_item.added",
+        json!({"output_index":1,
+            "item":{"id":"fc_item","type":"function_call","call_id":"call_execute","name":"Count","arguments":"{","status":"in_progress"}}),
+    ) + &incomplete_terminal(json!("max_output_tokens"), Value::Null);
+    let evidence = run_script(vec![body, completed_stream("done", None)]).await;
+    assert!(
+        matches!(evidence.result, LoopResult::Completed),
+        "{:?}",
+        evidence.result
+    );
+    assert_eq!(evidence.requests.len(), 2);
+    assert_eq!(evidence.executions, 0);
+    assert_discarded_tool_closed(&evidence.events);
+    assert!(!evidence.requests[1]["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["role"] == "assistant"
+            || item["type"] == "reasoning"
+            || item["type"] == "function_call"));
+    assert_eq!(
+        evidence
+            .messages
+            .iter()
+            .filter(|msg| matches!(msg, BaseMessage::Ai { .. }))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

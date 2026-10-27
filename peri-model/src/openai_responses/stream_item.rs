@@ -72,8 +72,71 @@ impl StreamItem {
         self.identity["id"].as_str()
     }
 
+    pub(super) fn call_id(&self) -> Option<&str> {
+        if self.kind == "function_call" {
+            self.identity["call_id"].as_str()
+        } else {
+            None
+        }
+    }
+
     pub(super) fn finished_snapshot(&self) -> Option<&Value> {
         self.done.as_ref()
+    }
+
+    pub(super) fn truncate(&mut self, item: &Value) -> ModelResult<Vec<ModelStreamEvent>> {
+        match item.get("status").filter(|status| !status.is_null()) {
+            Some(status) if status == "completed" => self.finish(item),
+            Some(status) if status != "in_progress" && status != "incomplete" => {
+                Err(invalid("Responses output item has an invalid status"))
+            }
+            _ if self.done.is_some() => self.finish(item),
+            _ => self.reconcile(item),
+        }
+    }
+
+    pub(super) fn truncated_snapshot(&self) -> ModelResult<Option<Value>> {
+        if let Some(done) = &self.done {
+            match done.get("status").filter(|status| !status.is_null()) {
+                None => return Ok(Some(done.clone())),
+                Some(status) if status == "completed" => return Ok(Some(done.clone())),
+                Some(status) if status == "in_progress" || status == "incomplete" => {}
+                _ => return Err(invalid("Responses output item has an invalid status")),
+            }
+        }
+        if self.done.is_none()
+            && self
+                .identity
+                .get("status")
+                .filter(|status| !status.is_null())
+                .is_some_and(|status| {
+                    !matches!(
+                        status.as_str(),
+                        Some("completed" | "in_progress" | "incomplete")
+                    )
+                })
+        {
+            return Err(invalid("Responses output item has an invalid status"));
+        }
+        // 半截思考和函数调用没有安全回放依据；正文只保留已校验的纯内容，
+        // 不伪造原生 item 的完成状态或携带其未完成身份。
+        if self.kind != "message" || self.parts.values().all(|(_, text)| text.is_empty()) {
+            return Ok(None);
+        }
+        let content: Vec<Value> = self
+            .parts
+            .values()
+            .map(|(kind, text)| {
+                if kind == "refusal" {
+                    serde_json::json!({"type": kind, "refusal": text})
+                } else {
+                    serde_json::json!({"type": kind, "text": text})
+                }
+            })
+            .collect();
+        Ok(Some(serde_json::json!({
+            "type": "message", "role": "assistant", "content": content
+        })))
     }
 
     pub(super) fn check_id(&self, event: &Value) -> ModelResult<()> {

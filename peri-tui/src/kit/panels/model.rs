@@ -1,8 +1,8 @@
 //! ratatui-kit ModelPanel component.
 //!
 //! 左右分栏 Profile 编辑器：
-//! - 左侧：4 个固定档位卡片（fable / opus / sonnet / haiku），↑/↓ 选择即切换 active profile；
-//! - 右侧：当前 profile 的 K/V 编辑行（Provider / Model / Effort / Max tokens / Context window / 1m enable）。
+//! - 左侧：4 个固定档位卡片；选择可用档位时同时激活，未完成档位只选中并提示；
+//! - 右侧：选中 profile 的 K/V 编辑行（Provider / Model / Effort / Max tokens / Context window / 1m enable）。
 //!
 //! 右侧 `→`/`←` 切换字段值并立即写入内存 + 持久化 + 推送 ACP（无 Enter/Save 步骤）。
 //! 所有 provider（含 Responses / ChatGPT plan）共用同一套行与动作，没有按 provider
@@ -41,15 +41,16 @@ pub(crate) use edit::switch_active_alias;
 pub(crate) const PROFILE_KEYS: [&str; 4] = ["fable", "opus", "sonnet", "haiku"];
 
 fn effective_context_window(config: &crate::config::PeriConfig, alias: &str) -> Option<u32> {
-    let profile = config.config.profiles.get(alias)?;
-    profile.context_window.or_else(
-        || match peri_acp::provider::LlmProvider::from_config_for_alias(config, alias)? {
-            peri_acp::provider::LlmProvider::Responses { context_window, .. } => {
-                Some(context_window)
-            }
-            _ => None,
-        },
-    )
+    peri_config::provider::effective_context_window(config, alias)
+}
+
+fn compact_context_window(window: Option<u32>) -> String {
+    match window {
+        Some(value) if value.is_multiple_of(1_000_000) => format!("{}m", value / 1_000_000),
+        Some(value) if value.is_multiple_of(1_000) => format!("{}k", value / 1_000),
+        Some(value) => value.to_string(),
+        None => "—".to_owned(),
+    }
 }
 
 /// 右侧字段索引
@@ -94,9 +95,9 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // hooks 全部无条件前置（TUI-HOOK-001）：这里到事件注册之间不得出现条件分支或
     // 提前 return——渲染路径变化时 hook 数量与类型必须一致。
     let theme_def = hooks.use_atom(&THEME_ATOM);
-    // 左侧 profile 无独立光标：键盘导航基于宿主配置的 active_alias。
-    // 移动，与渲染高亮（active_idx）天然一致——此前 cursor 固定从 0（fable）初始化，
-    // active ≠ fable 时按 ↓ 会从当前档位跳到错误的下一档。
+    // 选中只属于面板；未完成档位也必须能进入右栏编辑，不改变运行档位。
+    let selected_alias = hooks.use_state(current_active_alias);
+    let window_target = hooks.use_state(String::new);
     let right_cursor = hooks.use_state(|| 0usize); // 右侧字段光标
     let right_focus = hooks.use_state(|| false); // 是否在右侧编辑焦点
     let window_edit = hooks.use_state(|| None::<String>);
@@ -108,9 +109,8 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 触发重绘，面板选择和编辑始终读取 PERI_CONFIG_HANDLE。
     let _snapshot = hooks.use_atom(&SERVICE_SNAPSHOT);
     let active_alias = current_active_alias();
-    // 左栏高亮、键盘导航起点与视口跟随都取同一档位下标：身份是静态 `PROFILE_KEYS`
-    // 上的 key，配置刷新不会让下标指向别的档位。
-    let active_idx = active_profile_idx(&active_alias);
+    let selected = selected_alias.read().clone();
+    let selected_idx = active_profile_idx(&selected);
     let _lang_ver = hooks.use_atom(&LANG_VERSION);
 
     // 打开面板即重读权威配置：外部写入后重新打开 /model 必须看到最新快照与新
@@ -119,7 +119,10 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         move || {
             if crate::kit::atoms::CONFIG_SOURCE_HANDLE.get().is_some() {
                 match crate::kit::config_service::reload_configuration() {
-                    Ok(_) => *render_version.write() += 1,
+                    Ok(_) => {
+                        *selected_alias.write() = current_active_alias();
+                        *render_version.write() += 1;
+                    }
                     Err(error) => {
                         tracing::warn!(error = %error, "ModelPanel: 打开面板时重新载入配置失败")
                     }
@@ -145,7 +148,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         content_rows(area, term_h),
         LIST_METRICS,
         PROFILE_KEYS.len(),
-        active_idx,
+        selected_idx,
     );
 
     hooks.use_event_handler_with_options(
@@ -160,6 +163,8 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     right_cursor,
                     right_focus,
                     window_edit,
+                    window_target,
+                    selected_alias,
                     render_version,
                     right_scroll,
                     viewport,
@@ -173,6 +178,8 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         right_cursor,
         right_focus,
         window_edit,
+        window_target,
+        selected_alias,
         render_version,
         right_scroll,
     });
@@ -182,7 +189,11 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     // ── 标题 ──
     let title_line = Line::from(vec![Span::styled(
-        i18n::tr("model-panel-title"),
+        format!(
+            "{}  {}",
+            i18n::tr("model-panel-title"),
+            i18n::tr("model-panel-selection-legend")
+        ),
         Style::new().fg(theme.semantic.text.primary).bold(),
     )]);
 
@@ -211,11 +222,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 })
                 .filter(|m| !m.is_empty())
                 .unwrap_or_else(|| key.to_string());
-            let window = if profile.context_1m {
-                "1m".to_owned()
-            } else {
-                "200k".to_owned()
-            };
+            let window = compact_context_window(effective_context_window(cfg, key));
             (
                 prov.map(|p| p.display_name().to_string())
                     .unwrap_or_else(|| profile.provider.clone()),
@@ -228,14 +235,17 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 String::new(),
                 key.to_string(),
                 "xhigh".to_string(),
-                "200k".to_string(),
+                "—".to_string(),
             )
         };
-        let is_active = i == active_idx;
+        let is_active = key == active_alias;
         let mark = if is_active { "●" } else { "○" };
+        let selection = if i == selected_idx { "❯" } else { " " };
         left_lines.push(Line::from(vec![Span::styled(
-            format!(" {} {} · {}", mark, key, provider_label),
-            if is_active {
+            format!(" {mark}{selection} {key} · {provider_label}"),
+            if i == selected_idx {
+                Style::new().fg(theme.component.panel.title).bold()
+            } else if is_active {
                 Style::new().fg(theme.semantic.status.success).bold()
             } else {
                 Style::new().fg(theme.semantic.text.primary)
@@ -260,13 +270,13 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .get()
         .map(|h| {
             let c = h.read();
-            let profile = c.config.profiles.get(&active_alias);
+            let profile = c.config.profiles.get(&selected);
             (
                 profile
                     .map(|p| p.effort.clone())
                     .unwrap_or_else(|| "xhigh".to_string()),
                 profile.map(|p| p.max_tokens).unwrap_or(32000),
-                effective_context_window(&c, &active_alias),
+                effective_context_window(&c, &selected),
                 profile.map(|p| p.context_1m).unwrap_or(false),
             )
         })
@@ -276,7 +286,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         .get()
         .map(|h| {
             let c = h.read();
-            let profile = c.config.profiles.get(&active_alias);
+            let profile = c.config.profiles.get(&selected);
             let prov = profile.and_then(|pf| {
                 if pf.provider.is_empty() {
                     c.config.providers.first()
@@ -287,18 +297,18 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             let model = profile
                 .and_then(|pf| pf.model.clone().filter(|m| !m.is_empty()))
                 .or_else(|| {
-                    prov.and_then(|p| p.models.get_model(&active_alias))
+                    prov.and_then(|p| p.models.get_model(&selected))
                         .map(str::to_string)
                 })
                 .filter(|m| !m.is_empty())
-                .unwrap_or_else(|| active_alias.clone());
+                .unwrap_or_else(|| selected.clone());
             (
                 prov.map(|p| p.display_name().to_string())
                     .unwrap_or_else(|| profile.map(|pf| pf.provider.clone()).unwrap_or_default()),
                 model,
             )
         })
-        .unwrap_or_else(|| (String::new(), active_alias.clone()));
+        .unwrap_or_else(|| (String::new(), selected.clone()));
 
     // ── 响应式右列宽度：窄屏时 VALUE_ALIGN_COL 收缩，避免值被截断 ──
     // 面板宽度取自与鼠标命中同一份 `AreaTracker` 区域（首帧未测量时退守宽屏对齐）。
@@ -315,7 +325,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         window_edit.read().clone().unwrap_or_else(|| {
             context_window
                 .map(|window| window.to_string())
-                .unwrap_or_default()
+                .unwrap_or_else(|| "—".to_owned())
         }),
         if current_ctx { "on" } else { "off" }.to_string(),
     ];

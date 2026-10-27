@@ -111,6 +111,54 @@ fn plan_mode_rejects_invalid_account_reference() {
 }
 
 #[test]
+fn plan_account_uses_unmodified_shared_reference_rules() {
+    let cfg = responses_config();
+    let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
+    edit.cycle_auth_mode();
+    edit.plan.store = plan_store();
+    edit.plan.subject = "subject".into();
+    edit.plan.client_id = "client".into();
+
+    for input in [
+        "a".to_owned(),
+        "SYNTHETIC_account-42".to_owned(),
+        "x".repeat(128),
+    ] {
+        edit.plan.account = input.clone();
+        let candidate = edit.build_candidate().unwrap();
+        assert!(matches!(
+            &candidate.config.providers[0].auth,
+            Some(peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan { account, .. })
+                if account == &input
+        ));
+        let target = super::edit_handler::auth_scope(&edit).target().unwrap();
+        assert_eq!(target.account, input);
+    }
+    for input in [
+        "".to_owned(),
+        "work/team".to_owned(),
+        " work".to_owned(),
+        "work ".to_owned(),
+        " work ".to_owned(),
+        " ".to_owned(),
+        "work team".to_owned(),
+        "work\n".to_owned(),
+        "合成".to_owned(),
+        "x".repeat(129),
+        format!("{} ", "x".repeat(128)),
+    ] {
+        edit.plan.account = input;
+        assert!(super::edit_handler::auth_scope(&edit).target().is_none());
+        let error = edit.build_candidate().unwrap_err();
+        assert_eq!(error.field, LoginField::AuthActions);
+        assert_eq!(
+            error.message,
+            crate::i18n::tr("login-error-account-reference")
+        );
+    }
+}
+
+#[test]
 fn switching_back_to_api_key_drops_plan_reference() {
     let cfg = responses_config();
     let mut edit = LoginEditState::edit_provider(&cfg, "resp", None).unwrap();
@@ -162,6 +210,10 @@ fn plan_defaults_only_fill_empty_fields() {
     edit.ensure_plan_defaults(Some(default_store()));
     assert_eq!(edit.plan.store, "/custom/store");
     assert_eq!(edit.plan.account, "custom");
+
+    edit.plan.account = " ".into();
+    edit.ensure_plan_defaults(Some(default_store()));
+    assert_eq!(edit.plan.account, " ", "空白输入不得被归一为默认账号");
 
     edit.plan.store.clear();
     edit.plan.account.clear();

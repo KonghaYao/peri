@@ -518,6 +518,25 @@ impl AgentModelBridge {
                 Some(Ok(ModelStreamEvent::Usage(_))) => {}
                 Some(Ok(ModelStreamEvent::Completed(response))) => {
                     let mut reasoning = Self::response_reasoning(response, streaming.is_some())?;
+                    // 安全截断可能丢弃半截工具；只关闭未交给 dispatch 的提前指示器。
+                    if let (Some(context), Some((tool_call_id, name))) = (&streaming, &active_tool)
+                    {
+                        if !reasoning
+                            .tool_calls
+                            .iter()
+                            .any(|call| &call.id == tool_call_id)
+                        {
+                            context.event_bus.emit_render(RenderEvent::ToolEnded {
+                                turn_id: context.turn_id,
+                                agent_id: context.agent_id,
+                                tool_call_id: tool_call_id.clone(),
+                                name: name.clone(),
+                                output: "模型响应未完成该工具调用，已丢弃".to_string(),
+                                is_error: true,
+                                subagent_failure: None,
+                            });
+                        }
+                    }
                     // 流式 chunk 的 messageId 与定型消息 ID 对齐（标准语义）。
                     if let Some(msg) = reasoning.source_message.take() {
                         reasoning.source_message = Some(msg.with_message_id(message_id));

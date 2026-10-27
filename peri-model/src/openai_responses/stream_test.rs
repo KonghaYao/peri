@@ -312,7 +312,7 @@ fn parallel_calls_keep_item_ids_separate_from_call_ids_and_done_can_supply_argum
 fn terminal_failures_never_complete_and_unsupported_output_fails_closed() {
     for event in [
         json!({"type":"response.failed","response":{"error":{"code":"usage_limit_reached"}}}),
-        json!({"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}),
+        json!({"type":"response.incomplete","response":{"id":"resp_a","incomplete_details":{"reason":"content_filter"}}}),
         completed(vec![json!({"type":"computer_call","id":"cc_a"})]),
     ] {
         let (decode, _) = decoder();

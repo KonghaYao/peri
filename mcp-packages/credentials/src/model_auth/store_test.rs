@@ -2,6 +2,42 @@ use std::io::BufRead;
 
 use super::*;
 
+#[cfg(unix)]
+#[test]
+fn store_rejects_invalid_account_references_at_final_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("credentials");
+    for account in [
+        "a".to_owned(),
+        "SYNTHETIC_account-42".to_owned(),
+        "x".repeat(128),
+    ] {
+        assert!(Store::new(root.clone(), account).is_ok());
+    }
+    for account in [
+        "".to_owned(),
+        "work/team".to_owned(),
+        " work".to_owned(),
+        "work ".to_owned(),
+        " work ".to_owned(),
+        " ".to_owned(),
+        "work team".to_owned(),
+        "work\n".to_owned(),
+        "合成".to_owned(),
+        "x".repeat(129),
+        format!("{} ", "x".repeat(128)),
+    ] {
+        assert!(matches!(
+            Store::new(root.clone(), account),
+            Err(AuthError::InvalidReference)
+        ));
+    }
+    assert!(matches!(
+        Store::new("relative".into(), "work".into()),
+        Err(AuthError::InvalidReference)
+    ));
+}
+
 #[tokio::test]
 async fn account_named_host_has_independent_storage_and_persistent_host_id() {
     let dir = tempfile::tempdir().unwrap();

@@ -46,6 +46,7 @@ struct FakeState {
     logins_started: AtomicUsize,
     logouts_started: AtomicUsize,
     status_checks: AtomicUsize,
+    opened_targets: Mutex<Vec<AuthTarget>>,
 }
 
 impl FakeState {
@@ -62,6 +63,7 @@ impl FakeState {
             logins_started: AtomicUsize::new(0),
             logouts_started: AtomicUsize::new(0),
             status_checks: AtomicUsize::new(0),
+            opened_targets: Mutex::new(Vec::new()),
         })
     }
 
@@ -76,7 +78,12 @@ struct FakeBackend {
 }
 
 impl ChatGptAuthBackend for FakeBackend {
-    fn open(&self, _target: &AuthTarget) -> AuthResult<Box<dyn ChatGptAuthSession>> {
+    fn open(&self, target: &AuthTarget) -> AuthResult<Box<dyn ChatGptAuthSession>> {
+        self.state
+            .opened_targets
+            .lock()
+            .unwrap()
+            .push(target.clone());
         Ok(Box::new(FakeSession {
             state: self.state.clone(),
         }))
@@ -217,6 +224,43 @@ fn status(subject: &str, client_id: &str, plan_enabled: bool) -> AccountStatus {
         plan_enabled,
         expires_at: u64::MAX / 2,
     }
+}
+
+#[test]
+fn authentication_uses_raw_valid_account_and_never_opens_invalid_target() {
+    for invalid in [
+        "".to_owned(),
+        "work/team".to_owned(),
+        " work".to_owned(),
+        "work ".to_owned(),
+        " ".to_owned(),
+        "合成".to_owned(),
+        "x".repeat(129),
+        format!("{} ", "x".repeat(128)),
+    ] {
+        let (mut controller, state) = controller();
+        controller.sync_scope(HostConfigAuthScope::new(
+            "fixture-source",
+            AuthTarget::new(std::env::temp_dir(), invalid),
+        ));
+        assert!(matches!(
+            controller.prepare_login(),
+            Err(AuthFailure::TargetRequired)
+        ));
+        assert!(controller.prepare_status(false).is_none());
+        assert!(state.opened_targets.lock().unwrap().is_empty());
+    }
+
+    let (mut controller, state) = controller();
+    let account = "SYNTHETIC_account-42";
+    controller.sync_scope(HostConfigAuthScope::new(
+        "fixture-source",
+        AuthTarget::new(std::env::temp_dir(), account),
+    ));
+    assert!(controller.prepare_login().is_ok());
+    let opened = state.opened_targets.lock().unwrap();
+    assert_eq!(opened.len(), 1);
+    assert_eq!(opened[0].account, account);
 }
 
 /// [回归测试] 后台任务未能 spawn 时必须释放 `prepare_*` 建立的完成门。

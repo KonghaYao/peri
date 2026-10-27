@@ -31,7 +31,7 @@ pub(super) struct AuthServer {
 
 impl AuthServer {
     async fn execute(
-        &self,
+        self: &Arc<Self>,
         request: Request,
         cancellation: CancellationToken,
     ) -> AuthResult<Response> {
@@ -72,27 +72,31 @@ impl AuthServer {
             Request::Credential { identity, binding } => {
                 self.ensure_session()?;
                 let lease = self.store.lease(&cancellation).await?;
-                let mut account = lease.read().await?.ok_or(AuthError::LoginRequired)?;
+                let account = lease.read().await?.ok_or(AuthError::LoginRequired)?;
                 validate_identity(&account, &identity, binding.as_deref())?;
                 let expires_at = account
                     .tokens
                     .as_ref()
                     .ok_or(AuthError::LoginRequired)?
                     .expires_at;
-                if expires_at <= (self.clock)().saturating_add(60) {
-                    self.refresh_locked(&lease, &mut account, &identity, &cancellation)
-                        .await?;
-                }
+                let (lease, account) = if expires_at <= (self.clock)().saturating_add(60) {
+                    self.refresh_owned(lease, account, identity, &cancellation)
+                        .await?
+                } else {
+                    (lease, account)
+                };
                 self.ensure_session()?;
                 let tokens = account.tokens.as_ref().ok_or(AuthError::LoginRequired)?;
                 if !super::types::has_plan_scope(&tokens.scope) {
                     return Err(AuthError::MissingScope);
                 }
-                Ok(Response::Credential(CredentialReply {
+                let reply = Response::Credential(CredentialReply {
                     bearer: tokens.access_token.clone(),
                     version: tokens.version.clone(),
                     binding: account.binding.ok_or(AuthError::LoginRequired)?,
-                }))
+                });
+                drop(lease);
+                Ok(reply)
             }
             Request::Refresh {
                 identity,
@@ -101,19 +105,23 @@ impl AuthServer {
             } => {
                 self.ensure_session()?;
                 let lease = self.store.lease(&cancellation).await?;
-                let mut account = lease.read().await?.ok_or(AuthError::LoginRequired)?;
+                let account = lease.read().await?.ok_or(AuthError::LoginRequired)?;
                 validate_identity(&account, &identity, Some(&binding))?;
-                if account
+                let lease = if account
                     .tokens
                     .as_ref()
                     .ok_or(AuthError::LoginRequired)?
                     .version
                     == rejected_version
                 {
-                    self.refresh_locked(&lease, &mut account, &identity, &cancellation)
-                        .await?;
-                }
+                    self.refresh_owned(lease, account, identity, &cancellation)
+                        .await?
+                        .0
+                } else {
+                    lease
+                };
                 self.ensure_session()?;
+                drop(lease);
                 Ok(Response::Refreshed(true))
             }
         }
@@ -192,6 +200,50 @@ impl AuthServer {
             .ok_or(AuthError::InvalidResponse)?;
         lease.save(current).await?;
         Ok(Response::Status(Some(status)))
+    }
+
+    async fn refresh_owned(
+        self: &Arc<Self>,
+        lease: Lease,
+        mut account: StoredAccount,
+        identity: ExpectedIdentity,
+        cancellation: &CancellationToken,
+    ) -> AuthResult<(Lease, StoredAccount)> {
+        if cancellation.is_cancelled() {
+            return Err(AuthError::Cancelled);
+        }
+        self.ensure_session()?;
+
+        // 轮换一旦开始，调用方和 MCP 连接退出都不能中断持锁持久化。
+        let server = self.clone();
+        let worker = tokio::spawn(async move {
+            let transaction = CancellationToken::new();
+            server
+                .refresh_locked(&lease, &mut account, &identity, &transaction)
+                .await?;
+            Ok((lease, account))
+        });
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let account_ref = self.account_ref.clone();
+        tokio::spawn(async move {
+            let result = match worker.await {
+                Ok(result) => result,
+                Err(error) => {
+                    tracing::warn!(account_ref = %account_ref, panicked = error.is_panic(), cancelled = error.is_cancelled(), "ChatGPT refresh task failed");
+                    Err(AuthError::Unavailable)
+                }
+            };
+            if let Err(error) = &result {
+                tracing::warn!(account_ref = %account_ref, error_kind = refresh_error_kind(error), "ChatGPT refresh transaction failed");
+            }
+            let _ = sender.send(result);
+        });
+
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(AuthError::Cancelled),
+            result = receiver => result.unwrap_or(Err(AuthError::Unavailable)),
+        }
     }
 
     async fn refresh_locked(
@@ -299,6 +351,21 @@ fn validate_identity(
         return Err(AuthError::AccountChanged);
     }
     Ok(())
+}
+
+fn refresh_error_kind(error: &AuthError) -> &'static str {
+    match error {
+        AuthError::Cancelled => "cancelled",
+        AuthError::Storage => "storage",
+        AuthError::Unavailable => "unavailable",
+        AuthError::LoginRequired => "login_required",
+        AuthError::AccountChanged => "account_changed",
+        AuthError::InvalidIdToken => "invalid_id_token",
+        AuthError::MissingScope => "missing_scope",
+        AuthError::InvalidResponse => "invalid_response",
+        AuthError::OAuth { .. } => "oauth",
+        _ => "other",
+    }
 }
 
 fn refresh_is_terminal(error: &AuthError) -> bool {

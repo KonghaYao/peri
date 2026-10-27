@@ -552,6 +552,181 @@ fn model_commit_context_window_persists_for_responses_profile() {
 }
 
 #[test]
+fn model_mouse_and_keyboard_repair_then_activate_unfinished_profile() {
+    isolated(
+        "model_mouse_and_keyboard_repair_then_activate_unfinished_profile",
+        async {
+            let fixture = Fixture::new(false);
+            fixture.create_session().await;
+            // 先持久化未完成的非活动档位，供面板打开时重新读取。
+            edit_field("haiku".into(), FIELD_PROVIDER, false);
+            fixture.expect_request(false).await;
+            let initial = fixture.config.read().clone();
+            assert_eq!(initial.config.profiles.haiku.provider, "r");
+            assert_eq!(initial.config.profiles.haiku.context_window, None);
+
+            let area = Rect {
+                width: 110,
+                ..TEST_AREA
+            };
+            let first = mount_panel_frames(area, 2, |_, _| {});
+            let (haiku_row, _) = rendered_line_of(&first, "haiku ·");
+            let (window_row, _) = rendered_line_of(&first, "Context window");
+            let config = fixture.config.clone();
+            let path = fixture.target.clone();
+            mount_panel_frames(area, 5, move |frame, panel| match frame {
+                1 => {
+                    assert_eq!(
+                        panel.real_event(left_down(haiku_row, 5), area),
+                        EventResult::Consumed
+                    );
+                    assert_eq!(&*panel.selected_alias.read(), "haiku");
+                    assert_eq!(config.read().config.active_alias, "sonnet");
+                    assert!(
+                        NOTIFICATION
+                            .state()
+                            .read()
+                            .as_ref()
+                            .unwrap()
+                            .message
+                            .contains("context window")
+                    );
+                    assert_eq!(
+                        crate::config::load_from(&path).unwrap().config.active_alias,
+                        "sonnet"
+                    );
+                }
+                2 => {
+                    let column = area.width * 45 / 100 + 2;
+                    assert_eq!(
+                        panel.real_event(left_down(window_row, column), area),
+                        EventResult::Consumed
+                    );
+                    assert_eq!(&*panel.window_target.read(), "haiku");
+                    assert_eq!(panel.window_edit.read().as_deref(), Some(""));
+                    panel.real_event(Event::Paste("128000".into()), area);
+                    panel.real_event(key(KeyCode::Enter), area);
+                    assert!(panel.window_edit.read().is_none());
+                    let saved = crate::config::load_from(&path).unwrap();
+                    assert_eq!(saved.config.active_alias, "sonnet");
+                    assert_eq!(saved.config.profiles.haiku.context_window, Some(128_000));
+                    assert_eq!(saved.config.profiles.sonnet, initial.config.profiles.sonnet);
+                }
+                3 => {
+                    panel.real_event(key(KeyCode::Esc), area);
+                    panel.real_event(key(KeyCode::Enter), area);
+                    let saved = crate::config::load_from(&path).unwrap();
+                    assert_eq!(saved.config.active_alias, "haiku");
+                    assert_eq!(saved.config.profiles.haiku.context_window, Some(128_000));
+                    assert_eq!(saved.config.profiles.sonnet, initial.config.profiles.sonnet);
+                }
+                _ => {}
+            });
+
+            let mut saved_states = Vec::new();
+            for _ in 0..2 {
+                let IncomingMessage::Request { id, method, params } = fixture.recv().await else {
+                    panic!("expected update request")
+                };
+                assert_eq!(method, "session/update_config");
+                let sent: PeriConfig = serde_json::from_value(params["config"].clone()).unwrap();
+                assert_eq!(sent.config.profiles.haiku.context_window, Some(128_000));
+                saved_states.push(sent.config.active_alias);
+                fixture
+                    .server
+                    .send_response(id, Ok(json!({})))
+                    .await
+                    .unwrap();
+            }
+            saved_states.sort();
+            assert_eq!(saved_states, ["haiku", "sonnet"]);
+            fixture.finish().await;
+        },
+    );
+}
+
+#[test]
+fn model_keyboard_selection_and_window_target_remain_independent() {
+    isolated(
+        "model_keyboard_selection_and_window_target_remain_independent",
+        async {
+            let fixture = Fixture::new(false);
+            fixture.create_session().await;
+            edit_field("haiku".into(), FIELD_PROVIDER, false);
+            fixture.expect_request(false).await;
+            let before = fixture.config.read().config.profiles.sonnet.clone();
+            let config = fixture.config.clone();
+            mount_panel_frames(TEST_AREA, 3, move |frame, panel| {
+                if frame != 1 {
+                    return;
+                }
+                panel.real_event(key(KeyCode::Down), TEST_AREA);
+                assert_eq!(&*panel.selected_alias.read(), "haiku");
+                assert_eq!(config.read().config.active_alias, "sonnet");
+                panel.real_event(key(KeyCode::Tab), TEST_AREA);
+                for _ in 0..FIELD_CONTEXT_WINDOW {
+                    panel.real_event(key(KeyCode::Down), TEST_AREA);
+                }
+                panel.real_event(key(KeyCode::Enter), TEST_AREA);
+                assert_eq!(&*panel.window_target.read(), "haiku");
+                // 模拟编辑期间的面板状态变化，保存仍绑定打开时的档位。
+                *panel.selected_alias.write() = "sonnet".into();
+                panel.real_event(Event::Paste("128000".into()), TEST_AREA);
+                panel.real_event(key(KeyCode::Enter), TEST_AREA);
+                let saved = config.read();
+                assert_eq!(saved.config.active_alias, "sonnet");
+                assert_eq!(saved.config.profiles.haiku.context_window, Some(128_000));
+                assert_eq!(saved.config.profiles.sonnet, before);
+            });
+            fixture.expect_request(false).await;
+
+            let config = fixture.config.clone();
+            mount_panel_frames(TEST_AREA, 3, move |frame, panel| {
+                if frame == 1 {
+                    panel.real_event(key(KeyCode::Up), TEST_AREA);
+                    assert_eq!(&*panel.selected_alias.read(), "opus");
+                    assert_eq!(config.read().config.active_alias, "opus");
+                }
+            });
+            fixture.expect_request(false).await;
+            fixture.finish().await;
+        },
+    );
+}
+
+#[test]
+fn model_selected_inactive_profile_receives_generic_field_edit() {
+    isolated(
+        "model_selected_inactive_profile_receives_generic_field_edit",
+        async {
+            let fixture = Fixture::new(false);
+            fixture.create_session().await;
+            edit_field("haiku".into(), FIELD_PROVIDER, false);
+            fixture.expect_request(false).await;
+            let before = fixture.config.read().config.profiles.sonnet.clone();
+            let config = fixture.config.clone();
+            mount_panel_frames(TEST_AREA, 3, move |frame, panel| {
+                if frame != 1 {
+                    return;
+                }
+                panel.real_event(key(KeyCode::Down), TEST_AREA);
+                panel.real_event(key(KeyCode::Tab), TEST_AREA);
+                for _ in 0..FIELD_EFFORT {
+                    panel.real_event(key(KeyCode::Down), TEST_AREA);
+                }
+                panel.real_event(key(KeyCode::Right), TEST_AREA);
+                let saved = config.read();
+                assert_eq!(saved.config.active_alias, "sonnet");
+                assert_eq!(saved.config.profiles.haiku.effort, "max");
+                assert_eq!(saved.config.profiles.sonnet, before);
+            });
+            fixture.expect_request(false).await;
+            fixture.finish().await;
+        },
+    );
+}
+
+#[test]
 fn model_commit_inactive_edit_preserves_display_and_notifies() {
     isolated(
         "model_commit_inactive_edit_preserves_display_and_notifies",

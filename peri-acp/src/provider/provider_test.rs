@@ -14,6 +14,7 @@ fn openai_provider(model: &str) -> LlmProvider {
         effort: None,
         max_tokens: 32000,
         context_1m: false,
+        context_window: 200_000,
         retry_observer: None,
     }
 }
@@ -26,6 +27,7 @@ fn anthropic_provider(model: &str) -> LlmProvider {
         effort: None,
         max_tokens: 32000,
         context_1m: false,
+        context_window: 200_000,
         retry_observer: None,
     }
 }
@@ -81,6 +83,7 @@ fn into_model_thinking_config_applies_max_tokens() {
         effort: Some("medium".to_string()),
         max_tokens: 16384,
         context_1m: false,
+        context_window: 200_000,
         retry_observer: None,
     };
     let body = provider_with_think
@@ -119,6 +122,7 @@ fn into_model_anthropic_extended_thinking_applied() {
         effort: Some("high".to_string()),
         max_tokens: 64000,
         context_1m: false,
+        context_window: 200_000,
         retry_observer: None,
     };
     let body = provider
@@ -148,6 +152,7 @@ fn workflow_output_limit_disables_invalid_anthropic_thinking_budget() {
         effort: Some("high".to_string()),
         max_tokens: 64_000,
         context_1m: false,
+        context_window: 200_000,
         retry_observer: None,
     }
     .with_max_tokens(1_024);
@@ -174,6 +179,7 @@ fn workflow_output_limit_clamps_anthropic_thinking_below_total_limit() {
         effort: Some("high".to_string()),
         max_tokens: 64_000,
         context_1m: false,
+        context_window: 200_000,
         retry_observer: None,
     }
     .with_max_tokens(4_096);
@@ -205,6 +211,7 @@ fn into_model_invalid_base_url_falls_back_without_panic() {
         effort: None,
         max_tokens: 32000,
         context_1m: false,
+        context_window: 200_000,
         retry_observer: None,
     };
     let model = provider.into_model();
@@ -222,6 +229,44 @@ fn context_window_is_200k_for_both_providers() {
         anthropic_provider("claude-sonnet-4-6").context_window(),
         200_000
     );
+}
+
+#[test]
+fn legacy_config_capacity_reaches_provider_and_real_model_metadata() {
+    for provider_type in ["anthropic", "openai"] {
+        let mut cfg = PeriConfig::default();
+        cfg.config.active_alias = "opus".into();
+        cfg.config.providers.push(ProviderConfig {
+            id: "configured".into(),
+            provider_type: provider_type.into(),
+            api_key: "synthetic-key".into(),
+            models: ProviderModels {
+                opus: "synthetic-model".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        cfg.config.profiles.opus.provider = "configured".into();
+        for (window, context_1m, expected) in [
+            (Some(128_000), false, 128_000),
+            (None, false, 200_000),
+            (Some(0), false, 200_000),
+            (Some(0), true, 1_000_000),
+            (Some(128_000), true, 1_000_000),
+            (None, true, 1_000_000),
+        ] {
+            cfg.config.profiles.opus.context_window = window;
+            cfg.config.profiles.opus.context_1m = context_1m;
+            let resolved = peri_config::provider::try_resolve_for_alias(&cfg, "opus")
+                .unwrap()
+                .unwrap();
+            assert_eq!(resolved.effective_context_window(), expected);
+            let provider = LlmProvider::from_resolved(resolved);
+            assert_eq!(provider.context_window(), expected);
+            assert_eq!(provider.effective_context_window(), expected);
+            assert_eq!(provider.into_model().context_window(), Some(expected));
+        }
+    }
 }
 
 #[test]
@@ -312,6 +357,7 @@ fn from_resolved_preserves_runtime_fields_for_both_protocols() {
             effort: Some("high".into()),
             max_tokens: 64000,
             context_1m: true,
+            context_window: 1_000_000,
         },
         ResolvedProvider::OpenAi {
             api_key: "key".into(),
@@ -320,6 +366,7 @@ fn from_resolved_preserves_runtime_fields_for_both_protocols() {
             effort: Some("high".into()),
             max_tokens: 64000,
             context_1m: true,
+            context_window: 1_000_000,
         },
     ];
     for provider in resolved {

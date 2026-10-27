@@ -129,7 +129,6 @@ pub(crate) fn fingerprint(provider: &LlmProvider) -> String {
             auth,
             endpoint,
             max_tokens,
-            context_window,
             ..
         } => {
             match auth {
@@ -148,7 +147,6 @@ pub(crate) fn fingerprint(provider: &LlmProvider) -> String {
                     );
                 }
             }
-            digest.update(context_window.to_le_bytes());
             ("", Some(endpoint.as_str()), max_tokens)
         }
         LlmProvider::OpenAi {
@@ -174,6 +172,7 @@ pub(crate) fn fingerprint(provider: &LlmProvider) -> String {
             base_url,
             max_tokens,
             provider.context_1m(),
+            provider.effective_context_window(),
         ))
         .expect("provider cache identity contains only serializable primitives"),
     );

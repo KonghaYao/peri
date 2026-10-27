@@ -102,8 +102,7 @@ pub(super) fn handle_model_event(event: Event, ctx: &ModelEventCtx) -> EventResu
 
 /// 事件判定本体（档位切换入口注入）。
 ///
-/// 注入只为测试：单测进程没有 `CONFIG_SOURCE_HANDLE`，真实切换必然保存失败，
-/// 因此「点击哪一行 → 切换哪个档位」只能在动作出口可断言；真实分支由人工/E2E 验证。
+/// 注入用于不带配置源的命中测试；持久化测试经 `handle_model_event` 覆盖真实切换。
 pub(super) fn handle_model_event_with(
     event: Event,
     ctx: &ModelEventCtx,
@@ -131,7 +130,7 @@ pub(super) fn handle_model_event_with(
                         .and_then(|text| text.parse::<u32>().ok())
                         .filter(|value| *value > 0);
                     match value {
-                        Some(value) if set_context_window(&current_active_alias(), value) => {
+                        Some(value) if set_context_window(&ctx.window_target.read(), value) => {
                             *ctx.window_edit.write() = None;
                         }
                         Some(_) => {}
@@ -171,7 +170,7 @@ pub(super) fn handle_model_event_with(
     if let Event::Mouse(mouse) = event {
         if let Some(area) = ctx.area {
             if hit_provider_button(&mouse, area) {
-                open_provider_management(&current_active_alias());
+                open_provider_management(&ctx.selected_alias.read().clone());
                 *ctx.render_version.write() += 1;
                 return EventResult::Consumed;
             }
@@ -183,9 +182,9 @@ pub(super) fn handle_model_event_with(
                     *ctx.right_cursor.write() = field;
                     *ctx.right_focus.write() = true;
                     if field == FIELD_CONTEXT_WINDOW {
-                        begin_window_edit(ctx, &current_active_alias());
+                        begin_window_edit(ctx, &ctx.selected_alias.read().clone());
                     } else {
-                        edit_field(current_active_alias(), field, true);
+                        edit_field(ctx.selected_alias.read().clone(), field, true);
                     }
                     *ctx.render_version.write() += 1;
                     return EventResult::Consumed;
@@ -194,6 +193,7 @@ pub(super) fn handle_model_event_with(
             if mouse.column < left_column_end(area)
                 && let Some(idx) = hit_item(&mouse, area, ctx.viewport.hit_layout())
             {
+                *ctx.selected_alias.write() = PROFILE_KEYS[idx].to_owned();
                 switch_alias(idx);
                 *ctx.render_version.write() += 1;
                 return EventResult::Consumed;
@@ -211,8 +211,8 @@ pub(super) fn handle_model_event_with(
     if key.kind != KeyEventKind::Press {
         return EventResult::Ignored;
     }
-    // 编辑动作按 `active_alias` 定位档位（配置事实源；不从列表下标推导）
-    let current_alias = current_active_alias();
+    // 所有编辑动作只跟随面板选中，激活失败不阻止修复未完成档位。
+    let current_alias = ctx.selected_alias.read().clone();
     match key.code {
         // “管理 Provider”：经面板互斥规则打开 Login，并留下一次性目标身份。
         // 不复制配置编辑状态；Login 自己从权威配置构建草稿。
@@ -233,12 +233,14 @@ pub(super) fn handle_model_event_with(
                 let mut c = ctx.right_cursor.write();
                 *c = previous_selection(*c);
             } else {
-                // 从当前 active 档位出发上移（与渲染高亮一致）
+                // 从面板选中档位出发上移（与渲染高亮一致）
                 let idx = PROFILE_KEYS
                     .iter()
                     .position(|k| *k == current_alias)
                     .unwrap_or(1);
-                switch_active_alias(previous_selection(idx));
+                let next = previous_selection(idx);
+                *ctx.selected_alias.write() = PROFILE_KEYS[next].to_owned();
+                switch_alias(next);
                 *ctx.render_version.write() += 1;
             }
         }
@@ -247,12 +249,14 @@ pub(super) fn handle_model_event_with(
                 let mut c = ctx.right_cursor.write();
                 *c = next_selection(*c, FIELD_COUNT);
             } else {
-                // 从当前 active 档位出发下移（与渲染高亮一致）
+                // 从面板选中档位出发下移（与渲染高亮一致）
                 let idx = PROFILE_KEYS
                     .iter()
                     .position(|k| *k == current_alias)
                     .unwrap_or(1);
-                switch_active_alias(next_selection(idx, PROFILE_KEYS.len()));
+                let next = next_selection(idx, PROFILE_KEYS.len());
+                *ctx.selected_alias.write() = PROFILE_KEYS[next].to_owned();
+                switch_alias(next);
                 *ctx.render_version.write() += 1;
             }
         }
@@ -286,6 +290,10 @@ pub(super) fn handle_model_event_with(
                 *ctx.right_focus.write() = false;
             }
         }
+        KeyCode::Enter if !*ctx.right_focus.read() => {
+            switch_alias(active_profile_idx(&current_alias));
+            *ctx.render_version.write() += 1;
+        }
         KeyCode::Enter
             if *ctx.right_focus.read() && *ctx.right_cursor.read() == FIELD_CONTEXT_WINDOW =>
         {
@@ -300,6 +308,7 @@ fn begin_window_edit(ctx: &ModelEventCtx, alias: &str) {
     let value = PERI_CONFIG_HANDLE
         .get()
         .and_then(|handle| super::effective_context_window(&handle.read(), alias));
+    *ctx.window_target.write() = alias.to_owned();
     *ctx.window_edit.write() = Some(value.map(|window| window.to_string()).unwrap_or_default());
 }
 
@@ -350,6 +359,8 @@ pub(super) struct ModelEventCtx {
     pub(super) right_cursor: State<usize>,
     pub(super) right_focus: State<bool>,
     pub(super) window_edit: State<Option<String>>,
+    pub(super) window_target: State<String>,
+    pub(super) selected_alias: State<String>,
     pub(super) render_version: State<u64>,
     /// 右栏滚动偏移——内联视图命中与绘制共用同一本帧几何。
     pub(super) right_scroll: State<ScrollViewState>,
