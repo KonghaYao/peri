@@ -3,10 +3,28 @@ import { withDeadline } from "../util/deadline";
 import {
   DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS, DEFAULT_WASM_RUNTIME_STARTUP_TIMEOUT_MS,
 } from "./budget";
-import type { WasmRuntimeCleanupOutcome } from "./runtime";
+import type { WasmRuntimeCleanupOutcome, WasmRuntimeDiagnosticKind } from "./runtime";
 
-/** 运行后端启动器：只依赖取消信号，便于替换模块工厂或测试桩。 */
-export type WasmRuntimeStarter = (options: { signal: AbortSignal }) => Promise<WasmAcpTransport>;
+/** 单次运行后端启动的 per-chat 输入；全部可选以兼容旧的 starter。 */
+export interface WasmRuntimeAcquireOptions {
+  /** 外部取消信号；释放实例或进程退出时中止启动。 */
+  signal?: AbortSignal;
+  /** 该 Chat 的 WASM 启动配置；未提供时由默认 starter 使用 Manager 快照。 */
+  configJson?: string;
+  /** 该 Chat 合并后的 WASM env。 */
+  env?: Readonly<Record<string, string>>;
+  /** 该 Chat 的 WASM 诊断回调。 */
+  onDiagnostic?: (kind: WasmRuntimeDiagnosticKind, error: unknown) => void;
+}
+
+export interface WasmRuntimeStarterOptions extends WasmRuntimeAcquireOptions {
+  signal: AbortSignal;
+}
+
+/** 运行后端启动器：只依赖取消信号与 per-chat 启动配置，便于替换模块工厂或测试桩。 */
+export type WasmRuntimeStarter = (
+  options: WasmRuntimeStarterOptions,
+) => Promise<WasmAcpTransport>;
 
 /** 单运行后端状态：`live → closing → closed | close-unconfirmed`。 */
 export type WasmRuntimeState = "live" | "closing" | "closed" | "close-unconfirmed";
@@ -123,16 +141,24 @@ export class WasmRuntimePool {
     private readonly options: WasmRuntimePoolOptions = {}) {}
 
   /** 启动并登记一个运行后端；外部信号中止时启动一并取消，返回的租约由调用方负责 `close`。 */
-  async acquire(options: { signal?: AbortSignal } = {}): Promise<WasmRuntimeLease> {
+  async acquire(options: WasmRuntimeAcquireOptions = {}): Promise<WasmRuntimeLease> {
     const controller = new AbortController();
     const abort = (): void => controller.abort(options.signal?.reason);
     if (options.signal?.aborted) abort();
     else options.signal?.addEventListener("abort", abort, { once: true });
-    const task = WasmRuntimeLease.start(this.starter, {
-      startupTimeoutMs: this.options.startupTimeoutMs,
-      closeTimeoutMs: this.options.closeTimeoutMs,
-      signal: controller.signal,
-    });
+    const runtime = {
+      ...(options.configJson === undefined ? {} : { configJson: options.configJson }),
+      ...(options.env === undefined ? {} : { env: options.env }),
+      ...(options.onDiagnostic === undefined ? {} : { onDiagnostic: options.onDiagnostic }),
+    };
+    const task = WasmRuntimeLease.start(
+      ({ signal }) => this.starter({ ...runtime, signal }),
+      {
+        startupTimeoutMs: this.options.startupTimeoutMs,
+        closeTimeoutMs: this.options.closeTimeoutMs,
+        signal: controller.signal,
+      },
+    );
     this.startups.set(controller, task);
     try {
       const lease = await task;

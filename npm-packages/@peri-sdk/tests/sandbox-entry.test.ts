@@ -26,6 +26,12 @@ entryTest("sandbox bundle exists and exports the public entry", async () => {
   expect(await Bun.file(declaration).exists()).toBe(true);
 });
 
+entryTest("sandbox bundle does not reference a concrete adapter implementation", async () => {
+  const source = await Bun.file(resolve(dist, "sandbox.js")).text();
+  for (const marker of ["peri-sandbox", "better-sqlite3", "@anthropic-ai/sandbox-runtime"])
+    expect(source, `sandbox.js must not reference ${marker}`).not.toContain(marker);
+});
+
 entryTest("sandbox bundle does not pull in agent or session modules", async () => {
   const source = await Bun.file(resolve(dist, "sandbox.js")).text();
   for (const marker of ["agent/peri-instance", "agent/session", "contracts/acp", "ChatSessionInit", "AcpMcpServer"])

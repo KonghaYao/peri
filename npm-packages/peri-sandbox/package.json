@@ -24,10 +24,11 @@
     "postinstall": "node scripts/patch-sdk.mjs",
     "prepack": "npm run build",
     "build": "rm -rf dist && tsc",
-    "test": "node --test dist/tests/*.test.js",
+    "test": "bun run build && node --test dist/tests/*.test.js",
     "test:mac": "node dist/tests/integration/mac.js",
     "test:mac:programmatic": "node dist/tests/integration/programmatic-mac.js",
     "check": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
     "format": "bunx biome format --write src tests scripts examples package.json tsconfig.json biome.json",
     "format:check": "bunx biome format src tests scripts examples package.json tsconfig.json biome.json"
   },

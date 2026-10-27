@@ -2,6 +2,7 @@ import { createStorage } from "unstorage";
 import {
   BareHarnessConfig,
   TursoStorage,
+  type ChatAgentConfig,
   type ChatManagerOptions,
 } from "@peri-code/sdk";
 import { logError } from "./logging";
@@ -16,7 +17,7 @@ import { SYSTEM_INSTRUCTIONS } from "./system-instructions";
 
 /**
  * 平台装配：把 CF 的配置、Store、WASM 运行后端与默认工具面装配成 SDK `ChatManager`
- * 的构造选项。
+ * 的构造选项，并提供每个 Chat 共用的 `defaultAgentConfig`。
  *
  * `chatManagerOptions` 只做纯装配，测试可直接断言；生产路径不提供替换 Store、KV、
  * 运行后端或日志的注入 seam。具体 `ChatManager` 由入口用这些选项构造。
@@ -88,6 +89,36 @@ function wasmEnvironment(
   return selected;
 }
 
+/**
+ * 单个 Chat 的运行配置：cwd、模型、四档 profiles 与工具面都来自服务端配置。
+ *
+ * `storage`/`machineId` 属于 Manager 部署边界（见 `chatManagerOptions.store`），
+ * 不能出现在 per-chat 配置里；`ChatRegistry` 每次创建句柄时传入本对象。
+ */
+export function defaultAgentConfig(config: ServerConfig): ChatAgentConfig {
+  return {
+    cwd: WORKSPACE_CWD,
+    // 与宿主 `configJson` 的形状一致；模型直连上游，凭据只存在于服务端进程。
+    settings: {
+      config: {
+        active_alias: DEFAULT_MODEL_ALIAS,
+        providers: [{
+          id: HARNESS_PROVIDER_ID,
+          type: config.model.provider,
+          apiKey: config.model.apiKey,
+          baseUrl: config.model.baseUrl,
+          // 四档模型 ID 只在这里声明一次；profiles 只绑定 provider，避免两处漂移。
+          models: config.model.tiers,
+        }],
+        profiles: Object.fromEntries(
+          MODEL_TIERS.map((tier) => [tier, { provider: HARNESS_PROVIDER_ID }]),
+        ),
+        meta_harness: SERVER_HARNESS_CONFIG,
+      },
+    },
+  };
+}
+
 /** 纯装配：返回 SDK `ChatManager` 的完整构造选项，不启动运行后端。 */
 export function chatManagerOptions(config: ServerConfig): ChatManagerOptions {
   const defaultDatabase = new TursoStorage({
@@ -96,28 +127,10 @@ export function chatManagerOptions(config: ServerConfig): ChatManagerOptions {
     currentCwd: SESSION_CWD,
   });
   return {
-    // 与宿主 `configJson` 的形状一致；模型与存储直连上游，凭据只存在于服务端进程。
-    agentConfig: {
-      cwd: WORKSPACE_CWD,
-      machineId: config.machineId,
+    // Manager 是部署边界：Store 与机器身份整个进程共享，per-chat 不可声明。
+    store: {
       storage: defaultDatabase.storageConfig,
-      settings: {
-        config: {
-          active_alias: DEFAULT_MODEL_ALIAS,
-          providers: [{
-            id: HARNESS_PROVIDER_ID,
-            type: config.model.provider,
-            apiKey: config.model.apiKey,
-            baseUrl: config.model.baseUrl,
-            // 四档模型 ID 只在这里声明一次；profiles 只绑定 provider，避免两处漂移。
-            models: config.model.tiers,
-          }],
-          profiles: Object.fromEntries(
-            MODEL_TIERS.map((tier) => [tier, { provider: HARNESS_PROVIDER_ID }]),
-          ),
-          meta_harness: SERVER_HARNESS_CONFIG,
-        },
-      },
+      machineId: config.machineId,
     },
     database: defaultDatabase,
     // 默认进程内 memory storage；跨实例接管需要路由层与共享 storage，本轮不接入。
@@ -132,7 +145,7 @@ export function chatManagerOptions(config: ServerConfig): ChatManagerOptions {
           kind,
         }),
       },
-      sessionInit: {
+      session: {
         path: SESSION_CWD,
         instructions: SYSTEM_INSTRUCTIONS,
         mcpServers: mcpServerDefaults(config),

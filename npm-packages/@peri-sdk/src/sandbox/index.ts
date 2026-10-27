@@ -2,17 +2,15 @@ export { SandboxManager } from "./manager";
 export { SandboxHandle } from "./handle";
 export { SandboxManagerError } from "./types";
 export type {
-  SandboxBackend,
-  SandboxBackendInstance,
-  SandboxBackendStartOptions,
+  SandboxAdapter,
+  SandboxAdapterInstance,
+  SandboxAdapterStartOptions,
   SandboxEndpoint,
   SandboxHandleState,
-  SandboxInstanceState,
   SandboxManagerErrorCode,
   SandboxManagerOptions,
   SandboxManagerStartOptions,
-  SandboxMcpHttpServer,
+  SandboxMcpHttpConfig,
   SandboxMcpServer,
-  SandboxProfile,
   SandboxStatus,
 } from "./types";

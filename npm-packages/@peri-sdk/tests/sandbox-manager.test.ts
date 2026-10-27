@@ -3,10 +3,9 @@ import { SandboxHandle } from "../src/sandbox/handle";
 import { SandboxManager } from "../src/sandbox/manager";
 import {
   SandboxManagerError,
-  type SandboxBackend,
-  type SandboxBackendInstance,
-  type SandboxBackendStartOptions,
-  type SandboxInstanceState,
+  type SandboxAdapter,
+  type SandboxAdapterInstance,
+  type SandboxAdapterStartOptions,
   type SandboxManagerOptions,
 } from "../src/sandbox/types";
 
@@ -14,90 +13,75 @@ const SANDBOX_ID = `sbx_${"a".repeat(32)}`;
 const SECOND_ID = `sbx_${"b".repeat(32)}`;
 const TOKEN = "test-token-1234567890";
 
-interface InstanceOverrides {
-  id?: string;
-  runId?: string;
-  mcpUrl?: string;
-  token?: string;
-  workspacePath?: string;
-  state?: SandboxInstanceState;
+interface FakeOptions {
+  profileName?: string;
+  port?: number;
+  nested?: { a?: number; b?: number };
 }
 
-class FakeInstance implements SandboxBackendInstance {
-  readonly id: string;
-  readonly runId: string;
-  readonly mcpUrl: string;
-  readonly token: string;
-  readonly tokenFile: string | null = null;
+class FakeInstance implements SandboxAdapterInstance {
+  readonly sandboxId: string;
   readonly workspacePath: string;
-  readonly sandboxRoot: string;
-  stateValue: SandboxInstanceState;
+  readonly mcpServer: { type: "http"; url: string; headers: Record<string, string> };
   closeCalls = 0;
-  deleteDataCalls: boolean[] = [];
+  closeDelayMs = 0;
+  closeGate: Promise<void> | null = null;
   closeError: unknown;
 
-  constructor(overrides: InstanceOverrides = {}) {
-    this.id = overrides.id ?? SANDBOX_ID;
-    this.runId = overrides.runId ?? "run_01";
-    this.mcpUrl = overrides.mcpUrl ?? `http://127.0.0.1:43116/mcp`;
-    this.token = overrides.token ?? TOKEN;
-    this.workspacePath = overrides.workspacePath ?? `/tmp/peri-sandbox/sandboxes/${this.id}/workspace`;
-    this.sandboxRoot = `/tmp/peri-sandbox/sandboxes/${this.id}`;
-    this.stateValue = overrides.state ?? "ready";
+  constructor(sandboxId: string, url: string) {
+    this.sandboxId = sandboxId;
+    this.workspacePath = `/tmp/peri-sandbox/sandboxes/${sandboxId}/workspace`;
+    this.mcpServer = { type: "http", url, headers: { Authorization: `Bearer ${TOKEN}` } };
   }
 
-  get state(): SandboxInstanceState {
-    return this.stateValue;
-  }
-
-  async close(options?: { deleteData?: boolean }): Promise<void> {
+  async close(): Promise<void> {
     this.closeCalls += 1;
-    this.deleteDataCalls.push(options?.deleteData === true);
+    if (this.closeGate) await this.closeGate;
+    if (this.closeDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.closeDelayMs));
     if (this.closeError) throw this.closeError;
-    this.stateValue = "closed";
   }
 }
 
-class FakeBackend implements SandboxBackend {
+class FakeAdapter implements SandboxAdapter<FakeOptions> {
+  readonly starts: SandboxAdapterStartOptions<FakeOptions>[] = [];
   readonly instances: FakeInstance[] = [];
-  readonly startCalls: SandboxBackendStartOptions[] = [];
-  readonly deleteCalls: Array<{ sandboxId: string; sandboxesRoot?: string; settingsPath?: string }> = [];
+  readonly deleteCalls: string[] = [];
   startError: unknown;
-  closeError: unknown;
   deleteError: unknown;
   startGate: Promise<void> | null = null;
+  instanceId: string | null = null;
 
-  async start(options: SandboxBackendStartOptions): Promise<SandboxBackendInstance> {
-    this.startCalls.push(options);
+  async start(options: SandboxAdapterStartOptions<FakeOptions>): Promise<SandboxAdapterInstance> {
+    this.starts.push(options);
     if (this.startGate) await this.startGate;
     if (this.startError) {
       const error = this.startError;
       this.startError = undefined;
       throw error;
     }
-    const index = this.startCalls.length;
-    const instance = new FakeInstance({
-      id: options.sandboxId ?? SANDBOX_ID,
-      runId: `run_${index.toString().padStart(2, "0")}`,
-      mcpUrl: `http://127.0.0.1:${43116 + index}/mcp`,
-    });
-    instance.closeError = this.closeError;
+    const index = this.starts.length;
+    const sandboxId = this.instanceId ?? options.sandboxId;
+    const instance = new FakeInstance(sandboxId, `http://127.0.0.1:${43116 + index}/mcp`);
     this.instances.push(instance);
     return instance;
   }
 
-  async deleteData(options: { sandboxId: string; sandboxesRoot?: string; settingsPath?: string }): Promise<void> {
-    this.deleteCalls.push(options);
-    if (this.deleteError) throw this.deleteError;
+  async deleteData(sandboxId: string): Promise<void> {
+    this.deleteCalls.push(sandboxId);
+    if (this.deleteError) {
+      const error = this.deleteError;
+      this.deleteError = undefined;
+      throw error;
+    }
   }
 }
 
 function createManager(
-  overrides: SandboxManagerOptions = {},
-  backend = new FakeBackend(),
-): { backend: FakeBackend; manager: SandboxManager } {
-  const manager = new SandboxManager({ backend, ...overrides });
-  return { backend, manager };
+  overrides: Partial<SandboxManagerOptions<FakeOptions>> = {},
+  adapter = new FakeAdapter(),
+): { adapter: FakeAdapter; manager: SandboxManager<FakeOptions> } {
+  const manager = new SandboxManager<FakeOptions>({ adapter, ...overrides });
+  return { adapter, manager };
 }
 
 async function expectErrorCode(promise: Promise<unknown>, code: string): Promise<SandboxManagerError> {
@@ -122,8 +106,18 @@ async function waitFor(check: () => boolean): Promise<void> {
 }
 
 describe("SandboxManager", () => {
+  test("requires an adapter at construction", () => {
+    expect(() => new SandboxManager({} as unknown as SandboxManagerOptions)).toThrow(SandboxManagerError);
+    try {
+      new SandboxManager({} as unknown as SandboxManagerOptions);
+    } catch (error) {
+      expect((error as SandboxManagerError).code).toBe("invalid_options");
+      expect((error as Error).message).toContain("SandboxAdapter");
+    }
+  });
+
   test("manages several handles by sandboxId", async () => {
-    const { backend, manager } = createManager();
+    const { adapter, manager } = createManager();
 
     expect(manager.size).toBe(0);
     const first = await manager.start({ sandboxId: SANDBOX_ID });
@@ -133,50 +127,51 @@ describe("SandboxManager", () => {
     expect(manager.get(SANDBOX_ID)).toBe(first);
     expect(manager.get(SECOND_ID)).toBe(second);
     expect(manager.list()).toEqual([first, second]);
+    expect(first).toBeInstanceOf(SandboxHandle);
     expect(first.state).toBe("ready");
     expect(second.state).toBe("ready");
-    expect(backend.startCalls.map((options) => options.sandboxId)).toEqual([SANDBOX_ID, SECOND_ID]);
+    expect(adapter.starts.map((options) => options.sandboxId)).toEqual([SANDBOX_ID, SECOND_ID]);
   });
 
   test("start is idempotent for the same sandboxId", async () => {
-    const { backend, manager } = createManager();
+    const { adapter, manager } = createManager();
 
     const first = await manager.start({ sandboxId: SANDBOX_ID });
     const second = await manager.start({ sandboxId: SANDBOX_ID });
 
     expect(second).toBe(first);
-    expect(backend.startCalls.length).toBe(1);
+    expect(adapter.starts.length).toBe(1);
     expect(manager.size).toBe(1);
   });
 
   test("concurrent starts for one id share a single in-flight start", async () => {
-    const { backend, manager } = createManager();
+    const { adapter, manager } = createManager();
     let release: () => void = () => undefined;
-    backend.startGate = new Promise<void>((resolve) => {
+    adapter.startGate = new Promise<void>((resolve) => {
       release = resolve;
     });
 
     const first = manager.start({ sandboxId: SANDBOX_ID });
     const second = manager.start({ sandboxId: SANDBOX_ID });
-    await waitFor(() => backend.startCalls.length === 1);
+    await waitFor(() => adapter.starts.length === 1);
 
     release();
     const [a, b] = await Promise.all([first, second]);
     expect(b).toBe(a);
-    expect(backend.startCalls.length).toBe(1);
+    expect(adapter.starts.length).toBe(1);
     expect(manager.size).toBe(1);
   });
 
   test("different ids start in parallel", async () => {
-    const { backend, manager } = createManager();
+    const { adapter, manager } = createManager();
     let release: () => void = () => undefined;
-    backend.startGate = new Promise<void>((resolve) => {
+    adapter.startGate = new Promise<void>((resolve) => {
       release = resolve;
     });
 
     const first = manager.start({ sandboxId: SANDBOX_ID });
     const second = manager.start({ sandboxId: SECOND_ID });
-    await waitFor(() => backend.startCalls.length === 2);
+    await waitFor(() => adapter.starts.length === 2);
 
     release();
     const [a, b] = await Promise.all([first, second]);
@@ -198,17 +193,17 @@ describe("SandboxManager", () => {
   });
 
   test("a failed start removes the handle so it can be retried", async () => {
-    const { backend, manager } = createManager();
-    backend.startError = new Error("backend refused to start");
+    const { adapter, manager } = createManager();
+    adapter.startError = new Error("adapter refused to start");
 
     const failure = await expectErrorCode(manager.start({ sandboxId: SANDBOX_ID }), "start_failed");
-    expect(failure.message).toContain("backend refused to start");
+    expect(failure.message).toContain("adapter refused to start");
     expect(manager.size).toBe(0);
     expect(manager.get(SANDBOX_ID)).toBeUndefined();
 
     const handle = await manager.start({ sandboxId: SANDBOX_ID });
     expect(handle.state).toBe("ready");
-    expect(backend.startCalls.length).toBe(2);
+    expect(adapter.starts.length).toBe(2);
     expect(manager.size).toBe(1);
   });
 
@@ -229,82 +224,169 @@ describe("SandboxManager", () => {
   });
 
   test("mcpServer requires a ready handle and reports not_ready or closed", async () => {
-    const backend = new FakeBackend();
-    const handle = new SandboxHandle(
-      { sandboxId: SANDBOX_ID, serverName: "workspace", startupTimeoutMs: 1000, stopTimeoutMs: 1000 },
-      { getBackend: async () => backend },
-    );
+    const { adapter, manager } = createManager();
+    let release: () => void = () => undefined;
+    adapter.startGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
 
-    expect(handle.workspacePath).toBeNull();
+    const pending = manager.start({ sandboxId: SANDBOX_ID });
+    await waitFor(() => manager.get(SANDBOX_ID) !== undefined);
+    const handle = manager.get(SANDBOX_ID)!;
+    expect(handle.state).toBe("starting");
     await expectErrorCode(handle.mcpServer(), "not_ready");
 
-    await handle.start();
-    expect(handle.workspacePath).toBe(`/tmp/peri-sandbox/sandboxes/${SANDBOX_ID}/workspace`);
+    release();
+    await pending;
+    expect(handle.state).toBe("ready");
+    expect((await handle.mcpServer()).config.headers.Authorization).toBe(`Bearer ${TOKEN}`);
 
-    await handle.stop();
-    await expectErrorCode(handle.mcpServer(), "not_ready");
-
-    await handle.start();
     await handle.close();
     await expectErrorCode(handle.mcpServer(), "closed");
   });
 
-  test("sandbox API exposes no session instructions", async () => {
-    const { manager } = createManager();
-    const handle = await manager.start({ sandboxId: SANDBOX_ID });
-    const mcp = await handle.mcpServer();
-
-    expect(Object.keys(mcp).sort()).toEqual(["config", "name"]);
-    expect(Object.keys(mcp.config).sort()).toEqual(["headers", "type", "url"]);
-    expect(JSON.stringify({ workspacePath: handle.workspacePath, mcp })).not.toContain("instructions");
-  });
-
   test("custom server names are allowed and reserved names are rejected", async () => {
     const { manager } = createManager({ serverName: "sandbox" });
-    await manager.start({ sandboxId: SANDBOX_ID });
-    const handle = manager.get(SANDBOX_ID);
-    expect(handle).toBeDefined();
-    expect((await handle!.mcpServer()).name).toBe("sandbox");
+    const handle = await manager.start({ sandboxId: SANDBOX_ID });
+    expect(handle.serverName).toBe("sandbox");
+    expect((await handle.mcpServer()).name).toBe("sandbox");
 
-    for (const name of ["web", "artifact", "cron", "workflow", " "])
-      expect(() => new SandboxManager({ serverName: name })).toThrow(SandboxManagerError);
-
-    await expectErrorCode(manager.start({ serverName: "web" }), "invalid_server_name");
-    expect(manager.size).toBe(1);
+    expect(() => createManager({ serverName: "web" })).toThrow(SandboxManagerError);
+    const failure = await expectErrorCode(manager.start({ sandboxId: SECOND_ID, serverName: "cron" }), "invalid_server_name");
+    expect(failure.message).toContain("reserved");
   });
 
-  test("start forwards manager defaults plus per-sandbox overrides", async () => {
-    const { backend, manager } = createManager({
-      sandboxesRoot: "/tmp/sandboxes",
-      settingsPath: "/tmp/settings.json",
-      profileName: "default",
-      port: 0,
-      periPath: "/usr/local/bin/peri",
-      periSha256: "abc123",
-      bashCalls: 7,
-      minFreeBytes: 1024,
-      startupTimeoutMs: 1234,
+  test("forwards manager adapterOptions to the adapter", async () => {
+    const options: FakeOptions = { profileName: "manager", nested: { a: 1 } };
+    const { adapter, manager } = createManager({ adapterOptions: options });
+
+    const handle = await manager.start({ sandboxId: SANDBOX_ID });
+
+    expect(adapter.starts).toEqual([
+      { sandboxId: SANDBOX_ID, options: { profileName: "manager", nested: { a: 1 } } },
+    ]);
+    expect(handle.sandboxId).toBe(SANDBOX_ID);
+  });
+
+  test("per-start adapterOptions replaces the manager default", async () => {
+    const { adapter, manager } = createManager({ adapterOptions: { profileName: "manager", port: 1 } });
+
+    await manager.start({ sandboxId: SANDBOX_ID, adapterOptions: { profileName: "start" } });
+    await manager.start({ sandboxId: SECOND_ID });
+
+    expect(adapter.starts[0]?.options).toEqual({ profileName: "start" });
+    expect(adapter.starts[1]?.options).toEqual({ profileName: "manager", port: 1 });
+  });
+
+  test("per-start signal reaches the adapter and is not retained", async () => {
+    const { adapter, manager } = createManager();
+    const controller = new AbortController();
+
+    await manager.start({ sandboxId: SANDBOX_ID, signal: controller.signal });
+    expect(adapter.starts[0]?.signal).toBe(controller.signal);
+
+    await manager.start({ sandboxId: SECOND_ID });
+    expect(adapter.starts[1]?.signal).toBeUndefined();
+  });
+
+  test("manager signal is the default for starts and does not participate in conflict checks", async () => {
+    const managerSignal = new AbortController();
+    const { adapter, manager } = createManager({ signal: managerSignal.signal });
+
+    await manager.start({ sandboxId: SANDBOX_ID });
+    expect(adapter.starts[0]?.signal).toBe(managerSignal.signal);
+
+    const other = new AbortController();
+    const handle = await manager.start({ sandboxId: SANDBOX_ID, signal: other.signal });
+    expect(handle.state).toBe("ready");
+    expect(adapter.starts.length).toBe(1);
+  });
+
+  test("per-start startup timeout bounds a slow adapter", async () => {
+    const { adapter, manager } = createManager({ startupTimeoutMs: 5_000 });
+    let release: () => void = () => undefined;
+    adapter.startGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const failure = await expectErrorCode(
+      manager.start({ sandboxId: SANDBOX_ID, startupTimeoutMs: 5 }),
+      "start_failed",
+    );
+    expect(failure.message).toContain("timed out");
+    expect(manager.size).toBe(0);
+
+    release();
+    await waitFor(() => adapter.instances.length === 1);
+    expect(adapter.instances[0]?.closeCalls).toBe(1);
+  });
+
+  test("start reuses an existing handle when explicit overrides match", async () => {
+    const { adapter, manager } = createManager({
+      adapterOptions: { profileName: "p", nested: { a: 1, b: 2 } },
+      startupTimeoutMs: 10_000,
+      stopTimeoutMs: 10_000,
       serverName: "sandbox",
     });
 
-    await manager.start({ sandboxId: SANDBOX_ID, port: 4567, bashCalls: 9, serverName: "other" });
-
-    expect(backend.startCalls[0]).toMatchObject({
+    const first = await manager.start({ sandboxId: SANDBOX_ID });
+    const second = await manager.start({
       sandboxId: SANDBOX_ID,
-      sandboxesRoot: "/tmp/sandboxes",
-      settingsPath: "/tmp/settings.json",
-      profileName: "default",
-      port: 4567,
-      periPath: "/usr/local/bin/peri",
-      periSha256: "abc123",
-      bashCalls: 9,
-      minFreeBytes: 1024,
-      startupTimeoutMs: 1234,
+      serverName: "sandbox",
+      startupTimeoutMs: 10_000,
+      stopTimeoutMs: 10_000,
+      adapterOptions: { nested: { b: 2, a: 1 }, profileName: "p" },
     });
-    expect(backend.startCalls[0]).not.toHaveProperty("mode");
-    expect(backend.startCalls[0]).not.toHaveProperty("controlSocketPath");
-    expect(backend.startCalls[0]).not.toHaveProperty("tokenFile");
-    expect(backend.startCalls[0]).not.toHaveProperty("configPath");
+
+    expect(second).toBe(first);
+    expect(adapter.starts.length).toBe(1);
+  });
+
+  test("omitted fields inherit the handle values when only sandboxId is passed", async () => {
+    const { adapter, manager } = createManager({
+      adapterOptions: { profileName: "p" },
+      serverName: "sandbox",
+      startupTimeoutMs: 10_000,
+    });
+
+    await manager.start({ sandboxId: SANDBOX_ID });
+    await manager.start({ sandboxId: SANDBOX_ID });
+    expect(adapter.starts.length).toBe(1);
+    expect(adapter.starts[0]?.options).toEqual({ profileName: "p" });
+  });
+
+  test("start rejects conflicting options for an existing sandboxId", async () => {
+    const { manager } = createManager({
+      adapterOptions: { profileName: "p" },
+      serverName: "sandbox",
+      startupTimeoutMs: 10_000,
+      stopTimeoutMs: 10_000,
+    });
+    await manager.start({ sandboxId: SANDBOX_ID });
+
+    expect((await expectErrorCode(manager.start({ sandboxId: SANDBOX_ID, serverName: "other" }), "conflict")).message).toContain(
+      "serverName",
+    );
+    expect(
+      (await expectErrorCode(manager.start({ sandboxId: SANDBOX_ID, startupTimeoutMs: 20_000 }), "conflict")).message,
+    ).toContain("startupTimeoutMs");
+    expect(
+      (await expectErrorCode(manager.start({ sandboxId: SANDBOX_ID, stopTimeoutMs: 20_000 }), "conflict")).message,
+    ).toContain("stopTimeoutMs");
+    expect(
+      (await expectErrorCode(manager.start({ sandboxId: SANDBOX_ID, adapterOptions: { profileName: "q" } }), "conflict"))
+        .message,
+    ).toContain("adapterOptions");
+  });
+
+  test("non-serializable adapterOptions are never silently overwritten", async () => {
+    const first = { run: () => 1 };
+    const second = { run: () => 2 };
+    const manager = new SandboxManager({ adapter: new FakeAdapter(), adapterOptions: first });
+
+    await manager.start({ sandboxId: SANDBOX_ID });
+    await manager.start({ sandboxId: SANDBOX_ID, adapterOptions: first });
+    await expectErrorCode(manager.start({ sandboxId: SANDBOX_ID, adapterOptions: second }), "conflict");
   });
 
   test("status and endpoint never contain the token", async () => {
@@ -313,21 +395,18 @@ describe("SandboxManager", () => {
 
     expect(JSON.stringify(handle.status())).not.toContain(TOKEN);
     expect(JSON.stringify(handle.endpoint())).not.toContain(TOKEN);
-    expect(handle.status()).toEqual({
+    expect(handle.endpoint()).toEqual({
       sandboxId: SANDBOX_ID,
-      state: "ready",
+      serverName: "workspace",
       mcpUrl: "http://127.0.0.1:43117/mcp",
       workspacePath: `/tmp/peri-sandbox/sandboxes/${SANDBOX_ID}/workspace`,
-      lastError: null,
     });
   });
 
-  test("backend errors containing a known token are redacted and drop the cause", async () => {
-    const { backend, manager } = createManager();
+  test("adapter errors containing a known token are redacted and drop the cause", async () => {
+    const { adapter, manager } = createManager();
     const handle = await manager.start({ sandboxId: SANDBOX_ID });
-    backend.instances[0].closeError = Object.assign(new Error(`rejected token ${TOKEN} for Bearer ${TOKEN}`), {
-      code: "stop_incomplete",
-    });
+    adapter.instances[0]!.closeError = new Error(`close failed with ${TOKEN}`);
 
     const failure = await expectErrorCode(handle.stop(), "stop_incomplete");
     expect(failure.message).not.toContain(TOKEN);
@@ -336,109 +415,113 @@ describe("SandboxManager", () => {
   });
 
   test("Bearer credentials are redacted even before a token is known", async () => {
-    const { backend, manager } = createManager();
-    backend.startError = Object.assign(new Error(`authorization failed: Bearer ${TOKEN}`), {
-      code: "start_failed",
-    });
+    const { adapter, manager } = createManager();
+    adapter.startError = new Error("connect failed: Bearer abc123");
 
     const failure = await expectErrorCode(manager.start({ sandboxId: SANDBOX_ID }), "start_failed");
-    expect(failure.message).not.toContain(TOKEN);
-    expect(failure.message).toContain("Bearer [redacted]");
+    expect(failure.message).toBe("connect failed: Bearer [redacted]");
   });
 
   test("stop closes the instance but keeps the handle and workspace", async () => {
-    const { backend, manager } = createManager();
+    const { adapter, manager } = createManager();
     const handle = await manager.start({ sandboxId: SANDBOX_ID });
-    const first = handle.endpoint();
-    expect(first).not.toBeNull();
+
     await handle.stop();
 
-    expect(backend.instances[0].closeCalls).toBe(1);
+    expect(adapter.instances[0]?.closeCalls).toBe(1);
     expect(handle.state).toBe("stopped");
-    expect(handle.endpoint()).toBeNull();
+    expect(handle.status().mcpUrl).toBeNull();
+    expect(handle.workspacePath).toBe(`/tmp/peri-sandbox/sandboxes/${SANDBOX_ID}/workspace`);
     expect(manager.get(SANDBOX_ID)).toBe(handle);
-    expect(handle.status().sandboxId).toBe(SANDBOX_ID);
-    expect(handle.status().workspacePath).toBe(first?.workspacePath);
 
-    const restarted = await manager.start({ sandboxId: SANDBOX_ID });
-    expect(restarted).toBe(handle);
-    expect(restarted.state).toBe("ready");
-    const second = handle.endpoint();
-    expect(second?.sandboxId).toBe(SANDBOX_ID);
-    expect(second?.workspacePath).toBe(first?.workspacePath);
-    expect(second?.runId).not.toBe(first?.runId);
-    expect(second?.mcpUrl).not.toBe(first?.mcpUrl);
-    expect(backend.startCalls[1].sandboxId).toBe(SANDBOX_ID);
+    await handle.start();
+    expect(handle.state).toBe("ready");
+    expect(adapter.starts.length).toBe(2);
   });
 
   test("close removes the handle and rejects a later start", async () => {
-    const { backend, manager } = createManager();
+    const { adapter, manager } = createManager();
     const handle = await manager.start({ sandboxId: SANDBOX_ID });
 
     await handle.close();
-    await handle.close();
 
-    expect(backend.instances[0].closeCalls).toBe(1);
     expect(handle.state).toBe("closed");
-    expect(manager.size).toBe(0);
+    expect(adapter.instances[0]?.closeCalls).toBe(1);
+    expect(adapter.deleteCalls).toEqual([]);
     expect(manager.get(SANDBOX_ID)).toBeUndefined();
+    expect(manager.size).toBe(0);
     await expectErrorCode(handle.start(), "closed");
-
-    const replacement = await manager.start({ sandboxId: SANDBOX_ID });
-    expect(replacement).not.toBe(handle);
-    expect(manager.size).toBe(1);
   });
 
-  test("close({deleteData:true}) deletes through the instance and supports retry after stop", async () => {
-    const first = createManager();
-    const handle = await first.manager.start({ sandboxId: SANDBOX_ID });
-    await handle.close({ deleteData: true });
-    expect(first.backend.instances[0].deleteDataCalls).toEqual([true]);
-    expect(first.manager.size).toBe(0);
+  test("close({deleteData:true}) closes the instance then deletes adapter data", async () => {
+    const { adapter, manager } = createManager();
+    const handle = await manager.start({ sandboxId: SANDBOX_ID });
 
-    const second = createManager();
-    const stopped = await second.manager.start({ sandboxId: SANDBOX_ID });
-    await stopped.stop();
-    await stopped.close({ deleteData: true });
-    expect(second.backend.deleteCalls).toEqual([{ sandboxId: SANDBOX_ID }]);
-    expect(second.manager.size).toBe(0);
+    await handle.close({ deleteData: true });
+
+    expect(adapter.instances[0]?.closeCalls).toBe(1);
+    expect(adapter.deleteCalls).toEqual([SANDBOX_ID]);
+    expect(handle.state).toBe("closed");
+    expect(manager.get(SANDBOX_ID)).toBeUndefined();
+
+    await handle.close({ deleteData: true });
+    expect(adapter.deleteCalls).toEqual([SANDBOX_ID]);
+  });
+
+  test("close({deleteData:true}) skips adapters without deleteData", async () => {
+    const adapter: SandboxAdapter = {
+      start: async (options) => new FakeInstance(options.sandboxId, "http://127.0.0.1:43117/mcp"),
+    };
+    const manager = new SandboxManager({ adapter });
+    const handle = await manager.start({ sandboxId: SANDBOX_ID });
+
+    await handle.close({ deleteData: true });
+    expect(handle.state).toBe("closed");
   });
 
   test("delete failures surface delete_incomplete and keep the handle for retry", async () => {
-    const { backend, manager } = createManager();
+    const { adapter, manager } = createManager();
     const handle = await manager.start({ sandboxId: SANDBOX_ID });
-    await handle.stop();
-    backend.deleteError = Object.assign(new Error("cannot delete"), { code: "delete_incomplete" });
+    adapter.deleteError = new Error("cannot delete sandbox data");
 
-    await expectErrorCode(handle.close({ deleteData: true }), "delete_incomplete");
+    const failure = await expectErrorCode(handle.close({ deleteData: true }), "delete_incomplete");
+    expect(failure.message).toContain("cannot delete sandbox data");
     expect(handle.state).toBe("failed");
     expect(manager.get(SANDBOX_ID)).toBe(handle);
 
-    backend.deleteError = undefined;
     await handle.close({ deleteData: true });
-    expect(backend.deleteCalls.length).toBe(2);
     expect(handle.state).toBe("closed");
-    expect(manager.size).toBe(0);
+    expect(adapter.deleteCalls).toEqual([SANDBOX_ID, SANDBOX_ID]);
+    expect(manager.get(SANDBOX_ID)).toBeUndefined();
   });
 
   test("closeAll closes every handle concurrently and detaches them", async () => {
-    const { backend, manager } = createManager();
+    const { adapter, manager } = createManager();
     const first = await manager.start({ sandboxId: SANDBOX_ID });
     const second = await manager.start({ sandboxId: SECOND_ID });
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    adapter.instances.forEach((instance) => {
+      instance.closeGate = gate;
+    });
 
-    await manager.closeAll();
+    const closing = manager.closeAll();
+    await waitFor(() => adapter.instances.every((instance) => instance.closeCalls === 1));
+    release();
+    await closing;
 
     expect(first.state).toBe("closed");
     expect(second.state).toBe("closed");
     expect(manager.size).toBe(0);
-    expect(backend.instances.map((instance) => instance.closeCalls)).toEqual([1, 1]);
   });
 
   test("closeAll keeps failed handles and reports an AggregateError that can be retried", async () => {
-    const { backend, manager } = createManager();
+    const { adapter, manager } = createManager();
     const first = await manager.start({ sandboxId: SANDBOX_ID });
-    const second = await manager.start({ sandboxId: SECOND_ID });
-    backend.instances[0].closeError = Object.assign(new Error("cannot stop"), { code: "stop_incomplete" });
+    await manager.start({ sandboxId: SECOND_ID });
+    adapter.instances[0]!.closeError = new Error("stop failed");
 
     let caught: unknown;
     try {
@@ -450,60 +533,67 @@ describe("SandboxManager", () => {
     expect((caught as AggregateError).errors.length).toBe(1);
     expect(manager.size).toBe(1);
     expect(manager.get(SANDBOX_ID)).toBe(first);
-    expect(second.state).toBe("closed");
+    expect(first.state).toBe("failed");
 
-    backend.instances[0].closeError = undefined;
+    adapter.instances[0]!.closeError = undefined;
     await manager.closeAll();
     expect(manager.size).toBe(0);
-    expect(first.state).toBe("closed");
   });
 
-  test("an unexpected backend exit is reported as backend_exited", async () => {
-    const { backend, manager } = createManager();
-    const handle = await manager.start({ sandboxId: SANDBOX_ID });
-    backend.instances[0].stateValue = "failed";
+  test("an adapter id mismatch is rejected as conflict and closes the instance", async () => {
+    const { adapter, manager } = createManager();
+    adapter.instanceId = SECOND_ID;
 
-    expect(handle.state).toBe("failed");
-    expect(handle.status().lastError).toEqual({
-      code: "backend_exited",
-      message: "Sandbox backend exited unexpectedly.",
-    });
-    expect(handle.endpoint()).toBeNull();
-
-    await handle.close();
+    const failure = await expectErrorCode(manager.start({ sandboxId: SANDBOX_ID }), "conflict");
+    expect(failure.message).toContain(SECOND_ID);
+    expect(adapter.instances[0]?.closeCalls).toBe(1);
     expect(manager.size).toBe(0);
   });
 
-  test("a missing peri-sandbox module reports backend_unavailable", async () => {
+  test("an invalid adapter instance reports start_failed without leaking the handle", async () => {
     const manager = new SandboxManager({
-      moduleSpecifier: `missing-peri-sandbox-${Date.now()}`,
+      adapter: {
+        start: async () => ({ sandboxId: SANDBOX_ID, workspacePath: "relative", mcpServer: { type: "http", url: "http://127.0.0.1:1/mcp", headers: {} }, close: async () => undefined }),
+      } as unknown as SandboxAdapter,
     });
-    await expectErrorCode(manager.start({ sandboxId: SANDBOX_ID }), "backend_unavailable");
-    expect(manager.size).toBe(0);
-  });
 
-  test("a backend id mismatch is rejected as conflict and detaches the handle", async () => {
-    const backend = new FakeBackend();
-    backend.start = async () => new FakeInstance({ id: SECOND_ID });
-    const manager = new SandboxManager({ backend });
-
-    await expectErrorCode(manager.start({ sandboxId: SANDBOX_ID }), "conflict");
+    const failure = await expectErrorCode(manager.start({ sandboxId: SANDBOX_ID }), "workspace_unavailable");
+    expect(failure.message).toContain("absolute");
     expect(manager.size).toBe(0);
   });
 
   test("stop failures keep the handle failed and allow a retry", async () => {
-    const { backend, manager } = createManager();
+    const { adapter, manager } = createManager({ stopTimeoutMs: 1_000 });
     const handle = await manager.start({ sandboxId: SANDBOX_ID });
-    backend.instances[0].closeError = Object.assign(new Error("cannot stop"), {
-      code: "stop_incomplete",
-    });
+    adapter.instances[0]!.closeError = new Error("cannot stop");
 
     await expectErrorCode(handle.stop(), "stop_incomplete");
     expect(handle.state).toBe("failed");
     expect(manager.get(SANDBOX_ID)).toBe(handle);
 
-    backend.instances[0].closeError = undefined;
+    adapter.instances[0]!.closeError = undefined;
     await handle.stop();
     expect(handle.state).toBe("stopped");
+  });
+
+  test("the handle state machine moves through starting, ready, stopping and closed", async () => {
+    const { adapter, manager } = createManager();
+    let release: () => void = () => undefined;
+    adapter.startGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const pending = manager.start({ sandboxId: SANDBOX_ID });
+    await waitFor(() => manager.get(SANDBOX_ID)?.state === "starting");
+    release();
+    const handle = await pending;
+    expect(handle.state).toBe("ready");
+
+    adapter.instances[0]!.closeDelayMs = 20;
+    const closing = handle.close();
+    await waitFor(() => handle.state === "stopping");
+    expect(handle.endpoint()).not.toBeNull();
+    await closing;
+    expect(handle.state).toBe("closed");
   });
 });

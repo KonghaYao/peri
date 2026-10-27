@@ -22,20 +22,22 @@
 
 ```
 Host process (SDK / CLI / 测试)
-  SandboxManager (one per chat session)
-    └─ startSandbox()
-         ├─ settings/profile → random token → workspace lock
-         ├─ Provider.start() ──> SRT CLI ──> peri mcp-start workspace --stdio
-         ├─ PeriBackend (MCP stdio client, Tasks/limits, runId)
-         └─ HTTP MCP server 127.0.0.1:<ephemeral>/mcp (Bearer, Host/Origin)
-              └─ ChatSessionInit.mcpServers
-                   └─ session/new|load { cwd, mcpServers }
+  SandboxManager (host resource registry, one per host)
+    └─ SandboxAdapter.start()          ← createPeriSandboxAdapter()
+         └─ startSandbox()
+              ├─ settings/profile → random token → workspace lock
+              ├─ Provider.start() ──> SRT CLI ──> peri mcp-start workspace --stdio
+              ├─ PeriBackend (MCP stdio client, Tasks/limits, runId)
+              └─ HTTP MCP server 127.0.0.1:<ephemeral>/mcp (Bearer, Host/Origin)
+                   └─ ChatSessionInit.mcpServers
+                        └─ session/new|load { cwd, mcpServers }
 ```
 
 1. HTTP server 运行在宿主进程内；sandbox 内只有 SRT 包裹的 Peri backend。
 2. 每实例独立端口，`mcpUrl = http://127.0.0.1:<port>/mcp`，不带 sandboxId 路径。
 3. `ChatSessionInit.path` 必须是宿主可见的 `<sandboxRoot>/workspace`，否则 Agent 的绝对路径会落到 SRT 拒绝的区域。
-4. 一个 `SandboxManager` 对应一个会话；多个会话由宿主创建多个 manager，SDK 不维护全局表。
+4. `SandboxManager` 是宿主级资源注册表，不按会话划分；宿主决定哪个 chat 绑定哪个 handle。SDK 只定义 adapter 契约，`peri-sandbox` 不反向依赖 SDK 类型。
+5. Adapter 的 token 只出现在 `mcpServer.headers.Authorization`；`close()` 停止实例，`deleteData(sandboxId)` 单独删除数据。
 
 ## 3. 模块职责
 
@@ -47,6 +49,7 @@ Host process (SDK / CLI / 测试)
 | `src/instance/workspace.ts` | 目录、`.lock`、tokenFile、`deleteSandboxData`、free-space 检查 |
 | `src/instance/instance.ts` | 状态机、`status()`、`close()`/`deleteData` |
 | `src/instance/start.ts` | 启动编排、失败回卷、测试缝 `startSandboxWith` |
+| `src/adapter.ts` | `createPeriSandboxAdapter()`：结构化实现 SDK `SandboxAdapter` 契约，映射 options、token 与 `deleteData`；不 import SDK |
 | `src/server/http.ts` | 单实例 HTTP server、鉴权、大小/超时限制 |
 | `src/server/mcp-handler.ts` | MCP `Server`、`tools/list`、`tools/call`、`tasks/*`，pinned `2026-07-28` |
 | `src/runtime/provider.ts` | Provider 接口 + `providerFor(platform)` |

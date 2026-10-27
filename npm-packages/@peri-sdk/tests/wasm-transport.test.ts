@@ -126,7 +126,7 @@ test("ChatManager runs over an injected WASM frame port", async () => {
     wire.push({ jsonrpc: "2.0", id: request.id, result });
   };
   const manager = new ChatManager({
-    agentConfig: {},
+    store: { storage: {}, machineId: "test-machine" },
     database: {
       listSessions: async () => [],
       getSession: async () => null,
@@ -134,10 +134,10 @@ test("ChatManager runs over an injected WASM frame port", async () => {
     kv: new OwnershipProbe(),
     chatConfig: {
       runtime: { kind: "transport", factory: () => WasmAcpTransport.fromPort(wire.port) },
-      sessionInit: { path: "/tmp", instructions: "hello" },
+      session: { path: "/tmp", instructions: "hello" },
     },
   });
-  const chat = manager.createChat();
+  const chat = manager.createChat({ agent: { cwd: "/" } });
   try {
     const ready = await chat.execute(ChatUserAction.createNewSession({}));
     expect(ready.sessionId).toBe("s1");

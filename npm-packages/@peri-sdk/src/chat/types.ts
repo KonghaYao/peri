@@ -12,6 +12,7 @@ import type {
 import type { Transport } from "../transport/types";
 import type { WasmRuntimeDiagnosticKind } from "../wasm/runtime";
 import type { PeriWasmModuleFactory } from "../wasm/loader";
+import type { PeriInstanceOptions } from "../agent/peri-instance";
 import type {
     AnswerAction, CancelAction, ForceSendAction, HistoryAction, SendAction, SessionAction, TakeBackAction,
 } from "./action";
@@ -69,12 +70,45 @@ export interface SessionOwnership {
     release(sessionId: string): Promise<void>;
 }
 
-/** Session 建立输入：新会话 cwd、系统指令与 MCP 声明。 */
+/**
+ * Manager 部署边界：整个 Manager 共享的 Store 与机器身份。
+ *
+ * 由 `ChatManagerOptions.store` 提供，构造时快照；SDK 在序列化每个 Chat 的
+ * 内部 `agentConfig` JSON 时注入 `storage`/`machineId`，per-chat 不能声明这两个键。
+ */
+export interface ChatStoreConfig {
+    storage: unknown;
+    machineId: string;
+}
+
+/**
+ * 单个 Chat 的运行配置。
+ *
+ * `cwd` 必填；`settings`/`env` 与其余 JSON 字段可选。`storage`/`machineId`
+ * 由 Manager 的 `store` 注入，出现在 per-chat 配置里会抛 `TypeError`。
+ */
+export interface ChatAgentConfig {
+    cwd: string;
+    settings?: unknown;
+    env?: Readonly<Record<string, string>>;
+    [key: string]: unknown;
+}
+
+/** Session 建立输入：新会话 cwd、系统指令与 MCP 声明；嵌套容器按 Chat 深拷贝。 */
 export interface ChatSessionInit {
     path?: string;
     instructions?: string;
-    /** `acp` 型 server 实例由调用方持有；Manager 不深拷贝/冻结实例。 */
+    /** `acp` 型 server 实例由调用方持有；SDK 复制描述对象但不克隆实例。 */
     mcpServers?: Record<string, AcpMcpServer>;
+}
+
+/** 宿主 transport 工厂每次激活收到的上下文；旧工厂可忽略新增字段。 */
+export interface ChatTransportFactoryOptions {
+    signal?: AbortSignal;
+    /** 当前激活所属的 Chat 句柄 id。 */
+    chatId?: string;
+    /** 该 Chat 独立组合、冻结后的内部 agentConfig JSON（含 Manager store）。 */
+    agentConfig?: unknown;
 }
 
 export type ChatRuntime =
@@ -82,14 +116,16 @@ export type ChatRuntime =
           kind: "wasm";
           moduleUrl?: string | URL;
           moduleFactory?: PeriWasmModuleFactory;
+          /** Manager 级默认 WASM env；`createChat({ runtime })` 按字段合并覆盖。 */
           env?: Readonly<Record<string, string>>;
+          /** Manager 级诊断回调；per-chat 未提供时沿用。 */
           onDiagnostic?: (kind: WasmRuntimeDiagnosticKind, error: unknown) => void;
       }
     | {
           kind: "transport";
           factory: (
               path: string,
-              options?: { signal?: AbortSignal },
+              options?: ChatTransportFactoryOptions,
           ) => Transport | Promise<Transport>;
       };
 
@@ -105,27 +141,52 @@ export interface ChatLifecycleOptions {
     startupSettleTimeoutMs?: number;
     /** 单个激活（宿主/transport）关闭等待；默认 5000ms。 */
     activationCloseTimeoutMs?: number;
-    /** shutdown 等待单个 chat.close；默认 15000ms。 */
+    /** shutdown 等待单个 chat.close；Manager 聚合预算，per-chat 覆盖不生效。默认 15000ms。 */
     shutdownChatTimeoutMs?: number;
 }
 
 /** Chat 运行配置：运行后端、Session 建立输入与生命周期预算。 */
 export interface ChatConfig {
     runtime: ChatRuntime;
-    /** Manager 级默认 Session 建立输入；`createChat({ sessionInit })` 整体覆盖。 */
-    sessionInit?: ChatSessionInit;
+    /** Manager 级默认 Session 建立输入；`createChat({ session })` 整体覆盖。 */
+    session?: ChatSessionInit;
+    /** Manager 级默认生命周期预算；`createChat({ lifecycle })` 按字段覆盖。 */
     lifecycle?: ChatLifecycleOptions;
 }
 
-/** `createChat` 的句柄级配置；`sessionInit` 整体覆盖 Manager 默认值，不做字段合并。 */
+/**
+ * `createChat` 的句柄级配置。
+ *
+ * Manager 仍是部署/Store 边界；这里提供单个 Chat 的运行配置与 Session 输入。
+ * `agent` 必填，最终配置 = 本对象 + 注入的 Manager store，每个 Chat 独立。
+ * `session` 整体覆盖 Manager 默认值，不做字段合并。
+ */
 export interface ChatCreateOptions {
+    /** Per-chat 运行配置；`cwd` 必填，不能声明 `storage`/`machineId`。 */
+    agent: ChatAgentConfig;
     path?: string;
-    sessionInit?: ChatSessionInit;
+    session?: ChatSessionInit;
+    /**
+     * Partial lifecycle overrides merged over the Manager defaults.
+     * `shutdownChatTimeoutMs` stays Manager-scoped.
+     */
+    lifecycle?: ChatLifecycleOptions;
+    /** Per-chat WASM runtime settings; env is merged over chatConfig.runtime.env. */
+    runtime?: {
+        env?: Readonly<Record<string, string>>;
+        /** Overrides the Manager diagnostic handler for this chat's runtime. */
+        onDiagnostic?: (kind: WasmRuntimeDiagnosticKind, error: unknown) => void;
+    };
+    /** Passed to each PeriInstance; no Manager default. */
+    payloadBudgets?: PeriInstanceOptions["payloadBudgets"];
 }
 
 export interface ChatManagerOptions {
-    /** 纯 JSON 配置；构造时序列化快照，拒绝函数/循环/不可序列化值。 */
-    agentConfig: unknown;
+    /**
+     * Manager 级 Store 与机器身份；构造时校验并快照。
+     * 序列化每个 Chat 的内部 `agentConfig` JSON 时注入 `storage`/`machineId`。
+     */
+    store: ChatStoreConfig;
     database: ChatDatabase;
     /** Session 归属记录存储；Manager 内部构造 ownership 并生成 owner。 */
     kv: KvStorage;
@@ -135,7 +196,7 @@ export interface ChatManagerOptions {
 
 export interface ChatManager {
     /** 同步声明句柄；不启动 ACP、不取得 Session ownership。 */
-    createChat(options?: ChatCreateOptions): ChatService;
+    createChat(options: ChatCreateOptions): ChatService;
     getChat(id: string): ChatService | undefined;
     /** 包含 binding/cleanup 中的候选句柄。 */
     findChatBySession(sessionId: string): ChatService | undefined;

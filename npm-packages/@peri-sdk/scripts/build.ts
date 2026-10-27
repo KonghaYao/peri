@@ -55,7 +55,6 @@ const sandbox = await Bun.build({
   outdir: output,
   target: "node",
   format: "esm",
-  external: ["peri-sandbox"],
 });
 if (!sandbox.success) throw new Error(`Sandbox SDK bundle failed: ${sandbox.logs.join("; ")}`);
 const wasmNode = await Bun.build({

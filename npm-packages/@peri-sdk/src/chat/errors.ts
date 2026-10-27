@@ -68,6 +68,30 @@ export class SessionBindingConflictError extends ChatActionError {
 }
 
 /**
+ * Session 的 cwd 不在当前 Chat 的 workspace root 之下。
+ *
+ * 用于 `change_session` 的跨 workspace 护栏，也用于新会话 path 超出
+ * `agent.cwd` 的配置错误；动作未生效，调用方可修正后重试。
+ */
+export class SessionWorkspaceMismatchError extends ChatActionError {
+    constructor(
+        requestId: string,
+        readonly sessionPath: string,
+        readonly workspaceRoot: string,
+        options?: { cause?: unknown },
+    ) {
+        super(
+            requestId,
+            "workspace_mismatch",
+            `Session path "${sessionPath}" is outside the chat workspace root "${workspaceRoot}"`,
+            "rejected",
+            options,
+        );
+        this.name = "SessionWorkspaceMismatchError";
+    }
+}
+
+/**
  * `session/new` 已取得 sessionId，但后续阶段失败。
  * 清理确认后 SDK 会关闭已创建会话；清理未确认时保留资源与 ownership 供重试；
  * 调用方不得盲目重复新建。

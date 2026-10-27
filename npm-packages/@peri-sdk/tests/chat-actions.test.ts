@@ -28,7 +28,7 @@ function setup(
     const database = new FakeDatabase();
     const ports: FakePort[] = [];
     const options: ChatManagerInternalOptions = {
-        agentConfig: {},
+        store: { storage: {}, machineId: "test-machine" },
         database,
         kv: ownership,
         chatConfig: {
@@ -38,7 +38,7 @@ function setup(
                     throw new Error("ACP transport must not start");
                 },
             },
-            sessionInit: { path: "/workspace" },
+            session: { path: "/workspace" },
         },
         instanceFactory: () => {
             const port = new FakePort();
@@ -59,7 +59,7 @@ async function readyChat(
     setupValue: ReturnType<typeof setup>;
 }> {
     const setupValue = setup(configure);
-    const chat = setupValue.manager.createChat();
+    const chat = setupValue.manager.createChat({ agent: { cwd: "/" } });
     await chat.execute(ChatUserAction.createNewSession());
     return { chat, port: setupValue.ports[0], setupValue };
 }
@@ -222,8 +222,8 @@ describe("control actions", () => {
             port.runningValue = true;
             port.pendingInteractionValue = 1;
         });
-        const chatA = setupValue.manager.createChat();
-        const chatB = setupValue.manager.createChat();
+        const chatA = setupValue.manager.createChat({ agent: { cwd: "/" } });
+        const chatB = setupValue.manager.createChat({ agent: { cwd: "/" } });
         await chatA.execute(ChatUserAction.createNewSession());
         await chatB.execute(ChatUserAction.createNewSession());        const [portA, portB] = setupValue.ports;
 
@@ -371,7 +371,7 @@ describe("facts and late views", () => {
                 ];
             }
         });
-        chat = setupValue.manager.createChat();
+        chat = setupValue.manager.createChat({ agent: { cwd: "/" } });
         chat.subscribeFacts(early.observer);
         await chat.execute(ChatUserAction.createNewSession());
 

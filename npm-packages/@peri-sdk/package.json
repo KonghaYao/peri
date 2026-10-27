@@ -50,7 +50,7 @@
   "scripts": {
     "build": "bun run scripts/build.ts",
     "build:workers": "bun examples/workers/build-worker.mjs",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.demo.json",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.demo.json && tsc --noEmit -p tsconfig.type-tests.json",
     "test": "bun run build && bun test",
     "dev": "bun run examples/demo/demo.ts",
     "db:dev": "mise exec -- sqld --no-welcome --http-listen-addr 127.0.0.1:8081 --db-path ../../target/peri-sdk-local-turso",
@@ -61,6 +61,7 @@
   "devDependencies": {
     "bun-types": "^1.4.4",
     "hono": "^4.13.14",
+    "peri-sandbox": "file:../peri-sandbox",
     "typescript": "^7.0.2",
     "wrangler": "4.152.0"
   },
@@ -69,13 +70,5 @@
     "@tursodatabase/serverless": "1.4.1",
     "lib0": "^0.2.119",
     "yjs": "^13.6.33"
-  },
-  "peerDependencies": {
-    "peri-sandbox": ">=0.1.0"
-  },
-  "peerDependenciesMeta": {
-    "peri-sandbox": {
-      "optional": true
-    }
   }
 }

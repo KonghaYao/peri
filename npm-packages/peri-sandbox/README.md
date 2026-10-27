@@ -56,6 +56,41 @@ await sandbox.close({ deleteData: true }); // 停止并删除 <sandboxRoot>
 
 `deleteSandboxData({ sandboxId, sandboxesRoot })` 可单独删除一个已停止的 sandbox 目录；不会跟随 symlink，也不会越出 `sandboxesRoot`。
 
+### SDK adapter
+
+`createPeriSandboxAdapter()` 返回结构化实现 `@peri-code/sdk/sandbox` `SandboxAdapter` 契约的对象，供宿主注入 `SandboxManager`。`peri-sandbox` 不 import SDK 类型，兼容性由 SDK 侧测试保证。
+
+```ts
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { createPeriSandboxAdapter } from 'peri-sandbox';
+
+const adapter = createPeriSandboxAdapter({
+  // 部署/配置根；也可省略，由 settings 文件决定。JS 不会展开 "~"，用 homedir() 拼接。
+  settingsPath: join(homedir(), '.peri-sandbox', 'settings.json'),
+  sandboxesRoot: join(homedir(), '.peri-sandbox', 'sandboxes'),
+});
+
+const instance = await adapter.start({
+  sandboxId: 'sbx_0123456789abcdef0123456789abcdef',
+  signal, // 可选，取消本次启动
+  options: {
+    // 映射到 startSandbox：profileName / profile / port / bashCalls /
+    // minFreeBytes / startupTimeoutMs / stopTimeoutMs。
+    profileName: 'workspace-default',
+    minFreeBytes: 512 * 1024 * 1024,
+  },
+});
+
+instance.workspacePath; // <sandboxesRoot>/<sandboxId>/workspace
+instance.mcpServer;     // { type: 'http', url, headers: { Authorization: 'Bearer ...' } }
+await instance.close(); // 停止实例，保留 workspace
+
+await adapter.deleteData?.(instance.sandboxId); // 删除持久化数据
+```
+
+token 只出现在 `mcpServer.headers.Authorization`；adapter 不持久化 token，也不把它放进 `workspacePath` 或错误消息。
+
 ### 生命周期
 
 ```
@@ -101,6 +136,8 @@ starting -> ready -> stopping -> stopped/closed
 
 `allowedDomains` 只填域名，不支持 URL 或 `*`。`runtimeReadPaths` 必须存在且不能覆盖 `sandboxesRoot`。SRT policy 在每次启动时重新生成，因此修改 profile 后需重启实例（同一 workspace 会在新 policy 下启动）。`memoryMax`/`tasksMax`/`cpuQuota` 只在 Linux 生效。
 
+设置文件里的 `sandboxesRoot` / `periPath` 必须是规范化绝对路径（示例中的 `/Users/you/...` 是占位符，按本机实际路径替换）：加载时不展开 `~`，写 `"~/.peri-sandbox/sandboxes"` 会因不是绝对路径而报 `invalid_options`。
+
 ## 平台边界
 
 - **macOS**：SRT + `sandbox-exec` + detached 进程组。没有 cgroup 等价的 CPU/内存/进程数硬限制；double-fork/setsid 后代可能逃逸进程组，不承诺生产隔离。
@@ -114,5 +151,4 @@ bun install
 bun run format:check && bun run check && bun run build && bun run test
 bash scripts/macos-acceptance.sh   # Apple Silicon + OrbStack，Linux VM 验收
 ```
-
 `bun run test:mac -- /absolute/settings.json` 与 `bun run test:mac:programmatic` 需要真实的 Peri/SRT。已实测的版本与边界见 `COMPATIBILITY.md`，架构说明见 `peri-sandbox-design.md`。

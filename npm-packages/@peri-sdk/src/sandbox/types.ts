@@ -1,12 +1,8 @@
 /** Lifecycle states reported by one {@link SandboxHandle}. */
 export type SandboxHandleState = "idle" | "starting" | "ready" | "stopping" | "stopped" | "failed" | "closed";
 
-/** Lifecycle states reported by one in-process sandbox instance. */
-export type SandboxInstanceState = "starting" | "ready" | "stopping" | "stopped" | "failed" | "closed";
-
 /** Stable error codes for sandbox lifecycle failures. */
 export type SandboxManagerErrorCode =
-  | "backend_unavailable"
   | "unsupported_environment"
   | "invalid_options"
   | "invalid_server_name"
@@ -14,15 +10,13 @@ export type SandboxManagerErrorCode =
   | "start_failed"
   | "stop_incomplete"
   | "delete_incomplete"
-  | "backend_exited"
   | "workspace_unavailable"
-  | "token_unavailable"
   | "not_ready"
   | "limit_exceeded"
   | "closed"
   | "cancelled";
 
-/** Error raised by the sandbox entry; `cause` preserves the backend failure. */
+/** Error raised by the sandbox entry; `cause` preserves the adapter failure. */
 export class SandboxManagerError extends Error {
   readonly code: SandboxManagerErrorCode;
 
@@ -33,88 +27,93 @@ export class SandboxManagerError extends Error {
   }
 }
 
-export interface SandboxProfile {
-  allowedDomains: string[];
-  runtimeReadPaths: string[];
-  memoryMax: string;
-  tasksMax: number;
-  cpuQuota: string;
-}
-
-/** Options forwarded to `startSandbox()` in the optional backend package. */
-export interface SandboxBackendStartOptions {
-  sandboxId?: string;
-  sandboxesRoot?: string;
-  settingsPath?: string;
-  profileName?: string;
-  profile?: SandboxProfile;
-  periPath?: string;
-  periSha256?: string;
-  bashCalls?: number;
-  minFreeBytes?: number;
-  port?: number;
-  startupTimeoutMs?: number;
+/**
+ * Arguments passed to {@link SandboxAdapter.start}.
+ *
+ * `options` is the resolved per-sandbox adapter configuration: a per-start
+ * value replaces the manager default instead of being merged into it.
+ */
+export interface SandboxAdapterStartOptions<TOptions = unknown> {
+  sandboxId: string;
   signal?: AbortSignal;
+  options?: TOptions;
 }
 
-/** One started sandbox instance as seen through the backend boundary. */
-export interface SandboxBackendInstance {
-  readonly id: string;
-  readonly runId: string;
-  readonly state: SandboxInstanceState;
-  readonly mcpUrl: string;
-  /** Sensitive: only used to build the MCP Authorization header. */
-  readonly token: string;
-  readonly tokenFile: string | null;
+/**
+ * HTTP MCP descriptor contributed by one ready sandbox.
+ *
+ * A bearer token may appear in `headers`; this value is the only place the
+ * manager accepts or returns it.
+ */
+export interface SandboxMcpHttpConfig {
+  type: "http";
+  url: string;
+  headers: Record<string, string>;
+}
+
+/** One started sandbox as seen through the adapter boundary. */
+export interface SandboxAdapterInstance {
+  readonly sandboxId: string;
   readonly workspacePath: string;
-  readonly sandboxRoot: string;
-  close(options?: { deleteData?: boolean }): Promise<void>;
+  readonly mcpServer: SandboxMcpHttpConfig;
+  close(): Promise<void>;
 }
 
-/** Backend boundary around the optional `peri-sandbox` package. */
-export interface SandboxBackend {
-  start(options: SandboxBackendStartOptions): Promise<SandboxBackendInstance>;
-  deleteData(options: { sandboxId: string; sandboxesRoot?: string; settingsPath?: string }): Promise<void>;
+/**
+ * Host-provided sandbox lifecycle boundary.
+ *
+ * The SDK core knows nothing about a concrete sandbox implementation. An
+ * adapter starts one instance for a caller-supplied id and optionally deletes
+ * its persisted data by id.
+ */
+export interface SandboxAdapter<TOptions = unknown> {
+  start(options: SandboxAdapterStartOptions<TOptions>): Promise<SandboxAdapterInstance>;
+  deleteData?(sandboxId: string): Promise<void>;
 }
 
 /**
  * Manager-wide defaults shared by every handle it creates.
  *
  * The manager is a resource registry only: it never receives a session and
- * never records a session mapping.
+ * never records a session mapping. `adapter` is required; the manager cannot
+ * be constructed without one.
  */
-export interface SandboxManagerOptions {
-  sandboxesRoot?: string;
-  settingsPath?: string;
-  profileName?: string;
-  profile?: SandboxProfile;
-  /** 0 (default) binds an ephemeral port. */
-  port?: number;
-  periPath?: string;
-  periSha256?: string;
-  bashCalls?: number;
-  minFreeBytes?: number;
+export interface SandboxManagerOptions<TOptions = unknown> {
+  /** Sandbox lifecycle implementation supplied by the host. */
+  adapter: SandboxAdapter<TOptions>;
+  /** Default options forwarded to the adapter; replaced per start when set. */
+  adapterOptions?: TOptions;
   /** ACP MCP server key; defaults to "workspace". */
   serverName?: string;
-  /** Module loaded on first use; defaults to "peri-sandbox". */
-  moduleSpecifier?: string;
   /** Start budget; defaults to 45_000ms. */
   startupTimeoutMs?: number;
   /** Stop/close budget; defaults to 15_000ms. */
   stopTimeoutMs?: number;
-  backend?: SandboxBackend | (() => Promise<SandboxBackend>);
+  /**
+   * Default cancellation signal for starts only. It is not retained per start
+   * and {@link SandboxManager.closeAll} never inherits it.
+   */
   signal?: AbortSignal;
 }
 
-/** Per-sandbox overrides; omitted fields fall back to manager defaults. */
-export interface SandboxManagerStartOptions {
+/**
+ * Per-sandbox overrides; omitted fields fall back to manager defaults.
+ *
+ * Repeating `start()` for an existing `sandboxId` requires explicit values to
+ * match the values the handle was created with; a mismatch is rejected with
+ * code `conflict`. `adapterOptions` is replaced as a whole and compared by
+ * stable JSON serialization. `signal` applies to this start only and never
+ * participates in conflict checks.
+ */
+export interface SandboxManagerStartOptions<TOptions = unknown> {
   /** An id matching `sbx_<32 hex>`; generated by the manager when omitted. */
   sandboxId?: string;
-  profileName?: string;
-  profile?: SandboxProfile;
-  port?: number;
-  bashCalls?: number;
+  /** Replaces the manager's `adapterOptions` for this sandbox. */
+  adapterOptions?: TOptions;
   serverName?: string;
+  startupTimeoutMs?: number;
+  stopTimeoutMs?: number;
+  /** Cancels this start only and is not retained by the handle. */
   signal?: AbortSignal;
 }
 
@@ -123,7 +122,6 @@ export interface SandboxEndpoint {
   readonly sandboxId: string;
   readonly serverName: string;
   readonly mcpUrl: string;
-  readonly runId: string;
   readonly workspacePath: string;
 }
 
@@ -136,20 +134,8 @@ export interface SandboxStatus {
   readonly lastError: { code: SandboxManagerErrorCode; message: string } | null;
 }
 
-/**
- * HTTP MCP descriptor for one ready sandbox.
- *
- * The bearer token appears only in this value; callers assemble their own
- * session init from it and must not hand it to browsers or untrusted tenants.
- */
-export interface SandboxMcpHttpServer {
-  type: "http";
-  url: string;
-  headers: Record<string, string>;
-}
-
 /** One MCP server contributed by a ready sandbox. */
 export interface SandboxMcpServer {
   name: string;
-  config: SandboxMcpHttpServer;
+  config: SandboxMcpHttpConfig;
 }

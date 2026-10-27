@@ -1,10 +1,11 @@
-import { cloneJsonValue } from "../util/json-value";
 import { KvSessionOwnership, LocalSessionIndex } from "./ownership";
 import {
     WasmRuntimePool,
+    type WasmRuntimeAcquireOptions,
     type WasmRuntimeLease,
+    type WasmRuntimeStarter,
 } from "../wasm/runtime-pool";
-import { startWasmRuntime } from "../wasm/runtime";
+import { startWasmRuntime, type WasmRuntimeDiagnosticKind } from "../wasm/runtime";
 import { withDeadline } from "../util/deadline";
 import type { ChatDatabase, ChatSessionDirectoryEntry } from "../contracts/chat";
 import type {
@@ -14,21 +15,29 @@ import type {
     ChatCreateOptions,
     ChatManager as ChatManagerContract,
     ChatManagerOptions,
+    ChatStoreConfig,
     SessionOwnership,
 } from "./types";
 import { ChatService } from "./service";
 import { createChatInstance } from "./instance-factory";
-import { resolveChatLifecycle } from "./lifecycle";
+import {
+    resolveChatAgentConfig,
+    snapshotChatStore,
+} from "./agent-config";
+import { mergeChatLifecycle, resolveChatLifecycle } from "./lifecycle";
+import { copyChatSessionInit } from "./session-init";
 import type { ChatInstanceFactory, ChatSessionIndex } from "./service-context";
 
 /**
  * Phase 4 接入真实 PeriInstance 的内部入口。
  *
- * 公开的 `ChatManagerOptions` 不含该字段：Manager 默认装配真实工厂；
- * 测试可通过该字段注入 fake port。
+ * 公开的 `ChatManagerOptions` 不含这些字段：Manager 默认装配真实工厂；
+ * 测试可注入 fake port 或替代的 WASM 启动器。
  */
 export interface ChatManagerInternalOptions extends ChatManagerOptions {
     readonly instanceFactory?: ChatInstanceFactory;
+    /** 测试接缝：替代默认 `startWasmRuntime`，仍然接收 per-chat 启动配置。 */
+    readonly wasmRuntimeStarter?: WasmRuntimeStarter;
 }
 
 /**
@@ -45,8 +54,7 @@ export class ChatManager implements ChatManagerContract {
     private readonly sessions = new LocalSessionIndex();
     private readonly index: ChatSessionIndex;
 
-    private readonly agentConfig: unknown;
-    private readonly agentConfigJson: string;
+    private readonly store: ChatStoreConfig;
     private readonly database: ChatDatabase;
     private readonly sessionOwnership: SessionOwnership;
     private readonly runtime: ChatRuntime;
@@ -88,24 +96,26 @@ export class ChatManager implements ChatManagerContract {
             );
         }
 
-        this.agentConfig = cloneJsonValue(options.agentConfig, "agentConfig");
-        this.agentConfigJson = JSON.stringify(this.agentConfig);
+        // Manager 是部署边界：Store 与机器身份只在这里声明并快照。
+        this.store = snapshotChatStore(options.store);
         this.database = options.database;
         this.sessionOwnership = sessionOwnership;
-        // 运行后端配置在构造时快照；端口/模块工厂等实例仍由外部借用。
-        this.runtime = { ...options.chatConfig.runtime };
-        // Manager 级 sessionInit 只是默认值；未配置时不伪造空配置对象。
-        this.defaultSessionInit = options.chatConfig.sessionInit
-            ? { ...options.chatConfig.sessionInit }
-            : undefined;
+        // 运行后端配置在构造时快照；env 也复制，避免调用方后续修改影响所有 Chat。
+        const configuredRuntime = { ...options.chatConfig.runtime };
+        this.runtime = configuredRuntime.kind === "wasm" &&
+            configuredRuntime.env !== undefined
+            ? { ...configuredRuntime, env: { ...configuredRuntime.env } }
+            : configuredRuntime;
+        // Manager 级 session 只是默认值；未配置时不伪造空配置对象。
+        this.defaultSessionInit = options.chatConfig.session === undefined
+            ? undefined
+            : copyChatSessionInit(options.chatConfig.session);
         this.lifecycle = resolveChatLifecycle(
             this.runtime.kind,
             options.chatConfig.lifecycle,
         );
-        // 默认工厂只绑定 Manager 的生命周期预算；测试仍可注入 fake port。
-        const lifecycle = this.lifecycle;
-        this.instanceFactory = options.instanceFactory
-            ?? ((context) => createChatInstance({ ...context, lifecycle }));
+        // 默认工厂直接使用 per-chat context；生命周期预算已由 ChatService 合并。
+        this.instanceFactory = options.instanceFactory ?? createChatInstance;
         this.index = {
             reserve: (chatId, sessionId) =>
                 this.sessions.reserve(sessionId, chatId),
@@ -121,42 +131,71 @@ export class ChatManager implements ChatManagerContract {
 
         if (this.runtime.kind === "wasm") {
             const runtime = this.runtime;
-            this.wasmRuntimes = new WasmRuntimePool(
-                ({ signal }) =>
-                    startWasmRuntime({
-                        configJson: this.agentConfigJson,
+            const starter: WasmRuntimeStarter = options.wasmRuntimeStarter
+                ?? (({ signal, configJson, env, onDiagnostic }) => {
+                    if (configJson === undefined) {
+                        throw new Error(
+                            "WASM runtime requires a per-chat agentConfig snapshot",
+                        );
+                    }
+                    return startWasmRuntime({
+                        // 每个 Chat 传入自己的 configJson；Manager 不再持有全局配置。
+                        configJson,
                         moduleUrl: runtime.moduleUrl,
                         moduleFactory: runtime.moduleFactory,
-                        env: runtime.env,
+                        env: env ?? runtime.env,
                         signal,
-                        onDiagnostic: runtime.onDiagnostic,
-                    }),
-            );
+                        onDiagnostic: onDiagnostic ?? runtime.onDiagnostic,
+                    });
+                });
+            this.wasmRuntimes = new WasmRuntimePool(starter);
         }
     }
 
     /** 同步声明句柄；不启动 ACP、不取得 Session ownership。 */
-    createChat(options?: ChatCreateOptions): ChatService {
+    createChat(options: ChatCreateOptions): ChatService {
         if (!this.accepting) {
             throw new Error("ChatManager is shut down; no new chat handles");
         }
-        // 句柄级 sessionInit 整体覆盖默认值；每个 Chat 持有独立顶层对象。
-        const sessionInit = options?.sessionInit
-            ? { ...options.sessionInit }
-            : { ...(this.defaultSessionInit ?? {}) };
+        if (!options || typeof options !== "object") {
+            throw new TypeError("createChat requires an options object");
+        }
+        // per-chat agent 必填；Manager 只注入 store，不做默认合并。
+        const { agentConfig, agentConfigJson } = resolveChatAgentConfig(
+            this.store,
+            options.agent,
+        );
+        // 句柄级 session 整体覆盖默认值；每个 Chat 持有独立嵌套容器。
+        const sessionInit = copyChatSessionInit(
+            options.session ?? this.defaultSessionInit,
+        );
+        const lifecycle = mergeChatLifecycle(
+            this.lifecycle,
+            this.runtime.kind,
+            options.lifecycle,
+        );
+        const perChatRuntime = this.resolvePerChatRuntime(options.runtime);
+        const payloadBudgets = options.payloadBudgets === undefined
+            ? undefined
+            : { ...options.payloadBudgets };
         const id = crypto.randomUUID();
         const chat = new ChatService({
             id,
-            path: options?.path,
+            path: options.path,
             sessionInit,
-            agentConfig: this.agentConfig,
-            runtime: this.runtime,
+            agentConfig,
+            agentConfigJson,
+            runtime: perChatRuntime.runtime,
+            runtimeEnv: perChatRuntime.env,
+            onRuntimeDiagnostic: perChatRuntime.onDiagnostic,
+            payloadBudgets,
             database: this.database,
             ownership: this.sessionOwnership,
             index: this.index,
             instanceFactory: this.instanceFactory,
-            lifecycle: this.lifecycle,
-            acquireWasmRuntime: (signal) => this.acquireWasmRuntime(signal),
+            lifecycle,
+            acquireWasmRuntime: (acquireOptions) =>
+                this.acquireWasmRuntime(acquireOptions),
             onClosed: (chatId) => this.removeChat(chatId),
         });
         this.chats.set(id, chat);
@@ -252,15 +291,36 @@ export class ChatManager implements ChatManagerContract {
         this.sessions.clear();
     }
 
+    private resolvePerChatRuntime(
+        override?: ChatCreateOptions["runtime"],
+    ): {
+        runtime: ChatRuntime;
+        env?: Readonly<Record<string, string>>;
+        onDiagnostic?: (kind: WasmRuntimeDiagnosticKind, error: unknown) => void;
+    } {
+        if (this.runtime.kind !== "wasm") return { runtime: this.runtime };
+        const baseEnv = this.runtime.env;
+        const env = override?.env === undefined
+            ? (baseEnv === undefined ? undefined : { ...baseEnv })
+            : { ...(baseEnv ?? {}), ...override.env };
+        const onDiagnostic = override?.onDiagnostic ?? this.runtime.onDiagnostic;
+        const runtime: ChatRuntime = {
+            ...this.runtime,
+            ...(env === undefined ? {} : { env }),
+            ...(onDiagnostic === undefined ? {} : { onDiagnostic }),
+        };
+        return { runtime, env, onDiagnostic };
+    }
+
     private acquireWasmRuntime(
-        signal?: AbortSignal,
+        options?: WasmRuntimeAcquireOptions,
     ): Promise<WasmRuntimeLease> {
         if (!this.wasmRuntimes) {
             throw new Error(
                 'runtime.kind "transport" does not use a WASM runtime pool',
             );
         }
-        return this.wasmRuntimes.acquire({ signal });
+        return this.wasmRuntimes.acquire(options);
     }
 
     private removeChat(id: string): void {

@@ -12,3 +12,5 @@ export type {
 export { startSandbox } from './instance/start.js';
 export { deleteSandboxData } from './instance/workspace.js';
 export { defaultSettingsPath, initSettings, loadSettings } from './instance/settings.js';
+export { createPeriSandboxAdapter } from './adapter.js';
+export type { PeriSandboxAdapterOptions, PeriSandboxStartOptions } from './adapter.js';

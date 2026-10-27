@@ -38,13 +38,23 @@ async function closeTransport(
 function runtimeActivator(context: ChatInstanceContext): PeriHostActivator {
     return async (path, { signal }): Promise<PeriHostActivation> => {
         if (context.runtime.kind === "wasm") {
-            const lease = await context.acquireWasmRuntime(signal);
+            const lease = await context.acquireWasmRuntime({
+                signal,
+                configJson: context.agentConfigJson,
+                env: context.runtimeEnv,
+                onDiagnostic: context.onRuntimeDiagnostic,
+            });
             return {
                 transport: lease.transport,
                 close: () => closeLease(lease),
             };
         }
-        const transport = await context.runtime.factory(path, { signal });
+        // transport 工厂拿到该 Chat 的 id 与合并后的 agentConfig；旧工厂可忽略新增字段。
+        const transport = await context.runtime.factory(path, {
+            signal,
+            chatId: context.chatId,
+            agentConfig: context.agentConfig,
+        });
         return {
             transport,
             close: () => closeTransport(transport),
@@ -56,9 +66,9 @@ function runtimeActivator(context: ChatInstanceContext): PeriHostActivator {
  * 单次激活装配。
  *
  * - `resolveSessionPath` 只读数据库中的持久 cwd，不回退句柄 path；
- * - `defaultMcpServers` 来自 Manager sessionInit，由 PeriInstance 逐激活解析；
+ * - `defaultMcpServers` 来自该 Chat 的 sessionInit，由 PeriInstance 逐激活解析；
  * - 外层 signal 只中止启动等待，生命周期预算映射到关闭选项；
- * - `agentConfig` 由 Manager 序列化为 WASM 启动配置；transport 运行后端的配置归工厂。
+ * - `agentConfigJson`/`runtimeEnv`/`payloadBudgets` 都是 per-chat 值。
  */
 export function createChatInstance(context: ChatInstanceContext): PeriInstance {
     return new PeriInstance({
@@ -68,6 +78,9 @@ export function createChatInstance(context: ChatInstanceContext): PeriInstance {
             return entry?.cwd ?? null;
         },
         defaultMcpServers: context.sessionInit.mcpServers,
+        ...(context.payloadBudgets === undefined
+            ? {}
+            : { payloadBudgets: context.payloadBudgets }),
         signal: context.signal,
         close: {
             drainTimeoutMs: context.lifecycle.closeDrainTimeoutMs,

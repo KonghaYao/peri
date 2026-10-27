@@ -1,5 +1,4 @@
 import { randomBytes } from "node:crypto";
-import { DEFAULT_SANDBOX_MODULE, loadSandboxBackend } from "./backend";
 import {
   DEFAULT_SANDBOX_SERVER_NAME,
   DEFAULT_STARTUP_TIMEOUT_MS,
@@ -11,66 +10,108 @@ import {
 } from "./handle";
 import {
   SandboxManagerError,
-  type SandboxBackend,
+  type SandboxAdapter,
   type SandboxManagerOptions,
   type SandboxManagerStartOptions,
-  type SandboxProfile,
 } from "./types";
 
-interface NormalizedOptions {
-  sandboxesRoot?: string;
-  settingsPath?: string;
-  profileName?: string;
-  profile?: SandboxProfile;
-  port?: number;
-  periPath?: string;
-  periSha256?: string;
-  bashCalls?: number;
-  minFreeBytes?: number;
+interface NormalizedOptions<TOptions> {
+  adapter: SandboxAdapter<TOptions>;
+  adapterOptions?: TOptions;
   serverName: string;
-  moduleSpecifier: string;
   startupTimeoutMs: number;
   stopTimeoutMs: number;
-  backend?: SandboxBackend | (() => Promise<SandboxBackend>);
   signal?: AbortSignal;
 }
 
-/** Generate an id accepted by `peri-sandbox` (`sbx_<32 hex>`). */
+/** Generate a stable sandbox id (`sbx_<32 hex>`). */
 export function createSandboxId(): string {
   return `sbx_${randomBytes(16).toString("hex")}`;
+}
+
+function assertAdapter<TOptions>(adapter: SandboxAdapter<TOptions> | undefined): void {
+  if (typeof adapter !== "object" || adapter === null || typeof adapter.start !== "function")
+    throw new SandboxManagerError(
+      "invalid_options",
+      "SandboxManager requires a SandboxAdapter with a start() method.",
+    );
+}
+
+/**
+ * Stable JSON text for adapter options: object keys are sorted so equal
+ * configurations with different insertion order compare equal.
+ *
+ * Throws for values JSON cannot represent (functions, symbols, bigints,
+ * circular references, class instances) so callers never treat two
+ * unrepresentable values as equal.
+ */
+function canonicalOptions(value: unknown, stack: Set<object> = new Set()): string {
+  if (value === null) return "null";
+  switch (typeof value) {
+    case "string":
+      return JSON.stringify(value);
+    case "number":
+      return Number.isFinite(value) ? String(value) : `number:${String(value)}`;
+    case "boolean":
+      return value ? "true" : "false";
+    case "undefined":
+      return "undefined";
+    case "object": {
+      if (stack.has(value)) throw new TypeError("adapterOptions contains a circular reference");
+      stack.add(value);
+      try {
+        if (Array.isArray(value)) return `[${value.map((item) => canonicalOptions(item, stack)).join(",")}]`;
+        const prototype = Object.getPrototypeOf(value);
+        if (prototype !== Object.prototype && prototype !== null)
+          throw new TypeError("adapterOptions contains a non-plain object");
+        const record = value as Record<string, unknown>;
+        const entries = Object.keys(record)
+          .sort()
+          .map((key) => `${JSON.stringify(key)}:${canonicalOptions(record[key], stack)}`);
+        return `{${entries.join(",")}}`;
+      } finally {
+        stack.delete(value);
+      }
+    }
+    default:
+      throw new TypeError(`adapterOptions contains an unsupported ${typeof value} value`);
+  }
+}
+
+function adapterOptionsEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  try {
+    return canonicalOptions(left) === canonicalOptions(right);
+  } catch {
+    return false;
+  }
 }
 
 /**
  * Resource registry for in-process sandboxes, keyed by `sandboxId`.
  *
- * The manager knows nothing about chat sessions: it neither receives a
- * session key nor stores a session mapping. Callers decide which session
- * binds to which handle, and {@link SandboxHandle.mcpServer} merely exposes
- * a ready sandbox as data; session init is assembled by the caller.
+ * The manager knows nothing about chat sessions or a concrete sandbox
+ * implementation: it neither receives a session key nor stores a session
+ * mapping, and all lifecycle work is delegated to the injected
+ * {@link SandboxAdapter}. Callers decide which session binds to which handle,
+ * and {@link SandboxHandle.mcpServer} merely exposes a ready sandbox as data;
+ * session init is assembled by the caller.
  */
-export class SandboxManager {
-  private readonly options: NormalizedOptions;
-  private readonly handles = new Map<string, SandboxHandle>();
-  private backendValue: SandboxBackend | null = null;
+export class SandboxManager<TOptions = unknown> {
+  private readonly options: NormalizedOptions<TOptions>;
+  private readonly handles = new Map<string, SandboxHandle<TOptions>>();
+  private readonly startConfigs = new Map<string, SandboxHandleConfig<TOptions>>();
 
-  constructor(options: SandboxManagerOptions = {}) {
+  constructor(options: SandboxManagerOptions<TOptions>) {
+    assertAdapter(options?.adapter);
     const serverName = options.serverName ?? DEFAULT_SANDBOX_SERVER_NAME;
     assertServerName(serverName);
     this.options = {
-      ...(options.sandboxesRoot === undefined ? {} : { sandboxesRoot: options.sandboxesRoot }),
-      ...(options.settingsPath === undefined ? {} : { settingsPath: options.settingsPath }),
-      ...(options.profileName === undefined ? {} : { profileName: options.profileName }),
-      ...(options.profile === undefined ? {} : { profile: options.profile }),
-      ...(options.port === undefined ? {} : { port: options.port }),
-      ...(options.periPath === undefined ? {} : { periPath: options.periPath }),
-      ...(options.periSha256 === undefined ? {} : { periSha256: options.periSha256 }),
-      ...(options.bashCalls === undefined ? {} : { bashCalls: options.bashCalls }),
-      ...(options.minFreeBytes === undefined ? {} : { minFreeBytes: options.minFreeBytes }),
+      adapter: options.adapter,
+      ...(options.adapterOptions === undefined ? {} : { adapterOptions: options.adapterOptions }),
       serverName,
-      moduleSpecifier: options.moduleSpecifier ?? DEFAULT_SANDBOX_MODULE,
       startupTimeoutMs: positiveTimeout(options.startupTimeoutMs, DEFAULT_STARTUP_TIMEOUT_MS),
       stopTimeoutMs: positiveTimeout(options.stopTimeoutMs, DEFAULT_STOP_TIMEOUT_MS),
-      ...(options.backend === undefined ? {} : { backend: options.backend }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     };
   }
@@ -81,38 +122,46 @@ export class SandboxManager {
   }
 
   /** Look up a live handle; closed handles are not returned. */
-  get(sandboxId: string): SandboxHandle | undefined {
+  get(sandboxId: string): SandboxHandle<TOptions> | undefined {
     return this.handles.get(sandboxId);
   }
 
   /** Snapshot of the current handles in creation order. */
-  list(): SandboxHandle[] {
+  list(): SandboxHandle<TOptions>[] {
     return [...this.handles.values()];
   }
 
   /**
    * Start a sandbox and return its handle.
    *
-   * The same `sandboxId` is idempotent: an existing handle is started and
-   * returned again. A failed creation removes the half-built handle and
+   * The same `sandboxId` is idempotent when explicit options match the values
+   * the handle was created with: the existing handle is started and returned
+   * again, inheriting omitted fields. An explicit mismatch is rejected with
+   * code `conflict`. `signal` applies to this start only and is ignored by the
+   * conflict check. A failed creation removes the half-built handle and
    * rethrows. Without `sandboxId` the manager generates a fresh id, so each
    * such call starts a distinct sandbox.
    */
-  async start(options: SandboxManagerStartOptions = {}): Promise<SandboxHandle> {
+  async start(options: SandboxManagerStartOptions<TOptions> = {}): Promise<SandboxHandle<TOptions>> {
     const sandboxId = options.sandboxId ?? createSandboxId();
     const existing = this.handles.get(sandboxId);
     if (existing) {
-      await existing.start();
+      const config = this.startConfigs.get(sandboxId);
+      if (config) this.assertStartCompatible(config, options);
+      await existing.start(options.signal);
       return existing;
     }
 
     const handle = this.createHandle(sandboxId, options);
     this.handles.set(sandboxId, handle);
     try {
-      await handle.start();
+      await handle.start(options.signal);
       return handle;
     } catch (error) {
-      if (this.handles.get(sandboxId) === handle) this.handles.delete(sandboxId);
+      if (this.handles.get(sandboxId) === handle) {
+        this.handles.delete(sandboxId);
+        this.startConfigs.delete(sandboxId);
+      }
       throw error;
     }
   }
@@ -135,55 +184,59 @@ export class SandboxManager {
       );
   }
 
-  private createHandle(sandboxId: string, options: SandboxManagerStartOptions): SandboxHandle {
+  private createHandle(sandboxId: string, options: SandboxManagerStartOptions<TOptions>): SandboxHandle<TOptions> {
     const serverName = options.serverName ?? this.options.serverName;
     assertServerName(serverName);
-    const profileName = options.profileName ?? this.options.profileName;
-    const profile = options.profile ?? this.options.profile;
-    const port = options.port ?? this.options.port;
-    const bashCalls = options.bashCalls ?? this.options.bashCalls;
-    const signal = options.signal ?? this.options.signal;
-    const config: SandboxHandleConfig = {
+    const adapterOptions = options.adapterOptions === undefined ? this.options.adapterOptions : options.adapterOptions;
+    const config: SandboxHandleConfig<TOptions> = {
       sandboxId,
       serverName,
-      ...(this.options.sandboxesRoot === undefined ? {} : { sandboxesRoot: this.options.sandboxesRoot }),
-      ...(this.options.settingsPath === undefined ? {} : { settingsPath: this.options.settingsPath }),
-      ...(profileName === undefined ? {} : { profileName }),
-      ...(profile === undefined ? {} : { profile }),
-      ...(port === undefined ? {} : { port }),
-      ...(this.options.periPath === undefined ? {} : { periPath: this.options.periPath }),
-      ...(this.options.periSha256 === undefined ? {} : { periSha256: this.options.periSha256 }),
-      ...(bashCalls === undefined ? {} : { bashCalls }),
-      ...(this.options.minFreeBytes === undefined ? {} : { minFreeBytes: this.options.minFreeBytes }),
-      startupTimeoutMs: this.options.startupTimeoutMs,
-      stopTimeoutMs: this.options.stopTimeoutMs,
-      ...(signal === undefined ? {} : { signal }),
+      ...(adapterOptions === undefined ? {} : { adapterOptions }),
+      startupTimeoutMs: positiveTimeout(options.startupTimeoutMs, this.options.startupTimeoutMs),
+      stopTimeoutMs: positiveTimeout(options.stopTimeoutMs, this.options.stopTimeoutMs),
+      ...(this.options.signal === undefined ? {} : { signal: this.options.signal }),
     };
-    return new SandboxHandle(config, {
-      getBackend: () => this.getBackend(),
-      onClosed: (handle) => {
-        if (this.handles.get(handle.sandboxId) === handle) this.handles.delete(handle.sandboxId);
+    const handle = new SandboxHandle<TOptions>(config, {
+      getAdapter: () => this.options.adapter,
+      onClosed: (closed) => {
+        if (this.handles.get(closed.sandboxId) === closed) {
+          this.handles.delete(closed.sandboxId);
+          this.startConfigs.delete(closed.sandboxId);
+        }
       },
     });
+    this.startConfigs.set(sandboxId, config);
+    return handle;
   }
 
-  private async getBackend(): Promise<SandboxBackend> {
-    if (this.backendValue) return this.backendValue;
-    const injected = this.options.backend;
-    if (!injected) {
-      this.backendValue = loadSandboxBackend(this.options.moduleSpecifier);
-      return this.backendValue;
+  private assertStartCompatible(
+    config: SandboxHandleConfig<TOptions>,
+    options: SandboxManagerStartOptions<TOptions>,
+  ): void {
+    const mismatched: string[] = [];
+
+    if (options.serverName !== undefined) {
+      assertServerName(options.serverName);
+      if (options.serverName !== config.serverName) mismatched.push("serverName");
     }
-    if (typeof injected !== "function") {
-      this.backendValue = injected;
-      return injected;
-    }
-    try {
-      const resolved = await injected();
-      this.backendValue = resolved;
-      return resolved;
-    } catch (error) {
-      throw new SandboxManagerError("backend_unavailable", "Sandbox backend factory failed.", { cause: error });
-    }
+    if (options.adapterOptions !== undefined && !adapterOptionsEqual(options.adapterOptions, config.adapterOptions))
+      mismatched.push("adapterOptions");
+    if (
+      options.startupTimeoutMs !== undefined &&
+      positiveTimeout(options.startupTimeoutMs, config.startupTimeoutMs) !== config.startupTimeoutMs
+    )
+      mismatched.push("startupTimeoutMs");
+    if (
+      options.stopTimeoutMs !== undefined &&
+      positiveTimeout(options.stopTimeoutMs, config.stopTimeoutMs) !== config.stopTimeoutMs
+    )
+      mismatched.push("stopTimeoutMs");
+
+    if (mismatched.length === 0) return;
+    throw new SandboxManagerError(
+      "conflict",
+      `Sandbox "${config.sandboxId}" is already managed with different ${mismatched.join(", ")}; ` +
+        "close the existing handle before changing them.",
+    );
   }
 }

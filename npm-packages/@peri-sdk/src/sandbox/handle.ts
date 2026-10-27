@@ -2,14 +2,14 @@ import { isAbsolute } from "node:path";
 import { DeadlineError, withDeadline } from "../util/deadline";
 import {
   SandboxManagerError,
-  type SandboxBackend,
-  type SandboxBackendInstance,
-  type SandboxBackendStartOptions,
+  type SandboxAdapter,
+  type SandboxAdapterInstance,
+  type SandboxAdapterStartOptions,
   type SandboxEndpoint,
   type SandboxHandleState,
   type SandboxManagerErrorCode,
+  type SandboxMcpHttpConfig,
   type SandboxMcpServer,
-  type SandboxProfile,
   type SandboxStatus,
 } from "./types";
 
@@ -20,27 +20,19 @@ export const DEFAULT_STOP_TIMEOUT_MS = 15_000;
 const RESERVED_SERVER_NAMES = new Set(["web", "artifact", "cron", "workflow"]);
 
 /** @internal Manager-wide defaults resolved into one handle. */
-export interface SandboxHandleConfig {
+export interface SandboxHandleConfig<TOptions = unknown> {
   sandboxId: string;
   serverName: string;
-  sandboxesRoot?: string;
-  settingsPath?: string;
-  profileName?: string;
-  profile?: SandboxProfile;
-  port?: number;
-  periPath?: string;
-  periSha256?: string;
-  bashCalls?: number;
-  minFreeBytes?: number;
+  adapterOptions?: TOptions;
   startupTimeoutMs: number;
   stopTimeoutMs: number;
   signal?: AbortSignal;
 }
 
 /** @internal Collaborators injected by {@link SandboxManager}. */
-export interface SandboxHandleDeps {
-  getBackend(): Promise<SandboxBackend>;
-  onClosed?(handle: SandboxHandle): void;
+export interface SandboxHandleDeps<TOptions = unknown> {
+  getAdapter(): SandboxAdapter<TOptions>;
+  onClosed?(handle: SandboxHandle<TOptions>): void;
 }
 
 type ErrorOperation = "start" | "stop";
@@ -59,13 +51,13 @@ export function assertServerName(name: string): void {
     );
 }
 
-function backendCode(error: unknown): string | undefined {
+function adapterCode(error: unknown): string | undefined {
   if (typeof error !== "object" || error === null) return undefined;
   const code = (error as { code?: unknown }).code;
   return typeof code === "string" ? code : undefined;
 }
 
-function mapBackendCode(code: string | undefined, operation: ErrorOperation): SandboxManagerErrorCode | null {
+function mapAdapterCode(code: string | undefined, operation: ErrorOperation): SandboxManagerErrorCode | null {
   switch (code) {
     case "unsupported_environment":
       return "unsupported_environment";
@@ -79,16 +71,12 @@ function mapBackendCode(code: string | undefined, operation: ErrorOperation): Sa
       return "cancelled";
     case "stop_incomplete":
       return "stop_incomplete";
-    case "backend_exited":
-      return "backend_exited";
     case "delete_incomplete":
       return "delete_incomplete";
     case "limit_exceeded":
       return "limit_exceeded";
     case "closed":
       return "closed";
-    case "token_unreadable":
-      return "token_unavailable";
     default:
       return operation === "stop" ? "stop_incomplete" : null;
   }
@@ -119,6 +107,29 @@ function validateWorkspace(value: string): string {
   return value;
 }
 
+function validateMcpServer(value: unknown): SandboxMcpHttpConfig {
+  if (typeof value !== "object" || value === null || (value as { type?: unknown }).type !== "http")
+    throw new SandboxManagerError("start_failed", 'Sandbox adapter must return an HTTP MCP descriptor (type: "http").');
+  const { url, headers } = value as { url?: unknown; headers?: unknown };
+  if (typeof url !== "string") throw new SandboxManagerError("start_failed", "Sandbox MCP descriptor has no URL.");
+  if (typeof headers !== "object" || headers === null || Array.isArray(headers))
+    throw new SandboxManagerError("start_failed", "Sandbox MCP descriptor has no headers object.");
+  const copy: Record<string, string> = {};
+  for (const [name, header] of Object.entries(headers)) {
+    if (typeof header !== "string")
+      throw new SandboxManagerError("start_failed", `Sandbox MCP header "${name}" must be a string.`);
+    copy[name] = header;
+  }
+  return { type: "http", url: validateMcpUrl(url), headers: copy };
+}
+
+function authorizationToken(config: SandboxMcpHttpConfig | null): string | undefined {
+  if (!config) return undefined;
+  const header = config.headers.Authorization;
+  if (!header) return undefined;
+  return header.replace(/^Bearer\s+/i, "");
+}
+
 /**
  * One sandbox resource owned by a {@link SandboxManager}.
  *
@@ -127,17 +138,18 @@ function validateWorkspace(value: string): string {
  * leaves only through `mcpServer()`; `status()`, `endpoint()` and errors are
  * redacted.
  */
-export class SandboxHandle {
+export class SandboxHandle<TOptions = unknown> {
   readonly sandboxId: string;
   readonly serverName: string;
 
-  private readonly config: SandboxHandleConfig;
-  private readonly deps: SandboxHandleDeps;
+  private readonly config: SandboxHandleConfig<TOptions>;
+  private readonly deps: SandboxHandleDeps<TOptions>;
   private stateValue: SandboxHandleState = "idle";
   private startPromise: Promise<SandboxEndpoint> | null = null;
   private tail: Promise<unknown> = Promise.resolve();
   private closeRequested = false;
-  private instanceValue: SandboxBackendInstance | null = null;
+  private instanceValue: SandboxAdapterInstance | null = null;
+  private mcpConfigValue: SandboxMcpHttpConfig | null = null;
   private endpointValue: SandboxEndpoint | null = null;
   private workspacePathValue: string | null = null;
   private lastErrorValue: { code: SandboxManagerErrorCode; message: string } | null = null;
@@ -146,7 +158,7 @@ export class SandboxHandle {
   private closedNotified = false;
 
   /** @internal Create handles through {@link SandboxManager.start}. */
-  constructor(config: SandboxHandleConfig, deps: SandboxHandleDeps) {
+  constructor(config: SandboxHandleConfig<TOptions>, deps: SandboxHandleDeps<TOptions>) {
     assertServerName(config.serverName);
     this.config = config;
     this.deps = deps;
@@ -155,31 +167,29 @@ export class SandboxHandle {
   }
 
   get state(): SandboxHandleState {
-    this.syncInstanceState();
     return this.stateValue;
   }
 
-  /** Workspace path reported by the backend, or `null` before the first start. */
+  /** Workspace path reported by the adapter, or `null` before the first start. */
   get workspacePath(): string | null {
-    this.syncInstanceState();
     return this.endpointValue?.workspacePath ?? this.workspacePathValue;
   }
 
   /**
    * Start or reuse this sandbox instance.
    *
-   * Concurrent calls share one in-flight promise; failures are retryable;
-   * calls after `close()` are rejected.
+   * `signal` cancels this start only; without one the manager-level default is
+   * used. Concurrent calls share one in-flight promise; failures are
+   * retryable; calls after `close()` are rejected.
    */
-  start(): Promise<SandboxEndpoint> {
+  start(signal?: AbortSignal): Promise<SandboxEndpoint> {
     if (this.closeRequested)
       return Promise.reject(new SandboxManagerError("closed", "Sandbox handle is closed."));
-    this.syncInstanceState();
     const ready = this.endpointValue;
     if (this.stateValue === "ready" && ready) return Promise.resolve(ready);
     if (this.startPromise) return this.startPromise;
 
-    const operation = this.enqueue(() => this.performStart());
+    const operation = this.enqueue(() => this.performStart(signal ?? this.config.signal));
     this.startPromise = operation;
     const clear = (): void => {
       if (this.startPromise === operation) this.startPromise = null;
@@ -190,7 +200,6 @@ export class SandboxHandle {
 
   /** Local snapshot; reads the current instance state and never includes the token. */
   status(): SandboxStatus {
-    this.syncInstanceState();
     return {
       sandboxId: this.sandboxId,
       state: this.stateValue,
@@ -202,7 +211,6 @@ export class SandboxHandle {
 
   /** Return the current endpoint; never includes the bearer token. */
   endpoint(): SandboxEndpoint | null {
-    this.syncInstanceState();
     return this.endpointValue;
   }
 
@@ -214,22 +222,15 @@ export class SandboxHandle {
    * handle; callers assemble their own session init from this value.
    */
   async mcpServer(): Promise<SandboxMcpServer> {
-    this.syncInstanceState();
     if (this.stateValue === "closed" || this.closeRequested)
       throw new SandboxManagerError("closed", "Sandbox handle is closed.");
-    const endpoint = this.endpointValue;
     const instance = this.instanceValue;
-    if (this.stateValue !== "ready" || !endpoint || !instance)
+    const config = this.mcpConfigValue;
+    if (this.stateValue !== "ready" || !this.endpointValue || !instance || !config)
       throw new SandboxManagerError("not_ready", `Sandbox is not ready (state: ${this.stateValue}).`);
-    if (!instance.token)
-      throw new SandboxManagerError("token_unavailable", "Sandbox instance did not provide a token.");
     return {
       name: this.serverName,
-      config: {
-        type: "http",
-        url: endpoint.mcpUrl,
-        headers: { Authorization: `Bearer ${instance.token}` },
-      },
+      config: { type: "http", url: config.url, headers: { ...config.headers } },
     };
   }
 
@@ -237,7 +238,6 @@ export class SandboxHandle {
   stop(): Promise<void> {
     return this.enqueue(async () => {
       if (this.stateValue === "closed" || this.stateValue === "idle" || this.stateValue === "stopped") return;
-      this.syncInstanceState();
       const instance = this.instanceValue;
       if (!instance) {
         this.endpointValue = null;
@@ -248,6 +248,7 @@ export class SandboxHandle {
       try {
         await withDeadline(instance.close(), this.config.stopTimeoutMs, "Sandbox stop");
         this.instanceValue = null;
+        this.mcpConfigValue = null;
         this.endpointValue = null;
         this.lastErrorValue = null;
         this.stateValue = "stopped";
@@ -264,9 +265,11 @@ export class SandboxHandle {
   /**
    * Terminal close.
    *
-   * `deleteData: true` also removes the sandbox directory. Idempotent; after
-   * this call `start()` rejects with `closed`. A successful close detaches the
-   * handle from its manager, while a failed close keeps it for a retry.
+   * The adapter instance is closed first; `deleteData: true` then asks the
+   * adapter to delete persisted data when it supports deletion. Idempotent;
+   * after this call `start()` rejects with `closed`. A successful close
+   * detaches the handle from its manager, while a failed close keeps it for a
+   * retry.
    */
   close(options: { deleteData?: boolean } = {}): Promise<void> {
     const deleteData = options.deleteData === true;
@@ -287,69 +290,58 @@ export class SandboxHandle {
     return next;
   }
 
-  private syncInstanceState(): void {
-    if (
-      this.instanceValue &&
-      this.instanceValue.state === "failed" &&
-      (this.stateValue === "ready" || this.stateValue === "starting")
-    ) {
-      this.stateValue = "failed";
-      this.endpointValue = null;
-      this.lastErrorValue = {
-        code: "backend_exited",
-        message: "Sandbox backend exited unexpectedly.",
-      };
-    }
-  }
-
-  private async performStart(): Promise<SandboxEndpoint> {
-    this.syncInstanceState();
+  private async performStart(signal?: AbortSignal): Promise<SandboxEndpoint> {
     this.stateValue = "starting";
     this.endpointValue = null;
     this.lastErrorValue = null;
 
-    let instance: SandboxBackendInstance | null = null;
+    let instance: SandboxAdapterInstance | null = null;
     try {
-      const backend = await this.deps.getBackend();
-      const pending = backend.start(this.startOptions());
+      const adapter = this.deps.getAdapter();
+      const pending = adapter.start(this.startOptions(signal));
       try {
         instance = await withDeadline(pending, this.config.startupTimeoutMs, "Sandbox start");
       } catch (error) {
         void pending.then((late) => late.close()).catch(() => undefined);
         throw error;
       }
+      if (typeof instance.close !== "function") {
+        throw new SandboxManagerError("start_failed", "Sandbox adapter returned an instance without close().");
+      }
       if (this.closeRequested) {
         await instance.close().catch(() => undefined);
+        instance = null;
         throw new SandboxManagerError("closed", "Sandbox handle is closed.");
       }
-      if (instance.state !== "ready") {
-        const state = instance.state;
+      if (instance.sandboxId !== this.sandboxId) {
+        const startedId = instance.sandboxId;
         await instance.close().catch(() => undefined);
-        throw new SandboxManagerError("start_failed", `Sandbox did not become ready (state: ${state}).`);
-      }
-      if (instance.id !== this.sandboxId) {
-        await instance.close().catch(() => undefined);
+        instance = null;
         throw new SandboxManagerError(
           "conflict",
-          `Sandbox backend started "${instance.id}" for requested id "${this.sandboxId}".`,
+          `Sandbox adapter started "${startedId}" for requested id "${this.sandboxId}".`,
         );
       }
+      const workspacePath = validateWorkspace(instance.workspacePath);
+      const mcpConfig = validateMcpServer(instance.mcpServer);
       const endpoint: SandboxEndpoint = {
         sandboxId: this.sandboxId,
         serverName: this.serverName,
-        mcpUrl: validateMcpUrl(instance.mcpUrl),
-        runId: instance.runId,
-        workspacePath: validateWorkspace(instance.workspacePath),
+        mcpUrl: mcpConfig.url,
+        workspacePath,
       };
       this.instanceValue = instance;
-      this.knownToken = instance.token;
+      this.mcpConfigValue = mcpConfig;
+      this.knownToken = authorizationToken(mcpConfig) ?? null;
       this.workspacePathValue = endpoint.workspacePath;
       this.endpointValue = endpoint;
       this.lastErrorValue = null;
       this.stateValue = "ready";
       return endpoint;
     } catch (error) {
-      if (instance && this.instanceValue !== instance) await instance.close().catch(() => undefined);
+      if (instance && this.instanceValue !== instance && typeof instance.close === "function")
+        await instance.close().catch(() => undefined);
+      this.mcpConfigValue = null;
       const mapped = this.mapError(error, "start");
       this.stateValue = "failed";
       this.lastErrorValue = { code: mapped.code, message: mapped.message };
@@ -367,16 +359,11 @@ export class SandboxHandle {
     const instance = this.instanceValue;
     try {
       if (instance) {
-        await withDeadline(
-          instance.close(deleteData ? { deleteData: true } : undefined),
-          this.config.stopTimeoutMs,
-          "Sandbox close",
-        );
+        await withDeadline(instance.close(), this.config.stopTimeoutMs, "Sandbox close");
         this.instanceValue = null;
-        if (deleteData) this.dataDeleted = true;
-      } else if (deleteData && this.sandboxId) {
-        await this.deleteData();
+        this.mcpConfigValue = null;
       }
+      if (deleteData) await this.deleteData();
       this.endpointValue = null;
       this.lastErrorValue = null;
       this.stateValue = "closed";
@@ -391,16 +378,12 @@ export class SandboxHandle {
 
   private async deleteData(): Promise<void> {
     try {
-      const backend = await this.deps.getBackend();
-      await withDeadline(
-        backend.deleteData({
-          sandboxId: this.sandboxId,
-          ...(this.config.sandboxesRoot === undefined ? {} : { sandboxesRoot: this.config.sandboxesRoot }),
-          ...(this.config.settingsPath === undefined ? {} : { settingsPath: this.config.settingsPath }),
-        }),
-        this.config.stopTimeoutMs,
-        "Sandbox data delete",
-      );
+      const adapter = this.deps.getAdapter();
+      if (!adapter.deleteData) {
+        this.dataDeleted = true;
+        return;
+      }
+      await withDeadline(adapter.deleteData(this.sandboxId), this.config.stopTimeoutMs, "Sandbox data delete");
       this.dataDeleted = true;
     } catch (error) {
       const mapped = this.mapError(error, "stop");
@@ -416,38 +399,36 @@ export class SandboxHandle {
     this.deps.onClosed?.(this);
   }
 
-  private startOptions(): SandboxBackendStartOptions {
-    const options = this.config;
-    return {
-      sandboxId: options.sandboxId,
-      ...(options.sandboxesRoot === undefined ? {} : { sandboxesRoot: options.sandboxesRoot }),
-      ...(options.settingsPath === undefined ? {} : { settingsPath: options.settingsPath }),
-      ...(options.profileName === undefined ? {} : { profileName: options.profileName }),
-      ...(options.profile === undefined ? {} : { profile: options.profile }),
-      ...(options.periPath === undefined ? {} : { periPath: options.periPath }),
-      ...(options.periSha256 === undefined ? {} : { periSha256: options.periSha256 }),
-      ...(options.bashCalls === undefined ? {} : { bashCalls: options.bashCalls }),
-      ...(options.minFreeBytes === undefined ? {} : { minFreeBytes: options.minFreeBytes }),
-      ...(options.port === undefined ? {} : { port: options.port }),
-      startupTimeoutMs: options.startupTimeoutMs,
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
+  private startOptions(signal?: AbortSignal): SandboxAdapterStartOptions<TOptions> {
+    const options: SandboxAdapterStartOptions<TOptions> = {
+      sandboxId: this.sandboxId,
+      options: this.config.adapterOptions,
     };
+    if (signal !== undefined) options.signal = signal;
+    return options;
   }
 
   private mapError(error: unknown, operation: ErrorOperation): SandboxManagerError {
-    if (error instanceof SandboxManagerError) return error;
-    const token = this.instanceValue?.token ?? this.knownToken ?? undefined;
+    if (error instanceof SandboxManagerError) return this.redactError(error);
+    const token = this.knownToken ?? authorizationToken(this.mcpConfigValue) ?? undefined;
     if (error instanceof DeadlineError) {
       const code: SandboxManagerErrorCode = operation === "stop" ? "stop_incomplete" : "start_failed";
       return new SandboxManagerError(code, error.message);
     }
     const code =
-      mapBackendCode(backendCode(error), operation) ?? (operation === "stop" ? "stop_incomplete" : "start_failed");
+      mapAdapterCode(adapterCode(error), operation) ?? (operation === "stop" ? "stop_incomplete" : "start_failed");
     const message = error instanceof Error ? error.message : String(error);
-    const redacted = this.redact(message || `Sandbox ${operation} failed.`, token);
+    const redacted = this.redact(message, token);
     return new SandboxManagerError(code, redacted, {
       ...(token && message.includes(token) ? {} : { cause: error }),
     });
+  }
+
+  private redactError(error: SandboxManagerError): SandboxManagerError {
+    const token = this.knownToken ?? authorizationToken(this.mcpConfigValue) ?? undefined;
+    const message = this.redact(error.message, token);
+    if (message === error.message) return error;
+    return new SandboxManagerError(error.code, message);
   }
 
   private redact(message: string, token?: string): string {

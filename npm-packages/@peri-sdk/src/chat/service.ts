@@ -26,6 +26,7 @@ import {
     ChatNotReadyError,
     SessionBindingConflictError,
     SessionCreationError,
+    SessionWorkspaceMismatchError,
 } from "./errors";
 import { ChatFactHub } from "./fact-hub";
 import type { ChatBindingTarget, ChatFact, ChatFactObserver } from "../contracts/chat";
@@ -45,6 +46,7 @@ import {
     withRequestId,
 } from "./error-mapping";
 import { resolveChatLifecycle } from "./lifecycle";
+import { agentConfigCwd, workspaceRelation } from "./workspace";
 import type {
     Activation,
     ChatInstanceFactory,
@@ -60,6 +62,7 @@ import type {
     SendReceipt,
     SessionReadyResult,
 } from "./types";
+import type { WasmRuntimeAcquireOptions } from "../wasm/runtime-pool";
 
 /**
  * 单个 Chat 的操作句柄。
@@ -73,13 +76,20 @@ export class ChatService implements ChatServiceContract {
     private readonly path?: string;
     private readonly sessionInit: ChatServiceOptions["sessionInit"];
     private readonly agentConfig: unknown;
+    private readonly agentConfigCwd?: string;
+    /** 当前 Chat 的 workspace root；`change_session` 的跨 workspace 护栏使用。 */
+    private readonly workspaceRoot?: string;
+    private readonly agentConfigJson: string;
     private readonly runtime: ChatServiceOptions["runtime"];
+    private readonly runtimeEnv?: ChatServiceOptions["runtimeEnv"];
+    private readonly onRuntimeDiagnostic?: ChatServiceOptions["onRuntimeDiagnostic"];
+    private readonly payloadBudgets?: ChatServiceOptions["payloadBudgets"];
     private readonly database: ChatServiceOptions["database"];
     private readonly ownership: ChatServiceOptions["ownership"];
     private readonly index: ChatServiceOptions["index"];
     private readonly instanceFactory: ChatInstanceFactory;
     private readonly acquireWasmRuntime: (
-        signal?: AbortSignal,
+        options?: WasmRuntimeAcquireOptions,
     ) => Promise<WasmRuntimeLease>;
     private readonly onClosedHandler: (chatId: string) => void;
     private readonly lifecycleOptions: Required<ChatLifecycleOptions>;
@@ -108,7 +118,14 @@ export class ChatService implements ChatServiceContract {
         this.path = options.path;
         this.sessionInit = options.sessionInit;
         this.agentConfig = options.agentConfig;
+        this.agentConfigCwd = agentConfigCwd(options.agentConfig);
+        this.workspaceRoot =
+            this.path ?? this.sessionInit.path ?? this.agentConfigCwd;
+        this.agentConfigJson = options.agentConfigJson;
         this.runtime = options.runtime;
+        this.runtimeEnv = options.runtimeEnv;
+        this.onRuntimeDiagnostic = options.onRuntimeDiagnostic;
+        this.payloadBudgets = options.payloadBudgets;
         this.database = options.database;
         this.ownership = options.ownership;
         this.index = options.index;
@@ -350,6 +367,17 @@ export class ChatService implements ChatServiceContract {
             throw new ChatNotReadyError(
                 requestId,
                 "A path is required to create a new session",
+            );
+        }
+        // 运行时 cwd 由 per-chat agentConfig 决定；会话 path 必须是其内部路径。
+        if (
+            this.agentConfigCwd !== undefined &&
+            workspaceRelation(this.agentConfigCwd, path) === "outside"
+        ) {
+            throw new SessionWorkspaceMismatchError(
+                requestId,
+                path,
+                this.agentConfigCwd,
             );
         }
         this.state.beginCreate();
@@ -685,6 +713,17 @@ export class ChatService implements ChatServiceContract {
                 sessionId,
                 requestId,
             );
+            // 加载持久 Session 时不允许跨 workspace 复用当前 Chat 的 MCP/配置。
+            if (
+                this.workspaceRoot !== undefined &&
+                workspaceRelation(this.workspaceRoot, path) === "outside"
+            ) {
+                throw new SessionWorkspaceMismatchError(
+                    requestId,
+                    path,
+                    this.workspaceRoot,
+                );
+            }
             if (this.closingRequested) {
                 throw new ChatClosedError(
                     requestId,
@@ -820,12 +859,17 @@ export class ChatService implements ChatServiceContract {
                 chatId: this.id,
                 path,
                 agentConfig: this.agentConfig,
+                agentConfigJson: this.agentConfigJson,
                 sessionInit: this.sessionInit,
                 runtime: this.runtime,
+                runtimeEnv: this.runtimeEnv,
+                onRuntimeDiagnostic: this.onRuntimeDiagnostic,
+                payloadBudgets: this.payloadBudgets,
                 signal: controller.signal,
                 database: this.database,
                 lifecycle: this.lifecycleOptions,
-                acquireWasmRuntime: (signal) => this.acquireWasmRuntime(signal),
+                acquireWasmRuntime: (options) =>
+                    this.acquireWasmRuntime(options),
             });
         } catch (error) {
             this.startupControllers.delete(controller);

@@ -1,7 +1,9 @@
 import {
   ChatCloseIncompleteError,
   ChatViewRegistry,
+  type ChatAgentConfig,
   type ChatManagerContract,
+  type ChatServiceContract,
 } from "@peri-code/sdk";
 
 /**
@@ -13,7 +15,21 @@ import {
 export class ChatRegistry {
   readonly views = new ChatViewRegistry();
 
-  constructor(readonly chats: ChatManagerContract) {}
+  /**
+   * `agent` 是进程级运行配置模板；SDK 每次 `createChat` 都基于它独立组装
+   * （并注入 Manager 的 store），因此同一对象可跨 Chat 复用。
+   */
+  constructor(
+    readonly chats: ChatManagerContract,
+    private readonly agent: ChatAgentConfig,
+  ) {}
+
+  /**
+   * 创建句柄的唯一入口：HTTP 层只决定 path，不重复构造模型/工具面配置。
+   */
+  createChat(path?: string): ChatServiceContract {
+    return this.chats.createChat({ agent: this.agent, path });
+  }
 
   /** 成功关闭后同时释放该 Chat 的视图；任一步失败都保留句柄/占用或显式上报。 */
   async closeChat(id: string): Promise<void> {

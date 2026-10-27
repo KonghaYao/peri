@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import {
   ChatCloseIncompleteError,
   ChatViewRegistry,
+  type ChatAgentConfig,
   type ChatBindingTarget,
+  type ChatCreateOptions,
   type ChatFactObserver,
   type ChatFactSource,
   type ChatManagerContract,
@@ -16,6 +18,12 @@ const TARGET: ChatBindingTarget = {
   chatId: "chat-1",
   sessionId: "session-1",
   bindingRevision: 1,
+};
+
+/** 进程级 agent 模板：注册表原样交给 SDK，不在本地合并。 */
+const AGENT: ChatAgentConfig = {
+  cwd: "/workspace",
+  settings: { config: { active_alias: "sonnet" } },
 };
 
 class FakeFactSource implements ChatFactSource {
@@ -54,14 +62,16 @@ function stubChat(
 
 class FakeChatManager implements ChatManagerContract {
   readonly chats = new Map<string, ChatServiceContract>();
+  readonly createOptions: ChatCreateOptions[] = [];
   closeError: unknown;
   shutdownError: unknown;
   private created = 0;
 
   constructor(readonly events: string[] = []) {}
 
-  createChat(options?: { path?: string }): ChatServiceContract {
-    this.events.push(`port.createChat:${options?.path ?? ""}`);
+  createChat(options: ChatCreateOptions): ChatServiceContract {
+    this.createOptions.push(options);
+    this.events.push(`port.createChat:${options.path ?? ""}`);
     const chat = stubChat(`chat-${++this.created}`);
     this.chats.set(chat.id, chat);
     return chat;
@@ -137,11 +147,27 @@ function hosted(options: {
 } = {}) {
   const events = options.events ?? [];
   const chats = options.chats ?? new FakeChatManager(events);
-  const registry = new ChatRegistry(chats);
+  const registry = new ChatRegistry(chats, AGENT);
   return { registry, chats, views: registry.views, events };
 }
 
 describe("ChatRegistry", () => {
+  test("createChat 注入进程级 agent 并透传 path", () => {
+    const events: string[] = [];
+    const chats = new FakeChatManager(events);
+    const { registry } = hosted({ events, chats });
+
+    expect(registry.createChat("/workspace/").id).toBe("chat-1");
+    expect(registry.createChat().id).toBe("chat-2");
+
+    expect(events).toEqual(["port.createChat:/workspace/", "port.createChat:"]);
+    expect(chats.createOptions).toHaveLength(2);
+    // 同一个模板对象跨 Chat 复用；SDK 负责逐 Chat 深拷贝与注入 store。
+    expect(chats.createOptions[0]?.agent).toBe(AGENT);
+    expect(chats.createOptions[0]?.path).toBe("/workspace/");
+    expect(chats.createOptions[1]?.agent).toBe(AGENT);
+    expect(chats.createOptions[1]?.path).toBeUndefined();
+  });
   test("closeChat 先关闭端口句柄，再释放 View", async () => {
     const events: string[] = [];
     const { registry, chats, views } = hosted({ events });

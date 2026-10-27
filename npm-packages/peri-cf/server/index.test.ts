@@ -3,6 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  type ChatAgentConfig,
+  type ChatCreateOptions,
   type ChatManagerContract,
   type ChatServiceContract,
   type ChatSessionDirectoryEntry,
@@ -36,6 +38,9 @@ const directory: ChatSessionDirectoryEntry = {
   updatedAt: "2026-10-20T13:00:00Z",
 };
 
+/** 进程级 agent 模板；服务接线测试不启动 WASM，只需形状合法。 */
+const AGENT: ChatAgentConfig = { cwd: "/workspace" };
+
 function stubChat(id: string): ChatServiceContract {
   return {
     id,
@@ -53,7 +58,7 @@ function stubChat(id: string): ChatServiceContract {
 class FakeChatManager implements ChatManagerContract {
   private created = 0;
 
-  createChat(): ChatServiceContract {
+  createChat(_options: ChatCreateOptions): ChatServiceContract {
     return stubChat(`chat-${++this.created}`);
   }
 
@@ -76,7 +81,7 @@ class FakeChatManager implements ChatManagerContract {
 
 describe("server wiring", () => {
   test("HTTP、目录与 WS 410 路由在同一服务中工作", async () => {
-    const registry = new ChatRegistry(new FakeChatManager());
+    const registry = new ChatRegistry(new FakeChatManager(), AGENT);
     const server = createServer(config, registry);
     try {
       const info = await fetch(`http://127.0.0.1:${server.port}/api/info`);
@@ -121,7 +126,7 @@ describe("server wiring", () => {
     const root = mkdtempSync(join(tmpdir(), "peri-cf-static-"));
     writeFileSync(join(root, "index.html"), "<h1>peri</h1>");
     writeFileSync(join(root, "asset.txt"), "asset-body");
-    const registry = new ChatRegistry(new FakeChatManager());
+    const registry = new ChatRegistry(new FakeChatManager(), AGENT);
     const server = createServer({ ...config, staticRoot: root }, registry);
     try {
       const index = await fetch(`http://127.0.0.1:${server.port}/`);

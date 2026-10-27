@@ -7,7 +7,9 @@ import {
   type AnswerAction,
   type CancelAction,
   type CancelRequestResult,
+  type ChatAgentConfig,
   type ChatBindingTarget,
+  type ChatCreateOptions,
   type ChatManagerContract,
   type ChatServiceContract,
   type ChatSessionDirectoryEntry,
@@ -157,9 +159,16 @@ interface ApiFixture {
   registry: ChatRegistry;
   chats: Map<string, StubChat>;
   created: StubChat[];
+  createOptions: ChatCreateOptions[];
   listCalls: Array<{ path?: string } | undefined>;
   closeErrors: Map<string, unknown>;
 }
+
+/** 进程级 agent 模板；HTTP 层只决定 path，不重复构造 settings。 */
+const AGENT: ChatAgentConfig = {
+  cwd: "/workspace",
+  settings: { config: { active_alias: "sonnet" } },
+};
 
 /** View 首次释放失败、重试成功；其余通道成员不参与 DELETE 测试。 */
 class FailingCloseChannel implements ChatYjsChannel {
@@ -186,6 +195,7 @@ function apiWith(options: {
 } = {}): ApiFixture {
   const chats = new Map((options.chats ?? []).map((chat) => [chat.id, chat]));
   const created: StubChat[] = [];
+  const createOptions: ChatCreateOptions[] = [];
   const listCalls: Array<{ path?: string } | undefined> = [];
   const closeErrors = new Map<string, unknown>();
   const manager: ChatManagerContract = {
@@ -194,7 +204,8 @@ function apiWith(options: {
       if (options.listError !== undefined) throw options.listError;
       return options.listResult ?? [entry];
     },
-    createChat() {
+    createChat(options: ChatCreateOptions) {
+      createOptions.push(options);
       const chat = stubChat("chat-new");
       created.push(chat);
       chats.set(chat.id, chat);
@@ -212,13 +223,14 @@ function apiWith(options: {
     },
     async shutdown() {},
   };
-  const registry = new ChatRegistry(manager);
+  const registry = new ChatRegistry(manager, AGENT);
   const app = createApi({ registry, info });
   return {
     app,
     registry,
     chats,
     created,
+    createOptions,
     listCalls,
     closeErrors,
   };
@@ -260,8 +272,8 @@ describe("server api", () => {
     });
   });
 
-  test("createChat 只登记句柄，不创建 Session", async () => {
-    const { app, created } = apiWith();
+  test("createChat 只登记句柄，注入 agent 并透传 path", async () => {
+    const { app, created, createOptions } = apiWith();
     const response = await app.request("/api/chats", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -273,6 +285,16 @@ describe("server api", () => {
     });
     expect(created).toHaveLength(1);
     expect(created[0]?.calls).toEqual([]);
+    expect(createOptions).toEqual([{ agent: AGENT, path: "/workspace/" }]);
+  });
+
+  test("createChat 未指定 path 时只传 agent", async () => {
+    const { app, createOptions } = apiWith();
+    const response = await app.request("/api/chats", { method: "POST" });
+    expect(response.status).toBe(201);
+    expect(createOptions).toHaveLength(1);
+    expect(createOptions[0]?.agent).toBe(AGENT);
+    expect(createOptions[0]?.path).toBeUndefined();
   });
 
   test("非法 JSON 与非法 Action 不触达执行层", async () => {

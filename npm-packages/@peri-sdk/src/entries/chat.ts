@@ -28,10 +28,13 @@ export type {
 } from "../chat/action";
 export type {
     CancelRequestResult,
+    ChatAgentConfig,
     ChatConfig,
     ChatCreateOptions,
     ChatSessionInit,
     ChatRuntime,
+    ChatStoreConfig,
+    ChatTransportFactoryOptions,
     ChatLifecycleOptions,
     ChatManager as ChatManagerContract,
     ChatManagerOptions,

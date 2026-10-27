@@ -26,7 +26,7 @@ function setup(options: {
     const database = options.database ?? new FakeDatabase();
     const ports: FakePort[] = [];
     const managerOptions: ChatManagerInternalOptions = {
-        agentConfig: {},
+        store: { storage: {}, machineId: "test-machine" },
         database,
         kv: ownership,
         chatConfig: {
@@ -36,7 +36,7 @@ function setup(options: {
                     throw new Error("ACP transport must not start");
                 },
             },
-            sessionInit: { path: "/workspace" },
+            session: { path: "/workspace" },
         },
         instanceFactory: () => {
             const port = new FakePort();
@@ -65,7 +65,10 @@ async function bindNew(
 describe("ChatManager handle directory", () => {
     test("createChat is synchronous and starts no ACP, ownership acquisition or session", () => {
         const { manager, ownership, database, ports } = setup();
-        const chat = manager.createChat({ path: "/custom" });
+        const chat = manager.createChat({
+            path: "/custom",
+            agent: { cwd: "/" },
+        });
 
         expect(chat.id).toBeTruthy();
         expect(manager.getChat(chat.id)).toBe(chat);
@@ -78,7 +81,7 @@ describe("ChatManager handle directory", () => {
 
     test("create_new_session binds, acquires ownership and indexes without a prefilled session id", async () => {
         const { manager, ownership, ports } = setup();
-        const chat = manager.createChat();
+        const chat = manager.createChat({ agent: { cwd: "/" } });
         const action = ChatUserAction.createNewSession({ requestId: "req-1" });
 
         const result = await chat.execute(action);
@@ -105,7 +108,7 @@ describe("ChatManager handle directory", () => {
                 );
             },
         });
-        const chat = manager.createChat();
+        const chat = manager.createChat({ agent: { cwd: "/" } });
 
         await expect(
             chat.execute(
@@ -124,8 +127,8 @@ describe("ChatManager handle directory", () => {
 
     test("getChat is stable for the manager lifetime", () => {
         const { manager } = setup();
-        const first = manager.createChat();
-        const second = manager.createChat();
+        const first = manager.createChat({ agent: { cwd: "/" } });
+        const second = manager.createChat({ agent: { cwd: "/" } });
         expect(manager.getChat(first.id)).toBe(first);
         expect(manager.getChat(second.id)).toBe(second);
         expect(manager.getChat(first.id)).toBe(first);
@@ -156,7 +159,7 @@ describe("ChatManager handle directory", () => {
             },
         });
         database.seed(directoryEntry("session-1"));
-        const chat = manager.createChat();
+        const chat = manager.createChat({ agent: { cwd: "/" } });
         const loading = chat.execute(
             ChatUserAction.changeSessionTo("session-1", {
                 requestId: "load-1",
@@ -183,7 +186,7 @@ describe("ChatManager handle directory", () => {
                 port.bindExistingError = new Error("load failed");
             },
         });
-        const chat = manager.createChat();
+        const chat = manager.createChat({ agent: { cwd: "/" } });
         await expect(
             chat.execute(ChatUserAction.changeSessionTo("session-1")),
         ).rejects.toThrow("load failed");
@@ -203,7 +206,7 @@ describe("ChatManager handle directory", () => {
                 port.closeError = new Error("cleanup failed");
             },
         });
-        const chat = manager.createChat();
+        const chat = manager.createChat({ agent: { cwd: "/" } });
 
         await expect(
             chat.execute(ChatUserAction.changeSessionTo("session-1")),
@@ -235,13 +238,13 @@ describe("ChatManager ownership coordination", () => {
             },
         });
         database.seed(directoryEntry("session-1"));
-        const owner = manager.createChat();
+        const owner = manager.createChat({ agent: { cwd: "/" } });
         const loading = owner.execute(
             ChatUserAction.changeSessionTo("session-1"),
         );
         await waitFor(() => manager.findChatBySession("session-1") === owner);
 
-        const contender = manager.createChat();
+        const contender = manager.createChat({ agent: { cwd: "/" } });
         let conflict: unknown;
         try {
             await contender.execute(
@@ -270,8 +273,8 @@ describe("ChatManager ownership coordination", () => {
         database.seed(directoryEntry("session-1"));
         const first = setup({ ownership, database });
         const second = setup({ ownership, database });
-        const firstChat = first.manager.createChat();
-        const secondChat = second.manager.createChat();
+        const firstChat = first.manager.createChat({ agent: { cwd: "/" } });
+        const secondChat = second.manager.createChat({ agent: { cwd: "/" } });
 
         await firstChat.execute(
             ChatUserAction.changeSessionTo("session-1"),
@@ -294,7 +297,7 @@ describe("ChatManager ownership coordination", () => {
             const { manager, ownership, database, ports } = setup();
             database.seed(directoryEntry("session-1"));
             ownership[failure]("session-1");
-            const chat = manager.createChat();
+            const chat = manager.createChat({ agent: { cwd: "/" } });
 
             await expect(
                 chat.execute(
@@ -326,7 +329,7 @@ describe("ChatManager close and shutdown", () => {
         const { manager, ownership, database } = setup();
         await manager.closeChat("unknown");
         database.seed(directoryEntry("session-1"));
-        const chat = manager.createChat();
+        const chat = manager.createChat({ agent: { cwd: "/" } });
         await chat.execute(ChatUserAction.changeSessionTo("session-1"));
 
         await manager.closeChat(chat.id);
@@ -340,7 +343,7 @@ describe("ChatManager close and shutdown", () => {
     test("close failure retains the handle, index and ownership; retry succeeds", async () => {
         const { manager, ownership, database, ports } = setup();
         database.seed(directoryEntry("session-1"));
-        const chat = manager.createChat();
+        const chat = manager.createChat({ agent: { cwd: "/" } });
         await chat.execute(ChatUserAction.changeSessionTo("session-1"));
         ports[0].closeError = new Error("close unconfirmed");
 
@@ -363,8 +366,8 @@ describe("ChatManager close and shutdown", () => {
         const { manager, ownership, database, ports } = setup();
         database.seed(directoryEntry("session-1"));
         database.seed(directoryEntry("session-2"));
-        const first = manager.createChat();
-        const second = manager.createChat();
+        const first = manager.createChat({ agent: { cwd: "/" } });
+        const second = manager.createChat({ agent: { cwd: "/" } });
         await first.execute(ChatUserAction.changeSessionTo("session-1"));
         await second.execute(ChatUserAction.changeSessionTo("session-2"));
         ports[0].closeError = new Error("close unconfirmed");
@@ -372,7 +375,7 @@ describe("ChatManager close and shutdown", () => {
         await expect(manager.shutdown()).rejects.toThrow(
             "ChatManager shutdown is incomplete",
         );
-        expect(() => manager.createChat()).toThrow("shut down");
+        expect(() => manager.createChat({ agent: { cwd: "/" } })).toThrow("shut down");
         expect(manager.getChat(first.id)).toBe(first);
         expect(manager.getChat(second.id)).toBeUndefined();
         expect(manager.findChatBySession("session-1")).toBe(first);

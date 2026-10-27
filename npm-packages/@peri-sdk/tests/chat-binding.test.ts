@@ -31,7 +31,7 @@ function setup(
     const portList: FakePort[] = [];
     const managerOwnership = ownership ?? new OwnershipProbe();
     const options: ChatManagerInternalOptions = {
-        agentConfig: {},
+        store: { storage: {}, machineId: "test-machine" },
         database,
         kv: managerOwnership,
         chatConfig: {
@@ -41,7 +41,7 @@ function setup(
                     throw new Error("ACP transport must not start");
                 },
             },
-            sessionInit: { path: "/workspace" },
+            session: { path: "/workspace" },
             lifecycle,
         },
         instanceFactory: () => {
@@ -64,7 +64,7 @@ async function toggle(
     sessionId: string,
     requestId = `load-${sessionId}`,
 ) {
-    const chat = setupValue.manager.createChat();
+    const chat = setupValue.manager.createChat({ agent: { cwd: "/" } });
     await chat.execute(
         ChatUserAction.changeSessionTo(sessionId, { requestId }),
     );
@@ -199,7 +199,7 @@ describe("binding concurrency and revision", () => {
             port.bindExistingGate = gate;
         });
         setupValue.database.seed(directoryEntry("session-a"));
-        const chat = setupValue.manager.createChat();
+        const chat = setupValue.manager.createChat({ agent: { cwd: "/" } });
 
         const first = chat.execute(
             ChatUserAction.changeSessionTo("session-a", {
@@ -248,7 +248,7 @@ describe("binding concurrency and revision", () => {
             return originalGetSession(id);
         };
 
-        const chat = setupValue.manager.createChat();
+        const chat = setupValue.manager.createChat({ agent: { cwd: "/" } });
         const loading = chat.execute(
             ChatUserAction.changeSessionTo("session-a", {
                 requestId: "loading",
@@ -261,7 +261,7 @@ describe("binding concurrency and revision", () => {
         // 索引先于 ownership：path gate 期间尚未 acquire。
         expect(setupValue.ownership.has("session-a")).toBe(false);
 
-        const contender = setupValue.manager.createChat();
+        const contender = setupValue.manager.createChat({ agent: { cwd: "/" } });
         await expect(
             contender.execute(
                 ChatUserAction.changeSessionTo("session-a", {
@@ -337,7 +337,7 @@ describe("binding concurrency and revision", () => {
             ownership,
         );
         setupValue.database.seed(directoryEntry("session-1"));
-        const chat = setupValue.manager.createChat();
+        const chat = setupValue.manager.createChat({ agent: { cwd: "/" } });
 
         let failure: unknown;
         try {

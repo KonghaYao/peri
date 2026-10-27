@@ -6,13 +6,13 @@ import type { ChatSessionInit } from "../src/chat/types";
 import { FakeDatabase, FakePort } from "./chat-fixtures";
 import { OwnershipProbe } from "./ownership-probe";
 
-function setup(options: { defaultSessionInit?: ChatSessionInit } = {}): {
+function setup(options: { defaultSession?: ChatSessionInit } = {}): {
     manager: ChatManager;
     contexts: ChatInstanceContext[];
 } {
     const contexts: ChatInstanceContext[] = [];
     const manager = new ChatManager({
-        agentConfig: {},
+        store: { storage: {}, machineId: "test-machine" },
         database: new FakeDatabase(),
         kv: new OwnershipProbe(),
         chatConfig: {
@@ -22,9 +22,9 @@ function setup(options: { defaultSessionInit?: ChatSessionInit } = {}): {
                     throw new Error("ACP transport must not start");
                 },
             },
-            ...(options.defaultSessionInit === undefined
+            ...(options.defaultSession === undefined
                 ? {}
-                : { sessionInit: options.defaultSessionInit }),
+                : { session: options.defaultSession }),
         },
         instanceFactory: (context) => {
             contexts.push(context);
@@ -51,11 +51,12 @@ const defaultInit: ChatSessionInit = {
     },
 };
 
-describe("ChatManager createChat sessionInit", () => {
-    test("each chat keeps its own sessionInit without leaking the default", async () => {
-        const { manager, contexts } = setup({ defaultSessionInit: defaultInit });
+describe("ChatManager createChat session", () => {
+    test("each chat keeps its own session without leaking the default", async () => {
+        const { manager, contexts } = setup({ defaultSession: defaultInit });
         const first = manager.createChat({
-            sessionInit: {
+            agent: { cwd: "/" },
+            session: {
                 path: "/first",
                 instructions: "first instructions",
                 mcpServers: {
@@ -64,7 +65,8 @@ describe("ChatManager createChat sessionInit", () => {
             },
         });
         const second = manager.createChat({
-            sessionInit: {
+            agent: { cwd: "/" },
+            session: {
                 path: "/second",
                 instructions: "second instructions",
                 mcpServers: {
@@ -94,10 +96,13 @@ describe("ChatManager createChat sessionInit", () => {
         expect(contexts[0].sessionInit).not.toEqual(defaultInit);
     });
 
-    test("omitting sessionInit falls back to the Manager default", async () => {
-        const { manager, contexts } = setup({ defaultSessionInit: defaultInit });
-        const first = manager.createChat();
-        const second = manager.createChat({ path: "/handle" });
+    test("omitting session falls back to the Manager default", async () => {
+        const { manager, contexts } = setup({ defaultSession: defaultInit });
+        const first = manager.createChat({ agent: { cwd: "/" } });
+        const second = manager.createChat({
+            path: "/handle",
+            agent: { cwd: "/" },
+        });
 
         await bindNew(first);
         await bindNew(second, "create-2");
@@ -109,11 +114,12 @@ describe("ChatManager createChat sessionInit", () => {
         expect(contexts[1].path).toBe("/handle");
     });
 
-    test("an explicit sessionInit replaces the default instead of merging fields", async () => {
-        const { manager, contexts } = setup({ defaultSessionInit: defaultInit });
+    test("an explicit session replaces the default instead of merging fields", async () => {
+        const { manager, contexts } = setup({ defaultSession: defaultInit });
         const chat = manager.createChat({
             path: "/handle",
-            sessionInit: { path: "/init" },
+            agent: { cwd: "/" },
+            session: { path: "/init" },
         });
 
         await bindNew(chat);
@@ -123,20 +129,25 @@ describe("ChatManager createChat sessionInit", () => {
         expect(contexts[0].sessionInit.mcpServers).toBeUndefined();
     });
 
-    test("an explicit empty sessionInit is not replaced by the default", async () => {
-        const { manager, contexts } = setup({ defaultSessionInit: defaultInit });
-        const chat = manager.createChat({ path: "/empty", sessionInit: {} });
+    test("an explicit empty session is not replaced by the default", async () => {
+        const { manager, contexts } = setup({ defaultSession: defaultInit });
+        const chat = manager.createChat({
+            path: "/empty",
+            session: {},
+            agent: { cwd: "/" },
+        });
 
         await bindNew(chat);
 
         expect(contexts[0].sessionInit).toEqual({});
     });
 
-    test("handle path takes precedence over sessionInit.path", async () => {
+    test("handle path takes precedence over session.path", async () => {
         const { manager, contexts } = setup();
         const chat = manager.createChat({
             path: "/handle",
-            sessionInit: { path: "/init", instructions: "per chat" },
+            agent: { cwd: "/" },
+            session: { path: "/init", instructions: "per chat" },
         });
 
         await bindNew(chat);
@@ -146,9 +157,12 @@ describe("ChatManager createChat sessionInit", () => {
         expect(contexts[0].sessionInit.instructions).toBe("per chat");
     });
 
-    test("without any sessionInit the chat receives an empty object", async () => {
+    test("without any session the chat receives an empty object", async () => {
         const { manager, contexts } = setup();
-        const chat = manager.createChat({ path: "/only-path" });
+        const chat = manager.createChat({
+            path: "/only-path",
+            agent: { cwd: "/" },
+        });
 
         await bindNew(chat);
 
@@ -161,10 +175,10 @@ describe("ChatManager createChat sessionInit", () => {
             path: "/default",
             instructions: "original",
         };
-        const { manager, contexts } = setup({ defaultSessionInit: callerDefault });
+        const { manager, contexts } = setup({ defaultSession: callerDefault });
         callerDefault.instructions = "mutated caller default";
 
-        const first = manager.createChat();
+        const first = manager.createChat({ agent: { cwd: "/" } });
         await bindNew(first);
         expect(contexts[0].sessionInit.instructions).toBe("original");
 
@@ -173,7 +187,7 @@ describe("ChatManager createChat sessionInit", () => {
             hijacked: { type: "http", url: "https://example.test/hijacked" },
         };
 
-        const second = manager.createChat();
+        const second = manager.createChat({ agent: { cwd: "/" } });
         await bindNew(second, "create-2");
         expect(contexts[1].sessionInit).toEqual({
             path: "/default",

@@ -9,19 +9,23 @@
 
 SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行、调度、会话持久化与工具运行仍归 Peri。一个 Chat 句柄对应一次可替换的 Session 绑定，不把 Chat 句柄 ID 当作持久 Session 身份。
 
-不新增 SDK 调度器、持久执行恢复、平行会话表或第二套 ACP 协议。ACP 连接只有宿主注入的一条装配路径；SDK 不启动 Workspace 进程，也不提供本地数据库后端。唯一例外是显式可选的 server-side 子入口 `/sandbox`：`SandboxManager` 按 `sandboxId` 管理宿主进程内的多个 `peri-sandbox` 实例，`SandboxHandle` 只暴露 ready 实例的 `workspacePath` 与 MCP descriptor（`SandboxMcpServer`）；sessionInit 由调用方组装并在 `createChat({ sessionInit })` 中按 chat 传入，不改变 ACP/Chat 契约。
+不新增 SDK 调度器、持久执行恢复、平行会话表或第二套 ACP 协议。ACP 连接只有宿主注入的一条装配路径；SDK 不启动 Workspace 进程，也不提供本地数据库后端。唯一例外是显式可选的 server-side 子入口 `/sandbox`：`SandboxManager` 按 `sandboxId` 管理宿主进程内的多个 adapter 实例，具体 sandbox 实现（如 `peri-sandbox`）由宿主通过 `SandboxAdapter` 注入；`SandboxHandle` 只暴露 ready 实例的 `workspacePath` 与 MCP descriptor（`SandboxMcpServer`）；session 由调用方组装并在 `createChat({ session })` 中按 chat 传入，不改变 ACP/Chat 契约。
+
+`/sandbox` 的 manager 是宿主级资源注册表，不与 session 一一对应，也不保存 session 映射。SDK 核心只定义 `SandboxAdapter`/`SandboxAdapterInstance` 契约，不 import、不动态 import、也不 peer 依赖任何具体实现。配置分两层：`adapter` 必填，`adapterOptions` 是 manager 默认值；单次 `start` 可用 `adapterOptions` 整体替换默认值，并覆盖 `serverName`/`startupTimeoutMs`/`stopTimeoutMs`。再次 `start({ sandboxId })` 命中已有 handle 时，显式传入的上述字段必须与创建值一致（`adapterOptions` 按 key 排序的稳定 JSON 比较；不可序列化且非同一引用按冲突处理），否则以 `conflict` 拒绝；省略字段继承原值。`signal` 只作用于本次 `start`，不参与冲突，`closeAll` 不继承 manager 的默认 signal。
 
 ## 2. 五个核心对象
 
 | 对象 | 职责 | 生命周期 |
 | --- | --- | --- |
-| `ChatManager` | 共享依赖快照（含可选默认 `sessionInit`）、句柄目录、SessionOwnership 协调、整体释放；不接收普通执行动作 | 进程/宿主内可重建；`shutdown` 后封闭新准入 |
+| `ChatManager` | 部署/Store 边界：`store.storage`/`machineId` 快照、句柄目录、SessionOwnership 协调、整体释放；per-chat 通过 `createChat({ agent })` 提供运行配置（`cwd` 必填），可覆盖 `lifecycle`/runtime env；不接收普通执行动作 | 进程/宿主内可重建；`shutdown` 后封闭新准入 |
 | `ChatService` | 单 Chat 的绑定状态机、动作分派、事实日志、载荷读取；不持有 Manager，不依赖 Yjs | 由 `createChat` 同步登记；绑定在首次动作时建立 |
 | `ChatUserAction` | 八类纯数据用户意图，携带稳定 `requestId` | 单次请求；结果按 `disposition` 判断可重试性 |
 | `PeriInstance` | 一次激活的 ACP Session/运行后端装配，交互、队列、历史与载荷控制 | 由 `ChatService` 拥有；绑定换代或关闭时释放 |
 | `ChatView` / `ChatReplica` | 服务端事实到 Yjs 的投影、逻辑同步连接与浏览器只读副本 | `ChatView` 由 Chat 所有者释放；`ChatReplica` 由浏览器释放 |
 
 依赖方向固定为 `ChatManager → ChatService → PeriInstance → Session → Transport`。`ChatView` 只依赖 `ChatFactSource` 与 `ChatYjsChannel`；`ChatReplica` 只消费同步帧与只读 `SessionView`。
+
+Manager 的 `store`（`storage`/`machineId`）是部署/机器身份边界；`agent` 只属于单个 Chat，由 `createChat` 必填提供，Manager 只负责注入 store 并逐个序列化。per-chat `agent` 缺 `cwd`、不是 JSON 对象或声明 `storage`/`machineId` 都抛 `TypeError`。
 
 ## 3. 动作与回执
 
@@ -34,8 +38,10 @@ SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行
 
 ## 4. 绑定、SessionOwnership 与关闭
 
-- `createChat({ path?, sessionInit? })` 只同步登记句柄，不启动 ACP、不取得 SessionOwnership、不读取历史。`sessionInit` 是该 Chat 的 Session 建立输入：传入时整体覆盖 `chatConfig.sessionInit` 默认值，不做字段合并；每个句柄持有独立顶层对象，未配置时为空对象。
-- 首次绑定由 `create_new_session` 或 `change_session` 触发；新会话使用句柄 path 或该 Chat 的 `sessionInit.path`（句柄 path 优先），加载历史使用 Store 中的持久 cwd。
+- `createChat({ agent, path?, session?, lifecycle?, runtime?, payloadBudgets? })` 只同步登记句柄，不启动 ACP、不取得 SessionOwnership、不读取历史。`agent` 必填：per-chat 运行配置，`cwd` 必须是非空字符串；`session` 是该 Chat 的 Session 建立输入：传入时整体覆盖 `chatConfig.session` 默认值，不做字段合并；每个句柄持有独立嵌套对象（`mcpServers` 容器、http headers、stdio args/env 复制，`acp.server` 保留引用）。
+- Manager 是部署/Store 边界：`store.storage`/`machineId` 由 Manager 独占，序列化每个 Chat 时注入内部 `agentConfig` JSON；per-chat 声明这两个键一律抛 `TypeError`（即使值与 Manager 相同）。per-chat `agent` 必须是 JSON 安全对象，结果深拷贝、冻结并逐 Chat 序列化为 WASM 启动配置，因此同一 Manager 可服务不同 workspace。`lifecycle` 按字段覆盖 Manager 默认值，`shutdownChatTimeoutMs` 仍由 Manager 聚合；WASM `runtime.env` 按字段合并，`onDiagnostic` 可 per-chat 覆盖。
+- 首次绑定由 `create_new_session` 或 `change_session` 触发；新会话使用句柄 path 或该 Chat 的 `session.path`（句柄 path 优先），且 path 必须是该 Chat `agent.cwd` 内部路径；加载历史使用 Store 中的持久 cwd。
+- `change_session` 有 workspace 护栏：持久 cwd 必须等于或位于当前 Chat 的 workspace root（`path ?? session.path ?? agent.cwd`）之下，否则以稳定错误 `workspace_mismatch` 拒绝绑定，避免把错误 workspace 的 Session 注入当前 Chat 的 MCP 声明。root 缺失或路径为相对路径时跳过校验（纯 JS 判断，不引入 `node:path`）。
 - 同一 Session 同时至多一个执行所有者。调用方注入 3 方法存储端口（`ChatManagerOptions.kv`），`ChatManager` 内部构造 `SessionOwnership`；`LocalSessionIndex` 覆盖 binding/cleanup 候选，同 Manager 内冲突带 `ownerChatId`。
 - 归属记录 key 为 `ownership:<base64url(sessionId)>`，value 为 `{ sessionId, owner }`；owner 是 Manager 内部随机 UUID。acquire 是读后写、非原子；KV 记录是绑定标记/防御路由 bug，不是互斥原语，跨 Manager/进程的单实例绑定由路由层串行化，SDK 只做顺序冲突检测。`SessionOwnership` 协调器是内部实现，公开面只有 `KvStorage` 与 `clearSessionOwnership`。
 - 无 TTL、续租或心跳：崩溃遗留记录由路由层调用 `clearSessionOwnership(storage, sessionId)` 清理，且只能在旧实例已停止或已被 fence 后调用。
@@ -60,10 +66,10 @@ SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行
 
 `ChatRuntime` 描述一次 Chat 的运行实例来源，不是网络主机名；两个分支都产出可供 ACP 使用的 transport。
 
-1. `{ kind: "wasm" }`：Manager 为每次激活启动独立 WASM 运行后端；可注入 `moduleUrl`、`moduleFactory`、`env` 与 `onDiagnostic`。scheduler 与清理/启动超时由运行后端自持，调用方不可配置；`lifecycle` 未显式给出时按 runtime kind 取默认值（wasm 为 activation 25s、shutdown 30s），显式传入仍优先。
-2. `{ kind: "transport", factory }`：调用方按 path 创建 transport；`factory.close()` 成功即停止证明，失败保留原因供重试。
+1. `{ kind: "wasm" }`：Manager 为每次激活启动独立 WASM 运行后端；可注入 `moduleUrl`、`moduleFactory`、`env` 与 `onDiagnostic`。`createChat({ runtime })` 可按 Chat 合并 `env`、覆盖 `onDiagnostic`，并把自己的 `agentConfigJson` 传给启动器。scheduler 与清理/启动超时由运行后端自持，调用方不可配置；`lifecycle` 未显式给出时按 runtime kind 取默认值（wasm 为 activation 25s、shutdown 30s），显式传入仍优先。
+2. `{ kind: "transport", factory }`：调用方按 path 创建 transport；`factory` 收到 `{ signal, chatId, agentConfig }`（旧签名可忽略后两项），`factory.close()` 成功即停止证明，失败保留原因供重试。模型/权限隔离取决于该 factory 创建的运行时，SDK 不额外隔离。
 
-`PeriInstance` 是内部实现，不是发布门面。工厂把句柄的路径、Store、运行后端与生命周期上下文转换为一次运行装配；`WasmRuntimePool` 负责运行后端租约与释放证据。共享 MCP server 地址不共享 MCP client、声明路由或审批状态。
+`PeriInstance` 是内部实现，不是发布门面。工厂把句柄的路径、Store、per-chat 运行后端配置（`agentConfigJson`/`runtimeEnv`/`payloadBudgets`）与生命周期上下文转换为一次运行装配；`WasmRuntimePool` 负责运行后端租约与释放证据，`acquire` 透传 per-chat 启动配置。共享 MCP server 地址不共享 MCP client、声明路由或审批状态。
 
 调用方可用 SDK `ChatViewRegistry` 按 Chat 复用同一个 `ChatView`：这是可选的部署策略，不是 SDK 不变量；注册表从主入口与 `/portable` 导出，不从 `/view` 导出。
 
@@ -76,7 +82,7 @@ SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行
 | `/view` | `src/entries/view.ts` | 浏览器安全展示出口：副本、`readSessionView`、载荷读取、同步协议；不引入 Node 运行时依赖，也不导出 `ChatViewRegistry` |
 | `/wasm` | `src/entries/wasm.ts` | 平台无关的 Emscripten 运行后端、loader、transport |
 | `/wasm-node` | `src/entries/wasm-node.ts` | `/wasm` + Node 网络/DNS 端口 |
-| `/sandbox` | `src/entries/sandbox.ts` | server-side 的可选资源入口：`SandboxManager`（多实例、backend、`closeAll`）+ `SandboxHandle`（生命周期、`workspacePath` 与 MCP descriptor）；不接收 session |
+| `/sandbox` | `src/entries/sandbox.ts` | server-side 的可选资源入口：`SandboxAdapter` 契约 + `SandboxManager`（多实例、per-start 预算与参数冲突校验、`closeAll`）+ `SandboxHandle`（生命周期、`workspacePath` 与 MCP descriptor）；adapter 由宿主注入，不接收 session |
 
 主入口与 `/portable` 共用的 Chat 门面在 `src/entries/chat.ts`。
 

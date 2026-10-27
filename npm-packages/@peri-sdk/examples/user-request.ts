@@ -18,9 +18,8 @@ const machineId = "<stable-machine-uuid>";
 const workspacePath = "/tmp/peri-workspace";
 // 调用方注入存储端口；unstorage 由宿主安装，SDK 不 import 其实现。
 const manager = new ChatManager({
-    agentConfig: {
-        cwd: workspacePath,
-        settings: { config: { ...config, active_alias: "sonnet" } },
+    // Manager = 部署/Store 边界：Store 与机器身份由整个 Manager 共享。
+    store: {
         storage: storage.storageConfig,
         machineId,
     },
@@ -34,7 +33,7 @@ const manager = new ChatManager({
             kind: "wasm",
             moduleUrl: new URL("./peri-wasm.js", import.meta.url),
         },
-        sessionInit: {
+        session: {
             path: workspacePath,
             // ACP 无标准 instructions 字段；Peri 用 session/new._meta["peri.instructions"] 传递并冻结。
             instructions: "你是一个有趣的 AI 助手，能回答用户的问题",
@@ -45,7 +44,14 @@ const manager = new ChatManager({
 });
 
 // ChatManager.createChat 同步登记句柄；不启动 ACP、不取得 Session ownership。
-const chat = manager.createChat({ path: workspacePath });
+// agent 是 per-chat 运行配置：cwd 必填，不能声明 storage/machineId。
+const chat = manager.createChat({
+    path: workspacePath,
+    agent: {
+        cwd: workspacePath,
+        settings: { config: { ...config, active_alias: "sonnet" } },
+    },
+});
 // 已有 Session 用 change_session；cwd 从 Store 读取，不回退句柄 path。
 const requestedSessionId: string | null = null; // 业务请求传已有 ID 时恢复，否则新建。
 const ready = requestedSessionId === null
