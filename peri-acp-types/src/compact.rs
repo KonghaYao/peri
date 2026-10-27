@@ -42,6 +42,10 @@ pub enum CompactOutcome {
     FullFailed,
     /// 仅估算了 Compact 收益，未修改 transcript。
     Shadowed,
+    /// 达到 Micro 触发区间，但合法候选的净收益不足或候选为空；本轮延后提交。
+    ///
+    /// 延后不是失败：不写 transcript、不做归档正文验证、不增加失败计数。
+    Deferred,
     /// 已应用 Micro Compact，但后续 Full Compact 失败。
     MicroAppliedThenFullFailed,
     /// 已应用 Smart Compact，但后续 Full Compact 失败。
@@ -70,6 +74,34 @@ impl CompactOutcome {
     pub fn is_full_applied(self) -> bool {
         matches!(self, Self::FullApplied)
     }
+
+    /// 是否为「收益不足的主动延后」。延后不是失败。
+    pub fn is_deferred(self) -> bool {
+        matches!(self, Self::Deferred)
+    }
+}
+
+/// 自动 Micro 延后的结构化原因（事件契约字段）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactDeferralReason {
+    /// 净收益 G 低于最小收益门槛 M。
+    InsufficientGain,
+    /// 没有通过内容与协议校验的合法候选。
+    NoCandidates,
+    /// 缺少上下文窗口（C == 0），不执行比例型自动 Micro。
+    MissingContextBudget,
+}
+
+/// 延后事实：原因与同一冻结请求中的收益口径。
+///
+/// `estimated_gain_tokens` 是最终完整渲染后的净减少量（G），
+/// `min_gain_tokens` 是完整上下文窗口的 10% 向上取整（M）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompactDeferral {
+    pub reason: CompactDeferralReason,
+    pub estimated_gain_tokens: u64,
+    pub min_gain_tokens: u64,
 }
 
 /// 从消息历史提取保留的文件摘要（full compact 输出解析）。

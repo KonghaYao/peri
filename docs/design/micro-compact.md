@@ -33,7 +33,33 @@ flowchart LR
 
 ## 2. 触发与预算
 
-自动门控保持 `P / C >= micro_compact_threshold`：`P` 是现有 `TokenTracker::estimated_context_tokens()`，`C` 是完整 `context_window`。默认 Micro 为 75%，Full 为 95%。分母不扣输出预留；零/未知窗口、环境覆盖、自动开关、shadow、cache-aware 延迟及同一 `pressure_sample_key` 去重沿用原路径。
+自动门控保持 `P / C >= micro_compact_threshold`：`P` 是现有 `TokenTracker::estimated_context_tokens()`，`C` 是完整 `context_window`。默认 Micro 为 75%，Full 为 95%。分母不扣输出预留；零/未知窗口、环境覆盖、自动开关、shadow、cache-aware 延迟及同一 `pressure_sample_key` 去重沿用原路径。cache-aware 延迟只作用于尚未达到 Full 条件的请求，不得屏蔽已经成立的 Full 条件。
+
+### 2.1 统一收益准入
+
+所有自动 Micro 提交共用 `compact_v2/decision.rs` 一处决策，比例也只在那里定义一次：
+
+| 符号 | 定义 |
+| --- | --- |
+| `C` | 完整 `context_window`，不扣输出预留 |
+| `P` | 现有压力估计 |
+| `M` | 最小 Micro 净收益，`u64::from(C).div_ceil(10)`；200,000 → 20,000，200,001 → 20,001 |
+| `G` | 同一冻结请求中，已提交模型视图到最终完整渲染候选视图的估算净减少量（`estimated_tokens_saved`，已计入收据、目录与 root 成本） |
+| `R` | 既有 `pressure.target_reclaim_tokens()`（含 2% 下限，本轮不改为 10%） |
+
+| 条件 | 决策 |
+| --- | --- |
+| 手动 force | 手动 Full，不受 `M` 限制 |
+| 自动关闭 / 驻留 Full | 沿用既有独立路径 |
+| `C == 0` 或缺少上下文预算 | 不执行比例型自动 Micro；延后而非零门槛提交 |
+| `P / C` 低于 Micro 阈值 | 跳过 |
+| 未达 Full 条件，`G < M` 或候选为空 | 延后（Deferred），继续正常工作 |
+| 未达 Full 条件，`G >= M` 且候选非空 | 提交一次 Micro |
+| 达到 Full 条件，`G >= max(M, R)` 且候选非空 | 可提交一次 Micro |
+| 达到 Full 条件，其余情况 | 直接 Full，本轮 Micro 不先提交 |
+| shadow | 只报告拟采取决策，不提交 |
+
+先决定最终策略，再执行一次提交。延后是正常结果：压缩写入为 0、归档正文验证为 0、不发送成功事件、不增加失败计数；若 `CompactStarted` 已发送，必须发配对的 `CompactEnded` 并携带原因（收益不足时含 `G`、`M`）。Micro 成功后不得 reset `TokenTracker` 来伪造预算恢复。
 
 驻留字节预算是与 token 独立的前置门控：`CompactConfig::max_resident_history_bytes` 默认 128 MiB，只计 transcript 自有区与继承祖先区的 `reserved` 饱和和（`excluded_bytes` 是两者的子集，不重复计），不新增环境变量。自有区按 **Full 的实际归档谓词**拆成可回收 own（非 excluded、非 System、非 protected）与不可回收 own（System、受保护后台结果）；祖先区整体是不可回收继承残余。已 excluded 的非 System 条目会在 Full 提交后由 `shrink_after_full_commit` 释放，不作为稳定残余。三部分分别进入 `ResidentHistoryPressure` 访问器与日志。严格超过上限（恰好等于不触发；0 关闭）时，Compact 阶段在 token refresh **之前**读取快照，跳过模型视图物化、token Skip、已消费压力样本与 Micro planner，直接强制一次 Full。该路径不调用 `stages/micro_facts.rs::snapshot`，因此远程 archive metadata 探测失败不会把驻留 Full 提前变成 `micro_failure`。手动 force 优先；`auto_compact_enabled=false` 不因驻留触发；shadow 只记录拟执行的 Full、不提交。
 
@@ -51,9 +77,9 @@ Reason 在 `before_model` 与工具目录发布后，仅在可见压力确有增
 | 最近已完成 Step | 默认保护最近 2 步，可由 `micro_compact_stale_steps` 配置；软预算 `min(8192, 10% × C)` |
 | 历史收据与索引 | 预算 `min(2048, 2% × C)`；收据超预算时保留合并范围入口，通过分页发现目录 |
 
-收益对比同一冻结请求的当前已提交视图与候选视图，计入参数、消息壳、收据、引用和固定前缀/工具成本。保留当前 token 估算器，二进制媒体不按 Base64 字符数计文本成本。净收益不为正就清空计划；已经隐藏的正文不重复计省。
+收益对比同一冻结请求的当前已提交视图与最终完整渲染的候选视图，计入参数、消息壳、收据、引用和固定前缀/工具成本。保留当前 token 估算器，二进制媒体不按 Base64 字符数计文本成本。已经隐藏的正文不重复计省；净收益不为正时计划为空。
 
-达到 Full 阈值且无有效 Micro，或 Micro 净收益不足必要回收量，才进入既有 Full 路径。先提交有效 Micro；后续 Full 失败仍保留其收益。45% 未达标只报告原因，不能借此循环压缩或新增 Full 条件。估算与后续真实 provider usage 分开记录。
+达到 Full 条件且 `G < max(M, R)`（或候选为空）时直接进入既有 Full 路径，本轮不先提交 Micro。45% 未达标只报告原因，不能借此循环压缩或新增 Full 条件。估算与后续真实 provider usage 分开记录。
 
 ## 3. Step、交换与保护
 
@@ -76,7 +102,7 @@ Reason 在 `before_model` 与工具目录发布后，仅在可见压力确有增
 
 | 内容/策略 | 当前动作与边界 |
 | --- | --- |
-| `PreviewOnly`：未知工具 | 已暴露且可回查后做不完整结果预览；不整组省略 |
+| `PreviewOnly`：未知工具、`Bash` | 已暴露且可回查后做不完整结果预览；不整组省略。`Bash` 的命令与输出是后续任务的主要执行证据，不能退化为只有执行状态 |
 | `Recomputable` / `SideEffectReceipt` | 已知成功交换满足全部条件后整组省略；恢复读取历史 canonical 内容，不重新读取当前文件或执行工具 |
 | 长结果 | 从 canonical 原文按字符边界取 head/tail，携带不完整提示与原文引用；短内容不因标记而膨胀 |
 | 错误结果 | 更大的诊断预览与原文引用；不按相同前缀去重，不把错误组当成功组省略 |
@@ -87,11 +113,28 @@ Reason 在 `before_model` 与工具目录发布后，仅在可见压力确有增
 | 签名/Raw/Unknown | 已知 provider 的完整安全闭包可整体移除；未知块及未识别依赖保留并报告 |
 | 助手自由文本、canonical reminder | 当前保留；不以首尾截断伪造语义摘要 |
 
+`Bash` 的 PreviewOnly 预览保留 head/tail、`[N 字符已省略]` 标注与 `archive_ref` 回查后缀；工具参数逐值保持 canonical，不因预览回写或截断。Read/Grep/Glob 的保留策略本轮不变。预览仍可能隐藏输出中部的关键事实，需通过行为对照验收，不以静态测试通过代替质量结论。
+
 当前 planner 生成 `CompactToolResult`、`OmitToolExchange`、`PreviewArchiveRead`。`ResultReceipt` 等可序列化形状不等于 planner 已覆盖所有内容策略。旧 `CompactToolInput` 只为解码历史保留，当前不生成、不应用参数截断。
 
 仍出现在 provider 请求中的 `ToolCallRequest.arguments` 与 `ToolUse.input` 必须逐值等于 canonical 原值。整组省略同时处理缓存调用、Blocks/Raw 调用、独立/嵌套结果和必要推理依赖；不能删除混合消息里的用户内容、助手结论或其他未结调用。最终配对检查直接拒绝非法变换，不由 pairing repair 补造结果掩盖问题。
 
 历史收据是派生的 Assistant 数据消息，明确标注为历史事实及非执行/授权，使用基于引用和版本的独立虚拟 ID，不复用结果 ID 或 `delivery_id`。收据只写已有的工具、调用、路径、执行状态/退出码等事实，不编造版本、hash 或完成状态。原始日志不会借收据提升为 System/用户指令。
+
+### 4.1 收据与归档入口的位置
+
+派生消息在渲染期按 canonical 位置插入，不再统一追加到请求末尾；不新增持久化格式，也不升级 `PROJECTION_POLICY_VERSION`，v2/v3 旧投影渲染共用同一规则。
+
+| 场景 | 位置约束 |
+| --- | --- |
+| 完整归档的步骤 | 放在该步骤调用与全部结果处理完毕之后 |
+| A/B 同批调用只归档 A | 收据必须越过仍保留的 B 调用及其结果，不得插入二者之间 |
+| 混合 inline 结果 | 不移动同一条消息中的真实用户内容；收据放在该消息之后 |
+| `ResultReceipt` | 保持消息内原位替换语义 |
+| 收据超预算合并 | 可以只保留范围入口，但入口位置不变 |
+| `ArchiveRoot` | `last_anchor` 可见时放在其后；已被 Full 排除时放在仍持有该 root directive 的摘要/条目之后 |
+
+同一插入点上的多个收据按 anchor 的 canonical 顺序稳定排列；root 排在同位置的收据之后。插入后仍须通过配对与协议闭包校验；若某候选无法同时满足历史顺序与协议闭包，放弃该候选，不用 pairing repair 补造结果。派生收据不写入 canonical transcript，也不作为用户可见对话消息。
 
 ## 5. 持久化与恢复
 
@@ -140,20 +183,22 @@ rewind 在同一事务中检查保留前缀、组成员、目录锚点与替代�
 
 ## 8. 观测、测试与能力边界
 
-规划日志记录触发压力/比例、同快照 before/after 与增量估算、保护原因、剩余内容分类、缺口、候选/预览/收据/零收益数量、扫描消息数和 policy。真实输入 usage 仍由后续 `LlmCallEnd` 按 request ID 报告；估算不能当作实测节省或修改 tracker 的预算恢复证据。客户端 Compact 事件继续使用既有估算字段，没有新增独立诊断协议。
+规划日志记录触发压力/比例、`C/P/M/R/G`、决策与原因、同快照 before/after 与增量估算、保护原因、剩余内容分类、缺口、候选/预览/收据/零收益数量、扫描消息数和 policy；提交日志补充规划/原文验证/提交耗时、变更条数与写入次数。真实输入 usage 仍由后续 `LlmCallEnd` 按 request ID 报告；估算不能当作实测节省或修改 tracker 的预算恢复证据。客户端 Compact 事件继续使用既有估算字段，没有新增独立诊断协议；延后时 `CompactEnded` 携带结构化原因与 `G/M`，但不增加失败计数。
 
 验证应走真实 planner → commit → restore → renderer，并在 provider adapter 捕获最终 wire。以下是可重复验证入口，不代表这些测试已在任意环境运行通过：
 
 | 行为 | 测试入口 |
 | --- | --- |
 | 75%/95%、配置、shadow、去重/补检 | `compact_v2/{config,trigger}_test.rs`、`stages/{stages,compact,compact_retry}_test.rs` |
+| 10% 门槛、G/M 边界、Deferred、Smart 归一、Bash PreviewOnly | `compact_v2/gain_gate_test.rs`、`stages/compact_test.rs` |
 | Step、混合调用、暴露与净收益 | `compact_v2/{planner,exposure,projection_render,projection_restore}_test.rs`、`stages/micro_exposure_test.rs` |
+| 收据/归档入口位置、预算合并、Full 后 root、冷恢复与 provider 切换 | `compact_v2/projection_position_test.rs`、`compact_v2/projection_borrowed_test.rs` |
 | 批次提交、失败与冷恢复视图 | `compact_v2/micro_test.rs`、`session/transcript_persistence_test.rs` |
 | 两次 Micro + 两次 Full、无 ID 摘要、实际新进程读取 | `compact_v2/archive_lifecycle_test.rs` |
 | 原文分页、继承权限、摘要冲突、媒体、fork/rewind | `peri-agent/src/context_archive_test.rs`、`peri-acp-types/src/store/history_archive_test.rs` |
 | 子会话 Full 后独立 fork 的冻结归档授权 | `peri-acp/src/dispatch/session_fork_archive_test.rs` |
 | 远端有界读取与真实 MCP 调用 | `peri-resources/src/sessions/remote/session_archive_test.rs`、`peri-middlewares/src/mcp/context_archive_test.rs` |
-| 最终 provider 请求 | `peri-agent/tests/micro_compact_wire_test.rs` |
+| 最终 provider 请求（顺序、配对、收据位置） | `peri-agent/tests/micro_compact_wire_test.rs` |
 
 运行命令沿用 [测试标准](../standards/testing.md) 和 `scripts/cargo-rmcp-patched.sh`；测试断言是契约证据，运行结果应在交付/验收记录提供，设计文档不保存某次勾选状态。模拟 provider wire 不能替代真实 provider 发布验收，本文没有声明调用过付费模型。
 
@@ -164,4 +209,5 @@ rewind 在同一事务中检查保留前缀、组成员、目录锚点与替代�
 3. 独立用户图片/文档仍受保护；附件回查恢复 canonical 数据，不自动将重组附件转换为新的 vision 输入。外部 URL 不能代表历史媒体读取保证；未知 provider 块也保留。
 4. ArchiveRead 可复用原引用预览；尚无按源范围消除重复请求的独立机制。超过全局收据预算时提供目录入口，必要保护内容和冻结底座不会为满足预算被删。
 5. 目录/成员上限、不同来源数量及签名协议能力会限制可回收量。超大单条未消费内容或固定底座超过窗口时，沿用现有 Full/明确失败路径。
-6. 合成样本测量与本次执行范围见 [验证记录](../verification/micro-compact-redesign-2026-10-21.md)。反复回查的真实负载和所有支持 provider 的真实请求验收仍需独立证据，不能由合成 wire 测试推断已经完成。
+6. 10% 门槛是提交门槛，不是删除目标：候选不足时允许没有 Micro，不能扩大省略范围凑门槛。preview→整组省略等小增量升级通常低于门槛而延后，这是预期行为。
+7. 合成样本测量与本次执行范围见 [验证记录](../verification/micro-compact-redesign-2026-10-21.md)。反复回查的真实负载和所有支持 provider 的真实请求验收仍需独立证据，不能由合成 wire 测试推断已经完成。

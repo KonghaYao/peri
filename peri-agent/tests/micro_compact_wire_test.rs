@@ -352,6 +352,63 @@ async fn test_signed_mixed_batch_stays_protocol_complete_for_both_adapters() {
 }
 
 #[tokio::test]
+async fn test_final_wire_keeps_receipt_before_a_later_user_task() {
+    for anthropic in [false, true] {
+        let fixture = Fixture::open().await;
+        let mut transcript = fixture.transcript();
+        transcript.append(BaseMessage::human("Do the old task."));
+        let (ai, done) = mixed_step(&mut transcript, false);
+        // 新用户任务出现在旧工具步骤之后：派生收据不得越过它成为最新历史。
+        transcript.append(BaseMessage::human("NEW TASK after the old step."));
+        let (bridge, caps) = model(anthropic);
+        let plan = plan_micro_with_facts(
+            &transcript,
+            &CompactConfig {
+                micro_compact_stale_steps: 0,
+                ..Default::default()
+            },
+            &ContextPressure {
+                estimated_tokens: 15_000,
+                context_window: 20_000,
+                output_reserve: 1_000,
+                predicted_tool_growth: 0,
+                safety_buffer: 0,
+                cache_hit_rate: 0.0,
+            },
+            &facts(&transcript, &fixture.id, ai, done),
+            &caps,
+        )
+        .unwrap();
+        assert!(
+            plan.actions
+                .iter()
+                .any(|entry| matches!(entry.action, ProjectionAction::OmitToolExchange { .. })),
+            "真实 planner 必须生成整组退场"
+        );
+        apply_micro_plan(&mut transcript, &plan).await.unwrap();
+        let body = wire(&bridge, &fixture.restore().await, &caps);
+        let messages = body["messages"].as_array().unwrap();
+        let position = |needle: &str| {
+            messages
+                .iter()
+                .position(|message| message.to_string().contains(needle))
+                .unwrap_or_else(|| panic!("missing {needle} in final provider request"))
+        };
+        let receipt = position("Historical receipt");
+        let new_task = position("NEW TASK after the old step.");
+        assert!(
+            receipt < new_task,
+            "收据必须留在旧步骤附近，不能出现在新用户任务之后"
+        );
+        assert_eq!(
+            results(&body, anthropic),
+            vec!["pending".to_string()],
+            "最终请求配对合法，且不补造结果"
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_v2_restores_then_upgrades_and_unknown_version_blocks_wire() {
     for anthropic in [false, true] {
         let fixture = Fixture::open().await;

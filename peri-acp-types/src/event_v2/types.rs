@@ -350,8 +350,11 @@ pub enum ObserveEvent {
         step: usize,
         /// 压缩策略（Micro / Full / Smart）
         strategy: crate::event::CompactStrategy,
-        /// 结束语义（Interrupted = 被取消且未提交变更）
+        /// 结束语义（Interrupted = 被取消且未提交变更；Deferred = 收益不足延后）
         outcome: crate::compact::CompactOutcome,
+        /// 未提交原因与收益口径；仅 Deferred 携带。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deferral: Option<crate::compact::CompactDeferral>,
     },
     /// 消息被压缩
     MessagesCompacted {
