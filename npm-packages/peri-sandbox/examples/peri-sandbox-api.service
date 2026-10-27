@@ -1,0 +1,16 @@
+[Unit]
+Description=Peri Sandbox API
+After=default.target
+
+[Service]
+Type=exec
+Environment=XDG_RUNTIME_DIR=%t
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
+ExecStart=/opt/peri-runtime/node/bin/node /opt/peri-sandbox/current/dist/src/cli.js serve --config /srv/peri/control/config.json
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target
