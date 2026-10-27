@@ -249,11 +249,23 @@ jobs:
                   fi
                   tarball="$(find sdk-package -maxdepth 1 -name '*.tgz' -print -quit)"
                   test -n "${tarball}"
-                  if npm view "@peri-code/sdk@${VERSION}" version >/dev/null 2>&1; then
+                  if curl -fsS "https://registry.npmjs.org/@peri-code%2Fsdk/${VERSION}" >/dev/null 2>&1; then
                       echo "::error::@peri-code/sdk@${VERSION} is already published"
                       exit 1
                   fi
                   mkdir -p publish
                   tar -xzf "${tarball}" -C publish
                   npm publish ./publish/package --access public --provenance --tag "${DIST_TAG}"
-                  npm view "@peri-code/sdk@${VERSION}" version dist.tarball
+
+                  # npm 对新建 scope/包生成 packument 根文档需要时间；`npm view` 会先取根文档，
+                  # 发布刚成功时可能短暂 404。这里以版本元数据为准并重试，避免误判发布失败。
+                  for attempt in $(seq 1 24); do
+                      if curl -fsS "https://registry.npmjs.org/@peri-code%2Fsdk/${VERSION}" -o /tmp/published-sdk.json; then
+                          node -e 'const p = require("/tmp/published-sdk.json"); if (p.version !== process.env.VERSION) throw new Error(`version mismatch: ${p.version}`); console.log(`published ${p.name}@${p.version}`)'
+                          exit 0
+                      fi
+                      echo "registry not ready for ${VERSION}, retrying (${attempt}/24)..."
+                      sleep 5
+                  done
+                  echo "::error::published version is not visible in the registry after 2 minutes"
+                  exit 1
