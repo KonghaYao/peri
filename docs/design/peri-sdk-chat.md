@@ -9,7 +9,7 @@
 
 SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行、调度、会话持久化与工具运行仍归 Peri。一个 Chat 句柄对应一次可替换的 Session 绑定，不把 Chat 句柄 ID 当作持久 Session 身份。
 
-不新增 SDK 调度器、持久执行恢复、平行会话表或第二套 ACP 协议。ACP 连接只有宿主注入的一条装配路径；SDK 不启动 Workspace 进程，也不提供本地数据库后端。唯一例外是显式可选的 Node 子入口 `/sandbox`：它在宿主进程内启动一个 `peri-sandbox` 实例并只通过 `ChatSessionInit.mcpServers` 注入 HTTP descriptor，不改变 ACP/Chat 契约。
+不新增 SDK 调度器、持久执行恢复、平行会话表或第二套 ACP 协议。ACP 连接只有宿主注入的一条装配路径；SDK 不启动 Workspace 进程，也不提供本地数据库后端。唯一例外是显式可选的 Node 子入口 `/sandbox`：`SandboxManager` 按 `sandboxId` 管理宿主进程内的多个 `peri-sandbox` 实例，`SandboxHandle` 只把 ready 实例投影为 `ChatSessionInit.mcpServers`；session 绑定由调用方决定，不改变 ACP/Chat 契约。
 
 ## 2. 五个核心对象
 
@@ -76,6 +76,7 @@ SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行
 | `/view` | `src/entries/view.ts` | 浏览器安全展示出口：副本、`readSessionView`、载荷读取、同步协议；不引入 Node 运行时依赖，也不导出 `ChatViewRegistry` |
 | `/wasm` | `src/entries/wasm.ts` | 平台无关的 Emscripten 运行后端、loader、transport |
 | `/wasm-node` | `src/entries/wasm-node.ts` | `/wasm` + Node 网络/DNS 端口 |
+| `/sandbox` | `src/entries/sandbox.ts` | Node-only 的可选资源入口：`SandboxManager`（多实例、backend、`closeAll`）+ `SandboxHandle`（生命周期与 MCP 投影）；不接收 session |
 
 主入口与 `/portable` 共用的 Chat 门面在 `src/entries/chat.ts`。
 

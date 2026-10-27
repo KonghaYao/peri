@@ -319,7 +319,11 @@ chatConfig: {
 
 ## 沙箱生命周期（可选，Node only）
 
-`@peri-code/sdk/sandbox` 是独立的 Node 子入口，用于在宿主进程内管理一个 `peri-sandbox` 实例。主入口、`/portable`、`/wasm`、`/view` 不加载它，也不会间接加载 `better-sqlite3` 或 `@anthropic-ai/sandbox-runtime`；使用该入口需要 Node >= 22.12。
+`@peri-code/sdk/sandbox` 是独立的 Node 子入口，提供 `SandboxManager` + `SandboxHandle` 两层：`SandboxManager` 按 `sandboxId` 管理多个 `peri-sandbox` 实例，`SandboxHandle` 表示其中一个 sandbox 资源。它不是 daemon、control socket 或 SQLite registry，也不感知 session；sandbox 状态只存在于 manager 跟踪的 handle 和 workspace 文件中。主入口、`/portable`、`/wasm`、`/view` 不加载它，也不会间接加载 `peri-sandbox`、`better-sqlite3` 或 `@anthropic-ai/sandbox-runtime`。
+
+该入口当前只支持 macOS / Linux，要求 Node >= 22.12；Linux 需要可用的 systemd user session，Windows 不支持。
+
+### 安装与前置条件
 
 `peri-sandbox` 是可选 peer 依赖，不使用 `/sandbox` 时无需安装：
 
@@ -330,43 +334,89 @@ bun add peri-sandbox   # 仅在使用 /sandbox 时安装
 
 > `peri-sandbox` 当前仍在仓库内且标记为 private；发布前请用本地路径或 workspace 链接安装，发布后再使用上面的包名。
 
-**一个 `SandboxManager` 对应一个 chat session。** SDK 不维护全局 session→manager 表；多个会话请创建多个 manager。
+首次使用前生成 settings，并确认 Peri 运行时与宿主环境：
+
+```bash
+bunx peri-sandbox init     # 默认写入 ~/.peri-sandbox/settings.json
+bunx peri-sandbox doctor   # 只报告环境问题，不自动清理
+```
+
+`init` 会校验 `~/.peri/peri` 并记录 sha256；也可以通过 `PERI_SANDBOX_SETTINGS`、`PERI_PATH` 或 `SandboxManager` 的 `settingsPath` / `periPath` / `periSha256` 覆盖。
+
+### 用法
+
+Manager 独立于会话：它不接收 session，也不记录 session 映射。`handle.chatSessionInit()` 只把 ready 的 sandbox 投影成 `ChatSessionInit`，绑定到哪个会话由调用方决定。
 
 ```ts
 import { SandboxManager } from "@peri-code/sdk/sandbox";
 
-const sandbox = new SandboxManager({
-  sessionKey: chatSessionId, // 或 sandboxId；宿主应持久化返回值以便重启后复用 workspace
-  // settingsPath / sandboxesRoot / profileName / profile / port 可选
+const sandboxes = new SandboxManager({
+  // settingsPath / sandboxesRoot / profileName / profile / port / serverName 可选
 });
 
-const endpoint = await sandbox.start();
+const handle = await sandboxes.start({
+  sandboxId: "sbx_0123456789abcdef0123456789abcdef", // 可选；不传时生成新的 sbx_<32 hex>
+});
+const sessionInit = await handle.chatSessionInit({
+  instructions: "Use the sandbox workspace.",
+});
+
 const manager = new ChatManager({
-  agentConfig: { cwd: endpoint.workspacePath, /* ... */ },
+  agentConfig: { cwd: sessionInit.path, /* ... */ },
   database,
   kv,
   chatConfig: {
     runtime: { /* ... */ },
-    sessionInit: await sandbox.chatSessionInit({
-      instructions: "Use the sandbox workspace.",
-    }),
+    // 调用方决定：把 handle 的投影绑定到这次会话
+    sessionInit,
   },
 });
 
 // 先关闭 Chat 控制面，再关闭沙箱
 await manager.shutdown();
-await sandbox.close();                    // 停止实例，保留 workspace
-await sandbox.close({ deleteData: true }); // 停止并删除 sandbox 目录
+await handle.close(); // 终止实例，保留 workspace
+// 或：await handle.close({ deleteData: true }); // 同时删除 <sandboxesRoot>/<sandboxId>
+// 或：await sandboxes.closeAll(); // 关闭 manager 跟踪的全部 handle
 ```
 
-1. `chatSessionInit()` 返回 `{ path, instructions?, mcpServers }`，可直接作为 `ChatManager.chatConfig.sessionInit`；`path` 是沙箱 workspace 的宿主绝对路径，`mcpServers.workspace` 是带 Bearer token 的 HTTP descriptor。token 只在这里出现，`status()`、`endpoint()` 与错误都不返回它。
-2. `start()` 幂等且并发共享同一个 Promise；失败可重试；`close()` 之后拒绝新调用。
-3. `stop()` 只关闭当前实例，保留 sandboxId 与 workspace；之后 `start()` 用同一 id 新起实例（新 runId、新 token、可能新 URL）。
-4. `close()` 是终止操作且幂等；`close({ deleteData: true })` 删除 `<sandboxesRoot>/<sandboxId>`。`stop()` 后也可调用 `close({deleteData:true})`。
-5. 不传 `sandboxId`/`sessionKey` 时每次启动会得到新的随机 workspace；临时会话之外请至少传 `sessionKey`。
-6. descriptor 只应留在服务端进程；不要把它交给浏览器或不可信租户。默认 `serverName:"workspace"` 会被 Peri 当作系统 Workspace。
-7. 沙箱重启可能改变 `mcpUrl`；已有 `ChatManager` 仍持有旧 descriptor，需要重建 Manager 或重新建立会话后才能切换到新地址。
-8. 生命周期不持久：宿主/沙箱实例退出后在途请求、Task 映射与 Bash 预算都会丢失；workspace 文件保留。
+### API
+
+**`SandboxManager`**
+
+| 方法/属性 | 说明 |
+| --- | --- |
+| `start({ sandboxId?, ...overrides })` | 启动 sandbox 并返回 `SandboxHandle`；同一 `sandboxId` 幂等（复用已有 handle 并再次 `start`），新建失败会从 manager 移除；不传 id 时生成新 id，因此每次调用是不同 sandbox。 |
+| `get(sandboxId)` | 返回当前未 `close` 的 handle，或 `undefined`。 |
+| `list()` | 当前未 `close` 的 handle 快照。 |
+| `closeAll({ deleteData? })` | 并发关闭全部 handle；成功的移除，失败的保留并抛 `AggregateError`，可重试。 |
+| `size` | 当前跟踪的 handle 数量。 |
+
+Manager 选项：`settingsPath`、`sandboxesRoot`、`profileName`、`profile`、`port`、`periPath`、`periSha256`、`bashCalls`、`minFreeBytes`、`serverName`（默认 `workspace`，不能使用 `web` / `artifact` / `cron` / `workflow`）、`moduleSpecifier`、`startupTimeoutMs`、`stopTimeoutMs`、`signal`、`backend`（测试注入）。
+
+**`SandboxHandle`**
+
+| 方法/属性 | 说明 |
+| --- | --- |
+| `sandboxId` / `serverName` | 该 sandbox 的稳定 id 与 MCP server key。 |
+| `state` | `idle` / `starting` / `ready` / `stopping` / `stopped` / `failed` / `closed`。 |
+| `start()` | 启动或复用该实例，返回 `{ sandboxId, serverName, mcpUrl, runId, workspacePath }`；并发调用共享同一个 Promise，失败可重试，`close()` 后拒绝。 |
+| `status()` | 同步快照 `{ sandboxId, state, mcpUrl, workspacePath, lastError }`；不返回 token。 |
+| `chatSessionInit({ instructions? })` | 确保实例 ready，返回 `{ path, instructions?, mcpServers }`；可直接作为 `ChatManager.chatConfig.sessionInit`。token 只在这里出现。 |
+| `endpoint()` | 当前 endpoint 或 `null`；不返回 token。 |
+| `stop()` | 关闭实例，保留 handle 与 workspace，可再次 `start()`；不从 manager 移除。 |
+| `close({ deleteData? })` | 终止操作且幂等；成功后从 manager 移除，之后不能再 `start()`；`deleteData:true` 删除 `<sandboxesRoot>/<sandboxId>`。 |
+
+每次 `start` 可覆盖：`sandboxId`、`profileName`、`profile`、`port`、`bashCalls`、`serverName`、`signal`；其余值来自 manager。
+
+### 生命周期与边界
+
+1. `chatSessionInit()` 返回的 `path` 是 sandbox workspace 的宿主绝对路径；`mcpServers.workspace` 是带 Bearer token 的 loopback HTTP descriptor。descriptor 只应留在服务端进程，不要交给浏览器或不可信租户。
+2. manager 与 session 解耦：同一个 handle 由调用方决定绑定到哪个会话、何时解除绑定；manager 不保存这种关系，也不提供 session 目录。
+3. 需要跨宿主重启复用 workspace 时，调用方应持久化 `sandboxId` 并再次传给 `start`。同一 `sandboxId` 的 workspace 在 `stop()` 和 `close()` 后保留；重新 `start()` 会得到新 `runId`、新 token，`mcpUrl` 也可能变化，已有 `ChatManager` 仍持有旧 descriptor，需要重新建立会话。
+4. `stop()` 只关闭实例，handle 仍可再次 `start()`；`close()` 成功后才从 `get`/`list` 消失。`closeAll()` 部分失败时，失败 handle 保留以便重试。
+5. 生命周期不持久：宿主/实例退出后在途请求、Task 映射与 Bash 预算都会丢失；workspace 文件保留。不要依赖旧实例的 URL 或 token。
+6. `start()` 在缺少 `peri-sandbox` 时抛 `backend_unavailable`；环境/配置错误、id 冲突、启动或停止失败分别使用稳定的 `SandboxManagerError.code`。
+7. 沙箱隔离由 `peri-sandbox` 的 profile 决定（出站域名、只读路径、内存/CPU/pids 上限）；SDK 不扩大这些权限，也不把 token 写入日志或状态。
 
 ## 发布入口
 
@@ -377,7 +427,7 @@ await sandbox.close({ deleteData: true }); // 停止并删除 sandbox 目录
 | `@peri-code/sdk/wasm` | `src/entries/wasm.ts` | 平台无关的 Emscripten ACP 运行后端、loader 与 transport |
 | `@peri-code/sdk/wasm-node` | `src/entries/wasm-node.ts` | `/wasm` 加 Node 兼容的网络/DNS 端口 |
 | `@peri-code/sdk/portable` | `src/entries/portable.ts` | 不装配 Bun/stdio 进程或本地 SQLite；Chat 控制面 + 执行准入核心 |
-| `@peri-code/sdk/sandbox` | `src/entries/sandbox.ts` | Node-only；宿主进程内单实例 `peri-sandbox`，生成 HTTP MCP sessionInit |
+| `@peri-code/sdk/sandbox` | `src/entries/sandbox.ts` | Node-only；`SandboxManager` 管理多个 `peri-sandbox`，`SandboxHandle` 生成 HTTP MCP sessionInit |
 
 `src/entries/chat.ts` 是主入口与 `/portable` 共用的 Chat 门面，不对应独立包 subpath。`ChatViewRegistry` 只在主入口与 `/portable` 导出，`/view` 保持纯浏览器视图面。
 

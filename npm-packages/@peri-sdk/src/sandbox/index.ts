@@ -1,4 +1,5 @@
 export { SandboxManager } from "./manager";
+export { SandboxHandle } from "./handle";
 export { SandboxManagerError } from "./types";
 export type {
   SandboxBackend,
@@ -6,10 +7,11 @@ export type {
   SandboxBackendStartOptions,
   SandboxChatSessionInit,
   SandboxEndpoint,
+  SandboxHandleState,
   SandboxInstanceState,
   SandboxManagerErrorCode,
   SandboxManagerOptions,
-  SandboxManagerState,
+  SandboxManagerStartOptions,
   SandboxProfile,
   SandboxStatus,
 } from "./types";

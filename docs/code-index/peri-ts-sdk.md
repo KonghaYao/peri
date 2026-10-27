@@ -12,7 +12,7 @@
 | `/view` | `src/entries/view.ts` | 浏览器安全展示：`ChatView`、`ChatReplica`、`readSessionView`、载荷读取、同步协议；不引入 Node 运行时依赖，也不导出 `ChatViewRegistry` |
 | `/wasm` | `src/entries/wasm.ts` | Emscripten ACP 运行后端、loader、`WasmAcpTransport` |
 | `/wasm-node` | `src/entries/wasm-node.ts` | `/wasm` + Node 网络/DNS 端口 |
-| `/sandbox` | `src/entries/sandbox.ts` | Node-only；进程内单实例 `peri-sandbox`，输出 HTTP MCP `sessionInit`；动态 import optional peer |
+| `/sandbox` | `src/entries/sandbox.ts` | Node-only；`SandboxManager` 按 `sandboxId` 管理多个进程内 `peri-sandbox`，`SandboxHandle` 输出 HTTP MCP `sessionInit`；动态 import optional peer |
 
 旧 `Agent`、`ManagedAgents`、`SessionDocs`、`SessionViewStore`、`AtomicManagedAgentKv`、
 `agent-claim-conflict-error`、`Sandbox` 已删除，不在任何发布入口导出；`tests/public-view.test.ts`
@@ -27,7 +27,7 @@
 4. `agent` 可依赖 `contracts`/`payload`/`state`/`transport`/`wasm`/`util`，不得依赖 `chat`/`view`。
 5. `chat` 可依赖 `contracts`/`payload`/`state`/`transport`/`agent`/`wasm`/`util`，不得依赖 `view`。
 6. `view` 可依赖 `contracts`/`payload`/`state`/`sync`/`transport`/`util`，不得依赖 `chat`/`agent`。
-7. `sandbox` 只由 `entries/sandbox.ts` 引用；通过动态 import 加载 optional peer `peri-sandbox`，主入口、`/portable`、`/wasm`、`/view` 不得包含 `peri-sandbox`、`@anthropic-ai/sandbox-runtime` 或 `better-sqlite3`。
+7. `sandbox` 只由 `entries/sandbox.ts` 引用；`manager.ts` 持有按 `sandboxId` 的 handle 表、加载 backend 并聚合 `closeAll`，`handle.ts` 持有一个实例的生命周期与 `ChatSessionInit` 投影，不接收 session；通过动态 import 加载 optional peer `peri-sandbox`，主入口、`/portable`、`/wasm`、`/view` 不得包含 `peri-sandbox`、`@anthropic-ai/sandbox-runtime` 或 `better-sqlite3`。
 8. `entries` 可依赖所有层；任何模块不得依赖 `entries`。
 
 ## 控制面
@@ -56,6 +56,7 @@
 | MCP over ACP | `src/agent/acp-mcp-bridge.ts`、`src/contracts/acp.ts` | `acp` 声明走反向 `mcp/message`；直接实例单次借用，跨激活必须用工厂；owned 实例由激活关闭 |
 | 载荷 | `src/state/tool-payloads.ts`、`src/chat/payload-access.ts`、`src/payload/reader.ts` | 内容寻址引用、inline/单项/会话预算、`readPayload` 字节与 JSON 校验；错误码 `unauthorized`/`unavailable`/`too_large`/`integrity_error`/`aborted`/`transport_error` |
 | 运行后端 | `src/wasm/{runtime,runtime-pool,loader,ports,scheduler,transport}.ts`、`src/wasm/budget.ts` | WASM 启动/租约/关闭证据；scheduler 与清理/启动超时由运行后端自持；`moduleFactory` 时无需 `moduleUrl`；HTTP/DNS 端口仅在深层运行后端入口可注入 |
+| 沙箱 | `src/sandbox/manager.ts`、`src/sandbox/handle.ts`、`src/sandbox/backend.ts` | `SandboxManager`：handle 表、生成 `sbx_<32 hex>`、backend 懒加载、`closeAll` 聚合失败；`SandboxHandle`：单实例状态机、start/stop/close、loopback 校验、token 脱敏与 `chatSessionInit` 投影；manager 不接收 session |
 
 ## 展示与同步
 
