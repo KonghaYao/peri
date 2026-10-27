@@ -354,6 +354,14 @@ chatConfig: {
 
 默认 [demo.ts](examples/demo/demo.ts) 使用 `runtime.kind="wasm"`；[demo-wasm.ts](examples/demo/demo-wasm.ts) 使用 `runtime.kind="transport"` 注入 `WasmAcpTransport`。两者都通过 `ChatView` + 二进制同步帧驱动浏览器 `ChatReplica`；示例用 SSE 适配器承载逻辑帧，生产消费端使用 WebSocket。
 
+## 发布
+
+发布由 [`.github/workflows/release-sdk.yml`](../../.github/workflows/release-sdk.yml) 完成，不要在本地直接 `npm publish`。
+
+1. 推送 `sdk-v*` tag（例如 `sdk-v0.1.0`）：workflow 会构建 WASM、跑测试、打包并发布到 npm。
+2. 手动验证：运行 `Release SDK`，填写版本号并保持 `dry_run=true`；只构建、测试并上传 tarball，不发布。
+3. 正式发布需要仓库 secret `NPM_TOKEN`（对 `@peri-code` scope 有发布权限）；含 `-` 的预发布版本发布到 `next`，其余发布到 `latest`。
+
 ## 进阶
 
 `/portable` 额外公开可自行驱动的 durable execution admission，SDK Chat 不使用它。`KvExecutionRegistry` 包装 `AtomicExecutionKv` 提供 durable read/CAS apply/resolve；适配器必须实现 `readExecutionValue` 与 `compareAndSetExecutionValue`。`MemoryExecutionKv` 是单进程 `bestEffort` 实现，需要显式 `allowBestEffort`。票据绑定 session、instance/generation、lifecycle/control generation、稳定 work/revision 与 `{turnId, attemptId}`；预算跨实例替换保留，缺失停止证明返回 Blocked，不做 lease/TTL 接管。
