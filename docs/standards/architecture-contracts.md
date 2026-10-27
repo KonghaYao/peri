@@ -11,7 +11,7 @@
 ### ARC-MCP-DATA-001
 
 - **Scope**：builtin/external MCP、Host、Agent、ACP、TUI。
-- **Rule**：MCP 领域数据先经过标准 MCP `resources/read`、`tools/call` 或已协商的订阅，再由宿主投影到 ACP/其他客户端；同进程部署不构成例外。不得通过共享运行时、任务表、业务广播、downcast 或本地兜底绕过协议。构造期注入依赖/能力令牌和宿主自身的连接状态不属于 MCP 业务数据。模型可见性与调用授权分别校验，宿主专用控制工具不进入模型工具目录。外部任务终态必须先确认接收，再确认服务端待交付记录；断开、失败、重试和会话关闭不得静默丢失结果或伪造清理完成。
+- **Rule**：MCP 领域数据先经过标准 MCP `resources/read`、`tools/call` 或已协商的订阅，再由宿主投影到 ACP/其他客户端；同进程部署不构成例外。不得通过共享运行时、任务表、业务广播、downcast 或本地兜底绕过协议。构造期注入依赖/能力令牌和宿主自身的连接状态不属于 MCP 业务数据。模型可见性与调用授权分别校验，宿主专用控制工具不进入模型工具目录。外部任务终态必须先确认接收，再确认服务端待交付记录；TaskOutput 只做有界诊断，不产生第二套完成投递，等待到期不取消任务；宿主公共任务 ID 只经当前会话、同 server 的可信映射改写为远端 ID，随会话释放清理，Workspace 继续校验 taskOwner。断开、失败、重试和会话关闭不得静默丢失结果或伪造清理完成。
 - **Verify**：`scripts/check-mcp-data-boundary.sh`；Cron 和 Workflow 的真实 rmcp wire 测试、ACP 断线无兜底测试、Workflow 终态接收失败/重试测试。源码检查只是回归护栏，新增 MCP 出口仍需沿生产者到客户端追踪数据路径。
 
 ### ARC-WORKSPACE-001

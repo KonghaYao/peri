@@ -240,6 +240,17 @@ const WORKSPACE_TOOLS: &[BuiltinMcpTool] = &[
             "Run a shell command → `{{name}}` ({{title}}). Prefer the purpose-built tools above when applicable: they give structured output and enforce permission rules.",
         ),
     },
+    BuiltinMcpTool {
+        context_retention: crate::tools::ContextRetention::Recomputable,
+        completes_on_response: false,
+        original_name: "TaskOutput",
+        effective_name: "TaskOutput",
+        direct: true,
+        model_visible: true,
+        prompt_declaration: Some(
+            "Diagnose a background task → `{{name}}` ({{title}}). Do not poll or sleep; rely on completion notifications when there is no new information.",
+        ),
+    },
 ];
 
 /// `workflow` 实例的工具声明（4 项；顺序即声明段顺序）。

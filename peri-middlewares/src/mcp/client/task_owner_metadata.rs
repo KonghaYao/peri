@@ -39,6 +39,30 @@ pub(crate) fn task_owner_meta(
 }
 
 impl McpClientPool {
+    pub(crate) fn record_external_task_route(
+        &self,
+        session: &str,
+        public_id: &str,
+        server: &str,
+        raw_id: &str,
+    ) -> Result<(), String> {
+        self.session_bindings
+            .write()
+            .record_external_task_route(session, public_id, server, raw_id)
+    }
+
+    pub(crate) fn resolve_external_task_route(
+        &self,
+        session: &str,
+        public_id: &str,
+        server: &str,
+    ) -> Result<String, String> {
+        self.session_bindings
+            .read()
+            .resolve_external_task_route(session, public_id, server)
+            .map(|route| route.raw_id)
+    }
+
     pub fn bind_session_task_manager(&self, session_id: &str, manager: &Arc<dyn TaskManager>) {
         self.session_bindings
             .write()

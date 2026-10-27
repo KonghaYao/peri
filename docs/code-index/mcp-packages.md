@@ -4,6 +4,10 @@ Builtin MCP 的工具与 server handler 由独立 crate 持有；配置来源 I/
 
 Workspace 后台任务的资源结算以 `workspace/src/shell_tasks.rs` 为准：owner 在进程退出、管道回收和终态通知完成后结算；会话释放只取消 TaskManager 已知 external task 并等待 settled。没有 scope close barrier、旧 owner 扫描、连接重建或跨进程恢复；generic 模式无 owner，不参与 session 隔离。
 
+Workspace 后台诊断入口是 `workspace/src/task_output.rs::query`：`TaskOutput` 复用 `ShellTasks.updates` 的有界等待（最多 10s），两流合计最多 32KiB，UTF-8 字节 cursor 增量读取；等待到期不取消、不增加完成通知。`shell_tasks.rs` 保存显式后台与 promote 日志，`terminal.rs::PromotedTaskOutput` 同步传递路径；`foreground_sleep.rs` 在启动前拒绝静态可识别的 ≥60s 前台 sleep，后台只拒绝纯 sleep，不解释动态 shell。
+
+公共任务 ID 路由在 `peri-middlewares/src/mcp/client/session_bindings.rs::Binding`：登记成功后记录 `(session, public_id) → (server, raw_id)`，release 清理；`tool_bridge.rs` 只为 `TaskOutput` 重写 wire 参数，同 session、同 server 才可查，Workspace 再校验 owner。模型不接收 raw task id。
+
 宿主侧入口见 [`peri-middlewares` 代码索引](peri-middlewares.md)。本文是插件包的当前路径索引；设计契约见 [`architecture-contracts.md`](../standards/architecture-contracts.md) 与 [`MCP 适配设计`](../design/mcp-adaptation-v4-part-1.md)。
 
 Workspace git ref 更新由 `workspace/src/workspace.rs` 在 MCP 通知
@@ -26,7 +30,7 @@ Emscripten 目标引入 MCP 通用映射、配置数据面与凭证 bootstrap MC
 
 Workspace Shell Tasks 的归属只有一个身份：`_meta["peri/taskOwner"]`，值 = 直接发起会话的
 session id。Peri 宿主只为 builtin workspace 与 `WorkspaceRemote` 注入该字段；通用 MCP 客户端
-不发送任何 `peri/*` 元数据时走 generic 模式，7 个基础工具照常可用，后台任务不做 session 隔离。
+不发送任何 `peri/*` 元数据时走 generic 模式，8 个基础工具照常可用，后台任务不做 session 隔离。
 owner 只是身份，不是秘密或 capability：没有 token 表、签发/解析或调用一致性校验，远程部署
 依赖连接级认证。wire 契约见 `mcp-packages/workspace/src/workspace_tasks_wire_test.rs`；owner
 仅在当前进程内存在，不跨连接重建、不随进程重启恢复，也不扫描旧任务恢复归属。

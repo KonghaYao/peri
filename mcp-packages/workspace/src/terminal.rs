@@ -72,8 +72,13 @@ fn foreground_log_hint(capture: &ShellOutputCapture) -> String {
 /// BashTool - 终端命令执行工具，与 TypeScript TerminalMiddleware 对齐
 const BASH_DESCRIPTION: &str = include_str!("descriptions/bash.md");
 
-/// 后台任务启动回调：参数为任务 id；在返回 MCP 响应前同步登记。
-pub type OnBgStartedFn = Arc<dyn Fn(&str) + Send + Sync>;
+/// 后台启动时同步保留任务身份与日志路径。
+pub struct PromotedTaskOutput {
+    pub task_id: String,
+    pub stdout_log: Option<String>,
+    pub stderr_log: Option<String>,
+}
+pub type OnBgStartedFn = Arc<dyn Fn(&PromotedTaskOutput) + Send + Sync>;
 
 pub struct BashTool {
     pub cwd: String,
@@ -117,8 +122,9 @@ impl BashTool {
     /// 同源（同一字段），不允许各自维护一份判定。
     fn run_in_background_schema(&self) -> Value {
         let mut description = "If true, runs the command in the background and returns \
-             immediately with a task_id. Only use for long-running servers, watchers, or \
-             daemons. For builds/installs/tests, prefer a longer timeout instead."
+             immediately with a task_id. Prefer background execution for builds/installs/tests \
+             expected to exceed the short foreground window. Continue independent work after \
+             receiving task_id; use TaskOutput for diagnosis. Do not raise timeout to wait in the foreground."
             .to_string();
         if self.default_run_in_background {
             description.push_str(
@@ -363,7 +369,7 @@ impl BaseTool for BashTool {
                     "minimum": 0,
                     "maximum": 600000,
                     "description": format!(
-                        "Optional timeout in milliseconds. The synchronous path is always bounded: it defaults to 15000ms and is capped at {FOREGROUND_MAX_TIMEOUT_MS}ms (2 minutes) — `timeout: 0` is treated as that maximum instead of disabling the timeout, so no request can produce an unbounded synchronous wait. Foreground timeout returns an error: if background task registration succeeds, the process is promoted and the tool returns a background task receipt carrying its task id (no pid or log paths), without a new timeout; otherwise termination is requested. Background tasks (run_in_background: true) run until completion: omitting `timeout` or setting `0` leaves that background command without a timeout, and a positive `timeout` (up to 600000ms) requests termination when reached. Check the returned process status before retrying; do not duplicate a task that is still running. For builds, installs, or tests, set a longer `timeout` up to the foreground maximum, or use run_in_background: true for work that needs longer."
+                        "Optional timeout in milliseconds. The synchronous path is always bounded: it defaults to 15000ms and is capped at {FOREGROUND_MAX_TIMEOUT_MS}ms (2 minutes) — `timeout: 0` is treated as that maximum instead of disabling the timeout, so no request can produce an unbounded synchronous wait. Foreground timeout returns an error: if background task registration succeeds, the process is promoted and the tool returns a background task receipt carrying its task id (no pid or log paths), without a new timeout; otherwise termination is requested. Background tasks (run_in_background: true) run until completion: omitting `timeout` or setting `0` leaves that background command without a timeout, and a positive `timeout` (up to 600000ms) requests termination when reached. Check the returned process status before retrying; do not duplicate a task that is still running. For builds, installs, or tests expected to exceed the short foreground window, prefer run_in_background: true. Continue independent work after task_id; use TaskOutput only for diagnosis and rely on completion notifications. Do not raise timeout to wait in the foreground. Use health checks for service readiness and a bounded background watch for CI."
                     )
                 },
                 "run_in_background": self.run_in_background_schema()
@@ -437,6 +443,13 @@ impl BashTool {
             .as_bool()
             .unwrap_or(self.default_run_in_background);
         if run_in_background {
+            if let Some(rejection) = crate::foreground_sleep::reject_long_sleep(
+                command,
+                true,
+                crate::foreground_sleep::ShellPlatform::current(),
+            ) {
+                return Ok(BashOutput::rejected(rejection));
+            }
             // 任务发起（TaskManager::spawn_shell 委托注入的工具执行环境：
             // 执行环境负责进程/超时/输出，Agent 保留注册与完成生命周期）。
             let task_manager = Arc::clone(self.task_manager.as_ref().ok_or(
@@ -459,7 +472,7 @@ impl BashTool {
             let mut msg = format!(
                 "Background shell task started.\ntask_id: {}\n\
                  The task is now running in the background of this process; its result will be \
-                 delivered to this session when it finishes. Do not start a duplicate while it is active.",
+                 delivered to this session when it finishes. Do not start a duplicate while it is active. Continue independent work; use TaskOutput for diagnosis, do not sleep or query in a polling loop, and rely on completion notifications. Use health checks for service readiness; use a bounded background watch for CI.",
                 handle.task_id
             );
             match handle.pid {
@@ -512,6 +525,14 @@ impl BashTool {
         }
 
         // ── 同步执行路径 ──
+        if let Some(rejection) = crate::foreground_sleep::reject_long_sleep(
+            command,
+            false,
+            crate::foreground_sleep::ShellPlatform::current(),
+        ) {
+            return Ok(BashOutput::rejected(rejection));
+        }
+        let _foreground_timer = ForegroundTimer(std::time::Instant::now());
         // 前台执行恒有界：`timeout: 0` 与超过上限的请求都界到前台上限，
         // 不存在禁用超时的同步路径（无 Option，结构上无法表达"不超时"）。
         let (foreground_timeout_ms, adjusted_timeout) = parse_foreground_timeout(&input)?;
@@ -690,18 +711,22 @@ impl BashTool {
                                 );
                             }))?;
                             if let Some(on_started) = &self.on_bg_started {
-                                on_started(&task_id);
+                                on_started(&PromotedTaskOutput {
+                                    task_id: task_id.clone(),
+                                    stdout_log: output_capture.stdout_path(),
+                                    stderr_log: output_capture.stderr_path(),
+                                });
                             }
                             output_capture.retain_files();
                             let cleanup_hint = background_cleanup_hint(pid, std::env::consts::OS);
                             let log_hint = foreground_log_hint(&output_capture);
                             let recovery = format!(
-                                "Command timed out. The process is still running and has been promoted to a background task.\ntask_id: {task_id}\npid: {pid}{log_hint}\n{cleanup_hint}{timeout_note}\nDo not rerun the command while it is active; its result will be delivered to this session when it finishes. Check the Tasks panel or read its live logs."
+                                "Command timed out. The process is still running and has been promoted to a background task.\ntask_id: {task_id}\npid: {pid}{log_hint}\n{cleanup_hint}{timeout_note}\nDo not rerun the command while it is active; its result will be delivered to this session when it finishes. Check the Tasks panel or use TaskOutput for diagnosis; do not sleep or continuously query. Continue independent work and rely on completion notifications."
                             );
                             if has_output {
                                 // 有部分输出：进程在产生进展，续跑是合理的
                                 return Ok(BashOutput::with_execution(format!(
-                                    "Command timed out after {:.1}s. The process is still running and has been promoted to a background task (it was producing output, so it is likely progressing).\ntask_id: {task_id}\npid: {pid}\n{ps_line}\n- It continues running in the background; its result will be delivered to this session when it finishes.{log_hint}\n{cleanup_hint}\n{timeout_note}\n{partial_hint}\nCommand that timed out: {command}",
+                                    "Command timed out after {:.1}s. The process is still running and has been promoted to a background task (it was producing output, so it is likely progressing).\ntask_id: {task_id}\npid: {pid}\n{ps_line}\n- It continues running in the background; its result will be delivered to this session when it finishes.{log_hint}\n{cleanup_hint}\nUse TaskOutput for diagnosis; do not sleep or query in a polling loop. Continue independent work and rely on completion notifications.\n{timeout_note}\n{partial_hint}\nCommand that timed out: {command}",
                                     foreground_timeout_ms as f64 / 1000.0
                                 ), ToolExecutionEvidence {
                                     status: ToolExecutionStatus::RunningAfterTimeout,
@@ -714,7 +739,7 @@ impl BashTool {
                             // 无输出：进程可能挂起（等输入/资源）而非正常变慢——
                             // 仍 promote（避免误杀静默启动的慢任务），但如实说明不确定性
                             return Ok(BashOutput::with_execution(format!(
-                                "Command timed out after {:.1}s with no output produced. The process is still running and has been promoted to a background task, but it may never complete on its own. If it finishes, its result will be delivered to this session.\ntask_id: {task_id}\npid: {pid}\n{ps_line}\nLikely causes:\n- The command is waiting for input or for a resource (network, lock, another process) that will never arrive.\n- It is a long-running service/daemon; it should have been started with run_in_background: true.\n- It is a slow command still in a silent startup phase (e.g. compile/install with no output yet).{log_hint}\n{cleanup_hint}\n{timeout_note}\n{partial_hint}\nCommand that timed out: {command}",
+                                "Command timed out after {:.1}s with no output produced. The process is still running and has been promoted to a background task, but it may never complete on its own. If it finishes, its result will be delivered to this session.\ntask_id: {task_id}\npid: {pid}\n{ps_line}\nLikely causes:\n- The command is waiting for input or for a resource (network, lock, another process) that will never arrive.\n- It is a long-running service/daemon; it should have been started with run_in_background: true.\n- It is a slow command still in a silent startup phase (e.g. compile/install with no output yet).{log_hint}\n{cleanup_hint}\nUse TaskOutput for diagnosis; do not sleep or query in a polling loop. Continue independent work and rely on completion notifications.\n{timeout_note}\n{partial_hint}\nCommand that timed out: {command}",
                                 foreground_timeout_ms as f64 / 1000.0
                             ), ToolExecutionEvidence {
                                 status: ToolExecutionStatus::RunningAfterTimeout,
@@ -759,7 +784,7 @@ impl BashTool {
                          {ps_line}\n\
                          Options:\n\
                          - Optimize the command: avoid scanning large directories (e.g. use `find . -maxdepth 3` instead of `find /Users/...`), add `| head`, or use fd/rg instead of find/grep.\n\
-                         - Increase timeout: set `timeout` parameter to a larger value (the foreground maximum is `timeout: {FOREGROUND_MAX_TIMEOUT_MS}` for 2 minutes).\n\
+                         - Prefer background mode: set `run_in_background: true` for builds/installs/tests beyond the short foreground window; do not raise timeout just to wait.\n\
                          - Use background mode: set `run_in_background: true` for long-running servers/builds/installs.\n\
                          {timeout_note}\n\
                          {partial_hint}\n\
@@ -834,6 +859,13 @@ impl BashTool {
                             // has no observable exit code of its own.
                             Some(background_output.finish(None)));
                     }))?;
+                    if let Some(on_started) = &self.on_bg_started {
+                        on_started(&PromotedTaskOutput {
+                            task_id: task_id.clone(),
+                            stdout_log: output_capture.stdout_path(),
+                            stderr_log: output_capture.stderr_path(),
+                        });
+                    }
                     output_capture.retain_files();
                     output.push_str(&format!(
                         "\nRemaining processes continue as background task {task_id}.\npid: {pid}\n{}",
@@ -888,12 +920,33 @@ impl BashTool {
     }
 }
 
+struct ForegroundTimer(std::time::Instant);
+impl Drop for ForegroundTimer {
+    fn drop(&mut self) {
+        tracing::info!(
+            foreground_ms = self.0.elapsed().as_millis() as u64,
+            "Bash foreground execution finished"
+        );
+    }
+}
+
 /// Private execution result keeps recovery references separate from command output.
 pub(crate) struct BashOutput {
     pub(crate) output: ToolOutput,
     pub(crate) recovery: Option<String>,
+    pub(crate) rejection: Option<crate::foreground_sleep::SleepRejection>,
 }
 impl BashOutput {
+    fn rejected(rejection: crate::foreground_sleep::SleepRejection) -> Self {
+        let mut output = ToolOutput::from_legacy(rejection.text());
+        output.outcome = peri_agent::tools::ToolOutcome::reported(true);
+        Self {
+            output,
+            recovery: None,
+            rejection: Some(rejection),
+        }
+    }
+
     /// The structured path must retain the same recovery failure as legacy invoke.
     pub(crate) fn into_tool_output(mut self) -> ToolOutput {
         if let Some(recovery) = self.recovery {
@@ -920,6 +973,7 @@ impl BashOutput {
         Self {
             output: ToolOutput::with_execution(text, evidence),
             recovery,
+            rejection: None,
         }
     }
     fn with_recovery(mut self, recovery: String) -> Self {

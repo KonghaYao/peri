@@ -3,6 +3,7 @@
 mod file_observation;
 mod file_rewind;
 pub mod filesystem;
+mod foreground_sleep;
 mod fuzzy;
 mod git_branch;
 mod git_watch;
@@ -12,6 +13,7 @@ mod output_store;
 pub mod resources;
 mod shell_hints;
 mod shell_tasks;
+pub mod task_output;
 pub mod terminal;
 mod workspace;
 

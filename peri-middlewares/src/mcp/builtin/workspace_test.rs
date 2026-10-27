@@ -42,7 +42,7 @@ use peri_mcp_workspace::{WorkspaceInstanceInput, WorkspaceMcpServer};
 // ─── 线路：握手 + tools/list ───────────────────────────────────────────────────
 
 #[tokio::test]
-async fn workspace_handler_handshakes_and_lists_seven_tools_over_wire() {
+async fn workspace_handler_handshakes_and_lists_eight_tools_over_wire() {
     let (_dir, cwd) = workspace_dir();
     let pair = connect(&cwd, None).await;
     let peer = pair.peer();
@@ -71,7 +71,7 @@ async fn workspace_handler_handshakes_and_lists_seven_tools_over_wire() {
     // 跨 crate 一致性（本文件的宿主职责）：注册表 `find("workspace")` 的声明**顺序**与
     // 线路上的 `tools/list` 逐项一致——`list_tools_of` 的契约是「声明顺序 = tools 顺序」；
     // 成员集合本身也由此被钉住（数量与逐项名字）。成员集合的**冻结字面量**断言在
-    // package 侧（`resources/wire_test.rs::wire_declares_resources_and_keeps_seven_tools`），
+    // package 侧（`resources/wire_test.rs::wire_declares_resources_and_keeps_eight_tools`），
     // 防「注册表与 handler 一起漂移」的那一半由它承担，此处不重复。
     let declared = find("workspace").expect("`workspace` 必须是已实现实例（注册表 T1）");
     let declared_order: Vec<&str> = declared
@@ -414,7 +414,7 @@ async fn bridge_accepts_workspace_owned_task_handle() {
     let manager: Arc<dyn TaskManager> =
         Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     pool.bind_session_task_manager("task-session", &manager);
-    let bridge = crate::mcp::tool_bridge::McpToolBridge::new("workspace", bash, handle)
+    let bridge = crate::mcp::tool_bridge::McpToolBridge::new("workspace", bash, handle.clone())
         .with_output_store(&pool, Some("task-session"));
     let output = bridge
         .invoke_output(
@@ -440,6 +440,40 @@ async fn bridge_accepts_workspace_owned_task_handle() {
         .next()
         .expect("task id");
     assert!(task_id.starts_with("mcp-"));
+    let diagnostic = crate::mcp::tool_bridge::McpToolBridge::new(
+        "workspace",
+        tools.iter().find(|tool| tool.name == "TaskOutput").unwrap(),
+        handle.clone(),
+    )
+    .with_output_store(&pool, Some("task-session"));
+    let other_manager: Arc<dyn TaskManager> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    pool.bind_session_task_manager("other-session", &other_manager);
+    let error = diagnostic
+        .invoke_output(
+            json!({"task_id":task_id}),
+            ToolContext::new(&[], &cwd).with_session_identity("other-session", "turn"),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "unknown task for this session");
+    let diagnosis = diagnostic
+        .invoke_output(
+            json!({"task_id":task_id,"wait_ms":1000}),
+            ToolContext::new(&[], &cwd).with_session_identity("task-session", "turn"),
+        )
+        .await
+        .unwrap();
+    assert!(diagnosis.text.contains("bridge-ok"));
+    assert!(!diagnosis.text.contains("shell-"));
+    // 查询终态不重复入队；完成提醒仍只有下面的一条。
+    diagnostic
+        .invoke_output(
+            json!({"task_id":task_id}),
+            ToolContext::new(&[], &cwd).with_session_identity("task-session", "turn"),
+        )
+        .await
+        .unwrap();
     assert_eq!(evidence.task_id.as_deref(), Some(task_id));
     let completed = bridge
         .invoke_output(
