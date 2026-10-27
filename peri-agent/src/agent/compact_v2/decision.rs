@@ -6,16 +6,16 @@
 
 use super::planner::ContextPressure;
 use super::CompactConfig;
-use peri_acp_types::compact::{
-    CompactDeferral, CompactDeferralReason, FullEscalationReason, MICRO_MIN_GAIN_DIVISOR,
-};
+use peri_acp_types::compact::{CompactDeferral, CompactDeferralReason, FullEscalationReason};
 
-/// 最小 Micro 净收益的门槛分母：完整上下文窗口的 1/10，向上取整。
+/// 最小 Micro 净收益的门槛：完整上下文窗口的 1/N，向上取整。
 ///
-/// 比例只在 [`min_micro_gain_tokens`] 定义一次；planner、Full 与 Smart 分支
-/// 都复用它，避免复制出第二套经济门槛。
-pub fn min_micro_gain_tokens(context_window: u32) -> u64 {
-    u64::from(context_window).div_ceil(MICRO_MIN_GAIN_DIVISOR)
+/// 分母来自 [`CompactConfig::micro_min_gain_divisor`]；比例只在这里定义一次，
+/// planner、Full 与 Smart 分支都复用它，避免复制出第二套经济门槛。
+/// 程序内构造的零值按最严格口径（N=1）处理。
+pub fn min_micro_gain_tokens(context_window: u32, config: &CompactConfig) -> u64 {
+    let divisor = u64::from(config.micro_min_gain_divisor.max(1));
+    u64::from(context_window).div_ceil(divisor)
 }
 
 /// 自动压缩的决策结果。
@@ -42,7 +42,7 @@ pub(crate) fn decide_auto_compact(
     has_candidates: bool,
 ) -> GainDecision {
     let context_window = pressure.context_window;
-    let min_gain = min_micro_gain_tokens(context_window);
+    let min_gain = min_micro_gain_tokens(context_window, config);
     if context_window == 0 {
         // 零窗口没有比例型自动 Micro 的权威门槛；手动 force、驻留 Full 独立。
         return GainDecision::Deferred(CompactDeferral {

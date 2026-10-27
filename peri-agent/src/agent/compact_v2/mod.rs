@@ -356,7 +356,7 @@ pub async fn run_compact_with_facts_and_resident(
         Err(error) => return micro_failure(before_visible_len, error),
     };
     let planning_elapsed = planning_started.elapsed();
-    let min_gain = decision::min_micro_gain_tokens(pressure.context_window);
+    let min_gain = decision::min_micro_gain_tokens(pressure.context_window, config);
     let estimated_gain = plan.estimated_tokens_saved;
     let has_candidates = plan.has_changes();
     tracing::info!(

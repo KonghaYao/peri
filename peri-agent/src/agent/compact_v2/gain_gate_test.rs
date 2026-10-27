@@ -104,15 +104,16 @@ fn has_persisted_projection(transcript: &MessageTranscript) -> bool {
 
 #[test]
 fn minimum_gain_is_one_tenth_of_the_full_window_rounded_up() {
-    assert_eq!(min_micro_gain_tokens(0), 0);
-    assert_eq!(min_micro_gain_tokens(1), 1);
-    assert_eq!(min_micro_gain_tokens(200_000), 20_000);
+    let config = CompactConfig::default();
+    assert_eq!(min_micro_gain_tokens(0, &config), 0);
+    assert_eq!(min_micro_gain_tokens(1, &config), 1);
+    assert_eq!(min_micro_gain_tokens(200_000, &config), 20_000);
     assert_eq!(
-        min_micro_gain_tokens(200_001),
+        min_micro_gain_tokens(200_001, &config),
         20_001,
         "不得向下取整丢掉 1 token"
     );
-    assert_eq!(min_micro_gain_tokens(199_999), 20_000);
+    assert_eq!(min_micro_gain_tokens(199_999, &config), 20_000);
 }
 
 #[test]

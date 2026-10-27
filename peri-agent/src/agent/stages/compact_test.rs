@@ -585,7 +585,7 @@ async fn test_compact_stage_deferred_emits_paired_end_without_completion() {
     let deferral = ended[0].1.expect("CompactEnded 必须携带跳过原因");
     assert_eq!(
         deferral.min_gain_tokens,
-        crate::agent::compact_v2::min_micro_gain_tokens(200_000),
+        crate::agent::compact_v2::min_micro_gain_tokens(200_000, &CompactConfig::default()),
         "事件必须携带完整窗口 10% 的门槛"
     );
     assert!(

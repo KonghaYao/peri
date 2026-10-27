@@ -257,7 +257,7 @@ async fn test_micro_below_gain_gate_defers_without_writes() {
     let deferral = result.deferral.expect("延后必须携带结构化原因");
     assert_eq!(
         deferral.min_gain_tokens,
-        crate::agent::compact_v2::min_micro_gain_tokens(200_000)
+        crate::agent::compact_v2::min_micro_gain_tokens(200_000, &config)
     );
     assert!(deferral.estimated_gain_tokens < deferral.min_gain_tokens);
     assert_planned_once();
