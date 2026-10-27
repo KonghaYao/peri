@@ -6,6 +6,7 @@ use peri_acp_types::system_reminder::{ReminderCategory, ReminderDelivery, Remind
 use peri_acp_types::tasks::TaskManager as _;
 
 use crate::agent::async_tasks::TaskManager;
+use crate::session::async_result_mailbox::AsyncResultMailbox;
 use crate::session::transcript::PersistOp;
 use crate::session::{MessageQueue, MessageTranscript};
 
@@ -21,6 +22,7 @@ pub struct ParkedChildOwner {
     pub parent_thread_id: String,
     pub manager: Arc<TaskManager>,
     pub queue: MessageQueue,
+    pub(super) mailbox: Arc<AsyncResultMailbox>,
     pub resources: Option<Arc<dyn SessionResources>>,
     pub(super) pool: Option<std::sync::Weak<dyn peri_acp_types::ports::McpPoolPort>>,
     parent: parking_lot::Mutex<Option<std::sync::Weak<TaskManager>>>,
@@ -36,6 +38,29 @@ struct OwnerState {
     failure: Option<String>,
     receipt: Option<ChildHandoffReceipt>,
     pending_receipt: Option<ChildHandoffReceipt>,
+}
+
+impl OwnerState {
+    fn check_admission(&self) -> Result<(), String> {
+        if self.closing {
+            return Err("child resource owner is closing".into());
+        }
+        if self.preparing {
+            return Err("child resource owner is preparing another run".into());
+        }
+        if self.execution.is_some() {
+            return Err("child execution or terminal event drain is still active".into());
+        }
+        if self.pending_receipt.is_some() {
+            return Err(
+                "child handoff is unconfirmed; resume and receipt clearing are refused".into(),
+            );
+        }
+        if self.failure.is_some() {
+            return Err("child resource settlement is unconfirmed".into());
+        }
+        Ok(())
+    }
 }
 
 pub struct ChildPreparationPermit(Arc<ParkedChildOwner>);
@@ -61,11 +86,16 @@ impl ParkedChildOwner {
         resources: Option<Arc<dyn SessionResources>>,
         pool: Option<std::sync::Weak<dyn peri_acp_types::ports::McpPoolPort>>,
     ) -> Arc<Self> {
+        let mailbox = Arc::new(AsyncResultMailbox::new(
+            child_thread_id.clone(),
+            child_thread_id.clone(),
+        ));
         Arc::new(Self {
             child_thread_id,
             parent_thread_id,
             manager,
             queue,
+            mailbox,
             resources,
             pool,
             parent: parking_lot::Mutex::new(None),
@@ -100,23 +130,7 @@ impl ParkedChildOwner {
         execution: ExecutionBinding,
     ) -> Result<ChildExecutionPermit, String> {
         let mut state = self.state.lock();
-        if state.closing {
-            return Err("child resource owner is closing".into());
-        }
-        if state.preparing {
-            return Err("child resource owner is preparing another run".into());
-        }
-        if let Some(error) = &state.failure {
-            return Err(format!("child resource settlement is unconfirmed: {error}"));
-        }
-        if state.execution.is_some() {
-            return Err("child execution or terminal event drain is still active".into());
-        }
-        if state.pending_receipt.is_some() {
-            return Err(
-                "child handoff is unconfirmed; resume and receipt clearing are refused".into(),
-            );
-        }
+        state.check_admission()?;
         // 新执行拥有新的交接身份；旧执行的 receipt 不跨 run 复用。
         state.receipt = None;
         state.pending_receipt = None;
@@ -130,27 +144,13 @@ impl ParkedChildOwner {
 
     pub fn prepare_resume(self: &Arc<Self>) -> Result<ChildPreparationPermit, String> {
         let mut state = self.state.lock();
-        if state.closing || state.preparing || state.execution.is_some() || state.failure.is_some()
-        {
-            return Err("child resource owner is not available for resume".into());
-        }
+        state.check_admission()?;
         state.preparing = true;
         Ok(ChildPreparationPermit(self.clone()))
     }
 
     pub fn check_resume(&self) -> Result<(), String> {
-        let state = self.state.lock();
-        if state.closing || state.preparing || state.execution.is_some() || state.failure.is_some()
-        {
-            return Err(format!(
-                "child resource owner cannot resume: closing={}, preparing={}, active={}, failure={:?}",
-                state.closing,
-                state.preparing,
-                state.execution.is_some(),
-                state.failure
-            ));
-        }
-        Ok(())
+        self.state.lock().check_admission()
     }
 
     pub fn receipt(&self) -> Option<ChildHandoffReceipt> {

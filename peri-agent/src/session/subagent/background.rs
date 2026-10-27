@@ -53,6 +53,7 @@ pub(super) async fn spawn_background_subagent(
     v2_ctx: V2SubagentContext,
     resume_claim: Option<&mut super::factory::ResumeClaim>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let resuming = resume_claim.is_some();
     let task_manager =
         task_manager.ok_or("Background tasks not available: no task manager configured")?;
     let permit = v2_ctx
@@ -124,6 +125,10 @@ pub(super) async fn spawn_background_subagent(
         let execution_turn = v2_ctx.context.session.turn.clone();
         let context = v2_ctx.context;
         let session = v2_ctx.session;
+        if resuming {
+            // 注册与认领移交完成后才恢复处理责任，失败的准备不得提前解阻塞。
+            session.async_result_mailbox().resume_scope();
+        }
         // Start/Stop emit 需要 event_bus（partial move 后仍可用）+ 统一身份键
         let event_bus_for_emit = v2_ctx.event_bus;
         let subagent_agent_id = v2_ctx.agent_id;
@@ -193,7 +198,10 @@ pub(super) async fn spawn_background_subagent(
 
         let mut outcome =
             super::child_runner::run_child_until_terminal(context, max_iterations, &session).await;
+        // 已提交的交接不能替代后续 history flush 的确认。
+        let mut history_flush_failed = false;
         if let Err(error) = super::lifecycle::flush_session_history(&session).await {
+            history_flush_failed = true;
             outcome = match outcome {
                 ChildRunOutcome::HandedOff { receipt } => ChildRunOutcome::Failed {
                     error,
@@ -460,13 +468,16 @@ pub(super) async fn spawn_background_subagent(
         let owner = session
             .subagent_host()
             .and_then(|host| host.child_owner.clone());
+        // residual 是已确认的交接；无 receipt 时仍须检查动态到达的义务。
         let permit_result = if !terminal_persisted {
             Err("terminal_status_persist_failed".to_string())
         } else if let Some(error) = drain_failure.as_ref() {
             Err(format!("child event drain failed: {error}"))
+        } else if history_flush_failed {
+            Err("child history flush is unconfirmed".to_string())
         } else if matches!(outcome, ChildRunOutcome::HandoffFailed { .. }) {
             Err("child handoff persistence is unconfirmed".to_string())
-        } else if matches!(outcome, ChildRunOutcome::Failed { .. })
+        } else if matches!(outcome, ChildRunOutcome::Failed { residual: None, .. })
             && owner
                 .as_ref()
                 .is_some_and(|owner| owner.has_unsettled_obligations())
