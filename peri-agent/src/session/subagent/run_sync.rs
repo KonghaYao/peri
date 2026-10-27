@@ -425,6 +425,8 @@ pub(super) async fn run_sync_subagent(
     // records cancellation without duplicating lifecycle Stop/hook delivery.
     if let Some(claim) = &mut resume_claim {
         claim.mark_running(session.clone());
+        // 只在新执行获得准入后恢复处理责任；准备失败不得提前解阻塞。
+        session.async_result_mailbox().resume_scope();
     }
     let terminal_resources = session_resources.clone();
     let stop_resources = if resume_claim.is_some() {
@@ -484,7 +486,10 @@ pub(super) async fn run_sync_subagent(
         error: crate::error::AgentError::Other(anyhow::anyhow!("sync child execution panicked")),
         residual: None,
     });
+    // 已提交的交接不能替代后续 history flush 的确认。
+    let mut history_flush_failed = false;
     if let Err(error) = super::lifecycle::flush_session_history(&session).await {
+        history_flush_failed = true;
         outcome = match outcome {
             ChildRunOutcome::HandedOff { receipt } => ChildRunOutcome::Failed {
                 error,
@@ -694,11 +699,14 @@ pub(super) async fn run_sync_subagent(
     let owner = session
         .subagent_host()
         .and_then(|host| host.child_owner.clone());
+    // residual 是已确认的交接；无 receipt 时仍须检查动态到达的义务。
     let permit_result = if let Some(error) = settlement_error.as_ref() {
         Err(error.to_string())
+    } else if history_flush_failed {
+        Err("child history flush is unconfirmed".into())
     } else if matches!(outcome, ChildRunOutcome::HandoffFailed { .. }) {
         Err("child handoff persistence is unconfirmed".into())
-    } else if matches!(outcome, ChildRunOutcome::Failed { .. })
+    } else if matches!(outcome, ChildRunOutcome::Failed { residual: None, .. })
         && owner
             .as_ref()
             .is_some_and(|owner| owner.has_unsettled_obligations())
