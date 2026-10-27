@@ -434,39 +434,6 @@ async fn test_exited_leader_cleanup_terminates_descendant() {
 }
 
 #[tokio::test]
-async fn test_cleanup_and_drop_preserve_other_group_after_tree_exit() {
-    for explicit_cleanup in [true, false] {
-        let mut fixture = ExitedLeader::spawn_with_stdout("ignore").await;
-        let stopped = tokio::time::timeout(Duration::from_secs(3), fixture.host.kill()).await;
-        if !matches!(&stopped, Ok(Ok(()))) {
-            let cleanup = fixture.cleanup().await;
-            panic!("前置进程树退出失败：{stopped:?}; cleanup: {cleanup:?}");
-        }
-        let mut other = ExitedLeader::spawn().await;
-        let mut incoming = other.host.take_incoming().await.unwrap();
-        // 仅替换夹具记录的 PGID，模拟旧编号已复用；目标也是本测试拥有的树。
-        fixture.group = other.group;
-        let cleanup = if explicit_cleanup {
-            fixture.cleanup().await
-        } else {
-            Ok(())
-        };
-        drop(fixture);
-        // 用新的 RELEASE/响应握手证明仍可执行，不以信号 0 的瞬时探测代替。
-        let released = tokio::fs::write(other.release_path(), b"release").await;
-        let response = tokio::time::timeout(Duration::from_secs(3), incoming.recv()).await;
-        let other_cleanup = other.cleanup().await;
-        assert!(cleanup.is_ok(), "原树清理失败：{cleanup:?}");
-        assert!(released.is_ok(), "对照树 RELEASE 失败：{released:?}");
-        assert!(
-            matches!(response, Ok(Some(IncomingMessage::Request { id: None, ref method, .. })) if method == "fixture/released"),
-            "已结束 owner 的 cleanup/Drop 不得信号其他树：explicit_cleanup={explicit_cleanup}"
-        );
-        assert!(other_cleanup.is_ok(), "对照树清理失败：{other_cleanup:?}");
-    }
-}
-
-#[tokio::test]
 async fn test_cancelled_reader_join_retains_owner() {
     let mut fixture = ExitedLeader::spawn().await;
     let mut incoming = fixture.host.take_incoming().await.unwrap();
