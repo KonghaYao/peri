@@ -72,7 +72,7 @@ export function provesInstance(proof: InstanceStoppedProof | undefined, instance
         proof.generationId === instance.generationId && typeof proof.evidenceId === "string" && proof.evidenceId.length > 0;
 }
 
-export function provesAttempt(proof: StoppedProof, ticket: ExecutionTicket): boolean {
+function provesAttempt(proof: StoppedProof, ticket: ExecutionTicket): boolean {
     if (proof?.kind === "entryNotApplied") return sameTicket(proof.ticket, ticket);
     if (!proof || proof.instanceId !== ticket.instanceId || proof.generationId !== ticket.generationId || !proof.evidenceId)
         return false;

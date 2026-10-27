@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import type { ControlState } from "../src/execution/types";
 import { ExecutionCoordinator } from "../src/execution/coordinator";
-import { MemoryExecutionRegistry } from "../src/execution/memory-registry";
+import { MemoryExecutionKv } from "../src/execution/memory-registry";
+import { KvExecutionRegistry } from "../src/execution/kv-registry";
 import type { ExecutionTicket, RunnableWork } from "../src/execution/types";
 
 function barrier() {
@@ -11,7 +12,7 @@ function barrier() {
 }
 
 async function fixture() {
-    const registry = new MemoryExecutionRegistry();
+    const registry = new KvExecutionRegistry(new MemoryExecutionKv());
     const state = {
         control: { lifecycle: 1, revision: 0, controlGeneration: 0, status: "active", attempt: null } as ControlState,
         work: null as RunnableWork | null,

@@ -1,10 +1,9 @@
-import type { AtomicManagedAgentKv } from "../kv/types";
 import type { ExecutionMutation, ExecutionRecord, ExecutionRegistry, ExecutionResolution } from "./types";
 import { decideExecution, emptyExecutionRecord, mutationDigest } from "./registry-model";
 import { ExecutionMutationConflictError, replayMutation, type MutationEntry } from "./registry-ledger";
 
 export type ExecutionKvValue = { protocolVersion: 1; version: number; record: ExecutionRecord; mutations: MutationEntry[] };
-export interface AtomicExecutionKv extends AtomicManagedAgentKv {
+export interface AtomicExecutionKv {
     readonly durability: "durable" | "bestEffort";
     readExecutionValue(key: string): Promise<ExecutionKvValue | null>;
     compareAndSetExecutionValue(key: string, expectedVersion: number | null, next: ExecutionKvValue): Promise<boolean>;
@@ -15,7 +14,7 @@ export class KvExecutionRegistry implements ExecutionRegistry {
 
     constructor(private readonly kv: AtomicExecutionKv) {
         if (typeof kv.readExecutionValue !== "function" || typeof kv.compareAndSetExecutionValue !== "function")
-            throw new TypeError("Execution KV requires atomic read and versioned CAS; claim/release is insufficient");
+            throw new TypeError("Execution KV requires readExecutionValue and compareAndSetExecutionValue");
         this.durability = kv.durability;
     }
 

@@ -1,0 +1,301 @@
+name: Release SDK
+
+# 从 peri-wasm 的 Emscripten 构建到 @peri-code/sdk 的 npm 发布。
+#
+# 触发：
+# - push sdk-v* tag：版本取自 tag（sdk-v0.1.0 -> 0.1.0），构建成功后自动发布。
+# - workflow_dispatch：手动指定版本；dry_run 默认 true，只构建、测试、打包并上传
+#   artifact。确认无误后把 dry_run 设为 false 再运行一次。
+#
+# 发布前置：
+# - 仓库 secret NPM_TOKEN：对 @peri-code scope 有发布权限的 granular token，
+#   并允许 CI 绕过 2FA（Automation token，或在 token 上配置 bypass 2FA）。
+# - npm 侧已存在 @peri-code scope，且该 token 属于有发布权限的用户/团队。
+# - 发布使用 npm provenance（id-token: write + package.json 的 repository），
+#   因此必须从 GitHub Actions 运行，不要在本地复现发布步骤。
+#
+# 版本与 dist-tag：
+# - 版本来自 tag/输入，workflow 只在 CI 工作区执行 npm pkg set version，不写回仓库。
+# - 含 `-` 的版本（如 0.1.0-beta.1）发布到 next，其余发布到 latest。
+
+on:
+    push:
+        tags:
+            - "sdk-v*"
+    workflow_dispatch:
+        inputs:
+            version:
+                description: "要发布的版本号（不带 v，例如 0.1.0）"
+                required: true
+                type: string
+            dry_run:
+                description: "只构建/测试/打包，不发布"
+                required: true
+                type: boolean
+                default: true
+
+permissions:
+    contents: read
+
+concurrency:
+    group: release-sdk-${{ github.ref }}
+    cancel-in-progress: false
+
+env:
+    CARGO_TERM_COLOR: always
+    MISE_ENV: wasm
+
+jobs:
+    build:
+        name: Build and pack SDK
+        runs-on: ubuntu-24.04
+        timeout-minutes: 90
+        outputs:
+            version: ${{ steps.version.outputs.version }}
+            dist_tag: ${{ steps.version.outputs.dist_tag }}
+            dry_run: ${{ steps.version.outputs.dry_run }}
+        defaults:
+            run:
+                shell: bash
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+
+            - name: Resolve version and dist-tag
+              id: version
+              env:
+                  INPUT_VERSION: ${{ inputs.version }}
+                  INPUT_DRY_RUN: ${{ inputs.dry_run }}
+              run: |
+                  set -euo pipefail
+                  if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF_TYPE}" == "tag" ]]; then
+                      [[ "${GITHUB_REF_NAME}" == sdk-v* ]] || { echo "::error::tag must start with sdk-v"; exit 1; }
+                      version="${GITHUB_REF_NAME#sdk-v}"
+                      dry_run=false
+                  else
+                      version="${INPUT_VERSION}"
+                      dry_run="${INPUT_DRY_RUN}"
+                  fi
+                  [[ "${version}" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]] || {
+                      echo "::error::invalid semantic version: ${version}"
+                      exit 1
+                  }
+                  if [[ "${version}" == *-* ]]; then
+                      dist_tag=next
+                  else
+                      dist_tag=latest
+                  fi
+                  echo "version=${version}" >> "${GITHUB_OUTPUT}"
+                  echo "dist_tag=${dist_tag}" >> "${GITHUB_OUTPUT}"
+                  echo "dry_run=${dry_run}" >> "${GITHUB_OUTPUT}"
+
+            # 补丁身份必须在 mise 之前取：--print-patch-identity 只读
+            # patches/emscripten/*.patch，不要求本机已有 emcc。
+            - name: Resolve Emscripten patch identity
+              id: emscripten
+              run: echo "identity=$(bash scripts/prepare-emscripten.sh --print-patch-identity)" >> "${GITHUB_OUTPUT}"
+
+            - name: Install Bun
+              uses: oven-sh/setup-bun@v2
+
+            # 与 pre-release.yml 的 wasm job 共用同一套缓存身份：runner、mise 配置哈希、
+            # Emscripten 补丁集。工具版本仍由 mise.wasm.toml 钉死。
+            - name: Install WASM build tools
+              uses: jdx/mise-action@v4
+              with:
+                  cache: true
+                  cache_key: mise-wasm-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('mise.toml', 'mise.wasm.toml') }}-${{ steps.emscripten.outputs.identity }}
+
+            # 缓存命中时 mise 直接复用数据目录里的安装记录，这里就地验证工具仍可执行：
+            # 「记录在、二进制不在」这类缓存问题立刻失败，而不是等到链接阶段。
+            - name: Verify cached WASM tools
+              run: mise exec -- wasm-bindgen --version
+
+            - name: Cache Rust build
+              uses: Swatinem/rust-cache@v2
+              with:
+                  key: sdk-wasm32-unknown-emscripten
+
+            - name: Install SDK dependencies
+              working-directory: npm-packages/@peri-sdk
+              run: bun install --frozen-lockfile
+
+            - name: Typecheck SDK
+              working-directory: npm-packages/@peri-sdk
+              run: bun run typecheck
+
+            - name: Build WASM and SDK
+              working-directory: npm-packages/@peri-sdk
+              run: bun run build
+
+            - name: Verify build artifacts
+              working-directory: npm-packages/@peri-sdk
+              run: |
+                  set -euo pipefail
+                  for file in \
+                      dist/index.js dist/portable.js dist/wasm.js dist/wasm-node.js dist/view.js \
+                      dist/entries/index.d.ts dist/entries/portable.d.ts dist/entries/wasm.d.ts \
+                      dist/entries/wasm-node.d.ts dist/entries/view.d.ts \
+                      dist/wasm/peri-wasm.js dist/wasm/peri_wasm.wasm; do
+                      test -s "${file}" || { echo "::error::missing build artifact: ${file}"; exit 1; }
+                  done
+                  test -n "$(find dist/wasm/snippets -type f -print -quit)"
+                  bun -e 'const sdk = await import("./dist/index.js"); if (typeof sdk.ChatManager !== "function") throw new Error("ChatManager missing from dist/index.js")'
+
+            # SDK 的 wasm-acp-integration 测试需要真实 sqld。本地由 SDK 的 mise.toml 提供；
+            # Linux runner 这里下载同版本二进制，并用 PERI_TEST_SQLD_BIN 指向它。
+            # SQLD_VERSION 必须与 npm-packages/@peri-sdk/mise.toml 保持一致。
+            - name: Install sqld for SDK integration tests
+              env:
+                  SQLD_VERSION: 0.24.32
+                  SQLD_ASSET: libsql-server-x86_64-unknown-linux-gnu.tar.xz
+                  SQLD_SHA256: 71720fc8648c19efef416efebd47145ef59b62e198770533530a858e1336879f
+              run: |
+                  set -euo pipefail
+                  curl -fsSL -o "/tmp/${SQLD_ASSET}" \
+                      "https://github.com/tursodatabase/libsql/releases/download/libsql-server-v${SQLD_VERSION}/${SQLD_ASSET}"
+                  echo "${SQLD_SHA256}  /tmp/${SQLD_ASSET}" | sha256sum -c -
+                  mkdir -p /tmp/sqld
+                  tar -xJf "/tmp/${SQLD_ASSET}" -C /tmp/sqld --strip-components=1
+                  sudo install -m 0755 /tmp/sqld/sqld /usr/local/bin/sqld
+                  sqld --version
+
+            - name: Run SDK tests
+              working-directory: npm-packages/@peri-sdk
+              env:
+                  PERI_TEST_SQLD_BIN: /usr/local/bin/sqld
+              run: bun test
+
+            # 打包前才改版本：测试始终跑在仓库声明的版本上，避免测试结果依赖 tag。
+            # npm 会把 LICENSE 自动放进 tarball；files 只声明 dist 与 README。
+            - name: Pack SDK
+              working-directory: npm-packages/@peri-sdk
+              env:
+                  VERSION: ${{ steps.version.outputs.version }}
+              run: |
+                  set -euo pipefail
+                  rm -rf sdk-package
+                  mkdir -p sdk-package
+                  npm pkg set version="${VERSION}"
+                  npm pkg delete private
+                  npm pack --pack-destination sdk-package
+                  tarball="$(find sdk-package -maxdepth 1 -name '*.tgz' -print -quit)"
+                  test -n "${tarball}"
+                  tar -tzf "${tarball}" > sdk-package/contents.txt
+                  grep -qx 'package/package.json' sdk-package/contents.txt
+                  grep -qx 'package/README.md' sdk-package/contents.txt
+                  grep -qx 'package/LICENSE' sdk-package/contents.txt
+                  grep -qx 'package/dist/index.js' sdk-package/contents.txt
+                  grep -qx 'package/dist/wasm/peri_wasm.wasm' sdk-package/contents.txt
+                  if grep -qE '^package/(src|tests?|examples|node_modules)/' sdk-package/contents.txt; then
+                      echo "::error::unexpected files in package tarball"
+                      exit 1
+                  fi
+                  unpacked="$(mktemp -d)"
+                  tar -xzf "${tarball}" -C "${unpacked}"
+                  node -e 'const p = require(process.argv[1]); if (p.private) throw new Error("packed package is private"); if (p.version !== process.env.VERSION) throw new Error(`version mismatch: ${p.version}`); if (p.license !== "Apache-2.0") throw new Error("license missing"); if (!p.repository) throw new Error("repository missing"); if (!p.exports) throw new Error("exports missing")' "${unpacked}/package/package.json"
+                  echo "${VERSION}" > sdk-package/version.txt
+                  (cd sdk-package && sha256sum ./*.tgz > SHA256SUMS)
+
+            - name: Upload SDK package
+              uses: actions/upload-artifact@v4
+              with:
+                  name: sdk-package
+                  path: npm-packages/@peri-sdk/sdk-package
+                  if-no-files-found: error
+                  retention-days: 14
+
+    publish:
+        name: Publish to npm
+        needs: build
+        if: needs.build.outputs.dry_run != 'true'
+        runs-on: ubuntu-24.04
+        timeout-minutes: 15
+        permissions:
+            contents: read
+            id-token: write
+        defaults:
+            run:
+                shell: bash
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+
+            - name: Download SDK package
+              uses: actions/download-artifact@v4
+              with:
+                  name: sdk-package
+                  path: sdk-package
+
+            - name: Install Node for npm publish
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 24
+                  package-manager-cache: false
+
+            # 不用 setup-node 的 registry-url：它会写入 npm 11 已废弃的 always-auth，
+            # 并在日志里产生警告。这里显式写认证与 registry。
+            - name: Configure npm registry
+              env:
+                  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+              run: |
+                  set -euo pipefail
+                  if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
+                      echo "::error::NPM_TOKEN secret is required to publish @peri-code/sdk"
+                      exit 1
+                  fi
+                  {
+                      echo "registry=https://registry.npmjs.org/"
+                      echo "//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}"
+                  } >> "${HOME}/.npmrc"
+
+            - name: Publish
+              env:
+                  VERSION: ${{ needs.build.outputs.version }}
+                  DIST_TAG: ${{ needs.build.outputs.dist_tag }}
+              run: |
+                  set -euo pipefail
+                  (cd sdk-package && sha256sum -c SHA256SUMS)
+                  tarball="$(find sdk-package -maxdepth 1 -name '*.tgz' -print -quit)"
+                  test -n "${tarball}"
+
+                  # 版本端点不依赖 packument 根文档；新包/新 scope 的根文档可能延迟生成。
+                  # 只有明确 404 才继续发布；其他状态重试后仍不确定则失败关闭。
+                  status=000
+                  for attempt in $(seq 1 6); do
+                      status="$(curl -sS -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/@peri-code%2Fsdk/${VERSION}" || true)"
+                      status="${status:-000}"
+                      case "${status}" in
+                          200) echo "::error::@peri-code/sdk@${VERSION} is already published"; exit 1;;
+                          404) break;;
+                          *) echo "registry returned HTTP ${status}, retrying (${attempt}/6)..."; sleep 5;;
+                      esac
+                  done
+                  if [[ "${status}" != "404" ]]; then
+                      echo "::error::cannot confirm @peri-code/sdk@${VERSION} is unpublished (last HTTP ${status})"
+                      exit 1
+                  fi
+
+                  mkdir -p publish
+                  tar -xzf "${tarball}" -C publish
+                  node -e 'const p = require(process.argv[1]); if (p.private) throw new Error("packed package is private"); if (p.version !== process.env.VERSION) throw new Error(`version mismatch: ${p.version}`); if (p.license !== "Apache-2.0") throw new Error("license missing")' "${PWD}/publish/package/package.json"
+                  npm publish ./publish/package --access public --provenance --tag "${DIST_TAG}" --registry https://registry.npmjs.org
+
+                  # npm 对新建 scope/包生成 packument 根文档需要时间；`npm view` 会先取根文档，
+                  # 发布刚成功时可能短暂 404。这里以版本元数据为准并重试，避免误判发布失败。
+                  for attempt in $(seq 1 24); do
+                      if curl -fsS "https://registry.npmjs.org/@peri-code%2Fsdk/${VERSION}" -o /tmp/published-sdk.json; then
+                          node -e 'const p = require("/tmp/published-sdk.json"); if (p.version !== process.env.VERSION) throw new Error(`version mismatch: ${p.version}`); console.log(`published ${p.name}@${p.version}`)'
+                          tarball_url="$(node -p 'require("/tmp/published-sdk.json").dist.tarball')"
+                          curl -fsS -o /dev/null "${tarball_url}"
+                          exit 0
+                      fi
+                      echo "registry not ready for ${VERSION}, retrying (${attempt}/24)..."
+                      sleep 5
+                  done
+                  echo "::error::published version is not visible in the registry after 2 minutes"
+                  exit 1

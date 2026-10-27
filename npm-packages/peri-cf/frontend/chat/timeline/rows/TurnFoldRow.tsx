@@ -1,0 +1,36 @@
+import { ChevronRight } from 'lucide-react';
+import { cn } from '@/lib';
+
+/** turn 级折叠行：已结算 turn 的 work 收束为一条摘要；失败/取消保留终态语义。 */
+export function TurnFoldRow({
+  label,
+  expanded,
+  failed = false,
+  onToggle,
+}: {
+  label: string;
+  expanded: boolean;
+  failed?: boolean;
+  onToggle?: () => void;
+}) {
+  return (
+    <div className="border-border/70 border-b py-1" data-slot="peri-turn-fold">
+      <button
+        type="button"
+        className={cn(
+          'flex w-full min-w-0 items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[13px] transition-colors',
+          failed ? 'text-destructive/80 hover:text-destructive' : 'text-muted-foreground hover:text-foreground',
+        )}
+        aria-expanded={expanded}
+        onClick={onToggle}
+        disabled={!onToggle}
+      >
+        <ChevronRight
+          className={cn('size-3.5 shrink-0 transition-transform', expanded && 'rotate-90')}
+          aria-hidden="true"
+        />
+        <span className="truncate">{label}</span>
+      </button>
+    </div>
+  );
+}

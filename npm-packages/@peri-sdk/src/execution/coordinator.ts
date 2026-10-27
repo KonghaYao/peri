@@ -240,10 +240,6 @@ export class ExecutionCoordinator {
         }
     }
 
-    verifyRecordedEntries(record: ExecutionRecord): Promise<AdmissionResult | undefined> {
-        return this.auditEntered(record, true);
-    }
-
     private async queryWork(sessionId: string) {
         let query = await this.options.domain.queryWork(sessionId);
         const pending = query.pendingCommands ?? [];

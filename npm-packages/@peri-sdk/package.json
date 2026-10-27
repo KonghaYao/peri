@@ -1,29 +1,41 @@
 {
   "name": "@peri-code/sdk",
   "version": "0.0.0",
-  "private": true,
   "type": "module",
-  "description": "Peri ACP host SDK over host-injected transports, including the Emscripten WASM host",
+  "description": "Peri ACP host SDK over host-injected transports, including the Emscripten WASM runtime",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KonghaYao/peri.git",
+    "directory": "npm-packages/@peri-sdk"
+  },
+  "homepage": "https://github.com/KonghaYao/peri/tree/main/npm-packages/@peri-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/KonghaYao/peri/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": {
-      "types": "./dist/sdk/index.d.ts",
+      "types": "./dist/entries/index.d.ts",
       "import": "./dist/index.js"
     },
     "./portable": {
-      "types": "./dist/portable.d.ts",
+      "types": "./dist/entries/portable.d.ts",
       "import": "./dist/portable.js"
     },
     "./wasm": {
-      "types": "./dist/wasm.d.ts",
+      "types": "./dist/entries/wasm.d.ts",
       "import": "./dist/wasm.js"
     },
-    "./wasm-host": {
-      "types": "./dist/wasm-host.d.ts",
-      "import": "./dist/wasm-host.js"
+    "./wasm-node": {
+      "types": "./dist/entries/wasm-node.d.ts",
+      "import": "./dist/wasm-node.js"
     },
     "./view": {
-      "types": "./dist/view/index.d.ts",
-      "import": "./dist/view/index.js"
+      "types": "./dist/entries/view.d.ts",
+      "import": "./dist/view.js"
     }
   },
   "files": [
@@ -42,14 +54,14 @@
     "smoke:workers": "bun examples/workers/smoke.mjs"
   },
   "devDependencies": {
-    "bun-types": "^1.4.2",
-    "hono": "^4.6",
-    "typescript": "^7.0.0",
-    "wrangler": "4.147.0"
+    "bun-types": "^1.4.4",
+    "hono": "^4.13.14",
+    "typescript": "^7.0.2",
+    "wrangler": "4.152.0"
   },
   "dependencies": {
     "@microsoft/fetch-event-source": "2.0.1",
-    "@tursodatabase/serverless": "1.4.0",
+    "@tursodatabase/serverless": "1.4.1",
     "lib0": "^0.2.119",
     "yjs": "^13.6.33"
   }

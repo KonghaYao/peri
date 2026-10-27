@@ -15,5 +15,5 @@ await rm(dist, { recursive: true, force: true });
 await cp(source, dist, { recursive: true });
 await copyFile(resolve(here, 'worker.js'), resolve(dist, 'worker.js'));
 // SDK 打包入口：探针用它验证 peri-cf 形态（只注入 moduleFactory，不传可解析的 moduleUrl）。
-await copyFile(resolve(sdkRoot, 'dist/wasm-host.js'), resolve(dist, 'wasm-host.js'));
+await copyFile(resolve(sdkRoot, 'dist/wasm-node.js'), resolve(dist, 'wasm-node.js'));
 console.log(`Prepared Wrangler probe in ${dist}`);

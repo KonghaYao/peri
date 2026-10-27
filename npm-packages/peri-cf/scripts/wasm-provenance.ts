@@ -80,11 +80,7 @@ function localDependencies(manifest: CargoManifest, directory: string,
   return dependencies;
 }
 
-/**
- * `peri-wasm` plus its transitive in-repo path dependency closure: only these crates can change the CF
- * artifact. Hashing every workspace member made unrelated crates (for example `peri-tui`) invalidate
- * artifacts that do not depend on them.
- */
+/** `peri-wasm` 及其仓内路径依赖闭包：只有这些 crate 能改变 CF 产物。 */
 export async function wasmSourceRoots(repoRoot: string): Promise<string[]> {
   const root = resolve(repoRoot);
   const cargo = Bun.TOML.parse(await readFile(resolve(root, "Cargo.toml"), "utf8")) as {
@@ -143,7 +139,7 @@ export async function sourceChecksums(repoRoot: string): Promise<Record<string, 
   for (const directory of await wasmSourceRoots(repoRoot)) await walk(directory, add);
   for (const directory of ["patches", ".cargo"]) await walk(resolve(repoRoot, directory), add);
   for (const file of ["Cargo.toml", "Cargo.lock", "scripts/cargo-wasm.sh", "scripts/cargo-rmcp-patched.sh",
-    "scripts/prepare-emscripten.sh", "npm-packages/peri-cf/shared/runtime-limits.ts"])
+    "scripts/prepare-emscripten.sh"])
     await add(resolve(repoRoot, file));
   await walk(resolve(repoRoot, "npm-packages/peri-cf/scripts"), async (path) => {
     if (/\/(?:build-wasm|wasm-provenance|wasm-profile|wasm-tools|worker-glue|worker-runtime-glue)\.ts$/.test(path)) await add(path);

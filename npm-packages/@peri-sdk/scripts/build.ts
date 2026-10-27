@@ -20,7 +20,7 @@ await run(resolve(repoRoot, "scripts/cargo-wasm.sh"), [
 await rm(output, { recursive: true, force: true });
 
 const result = await Bun.build({
-  entrypoints: [resolve(packageRoot, "src/sdk/index.ts")],
+  entrypoints: [resolve(packageRoot, "src/entries/index.ts")],
   outdir: output,
   target: "bun",
   format: "esm",
@@ -28,36 +28,36 @@ const result = await Bun.build({
 });
 if (!result.success) throw new Error(`SDK bundle failed: ${result.logs.join("; ")}`);
 const browser = await Bun.build({
-  entrypoints: [resolve(packageRoot, "src/wasm.ts")],
+  entrypoints: [resolve(packageRoot, "src/entries/wasm.ts")],
   outdir: output,
   target: "browser",
   format: "esm",
 });
 if (!browser.success) throw new Error(`WASM SDK bundle failed: ${browser.logs.join("; ")}`);
 const view = await Bun.build({
-  entrypoints: [resolve(packageRoot, "src/view/index.ts")],
-  outdir: resolve(output, "view"),
+  entrypoints: [resolve(packageRoot, "src/entries/view.ts")],
+  outdir: output,
   target: "browser",
   format: "esm",
   external: ["yjs"],
 });
 if (!view.success) throw new Error(`Session view bundle failed: ${view.logs.join("; ")}`);
 const portable = await Bun.build({
-  entrypoints: [resolve(packageRoot, "src/portable.ts")],
+  entrypoints: [resolve(packageRoot, "src/entries/portable.ts")],
   outdir: output,
   target: "bun",
   format: "esm",
   external: ["yjs"],
 });
 if (!portable.success) throw new Error(`Portable SDK bundle failed: ${portable.logs.join("; ")}`);
-const host = await Bun.build({
-  entrypoints: [resolve(packageRoot, "src/wasm-host.ts")],
+const wasmNode = await Bun.build({
+  entrypoints: [resolve(packageRoot, "src/entries/wasm-node.ts")],
   outdir: output,
   target: "node",
   external: ["dns", "net", "node:dns", "node:net"],
   format: "esm",
 });
-if (!host.success) throw new Error(`WASM host bundle failed: ${host.logs.join("; ")}`);
+if (!wasmNode.success) throw new Error(`WASM node bundle failed: ${wasmNode.logs.join("; ")}`);
 await run(resolve(packageRoot, "node_modules/.bin/tsc"), ["--noEmit", "false", "--emitDeclarationOnly", "--declaration", "--outDir", "dist"], packageRoot);
 
 await mkdir(wasmOutput, { recursive: true });

@@ -3,10 +3,10 @@
  *
  * 只用当前 Host 方法表（`peri-acp/src/host/server_loop.rs` 的请求分派）：
  *  - 会话：`session/new` / `session/list` / `session/load` / `session/close`
- *  - Turn：默认走 `session/input/{snapshot,enqueue}` 队列路径，与 SDK `Session.send` 相同；
+ *  - Turn：默认走 `session/input/{snapshot,enqueue}` 队列路径，与 SDK `ChatService` 的输入队列相同；
  *    `?turn=prompt` 走 `session/prompt`，这是 SDK 之外的直连 turn 路径（peri-cf 也在用），不是遗留方法。
  *  - 取消：`session/cancel` 是通知，不是请求。
- *  - `?host=sdk`：peri-cf 形态——调用 SDK 的 `startPeriWasmHost` 且**只注入 `moduleFactory`**，
+ *  - `?host=sdk`：peri-cf 形态——调用 SDK 的 `startWasmRuntime` 且**只注入 `moduleFactory`**，
  *    不提供可解析的 `moduleUrl`。workerd 里 `import.meta.url` 是 undefined，SDK 不得在注入
  *    factory 时再去解析产物 URL。
  *
@@ -16,7 +16,7 @@
  */
 import Module from './peri-wasm.js';
 import wasmModule from './peri_wasm.wasm';
-import { createNodeSchedulerPort, startPeriWasmHost } from './wasm-host.js';
+import { startWasmRuntime } from './wasm-node.js';
 
 const CWD = '/workspace';
 const TURN_BUDGET_MS = 60_000;
@@ -73,6 +73,7 @@ function hostConfig(env) {
       profiles: { sonnet: { provider: 'fixture', model: 'fixture-model' } },
     } },
     storage: { url: env.STORAGE_URL, authToken: 'local-dev' },
+    // smoke fixture 的固定身份；仅用于示例。
     machineId: '00000000-0000-4000-8000-000000000004',
   };
 }
@@ -126,7 +127,7 @@ async function closeSession(acp, sessionId, observe) {
 
 /** peri-cf 形态：宿主只注入 moduleFactory，没有可解析的产物 URL。 */
 async function probeSdkHost(env) {
-  const transport = await startPeriWasmHost({
+  const transport = await startWasmRuntime({
     configJson: JSON.stringify(hostConfig(env)),
     moduleFactory: (options) => Module({
       mainScriptUrlOrBlob: 'file:///bundle/peri-wasm.js',
@@ -135,7 +136,6 @@ async function probeSdkHost(env) {
       },
       ...options,
     }),
-    ports: { scheduler: createNodeSchedulerPort() },
   });
   try {
     // transport.request<T> 的默认返回类型是 unknown，这里显式标注用到的响应字段。

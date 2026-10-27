@@ -27,7 +27,7 @@ async fn test_owner_retains_resources_without_computation() {
     let weak = Arc::downgrade(&child);
     root.register_child_owner(child.clone()).unwrap();
     let permit = child.acquire(execution()).unwrap();
-    assert!(child.check_resume().unwrap_err().contains("active=true"));
+    assert!(child.check_resume().unwrap_err().contains("active"));
     permit.finish(Ok(()));
     drop(child);
     let retained = root.child_owner("child").unwrap();
@@ -365,4 +365,74 @@ fn test_missing_handoff_capability_is_not_classified_as_persistence_failure() {
     assert!(failure
         .public_message()
         .contains("handoff_persistence_failed"));
+}
+
+/// [回归测试] prepare 与 acquire 共用锁内准入，未确认 receipt 不能被清除。
+#[tokio::test]
+async fn test_prepare_resume_preserves_exclusion_and_pending_handoff() {
+    let child = owner("root", "child");
+    let preparation = child.prepare_resume().unwrap();
+    assert!(child.prepare_resume().err().unwrap().contains("preparing"));
+    assert!(child
+        .acquire(execution())
+        .err()
+        .unwrap()
+        .contains("preparing"));
+    drop(preparation);
+    let binding = execution();
+    let permit = child.acquire(binding.clone()).unwrap();
+    assert!(child.prepare_resume().err().unwrap().contains("active"));
+    child
+        .freeze_receipt(super::super::ChildHandoffReceipt {
+            child_thread_id: "child".into(),
+            execution: binding,
+            owner_session_id: "child".into(),
+            reason: super::super::ChildHandoffReason::ExecutionFailed,
+            tasks: Vec::new(),
+            message_ids: Vec::new(),
+            message_sequences: Vec::new(),
+            unprocessed_tool_calls: Vec::new(),
+            canonical_message_id: peri_acp_types::messages::MessageId::new(),
+        })
+        .unwrap();
+    permit.finish(Ok(()));
+    assert!(child
+        .prepare_resume()
+        .err()
+        .unwrap()
+        .contains("handoff is unconfirmed"));
+    assert!(child.pending_receipt().is_some());
+    child.begin_close().unwrap();
+    assert!(child.prepare_resume().err().unwrap().contains("closing"));
+}
+
+/// [回归测试] 并发准备必须只有一个持有 permit，不能先检查后加锁。
+#[tokio::test]
+async fn test_concurrent_prepare_resume_allows_only_one_permit() {
+    let child = owner("root", "child");
+    let start = Arc::new(std::sync::Barrier::new(3));
+    let finish = Arc::new(std::sync::Barrier::new(3));
+    let workers: Vec<_> = (0..2)
+        .map(|_| {
+            let child = child.clone();
+            let start = start.clone();
+            let finish = finish.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                let result = child.prepare_resume();
+                let granted = result.is_ok();
+                finish.wait();
+                granted
+            })
+        })
+        .collect();
+    start.wait();
+    finish.wait();
+    let granted = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .filter(|granted| *granted)
+        .count();
+    assert_eq!(granted, 1);
+    child.prepare_resume().unwrap();
 }

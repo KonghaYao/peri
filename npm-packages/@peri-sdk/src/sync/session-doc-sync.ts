@@ -22,7 +22,7 @@ function positive(value: number, name: string): number {
     return value;
 }
 
-/** Authorized read-only replication. ACP remains the command boundary; peers never write back. */
+/** Read-only replication. ACP remains the command boundary; peers never write back. */
 export class SessionDocSync {
     readonly generation = crypto.randomUUID();
     private sequence = 0;

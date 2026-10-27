@@ -1,13 +1,51 @@
 import * as Y from "yjs";
-import { DocModel } from "./doc-model";
+import { DocModel, isPublicErrorCode, isTerminal, publicError } from "./doc-model";
 import { TurnMachine } from "./turn-machine";
-import { decodeMessagesJson, object, string, toolContentText, type RecordValue } from "./protocol";
+import { decodeMessagesJson, object, string, type RecordValue } from "./protocol";
+
+function jsonCopy(value: unknown): unknown {
+    const json = JSON.stringify(value);
+    if (json === undefined) throw new TypeError("Tool payload must be JSON serializable");
+    return JSON.parse(json);
+}
+
+function publicErrorFrom(value: unknown): { code: string; message: string } | null {
+    const record = object(value);
+    return record && isPublicErrorCode(record.code) && typeof record.message === "string"
+        ? { code: record.code, message: record.message } : null;
+}
+
+type PayloadRef = { id: string; bytes: number; preview: string };
+
+function payloadRefFrom(value: unknown): PayloadRef | null {
+    const record = object(value);
+    const id = string(record?.id);
+    return record && id && typeof record.bytes === "number" && Number.isFinite(record.bytes)
+        && typeof record.preview === "string"
+        ? { id, bytes: record.bytes, preview: record.preview } : null;
+}
+
+/** 只写运行侧归一化后的字段；inline 与 external 二者互斥，旧字段成对清除。 */
+function writePayloadField(
+    tool: Y.Map<unknown>, update: RecordValue,
+    field: "arguments" | "result", refKey: "argumentsRef" | "resultRef",
+): void {
+    const ref = payloadRefFrom(update[refKey]);
+    if (ref) {
+        if (payloadRefFrom(tool.get(refKey))?.id !== ref.id) tool.set(refKey, ref);
+        if (tool.has(field)) tool.delete(field);
+        return;
+    }
+    if (update[field] === undefined) return;
+    tool.set(field, jsonCopy(update[field]));
+    if (tool.has(refKey)) tool.delete(refKey);
+}
 
 /**
  * 规范历史替换（`replaceHistory`）的两种语义。Compact 不再走这条路（REQ-C02）：
  * 只有 rewind 这种「服务端真的删掉了尾部行、范围变了」的调用才会重建窗口。
  */
-export type HistoryReplaceMode =
+type HistoryReplaceMode =
     /** 默认：历史是唯一事实源，实时执行状态随之清空（首窗安装等冷路径）。 */
     | "reset-execution"
     /** rewind：窗口失效并刷新，但当前 turn／request 与未决交互保留（REQ-C02）。 */
@@ -71,21 +109,29 @@ export class ChatProjection {
     private acceptAssistant(update: RecordValue, kind: "agent_message_chunk" | "agent_thought_chunk"): boolean {
         const content = object(update.content);
         const text = typeof content?.text === "string" ? content.text : null;
-        if (!text) return false;
+        if (!content || !text || (content.type !== undefined && content.type !== "text")) return false;
+        if (kind === "agent_thought_chunk" && [content.visibility, update.visibility, object(update._meta)?.visibility]
+            .some((visibility) => visibility !== undefined && visibility !== "summary")) return false;
         const replay = object(update._meta)?.periReplay === true;
         const messageId = string(update.messageId);
         // A terminal turn can only be followed by a user turn. Late chunks must not create a ghost turn.
         if (!this.turns.activeTurn() || !this.turns.writable()) return false;
+        if (messageId && !replay) {
+            for (const id of this.docs.turnEntries(this.turns.activeTurn()!)) {
+                const previous = this.docs.entries().get(id)!;
+                if (previous.get("messageId") === messageId && isTerminal(previous.get("status"))) return false;
+            }
+        }
         this.docs.transactBoth(() => {
             const turnId = this.turns.activeTurn()!;
             const info = this.docs.info();
             let entryId = string(info.get("activeAssistantEntryId")) ?? `${turnId}:assistant`;
-            let entry = this.docs.ensureEntry(entryId, turnId, "assistant");
+            let entry = this.docs.ensureEntry(entryId, turnId, "assistant", replay);
             const currentMessageId = string(entry.get("messageId"));
             if (messageId && currentMessageId && currentMessageId !== messageId) {
-                entry.set("status", "completed");
+                this.docs.finish(entry, "completed");
                 entryId = `${turnId}:assistant:${messageId}`;
-                entry = this.docs.ensureEntry(entryId, turnId, "assistant");
+                entry = this.docs.ensureEntry(entryId, turnId, "assistant", replay);
                 info.set("activeAssistantEntryId", entryId);
             }
             const type = kind === "agent_message_chunk" ? "text" : "reasoning";
@@ -95,7 +141,7 @@ export class ChatProjection {
             if (replay && messageId) entry.set("replayMessageId", messageId);
             if (replay) entry.set("replayEpoch", this.replayEpoch);
             if (entry.get("status") !== "streaming") entry.set("status", "streaming");
-            if (info.get("activeTurnStatus") !== "running") info.set("activeTurnStatus", "running");
+            this.turns.markRunning();
         });
         return true;
     }
@@ -104,39 +150,47 @@ export class ChatProjection {
         const id = string(update.toolCallId) ?? string(update.id);
         const turnId = this.turns.activeTurn();
         if (!id || !turnId || !this.turns.writable()) return false;
+        const replay = object(update._meta)?.periReplay === true;
+        const existing = this.docs.tools().get(id);
+        if (existing && existing.get("turnId") !== turnId) {
+            if (update.sessionUpdate === "tool_call") throw new Error("tool_id_reused");
+            return false;
+        }
+        // 无所属调用的补丁不能构造工具；新调用显式接纳，缺省状态保持 pending。
+        if (!existing && update.sessionUpdate === "tool_call_update") return false;
+        const oldStatus = existing?.get("status");
         const rawStatus = string(update.status);
-        const status = rawStatus === "completed" ? "completed"
+        const status = rawStatus === null ? String(oldStatus ?? "pending")
+            : rawStatus === "completed" ? "completed"
             : rawStatus === "failed" || rawStatus === "error" ? "error"
             : rawStatus === "cancelled" ? "cancelled"
-            : rawStatus === "pending" ? "pending" : "running";
-        const existing = this.docs.tools().get(id);
-        const oldStatus = existing?.get("status");
-        if ((oldStatus === "completed" || oldStatus === "error" || oldStatus === "cancelled") && oldStatus !== status) return false;
+            : rawStatus === "pending" || rawStatus === "awaiting_permission" ? rawStatus
+            : rawStatus === "in_progress" ? "running" : null;
+        if (!status || (isTerminal(oldStatus) && oldStatus !== status)) return false;
+        const payloadError = publicErrorFrom(update.error);
+        const payloadRejected = Array.isArray(object(update._meta)?.periPayloadTooLarge)
+            && (object(update._meta)!.periPayloadTooLarge as unknown[]).length > 0;
         this.docs.chat.transact(() => {
-            const tool = this.docs.ensureTool(id, turnId, string(update.title) ?? string(update.name) ?? "Tool");
+            const tool = this.docs.ensureTool(id, turnId, string(update.title) ?? string(update.name) ?? "Tool", replay);
             const ownerId = string(tool.get("entryId"));
             const owner = ownerId ? this.docs.entries().get(ownerId) : undefined;
             const alreadyAttached = owner?.get("turnId") === turnId &&
                 (owner.get("blocks") as Y.Map<unknown>).has(`tool:${id}`);
             if (!alreadyAttached) {
                 const entryId = string(this.docs.info().get("activeAssistantEntryId")) ?? `${turnId}:assistant`;
-                this.docs.addToolBlock(this.docs.ensureEntry(entryId, turnId, "assistant"), id);
+                this.docs.addToolBlock(this.docs.ensureEntry(entryId, turnId, "assistant", replay), id);
             }
             const name = string(update.title) ?? string(update.name);
             if (name && tool.get("name") !== name) tool.set("name", name);
             const kind = string(update.kind);
             if (kind && tool.get("kind") !== kind) tool.set("kind", kind);
-            if (update.rawInput !== undefined) this.docs.payloads.set(tool, "arguments", update.rawInput);
-            if (status === "completed" || status === "error") {
-                const contentText = toolContentText(update.content);
-                const result: RecordValue = {};
-                if (contentText !== null) result.contentText = status === "error" && !contentText.trim()
-                    ? "Tool execution failed" : contentText;
-                else if (status === "error") result.contentText = "Tool execution failed";
-                if (update.rawOutput !== undefined) result.rawOutput = update.rawOutput;
-                if (Object.keys(result).length) this.docs.payloads.set(tool, "result", result);
-            }
-            if (tool.get("status") !== status) tool.set("status", status);
+            // 运行侧已完成载荷归一化：inline 写 JSON 值，external 只写引用与预览。
+            writePayloadField(tool, update, "arguments", "argumentsRef");
+            writePayloadField(tool, update, "result", "resultRef");
+            if (status === "completed" || status === "error" || status === "cancelled") this.docs.finish(tool, status, "tool_failed");
+            else if (tool.get("status") !== status) tool.set("status", status);
+            if (payloadError) tool.set("error", payloadError);
+            else if (payloadRejected) tool.set("error", publicError("payload_too_large"));
         });
         return true;
     }
@@ -177,16 +231,27 @@ export class ChatProjection {
                     continue;
                 }
                 const entryId = `message:${message.id}`;
-                const entry = this.docs.ensureEntry(entryId, turnId, message.role);
+                const entry = this.docs.ensureEntry(entryId, turnId, message.role, true);
                 if (message.role === "assistant") lastAssistantEntryId = entryId;
                 entry.set("messageId", message.id);
-                entry.set("status", "completed");
+                this.docs.finish(entry, "completed");
                 for (const block of message.blocks) {
                     if (block.type === "text" || block.type === "reasoning") {
                         if (block.text) this.docs.appendText(entry, block.type, block.text);
                     } else if (block.type === "tool") {
-                        const tool = this.docs.ensureTool(block.id, turnId, block.name);
-                        if (block.arguments !== undefined) this.docs.payloads.set(tool, "arguments", block.arguments);
+                        const tool = this.docs.ensureTool(block.id, turnId, block.name, true);
+                        if (block.argumentsError) {
+                            // 归一化明确拒绝外置：只保留公开错误，不写原文。
+                            tool.delete("arguments");
+                            tool.delete("argumentsRef");
+                            tool.set("error", publicError(block.argumentsError));
+                        } else if (block.argumentsRef) {
+                            tool.set("argumentsRef", block.argumentsRef);
+                            tool.delete("arguments");
+                        } else if (block.arguments !== undefined) {
+                            tool.set("arguments", jsonCopy(block.arguments));
+                            tool.delete("argumentsRef");
+                        }
                         this.docs.addToolBlock(entry, block.id);
                     }
                 }
@@ -195,7 +260,7 @@ export class ChatProjection {
                 const outcome = completedTools.get(id);
                 // A tool_use without its matching tool result is incomplete, even in a canonical snapshot.
                 tool.set("status", outcome === undefined ? "cancelled" : outcome.failed ? "error" : "completed");
-                if (outcome) this.docs.payloads.set(tool, "result", { contentText: outcome.failed && !outcome.resultText.trim()
+                if (outcome) tool.set("result", { contentText: outcome.failed && !outcome.resultText.trim()
                     ? "Tool execution failed" : outcome.resultText });
             }
             if (live) {

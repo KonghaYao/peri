@@ -41,7 +41,11 @@ export async function periFetchClose(handle, abort) {
     if (abort) handle.controller.abort();
     if (handle.reader) {
         try {
-            if (abort) await handle.reader.cancel();
+            // 已请求中止时 reader.cancel() 以 AbortError 拒绝是中止本身的结果，不是清理失败
+            // （Rust 侧同名映射：AbortError ⇒ cancelled）；其余失败照常上报给上层记录。
+            if (abort) await handle.reader.cancel().catch((error) => {
+                if (error?.name !== 'AbortError') throw error;
+            });
         } finally {
             handle.reader.releaseLock();
         }

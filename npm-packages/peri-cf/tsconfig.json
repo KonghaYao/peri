@@ -1,16 +1,37 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022", "DOM", "DOM.Iterable", "DOM.AsyncIterable"],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable",
+      "DOM.AsyncIterable"
+    ],
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "jsx": "react-jsx",
     "strict": true,
     "noEmit": true,
+    "paths": {
+      "@/*": [
+        "./frontend/*"
+      ]
+    },
     "skipLibCheck": true,
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
-    "types": ["bun", "vite/client"]
+    "types": [
+      "bun",
+      "vite/client"
+    ]
   },
-  "include": ["shared", "web", "worker", "scripts", "tests", "vite.config.ts"]
+  "include": [
+    "frontend",
+    "scripts",
+    "wasm",
+    "vite.config.ts"
+  ],
+  "exclude": [
+    "server"
+  ]
 }

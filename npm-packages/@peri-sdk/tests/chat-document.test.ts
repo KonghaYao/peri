@@ -1,0 +1,774 @@
+import { describe, expect, test } from "bun:test";
+import * as Y from "yjs";
+import { ChatDocument } from "../src/view/chat-document";
+import { readSessionView } from "../src/view/session-view";
+import type { ChatFact, ChatFactEnvelope } from "../src/contracts/chat";
+import { COMPACTION_STATUS } from "../src/state/session-projection";
+import type { JsonRpcNotification } from "../src/transport/types";
+
+function update(
+  sessionId: string,
+  sessionUpdate: string,
+  fields: Record<string, unknown>,
+  eventId?: string,
+): JsonRpcNotification {
+  return {
+    jsonrpc: "2.0",
+    method: "session/update",
+    params: {
+      sessionId,
+      update: { sessionUpdate, ...fields },
+      ...(eventId ? { _meta: { peri: { eventId } } } : {}),
+    },
+  };
+}
+
+function textChunk(sessionId: string, kind: string, messageId: string, text: string, eventId?: string) {
+  return update(sessionId, kind, { messageId, content: { type: "text", text } }, eventId);
+}
+
+function entries(docs: ChatDocument): Array<Y.Map<unknown>> {
+  const root = docs.chat.getMap<unknown>("root");
+  const order = root.get("entryOrder") as Y.Array<string>;
+  const byId = root.get("entries") as Y.Map<Y.Map<unknown>>;
+  return order.toArray().map((id) => byId.get(id)!);
+}
+
+function blocks(entry: Y.Map<unknown>): Array<Y.Map<unknown>> {
+  const order = entry.get("blockOrder") as Y.Array<string>;
+  const byId = entry.get("blocks") as Y.Map<Y.Map<unknown>>;
+  return order.toArray().map((id) => byId.get(id)!);
+}
+
+function textOf(entry: Y.Map<unknown>, type: string): string {
+  return blocks(entry)
+    .filter((block) => block.get("type") === type)
+    .map((block) => (block.get("text") as Y.Text).toString())
+    .join("");
+}
+
+const USER_ONE = "00000000-0000-4000-8000-000000000001";
+const ASSISTANT_ONE = "00000000-0000-4000-8000-000000000002";
+const USER_TWO = "00000000-0000-4000-8000-000000000003";
+const ASSISTANT_TWO = "00000000-0000-4000-8000-000000000004";
+
+function legacyEvent(sessionId: string, type: string, value: Record<string, unknown>): JsonRpcNotification {
+  return {
+    jsonrpc: "2.0",
+    method: "peri/agent_event",
+    params: { sessionId, event_json: JSON.stringify({ type, value }) },
+  };
+}
+
+describe("ACP to Yjs session documents", () => {
+  test("streams user, thought, and answer chunks into ordered Yjs entries", () => {
+    const docs = new ChatDocument();
+    docs.accept(textChunk("s1", "user_message_chunk", "user-1", "Build it"));
+    docs.accept(textChunk("s1", "agent_thought_chunk", "assistant-1", "First "));
+    docs.accept(textChunk("s1", "agent_thought_chunk", "assistant-1", "inspect"));
+    docs.accept(textChunk("s1", "agent_message_chunk", "assistant-1", "Done"));
+
+    expect(docs.chat).toBeInstanceOf(Y.Doc);
+    expect(docs.session).toBeInstanceOf(Y.Doc);
+    const visible = entries(docs);
+    expect(visible.map((entry) => entry.get("role"))).toEqual(["user", "assistant"]);
+    expect(textOf(visible[0]!, "text")).toBe("Build it");
+    expect(textOf(visible[1]!, "reasoning")).toBe("First inspect");
+    expect(textOf(visible[1]!, "text")).toBe("Done");
+    expect(blocks(visible[1]!).find((block) => block.get("type") === "text")?.get("text"))
+      .toBeInstanceOf(Y.Text);
+  });
+
+  test("tool calls keep their identity and a terminal status cannot regress", () => {
+    const docs = new ChatDocument();
+    docs.accept(textChunk("s1", "user_message_chunk", "user-1", "Read README.md"));
+    docs.accept(update("s1", "tool_call", {
+      toolCallId: "call-1", title: "Read", status: "in_progress",
+      arguments: { path: "README.md" },
+    }));
+    docs.accept(update("s1", "tool_call_update", {
+      toolCallId: "call-1", status: "completed", title: "Read",
+      content: [{ type: "text", text: "contents" }],
+    }));
+    docs.accept(update("s1", "tool_call_update", {
+      toolCallId: "call-1", status: "in_progress", title: "Read",
+    }));
+
+    const root = docs.chat.getMap<unknown>("root");
+    const toolCalls = root.get("toolCalls") as Y.Map<Y.Map<unknown>>;
+    expect(toolCalls.size).toBe(1);
+    const call = toolCalls.get("call-1")!;
+    expect(call.get("toolCallId")).toBe("call-1");
+    expect(call.get("name")).toBe("Read");
+    expect(call.get("status")).toBe("completed");
+  });
+
+  test("a canonical rewind snapshot does not claim an unpaired tool call succeeded", () => {
+    const docs = new ChatDocument();
+    docs.accept(legacyEvent("s1", "rewind_completed", {
+      messages_json: JSON.stringify([
+        { role: "user", id: USER_ONE, content: "Run a tool" },
+        {
+          role: "assistant", id: ASSISTANT_ONE,
+          content: [{ type: "tool_use", id: "call-without-result", name: "Read" }],
+        },
+      ]),
+    }));
+
+    const tools = docs.chat.getMap<unknown>("root").get("toolCalls") as Y.Map<Y.Map<unknown>>;
+    expect(tools.get("call-without-result")?.get("status")).not.toBe("completed");
+  });
+
+  test("a new user turn cancels the unfinished assistant and its tool", () => {
+    const docs = new ChatDocument();
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "First request"));
+    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "Working"));
+    docs.accept(update("s1", "tool_call", {
+      toolCallId: "call-in-progress", title: "Read", status: "in_progress",
+    }));
+    docs.accept(textChunk("s1", "user_message_chunk", USER_TWO, "Second request"));
+
+    const visible = entries(docs);
+    const tools = docs.chat.getMap<unknown>("root").get("toolCalls") as Y.Map<Y.Map<unknown>>;
+    expect(visible[1]?.get("status")).toBe("cancelled");
+    expect(tools.get("call-in-progress")?.get("status")).toBe("cancelled");
+    expect(visible[3]?.get("status")).toBe("pending");
+  });
+
+  test("a late chunk from a terminal turn does not create a phantom turn", () => {
+    const docs = new ChatDocument();
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Question"));
+    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "Answer"));
+    docs.accept({
+      jsonrpc: "2.0", method: "peri/agent_event_done",
+      params: { sessionId: "s1", stopReason: "end_turn", requestId: "request-1" },
+    });
+    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_TWO, "Late old output"));
+
+    expect(entries(docs)).toHaveLength(2);
+    expect(textOf(entries(docs)[1]!, "text")).toBe("Answer");
+    const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
+    expect(info.get("activeTurnStatus")).toBe("completed");
+  });
+
+  test("rewind keeps the live turn, its request identity, and pending interactions", () => {
+    const docs = new ChatDocument();
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Before rewind"));
+    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "partial answer"));
+    const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
+    const liveTurn = info.get("activeTurnId");
+    const liveStatus = info.get("activeTurnStatus");
+    const liveRequest = info.get("activeRequestId");
+    docs.accept(legacyEvent("s1", "user_input_run_started", { request_id: "request-live" }));
+    expect(info.get("pendingRequestId")).toBe("request-live");
+    const pending = new Y.Map<unknown>();
+    pending.set("1", { id: 1, kind: "permission", sessionId: "s1", toolCallId: "call-1" });
+    info.set("pendingInteractions", pending);
+    info.set("activeTurnInteractionStatus", "awaiting_permission");
+
+    docs.accept(legacyEvent("s1", "rewind_completed", { messages_json: "[]" }));
+
+    // 范围真的变了：窗口按保留消息刷新（这里为空），但执行状态与未决交互不能跟着清空。
+    expect(entries(docs)).toHaveLength(0);
+    expect(info.get("activeTurnId")).toBe(liveTurn);
+    expect(info.get("activeTurnStatus")).toBe(liveStatus);
+    expect(info.get("activeRequestId")).toBe(liveRequest);
+    expect(info.get("pendingRequestId")).toBe("request-live");
+    expect(info.get("pendingInteractions")).toBe(pending);
+    expect(info.get("activeTurnInteractionStatus")).toBe("awaiting_permission");
+  });
+
+  test("replayed notifications with an explicit event id do not append text twice", () => {
+    const docs = new ChatDocument();
+    const first = textChunk("s1", "user_message_chunk", "user-1", "Hello", "event-1");
+    const second = textChunk("s1", "agent_message_chunk", "assistant-1", "World", "event-2");
+    docs.accept(first);
+    docs.accept(second);
+    const before = docs.chat.getMap("root").toJSON();
+
+    docs.accept(first);
+    docs.accept(second);
+
+    expect(docs.chat.getMap("root").toJSON()).toEqual(before);
+    expect(entries(docs)).toHaveLength(2);
+  });
+
+  test("ACP replay chunks carrying the same messageId replace prior live text", () => {
+    const docs = new ChatDocument();
+    docs.accept(textChunk("s1", "user_message_chunk", "user-1", "Hello"));
+    docs.accept(textChunk("s1", "agent_message_chunk", "assistant-1", "World"));
+
+    // session/load replays complete message content with the canonical messageId.
+    // When the replay capability is negotiated, ACP marks the chunk itself.
+    docs.accept(update("s1", "user_message_chunk", {
+      messageId: "user-1", content: { type: "text", text: "Hello" },
+      _meta: { periReplay: true },
+    }));
+    docs.accept(update("s1", "agent_message_chunk", {
+      messageId: "assistant-1", content: { type: "text", text: "World" },
+      _meta: { periReplay: true },
+    }));
+
+    const visible = entries(docs);
+    expect(visible).toHaveLength(2);
+    expect(textOf(visible[0]!, "text")).toBe("Hello");
+    expect(textOf(visible[1]!, "text")).toBe("World");
+  });
+
+  test("multiple replay chunks of one user message preserve every text block", () => {
+    const docs = new ChatDocument();
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "live draft"));
+    docs.accept(update("s1", "user_message_chunk", {
+      messageId: USER_ONE, content: { type: "text", text: "first " }, _meta: { periReplay: true },
+    }));
+    docs.accept(update("s1", "user_message_chunk", {
+      messageId: USER_ONE, content: { type: "text", text: "second" }, _meta: { periReplay: true },
+    }));
+    expect(textOf(entries(docs)[0]!, "text")).toBe("first second");
+  });
+
+  test("a later replayed user turn completes the prior historical assistant", () => {
+    const docs = new ChatDocument();
+    const replay = (kind: string, messageId: string, text: string) => update("s1", kind, {
+      messageId, content: { type: "text", text }, _meta: { periReplay: true },
+    });
+    docs.accept(replay("user_message_chunk", USER_ONE, "First"));
+    docs.accept(replay("agent_message_chunk", ASSISTANT_ONE, "First reply"));
+    docs.accept(replay("user_message_chunk", USER_TWO, "Second"));
+    expect(entries(docs)[1]!.get("status")).toBe("completed");
+  });
+
+  test("different assistant messageIds in one turn remain separate entries", () => {
+    const docs = new ChatDocument();
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Run tool, then answer"));
+    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "I will inspect."));
+    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_TWO, "Inspection complete."));
+
+    const visible = entries(docs);
+    expect(visible.map((entry) => entry.get("role"))).toEqual(["user", "assistant", "assistant"]);
+    expect(textOf(visible[1]!, "text")).toBe("I will inspect.");
+    expect(textOf(visible[2]!, "text")).toBe("Inspection complete.");
+  });
+
+  test("adjacent identical text blocks in one replayed assistant message both survive", () => {
+    const docs = new ChatDocument();
+    docs.accept(update("s1", "user_message_chunk", {
+      messageId: USER_ONE, content: { type: "text", text: "Echo" },
+      _meta: { periReplay: true },
+    }));
+    for (const part of ["ha", "ha"]) {
+      docs.accept(update("s1", "agent_message_chunk", {
+        messageId: ASSISTANT_ONE, content: { type: "text", text: part },
+        _meta: { periReplay: true },
+      }));
+    }
+
+    expect(textOf(entries(docs)[1]!, "text")).toBe("haha");
+  });
+
+  test("ACP turn completion finalizes the assistant entry without adding a message", () => {
+    const docs = new ChatDocument();
+    docs.accept(textChunk("s1", "user_message_chunk", "user-1", "Question"));
+    docs.accept(textChunk("s1", "agent_message_chunk", "assistant-1", "Answer"));
+    docs.accept({
+      jsonrpc: "2.0",
+      method: "peri/agent_event_done",
+      params: { sessionId: "s1", stopReason: "end_turn", requestId: "request-1" },
+    });
+
+    const visible = entries(docs);
+    expect(visible).toHaveLength(2);
+    expect(visible[1]!.get("status")).toBe("completed");
+    expect(textOf(visible[1]!, "text")).toBe("Answer");
+  });
+
+  test("max_tokens turn done keeps an incomplete terminal state", () => {
+    const docs = new ChatDocument();
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Long answer"));
+    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "Partial answer"));
+    docs.accept({
+      jsonrpc: "2.0", method: "peri/agent_event_done",
+      params: { sessionId: "s1", stopReason: "max_tokens", requestId: "request-1" },
+    });
+
+    const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
+    expect(info.get("activeTurnStatus")).not.toBe("completed");
+    expect(entries(docs)[1]!.get("status")).not.toBe("completed");
+    expect(textOf(entries(docs)[1]!, "text")).toBe("Partial answer");
+  });
+
+  test("late done from an older input request cannot finish the next turn", () => {
+    const docs = new ChatDocument();
+    docs.accept(legacyEvent("s1", "user_input_run_started", {
+      generation: "generation-1", request_id: "old-request",
+    }));
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "First"));
+    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "First reply"));
+    docs.accept(legacyEvent("s1", "user_input_run_started", {
+      generation: "generation-1", request_id: "new-request",
+    }));
+    docs.accept(textChunk("s1", "user_message_chunk", USER_TWO, "Second"));
+    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_TWO, "Second reply"));
+
+    docs.accept({
+      jsonrpc: "2.0", method: "peri/agent_event_done",
+      params: { sessionId: "s1", stopReason: "end_turn", requestId: "old-request" },
+    });
+    const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
+    expect(info.get("activeTurnStatus")).toBe("running");
+    expect(entries(docs).at(-1)?.get("status")).toBe("streaming");
+
+    docs.accept({
+      jsonrpc: "2.0", method: "peri/agent_event_done",
+      params: { sessionId: "s1", stopReason: "end_turn", requestId: "new-request" },
+    });
+    expect(info.get("activeTurnStatus")).toBe("completed");
+    expect(entries(docs).at(-1)?.get("status")).toBe("completed");
+  });
+
+  test("a late identified done cannot finish a later turn without a run-started event", () => {
+    const docs = new ChatDocument();
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "First"));
+    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "First reply"));
+    docs.accept(textChunk("s1", "user_message_chunk", USER_TWO, "Second"));
+    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_TWO, "Second reply"));
+
+    docs.accept({
+      jsonrpc: "2.0", method: "peri/agent_event_done",
+      params: { sessionId: "s1", stopReason: "end_turn", requestId: "old-request" },
+    });
+
+    const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
+    expect(info.get("activeTurnStatus")).toBe("running");
+    expect(entries(docs).at(-1)?.get("status")).toBe("streaming");
+  });
+
+  test("cancel requested stops new deltas and done closes the same turn", () => {
+    const docs = new ChatDocument();
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Stop"));
+    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "Before"));
+    expect(docs.applyFact({ kind: "turn-cancel", restore: false })).toBe(true);
+    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, " after"));
+    docs.accept({ jsonrpc: "2.0", method: "peri/agent_event_done", params: { sessionId: "s1", stopReason: "cancelled" } });
+    expect(textOf(entries(docs)[1]!, "text")).toBe("Before");
+    expect(entries(docs)[1]!.get("status")).toBe("cancelled");
+  });
+
+  test("separate Agent session document pairs do not share state", () => {
+    const first = new ChatDocument();
+    const second = new ChatDocument();
+    first.accept(textChunk("s1", "user_message_chunk", "user-1", "Only first"));
+    second.accept(textChunk("s2", "user_message_chunk", "user-2", "Only second"));
+
+    expect(textOf(entries(first)[0]!, "text")).toBe("Only first");
+    expect(textOf(entries(second)[0]!, "text")).toBe("Only second");
+    expect(first.chat).not.toBe(second.chat);
+    expect(first.session).not.toBe(second.session);
+  });
+
+  test("subagent lifecycle is mirrored as safe task state", () => {
+    const docs = new ChatDocument();
+    docs.accept(legacyEvent("s1", "subagent_started", {
+      instance_id: "child-1", agent_name: "reviewer", is_background: true,
+    }));
+    docs.accept(legacyEvent("s1", "subagent_stopped", {
+      instance_id: "child-1", agent_name: "reviewer", is_error: true,
+      result: "private tool output", subagent_failure: { diagnostic: "private path" },
+    }));
+    docs.accept(legacyEvent("s1", "subagent_started", {
+      instance_id: "child-1", agent_name: "reviewer", is_background: true,
+    }));
+
+    const root = docs.session.getMap<unknown>("root");
+    const tasks = root.get("tasks") as Y.Map<Y.Map<unknown>>;
+    expect(tasks.size).toBe(1);
+    expect(tasks.get("child-1")?.get("status")).toBe("failed");
+    expect(JSON.stringify(root.toJSON())).not.toContain("private tool output");
+    expect(JSON.stringify(root.toJSON())).not.toContain("private path");
+  });
+
+  test("background task snapshot recovers a missed start and update", () => {
+    const docs = new ChatDocument();
+    docs.accept({
+      jsonrpc: "2.0", method: "peri/unstable_event",
+      params: {
+        sessionId: "s1", event: "bg-task-snapshot",
+        data: {
+          revision: 4,
+          tasks: [{
+            task_id: "bg-1", kind: "workflow", summary: "Build project",
+            started_at: "2026-10-04T00:00:00Z", status: "running",
+            duration_ms: 0, output_preview: null,
+          }],
+        },
+      },
+    });
+    docs.accept({
+      jsonrpc: "2.0", method: "peri/unstable_event",
+      params: {
+        sessionId: "s1", event: "bg-task-updated",
+        data: { task_id: "bg-1", status: "awaiting_input", revision: 5 },
+      },
+    });
+
+    const root = docs.session.getMap<unknown>("root");
+    const tasks = root.get("tasks") as Y.Map<Y.Map<unknown>>;
+    expect(tasks.get("bg-1")?.get("kind")).toBe("background");
+    expect(tasks.get("bg-1")?.get("status")).toBe("unobserved:awaiting_input");
+    expect((root.get("taskOrder") as Y.Array<string>).toArray()).toEqual(["bg-1"]);
+  });
+
+  test("rewind replaces streamed chat with exactly the retained canonical messages", () => {
+    const docs = new ChatDocument();
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Keep question"));
+    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "Keep answer"));
+    docs.accept(textChunk("s1", "user_message_chunk", USER_TWO, "Remove question"));
+    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_TWO, "Remove answer"));
+    expect(entries(docs)).toHaveLength(4);
+    const peer = new Y.Doc();
+    Y.applyUpdate(peer, Y.encodeStateAsUpdate(docs.chat));
+
+    const retained = [
+      { role: "system", id: "00000000-0000-4000-8000-000000000099", content: "Private system instructions" },
+      { role: "user", id: USER_ONE, content: "Keep question" },
+      { role: "assistant", id: ASSISTANT_ONE, content: "Keep answer" },
+    ];
+    docs.accept(legacyEvent("s1", "rewind_completed", {
+      summary: "Rewound two messages", messages_json: JSON.stringify(retained),
+    }));
+
+    const visible = entries(docs);
+    expect(visible).toHaveLength(2);
+    expect(visible.map((entry) => entry.get("role"))).toEqual(["user", "assistant"]);
+    expect(textOf(visible[0]!, "text")).toBe("Keep question");
+    expect(textOf(visible[1]!, "text")).toBe("Keep answer");
+    expect(JSON.stringify(docs.chat.getMap("root").toJSON())).not.toContain("Remove question");
+    expect(JSON.stringify(docs.chat.getMap("root").toJSON())).not.toContain("Remove answer");
+    expect(JSON.stringify(docs.chat.getMap("root").toJSON())).not.toContain("Private system instructions");
+    Y.applyUpdate(peer, Y.encodeStateAsUpdate(docs.chat, Y.encodeStateVector(peer)));
+    expect(peer.getMap("root").toJSON()).toEqual(docs.chat.getMap("root").toJSON());
+  });
+
+  test("rewind keeps root collection handles for Yjs observers", () => {
+    const docs = new ChatDocument();
+    const root = docs.chat.getMap<unknown>("root");
+    const order = root.get("entryOrder");
+    const entriesMap = root.get("entries");
+    const toolsMap = root.get("toolCalls");
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Before"));
+    docs.accept(legacyEvent("s1", "rewind_completed", { messages_json: "[]" }));
+    expect(root.get("entryOrder")).toBe(order);
+    expect(root.get("entries")).toBe(entriesMap);
+    expect(root.get("toolCalls")).toBe(toolsMap);
+  });
+
+  test("compact keeps the loaded window, live turn, and pending interactions", () => {
+    const docs = new ChatDocument();
+    // 翻页光标由运行侧持有；Compact 不触达 View。
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Old question"));
+    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "Old answer"));
+    docs.accept(update("s1", "tool_call", { toolCallId: "call-live", title: "Read", status: "in_progress" }));
+    docs.accept(legacyEvent("s1", "user_input_run_started", { request_id: "request-live" }));
+    const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
+    const liveTurn = info.get("activeTurnId");
+    const liveStatus = info.get("activeTurnStatus");
+    const liveRequest = info.get("activeRequestId");
+    const pending = new Y.Map<unknown>();
+    pending.set("1", { id: 1, kind: "permission", sessionId: "s1", toolCallId: "call-live" });
+    info.set("pendingInteractions", pending);
+    const before = entries(docs).map((entry) => entry.get("entryId"));
+
+    const committed = [
+      { role: "user", id: USER_TWO, content: "Current question" },
+      { role: "assistant", id: ASSISTANT_TWO, content: [{ type: "text", text: "Current answer" }] },
+    ];
+    docs.accept(legacyEvent("s1", "compact_completed", {
+      summary: "Compacted context", messages_json: JSON.stringify(committed),
+      trigger: "auto", strategy: "full", affected_count: 2,
+      estimated_tokens_saved: 100, files: [], skills: [],
+    }));
+
+    // REQ-C02 / A12：模型上下文收缩不等于界面删除历史——已加载窗口逐条保留。
+    expect(entries(docs).map((entry) => entry.get("entryId"))).toEqual(before);
+    expect(textOf(entries(docs)[0]!, "text")).toBe("Old question");
+    expect(textOf(entries(docs)[1]!, "text")).toBe("Old answer");
+    expect(JSON.stringify(docs.chat.getMap("root").toJSON())).not.toContain("Current question");
+    // Compact 展示语义仍走既有元数据；执行状态与未决交互保留。
+    expect(info.get("compactionStatus")).toBe("completed");
+    expect(info.get("compaction")).toMatchObject({ status: "completed", trigger: "auto", strategy: "full" });
+    expect(info.get("activeTurnId")).toBe(liveTurn);
+    expect(info.get("activeTurnStatus")).toBe(liveStatus);
+    expect(info.get("activeRequestId")).toBe(liveRequest);
+    expect(info.get("pendingRequestId")).toBe("request-live");
+    expect(info.get("pendingInteractions")).toBe(pending);
+    // 未完成工具保持实时状态，不因 Compact 被批量中止。
+    const tools = docs.chat.getMap<unknown>("root").get("toolCalls") as Y.Map<Y.Map<unknown>>;
+    expect(tools.get("call-live")?.get("status")).toBe("running");
+  });
+
+  test("compact failure only updates the failure display", () => {
+    const docs = new ChatDocument();
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Keep me"));
+    docs.accept(update("s1", "tool_call", { toolCallId: "call-live", title: "Read", status: "in_progress" }));
+    docs.accept(legacyEvent("s1", "compact_started", {}));
+    const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
+    expect(info.get("compactionStatus")).toBe("running");
+    docs.accept(legacyEvent("s1", "agent_execution_failed", { message: "provider detail" }));
+
+    // 失败只反映在执行状态上：消息区与工具状态不被清空。
+    expect(entries(docs)).toHaveLength(2);
+    expect(textOf(entries(docs)[0]!, "text")).toBe("Keep me");
+    expect(info.get("activeTurnStatus")).toBe("error");
+    const tools = docs.chat.getMap<unknown>("root").get("toolCalls") as Y.Map<Y.Map<unknown>>;
+    expect(tools.get("call-live")?.get("status")).toBe("cancelled");
+    // 轮次失败时 Compact 没有上报终态：展示收敛为失败，不能停在 running（A12）。
+    expect(info.get("compactionStatus")).toBe(COMPACTION_STATUS.failed);
+    expect(info.get("compaction")).toMatchObject({ status: COMPACTION_STATUS.failed });
+  });
+
+  test("a manual compact failure converges the compact display (A12)", () => {
+    const docs = new ChatDocument();
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Keep me"));
+    docs.accept(update("s1", "tool_call", { toolCallId: "call-live", title: "Read", status: "in_progress" }));
+    docs.accept(legacyEvent("s1", "compact_started", {}));
+    const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
+    expect(info.get("compactionStatus")).toBe("running");
+
+    // 手动 Compact 的真实失败载体：pipeline EarlyReturn → CommandFeedback(Error, UiOnly)
+    // → AcpEvent::CommandFeedback（peri-acp/src/event/{mod.rs,mapper.rs}），
+    // 经 peri/agent_event 以 `{type, value:{level, message, channel}}` 抵达。
+    docs.accept(legacyEvent("s1", "command_feedback", {
+      level: "error", message: "compact produced no effect", channel: "uiOnly",
+    }));
+
+    expect(info.get("compactionStatus")).toBe(COMPACTION_STATUS.failed);
+    expect(info.get("compaction")).toMatchObject({
+      status: COMPACTION_STATUS.failed, message: "compact produced no effect",
+    });
+    // 失败只更新失败展示：消息区、工具与未决交互不被清空。
+    expect(entries(docs)).toHaveLength(2);
+    expect(textOf(entries(docs)[0]!, "text")).toBe("Keep me");
+    const tools = docs.chat.getMap<unknown>("root").get("toolCalls") as Y.Map<Y.Map<unknown>>;
+    expect(tools.get("call-live")?.get("status")).toBe("running");
+  });
+
+  test("a cancelled manual compact converges the compact display (A12)", () => {
+    const docs = new ChatDocument();
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Keep me"));
+    docs.accept(legacyEvent("s1", "compact_started", {}));
+    const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
+
+    // 取消不是执行失败：服务端发 Warning「compact cancelled」（compact_pipeline.rs 的
+    // PipelineOutcome::Cancelled 分支），SDK 侧同样必须离开 running。
+    docs.accept(legacyEvent("s1", "command_feedback", {
+      level: "warning", message: "compact cancelled", channel: "uiOnly",
+    }));
+
+    expect(info.get("compactionStatus")).toBe(COMPACTION_STATUS.cancelled);
+    expect(info.get("compaction")).toMatchObject({
+      status: COMPACTION_STATUS.cancelled, message: "compact cancelled",
+    });
+    // 取消同样只更新展示：已加载的窗口逐条保留（user + assistant 占位）。
+    expect(entries(docs)).toHaveLength(2);
+    expect(textOf(entries(docs)[0]!, "text")).toBe("Keep me");
+  });
+
+  test("feedback from another command never rewrites the compact display (A12)", () => {
+    const docs = new ChatDocument();
+    docs.accept(legacyEvent("s1", "compact_started", {}));
+    docs.accept(legacyEvent("s1", "compact_completed", {
+      trigger: "manual", strategy: "full", affected_count: 2, estimated_tokens_saved: 100,
+      messages_json: JSON.stringify([]),
+    }));
+    const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
+    const compaction = info.get("compaction");
+
+    // 没有进行中的 Compact 时，命令反馈与本展示无关（feedback 不带命令名）。
+    docs.accept(legacyEvent("s1", "command_feedback", {
+      level: "error", message: "/clear failed", channel: "uiOnly",
+    }));
+
+    expect(info.get("compactionStatus")).toBe("completed");
+    expect(info.get("compaction")).toBe(compaction);
+  });
+
+  test("after a compact the live turn keeps streaming into the same entry (REQ-C02)", () => {
+    const docs = new ChatDocument();
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Question"));
+    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "partial answer"));
+    const info = docs.session.getMap<unknown>("root").get("session") as Y.Map<unknown>;
+    const liveTurn = info.get("activeTurnId");
+    const liveEntry = info.get("activeAssistantEntryId");
+
+    docs.accept(legacyEvent("s1", "compact_completed", {
+      trigger: "auto", strategy: "full", affected_count: 2, estimated_tokens_saved: 10,
+      messages_json: JSON.stringify([{ role: "user", id: USER_TWO, content: "compacted transcript" }]),
+    }));
+    // Compact 之后的流式增量仍落在同一个 turn / 同一条 assistant 条目。
+    docs.accept(textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, " continued"));
+
+    expect(entries(docs).map((entry) => entry.get("entryId"))).toEqual([`turn:${USER_ONE}:user`, `turn:${USER_ONE}:assistant`]);
+    expect(textOf(entries(docs)[1]!, "text")).toBe("partial answer continued");
+    expect(info.get("activeTurnId")).toBe(liveTurn);
+    expect(info.get("activeAssistantEntryId")).toBe(liveEntry);
+  });
+
+  test("unknown and malformed notifications leave both documents unchanged", () => {
+    const docs = new ChatDocument();
+    docs.accept(textChunk("s1", "user_message_chunk", "user-1", "Retain me"));
+    const chatBefore = docs.chat.getMap("root").toJSON();
+    const sessionBefore = docs.session.getMap("root").toJSON();
+
+    docs.accept(update("s1", "future_update", { arbitrary: "value" }));
+    docs.accept({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "s1", update: null } });
+    docs.accept({ jsonrpc: "2.0", method: "peri/agent_event", params: { sessionId: "s1", event_json: "{" } });
+
+    expect(docs.chat.getMap("root").toJSON()).toEqual(chatBefore);
+    expect(docs.session.getMap("root").toJSON()).toEqual(sessionBefore);
+  });
+});
+
+function envelope(sequence: number, fact: ChatFact, bindingRevision = 7): ChatFactEnvelope {
+  return { chatId: "chat-1", sessionId: "s1", bindingRevision, sequence, fact };
+}
+
+describe("ChatDocument facts", () => {
+  test("replays seed, history, queue, tasks, interaction and run state into one display pair", () => {
+    const docs = new ChatDocument({ binding: { chatId: "chat-1", sessionId: "s1", bindingRevision: 7 } });
+    docs.applyFacts([
+      envelope(1, { kind: "seed-config", response: {
+        configOptions: [{ id: "model", name: "Model", type: "select", currentValue: "m1", options: [] }],
+        modes: { currentModeId: "code", availableModes: [{ id: "code", name: "Code" }] },
+      } }),
+      envelope(2, { kind: "history-batch", notifications: [
+        textChunk("s1", "user_message_chunk", USER_ONE, "Saved prompt"),
+        textChunk("s1", "agent_message_chunk", ASSISTANT_ONE, "Saved answer"),
+      ] }),
+      envelope(3, { kind: "input-queue", snapshot: { generation: "g", revision: 1, items: [{ inputId: "i1", state: "queued" }] } }),
+      envelope(4, { kind: "task-snapshot", snapshot: { revision: 1, tasks: [
+        { task_id: "bg", status: "running", kind: "shell", summary: "Build" },
+      ] } }),
+      envelope(5, { kind: "interaction-began", record: {
+        id: "interaction:1", kind: "elicitation", sessionId: "s1", message: "Choose",
+        fields: [{ key: "name", title: "Name", description: "", type: "string", required: true }],
+      } }),
+      envelope(6, { kind: "run-state", running: true, executionBlocked: false }),
+    ]);
+
+    const view = readSessionView(docs.chat, docs.session);
+    expect(view.readiness).toBe("ready");
+    expect(view.sessionId).toBe("s1");
+    expect(view.bindingRevision).toBe(7);
+    expect(view.running).toBe(true);
+    expect(view.executionBlocked).toBe(false);
+    expect(view.entries.map((entry) => entry.role)).toEqual(["user", "assistant"]);
+    expect(view.inputQueue).toMatchObject({ generation: "g", items: [{ inputId: "i1", state: "queued" }] });
+    expect(view.tasks[0]).toMatchObject({ taskId: "bg", title: "Build", status: "unobserved:running" });
+    expect(view.pendingInteractions[0]).toMatchObject({ id: "interaction:1", kind: "elicitation" });
+    expect(view.session.configOptions).toHaveLength(1);
+    expect(view.session.modeState).toMatchObject({ currentModeId: "code" });
+  });
+
+  test("history page merge is idempotent and does not create an active turn", () => {
+    const docs = new ChatDocument({ binding: { chatId: "chat-1", sessionId: "s1", bindingRevision: 1 } });
+    const items = [
+      {
+        entryId: "s1:message:old-user", position: 1,
+        subItems: [{ position: 0, update: { sessionUpdate: "user_message_chunk", messageId: "old", content: { type: "text", text: "Past" } } }],
+      },
+      {
+        entryId: "s1:message:old-assistant", position: 2,
+        subItems: [{ position: 0, update: { sessionUpdate: "agent_message_chunk", messageId: "old", content: { type: "text", text: "Reply" } } }],
+      },
+    ];
+    docs.applyFact({ kind: "history-page", items, nextCursor: "cursor-1" });
+    docs.applyFact({ kind: "history-page", items, nextCursor: "cursor-1" });
+    const view = readSessionView(docs.chat, docs.session);
+    expect(view.entries).toHaveLength(2);
+    expect(view.activeTurn).toEqual({ turnId: null, status: null });
+    expect(view.turns).toEqual([]);
+  });
+
+  test("stale binding revisions and duplicate sequences are ignored", () => {
+    const docs = new ChatDocument({ binding: { chatId: "chat-1", sessionId: "s1", bindingRevision: 2 } });
+    expect(docs.applyEnvelope(envelope(1, { kind: "run-state", running: true, executionBlocked: false }, 1))).toBe(false);
+    expect(docs.applyEnvelope(envelope(1, { kind: "run-state", running: true, executionBlocked: false }, 2))).toBe(true);
+    expect(docs.applyEnvelope(envelope(1, { kind: "run-state", running: false, executionBlocked: true }, 2))).toBe(false);
+    const view = readSessionView(docs.chat, docs.session);
+    expect(view.running).toBe(true);
+    expect(view.executionBlocked).toBe(false);
+  });
+
+  test("interaction facts carry structured ask_user questions without resolvers", () => {
+    const docs = new ChatDocument({ binding: { chatId: "chat-1", sessionId: "s1", bindingRevision: 1 } });
+    docs.applyFact({ kind: "interaction-began", record: {
+      id: "interaction:ask", kind: "elicitation", sessionId: "s1", title: "Question",
+      variant: "ask_user", formSupport: "unsupported", formReason: "multi_step",
+      questions: [
+        {
+          id: "ask_user_question_0", header: "Language", question: "Which language?", multiSelect: false,
+          options: [{ value: "ts", label: "TypeScript", description: "typed" }, { value: "rs", label: "Rust" }],
+        },
+        {
+          id: "ask_user_question_1", header: "Features", question: "Pick features", multiSelect: true,
+          options: [{ value: "a", label: "A" }, { value: "b", label: "B" }],
+        },
+      ],
+    } });
+    docs.applyFact({ kind: "interaction-settled", id: "interaction:ask", status: "resolved", outcome: "accept" });
+    const [interaction] = readSessionView(docs.chat, docs.session).interactions;
+    expect(interaction).toMatchObject({
+      id: "interaction:ask", variant: "ask_user", status: "resolved", outcome: "accept",
+      formUnsupported: "multi_step",
+    });
+    expect(interaction!.fields).toEqual([]);
+    expect(interaction!.questions).toEqual([
+      {
+        id: "ask_user_question_0", header: "Language", question: "Which language?", multiSelect: false,
+        options: [{ value: "ts", label: "TypeScript", description: "typed" }, { value: "rs", label: "Rust" }],
+      },
+      {
+        id: "ask_user_question_1", header: "Features", question: "Pick features", multiSelect: true,
+        options: [{ value: "a", label: "A" }, { value: "b", label: "B" }],
+      },
+    ]);
+  });
+
+  test("closed and run-state are terminal display facts", () => {
+    const docs = new ChatDocument({ binding: { chatId: "chat-1", sessionId: "s1", bindingRevision: 1 } });
+    docs.applyFact({ kind: "run-state", running: true, executionBlocked: true });
+    docs.applyFact({ kind: "closed", reason: { code: "execution_interrupted", message: "执行已中断" } });
+    const view = readSessionView(docs.chat, docs.session);
+    expect(view.closed).toBe(true);
+    expect(view.closedReason).toEqual({ code: "execution_interrupted", message: "执行已中断" });
+    expect(view.running).toBe(false);
+    expect(view.executionBlocked).toBe(true);
+    expect(docs.closed).toBe(true);
+    expect(docs.applyFact({ kind: "run-state", running: true, executionBlocked: false })).toBe(false);
+    expect(readSessionView(docs.chat, docs.session).running).toBe(false);
+  });
+
+  test("checkpoint round-trips display data without payload contents", () => {
+    const docs = new ChatDocument({ binding: { chatId: "chat-1", sessionId: "s1", bindingRevision: 3 } });
+    docs.applyFact({ kind: "run-state", running: true, executionBlocked: false });
+    docs.accept(textChunk("s1", "user_message_chunk", USER_ONE, "Use a tool"));
+    docs.accept(update("s1", "tool_call", {
+      toolCallId: "call-1", title: "Read", status: "completed",
+      arguments: { path: "README.md" },
+      resultRef: { id: "payload:1", bytes: 12, preview: "contents" },
+    }));
+    docs.completeTurn();
+
+    const checkpoint = docs.exportCheckpoint();
+    expect("payloadValues" in checkpoint).toBe(false);
+    expect(checkpoint.session).toMatchObject({ sessionId: "s1", bindingRevision: 3, running: true });
+    const restored = ChatDocument.fromCheckpoint(checkpoint);
+    const view = readSessionView(restored.chat, restored.session);
+    expect(view.sessionId).toBe("s1");
+    expect(view.bindingRevision).toBe(3);
+    expect(view.running).toBe(false);
+    expect(view.entries[1]?.blocks[0]).toMatchObject({
+      type: "tool_call", tool: { arguments: { path: "README.md" }, resultRef: { id: "payload:1" } },
+    });
+  });
+});

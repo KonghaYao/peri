@@ -57,12 +57,6 @@ export type ExecutionDisaster = {
     ticket: ExecutionTicket;
     enteredEvidenceId?: string;
 };
-export class ExecutionDataLossError extends Error {
-    constructor(readonly disaster: ExecutionDisaster) {
-        super(`Execution DataLoss: ${disaster.reason}`);
-        this.name = "ExecutionDataLossError";
-    }
-}
 export type InstanceRecord = InstanceDescriptor & {
     status: "registered" | "stopped";
     stoppedProof?: InstanceStoppedProof;
