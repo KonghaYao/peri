@@ -2,8 +2,7 @@ import { Client, type Transport, type JSONRPCMessage } from '@modelcontextprotoc
 import { z } from 'zod';
 import { randomBytes } from 'node:crypto';
 import { type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { ControlError } from '../control/types.js';
-import type { Backend } from '../control/control.js';
+import { SandboxError, type McpBackendPort } from '../instance/types.js';
 import type { DiagnosticLog } from './diagnostics.js';
 
 const maxMessage = 8 * 1024 * 1024;
@@ -15,7 +14,7 @@ function object(value: unknown): value is Record<string, unknown> {
 
 function allowed(params: Record<string, unknown>, keys: string[]): void {
   if (Object.keys(params).some((key) => !keys.includes(key)))
-    throw new ControlError('conflict', 'unsupported request field');
+    throw new SandboxError('invalid_options', 'unsupported request field');
 }
 
 class ProcessTransport implements Transport {
@@ -28,6 +27,7 @@ class ProcessTransport implements Transport {
   constructor(
     readonly process: ChildProcessWithoutNullStreams,
     private readonly diagnostics?: DiagnosticLog,
+    private readonly onClosed?: () => void,
   ) {}
   private fail(error: Error): void {
     this.onerror?.(error);
@@ -86,11 +86,12 @@ class ProcessTransport implements Transport {
     });
   }
   async send(message: JSONRPCMessage): Promise<void> {
-    if (this.closed || !this.process.stdin.writable) throw new ControlError('interrupted', 'backend closed');
+    if (this.closed || !this.process.stdin.writable)
+      throw new SandboxError('backend_exited', 'Sandbox backend is closed.');
     const serialized = JSON.stringify(message) + '\n';
     const size = Buffer.byteLength(serialized);
     if (size > maxMessage || this.pendingBytes + size > maxMessage * 2)
-      throw new ControlError('limit_exceeded', 'stdio write buffer limit');
+      throw new SandboxError('limit_exceeded', 'stdio write buffer limit');
     this.pendingBytes += size;
     try {
       await new Promise<void>((resolve, reject) =>
@@ -106,27 +107,41 @@ class ProcessTransport implements Transport {
     this.process.stdin.end();
     this.diagnostics?.close();
     this.onclose?.();
+    this.onClosed?.();
   }
 }
 
-export class PeriBackend implements Backend {
+export interface PeriBackendOptions {
+  id: string;
+  runId: string;
+  process: ChildProcessWithoutNullStreams;
+  bashLimit: number;
+  diagnostics?: DiagnosticLog;
+  onExit?: (error: Error) => void;
+}
+
+/** MCP stdio bridge to the Peri backend running inside SRT. */
+export class PeriBackend implements McpBackendPort {
   readonly client: Client;
+  readonly id: string;
+  readonly runId: string;
   private readonly transport: ProcessTransport;
   private readonly taskIds = new Map<string, { internal: string; owner?: string }>();
   private readonly reversed = new Map<string, string>();
+  private readonly bashLimit: number;
+  private readonly onExit?: (error: Error) => void;
   private bashCalls = 0;
   private inflight = 0;
   private queries = 0;
   private toolsCache: unknown;
   private advertisedTools = new Set(['Bash', 'Read', 'Write']);
-  constructor(
-    readonly id: string,
-    readonly generation: string,
-    process: ChildProcessWithoutNullStreams,
-    readonly bashLimit: number,
-    diagnostics?: DiagnosticLog,
-  ) {
-    this.transport = new ProcessTransport(process, diagnostics);
+  private closing = false;
+  constructor(options: PeriBackendOptions) {
+    this.id = options.id;
+    this.runId = options.runId;
+    this.bashLimit = options.bashLimit;
+    this.onExit = options.onExit;
+    this.transport = new ProcessTransport(options.process, options.diagnostics, () => this.handleClosed());
     this.client = new Client(
       { name: 'peri-sandbox', version: '0.1.0' },
       {
@@ -136,18 +151,22 @@ export class PeriBackend implements Backend {
       },
     );
   }
+  private handleClosed(): void {
+    if (this.closing) return;
+    this.onExit?.(new SandboxError('backend_exited', 'Sandbox backend exited unexpectedly.'));
+  }
   async ready(): Promise<void> {
     await this.client.connect(this.transport);
     const capabilities = this.client.getServerCapabilities();
     if (!capabilities?.tools || !capabilities.extensions?.['io.modelcontextprotocol/tasks'])
-      throw new ControlError('startup_failed', 'backend lacks tools or Tasks capability');
+      throw new SandboxError('start_failed', 'backend lacks tools or Tasks capability');
     const listed = await this.client.listTools();
     if (
       !listed.tools.some((tool) => tool.name === 'Bash') ||
       !listed.tools.some((tool) => tool.name === 'Read') ||
       !listed.tools.some((tool) => tool.name === 'Write')
     )
-      throw new ControlError('startup_failed', 'required tools missing');
+      throw new SandboxError('start_failed', 'required tools missing');
     this.advertisedTools = new Set(listed.tools.map((tool) => tool.name));
     this.toolsCache = { tools: listed.tools };
   }
@@ -157,14 +176,14 @@ export class PeriBackend implements Backend {
   private internal(external: string, owner?: string): string {
     const mapping = this.taskIds.get(external);
     if (!mapping || mapping.owner !== owner)
-      throw new ControlError('not_found', 'unknown task for this generation/owner');
+      throw new SandboxError('invalid_options', 'unknown task for this run/owner');
     return mapping.internal;
   }
   private external(internal: string, owner?: string): string {
     const key = JSON.stringify([owner ?? null, internal]);
     let external = this.reversed.get(key);
     if (!external) {
-      if (this.taskIds.size >= this.bashLimit) throw new ControlError('limit_exceeded', 'task mapping limit');
+      if (this.taskIds.size >= this.bashLimit) throw new SandboxError('limit_exceeded', 'task mapping limit');
       external = `task_${randomBytes(24).toString('hex')}`;
       this.taskIds.set(external, { internal, owner });
       this.reversed.set(key, external);
@@ -182,16 +201,17 @@ export class PeriBackend implements Backend {
     if (method === 'tools/call') {
       allowed(params, ['name', 'arguments', '_meta']);
       if (typeof params.name !== 'string' || !this.advertisedTools.has(params.name) || !object(params.arguments))
-        throw new ControlError('conflict', 'unsupported tool call');
+        throw new SandboxError('invalid_options', 'unsupported tool call');
     } else if (isQuery) {
       allowed(params, ['taskId', '_meta']);
-      if (typeof params.taskId !== 'string' || !params.taskId) throw new ControlError('conflict', 'invalid task ID');
-    } else throw new ControlError('conflict', 'unsupported method');
+      if (typeof params.taskId !== 'string' || !params.taskId)
+        throw new SandboxError('invalid_options', 'invalid task ID');
+    } else throw new SandboxError('invalid_options', 'unsupported method');
     if (owner !== undefined && (typeof owner !== 'string' || !owner.trim() || Buffer.byteLength(owner) > 512))
-      throw new ControlError('conflict', 'invalid peri/taskOwner');
-    if (isQuery ? this.queries >= 4 : this.inflight >= 8) throw new ControlError('limit_exceeded', 'concurrency limit');
+      throw new SandboxError('invalid_options', 'invalid peri/taskOwner');
+    if (isQuery ? this.queries >= 4 : this.inflight >= 8) throw new SandboxError('limit_exceeded', 'concurrency limit');
     if (method === 'tools/call' && params.name === 'Bash') {
-      if (this.bashCalls >= this.bashLimit) throw new ControlError('limit_exceeded', 'Bash call budget exhausted');
+      if (this.bashCalls >= this.bashLimit) throw new SandboxError('limit_exceeded', 'Bash call budget exhausted');
       this.bashCalls++;
     }
     if (isQuery) this.queries++;
@@ -208,7 +228,7 @@ export class PeriBackend implements Backend {
         { signal, timeout: 60 * 60 * 1000, onprogress: onProgress },
       );
       if (result.resultType === 'input_required' || result.status === 'input_required')
-        throw new ControlError('conflict', 'unsupported backend input_required');
+        throw new SandboxError('invalid_options', 'unsupported backend input_required');
       if (method === 'tasks/update') return { resultType: 'complete' };
       const output = { ...result };
       if (typeof output.taskId === 'string') output.taskId = this.external(output.taskId, owner);
@@ -236,7 +256,11 @@ export class PeriBackend implements Backend {
     }
   }
   async close(): Promise<void> {
-    await this.client.close();
-    await this.transport.close();
+    this.closing = true;
+    try {
+      await this.client.close();
+    } finally {
+      await this.transport.close();
+    }
   }
 }

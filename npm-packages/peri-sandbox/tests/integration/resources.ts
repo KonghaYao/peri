@@ -1,25 +1,33 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { z } from 'zod';
-import { connectSandboxControl, loadConfig, type SandboxRecord } from '../../src/index.js';
+import { loadSettings, startSandbox, type SandboxInstance } from '../../src/index.js';
 
-const configFile = process.argv[2];
-if (!configFile) throw new Error('Usage: node dist/tests/integration/resources.js /absolute/config.json');
-const config = loadConfig(configFile);
+const settingsPath = process.argv[2];
+if (!settingsPath) throw new Error('Usage: node dist/tests/integration/resources.js /absolute/settings.json');
+const settings = loadSettings(settingsPath);
 for (const profile of ['workspace-egress', 'workspace-limited', 'workspace-memory'])
-  assert(config.profiles[profile], `missing acceptance profile: ${profile}`);
-const control = connectSandboxControl({ socketPath: `${config.controlRoot}/control.sock` });
-const token = readFileSync(config.auth.tokenFile, 'utf8').trim();
-const records: SandboxRecord[] = [];
+  assert(settings.profiles[profile], `missing acceptance profile: ${profile}`);
+const schema = z.record(z.string(), z.unknown());
+const instances: SandboxInstance[] = [];
 const clients: Client[] = [];
 const passed: string[] = [];
-const requestId = () => randomUUID();
-const schema = z.record(z.string(), z.unknown());
 
-async function connect(record: SandboxRecord): Promise<Client> {
+async function start(profileName: string): Promise<SandboxInstance> {
+  const instance = await startSandbox({
+    settingsPath,
+    sandboxId: `sbx_${randomBytes(16).toString('hex')}`,
+    profileName,
+    minFreeBytes: 0,
+  });
+  instances.push(instance);
+  return instance;
+}
+
+async function connect(instance: SandboxInstance): Promise<Client> {
   const client = new Client(
     { name: 'peri-sandbox-resources-acceptance', version: '1' },
     {
@@ -28,8 +36,8 @@ async function connect(record: SandboxRecord): Promise<Client> {
     },
   );
   await client.connect(
-    new StreamableHTTPClientTransport(new URL(record.mcpUrl), {
-      requestInit: { headers: { Authorization: `Bearer ${token}` } },
+    new StreamableHTTPClientTransport(new URL(instance.mcpUrl), {
+      requestInit: { headers: { Authorization: `Bearer ${instance.token}` } },
     }),
   );
   clients.push(client);
@@ -60,8 +68,9 @@ async function settle(client: Client, result: Record<string, unknown>): Promise<
   throw new Error(`resource task did not settle: ${result.taskId}`);
 }
 
-function cgroup(record: SandboxRecord): string {
-  const unit = `${config.provider.unitPrefix}${record.id}-${record.generation}.service`;
+function cgroup(instance: SandboxInstance): string {
+  const unit = instance.runtime.unit;
+  assert(unit, 'Linux instance must expose a transient unit');
   const group = execFileSync('systemctl', ['--user', 'show', unit, '-p', 'ControlGroup', '--value'], {
     encoding: 'utf8',
   }).trim();
@@ -76,20 +85,18 @@ function event(root: string, file: string, field: string): number {
 }
 
 try {
-  const egress = await control.create({ profile: 'workspace-egress' }, { requestId: requestId() });
-  records.push(egress);
-  const permitted = await connect(await control.start(egress.id, { requestId: requestId() }));
+  const egress = await start('workspace-egress');
+  const permitted = await connect(egress);
   const allowed = await bash(permitted, 'curl -fsS --max-time 10 https://example.com >/dev/null');
   assert.equal(allowed.isError, false, `allowlisted HTTPS failed: ${JSON.stringify(allowed)}`);
   const denied = await bash(permitted, 'curl -fsS --max-time 3 https://www.wikipedia.org >/dev/null');
   assert.equal(denied.isError, true, `unexpected unrestricted HTTPS: ${JSON.stringify(denied)}`);
   passed.push('A06: allowlisted HTTPS succeeds; other HTTPS denied');
+  await egress.close({ deleteData: true });
 
-  const limited = await control.create({ profile: 'workspace-limited' }, { requestId: requestId() });
-  records.push(limited);
-  const running = await control.start(limited.id, { requestId: requestId() });
-  const client = await connect(running);
-  const root = cgroup(running);
+  const limited = await start('workspace-limited');
+  const client = await connect(limited);
+  const root = cgroup(limited);
   assert.equal(readFileSync(`${root}/memory.max`, 'utf8').trim(), String(512 * 1024 * 1024));
   assert.equal(readFileSync(`${root}/pids.max`, 'utf8').trim(), '32');
   assert.equal(readFileSync(`${root}/cpu.max`, 'utf8').trim().split(' ')[0], '50000');
@@ -103,12 +110,11 @@ try {
   await settle(client, await bash(client, 'for number in $(seq 1 80); do sleep 2 & done; wait'));
   assert(event(root, 'pids.events', 'max') > exhausted, 'PID limit was not exercised');
   passed.push('A07: TasksMax blocks excess child processes');
+  await limited.close({ deleteData: true });
 
-  await control.stop(limited.id, { requestId: requestId() });
-  const memorySandbox = await control.create({ profile: 'workspace-memory' }, { requestId: requestId() });
-  records.push(memorySandbox);
-  const memoryClient = await connect(await control.start(memorySandbox.id, { requestId: requestId() }));
-  const memoryRoot = cgroup(await control.inspect(memorySandbox.id));
+  const memory = await start('workspace-memory');
+  const memoryClient = await connect(memory);
+  const memoryRoot = cgroup(memory);
   const killed = event(memoryRoot, 'memory.events', 'oom_kill');
   const oversized = await bash(
     memoryClient,
@@ -119,9 +125,10 @@ try {
     await new Promise((done) => setTimeout(done, 200));
   assert(
     event(memoryRoot, 'memory.events', 'oom_kill') > killed,
-    `memory limit did not kill allocation: ${JSON.stringify(oversized)}; ${readFileSync(`${memoryRoot}/memory.events`, 'utf8')}; pids=${readFileSync(`${memoryRoot}/pids.current`, 'utf8')}; memory=${readFileSync(`${memoryRoot}/memory.current`, 'utf8')}`,
+    `memory limit did not kill allocation: ${JSON.stringify(oversized)}; ${readFileSync(`${memoryRoot}/memory.events`, 'utf8')}`,
   );
   passed.push('A07: MemoryMax kills an oversized child allocation');
+  await memory.close({ deleteData: true });
 
   console.log(JSON.stringify({ passed }, null, 2));
 } catch (error) {
@@ -129,14 +136,12 @@ try {
   throw error;
 } finally {
   await Promise.allSettled(clients.map((client) => client.close()));
-  const cleanupFailures: unknown[] = [];
-  for (const record of records.reverse()) {
+  for (const instance of instances.reverse()) {
     try {
-      await control.destroy(record.id, { requestId: requestId(), deleteData: true });
+      await instance.close({ deleteData: true });
     } catch (error) {
-      console.error(`resource acceptance cleanup incomplete: ${record.id}`, error);
-      cleanupFailures.push(error);
+      console.error(`resource acceptance cleanup incomplete: ${instance.id}`, error);
+      throw error;
     }
   }
-  if (cleanupFailures.length) throw new AggregateError(cleanupFailures, 'resource acceptance cleanup incomplete');
 }

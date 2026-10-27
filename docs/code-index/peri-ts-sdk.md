@@ -12,6 +12,7 @@
 | `/view` | `src/entries/view.ts` | 浏览器安全展示：`ChatView`、`ChatReplica`、`readSessionView`、载荷读取、同步协议；不引入 Node 运行时依赖，也不导出 `ChatViewRegistry` |
 | `/wasm` | `src/entries/wasm.ts` | Emscripten ACP 运行后端、loader、`WasmAcpTransport` |
 | `/wasm-node` | `src/entries/wasm-node.ts` | `/wasm` + Node 网络/DNS 端口 |
+| `/sandbox` | `src/entries/sandbox.ts` | Node-only；进程内单实例 `peri-sandbox`，输出 HTTP MCP `sessionInit`；动态 import optional peer |
 
 旧 `Agent`、`ManagedAgents`、`SessionDocs`、`SessionViewStore`、`AtomicManagedAgentKv`、
 `agent-claim-conflict-error`、`Sandbox` 已删除，不在任何发布入口导出；`tests/public-view.test.ts`
@@ -26,7 +27,8 @@
 4. `agent` 可依赖 `contracts`/`payload`/`state`/`transport`/`wasm`/`util`，不得依赖 `chat`/`view`。
 5. `chat` 可依赖 `contracts`/`payload`/`state`/`transport`/`agent`/`wasm`/`util`，不得依赖 `view`。
 6. `view` 可依赖 `contracts`/`payload`/`state`/`sync`/`transport`/`util`，不得依赖 `chat`/`agent`。
-7. `entries` 可依赖所有层；任何模块不得依赖 `entries`。
+7. `sandbox` 只由 `entries/sandbox.ts` 引用；通过动态 import 加载 optional peer `peri-sandbox`，主入口、`/portable`、`/wasm`、`/view` 不得包含 `peri-sandbox`、`@anthropic-ai/sandbox-runtime` 或 `better-sqlite3`。
+8. `entries` 可依赖所有层；任何模块不得依赖 `entries`。
 
 ## 控制面
 

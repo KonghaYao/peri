@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $(uname -s) != Darwin || $(uname -m) != arm64 ]]; then
-  echo 'Requires an Apple Silicon macOS host with OrbStack' >&2
+  echo 'Requires an Apple Silicon macOS host with OrbStack (single-instance Linux acceptance)' >&2
   exit 1
 fi
 for executable in orb orbctl jq; do command -v "$executable" >/dev/null || { echo "Missing $executable" >&2; exit 1; }; done

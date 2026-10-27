@@ -9,7 +9,7 @@
 
 SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行、调度、会话持久化与工具运行仍归 Peri。一个 Chat 句柄对应一次可替换的 Session 绑定，不把 Chat 句柄 ID 当作持久 Session 身份。
 
-不新增 SDK 调度器、持久执行恢复、平行会话表或第二套 ACP 协议。ACP 连接只有宿主注入的一条装配路径；SDK 不启动 Workspace 进程，也不提供本地数据库后端。
+不新增 SDK 调度器、持久执行恢复、平行会话表或第二套 ACP 协议。ACP 连接只有宿主注入的一条装配路径；SDK 不启动 Workspace 进程，也不提供本地数据库后端。唯一例外是显式可选的 Node 子入口 `/sandbox`：它在宿主进程内启动一个 `peri-sandbox` 实例并只通过 `ChatSessionInit.mcpServers` 注入 HTTP descriptor，不改变 ACP/Chat 契约。
 
 ## 2. 五个核心对象
 
@@ -81,7 +81,7 @@ SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行
 
 ## 8. 非目标
 
-- 不恢复 stdio/Workspace 进程管理、本地数据库后端、JSONL dispatcher 或执行恢复账本。
+- 不恢复 stdio/Workspace 进程管理、本地数据库后端、JSONL dispatcher 或执行恢复账本；`/sandbox` 是唯一的进程内 Workspace 例外，且不进入主入口。
 - 不让浏览器直接持有模型/Store 凭据，也不把运行后端执行搬进浏览器。
 - 不声明跨实例 ownership、共享内存 Manager 或多租户隔离已实现；这些由部署注入或另行设计。
 - 不用兼容 shim 维持两套业务入口；删除的公开门面按 breaking change 处理。

@@ -1,28 +1,39 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import test from 'node:test';
-import type { Config } from '../src/config.js';
 import { MacProvider } from '../src/runtime/mac-provider.js';
+import type { ProviderStartOptions } from '../src/runtime/provider.js';
 
-test('macOS stop refuses a process group with an unverified leader', {
+const options: ProviderStartOptions = {
+  sandboxId: `sbx_${'a'.repeat(32)}`,
+  runId: `run_${'b'.repeat(24)}`,
+  sandboxesRoot: '/tmp/peri-sandbox-test',
+  sandboxRoot: `/tmp/peri-sandbox-test/sbx_${'a'.repeat(32)}`,
+  workspacePath: `/tmp/peri-sandbox-test/sbx_${'a'.repeat(32)}/workspace`,
+  homePath: `/tmp/peri-sandbox-test/sbx_${'a'.repeat(32)}/home`,
+  policyPath: `/tmp/peri-sandbox-test/sbx_${'a'.repeat(32)}/policy.json`,
+  profile: { allowedDomains: [], runtimeReadPaths: [], memoryMax: '1G', tasksMax: 16, cpuQuota: '100%' },
+  periPath: '/usr/bin/true',
+};
+
+test('macOS provider refuses to stop an unverified process group', {
   skip: process.platform !== 'darwin',
 }, async () => {
-  const controlRoot = mkdtempSync(join(tmpdir(), 'peri-mac-stop-'));
-  try {
-    mkdirSync(join(controlRoot, 'processes'));
-    const config = { controlRoot, provider: { unitPrefix: 'peri-sbx-' }, limits: { stopMs: 100 } } as Config;
-    const provider = new MacProvider(config);
-    const unit = provider.unit(`sbx_${'a'.repeat(32)}`, `run_${'b'.repeat(24)}`);
-    const group = Number(
-      execFileSync('/bin/ps', ['-p', String(process.pid), '-o', 'pgid='], { encoding: 'utf8' }).trim(),
-    );
-    writeFileSync(join(controlRoot, 'processes', unit), JSON.stringify({ pid: group, started: 'wrong process' }));
-    await assert.rejects(() => provider.stop(unit), /cannot confirm owned macOS process group/);
-    process.kill(process.pid, 0);
-  } finally {
-    rmSync(controlRoot, { recursive: true, force: true });
-  }
+  const provider = new MacProvider({ stopTimeoutMs: 100 });
+  const stop = (
+    provider as unknown as {
+      stop(pid: number, started: string, options: ProviderStartOptions): Promise<void>;
+    }
+  ).stop.bind(provider);
+  const group = Number(
+    execFileSync('/bin/ps', ['-p', String(process.pid), '-o', 'pgid='], { encoding: 'utf8' }).trim(),
+  );
+  await assert.rejects(() => stop(group, 'wrong process', options), /cannot confirm owned macOS process group/);
+  await assert.rejects(() => stop(1, 'wrong process', options), /invalid process group/);
+  process.kill(process.pid, 0);
+});
+
+test('macOS provider reports its runtime kind without touching the host', () => {
+  const provider = new MacProvider();
+  assert.equal(provider.kind, 'macos-process-group');
 });

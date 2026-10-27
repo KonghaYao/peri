@@ -1,79 +1,55 @@
-import { spawn, execFileSync, spawnSync } from 'node:child_process';
-import {
-  accessSync,
-  constants,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  writeFileSync,
-  unlinkSync,
-  lstatSync,
-} from 'node:fs';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { accessSync, constants } from 'node:fs';
 import { dirname, join } from 'node:path';
-import type { Config } from '../config.js';
-import { verifyRuntime } from '../config.js';
-import { ControlError } from '../control/types.js';
-import { macTmpPath, makeDirectories, removeMacTmp, sandboxPath } from './policy.js';
+import { SandboxError } from '../instance/types.js';
+import { verifyPeriRuntime } from '../instance/settings.js';
+import { makeDirectories } from '../instance/workspace.js';
+import { macTmpPath, removeMacTmp } from './policy.js';
 import { srtRuntime } from './srt.js';
-import type { Handle, Provider } from './provider.js';
+import type { DoctorOptions, Provider, ProviderHandle, ProviderOptions, ProviderStartOptions } from './provider.js';
 
+const DEFAULT_STOP_TIMEOUT_MS = 15_000;
+
+/** macOS provider: SRT CLI in a detached process group, no registry. */
 export class MacProvider implements Provider {
-  private readonly stopped = new Set<string>();
-  constructor(private readonly config: Config) {}
+  readonly kind = 'macos-process-group' as const;
+  private readonly stopTimeoutMs: number;
 
-  unit(id: string, generation: string): string {
-    return `${this.config.provider.unitPrefix}${id}-${generation}.service`;
+  constructor(options: ProviderOptions = {}) {
+    this.stopTimeoutMs = options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
   }
 
-  async doctor(): Promise<void> {
+  async doctor(options?: DoctorOptions): Promise<void> {
     if (process.platform !== 'darwin' || process.getuid?.() === 0)
-      throw new ControlError('unsupported_environment', 'requires an unprivileged macOS account');
-    verifyRuntime(this.config);
+      throw new SandboxError('unsupported_environment', 'requires an unprivileged macOS account');
     srtRuntime();
     try {
       accessSync('/usr/bin/sandbox-exec', constants.X_OK);
-    } catch {
-      throw new ControlError('unsupported_environment', 'macOS sandbox-exec unavailable');
+    } catch (error) {
+      throw new SandboxError('unsupported_environment', 'macOS sandbox-exec unavailable', { cause: error });
     }
+    if (options) verifyPeriRuntime(options.periPath, options.periSha256);
   }
 
-  private directory(): string {
-    return join(this.config.controlRoot, 'processes');
-  }
-
-  private file(unit: string): string {
-    if (!new RegExp(`^${this.config.provider.unitPrefix}sbx_[a-f0-9]{32}-run_[a-f0-9]{24}\\.service$`).test(unit))
-      throw new ControlError('conflict', 'unit outside owned namespace');
-    return join(this.directory(), unit);
-  }
-
-  async start(
-    id: string,
-    generation: string,
-    policyPath: string,
-    _profile: Config['profiles'][string],
-  ): Promise<Handle> {
+  async start(options: ProviderStartOptions): Promise<ProviderHandle> {
+    if (process.platform !== 'darwin')
+      throw new SandboxError('unsupported_environment', 'macOS provider requires darwin');
     await this.doctor();
-    makeDirectories(this.config, id);
-    const unit = this.unit(id, generation);
     const srt = srtRuntime();
-    const base = sandboxPath(this.config, id);
-    const home = join(base, 'home');
-    const workspace = join(base, 'workspace');
-    mkdirSync(this.directory(), { recursive: true, mode: 0o700 });
+    makeDirectories(options.sandboxesRoot, options.sandboxId);
     const child = spawn(
       process.execPath,
       [
         srt.cli,
         '--settings',
-        policyPath,
+        options.policyPath,
         '--',
-        this.config.runtime.periPath,
+        options.periPath,
         'mcp-start',
         'workspace',
         '--stdio',
         '--workspace',
-        workspace,
+        options.workspacePath,
       ],
       {
         detached: true,
@@ -90,35 +66,31 @@ export class MacProvider implements Provider {
             '/usr/sbin',
             '/sbin',
           ].join(':'),
-          HOME: home,
-          XDG_CONFIG_HOME: join(home, '.config'),
-          TMPDIR: macTmpPath(id),
-          CLAUDE_CODE_TMPDIR: join(macTmpPath(id), 'claude'),
+          HOME: options.homePath,
+          XDG_CONFIG_HOME: join(options.homePath, '.config'),
+          TMPDIR: macTmpPath(options.sandboxId),
+          CLAUDE_CODE_TMPDIR: join(macTmpPath(options.sandboxId), 'claude'),
           LANG: 'en_US.UTF-8',
         },
       },
     );
-    if (!child.pid) throw new ControlError('startup_failed', 'failed to spawn SRT');
-    try {
-      const started = this.started(child.pid);
-      writeFileSync(this.file(unit), JSON.stringify({ pid: child.pid, started }), { flag: 'wx', mode: 0o600 });
-    } catch (error) {
-      try {
-        process.kill(-child.pid, 'SIGKILL');
-      } catch {
-        /* child exited */
-      }
-      throw error;
-    }
-    return { unit, process: child };
+    if (!child.pid) throw new SandboxError('start_failed', 'failed to spawn SRT');
+    const pid = child.pid;
+    const started = this.started(pid);
+    return {
+      provider: this.kind,
+      unit: null,
+      process: child,
+      stop: () => this.stop(pid, started, options),
+    };
   }
 
   private groupAlive(pid: number): boolean {
     try {
       const groups = execFileSync('/bin/ps', ['-ax', '-o', 'pgid='], { encoding: 'utf8' });
       return groups.split(/\s+/).some((group) => Number(group) === pid);
-    } catch {
-      throw new ControlError('stop_incomplete', 'cannot inspect macOS process groups');
+    } catch (error) {
+      throw new SandboxError('stop_incomplete', 'cannot inspect macOS process groups', { cause: error });
     }
   }
 
@@ -127,85 +99,41 @@ export class MacProvider implements Provider {
     return result.status === 0 ? result.stdout.trim() : '';
   }
 
-  private confirmLeader(pid: number, started: string, unit: string): void {
+  private confirmLeader(pid: number, started: string, options: ProviderStartOptions): void {
     const command = spawnSync('/bin/ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8' });
-    const id = /sbx_[a-f0-9]{32}/.exec(unit)![0];
-    const policyPath = join(this.config.controlRoot, 'policies', `${id}.json`);
     if (
       !started ||
       this.started(pid) !== started ||
       command.status !== 0 ||
       !command.stdout.includes(srtRuntime().cli) ||
-      !command.stdout.includes(policyPath)
+      !command.stdout.includes(options.policyPath)
     )
-      throw new ControlError('stop_incomplete', `cannot confirm owned macOS process group: ${unit}`);
+      throw new SandboxError('stop_incomplete', `cannot confirm owned macOS process group: ${pid}`);
   }
 
-  async stop(unit: string): Promise<void> {
-    const file = this.file(unit);
-    if (this.stopped.has(unit)) return;
-    if (lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink())
-      throw new ControlError('stop_incomplete', 'symlinked process record');
-    let pid: number;
-    let started: string;
-    try {
-      const record = JSON.parse(readFileSync(file, 'utf8'));
-      if (record.stopped === true) {
-        this.stopped.add(unit);
-        return;
-      }
-      ({ pid, started } = record);
-    } catch {
-      throw new ControlError('stop_incomplete', `missing process record: ${unit}`);
-    }
-    if (!Number.isSafeInteger(pid) || pid < 2) throw new ControlError('stop_incomplete', 'invalid process group');
-    const finish = () => {
-      removeMacTmp(/sbx_[a-f0-9]{32}/.exec(unit)![0]);
-      writeFileSync(file, JSON.stringify({ stopped: true }), { mode: 0o600 });
-      this.stopped.add(unit);
-    };
+  private async stop(pid: number, started: string, options: ProviderStartOptions): Promise<void> {
+    if (!Number.isSafeInteger(pid) || pid < 2) throw new SandboxError('stop_incomplete', 'invalid process group');
     for (const signal of ['SIGTERM', 'SIGKILL'] as const) {
       if (!this.groupAlive(pid)) {
-        finish();
+        removeMacTmp(options.sandboxId);
         return;
       }
-      this.confirmLeader(pid, started, unit);
+      this.confirmLeader(pid, started, options);
       try {
         process.kill(-pid, signal);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ESRCH' && this.groupAlive(pid))
-          throw new ControlError('stop_incomplete', String(error));
+          throw new SandboxError('stop_incomplete', String(error), { cause: error });
       }
-      const until = Date.now() + this.config.limits.stopMs;
+      const until = Date.now() + this.stopTimeoutMs;
       while (Date.now() < until) {
         if (!this.groupAlive(pid)) {
-          finish();
+          removeMacTmp(options.sandboxId);
           return;
         }
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
     }
-    throw new ControlError('stop_incomplete', `could not confirm stopped process group: ${unit}`);
-  }
-
-  async listOwned(): Promise<string[]> {
-    mkdirSync(this.directory(), { recursive: true, mode: 0o700 });
-    return readdirSync(this.directory()).filter((unit) => {
-      try {
-        this.file(unit);
-        return true;
-      } catch {
-        return false;
-      }
-    });
-  }
-
-  pruneStopped(referencedUnits: Set<string>): void {
-    for (const unit of readdirSync(this.directory())) {
-      if (referencedUnits.has(unit)) continue;
-      const file = this.file(unit);
-      if (lstatSync(file).isSymbolicLink()) throw new ControlError('stop_incomplete', 'symlinked process record');
-      if (JSON.parse(readFileSync(file, 'utf8')).stopped === true) unlinkSync(file);
-    }
+    throw new SandboxError('stop_incomplete', `could not confirm stopped process group: ${pid}`);
   }
 }

@@ -1,43 +1,62 @@
 # Compatibility and validation ledger
 
-> Toolchain note: this ledger records the upstream npm-based run. After the move into the Peri repository, dependency installation uses Bun (`bun install`); runtime and tests still execute on Node (`node --test`).
+> 本文件只记录**实际执行过**的命令与结果。旧版 daemon/registry/control socket 的验收数字已作废，不再沿用。
 
-Observed **October 27, 2026** on Apple Silicon macOS operating an isolated OrbStack Ubuntu 24.04 ARM64 VM (`peri-sandbox-accept`). Reproduce with `bash scripts/macos-acceptance.sh`; it builds and executes `npm test`, `node dist/src/cli.js doctor --config /srv/peri/control/config.json`, `node dist/tests/integration/linux.js /srv/peri/control/config.json` and `node dist/tests/integration/resources.js /srv/peri/control/config.json`. Latest Linux run: **40 unit cases (38 passed, 2 macOS-specific skipped), 16 Linux integration checks and 4 resource/network checks passed**. Logs and exact output come from those commands, not a security certificate.
+## 2026-10-27：单实例迁移基线
 
-macOS local preview: `npm test` passed all **41** cases; `npm run test:mac -- /absolute/config.json` against a temporary local service passed real MCP Write/Read/Bash, token read denial, stop and same-URL restart. A separately installed npm tarball started `up` and passed the same MCP exercise. Killing the temporary API with SIGKILL and running `up` again stopped/recovered its previous generation and reused the URL. macOS relies on SRT's native sandbox and process groups; unlike Linux, it **does not enforce `memoryMax`, `tasksMax`, or `cpuQuota`**, and detached descendants escaping a process group have not been shown to be reliably cleaned. Do not infer Linux A01–A18 or production multi-tenant guarantees from these macOS checks.
+环境：Apple Silicon macOS，Node `v24.18.0`，Bun `1.4.3`，`@anthropic-ai/sandbox-runtime` `0.0.81`。
 
-Programmatic macOS startup: `npm run test:mac:programmatic` starts a temporary in-process server via the public `startPeriSandbox()` API, discovers all seven Peri Workspace tools and invokes `Glob` through authenticated MCP, confirms a second startup reports a conflict without affecting the first, closes twice without exiting the host, confirms occupied-port fallback updates the Sandbox URL, and recovers the preferred URL after releasing the port. This does not expand the isolation guarantees above.
+| 命令 | 结果 |
+| --- | --- |
+| `bun install` | 成功；`better-sqlite3` 已从依赖树移除 |
+| `bun run format:check` | 通过 |
+| `bun run check` | 通过 |
+| `bun run build` | 通过 |
+| `bun run test`（`node --test dist/tests/*.test.js`） | **43/43 passed，0 failed，0 skipped** |
 
-| Component | Observed version | Verification |
+单元测试覆盖：settings init/load/hash、workspace 目录与锁、token 内存/文件、deleteData 与 symlink 拒绝、policy/transient unit 属性、cgroup 探针、diagnostics 轮转、PeriBackend 限流/Tasks 映射、HTTP codec，以及用 fake provider/backend 的实例生命周期（start/close 幂等、deleteData、同 id conflict、backend 退出、启动超时、abort、端口冲突、`stop_incomplete` 重试、symlinked root canonicalization）。
+
+### macOS 真实 SRT/MCP（已执行）
+
+使用真实 Peri 4.3.2 + SRT 0.0.81，全部写入临时目录（不使用 `~/.peri-sandbox`）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `npm run test:mac:programmatic` | 通过：start、同 id `conflict`、占用端口 `conflict`、重复 close、`deleteData` |
+| `node dist/src/cli.js init --settings <tmp>` + `node dist/tests/integration/mac.js <tmp>` | 通过：7 个工具、Write/Read/Bash、未授权 401、关闭后同 workspace 重启 |
+| 自定义程序化脚本（临时 settings） | 通过：Bearer MCP、`Bash pwd` 位于 workspace、文件跨重启保留、新 runId/新 URL、`deleteData` 删除目录与 `/private/tmp/peri-*` |
+
+补充验证：以未 realpath 的 `/var/folders/...` 作为 `sandboxesRoot` 时，实例路径被 canonicalize 为 `/private/var/...`，启动与 MCP 调用成功。运行后未发现残留 Peri/SRT 进程。
+
+未验证：进程组逃逸、宿主 SIGKILL 后的 macOS 残留、真实 ChatManager 端到端会话。
+
+### 未在本机执行
+
+| 项目 | 原因 | 状态 |
 | --- | --- | --- |
-| Node, Linux VM | 24.22.1 | ARM64 tarball checked against upstream SHASUMS256; build/tests/doctor passed |
-| MCP TS core/client/server | 2.4.0, locked | `scripts/patch-sdk.mjs` applies the exact-anchor Tasks codec patch; wire fixtures and HTTP roundtrip passed |
-| Peri | 4.3.2; SHA-256 `323a8e491a26e71be93a4e129ef60b18c7a53098b7bf252a5f309affe3af36c1` | Archive SHA-256 `750db3c41a3eb7d2b65d6ac8b4aedae338a72025cfdd747ef0c43368e9a98a6d`; real MCP Write/Read/Bash/tasks; update returns method-not-found |
-| Anthropic sandbox-runtime CLI | npm dependency 0.0.81; CLI SHA-256 `2a3cc1c7c6ee703860ea548594d55de1bdf760a642786cac74506dd96ac7fcb1` in VM | Package-local CLI and seccomp helper resolved without a global `srt`; real SRT/bwrap/seccomp, path/network probes under user-systemd cgroup v2 |
+| `scripts/macos-acceptance.sh`（OrbStack Ubuntu 24.04 VM） | 本轮未启动 VM | **未验证**：Linux cgroup、`systemd-run`、真实 SRT/seccomp、SIGKILL 清理、resources 验收均需在 VM 内重跑 |
+| npm pack / 独立消费者安装 | 未重跑 | **未验证** |
 
-Package smoke check: `npm pack` produced a tarball with only the public `dist/src` runtime tree, declarations, README, examples and SDK patch script; a separate temporary ESM consumer project installed the tarball and resolved the SRT CLI from its own npm dependencies while importing `connectSandboxControl`. This checks package wiring; the Linux VM tests check actual isolation, **not** Peri client discovery.
+Linux 侧需要手工确认：`run` 前台启动后 Ctrl+C 无残留；`kill -9` 宿主后 `systemctl --user list-units 'peri-sbx-*'` 无 active unit 且 cgroup 为空；同 sandboxId 第二实例 `conflict`；不同 id 可并行；显式端口占用 `conflict`；`close({deleteData:true})` 后目录不存在。
 
-“Live” below means the Linux VM ran **real** SRT+Peri through the HTTP adapter and user-systemd provider. “Mock” means local automated unit/fixture test, **not** environmental isolation. Partial means not all conditions in the design's row were exercised.
+## 保留的保证
 
-| ID | Evidence | Result / remaining gap |
-| --- | --- | --- |
-| A01 | Live authenticated MCP TS client calls real Peri Write/Read/Bash | **Partial:** no real *Peri client* settings discovery/invocation; `examples/peri-mcp-client.json` not executed end-to-end |
-| A02 | Live cgroup confirms exactly one Peri backend; no readiness sibling | Passed in this VM |
-| A03 | Live stop/start keeps URL/files, rotates generation, rejects stale get/update/cancel | Passed in this VM |
-| A04 | Live other workspace/home, symlink, relative/traversal and unowned sibling denials | Passed for tested paths in this VM |
-| A05 | Live config/token/user bus denial and two-running-sandbox `/tmp/claude` isolation | Passed for tested paths in this VM |
-| A06 | Live default egress denied, allowlisted HTTPS succeeds, another domain denied; doctor probes AF_UNIX | **Partial:** AF_UNIX proof from doctor, not a separate sandbox-to-sandbox socket probe |
-| A07 | Live CPU throttling, PID max and memory OOM events in unit cgroups | Passed in this VM; filesystem has start-time free-space watermark, no per-sandbox hard disk quota |
-| A08 | Live normal and nonzero Bash tasks, get/update no-op, cross-owner denial, cancel terminal + no shell marker; codec fixture | Passed for no-op update contract; no input handoff |
-| A09 | Live task lookup after HTTP connection close | Passed within same generation |
-| A10 | Live two connections share backend; task query is served during long Bash; mock independent abort/progress | **Partial:** same JSON-RPC IDs and cross-request progress/cancel not independently instrumented live |
-| A11 | Mock start/stop/destroy races, startup timeout, late callbacks | Mock only, not stress-tested under a real concurrent supervisor |
-| A12 | Live detached `setsid` double-fork descendant and separate Peri/SRT/API SIGKILL paths cleaned; cgroups empty | Passed for these failure modes in this VM |
-| A13 | Mock stop failure retains `stop_incomplete` and forbids restart/delete | Mock only; unsafe real unkillable-cgroup scenario not exercised |
-| A14 | Live `systemctl --user restart` and API SIGKILL/recovery: units stopped, data retained, no automatic replay; mock registry write failures | **Partial:** late systemd start job, real DB corruption/full and disk-full conditions not tested |
-| A15 | Live unauthenticated/legacy/no-Tasks rejected; mock unsupported features/allowlist | Passed for tested protocol boundaries |
-| A16 | Live >1 MiB request rejected; unit malformed/oversized stdio and rotating private diagnostics; HTTP concurrency capped at 32 | **Partial:** live slow consumer, unbroken huge stdout, stderr flood, Bash budget after quota, cumulative Peri task memory measurement outstanding |
-| A17 | Live tombstone, directory-only removal, HTTP 410; mock traversal/symlink checks | **Partial:** destructive attack scenarios not all reproduced live |
-| A18 | Live doctor succeeds in supported VM; mock controller mismatch/absent/unlimited rejects | **Partial:** live fault injection for disabled PrivateTmp, user namespace and cgroup controllers not executed |
+| 能力 | 说明 |
+| --- | --- |
+| workspace/home 持久 | `close()` 保留；只有 `deleteData` 删除 |
+| SRT 路径/网络策略 | 每次启动重新生成 `policy.json`；`denyRead: ["/"]`，allowRead 仅运行时路径 + workspace/home/tmp |
+| 单 workspace 单写者 | `<sandboxRoot>/.lock`（O_EXCL + pid 存活校验） |
+| HTTP 鉴权 | 每实例 token；`timingSafeEqual`；Host/Origin 校验；请求 1 MiB / 响应 8 MiB |
+| Linux cgroup 限制 | transient unit 保留 `MemoryMax`/`TasksMax`/`CPUQuota`/`PrivateTmp` |
+| PeriBackend Tasks 映射与限流 | 每个实例独立 runId；旧 task 在新实例中不可用 |
+| 停止确认 | Linux 等 cgroup 空；macOS 等进程组消失 |
 
-Native Darwin is **not** the Linux isolation provider. The VM reuse check cannot establish absence of manually configured mounts or secrets. Node's tarball hash is obtained from a downloaded manifest rather than pinned; apt packages and SRT transitive dependencies can change. The service and profiles require a dedicated, reviewed Linux deployment; these tests do not establish portability, multi-tenant security or sustained-memory behavior.
+## 不再提供的保证
+
+| 旧能力 | 现状 |
+| --- | --- |
+| 稳定 MCP URL | 默认 ephemeral port；重启后重新取 `mcpUrl` |
+| 崩溃后自动恢复/对账 | 无 daemon、无 registry、无 tombstone |
+| 请求幂等回执 | 无 requestId 去重；由宿主负责 |
+| 全局 `list` / `maxSandboxes` | 无 API；由宿主控制并发 |
+| token 文件共享 | 默认内存 token；`tokenFile` 必须位于 `<sandboxRoot>` |

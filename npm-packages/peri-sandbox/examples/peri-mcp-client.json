@@ -1,7 +1,8 @@
 {
   "mcpServers": {
-    "workspace-sandbox": {
-      "url": "http://127.0.0.1:8787/sandboxes/REPLACE_WITH_SANDBOX_ID/mcp",
+    "workspace": {
+      "type": "http",
+      "url": "http://127.0.0.1:PORT/mcp",
       "headers": {
         "Authorization": "Bearer ${PERI_SANDBOX_TOKEN}"
       }

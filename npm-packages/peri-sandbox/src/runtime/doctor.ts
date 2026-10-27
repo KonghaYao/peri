@@ -1,12 +1,23 @@
 import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  accessSync,
+  constants,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createServer } from 'node:net';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import type { Config } from '../config.js';
-import { makeDirectories, policyFor, sandboxPath } from './policy.js';
-import { ControlError } from '../control/types.js';
+import { SandboxError, type SandboxProfile } from '../instance/types.js';
+import { makeDirectories } from '../instance/workspace.js';
+import { policyFor, sandboxPath } from './policy.js';
 import { srtRuntime } from './srt.js';
+import type { DoctorOptions } from './provider.js';
 
 async function command(program: string, args: string[]): Promise<{ status: number; output: string }> {
   const child = spawn(program, args, { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -64,10 +75,8 @@ async function properties(unit: string): Promise<Map<string, string>> {
     'CPUQuotaPerSecUSec',
     '-p',
     'ControlGroup',
-    '-p',
-    'BindsTo',
   ]);
-  if (result.status) throw new ControlError('unsupported_environment', `cannot inspect probe unit: ${result.output}`);
+  if (result.status) throw new SandboxError('unsupported_environment', `cannot inspect probe unit: ${result.output}`);
   return new Map(
     result.output
       .trim()
@@ -79,7 +88,7 @@ async function properties(unit: string): Promise<Map<string, string>> {
   );
 }
 
-export function verifyProbeCgroup(root: string, profile: Config['profiles'][string]): void {
+export function verifyProbeCgroup(root: string, profile: SandboxProfile): void {
   let events: string, cpu: string[], memory: string, tasks: string;
   try {
     events = readFileSync(join(root, 'cgroup.events'), 'utf8');
@@ -87,7 +96,7 @@ export function verifyProbeCgroup(root: string, profile: Config['profiles'][stri
     memory = readFileSync(join(root, 'memory.max'), 'utf8').trim();
     tasks = readFileSync(join(root, 'pids.max'), 'utf8').trim();
   } catch {
-    throw new ControlError('unsupported_environment', 'probe cgroup controller files unavailable');
+    throw new SandboxError('unsupported_environment', 'probe cgroup controller files unavailable');
   }
   const memoryMatch = /^(\d+)([KMGT])$/.exec(profile.memoryMax);
   const quotaMatch = /^(\d+)%$/.exec(profile.cpuQuota);
@@ -98,7 +107,7 @@ export function verifyProbeCgroup(root: string, profile: Config['profiles'][stri
     cpu.length !== 2 ||
     ![...cpu, memory, tasks].every((value) => /^\d+$/.test(value) && BigInt(value) > 0n)
   ) {
-    throw new ControlError('unsupported_environment', 'probe cgroup controllers ineffective');
+    throw new SandboxError('unsupported_environment', 'probe cgroup controllers ineffective');
   }
   const bytes = BigInt(memoryMatch[1]) * 1024n ** BigInt('KMGT'.indexOf(memoryMatch[2]) + 1);
   if (
@@ -106,45 +115,34 @@ export function verifyProbeCgroup(root: string, profile: Config['profiles'][stri
     BigInt(tasks) !== BigInt(profile.tasksMax) ||
     BigInt(cpu[0]) * 100n !== BigInt(cpu[1]) * BigInt(quotaMatch[1])
   ) {
-    throw new ControlError('unsupported_environment', 'probe cgroup limits differ from profile');
+    throw new SandboxError('unsupported_environment', 'probe cgroup limits differ from profile');
   }
 }
 
-function verifyProperties(
-  values: Map<string, string>,
-  config: Config,
-  profile: Config['profiles'][string],
-  unit: string,
-  requireApiActive: boolean,
-): void {
+function verifyProperties(values: Map<string, string>, profile: SandboxProfile, unit: string): void {
   const group = values.get('ControlGroup');
   if (
     values.get('ActiveState') !== 'active' ||
     values.get('PrivateTmp') !== 'yes' ||
     values.get('KillMode') !== 'control-group'
   )
-    throw new ControlError('unsupported_environment', 'probe unit isolation properties not active');
-  if (requireApiActive && !values.get('BindsTo')?.split(' ').includes(config.provider.apiUnit))
-    throw new ControlError('unsupported_environment', 'probe unit not bound to API unit');
+    throw new SandboxError('unsupported_environment', 'probe unit isolation properties not active');
   if (!group?.startsWith('/user.slice/') || !group.endsWith(`/${unit}`) || group.includes('..'))
-    throw new ControlError('unsupported_environment', 'probe unit has no verifiable cgroup');
+    throw new SandboxError('unsupported_environment', 'probe unit has no verifiable cgroup');
   const root = resolve('/sys/fs/cgroup', '.' + group);
   if (!root.startsWith('/sys/fs/cgroup/user.slice/'))
-    throw new ControlError('unsupported_environment', 'unexpected cgroup root');
+    throw new SandboxError('unsupported_environment', 'unexpected cgroup root');
   verifyProbeCgroup(root, profile);
   if (
     ['infinity', '[not set]', undefined].includes(values.get('MemoryMax')) ||
     ['infinity', '[not set]', undefined].includes(values.get('TasksMax')) ||
     ['infinity', '[not set]', undefined].includes(values.get('CPUQuotaPerSecUSec'))
   )
-    throw new ControlError('unsupported_environment', 'resource limit property missing');
+    throw new SandboxError('unsupported_environment', 'resource limit property missing');
 }
 
-export function transientUnitProperties(
-  config: Config,
-  profile: Config['profiles'][string],
-  bindApi: boolean,
-): string[] {
+/** Properties shared by the doctor probe and the production transient unit. */
+export function transientUnitProperties(profile: SandboxProfile): string[] {
   return [
     '-p',
     'Type=exec',
@@ -158,7 +156,8 @@ export function transientUnitProperties(
     'PrivateTmp=yes',
     '-p',
     'ExecStartPre=/usr/bin/mkdir -p /tmp/claude',
-    ...(bindApi ? ['-p', `BindsTo=${config.provider.apiUnit}`, '-p', `After=${config.provider.apiUnit}`] : []),
+    '-p',
+    'CollectMode=inactive-or-failed',
     '-p',
     `MemoryMax=${profile.memoryMax}`,
     '-p',
@@ -171,68 +170,63 @@ export function transientUnitProperties(
 export function verifySeccompHelper(): void {
   const srtPackage = srtRuntime().packageRoot;
   if (process.arch !== 'arm64' && process.arch !== 'x64')
-    throw new ControlError('unsupported_environment', `unsupported SRT architecture: ${process.arch}`);
+    throw new SandboxError('unsupported_environment', `unsupported SRT architecture: ${process.arch}`);
   const helper = join(srtPackage, 'vendor', 'seccomp', process.arch === 'arm64' ? 'arm64' : 'x64', 'apply-seccomp');
   try {
     accessSync(helper, constants.X_OK);
   } catch {
-    throw new ControlError('unsupported_environment', `SRT seccomp helper missing: ${helper}`);
+    throw new SandboxError('unsupported_environment', `SRT seccomp helper missing: ${helper}`);
   }
 }
 
-export async function probeEnvironment(
-  config: Config,
-  requireApiActive: boolean,
-  stop: (unit: string) => Promise<void>,
-): Promise<void> {
+/** Verify cgroups, seccomp and SRT isolation for every configured profile. */
+export async function probeEnvironment(options: DoctorOptions, stop: (unit: string) => Promise<void>): Promise<void> {
   if (process.platform !== 'linux' || process.getuid?.() === 0)
-    throw new ControlError('unsupported_environment', 'requires an unprivileged Linux systemd user manager');
+    throw new SandboxError('unsupported_environment', 'requires an unprivileged Linux systemd user manager');
   if (!existsSync('/sys/fs/cgroup/cgroup.controllers'))
-    throw new ControlError('unsupported_environment', 'cgroup v2 unavailable');
+    throw new SandboxError('unsupported_environment', 'cgroup v2 unavailable');
   const controllers = readFileSync('/sys/fs/cgroup/cgroup.controllers', 'utf8').split(/\s+/);
   if (!['cpu', 'memory', 'pids'].every((value) => controllers.includes(value)))
-    throw new ControlError('unsupported_environment', 'required cgroup controllers unavailable');
+    throw new SandboxError('unsupported_environment', 'required cgroup controllers unavailable');
   const manager = await command('systemctl', ['--user', 'is-system-running']);
   if (manager.status && !['running', 'degraded'].includes(manager.output.trim()))
-    throw new ControlError('unsupported_environment', 'systemd user manager unavailable');
-  if (requireApiActive) {
-    const api = await command('systemctl', ['--user', 'show', config.provider.apiUnit, '-p', 'ActiveState', '--value']);
-    if (api.status || api.output.trim() !== 'active')
-      throw new ControlError('unsupported_environment', 'API user unit not active');
-  }
+    throw new SandboxError('unsupported_environment', 'systemd user manager unavailable');
   verifySeccompHelper();
-  mkdirSync(config.controlRoot, { recursive: true, mode: 0o700 });
-  mkdirSync(config.sandboxesRoot, { recursive: true, mode: 0o700 });
-  if (!Object.keys(config.profiles).length) throw new ControlError('unsupported_environment', 'no profile to probe');
-  for (const profileName of Object.keys(config.profiles))
-    await probeProfile(config, requireApiActive, stop, profileName);
+  mkdirSync(options.sandboxesRoot, { recursive: true, mode: 0o700 });
+  if (!Object.keys(options.profiles).length) throw new SandboxError('unsupported_environment', 'no profile to probe');
+  for (const [profileName, profile] of Object.entries(options.profiles))
+    await probeProfile(options, stop, profileName, profile);
 }
 
 async function probeProfile(
-  config: Config,
-  requireApiActive: boolean,
+  options: DoctorOptions,
   stop: (unit: string) => Promise<void>,
   profileName: string,
+  profile: SandboxProfile,
 ): Promise<void> {
   const id = `sbx_${randomBytes(16).toString('hex')}`;
-  const generation = `run_${randomBytes(12).toString('hex')}`;
-  const unit = `${config.provider.unitPrefix}${id}-${generation}.service`;
-  const base = sandboxPath(config, id),
+  const runId = `run_${randomBytes(12).toString('hex')}`;
+  const unit = `${options.unitPrefix}${id}-${runId}.service`;
+  const base = sandboxPath(options.sandboxesRoot, id),
     workspace = join(base, 'workspace'),
     home = join(base, 'home');
-  const policyPath = join(config.controlRoot, `probe-${id}.json`);
-  const secretPath = join(config.controlRoot, `probe-secret-${id}`);
+  const policyPath = join(base, 'policy.json');
+  const secrets = mkdtempSync(join(homedir(), '.peri-sandbox-probe-'));
+  const secretPath = join(secrets, 'secret');
   const tmpMarker = join('/tmp', `peri-sandbox-host-${id}`);
   const socketPath = join(workspace, 'unix-probe.sock');
-  const profile = config.profiles[profileName];
   const server = createServer((connection) => connection.end('unexpected access'));
   let child: ReturnType<typeof spawn> | undefined;
   let exit: Promise<number> | undefined;
   let exited = false;
   let stopped = false;
   try {
-    makeDirectories(config, id);
-    writeFileSync(policyPath, policyFor(config, id, profileName).json, { mode: 0o600 });
+    makeDirectories(options.sandboxesRoot, id);
+    writeFileSync(
+      policyPath,
+      policyFor({ sandboxesRoot: options.sandboxesRoot, sandboxId: id, profile, periPath: options.periPath }).json,
+      { mode: 0o600 },
+    );
     writeFileSync(secretPath, 'control-secret', { mode: 0o600 });
     writeFileSync(tmpMarker, 'host-tmp-marker', { mode: 0o600 });
     await new Promise<void>((done, reject) => {
@@ -248,7 +242,7 @@ async function probeProfile(
       '--wait',
       '--quiet',
       `--unit=${unit}`,
-      ...transientUnitProperties(config, profile, requireApiActive),
+      ...transientUnitProperties(profile),
       '--',
       '/usr/bin/env',
       '-i',
@@ -300,11 +294,11 @@ async function probeProfile(
         done(code ?? 1);
       });
     });
-    const limit = Date.now() + Math.max(config.limits.startupMs, 12000);
+    const limit = Date.now() + Math.max(options.startupTimeoutMs, 12000);
     let observed = false;
     while (Date.now() < limit) {
       if (stdout.includes('PERI_SANDBOX_PROBE_OK')) {
-        verifyProperties(await properties(unit), config, profile, unit, requireApiActive);
+        verifyProperties(await properties(unit), profile, unit);
         observed = true;
         break;
       }
@@ -312,19 +306,19 @@ async function probeProfile(
       await new Promise((done) => setTimeout(done, 100));
     }
     if (!observed)
-      throw new ControlError(
+      throw new SandboxError(
         'unsupported_environment',
-        `SRT isolation probe failed: ${stderr.slice(0, 2000)} ${stdout.slice(0, 500)}`,
+        `SRT isolation probe failed for ${profileName}: ${stderr.slice(0, 2000)} ${stdout.slice(0, 500)}`,
       );
     let timeout: NodeJS.Timeout | undefined;
     const status = await Promise.race([
       exit,
       new Promise<never>((_, reject) => {
-        timeout = setTimeout(() => reject(new ControlError('unsupported_environment', 'SRT probe did not exit')), 5000);
+        timeout = setTimeout(() => reject(new SandboxError('unsupported_environment', 'SRT probe did not exit')), 5000);
       }),
     ]).finally(() => clearTimeout(timeout));
     if (status || /seccomp.{0,120}(warning|failed|missing|unavailable)/i.test(stderr))
-      throw new ControlError('unsupported_environment', `SRT probe exited or degraded: ${stderr.slice(0, 2000)}`);
+      throw new SandboxError('unsupported_environment', `SRT probe exited or degraded: ${stderr.slice(0, 2000)}`);
   } finally {
     if (child && exit && !exited) child.kill('SIGKILL');
     try {
@@ -334,7 +328,7 @@ async function probeProfile(
           exit,
           new Promise<never>((_, reject) => {
             timeout = setTimeout(
-              () => reject(new ControlError('stop_incomplete', 'probe launcher did not exit')),
+              () => reject(new SandboxError('stop_incomplete', 'probe launcher did not exit')),
               5000,
             );
           }),
@@ -348,8 +342,8 @@ async function probeProfile(
         if (server.listening) await new Promise<void>((done) => server.close(() => done()));
         if (stopped) {
           rmSync(base, { recursive: true, force: true });
-          rmSync(policyPath, { force: true });
           rmSync(secretPath, { force: true });
+          rmSync(secrets, { recursive: true, force: true });
           rmSync(tmpMarker, { force: true });
         }
       }

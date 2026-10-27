@@ -1,16 +1,8 @@
 {
-  "controlRoot": "/srv/peri/control",
   "sandboxesRoot": "/srv/peri/sandboxes",
-  "listen": { "host": "127.0.0.1", "port": 8787 },
-  "publicBaseUrl": "http://127.0.0.1:8787",
-  "auth": { "tokenFile": "/srv/peri/control/token" },
-  "http": { "allowedHosts": ["127.0.0.1:8787"], "allowedOrigins": [] },
-  "runtime": {
-    "periPath": "/opt/peri-runtime/bin/peri",
-    "periSha256": "323a8e491a26e71be93a4e129ef60b18c7a53098b7bf252a5f309affe3af36c1"
-  },
-  "provider": { "apiUnit": "peri-sandbox-api.service", "unitPrefix": "peri-sbx-" },
-  "limits": { "maxSandboxes": 20, "startupMs": 30000, "stopMs": 10000, "bashCalls": 10000 },
+  "periPath": "/opt/peri-runtime/bin/peri",
+  "periSha256": "323a8e491a26e71be93a4e129ef60b18c7a53098b7bf252a5f309affe3af36c1",
+  "defaultProfile": "workspace-default",
   "profiles": {
     "workspace-default": {
       "allowedDomains": [],

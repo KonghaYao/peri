@@ -36,6 +36,11 @@
     "./view": {
       "types": "./dist/entries/view.d.ts",
       "import": "./dist/view.js"
+    },
+    "./sandbox": {
+      "types": "./dist/entries/sandbox.d.ts",
+      "import": "./dist/sandbox.js",
+      "default": "./dist/sandbox.js"
     }
   },
   "files": [
@@ -64,5 +69,13 @@
     "@tursodatabase/serverless": "1.4.1",
     "lib0": "^0.2.119",
     "yjs": "^13.6.33"
+  },
+  "peerDependencies": {
+    "peri-sandbox": ">=0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "peri-sandbox": {
+      "optional": true
+    }
   }
 }

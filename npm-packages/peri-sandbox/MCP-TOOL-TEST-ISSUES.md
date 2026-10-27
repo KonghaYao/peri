@@ -1,5 +1,7 @@
 # peri-sandbox MCP 工具测试问题报告
 
+> **历史记录（已过时）**：本报告基于旧的多 sandbox daemon 与 `/sandboxes/<id>/mcp` 静态端点，已被单实例 API 取代。当前端点固定为每实例 `http://127.0.0.1:<随机端口>/mcp`，不存在 daemon 或全局清单。以下内容仅作问题追溯，不再作为当前行为依据。
+
 - 测试时间：2026-10-27 16:30–16:35 CST
 - 代码版本：`6813e61`（工作区另有未提交修改：`src/runtime/backend.ts` 等）
 - 环境：macOS 26.5.1 (arm64)，Node `v26.9.0`，peri-sandbox 0.1.0

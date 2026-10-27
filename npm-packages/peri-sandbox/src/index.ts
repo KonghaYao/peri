@@ -1,7 +1,14 @@
-export { connectSandboxControl, newRequestId } from './control/client.js';
-export { ControlError } from './control/types.js';
-export type { SandboxControl, SandboxRecord, SandboxState, ErrorCode } from './control/types.js';
-export { configSchema, loadConfig } from './config.js';
-export type { Config } from './config.js';
-export { startPeriSandbox } from './start.js';
-export type { PeriSandboxSession } from './start.js';
+export { SandboxError } from './instance/types.js';
+export type {
+  SandboxErrorCode,
+  SandboxInstance,
+  SandboxProfile,
+  SandboxRuntimeInfo,
+  SandboxSettings,
+  SandboxState,
+  SandboxStatus,
+  StartSandboxOptions,
+} from './instance/types.js';
+export { startSandbox } from './instance/start.js';
+export { deleteSandboxData } from './instance/workspace.js';
+export { defaultSettingsPath, initSettings, loadSettings } from './instance/settings.js';

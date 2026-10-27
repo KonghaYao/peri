@@ -13,27 +13,26 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 
+/** Bounded rotating stderr log under `<sandboxRoot>/diagnostics`. */
 export class DiagnosticLog {
   private readonly directory: string;
   private descriptor: number;
   private bytes: number;
   private closed = false;
   constructor(
-    controlRoot: string,
-    sandboxId: string,
+    sandboxRoot: string,
     private readonly maxBytes = 10 * 1024 * 1024,
   ) {
-    if (!/^sbx_[a-f0-9]{32}$/.test(sandboxId) || maxBytes < 1) throw new Error('invalid diagnostic log configuration');
-    const root = join(controlRoot, 'diagnostics');
-    if (existsSync(root) && (lstatSync(root).isSymbolicLink() || !lstatSync(root).isDirectory()))
+    if (maxBytes < 1) throw new Error('invalid diagnostic log configuration');
+    const root = join(sandboxRoot, 'diagnostics');
+    const rootEntry = lstatSync(root, { throwIfNoEntry: false });
+    if (rootEntry && (rootEntry.isSymbolicLink() || !rootEntry.isDirectory()))
       throw new Error('diagnostic root is not a real directory');
-    this.directory = join(root, sandboxId);
+    this.directory = root;
     mkdirSync(this.directory, { recursive: true, mode: 0o700 });
-    for (const path of [root, this.directory]) {
-      const stats = lstatSync(path);
-      if (!stats.isDirectory() || stats.isSymbolicLink() || stats.mode & 0o077)
-        throw new Error('diagnostic directory must be private and real');
-    }
+    const stats = lstatSync(this.directory);
+    if (!stats.isDirectory() || stats.isSymbolicLink() || stats.mode & 0o077)
+      throw new Error('diagnostic directory must be private and real');
     this.descriptor = this.open();
     this.bytes = fstatSync(this.descriptor).size;
   }

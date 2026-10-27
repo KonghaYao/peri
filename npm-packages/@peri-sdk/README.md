@@ -2,7 +2,7 @@
 
 在宿主提供的 ACP transport 上运行 Peri，并给应用一套可读的 Chat 控制面、事实流和只读视图。
 
-SDK 不启动或停止 Peri CLI、Workspace 进程，也不提供本地 SQLite 后端。宿主负责提供 transport、持久化 Store，并在路由层保证同一 Session 只落在一个实例上。
+SDK 主入口不启动或停止 Peri CLI、Workspace 进程，也不提供本地 SQLite 后端。可选的 `@peri-code/sdk/sandbox` Node 子入口按宿主显式调用管理 `peri-sandbox` 生命周期。宿主负责提供 transport、持久化 Store，并在路由层保证同一 Session 只落在一个实例上。
 
 下面的接入代码来自 [`peri-cf`](../peri-cf/server/agent/compose.ts) 的真实装配，而不是抽象伪代码。
 
@@ -317,6 +317,57 @@ chatConfig: {
 
 `@peri-code/sdk` 不自带官方 MCP 包，使用方自行安装：v2 用 `bun add @modelcontextprotocol/server`；v1 单包路径为 `@modelcontextprotocol/sdk/server/mcp.js`，两版都可直接传入。
 
+## 沙箱生命周期（可选，Node only）
+
+`@peri-code/sdk/sandbox` 是独立的 Node 子入口，用于在宿主进程内管理一个 `peri-sandbox` 实例。主入口、`/portable`、`/wasm`、`/view` 不加载它，也不会间接加载 `better-sqlite3` 或 `@anthropic-ai/sandbox-runtime`；使用该入口需要 Node >= 22.12。
+
+`peri-sandbox` 是可选 peer 依赖，不使用 `/sandbox` 时无需安装：
+
+```bash
+bun add @peri-code/sdk
+bun add peri-sandbox   # 仅在使用 /sandbox 时安装
+```
+
+> `peri-sandbox` 当前仍在仓库内且标记为 private；发布前请用本地路径或 workspace 链接安装，发布后再使用上面的包名。
+
+**一个 `SandboxManager` 对应一个 chat session。** SDK 不维护全局 session→manager 表；多个会话请创建多个 manager。
+
+```ts
+import { SandboxManager } from "@peri-code/sdk/sandbox";
+
+const sandbox = new SandboxManager({
+  sessionKey: chatSessionId, // 或 sandboxId；宿主应持久化返回值以便重启后复用 workspace
+  // settingsPath / sandboxesRoot / profileName / profile / port 可选
+});
+
+const endpoint = await sandbox.start();
+const manager = new ChatManager({
+  agentConfig: { cwd: endpoint.workspacePath, /* ... */ },
+  database,
+  kv,
+  chatConfig: {
+    runtime: { /* ... */ },
+    sessionInit: await sandbox.chatSessionInit({
+      instructions: "Use the sandbox workspace.",
+    }),
+  },
+});
+
+// 先关闭 Chat 控制面，再关闭沙箱
+await manager.shutdown();
+await sandbox.close();                    // 停止实例，保留 workspace
+await sandbox.close({ deleteData: true }); // 停止并删除 sandbox 目录
+```
+
+1. `chatSessionInit()` 返回 `{ path, instructions?, mcpServers }`，可直接作为 `ChatManager.chatConfig.sessionInit`；`path` 是沙箱 workspace 的宿主绝对路径，`mcpServers.workspace` 是带 Bearer token 的 HTTP descriptor。token 只在这里出现，`status()`、`endpoint()` 与错误都不返回它。
+2. `start()` 幂等且并发共享同一个 Promise；失败可重试；`close()` 之后拒绝新调用。
+3. `stop()` 只关闭当前实例，保留 sandboxId 与 workspace；之后 `start()` 用同一 id 新起实例（新 runId、新 token、可能新 URL）。
+4. `close()` 是终止操作且幂等；`close({ deleteData: true })` 删除 `<sandboxesRoot>/<sandboxId>`。`stop()` 后也可调用 `close({deleteData:true})`。
+5. 不传 `sandboxId`/`sessionKey` 时每次启动会得到新的随机 workspace；临时会话之外请至少传 `sessionKey`。
+6. descriptor 只应留在服务端进程；不要把它交给浏览器或不可信租户。默认 `serverName:"workspace"` 会被 Peri 当作系统 Workspace。
+7. 沙箱重启可能改变 `mcpUrl`；已有 `ChatManager` 仍持有旧 descriptor，需要重建 Manager 或重新建立会话后才能切换到新地址。
+8. 生命周期不持久：宿主/沙箱实例退出后在途请求、Task 映射与 Bash 预算都会丢失；workspace 文件保留。
+
 ## 发布入口
 
 | 入口 | 源码 | 内容 |
@@ -326,6 +377,7 @@ chatConfig: {
 | `@peri-code/sdk/wasm` | `src/entries/wasm.ts` | 平台无关的 Emscripten ACP 运行后端、loader 与 transport |
 | `@peri-code/sdk/wasm-node` | `src/entries/wasm-node.ts` | `/wasm` 加 Node 兼容的网络/DNS 端口 |
 | `@peri-code/sdk/portable` | `src/entries/portable.ts` | 不装配 Bun/stdio 进程或本地 SQLite；Chat 控制面 + 执行准入核心 |
+| `@peri-code/sdk/sandbox` | `src/entries/sandbox.ts` | Node-only；宿主进程内单实例 `peri-sandbox`，生成 HTTP MCP sessionInit |
 
 `src/entries/chat.ts` 是主入口与 `/portable` 共用的 Chat 门面，不对应独立包 subpath。`ChatViewRegistry` 只在主入口与 `/portable` 导出，`/view` 保持纯浏览器视图面。
 

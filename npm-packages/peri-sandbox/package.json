@@ -31,9 +31,6 @@
     "format": "bunx biome format --write src tests scripts examples package.json tsconfig.json biome.json",
     "format:check": "bunx biome format src tests scripts examples package.json tsconfig.json biome.json"
   },
-  "trustedDependencies": [
-    "better-sqlite3"
-  ],
   "engines": {
     "node": ">=22.12.0"
   },
@@ -42,12 +39,10 @@
     "@modelcontextprotocol/client": "2.4.0",
     "@modelcontextprotocol/server": "2.4.0",
     "@modelcontextprotocol/core": "2.4.0",
-    "better-sqlite3": "^12.4.1",
     "zod": "^4.6.7"
   },
   "devDependencies": {
     "@biomejs/biome": "2.6.3",
-    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^26.6.5",
     "bun-types": "^1.4.4",
     "typescript": "^7.0.2"

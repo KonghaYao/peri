@@ -17,7 +17,7 @@ trap 'rm -rf "$staging"' EXIT
 
 sudo -n apt-get update
 sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y bubblewrap curl ca-certificates ripgrep socat build-essential xz-utils strace
-for path in "$runtime" /srv/peri /srv/peri/control /srv/peri/sandboxes; do
+for path in "$runtime" /srv/peri /srv/peri/sandboxes; do
   if [[ -L "$path" ]]; then echo "Refusing symlinked acceptance path: $path" >&2; exit 1; fi
 done
 sudo -n install -d -m 0755 -o "$(id -u)" -g "$(id -g)" "$runtime" "$runtime/bin"
@@ -49,31 +49,26 @@ bun install --frozen-lockfile
 bun run postinstall
 bun run build
 bun run test
-sudo -n install -d -m 0700 -o "$(id -u)" -g "$(id -g)" /srv/peri/control /srv/peri/sandboxes
-if [[ -L /srv/peri/control/config.json || -L /srv/peri/control/token ]]; then
-  echo 'Refusing symlinked acceptance config or token' >&2
+sudo -n install -d -m 0700 -o "$(id -u)" -g "$(id -g)" /srv/peri /srv/peri/sandboxes
+if [[ -L /srv/peri/settings.json ]]; then
+  echo 'Refusing symlinked acceptance settings' >&2
   exit 1
 fi
-if [[ ! -f /srv/peri/control/config.json ]]; then
-  install -m 0600 examples/config.acceptance.json /srv/peri/control/config.json
+if [[ ! -f /srv/peri/settings.json ]]; then
+  install -m 0600 examples/settings.acceptance.json /srv/peri/settings.json
 fi
-node -e 'const fs=require("node:fs");const file="/srv/peri/control/config.json";const config=JSON.parse(fs.readFileSync(file,"utf8"));if(!config.runtime.periSha256)config.runtime.periSha256="323a8e491a26e71be93a4e129ef60b18c7a53098b7bf252a5f309affe3af36c1";delete config.runtime.srtPath;delete config.runtime.srtSha256;fs.writeFileSync(file,JSON.stringify(config,null,2)+"\n",{mode:0o600});'
-if [[ ! -f /srv/peri/control/token ]]; then
-  node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('hex'))" > /srv/peri/control/token
-fi
-chmod 0600 /srv/peri/control/config.json /srv/peri/control/token
-mkdir -p "$HOME/.config/systemd/user"
-sed "s@ExecStart=.*@ExecStart=$runtime/node/bin/node $source_dir/dist/src/cli.js serve --config /srv/peri/control/config.json@" \
-  examples/peri-sandbox-api.service > "$HOME/.config/systemd/user/peri-sandbox-api.service"
+node -e '
+const fs = require("node:fs");
+const crypto = require("node:crypto");
+const file = "/srv/peri/settings.json";
+const settings = JSON.parse(fs.readFileSync(file, "utf8"));
+settings.periPath = "/opt/peri-runtime/bin/peri";
+settings.periSha256 = crypto.createHash("sha256").update(fs.readFileSync(settings.periPath)).digest("hex");
+fs.writeFileSync(file, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
+'
+chmod 0600 /srv/peri/settings.json
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
-systemctl --user daemon-reload
-systemctl --user restart peri-sandbox-api.service
-systemctl --user is-active --quiet peri-sandbox-api.service
-for attempt in {1..50}; do
-  [[ -S /srv/peri/control/control.sock ]] && break
-  sleep 0.2
-done
-node dist/src/cli.js doctor --config /srv/peri/control/config.json
-node dist/tests/integration/linux.js /srv/peri/control/config.json
-node dist/tests/integration/resources.js /srv/peri/control/config.json
+node dist/src/cli.js doctor --settings /srv/peri/settings.json
+node dist/tests/integration/linux.js /srv/peri/settings.json
+node dist/tests/integration/resources.js /srv/peri/settings.json

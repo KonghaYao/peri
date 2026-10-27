@@ -17,7 +17,7 @@ test('stdio transport frames batched and split messages without limiting whole c
     stdout,
     stderr: new PassThrough(),
   }) as unknown as ChildProcessWithoutNullStreams;
-  const backend = new PeriBackend('sbx_test', 'run_one', process, 2);
+  const backend = new PeriBackend({ id: 'sbx_test', runId: 'run_one', process, bashLimit: 2 });
   const transport = (
     backend as unknown as {
       transport: { start(): Promise<void>; onmessage?: (value: unknown) => void; onerror?: (error: Error) => void };
@@ -45,7 +45,7 @@ test('stdio transport rejects oversized outgoing messages before writing', async
     stdout: new PassThrough(),
     stderr: new PassThrough(),
   }) as unknown as ChildProcessWithoutNullStreams;
-  const backend = new PeriBackend('sbx_test', 'run_one', process, 2);
+  const backend = new PeriBackend({ id: 'sbx_test', runId: 'run_one', process, bashLimit: 2 });
   const transport = (backend as unknown as { transport: { send(message: unknown): Promise<void> } }).transport;
   let writes = 0;
   stdin.on('data', () => writes++);
@@ -63,7 +63,7 @@ test('malformed backend JSON closes transport instead of stranding requests', as
     stdout,
     stderr: new PassThrough(),
   }) as unknown as ChildProcessWithoutNullStreams;
-  const backend = new PeriBackend('sbx_test', 'run_one', process, 2);
+  const backend = new PeriBackend({ id: 'sbx_test', runId: 'run_one', process, bashLimit: 2 });
   const transport = (
     backend as unknown as {
       transport: {

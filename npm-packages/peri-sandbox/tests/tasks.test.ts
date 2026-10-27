@@ -11,7 +11,7 @@ test('task IDs are opaque, stable per owner, and reversed only on the owning bac
     stdout: new PassThrough(),
     stderr: new PassThrough(),
   }) as unknown as ChildProcessWithoutNullStreams;
-  const backend = new PeriBackend('sbx_test', 'run_old', process, 4);
+  const backend = new PeriBackend({ id: 'sbx_test', runId: 'run_old', process, bashLimit: 4 });
   const calls: unknown[] = [];
   let result: Record<string, unknown> = {
     resultType: 'task',
@@ -80,7 +80,7 @@ test('allowlists and Bash budget reject before dispatch while task operations re
     stdout: new PassThrough(),
     stderr: new PassThrough(),
   }) as unknown as ChildProcessWithoutNullStreams;
-  const backend = new PeriBackend('sbx_test', 'run_one', process, 1);
+  const backend = new PeriBackend({ id: 'sbx_test', runId: 'run_one', process, bashLimit: 1 });
   const calls: { method: string; params: Record<string, unknown> }[] = [];
   backend.client.request = (async (request: { method: string; params: Record<string, unknown> }) => {
     calls.push(request);
@@ -128,7 +128,7 @@ test('concurrent requests use independent signals and progress callbacks', async
     stdout: new PassThrough(),
     stderr: new PassThrough(),
   }) as unknown as ChildProcessWithoutNullStreams;
-  const backend = new PeriBackend('sbx_test', 'run_one', process, 3);
+  const backend = new PeriBackend({ id: 'sbx_test', runId: 'run_one', process, bashLimit: 3 });
   const pending: {
     signal: AbortSignal;
     onprogress?: (progress: { progress: number }) => void;

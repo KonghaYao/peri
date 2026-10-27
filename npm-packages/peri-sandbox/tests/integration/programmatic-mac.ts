@@ -1,101 +1,61 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
-import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
-import { z } from 'zod';
-import { connectSandboxControl, startPeriSandbox } from '../../src/index.js';
+import { initSettings, SandboxError, startSandbox, type SandboxInstance } from '../../src/index.js';
 
 if (process.platform !== 'darwin') throw new Error('macOS acceptance runs only on macOS');
 const root = realpathSync(mkdtempSync(join(tmpdir(), 'peri-programmatic-')));
-const configPath = join(root, 'control', 'config.json');
-let session: Awaited<ReturnType<typeof startPeriSandbox>> | undefined;
-try {
-  session = await startPeriSandbox({ configPath });
-  assert.equal(session.configPath, configPath);
-  assert(existsSync(session.tokenFile));
-  const control = connectSandboxControl({ socketPath: join(root, 'control', 'control.sock') });
-  assert.equal((await control.inspect(session.id)).state, 'ready');
-  await assert.rejects(startPeriSandbox({ configPath }), { code: 'conflict' });
-  assert.equal((await control.inspect(session.id)).state, 'ready');
-  const client = new Client(
-    { name: 'programmatic-test', version: '1' },
-    {
-      versionNegotiation: { mode: { pin: '2026-07-28' } },
-      capabilities: { extensions: { 'io.modelcontextprotocol/tasks': {} } },
-    },
-  );
-  try {
-    await client.connect(
-      new StreamableHTTPClientTransport(new URL(session.mcpUrl), {
-        requestInit: { headers: { Authorization: `Bearer ${readFileSync(session.tokenFile, 'utf8').trim()}` } },
-      }),
-    );
-    assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name).sort(), [
-      'Bash',
-      'Edit',
-      'Glob',
-      'Grep',
-      'Read',
-      'Write',
-      'folder_operations',
-    ]);
-    const glob = await client.request(
-      { method: 'tools/call', params: { name: 'Glob', arguments: { pattern: '*.does-not-exist' } } },
-      z.record(z.string(), z.unknown()),
-    );
-    assert.equal(glob.isError, false, JSON.stringify(glob));
-    const bash = await client.request(
-      {
-        method: 'tools/call',
-        params: {
-          name: 'Bash',
-          arguments: {
-            command:
-              'stat /bin/ls && command -v ls && ls -d . && if test -x /opt/homebrew/bin/brew; then command -v brew; fi',
-          },
-        },
-      },
-      z.record(z.string(), z.unknown()),
-    );
-    assert.equal(bash.isError, false, JSON.stringify(bash));
-    assert(JSON.stringify(bash.content).includes('/bin/ls'));
-    if (existsSync('/opt/homebrew/bin/brew')) assert(JSON.stringify(bash.content).includes('/opt/homebrew/bin/brew'));
-  } finally {
-    await client.close();
-  }
-  const original = { id: session.id, mcpUrl: session.mcpUrl };
-  await session.close();
-  await session.close();
-  session = undefined;
-  assert.equal(existsSync(join(root, 'sandboxes', original.id, 'workspace')), true);
-  const occupiedPort = Number(new URL(original.mcpUrl).port);
-  const occupant = createServer();
-  await new Promise<void>((resolve, reject) => {
-    occupant.once('error', reject);
-    occupant.listen(occupiedPort, '127.0.0.1', resolve);
+const settingsPath = join(root, 'settings.json');
+const sandboxId = `sbx_${'cd'.repeat(16)}`;
+let instance: SandboxInstance | undefined;
+
+async function expectCode(promise: Promise<unknown>, code: string): Promise<void> {
+  await assert.rejects(promise, (error: unknown) => {
+    assert(error instanceof SandboxError, String(error));
+    assert.equal(error.code, code);
+    return true;
   });
+}
+
+try {
+  await initSettings(settingsPath);
+  instance = await startSandbox({ settingsPath, sandboxId, minFreeBytes: 0 });
+  assert.equal(instance.id, sandboxId);
+  assert.equal(instance.workspacePath, join(root, 'sandboxes', sandboxId, 'workspace'));
+  assert.match(instance.token, /^[a-f0-9]{64}$/);
+
+  await expectCode(startSandbox({ settingsPath, sandboxId, minFreeBytes: 0 }), 'conflict');
+
+  const occupied = createServer();
+  await new Promise<void>((resolve) => occupied.listen(0, '127.0.0.1', resolve));
+  const address = occupied.address();
+  assert(address && typeof address !== 'string');
   try {
-    session = await startPeriSandbox({ configPath });
-    assert.equal(session.id, original.id);
-    assert.notEqual(session.mcpUrl, original.mcpUrl);
-    assert.equal(
-      (await connectSandboxControl({ socketPath: join(root, 'control', 'control.sock') }).inspect(session.id)).mcpUrl,
-      session.mcpUrl,
+    await expectCode(
+      startSandbox({
+        settingsPath,
+        sandboxId: `sbx_${'ef'.repeat(16)}`,
+        port: address.port,
+        minFreeBytes: 0,
+      }),
+      'conflict',
     );
-    const response = await fetch(session.mcpUrl);
-    assert.equal(response.status, 401);
-    await session.close();
-    session = undefined;
   } finally {
-    await new Promise<void>((resolve) => occupant.close(() => resolve()));
+    await new Promise<void>((resolve) => occupied.close(() => resolve()));
   }
-  session = await startPeriSandbox({ configPath });
-  assert.equal(session.id, original.id);
-  assert.equal(session.mcpUrl, original.mcpUrl);
-  console.log('macOS: programmatic start, MCP, occupied-port fallback and preferred-port recovery passed');
+
+  await instance.close();
+  await instance.close();
+  assert.equal(instance.state, 'closed');
+  assert.equal(existsSync(instance.workspacePath), true);
+  await instance.close({ deleteData: true });
+  assert.equal(existsSync(join(root, 'sandboxes', sandboxId)), false);
+  instance = undefined;
+  instance = await startSandbox({ settingsPath, sandboxId, minFreeBytes: 0 });
+  console.log('macOS: programmatic start, same-id conflict, occupied port, idempotent close and deleteData passed');
 } finally {
-  await session?.close();
+  await instance?.close({ deleteData: true });
   rmSync(root, { recursive: true, force: true });
 }

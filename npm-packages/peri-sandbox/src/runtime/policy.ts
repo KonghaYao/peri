@@ -1,84 +1,75 @@
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { existsSync, lstatSync, realpathSync, rmSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
-import type { Config } from '../config.js';
-import { ControlError } from '../control/types.js';
+import type { SandboxProfile } from '../instance/types.js';
+import { SandboxError } from '../instance/types.js';
 import { srtRuntime } from './srt.js';
 
-export function sandboxPath(config: Config, id: string): string {
-  if (!/^sbx_[a-f0-9]{32}$/.test(id)) throw new ControlError('conflict', 'invalid sandbox ID');
-  return join(config.sandboxesRoot, id);
+const sandboxIdPattern = /^sbx_[a-f0-9]{32}$/;
+
+export function sandboxPath(sandboxesRoot: string, id: string): string {
+  if (!sandboxIdPattern.test(id)) throw new SandboxError('conflict', 'invalid sandbox ID');
+  return join(sandboxesRoot, id);
 }
 
 export function macTmpPath(id: string): string {
-  if (!/^sbx_[a-f0-9]{32}$/.test(id)) throw new ControlError('conflict', 'invalid sandbox ID');
+  if (!sandboxIdPattern.test(id)) throw new SandboxError('conflict', 'invalid sandbox ID');
   return join('/private/tmp', `peri-${id.slice(4, 20)}`);
 }
 
 export function removeMacTmp(id: string): void {
+  if (process.platform !== 'darwin') return;
   const tmp = macTmpPath(id);
   const entry = lstatSync(tmp, { throwIfNoEntry: false });
-  if (
-    entry &&
-    (entry.isSymbolicLink() || !entry.isDirectory() || entry.uid !== process.getuid?.() || entry.mode & 0o077)
-  )
-    throw new ControlError('stop_incomplete', `untrusted sandbox tmp: ${tmp}`);
+  if (!entry) return;
+  if (entry.isSymbolicLink() || !entry.isDirectory() || entry.uid !== process.getuid?.() || entry.mode & 0o077)
+    throw new SandboxError('stop_incomplete', `untrusted sandbox tmp: ${tmp}`);
   rmSync(tmp, { recursive: true, force: true });
 }
 
+/** Reject symlinks and paths outside the managed root before creating or deleting. */
 export function checkDirectory(path: string, root: string): void {
   if (resolve(path) === resolve(root) || !resolve(path).startsWith(resolve(root) + sep))
-    throw new ControlError('conflict', 'path outside managed root');
+    throw new SandboxError('conflict', 'path outside managed root');
   let cursor = resolve(path);
   while (cursor !== resolve(root)) {
     if (existsSync(cursor) && lstatSync(cursor).isSymbolicLink())
-      throw new ControlError('conflict', `symlink in managed path: ${cursor}`);
+      throw new SandboxError('conflict', `symlink in managed path: ${cursor}`);
     cursor = resolve(cursor, '..');
   }
-  if (existsSync(root) && lstatSync(root).isSymbolicLink()) throw new ControlError('conflict', 'symlink root');
+  if (existsSync(root) && lstatSync(root).isSymbolicLink()) throw new SandboxError('conflict', 'symlink root');
 }
 
-export function makeDirectories(config: Config, id: string): void {
-  const base = sandboxPath(config, id);
-  checkDirectory(base, config.sandboxesRoot);
-  mkdirSync(join(base, 'workspace'), { recursive: true, mode: 0o700 });
-  mkdirSync(join(base, 'home'), { recursive: true, mode: 0o700 });
-  mkdirSync(join(base, 'home', '.config'), { recursive: true, mode: 0o700 });
-  if (process.platform === 'darwin') {
-    const tmp = macTmpPath(id);
-    if (
-      existsSync(tmp) &&
-      (lstatSync(tmp).isSymbolicLink() ||
-        !statSync(tmp).isDirectory() ||
-        statSync(tmp).uid !== process.getuid?.() ||
-        statSync(tmp).mode & 0o077)
-    )
-      throw new ControlError('conflict', `untrusted sandbox tmp: ${tmp}`);
-    mkdirSync(join(tmp, 'claude'), { recursive: true, mode: 0o700 });
-  }
+function overlapsManagedRoot(candidate: string, root: string): boolean {
+  const left = resolve(candidate),
+    right = resolve(root);
+  return left === right || !relative(left, right).startsWith('..') || !relative(right, left).startsWith('..');
 }
 
-export function policyFor(config: Config, id: string, name: string): { json: string; hash: string } {
-  const selected = config.profiles[name];
-  if (!selected) throw new ControlError('conflict', `unknown profile: ${name}`);
-  const base = sandboxPath(config, id);
-  const reads = [...selected.runtimeReadPaths, srtRuntime().packageRoot].flatMap((path) => {
-    if (!existsSync(path)) throw new ControlError('unsupported_environment', `runtime path missing: ${path}`);
+/**
+ * Build the SRT policy for one sandbox.
+ *
+ * `allowRead` is limited to runtime paths plus workspace/home/tmp; the
+ * sandbox root itself (policy, token, lock, diagnostics) stays unreadable.
+ */
+export function policyFor(options: {
+  sandboxesRoot: string;
+  sandboxId: string;
+  profile: SandboxProfile;
+  periPath: string;
+}): { json: string; hash: string } {
+  const base = sandboxPath(options.sandboxesRoot, options.sandboxId);
+  const root = existsSync(options.sandboxesRoot) ? realpathSync(options.sandboxesRoot) : resolve(options.sandboxesRoot);
+  const reads: string[] = [];
+  for (const path of [...options.profile.runtimeReadPaths, srtRuntime().packageRoot, options.periPath]) {
+    if (!existsSync(path)) throw new SandboxError('unsupported_environment', `runtime path missing: ${path}`);
     const target = realpathSync(path);
-    for (const protectedRoot of [config.controlRoot, config.sandboxesRoot]) {
-      const root = existsSync(protectedRoot) ? realpathSync(protectedRoot) : resolve(protectedRoot);
-      if (
-        [path, target].some(
-          (candidate) =>
-            candidate === root ||
-            !relative(candidate, root).startsWith('..') ||
-            !relative(root, candidate).startsWith('..'),
-        )
-      )
-        throw new ControlError('unsupported_environment', `runtime path overlaps managed state: ${path}`);
+    for (const candidate of [path, target]) {
+      if (overlapsManagedRoot(candidate, root))
+        throw new SandboxError('unsupported_environment', `runtime path overlaps managed state: ${path}`);
+      if (!reads.includes(candidate)) reads.push(candidate);
     }
-    return path === target ? [path] : [path, target];
-  });
+  }
   const json = JSON.stringify({
     filesystem: {
       denyRead: ['/'],
@@ -86,17 +77,17 @@ export function policyFor(config: Config, id: string, name: string): { json: str
         ...reads,
         join(base, 'workspace'),
         join(base, 'home'),
-        process.platform === 'darwin' ? macTmpPath(id) : '/tmp',
+        process.platform === 'darwin' ? macTmpPath(options.sandboxId) : '/tmp',
       ],
       allowWrite: [
         join(base, 'workspace'),
         join(base, 'home'),
-        process.platform === 'darwin' ? macTmpPath(id) : '/tmp/claude',
+        process.platform === 'darwin' ? macTmpPath(options.sandboxId) : '/tmp/claude',
       ],
       denyWrite: [],
     },
     network: {
-      allowedDomains: selected.allowedDomains,
+      allowedDomains: options.profile.allowedDomains,
       deniedDomains: [],
       strictAllowlist: true,
       allowAllUnixSockets: false,

@@ -18,9 +18,10 @@ test('declared CLI and public TypeScript entry resolve to built files', async ()
   ]) {
     assert(existsSync(path), `missing package entrypoint: ${path}`);
   }
-  const api = await import('../src/index.js');
-  assert.equal(typeof api.connectSandboxControl, 'function');
-  assert.equal(typeof api.newRequestId, 'function');
-  assert.equal(typeof api.loadConfig, 'function');
-  assert.equal(typeof api.startPeriSandbox, 'function');
+  const api = (await import('../src/index.js')) as Record<string, unknown>;
+  for (const symbol of ['startSandbox', 'deleteSandboxData', 'initSettings', 'loadSettings', 'defaultSettingsPath'])
+    assert.equal(typeof api[symbol], 'function', `missing export: ${symbol}`);
+  assert.equal(typeof api.SandboxError, 'function');
+  for (const removed of ['connectSandboxControl', 'newRequestId', 'startPeriSandbox', 'loadConfig', 'ControlError'])
+    assert.equal(api[removed], undefined, `removed export still present: ${removed}`);
 });
