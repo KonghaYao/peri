@@ -1,9 +1,21 @@
 {
   "name": "@peri-code/sdk",
   "version": "0.0.0",
-  "private": true,
   "type": "module",
   "description": "Peri ACP host SDK over host-injected transports, including the Emscripten WASM runtime",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KonghaYao/peri.git",
+    "directory": "npm-packages/@peri-sdk"
+  },
+  "homepage": "https://github.com/KonghaYao/peri/tree/main/npm-packages/@peri-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/KonghaYao/peri/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": {
       "types": "./dist/entries/index.d.ts",
