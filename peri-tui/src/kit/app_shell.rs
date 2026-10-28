@@ -10,6 +10,7 @@ use crate::kit::event_handlers;
 use crate::kit::image_overlay::ImageOverlay;
 use crate::kit::layout::{CenterBand, SessionColumn};
 use crate::kit::message_area::grid::GridSpec;
+use crate::kit::panel_overlay::PanelOverlay;
 use crate::kit::popup_overlay::PopupOverlay;
 use crate::kit::setup_wizard::SetupWizard;
 use crate::kit::status_bar::StatusBar;
@@ -27,6 +28,8 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let popup_kind = hooks.use_atom(&atoms::POPUP_KIND);
     let wizard_active = hooks.use_atom(&atoms::WIZARD_ACTIVE);
     let setup_preflight = hooks.use_atom(&atoms::SETUP_PREFLIGHT);
+    let setup_chatgpt = hooks.use_atom(&atoms::SETUP_CHATGPT_PHASE);
+    let active_panel = hooks.use_atom(&atoms::ACTIVE_PANEL);
     // 订阅渲染心跳：即使终端无输入，heartbeat 也能周期性唤醒 render loop，
     // 防止窗口切换后 EventStream 永久阻塞。
     let _heartbeat = hooks.use_atom(&atoms::RENDER_HEARTBEAT);
@@ -81,17 +84,56 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
 
     let setup_preflight_active = *setup_preflight.read();
     let wizard_open = *wizard_active.read();
+    let setup_phase = *setup_chatgpt.read();
+    let active_panel_kind = *active_panel.read();
+    hooks.use_effect(
+        move || {
+            if !setup_preflight_active || wizard_open || active_panel_kind.is_some() {
+                return;
+            }
+            match setup_phase {
+                Some(atoms::SetupChatGptPhase::Login) => {
+                    atoms::SETUP_WIZARD.state().write().step =
+                        crate::app::setup_wizard::SetupStep::Choose;
+                    atoms::SETUP_CHATGPT_PHASE.set(None);
+                    atoms::WIZARD_ACTIVE.set(true);
+                }
+                Some(atoms::SetupChatGptPhase::Model) => {
+                    let ready = atoms::PERI_CONFIG_HANDLE.get().is_some_and(|config| {
+                        !crate::app::setup_wizard::needs_setup(&config.read().config)
+                    });
+                    if ready {
+                        atoms::SETUP_COMPLETED.set(true);
+                        atoms::SETUP_CHATGPT_PHASE.set(None);
+                    } else {
+                        crate::chatgpt_auth::notify_key("setup-chatgpt-complete-model", 4);
+                        crate::kit::panel_registry::open_panel(
+                            crate::app::panel_types::PanelKind::Model,
+                        );
+                    }
+                }
+                None => {}
+            }
+        },
+        (
+            setup_preflight_active,
+            wizard_open,
+            setup_phase,
+            active_panel_kind,
+        ),
+    );
     let exit_for_setup = exit_shared.clone();
     hooks.use_effect(
         move || {
             if setup_preflight_active
                 && !wizard_open
+                && setup_phase.is_none()
                 && let Some(mut f) = exit_for_setup.lock().take()
             {
                 f();
             }
         },
-        (setup_preflight_active, wizard_open),
+        (setup_preflight_active, wizard_open, setup_phase),
     );
 
     // [Fix P0] mount 时重装 panic hook，覆盖 ratatui::init() 的包装 hook。
@@ -134,6 +176,22 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     height: Constraint::Fill(1),
                 ) {
                     SetupWizard()
+                }
+            }
+        }
+    } else if setup_preflight_active && setup_phase.is_some() {
+        let hint = if setup_phase == Some(atoms::SetupChatGptPhase::Login) {
+            crate::i18n::tr("setup-chatgpt-login-hint")
+        } else {
+            crate::i18n::tr("setup-chatgpt-complete-model")
+        };
+        element! {
+            PaletteProvider(palette) {
+                View(flex_direction: Direction::Vertical, width: Constraint::Fill(1), height: Constraint::Fill(1)) {
+                    PanelOverlay()
+                    View(height: Constraint::Length(2)) {
+                        Text(text: ratatui_kit::ratatui::widgets::Paragraph::new(hint))
+                    }
                 }
             }
         }

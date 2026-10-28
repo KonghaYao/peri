@@ -1,46 +1,20 @@
-use std::io::Write;
+use std::path::PathBuf;
 
 use serde_json::Value;
 use serial_test::serial;
 
 use super::{load_from, save_to, ConfigSource};
 use crate::app::PeriConfig;
+use support::{
+    make_source, revision, run_isolated_test, write_settings, ConfigPathGuard, SUBPROCESS_MARKER,
+};
 
-fn revision(source: &ConfigSource) -> crate::ConfigurationRevision {
-    source
-        .snapshot()
-        .map(|snapshot| snapshot.revision())
-        .unwrap_or_else(|| {
-            crate::ConfigurationSnapshot::resolve(
-                crate::ConfigurationScope::new(
-                    std::env::temp_dir(),
-                    source.global_path().to_owned(),
-                )
-                .unwrap(),
-                Default::default(),
-            )
-            .unwrap()
-            .revision()
-        })
-}
-
-/// 在临时目录创建 .peri/settings.json
-fn write_settings(dir: &std::path::Path, content: &str) {
-    let peri_dir = dir.join(".peri");
-    std::fs::create_dir_all(&peri_dir).unwrap();
-    let mut f = std::fs::File::create(peri_dir.join("settings.json")).unwrap();
-    f.write_all(content.as_bytes()).unwrap();
-}
-
-/// RAII guard：测试结束时复位全局配置路径重定向，
-/// 防止断言失败后残留全局态污染其他测试。
-struct ConfigPathGuard;
-
-impl Drop for ConfigPathGuard {
-    fn drop(&mut self) {
-        super::set_global_config_path(None);
-    }
-}
+#[cfg(test)]
+#[path = "settings_test/responses.rs"]
+mod responses;
+#[cfg(test)]
+#[path = "settings_test/support.rs"]
+mod support;
 
 #[test]
 fn test_load_global_only_no_workspace() {
@@ -219,19 +193,6 @@ fn test_merge_global_and_workspace_via_load_from() {
 }
 
 // ─── ConfigSource（值对象，无进程级全局态，可并行）─────────────────────────
-
-/// 构造配置源：global 目录 + 可选 workspace 目录（均含 .peri/settings.json）
-fn make_source(tmp: &tempfile::TempDir, ws_dir: Option<&str>) -> ConfigSource {
-    let global_dir = tmp.path().join("global");
-    let global_path = global_dir.join(".peri").join("settings.json");
-    let cwd = ws_dir
-        .map(|d| tmp.path().join(d))
-        .unwrap_or_else(|| tmp.path().join("empty-cwd"));
-    if ws_dir.is_none() {
-        std::fs::create_dir_all(&cwd).unwrap();
-    }
-    ConfigSource::load_at(&cwd, global_path).unwrap()
-}
 
 /// [P0 契约] 加载与保存共享同一路径决策：`ConfigSource` 在加载时一次性确定
 /// 布局，保存复用——工作区配置存在时写回工作区，全局文件保持原样。
@@ -488,40 +449,55 @@ fn test_config_source_save_unwritable_errors() {
 #[test]
 #[serial]
 fn test_set_global_config_path_none_keeps_default() {
-    let _guard = ConfigPathGuard;
+    let _guard = ConfigPathGuard::new();
     super::set_global_config_path(None);
     let expected = peri_mcp_config::global_config_path();
     assert_eq!(super::config_path(), expected);
 }
 
-/// 重定向 + ConfigSource 全链路：save 写回重定向后的全局路径
+/// 重定向 + ConfigSource 全链路：save 写回重定向后的全局路径。
+///
+/// 使用显式 `load_at`，cwd 指向本次测试自建的临时工作区：
+/// 即使测试进程的 cwd 是仓库根，也不会读写真实 `.peri/settings.json`。
 #[test]
 #[serial]
 fn test_redirect_config_path_and_save_roundtrip() {
-    let _guard = ConfigPathGuard;
+    let _guard = ConfigPathGuard::new();
     let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("workspace");
     let target = tmp.path().join("global").join("settings.json");
     // tempdir 路径本身是绝对路径，set 后不做相对路径解析
     super::set_global_config_path(Some(target.clone()));
     assert_eq!(super::config_path(), target);
 
-    let source = ConfigSource::load().unwrap();
+    let source = ConfigSource::load_at(&workspace, target.clone()).unwrap();
+    assert_eq!(source.cwd(), workspace);
+    assert!(
+        source.workspace_path().is_none(),
+        "隔离工作区无配置，save 必须落全局路径"
+    );
     source
         .save(revision(&source), &PeriConfig::default())
         .unwrap();
     assert!(target.exists());
+    assert!(
+        target.starts_with(tmp.path()),
+        "写入目标必须位于本次测试的临时根内"
+    );
     // 写入内容必须是合法 JSON（save_to 内部 serde_json::to_string_pretty 已保证）
     let content = std::fs::read_to_string(&target).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
     assert!(parsed.is_object());
+    assert!(
+        !workspace.join(".peri").join("settings.json").exists(),
+        "隔离工作区不得被创建配置"
+    );
 }
 
 #[test]
 #[serial]
 fn test_redirect_load_reads_override_file() {
-    let _guard = ConfigPathGuard;
-    // 测试 cwd 是 peri-acp 包根，无 ./.peri/ 目录，
-    // 工作区 merge 不介入，load() 只读重定向后的全局文件。
+    let _guard = ConfigPathGuard::new();
     let tmp = tempfile::tempdir().unwrap();
     let content = r#"{
         "config": {
@@ -533,16 +509,150 @@ fn test_redirect_load_reads_override_file() {
     let target = tmp.path().join(".peri").join("settings.json");
     super::set_global_config_path(Some(target.clone()));
 
-    let cfg = super::load().unwrap();
+    // 显式 cwd = 本次测试临时目录；工作区路径与全局路径是同一文件，
+    // load_at 按 same_file 跳过工作区层，只读重定向后的全局文件。
+    let cfg = ConfigSource::load_at(tmp.path(), target)
+        .unwrap()
+        .loaded_merged();
     assert_eq!(cfg.config.active_alias, "sonnet");
     assert_eq!(cfg.config.providers.len(), 1);
     assert_eq!(cfg.config.providers[0].api_key, "sk-redirect");
 }
 
+/// 仅在父测试以隔离 cwd/HOME 拉起时执行：验证默认 `ConfigSource::load()`
+/// 确实使用 cwd 与 HOME，而不是测试进程的真实环境。
+#[test]
+#[ignore = "由 test_default_load_wiring_is_isolated_in_subprocess 在隔离子进程中显式运行"]
+fn child_default_load_uses_isolated_cwd_and_home() {
+    assert_eq!(
+        std::env::var(SUBPROCESS_MARKER).as_deref(),
+        Ok("1"),
+        "该用例只能由父测试在隔离子进程中运行"
+    );
+    let cwd = std::env::current_dir().unwrap();
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .expect("父测试必须设置隔离 HOME");
+    assert_eq!(
+        super::config_path(),
+        home.join(".peri").join("settings.json"),
+        "默认全局路径必须来自隔离 HOME"
+    );
+
+    let source = ConfigSource::load().unwrap();
+    assert_eq!(source.cwd(), cwd, "默认 load 必须使用隔离 cwd");
+    let workspace_path = cwd.join(".peri").join("settings.json");
+    assert_eq!(
+        source.workspace_path(),
+        Some(workspace_path.as_path()),
+        "默认 load 必须发现隔离工作区配置"
+    );
+    assert_eq!(
+        source.loaded_merged().config.language.as_deref(),
+        Some("en")
+    );
+
+    let mut updated = source.loaded_merged();
+    updated.config.active_alias = "sonnet".to_owned();
+    source.save(revision(&source), &updated).unwrap();
+    assert!(workspace_path.exists());
+    assert!(
+        !home.join(".peri").join("settings.json").exists(),
+        "存在工作区时不得写全局配置"
+    );
+}
+
+/// 默认 `load()` 接线回归：cwd 与 HOME 都隔离的子进程内验证读/写落点。
+#[test]
+#[serial]
+fn test_default_load_wiring_is_isolated_in_subprocess() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("workspace");
+    let home = tmp.path().join("home");
+    write_settings(&workspace, r#"{"config":{"language":"en"}}"#);
+    std::fs::create_dir_all(&home).unwrap();
+
+    let output = run_isolated_test(
+        "settings::tests::child_default_load_uses_isolated_cwd_and_home",
+        &workspace,
+        &home,
+        true,
+    );
+    assert!(
+        output.status.success(),
+        "隔离子进程失败：\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let saved = std::fs::read_to_string(workspace.join(".peri").join("settings.json")).unwrap();
+    assert!(saved.contains("\"active_alias\": \"sonnet\""));
+    assert!(!home.join(".peri").join("settings.json").exists());
+}
+
+/// 哨兵回归：构造临时“模拟真实工作区”，内含已知内容的 `.peri/settings.json`。
+///
+/// 1. 用显式隔离路径执行同类 load/save，写入目标必须在本次测试根内，哨兵逐字节不变；
+/// 2. 再以该模拟工作区为 cwd 在子进程中运行危险用例，防止将来退回 ambient `load()`。
+#[test]
+#[serial]
+fn contract_roundtrip_never_touches_simulated_workspace_sentinel() {
+    let root = tempfile::tempdir().unwrap();
+
+    let sentinel: &[u8] =
+        br#"{"config":{"active_alias":"do-not-touch","custom-setting":"sentinel"}}"#;
+    let simulated_workspace = root.path().join("simulated-real-workspace");
+    let sentinel_path = simulated_workspace.join(".peri").join("settings.json");
+    std::fs::create_dir_all(sentinel_path.parent().unwrap()).unwrap();
+    std::fs::write(&sentinel_path, sentinel).unwrap();
+
+    // 同类流程：显式 cwd/global，写入根由本次测试拥有。
+    let isolated_workspace = root.path().join("isolated-workspace");
+    let isolated_global = root.path().join("isolated-global").join("settings.json");
+    let source = ConfigSource::load_at(&isolated_workspace, isolated_global.clone()).unwrap();
+    source
+        .save(revision(&source), &PeriConfig::default())
+        .unwrap();
+    assert!(source.workspace_path().is_none());
+    assert!(isolated_global.starts_with(root.path()));
+    assert!(isolated_global.exists());
+    assert!(!isolated_workspace.join(".peri/settings.json").exists());
+
+    // 危险用例在“真实工作区”cwd 下运行：它必须只使用自己的 tempdir。
+    let home = root.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let output = run_isolated_test(
+        "settings::tests::test_redirect_config_path_and_save_roundtrip",
+        &simulated_workspace,
+        &home,
+        false,
+    );
+    assert!(
+        output.status.success(),
+        "危险用例在模拟真实工作区 cwd 下失败：\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        std::fs::read(&sentinel_path).unwrap(),
+        sentinel,
+        "模拟真实工作区的哨兵文件必须逐字节不变"
+    );
+    let entries: Vec<_> = std::fs::read_dir(sentinel_path.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        entries,
+        vec![std::ffi::OsString::from("settings.json")],
+        "模拟真实工作区不得出现新文件"
+    );
+}
+
 #[test]
 #[serial]
 fn test_redirect_absolutizes_relative_path() {
-    let _guard = ConfigPathGuard;
+    let _guard = ConfigPathGuard::new();
     super::set_global_config_path(Some(std::path::PathBuf::from("settings.json")));
     let resolved = super::config_path();
     let cwd = std::env::current_dir().unwrap();
@@ -555,7 +665,7 @@ fn test_redirect_absolutizes_relative_path() {
 fn test_redirect_save_to_unaffected_by_override() {
     // save_to 显式指定路径，不经过 config_path()，
     // 重定向设置后行为不变（防御显式路径语义不被全局态污染）。
-    let _guard = ConfigPathGuard;
+    let _guard = ConfigPathGuard::new();
     let tmp = tempfile::tempdir().unwrap();
     super::set_global_config_path(Some(tmp.path().join("override").join("settings.json")));
     let explicit = tmp.path().join("explicit").join("settings.json");
@@ -637,7 +747,7 @@ fn config_source_refuses_stale_global_baseline_without_copying_credentials() {
 #[test]
 #[serial]
 fn config_path_uses_shared_data_plane_authority() {
-    let _guard = ConfigPathGuard;
+    let _guard = ConfigPathGuard::new();
     let tmp = tempfile::tempdir().unwrap();
     let shared_path = tmp.path().join("shared.json");
     peri_mcp_config::set_global_config_path(Some(shared_path.clone()));
@@ -832,3 +942,5 @@ fn save_to_preserves_unknown_top_level_siblings() {
     assert_eq!(saved["other"], 17);
     assert_eq!(saved["config"]["active_alias"], "sonnet");
 }
+
+// Responses 未完成绑定与保存边界测试见 `responses` 子模块。

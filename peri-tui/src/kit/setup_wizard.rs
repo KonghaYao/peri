@@ -1,6 +1,6 @@
 //! ratatui-kit SetupWizard —— 完整交互式配置向导。
 //!
-//! 五步向导：Language → Choose → Preset → Form → Done。
+//! 配置向导：Language → Choose → Preset/Form/ChatGpt 引导 → Done。
 //! 状态存储在 `SETUP_WIZARD` atom 中，显隐由 `WIZARD_ACTIVE` 控制。
 
 #![allow(clippy::needless_update)]
@@ -26,8 +26,8 @@ mod render;
 
 use self::handler::{handle_wizard_event, wizard_click};
 use self::render::{
-    render_choose_step, render_done_step, render_form_step, render_language_step,
-    render_preset_step,
+    render_chatgpt_step, render_choose_step, render_done_step, render_form_step,
+    render_language_step, render_preset_step,
 };
 
 // ── 主组件 ────────────────────────────────────────────────────────────────────
@@ -130,8 +130,7 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                     // 区域内点击（未命中行）也消费，防止穿透
                     return EventResult::Consumed;
                 }
-                let current = SETUP_WIZARD.state().read().clone();
-                handle_wizard_event(event, current)
+                dispatch_wizard_event(event)
             },
         );
     }
@@ -142,6 +141,7 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         SetupStep::Choose => {
             render_choose_step(&state, dim, accent, cursor_color, text_color, error_color)
         }
+        SetupStep::ChatGpt => render_chatgpt_step(&state, dim, accent, cursor_color, text_color),
         SetupStep::Preset => render_preset_step(&state, dim, accent, cursor_color, text_color),
         SetupStep::Form => render_form_step(
             &state,
@@ -178,6 +178,11 @@ pub fn SetupWizard(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
             }
         }
     }
+}
+
+fn dispatch_wizard_event(event: Event) -> EventResult {
+    let current = SETUP_WIZARD.state().read().clone();
+    handle_wizard_event(event, current)
 }
 
 // Durable save and runtime activation are separate stages. The wizard stays
@@ -229,8 +234,34 @@ fn report_setup_failure(key: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui_kit::crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui_kit::crossterm::event::{
+        KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use ratatui_kit::ratatui::layout::Rect;
+
+    #[test]
+    #[serial_test::serial]
+    fn setup_keyboard_dispatch_releases_snapshot_before_writing_state() {
+        SETUP_WIZARD.set(SetupWizardState {
+            step: SetupStep::Choose,
+            ..Default::default()
+        });
+        assert_eq!(
+            dispatch_wizard_event(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))),
+            EventResult::Consumed
+        );
+        assert_eq!(SETUP_WIZARD.state().read().choose_cursor, 1);
+        assert_eq!(
+            dispatch_wizard_event(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))),
+            EventResult::Consumed
+        );
+        assert_eq!(SETUP_WIZARD.state().read().choose_cursor, 0);
+        dispatch_wizard_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert_eq!(SETUP_WIZARD.state().read().step, SetupStep::Language);
+        atoms::WIZARD_ACTIVE.set(true);
+        dispatch_wizard_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!atoms::WIZARD_ACTIVE.get());
+    }
 
     /// 内容区 visual_row 处的左键点击（area 顶部边框行不可点，故 row = area.y + 1 + visual_row）。
     fn click(area: Rect, visual_row: u16) -> MouseEvent {
@@ -249,6 +280,83 @@ mod tests {
             providers,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn chatgpt_guide_click_back_returns_to_source_without_opening_login() {
+        let mut state = SetupWizardState {
+            step: SetupStep::ChatGpt,
+            ..Default::default()
+        };
+        let area = Rect::new(0, 0, 80, 30);
+        assert!(!wizard_click(&click(area, 10), area, &mut state));
+        assert!(wizard_click(&click(area, 13), area, &mut state));
+        assert_eq!(state.step, SetupStep::Choose);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn chatgpt_guide_click_continue_opens_login_only_after_confirmation() {
+        let mut state = SetupWizardState {
+            step: SetupStep::Choose,
+            source: SetupSource::ChatGptSubscription,
+            ..Default::default()
+        };
+        atoms::SETUP_PREFLIGHT.set(false);
+        atoms::WIZARD_ACTIVE.set(true);
+        let area = Rect::new(0, 0, 80, 30);
+        assert!(wizard_click(&click(area, 3 + 2 * 3), area, &mut state));
+        assert_eq!(state.step, SetupStep::ChatGpt);
+        assert!(atoms::WIZARD_ACTIVE.get());
+        assert!(wizard_click(&click(area, 11), area, &mut state));
+        assert!(!atoms::WIZARD_ACTIVE.get());
+        assert_eq!(
+            *atoms::ACTIVE_PANEL.state().read(),
+            Some(crate::app::panel_types::PanelKind::Login)
+        );
+        crate::kit::panel_registry::close_active_panel();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn chatgpt_guide_direction_keys_and_escape_dispatch_without_locking() {
+        SETUP_WIZARD.set(SetupWizardState {
+            step: SetupStep::ChatGpt,
+            ..Default::default()
+        });
+        for direction in [KeyCode::Down, KeyCode::Left, KeyCode::Right, KeyCode::Up] {
+            assert_eq!(
+                dispatch_wizard_event(Event::Key(KeyEvent::new(direction, KeyModifiers::NONE))),
+                EventResult::Consumed
+            );
+        }
+        dispatch_wizard_event(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert_eq!(SETUP_WIZARD.state().read().step, SetupStep::Choose);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn chatgpt_guide_preflight_confirmation_retains_login_model_handoff() {
+        let mut state = SetupWizardState {
+            step: SetupStep::ChatGpt,
+            ..Default::default()
+        };
+        atoms::SETUP_PREFLIGHT.set(true);
+        atoms::SETUP_CHATGPT_PHASE.set(None);
+        atoms::WIZARD_ACTIVE.set(true);
+        let area = Rect::new(0, 0, 80, 30);
+        assert!(wizard_click(&click(area, 11), area, &mut state));
+        assert_eq!(
+            atoms::SETUP_CHATGPT_PHASE.get(),
+            Some(atoms::SetupChatGptPhase::Login)
+        );
+        assert_eq!(
+            *atoms::ACTIVE_PANEL.state().read(),
+            Some(crate::app::panel_types::PanelKind::Login)
+        );
+        crate::kit::panel_registry::close_active_panel();
+        atoms::SETUP_CHATGPT_PHASE.set(None);
+        atoms::SETUP_PREFLIGHT.set(false);
     }
 
     /// Browse 无 base_url：每 provider 7 行（provider 行 + 空行 + 4 别名 + 空行）。

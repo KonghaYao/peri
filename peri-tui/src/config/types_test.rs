@@ -142,6 +142,7 @@ fn test_provider_config_models_serde_roundtrip() {
         provider_type: "anthropic".to_string(),
         api_key: "key".to_string(),
         base_url: String::new(),
+        auth: None,
         name: Some("Test".to_string()),
         models: ProviderModels {
             opus: "claude-opus-4-7".to_string(),
@@ -356,4 +357,23 @@ fn test_app_config_claude_md_excludes_roundtrip() {
         back.claude_md_excludes,
         Some(vec!["node_modules/**".to_string()])
     );
+}
+
+#[test]
+fn save_effective_error_classifies_revision_conflicts() {
+    use peri_config::settings::SettingsError;
+
+    assert!(SaveEffectiveError::Settings(SettingsError::Conflict).is_conflict());
+    assert!(
+        !SaveEffectiveError::Settings(SettingsError::GlobalBaselineChanged).is_conflict(),
+        "global baseline 变化需要重启，重新载入不能恢复，不得提示重载"
+    );
+    assert!(
+        SaveEffectiveError::Settings(SettingsError::Resolution(
+            peri_config::ConfigurationError::Conflict
+        ))
+        .is_conflict()
+    );
+    assert!(!SaveEffectiveError::SourceUnavailable.is_conflict());
+    assert!(!SaveEffectiveError::Settings(SettingsError::AuthorityUnavailable).is_conflict());
 }

@@ -54,6 +54,10 @@ pub(super) fn project_message_ref(
     removed: &HashSet<String>,
     caps: &ProviderCapabilities,
 ) -> AgentResult<Option<BaseMessage>> {
+    // Replay state and its visible siblings form one assistant output unit.
+    // The provider validates the same invariant at the wire boundary, but a
+    // stale/persisted projection must fail here before a request is attempted.
+    let atomic_replay = message.message_content().has_provider_state();
     // A standalone archived result carries one logical body. Drop it before any
     // projection work copies that body; special actions still take the ordered
     // path so their validation errors stay unchanged.
@@ -93,10 +97,27 @@ pub(super) fn project_message_ref(
             }
         }
     }
-    if !removed.is_empty() && draft.omit(removed, caps)? {
+    if atomic_replay
+        && message
+            .tool_calls()
+            .iter()
+            .any(|call| removed.contains(&call.id))
+    {
+        return Err(invalid("provider replay unit cannot omit tool calls"));
+    }
+    if !atomic_replay && !removed.is_empty() && draft.omit(removed, caps)? {
         return Ok(None);
     }
-    Ok(Some(draft.finish()))
+    let projected = draft.finish();
+    if atomic_replay
+        && (projected.message_content() != message.message_content()
+            || projected.tool_calls() != message.tool_calls())
+    {
+        return Err(invalid(
+            "provider replay unit cannot be partially projected",
+        ));
+    }
+    Ok(Some(projected))
 }
 
 /// Copy-on-write message body: fields stay borrowed until an action changes them.
@@ -600,7 +621,10 @@ fn project_block(
     action: Option<&ProjectionAction>,
     _caps: &ProviderCapabilities,
 ) -> ContentBlock {
-    if matches!(block, ContentBlock::ToolUse { .. }) {
+    if matches!(
+        block,
+        ContentBlock::ToolUse { .. } | ContentBlock::ProviderState { .. }
+    ) {
         return block.clone();
     }
 

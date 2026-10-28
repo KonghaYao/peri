@@ -147,3 +147,7 @@ pub(super) fn build_model_factories(
         subagent_llm_factory,
     }
 }
+
+#[cfg(test)]
+#[path = "models_responses_test.rs"]
+mod responses_tests;

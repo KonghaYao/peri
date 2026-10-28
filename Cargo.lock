@@ -3253,6 +3253,7 @@ dependencies = [
  "peri-config",
  "peri-controller",
  "peri-mcp-common",
+ "peri-mcp-credentials",
  "peri-mcp-cron",
  "peri-mcp-workflow",
  "peri-mcp-workspace",
@@ -3343,6 +3344,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -3467,15 +3469,24 @@ name = "peri-mcp-credentials"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "peri-acp-types",
+ "peri-model",
  "peri-resources",
  "peri-time",
+ "reqwest",
+ "ring",
  "rmcp",
+ "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-util",
  "tracing",
+ "url",
+ "uuid",
  "wasm-bindgen-futures",
 ]
 
@@ -4591,6 +4602,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",

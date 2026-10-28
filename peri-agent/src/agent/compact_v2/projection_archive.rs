@@ -186,6 +186,11 @@ pub(super) fn render(
     for message in &visible {
         original_pairs.add_message(message.as_ref())?;
     }
+    let replay_calls: HashSet<&str> = visible
+        .iter()
+        .filter(|message| message.message_content().has_provider_state())
+        .flat_map(|message| message.tool_calls().iter().map(|call| call.id.as_str()))
+        .collect();
     // Receipts and root entries are derived history: they keep the canonical step
     // order instead of becoming the newest messages in the request.
     let mut visible_positions = HashMap::with_capacity(visible.len());
@@ -299,9 +304,19 @@ pub(super) fn render(
                 None => return Err(invalid("preview requires its original archive catalog")),
             }
         }
-        outputs.push(project_message_ref(
-            message, &ordinary, legacy, &resolved, &remove, caps,
-        )?);
+        let result = project_message_ref(message, &ordinary, legacy, &resolved, &remove, caps)?;
+        if is_replay_result(message, &replay_calls)
+            && result.as_ref().is_none_or(|result| {
+                result.id() != message.id()
+                    || result.message_content() != message.message_content()
+                    || result.tool_calls() != message.tool_calls()
+            })
+        {
+            return Err(invalid(
+                "provider replay tool results cannot be partially projected",
+            ));
+        }
+        outputs.push(result);
     }
     // A root follows its visible `last_anchor`; when Full removed that member it follows
     // the message that still carries the root directive (usually the summary).
@@ -385,6 +400,25 @@ pub(super) fn render(
     validate_delta(&original_pairs, &after_pairs, &omitted_calls)?;
     validate_projected_view(&projected, caps)?;
     Ok(projected)
+}
+
+fn is_replay_result(message: &BaseMessage, replay_calls: &HashSet<&str>) -> bool {
+    if let BaseMessage::Tool { tool_call_id, .. } = message {
+        return replay_calls.contains(tool_call_id.as_str());
+    }
+    match message.message_content() {
+        MessageContent::Blocks(blocks) => blocks.iter().any(|block| {
+            matches!(block, ContentBlock::ToolResult { tool_use_id, .. }
+                if replay_calls.contains(tool_use_id.as_str()))
+        }),
+        MessageContent::Raw(blocks) => blocks.iter().any(|block| {
+            block["type"] == "tool_result"
+                && block["tool_use_id"]
+                    .as_str()
+                    .is_some_and(|id| replay_calls.contains(id))
+        }),
+        MessageContent::Text(_) => false,
+    }
 }
 
 /// Visible message index for every tool call result in the current view.

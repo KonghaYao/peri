@@ -59,6 +59,74 @@ async fn collect_replay(history: Vec<BaseMessage>) -> Vec<SessionUpdate> {
     sender.updates.into_inner().unwrap()
 }
 
+/// Responses native replay data stays in persistence; ACP only publishes the
+/// readable projection and exactly one tool call when loading the same message.
+#[tokio::test]
+async fn responses_provider_state_is_hidden_but_tool_call_survives_history_replay() {
+    use peri_acp_types::messages::ToolCallRequest;
+
+    for embedded_tool in [false, true] {
+        let mut blocks = vec![
+            PeriContentBlock::Text {
+                text: "visible answer".into(),
+            },
+            PeriContentBlock::Reasoning {
+                text: "visible summary".into(),
+                signature: None,
+            },
+            PeriContentBlock::ProviderState {
+                provider: "openai_responses".into(),
+                data: serde_json::json!({"version": 1, "items": [{"type": "reasoning", "encrypted_content": "private-ciphertext-fixture"}]}),
+            },
+        ];
+        if embedded_tool {
+            blocks.push(PeriContentBlock::ToolUse {
+                id: "call_history".into(),
+                name: "Read".into(),
+                input: serde_json::json!({"path": "a.rs"}),
+            });
+        }
+        let message = BaseMessage::ai_with_tool_calls(
+            PeriMessageContent::Blocks(blocks),
+            vec![ToolCallRequest::new(
+                "call_history",
+                "Read",
+                serde_json::json!({"path": "a.rs"}),
+            )],
+        );
+        let persisted = serde_json::to_vec(&message).unwrap();
+        assert!(String::from_utf8_lossy(&persisted).contains("private-ciphertext-fixture"));
+        let restored: BaseMessage = serde_json::from_slice(&persisted).unwrap();
+        let updates = collect_replay(vec![restored]).await;
+        assert_eq!(
+            updates.len(),
+            3,
+            "text, summary and a single tool call only"
+        );
+        let wire = serde_json::to_string(&updates).unwrap();
+        assert!(!wire.contains("private-ciphertext-fixture"));
+        assert!(!wire.contains("provider_state"));
+        assert!(wire.contains("visible answer") && wire.contains("visible summary"));
+        let calls: Vec<_> = updates
+            .iter()
+            .filter_map(|update| match update {
+                SessionUpdate::ToolCall(call) => Some(call),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls.len(),
+            1,
+            "tool_calls and embedded ToolUse must deduplicate"
+        );
+        assert_eq!(calls[0].tool_call_id.to_string(), "call_history");
+        assert_eq!(
+            calls[0].raw_input,
+            Some(serde_json::json!({"path": "a.rs"}))
+        );
+    }
+}
+
 /// REQ-H04：回放通知带本次 load 的代次（紧挨 `periReplay`），未协商的连接一个私有字段都不带。
 #[tokio::test]
 async fn replay_notifications_carry_the_load_generation_next_to_the_replay_marker() {

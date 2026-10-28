@@ -14,7 +14,7 @@
 flowchart LR
     AGENT[AgentModelBridge] --> REQ[ModelRequest]
     REQ --> MODEL[Model::stream]
-    MODEL --> PROVIDER[Anthropic / OpenAI-compatible]
+    MODEL --> PROVIDER[Anthropic / Chat Completions / Responses]
     PROVIDER --> STREAM[ModelStreamEvent]
     STREAM --> AGENT
 ```
@@ -41,7 +41,7 @@ Agent 侧 `AgentModelBridge` 是 `peri-model` 与 ReAct 的边界：它把
 
 ## 3. Provider Adapter
 
-Anthropic 与 OpenAI-compatible adapter 都实现三项核心职责：
+Anthropic、OpenAI-compatible（Chat Completions）与 Responses adapter 实现三项核心职责：
 
 1. `prepare_request`：构造 provider-native 请求观测投影；
 2. `stream`：经公共 HTTP/SSE runtime 发起请求并返回统一事件流；
@@ -56,6 +56,35 @@ System Prompt 的 cached/uncached seam 由
 breakpoint 的 adapter 消费该 seam；其他 adapter 只做字节守恒剥离。详见
 [System Prompt 设计](system-prompt.md)与 ARC-SERIAL-001。
 
+### Responses 与认证
+
+`openai_responses` 是独立 wire adapter，由配置 `type: "openai_responses"` 显式选择。
+API Key 与 ChatGPT plan 共用请求编码、流解码和公共 runtime，通过 `ResponsesProfile`
+描述能力差异，凭据获取通过宿主注入的 `RequestAuth` 完成。模型层不读文件、环境变量，
+也不启动另一套 Agent。原有 `openai` 配置继续使用 Chat Completions。
+
+| Profile | 认证和路由 | 请求约束 |
+| --- | --- | --- |
+| Platform | 配置 API Key；显式 Responses endpoint | `store: false`、`stream: true`；可配置输出上限 |
+| ChatGptPlan | Sign in with ChatGPT 授权；固定公共 `/v1/responses` | 全历史 `input`，system 转 developer；省略不支持的输出上限等参数；function 工具放在 `peri` namespace |
+
+订阅的登录、刷新、状态与登出属于 `mcp-packages/credentials` 的宿主控制面；不进入
+模型工具目录。凭据按账户保存，刷新串行化并原子替换。配置只持有凭据引用，不将
+access/refresh token 写入请求 checkpoint。401 刷新只允许原预算内重新发送冻结请求；
+认证或配额失败不能切换到 API Key。此入口不读取或借用 Codex 的本地登录文件。
+
+Responses 输出用普通内容块供显示和工具调度，同时以 `ProviderState` 保存有序原生
+output items。重放时使用原生 items 替代其普通内容投影，保留 `call_id`、item ID、
+namespace、phase 和 encrypted reasoning；两份投影不得重复发送。状态绑定 endpoint、
+model、profile 和 credential reference。切换绑定时先验证原生状态与普通内容投影
+一致，再只发送普通历史内容，旧 encrypted reasoning 不得跨域发送；被编辑而不一致
+的历史明确拒绝。
+
+`ProviderState` 随 transcript 序列化，但不显示为正文。Micro Compact 不拆开携带原生
+状态的完整交换；Full Compact 生成新的纯文本摘要，不能把旧状态附到新摘要。恢复、
+fork 与 rewind 使用同一校验边界。无法解释的可执行 output item 必须显式失败，不能
+静默跳过或交给工具执行器。
+
 ## 4. 流、取消与重试
 
 `ModelStream` 持有 parent cancellation token 的 child token。取消本流只能停止本次
@@ -67,9 +96,17 @@ breakpoint 的 adapter 消费该 seam；其他 adapter 只做字节守恒剥离�
 - 首个可见增量前，按 `RetryableErrorClasses` 判定传输、HTTP 和协议错误是否进入退避；
 - 已发出可见 delta 后，失败以 `Interrupted` 交付，不重放同一请求；Agent 保存部分正文，
   经队列有界续跑，预算与取消遵循 ARC-OUTPUT-COMPLETION-001；
+- provider 明确终止的 `ProviderTerminal` 不重试；即使已有可见内容，Agent 也在保存
+  部分正文后返回失败，不入队自动续跑，不执行半成品工具调用，不调用成功 hook；
 - SSE parser 与 decoder 保持事件顺序：后续坏帧不能丢弃此前完整增量，完成后的尾帧
   不再消费。OpenAI-compatible 的 `[DONE]` 还须有有效 `finish_reason`，流内 error
   不得忽略或转为正常完成；
+- Responses 的 `response.completed` 提供正常完成证据；`response.incomplete` 仅在
+  `incomplete_details.reason=max_output_tokens` 时按 ARC-OUTPUT-COMPLETION-001 安全归一化：
+  已完成 items、部分正文与严格 usage 得以保留，未完成 reasoning/function_call 不回灌或执行；
+  有完整工具时沿用 `ToolUse`，否则以 `MaxTokens` 进入现有有界续跑，不代表任务成功。
+  `[DONE]`、EOF、`response.failed`、其他或缺失 reason 的 incomplete 不能伪造完成证据。
+  配额耗尽和不支持的能力仍为明确失败终态；
 - retry observer 保留失败分类、时序、实际错误内容与原因链，不能在重试或中断转换时丢弃底层原因；
 - jitter、最大尝试次数与错误分类由 `ModelRuntimeConfig` 提供，Agent 不复制重试器。
 
@@ -90,7 +127,7 @@ Provider 配置由 ACP 装配面构造并注入，不由 `peri-model` 读取环�
 3. 使用公共 HTTP/SSE、取消与 retry runtime，不创建平行 transport。
 4. 消费或安全剥离 system prompt cache 控制字，wire 上不得泄漏。
 5. 提供 config/error/observation 保真、错误原因链与长度边界测试。
-6. 在 `peri-acp/src/provider/mod.rs` 的 provider 工厂显式注册；不得被现有通配分支
-   意外吞掉。
+6. 在 `peri-acp/src/provider/mod.rs` 的 provider 工厂与 `peri-config` authority
+   显式注册；未知 provider 类型不得由通配分支意外吞掉。
 7. 运行 provider 相邻测试、`cargo test -p peri-model --lib`，并检查
    ARC-EVENT-001 与 ARC-SERIAL-001 的跨层影响。

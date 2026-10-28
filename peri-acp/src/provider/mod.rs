@@ -3,15 +3,19 @@
 //! Manages provider configuration, model alias resolution, and LLM factory creation.
 //! Decoupled from TUI-specific types.
 
+pub mod auth;
 pub mod config;
 pub mod store;
 
 use std::sync::Arc;
 
-use peri_config::provider::ResolvedProvider;
+use peri_config::provider::{ResolvedProvider, ResponsesAuthentication};
 
 pub use config::{AppConfig, PeriConfig, ProfileConfig, Profiles, ProviderConfig, ProviderModels};
-use peri_model::{AnthropicConfig, AnthropicModel, OpenAiConfig, OpenAiModel};
+use peri_model::{
+    AnthropicConfig, AnthropicModel, OpenAiConfig, OpenAiModel, ResponsesConfig, ResponsesModel,
+    ResponsesProfile,
+};
 pub use store::{
     config_path, load, load_from, save_to, set_global_config_path, workspace_config_path,
     ConfigSource,
@@ -23,6 +27,15 @@ const DEFAULT_ANTHROPIC_THINKING_BUDGET: u32 = 10_000;
 
 #[derive(Clone)]
 pub enum LlmProvider {
+    Responses {
+        auth: ResponsesAuthentication,
+        endpoint: Url,
+        model: String,
+        effort: Option<String>,
+        max_tokens: u32,
+        context_window: u32,
+        retry_observer: Option<Arc<dyn peri_model::RetryObserver>>,
+    },
     /// OpenAI 兼容 Provider。`base_url` 需要 `/v1` 后缀。
     OpenAi {
         api_key: String,
@@ -32,6 +45,7 @@ pub enum LlmProvider {
         effort: Option<String>,
         max_tokens: u32,
         context_1m: bool,
+        context_window: u32,
         retry_observer: Option<Arc<dyn peri_model::RetryObserver>>,
     },
     Anthropic {
@@ -41,6 +55,7 @@ pub enum LlmProvider {
         effort: Option<String>,
         max_tokens: u32,
         context_1m: bool,
+        context_window: u32,
         retry_observer: Option<Arc<dyn peri_model::RetryObserver>>,
     },
 }
@@ -58,6 +73,22 @@ impl LlmProvider {
 
     pub fn from_resolved(provider: ResolvedProvider) -> Self {
         match provider {
+            ResolvedProvider::Responses {
+                auth,
+                endpoint,
+                model,
+                effort,
+                max_tokens,
+                context_window,
+            } => Self::Responses {
+                auth,
+                endpoint,
+                model,
+                effort,
+                max_tokens,
+                context_window,
+                retry_observer: None,
+            },
             ResolvedProvider::Anthropic {
                 api_key,
                 model,
@@ -65,6 +96,7 @@ impl LlmProvider {
                 effort,
                 max_tokens,
                 context_1m,
+                context_window,
             } => Self::Anthropic {
                 api_key,
                 model,
@@ -72,6 +104,7 @@ impl LlmProvider {
                 effort,
                 max_tokens,
                 context_1m,
+                context_window,
                 retry_observer: None,
             },
             ResolvedProvider::OpenAi {
@@ -81,6 +114,7 @@ impl LlmProvider {
                 effort,
                 max_tokens,
                 context_1m,
+                context_window,
             } => Self::OpenAi {
                 api_key,
                 base_url,
@@ -88,6 +122,7 @@ impl LlmProvider {
                 effort,
                 max_tokens,
                 context_1m,
+                context_window,
                 retry_observer: None,
             },
         }
@@ -101,7 +136,7 @@ impl LlmProvider {
     }
 
     /// 从 PeriConfig 按指定档位（"fable"/"opus"/"sonnet"/"haiku"）构造 LlmProvider。
-    /// Profile 是唯一事实源：provider/model/effort/max_tokens/context_1m 全部取自
+    /// Profile 是唯一事实源：provider/model/effort/max_tokens/窗口配置全部取自
     /// `profiles[alias]`，model 空时回退 provider.models 同档位映射（fable 空回退 opus）。
     pub fn from_config_for_alias(cfg: &config::PeriConfig, alias: &str) -> Option<Self> {
         peri_config::provider::resolve_for_alias(cfg, alias).map(Self::from_resolved)
@@ -109,6 +144,11 @@ impl LlmProvider {
 
     pub fn display_name(&self) -> &str {
         match self {
+            Self::Responses {
+                auth: ResponsesAuthentication::ChatGptPlan { .. },
+                ..
+            } => "ChatGPT plan (Responses)",
+            Self::Responses { .. } => "OpenAI Responses",
             Self::OpenAi { .. } => "OpenAI",
             Self::Anthropic { .. } => "Anthropic",
         }
@@ -116,13 +156,14 @@ impl LlmProvider {
 
     pub fn model_name(&self) -> &str {
         match self {
-            Self::OpenAi { model, .. } => model,
+            Self::Responses { model, .. } | Self::OpenAi { model, .. } => model,
             Self::Anthropic { model, .. } => model,
         }
     }
 
     pub fn context_1m(&self) -> bool {
         match self {
+            Self::Responses { .. } => false,
             Self::OpenAi { context_1m, .. } | Self::Anthropic { context_1m, .. } => *context_1m,
         }
     }
@@ -130,7 +171,9 @@ impl LlmProvider {
     /// 思考强度稳定标识，用于 fingerprint；None 时返回空字符串
     pub fn effort_key(&self) -> String {
         match self {
-            Self::OpenAi { effort, .. } | Self::Anthropic { effort, .. } => effort
+            Self::Responses { effort, .. }
+            | Self::OpenAi { effort, .. }
+            | Self::Anthropic { effort, .. } => effort
                 .as_ref()
                 .map(|e| format!(":effort={e}"))
                 .unwrap_or_default(),
@@ -141,17 +184,22 @@ impl LlmProvider {
     pub fn with_model_name(&self, model: String) -> Self {
         let mut clone = self.clone();
         match &mut clone {
-            Self::OpenAi { model: m, .. } => *m = model,
+            Self::Responses { model: m, .. } | Self::OpenAi { model: m, .. } => *m = model,
             Self::Anthropic { model: m, .. } => *m = model,
         }
         clone
     }
 
     /// 覆盖单次调用的输出 token 上限；provider 在本次模型构造后即被消费。
+    /// ChatGPT plan 不支持服务器输出上限，Responses adapter 在该模式忽略此值。
     pub fn with_max_tokens(&self, max_tokens: u32) -> Self {
         let mut clone = self.clone();
         match &mut clone {
-            Self::OpenAi {
+            Self::Responses {
+                max_tokens: configured_max_tokens,
+                ..
+            }
+            | Self::OpenAi {
                 max_tokens: configured_max_tokens,
                 ..
             }
@@ -169,36 +217,74 @@ impl LlmProvider {
         observer: Option<Arc<dyn peri_model::RetryObserver>>,
     ) -> Self {
         match &mut self {
-            Self::OpenAi { retry_observer, .. } | Self::Anthropic { retry_observer, .. } => {
+            Self::Responses { retry_observer, .. }
+            | Self::OpenAi { retry_observer, .. }
+            | Self::Anthropic { retry_observer, .. } => {
                 *retry_observer = observer;
             }
         }
         self
     }
 
-    /// 获取模型的上下文窗口大小（不消费 self）。
-    ///
-    /// 历史实现通过 `into_model().context_window()` 取值，OpenAI 与 Anthropic
-    /// provider 均返回 200_000；`peri_model::Model` 不暴露 context_window，
-    /// 此处保持配置级常量语义（1M 窗口由 `context_1m()` 标志在调用侧覆盖）。
+    /// 配置权威面已解析的有效容量；模型 metadata 与宿主预算消费相同值。
     pub fn context_window(&self) -> u32 {
-        200_000
+        match self {
+            Self::Responses { context_window, .. }
+            | Self::OpenAi { context_window, .. }
+            | Self::Anthropic { context_window, .. } => *context_window,
+        }
     }
 
-    /// 装配处已解析的有效上下文窗口：`context_1m` 生效后的值。
-    ///
-    /// 这是唯一权威，装配出的模型与宿主预算都用它，避免两处各算一遍。
     pub fn effective_context_window(&self) -> u32 {
-        if self.context_1m() {
-            1_000_000
-        } else {
-            self.context_window()
-        }
+        self.context_window()
     }
 
     pub fn into_model(self) -> Box<dyn peri_model::Model> {
         let context_window = self.effective_context_window();
         match self {
+            Self::Responses {
+                auth,
+                endpoint,
+                model,
+                effort,
+                max_tokens,
+                retry_observer,
+                ..
+            } => {
+                let mut config = match auth {
+                    ResponsesAuthentication::ApiKey { api_key } => {
+                        let credential_ref = credential_identity(&api_key);
+                        ResponsesConfig::new(endpoint, api_key, model)
+                            .with_profile(ResponsesProfile::Platform)
+                            .with_credential_ref(credential_ref)
+                    }
+                    ResponsesAuthentication::ChatGptPlan {
+                        store,
+                        account,
+                        subject,
+                        client_id,
+                    } => {
+                        let auth = auth::request_auth(store, account, subject, client_id);
+                        let credential_ref = auth.credential_ref().to_owned();
+                        ResponsesConfig::new(endpoint, "", model)
+                            .with_profile(ResponsesProfile::ChatGptPlan)
+                            .with_credential_ref(credential_ref)
+                            .with_auth(auth)
+                    }
+                };
+                if let Some(effort) = effort {
+                    config = config.with_reasoning_effort(effort);
+                }
+                config = config
+                    .with_max_tokens(max_tokens)
+                    .with_context_window(Some(context_window))
+                    .with_runtime(match retry_observer {
+                        Some(observer) => peri_model::ModelRuntimeConfig::with_full_observation()
+                            .with_retry_observer(observer),
+                        None => peri_model::ModelRuntimeConfig::with_full_observation(),
+                    });
+                Box::new(ResponsesModel::new(config))
+            }
             Self::OpenAi {
                 api_key,
                 base_url,
@@ -283,3 +369,20 @@ fn parse_endpoint(raw: &str, fallback: &str, label: &str) -> Url {
 #[cfg(test)]
 #[path = "provider_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "responses_test.rs"]
+mod responses_tests;
+
+// Replay bindings use a digest; bearer credentials and local store paths never
+// become provider-state fields in a saved transcript.
+fn credential_identity(value: &impl serde::Serialize) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    let bytes = serde_json::to_vec(value).expect("credential identity is serializable");
+    let mut identity = String::with_capacity(64);
+    for byte in Sha256::digest(bytes) {
+        let _ = write!(identity, "{byte:02x}");
+    }
+    identity
+}

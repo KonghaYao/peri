@@ -161,6 +161,7 @@ impl AgentModelBridge {
             .prepare_request(&ModelRequest::default())
             .map(|request| match request.protocol() {
                 peri_model::ProviderProtocol::OpenAiCompatible => ProviderProtocol::OpenAI,
+                peri_model::ProviderProtocol::OpenAiResponses => ProviderProtocol::OpenAiResponses,
                 peri_model::ProviderProtocol::Anthropic => ProviderProtocol::Anthropic,
                 peri_model::ProviderProtocol::Other { .. } => ProviderProtocol::Generic,
             })
@@ -182,6 +183,23 @@ impl AgentModelBridge {
     ) -> AgentResult<Vec<ModelMessage>> {
         let mut tool_names = BTreeMap::new();
         for message in messages {
+            if message.message_content().has_provider_state() {
+                if !matches!(message, BaseMessage::Ai { .. }) {
+                    return Err(AgentError::LlmError(
+                        "provider replay state is only valid in assistant messages".into(),
+                    ));
+                }
+                if let MessageContent::Blocks(blocks) = message.message_content() {
+                    if blocks.iter().any(|block| {
+                        matches!(block, ContentBlock::ToolResult { content, .. }
+                            if content.iter().any(ContentBlock::has_provider_state))
+                    }) {
+                        return Err(AgentError::LlmError(
+                            "provider replay state cannot be nested in tool results".into(),
+                        ));
+                    }
+                }
+            }
             if let BaseMessage::Ai { tool_calls, .. } = message {
                 for call in tool_calls {
                     tool_names.insert(call.id.clone(), call.name.clone());
@@ -500,6 +518,25 @@ impl AgentModelBridge {
                 Some(Ok(ModelStreamEvent::Usage(_))) => {}
                 Some(Ok(ModelStreamEvent::Completed(response))) => {
                     let mut reasoning = Self::response_reasoning(response, streaming.is_some())?;
+                    // 安全截断可能丢弃半截工具；只关闭未交给 dispatch 的提前指示器。
+                    if let (Some(context), Some((tool_call_id, name))) = (&streaming, &active_tool)
+                    {
+                        if !reasoning
+                            .tool_calls
+                            .iter()
+                            .any(|call| &call.id == tool_call_id)
+                        {
+                            context.event_bus.emit_render(RenderEvent::ToolEnded {
+                                turn_id: context.turn_id,
+                                agent_id: context.agent_id,
+                                tool_call_id: tool_call_id.clone(),
+                                name: name.clone(),
+                                output: "模型响应未完成该工具调用，已丢弃".to_string(),
+                                is_error: true,
+                                subagent_failure: None,
+                            });
+                        }
+                    }
                     // 流式 chunk 的 messageId 与定型消息 ID 对齐（标准语义）。
                     if let Some(msg) = reasoning.source_message.take() {
                         reasoning.source_message = Some(msg.with_message_id(message_id));
@@ -753,6 +790,10 @@ fn convert_block(block: &ContentBlock) -> AgentResult<ModelContentBlock> {
             text: text.clone(),
             signature: signature.clone(),
         }),
+        ContentBlock::ProviderState { provider, data } => Ok(ModelContentBlock::ProviderState {
+            provider: provider.clone(),
+            data: data.clone(),
+        }),
         ContentBlock::Unknown(value) => {
             // Agent 暂无显式 RedactedReasoning 变体；标准载荷经 Unknown 容器往返。
             // 仅识别 peri_model::RedactedReasoning 的确定形状，其余 Unknown 一律 fail closed。
@@ -860,6 +901,10 @@ fn convert_model_block(block: &ModelContentBlock) -> AgentResult<ContentBlock> {
             text: text.clone(),
             signature: signature.clone(),
         }),
+        ModelContentBlock::ProviderState { provider, data } => Ok(ContentBlock::ProviderState {
+            provider: provider.clone(),
+            data: data.clone(),
+        }),
         ModelContentBlock::ToolUse { tool_call } => Ok(ContentBlock::ToolUse {
             id: tool_call.id().into(),
             name: tool_call.name().into(),
@@ -902,6 +947,7 @@ pub(crate) fn stop_reason_display(reason: &peri_model::StopReason) -> String {
         peri_model::StopReason::EndTurn => "end_turn".into(),
         peri_model::StopReason::ToolUse => "tool_use".into(),
         peri_model::StopReason::MaxTokens => "max_tokens".into(),
+        peri_model::StopReason::Continue => "continue".into(),
         peri_model::StopReason::Other { value } => value.clone(),
     }
 }
@@ -909,3 +955,7 @@ pub(crate) fn stop_reason_display(reason: &peri_model::StopReason) -> String {
 #[cfg(test)]
 #[path = "model_bridge_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "model_bridge_replay_test.rs"]
+mod replay_tests;

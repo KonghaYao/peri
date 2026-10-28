@@ -25,6 +25,68 @@ fn transcript_with_tool_exchange(
     }
     t
 }
+
+fn replay_transcript() -> MessageTranscript {
+    let mut transcript = MessageTranscript::new();
+    transcript.append(BaseMessage::ai_from_blocks(vec![
+        ContentBlock::text("visible assistant text"),
+        ContentBlock::tool_use("replay-call", "Read", serde_json::json!({"path":"a"})),
+        ContentBlock::ProviderState {
+            provider: "openai_responses".into(),
+            data: serde_json::json!({"version":1,"items":[{"type":"reasoning","encrypted_content":"opaque"}]}),
+        },
+    ]));
+    transcript.append(BaseMessage::tool_result(
+        "replay-call",
+        "original result".repeat(100),
+    ));
+    transcript
+}
+
+#[test]
+fn provider_replay_unit_survives_render_and_provider_switch_unchanged() {
+    let transcript = replay_transcript();
+    for caps in [
+        ProviderCapabilities::openai(),
+        ProviderCapabilities::anthropic(),
+        ProviderCapabilities::default(),
+    ] {
+        let view = render_llm_view(&transcript, &[], &caps).unwrap();
+        assert_eq!(
+            serde_json::to_value(&view).unwrap(),
+            serde_json::to_value(transcript.visible_messages()).unwrap()
+        );
+        assert_eq!(view[0].content(), "visible assistant text");
+        assert_eq!(view[0].tool_calls().len(), 1);
+        assert!(view[0].message_content().has_provider_state());
+    }
+}
+
+#[test]
+fn provider_replay_rejects_assistant_text_and_result_projection() {
+    let transcript = replay_transcript();
+    let visible = transcript.visible_messages();
+    for action in [
+        ProjectionActionEntry {
+            message_id: visible[0].id(),
+            target: ProjectionTarget::ContentBlock { index: 0 },
+            action: ProjectionAction::CompactText { max_chars: 2 },
+        },
+        ProjectionActionEntry {
+            message_id: visible[1].id(),
+            target: ProjectionTarget::Message,
+            action: ProjectionAction::CompactToolResult {
+                keep_head: 2,
+                keep_tail: 2,
+                preserve_recovery_handle: false,
+            },
+        },
+    ] {
+        let error =
+            render_llm_view(&transcript, &[action], &ProviderCapabilities::openai()).unwrap_err();
+        assert!(error.to_string().contains("provider replay"), "{error}");
+    }
+}
 fn transcript_with_image(media_type: &str, data: &str) -> MessageTranscript {
     let mut t = MessageTranscript::new();
     t.append(BaseMessage::human(MessageContent::Blocks(vec![

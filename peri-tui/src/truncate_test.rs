@@ -1,4 +1,5 @@
 use super::*;
+use unicode_width::UnicodeWidthStr;
 
 #[test]
 fn test_truncate_text_short() {
@@ -413,4 +414,39 @@ fn tui_unknown_mcp_names_fall_back_to_generic() {
     // 输出侧同样走通用截断（不是 Edit/Write 的 "N lines changed"，也不是 WebFetch 折叠）
     let output = "a\nb\nc\nd";
     assert_eq!(summarize_output("mcp__foo__bar", output), "a\nb\nc\nd");
+}
+
+#[test]
+fn test_middle_truncate_by_width_keeps_head_and_tail() {
+    let s = "/Users/example/very/long/path/to/credentials/chatgpt";
+    let out = middle_truncate_by_width(s, 24);
+    assert!(out.starts_with("/Users/"), "头部必须保留: {out}");
+    assert!(out.ends_with("chatgpt"), "尾部必须保留: {out}");
+    assert_eq!(out.width(), 24, "省略号连接后恰好填满预算: {out}");
+    assert_eq!(out.matches('…').count(), 1, "只出现一个省略号: {out}");
+}
+
+#[test]
+fn test_middle_truncate_by_width_fits_and_edges() {
+    assert_eq!(middle_truncate_by_width("short", 8), "short");
+    assert_eq!(middle_truncate_by_width("abcdef", 0), "");
+    // 预算过小退化为尾部截断，仍不超宽
+    let tiny = middle_truncate_by_width("abcdefgh", 3);
+    assert!(tiny.width() <= 3, "{tiny:?}");
+    assert!(tiny.ends_with('…'), "{tiny:?}");
+}
+
+#[test]
+fn test_middle_truncate_by_width_cjk_and_emoji() {
+    let cjk = "中文路径很长的凭据目录尾部";
+    let out = middle_truncate_by_width(cjk, 11);
+    assert!(out.width() <= 11, "CJK 输出不得超宽: {out:?}");
+    assert!(out.starts_with('中'), "保留头部: {out:?}");
+    assert!(out.ends_with('部'), "保留尾部: {out:?}");
+
+    let emoji = "👨‍👩‍👧‍👦family👨‍👩‍👧‍👦";
+    let family = "👨‍👩‍👧‍👦";
+    let out = middle_truncate_by_width(emoji, 8);
+    assert!(out.width() <= 8, "emoji 组合序列不得超宽: {out:?}");
+    assert!(out.ends_with(family), "尾部 ZWJ 序列必须完整: {out:?}");
 }

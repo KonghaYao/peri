@@ -137,6 +137,13 @@ fn test_content_blocks_serde_roundtrip() {
                 data: Some("opaque-provider-data".into()),
             },
         ),
+        (
+            "provider_state",
+            ContentBlock::ProviderState {
+                provider: "openai_responses".into(),
+                data: json!({"version": 1, "items": [{"type": "reasoning", "encrypted_content": "opaque"}]}),
+            },
+        ),
     ];
     for (name, block) in blocks {
         let encoded = serde_json::to_string(&block).unwrap();
@@ -269,6 +276,7 @@ fn test_stop_reasons_serde_roundtrip_for_all_variants() {
 fn test_provider_protocols_serde_roundtrip_for_all_variants() {
     let protocols = vec![
         ProviderProtocol::OpenAiCompatible,
+        ProviderProtocol::OpenAiResponses,
         ProviderProtocol::Anthropic,
         ProviderProtocol::Other {
             value: "custom".into(),

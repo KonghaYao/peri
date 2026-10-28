@@ -107,6 +107,10 @@ fn record_unhandled_content(message: &BaseMessage, diagnostics: &mut PlanningDia
             ContentBlock::Reasoning { text, .. } => {
                 ("reasoning", (text.chars().count() as u64).div_ceil(4))
             }
+            ContentBlock::ProviderState { .. } => (
+                "provider_replay",
+                crate::agent::token::PROVIDER_REPLAY_ESTIMATED_TOKENS,
+            ),
             ContentBlock::ToolResult { content, .. } => {
                 for child in content {
                     visit(child, diagnostics);
@@ -254,6 +258,16 @@ pub fn plan_micro_with_facts(
             continue;
         };
         let result_tokens = result_costs.get(exchange.call_id).map_or(0, |cost| cost.1);
+        if step
+            .entry
+            .as_message()
+            .is_some_and(|message| message.message_content().has_provider_state())
+        {
+            // Preserve the full call/result closure, including otherwise safe
+            // previews. We have no provider-neutral way to rewrite replay data.
+            diagnostics.protect("provider_replay_unit", result_tokens);
+            continue;
+        }
         let content_kind = if result.is_error {
             "error"
         } else {

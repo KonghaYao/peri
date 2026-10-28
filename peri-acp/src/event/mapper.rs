@@ -307,6 +307,7 @@ fn stop_reason_wire(reason: &peri_model::StopReason) -> String {
         peri_model::StopReason::EndTurn => "end_turn".into(),
         peri_model::StopReason::ToolUse => "tool_use".into(),
         peri_model::StopReason::MaxTokens => "max_tokens".into(),
+        peri_model::StopReason::Continue => "continue".into(),
         peri_model::StopReason::Other { value } => value.clone(),
     }
 }

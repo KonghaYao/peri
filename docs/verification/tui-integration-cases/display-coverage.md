@@ -24,7 +24,7 @@
 
 | 当前枚举 | 对应用例 |
 | --- | --- |
-| `Model`、`Login`、`Config`、`Theme` | P0-61、P1-12、P1-13 |
+| `Model`、`Login`、`Config`、`Theme` | P0-61、P0-83～P0-89、P1-12、P1-13 |
 | `Agent`、`Tasks`、`SubAgentDetail`、`ShellDetail` | P0-18、P0-54、P0-59、P1-12 |
 | `ThreadBrowser` | P0-58、P1-12 |
 | `Mcp`、`Plugin`、`Hooks`、`Cron` | P0-60、P0-44、P1-12、P1-14 |
@@ -32,7 +32,7 @@
 | `AskUser` | P0-65、P1-12 |
 | `Status`、`Memory`、`Goal` | P1-12、P1-15 |
 
-`PanelKind` 当前共 18 个变体。P1-12 是逐项打开与关闭的目录巡检；其他用例核对身份、状态和失败，不能由目录巡检替代。
+`PanelKind` 当前共 18 个变体。P1-12 是逐项打开与关闭的目录巡检；其他用例核对身份、状态和失败，不能由目录巡检替代。ChatGPT 登录/状态/注销是 Login 面板内的认证子视图，不是 `PopupKind::OAuth`，对应 P0-87、P0-88。
 
 ## PopupKind
 

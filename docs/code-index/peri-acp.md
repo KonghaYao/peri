@@ -154,7 +154,8 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
-| Provider 构建 | `provider/mod.rs`；规则 `peri-config/src/provider.rs` | `LlmProvider::{from_source,from_resolved,from_config_for_alias,into_model}`；消费 `ResolvedProvider`，alias/profile/default/environment 规则归 core，ACP 适配具体 Model |
+| Provider 构建 | `provider/mod.rs`；规则 `peri-config/src/provider.rs` | `LlmProvider::{from_source,from_resolved,from_config_for_alias,into_model}`；消费 `ResolvedProvider`，alias/profile/default/environment 规则归 core，ACP 将已解析的有效容量同时用于 Model metadata 与 `host/prompt.rs` 预算 |
+| Responses 与订阅认证装配 | `provider/mod.rs`、`provider/auth.rs`；凭据能力 `mcp-packages/credentials/src/model_auth/` | `ResponsesModel` 使用原有主/辅助/子模型工厂；窗口取 profile，ChatGPT 输出上限未知。`RequestAuth` 经 credentials MCP custom channel 获取/刷新凭据并验证显式 subject/clientId；`provider/auth.rs` 在非 emscripten 目标 re-export `ChatGptAuthManager`、`PendingLogin`、`AccountStatus`、`AuthError`、`AuthResult`、`LogoutOutcome`，TUI `chatgpt_auth` 只消费这些安全 DTO。CLI `peri auth chatgpt` 与 TUI Login 都经该宿主入口调用。操作示例见 [OpenAI Responses](../reference/openai-responses.md) |
 | 配置结构 | `provider/config.rs`（re-export）；事实源 `peri-config/src/app.rs` | `PeriConfig` / `AppConfig` / `ProviderConfig` / `ProfileConfig` / `Profiles`；领域 merge 与 validation 归 core |
 | 配置加载/保存 | `provider/store.rs`（re-export）；`peri-config/src/{settings,system,source}.rs` | `ConfigSource::{load_at,load_lenient,snapshot,reload_merged}`、`save(expected_revision, &PeriConfig) -> Result<Arc<ConfigurationSnapshot>>`；caller 在编辑开始捕获 token，成功后消费 accepted snapshot；正常 source 持有 `ConfigurationSystem`，固定布局/同文件不拆层，workspace 相对差异保存与字节 CAS 保留兄弟域；输入 I/O 经独立配置 MCP，布局/校验失败不可误写全局；reload 显式，不热替换旧 pool 或 session prefix |
 
@@ -203,7 +204,7 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 | ACP HTTP/stdio MCP 与 Agent 指令 | `host/requests/session_mcp_setup.rs` + `host/requests/session_lifecycle.rs` + `host/prepared.rs` + `session/frozen_snapshot.rs` + `host/assemble.rs` + `peri-middlewares/src/mcp/{client,initialize}.rs` | `session_mcp_servers`；`PreparedSessionInputs::build_frozen_after_activation`；`encode_frozen_snapshot` / `decode_frozen_snapshot`；`McpClientPool::set_session_servers`；`session/new`、冷 load/resume、fork 的 MCP 声明在池初始化前注入；bare 只消费显式 HTTP `workspace`，其余会话 MCP 保持关闭；HTTP `workspace` 取代内置实例，`tools/list` 是工具清单权威；`peri.instructions` 在创建期准入并作为 V2/V3 frozen 独立字段保存，内部 prompt 不含外部正文；V1 旧来源按标记保守判定，冷恢复复用快照。ACP `initialize` 仅协商 HTTP 能力，不承载实例配置 |
 | notification 处理 | host/notify.rs | `handle_notification`（:28）/`extract_session_id`（:153）；`host/unify_wire_baseline_test.rs` 锁定发射面 payload 与 schema typed `SessionNotification` 的逐字段一致性；统一 host 入口见 ARC-STDIO-001 与 `docs/design/architecture.md` |
 | prompt 执行编排 | host/prompt.rs | `run_prompt` 借用既有 AcpServerConfig 与当轮参数；`take_recall_for_turn`；保留 session 快照、Controller 执行及 canonical 结果回写顺序 |
-| prompt 模型工厂 | host/prompt/models.rs | `build_model_factories`；闭包复用当轮 provider/config 快照与同一 session AgentPool，缓存按 provider fingerprint 校验 |
+| prompt 模型工厂 | host/prompt/models.rs | `build_model_factories`；闭包复用当轮 provider/config 快照与同一 session AgentPool。`session/agent_pool.rs::fingerprint` 对所有 provider 纳入有效上下文容量，供主模型、SubAgent 与辅助模型缓存校验；回归见 `host/prompt/models_responses_test.rs` |
 | prompt 观测装配 | host/prompt/telemetry.rs | `build_langfuse_hooks` / `build_forwarder_launcher`；turn hooks 与 bridge 共享 tracer，事件消费顺序仍归 event/forwarder.rs |
 | prompt stage 装配 | host/prompt/stage.rs | `build_stage_bridge` / `build_compact_hooks`；逐次 stage 构造原 compact hooks，保留 host/prompt.rs 的 hook re-export |
 | 续跑调度 | host/continuation.rs | `run_continuation_scheduler`（:111） |

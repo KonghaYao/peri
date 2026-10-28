@@ -478,7 +478,8 @@ pub(crate) async fn handle_metadata(
         let provider = cfg.provider.read();
         response["modelName"] = Value::String(provider.model_name().to_owned());
         let effort = match &*provider {
-            crate::provider::LlmProvider::OpenAi { effort, .. }
+            crate::provider::LlmProvider::Responses { effort, .. }
+            | crate::provider::LlmProvider::OpenAi { effort, .. }
             | crate::provider::LlmProvider::Anthropic { effort, .. } => effort.clone(),
         };
         response["effort"] = serde_json::json!(effort);

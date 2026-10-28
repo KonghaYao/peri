@@ -73,6 +73,12 @@ pub(crate) async fn handle_set_config_option(
                 "model" => candidate.write().config.active_alias = value.to_owned(),
                 "thinking_effort" => apply_profile_effort(&candidate, value),
                 "context_1m" => {
+                    if matches!(&*cfg.provider.read(), LlmProvider::Responses { .. }) {
+                        return Err(AcpError::new(
+                            -32602,
+                            "Responses profiles use explicit contextWindow; context_1m is unsupported",
+                        ));
+                    }
                     let mut config = candidate.write();
                     let alias = config.config.active_alias.clone();
                     let profile = config.config.profiles.get_mut(&alias).ok_or_else(|| {

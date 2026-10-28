@@ -8,6 +8,7 @@
 - [wasm-host-ecosystem.md](wasm-host-ecosystem.md)：Peri WASM 生态接入调查，涵盖协调、鉴权、实时同步、对象存储、模型网关与队列；候选方案不构成已批准设计。
 - [artifact-remote-storage.md](artifact-remote-storage.md)：artifact 上传的远程存储配置与对接契约（使用者视角）。
 - [langfuse-data-integrity.md](langfuse-data-integrity.md)：Langfuse 数据检查手册。
+- [openai-responses.md](openai-responses.md)：Responses API key、ChatGPT 计划登录、账户身份绑定与 profile 配置。
 - [tui-manual-verification.md](tui-manual-verification.md)：可重复执行的 TUI 手工验证清单。
 - [i386-static-build.md](i386-static-build.md)：cargo-zigbuild 32 位 x86 Linux 静态构建与容器验证。
 - [loongarch64-build.md](loongarch64-build.md)：cargo-zigbuild 64 位 LoongArch Linux 静态构建与模拟器验证。

@@ -84,6 +84,13 @@ pub struct ProfileConfig {
     pub max_tokens: u32,
     #[serde(default, skip_serializing_if = "is_false")]
     pub context_1m: bool,
+    /// Exact model capacity, required for Responses profiles; never inferred from a model name.
+    #[serde(
+        rename = "contextWindow",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub context_window: Option<u32>,
 }
 
 impl Default for ProfileConfig {
@@ -94,6 +101,7 @@ impl Default for ProfileConfig {
             effort: default_profile_effort(),
             max_tokens: default_profile_max_tokens(),
             context_1m: false,
+            context_window: None,
         }
     }
 }
@@ -426,12 +434,30 @@ pub struct ProviderConfig {
     pub api_key: String,
     #[serde(rename = "baseUrl", default)]
     pub base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<ProviderAuthConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default)]
     pub models: ProviderModels,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+/// Responses authentication is selected explicitly. Subscription credentials stay in
+/// the credentials capability; settings contain only a store/account reference.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderAuthConfig {
+    ApiKey,
+    #[serde(rename = "chatgpt_plan")]
+    ChatGptPlan {
+        store: std::path::PathBuf,
+        account: String,
+        subject: String,
+        #[serde(rename = "clientId")]
+        client_id: String,
+    },
 }
 
 impl ProviderConfig {

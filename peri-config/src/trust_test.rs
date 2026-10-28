@@ -3,13 +3,36 @@
 //! `set_global_config_path` 是进程级全局（数据面唯一实例），全部用 `#[serial]`
 //! 串行，且每个用例把信任文件指向自己的 tempdir，不触碰真实用户目录。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serial_test::serial;
 
 use super::*;
 
+/// RAII guard：记录进入时的全局配置路径，Drop 时恢复原值。
+///
+/// 用例提前 panic 时也会执行，避免把 tempdir 重定向残留给其他测试。
+/// 配置数据面只暴露解析后的路径；未重定向时恢复值即默认路径，行为等价。
+struct GlobalConfigPathGuard {
+    previous: PathBuf,
+}
+
+impl GlobalConfigPathGuard {
+    fn redirect_to(path: PathBuf) -> Self {
+        let previous = crate::io::global_config_path();
+        crate::io::set_global_config_path(Some(path));
+        Self { previous }
+    }
+}
+
+impl Drop for GlobalConfigPathGuard {
+    fn drop(&mut self) {
+        crate::io::set_global_config_path(Some(self.previous.clone()));
+    }
+}
+
 struct TestScope {
+    _global_path: GlobalConfigPathGuard,
     _home: tempfile::TempDir,
     workspace: tempfile::TempDir,
 }
@@ -19,8 +42,10 @@ impl TestScope {
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         // 信任文件跟随选中 global 配置：<temp>/peri/settings.json → <temp>/peri/hook-trust.json
-        crate::io::set_global_config_path(Some(home.path().join("peri").join("settings.json")));
+        let global_path =
+            GlobalConfigPathGuard::redirect_to(home.path().join("peri").join("settings.json"));
         Self {
+            _global_path: global_path,
             _home: home,
             workspace,
         }

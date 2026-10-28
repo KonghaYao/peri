@@ -221,6 +221,11 @@ impl ArchiveCatalog {
         }
         if self.members.is_empty()
             || self.members.len() > ARCHIVE_MAX_MEMBERS
+            // Archive reads expose exact canonical fragments as tool text. An
+            // opaque replay unit must stay in persistence, never that channel.
+            || self.members.iter().any(|member| {
+                member.block_types.iter().any(|kind| kind == "provider_state")
+            })
             || serde_json::to_vec(self)
                 .map_err(|_| ArchiveError::ContentMismatch)?
                 .len()
@@ -472,7 +477,8 @@ fn recoverable_content(content: &crate::messages::MessageContent) -> bool {
             | ContentBlock::Document {
                 source: DocumentSource::Url { .. },
                 ..
-            } => false,
+            }
+            | ContentBlock::ProviderState { .. } => false,
             ContentBlock::ToolResult { content, .. } => content.iter().all(block),
             _ => true,
         }
@@ -521,6 +527,7 @@ fn content_block_types(content: &crate::messages::MessageContent) -> Vec<String>
                     ContentBlock::ToolUse { .. } => "tool_use",
                     ContentBlock::ToolResult { .. } => "tool_result",
                     ContentBlock::Reasoning { .. } => "reasoning",
+                    ContentBlock::ProviderState { .. } => "provider_state",
                     ContentBlock::Unknown(_) => "unknown",
                 }
                 .to_owned()

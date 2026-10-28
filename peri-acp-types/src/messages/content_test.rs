@@ -112,11 +112,46 @@ fn test_content_block_all_variants_roundtrip() {
         ContentBlock::tool_use("id1", "Bash", serde_json::json!({"cmd": "ls"})),
         ContentBlock::tool_result("id1", vec![ContentBlock::text("output")], false),
         ContentBlock::reasoning_with_signature("think", "sig123"),
+        ContentBlock::ProviderState {
+            provider: "openai_responses".into(),
+            data: serde_json::json!({"version": 1, "items": []}),
+        },
         ContentBlock::Unknown(serde_json::json!({"type": "custom_block", "value": 42})),
     ];
     let json = serde_json::to_string(&blocks).unwrap();
     let blocks2: Vec<ContentBlock> = serde_json::from_str(&json).unwrap();
     assert_eq!(blocks, blocks2, "所有变体应完整 round-trip");
+}
+
+#[test]
+fn provider_state_is_durable_but_not_display_content() {
+    let state = ContentBlock::ProviderState {
+        provider: "openai_responses".into(),
+        data: serde_json::json!({
+            "version": 1,
+            "binding": {"endpoint": "https://api.openai.com/v1/responses", "model": "model", "credential_ref": "profile:one", "profile": "chatgpt_plan"},
+            "items": [
+                {"type": "reasoning", "id": "rs_1", "encrypted_content": "ciphertext", "summary": []},
+                {"type": "message", "id": "msg_1", "phase": "commentary", "content": [{"type": "output_text", "text": "visible"}]},
+                {"type": "function_call", "id": "fc_1", "call_id": "call_1", "namespace": "peri", "name": "Read", "arguments": "{}"}
+            ]
+        }),
+    };
+    let content = MessageContent::Blocks(vec![
+        ContentBlock::text("visible"),
+        ContentBlock::tool_use("call_1", "Read", serde_json::json!({})),
+        state,
+    ]);
+    let saved = serde_json::to_vec(&content).unwrap();
+    let restored: MessageContent = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(restored, content);
+    assert!(restored.has_provider_state());
+    assert_eq!(restored.text_content(), "visible");
+    assert_eq!(restored.tool_use_blocks().len(), 1);
+    let state = &restored.content_blocks()[2];
+    assert_eq!(state.as_text(), None);
+    assert_eq!(state.as_reasoning(), None);
+    assert_eq!(state.as_tool_use(), None);
 }
 
 #[test]

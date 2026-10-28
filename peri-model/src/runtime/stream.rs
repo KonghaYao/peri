@@ -1,4 +1,11 @@
-use std::{collections::VecDeque, sync::Arc, time::Duration};
+use std::{
+    collections::VecDeque,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 const ERROR_BODY_READ_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -20,6 +27,8 @@ pub(crate) type SseCompletionDecoder =
     Arc<dyn Fn() -> ModelResult<Vec<ModelStreamEvent>> + Send + Sync>;
 pub(crate) type SseDecoders = (SseDecoder, SseCompletionDecoder);
 pub(crate) type SseDecoderFactory = Arc<dyn Fn() -> SseDecoders + Send + Sync>;
+type AuthenticatedRequestFactory =
+    Arc<dyn Fn(&crate::RequestCredential) -> ModelResult<HttpRequest> + Send + Sync>;
 
 /// 将 crate-private HTTP seam、SSE parser、provider decoder 与通用 retry 串为一条可取消的流。
 ///
@@ -74,6 +83,109 @@ pub(crate) fn runtime_http_sse_stream(
         provider,
         decoders,
     )
+}
+
+/// Resolve authentication inside the shared attempt budget, never during prepare.
+/// Admission failures can renew once; the next send is a normal retry attempt.
+pub(crate) fn runtime_authenticated_http_sse_stream(
+    runtime: &ModelRuntimeConfig,
+    cancellation: CancellationToken,
+    transport: Arc<dyn HttpTransport>,
+    request: AuthenticatedRequestFactory,
+    provider: Arc<str>,
+    decoders: SseDecoderFactory,
+    auth: Arc<dyn crate::RequestAuth>,
+) -> ModelStream {
+    let call_cancellation = cancellation.child_token();
+    let watcher_stop = CancellationToken::new();
+    if let Some(session_cancellation) = auth.cancellation_token() {
+        if session_cancellation.is_cancelled() {
+            call_cancellation.cancel();
+        } else {
+            let call = call_cancellation.clone();
+            let stop = watcher_stop.clone();
+            tokio::spawn(async move {
+                tokio::select! {
+                    biased;
+                    _ = call.cancelled() => {},
+                    _ = stop.cancelled() => {},
+                    _ = session_cancellation.cancelled() => call.cancel(),
+                }
+            });
+        }
+    }
+    let refreshed = Arc::new(AtomicBool::new(false));
+    let attempt: StreamAttempt = Arc::new(move |attempt_cancellation| {
+        let transport = transport.clone();
+        let request = request.clone();
+        let provider = provider.clone();
+        let auth = auth.clone();
+        let refreshed = refreshed.clone();
+        let (decoder, completion_decoder) = decoders();
+        Box::pin(async move {
+            let credential = tokio::select! {
+                biased;
+                _ = attempt_cancellation.cancelled() => return Err(ModelError::cancelled()),
+                value = auth.credential(attempt_cancellation.clone()) => value?,
+            };
+            let response = transport
+                .send(request(&credential)?, attempt_cancellation.clone())
+                .await?;
+            if response.status == 401 && !refreshed.swap(true, Ordering::AcqRel) {
+                let renewed = tokio::select! {
+                    biased;
+                    _ = attempt_cancellation.cancelled() => return Err(ModelError::cancelled()),
+                    value = auth.refresh_after_unauthorized(&credential, attempt_cancellation.clone()) => value?,
+                };
+                if renewed {
+                    return Err(ModelError::protocol(
+                        crate::ProtocolErrorKind::AuthenticationRefreshed,
+                    ));
+                }
+            }
+            response_to_sse_stream(
+                response,
+                attempt_cancellation,
+                provider,
+                decoder,
+                completion_decoder,
+            )
+            .await
+        })
+    });
+    let stream = retrying_stream(
+        runtime.retry().clone(),
+        call_cancellation.clone(),
+        runtime.retry_observer(),
+        attempt,
+    );
+    // Own a child of the caller token. Drop/abort also stops the logout watcher,
+    // without ever cancelling sibling calls or the caller's session token.
+    let events = futures::stream::unfold(
+        (stream, WatcherStopGuard(watcher_stop)),
+        |(mut stream, guard)| async move {
+            let event = stream.next().await;
+            if matches!(
+                event,
+                None | Some(Err(_))
+                    | Some(Ok(
+                        ModelStreamEvent::Completed(_) | ModelStreamEvent::Interrupted { .. }
+                    ))
+            ) {
+                guard.0.cancel();
+            }
+            event.map(|event| (event, (stream, guard)))
+        },
+    );
+    ModelStream::with_cancellation(events, call_cancellation)
+}
+
+struct WatcherStopGuard(CancellationToken);
+
+impl Drop for WatcherStopGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
 }
 
 async fn response_to_sse_stream(
@@ -218,7 +330,39 @@ async fn read_http_error(
     if cancellation.is_cancelled() {
         return ModelError::cancelled();
     }
-    error.with_body(String::from_utf8_lossy(&bytes))
+    let body = String::from_utf8_lossy(&bytes);
+    let hard_quota = matches!(response.status, 402 | 403 | 429)
+        && serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("error")
+                    .unwrap_or(&value)
+                    .get("code")?
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .is_some_and(|code| {
+                matches!(
+                    code.as_str(),
+                    "subscription_sharing_usage_limit_exceeded"
+                        | "usage_limit_exceeded"
+                        | "usage_limit_reached"
+                        | "insufficient_quota"
+                        | "billing_hard_limit_reached"
+                )
+            });
+    if hard_quota {
+        ModelError::protocol(crate::ProtocolErrorKind::ProviderTerminal)
+            .with_message("Provider quota or plan allowance is exhausted")
+            .with_body(body)
+            .with_causes(
+                std::iter::once(error.to_string())
+                    .chain(error.diagnostic().causes().iter().cloned()),
+            )
+    } else {
+        error.with_body(body)
+    }
 }
 
 struct SseReadState {

@@ -37,6 +37,103 @@ fn make_ai_with_read_tool(file_path: &str) -> BaseMessage {
 
 struct FullLifecycleModel;
 
+fn replay_call() -> BaseMessage {
+    BaseMessage::ai_from_blocks(vec![
+        crate::messages::ContentBlock::text("read the historical file"),
+        crate::messages::ContentBlock::tool_use(
+            "responses-read",
+            "Read",
+            serde_json::json!({"path":"a.rs"}),
+        ),
+        crate::messages::ContentBlock::ProviderState {
+            provider: "openai_responses".into(),
+            data: serde_json::json!({"version":1,"items":[{"type":"reasoning","id":"rs_1","encrypted_content":"preserve-opaque"}]}),
+        },
+    ])
+}
+
+#[tokio::test]
+async fn full_compact_preserves_replay_in_sqlite_but_starts_summary_without_it() {
+    let session = crate::session::test_resources::TestSession::open().await;
+    let store = session.resources();
+    let thread_id = session.thread_id.clone();
+    let mut transcript =
+        MessageTranscript::new().with_persistence(store.clone(), thread_id.clone());
+    transcript.append(make_human("inspect the file"));
+    let original = replay_call();
+    let original_id = original.id();
+    transcript.append(original.clone());
+    transcript.append(BaseMessage::tool_result("responses-read", "file contents"));
+    transcript.flush_persistence().await.unwrap();
+    let model = CapturingFullModel {
+        requests: std::sync::Mutex::new(Vec::new()),
+    };
+    full_compact_inner(
+        &mut transcript,
+        Some(&model),
+        &CompactConfig::default(),
+        "/tmp",
+    )
+    .await
+    .unwrap();
+    transcript.flush_persistence().await.unwrap();
+
+    {
+        let requests = model.requests.lock().unwrap();
+        let request = requests.first().unwrap();
+        assert_eq!(request.messages.iter().filter(|message| {
+            matches!(message, ModelMessage::Assistant { content, .. } if content.iter().any(|block| matches!(block, peri_model::ContentBlock::ProviderState { .. })))
+        }).count(), 1);
+    }
+    let view = transcript.visible_messages();
+    assert!(view
+        .iter()
+        .all(|message| !message.message_content().has_provider_state()));
+    assert!(view
+        .iter()
+        .any(|message| message.content().contains("captured")));
+
+    let saved = store.load_session_snapshot(&thread_id).await.unwrap();
+    let payload = saved
+        .payloads
+        .iter()
+        .find(|payload| payload.id() == original_id)
+        .unwrap();
+    // JSON decode simulates a new process rather than preserving any adapter cache.
+    let restored = peri_acp_types::store::deserialize_persisted_payload(
+        &peri_acp_types::store::serialize_persisted_payload(payload).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(restored, PersistedPayload::Message(ref message)
+        if serde_json::to_value(message).unwrap() == serde_json::to_value(&original).unwrap()));
+}
+
+#[tokio::test]
+async fn full_compact_refuses_to_split_inherited_provider_replay_from_own_result() {
+    let mut transcript = MessageTranscript::new().with_ancestor(vec![replay_call()]);
+    transcript.append(BaseMessage::tool_result("responses-read", "own result"));
+    let before = serde_json::to_value(transcript.visible_messages()).unwrap();
+    let model = CapturingFullModel {
+        requests: std::sync::Mutex::new(Vec::new()),
+    };
+    let error = full_compact_inner(
+        &mut transcript,
+        Some(&model),
+        &CompactConfig::default(),
+        "/tmp",
+    )
+    .await
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("cannot split a provider replay unit"));
+    assert!(model.requests.lock().unwrap().is_empty());
+    assert_eq!(
+        serde_json::to_value(transcript.visible_messages()).unwrap(),
+        before
+    );
+}
+
 struct CapturingFullModel {
     requests: std::sync::Mutex<Vec<ModelRequest>>,
 }

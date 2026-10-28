@@ -21,6 +21,68 @@ const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max"];
 /// Max tokens 预设
 const MAX_TOKEN_PRESETS: &[u32] = &[4096, 8192, 16000, 32000, 64000];
 
+/// 档位实际归属的 provider（空引用回退首 provider）。
+pub(super) fn effective_provider_id(cfg: &PeriConfig, alias: &str) -> Option<String> {
+    cfg.config.profiles.get(alias).and_then(|profile| {
+        if profile.provider.is_empty() {
+            cfg.config
+                .providers
+                .first()
+                .map(|provider| provider.id.clone())
+        } else if cfg
+            .config
+            .providers
+            .iter()
+            .any(|provider| provider.id == profile.provider)
+        {
+            Some(profile.provider.clone())
+        } else {
+            None
+        }
+    })
+}
+
+/// 仅修改 provider/model 的候选副本；容量等档位字段保持原值。未完成的
+/// Responses 绑定只允许作为非活动档位保存，不能切断当前运行模型。
+pub(super) fn provider_switch_candidate(
+    cfg: &PeriConfig,
+    alias: &str,
+    forward: bool,
+) -> Option<PeriConfig> {
+    let provider_ids: Vec<String> = cfg.config.providers.iter().map(|p| p.id.clone()).collect();
+    if provider_ids.is_empty() {
+        return None;
+    }
+    let profile_provider = cfg
+        .config
+        .profiles
+        .get(alias)
+        .map(|profile| profile.provider.clone())
+        .unwrap_or_default();
+    let idx = provider_ids
+        .iter()
+        .position(|id| *id == profile_provider)
+        .unwrap_or(0);
+    let next = provider_ids
+        [(idx + if forward { 1 } else { provider_ids.len() - 1 }) % provider_ids.len()]
+    .clone();
+    // 联动：目标 provider 同档位映射 → 覆盖 profile.model；无映射 → None 触发回退
+    let mapped = cfg
+        .config
+        .providers
+        .iter()
+        .find(|provider| provider.id == next)
+        .and_then(|provider| provider.models.get_model(alias))
+        .map(str::to_string)
+        .filter(|model| !model.is_empty());
+    let mut candidate = cfg.clone();
+    if let Some(profile) = candidate.config.profiles.get_mut(alias) {
+        profile.provider = next;
+        profile.model = mapped;
+    }
+    Some(candidate)
+}
+
 /// 切换左侧光标指向的档位为 active profile（先落盘、成功才切换内存并推送 ACP）。
 /// pub(crate)：状态栏模型快速切换弹窗复用此切换逻辑。
 pub(crate) fn switch_active_alias(idx: usize) {
@@ -49,7 +111,6 @@ pub(super) fn edit_field(alias: String, field: usize, forward: bool) {
     let mut cfg = handle.read().clone();
 
     // 先读取当前值（不可变，纯 clone），避免跨 guard 的字段级借用冲突
-    let provider_ids: Vec<String> = cfg.config.providers.iter().map(|p| p.id.clone()).collect();
     let profile_provider = cfg
         .config
         .profiles
@@ -94,29 +155,10 @@ pub(super) fn edit_field(alias: String, field: usize, forward: bool) {
 
     match field {
         FIELD_PROVIDER => {
-            if provider_ids.is_empty() {
+            let Some(candidate) = provider_switch_candidate(&cfg, &alias, forward) else {
                 return;
-            }
-            let idx = provider_ids
-                .iter()
-                .position(|i| *i == profile_provider)
-                .unwrap_or(0);
-            let next = provider_ids
-                [(idx + if forward { 1 } else { provider_ids.len() - 1 }) % provider_ids.len()]
-            .clone();
-            // 联动：目标 provider 同档位映射 → 覆盖 profile.model；无映射 → None 触发回退
-            let mapped = cfg
-                .config
-                .providers
-                .iter()
-                .find(|p| p.id == next)
-                .and_then(|p| p.models.get_model(&alias))
-                .map(str::to_string)
-                .filter(|m| !m.is_empty());
-            if let Some(profile) = cfg.config.profiles.get_mut(&alias) {
-                profile.provider = next;
-                profile.model = mapped;
-            }
+            };
+            cfg = candidate;
         }
         FIELD_MODEL => {
             let provider = cfg
@@ -191,6 +233,22 @@ pub(super) fn edit_field(alias: String, field: usize, forward: bool) {
     commit_snapshot(handle, cfg, ModelChange::ProfileField(alias));
 }
 
+pub(super) fn set_context_window(alias: &str, window: u32) -> bool {
+    let Some(handle) = PERI_CONFIG_HANDLE.get() else {
+        return false;
+    };
+    let mut candidate = handle.read().clone();
+    let Some(profile) = candidate.config.profiles.get_mut(alias) else {
+        return false;
+    };
+    profile.context_window = Some(window);
+    commit_snapshot(
+        handle,
+        candidate,
+        ModelChange::ProfileField(alias.to_owned()),
+    )
+}
+
 /// Describes only the immediate display changes made by this action.
 /// Inactive profile edits still persist and push the complete configuration.
 enum ModelChange {
@@ -204,19 +262,42 @@ enum ModelChange {
 /// 的配置；失败提示由 [`crate::kit::config_service::persist_candidate`] 统一给出。
 /// 返回是否已持久化——调用方据此决定日志等本地副作用。
 fn commit_snapshot(handle: &PeriHandle, candidate: PeriConfig, change: ModelChange) -> bool {
+    let active_alias = &candidate.config.active_alias;
+    let edits_active_profile = match &change {
+        ModelChange::ActiveAlias(_) => true,
+        ModelChange::ProfileField(alias) => alias == active_alias,
+    };
+    if edits_active_profile
+        && peri_acp::provider::LlmProvider::from_config_for_alias(&candidate, active_alias)
+            .is_none()
+    {
+        crate::kit::config_service::notify_save_failed(&anyhow::anyhow!(crate::i18n::tr(
+            "model-panel-active-provider-unavailable"
+        )));
+        return false;
+    }
     if !crate::kit::config_service::persist_candidate(&candidate) {
         return false;
     }
-    *handle.write() = candidate.clone();
-    project_model_change(&candidate, change);
+    publish_accepted(handle, candidate, change);
+    true
+}
+
+/// 发布 authority 接纳后的配置：内存、投影、ACP。
+///
+/// ACP 失败只提示“配置已保存，运行端同步失败”，不回滚、不重发，也不发布原始 candidate。
+fn publish_accepted(handle: &PeriHandle, accepted: PeriConfig, change: ModelChange) {
+    *handle.write() = accepted.clone();
+    project_model_change(&accepted, change);
     tokio::spawn(async move {
         if let Some(client) = ACP_CLIENT_HANDLE.get()
-            && let Err(e) = client.update_config(&candidate).await
+            && let Err(error) = client.update_config(&accepted).await
         {
-            tracing::warn!(error = %e, "ModelPanel: update_config push failed");
+            crate::kit::config_service::notify_runtime_sync_failed(&anyhow::anyhow!(
+                error.to_string()
+            ));
         }
     });
-    true
 }
 
 fn project_model_change(snap: &PeriConfig, change: ModelChange) {

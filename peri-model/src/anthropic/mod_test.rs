@@ -16,6 +16,45 @@ fn config() -> AnthropicConfig {
     config_with_retry(1)
 }
 
+#[test]
+fn switching_from_responses_does_not_misuse_anthropic_signatures() {
+    let request = ModelRequest::new(vec![ModelMessage::assistant(
+        vec![
+            ContentBlock::reasoning("foreign readable summary"),
+            ContentBlock::text("visible"),
+            ContentBlock::ProviderState {
+                provider: "openai_responses".into(),
+                data: json!({"items":[{"type":"reasoning","encrypted_content":"foreign-opaque"}]}),
+            },
+        ],
+        vec![ToolCall::new(
+            "call_1",
+            "Read",
+            JsonObject::from_value(json!({"path":"a"})).unwrap(),
+        )],
+    )]);
+    let body = body_for_test(&config(), &request);
+    // The existing Anthropic compatibility layer adds its own empty thinking
+    // placeholder. A converted foreign turn must be exactly the same wire as
+    // ordinary typed text/calls, including that local placeholder, and must not
+    // carry any foreign reasoning state or invent a provider signature.
+    let mut ordinary = request.clone();
+    if let ModelMessage::Assistant { content, .. } = &mut ordinary.messages[0] {
+        *content = vec![
+            ContentBlock::text("foreign readable summary"),
+            ContentBlock::text("visible"),
+        ];
+    }
+    assert_eq!(body, body_for_test(&config(), &ordinary));
+    let encoded = body.to_string();
+    assert!(!encoded.contains("foreign-opaque"));
+    assert!(!encoded.contains("provider_state"));
+    assert!(encoded.contains("foreign readable summary"));
+    assert!(encoded.contains("visible"));
+    assert!(encoded.contains("call_1"));
+    assert!(encoded.contains("tool_use"));
+}
+
 fn config_with_retry(max_attempts: u32) -> AnthropicConfig {
     AnthropicConfig::new(
         Url::parse("https://proxy.example.test/custom/").expect("valid endpoint"),

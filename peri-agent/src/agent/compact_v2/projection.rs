@@ -38,6 +38,7 @@ mod render;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderProtocol {
     OpenAI,
+    OpenAiResponses,
     Anthropic,
     Generic,
 }

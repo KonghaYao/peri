@@ -1,5 +1,7 @@
 # peri-config 代码索引
 
+容量权威入口为 `provider.rs::effective_context_window` 与 `ResolvedProvider::effective_context_window`：Anthropic/OpenAI 使用显式正数、缺省 200,000，旧 `context_1m` 优先 1,000,000；Responses 的已确认 ChatGPT plan 模型缺窗口时派生 1,000,000，API key、未知模型及显式零仍须正整数。`try_resolve` 与 `try_resolve_snapshot` 共用 policy：仅快照校验未绑定 provider 并容忍生效档位缺容量；两者均容忍辅助档位的容量缺口。账号引用校验复用 `peri-acp-types::model::valid_account_reference`。
+
 > Peri 内部配置权威面。模块指引见 [peri-config/CLAUDE.md](../../peri-config/CLAUDE.md)，
 > 现行设计见 [configuration-authority.md](../design/configuration-authority.md)。
 
@@ -27,7 +29,7 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
 | 单文件 helpers | `settings.rs`：`load_from`、`save_to` | `save_to` 显式路径也用字节 CAS 保留其他顶层领域；不发布 scoped snapshot，不等同于 system revision 更新。lenient source 无 authority 时临时可读、不可写 |
 | 资源配置投影 | `resources.rs`：`ResourceConfiguration`、`resolve`；`system.rs::resources` | global `config.disableBundledSkills` 优先于旧顶层键，默认 false；workspace 资源 consumer 使用 snapshot 开关 |
 | Beta flag 投影 | `betas.rs`：`BetaFlags`（re-export 契约层 `peri_acp_types::beta_flags`）、`resolve`、`from_merged`、`HISTORY_WINDOW_V1`、`is_known`；`system.rs::flags`；`settings.rs::beta_flags` | `config.betas` 稀疏 bool 覆盖表由**合并后 settings** 派生，global→workspace 逐 key 覆盖（workspace 显式 false 可关闭 global true）；未覆盖与未知 id 恒 false；未知键解析后剔除并 warn，非 bool 使该来源解析失败；保存沿用 `ConfigSource::save`（CAS），不新增写路径。TUI 本地键 `history-window-v1` 由 `is_known` 接受但不在 ACP `BETA_FLAGS`，故 ConfigPanel 不列；`peri-tui` 启动读取一次并写 `HISTORY_WINDOW_V1`（未配置视为开启、显式 false 关闭），无热重载，仍需服务端在 initialize 响应中明确回显 `peri.historyWindowV1` |
-| Provider 解析 | `provider.rs`：`resolve`、`resolve_for_alias`、`ResolvedProvider`、`ENVIRONMENT_KEYS` | `MODEL_PROVIDER` + `MODEL_TYPE` 选择配置的 provider ID 和档位；缺省用 active profile；消费者负责 Model adapter 构造 |
+| Provider 解析 | `provider.rs`：`try_resolve`、`try_resolve_snapshot`、`resolve_for_alias`、`validate_responses_provider`、`ResolvedProvider`、`ResponsesAuthentication`、`ENVIRONMENT_KEYS` | `MODEL_PROVIDER` + `MODEL_TYPE` 选择配置的 provider ID 和档位；缺省用 active profile；`openai_responses` 显式协议选择，未知 type 拒绝。Responses 须有模型与正整数窗口；已确认 ChatGPT plan 模型缺窗口时派生 1M，不写回配置；API key 与未知模型仍须显式窗口。typed `ProviderAuthConfig` 只保存 API key 模式或 ChatGPT 账户/subject/clientId 引用。`validate_responses_provider` 独立校验 endpoint 与认证，供 resolver 和 TUI 编辑共用；消费者负责 Model adapter 构造。快照/保存边界用 `try_resolve_snapshot`：provider 级错误仍拒绝文档，真正未完成的 model/window 绑定只让 provider 不可用，不阻断其它配置保存；运行时 `try_resolve` 对生效档位保持严格 |
 | MCP 基础配置 | `mcp.rs`：`parse_global`、`parse_project`、`resolve_from_files`、`validate_config`、`server_config_hash` | global/plugin/project 合并、插件手动去重、typed 准入与 cache 关闭优先 |
 | Builtin 环境策略 | `mcp.rs`：`builtin_enabled` | `PERI_MCP_BUILTIN` 解释规则归 core；旧 builtin adapter 只采集 env，不复制规则 |
 | 快照中的插件/普通/bare 投影 | `system.rs`：`mcp_with_plugins`、`bare_mcp`、`cache_policy`、`builtin_mcp_enabled` | 从冻结原始输入派生；插件发现和执行展开留在 middleware |
@@ -47,9 +49,10 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
   已有 workspace `$schema` 优先。提交后使用 accepted snapshot，不能发布候选草稿。
 - `update_mcp` 只接受显式无来源输入或本 cwd `.mcp.json` 的 Project server；
   拒绝 Global / Plugin / Builtin / 其他 cwd.Project，防止 merged 全局凭据落入项目。
-- expected revision 是编辑开始的基线，提交时不能改取最新版。public core 接口
-  已修复；TUI `save_effective` 仍在提交时取 revision，延迟 draft / 远程 wire token
-  接线在 active issue 保持 followup，不宣称端到端版本保护已完整闭环。
+- expected revision 是编辑开始的基线，提交时不能改取最新版。public core 接口已修复；
+  TUI 即时入口 `save_effective` 仍在提交时取 revision，Login/Model 长草稿已使用
+  `save_effective_at`，但 ACP 远程 wire token 接线仍在 active issue 保持 followup，
+  不宣称端到端版本保护已完整闭环。
 
 ## Consumer 接线
 

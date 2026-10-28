@@ -675,6 +675,10 @@ fn build_snapshot_source(
                     provider_type: p.provider_type.clone(),
                     is_active: p.id == active_profile_provider,
                     has_api_key,
+                    has_chatgpt_plan: matches!(
+                        &p.auth,
+                        Some(peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan { .. })
+                    ),
                     base_url,
                 }
             })

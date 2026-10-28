@@ -16,7 +16,8 @@
 | --- | --- | --- | --- |
 | 改 Node 生命周期或 stderr | `peri-js-runtime/src/host.rs` + `peri-process/src/lib.rs` | `JsExecutionHost::spawn`、`terminate_and_wait`、`join_readers`、`kill`、`wait` | host 持有 child/channel/incoming 与共同 ProcessTree；Windows 挂起后入 Job 才执行；kill 请求整树终止，先 reap leader，再证明整树已退出，最后 join readers；自然 wait 也等待重定向输出的后代；等待取消保留原 owner 供重试 |
 | 改 JSON-RPC framing/pending | `peri-js-runtime/src/rpc.rs` | `RpcChannel::send_request`、`parse_message`、`spawn_stdout_reader` | malformed frame 产生 protocol error 并 drain pending；EOF 同样 drain；通用 JSON-RPC error 保真传输，不承担 adapter 业务归类 |
-| 验证 host 后代管道与等待取消 | `peri-js-runtime/src/host_lifecycle_test.rs` | `test_exited_leader_cleanup_terminates_descendant`、`test_cancelled_reader_join_retains_owner`、`test_wait_retains_redirected_descendant_until_natural_exit`、`test_cancelled_kill_retries_same_owner_for_redirected_descendant` | Unix 真实 Node leader 退出后，持 stdout 或已重定向输出的后代都参与清理证明；wait 被取消后重试仍等受控 RELEASE，kill 被取消后可继续排空原树；不构成 Windows Job Object 运行证明 |
+| 验证 host 后代管道与等待取消 | `peri-js-runtime/src/host_lifecycle_test.rs` | `test_exited_leader_cleanup_terminates_descendant`、`test_cancelled_reader_join_retains_owner`、`test_wait_retains_redirected_descendant_until_natural_exit`、`test_cancelled_kill_retries_same_owner_for_redirected_descendant` | Unix 真实 Node leader 退出后，持 stdout 或已重定向输出的后代都参与清理证明；wait 被取消后重试仍等受控 RELEASE；直接取消/重试 reader join 验证 handle 保留、最终帧与 EOF；kill 被取消后可继续排空原树；不构成 Windows Job Object 运行证明 |
+| 排查 Node 生命周期夹具启动失败 | `peri-js-runtime/src/host_lifecycle_test.rs` | `ExitedLeader::finish_startup`、`test_fixture_*` | 独立启动预算与原生命周期时限分离；提前退出、非法 READY 与超时均先显式回收，再附隔离合成脚本 stderr；cleanup/Drop 复用 ProcessTree 的已结束保护；不输出生产进程 stderr |
 | 改错误类型 | `peri-js-runtime/src/error.rs` | `JsRuntimeError` | 通用 `RpcResponse` 保持独立 |
 
 ## 跨模块契约
