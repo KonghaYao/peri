@@ -7,6 +7,7 @@ import { createRoot } from 'react-dom/client';
 import '../tailwind.css';
 import '../styles.css';
 import '../styles/chat-tokens.css';
+import 'streamdown/styles.css';
 import { installOpenUITheme } from '../chat';
 import App from './App';
 

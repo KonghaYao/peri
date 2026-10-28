@@ -83,7 +83,7 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 - `frontend/chat/{timeline,composer}/`：Entry → 展示行与输入区；不提供编辑/重生成/队列/附件/语音
   handler。assistant 行的 `OpenUIMessage` 只在顶层完整 `openui` 围栏，或流结束后以
   `root = Stack(` 开头的裸程序时懒加载 Renderer；校验失败、引用未解析、`incomplete`、懒加载或
-  渲染异常都回退 `MarkdownText`。复制按钮始终复制原始文本（含 DSL）。
+  渲染异常都回退 `StreamdownText`。复制按钮始终复制原始文本（含 DSL）。
 - OpenUI 表单值 ephemeral；`Button` action 经 `parseOpenUIAction` 路由到 `chat.send` 或
   `window.open`（仅 http/https）。`actionsEnabled={canSend}` 在聊天忙时禁用交互。
 - `frontend/components/assistant-ui/` 只保留 vendored 审批/问答卡片与样式常量；`frontend/hooks/`、

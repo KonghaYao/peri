@@ -1,5 +1,5 @@
 import { Check, Copy } from 'lucide-react';
-import { MarkdownText } from '../MarkdownText';
+import { StreamdownText } from '../StreamdownText';
 import { OpenUIMessage, type OpenUIActionEvent } from '../../openui';
 import { useCopyToClipboard } from '../../../hooks';
 
@@ -10,7 +10,8 @@ interface AssistantMessageRowProps {
   actionsEnabled?: boolean;
 }
 
-const renderMarkdown = (value: string) => <MarkdownText text={value} />;
+const renderMarkdownFor = (streaming: boolean) => (value: string) =>
+  <StreamdownText text={value} streaming={streaming} />;
 
 /** assistant 消息：无气泡正文；流式期间不显示复制完成态。复制始终复制原始文本（含 DSL）。 */
 export function AssistantMessageRow({
@@ -24,7 +25,7 @@ export function AssistantMessageRow({
         <OpenUIMessage
           text={body}
           streaming={streaming}
-          renderMarkdown={renderMarkdown}
+          renderMarkdown={renderMarkdownFor(streaming)}
           onOpenUIAction={onOpenUIAction}
           actionsEnabled={actionsEnabled}
         />
