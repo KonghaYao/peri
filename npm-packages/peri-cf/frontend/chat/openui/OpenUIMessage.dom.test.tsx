@@ -6,7 +6,7 @@ installDom();
 const { cleanup, render, screen, waitFor } = await import("@testing-library/react");
 const { createElement } = await import("react");
 const { OpenUIMessage } = await import("./OpenUIMessage");
-const { OpenUIErrorBoundary } = await import("./OpenUIErrorBoundary");
+const { OpenUIErrorBoundary } = await import("peri-openui/error-boundary");
 
 afterEach(() => cleanup());
 

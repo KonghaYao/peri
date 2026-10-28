@@ -3,9 +3,11 @@ import "./devtools-off";
 import type { ElementNode } from "@openuidev/lang-core";
 import { createParser, Renderer } from "@openuidev/react-lang";
 import { useMemo, type ReactNode } from "react";
-import type { OpenUIActionEvent } from "./actions";
+import type { OpenUIActionEvent } from "./action-event";
 import { OpenUIActionEnabledContext } from "./components/shared";
 import { openuiLibrary } from "./library";
+
+export { OpenUIErrorBoundary } from "./openui-error-boundary";
 
 const parser = createParser(openuiLibrary.toJSONSchema(), openuiLibrary.root);
 
@@ -45,7 +47,7 @@ function hasInvalidElement(node: ElementNode): boolean {
   return false;
 }
 
-interface OpenUIProgramProps {
+export interface OpenUIProgramProps {
   readonly program: string;
   readonly isStreaming: boolean;
   readonly actionsEnabled?: boolean;
@@ -53,7 +55,8 @@ interface OpenUIProgramProps {
   readonly after?: string;
   /** 整条消息的原文，解析失败时完整回退。 */
   readonly fallbackText: string;
-  readonly renderMarkdown: (text: string) => ReactNode;
+  /** 宿主注入的文本渲染器（聊天侧传 StreamdownText）；缺省按纯文本输出。 */
+  readonly renderText?: (text: string) => ReactNode;
   readonly onAction?: (event: OpenUIActionEvent) => void;
 }
 
@@ -70,6 +73,8 @@ function warnRendererErrors(errors: unknown[]): void {
  * 重 chunk：parser + library + Renderer。
  * 只有 OpenUIMessage 的懒加载入口会 import 本文件；主 chunk 不应包含它。
  */
+const renderPlainText = (text: string): ReactNode => text;
+
 export function OpenUIProgram({
   program,
   isStreaming,
@@ -77,7 +82,7 @@ export function OpenUIProgram({
   before = "",
   after = "",
   fallbackText,
-  renderMarkdown,
+  renderText = renderPlainText,
   onAction,
 }: OpenUIProgramProps) {
   const parsed = useMemo(() => {
@@ -94,21 +99,21 @@ export function OpenUIProgram({
   );
 
   if (!parsed?.root) {
-    return warningFallback("parse-failed", renderMarkdown(fallbackText));
+    return warningFallback("parse-failed", renderText(fallbackText));
   }
   if (parsed.meta.incomplete) {
-    return warningFallback("incomplete-program", renderMarkdown(fallbackText));
+    return warningFallback("incomplete-program", renderText(fallbackText));
   }
   // root 存在但存在校验错误/未解析引用时，Renderer 会静默丢弃节点并留下空白。
   // 这类残缺 UI 不可接受：回退整段原文并标记原因（orphaned 不影响渲染，不触发）。
   if (parsed.meta.errors.length > 0 || parsed.meta.unresolved.length > 0 || invalid) {
-    return warningFallback("validation-failed", renderMarkdown(fallbackText));
+    return warningFallback("validation-failed", renderText(fallbackText));
   }
 
   const interactionEnabled = actionsEnabled && !isStreaming;
   return (
     <OpenUIActionEnabledContext.Provider value={interactionEnabled}>
-      {before ? renderMarkdown(before) : null}
+      {before ? renderText(before) : null}
       <div data-slot="peri-openui" style={{ minWidth: 0 }}>
         <Renderer
           response={program}
@@ -119,7 +124,7 @@ export function OpenUIProgram({
           onError={warnRendererErrors}
         />
       </div>
-      {after ? renderMarkdown(after) : null}
+      {after ? renderText(after) : null}
     </OpenUIActionEnabledContext.Provider>
   );
 }

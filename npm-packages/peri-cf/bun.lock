@@ -7,13 +7,12 @@
       "dependencies": {
         "@hono/bun": "^1.0.1",
         "@legendapp/list": "^3.7.0",
-        "@openuidev/lang-core": "1.0.2",
-        "@openuidev/react-lang": "1.0.2",
         "@peri-code/sdk": "0.2.0",
         "@tanstack/react-query": "^5.105.0",
         "clsx": "^2.1.1",
         "hono": "4.13.13",
         "lucide-react": "^1.61.0",
+        "peri-openui": "file:../peri-openui",
         "peri-sandbox": "file:../peri-sandbox",
         "react": "^19.3.1",
         "react-dom": "^19.3.1",
@@ -525,6 +524,8 @@
     "parse5": ["parse5@7.3.0", "https://registry.npmmirror.com/parse5/-/parse5-7.3.0.tgz", { "dependencies": { "entities": "^6.0.0" } }, "sha512-IInvU7fabl34qmi9gY8XOVxhYyMyuH2xUNpb2q8/Y+7552KlejkRvqvD19nMoUW/uQGGbqNpA6Tufu5FL5BZgw=="],
 
     "path-key": ["path-key@3.1.1", "https://registry.npmmirror.com/path-key/-/path-key-3.1.1.tgz", {}, "sha512-ojmeN0qd+y0jszEtoY48r0Peq5dwMEkIlCOu6Q5f41lfkswXuKtYrhgoTpLnyIcHm24Uhqx+5Tqm2InSwLhE6Q=="],
+
+    "peri-openui": ["peri-openui@file:../peri-openui", { "dependencies": { "@openuidev/lang-core": "1.0.2", "@openuidev/react-lang": "1.0.2", "zod": "^4.6.7" }, "devDependencies": { "@testing-library/dom": "^10.4.2", "@testing-library/react": "^16.3.3", "@types/bun": "^1.4.4", "@types/react": "^19.3.0", "@types/react-dom": "^19.3.0", "happy-dom": "^21.0.4", "react": "^19.3.1", "react-dom": "^19.3.1", "typescript": "^7.0.2" }, "peerDependencies": { "react": ">=18", "react-dom": ">=18" } }],
 
     "peri-sandbox": ["peri-sandbox@file:../peri-sandbox", { "dependencies": { "@anthropic-ai/sandbox-runtime": "0.0.81", "@modelcontextprotocol/client": "2.4.0", "@modelcontextprotocol/core": "2.4.0", "@modelcontextprotocol/server": "2.4.0", "zod": "^4.6.7" }, "devDependencies": { "@biomejs/biome": "2.6.3", "@types/node": "^26.6.5", "bun-types": "^1.4.4", "typescript": "^7.0.2" }, "bin": { "peri-sandbox": "./dist/src/cli.js" } }],
 

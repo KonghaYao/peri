@@ -1,13 +1,7 @@
-import type { ActionEvent } from "@openuidev/lang-core";
+import type { OpenUIActionEvent } from "peri-openui";
 
-/** Renderer 传给宿主的原始 action 事件；与 `ActionEvent` 结构兼容但保持本模块无 React 依赖。 */
-export interface OpenUIActionEvent {
-  readonly type: string;
-  readonly params: Record<string, unknown>;
-  readonly humanFriendlyMessage: string;
-  readonly formState?: Record<string, unknown>;
-  readonly formName?: string;
-}
+/** 渲染层 action 事件由 `peri-openui` 定义；聊天适配层再导出保持既有消费者不变。 */
+export type { OpenUIActionEvent };
 
 export type ParsedOpenUIAction =
   | { kind: "send"; text: string }
@@ -140,7 +134,7 @@ function messageOf(event: OpenUIActionEvent): string {
  * `continue_conversation` 附带精简表单值；空消息忽略。
  * `open_url` 只允许无 userinfo、长度 ≤2048 的 http/https。
  */
-export function parseOpenUIAction(event: OpenUIActionEvent | ActionEvent): ParsedOpenUIAction {
+export function parseOpenUIAction(event: OpenUIActionEvent): ParsedOpenUIAction {
   if (event.type === "continue_conversation") {
     const rawMessage = messageOf(event);
     const message = rawMessage.slice(0, MAX_MESSAGE_CHARS);

@@ -1,0 +1,3 @@
+[test]
+# 链接包 `peri-openui` 自带 React；测试期统一到宿主副本，见 frontend/test/react-dedupe.ts。
+preload = ["./frontend/test/react-dedupe.ts"]

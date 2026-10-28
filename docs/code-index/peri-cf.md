@@ -40,11 +40,13 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 - **前端**：`frontend/remote/controller.ts` 是页面控制器（句柄身份、两步打开历史、绑定代次、Action、
   连接）；`actions.ts` 是 HTTP 客户端；`sync.ts` 是 WebSocket → SDK 副本；`application.ts` 是前端组合根。
   `frontend/remote/projection.ts` 把 `ChatReplica` 物化为展示 DTO，不反向控制执行。
-- **生成式 UI**：`frontend/chat/openui/library.tsx` 是组件事实源；`bun run openui:spec` 产出
-  `server/generated/openui.json`。`OpenUIMessage` 只认顶层完整 `openui` 围栏并懒加载 Renderer；
+- **生成式 UI**：组件库、spec 与 Renderer 独立在 [`peri-openui`](peri-openui.md)；
+  `peri-openui/src/library.tsx` 是组件事实源，`bun run openui:spec` 生成 `peri-openui/spec.json`。
+  CF 的 `frontend/chat/openui/` 只保留 `OpenUIMessage` 聊天适配，它只认顶层完整 `openui` 围栏并懒加载
+  `peri-openui/renderer`；
   root 为空、root 存在但 prop 校验失败/引用未解析、incomplete、未闭合或渲染异常都回退 Markdown。
-  流结束后的裸 `root = Stack(` 程序会被识别，普通代码块/列表项内的 `openui` 字样不算；服务端只读
-  JSON 生成提示词，随 `session/new` 对新会话生效。
+  流结束后的裸 `root = Stack(` 程序会被识别，普通代码块/列表项内的 `openui` 字样不算；服务端经
+  `peri-openui/prompt` 只读 `spec.json` 生成提示词，随 `session/new` 对新会话生效。
 - **静态资源**：非 `/api/*` 路径由 `server/index.ts` 的 Hono `serveStatic` 提供 `dist/client` 与 `index.html` 回退；Vite 开发服务器把
   `/api` 代理到 Bun 服务。
 - **没有访问控制**：服务不提供认证、限流或多租户隔离；部署入口鉴权是必要条件。
@@ -96,7 +98,7 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 | 远程客户端与页面控制器 | `frontend/remote/{application,actions,controller,repository,sync}.ts` |
 | Chat 运行时与 useChat | `frontend/chat/runtime/{useChat,queries,payloadReader,askUserQuestion}.ts` |
 | Chat 展示与交互 | `frontend/chat/{components,timeline,composer}/`；`frontend/components/assistant-ui/` 只保留 vendored 审批/问答卡片 |
-| OpenUI 规格与渲染 | `frontend/chat/openui/{library,generate,OpenUIMessage,OpenUIProgram,fence,actions,theme}.ts(x)`；canvas 在 `openui/canvas/`；生成产物 `server/generated/openui.json` |
+| OpenUI 聊天适配 | `frontend/chat/openui/{OpenUIMessage,actions,index}.ts(x)`；渲染与 spec 见 [`peri-openui`](peri-openui.md) |
 | OpenUI 系统提示词 | `server/openui-instructions.ts`、`server/system-instructions.ts` |
 | SPA 外壳与只读服务端监控 | `frontend/app/App.tsx`、`frontend/settings/MonitorDialog.tsx`、`frontend/settings/monitor/` |
 | Vite 构建与 `/api` 代理 | `vite.config.ts` |
@@ -116,7 +118,8 @@ Emscripten 6.0.10 与 peri-wasm 产物。最近一次记录（2026-10-26）：SD
 
 - `bun run typecheck`：根 TS + `server/tsconfig.json`。
 - `bun test`：`frontend`、`scripts`，再以 server tsconfig 跑 `server`。
-- `bun run openui:spec` / `openui:check`：生成/校验 `server/generated/openui.json`；`build` 前置 check。
+- `bun run openui:spec` / `openui:check`：转发到 `../peri-openui/scripts/generate.ts` 生成/校验
+  `../peri-openui/spec.json`；`build` 前置 check。
 - `./node_modules/.bin/vite build`：只构建前端；`bun run build` 额外执行 `prepare:wasm`。
 - 服务端冒烟：`GET /api/monitor`、`GET /api/chats`、WS `/api/chats/:id/sync`；真实执行需模型端点与 Store。
 - 边界回归：`scripts/module-boundary.test.ts` 扫描生产源码，强制依赖方向、禁止循环与自有 index 引用，并拦截旧命令/事件路由和旧门面。

@@ -58,8 +58,9 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
 - **新会话**：`create_new_session` 使用 `workspace` 派生的会话 cwd（省略 `sessionPath` 时为工作区根）；
   历史加载使用 Store 中的持久 cwd，不回退句柄 path。
 - **OpenUI 指令**：默认 Session instructions 由 `BASE_SYSTEM_INSTRUCTIONS` + OpenUI 段组成；OpenUI 段来自
-  提交入库的 `server/generated/openui.json`，经 `@openuidev/lang-core` 的 `generateSystemPrompt` 生成，
-  服务端不 import React/canvas。提示词只随 `session/new` 冻结，**旧会话不会获得**；前端只在顶层完整
+  独立包 `peri-openui` 提交入库的 `spec.json`，经该包 `peri-openui/prompt` 的
+  `generateOpenUISystemPrompt`（内部调用 `@openuidev/lang-core`）生成，服务端不 import React/canvas。
+  提示词只随 `session/new` 冻结，**旧会话不会获得**；前端只在顶层完整
   `openui` 围栏，或流结束后以 `root = Stack(` 开头的裸程序时懒加载 Renderer；校验失败、引用未解析、
   `incomplete`、懒加载或渲染异常都回退 Markdown。表单值 ephemeral，`Button` action 经
   `parseOpenUIAction` 转成 `chat.send` 或 http(s) 外链（拒绝 userinfo、长度 >2048）。
@@ -108,8 +109,8 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
 - 单进程 ownership 不能宣称跨实例接管；多实例部署需要改造装配接入共享 storage，并由路由层做串行化/崩溃清理。
 - 真实模型/Store/远程 MCP、浏览器验收与 hosted 部署仍需环境验收；单元测试或类型检查不替代真实运行后端。
 - OpenUI vendored canvas 的来源与许可链记录在
-  `npm-packages/peri-cf/frontend/chat/openui/canvas/PROVENANCE.md`：上游声明 MIT 但仓库根无 LICENSE，
-  授权链不明，仅限内部使用；对外分发前必须法律复核。
+  `npm-packages/peri-openui/PROVENANCE.md`：上游声明 MIT 但仓库根无 LICENSE，
+  授权链不明，仅限内部使用；对外分发前必须法律复核。包本身 `private: true`，由 CF 以 `file:` 依赖消费。
 
 ## 与其他文档的关系
 

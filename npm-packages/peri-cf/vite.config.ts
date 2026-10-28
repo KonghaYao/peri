@@ -12,6 +12,8 @@ const nodeCryptoShim = fileURLToPath(new URL("./frontend/shims/nodeCrypto.ts", i
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
+    // `peri-openui` 以 file: 依赖引入源码；与主应用共用同一份 React。
+    dedupe: ["react", "react-dom"],
     alias: {
       "@": frontendRoot,
       crypto: nodeCryptoShim, "node:crypto": nodeCryptoShim,

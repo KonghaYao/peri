@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { OPENUI_ARTIFACT } from "peri-openui/prompt";
 import type { ServerConfig } from "./config";
 import { defaultSessionOptions } from "./compose";
-import artifact from "./generated/openui.json";
 import { OPENUI_SYSTEM_PROMPT } from "./openui-instructions";
 import { BASE_SYSTEM_INSTRUCTIONS, SYSTEM_INSTRUCTIONS } from "./system-instructions";
 
@@ -35,10 +35,10 @@ describe("OpenUI system instructions", () => {
   });
 
   test("每个组件名与四个分组都出现在提示词中", () => {
-    for (const name of Object.keys(artifact.spec.components)) {
+    for (const name of Object.keys(OPENUI_ARTIFACT.spec.components)) {
       expect(SYSTEM_INSTRUCTIONS).toContain(`${name}(`);
     }
-    for (const group of artifact.spec.componentGroups) {
+    for (const group of OPENUI_ARTIFACT.spec.componentGroups) {
       expect(SYSTEM_INSTRUCTIONS).toContain(group.name);
     }
   });

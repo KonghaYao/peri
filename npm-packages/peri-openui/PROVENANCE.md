@@ -1,5 +1,8 @@
 # Vendored canvas provenance
 
+本文件记录 `peri-openui` 包内 vendored canvas（`src/canvas/`）的来源与许可链。canvas 原先位于
+`peri-cf/frontend/chat/openui/canvas/`，随 OpenUI 组件库抽取迁入本包；组件库其余部分为本仓库第一方代码。
+
 ## 来源
 
 - 上游包：`peri-canvas@0.1.0`
@@ -14,7 +17,8 @@
 - 上游 README 自述为 “Standalone React implementation of the Cursor Canvas SDK”
   （Cursor Canvas SDK 的移植/重实现）。
 - 因此**授权链不明**：MIT 声明是否覆盖全部代码、与 Cursor Canvas SDK 原始许可的关系
-  均未核实。此风险已由用户明确知晓并接受，仅用于 peri-cf 内部使用。
+  均未核实。此风险已由用户明确知晓并接受，仅用于 Peri 内部使用（`peri-openui` 当前
+  `private: true`，仅由 `peri-cf` 以 `file:` 依赖消费）。
 - 对外分发、发布或商业化前必须完成法律复核；不得在未复核的情况下再分发。
 
 ## 保留文件

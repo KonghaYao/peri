@@ -1,0 +1,40 @@
+{
+  "name": "peri-openui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Peri OpenUI component library, lazy renderer and prompt artifact",
+  "exports": {
+    ".": "./src/index.ts",
+    "./renderer": "./src/renderer.tsx",
+    "./error-boundary": "./src/openui-error-boundary.tsx",
+    "./prompt": "./src/prompt.ts",
+    "./spec.json": "./spec.json"
+  },
+  "scripts": {
+    "spec": "bun scripts/generate.ts",
+    "check:spec": "bun scripts/generate.ts --check",
+    "test": "bun test src",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@openuidev/lang-core": "1.0.2",
+    "@openuidev/react-lang": "1.0.2",
+    "zod": "^4.6.7"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "devDependencies": {
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
+    "@types/bun": "^1.4.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "happy-dom": "^21.0.4",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "typescript": "^7.0.2"
+  }
+}

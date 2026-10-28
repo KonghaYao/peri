@@ -1,15 +1,15 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { openuiLibrary, openuiPromptOptions } from "./library";
+import { openuiLibrary, openuiPromptOptions } from "../src/library";
 
 /**
- * 构建期生成器：`library.toSpec()` + promptOptions -> server/generated/openui.json。
- * 服务端只读这个 JSON，不 import 前端库（见方案 4.3）。
+ * 构建期生成器：`library.toSpec()` + promptOptions -> 包根 `spec.json`。
+ * 服务端只读这个 JSON（经 `peri-openui/prompt`），不 import 前端库。
  *
  * 失败策略：读取/解析/写出错误直接抛出，不吞；`--check` 不一致时给出可执行命令。
  */
-const OUTPUT_PATH = resolve(import.meta.dir, "../../../server/generated/openui.json");
+const OUTPUT_PATH = resolve(import.meta.dir, "../spec.json");
 
 export function buildOpenUIArtifact() {
   return {
@@ -35,7 +35,7 @@ export function checkOpenUISpec(): void {
     raw = readFileSync(OUTPUT_PATH, "utf8");
   } catch (error) {
     throw new Error(
-      `OpenUI spec 不存在或不可读：${OUTPUT_PATH}。先运行 \`bun run openui:spec\`。`,
+      `OpenUI spec 不存在或不可读：${OUTPUT_PATH}。先运行 \`bun run spec\`。`,
       { cause: error },
     );
   }
@@ -44,7 +44,7 @@ export function checkOpenUISpec(): void {
   try {
     parsed = JSON.parse(raw);
   } catch (error) {
-    throw new Error(`OpenUI spec 不是合法 JSON：${OUTPUT_PATH}。重新运行 \`bun run openui:spec\`。`, {
+    throw new Error(`OpenUI spec 不是合法 JSON：${OUTPUT_PATH}。重新运行 \`bun run spec\`。`, {
       cause: error,
     });
   }
@@ -52,7 +52,7 @@ export function checkOpenUISpec(): void {
   const expected = JSON.parse(serializeOpenUIArtifact()) as unknown;
   if (!isDeepStrictEqual(parsed, expected)) {
     throw new Error(
-      `OpenUI spec 已过期：${OUTPUT_PATH} 与 library.tsx 不一致。运行 \`bun run openui:spec\` 并提交生成产物。`,
+      `OpenUI spec 已过期：${OUTPUT_PATH} 与 src/library.tsx 不一致。运行 \`bun run spec\` 并提交生成产物。`,
     );
   }
 }

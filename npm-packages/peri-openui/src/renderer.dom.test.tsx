@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { installDom } from "../../test/dom";
+import { installDom } from "../tests/dom";
 
 installDom();
 
@@ -17,11 +17,11 @@ Object.defineProperty(globalThis, "ResizeObserver", {
 
 const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { createElement } = await import("react");
-const { OpenUIProgram } = await import("./OpenUIProgram");
+const { OpenUIProgram } = await import("./renderer");
 
 afterEach(() => cleanup());
 
-const renderMarkdown = (value: string) => createElement("div", { "data-slot": "peri-markdown" }, value);
+const renderText = (value: string) => createElement("div", { "data-slot": "peri-markdown" }, value);
 
 function mount(program: string, options: {
   isStreaming?: boolean;
@@ -33,7 +33,7 @@ function mount(program: string, options: {
     isStreaming: options.isStreaming ?? false,
     actionsEnabled: options.actionsEnabled ?? true,
     fallbackText: program,
-    renderMarkdown,
+    renderText,
     onAction: options.onAction,
   }));
 }
