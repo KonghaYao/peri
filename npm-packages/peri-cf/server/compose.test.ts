@@ -4,12 +4,11 @@ import {
   type ChatRuntime,
 } from "@peri-code/sdk";
 import {
-  SESSION_CWD,
   WORKSPACE_CWD,
   type ServerConfig,
 } from "./config";
 import { SYSTEM_INSTRUCTIONS } from "./system-instructions";
-import { chatManagerOptions } from "./compose";
+import { chatManagerOptions, defaultAgentConfig, defaultWorkspace } from "./compose";
 
 const config: ServerConfig = {
   hostname: "127.0.0.1",
@@ -46,16 +45,18 @@ function wasmRuntime(options: ReturnType<typeof chatManagerOptions>): Extract<
 }
 
 describe("chatManagerOptions", () => {
-  test("把模型、四档 profiles 与工具面装配成 agentConfig", () => {
-    const options = chatManagerOptions(config);
+  test("defaultWorkspace 固定宿主与运行时根为 /workspace", () => {
+    expect(defaultWorkspace(config)).toEqual({
+      id: "default",
+      hostPath: WORKSPACE_CWD,
+      runtimePath: WORKSPACE_CWD,
+    });
+  });
 
-    expect(options.agentConfig).toEqual({
-      cwd: WORKSPACE_CWD,
-      machineId: config.machineId,
-      storage: {
-        url: config.storage.url,
-        authToken: config.storage.authToken,
-      },
+  test("defaultAgentConfig 把模型、四档 profiles 与工具面装配成 per-chat agent", () => {
+    const agent = defaultAgentConfig(config);
+
+    expect(agent).toEqual({
       settings: {
         config: {
           active_alias: "sonnet",
@@ -86,32 +87,38 @@ describe("chatManagerOptions", () => {
         },
       },
     });
+    // Store 与机器身份只属于 Manager，per-chat 声明会被 SDK 拒绝。
+    expect(agent).not.toHaveProperty("storage");
+    expect(agent).not.toHaveProperty("machineId");
+    // cwd 由 SDK 从 workspace.runtimePath 派生，不能与 workspace 漂移。
+    expect(agent).not.toHaveProperty("cwd");
   });
 
-  test("storage 使用默认 database 的纯 JSON storageConfig", () => {
+  test("storage 由 Manager store 使用默认 database 的纯 JSON storageConfig", () => {
     const options = chatManagerOptions(config);
 
     expect(options.database).toBeInstanceOf(TursoStorage);
     const database = options.database as TursoStorage;
-    const agentStorage = (options.agentConfig as { storage: unknown }).storage;
+    const agentStorage = options.store.storage;
 
     expect(agentStorage).toEqual(database.storageConfig);
     expect(agentStorage).toEqual({
       url: config.storage.url,
       authToken: config.storage.authToken,
     });
+    expect(options.store.machineId).toBe(config.machineId);
     expect(Object.keys(agentStorage as object).sort()).toEqual(["authToken", "url"]);
     expect(JSON.parse(JSON.stringify(agentStorage))).toEqual(agentStorage);
     expect(agentStorage).not.toHaveProperty("legacyCwd");
     expect(agentStorage).not.toHaveProperty("currentCwd");
+    expect(options).not.toHaveProperty("agentConfig");
   });
 
-  test("sessionInit 注入会话 cwd、系统指令与远程 MCP，kv 使用进程内存储", () => {
+  test("session 注入系统指令与远程 MCP，cwd 留给 workspace 派生", () => {
     const options = chatManagerOptions(config);
 
     expect(options.kv).toBeDefined();
-    expect(options.chatConfig.sessionInit).toEqual({
-      path: SESSION_CWD,
+    expect(options.chatConfig.session).toEqual({
       instructions: SYSTEM_INSTRUCTIONS,
       mcpServers: {
         tools: {
@@ -121,6 +128,7 @@ describe("chatManagerOptions", () => {
         },
       },
     });
+    expect(options.chatConfig.session).not.toHaveProperty("path");
     expect(options.chatConfig.lifecycle).toBeUndefined();
   });
 

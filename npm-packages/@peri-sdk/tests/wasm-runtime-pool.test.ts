@@ -63,6 +63,37 @@ describe("WasmRuntimeLease", () => {
 });
 
 describe("WasmRuntimePool", () => {
+  test("acquire passes per-chat startup config to the starter", async () => {
+    const starts: Array<{
+      configJson?: string;
+      env?: Readonly<Record<string, string>>;
+      diagnostic?: unknown;
+    }> = [];
+    const diagnostic = (): void => {};
+    const manager = new WasmRuntimePool(async (options) => {
+      starts.push({
+        configJson: options.configJson,
+        env: options.env,
+        diagnostic: options.onDiagnostic,
+      });
+      return fakeTransport();
+    });
+
+    const lease = await manager.acquire({
+      configJson: '{"cwd":"/chat-a"}',
+      env: { FLAG: "1" },
+      onDiagnostic: diagnostic,
+    });
+    expect(starts).toEqual([
+      {
+        configJson: '{"cwd":"/chat-a"}',
+        env: { FLAG: "1" },
+        diagnostic,
+      },
+    ]);
+    await manager.release(lease);
+  });
+
   test("tracks acquired leases and closeAll closes them", async () => {
     let closes = 0;
     const manager = new WasmRuntimePool(async () => fakeTransport(async () => { closes += 1; }));

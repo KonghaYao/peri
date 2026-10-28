@@ -50,6 +50,13 @@ const portable = await Bun.build({
   external: ["yjs"],
 });
 if (!portable.success) throw new Error(`Portable SDK bundle failed: ${portable.logs.join("; ")}`);
+const sandbox = await Bun.build({
+  entrypoints: [resolve(packageRoot, "src/entries/sandbox.ts")],
+  outdir: output,
+  target: "node",
+  format: "esm",
+});
+if (!sandbox.success) throw new Error(`Sandbox SDK bundle failed: ${sandbox.logs.join("; ")}`);
 const wasmNode = await Bun.build({
   entrypoints: [resolve(packageRoot, "src/entries/wasm-node.ts")],
   outdir: output,

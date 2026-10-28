@@ -15,7 +15,7 @@ import {
   type SyncEnv,
 } from "./api";
 import { MODEL_TIERS, loadServerConfig, publicServerInfo, type ServerConfig } from "./config";
-import { chatManagerOptions } from "./compose";
+import { chatManagerOptions, defaultAgentConfig, defaultWorkspace } from "./compose";
 import { ChatRegistry } from "./registry";
 
 /**
@@ -73,7 +73,11 @@ export function createServer(
 export function startServer(
   config: ServerConfig,
 ): { server: Server<BunWebSocketData>; registry: ChatRegistry } {
-  const registry = new ChatRegistry(new ChatManager(chatManagerOptions(config)));
+  const registry = new ChatRegistry(
+    new ChatManager(chatManagerOptions(config)),
+    defaultWorkspace(config),
+    defaultAgentConfig(config),
+  );
   return { server: createServer(config, registry), registry };
 }
 

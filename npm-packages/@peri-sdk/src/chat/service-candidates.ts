@@ -2,14 +2,13 @@ import { ChatNotReadyError } from "./errors";
 import { asActionError } from "./error-mapping";
 import type { ChatSessionIndex, CleanupOutcome } from "./service-context";
 import type { ChatDatabase } from "../contracts/chat";
-import type { ChatSessionInit } from "./types";
 
 /** 候选 Session 的登记/acquire/释放依赖；由 ChatService 提供。 */
 export interface CandidateContext {
     readonly chatId: string;
     readonly database: ChatDatabase;
-    readonly path?: string;
-    readonly sessionInit: ChatSessionInit;
+    /** 由 workspace 派生的会话 cwd；仅在 Store 没有持久 cwd 时兜底。 */
+    readonly sessionCwd: string;
     readonly index: ChatSessionIndex;
     acquireSession(sessionId: string): Promise<void>;
     releaseOwnership(sessionId: string): Promise<void>;
@@ -99,7 +98,8 @@ export class SessionCandidate {
 /**
  * 解析加载历史所需的 cwd。
  *
- * 持久 cwd 是权威；句柄/default path 只作兜底。查询失败保留动作错误语义。
+ * 持久 cwd 是权威；Store 没有记录时回退到由 workspace 派生的会话 cwd。
+ * 查询失败保留动作错误语义。
  */
 export async function resolveLoadPath(
     context: CandidateContext,
@@ -118,7 +118,7 @@ export async function resolveLoadPath(
             "rejected",
         );
     }
-    const path = persistedCwd || context.path || context.sessionInit.path;
+    const path = persistedCwd || context.sessionCwd;
     if (!path) {
         throw new ChatNotReadyError(
             requestId,

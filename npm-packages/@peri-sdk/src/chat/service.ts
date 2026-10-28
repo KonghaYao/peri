@@ -26,6 +26,8 @@ import {
     ChatNotReadyError,
     SessionBindingConflictError,
     SessionCreationError,
+    SessionWorkspaceConflictError,
+    SessionWorkspaceMismatchError,
 } from "./errors";
 import { ChatFactHub } from "./fact-hub";
 import type { ChatBindingTarget, ChatFact, ChatFactObserver } from "../contracts/chat";
@@ -45,6 +47,7 @@ import {
     withRequestId,
 } from "./error-mapping";
 import { resolveChatLifecycle } from "./lifecycle";
+import { workspaceRelation } from "./workspace";
 import type {
     Activation,
     ChatInstanceFactory,
@@ -60,6 +63,7 @@ import type {
     SendReceipt,
     SessionReadyResult,
 } from "./types";
+import type { WasmRuntimeAcquireOptions } from "../wasm/runtime-pool";
 
 /**
  * 单个 Chat 的操作句柄。
@@ -70,16 +74,23 @@ import type {
 export class ChatService implements ChatServiceContract {
     readonly id: string;
 
-    private readonly path?: string;
     private readonly sessionInit: ChatServiceOptions["sessionInit"];
     private readonly agentConfig: unknown;
+    /** 当前 Chat 的 workspace；id 用于跨 workspace 判定，runtimePath 是路径边界。 */
+    private readonly workspace: ChatServiceOptions["workspace"];
+    /** 由 workspace 与 sessionPath 派生的新会话 cwd。 */
+    private readonly sessionCwd: string;
+    private readonly agentConfigJson: string;
     private readonly runtime: ChatServiceOptions["runtime"];
+    private readonly runtimeEnv?: ChatServiceOptions["runtimeEnv"];
+    private readonly onRuntimeDiagnostic?: ChatServiceOptions["onRuntimeDiagnostic"];
+    private readonly payloadBudgets?: ChatServiceOptions["payloadBudgets"];
     private readonly database: ChatServiceOptions["database"];
     private readonly ownership: ChatServiceOptions["ownership"];
     private readonly index: ChatServiceOptions["index"];
     private readonly instanceFactory: ChatInstanceFactory;
     private readonly acquireWasmRuntime: (
-        signal?: AbortSignal,
+        options?: WasmRuntimeAcquireOptions,
     ) => Promise<WasmRuntimeLease>;
     private readonly onClosedHandler: (chatId: string) => void;
     private readonly lifecycleOptions: Required<ChatLifecycleOptions>;
@@ -105,10 +116,15 @@ export class ChatService implements ChatServiceContract {
         this.id = options.id;
         this.state = new ChatBinding(options.id);
         this.facts = new ChatFactHub(options.id);
-        this.path = options.path;
         this.sessionInit = options.sessionInit;
         this.agentConfig = options.agentConfig;
+        this.workspace = options.workspace;
+        this.sessionCwd = options.sessionCwd;
+        this.agentConfigJson = options.agentConfigJson;
         this.runtime = options.runtime;
+        this.runtimeEnv = options.runtimeEnv;
+        this.onRuntimeDiagnostic = options.onRuntimeDiagnostic;
+        this.payloadBudgets = options.payloadBudgets;
         this.database = options.database;
         this.ownership = options.ownership;
         this.index = options.index;
@@ -122,8 +138,7 @@ export class ChatService implements ChatServiceContract {
         this.candidateContext = {
             chatId: this.id,
             database: this.database,
-            path: this.path,
-            sessionInit: this.sessionInit,
+            sessionCwd: this.sessionCwd,
             index: this.index,
             acquireSession: (sessionId) => this.acquireSession(sessionId),
             releaseOwnership: (sessionId) => this.releaseOwnership(sessionId),
@@ -345,13 +360,7 @@ export class ChatService implements ChatServiceContract {
                 "create_new_session requires an empty chat handle",
             );
         }
-        const path = this.path ?? this.sessionInit.path;
-        if (!path) {
-            throw new ChatNotReadyError(
-                requestId,
-                "A path is required to create a new session",
-            );
-        }
+        const path = this.sessionCwd;
         this.state.beginCreate();
         return this.mutex
             .run(() =>
@@ -526,6 +535,8 @@ export class ChatService implements ChatServiceContract {
                 );
             }
             candidate = next;
+            // 新 Session 一旦有 id 就记录所属 workspace；清理未确认期间仍有效。
+            this.index.claimWorkspace(sessionId, this.workspace.id);
             try {
                 await next.acquire();
             } catch (error) {
@@ -660,6 +671,21 @@ export class ChatService implements ChatServiceContract {
             );
         }
 
+        // workspaceId 优先于 ownership/路径：已知 Session 属于其他 workspace 时
+        // 直接拒绝，不进入索引占位或 ACP 激活。
+        const knownWorkspaceId = this.index.workspaceOf(sessionId);
+        if (
+            knownWorkspaceId !== undefined &&
+            knownWorkspaceId !== this.workspace.id
+        ) {
+            throw new SessionWorkspaceConflictError(
+                requestId,
+                sessionId,
+                this.workspace.id,
+                knownWorkspaceId,
+            );
+        }
+
         const previousPhase: "empty" | "ready" =
             observedPhase === "ready" ? "ready" : "empty";
         this.state.beginSwitch();
@@ -685,6 +711,18 @@ export class ChatService implements ChatServiceContract {
                 sessionId,
                 requestId,
             );
+            // 持久 Session 没有 workspace 元数据时回退路径校验；相对 cwd 无法
+            // 证明确实位于根内，同样拒绝。
+            if (
+                workspaceRelation(this.workspace.runtimePath, path) !== "within"
+            ) {
+                throw new SessionWorkspaceMismatchError(
+                    requestId,
+                    path,
+                    this.workspace.runtimePath,
+                );
+            }
+            this.index.claimWorkspace(sessionId, this.workspace.id);
             if (this.closingRequested) {
                 throw new ChatClosedError(
                     requestId,
@@ -820,12 +858,17 @@ export class ChatService implements ChatServiceContract {
                 chatId: this.id,
                 path,
                 agentConfig: this.agentConfig,
+                agentConfigJson: this.agentConfigJson,
                 sessionInit: this.sessionInit,
                 runtime: this.runtime,
+                runtimeEnv: this.runtimeEnv,
+                onRuntimeDiagnostic: this.onRuntimeDiagnostic,
+                payloadBudgets: this.payloadBudgets,
                 signal: controller.signal,
                 database: this.database,
                 lifecycle: this.lifecycleOptions,
-                acquireWasmRuntime: (signal) => this.acquireWasmRuntime(signal),
+                acquireWasmRuntime: (options) =>
+                    this.acquireWasmRuntime(options),
             });
         } catch (error) {
             this.startupControllers.delete(controller);

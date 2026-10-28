@@ -16,6 +16,9 @@ import {
 } from "./chat-fixtures";
 import { OwnershipProbe } from "./ownership-probe";
 
+/** 测试用 workspace 根；路径判断是纯字符串，不依赖真实目录。 */
+const TEST_WORKSPACE = { id: "ws-test", runtimePath: "/" };
+
 function setup(
     configure?: (port: FakePort, index: number) => void,
 ): {
@@ -28,7 +31,7 @@ function setup(
     const database = new FakeDatabase();
     const ports: FakePort[] = [];
     const options: ChatManagerInternalOptions = {
-        agentConfig: {},
+        store: { storage: {}, machineId: "test-machine" },
         database,
         kv: ownership,
         chatConfig: {
@@ -38,7 +41,7 @@ function setup(
                     throw new Error("ACP transport must not start");
                 },
             },
-            sessionInit: { path: "/workspace" },
+            session: {},
         },
         instanceFactory: () => {
             const port = new FakePort();
@@ -59,7 +62,7 @@ async function readyChat(
     setupValue: ReturnType<typeof setup>;
 }> {
     const setupValue = setup(configure);
-    const chat = setupValue.manager.createChat();
+    const chat = setupValue.manager.createChat({ workspace: TEST_WORKSPACE, agent: {} });
     await chat.execute(ChatUserAction.createNewSession());
     return { chat, port: setupValue.ports[0], setupValue };
 }
@@ -222,8 +225,8 @@ describe("control actions", () => {
             port.runningValue = true;
             port.pendingInteractionValue = 1;
         });
-        const chatA = setupValue.manager.createChat();
-        const chatB = setupValue.manager.createChat();
+        const chatA = setupValue.manager.createChat({ workspace: TEST_WORKSPACE, agent: {} });
+        const chatB = setupValue.manager.createChat({ workspace: TEST_WORKSPACE, agent: {} });
         await chatA.execute(ChatUserAction.createNewSession());
         await chatB.execute(ChatUserAction.createNewSession());        const [portA, portB] = setupValue.ports;
 
@@ -371,7 +374,7 @@ describe("facts and late views", () => {
                 ];
             }
         });
-        chat = setupValue.manager.createChat();
+        chat = setupValue.manager.createChat({ workspace: TEST_WORKSPACE, agent: {} });
         chat.subscribeFacts(early.observer);
         await chat.execute(ChatUserAction.createNewSession());
 

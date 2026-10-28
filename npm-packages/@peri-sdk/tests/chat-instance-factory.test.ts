@@ -8,50 +8,11 @@ import { ChatUserAction } from "../src/chat/action";
 import { createChatInstance } from "../src/chat/instance-factory";
 import { ChatManager } from "../src/chat/manager";
 import type { ChatInstanceContext } from "../src/chat/service-context";
-import type { JsonRpcNotification, Transport } from "../src/transport/types";
+import type { ChatFact } from "../src/contracts/chat";
+import type { WasmRuntimeAcquireOptions } from "../src/wasm/runtime-pool";
 import { FakeDatabase, directoryEntry } from "./chat-fixtures";
+import { TestTransport } from "./chat-transport-fixture";
 import { OwnershipProbe } from "./ownership-probe";
-
-class TestTransport implements Transport {
-    readonly requests: Array<{ method: string; params?: unknown }> = [];
-    closeCalls = 0;
-    closeError?: unknown;
-    private readonly listeners = new Set<(event: JsonRpcNotification) => void>();
-
-    async request<T>(method: string, params?: unknown): Promise<T> {
-        this.requests.push({ method, params });
-        if (method === "initialize") return { protocolVersion: 1 } as T;
-        if (method === "session/new") return { sessionId: "session-new" } as T;
-        if (method === "session/load") return { sessionId: (params as { sessionId: string }).sessionId } as T;
-        if (method === "session/input/snapshot") return { generation: "g1" } as T;
-        if (method === "session/close") return {} as T;
-        throw new Error(`Unexpected request: ${method}`);
-    }
-
-    async sendRequest<T>(method: string, params?: unknown): Promise<{ response: Promise<T> }> {
-        return { response: this.request<T>(method, params) };
-    }
-
-    async notify(): Promise<void> {}
-
-    subscribe(listener: (event: JsonRpcNotification) => void): () => void {
-        this.listeners.add(listener);
-        return () => this.listeners.delete(listener);
-    }
-
-    emit(notification: JsonRpcNotification): void {
-        for (const listener of this.listeners) listener(notification);
-    }
-
-    async *events(): AsyncIterable<JsonRpcNotification> {}
-
-    setRequestHandler(): void {}
-
-    async close(): Promise<void> {
-        this.closeCalls += 1;
-        if (this.closeError) throw this.closeError;
-    }
-}
 
 function context(
     overrides: Partial<ChatInstanceContext> = {},
@@ -60,6 +21,7 @@ function context(
         chatId: "chat-1",
         path: "/handle-path",
         agentConfig: {},
+        agentConfigJson: "{}",
         sessionInit: {},
         runtime: {
             kind: "transport",
@@ -121,14 +83,18 @@ describe("createChatInstance", () => {
         expect(transport.closeCalls).toBe(2);
     });
 
-    test("WASM runtime uses the lease transport and maps its close report", async () => {
+    test("WASM runtime uses the per-chat startup config and maps its close report", async () => {
         const transport = new TestTransport();
         let closed = 0;
-        let signal: AbortSignal | undefined;
+        let acquired: WasmRuntimeAcquireOptions | undefined;
+        const diagnostic = (): void => {};
         const instance = createChatInstance(context({
             runtime: { kind: "wasm" },
+            agentConfigJson: '{"cwd":"/runtime"}',
+            runtimeEnv: { PERI_FLAG: "1" },
+            onRuntimeDiagnostic: diagnostic,
             acquireWasmRuntime: async (value) => {
-                signal = value;
+                acquired = value;
                 return {
                     transport,
                     close: async () => {
@@ -140,7 +106,10 @@ describe("createChatInstance", () => {
         }));
 
         await instance.bindNew({ path: "/workspace" });
-        expect(signal?.aborted).toBe(false);
+        expect(acquired?.signal?.aborted).toBe(false);
+        expect(acquired?.configJson).toBe('{"cwd":"/runtime"}');
+        expect(acquired?.env).toEqual({ PERI_FLAG: "1" });
+        expect(acquired?.onDiagnostic).toBe(diagnostic);
         await instance.close();
 
         expect(closed).toBe(1);
@@ -166,6 +135,50 @@ describe("createChatInstance", () => {
         await instance.bindExisting("session-1");
         expect(database.getCalls).toEqual(["session-1"]);
         expect(paths).toEqual(["/persisted"]);
+        await instance.close();
+    });
+
+    test("payloadBudgets reach the PeriInstance payload store", async () => {
+        const transport = new TestTransport();
+        const facts: ChatFact[] = [];
+        const instance = createChatInstance(context({
+            runtime: { kind: "transport", factory: () => transport },
+            payloadBudgets: {
+                inlineBytes: 8,
+                externalBytes: 1_000_000,
+                maxPayloadBytes: 1_000_000,
+            },
+        }));
+        instance.attach((fact) => facts.push(fact));
+        await instance.bindNew({ path: "/workspace" });
+
+        transport.emit({
+            jsonrpc: "2.0",
+            method: "session/update",
+            params: {
+                update: {
+                    sessionUpdate: "tool_call",
+                    toolCallId: "call-1",
+                    title: "large input",
+                    rawInput: { text: "x".repeat(200) },
+                },
+            },
+        });
+
+        const notice = facts.find(
+            (fact): fact is Extract<ChatFact, { kind: "notice" }> =>
+                fact.kind === "notice",
+        );
+        const update = (
+            notice!.notification.params as {
+                update: { rawInput?: unknown; argumentsRef?: { id: string; bytes: number } };
+            }
+        ).update;
+        expect(update.rawInput).toBeUndefined();
+        expect(update.argumentsRef).toBeDefined();
+
+        const payload = await instance.readPayload(update.argumentsRef!);
+        expect(JSON.parse(payload.json)).toEqual({ text: "x".repeat(200) });
         await instance.close();
     });
 
@@ -196,7 +209,7 @@ describe("default factory wiring", () => {
         const transport = new TestTransport();
         const paths: string[] = [];
         const manager = new ChatManager({
-            agentConfig: {},
+            store: { storage: {}, machineId: "test-machine" },
             database: new FakeDatabase(),
             kv: new OwnershipProbe(),
             chatConfig: {
@@ -207,10 +220,13 @@ describe("default factory wiring", () => {
                         return transport;
                     },
                 },
-                sessionInit: { path: "/workspace" },
+                session: {},
             },
         });
-        const chat = manager.createChat();
+        const chat = manager.createChat({
+            workspace: { id: "ws-factory", runtimePath: "/workspace" },
+            agent: {},
+        });
 
         const ready = await chat.execute(ChatUserAction.createNewSession({}));
         expect(ready.sessionId).toBe("session-new");
@@ -226,15 +242,18 @@ describe("default factory wiring", () => {
     test("ChatService reads real PeriInstance payloads and reports integrity mismatches", async () => {
         const transport = new TestTransport();
         const manager = new ChatManager({
-            agentConfig: {},
+            store: { storage: {}, machineId: "test-machine" },
             database: new FakeDatabase(),
             kv: new OwnershipProbe(),
             chatConfig: {
                 runtime: { kind: "transport", factory: () => transport },
-                sessionInit: { path: "/workspace" },
+                session: {},
             },
         });
-        const chat = manager.createChat();
+        const chat = manager.createChat({
+            workspace: { id: "ws-factory", runtimePath: "/workspace" },
+            agent: {},
+        });
         const notices: string[] = [];
         chat.subscribeFacts({
             onBinding(_target, replay) {

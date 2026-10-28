@@ -1,3 +1,5 @@
+import { WORKSPACE_MISMATCH } from "../workspace/errors";
+
 /**
  * Chat 动作错误契约（Phase 0 冻结）。
  *
@@ -64,6 +66,53 @@ export class SessionBindingConflictError extends ChatActionError {
     constructor(requestId: string, message: string, readonly ownerChatId?: string) {
         super(requestId, "binding_conflict", message, "rejected");
         this.name = "SessionBindingConflictError";
+    }
+}
+
+/**
+ * Session 的 cwd 不在当前 Chat 的 workspace root 之下。
+ *
+ * 用于 `change_session` 的跨 workspace 护栏，也用于新会话 path 超出
+ * `agent.cwd` 的配置错误；动作未生效，调用方可修正后重试。
+ */
+export class SessionWorkspaceMismatchError extends ChatActionError {
+    constructor(
+        requestId: string,
+        readonly sessionPath: string,
+        readonly workspaceRoot: string,
+        options?: { cause?: unknown },
+    ) {
+        super(
+            requestId,
+            WORKSPACE_MISMATCH,
+            `Session path "${sessionPath}" is outside the chat workspace root "${workspaceRoot}"`,
+            "rejected",
+            options,
+        );
+        this.name = "SessionWorkspaceMismatchError";
+    }
+}
+
+/**
+ * Session 已记录属于另一个 workspace。
+ *
+ * 内存映射只在本 Manager 内生效；持久 Session 没有 workspace 元数据时，
+ * 由 `SessionWorkspaceMismatchError` 的路径校验兜底。动作未生效。
+ */
+export class SessionWorkspaceConflictError extends ChatActionError {
+    constructor(
+        requestId: string,
+        readonly sessionId: string,
+        readonly workspaceId: string,
+        readonly sessionWorkspaceId: string,
+    ) {
+        super(
+            requestId,
+            WORKSPACE_MISMATCH,
+            `Session "${sessionId}" belongs to workspace "${sessionWorkspaceId}", not "${workspaceId}"`,
+            "rejected",
+        );
+        this.name = "SessionWorkspaceConflictError";
     }
 }
 

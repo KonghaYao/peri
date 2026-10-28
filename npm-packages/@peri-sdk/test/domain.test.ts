@@ -10,6 +10,9 @@ import {
 } from "../tests/chat-fixtures";
 import { OwnershipProbe } from "../tests/ownership-probe";
 
+/** 测试用 workspace 根；路径判断是纯字符串，不依赖真实目录。 */
+const TEST_WORKSPACE = { id: "ws-test", runtimePath: "/" };
+
 interface Harness {
     manager: ChatManager;
     ownership: OwnershipProbe;
@@ -19,14 +22,13 @@ interface Harness {
 
 function harness(options: {
     ownership?: OwnershipProbe;
-    path?: string;
     database?: FakeDatabase;
 } = {}): Harness {
     const ownership = options.ownership ?? new OwnershipProbe();
     const database = options.database ?? new FakeDatabase();
     const ports: FakePort[] = [];
     const managerOptions: ChatManagerInternalOptions = {
-        agentConfig: { model: "test" },
+        store: { storage: {}, machineId: "test-machine" },
         database,
         kv: ownership,
         chatConfig: {
@@ -36,7 +38,7 @@ function harness(options: {
                     throw new Error("ACP transport must not start");
                 },
             },
-            sessionInit: options.path ? { path: options.path } : {},
+            session: {},
         },
         instanceFactory: () => {
             const port = new FakePort();
@@ -50,7 +52,7 @@ function harness(options: {
 describe("ChatManager lifecycle", () => {
     test("declaration is synchronous and starts nothing", () => {
         const { manager, ownership, database, ports } = harness();
-        const chat = manager.createChat({ path: "/workspace" });
+        const chat = manager.createChat({ workspace: TEST_WORKSPACE, agent: {} });
 
         expect(chat.id).toBeTruthy();
         expect(manager.getChat(chat.id)).toBe(chat);
@@ -78,7 +80,7 @@ describe("ChatManager lifecycle", () => {
     test("loading a Session never republishes or dispatches old input", async () => {
         const { manager, database, ports } = harness();
         database.seed(directoryEntry("session-1"));
-        const chat = manager.createChat();
+        const chat = manager.createChat({ workspace: TEST_WORKSPACE, agent: {} });
 
         await chat.execute(ChatUserAction.changeSessionTo("session-1"));
 
@@ -96,7 +98,11 @@ describe("ChatManager lifecycle", () => {
 
     test("new Sessions use the handle path and acquire the returned identity", async () => {
         const { manager, ownership } = harness();
-        const chat = manager.createChat({ path: "/custom" });
+        const chat = manager.createChat({
+            workspace: { id: "ws-custom", runtimePath: "/" },
+            sessionPath: "custom",
+            agent: {},
+        });
 
         const ready = await chat.execute(
             ChatUserAction.createNewSession({ title: "Untitled" }),
@@ -110,7 +116,7 @@ describe("ChatManager lifecycle", () => {
     test("close failure retains the handle and ownership; retry succeeds", async () => {
         const { manager, ownership, database, ports } = harness();
         database.seed(directoryEntry("session-1"));
-        const chat = manager.createChat();
+        const chat = manager.createChat({ workspace: TEST_WORKSPACE, agent: {} });
         await chat.execute(ChatUserAction.changeSessionTo("session-1"));
         ports[0].closeError = new Error("termination unconfirmed");
 
@@ -130,12 +136,12 @@ describe("ChatManager lifecycle", () => {
     test("shutdown closes handles after stopping admission", async () => {
         const { manager, database, ports } = harness();
         database.seed(directoryEntry("session-1"));
-        const chat = manager.createChat();
+        const chat = manager.createChat({ workspace: TEST_WORKSPACE, agent: {} });
         await chat.execute(ChatUserAction.changeSessionTo("session-1"));
 
         await manager.shutdown();
 
-        expect(() => manager.createChat()).toThrow("shut down");
+        expect(() => manager.createChat({ workspace: TEST_WORKSPACE, agent: {} })).toThrow("shut down");
         expect(manager.getChat(chat.id)).toBeUndefined();
         expect(ports[0].closeCalls).toBe(1);
         await manager.shutdown();
@@ -151,8 +157,8 @@ describe("Session ownership", () => {
         database.seed(directoryEntry("session-1"));
         const first = harness({ ownership, database });
         const second = harness({ ownership, database });
-        const firstChat = first.manager.createChat();
-        const secondChat = second.manager.createChat();
+        const firstChat = first.manager.createChat({ workspace: TEST_WORKSPACE, agent: {} });
+        const secondChat = second.manager.createChat({ workspace: TEST_WORKSPACE, agent: {} });
 
         await firstChat.execute(
             ChatUserAction.changeSessionTo("session-1"),
@@ -171,11 +177,18 @@ describe("Session ownership", () => {
     test("different handle paths cannot bypass SessionOwnership", async () => {
         const ownership = new OwnershipProbe();
         const database = new FakeDatabase();
-        database.seed(directoryEntry("session-1", "/persisted"));
-        const first = harness({ ownership, database, path: "/first" });
-        const second = harness({ ownership, database, path: "/second" });
-        const firstChat = first.manager.createChat({ path: "/first" });
-        const secondChat = second.manager.createChat({ path: "/second" });
+        // 两个句柄路径不同但都包含持久 cwd，确保本用例只验证 ownership 冲突。
+        database.seed(directoryEntry("session-1", "/workspace/persisted"));
+        const first = harness({ ownership, database });
+        const second = harness({ ownership, database });
+        const firstChat = first.manager.createChat({
+            workspace: { id: "ws-a", runtimePath: "/workspace" },
+            agent: {},
+        });
+        const secondChat = second.manager.createChat({
+            workspace: { id: "ws-b", runtimePath: "/" },
+            agent: {},
+        });
 
         await firstChat.execute(
             ChatUserAction.changeSessionTo("session-1"),

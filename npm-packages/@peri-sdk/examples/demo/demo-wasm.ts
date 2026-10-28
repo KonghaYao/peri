@@ -80,9 +80,7 @@ const config = {
 const machineId = Bun.env.PERI_WASM_MACHINE_ID ?? "00000000-0000-4000-8000-000000000001";
 
 const manager = new ChatManager({
-    agentConfig: {
-        cwd: workspace,
-        settings: config,
+    store: {
         storage: database.storageConfig,
         machineId,
     },
@@ -92,19 +90,14 @@ const manager = new ChatManager({
         // transport 入口按 path 装配独立运行后端；ChatManager 不持有 WASM 运行后端池。
         runtime: {
             kind: "transport",
-            factory: (path) => WasmAcpTransport.start({
+            factory: (_path, options) => WasmAcpTransport.start({
                 moduleUrl: wasmModuleUrl,
                 env: wasmEnv,
-                configJson: JSON.stringify({
-                    cwd: path,
-                    settings: config,
-                    storage: database.storageConfig,
-                    machineId,
-                }),
+                // Manager 已把 store 注入每个 Chat 的内部 agentConfig JSON。
+                configJson: JSON.stringify(options?.agentConfig ?? {}),
             }),
         },
-        sessionInit: {
-            path: workspace,
+        session: {
             instructions: "你是 Peri。请用清晰、简洁的中文帮助用户完成任务。",
             mcpServers: {
                 demo: { type: "http", url: "https://demo-day.mcp.cloudflare.com/mcp" },
@@ -118,6 +111,7 @@ const demo = createDemoApp({
     manager,
     database,
     workspace,
+    agent: { cwd: workspace, settings: config },
     ...(Bun.env.PERI_WORKSPACE_MCP_URL ? { workspaceMcpUrl: Bun.env.PERI_WORKSPACE_MCP_URL } : {}),
     html,
     sseClientJs,

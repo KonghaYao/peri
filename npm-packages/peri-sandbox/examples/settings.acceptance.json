@@ -1,0 +1,64 @@
+{
+  "sandboxesRoot": "/srv/peri/sandboxes",
+  "periPath": "/opt/peri-runtime/bin/peri",
+  "periSha256": "323a8e491a26e71be93a4e129ef60b18c7a53098b7bf252a5f309affe3af36c1",
+  "defaultProfile": "workspace-default",
+  "profiles": {
+    "workspace-default": {
+      "allowedDomains": [],
+      "runtimeReadPaths": [
+        "/usr",
+        "/opt/peri-runtime",
+        "/etc/ssl/certs",
+        "/etc/ld.so.cache",
+        "/etc/resolv.conf",
+        "/etc/hosts"
+      ],
+      "memoryMax": "1G",
+      "tasksMax": 128,
+      "cpuQuota": "100%"
+    },
+    "workspace-egress": {
+      "allowedDomains": ["example.com"],
+      "runtimeReadPaths": [
+        "/usr",
+        "/opt/peri-runtime",
+        "/etc/ssl/certs",
+        "/etc/ld.so.cache",
+        "/etc/resolv.conf",
+        "/etc/hosts"
+      ],
+      "memoryMax": "1G",
+      "tasksMax": 128,
+      "cpuQuota": "100%"
+    },
+    "workspace-limited": {
+      "allowedDomains": [],
+      "runtimeReadPaths": [
+        "/usr",
+        "/opt/peri-runtime",
+        "/etc/ssl/certs",
+        "/etc/ld.so.cache",
+        "/etc/resolv.conf",
+        "/etc/hosts"
+      ],
+      "memoryMax": "512M",
+      "tasksMax": 32,
+      "cpuQuota": "50%"
+    },
+    "workspace-memory": {
+      "allowedDomains": [],
+      "runtimeReadPaths": [
+        "/usr",
+        "/opt/peri-runtime",
+        "/etc/ssl/certs",
+        "/etc/ld.so.cache",
+        "/etc/resolv.conf",
+        "/etc/hosts"
+      ],
+      "memoryMax": "512M",
+      "tasksMax": 128,
+      "cpuQuota": "50%"
+    }
+  }
+}

@@ -79,7 +79,7 @@ Session。读取历史可以有多个 `ChatView`/`ChatReplica` 观察者，但�
 | ChatView / ChatReplica | 服务端事实到 Yjs 的投影与浏览器只读副本。 | View 由 Chat 所有者释放；Replica 由浏览器释放；断开不停止执行。 |
 | Workspace MCP | Peri 实现的文件、终端、技能等工具与资源服务；使用方部署在 Workspace 环境中，SDK 示例也可连接普通子进程。 | 可以独立于某次 Chat 运行。 |
 
-`ChatManager` 的共享依赖（agentConfig 纯配置快照、数据库/目录、SessionOwnership、runtime 配置）由外部注入；
+`ChatManager` 的共享依赖（`store` 的 storage/machineId 快照、数据库/目录、SessionOwnership、runtime 配置）由外部注入；
 外部服务实例默认借用。每个 Chat 独立持有当前绑定、加载状态、输入回执、交互、历史进度、MCP 桥接与
 运行后端所有权。`ChatView` 独立持有 Yjs 文档、投影接入、逻辑同步连接与发送队列。
 

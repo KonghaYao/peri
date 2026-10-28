@@ -27,7 +27,7 @@ export class TursoStorage implements ChatDatabase {
   ) {}
 
   /**
-   * Peri 写侧启动配置：只含连接字段，可直接作为 `agentConfig.storage`。
+   * Peri 写侧启动配置：只含连接字段，可直接作为 `store.storage`。
    * 目录读取的 legacyCwd/currentCwd 不属于 Peri 启动对象，故不包含。
    */
   get storageConfig(): { readonly url: string; readonly authToken?: string } {

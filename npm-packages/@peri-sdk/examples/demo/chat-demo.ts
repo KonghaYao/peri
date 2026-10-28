@@ -13,6 +13,7 @@ import {
     ChatView,
     PayloadReadError,
     parseInteractionAnswer,
+    type ChatAgentConfig,
     type ChatDatabase,
     type ChatService,
     type ChatYjsChannel,
@@ -112,6 +113,8 @@ export interface DemoAppOptions {
     manager: ChatManager;
     database: ChatDatabase;
     workspace: string;
+    /** 每个 Chat 的运行配置；store 由 Manager 注入。 */
+    agent: ChatAgentConfig;
     workspaceMcpUrl?: string;
     html: string;
     sseClientJs: string;
@@ -127,7 +130,9 @@ export function createDemoApp(options: DemoAppOptions): {
     app: Hono;
     close(): Promise<void>;
 } {
-    const { manager, database, workspace } = options;
+    const { manager, database, workspace, agent } = options;
+    // 本地 demo 的宿主路径即运行时路径；远程 sandbox 可省略 hostPath。
+    const workspaceRef = { id: workspace, hostPath: workspace, runtimePath: workspace };
     const sessions = new Map<string, Promise<OpenSession>>();
     const creationRequests = new Map<string, Promise<OpenSession>>();
     const connections = new Map<string, SseChannel>();
@@ -141,7 +146,7 @@ export function createDemoApp(options: DemoAppOptions): {
         const opening = (async (): Promise<OpenSession> => {
             if (sessionId !== null && !(await database.getSession(sessionId)))
                 throw new DemoSessionNotFoundError();
-            const chat = manager.createChat({ path: workspace });
+            const chat = manager.createChat({ workspace: workspaceRef, agent });
             const view = new ChatView(chat);
             try {
                 const ready = sessionId === null

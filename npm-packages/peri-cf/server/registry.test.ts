@@ -2,13 +2,17 @@ import { describe, expect, test } from "bun:test";
 import {
   ChatCloseIncompleteError,
   ChatViewRegistry,
+  type ChatAgentConfig,
   type ChatBindingTarget,
+  type ChatCreateOptions,
   type ChatFactObserver,
   type ChatFactSource,
   type ChatManagerContract,
   type ChatServiceContract,
   type ChatSessionDirectoryEntry,
   type ChatYjsChannel,
+  type WorkspaceRef,
+  WorkspaceMismatchError,
 } from "@peri-code/sdk";
 import { ChatRegistry } from "./registry";
 
@@ -16,6 +20,18 @@ const TARGET: ChatBindingTarget = {
   chatId: "chat-1",
   sessionId: "session-1",
   bindingRevision: 1,
+};
+
+/** 服务唯一工作区；与会话 cwd 的 `/workspace` 根一致。 */
+const WORKSPACE: WorkspaceRef = {
+  id: "default",
+  hostPath: "/workspace",
+  runtimePath: "/workspace",
+};
+
+/** 进程级 agent 模板：注册表原样交给 SDK，不在本地合并。 */
+const AGENT: ChatAgentConfig = {
+  settings: { config: { active_alias: "sonnet" } },
 };
 
 class FakeFactSource implements ChatFactSource {
@@ -54,14 +70,16 @@ function stubChat(
 
 class FakeChatManager implements ChatManagerContract {
   readonly chats = new Map<string, ChatServiceContract>();
+  readonly createOptions: ChatCreateOptions[] = [];
   closeError: unknown;
   shutdownError: unknown;
   private created = 0;
 
   constructor(readonly events: string[] = []) {}
 
-  createChat(options?: { path?: string }): ChatServiceContract {
-    this.events.push(`port.createChat:${options?.path ?? ""}`);
+  createChat(options: ChatCreateOptions): ChatServiceContract {
+    this.createOptions.push(options);
+    this.events.push(`port.createChat:${options.sessionPath ?? ""}`);
     const chat = stubChat(`chat-${++this.created}`);
     this.chats.set(chat.id, chat);
     return chat;
@@ -137,11 +155,43 @@ function hosted(options: {
 } = {}) {
   const events = options.events ?? [];
   const chats = options.chats ?? new FakeChatManager(events);
-  const registry = new ChatRegistry(chats);
+  const registry = new ChatRegistry(chats, WORKSPACE, AGENT);
   return { registry, chats, views: registry.views, events };
 }
 
 describe("ChatRegistry", () => {
+  test("createChat 注入 workspace、agent，并把绝对 path 转为相对 sessionPath", () => {
+    const events: string[] = [];
+    const chats = new FakeChatManager(events);
+    const { registry } = hosted({ events, chats });
+
+    expect(registry.createChat("/workspace/").id).toBe("chat-1");
+    expect(registry.createChat("/workspace/project").id).toBe("chat-2");
+    expect(registry.createChat().id).toBe("chat-3");
+
+    expect(events).toEqual([
+      "port.createChat:",
+      "port.createChat:project",
+      "port.createChat:",
+    ]);
+    expect(chats.createOptions).toHaveLength(3);
+    // 同一个模板对象跨 Chat 复用；SDK 负责逐 Chat 深拷贝与注入 store。
+    for (const options of chats.createOptions) {
+      expect(options.workspace).toBe(WORKSPACE);
+      expect(options.agent).toBe(AGENT);
+    }
+    expect(chats.createOptions.map((options) => options.sessionPath))
+      .toEqual(["", "project", ""]);
+  });
+
+  test("createChat 拒绝工作区外的绝对 path", () => {
+    const { registry } = hosted();
+
+    expect(() => registry.createChat("/workspace-other"))
+      .toThrow(WorkspaceMismatchError);
+    expect(() => registry.createChat("/tmp/project"))
+      .toThrow(WorkspaceMismatchError);
+  });
   test("closeChat 先关闭端口句柄，再释放 View", async () => {
     const events: string[] = [];
     const { registry, chats, views } = hosted({ events });

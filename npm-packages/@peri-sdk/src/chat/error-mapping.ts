@@ -5,6 +5,7 @@ import {
     ChatNotReadyError,
     SessionBindingConflictError,
     SessionCreationError,
+    SessionWorkspaceMismatchError,
 } from "./errors";
 
 export function messageOf(error: unknown): string {
@@ -29,6 +30,14 @@ export function withRequestId(error: unknown, requestId: string): unknown {
             requestId,
             error.message,
             error.ownerChatId,
+        );
+    }
+    if (error instanceof SessionWorkspaceMismatchError) {
+        return new SessionWorkspaceMismatchError(
+            requestId,
+            error.sessionPath,
+            error.workspaceRoot,
+            { cause: error },
         );
     }
     if (error instanceof ChatBusyError) {

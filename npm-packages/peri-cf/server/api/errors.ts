@@ -7,6 +7,7 @@ import {
   PayloadReadError,
   SessionBindingConflictError,
   SessionCreationError,
+  SessionWorkspaceMismatchError,
   type ChatDisposition,
 } from "@peri-code/sdk";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -39,6 +40,7 @@ function statusFor(error: ChatActionError): ContentfulStatusCode {
     error instanceof ChatBusyError
     || error instanceof ChatNotReadyError
     || error instanceof SessionBindingConflictError
+    || error instanceof SessionWorkspaceMismatchError
   ) return 409;
   if (error instanceof ChatClosedError) return 503;
   // session/new 已取得身份但后续失败：调用方必须先核对，不能盲目重建。
@@ -47,6 +49,7 @@ function statusFor(error: ChatActionError): ContentfulStatusCode {
     case "invalid_action": return 400;
     case "busy":
     case "binding_conflict":
+    case "workspace_mismatch":
     case "not_ready": return 409;
     case "closed": return 503;
     default: return 500;
@@ -56,7 +59,7 @@ function statusFor(error: ChatActionError): ContentfulStatusCode {
 /**
  * Action 错误映射。
  *
- * `invalid_action` → 400；busy/binding_conflict/not_ready → 409；closed → 503；
+ * `invalid_action` → 400；busy/binding_conflict/workspace_mismatch/not_ready → 409；closed → 503；
  * 加载路径 ownership 读/写故障（`claim_failed`）、session 创建失败
  * （`session_creation_failed`，含 stage `claim`）与 unknown/internal → 500。
  * 未知错误统一 unknown，绝不声称动作未生效。

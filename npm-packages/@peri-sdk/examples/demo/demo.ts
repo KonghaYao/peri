@@ -79,9 +79,7 @@ const config = {
 } satisfies PeriConfig;
 
 const manager = new ChatManager({
-    agentConfig: {
-        cwd: workspace,
-        settings: config,
+    store: {
         storage: database.storageConfig,
         // 本地 demo 固定 UUID；生产必须持久化并复用，不要每次启动随机。
         machineId: Bun.env.PERI_WASM_MACHINE_ID ?? "00000000-0000-4000-8000-000000000001",
@@ -90,8 +88,7 @@ const manager = new ChatManager({
     kv: new DemoKvStorage(),
     chatConfig: {
         runtime: { kind: "wasm", moduleUrl: wasmModuleUrl, env: wasmEnv },
-        sessionInit: {
-            path: workspace,
+        session: {
             instructions: "你是 Peri。请用清晰、简洁的中文帮助用户完成任务。",
             mcpServers: {
                 demo: { type: "http", url: "https://demo-day.mcp.cloudflare.com/mcp" },
@@ -105,6 +102,7 @@ const demo = createDemoApp({
     manager,
     database,
     workspace,
+    agent: { cwd: workspace, settings: config },
     workspaceMcpUrl,
     html,
     sseClientJs,

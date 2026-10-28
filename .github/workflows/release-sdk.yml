@@ -135,14 +135,15 @@ jobs:
               run: |
                   set -euo pipefail
                   for file in \
-                      dist/index.js dist/portable.js dist/wasm.js dist/wasm-node.js dist/view.js \
+                      dist/index.js dist/portable.js dist/wasm.js dist/wasm-node.js dist/view.js dist/sandbox.js \
                       dist/entries/index.d.ts dist/entries/portable.d.ts dist/entries/wasm.d.ts \
-                      dist/entries/wasm-node.d.ts dist/entries/view.d.ts \
+                      dist/entries/wasm-node.d.ts dist/entries/view.d.ts dist/entries/sandbox.d.ts \
                       dist/wasm/peri-wasm.js dist/wasm/peri_wasm.wasm; do
                       test -s "${file}" || { echo "::error::missing build artifact: ${file}"; exit 1; }
                   done
                   test -n "$(find dist/wasm/snippets -type f -print -quit)"
                   bun -e 'const sdk = await import("./dist/index.js"); if (typeof sdk.ChatManager !== "function") throw new Error("ChatManager missing from dist/index.js")'
+                  bun -e 'const sdk = await import("./dist/sandbox.js"); if (typeof sdk.SandboxManager !== "function") throw new Error("SandboxManager missing from dist/sandbox.js")'
 
             # SDK 的 wasm-acp-integration 测试需要真实 sqld。本地由 SDK 的 mise.toml 提供；
             # Linux runner 这里下载同版本二进制，并用 PERI_TEST_SQLD_BIN 指向它。
@@ -188,6 +189,8 @@ jobs:
                   grep -qx 'package/README.md' sdk-package/contents.txt
                   grep -qx 'package/LICENSE' sdk-package/contents.txt
                   grep -qx 'package/dist/index.js' sdk-package/contents.txt
+                  grep -qx 'package/dist/sandbox.js' sdk-package/contents.txt
+                  grep -qx 'package/dist/entries/sandbox.d.ts' sdk-package/contents.txt
                   grep -qx 'package/dist/wasm/peri_wasm.wasm' sdk-package/contents.txt
                   if grep -qE '^package/(src|tests?|examples|node_modules)/' sdk-package/contents.txt; then
                       echo "::error::unexpected files in package tarball"
