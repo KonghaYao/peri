@@ -34,6 +34,10 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 | `session/list` | `{ cwd? }` | `{ sessions: SessionInfo[] }` | 列出会话（可按 cwd 过滤） |
 | `session/rename` | `{ sessionId, title }` | `{ sessionId, title }` | 重命名会话并持久化标题 |
 
+会话级 `mcpServers` 条目可通过 `_meta["peri.subscriptions"]` 声明 `subscriptions/listen`，
+形状与 `.mcp.json` 的 `subscriptions` 相同；HTTP 与 stdio 生效，非法值返回 `-32602`，
+`type: "acp"` 暂不支持。
+
 会话工作区扩展由 initialize 的 `peri.sessionWorkspaceV1: true` 显式协商：
 
 - `peri/session_context` 接受互斥的 `{ cwd }` 或 `{ sessionId }`，返回 `version: 1`、
