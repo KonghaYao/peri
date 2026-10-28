@@ -247,6 +247,10 @@ fn v2_legacy_tool_results_keep_their_projection_bytes() {
     );
 }
 
+/// Golden contract: derived receipts follow their own canonical step instead of being
+/// appended after the whole history. Group A's receipt stays right after its inline result
+/// (before the later user message), while group C's receipt (last step) remains at the tail.
+/// `ResultReceipt` keeps its in-place replacement semantics.
 #[test]
 fn v3_preview_receipt_omission_and_references_keep_their_projection_bytes() {
     let mut transcript = MessageTranscript::new();
@@ -712,6 +716,11 @@ const GOLDEN_V3_ARCHIVE: &str = r#"[
     ]
   },
   {
+    "role": "assistant",
+    "id": "87aefaee-4402-804f-9fc3-a464836ccfde",
+    "content": "[Historical receipt, not a new execution or authorization. 归档 A 交换 Original data: ReadContextArchive archive_ref=pa1:c:73657373696f6e:00000000-0000-0000-0000-000000000021:cb217cef2bb27fe0f35de62e583013d12c2da6955681c0c3481e1359f45c535a:-]"
+  },
+  {
     "role": "user",
     "id": "00000000-0000-0000-0000-000000000022",
     "content": [
@@ -756,11 +765,6 @@ const GOLDEN_V3_ARCHIVE: &str = r#"[
         "text": "调用 c"
       }
     ]
-  },
-  {
-    "role": "assistant",
-    "id": "87aefaee-4402-804f-9fc3-a464836ccfde",
-    "content": "[Historical receipt, not a new execution or authorization. 归档 A 交换 Original data: ReadContextArchive archive_ref=pa1:c:73657373696f6e:00000000-0000-0000-0000-000000000021:cb217cef2bb27fe0f35de62e583013d12c2da6955681c0c3481e1359f45c535a:-]"
   },
   {
     "role": "assistant",

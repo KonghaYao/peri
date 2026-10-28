@@ -27,6 +27,29 @@ fn make_context_with_observe() -> (StageContext, EventHandles) {
 }
 
 fn append_compactable_history(ctx: &StageContext) {
+    // 8 轮 × 24k 字符 ≈ 48k token 的可回收正文：足以跨过 200k 窗口的 20k 净收益门槛，
+    // 同时仍低于 45% 尽力目标，便于观察“确实提交一次 Micro”的路径。
+    let long_output = "x".repeat(24_000);
+    let mut transcript = ctx.session.transcript.write();
+    for i in 0..8 {
+        transcript.append(BaseMessage::human(MessageContent::text(format!("q {}", i))));
+        transcript.append(BaseMessage::ai_with_tool_calls(
+            MessageContent::text(""),
+            vec![ToolCallRequest::new(
+                format!("c_{}", i),
+                "Bash",
+                serde_json::json!({}),
+            )],
+        ));
+        transcript.append(BaseMessage::tool_result(
+            format!("c_{}", i),
+            MessageContent::text(&long_output),
+        ));
+    }
+}
+
+/// 低于 10% 净收益门槛的历史：进入 Micro 区间后必须延后，而不是提交低收益压缩。
+fn append_low_gain_history(ctx: &StageContext) {
     let long_output = "x".repeat(2_000);
     let mut transcript = ctx.session.transcript.write();
     for i in 0..8 {
@@ -118,8 +141,9 @@ fn observe_events(handles: &mut EventHandles) -> Vec<ObserveEvent> {
 }
 
 #[tokio::test]
-async fn test_micro_applied_then_full_failure_does_not_reset_token_tracker() {
-    // 高压力下先应用 Micro，随后无 compact LLM 的 Full 失败。
+async fn test_full_failure_after_admission_does_not_commit_micro_or_reset_tracker() {
+    // 新契约：达到 Full 条件但收益不足时直接 Full；Full 失败不得留下本轮 Micro，
+    // 也不得 reset 真实 usage。
     let mut ctx = make_context();
     let long_output = "x".repeat(2_000);
     {
@@ -164,7 +188,7 @@ async fn test_micro_applied_then_full_failure_does_not_reset_token_tracker() {
 
     assert!(matches!(error, crate::error::AgentError::CompactNoLlm));
     assert!(
-        ctx.session.transcript.read().entries().iter().any(|entry| {
+        !ctx.session.transcript.read().entries().iter().any(|entry| {
             ctx.session
                 .transcript
                 .read()
@@ -172,18 +196,18 @@ async fn test_micro_applied_then_full_failure_does_not_reset_token_tracker() {
                 .projection
                 .is_some()
         }),
-        "Full 失败后必须保留已应用的 Micro/Smart projection"
+        "Full 失败前不得留下本轮 Micro 的隐藏提交"
     );
     assert_eq!(
         token_tracker.read().estimated_context_tokens(),
         Some(196_000),
-        "Full 失败后不得将已应用 Micro 伪装为 Full completion 并 reset token tracker"
+        "Full 失败后不得 reset token tracker"
     );
 }
 
 #[tokio::test]
-async fn test_compact_stage_smart_applied_then_full_failure_stops_without_tracker_reset() {
-    // 高压力下先应用 Smart，随后无 compact LLM 的 Full 失败。
+async fn test_compact_stage_smart_uses_same_admission_and_stops_without_tracker_reset() {
+    // 新契约：Smart 打开时复用同一收益准入；高压 Full 失败前不得先写 Smart。
     let mut ctx = make_context();
     let long_output = "x".repeat(2_000);
     {
@@ -229,7 +253,7 @@ async fn test_compact_stage_smart_applied_then_full_failure_stops_without_tracke
 
     assert!(matches!(error, crate::error::AgentError::CompactNoLlm));
     assert!(
-        ctx.session.transcript.read().entries().iter().any(|entry| {
+        !ctx.session.transcript.read().entries().iter().any(|entry| {
             ctx.session
                 .transcript
                 .read()
@@ -237,12 +261,12 @@ async fn test_compact_stage_smart_applied_then_full_failure_stops_without_tracke
                 .projection
                 .is_some()
         }),
-        "Full 失败后必须保留已应用的 Micro/Smart projection"
+        "Full 失败前不得留下 Smart 的投影写入"
     );
     assert_eq!(
         token_tracker.read().estimated_context_tokens(),
         Some(196_000),
-        "Full 失败后不得将已应用 Smart 伪装为 Full completion 并 reset token tracker"
+        "Full 失败后不得 reset token tracker"
     );
 }
 
@@ -432,7 +456,8 @@ async fn test_compact_stage_failure_limit_emits_no_messages_compacted() {
 }
 
 #[tokio::test]
-async fn test_compact_stage_applied_mixed_emits_one_messages_compacted_with_snapshot() {
+async fn test_micro_success_does_not_reset_provider_usage() {
+    // Micro 提交只改变投影；真实 provider usage 必须保持，不能伪造预算恢复。
     let (mut ctx, mut handles) = make_context_with_observe();
     append_compactable_history(&ctx);
     let _bound = confirm_fixture_exposure(&ctx).await;
@@ -442,23 +467,81 @@ async fn test_compact_stage_applied_mixed_emits_one_messages_compacted_with_snap
         ..Default::default()
     });
     ctx.compact.token_tracker.write().accumulate(&TokenUsage {
-        input_tokens: 196_000,
+        input_tokens: 160_000,
+        output_tokens: 0,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+    });
+    let token_tracker = ctx.compact.token_tracker.clone();
+
+    let output = run_compact(CompactInput {
+        context: ctx.clone(),
+        has_tool_calls: true,
+    })
+    .await
+    .unwrap();
+
+    assert!(output.compacted, "足量收益应提交一次 Micro");
+    assert_eq!(
+        token_tracker.read().estimated_context_tokens(),
+        Some(160_000),
+        "Micro 成功后不得 reset 真实 usage"
+    );
+    let events = observe_events(&mut handles);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ObserveEvent::MessagesCompacted { .. }))
+            .count(),
+        1,
+        "确有变更时才发成功事件"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ObserveEvent::CompactEnded { .. }))
+            .count(),
+        0,
+        "成功路径不额外发无变更结束事件"
+    );
+}
+
+#[tokio::test]
+async fn test_compact_stage_deferred_emits_paired_end_without_completion() {
+    // 新契约：进入 Micro 区间但净收益不足时主动延后。
+    // 必须闭合 CompactStarted，携带原因与 G/M，且不产生 MessagesCompacted、不写入。
+    let (mut ctx, mut handles) = make_context_with_observe();
+    append_low_gain_history(&ctx);
+    let _bound = confirm_fixture_exposure(&ctx).await;
+    ctx.compact.context_budget = Some(ContextBudget::new(200_000));
+    ctx.compact.compact_config = Some(CompactConfig {
+        micro_compact_stale_steps: 1,
+        ..Default::default()
+    });
+    ctx.compact.token_tracker.write().accumulate(&TokenUsage {
+        input_tokens: 160_000,
         output_tokens: 0,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
     });
 
-    let error = run_compact(CompactInput {
+    let output = run_compact(CompactInput {
         context: ctx.clone(),
         has_tool_calls: true,
     })
     .await
-    .err()
-    .expect("高压 Full 失败必须结束本轮");
+    .unwrap();
 
-    assert!(matches!(error, crate::error::AgentError::CompactNoLlm));
+    assert!(!output.compacted, "延后不得向 stage 报告 compacted=true");
+    assert_eq!(
+        ctx.compact
+            .compact_consecutive_failures
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "延后不增加失败计数"
+    );
     assert!(
-        ctx.session.transcript.read().entries().iter().any(|entry| {
+        !ctx.session.transcript.read().entries().iter().any(|entry| {
             ctx.session
                 .transcript
                 .read()
@@ -466,32 +549,48 @@ async fn test_compact_stage_applied_mixed_emits_one_messages_compacted_with_snap
                 .projection
                 .is_some()
         }),
-        "Full 失败后必须保留已应用的 Micro/Smart projection"
+        "延后不得写入任何投影"
     );
     let events = observe_events(&mut handles);
-    let completions: Vec<_> = events
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ObserveEvent::CompactStarted { .. }))
+            .count(),
+        1,
+        "进入区间后 CompactStarted 仍会发出"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, ObserveEvent::MessagesCompacted { .. }))
+            .count(),
+        0,
+        "延后不得伪装为 MessagesCompacted"
+    );
+    let ended: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
-            ObserveEvent::MessagesCompacted {
-                messages,
-                affected_count,
-                ..
-            } => Some((messages, affected_count)),
+            ObserveEvent::CompactEnded {
+                outcome, deferral, ..
+            } => Some((*outcome, *deferral)),
             _ => None,
         })
         .collect();
+    assert_eq!(ended.len(), 1, "延后必须发配对的 CompactEnded");
     assert_eq!(
-        completions.len(),
-        1,
-        "Applied mixed outcome 只能产生一个 completion"
+        ended[0].0,
+        crate::agent::compact_v2::CompactOutcome::Deferred
+    );
+    let deferral = ended[0].1.expect("CompactEnded 必须携带跳过原因");
+    assert_eq!(
+        deferral.min_gain_tokens,
+        crate::agent::compact_v2::min_micro_gain_tokens(200_000, &CompactConfig::default()),
+        "事件必须携带完整窗口 10% 的门槛"
     );
     assert!(
-        !completions[0].0.is_empty(),
-        "Applied mixed completion 必须携带 transcript snapshot"
-    );
-    assert!(
-        *completions[0].1 > 0,
-        "Applied mixed completion 必须反映实际变更"
+        deferral.estimated_gain_tokens < deferral.min_gain_tokens,
+        "事件必须携带本轮估算净收益"
     );
 }
 
@@ -607,7 +706,7 @@ async fn test_compact_stage_cancel_without_commit_emits_compact_ended() {
     ctx.session.turn.cancel_token.cancel();
 
     let result = run_compact(CompactInput {
-        context: ctx,
+        context: ctx.clone(),
         has_tool_calls: true,
     })
     .await;
@@ -615,6 +714,17 @@ async fn test_compact_stage_cancel_without_commit_emits_compact_ended() {
     assert!(
         matches!(result, Err(crate::error::AgentError::Interrupted)),
         "cancel 且未提交变更应返回 Interrupted"
+    );
+    assert!(
+        !ctx.session.transcript.read().entries().iter().any(|entry| {
+            ctx.session
+                .transcript
+                .read()
+                .flags(entry.id())
+                .projection
+                .is_some()
+        }),
+        "提交前取消不得留下本轮 Micro 的隐藏提交"
     );
 
     let events = observe_events(&mut handles);

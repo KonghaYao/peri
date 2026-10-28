@@ -57,9 +57,10 @@ fn make_ai_with_tool(text: &str, tool_name: &str, tool_id: &str) -> BaseMessage 
 }
 
 fn make_tool_result(tool_call_id: &str, _text: &str) -> BaseMessage {
+    // 8 轮 × 24k 字符 ≈ 48k token 的可回收正文，足以跨过 200k 窗口的 20k 净收益门槛。
     BaseMessage::tool_result(
         tool_call_id.to_string(),
-        MessageContent::text("x".repeat(8000)),
+        MessageContent::text("x".repeat(24_000)),
     )
 }
 

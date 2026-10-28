@@ -230,7 +230,9 @@ const WORKSPACE_TOOLS: &[BuiltinMcpTool] = &[
         ),
     },
     BuiltinMcpTool {
-        context_retention: crate::tools::ContextRetention::SideEffectReceipt,
+        // 命令与输出是后续任务唯一的执行证据：只做不完整预览，不整组省略。
+        // 预览保留 head/tail、省略标注与 archive_ref，参数保持 canonical 原值。
+        context_retention: crate::tools::ContextRetention::PreviewOnly,
         completes_on_response: false,
         original_name: "Bash",
         effective_name: "Bash",

@@ -43,9 +43,10 @@ fn make_ai_with_tool(text: &str, tool_name: &str, tool_id: &str) -> BaseMessage 
 }
 
 fn make_tool_result(tool_call_id: &str, text: &str) -> BaseMessage {
+    // 8 轮合计必须跨过 200k 窗口的 20k 净收益门槛，否则统一准入会延后。
     let body = format!(
         "{text}{}",
-        "x".repeat(8_000usize.saturating_sub(text.len()))
+        "x".repeat(24_000usize.saturating_sub(text.len()))
     );
     BaseMessage::tool_result(tool_call_id.to_string(), MessageContent::text(body))
 }
