@@ -219,7 +219,7 @@ function makeRegistry(chat?: ChatServiceContract): ChatRegistry {
     async listSessions() { return []; },
     async closeChat() {},
     async shutdown() {},
-  }, { cwd: "/workspace" });
+  }, { id: "default", runtimePath: "/workspace" }, {});
 }
 
 function startSyncServer(chat: ChatServiceContract = fakeChat("chat-1")) {

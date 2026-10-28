@@ -6,6 +6,7 @@ import type { PeriInstancePort } from "../agent/port";
 import type { ChatDatabase, ChatFact } from "../contracts/chat";
 import type { WasmRuntimeDiagnosticKind } from "../wasm/runtime";
 import type { PeriInstanceOptions } from "../agent/peri-instance";
+import type { WorkspaceRef } from "../workspace/types";
 import type {
     ChatSessionInit,
     ChatRuntime,
@@ -55,12 +56,18 @@ export interface ChatSessionIndex {
         sessionId: string,
     ): void;
     release(chatId: string, sessionId: string): void;
+    /** 该 Manager 内已知的 Session workspace；持久 Session 可能没有记录。 */
+    workspaceOf(sessionId: string): string | undefined;
+    /** 记录 Session 所属 workspace；同一 Session 不允许改写。 */
+    claimWorkspace(sessionId: string, workspaceId: string): void;
 }
 
 export interface ChatServiceOptions {
     readonly id: string;
-    /** createChat({path}) 的句柄级 path；新会话优先使用，加载历史仅兜底。 */
-    readonly path?: string;
+    /** 该 Chat 的 Workspace；`workspace.id` 用于跨 workspace 判定，`runtimePath` 是根。 */
+    readonly workspace: WorkspaceRef;
+    /** 由 workspace 与 sessionPath 派生的新会话 cwd。 */
+    readonly sessionCwd: string;
     readonly sessionInit: ChatSessionInit;
     /** 该 Chat 独立组合、冻结后的 agentConfig（含 Manager store）。 */
     readonly agentConfig: unknown;

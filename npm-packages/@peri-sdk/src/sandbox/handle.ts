@@ -1,5 +1,6 @@
-import { isAbsolute } from "node:path";
 import { DeadlineError, withDeadline } from "../util/deadline";
+import { normalizeAbsolutePath } from "../workspace/paths";
+import type { WorkspaceRef } from "../workspace/types";
 import {
   SandboxManagerError,
   type SandboxAdapter,
@@ -101,10 +102,43 @@ function validateMcpUrl(value: string): string {
   return value;
 }
 
-function validateWorkspace(value: string): string {
-  if (!isAbsolute(value))
-    throw new SandboxManagerError("workspace_unavailable", "Sandbox workspace path must be an absolute host path.");
-  return value;
+function validateWorkspace(value: unknown): WorkspaceRef {
+  if (typeof value !== "object" || value === null || Array.isArray(value))
+    throw new SandboxManagerError(
+      "workspace_unavailable",
+      "Sandbox adapter must return a workspace object with an id and a runtimePath.",
+    );
+  const { id, hostPath, runtimePath } = value as {
+    id?: unknown;
+    hostPath?: unknown;
+    runtimePath?: unknown;
+  };
+  if (typeof id !== "string" || id.length === 0)
+    throw new SandboxManagerError(
+      "workspace_unavailable",
+      "Sandbox workspace id must be a non-empty string.",
+    );
+  const normalizedRuntimePath = normalizeAbsolutePath(runtimePath);
+  if (normalizedRuntimePath === null)
+    throw new SandboxManagerError(
+      "workspace_unavailable",
+      "Sandbox workspace runtimePath must be an absolute path.",
+    );
+  let normalizedHostPath: string | undefined;
+  if (hostPath !== undefined) {
+    const normalized = normalizeAbsolutePath(hostPath);
+    if (normalized === null)
+      throw new SandboxManagerError(
+        "workspace_unavailable",
+        "Sandbox workspace hostPath must be an absolute path.",
+      );
+    normalizedHostPath = normalized;
+  }
+  return Object.freeze({
+    id,
+    ...(normalizedHostPath === undefined ? {} : { hostPath: normalizedHostPath }),
+    runtimePath: normalizedRuntimePath,
+  });
 }
 
 function validateMcpServer(value: unknown): SandboxMcpHttpConfig {
@@ -151,7 +185,7 @@ export class SandboxHandle<TOptions = unknown> {
   private instanceValue: SandboxAdapterInstance | null = null;
   private mcpConfigValue: SandboxMcpHttpConfig | null = null;
   private endpointValue: SandboxEndpoint | null = null;
-  private workspacePathValue: string | null = null;
+  private workspaceValue: WorkspaceRef | null = null;
   private lastErrorValue: { code: SandboxManagerErrorCode; message: string } | null = null;
   private dataDeleted = false;
   private knownToken: string | null = null;
@@ -170,9 +204,14 @@ export class SandboxHandle<TOptions = unknown> {
     return this.stateValue;
   }
 
-  /** Workspace path reported by the adapter, or `null` before the first start. */
-  get workspacePath(): string | null {
-    return this.endpointValue?.workspacePath ?? this.workspacePathValue;
+  /**
+   * Workspace reported by the adapter, or `null` before the first start.
+   *
+   * The value is frozen; `runtimePath` is the root the agent/session sees and
+   * `hostPath` is optional for remote sandboxes.
+   */
+  get workspace(): WorkspaceRef | null {
+    return this.endpointValue?.workspace ?? this.workspaceValue;
   }
 
   /**
@@ -204,7 +243,7 @@ export class SandboxHandle<TOptions = unknown> {
       sandboxId: this.sandboxId,
       state: this.stateValue,
       mcpUrl: this.endpointValue?.mcpUrl ?? null,
-      workspacePath: this.endpointValue?.workspacePath ?? this.workspacePathValue,
+      workspace: this.endpointValue?.workspace ?? this.workspaceValue,
       lastError: this.lastErrorValue ? { ...this.lastErrorValue } : null,
     };
   }
@@ -322,18 +361,18 @@ export class SandboxHandle<TOptions = unknown> {
           `Sandbox adapter started "${startedId}" for requested id "${this.sandboxId}".`,
         );
       }
-      const workspacePath = validateWorkspace(instance.workspacePath);
+      const workspace = validateWorkspace(instance.workspace);
       const mcpConfig = validateMcpServer(instance.mcpServer);
       const endpoint: SandboxEndpoint = {
         sandboxId: this.sandboxId,
         serverName: this.serverName,
         mcpUrl: mcpConfig.url,
-        workspacePath,
+        workspace,
       };
       this.instanceValue = instance;
       this.mcpConfigValue = mcpConfig;
       this.knownToken = authorizationToken(mcpConfig) ?? null;
-      this.workspacePathValue = endpoint.workspacePath;
+      this.workspaceValue = endpoint.workspace;
       this.endpointValue = endpoint;
       this.lastErrorValue = null;
       this.stateValue = "ready";

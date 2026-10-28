@@ -10,6 +10,8 @@ export { ChatService } from "../chat/service";
 export { ChatUserAction, parseChatUserAction } from "../chat/action";
 export { clearSessionOwnership } from "../chat/ownership";
 export * from "../chat/errors";
+export { WorkspaceMismatchError } from "../workspace/errors";
+export type { WorkspaceRef } from "../workspace/types";
 
 export type {
     AnswerAction,
@@ -31,7 +33,7 @@ export type {
     ChatAgentConfig,
     ChatConfig,
     ChatCreateOptions,
-    ChatSessionInit,
+    ChatSessionOptions,
     ChatRuntime,
     ChatStoreConfig,
     ChatTransportFactoryOptions,

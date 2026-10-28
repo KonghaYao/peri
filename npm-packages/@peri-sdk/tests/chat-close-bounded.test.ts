@@ -17,6 +17,9 @@ import {
 } from "./chat-fixtures";
 import { OwnershipProbe } from "./ownership-probe";
 
+/** 测试用 workspace 根；路径判断是纯字符串，不依赖真实目录。 */
+const TEST_WORKSPACE = { id: "ws-test", runtimePath: "/" };
+
 interface Setup {
     readonly manager: ChatManager;
     readonly ownership: OwnershipProbe;
@@ -43,7 +46,7 @@ function setup(
                     throw new Error("ACP transport must not start");
                 },
             },
-            session: { path: "/workspace" },
+            session: {},
             lifecycle,
         },
         instanceFactory: () => {
@@ -101,7 +104,7 @@ describe("bounded close during startup", () => {
                 activationCloseTimeoutMs: 100,
             },
         );
-        const chat = setupValue.manager.createChat({ agent: { cwd: "/" } });
+        const chat = setupValue.manager.createChat({ workspace: TEST_WORKSPACE, agent: {} });
         const recorded = recorder();
         chat.subscribeFacts(recorded.observer);
         const creating = chat.execute(
@@ -160,7 +163,7 @@ describe("bounded close during startup", () => {
             return originalGetSession(id);
         };
 
-        const chat = setupValue.manager.createChat({ agent: { cwd: "/" } });
+        const chat = setupValue.manager.createChat({ workspace: TEST_WORKSPACE, agent: {} });
         const loading = chat.execute(
             ChatUserAction.changeSessionTo("session-1", {
                 requestId: "load-1",
@@ -193,7 +196,7 @@ describe("bounded close during startup", () => {
             activationCloseTimeoutMs: 20,
         });
         setupValue.database.seed(directoryEntry("session-1"));
-        const chat = setupValue.manager.createChat({ agent: { cwd: "/" } });
+        const chat = setupValue.manager.createChat({ workspace: TEST_WORKSPACE, agent: {} });
         await chat.execute(ChatUserAction.changeSessionTo("session-1"));
         const port = setupValue.ports[0];
         const originalClose = port.close.bind(port);
@@ -239,7 +242,8 @@ describe("bounded shutdown", () => {
         );
         // Per-chat shutdown budget must not replace the Manager aggregate timeout.
         const chat = setupValue.manager.createChat({
-            agent: { cwd: "/" },
+            workspace: TEST_WORKSPACE,
+            agent: {},
             lifecycle: { shutdownChatTimeoutMs: 60_000 },
         });
         const creating = chat.execute(
@@ -256,7 +260,7 @@ describe("bounded shutdown", () => {
         }
         expect(shutdownError).toBeInstanceOf(AggregateError);
         expect(performance.now() - started).toBeLessThan(2000);
-        expect(() => setupValue.manager.createChat({ agent: { cwd: "/" } })).toThrow("shut down");
+        expect(() => setupValue.manager.createChat({ workspace: TEST_WORKSPACE, agent: {} })).toThrow("shut down");
         expect(setupValue.manager.getChat(chat.id)).toBe(chat);
         expect(setupValue.ownership.has("session-new")).toBe(true);
         expect(
@@ -282,7 +286,7 @@ describe("bounded shutdown", () => {
             { kind: "wasm", moduleUrl: "about:blank" },
         );
         setupValue.database.seed(directoryEntry("session-1"));
-        const chat = setupValue.manager.createChat({ agent: { cwd: "/" } });
+        const chat = setupValue.manager.createChat({ workspace: TEST_WORKSPACE, agent: {} });
         await chat.execute(ChatUserAction.changeSessionTo("session-1"));
 
         let closeAllCalls = 0;
@@ -317,7 +321,7 @@ describe("ownership storage failure", () => {
         for (const failure of ["failRead", "failWrite"] as const) {
             const setupValue = setup();
             setupValue.ownership[failure]("session-new");
-            const chat = setupValue.manager.createChat({ agent: { cwd: "/" } });
+            const chat = setupValue.manager.createChat({ workspace: TEST_WORKSPACE, agent: {} });
 
             await expect(
                 chat.execute(

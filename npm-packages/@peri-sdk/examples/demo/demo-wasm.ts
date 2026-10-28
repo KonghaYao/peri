@@ -98,7 +98,6 @@ const manager = new ChatManager({
             }),
         },
         session: {
-            path: workspace,
             instructions: "你是 Peri。请用清晰、简洁的中文帮助用户完成任务。",
             mcpServers: {
                 demo: { type: "http", url: "https://demo-day.mcp.cloudflare.com/mcp" },

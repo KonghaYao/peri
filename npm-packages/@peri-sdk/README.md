@@ -109,12 +109,17 @@ const manager = new ChatManager({
 // 6. 每个 Chat 一个共享 View；同 Chat 的所有同步连接复用它。
 const views = new ChatViewRegistry();
 const chat = manager.createChat({
-  // agent = per-chat 运行配置：cwd 必填；store 由 Manager 注入。
-  agent: {
-    cwd: "/workspace", // Peri 虚拟工作区的绝对路径身份
-    settings,
+  // workspace = 该 Chat 的边界：runtimePath 是 Agent/Session 看到的根。
+  // hostPath 是宿主文件系统路径；远程 sandbox 没有本地路径时可省略。
+  workspace: {
+    id: "ws-local",
+    hostPath: "/srv/peri/workspaces/ws-local",
+    runtimePath: "/workspace",
   },
-  path: "/workspace/", // 会话 cwd；peri-cf 用带尾斜杠的 SESSION_CWD
+  // 可选：相对 workspace.runtimePath 的会话 cwd；越界以 workspace_mismatch 拒绝。
+  sessionPath: "",
+  // agent = per-chat 运行配置；cwd 由 SDK 注入为 workspace.runtimePath。
+  agent: { settings },
   session: {
     instructions: "Help with this workspace.",
     mcpServers: {},
@@ -163,12 +168,12 @@ Manager 只声明部署边界：`store.storage` 与 `store.machineId` 由整个 
 
 | 字段 | 说明 |
 | --- | --- |
-| `cwd` | 必填，非空字符串；Peri 虚拟工作区的绝对路径身份 |
+| `cwd` | 可选；SDK 最终注入 `workspace.runtimePath`。显式提供时必须等于该值，否则抛 `workspace_mismatch` |
 | `settings` | 可选；整份 `PeriConfig`，替换 Peri 的全局配置 |
 | `env` | 可选；字符串映射 |
 | 其他字段 | 其余 JSON 字段原样传递 |
 
-per-chat `agent` 必须是 JSON 安全对象；缺 `cwd`、`cwd` 非字符串、配置不是对象、含 `storage`/`machineId` 都会抛 `TypeError`。每个 Chat 得到独立的深拷贝、冻结并序列化的 JSON，不复用 Manager 或其他 Chat 的引用。
+per-chat `agent` 必须是 JSON 安全对象；`cwd` 非字符串/空串、配置不是对象、含 `storage`/`machineId` 都会抛 `TypeError`。每个 Chat 得到独立的深拷贝、冻结并序列化的 JSON，不复用 Manager 或其他 Chat 的引用。
 
 `store.storage` 不是 `database`：
 
@@ -184,7 +189,13 @@ per-chat `agent` 必须是 JSON 安全对象；缺 `cwd`、`cwd` 非字符串、
 3. 一个 WASM 模块实例只承载一个 `machineId`，运行期不能切换。
 4. 本地 demo 的固定 UUID 只用于演示，生产必须从配置或密钥管理读取。
 
-`createChat({ path })` 是会话 cwd，必须是该 Chat `agent.cwd` 内部路径（相同或子目录）。两者不一致时运行时 cwd 由 per-chat `agent.cwd` 决定；新会话 path 超出 cwd 会以 `workspace_mismatch` 拒绝。
+`createChat({ workspace, sessionPath })` 决定会话 cwd：
+
+1. `workspace` 必填，`runtimePath` 必须是绝对路径；SDK 归一化 `.`/`..` 与分隔符后作为 Agent 与 Session 的共同根。
+2. `sessionPath` 可选且相对 `runtimePath`；省略表示 workspace 根，`../` 越界或传入绝对路径都会以 `workspace_mismatch` 拒绝。
+3. 不再接受 `session.path`；公开的 `ChatSessionOptions` 只含 `instructions`/`mcpServers`，cwd 一律从 workspace 派生。
+4. `hostPath` 是宿主文件系统路径，`runtimePath` 是 Agent/session 看到的路径；本地 sandbox 两者相同，远程 sandbox 可省略 `hostPath`。
+5. Workspace 只是路径引用，不拥有 sandbox 或 session；MCP 描述符与 token 仍由 sandbox adapter / `SandboxHandle.mcpServer()` 提供。
 
 ### `database`
 
@@ -231,7 +242,7 @@ interface KvStorage {
 | 字段 | 说明 |
 | --- | --- |
 | `runtime` | 必填。`{ kind: "wasm" }` 在进程内启动 WASM 模块；`{ kind: "transport", factory }` 由宿主按 path 创建 transport |
-| `session` | 可选默认值：`path`、`instructions`、`mcpServers`；`createChat({ session })` 按 chat 整体覆盖，不做字段合并 |
+| `session` | 可选默认值：`instructions`、`mcpServers`（不含 cwd）；`createChat({ session })` 按 chat 整体覆盖，不做字段合并 |
 | `lifecycle` | `closeDrainTimeoutMs`、`startupSettleTimeoutMs`、`activationCloseTimeoutMs`、`shutdownChatTimeoutMs`；`createChat({ lifecycle })` 按字段覆盖 |
 
 `runtime.kind="wasm"` 时，Manager 为每次激活启动独立 WASM 运行后端；可注入 `moduleUrl`、`moduleFactory`、`env` 与 `onDiagnostic`。`createChat({ runtime: { env } })` 的 env 会按字段合并到 Manager env 上，`onDiagnostic` 覆盖该 Chat 的诊断回调。scheduler 与清理/启动超时由 SDK 内部管理，用户不可配置。`lifecycle` 未显式给出时按 runtime kind 取默认值：wasm 为 activation 25s、shutdown 30s；transport 为 5s、15s。per-chat `lifecycle.shutdownChatTimeoutMs` 不改变 Manager 聚合等待预算。
@@ -242,20 +253,21 @@ interface KvStorage {
 
 | 字段 | 说明 |
 | --- | --- |
-| `path` | 句柄级新会话 cwd；优先于 `session.path`，必须是 `agent.cwd` 内部路径，加载历史不使用该值 |
-| `session` | 该 Chat 的 `path`、`instructions`、`mcpServers`；传值时整体覆盖 `chatConfig.session`，不做字段合并 |
-| `agent` | 必填；per-chat 运行配置，`cwd` 必填且不能含 `storage`/`machineId`；Manager 注入 store 后独立冻结、序列化 |
+| `workspace` | 必填；`{ id, hostPath?, runtimePath }`，`runtimePath` 必须是绝对路径，决定 `agent.cwd` 与会话 cwd |
+| `sessionPath` | 可选；相对 `workspace.runtimePath` 的新会话 cwd，越界以 `workspace_mismatch` 拒绝 |
+| `session` | 该 Chat 的 `instructions`、`mcpServers`；传值时整体覆盖 `chatConfig.session`，不做字段合并 |
+| `agent` | 必填；per-chat 运行配置，`cwd` 可选且只能等于 `runtimePath`，不能含 `storage`/`machineId`；Manager 注入 store 后独立冻结、序列化 |
 | `lifecycle` | 按字段覆盖 Manager 生命周期预算；`shutdownChatTimeoutMs` 仍由 Manager 聚合 |
 | `runtime` | WASM 运行参数：`env` 合并到 Manager env，`onDiagnostic` 覆盖该 Chat 的回调 |
 | `payloadBudgets` | 传给该 Chat 的 `PeriInstance`；没有 Manager 默认值，不传时使用 PeriInstance 默认预算 |
 
-未传 `session` 时使用 Manager 默认值；两者都没有时使用 `{}`。`session.mcpServers` 容器、http `headers`、stdio `args`/`env` 都按 Chat 复制（`acp` 的 `server` 实例保留引用）；runtime env 也按 Chat 复制/合并。`createChat` 同步登记句柄，不启动 ACP；每个 Chat 的配置互不影响。缺少 `agent.cwd`、配置不是 JSON 对象、或出现 `storage`/`machineId` 都会抛 `TypeError`。
+未传 `session` 时使用 Manager 默认值；两者都没有时使用 `{}`。`session.mcpServers` 容器、http `headers`、stdio `args`/`env` 都按 Chat 复制（`acp` 的 `server` 实例保留引用）；runtime env 也按 Chat 复制/合并。`createChat` 同步登记句柄，不启动 ACP；每个 Chat 的配置互不影响。缺少 `workspace`、`runtimePath` 非绝对路径、`agent` 不是 JSON 对象、或出现 `storage`/`machineId` 都会抛 `TypeError`。
 
 ## 核心概念
 
-1. **Chat 句柄**：`manager.createChat({ agent, path, session, lifecycle, runtime, payloadBudgets })` 同步登记，不启动 ACP、不取得 ownership、不读历史；`agent` 必填，store 由 Manager 注入。
+1. **Chat 句柄**：`manager.createChat({ workspace, sessionPath, agent, session, lifecycle, runtime, payloadBudgets })` 同步登记，不启动 ACP、不取得 ownership、不读历史；`workspace` 与 `agent` 必填，store 由 Manager 注入。
 2. **Session**：Peri 持久化的会话；只有首次绑定动作才会创建或加载。
-3. **绑定**：`create_new_session` 使用句柄 path 或 `session.path`；`change_session` 使用 Store 中的持久 cwd，不回退句柄 path。加载历史的 cwd 必须位于当前 Chat 的 workspace root（`path ?? session.path ?? agent.cwd`）之下，否则以 `workspace_mismatch` 拒绝，避免跨 workspace 注入当前 Chat 的 MCP 声明。
+3. **绑定**：`create_new_session` 使用 `sessionPath` 派生的 cwd；`change_session` 使用 Store 中的持久 cwd。加载历史的 cwd 必须等于或位于 `workspace.runtimePath` 之下，否则以 `workspace_mismatch` 拒绝。Manager 同时维护内存 `sessionId → workspaceId` 映射：已知 Session 属于其他 workspace 时优先按 id 拒绝；持久 Session 没有该元数据时才回退路径校验。workspaceId 不写入 ACP 字段。
 4. **ownership**：同一 Session 同时至多一个执行所有者；只在清理确认后释放，关闭超时或失败时保留。
 5. **事实与 View**：`ChatService` 发布 `ChatFact`；`ChatView` 重放事实并维护只读 Y.Doc。View 不执行动作、不决定权限、不取消任务。
 
@@ -320,8 +332,14 @@ const createMyMcpServer = () => {
   return server;
 };
 
+const workspace = {
+  id: "workspace-default",
+  hostPath: "/workspace",
+  runtimePath: "/workspace",
+};
 const chat = manager.createChat({
-  path: "/workspace",
+  workspace,
+  agent: {}, // agent.cwd 由 workspace.runtimePath 派生
   session: {
     mcpServers: {
       "my-tools": {
@@ -361,33 +379,33 @@ bun add peri-sandbox   # 仅在使用 /sandbox 时安装
 
 > `peri-sandbox` 当前仍在仓库内且标记为 private；发布前请用本地路径或 workspace 链接安装，发布后再使用上面的包名。
 
-首次使用前生成 settings，并确认 Peri 运行时与宿主环境：
+`init` 是可选的环境固定步骤，不是启动前置条件。不传 `settingsPath` 时，adapter 使用默认 settings 路径（`~/.peri-sandbox/settings.json`，可用 `PERI_SANDBOX_SETTINGS` 覆盖）；该文件不存在则回退到内存默认配置，`start()` 可直接用。前提是 Peri 可被发现：`PERI_PATH` 或默认 `~/.peri/peri`，否则报 `unsupported_environment`。
 
 ```bash
-bunx peri-sandbox init     # 默认写入 ~/.peri-sandbox/settings.json
-bunx peri-sandbox doctor   # 只报告环境问题，不自动清理
+bunx peri-sandbox doctor   # 可选：检查平台、Peri、SRT/cgroup，只报告不清理
 ```
 
-`init` 会校验 `~/.peri/peri` 并记录 sha256；`settingsPath` / `sandboxesRoot` 通过 `createPeriSandboxAdapter({ settingsPath, sandboxesRoot })` 传入，两者都可省略，省略时由 adapter 在运行时按 `homedir()` 解析默认路径（`~/.peri-sandbox/settings.json` 与 `~/.peri-sandbox/sandboxes`）；需要显式指定时用 `node:os` 的 `homedir()` 加 `node:path` 的 `join()` 拼接，不要在 JS 参数里写 `"~/..."`，字符串里的 `~` 不会被展开。per-sandbox 的 `profileName` / `profile` / `port` / `bashCalls` / `minFreeBytes` 等通过 `adapterOptions` 传入。
+需要固定 settings 路径、哈希或自定义 profile 时，再执行 `init`：
+
+```bash
+bunx peri-sandbox init     # 写入 ~/.peri-sandbox/settings.json（0600）与 sandboxes/（0700）
+```
+
+`init` 会把 `periPath` 与 SHA-256 固化进 settings，不生成 token、端口或后台服务。`settingsPath` / `sandboxesRoot` 通过 `createPeriSandboxAdapter({ settingsPath, sandboxesRoot })` 传入，两者都可省略；传递显式 `settingsPath` 时文件必须已存在（先 `init` 或手工创建），否则启动报 `invalid_options`。需要显式指定时用 `node:os` 的 `homedir()` 加 `node:path` 的 `join()` 拼接，不要在 JS 参数里写 `"~/..."`，字符串里的 `~` 不会被展开。per-sandbox 的 `profileName` / `profile` / `port` / `bashCalls` / `minFreeBytes` 等通过 `adapterOptions` 传入。
 
 ### 用法
 
-Manager 独立于会话：它不接收 session，也不记录 session 映射。`handle.workspacePath` 返回 sandbox workspace 路径，`handle.mcpServer()` 返回 ready sandbox 的 MCP 描述符；每个 Chat 的 `agent.cwd`、`path` 与 `session` 由调用方组装并在 `createChat` 传入，绑定到哪个会话也由调用方决定。
+Manager 独立于会话：它不接收 session，也不记录 session 映射。`handle.workspace` 返回 `{ id, hostPath, runtimePath }`，`handle.mcpServer()` 返回 ready sandbox 的 MCP 描述符；调用方把 `workspace` 与 MCP 描述符组装进 `createChat`，绑定到哪个会话也由调用方决定。Workspace 不拥有 sandbox 或 session；token 仍只在 `handle.mcpServer()` 的 descriptor 中。
 
 ```ts
-import { homedir } from "node:os";
-import { join } from "node:path";
 import { ChatManager } from "@peri-code/sdk";
 import { SandboxManager } from "@peri-code/sdk/sandbox";
 import { createPeriSandboxAdapter } from "peri-sandbox";
 
 const sandboxes = new SandboxManager({
   // adapter 必填；SDK 不提供默认 adapter，也不动态 import 任何实现。
-  adapter: createPeriSandboxAdapter({
-    // 部署/配置根在 adapter 选项中设置。JS 不会展开 "~"，显式用 homedir() 拼接。
-    settingsPath: join(homedir(), ".peri-sandbox", "settings.json"),
-    sandboxesRoot: join(homedir(), ".peri-sandbox", "sandboxes"),
-  }),
+  // 不传 settingsPath：默认 settings 不存在时回退内存默认配置，无需 init。
+  adapter: createPeriSandboxAdapter(),
   // manager 默认值；可被单次 start 整体替换。
   adapterOptions: { profileName: "workspace-default" },
   serverName: "workspace",
@@ -405,7 +423,7 @@ const sandbox = await sandboxes.start({
   stopTimeoutMs: 10_000,
 });
 const mcp = await sandbox.mcpServer();
-const workspacePath = sandbox.workspacePath!;
+const workspace = sandbox.workspace!; // { id, hostPath, runtimePath }
 
 const manager = new ChatManager({
   // Manager = 部署/Store 边界：Store 与机器身份由整个 Manager 共享。
@@ -423,9 +441,9 @@ const manager = new ChatManager({
 
 // sandbox 绑定到哪个 chat 由调用方决定。
 const chat = manager.createChat({
-  // per-chat 运行配置：cwd 指向该 sandbox 的 workspace。
-  agent: { cwd: workspacePath },
-  path: workspacePath,
+  // workspace 决定 agent.cwd 与会话 cwd；不需要再传 agent.cwd/path。
+  workspace,
+  agent: { settings },
   session: {
     instructions: "Use the sandbox workspace.",
     mcpServers: { [mcp.name]: mcp.config },
@@ -439,13 +457,26 @@ await sandbox.close(); // 终止实例，保留 workspace
 // 或：await sandboxes.closeAll(); // 关闭 manager 跟踪的全部 handle
 ```
 
+需要固定 settings 路径时，在 adapter 选项中显式传入（文件必须已存在或先 `init`；JS 不展开 `~`）：
+
+```ts
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { createPeriSandboxAdapter } from "peri-sandbox";
+
+const adapter = createPeriSandboxAdapter({
+  settingsPath: join(homedir(), ".peri-sandbox", "settings.json"),
+  sandboxesRoot: join(homedir(), ".peri-sandbox", "sandboxes"), // 可选：覆盖 settings 中的部署根
+});
+```
+
 ### 两个 Chat 绑定两个 sandbox workspace
 
-Manager 只持有部署级 `store.storage`/`store.machineId`；每个 Chat 用自己的 `agent.cwd` 决定 WASM 运行时工作区，用 `path` 指定会话 cwd，用 `session.mcpServers` 绑定该 workspace 的 MCP：
+Manager 只持有部署级 `store.storage`/`store.machineId`；每个 Chat 用自己的 `workspace` 决定 WASM 运行时工作区与会话 cwd，用 `session.mcpServers` 绑定该 workspace 的 MCP：
 
 ```ts
 const manager = new ChatManager({
-  // storage/machineId 由整个 Manager 共享；cwd 只在 createChat 的 agent 中给出。
+  // storage/machineId 由整个 Manager 共享；每个 Chat 的 workspace 决定 runtimePath，agent.cwd 由 SDK 派生。
   store: { storage: database.storageConfig, machineId },
   database,
   kv,
@@ -465,10 +496,10 @@ const [alpha, beta] = await Promise.all([
 const alphaMcp = await alpha.mcpServer();
 const betaMcp = await beta.mcpServer();
 
-// 两个 Chat 各自绑定一个 workspace；运行配置与 path 都在自己的 sandbox 内。
+// 两个 Chat 各自绑定一个 workspace；运行配置与会话 cwd 都在自己的 sandbox 内。
 const alphaChat = manager.createChat({
-  agent: { cwd: alpha.workspacePath!, settings },
-  path: alpha.workspacePath!,
+  workspace: alpha.workspace!,
+  agent: { settings },
   session: {
     instructions: "Work only inside the alpha workspace.",
     mcpServers: { [alphaMcp.name]: alphaMcp.config },
@@ -476,8 +507,8 @@ const alphaChat = manager.createChat({
   runtime: { env: { PERI_TENANT: "alpha" } },
 });
 const betaChat = manager.createChat({
-  agent: { cwd: beta.workspacePath!, settings },
-  path: beta.workspacePath!,
+  workspace: beta.workspace!,
+  agent: { settings },
   session: {
     instructions: "Work only inside the beta workspace.",
     mcpServers: { [betaMcp.name]: betaMcp.config },
@@ -486,7 +517,7 @@ const betaChat = manager.createChat({
 });
 ```
 
-`change_session` 会拒绝加载 cwd 不在该 Chat workspace root 下的持久会话；同一 sandbox 的子目录仍允许。
+`change_session` 会拒绝加载 cwd 不在该 Chat `workspace.runtimePath` 下的持久会话；同一 sandbox 的子目录仍允许。Manager 已知该 Session 属于另一个 workspace 时优先按内存映射拒绝；持久 Session 没有 workspace 元数据时才回退路径校验。
 
 ### API
 
@@ -512,13 +543,17 @@ interface SandboxAdapter<TOptions = unknown> {
 
 interface SandboxAdapterInstance {
   readonly sandboxId: string;
-  readonly workspacePath: string;
+  readonly workspace: {
+    id: string;
+    hostPath?: string;   // 远程 sandbox 可省略
+    runtimePath: string; // Agent/session 看到的根，必须是绝对路径
+  };
   readonly mcpServer: { type: "http"; url: string; headers: Record<string, string> }; // token 只在这里
   close(): Promise<void>;
 }
 ```
 
-Adapter 返回的 `sandboxId` 必须与请求一致，`workspacePath` 必须是绝对路径，`mcpServer` 必须是 loopback HTTP descriptor；否则 `start()` 失败并关闭已返回的实例。
+`peri-sandbox` 的 `createPeriSandboxAdapter()` 返回 `{ id: sandboxId, hostPath: workspacePath, runtimePath: workspacePath }`；本地 sandbox 两个路径相同，未来若 WASM 运行时路径不同，由 adapter 自己决定。Adapter 返回的 `sandboxId` 必须与请求一致，`workspace.runtimePath` 必须是绝对路径，`mcpServer` 必须是 loopback HTTP descriptor；否则 `start()` 失败并关闭已返回的实例。
 
 **`SandboxHandle`**
 
@@ -526,9 +561,9 @@ Adapter 返回的 `sandboxId` 必须与请求一致，`workspacePath` 必须是�
 | --- | --- |
 | `sandboxId` / `serverName` | 该 sandbox 的稳定 id 与 MCP server key。 |
 | `state` | `idle` / `starting` / `ready` / `stopping` / `stopped` / `failed` / `closed`。 |
-| `workspacePath` | adapter 报告的 workspace 宿主绝对路径；首次 `start()` 前为 `null`，停止或关闭后仍保留。 |
-| `start()` | 启动或复用该实例，返回 `{ sandboxId, serverName, mcpUrl, workspacePath }`；并发调用共享同一个 Promise，失败可重试，`close()` 后拒绝。 |
-| `status()` | 同步快照 `{ sandboxId, state, mcpUrl, workspacePath, lastError }`；不返回 token。 |
+| `workspace` | adapter 报告的 `{ id, hostPath?, runtimePath }`（冻结、已归一化）；首次 `start()` 前为 `null`，停止或关闭后仍保留。 |
+| `start()` | 启动或复用该实例，返回 `{ sandboxId, serverName, mcpUrl, workspace }`；并发调用共享同一个 Promise，失败可重试，`close()` 后拒绝。 |
+| `status()` | 同步快照 `{ sandboxId, state, mcpUrl, workspace, lastError }`；不返回 token。 |
 | `mcpServer()` | 仅在 `ready` 时返回 `{ name, config }`；`config` 是 adapter 提供的 loopback HTTP descriptor。非 ready 抛 `not_ready`，`close()` 后抛 `closed`。token 只在这里出现。 |
 | `endpoint()` | 当前 endpoint 或 `null`；不返回 token。 |
 | `stop()` | 关闭 adapter 实例，保留 handle 与 workspace，可再次 `start()`；不从 manager 移除。 |
@@ -538,7 +573,7 @@ Adapter 返回的 `sandboxId` 必须与请求一致，`workspacePath` 必须是�
 
 ### 生命周期与边界
 
-1. `handle.workspacePath` 是 sandbox workspace 的宿主绝对路径；`mcpServer()` 返回的 `config` 是带 Bearer token 的 loopback HTTP descriptor。descriptor 只应留在服务端进程，不要交给浏览器或不可信租户。
+1. `handle.workspace` 是可移植的 `{ id, hostPath?, runtimePath }`；`hostPath` 是宿主路径，`runtimePath` 是 Agent/session 看到的根，两者不能互相替代。`mcpServer()` 返回的 `config` 是带 Bearer token 的 loopback HTTP descriptor；descriptor 只应留在服务端进程，不要交给浏览器或不可信租户。
 2. manager 与 session 解耦：同一个 handle 由调用方决定绑定到哪个会话、何时解除绑定；manager 不保存这种关系，也不提供 session 目录。
 3. 需要跨宿主重启复用 workspace 时，调用方应持久化 `sandboxId` 并再次传给 `start`。同一 `sandboxId` 的 workspace 在 `stop()` 和 `close()` 后保留；重新 `start()` 会得到 adapter 的新实例（token、`mcpUrl` 可能变化），已有 `ChatManager` 仍持有旧 descriptor，需要重新建立会话。再次 `start` 时显式传入的创建参数必须与 handle 原值一致，否则以 `conflict` 拒绝。
 4. `stop()` 只关闭实例，handle 仍可再次 `start()`；`close()` 成功后才从 `get`/`list` 消失。`closeAll()` 部分失败时，失败 handle 保留以便重试。
@@ -569,6 +604,7 @@ Adapter 返回的 `sandboxId` 必须与请求一致，`workspacePath` 必须是�
 | `src/contracts/` | ACP、Chat 事实与交互回答等跨层契约；不依赖控制面或视图 |
 | `src/payload/` | 工具载荷读取契约与校验 |
 | `src/agent/` | 一次激活的 ACP Session、交互、MCP 桥接，以及运行时端口 `PeriInstancePort` |
+| `src/workspace/` | 可移植的 `WorkspaceRef` 值对象与纯 JS 路径归一化/越界判断；不依赖 Node/Bun |
 | `src/chat/` | Chat 控制面：绑定状态机、动作、ownership、事实日志、生命周期与错误映射 |
 | `src/view/` | 事实到 Yjs 文档的投影与浏览器只读副本 |
 | `src/state/`、`src/sync/`、`src/transport/` | 对象状态、同步协议、通用 JSON-RPC 与帧端口 |
@@ -577,7 +613,7 @@ Adapter 返回的 `sandboxId` 必须与请求一致，`workspacePath` 必须是�
 | `src/storage/`、`src/config/`、`src/util/` | 目录读取、启动配置与通用工具 |
 | `src/entries/` | 唯一发布入口；`chat.ts` 是主入口与 `/portable` 共用的门面 |
 
-依赖方向：基础层（`contracts`/`payload`/`state`/`sync`/`transport`/`util`/`storage`/`config`/`execution`）不依赖控制面；`wasm` 不依赖 `agent`/`chat`/`view`；`agent` 不依赖 `chat`/`view`；`chat` 不依赖 `view`；`view` 不依赖 `chat`/`agent`。只有 `entries` 可以依赖所有层，任何模块都不依赖 `entries`。
+依赖方向：基础层（`contracts`/`payload`/`state`/`sync`/`transport`/`util`/`storage`/`config`/`execution`/`workspace`）不依赖控制面；`chat` 与 `sandbox` 都依赖 `workspace`，但互不依赖；`wasm` 不依赖 `agent`/`chat`/`view`；`agent` 不依赖 `chat`/`view`；`chat` 不依赖 `view`；`view` 不依赖 `chat`/`agent`。只有 `entries` 可以依赖所有层，任何模块都不依赖 `entries`。
 
 ## 构建与示例
 
@@ -604,7 +640,7 @@ Machine/workspace 绑定与 SDK 执行所有权是两件独立职责，不能互
 1. SDK 不管理 Peri 或 Workspace 进程；Workspace 文件工具必须由外部 MCP 提供。
 2. 没有 TTL、续租或心跳；崩溃清理是路由层责任。
 3. 没有共享 KV 与路由亲和时，不保证多实例安全。
-4. `store` 在 Manager 构造时校验并深拷贝（`machineId` 非空、`storage` JSON 安全）；per-chat `agent` 由 `createChat` 必填提供，缺 `cwd` 或含 `storage`/`machineId` 直接报错。
+4. `store` 在 Manager 构造时校验并深拷贝（`machineId` 非空、`storage` JSON 安全）；`createChat` 必填 `workspace` 与 `agent`，`cwd` 由 `workspace.runtimePath` 派生；含 `storage`/`machineId` 或与 workspace 冲突的 `cwd` 直接报错。
 5. `/view` 依赖 Yjs，浏览器使用需要打包；`/portable` 的准入摘要仍用 `node:crypto`。
 
 ## 参考

@@ -15,6 +15,9 @@ import {
 } from "./chat-fixtures";
 import { OwnershipProbe } from "./ownership-probe";
 
+/** 测试用 workspace 根；路径判断是纯字符串，不依赖真实目录。 */
+const TEST_WORKSPACE = { id: "ws-test", runtimePath: "/" };
+
 interface Setup {
     readonly manager: ChatManager;
     readonly ownership: OwnershipProbe;
@@ -41,7 +44,7 @@ function setup(
                     throw new Error("ACP transport must not start");
                 },
             },
-            session: { path: "/workspace" },
+            session: {},
             lifecycle,
         },
         instanceFactory: () => {
@@ -64,7 +67,7 @@ async function toggle(
     sessionId: string,
     requestId = `load-${sessionId}`,
 ) {
-    const chat = setupValue.manager.createChat({ agent: { cwd: "/" } });
+    const chat = setupValue.manager.createChat({ workspace: TEST_WORKSPACE, agent: {} });
     await chat.execute(
         ChatUserAction.changeSessionTo(sessionId, { requestId }),
     );
@@ -199,7 +202,7 @@ describe("binding concurrency and revision", () => {
             port.bindExistingGate = gate;
         });
         setupValue.database.seed(directoryEntry("session-a"));
-        const chat = setupValue.manager.createChat({ agent: { cwd: "/" } });
+        const chat = setupValue.manager.createChat({ workspace: TEST_WORKSPACE, agent: {} });
 
         const first = chat.execute(
             ChatUserAction.changeSessionTo("session-a", {
@@ -248,7 +251,7 @@ describe("binding concurrency and revision", () => {
             return originalGetSession(id);
         };
 
-        const chat = setupValue.manager.createChat({ agent: { cwd: "/" } });
+        const chat = setupValue.manager.createChat({ workspace: TEST_WORKSPACE, agent: {} });
         const loading = chat.execute(
             ChatUserAction.changeSessionTo("session-a", {
                 requestId: "loading",
@@ -261,7 +264,7 @@ describe("binding concurrency and revision", () => {
         // 索引先于 ownership：path gate 期间尚未 acquire。
         expect(setupValue.ownership.has("session-a")).toBe(false);
 
-        const contender = setupValue.manager.createChat({ agent: { cwd: "/" } });
+        const contender = setupValue.manager.createChat({ workspace: TEST_WORKSPACE, agent: {} });
         await expect(
             contender.execute(
                 ChatUserAction.changeSessionTo("session-a", {
@@ -337,7 +340,7 @@ describe("binding concurrency and revision", () => {
             ownership,
         );
         setupValue.database.seed(directoryEntry("session-1"));
-        const chat = setupValue.manager.createChat({ agent: { cwd: "/" } });
+        const chat = setupValue.manager.createChat({ workspace: TEST_WORKSPACE, agent: {} });
 
         let failure: unknown;
         try {

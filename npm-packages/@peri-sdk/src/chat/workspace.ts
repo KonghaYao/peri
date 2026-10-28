@@ -1,42 +1,13 @@
+import { isAbsolutePath, normalizePath } from "../workspace/paths";
+
 /**
  * Chat 工作区路径判断（纯 JS，不引入 `node:path`）。
  *
- * 只做“同一路径或后代”判定，不解析符号链接、不访问文件系统。接受 `/` 与
- * `\` 分隔符、`.`/`..` 段与 Windows 盘符；无法比较（相对路径、非字符串）
- * 时返回 `unknown`，由调用方跳过校验而不是猜测。
+ * 只做“同一路径或后代”判定，不解析符号链接、不访问文件系统。归一化规则见
+ * `workspace/paths`；无法比较（相对路径、非字符串）时返回 `unknown`，
+ * 由调用方决定拒绝还是跳过。
  */
 export type WorkspaceRelation = "within" | "outside" | "unknown";
-
-function normalizePath(value: unknown): string | null {
-    if (typeof value !== "string") return null;
-    let path = value.trim().replace(/\\/gu, "/");
-    if (path.length === 0) return null;
-    const drive = /^([A-Za-z]):(?:\/|$)/u.exec(path);
-    const drivePrefix = drive ? `${drive[1]!.toLowerCase()}:` : "";
-    if (drive) path = path.slice(2);
-    const absolute = path.startsWith("/");
-    const segments: string[] = [];
-    for (const segment of path.split("/")) {
-        if (segment.length === 0 || segment === ".") continue;
-        if (segment === "..") {
-            if (segments.length > 0 && segments[segments.length - 1] !== "..") {
-                segments.pop();
-            } else if (!absolute && drivePrefix === "") {
-                segments.push("..");
-            }
-            continue;
-        }
-        segments.push(segment);
-    }
-    const joined = segments.join("/");
-    if (drivePrefix !== "") return `${drivePrefix}/${joined}`;
-    if (absolute) return `/${joined}`;
-    return joined.length === 0 ? "." : joined;
-}
-
-function isAbsoluteNormalized(path: string): boolean {
-    return path.startsWith("/") || /^[a-z]:\//u.test(path);
-}
 
 /**
  * 判断 `candidate` 是否等于 `root` 或位于其下。
@@ -56,16 +27,21 @@ export function workspaceRelation(
         return "unknown";
     }
     if (
-        !isAbsoluteNormalized(normalizedRoot) ||
-        !isAbsoluteNormalized(normalizedCandidate)
+        !isAbsolutePath(normalizedRoot) ||
+        !isAbsolutePath(normalizedCandidate)
     ) {
         return "unknown";
     }
     if (normalizedRoot === "/") return "within";
     if (normalizedCandidate === normalizedRoot) return "within";
-    return normalizedCandidate.startsWith(`${normalizedRoot}/`)
-        ? "within"
-        : "outside";
+    if (normalizedCandidate.startsWith(`${normalizedRoot}/`)) return "within";
+    // Windows 盘符根（`c:/`）的尾斜杠不能用于拼接后代前缀。
+    if (/^[a-z]:\/$/u.test(normalizedRoot)) {
+        return normalizedCandidate.startsWith(normalizedRoot)
+            ? "within"
+            : "outside";
+    }
+    return "outside";
 }
 
 /** 读取 `agentConfig.cwd`；非字符串/空串视为未配置。 */

@@ -33,22 +33,30 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
 ## 组合根与装配
 
 - **平台装配**：`server/compose.ts` 读取 `ServerConfig`，构造 Store、memory KV（默认 `createStorage()`）、
-  WASM `ChatRuntime`、`session`（path/instructions/MCP）；`chatManagerOptions(config)` 是纯装配，
-  入口用它构造具体 `ChatManager`。
-- **服务端注册表**：`server/registry.ts` 的 `ChatRegistry` 持有 `ChatManagerContract` 与
-  `ChatViewRegistry`。`chats` 直接暴露句柄端口；`closeChat` 先关 SDK 句柄再释放 View；
-  `hasPendingClose` 暴露「句柄已移除、View 仍待释放」的残留；`shutdown` 先 `disposeAll` 再
-  `chats.shutdown()`。注册表只做关闭/停机编排，不提供替换端口或注册表的注入 seam。
-- **入口**：`startServer(config)` 构造 `ChatRegistry` 并组装 HTTP/WS；测试直接构造 `ChatRegistry` 或断言
-  `chatManagerOptions(config)`，生产路径没有可选注入参数。
+  WASM `ChatRuntime`、`session`（instructions/MCP；cwd 由 Workspace 派生）与固定 `WorkspaceRef`
+  （`defaultWorkspace`：`id=default`，宿主与运行时根都是 `/workspace`）；`chatManagerOptions(config)`
+  是纯装配，入口用它构造具体 `ChatManager`。
+- **服务端注册表**：`server/registry.ts` 的 `ChatRegistry` 持有 `ChatManagerContract`、
+  `ChatViewRegistry`、进程级 workspace 与 `agent` 模板。`chats` 直接暴露句柄端口；`closeChat` 先关
+  SDK 句柄再释放 View；`hasPendingClose` 暴露「句柄已移除、View 仍待释放」的残留；`shutdown` 先
+  `disposeAll` 再 `chats.shutdown()`。注册表只做关闭/停机编排与 `path → sessionPath` 映射，
+  不提供替换端口或注册表的注入 seam。
+- **入口**：`startServer(config)` 用 `defaultWorkspace(config)` 与 `defaultAgentConfig(config)` 构造
+  `ChatRegistry` 并组装 HTTP/WS；测试直接构造 `ChatRegistry` 或断言 `chatManagerOptions(config)`，
+  生产路径没有可选注入参数。
 - **应用只装配平台**：句柄、绑定、动作、事实与关闭语义都在 SDK；应用不复制准入、同步或关闭规则。
 - **视图**：`ChatViewRegistry` 由 SDK 主入口与 `/portable` 提供（`/view` 不含），每个 Chat 一个
   `ChatView`；同一 Chat 的所有 WS 连接共享视图，连接断开不释放视图；绑定换代由 View 成对替换文档。
 - **目录**：`GET /api/chats` 只读 Store，不启动历史运行实例；列表不提供每会话运行态，运行/交互事实
   只来自选中会话的 Yjs 副本。
+- **创建句柄**：`POST /api/chats` 的 `path` 是旧接口的绝对会话 cwd；`ChatRegistry` 用
+  `node:path.relative` 转为相对 `workspace.runtimePath` 的 `sessionPath`，空值表示工作区根，
+  工作区外的绝对路径以 `workspace_mismatch` 拒绝。SDK 由 `workspace.runtimePath + sessionPath`
+  派生 `agent.cwd` 与新会话 cwd，`chatConfig.session` 不再携带 `path`。
 - **打开历史**：先 `POST /api/chats` 登记空句柄，再 `change_session`；202 回执给出真实 Session ID 与
   绑定代次后才连 WS。已有控制者返回 `binding_conflict`，前端改用 Session ID 寻址既有句柄。
-- **新会话**：`create_new_session` 使用句柄 path 或 `session.path`；历史加载使用 Store 中的持久 cwd，不回退句柄 path。
+- **新会话**：`create_new_session` 使用 `workspace` 派生的会话 cwd（省略 `sessionPath` 时为工作区根）；
+  历史加载使用 Store 中的持久 cwd，不回退句柄 path。
 - **同步**：WS 二进制帧为 HELLO/SNAPSHOT/UPDATE/ACK；客户端只读，不能写 Y.Doc 或提交业务命令。
   动作回执与投影是两条通道，不能用同步帧代替 Action 回执。
 - **机器身份**：`PERI_MACHINE_ID` 必须是持久 UUID，由部署方提供；服务端不随机生成。
@@ -56,6 +64,7 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
 ## 生命周期与失败语义
 
 - `createChat` 同步登记，不启动 WASM、不取得 SessionOwnership；首次绑定动作才激活运行后端与 Session。
+  `workspace` 与 `agent` 必填，`cwd` 由 SDK 从 `workspace.runtimePath` 注入，per-chat 显式值只能与其相同。
 - 同一 Session 同时至多一个执行所有者。加载路径（`change_session`）冲突返回 `binding_conflict` 409（跨 Manager 不带
   `ownerChatId`），KV 读/写失败返回 `claim_failed` 500；新会话路径（`create_new_session`）claim 阶段失败
   （本地/KV 冲突或 KV 读/写失败）返回 `session_creation_failed` 500（stage `claim`，带 `createdSessionId`）。

@@ -21,7 +21,11 @@ interface FakeOptions {
 
 class FakeInstance implements SandboxAdapterInstance {
   readonly sandboxId: string;
-  readonly workspacePath: string;
+  readonly workspace: {
+    id: string;
+    hostPath: string;
+    runtimePath: string;
+  };
   readonly mcpServer: { type: "http"; url: string; headers: Record<string, string> };
   closeCalls = 0;
   closeDelayMs = 0;
@@ -30,7 +34,11 @@ class FakeInstance implements SandboxAdapterInstance {
 
   constructor(sandboxId: string, url: string) {
     this.sandboxId = sandboxId;
-    this.workspacePath = `/tmp/peri-sandbox/sandboxes/${sandboxId}/workspace`;
+    this.workspace = {
+      id: sandboxId,
+      hostPath: `/tmp/peri-sandbox/sandboxes/${sandboxId}/workspace`,
+      runtimePath: `/tmp/peri-sandbox/sandboxes/${sandboxId}/workspace`,
+    };
     this.mcpServer = { type: "http", url, headers: { Authorization: `Bearer ${TOKEN}` } };
   }
 
@@ -106,6 +114,22 @@ async function waitFor(check: () => boolean): Promise<void> {
 }
 
 describe("SandboxManager", () => {
+  test("a fresh handle reports no workspace before the first start", () => {
+    const adapter = new FakeAdapter();
+    const handle = new SandboxHandle(
+      {
+        sandboxId: SANDBOX_ID,
+        serverName: "workspace",
+        startupTimeoutMs: 1_000,
+        stopTimeoutMs: 1_000,
+      },
+      { getAdapter: () => adapter },
+    );
+
+    expect(handle.workspace).toBeNull();
+    expect(handle.status().workspace).toBeNull();
+  });
+
   test("requires an adapter at construction", () => {
     expect(() => new SandboxManager({} as unknown as SandboxManagerOptions)).toThrow(SandboxManagerError);
     try {
@@ -220,7 +244,34 @@ describe("SandboxManager", () => {
         headers: { Authorization: `Bearer ${TOKEN}` },
       },
     });
-    expect(handle.workspacePath).toBe(`/tmp/peri-sandbox/sandboxes/${SANDBOX_ID}/workspace`);
+    expect(handle.workspace).toEqual({
+      id: SANDBOX_ID,
+      hostPath: `/tmp/peri-sandbox/sandboxes/${SANDBOX_ID}/workspace`,
+      runtimePath: `/tmp/peri-sandbox/sandboxes/${SANDBOX_ID}/workspace`,
+    });
+  });
+
+  test("workspace may omit hostPath and is frozen and normalized", async () => {
+    const manager = new SandboxManager({
+      adapter: {
+        start: async () => ({
+          sandboxId: SANDBOX_ID,
+          workspace: { id: SANDBOX_ID, runtimePath: "/srv/workspaces/remote/../remote/" },
+          mcpServer: { type: "http", url: "http://127.0.0.1:1/mcp", headers: {} },
+          close: async () => undefined,
+        }),
+      } as unknown as SandboxAdapter,
+    });
+    const handle = await manager.start({ sandboxId: SANDBOX_ID });
+
+    expect(handle.workspace).toEqual({
+      id: SANDBOX_ID,
+      runtimePath: "/srv/workspaces/remote",
+    });
+    expect(Object.isFrozen(handle.workspace!)).toBe(true);
+    expect(handle.status().workspace).toEqual(handle.workspace);
+    expect(JSON.stringify(handle.status())).not.toContain(TOKEN);
+    await handle.close();
   });
 
   test("mcpServer requires a ready handle and reports not_ready or closed", async () => {
@@ -399,7 +450,11 @@ describe("SandboxManager", () => {
       sandboxId: SANDBOX_ID,
       serverName: "workspace",
       mcpUrl: "http://127.0.0.1:43117/mcp",
-      workspacePath: `/tmp/peri-sandbox/sandboxes/${SANDBOX_ID}/workspace`,
+      workspace: {
+        id: SANDBOX_ID,
+        hostPath: `/tmp/peri-sandbox/sandboxes/${SANDBOX_ID}/workspace`,
+        runtimePath: `/tmp/peri-sandbox/sandboxes/${SANDBOX_ID}/workspace`,
+      },
     });
   });
 
@@ -431,7 +486,11 @@ describe("SandboxManager", () => {
     expect(adapter.instances[0]?.closeCalls).toBe(1);
     expect(handle.state).toBe("stopped");
     expect(handle.status().mcpUrl).toBeNull();
-    expect(handle.workspacePath).toBe(`/tmp/peri-sandbox/sandboxes/${SANDBOX_ID}/workspace`);
+    expect(handle.workspace).toEqual({
+      id: SANDBOX_ID,
+      hostPath: `/tmp/peri-sandbox/sandboxes/${SANDBOX_ID}/workspace`,
+      runtimePath: `/tmp/peri-sandbox/sandboxes/${SANDBOX_ID}/workspace`,
+    });
     expect(manager.get(SANDBOX_ID)).toBe(handle);
 
     await handle.start();
@@ -553,7 +612,12 @@ describe("SandboxManager", () => {
   test("an invalid adapter instance reports start_failed without leaking the handle", async () => {
     const manager = new SandboxManager({
       adapter: {
-        start: async () => ({ sandboxId: SANDBOX_ID, workspacePath: "relative", mcpServer: { type: "http", url: "http://127.0.0.1:1/mcp", headers: {} }, close: async () => undefined }),
+        start: async () => ({
+          sandboxId: SANDBOX_ID,
+          workspace: { id: SANDBOX_ID, runtimePath: "relative" },
+          mcpServer: { type: "http", url: "http://127.0.0.1:1/mcp", headers: {} },
+          close: async () => undefined,
+        }),
       } as unknown as SandboxAdapter,
     });
 

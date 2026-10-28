@@ -49,7 +49,7 @@ Host process (SDK / CLI / 测试)
 | `src/instance/workspace.ts` | 目录、`.lock`、tokenFile、`deleteSandboxData`、free-space 检查 |
 | `src/instance/instance.ts` | 状态机、`status()`、`close()`/`deleteData` |
 | `src/instance/start.ts` | 启动编排、失败回卷、测试缝 `startSandboxWith` |
-| `src/adapter.ts` | `createPeriSandboxAdapter()`：结构化实现 SDK `SandboxAdapter` 契约，映射 options、token 与 `deleteData`；不 import SDK |
+| `src/adapter.ts` | `createPeriSandboxAdapter()`：结构化实现 SDK `SandboxAdapter` 契约，映射 options、`workspace`（`{ id: sandboxId, hostPath, runtimePath }`，本地两者相同）、token 与 `deleteData`；不 import SDK |
 | `src/server/http.ts` | 单实例 HTTP server、鉴权、大小/超时限制 |
 | `src/server/mcp-handler.ts` | MCP `Server`、`tools/list`、`tools/call`、`tasks/*`，pinned `2026-07-28` |
 | `src/runtime/provider.ts` | Provider 接口 + `providerFor(platform)` |

@@ -4,6 +4,7 @@ import {
   TursoStorage,
   type ChatAgentConfig,
   type ChatManagerOptions,
+  type WorkspaceRef,
 } from "@peri-code/sdk";
 import { logError } from "./logging";
 import {
@@ -23,6 +24,7 @@ import { SYSTEM_INSTRUCTIONS } from "./system-instructions";
  * 运行后端或日志的注入 seam。具体 `ChatManager` 由入口用这些选项构造。
  */
 
+const DEFAULT_WORKSPACE_ID = "default";
 const DEFAULT_MODEL_ALIAS = "sonnet";
 const HARNESS_PROVIDER_ID = "model";
 const RUNTIME_DIAGNOSTIC_LABEL = "[peri-cf] Peri server runtime diagnostic";
@@ -90,14 +92,29 @@ function wasmEnvironment(
 }
 
 /**
- * 单个 Chat 的运行配置：cwd、模型、四档 profiles 与工具面都来自服务端配置。
+ * peri-cf 只有固定工作区：宿主目录与运行时根都是 `/workspace`。
  *
- * `storage`/`machineId` 属于 Manager 部署边界（见 `chatManagerOptions.store`），
- * 不能出现在 per-chat 配置里；`ChatRegistry` 每次创建句柄时传入本对象。
+ * `id` 固定，保证同一进程内所有 Chat 的 Session 归属一致；`config` 目前不参与
+ * 派生，保留参数与 `defaultAgentConfig(config)` 对称，多工作区时从这里扩展。
+ */
+export function defaultWorkspace(_config: ServerConfig): WorkspaceRef {
+  return {
+    id: DEFAULT_WORKSPACE_ID,
+    hostPath: WORKSPACE_CWD,
+    runtimePath: WORKSPACE_CWD,
+  };
+}
+
+/**
+ * 单个 Chat 的运行配置：模型、四档 profiles 与工具面都来自服务端配置。
+ *
+ * `cwd` 不在此声明：SDK 从 `workspace.runtimePath` 派生并注入，显式声明反而
+ * 可能与工作区不一致。`storage`/`machineId` 属于 Manager 部署边界（见
+ * `chatManagerOptions.store`），不能出现在 per-chat 配置里；
+ * `ChatRegistry` 每次创建句柄时传入本对象。
  */
 export function defaultAgentConfig(config: ServerConfig): ChatAgentConfig {
   return {
-    cwd: WORKSPACE_CWD,
     // 与宿主 `configJson` 的形状一致；模型直连上游，凭据只存在于服务端进程。
     settings: {
       config: {
@@ -146,7 +163,7 @@ export function chatManagerOptions(config: ServerConfig): ChatManagerOptions {
         }),
       },
       session: {
-        path: SESSION_CWD,
+        // cwd 由 `createChat({ workspace, sessionPath })` 派生；这里只放共享配置。
         instructions: SYSTEM_INSTRUCTIONS,
         mcpServers: mcpServerDefaults(config),
       },

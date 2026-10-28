@@ -44,7 +44,7 @@ function chatServiceHarness(): {
                     throw new Error("ACP transport must not start");
                 },
             },
-            session: { path: "/workspace" },
+            session: {},
         },
         instanceFactory: () => {
             const port = new FakePort();
@@ -171,7 +171,10 @@ describe("payload read concurrency gate", () => {
 describe("payload reads across binding generations", () => {
     test("a late result or error admitted on the old binding is discarded and leaves the new binding untouched", async () => {
         const { manager, database, ports } = chatServiceHarness();
-        const chat = manager.createChat({ agent: { cwd: "/" } });
+        const chat = manager.createChat({
+            workspace: { id: "ws-payload", runtimePath: "/workspace" },
+            agent: {},
+        });
         await chat.execute(ChatUserAction.createNewSession());
         database.seed(directoryEntry("session-b"));
 

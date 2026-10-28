@@ -103,7 +103,11 @@ test('adapter maps start arguments and exposes the token only in mcpServer', asy
     signal: controller.signal,
   });
   assert.equal(instance.sandboxId, id);
-  assert.equal(instance.workspacePath, `/tmp/peri-sandbox/sandboxes/${id}/workspace`);
+  assert.deepEqual(instance.workspace, {
+    id,
+    hostPath: `/tmp/peri-sandbox/sandboxes/${id}/workspace`,
+    runtimePath: `/tmp/peri-sandbox/sandboxes/${id}/workspace`,
+  });
   assert.deepEqual(instance.mcpServer, {
     type: 'http',
     url: 'http://127.0.0.1:41000/mcp',

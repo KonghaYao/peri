@@ -10,6 +10,7 @@ import { withDeadline } from "../util/deadline";
 import type { ChatDatabase, ChatSessionDirectoryEntry } from "../contracts/chat";
 import type {
     ChatSessionInit,
+    ChatSessionOptions,
     ChatRuntime,
     ChatLifecycleOptions,
     ChatCreateOptions,
@@ -26,6 +27,7 @@ import {
 } from "./agent-config";
 import { mergeChatLifecycle, resolveChatLifecycle } from "./lifecycle";
 import { copyChatSessionInit } from "./session-init";
+import { resolveChatWorkspace } from "./workspace-config";
 import type { ChatInstanceFactory, ChatSessionIndex } from "./service-context";
 
 /**
@@ -52,13 +54,15 @@ export interface ChatManagerInternalOptions extends ChatManagerOptions {
 export class ChatManager implements ChatManagerContract {
     private readonly chats = new Map<string, ChatService>();
     private readonly sessions = new LocalSessionIndex();
+    /** 本 Manager 内 Session → workspace 的内存映射；不写入 Store/ACP 元数据。 */
+    private readonly sessionWorkspaces = new Map<string, string>();
     private readonly index: ChatSessionIndex;
 
     private readonly store: ChatStoreConfig;
     private readonly database: ChatDatabase;
     private readonly sessionOwnership: SessionOwnership;
     private readonly runtime: ChatRuntime;
-    private readonly defaultSessionInit?: ChatSessionInit;
+    private readonly defaultSessionInit?: ChatSessionOptions;
     private readonly instanceFactory: ChatInstanceFactory;
     private readonly wasmRuntimes?: WasmRuntimePool;
     private readonly lifecycle: Required<ChatLifecycleOptions>;
@@ -127,6 +131,13 @@ export class ChatManager implements ChatManagerContract {
                 ),
             release: (chatId, sessionId) =>
                 this.sessions.release(sessionId, chatId),
+            workspaceOf: (sessionId) => this.sessionWorkspaces.get(sessionId),
+            claimWorkspace: (sessionId, workspaceId) => {
+                // 首次记录即归属；同一 Session 不允许在同一 Manager 内改写。
+                if (!this.sessionWorkspaces.has(sessionId)) {
+                    this.sessionWorkspaces.set(sessionId, workspaceId);
+                }
+            },
         };
 
         if (this.runtime.kind === "wasm") {
@@ -160,15 +171,23 @@ export class ChatManager implements ChatManagerContract {
         if (!options || typeof options !== "object") {
             throw new TypeError("createChat requires an options object");
         }
-        // per-chat agent 必填；Manager 只注入 store，不做默认合并。
+        // workspace 与 agent 都是 per-chat 必填；cwd 由 workspace 派生并注入。
+        const { workspace, runtimeRoot, sessionCwd } = resolveChatWorkspace(
+            options.workspace,
+            options.sessionPath,
+        );
         const { agentConfig, agentConfigJson } = resolveChatAgentConfig(
             this.store,
             options.agent,
+            runtimeRoot,
         );
-        // 句柄级 session 整体覆盖默认值；每个 Chat 持有独立嵌套容器。
-        const sessionInit = copyChatSessionInit(
-            options.session ?? this.defaultSessionInit,
-        );
+        // 句柄级 session 整体覆盖默认值；cwd 一律由 workspace 派生。
+        const sessionInit: ChatSessionInit = {
+            ...copyChatSessionInit(
+                options.session ?? this.defaultSessionInit,
+            ),
+            path: sessionCwd,
+        };
         const lifecycle = mergeChatLifecycle(
             this.lifecycle,
             this.runtime.kind,
@@ -181,7 +200,8 @@ export class ChatManager implements ChatManagerContract {
         const id = crypto.randomUUID();
         const chat = new ChatService({
             id,
-            path: options.path,
+            workspace,
+            sessionCwd,
             sessionInit,
             agentConfig,
             agentConfigJson,

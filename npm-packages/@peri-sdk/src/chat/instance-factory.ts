@@ -65,7 +65,7 @@ function runtimeActivator(context: ChatInstanceContext): PeriHostActivator {
 /**
  * 单次激活装配。
  *
- * - `resolveSessionPath` 只读数据库中的持久 cwd，不回退句柄 path；
+ * - `resolveSessionPath` 只读数据库中的持久 cwd，不回退 workspace 派生的会话 cwd；
  * - `defaultMcpServers` 来自该 Chat 的 sessionInit，由 PeriInstance 逐激活解析；
  * - 外层 signal 只中止启动等待，生命周期预算映射到关闭选项；
  * - `agentConfigJson`/`runtimeEnv`/`payloadBudgets` 都是 per-chat 值。

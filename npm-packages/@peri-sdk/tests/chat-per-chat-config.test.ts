@@ -7,9 +7,10 @@ import type {
     ChatCreateOptions,
     ChatLifecycleOptions,
     ChatRuntime,
-    ChatSessionInit,
+    ChatSessionOptions,
 } from "../src/chat/types";
 import type { AcpMcpServer } from "../src/contracts/acp";
+import type { WorkspaceRef } from "../src/workspace/types";
 import type { WasmAcpTransport } from "../src/wasm/transport";
 import type {
     WasmRuntimeStarter,
@@ -23,6 +24,12 @@ function throwTransport(): never {
     throw new Error("ACP transport must not start");
 }
 
+/** 测试用 workspace；路径判断是纯字符串，不依赖真实目录。 */
+const ROOT_WORKSPACE: WorkspaceRef = { id: "ws-root", runtimePath: "/" };
+function workspaceAt(runtimePath: string, id = `ws:${runtimePath}`): WorkspaceRef {
+    return { id, runtimePath };
+}
+
 interface CaptureSetup {
     readonly manager: ChatManager;
     readonly contexts: ChatInstanceContext[];
@@ -33,7 +40,7 @@ interface CaptureSetup {
 function captureManager(options: {
     storage?: unknown;
     machineId?: string;
-    session?: ChatSessionInit;
+    session?: ChatSessionOptions;
     runtime?: ChatRuntime;
     lifecycle?: ChatLifecycleOptions;
 } = {}): CaptureSetup {
@@ -53,7 +60,7 @@ function captureManager(options: {
                 factory: throwTransport,
             },
             ...(options.session === undefined
-                ? { session: { path: "/workspace" } }
+                ? { session: {} }
                 : { session: options.session }),
             ...(options.lifecycle === undefined
                 ? {}
@@ -86,7 +93,7 @@ function createManager(
         kv: new OwnershipProbe(),
         chatConfig: {
             runtime: { kind: "transport", factory: throwTransport },
-            session: { path: "/workspace" },
+            session: {},
         },
         instanceFactory: () => new FakePort(),
     });
@@ -130,18 +137,18 @@ describe("per-chat agent", () => {
             kv: new OwnershipProbe(),
             chatConfig: {
                 runtime: { kind: "wasm" },
-                session: { path: "/workspace" },
+                session: {},
             },
             wasmRuntimeStarter: starter,
         });
 
         const first = manager.createChat({
-            path: "/workspace-a",
-            agent: { cwd: "/workspace-a" },
+            workspace: workspaceAt("/workspace-a", "ws-a"),
+            agent: {},
         });
         const second = manager.createChat({
-            path: "/workspace-b",
-            agent: { cwd: "/workspace-b" },
+            workspace: workspaceAt("/workspace-b", "ws-b"),
+            agent: {},
         });
         await bindNew(first, "create-a");
         await bindNew(second, "create-b");
@@ -174,12 +181,12 @@ describe("per-chat agent", () => {
         sharedStorage.nested.value = "mutated after construction";
 
         const first = manager.createChat({
-            path: "/first",
-            agent: { cwd: "/first", settings: { chat: 1 } },
+            workspace: workspaceAt("/first", "ws-first"),
+            agent: { settings: { chat: 1 } },
         });
         const second = manager.createChat({
-            path: "/second",
-            agent: { cwd: "/second", settings: { chat: 2 } },
+            workspace: workspaceAt("/second", "ws-second"),
+            agent: { settings: { chat: 2 } },
         });
         await bindNew(first);
         await bindNew(second, "create-2");
@@ -216,61 +223,77 @@ describe("per-chat agent", () => {
 
         expect(() =>
             manager.createChat({
-                agent: { cwd: "/", storage: { url: "libsql://other" } },
+                workspace: ROOT_WORKSPACE,
+                agent: { storage: { url: "libsql://other" } },
             }),
         ).toThrow(/agent\.storage is Manager-scoped/);
         expect(() =>
             manager.createChat({
-                agent: { cwd: "/", machineId: "other" },
+                workspace: ROOT_WORKSPACE,
+                agent: { machineId: "other" },
             }),
         ).toThrow(/agent\.machineId is Manager-scoped/);
         // 保留键检查先于 JSON 校验：非 JSON 值也按越权拒绝。
         expect(() =>
             manager.createChat({
-                agent: { cwd: "/", storage: undefined },
+                workspace: ROOT_WORKSPACE,
+                agent: { storage: undefined },
             }),
         ).toThrow(/agent\.storage is Manager-scoped/);
         expect(() =>
             manager.createChat({
+                workspace: ROOT_WORKSPACE,
                 agent: {
-                    cwd: "/",
                     storage: { url: "libsql://shared" },
                     machineId: "machine-1",
                 },
             }),
         ).toThrow(TypeError);
         expect(() =>
-            manager.createChat({ agent: { cwd: "/" } }),
+            manager.createChat({ workspace: ROOT_WORKSPACE, agent: {} }),
         ).not.toThrow();
     });
 
-    test("createChat requires a JSON object with a non-empty cwd", () => {
+    test("createChat requires a workspace and a JSON-safe agent object", () => {
         const manager = createManager();
         const create = (options: unknown): (() => unknown) =>
             () => manager.createChat(options as ChatCreateOptions);
 
         expect(create(undefined)).toThrow(TypeError);
         expect(create(undefined)).toThrow(/options object/);
-        expect(create({})).toThrow(TypeError);
-        expect(create({})).toThrow(/JSON object/);
-        expect(create({ agent: undefined })).toThrow(TypeError);
-        expect(create({ agent: undefined })).toThrow(/JSON object/);
-        expect(create({ agent: null })).toThrow(/JSON object/);
-        expect(create({ agent: [] })).toThrow(/JSON object/);
-        expect(create({ agent: "cwd" })).toThrow(/JSON object/);
-        expect(create({ agent: { settings: {} } })).toThrow(
-            /agent\.cwd/,
+        expect(create({})).toThrow(/workspace/);
+        expect(create({ workspace: undefined })).toThrow(/workspace/);
+        expect(create({ workspace: { id: "ws" } })).toThrow(
+            /runtimePath/,
         );
-        expect(create({ agent: { cwd: "" } })).toThrow(
-            /agent\.cwd/,
+        expect(create({ workspace: ROOT_WORKSPACE, agent: undefined })).toThrow(
+            /JSON object/,
         );
-        expect(create({ agent: { cwd: 1 } })).toThrow(
-            /agent\.cwd/,
+        expect(create({ workspace: ROOT_WORKSPACE, agent: null })).toThrow(
+            /JSON object/,
         );
-        expect(create({ agent: { cwd: "/", settings: () => {} } })).toThrow(
-            /JSON-safe agent/,
+        expect(create({ workspace: ROOT_WORKSPACE, agent: [] })).toThrow(
+            /JSON object/,
         );
-        expect(create({ agent: { cwd: "/" } })).not.toThrow();
+        expect(create({ workspace: ROOT_WORKSPACE, agent: "cwd" })).toThrow(
+            /JSON object/,
+        );
+        expect(
+            create({ workspace: ROOT_WORKSPACE, agent: { cwd: "" } }),
+        ).toThrow(/agent\.cwd/);
+        expect(
+            create({ workspace: ROOT_WORKSPACE, agent: { cwd: 1 } }),
+        ).toThrow(/agent\.cwd/);
+        expect(
+            create({
+                workspace: ROOT_WORKSPACE,
+                agent: { settings: () => {} },
+            }),
+        ).toThrow(/JSON-safe agent/);
+        expect(create({ workspace: ROOT_WORKSPACE })).toThrow(/JSON object/);
+        expect(
+            create({ workspace: ROOT_WORKSPACE, agent: {} }),
+        ).not.toThrow();
     });
 
     test("the Manager requires store with a non-empty machineId and JSON-safe storage", () => {
@@ -325,11 +348,12 @@ describe("per-chat agent", () => {
                         return new TestTransport(undefined, "session-factory");
                     },
                 },
-                session: { path: "/workspace" },
+                session: {},
             },
         });
         const chat = manager.createChat({
-            agent: { cwd: "/workspace", settings: { chat: true } },
+            workspace: workspaceAt("/workspace", "ws-factory"),
+            agent: { settings: { chat: true } },
         });
         await bindNew(chat);
 
@@ -358,7 +382,8 @@ describe("per-chat lifecycle and runtime", () => {
             },
         });
         const chat = manager.createChat({
-            agent: { cwd: "/" },
+            workspace: ROOT_WORKSPACE,
+            agent: {},
             lifecycle: {
                 closeDrainTimeoutMs: 300,
                 activationCloseTimeoutMs: 250,
@@ -396,13 +421,13 @@ describe("per-chat lifecycle and runtime", () => {
                     env: { A: "1", SHARED: "manager" },
                     onDiagnostic: (kind) => managerDiagnostics.push(kind),
                 },
-                session: { path: "/workspace" },
+                session: {},
             },
             wasmRuntimeStarter: starter,
         });
         const chat = manager.createChat({
-            path: "/workspace",
-            agent: { cwd: "/workspace" },
+            workspace: workspaceAt("/workspace", "ws-env"),
+            agent: {},
             runtime: {
                 env: { SHARED: "chat", C: "3" },
                 onDiagnostic: (kind) => chatDiagnostics.push(kind),
@@ -421,8 +446,7 @@ describe("per-chat lifecycle and runtime", () => {
 describe("session isolation", () => {
     test("nested MCP descriptors are copied per chat while acp instances stay referenced", async () => {
         const acpServer = { connect: async (): Promise<void> => {} };
-        const defaultInit: ChatSessionInit = {
-            path: "/workspace",
+        const defaultInit: ChatSessionOptions = {
             mcpServers: {
                 http: {
                     type: "http",
@@ -441,8 +465,8 @@ describe("session isolation", () => {
         const { manager, contexts } = captureManager({
             session: defaultInit,
         });
-        const first = manager.createChat({ agent: { cwd: "/" } });
-        const second = manager.createChat({ agent: { cwd: "/" } });
+        const first = manager.createChat({ workspace: ROOT_WORKSPACE, agent: {} });
+        const second = manager.createChat({ workspace: ROOT_WORKSPACE, agent: {} });
         await bindNew(first);
         await bindNew(second, "create-2");
 
@@ -475,13 +499,11 @@ describe("session isolation", () => {
 
 describe("change_session workspace guard", () => {
     test("rejects a persisted cwd outside the chat workspace and keeps the handle empty", async () => {
-        const { manager, database, ownership } = captureManager({
-            session: { path: "/workspace" },
-        });
+        const { manager, database, ownership } = captureManager();
         database.seed(directoryEntry("session-outside", "/other"));
         const chat = manager.createChat({
-            path: "/workspace",
-            agent: { cwd: "/workspace" },
+            workspace: workspaceAt("/workspace", "ws-guard"),
+            agent: {},
         });
 
         await expect(
@@ -500,61 +522,79 @@ describe("change_session workspace guard", () => {
     });
 
     test("allows the workspace root and its descendants", async () => {
-        const { manager, database } = captureManager({
-            session: { path: "/workspace" },
-        });
+        const { manager, database } = captureManager();
+        database.seed(directoryEntry("session-root", "/workspace/"));
         database.seed(directoryEntry("session-child", "/workspace/sub"));
         const chat = manager.createChat({
-            path: "/workspace/",
-            agent: { cwd: "/workspace" },
+            workspace: workspaceAt("/workspace/", "ws-descendants"),
+            agent: {},
         });
 
         await bindSession(chat, "session-child");
         expect(chat.phase).toBe("ready");
         expect(chat.sessionId).toBe("session-child");
+
+        const second = manager.createChat({
+            workspace: workspaceAt("/workspace", "ws-root-session"),
+            sessionPath: "sub",
+            agent: {},
+        });
+        await bindSession(second, "session-root");
+        expect(second.sessionId).toBe("session-root");
     });
 
-    test("uses agent.cwd as the root and skips the guard when paths cannot be compared", async () => {
-        const { manager, database } = captureManager({ session: {} });
-        database.seed(directoryEntry("inside", "/root/sub"));
-        database.seed(directoryEntry("outside", "/elsewhere"));
-        database.seed(directoryEntry("unscoped", "/anywhere"));
-
-        const scoped = manager.createChat({ agent: { cwd: "/root" } });
-        await bindSession(scoped, "inside");
-        expect(scoped.sessionId).toBe("inside");
-
-        const rejected = manager.createChat({ agent: { cwd: "/root" } });
-        await expect(bindSession(rejected, "outside")).rejects.toMatchObject({
-            code: "workspace_mismatch",
+    test("rejects a persisted cwd that cannot be compared instead of guessing", async () => {
+        const { manager, database } = captureManager();
+        database.seed(directoryEntry("relative", "relative/session"));
+        const chat = manager.createChat({
+            workspace: workspaceAt("/workspace", "ws-relative"),
+            agent: {},
         });
 
-        // 相对路径无法确定基准：跳过校验而不是猜测。
-        const unscoped = manager.createChat({
-            agent: { cwd: "relative-workspace" },
-        });
-        await bindSession(unscoped, "unscoped");
-        expect(unscoped.sessionId).toBe("unscoped");
-    });
-
-    test("rejects new session paths outside agent.cwd including prefix lookalikes", async () => {
-        const { manager } = captureManager({ session: {} });
-        const outside = manager.createChat({
-            path: "/workspace-other",
-            agent: { cwd: "/workspace" },
-        });
-        await expect(bindNew(outside)).rejects.toMatchObject({
+        await expect(bindSession(chat, "relative")).rejects.toMatchObject({
             name: "SessionWorkspaceMismatchError",
             code: "workspace_mismatch",
         });
-        expect(outside.phase).toBe("empty");
+        expect(chat.phase).toBe("empty");
 
-        const inside = manager.createChat({
-            path: "/workspace/",
-            agent: { cwd: "/workspace" },
+        // workspace.runtimePath 本身必须是绝对路径。
+        expect(() =>
+            manager.createChat({
+                workspace: { id: "ws-bad", runtimePath: "relative-workspace" },
+            }),
+        ).toThrow(/workspace\.runtimePath must be an absolute path/);
+    });
+
+    test("uses the workspaceId map before the path fallback", async () => {
+        const { manager } = captureManager();
+        const owner = manager.createChat({
+            workspace: workspaceAt("/workspace", "ws-owner"),
+            agent: {},
         });
-        await bindNew(inside, "create-2");
-        expect(inside.phase).toBe("ready");
+        const ready = await owner.execute(ChatUserAction.createNewSession({}));
+
+        const other = manager.createChat({
+            workspace: workspaceAt("/other", "ws-other"),
+            agent: {},
+        });
+        await expect(
+            bindSession(other, ready.sessionId),
+        ).rejects.toMatchObject({
+            name: "SessionWorkspaceConflictError",
+            code: "workspace_mismatch",
+            disposition: "rejected",
+            workspaceId: "ws-other",
+            sessionWorkspaceId: "ws-owner",
+        });
+        expect(other.phase).toBe("empty");
+        // 同一 workspace 的第二个 Chat 在 ownership 层冲突，而不是 workspace。
+        const sameWorkspace = manager.createChat({
+            workspace: workspaceAt("/workspace", "ws-owner"),
+            agent: {},
+        });
+        await expect(
+            bindSession(sameWorkspace, ready.sessionId),
+        ).rejects.toMatchObject({ code: "binding_conflict" });
     });
 });
 
@@ -567,10 +607,11 @@ describe("per-chat payload budgets", () => {
         };
         const { manager, contexts } = captureManager();
         const withBudgets = manager.createChat({
-            agent: { cwd: "/" },
+            workspace: ROOT_WORKSPACE,
+            agent: {},
             payloadBudgets: budgets,
         });
-        const withoutBudgets = manager.createChat({ agent: { cwd: "/" } });
+        const withoutBudgets = manager.createChat({ workspace: ROOT_WORKSPACE, agent: {} });
         await bindNew(withBudgets);
         await bindNew(withoutBudgets, "create-2");
 

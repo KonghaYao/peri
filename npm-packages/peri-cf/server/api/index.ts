@@ -8,7 +8,7 @@ import {
   type ReadPayloadOptions,
   type ToolPayloadResponse,
 } from "@peri-code/sdk";
-import { ChatCloseIncompleteError } from "@peri-code/sdk";
+import { ChatCloseIncompleteError, WorkspaceMismatchError } from "@peri-code/sdk";
 import { logError } from "../logging";
 import type { ServerInfo } from "../config";
 import {
@@ -21,7 +21,7 @@ import {
 /** HTTP 适配所需的注册表能力；不依赖父层具体装配类。 */
 type ApiRegistry = {
   chats: Pick<ChatManagerContract, "getChat" | "findChatBySession" | "listSessions">;
-  /** 注入进程级 agent 配置后创建句柄；HTTP 层不构造模型/工具面设置。 */
+  /** 注入 workspace 与进程级 agent 配置后创建句柄；HTTP 层不构造模型/工具面设置。 */
   createChat(path?: string): ChatServiceContract;
   closeChat(id: string): Promise<void>;
   hasPendingClose(id: string): boolean;
@@ -198,7 +198,19 @@ export function createApi(deps: ApiOptions): Hono {
       return c.json({ ok: false, code: "invalid_request", message: "path must be a non-empty string" }, 400);
     }
     // 只登记句柄；不新建 ACP Session，也不读取历史。
-    const chat = deps.registry.createChat(path);
+    let chat: ChatServiceContract;
+    try {
+      chat = deps.registry.createChat(path);
+    } catch (error) {
+      if (error instanceof WorkspaceMismatchError) {
+        return c.json({
+          ok: false as const,
+          code: "workspace_mismatch",
+          message: error.message,
+        }, 400);
+      }
+      throw error;
+    }
     return c.json({
       chat: {
         id: chat.id,

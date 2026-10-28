@@ -16,6 +16,12 @@ const storage = new TursoStorage({ url: "turso://<database>.turso.io", authToken
 // 宿主持久化的 UUID，标识逻辑执行环境；不要用 workspaceId/sessionId 代替。
 const machineId = "<stable-machine-uuid>";
 const workspacePath = "/tmp/peri-workspace";
+// Workspace 是 Chat 的边界：runtimePath 是 Agent/Session 看到的根，hostPath 是宿主路径。
+const workspace = {
+    id: "ws-user-request",
+    hostPath: workspacePath,
+    runtimePath: workspacePath,
+};
 // 调用方注入存储端口；unstorage 由宿主安装，SDK 不 import 其实现。
 const manager = new ChatManager({
     // Manager = 部署/Store 边界：Store 与机器身份由整个 Manager 共享。
@@ -34,7 +40,7 @@ const manager = new ChatManager({
             moduleUrl: new URL("./peri-wasm.js", import.meta.url),
         },
         session: {
-            path: workspacePath,
+            // cwd 由 workspace.runtimePath 派生；这里只声明 instructions 与额外 MCP。
             // ACP 无标准 instructions 字段；Peri 用 session/new._meta["peri.instructions"] 传递并冻结。
             instructions: "你是一个有趣的 AI 助手，能回答用户的问题",
             // 这里是额外 MCP；HTTP Workspace 由部署方另行提供。
@@ -44,15 +50,15 @@ const manager = new ChatManager({
 });
 
 // ChatManager.createChat 同步登记句柄；不启动 ACP、不取得 Session ownership。
-// agent 是 per-chat 运行配置：cwd 必填，不能声明 storage/machineId。
+// workspace 必填；agent.cwd 由 SDK 注入，不能声明 storage/machineId。
 const chat = manager.createChat({
-    path: workspacePath,
+    workspace,
+    sessionPath: "", // 相对 workspace.runtimePath；省略时为根
     agent: {
-        cwd: workspacePath,
         settings: { config: { ...config, active_alias: "sonnet" } },
     },
 });
-// 已有 Session 用 change_session；cwd 从 Store 读取，不回退句柄 path。
+// 已有 Session 用 change_session；cwd 从 Store 读取，回退到派生的会话 cwd。
 const requestedSessionId: string | null = null; // 业务请求传已有 ID 时恢复，否则新建。
 const ready = requestedSessionId === null
     ? await chat.execute(ChatUserAction.createNewSession({}))

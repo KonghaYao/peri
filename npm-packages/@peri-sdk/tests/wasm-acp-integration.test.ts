@@ -115,7 +115,8 @@ async function fixture() {
     storage: { url: databaseUrl, authToken: "local-dev" },
     machineId: "00000000-0000-4000-8000-000000000003",
   };
-  const agent = { cwd: workspace, settings };
+  const workspaceRef = { id: `ws:${workspace}`, hostPath: workspace, runtimePath: workspace };
+  const agent = { settings };
   const wasmRuntime = {
     kind: "wasm" as const,
     moduleUrl,
@@ -132,7 +133,7 @@ async function fixture() {
     kv: storagePort,
     chatConfig: {
       runtime: wasmRuntime,
-      session: { path: workspace },
+      session: {},
       lifecycle: { activationCloseTimeoutMs: 20_000, closeDrainTimeoutMs: 20_000 },
     },
   });
@@ -148,7 +149,7 @@ async function fixture() {
       "WASM integration domain or startup cleanup failed", { cause: primaryError });
     if (primaryError) throw primaryError;
   };
-  return { workspace, storage, agent, managerFor, prompts: () => prompts.length, telemetry, dispose };
+  return { workspace, workspaceRef, storage, agent, managerFor, prompts: () => prompts.length, telemetry, dispose };
 }
 
 test("create, send two inputs, cancel, close and reload run through the bundled WASM ACP Host", async () => {
@@ -156,7 +157,7 @@ test("create, send two inputs, cancel, close and reload run through the bundled 
   const manager = f.managerFor(new OwnershipProbe());
   let primaryError: unknown;
   try {
-    const chat = manager.createChat({ path: f.workspace, agent: f.agent });
+    const chat = manager.createChat({ workspace: f.workspaceRef, agent: f.agent });
     const display = new ChatDocument();
     chat.subscribeFacts({
       onBinding(_target, replay) { display.applyFacts(replay); },
@@ -185,7 +186,7 @@ test("create, send two inputs, cancel, close and reload run through the bundled 
     expect((await f.storage.listSessions(f.workspace)).some((entry) => entry.sessionId === sessionId)).toBe(true);
 
     // 新 Chat 用新的 WASM 实例加载同一会话：身份保持，历史回放进入展示文档。
-    const loadedChat = manager.createChat({ path: f.workspace, agent: f.agent });
+    const loadedChat = manager.createChat({ workspace: f.workspaceRef, agent: f.agent });
     const loaded = new ChatDocument();
     loadedChat.subscribeFacts({
       onBinding(_target, replay) { loaded.applyFacts(replay); },
@@ -217,7 +218,7 @@ test("a second manager cannot own the same real Session and never starts its tra
   let secondTransportStarted = false;
   let primaryError: unknown;
   try {
-    const first = firstManager.createChat({ path: f.workspace, agent: f.agent });
+    const first = firstManager.createChat({ workspace: f.workspaceRef, agent: f.agent });
     const session = await first.execute(ChatUserAction.createNewSession({}));
 
     // 第二管理器只提供会记录启动的 transport 运行后端；ownership 必须先于激活。
@@ -236,12 +237,12 @@ test("a second manager cannot own the same real Session and never starts its tra
             throw new Error("transport must not start before ownership acquisition succeeds");
           },
         },
-        session: { path: f.workspace },
+        session: {},
       },
     });
     const second = transportManager.createChat({
-      path: f.workspace,
-      agent: { cwd: f.workspace, settings: {} },
+      workspace: f.workspaceRef,
+      agent: { settings: {} },
     });
     await expect(second.execute(ChatUserAction.changeSessionTo(session.sessionId)))
       .rejects.toBeInstanceOf(SessionBindingConflictError);

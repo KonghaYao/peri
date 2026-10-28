@@ -8,9 +8,22 @@ import { deleteSandboxData } from './instance/workspace.js';
  * `peri-sandbox` intentionally does not import `@peri-code/sdk`: the shapes are
  * kept structurally compatible and verified by the SDK test suite.
  */
+
+/**
+ * Structural mirror of the SDK workspace value object.
+ *
+ * `runtimePath` is the root the agent/session sees; `hostPath` is the local
+ * host path. A local sandbox uses the same path for both.
+ */
+interface WorkspaceRef {
+  id: string;
+  hostPath?: string;
+  runtimePath: string;
+}
+
 interface SandboxAdapterInstance {
   readonly sandboxId: string;
-  readonly workspacePath: string;
+  readonly workspace: WorkspaceRef;
   readonly mcpServer: { type: 'http'; url: string; headers: Record<string, string> };
   close(): Promise<void>;
 }
@@ -74,8 +87,10 @@ function startOptions(
 /**
  * Build an SDK-compatible adapter around the single-instance `peri-sandbox` API.
  *
- * The returned instance exposes the bearer token only through
- * `mcpServer.headers.Authorization`; `close()` stops the sandbox without
+ * The returned instance exposes its workspace as
+ * `{ id: sandboxId, hostPath, runtimePath }`; a local sandbox uses the same
+ * path for host and runtime. The bearer token is exposed only through
+ * `mcpServer.headers.Authorization`. `close()` stops the sandbox without
  * deleting its workspace, and `deleteData()` removes persisted data by id.
  */
 export function createPeriSandboxAdapter(
@@ -97,7 +112,11 @@ export function createPeriSandboxAdapterWith(
       const instance = await start(startOptions(options, request));
       return {
         sandboxId: instance.id,
-        workspacePath: instance.workspacePath,
+        workspace: {
+          id: instance.id,
+          hostPath: instance.workspacePath,
+          runtimePath: instance.workspacePath,
+        },
         mcpServer: {
           type: 'http',
           url: instance.mcpUrl,

@@ -11,6 +11,7 @@ import {
 } from "@peri-code/sdk";
 import type { ServerConfig } from "./config";
 import { createServer } from ".";
+import { defaultWorkspace } from "./compose";
 import { ChatRegistry } from "./registry";
 
 const config: ServerConfig = {
@@ -39,7 +40,7 @@ const directory: ChatSessionDirectoryEntry = {
 };
 
 /** 进程级 agent 模板；服务接线测试不启动 WASM，只需形状合法。 */
-const AGENT: ChatAgentConfig = { cwd: "/workspace" };
+const AGENT: ChatAgentConfig = {};
 
 function stubChat(id: string): ChatServiceContract {
   return {
@@ -81,7 +82,11 @@ class FakeChatManager implements ChatManagerContract {
 
 describe("server wiring", () => {
   test("HTTP、目录与 WS 410 路由在同一服务中工作", async () => {
-    const registry = new ChatRegistry(new FakeChatManager(), AGENT);
+    const registry = new ChatRegistry(
+      new FakeChatManager(),
+      defaultWorkspace(config),
+      AGENT,
+    );
     const server = createServer(config, registry);
     try {
       const info = await fetch(`http://127.0.0.1:${server.port}/api/info`);
@@ -126,7 +131,11 @@ describe("server wiring", () => {
     const root = mkdtempSync(join(tmpdir(), "peri-cf-static-"));
     writeFileSync(join(root, "index.html"), "<h1>peri</h1>");
     writeFileSync(join(root, "asset.txt"), "asset-body");
-    const registry = new ChatRegistry(new FakeChatManager(), AGENT);
+    const registry = new ChatRegistry(
+      new FakeChatManager(),
+      defaultWorkspace(config),
+      AGENT,
+    );
     const server = createServer({ ...config, staticRoot: root }, registry);
     try {
       const index = await fetch(`http://127.0.0.1:${server.port}/`);

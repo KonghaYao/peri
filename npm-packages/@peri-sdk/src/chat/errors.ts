@@ -1,3 +1,5 @@
+import { WORKSPACE_MISMATCH } from "../workspace/errors";
+
 /**
  * Chat 动作错误契约（Phase 0 冻结）。
  *
@@ -82,12 +84,35 @@ export class SessionWorkspaceMismatchError extends ChatActionError {
     ) {
         super(
             requestId,
-            "workspace_mismatch",
+            WORKSPACE_MISMATCH,
             `Session path "${sessionPath}" is outside the chat workspace root "${workspaceRoot}"`,
             "rejected",
             options,
         );
         this.name = "SessionWorkspaceMismatchError";
+    }
+}
+
+/**
+ * Session 已记录属于另一个 workspace。
+ *
+ * 内存映射只在本 Manager 内生效；持久 Session 没有 workspace 元数据时，
+ * 由 `SessionWorkspaceMismatchError` 的路径校验兜底。动作未生效。
+ */
+export class SessionWorkspaceConflictError extends ChatActionError {
+    constructor(
+        requestId: string,
+        readonly sessionId: string,
+        readonly workspaceId: string,
+        readonly sessionWorkspaceId: string,
+    ) {
+        super(
+            requestId,
+            WORKSPACE_MISMATCH,
+            `Session "${sessionId}" belongs to workspace "${sessionWorkspaceId}", not "${workspaceId}"`,
+            "rejected",
+        );
+        this.name = "SessionWorkspaceConflictError";
     }
 }
 

@@ -4,6 +4,7 @@ import {
   ChatCloseIncompleteError,
   PayloadReadError,
   SessionCreationError,
+  SessionWorkspaceMismatchError,
   type AnswerAction,
   type CancelAction,
   type CancelRequestResult,
@@ -26,6 +27,7 @@ import {
   type TakeBackAction,
   type ToolPayloadReadRef,
   type ToolPayloadResponse,
+  type WorkspaceRef,
 } from "@peri-code/sdk";
 import type { ServerInfo } from "../config";
 import { ChatRegistry } from "../registry";
@@ -164,9 +166,15 @@ interface ApiFixture {
   closeErrors: Map<string, unknown>;
 }
 
+/** 服务唯一工作区；HTTP 层的 path 在注册表内映射为相对 sessionPath。 */
+const WORKSPACE: WorkspaceRef = {
+  id: "default",
+  hostPath: "/workspace",
+  runtimePath: "/workspace",
+};
+
 /** 进程级 agent 模板；HTTP 层只决定 path，不重复构造 settings。 */
 const AGENT: ChatAgentConfig = {
-  cwd: "/workspace",
   settings: { config: { active_alias: "sonnet" } },
 };
 
@@ -223,7 +231,7 @@ function apiWith(options: {
     },
     async shutdown() {},
   };
-  const registry = new ChatRegistry(manager, AGENT);
+  const registry = new ChatRegistry(manager, WORKSPACE, AGENT);
   const app = createApi({ registry, info });
   return {
     app,
@@ -272,12 +280,12 @@ describe("server api", () => {
     });
   });
 
-  test("createChat 只登记句柄，注入 agent 并透传 path", async () => {
+  test("createChat 只登记句柄，注入 workspace/agent 并转换 path", async () => {
     const { app, created, createOptions } = apiWith();
     const response = await app.request("/api/chats", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ path: "/workspace/" }),
+      body: JSON.stringify({ path: "/workspace/project" }),
     });
     expect(response.status).toBe(201);
     expect(await response.json()).toEqual({
@@ -285,16 +293,58 @@ describe("server api", () => {
     });
     expect(created).toHaveLength(1);
     expect(created[0]?.calls).toEqual([]);
-    expect(createOptions).toEqual([{ agent: AGENT, path: "/workspace/" }]);
+    expect(createOptions).toEqual([{
+      workspace: WORKSPACE,
+      sessionPath: "project",
+      agent: AGENT,
+    }]);
   });
 
-  test("createChat 未指定 path 时只传 agent", async () => {
+  test("createChat 未指定 path 时使用工作区根 sessionPath", async () => {
     const { app, createOptions } = apiWith();
     const response = await app.request("/api/chats", { method: "POST" });
     expect(response.status).toBe(201);
     expect(createOptions).toHaveLength(1);
+    expect(createOptions[0]?.workspace).toBe(WORKSPACE);
+    expect(createOptions[0]?.sessionPath).toBe("");
     expect(createOptions[0]?.agent).toBe(AGENT);
-    expect(createOptions[0]?.path).toBeUndefined();
+    expect(createOptions[0]).not.toHaveProperty("path");
+  });
+
+  test("createChat 拒绝工作区外绝对 path：400 workspace_mismatch 且不创建句柄", async () => {
+    const { app, created, createOptions } = apiWith();
+    for (const path of ["/workspace-other", "/tmp/project"]) {
+      const response = await app.request("/api/chats", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body).toMatchObject({ ok: false, code: "workspace_mismatch" });
+      expect(body.message).toContain("outside the workspace runtime root");
+    }
+    expect(created).toEqual([]);
+    expect(createOptions).toEqual([]);
+  });
+
+  test("session workspace 越界映射为 409 并保留 disposition", async () => {
+    const chat = stubChat("chat-1");
+    chat.failNext = new SessionWorkspaceMismatchError(
+      "request-1", "/other/session", "/workspace",
+    );
+    const { app } = apiWith({ chats: [chat] });
+    const response = await postAction(app, "chat-1", {
+      type: "change_session", requestId: "request-1", payload: { sessionId: "session-1" },
+    }, { sessionId: null, bindingRevision: 0 });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      code: "workspace_mismatch",
+      disposition: "rejected",
+      requestId: "request-1",
+      chatId: "chat-1",
+    });
   });
 
   test("非法 JSON 与非法 Action 不触达执行层", async () => {

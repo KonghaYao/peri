@@ -26,6 +26,7 @@ import {
     ChatNotReadyError,
     SessionBindingConflictError,
     SessionCreationError,
+    SessionWorkspaceConflictError,
     SessionWorkspaceMismatchError,
 } from "./errors";
 import { ChatFactHub } from "./fact-hub";
@@ -46,7 +47,7 @@ import {
     withRequestId,
 } from "./error-mapping";
 import { resolveChatLifecycle } from "./lifecycle";
-import { agentConfigCwd, workspaceRelation } from "./workspace";
+import { workspaceRelation } from "./workspace";
 import type {
     Activation,
     ChatInstanceFactory,
@@ -73,12 +74,12 @@ import type { WasmRuntimeAcquireOptions } from "../wasm/runtime-pool";
 export class ChatService implements ChatServiceContract {
     readonly id: string;
 
-    private readonly path?: string;
     private readonly sessionInit: ChatServiceOptions["sessionInit"];
     private readonly agentConfig: unknown;
-    private readonly agentConfigCwd?: string;
-    /** 当前 Chat 的 workspace root；`change_session` 的跨 workspace 护栏使用。 */
-    private readonly workspaceRoot?: string;
+    /** 当前 Chat 的 workspace；id 用于跨 workspace 判定，runtimePath 是路径边界。 */
+    private readonly workspace: ChatServiceOptions["workspace"];
+    /** 由 workspace 与 sessionPath 派生的新会话 cwd。 */
+    private readonly sessionCwd: string;
     private readonly agentConfigJson: string;
     private readonly runtime: ChatServiceOptions["runtime"];
     private readonly runtimeEnv?: ChatServiceOptions["runtimeEnv"];
@@ -115,12 +116,10 @@ export class ChatService implements ChatServiceContract {
         this.id = options.id;
         this.state = new ChatBinding(options.id);
         this.facts = new ChatFactHub(options.id);
-        this.path = options.path;
         this.sessionInit = options.sessionInit;
         this.agentConfig = options.agentConfig;
-        this.agentConfigCwd = agentConfigCwd(options.agentConfig);
-        this.workspaceRoot =
-            this.path ?? this.sessionInit.path ?? this.agentConfigCwd;
+        this.workspace = options.workspace;
+        this.sessionCwd = options.sessionCwd;
         this.agentConfigJson = options.agentConfigJson;
         this.runtime = options.runtime;
         this.runtimeEnv = options.runtimeEnv;
@@ -139,8 +138,7 @@ export class ChatService implements ChatServiceContract {
         this.candidateContext = {
             chatId: this.id,
             database: this.database,
-            path: this.path,
-            sessionInit: this.sessionInit,
+            sessionCwd: this.sessionCwd,
             index: this.index,
             acquireSession: (sessionId) => this.acquireSession(sessionId),
             releaseOwnership: (sessionId) => this.releaseOwnership(sessionId),
@@ -362,24 +360,7 @@ export class ChatService implements ChatServiceContract {
                 "create_new_session requires an empty chat handle",
             );
         }
-        const path = this.path ?? this.sessionInit.path;
-        if (!path) {
-            throw new ChatNotReadyError(
-                requestId,
-                "A path is required to create a new session",
-            );
-        }
-        // 运行时 cwd 由 per-chat agentConfig 决定；会话 path 必须是其内部路径。
-        if (
-            this.agentConfigCwd !== undefined &&
-            workspaceRelation(this.agentConfigCwd, path) === "outside"
-        ) {
-            throw new SessionWorkspaceMismatchError(
-                requestId,
-                path,
-                this.agentConfigCwd,
-            );
-        }
+        const path = this.sessionCwd;
         this.state.beginCreate();
         return this.mutex
             .run(() =>
@@ -554,6 +535,8 @@ export class ChatService implements ChatServiceContract {
                 );
             }
             candidate = next;
+            // 新 Session 一旦有 id 就记录所属 workspace；清理未确认期间仍有效。
+            this.index.claimWorkspace(sessionId, this.workspace.id);
             try {
                 await next.acquire();
             } catch (error) {
@@ -688,6 +671,21 @@ export class ChatService implements ChatServiceContract {
             );
         }
 
+        // workspaceId 优先于 ownership/路径：已知 Session 属于其他 workspace 时
+        // 直接拒绝，不进入索引占位或 ACP 激活。
+        const knownWorkspaceId = this.index.workspaceOf(sessionId);
+        if (
+            knownWorkspaceId !== undefined &&
+            knownWorkspaceId !== this.workspace.id
+        ) {
+            throw new SessionWorkspaceConflictError(
+                requestId,
+                sessionId,
+                this.workspace.id,
+                knownWorkspaceId,
+            );
+        }
+
         const previousPhase: "empty" | "ready" =
             observedPhase === "ready" ? "ready" : "empty";
         this.state.beginSwitch();
@@ -713,17 +711,18 @@ export class ChatService implements ChatServiceContract {
                 sessionId,
                 requestId,
             );
-            // 加载持久 Session 时不允许跨 workspace 复用当前 Chat 的 MCP/配置。
+            // 持久 Session 没有 workspace 元数据时回退路径校验；相对 cwd 无法
+            // 证明确实位于根内，同样拒绝。
             if (
-                this.workspaceRoot !== undefined &&
-                workspaceRelation(this.workspaceRoot, path) === "outside"
+                workspaceRelation(this.workspace.runtimePath, path) !== "within"
             ) {
                 throw new SessionWorkspaceMismatchError(
                     requestId,
                     path,
-                    this.workspaceRoot,
+                    this.workspace.runtimePath,
                 );
             }
+            this.index.claimWorkspace(sessionId, this.workspace.id);
             if (this.closingRequested) {
                 throw new ChatClosedError(
                     requestId,

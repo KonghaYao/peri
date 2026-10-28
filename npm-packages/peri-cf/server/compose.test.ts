@@ -4,12 +4,11 @@ import {
   type ChatRuntime,
 } from "@peri-code/sdk";
 import {
-  SESSION_CWD,
   WORKSPACE_CWD,
   type ServerConfig,
 } from "./config";
 import { SYSTEM_INSTRUCTIONS } from "./system-instructions";
-import { chatManagerOptions, defaultAgentConfig } from "./compose";
+import { chatManagerOptions, defaultAgentConfig, defaultWorkspace } from "./compose";
 
 const config: ServerConfig = {
   hostname: "127.0.0.1",
@@ -46,11 +45,18 @@ function wasmRuntime(options: ReturnType<typeof chatManagerOptions>): Extract<
 }
 
 describe("chatManagerOptions", () => {
+  test("defaultWorkspace 固定宿主与运行时根为 /workspace", () => {
+    expect(defaultWorkspace(config)).toEqual({
+      id: "default",
+      hostPath: WORKSPACE_CWD,
+      runtimePath: WORKSPACE_CWD,
+    });
+  });
+
   test("defaultAgentConfig 把模型、四档 profiles 与工具面装配成 per-chat agent", () => {
     const agent = defaultAgentConfig(config);
 
     expect(agent).toEqual({
-      cwd: WORKSPACE_CWD,
       settings: {
         config: {
           active_alias: "sonnet",
@@ -84,6 +90,8 @@ describe("chatManagerOptions", () => {
     // Store 与机器身份只属于 Manager，per-chat 声明会被 SDK 拒绝。
     expect(agent).not.toHaveProperty("storage");
     expect(agent).not.toHaveProperty("machineId");
+    // cwd 由 SDK 从 workspace.runtimePath 派生，不能与 workspace 漂移。
+    expect(agent).not.toHaveProperty("cwd");
   });
 
   test("storage 由 Manager store 使用默认 database 的纯 JSON storageConfig", () => {
@@ -106,12 +114,11 @@ describe("chatManagerOptions", () => {
     expect(options).not.toHaveProperty("agentConfig");
   });
 
-  test("session 注入会话 cwd、系统指令与远程 MCP，kv 使用进程内存储", () => {
+  test("session 注入系统指令与远程 MCP，cwd 留给 workspace 派生", () => {
     const options = chatManagerOptions(config);
 
     expect(options.kv).toBeDefined();
     expect(options.chatConfig.session).toEqual({
-      path: SESSION_CWD,
       instructions: SYSTEM_INSTRUCTIONS,
       mcpServers: {
         tools: {
@@ -121,6 +128,7 @@ describe("chatManagerOptions", () => {
         },
       },
     });
+    expect(options.chatConfig.session).not.toHaveProperty("path");
     expect(options.chatConfig.lifecycle).toBeUndefined();
   });
 

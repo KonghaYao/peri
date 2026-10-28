@@ -5,9 +5,9 @@ import type { AcpMcpServer, PeriConfig, TursoStorage } from "@peri-code/sdk";
 /** 宿主虚拟工作区的根；与 ACP 会话 cwd 分开（见 `SESSION_CWD`）。 */
 export const WORKSPACE_CWD = "/workspace";
 /**
- * ACP 会话 cwd。上游 `session/load` 用 `root.join(relative_cwd)` 复原，空 relative 会产出
- * `/workspace/`；子代理 spawn 用字符串比较，故新建会话直接以带尾斜杠的 cwd 落库。
- * 移除条件：上游改为按 `Path` 比较或在 join 后规范化。
+ * 历史 Store 中带尾斜杠的会话 cwd。目录读取仍把它作为 `currentCwd`，`/api/info`
+ * 也继续展示该值；新会话 cwd 由 `workspace.runtimePath` 派生并归一化为
+ * `/workspace`（不再保留尾斜杠）。同一次读取还以 `WORKSPACE_CWD` 兼容新值。
  */
 export const SESSION_CWD = "/workspace/";
 

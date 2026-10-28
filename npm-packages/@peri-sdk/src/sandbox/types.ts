@@ -1,3 +1,5 @@
+import type { WorkspaceRef } from "../workspace/types";
+
 /** Lifecycle states reported by one {@link SandboxHandle}. */
 export type SandboxHandleState = "idle" | "starting" | "ready" | "stopping" | "stopped" | "failed" | "closed";
 
@@ -54,7 +56,11 @@ export interface SandboxMcpHttpConfig {
 /** One started sandbox as seen through the adapter boundary. */
 export interface SandboxAdapterInstance {
   readonly sandboxId: string;
-  readonly workspacePath: string;
+  /**
+   * Workspace exposed by the sandbox. `runtimePath` is the root the agent and
+   * sessions see; `hostPath` is omitted when the sandbox has no local host path.
+   */
+  readonly workspace: WorkspaceRef;
   readonly mcpServer: SandboxMcpHttpConfig;
   close(): Promise<void>;
 }
@@ -122,7 +128,7 @@ export interface SandboxEndpoint {
   readonly sandboxId: string;
   readonly serverName: string;
   readonly mcpUrl: string;
-  readonly workspacePath: string;
+  readonly workspace: WorkspaceRef;
 }
 
 /** Local snapshot of one handle; never contains the bearer token. */
@@ -130,7 +136,7 @@ export interface SandboxStatus {
   readonly sandboxId: string;
   readonly state: SandboxHandleState;
   readonly mcpUrl: string | null;
-  readonly workspacePath: string | null;
+  readonly workspace: WorkspaceRef | null;
   readonly lastError: { code: SandboxManagerErrorCode; message: string } | null;
 }
 

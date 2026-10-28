@@ -13,6 +13,7 @@ import type { Transport } from "../transport/types";
 import type { WasmRuntimeDiagnosticKind } from "../wasm/runtime";
 import type { PeriWasmModuleFactory } from "../wasm/loader";
 import type { PeriInstanceOptions } from "../agent/peri-instance";
+import type { WorkspaceRef } from "../workspace/types";
 import type {
     AnswerAction, CancelAction, ForceSendAction, HistoryAction, SendAction, SessionAction, TakeBackAction,
 } from "./action";
@@ -84,23 +85,34 @@ export interface ChatStoreConfig {
 /**
  * 单个 Chat 的运行配置。
  *
- * `cwd` 必填；`settings`/`env` 与其余 JSON 字段可选。`storage`/`machineId`
+ * `cwd` 由 SDK 从 `ChatCreateOptions.workspace.runtimePath` 派生并注入；
+ * 调用方显式提供时必须与 `runtimePath` 相同，否则以 `workspace_mismatch`
+ * 拒绝。`settings`/`env` 与其余 JSON 字段可选。`storage`/`machineId`
  * 由 Manager 的 `store` 注入，出现在 per-chat 配置里会抛 `TypeError`。
  */
 export interface ChatAgentConfig {
-    cwd: string;
+    /** 可选；只允许等于 workspace.runtimePath，SDK 最终以该值注入。 */
+    cwd?: string;
     settings?: unknown;
     env?: Readonly<Record<string, string>>;
     [key: string]: unknown;
 }
 
-/** Session 建立输入：新会话 cwd、系统指令与 MCP 声明；嵌套容器按 Chat 深拷贝。 */
+/** Session 建立输入：cwd、系统指令与 MCP 声明；嵌套容器按 Chat 深拷贝。 */
 export interface ChatSessionInit {
     path?: string;
     instructions?: string;
     /** `acp` 型 server 实例由调用方持有；SDK 复制描述对象但不克隆实例。 */
     mcpServers?: Record<string, AcpMcpServer>;
 }
+
+/**
+ * 公开的 Session 建立配置：cwd 由 `ChatCreateOptions.workspace` 派生。
+ *
+ * `ChatSessionInit` 仍保留 `path`，供 `ChatService`/ACP 内部使用；
+ * 调用方不能通过 `chatConfig.session` 或 `createChat({ session })` 指定 cwd。
+ */
+export type ChatSessionOptions = Omit<ChatSessionInit, "path">;
 
 /** 宿主 transport 工厂每次激活收到的上下文；旧工厂可忽略新增字段。 */
 export interface ChatTransportFactoryOptions {
@@ -148,8 +160,11 @@ export interface ChatLifecycleOptions {
 /** Chat 运行配置：运行后端、Session 建立输入与生命周期预算。 */
 export interface ChatConfig {
     runtime: ChatRuntime;
-    /** Manager 级默认 Session 建立输入；`createChat({ session })` 整体覆盖。 */
-    session?: ChatSessionInit;
+    /**
+     * Manager 级默认 Session 建立输入（不含 cwd）；`createChat({ session })`
+     * 整体覆盖。cwd 一律从每个 Chat 的 `workspace.runtimePath` 派生。
+     */
+    session?: ChatSessionOptions;
     /** Manager 级默认生命周期预算；`createChat({ lifecycle })` 按字段覆盖。 */
     lifecycle?: ChatLifecycleOptions;
 }
@@ -157,15 +172,18 @@ export interface ChatConfig {
 /**
  * `createChat` 的句柄级配置。
  *
- * Manager 仍是部署/Store 边界；这里提供单个 Chat 的运行配置与 Session 输入。
- * `agent` 必填，最终配置 = 本对象 + 注入的 Manager store，每个 Chat 独立。
- * `session` 整体覆盖 Manager 默认值，不做字段合并。
+ * Manager 仍是部署/Store 边界；这里提供单个 Chat 的 workspace、运行配置与
+ * Session 输入。`workspace` 与 `agent` 必填，最终配置 = 本对象 + 注入的
+ * Manager store，每个 Chat 独立。`session` 整体覆盖 Manager 默认值，不做字段合并。
  */
 export interface ChatCreateOptions {
-    /** Per-chat 运行配置；`cwd` 必填，不能声明 `storage`/`machineId`。 */
+    /** 该 Chat 的 Workspace；`runtimePath` 决定 agent.cwd 与会话 cwd。 */
+    workspace: WorkspaceRef;
+    /** 相对 `workspace.runtimePath` 的会话 cwd；省略时为 workspace 根。 */
+    sessionPath?: string;
+    /** Per-chat 运行配置；`cwd` 由 SDK 派生，不能声明 `storage`/`machineId`。 */
     agent: ChatAgentConfig;
-    path?: string;
-    session?: ChatSessionInit;
+    session?: ChatSessionOptions;
     /**
      * Partial lifecycle overrides merged over the Manager defaults.
      * `shutdownChatTimeoutMs` stays Manager-scoped.

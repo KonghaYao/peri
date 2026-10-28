@@ -1,4 +1,6 @@
 import { cloneJsonValue } from "../util/json-value";
+import { WorkspaceMismatchError } from "../workspace/errors";
+import { normalizeAbsolutePath } from "../workspace/paths";
 import type { ChatStoreConfig } from "./types";
 
 /**
@@ -73,15 +75,17 @@ export function snapshotChatStore(store: unknown): ChatStoreConfig {
 /**
  * 组合单个 Chat 的内部 agentConfig JSON：per-chat agent 配置 + Manager store。
  *
- * - per-chat 值必须是 JSON 安全对象，`cwd` 必须是非空字符串；
+ * - per-chat 值必须是 JSON 安全对象；`cwd` 可选，显式提供时必须等于
+ *   `runtimeRoot`（否则 `workspace_mismatch`），最终由 SDK 注入该值；
  * - 顶层出现 `storage`/`machineId` 一律拒绝（即使值与 Manager 相同）；
  * - 注入 Manager 快照并再次深拷贝、冻结，每个 Chat 得到独立 JSON，不复用 Manager 引用。
  *
- * 所有校验失败抛 `TypeError`。
+ * 所有形状错误抛 `TypeError`。
  */
 export function resolveChatAgentConfig(
     store: ChatStoreConfig,
     agentConfig: unknown,
+    runtimeRoot: string,
 ): ResolvedChatAgentConfig {
     if (!isJsonObject(agentConfig)) {
         throw new TypeError(
@@ -105,13 +109,23 @@ export function resolveChatAgentConfig(
             { cause: error },
         );
     }
-    if (typeof snapshot.cwd !== "string" || snapshot.cwd.length === 0) {
-        throw new TypeError(
-            "createChat requires agent.cwd to be a non-empty string",
-        );
+    const explicitCwd = snapshot.cwd;
+    if (explicitCwd !== undefined) {
+        if (typeof explicitCwd !== "string" || explicitCwd.length === 0) {
+            throw new TypeError(
+                "createChat requires agent.cwd to be a non-empty string",
+            );
+        }
+        if (normalizeAbsolutePath(explicitCwd) !== runtimeRoot) {
+            throw new WorkspaceMismatchError(
+                `agent.cwd "${explicitCwd}" must equal workspace.runtimePath "${runtimeRoot}"`,
+            );
+        }
     }
 
     const composed: Record<string, unknown> = { ...snapshot };
+    // cwd 是派生值，不允许 per-chat 覆盖成其他路径。
+    defineEntry(composed, "cwd", runtimeRoot);
     defineEntry(composed, "storage", store.storage);
     defineEntry(composed, "machineId", store.machineId);
     // 二次深拷贝：storage 是 Manager 快照，不能让多个 Chat 共享同一 JSON 对象。

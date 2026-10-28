@@ -220,10 +220,13 @@ describe("default factory wiring", () => {
                         return transport;
                     },
                 },
-                session: { path: "/workspace" },
+                session: {},
             },
         });
-        const chat = manager.createChat({ agent: { cwd: "/" } });
+        const chat = manager.createChat({
+            workspace: { id: "ws-factory", runtimePath: "/workspace" },
+            agent: {},
+        });
 
         const ready = await chat.execute(ChatUserAction.createNewSession({}));
         expect(ready.sessionId).toBe("session-new");
@@ -244,10 +247,13 @@ describe("default factory wiring", () => {
             kv: new OwnershipProbe(),
             chatConfig: {
                 runtime: { kind: "transport", factory: () => transport },
-                session: { path: "/workspace" },
+                session: {},
             },
         });
-        const chat = manager.createChat({ agent: { cwd: "/" } });
+        const chat = manager.createChat({
+            workspace: { id: "ws-factory", runtimePath: "/workspace" },
+            agent: {},
+        });
         const notices: string[] = [];
         chat.subscribeFacts({
             onBinding(_target, replay) {
