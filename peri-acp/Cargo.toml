@@ -43,7 +43,7 @@ peri-resources = { path = "../peri-resources" }
 # （host/telemetry.rs 组装 native spool，并传入 LangfuseSession::new_owned 的
 # spool 参数）；本行只交付依赖声明，不代表 host 接线已通过。测试面复用同一依赖。
 langfuse-client = { path = "../langfuse-client" }
-agent-client-protocol = { version = "3.4", features = ["unstable"] }
+agent-client-protocol = { version = "3.5", features = ["unstable"] }
 # `unstable_mcp_over_acp`：MCP over ACP 的类型（`McpCapabilities` / `McpServer::Acp`
 # / 请求作用域的 `mcp/message`）与 ACP `mcp/*` 方法名。当前由
 # `agent-client-protocol` 的 `unstable` 特性归一化间接开启，此处显式声明，
