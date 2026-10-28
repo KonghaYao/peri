@@ -59,32 +59,54 @@
 .mobile-only { display: none; }
 .settings-shell { position: fixed; inset: 0; z-index: 40; display: grid; place-items: center; padding: 24px; overflow-y: auto; background: #f6f7f2f0; backdrop-filter: blur(3px); }
 .settings-card { width: min(100%, 540px); max-height: 100%; overflow-y: auto; padding: 24px 26px 20px; background: #fff; border: 1px solid #e7e9e1; border-radius: 18px; box-shadow: 0 14px 44px #2b3a2012; }
-.settings-head { display: flex; align-items: center; gap: 12px; }
-.settings-head h1 { margin: 0; font-size: 17px; font-weight: 550; }
-.settings-head > .icon-button { margin-left: auto; }
 .settings-intro { margin: 12px 0 18px; color: #95988d; font-size: 11px; line-height: 1.9; }
 .settings-group { border: 1px solid #eceee6; border-radius: 13px; padding: 14px 15px; margin-bottom: 12px; }
 .settings-group h2 { margin: 0 0 11px; font-size: 10px; font-weight: 500; letter-spacing: 1.4px; color: #8f9884; }
-.settings-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 11px; }
-.settings-field:last-child { margin-bottom: 0; }
-.settings-field > span { font-size: 11px; color: #6f7566; }
-.settings-field input, .settings-field select, .settings-field textarea { width: 100%; padding: 9px 11px; border: 1px solid #e0e4d8; border-radius: 9px; background: #fdfefb; color: #3e4638; font-size: 12px; }
-.settings-field input:focus, .settings-field select:focus, .settings-field textarea:focus { border-color: #a5b998; }
-.settings-field input[readonly] { background: #f4f6ef; color: #808874; }
-.settings-field textarea { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.6; }
-.settings-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 16px; }
-.settings-foot .muted { font-size: 10px; }
 .settings-problems { margin: 12px 0 0; color: #9c6238; font-size: 11px; line-height: 1.8; }
-.settings-group-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 9px; }
-.settings-group-head h2 { margin: 0; }
-.settings-add { display: inline-flex; align-items: center; gap: 4px; padding: 5px 9px; }
-.settings-hint { margin: 0 0 11px; color: #95988d; font-size: 10px; line-height: 1.8; }
+.settings-hint { margin: 10px 0 0; color: #95988d; font-size: 10px; line-height: 1.8; }
 .settings-empty { margin: 0; color: #9aa191; font-size: 11px; line-height: 1.8; }
-.mcp-server-card { border: 1px solid #e9ece2; border-radius: 11px; padding: 12px 12px 13px; margin-top: 10px; background: #fcfdfa; }
-.mcp-server-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
-.mcp-server-head h3 { flex: 1; margin: 0; font-size: 12px; font-weight: 550; color: #4d5845; overflow-wrap: anywhere; }
-.mcp-server-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 10px; }
-.mcp-problems { margin: 8px 0 0; padding-left: 17px; color: #9c6238; font-size: 10px; line-height: 1.8; }
+/* 服务端监控：macOS 系统设置式左 tab / 右详情；窄屏降级为顶部横向 tab。 */
+.monitor-card { width: min(100%, 880px); height: min(100%, 640px); max-height: 100%; display: flex; flex-direction: column; overflow: hidden; padding: 0; }
+.monitor-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 16px 20px; border-bottom: 1px solid #eef0e8; flex-shrink: 0; }
+.monitor-head h1 { margin: 0; font-size: 17px; font-weight: 550; }
+.monitor-updated { margin-left: auto; color: #95988d; font-size: 11px; white-space: nowrap; }
+.monitor-head > .icon-button { flex-shrink: 0; }
+.monitor-alert { display: flex; align-items: center; gap: 10px; margin: 10px 20px 0; padding: 9px 12px; border: 1px solid #ecd9c8; border-radius: 10px; background: #fff6ee; color: #996039; font-size: 11px; line-height: 1.7; }
+.monitor-alert > span { flex: 1; overflow-wrap: anywhere; }
+.monitor-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 208px minmax(0, 1fr); }
+.monitor-tabs { display: flex; flex-direction: column; gap: 2px; padding: 12px 10px; border-right: 1px solid #eef0e8; background: #fafbf7; overflow-y: auto; }
+.monitor-tab { display: flex; align-items: center; gap: 9px; width: 100%; padding: 9px 11px; border: 0; border-radius: 9px; background: transparent; color: #6f7566; font-size: 12px; text-align: left; }
+.monitor-tab:hover { background: #eef1e7; color: #3a483b; }
+.monitor-tab[aria-selected="true"] { background: #e5ebdd; color: #2f4a36; font-weight: 550; }
+.monitor-tab > svg { color: #8a967c; }
+.monitor-tab[aria-selected="true"] > svg { color: #426848; }
+.monitor-panel { min-height: 0; overflow-y: auto; padding: 18px 22px 22px; outline: none; }
+.monitor-section { display: flex; flex-direction: column; }
+.monitor-row { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; padding: 5px 0; font-size: 12px; }
+.monitor-row > span:first-child { flex-shrink: 0; color: #6f7566; font-size: 11px; }
+.monitor-value { color: #3e4638; text-align: right; overflow-wrap: anywhere; }
+.monitor-code { color: #3e4638; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; overflow-wrap: anywhere; text-align: right; }
+.monitor-badge { display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 999px; background: #eef1e7; color: #5a6b52; font-size: 10px; line-height: 1.6; }
+.monitor-badge[data-tone="active"], .monitor-badge[data-state="ready"] { background: #e2eee4; color: #34684f; }
+.monitor-badge[data-state="failed"], .monitor-badge[data-state="closed"], .monitor-badge[data-state="stopped"] { background: #f4e7e2; color: #8a4b3a; }
+.monitor-badge[data-state="starting"], .monitor-badge[data-state="stopping"] { background: #f4efdd; color: #7a6630; }
+.monitor-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.monitor-metric { display: flex; flex-direction: column; gap: 3px; padding: 12px 14px; border: 1px solid #eceee6; border-radius: 12px; background: #fcfdfa; }
+.monitor-metric-label { color: #8f9884; font-size: 10px; letter-spacing: .6px; }
+.monitor-metric-value { color: #2f4a36; font-size: 16px; font-weight: 550; }
+.monitor-metric-hint { color: #95988d; font-size: 10px; }
+.monitor-table-scroll { overflow-x: auto; }
+.monitor-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.monitor-table th { padding: 6px 8px; border-bottom: 1px solid #eceee6; color: #8f9884; font-size: 10px; font-weight: 500; letter-spacing: .6px; text-align: left; }
+.monitor-table td { padding: 7px 8px; border-bottom: 1px solid #f2f4ee; color: #3e4638; vertical-align: top; }
+.monitor-table tr:last-child td { border-bottom: 0; }
+.monitor-table .monitor-code { text-align: left; }
+.monitor-table .monitor-badge { white-space: nowrap; }
+.monitor-muted { color: #95988d; font-size: 10px; }
+.monitor-error-text { color: #8a4b3a; overflow-wrap: anywhere; }
+.monitor-details { margin-top: 6px; color: #6f7566; font-size: 11px; }
+.monitor-details summary { cursor: pointer; color: #5a6b52; }
+.monitor-list { margin: 7px 0 0; padding-left: 17px; line-height: 1.8; overflow-wrap: anywhere; }
 .spinning { animation: spin 1.2s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 /* pulse 仅由 Tailwind animate-pulse 消费（tailwind.css 先加载，此定义覆盖其同名 keyframes）。 */
@@ -111,7 +133,16 @@
   .topbar-name { font-size: 15px; }
   .topbar-subtitle { font-size: 10px; }
   .error-banner { margin: 10px 16px 0; padding: 8px 10px; font-size: 11px; }
-  .mcp-server-grid { grid-template-columns: 1fr; gap: 0; }
+  .settings-shell { padding: 12px; }
+  .monitor-card { width: 100%; height: 90dvh; border-radius: 14px; }
+  .monitor-head { padding: 12px 14px; gap: 8px; }
+  .monitor-head h1 { font-size: 15px; }
+  .monitor-updated { font-size: 10px; }
+  .monitor-alert { margin: 8px 14px 0; }
+  .monitor-body { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .monitor-tabs { flex-direction: row; gap: 4px; padding: 8px 10px; border-right: 0; border-bottom: 1px solid #eef0e8; overflow-x: auto; overflow-y: hidden; }
+  .monitor-tab { width: auto; flex-shrink: 0; padding: 7px 10px; }
+  .monitor-panel { padding: 14px 15px 18px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

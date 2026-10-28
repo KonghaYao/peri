@@ -18,6 +18,8 @@ export interface TimelineWorkItem {
   createdAt: string | null;
   completedAt: string | null;
   failed: boolean;
+  /** 载荷超出会话预算：结果是截断/降级展示，不代表执行失败。 */
+  degraded?: boolean;
   /** 工具记录缺失时的原因；不静默丢弃调用身份。 */
   unavailable?: string;
   tool?: ToolCall;
@@ -37,11 +39,17 @@ export type TimelineRow =
     defaultExpanded: boolean;
     /** 状态转为失败终态时即使曾手动折叠也展开一次。 */
     forceExpanded: boolean;
+    /** 已展开的干净 turn fold 下直接展示条目，不再重复组头与折叠。 */
+    bare?: boolean;
   }
   | {
     kind: 'turn-fold'; id: string; turnId: string; status: string; label: string;
+    /** 整轮工作量的紧凑摘要，接在 label 后。 */
+    summary?: string;
     failed: boolean;
     startedAt: string | null; completedAt: string | null; expanded: boolean;
+    /** 失败 turn 只展示静态摘要，不提供会隐藏失败证据的折叠开关。 */
+    static?: boolean;
   }
   | { kind: 'working'; id: string; turnId: string | null; startedAt: string | null }
   | { kind: 'error'; id: string; entryId: string; message: string }

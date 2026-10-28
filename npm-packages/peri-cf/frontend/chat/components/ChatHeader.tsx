@@ -62,9 +62,9 @@ export function ChatHeader({
         <button
           type="button"
           className="text-muted-foreground hover:bg-accent hover:text-foreground inline-flex size-8 items-center justify-center rounded-lg"
-          aria-label="服务端信息"
+          aria-label="服务端监控"
           aria-haspopup="dialog"
-          title="服务端配置"
+          title="服务端监控"
           onClick={onOpenSettings}
         >
           <Settings size={17} />

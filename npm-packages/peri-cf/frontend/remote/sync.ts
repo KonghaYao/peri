@@ -189,7 +189,11 @@ export class ChatSyncProvider {
   constructor(private readonly options: ChatSyncOptions) {
     this.unsubscribe = options.projection.subscribe(() => {
       if (this.disposed || !this.channel) return;
-      if (options.projection.status === "synced" && this.current !== "open") this.report("open");
+      if (options.projection.status === "synced") {
+        // 成功同步即清零重连预算：连续失败才消耗预算，长连接寿命内不被历史断线拖垮。
+        this.attempt = 0;
+        if (this.current !== "open") this.report("open");
+      }
     });
   }
 

@@ -14,5 +14,5 @@ export {
 } from "./interactionForm";
 export type {
   AskUserQuestion, ChatSummary, Entry, Interaction, ChatDisplayState,
-  ToolCall, ToolPayloadReader, Turn, ChatLoadState,
+  ToolCall, ToolPayloadReader, Turn, ChatLoadState, ChatSendOutcome,
 } from "./types";

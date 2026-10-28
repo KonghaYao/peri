@@ -26,6 +26,7 @@ const config: ServerConfig = {
   },
   storage: { url: "https://store.example.com", authToken: "store-secret" },
   mcpServers: [],
+  sandbox: { enabled: false, root: "/tmp/peri-sandbox" },
   wasmModuleUrl: "file:///tmp/peri-wasm.js",
   staticRoot: "/tmp/peri-cf-missing-static",
 };
@@ -86,23 +87,39 @@ describe("server wiring", () => {
       new FakeChatManager(),
       defaultWorkspace(config),
       AGENT,
+      {
+        session: { instructions: "test", mcpServers: {} },
+        sessions: { getSession: async () => null },
+      },
     );
     const server = createServer(config, registry);
     try {
-      const info = await fetch(`http://127.0.0.1:${server.port}/api/info`);
-      expect(info.status).toBe(200);
-      expect(await info.json()).toEqual({
+      const monitor = await fetch(`http://127.0.0.1:${server.port}/api/monitor`);
+      expect(monitor.status).toBe(200);
+      const monitorBody = await monitor.json();
+      expect(monitorBody).toMatchObject({
         ok: true,
-        model: {
+        llm: {
           provider: "openai",
+          activeAlias: "sonnet",
           tiers: { fable: "gpt-test", opus: "gpt-test", sonnet: "gpt-test", haiku: "gpt-test" },
           baseUrl: "https://api.example.com/v1",
         },
-        storage: { url: "https://store.example.com/" },
-        mcp: [],
-        workspace: "/workspace",
-        sessionCwd: "/workspace/",
+        mcp: { sandboxEnabled: false, remote: [], sandbox: [] },
+        wasm: { activeChats: 0 },
+        sandbox: {
+          enabled: false,
+          settings: { source: "disabled" },
+          workspacesOnDisk: null,
+          active: [],
+          starting: 0,
+        },
       });
+      expect(typeof monitorBody.generatedAt).toBe("string");
+      expect(typeof monitorBody.wasm.process.rssBytes).toBe("number");
+      expect(JSON.stringify(monitorBody)).not.toContain("model-secret");
+      expect(JSON.stringify(monitorBody)).not.toContain("store-secret");
+      expect((await fetch(`http://127.0.0.1:${server.port}/api/info`)).status).toBe(404);
 
       const chats = await fetch(`http://127.0.0.1:${server.port}/api/chats`);
       expect(chats.status).toBe(200);
@@ -135,6 +152,10 @@ describe("server wiring", () => {
       new FakeChatManager(),
       defaultWorkspace(config),
       AGENT,
+      {
+        session: { instructions: "test", mcpServers: {} },
+        sessions: { getSession: async () => null },
+      },
     );
     const server = createServer({ ...config, staticRoot: root }, registry);
     try {

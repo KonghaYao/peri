@@ -75,6 +75,7 @@ export function policyFor(options: {
       denyRead: ['/'],
       allowRead: [
         ...reads,
+        ...['/dev/null', '/dev/zero', '/dev/urandom', '/dev/random'].filter((path) => existsSync(path)),
         join(base, 'workspace'),
         join(base, 'home'),
         process.platform === 'darwin' ? macTmpPath(options.sandboxId) : '/tmp',
@@ -85,6 +86,8 @@ export function policyFor(options: {
         process.platform === 'darwin' ? macTmpPath(options.sandboxId) : '/tmp/claude',
       ],
       denyWrite: [],
+      // git init/clone 需要写 .git/config；hooks 仍受 denyWrite 默认保护。
+      allowGitConfig: true,
     },
     network: {
       allowedDomains: options.profile.allowedDomains,

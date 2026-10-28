@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { cleanBuildEnvironment, PINNED_TOOLCHAIN } from "./wasm-profile";
 
 export async function capture(command: string[], cwd: string, env?: NodeJS.ProcessEnv): Promise<string> {
@@ -51,14 +52,32 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * 从 CF 的已安装依赖解析包根，而不是读取工作区兄弟目录。
+ *
+ * 生产测试场消费 registry 上的 SDK；只有解析 `node_modules` 才能发现发布包
+ * 缺失导出或入口这类问题。
+ */
+function installedPackageRoot(packageRoot: string, specifier: string): string {
+  const entry = Bun.resolveSync(specifier, packageRoot);
+  let current = dirname(entry);
+  for (;;) {
+    if (existsSync(resolve(current, "package.json"))) return current;
+    const parent = dirname(current);
+    if (parent === current)
+      throw new Error(`Cannot locate the package root of ${specifier} from ${packageRoot}`);
+    current = parent;
+  }
+}
+
 /** WASM 入口以 SDK `package.json#exports["./wasm"]` 为唯一权威，不假设 dist 布局。 */
 async function publicWasmExports(packageRoot: string): Promise<{ sdkRoot: string; runtime: string; types: string }> {
-  const sdkRoot = resolve(packageRoot, "../@peri-sdk");
+  const sdkRoot = installedPackageRoot(packageRoot, "@peri-code/sdk");
   const manifestPath = resolve(sdkRoot, "package.json");
   let manifest: unknown;
   try { manifest = await Bun.file(manifestPath).json(); }
   catch (error) {
-    throw new Error(`Cannot read @peri-code/sdk manifest at ${manifestPath}; prepare the SDK package before building CF.`, { cause: error });
+    throw new Error(`Cannot read the installed @peri-code/sdk manifest at ${manifestPath}; run bun install in peri-cf before building.`, { cause: error });
   }
   const wasm = isRecord(manifest) && isRecord(manifest.exports) ? manifest.exports["./wasm"] : undefined;
   const types = isRecord(wasm) && typeof wasm.types === "string" ? wasm.types : undefined;
@@ -73,7 +92,7 @@ export async function requirePublicTransport(packageRoot: string): Promise<void>
   for (const [kind, relative] of [["types", types], ["import", runtime]] as const) {
     const target = resolve(sdkRoot, relative);
     if (!(await Bun.file(target).exists()))
-      throw new Error(`Missing @peri-code/sdk WASM ${kind} entry ${relative} (resolved to ${target}); rebuild @peri-code/sdk before building CF.`);
+      throw new Error(`Missing @peri-code/sdk WASM ${kind} entry ${relative} (resolved to ${target}); reinstall the published @peri-code/sdk before building CF.`);
   }
 }
 

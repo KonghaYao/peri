@@ -22,6 +22,14 @@ export type ChatLoadState = "idle" | "loading" | "ready" | "failed" | "unsupport
 
 export type SyncStatus = "connecting" | "synced" | "failed";
 
+/** 恢复入口：错误文案必须有可执行动作，不能让用户停留在无法解释的阻断态。 */
+export type ChatRecovery = "none" | "reload";
+
+/** 发送结果：202 只代表入队；`delivered` 由副本队列/用户条目结算。 */
+export type ChatSendOutcome =
+  | { delivered: true; sessionId: string }
+  | { delivered: false; sessionId: string | null; message: string };
+
 /** 控制器发布的只读视图；UI 只消费，不直接修改。 */
 export interface ChatView {
   selected: Chat | null;
@@ -31,6 +39,8 @@ export interface ChatView {
   loadState: ChatLoadState;
   liveSync: SyncStatus;
   error: string;
+  /** 当前错误对应的恢复动作；`none` 表示只能等待或 dismiss。 */
+  recovery: ChatRecovery;
 }
 
 interface ChatHandleRecord {
@@ -68,6 +78,7 @@ export interface ChatControllerDeps {
 
 const UNSUPPORTED = "会话使用了不受支持的数据版本，请刷新页面或升级应用后再继续。";
 const INITIAL_SYNC_TIMEOUT_MS = 30_000;
+const DELIVERY_UNCONFIRMED = "消息尚未确认送达，请检查连接后重试。";
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -86,7 +97,7 @@ function sameChat(left: Chat | null, right: Chat | null): boolean {
 export class ChatController {
   private view: ChatView = {
     selected: null, state: null, phase: "idle", historyReady: true,
-    loadState: "idle", liveSync: "connecting", error: "",
+    loadState: "idle", liveSync: "connecting", error: "", recovery: "none",
   };
   private readonly listeners = new Set<() => void>();
   private readonly handles = new Map<string, ChatHandleRecord>();
@@ -97,9 +108,12 @@ export class ChatController {
   private connectionError = "";
   private dismissedError = "";
   private uncertain = false;
+  private recovery: ChatRecovery = "none";
   private sending = false;
   private sendInFlight: Promise<unknown> | undefined;
+  /** 取消意图只对发起时的 running turn 有效；turn 结算或换代后自动失效。 */
   private cancelRequested = false;
+  private cancelTurnId: string | null = null;
 
   constructor(private readonly deps: ChatControllerDeps) {}
 
@@ -126,7 +140,8 @@ export class ChatController {
   async openChat(target: ChatSummary | null): Promise<boolean> {
     if (this.disposed) return false;
     const selected = target === null ? null : toChat(target);
-    if (target !== null && this.active?.chat.id === selected!.id
+    const boundId = this.active?.projection.state().chat.id ?? null;
+    if (target !== null && boundId === selected!.id
       && this.view.loadState !== "failed" && this.view.liveSync !== "failed") return true;
 
     const token = ++this.selection;
@@ -134,10 +149,11 @@ export class ChatController {
     this.actionError = "";
     this.connectionError = "";
     this.uncertain = false;
-    this.cancelRequested = false;
+    this.recovery = "none";
+    this.clearCancel();
     this.update({
       selected, state: null, phase: "loading", historyReady: false,
-      loadState: "loading", liveSync: "connecting", error: "",
+      loadState: "loading", liveSync: "connecting", error: "", recovery: "none",
     });
 
     try {
@@ -146,33 +162,94 @@ export class ChatController {
     } catch (error) {
       if (token !== this.selection || this.disposed) return false;
       this.actionError = messageOf(error);
-      this.update({ phase: "idle", loadState: "failed", historyReady: false, error: this.visibleError() });
+      this.recovery = "reload";
+      this.update({
+        phase: "idle", loadState: "failed", historyReady: false,
+        error: this.visibleError(), recovery: this.recovery,
+      });
       return false;
     }
   }
 
-  /** 失败恢复：释放本地连接后重新打开当前会话；不 cancel、不关闭服务端句柄。 */
+  /**
+   * 失败恢复：先释放本地连接，再真正重开当前会话；不 cancel、不关闭服务端句柄。
+   * 新建失败（尚无 selected）时重试新会话创建，避免「重新加载」无请求可发。
+   */
   async reloadChat(): Promise<boolean> {
-    if (this.disposed || !this.view.selected) return false;
-    if (this.view.state?.running && this.view.loadState !== "failed" && this.view.liveSync !== "failed")
-      return false;
+    if (this.disposed) return false;
+    if (!this.view.selected) return await this.openChat(null);
+    if (this.view.state?.running && !this.view.state.executionBlocked
+      && this.view.loadState !== "failed" && this.view.liveSync !== "failed") return false;
     const selected = this.view.selected;
     this.handles.delete(selected.id);
     this.uncertain = false;
+    this.recovery = "none";
     this.actionError = "";
     this.connectionError = "";
+    this.clearCancel();
+    // 先释放 active，`openChat` 也不会命中同 id 的「已打开」短路。
+    this.releaseActive();
     return await this.openChat({
       ...selected, sessionId: selected.id, title: selected.title, cwd: "", messageCount: 0, createdAt: selected.updatedAt,
     });
   }
 
   /**
-   * 发送输入：HTTP 202 表示入队被接受；返回实际接收的 sessionId。
-   * 投递确认由副本输入队列结算，见 `dispatchSend`。
+   * 关闭未确认时的逃生入口：显式关闭当前句柄（`actions.close`）后新建会话。
+   * 关闭失败保留当前连接与错误，`close_incomplete` 原样上报，不假装已关闭。
    */
-  async send(content: string): Promise<string | null> {
+  async rebuildChat(): Promise<boolean> {
+    if (this.disposed) return false;
+    const address = this.active?.address ?? this.view.selected?.id ?? null;
+    if (address) {
+      try {
+        await this.deps.actions.close(address);
+      } catch (error) {
+        this.failAction(error);
+        return false;
+      }
+    }
+    const selected = this.view.selected;
+    if (selected) this.handles.delete(selected.id);
+    this.releaseActive();
+    this.selection += 1;
+    this.uncertain = false;
+    this.recovery = "none";
+    this.actionError = "";
+    this.connectionError = "";
+    this.clearCancel();
+    return await this.openChat(null);
+  }
+
+  /**
+   * 发送输入：202 只代表入队。等副本确认投递后才算送达；
+   * 撤回/连接释放时返回未送达并保留可重试的可见错误，不静默丢输入。
+   */
+  async send(content: string): Promise<ChatSendOutcome> {
     const sent = await this.dispatchSend(content);
-    return sent?.sessionId ?? null;
+    if (!sent) {
+      return {
+        delivered: false,
+        sessionId: null,
+        message: this.actionError || DELIVERY_UNCONFIRMED,
+      };
+    }
+    try {
+      await sent.receipt;
+      this.actionError = "";
+      this.uncertain = false;
+      this.recovery = "none";
+      this.refresh();
+      return { delivered: true, sessionId: sent.sessionId };
+    } catch (error) {
+      const message = messageOf(error);
+      this.failAction(new RemoteActionError("input_not_delivered", `消息未送达：${message}`, "rejected"));
+      return {
+        delivered: false,
+        sessionId: sent.sessionId,
+        message: this.actionError || message,
+      };
+    }
   }
 
   /**
@@ -181,7 +258,7 @@ export class ChatController {
    */
   async dispatchSend(content: string): Promise<{ receipt: RemoteSendReceipt; sessionId: string } | null> {
     const text = content.trim();
-    if (this.disposed || !text || this.sending || this.uncertain || this.cancelRequested) return null;
+    if (this.disposed || !text || this.sending || this.uncertain || this.cancelPending()) return null;
     if (this.view.loadState !== "ready" && this.active) return null;
     if (!this.active) {
       if (!await this.openChat(null)) return null;
@@ -227,17 +304,23 @@ export class ChatController {
     const target = active ? this.bindingTarget(active) : null;
     if (!active || !target) return true;
     if (!this.view.state?.running && !this.view.state?.executionBlocked) return true;
-    if (this.cancelRequested) return true;
+    if (this.cancelPending()) return true;
     this.cancelRequested = true;
+    this.cancelTurnId = this.view.state?.activeTurn.turnId ?? null;
     this.refresh();
     // 保证取消不先于在途发送到达；不等待整轮执行。
     await this.sendInFlight;
     try {
       const receipt = await this.deps.actions.execute(active.address, ChatUserAction.cancel(), target);
-      if (receipt.status === "idle") this.cancelRequested = false;
+      if (receipt.status === "idle") this.clearCancel();
+      // 未知结果仍需要 reload 的说明，不能被一次成功的取消静默抹掉。
+      if (!this.uncertain) {
+        this.actionError = "";
+        this.recovery = "none";
+      }
       return true;
     } catch (error) {
-      this.cancelRequested = false;
+      this.clearCancel();
       this.failAction(error);
       return false;
     } finally {
@@ -255,6 +338,9 @@ export class ChatController {
         ChatUserAction.answer({ interactionId, answer }),
         target,
       );
+      this.actionError = "";
+      this.recovery = "none";
+      this.refresh();
     } catch (error) {
       this.failAction(error);
       throw new Error(this.actionError || messageOf(error));
@@ -305,6 +391,10 @@ export class ChatController {
 
   private async openNew(token: number): Promise<boolean> {
     const handle = await this.deps.actions.createHandle();
+    if (token !== this.selection || this.disposed) {
+      await this.closeCandidate(handle.id);
+      return false;
+    }
     let receipt: ActionReceipt;
     try {
       receipt = await this.deps.actions.execute(
@@ -322,8 +412,11 @@ export class ChatController {
       updatedAt: this.deps.now?.().toISOString() ?? new Date().toISOString(),
     };
     const record: ChatHandleRecord = { address: handle.id, handleId: handle.id, chat };
+    if (token !== this.selection || this.disposed) {
+      await this.closeCandidate(handle.id);
+      return false;
+    }
     this.handles.set(chat.id, record);
-    if (token !== this.selection || this.disposed) return false;
     return await this.activate(record, token);
   }
 
@@ -331,13 +424,19 @@ export class ChatController {
     const sessionId = target.sessionId;
     let record = this.handles.get(sessionId);
     if (!record) {
-      const handle = await this.deps.actions.createHandle();
+      const handle = await this.deps.actions.createHandle(sessionId);
+      if (token !== this.selection || this.disposed) {
+        await this.closeCandidate(handle.id);
+        return false;
+      }
+      let bound = false;
       try {
         await this.deps.actions.execute(
           handle.id,
           ChatUserAction.changeSessionTo(sessionId),
           { sessionId: null, bindingRevision: 0 },
         );
+        bound = true;
         record = { address: handle.id, handleId: handle.id, chat: toChat(target) };
       } catch (error) {
         if (error instanceof RemoteActionError && error.code === "binding_conflict") {
@@ -348,6 +447,10 @@ export class ChatController {
           await this.closeCandidate(handle.id);
           throw error;
         }
+      }
+      if (token !== this.selection || this.disposed) {
+        if (bound) await this.closeCandidate(handle.id);
+        return false;
       }
       this.handles.set(sessionId, record);
     }
@@ -414,6 +517,7 @@ export class ChatController {
       active.everReady = true;
       active.initialResolve?.(true);
     }
+    if (this.cancelRequested && !this.cancelPending()) this.clearCancel();
     this.settleDelivery(active, state);
     this.refresh();
   }
@@ -434,12 +538,16 @@ export class ChatController {
     const items = state.inputQueue?.items ?? [];
     for (const pending of [...active.pending]) {
       const item = items.find((candidate) => candidate.inputId === pending.inputId);
-      if (item?.state === "delivered" || (!item && state.running)) {
+      // 投递事实只有两种：队列结算为 delivered，或用户条目已进入时间线。
+      const deliveredEntry = state.entries.some(
+        (entry) => entry.role === "user" && entry.entryId === `turn:${pending.inputId}:user`,
+      );
+      if (item?.state === "delivered" || deliveredEntry) {
         active.pending = active.pending.filter((candidate) => candidate !== pending);
         pending.resolve();
       } else if (item?.state === "withdrawn") {
         active.pending = active.pending.filter((candidate) => candidate !== pending);
-        pending.reject(new Error("输入已撤回。"));
+        pending.reject(new Error("输入已撤回，消息未送达。"));
       }
     }
   }
@@ -472,6 +580,16 @@ export class ChatController {
     const state = active?.projection.state() ?? null;
     const readiness = state?.readiness ?? "not-ready";
     if (state && readiness !== "not-ready") active!.everReady = true;
+    if (this.cancelRequested && !this.cancelPending()) this.clearCancel();
+    // 换绑后句柄记录也跟随绑定身份，避免复用旧 sessionId 快照。
+    if (active && state?.sessionId && state.sessionId !== active.chat.id) {
+      const previousId = active.chat.id;
+      active.chat = state.chat;
+      if (this.handles.get(previousId)?.address === active.address) this.handles.delete(previousId);
+      this.handles.set(active.chat.id, {
+        address: active.address, handleId: active.handleId, chat: active.chat,
+      });
+    }
     const liveSync: SyncStatus = active?.projection.status === "synced"
       ? "synced"
       : active?.projection.status === "failed" || active?.sync.status === "failed" ? "failed" : "connecting";
@@ -479,13 +597,15 @@ export class ChatController {
     const historyReady = loadState === "ready";
     const phase = this.phase(active, state, loadState, historyReady);
     this.update({
-      selected: active?.chat ?? this.view.selected,
+      // 展示身份只跟随副本绑定；记录里的 Chat 只是尚未绑定时的占位。
+      selected: state?.chat ?? active?.chat ?? this.view.selected,
       state,
       phase,
       historyReady,
       loadState,
       liveSync,
       error: this.visibleError(),
+      recovery: this.recovery,
     });
   }
 
@@ -506,9 +626,29 @@ export class ChatController {
     if (!active) return "idle";
     if (loadState === "loading") return "loading";
     if (this.uncertain || state?.executionBlocked) return "blocked";
-    if (state?.running) return this.cancelRequested ? "cancelling" : "streaming";
+    // 已就绪但动作需要重新同步（例如绑定代次过期）：先恢复，避免重复发送同一条 409。
+    if (this.recovery === "reload" && loadState === "ready") return "blocked";
+    if (state?.running) return this.cancelPending() ? "cancelling" : "streaming";
     if (!historyReady && loadState !== "failed" && loadState !== "unsupported") return "syncing";
     return "idle";
+  }
+
+  /**
+   * 取消意图只在发起时的 running 窗口内有效。
+   * `running=false` 或 active turn 已换代即失效，避免停止后输入被永久拦住。
+   */
+  private cancelPending(): boolean {
+    if (!this.cancelRequested) return false;
+    const state = this.active?.projection.state() ?? this.view.state;
+    if (!state?.running) return false;
+    if (this.cancelTurnId !== null && state.activeTurn.turnId !== null
+      && state.activeTurn.turnId !== this.cancelTurnId) return false;
+    return true;
+  }
+
+  private clearCancel(): void {
+    this.cancelRequested = false;
+    this.cancelTurnId = null;
   }
 
   private rawError(): string {
@@ -532,9 +672,20 @@ export class ChatController {
       ? error
       : new RemoteActionError("internal_error", messageOf(error), "unknown");
     if (remote.disposition === "unknown") this.uncertain = true;
-    this.actionError = remote.disposition === "unknown"
-      ? `${remote.message} 尚未确认执行状态，请先停止任务或重新加载。`
+    // 未知结果与过期绑定都需要重新同步；普通拒绝（例如校验失败）没有恢复动作。
+    this.recovery = remote.disposition === "unknown" || remote.code === "binding_conflict"
+      ? "reload"
+      : "none";
+    const message = remote.code === "close_incomplete"
+      ? `关闭未完成：${remote.message}`
       : remote.message;
+    this.actionError = remote.disposition === "unknown"
+      ? `${message} 执行状态尚未确认，请重新加载会话后再继续。`
+      : remote.code === "binding_conflict"
+        ? `${message} 会话绑定已过期，请重新同步后再发送。`
+        : message;
+    // 新的错误必须重新可见，不能沿用上一次 dismiss 的结果。
+    this.dismissedError = "";
     this.refresh();
   }
 
@@ -546,7 +697,8 @@ export class ChatController {
       && next.historyReady === this.view.historyReady
       && next.loadState === this.view.loadState
       && next.liveSync === this.view.liveSync
-      && next.error === this.view.error) return;
+      && next.error === this.view.error
+      && next.recovery === this.view.recovery) return;
     this.view = next;
     for (const listener of [...this.listeners]) listener();
   }
@@ -554,6 +706,7 @@ export class ChatController {
   private releaseActive(): void {
     const active = this.active;
     this.active = undefined;
+    this.clearCancel();
     if (!active) return;
     for (const pending of active.pending) pending.reject(new Error("会话连接已释放。"));
     active.pending = [];

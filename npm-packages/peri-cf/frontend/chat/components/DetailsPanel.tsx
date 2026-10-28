@@ -55,7 +55,7 @@ export function DetailsPanel({ state, mode = 'all' }: { state: ChatDisplayState 
           <li>运行状态：{state.activeTurn.status ?? '空闲'}{state.running ? '（执行中）' : ''}</li>
           {state.session.activeTurnInteractionStatus && <li>等待交互：{state.session.activeTurnInteractionStatus}</li>}
           {state.session.legacyIncomplete && <li className="text-muted-foreground">历史由旧记录导入，可能缺少推理与工具细节。</li>}
-          {state.executionBlocked && <li className="text-muted-foreground">宿主执行被阻断，请先确认停止状态。</li>}
+          {state.executionBlocked && <li className="text-muted-foreground">宿主执行被阻断，请先在主列重新加载或关闭会话。</li>}
         </ul>
       </Section>
     )}

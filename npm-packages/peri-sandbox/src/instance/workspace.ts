@@ -50,6 +50,9 @@ export function makeDirectories(sandboxesRoot: string, sandboxId: string): void 
   mkdirSync(join(base, 'workspace'), { recursive: true, mode: 0o700 });
   mkdirSync(join(base, 'home'), { recursive: true, mode: 0o700 });
   mkdirSync(join(base, 'home', '.config'), { recursive: true, mode: 0o700 });
+  // 空的 git 模板目录：SRT 默认保护 .git/hooks，git init/clone 复制样本
+  // hooks 会被拒绝；模板为空即可跳过复制。
+  mkdirSync(join(base, 'home', '.git-template'), { recursive: true, mode: 0o700 });
   if (process.platform === 'darwin') {
     const tmp = macTmpPath(sandboxId);
     const existing = lstatSync(tmp, { throwIfNoEntry: false });

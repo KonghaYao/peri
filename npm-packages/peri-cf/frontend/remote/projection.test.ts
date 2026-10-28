@@ -107,6 +107,25 @@ describe('ChatProjection over ChatReplica', () => {
     expect(projection.state()).toMatchObject({ running: false, sessionId: 'session-1', bindingRevision: 1 });
   });
 
+  test('a rebind updates the displayed chat identity and session title', async () => {
+    const projection = new ChatProjection(chat);
+    const channel = new LoopbackChannel();
+    projection.connect(channel);
+    const pair = docs();
+    pair.info.set('title', '旧标题');
+    channel.deliver(frame(snapshot(pair)));
+    await settle();
+    expect(projection.state().chat).toMatchObject({ id: 'session-1', title: '旧标题' });
+
+    pair.info.set('sessionId', 'session-2');
+    pair.info.set('bindingRevision', 2);
+    pair.info.set('title', '新标题');
+    channel.deliver(encodeSyncFrame({ type: 'update', delivery: 2, update: update(pair) }));
+    await settle();
+    expect(projection.state()).toMatchObject({ sessionId: 'session-2', bindingRevision: 2 });
+    expect(projection.state().chat).toMatchObject({ id: 'session-2', title: '新标题' });
+  });
+
   test('marks unsupported schema without turning it into empty history', async () => {
     const projection = new ChatProjection(chat);
     const channel = new LoopbackChannel();

@@ -18,26 +18,29 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 
 **凭据与工具面只在服务端**：模型、Store、machineId 与远程 MCP 全部来自环境变量
 （`server/config.ts`）；前端没有 localStorage 凭据、relay 或首次运行门禁。`PERI_MCP_SERVERS` 只接受
-远程 Streamable HTTP；不启动 local-fs、模拟 Bash、stdio 或进程内 builtin。`/api/info` 只返回去敏地址。
+远程 Streamable HTTP；不启动 local-fs、模拟 Bash、stdio 或进程内 builtin。`/api/monitor` 只返回去敏地址、运行中 sandbox 与进程级内存事实。
 
 **没有访问控制**：服务不提供认证、限流或多租户隔离；部署入口鉴权是必要条件。machineId 必须是
 部署方提供的持久 UUID，服务端不随机生成。
 
 **唯一持久权威是 Turso/libSQL 的 Rust Store**；Yjs 展示态与运行元数据只在内存。新建会话经 ACP
-`session/new` + `session/rename`，默认系统指令（`server/system-instructions.ts`，经
-`_meta["peri.instructions"]`）只对新会话生效；加载历史使用 Store 中的持久 cwd。
+`session/new` + `session/rename`，默认系统指令（`server/system-instructions.ts` = BASE + OpenUI 段，经
+`_meta["peri.instructions"]`）只对新会话生效；旧会话不会获得 OpenUI 指令。加载历史使用 Store 中的持久 cwd。
 
 ## 代码布局
 
 - `frontend/remote/`：HTTP Action、WebSocket 客户端、页面控制器、目录仓储与组合根；同目录承载
-  `contracts.ts`（Zod wire/展示 DTO 与 `ServerInfo`）、`display-state.ts`（`ChatDisplayState` 物化）、
+  `contracts.ts`（Zod wire/展示 DTO 与 `MonitorSnapshot`）、`display-state.ts`（`ChatDisplayState` 物化）、
   `projection.ts`（`ChatReplica` 投影）与 `logging.ts`。
 - `server/`：`index.ts`（Hono 应用：API、静态资源与 WS 升级）、`config.ts`（环境变量与启动校验）、
   `compose.ts`（`chatManagerOptions` 平台装配）、`registry.ts`（`ChatRegistry`：View 生命周期与关闭/停机）、
   `api/index.ts`（Hono 目录/句柄/Action/payload）、`api/sync.ts`（WS → ChatYjsChannel）、
   `api/errors.ts`（错误映射）。
 - `frontend/chat/`、`frontend/components/`、`frontend/app/`：Chat 展示外壳、时间线与交互卡片；
-  `frontend/chat/runtime/askUserQuestion.ts` 承载问答表单适配；`frontend/settings/` 只读服务端信息。
+  `frontend/chat/runtime/askUserQuestion.ts` 承载问答表单适配；`frontend/settings/` 只读服务端监控。
+- `frontend/chat/openui/`：OpenUI 门面与懒加载 Renderer、围栏/action 纯函数、`library.tsx` 单一事实源、
+  vendored canvas（含 `PROVENANCE.md`）。生成产物是 `server/generated/openui.json`；服务端只读 JSON，
+  不 import 前端 library 或 React。OpenUI 模块不得 import timeline/components/runtime/composer。
 - `scripts/`：WASM 构建/provenance、开发启动与探针；`wasm/generated/` 是构建产物（gitignored），
   只由服务端加载。
 
@@ -78,7 +81,11 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
   时间线、输入区与右面板，`PendingInteractions`/`InteractionCard` 承载交互，`ChatRightPanel` 汇总
   详情、计划与任务。
 - `frontend/chat/{timeline,composer}/`：Entry → 展示行与输入区；不提供编辑/重生成/队列/附件/语音
-  handler。
+  handler。assistant 行的 `OpenUIMessage` 只在顶层完整 `openui` 围栏，或流结束后以
+  `root = Stack(` 开头的裸程序时懒加载 Renderer；校验失败、引用未解析、`incomplete`、懒加载或
+  渲染异常都回退 `MarkdownText`。复制按钮始终复制原始文本（含 DSL）。
+- OpenUI 表单值 ephemeral；`Button` action 经 `parseOpenUIAction` 路由到 `chat.send` 或
+  `window.open`（仅 http/https）。`actionsEnabled={canSend}` 在聊天忙时禁用交互。
 - `frontend/components/assistant-ui/` 只保留 vendored 审批/问答卡片与样式常量；`frontend/hooks/`、
   `frontend/lib/` 提供共用工具。上游升级手动同步，改动前读文件头定制记录。
 - 样式：`frontend/tailwind.css` 是 Tailwind 入口与主题 token；`frontend/styles.css` 保留外壳与设置页。
@@ -94,10 +101,15 @@ SDK 不感知 assistant-ui。
 `frontend/remote/contracts.ts` 与 `display-state.ts` 的 Zod schema 是浏览器侧 wire/展示 DTO 的单一
 来源。ACP 投影由 SDK `ChatView`/`ChatReplica` 负责，应用只做展示适配。
 
-**SDK dist 前置**：CF 通过 `file:../@peri-sdk` 解析 `node_modules/@peri-code/sdk`。干净 CI 先在 SDK
-执行 `MISE_ENV=wasm mise exec -- bun run build`，再在 CF 执行 `bun install --force`（file 依赖变为
-指向工作区的符号链接）；否则会使用旧 dist，表现为导出缺失或类型漂移。SDK build 依赖 Emscripten
-6.0.10 与 peri-wasm 产物，工具链不满足时构建失败，不能用旧 dist 冒充。
+**生产测试场**：CF 依赖 registry 上的 `@peri-code/sdk` 固定版本，不以源码 alias 或 `file:` 链接消费
+SDK；`server/tsconfig.json` 不映射 SDK 源码，`scripts/wasm-tools.ts` 从 `node_modules` 读取已安装包
+并校验 `exports["./wasm"]`。升级 SDK 必须显式改版本号并重装，使发布产物（入口、类型、WASM 资源）
+在 `bun run typecheck && bun test` 中被真实验证。`peri-sandbox` 未发布前用
+`file:../peri-sandbox`，CF 通过 `@peri-code/sdk/sandbox` 的 `SandboxManager` 为每个实际会话启动
+真实实例：新 Chat 先启动实例，历史会话按 Store cwd 找回同一实例，旧 `/workspace` 会话不启动。
+`server/sandbox.ts` 持有按 `sandboxId` 引用计数的租约池，`server/registry.ts` 负责把 workspace 与
+MCP 合并进 `createChat`，并在关闭/停机时释放；HTTP 只映射 `sandbox_start_failed`。
+`server/sandbox-adapter.test.ts` 校验 adapter 与已发布 `/sandbox` 的契约。
 
 ## 路由与命令
 
@@ -105,9 +117,15 @@ SDK 不感知 assistant-ui。
 - `bun run dev:server` / `dev:web`：分开启动。
 - `bun run start`：生产启动 Bun 服务（需环境变量与已构建资源）。
 - `bun run typecheck`、`bun test`、`./node_modules/.bin/vite build`：TS、行为测试与前端构建。
-- `bun run build`：`prepare:wasm` + Vite；`build:wasm` 构建 CF 专用 profile 与 provenance；
+- `bun run openui:spec` / `bun run openui:check`：从 `library.tsx` 生成/校验
+  `server/generated/openui.json`；改 library 后必须重新生成并提交。
+- `bun run build`：`openui:check` + `prepare:wasm` + Vite；`build:wasm` 构建 CF 专用 profile 与 provenance；
   `prepare:wasm` 只校验并原子发布到 `wasm/generated`。`scripts/wasm-profile.ts` 的内存常量属于 wasm
   构建输入。
+- `bun install` 的根 `postinstall` 执行 `node_modules/peri-sandbox/scripts/patch-sdk.mjs`（MCP 2.4.0
+  任务结果补丁）；使用 `--ignore-scripts` 时需手动执行。
 
-默认没有本地文件/终端工具；远程能力需经 `PERI_MCP_SERVERS` 单独配置。单进程 memory storage 不能宣称
-多实例接管；工具环境、真实模型/Store 与部署端资源仍需环境验收。
+工具面由远程 Streamable HTTP MCP 与会话 sandbox 的 MCP（名称 `sandbox`）组成；WASM 进程内没有
+文件/终端 builtin。`workspace` 是 ACP 保留名，宿主会要求资源发现，sandbox 不实现 `resources/list`，
+改名会让会话启动失败。单进程 memory storage 不能宣称多实例接管；工具环境、真实模型/Store 与部署端
+资源仍需环境验收。

@@ -1,15 +1,81 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, describe, expect, spyOn, test } from 'bun:test';
 import type { ChatShellChat } from './ChatShell';
 import { installDom } from '../../test/dom';
 
 installDom();
 
-const { cleanup, fireEvent, render, screen, within, act } = await import('@testing-library/react');
+const { cleanup, fireEvent, render, screen, within, act, waitFor } = await import('@testing-library/react');
 const { ChatShellView } = await import('./ChatShell');
 const { errorBanners } = await import('../runtime');
 const { createElement, useRef, useState } = await import('react');
 
 afterEach(() => cleanup());
+
+/** ChatShell 的 Timeline 使用 LegendList：给 happy-dom 一个最小可滚动布局。 */
+function stubShellLayout(): void {
+  class ImmediateResizeObserver {
+    constructor(private readonly callback: (entries: unknown[], observer: unknown) => void) {}
+    observe(element: Element): void {
+      this.callback([{ target: element, contentRect: element.getBoundingClientRect() }], this);
+    }
+    unobserve(): void {}
+    disconnect(): void {}
+  }
+  Object.defineProperty(globalThis, 'ResizeObserver', {
+    value: ImmediateResizeObserver, configurable: true, writable: true,
+  });
+  HTMLElement.prototype.getBoundingClientRect = function getRect(this: HTMLElement) {
+    if (this.hasAttribute('data-timeline-row-kind') || this.hasAttribute('data-timeline-row-id') ||
+      this.querySelector(':scope > [data-timeline-row-kind]')) {
+      return new DOMRect(0, 0, 760, 120);
+    }
+    if (this.classList.contains('legend-list-content-container')) return new DOMRect(0, 0, 760, 2_000);
+    return new DOMRect(0, 0, 800, 600);
+  };
+  Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+    configurable: true,
+    get(this: HTMLElement) { return this.getBoundingClientRect().height; },
+  });
+  Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+    configurable: true,
+    get(this: HTMLElement) {
+      if (this.classList.contains('legend-list-content-container')) return 2_000;
+      if (this.getAttribute('data-slot') === 'peri-timeline') return 4_000;
+      return 600;
+    },
+  });
+  HTMLElement.prototype.scrollTo = function scrollTo(
+    this: HTMLElement, options?: ScrollToOptions | number, y?: number,
+  ): void {
+    if (typeof options === 'object' && options !== null && typeof options.top === 'number') {
+      this.scrollTop = options.top;
+    } else if (typeof options === 'number' && typeof y === 'number') {
+      this.scrollLeft = options;
+      this.scrollTop = y;
+    }
+  } as typeof HTMLElement.prototype.scrollTo;
+}
+
+/** 单个 assistant 文本块；用于 OpenUI action 路由测试。 */
+function openUIState(text: string, chatId = 'chat-openui') {
+  return {
+    chat: { id: chatId, title: 'OpenUI', updatedAt: '2026-10-20T00:00:00Z' },
+    sessionId: chatId, bindingRevision: 1, running: false, executionBlocked: false, readiness: 'ready',
+    entries: [{
+      entryId: 'entry:openui', id: 'entry:openui', kind: 'message', turnId: 'turn:openui',
+      role: 'assistant', status: 'completed', createdAt: '2026-10-20T00:00:00Z',
+      createdAtSource: 'observed', completedAt: '2026-10-20T00:00:01Z', error: null,
+      blocks: [{ blockId: 'text:0', type: 'text', text }],
+    }],
+    toolCalls: [], turns: [{
+      turnId: 'turn:openui', status: 'completed', startedAt: '2026-10-20T00:00:00Z',
+      completedAt: '2026-10-20T00:00:01Z', error: null, interactionStatus: 'idle',
+    }],
+    activeTurn: { turnId: null, status: null }, session: {},
+    tasks: [], plans: { current: [], byTurn: {} }, interactions: [],
+    pendingInteractions: [], inputQueue: null,
+  };
+}
 
 const summary = (sessionId: string, title = sessionId) => ({
   sessionId, title, updatedAt: '2026-10-20T00:00:00Z',
@@ -37,7 +103,7 @@ type ChatFacade = ChatShellChat;
 
 function fakeChat(options: FakeOptions = {}) {
   const ref = { id: options.initialId ?? null };
-  const calls = { reload: 0, refresh: 0, selected: [] as (string | null)[] };
+  const calls = { reload: 0, rebuild: 0, refresh: 0, selected: [] as (string | null)[] };
   const selected = () => (ref.id ? selectedChat(ref.id) : null);
   return {
     ref,
@@ -50,8 +116,11 @@ function fakeChat(options: FakeOptions = {}) {
       refreshList: async () => { calls.refresh += 1; },
       selectChat: async () => { calls.selected.push(null); return true; },
       reloadChat: async () => { calls.reload += 1; return false; },
+      rebuildChat: async () => { calls.rebuild += 1; return false; },
       currentChatId: () => ref.id,
-      send: async () => ref.id ?? null,
+      send: async () => (ref.id
+        ? { delivered: true as const, sessionId: ref.id }
+        : { delivered: false as const, sessionId: null, message: '消息未发送。' }),
       stop: async () => true,
       dismissChatError: () => {}, dismissListError: () => {},
     } as unknown as ChatFacade,
@@ -116,7 +185,10 @@ function Harness({
     send: async () => {
       const id = createId();
       choose(id);
-      return sendFails ? null : id;
+      if (!id) return { delivered: false as const, sessionId: null, message: '消息未发送。' };
+      return sendFails
+        ? { delivered: false as const, sessionId: id, message: '消息未送达，已撤回。' }
+        : { delivered: true as const, sessionId: id };
     },
   } as ChatFacade;
 
@@ -316,5 +388,131 @@ describe('ChatShell draft migration through real input events', () => {
     expect((screen.getByLabelText('输入消息') as HTMLTextAreaElement).value).toBe('不要丢');
     await act(async () => { fireEvent.click(screen.getByText('chat-b')); });
     expect((screen.getByLabelText('输入消息') as HTMLTextAreaElement).value).toBe('B 草稿');
+  });
+});
+
+describe('ChatShell blocked-state recovery', () => {
+  test('executionBlocked shows a reason plus reload and close/rebuild actions', async () => {
+    const base = fakeChat({ initialId: 'chat-a' });
+    const chat = {
+      ...base.chat,
+      phase: 'blocked' as const,
+      state: { ...emptyState('chat-a'), executionBlocked: true } as never,
+      chatError: '',
+      banners: {},
+    };
+    render(createElement(ChatShellView, { chat: chat as ChatFacade, onOpenSettings: () => {} }));
+
+    const notice = document.querySelector('[data-slot="peri-chat-blocked"]')!;
+    expect(notice.textContent).toContain('宿主执行被阻断');
+    expect(within(notice as HTMLElement).getByText('重新加载')).toBeTruthy();
+    expect(within(notice as HTMLElement).getByText('关闭并新建')).toBeTruthy();
+    // 输入框给出真实阻断原因，而不是笼统的“等待会话同步”。
+    expect((screen.getByLabelText('输入消息') as HTMLTextAreaElement).placeholder).toContain('执行被阻断');
+
+    fireEvent.click(within(notice as HTMLElement).getByText('重新加载'));
+    expect(base.calls.reload).toBe(1);
+    await act(async () => {
+      fireEvent.click(within(notice as HTMLElement).getByText('关闭并新建'));
+      await Promise.resolve();
+    });
+    expect(base.calls.rebuild).toBe(1);
+  });
+
+  test('an unknown action result keeps its explanation and recovery on screen', () => {
+    const base = fakeChat({ initialId: 'chat-a' });
+    const message = '网络请求失败，动作执行状态未知。执行状态尚未确认，请重新加载会话后再继续。';
+    const chat = {
+      ...base.chat,
+      phase: 'blocked' as const,
+      state: emptyState('chat-a') as never,
+      chatError: message,
+      error: message,
+      banners: errorBanners({ listError: '', chatError: message, loadState: 'ready', recovery: 'reload' }),
+    };
+    render(createElement(ChatShellView, { chat: chat as ChatFacade, onOpenSettings: () => {} }));
+
+    const notice = document.querySelector('[data-slot="peri-chat-blocked"]')!;
+    expect(notice.textContent).toContain('未确认');
+    expect(within(notice as HTMLElement).getByText('重新加载')).toBeTruthy();
+    // 阻断态不能被 dismiss 成「只剩一个禁用的输入框」。
+    expect(screen.queryByLabelText('关闭错误提示')).toBeNull();
+    expect((screen.getByLabelText('输入消息') as HTMLTextAreaElement).placeholder).toContain('未确认');
+  });
+});
+
+describe('ChatShell binding-scoped draft slots', () => {
+  test('a rebind to a different session never reuses the previous draft slot', () => {
+    const base = fakeChat({ initialId: 'chat-a' });
+    const view = render(createElement(ChatShellView, {
+      chat: base.chat as ChatFacade, onOpenSettings: () => {},
+    }));
+    fireEvent.change(screen.getByLabelText('输入消息'), { target: { value: 'A 的草稿' } });
+    expect((screen.getByLabelText('输入消息') as HTMLTextAreaElement).value).toBe('A 的草稿');
+
+    // 副本换绑到新会话：展示身份跟着绑定走，草稿槽也随会话切换重置。
+    const rebound = {
+      ...base.chat,
+      selected: selectedChat('chat-b'),
+      currentChatId: () => 'chat-b',
+    };
+    view.rerender(createElement(ChatShellView, {
+      chat: rebound as ChatFacade, onOpenSettings: () => {},
+    }));
+    expect((screen.getByLabelText('输入消息') as HTMLTextAreaElement).value).toBe('');
+  });
+});
+
+describe('ChatShell OpenUI action routing', () => {
+  test('assistant Button action reuses send with compacted form values', async () => {
+    stubShellLayout();
+    const base = fakeChat({ initialId: 'chat-openui' });
+    const sent: string[] = [];
+    const program = [
+      '```openui',
+      'root = Stack([input, submit])',
+      'input = TextInput("name", "姓名", "请输入")',
+      'submit = Button("提交", @ToAssistant("提交表单"))',
+      '```',
+    ].join('\n');
+    const state = openUIState(program);
+    const chat = {
+      ...base.chat,
+      state,
+      send: async (content: string) => {
+        sent.push(content);
+        return { delivered: true as const, sessionId: 'chat-openui' };
+      },
+    } as unknown as ChatFacade;
+    render(createElement(ChatShellView, { chat, onOpenSettings: () => {} }));
+
+    fireEvent.change(await screen.findByPlaceholderText('请输入'), { target: { value: 'Ada' } });
+    fireEvent.click(screen.getByRole('button', { name: '提交' }));
+    await waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0]).toBe('提交表单\n\n表单数据：{"name":"Ada"}');
+  });
+
+  test('open_url 只对 http(s) 调用 window.open', async () => {
+    stubShellLayout();
+    const open = spyOn(window, 'open').mockImplementation(() => null);
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+    const base = fakeChat({ initialId: 'chat-open-url' });
+    const program = [
+      '```openui',
+      'root = Stack([bad, good])',
+      'bad = Button("坏", @OpenUrl("javascript:alert(1)"))',
+      'good = Button("好", @OpenUrl("https://example.com"))',
+      '```',
+    ].join('\n');
+    const chat = { ...base.chat, state: openUIState(program, 'chat-open-url') } as unknown as ChatFacade;
+    render(createElement(ChatShellView, { chat, onOpenSettings: () => {} }));
+
+    fireEvent.click(await screen.findByRole('button', { name: '坏' }));
+    expect(open).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: '好' }));
+    await waitFor(() => expect(open).toHaveBeenCalledTimes(1));
+    expect(open).toHaveBeenCalledWith('https://example.com/', '_blank', 'noopener,noreferrer');
+    open.mockRestore();
+    warn.mockRestore();
   });
 });

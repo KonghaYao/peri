@@ -1,25 +1,51 @@
 import { ChevronRight } from 'lucide-react';
 import { cn } from '@/lib';
 
-/** turn 级折叠行：已结算 turn 的 work 收束为一条摘要；失败/取消保留终态语义。 */
+/**
+ * turn 级折叠行：已结算 turn 的 work 收束为一条摘要；失败/取消保留终态语义。
+ * 有失败证据时渲染为静态摘要（无开关），避免「开关无效但失败仍可见」的矛盾语义。
+ */
 export function TurnFoldRow({
   label,
+  summary,
   expanded,
   failed = false,
+  isStatic = false,
   onToggle,
 }: {
   label: string;
+  summary?: string;
   expanded: boolean;
   failed?: boolean;
+  isStatic?: boolean;
   onToggle?: () => void;
 }) {
+  const labelClass = cn(
+    'flex w-full min-w-0 items-center gap-1.5 px-1 py-0.5 text-left text-[13px]',
+    failed ? 'text-destructive/80' : 'text-muted-foreground',
+  );
+
+  if (isStatic) {
+    return (
+      <div className="border-border/70 border-b py-1" data-slot="peri-turn-fold" data-static="true">
+        <div className={labelClass} data-turn-static="true">
+          <span className="truncate">{label}</span>
+          {summary && (
+            <span className="text-muted-foreground/60 shrink-0 text-[11px]">· {summary}</span>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="border-border/70 border-b py-1" data-slot="peri-turn-fold">
       <button
         type="button"
         className={cn(
-          'flex w-full min-w-0 items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[13px] transition-colors',
-          failed ? 'text-destructive/80 hover:text-destructive' : 'text-muted-foreground hover:text-foreground',
+          labelClass,
+          'rounded-md transition-colors',
+          failed ? 'hover:text-destructive' : 'hover:text-foreground',
         )}
         aria-expanded={expanded}
         onClick={onToggle}
@@ -30,6 +56,9 @@ export function TurnFoldRow({
           aria-hidden="true"
         />
         <span className="truncate">{label}</span>
+        {summary && (
+          <span className="text-muted-foreground/60 shrink-0 text-[11px]">· {summary}</span>
+        )}
       </button>
     </div>
   );

@@ -1,5 +1,5 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { accessSync, constants } from 'node:fs';
+import { accessSync, constants, existsSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { SandboxError } from '../instance/types.js';
 import { verifyPeriRuntime } from '../instance/settings.js';
@@ -9,6 +9,54 @@ import { srtRuntime } from './srt.js';
 import type { DoctorOptions, Provider, ProviderHandle, ProviderOptions, ProviderStartOptions } from './provider.js';
 
 const DEFAULT_STOP_TIMEOUT_MS = 15_000;
+
+/**
+ * Xcode 命令行工具目录。SRT 对 `/var/select` 的 readlink 仍会被拒绝（即使
+ * allowRead 包含该路径），`xcode-select` 因此失败；显式设置 `DEVELOPER_DIR`
+ * 可绕过 shim，让 git/python3/clang 直接找到工具链。
+ */
+function developerDir(): string | null {
+  try {
+    const target = realpathSync('/var/select/developer_dir');
+    if (existsSync(target)) return target;
+  } catch {
+    // 没有 xcode-select 链接时回退到常见安装位置。
+  }
+  return existsSync('/Library/Developer/CommandLineTools') ? '/Library/Developer/CommandLineTools' : null;
+}
+
+/**
+ * SRT 是 Bun 进程，Bun 会从 cwd 自动加载 `.env`。固定到沙箱根目录，
+ * 避免把宿主服务的凭据与代理变量带进沙箱子进程。
+ */
+export function macSpawnOptions(options: ProviderStartOptions) {
+  const developer = developerDir();
+  return {
+    detached: true,
+    stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
+    cwd: options.sandboxRoot,
+    env: {
+      PATH: [
+        dirname(process.execPath),
+        '/opt/homebrew/bin',
+        '/usr/local/bin',
+        '/usr/bin',
+        '/bin',
+        '/opt/homebrew/sbin',
+        '/usr/local/sbin',
+        '/usr/sbin',
+        '/sbin',
+      ].join(':'),
+      HOME: options.homePath,
+      XDG_CONFIG_HOME: join(options.homePath, '.config'),
+      TMPDIR: macTmpPath(options.sandboxId),
+      CLAUDE_CODE_TMPDIR: join(macTmpPath(options.sandboxId), 'claude'),
+      GIT_TEMPLATE_DIR: join(options.homePath, '.git-template'),
+      LANG: 'en_US.UTF-8',
+      ...(developer === null ? {} : { DEVELOPER_DIR: developer }),
+    },
+  };
+}
 
 /** macOS provider: SRT CLI in a detached process group, no registry. */
 export class MacProvider implements Provider {
@@ -51,28 +99,7 @@ export class MacProvider implements Provider {
         '--workspace',
         options.workspacePath,
       ],
-      {
-        detached: true,
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: {
-          PATH: [
-            dirname(process.execPath),
-            '/opt/homebrew/bin',
-            '/usr/local/bin',
-            '/usr/bin',
-            '/bin',
-            '/opt/homebrew/sbin',
-            '/usr/local/sbin',
-            '/usr/sbin',
-            '/sbin',
-          ].join(':'),
-          HOME: options.homePath,
-          XDG_CONFIG_HOME: join(options.homePath, '.config'),
-          TMPDIR: macTmpPath(options.sandboxId),
-          CLAUDE_CODE_TMPDIR: join(macTmpPath(options.sandboxId), 'claude'),
-          LANG: 'en_US.UTF-8',
-        },
-      },
+      macSpawnOptions(options),
     );
     if (!child.pid) throw new SandboxError('start_failed', 'failed to spawn SRT');
     const pid = child.pid;

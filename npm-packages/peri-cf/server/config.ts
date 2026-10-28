@@ -1,12 +1,13 @@
-import { resolve } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { AcpMcpServer, PeriConfig, TursoStorage } from "@peri-code/sdk";
 
 /** 宿主虚拟工作区的根；与 ACP 会话 cwd 分开（见 `SESSION_CWD`）。 */
 export const WORKSPACE_CWD = "/workspace";
 /**
- * 历史 Store 中带尾斜杠的会话 cwd。目录读取仍把它作为 `currentCwd`，`/api/info`
- * 也继续展示该值；新会话 cwd 由 `workspace.runtimePath` 派生并归一化为
+ * 历史 Store 中带尾斜杠的会话 cwd。目录读取仍把它作为 `currentCwd`；
+ * 新会话 cwd 由 `workspace.runtimePath` 派生并归一化为
  * `/workspace`（不再保留尾斜杠）。同一次读取还以 `WORKSPACE_CWD` 兼容新值。
  */
 export const SESSION_CWD = "/workspace/";
@@ -20,6 +21,24 @@ export type ModelTier = NonNullable<PeriConfig["config"]["active_alias"]>;
 const MODEL_PROVIDERS = ["openai", "anthropic"] as const satisfies readonly ModelProvider[];
 /** 与 peri-config 的 `Profiles` 四档一致；子 Agent 按档位取模型。 */
 export const MODEL_TIERS = ["fable", "opus", "sonnet", "haiku"] as const satisfies readonly ModelTier[];
+
+/** 每个会话一个 sandbox 的配置；`root` 是会话 cwd 的解析基准。 */
+export interface SandboxConfig {
+  enabled: boolean;
+  /** 必须绝对；适配器在该目录下创建 `<sandboxId>/workspace`。 */
+  root: string;
+  settingsPath?: string;
+  profileName?: string;
+}
+
+/**
+ * sandbox MCP 的 server key；远程 MCP 不得占用。
+ *
+ * 不能使用 ACP 保留名 `workspace`：宿主把它视为 WorkspaceRemote，要求
+ * `resources/list` 成功；sandbox MCP 只提供工具、不实现资源发现，`-32601`
+ * 会让整个会话启动失败。
+ */
+export const SANDBOX_SERVER_NAME = "sandbox";
 
 /** 服务端进程配置；进程内字段形状只在这里声明一次。 */
 export interface ServerConfig {
@@ -37,6 +56,7 @@ export interface ServerConfig {
   storage: TursoStorage["storageConfig"];
   /** 只支持远程 Streamable HTTP；本地 ACP/stdio 不随后端执行。 */
   mcpServers: { name: string; url: string; headers: { name: string; value: string }[] }[];
+  sandbox: SandboxConfig;
   /** 服务端 Emscripten 胶水位置（file URL 或 http(s) URL）。 */
   wasmModuleUrl: string;
   /** 生产环境的前端静态目录；不存在时只提供 API。 */
@@ -180,6 +200,43 @@ function parseWasmModuleUrl(env: ServerEnvironment, packageRoot: string): string
   return pathToFileURL(path).href;
 }
 
+const DEFAULT_SANDBOX_ROOT = join(homedir(), ".peri-sandbox", "sandboxes");
+
+function parseBoolean(value: string): boolean | undefined {
+  const normalized = value.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return undefined;
+}
+
+/** sandbox 默认启用；禁用后回退到固定 `/workspace`（历史会话仍可打开）。 */
+function parseSandbox(
+  env: ServerEnvironment,
+  problems: string[],
+  mcpServers: ServerConfig["mcpServers"],
+): SandboxConfig {
+  const rawEnabled = text(env.PERI_SANDBOX_ENABLED);
+  const enabled = rawEnabled ? parseBoolean(rawEnabled) : true;
+  if (enabled === undefined) problems.push("PERI_SANDBOX_ENABLED 必须是 true/false");
+
+  const rawRoot = text(env.PERI_SANDBOX_ROOT);
+  if (rawRoot && !isAbsolute(rawRoot)) problems.push("PERI_SANDBOX_ROOT 必须是绝对路径");
+  const rawSettings = text(env.PERI_SANDBOX_SETTINGS);
+  if (rawSettings && !isAbsolute(rawSettings)) problems.push("PERI_SANDBOX_SETTINGS 必须是绝对路径");
+
+  const resolvedEnabled = enabled ?? true;
+  if (resolvedEnabled && mcpServers.some((server) => server.name === SANDBOX_SERVER_NAME)) {
+    problems.push(`PERI_MCP_SERVERS 名称 "${SANDBOX_SERVER_NAME}" 保留给 sandbox`);
+  }
+  const profileName = text(env.PERI_SANDBOX_PROFILE);
+  return {
+    enabled: resolvedEnabled,
+    root: resolve(rawRoot || DEFAULT_SANDBOX_ROOT),
+    ...(rawSettings ? { settingsPath: resolve(rawSettings) } : {}),
+    ...(profileName ? { profileName } : {}),
+  };
+}
+
 /**
  * 服务端配置全部来自环境变量；密钥不进入前端，也不写入日志。
  * 返回问题清单而不是抛错，便于启动入口一次性报告所有缺失项。
@@ -198,6 +255,7 @@ export function loadServerConfig(
   const model = parseModel(env, problems);
   const storage = parseStorage(env, problems);
   const mcpServers = parseMcpServers(env, problems);
+  const sandbox = parseSandbox(env, problems, mcpServers);
 
   // 任何解析问题都拒绝启动：宁可明确失败，也不带着缺失的 MCP/凭据执行。
   if (problems.length > 0 || !model || !storage || port === undefined || !MACHINE_ID_PATTERN.test(machineId))
@@ -212,6 +270,7 @@ export function loadServerConfig(
       model,
       storage,
       mcpServers,
+      sandbox,
       wasmModuleUrl: parseWasmModuleUrl(env, packageRoot),
       staticRoot: text(env.PERI_STATIC_ROOT)
         ? resolve(packageRoot, text(env.PERI_STATIC_ROOT))
@@ -237,26 +296,17 @@ export function mcpServerDefaults(
   }]));
 }
 
-/** 不暴露 token / query / userinfo 的配置摘要，供前端设置页只读展示。 */
-export function publicServerInfo(
-  config: Pick<ServerConfig, "model" | "storage" | "mcpServers">,
-) {
-  const origin = (raw: string) => {
-    try {
-      const url = new URL(raw);
-      return `${url.protocol}//${url.host}${url.pathname}`;
-    } catch {
-      return "";
-    }
-  };
-  return {
-    model: { provider: config.model.provider, tiers: config.model.tiers, baseUrl: origin(config.model.baseUrl) },
-    storage: { url: origin(config.storage.url) },
-    mcp: config.mcpServers.map((server) => ({ name: server.name, url: origin(server.url) })),
-    workspace: WORKSPACE_CWD,
-    sessionCwd: SESSION_CWD,
-  };
+/**
+ * 去掉 userinfo、query 与 hash 的地址摘要。
+ *
+ * 用于任何会返回前端的连接地址：token 常以 query 或 userinfo 形式出现，不能出网。
+ * 无法解析时返回空串，由调用方决定降级文案。
+ */
+export function publicOrigin(raw: string): string {
+  try {
+    const url = new URL(raw);
+    return `${url.protocol}//${url.host}${url.pathname}`;
+  } catch {
+    return "";
+  }
 }
-
-/** `GET /api/info` 的去敏响应；形状由实现推导，避免再维护一份声明。 */
-export type ServerInfo = ReturnType<typeof publicServerInfo>;

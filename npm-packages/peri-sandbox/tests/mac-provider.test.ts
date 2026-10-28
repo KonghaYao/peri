@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { existsSync, realpathSync } from 'node:fs';
+import { join } from 'node:path';
 import test from 'node:test';
-import { MacProvider } from '../src/runtime/mac-provider.js';
+import { MacProvider, macSpawnOptions } from '../src/runtime/mac-provider.js';
 import type { ProviderStartOptions } from '../src/runtime/provider.js';
 
 const options: ProviderStartOptions = {
@@ -31,6 +33,20 @@ test('macOS provider refuses to stop an unverified process group', {
   await assert.rejects(() => stop(group, 'wrong process', options), /cannot confirm owned macOS process group/);
   await assert.rejects(() => stop(1, 'wrong process', options), /invalid process group/);
   process.kill(process.pid, 0);
+});
+
+test('macOS provider pins SRT cwd and drops host secrets from the child env', () => {
+  const spec = macSpawnOptions(options);
+  const env = spec.env as Record<string, string | undefined>;
+  assert.equal(spec.cwd, options.sandboxRoot);
+  assert.equal(env.HOME, options.homePath);
+  assert.equal(env.PERI_MODEL_API_KEY, undefined);
+  assert.equal(env.PERI_STORAGE_TOKEN, undefined);
+  assert.equal(env.HTTP_PROXY, undefined);
+  assert.equal(env.HTTPS_PROXY, undefined);
+  assert.equal(env.GIT_TEMPLATE_DIR, join(options.homePath, '.git-template'));
+  if (process.platform === 'darwin' && existsSync('/private/var/select/developer_dir'))
+    assert.equal(env.DEVELOPER_DIR, realpathSync('/private/var/select/developer_dir'));
 });
 
 test('macOS provider reports its runtime kind without touching the host', () => {

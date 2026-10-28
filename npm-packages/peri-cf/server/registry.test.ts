@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import {
   ChatCloseIncompleteError,
@@ -15,6 +18,7 @@ import {
   WorkspaceMismatchError,
 } from "@peri-code/sdk";
 import { ChatRegistry } from "./registry";
+import type { SandboxLease, SandboxPoolPort, SandboxPoolSnapshot } from "./sandbox";
 
 const TARGET: ChatBindingTarget = {
   chatId: "chat-1",
@@ -33,6 +37,55 @@ const WORKSPACE: WorkspaceRef = {
 const AGENT: ChatAgentConfig = {
   settings: { config: { active_alias: "sonnet" } },
 };
+
+const SANDBOX_ID = "sbx_0123456789abcdef0123456789abcdef";
+const SANDBOX_ROOT = "/sandboxes";
+const DIRECTORY: ChatSessionDirectoryEntry = {
+  sessionId: "session-1",
+  title: null,
+  cwd: "/workspace",
+  messageCount: 1,
+  createdAt: "2026-10-20T12:00:00Z",
+  updatedAt: "2026-10-20T13:00:00Z",
+};
+
+class FakeSandboxPool implements SandboxPoolPort {
+  readonly acquired: Array<string | undefined> = [];
+  readonly released: string[] = [];
+  readonly leases: SandboxLease[] = [];
+  closedAll = 0;
+
+  constructor(private readonly workspaceOverride?: string) {}
+
+  async acquire(sandboxId?: string): Promise<SandboxLease> {
+    this.acquired.push(sandboxId);
+    const id = sandboxId ?? SANDBOX_ID;
+    const workspace = this.workspaceOverride ?? `/sandboxes/${id}/workspace`;
+    const lease: SandboxLease = {
+      sandboxId: id,
+      workspace: { id, hostPath: workspace, runtimePath: workspace },
+      mcp: {
+        name: "workspace",
+        config: {
+          type: "http",
+          url: `http://127.0.0.1/${id}`,
+          headers: { authorization: "Bearer sandbox-token" },
+        },
+      },
+      release: async () => { this.released.push(id); },
+    };
+    this.leases.push(lease);
+    return lease;
+  }
+
+  async closeAll(): Promise<void> {
+    this.closedAll += 1;
+  }
+
+  snapshot(): SandboxPoolSnapshot {
+    return { active: [], starting: 0 };
+  }
+}
 
 class FakeFactSource implements ChatFactSource {
   binding: ChatBindingTarget | null = null;
@@ -71,6 +124,7 @@ function stubChat(
 class FakeChatManager implements ChatManagerContract {
   readonly chats = new Map<string, ChatServiceContract>();
   readonly createOptions: ChatCreateOptions[] = [];
+  readonly listResults = new Map<string, ChatSessionDirectoryEntry[]>();
   closeError: unknown;
   shutdownError: unknown;
   private created = 0;
@@ -93,8 +147,8 @@ class FakeChatManager implements ChatManagerContract {
     return undefined;
   }
 
-  async listSessions(): Promise<ChatSessionDirectoryEntry[]> {
-    return [];
+  async listSessions(params?: { path?: string }): Promise<ChatSessionDirectoryEntry[]> {
+    return this.listResults.get(params?.path ?? "") ?? [];
   }
 
   async closeChat(id: string): Promise<void> {
@@ -152,22 +206,37 @@ function attachChat(
 function hosted(options: {
   events?: string[];
   chats?: FakeChatManager;
+  sessions?: { getSession(id: string): Promise<ChatSessionDirectoryEntry | null> };
+  sandbox?: SandboxPoolPort;
+  sandboxesRoot?: string;
 } = {}) {
   const events = options.events ?? [];
   const chats = options.chats ?? new FakeChatManager(events);
-  const registry = new ChatRegistry(chats, WORKSPACE, AGENT);
+  const registry = new ChatRegistry(chats, WORKSPACE, AGENT, {
+    session: {
+      instructions: "test instructions",
+      mcpServers: { remote: { type: "http", url: "https://mcp.example.com" } },
+    },
+    sessions: options.sessions ?? { getSession: async () => null },
+    ...(options.sandbox
+      ? {
+        sandbox: options.sandbox,
+        sandboxesRoot: options.sandboxesRoot ?? SANDBOX_ROOT,
+      }
+      : {}),
+  });
   return { registry, chats, views: registry.views, events };
 }
 
 describe("ChatRegistry", () => {
-  test("createChat 注入 workspace、agent，并把绝对 path 转为相对 sessionPath", () => {
+  test("createChat 注入 workspace、agent，并把绝对 path 转为相对 sessionPath", async () => {
     const events: string[] = [];
     const chats = new FakeChatManager(events);
     const { registry } = hosted({ events, chats });
 
-    expect(registry.createChat("/workspace/").id).toBe("chat-1");
-    expect(registry.createChat("/workspace/project").id).toBe("chat-2");
-    expect(registry.createChat().id).toBe("chat-3");
+    expect((await registry.createChat({ path: "/workspace/" })).id).toBe("chat-1");
+    expect((await registry.createChat({ path: "/workspace/project" })).id).toBe("chat-2");
+    expect((await registry.createChat()).id).toBe("chat-3");
 
     expect(events).toEqual([
       "port.createChat:",
@@ -184,13 +253,147 @@ describe("ChatRegistry", () => {
       .toEqual(["", "project", ""]);
   });
 
-  test("createChat 拒绝工作区外的绝对 path", () => {
+  test("createChat 拒绝工作区外的绝对 path", async () => {
     const { registry } = hosted();
 
-    expect(() => registry.createChat("/workspace-other"))
-      .toThrow(WorkspaceMismatchError);
-    expect(() => registry.createChat("/tmp/project"))
-      .toThrow(WorkspaceMismatchError);
+    await expect(registry.createChat({ path: "/workspace-other" }))
+      .rejects.toBeInstanceOf(WorkspaceMismatchError);
+    await expect(registry.createChat({ path: "/tmp/project" }))
+      .rejects.toBeInstanceOf(WorkspaceMismatchError);
+  });
+
+  test("监控读面：活动句柄计数与 sandbox 快照委托", async () => {
+    const sandbox = new FakeSandboxPool();
+    const { registry } = hosted({ sandbox });
+    expect(registry.activeChatCount()).toBe(0);
+
+    const first = await registry.createChat();
+    const second = await registry.createChat();
+    expect(registry.activeChatCount()).toBe(2);
+    expect(registry.sandboxSnapshot()).toEqual({ active: [], starting: 0 });
+
+    await registry.closeChat(first.id);
+    expect(registry.activeChatCount()).toBe(1);
+
+    await registry.shutdown();
+    expect(registry.activeChatCount()).toBe(0);
+    expect(second.id).toBe("chat-2");
+  });
+
+  test("未启用 sandbox 时监控快照为 undefined", () => {
+    const { registry } = hosted();
+    expect(registry.sandboxSnapshot()).toBeUndefined();
+  });
+
+  test("新会话启动 sandbox，并把 sandbox MCP 合并进共享 Session 配置", async () => {
+    const sandbox = new FakeSandboxPool();
+    const { registry, chats } = hosted({ sandbox });
+
+    const chat = await registry.createChat();
+
+    expect(sandbox.acquired).toEqual([undefined]);
+    expect(chat.id).toBe("chat-1");
+    const options = chats.createOptions[0]!;
+    expect(options.workspace).toBe(sandbox.leases[0]!.workspace);
+    expect(options.sessionPath).toBeUndefined();
+    expect(options.session).toEqual({
+      instructions: "test instructions",
+      mcpServers: {
+        remote: { type: "http", url: "https://mcp.example.com" },
+        workspace: sandbox.leases[0]!.mcp.config,
+      },
+    });
+  });
+
+  test("历史会话按 cwd 复用所属 sandbox，并保留原子目录 sessionPath", async () => {
+    const sandbox = new FakeSandboxPool();
+    const cwd = `${SANDBOX_ROOT}/${SANDBOX_ID}/workspace/project`;
+    const { registry, chats } = hosted({
+      sandbox,
+      sessions: {
+        getSession: async (id) => id === "session-1" ? { ...DIRECTORY, cwd } : null,
+      },
+    });
+
+    const chat = await registry.createChat({ sessionId: "session-1" });
+
+    expect(sandbox.acquired).toEqual([SANDBOX_ID]);
+    expect(chat.id).toBe("chat-1");
+    expect(chats.createOptions[0]?.workspace).toBe(sandbox.leases[0]!.workspace);
+    expect(chats.createOptions[0]?.sessionPath).toBe("project");
+  });
+
+  test("旧 /workspace 会话不启动 sandbox，沿用固定工作区", async () => {
+    const sandbox = new FakeSandboxPool();
+    const { registry, chats } = hosted({
+      sandbox,
+      sessions: { getSession: async () => ({ ...DIRECTORY, cwd: "/workspace" }) },
+    });
+
+    await registry.createChat({ sessionId: "session-1" });
+
+    expect(sandbox.acquired).toEqual([]);
+    expect(chats.createOptions[0]?.workspace).toBe(WORKSPACE);
+    expect(chats.createOptions[0]?.sessionPath).toBe("");
+  });
+
+  test("sandbox 工作区外的会话 cwd 以 workspace_mismatch 拒绝并释放租约", async () => {
+    const sandbox = new FakeSandboxPool(`${SANDBOX_ROOT}/${SANDBOX_ID}/other`);
+    const { registry } = hosted({
+      sandbox,
+      sessions: { getSession: async () => ({ ...DIRECTORY, cwd: `${SANDBOX_ROOT}/${SANDBOX_ID}/workspace/project` }) },
+    });
+
+    await expect(registry.createChat({ sessionId: "session-1" }))
+      .rejects.toBeInstanceOf(WorkspaceMismatchError);
+    expect(sandbox.released).toEqual([SANDBOX_ID]);
+  });
+
+  test("关闭 Chat 释放 sandbox 租约；shutdown 关闭全部实例", async () => {
+    const sandbox = new FakeSandboxPool();
+    const { registry } = hosted({ sandbox });
+    const first = await registry.createChat();
+    const second = await registry.createChat();
+
+    await registry.closeChat(first.id);
+    expect(sandbox.released).toEqual([sandbox.leases[0]!.sandboxId]);
+
+    await registry.shutdown();
+    expect(sandbox.closedAll).toBe(1);
+    expect(second.id).toBe("chat-2");
+  });
+
+  test("listSessions 合并旧工作区与每个 sandbox 工作区", async () => {
+    const root = mkdtempSync(join(tmpdir(), "peri-cf-sandboxes-"));
+    try {
+      mkdirSync(join(root, SANDBOX_ID, "workspace"), { recursive: true });
+      const chats = new FakeChatManager();
+      chats.listResults.set("", [{
+        ...DIRECTORY,
+        sessionId: "legacy",
+        updatedAt: "2026-10-20T12:00:00Z",
+      }]);
+      chats.listResults.set(
+        join(root, SANDBOX_ID, "workspace"),
+        [{
+          ...DIRECTORY,
+          sessionId: "sandboxed",
+          cwd: join(root, SANDBOX_ID, "workspace"),
+          updatedAt: "2026-10-20T14:00:00Z",
+        }],
+      );
+      const { registry } = hosted({
+        chats,
+        sandbox: new FakeSandboxPool(),
+        sandboxesRoot: root,
+      });
+
+      const entries = await registry.listSessions();
+
+      expect(entries.map((entry) => entry.sessionId)).toEqual(["sandboxed", "legacy"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
   test("closeChat 先关闭端口句柄，再释放 View", async () => {
     const events: string[] = [];

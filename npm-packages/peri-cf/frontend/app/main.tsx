@@ -7,7 +7,11 @@ import { createRoot } from 'react-dom/client';
 import '../tailwind.css';
 import '../styles.css';
 import '../styles/chat-tokens.css';
+import { installOpenUITheme } from '../chat';
 import App from './App';
+
+// CSS 变量已可用后再把主题推给 canvas，避免首帧读不到 --chat-* 回退到默认色。
+installOpenUITheme();
 
 const root = document.getElementById('root');
 if (!root) throw new Error('页面缺少应用挂载节点。');

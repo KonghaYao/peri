@@ -1,5 +1,7 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { loadServerConfig, mcpServerDefaults, publicServerInfo } from "./config";
+import { loadServerConfig, mcpServerDefaults, publicOrigin } from "./config";
 
 const BASE = {
   PERI_MODEL_PROVIDER: "openai",
@@ -31,6 +33,55 @@ describe("loadServerConfig", () => {
     });
   });
 
+  test("sandbox 默认启用并使用用户目录下的 sandboxesRoot", () => {
+    const { config } = loadServerConfig(BASE, "/srv/peri-cf");
+    expect(config?.sandbox).toEqual({
+      enabled: true,
+      root: join(homedir(), ".peri-sandbox", "sandboxes"),
+    });
+  });
+
+  test("sandbox 可由环境变量禁用或改根目录", () => {
+    const { config } = loadServerConfig({
+      ...BASE,
+      PERI_SANDBOX_ENABLED: "false",
+      PERI_SANDBOX_ROOT: "/var/lib/peri-sandboxes",
+      PERI_SANDBOX_SETTINGS: "/etc/peri/sandbox.json",
+      PERI_SANDBOX_PROFILE: "default",
+    }, "/srv/peri-cf");
+    expect(config?.sandbox).toEqual({
+      enabled: false,
+      root: "/var/lib/peri-sandboxes",
+      settingsPath: "/etc/peri/sandbox.json",
+      profileName: "default",
+    });
+  });
+
+  test("sandbox 配置非法时拒绝启动", () => {
+    const invalidBoolean = loadServerConfig(
+      { ...BASE, PERI_SANDBOX_ENABLED: "maybe" },
+      "/srv/peri-cf",
+    );
+    expect(invalidBoolean.config).toBeUndefined();
+    expect(invalidBoolean.problems).toContain("PERI_SANDBOX_ENABLED 必须是 true/false");
+
+    const relativeRoot = loadServerConfig(
+      { ...BASE, PERI_SANDBOX_ROOT: "relative/sandboxes" },
+      "/srv/peri-cf",
+    );
+    expect(relativeRoot.config).toBeUndefined();
+    expect(relativeRoot.problems).toContain("PERI_SANDBOX_ROOT 必须是绝对路径");
+  });
+
+  test("远程 MCP 不得占用 sandbox 的 server key", () => {
+    const { config, problems } = loadServerConfig({
+      ...BASE,
+      PERI_MCP_SERVERS: JSON.stringify([{ name: "sandbox", url: "https://mcp.example.com/mcp" }]),
+    }, "/srv/peri-cf");
+    expect(config).toBeUndefined();
+    expect(problems).toContain('PERI_MCP_SERVERS 名称 "sandbox" 保留给 sandbox');
+  });
+
   test("一次性报告缺失项", () => {
     const { config, problems } = loadServerConfig({}, "/srv/peri-cf");
     expect(config).toBeUndefined();
@@ -59,11 +110,11 @@ describe("loadServerConfig", () => {
     const { config } = loadServerConfig({
       ...BASE,
       PERI_MCP_SERVERS: JSON.stringify([
-        { name: "workspace", url: "https://mcp.example.com/mcp", token: "mcp-secret" },
+        { name: "remote", url: "https://mcp.example.com/mcp", token: "mcp-secret" },
       ]),
     }, "/srv/peri-cf");
     expect(config?.mcpServers).toEqual([{
-      name: "workspace",
+      name: "remote",
       url: "https://mcp.example.com/mcp",
       headers: [{ name: "Authorization", value: "Bearer mcp-secret" }],
     }]);
@@ -73,12 +124,12 @@ describe("loadServerConfig", () => {
     const { config } = loadServerConfig({
       ...BASE,
       PERI_MCP_SERVERS: JSON.stringify([{
-        name: "workspace", url: "https://mcp.example.com/mcp",
+        name: "remote", url: "https://mcp.example.com/mcp",
         headers: [{ name: "X-Test", value: "yes" }],
       }]),
     }, "/srv/peri-cf");
     expect(mcpServerDefaults(config!)).toEqual({
-      workspace: {
+      remote: {
         type: "http",
         url: "https://mcp.example.com/mcp",
         headers: { "X-Test": "yes" },
@@ -101,17 +152,10 @@ describe("loadServerConfig", () => {
     expect(problems).toContain("PERI_MCP_SERVERS 不是合法 JSON");
   });
 
-  test("公开信息去掉 token 与查询参数", () => {
-    const { config } = loadServerConfig({
-      ...BASE,
-      PERI_STORAGE_URL: "https://user:pass@store.example.com/db?token=leak",
-      PERI_MCP_SERVERS: JSON.stringify([{ name: "workspace", url: "https://mcp.example.com/mcp?key=leak" }]),
-    }, "/srv/peri-cf");
-    const info = publicServerInfo(config!);
-    const serialized = JSON.stringify(info);
-    expect(serialized).not.toContain("secret");
-    expect(serialized).not.toContain("leak");
-    expect(serialized).not.toContain("user:pass");
-    expect(info.storage.url).toBe("https://store.example.com/db");
+  test("publicOrigin 去掉 userinfo、查询参数与 hash", () => {
+    expect(publicOrigin("https://user:pass@store.example.com/db?token=leak#frag"))
+      .toBe("https://store.example.com/db");
+    expect(publicOrigin("https://mcp.example.com/mcp?key=leak")).toBe("https://mcp.example.com/mcp");
+    expect(publicOrigin("not a url")).toBe("");
   });
 });

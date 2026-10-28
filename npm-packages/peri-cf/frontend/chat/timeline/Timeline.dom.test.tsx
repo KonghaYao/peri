@@ -3,8 +3,9 @@ import { installDom } from '../../test/dom';
 
 installDom();
 
-const { cleanup, fireEvent, render, screen, act } = await import('@testing-library/react');
-const { Timeline } = await import('./Timeline');
+const { cleanup, fireEvent, render, screen, act, waitFor } = await import('@testing-library/react');
+const { Timeline, TimelineRows } = await import('./Timeline');
+const { deriveTimeline } = await import('./deriveTimeline');
 const { createElement } = await import('react');
 
 afterEach(() => cleanup());
@@ -196,5 +197,86 @@ describe('Timeline virtualization in a real DOM', () => {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     });
     expect(scroller.scrollTop).toBeGreaterThan(1_000);
+  });
+});
+
+function foldState(chatId: string, bindingRevision: number) {
+  return {
+    chat: { id: chatId, title: '折叠测试', updatedAt: '2026-10-20T00:00:00Z' },
+    sessionId: chatId, bindingRevision, running: false, executionBlocked: false, readiness: 'ready',
+    entries: [
+      {
+        entryId: 'turn:1:user', id: 'turn:1:user', kind: 'message', turnId: 'turn:1',
+        role: 'user', status: 'completed', createdAt: '2026-10-20T00:00:00Z', createdAtSource: 'observed',
+        completedAt: null, error: null, blocks: [{ blockId: 'text:0', type: 'text', text: '问题' }],
+      },
+      {
+        entryId: 'turn:1:a', id: 'turn:1:a', kind: 'message', turnId: 'turn:1',
+        role: 'assistant', status: 'completed', createdAt: '2026-10-20T00:00:01Z',
+        createdAtSource: 'observed', completedAt: '2026-10-20T00:00:02Z', error: null,
+        blocks: [{
+          blockId: 'tool:read', type: 'tool_call', toolCallId: 'read',
+          tool: {
+            toolCallId: 'read', turnId: 'turn:1', name: 'Read', status: 'completed',
+            createdAt: '2026-10-20T00:00:01Z', completedAt: '2026-10-20T00:00:02Z', error: null,
+            arguments: { file_path: '/workspace/README.md' },
+          },
+        }],
+      },
+    ],
+    toolCalls: [],
+    turns: [{
+      turnId: 'turn:1', status: 'completed', startedAt: '2026-10-20T00:00:00Z',
+      completedAt: '2026-10-20T00:00:02Z', error: null, interactionStatus: 'idle',
+    }],
+    activeTurn: { turnId: null, status: null }, session: {},
+    tasks: [], plans: { current: [], byTurn: {} }, interactions: [],
+    pendingInteractions: [], inputQueue: null,
+  };
+}
+
+describe('timeline binding-scoped fold state', () => {
+  test('a rebind resets the expanded turn fold instead of reusing the old binding', async () => {
+    stubLayout();
+    const props = (bindingRevision: number) => ({
+      state: foldState('chat-fold', bindingRevision) as never,
+      loadState: 'ready' as const, bottomInset: 0, scrollSignal: null,
+    });
+    const view = render(createElement(Timeline, props(1)));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+
+    const foldButton = () => view.container.querySelector('[data-slot="peri-turn-fold"] button') as HTMLElement;
+    expect(foldButton().getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(foldButton());
+    expect(foldButton().getAttribute('aria-expanded')).toBe('true');
+    expect(view.container.querySelector('[data-timeline-row-kind="work"]')).not.toBeNull();
+
+    // 同一会话的新绑定代次：旧代的展开状态不能泄漏到新代。
+    await act(async () => {
+      view.rerender(createElement(Timeline, props(2)));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(foldButton().getAttribute('aria-expanded')).toBe('false');
+    expect(view.container.querySelector('[data-timeline-row-kind="work"]')).toBeNull();
+  });
+});
+
+describe('OpenUI action propagation', () => {
+  test('assistant row forwards Renderer actions through TimelineRows', async () => {
+    const state = bigState('chat-openui', 2);
+    state.entries[1]!.blocks = [{
+      blockId: 'text:0', type: 'text',
+      text: '```openui\nroot = Stack([submit])\nsubmit = Button("提交", @ToAssistant("提交表单"))\n```',
+    }];
+    const events: unknown[] = [];
+    render(createElement(TimelineRows, {
+      rows: deriveTimeline(state as never),
+      onOpenUIAction: (event) => events.push(event),
+      actionsEnabled: true,
+    }));
+
+    fireEvent.click(await screen.findByRole('button', { name: '提交' }));
+    await waitFor(() => expect(events).toHaveLength(1));
+    expect(events[0]).toMatchObject({ type: 'continue_conversation', humanFriendlyMessage: '提交表单' });
   });
 });

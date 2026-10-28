@@ -27,6 +27,7 @@ const moduleRoots = [
   'server', 'server/api',
   'frontend/chat', 'frontend/chat/runtime', 'frontend/chat/components',
   'frontend/chat/timeline', 'frontend/chat/composer',
+  'frontend/chat/openui',
   'frontend/remote', 'frontend/settings',
   'frontend/hooks', 'frontend/lib',
   'frontend/components/assistant-ui',
@@ -261,6 +262,15 @@ describe('production dependency direction', () => {
     );
     expect([...forbiddenFor('frontend/chat/timeline'),
       ...forbiddenFor('frontend/chat/composer')]).toEqual([]);
+  });
+
+  test('chat/openui does not import timeline, components, runtime or composer', () => {
+    const violations = directionViolations(
+      (importer) => inModule('frontend/chat/openui', importer),
+      (target) => ['frontend/chat/timeline', 'frontend/chat/components', 'frontend/chat/runtime', 'frontend/chat/composer']
+        .some((view) => inModule(view, target)),
+    );
+    expect(violations).toEqual([]);
   });
 
   test('chat/components reaches remote only through chat/runtime', () => {

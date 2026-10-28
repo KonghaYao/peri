@@ -228,6 +228,7 @@ describe('turn fold', () => {
       turnId: 'turn:1', label: 'Worked for 2.0s', expanded: false,
       startedAt: '2026-10-20T00:00:00Z', completedAt: '2026-10-20T00:00:02Z',
     });
+    expect(fold.summary).toBe('1 个工具');
   });
 
   test('an expanded turn fold keeps the original work rows in place', () => {
@@ -237,10 +238,12 @@ describe('turn fold', () => {
     expect(fold?.kind).toBe('turn-fold');
     if (fold?.kind !== 'turn-fold') return;
     expect(fold.expanded).toBe(true);
+    expect(fold.summary).toBe('1 个工具');
     const work = rows[2];
     expect(work?.kind).toBe('work');
     if (work?.kind !== 'work') return;
     expect(work.turnId).toBe('turn:1');
+    expect(work.bare).toBe(true);
   });
 
   test('one fold per turn covers multiple non-contiguous work groups', () => {
@@ -401,5 +404,48 @@ describe('turn fold', () => {
     expect(formatWorkDuration(2_000)).toBe('2.0s');
     expect(formatWorkDuration(12_400)).toBe('12s');
     expect(formatWorkDuration(65_000)).toBe('1m 5s');
+  });
+
+  test('payload_too_large is a degraded completed result, never a failure', () => {
+    const degraded = toolBlock('large', {
+      status: 'completed',
+      error: { code: 'payload_too_large', message: '工具载荷超出会话接纳预算' },
+    });
+    const rows = deriveTimeline(state([
+      user('turn:1'),
+      entry({ entryId: 'turn:1:a', id: 'turn:1:a', turnId: 'turn:1', blocks: [degraded] }),
+    ], { turns: [finished] }), { expandedTurnIds: new Set(['turn:1']) });
+
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'turn-fold', 'work']);
+    const fold = rows[1];
+    expect(fold).toMatchObject({ kind: 'turn-fold', failed: false, expanded: true });
+    expect(fold?.kind === 'turn-fold' ? fold.label : '').toBe('Worked for 2.0s');
+    const work = rows[2];
+    expect(work?.kind).toBe('work');
+    if (work?.kind !== 'work') return;
+    expect(work.failed).toBe(false);
+    expect(work.items[0]).toMatchObject({ status: 'completed', failed: false, degraded: true });
+  });
+
+  test('failed tools in a completed turn keep a static fold that never hides them', () => {
+    const withFailure = state([
+      user('turn:1'),
+      entry({
+        entryId: 'turn:1:a', id: 'turn:1:a', turnId: 'turn:1',
+        blocks: [toolBlock('failed', { status: 'error', error: { code: 'tool_failed', message: '工具执行失败' } })],
+      }),
+    ], { turns: [finished] });
+
+    const rows = deriveTimeline(withFailure);
+    const fold = rows.find((row) => row.kind === 'turn-fold');
+    expect(fold).toMatchObject({ kind: 'turn-fold', failed: true, expanded: true, static: true });
+    expect(rows.some((row) => row.kind === 'work')).toBe(true);
+
+    // 用户显式折叠也不会让失败证据消失：折叠开关静态化，内容保持可见。
+    const collapsed = deriveTimeline(withFailure, { collapsedTurnIds: new Set(['turn:1']) });
+    expect(collapsed.find((row) => row.kind === 'turn-fold')).toMatchObject({
+      kind: 'turn-fold', expanded: true, static: true,
+    });
+    expect(collapsed.some((row) => row.kind === 'work')).toBe(true);
   });
 });

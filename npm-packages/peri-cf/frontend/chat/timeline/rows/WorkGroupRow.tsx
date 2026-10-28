@@ -5,16 +5,9 @@ import { ReasoningRow } from './ReasoningRow';
 import { ToolRow } from './ToolRow';
 import type { ToolPayloadReader } from '../../runtime';
 import type { TimelineWorkItem } from '../types';
+import { countWork, workSummaryLabel } from '../workSummary';
 
 const RUNNING_STATUSES = new Set(['pending', 'streaming', 'running']);
-
-function summaryLabel(items: readonly TimelineWorkItem[]): string {
-  const reasoning = items.filter((item) => item.kind === 'reasoning').length;
-  const tools = items.length - reasoning;
-  if (tools === 0) return `思考过程 · ${reasoning} 段`;
-  if (reasoning === 0) return `工具调用 · ${tools} 个`;
-  return `思考与工具 · ${tools} 个工具 / ${reasoning} 段思考`;
-}
 
 /**
  * 连续 reasoning/tool 的合并行：运行中默认展开并跟随当前活动；历史默认折叠。
@@ -27,6 +20,7 @@ export function WorkGroupRow({
   defaultExpanded = active,
   forceExpanded = false,
   payloadReader,
+  bare = false,
 }: {
   items: readonly TimelineWorkItem[];
   active: boolean;
@@ -37,6 +31,8 @@ export function WorkGroupRow({
   forceExpanded?: boolean;
   /** 结果全文按需读取；缺席时只显示 inline/预览。 */
   payloadReader?: ToolPayloadReader;
+  /** 外层 turn fold 已展开：直接展示条目，不再渲染组头与折叠按钮。 */
+  bare?: boolean;
 }) {
   const [expanded, setExpanded] = useState(defaultExpanded || failed);
   const userToggled = useRef(false);
@@ -65,35 +61,40 @@ export function WorkGroupRow({
   };
   const current = [...items].reverse().find((item) => RUNNING_STATUSES.has(item.status)) ?? items.at(-1);
   const failedCount = items.filter((item) => item.failed).length;
+  const counts = countWork(items);
+  const open = bare || expanded;
 
   return (
     <div
-      className="border-border/70 border-b py-1"
+      className={bare ? 'pb-1' : 'py-1'}
       data-slot="peri-work-group"
       data-active={active ? 'true' : 'false'}
       data-work-failed={failed ? 'true' : 'false'}
+      data-bare={bare ? 'true' : 'false'}
     >
-      <button
-        type="button"
-        className="text-muted-foreground hover:text-foreground flex w-full min-w-0 items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[13px] transition-colors"
-        aria-expanded={expanded}
-        onClick={toggle}
-      >
-        <ChevronRight
-          className={cn('size-3.5 shrink-0 transition-transform', expanded && 'rotate-90')}
-          aria-hidden="true"
-        />
-        <span className={cn('truncate', failed && 'text-destructive/80', active && 'shimmer motion-reduce:animate-none')}>
-          {summaryLabel(items)}
-        </span>
-        {failed && (
-          <span className="text-destructive shrink-0 text-[11px]" data-slot="peri-work-failed-count">
-            失败 {failedCount}
+      {!bare && (
+        <button
+          type="button"
+          className="text-muted-foreground hover:text-foreground flex w-full min-w-0 items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[13px] transition-colors"
+          aria-expanded={expanded}
+          onClick={toggle}
+        >
+          <ChevronRight
+            className={cn('size-3.5 shrink-0 transition-transform', expanded && 'rotate-90')}
+            aria-hidden="true"
+          />
+          <span className={cn('truncate', failed && 'text-destructive/80', active && 'shimmer motion-reduce:animate-none')}>
+            {workSummaryLabel(counts)}
           </span>
-        )}
-        {active && <span className="text-muted-foreground/70 ml-auto shrink-0 text-[11px]">进行中</span>}
-      </button>
-      {!expanded && active && current && (
+          {failed && (
+            <span className="text-destructive shrink-0 text-[11px]" data-slot="peri-work-failed-count">
+              失败 {failedCount}
+            </span>
+          )}
+          {active && <span className="text-muted-foreground/70 ml-auto shrink-0 text-[11px]">进行中</span>}
+        </button>
+      )}
+      {!bare && !expanded && active && current && (
         <div
           className="text-muted-foreground ml-5 flex min-w-0 items-center gap-1.5 py-0.5 text-xs"
           data-slot="peri-work-current"
@@ -103,8 +104,8 @@ export function WorkGroupRow({
           {current.target && <span className="truncate font-mono text-[11px]">{current.target}</span>}
         </div>
       )}
-      {expanded && (
-        <div className="border-border/70 ml-2 flex flex-col border-l pl-2">
+      {open && (
+        <div className={cn('border-border/70 ml-2 flex flex-col border-l pl-2', bare && 'pt-1')}>
           {items.map((item) => item.kind === 'reasoning'
             ? <ReasoningRow key={item.id} item={item} />
             : <ToolRow key={item.id} item={item} payloadReader={payloadReader} />)}

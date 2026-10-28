@@ -34,6 +34,7 @@ test('sandbox reads only the required SRT npm package, not its parent project', 
   assert(!policy.filesystem.allowRead.includes(dirname(runtime.packageRoot)));
   assert(policy.filesystem.allowRead.includes(process.execPath));
   assert(!policy.filesystem.allowRead.includes(sandboxesRoot));
+  assert.equal(policy.filesystem.allowGitConfig, true);
 });
 
 test('probe and production launch use the same isolation and resource limits', () => {

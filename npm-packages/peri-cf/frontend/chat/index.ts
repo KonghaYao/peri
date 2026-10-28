@@ -3,3 +3,4 @@ export * from "./runtime";
 export * from "./components";
 export * from "./timeline";
 export * from "./composer";
+export { installOpenUITheme, resolveOpenUIThemeKind } from "./openui";

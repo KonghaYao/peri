@@ -34,6 +34,14 @@ describe('POST /api/chats handle creation', () => {
     expect(requests[0]?.url).toBe('https://example.test/api/chats');
     expect(await body(requests[0]!)).toEqual({});
   });
+
+  test('forwards the target session id so the server can prepare its sandbox', async () => {
+    const { client, requests } = actions(() => Response.json({
+      chat: { id: 'chat-1', sessionId: null, bindingRevision: 0 },
+    }, { status: 201 }));
+    await client.createHandle('session-1');
+    expect(await body(requests[0]!)).toEqual({ sessionId: 'session-1' });
+  });
 });
 
 describe('Action envelope and 202 receipt', () => {
@@ -156,6 +164,17 @@ describe('payload and close endpoints', () => {
       : Response.json({ ok: false, code: 'chat_not_found', message: 'gone', disposition: 'rejected' }, { status: 410 }));
     await expect(client.close('chat-1')).resolves.toBeUndefined();
     await expect(client.close('chat-2')).resolves.toBeUndefined();
+  });
+
+  test('close_incomplete keeps the incomplete flag and failure reasons', async () => {
+    const { client } = actions(() => Response.json({
+      ok: false, code: 'close_incomplete', message: 'Chat is closed but cleanup is incomplete',
+      disposition: 'unknown', incomplete: true, errors: ['Sandbox shutdown is incomplete'], chatId: 'chat-1',
+    }, { status: 500 }));
+    const error = await client.close('chat-1').catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(RemoteActionError);
+    expect(error).toMatchObject({ code: 'close_incomplete', disposition: 'unknown', incomplete: true });
+    expect(error).toHaveProperty('errors', ['Sandbox shutdown is incomplete']);
   });
 });
 

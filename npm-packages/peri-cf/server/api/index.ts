@@ -4,13 +4,15 @@ import {
   type ChatBindingTarget,
   type ChatManagerContract,
   type ChatServiceContract,
+  type ChatSessionDirectoryEntry,
   type ChatUserAction as ChatUserActionValue,
   type ReadPayloadOptions,
   type ToolPayloadResponse,
 } from "@peri-code/sdk";
 import { ChatCloseIncompleteError, WorkspaceMismatchError } from "@peri-code/sdk";
 import { logError } from "../logging";
-import type { ServerInfo } from "../config";
+import type { MonitorSource } from "../monitor";
+import { SandboxStartError } from "../sandbox";
 import {
   chatNotFound,
   closeIncomplete,
@@ -20,16 +22,18 @@ import {
 
 /** HTTP 适配所需的注册表能力；不依赖父层具体装配类。 */
 type ApiRegistry = {
-  chats: Pick<ChatManagerContract, "getChat" | "findChatBySession" | "listSessions">;
-  /** 注入 workspace 与进程级 agent 配置后创建句柄；HTTP 层不构造模型/工具面设置。 */
-  createChat(path?: string): ChatServiceContract;
+  chats: Pick<ChatManagerContract, "getChat" | "findChatBySession">;
+  /** 注入 workspace、agent 与 sandbox 后创建句柄；HTTP 层不构造模型/工具面设置。 */
+  createChat(target?: { path?: string; sessionId?: string }): Promise<ChatServiceContract>;
+  /** 合并旧 `/workspace` 与每个 sandbox 工作区的会话目录。 */
+  listSessions(path?: string): Promise<ChatSessionDirectoryEntry[]>;
   closeChat(id: string): Promise<void>;
   hasPendingClose(id: string): boolean;
 };
 
 export interface ApiOptions {
   registry: ApiRegistry;
-  info: ServerInfo;
+  monitor: MonitorSource;
 }
 
 interface ActionTarget {
@@ -162,13 +166,25 @@ function bindingTarget(chat: ChatServiceContract, fallback: ActionTarget): ChatB
 export function createApi(deps: ApiOptions): Hono {
   const app = new Hono();
 
-  app.get("/api/info", (c) => c.json({ ok: true, ...deps.info }));
+  // 单个只读快照承载监控面板四段；构建失败整体 503，不返回伪造数据。
+  app.get("/api/monitor", async (c) => {
+    try {
+      return c.json({ ok: true as const, ...await deps.monitor.snapshot() });
+    } catch (error) {
+      logError("[peri-cf] Server monitor snapshot is unavailable", error);
+      return c.json({
+        ok: false as const,
+        code: "monitor_unavailable",
+        message: "Monitor snapshot is unavailable",
+      }, 503);
+    }
+  });
 
   app.get("/api/chats", async (c) => {
     const raw = c.req.query("path");
     const path = raw && raw.length > 0 ? raw : undefined;
     try {
-      const chats = await deps.registry.chats.listSessions(path ? { path } : undefined);
+      const chats = await deps.registry.listSessions(path);
       return c.json({ chats, available: true });
     } catch (error) {
       logError("[peri-cf] Peri session directory is unavailable", error);
@@ -197,10 +213,17 @@ export function createApi(deps: ApiOptions): Hono {
     if (path !== undefined && (typeof path !== "string" || path.length === 0)) {
       return c.json({ ok: false, code: "invalid_request", message: "path must be a non-empty string" }, 400);
     }
-    // 只登记句柄；不新建 ACP Session，也不读取历史。
+    const sessionId = parsed.sessionId;
+    if (sessionId !== undefined && (typeof sessionId !== "string" || sessionId.length === 0)) {
+      return c.json({ ok: false, code: "invalid_request", message: "sessionId must be a non-empty string" }, 400);
+    }
+    if (path !== undefined && sessionId !== undefined) {
+      return c.json({ ok: false, code: "invalid_request", message: "path and sessionId are mutually exclusive" }, 400);
+    }
+    // 只登记句柄；历史会话的 sandbox 在此按 sessionId 解析并启动。
     let chat: ChatServiceContract;
     try {
-      chat = deps.registry.createChat(path);
+      chat = await deps.registry.createChat({ path, sessionId });
     } catch (error) {
       if (error instanceof WorkspaceMismatchError) {
         return c.json({
@@ -208,6 +231,14 @@ export function createApi(deps: ApiOptions): Hono {
           code: "workspace_mismatch",
           message: error.message,
         }, 400);
+      }
+      if (error instanceof SandboxStartError) {
+        logError("[peri-cf] Peri sandbox failed to start", error, { sessionId });
+        return c.json({
+          ok: false as const,
+          code: "sandbox_start_failed",
+          message: "Sandbox failed to start for this session",
+        }, 503);
       }
       throw error;
     }

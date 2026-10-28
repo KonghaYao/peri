@@ -36,21 +36,82 @@ export const chatHandleSchema = z.object({
   bindingRevision: z.number().int().nonnegative(),
 });
 
+const sandboxStateSchema = z.enum([
+  "idle", "starting", "ready", "stopping", "stopped", "failed", "closed", "unknown",
+]);
+
 /**
- * `GET /api/info` 的去敏配置摘要。
+ * `GET /api/monitor` 的只读快照：LLM、MCP、WASM 与 Sandbox 四段。
  *
- * 服务端 `publicServerInfo` 与设置页共用这一形状；地址在服务端去掉 userinfo、query 与 token。
+ * 地址在服务端去掉 userinfo、query 与 hash；MCP header 只保留名称，模型/Store
+ * 凭据从不出网。WASM 段只有进程级内存（`arrayBufferBytes` 含全部 WASM 线性内存），
+ * 不提供单实例堆占用。
  */
-export const serverInfoSchema = z.object({
-  model: z.object({
+export const monitorSnapshotSchema = z.object({
+  ok: z.literal(true),
+  generatedAt: z.string(),
+  uptimeSeconds: z.number().nonnegative(),
+  llm: z.object({
     provider: z.string().min(1),
-    tiers: z.record(z.string(), z.string()),
+    activeAlias: z.string().min(1),
     baseUrl: z.string(),
+    tiers: z.record(z.string(), z.string()),
   }),
-  storage: z.object({ url: z.string() }),
-  mcp: z.array(z.object({ name: z.string().min(1), url: z.string() })),
-  workspace: z.string(),
-  sessionCwd: z.string(),
+  mcp: z.object({
+    sandboxEnabled: z.boolean(),
+    remote: z.array(z.object({
+      name: z.string().min(1),
+      url: z.string(),
+      headerNames: z.array(z.string()),
+    })),
+    sandbox: z.array(z.object({
+      sandboxId: z.string().min(1),
+      name: z.string().min(1),
+      url: z.string().nullable(),
+      state: sandboxStateSchema,
+    })),
+  }),
+  wasm: z.object({
+    moduleUrl: z.string(),
+    process: z.object({
+      rssBytes: z.number().int().nonnegative(),
+      heapTotalBytes: z.number().int().nonnegative(),
+      heapUsedBytes: z.number().int().nonnegative(),
+      arrayBufferBytes: z.number().int().nonnegative(),
+    }),
+    activeChats: z.number().int().nonnegative(),
+  }),
+  sandbox: z.object({
+    enabled: z.boolean(),
+    root: z.string(),
+    settings: z.object({
+      path: z.string(),
+      source: z.enum(["file", "defaults", "disabled", "error"]),
+      profileName: z.string().nullable(),
+      profile: z.object({
+        memoryMax: z.string(),
+        tasksMax: z.number().int().nonnegative(),
+        cpuQuota: z.string(),
+        allowedDomains: z.array(z.string()).max(100),
+        allowedDomainsTotal: z.number().int().nonnegative(),
+        runtimeReadPathsCount: z.number().int().nonnegative(),
+      }).nullable(),
+      error: z.string().optional(),
+    }),
+    workspacesOnDisk: z.number().int().nonnegative().nullable(),
+    workspacesError: z.string().optional(),
+    active: z.array(z.object({
+      sandboxId: z.string().min(1),
+      state: sandboxStateSchema,
+      refs: z.number().int().nonnegative(),
+      startedAt: z.string(),
+      workspacePath: z.string(),
+      mcpUrl: z.string().nullable(),
+      mcpServerName: z.string().nullable(),
+      lastError: z.object({ code: z.string().min(1), message: z.string() }).nullable(),
+    })),
+    starting: z.number().int().nonnegative(),
+  }),
 });
 
 /** Action 封套里的目标绑定；空句柄固定 `{sessionId:null,bindingRevision:0}`。 */
@@ -125,7 +186,8 @@ const entryBlockSchema = z.discriminatedUnion("type", [
   z.object({ blockId: z.string().min(1), type: z.literal("text"), text: z.string() }),
   z.object({
     blockId: z.string().min(1), type: z.literal("reasoning"), text: z.string(),
-    visibility: z.enum(["summary", "hidden"]).optional(),
+    // SDK 只保证 `visibility?: string`；未知值必须透传，不能反过来冻结整份展示态。
+    visibility: z.string().optional(),
   }),
   z.object({
     blockId: z.string().min(1), type: z.literal("tool_call"), toolCallId: z.string().min(1),
@@ -205,7 +267,7 @@ export type ToolCallDTO = z.infer<typeof toolCallSchema>;
 export type TurnDTO = z.infer<typeof turnSchema>;
 export type InteractionDTO = z.infer<typeof interactionSchema>;
 export type AskUserQuestionDTO = z.infer<typeof askUserQuestionSchema>;
-export type ServerInfo = z.infer<typeof serverInfoSchema>;
+export type MonitorSnapshot = z.infer<typeof monitorSnapshotSchema>;
 export type Chat = z.infer<typeof chatSchema>;
 export type ChatSummary = z.infer<typeof chatSummarySchema>;
 
