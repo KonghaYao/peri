@@ -79,6 +79,7 @@
 - `bun test tests test`：单元/行为测试；`test/` 覆盖执行准入、Session 关闭/启动与 SessionOwnership。
 - `bun run test`：在 `MISE_ENV=wasm mise exec --` 下先 build（含 peri-wasm）再全量测试。
 - `bun run test:wasm`：先 build，再跑真实 WASM ACP 集成（真实打包 WASM + 真实 Turso listener + fixture 模型）。
+- 容量基准：1 GiB 宿主 RSS 下 WASM Agent 容量复测规程见 [SDK WASM Agent 容量基准](../verification/benchmarks/sdk-wasm-capacity.md)；目录索引与其他规程见 [验证基准](../verification/benchmarks/README.md)。
 - `bun run smoke:workers`：本地 workerd 探针；Hosted Workers 未部署。
 - 关键回归：`tests/chat-{action,manager,binding,actions,close-bounded,view,replica,document,instance-factory}.test.ts`、`tests/view-registry.test.ts`、`tests/peri-instance.test.ts`、`tests/history-pagination.test.ts`、`tests/acp-mcp-lifecycle.test.ts`、`tests/turso-storage.test.ts`、`tests/wasm-acp-integration.test.ts`。
 - 公共出口负向断言：`tests/public-view.test.ts`，同时确认 `ChatViewRegistry` 只在主入口、不在 `/view`。
