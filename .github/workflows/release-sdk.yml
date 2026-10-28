@@ -118,6 +118,17 @@ jobs:
               with:
                   key: sdk-wasm32-unknown-emscripten
 
+            # @peri-sdk 通过 file:../peri-sandbox 做类型兼容检查，而 sandbox 的
+            # types/exports 指向 gitignore 的 dist/。Bun 在安装时物化 file: 依赖，
+            # 因此必须先安装并构建 sandbox，再安装 SDK 依赖。
+            - name: Install peri-sandbox dependencies
+              working-directory: npm-packages/peri-sandbox
+              run: bun install --frozen-lockfile
+
+            - name: Build peri-sandbox for SDK compatibility test
+              working-directory: npm-packages/peri-sandbox
+              run: bun run build
+
             - name: Install SDK dependencies
               working-directory: npm-packages/@peri-sdk
               run: bun install --frozen-lockfile
