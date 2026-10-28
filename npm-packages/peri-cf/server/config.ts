@@ -107,7 +107,9 @@ function parseModel(env: ServerEnvironment, problems: string[]): ServerConfig["m
 }
 
 function parseStorage(env: ServerEnvironment, problems: string[]): ServerConfig["storage"] | undefined {
-  const url = text(env.PERI_STORAGE_URL);
+  const rawUrl = text(env.PERI_STORAGE_URL);
+  // WASM 运行时自己拼接 `/v2/pipeline`；结尾斜杠会形成双斜杠并被远端当成未知路径。
+  const url = rawUrl.replace(/\/+$/, "");
   const authToken = typeof env.PERI_STORAGE_TOKEN === "string" ? env.PERI_STORAGE_TOKEN : "";
   if (!url) problems.push("缺少 PERI_STORAGE_URL");
   else if (!isHttpAddress(url)) problems.push("PERI_STORAGE_URL 必须是 http(s) 地址");

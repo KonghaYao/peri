@@ -4,6 +4,9 @@ import { DeadlineError } from "../src/util/deadline";
 import {
   WasmRuntimeLease, WasmRuntimePool, type WasmRuntimeStarter,
 } from "../src/wasm/runtime-pool";
+import {
+  WasmRuntimeStartupError, type WasmRuntimeCleanupOutcome,
+} from "../src/wasm/runtime";
 
 let generation = 0;
 
@@ -60,6 +63,23 @@ describe("WasmRuntimeLease", () => {
     expect(closes).toBe(1);
     expect(outcomes).toEqual([{ confirmed: true }]);
   });
+
+  test("a late startup rejection settles its cleanup evidence", async () => {
+    let rejectStart!: (error: unknown) => void;
+    const outcomes: WasmRuntimeCleanupOutcome[] = [];
+    const starting = new Promise<WasmAcpTransport>((_, reject) => { rejectStart = reject; });
+    await expect(WasmRuntimeLease.start(() => starting, {
+      startupTimeoutMs: 5,
+      onLateCleanup: (outcome) => outcomes.push(outcome),
+    })).rejects.toBeInstanceOf(DeadlineError);
+    const cleanupError = new Error("native exit unconfirmed");
+    rejectStart(new WasmRuntimeStartupError(
+      new Error("startup failed"),
+      Promise.resolve({ confirmed: false, error: cleanupError }),
+    ));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(outcomes).toEqual([{ confirmed: false, error: cleanupError }]);
+  });
 });
 
 describe("WasmRuntimePool", () => {
@@ -112,6 +132,10 @@ describe("WasmRuntimePool", () => {
     let startupSignal: AbortSignal | undefined;
     const manager = new WasmRuntimePool(({ signal }) => new Promise<WasmAcpTransport>((_, reject) => {
       startupSignal = signal;
+      if (signal.aborted) {
+        reject(signal.reason);
+        return;
+      }
       signal.addEventListener("abort", () => reject(signal.reason));
     }), { startupTimeoutMs: 1_000 });
     const acquiring = manager.acquire();
@@ -136,5 +160,38 @@ describe("WasmRuntimePool", () => {
     expect((await manager.release(unconfirmed)).confirmed).toBe(false);
     expect(manager.unconfirmed).toBe(true);
     expect(manager.size).toBe(1);
+  });
+
+  test("waits for late cleanup after a failed startup and remembers unconfirmed ownership", async () => {
+    let resolveCleanup!: (outcome: WasmRuntimeCleanupOutcome) => void;
+    const cleanup = new Promise<WasmRuntimeCleanupOutcome>((resolve) => { resolveCleanup = resolve; });
+    const manager = new WasmRuntimePool(async () => {
+      throw new WasmRuntimeStartupError(new Error("startup failed"), cleanup);
+    });
+    await expect(manager.acquire()).rejects.toBeInstanceOf(WasmRuntimeStartupError);
+    expect(manager.unconfirmed).toBe(false);
+
+    const closing = manager.closeAll();
+    let closed = false;
+    void closing.then(() => { closed = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(closed).toBe(false);
+
+    resolveCleanup({ confirmed: false, error: new Error("native exit unconfirmed") });
+    await closing;
+    expect(manager.unconfirmed).toBe(true);
+  });
+
+  test("closeAll bounds a late cleanup that never settles", async () => {
+    const manager = new WasmRuntimePool(
+      () => new Promise<WasmAcpTransport>(() => {}),
+      { startupTimeoutMs: 5, closeTimeoutMs: 20 },
+    );
+    const acquiring = manager.acquire();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const closing = manager.closeAll();
+    await expect(acquiring).rejects.toBeDefined();
+    await closing;
+    expect(manager.unconfirmed).toBe(true);
   });
 });

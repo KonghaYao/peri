@@ -33,6 +33,15 @@ describe("loadServerConfig", () => {
     });
   });
 
+  test("storage URL 去掉结尾斜杠，避免运行时拼出双斜杠", () => {
+    const { config, problems } = loadServerConfig(
+      { ...BASE, PERI_STORAGE_URL: "https://store.example.com/db/demo/main/" },
+      "/srv/peri-cf",
+    );
+    expect(problems).toEqual([]);
+    expect(config?.storage.url).toBe("https://store.example.com/db/demo/main");
+  });
+
   test("sandbox 默认启用并使用用户目录下的 sandboxesRoot", () => {
     const { config } = loadServerConfig(BASE, "/srv/peri-cf");
     expect(config?.sandbox).toEqual({
