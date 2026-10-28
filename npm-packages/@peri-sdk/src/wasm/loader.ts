@@ -1,3 +1,5 @@
+import { loadWasmArtifact, wasmArtifactUrl } from "./artifact-cache";
+
 /** The Emscripten module generated from this workspace's peri-wasm binary. */
 export interface NativeWasmAcp {
   free?(): void;
@@ -59,15 +61,61 @@ function artifactUrl(moduleUrl?: string | URL): URL {
   }
 }
 
+/**
+ * Emscripten only accepts an instance through this callback and ignores the return value, so a
+ * failed instantiation has no rejection channel into the factory promise. Log failures and let the
+ * runtime's startup timeout bound the wait, like any other stalled glue startup.
+ *
+ * `successCallback` runs on a promise chain, so a synchronous throw from it would otherwise become
+ * an unhandled rejection that can take down the host. Catch it, log it, and keep the process alive.
+ * The factory cannot be rejected from here: Emscripten exposes no hook for that, and the startup
+ * timeout is the only bound for a glue that keeps waiting.
+ */
+function instantiateSharedWasm(artifact: WebAssembly.Module) {
+  return (imports: WebAssembly.Imports,
+    successCallback: (instance: WebAssembly.Instance, module: WebAssembly.Module) => void) => {
+    void WebAssembly.instantiate(artifact, imports).then(
+      (instance) => {
+        try {
+          successCallback(instance, artifact);
+        } catch (error) {
+          console.error("[peri-sdk] Peri WASM instantiation callback failed", error);
+        }
+      },
+    ).catch((error: unknown) => {
+      console.error("[peri-sdk] Peri WASM instance creation failed", error);
+    });
+    return {};
+  };
+}
+
+/**
+ * Compile the binary once when this loader owns the artifact location.
+ *
+ * `locateFile` and `instantiateWasm` are runtime-owned choices about where and how the binary is
+ * loaded; with either present the glue keeps its current path and the cache stays unused. A missing
+ * binary, a failed read or a read that exceeds the artifact budget also resolves `null` so the glue
+ * can fall back to its own loading path; the cache evicts that result so a later activation retries.
+ */
+async function loadSharedWasmModule(url: URL,
+  moduleOptions: Readonly<Record<string, unknown>>): Promise<WebAssembly.Module | null> {
+  if (moduleOptions.instantiateWasm !== undefined || moduleOptions.locateFile !== undefined) return null;
+  return loadWasmArtifact(wasmArtifactUrl(url));
+}
+
 async function instantiate(url: URL | undefined, environment: Record<string, string>,
   moduleOptions: Readonly<Record<string, unknown>>,
   factory?: PeriWasmInstantiateOptions["moduleFactory"]): Promise<PeriWasmModule> {
-  if (!factory) {
+  // 注入 factory 时产物位置归宿主所有，共享编译缓存不介入该路径。
+  const loaderOwnsArtifact = factory === undefined;
+  let resolved = factory;
+  if (!resolved) {
     if (!url) throw new Error("Peri WASM artifact URL is unavailable; pass moduleUrl or inject moduleFactory");
     const source = await import(/* @vite-ignore */ url.href) as { default?: PeriWasmModuleFactory };
-    factory = source.default;
+    resolved = source.default;
+    if (typeof resolved !== "function") throw new Error("Invalid peri-wasm module factory");
   }
-  if (typeof factory !== "function") throw new Error("Invalid peri-wasm module factory");
+  if (typeof resolved !== "function") throw new Error("Invalid peri-wasm module factory");
   const hooks = moduleOptions.preRun;
   if (hooks !== undefined && typeof hooks !== "function" && !Array.isArray(hooks))
     throw new TypeError("Invalid WASM preRun hooks");
@@ -78,14 +126,20 @@ async function instantiate(url: URL | undefined, environment: Record<string, str
       if (!runtime.ENV) throw new Error("peri-wasm artifact does not export ENV; rebuild peri-wasm");
       Object.assign(runtime.ENV, environment);
     });
-  const module = await factory({ ...moduleOptions, preRun });
+  const shared = loaderOwnsArtifact && url ? await loadSharedWasmModule(url, moduleOptions) : null;
+  const module = await resolved({
+    ...moduleOptions,
+    preRun,
+    ...(shared ? { instantiateWasm: instantiateSharedWasm(shared) } : {}),
+  });
   if (typeof module.PeriWasmAcp?.start !== "function")
     throw new Error("peri-wasm artifact does not expose the ACP Host");
   return module;
 }
 
 /**
- * Build a fresh module instance for one runtime; nothing is shared with other instances or URLs.
+ * Build a fresh module instance for one runtime. The compiled artifact may be shared by URL, but
+ * each caller gets its own module object, `ENV` and ACP Host; nothing else is shared.
  *
  * 环境在调用时同步取快照，失败一律以 reject 结算（`loadPeriWasm` 的校验失败仍是同步抛出）。
  */
