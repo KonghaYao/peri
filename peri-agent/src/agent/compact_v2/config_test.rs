@@ -12,6 +12,8 @@ fn test_default_values() {
     assert!((config.auto_compact_threshold - 0.95).abs() < 0.001);
     assert!((config.micro_compact_threshold - 0.75).abs() < 0.001);
     assert_eq!(config.micro_compact_stale_steps, 2);
+    assert_eq!(config.micro_min_gain_divisor, 10);
+    assert!(config.has_valid_micro_min_gain_divisor());
     assert_eq!(config.micro_field_threshold_chars, 500);
     assert_eq!(config.micro_field_keep_head_chars, 350);
     assert_eq!(config.micro_field_keep_tail_chars, 100);
@@ -28,6 +30,26 @@ fn test_default_values() {
         128 * 1024 * 1024,
         "驻留预算默认 128 MiB"
     );
+}
+
+#[test]
+fn test_micro_min_gain_divisor_default_override_and_zero_rejection() {
+    assert_eq!(CompactConfig::default().micro_min_gain_divisor, 10);
+
+    let overridden: CompactConfig =
+        serde_json::from_str(r#"{"micro_min_gain_divisor":20}"#).unwrap();
+    assert_eq!(overridden.micro_min_gain_divisor, 20);
+
+    assert!(
+        serde_json::from_str::<CompactConfig>(r#"{"micro_min_gain_divisor":0}"#).is_err(),
+        "零值不是「不限」，外部配置必须被拒绝"
+    );
+
+    let zero = CompactConfig {
+        micro_min_gain_divisor: 0,
+        ..Default::default()
+    };
+    assert!(!zero.has_valid_micro_min_gain_divisor());
 }
 
 #[test]

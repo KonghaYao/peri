@@ -209,6 +209,7 @@ pub(super) async fn full_compact_inner_with_protected(
             changed_messages: 0,
             changed_fields: 0,
             no_op_candidates: 0,
+            deferral: None,
         });
     }
     let summary = if has_history {
@@ -279,6 +280,7 @@ pub(super) async fn full_compact_inner_with_protected(
         changed_messages: 0,
         changed_fields: 0,
         no_op_candidates: 0,
+        deferral: None,
     })
 }
 

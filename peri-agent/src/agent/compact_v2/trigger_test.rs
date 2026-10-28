@@ -37,9 +37,10 @@ fn make_ai_with_tool(text: &str, tool_name: &str, tool_id: &str) -> BaseMessage 
 
 fn make_tool_result(tool_call_id: &str, text: &str) -> BaseMessage {
     // Even the short fixture outputs carry enough body to pay the real archive receipt cost.
+    // 8 轮左右的输出必须显著超过 200k 窗口的 20k 净收益门槛，否则统一准入会延后。
     let body = format!(
         "{text}{}",
-        "x".repeat(8_000usize.saturating_sub(text.len()))
+        "x".repeat(24_000usize.saturating_sub(text.len()))
     );
     BaseMessage::tool_result(tool_call_id.to_string(), MessageContent::text(body))
 }
@@ -200,9 +201,9 @@ async fn test_micro_effective_no_full_overlay() {
 }
 
 #[tokio::test]
-async fn test_micro_invalid_upgrades_to_full() {
-    // 仅 3 轮 + stale_steps=1 → 回收不足 + budget=0.80 ≥ 0.95? 否 → Micro 应用（部分收益）
-    // 此测试改为：验证低 budget 时 Micro 应用而不是升级
+async fn test_micro_below_gain_gate_defers_without_writes() {
+    // 新契约：进入 Micro 区间但净收益低于完整窗口 10% 时主动延后，
+    // 不再“部分收益也好”地提交低收益 Micro。
     let bound = TestSession::open().await;
     let mut t =
         MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
@@ -217,7 +218,6 @@ async fn test_micro_invalid_upgrades_to_full() {
         ..Default::default()
     };
     let mut failures = 0u32;
-    // budget=0.80 (< 0.95) → Micro 应用（部分收益），不升级 Full
     let pressure = pressure_from_budget(0.80);
     reset_plan_micro_calls();
     let facts = exposed_facts(&t, &bound.thread_id);
@@ -235,25 +235,37 @@ async fn test_micro_invalid_upgrades_to_full() {
         &crate::agent::compact_v2::ProviderCapabilities::openai(),
     )
     .await;
-    // budget=0.80 < threshold=0.95 → 走 "不足但未达 Full 阈值" 路径 → 应用 Micro
     assert_eq!(
         result.strategy,
         CompactStrategy::Micro,
-        "budget 低于 Full 阈值时应走 Micro"
+        "区间策略标签仍为 Micro"
     );
-    assert_eq!(failures, 0, "Micro 不应计失败");
+    assert_eq!(
+        result.outcome(),
+        CompactOutcome::Deferred,
+        "收益不足应延后而不是提交"
+    );
+    assert_eq!(failures, 0, "延后不增加失败计数");
+    assert_eq!(result.affected_count, 0, "延后不得写入");
+    assert_eq!(result.changed_messages, 0, "延后不得写入");
     assert!(
-        result.estimated_tokens_saved < pressure.target_reclaim_tokens(),
-        "本场景收益应低于回收目标（不足未达阈值），实际 saved={} target={}",
-        result.estimated_tokens_saved,
-        pressure.target_reclaim_tokens()
+        !t.entries()
+            .iter()
+            .any(|entry| t.flags(entry.id()).truncated || t.flags(entry.id()).projection.is_some()),
+        "延后不得持久化任何投影标记"
     );
+    let deferral = result.deferral.expect("延后必须携带结构化原因");
+    assert_eq!(
+        deferral.min_gain_tokens,
+        crate::agent::compact_v2::min_micro_gain_tokens(200_000, &config)
+    );
+    assert!(deferral.estimated_gain_tokens < deferral.min_gain_tokens);
     assert_planned_once();
 }
 
 #[tokio::test]
-async fn test_micro_effective_full_overlay() {
-    // budget = 0.98 → ≥ 95% → dry-run 估算 → token saving 不足 + budget 高位 → 跳过 Micro → 直接 Full
+async fn test_full_condition_does_not_commit_micro_before_full() {
+    // 新契约：达到 Full 条件且 G < max(M, R) 时直接 Full，本轮不先提交 Micro。
     let bound = TestSession::open().await;
     let mut t =
         MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
@@ -265,7 +277,7 @@ async fn test_micro_effective_full_overlay() {
 
     let config = CompactConfig::default();
     let mut failures = 0u32;
-    // budget=0.98 (196000 tokens) → 远高于 threshold → 直接 Full（无 LLM 降级）
+    // budget=0.98 (196000 tokens) 且 R 很大 → G < max(M, R) → 直接 Full（无 LLM 失败）
     let pressure = pressure_from_budget(0.98);
     reset_plan_micro_calls();
     let facts = exposed_facts(&t, &bound.thread_id);
@@ -283,16 +295,23 @@ async fn test_micro_effective_full_overlay() {
         &crate::agent::compact_v2::ProviderCapabilities::openai(),
     )
     .await;
-    // Full 无 LLM 失败，但已应用的 Micro 必须仍是有效策略视图。
     assert_eq!(
         result.strategy,
-        CompactStrategy::Micro,
-        "Micro 已应用但 Full 失败时应报告 Micro"
+        CompactStrategy::Full,
+        "达到 Full 条件时不得把结果伪装成 Micro"
     );
     assert_eq!(
         result.outcome(),
-        CompactOutcome::MicroAppliedThenFullFailed,
-        "结果应明确表示 Micro 已应用而 Full 失败"
+        CompactOutcome::FullFailed,
+        "Full 失败必须显式报告，且本轮 Micro 提交为 0"
+    );
+    assert_eq!(result.affected_count, 0, "本轮 Micro 不得提交");
+    assert_eq!(result.changed_messages, 0, "本轮 Micro 不得提交");
+    assert!(
+        !t.entries()
+            .iter()
+            .any(|entry| t.flags(entry.id()).truncated || t.flags(entry.id()).projection.is_some()),
+        "Full 失败前不得先写 Micro 投影"
     );
     assert_planned_once();
 }
@@ -477,8 +496,8 @@ async fn test_full_without_llm_fails_no_panic() {
 }
 
 #[tokio::test]
-async fn test_micro_applied_then_full_failure_is_not_reported_as_full_completion() {
-    // 高上下文压力下，Micro 先应用；随后无 LLM 的 Full 必然失败。
+async fn test_full_failure_before_commit_leaves_no_hidden_micro_commit() {
+    // 新契约：高压 Full 失败或提交前取消时，不得补交本轮被拒绝的 Micro。
     let bound = TestSession::open().await;
     let mut t =
         MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
@@ -512,10 +531,10 @@ async fn test_micro_applied_then_full_failure_is_not_reported_as_full_completion
     .await;
 
     assert!(
-        t.entries()
+        !t.entries()
             .iter()
-            .any(|entry| t.flags(entry.id()).truncated),
-        "Full 失败后仍应保留已应用的 Micro 截断"
+            .any(|entry| t.flags(entry.id()).truncated || t.flags(entry.id()).projection.is_some()),
+        "Full 失败前不得留下本轮 Micro 的隐藏提交"
     );
     assert_eq!(failures, 1, "Full 失败应计入连续失败次数");
     assert_eq!(
@@ -525,14 +544,10 @@ async fn test_micro_applied_then_full_failure_is_not_reported_as_full_completion
     );
     assert_eq!(
         result.outcome(),
-        CompactOutcome::MicroAppliedThenFullFailed,
-        "结果应明确表示 Micro 已应用而 Full 失败"
+        CompactOutcome::FullFailed,
+        "Full 失败必须显式报告"
     );
-    assert_ne!(
-        result.strategy,
-        CompactStrategy::Full,
-        "Micro 已应用但 Full 失败时，不得伪装为 Full completion"
-    );
+    assert_eq!(result.strategy, CompactStrategy::Full);
     assert!(result.summary.is_none(), "失败的 Full 不得产生完成摘要");
 }
 
@@ -646,8 +661,8 @@ async fn test_estimated_tokens_saved_increases_with_more_rounds() {
 }
 
 #[tokio::test]
-async fn test_run_compact_smart_applied_then_full_failure_preserves_effects() {
-    // 高压力下 Smart 已先应用；无 LLM 的 Full 随后失败也不得抹去该事实。
+async fn test_run_compact_smart_uses_same_admission_and_never_precommits() {
+    // 新契约：Smart 打开时与 Micro 使用同一收益准入；高压 Full 失败前不得先写 Smart。
     let bound = TestSession::open().await;
     let mut t =
         MessageTranscript::new().with_persistence(bound.resources(), bound.thread_id.clone());
@@ -683,20 +698,20 @@ async fn test_run_compact_smart_applied_then_full_failure_preserves_effects() {
 
     assert_eq!(
         result.strategy,
-        CompactStrategy::Smart,
-        "应保留已应用的 Smart 策略"
+        CompactStrategy::Full,
+        "Smart 打开时也必须直接进入 Full，不得先写后判"
     );
     assert_eq!(
         result.outcome(),
-        CompactOutcome::SmartAppliedThenFullFailed,
-        "结果必须精确表示 Smart 已应用而 Full 失败"
+        CompactOutcome::FullFailed,
+        "结果必须精确表示 Full 失败"
     );
     assert_planned_once();
     assert!(
-        t.entries()
+        !t.entries()
             .iter()
-            .any(|entry| t.flags(entry.id()).truncated),
-        "Full 失败后必须保留 Smart 已应用的 truncated 标记"
+            .any(|entry| t.flags(entry.id()).truncated || t.flags(entry.id()).projection.is_some()),
+        "Full 失败前不得留下 Smart 的投影写入"
     );
     assert_eq!(
         result.full_escalation_reason,
@@ -704,16 +719,12 @@ async fn test_run_compact_smart_applied_then_full_failure_preserves_effects() {
         "应保留后续 Full 失败前的升级原因"
     );
     assert!(result.summary.is_none(), "失败的 Full 不得产生完成摘要");
-    assert!(result.affected_count > 0, "应保留 Smart 的 affected_count");
-    assert!(
-        result.estimated_tokens_saved > 0,
-        "应保留 Smart 的 estimated_tokens_saved"
-    );
+    assert_eq!(result.affected_count, 0, "不得保留先写的 Smart 变更");
     assert_eq!(failures, 1, "Full 失败应计入连续失败次数");
 }
 
 #[tokio::test]
-async fn test_smart_then_full_success_aggregates_metrics() {
+async fn test_smart_full_success_has_no_precommitted_micro_metrics() {
     // Full compact 现在需要 persistence（commit_compaction_lifecycle 要求 store）。
     // 使用临时 SQLite store 满足此约束。
     let bound = TestSession::open().await;
@@ -750,15 +761,13 @@ async fn test_smart_then_full_success_aggregates_metrics() {
 
     assert_eq!(result.strategy, CompactStrategy::Full);
     assert_eq!(result.outcome(), CompactOutcome::FullApplied);
-    // 注意：Full Compact 成功时 affected_count 仅包含 Full 的 excluded 消息数
-    // （Smart 的实际标记在 transcript 中生效，但 affected_count 由 Full 的 lifecycle 计算）
     assert!(
         result.affected_count > 0,
         "Full 成功应包含被 excluded 的消息"
     );
-    assert!(
-        result.estimated_tokens_saved > 0,
-        "Full 本身当前不估算节省量，结果仍必须保留 Smart 的节省量"
+    assert_eq!(
+        result.estimated_tokens_saved, 0,
+        "Full 本身不估算节省量；本轮没有先提交的 Smart 收益"
     );
     assert_eq!(failures, 0, "成功 Full 应清零连续失败次数");
 }

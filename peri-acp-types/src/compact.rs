@@ -10,6 +10,12 @@ use crate::messages::BaseMessage;
 pub const CONTINUATION_HINT: &str =
     "[Context has been compacted. Continue working based on the summary above.]";
 
+/// 自动 Micro 最小净收益的默认分母：完整上下文窗口的 1/10，向上取整。
+///
+/// 运行期分母由 [`CompactConfig::micro_min_gain_divisor`] 持有；本常量只作为
+/// 默认值，避免在决策代码中复制数字。
+pub const MICRO_MIN_GAIN_DIVISOR: u32 = 10;
+
 /// 升级到 Full Compact 的原因（事件契约字段）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -42,6 +48,10 @@ pub enum CompactOutcome {
     FullFailed,
     /// 仅估算了 Compact 收益，未修改 transcript。
     Shadowed,
+    /// 达到 Micro 触发区间，但合法候选的净收益不足或候选为空；本轮延后提交。
+    ///
+    /// 延后不是失败：不写 transcript、不做归档正文验证、不增加失败计数。
+    Deferred,
     /// 已应用 Micro Compact，但后续 Full Compact 失败。
     MicroAppliedThenFullFailed,
     /// 已应用 Smart Compact，但后续 Full Compact 失败。
@@ -70,6 +80,34 @@ impl CompactOutcome {
     pub fn is_full_applied(self) -> bool {
         matches!(self, Self::FullApplied)
     }
+
+    /// 是否为「收益不足的主动延后」。延后不是失败。
+    pub fn is_deferred(self) -> bool {
+        matches!(self, Self::Deferred)
+    }
+}
+
+/// 自动 Micro 延后的结构化原因（事件契约字段）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactDeferralReason {
+    /// 净收益 G 低于最小收益门槛 M。
+    InsufficientGain,
+    /// 没有通过内容与协议校验的合法候选。
+    NoCandidates,
+    /// 缺少上下文窗口（C == 0），不执行比例型自动 Micro。
+    MissingContextBudget,
+}
+
+/// 延后事实：原因与同一冻结请求中的收益口径。
+///
+/// `estimated_gain_tokens` 是最终完整渲染后的净减少量（G），
+/// `min_gain_tokens` 是完整上下文窗口的 10% 向上取整（M）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompactDeferral {
+    pub reason: CompactDeferralReason,
+    pub estimated_gain_tokens: u64,
+    pub min_gain_tokens: u64,
 }
 
 /// 从消息历史提取保留的文件摘要（full compact 输出解析）。
@@ -167,6 +205,22 @@ fn default_micro_field_keep_head_chars() -> usize {
 fn default_micro_field_keep_tail_chars() -> usize {
     100
 }
+fn default_micro_min_gain_divisor() -> u32 {
+    MICRO_MIN_GAIN_DIVISOR
+}
+/// 分母必须为正；零值不是「不限」，而是明确的配置错误。
+fn deserialize_positive_divisor<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u32::deserialize(deserializer)?;
+    if value == 0 {
+        return Err(serde::de::Error::custom(
+            "micro_min_gain_divisor must be positive",
+        ));
+    }
+    Ok(value)
+}
 /// serde 反序列化时校验 compact 阈值在 [0.0, 1.0] 范围内，
 /// 超出则 clamp 并发出警告。防止配置错误导致 compact 的 Full 升级路径
 /// 被静默绕过（如 auto_compact_threshold 误设为 1.2 时 budget_pct 永不满足条件）。
@@ -208,6 +262,15 @@ pub struct CompactConfig {
     pub micro_compact_threshold: f64,
     #[serde(default = "default_stale_steps")]
     pub micro_compact_stale_steps: usize,
+    /// 自动 Micro 最小净收益的分母：完整上下文窗口的 1/N，向上取整。
+    ///
+    /// 默认 10（10%）。零值不是「不限」，而是明确的配置错误；外部反序列化拒绝零值，
+    /// 程序内构造的零值按最严格口径（N=1）处理。
+    #[serde(
+        default = "default_micro_min_gain_divisor",
+        deserialize_with = "deserialize_positive_divisor"
+    )]
+    pub micro_min_gain_divisor: u32,
     /// 显式附加保护工具名；默认空，工具目录中的语义保护仍优先。
     #[serde(default = "default_excluded_tools")]
     pub micro_excluded_tools: Vec<String>,
@@ -285,6 +348,7 @@ impl Default for CompactConfig {
             auto_compact_threshold: default_threshold_095(),
             micro_compact_threshold: default_threshold_075(),
             micro_compact_stale_steps: default_stale_steps(),
+            micro_min_gain_divisor: default_micro_min_gain_divisor(),
             micro_excluded_tools: default_excluded_tools(),
             summary_max_tokens: default_summary_max_tokens(),
             summary_max_requests: default_summary_max_requests(),
@@ -313,6 +377,10 @@ impl Default for CompactConfig {
 pub const LEGACY_COMPACT_KEYS: [&str; 1] = ["ptl_max_retries"];
 
 impl CompactConfig {
+    pub fn has_valid_micro_min_gain_divisor(&self) -> bool {
+        self.micro_min_gain_divisor > 0
+    }
+
     pub fn has_valid_micro_field_limits(&self) -> bool {
         self.micro_field_threshold_chars > 0
             && self

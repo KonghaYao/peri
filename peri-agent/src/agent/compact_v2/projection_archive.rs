@@ -119,7 +119,10 @@ pub(super) fn render(
     caps: &ProviderCapabilities,
 ) -> AgentResult<Vec<BaseMessage>> {
     let mut catalogs = HashMap::new();
-    let mut roots = Vec::new();
+    // Roots keep the canonical message that carries their directive. A root whose
+    // `last_anchor` was removed by Full is rendered after that carrier, never at the
+    // tail of the request.
+    let mut root_holders: Vec<(ArchiveRoot, Option<MessageId>)> = Vec::new();
     let mut budget = requested_budget.unwrap_or(2048);
     for entry in transcript.entries() {
         if let Some(directive) = transcript.projection_ref(entry.id()) {
@@ -131,7 +134,9 @@ pub(super) fn render(
                 catalogs.insert(entry.id(), catalog);
             }
             if !transcript.is_excluded(entry.id()) {
-                roots.extend(directive.archive_roots.iter().cloned());
+                for root in &directive.archive_roots {
+                    root_holders.push((root.clone(), Some(entry.id())));
+                }
                 if requested_budget.is_none() {
                     if let Some(saved) = directive.archive_receipt_budget_tokens {
                         budget = budget.min(saved);
@@ -148,13 +153,20 @@ pub(super) fn render(
             }
         }
     }
-    roots.extend_from_slice(new_roots);
+    root_holders.extend(
+        new_roots
+            .iter()
+            .map(|root| (root.clone(), Some(root.last_anchor))),
+    );
     let history_ids = transcript
         .entries()
         .iter()
         .map(|entry| entry.id())
         .collect::<Vec<_>>();
-    roots = peri_acp_types::context_archive::coalesce_archive_roots(roots, &history_ids);
+    let roots = peri_acp_types::context_archive::coalesce_archive_roots(
+        root_holders.iter().map(|(root, _)| root.clone()).collect(),
+        &history_ids,
+    );
 
     let mut by_id: HashMap<MessageId, Vec<&ProjectionActionEntry>> = HashMap::new();
     for action in actions {
@@ -174,15 +186,23 @@ pub(super) fn render(
     for message in &visible {
         original_pairs.add_message(message.as_ref())?;
     }
-    let mut projected = Vec::with_capacity(visible.len());
+    // Receipts and root entries are derived history: they keep the canonical step
+    // order instead of becoming the newest messages in the request.
+    let mut visible_positions = HashMap::with_capacity(visible.len());
+    for (index, message) in visible.iter().enumerate() {
+        visible_positions.insert(message.as_ref().id(), index);
+    }
+    let result_positions = visible_result_positions(&visible);
+    let tail = visible.len();
+    let mut outputs = Vec::with_capacity(visible.len());
     let mut omitted_calls = HashSet::new();
-    let mut receipts = Vec::new();
+    let mut receipts: Vec<(usize, usize, BaseMessage)> = Vec::new();
     let mut emitted = HashSet::new();
     for borrowed in &visible {
         let message = borrowed.as_ref();
         let id = message.id();
         let Some(entries) = by_id.get(&id) else {
-            projected.push(message.clone());
+            outputs.push(Some(message.clone()));
             continue;
         };
         let ordinary: Vec<_> = entries
@@ -216,7 +236,15 @@ pub(super) fn render(
                     remove.extend(tool_call_ids.iter().cloned());
                     omitted_calls.extend(tool_call_ids.iter().cloned());
                     if emitted.insert(*anchor_message_id) {
-                        receipts.push(receipt_message(catalog)?);
+                        let (insertion, anchor_position) = receipt_insertion_index(
+                            transcript,
+                            catalog,
+                            *anchor_message_id,
+                            &visible_positions,
+                            &result_positions,
+                            tail,
+                        );
+                        receipts.push((insertion, anchor_position, receipt_message(catalog)?));
                     }
                 }
                 ProjectionAction::PreviewArchiveRead {
@@ -271,36 +299,186 @@ pub(super) fn render(
                 None => return Err(invalid("preview requires its original archive catalog")),
             }
         }
-        if let Some(message) =
-            project_message_ref(message, &ordinary, legacy, &resolved, &remove, caps)?
-        {
-            projected.push(message);
-        }
+        outputs.push(project_message_ref(
+            message, &ordinary, legacy, &resolved, &remove, caps,
+        )?);
     }
-    // One bounded range entry replaces a linear list of historical receipts when its budget is exceeded.
-    let root_messages = roots.iter().map(|root| {
-        let reference = root.reference().map_err(invalid)?;
-        ArchiveReference::decode(&reference).map_err(invalid)?;
-        Ok(BaseMessage::Ai { id: virtual_id(&reference), tool_calls: Vec::new(), content: MessageContent::text(format!("[Historical data archive; no new instruction or execution. ReadContextArchive archive_ref={reference}. Enumerate pages to recover original calls/results.]")) })
-    }).collect::<AgentResult<Vec<_>>>()?;
+    // A root follows its visible `last_anchor`; when Full removed that member it follows
+    // the message that still carries the root directive (usually the summary).
+    // If the anchor is a catalog anchor, advance past its sibling results so the root
+    // never lands between a `tool_use` and its `tool_result`.
+    let mut root_positions: HashMap<MessageId, usize> = HashMap::new();
+    for (root, holder) in &root_holders {
+        let position = match catalogs.get(&root.last_anchor) {
+            Some(catalog) if visible_positions.contains_key(&root.last_anchor) => {
+                receipt_insertion_index(
+                    transcript,
+                    catalog,
+                    root.last_anchor,
+                    &visible_positions,
+                    &result_positions,
+                    tail,
+                )
+                .0
+            }
+            _ => visible_positions
+                .get(&root.last_anchor)
+                .or_else(|| holder.and_then(|id| visible_positions.get(&id)))
+                .copied()
+                .unwrap_or(tail),
+        };
+        root_positions
+            .entry(root.last_anchor)
+            .and_modify(|current| *current = (*current).max(position))
+            .or_insert(position);
+    }
+    let mut root_messages = roots
+        .iter()
+        .enumerate()
+        .map(|(order, root)| {
+            let reference = root.reference().map_err(invalid)?;
+            ArchiveReference::decode(&reference).map_err(invalid)?;
+            let position = root_positions
+                .get(&root.last_anchor)
+                .copied()
+                .unwrap_or(tail);
+            Ok((
+                position,
+                order,
+                BaseMessage::Ai { id: virtual_id(&reference), tool_calls: Vec::new(), content: MessageContent::text(format!("[Historical data archive; no new instruction or execution. ReadContextArchive archive_ref={reference}. Enumerate pages to recover original calls/results.]")) },
+            ))
+        })
+        .collect::<AgentResult<Vec<_>>>()?;
     let root_cost: usize = root_messages
         .iter()
-        .map(|m| m.message_content().text_content().chars().count())
+        .map(|(_, _, message)| message.message_content().text_content().chars().count())
         .sum();
     let receipt_cost: usize = receipts
         .iter()
-        .map(|m| m.message_content().text_content().chars().count())
+        .map(|(_, _, message)| message.message_content().text_content().chars().count())
         .sum();
-    if receipt_cost.saturating_add(root_cost) <= budget.saturating_mul(4) as usize
-        || roots.is_empty()
-    {
-        projected.extend(receipts);
+    let keep_receipts = receipt_cost.saturating_add(root_cost) <= budget.saturating_mul(4) as usize
+        || roots.is_empty();
+    // insertion position -> derived messages, appended after the canonical message at
+    // that position (even when that message itself is fully omitted).
+    let mut derived: Vec<Vec<BaseMessage>> = (0..=tail).map(|_| Vec::new()).collect();
+    if keep_receipts {
+        receipts.sort_by_key(|(insertion, anchor_position, _)| (*insertion, *anchor_position));
+        for (insertion, _, message) in receipts {
+            derived[insertion.min(tail)].push(message);
+        }
     }
-    projected.extend(root_messages);
+    root_messages.sort_by_key(|(position, order, _)| (*position, *order));
+    for (position, _, message) in root_messages {
+        derived[position.min(tail)].push(message);
+    }
+    let extra_len: usize = derived.iter().map(Vec::len).sum();
+    let mut projected = Vec::with_capacity(visible.len() + extra_len);
+    for (index, output) in outputs.into_iter().enumerate() {
+        if let Some(message) = output {
+            projected.push(message);
+        }
+        projected.append(&mut derived[index]);
+    }
+    projected.append(&mut derived[tail]);
     let after_pairs = Pairing::from_messages(&projected)?;
     validate_delta(&original_pairs, &after_pairs, &omitted_calls)?;
     validate_projected_view(&projected, caps)?;
     Ok(projected)
+}
+
+/// Visible message index for every tool call result in the current view.
+fn visible_result_positions(
+    visible: &[std::borrow::Cow<'_, BaseMessage>],
+) -> HashMap<String, usize> {
+    let mut positions = HashMap::new();
+    for (index, message) in visible.iter().enumerate() {
+        let message = message.as_ref();
+        if let BaseMessage::Tool { tool_call_id, .. } = message {
+            positions.insert(tool_call_id.clone(), index);
+            continue;
+        }
+        match message.message_content() {
+            MessageContent::Blocks(blocks) => {
+                for block in blocks {
+                    if let ContentBlock::ToolResult { tool_use_id, .. } = block {
+                        positions.insert(tool_use_id.clone(), index);
+                    }
+                }
+            }
+            MessageContent::Raw(values) => {
+                for value in values {
+                    // Malformed raw results deserialize as Unknown and are not results.
+                    if value["type"].as_str() == Some("tool_result") && raw_block_parses(value) {
+                        if let Some(id) = value["tool_use_id"].as_str() {
+                            positions.insert(id.to_string(), index);
+                        }
+                    }
+                }
+            }
+            MessageContent::Text(_) => {}
+        }
+    }
+    positions
+}
+
+/// Canonical boundary for a catalog receipt.
+///
+/// The receipt follows the whole step: every call declared by the anchor message and
+/// its sibling callers, plus the last result position of those calls. This keeps A/B
+/// batches intact when only A is archived and never splits a call from its result.
+/// Returns `(insertion index, anchor order)` in visible-message coordinates.
+fn receipt_insertion_index(
+    transcript: &MessageTranscript,
+    catalog: &ArchiveCatalog,
+    anchor: MessageId,
+    visible_positions: &HashMap<MessageId, usize>,
+    result_positions: &HashMap<String, usize>,
+    tail: usize,
+) -> (usize, usize) {
+    let anchor_position = visible_positions.get(&anchor).copied();
+    let mut end = anchor_position;
+    let mut calls: HashSet<&str> = HashSet::new();
+    for member in &catalog.members {
+        let member_position = visible_positions.get(&member.message_id).copied();
+        end = match (end, member_position) {
+            (Some(current), Some(position)) => Some(current.max(position)),
+            (None, position) => position,
+            (current, None) => current,
+        };
+        let Some(message) = transcript
+            .get(member.message_id)
+            .and_then(|entry| entry.as_message())
+        else {
+            continue;
+        };
+        calls.extend(message.tool_calls().iter().map(|call| call.id.as_str()));
+        match message.message_content() {
+            MessageContent::Blocks(blocks) => {
+                for block in blocks {
+                    if let ContentBlock::ToolUse { id, .. } = block {
+                        calls.insert(id.as_str());
+                    }
+                }
+            }
+            MessageContent::Raw(values) => {
+                for value in values {
+                    if value["type"].as_str() == Some("tool_use") {
+                        if let Some(id) = value["id"].as_str() {
+                            calls.insert(id);
+                        }
+                    }
+                }
+            }
+            MessageContent::Text(_) => {}
+        }
+    }
+    for call in calls {
+        if let Some(position) = result_positions.get(call) {
+            end = Some(end.map_or(*position, |current| current.max(*position)));
+        }
+    }
+    (end.unwrap_or(tail), anchor_position.unwrap_or(tail))
 }
 
 fn catalog_for<'a>(
