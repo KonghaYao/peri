@@ -105,9 +105,9 @@ export function WorkGroupRow({
         </div>
       )}
       {open && (
-        <div className={cn('border-border/70 ml-2 flex flex-col border-l pl-2', bare && 'pt-1')}>
+        <div className={cn('flex flex-col', bare ? 'pt-1' : 'border-border/70 ml-2 border-l pl-2')}>
           {items.map((item) => item.kind === 'reasoning'
-            ? <ReasoningRow key={item.id} item={item} />
+            ? <ReasoningRow key={item.id} item={item} rail={!bare} />
             : <ToolRow key={item.id} item={item} payloadReader={payloadReader} />)}
         </div>
       )}

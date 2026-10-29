@@ -123,6 +123,29 @@ export class TurnMachine {
         if (!keepOpen) info.delete("activeRequestId");
     }
 
+    /**
+     * History has no live lifecycle; materialize a terminal turn so folds and
+     * tool grouping stay stable after a restore instead of appearing open.
+     */
+    recordHistoricalTurn(turnId: string): void {
+        if (!turnId) return;
+        const existing = this.docs.turns().get(turnId);
+        if (existing) {
+            if (existing.get("status") !== "completed") {
+                existing.set("status", "completed");
+            }
+            return;
+        }
+        const turn = new Y.Map<unknown>();
+        turn.set("turnId", turnId);
+        turn.set("status", "completed");
+        turn.set("startedAt", null);
+        turn.set("completedAt", null);
+        turn.set("error", null);
+        turn.set("interactionStatus", "none");
+        this.docs.turns().set(turnId, turn);
+    }
+
     acceptsDone(requestId: string | null): boolean {
         const activeRequestId = string(this.docs.info().get("activeRequestId"));
         if (requestId && activeRequestId) return requestId === activeRequestId;
