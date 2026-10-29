@@ -53,7 +53,7 @@ peri-cf 是 `@peri-code/sdk` 与 `peri-sandbox` 的生产测试场：SDK 固定�
 - 本地 `frontend/chat/openui/` 只保留聊天适配：`OpenUIMessage`、`actions`、`index`。门面从 `peri-openui` 取 `splitOpenUI`/主题，懒加载 `peri-openui/renderer`。
 - 表单值不持久化，刷新/切换会话即重置。`Button` 的 `continue_conversation` 复用 `chat.send`；`open_url` 只允许无 userinfo、长度 ≤2048 的 `http(s)` 链接。超长消息/表单数据会在发送文本中标注截断。
 - OpenUI 只在懒加载 chunk：主 chunk 不含 `react-lang`、`LineChart`、`BarChart`；构建输出 `renderer-*.js` 约 257 kB，另有 5 kB 的 `ci-info` 子 chunk（不阻塞构建）。`vite.config.ts` 用 `resolve.dedupe` 保证库与主应用共用一份 React。
-- 组件来自 `peri-canvas@0.1.0` 的复制改写。上游 `package.json` 声明 MIT，但仓库根无 LICENSE，上游 README 自述为某商用 Canvas SDK 的移植；授权链不明，仅限内部使用，对外分发前必须法律复核。详见 `../peri-openui/PROVENANCE.md`。
+- 组件来自 `peri-canvas@0.1.0` 的复制改写。上游 `package.json` 声明 MIT，但仓库根无 LICENSE，上游 README 自述为某商用 Canvas SDK 的移植；授权链不明，仅限内部使用，对外分发前必须法律复核。
 
 ## 每会话 Sandbox
 

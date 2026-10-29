@@ -1,6 +1,6 @@
 // Vendored from peri-canvas@0.1.0 (packages/canvas/src/tokens.ts).
 // License declared MIT in packages/canvas/package.json; no repository LICENSE file.
-// See PROVENANCE.md. Internal use only; do not redistribute without legal review.
+// Internal use only; do not redistribute without legal review.
 export interface CanvasPalette {
   readonly foreground: string;
   readonly foregroundSecondary: string;
@@ -63,7 +63,7 @@ export const canvasPaletteDark: CanvasPalette = {
 export const canvasPaletteLight: CanvasPalette = {
   foreground: "#141414",
   foregroundSecondary: "#3A3A3A",
-  // 浅色下提升小字对比度（约 4.6:1 on #f9fafb），见 PROVENANCE.md 修改清单。
+  // 浅色下提升小字对比度（约 4.6:1 on #f9fafb）。
   foregroundTertiary: "#6B6F76",
   foregroundQuaternary: "#8A8D93",
   editor: "#FFFFFF",

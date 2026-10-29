@@ -108,9 +108,7 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
 - `/api/monitor` 只返回去敏后的地址（去掉 userinfo、query 与 hash）、MCP header 名称、运行中 sandbox 与进程级内存事实，监控面板只读展示。
 - 单进程 ownership 不能宣称跨实例接管；多实例部署需要改造装配接入共享 storage，并由路由层做串行化/崩溃清理。
 - 真实模型/Store/远程 MCP、浏览器验收与 hosted 部署仍需环境验收；单元测试或类型检查不替代真实运行后端。
-- OpenUI vendored canvas 的来源与许可链记录在
-  `npm-packages/peri-openui/PROVENANCE.md`：上游声明 MIT 但仓库根无 LICENSE，
-  授权链不明，仅限内部使用；对外分发前必须法律复核。包本身 `private: true`，由 CF 以 `file:` 依赖消费。
+- OpenUI vendored canvas 上游声明 MIT 但仓库根无 LICENSE，授权链未核实，仅限内部使用；对外分发前必须法律复核。包本身 `private: true`，由 CF 以 `file:` 依赖消费。
 
 ## 与其他文档的关系
 

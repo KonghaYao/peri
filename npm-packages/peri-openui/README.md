@@ -60,4 +60,4 @@ bun run typecheck
 
 `src/canvas/` 是从 `peri-canvas@0.1.0` 复制改写的 vendored 代码。上游包声明 MIT，但仓库根
 没有 LICENSE 文件，且上游自述为 Cursor Canvas SDK 的移植；授权链未核实，仅限 Peri 内部
-使用。对外分发、发布或商业化前必须完成法律复核。详见 [PROVENANCE.md](./PROVENANCE.md)。
+使用。对外分发、发布或商业化前必须完成法律复核。

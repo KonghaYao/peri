@@ -12,8 +12,7 @@
 服务端经 `src/prompt.ts` 只读该 JSON，调用 `@openuidev/lang-core` 生成系统提示词，不 import React。
 浏览器侧 `src/renderer.tsx` 组合 parser、library 与 canvas 组件，是唯一的重量级出口；
 `src/index.ts` 只导出围栏切分、主题桥与共享类型，供聊天门面 eager 引入。
-`src/canvas/` 是从 `peri-canvas@0.1.0` 复制改写的 vendored 代码，许可风险见
-[PROVENANCE](../../npm-packages/peri-openui/PROVENANCE.md)。
+`src/canvas/` 是从 `peri-canvas@0.1.0` 复制改写的 vendored 代码，仅限内部使用。
 
 ```text
 library.tsx ──generate──> spec.json ──prompt.ts──> 服务端系统提示词
