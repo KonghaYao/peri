@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import type { InteractionAnswer } from "../src/contracts/interaction";
 import {
+    CHAT_SEND_TEXT_MAX_LENGTH,
     ChatUserAction,
     parseChatUserAction,
     type ChatUserAction as ChatUserActionValue,
@@ -23,7 +24,7 @@ function captureValidation(fn: () => unknown): ChatActionValidationError {
     throw new Error("expected ChatActionValidationError");
 }
 
-test("八类工厂生成对应 type、requestId 与纯数据 payload", () => {
+test("九类工厂生成对应 type、requestId 与纯数据 payload", () => {
     const create = ChatUserAction.createNewSession({ title: "新会话", requestId: "r-create" });
     const change = ChatUserAction.changeSessionTo("s1", { requestId: "r-change" });
     const send = ChatUserAction.send({ text: "hello", requestId: "r-send" });
@@ -36,6 +37,9 @@ test("八类工厂生成对应 type、requestId 与纯数据 payload", () => {
         answer: { kind: "permission", decision: "allow_once" },
         requestId: "r-answer",
     });
+    const config = ChatUserAction.setConfigOption({
+        configId: "model", value: "fast", requestId: "r-config",
+    });
 
     expect(create).toEqual({ type: "create_new_session", requestId: "r-create", payload: { title: "新会话" } });
     expect(change).toEqual({ type: "change_session", requestId: "r-change", payload: { sessionId: "s1" } });
@@ -47,6 +51,10 @@ test("八类工厂生成对应 type、requestId 与纯数据 payload", () => {
     expect(answer).toEqual({
         type: "answer", requestId: "r-answer",
         payload: { interactionId: "int-1", answer: { kind: "permission", decision: "allow_once" } },
+    });
+    expect(config).toEqual({
+        type: "set_config_option", requestId: "r-config",
+        payload: { configId: "model", value: "fast" },
     });
 });
 
@@ -87,13 +95,14 @@ test("解析接受普通对象与无原型对象，不依赖 instanceof", () => 
 });
 
 test("send 文本必须非空、非纯空白且不超过 32768 字符", () => {
-    const atLimit = "x".repeat(32_768);
+    expect(CHAT_SEND_TEXT_MAX_LENGTH).toBe(32_768);
+    const atLimit = "x".repeat(CHAT_SEND_TEXT_MAX_LENGTH);
     expect(parseChatUserAction({ type: "send", requestId: "r", payload: { text: atLimit } })).toEqual({
         type: "send", requestId: "r", payload: { text: atLimit },
     });
 
     const tooLong = captureValidation(() =>
-        parseChatUserAction({ type: "send", requestId: "r-long", payload: { text: "x".repeat(32_769) } }));
+        parseChatUserAction({ type: "send", requestId: "r-long", payload: { text: "x".repeat(CHAT_SEND_TEXT_MAX_LENGTH + 1) } }));
     expect(tooLong.requestId).toBe("r-long");
 
     for (const text of ["", "   ", "\n\t", "\u00a0"]) {
@@ -114,6 +123,30 @@ test("send 文本必须非空、非纯空白且不超过 32768 字符", () => {
         type: "send", requestId: "r-padded", payload: { text: padded },
     });
     expect(ChatUserAction.send({ text: padded, requestId: "r-padded-factory" }).payload.text).toBe(padded);
+});
+
+test("set_config_option 要求非空 configId 与 value，并保持 wire 往返", () => {
+    const action = ChatUserAction.setConfigOption({
+        configId: "model", value: "fast", requestId: "r-config",
+    });
+    expect(action).toEqual({
+        type: "set_config_option", requestId: "r-config",
+        payload: { configId: "model", value: "fast" },
+    });
+    expect(roundTrip(action)).toEqual(action);
+
+    for (const payload of [
+        { configId: "", value: "fast" },
+        { configId: "model", value: "" },
+        { configId: 1, value: "fast" },
+        { configId: "model", value: false },
+    ]) {
+        const error = captureValidation(() =>
+            parseChatUserAction({ type: "set_config_option", requestId: "r-bad", payload }));
+        expect(error.requestId).toBe("r-bad");
+        expect(error.code).toBe("invalid_action");
+        expect(error.disposition).toBe("rejected");
+    }
 });
 
 test("create_new_session 的 title 可选且必须是字符串", () => {
@@ -325,7 +358,7 @@ test("工厂同样拒绝非法输入，并保留或生成 requestId", () => {
     expect(preserved.requestId).toBe("factory:7");
 });
 
-test("八个动作经 JSON wire 往返后语义与 requestId 不变", () => {
+test("九个动作经 JSON wire 往返后语义与 requestId 不变", () => {
     const actions: ChatUserActionValue[] = [
         ChatUserAction.createNewSession({ title: "新会话", requestId: "r1" }),
         ChatUserAction.changeSessionTo("s1", { requestId: "r2" }),
@@ -338,6 +371,9 @@ test("八个动作经 JSON wire 往返后语义与 requestId 不变", () => {
             interactionId: "int-1",
             answer: { kind: "permission", decision: "reject_once" },
             requestId: "r8",
+        }),
+        ChatUserAction.setConfigOption({
+            configId: "mode", value: "accept_edit", requestId: "r9",
         }),
     ];
     for (const action of actions) expect(roundTrip(action)).toEqual(action);

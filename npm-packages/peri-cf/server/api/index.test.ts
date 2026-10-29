@@ -24,6 +24,7 @@ import {
   type SendReceipt,
   type SessionAction,
   type SessionReadyResult,
+  type SetConfigOptionAction,
   type TakeBackAction,
   type ToolPayloadReadRef,
   type ToolPayloadResponse,
@@ -43,11 +44,18 @@ const monitorSnapshot: MonitorSnapshot = {
     baseUrl: "https://api.example.com/v1",
     tiers: { fable: "gpt-test", opus: "gpt-test", sonnet: "gpt-test", haiku: "gpt-test" },
   },
-  mcp: { sandboxEnabled: false, remote: [], sandbox: [] },
+  mcp: { remote: [] },
   wasm: {
     moduleUrl: "/tmp/peri-wasm.js",
     process: { rssBytes: 1, heapTotalBytes: 2, heapUsedBytes: 3, arrayBufferBytes: 4 },
-    activeChats: 0,
+    chatHandles: 0,
+    startingInstances: 0,
+    unconfirmed: false,
+    truncated: false,
+    linearMemoryTotalBytes: null,
+    linearMemoryKnownInstances: 0,
+    linearMemoryUnknownInstances: 0,
+    instances: [],
   },
   sandbox: {
     enabled: false,
@@ -107,7 +115,7 @@ function stubChat(
   function execute(action: SendAction): SendReceipt;
   function execute(action: SessionAction): Promise<SessionReadyResult>;
   function execute(action: CancelAction): Promise<CancelRequestResult>;
-  function execute(action: ForceSendAction | TakeBackAction | AnswerAction): Promise<ControlResult>;
+  function execute(action: ForceSendAction | TakeBackAction | AnswerAction | SetConfigOptionAction): Promise<ControlResult>;
   function execute(action: HistoryAction): Promise<HistoryPageOutcome>;
   function execute(action: ChatUserAction): unknown {
     calls.push(action);
@@ -145,6 +153,7 @@ function stubChat(
       case "force_send":
       case "take_back":
       case "answer":
+      case "set_config_option":
         return Promise.resolve({ requestId: action.requestId, status: "accepted" });
       case "load_earlier_history":
         return Promise.resolve({ applied: 1, nextCursor: "next" });

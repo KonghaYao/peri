@@ -18,7 +18,7 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 
 **凭据与工具面只在服务端**：模型、Store、machineId 与远程 MCP 全部来自环境变量
 （`server/config.ts`）；前端没有 localStorage 凭据、relay 或首次运行门禁。`PERI_MCP_SERVERS` 只接受
-远程 Streamable HTTP；不启动 local-fs、模拟 Bash、stdio 或进程内 builtin。`/api/monitor` 只返回去敏地址、运行中 sandbox 与进程级内存事实。
+远程 Streamable HTTP；不启动 local-fs、模拟 Bash、stdio 或进程内 builtin。`/api/monitor` 只返回去敏地址、运行中 sandbox、进程级内存事实，以及每个 WASM 实例的线性内存容量与数值型业务计数（不含消息/工具内容）。
 
 **没有访问控制**：服务不提供认证、限流或多租户隔离；部署入口鉴权是必要条件。machineId 必须是
 部署方提供的持久 UUID，服务端不随机生成。
@@ -87,7 +87,10 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
   与横幅 (`ChatBanners`)，`PendingInteractions`/`InteractionCard` 承载交互，`ChatRightPanel` 汇总
   详情、计划与任务。
 - `frontend/chat/{timeline,composer}/`：Entry → 展示行与输入区；不提供编辑/重生成/队列/附件/语音
-  handler。`timeline/toolText.ts` 是折叠态与失败态共用的工具文本/退出码/流分段提取。assistant 行的
+  handler。`composer/` 状态栏只读消费 `configOptions`/`tokenUsage`/`stateSnapshotMeta`，字数上限引用
+  SDK `CHAT_SEND_TEXT_MAX_LENGTH`；草稿按会话持久化到版本化 localStorage；斜杠命令只读
+  `availableCommands`；模型/模式/推理强度经 `ChatUserAction.set_config_option` 写入。
+  `timeline/toolText.ts` 是折叠态与失败态共用的工具文本/退出码/流分段提取。assistant 行的
   `OpenUIMessage` 只在顶层完整 `openui` 围栏，或流结束后以
   `root = Stack(` 开头的裸程序时懒加载 Renderer；校验失败、引用未解析、`incomplete`、懒加载或
   渲染异常都回退 `StreamdownText`。复制按钮始终复制原始文本（含 DSL）。

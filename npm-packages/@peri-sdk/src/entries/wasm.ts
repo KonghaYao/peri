@@ -12,8 +12,9 @@ export type { WasmAcpTransportOptions } from "../wasm/transport";
 export { WasmRuntimeStartupError, startWasmRuntime } from "../wasm/runtime";
 export { WasmRuntimeLease, WasmRuntimePool } from "../wasm/runtime-pool";
 export type {
-  WasmRuntimeAcquireOptions, WasmRuntimeCloseReport, WasmRuntimeLeaseOptions, WasmRuntimePoolOptions,
-  WasmRuntimeStarter, WasmRuntimeStarterOptions, WasmRuntimeState,
+  WasmRuntimeAcquireOptions, WasmRuntimeCloseReport, WasmRuntimeInstanceSnapshot, WasmRuntimeLeaseOptions,
+  WasmRuntimePoolOptions, WasmRuntimePoolSnapshot, WasmRuntimeStarter, WasmRuntimeStarterOptions,
+  WasmRuntimeState,
 } from "../wasm/runtime-pool";
 export type {
   WasmRuntimeCleanupOutcome, WasmRuntimeDiagnosticKind, WasmRuntimeLifecycleEvent, WasmRuntimeOptions,

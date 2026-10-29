@@ -211,6 +211,22 @@ describe('ChatController history open', () => {
     await controller.dispose();
   });
 
+  test('new session creation does not persist a placeholder title', async () => {
+    const { controller, sockets, actions } = harness();
+    const createPayloads: unknown[] = [];
+    const execute = actions.execute;
+    actions.execute = async (...args) => {
+      const action = args[1];
+      if (action.type === 'create_new_session') createPayloads.push(action.payload);
+      return execute(...args);
+    };
+
+    expect(await openWithSnapshot(controller, null, sockets, { sessionId: 'created-session' })).toBe(true);
+    // 标题由 Store 在首次 append_history 时从首条用户消息补齐；创建不得写入占位标题。
+    expect(createPayloads).toEqual([{}]);
+    await controller.dispose();
+  });
+
   test('binding conflict falls back to the Session-addressed existing handle', async () => {
     const { controller, log, sockets } = harness({
       changeSession: async () => { throw new RemoteActionError('binding_conflict', 'owned', 'rejected', { status: 409 }); },
@@ -604,6 +620,27 @@ describe('ChatController rebind and recovery flows', () => {
     expect(await finishReload(rebuilding, sockets, { sessionId: 'created-session', sequence: 1 })).toBe(true);
     expect(controller.getState().selected?.id).toBe('created-session');
     expect(log).toContain('close:handle-1');
+    await controller.dispose();
+  });
+});
+
+describe('ChatController config options', () => {
+  test('writes config options through the same bound target and action log', async () => {
+    const { controller, log, sockets, sentTargets } = harness();
+    await openWithSnapshot(controller, summary('session-1'), sockets, { sessionId: 'session-1' });
+
+    const result = await controller.setConfigOption('model', 'fast');
+    expect(result).toEqual({ ok: true });
+    expect(log.at(-1)).toBe('action:set_config_option');
+    expect(sentTargets.at(-1)).toEqual({ sessionId: 'session-1', bindingRevision: 1 });
+    await controller.dispose();
+  });
+
+  test('an unbound controller rejects config writes without pretending success', async () => {
+    const { controller } = harness();
+    expect(await controller.setConfigOption('mode', 'auto')).toEqual({
+      ok: false, message: '会话尚未就绪，配置未提交。',
+    });
     await controller.dispose();
   });
 });

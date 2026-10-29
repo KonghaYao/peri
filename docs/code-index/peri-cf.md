@@ -60,7 +60,7 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 
 | 方法 | 路径 | 行为 |
 | --- | --- | --- |
-| GET | `/api/monitor` | 四段只读监控快照（LLM / MCP / WASM / Sandbox）；地址去敏，MCP header 只给名称 |
+| GET | `/api/monitor` | 四段只读监控快照（LLM / MCP / WASM 实例 / Sandbox）；地址去敏，MCP header 只给名称；WASM 段含每实例线性内存、回合/token/工具计数与关闭未确认状态 |
 | GET | `/api/chats` | 只读 Store 目录；不可达返回 503 + `available:false`，不伪造空列表 |
 | POST | `/api/chats` | 按目标启动/复用 sandbox 并登记句柄，返回 201 + `{chat:{id,sessionId:null,bindingRevision:0}}`；不新建 Session；body 可带 `sessionId` 或 `path`（互斥），sandbox 启动失败 503 `sandbox_start_failed` |
 | POST | `/api/chats/:chatId/actions` | `ChatUserAction` + 目标绑定；202 回执带 `inputId`/`status`/`applied` 等纯数据 |
@@ -76,7 +76,8 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 3. 只有绑定成功后，前端才为该句柄打开 `/sync` WebSocket 并等待首屏 SNAPSHOT。
 4. 若服务端已有该 Session 的控制者，`change_session` 返回 `binding_conflict`；前端释放候选句柄，改用
    Session ID 寻址既有句柄，不重复绑定。切换页面只释放本地连接，不 cancel、不 close。
-5. 新会话走 `create_new_session`，同样等待 202 后才连接；失败时清理候选句柄。
+5. 新会话走 `create_new_session`，同样等待 202 后才连接；创建不写标题（标题由 Store 在首次
+   `append_history` 时从首条用户消息补齐，前端只提供展示回退）；失败时清理候选句柄。
 
 ## 错误映射
 
@@ -94,13 +95,14 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 | 环境变量解析与启动校验 | `server/config.ts` |
 | 平台装配（`chatManagerOptions`） | `server/compose.ts` |
 | 服务端注册表（句柄端口 + View 生命周期） | `server/registry.ts` |
+| 每实例业务计数（事实流订阅，不保存内容） | `server/instance-metrics.ts` |
 | HTTP 路由与错误映射 | `server/api/index.ts`、`server/api/errors.ts` |
 | WebSocket 同步适配 | `server/api/sync.ts` |
 | 共享 Zod DTO / HTTP 契约 | `frontend/remote/contracts.ts`、`frontend/remote/display-state.ts` |
 | 浏览器投影 | `frontend/remote/projection.ts` |
 | 远程客户端与页面控制器 | `frontend/remote/{application,actions,controller,view-state,delivery,handles,repository,sync}.ts` |
 | Chat 运行时与 useChat | `frontend/chat/runtime/{useChat,queries,payloadReader,askUserQuestion}.ts` |
-| Chat 展示与交互 | `frontend/chat/{components,timeline,composer}/`；`components/shell/` 承载草稿/导航 hook 与横幅，`timeline/toolText.ts` 统一折叠/失败态文本提取；`frontend/components/assistant-ui/` 只保留 vendored 审批/问答卡片 |
+| Chat 展示与交互 | `frontend/chat/{components,timeline,composer}/`；`components/shell/` 承载草稿/导航 hook 与横幅，`composer/` 承载输入、状态栏、上下文用量、限长、历史召回、斜杠命令与草稿持久化；`timeline/toolText.ts` 统一折叠/失败态文本提取；`frontend/components/assistant-ui/` 只保留 vendored 审批/问答卡片 |
 | OpenUI 聊天适配 | `frontend/chat/openui/{OpenUIMessage,actions,index}.ts(x)`；渲染与 spec 见 [`OpenUI 代码索引`](peri-openui.md) |
 | OpenUI 系统提示词 | `server/openui-instructions.ts`、`server/system-instructions.ts` |
 | SPA 外壳与只读服务端监控 | `frontend/app/App.tsx`、`frontend/settings/MonitorDialog.tsx`、`frontend/settings/monitor/` |

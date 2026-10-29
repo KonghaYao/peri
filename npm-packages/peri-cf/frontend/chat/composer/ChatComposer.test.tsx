@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import {
   ChatComposer, isSubmitKey, nextDraftAfterSend, type ChatComposerProps,
 } from './ChatComposer';
+import { MAX_COMPOSER_CHARS } from './composerLimits';
 
 function render(overrides: Partial<ChatComposerProps> = {}): string {
   return renderToStaticMarkup(
@@ -47,5 +48,27 @@ describe('ChatComposer keyboard and submit semantics', () => {
     expect(idle).toContain('aria-label="发送"');
     expect(idle).toContain('Enter 发送 · Shift+Enter 换行');
     expect(idle).toContain('>草稿</textarea>');
+  });
+
+  test('over-limit drafts render an alert and disable send', () => {
+    const over = render({ draft: 'x'.repeat(MAX_COMPOSER_CHARS + 1) });
+    expect(over).toContain('role="alert"');
+    expect(over).toContain('已超出 1 字');
+    expect(over).toContain('disabled=""');
+  });
+
+  test('renders read-only status meta and context usage', () => {
+    const meta = {
+      model: {
+        id: 'model', label: '模型', currentValue: 'fast', currentLabel: 'Fast',
+        options: [{ value: 'fast', name: 'Fast' }, { value: 'quality', name: 'Quality' }],
+      },
+      modeLabel: 'default',
+    };
+    const markup = render({ meta, usage: { used: 50, max: 100, percent: 50 } });
+    expect(markup).toContain('Fast');
+    expect(markup).toContain('default');
+    expect(markup).toContain('上下文用量 50%');
+    expect(markup).not.toContain('aria-haspopup="listbox"');
   });
 });

@@ -10,9 +10,14 @@ import {
 
 let generation = 0;
 
-function fakeTransport(close: () => Promise<void> = async () => {}): WasmAcpTransport {
+function fakeTransport(close: () => Promise<void> = async () => {},
+  memoryBytes: number | null = null): WasmAcpTransport {
   generation += 1;
-  return { generationId: `generation-${generation}`, close } as unknown as WasmAcpTransport;
+  return {
+    generationId: `generation-${generation}`,
+    close,
+    linearMemoryBytes: () => memoryBytes,
+  } as unknown as WasmAcpTransport;
 }
 
 describe("WasmRuntimeLease", () => {
@@ -193,5 +198,60 @@ describe("WasmRuntimePool", () => {
     await expect(acquiring).rejects.toBeDefined();
     await closing;
     expect(manager.unconfirmed).toBe(true);
+  });
+
+  test("snapshot carries owner, generation and linear memory; direct close removes the lease", async () => {
+    const manager = new WasmRuntimePool(async () => fakeTransport(undefined, 16 * 1024 * 1024));
+    const before = Date.now();
+    const lease = await manager.acquire({ ownerChatId: "chat-1" });
+
+    const first = manager.snapshot();
+    expect(first.starting).toBe(0);
+    expect(first.unconfirmed).toBe(false);
+    expect(first.instances).toHaveLength(1);
+    expect(first.instances[0]).toMatchObject({
+      chatId: "chat-1",
+      state: "live",
+      generationId: lease.generationId,
+      linearMemoryBytes: 16 * 1024 * 1024,
+    });
+    expect(first.instances[0]!.startedAtMs).toBeGreaterThanOrEqual(before);
+
+    // 生产路径只关闭租约，不调用 pool.release；快照必须同步收缩。
+    await lease.close();
+    expect(manager.size).toBe(0);
+    expect(manager.snapshot().instances).toEqual([]);
+  });
+
+  test("snapshot counts in-flight startups without inventing an instance", async () => {
+    let resolveStart!: (transport: WasmAcpTransport) => void;
+    const manager = new WasmRuntimePool(() => new Promise<WasmAcpTransport>((resolve) => {
+      resolveStart = resolve;
+    }));
+    const acquiring = manager.acquire({ ownerChatId: "chat-2" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(manager.snapshot()).toEqual({ instances: [], starting: 1, unconfirmed: false });
+
+    resolveStart(fakeTransport(undefined, 65_536));
+    const lease = await acquiring;
+    expect(manager.snapshot().starting).toBe(0);
+    expect(manager.snapshot().instances[0]).toMatchObject({ chatId: "chat-2", state: "live" });
+    await manager.release(lease);
+  });
+
+  test("close-unconfirmed lease stays visible with null-free memory value", async () => {
+    const manager = new WasmRuntimePool(async () =>
+      fakeTransport(async () => { throw new Error("close failed"); }, 65_536));
+    const lease = await manager.acquire({ ownerChatId: "chat-3" });
+    const report = await manager.release(lease);
+    expect(report.confirmed).toBe(false);
+    expect(manager.size).toBe(1);
+    const snapshot = manager.snapshot();
+    expect(snapshot.unconfirmed).toBe(true);
+    expect(snapshot.instances[0]).toMatchObject({
+      chatId: "chat-3",
+      state: "close-unconfirmed",
+      linearMemoryBytes: 65_536,
+    });
   });
 });

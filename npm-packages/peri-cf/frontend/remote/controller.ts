@@ -210,6 +210,8 @@ export class ChatController {
         delivered: false,
         sessionId: sent.sessionId,
         message: this.actionError || message,
+        // 投递等待被明确拒绝（撤回/拒绝）可安全重试；状态未知不能自动重放。
+        disposition: "rejected",
       };
     }
   }
@@ -310,6 +312,39 @@ export class ChatController {
   }
 
   /**
+   * 写入会话配置（模型/模式/推理强度）。
+   *
+   * 成功只表示后端接受了请求；界面值仍由 `config_option_update` 投影接管。
+   * 失败沿用 Action 的 disposition 规则，未知结果会阻断后续发送。
+   */
+  async setConfigOption(configId: string, value: string): Promise<{ ok: true } | { ok: false; message: string }> {
+    const active = this.active;
+    const target = active ? this.bindingTarget(active) : null;
+    if (!active || !target) return { ok: false, message: "会话尚未就绪，配置未提交。" };
+    try {
+      await this.deps.actions.execute(
+        active.address,
+        ChatUserAction.setConfigOption({ configId, value }),
+        target,
+      );
+      this.actionError = "";
+      this.recovery = "none";
+      this.refresh();
+      return { ok: true };
+    } catch (error) {
+      // 明确拒绝只影响本次配置切换，由选择器就地回滚；未知结果才升级为全局阻断。
+      const disposition = error instanceof RemoteActionError ? error.disposition : "unknown";
+      if (disposition === "unknown") this.failAction(error);
+      return {
+        ok: false,
+        message: disposition === "unknown"
+          ? this.actionError || messageOf(error)
+          : messageOf(error),
+      };
+    }
+  }
+
+  /**
    * 全文读取：只接受副本里仍被引用的载荷 ID，字节数取自引用事实。
    * 旧会话/丢失引用的 ID 明确 unavailable，不猜字节数。
    */
@@ -361,7 +396,8 @@ export class ChatController {
     try {
       receipt = await this.deps.actions.execute(
         handle.id,
-        ChatUserAction.createNewSession({ title: "新会话" }),
+        // 标题由 Store 在首次 append_history 时从首条用户消息补齐，前端不伪造。
+        ChatUserAction.createNewSession(),
         { sessionId: null, bindingRevision: 0 },
       );
     } catch (error) {

@@ -138,6 +138,17 @@ async function executeAction(
         details: { status: result.status },
       };
     }
+    case "set_config_option": {
+      const result = await chat.execute(action);
+      return {
+        target: bindingTarget(chat, fallback),
+        details: {
+          status: result.status,
+          configId: action.payload.configId,
+          value: action.payload.value,
+        },
+      };
+    }
     case "load_earlier_history": {
       const result = await chat.execute(action);
       return {

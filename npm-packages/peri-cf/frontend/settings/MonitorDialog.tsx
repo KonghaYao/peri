@@ -9,10 +9,10 @@ import { Activity, Bot, Cpu, Plug, RefreshCw, ShieldCheck, X } from "lucide-reac
 import { useFocusTrap, useMediaQuery } from "@/hooks";
 import { createHttpMonitorRepository, type MonitorRepository } from "../remote";
 import { formatClock } from "./monitor/format";
+import { InstanceSection } from "./monitor/InstanceSection";
 import { LlmSection } from "./monitor/LlmSection";
 import { McpSection } from "./monitor/McpSection";
 import { SandboxSection } from "./monitor/SandboxSection";
-import { WasmSection } from "./monitor/WasmSection";
 import {
   MONITOR_POLL_INTERVAL_MS,
   useMonitorSnapshot,
@@ -22,12 +22,12 @@ import {
 const VERTICAL_TABS_MEDIA_QUERY = "(min-width: 761px)";
 const TAB_KEYS = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"];
 
-type MonitorTab = "llm" | "mcp" | "wasm" | "sandbox";
+type MonitorTab = "llm" | "mcp" | "instances" | "sandbox";
 
 const TABS: ReadonlyArray<{ id: MonitorTab; label: string; Icon: typeof Activity }> = [
   { id: "llm", label: "LLM 配置", Icon: Bot },
   { id: "mcp", label: "MCP 配置", Icon: Plug },
-  { id: "wasm", label: "WASM 内存", Icon: Cpu },
+  { id: "instances", label: "WASM 实例", Icon: Cpu },
   { id: "sandbox", label: "Sandbox 情况", Icon: ShieldCheck },
 ];
 
@@ -188,8 +188,8 @@ export function MonitorDialog({ onClose, repository, intervalMs }: MonitorDialog
               <LlmSection llm={snapshot.llm} />
             ) : active.id === "mcp" ? (
               <McpSection mcp={snapshot.mcp} />
-            ) : active.id === "wasm" ? (
-              <WasmSection wasm={snapshot.wasm} generatedAt={snapshot.generatedAt} />
+            ) : active.id === "instances" ? (
+              <InstanceSection wasm={snapshot.wasm} generatedAt={snapshot.generatedAt} />
             ) : (
               <SandboxSection sandbox={snapshot.sandbox} generatedAt={snapshot.generatedAt} />
             )}

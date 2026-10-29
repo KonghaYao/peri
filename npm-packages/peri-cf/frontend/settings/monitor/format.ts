@@ -56,3 +56,34 @@ export function formatDateTime(value: string): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
     + ` ${formatClock(date)}`;
 }
+
+/** 千分位整数；用于 token 计数（不是账单）。 */
+export function formatTokens(value: number | null): string {
+  if (value === null || !Number.isFinite(value) || value < 0) return "—";
+  return String(Math.round(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
+/** 相对时间；`toIso` 是当前快照时间，避免前端自行取时钟导致漂移。 */
+export function formatRelativeTime(fromIso: string | null, toIso: string): string {
+  if (fromIso === null) return "—";
+  const from = Date.parse(fromIso);
+  const to = Date.parse(toIso);
+  if (!Number.isFinite(from) || !Number.isFinite(to)) return "—";
+  const seconds = Math.max(0, Math.floor((to - from) / 1000));
+  if (seconds < 5) return "刚刚";
+  if (seconds < 60) return `${seconds} 秒前`;
+  if (seconds < 3_600) return `${Math.floor(seconds / 60)} 分钟前`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3_600)} 小时前`;
+  return `${Math.floor(seconds / 86_400)} 天前`;
+}
+
+/** 毫秒墙钟时长；不是 CPU 时间。 */
+export function formatWallMs(value: number | null): string {
+  if (value === null || !Number.isFinite(value) || value < 0) return "—";
+  if (value < 1_000) return `${Math.round(value)} 毫秒`;
+  if (value < 60_000) {
+    const seconds = (value / 1_000).toFixed(1).replace(/\.0$/, "");
+    return `${seconds} 秒`;
+  }
+  return formatDuration(value / 1_000);
+}

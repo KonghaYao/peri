@@ -17,7 +17,8 @@ import { cloneJsonValue, NonJsonValueError } from "../util/json-value";
 export type ChatActionType =
     | "create_new_session" | "change_session"
     | "send" | "force_send" | "take_back"
-    | "load_earlier_history" | "cancel" | "answer";
+    | "load_earlier_history" | "cancel" | "answer"
+    | "set_config_option";
 
 export interface ChatUserActionBase<T extends ChatActionType, P> {
     readonly type: T;
@@ -33,17 +34,27 @@ export type TakeBackAction = ChatUserActionBase<"take_back", { inputId: string }
 export type LoadEarlierHistoryAction = ChatUserActionBase<"load_earlier_history", { limit?: number }>;
 export type CancelAction = ChatUserActionBase<"cancel", Record<string, never>>;
 export type AnswerAction = ChatUserActionBase<"answer", { interactionId: string; answer: InteractionAnswer }>;
+/** 会话配置（模型/权限模式/推理强度）；`configId` 对应 ACP `SessionConfigOption.id`。 */
+export type SetConfigOptionAction = ChatUserActionBase<"set_config_option", {
+    configId: string;
+    value: string;
+}>;
 export type SessionAction = CreateNewSessionAction | ChangeSessionAction;
-export type ControlAction = ForceSendAction | TakeBackAction | CancelAction | AnswerAction;
+export type ControlAction =
+    | ForceSendAction | TakeBackAction | CancelAction | AnswerAction | SetConfigOptionAction;
 export type HistoryAction = LoadEarlierHistoryAction;
 export type ChatUserAction = SessionAction | SendAction | ControlAction | HistoryAction;
 
-/** 沿用 CF wire 的单条输入上限。 */
-const MAX_SEND_TEXT_LENGTH = 32_768;
+/**
+ * 单条发送文本上限（UTF-16 单元）。
+ *
+ * UI 与 Action 校验共用这一份权威；不要在调用方再复制数字。
+ */
+export const CHAT_SEND_TEXT_MAX_LENGTH = 32_768;
 
 const ACTION_TYPES: ReadonlySet<string> = new Set<ChatActionType>([
     "create_new_session", "change_session", "send", "force_send", "take_back",
-    "load_earlier_history", "cancel", "answer",
+    "load_earlier_history", "cancel", "answer", "set_config_option",
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -136,8 +147,8 @@ export function parseChatUserAction(raw: unknown): ChatUserAction {
             const text = requireNonEmptyString(payload.text, requestId, "payload.text");
             // 与 CF canonical 的 `content.trim().length > 0` 对齐；只校验，不改写文本。
             if (text.trim().length === 0) validationError(requestId, "payload.text must not be blank");
-            if (text.length > MAX_SEND_TEXT_LENGTH) {
-                validationError(requestId, `payload.text must not exceed ${MAX_SEND_TEXT_LENGTH} characters`);
+            if (text.length > CHAT_SEND_TEXT_MAX_LENGTH) {
+                validationError(requestId, `payload.text must not exceed ${CHAT_SEND_TEXT_MAX_LENGTH} characters`);
             }
             return buildAction("send", requestId, { text });
         }
@@ -162,6 +173,11 @@ export function parseChatUserAction(raw: unknown): ChatUserAction {
             if (!answer) validationError(requestId, "payload.answer is not a valid interaction answer");
             return buildAction("answer", requestId, { interactionId, answer });
         }
+        case "set_config_option":
+            return buildAction("set_config_option", requestId, {
+                configId: requireNonEmptyString(payload.configId, requestId, "payload.configId"),
+                value: requireNonEmptyString(payload.value, requestId, "payload.value"),
+            });
     }
 }
 
@@ -174,6 +190,11 @@ export const ChatUserAction: {
     loadEarlierHistory(input?: { limit?: number; requestId?: string }): LoadEarlierHistoryAction;
     cancel(options?: { requestId?: string }): CancelAction;
     answer(input: { interactionId: string; answer: InteractionAnswer; requestId?: string }): AnswerAction;
+    setConfigOption(input: {
+        configId: string;
+        value: string;
+        requestId?: string;
+    }): SetConfigOptionAction;
 } = {
     createNewSession(input = {}) {
         const requestId = resolveRequestId(input.requestId);
@@ -226,5 +247,12 @@ export const ChatUserAction: {
             type: "answer", requestId,
             payload: { interactionId: input.interactionId, answer: input.answer },
         }) as AnswerAction;
+    },
+    setConfigOption(input) {
+        const requestId = resolveRequestId(input.requestId);
+        return parseChatUserAction({
+            type: "set_config_option", requestId,
+            payload: { configId: input.configId, value: input.value },
+        }) as SetConfigOptionAction;
     },
 };

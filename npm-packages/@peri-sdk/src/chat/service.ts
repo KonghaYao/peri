@@ -14,6 +14,7 @@ import {
     type HistoryAction,
     type SendAction,
     type SessionAction,
+    type SetConfigOptionAction,
     type TakeBackAction,
     type AnswerAction,
 } from "./action";
@@ -192,7 +193,7 @@ export class ChatService implements ChatServiceContract {
     execute(action: SessionAction): Promise<SessionReadyResult>;
     execute(action: CancelAction): Promise<CancelRequestResult>;
     execute(
-        action: ForceSendAction | TakeBackAction | AnswerAction,
+        action: ForceSendAction | TakeBackAction | AnswerAction | SetConfigOptionAction,
     ): Promise<ControlResult>;
     execute(action: HistoryAction): Promise<HistoryPageOutcome>;
     execute(action: ChatUserAction): SendReceipt | Promise<
@@ -237,6 +238,16 @@ export class ChatService implements ChatServiceContract {
                         port.answer(
                             parsed.payload.interactionId,
                             parsed.payload.answer,
+                        ),
+                );
+            case "set_config_option":
+                return this.executeControl(
+                    parsed.requestId,
+                    "set_config_option",
+                    (port) =>
+                        port.setConfigOption(
+                            parsed.payload.configId,
+                            parsed.payload.value,
                         ),
                 );
             case "load_earlier_history":

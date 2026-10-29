@@ -492,6 +492,10 @@ export class PeriInstance implements PeriInstancePort {
         broker.answer(interactionId, answer);
     }
 
+    async setConfigOption(configId: string, value: string): Promise<void> {
+        await this.requireSession().setConfigOption(configId, value);
+    }
+
     async loadEarlierHistory(limit?: number): Promise<HistoryPageOutcome> {
         const session = this.requireSession();
         const sessionId = this.requireSessionId();

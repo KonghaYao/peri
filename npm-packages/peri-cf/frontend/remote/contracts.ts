@@ -41,12 +41,56 @@ const sandboxStateSchema = z.enum([
 ]);
 
 /**
- * `GET /api/monitor` 的只读快照：LLM、MCP、WASM 与 Sandbox 四段。
+ * `GET /api/monitor` 的只读快照：LLM、MCP、WASM 实例与 Sandbox 四段。
  *
  * 地址在服务端去掉 userinfo、query 与 hash；MCP header 只保留名称，模型/Store
- * 凭据从不出网。WASM 段只有进程级内存（`arrayBufferBytes` 含全部 WASM 线性内存），
- * 不提供单实例堆占用。
+ * 凭据从不出网。WASM 段给出每个实例的线性内存容量（不是活跃堆）与业务计数，
+ * 进程级 `arrayBufferBytes` 仍是进程合计。
  */
+const wasmInstanceStateSchema = z.enum(["live", "closing", "closed", "close-unconfirmed"]);
+
+const wasmInstanceSchema = z.object({
+  chatId: z.string().min(1),
+  sessionId: z.string().min(1).nullable(),
+  generationId: z.string().min(1),
+  state: wasmInstanceStateSchema,
+  startedAt: z.string(),
+  uptimeSeconds: z.number().nonnegative(),
+  linearMemoryBytes: z.number().int().nonnegative().nullable(),
+  running: z.boolean(),
+  lastActivityAt: z.string().nullable(),
+  queueDepth: z.number().int().nonnegative(),
+  pendingInteractions: z.number().int().nonnegative(),
+  turns: z.object({
+    started: z.number().int().nonnegative(),
+    completed: z.number().int().nonnegative(),
+    cancelled: z.number().int().nonnegative(),
+    error: z.number().int().nonnegative(),
+    totalWallMs: z.number().nonnegative(),
+    lastWallMs: z.number().nonnegative().nullable(),
+    activeWallMs: z.number().nonnegative().nullable(),
+  }),
+  tokens: z.object({
+    llmCalls: z.number().int().nonnegative(),
+    inputTokens: z.number().int().nonnegative().nullable(),
+    outputTokens: z.number().int().nonnegative().nullable(),
+    auxiliaryCalls: z.number().int().nonnegative(),
+    partial: z.boolean(),
+  }).nullable(),
+  context: z.object({
+    used: z.number().nonnegative(),
+    size: z.number().nonnegative(),
+  }).nullable(),
+  tools: z.object({
+    started: z.number().int().nonnegative(),
+    completed: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+    cancelled: z.number().int().nonnegative(),
+  }).nullable(),
+  lastStopReason: z.string().nullable(),
+  statsError: z.literal(true).optional(),
+});
+
 export const monitorSnapshotSchema = z.object({
   ok: z.literal(true),
   generatedAt: z.string(),
@@ -58,17 +102,10 @@ export const monitorSnapshotSchema = z.object({
     tiers: z.record(z.string(), z.string()),
   }),
   mcp: z.object({
-    sandboxEnabled: z.boolean(),
     remote: z.array(z.object({
       name: z.string().min(1),
       url: z.string(),
       headerNames: z.array(z.string()),
-    })),
-    sandbox: z.array(z.object({
-      sandboxId: z.string().min(1),
-      name: z.string().min(1),
-      url: z.string().nullable(),
-      state: sandboxStateSchema,
     })),
   }),
   wasm: z.object({
@@ -79,7 +116,15 @@ export const monitorSnapshotSchema = z.object({
       heapUsedBytes: z.number().int().nonnegative(),
       arrayBufferBytes: z.number().int().nonnegative(),
     }),
-    activeChats: z.number().int().nonnegative(),
+    chatHandles: z.number().int().nonnegative(),
+    startingInstances: z.number().int().nonnegative(),
+    unconfirmed: z.boolean(),
+    instancesError: z.string().optional(),
+    truncated: z.boolean(),
+    linearMemoryTotalBytes: z.number().int().nonnegative().nullable(),
+    linearMemoryKnownInstances: z.number().int().nonnegative(),
+    linearMemoryUnknownInstances: z.number().int().nonnegative(),
+    instances: z.array(wasmInstanceSchema),
   }),
   sandbox: z.object({
     enabled: z.boolean(),

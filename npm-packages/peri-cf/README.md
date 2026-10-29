@@ -78,7 +78,7 @@ peri-cf 是 `@peri-code/sdk` 与 `peri-sandbox` 的生产测试场：SDK 固定�
 
 | 方法 | 路径 | 行为 |
 | --- | --- | --- |
-| GET | `/api/monitor` | 只读监控快照：LLM / MCP / WASM / Sandbox；地址去敏，header 只给名称 |
+| GET | `/api/monitor` | 只读监控快照：LLM / MCP / WASM 实例 / Sandbox；地址去敏，header 只给名称，WASM 段含每实例线性内存与回合/token/工具计数 |
 | GET | `/api/chats` | Store 目录；不可达 503 + `available:false` |
 | POST | `/api/chats` | 按目标启动/复用 sandbox 并登记句柄，不创建 Session；body 可带 `sessionId` 或 `path`（互斥） |
 | POST | `/api/chats/:chatId/actions` | `ChatUserAction`；202 回执 |

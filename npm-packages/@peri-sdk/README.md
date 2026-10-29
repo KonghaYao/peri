@@ -165,7 +165,7 @@ await manager.shutdown();
 
 ## 常用操作
 
-`execute` 只接受 `ChatUserAction` 的八类动作；推荐用工厂方法构造：
+`execute` 只接受 `ChatUserAction` 的九类动作；推荐用工厂方法构造：
 
 | 动作 | 工厂方法 | 用途 |
 | --- | --- | --- |
@@ -177,8 +177,9 @@ await manager.shutdown();
 | `load_earlier_history` | `ChatUserAction.loadEarlierHistory({ limit? })` | 向前加载历史 |
 | `cancel` | `ChatUserAction.cancel()` | 取消当前执行 |
 | `answer` | `ChatUserAction.answer({ interactionId, answer })` | 回答待决交互 |
+| `set_config_option` | `ChatUserAction.setConfigOption({ configId, value })` | 写入模型/模式/推理强度等会话配置 |
 
-`ChatUserAction.send()` 返回 `SendReceipt`（`accepted`、`inputId`）；`create_new_session` 与 `change_session` 返回 `SessionReadyResult`，包含 `chatId`、`sessionId`、`bindingRevision`。
+`ChatUserAction.send()` 返回 `SendReceipt`（`accepted`、`inputId`）；`create_new_session` 与 `change_session` 返回 `SessionReadyResult`，包含 `chatId`、`sessionId`、`bindingRevision`。单条发送文本上限由 `CHAT_SEND_TEXT_MAX_LENGTH` 导出，调用方不要另写数字。
 
 传入普通 wire 对象时先经 `parseChatUserAction` 校验。Manager 不接收 `execute`；执行调度属于 Peri。路由层可用 `chat.binding` 与 `bindingRevision` 拒绝过期连接的动作。
 

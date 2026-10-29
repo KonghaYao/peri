@@ -158,6 +158,10 @@ export function useChat() {
     return outcome;
   }, [controller, bumpActivity]);
   const stop = useCallback(() => controller.stop(), [controller]);
+  const setConfigOption = useCallback(
+    (configId: string, value: string) => controller.setConfigOption(configId, value),
+    [controller],
+  );
   const dismissChatError = useCallback(() => controller.dismissError(), [controller]);
   const dismissListError = useCallback(() => {
     setDismissedListError(list.errorUpdatedAt);
@@ -174,6 +178,7 @@ export function useChat() {
     chatError, listError, error: chatError || listError, banners,
     payloadReader, answerInteraction,
     refreshList, selectChat, reloadChat, rebuildChat, currentChatId, send, stop,
+    setConfigOption,
     dismissChatError, dismissListError,
   };
 }

@@ -105,7 +105,7 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
 - 没有内置认证、授权、限流或多租户隔离；只适合单可信用户或受入口控制保护的部署。反向代理鉴权是
   必要条件。
 - Bun 服务是唯一后端入口；Cloudflare Worker relay 与 `wrangler.jsonc` 已删除。
-- `/api/monitor` 只返回去敏后的地址（去掉 userinfo、query 与 hash）、MCP header 名称、运行中 sandbox 与进程级内存事实，监控面板只读展示。
+- `/api/monitor` 只返回去敏后的地址（去掉 userinfo、query 与 hash）、MCP header 名称、运行中 sandbox、进程级内存事实，以及每个 WASM 实例的线性内存当前容量与回合/token/工具计数；不采集 prompt、消息、工具内容或错误原文。HTTP 实例段失败只标记 `instancesError`，不影响进程级指标。
 - 单进程 ownership 不能宣称跨实例接管；多实例部署需要改造装配接入共享 storage，并由路由层做串行化/崩溃清理。
 - 真实模型/Store/远程 MCP、浏览器验收与 hosted 部署仍需环境验收；单元测试或类型检查不替代真实运行后端。
 - OpenUI canvas 位于 `@peri-code/sdk/src/openui/canvas`，随 SDK 源码子路径发布；CF 以 `file:../@peri-sdk` 消费。

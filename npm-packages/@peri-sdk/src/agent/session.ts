@@ -481,6 +481,15 @@ export class Session {
         await this.activeTransport().notify("session/cancel", { sessionId: this.id });
     }
 
+    /** 写入会话配置；响应中的 configOptions 由 ACP 通知投影接管，这里只确认请求成功。 */
+    async setConfigOption(configId: string, value: string): Promise<void> {
+        await this.activeTransport().request("session/set_config_option", {
+            sessionId: this.id,
+            configId,
+            value,
+        });
+    }
+
     /** 可选标题重命名；失败保留 `createdSessionId` 供上层判定创建阶段。 */
     async rename(title: string, options: { signal?: AbortSignal } = {}): Promise<void> {
         throwIfAborted(options.signal, "session/rename");

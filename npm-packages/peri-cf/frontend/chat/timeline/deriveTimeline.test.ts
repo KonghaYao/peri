@@ -448,4 +448,89 @@ describe('turn fold', () => {
     });
     expect(collapsed.some((row) => row.kind === 'work')).toBe(true);
   });
+
+  test('the fold opens the turn and stays before the next user message', () => {
+    const rows = deriveTimeline(state([
+      user('turn:1'),
+      entry({
+        entryId: 'turn:1:a', id: 'turn:1:a', turnId: 'turn:1',
+        blocks: [toolBlock('t1'), textBlock('第一轮回答', 'text:1')],
+      }),
+      user('turn:2'),
+      entry({ entryId: 'turn:2:a', id: 'turn:2:a', turnId: 'turn:2', blocks: [textBlock('第二轮回答')] }),
+    ], { turns: [finished] }));
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'turn-fold', 'assistant', 'user', 'assistant']);
+    expect(rows[1]).toMatchObject({ kind: 'turn-fold', id: 'turn-fold:turn:1' });
+  });
+
+  test('interleaved text and tools emit one fold at the first work group', () => {
+    const base = state([
+      user('turn:1'),
+      entry({
+        entryId: 'turn:1:a', id: 'turn:1:a', turnId: 'turn:1',
+        blocks: [
+          textBlock('先说明', 'text:1'),
+          toolBlock('t1'),
+          textBlock('再说明', 'text:2'),
+          toolBlock('t2'),
+        ],
+      }),
+    ], { turns: [finished] });
+    expect(deriveTimeline(base).map((row) => row.kind))
+      .toEqual(['user', 'assistant', 'turn-fold', 'assistant']);
+    expect(deriveTimeline(base, { expandedTurnIds: new Set(['turn:1']) }).map((row) => row.kind))
+      .toEqual(['user', 'assistant', 'turn-fold', 'work', 'assistant', 'work']);
+  });
+
+  test('a trailing entry error stays visible after the fold', () => {
+    const rows = deriveTimeline(state([
+      user('turn:1'),
+      entry({
+        entryId: 'turn:1:a', id: 'turn:1:a', turnId: 'turn:1', status: 'error',
+        blocks: [toolBlock('t1')], error: { code: 'tool_error', message: '工具执行失败' },
+      }),
+    ], { turns: [finished] }));
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'turn-fold', 'error']);
+  });
+
+  test('an unknown block stays in place after the fold', () => {
+    const rows = deriveTimeline(state([
+      user('turn:1'),
+      entry({
+        entryId: 'turn:1:a', id: 'turn:1:a', turnId: 'turn:1',
+        blocks: [
+          toolBlock('t1'),
+          { blockId: 'unknown:1', type: 'unknown', reason: 'unsupported_content' },
+          toolBlock('t2'),
+        ],
+      }),
+    ], { turns: [finished] }), { expandedTurnIds: new Set(['turn:1']) });
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'turn-fold', 'work', 'unknown', 'work']);
+  });
+
+  test('turns without a settled record keep their work rows and emit no fold', () => {
+    const rows = deriveTimeline(state([
+      user('turn:1'),
+      entry({ entryId: 'turn:1:a', id: 'turn:1:a', turnId: 'turn:1', blocks: [toolBlock('t1')] }),
+    ]));
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'work']);
+    expect(rows.some((row) => row.kind === 'turn-fold')).toBe(false);
+  });
+
+  test('a settled turn folds before the next live turn work rows', () => {
+    const rows = deriveTimeline(state([
+      user('turn:1'),
+      entry({ entryId: 'turn:1:a', id: 'turn:1:a', turnId: 'turn:1', blocks: [toolBlock('t1')] }),
+      user('turn:2'),
+      entry({
+        entryId: 'turn:2:a', id: 'turn:2:a', turnId: 'turn:2', status: 'streaming',
+        blocks: [toolBlock('t2', { status: 'running', completedAt: null })],
+      }),
+    ], {
+      running: true,
+      activeTurn: { turnId: 'turn:2', status: 'streaming' },
+      turns: [finished, turn('turn:2', { status: 'streaming' })],
+    }));
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'turn-fold', 'user', 'work', 'working']);
+  });
 });

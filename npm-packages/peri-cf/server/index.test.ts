@@ -105,8 +105,13 @@ describe("server wiring", () => {
           tiers: { fable: "gpt-test", opus: "gpt-test", sonnet: "gpt-test", haiku: "gpt-test" },
           baseUrl: "https://api.example.com/v1",
         },
-        mcp: { sandboxEnabled: false, remote: [], sandbox: [] },
-        wasm: { activeChats: 0 },
+        mcp: { remote: [] },
+        wasm: {
+          chatHandles: 0,
+          startingInstances: 0,
+          unconfirmed: false,
+          instances: [],
+        },
         sandbox: {
           enabled: false,
           settings: { source: "disabled" },

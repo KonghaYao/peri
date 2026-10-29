@@ -9,9 +9,14 @@ import {
   type ChatServiceContract,
   type ChatSessionDirectoryEntry,
   type ChatSessionOptions,
+  type WasmRuntimeInstanceSnapshot,
   type WorkspaceRef,
 } from "@peri-code/sdk";
 import { SESSION_CWD, WORKSPACE_CWD } from "./config";
+import {
+  ChatInstanceMetricsCollector,
+  type InstanceBusinessSnapshot,
+} from "./instance-metrics";
 import {
   listSandboxWorkspaces,
   parseSandboxWorkspace,
@@ -66,6 +71,19 @@ export interface ChatRegistryOptions {
   sandboxesRoot?: string;
 }
 
+/** 监控读面：实例快照 + 当前会话 + 业务计数；业务计数不可用时为 null。 */
+export interface MonitorInstanceView extends WasmRuntimeInstanceSnapshot {
+  chatId: string;
+  sessionId: string | null;
+  business: InstanceBusinessSnapshot | null;
+}
+
+export interface MonitorRuntimeView {
+  instances: MonitorInstanceView[];
+  starting: number;
+  unconfirmed: boolean;
+}
+
 /**
  * 服务端注册表：持有 SDK `ChatManagerContract` 句柄、`ChatViewRegistry` 与
  * 每 Chat 的 sandbox 租约。
@@ -79,6 +97,8 @@ export class ChatRegistry {
   private readonly chatSandboxes = new Map<string, SandboxLease>();
   /** 已登记且未关闭的句柄；用于只读监控，不代表运行后端已启动。 */
   private readonly chatIds = new Set<string>();
+  /** 每 Chat 的事实流计数器；只保留数值，不保存通知原文。 */
+  private readonly instanceMetrics = new ChatInstanceMetricsCollector();
 
   /**
    * `workspace` 是旧固定工作区，`agent` 是进程级运行配置模板；SDK 每次
@@ -128,8 +148,39 @@ export class ChatRegistry {
     return this.options.sandbox?.snapshot();
   }
 
+  /**
+   * WASM 实例读面：实例身份来自 SDK 只读快照，业务计数来自事实流。
+   *
+   * 同一 Chat 在会话切换窗口可能短暂出现两条租约；只保留最新一条，
+   * 避免把旧 generation 标成新 session。没有 chatId 的租约不进入本应用的实例列表。
+   */
+  runtimeInstances(nowMs: number): MonitorRuntimeView {
+    const pool = this.chats.runtimeSnapshot?.()
+      ?? { instances: [], starting: 0, unconfirmed: false };
+    const latest = new Map<string, WasmRuntimeInstanceSnapshot>();
+    for (const instance of pool.instances) {
+      const chatId = instance.chatId;
+      if (chatId === null) continue;
+      const existing = latest.get(chatId);
+      if (existing === undefined || instance.startedAtMs > existing.startedAtMs) {
+        latest.set(chatId, instance);
+      }
+    }
+    const instances: MonitorInstanceView[] = [...latest.values()].map((instance) => {
+      const chatId = instance.chatId as string;
+      return {
+        ...instance,
+        chatId,
+        sessionId: this.chats.getChat(chatId)?.sessionId ?? null,
+        business: this.instanceMetrics.snapshot(chatId, nowMs),
+      };
+    });
+    return { instances, starting: pool.starting, unconfirmed: pool.unconfirmed };
+  }
+
   private track(chat: ChatServiceContract): ChatServiceContract {
     this.chatIds.add(chat.id);
+    this.instanceMetrics.track(chat);
     return chat;
   }
 
@@ -158,6 +209,7 @@ export class ChatRegistry {
   async closeChat(id: string): Promise<void> {
     await this.chats.closeChat(id);
     this.chatIds.delete(id);
+    this.instanceMetrics.forget(id);
     const failures: unknown[] = [];
     try {
       await this.views.dispose(id);
@@ -210,6 +262,7 @@ export class ChatRegistry {
       failures.push(error);
     }
     this.chatIds.clear();
+    this.instanceMetrics.disposeAll();
     if (failures.length > 0) {
       throw new AggregateError(
         failures,
