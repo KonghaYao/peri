@@ -11,49 +11,33 @@ const RUNNING_STATUSES = new Set(['pending', 'streaming', 'running']);
 
 /**
  * 连续 reasoning/tool 的合并行：运行中默认展开并跟随当前活动；历史默认折叠。
- * 失败工具、失败/取消 turn 默认展开；状态转失败时即使曾手动折叠也展开一次。
+ * 失败/取消也保持收起，失败信号由摘要计数与红色样式提示。
  */
 export function WorkGroupRow({
   items,
   active,
   failed,
   defaultExpanded = active,
-  forceExpanded = false,
   payloadReader,
   bare = false,
 }: {
   items: readonly TimelineWorkItem[];
   active: boolean;
   failed: boolean;
-  /** 首帧展开事实：由 deriveTimeline 按运行/失败/取消状态计算。 */
+  /** 首帧展开事实：由 deriveTimeline 按运行状态计算。 */
   defaultExpanded?: boolean;
-  /** 失败终态：从 false 变为 true 时覆盖用户此前的折叠。 */
-  forceExpanded?: boolean;
   /** 结果全文按需读取；缺席时只显示 inline/预览。 */
   payloadReader?: ToolPayloadReader;
   /** 外层 turn fold 已展开：直接展示条目，不再渲染组头与折叠按钮。 */
   bare?: boolean;
 }) {
-  const [expanded, setExpanded] = useState(defaultExpanded || failed);
+  const [expanded, setExpanded] = useState(defaultExpanded);
   const userToggled = useRef(false);
-  const previousForce = useRef(forceExpanded || failed);
-  const previousFailures = useRef(items.filter((item) => item.failed).length);
 
   // 仅在没有用户手动操作时跟随运行态展开；折叠后不被普通流式更新强制打开。
   useEffect(() => {
     if (active && !userToggled.current) setExpanded(true);
   }, [active]);
-
-  // 失败终态或新的失败工具出现时必须可见：展开一次，用户随后仍可手动折叠。
-  useEffect(() => {
-    const failures = items.filter((item) => item.failed).length;
-    const terminal = forceExpanded || failed;
-    if ((terminal && !previousForce.current) || failures > previousFailures.current) {
-      setExpanded(true);
-    }
-    previousForce.current = terminal;
-    previousFailures.current = failures;
-  }, [failed, forceExpanded, items]);
 
   const toggle = () => {
     userToggled.current = true;

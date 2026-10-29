@@ -35,10 +35,8 @@ export type TimelineRow =
     kind: 'work'; id: string; turnId: string | null; items: TimelineWorkItem[]; active: boolean;
     /** 组内存在失败工具：摘要与展开都保留失败信号。 */
     failed: boolean;
-    /** 首帧是否展开：运行中、组内失败或失败/取消 turn 的 work 默认可见。 */
+    /** 首帧是否展开：仅运行中的 work 默认可见；失败/取消也收起。 */
     defaultExpanded: boolean;
-    /** 状态转为失败终态时即使曾手动折叠也展开一次。 */
-    forceExpanded: boolean;
     /** 已展开的干净 turn fold 下直接展示条目，不再重复组头与折叠。 */
     bare?: boolean;
   }
@@ -48,8 +46,6 @@ export type TimelineRow =
     summary?: string;
     failed: boolean;
     startedAt: string | null; completedAt: string | null; expanded: boolean;
-    /** 失败 turn 只展示静态摘要，不提供会隐藏失败证据的折叠开关。 */
-    static?: boolean;
   }
   | { kind: 'working'; id: string; turnId: string | null; startedAt: string | null }
   | { kind: 'error'; id: string; entryId: string; message: string }
