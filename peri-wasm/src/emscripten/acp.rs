@@ -84,7 +84,7 @@ impl PeriWasmAcp {
             provider,
             peri_config: Arc::new(RwLock::new(config)),
             config_source: source,
-            permission_mode: SharedPermissionMode::new(PermissionMode::Default),
+            permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
             session_resources,
             session_store_shutdown: Some(Box::new(session_store_shutdown)),
             cwd,

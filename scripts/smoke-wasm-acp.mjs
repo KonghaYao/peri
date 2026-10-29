@@ -79,6 +79,14 @@ function rpc(port) {
   };
 }
 
+function assertBypassMode(result, label) {
+  assert(result?.modes?.currentModeId === 'bypass',
+    `${label} should default to bypass mode: ${JSON.stringify(result?.modes)}`);
+  const mode = result?.configOptions?.find((option) => option.id === 'mode');
+  assert(mode?.currentValue === 'bypass',
+    `${label} configOptions should default to bypass: ${JSON.stringify(mode)}`);
+}
+
 try {
   const sqlPort = await unusedPort();
   sqlProcess = spawn('mise', [
@@ -133,6 +141,7 @@ try {
   const created = await wire.request('session/new', { cwd: '/workspace', mcpServers: [] });
   const sessionId = created.result?.sessionId;
   assert(sessionId, `session/new failed: ${JSON.stringify(created)}`);
+  assertBypassMode(created.result, 'session/new');
   const hidden = await wire.request('session/list', { cwd: '/workspace' });
   assert(Array.isArray(hidden.result?.sessions) && hidden.result.sessions.length === 0,
     `new empty session should be hidden: ${JSON.stringify(hidden)}`);
@@ -166,6 +175,7 @@ try {
   const loaded = await wire.request('session/load', { sessionId, cwd: '/workspace', mcpServers: [] });
   assert(loaded.result?.modes && Array.isArray(loaded.result.configOptions),
     `session/load failed: ${JSON.stringify(loaded)}`);
+  assertBypassMode(loaded.result, 'session/load');
   console.log(JSON.stringify({ passed: true, sessionId, modelCalls: modelRequests.length,
     notificationCount: wire.notifications.length, persistedAcrossRestart: true }));
 } catch (error) {
