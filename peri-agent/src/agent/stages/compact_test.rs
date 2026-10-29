@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::agent::compact_v2::config::CompactConfig;
+use crate::agent::events::CompactStrategy;
 use crate::agent::events_v2::{EventBus, EventBusConfig, EventHandles, ObserveEvent};
 use crate::agent::stages::StageContext;
 use crate::agent::token::ContextBudget;
@@ -467,7 +468,7 @@ async fn test_micro_success_does_not_reset_provider_usage() {
         ..Default::default()
     });
     ctx.compact.token_tracker.write().accumulate(&TokenUsage {
-        input_tokens: 160_000,
+        input_tokens: 183_610,
         output_tokens: 0,
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
@@ -484,18 +485,37 @@ async fn test_micro_success_does_not_reset_provider_usage() {
     assert!(output.compacted, "足量收益应提交一次 Micro");
     assert_eq!(
         token_tracker.read().estimated_context_tokens(),
-        Some(160_000),
+        Some(183_610),
         "Micro 成功后不得 reset 真实 usage"
     );
     let events = observe_events(&mut handles);
+    let completed: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            ObserveEvent::MessagesCompacted {
+                strategy,
+                outcome,
+                affected_count,
+                estimated_tokens_saved,
+                ..
+            } => Some((
+                *strategy,
+                *outcome,
+                *affected_count,
+                *estimated_tokens_saved,
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(completed.len(), 1, "确有变更时才发一次成功事件");
+    let (strategy, outcome, affected_count, estimated_tokens_saved) = completed[0];
+    assert_eq!(strategy, CompactStrategy::Micro);
     assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(event, ObserveEvent::MessagesCompacted { .. }))
-            .count(),
-        1,
-        "确有变更时才发成功事件"
+        outcome,
+        crate::agent::compact_v2::CompactOutcome::MicroApplied
     );
+    assert!(affected_count > 0);
+    assert!(estimated_tokens_saved >= 20_000);
     assert_eq!(
         events
             .iter()
@@ -507,9 +527,11 @@ async fn test_micro_success_does_not_reset_provider_usage() {
 }
 
 #[tokio::test]
-async fn test_compact_stage_deferred_emits_paired_end_without_completion() {
-    // 新契约：进入 Micro 区间但净收益不足时主动延后。
-    // 必须闭合 CompactStarted，携带原因与 G/M，且不产生 MessagesCompacted、不写入。
+async fn test_compact_stage_defers_continuous_low_gain_at_high_pressure() {
+    use crate::agent::compact_v2::{exposure::RequestExposure, CompactOutcome};
+    use peri_acp_types::compact::CompactDeferralReason;
+
+    // #310 的截图压力序列；#299 已修复收益准入，本例锁住真实阶段的连续低收益路径。
     let (mut ctx, mut handles) = make_context_with_observe();
     append_low_gain_history(&ctx);
     let _bound = confirm_fixture_exposure(&ctx).await;
@@ -518,80 +540,107 @@ async fn test_compact_stage_deferred_emits_paired_end_without_completion() {
         micro_compact_stale_steps: 1,
         ..Default::default()
     });
-    ctx.compact.token_tracker.write().accumulate(&TokenUsage {
-        input_tokens: 160_000,
-        output_tokens: 0,
-        cache_creation_input_tokens: None,
-        cache_read_input_tokens: None,
-    });
-
-    let output = run_compact(CompactInput {
-        context: ctx.clone(),
-        has_tool_calls: true,
-    })
-    .await
-    .unwrap();
-
-    assert!(!output.compacted, "延后不得向 stage 报告 compacted=true");
-    assert_eq!(
-        ctx.compact
-            .compact_consecutive_failures
-            .load(std::sync::atomic::Ordering::Relaxed),
-        0,
-        "延后不增加失败计数"
-    );
-    assert!(
-        !ctx.session.transcript.read().entries().iter().any(|entry| {
-            ctx.session
-                .transcript
-                .read()
-                .flags(entry.id())
-                .projection
-                .is_some()
-        }),
-        "延后不得写入任何投影"
-    );
-    let events = observe_events(&mut handles);
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(event, ObserveEvent::CompactStarted { .. }))
-            .count(),
-        1,
-        "进入区间后 CompactStarted 仍会发出"
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(event, ObserveEvent::MessagesCompacted { .. }))
-            .count(),
-        0,
-        "延后不得伪装为 MessagesCompacted"
-    );
-    let ended: Vec<_> = events
-        .iter()
-        .filter_map(|event| match event {
-            ObserveEvent::CompactEnded {
-                outcome, deferral, ..
-            } => Some((*outcome, *deferral)),
-            _ => None,
+    for (round, input_tokens) in [
+        183_610, 186_380, 185_973, 185_538, 185_029, 184_511, 185_068, 184_249,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let call_id = format!("screenshot_{round}");
+        let mut transcript = std::mem::take(&mut *ctx.session.transcript.write());
+        transcript.append(BaseMessage::human(MessageContent::text(format!(
+            "q {round}"
+        ))));
+        transcript.append(BaseMessage::ai_with_tool_calls(
+            MessageContent::text(""),
+            vec![ToolCallRequest::new(
+                &call_id,
+                "Bash",
+                serde_json::json!({}),
+            )],
+        ));
+        transcript.append(BaseMessage::tool_result(
+            &call_id,
+            MessageContent::text("x".repeat(2_000)),
+        ));
+        transcript.flush_persistence().await.unwrap();
+        let request: Vec<_> = transcript.visible_messages().into_iter().cloned().collect();
+        let exposure = RequestExposure::capture(&request, &transcript).unwrap();
+        ctx.compact.exposure.lock().confirm_closed([call_id]);
+        ctx.compact.exposure.lock().confirm(&exposure);
+        let before = (transcript.len(), transcript.view_revision());
+        *ctx.session.transcript.write() = transcript;
+        // 新有效 usage 覆盖本轮新增内容，不能靠复用已消费样本而跳过收益评估。
+        super::context_pressure::refresh(&ctx).unwrap();
+        ctx.compact.token_tracker.write().accumulate(&TokenUsage {
+            input_tokens,
+            output_tokens: 0,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        });
+        let output = run_compact(CompactInput {
+            context: ctx.clone(),
+            has_tool_calls: true,
         })
-        .collect();
-    assert_eq!(ended.len(), 1, "延后必须发配对的 CompactEnded");
-    assert_eq!(
-        ended[0].0,
-        crate::agent::compact_v2::CompactOutcome::Deferred
-    );
-    let deferral = ended[0].1.expect("CompactEnded 必须携带跳过原因");
-    assert_eq!(
-        deferral.min_gain_tokens,
-        crate::agent::compact_v2::min_micro_gain_tokens(200_000, &CompactConfig::default()),
-        "事件必须携带完整窗口 10% 的门槛"
-    );
-    assert!(
-        deferral.estimated_gain_tokens < deferral.min_gain_tokens,
-        "事件必须携带本轮估算净收益"
-    );
+        .await
+        .unwrap();
+        assert!(!output.compacted, "round {round}: 低收益必须延后");
+        let events = observe_events(&mut handles);
+        let [ObserveEvent::CompactStarted {
+            turn_id,
+            agent_id,
+            step,
+            strategy: CompactStrategy::Micro,
+        }, ObserveEvent::CompactEnded {
+            turn_id: end_turn,
+            agent_id: end_agent,
+            step: end_step,
+            strategy: CompactStrategy::Micro,
+            outcome: CompactOutcome::Deferred,
+            deferral: Some(deferral),
+        }] = events.as_slice()
+        else {
+            panic!(
+                "round {round}: 必须只有配对 Started/Ended，不得发送 MessagesCompacted: {events:?}"
+            );
+        };
+        assert_eq!((turn_id, agent_id, step), (end_turn, end_agent, end_step));
+        assert_eq!(deferral.reason, CompactDeferralReason::InsufficientGain);
+        assert_eq!(deferral.min_gain_tokens, 20_000);
+        assert!(
+            (1..20_000).contains(&deferral.estimated_gain_tokens),
+            "必须存在非零收益候选"
+        );
+        if round == 0 {
+            assert!(
+                deferral.estimated_gain_tokens < 4_000,
+                "锁住旧 fallback 放行的 G < R 场景"
+            );
+        }
+        let transcript = ctx.session.transcript.read();
+        assert_eq!((transcript.len(), transcript.view_revision()), before);
+        assert!(transcript
+            .entries()
+            .iter()
+            .all(|entry| transcript.flags(entry.id()).projection.is_none()));
+        assert_eq!(
+            ctx.compact
+                .compact_consecutive_failures
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "延后不增加失败计数"
+        );
+        assert_eq!(
+            ctx.compact
+                .token_tracker
+                .read()
+                .last_usage
+                .as_ref()
+                .unwrap()
+                .input_tokens,
+            input_tokens
+        );
+    }
 }
 
 #[tokio::test]
