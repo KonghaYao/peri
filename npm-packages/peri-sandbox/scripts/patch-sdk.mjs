@@ -11,9 +11,27 @@ function patch(file, before, after) {
   writeFileSync(file, source.replace(before, after));
 }
 
+/**
+ * `SubscriptionFilterSchema` validates the `subscriptions/listen` ack filter.
+ * Without `.passthrough()` zod strips extension fields such as rmcp's
+ * `taskIds`, so the host would receive a rewritten honored filter.
+ */
+function patchSubscriptionFilter(file) {
+  const source = readFileSync(file, 'utf8');
+  if (!source.includes('SubscriptionFilterSchema$1 = ')) return false;
+  if (/SubscriptionFilterSchema\$1 = (?:z|zod_v4)\.object\(\{[\s\S]*?\n\t\}\)\.passthrough\(\);/.test(source))
+    return true;
+  const pattern = /(const SubscriptionFilterSchema\$1 = (?:z|zod_v4)\.object\(\{[\s\S]*?\n\t\}\));/;
+  if (!pattern.test(source)) return false;
+  writeFileSync(file, source.replace(pattern, '$1.passthrough();'));
+  return true;
+}
+
 for (const pkg of ['client', 'server']) {
   const dir = sdkDist(pkg);
+  let filterPatchedMjs = false;
   for (const file of readdirSync(dir).filter((name) => /^src-.*\.(mjs|cjs)$/.test(name))) {
+    if (patchSubscriptionFilter(join(dir, file)) && file.endsWith('.mjs')) filterPatchedMjs = true;
     const previous =
       'if (rawResultType === "task" && method === "tools/call" && typeof raw.taskId === "string") return { kind: "complete", result: raw };';
     const previousNested =
@@ -33,7 +51,17 @@ for (const pkg of ['client', 'server']) {
         'if (provided === "complete") return result;',
         'if (provided === "complete" || provided === "task" && method === "tools/call") return result;',
       );
+    // The inner Peri MCP server (rmcp 3.5.1) omits `resultType` on custom
+    // methods such as `skills/list`. A 2026 client must accept what the server
+    // sent and let the outer encode seam stamp `resultType`; rejecting here
+    // would turn a transparent bridge into a filter.
+    patch(
+      join(dir, file),
+      'const rawResultType = raw["resultType"];',
+      'const rawResultType = raw["resultType"];\n\t\tif (rawResultType === void 0 && !isSpecRequestMethod(method)) return { kind: "complete", result: raw };',
+    );
   }
+  if (!filterPatchedMjs) throw new Error(`SubscriptionFilterSchema anchor missing in @modelcontextprotocol/${pkg}`);
 }
 const dir = sdkDist('server');
 for (const file of readdirSync(dir).filter((name) => /^mcp-.*\.(mjs|cjs)$/.test(name))) {
@@ -61,7 +89,6 @@ const srtUtils = [
 if (!srtUtils) throw new Error('sandbox-runtime sandbox-utils.js not found');
 const srtSource = readFileSync(srtUtils, 'utf8');
 if (!srtSource.includes('${auth}127.0.0.1:')) {
-  if (!srtSource.includes('${auth}localhost:'))
-    throw new Error(`sandbox-runtime proxy anchor missing: ${srtUtils}`);
+  if (!srtSource.includes('${auth}localhost:')) throw new Error(`sandbox-runtime proxy anchor missing: ${srtUtils}`);
   writeFileSync(srtUtils, srtSource.replaceAll('${auth}localhost:', '${auth}127.0.0.1:'));
 }

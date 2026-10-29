@@ -25,7 +25,9 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
   按 `sandboxId` 引用计数；`server/registry.ts` 在 `createChat` 前启动/复用实例，把
   `workspace` 与 MCP `sandbox` 合并进 Session；历史会话由 Store `cwd` 解析
   `<root>/<sandboxId>/workspace`，旧 `/workspace` 会话走固定工作区。关闭 Chat 释放租约并保留工作区，
-  停机 `closeAll`；启动失败映射 503 `sandbox_start_failed`。
+  停机 `closeAll`；启动失败映射 503 `sandbox_start_failed`。sandbox MCP 是透明代理：能力、
+  tools、resources、prompts、skills 与通知都从内层 `peri mcp-start workspace` 镜像/转发；server 名仍为
+  `sandbox`，不作为宿主 `WorkspaceRemote` 系统资源面。
 - **服务端注册表**：`server/registry.ts` 的 `ChatRegistry` 持有 `ChatManagerContract` 与
   `ChatViewRegistry`，`chats` 直接暴露句柄端口，编排 close 与 shutdown；`createChat` 不启动 WASM，
   不读历史，只按目标启动/复用 sandbox。

@@ -340,12 +340,12 @@ pub(crate) async fn new_session_from_prepared(
         }
         _ => HashMap::new(),
     };
-    // W4b（F3/J1）：system 来源（builtin `workspace` 实例）的技能元数据快照——
-    // 冻结 system prompt 的技能摘要由它渲染（非 system 来源不进冻结面）。
-    // X5 失败语义：技能面不适用（未装配/未连接/未声明/被关闭）⇒ 空快照不是失败；
-    // 已声明且被选中却读取失败 ⇒ fail-closed（下面按 J2 补偿后返回错误）。
+    // W4b（F3/J1）：按 skills 能力聚合本会话可见的 MCP 技能元数据快照——
+    // 冻结 system prompt 的技能摘要由它渲染。SkillsMiddleware 关闭时为空；
+    // host-assigned system workspace 读取失败 ⇒ fail-closed（下面按 J2 补偿后
+    // 返回错误），其他声明 skills 的 server 失败只记录诊断并保留其余条目。
     let skill_catalog = match environment.as_ref() {
-        Some(env) => match env.read_workspace_skill_catalog().await {
+        Some(env) => match env.read_skill_catalog().await {
             Ok(catalog) => catalog,
             Err(error) => {
                 drain_and_abandon(environment.as_ref(), &initialization).await?;

@@ -195,7 +195,7 @@ pub(super) async fn prepare_for_restore(
                     _ => HashMap::new(),
                 };
                 let skill_catalog = match environment.as_ref() {
-                    Some(env) => env.read_workspace_skill_catalog().await?,
+                    Some(env) => env.read_skill_catalog().await?,
                     None => Vec::new(),
                 };
                 let instructions = match environment.as_ref() {

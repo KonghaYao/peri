@@ -477,11 +477,12 @@ pub trait McpPoolPort: Send + Sync {
 
     /// 冻结期技能清单快照（元数据快照，不读正文）。默认错误。
     ///
-    /// 实现方语义（`McpClientPool`）：实例未装配 / 未连接 / 未声明 skills
-    /// 能力 ⇒ `Ok(空)`（不是失败）；能力已声明且实例健康但读取失败 ⇒ `Err`
-    /// （调用方 fail-closed，不谎称「无技能」）。
-    async fn read_builtin_workspace_skills(&self) -> Result<Vec<SkillMetadata>, String> {
-        Err("builtin workspace skills face unavailable".into())
+    /// 实现方语义（`McpClientPool`）：按 **skills 能力**聚合本会话可见的
+    /// 连接，不按 server 名；未声明 skills 的 server ⇒ 跳过（不是失败）；
+    /// host-assigned system workspace 读取失败 ⇒ `Err`（调用方 fail-closed），
+    /// 其他声明了 skills 的 server 失败 ⇒ 记录诊断并保留其余条目。
+    async fn read_skills_catalog(&self, _session_id: &str) -> Result<Vec<SkillMetadata>, String> {
+        Err("skills catalog unavailable".into())
     }
 
     /// 冻结期项目指令读取：`(main, local)`，main 为 import 展开后的正文，

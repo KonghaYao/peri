@@ -858,51 +858,97 @@ impl McpClientPool {
         Ok((main, local))
     }
 
-    /// 冻结期技能清单快照（F3，J1/§5.4）：只认真实 builtin `workspace` 实例。
+    /// 冻结期技能清单快照（按 **skills 能力**聚合，不按 server 名）。
     ///
-    /// 身份与关闭口径与 [`Self::read_builtin_workspace_meta`] 同源（X6/X7：
-    /// `ConfigSource::Builtin { instance: "workspace" }` + Connected；X4/A24：
-    /// 关闭集命中直接返回空，不发现、不回落磁盘）。
+    /// 遍历本会话可见、`Connected`、声明了 SEP-2640 skills 扩展的句柄；每个
+    /// server 独立并发调用 `skills/list`（共享 10s 预算）。条目名已是
+    /// `mcp__<server>__<skill>`，不同 server 的同名技能天然区分；同一 server
+    /// 内冲突由 [`super::skill_discovery::snapshot_via_skills_list`] 消歧。
     ///
-    /// 失败语义（X5，受限 Peri profile）：
-    /// - 实例未装配 / 未连接 / 未声明 skills 能力 → `Ok(空)`：**未声明不是失败**
-    ///   （不凭空要求每台 server 支持 skills）；
-    /// - 能力已声明且实例健康，但 `skills/list` 读取失败（超时 / RPC 错误 /
-    ///   响应不合法）→ `Err`：system 已声明且被选中的投递失败 ⇒ 调用方
-    ///   fail-closed（拒绝创建会话，不谎称「无技能」）。
-    ///
-    /// 返回的是**元数据快照**（发现面同构条目，正文不读）：正文由激活面
-    /// （`resources/read` + digest 校验）按需读取。
-    pub async fn read_builtin_workspace_skills(
+    /// 失败语义：
+    /// - 未声明 skills / 不在本会话可见范围 / 被 A24 关闭集命中 ⇒ 跳过（能力
+    ///   不适用不是失败）；
+    /// - 非 system server 读取失败 ⇒ `tracing::warn!` 并继续，保留其他 server
+    ///   的条目（常规发现任务会独立把该 server 标成 Failed）；
+    /// - host-assigned system workspace（builtin `workspace` 或
+    ///   `WorkspaceRemote`）读取失败 ⇒ `Err`，调用方 fail-closed。
+    pub async fn read_skills_catalog(
         &self,
-    ) -> Result<Vec<peri_acp_types::skills::SkillMetadata>, String> {
+        session_id: &str,
+    ) -> Result<Vec<SkillMetadata>, String> {
         let closed = self
             .builtin_instance_context()
             .map(|context| context.closed.clone())
             .unwrap_or_default();
-        if self.workspace_source_closed(&closed) {
-            tracing::debug!("skills: builtin workspace is closed; skill face stays unavailable");
+        let handles: Vec<_> = self
+            .get_all_clients_visible_to(Some(session_id))
+            .into_iter()
+            .filter(|handle| handle.skills_capable)
+            .filter(|handle| {
+                !super::builtin::is_closed_source(&handle.name, handle.source.as_ref(), &closed)
+            })
+            .collect();
+        if handles.is_empty() {
             return Ok(Vec::new());
         }
-        let Some(handle) = self.get_client("workspace") else {
-            return Ok(Vec::new());
-        };
-        if !matches!(handle.status, ClientStatus::Connected)
-            || !super::builtin::is_workspace_source(handle.source.as_ref())
-        {
-            return Ok(Vec::new());
-        }
-        if !handle.skills_capable {
-            // 能力未声明 ⇒ 技能面不适用（X5）；不调用未声明的方法。
-            return Ok(Vec::new());
-        }
-        let Some(peer) = handle.peer.clone() else {
-            return Err(
-                "builtin workspace skills face declared but the peer is unavailable".to_string(),
-            );
-        };
         let cancel = tokio_util::sync::CancellationToken::new();
-        super::skill_discovery::snapshot_via_skills_list(peer, &handle.name, cancel).await
+        let reads = handles.into_iter().map(|handle| {
+            let server = handle.name.clone();
+            let system = super::builtin::is_workspace_source(handle.source.as_ref());
+            let peer = handle.peer.clone();
+            let cancel = cancel.clone();
+            async move {
+                let Some(peer) = peer else {
+                    return (
+                        server,
+                        system,
+                        Err("skills declared but the peer is unavailable".to_string()),
+                    );
+                };
+                let outcome = peri_time::timeout(
+                    std::time::Duration::from_secs(10),
+                    super::skill_discovery::snapshot_via_skills_list(peer, &server, cancel),
+                )
+                .await;
+                match outcome {
+                    Ok(result) => (server, system, result),
+                    Err(_) => (
+                        server,
+                        system,
+                        Err("skills/list timed out after 10s".to_string()),
+                    ),
+                }
+            }
+        });
+        let results = futures::future::join_all(reads).await;
+        let mut catalog: Vec<SkillMetadata> = Vec::new();
+        let mut seen = HashSet::new();
+        let mut system_failures = Vec::new();
+        for (server, system, result) in results {
+            match result {
+                Ok(entries) => {
+                    for entry in entries {
+                        if seen.insert(entry.name.clone()) {
+                            catalog.push(entry);
+                        }
+                    }
+                }
+                Err(error) if system => system_failures.push(format!("{server}: {error}")),
+                Err(error) => tracing::warn!(
+                    server,
+                    %error,
+                    "MCP skills/list failed; continuing without this server's skills"
+                ),
+            }
+        }
+        if !system_failures.is_empty() {
+            return Err(format!(
+                "system workspace skills face failed: {}",
+                system_failures.join("; ")
+            ));
+        }
+        catalog.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(catalog)
     }
 }
 
