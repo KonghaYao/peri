@@ -38,7 +38,9 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
   `SyncConnection`，`syncEvents` 再把每连接 `WSContext` 适配为 `ChatYjsChannel`；客户端只能发
   HELLO/ACK，任何文档更新帧都被拒绝；慢客户端由 SDK 交付信用/背压显式关闭。
 - **前端**：`frontend/remote/controller.ts` 是页面控制器（句柄身份、两步打开历史、绑定代次、Action、
-  连接）；`actions.ts` 是 HTTP 客户端；`sync.ts` 是 WebSocket → SDK 副本；`application.ts` 是前端组合根。
+  连接）；视图派生纯函数在 `view-state.ts`，投递结算在 `delivery.ts`，句柄表在 `handles.ts`
+  （三者不持有连接生命周期）；`actions.ts` 是 HTTP 客户端；`sync.ts` 是 WebSocket → SDK 副本；
+  `application.ts` 是前端组合根。
   `frontend/remote/projection.ts` 把 `ChatReplica` 物化为展示 DTO，不反向控制执行。
 - **生成式 UI**：组件库、spec 与 Renderer 独立在 [`peri-openui`](peri-openui.md)；
   `peri-openui/src/library.tsx` 是组件事实源，`bun run openui:spec` 生成 `peri-openui/spec.json`。
@@ -95,9 +97,9 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 | WebSocket 同步适配 | `server/api/sync.ts` |
 | 共享 Zod DTO / HTTP 契约 | `frontend/remote/contracts.ts`、`frontend/remote/display-state.ts` |
 | 浏览器投影 | `frontend/remote/projection.ts` |
-| 远程客户端与页面控制器 | `frontend/remote/{application,actions,controller,repository,sync}.ts` |
+| 远程客户端与页面控制器 | `frontend/remote/{application,actions,controller,view-state,delivery,handles,repository,sync}.ts` |
 | Chat 运行时与 useChat | `frontend/chat/runtime/{useChat,queries,payloadReader,askUserQuestion}.ts` |
-| Chat 展示与交互 | `frontend/chat/{components,timeline,composer}/`；`frontend/components/assistant-ui/` 只保留 vendored 审批/问答卡片 |
+| Chat 展示与交互 | `frontend/chat/{components,timeline,composer}/`；`components/shell/` 承载草稿/导航 hook 与横幅，`timeline/toolText.ts` 统一折叠/失败态文本提取；`frontend/components/assistant-ui/` 只保留 vendored 审批/问答卡片 |
 | OpenUI 聊天适配 | `frontend/chat/openui/{OpenUIMessage,actions,index}.ts(x)`；渲染与 spec 见 [`peri-openui`](peri-openui.md) |
 | OpenUI 系统提示词 | `server/openui-instructions.ts`、`server/system-instructions.ts` |
 | SPA 外壳与只读服务端监控 | `frontend/app/App.tsx`、`frontend/settings/MonitorDialog.tsx`、`frontend/settings/monitor/` |

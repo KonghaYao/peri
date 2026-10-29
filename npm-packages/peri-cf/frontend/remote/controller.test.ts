@@ -119,6 +119,7 @@ interface HarnessOptions {
   send?: () => Promise<ActionReceipt>;
   cancel?: () => Promise<ActionReceipt>;
   close?: (address: string) => Promise<void>;
+  initialSyncTimeoutMs?: number;
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -168,6 +169,7 @@ function harness(options: HarnessOptions = {}) {
       log.push(`socket:${url}`);
       return socket;
     },
+    ...(options.initialSyncTimeoutMs ? { initialSyncTimeoutMs: options.initialSyncTimeoutMs } : {}),
   });
   return { controller, log, sockets, actions, sentTargets };
 }
@@ -240,6 +242,19 @@ describe('ChatController history open', () => {
     expect(await first).toBe(false);
     expect(log).toContain('close:handle-1');
     expect(controller.getState().selected?.id).toBe('session-2');
+    await controller.dispose();
+  });
+
+  test('an initial sync timeout reports failed without closing the server handle', async () => {
+    const { controller, sockets, log } = harness({ initialSyncTimeoutMs: 5 });
+    const opening = controller.openChat(summary('session-1'));
+    await waitFor(() => sockets.length > 0);
+
+    expect(await opening).toBe(false);
+    expect(controller.getState()).toMatchObject({ loadState: 'failed', phase: 'idle' });
+    expect(controller.getState().error).toContain('同步超时');
+    // 超时只报告失败，不关闭服务端句柄。
+    expect(log.some((entry) => entry.startsWith('close:'))).toBe(false);
     await controller.dispose();
   });
 });

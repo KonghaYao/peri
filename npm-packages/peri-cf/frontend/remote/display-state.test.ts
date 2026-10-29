@@ -38,6 +38,34 @@ const reasoningEntry = {
   blocks: [{ blockId: 'r1', type: 'reasoning', text: '思考', visibility: 'opaque' }],
 };
 
+const permission = {
+  id: 'interaction-1', kind: 'permission', sessionId: 'session-1', status: 'pending',
+  createdAt: null, resolvedAt: null, title: '允许执行？',
+};
+
+/** 覆盖全部展示字段的一组有效事实。 */
+const facts = {
+  running: true,
+  executionBlocked: true,
+  entries: [reasoningEntry],
+  toolCalls: [{
+    toolCallId: 'tool-1', turnId: 'turn:1', name: 'read_file', status: 'completed',
+    createdAt: null, completedAt: null, error: null,
+  }],
+  turns: [{
+    turnId: 'turn:1', status: 'completed', startedAt: null, completedAt: null,
+    error: null, interactionStatus: 'none',
+  }],
+  activeTurn: { turnId: 'turn:1', status: 'completed' },
+  session: { title: '会话标题', model: 'claude' },
+  tasks: [{ taskId: 'task-1', kind: 'subagent', title: '子任务', status: 'running' }],
+  plan: [{ content: '做一件事', status: 'pending' }],
+  plansByTurn: { 'turn:1': [{ content: '做一件事', status: 'pending' }] },
+  interactions: [permission],
+  pendingInteractions: [permission],
+  inputQueue: { generation: 'gen-1', revision: 1, items: [{ inputId: 'input-1', state: 'queued' }] },
+};
+
 describe('Chat display state schema tolerance', () => {
   test('an SDK reasoning visibility outside the old enum no longer rejects the whole state', () => {
     const state = materializeChatDisplayState(view({ entries: [reasoningEntry] }), chat);
@@ -69,5 +97,31 @@ describe('Chat display state schema tolerance', () => {
       chat,
     );
     expect(state).toMatchObject({ readiness: 'not-ready', entries: [], running: false });
+  });
+});
+
+describe('field mapping is shared by the normal and salvage paths', () => {
+  test('a field-level fallback yields the same facts as a normalized view', () => {
+    // 可展示子集：只保留一条有效条目 + 空 session；坏条目与坏 session 都应落到这里。
+    const normalized = materializeChatDisplayState(
+      view({ ...facts, entries: [reasoningEntry], session: {} }),
+      chat,
+    );
+    const recovered = materializeChatDisplayState(
+      view({
+        ...facts,
+        entries: [reasoningEntry, { entryId: '', blocks: 'not-a-list' }],
+        session: { title: 42 },
+      }),
+      chat,
+    );
+    expect(recovered).toEqual(normalized);
+  });
+
+  test('the salvage path returns the same field values as the schema path', () => {
+    const normalized = materializeChatDisplayState(view(facts), chat);
+    // `chat.id` 为空触发整份 schema 拒绝，强制走 salvage；其余输入与上面相同。
+    const salvaged = materializeChatDisplayState(view(facts), { ...chat, id: '' });
+    expect({ ...salvaged, chat: normalized.chat }).toEqual(normalized);
   });
 });

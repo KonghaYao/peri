@@ -31,7 +31,8 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 
 - `frontend/remote/`：HTTP Action、WebSocket 客户端、页面控制器、目录仓储与组合根；同目录承载
   `contracts.ts`（Zod wire/展示 DTO 与 `MonitorSnapshot`）、`display-state.ts`（`ChatDisplayState` 物化）、
-  `projection.ts`（`ChatReplica` 投影）与 `logging.ts`。
+  `projection.ts`（`ChatReplica` 投影）、`view-state.ts`（视图派生纯函数）、`delivery.ts`（投递结算）、
+  `handles.ts`（句柄表）与 `logging.ts`。
 - `server/`：`index.ts`（Hono 应用：API、静态资源与 WS 升级）、`config.ts`（环境变量与启动校验）、
   `compose.ts`（`chatManagerOptions` 平台装配）、`registry.ts`（`ChatRegistry`：View 生命周期与关闭/停机）、
   `api/index.ts`（Hono 目录/句柄/Action/payload）、`api/sync.ts`（WS → ChatYjsChannel）、
@@ -39,14 +40,17 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 - `frontend/chat/`、`frontend/components/`、`frontend/app/`：Chat 展示外壳、时间线与交互卡片；
   `frontend/chat/runtime/askUserQuestion.ts` 承载问答表单适配；`frontend/settings/` 只读服务端监控。
 - `frontend/chat/openui/`：只剩聊天适配层——`OpenUIMessage` 门面与懒加载 `peri-openui/renderer`、
-  `actions` 纯函数、模块出口。组件库、spec、主题与围栏在 `../peri-openui`；服务端只经
+  `actions` 纯函数、模块出口。组件库、spec、主题与围栏在 `../peri-openui`；库能力只从
+  `peri-openui` 入口取，不深层 import `peri-openui/src/canvas|components|library`；服务端只经
   `peri-openui/prompt` 读 `spec.json`，不 import React。OpenUI 模块不得 import
   timeline/components/runtime/composer。
 - `scripts/`：WASM 构建/provenance、开发启动与探针；`wasm/generated/` 是构建产物（gitignored），
   只由服务端加载。
 
-模块规则：文件夹是模块，目录根 `index.ts` 是唯一公共出口；`scripts/module-boundary.test.ts` 扫描生产
-代码，强制依赖方向、禁止循环，并保证 `frontend/`、`server/`、`scripts/` 互不越界。
+模块规则：文件夹是模块，目录根 `index.ts` 是唯一公共出口。例外是入口与内部实现目录：`frontend/app/`
+由 `main.tsx` 直接启动、没有 barrel，`frontend/chat/timeline/rows/` 是 timeline 内部行组件，
+`frontend/shims/` 是 Vite alias 的构建替身，三者都不设 `index.ts`。`scripts/module-boundary.test.ts`
+扫描生产代码，强制依赖方向、禁止循环，并保证 `frontend/`、`server/`、`scripts/` 互不越界。
 
 ## 数据流与生命周期
 
@@ -79,17 +83,22 @@ documentation。结构见 `../../docs/design/peri-cf-server-agent.md` 与
 
 - `frontend/chat/runtime/useChat.ts`：装配 `ChatController`、目录查询缓存与 payload reader。
 - `frontend/chat/components/`：消息流、工具卡片、会话列表、欢迎页与交互面板；`ChatShell` 组合侧栏、
-  时间线、输入区与右面板，`PendingInteractions`/`InteractionCard` 承载交互，`ChatRightPanel` 汇总
+  时间线、输入区与右面板，`shell/` 承载草稿槽 (`useComposerDrafts`)、导航编排 (`useChatNavigation`)
+  与横幅 (`ChatBanners`)，`PendingInteractions`/`InteractionCard` 承载交互，`ChatRightPanel` 汇总
   详情、计划与任务。
 - `frontend/chat/{timeline,composer}/`：Entry → 展示行与输入区；不提供编辑/重生成/队列/附件/语音
-  handler。assistant 行的 `OpenUIMessage` 只在顶层完整 `openui` 围栏，或流结束后以
+  handler。`timeline/toolText.ts` 是折叠态与失败态共用的工具文本/退出码/流分段提取。assistant 行的
+  `OpenUIMessage` 只在顶层完整 `openui` 围栏，或流结束后以
   `root = Stack(` 开头的裸程序时懒加载 Renderer；校验失败、引用未解析、`incomplete`、懒加载或
   渲染异常都回退 `StreamdownText`。复制按钮始终复制原始文本（含 DSL）。
 - OpenUI 表单值 ephemeral；`Button` action 经 `parseOpenUIAction` 路由到 `chat.send` 或
   `window.open`（仅 http/https）。`actionsEnabled={canSend}` 在聊天忙时禁用交互。
 - `frontend/components/assistant-ui/` 只保留 vendored 审批/问答卡片与样式常量；`frontend/hooks/`、
   `frontend/lib/` 提供共用工具。上游升级手动同步，改动前读文件头定制记录。
-- 样式：`frontend/tailwind.css` 是 Tailwind 入口与主题 token；`frontend/styles.css` 保留外壳与设置页。
+- 样式：`frontend/tailwind.css` 是 Tailwind 入口与主题 token；`frontend/styles.css` 只承担设置/监控
+  外壳与全局基础样式，消息流在 `frontend/styles/`（chat token、用户气泡、Markdown、欢迎页）。
+  深色主题由 `frontend/app/theme.ts` 把系统偏好同步成 `<html class="dark|light">`，Tailwind 与
+  chat token 共用 `.dark`；首帧由 `index.html` 内联脚本设置，避免闪烁。
 
 ## SDK 消费边界
 

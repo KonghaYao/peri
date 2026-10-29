@@ -3,16 +3,23 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, relative, resolve, sep } from 'node:path';
 
 /**
- * 模块边界回归：文件夹是模块，`index.ts` 是唯一公共出口。
+ * 模块边界回归：除入口与内部实现目录外，文件夹是模块，`index.ts` 是唯一公共出口。
  * 跨模块必须走出口；`frontend/remote/` 承载 DTO、投影与客户端门面；
  * `frontend/` 与 `server/` 互不引用。
+ *
+ * 出口例外（不在 `moduleRoots` 中，因此不要求 index.ts）：
+ * - `frontend/app/`：浏览器入口目录，`main.tsx` 直接启动，不做 barrel；
+ * - `frontend/chat/timeline/rows/`：timeline 的内部行组件；
+ * - `frontend/shims/`：Vite alias 的构建替身，不是可导入模块；
+ * - `frontend/test/`：测试工具目录，不参与生产边界规则。
  *
  * 生产代码依赖方向（从稳定到易变）：
  * - `frontend/lib` / `frontend/hooks` / `frontend/components/assistant-ui` 不依赖 feature；
  * - `frontend/remote` 不依赖任何其他 frontend 模块，也不依赖 React/UI 包；
- * - `frontend/chat/runtime` 不依赖展示/组件层；
+ * - `frontend/chat/runtime` 不依赖 components / timeline / composer，也不引用 chat 出口；
  * - `frontend/chat/timeline` 与 `frontend/chat/composer` 互不依赖，也不依赖 components；
  * - `frontend/chat/components` 只经 runtime 使用 remote；
+ * - `frontend/chat/openui` 只经 `peri-openui` 包入口取库能力，不深层引用 `src/`；
  * - `server/api` 不依赖 registry/compose/index；
  * - `scripts` 不依赖 frontend/server。
  *
@@ -270,6 +277,15 @@ describe('production dependency direction', () => {
       (target) => ['frontend/chat/timeline', 'frontend/chat/components', 'frontend/chat/runtime', 'frontend/chat/composer']
         .some((view) => inModule(view, target)),
     );
+    expect(violations).toEqual([]);
+  });
+
+  test('chat/openui takes library capabilities only from the peri-openui entrypoints', () => {
+    const deepLibraryImport = /^peri-openui\/src(\/|$)/;
+    const violations = productionImports
+      .filter(({ importer, specifier }) => inModule('frontend/chat/openui', importer)
+        && deepLibraryImport.test(specifier))
+      .map(({ importer, specifier }) => `${importer} → ${specifier}`);
     expect(violations).toEqual([]);
   });
 

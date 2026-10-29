@@ -75,15 +75,18 @@
 
 ## 4. 依赖与基础设施
 
-- 运行时：React 19、`react-markdown` + `remark-gfm` 渲染 Markdown，`@tanstack/react-query` 缓存目录，
+- 运行时：React 19、Streamdown（`streamdown`，GFM 内建）渲染 Markdown，`@tanstack/react-query` 缓存目录，
   `@legendapp/list` 虚拟列表，`lucide-react` 图标，`zod` 校验共享 DTO。
 - 样式：Tailwind CSS 4（`@tailwindcss/vite`），`cn` = `clsx` + `tailwind-merge`，`tw-shimmer` 提供运行态 shimmer。
+- 主题：`frontend/app/theme.ts` 把 `prefers-color-scheme` 同步为 `<html>` 的 `.dark` / `.light`，
+  `index.html` 内联脚本负责首帧；Tailwind 与 chat token（`:root.dark`）共用同一个 class 源。
 - 历史（2026-10-26 起已退出依赖）：`@assistant-ui/react`、`@assistant-ui/react-markdown`、
   `@base-ui/react`、`class-variance-authority`、`zustand` 与 `components.json` 随 registry 组件删除一并移除；
   目录名 `frontend/components/assistant-ui/` 只表示 vendored 来源，不再引用这些包。
 - vendored 组件只剩 `frontend/components/assistant-ui/elements/`（审批卡、问答表单、样式常量）；
   `frontend/components/ui/` 已删除，需要新组件时按需引入，不要假设该路径存在。
-- 样式拆分在 `frontend/styles/` 与 `tailwind.css`；chat 样式随组件迁移，外壳与设置页保留。
+- 样式拆分在 `frontend/styles/`（chat token、用户气泡、Markdown、欢迎页）与 `tailwind.css`；
+  应用外壳由组件内的 Tailwind 工具类承担，`styles.css` 只保留设置/监控外壳与全局基础样式。
 - React 19 官方支持；版本以实施 issue 记录为准。
 
 ## 5. 行为对齐

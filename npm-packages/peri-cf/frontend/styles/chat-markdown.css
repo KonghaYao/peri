@@ -7,8 +7,8 @@
  * 保持可读。
  *
  * 本文件未分层，规则天然高于 Tailwind 的 components / utilities 层；
- * 基础层 chat-stream.css 已不承担 Markdown 样式，这里用单类 `.aui-md`
- * 选择器即可生效。reasoning 的 compact 覆盖由 chat-tools.css 负责。
+ * 基础层 `chat-tokens.css` 已不承担 Markdown 样式，这里用单类 `.aui-md`
+ * 选择器即可生效。reasoning 的排版与折叠由 `ReasoningRow` 的 Tailwind 工具类负责。
  */
 .aui-md {
   --chat-markdown-font-mono: var(

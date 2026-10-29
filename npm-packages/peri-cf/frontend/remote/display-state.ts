@@ -58,21 +58,27 @@ function keepRecord<T>(schema: z.ZodType<T>, values: unknown): Record<string, T[
   );
 }
 
+/** 每次构造新的空值，避免不同展示态之间共享可变对象。 */
+const emptyActiveTurn = (): ChatDisplayState["activeTurn"] => ({ turnId: null, status: null });
+const emptySession = (): ChatDisplayState["session"] => ({});
+
+/** 单字段校验：不通过时返回 undefined，由调用方给出空/中性值。 */
+function parseField<T>(schema: z.ZodType<T>, value: unknown): T | undefined {
+  const parsed = schema.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
 /**
- * 字段级回退：schema 整体拒绝时保留仍能校验的条目与标量。
+ * 字段级回退：一次逐字段兜底构造展示 DTO。
  *
- * 只退到「更少事实」，不猜测运行态；坏字段为空/中性值，其余字段继续展示。
+ * 正常路径与 salvage 路径共用这一份映射；`readiness !== "ready"` 时不提供条目内容，
+ * 只退到「更少事实」，不猜测运行态。
  */
-function salvageDisplayState(
+function buildDisplayState(
   view: SessionView,
   chat: Chat,
   known: boolean,
 ): ChatDisplayState {
-  const activeTurn = activeTurnSchema.safeParse(
-    known ? view.activeTurn : { turnId: null, status: null },
-  );
-  const session = sessionInfoSchema.safeParse(known ? view.session : {});
-  const inputQueue = inputQueueSchema.safeParse(known ? view.inputQueue : null);
   return {
     chat,
     sessionId: view.sessionId,
@@ -83,8 +89,9 @@ function salvageDisplayState(
     entries: known ? keepValid(entrySchema, view.entries) : [],
     toolCalls: known ? keepValid(toolCallSchema, view.toolCalls) : [],
     turns: known ? keepValid(turnSchema, view.turns) : [],
-    activeTurn: activeTurn.success ? activeTurn.data : { turnId: null, status: null },
-    session: session.success ? session.data : {},
+    activeTurn: parseField(activeTurnSchema, known ? view.activeTurn : emptyActiveTurn())
+      ?? emptyActiveTurn(),
+    session: parseField(sessionInfoSchema, known ? view.session : {}) ?? emptySession(),
     tasks: known ? keepValid(taskSchema, view.tasks) : [],
     plans: {
       current: known ? keepValid(planEntrySchema, view.plan) : [],
@@ -92,7 +99,7 @@ function salvageDisplayState(
     },
     interactions: known ? keepValid(interactionSchema, view.interactions) : [],
     pendingInteractions: known ? keepValid(interactionSchema, view.pendingInteractions) : [],
-    inputQueue: inputQueue.success ? inputQueue.data : null,
+    inputQueue: parseField(inputQueueSchema, known ? view.inputQueue : null) ?? null,
   };
 }
 
@@ -102,32 +109,18 @@ function salvageDisplayState(
  * `readiness !== "ready"` 时不提供条目内容：`unsupported` 必须由 UI 显示
  * 版本不受支持，不能当成空历史；`not-ready` 只表示副本尚未收到文档对。
  * 校验失败只降级为可展示的子集，绝不让解析异常穿透副本通知。
+ *
+ * 字段映射只在 `buildDisplayState` 维护一份：整体 schema 通过就采用其规范化结果，
+ * 失败则原样返回同一份逐字段兜底构造，并留下日志用于发现 schema 与构造的漂移。
  */
 export function materializeChatDisplayState(view: SessionView, chat: Chat): ChatDisplayState {
   const known = view.readiness === "ready";
-  const input = {
-    chat,
-    sessionId: view.sessionId,
-    bindingRevision: view.bindingRevision,
-    running: known ? view.running : false,
-    executionBlocked: known ? view.executionBlocked : false,
-    readiness: view.readiness,
-    entries: known ? view.entries : [],
-    toolCalls: known ? view.toolCalls : [],
-    turns: known ? view.turns : [],
-    activeTurn: known ? view.activeTurn : { turnId: null, status: null },
-    session: known ? view.session : {},
-    tasks: known ? view.tasks : [],
-    plans: { current: known ? view.plan : [], byTurn: known ? view.plansByTurn : {} },
-    interactions: known ? view.interactions : [],
-    pendingInteractions: known ? view.pendingInteractions : [],
-    inputQueue: known ? view.inputQueue : null,
-  };
-  const parsed = chatDisplayStateSchema.safeParse(input);
+  const state = buildDisplayState(view, chat, known);
+  const parsed = chatDisplayStateSchema.safeParse(state);
   if (parsed.success) return parsed.data;
   logError("Chat display state failed schema validation; keeping valid facts", parsed.error, {
     sessionId: view.sessionId,
     bindingRevision: view.bindingRevision,
   });
-  return salvageDisplayState(view, chat, known);
+  return state;
 }

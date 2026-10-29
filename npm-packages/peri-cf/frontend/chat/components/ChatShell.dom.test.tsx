@@ -461,6 +461,22 @@ describe('ChatShell binding-scoped draft slots', () => {
     }));
     expect((screen.getByLabelText('输入消息') as HTMLTextAreaElement).value).toBe('');
   });
+
+  test('switching between existing sessions keeps each draft in its own slot', async () => {
+    render(createElement(Harness, { initialId: 'chat-a', existingChats: ['chat-a', 'chat-b'] }));
+    const textarea = () => screen.getByLabelText('输入消息') as HTMLTextAreaElement;
+
+    fireEvent.change(textarea(), { target: { value: 'A 草稿' } });
+    await act(async () => { fireEvent.click(screen.getByText('chat-b')); });
+    expect(textarea().value).toBe('');
+
+    fireEvent.change(textarea(), { target: { value: 'B 草稿' } });
+    await act(async () => { fireEvent.click(screen.getByText('chat-a')); });
+    expect(textarea().value).toBe('A 草稿');
+
+    await act(async () => { fireEvent.click(screen.getByText('chat-b')); });
+    expect(textarea().value).toBe('B 草稿');
+  });
 });
 
 describe('ChatShell OpenUI action routing', () => {

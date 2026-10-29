@@ -1,12 +1,18 @@
+/*
+ * 全局基础样式与设置/监控外壳。
+ *
+ * 消息流样式在 `frontend/styles/`（chat token、用户气泡、Markdown、欢迎页）；
+ * 应用外壳由组件内的 Tailwind 工具类承担，这里不再保留 shell 规则。
+ */
 :root {
+  color-scheme: light;
   font-family: 'Noto Sans SC', -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', sans-serif;
   color: #282b29;
   background: #fcfcfa;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
-  /* 外壳/设置页自有 token 带前缀：--muted、--border 归 tailwind.css 的主题（styles.css 在后加载会覆盖它们的主题值）。 */
-  --shell-muted: #8a8c86;
+  /* --muted、--border 归 tailwind.css 的主题（styles.css 在后加载会覆盖它们的主题值），本文件只用自有 token。 */
   --green: #34684f;
 }
 
@@ -14,7 +20,7 @@
  * 全局重置与元素级行为放进 base 层：Tailwind utilities 优先于这些规则。
  * 否则 `button { color: inherit }` / `button:disabled { opacity: .45 }` 会盖掉
  * vendored 卡片（registry 源码）在按钮上的 text-* / disabled:opacity-* 等工具类。
- * 外壳与设置页不使用 utilities，渲染结果不变。
+ * 设置/监控外壳不使用 utilities，渲染结果不变。
  */
 @layer base {
   * { box-sizing: border-box; }
@@ -28,27 +34,9 @@
   svg { flex-shrink: 0; }
   button { transition: background .16s, border-color .16s, opacity .16s; }
 }
-.app-shell { display: flex; height: 100dvh; min-height: 420px; overflow: hidden; }
-.sidebar { width: 268px; flex-shrink: 0; background: #f3f4ef; padding: 27px 17px 16px; display: flex; flex-direction: column; border-right: 1px solid #e7e9e1; }
-.sidebar-brand { display: flex; align-items: center; gap: 9px; padding: 0 11px; font-size: 29px; font-weight: 650; letter-spacing: -1.4px; }
 .brand-mark { display: grid; place-items: center; height: 33px; width: 33px; background: var(--green); border-radius: 11px; color: #fff; }
-/* 新建入口与会话条目由 Sidebar / SidebarThreadRow 渲染（自带 Tailwind 样式），这里只给外层间距。 */
-.sidebar-new { margin: 22px 2px 16px; }
-.sidebar-section-heading { display: flex; align-items: center; justify-content: space-between; padding: 0 11px; font-size: 11px; color: var(--shell-muted); letter-spacing: 1px; }
 .icon-button { display: inline-flex; align-items: center; justify-content: center; padding: 7px; border: 0; border-radius: 7px; background: transparent; color: #83877e; }
 .icon-button:hover:not(:disabled) { background: #e8ece2; color: #3a483b; }
-.chat-list { flex: 1; overflow-y: auto; padding-top: 6px; scrollbar-width: thin; }
-.sidebar-empty { text-align: center; padding: 53px 8px; color: #a4ab9a; }
-.sidebar-empty p { color: #868e7e; font-size: 12px; margin: 14px 0 7px; }
-.sidebar-empty > span { font-size: 10px; line-height: 1.8; }
-.main-panel { display: flex; flex: 1; min-width: 0; flex-direction: column; background: var(--chat-bg); }
-.topbar { height: 77px; flex-shrink: 0; padding: 0 34px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #f0f0eb; gap: 16px; }
-.topbar-left { display: flex; align-items: center; min-width: 0; gap: 14px; }
-.topbar-name { display: flex; align-items: center; gap: 7px; font-size: 16px; font-weight: 550; }
-.topbar-name > svg { color: #a4a69f; }
-.topbar-divider { width: 1px; height: 14px; background: #e1e3da; }
-.topbar-subtitle { color: #92958b; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.content-area { display: flex; flex-direction: column; flex: 1; min-height: 0; position: relative; }
 .error-banner { display: flex; align-items: center; gap: 10px; margin: 12px 24px 0; padding: 10px 14px; border: 1px solid #ecd9c8; border-radius: 10px; background: #fff6ee; color: #996039; font-size: 12px; line-height: 1.7; flex-shrink: 0; }
 .error-banner > span { flex: 1; overflow-wrap: anywhere; }
 .muted { color: #969e8c; font-size: 12px; line-height: 1.8; }
@@ -112,26 +100,7 @@
 /* pulse 仅由 Tailwind animate-pulse 消费（tailwind.css 先加载，此定义覆盖其同名 keyframes）。 */
 @keyframes pulse { 50% { opacity: .35; transform: translateY(-2px); } }
 
-@media (min-width: 1400px) {
-  .sidebar { width: 286px; padding-left: 21px; padding-right: 21px; }
-}
-
-@media (max-width: 1050px) {
-  .sidebar { width: 230px; padding-left: 12px; padding-right: 12px; }
-  .topbar { padding: 0 24px; }
-}
-
 @media (max-width: 760px) {
-  .app-shell { min-height: 320px; }
-  .mobile-only { display: inline-flex; }
-  .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 30; width: min(290px, 85vw); visibility: hidden; transform: translateX(-100%); transition: transform .22s ease; box-shadow: 10px 0 30px #1e2d1612; }
-  .sidebar.is-open { visibility: visible; transform: translateX(0); }
-  .sidebar-brand > .icon-button { margin-left: auto; }
-  .sidebar-backdrop { position: fixed; inset: 0; background: #25362055; z-index: 20; backdrop-filter: blur(2px); }
-  .topbar { height: 61px; padding: 0 17px; }
-  .topbar-left { gap: 12px; }
-  .topbar-name { font-size: 15px; }
-  .topbar-subtitle { font-size: 10px; }
   .error-banner { margin: 10px 16px 0; padding: 8px 10px; font-size: 11px; }
   .settings-shell { padding: 12px; }
   .monitor-card { width: 100%; height: 90dvh; border-radius: 14px; }
@@ -149,4 +118,118 @@
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
 
-.topbar-actions { display: flex; align-items: center; gap: 6px; }
+/* 深色主题：class 由 index.html 首帧脚本与 app/theme.ts 同步。
+   设置/监控外壳原先硬编码亮色，这里补齐暗色可读性。 */
+:root.dark {
+  color-scheme: dark;
+  color: #e6e8e1;
+  background: #151517;
+  --green: #7fb08f;
+}
+
+.dark .muted,
+.dark .text-button,
+.dark .settings-intro,
+.dark .settings-hint,
+.dark .settings-empty,
+.dark .settings-group h2,
+.dark .monitor-muted,
+.dark .monitor-updated,
+.dark .monitor-metric-label,
+.dark .monitor-row > span:first-child {
+  color: #9aa192;
+}
+
+.dark .icon-button {
+  color: #a7aea0;
+}
+
+.dark .icon-button:hover:not(:disabled),
+.dark .text-button:hover:not(:disabled) {
+  background: #24261f;
+  color: #e6e8e1;
+}
+
+.dark .error-banner,
+.dark .monitor-alert {
+  border-color: #4a3528;
+  background: #2b1f17;
+  color: #e2ac80;
+}
+
+.dark .settings-shell {
+  background: #0f100fe0;
+}
+
+.dark .settings-card {
+  border-color: #2e302a;
+  background: #1c1d1a;
+  box-shadow: 0 18px 54px #0008;
+}
+
+.dark .settings-group,
+.dark .monitor-head,
+.dark .monitor-metric {
+  border-color: #2e302a;
+}
+
+.dark .settings-problems,
+.dark .monitor-error-text {
+  color: #e2ac80;
+}
+
+.dark .monitor-tabs {
+  border-color: #2e302a;
+  background: #181a16;
+}
+
+.dark .monitor-tab {
+  color: #a7aea0;
+}
+
+.dark .monitor-tab:hover {
+  background: #24261f;
+  color: #e6e8e1;
+}
+
+.dark .monitor-tab[aria-selected="true"] {
+  background: #2b3327;
+  color: #dce8d6;
+}
+
+.dark .monitor-value,
+.dark .monitor-code,
+.dark .monitor-table td {
+  color: #d8dbd2;
+}
+
+.dark .monitor-table th {
+  color: #9aa192;
+}
+
+.dark .monitor-table th,
+.dark .monitor-table td {
+  border-color: #2e302a;
+}
+
+.dark .monitor-badge {
+  background: #24261f;
+  color: #b7c0ae;
+}
+
+.dark .monitor-badge[data-state="ready"],
+.dark .monitor-badge[data-tone="active"] {
+  background: #24362a;
+  color: #a4cfad;
+}
+
+.dark .monitor-badge[data-state="failed"],
+.dark .monitor-badge[data-state="error"] {
+  background: #3a2621;
+  color: #e2ac80;
+}
+
+.dark .monitor-badge[data-state="starting"] {
+  background: #332d1e;
+  color: #d8c27c;
+}

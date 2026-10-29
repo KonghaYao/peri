@@ -10,6 +10,15 @@ import '../styles/chat-tokens.css';
 import 'streamdown/styles.css';
 import { installOpenUITheme } from '../chat';
 import App from './App';
+import { syncThemeClass, watchSystemTheme } from './theme';
+
+// 主题 class 由 index.html 的内联脚本在首帧前设置；这里跟随系统后续切换。
+// 入口常驻不卸载，HMR 重跑时先清理旧监听，避免重复订阅。
+const systemsPrefersDark = typeof window.matchMedia === 'function'
+  && window.matchMedia('(prefers-color-scheme: dark)').matches;
+syncThemeClass(systemsPrefersDark);
+const stopThemeWatch = watchSystemTheme();
+import.meta.hot?.dispose(stopThemeWatch);
 
 // CSS 变量已可用后再把主题推给 canvas，避免首帧读不到 --chat-* 回退到默认色。
 installOpenUITheme();
