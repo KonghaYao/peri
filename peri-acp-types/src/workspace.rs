@@ -3,7 +3,10 @@
 use crate::thread::{ThreadId, ThreadListEntry};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, str::FromStr};
+use std::{
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 use uuid::Uuid;
 
 macro_rules! opaque_id {
@@ -103,6 +106,29 @@ impl SessionBinding {
             cwd_relative_to_workspace: workspace.relative_cwd.clone(),
         }
     }
+}
+
+/// 绑定指向的执行目录：相对路径为空时就是工作区根本身。
+///
+/// 不能直接写 `root.join(relative)`：`join("")` 会追加分隔符（`/a/b` → `/a/b/`），
+/// 同一个目录因此出现两种文本形式——创建时的解析结果不带分隔符，绑定复核却带回
+/// 分隔符。调用方按文本比较目录（如子代理 spawn 的父快照比对）会把同一个目录当成
+/// 换了目录。所有把绑定还原成执行目录的路径都必须经过这里。
+pub fn binding_cwd(root: &Path, relative: &Path) -> PathBuf {
+    if relative.as_os_str().is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(relative)
+    }
+}
+
+/// 两个执行目录是否指同一位置（按 `Path` 组件比较）。
+///
+/// 只消除文本形态差异（尾分隔符、重复分隔符、`.` 段），不做文件系统 canonicalize，
+/// 也不折叠 `..`：远端/Virtual 工作区在本机可能不存在，symlink 解析会把「目录是否
+/// 换位」的准入判断交给比较之外的事实。真正不同的目录（含 `..` 逃逸到根外）仍不等。
+pub fn same_execution_directory(a: &Path, b: &Path) -> bool {
+    a.components().eq(b.components())
 }
 
 /// A validated execution directory. The store revalidates this before binding a thread.
