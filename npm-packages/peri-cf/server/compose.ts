@@ -4,6 +4,7 @@ import {
   TursoStorage,
   type ChatAgentConfig,
   type ChatManagerOptions,
+  type ChatSessionOptions,
   type WorkspaceRef,
 } from "@peri-code/sdk";
 import { logError } from "./logging";
@@ -25,7 +26,8 @@ import { SYSTEM_INSTRUCTIONS } from "./system-instructions";
  */
 
 const DEFAULT_WORKSPACE_ID = "default";
-const DEFAULT_MODEL_ALIAS = "sonnet";
+/** 服务端唯一活动档位；`defaultAgentConfig` 与只读监控共用。 */
+export const DEFAULT_MODEL_ALIAS = "sonnet";
 const HARNESS_PROVIDER_ID = "model";
 const RUNTIME_DIAGNOSTIC_LABEL = "[peri-cf] Peri server runtime diagnostic";
 const RUNTIME_START_PHASE = "runtime-start";
@@ -136,20 +138,36 @@ export function defaultAgentConfig(config: ServerConfig): ChatAgentConfig {
   };
 }
 
-/** 纯装配：返回 SDK `ChatManager` 的完整构造选项，不启动运行后端。 */
-export function chatManagerOptions(config: ServerConfig): ChatManagerOptions {
-  const defaultDatabase = new TursoStorage({
+/** 进程共享的只读会话目录；注册表与 Manager 必须持有同一实例。 */
+export function createChatDatabase(config: ServerConfig): TursoStorage {
+  return new TursoStorage({
     ...config.storage,
     legacyCwd: WORKSPACE_CWD,
     currentCwd: SESSION_CWD,
   });
+}
+
+/** 每个 Chat 共享的 Session 建立配置；sandbox MCP 在注册表按 Chat 合并。 */
+export function defaultSessionOptions(config: ServerConfig): ChatSessionOptions {
+  return {
+    // cwd 由 `createChat({ workspace, sessionPath })` 派生；这里只放共享配置。
+    instructions: SYSTEM_INSTRUCTIONS,
+    mcpServers: mcpServerDefaults(config),
+  };
+}
+
+/** 纯装配：返回 SDK `ChatManager` 的完整构造选项，不启动运行后端。 */
+export function chatManagerOptions(
+  config: ServerConfig,
+  database = createChatDatabase(config),
+): ChatManagerOptions {
   return {
     // Manager 是部署边界：Store 与机器身份整个进程共享，per-chat 不可声明。
     store: {
-      storage: defaultDatabase.storageConfig,
+      storage: database.storageConfig,
       machineId: config.machineId,
     },
-    database: defaultDatabase,
+    database,
     // 默认进程内 memory storage；跨实例接管需要路由层与共享 storage，本轮不接入。
     kv: createStorage(),
     chatConfig: {
@@ -162,11 +180,7 @@ export function chatManagerOptions(config: ServerConfig): ChatManagerOptions {
           kind,
         }),
       },
-      session: {
-        // cwd 由 `createChat({ workspace, sessionPath })` 派生；这里只放共享配置。
-        instructions: SYSTEM_INSTRUCTIONS,
-        mcpServers: mcpServerDefaults(config),
-      },
+      session: defaultSessionOptions(config),
     },
   };
 }

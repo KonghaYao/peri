@@ -5,4 +5,4 @@ export type {
 export type { ChatDisplayState } from '../../remote';
 export type { ToolPayloadReader } from '@peri-code/sdk/view';
 
-export type { ChatLoadState, Phase } from '../../remote';
+export type { ChatLoadState, Phase, ChatRecovery, ChatSendOutcome } from '../../remote';

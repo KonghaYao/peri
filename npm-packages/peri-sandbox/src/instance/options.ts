@@ -136,7 +136,13 @@ export interface ResolvedSandboxOptions {
   readonly signal: AbortSignal | undefined;
 }
 
-function resolveProfile(
+/**
+ * Select the effective profile exactly as `startSandbox` does.
+ *
+ * Exported so read-only diagnostics share the runtime rule instead of
+ * re-implementing `defaultProfile` fallback or unknown-name handling.
+ */
+export function resolveProfile(
   settings: SandboxSettings,
   options: Pick<StartSandboxOptions, 'profile' | 'profileName'>,
 ): { profile: SandboxProfile; profileName: string } {

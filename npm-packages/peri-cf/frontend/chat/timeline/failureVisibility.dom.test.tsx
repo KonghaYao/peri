@@ -8,6 +8,7 @@ const { createElement } = await import('react');
 const { deriveTimeline } = await import('./deriveTimeline');
 const { TimelineRows } = await import('./Timeline');
 const { WorkGroupRow } = await import('./rows/WorkGroupRow');
+const { AssistantMessageRow } = await import('./rows/AssistantMessageRow');
 const { ToolRow } = await import('./rows/ToolRow');
 const { fireEvent, act } = await import('@testing-library/react');
 
@@ -99,6 +100,20 @@ describe('failed and cancelled work is visible on the first screen', () => {
     expect(document.querySelector('[data-tool-failed="true"]')).toBeNull();
   });
 
+  test('a clean expanded turn renders work items without a second toggle', () => {
+    const rows = deriveTimeline(state({ turnStatus: 'completed', entryStatus: 'completed' }) as never, {
+      expandedTurnIds: new Set(['turn:1']),
+    });
+    render(createElement(TimelineRows, { rows }));
+
+    expect(screen.getByText(/1 个工具/)).toBeTruthy();
+    expect(screen.getByText('运行命令')).toBeTruthy();
+    expect(document.querySelector('[data-slot="peri-work-group"] > button')).toBeNull();
+    expect(
+      document.querySelector('[data-slot="peri-work-group"]')?.getAttribute('data-bare'),
+    ).toBe('true');
+  });
+
   test('a group that turns failed after a manual collapse expands again', async () => {
     const running = {
       kind: 'tool' as const, id: 'bash', entryId: 'turn:1:a', blockId: 'tool:bash',
@@ -156,5 +171,68 @@ describe('tool payload detail visibility', () => {
     const result = document.querySelector('[data-slot="peri-tool-result"]')!;
     expect(result.textContent).not.toContain('[stderr]');
     expect(result.textContent).not.toContain('"contentText"');
+  });
+});
+
+describe('failure evidence and degraded payloads', () => {
+  test('a completed turn with a failed tool renders a static fold without a dead toggle', () => {
+    const rows = deriveTimeline(state({
+      turnStatus: 'completed', entryStatus: 'error',
+      error: { code: 'tool_failed', message: '工具执行失败' },
+      result: { contentText: 'boom' },
+    }) as never);
+    render(createElement(TimelineRows, { rows }));
+
+    const fold = document.querySelector('[data-slot="peri-turn-fold"]')!;
+    expect(fold.getAttribute('data-static')).toBe('true');
+    // 静态摘要不提供无效开关：失败证据始终可见。
+    expect(fold.querySelector('button')).toBeNull();
+    expect(screen.getByText('Failed after 2.0s')).toBeTruthy();
+    expect(document.querySelector('[data-tool-failed="true"]')).toBeTruthy();
+  });
+
+  test('payload_too_large renders as a truncated completed result, not a failure', () => {
+    const rows = deriveTimeline(state({
+      turnStatus: 'completed', entryStatus: 'completed',
+      error: { code: 'payload_too_large', message: '工具载荷超出会话接纳预算' },
+      result: { contentText: 'partial output' },
+    }) as never, { expandedTurnIds: new Set(['turn:1']) });
+    render(createElement(TimelineRows, { rows }));
+
+    expect(screen.getByText('Worked for 2.0s')).toBeTruthy();
+    const tool = document.querySelector('[data-slot="peri-tool-row"]')!;
+    expect(tool.getAttribute('data-tool-failed')).toBe('false');
+    expect(tool.getAttribute('data-tool-degraded')).toBe('true');
+    expect(document.querySelector('[data-slot="peri-tool-failure"]')).toBeNull();
+    expect(screen.getByText('结果超出会话接纳预算，已截断或省略。')).toBeTruthy();
+  });
+});
+
+describe('row chrome', () => {
+  test('an assistant message row renders no Peri label', () => {
+    render(createElement(AssistantMessageRow, { text: '这是回答', streaming: false }));
+
+    const row = document.querySelector('[data-slot="peri-assistant-message"]')!;
+    expect(row.textContent).toContain('这是回答');
+    expect(row.textContent).not.toContain('Peri');
+    expect(screen.queryByText('Peri')).toBeNull();
+  });
+
+  test('a non-bare work group root draws no bottom border', () => {
+    const item = {
+      kind: 'reasoning' as const, id: 'r1', entryId: 'turn:1:a', blockId: 'r1',
+      status: 'completed', label: '思考', text: '先检查一下',
+      createdAt: null, completedAt: null, failed: false,
+    };
+    render(createElement(WorkGroupRow, {
+      items: [item], active: false, failed: false, defaultExpanded: true,
+    }));
+
+    const group = document.querySelector('[data-slot="peri-work-group"]')!;
+    expect(group.getAttribute('data-bare')).toBe('false');
+    expect(group.classList.contains('border-b')).toBe(false);
+    expect(group.className).not.toContain('border-b');
+    expect(group.className).toContain('py-1');
+    expect(screen.getByText('先检查一下')).toBeTruthy();
   });
 });

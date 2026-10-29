@@ -3,9 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f9f9f6" />
+    <meta name="theme-color" content="#f9f9f6" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#151517" media="(prefers-color-scheme: dark)" />
     <meta name="description" content="Peri — 把想法变成下一步。简洁、专注的 AI 对话空间。" />
     <title>Peri · 你的思考伙伴</title>
+    <script>
+      // 首帧前同步主题 class：Tailwind 与 chat token 都只认 `.dark`，避免两套 token 错位。
+      (function () {
+        var dark = typeof window.matchMedia === 'function'
+          && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.classList.toggle('dark', dark);
+        document.documentElement.classList.toggle('light', !dark);
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

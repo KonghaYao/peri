@@ -27,6 +27,7 @@ const config: ServerConfig = {
     apiKey: "model-secret",
   },
   storage: { url: "https://store.example.com", authToken: "store-secret" },
+  sandbox: { enabled: false, root: "/tmp/peri-sandbox" },
   mcpServers: [{
     name: "tools",
     url: "https://mcp.example.com",

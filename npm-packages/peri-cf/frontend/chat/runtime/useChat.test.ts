@@ -28,6 +28,13 @@ describe('chat error banner routing', () => {
   test('no errors means no banners', () => {
     expect(errorBanners({ listError: '', chatError: '', loadState: 'ready' })).toEqual({});
   });
+
+  test('unknown results and stale bindings keep a non-dismissible reload entry', () => {
+    for (const chatError of ['网络请求失败，执行状态尚未确认。', '会话绑定已过期，请重新同步后再发送。']) {
+      const banner = errorBanners({ listError: '', chatError, loadState: 'ready', recovery: 'reload' }).chat;
+      expect(banner).toMatchObject({ message: chatError, action: 'reload-chat', dismissible: false });
+    }
+  });
 });
 
 describe('live sync retry routing', () => {

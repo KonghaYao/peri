@@ -3,16 +3,23 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, relative, resolve, sep } from 'node:path';
 
 /**
- * 模块边界回归：文件夹是模块，`index.ts` 是唯一公共出口。
+ * 模块边界回归：除入口与内部实现目录外，文件夹是模块，`index.ts` 是唯一公共出口。
  * 跨模块必须走出口；`frontend/remote/` 承载 DTO、投影与客户端门面；
  * `frontend/` 与 `server/` 互不引用。
+ *
+ * 出口例外（不在 `moduleRoots` 中，因此不要求 index.ts）：
+ * - `frontend/app/`：浏览器入口目录，`main.tsx` 直接启动，不做 barrel；
+ * - `frontend/chat/timeline/rows/`：timeline 的内部行组件；
+ * - `frontend/shims/`：Vite alias 的构建替身，不是可导入模块；
+ * - `frontend/test/`：测试工具目录，不参与生产边界规则。
  *
  * 生产代码依赖方向（从稳定到易变）：
  * - `frontend/lib` / `frontend/hooks` / `frontend/components/assistant-ui` 不依赖 feature；
  * - `frontend/remote` 不依赖任何其他 frontend 模块，也不依赖 React/UI 包；
- * - `frontend/chat/runtime` 不依赖展示/组件层；
+ * - `frontend/chat/runtime` 不依赖 components / timeline / composer，也不引用 chat 出口；
  * - `frontend/chat/timeline` 与 `frontend/chat/composer` 互不依赖，也不依赖 components；
  * - `frontend/chat/components` 只经 runtime 使用 remote；
+ * - `frontend/chat/openui` 只经 `@peri-code/sdk/openui*` 四个入口取库能力，不深层引用源码；
  * - `server/api` 不依赖 registry/compose/index；
  * - `scripts` 不依赖 frontend/server。
  *
@@ -27,6 +34,7 @@ const moduleRoots = [
   'server', 'server/api',
   'frontend/chat', 'frontend/chat/runtime', 'frontend/chat/components',
   'frontend/chat/timeline', 'frontend/chat/composer',
+  'frontend/chat/openui',
   'frontend/remote', 'frontend/settings',
   'frontend/hooks', 'frontend/lib',
   'frontend/components/assistant-ui',
@@ -261,6 +269,40 @@ describe('production dependency direction', () => {
     );
     expect([...forbiddenFor('frontend/chat/timeline'),
       ...forbiddenFor('frontend/chat/composer')]).toEqual([]);
+  });
+
+  test('chat/openui does not import timeline, components, runtime or composer', () => {
+    const violations = directionViolations(
+      (importer) => inModule('frontend/chat/openui', importer),
+      (target) => ['frontend/chat/timeline', 'frontend/chat/components', 'frontend/chat/runtime', 'frontend/chat/composer']
+        .some((view) => inModule(view, target)),
+    );
+    expect(violations).toEqual([]);
+  });
+
+  test('chat/openui takes library capabilities only from the @peri-code/sdk OpenUI entrypoints', () => {
+    const allowed = new Set([
+      '@peri-code/sdk/openui',
+      '@peri-code/sdk/openui/renderer',
+      '@peri-code/sdk/openui/error-boundary',
+      '@peri-code/sdk/openui/prompt',
+    ]);
+    const openuiImport = /^@peri-code\/sdk\/(?:openui|src\/openui)(?:\/|$)/;
+    const violations = productionImports
+      .filter(({ importer, specifier }) => inModule('frontend/chat/openui', importer)
+        && openuiImport.test(specifier)
+        && !allowed.has(specifier))
+      .map(({ importer, specifier }) => `${importer} → ${specifier}`);
+    expect(violations).toEqual([]);
+  });
+
+  test('chat/openui has no legacy peri-openui imports', () => {
+    const legacyImport = /^peri-openui(?:\/|$)/;
+    const violations = productionImports
+      .filter(({ importer, specifier }) => inModule('frontend/chat/openui', importer)
+        && legacyImport.test(specifier))
+      .map(({ importer, specifier }) => `${importer} → ${specifier}`);
+    expect(violations).toEqual([]);
   });
 
   test('chat/components reaches remote only through chat/runtime', () => {

@@ -1,0 +1,30 @@
+/*
+ * Peri Chat 用户消息气泡。
+ *
+ * 依赖 chat-tokens.css 中的 --chat-* 变量；本文件由 chat-tokens.css 引入，
+ * 两者一起在 tailwind.css / styles.css 之后加载。
+ *
+ * 消息流布局与其余消息样式已由 `Timeline` 各组件的 Tailwind 工具类承担；
+ * 这里只保留需要后代选择器与空态语义、工具类不便表达的气泡规则。
+ */
+
+.chat-user-bubble {
+  max-width: min(calc(var(--chat-column-width) * 0.702), 82%);
+  padding: 8px 16px;
+  border-radius: var(--chat-radius-bubble);
+  background: var(--chat-user-bubble);
+  color: var(--chat-fg);
+  font-size: var(--chat-text-body);
+  font-weight: 400;
+  line-height: var(--chat-leading-user);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.chat-user-bubble:empty {
+  display: none;
+}
+
+.chat-user-bubble :where(p) {
+  margin: 0;
+}

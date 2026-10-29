@@ -45,6 +45,7 @@ const config: ServerConfig = {
   },
   storage: { url: "https://store.example.com", authToken: "store-secret" },
   mcpServers: [],
+  sandbox: { enabled: false, root: "/tmp/peri-sandbox" },
   wasmModuleUrl: "file:///tmp/peri-wasm.js",
   staticRoot: "/tmp/peri-cf-missing-static",
 };
@@ -219,7 +220,10 @@ function makeRegistry(chat?: ChatServiceContract): ChatRegistry {
     async listSessions() { return []; },
     async closeChat() {},
     async shutdown() {},
-  }, { id: "default", runtimePath: "/workspace" }, {});
+  }, { id: "default", runtimePath: "/workspace" }, {}, {
+    session: { instructions: "test", mcpServers: {} },
+    sessions: { getSession: async () => null },
+  });
 }
 
 function startSyncServer(chat: ChatServiceContract = fakeChat("chat-1")) {

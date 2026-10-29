@@ -14,9 +14,17 @@ import {
   syncUpgradeGuard,
   type SyncEnv,
 } from "./api";
-import { MODEL_TIERS, loadServerConfig, publicServerInfo, type ServerConfig } from "./config";
-import { chatManagerOptions, defaultAgentConfig, defaultWorkspace } from "./compose";
+import { MODEL_TIERS, loadServerConfig, type ServerConfig } from "./config";
+import {
+  chatManagerOptions,
+  createChatDatabase,
+  defaultAgentConfig,
+  defaultSessionOptions,
+  defaultWorkspace,
+} from "./compose";
 import { ChatRegistry } from "./registry";
+import { createMonitor } from "./monitor";
+import { createSandboxPool } from "./sandbox";
 
 /**
  * Bun 长驻服务：Hono 统一处理 `/api/*`、`/api/chats/:chatId/sync` 的 WS 升级
@@ -30,7 +38,7 @@ const NOT_FOUND_TEXT = "404 Not Found";
 /** 组装路由；`fetch` 必须由 `Bun.serve` 提供 server 才能完成 WS 升级。 */
 export function createApp(config: ServerConfig, registry: ChatRegistry): Hono<SyncEnv> {
   const app = new Hono<SyncEnv>();
-  app.route("/", createApi({ registry, info: publicServerInfo(config) }));
+  app.route("/", createApi({ registry, monitor: createMonitor({ config, registry }) }));
 
   // 精确匹配的升级前置条件（405/426/410/500）与逐连接状态。
   app.all(SYNC_PATH, syncUpgradeGuard(registry));
@@ -73,10 +81,19 @@ export function createServer(
 export function startServer(
   config: ServerConfig,
 ): { server: Server<BunWebSocketData>; registry: ChatRegistry } {
+  const database = createChatDatabase(config);
+  const sandbox = createSandboxPool(config);
   const registry = new ChatRegistry(
-    new ChatManager(chatManagerOptions(config)),
+    new ChatManager(chatManagerOptions(config, database)),
     defaultWorkspace(config),
     defaultAgentConfig(config),
+    {
+      session: defaultSessionOptions(config),
+      sessions: database,
+      ...(sandbox
+        ? { sandbox, sandboxesRoot: config.sandbox.root }
+        : {}),
+    },
   );
   return { server: createServer(config, registry), registry };
 }
@@ -94,6 +111,10 @@ function startFromEnvironment(): void {
     `[peri-cf] model=${config.model.provider}`
     + ` tiers=${MODEL_TIERS.map((tier) => `${tier}:${config.model.tiers[tier]}`).join(",")}`
     + ` mcp=${config.mcpServers.map((item) => item.name).join(",") || "none"}`,
+  );
+  console.log(
+    `[peri-cf] sandbox=${config.sandbox.enabled ? "enabled" : "disabled"}`
+    + (config.sandbox.enabled ? ` root=${config.sandbox.root}` : ""),
   );
 
   // SIGINT/SIGTERM 可能并发到达（终端进程组与 scripts/dev.ts 的 child.kill）。

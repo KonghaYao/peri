@@ -3,6 +3,7 @@ import { withDeadline } from "../util/deadline";
 import {
   DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS, DEFAULT_WASM_RUNTIME_STARTUP_TIMEOUT_MS,
 } from "./budget";
+import { WasmRuntimeStartupError } from "./runtime";
 import type { WasmRuntimeCleanupOutcome, WasmRuntimeDiagnosticKind } from "./runtime";
 
 /** 单次运行后端启动的 per-chat 输入；全部可选以兼容旧的 starter。 */
@@ -38,6 +39,13 @@ export interface WasmRuntimeLeaseOptions {
   signal?: AbortSignal;
   /** 启动已判定失败、但迟到运行后端仍被关闭时的证据回调。 */
   onLateCleanup?: (outcome: WasmRuntimeCleanupOutcome) => void;
+  /**
+   * 启动失败后仍需结算的迟到清理。
+   *
+   * 清理可能在 `start` 拒绝之后才完成；池用它登记尚未结算的所有权，
+   * 并在关闭时等待，避免「启动失败即无主」。
+   */
+  onLateCleanupStart?: (cleanup: Promise<WasmRuntimeCleanupOutcome | undefined>) => void;
 }
 
 export interface WasmRuntimeCloseReport extends WasmRuntimeCleanupOutcome {
@@ -79,15 +87,30 @@ export class WasmRuntimeLease {
       return new WasmRuntimeLease(transport, closeTimeoutMs);
     } catch (error) {
       controller.abort(error);
-      // 启动可能仍会成功：迟到运行后端必须关闭，否则所有权泄漏。
-      void starting.then(async (late) => {
-        try {
-          await withDeadline(late.close(), closeTimeoutMs, "Peri WASM late runtime close");
-          options.onLateCleanup?.({ confirmed: true });
-        } catch (cleanupError) {
-          options.onLateCleanup?.({ confirmed: false, error: cleanupError });
-        }
-      }, () => undefined);
+      // 启动可能仍会成功，也可能迟到地以启动错误拒绝。两种情况都必须结算
+      // 迟到运行后端的所有权，否则清理证据无人观察、容量会被错误复用。
+      const settling = starting.then(
+        async (late): Promise<WasmRuntimeCleanupOutcome | undefined> => {
+          try {
+            await withDeadline(late.close(), closeTimeoutMs, "Peri WASM late runtime close");
+            return { confirmed: true };
+          } catch (cleanupError) {
+            return { confirmed: false, error: cleanupError };
+          }
+        },
+        async (lateError): Promise<WasmRuntimeCleanupOutcome | undefined> => {
+          if (!(lateError instanceof WasmRuntimeStartupError)) return undefined;
+          try {
+            return await lateError.cleanup;
+          } catch (cleanupError) {
+            return { confirmed: false, error: cleanupError };
+          }
+        },
+      );
+      options.onLateCleanupStart?.(settling);
+      void settling.then((outcome) => {
+        if (outcome !== undefined) options.onLateCleanup?.(outcome);
+      });
       throw error;
     } finally {
       options.signal?.removeEventListener("abort", abort);
@@ -136,6 +159,10 @@ export class WasmRuntimePool {
   private readonly leases = new Set<WasmRuntimeLease>();
   /** 启动中的任务；`closeAll` 通过中止它们收敛并发启动。 */
   private readonly startups = new Map<AbortController, Promise<WasmRuntimeLease>>();
+  /** 启动失败后仍在结算的迟到清理；`closeAll` 会等待它们。 */
+  private readonly pendingLateCleanups = new Set<Promise<WasmRuntimeCleanupOutcome | undefined>>();
+  /** 任一次迟到清理未确认；在进程关闭前保持，避免继续复用容量。 */
+  private lateCleanupUnconfirmed = false;
 
   constructor(private readonly starter: WasmRuntimeStarter,
     private readonly options: WasmRuntimePoolOptions = {}) {}
@@ -157,6 +184,13 @@ export class WasmRuntimePool {
         startupTimeoutMs: this.options.startupTimeoutMs,
         closeTimeoutMs: this.options.closeTimeoutMs,
         signal: controller.signal,
+        onLateCleanupStart: (cleanup) => {
+          this.pendingLateCleanups.add(cleanup);
+          void cleanup.finally(() => this.pendingLateCleanups.delete(cleanup));
+        },
+        onLateCleanup: (outcome) => {
+          if (!outcome.confirmed) this.lateCleanupUnconfirmed = true;
+        },
       },
     );
     this.startups.set(controller, task);
@@ -175,7 +209,8 @@ export class WasmRuntimePool {
 
   /** 是否存在关闭未确认的运行后端；为真时调用方不得再启动新执行。 */
   get unconfirmed(): boolean {
-    return [...this.leases].some((lease) => lease.state === "close-unconfirmed");
+    return this.lateCleanupUnconfirmed
+      || [...this.leases].some((lease) => lease.state === "close-unconfirmed");
   }
 
   /** 中止启动中的运行后端，关闭其余运行后端；返回每个运行后端的关闭证据。 */
@@ -183,6 +218,19 @@ export class WasmRuntimePool {
     const startups = [...this.startups];
     for (const [controller] of startups) controller.abort(new Error("Peri WASM runtime pool shutdown"));
     await Promise.allSettled(startups.map(([, task]) => task));
+    // 启动失败但迟到清理尚未结算的运行后端不在 `leases` 里，必须单独等待；
+    // 若启动器不响应中止、清理永不结算，等待必须有界，否则关闭会永久挂起。
+    if (this.pendingLateCleanups.size > 0) {
+      try {
+        await withDeadline(
+          Promise.allSettled([...this.pendingLateCleanups]),
+          this.options.closeTimeoutMs ?? DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS,
+          "Peri WASM late runtime cleanup",
+        );
+      } catch {
+        this.lateCleanupUnconfirmed = true;
+      }
+    }
     const reports = await Promise.all([...this.leases].map((lease) => lease.close()));
     for (const lease of this.leases) if (lease.state === "closed") this.leases.delete(lease);
     return reports;

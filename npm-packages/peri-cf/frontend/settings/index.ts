@@ -1,1 +1,1 @@
-export { ServerInfoDialog } from "./ServerInfoDialog";
+export { MonitorDialog, type MonitorDialogProps } from "./MonitorDialog";

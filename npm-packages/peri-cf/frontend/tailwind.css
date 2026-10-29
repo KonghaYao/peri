@@ -10,6 +10,9 @@
 /* tw-shimmer 提供 `shimmer` 工具类，运行态状态行使用它 */
 @import "tw-shimmer";
 
+/* Streamdown 的组件使用 Tailwind 工具类；让 Tailwind 扫描它的 dist。 */
+@source "../node_modules/streamdown/dist/*.js";
+
 @custom-variant dark (&:is(.dark *));
 
 /* 折叠组件状态变体：同时匹配 Radix（data-state）与 Base UI（data-open / data-closed）的 DOM 约定 */

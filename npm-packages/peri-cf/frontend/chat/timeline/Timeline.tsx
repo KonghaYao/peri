@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { ChevronDown } from 'lucide-react';
 import { LegendList, type LegendListRef } from '@legendapp/list/react';
 import type { ChatLoadState, ChatDisplayState, ToolPayloadReader } from '../runtime';
+import type { OpenUIActionEvent } from '../openui';
 import { deriveTimeline } from './deriveTimeline';
 import { isTimelinePinned, type ScrollMetrics } from './timelineFollow';
 import {
@@ -38,11 +39,13 @@ export interface TimelineScrollSignal {
 }
 
 function TimelineRowView({
-  row, onToggleTurnFold, payloadReader,
+  row, onToggleTurnFold, payloadReader, onOpenUIAction, actionsEnabled,
 }: {
   row: TimelineRow;
   onToggleTurnFold?: (turnId: string, expanded: boolean) => void;
   payloadReader?: ToolPayloadReader;
+  onOpenUIAction?: (event: OpenUIActionEvent) => void;
+  actionsEnabled?: boolean;
 }) {
   switch (row.kind) {
     case 'user':
@@ -51,7 +54,12 @@ function TimelineRowView({
       </div>;
     case 'assistant':
       return <div className="py-2" data-timeline-row-kind="assistant" data-timeline-row-id={row.id}>
-        <AssistantMessageRow text={row.text} streaming={row.streaming} />
+        <AssistantMessageRow
+          text={row.text}
+          streaming={row.streaming}
+          onOpenUIAction={onOpenUIAction}
+          actionsEnabled={actionsEnabled}
+        />
       </div>;
     case 'work':
       return <div data-timeline-row-kind="work" data-timeline-row-id={row.id} data-work-failed={row.failed ? 'true' : 'false'}>
@@ -61,6 +69,7 @@ function TimelineRowView({
           failed={row.failed}
           defaultExpanded={row.defaultExpanded}
           forceExpanded={row.forceExpanded}
+          bare={row.bare}
           payloadReader={payloadReader}
         />
       </div>;
@@ -73,8 +82,10 @@ function TimelineRowView({
       >
         <TurnFoldRow
           label={row.label}
+          summary={row.summary}
           expanded={row.expanded}
           failed={row.failed}
+          isStatic={row.static === true}
           onToggle={onToggleTurnFold ? () => onToggleTurnFold(row.turnId, row.expanded) : undefined}
         />
       </div>;
@@ -98,10 +109,14 @@ export function TimelineRows({
   rows,
   onToggleTurnFold,
   payloadReader,
+  onOpenUIAction,
+  actionsEnabled,
 }: {
   rows: readonly TimelineRow[];
   onToggleTurnFold?: (turnId: string, expanded: boolean) => void;
   payloadReader?: ToolPayloadReader;
+  onOpenUIAction?: (event: OpenUIActionEvent) => void;
+  actionsEnabled?: boolean;
 }) {
   return <div className="flex flex-col" data-slot="peri-timeline-rows">
     {rows.map((row) => (
@@ -110,6 +125,8 @@ export function TimelineRows({
         row={row}
         onToggleTurnFold={onToggleTurnFold}
         payloadReader={payloadReader}
+        onOpenUIAction={onOpenUIAction}
+        actionsEnabled={actionsEnabled}
       />
     ))}
   </div>;
@@ -131,6 +148,10 @@ interface TimelineProps {
   scrollSignal: TimelineScrollSignal | null;
   /** 工具结果全文按需读取；缺席时只展示 inline 结果或预览。 */
   payloadReader?: ToolPayloadReader;
+  /** Renderer 内 Button 的 action；由 ChatShell 转成发送/开链接。 */
+  onOpenUIAction?: (event: OpenUIActionEvent) => void;
+  /** 聊天忙或未就绪时禁用 OpenUI 表单/按钮。 */
+  actionsEnabled?: boolean;
 }
 
 /** web 事件形状；LegendList 的 web 实现提供 NativeSyntheticEvent 兼容原生事件。 */
@@ -148,12 +169,15 @@ interface TimelineScrollEvent {
  */
 export function Timeline({
   state, loadState, error, onRetry, emptyContent, bottomInset, scrollSignal, payloadReader,
+  onOpenUIAction, actionsEnabled,
 }: TimelineProps) {
   const [expandedTurns, setExpandedTurns] = useState<ReadonlySet<string>>(() => new Set());
   const [collapsedTurns, setCollapsedTurns] = useState<ReadonlySet<string>>(() => new Set());
-  const followKey = state?.chat.id ?? null;
+  /** 会话身份（用于发送信号匹配）与绑定身份（用于滚动/折叠分代）。 */
+  const chatKey = state?.chat.id ?? null;
+  const followKey = state ? `${state.chat.id}@${state.bindingRevision ?? 'pending'}` : null;
 
-  // 切换会话时折叠状态不跨会话复用。
+  // 切换会话或换绑代次时，折叠与滚动位置都不跨代复用。
   useEffect(() => {
     setExpandedTurns(new Set());
     setCollapsedTurns(new Set());
@@ -181,12 +205,25 @@ export function Timeline({
     () => deriveTimeline(state, { expandedTurnIds: expandedTurns, collapsedTurnIds: collapsedTurns }),
     [state, expandedTurns, collapsedTurns],
   );
+  /** 折叠状态变化时强制列表重绘；虚拟列表可能按 key 缓存已渲染项。 */
+  const foldSignature = useMemo(
+    () => rows
+      .filter((row) => row.kind === 'turn-fold')
+      .map((row) => `${row.turnId}:${row.expanded ? 1 : 0}`)
+      .join('|'),
+    [rows],
+  );
 
   const listRef = useRef<LegendListRef>(null);
   const positions = useRef(new Map<string, TimelinePosition>());
   const pinnedRef = useRef(true);
   const [pinned, setPinned] = useState(true);
   const firstVisibleRow = useRef<string | null>(null);
+  /** 用户意图：只有滚动位置上移才取消贴底；内容增长不算。 */
+  const lastScrollTop = useRef(0);
+  const scrollInitialized = useRef(false);
+  /** 首次布局/恢复完成前忽略滚动事件，避免把初始的 0 当成用户上滚。 */
+  const allowScrollUpdates = useRef(false);
   /** 每个会话自己的贴底事实；切换时旧 key 的条目不会被新会话的恢复覆盖。 */
   const pinnedByKey = useRef(new Map<string, boolean>());
   /**
@@ -208,20 +245,45 @@ export function Timeline({
     positions.current.set(followKey, rememberTimelinePosition(metrics, rowId, rowTop));
   }, [followKey]);
 
+  // 首次布局/恢复后的第一帧才接受滚动事件；初始的 scrollTop=0 不是用户意图。
+  useEffect(() => {
+    allowScrollUpdates.current = false;
+    scrollInitialized.current = false;
+    lastScrollTop.current = 0;
+    const frame = requestAnimationFrame(() => {
+      allowScrollUpdates.current = true;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [followKey, restoreProps]);
+
   const onScroll = useCallback((event: TimelineScrollEvent) => {
+    if (!allowScrollUpdates.current) return;
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
     const metrics: ScrollMetrics = {
       scrollHeight: contentSize.height,
       scrollTop: contentOffset.y,
       clientHeight: layoutMeasurement.height,
     };
-    const next = isTimelinePinned(metrics);
+    const atEnd = isTimelinePinned(metrics);
+    let next = pinnedRef.current;
+    if (!scrollInitialized.current) {
+      // 恢复完成后的第一帧以实际位置为准。
+      scrollInitialized.current = true;
+      next = atEnd;
+    } else if (atEnd) {
+      next = true;
+    } else if (metrics.scrollTop < lastScrollTop.current - 1) {
+      // 只有位置上移才算用户离开底部；内容增长导致的“不再贴底”不算。
+      next = false;
+    }
+    lastScrollTop.current = metrics.scrollTop;
     if (followKey) pinnedByKey.current.set(followKey, next);
     if (next !== pinnedRef.current) {
       pinnedRef.current = next;
       setPinned(next);
     }
-    savePosition(metrics);
+    // 贴底时由列表与 markAtEnd 维护位置，避免流式期间保存中间锚点。
+    if (!next) savePosition(metrics);
   }, [savePosition, followKey]);
 
   /** 同步记录“当前会话应贴底”的事实；滚动本身可能等到下一帧。 */
@@ -264,13 +326,13 @@ export function Timeline({
     const previous = previousScrollSignal.current;
     previousScrollSignal.current = scrollSignal;
     if (!scrollSignal || previous?.token === scrollSignal.token) return;
-    if (scrollSignal.chatId !== followKey) return;
+    if (scrollSignal.chatId !== chatKey) return;
     // 贴底状态与本轮信号同步提交：主线程繁忙时动画帧可能晚到，不能让“回到底部”
     // 按钮在信号已生效后仍然可见。滚动本身仍等一帧，让新内容先完成布局。
     markAtEnd();
     const frame = requestAnimationFrame(() => scrollToEnd(false));
     return () => cancelAnimationFrame(frame);
-  }, [scrollSignal, followKey, markAtEnd, scrollToEnd]);
+  }, [scrollSignal, chatKey, markAtEnd, scrollToEnd]);
 
   // 离开会话时只记录该 key 自己的贴底事实；上滚位置已由滚动事件保存。
   // cleanup 捕获旧 key，并读取按 key 保存的状态，因此切到 null/加载态不会覆盖旧位置。
@@ -283,8 +345,14 @@ export function Timeline({
   }, [followKey]);
 
   const renderItem = useCallback(({ item }: { item: TimelineRow }) => (
-    <TimelineRowView row={item} onToggleTurnFold={toggleTurnFold} payloadReader={payloadReader} />
-  ), [toggleTurnFold, payloadReader]);
+    <TimelineRowView
+      row={item}
+      onToggleTurnFold={toggleTurnFold}
+      payloadReader={payloadReader}
+      onOpenUIAction={onOpenUIAction}
+      actionsEnabled={actionsEnabled}
+    />
+  ), [toggleTurnFold, payloadReader, onOpenUIAction, actionsEnabled]);
 
   const notReady = state !== null && state.readiness !== 'ready';
   const noContent = !notReady && rows.length === 0;
@@ -346,6 +414,8 @@ export function Timeline({
           drawDistance={600}
           // 行组件持有本地展开状态；复用容器会在内容切换时保留旧 DOM，先关闭。
           recycleItems={false}
+          maintainScrollAtEnd={pinned}
+          extraData={foldSignature}
           {...restoreProps}
           onScroll={onScroll}
           onFirstVisibleItemChanged={({ key }) => { firstVisibleRow.current = key; }}

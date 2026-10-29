@@ -84,6 +84,7 @@ export function ToolRow({ item, payloadReader }: { item: TimelineWorkItem; paylo
       data-slot="peri-tool-row"
       data-tool-status={item.status}
       data-tool-failed={item.failed ? 'true' : 'false'}
+      data-tool-degraded={item.degraded ? 'true' : 'false'}
     >
       <button
         type="button"
@@ -113,6 +114,14 @@ export function ToolRow({ item, payloadReader }: { item: TimelineWorkItem; paylo
           data-slot="peri-tool-failure"
         >
           {failure}
+        </p>
+      )}
+      {item.degraded && (
+        <p
+          className="text-muted-foreground mt-0.5 ml-5 text-[11px] leading-4 [overflow-wrap:anywhere]"
+          data-slot="peri-tool-degraded"
+        >
+          结果超出会话接纳预算，已截断或省略。
         </p>
       )}
       {open && (

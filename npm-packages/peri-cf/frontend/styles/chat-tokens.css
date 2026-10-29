@@ -2,13 +2,13 @@
  * Peri Chat 信息流 token。
  *
  * 加载顺序：`main.tsx` 在 tailwind.css / styles.css 之后引入本文件（本文件再引入
- * chat-stream.css），因此这里的变量与规则覆盖既有全局样式。设置页、侧边栏与欢迎页
+ * chat-messages.css），因此这里的变量与规则覆盖既有全局样式。设置页、侧边栏与欢迎页
  * 的品牌选择器不在本层范围内。
  *
- * 深色主题跟随项目既有 `.dark` 约定；项目当前没有运行时主题切换，故同时提供
- * `prefers-color-scheme` 回退（`.light` 可显式退出系统深色）。
+ * 深色主题与 Tailwind 共用 `<html class="dark">`：`frontend/app/theme.ts` 跟随系统
+ * 偏好增删 `.dark` / `.light`，`.light` 是显式亮色标记（其余情况沿用 `:root` 亮色值）。
  */
-@import "./chat-stream.css";
+@import "./chat-messages.css";
 
 :root {
   /* 颜色（Light） */
@@ -77,7 +77,7 @@
   --chat-transition-fast: 120ms;
 }
 
-.dark {
+:root.dark {
   --chat-bg: #151517;
   --chat-fg: #f9fafb;
   --chat-fg-2: #cfd3d6;
@@ -99,30 +99,4 @@
   --chat-running: #7aaaff;
   --chat-floating: #2c2c2e;
   --chat-focus: #7aaaff;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not(.light) {
-    --chat-bg: #151517;
-    --chat-fg: #f9fafb;
-    --chat-fg-2: #cfd3d6;
-    --chat-fg-3: #adb2b8;
-    --chat-caption: #81858c;
-    --chat-user-bubble: #2c2c2e;
-    --chat-code-bg: #1b1b1c;
-    --chat-code-header: #2c2c2e;
-    --chat-inline-code: #292929;
-    --chat-border-1: rgba(255, 255, 255, 0.06);
-    --chat-border-2: rgba(255, 255, 255, 0.12);
-    --chat-border-3: rgba(255, 255, 255, 0.16);
-    --chat-hover: rgba(255, 255, 255, 0.08);
-    --chat-hover-solid: #353638;
-    --chat-link: #7aaaff;
-    --chat-error: #f25a5a;
-    --chat-success: #22c55e;
-    --chat-warn: #f59e0b;
-    --chat-running: #7aaaff;
-    --chat-floating: #2c2c2e;
-    --chat-focus: #7aaaff;
-  }
 }

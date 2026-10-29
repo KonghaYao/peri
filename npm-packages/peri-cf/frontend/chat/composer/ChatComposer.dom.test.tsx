@@ -14,7 +14,10 @@ function setup(overrides: Record<string, unknown> = {}) {
   render(createElement(ChatComposer, {
     draft: '你好', onDraftChange: (value: string) => events.drafts.push(value),
     canSend: true, canStop: false, stopping: false,
-    onSend: async (value: string) => { events.sent.push(value); return 'chat-test'; },
+    onSend: async (value: string) => {
+      events.sent.push(value);
+      return { delivered: true as const, sessionId: 'chat-test' };
+    },
     onStop: async () => { events.stopped += 1; return true; },
     focusSignal: 0,
     ...overrides,
@@ -64,5 +67,41 @@ describe('ChatComposer real DOM keyboard interactions', () => {
 
     fireEvent.change(textarea, { target: { value: '新内容' } });
     expect(events.drafts).toEqual(['新内容']);
+  });
+});
+
+describe('send delivery outcomes', () => {
+  test('a withdrawn delivery keeps the draft and shows the reason', async () => {
+    const drafts: string[] = [];
+    const sent: string[] = [];
+    setup({
+      onDraftChange: (value: string) => drafts.push(value),
+      onSend: async (value: string) => {
+        sent.push(value);
+        return { delivered: false as const, sessionId: 'chat-test', message: '输入已撤回，消息未送达。' };
+      },
+    });
+    const textarea = screen.getByLabelText('输入消息') as HTMLTextAreaElement;
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter', keyCode: 13 });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(sent).toEqual(['你好']);
+    // 202 不算送达：撤回时不发清空指令，草稿原样保留。
+    expect(drafts).toEqual([]);
+    expect(screen.getByRole('alert').textContent).toContain('输入已撤回');
+  });
+
+  test('a confirmed delivery clears only the submitted draft', async () => {
+    const drafts: string[] = [];
+    setup({
+      onDraftChange: (value: string) => drafts.push(value),
+      onSend: async () => ({ delivered: true as const, sessionId: 'chat-test' }),
+    });
+    const textarea = screen.getByLabelText('输入消息') as HTMLTextAreaElement;
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter', keyCode: 13 });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(drafts).toEqual(['']);
+    expect(screen.queryByRole('alert')).toBeNull();
   });
 });

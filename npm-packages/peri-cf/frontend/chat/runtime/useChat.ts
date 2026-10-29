@@ -4,7 +4,7 @@ import type { InteractionAnswer } from '@peri-code/sdk/view';
 import { createChatApplication, type ChatController } from '../../remote';
 import { createChatQueries, LIST_POLL_ACTIVITY_MS, listRefetchInterval } from './queries';
 import { chatPayloadReader } from './payloadReader';
-import type { Chat, ChatSummary } from './types';
+import type { Chat, ChatRecovery, ChatSendOutcome, ChatSummary } from './types';
 
 /** 错误文案单一出口：宿主字符串与 Error 用同一条清洗规则，避免控制字符进入视图。 */
 function errorText(error: unknown): string {
@@ -14,7 +14,7 @@ function errorText(error: unknown): string {
 }
 
 /** 错误横幅的重试路由：列表错误刷新列表；只有读面失败才重新加载会话。 */
-export type ChatRetryAction = 'refresh-list' | 'reload-chat' | 'none';
+export type ChatRetryAction = 'refresh-list' | 'reload-chat' | 'rebuild-chat' | 'none';
 
 interface ChatErrorBanner {
   message: string;
@@ -30,12 +30,14 @@ interface ChatErrorBanners {
 
 /**
  * 横幅与重试动作的唯一映射：列表错误与会话错误分别展示，互不覆盖。
- * 执行错误不是读面事实，不能靠 reload 重读同一错误，因此不提供重试。
+ * 有恢复入口的错误（未知执行结果、绑定过期）必须保留动作且不可 dismiss；
+ * 普通执行拒绝不是读面事实，不能靠 reload 重读同一错误，因此不提供重试。
  */
 export function errorBanners(input: {
   listError: string;
   chatError: string;
   loadState: 'idle' | 'loading' | 'ready' | 'failed' | 'unsupported';
+  recovery?: ChatRecovery;
 }): ChatErrorBanners {
   const banners: ChatErrorBanners = {};
   if (input.listError) {
@@ -48,7 +50,8 @@ export function errorBanners(input: {
       dismissible: false,
     };
   } else if (input.chatError) {
-    banners.chat = { message: input.chatError, action: 'none', dismissible: true };
+    const retry = input.recovery === 'reload';
+    banners.chat = { message: input.chatError, action: retry ? 'reload-chat' : 'none', dismissible: !retry };
   }
   return banners;
 }
@@ -141,12 +144,18 @@ export function useChat() {
     void list.refetch({ cancelRefetch: true });
     return opened;
   }, [controller, bumpActivity, list.refetch]);
+  const rebuildChat = useCallback(async () => {
+    const opened = await controller.rebuildChat();
+    bumpActivity();
+    void list.refetch({ cancelRefetch: true });
+    return opened;
+  }, [controller, bumpActivity, list.refetch]);
   const currentChatId = useCallback(() => controller.currentChatId(), [controller]);
-  const send = useCallback(async (content: string) => {
+  const send = useCallback(async (content: string): Promise<ChatSendOutcome> => {
     // 身份以控制器实际提交的会话为准：隐式创建期间即使视图已切走，也不会记错会话。
-    const chatId = await controller.send(content);
-    if (chatId) bumpActivity();
-    return chatId;
+    const outcome = await controller.send(content);
+    if (outcome.sessionId) bumpActivity();
+    return outcome;
   }, [controller, bumpActivity]);
   const stop = useCallback(() => controller.stop(), [controller]);
   const dismissChatError = useCallback(() => controller.dismissError(), [controller]);
@@ -156,13 +165,15 @@ export function useChat() {
 
   const chatError = view.error;
   const listError = list.error && dismissedListError !== list.errorUpdatedAt ? errorText(list.error) : '';
-  const banners = errorBanners({ listError, chatError, loadState: view.loadState });
+  const banners = errorBanners({
+    listError, chatError, loadState: view.loadState, recovery: view.recovery,
+  });
 
   return {
     ...view, chats: list.data ?? [], listLoading: list.isFetching,
     chatError, listError, error: chatError || listError, banners,
     payloadReader, answerInteraction,
-    refreshList, selectChat, reloadChat, currentChatId, send, stop,
+    refreshList, selectChat, reloadChat, rebuildChat, currentChatId, send, stop,
     dismissChatError, dismissListError,
   };
 }

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { DEFAULT_PROFILE_NAME, parseSettings } from './options.js';
+import { DEFAULT_PROFILE_NAME, parseSettings, resolveProfile } from './options.js';
 import { SandboxError, type SandboxProfile, type SandboxSettings } from './types.js';
 
 export function defaultSettingsPath(): string {
@@ -19,6 +19,10 @@ function defaultReadPaths(): string[] {
     '/System',
     '/Library',
     '/private/etc',
+    '/private/var/select',
+    '/var/select',
+    '/etc',
+    '/Applications/Xcode.app',
     '/etc/ssl/certs',
     '/etc/ld.so.cache',
     '/etc/resolv.conf',
@@ -30,8 +34,31 @@ function defaultReadPaths(): string[] {
 
 export function defaultProfile(periPath: string): SandboxProfile {
   return {
-    allowedDomains: ['github.com', 'api.github.com', 'registry.npmjs.org', 'api.anthropic.com', 'api.openai.com'],
-    runtimeReadPaths: defaultReadPaths().filter((path) => path !== periPath),
+    allowedDomains: [
+      'github.com',
+      'api.github.com',
+      'codeload.github.com',
+      'objects.githubusercontent.com',
+      'raw.githubusercontent.com',
+      'registry.npmjs.org',
+      'registry.yarnpkg.com',
+      'pypi.org',
+      'files.pythonhosted.org',
+      'crates.io',
+      'static.crates.io',
+      'index.crates.io',
+      'proxy.golang.org',
+      'sum.golang.org',
+      'deno.land',
+      'jsr.io',
+      'repo1.maven.org',
+      'repo.maven.apache.org',
+      'api.anthropic.com',
+      'api.openai.com',
+    ],
+    runtimeReadPaths: [...new Set([...defaultReadPaths(), dirname(process.execPath)])].filter(
+      (path) => path !== periPath,
+    ),
     memoryMax: '1G',
     tasksMax: 128,
     cpuQuota: '100%',
@@ -42,16 +69,20 @@ function defaultPeriPath(): string {
   return resolve(process.env.PERI_PATH ?? join(homedir(), '.peri', 'peri'));
 }
 
-/** In-memory defaults used when no settings file exists; nothing is written. */
-export function defaultSandboxSettings(): SandboxSettings {
-  const periPath = defaultPeriPath();
+function defaultSettingsFor(periPath: string, periSha256: string): SandboxSettings {
   return {
     sandboxesRoot: join(homedir(), '.peri-sandbox', 'sandboxes'),
     periPath,
-    periSha256: sha256Of(periPath) ?? '',
+    periSha256,
     defaultProfile: DEFAULT_PROFILE_NAME,
     profiles: { [DEFAULT_PROFILE_NAME]: defaultProfile(periPath) },
   };
+}
+
+/** In-memory defaults used when no settings file exists; nothing is written. */
+export function defaultSandboxSettings(): SandboxSettings {
+  const periPath = defaultPeriPath();
+  return defaultSettingsFor(periPath, sha256Of(periPath) ?? '');
 }
 
 function sha256Of(path: string): string | null {
@@ -81,18 +112,21 @@ function validateSettings(value: SandboxSettings, description: string): SandboxS
   return value;
 }
 
-/**
- * Load settings from an explicit path, the default path, or in-memory defaults.
- *
- * An explicitly requested file must exist and parse; the default path silently
- * falls back to in-memory defaults so `run` works before `init`.
- */
-export function loadSettings(file?: string): SandboxSettings {
+interface LoadedSandboxSettings {
+  readonly path: string;
+  readonly source: 'file' | 'defaults';
+  readonly settings: SandboxSettings;
+}
+
+function loadSettingsResult(file: string | undefined, digestDefaults: boolean): LoadedSandboxSettings {
   const explicit = file !== undefined;
   const path = resolve(file ?? defaultSettingsPath());
   if (!existsSync(path)) {
     if (explicit) throw new SandboxError('invalid_options', `Sandbox settings not found: ${path}`);
-    return validateSettings(defaultSandboxSettings(), 'default settings');
+    const periPath = defaultPeriPath();
+    // Diagnostics skip the digest: reading the Peri binary is not needed to describe a profile.
+    const settings = defaultSettingsFor(periPath, digestDefaults ? (sha256Of(periPath) ?? '') : '');
+    return { path, source: 'defaults', settings: validateSettings(settings, 'default settings') };
   }
   let raw: unknown;
   try {
@@ -102,7 +136,41 @@ export function loadSettings(file?: string): SandboxSettings {
   }
   const settings = validateSettings(parseSettings(raw), 'settings');
   validateManagedRoot(settings.sandboxesRoot, 'sandboxesRoot');
-  return settings;
+  return { path, source: 'file', settings };
+}
+
+/**
+ * Load settings from an explicit path, the default path, or in-memory defaults.
+ *
+ * An explicitly requested file must exist and parse; the default path silently
+ * falls back to in-memory defaults so `run` works before `init`.
+ */
+export function loadSettings(file?: string): SandboxSettings {
+  return loadSettingsResult(file, true).settings;
+}
+
+export interface ResolvedSandboxSettings {
+  /** Absolute path considered, whether or not the file exists. */
+  path: string;
+  source: 'file' | 'defaults';
+  profileName: string;
+  profile: SandboxProfile;
+}
+
+/**
+ * Describe the settings and profile the runtime would use, without starting a sandbox.
+ *
+ * Shares `loadSettings` (explicit-path errors, defaults fallback) and
+ * `resolveProfile` (defaultProfile, first-profile fallback, unknown profile)
+ * with the runtime. Defaults are built without hashing the Peri binary because
+ * this runs on the monitor polling path.
+ */
+export function resolveSandboxSettings(
+  options: { settingsPath?: string; profileName?: string } = {},
+): ResolvedSandboxSettings {
+  const { path, source, settings } = loadSettingsResult(options.settingsPath, false);
+  const { profile, profileName } = resolveProfile(settings, { profileName: options.profileName });
+  return { path, source, profileName, profile };
 }
 
 /** Verify the configured Peri binary before spawning it. */

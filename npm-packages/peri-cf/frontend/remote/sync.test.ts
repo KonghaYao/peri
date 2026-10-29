@@ -127,8 +127,7 @@ describe('WebSocketChatChannel framing', () => {
   });
 });
 
-describe('WebSocketChatChannel explicit failures', () => {
-  test('text frames are rejected and the connection fails explicitly', async () => {
+describe('WebSocketChatChannel explicit failures', () => {  test('text frames are rejected and the connection fails explicitly', async () => {
     const sockets: FakeSocket[] = [];
     const { sync, statuses } = provider(sockets);
     sockets[0]!.open();
@@ -168,5 +167,23 @@ describe('WebSocketChatChannel explicit failures', () => {
     const error = new SyncBackpressureError(2_000_000);
     expect(error.name).toBe('SyncBackpressureError');
     expect(error.bufferedBytes).toBe(2_000_000);
+  });
+});
+
+describe('ChatSyncProvider reconnect budget', () => {
+  test('a successful resync resets the budget so long sessions keep reconnecting', async () => {
+    const sockets: FakeSocket[] = [];
+    const { sync } = provider(sockets, { reconnect: true, maxAttempts: 2 });
+    // 5 次断线都发生在成功同步之后：每次都算新的连续失败序列。
+    for (let cycle = 0; cycle < 5; cycle += 1) {
+      const socket = sockets.at(-1)!;
+      socket.open();
+      socket.message(snapshotFrame({ sequence: cycle }));
+      await settle();
+      socket.drop();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(sockets).toHaveLength(6);
+    await sync.close();
   });
 });

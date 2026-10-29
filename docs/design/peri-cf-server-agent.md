@@ -57,6 +57,13 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
   绑定代次后才连 WS。已有控制者返回 `binding_conflict`，前端改用 Session ID 寻址既有句柄。
 - **新会话**：`create_new_session` 使用 `workspace` 派生的会话 cwd（省略 `sessionPath` 时为工作区根）；
   历史加载使用 Store 中的持久 cwd，不回退句柄 path。
+- **OpenUI 指令**：默认 Session instructions 由 `BASE_SYSTEM_INSTRUCTIONS` + OpenUI 段组成；OpenUI 段来自
+  `@peri-code/sdk` 提交入库的 `src/openui/spec.json`，经 `@peri-code/sdk/openui/prompt` 的
+  `generateOpenUISystemPrompt`（内部调用 `@openuidev/lang-core`）生成，服务端不 import React/canvas。
+  提示词只随 `session/new` 冻结，**旧会话不会获得**；前端只在顶层完整
+  `openui` 围栏，或流结束后以 `root = Stack(` 开头的裸程序时懒加载 Renderer；校验失败、引用未解析、
+  `incomplete`、懒加载或渲染异常都回退 Markdown。表单值 ephemeral，`Button` action 经
+  `parseOpenUIAction` 转成 `chat.send` 或 http(s) 外链（拒绝 userinfo、长度 >2048）。
 - **同步**：WS 二进制帧为 HELLO/SNAPSHOT/UPDATE/ACK；客户端只读，不能写 Y.Doc 或提交业务命令。
   动作回执与投影是两条通道，不能用同步帧代替 Action 回执。
 - **机器身份**：`PERI_MACHINE_ID` 必须是持久 UUID，由部署方提供；服务端不随机生成。
@@ -98,9 +105,10 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
 - 没有内置认证、授权、限流或多租户隔离；只适合单可信用户或受入口控制保护的部署。反向代理鉴权是
   必要条件。
 - Bun 服务是唯一后端入口；Cloudflare Worker relay 与 `wrangler.jsonc` 已删除。
-- `/api/info` 只返回去敏后的地址（去掉 userinfo、query 与 token），设置页只读展示。
+- `/api/monitor` 只返回去敏后的地址（去掉 userinfo、query 与 hash）、MCP header 名称、运行中 sandbox 与进程级内存事实，监控面板只读展示。
 - 单进程 ownership 不能宣称跨实例接管；多实例部署需要改造装配接入共享 storage，并由路由层做串行化/崩溃清理。
 - 真实模型/Store/远程 MCP、浏览器验收与 hosted 部署仍需环境验收；单元测试或类型检查不替代真实运行后端。
+- OpenUI canvas 位于 `@peri-code/sdk/src/openui/canvas`，随 SDK 源码子路径发布；CF 以 `file:../@peri-sdk` 消费。
 
 ## 与其他文档的关系
 

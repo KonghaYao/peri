@@ -27,6 +27,9 @@ export class RemoteActionError extends Error {
       chatId?: string;
       createdSessionId?: string;
       stage?: string;
+      /** close 未确认时服务端给出 `incomplete: true`；关闭目标尚未完全达成。 */
+      incomplete?: boolean;
+      errors?: string[];
       cause?: unknown;
     } = {},
   ) {
@@ -39,6 +42,8 @@ export class RemoteActionError extends Error {
   get chatId(): string | undefined { return this.options.chatId; }
   get createdSessionId(): string | undefined { return this.options.createdSessionId; }
   get stage(): string | undefined { return this.options.stage; }
+  get incomplete(): boolean | undefined { return this.options.incomplete; }
+  get errors(): readonly string[] | undefined { return this.options.errors; }
 }
 
 /** `POST /api/chats` 的句柄；打开历史会话时先取得它，再发 change_session。 */
@@ -77,6 +82,8 @@ function failureFromResponse(status: number, body: unknown): RemoteActionError {
     ...(value.chatId ? { chatId: value.chatId } : {}),
     ...(value.createdSessionId ? { createdSessionId: value.createdSessionId } : {}),
     ...(value.stage ? { stage: value.stage } : {}),
+    ...(value.incomplete === true ? { incomplete: true } : {}),
+    ...(value.errors ? { errors: value.errors } : {}),
   });
 }
 
@@ -177,13 +184,13 @@ export function createRemoteActions(options: RemoteActionClientOptions = {}) {
   const base = options.origin ?? "";
   const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
 
-  async function createHandle(path?: string, signal?: AbortSignal): Promise<RemoteChatHandle> {
+  async function createHandle(sessionId?: string, signal?: AbortSignal): Promise<RemoteChatHandle> {
     let response: Response;
     try {
       response = await fetchImpl(apiUrl(base, "/api/chats"), {
         method: "POST",
         headers: { "content-type": "application/json", accept: "application/json" },
-        body: JSON.stringify(path === undefined ? {} : { path }),
+        body: JSON.stringify(sessionId === undefined ? {} : { sessionId }),
         signal,
       });
     } catch (error) {

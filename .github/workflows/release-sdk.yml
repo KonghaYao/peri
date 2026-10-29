@@ -181,7 +181,7 @@ jobs:
               run: bun test
 
             # 打包前才改版本：测试始终跑在仓库声明的版本上，避免测试结果依赖 tag。
-            # npm 会把 LICENSE 自动放进 tarball；files 只声明 dist 与 README。
+            # npm 会把 LICENSE 自动放进 tarball；files 声明 dist、src/openui 与 README。
             - name: Pack SDK
               working-directory: npm-packages/@peri-sdk
               env:
@@ -190,6 +190,7 @@ jobs:
                   set -euo pipefail
                   rm -rf sdk-package
                   mkdir -p sdk-package
+                  test -f src/openui/spec.json
                   npm pkg set version="${VERSION}"
                   npm pkg delete private
                   npm pack --pack-destination sdk-package
@@ -203,7 +204,10 @@ jobs:
                   grep -qx 'package/dist/sandbox.js' sdk-package/contents.txt
                   grep -qx 'package/dist/entries/sandbox.d.ts' sdk-package/contents.txt
                   grep -qx 'package/dist/wasm/peri_wasm.wasm' sdk-package/contents.txt
-                  if grep -qE '^package/(src|tests?|examples|node_modules)/' sdk-package/contents.txt; then
+                  grep -qx 'package/src/openui/index.ts' sdk-package/contents.txt
+                  grep -qx 'package/src/openui/spec.json' sdk-package/contents.txt
+                  if grep -qE '^package/(tests?|examples|node_modules)/' sdk-package/contents.txt \
+                      || grep -E '^package/src/' sdk-package/contents.txt | grep -vE '^package/src/openui/' > /dev/null; then
                       echo "::error::unexpected files in package tarball"
                       exit 1
                   fi

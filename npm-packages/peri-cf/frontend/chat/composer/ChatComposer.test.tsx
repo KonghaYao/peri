@@ -12,7 +12,7 @@ function render(overrides: Partial<ChatComposerProps> = {}): string {
       canSend
       canStop={false}
       stopping={false}
-      onSend={async () => 'chat-test'}
+      onSend={async () => ({ delivered: true, sessionId: 'chat-test' })}
       onStop={async () => true}
       focusSignal={0}
       {...overrides}

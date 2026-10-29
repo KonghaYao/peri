@@ -1,14 +1,14 @@
 /*
  * 消息流 Markdown 排版与代码块外观。
  *
- * 由 markdown-text.tsx 自行 import，保证对话正文与 reasoning 内的 Markdown
+ * 由 streamdown-text.tsx 自行 import，保证对话正文与 reasoning 内的 Markdown
  * 共用一套视觉契约。字号、行高、字重、圆角、颜色与间距均消费基础层
  * chat-tokens.css 的 --chat-* 变量；括号内 fallback 只用于 token 未加载时
  * 保持可读。
  *
  * 本文件未分层，规则天然高于 Tailwind 的 components / utilities 层；
- * 基础层 chat-stream.css 已不承担 Markdown 样式，这里用单类 `.aui-md`
- * 选择器即可生效。reasoning 的 compact 覆盖由 chat-tools.css 负责。
+ * 基础层 `chat-tokens.css` 已不承担 Markdown 样式，这里用单类 `.aui-md`
+ * 选择器即可生效。reasoning 的排版与折叠由 `ReasoningRow` 的 Tailwind 工具类负责。
  */
 .aui-md {
   --chat-markdown-font-mono: var(
@@ -192,133 +192,7 @@
   word-break: inherit;
 }
 
-/* ---------- 代码块 ---------- */
-
-/* 代码块 header 与 pre 同级渲染（沿用上游 aui 样式命名）：header 负责吸顶名称栏，
-   pre 负责主体，两者用同一圆角拼成一个无外边框的代码块。 */
-.aui-md .aui-code-header-root {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--chat-space-4, 12px);
-  margin: var(--chat-space-5, 16px) 0 0;
-  padding: 9px 14px;
-  border: 0;
-  border-radius: var(--chat-radius-code, 16px);
-  background: var(--chat-code-header, var(--muted));
-  color: var(--chat-fg-3, var(--muted-foreground));
-  font-size: 11px;
-  line-height: 18px;
-  font-weight: 500;
-}
-
-.aui-md .aui-code-header-language {
-  min-width: 0;
-  overflow: hidden;
-  color: inherit;
-  font-size: inherit;
-  font-weight: inherit;
-  line-height: inherit;
-  text-overflow: ellipsis;
-  text-transform: lowercase;
-  white-space: nowrap;
-}
-
-.aui-md pre {
-  margin: var(--chat-space-5, 16px) 0;
-  padding: var(--chat-space-5, 16px);
-  border: 0;
-  border-radius: var(--chat-radius-code, 16px);
-  background: var(--chat-code-bg, var(--muted));
-  color: inherit;
-  font-family: var(--chat-markdown-font-mono);
-  font-size: 11px;
-  font-weight: 400;
-  line-height: 19px;
-  overflow-x: auto;
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-
-.aui-md .aui-code-header-root + pre {
-  margin-top: 0;
-  border-top-left-radius: 0;
-  border-top-right-radius: 0;
-}
-
-/* ---------- 表格 ---------- */
-
-.aui-md .aui-md-table-wrapper {
-  max-width: 100%;
-  margin: var(--chat-space-5, 16px) 0;
-  overflow-x: auto;
-  overscroll-behavior-x: contain;
-}
-
-.aui-md .aui-md-table {
-  width: max-content;
-  min-width: 100%;
-  border-collapse: separate;
-  border-spacing: 0;
-  font-size: var(--chat-text-secondary, 13px);
-  line-height: var(--chat-leading-secondary, 20px);
-}
-
-.aui-md .aui-md-th,
-.aui-md .aui-md-td {
-  min-width: 100px;
-  max-width: min(30vw, 320px);
-  padding: 10px 14px;
-  border-bottom: 1px solid
-    var(--chat-border-2, var(--chat-border-1, var(--border)));
-  overflow-wrap: anywhere;
-  text-align: start;
-  vertical-align: top;
-}
-
-.aui-md .aui-md-th {
-  background: var(--chat-code-header, var(--muted));
-  color: var(--chat-fg-2, var(--muted-foreground));
-  font-weight: 500;
-}
-
-.aui-md .aui-md-td {
-  font-weight: 400;
-}
-
-.aui-md .aui-md-th[align="center"],
-.aui-md .aui-md-td[align="center"] {
-  text-align: center;
-}
-
-.aui-md .aui-md-th[align="right"],
-.aui-md .aui-md-td[align="right"] {
-  text-align: right;
-}
-
-/* 宽表（4 列及以上）在消息列内放不下时，允许铺到会话滚动容器宽度：
-   负 margin 抵消外层留白，padding-left 让表头仍与正文左缘对齐。
-   thread 根节点不再带 @container，这里把滚动容器声明为 size container；
-   @container 同时保证脱离 thread 的 Markdown 不会误用视口宽度。 */
-:root .aui-thread-viewport {
-  container-type: inline-size;
-}
-
-@container (min-width: 1px) {
-  .aui-md .aui-md-table-wrapper:has(> .aui-md-table th:nth-child(4)) {
-    --chat-markdown-table-spare: max(0px, calc((100cqw - 100%) / 2));
-
-    width: calc(
-      100% + var(--chat-markdown-table-spare) + var(--chat-markdown-table-spare)
-    );
-    max-width: none;
-    margin-left: calc(0px - var(--chat-markdown-table-spare));
-    padding-left: var(--chat-markdown-table-spare);
-  }
-}
+/* 代码块外观由 Streamdown 的 CodeBlock 负责；这里只保留 pre code 的字体重置。 */
 
 /* ---------- 图片 ---------- */
 

@@ -1,20 +1,35 @@
 import { Check, Copy } from 'lucide-react';
-import { MarkdownText } from '../MarkdownText';
+import { StreamdownText } from '../StreamdownText';
+import { OpenUIMessage, type OpenUIActionEvent } from '../../openui';
 import { useCopyToClipboard } from '../../../hooks';
 
 interface AssistantMessageRowProps {
   text: string;
   streaming: boolean;
+  onOpenUIAction?: (event: OpenUIActionEvent) => void;
+  actionsEnabled?: boolean;
 }
 
-/** assistant 消息：无气泡正文；流式期间不显示复制完成态。 */
-export function AssistantMessageRow({ text, streaming }: AssistantMessageRowProps) {
+const renderMarkdownFor = (streaming: boolean) => (value: string) =>
+  <StreamdownText text={value} streaming={streaming} />;
+
+/** assistant 消息：无气泡正文；流式期间不显示复制完成态。复制始终复制原始文本（含 DSL）。 */
+export function AssistantMessageRow({
+  text, streaming, onOpenUIAction, actionsEnabled,
+}: AssistantMessageRowProps) {
   const { isCopied, copyToClipboard } = useCopyToClipboard();
   const body = text || (streaming ? '' : '（空响应）');
   return (
     <article className="group/assistant relative min-w-0 px-0.5 py-0.5" data-slot="peri-assistant-message">
-      <div className="text-muted-foreground mb-1 text-[11px] font-medium">Peri</div>
-      {body && <MarkdownText text={body} />}
+      {body && (
+        <OpenUIMessage
+          text={body}
+          streaming={streaming}
+          renderMarkdown={renderMarkdownFor(streaming)}
+          onOpenUIAction={onOpenUIAction}
+          actionsEnabled={actionsEnabled}
+        />
+      )}
       {text && !streaming && (
         <button
           type="button"

@@ -231,6 +231,7 @@ describe('Timeline turn folds', () => {
     expect(html).toContain('data-timeline-row-kind="turn-fold"');
     expect(html).toContain('aria-expanded="true"');
     expect(html).toContain('data-timeline-row-kind="work"');
-    expect(html).toContain('工具调用 · 1 个');
+    expect(html).toContain('data-bare="true"');
+    expect(html).toContain('1 个工具');
   });
 });

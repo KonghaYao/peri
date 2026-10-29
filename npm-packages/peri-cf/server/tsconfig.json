@@ -2,9 +2,7 @@
   "extends": "../tsconfig.json",
   "compilerOptions": {
     "paths": {
-      "@/*": ["../frontend/*"],
-      "@peri-code/sdk": ["../../@peri-sdk/src/entries/index.ts"],
-      "@peri-code/sdk/view": ["../../@peri-sdk/src/entries/view.ts"]
+      "@/*": ["../frontend/*"]
     }
   },
   "include": ["."],

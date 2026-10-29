@@ -6,12 +6,16 @@ export {
 } from "./actions";
 export {
   ChatController,
-  type ChatLoadState, type ChatView, type Phase, type SyncStatus,
+  type ChatLoadState, type ChatRecovery, type ChatSendOutcome, type ChatView, type Phase, type SyncStatus,
 } from "./controller";
 export {
   ChatDirectoryUnavailableError, createHttpRepository,
   type ChatDirectoryRepository,
 } from "./repository";
+export {
+  MonitorUnavailableError, createHttpMonitorRepository,
+  type MonitorRepository,
+} from "./monitor";
 export {
   ChatSyncProvider, SyncBackpressureError, WebSocketChatChannel,
   type ChatSyncOptions, type SyncConnectionStatus, type WebSocketLike,

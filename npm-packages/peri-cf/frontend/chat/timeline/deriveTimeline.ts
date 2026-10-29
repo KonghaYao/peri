@@ -1,13 +1,33 @@
-import type { ChatDisplayState } from '../runtime';
+import type { ChatDisplayState, ToolCall } from '../runtime';
 import { toolPresentation } from './toolPresentation';
 import type { TimelineRow, TimelineWorkItem } from './types';
+import { workCountsLabel, type WorkCounts } from './workSummary';
 
 const RUNNING_STATUSES = new Set(['pending', 'streaming', 'running']);
 /** `cancelled` 是用户停止造成的中性终态，不算失败；只有 failed/error 进入红色语义。 */
 const FAILED_STATUSES = new Set(['failed', 'error']);
+/** 载荷超限只表示结果被截断/降级；工具执行本身在 SDK 中仍是 completed。 */
+const DEGRADED_ERROR_CODE = 'payload_too_large';
 
 function isRunning(status: string): boolean {
   return RUNNING_STATUSES.has(status);
+}
+
+/** 工具执行事实：状态是唯一权威，错误码只区分「降级」与「失败」。 */
+export interface ToolWorkState {
+  failed: boolean;
+  degraded: boolean;
+  cancelled: boolean;
+}
+
+/** 单一规则：时间线行与 turn 摘要共用，避免两处对 `error !== null` 各判一次。 */
+export function toolWorkState(tool: ToolCall | null | undefined): ToolWorkState {
+  if (!tool) return { failed: true, degraded: false, cancelled: false };
+  return {
+    failed: FAILED_STATUSES.has(tool.status),
+    degraded: tool.error?.code === DEGRADED_ERROR_CODE,
+    cancelled: tool.status === 'cancelled',
+  };
 }
 
 /** 与 t3code 一致的时间压缩：短于 10s 保留十分位，之后整秒/分/时。 */
@@ -63,13 +83,28 @@ function collectTurnWorkFacts(state: ChatDisplayState): Map<string, TurnWorkFact
     const current = facts.get(entry.turnId) ?? { failed: false, cancelled: false };
     for (const block of entry.blocks) {
       if (block.type !== 'tool_call') continue;
-      const status = block.tool?.status ?? 'unavailable';
-      if (!block.tool || block.tool.error !== null || FAILED_STATUSES.has(status)) current.failed = true;
-      if (status === 'cancelled') current.cancelled = true;
+      const outcome = toolWorkState(block.tool);
+      if (outcome.failed) current.failed = true;
+      if (outcome.cancelled) current.cancelled = true;
     }
     if (current.failed || current.cancelled) facts.set(entry.turnId, current);
   }
   return facts;
+}
+
+/** 整轮工作量按 turn 汇总，供 fold 摘要使用；hidden reasoning 不计入。 */
+function collectTurnWorkCounts(state: ChatDisplayState): Map<string, WorkCounts> {
+  const counts = new Map<string, WorkCounts>();
+  for (const entry of state.entries) {
+    if (entry.role === 'user') continue;
+    const current = counts.get(entry.turnId) ?? { tools: 0, reasoning: 0 };
+    for (const block of entry.blocks) {
+      if (block.type === 'reasoning' && block.visibility !== 'hidden') current.reasoning += 1;
+      if (block.type === 'tool_call') current.tools += 1;
+    }
+    if (current.tools > 0 || current.reasoning > 0) counts.set(entry.turnId, current);
+  }
+  return counts;
 }
 
 /** 运行中的 turn 永不折叠：运行元数据优先于可能残留的 activeTurnId。 */
@@ -105,6 +140,7 @@ function toolWorkItem(
   const tool = block.tool;
   const presentation = toolPresentation(tool);
   const status = tool?.status ?? 'unavailable';
+  const outcome = toolWorkState(tool);
   return {
     kind: 'tool',
     id: tool?.toolCallId ?? `${entry.entryId}:${block.blockId}`,
@@ -116,7 +152,8 @@ function toolWorkItem(
     ...(presentation.target ? { target: presentation.target } : {}),
     createdAt: tool?.createdAt ?? entry.createdAt,
     completedAt: tool?.completedAt ?? entry.completedAt,
-    failed: !tool || tool.error !== null || FAILED_STATUSES.has(status),
+    failed: outcome.failed,
+    ...(outcome.degraded ? { degraded: true } : {}),
     ...(block.unavailable ? { unavailable: block.unavailable } : {}),
     ...(tool ? { tool } : {}),
   };
@@ -162,6 +199,7 @@ export function deriveTimeline(
     settledTurns.set(turn.turnId, turn);
   }
   const turnWorkFacts = collectTurnWorkFacts(state);
+  const turnWorkCounts = collectTurnWorkCounts(state);
   const emittedFolds = new Set<string>();
   let workItems: TimelineWorkItem[] = [];
   let workActive = false;
@@ -184,20 +222,26 @@ export function deriveTimeline(
     const turnCancelled = facts?.cancelled === true || foldTurn?.status === 'cancelled';
     const terminalFailure = foldTurn !== undefined &&
       (foldTurn.status === 'error' || foldTurn.status === 'failed' || foldTurn.status === 'cancelled');
+    let foldExpanded = false;
     if (turnId && foldTurn) {
-      const expanded = isTurnExpanded(foldTurn, expandedTurnIds, collapsedTurnIds);
+      // 有失败证据时 fold 只做静态摘要：既不会隐藏失败工具，也不提供无效的折叠开关。
+      const expanded = turnFailed ? true : isTurnExpanded(foldTurn, expandedTurnIds, collapsedTurnIds);
+      foldExpanded = expanded;
       if (!emittedFolds.has(turnId)) {
         emittedFolds.add(turnId);
+        const counts = turnWorkCounts.get(turnId);
         rows.push({
           kind: 'turn-fold',
           id: `turn-fold:${turnId}`,
           turnId,
           status: foldTurn.status,
           label: turnFoldLabel(foldTurn, { failed: turnFailed, cancelled: turnCancelled }),
+          ...(counts ? { summary: workCountsLabel(counts) } : {}),
           failed: turnFailed,
           startedAt: foldTurn.startedAt,
           completedAt: foldTurn.completedAt,
           expanded,
+          ...(turnFailed ? { static: true } : {}),
         });
       }
       // 折叠只隐藏干净的已完成 work；失败工具始终保留，不因 fold 丢失错误证据。
@@ -208,6 +252,8 @@ export function deriveTimeline(
         return;
       }
     }
+    // 干净 turn 展开后由 fold 作为唯一折叠层；失败/取消保留组头与失败计数。
+    const bare = foldTurn !== undefined && foldExpanded && !turnFailed && !terminalFailure;
     rows.push({
       kind: 'work',
       id: `work:${workItems[0]!.id}`,
@@ -219,6 +265,7 @@ export function deriveTimeline(
       defaultExpanded: workActive || hasFailure || terminalFailure ||
         workItems.some((item) => isRunning(item.status)),
       forceExpanded: hasFailure || terminalFailure,
+      ...(bare ? { bare: true } : {}),
     });
     workItems = [];
     workActive = false;

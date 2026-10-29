@@ -6,6 +6,9 @@
   "description": "Peri WASM Agent on a Bun server with a browser client",
   "scripts": {
     "build:wasm": "bun scripts/build-wasm.ts",
+    "openui:spec": "bun ../@peri-sdk/scripts/generate-openui-spec.ts",
+    "openui:check": "bun ../@peri-sdk/scripts/generate-openui-spec.ts --check",
+    "prebuild": "bun run openui:check",
     "wasm:profiles": "bun scripts/profile-wasm.ts",
     "prepare:wasm": "bun scripts/prepare-wasm.ts",
     "dev": "bun run prepare:wasm && bun scripts/dev.ts",
@@ -17,7 +20,8 @@
     "typecheck": "tsc --noEmit && tsc -p server/tsconfig.json",
     "typecheck:server": "tsc -p server/tsconfig.json",
     "test": "bun test frontend scripts && bun test --tsconfig-override server/tsconfig.json server",
-    "test:server": "bun test --tsconfig-override server/tsconfig.json server"
+    "test:server": "bun test --tsconfig-override server/tsconfig.json server",
+    "postinstall": "node node_modules/peri-sandbox/scripts/patch-sdk.mjs"
   },
   "dependencies": {
     "@hono/bun": "^1.0.1",
@@ -27,10 +31,10 @@
     "clsx": "^2.1.1",
     "hono": "4.13.13",
     "lucide-react": "^1.61.0",
+    "peri-sandbox": "file:../peri-sandbox",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1",
+    "streamdown": "2.7.1",
     "tailwind-merge": "^3.7.0",
     "tw-shimmer": "^0.4.14",
     "unstorage": "^1.17.6",

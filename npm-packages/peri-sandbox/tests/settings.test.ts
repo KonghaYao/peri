@@ -2,9 +2,16 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
-import { defaultSettingsPath, initSettings, loadSettings, verifyPeriRuntime } from '../src/instance/settings.js';
+import {
+  defaultProfile,
+  defaultSettingsPath,
+  initSettings,
+  loadSettings,
+  resolveSandboxSettings,
+  verifyPeriRuntime,
+} from '../src/instance/settings.js';
 import { SandboxError } from '../src/instance/types.js';
 
 function withPeriPath<T>(path: string, operation: () => Promise<T>): Promise<T> {
@@ -65,9 +72,46 @@ test('default settings stay in memory when the default file is absent', () => {
     const settings = loadSettings();
     assert.equal(settings.sandboxesRoot, join(process.env.HOME ?? '', '.peri-sandbox', 'sandboxes'));
     assert(!existsSync(file));
+    const resolved = resolveSandboxSettings();
+    assert.equal(resolved.path, file);
+    assert.equal(resolved.source, 'defaults');
+    assert.equal(resolved.profileName, 'workspace-default');
   } finally {
     if (previous === undefined) delete process.env.PERI_SANDBOX_SETTINGS;
     else process.env.PERI_SANDBOX_SETTINGS = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('settings description mirrors runtime file and profile rules', () => {
+  const root = mkdtempSync(join(tmpdir(), 'peri-settings-'));
+  try {
+    const file = join(root, 'settings.json');
+    const beta = { allowedDomains: [], runtimeReadPaths: ['/usr'], memoryMax: '2G', tasksMax: 4, cpuQuota: '50%' };
+    writeFileSync(
+      file,
+      JSON.stringify({
+        sandboxesRoot: join(root, 'sandboxes'),
+        periPath: process.execPath,
+        periSha256: 'a'.repeat(64),
+        profiles: { beta },
+      }),
+    );
+    assert.deepEqual(resolveSandboxSettings({ settingsPath: file }), {
+      path: file,
+      source: 'file',
+      profileName: 'beta',
+      profile: beta,
+    });
+    assert.throws(
+      () => resolveSandboxSettings({ settingsPath: join(root, 'missing.json') }),
+      /Sandbox settings not found/,
+    );
+    assert.throws(
+      () => resolveSandboxSettings({ settingsPath: file, profileName: 'missing' }),
+      /Unknown sandbox profile/,
+    );
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -94,6 +138,15 @@ test('public or symlinked sandboxes roots are rejected', () => {
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('default profile reads runtime paths and package registries', () => {
+  const profile = defaultProfile(process.execPath);
+  assert(profile.allowedDomains.includes('registry.npmjs.org'));
+  assert(profile.allowedDomains.includes('pypi.org'));
+  assert(profile.allowedDomains.includes('crates.io'));
+  assert(profile.runtimeReadPaths.includes(dirname(process.execPath)));
+  if (process.platform === 'darwin') assert(profile.runtimeReadPaths.includes('/private/var/select'));
 });
 
 test('peri runtime verification rejects missing binaries and hash mismatches', () => {

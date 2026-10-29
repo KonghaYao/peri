@@ -1,5 +1,6 @@
 import { useCallback, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowUp, Square } from 'lucide-react';
+import type { ChatSendOutcome } from '../runtime';
 import { ComposerShell } from './ComposerShell';
 
 export interface ChatComposerProps {
@@ -10,8 +11,10 @@ export interface ChatComposerProps {
   stopping: boolean;
   /** 待回答交互由外层渲染并注入，composer 不依赖交互视图模块。 */
   pendingContent?: ReactNode;
-  /** 返回实际接收消息的会话 id；null 表示未发送。 */
-  onSend: (content: string) => Promise<string | null>;
+  /** 不可发送的真实原因（阻断/同步中）；缺席时回退到同步文案。 */
+  disabledReason?: string | undefined;
+  /** 返回发送结果：只有 `delivered` 为真才清空草稿，撤回/失败保留输入。 */
+  onSend: (content: string) => Promise<ChatSendOutcome>;
   onStop: () => Promise<boolean>;
   onHeightChange?: (height: number) => void;
   focusSignal: number;
@@ -34,7 +37,7 @@ export function nextDraftAfterSend(current: string, submitted: string, sent: boo
  * 运行中主按钮变为停止；本轮不提供模型、slash、附件与队列入口。
  */
 export function ChatComposer({
-  draft, onDraftChange, canSend, canStop, stopping, pendingContent,
+  draft, onDraftChange, canSend, canStop, stopping, pendingContent, disabledReason,
   onSend, onStop, onHeightChange, focusSignal,
 }: ChatComposerProps) {
   const textarea = useRef<HTMLTextAreaElement>(null);
@@ -63,11 +66,10 @@ export function ChatComposer({
     setLocalError('');
     setSubmitting(true);
     try {
-      const sentChatId = await onSend(content);
-      const sent = sentChatId !== null;
-      const next = nextDraftAfterSend(draftRef.current, content, sent);
+      const outcome = await onSend(content);
+      const next = nextDraftAfterSend(draftRef.current, content, outcome.delivered);
       if (next !== null) onDraftChange(next);
-      else if (!sent) setLocalError('消息未发送，请检查连接后重试。');
+      else if (!outcome.delivered) setLocalError(outcome.message || '消息未发送，请检查连接后重试。');
     } finally {
       setSubmitting(false);
     }
@@ -95,7 +97,9 @@ export function ChatComposer({
           ref={textarea}
           value={draft}
           rows={1}
-          placeholder={busy ? '任务运行中，可先起草消息…' : canSend ? '输入消息，Enter 发送，Shift+Enter 换行' : '等待会话同步…'}
+          placeholder={busy ? '任务运行中，可先起草消息…' : canSend
+            ? '输入消息，Enter 发送，Shift+Enter 换行'
+            : disabledReason ?? '等待会话同步…'}
           className="placeholder:text-muted-foreground/70 max-h-[200px] min-h-9 w-full resize-none bg-transparent px-1.5 py-1.5 text-sm leading-6 outline-none"
           aria-label="输入消息"
           onChange={(event) => onDraftChange(event.target.value)}

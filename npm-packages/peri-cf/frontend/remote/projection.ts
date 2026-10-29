@@ -3,6 +3,7 @@ import {
   type ChatReplicaConnection,
   type ChatReplicaStatus,
   type ChatYjsChannel,
+  type SessionView,
 } from "@peri-code/sdk/view";
 import type { Chat } from "./contracts";
 import { materializeChatDisplayState, type ChatDisplayState } from "./display-state";
@@ -39,8 +40,23 @@ export class ChatProjection {
 
   /** 当前展示状态；相同文档代内复用已校验结果。 */
   state(): ChatDisplayState {
-    if (!this.cached) this.cached = materializeChatDisplayState(this.replica.read(), this.chat);
+    if (!this.cached) {
+      const view = this.replica.read();
+      this.cached = materializeChatDisplayState(view, this.chatFor(view));
+    }
     return this.cached;
+  }
+
+  /**
+   * 展示身份以当前绑定为准：`sessionId` 变化时 id 跟着换，标题优先取副本会话事实。
+   * 构造时的 Chat 只作为尚未绑定时的占位，不再当作会话身份快照。
+   */
+  private chatFor(view: SessionView): Chat {
+    const id = view.sessionId ?? this.chat.id;
+    const title = view.session?.title ?? this.chat.title;
+    return id === this.chat.id && title === this.chat.title
+      ? this.chat
+      : { id, title, updatedAt: this.chat.updatedAt };
   }
 
   subscribe(listener: () => void): () => void {

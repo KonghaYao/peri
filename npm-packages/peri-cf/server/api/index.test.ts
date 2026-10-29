@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import {
   ChatActionError,
   ChatCloseIncompleteError,
@@ -29,21 +29,44 @@ import {
   type ToolPayloadResponse,
   type WorkspaceRef,
 } from "@peri-code/sdk";
-import type { ServerInfo } from "../config";
+import type { MonitorSnapshot, MonitorSource } from "../monitor";
 import { ChatRegistry } from "../registry";
+import { SandboxStartError, type SandboxLease, type SandboxPoolPort } from "../sandbox";
 import { createApi } from ".";
 
-const info = {
-  model: {
-    provider: "openai" as const,
-    tiers: { fable: "gpt-test", opus: "gpt-test", sonnet: "gpt-test", haiku: "gpt-test" },
+const monitorSnapshot: MonitorSnapshot = {
+  generatedAt: "2026-10-27T10:00:00.000Z",
+  uptimeSeconds: 120,
+  llm: {
+    provider: "openai",
+    activeAlias: "sonnet",
     baseUrl: "https://api.example.com/v1",
+    tiers: { fable: "gpt-test", opus: "gpt-test", sonnet: "gpt-test", haiku: "gpt-test" },
   },
-  storage: { url: "https://store.example.com" },
-  mcp: [],
-  workspace: "/workspace",
-  sessionCwd: "/workspace/",
-} satisfies ServerInfo;
+  mcp: { sandboxEnabled: false, remote: [], sandbox: [] },
+  wasm: {
+    moduleUrl: "/tmp/peri-wasm.js",
+    process: { rssBytes: 1, heapTotalBytes: 2, heapUsedBytes: 3, arrayBufferBytes: 4 },
+    activeChats: 0,
+  },
+  sandbox: {
+    enabled: false,
+    root: "/tmp/peri-sandbox",
+    settings: {
+      path: "/tmp/peri-sandbox/settings.json",
+      source: "disabled",
+      profileName: null,
+      profile: null,
+    },
+    workspacesOnDisk: null,
+    active: [],
+    starting: 0,
+  },
+};
+
+function stubMonitor(snapshot: MonitorSnapshot = monitorSnapshot): MonitorSource {
+  return { snapshot: async () => snapshot };
+}
 
 const entry: ChatSessionDirectoryEntry = {
   sessionId: "session-1",
@@ -196,10 +219,43 @@ class FailingCloseChannel implements ChatYjsChannel {
   }
 }
 
+/** 最小 sandbox 端口：成功时返回固定工作区与 MCP，失败时抛启动错误。 */
+class StubSandboxPool implements SandboxPoolPort {
+  readonly acquired: Array<string | undefined> = [];
+
+  constructor(private readonly fail = false) {}
+
+  async acquire(sandboxId?: string): Promise<SandboxLease> {
+    this.acquired.push(sandboxId);
+    if (this.fail) throw new SandboxStartError("sandbox start failed");
+    const id = sandboxId ?? "sbx_0123456789abcdef0123456789abcdef";
+    const workspace = `/sandboxes/${id}/workspace`;
+    return {
+      sandboxId: id,
+      workspace: { id, hostPath: workspace, runtimePath: workspace },
+      mcp: {
+        name: "workspace",
+        config: { type: "http", url: "http://127.0.0.1/mcp", headers: {} },
+      },
+      release: async () => {},
+    };
+  }
+
+  async closeAll(): Promise<void> {}
+
+  snapshot() {
+    return { active: [], starting: 0 };
+  }
+}
+
 function apiWith(options: {
   chats?: StubChat[];
   listError?: unknown;
   listResult?: ChatSessionDirectoryEntry[];
+  sandbox?: SandboxPoolPort;
+  sandboxesRoot?: string;
+  sessions?: { getSession(id: string): Promise<ChatSessionDirectoryEntry | null> };
+  monitor?: MonitorSource;
 } = {}): ApiFixture {
   const chats = new Map((options.chats ?? []).map((chat) => [chat.id, chat]));
   const created: StubChat[] = [];
@@ -231,8 +287,14 @@ function apiWith(options: {
     },
     async shutdown() {},
   };
-  const registry = new ChatRegistry(manager, WORKSPACE, AGENT);
-  const app = createApi({ registry, info });
+  const registry = new ChatRegistry(manager, WORKSPACE, AGENT, {
+    session: { instructions: "test", mcpServers: {} },
+    sessions: options.sessions ?? { getSession: async () => null },
+    ...(options.sandbox === undefined
+      ? {}
+      : { sandbox: options.sandbox, sandboxesRoot: options.sandboxesRoot ?? "/sandboxes" }),
+  });
+  const app = createApi({ registry, monitor: options.monitor ?? stubMonitor() });
   return {
     app,
     registry,
@@ -260,6 +322,35 @@ function postAction(
 const boundTarget = { sessionId: "session-1", bindingRevision: 1 };
 
 describe("server api", () => {
+  test("GET /api/monitor 返回单一快照，旧 /api/info 已移除", async () => {
+    const { app, created, createOptions } = apiWith();
+    const response = await app.request("/api/monitor");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, ...monitorSnapshot });
+    // 监控读取不得创建 Chat 或启动 sandbox。
+    expect(created).toHaveLength(0);
+    expect(createOptions).toHaveLength(0);
+    expect((await app.request("/api/info")).status).toBe(404);
+  });
+
+  test("快照构建失败返回 503 monitor_unavailable", async () => {
+    const logged = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { app } = apiWith({
+        monitor: { snapshot: async () => { throw new Error("snapshot boom"); } },
+      });
+      const response = await app.request("/api/monitor");
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({
+        ok: false,
+        code: "monitor_unavailable",
+        message: "Monitor snapshot is unavailable",
+      });
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
   test("目录只返回 Store 事实并标记 available", async () => {
     const { app } = apiWith();
     const response = await app.request("/api/chats");
@@ -309,6 +400,58 @@ describe("server api", () => {
     expect(createOptions[0]?.sessionPath).toBe("");
     expect(createOptions[0]?.agent).toBe(AGENT);
     expect(createOptions[0]).not.toHaveProperty("path");
+  });
+
+  test("createChat 按 sessionId 启动会话所属 sandbox 并合并 MCP", async () => {
+    const sandbox = new StubSandboxPool();
+    const workspace = "/sandboxes/sbx_0123456789abcdef0123456789abcdef/workspace";
+    const { app, createOptions } = apiWith({
+      sandbox,
+      sessions: { getSession: async () => ({ ...entry, cwd: workspace }) },
+    });
+    const response = await app.request("/api/chats", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: "session-1" }),
+    });
+    expect(response.status).toBe(201);
+    expect(sandbox.acquired).toEqual(["sbx_0123456789abcdef0123456789abcdef"]);
+    expect(createOptions[0]?.workspace).toEqual({
+      id: "sbx_0123456789abcdef0123456789abcdef",
+      hostPath: workspace,
+      runtimePath: workspace,
+    });
+    expect(createOptions[0]?.sessionPath).toBeUndefined();
+    expect(createOptions[0]?.session?.mcpServers?.workspace).toMatchObject({
+      type: "http",
+      url: "http://127.0.0.1/mcp",
+    });
+  });
+
+  test("createChat sandbox 启动失败返回 503 sandbox_start_failed", async () => {
+    const { app, created } = apiWith({ sandbox: new StubSandboxPool(true) });
+    const response = await app.request("/api/chats", { method: "POST" });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      code: "sandbox_start_failed",
+    });
+    expect(created).toHaveLength(0);
+  });
+
+  test("createChat 拒绝同时给 path 与 sessionId", async () => {
+    const { app, created } = apiWith();
+    const response = await app.request("/api/chats", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: "project", sessionId: "session-1" }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      code: "invalid_request",
+    });
+    expect(created).toHaveLength(0);
   });
 
   test("createChat 拒绝工作区外绝对 path：400 workspace_mismatch 且不创建句柄", async () => {
