@@ -774,3 +774,31 @@ async fn dispatch_reuses_bound_history_snapshot_without_copy() {
     );
     assert_eq!(invocation.messages().len(), 1, "分派不改变 hook 前缀视图");
 }
+
+// ── tool.error 指标入参摘要 ─────────────────────────────────────────────────
+
+#[test]
+fn input_summary_keeps_string_input_verbatim() {
+    assert_eq!(
+        input_summary(&serde_json::json!("plain text")),
+        "plain text",
+        "字符串型入参取原值，不额外加 JSON 引号"
+    );
+}
+
+#[test]
+fn input_summary_serializes_object_input() {
+    assert_eq!(
+        input_summary(&serde_json::json!({"command": "exit 1"})),
+        r#"{"command":"exit 1"}"#,
+        "对象型入参必须序列化，不能退化为空串（生产上曾全部为空）"
+    );
+}
+
+#[test]
+fn input_summary_truncates_overlong_input_to_200_chars() {
+    let long = "界".repeat(250);
+    let summary = input_summary(&serde_json::json!(long));
+    assert_eq!(summary.chars().count(), 200, "按字符截断，不切坏多字节字符");
+    assert_eq!(summary, "界".repeat(200));
+}

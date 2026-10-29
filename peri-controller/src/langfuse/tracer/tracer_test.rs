@@ -1025,10 +1025,15 @@ async fn turn_lifecycle_registers_and_clears_active_trace_for_metrics() {
     let trace_id = t.trace_id.clone();
 
     t.on_turn_start("turn_metrics");
+    let active = session
+        .turn_traces()
+        .resolve("sess_smoke")
+        .expect("turn 开始后指标出口应能取到本 turn 的 trace");
+    assert_eq!(active.trace_id, trace_id);
     assert_eq!(
-        session.turn_traces().resolve("sess_smoke").as_deref(),
+        active.parent_observation_id.as_deref(),
         Some(trace_id.as_str()),
-        "turn 开始后指标出口应能取到本 turn 的 trace"
+        "采样 turn 的指标应挂到 turn 根 span（id = trace id）下"
     );
 
     let _flush = t.on_turn_end(TurnTelemetryOutcome::Completed);
@@ -1036,4 +1041,60 @@ async fn turn_lifecycle_registers_and_clears_active_trace_for_metrics() {
         session.turn_traces().resolve("sess_smoke").is_none(),
         "turn 结束后应清理活跃登记，后续指标回退独立 root trace"
     );
+}
+
+#[tokio::test]
+async fn unsampled_turn_registers_without_parent_observation() {
+    let (mut t, session) = make_tracer(0.0);
+    let trace_id = t.trace_id.clone();
+
+    t.on_turn_start("turn_unsampled");
+    let active = session
+        .turn_traces()
+        .resolve("sess_smoke")
+        .expect("登记不受采样影响");
+    assert_eq!(active.trace_id, trace_id);
+    assert!(
+        active.parent_observation_id.is_none(),
+        "未采样 turn 没有根 span，指标只共享 trace 不挂父观测"
+    );
+
+    let _flush = t.on_turn_end(TurnTelemetryOutcome::Completed);
+    assert!(session.turn_traces().resolve("sess_smoke").is_none());
+}
+
+#[tokio::test]
+async fn subagent_sid_follows_turn_trace_and_is_cleared() {
+    let (mut t, session) = make_tracer(1.0);
+    let trace_id = t.trace_id.clone();
+
+    t.on_turn_start("turn_subagent_metrics");
+    t.on_subagent_start("main", "child-thread-1", "worker", false);
+    let child = session
+        .turn_traces()
+        .resolve("child-thread-1")
+        .expect("子 agent 的 thread id 应在本 turn 登记");
+    assert_eq!(child.trace_id, trace_id, "子 agent 指标归同一 turn trace");
+    assert_eq!(
+        child.parent_observation_id.as_deref(),
+        Some(trace_id.as_str()),
+        "子 agent 指标挂到同一 turn 根 span 下"
+    );
+
+    t.on_subagent_stop("main", "child-thread-1", "done", false);
+    assert!(
+        session.turn_traces().resolve("child-thread-1").is_none(),
+        "子 agent 结束后应清理其指标归属"
+    );
+
+    // 未正常收 Stop 的子 agent：turn 结束时由 clear_trace 兜底清理
+    t.on_subagent_start("main", "child-thread-2", "worker", false);
+    assert!(session.turn_traces().resolve("child-thread-2").is_some());
+
+    let _flush = t.on_turn_end(TurnTelemetryOutcome::Completed);
+    assert!(
+        session.turn_traces().resolve("child-thread-2").is_none(),
+        "turn 结束应清理残留的子 agent sid"
+    );
+    assert!(session.turn_traces().resolve("sess_smoke").is_none());
 }
