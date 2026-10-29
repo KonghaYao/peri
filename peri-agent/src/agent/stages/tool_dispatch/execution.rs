@@ -673,18 +673,25 @@ async fn settle_results(
     }
 }
 
+/// `input_summary` 的字符上限（按 `chars()` 计数，不切坏多字节字符）。
+const INPUT_SUMMARY_LIMIT: usize = 200;
+
+/// 工具入参摘要：字符串取原值，其余类型取 JSON 序列化，统一截断到
+/// [`INPUT_SUMMARY_LIMIT`] 字符。
+fn input_summary(input: &serde_json::Value) -> String {
+    let raw = match input {
+        serde_json::Value::String(raw) => raw.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    };
+    raw.chars().take(INPUT_SUMMARY_LIMIT).collect()
+}
+
 /// 工具失败的可观测性投影（`tool.error` 指标）。
 ///
 /// 事实取自执行上下文快照（会话身份、run 关联键、turn step），不读阶段上下文：
 /// 无 turn 时不写 `step`，不用伪造的 `0` 占位。
 fn record_tool_failure(ctx: &InvocationContext, call: &ToolCall, result: &ToolResult) {
-    let input_summary: String = call
-        .input
-        .as_str()
-        .unwrap_or("")
-        .chars()
-        .take(200)
-        .collect();
+    let input_summary = input_summary(&call.input);
     let mut data = serde_json::json!({
         "name": result.tool_name,
         "tool_call_id": call.id,

@@ -45,12 +45,15 @@ impl LangfuseTracer {
     /// Session 分组由观测的 session_id 属性承载。
     pub fn on_turn_start(&mut self, input: &str) {
         // 先登记 sid → 本 turn trace（不受采样影响）：指标出口据此把指标挂到
-        // 当前 turn 的 trace 下；未采样 turn 的指标本就会自行产生观测。
+        // 当前 turn 下；采样 turn 有根 span，指标挂其下，未采样 turn 无根 span，
+        // 只共享 trace（parent 为 None）。
+        let sampled = self.sampling.should_emit(&self.trace_id, &self.session_id);
+        let parent = sampled.then(|| self.trace_id.clone());
         self.session
             .turn_traces()
-            .register(&self.session_id, &self.trace_id);
+            .register(&self.session_id, &self.trace_id, parent.as_deref());
 
-        if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
+        if !sampled {
             return;
         }
 
@@ -101,11 +104,9 @@ impl LangfuseTracer {
     pub fn on_turn_end(&mut self, outcome: TurnTelemetryOutcome) -> tokio::task::JoinHandle<()> {
         use std::sync::Arc;
 
-        // 先清理活跃 turn 登记（compare-and-remove：不误删后一 turn），
-        // 之后发出的指标回退独立 root trace。
-        self.session
-            .turn_traces()
-            .clear(&self.session_id, &self.trace_id);
+        // 先清理本 turn 的活跃登记（含主 sid 与子 agent sid；compare-and-remove
+        // 按 trace 匹配，不误删后一 turn），之后发出的指标回退独立 root trace。
+        self.session.turn_traces().clear_trace(&self.trace_id);
 
         let fallback_status = GenerationFallbackStatus::for_outcome(&outcome);
         let failure = fallback_status.failure;
