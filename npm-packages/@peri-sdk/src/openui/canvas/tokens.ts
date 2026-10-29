@@ -1,6 +1,3 @@
-// Vendored from peri-canvas@0.1.0 (packages/canvas/src/tokens.ts).
-// License declared MIT in packages/canvas/package.json; no repository LICENSE file.
-// Internal use only; do not redistribute without legal review.
 export interface CanvasPalette {
   readonly foreground: string;
   readonly foregroundSecondary: string;

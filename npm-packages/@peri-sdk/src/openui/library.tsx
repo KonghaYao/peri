@@ -42,8 +42,8 @@ import {
 
 /**
  * 唯一事实源：组件名、zod props、description、分组、渲染器与提示词选项。
- * 包根 `spec.json` 由 `scripts/generate.ts` 从这里生成；服务端只读 `spec.json`
- * （经 `peri-openui/prompt`），不 import 本文件或 React。
+ * `src/openui/spec.json` 由 `scripts/generate-openui-spec.ts` 从这里生成；服务端只读 `spec.json`
+ * （经 `@peri-code/sdk/openui/prompt`），不 import 本文件或 React。
  *
  * children 采用有向无环的三层 union（见 `leafRefs` / `sectionRefs`）：
  * Stack -> Grid | Card | Row | Leaf；Grid -> Card | Row | Leaf；

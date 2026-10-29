@@ -1,9 +1,9 @@
 import { lazy, Suspense, useMemo, type ReactNode } from "react";
-import { splitOpenUI, type OpenUIActionEvent } from "peri-openui";
-import { OpenUIErrorBoundary } from "peri-openui/error-boundary";
+import { splitOpenUI, type OpenUIActionEvent } from "@peri-code/sdk/openui";
+import { OpenUIErrorBoundary } from "@peri-code/sdk/openui/error-boundary";
 
 const LazyOpenUIProgram = lazy(() =>
-  import("peri-openui/renderer").then((module) => ({ default: module.OpenUIProgram })),
+  import("@peri-code/sdk/openui/renderer").then((module) => ({ default: module.OpenUIProgram })),
 );
 
 export interface OpenUIMessageProps {
@@ -24,7 +24,7 @@ function Skeleton({ label }: { label: string }) {
 
 /**
  * 轻量门面：只 eager 引入 fence/类型/错误边界；canvas 与 react-lang 全部在
- * `peri-openui/renderer` 的懒加载 chunk 中。
+ * `@peri-code/sdk/openui/renderer` 的懒加载 chunk 中。
  */
 export function OpenUIMessage({
   text,

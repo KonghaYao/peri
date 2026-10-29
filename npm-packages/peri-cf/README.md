@@ -48,12 +48,12 @@ peri-cf 是 `@peri-code/sdk` 与 `peri-sandbox` 的生产测试场：SDK 固定�
 
 - 模型默认继续用 Markdown。只有结构化视觉明显更好时，才输出**一个**标记为 `openui` 的围栏代码块，内含完整程序，首行 `root = Stack([...])`；解释文字在围栏外。
 - 前端只认顶层完整围栏；流式中未闭合围栏显示“正在生成界面…”骨架，不显示半截代码。解析失败、root 存在但 prop 校验失败/引用未解析、`meta.incomplete`、懒加载或渲染异常都会回退到 Markdown 原文，用户始终能看到模型输出。流结束后，整段以 `root = Stack(` 开头的裸 DSL 也会被识别；普通代码块或列表项内的 `openui` 字样不算。
-- OpenUI 组件库与 spec 独立在 `npm-packages/peri-openui`（`file:` 依赖）。唯一事实源是 `../peri-openui/src/library.tsx`；`bun run openui:spec` 转发到 `../peri-openui/scripts/generate.ts` 生成 `../peri-openui/spec.json`，`bun run openui:check` 校验新鲜度；`bun run build` 已前置该检查。
-- 服务端 `server/openui-instructions.ts` 只经 `peri-openui/prompt` 读取 spec 生成提示词，不引入 React/canvas。提示词随 `session/new` 冻结，**旧会话不会获得 OpenUI 段**，需要新建会话。
-- 本地 `frontend/chat/openui/` 只保留聊天适配：`OpenUIMessage`、`actions`、`index`。门面从 `peri-openui` 取 `splitOpenUI`/主题，懒加载 `peri-openui/renderer`。
+- OpenUI 组件库与 spec 作为 `@peri-code/sdk/openui*` 源码 subpath 发布，源码在 `../@peri-sdk/src/openui`。唯一事实源是 `../@peri-sdk/src/openui/library.tsx`；`bun run openui:spec` 转发到 `../@peri-sdk/scripts/generate-openui-spec.ts` 生成 `../@peri-sdk/src/openui/spec.json`，`bun run openui:check` 校验新鲜度；`bun run build` 已前置该检查。
+- 服务端 `server/openui-instructions.ts` 只经 `@peri-code/sdk/openui/prompt` 读取 spec 生成提示词，不引入 React/canvas。提示词随 `session/new` 冻结，**旧会话不会获得 OpenUI 段**，需要新建会话。
+- 本地 `frontend/chat/openui/` 只保留聊天适配：`OpenUIMessage`、`actions`、`index`。门面从 `@peri-code/sdk/openui` 取 `splitOpenUI`/主题，懒加载 `@peri-code/sdk/openui/renderer`。
 - 表单值不持久化，刷新/切换会话即重置。`Button` 的 `continue_conversation` 复用 `chat.send`；`open_url` 只允许无 userinfo、长度 ≤2048 的 `http(s)` 链接。超长消息/表单数据会在发送文本中标注截断。
 - OpenUI 只在懒加载 chunk：主 chunk 不含 `react-lang`、`LineChart`、`BarChart`；构建输出 `renderer-*.js` 约 257 kB，另有 5 kB 的 `ci-info` 子 chunk（不阻塞构建）。`vite.config.ts` 用 `resolve.dedupe` 保证库与主应用共用一份 React。
-- 组件来自 `peri-canvas@0.1.0` 的复制改写。上游 `package.json` 声明 MIT，但仓库根无 LICENSE，上游 README 自述为某商用 Canvas SDK 的移植；授权链不明，仅限内部使用，对外分发前必须法律复核。
+- 组件来自 `peri-canvas@0.1.0` 的复制改写，随 `@peri-code/sdk` 的 `src/openui/canvas` 源码发布。
 
 ## 每会话 Sandbox
 
@@ -132,8 +132,8 @@ PERI_MODEL_ID_HAIKU=claude-haiku-5-5
 ## 本地运行
 
 ```bash
-cd npm-packages/peri-openui
-bun install                                  # OpenUI 库与 spec 生成器自身依赖
+cd npm-packages/@peri-sdk
+bun install                                  # SDK 与 OpenUI 源码依赖
 cd ../peri-cf
 bun install
 bun run dev                                  # prepare:wasm + Bun 服务 + Vite
@@ -141,14 +141,12 @@ bun run dev                                  # prepare:wasm + Bun 服务 + Vite
 bun run start                                # 需要已构建的 wasm/generated 与 dist/client
 ```
 
-SDK 来自 registry，安装即得到发布产物；CF 的 WASM 产物仍由本仓库的 Rust/Emscripten
-工具链构建（`build:wasm`/`prepare:wasm`，依赖 Emscripten 6.0.10）。`scripts/wasm-tools.ts`
-从 `node_modules` 读取已安装 SDK 的 `exports["./wasm"]` 校验入口，不再读取工作区兄弟
-目录。`peri-openui` 与 `peri-sandbox` 都是 `file:` 依赖：`bun install` 只链接工作区包目录，
-包自身依赖需先在各包目录安装（`peri-openui` 如上；`peri-sandbox` 首次运行前需在
-`npm-packages/peri-sandbox` 执行
-`bun run build`（其 `dist` 不入库）。CF 的根 `postinstall` 会运行该依赖的 `patch-sdk`，
-为 MCP 2.4.0 打任务结果补丁；`bun install --ignore-scripts` 后需手动执行
+SDK 通过 `file:../@peri-sdk` 链接工作区包，`dist` 需先在该包构建；CF 的 WASM 产物仍由本仓库的
+Rust/Emscripten 工具链构建（`build:wasm`/`prepare:wasm`，依赖 Emscripten 6.0.10）。
+`scripts/wasm-tools.ts` 从 `node_modules` 读取已链接 SDK 的 `exports["./wasm"]` 校验入口。
+`peri-sandbox` 也是 `file:` 依赖：`bun install` 只链接工作区包目录，其自身依赖需先在
+`npm-packages/peri-sandbox` 执行 `bun run build`（`dist` 不入库）。CF 的根 `postinstall` 会运行该依赖的
+`patch-sdk`，为 MCP 2.4.0 打任务结果补丁；`bun install --ignore-scripts` 后需手动执行
 `node node_modules/peri-sandbox/scripts/patch-sdk.mjs`。
 
 ## 验证
@@ -162,9 +160,9 @@ bun run build        # openui:check + prepare:wasm + Vite；需要 WASM 工具�
 ```
 
 - `bun test` 覆盖 frontend、scripts 与 server；真实模型/Store/远程 MCP 不在单测内。`bunfig.toml`
-  的 test preload 为链接包 `peri-openui` 做 React 去重（浏览器构建由 Vite `resolve.dedupe` 处理）。
-- OpenUI spec 过期时 `openui:check` 直接失败；修改 `../peri-openui/src/library.tsx` 后在该包运行
-  `bun run spec` 并提交 `spec.json`。
+  的 test preload 为 `@peri-code/sdk` 的 OpenUI 源码做 React 去重（浏览器构建由 Vite `resolve.dedupe` 处理）。
+- OpenUI spec 过期时 `openui:check` 直接失败；修改 `../@peri-sdk/src/openui/library.tsx` 后在 SDK 目录运行
+  `bun run openui:spec` 并提交 `spec.json`。
 - 浏览器包检查：`dist/client` 不应出现 `PERI_MODEL_API_KEY`、`PERI_STORAGE_TOKEN`、`node:fs` 或
   `@tursodatabase`。
 - 真实运行后端验收需要匹配源码的 WASM 产物与可用模型/Store；未验证平台必须标记 blocked。

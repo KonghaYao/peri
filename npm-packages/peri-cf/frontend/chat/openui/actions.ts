@@ -1,6 +1,6 @@
-import type { OpenUIActionEvent } from "peri-openui";
+import type { OpenUIActionEvent } from "@peri-code/sdk/openui";
 
-/** 渲染层 action 事件由 `peri-openui` 定义；聊天适配层再导出保持既有消费者不变。 */
+/** 渲染层 action 事件由 `@peri-code/sdk/openui` 定义；聊天适配层再导出保持既有消费者不变。 */
 export type { OpenUIActionEvent };
 
 export type ParsedOpenUIAction =

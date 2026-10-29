@@ -1,3 +1,3 @@
 [test]
-# 链接包 `peri-openui` 自带 React；测试期统一到宿主副本，见 frontend/test/react-dedupe.ts。
+# `@peri-code/sdk/openui` 以源文件引入并自带 React；测试期统一到宿主副本，见 frontend/test/react-dedupe.ts。
 preload = ["./frontend/test/react-dedupe.ts"]

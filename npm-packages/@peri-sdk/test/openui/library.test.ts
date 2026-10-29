@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { createParser } from "@openuidev/react-lang";
 import { generateSystemPrompt, type LibrarySpec, type SystemPromptOptions } from "@openuidev/lang-core";
-import artifact from "../spec.json";
-import { openuiLibrary, openuiPromptOptions } from "./library";
+import artifact from "../../src/openui/spec.json";
+import { openuiLibrary, openuiPromptOptions } from "../../src/openui/library";
 
 const EXPECTED_COMPONENTS = [
   "Stack",

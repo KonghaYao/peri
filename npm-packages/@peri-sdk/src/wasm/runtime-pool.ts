@@ -45,7 +45,7 @@ export interface WasmRuntimeLeaseOptions {
    * 清理可能在 `start` 拒绝之后才完成；池用它登记尚未结算的所有权，
    * 并在关闭时等待，避免「启动失败即无主」。
    */
-  onLateCleanupStart?: (cleanup: Promise<WasmRuntimeCleanupOutcome>) => void;
+  onLateCleanupStart?: (cleanup: Promise<WasmRuntimeCleanupOutcome | undefined>) => void;
 }
 
 export interface WasmRuntimeCloseReport extends WasmRuntimeCleanupOutcome {
@@ -160,7 +160,7 @@ export class WasmRuntimePool {
   /** 启动中的任务；`closeAll` 通过中止它们收敛并发启动。 */
   private readonly startups = new Map<AbortController, Promise<WasmRuntimeLease>>();
   /** 启动失败后仍在结算的迟到清理；`closeAll` 会等待它们。 */
-  private readonly pendingLateCleanups = new Set<Promise<WasmRuntimeCleanupOutcome>>();
+  private readonly pendingLateCleanups = new Set<Promise<WasmRuntimeCleanupOutcome | undefined>>();
   /** 任一次迟到清理未确认；在进程关闭前保持，避免继续复用容量。 */
   private lateCleanupUnconfirmed = false;
 
@@ -224,7 +224,7 @@ export class WasmRuntimePool {
       try {
         await withDeadline(
           Promise.allSettled([...this.pendingLateCleanups]),
-          this.options.closeTimeoutMs,
+          this.options.closeTimeoutMs ?? DEFAULT_WASM_RUNTIME_CLEANUP_TIMEOUT_MS,
           "Peri WASM late runtime cleanup",
         );
       } catch {

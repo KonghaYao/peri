@@ -1,14 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { installDom } from "../tests/dom";
+import { installDom } from "./dom";
 
 installDom();
 
 const { cleanup, render, screen } = await import("@testing-library/react");
 const { createElement } = await import("react");
-const { Stat, Stack, Text } = await import("./canvas");
-const { getHostTheme, setHostTheme } = await import("./canvas/hooks");
-const { installOpenUITheme, resolveOpenUIThemeKind } = await import("./theme");
-const openuiEntry = await import("./index");
+const { Stat, Stack, Text } = await import("../../src/openui/canvas");
+const { getHostTheme, setHostTheme } = await import("../../src/openui/canvas/hooks");
+const { installOpenUITheme, resolveOpenUIThemeKind } = await import("../../src/openui/theme");
+const openuiEntry = await import("../../src/openui/index");
 
 afterEach(() => {
   cleanup();

@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { ComponentType } from "react";
-import { installDom } from "../../tests/dom";
+import { installDom } from "./dom";
 
 installDom();
 
 const { cleanup, render, screen } = await import("@testing-library/react");
 const { createElement } = await import("react");
-const { ChangedFilesView, GaugeView, SourcesView } = await import("./containers");
+const { ChangedFilesView, GaugeView, SourcesView } = await import("../../src/openui/components/containers");
 
 afterEach(() => cleanup());
 

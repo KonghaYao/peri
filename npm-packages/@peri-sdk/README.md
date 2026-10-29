@@ -592,8 +592,21 @@ interface SandboxAdapterInstance {
 | `@peri-code/sdk/wasm-node` | `src/entries/wasm-node.ts` | `/wasm` 加 Node 兼容的网络/DNS 端口 |
 | `@peri-code/sdk/portable` | `src/entries/portable.ts` | 不装配 Bun/stdio 进程或本地 SQLite；Chat 控制面 + 执行准入核心 |
 | `@peri-code/sdk/sandbox` | `src/entries/sandbox.ts` | server-side（Node 22.12+ / Bun）；`SandboxAdapter` 契约 + `SandboxManager` 多实例注册表 + `SandboxHandle`；实现由宿主注入，SDK 不加载具体 adapter，session 由调用方组装并在 `createChat` 传入 |
+| `@peri-code/sdk/openui` | `src/openui/index.ts` | 轻量门面：围栏切分、主题桥与共享类型 |
+| `@peri-code/sdk/openui/renderer` | `src/openui/renderer.tsx` | `OpenUIProgram`；重出口，消费端应懒加载 |
+| `@peri-code/sdk/openui/error-boundary` | `src/openui/openui-error-boundary.tsx` | `OpenUIErrorBoundary`；同步兜底，不牵入 Renderer |
+| `@peri-code/sdk/openui/prompt` | `src/openui/prompt.ts` | 服务端提示词；只读 `spec.json`，不引入 React |
+| `@peri-code/sdk/openui/spec.json` | `src/openui/spec.json` | `{ spec, promptOptions }` 生成产物 |
 
 `src/entries/chat.ts` 是主入口与 `/portable` 共用的 Chat 门面，不对应独立包 subpath。`ChatViewRegistry` 只在主入口与 `/portable` 导出，`/view` 保持纯浏览器视图面。
+
+## OpenUI 源码 subpath
+
+`@peri-code/sdk/openui*` 五个入口直接发布 TS/TSX 源码，不单独构建，也不进入 `dist`。消费端需要能编译源码的打包器（Vite、Bun）；Node 原生 ESM 直接 import 不在支持范围内。
+
+- `src/openui/library.tsx` 是组件、props 与提示词选项的唯一事实源；修改后运行 `bun run openui:spec`，并提交 `src/openui/spec.json`。`bun run openui:check` 校验产物是否过期，`prebuild` 已前置该检查。
+- `src/openui/canvas/` 为 `peri-canvas@0.1.0` 的改写代码。
+- `react` / `react-dom` 是可选 peer 依赖；只有使用 Renderer/error-boundary 的宿主需要提供。
 
 ## 源码结构
 

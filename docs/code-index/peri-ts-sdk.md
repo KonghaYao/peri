@@ -13,6 +13,14 @@
 | `/wasm` | `src/entries/wasm.ts` | Emscripten ACP 运行后端、loader、`WasmAcpTransport` |
 | `/wasm-node` | `src/entries/wasm-node.ts` | `/wasm` + Node 网络/DNS 端口 |
 | `/sandbox` | `src/entries/sandbox.ts` | server-side（Node 22.12+/Bun）；`SandboxAdapter` 契约 + `SandboxManager` 按 `sandboxId` 管理多个 adapter 实例，支持 per-start 预算与创建参数冲突校验；`SandboxHandle` 暴露 `WorkspaceRef` 与 HTTP MCP descriptor，session 由调用方组装并在 `createChat({ workspace, session })` 传入；adapter 由宿主注入，SDK 不 import/动态 import/peer 依赖具体实现 |
+| `/openui` | `src/openui/index.ts` | 轻量门面：围栏切分、主题桥与共享类型 |
+| `/openui/renderer` | `src/openui/renderer.tsx` | `OpenUIProgram`；重出口，消费端应懒加载 |
+| `/openui/error-boundary` | `src/openui/openui-error-boundary.tsx` | `OpenUIErrorBoundary`；同步兜底，不牵入 Renderer |
+| `/openui/prompt` | `src/openui/prompt.ts` | 服务端提示词；只读 `spec.json`，不引入 React |
+| `/openui/spec.json` | `src/openui/spec.json` | `{spec, promptOptions}` 生成产物 |
+
+`/openui*` 五个入口直接发布 TS/TSX 源码，不进入 `dist`；消费端需要能编译源码的打包器
+（Vite/Bun）。模块细节见 [peri-openui](peri-openui.md)。
 
 旧 `Agent`、`ManagedAgents`、`SessionDocs`、`SessionViewStore`、`AtomicManagedAgentKv`、
 `agent-claim-conflict-error`、`Sandbox` 已删除，不在任何发布入口导出；`tests/public-view.test.ts`

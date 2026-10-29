@@ -1,7 +1,3 @@
-// Vendored from peri-canvas@0.1.0 (packages/canvas/src/hooks.ts), heavily reduced.
-// License declared MIT in packages/canvas/package.json; no repository LICENSE file.
-// Internal use only; do not redistribute without legal review.
-//
 // Upstream hooks also carried host-integration APIs (global bridge, persisted
 // canvas state, HTTP fetches, imperative state/action). peri-cf renders OpenUI
 // inside a chat message and owns interaction through the renderer, so those

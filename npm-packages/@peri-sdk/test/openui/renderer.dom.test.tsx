@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { installDom } from "../tests/dom";
+import { installDom } from "./dom";
 
 installDom();
 
@@ -17,7 +17,7 @@ Object.defineProperty(globalThis, "ResizeObserver", {
 
 const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { createElement } = await import("react");
-const { OpenUIProgram, openuiParseStats } = await import("./renderer");
+const { OpenUIProgram, openuiParseStats } = await import("../../src/openui/renderer");
 
 afterEach(() => {
   cleanup();

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { looksLikeOpenUIProgram, splitOpenUI } from "./fence";
+import { looksLikeOpenUIProgram, splitOpenUI } from "../../src/openui/fence";
 
 const PROGRAM = 'root = Stack([title])\ntitle = Text("你好")';
 

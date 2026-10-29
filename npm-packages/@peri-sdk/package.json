@@ -41,15 +41,39 @@
       "types": "./dist/entries/sandbox.d.ts",
       "import": "./dist/sandbox.js",
       "default": "./dist/sandbox.js"
+    },
+    "./openui": {
+      "types": "./src/openui/index.ts",
+      "import": "./src/openui/index.ts"
+    },
+    "./openui/renderer": {
+      "types": "./src/openui/renderer.tsx",
+      "import": "./src/openui/renderer.tsx"
+    },
+    "./openui/error-boundary": {
+      "types": "./src/openui/openui-error-boundary.tsx",
+      "import": "./src/openui/openui-error-boundary.tsx"
+    },
+    "./openui/prompt": {
+      "types": "./src/openui/prompt.ts",
+      "import": "./src/openui/prompt.ts"
+    },
+    "./openui/spec.json": {
+      "types": "./src/openui/spec.json",
+      "import": "./src/openui/spec.json"
     }
   },
   "files": [
     "dist",
+    "src/openui",
     "README.md"
   ],
   "scripts": {
     "build": "bun run scripts/build.ts",
     "build:workers": "bun examples/workers/build-worker.mjs",
+    "openui:spec": "bun scripts/generate-openui-spec.ts",
+    "openui:check": "bun scripts/generate-openui-spec.ts --check",
+    "prebuild": "bun run openui:check",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.demo.json && tsc --noEmit -p tsconfig.type-tests.json",
     "test": "bun run build && bun test",
     "dev": "bun run examples/demo/demo.ts",
@@ -59,16 +83,38 @@
     "smoke:workers": "bun examples/workers/smoke.mjs"
   },
   "devDependencies": {
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "bun-types": "^1.4.4",
+    "happy-dom": "^21.0.4",
     "hono": "^4.13.14",
     "peri-sandbox": "file:../peri-sandbox",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "typescript": "^7.0.2",
     "wrangler": "4.152.0"
   },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    }
+  },
   "dependencies": {
     "@microsoft/fetch-event-source": "2.0.1",
+    "@openuidev/lang-core": "1.0.2",
+    "@openuidev/react-lang": "1.0.2",
     "@tursodatabase/serverless": "1.4.1",
     "lib0": "^0.2.119",
-    "yjs": "^13.6.33"
+    "yjs": "^13.6.33",
+    "zod": "^4.6.7"
   }
 }

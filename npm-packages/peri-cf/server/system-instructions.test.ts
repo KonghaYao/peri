@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { OPENUI_ARTIFACT } from "peri-openui/prompt";
+import { OPENUI_ARTIFACT } from "@peri-code/sdk/openui/prompt";
 import type { ServerConfig } from "./config";
 import { defaultSessionOptions } from "./compose";
 import { OPENUI_SYSTEM_PROMPT } from "./openui-instructions";

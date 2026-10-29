@@ -3,10 +3,11 @@ import {
   type LibrarySpec,
   type SystemPromptOptions,
 } from "@openuidev/lang-core";
-import artifact from "../spec.json";
+import artifact from "./spec.json";
 
 /**
- * 服务端出口：只读提交入库的 `spec.json`，不 import React、canvas 或 library。
+ * OpenUI 服务端出口（`@peri-code/sdk/openui/prompt`）：只读提交入库的 `spec.json`，
+ * 不 import React、canvas 或 library。
  *
  * - 不传 `cloud`，本地纯函数生成，不产生 `]]>openui:config`；
  * - 生成失败直接抛错，由启动错误路径暴露，不静默降级。

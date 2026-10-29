@@ -19,7 +19,7 @@ import { dirname, relative, resolve, sep } from 'node:path';
  * - `frontend/chat/runtime` 不依赖 components / timeline / composer，也不引用 chat 出口；
  * - `frontend/chat/timeline` 与 `frontend/chat/composer` 互不依赖，也不依赖 components；
  * - `frontend/chat/components` 只经 runtime 使用 remote；
- * - `frontend/chat/openui` 只经 `peri-openui` 包入口取库能力，不深层引用 `src/`；
+ * - `frontend/chat/openui` 只经 `@peri-code/sdk/openui*` 四个入口取库能力，不深层引用源码；
  * - `server/api` 不依赖 registry/compose/index；
  * - `scripts` 不依赖 frontend/server。
  *
@@ -280,11 +280,27 @@ describe('production dependency direction', () => {
     expect(violations).toEqual([]);
   });
 
-  test('chat/openui takes library capabilities only from the peri-openui entrypoints', () => {
-    const deepLibraryImport = /^peri-openui\/src(\/|$)/;
+  test('chat/openui takes library capabilities only from the @peri-code/sdk OpenUI entrypoints', () => {
+    const allowed = new Set([
+      '@peri-code/sdk/openui',
+      '@peri-code/sdk/openui/renderer',
+      '@peri-code/sdk/openui/error-boundary',
+      '@peri-code/sdk/openui/prompt',
+    ]);
+    const openuiImport = /^@peri-code\/sdk\/(?:openui|src\/openui)(?:\/|$)/;
     const violations = productionImports
       .filter(({ importer, specifier }) => inModule('frontend/chat/openui', importer)
-        && deepLibraryImport.test(specifier))
+        && openuiImport.test(specifier)
+        && !allowed.has(specifier))
+      .map(({ importer, specifier }) => `${importer} → ${specifier}`);
+    expect(violations).toEqual([]);
+  });
+
+  test('chat/openui has no legacy peri-openui imports', () => {
+    const legacyImport = /^peri-openui(?:\/|$)/;
+    const violations = productionImports
+      .filter(({ importer, specifier }) => inModule('frontend/chat/openui', importer)
+        && legacyImport.test(specifier))
       .map(({ importer, specifier }) => `${importer} → ${specifier}`);
     expect(violations).toEqual([]);
   });

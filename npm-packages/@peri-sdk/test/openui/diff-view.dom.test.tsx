@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { installDom } from "../../tests/dom";
+import { installDom } from "./dom";
 
 installDom();
 
 const { cleanup, render, screen } = await import("@testing-library/react");
 const { createElement } = await import("react");
-const { DiffStats, formatCompactDiffCount } = await import("./diff-view");
+const { DiffStats, formatCompactDiffCount } = await import("../../src/openui/canvas/diff-view");
 
 afterEach(() => cleanup());
 

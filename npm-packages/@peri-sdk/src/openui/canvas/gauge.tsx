@@ -1,5 +1,3 @@
-// New in peri-openui (no vendored upstream). Shape inspired by t3code's
-// ContextWindowMeter; no t3code code or runtime dependency is copied.
 import type { CSSProperties, JSX } from "react";
 import { useHostTheme } from "./hooks";
 import { mergeStyle } from "./merge-style";

@@ -1,7 +1,7 @@
-import { generateOpenUISystemPrompt } from "peri-openui/prompt";
+import { generateOpenUISystemPrompt } from "@peri-code/sdk/openui/prompt";
 
 /**
- * 服务端系统提示词：只经 `peri-openui/prompt` 读取生成的 spec。
+ * 服务端系统提示词：只经 `@peri-code/sdk/openui/prompt` 读取生成的 spec。
  *
  * - 不传 `cloud`，本地纯函数生成，不产生 `]]>openui:config`；
  * - 服务端不 import React、canvas 或前端 library；
