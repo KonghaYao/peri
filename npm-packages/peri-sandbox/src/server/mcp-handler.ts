@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Server, createMcpHandler } from '@modelcontextprotocol/server';
+import { type Implementation, Server, createMcpHandler } from '@modelcontextprotocol/server';
 import { ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/client';
 import { z } from 'zod';
 import { SandboxError, type McpBackendPort } from '../instance/types.js';
@@ -7,6 +7,31 @@ import { SandboxError, type McpBackendPort } from '../instance/types.js';
 const objects = z.object({}).passthrough();
 const results = z.record(z.string(), z.unknown());
 const taskMethods = ['tasks/get', 'tasks/update', 'tasks/cancel'] as const;
+
+/**
+ * Keeps the SDK's 2026 identity stamp off custom-method results.
+ *
+ * rmcp 3.5.1 parses custom-method results with an untagged `ServerResult`
+ * whose `CallToolResult` variant matches any object carrying `_meta`. The
+ * encode seam stamps `io.modelcontextprotocol/serverInfo` into every result
+ * `_meta`, so a payload such as `skills/list` would deserialize as a bogus
+ * `CallToolResult` on the host. Spec-defined results keep the stamp; their
+ * typed host parsers accept `_meta`, and `server/discover` uses it to carry
+ * the mirrored identity.
+ */
+class TransparentServer extends Server {
+  #forwardedMethod: string | undefined;
+
+  setForwardedMethod(method: string): void {
+    this.#forwardedMethod = method;
+  }
+
+  protected override _outboundServerInfo(): Implementation | undefined {
+    if (this.#forwardedMethod !== undefined && !this._wireCodec().hasRequestMethod(this.#forwardedMethod))
+      return undefined;
+    return super._outboundServerInfo();
+  }
+}
 
 /**
  * MCP handler for one sandbox instance.
@@ -23,7 +48,7 @@ export function createSandboxMcpHandler(options: {
   const { sandboxId, backend } = options;
   return createMcpHandler(
     () => {
-      const server = new Server(backend.serverInfo() ?? { name: 'peri-sandbox', version: '0.1.0' }, {
+      const server = new TransparentServer(backend.serverInfo() ?? { name: 'peri-sandbox', version: '0.1.0' }, {
         capabilities: structuredClone(backend.serverCapabilities() ?? {}),
         instructions: backend.instructions(),
         supportedProtocolVersions: ['2026-07-28'],
@@ -40,6 +65,7 @@ export function createSandboxMcpHandler(options: {
         const correlationId = randomUUID();
         const begun = Date.now();
         let outcome = 'error';
+        server.setForwardedMethod(method);
         try {
           const token = context.mcpReq._meta?.progressToken as number | string | undefined;
           const result = await backend.request(method, params, {

@@ -8,6 +8,7 @@ import { Server, createMcpHandler } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
+import { createSandboxMcpHandler } from '../src/server/mcp-handler.js';
 import { PeriBackend } from '../src/runtime/backend.js';
 import { startHttpServer } from '../src/server/http.js';
 import type { McpBackendPort, McpBackendSubscription } from '../src/instance/types.js';
@@ -345,6 +346,48 @@ test('outer discover mirrors inner capabilities, identity and instructions', asy
     await client.close();
     await endpoint.close();
   }
+});
+
+test('custom method results keep resultType without the bridge serverInfo stamp', async () => {
+  const backend = new FakeSandboxBackend();
+  backend.handler = async (method) =>
+    method === 'skills/list' ? { skills: [{ name: 'core:commit' }] } : { tools: [] };
+  const handler = createSandboxMcpHandler({ sandboxId: 'sbx_test', backend });
+  const call = async (method: string) => {
+    const response = await handler.fetch(
+      new Request('http://127.0.0.1:7040/mcp', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+          'mcp-protocol-version': '2026-07-28',
+          'mcp-method': method,
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method,
+          params: {
+            _meta: {
+              'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+              'io.modelcontextprotocol/clientCapabilities': {},
+            },
+          },
+        }),
+      }),
+    );
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    const sse = /^data: (.*)$/m.exec(text)?.[1];
+    return JSON.parse(sse ?? text) as { result: Record<string, unknown> };
+  };
+  const custom = await call('skills/list');
+  assert.deepEqual(custom.result.skills, [{ name: 'core:commit' }]);
+  assert.equal(custom.result.resultType, 'complete');
+  assert.equal('_meta' in custom.result, false);
+  const spec = await call('tools/list');
+  assert.equal(spec.result.resultType, 'complete');
+  assert.deepEqual((spec.result._meta as Record<string, unknown>)['io.modelcontextprotocol/serverInfo'], backend.info);
 });
 
 test('resources, prompts, skills, tools, tasks and unknown methods are forwarded verbatim', async () => {
