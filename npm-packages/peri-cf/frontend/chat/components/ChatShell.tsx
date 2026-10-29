@@ -120,6 +120,15 @@ export function ChatShellView({ chat, onOpenSettings }: ChatShellViewProps) {
 
   const newChat = useCallback(() => selectFromSidebar(null), [selectFromSidebar]);
 
+  const newChatInProject = useCallback((projectId: string) => {
+    setSidebarOpen(false);
+    void select(null, { projectId });
+  }, [select]);
+
+  const createProject = useCallback(async (name: string) => {
+    await chat.createProject(name);
+  }, [chat.createProject]);
+
   const refreshList = useCallback(() => {
     void chat.refreshList();
   }, [chat.refreshList]);
@@ -156,13 +165,17 @@ export function ChatShellView({ chat, onOpenSettings }: ChatShellViewProps) {
     <div className="bg-background text-foreground flex h-dvh min-h-[320px] overflow-hidden">
       <Sidebar
         chats={chat.chats}
+        projects={chat.projects}
         selectedId={chat.selected?.id}
         selectedRunning={chat.state?.running === true}
         loading={chat.listLoading}
+        projectsLoading={chat.projectsLoading}
         disabled={navigationDisabled}
         open={sidebarOpen}
         onClose={closeSidebar}
         onNew={newChat}
+        onNewInProject={newChatInProject}
+        onCreateProject={createProject}
         onRefresh={refreshList}
         onSelect={selectFromSidebar}
       />

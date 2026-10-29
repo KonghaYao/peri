@@ -12,6 +12,12 @@ import {
 import { ChatCloseIncompleteError, WorkspaceMismatchError } from "@peri-code/sdk";
 import { logError } from "../logging";
 import type { MonitorSource } from "../monitor";
+import {
+  ProjectNameConflictError,
+  ProjectNameError,
+  ProjectNotFoundError,
+  type ProjectView,
+} from "../projects";
 import { SandboxStartError } from "../sandbox";
 import {
   chatNotFound,
@@ -24,9 +30,15 @@ import {
 type ApiRegistry = {
   chats: Pick<ChatManagerContract, "getChat" | "findChatBySession">;
   /** 注入 workspace、agent 与 sandbox 后创建句柄；HTTP 层不构造模型/工具面设置。 */
-  createChat(target?: { path?: string; sessionId?: string }): Promise<ChatServiceContract>;
+  createChat(target?: {
+    path?: string;
+    sessionId?: string;
+    projectId?: string;
+  }): Promise<ChatServiceContract>;
   /** 合并旧 `/workspace` 与每个 sandbox 工作区的会话目录。 */
-  listSessions(path?: string): Promise<ChatSessionDirectoryEntry[]>;
+  listSessions(path?: string): Promise<(ChatSessionDirectoryEntry & { projectId: string })[]>;
+  listProjects(): Promise<ProjectView[]>;
+  createProject(name: unknown): Promise<ProjectView>;
   closeChat(id: string): Promise<void>;
   hasPendingClose(id: string): boolean;
 };
@@ -207,6 +219,50 @@ export function createApi(deps: ApiOptions): Hono {
     }
   });
 
+  app.get("/api/projects", async (c) => {
+    try {
+      return c.json({ projects: await deps.registry.listProjects() });
+    } catch (error) {
+      logError("[peri-cf] Peri project directory is unavailable", error);
+      return c.json({
+        projects: [],
+        available: false,
+        code: "projects_unavailable",
+        message: "Project directory is unavailable",
+      }, 503);
+    }
+  });
+
+  app.post("/api/projects", async (c) => {
+    const body = await c.req.text();
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return c.json({ ok: false, code: "invalid_request", message: "Body is not valid JSON" }, 400);
+    }
+    if (!isRecord(parsed)) {
+      return c.json({ ok: false, code: "invalid_request", message: "Body must be an object" }, 400);
+    }
+    try {
+      const project = await deps.registry.createProject(parsed.name);
+      return c.json({ project }, 201);
+    } catch (error) {
+      if (error instanceof ProjectNameError) {
+        return c.json({ ok: false, code: "invalid_project_name", message: error.message }, 400);
+      }
+      if (error instanceof ProjectNameConflictError) {
+        return c.json({ ok: false, code: "project_name_conflict", message: error.message }, 409);
+      }
+      logError("[peri-cf] Peri project creation failed", error);
+      return c.json({
+        ok: false,
+        code: "projects_unavailable",
+        message: "Project directory is unavailable",
+      }, 503);
+    }
+  });
+
   app.post("/api/chats", async (c) => {
     const body = await c.req.text();
     let parsed: unknown = {};
@@ -231,10 +287,21 @@ export function createApi(deps: ApiOptions): Hono {
     if (path !== undefined && sessionId !== undefined) {
       return c.json({ ok: false, code: "invalid_request", message: "path and sessionId are mutually exclusive" }, 400);
     }
+    const projectId = parsed.projectId;
+    if (projectId !== undefined && (typeof projectId !== "string" || projectId.length === 0)) {
+      return c.json({ ok: false, code: "invalid_request", message: "projectId must be a non-empty string" }, 400);
+    }
+    if (projectId !== undefined && (path !== undefined || sessionId !== undefined)) {
+      return c.json({
+        ok: false,
+        code: "invalid_request",
+        message: "projectId cannot be combined with path or sessionId",
+      }, 400);
+    }
     // 只登记句柄；历史会话的 sandbox 在此按 sessionId 解析并启动。
     let chat: ChatServiceContract;
     try {
-      chat = await deps.registry.createChat({ path, sessionId });
+      chat = await deps.registry.createChat({ path, sessionId, projectId });
     } catch (error) {
       if (error instanceof WorkspaceMismatchError) {
         return c.json({
@@ -243,8 +310,15 @@ export function createApi(deps: ApiOptions): Hono {
           message: error.message,
         }, 400);
       }
+      if (error instanceof ProjectNotFoundError) {
+        return c.json({
+          ok: false as const,
+          code: "project_not_found",
+          message: error.message,
+        }, 404);
+      }
       if (error instanceof SandboxStartError) {
-        logError("[peri-cf] Peri sandbox failed to start", error, { sessionId });
+        logError("[peri-cf] Peri sandbox failed to start", error, { sessionId, projectId });
         return c.json({
           ok: false as const,
           code: "sandbox_start_failed",

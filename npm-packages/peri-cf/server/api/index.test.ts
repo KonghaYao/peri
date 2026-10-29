@@ -360,11 +360,14 @@ describe("server api", () => {
     }
   });
 
-  test("目录只返回 Store 事实并标记 available", async () => {
+  test("目录返回 Store 事实并附加项目归属", async () => {
     const { app } = apiWith();
     const response = await app.request("/api/chats");
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ chats: [entry], available: true });
+    expect(await response.json()).toEqual({
+      chats: [{ ...entry, projectId: "default" }],
+      available: true,
+    });
     expect(JSON.stringify(await (await app.request("/api/chats")).json()))
       .not.toContain("running");
   });

@@ -18,6 +18,14 @@ import {
   type InstanceBusinessSnapshot,
 } from "./instance-metrics";
 import {
+  DEFAULT_PROJECT_ID,
+  ProjectNotFoundError,
+  defaultProjectView,
+  type ProjectRecord,
+  type ProjectStore,
+  type ProjectView,
+} from "./projects";
+import {
   listSandboxWorkspaces,
   parseSandboxWorkspace,
   type SandboxLease,
@@ -58,6 +66,8 @@ function toSessionPath(workspace: WorkspaceRef, path: string | undefined): strin
 export interface ChatTarget {
   path?: string;
   sessionId?: string;
+  /** 目标项目；`default` 与缺省等价，表示新会话使用独立 sandbox。 */
+  projectId?: string;
 }
 
 /** 注册表装配依赖；`sandbox` 缺省表示禁用每会话 sandbox。 */
@@ -69,6 +79,13 @@ export interface ChatRegistryOptions {
   sandbox?: SandboxPoolPort;
   /** 与 `sandbox` 同源；只用于把 cwd 解析回 `<root>/<sandboxId>/workspace`。 */
   sandboxesRoot?: string;
+  /** 项目清单；未装配时所有会话归入默认项目。 */
+  projects?: ProjectStore;
+}
+
+/** 会话目录条目 + 项目归属；`projectId` 由 cwd 推导，不写入 Store。 */
+export interface ProjectSessionEntry extends ChatSessionDirectoryEntry {
+  projectId: string;
 }
 
 /** 监控读面：实例快照 + 当前会话 + 业务计数；业务计数不可用时为 null。 */
@@ -126,6 +143,10 @@ export class ChatRegistry {
       const leased = await this.leaseForSession(target.sessionId);
       if (leased) return this.track(await this.createSandboxedChat(leased.lease, leased.sessionPath));
       return this.track(this.createLegacyChat(DEFAULT_SESSION_PATH));
+    }
+    if (target.projectId !== undefined && target.projectId !== DEFAULT_PROJECT_ID) {
+      const lease = await this.leaseForProject(target.projectId);
+      return this.track(await this.createSandboxedChat(lease));
     }
     if (this.options.sandbox) {
       const lease = await this.options.sandbox.acquire();
@@ -190,8 +211,8 @@ export class ChatRegistry {
    * Store 的目录 SQL 按 cwd 精确匹配，因此必须逐个 sandbox 查询；sandbox 数量
    * 等于本机历史会话数，量级由部署决定。sandbox 目录不存在按空处理。
    */
-  async listSessions(path?: string): Promise<ChatSessionDirectoryEntry[]> {
-    if (path !== undefined) return this.chats.listSessions({ path });
+  async listSessions(path?: string): Promise<ProjectSessionEntry[]> {
+    if (path !== undefined) return await this.withProjectIds(await this.chats.listSessions({ path }));
     const merged = new Map<string, ChatSessionDirectoryEntry>();
     for (const entry of await this.chats.listSessions()) merged.set(entry.sessionId, entry);
     if (this.options.sandbox && this.options.sandboxesRoot) {
@@ -201,8 +222,38 @@ export class ChatRegistry {
         }
       }
     }
-    return [...merged.values()].sort((a, b) =>
+    const sorted = [...merged.values()].sort((a, b) =>
       b.updatedAt.localeCompare(a.updatedAt) || b.sessionId.localeCompare(a.sessionId));
+    return await this.withProjectIds(sorted);
+  }
+
+  /** 项目读面：默认项目始终存在，其余来自清单。 */
+  async listProjects(): Promise<ProjectView[]> {
+    const store = this.options.projects;
+    if (!store) return [defaultProjectView()];
+    return await store.listViews();
+  }
+
+  /** 名称校验与冲突在 ProjectStore 内完成；HTTP 层只做错误映射。 */
+  async createProject(rawName: unknown): Promise<ProjectView> {
+    const store = this.options.projects;
+    if (!store) throw new Error("Project store is not configured");
+    return await store.create(rawName);
+  }
+
+  /** 给目录条目补项目归属；Store 目录不带项目字段，归属只由 cwd 派生。 */
+  private async withProjectIds(
+    entries: ChatSessionDirectoryEntry[],
+  ): Promise<ProjectSessionEntry[]> {
+    const { projects, sandboxesRoot } = this.options;
+    if (!projects || !sandboxesRoot) {
+      return entries.map((entry) => ({ ...entry, projectId: DEFAULT_PROJECT_ID }));
+    }
+    const records: ProjectRecord[] = await projects.list();
+    return entries.map((entry) => ({
+      ...entry,
+      projectId: projects.projectIdForCwd(entry.cwd, records, sandboxesRoot),
+    }));
   }
 
   /** 成功关闭后释放该 Chat 的视图与 sandbox 租约；任一步失败都显式上报。 */
@@ -304,6 +355,37 @@ export class ChatRegistry {
     }
     this.chatSandboxes.set(chat.id, lease);
     return chat;
+  }
+
+  /**
+   * 项目 → sandbox 租约。
+   *
+   * 首次使用时绑定新 sandbox 并写回清单；并发首次创建会竞争绑定，落败方
+   * 释放自己的租约并改用已绑定的 sandbox，保证一个项目只有一个工作区。
+   */
+  private async leaseForProject(projectId: string): Promise<SandboxLease> {
+    const { sandbox, projects } = this.options;
+    if (!sandbox) throw new Error("Sandbox pool is not configured");
+    if (!projects) throw new Error("Project store is not configured");
+    const project = await projects.get(projectId);
+    if (!project) throw new ProjectNotFoundError(`项目不存在：${projectId}`);
+    if (project.sandboxId !== null) return await sandbox.acquire(project.sandboxId);
+
+    const lease = await sandbox.acquire();
+    let assigned;
+    try {
+      assigned = await projects.assignSandbox(project.id, lease.sandboxId);
+    } catch (error) {
+      await lease.release().catch(() => undefined);
+      throw error;
+    }
+    if (assigned.sandboxId === null) {
+      await lease.release().catch(() => undefined);
+      throw new Error(`项目 ${project.id} 未绑定 sandbox`);
+    }
+    if (assigned.sandboxId === lease.sandboxId) return lease;
+    await lease.release().catch(() => undefined);
+    return await sandbox.acquire(assigned.sandboxId);
   }
 
   /** 历史会话 → sandbox 租约；旧 `/workspace` 会话返回 `undefined`。 */

@@ -24,6 +24,7 @@ import {
 } from "./compose";
 import { ChatRegistry } from "./registry";
 import { createMonitor } from "./monitor";
+import { ProjectStore } from "./projects";
 import { createSandboxPool } from "./sandbox";
 
 /**
@@ -91,7 +92,11 @@ export function startServer(
       session: defaultSessionOptions(config),
       sessions: database,
       ...(sandbox
-        ? { sandbox, sandboxesRoot: config.sandbox.root }
+        ? {
+            sandbox,
+            sandboxesRoot: config.sandbox.root,
+            projects: new ProjectStore(config.sandbox.root),
+          }
         : {}),
     },
   );

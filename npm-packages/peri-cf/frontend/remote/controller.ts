@@ -4,7 +4,7 @@ import {
   type ToolPayloadResponse,
 } from "@peri-code/sdk";
 import { logError } from "./logging";
-import { type ActionTargetDTO, type Chat, type ChatSummary } from "./contracts";
+import { type ActionTargetDTO, type Chat, type ChatSummary, type ProjectSummary } from "./contracts";
 import { ChatProjection } from "./projection";
 import {
   RemoteActionError, RemoteSendReceipt,
@@ -35,6 +35,8 @@ interface ActiveChat extends ChatHandleRecord {
 export interface ChatControllerDeps {
   actions: RemoteActions;
   list(signal?: AbortSignal): Promise<ChatSummary[]>;
+  listProjects(signal?: AbortSignal): Promise<ProjectSummary[]>;
+  createProject(name: string, signal?: AbortSignal): Promise<ProjectSummary>;
   syncUrl(chatAddress: string): string;
   webSocketFactory?: (url: string) => WebSocketLike;
   /** 首次同步预算；超时只报告失败，不关闭服务端句柄。 */
@@ -48,6 +50,9 @@ const DELIVERY_UNCONFIRMED = "消息尚未确认送达，请检查连接后重�
 function sameChat(left: Chat | null, right: Chat | null): boolean {
   return left?.id === right?.id && left?.title === right?.title && left?.updatedAt === right?.updatedAt;
 }
+
+/** 打开历史会话只需要目录身份；`projectId` 等其余字段不参与绑定。 */
+type OpenChatTarget = Pick<ChatSummary, "sessionId" | "title" | "updatedAt">;
 
 /**
  * 页面级 Chat 控制器：句柄身份、两步打开历史、绑定代次、Action 与同步连接。
@@ -66,6 +71,8 @@ export class ChatController {
   private active: ActiveChat | undefined;
   private disposed = false;
   private selection = 0;
+  /** 下一次新建会话的目标项目；打开历史会话时清空。 */
+  private newProjectId: string | undefined;
   private actionError = "";
   private connectionError = "";
   private dismissedError = "";
@@ -91,6 +98,14 @@ export class ChatController {
     return this.deps.list(signal);
   }
 
+  listProjects(signal?: AbortSignal): Promise<ProjectSummary[]> {
+    return this.deps.listProjects(signal);
+  }
+
+  createProject(name: string): Promise<ProjectSummary> {
+    return this.deps.createProject(name);
+  }
+
   currentChatId(): string | null {
     return this.view.selected?.id ?? null;
   }
@@ -98,9 +113,15 @@ export class ChatController {
   /**
    * 打开历史会话：先 POST /api/chats 取得句柄，再 change_session，收到 202 后才连 WS。
    * 同一客户端已绑定过的会话复用句柄，不重复换绑。
+   *
+   * `options.projectId` 只对新建会话生效；项目内的新会话共享项目 sandbox。
    */
-  async openChat(target: ChatSummary | null): Promise<boolean> {
+  async openChat(
+    target: OpenChatTarget | null,
+    options: { projectId?: string } = {},
+  ): Promise<boolean> {
     if (this.disposed) return false;
+    this.newProjectId = target === null ? options.projectId : undefined;
     const selected = target === null ? null : toChat(target);
     const boundId = this.active?.projection.state().chat.id ?? null;
     if (target !== null && boundId === selected!.id
@@ -139,7 +160,12 @@ export class ChatController {
    */
   async reloadChat(): Promise<boolean> {
     if (this.disposed) return false;
-    if (!this.view.selected) return await this.openChat(null);
+    if (!this.view.selected) {
+      return await this.openChat(
+        null,
+        this.newProjectId === undefined ? {} : { projectId: this.newProjectId },
+      );
+    }
     if (this.view.state?.running && !this.view.state.executionBlocked
       && this.view.loadState !== "failed" && this.view.liveSync !== "failed") return false;
     const selected = this.view.selected;
@@ -152,7 +178,7 @@ export class ChatController {
     // 先释放 active，`openChat` 也不会命中同 id 的「已打开」短路。
     this.releaseActive();
     return await this.openChat({
-      ...selected, sessionId: selected.id, title: selected.title, cwd: "", messageCount: 0, createdAt: selected.updatedAt,
+      sessionId: selected.id, title: selected.title, updatedAt: selected.updatedAt,
     });
   }
 
@@ -180,7 +206,10 @@ export class ChatController {
     this.actionError = "";
     this.connectionError = "";
     this.clearCancel();
-    return await this.openChat(null);
+    return await this.openChat(
+      null,
+      this.newProjectId === undefined ? {} : { projectId: this.newProjectId },
+    );
   }
 
   /**
@@ -387,7 +416,9 @@ export class ChatController {
   // ------------------------------------------------------------------
 
   private async openNew(token: number): Promise<boolean> {
-    const handle = await this.deps.actions.createHandle();
+    const handle = await this.deps.actions.createHandle(
+      this.newProjectId === undefined ? {} : { projectId: this.newProjectId },
+    );
     if (token !== this.selection || this.disposed) {
       await this.closeCandidate(handle.id);
       return false;
@@ -418,7 +449,7 @@ export class ChatController {
     return await this.activate(record, token);
   }
 
-  private async openExisting(target: ChatSummary, token: number): Promise<boolean> {
+  private async openExisting(target: OpenChatTarget, token: number): Promise<boolean> {
     const sessionId = target.sessionId;
     let record = this.handles.get(sessionId);
     if (!record) {
@@ -675,6 +706,6 @@ export class ChatController {
   }
 }
 
-function toChat(summary: ChatSummary): Chat {
+function toChat(summary: OpenChatTarget): Chat {
   return { id: summary.sessionId, title: summary.title ?? "新会话", updatedAt: summary.updatedAt };
 }

@@ -29,6 +29,7 @@ function summary(sessionId: string, title = sessionId): ChatSummary {
   return {
     sessionId, title, cwd: '/workspace', messageCount: 1,
     createdAt: '2026-10-20T00:00:00Z', updatedAt: '2026-10-20T01:00:00Z',
+    projectId: 'default',
   };
 }
 
@@ -162,6 +163,10 @@ function harness(options: HarnessOptions = {}) {
   const controller = new ChatController({
     actions,
     list: async () => [summary('session-1'), summary('session-2')],
+    listProjects: async () => [],
+    createProject: async (name) => ({
+      id: 'project-1', name, createdAt: '2026-10-20T00:00:00Z', isDefault: false,
+    }),
     syncUrl: (address) => { log.push(`sync:${address}`); return `ws://example.test/${address}`; },
     webSocketFactory: (url) => {
       const socket = new FakeSocket();

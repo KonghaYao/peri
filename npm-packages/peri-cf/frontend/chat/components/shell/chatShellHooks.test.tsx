@@ -36,6 +36,7 @@ function baseChat() {
 const summary = (sessionId: string) => ({
   sessionId, title: sessionId, cwd: '/workspace', messageCount: 0,
   createdAt: '2026-10-20T00:00:00Z', updatedAt: '2026-10-20T00:00:00Z',
+  projectId: 'default',
 });
 
 describe('useComposerDrafts', () => {

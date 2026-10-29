@@ -12,13 +12,14 @@ function summary(sessionId: string, title = sessionId, updatedAt = '2026-10-06T0
   return {
     sessionId, title, updatedAt,
     cwd: '/workspace', messageCount: 0, createdAt: '2026-10-05T00:00:00Z',
+    projectId: 'default',
   };
 }
 
 const scopes: ReturnType<typeof createChatQueries>[] = [];
 
 function scope(list = async () => [summary('first')]) {
-  const queries = createChatQueries({ list });
+  const queries = createChatQueries({ list, projects: async () => [] });
   scopes.push(queries);
   return queries;
 }

@@ -21,6 +21,24 @@ const chatSummarySchema = z.object({
   messageCount: z.number().int().nonnegative(),
   createdAt: z.string(),
   updatedAt: z.string(),
+  /** 服务端按会话 cwd 推导；Store 目录本身不保存项目字段。 */
+  projectId: z.string().min(1),
+});
+
+/** 项目是 sandbox 工作区的展示归属；默认项目聚合未归组会话。 */
+export const projectSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  createdAt: z.string(),
+  isDefault: z.boolean(),
+});
+
+export const projectListResponseSchema = z.object({
+  projects: z.array(projectSchema),
+});
+
+export const projectCreateResponseSchema = z.object({
+  project: projectSchema,
 });
 
 export const chatDirectoryResponseSchema = z.object({
@@ -315,12 +333,13 @@ export type AskUserQuestionDTO = z.infer<typeof askUserQuestionSchema>;
 export type MonitorSnapshot = z.infer<typeof monitorSnapshotSchema>;
 export type Chat = z.infer<typeof chatSchema>;
 export type ChatSummary = z.infer<typeof chatSummarySchema>;
+export type ProjectSummary = z.infer<typeof projectSchema>;
 
-/** 编译期守卫：目录 DTO 与 SDK 目录条目的字段集合必须完全一致。 */
+/** 编译期守卫：除服务端派生的 `projectId` 外，目录 DTO 与 SDK 条目字段集合必须一致。 */
 type AssertSameKeys<A, B> = [Exclude<keyof A, keyof B> | Exclude<keyof B, keyof A>] extends [never]
   ? true
   : { driftedKeys: Exclude<keyof A, keyof B> | Exclude<keyof B, keyof A> };
-const _directoryKeysMatchSdk: AssertSameKeys<ChatSummary, ChatSessionDirectoryEntry> = true;
+const _directoryKeysMatchSdk: AssertSameKeys<Omit<ChatSummary, "projectId">, ChatSessionDirectoryEntry> = true;
 export type ChatHandleDTO = z.infer<typeof chatHandleSchema>;
 export type ActionTargetDTO = z.infer<typeof actionTargetSchema>;
 export type ChatActionSuccessDTO = z.infer<typeof chatActionSuccessSchema>;

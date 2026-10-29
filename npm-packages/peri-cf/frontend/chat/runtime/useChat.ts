@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore
 import { useQuery } from '@tanstack/react-query';
 import type { InteractionAnswer } from '@peri-code/sdk/view';
 import { createChatApplication, type ChatController } from '../../remote';
-import { createChatQueries, LIST_POLL_ACTIVITY_MS, listRefetchInterval } from './queries';
+import { createChatQueries, LIST_POLL_ACTIVITY_MS, LIST_POLL_IDLE_INTERVAL_MS, listRefetchInterval } from './queries';
 import { chatPayloadReader } from './payloadReader';
 import type { Chat, ChatRecovery, ChatSendOutcome, ChatSummary } from './types';
 
@@ -84,6 +84,7 @@ export function useChat() {
   const controllerRef = useRef<ChatController | null>(null);
   const api = useMemo(() => ({
     list: (signal?: AbortSignal) => controllerRef.current?.listChats(signal) ?? Promise.resolve([]),
+    projects: (signal?: AbortSignal) => controllerRef.current?.listProjects(signal) ?? Promise.resolve([]),
   }), []);
   const queries = useMemo(() => createChatQueries(api), [api]);
   const controller = useMemo(() => createChatApplication(), []);
@@ -96,6 +97,13 @@ export function useChat() {
     // 隐藏 tab 不轮询；可见 tab 空闲时低频刷新目录事实。
     refetchIntervalInBackground: false,
     // 回到页面时立即补一次目录事实。
+    refetchOnWindowFocus: true,
+  }, queries.client);
+  const projectList = useQuery({
+    ...queries.projects,
+    // 项目清单变化远低于会话目录：跟随可见性低频刷新即可。
+    refetchInterval: visible ? LIST_POLL_IDLE_INTERVAL_MS : false,
+    refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
   }, queries.client);
   const cleanupTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -129,15 +137,26 @@ export function useChat() {
   }, [controller]);
 
   const refreshList = useCallback(async () => {
-    await list.refetch({ cancelRefetch: true });
-  }, [list.refetch]);
-  const selectChat = useCallback(async (chat: ChatSummary | null) => {
-    const opened = await controller.openChat(chat);
+    await Promise.all([
+      list.refetch({ cancelRefetch: true }),
+      projectList.refetch({ cancelRefetch: true }),
+    ]);
+  }, [list.refetch, projectList.refetch]);
+  const selectChat = useCallback(async (
+    chat: ChatSummary | null,
+    options?: { projectId?: string },
+  ) => {
+    const opened = await controller.openChat(chat, options);
     // 切换会话时刷新目录：发现外部客户端新建/结算的后台会话。
     bumpActivity();
     void list.refetch({ cancelRefetch: true });
     return opened;
   }, [controller, bumpActivity, list.refetch]);
+  const createProject = useCallback(async (name: string) => {
+    const project = await controller.createProject(name);
+    await projectList.refetch({ cancelRefetch: true });
+    return project;
+  }, [controller, projectList.refetch]);
   const reloadChat = useCallback(async () => {
     const opened = await controller.reloadChat();
     bumpActivity();
@@ -174,10 +193,11 @@ export function useChat() {
   });
 
   return {
-    ...view, chats: list.data ?? [], listLoading: list.isFetching,
+    ...view, chats: list.data ?? [], projects: projectList.data ?? [],
+    listLoading: list.isFetching, projectsLoading: projectList.isFetching,
     chatError, listError, error: chatError || listError, banners,
     payloadReader, answerInteraction,
-    refreshList, selectChat, reloadChat, rebuildChat, currentChatId, send, stop,
+    refreshList, selectChat, createProject, reloadChat, rebuildChat, currentChatId, send, stop,
     setConfigOption,
     dismissChatError, dismissListError,
   };

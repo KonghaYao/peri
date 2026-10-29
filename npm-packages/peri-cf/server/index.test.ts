@@ -128,7 +128,10 @@ describe("server wiring", () => {
 
       const chats = await fetch(`http://127.0.0.1:${server.port}/api/chats`);
       expect(chats.status).toBe(200);
-      expect(await chats.json()).toEqual({ chats: [directory], available: true });
+      expect(await chats.json()).toEqual({
+        chats: [{ ...directory, projectId: "default" }],
+        available: true,
+      });
 
       const missing = await fetch(
         `http://127.0.0.1:${server.port}/api/chats/missing/sync`,

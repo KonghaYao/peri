@@ -87,6 +87,7 @@ function openUIState(text: string, chatId = 'chat-openui') {
 const summary = (sessionId: string, title = sessionId) => ({
   sessionId, title, updatedAt: '2026-10-20T00:00:00Z',
   cwd: '/workspace', messageCount: 0, createdAt: '2026-10-20T00:00:00Z',
+  projectId: 'default',
 });
 
 /** 展示身份 `Chat` 由 `sessionId` 派生，和 `toChat` 一致。 */
@@ -119,6 +120,10 @@ function fakeChat(options: FakeOptions = {}) {
       selected: selected(), state: null, phase: 'idle', historyReady: true,
       loadState: 'ready', liveSync: 'synced', error: '', chatError: '', listError: '',
       chats: [], listLoading: false, banners: {},
+      projects: [], projectsLoading: false,
+      createProject: async (name: string) => ({
+        id: `project-${name}`, name, createdAt: '2026-10-20T00:00:00Z', isDefault: false,
+      }),
       payloadReader: {}, answerInteraction: async () => {},
       refreshList: async () => { calls.refresh += 1; },
       selectChat: async () => { calls.selected.push(null); return true; },
