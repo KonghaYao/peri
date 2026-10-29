@@ -4,7 +4,7 @@
 
 SDK 主入口不启动或停止 Peri CLI、Workspace 进程，也不提供本地 SQLite 后端。可选的 `@peri-code/sdk/sandbox` server-side 子入口按宿主显式注入的 adapter 管理 sandbox 生命周期。宿主负责提供 transport、持久化 Store，并在路由层保证同一 Session 只落在一个实例上。
 
-下面的接入代码来自 [`peri-cf`](../peri-cf/server/agent/compose.ts) 的真实装配，而不是抽象伪代码。
+下面示例是宿主中可直接照抄的装配顺序。
 
 ## 适合什么场景
 
@@ -24,7 +24,7 @@ bun add unstorage
 
 ## 快速开始
 
-完整例子按 `peri-cf/server/agent/compose.ts` 的装配顺序展开。`store.storage` 与 `machineId` 是接入时最容易混淆的两个字段，注释里写明了区别。
+按接入顺序展开：Store → Manager → Chat。`store.storage` 与 `machineId` 最容易混淆。
 
 ```ts
 import { createStorage } from "unstorage";
@@ -33,29 +33,22 @@ import {
   type PeriConfig, type KvStorage,
 } from "@peri-code/sdk";
 
-// 1. Store 连接只声明一次：database 同时提供 SDK 只读目录与 Peri 写侧配置。
-//    本地 sqld 也要求非空 authToken；生产从环境变量或密钥管理读取。
+// 1. Store 连接只声明一次；本地 sqld 也要求非空 authToken。
 const storeConnection = {
   url: process.env.PERI_STORAGE_URL ?? "http://127.0.0.1:8081",
   authToken: process.env.PERI_STORAGE_TOKEN ?? "local-dev",
 };
 
-// 2. SDK 的会话目录：TursoStorage 直接实现 ChatDatabase（只读）。
-//    store.storage 使用它的 storageConfig 纯 JSON 快照；写入仍由 Peri 完成。
+// 2. SDK 会话目录（只读）；store.storage 复用同一连接配置，写入仍由 Peri 完成。
 const database = new TursoStorage(storeConnection);
 
-// 3. Session ownership：只需 getItem/setItem/removeItem。
-//    peri-cf 默认用 unstorage 的进程内 memory storage；
-//    多实例必须换共享 driver，并由路由层保证单实例绑定。
+// 3. Session ownership：只需 getItem/setItem/removeItem；多实例必须换共享 driver。
 const kv: KvStorage = createStorage();
 
-// 4. machineId：宿主持久化的 UUID，标识一个逻辑执行环境。
-//    peri-cf 从 PERI_MACHINE_ID 读取并校验 UUID。
-//    不要用 sessionId/workspaceId 代替，也不要每次启动随机生成；
-//    换 machineId 后，旧 Workspace/Session 可能无法按原身份找到。
+// 4. machineId：宿主持久化的逻辑执行环境 UUID，不是 session/workspace id。
 const machineId = process.env.PERI_MACHINE_ID ?? "00000000-0000-4000-8000-000000000001";
 
-// 5. PeriConfig：与 peri-cf 一样，模型与 Store 凭据只存在于服务端进程。
+// 5. 模型与 Store 凭据只存在于服务端进程。
 const settings: PeriConfig = {
   config: {
     active_alias: "sonnet",
@@ -71,7 +64,7 @@ const settings: PeriConfig = {
         model: process.env.PERI_MODEL_ID!,
       },
     },
-    // peri-cf 按部署开启需要的 harness；这里只保留最小对话能力。
+    // 按部署开启需要的 harness，这里只保留最小对话能力。
     meta_harness: {
       ...BareHarnessConfig,
       TodoMiddleware: true,
@@ -82,9 +75,9 @@ const settings: PeriConfig = {
 };
 
 const manager = new ChatManager({
-  // Manager = 部署/Store 边界：Store 与机器身份由整个 Manager 共享。
+  // Manager 共享 Store 与机器身份。
   store: {
-    storage: database.storageConfig, // 纯 JSON 连接配置；Peri 写侧使用同一 Store
+    storage: database.storageConfig, // 纯 JSON；Peri 写侧使用同一 Store
     machineId,
   },
   database,
@@ -92,10 +85,9 @@ const manager = new ChatManager({
   chatConfig: {
     runtime: {
       kind: "wasm",
-      moduleUrl: process.env.PERI_WASM_MODULE_URL
-        ?? new URL("./dist/wasm/peri-wasm.js", import.meta.url),
-      // 可选：只把遥测变量交给 WASM 实例，避免服务端凭据扩散到模块环境。
-      // 未配置 Langfuse 时删除整个 env。
+      // peri-wasm.js 位置（string | URL）；推荐 new URL("./peri-wasm.js", import.meta.url)，无可用 import.meta.url（如 workerd）时传绝对 URL 或 moduleFactory。
+      moduleUrl: process.env.PERI_WASM_MODULE_URL!,
+      // 只把遥测变量交给 WASM；未配置 Langfuse 时删除整个 env。
       env: {
         LANGFUSE_PUBLIC_KEY: process.env.LANGFUSE_PUBLIC_KEY!,
         LANGFUSE_SECRET_KEY: process.env.LANGFUSE_SECRET_KEY!,
@@ -109,16 +101,15 @@ const manager = new ChatManager({
 // 6. 每个 Chat 一个共享 View；同 Chat 的所有同步连接复用它。
 const views = new ChatViewRegistry();
 const chat = manager.createChat({
-  // workspace = 该 Chat 的边界：runtimePath 是 Agent/Session 看到的根。
-  // hostPath 是宿主文件系统路径；远程 sandbox 没有本地路径时可省略。
+  // workspace = 该 Chat 的边界；hostPath 是宿主路径，runtimePath 是 Agent/Session 的根。
   workspace: {
     id: "ws-local",
     hostPath: "/srv/peri/workspaces/ws-local",
     runtimePath: "/workspace",
   },
-  // 可选：相对 workspace.runtimePath 的会话 cwd；越界以 workspace_mismatch 拒绝。
+  // 可选：相对 runtimePath 的会话 cwd；越界以 workspace_mismatch 拒绝。
   sessionPath: "",
-  // agent = per-chat 运行配置；cwd 由 SDK 注入为 workspace.runtimePath。
+  // per-chat 运行配置；cwd 由 SDK 注入为 workspace.runtimePath。
   agent: { settings },
   session: {
     instructions: "Help with this workspace.",
@@ -151,125 +142,26 @@ await views.disposeAll();
 await manager.shutdown();
 ```
 
-## 四个必填输入
+### 必填与可选
 
-| 选项 | 作用 | 消费者 |
+| 构造 | 必填 | 可选 |
 | --- | --- | --- |
-| `store` | Manager 部署边界：`storage`（Peri 写侧 Store 配置）与 `machineId`（持久化执行环境 UUID）；整个 Manager 共享 | `ChatManager` |
-| `database` | 会话目录读取：`listSessions`、`getSession` | `ChatManager` |
-| `kv` | Session 绑定记录，3 个 KV 方法 | `ChatManager` |
-| `chatConfig` | 运行后端、可选默认 Session 建立输入、生命周期预算；per-chat 可覆盖 | `ChatManager` |
+| `ChatManager` | `store`、`database`、`kv`、`chatConfig.runtime` | `chatConfig.session`、`chatConfig.lifecycle` |
+| `createChat` | `workspace`、`agent` | `sessionPath`、`session`、`lifecycle`、`runtime`、`payloadBudgets` |
 
-### `store` 与 per-chat `agent`
-
-Manager 只声明部署边界：`store.storage` 与 `store.machineId` 由整个 Manager 共享，构造时校验并深拷贝快照。序列化每个 Chat 的内部 `agentConfig` JSON 时，SDK 会注入这两个值；per-chat 配置出现 `storage`/`machineId` 一律抛 `TypeError`（即使值与 Manager 相同）。
-
-`createChat` 必填提供 per-chat `agent`：
-
-| 字段 | 说明 |
-| --- | --- |
-| `cwd` | 可选；SDK 最终注入 `workspace.runtimePath`。显式提供时必须等于该值，否则抛 `workspace_mismatch` |
-| `settings` | 可选；整份 `PeriConfig`，替换 Peri 的全局配置 |
-| `env` | 可选；字符串映射 |
-| 其他字段 | 其余 JSON 字段原样传递 |
-
-per-chat `agent` 必须是 JSON 安全对象；`cwd` 非字符串/空串、配置不是对象、含 `storage`/`machineId` 都会抛 `TypeError`。每个 Chat 得到独立的深拷贝、冻结并序列化的 JSON，不复用 Manager 或其他 Chat 的引用。
-
-`store.storage` 不是 `database`：
-
-1. `store.storage` 由 Peri 消费，用来写 Session、消息与运行状态。
-2. `database` 由 SDK 消费，只用来读会话目录；SDK 不调用 ACP `session/list`。
-3. 两者可以指向同一个 libSQL 端点，但契约不同，不能互相替代。
-4. `TursoStorage` 同时提供两者：`database` 传实例，`store.storage` 传 `database.storageConfig`；默认 database 只构造一次。
-
-`machineId` 不是 Session、Workspace 或 Chat 的标识：
-
-1. 它标识一份可跨实例持续使用的逻辑执行环境，必须由宿主持久化并复用。
-2. 同一次部署重启后应保持不变；换值等于换了一个执行环境。
-3. 一个 WASM 模块实例只承载一个 `machineId`，运行期不能切换。
-4. 本地 demo 的固定 UUID 只用于演示，生产必须从配置或密钥管理读取。
-
-`createChat({ workspace, sessionPath })` 决定会话 cwd：
-
-1. `workspace` 必填，`runtimePath` 必须是绝对路径；SDK 归一化 `.`/`..` 与分隔符后作为 Agent 与 Session 的共同根。
-2. `sessionPath` 可选且相对 `runtimePath`；省略表示 workspace 根，`../` 越界或传入绝对路径都会以 `workspace_mismatch` 拒绝。
-3. 不再接受 `session.path`；公开的 `ChatSessionOptions` 只含 `instructions`/`mcpServers`，cwd 一律从 workspace 派生。
-4. `hostPath` 是宿主文件系统路径，`runtimePath` 是 Agent/session 看到的路径；本地 sandbox 两者相同，远程 sandbox 可省略 `hostPath`。
-5. Workspace 只是路径引用，不拥有 sandbox 或 session；MCP 描述符与 token 仍由 sandbox adapter / `SandboxHandle.mcpServer()` 提供。
-
-### `database`
-
-```ts
-class TursoStorage implements ChatDatabase {
-  constructor(options: {
-    url: string;
-    authToken?: string;
-    legacyCwd?: string;   // 默认 "/workspace"
-    currentCwd?: string;  // 默认 "/workspace/"
-  });
-  get storageConfig(): { url: string; authToken?: string };
-  listSessions(path?: string): Promise<ChatSessionDirectoryEntry[]>;
-  getSession(id: string): Promise<ChatSessionDirectoryEntry | null>;
-}
-```
-
-`TursoStorage` 直接实现 `ChatDatabase`，是 Manager 读取会话目录的唯一入口。显式 `path` 只查该 cwd；省略时串行读取 `legacyCwd` 与 `currentCwd`，同 id 以当前 cwd 为准并按 `updatedAt` 倒序。缺表错误收敛为空目录，其它错误照常抛出。凭证由调用方显式提供，没有本地 SQLite 文件后端、CLI 部署路径或环境变量 token 回退。
-
-`storageConfig` 返回只含 `url` 与 `authToken` 的普通 JSON 对象；`authToken` 未设置时省略该键，也不包含 `legacyCwd`/`currentCwd`。每次读取返回新对象，可直接作为 `store.storage`。
-
-### `kv`
-
-```ts
-interface KvStorage {
-  getItem(key: string): Promise<unknown>;
-  setItem(key: string, value: unknown): Promise<void>;
-  removeItem(key: string): Promise<void>;
-}
-```
-
-`ChatManager` 用它记录“这个 Session 当前由哪个 Manager 持有”。记录 key 为 `ownership:<base64url(sessionId)>`，value 为 `{ sessionId, owner }`。
-
-1. 只做读后写，非原子；记录是绑定标记，不是互斥原语。
-2. 同一 Session 的单实例绑定由路由层串行化保证；SDK 只做顺序冲突检测。
-3. 没有 TTL、续租或心跳；崩溃遗留记录由路由层在旧实例停止后调用 `clearSessionOwnership(storage, sessionId)` 清理。
-4. 公开面只有 `KvStorage` 与 `clearSessionOwnership`；`SessionOwnership` 等协调器是内部实现。
-5. 错误映射：加载路径冲突 → 409 `binding_conflict`；加载路径 KV 故障 → 500 `claim_failed`；新会话 claim 失败 → 500 `session_creation_failed`（stage `claim`）。没有 ownership 专用的 503。
-
-`unstorage` 的 `Storage` 结构化满足这个端口；SDK 不 import unstorage，具体实现由宿主安装。`createStorage()` 默认是进程内 memory storage，只适合单进程；多实例必须换共享 driver。
-
-### `chatConfig`
-
-| 字段 | 说明 |
-| --- | --- |
-| `runtime` | 必填。`{ kind: "wasm" }` 在进程内启动 WASM 模块；`{ kind: "transport", factory }` 由宿主按 path 创建 transport |
-| `session` | 可选默认值：`instructions`、`mcpServers`（不含 cwd）；`createChat({ session })` 按 chat 整体覆盖，不做字段合并 |
-| `lifecycle` | `closeDrainTimeoutMs`、`startupSettleTimeoutMs`、`activationCloseTimeoutMs`、`shutdownChatTimeoutMs`；`createChat({ lifecycle })` 按字段覆盖 |
-
-`runtime.kind="wasm"` 时，Manager 为每次激活启动独立 WASM 运行后端；可注入 `moduleUrl`、`moduleFactory`、`env` 与 `onDiagnostic`。`createChat({ runtime: { env } })` 的 env 会按字段合并到 Manager env 上，`onDiagnostic` 覆盖该 Chat 的诊断回调。scheduler 与清理/启动超时由 SDK 内部管理，用户不可配置。`lifecycle` 未显式给出时按 runtime kind 取默认值：wasm 为 activation 25s、shutdown 30s；transport 为 5s、15s。per-chat `lifecycle.shutdownChatTimeoutMs` 不改变 Manager 聚合等待预算。
-
-`runtime.kind="transport"` 时，SDK 不启动 Peri 或 Workspace 进程；`factory(path, { signal, chatId, agentConfig })` 接收当前 Chat 的 id 与包含 Manager store 的内部 agentConfig JSON，旧工厂可忽略新增字段。`factory` 的 `close()` 成功即视为停止证明，失败保留原因供重试。模型与权限隔离取决于 factory 创建的运行时；WASM 分支每次激活都启动独立实例，不共享执行环境。
-
-### `createChat`
-
-| 字段 | 说明 |
-| --- | --- |
-| `workspace` | 必填；`{ id, hostPath?, runtimePath }`，`runtimePath` 必须是绝对路径，决定 `agent.cwd` 与会话 cwd |
-| `sessionPath` | 可选；相对 `workspace.runtimePath` 的新会话 cwd，越界以 `workspace_mismatch` 拒绝 |
-| `session` | 该 Chat 的 `instructions`、`mcpServers`；传值时整体覆盖 `chatConfig.session`，不做字段合并 |
-| `agent` | 必填；per-chat 运行配置，`cwd` 可选且只能等于 `runtimePath`，不能含 `storage`/`machineId`；Manager 注入 store 后独立冻结、序列化 |
-| `lifecycle` | 按字段覆盖 Manager 生命周期预算；`shutdownChatTimeoutMs` 仍由 Manager 聚合 |
-| `runtime` | WASM 运行参数：`env` 合并到 Manager env，`onDiagnostic` 覆盖该 Chat 的回调 |
-| `payloadBudgets` | 传给该 Chat 的 `PeriInstance`；没有 Manager 默认值，不传时使用 PeriInstance 默认预算 |
-
-未传 `session` 时使用 Manager 默认值；两者都没有时使用 `{}`。`session.mcpServers` 容器、http `headers`、stdio `args`/`env` 都按 Chat 复制（`acp` 的 `server` 实例保留引用）；runtime env 也按 Chat 复制/合并。`createChat` 同步登记句柄，不启动 ACP；每个 Chat 的配置互不影响。缺少 `workspace`、`runtimePath` 非绝对路径、`agent` 不是 JSON 对象、或出现 `storage`/`machineId` 都会抛 `TypeError`。
+- `store.storage` 是 Peri 写侧 Store，`database` 是 SDK 只读会话目录；`TursoStorage` 同时提供（实例给 `database`，`storageConfig` 给 `store.storage`）。
+- `kv` 只需 `getItem`/`setItem`/`removeItem`；`unstorage` 的 `Storage` 直接满足。进程内 memory 只适合单进程，多实例必须换共享 driver 并由路由层串行化。
+- `machineId` 是宿主持久化的执行环境身份，不是 session/workspace id；每个 WASM 实例只使用一个 `machineId`。
+- per-chat `agent.cwd` 由 `workspace.runtimePath` 派生；`agent` 顶层不能声明 `storage`/`machineId`（由 Manager 注入）；每个 Chat 独立深拷贝。
+- `session` 整体覆盖 Manager 默认值，不做字段合并；cwd 越出 `workspace.runtimePath` 以 `workspace_mismatch` 拒绝。
+- 生命周期默认 `shutdownChatTimeoutMs`：wasm 30s，transport 15s。
 
 ## 核心概念
 
-1. **Chat 句柄**：`manager.createChat({ workspace, sessionPath, agent, session, lifecycle, runtime, payloadBudgets })` 同步登记，不启动 ACP、不取得 ownership、不读历史；`workspace` 与 `agent` 必填，store 由 Manager 注入。
-2. **Session**：Peri 持久化的会话；只有首次绑定动作才会创建或加载。
-3. **绑定**：`create_new_session` 使用 `sessionPath` 派生的 cwd；`change_session` 使用 Store 中的持久 cwd。加载历史的 cwd 必须等于或位于 `workspace.runtimePath` 之下，否则以 `workspace_mismatch` 拒绝。Manager 同时维护内存 `sessionId → workspaceId` 映射：已知 Session 属于其他 workspace 时优先按 id 拒绝；持久 Session 没有该元数据时才回退路径校验。workspaceId 不写入 ACP 字段。
-4. **ownership**：同一 Session 同时至多一个执行所有者；只在清理确认后释放，关闭超时或失败时保留。
-5. **事实与 View**：`ChatService` 发布 `ChatFact`；`ChatView` 重放事实并维护只读 Y.Doc。View 不执行动作、不决定权限、不取消任务。
+1. **Chat 句柄**：`createChat` 同步登记，不启动 ACP、不取得 ownership、不读历史；首次 `execute` 才绑定 Session。
+2. **Session 与绑定**：新建会话用 `sessionPath` 派生的 cwd，加载历史用 Store 中的持久 cwd；两者都必须位于 `workspace.runtimePath` 下，否则以 `workspace_mismatch` 拒绝。
+3. **ownership**：同一 Session 同时至多一个执行所有者；只在清理确认后释放，关闭超时或失败时保留。
+4. **事实与 View**：`ChatService` 发布 `ChatFact`；`ChatView` 重放事实并维护只读 Y.Doc。View 不执行动作、不决定权限、不取消任务。
 
 ## 常用操作
 
@@ -286,31 +178,25 @@ interface KvStorage {
 | `cancel` | `ChatUserAction.cancel()` | 取消当前执行 |
 | `answer` | `ChatUserAction.answer({ interactionId, answer })` | 回答待决交互 |
 
-`ChatUserAction.send()` 返回 `SendReceipt`：`accepted` 表示已入队，不是执行完成。`create_new_session` 与 `change_session` 返回 `SessionReadyResult`，包含 `chatId`、`sessionId`、`bindingRevision`。
+`ChatUserAction.send()` 返回 `SendReceipt`（`accepted`、`inputId`）；`create_new_session` 与 `change_session` 返回 `SessionReadyResult`，包含 `chatId`、`sessionId`、`bindingRevision`。
 
-传入普通 wire 对象时先经 `parseChatUserAction` 校验。Manager 不接收 `execute`；执行调度属于 Peri。`peri-cf` 的 HTTP 层还会用 `chat.binding` 与 `bindingRevision` 拒绝过期连接的动作。
+传入普通 wire 对象时先经 `parseChatUserAction` 校验。Manager 不接收 `execute`；执行调度属于 Peri。路由层可用 `chat.binding` 与 `bindingRevision` 拒绝过期连接的动作。
 
 ## 展示与同步
 
 ```ts
 import { ChatReplica } from "@peri-code/sdk/view";
 
-const views = new ChatViewRegistry();
-const view = views.attach(chat);          // 同 Chat 复用同一个 View
-view.sync(channel);                       // channel: ChatYjsChannel
-
 // 浏览器：ChatReplica 收 HELLO/SNAPSHOT/UPDATE/ACK，提供只读 SessionView。
 const replica = new ChatReplica();
-replica.connect(channel);
+replica.connect(channel); // channel: ChatYjsChannel
 const unsubscribe = replica.subscribe(() => render(replica.read()));
 await replica.dispose();
 ```
 
 `ChatYjsChannel` 只约定帧收发与关闭，不创建物理连接；鉴权与传输由应用负责。`ChatReplica.read()` 返回 `SessionView`，包含 readiness、entries/blocks/tools/turns/tasks/plans、session info、输入队列、交互记录与 `pendingInteractions`。未知块与孤立工具引用显式标记为 `unknown`/`unavailable`，不静默丢弃。
 
-`readSessionView` 与 `readPayload` 从 `/view` 导出。`SessionViewStore` 和按身份选择器已删除；消费方直接读取 `SessionView` 的数组，或按 id 自建索引。
-
-`readPayload(ref, reader, { signal, maxBytes })` 校验返回 id、UTF-8 字节数与 JSON；`ChatService.readPayload({id, bytes})` 直接读取当前激活的载荷仓库，错误码为 `unauthorized`、`unavailable`、`too_large`、`integrity_error`、`aborted`、`transport_error`。默认单次展示上限 1 MiB；`limitPayloadReads` 默认并发 2。
+`readSessionView` 与 `readPayload` 从 `/view` 导出。`readPayload(ref, reader, { signal, maxBytes })` 校验 id、UTF-8 字节数与 JSON；`ChatService.readPayload({id, bytes})` 读取当前激活的载荷仓库。默认单次 1 MiB、并发 2，错误码见 `PayloadReadErrorCode`。
 
 ## MCP over ACP
 
@@ -351,12 +237,9 @@ const chat = manager.createChat({
 });
 ```
 
-1. 官方 `McpServer` 负责 tools/resources/prompts；桥接只依赖实例的 `connect(transport)`，不需要适配层，直接把实例或工厂放进 `type:"acp"` 的 `server`。
-2. 不要手动 `connect()`：SDK 在 `session/new|load` 前连接。
-   - 工厂实例由激活拥有，结束时由 SDK `close()`。
-   - 直接传入的实例由调用方持有，SDK 不会关闭它；不再使用时由调用方自行 `close()`。
-3. 直接传实例是单次借用，bridge 关闭后不能安全重连；跨 reload 或多个 Chat 必须用工厂，工厂结果必须有 `close()`（`McpServer` 已提供）。
-4. 边界：ACP 只承载 `{serverId, requestId, method, params}`，不重新定义 MCP；sampling/roots 等 server→client 请求返回 `-32601`。
+1. 官方 `McpServer` 负责 tools/resources/prompts；桥接只依赖实例的 `connect(transport)`，把实例或工厂放进 `type:"acp"` 的 `server` 即可，不需要适配层。
+2. 不要手动 `connect()`：SDK 在 `session/new|load` 前连接。工厂实例由激活拥有并在结束时 `close()`；直接传入的实例由调用方持有、SDK 不关闭，且 bridge 关闭后不能安全重连，跨 reload 或多个 Chat 必须用工厂。
+3. 边界：ACP 只承载 `{serverId, requestId, method, params}`，不重新定义 MCP；sampling/roots 等 server→client 请求返回 `-32601`。
 
 `@peri-code/sdk` 不自带官方 MCP 包，使用方自行安装：v2 用 `bun add @modelcontextprotocol/server`；v1 单包路径为 `@modelcontextprotocol/sdk/server/mcp.js`，两版都可直接传入。
 
@@ -377,7 +260,7 @@ bun add @peri-code/sdk
 bun add peri-sandbox   # 仅在使用 /sandbox 时安装
 ```
 
-> `peri-sandbox` 当前仍在仓库内且标记为 private；发布前请用本地路径或 workspace 链接安装，发布后再使用上面的包名。
+> 官方 `peri-sandbox` adapter 目前未公开发布；发布前可自行实现并注入 adapter。
 
 `init` 是可选的环境固定步骤，不是启动前置条件。不传 `settingsPath` 时，adapter 使用默认 settings 路径（`~/.peri-sandbox/settings.json`，可用 `PERI_SANDBOX_SETTINGS` 覆盖）；该文件不存在则回退到内存默认配置，`start()` 可直接用。前提是 Peri 可被发现：`PERI_PATH` 或默认 `~/.peri/peri`，否则报 `unsupported_environment`。
 
@@ -470,55 +353,6 @@ const adapter = createPeriSandboxAdapter({
 });
 ```
 
-### 两个 Chat 绑定两个 sandbox workspace
-
-Manager 只持有部署级 `store.storage`/`store.machineId`；每个 Chat 用自己的 `workspace` 决定 WASM 运行时工作区与会话 cwd，用 `session.mcpServers` 绑定该 workspace 的 MCP：
-
-```ts
-const manager = new ChatManager({
-  // storage/machineId 由整个 Manager 共享；每个 Chat 的 workspace 决定 runtimePath，agent.cwd 由 SDK 派生。
-  store: { storage: database.storageConfig, machineId },
-  database,
-  kv,
-  chatConfig: {
-    runtime: {
-      kind: "wasm",
-      moduleUrl: new URL("./dist/wasm/peri-wasm.js", import.meta.url),
-      env: { LANGFUSE_PUBLIC_KEY: process.env.LANGFUSE_PUBLIC_KEY! },
-    },
-  },
-});
-
-const [alpha, beta] = await Promise.all([
-  sandboxes.start({ sandboxId: "sbx_alpha" }),
-  sandboxes.start({ sandboxId: "sbx_beta" }),
-]);
-const alphaMcp = await alpha.mcpServer();
-const betaMcp = await beta.mcpServer();
-
-// 两个 Chat 各自绑定一个 workspace；运行配置与会话 cwd 都在自己的 sandbox 内。
-const alphaChat = manager.createChat({
-  workspace: alpha.workspace!,
-  agent: { settings },
-  session: {
-    instructions: "Work only inside the alpha workspace.",
-    mcpServers: { [alphaMcp.name]: alphaMcp.config },
-  },
-  runtime: { env: { PERI_TENANT: "alpha" } },
-});
-const betaChat = manager.createChat({
-  workspace: beta.workspace!,
-  agent: { settings },
-  session: {
-    instructions: "Work only inside the beta workspace.",
-    mcpServers: { [betaMcp.name]: betaMcp.config },
-  },
-  runtime: { env: { PERI_TENANT: "beta" } },
-});
-```
-
-`change_session` 会拒绝加载 cwd 不在该 Chat `workspace.runtimePath` 下的持久会话；同一 sandbox 的子目录仍允许。Manager 已知该 Session 属于另一个 workspace 时优先按内存映射拒绝；持久 Session 没有 workspace 元数据时才回退路径校验。
-
 ### API
 
 **`SandboxManager`**
@@ -531,7 +365,7 @@ const betaChat = manager.createChat({
 | `closeAll({ deleteData? })` | 并发关闭全部 handle；成功的移除，失败的保留并抛 `AggregateError`，可重试。 |
 | `size` | 当前跟踪的 handle 数量。 |
 
-Manager 选项：`adapter`（必填，缺失时构造抛 `invalid_options`）、`adapterOptions`（默认值，per-start 整体替换）、`serverName`（默认 `workspace`，不能使用 `web` / `artifact` / `cron` / `workflow`）、`startupTimeoutMs`、`stopTimeoutMs`、`signal`。`signal` 只作为 `start` 的默认取消信号，`closeAll` 不继承。管理器不再接受 `backend`、`moduleSpecifier`、`settingsPath`、`sandboxesRoot`、`periPath`、`periSha256`、`profile`、`profileName`、`port`、`bashCalls`、`minFreeBytes` 等实现细节；这些由 adapter 的 options/start options 定义。
+Manager 选项：`adapter`（必填，缺失时构造抛 `invalid_options`）、`adapterOptions`（默认值，per-start 整体替换）、`serverName`（默认 `workspace`，不能使用 `web` / `artifact` / `cron` / `workflow`）、`startupTimeoutMs`、`stopTimeoutMs`、`signal`。`signal` 只作为 `start` 的默认取消信号，`closeAll` 不继承。adapter 实现细节（`settingsPath`、`sandboxesRoot`、`profile`、`port`、`bashCalls`、`minFreeBytes` 等）由 adapter 的 options/start options 定义。
 
 **`SandboxAdapter`**
 
@@ -582,83 +416,212 @@ interface SandboxAdapterInstance {
 7. 沙箱隔离由 adapter 实现决定；使用 `peri-sandbox` 时由 `adapterOptions.profile` / `profileName` 控制（出站域名、只读路径、内存/CPU/pids 上限）。SDK 不扩大这些权限，也不把 token 写入日志或状态。
 8. 同一 `sandboxId` 的创建参数不可静默改写：显式冲突返回 `conflict`，需先 `close()` 再用新参数创建。`adapterOptions` 按 key 排序的稳定 JSON 比较；不可序列化且不是同一引用时同样按冲突处理。
 
-## 发布入口
+## 公开入口
 
-| 入口 | 源码 | 内容 |
-| --- | --- | --- |
-| `@peri-code/sdk` | `src/entries/index.ts` | Chat 控制面、展示契约、config/storage 读取工具 |
-| `@peri-code/sdk/view` | `src/entries/view.ts` | 浏览器安全展示出口；需要打包包内 Yjs 依赖 |
-| `@peri-code/sdk/wasm` | `src/entries/wasm.ts` | 平台无关的 Emscripten ACP 运行后端、loader 与 transport |
-| `@peri-code/sdk/wasm-node` | `src/entries/wasm-node.ts` | `/wasm` 加 Node 兼容的网络/DNS 端口 |
-| `@peri-code/sdk/portable` | `src/entries/portable.ts` | 不装配 Bun/stdio 进程或本地 SQLite；Chat 控制面 + 执行准入核心 |
-| `@peri-code/sdk/sandbox` | `src/entries/sandbox.ts` | server-side（Node 22.12+ / Bun）；`SandboxAdapter` 契约 + `SandboxManager` 多实例注册表 + `SandboxHandle`；实现由宿主注入，SDK 不加载具体 adapter，session 由调用方组装并在 `createChat` 传入 |
-| `@peri-code/sdk/openui` | `src/openui/index.ts` | 轻量门面：围栏切分、主题桥与共享类型 |
-| `@peri-code/sdk/openui/renderer` | `src/openui/renderer.tsx` | `OpenUIProgram`；重出口，消费端应懒加载 |
-| `@peri-code/sdk/openui/error-boundary` | `src/openui/openui-error-boundary.tsx` | `OpenUIErrorBoundary`；同步兜底，不牵入 Renderer |
-| `@peri-code/sdk/openui/prompt` | `src/openui/prompt.ts` | 服务端提示词；只读 `spec.json`，不引入 React |
-| `@peri-code/sdk/openui/spec.json` | `src/openui/spec.json` | `{ spec, promptOptions }` 生成产物 |
-
-`src/entries/chat.ts` 是主入口与 `/portable` 共用的 Chat 门面，不对应独立包 subpath。`ChatViewRegistry` 只在主入口与 `/portable` 导出，`/view` 保持纯浏览器视图面。
-
-## OpenUI 源码 subpath
-
-`@peri-code/sdk/openui*` 五个入口直接发布 TS/TSX 源码，不单独构建，也不进入 `dist`。消费端需要能编译源码的打包器（Vite、Bun）；Node 原生 ESM 直接 import 不在支持范围内。
-
-- `src/openui/library.tsx` 是组件、props 与提示词选项的唯一事实源；修改后运行 `bun run openui:spec`，并提交 `src/openui/spec.json`。`bun run openui:check` 校验产物是否过期，`prebuild` 已前置该检查。
-- `src/openui/canvas/` 为 `peri-canvas@0.1.0` 的改写代码。
-- `react` / `react-dom` 是可选 peer 依赖；只有使用 Renderer/error-boundary 的宿主需要提供。
-
-## 源码结构
-
-`src/` 按依赖方向分层，发布入口集中在 `src/entries/`：
-
-| 目录 | 职责 |
+| 入口 | 内容 |
 | --- | --- |
-| `src/contracts/` | ACP、Chat 事实与交互回答等跨层契约；不依赖控制面或视图 |
-| `src/payload/` | 工具载荷读取契约与校验 |
-| `src/agent/` | 一次激活的 ACP Session、交互、MCP 桥接，以及运行时端口 `PeriInstancePort` |
-| `src/workspace/` | 可移植的 `WorkspaceRef` 值对象与纯 JS 路径归一化/越界判断；不依赖 Node/Bun |
-| `src/chat/` | Chat 控制面：绑定状态机、动作、ownership、事实日志、生命周期与错误映射 |
-| `src/view/` | 事实到 Yjs 文档的投影与浏览器只读副本 |
-| `src/state/`、`src/sync/`、`src/transport/` | 对象状态、同步协议、通用 JSON-RPC 与帧端口 |
-| `src/wasm/` | Emscripten ACP 运行后端、loader、端口与 `WasmAcpTransport` |
-| `src/execution/` | durable execution admission（仅 `/portable` 使用） |
-| `src/storage/`、`src/config/`、`src/util/` | 目录读取、启动配置与通用工具 |
-| `src/entries/` | 唯一发布入口；`chat.ts` 是主入口与 `/portable` 共用的门面 |
+| `@peri-code/sdk` | Chat 控制面、展示契约、config/storage 读取工具 |
+| `@peri-code/sdk/view` | 浏览器安全展示出口；需要打包包内 Yjs 依赖 |
+| `@peri-code/sdk/wasm` | 平台无关的 WASM ACP 运行后端、loader 与 transport |
+| `@peri-code/sdk/wasm-node` | `/wasm` 加 Node 兼容的网络/DNS 端口 |
+| `@peri-code/sdk/portable` | 不装配 Bun/stdio 进程或本地 SQLite；Chat 控制面 + 执行准入核心 |
+| `@peri-code/sdk/sandbox` | server-side（Node 22.12+ / Bun）；`SandboxAdapter` 契约 + `SandboxManager` 多实例注册表 + `SandboxHandle`；实现由宿主注入，SDK 不加载具体 adapter，session 由调用方组装并在 `createChat` 传入 |
+| `@peri-code/sdk/openui` | 轻量门面：围栏切分、主题桥与共享类型 |
+| `@peri-code/sdk/openui/renderer` | `OpenUIProgram`；重出口，消费端应懒加载 |
+| `@peri-code/sdk/openui/error-boundary` | `OpenUIErrorBoundary`；同步兜底，不牵入 Renderer |
+| `@peri-code/sdk/openui/prompt` | 服务端提示词；只读 `spec.json`，不引入 React |
+| `@peri-code/sdk/openui/spec.json` | `{ spec, promptOptions }` |
 
-依赖方向：基础层（`contracts`/`payload`/`state`/`sync`/`transport`/`util`/`storage`/`config`/`execution`/`workspace`）不依赖控制面；`chat` 与 `sandbox` 都依赖 `workspace`，但互不依赖；`wasm` 不依赖 `agent`/`chat`/`view`；`agent` 不依赖 `chat`/`view`；`chat` 不依赖 `view`；`view` 不依赖 `chat`/`agent`。只有 `entries` 可以依赖所有层，任何模块都不依赖 `entries`。
+`ChatViewRegistry` 只在主入口与 `/portable` 导出，`/view` 保持纯浏览器视图面。
 
-## 构建与示例
+## OpenUI
 
-`MISE_ENV=wasm mise exec -- bun run build` 构建 `peri-wasm` release 产物，并把 `peri-wasm.js` 与 `peri_wasm.wasm` 放入 `dist/wasm/`。构建依赖 Emscripten 6.0.10；`mise exec` 会注入 `EMSDK`，直接 `bun run build` 在仅有 mise shim 的环境会把 shim 路径当作工具链并失败。
+下文假设 Streamdown 已安装，并能流式渲染 Markdown；这里只讲 OpenUI 如何接上它。模型默认输出 Markdown，只有结构化界面明显更好时，才在一条回复里额外输出**一个** `openui` 围栏。OpenUI 不接管 Markdown：它只切出围栏、渲染围栏内的程序；把 `renderText` 指给宿主已有的 Markdown 渲染器后，围栏前后的文字与失败回退都走同一个渲染器。已闭合围栏解析、校验或渲染失败时整条消息回退原文；未闭合围栏在流式中显示骨架或上一版界面，用户始终能看到模型输出。
 
-默认 [demo.ts](examples/demo/demo.ts) 使用 `runtime.kind="wasm"`；[demo-wasm.ts](examples/demo/demo-wasm.ts) 使用 `runtime.kind="transport"` 注入 `WasmAcpTransport`。两者都通过 `ChatView` + 二进制同步帧驱动浏览器 `ChatReplica`；示例用 SSE 适配器承载逻辑帧，生产消费端使用 WebSocket。
+`@peri-code/sdk/openui*` 发布 TS/TSX 源码，需要能编译它的打包器（Vite、Bun），不支持 Node 原生 ESM；`react` / `react-dom` 是可选 peer（≥18）。SDK 不依赖 Streamdown，也不导入它的样式；正文 Markdown 渲染器由宿主注入。
 
-## 发布
+OpenUI 自身只有一步初始化（与正文 Markdown 渲染器无关）：在入口调用一次主题桥，让 canvas 跟随宿主主题。
 
-发布由 [`.github/workflows/release-sdk.yml`](../../.github/workflows/release-sdk.yml) 完成，不要在本地直接 `npm publish`。
+```tsx
+// app entry：CSS 加载后调用一次；不调用则 canvas 使用内置 palette。
+import { installOpenUITheme } from "@peri-code/sdk/openui";
+installOpenUITheme();
+```
 
-1. 推送 `sdk-v*` tag（例如 `sdk-v0.1.0`）：workflow 会构建 WASM、跑测试、打包并发布到 npm。
-2. 手动验证：运行 `Release SDK`，填写版本号并保持 `dry_run=true`；只构建、测试并上传 tarball，不发布。
-3. 正式发布需要仓库 secret `NPM_TOKEN`（对 `@peri-code` scope 有发布权限）；含 `-` 的预发布版本发布到 `next`，其余发布到 `latest`。
+### 1. 切分围栏并渲染 OpenUI
+
+`splitOpenUI(text, streaming)` 只做围栏切分，不解析 DSL：`program` 为 `null` 时不挂载 Renderer（普通 Markdown 或多围栏）；流式未闭合时 `status` 为 `open`，`program` 是已到达的片段；闭合后为 `complete`。
+示例假定宿主已有 `Markdown({ text, streaming })` 组件：`streaming` 用于补全未闭合的 Markdown 块；`renderMarkdown` 就是它，`before`/`after` 与失败回退都走同一渲染器。
+
+```tsx
+// OpenUIMessage.tsx
+import { lazy, Suspense, useMemo, type ReactNode } from "react";
+import { splitOpenUI, type OpenUIActionEvent } from "@peri-code/sdk/openui";
+import { OpenUIErrorBoundary } from "@peri-code/sdk/openui/error-boundary";
+
+// 重量级 chunk：解析器、图表与 canvas 只在出现围栏时加载。
+const OpenUIProgram = lazy(() => import("@peri-code/sdk/openui/renderer").then((m) => ({ default: m.OpenUIProgram })));
+
+function Skeleton({ label }: { label: string }) {
+  return <div data-slot="peri-openui-skeleton" role="status" aria-live="polite">{label}</div>;
+}
+
+export function OpenUIMessage({
+  text, streaming, renderMarkdown, onOpenUIAction, actionsEnabled = true,
+}: {
+  text: string;
+  streaming: boolean;
+  renderMarkdown: (text: string) => ReactNode;
+  onOpenUIAction?: (event: OpenUIActionEvent) => void;
+  actionsEnabled?: boolean;
+}) {
+  const doc = useMemo(() => splitOpenUI(text, streaming), [text, streaming]);
+
+  // 无围栏、多围栏：整条消息按 Markdown 渲染。
+  if (doc.program === null) return <>{renderMarkdown(text)}</>;
+  // 流结束仍未闭合：半截程序不可解析，回退原文并标记原因。
+  if (doc.status === "open" && !streaming) {
+    return <div data-openui-fallback="incomplete-fence">{renderMarkdown(text)}</div>;
+  }
+
+  const pending = doc.status === "open";
+  const before = doc.before ? renderMarkdown(doc.before) : null;
+  const skeleton = <Skeleton label={doc.program ? "正在渲染界面…" : "正在生成界面…"} />;
+  if (pending && !doc.program) return <>{before}{skeleton}</>;
+
+  return (
+    <OpenUIErrorBoundary
+      resetKey={doc.program}
+      fallback={pending ? skeleton : renderMarkdown(text)}
+    >
+      <Suspense fallback={<>{before}{skeleton}{doc.after ? renderMarkdown(doc.after) : null}</>}>
+        <OpenUIProgram
+          program={doc.program}
+          isStreaming={pending}
+          actionsEnabled={actionsEnabled}
+          before={doc.before}
+          after={pending ? "" : doc.after}
+          fallbackText={text}
+          renderText={renderMarkdown}
+          onAction={onOpenUIAction}
+        />
+      </Suspense>
+    </OpenUIErrorBoundary>
+  );
+}
+```
+
+### 2. 按钮动作
+
+`SessionView` 的 assistant 条目给出 text block；`streaming` 由宿主按当前 turn 是否完成决定。把消息交给 `OpenUIMessage`，并把 action 路由到发送或开链接（`send` 即宿主已有的发送函数，最终落到 `ChatUserAction.send`）：
+
+```tsx
+import type { OpenUIActionEvent } from "@peri-code/sdk/openui";
+
+// 在消息列表里这样接；OpenUIMessage 来自步骤 1，Markdown 是宿主已有组件，text/streaming 来自 SessionView，busy/send 由宿主提供。
+<OpenUIMessage
+  text={text}
+  streaming={streaming}
+  renderMarkdown={(value) => <Markdown text={value} streaming={streaming} />}
+  onOpenUIAction={(event) => handleOpenUIAction(event, send)}
+  actionsEnabled={!busy && !streaming}
+/>
+
+// 只放行无 userinfo、长度 ≤2048 的 http(s)。
+function safeHttpUrl(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length > 2048) return undefined;
+  try {
+    const url = new URL(value.trim());
+    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+    if (url.username || url.password) return undefined;
+    const normalized = url.toString();
+    return normalized.length <= 2048 ? normalized : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function handleOpenUIAction(event: OpenUIActionEvent, send: (text: string) => void) {
+  if (event.type === "continue_conversation") {
+    // 空消息回退 params.message；消息截断 8k，表单摘要超过 2k 时省略。
+    const raw = event.humanFriendlyMessage.trim() || (typeof event.params.message === "string" ? event.params.message.trim() : "");
+    if (!raw) return;
+    // formState 字段形如 {value, componentType}；只保留顶层 primitive。
+    const form = JSON.stringify(Object.fromEntries(Object.entries(event.formState ?? {})
+      .filter(([key]) => key !== "componentType" && !key.startsWith("$"))
+      .map(([key, field]) => [key, field && typeof field === "object" && "value" in field ? (field as { value: unknown }).value : field] as const)
+      .filter(([, value]) => typeof value === "string" || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value)))));
+    const formText = form === "{}" ? "" : form.length <= 2000 ? `\n\n表单数据：${form}` : "\n\n（表单数据过长，已省略）";
+    send(`${raw.slice(0, 8000)}${raw.length > 8000 ? "\n\n（消息过长，已截断）" : ""}${formText}`);
+    return;
+  }
+  if (event.type === "open_url") {
+    const url = safeHttpUrl(event.params.url);
+    if (url) window.open(url, "_blank", "noopener,noreferrer");
+  }
+}
+```
+
+### 3. 服务端提示词
+
+```tsx
+import { generateOpenUISystemPrompt } from "@peri-code/sdk/openui/prompt";
+
+// baseSystemPrompt 是宿主已有的系统提示词。
+const instructions = [baseSystemPrompt, generateOpenUISystemPrompt()]
+  .filter(Boolean)
+  .join("\n\n");
+```
+
+把 `instructions` 传给 `createChat({ session: { instructions } })`。提示词只读 `spec.json`，不引入 React，也不含云端配置；它在 `session/new` 时冻结，已有会话需要新建才会带上 OpenUI 段。
+
+### 4. 模型输出长什么样
+
+````text
+本周交付如下。
+
+```openui
+root = Stack([title, metrics, next])
+title = H2("本周交付")
+metrics = Grid(2, [done, blocked])
+done = Stat("12", "已完成", "success")
+blocked = Stat("3", "阻塞", "danger")
+next = Button("展开阻塞项", @ToAssistant("展开阻塞项并给出处理建议"))
+```
+
+需要我展开阻塞项吗？
+````
+
+1. 每行 `name = Expression`，必须定义 `root = Stack([...])`；参数按位置传，可选参数只能从末尾省略。
+2. 一条回复最多一个顶层围栏；普通代码块、列表项或引用块里的 `openui` 不算。
+3. 动作按钮用 `@ToAssistant("...")` 或 `@OpenUrl("...")`。
+
+### 边界与限制
+
+- `OpenUIProgram` 必须懒加载；主 chunk 不应引入解析器、图表与 canvas。
+- 未闭合围栏在流式中：解析失败或暂无可渲染程序时显示骨架；已有可渲染程序时保留上一版，渲染异常回退骨架，不使用 `fallbackText`。
+- 未闭合围栏在流结束后，或已闭合围栏（含裸 DSL）解析、校验、引用解析或渲染失败时：整条消息回退原文（`renderText(fallbackText)`；宿主传 Markdown 渲染器时保持 Markdown，缺省纯文本）。
+- 流式解析按 120 ms 节流：首个片段立即解析，窗口内的更新合并为最后一次；流式期间不跑严格校验，非法值可能短暂空白。
+- 表单值不持久化；按钮的校验、发送、消息截断（8k）与表单摘要上限（2k）由宿主负责。聊天忙或流式时传 `actionsEnabled={false}`。
+- 主题：`installOpenUITheme()`（`@peri-code/sdk/openui`）从 `--chat-code-bg` / `--chat-fg` / `--chat-link` 读取 hex 并推给 canvas；`oklch()` 等非 hex 值会被忽略并沿用内置 palette；不调用同样用内置 palette。
+- 组件与参数的公开契约是 `@peri-code/sdk/openui/spec.json`（`{ spec, promptOptions }`）；`generateOpenUISystemPrompt()` 已把同一份 spec 交给模型。常用组件：`Stack`、`Row`、`Grid`、`Card`、`Table`、`Stat`、`BarChart`/`LineChart`/`PieChart`、表单控件与 `Button`。
 
 ## 进阶
 
-`/portable` 额外公开可自行驱动的 durable execution admission，SDK Chat 不使用它。`KvExecutionRegistry` 包装 `AtomicExecutionKv` 提供 durable read/CAS apply/resolve；适配器必须实现 `readExecutionValue` 与 `compareAndSetExecutionValue`。`MemoryExecutionKv` 是单进程 `bestEffort` 实现，需要显式 `allowBestEffort`。票据绑定 session、instance/generation、lifecycle/control generation、稳定 work/revision 与 `{turnId, attemptId}`；预算跨实例替换保留，缺失停止证明返回 Blocked，不做 lease/TTL 接管。
-
-Machine/workspace 绑定与 SDK 执行所有权是两件独立职责，不能互相推导。
+`/portable` 额外公开可自行驱动的 durable execution admission，SDK Chat 不使用它；`KvExecutionRegistry` 包装 `AtomicExecutionKv` 提供 durable read/CAS apply/resolve。票据绑定 session、instance/generation、lifecycle/control generation 与 `{turnId, attemptId}`，预算跨实例替换保留。Machine/workspace 绑定与 SDK 执行所有权是两件独立职责。
 
 ## 限制
 
 1. SDK 不管理 Peri 或 Workspace 进程；Workspace 文件工具必须由外部 MCP 提供。
-2. 没有 TTL、续租或心跳；崩溃清理是路由层责任。
+2. 没有 TTL、续租或心跳；崩溃遗留记录由路由层在旧实例停止后调用 `clearSessionOwnership(storage, sessionId)` 清理。
 3. 没有共享 KV 与路由亲和时，不保证多实例安全。
 4. `store` 在 Manager 构造时校验并深拷贝（`machineId` 非空、`storage` JSON 安全）；`createChat` 必填 `workspace` 与 `agent`，`cwd` 由 `workspace.runtimePath` 派生；含 `storage`/`machineId` 或与 workspace 冲突的 `cwd` 直接报错。
 5. `/view` 依赖 Yjs，浏览器使用需要打包；`/portable` 的准入摘要仍用 `node:crypto`。
+6. 错误码：加载路径 ownership 冲突为 409 `binding_conflict`；加载路径 KV 故障为 500 `claim_failed`；新会话 claim 失败为 500 `session_creation_failed`。
 
-## 参考
+## 示例
 
-- [Chat 架构设计](../../docs/design/peri-sdk-chat.md)
-- [Ownership 模型](OWNERSHIP-MODEL.md)
-- [代码索引](../../docs/code-index/peri-ts-sdk.md)
-- [peri-cf 服务端装配](../peri-cf/server/agent/compose.ts)
+- [demo.ts](https://github.com/KonghaYao/peri/blob/main/npm-packages/@peri-sdk/examples/demo/demo.ts) 使用 `runtime.kind="wasm"`。
+- [demo-wasm.ts](https://github.com/KonghaYao/peri/blob/main/npm-packages/@peri-sdk/examples/demo/demo-wasm.ts) 使用 `runtime.kind="transport"` 注入 `WasmAcpTransport`。
+
+两者都通过 `ChatView` + 二进制同步帧驱动浏览器 `ChatReplica`；示例用 SSE 适配器承载逻辑帧，生产消费端使用 WebSocket。
