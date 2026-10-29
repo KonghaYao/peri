@@ -46,6 +46,26 @@ export function safeHref(href: string): string | undefined {
   }
 }
 
+export const MAX_EXTERNAL_URL_LENGTH = 2048;
+
+/**
+ * 外链来源的独立校验：只允许 http/https，并拒绝 userinfo 与超长 URL。
+ * 与 `safeHref` 分开，避免改变 `Link` 的既有行为；非法值不返回原始字符串，
+ * 防止把 `user:token@host` 这类凭据回显到 DOM。
+ */
+export function safeExternalUrl(href: string): string | undefined {
+  if (href.length === 0 || href.length > MAX_EXTERNAL_URL_LENGTH) return undefined;
+  try {
+    const url = new URL(href);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+    if (url.username !== "" || url.password !== "") return undefined;
+    if (url.hostname === "") return undefined;
+    return url.toString();
+  } catch {
+    return undefined;
+  }
+}
+
 export function chartDataMismatch(series: readonly { data: readonly number[] }[], categories: readonly string[]): boolean {
   return series.some((entry) => entry.data.length !== categories.length);
 }

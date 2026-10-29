@@ -17,37 +17,94 @@ const DIFF_FONT_SIZE = "12px";
 const DIFF_GUTTER_FONT_SIZE = "11px";
 const DIFF_LINE_HEIGHT = "20px";
 
+export type DiffStatsLayout = "aligned" | "inline";
+
 export type DiffStatsProps = {
   additions?: number;
   deletions?: number;
+  layout?: DiffStatsLayout;
+  showParentheses?: boolean;
   style?: CSSProperties;
 };
+
+/** ≥1000 使用 k/m/b；<10 保留一位小数并去掉 .0，其余取整。 */
+export function formatCompactDiffCount(value: number): string {
+  const count = Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
+  if (count < 1000) return String(count);
+  if (count < 1_000_000) {
+    const k = count / 1000;
+    return `${k < 10 ? k.toFixed(1).replace(/\.0$/, "") : Math.round(k)}k`;
+  }
+  if (count < 1_000_000_000) {
+    const m = count / 1_000_000;
+    return `${m < 10 ? m.toFixed(1).replace(/\.0$/, "") : Math.round(m)}m`;
+  }
+  const b = count / 1_000_000_000;
+  return `${b < 10 ? b.toFixed(1).replace(/\.0$/, "") : Math.round(b)}b`;
+}
+
+function normalizeDiffCount(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
+}
 
 export function DiffStats({
   additions = 0,
   deletions = 0,
+  layout = "inline",
+  showParentheses = false,
   style,
 }: DiffStatsProps): JSX.Element | null {
   const { tokens } = useHostTheme();
-  if (additions <= 0 && deletions <= 0) return null;
+  const safeAdditions = normalizeDiffCount(additions);
+  const safeDeletions = normalizeDiffCount(deletions);
+  if (safeAdditions === 0 && safeDeletions === 0) return null;
+
+  const aligned = layout === "aligned";
+  const showAdditions = aligned || safeAdditions > 0;
+  const showDeletions = aligned || safeDeletions > 0;
+
   return (
-    <span
-      style={mergeStyle(
-        {
-          display: "inline-flex",
-          alignItems: "center",
-          gap: `${canvasSpacing[0.5]}px`,
-          flexShrink: 0,
-          fontVariantNumeric: "tabular-nums",
-          fontSize: canvasTypography.small.fontSize,
-          lineHeight: canvasTypography.small.lineHeight,
-        },
-        style,
-      )}
-    >
-      {additions > 0 ? <span style={{ color: tokens.category.green }}>+{additions}</span> : null}
-      {deletions > 0 ? <span style={{ color: tokens.category.red }}>-{deletions}</span> : null}
-    </span>
+    <>
+      {showParentheses ? (
+        <span aria-hidden="true" style={{ color: tokens.text.tertiary }}>
+          (
+        </span>
+      ) : null}
+      <span
+        role="group"
+        aria-label={`${safeAdditions} additions, ${safeDeletions} deletions`}
+        style={mergeStyle(
+          {
+            display: aligned ? "inline-grid" : "inline-flex",
+            gridTemplateColumns: aligned ? "4ch 4ch" : undefined,
+            alignItems: "center",
+            gap: aligned ? `${canvasSpacing[2]}px` : `${canvasSpacing[0.5]}px`,
+            textAlign: aligned ? "right" : undefined,
+            flexShrink: 0,
+            fontVariantNumeric: "tabular-nums",
+            fontSize: canvasTypography.small.fontSize,
+            lineHeight: canvasTypography.small.lineHeight,
+          },
+          style,
+        )}
+      >
+        {showAdditions ? (
+          <span aria-hidden="true" style={{ color: tokens.category.green }}>
+            +{formatCompactDiffCount(safeAdditions)}
+          </span>
+        ) : null}
+        {showDeletions ? (
+          <span aria-hidden="true" style={{ color: tokens.category.red }}>
+            -{formatCompactDiffCount(safeDeletions)}
+          </span>
+        ) : null}
+      </span>
+      {showParentheses ? (
+        <span aria-hidden="true" style={{ color: tokens.text.tertiary }}>
+          )
+        </span>
+      ) : null}
+    </>
   );
 }
 

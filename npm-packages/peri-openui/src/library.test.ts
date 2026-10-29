@@ -21,8 +21,11 @@ const EXPECTED_COMPONENTS = [
   "Callout",
   "Stat",
   "UsageBar",
+  "Gauge",
   "DiffStats",
   "DiffView",
+  "ChangedFiles",
+  "Sources",
   "TodoList",
   "Table",
   "BarChart",
@@ -42,13 +45,22 @@ describe("openui library", () => {
     expect(openuiPromptOptions).toEqual(artifact.promptOptions as unknown as typeof openuiPromptOptions);
   });
 
-  test("包含 29 个组件且 root 为 Stack", () => {
+  test("包含 32 个组件且 root 为 Stack", () => {
     const spec = openuiLibrary.toSpec() as ReturnType<typeof openuiLibrary.toSpec> & {
       schema?: { $defs?: Record<string, unknown> };
     };
     expect(Object.keys(spec.components)).toEqual([...EXPECTED_COMPONENTS]);
     expect(spec.root).toBe("Stack");
     expect(spec.schema?.$defs).toBeDefined();
+  });
+
+  test("新增组件落在 Containers & data，且不包含 Slider", () => {
+    const spec = openuiLibrary.toSpec();
+    const containers = spec.componentGroups?.find((group) => group.name === "Containers & data");
+    expect(containers?.components).toEqual(
+      expect.arrayContaining(["Gauge", "ChangedFiles", "Sources"]),
+    );
+    expect(spec.components).not.toHaveProperty("Slider");
   });
 
   test("每个组件都有非空 description", () => {
@@ -88,6 +100,13 @@ describe("openui library", () => {
       expect(parsed.root, `example ${index + 1} 缺少 root`).toBeTruthy();
       expect(parsed.meta.incomplete, `example ${index + 1} 不完整`).toBe(false);
     }
+  });
+
+  test("提示词示例包含 Gauge、ChangedFiles 与 Sources", () => {
+    const examples = openuiPromptOptions.examples.join("\n");
+    expect(examples).toContain("Gauge(");
+    expect(examples).toContain("ChangedFiles(");
+    expect(examples).toContain("Sources(");
   });
 
   test("生成的系统提示词可加载且不含 Cloud/密钥标记", () => {

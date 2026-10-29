@@ -35,29 +35,56 @@ export function OpenUIMessage({
 }: OpenUIMessageProps) {
   const doc = useMemo(() => splitOpenUI(text, streaming), [text, streaming]);
 
-  if (doc.program === null) {
-    if (doc.status === "open" && streaming) {
+  // 流式未闭合：已到达的片段直接交给 React-lang 流式解析，不再等闭合围栏。
+  if (doc.status === "open" && streaming) {
+    if (!doc.program) {
       return (
         <>
           {doc.before ? renderMarkdown(doc.before) : null}
           <Skeleton label="正在生成界面…" />
-          {doc.after ? renderMarkdown(doc.after) : null}
         </>
       );
     }
-    if (doc.status === "open" && !streaming) {
-      return <div data-openui-fallback="incomplete-fence">{renderMarkdown(text)}</div>;
-    }
-    // 普通 Markdown、多围栏、流式裸 DSL 都保持原文渲染。
-    return <>{renderMarkdown(text)}</>;
+    return (
+      <OpenUIErrorBoundary
+        resetKey={doc.program}
+        fallback={<Skeleton label="正在生成界面…" />}
+      >
+        <Suspense
+          fallback={
+            <>
+              {doc.before ? renderMarkdown(doc.before) : null}
+              <Skeleton label="正在渲染界面…" />
+            </>
+          }
+        >
+          <LazyOpenUIProgram
+            program={doc.program}
+            isStreaming
+            actionsEnabled={actionsEnabled}
+            before={doc.before}
+            // 未闭合围栏之后不可能有 Markdown；显式传空，避免流式期间渲染 after。
+            after=""
+            fallbackText={text}
+            renderText={renderMarkdown}
+            onAction={onOpenUIAction}
+          />
+        </Suspense>
+      </OpenUIErrorBoundary>
+    );
   }
 
+  // 流结束仍未闭合：半截程序不可解析，回退原文并标记原因。
+  if (doc.status === "open") {
+    return <div data-openui-fallback="incomplete-fence">{renderMarkdown(text)}</div>;
+  }
+
+  // 普通 Markdown、多围栏、流式裸 DSL 都保持原文渲染。
+  if (doc.program === null) return <>{renderMarkdown(text)}</>;
+
+  // 闭合围栏与裸 DSL 走严格路径：完整校验后才挂载 Renderer。
   return (
-    <OpenUIErrorBoundary
-      key={doc.program}
-      resetKey={doc.program}
-      fallback={renderMarkdown(text)}
-    >
+    <OpenUIErrorBoundary resetKey={doc.program} fallback={renderMarkdown(text)}>
       <Suspense
         fallback={
           <>
@@ -69,7 +96,7 @@ export function OpenUIMessage({
       >
         <LazyOpenUIProgram
           program={doc.program}
-          isStreaming={streaming}
+          isStreaming={false}
           actionsEnabled={actionsEnabled}
           before={doc.before}
           after={doc.after}

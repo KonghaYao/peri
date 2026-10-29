@@ -18,17 +18,43 @@ describe("splitOpenUI", () => {
     expect(splitOpenUI(`~~~openui\n${PROGRAM}\n~~~`, false).program).toBe(PROGRAM);
   });
 
-  test("未闭合围栏返回 open，不泄露半截程序", () => {
+  test("流式未闭合围栏返回已到达的程序片段", () => {
     const doc = splitOpenUI(`前言\n\`\`\`openui\n${PROGRAM}`, true);
     expect(doc.status).toBe("open");
+    expect(doc.complete).toBe(false);
+    expect(doc.program).toBe(PROGRAM);
+    expect(doc.before).toBe("前言\n");
+    expect(doc.after).toBe("");
+  });
+
+  test("流式刚开启、尚无内容时返回空片段", () => {
+    const doc = splitOpenUI("前言\n```openui\n", true);
+    expect(doc.status).toBe("open");
+    expect(doc.complete).toBe(false);
+    expect(doc.program).toBe("");
+    expect(doc.after).toBe("");
+  });
+
+  test("流结束仍未闭合时仍返回片段，由调用方回退", () => {
+    const doc = splitOpenUI(`\`\`\`openui\n${PROGRAM}`, false);
+    expect(doc.status).toBe("open");
+    expect(doc.complete).toBe(false);
+    expect(doc.program).toBe(PROGRAM);
+  });
+
+  test("普通代码块内未闭合的 openui 不返回片段", () => {
+    const text = `\`\`\`\`text\n\`\`\`openui\n${PROGRAM}`;
+    const doc = splitOpenUI(text, true);
+    expect(doc.status).toBe("none");
     expect(doc.program).toBeNull();
-    expect(doc.before.trim()).toBe("前言");
+    expect(doc.before).toBe(text);
   });
 
   test("闭合长度短于开启时不关闭", () => {
     const doc = splitOpenUI(`\`\`\`\`openui\n${PROGRAM}\n\`\`\``, false);
     expect(doc.status).toBe("open");
-    expect(doc.program).toBeNull();
+    // 不足长度的闭合行只是片段内容，原样保留给流式解析。
+    expect(doc.program).toBe(`${PROGRAM}\n\`\`\``);
   });
 
   test("多个 OpenUI 围栏整体回退 Markdown", () => {

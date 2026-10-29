@@ -1,15 +1,89 @@
 // devtools 必须在 react-lang 求值前设置内部开关。
 import "./devtools-off";
-import type { ElementNode } from "@openuidev/lang-core";
+import type { ElementNode, ParseResult } from "@openuidev/lang-core";
 import { createParser, Renderer } from "@openuidev/react-lang";
-import { useMemo, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { OpenUIActionEvent } from "./action-event";
 import { OpenUIActionEnabledContext } from "./components/shared";
 import { openuiLibrary } from "./library";
 
 export { OpenUIErrorBoundary } from "./openui-error-boundary";
 
-const parser = createParser(openuiLibrary.toJSONSchema(), openuiLibrary.root);
+/** 流式解析/渲染最多每 120ms 推进一次，避免逐字符 parse。 */
+const STREAM_THROTTLE_MS = 120;
+
+/**
+ * 解析诊断：供流式节流测试与探针读取，不参与渲染决策。
+ * `count` 只统计本模块发起的 parse 次数。
+ */
+export const openuiParseStats = {
+  count: 0,
+  maxDurationMs: 0,
+};
+
+function nowMs(): number {
+  return typeof performance === "undefined" ? Date.now() : performance.now();
+}
+
+/**
+ * 复用同一个 parser 会累积内部状态，流式前缀必须每次新建。
+ */
+function parseProgram(program: string): ParseResult | null {
+  const started = nowMs();
+  try {
+    return createParser(openuiLibrary.toJSONSchema(), openuiLibrary.root).parse(program);
+  } catch {
+    return null;
+  } finally {
+    openuiParseStats.count += 1;
+    openuiParseStats.maxDurationMs = Math.max(openuiParseStats.maxDurationMs, nowMs() - started);
+  }
+}
+
+/**
+ * leading + trailing 节流：首次立即生效，窗口内的更新合并为最后一次。
+ * 非流式直接返回原值，保证严格模式的同步校验。
+ */
+function useThrottledProgram(program: string, isStreaming: boolean): string {
+  const [snapshot, setSnapshot] = useState(program);
+  const latestRef = useRef(program);
+  latestRef.current = program;
+  const lastCommitRef = useRef(Date.now());
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearTimer = useCallback(() => {
+    if (timerRef.current !== null) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => clearTimer, [clearTimer]);
+
+  useEffect(() => {
+    if (!isStreaming) {
+      clearTimer();
+      lastCommitRef.current = 0;
+      return;
+    }
+    if (program === snapshot) return;
+
+    const elapsed = Date.now() - lastCommitRef.current;
+    if (lastCommitRef.current === 0 || elapsed >= STREAM_THROTTLE_MS) {
+      lastCommitRef.current = Date.now();
+      setSnapshot(program);
+      return;
+    }
+    if (timerRef.current !== null) return;
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      lastCommitRef.current = Date.now();
+      setSnapshot(latestRef.current);
+    }, STREAM_THROTTLE_MS - elapsed);
+  }, [program, isStreaming, snapshot, clearTimer]);
+
+  return isStreaming ? snapshot : program;
+}
 
 function isElementNode(value: unknown): value is ElementNode {
   return value !== null && typeof value === "object"
@@ -45,6 +119,32 @@ function hasInvalidElement(node: ElementNode): boolean {
     }
   }
   return false;
+}
+
+/**
+ * 流式模式取“最近一次可解析”的程序：root 存在且无 parser 错误。
+ * unresolved 允许（定义稍后到达）；瞬时错误期间继续展示上一版 UI。
+ */
+function resolveStreamingProgram(
+  parsed: ParseResult | null,
+  program: string,
+  lastGood: { current: string | null },
+): string | null {
+  if (parsed?.root && parsed.meta.errors.length === 0) {
+    lastGood.current = program;
+    return program;
+  }
+  // 新一轮流式从空内容重新开始，旧结果不再适用。
+  if (!program) lastGood.current = null;
+  return lastGood.current;
+}
+
+function StreamingSkeleton() {
+  return (
+    <div data-slot="peri-openui-skeleton" role="status" aria-live="polite">
+      正在生成界面…
+    </div>
+  );
 }
 
 export interface OpenUIProgramProps {
@@ -85,18 +185,33 @@ export function OpenUIProgram({
   renderText = renderPlainText,
   onAction,
 }: OpenUIProgramProps) {
-  const parsed = useMemo(() => {
-    try {
-      return parser.parse(program);
-    } catch {
-      return null;
-    }
-  }, [program]);
+  const activeProgram = useThrottledProgram(program, isStreaming);
+  const parsed = useMemo(() => parseProgram(activeProgram), [activeProgram]);
+  const lastGoodRef = useRef<string | null>(null);
 
-  const invalid = useMemo(
-    () => (parsed?.root ? hasInvalidElement(parsed.root) : false),
-    [parsed],
-  );
+  if (isStreaming) {
+    const renderProgram = resolveStreamingProgram(parsed, activeProgram, lastGoodRef);
+    return (
+      <OpenUIActionEnabledContext.Provider value={false}>
+        {before ? renderText(before) : null}
+        {renderProgram === null ? (
+          <StreamingSkeleton />
+        ) : (
+          <div data-slot="peri-openui" style={{ minWidth: 0 }}>
+            <Renderer
+              response={renderProgram}
+              library={openuiLibrary}
+              isStreaming
+              onAction={onAction}
+              publishObservability={false}
+              onError={warnRendererErrors}
+            />
+          </div>
+        )}
+        {after ? renderText(after) : null}
+      </OpenUIActionEnabledContext.Provider>
+    );
+  }
 
   if (!parsed?.root) {
     return warningFallback("parse-failed", renderText(fallbackText));
@@ -106,11 +221,15 @@ export function OpenUIProgram({
   }
   // root 存在但存在校验错误/未解析引用时，Renderer 会静默丢弃节点并留下空白。
   // 这类残缺 UI 不可接受：回退整段原文并标记原因（orphaned 不影响渲染，不触发）。
-  if (parsed.meta.errors.length > 0 || parsed.meta.unresolved.length > 0 || invalid) {
+  if (
+    parsed.meta.errors.length > 0
+    || parsed.meta.unresolved.length > 0
+    || hasInvalidElement(parsed.root)
+  ) {
     return warningFallback("validation-failed", renderText(fallbackText));
   }
 
-  const interactionEnabled = actionsEnabled && !isStreaming;
+  const interactionEnabled = actionsEnabled;
   return (
     <OpenUIActionEnabledContext.Provider value={interactionEnabled}>
       {before ? renderText(before) : null}
@@ -118,7 +237,7 @@ export function OpenUIProgram({
         <Renderer
           response={program}
           library={openuiLibrary}
-          isStreaming={isStreaming}
+          isStreaming={false}
           onAction={onAction}
           publishObservability={false}
           onError={warnRendererErrors}

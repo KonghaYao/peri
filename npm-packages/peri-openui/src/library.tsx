@@ -7,8 +7,11 @@ import { BarChartView, LineChartView, PieChartView } from "./components/charts";
 import {
   CalloutView,
   CardView,
+  ChangedFilesView,
   DiffStatsView,
   DiffViewView,
+  GaugeView,
+  SourcesView,
   StatView,
   TableView,
   TodoListView,
@@ -171,10 +174,32 @@ const UsageBar = defineComponent({
   component: UsageBarView,
 });
 
+const Gauge = defineComponent({
+  name: "Gauge",
+  description:
+    "Single-value ring gauge for usage or completion. args: value, label, max?(default 100, must be >0), unit?, detail?, tone?(success|danger|warning|info), size?(72-160, default 96). Display-only; use UsageBar for multi-segment composition and Stat for plain metrics.",
+  props: z.object({
+    value: z.number(),
+    label: z.string(),
+    max: z.number().optional(),
+    unit: z.string().optional(),
+    detail: z.string().optional(),
+    tone: toneSchema,
+    size: z.number().int().min(72).max(160).optional(),
+  }),
+  component: GaugeView,
+});
+
 const DiffStats = defineComponent({
   name: "DiffStats",
-  description: "Inline +additions/-deletions counts. args: additions, deletions.",
-  props: z.object({ additions: z.number(), deletions: z.number() }),
+  description:
+    "Inline or aligned +additions/-deletions counts. args: additions, deletions, layout?(inline|aligned, default inline), showParentheses?. Counts >=1000 use compact k/m/b notation.",
+  props: z.object({
+    additions: z.number(),
+    deletions: z.number(),
+    layout: z.enum(["aligned", "inline"]).optional(),
+    showParentheses: z.boolean().optional(),
+  }),
   component: DiffStatsView,
 });
 
@@ -196,6 +221,45 @@ const DiffView = defineComponent({
     showAccentStrip: z.boolean().optional(),
   }),
   component: DiffViewView,
+});
+
+const ChangedFiles = defineComponent({
+  name: "ChangedFiles",
+  description:
+    "Changed-files summary grouped by directory; display-only, not authoritative. args: files(path, additions?, deletions?, status?: added|modified|deleted|renamed)[], title?, maxRows?(1-200, default 50). Paths use '/'; excess rows collapse to '+N more files'.",
+  props: z.object({
+    files: z.array(
+      z.object({
+        path: z.string(),
+        additions: z.number().optional(),
+        deletions: z.number().optional(),
+        status: z.enum(["added", "modified", "deleted", "renamed"]).optional(),
+      }),
+    ),
+    title: z.string().optional(),
+    maxRows: z.number().int().min(1).max(200).optional(),
+  }),
+  component: ChangedFilesView,
+});
+
+const Sources = defineComponent({
+  name: "Sources",
+  description:
+    "Ordered source list (1-10 items). args: items(title, url, snippet?)[], title?(default Sources). Only plain http(s) URLs without credentials are linked; rejected URLs render as plain text.",
+  props: z.object({
+    items: z
+      .array(
+        z.object({
+          title: z.string(),
+          url: z.string(),
+          snippet: z.string().optional(),
+        }),
+      )
+      .min(1)
+      .max(10),
+    title: z.string().optional(),
+  }),
+  component: SourcesView,
 });
 
 const TodoList = defineComponent({
@@ -376,8 +440,11 @@ const leafRefs = [
   Callout.ref,
   Stat.ref,
   UsageBar.ref,
+  Gauge.ref,
   DiffStats.ref,
   DiffView.ref,
+  ChangedFiles.ref,
+  Sources.ref,
   TodoList.ref,
   Table.ref,
   BarChart.ref,
@@ -456,7 +523,19 @@ export const openuiComponentGroups = [
   },
   {
     name: "Containers & data",
-    components: ["Card", "Callout", "Stat", "UsageBar", "DiffStats", "DiffView", "TodoList", "Table"],
+    components: [
+      "Card",
+      "Callout",
+      "Stat",
+      "UsageBar",
+      "Gauge",
+      "DiffStats",
+      "DiffView",
+      "ChangedFiles",
+      "Sources",
+      "TodoList",
+      "Table",
+    ],
     notes: ["Use Card for grouping; do not nest Cards."],
   },
   {
@@ -496,6 +575,12 @@ title = H3("近 7 天请求量")
 chart = LineChart(["周一", "周二", "周三", "周四", "周五", "周六", "周日"], [{ name: "请求", data: [120, 160, 140, 200, 180, 240, 220] }])
 actions = Row([more], 8, "end", "end")
 more = Button("继续分析", @ToAssistant("继续分析这张图"), "secondary")`,
+    `root = Stack([gauge])
+gauge = Gauge(72, "上下文用量", 100, "%", "144k / 200k tokens", "info")`,
+    `root = Stack([changes])
+changes = ChangedFiles([{ path: "src/library.tsx", additions: 12, deletions: 3, status: "modified" }, { path: "README.md", additions: 2 }], "本次改动", 20)`,
+    `root = Stack([sources])
+sources = Sources([{ title: "Peri 文档", url: "https://example.com/peri", snippet: "Agent loop overview" }])`,
   ],
   inlineMode: false,
   editMode: false,
@@ -524,8 +609,11 @@ export const openuiLibrary = createLibrary({
     Callout,
     Stat,
     UsageBar,
+    Gauge,
     DiffStats,
     DiffView,
+    ChangedFiles,
+    Sources,
     TodoList,
     Table,
     BarChart,

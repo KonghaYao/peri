@@ -16,6 +16,9 @@ export { BarChart, LineChart, PieChart } from "./chart-primitives";
 export type { DiffLineData } from "./diff-view";
 export { DiffStats, DiffView } from "./diff-view";
 
+export type { GaugeProps, GaugeTone } from "./gauge";
+export { Gauge } from "./gauge";
+
 export { Checkbox, Select, TextArea, TextInput, Toggle } from "./form-primitives";
 
 export type { CalloutTone, StatTone, TableColumnAlign, TableRowTone } from "./ui-primitives";

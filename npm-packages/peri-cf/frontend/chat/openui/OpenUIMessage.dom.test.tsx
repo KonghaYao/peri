@@ -41,17 +41,44 @@ describe("OpenUIMessage", () => {
     expect(document.body.textContent).toContain("后文");
   });
 
-  test("流式中未闭合围栏只显示骨架，不泄露半截代码", () => {
+  test("流式中未闭合围栏在闭合前就挂载 Renderer", async () => {
     renderMessage(`\`\`\`openui\n${PROGRAM}`, true);
-    expect(screen.getByText("正在生成界面…")).toBeTruthy();
-    expect(document.querySelector('[data-slot="peri-openui"]')).toBeNull();
+    expect(await screen.findByText("OpenUI 内容")).toBeTruthy();
+    expect(document.querySelector('[data-slot="peri-openui"]')).toBeTruthy();
+    expect(document.querySelector('[data-openui-fallback]')).toBeNull();
     expect(document.body.textContent).not.toContain("root = Stack");
+  });
+
+  test("流式未闭合围栏保留 before，且只渲染一次", async () => {
+    renderMessage(`前文\n\`\`\`openui\n${PROGRAM}`, true);
+    expect(await screen.findByText("OpenUI 内容")).toBeTruthy();
+    expect(screen.getAllByText("前文")).toHaveLength(1);
+    expect(document.querySelector('[data-slot="peri-openui"]')).toBeTruthy();
+  });
+
+  test("流式逐步更新：闭合前出现 UI，闭合后不回退不重复", async () => {
+    const view = renderMessage("```openui\n", true);
+    expect(screen.getByText("正在生成界面…")).toBeTruthy();
+
+    const partial = `\`\`\`openui\n${PROGRAM}`;
+    view.rerender(createElement(OpenUIMessage, { text: partial, streaming: true, renderMarkdown }));
+    expect(await screen.findByText("OpenUI 内容")).toBeTruthy();
+    expect(document.querySelectorAll('[data-slot="peri-openui"]')).toHaveLength(1);
+
+    const closed = `\`\`\`openui\n${PROGRAM}\n\`\`\``;
+    view.rerender(createElement(OpenUIMessage, { text: closed, streaming: false, renderMarkdown }));
+    await waitFor(() => expect(document.querySelectorAll('[data-slot="peri-openui"]')).toHaveLength(1));
+    expect(screen.getAllByText("OpenUI 内容")).toHaveLength(1);
+    expect(document.querySelector('[data-openui-fallback]')).toBeNull();
+    expect(document.querySelector('[data-slot="peri-openui-skeleton"]')).toBeNull();
   });
 
   test("流结束仍未闭合时回退原始 Markdown", () => {
     renderMessage(`\`\`\`openui\n${PROGRAM}`, false);
     expect(document.querySelector('[data-openui-fallback="incomplete-fence"]')).toBeTruthy();
     expect(document.querySelector('[data-slot="peri-openui"]')).toBeNull();
+    expect(document.body.textContent).toContain("root = Stack");
+    expect(document.body.textContent).toContain("OpenUI 内容");
   });
 
   test("解析失败回退 Markdown 并标记 parse-failed", async () => {
@@ -79,10 +106,10 @@ describe("OpenUIMessage", () => {
     expect(document.querySelector('[data-openui-fallback]')).toBeNull();
   });
 
-  test("流式中完整围栏仍挂载并禁用按钮", async () => {
+  test("流式中完整围栏走严格路径，按钮按完整程序启用", async () => {
     renderMessage('```openui\nroot = Stack([submit])\nsubmit = Button("提交", @ToAssistant("提交"))\n```', true);
     const button = await screen.findByRole("button", { name: "提交" });
-    expect((button as HTMLButtonElement).disabled).toBe(true);
+    expect((button as HTMLButtonElement).disabled).toBe(false);
     expect(document.querySelector('[data-slot="peri-openui"]')).toBeTruthy();
   });
 

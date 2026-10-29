@@ -3,15 +3,15 @@
     "root": "Stack",
     "components": {
       "Stack": {
-        "signature": "Stack(children: (Grid | Card | Row | Text | H1 | H2 | H3 | Code | Link | Pill | Spacer | Divider | Callout | Stat | UsageBar | DiffStats | DiffView | TodoList | Table | BarChart | LineChart | PieChart | TextInput | TextArea | Checkbox | Toggle | Select | Button)[], gap?: number)",
+        "signature": "Stack(children: (Grid | Card | Row | Text | H1 | H2 | H3 | Code | Link | Pill | Spacer | Divider | Callout | Stat | UsageBar | Gauge | DiffStats | DiffView | ChangedFiles | Sources | TodoList | Table | BarChart | LineChart | PieChart | TextInput | TextArea | Checkbox | Toggle | Select | Button)[], gap?: number)",
         "description": "Vertical page root; use as `root = Stack([...])`. args: children(Grid, Card, Row or leaf), gap?."
       },
       "Row": {
-        "signature": "Row(children: (Text | H1 | H2 | H3 | Code | Link | Pill | Spacer | Divider | Callout | Stat | UsageBar | DiffStats | DiffView | TodoList | Table | BarChart | LineChart | PieChart | TextInput | TextArea | Checkbox | Toggle | Select | Button)[], gap?: number, align?: \"start\" | \"center\" | \"end\" | \"stretch\", justify?: \"start\" | \"center\" | \"end\" | \"space-between\", wrap?: boolean)",
+        "signature": "Row(children: (Text | H1 | H2 | H3 | Code | Link | Pill | Spacer | Divider | Callout | Stat | UsageBar | Gauge | DiffStats | DiffView | ChangedFiles | Sources | TodoList | Table | BarChart | LineChart | PieChart | TextInput | TextArea | Checkbox | Toggle | Select | Button)[], gap?: number, align?: \"start\" | \"center\" | \"end\" | \"stretch\", justify?: \"start\" | \"center\" | \"end\" | \"space-between\", wrap?: boolean)",
         "description": "Horizontal layout. Children must be leaf components (no Card or Grid). args: children, gap?, align?, justify?, wrap?."
       },
       "Grid": {
-        "signature": "Grid(columns: number, children: (Card | Row | Text | H1 | H2 | H3 | Code | Link | Pill | Spacer | Divider | Callout | Stat | UsageBar | DiffStats | DiffView | TodoList | Table | BarChart | LineChart | PieChart | TextInput | TextArea | Checkbox | Toggle | Select | Button)[], gap?: number, align?: \"start\" | \"center\" | \"end\" | \"stretch\")",
+        "signature": "Grid(columns: number, children: (Card | Row | Text | H1 | H2 | H3 | Code | Link | Pill | Spacer | Divider | Callout | Stat | UsageBar | Gauge | DiffStats | DiffView | ChangedFiles | Sources | TodoList | Table | BarChart | LineChart | PieChart | TextInput | TextArea | Checkbox | Toggle | Select | Button)[], gap?: number, align?: \"start\" | \"center\" | \"end\" | \"stretch\")",
         "description": "N-column grid; only allowed directly under Stack. args: columns(1-6), children(Card, Row or leaf), gap?, align?."
       },
       "Spacer": {
@@ -51,7 +51,7 @@
         "description": "Compact status or label chip. args: label, size?(sm|md)."
       },
       "Card": {
-        "signature": "Card(title: string, children: (Row | Text | H1 | H2 | H3 | Code | Link | Pill | Spacer | Divider | Callout | Stat | UsageBar | DiffStats | DiffView | TodoList | Table | BarChart | LineChart | PieChart | TextInput | TextArea | Checkbox | Toggle | Select | Button)[], subtitle?: string, collapsible?: boolean, defaultOpen?: boolean)",
+        "signature": "Card(title: string, children: (Row | Text | H1 | H2 | H3 | Code | Link | Pill | Spacer | Divider | Callout | Stat | UsageBar | Gauge | DiffStats | DiffView | ChangedFiles | Sources | TodoList | Table | BarChart | LineChart | PieChart | TextInput | TextArea | Checkbox | Toggle | Select | Button)[], subtitle?: string, collapsible?: boolean, defaultOpen?: boolean)",
         "description": "Bordered card with header and body; optional collapse. args: title, children(Row or leaf), subtitle?, collapsible?, defaultOpen?."
       },
       "Callout": {
@@ -66,13 +66,25 @@
         "signature": "UsageBar(segments: {id: string, value: number, color?: \"gray\" | \"purple\" | \"green\" | \"yellow\" | \"cyan\" | \"pink\" | \"blue\" | \"orange\" | \"red\"}[], total: number, topLeftLabel?: string, topRightLabel?: string)",
         "description": "Segmented usage bar. args: segments(id,value,color?), total, topLeftLabel?, topRightLabel?. color: gray|purple|green|yellow|cyan|pink|blue|orange|red."
       },
+      "Gauge": {
+        "signature": "Gauge(value: number, label: string, max?: number, unit?: string, detail?: string, tone?: \"success\" | \"danger\" | \"warning\" | \"info\", size?: number)",
+        "description": "Single-value ring gauge for usage or completion. args: value, label, max?(default 100, must be >0), unit?, detail?, tone?(success|danger|warning|info), size?(72-160, default 96). Display-only; use UsageBar for multi-segment composition and Stat for plain metrics."
+      },
       "DiffStats": {
-        "signature": "DiffStats(additions: number, deletions: number)",
-        "description": "Inline +additions/-deletions counts. args: additions, deletions."
+        "signature": "DiffStats(additions: number, deletions: number, layout?: \"aligned\" | \"inline\", showParentheses?: boolean)",
+        "description": "Inline or aligned +additions/-deletions counts. args: additions, deletions, layout?(inline|aligned, default inline), showParentheses?. Counts >=1000 use compact k/m/b notation."
       },
       "DiffView": {
         "signature": "DiffView(lines: {type: \"added\" | \"removed\" | \"unchanged\", content: string, lineNumber?: number}[], path?: string, language?: string, showLineNumbers?: boolean, showAccentStrip?: boolean)",
         "description": "Unified diff. args: lines(type added|removed|unchanged, content, lineNumber?), path?, language?, showLineNumbers?, showAccentStrip?."
+      },
+      "ChangedFiles": {
+        "signature": "ChangedFiles(files: {path: string, additions?: number, deletions?: number, status?: \"added\" | \"modified\" | \"deleted\" | \"renamed\"}[], title?: string, maxRows?: number)",
+        "description": "Changed-files summary grouped by directory; display-only, not authoritative. args: files(path, additions?, deletions?, status?: added|modified|deleted|renamed)[], title?, maxRows?(1-200, default 50). Paths use '/'; excess rows collapse to '+N more files'."
+      },
+      "Sources": {
+        "signature": "Sources(items: {title: string, url: string, snippet?: string}[], title?: string)",
+        "description": "Ordered source list (1-10 items). args: items(title, url, snippet?)[], title?(default Sources). Only plain http(s) URLs without credentials are linked; rejected URLs render as plain text."
       },
       "TodoList": {
         "signature": "TodoList(todos: {id: string, content: string, status: \"pending\" | \"in_progress\" | \"completed\" | \"cancelled\"}[])",
@@ -148,8 +160,11 @@
           "Callout",
           "Stat",
           "UsageBar",
+          "Gauge",
           "DiffStats",
           "DiffView",
+          "ChangedFiles",
+          "Sources",
           "TodoList",
           "Table"
         ],
@@ -235,11 +250,20 @@
         "UsageBar": {
           "$ref": "#/$defs/UsageBar"
         },
+        "Gauge": {
+          "$ref": "#/$defs/Gauge"
+        },
         "DiffStats": {
           "$ref": "#/$defs/DiffStats"
         },
         "DiffView": {
           "$ref": "#/$defs/DiffView"
+        },
+        "ChangedFiles": {
+          "$ref": "#/$defs/ChangedFiles"
+        },
+        "Sources": {
+          "$ref": "#/$defs/Sources"
         },
         "TodoList": {
           "$ref": "#/$defs/TodoList"
@@ -292,8 +316,11 @@
         "Callout",
         "Stat",
         "UsageBar",
+        "Gauge",
         "DiffStats",
         "DiffView",
+        "ChangedFiles",
+        "Sources",
         "TodoList",
         "Table",
         "BarChart",
@@ -361,10 +388,19 @@
                     "$ref": "#/$defs/UsageBar"
                   },
                   {
+                    "$ref": "#/$defs/Gauge"
+                  },
+                  {
                     "$ref": "#/$defs/DiffStats"
                   },
                   {
                     "$ref": "#/$defs/DiffView"
+                  },
+                  {
+                    "$ref": "#/$defs/ChangedFiles"
+                  },
+                  {
+                    "$ref": "#/$defs/Sources"
                   },
                   {
                     "$ref": "#/$defs/TodoList"
@@ -469,10 +505,19 @@
                     "$ref": "#/$defs/UsageBar"
                   },
                   {
+                    "$ref": "#/$defs/Gauge"
+                  },
+                  {
                     "$ref": "#/$defs/DiffStats"
                   },
                   {
                     "$ref": "#/$defs/DiffView"
+                  },
+                  {
+                    "$ref": "#/$defs/ChangedFiles"
+                  },
+                  {
+                    "$ref": "#/$defs/Sources"
                   },
                   {
                     "$ref": "#/$defs/TodoList"
@@ -582,10 +627,19 @@
                     "$ref": "#/$defs/UsageBar"
                   },
                   {
+                    "$ref": "#/$defs/Gauge"
+                  },
+                  {
                     "$ref": "#/$defs/DiffStats"
                   },
                   {
                     "$ref": "#/$defs/DiffView"
+                  },
+                  {
+                    "$ref": "#/$defs/ChangedFiles"
+                  },
+                  {
+                    "$ref": "#/$defs/Sources"
                   },
                   {
                     "$ref": "#/$defs/TodoList"
@@ -684,10 +738,19 @@
                     "$ref": "#/$defs/UsageBar"
                   },
                   {
+                    "$ref": "#/$defs/Gauge"
+                  },
+                  {
                     "$ref": "#/$defs/DiffStats"
                   },
                   {
                     "$ref": "#/$defs/DiffView"
+                  },
+                  {
+                    "$ref": "#/$defs/ChangedFiles"
+                  },
+                  {
+                    "$ref": "#/$defs/Sources"
                   },
                   {
                     "$ref": "#/$defs/TodoList"
@@ -1014,6 +1077,46 @@
           "additionalProperties": false,
           "description": "Segmented usage bar. args: segments(id,value,color?), total, topLeftLabel?, topRightLabel?. color: gray|purple|green|yellow|cyan|pink|blue|orange|red."
         },
+        "Gauge": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "number"
+            },
+            "label": {
+              "type": "string"
+            },
+            "max": {
+              "type": "number"
+            },
+            "unit": {
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "tone": {
+              "type": "string",
+              "enum": [
+                "success",
+                "danger",
+                "warning",
+                "info"
+              ]
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 72,
+              "maximum": 160
+            }
+          },
+          "required": [
+            "value",
+            "label"
+          ],
+          "additionalProperties": false,
+          "description": "Single-value ring gauge for usage or completion. args: value, label, max?(default 100, must be >0), unit?, detail?, tone?(success|danger|warning|info), size?(72-160, default 96). Display-only; use UsageBar for multi-segment composition and Stat for plain metrics."
+        },
         "DiffStats": {
           "type": "object",
           "properties": {
@@ -1022,6 +1125,16 @@
             },
             "deletions": {
               "type": "number"
+            },
+            "layout": {
+              "type": "string",
+              "enum": [
+                "aligned",
+                "inline"
+              ]
+            },
+            "showParentheses": {
+              "type": "boolean"
             }
           },
           "required": [
@@ -1029,7 +1142,7 @@
             "deletions"
           ],
           "additionalProperties": false,
-          "description": "Inline +additions/-deletions counts. args: additions, deletions."
+          "description": "Inline or aligned +additions/-deletions counts. args: additions, deletions, layout?(inline|aligned, default inline), showParentheses?. Counts >=1000 use compact k/m/b notation."
         },
         "DiffView": {
           "type": "object",
@@ -1081,6 +1194,91 @@
           ],
           "additionalProperties": false,
           "description": "Unified diff. args: lines(type added|removed|unchanged, content, lineNumber?), path?, language?, showLineNumbers?, showAccentStrip?."
+        },
+        "ChangedFiles": {
+          "type": "object",
+          "properties": {
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "additions": {
+                    "type": "number"
+                  },
+                  "deletions": {
+                    "type": "number"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "added",
+                      "modified",
+                      "deleted",
+                      "renamed"
+                    ]
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "title": {
+              "type": "string"
+            },
+            "maxRows": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          "required": [
+            "files"
+          ],
+          "additionalProperties": false,
+          "description": "Changed-files summary grouped by directory; display-only, not authoritative. args: files(path, additions?, deletions?, status?: added|modified|deleted|renamed)[], title?, maxRows?(1-200, default 50). Paths use '/'; excess rows collapse to '+N more files'."
+        },
+        "Sources": {
+          "type": "object",
+          "properties": {
+            "items": {
+              "minItems": 1,
+              "maxItems": 10,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "snippet": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title",
+                  "url"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "additionalProperties": false,
+          "description": "Ordered source list (1-10 items). args: items(title, url, snippet?)[], title?(default Sources). Only plain http(s) URLs without credentials are linked; rejected URLs render as plain text."
         },
         "TodoList": {
           "type": "object",
@@ -1621,7 +1819,10 @@
     ],
     "examples": [
       "root = Stack([title, metrics, table])\ntitle = H2(\"本周交付\")\nmetrics = Grid(3, [done, blocked, onTime])\ndone = Stat(\"12\", \"已完成任务\", \"success\")\nblocked = Stat(\"3\", \"阻塞\", \"danger\")\nonTime = Stat(\"87%\", \"按期率\", \"info\")\ntable = Table([\"模块\", \"状态\", \"负责人\"], [[\"渲染\", \"完成\", \"A\"], [\"回传\", \"进行中\", \"B\"]])",
-      "root = Stack([title, chart, actions])\ntitle = H3(\"近 7 天请求量\")\nchart = LineChart([\"周一\", \"周二\", \"周三\", \"周四\", \"周五\", \"周六\", \"周日\"], [{ name: \"请求\", data: [120, 160, 140, 200, 180, 240, 220] }])\nactions = Row([more], 8, \"end\", \"end\")\nmore = Button(\"继续分析\", @ToAssistant(\"继续分析这张图\"), \"secondary\")"
+      "root = Stack([title, chart, actions])\ntitle = H3(\"近 7 天请求量\")\nchart = LineChart([\"周一\", \"周二\", \"周三\", \"周四\", \"周五\", \"周六\", \"周日\"], [{ name: \"请求\", data: [120, 160, 140, 200, 180, 240, 220] }])\nactions = Row([more], 8, \"end\", \"end\")\nmore = Button(\"继续分析\", @ToAssistant(\"继续分析这张图\"), \"secondary\")",
+      "root = Stack([gauge])\ngauge = Gauge(72, \"上下文用量\", 100, \"%\", \"144k / 200k tokens\", \"info\")",
+      "root = Stack([changes])\nchanges = ChangedFiles([{ path: \"src/library.tsx\", additions: 12, deletions: 3, status: \"modified\" }, { path: \"README.md\", additions: 2 }], \"本次改动\", 20)",
+      "root = Stack([sources])\nsources = Sources([{ title: \"Peri 文档\", url: \"https://example.com/peri\", snippet: \"Agent loop overview\" }])"
     ],
     "inlineMode": false,
     "editMode": false,

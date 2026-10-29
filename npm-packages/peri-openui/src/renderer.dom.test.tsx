@@ -15,27 +15,48 @@ Object.defineProperty(globalThis, "ResizeObserver", {
   writable: true,
 });
 
-const { cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
+const { act, cleanup, fireEvent, render, screen, waitFor } = await import("@testing-library/react");
 const { createElement } = await import("react");
-const { OpenUIProgram } = await import("./renderer");
+const { OpenUIProgram, openuiParseStats } = await import("./renderer");
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  openuiParseStats.count = 0;
+  openuiParseStats.maxDurationMs = 0;
+});
 
 const renderText = (value: string) => createElement("div", { "data-slot": "peri-markdown" }, value);
 
-function mount(program: string, options: {
+interface MountOptions {
   isStreaming?: boolean;
   actionsEnabled?: boolean;
   onAction?: (event: unknown) => void;
-} = {}) {
-  return render(createElement(OpenUIProgram, {
+}
+
+function programElement(program: string, options: MountOptions = {}) {
+  return createElement(OpenUIProgram, {
     program,
     isStreaming: options.isStreaming ?? false,
     actionsEnabled: options.actionsEnabled ?? true,
     fallbackText: program,
     renderText,
     onAction: options.onAction,
-  }));
+  });
+}
+
+function mount(program: string, options: MountOptions = {}) {
+  return render(programElement(program, options));
+}
+
+function update(view: ReturnType<typeof mount>, program: string, options: MountOptions = {}) {
+  view.rerender(programElement(program, options));
+}
+
+/** 等待超过一个节流窗口，确保 trailing 更新落地。 */
+function waitStreamWindow(): Promise<void> {
+  return act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 160));
+  });
 }
 
 describe("OpenUIProgram", () => {
@@ -144,6 +165,17 @@ submit = Button("提交", @ToAssistant("提交"))`, { isStreaming: true });
     expect((screen.getByRole("button", { name: "提交" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  test("渲染 Gauge、ChangedFiles 与 Sources 叶子组件", () => {
+    mount(`root = Stack([gauge, changes, sources])
+gauge = Gauge(72, "上下文用量", 100, "%")
+changes = ChangedFiles([{ path: "src/a.ts", additions: 2, deletions: 1, status: "modified" }])
+sources = Sources([{ title: "Peri", url: "https://example.com/peri" }])`);
+    expect(screen.getByRole("meter").getAttribute("aria-valuenow")).toBe("72");
+    expect(screen.getByText("1 changed file")).toBeTruthy();
+    expect(screen.getByText("src/a.ts")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Peri" })).toBeTruthy();
+  });
+
   test("Text 转义 HTML，Link 拒绝 javascript:", () => {
     mount(`root = Stack([text, link])
 text = Text("<img src=x onerror=alert(1)>")
@@ -152,5 +184,74 @@ link = Link("坏链接", "javascript:alert(1)")`);
     expect(screen.getByText("<img src=x onerror=alert(1)>")).toBeTruthy();
     expect(document.querySelector('a[href^="javascript:"]')).toBeNull();
     expect(screen.getByText("坏链接").getAttribute("title")).toContain("Blocked non-http(s) link");
+  });
+
+  test("流式 partial 在闭合前挂载 Renderer，并随新定义更新", async () => {
+    const view = mount("root = Stack([", { isStreaming: true });
+    expect(document.querySelector('[data-slot="peri-openui"]')).toBeTruthy();
+    expect(document.querySelector('[data-slot="peri-openui-skeleton"]')).toBeNull();
+    expect(document.querySelector('[data-openui-fallback]')).toBeNull();
+
+    update(view, 'root = Stack([title])\ntitle = Text("标题")', { isStreaming: true });
+    await waitFor(() => expect(screen.getByText("标题")).toBeTruthy(), { timeout: 1000 });
+    expect(document.querySelector('[data-slot="peri-openui"]')).toBeTruthy();
+  });
+
+  test("瞬时 errors/unresolved 不回退原文，保留上一版可渲染程序", async () => {
+    const view = mount('root = Stack([title])\ntitle = Text("标题")', { isStreaming: true });
+    expect(screen.getByText("标题")).toBeTruthy();
+
+    // table 未定义 + Text 未闭合：瞬时 missing-required，不能回退 Markdown。
+    update(view, 'root = Stack([title, table])\ntitle = Text(', { isStreaming: true });
+    await waitStreamWindow();
+    expect(screen.getByText("标题")).toBeTruthy();
+    expect(document.querySelector('[data-openui-fallback]')).toBeNull();
+
+    update(
+      view,
+      'root = Stack([title, table])\ntitle = Text("标题")\ntable = Table(["模块", "状态"], [["渲染", "完成"]])',
+      { isStreaming: true },
+    );
+    await waitFor(() => expect(screen.getByText("模块")).toBeTruthy(), { timeout: 1000 });
+    expect(document.querySelector('[data-openui-fallback]')).toBeNull();
+  });
+
+  test("流式解析错误且无上一版时显示内联骨架", async () => {
+    mount('root = Stack([t])\nt = Text(', { isStreaming: true });
+    await waitStreamWindow();
+    expect(document.querySelector('[data-slot="peri-openui-skeleton"]')).toBeTruthy();
+    expect(document.querySelector('[data-slot="peri-openui"]')).toBeNull();
+    expect(document.querySelector('[data-openui-fallback]')).toBeNull();
+    expect(document.body.textContent).not.toContain("root = Stack");
+  });
+
+  test("流结束仍非法时走严格回退", () => {
+    const program = 'root = Stack([t])\nt = Text("hi"';
+    const view = mount(program, { isStreaming: true });
+    expect(document.querySelector('[data-openui-fallback]')).toBeNull();
+
+    update(view, program, { isStreaming: false });
+    expect(document.querySelector('[data-openui-fallback="incomplete-program"]')).toBeTruthy();
+    expect(document.querySelector('[data-slot="peri-openui"]')).toBeNull();
+  });
+
+  test("流式高频更新按 120ms 合并，不逐字符解析", async () => {
+    const view = mount('root = Stack([t])\nt = Text("v1")', { isStreaming: true });
+    // 先推进一次，确保后续更新落在同一个节流窗口内。
+    update(view, 'root = Stack([t])\nt = Text("v1a")', { isStreaming: true });
+    const base = openuiParseStats.count;
+
+    update(view, 'root = Stack([t])\nt = Text("v2")', { isStreaming: true });
+    update(view, 'root = Stack([t])\nt = Text("v3")', { isStreaming: true });
+    update(view, 'root = Stack([t])\nt = Text("v4")', { isStreaming: true });
+
+    expect(openuiParseStats.count).toBe(base);
+    expect(screen.queryByText("v2")).toBeNull();
+    expect(screen.queryByText("v3")).toBeNull();
+
+    await waitFor(() => expect(screen.getByText("v4")).toBeTruthy(), { timeout: 1000 });
+    expect(openuiParseStats.count).toBe(base + 1);
+    expect(screen.queryByText("v2")).toBeNull();
+    expect(screen.queryByText("v3")).toBeNull();
   });
 });

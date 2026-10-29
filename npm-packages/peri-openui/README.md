@@ -50,6 +50,12 @@ bun run typecheck
 修改 `src/library.tsx` 后必须运行 `bun run spec` 并提交新的 `spec.json`。消费端
 `peri-cf` 的 `bun run build` 会先执行 `bun ../peri-openui/scripts/generate.ts --check`。
 
+## 组件来源
+
+`Gauge`、`ChangedFiles` 与 `Sources` 的形态借鉴自 t3code 的 `ContextWindowMeter`、
+`ChangedFilesTree`/`DiffStatLabel` 与 citation source 展示。这里只复用信息结构与展示方式，
+未复制 t3code 代码，也没有新增第三方运行时依赖；三个组件均为纯数据展示，不包含宿主交互。
+
 ## 许可风险
 
 `src/canvas/` 是从 `peri-canvas@0.1.0` 复制改写的 vendored 代码。上游包声明 MIT，但仓库根

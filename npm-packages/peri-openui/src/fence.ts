@@ -5,13 +5,16 @@
  * - OpenUI 开启围栏必须顶层（0 缩进）；```openui / ```openui-lang / ~~~openui；
  * - 扫描同时跟踪所有普通代码围栏（0-3 空格缩进），普通围栏内的 `openui` 只算内容；
  * - 只接受一个顶层 OpenUI 围栏，多个则整体回退 Markdown；
- * - 流式未闭合时不返回半截程序；
+ * - 流式未闭合时返回已到达的程序片段，由渲染层按流式模式逐步解析；
  * - 流结束后的裸 DSL 只在以 `root = Stack(` 开头时识别。
  */
 export interface OpenUIDocument {
   /** 围栏之前的 Markdown 原文。 */
   before: string;
-  /** 可渲染的完整程序；null 表示不挂载 Renderer。 */
+  /**
+   * 程序文本；null 表示不挂载 Renderer。
+   * 流式未闭合时是已到达的片段，不保证可解析。
+   */
   program: string | null;
   /** 围栏之后的 Markdown 原文。 */
   after: string;
@@ -113,7 +116,7 @@ export function splitOpenUI(text: string, streaming: boolean): OpenUIDocument {
   if (mode.kind === "openui") {
     return {
       before: text.slice(0, mode.lineStart),
-      program: null,
+      program: text.slice(mode.contentStart).trim(),
       after: "",
       complete: false,
       status: "open",
