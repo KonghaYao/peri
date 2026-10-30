@@ -19,7 +19,7 @@ pub enum PredictionError {
 ///
 /// 此函数封装了 TUI 之前在 `acp_server/mod.rs` 内联的 Prediction 构造逻辑
 /// （`AgentModelBridge::new` + `ReactLLM::generate_reasoning` 一次调用），
-/// 避免违反 CLAUDE.md [TRAP]：
+/// 避免违反 ARC-BOUNDARY-001 [TRAP]（docs/standards/architecture-contracts.md）：
 ///
 /// > Agent 构建和执行统一通过会话编排入口 `run_session_loop()`（ACP 侧经
 /// > 协议化薄壳 re-export）。禁止在 TUI 层直接构建 Agent。

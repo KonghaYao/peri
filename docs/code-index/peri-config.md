@@ -2,8 +2,7 @@
 
 容量权威入口为 `provider.rs::effective_context_window` 与 `ResolvedProvider::effective_context_window`：Anthropic/OpenAI 使用显式正数、缺省 200,000，旧 `context_1m` 优先 1,000,000；Responses 的已确认 ChatGPT plan 模型缺窗口时派生 1,000,000，API key、未知模型及显式零仍须正整数。`try_resolve` 与 `try_resolve_snapshot` 共用 policy：仅快照校验未绑定 provider 并容忍生效档位缺容量；两者均容忍辅助档位的容量缺口。账号引用校验复用 `peri-acp-types::model::valid_account_reference`。
 
-> Peri 内部配置权威面。模块指引见 [peri-config/CLAUDE.md](../../peri-config/CLAUDE.md)，
-> 现行设计见 [configuration-authority.md](../design/configuration-authority.md)。
+> Peri 内部配置权威面。现行设计见 [configuration-authority.md](../design/configuration-authority.md)。
 
 ## 数据流与职责
 

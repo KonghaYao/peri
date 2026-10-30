@@ -65,7 +65,7 @@ pub(super) fn spawn_prediction(
             tracing::debug!("Prediction: LLM provider ready");
 
             // Facade：agent 构建与执行统一由 peri-acp executor 承担，
-            // TUI 层不再直接构建 Agent（遵守 CLAUDE.md [TRAP]）。
+            // TUI 层不再直接构建 Agent（ARC-BOUNDARY-001，docs/standards/architecture-contracts.md）。
             // L5：LLM 构造（AgentModelBridge）在协议面完成，执行体只收 ReactLLM。
             let llm: Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync> =
                 Box::new(peri_agent::agent::model_bridge::AgentModelBridge::new(

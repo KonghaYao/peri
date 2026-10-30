@@ -277,7 +277,7 @@ fn test_clear_command_name_and_aliases() {
 }
 
 // ── push_done 验证测试 ──────────────────────────────────────────────────────
-// 对应 TRAP: CLAUDE.md issue_2026-05-29-immediate-command-missing-push-done
+// 对应 TRAP: issue_2026-05-29-immediate-command-missing-push-done
 
 /// 验证 MockEventSink 记录 push_done 调用
 #[test]

@@ -338,7 +338,7 @@ lefthook run pre-commit    # fmt + check + clippy（改动命中 crate）+ layer
 
 ### 8.2 Peri TUI E2E（分层门禁）
 
-Rust 单测与 E2E 分离：**E2E 命令只在 `e2e/CLAUDE.md` 维护**，不要写逐文件手跑清单或 `npm run e2e -- --all`。
+Rust 单测与 E2E 分离：**E2E 命令在本文件维护**，不要写逐文件手跑清单或 `npm run e2e -- --all`。
 
 在 `e2e/` 目录：
 
