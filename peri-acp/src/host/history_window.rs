@@ -31,6 +31,8 @@ use crate::transport::types::AcpError;
 
 use super::{AcpServerConfig, SessionState, SharedSessions};
 
+pub(crate) mod child;
+mod child_display;
 mod commit_observer;
 mod inherited;
 mod oversize;
@@ -105,6 +107,22 @@ pub(crate) struct PreparedWindowTicket {
     inherited: Option<HistoryInheritedSnapshot>,
 }
 
+impl PreparedWindowTicket {
+    fn issue(self, ticket_epoch: u64) -> IssuedWindowTicket {
+        IssuedWindowTicket {
+            opaque: self.opaque,
+            binding: self.binding,
+            metadata: self.metadata,
+            ticket_epoch,
+            sink: self.sink,
+            oversize_entries: self.oversize_entries,
+            inherited_unsupported: self.inherited_unsupported,
+            inherited: self.inherited,
+            visibility: self.visibility,
+        }
+    }
+}
+
 /// 一条已签发的窗口票据及其绑定的 snapshot metadata。
 #[derive(Clone)]
 pub(crate) struct IssuedWindowTicket {
@@ -166,6 +184,9 @@ impl IssuedWindowTicket {
 pub(crate) struct HistoryWindowCoordinator {
     ticket: Option<IssuedWindowTicket>,
     ticket_epoch: u64,
+    /// One read-only child window per parent; replacing it revokes the old scope.
+    child_scope: Option<child::ChildHistoryScope>,
+    child_ticket_epoch: u64,
     pub(crate) rewind_in_progress: bool,
     pub(crate) committed_tail: Option<HistoryCommittedTail>,
     pub(crate) checkpoint_id: Option<String>,
@@ -214,17 +235,7 @@ impl HistoryWindowCoordinator {
     /// 原子发布已准备票据：旧 ticket 在此刻才失效。
     fn publish(&mut self, prepared: PreparedWindowTicket) -> IssuedWindowTicket {
         self.ticket_epoch = self.ticket_epoch.saturating_add(1);
-        let issued = IssuedWindowTicket {
-            opaque: prepared.opaque,
-            binding: prepared.binding,
-            metadata: prepared.metadata,
-            ticket_epoch: self.ticket_epoch,
-            sink: prepared.sink,
-            oversize_entries: prepared.oversize_entries,
-            inherited_unsupported: prepared.inherited_unsupported,
-            inherited: prepared.inherited,
-            visibility: prepared.visibility,
-        };
+        let issued = prepared.issue(self.ticket_epoch);
         self.ticket = Some(issued.clone());
         issued
     }
@@ -252,12 +263,17 @@ impl HistoryWindowCoordinator {
         if let Some(ticket) = self.ticket.as_ref() {
             ticket.force_oversize_overflow();
         }
+        if let Some(scope) = &self.child_scope {
+            scope.force_oversize_overflow();
+        }
     }
 
     /// 撤销当前票据；旧 epoch 的读请求在返回前复核时被拒绝。
     pub(crate) fn revoke_ticket(&mut self) {
         self.ticket = None;
         self.ticket_epoch = self.ticket_epoch.saturating_add(1);
+        self.child_scope = None;
+        self.child_ticket_epoch = self.child_ticket_epoch.saturating_add(1);
     }
 
     /// rewind 进入：停止签发/接受新票据，旧票据保留到提交结论。
@@ -641,7 +657,7 @@ async fn seek(
         _ => {
             return Err(snapshot_mismatch(
                 "seek source does not match the active window",
-            ))
+            ));
         }
     }
     let page_plan = HistoryWindowPagePlan {

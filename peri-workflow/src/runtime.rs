@@ -72,9 +72,16 @@ pub enum WorkflowResourceUpdate {
 pub struct WorkflowStartOutcome {
     pub run_id: String,
     pub workflow_name: String,
+    observation: crate::registry::WorkflowRunTicket,
 }
 
 impl WorkflowStartOutcome {
+    /// The producer-held receipt survives an ACK that arrives during the fast
+    /// completion path, before the MCP tool begins waiting for observation.
+    pub async fn wait_for_observation(&self) {
+        self.observation.wait_for_observation().await;
+    }
+
     /// 启动成功文案（稳定格式；MCP `Workflow` 工具与旧 `WorkflowTool` 共用）。
     ///
     /// 与完成提醒同口径说明长文本外置（`${label}` 是引用、内容在 `outputs/`）：
@@ -455,10 +462,17 @@ impl WorkflowRuntime {
         let workflow_name = wf_input.workflow_name.clone();
         let (kill_tx, kill_rx) = tokio::sync::oneshot::channel::<()>();
         let started_at = peri_time::monotonic_now();
+        let started_at_wall = peri_time::now_utc_rfc3339();
+        let summary = format!(
+            "{}: {}",
+            workflow_name,
+            wf_input.script.chars().take(80).collect::<String>()
+        );
 
         // 先原子占用 registry 并发槽，再 spawn，避免并发失败产生孤儿 run。
         let script_preview: String = wf_input.script.chars().take(100).collect();
-        self.registry
+        let run_ticket = self
+            .registry
             .reserve(crate::registry::WorkflowRun {
                 run_id: run_id.clone(),
                 workflow_name: workflow_name.clone(),
@@ -478,29 +492,60 @@ impl WorkflowRuntime {
         // 注册到统一后台任务注册表（取消转发到 WorkflowTaskRegistry::kill 与任务表取消，
         // 与 `kill_run` 同一条路径：不留下「run 已杀、任务仍活」的悬挂）。
         let bg = self.bg_registry.read().clone();
-        if let Some(ref bg) = bg {
+        let registration = if let Some(ref bg) = bg {
             let kill_registry = Arc::clone(&self.registry);
             let kill_tasks = Arc::clone(&self.tasks);
             let kill_run_id = run_id.clone();
-            if let Err(e) = bg.register(peri_acp_types::tasks::BgTaskRegistration {
+            let ticket = match bg.register(peri_acp_types::tasks::BgTaskRegistration {
                 task_id: run_id.clone(),
                 kind: peri_acp_types::tasks::BgTaskKind::Workflow,
-                summary: format!(
-                    "{}: {}",
-                    workflow_name,
-                    wf_input.script.chars().take(80).collect::<String>()
-                ),
+                summary: summary.clone(),
                 pid: None,
                 kill: Some(Box::new(move || {
                     let _ = kill_tasks.cancel_run(&kill_run_id, Some("workflow run killed".into()));
                     let _ = kill_registry.kill(&kill_run_id);
                 })),
             }) {
-                let _ = self.registry.kill(&run_id);
+                Ok(ticket) => ticket,
+                Err(e) => {
+                    self.registry.discard_unstarted(&run_ticket);
+                    self.budgets.forget(&run_id);
+                    return Err(format!("Workflow background admission failed: {e}"));
+                }
+            };
+            Some((Arc::clone(bg), ticket))
+        } else {
+            None
+        };
+        // Preserve the exact source identity while it is still active. The
+        // completion outbox must not depend on a future bounded display read.
+        let task_record = if let Some((bg, ticket)) = &registration {
+            let Some(record) = bg
+                .snapshot()
+                .tasks
+                .into_iter()
+                .find(|task| task.task_id == run_id)
+            else {
+                bg.confirm_external_execution_stopped(ticket);
+                let _ = bg.cancel(&run_id);
+                self.registry.discard_unstarted(&run_ticket);
                 self.budgets.forget(&run_id);
-                return Err(format!("Workflow background admission failed: {e}"));
+                return Err("Workflow registration has no source task record".into());
+            };
+            record
+        } else {
+            peri_acp_types::tasks::TaskRecord {
+                task_id: run_id.clone(),
+                kind: peri_acp_types::tasks::BgTaskKind::Workflow,
+                summary,
+                started_at: started_at_wall,
+                status: "running".into(),
+                duration_ms: 0,
+                output_preview: None,
+                initiator_session_id: None,
+                child_thread_id: None,
             }
-        }
+        };
 
         let completion = crate::completion::RunCompletion {
             registry: Arc::downgrade(&self.registry),
@@ -510,19 +555,25 @@ impl WorkflowRuntime {
             name: workflow_name.clone(),
             started_at,
         };
-        let (child_handle, mut fast_rx) =
-            match completion.spawn(Arc::clone(&self.runner), wf_input, kill_rx, bg, owner) {
-                Ok(started) => started,
-                Err(error) => {
-                    let _ = self.registry.kill(&run_id);
-                    self.budgets.forget(&run_id);
-                    if let Some(bg) = self.bg_registry.read().as_ref() {
-                        bg.confirm_external_execution_stopped(&run_id);
-                        let _ = bg.cancel(&run_id);
-                    }
-                    return Err(error);
+        let (child_handle, mut fast_rx) = match completion.spawn(
+            Arc::clone(&self.runner),
+            wf_input,
+            kill_rx,
+            registration.clone(),
+            owner,
+            (run_ticket.clone(), task_record),
+        ) {
+            Ok(started) => started,
+            Err(error) => {
+                self.registry.discard_unstarted(&run_ticket);
+                self.budgets.forget(&run_id);
+                if let Some((bg, ticket)) = &registration {
+                    bg.confirm_external_execution_stopped(ticket);
+                    let _ = bg.cancel(&run_id);
                 }
-            };
+                return Err(error);
+            }
+        };
         self.registry.attach_child(&run_id, child_handle);
 
         // The one-second fast path observes the same already-published terminal projection.
@@ -581,6 +632,7 @@ impl WorkflowRuntime {
         Ok(WorkflowStartOutcome {
             run_id,
             workflow_name,
+            observation: run_ticket,
         })
     }
 

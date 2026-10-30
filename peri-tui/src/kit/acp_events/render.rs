@@ -24,6 +24,7 @@ use std::sync::Mutex;
 /// 3. todo 进度摘要行（§6.9：TODO_ITEMS 派生，插在最终回答前）；
 /// 4. `group_successful_tools`（§7：相邻成功工具压成 `TuiCollapsedGroup`）。
 pub(crate) fn push_view_models(state: &mut BridgeState) {
+    super::subagent_preview::enforce(state);
     state
         .window
         .ack_release_epoch(crate::kit::atoms::RENDER_ACHIEVED_EPOCH.get());

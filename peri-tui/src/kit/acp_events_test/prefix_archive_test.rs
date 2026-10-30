@@ -42,7 +42,7 @@ fn flush_archives_stable_prefix_while_subagent_runs() {
     dispatch_and_notify(&mut state, &todo_start());
     dispatch_and_notify(&mut state, &todo_end());
     assert!(state.last_successful_todos.is_some());
-    let baseline = state.last_successful_todo_sequence;
+    let baseline = state.todo_baseline_sequence;
 
     dispatch_and_notify(
         &mut state,
@@ -79,7 +79,7 @@ fn flush_archives_stable_prefix_while_subagent_runs() {
     // 已归档 TodoWrite 的迟到结束事件：不 panic、不推进基线、不重建卡片。
     dispatch_and_notify(&mut state, &todo_end());
     assert_eq!(
-        state.last_successful_todo_sequence, baseline,
+        state.todo_baseline_sequence, baseline,
         "迟到事件不得推进 Todo 基线"
     );
     assert_eq!(state.committed.len(), 2);

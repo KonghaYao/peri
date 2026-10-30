@@ -172,10 +172,7 @@ impl ParkedChildOwner {
             let state = self.state.lock();
             state.failure.is_some() || state.pending_receipt.is_some()
         };
-        unconfirmed
-            || self.manager.active_count() > 0
-            || self.manager.has_pending_deliveries()
-            || self.queue.has_required()
+        unconfirmed || self.manager.has_unsettled_tasks() || self.queue.has_required()
     }
 
     pub fn freeze_receipt(

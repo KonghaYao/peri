@@ -15,6 +15,7 @@ use super::interaction_lifecycle::{InteractionLifecycle, InteractionOwner, Inter
 use super::interaction_settlement::spawn_settlement_worker;
 use session::SessionLoadReservationState;
 
+mod child_history;
 mod history_page;
 mod interaction;
 mod pump;
@@ -28,6 +29,12 @@ pub(crate) use session::SessionLoadReservation;
 /// Notification events dispatched from the background pump to the TUI event loop.
 #[derive(Debug)]
 pub enum AcpNotification {
+    /// Producer provenance, captured before entering the client notification queue.
+    ChildEvent {
+        origin: peri_acp_types::event::ChildEventOrigin,
+        view_epoch: u64,
+        notification: Box<AcpNotification>,
+    },
     /// A `notifications/agent_event` notification carrying an AcpEvent DTO.
     /// The TUI converts this to its own AgentEvent via `map_acp_event`.
     AgentEvent { session_id: String, event: AcpEvent },
@@ -220,3 +227,24 @@ mod tests;
 #[cfg(test)]
 #[path = "client_reverse_test.rs"]
 mod reverse_tests;
+
+impl AcpNotification {
+    pub(super) fn with_child_origin(
+        self,
+        origin: Option<peri_acp_types::event::ChildEventOrigin>,
+        view_epoch: u64,
+    ) -> Self {
+        match origin {
+            Some(origin) => Self::ChildEvent {
+                origin,
+                view_epoch,
+                notification: Box::new(self),
+            },
+            None => self,
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "client/child_origin_test.rs"]
+mod child_origin_tests;

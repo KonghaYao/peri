@@ -2,6 +2,23 @@ use super::test_support::*;
 use super::*;
 
 #[test]
+fn disposable_preview_removal_preserves_canonical_display_ranges() {
+    let mut window = enabled_window(WindowLimits::default());
+    let first = PersistentEntryKey::own("s1:first");
+    let later = PersistentEntryKey::own("s1:later");
+    assert!(window.mark_existing_display_slot(first.clone(), 0, 2));
+    assert!(window.mark_existing_display_slot(later.clone(), 3, 2));
+    // Slot 2 is a disposable child preview between two canonical entries.
+    assert!(window.remove_unmapped_display_slot(2));
+    assert_eq!(window.display.range_for(&first), Some((0, 2)));
+    assert_eq!(window.display.range_for(&later), Some((2, 2)));
+    assert!(!window.remove_unmapped_display_slot(3));
+    assert_eq!(window.display.range_for(&later), Some((2, 2)));
+    assert!(window.is_entry_displayed(&first));
+    assert!(window.is_entry_displayed(&later));
+}
+
+#[test]
 fn history_window_identity_separates_source_entry_and_sub_item() {
     let own = PersistentEntryKey::own("s1:message-1");
     let inherited = PersistentEntryKey::new(HistorySource::inherited("snap-1"), "s1:message-1");

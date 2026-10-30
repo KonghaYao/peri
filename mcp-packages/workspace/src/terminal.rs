@@ -637,16 +637,17 @@ impl BashTool {
                             kill: execution.cancel_callback(),
                         });
                     match register_result {
-                        Ok(()) => {
+                        Ok(ticket) => {
                             let task_manager = task_manager.clone();
-                            execution.track_registration(task_manager.clone(), task_id.clone());
+                            execution.track_registration(task_manager.clone(), ticket.clone());
                             let on_bg_complete_cb = self.on_bg_complete.clone();
                             let command_owned = command.to_string();
                             let task_id_owned = task_id.clone();
                             let background_output = Arc::clone(&output_capture);
                             // 续跑任务：继续读 pipe 至 EOF → wait → finalize → 通知 Agent
                             let task_owner = task_manager.clone();
-                            task_owner.spawn_owned(Box::pin(async move {
+                            let rejected_ticket = ticket.clone();
+                            if let Err(error) = task_owner.spawn_owned(Box::pin(async move {
                                 let started = peri_time::monotonic_now();
                                 drain_output.await;
                                 // 已在前台回收的 leader 不能提供仍持管道的后代退出码。
@@ -680,7 +681,7 @@ impl BashTool {
                                 execution.confirm_stopped();
                                 task_manager.finalize_bg_shell(
                                     &on_bg_complete_cb,
-                                    task_id_owned,
+                                    ticket,
                                     command_owned.chars().take(80).collect(),
                                     success,
                                     combined,
@@ -688,7 +689,22 @@ impl BashTool {
                                     false,
                                     Some(background_output.finish(exit_code)),
                                 );
-                            }))?;
+                            })) {
+                                // The caller receives this failed handoff directly.
+                                // The dropped guard retains the separate cleanup
+                                // obligation until the process tree has stopped.
+                                task_owner.finalize_bg_shell(
+                                    &None,
+                                    rejected_ticket,
+                                    command.chars().take(80).collect(),
+                                    false,
+                                    format!("Background handoff failed: {error}; process cleanup is pending."),
+                                    0,
+                                    false,
+                                    None,
+                                );
+                                return Err(error.into());
+                            }
                             if let Some(on_started) = &self.on_bg_started {
                                 on_started(&task_id);
                             }
@@ -810,30 +826,42 @@ impl BashTool {
                     // Register that group before returning so normal completion does not kill it.
                     let task_id = bg_shell_task_id();
                     background_task_id = Some(task_id.clone());
-                    manager.register(peri_acp_types::tasks::BgTaskRegistration {
+                    let ticket = manager.register(peri_acp_types::tasks::BgTaskRegistration {
                         task_id: task_id.clone(),
                         kind: BgTaskKind::Shell,
                         summary: command.chars().take(80).collect(),
                         pid: Some(pid),
                         kill: execution.cancel_callback(),
                     })?;
-                    execution.track_registration(manager.clone(), task_id.clone());
+                    execution.track_registration(manager.clone(), ticket.clone());
                     let task_manager = manager.clone();
                     let on_complete = self.on_bg_complete.clone();
                     let summary: String = command.chars().take(80).collect();
-                    let task_id_for_wait = task_id.clone();
                     let background_output = Arc::clone(&output_capture);
-                    manager.spawn_owned(Box::pin(async move {
+                    let rejected_ticket = ticket.clone();
+                    if let Err(error) = manager.spawn_owned(Box::pin(async move {
                         let started = peri_time::monotonic_now();
                         execution.wait_for_exit().await;
                         execution.confirm_stopped();
-                        task_manager.finalize_bg_shell(&on_complete, task_id_for_wait, summary, status.success(),
+                        task_manager.finalize_bg_shell(&on_complete, ticket, summary, status.success(),
                             "Background processes have stopped; individual exit codes are unavailable.".into(),
                             started.elapsed().as_millis() as u64, false,
                             // Only the leader was waited. The remaining group
                             // has no observable exit code of its own.
                             Some(background_output.finish(None)));
-                    }))?;
+                    })) {
+                        manager.finalize_bg_shell(
+                            &None,
+                            rejected_ticket,
+                            command.chars().take(80).collect(),
+                            false,
+                            format!("Background handoff failed: {error}; process cleanup is pending."),
+                            0,
+                            false,
+                            None,
+                        );
+                        return Err(error.into());
+                    }
                     output_capture.retain_files();
                     output.push_str(&format!(
                         "\nRemaining processes continue as background task {task_id}.\npid: {pid}\n{}",

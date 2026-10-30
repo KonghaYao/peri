@@ -123,9 +123,14 @@ fn large_output_dedup_is_idempotent_and_still_detects_conflicts() {
     assert_eq!(queue.drain_batch(64).len(), 0, "冲突不得追加投递");
 }
 
-fn registered_manager(task_id: &str) -> crate::agent::async_tasks::TaskManager {
+fn registered_manager(
+    task_id: &str,
+) -> (
+    crate::agent::async_tasks::TaskManager,
+    peri_acp_types::tasks::TaskRegistrationTicket,
+) {
     let manager = crate::agent::async_tasks::TaskManager::new();
-    manager
+    let ticket = manager
         .register(BgTaskRegistration {
             task_id: task_id.into(),
             kind: BgTaskKind::Agent,
@@ -134,7 +139,7 @@ fn registered_manager(task_id: &str) -> crate::agent::async_tasks::TaskManager {
             kill: Some(Box::new(|| {})),
         })
         .unwrap();
-    manager
+    (manager, ticket)
 }
 
 #[test]
@@ -142,9 +147,9 @@ fn accepted_queue_delivery_settles_task_without_another_run() {
     let queue = MessageQueue::new();
     let callback = task_bg_complete_callback(SessionTerminalDelivery::for_queue(queue.clone()));
     let result = shell_result("accepted-task");
-    let manager = registered_manager(&result.task_id);
+    let (manager, ticket) = registered_manager(&result.task_id);
     assert!(manager
-        .settle_completed(&result.task_id, result.clone(), callback.clone())
+        .settle_completed(&ticket, result.clone(), callback.clone())
         .unwrap());
     assert_eq!(manager.active_count(), 0);
     assert!(manager.is_execution_idle());
@@ -153,7 +158,7 @@ fn accepted_queue_delivery_settles_task_without_another_run() {
     assert_eq!(queue.len(), 1);
     callback(&result, BgTaskKind::Agent).unwrap();
     assert!(!manager
-        .settle_completed(&result.task_id, result.clone(), callback)
+        .settle_completed(&ticket, result.clone(), callback)
         .unwrap());
     assert_eq!(manager.retry_pending_deliveries(), 0);
     assert_eq!(queue.len(), 1);
@@ -196,9 +201,9 @@ fn refused_queue_delivery_retains_task_and_retries_original_once() {
     });
     let callback = task_bg_complete_callback(route.clone());
     let result = shell_result("refused-task");
-    let manager = registered_manager(&result.task_id);
+    let (manager, ticket) = registered_manager(&result.task_id);
     let error = manager
-        .settle_completed(&result.task_id, result.clone(), callback.clone())
+        .settle_completed(&ticket, result.clone(), callback.clone())
         .unwrap_err();
     assert!(error.to_string().contains("queue acceptance refused"));
     assert_eq!(manager.active_count(), 1);

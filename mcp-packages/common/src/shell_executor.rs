@@ -79,15 +79,21 @@ impl ShellExecutor for LocalShellExecutor {
                     owner_session_id: None,
                     owner_identity: None,
                 };
-                if let Err(registration_error) = registry.register_external_admitted(bg_task) {
-                    // No registered task can publish a completion. Return the
-                    // failure now instead of promising an eventual notification.
-                    return Err(format!("Failed to spawn: {e}; {registration_error}").into());
-                }
+                let ticket =
+                    registry
+                        .register_external_admitted(bg_task)
+                        .map_err(|registration_error| {
+                            // No registered task can publish a completion. Return the
+                            // failure now instead of promising an eventual notification.
+                            format!("Failed to spawn: {e}; {registration_error}")
+                        })?;
+                // Spawn failed before any process existed. The registration
+                // still owns delivery, but its cleanup obligation is complete.
+                registry.confirm_external_stopped(&ticket);
                 finalize_bg_shell(
                     &registry,
                     &on_bg_complete_cb,
-                    task_id.clone(),
+                    ticket,
                     command_owned.chars().take(80).collect(),
                     false,
                     format!("Failed to spawn: {e}"),
@@ -141,15 +147,18 @@ impl ShellExecutor for LocalShellExecutor {
             owner_session_id: None,
             owner_identity: None,
         };
-        if let Err(error) = registry.register_external_admitted(bg_task) {
-            kill_process_group(pid, "KILL");
-            registry.spawn_execution_cleanup(async move {
-                let _ = child.wait().await;
-                execution.confirm_stopped();
-                output_capture.cleanup().await;
-            });
-            return Err(error.into());
-        }
+        let ticket = match registry.register_external_admitted(bg_task) {
+            Ok(ticket) => ticket,
+            Err(error) => {
+                kill_process_group(pid, "KILL");
+                registry.spawn_execution_cleanup(async move {
+                    let _ = child.wait().await;
+                    execution.confirm_stopped();
+                    output_capture.cleanup().await;
+                });
+                return Err(error.into());
+            }
+        };
 
         // The returned handle publishes live output paths. They outlive the
         // worker and remain readable even after cancellation/completion.
@@ -215,11 +224,11 @@ impl ShellExecutor for LocalShellExecutor {
                                 }
                                 execution.wait_for_exit().await;
                                 execution.confirm_stopped();
-                                registry.confirm_external_stopped(&task_id);
+                                registry.confirm_external_stopped(&ticket);
                                 finalize_bg_shell(
                                     &registry,
                                     &on_bg_complete_cb,
-                                    task_id.clone(),
+                                    ticket.clone(),
                                     command_owned.chars().take(80).collect(),
                                     false,
                                     format!(
@@ -296,12 +305,12 @@ impl ShellExecutor for LocalShellExecutor {
                 execution.confirm_stopped();
                 // Process cleanup is independent of the visible task. Cancel
                 // may already have removed it before completion can claim it.
-                registry.confirm_external_stopped(&task_id);
+                registry.confirm_external_stopped(&ticket);
                 // 回调通知 + 完成（任务在启动时已注册，与 promote 续跑共用收尾逻辑）
                 finalize_bg_shell(
                     &registry,
                     &on_bg_complete_cb,
-                    task_id.clone(),
+                    ticket.clone(),
                     command_owned.chars().take(80).collect(),
                     output.0,
                     output.1,
@@ -317,7 +326,7 @@ impl ShellExecutor for LocalShellExecutor {
                 let _ = child.wait().await;
                 execution.wait_for_exit().await;
                 execution.confirm_stopped();
-                registry.confirm_external_stopped(&task_id);
+                registry.confirm_external_stopped(&ticket);
                 // spawn 閉包內部 panic：嘗試用現有 task_id 發送失敗事件
                 let panic_msg = if let Some(s) = panic_err.downcast_ref::<String>() {
                     s.clone()
@@ -334,7 +343,7 @@ impl ShellExecutor for LocalShellExecutor {
                 finalize_bg_shell(
                     &registry,
                     &on_bg_complete_cb,
-                    task_id.clone(),
+                    ticket,
                     command_owned.chars().take(80).collect(),
                     false,
                     format!("Background shell task panicked: {panic_msg}"),

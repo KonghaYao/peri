@@ -48,6 +48,91 @@ impl Drop for RestoreSnapshotAtoms {
 
 #[test]
 #[serial]
+fn missing_old_stop_does_not_bind_a_new_background_occurrence_to_the_old_task() {
+    let _restore = RestoreSnapshotAtoms::empty();
+    let mut state = make_fold_test_state();
+    let execution = || peri_acp_types::session::ExecutionBinding {
+        turn_id: peri_acp_types::session::TurnId::new(),
+        attempt_id: peri_acp_types::identity::AttemptId::new(),
+    };
+    let old_execution = execution();
+    let new_execution = execution();
+    for (task_id, binding, body) in [
+        ("old-bg-task", &old_execution, "old body"),
+        ("new-bg-task", &new_execution, "new body"),
+    ] {
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
+                task_id: task_id.into(),
+                kind: "agent".into(),
+                summary: "worker".into(),
+                started_at: String::new(),
+                pid: None,
+                revision: None,
+                status: Some("running".into()),
+            }),
+        );
+        // The bridge does this after validating a newer origin. No old Stop arrives.
+        state
+            .current_turn
+            .prepare_subagent_execution("same-child", binding);
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::SubagentStarted {
+                agent_id: "same-child".into(),
+                agent_name: "coder".into(),
+                is_background: true,
+                parent_tool_call_id: None,
+            },
+        );
+        state
+            .current_turn
+            .bind_subagent_execution("same-child", binding);
+        dispatch_and_notify(
+            &mut state,
+            &AcpEventData::TextChunk(TuiTextChunk {
+                text: body.into(),
+                message_id: Some(task_id.into()),
+                agent_id: Some("same-child".into()),
+            }),
+        );
+    }
+    assert_eq!(
+        crate::kit::bg_task_identity::task_id_for_agent_id("same-child").as_deref(),
+        Some("new-bg-task")
+    );
+    let details = BG_LIVE_DETAIL.state();
+    let details = details.read();
+    let text = |id: &str| {
+        details[id]
+            .nested_units
+            .iter()
+            .filter_map(|unit| match unit {
+                TuiRenderUnit::TuiAssistantBubble(body) => Some(body.text.as_str()),
+                _ => None,
+            })
+            .collect::<String>()
+    };
+    assert_eq!(text("old-bg-task"), "old body");
+    assert_eq!(text("new-bg-task"), "new body");
+    assert_ne!(
+        details["old-bg-task"].subagent_instance_id,
+        details["new-bg-task"].subagent_instance_id
+    );
+    assert_eq!(details["old-bg-task"].status, BgLiveStatus::Running);
+    assert_eq!(details["new-bg-task"].status, BgLiveStatus::Running);
+    assert!(
+        crate::kit::atoms::BG_TASKS
+            .state()
+            .read()
+            .iter()
+            .any(|task| task.task_id == "old-bg-task")
+    );
+}
+
+#[test]
+#[serial]
 fn background_started_does_not_restore_parent_loading() {
     let _restore = RestoreSnapshotAtoms::empty();
     let mut state = make_fold_test_state();
@@ -374,11 +459,11 @@ fn bg_tool_duplicate_start_upgrades_input_without_restarting() {
         origin_message_id: None,
         origin_readable: None,
     };
-    crate::kit::bg_task_live::handle_bg_tool_started("child-upgrade", &started, None);
+    crate::kit::bg_task_live::handle_bg_tool_started("child-upgrade", &started, None, false);
     let started_at = BG_LIVE_DETAIL.state().read()["task-upgrade"].tool_cards[0].started_at;
     started.raw_input = serde_json::json!({"command": "pwd"});
     started.input_summary = "pwd".into();
-    crate::kit::bg_task_live::handle_bg_tool_started("child-upgrade", &started, None);
+    crate::kit::bg_task_live::handle_bg_tool_started("child-upgrade", &started, None, false);
     crate::kit::bg_task_live::handle_bg_tool_ended(
         "child-upgrade",
         &TuiToolEnded {
@@ -388,7 +473,7 @@ fn bg_tool_duplicate_start_upgrades_input_without_restarting() {
             agent_id: started.agent_id.clone(),
         },
     );
-    crate::kit::bg_task_live::handle_bg_tool_started("child-upgrade", &started, None);
+    crate::kit::bg_task_live::handle_bg_tool_started("child-upgrade", &started, None, false);
     let live = BG_LIVE_DETAIL.state();
     let guard = live.read();
     let detail = &guard["task-upgrade"];
@@ -649,6 +734,7 @@ fn test_bg_tool_sync_preserves_event_order() {
             origin_readable: None,
         },
         None,
+        false,
     );
     crate::kit::bg_task_live::append_bg_text_chunk(
         "bg-order",
@@ -788,6 +874,7 @@ fn test_bg_group_frozen_in_view_models_after_turn_suspended() {
 
 fn make_state() -> BridgeState {
     BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -800,7 +887,7 @@ fn make_state() -> BridgeState {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,

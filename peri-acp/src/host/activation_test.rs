@@ -17,6 +17,7 @@ struct ActivationHarness {
     locks: PromptLocks,
     sender: Arc<mpsc::UnboundedSender<crate::session::executor::ContinuationRequest>>,
     receiver: Option<mpsc::UnboundedReceiver<crate::session::executor::ContinuationRequest>>,
+    task_tickets: std::sync::Mutex<HashMap<String, peri_acp_types::tasks::TaskRegistrationTicket>>,
     _server: mockito::ServerGuard,
     _mock: mockito::Mock,
     _directory: tempfile::TempDir,
@@ -57,6 +58,7 @@ impl ActivationHarness {
             locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             sender: Arc::new(sender),
             receiver: Some(receiver),
+            task_tickets: std::sync::Mutex::new(HashMap::new()),
             _server: server,
             _mock: mock,
             _directory: directory,
@@ -85,29 +87,31 @@ impl ActivationHarness {
             .unwrap()
             .task_manager
             .clone();
-        if !tasks
-            .snapshot()
-            .tasks
-            .iter()
-            .any(|task| task.task_id == task_id)
-        {
-            tasks
-                .register(BgTaskRegistration {
-                    task_id: task_id.into(),
-                    kind,
-                    summary: "child".into(),
-                    pid: None,
-                    kill: None,
-                })
-                .unwrap();
-        }
+        let ticket = self
+            .task_tickets
+            .lock()
+            .unwrap()
+            .entry(task_id.into())
+            .or_insert_with(|| {
+                tasks
+                    .register(BgTaskRegistration {
+                        task_id: task_id.into(),
+                        kind,
+                        summary: "child".into(),
+                        pid: None,
+                        kill: None,
+                    })
+                    .unwrap()
+            })
+            .clone();
+        tasks.confirm_external_execution_stopped(&ticket);
         let callback = peri_agent::session::bg_complete::session_bg_complete_callback(
             Arc::new(self.cfg.session_manager.clone()),
             self.session_id.clone(),
         );
         tasks
             .settle_completed(
-                task_id,
+                &ticket,
                 peri_acp_types::event::BackgroundTaskResult {
                     task_id: task_id.into(),
                     agent_name: "child".into(),
@@ -171,7 +175,7 @@ async fn late_child_result_restarts_completed_host_run_and_commits_result() {
             ),
         )
         .unwrap();
-    harness
+    let ticket = harness
         .cfg
         .session_manager
         .get_session(&harness.session_id)
@@ -185,6 +189,11 @@ async fn late_child_result_restarts_completed_host_run_and_commits_result() {
             kill: None,
         })
         .unwrap();
+    harness
+        .task_tickets
+        .lock()
+        .unwrap()
+        .insert("late-child".into(), ticket);
     let prompt_cfg = harness.cfg.clone();
     let prompt_sessions = harness.sessions.clone();
     let prompt_locks = harness.locks.clone();

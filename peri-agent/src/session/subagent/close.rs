@@ -28,10 +28,14 @@ impl SubagentCloseState {
         self.attempt.lock().is_some()
     }
 
+    /// Admit parent registration and its completion worker as one synchronous step.
+    /// Lock order: close gate -> registry admission/tasks -> sync delivery. The
+    /// registration path only publishes watch/broadcast messages; it cannot call
+    /// back into this gate. The factory must not await or re-enter close state.
     pub(super) fn spawn_sync_worker<F>(
         self: &Arc<Self>,
         task_id: String,
-        worker: F,
+        build: impl FnOnce() -> Result<F, String>,
     ) -> Result<tokio::task::JoinHandle<F::Output>, String>
     where
         F: Future + Send + 'static,
@@ -43,6 +47,7 @@ impl SubagentCloseState {
                 "Incomplete: sync child worker registered after session close began".into(),
             );
         }
+        let worker = build()?;
         self.sync_delivery.lock().insert(task_id, None);
         let handle = self
             .sync_workers

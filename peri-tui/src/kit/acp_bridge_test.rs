@@ -11,6 +11,7 @@ mod window_test;
 pub(super) fn scheduler_state() -> BridgeState {
     crate::kit::atoms::init_atoms();
     BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -23,7 +24,7 @@ pub(super) fn scheduler_state() -> BridgeState {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: Default::default(),
         turn_generation: 0,
@@ -645,6 +646,8 @@ async fn test_goal_snapshot_bridge_accepts_current_session_and_drops_stale_sessi
     let handle = spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
 
     tx.send(AcpEventWithEpoch {
+        child_origin: None,
+        view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
         event: goal_snapshot("current", 2),
         active_session_id: "s1".into(),
     })
@@ -661,6 +664,8 @@ async fn test_goal_snapshot_bridge_accepts_current_session_and_drops_stale_sessi
     );
 
     tx.send(AcpEventWithEpoch {
+        child_origin: None,
+        view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
         event: goal_snapshot("stale", 99),
         active_session_id: "s0".into(),
     })
@@ -694,6 +699,8 @@ async fn test_late_prompt_failure_from_previous_session_does_not_reset_loading()
     let shutdown = CancellationToken::new();
     let handle = spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
     tx.send(AcpEventWithEpoch {
+        child_origin: None,
+        view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
         event: AcpEventData::PromptSubmitted {
             request_id: Some("B".into()),
         },
@@ -704,6 +711,8 @@ async fn test_late_prompt_failure_from_previous_session_does_not_reset_loading()
     assert_eq!(observed_rx.recv().await, Some(true));
     assert!(ACP_STATE.state().read().is_loading);
     tx.send(AcpEventWithEpoch {
+        child_origin: None,
+        view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
         event: AcpEventData::PromptFailed {
             request_id: "A".into(),
         },
@@ -745,6 +754,8 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
     let shutdown = CancellationToken::new();
     let handle = spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
     tx.send(AcpEventWithEpoch {
+        child_origin: None,
+        view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
         event: AcpEventData::PromptStarted,
         active_session_id: String::new(),
     })
@@ -763,6 +774,8 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
     *POPUP_KIND.state().write() = Some(PopupKind::OAuth);
     let sentinel_view = VIEW_MODELS.state().read().clone();
     tx.send(AcpEventWithEpoch {
+        child_origin: None,
+        view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
         event: hitl(),
         active_session_id: "s1".into(),
     })
@@ -786,6 +799,8 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
     *ACTIVE_SESSION_ID.state().write() = "s1".into();
     BRIDGE_RESET_COUNTER.set(old_reset.wrapping_add(2));
     tx.send(AcpEventWithEpoch {
+        child_origin: None,
+        view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
         event: AcpEventData::PromptStarted,
         active_session_id: "s1".into(),
     })
@@ -803,6 +818,8 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
     });
     *POPUP_KIND.state().write() = Some(PopupKind::OAuth);
     tx.send(AcpEventWithEpoch {
+        child_origin: None,
+        view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
         event: hitl(),
         active_session_id: "stale".into(),
     })
@@ -820,6 +837,8 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
     );
     assert_eq!(*POPUP_KIND.state().read(), Some(PopupKind::OAuth));
     tx.send(AcpEventWithEpoch {
+        child_origin: None,
+        view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
         event: hitl(),
         active_session_id: "s1".into(),
     })
@@ -852,131 +871,8 @@ async fn test_hitl_bridge_drops_unowned_events_before_all_side_effects() {
     *VIEW_MODELS.state().write() = old_view;
 }
 
-/// [回归测试] production bridge 在 session gate 前不发布 AskUser UI state。
-#[tokio::test]
-#[serial]
-async fn test_ask_user_bridge_drops_unowned_events_before_all_side_effects() {
-    use crate::app::panel_types::PanelKind;
-    use crate::kit::atoms::{
-        ACP_STATE, ACTIVE_PANEL, ACTIVE_SESSION_ID, ASK_USER_PENDING, BRIDGE_RESET_COUNTER,
-        FOCUSED_ENTRY, FOLD_OVERRIDES, INPUT_BUFFER, OPEN_PANELS, PENDING_COMPACT_NOTE,
-        VIEW_MODELS,
-    };
-    let old_acp_state = ACP_STATE.state().read().clone();
-    let old_active_session = ACTIVE_SESSION_ID.state().read().clone();
-    let old_reset = BRIDGE_RESET_COUNTER.get();
-    let old_input = INPUT_BUFFER.state().read().clone();
-    let old_fold_overrides = FOLD_OVERRIDES.state().read().clone();
-    let old_focused_entry = FOCUSED_ENTRY.state().read().clone();
-    let old_compact_note = PENDING_COMPACT_NOTE.state().read().clone();
-    let old_pending = ASK_USER_PENDING.state().read().clone();
-    let old_active_panel = *ACTIVE_PANEL.state().read();
-    let old_open = OPEN_PANELS.state().read().clone();
-    let old_view = VIEW_MODELS.state().read().clone();
-    *ACTIVE_SESSION_ID.state().write() = String::new();
-    BRIDGE_RESET_COUNTER.set(old_reset.wrapping_add(1));
-    let (tx, rx) = mpsc::channel(crate::kit::acp_bridge::BRIDGE_QUEUE_CAPACITY);
-    let (observed_tx, mut observed_rx) = mpsc::unbounded_channel();
-    let shutdown = CancellationToken::new();
-    let handle = spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
-    tx.send(AcpEventWithEpoch {
-        event: AcpEventData::PromptStarted,
-        active_session_id: String::new(),
-    })
-    .await
-    .unwrap();
-    assert_eq!(observed_rx.recv().await, Some(true));
-    *ASK_USER_PENDING.state().write() = Some(PendingInteraction {
-        owner: Default::default(),
-        request_id_json: "\"sentinel\"".into(),
-        payload: AskUser { questions: vec![] },
-    });
-    *OPEN_PANELS.state().write() = vec![PanelKind::Tasks];
-    *ACTIVE_PANEL.state().write() = Some(PanelKind::Tasks);
-    let sentinel_view = VIEW_MODELS.state().read().clone();
-    tx.send(AcpEventWithEpoch {
-        event: ask_user(),
-        active_session_id: "s1".into(),
-    })
-    .await
-    .unwrap();
-    assert_eq!(observed_rx.recv().await, Some(false));
-    assert_eq!(
-        ASK_USER_PENDING
-            .state()
-            .read()
-            .as_ref()
-            .unwrap()
-            .request_id_json,
-        "\"sentinel\""
-    );
-    assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::Tasks));
-    assert_eq!(
-        VIEW_MODELS.state().read().items.len(),
-        sentinel_view.items.len()
-    );
-    *ACTIVE_SESSION_ID.state().write() = "s1".into();
-    BRIDGE_RESET_COUNTER.set(old_reset.wrapping_add(2));
-    tx.send(AcpEventWithEpoch {
-        event: AcpEventData::PromptStarted,
-        active_session_id: "s1".into(),
-    })
-    .await
-    .unwrap();
-    assert_eq!(observed_rx.recv().await, Some(true));
-    *ASK_USER_PENDING.state().write() = Some(PendingInteraction {
-        owner: Default::default(),
-        request_id_json: "\"sentinel\"".into(),
-        payload: AskUser { questions: vec![] },
-    });
-    *OPEN_PANELS.state().write() = vec![PanelKind::Tasks];
-    *ACTIVE_PANEL.state().write() = Some(PanelKind::Tasks);
-    tx.send(AcpEventWithEpoch {
-        event: ask_user(),
-        active_session_id: "stale".into(),
-    })
-    .await
-    .unwrap();
-    assert_eq!(observed_rx.recv().await, Some(false));
-    assert_eq!(
-        ASK_USER_PENDING
-            .state()
-            .read()
-            .as_ref()
-            .unwrap()
-            .request_id_json,
-        "\"sentinel\""
-    );
-    assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::Tasks));
-    tx.send(AcpEventWithEpoch {
-        event: ask_user(),
-        active_session_id: "s1".into(),
-    })
-    .await
-    .unwrap();
-    assert_eq!(observed_rx.recv().await, Some(true));
-    assert_eq!(
-        ASK_USER_PENDING
-            .state()
-            .read()
-            .as_ref()
-            .unwrap()
-            .request_id_json,
-        "\"a\""
-    );
-    assert_eq!(*ACTIVE_PANEL.state().read(), Some(PanelKind::AskUser));
-    shutdown.cancel();
-    drop(tx);
-    handle.await.unwrap();
-    *ACP_STATE.state().write() = old_acp_state;
-    *ACTIVE_SESSION_ID.state().write() = old_active_session;
-    BRIDGE_RESET_COUNTER.set(old_reset);
-    *INPUT_BUFFER.state().write() = old_input;
-    *FOLD_OVERRIDES.state().write() = old_fold_overrides;
-    *FOCUSED_ENTRY.state().write() = old_focused_entry;
-    *PENDING_COMPACT_NOTE.state().write() = old_compact_note;
-    *ASK_USER_PENDING.state().write() = old_pending;
-    *ACTIVE_PANEL.state().write() = old_active_panel;
-    *OPEN_PANELS.state().write() = old_open;
-    *VIEW_MODELS.state().write() = old_view;
-}
+#[path = "acp_bridge_ask_user_test.rs"]
+mod ask_user_tests;
+
+#[path = "acp_bridge_child_origin_test.rs"]
+mod child_origin_tests;

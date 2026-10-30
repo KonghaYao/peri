@@ -2,6 +2,8 @@
 
 更新：2026-10-30
 
+子会话只读历史入口是 `session/history/child` 与 `session/history/child/body`，实现见 `host/history_window/{child,child_display}.rs`。父会话只可读取 canonical 父链可达的后代 own 历史（最多 64 跳、检测环），不装载 child runtime；每个父会话只保留一个子历史 scope。分页与正文同时校验父结构代次、child 身份、固定尾部、snapshot、read ticket 与受众；正文投影为有界 `display_text`，不向客户端暴露 ProviderState、签名或未知内部字段。未知格式显式失败，随机正文偏移需从头扫描。回归见 `host/child_history_test.rs`、`child_display_test.rs`。
+
 MCP 运行控制：`host/requests/mcp_control.rs::{prepare,execute}` 按当前连接的 `peri.mcpControlV1`、显式 session 与冻结 policy 准入，`host/server_loop.rs::spawn_mcp_control` 由 host owner 异步执行。`host/requests/mcp_oauth.rs::handle_list` 按同一 session 查询并投影可管理动作；控制专用 capability 独立允许查询。契约见 [ACP MCP 运行控制](../design/acp-mcp-control.md)，真实 loop 回归在 `host/requests_mcp_control_test.rs`。
 
 后台任务查询/取消 handler 在 `host/requests/session_tasks.rs`；`session_lifecycle.rs` 仅 re-export，已满足 STD-SIZE-001。`childThreadId` 只在 owning 会话的任务 owner 子树内解析，不把任意 child ID 当作授权。

@@ -14,7 +14,9 @@ mod memory_probe;
 pub(crate) mod render;
 mod streaming;
 mod subagent;
+mod subagent_preview;
 mod system;
+mod todo_cache;
 mod tool;
 mod turn;
 
@@ -128,6 +130,7 @@ pub struct SubmittedInputRollback {
 ///
 /// 定义在 acp_events.rs 中以避免 acp_bridge ↔ acp_events 循环依赖。
 pub struct BridgeState {
+    pub(crate) child_runs: crate::kit::child_run_routing::ChildRunRouting,
     /// 0=Idle, 1=Streaming, 2=Modal
     pub variant: u8,
     /// 已提交的 TuiRenderUnit 列表——im::Vector 支持 O(1) clone + O(log n) push_back。
@@ -165,11 +168,11 @@ pub struct BridgeState {
     pub last_pushed_reasoning_len: usize,
     /// 当前会话最近一次成功 TodoWrite 的完整快照；仅用于下一张 Todo 卡片的变更集。
     pub(crate) last_successful_todos: Option<crate::kit::tool_semantics::TodoSnapshot>,
-    /// 当前基线对应 TodoWrite 的启动序号，用于拒绝较旧调用的乱序成功结束事件。
-    pub(crate) last_successful_todo_sequence: Option<u64>,
+    /// 最近已知或未知基线的启动序号；快照为 None 且此值为 Some 表示基线缺失。
+    pub(crate) todo_baseline_sequence: Option<u64>,
     /// 单调递增的 TodoWrite 启动序号。
     pub(crate) next_todo_sequence: u64,
-    /// 所有未结束 TodoWrite 的启动序号与原始输入，涵盖主 agent、子 agent 和回放。
+    /// 有界的未结束 TodoWrite 比较输入；淘汰仅影响展示，不影响工具执行。
     pub(crate) todo_call_inputs: HashMap<String, (u64, serde_json::Value)>,
     /// turn 代际计数器——每次用户可见提交（LocalUserBubble）递增。
     /// 用于识别 stale 的 turn 结束事件（Issue 2026-08-05）：用户取消旧 turn 后
@@ -308,6 +311,11 @@ impl BridgeState {
         let mut unattributed_seen = crate::kit::retained_bytes::SeenAllocations::default();
         for slot in slots {
             let unit = &self.committed[slot];
+            // Child previews have their own bounded disposable cache. They are
+            // not canonical rows and cannot borrow/return canonical admission credit.
+            if matches!(unit, TuiRenderUnit::TuiSubAgentGroup(_)) {
+                continue;
+            }
             let unit_bytes =
                 crate::kit::retained_bytes::retained_unit_bytes(unit, &mut unattributed_seen);
             let Some((key, position)) = self.live_unit_owner(unit) else {
@@ -590,33 +598,6 @@ impl BridgeState {
             .push_system_note(text, level, content_hash);
         self.publish_barrier();
         render::push_acp_state(self);
-    }
-
-    /// 记录 TodoWrite 启动并返回其会话内单调序号。
-    pub(crate) fn record_todo_started(&mut self, tool_id: String, raw_input: serde_json::Value) {
-        let sequence = self.next_todo_sequence;
-        self.next_todo_sequence = self.next_todo_sequence.wrapping_add(1);
-        self.todo_call_inputs.insert(tool_id, (sequence, raw_input));
-    }
-
-    /// 仅当完成调用不早于当前成功基线时才推进 Todo 快照。
-    pub(crate) fn complete_todo_if_current(&mut self, tool_id: &str, is_error: bool) -> bool {
-        let Some((sequence, raw_input)) = self.todo_call_inputs.remove(tool_id) else {
-            return false;
-        };
-        if is_error
-            || self
-                .last_successful_todo_sequence
-                .is_some_and(|current| sequence < current)
-        {
-            return false;
-        }
-        if let Some(snapshot) = crate::kit::tool_semantics::TodoSnapshot::parse(&raw_input) {
-            self.last_successful_todos = Some(snapshot);
-            self.last_successful_todo_sequence = Some(sequence);
-            return true;
-        }
-        false
     }
 }
 
@@ -1001,35 +982,6 @@ pub(crate) fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData)
 // ---------------------------------------------------------------------------
 // 辅助函数
 // ---------------------------------------------------------------------------
-
-/// 从 BaseMessage JSON 提取纯文本（H3 辅助函数）。
-///
-/// content 可能是 string 或 array of {type:text, text:...}，
-/// 两种格式都兼容。**仅提取 type=="text" 的 block**——tool_use / tool_result /
-/// reasoning / image 等非文本 block 在 rewind 视图下不还原（用户看不到历史工具
-/// 调用卡片与 reasoning），这是 display-only 的简化设计，避免在 H3 反序列化
-/// 路径重建完整 ViewModel（成本过高且非 rewind 主场景）。
-fn extract_message_text(msg: &serde_json::Value) -> String {
-    // content 为 string 的简单格式
-    if let Some(s) = msg.get("content").and_then(|v| v.as_str()) {
-        return s.to_string();
-    }
-    // content 为 array 的复杂格式
-    if let Some(arr) = msg.get("content").and_then(|v| v.as_array()) {
-        return arr
-            .iter()
-            .filter_map(|block| {
-                if block.get("type").and_then(|v| v.as_str()) == Some("text") {
-                    block.get("text").and_then(|v| v.as_str()).map(String::from)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("");
-    }
-    String::new()
-}
 
 // ---------------------------------------------------------------------------
 // Tests

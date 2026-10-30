@@ -6,7 +6,7 @@ use crate::{
     runner::{WorkflowInput, WorkflowResult, WorkflowRunner},
 };
 use futures::FutureExt;
-use peri_acp_types::tasks::{ExternalExecutionGuard, TaskManager};
+use peri_acp_types::tasks::{ExternalExecutionGuard, TaskManager, TaskRegistrationTicket};
 use std::sync::{Arc, Weak};
 use tokio::{
     sync::{oneshot, watch},
@@ -66,12 +66,18 @@ impl RunCompletion {
         runner: Arc<WorkflowRunner>,
         input: WorkflowInput,
         kill: oneshot::Receiver<()>,
-        manager: Option<Arc<dyn TaskManager>>,
+        registration: Option<(Arc<dyn TaskManager>, TaskRegistrationTicket)>,
         mut owner: ExecutionOwner,
+        source: (
+            crate::registry::WorkflowRunTicket,
+            peri_acp_types::tasks::TaskRecord,
+        ),
     ) -> Result<(JoinHandle<()>, watch::Receiver<Option<CompletedRun>>), String> {
         let (done_tx, done_rx) = watch::channel(None);
         let (completed_tx, completed_rx) = watch::channel(None);
-        let completion_manager = manager.clone();
+        let manager = registration
+            .as_ref()
+            .map(|(manager, _)| Arc::clone(manager));
         let execution_task = async move {
             owner.started = true;
             // Unwinding must still settle the registered run. Panic content is never published.
@@ -111,8 +117,8 @@ impl RunCompletion {
                 ),
             };
             if stopped {
-                if let Some(manager) = &completion_manager {
-                    manager.confirm_external_execution_stopped(&self.run_id);
+                if let Some((manager, ticket)) = &registration {
+                    manager.confirm_external_execution_stopped(ticket);
                 }
                 owner.confirm_stopped();
             }
@@ -134,13 +140,13 @@ impl RunCompletion {
             let result = self.project(raw);
             // The task cannot keep the registry alive by holding its own owner.
             if let Some(registry) = self.registry.upgrade() {
-                registry.complete(&self.run_id, result.clone());
+                registry.complete(&source.0, result.clone(), source.1);
             }
             // The MCP owner settles after retaining the result in its outbox. Host
             // reminder delivery is acknowledged separately through tools/call.
-            if let Some(manager) = &completion_manager {
+            if let Some((manager, ticket)) = &registration {
                 if let Err(error) = manager.settle_completed(
-                    &self.run_id,
+                    ticket,
                     result.background_result(),
                     Arc::new(|_, _| Ok(())),
                 ) {

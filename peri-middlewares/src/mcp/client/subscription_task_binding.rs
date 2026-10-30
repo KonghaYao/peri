@@ -134,7 +134,7 @@ impl McpClientPool {
         summary: &str,
         scoped_workspace: bool,
         started_at: &str,
-    ) -> Result<String, String> {
+    ) -> Result<peri_acp_types::tasks::TaskRegistrationTicket, String> {
         let (manager, request) = self.external_task_registration(
             session_id,
             initiator_session_id,

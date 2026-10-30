@@ -68,7 +68,7 @@ async fn agent_task_projection_keeps_child_thread_identity_past_terminal() {
         MessageQueue::new(),
         CancellationToken::new(),
     );
-    registry
+    let ticket = registry
         .register_with_kind(base_task(BgTaskKind::Agent, Some(inbox)))
         .unwrap();
 
@@ -84,7 +84,7 @@ async fn agent_task_projection_keeps_child_thread_identity_past_terminal() {
         "task 身份与线程身份是两个字段，不得同值改写"
     );
 
-    assert!(registry.complete(TASK_ID, terminal_result()));
+    assert!(registry.complete(&ticket, terminal_result()));
     let settled = record(&registry);
     assert_eq!(
         settled.child_thread_id.as_deref(),

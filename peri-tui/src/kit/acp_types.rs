@@ -12,6 +12,7 @@
 
 mod current_turn;
 mod event_data;
+pub(crate) mod subagent_preview;
 mod tool_card;
 
 pub use current_turn::CurrentTurn;

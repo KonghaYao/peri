@@ -38,6 +38,7 @@
 
 - **Scope**：Agent 会话、Task/MQ、异步生产者、ACP 适配；适用于主/子/Workflow Agent。
 - **Rule**：2026-10-07 用户批准撤销持久执行恢复，目标以 [RCRA 权威](../design/rcra-message-activation.md) 为准。当前进程使用归属明确的内存 MQ 与任务关系；保留 canonical 消息持久化、可信路由、类型化消费和当前取消/关闭。不持久化 WorkState、阶段检查点、处理义务或恢复 journal/control 回执；普通 prompt 不依赖 SDK durable admission。history load/resume 仅加载历史及 frozen/继承上下文并装配新的 runtime，不自动续跑旧执行，不以旧账本冻结新输入。跨实例协调不由 Store 租约替代。剥离实现与定向验证见 Git 历史；真实远端和完整端到端验证不在本轮结论内。
+- 当前任务的结算与清理资格由原运行期注册票据承载，展示快照和公开任务 ID 不作为重放资格或永久去重账本；未结清投递、取消结果及实际清理不能随展示回收释放。生命周期与保留范围见 [Session 异步任务](../design/session-async-tasks.md)。
 - **Verify**：验证普通执行、当前子任务与取消、history 加载/续聊、重启不复活旧执行和删表迁移数据保留；文档检查链接与 `git diff --check`。
 
 ### ARC-SUBAGENT-IDENTITY-001

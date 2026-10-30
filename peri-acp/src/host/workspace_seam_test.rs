@@ -124,7 +124,7 @@ async fn workflow_consumer_waits_for_instance_registration_then_dispatches() {
         None,
     ));
     environment.bind_workflow_runtime(&runtime).unwrap();
-    let start = environment.start_workflow_consumer(executor);
+    let start = environment.start_workflow_consumer(executor.clone());
     tokio::pin!(start);
     // 激活闸门保证连接尚未开始：旧实现会立即返回 false，确定性复现竞态。
     assert!(
@@ -135,6 +135,12 @@ async fn workflow_consumer_waits_for_instance_registration_then_dispatches() {
     );
     environment.activate();
     assert!(start.await.unwrap());
+    let original_projection = environment.workflow_projection_client_for_test().unwrap();
+    assert!(environment.start_workflow_consumer(executor).await.unwrap());
+    assert!(Arc::ptr_eq(
+        &original_projection,
+        &environment.workflow_projection_client_for_test().unwrap(),
+    ));
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         while !runtime.consumer_ready() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;

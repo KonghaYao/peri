@@ -12,18 +12,48 @@ fn make_registry() -> (
 }
 
 fn make_run(id: &str) -> WorkflowRun {
-    let (kill_tx, _kill_rx) = tokio::sync::oneshot::channel();
-    let handle = tokio::spawn(async {
-        std::future::pending::<()>().await;
-    });
     WorkflowRun {
         run_id: id.into(),
         workflow_name: "test".into(),
         script_preview: "...".into(),
         status: WorkflowRunStatus::Running,
         started_at: std::time::Instant::now(),
-        child_handle: Some(handle),
-        kill_tx: Some(kill_tx),
+        child_handle: None,
+        kill_tx: None,
+    }
+}
+
+fn task_record(run_id: &str) -> TaskRecord {
+    TaskRecord {
+        task_id: run_id.into(),
+        kind: peri_acp_types::tasks::BgTaskKind::Workflow,
+        summary: "test workflow".into(),
+        started_at: "2026-10-30T00:00:00Z".into(),
+        status: "running".into(),
+        duration_ms: 0,
+        output_preview: None,
+        initiator_session_id: None,
+        child_thread_id: None,
+    }
+}
+
+fn terminal_result(run_id: &str) -> WorkflowTaskResult {
+    WorkflowTaskResult {
+        run_id: run_id.into(),
+        workflow_name: "test".into(),
+        success: true,
+        status: WorkflowRunStatus::Completed,
+        execution_status: ExecutionStatus::Completed,
+        acceptance_status: AcceptanceStatus::Unknown,
+        post_processing_status: PostProcessingStatus::NotRequired,
+        delivery_status: DeliveryStatus::Unknown,
+        state_artifact_exists: false,
+        duration_ms: 100,
+        agent_count: 0,
+        tool_calls_count: 0,
+        error: None,
+        phase_summaries: Vec::new(),
+        attempts: Vec::new(),
     }
 }
 
@@ -48,9 +78,9 @@ async fn test_concurrent_limit() {
 #[tokio::test]
 async fn test_complete_sends_notification() {
     let (reg, mut rx) = make_registry();
-    reg.register(make_run("r1")).unwrap();
+    let ticket = reg.register(make_run("r1")).unwrap();
     reg.complete(
-        "r1",
+        &ticket,
         WorkflowTaskResult {
             run_id: "r1".into(),
             workflow_name: "test".into(),
@@ -68,6 +98,7 @@ async fn test_complete_sends_notification() {
             phase_summaries: Vec::new(),
             attempts: Vec::new(),
         },
+        task_record("r1"),
     );
     let result = rx.recv().await.unwrap();
     assert_eq!(result.run_id, "r1");
@@ -83,16 +114,23 @@ async fn test_complete_sends_notification() {
     reg.acknowledge_completion("r1");
     reg.acknowledge_completion("r1");
     assert!(reg.pending_completions().is_empty());
+    assert!(reg.list_runs().is_empty());
+    assert!(reg.registrations.lock().is_empty());
+    assert!(!reg.complete(&ticket, result, task_record("r1")));
+    assert!(
+        reg.pending_completions().is_empty(),
+        "late completion cannot reopen an acknowledged source"
+    );
 }
 
 #[tokio::test]
-async fn test_complete_retains_history_with_status() {
+async fn test_complete_retains_unacknowledged_run_with_status() {
     let (reg, _rx) = make_registry();
-    reg.register(make_run("r1")).unwrap();
+    let ticket = reg.register(make_run("r1")).unwrap();
     assert_eq!(reg.active_count(), 1);
 
     reg.complete(
-        "r1",
+        &ticket,
         WorkflowTaskResult {
             run_id: "r1".into(),
             workflow_name: "test".into(),
@@ -110,12 +148,13 @@ async fn test_complete_retains_history_with_status() {
             phase_summaries: Vec::new(),
             attempts: Vec::new(),
         },
+        task_record("r1"),
     );
 
     // complete 后 active_count 归零
     assert_eq!(reg.active_count(), 0);
 
-    // 但 list_runs 仍保留记录（状态更新为 Completed）
+    // ACK 前仍保留状态与投递资格；展示历史由 progress/journal 提供。
     let runs = reg.list_runs();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].1, WorkflowRunStatus::Completed);
@@ -364,12 +403,53 @@ async fn cancellation_before_child_attachment_keeps_cleanup_running() {
 #[tokio::test]
 async fn background_start_waits_for_mcp_projection_receipt() {
     let (registry, _) = make_registry();
-    let mut pending = Box::pin(registry.wait_for_observation("run-a"));
+    let ticket = registry.register(make_run("run-a")).unwrap();
+    let mut pending = Box::pin(ticket.wait_for_observation());
     assert!(futures::poll!(&mut pending).is_pending());
     registry.acknowledge_observation("other-run");
     assert!(futures::poll!(&mut pending).is_pending());
     registry.acknowledge_observation("run-a");
     pending.await;
     // Reconnect retries may observe an acknowledgement before starting their wait.
-    registry.wait_for_observation("run-a").await;
+    ticket.wait_for_observation().await;
+}
+
+#[tokio::test]
+async fn observation_wait_after_completion_ack_uses_the_original_receipt() {
+    let (registry, _) = make_registry();
+    let ticket = registry.register(make_run("fast-run")).unwrap();
+    assert!(registry.complete(
+        &ticket,
+        terminal_result("fast-run"),
+        task_record("fast-run")
+    ));
+    registry.acknowledge_completion("fast-run");
+    assert!(registry.runs.lock().is_empty());
+    assert!(registry.registrations.lock().is_empty());
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        ticket.wait_for_observation(),
+    )
+    .await
+    .expect("ACK before the tool's wait must preserve observation evidence");
+}
+
+#[test]
+fn acknowledging_many_completions_releases_source_state_and_capacity() {
+    let (registry, _) = make_registry();
+    for index in 0..600 {
+        let run_id = format!("retire-{index}");
+        let ticket = registry.register(make_run(&run_id)).unwrap();
+        assert!(registry.complete(&ticket, terminal_result(&run_id), task_record(&run_id)));
+    }
+    assert_eq!(registry.pending_completion_records().len(), 600);
+    for index in 0..600 {
+        registry.acknowledge_completion(&format!("retire-{index}"));
+    }
+    assert!(registry.pending_completion_records().is_empty());
+    assert!(registry.list_runs().is_empty());
+    assert!(registry.registrations.lock().is_empty());
+    assert!(registry.registrations.lock().capacity() <= 128);
+    assert!(registry.runs.lock().capacity() <= 128);
+    assert!(registry.completions.lock().capacity() <= 128);
 }

@@ -44,8 +44,7 @@ fn has_obligations(
     context: &StageContext,
     execution: &peri_acp_types::session::ExecutionBinding,
 ) -> bool {
-    manager.active_count() > 0
-        || manager.has_pending_deliveries()
+    manager.has_unsettled_tasks()
         || context.session.queue.has_required_for_run(execution)
         || !context.async_ctx.received_after_deadline.lock().is_empty()
         || !context.async_ctx.unprocessed_tool_calls.lock().is_empty()
@@ -161,7 +160,7 @@ pub(super) async fn run_child_with_handoff_signal(
     context.async_ctx.idle_should_wait = Some({
         let manager = Arc::clone(&manager);
         Arc::new(move || {
-            if manager.active_count() > 0 {
+            if manager.has_unsettled_tasks() {
                 return false;
             }
             original_idle_probe.as_ref().is_some_and(|probe| probe())

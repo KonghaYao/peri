@@ -10,6 +10,7 @@ impl UnifiedLangfuseEvent {
     /// 无 Langfuse 映射的变体返回 `None`。
     pub fn from_executor_event(ev: ExecutorEvent) -> Option<Self> {
         match ev {
+            ExecutorEvent::Originated(scoped) => Self::from_executor_event(*scoped.event),
             ExecutorEvent::LlmCallStart {
                 step,
                 messages,

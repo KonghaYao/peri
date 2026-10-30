@@ -21,6 +21,9 @@ use tokio::sync::Notify;
 pub(crate) mod current_invocation_fixture;
 use current_invocation_fixture::CurrentInvocationFixture;
 
+#[path = "output_store_task_fixture_test.rs"]
+mod task_fixture;
+
 pub(crate) fn large_output() -> String {
     (0..2200)
         .map(|line| format!("remote output {line} λ\n"))
@@ -478,6 +481,7 @@ async fn child_initiated_task_receipt_delivers_to_the_child_not_root() {
 
     struct RecordingDelivery {
         delivered: parking_lot::Mutex<Vec<(MessageId, TrustedSystemReminder)>>,
+        accepted: Notify,
     }
     impl TaskTerminalDelivery for RecordingDelivery {
         fn deliver<'a>(
@@ -489,12 +493,14 @@ async fn child_initiated_task_receipt_delivers_to_the_child_not_root() {
         {
             Box::pin(async move {
                 self.delivered.lock().push((delivery_id, reminder.clone()));
+                self.accepted.notify_one();
                 Ok(())
             })
         }
     }
 
-    let wire = Wire::connect(StartedTask).await;
+    let completed = Arc::new(Notify::new());
+    let wire = Wire::connect(task_fixture::FinishingTask(completed.clone())).await;
     let (mut owner, spawner) = crate::mcp::task_scope::McpTaskOwner::new();
     let pool = Arc::new(McpClientPool::new_pending_with_spawner(spawner));
     wire.install(&pool, "source", false);
@@ -516,6 +522,7 @@ async fn child_initiated_task_receipt_delivers_to_the_child_not_root() {
     );
     let delivery = Arc::new(RecordingDelivery {
         delivered: parking_lot::Mutex::new(Vec::new()),
+        accepted: Notify::new(),
     });
     let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
         .with_output_store(&pool, Some("root-session"));
@@ -529,27 +536,17 @@ async fn child_initiated_task_receipt_delivers_to_the_child_not_root() {
         "回执只能承诺结果到达时的投递与记录: {output}"
     );
     let task_id = manager.snapshot().tasks[0].task_id.clone();
-    let mut result = peri_acp_types::event::BackgroundTaskResult {
-        task_id: task_id.clone(),
-        agent_name: "mcp".into(),
-        prompt_summary: "source".into(),
-        success: true,
-        output: "done".into(),
-        tool_calls_count: 0,
-        duration_ms: 1,
-        timed_out: false,
-        child_thread_id: None,
-        subagent_failure: None,
-        shell_output: None,
-    };
-    result.task_id = task_id.clone();
-    assert!(manager
-        .settle_external(&task_id, "terminal-1", result)
-        .await
-        .unwrap());
+    completed.notify_one();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        delivery.accepted.notified(),
+    )
+    .await
+    .expect("the real task subscription must deliver the source terminal");
     {
         let delivered = delivery.delivered.lock();
         assert_eq!(delivered.len(), 1, "终态提醒必须投给发起者");
+        assert_eq!(delivered[0].1.as_reminder().metadata["task_id"], task_id);
         assert_eq!(
             delivered[0].1.as_reminder().metadata["initiator"],
             "child-thread"

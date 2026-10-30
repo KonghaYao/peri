@@ -32,6 +32,8 @@ pub struct TuiSubAgentGroup {
     pub agent_name: String,
     /// Nested view models produced by the sub-agent.
     pub view_models: im::Vector<TuiRenderUnit>,
+    /// Disposable live preview was clipped or released; this is not durable coverage.
+    pub preview_omitted: bool,
     /// Whether the group is currently collapsed（详情面板语义；消息区折叠由 fold 驱动）。
     pub collapsed: bool,
     /// Whether the sub-agent is still streaming.
@@ -64,6 +66,7 @@ impl TuiSubAgentGroup {
         h = tui_hash_combine(h, tui_hash_str(&self.agent_id));
         h = tui_hash_combine(h, tui_hash_str(&self.agent_name));
         h = tui_hash_combine(h, self.view_models.len() as u64);
+        h = tui_hash_combine(h, u64::from(self.preview_omitted));
         h = tui_hash_combine(h, 0); // collapsed 恒为 false（详情面板保持展开；消息区折叠由 fold 驱动）
         h = tui_hash_combine(h, u64::from(self.is_running));
         h = tui_hash_combine(h, u64::from(self.is_error));
@@ -78,7 +81,7 @@ impl TuiSubAgentGroup {
     }
 }
 
-tui_impl_partial_eq!(TuiSubAgentGroup: instance_id, agent_id, agent_name, view_models, collapsed, is_running, is_error, error_reason, fold, user_modified);
+tui_impl_partial_eq!(TuiSubAgentGroup: instance_id, agent_id, agent_name, view_models, preview_omitted, collapsed, is_running, is_error, error_reason, fold, user_modified);
 
 /// Generic collapsible group -- e.g. batched tool calls.
 #[derive(Debug, Clone)]

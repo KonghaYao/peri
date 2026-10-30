@@ -72,7 +72,7 @@ async fn explicit_stop_after_failure_does_not_release_a_new_child_error() {
 async fn stopped_user_turn_allows_exactly_one_automatic_independent_child_turn() {
     let mut harness = ActivationHarness::new().await;
     harness.start_scheduler();
-    harness
+    let ticket = harness
         .cfg
         .session_manager
         .get_session(&harness.session_id)
@@ -86,6 +86,11 @@ async fn stopped_user_turn_allows_exactly_one_automatic_independent_child_turn()
             kill: None,
         })
         .unwrap();
+    harness
+        .task_tickets
+        .lock()
+        .unwrap()
+        .insert("independent-child".into(), ticket);
     let cfg = harness.cfg.clone();
     let sessions = harness.sessions.clone();
     let locks = harness.locks.clone();

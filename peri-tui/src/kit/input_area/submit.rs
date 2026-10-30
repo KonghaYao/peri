@@ -190,6 +190,8 @@ pub(crate) fn send_local_user_bubble(
     use crate::kit::acp_types::AcpEventData;
     if let Some(tx) = LOCAL_EVENT_TX.get() {
         let _ = tx.send(AcpEventWithEpoch {
+            child_origin: None,
+            view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
             event: AcpEventData::LocalUserBubble {
                 text: text.to_string(),
                 attachments: crate::kit::steer_state::attachment_displays(attachments),

@@ -36,6 +36,7 @@ fn group(children: Vec<TuiRenderUnit>, reason: Option<&str>) -> TuiRenderUnit {
         agent_name: "Child".into(),
         view_models: children.into(),
         collapsed: false,
+        preview_omitted: false,
         is_running: false,
         is_error: true,
         error_reason: reason.map(str::to_owned),

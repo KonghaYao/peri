@@ -188,7 +188,7 @@ fn blocking_context(
     )
 }
 
-fn shell_task(manager: &TaskManager, id: &str) {
+fn shell_task(manager: &TaskManager, id: &str) -> peri_acp_types::tasks::TaskRegistrationTicket {
     TaskManagerPort::register(
         manager,
         BgTaskRegistration {
@@ -199,7 +199,7 @@ fn shell_task(manager: &TaskManager, id: &str) {
             kill: Some(Box::new(|| {})),
         },
     )
-    .unwrap();
+    .unwrap()
 }
 
 fn shell_result(id: &str) -> crate::agent::events::BackgroundTaskResult {
@@ -224,7 +224,7 @@ async fn settled_sync_child_returns_finished_without_parent_task() {
     let manager = Arc::new(TaskManager::new());
     let parent_manager = Arc::new(TaskManager::new());
     let (session, _owner) = bound_child(manager.clone());
-    shell_task(&manager, "shell-task");
+    let ticket = shell_task(&manager, "shell-task");
     session.queue().push(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run shell"),
@@ -266,7 +266,8 @@ async fn settled_sync_child_returns_finished_without_parent_task() {
     for _ in 0..20 {
         tokio::task::yield_now().await;
     }
-    assert!(manager.complete("shell-task", shell_result("shell-task")));
+    manager.confirm_external_execution_stopped(&ticket);
+    assert!(manager.complete(&ticket, shell_result("shell-task")));
     let completion = call.await.unwrap().unwrap();
     let SyncCompletion::Finished(outcome) = completion else {
         panic!("settled run must not detach");
@@ -351,7 +352,7 @@ async fn handoff_sync_child_returns_pending_and_registry_retries_delivery() {
     let manager = Arc::new(TaskManager::new());
     let parent_manager = Arc::new(TaskManager::new());
     let (session, _owner) = bound_child(manager.clone());
-    shell_task(&manager, "shell-task");
+    let ticket = shell_task(&manager, "shell-task");
     session.queue().push(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run shell"),
@@ -439,7 +440,8 @@ async fn handoff_sync_child_returns_pending_and_registry_retries_delivery() {
         sync_state.sync_delivery_errors().is_empty(),
         "成功重试必须清除此前 delivery 失败记录"
     );
-    assert!(manager.complete("shell-task", shell_result("shell-task")));
+    manager.confirm_external_execution_stopped(&ticket);
+    assert!(manager.complete(&ticket, shell_result("shell-task")));
     crate::session::subagent::close_subagent_session_scope(close_session)
         .await
         .expect("成功回执后显式 close 必须成功");
@@ -630,7 +632,7 @@ async fn handoff_with_empty_task_list_keeps_retained_messages() {
     let manager = Arc::new(TaskManager::new());
     let parent_manager = Arc::new(TaskManager::new());
     let (session, _owner) = bound_child(manager.clone());
-    shell_task(&manager, "shell-task");
+    let ticket = shell_task(&manager, "shell-task");
     session.queue().push(QueuedMessage::info(
         MessageSource::HookStopIntent,
         crate::messages::BaseMessage::human("stop"),
@@ -691,9 +693,8 @@ async fn handoff_with_empty_task_list_keeps_retained_messages() {
     );
     let mut result = shell_result("shell-task");
     result.agent_name = "shell".into();
-    assert!(manager
-        .settle_completed("shell-task", result, delivery)
-        .unwrap());
+    manager.confirm_external_execution_stopped(&ticket);
+    assert!(manager.settle_completed(&ticket, result, delivery).unwrap());
     let completion = call.await.unwrap().unwrap();
     let SyncCompletion::Pending(pending) = completion else {
         panic!("retained message must hand off even with empty task list");
@@ -863,162 +864,5 @@ async fn run_sync_handoff_failure_preserves_error_and_receipt() {
     assert!(owner.check_resume().is_err(), "未确认交接必须拒绝 resume");
 }
 
-/// 阻塞在模型调用中的同步子任务：父调用 future 被 drop（生产侧 cancel 分支）
-/// 后，子执行仍须走完既有收尾并恰好发射一次 SubagentStopped。
-#[tokio::test]
-async fn cancelled_sync_child_emits_stopped_after_caller_future_dropped() {
-    let manager = Arc::new(TaskManager::new());
-    let (session, _owner, store) = bound_child_with_store(manager.clone());
-    let child_id = session.store().thread_id.clone().unwrap();
-    session.queue().push(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        crate::messages::BaseMessage::human("block in model call"),
-    ));
-    let entered = Arc::new(tokio::sync::Notify::new());
-    let gate = Arc::new(tokio::sync::Notify::new());
-    let built = blocking_context(&session, entered.clone(), gate.clone());
-
-    let events: Arc<parking_lot::Mutex<Vec<ExecutorEvent>>> = Arc::default();
-    let capture = events.clone();
-    let handler: Arc<dyn AgentEventHandler> =
-        Arc::new(FnEventHandler(move |event| capture.lock().push(event)));
-
-    let resources: Arc<dyn SessionResources> = store.clone();
-    let cancel = session.config().cancel_token.clone();
-    let caller_cancel = cancel.clone();
-    let run_session = session.clone();
-    let run_id = child_id.clone();
-    let run_handler = handler.clone();
-    // 与生产同形的父工具调用 future：cancel 分支命中时整块 wrapper 被 drop。
-    let caller = tokio::spawn(async move {
-        let wrapper = run_sync_with_registered_handoff(
-            run_session.clone(),
-            run_id.clone(),
-            "fixture".into(),
-            None,
-            Some(new_sync_task_id()),
-            Some(Arc::new(|_, _| Ok(()))),
-            move |handoff, _| async move {
-                run_sync_subagent(
-                    &run_id,
-                    "fixture",
-                    "/tmp",
-                    10,
-                    Some(run_handler),
-                    None,
-                    None,
-                    Some(resources),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    built,
-                    run_session,
-                    None,
-                    Some(handoff),
-                )
-                .await
-            },
-        );
-        tokio::pin!(wrapper);
-        tokio::select! {
-            biased;
-            _ = caller_cancel.cancelled() => {}
-            outcome = &mut wrapper => panic!(
-                "wrapper finished before cancellation: {}",
-                outcome
-                    .err()
-                    .map(|error| error.to_string())
-                    .unwrap_or_else(|| "completed".into())
-            ),
-        }
-    });
-
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while !events
-            .lock()
-            .iter()
-            .any(|event| matches!(event, ExecutorEvent::SubagentStarted { .. }))
-        {
-            peri_time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("SubagentStarted must reach the parent handler");
-    tokio::time::timeout(Duration::from_secs(5), entered.notified())
-        .await
-        .expect("child model call must be in flight before cancellation");
-    cancel.cancel();
-    caller.await.unwrap();
-
-    let stopped = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let observed = events
-                .lock()
-                .iter()
-                .find(|event| matches!(event, ExecutorEvent::SubagentStopped { .. }))
-                .cloned();
-            if let Some(event) = observed {
-                break event;
-            }
-            peri_time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("dropping the caller future must not swallow SubagentStopped");
-    let ExecutorEvent::SubagentStopped {
-        result,
-        is_error,
-        instance_id,
-        ..
-    } = stopped
-    else {
-        unreachable!("filtered to SubagentStopped above");
-    };
-    assert_eq!(instance_id, child_id);
-    assert!(is_error, "cancel 收尾必须标记 error: {result}");
-    assert_eq!(result, "interrupted");
-    // 收尾顺序：close 落盘终态后才是 v1 Stopped，故此处终态已持久化。
-    assert_eq!(
-        store.statuses().last().map(|(_, status)| status.as_str()),
-        Some("error"),
-        "子线程终态必须持久化"
-    );
-    assert_eq!(manager.active_count(), 0);
-
-    peri_time::sleep(Duration::from_millis(200)).await;
-    let events = events.lock();
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(event, ExecutorEvent::SubagentStarted { .. }))
-            .count(),
-        1,
-        "Started 恰好一次"
-    );
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(event, ExecutorEvent::SubagentStopped { .. }))
-            .count(),
-        1,
-        "取消收尾只发一次 Stopped"
-    );
-}
-
-/// 关闭失败必须保留诊断，不因同步 worker 结束而宣称成功。
-#[tokio::test]
-async fn explicit_close_reports_failed_sync_delivery() {
-    let manager = Arc::new(TaskManager::new());
-    let session = child(manager.clone());
-    session
-        .subagent_host()
-        .unwrap()
-        .close_state
-        .record_sync_delivery_failure("sync-broken", "callback rejected");
-    let error = super::super::close::close_subagent_session_scope(session)
-        .await
-        .unwrap_err();
-    assert!(error.contains("callback rejected"), "{error}");
-}
+#[path = "run_sync_cancellation_test.rs"]
+mod cancellation_tests;

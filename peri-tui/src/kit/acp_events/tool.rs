@@ -5,26 +5,43 @@ use super::live_tool_links;
 use super::*;
 use crate::kit::acp_types::ToolCardAccumulator;
 use crate::kit::atoms::BG_AGENT_IDS;
-use crate::kit::bg_task_identity::with_bg_display_for_agent;
+use crate::kit::bg_task_identity::{bounded_label, with_bg_display_for_agent};
 use crate::kit::bg_task_live::{handle_bg_tool_ended, handle_bg_tool_started};
 use crate::kit::retained_bytes::{SeenAllocations, retained_unit_bytes};
 use crate::kit::stream_data::{TuiToolEnded, TuiToolStarted};
 use crate::kit::tui_render_unit::{
-    EntryStatus, FoldTarget, TuiRenderUnit, TuiToolCard, fold_for_status,
+    EntryStatus, FoldTarget, TuiRenderUnit, TuiToolCard, TuiToolPresentation, fold_for_status,
 };
 
 pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) {
+    if ts
+        .agent_id
+        .as_deref()
+        .is_some_and(|id| !has_live_child(state, id))
+    {
+        return;
+    }
     if ts.tool_name == "TodoWrite" {
-        state.record_todo_started(ts.tool_id.clone(), ts.raw_input.clone());
+        let input_limit = if ts.agent_id.is_some() {
+            crate::kit::acp_types::subagent_preview::FIELD_BYTES
+        } else {
+            super::todo_cache::INPUT_BYTES
+        };
+        state.record_todo_started(ts.tool_id.clone(), &ts.raw_input, input_limit);
     }
     if let Some(agent_id) = ts.agent_id.as_deref() {
         // bg sub-agent: TurnSuspended 后 SubAgentAccumulator 已被清除，
         // 后续 bg 工具事件仅更新 BG_DISPLAY，不走 start_subagent_tool
         if BG_AGENT_IDS.state().read().contains(agent_id) {
             with_bg_display_for_agent(agent_id, |entry| {
-                entry.current_tool = Some(ts.tool_name.clone());
+                entry.current_tool = Some(bounded_label(&ts.tool_name));
             });
-            handle_bg_tool_started(agent_id, ts, state.last_successful_todos.as_ref());
+            handle_bg_tool_started(
+                agent_id,
+                ts,
+                state.last_successful_todos.as_ref(),
+                state.todo_baseline_unknown(),
+            );
             state.variant = 1;
             // bg 工具事件不触碰 phase（Issue 2026-08-12）：仅更新 BG_DISPLAY，
             // 主 agent 已空闲（TurnSuspended → Idle）时不得拉回 loading。
@@ -34,41 +51,19 @@ pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) 
             state.last_pushed_text_len = state.current_turn.text.len();
             state.last_pushed_reasoning_len = state.current_turn.reasoning.len();
         } else {
-            // 同步 sub-agent: 路由到 SubAgentAccumulator
-            let routed = state.current_turn.start_subagent_tool(
-                agent_id,
-                ToolCardAccumulator::with_input(
-                    ts.tool_id.clone(),
-                    ts.tool_name.clone(),
-                    ts.input_summary.clone(),
-                    ts.raw_input.clone(),
-                    state.last_successful_todos.as_ref(),
-                ),
+            let (mut tool, omitted) = crate::kit::acp_types::subagent_preview::tool(
+                ts,
+                state.last_successful_todos.as_ref(),
             );
-            if !routed {
-                // [诊断] 收集当前所有 SubAgentAccumulator 的 agent_id
-                let registered_ids: Vec<&str> = state.current_turn.subagent_ids();
-                tracing::warn!(
-                    target: "tui.acp_events",
-                    agent_id = ?agent_id,
-                    tool_id = %ts.tool_id,
-                    tool_name = %ts.tool_name,
-                    routed = false,
-                    registered_count = registered_ids.len(),
-                    registered_agent_ids = ?registered_ids,
-                    "subagent tool start NOT ROUTED to SubAgentGroup"
-                );
-                // [修复] 兜底：路由失败时将工具卡作为普通 ToolCard 展示，
-                // 确保第二个 SubAgent 的工具调用不会完全丢失
-                state
-                    .current_turn
-                    .start_tool(ToolCardAccumulator::with_input(
-                        ts.tool_id.clone(),
-                        ts.tool_name.clone(),
-                        ts.input_summary.clone(),
-                        ts.raw_input.clone(),
-                        state.last_successful_todos.as_ref(),
-                    ));
+            if ts.tool_name == "TodoWrite" && state.todo_baseline_unknown() {
+                tool.presentation = TuiToolPresentation::Generic;
+            }
+            if omitted {
+                state.current_turn.mark_subagent_preview_omitted(agent_id);
+            }
+            if !state.current_turn.start_subagent_tool(agent_id, tool) {
+                tracing::debug!(child = %agent_id, "ignored unobserved child tool preview");
+                return;
             }
             state.variant = 1;
             state.phase = SessionPhase::PromptRunning;
@@ -86,15 +81,25 @@ pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) 
             ts.origin_message_id.as_deref(),
             ts.origin_readable,
         );
-        state
-            .current_turn
-            .start_tool(ToolCardAccumulator::with_input(
+        let tool = if ts.tool_name == "TodoWrite" && state.todo_baseline_unknown() {
+            // Do not derive an initial Todo presentation from a missing baseline.
+            let mut tool = ToolCardAccumulator::new(
+                ts.tool_id.clone(),
+                ts.tool_name.clone(),
+                ts.input_summary.clone(),
+            );
+            tool.raw_input = ts.raw_input.clone();
+            tool
+        } else {
+            ToolCardAccumulator::with_input(
                 ts.tool_id.clone(),
                 ts.tool_name.clone(),
                 ts.input_summary.clone(),
                 ts.raw_input.clone(),
                 state.last_successful_todos.as_ref(),
-            ));
+            )
+        };
+        state.current_turn.start_tool(tool);
         state.variant = 1;
         state.phase = SessionPhase::PromptRunning;
         state.publish_barrier();
@@ -105,6 +110,13 @@ pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) 
 }
 
 pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
+    if te
+        .agent_id
+        .as_deref()
+        .is_some_and(|id| !has_live_child(state, id))
+    {
+        return;
+    }
     let _todo_advanced = if let Some(agent_id) = te.agent_id.as_deref() {
         // bg sub-agent 不生成消息卡片，但仍需在成功结束时推进 Todo 基线。
         if BG_AGENT_IDS.state().read().contains(agent_id) {
@@ -120,14 +132,17 @@ pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
             state.last_pushed_reasoning_len = state.current_turn.reasoning.len();
             state.complete_todo_if_current(&te.tool_id, te.is_error)
         } else {
-            let ended = state.current_turn.end_subagent_tool(
+            let (output, omitted) = crate::kit::acp_types::subagent_preview::text(
+                &te.output_summary,
+                crate::kit::acp_types::subagent_preview::FIELD_BYTES,
+            );
+            if omitted {
+                state.current_turn.mark_subagent_preview_omitted(agent_id);
+            }
+            let _ended = state.current_turn.end_subagent_tool(
                 agent_id,
                 &te.tool_id,
-                te.output_summary.clone(),
-                te.is_error,
-            ) || state.current_turn.end_tool(
-                &te.tool_id,
-                te.output_summary.clone(),
+                output.to_owned(),
                 te.is_error,
             );
             state.variant = 1;
@@ -135,7 +150,7 @@ pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
             state.publish_barrier();
             state.last_pushed_text_len = state.current_turn.text.len();
             state.last_pushed_reasoning_len = state.current_turn.reasoning.len();
-            ended && state.complete_todo_if_current(&te.tool_id, te.is_error)
+            state.complete_todo_if_current(&te.tool_id, te.is_error)
         }
     } else {
         let ended =
@@ -154,10 +169,19 @@ pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
         state.publish_barrier();
         state.last_pushed_text_len = state.current_turn.text.len();
         state.last_pushed_reasoning_len = state.current_turn.reasoning.len();
-        ended && state.complete_todo_if_current(&te.tool_id, te.is_error)
+        state.complete_todo_if_current(&te.tool_id, te.is_error)
     };
 
     super::render::push_acp_state(state);
+}
+
+fn has_live_child(state: &BridgeState, id: &str) -> bool {
+    state
+        .current_turn
+        .subagents
+        .iter()
+        .any(|s| s.agent_id == id && s.is_running)
+        || BG_AGENT_IDS.state().read().contains(id)
 }
 
 pub(super) fn handle_tool_count(state: &mut BridgeState) {
@@ -176,7 +200,11 @@ pub(super) fn handle_replay_tool_started(
     raw_input: &serde_json::Value,
 ) {
     if tool_name == "TodoWrite" {
-        state.record_todo_started(tool_id.to_string(), raw_input.clone());
+        state.record_todo_started(
+            tool_id.to_string(),
+            raw_input,
+            super::todo_cache::INPUT_BYTES,
+        );
     }
     let card = replay_tool_started_unit(
         tool_id,
@@ -184,6 +212,7 @@ pub(super) fn handle_replay_tool_started(
         input_summary,
         raw_input,
         state.last_successful_todos.as_ref(),
+        state.todo_baseline_unknown(),
     );
     state.committed.push_back(card);
     // Replay publication 由 bridge scheduler 合帧；避免每条历史工具事件完整发布。
@@ -200,9 +229,13 @@ pub(super) fn replay_tool_started_unit(
     input_summary: &str,
     raw_input: &serde_json::Value,
     last_successful_todos: Option<&crate::kit::tool_semantics::TodoSnapshot>,
+    todo_baseline_unknown: bool,
 ) -> TuiRenderUnit {
-    let presentation =
-        crate::kit::tool_semantics::presentation_for(tool_name, raw_input, last_successful_todos);
+    let presentation = if tool_name == "TodoWrite" && todo_baseline_unknown {
+        TuiToolPresentation::Generic
+    } else {
+        crate::kit::tool_semantics::presentation_for(tool_name, raw_input, last_successful_todos)
+    };
     let card = TuiToolCard {
         tool_id: tool_id.to_string(),
         tool_name: tool_name.to_string(),
@@ -213,7 +246,7 @@ pub(super) fn replay_tool_started_unit(
         running_duration_ms: None,
         completed_duration_ms: None,
         diff: None,
-        presentation: presentation.clone(),
+        presentation,
         fold: fold_for_status(FoldTarget::Tool, EntryStatus::Error),
         user_modified: false,
         tool_calls_count: 0,
@@ -230,9 +263,8 @@ pub(super) fn handle_replay_tool_ended(
     output_summary: &str,
     is_error: bool,
 ) {
-    if update_committed_tool_card(state, tool_id, output_summary, is_error) {
-        state.complete_todo_if_current(tool_id, is_error);
-    }
+    update_committed_tool_card(state, tool_id, output_summary, is_error);
+    state.complete_todo_if_current(tool_id, is_error);
     // Replay publication 由 bridge scheduler 合帧；completion 更新仍在固定 deadline 内可见。
     super::render::push_acp_state(state);
 }

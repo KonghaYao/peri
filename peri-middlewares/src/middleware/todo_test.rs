@@ -36,7 +36,7 @@ async fn test_after_agent_background_tasks_suppress_and_resume_todo() {
     for kind in [BgTaskKind::Agent, BgTaskKind::Workflow, BgTaskKind::Shell] {
         for success in [true, false] {
             let manager = Arc::new(TaskManager::new());
-            manager
+            let registration = manager
                 .register(BgTaskRegistration {
                     task_id: "background".into(),
                     kind,
@@ -81,8 +81,9 @@ async fn test_after_agent_background_tasks_suppress_and_resume_todo() {
                 assert!(todo.require_completion);
                 assert_eq!(todo.items[0].status, TodoStatus::InProgress);
             }
+            manager.confirm_external_execution_stopped(&registration);
             assert!(manager.complete(
-                "background",
+                &registration,
                 BackgroundTaskResult {
                     task_id: "background".into(),
                     agent_name: "边界替身".into(),

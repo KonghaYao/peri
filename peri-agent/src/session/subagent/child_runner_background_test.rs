@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test(start_paused = true)]
 async fn background_child_hands_off_reports_failure() {
-    let (child, manager, built, _) = child_with_shell_task(false);
+    let (child, manager, built, _, _ticket) = child_with_shell_task(false);
     let child_id = child.store().thread_id.clone().unwrap();
     let parent_manager = Arc::new(TaskManager::new());
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -56,7 +56,7 @@ async fn background_child_hands_off_reports_failure() {
 /// 后台在 D 前完成：成功结果与正常 Stop。
 #[tokio::test(start_paused = true)]
 async fn background_child_settles_before_deadline_reports_success() {
-    let (child, manager, built, initial_calls, result_calls) = child_with_nested_task();
+    let (child, manager, built, initial_calls, result_calls, ticket) = child_with_nested_task();
     let child_id = child.store().thread_id.clone().unwrap();
     let parent_manager = Arc::new(TaskManager::new());
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -96,7 +96,7 @@ async fn background_child_settles_before_deadline_reports_success() {
     .await
     .unwrap();
     tokio::time::advance(Duration::from_secs(1)).await;
-    settle_nested_task(&child, &manager);
+    settle_nested_task(&child, &manager, &ticket);
     let result = tokio::time::timeout(Duration::from_secs(10), rx)
         .await
         .expect("settled background child must report")
@@ -111,7 +111,7 @@ async fn background_child_settles_before_deadline_reports_success() {
 /// 后台协作取消：原身份终态一次，失败语义不伪装成功。
 #[tokio::test(start_paused = true)]
 async fn background_child_cancellation_reports_interrupted_terminal() {
-    let (child, manager, built, _) = child_with_shell_task(false);
+    let (child, manager, built, _, ticket) = child_with_shell_task(false);
     let child_id = child.store().thread_id.clone().unwrap();
     let parent_manager = Arc::new(TaskManager::new());
     let (tx, rx) = tokio::sync::oneshot::channel();
@@ -161,7 +161,7 @@ async fn background_child_cancellation_reports_interrupted_terminal() {
     child.config().cancel_token.cancel();
     let mut shell_result = nested_result();
     shell_result.task_id = "shell-task".into();
-    assert!(manager.complete("shell-task", shell_result));
+    assert!(manager.complete(&ticket, shell_result));
     let result = tokio::time::timeout(Duration::from_secs(10), rx)
         .await
         .expect("cancelled background child must report")
@@ -191,7 +191,7 @@ impl crate::agent::LangfuseBridgeLike for PanicOnStopBridge {
 /// 后台排空失败必须进入 owner 准入，阻止 resume，而不是只改结果文本。
 #[tokio::test(start_paused = true)]
 async fn background_drain_failure_blocks_resume() {
-    let (child, _manager, built, _) = child_with_shell_task(true);
+    let (child, _manager, built, _, _ticket) = child_with_shell_task(true);
     let child_id = child.store().thread_id.clone().unwrap();
     let parent_manager = Arc::new(TaskManager::new());
     let (tx, rx) = tokio::sync::oneshot::channel();
