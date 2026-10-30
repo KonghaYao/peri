@@ -606,10 +606,10 @@ async fn test_resume_thread_id_background_combination() {
     );
 }
 
-/// 强制后台（beta flag `full-async-tools`）：resume 省略 `run_in_background` 时
-/// 非 active 恢复仍走后台；完成通知照常回传。
+/// 强制后台（beta flag `full-async-tools`）：resume 省略 `run_in_background` 或
+/// 显式 `false` 时，非 active 恢复仍走后台；完成通知照常回传。
 #[tokio::test]
-async fn test_resume_thread_id_background_forced_without_field() {
+async fn test_resume_thread_id_background_forced() {
     use peri_agent::agent::events::ExecutorEvent;
     use tokio::sync::mpsc;
 
@@ -685,6 +685,48 @@ async fn test_resume_thread_id_background_forced_without_field() {
         "BackgroundTaskResult 必须携带 child_thread_id"
     );
     assert_eq!(registry.active_count(), 0, "父任务目录必须已结算新任务");
+
+    // 显式 false 也不能落回同步：强制后台对 resume 同样生效。
+    let explicit_false_id = uuid::Uuid::now_v7().to_string();
+    preset_resumable_thread(
+        &store,
+        &explicit_false_id,
+        "fork",
+        Some(parent_id.as_str()),
+        Vec::new(),
+    )
+    .await;
+    let explicit_false_result = t
+        .invoke(
+            serde_json::json!({
+                "resume_thread_id": explicit_false_id.clone(),
+                "run_in_background": false,
+            }),
+            preset_child_ctx(&explicit_false_id, "."),
+        )
+        .await
+        .expect("强制后台下 resume 显式 false 应启动后台任务");
+    assert!(
+        explicit_false_result.contains("Background task"),
+        "强制后台 resume 显式 false 应返回后台启动文本: {explicit_false_result}"
+    );
+    let explicit_false_completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match bg_rx.recv().await {
+                Some(ExecutorEvent::BackgroundTaskCompleted(res)) => return res,
+                Some(_) => continue,
+                None => panic!("bg 通道关闭"),
+            }
+        }
+    })
+    .await
+    .expect("强制后台 resume 显式 false 应在超时内完成");
+    assert!(explicit_false_completed.success);
+    assert_eq!(
+        explicit_false_completed.child_thread_id.as_deref(),
+        Some(explicit_false_id.as_str())
+    );
+    assert_eq!(registry.active_count(), 0);
 }
 
 /// 成功路径：预置非 active thread（带消息）→ resume → 完成文本含
