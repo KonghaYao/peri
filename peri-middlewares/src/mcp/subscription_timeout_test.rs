@@ -318,7 +318,7 @@ async fn cancel_task_rpc_returns_after_its_own_deadline() {
     let manager: Arc<dyn TaskManager> =
         Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     pool.bind_session_task_manager("session", &manager);
-    let task_id = pool
+    let ticket = pool
         .register_external_task(
             "session",
             Some("session"),
@@ -334,7 +334,7 @@ async fn cancel_task_rpc_returns_after_its_own_deadline() {
 
     let cancellation = tokio::spawn({
         let manager = Arc::clone(&manager);
-        async move { manager.cancel_async(&task_id).await }
+        async move { manager.cancel_async(ticket.task_id()).await }
     });
     wait_for_cancel_request(&cancel_requests, 1).await;
     tokio::time::advance(cancel_timeout).await;

@@ -6,6 +6,7 @@ fn test_two_turn_done_accumulates_committed() {
     crate::kit::atoms::init_atoms();
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -18,7 +19,7 @@ fn test_two_turn_done_accumulates_committed() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,
@@ -73,6 +74,7 @@ fn test_turndone_archives_assistant_to_committed() {
     crate::kit::atoms::init_atoms();
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -85,7 +87,7 @@ fn test_turndone_archives_assistant_to_committed() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,
@@ -135,6 +137,7 @@ fn test_turn_interrupted_empty_skips_archive() {
         generation: 0,
     };
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 1,
         committed: pre_existing,
         current_turn: CurrentTurn::new(),
@@ -147,7 +150,7 @@ fn test_turn_interrupted_empty_skips_archive() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,
@@ -188,6 +191,7 @@ fn test_turn_done_clears_last_submitted_text() {
     crate::kit::atoms::init_atoms();
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -200,7 +204,7 @@ fn test_turn_done_clears_last_submitted_text() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,

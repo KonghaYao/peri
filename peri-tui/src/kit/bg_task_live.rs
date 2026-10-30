@@ -9,6 +9,9 @@ use crate::kit::tui_render_unit::{
     tui_hash_roll_update,
 };
 
+#[path = "bg_task_live_preview.rs"]
+mod preview;
+
 /// `BgLiveDetail` 的分层驻留计量。
 ///
 /// `stream` 与 `nested_units` 是两份真实分配（stream 的 bubble 在投影时被
@@ -21,6 +24,8 @@ pub(crate) struct BgLiveMemoryBytes {
     pub summary_bytes: usize,
     pub output_preview_bytes: usize,
     pub subagent_result_bytes: usize,
+    pub cancel_reason_bytes: usize,
+    pub metadata_bytes: usize,
     pub nested_units_bytes: usize,
     pub stream_bytes: usize,
     pub tool_cards_bytes: usize,
@@ -42,6 +47,22 @@ impl BgLiveDetail {
             .as_ref()
             .map(layer_bytes)
             .unwrap_or_default();
+        let cancel_reason = self
+            .cancel_reason
+            .as_ref()
+            .map(layer_bytes)
+            .unwrap_or_default();
+        let mut metadata = (
+            self.kind.len(),
+            self.kind.capacity() + std::mem::size_of::<Self>(),
+        );
+        for value in [&self.agent_id, &self.agent_name, &self.subagent_instance_id]
+            .into_iter()
+            .flatten()
+        {
+            metadata.0 += value.len();
+            metadata.1 += value.capacity();
+        }
         let nested_units = nested_units_layer_bytes(self);
         let stream = self
             .stream
@@ -53,22 +74,42 @@ impl BgLiveDetail {
             summary_bytes: summary.0,
             output_preview_bytes: output_preview.0,
             subagent_result_bytes: subagent_result.0,
+            cancel_reason_bytes: cancel_reason.0,
+            metadata_bytes: metadata.0,
             nested_units_bytes: nested_units.0,
             stream_bytes: stream.0,
             tool_cards_bytes: tool_cards.0,
             body: summary.0
                 + output_preview.0
                 + subagent_result.0
+                + cancel_reason.0
+                + metadata.0
                 + nested_units.0
                 + stream.0
                 + tool_cards.0,
             reserved: summary.1
                 + output_preview.1
                 + subagent_result.1
+                + cancel_reason.1
+                + metadata.1
                 + nested_units.1
                 + stream.1
                 + tool_cards.1,
         }
+    }
+
+    /// Disposable display payload only. Active routing identity is O(A), and
+    /// copies held by a frame/detail source remain owned by those consumers.
+    pub(crate) fn preview_reserved(&self) -> usize {
+        let memory = self.memory_bytes();
+        let identity = std::mem::size_of::<Self>()
+            + self.kind.capacity()
+            + [&self.agent_id, &self.agent_name, &self.subagent_instance_id]
+                .into_iter()
+                .flatten()
+                .map(String::capacity)
+                .sum::<usize>();
+        memory.reserved.saturating_sub(identity)
     }
 }
 
@@ -137,8 +178,11 @@ impl BgStream {
 
 fn nested_units_layer_bytes(detail: &BgLiveDetail) -> (usize, usize) {
     let mut seen = crate::kit::retained_bytes::SeenAllocations::default();
-    let reserved =
-        crate::kit::retained_bytes::retained_units_bytes(detail.nested_units.iter(), &mut seen);
+    let reserved = detail
+        .nested_units
+        .iter()
+        .map(|unit| crate::kit::retained_bytes::retained_unit_bytes(unit, &mut seen))
+        .sum::<usize>();
     // body 按出现次数累计逻辑正文；reserved 才按共享 Arc 去重。两者口径不同。
     let body = detail.nested_units.iter().map(unit_body_bytes).sum();
     (body, reserved)
@@ -162,10 +206,10 @@ fn tool_cards_layer_bytes(cards: &Vec<ToolCardAccumulator>) -> (usize, usize) {
             + card.output_summary.as_ref().map_or(0, String::capacity);
         let raw = crate::kit::retained_bytes::json_value_bytes(&card.raw_input);
         body += raw.body;
-        reserved += raw.reserved;
+        reserved += preview::json_reserved(&card.raw_input);
         let presentation = crate::kit::retained_bytes::presentation_bytes(&card.presentation);
         body += presentation.body;
-        reserved += presentation.reserved;
+        reserved += preview::presentation_reserved(&card.presentation);
     }
     (body, reserved)
 }
@@ -276,6 +320,7 @@ pub(crate) fn publish_pending_streams() {
     for detail in map.values_mut() {
         flush_detail(detail);
     }
+    preview::enforce(&mut map);
 }
 
 fn append_stream(agent_id: &str, message_id: Option<String>, chunk: &str, reasoning: bool) {
@@ -287,6 +332,9 @@ fn append_stream(agent_id: &str, message_id: Option<String>, chunk: &str, reason
     let Some(detail) = map.get_mut(&task_id) else {
         return;
     };
+    if detail.status != BgLiveStatus::Running {
+        return;
+    }
     if detail.stream.is_none() {
         detail.stream = Some(BgStream::new(detail, message_id));
     }
@@ -303,17 +351,29 @@ fn append_stream(agent_id: &str, message_id: Option<String>, chunk: &str, reason
                 started_at: Some(peri_time::monotonic_now()),
                 duration_ms: None,
             });
-        block.text.push_str(chunk);
-        stream.reasoning_hash = tui_hash_roll_update(stream.reasoning_hash, chunk);
+        let previous_len = block.text.len();
+        preview::append(&mut block.text, chunk, &mut detail.preview_omitted);
+        stream.reasoning_hash = if previous_len + chunk.len() == block.text.len() {
+            tui_hash_roll_update(stream.reasoning_hash, chunk)
+        } else {
+            tui_hash_roll(&block.text)
+        };
     } else {
         stream
             .bubble
             .started_at
             .get_or_insert_with(peri_time::monotonic_now);
-        stream.bubble.text.push_str(chunk);
-        stream.text_hash = tui_hash_roll_update(stream.text_hash, chunk);
+        let previous_len = stream.bubble.text.len();
+        preview::append(&mut stream.bubble.text, chunk, &mut detail.preview_omitted);
+        stream.text_hash = if previous_len + chunk.len() == stream.bubble.text.len() {
+            tui_hash_roll_update(stream.text_hash, chunk)
+        } else {
+            tui_hash_roll(&stream.bubble.text)
+        };
     }
     stream.dirty = true;
+    preview::touch(detail);
+    preview::enforce(&mut map);
 }
 
 fn with_live_detail<F>(task_id: &str, f: F)
@@ -326,6 +386,8 @@ where
     flush_detail(detail);
     detail.stream = None;
     f(detail);
+    preview::touch(detail);
+    preview::enforce(&mut map);
 }
 
 fn with_live_detail_for_agent<F>(agent_id: &str, f: F)
@@ -338,13 +400,21 @@ where
     let live = BG_LIVE_DETAIL.state();
     let mut map = live.write();
     if let Some(detail) = map.get_mut(&task_id) {
+        if detail.status != BgLiveStatus::Running {
+            return;
+        }
         flush_detail(detail);
         detail.stream = None;
         f(&task_id, detail);
+        preview::touch(detail);
     }
+    preview::enforce(&mut map);
 }
 
 fn sync_tool_units(detail: &mut BgLiveDetail) {
+    if detail.tool_cards.is_empty() {
+        return;
+    }
     let mut seen = std::collections::HashSet::new();
     let mut units = detail.nested_units.clone();
     for unit in units.iter_mut() {
@@ -387,10 +457,22 @@ fn detail_tool_card(
 }
 
 fn finalize_nested_reasoning(detail: &mut BgLiveDetail) {
+    if !detail.nested_units.iter().any(|unit| {
+        matches!(unit, TuiRenderUnit::TuiAssistantBubble(bubble) if bubble.reasoning.as_ref().is_some_and(|block| {
+            block.is_running || block.started_at.is_some() || block.status != EntryStatus::Completed
+        }))
+    }) {
+        return;
+    }
     for unit in detail.nested_units.iter_mut() {
         let TuiRenderUnit::TuiAssistantBubble(bubble) = unit else {
             continue;
         };
+        if !bubble.reasoning.as_ref().is_some_and(|block| {
+            block.is_running || block.started_at.is_some() || block.status != EntryStatus::Completed
+        }) {
+            continue;
+        }
         let mut bubble = (**bubble).clone();
         if let Some(reasoning) = bubble.reasoning.as_mut() {
             reasoning.duration_ms = reasoning.duration_ms.or_else(|| {
@@ -415,8 +497,18 @@ pub fn init_agent_live_detail(
     subagent_instance_id: Option<&str>,
 ) {
     with_live_detail(task_id, |d| {
+        if matches!(
+            d.status,
+            BgLiveStatus::Succeeded | BgLiveStatus::Failed | BgLiveStatus::Cancelled
+        ) {
+            return;
+        }
         d.agent_id = Some(agent_id.to_string());
-        d.agent_name = Some(agent_name.to_string());
+        d.agent_name = Some(preview::text(
+            agent_name,
+            preview::FIELD_BYTES,
+            &mut d.preview_omitted,
+        ));
         d.subagent_instance_id = subagent_instance_id.map(str::to_string);
         d.status = BgLiveStatus::Running;
     });
@@ -424,8 +516,14 @@ pub fn init_agent_live_detail(
 
 pub fn seed_live_from_started(task_id: &str, kind: &str, summary: &str, pid: Option<u32>) {
     with_live_detail(task_id, |d| {
+        if matches!(
+            d.status,
+            BgLiveStatus::Succeeded | BgLiveStatus::Failed | BgLiveStatus::Cancelled
+        ) {
+            return;
+        }
         d.kind = kind.to_string();
-        d.summary = summary.to_string();
+        d.summary = preview::text(summary, preview::FIELD_BYTES, &mut d.preview_omitted);
         d.pid = pid;
         d.status = BgLiveStatus::Running;
     });
@@ -445,16 +543,25 @@ pub(crate) fn seed_live_from_running_snapshot(
     let live = BG_LIVE_DETAIL.state();
     let mut map = live.write();
     let detail = map.entry(task_id.to_string()).or_default();
+    if matches!(
+        detail.status,
+        BgLiveStatus::Succeeded | BgLiveStatus::Failed | BgLiveStatus::Cancelled
+    ) {
+        return;
+    }
     detail.kind = kind.to_string();
-    detail.summary = summary.to_string();
+    detail.summary = preview::text(summary, preview::FIELD_BYTES, &mut detail.preview_omitted);
     detail.pid = pid;
     if detail.status == BgLiveStatus::Running {
+        preview::enforce(&mut map);
         return;
     }
     flush_detail(detail);
     detail.stream = None;
     detail.status = BgLiveStatus::Running;
     sync_tool_units(detail);
+    preview::touch(detail);
+    preview::enforce(&mut map);
 }
 
 pub fn seed_live_from_terminal_snapshot(
@@ -464,9 +571,11 @@ pub fn seed_live_from_terminal_snapshot(
     pid: Option<u32>,
     status: &str,
 ) {
+    let missing = !BG_LIVE_DETAIL.state().read().contains_key(task_id);
     with_live_detail(task_id, |detail| {
+        detail.preview_omitted |= missing;
         detail.kind = kind.to_string();
-        detail.summary = summary.to_string();
+        detail.summary = preview::text(summary, preview::FIELD_BYTES, &mut detail.preview_omitted);
         detail.pid = pid;
         detail.status = match status {
             "completed" => BgLiveStatus::Succeeded,
@@ -474,8 +583,7 @@ pub fn seed_live_from_terminal_snapshot(
             "cancelled" => BgLiveStatus::Cancelled,
             _ => return,
         };
-        finalize_nested_reasoning(detail);
-        sync_tool_units(detail);
+        preview::finish(detail);
     });
 }
 
@@ -483,15 +591,45 @@ pub(crate) fn handle_bg_tool_started(
     agent_id: &str,
     ts: &TuiToolStarted,
     previous_todos: Option<&crate::kit::tool_semantics::TodoSnapshot>,
+    todo_baseline_unknown: bool,
 ) {
     with_live_detail_for_agent(agent_id, |_, detail| {
-        let tool = ToolCardAccumulator::with_input(
+        let raw_input = preview::raw_input(&ts.raw_input, &mut detail.preview_omitted);
+        let input_omitted = !ts.raw_input.is_null() && raw_input.is_null();
+        let previous_fits = previous_todos.is_none_or(|todos| {
+            std::mem::size_of_val(todos.items())
+                + todos
+                    .items()
+                    .iter()
+                    .map(|item| {
+                        item.content.capacity()
+                            + item.active_form.as_ref().map_or(0, String::capacity)
+                    })
+                    .sum::<usize>()
+                <= preview::FIELD_BYTES
+        });
+        let mut tool = ToolCardAccumulator::with_input(
             ts.tool_id.clone(),
-            ts.tool_name.clone(),
-            ts.input_summary.clone(),
-            ts.raw_input.clone(),
-            previous_todos,
+            preview::text(
+                &ts.tool_name,
+                preview::FIELD_BYTES,
+                &mut detail.preview_omitted,
+            ),
+            preview::text(
+                &ts.input_summary,
+                preview::FIELD_BYTES,
+                &mut detail.preview_omitted,
+            ),
+            raw_input,
+            previous_todos.filter(|_| previous_fits),
         );
+        if !previous_fits || input_omitted {
+            detail.preview_omitted = true;
+            tool.presentation = crate::kit::tui_render_unit::TuiToolPresentation::Generic;
+        }
+        if ts.tool_name == "TodoWrite" && todo_baseline_unknown {
+            tool.presentation = crate::kit::tui_render_unit::TuiToolPresentation::Generic;
+        }
         if let Some(existing) = detail
             .tool_cards
             .iter_mut()
@@ -516,7 +654,12 @@ pub fn handle_bg_tool_ended(agent_id: &str, te: &TuiToolEnded) {
         else {
             return;
         };
-        if t.finish(te.output_summary.clone(), te.is_error) {
+        let output = preview::text(
+            &te.output_summary,
+            preview::FIELD_BYTES,
+            &mut detail.preview_omitted,
+        );
+        if t.finish(output, te.is_error) {
             sync_tool_units(detail);
         }
     });
@@ -536,17 +679,33 @@ pub fn append_bg_reasoning_chunk(agent_id: &str, rc: &TuiReasoningChunk) {
     append_stream(agent_id, rc.message_id.clone(), &rc.text, true);
 }
 
+pub(crate) fn append_bg_system_reminder(
+    agent_id: &str,
+    reminder: crate::kit::tui_render_unit::TuiSystemReminder,
+    omitted: bool,
+) {
+    with_live_detail_for_agent(agent_id, |_, detail| {
+        detail.preview_omitted |= omitted;
+        detail
+            .nested_units
+            .push_back(TuiRenderUnit::TuiSystemReminder(reminder));
+    });
+}
+
 pub fn handle_bg_subagent_stopped(agent_id: &str, result: &str, is_error: bool) {
     with_live_detail_for_agent(agent_id, |_, detail| {
-        detail.subagent_result = Some(result.to_string());
+        detail.subagent_result = Some(preview::text(
+            result,
+            preview::FIELD_BYTES,
+            &mut detail.preview_omitted,
+        ));
         detail.subagent_is_error = is_error;
         detail.status = if is_error {
             BgLiveStatus::Failed
         } else {
             BgLiveStatus::Succeeded
         };
-        finalize_nested_reasoning(detail);
-        sync_tool_units(detail);
+        preview::finish(detail);
     });
 }
 
@@ -556,37 +715,73 @@ pub fn mark_task_completed(
     duration_ms: u64,
     output_preview: Option<String>,
 ) {
-    with_live_detail(task_id, |d| {
+    let live = BG_LIVE_DETAIL.state();
+    let mut map = live.write();
+    // A completion for an evicted detail does not recreate its preview.
+    if let Some(d) = map.get_mut(task_id) {
+        flush_detail(d);
+        d.stream = None;
         d.duration_ms = Some(duration_ms);
-        d.output_preview = output_preview.filter(|s| !s.is_empty());
+        d.output_preview = output_preview
+            .filter(|s| !s.is_empty())
+            .map(|s| preview::text(&s, preview::FIELD_BYTES, &mut d.preview_omitted));
         d.status = if success {
             BgLiveStatus::Succeeded
         } else {
             BgLiveStatus::Failed
         };
-        finalize_nested_reasoning(d);
-        sync_tool_units(d);
-    });
+        preview::finish(d);
+        preview::touch(d);
+    }
+    preview::enforce(&mut map);
 }
 
 pub fn mark_task_cancelled(task_id: &str, reason: &str) {
-    with_live_detail(task_id, |d| {
-        d.cancel_reason = Some(reason.to_string());
+    let live = BG_LIVE_DETAIL.state();
+    let mut map = live.write();
+    if let Some(d) = map.get_mut(task_id) {
+        flush_detail(d);
+        d.stream = None;
+        d.cancel_reason = Some(preview::text(
+            reason,
+            preview::FIELD_BYTES,
+            &mut d.preview_omitted,
+        ));
         d.status = BgLiveStatus::Cancelled;
-        finalize_nested_reasoning(d);
-        sync_tool_units(d);
-    });
+        preview::finish(d);
+        preview::touch(d);
+    }
+    preview::enforce(&mut map);
 }
 
 pub fn seed_unobserved_snapshot(task_id: &str, kind: &str, summary: &str, pid: Option<u32>) {
     with_live_detail(task_id, |detail| {
         detail.kind = kind.to_string();
-        detail.summary = summary.to_string();
+        detail.summary = preview::text(summary, preview::FIELD_BYTES, &mut detail.preview_omitted);
         detail.pid = pid;
         detail.status = BgLiveStatus::Unobserved;
         finalize_nested_reasoning(detail);
         sync_tool_units(detail);
     });
+}
+
+/// Missing from a current full task snapshot is loss of live evidence, not a
+/// task cancellation. Its disposable detail joins the bounded unobserved cache.
+pub(crate) fn reconcile_snapshot_tasks(observed: &std::collections::HashSet<String>) {
+    let live = BG_LIVE_DETAIL.state();
+    let mut map = live.write();
+    for (id, detail) in map.iter_mut() {
+        if detail.status == BgLiveStatus::Running && !observed.contains(id) {
+            flush_detail(detail);
+            detail.stream = None;
+            detail.status = BgLiveStatus::Unobserved;
+            detail.preview_omitted = true;
+            finalize_nested_reasoning(detail);
+            sync_tool_units(detail);
+            preview::touch(detail);
+        }
+    }
+    preview::enforce(&mut map);
 }
 
 #[cfg(test)]

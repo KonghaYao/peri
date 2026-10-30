@@ -202,7 +202,7 @@ async fn test_background_path_emits_v2_start_stop_exactly_once() {
         .await
         .expect("应收到 SubagentStarted")
         .expect("通道不应关闭");
-    let instance_id = match instance_id {
+    let instance_id = match instance_id.payload().clone() {
         ExecutorEvent::SubagentStarted { instance_id, .. } => instance_id,
         other => panic!("应为 SubagentStarted，实际 {:?}", other),
     };
@@ -253,7 +253,7 @@ async fn test_bg_fork_path_emits_v2_start_stop_exactly_once() {
         .await
         .expect("应收到 SubagentStarted")
         .expect("通道不应关闭");
-    let instance_id = match instance_id {
+    let instance_id = match instance_id.payload().clone() {
         ExecutorEvent::SubagentStarted { instance_id, .. } => instance_id,
         other => panic!("应为 SubagentStarted，实际 {:?}", other),
     };

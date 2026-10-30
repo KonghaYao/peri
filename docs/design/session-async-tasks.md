@@ -27,6 +27,10 @@ owner 是纯身份，不是秘密或 capability：不存在 per-session token、
 
 保留当前任务的启动、查询、等待、进度、结果和取消。TaskManager、MCP task subscription 与当前队列是运行期实现，不提供跨进程恢复保证。
 
+当前任务注册返回 `TaskRegistrationTicket`，结果生产者保留原票据完成回调、重试和真实资源停止确认；公开 task ID 只用于查询/取消，不能重建旧注册资格。外部真实新来源分配新公开 ID，回调刷新复用原票据并校验来源与 initiator。已接纳的幂等证据由 producer receipt 持有，MCP 订阅结束或 Workflow 来源 ACK 后随句柄释放，不在全局保留无限终态 ID 集合。Workflow 未 ACK 的结果及原 TaskRecord 在来源 outbox 同时保留，来源终态/ACK 后不得由迟到 Running 展示行重新注册。
+
+`snapshot` 是完整的活动/未结清任务目录，加有数量与字节预算的近期已结清展示窗口；预算唯一实现见 `agent/async_tasks/projection.rs`。它不再承诺整个会话的任务历史，canonical 消息不受该展示淘汰影响。未接纳结果保留原正文和冻结路由，取消后的协作结果及未确认资源清理保留必要控制责任，不能按 UI 预算释放；内存随实际活动及未结清规模增长，不宣称全进程常量上限。业务执行尚未开始且有原票据证明时可撤销注册；`mark_execution_started` 之后的取消或 abort 必须走原结果/清理边界，不能使用该撤销路径。
+
 完成结果按可信来源进入当前会话队列或既有 canonical reminder 路径，保留消息持久化与工具/任务错误可见性。展示成功不代表工具成功，取消请求已发出不代表外部资源已停止。Workspace 结果文件和产物引用保持原有访问和有界投影语义。
 
 当前会话宿主持续监听队列激活信号；主 run 自然结束（包括有界等待到期）不撤销该监听。结果晚于 run 退出到达时，仍经原 continuation scheduler、prompt lock 和代际校验启动新 run。监听在订阅后复查队列，run 结束也复查队列，覆盖退出与投递竞态；活跃 run 自己消费结果，不额外并发启动。Info 或已消费的消息不产生空跑，失败不自动反复重试同一输入。

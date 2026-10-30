@@ -24,6 +24,7 @@ fn group(instance_id: &str, text: &str) -> TuiSubAgentGroup {
         is_running: false,
         is_error: false,
         error_reason: None,
+        preview_omitted: false,
         fold: FoldState::Collapsed,
         user_modified: false,
         content_hash: 0,
@@ -53,6 +54,91 @@ fn group_with_tool() -> TuiSubAgentGroup {
         .view_models
         .push_back(TuiRenderUnit::TuiToolCard(tool));
     group
+}
+
+#[test]
+#[serial_test::serial]
+fn replacing_evicted_preview_releases_body_and_obsolete_fold_state() {
+    let mut cache = DetailRenderCache::default();
+    let theme = Arc::new(peri_theme::builtin::dark_theme());
+    let grid = GridSpec::grid_for(60);
+    let mut transcript = group_with_tool();
+    let weak = match &transcript.view_models[0] {
+        TuiRenderUnit::TuiAssistantBubble(body) => Arc::downgrade(body),
+        _ => unreachable!(),
+    };
+    cache.prepare(&transcript, &grid, theme.clone(), 0, Vec::new());
+    cache.focus_next(false);
+    cache.toggle_focused(false);
+    assert!(!cache.folds.is_empty());
+    transcript.view_models = im::Vector::new();
+    transcript.preview_omitted = true;
+    cache.prepare(&transcript, &grid, theme, 0, Vec::new());
+    assert!(
+        weak.upgrade().is_none(),
+        "detail cache kept an evicted preview alive"
+    );
+    assert!(cache.folds.is_empty());
+    assert_eq!(cache.slots.capacity(), 0);
+    assert_eq!(cache.source.len(), 0);
+}
+
+#[test]
+#[serial_test::serial]
+fn entering_history_releases_the_previous_preview_source() {
+    let mut cache = DetailRenderCache::default();
+    let transcript = group("old-instance", "large old preview");
+    let weak = match &transcript.view_models[0] {
+        TuiRenderUnit::TuiAssistantBubble(body) => Arc::downgrade(body),
+        _ => unreachable!(),
+    };
+    cache.prepare(
+        &transcript,
+        &GridSpec::grid_for(60),
+        Arc::new(peri_theme::builtin::dark_theme()),
+        0,
+        Vec::new(),
+    );
+    drop(transcript);
+    assert!(weak.upgrade().is_some());
+    cache.prepare_text(
+        vec![Line::from("saved child history")],
+        "saved body".into(),
+        60,
+    );
+    assert!(weak.upgrade().is_none());
+    assert_eq!(cache.source.len(), 0);
+    assert_eq!(cache.height(), 2);
+}
+
+#[test]
+#[serial_test::serial]
+fn forwarded_reminder_can_expand_inside_child_detail_and_expire_its_fold() {
+    let mut cache = DetailRenderCache::default();
+    let theme = Arc::new(peri_theme::builtin::dark_theme());
+    let grid = GridSpec::grid_for(60);
+    let mut transcript = group("reminder-instance", "");
+    let mut reminder = crate::kit::tui_render_unit::TuiSystemReminder::legacy(
+        "child reminder body\nsecond line".into(),
+    );
+    reminder.summary = "child reminder".into();
+    reminder.recompute_hash();
+    let key = FoldKey::SystemReminder(reminder.reminder_id);
+    transcript.view_models = im::vector![TuiRenderUnit::TuiSystemReminder(reminder)];
+    cache.prepare(&transcript, &grid, theme.clone(), 0, Vec::new());
+    cache.focus_next(false);
+    assert!(cache.toggle_focused(false));
+    assert_eq!(cache.folds.get(&key), Some(&FoldState::Expanded));
+    let expanded = projected(&transcript.view_models[0], cache.folds.get(&key).copied());
+    assert!(
+        matches!(expanded.as_ref(), TuiRenderUnit::TuiSystemReminder(reminder)
+        if reminder.fold == FoldState::Expanded && reminder.body.contains("second line"))
+    );
+    drop(expanded);
+    transcript.view_models = im::Vector::new();
+    cache.prepare(&transcript, &grid, theme, 0, Vec::new());
+    assert!(cache.folds.is_empty());
+    assert!(cache.focused.is_none());
 }
 
 #[test]

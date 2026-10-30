@@ -30,6 +30,7 @@ fn make_subagent(id: &str, name: &str) -> TuiSubAgentGroup {
         is_running: false,
         is_error: false,
         error_reason: None,
+        preview_omitted: false,
         fold: crate::kit::tui_render_unit::FoldState::Collapsed,
         user_modified: false,
         content_hash: 0,

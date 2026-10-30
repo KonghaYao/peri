@@ -130,6 +130,10 @@ pub(super) async fn spawn_background_subagent(
 
     // 注册与 claim 移交均确认后，后台任务才可以开始执行。
     let (reg_tx, reg_rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
+    // The registration receipt belongs to this execution, including its panic path.
+    let registration_slot = Arc::new(parking_lot::Mutex::new(None));
+    let execution_registration = Arc::clone(&registration_slot);
+    let panic_registration = Arc::clone(&registration_slot);
     let (confirmed_tx, confirmed_rx) = tokio::sync::oneshot::channel();
     let startup_alive = Arc::new(parking_lot::Mutex::new(true));
     let startup_gate = BackgroundStartGate {
@@ -164,7 +168,15 @@ pub(super) async fn spawn_background_subagent(
         stop: None,
     };
 
+    // Construct before the future: dropping an unpolled task still withdraws
+    // the original, provably unstarted registration.
+    let unstarted_registration = UnstartedRegistrationGuard {
+        manager: Arc::clone(&task_manager),
+        ticket: Arc::clone(&registration_slot),
+        armed: true,
+    };
     let execution = async move {
+        let mut unstarted_registration = unstarted_registration;
         let mut cleanup_guard = cleanup_guard;
         let inbox_guard = inbox_guard;
         let mut permit = execution_permit.lock().take();
@@ -188,9 +200,24 @@ pub(super) async fn spawn_background_subagent(
             return;
         }
 
+        let registration = execution_registration
+            .lock()
+            .clone()
+            .expect("startup gate only opens after registration");
+        if let Err(error) = task_manager_spawn.mark_execution_started(&registration) {
+            if let Some(permit) = permit.take() {
+                permit.finish(Err(error.to_string()));
+            }
+            return;
+        }
+        unstarted_registration.armed = false;
         let started_at = peri_time::monotonic_now();
         // context 将被 move 进 run_react_loop，turn_id 提前提取（Start/Stop emit 用）
         let execution_turn = v2_ctx.context.session.turn.clone();
+        let event_stream = peri_acp_types::event::ChildEventStream::new(
+            child_thread_id_for_task.clone(),
+            execution_turn.execution_binding(),
+        );
         let context = v2_ctx.context;
         let session = v2_ctx.session;
         let mut resumed_mailbox = if resuming {
@@ -216,6 +243,7 @@ pub(super) async fn spawn_background_subagent(
             agent_name: agent_name_for_task.clone(),
             // v1 协议化直发目标（bg 泵；None = 无 bg 通道，仅 v2 补发）
             sender: bg_event_sender.clone(),
+            event_stream: event_stream.clone(),
         });
         // v1 协议化发射目标（bg 泵）：BG pump 独立于主 pump，主 turn 结束后仍存活。
         // 构造提前到 Started 直发之前（start 借用、stop 直发 clone、forwarder move）。
@@ -227,6 +255,10 @@ pub(super) async fn spawn_background_subagent(
                     },
                 )) as Arc<dyn AgentEventHandler>
             });
+        let bg_forwarder_handler = crate::agent::subagent_event_forwarder::with_child_event_origin(
+            bg_forwarder_handler,
+            event_stream,
+        );
         let bg_stop_handler = bg_forwarder_handler.clone();
 
         // 真实子会话身份：hook 载荷 agent_id 的来源（不是 agent 名）。
@@ -536,7 +568,7 @@ pub(super) async fn spawn_background_subagent(
                 );
             }
         }
-        settle_background_terminal(&task_manager_spawn, result, on_bg_complete);
+        settle_background_terminal(&task_manager_spawn, &registration, result, on_bg_complete);
         let owner = session
             .subagent_host()
             .and_then(|host| host.child_owner.clone());
@@ -604,7 +636,14 @@ pub(super) async fn spawn_background_subagent(
                     &mut result,
                 )
                 .await;
-                settle_background_terminal(&panic_manager, result, panic_on_complete);
+                if let Some(registration) = panic_registration.lock().clone() {
+                    settle_background_terminal(
+                        &panic_manager,
+                        &registration,
+                        result,
+                        panic_on_complete,
+                    );
+                }
             }
             // panic 已在边界内收敛；正常返回让 spawn_owned 确认执行已停止。
         }),
@@ -638,16 +677,20 @@ pub(super) async fn spawn_background_subagent(
         owner_session_id: None,
         owner_identity: None,
     };
-    if let Err(e) = task_manager.register_with_kind(bg_task) {
-        // S3.1：注册失败（Agent 类无并发上限，失败仅剩 session execution scope
-        // 关闭一类）——通知包装任务直接 return（不执行 run_react_loop、不 emit
-        // 任何事件），再如实返回错误。任务零事件零注册，无幽灵执行 / 无泄漏。
-        let _ = reg_tx.send(Err(e.to_string()));
-        return Err(format!("Failed to register background task: {}", e).into());
-    }
+    let ticket = match task_manager.register_pending_start(bg_task) {
+        Ok(ticket) => ticket,
+        Err(e) => {
+            // S3.1：注册失败（Agent 类无并发上限，失败仅剩 session execution scope
+            // 关闭一类）——通知包装任务直接 return（不执行 run_react_loop、不 emit
+            // 任何事件），再如实返回错误。任务零事件零注册，无幽灵执行 / 无泄漏。
+            let _ = reg_tx.send(Err(e.to_string()));
+            return Err(format!("Failed to register background task: {}", e).into());
+        }
+    };
+    *registration_slot.lock() = Some(ticket.clone());
     let mut registration = PendingBackgroundRegistration {
         manager: task_manager.clone(),
-        task_id: Some(task_id.clone()),
+        ticket: Some(ticket),
         runtime_cleanup: cleanup_runtime.map(|cleanup| (child_thread_id.clone(), cleanup)),
     };
     let handoff = match resume_claim {
@@ -664,7 +707,7 @@ pub(super) async fn spawn_background_subagent(
         Some(handoff) => handoff.accept(),
         None => Ok(()),
     })?;
-    registration.task_id = None;
+    registration.ticket = None;
     registration.runtime_cleanup = None;
 
     Ok(())
@@ -702,34 +745,65 @@ async fn persist_background_terminal(
 
 fn settle_background_terminal(
     manager: &TaskManager,
+    registration: &peri_acp_types::tasks::TaskRegistrationTicket,
     result: crate::agent::events::BackgroundTaskResult,
     delivery: Option<peri_acp_types::tasks::OnBgCompleteFn>,
 ) {
     let task_id = result.task_id.clone();
     if let Some(delivery) = delivery {
-        if let Err(error) = manager.settle_completed(&task_id, result, delivery) {
+        if let Err(error) = manager.settle_completed(registration, result, delivery) {
             tracing::error!(%task_id, %error, "subagent terminal delivery is pending");
         }
     } else {
-        manager.complete(&task_id, result);
+        manager.complete(registration, result);
+    }
+}
+
+fn withdraw_unstarted(
+    manager: &TaskManager,
+    ticket: Option<&peri_acp_types::tasks::TaskRegistrationTicket>,
+) {
+    if let Some(ticket) = ticket {
+        if let Err(error) = manager.withdraw_unstarted_registration(ticket) {
+            tracing::error!(task_id = %ticket.task_id(), %error, "background startup receipt withdrawal failed");
+        }
+    }
+}
+
+struct UnstartedRegistrationGuard {
+    manager: Arc<TaskManager>,
+    ticket: Arc<parking_lot::Mutex<Option<peri_acp_types::tasks::TaskRegistrationTicket>>>,
+    armed: bool,
+}
+
+impl Drop for UnstartedRegistrationGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            withdraw_unstarted(&self.manager, self.ticket.lock().as_ref());
+        }
     }
 }
 
 struct PendingBackgroundRegistration {
     manager: Arc<TaskManager>,
-    task_id: Option<String>,
+    ticket: Option<peri_acp_types::tasks::TaskRegistrationTicket>,
     runtime_cleanup: Option<(String, DeregisterRuntimeFn)>,
 }
 
 impl Drop for PendingBackgroundRegistration {
     fn drop(&mut self) {
-        if let Some(task_id) = self.task_id.take() {
-            if let Err(error) = self.manager.cancel(&task_id) {
-                tracing::error!(%task_id, %error, "background preparation cancellation failed");
+        if let Some(ticket) = self.ticket.take() {
+            if let Err(error) = self.manager.cancel(ticket.task_id()) {
+                tracing::error!(task_id = %ticket.task_id(), %error, "background preparation cancellation failed");
             }
+            withdraw_unstarted(&self.manager, Some(&ticket));
         }
         if let Some((thread_id, cleanup)) = self.runtime_cleanup.take() {
             cleanup(&thread_id);
         }
     }
 }
+
+#[cfg(test)]
+#[path = "background_registration_test.rs"]
+mod registration_tests;

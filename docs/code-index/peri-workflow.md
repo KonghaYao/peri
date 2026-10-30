@@ -3,7 +3,7 @@
 Workflow 的运行耗时、RPC 有界等待和终态时间戳使用 [peri-time](peri-time.md)；
 预算与持久化字段语义仍由 Workflow 自身定义。
 
-> 速查表：把「我想做什么」映射到稳定符号；细节以代码为准。更新：2026-10-11
+> 速查表：把「我想做什么」映射到稳定符号；细节以代码为准。更新：2026-10-30（运行期注册票据、source outbox 与 ACK 后回收）
 > 依据：`docs/design/workflow-mcp.md`（现行目标设计）、`docs/design/workflow.md`（已取代的旧链描述）、`docs/standards/architecture-contracts.md`、源码（无 crate 级 CLAUDE.md）
 
 ## 架构速览
@@ -13,7 +13,7 @@ Workflow 的运行耗时、RPC 有界等待和终态时间戳使用 [peri-time](
 - 入口：`peri-workflow/src/runtime.rs::WorkflowRuntime`（start_run/kill/resume/status/任务表；经 `mcp-packages/workflow/src/{server,resources}.rs` 暴露 MCP 工具/资源/订阅）；执行与终态：`peri-workflow/src/runner.rs::WorkflowRunner::run`；通用进程 host 与 NDJSON framing/pending：`peri-js-runtime/src/{host,rpc}.rs`；Workflow agent ownership/kill：`peri-workflow/src/rpc.rs`（引擎侧无登记方，kill 由任务表栅栏承担）。
 - 契约事实源：`peri-acp-types/src/workflow.rs` 的 `AgentExecutor`、`AgentRunParams`、`AgentRunResult`、`ProgressEvent`、四维状态、`WorkflowAttempt`、`WorkflowTaskResult`。wire 变更须同步 `npm-packages/@peri-workflow/src/types.ts`。
 - Workflow Agent 的持久执行边界在 `peri-agent/src/agent/workflow/agent/execution.rs`：从直接发起会话继承 binding、frozen 与资源授权，保存真实 child 后交由共享 WorkBoundary 获取 SDK 唯一准入；实际执行、forwarder 和持久化排空后，先结清存在的直接发起会话终态 ACK，再结束准入。生命周期缺失或结清未知不降级为内存执行。
-- 并发不变量：start/resume 共用 `WorkflowTool::start_run`，先取得实例独立的 execution owner、`WorkflowTaskRegistry::reserve` 并登记取消通道，再经 `TaskManager::spawn_owned` 启动；MCP 启动成功返回前等待 Host 的 `WorkflowTaskObserved`，拒绝路径不得产生 detached runner。
+- 并发不变量：start/resume 共用 `WorkflowTool::start_run`，先取得实例独立的 execution owner、`WorkflowTaskRegistry::reserve` 返回的 `WorkflowRunTicket` 并登记取消通道，再经 `TaskManager::spawn_owned` 启动。MCP 启动成功返回前由 `WorkflowStartOutcome` 持原票据等待 Host 的观察确认；即使快速完成已被 ACK、source 目录已回收，晚到的 waiter 仍能观察该确认。启动拒绝通过 `discard_unstarted` 释放未执行的登记，不产生 detached runner。
 - 交付不变量：engine `completed` 只表示 execution completed；acceptance、post-processing、delivery 独立投影。`acceptance_status: unknown` 且 execution/post-processing 成功时，delivery 保持 `unknown`；明确执行/验收/Git postcondition 失败才为 `blocked`。Git postcondition 只比较 Workflow 前后状态发生变化的路径，已有且未变化的无关 dirty path 不阻塞；异常只报告并 blocked，不执行 add/commit/stash/reset/restore/clean。内核不产出 `deliverable`（该判定属引擎之外的验收层；历史 state.json 里的该值按 `unknown` 读入）。
 
 ## 速查表
@@ -39,12 +39,12 @@ Workflow 的运行耗时、RPC 有界等待和终态时间戳使用 [peri-time](
 | 改任务计数与事件日志分页 | `peri-workflow/src/runtime/tasks.rs` + `runtime/event_log.rs` | `WorkflowTaskTable::{active_count_for_run, executing_count_for_run}`（持锁借用遍历 `order` + `tasks.get`，只计数不克隆记录；语义等价 `for_run(...).iter().filter(...)`；消费点 `runtime.rs` 的 `maxAgents` 门限与 `peri-acp/src/host/workflow_consumer.rs` 的 `maxConcurrency` 容量）；`BoundedEventLog::page_where` 用 `partition_point` + `VecDeque::range` 跳过游标前已读前缀（依赖 entries 内 sequence 严格递增），保留 `start = max(cursor+1, truncated_before)` 与 head_sequence/truncated_before 语义 |
 | 改自然终态/Git 交付投影 | `peri-workflow/src/runner/terminal.rs` | `finalize_workflow`、`project_postcondition`、`send_failure`；Git postcondition → state.json → progress，持久化失败使对外结果降级为 failed/blocked |
 | 改 Workflow 工具/preflight | `peri-workflow/src/tool.rs` + `src/preflight.rs` + `runtime.rs` | `WorkflowTool`（`new(runtime)` 薄壳与描述/参数契约）；执行与参数校验核心在 `WorkflowRuntime::start_run`；`preflight_validate_script`、`resolve_script_path`；`script` description 是 AsyncFunction body grammar（唯一 `export const meta`、顶层 primitives、顶层 `return` 建议、禁止 import/其他 export）的模型契约；run_id 前校验脚本、cwd/repo、writeIntent、JS-safe limits，并捕获 GitBaseline；preflight 持有 TempDir 与 kill-on-drop 子进程 |
-| 改调用取消与运行完成发布 | `peri-workflow/src/completion.rs` | `RunCompletion::spawn/project`；单任务等待真实 runner 清理后完成 registry 与四维投影；快速窗口只观察相同结果，调用者取消不丢完成通知，kill 保持 Killed |
+| 改调用取消与运行完成发布 | `peri-workflow/src/completion.rs` | `RunCompletion::spawn/project`；持原 `TaskRegistrationTicket` 确认真实清理与结算，持 `WorkflowRunTicket` 和注册时的 `TaskRecord` 发布 source outbox；快速窗口只观察相同结果，调用者取消不丢完成通知，kill 保持 Killed |
 | 改 Git ownership/postcondition | `peri-workflow/src/journal/git.rs`（journal 根 re-export） | `GitBaseline::capture`、`validate_write_intent`、`verify_postcondition`；`GIT_OPTIONAL_LOCKS=0`，canonical repo/cwd、allowlist、HEAD/commit paths fail-safe 对账 |
 | 改 state/journal/resume | `peri-workflow/src/journal.rs` + `runner/run_protocol.rs` + `npm-packages/@peri-workflow/src/server.ts` | `WorkflowJournalStore::{init_run,append,read_all_strict,write_state}`；恢复读取失败可见，只复用从 seq=0 开始的连续 ok 前缀；state 保存 args/max_concurrency；legacy attempt identity 不得用 journal seq 伪造 |
 | 改长输出提取 | `peri-workflow/src/journal/output.rs`（journal 根 re-export） | `extract_long_texts`；独立文件写入成功后才提交 JSON 引用，失败保留正文，返回值只列成功标签 |
 | 改 runtime limits | `peri-workflow/src/runner/{limits,message_loop}.rs` + `runtime.rs`（预算表） | tool 调用计数改由任务终态结果观察（`RunLimitState::observe_tool_calls`），breach 由 `workflow/done` 投影为 failed；`RunExecutionBudget`（maxConcurrency/maxAgents）是宿主消费者与 wire 准入的同一权威，预算缺失时容量门跳过（liveness 优先）；配置事实源为 `protocol.rs::WorkflowLimits`，cache-hit 不重复计数 |
-| 改并发限制/完成通知 | `peri-workflow/src/registry.rs` + `peri-acp/src/host/workflow_projection.rs` | `complete` 保留未确认结果；Host 通过 MCP 重建独立任务投影并投递完成结果，成功后才调用 `WorkflowCompletionAck`；`WorkflowClose` 排空实例所有的执行 |
+| 改并发限制/完成通知与 ACK 回收 | `peri-workflow/src/registry.rs` + `mcp-packages/workflow/src/resources.rs` + `peri-acp/src/host/workflow_projection.rs` | `complete` 验证原 receipt 并原子保存未 ACK 的结果和原 `TaskRecord`；`background_tasks` 同锁读取 source 已准入的 Running IDs 与 pending outbox，资源据此过滤 owner 快照并补入未 ACK 记录，不用有界展示缓存判断业务资格。Host 接纳交付后才 `WorkflowCompletionAck`；ACK 删除 run、receipt 目录与 outbox 并缩容，producer 自持票据保留必要证据；`WorkflowClose` 排空实例所有的执行 |
 | 改进度/ACP snapshot | `peri-workflow/src/progress.rs` + `runtime.rs` | `WorkflowProgressStore::{apply_event,set_terminal_projection,get_all_runs_snapshot}`、`WorkflowRuntime::{runs_snapshot,run_snapshot,event_watermark}`；私有 TrackedRun 同时持有公开投影与本次实际执行标记，单一提交器（`commit` 串行锁）保证事件顺序，观察者回调不得重入提交；完成保留期内仍可取正确 phase 摘要，到期共同回收，cache-hit 历史 token/duration 不计入本次摘要；相位耗时是 `PhaseStarted`→`PhaseDone` 的墙钟，无相位边界事件为 `None`（不回落成 agent 时长求和） |
 | 改 TUI Workflow 面板 | `peri-tui/src/kit/{workflow_snapshot.rs,panels/workflow.rs}` | `TuiRunProgress` legacy 四维默认 unknown；panel footer 只展示快捷键，不渲染 execution/acceptance/post-processing/delivery |
 | 改 Node adapter/attempt bridge | `npm-packages/@peri-workflow/src/{adapter,rpc,server,types}.ts` | `rpcAdapter.run` 发布 `agent/task`（taskId = `<runId>:<seq>`）并透传真实 `ctx.agentId`；`agent/result` 按 taskId 幂等结算等待表（`registerTask`/`handleTaskResult`/`rejectPendingTasks`）；journal callback 无 identity 时省略 optional agentId，不合成确定值 |
@@ -54,7 +54,7 @@ Workflow 的运行耗时、RPC 有界等待和终态时间戳使用 [peri-time](
 - `RunProgress.status` 是 legacy/导航状态；`execution_status`、`acceptance_status`、`post_processing_status`、`delivery_status` 是 canonical 终态投影。
 - `RunState` 是磁盘权威状态；写入失败必须使对外结果降级为 failed/blocked，不能继续通知 completed。
 - 新 state 保留启动 args 与并发数，ACP resume 原样恢复；旧 state 缺失时仅使用兼容默认，不能重建丢失的参数。契约变化时由 Workflow tool 显式传入完整新 args。
-- run 终态经 `registry::complete` 保存在实例内 outbox，Host 只能通过 MCP 读取并确认；不共享 TaskManager 或完成广播。任务级终态经 `workflow://tasks` 资源与 `agent/result` 通知投递。outbox 只保证实例存活期间的重试，不承诺进程重启恢复。
+- run 终态经 `registry::complete` 保存在实例内 outbox，结果与原 `TaskRecord` 一起保留到 ACK；即使终态展示窗口淘汰该记录，MCP 重试仍有真实来源身份。Host 只能通过 MCP 读取并确认，不共享 TaskManager 或完成广播；ACK 关闭 source 资格并回收登记，owner 尚未更新的 Running 展示行不能重新发布。`WorkflowRunTicket` 仅在运行期持有，替代永久观察 ID 集，不修改 wire 或持久格式。任务级终态经 `workflow://tasks` 资源与 `agent/result` 通知投递。outbox 只保证实例存活期间的重试，不承诺进程重启恢复。
 - journal 保留 legacy `key/seq/result`；`attempt.agentId` 只有在来源真实可证明时存在，`journalSeq` 只表示日志顺序。
 
 ## 目标验证

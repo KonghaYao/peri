@@ -320,7 +320,7 @@ async fn background_terminal_store_failure_cannot_report_success() {
         events.push(event);
     }
     assert!(matches!(
-        events.last(),
+        events.last().map(|event| event.payload()),
         Some(crate::agent::events::ExecutorEvent::SubagentStopped { is_error: true, .. })
     ));
     assert!(!events.iter().any(|event| matches!(

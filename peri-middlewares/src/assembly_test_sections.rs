@@ -387,7 +387,7 @@ async fn test_stage_completion_reminders_share_assembled_task_manager() {
                     "W3-C1 后链上不得再有裸名壳工具：壳工具唯一提供面是 builtin workspace 桥"
                 );
             }
-            assembled_manager
+            let registration = assembled_manager
                 .register(BgTaskRegistration {
                     task_id: "pending".into(),
                     kind,
@@ -414,8 +414,9 @@ async fn test_stage_completion_reminders_share_assembled_task_manager() {
                 host.task_manager.as_ref().unwrap(),
                 &assembled_manager
             ));
+            assembled_manager.confirm_external_execution_stopped(&registration);
             assert!(assembled_manager.complete(
-                "pending",
+                &registration,
                 peri_agent::agent::events::BackgroundTaskResult {
                     task_id: "pending".into(),
                     agent_name: "test".into(),

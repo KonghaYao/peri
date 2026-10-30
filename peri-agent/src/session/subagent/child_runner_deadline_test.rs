@@ -1,5 +1,43 @@
 use super::*;
 
+/// [回归测试] 已投递终态但真实清理未确认时，不能仅凭 active_count=0 结束。
+#[tokio::test(start_paused = true)]
+async fn accepted_terminal_with_pending_cleanup_hands_off_instead_of_settled() {
+    let (child, manager, built, _, finished) = child_with_shell_task(false);
+    assert!(manager.complete(&finished, nested_result()));
+    let cleanup = manager
+        .register(BgTaskRegistration {
+            task_id: "cleanup-pending".into(),
+            kind: BgTaskKind::Shell,
+            summary: "result accepted; child process exit unconfirmed".into(),
+            pid: None,
+            kill: Some(Box::new(|| {})),
+        })
+        .unwrap();
+    let mut result = nested_result();
+    result.task_id = cleanup.task_id().into();
+    assert!(manager.complete(&cleanup, result));
+    assert_eq!(manager.active_count(), 0);
+    assert!(!manager.has_pending_deliveries());
+    let permit = permit_for(&child, &built.context);
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(125),
+        run_child_until_terminal(built.context, 10, &child),
+    )
+    .await
+    .expect("the cleanup obligation must reach the existing handoff deadline");
+    if let Some(permit) = permit {
+        permit.finish(Ok(()));
+    }
+    let ChildRunOutcome::HandedOff { receipt } = outcome else {
+        panic!("unconfirmed cleanup must not become Settled: {outcome:?}");
+    };
+    assert_eq!(receipt.tasks.len(), 1);
+    assert_eq!(receipt.tasks[0].task_id, "cleanup-pending");
+    manager.confirm_external_execution_stopped(&cleanup);
+    assert!(!manager.has_unsettled_tasks());
+}
+
 fn install_started_window(
     context: &mut crate::agent::stages::StageContext,
 ) -> tokio::time::Instant {
@@ -12,13 +50,13 @@ fn install_started_window(
 /// 完成与 D 同刻，且完成通知先被调度：activity 胜出，正常 Settled。
 #[tokio::test(start_paused = true)]
 async fn completion_just_before_deadline_prefers_settled() {
-    let (child, manager, mut built, _) = child_with_shell_task(false);
+    let (child, manager, mut built, _, ticket) = child_with_shell_task(false);
     let deadline = install_started_window(&mut built.context);
     tokio::time::advance(Duration::from_secs(119)).await;
     let settle_manager = manager.clone();
     let settle = tokio::spawn(async move {
         tokio::time::sleep_until(deadline - Duration::from_millis(1)).await;
-        assert!(settle_manager.complete("shell-task", nested_result()));
+        assert!(settle_manager.complete(&ticket, nested_result()));
     });
     for _ in 0..10 {
         tokio::task::yield_now().await;
@@ -40,13 +78,13 @@ async fn completion_just_before_deadline_prefers_settled() {
 /// 完成发生在 D 之后：deadline 先胜出，交接且不误报成功。
 #[tokio::test(start_paused = true)]
 async fn completion_just_after_deadline_hands_off() {
-    let (child, manager, mut built, _) = child_with_shell_task(false);
+    let (child, manager, mut built, _, ticket) = child_with_shell_task(false);
     let deadline = install_started_window(&mut built.context);
     tokio::time::advance(Duration::from_secs(119)).await;
     let settle_manager = manager.clone();
     let settle = tokio::spawn(async move {
         tokio::time::sleep_until(deadline + Duration::from_millis(1)).await;
-        assert!(settle_manager.complete("shell-task", nested_result()));
+        assert!(settle_manager.complete(&ticket, nested_result()));
     });
     for _ in 0..10 {
         tokio::task::yield_now().await;
@@ -71,7 +109,7 @@ async fn completion_just_after_deadline_hands_off() {
 /// cancel 与 D 同刻且 cancel 先被调度：cancel 优先，不得误判为普通交接。
 #[tokio::test(start_paused = true)]
 async fn cancel_just_before_deadline_prefers_interrupted() {
-    let (child, _manager, mut built, _) = child_with_shell_task(false);
+    let (child, _manager, mut built, _, _ticket) = child_with_shell_task(false);
     let deadline = install_started_window(&mut built.context);
     tokio::time::advance(Duration::from_secs(119)).await;
     let cancel = child.config().cancel_token.clone();
@@ -102,7 +140,7 @@ async fn cancel_just_before_deadline_prefers_interrupted() {
 /// cancel 发生在 D 之后：deadline 先结束计算，Shell 不被自动取消。
 #[tokio::test(start_paused = true)]
 async fn cancel_just_after_deadline_hands_off_without_cancelling_shell() {
-    let (child, manager, mut built, _) = child_with_shell_task(false);
+    let (child, manager, mut built, _, _ticket) = child_with_shell_task(false);
     let deadline = install_started_window(&mut built.context);
     tokio::time::advance(Duration::from_secs(119)).await;
     let cancel = child.config().cancel_token.clone();

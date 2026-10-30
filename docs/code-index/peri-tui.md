@@ -1,5 +1,11 @@
 # peri-tui 代码索引
 
+子任务临时预览的保留边界在 `kit/acp_types/subagent_preview.rs`、`current_turn/preview.rs`、`acp_events/subagent_preview.rs` 与 `bg_task_live_preview.rs`：按字段、正文和终态目录限制保留，停止后释放原始累加器；超限标记 `preview_omitted`，不产生持久化副本，也不借用 canonical 窗口额度。删除未映射预览槽时由 `DisplayLedger::remove_unmapped_slot` 维护后续持久条目位置，并释放对应折叠键。回归见 `acp_events_test/memory_retention_audit_test.rs` 与 `bg_task_live_preview_test.rs`。
+
+子事件身份沿 `peri_acp_types::event::ChildEventOrigin` → ACP `_meta.peri.childRun` → `AcpEventWithEpoch` → `kit/child_run_routing.rs` 校验。新 execution 不复用旧累加器；重复、陈旧或未知 child 事件不进入主回复。相同会话的视图 reset 保留真实活动 execution 与已观察序号，重建带缺失标记的预览；仍可接收该运行未观察到的后续事件，不宣称建立生产端时间屏障。后台任务业务终态不受预览门禁影响。
+
+`kit/panels/child_history_detail.rs` 在子任务详情中通过 H 独立打开“子会话历史（含多次运行）”；客户端 `acp_client/client/child_history.rs` 只读现有 canonical 记录。页和正文块均替换保留，渲染仅构造可见行；跨父会话、视图、选中项及 snapshot 的迟到返回被丢弃。它不保证重建已丢失且未持久化的临时片段，也不把一条子会话历史当作单次 run 的完整档案。
+
 Model 面板的 `effective_context_window` 使用配置权威的同一容量规则显示和预填，不把推导值写回 profile；未知模型及 API key Responses 仍须显式窗口才可激活。面板 `selected_alias` 与配置 `active_alias` 分离：可解析档位选择即激活，未完成档位仍可选中修复；窗口编辑绑定打开时的档位。真实鼠标/键盘、保存及 ACP 推送回归见 `kit/panels/model/commit_test.rs`，渲染容量与选中标记见 `kit/panels/model/responses_test.rs`。
 
 Login 的账号引用原样校验、保存和构造认证目标，不 trim 或归一化；`kit/panels/login/plan.rs` 与 `chatgpt_auth/controller.rs` 均使用 `peri-acp-types` 的共享校验，非法目标不会发起认证。

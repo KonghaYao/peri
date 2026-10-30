@@ -3,6 +3,16 @@ use super::SessionEnvironment;
 use std::sync::Arc;
 
 impl SessionEnvironment {
+    #[cfg(test)]
+    pub(crate) fn workflow_projection_client_for_test(
+        &self,
+    ) -> Option<Arc<crate::host::workflow_projection::Client>> {
+        self.workflow_projection
+            .lock()
+            .as_ref()
+            .map(|projection| projection.client.clone())
+    }
+
     /// 装配期将运行时绑定进 builtin `workflow` 槽位；业务数据只经 MCP 消费。
     ///
     /// 返回 `None`：本环境未注入 workflow 实例槽位（该部署形态没有 builtin 实例面）。
@@ -94,21 +104,24 @@ impl SessionEnvironment {
             .session_manager
             .session_inbox_for(&session_id)
             .map(|inbox| inbox.handle());
-        let projection = crate::host::workflow_projection::WorkflowProjection::start(
-            pool.clone(),
-            self.task_manager(),
-            session_id.clone(),
-            token.clone(),
-            Arc::new(move |result| {
-                let inbox = inbox
-                    .as_ref()
-                    .ok_or_else(|| "workflow session inbox unavailable".to_string())?;
-                peri_agent::session::async_router::AsyncRouter::new(inbox.clone())
-                    .route_workflow_task_result(result);
-                Ok(())
-            }),
-        );
-        *self.workflow_projection.lock() = Some(projection);
+        // A repeated setup must preserve the original pending/accepted receipts.
+        // Replacing this client would lose replay authority before source ACK.
+        self.workflow_projection.lock().get_or_insert_with(|| {
+            crate::host::workflow_projection::WorkflowProjection::start(
+                pool.clone(),
+                self.task_manager(),
+                session_id.clone(),
+                token.clone(),
+                Arc::new(move |result| {
+                    let inbox = inbox
+                        .as_ref()
+                        .ok_or_else(|| "workflow session inbox unavailable".to_string())?;
+                    peri_agent::session::async_router::AsyncRouter::new(inbox.clone())
+                        .route_workflow_task_result(result);
+                    Ok(())
+                }),
+            )
+        });
         let consumer = crate::host::workflow_consumer::WorkflowTaskConsumer::start(
             pool,
             token,

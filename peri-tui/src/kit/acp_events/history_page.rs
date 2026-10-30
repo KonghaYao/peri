@@ -420,6 +420,7 @@ pub(super) fn project_items(
                         &input_summary,
                         &raw_input,
                         state.last_successful_todos.as_ref(),
+                        state.todo_baseline_unknown(),
                     );
                     tool_slots.insert(tool_id, (entries.len(), units.len()));
                     units.push(unit);
@@ -716,6 +717,8 @@ pub(super) fn maybe_request_tool_result(unit: &TuiRenderUnit) -> Option<ToolResu
             return;
         };
         let event = AcpEventWithEpoch {
+            child_origin: None,
+            view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
             event: AcpEventData::HistoryPageLoaded {
                 response: Box::new(response),
                 origin: None,

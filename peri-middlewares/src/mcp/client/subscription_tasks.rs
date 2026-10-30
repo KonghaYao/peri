@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use peri_acp_types::event::BackgroundTaskResult;
-use peri_acp_types::tasks::TaskManager;
+use peri_acp_types::tasks::{TaskManager, TaskRegistrationTicket};
 use rmcp::{
     model::{DetailedTask, GetTaskParams, TaskPayload},
     service::{Peer, RoleClient},
@@ -69,10 +69,11 @@ impl McpClientPool {
         server: String,
         session_id: String,
         raw_task_id: String,
-        task_id: String,
+        ticket: TaskRegistrationTicket,
         is_workspace_shell: bool,
         initial_peer: Peer<RoleClient>,
     ) -> Result<(), crate::mcp::task_scope::TaskAdmissionError> {
+        let task_id = ticket.task_id().to_owned();
         let weak_pool = Arc::downgrade(self);
         let manager = self.session_bindings.read().manager(&session_id);
         let key = crate::mcp::McpTaskKey::TaskStatus {
@@ -106,7 +107,7 @@ impl McpClientPool {
                         let result = pool
                             .deliver_managed_task_status(
                                 &server,
-                                &task_id,
+                                &ticket,
                                 &transition_id,
                                 &task,
                                 is_workspace_shell,
@@ -132,7 +133,7 @@ impl McpClientPool {
                         if lost_owner_retry_due(&mut lost_owner_attempts) {
                             match manager
                                 .abandon_external(
-                                    &task_id,
+                                    &ticket,
                                     &format!("task status unavailable: {error}"),
                                 )
                                 .await
@@ -174,20 +175,18 @@ impl McpClientPool {
     async fn deliver_managed_task_status(
         &self,
         server: &str,
-        task_id: &str,
+        ticket: &TaskRegistrationTicket,
         transition_id: &str,
         task: &DetailedTask,
         is_workspace_shell: bool,
         manager: &dyn TaskManager,
     ) -> Result<(), String> {
+        let task_id = ticket.task_id();
         let result = Self::map_task_result(server, task_id, task, is_workspace_shell);
         if manager
-            .settle_external(task_id, transition_id, result)
+            .settle_external(ticket, transition_id, result)
             .await?
-            || manager.snapshot().tasks.iter().any(|record| {
-                record.task_id == task_id
-                    && matches!(record.status.as_str(), "completed" | "failed" | "cancelled")
-            })
+            || ticket.is_settled()
         {
             Ok(())
         } else {

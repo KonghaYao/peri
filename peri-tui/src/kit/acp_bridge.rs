@@ -209,6 +209,7 @@ pub(crate) fn run_synthetic_eager_burst(bytes: usize, chunk_bytes: usize) -> Per
 #[cfg(test)]
 fn synthetic_scheduler_state() -> BridgeState {
     BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -221,7 +222,7 @@ fn synthetic_scheduler_state() -> BridgeState {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: Default::default(),
         turn_generation: 0,
@@ -414,6 +415,12 @@ fn apply_bridge_reset(state: &mut BridgeState, last_reset_counter: &mut u64, cou
     crate::kit::history_window::clear_window_viewport();
     crate::kit::atoms::HISTORY_DETAIL.set(None);
     state.current_turn.reset();
+    if same_session_replay {
+        state.child_runs.restore(&mut state.current_turn);
+    } else {
+        state.child_runs.clear();
+    }
+
     state.folded_history = Default::default();
     state.publication_intent = PublicationIntent::None;
     state.generation = 0;
@@ -427,7 +434,7 @@ fn apply_bridge_reset(state: &mut BridgeState, last_reset_counter: &mut u64, cou
     state.last_pushed_text_len = 0;
     state.last_pushed_reasoning_len = 0;
     state.last_successful_todos = None;
-    state.last_successful_todo_sequence = None;
+    state.todo_baseline_sequence = None;
     state.next_todo_sequence = 0;
     state.todo_call_inputs.clear();
     atoms::INPUT_BUFFER.state().write().clear();
@@ -508,6 +515,7 @@ fn spawn_acp_bridge_inner(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut state = BridgeState {
+            child_runs: Default::default(),
             variant: 0,
             committed: im::Vector::new(),
             current_turn: CurrentTurn::new(),
@@ -520,7 +528,7 @@ fn spawn_acp_bridge_inner(
             last_pushed_text_len: 0,
             last_pushed_reasoning_len: 0,
             last_successful_todos: None,
-            last_successful_todo_sequence: None,
+            todo_baseline_sequence: None,
             next_todo_sequence: 0,
             todo_call_inputs: std::collections::HashMap::new(),
             turn_generation: 0,
@@ -647,12 +655,49 @@ fn spawn_acp_bridge_inner(
                                 continue;
                             }
 
+                            let child_origin = epoch_event.child_origin;
+                            let same_view = epoch_event.view_epoch == counter;
+                            if let Some(origin) = child_origin.as_ref()
+                                && crate::kit::child_run_routing::is_child_preview_event(&epoch_event.event) {
+                                if !state.child_runs.accept(&epoch_event.event, origin, same_view) {
+                                    if let Some(tx) = &observed { let _ = tx.send(false); }
+                                    continue;
+                                }
+                                if !matches!(epoch_event.event, AcpEventData::SubagentStarted { .. })
+                                    && !state.current_turn.accepts_subagent_execution(
+                                        &origin.child_thread_id, &origin.execution,
+                                    )
+                                    && !atoms::BG_AGENT_IDS.state().read().contains(&origin.child_thread_id) {
+                                    if let Some(tx) = &observed { let _ = tx.send(false); }
+                                    continue;
+                                }
+                            }
+                            let started = matches!(epoch_event.event, AcpEventData::SubagentStarted { .. });
+                            if started && let Some(origin) = child_origin.as_ref() {
+                                let retired = state.current_turn.prepare_subagent_execution(
+                                    &origin.child_thread_id, &origin.execution,
+                                );
+                                if !retired.is_empty() {
+                                    let overrides_state = atoms::FOLD_OVERRIDES.state();
+                                    let mut overrides = overrides_state.write();
+                                    for id in retired {
+                                        overrides.remove(&crate::kit::tui_render_unit::FoldKey::SubAgent(id));
+                                    }
+                                    overrides.shrink_to_fit();
+                                }
+                            }
                             let event = epoch_event.event;
 
                             let intent = acp_events::dispatch_trusted_structured_for_bridge(
                                 &mut state,
                                 event,
                             );
+                            if started && let Some(origin) = child_origin.as_ref() {
+                                state.current_turn.bind_subagent_execution(&origin.child_thread_id, &origin.execution);
+                                if !same_view {
+                                    state.current_turn.mark_subagent_preview_incomplete(&origin.child_thread_id, &origin.execution);
+                                }
+                            }
                             scheduler.accept(intent, &mut state);
 
                             if let Some(tx) = &observed {

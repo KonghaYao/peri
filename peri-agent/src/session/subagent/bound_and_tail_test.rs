@@ -295,7 +295,7 @@ async fn subagent_start_uses_model_call_identity_for_spawn_and_resume() {
         let starts: Vec<_> = events
             .lock()
             .iter()
-            .filter_map(|event| match event {
+            .filter_map(|event| match event.payload() {
                 ExecutorEvent::SubagentStarted {
                     parent_tool_call_id,
                     instance_id,
@@ -418,11 +418,34 @@ async fn assert_background_tail_completion(outcome: TailOutcome, panic_forwarder
     );
     let stop_index = events
         .iter()
-        .position(|e| matches!(e, ExecutorEvent::SubagentStopped { .. }))
+        .position(|e| matches!(e.payload(), ExecutorEvent::SubagentStopped { .. }))
         .expect("必须配对 Stopped");
+    let stop_origin = events[stop_index]
+        .child_origin()
+        .expect("terminal carries producer identity");
+    assert_eq!(stop_origin.child_thread_id, spawned.child_thread_id);
+    for event in &events[..=stop_index] {
+        if !matches!(
+            event.payload(),
+            ExecutorEvent::SubagentStarted { .. }
+                | ExecutorEvent::SubagentStopped { .. }
+                | ExecutorEvent::TextChunk { .. }
+                | ExecutorEvent::AiReasoning { .. }
+                | ExecutorEvent::ToolStart { .. }
+                | ExecutorEvent::ToolEnd { .. }
+        ) {
+            continue;
+        }
+        let origin = event
+            .child_origin()
+            .expect("child lifecycle and body carry identity");
+        assert_eq!(origin.execution, stop_origin.execution);
+        assert_eq!(origin.run_order, stop_origin.run_order);
+        assert!(origin.sequence <= stop_origin.sequence);
+    }
     let completed_index = events
         .iter()
-        .position(|e| matches!(e, ExecutorEvent::BackgroundTaskCompleted(_)));
+        .position(|e| matches!(e.payload(), ExecutorEvent::BackgroundTaskCompleted(_)));
     let expected_success = matches!(outcome, TailOutcome::Completed) && !panic_forwarder;
     let expected_completed = expected_success || matches!(outcome, TailOutcome::Cancelled);
     if expected_completed {
@@ -440,7 +463,7 @@ async fn assert_background_tail_completion(outcome: TailOutcome, panic_forwarder
     assert_eq!(
         events
             .iter()
-            .filter(|e| matches!(e, ExecutorEvent::SubagentStopped { .. }))
+            .filter(|e| matches!(e.payload(), ExecutorEvent::SubagentStopped { .. }))
             .count(),
         1
     );
@@ -454,16 +477,16 @@ async fn assert_background_tail_completion(outcome: TailOutcome, panic_forwarder
         "callback 后没有滞留事件"
     );
     if !panic_forwarder {
-        let chunk_index = events.iter().position(|e| matches!(e, ExecutorEvent::TextChunk { chunk, source_agent_id, .. } if chunk == "tail-chunk" && source_agent_id.as_deref() == Some(spawned.child_thread_id.as_str()))).expect("callback 必须收到末条增量");
+        let chunk_index = events.iter().position(|e| matches!(e.payload(), ExecutorEvent::TextChunk { chunk, source_agent_id, .. } if chunk == "tail-chunk" && source_agent_id.as_deref() == Some(spawned.child_thread_id.as_str()))).expect("callback 必须收到末条增量");
         assert!(chunk_index < stop_index, "末条增量必须先于 Stopped");
     }
     assert_eq!(result.success, expected_success);
     assert!(
-        matches!(&events[stop_index], ExecutorEvent::SubagentStopped { is_error, .. } if *is_error != expected_success)
+        matches!(events[stop_index].payload(), ExecutorEvent::SubagentStopped { is_error, .. } if *is_error != expected_success)
     );
     if let Some(completed_index) = completed_index {
         assert!(
-            matches!(&events[completed_index], ExecutorEvent::BackgroundTaskCompleted(completed) if completed.success == expected_success)
+            matches!(events[completed_index].payload(), ExecutorEvent::BackgroundTaskCompleted(completed) if completed.success == expected_success)
         );
     }
     let expected_status = match outcome {
@@ -499,7 +522,7 @@ async fn assert_background_tail_completion(outcome: TailOutcome, panic_forwarder
             Some(spawned.child_thread_id.as_str())
         );
         assert!(matches!(
-            &events[stop_index],
+            events[stop_index].payload(),
             ExecutorEvent::SubagentStopped {
                 subagent_failure: Some(failure),
                 ..
@@ -573,7 +596,10 @@ async fn test_spawn_subagent_sync_forwarder_panic_is_failure() {
         events
             .lock()
             .iter()
-            .filter(|event| matches!(event, ExecutorEvent::SubagentStopped { is_error: true, .. }))
+            .filter(|event| matches!(
+                event.payload(),
+                ExecutorEvent::SubagentStopped { is_error: true, .. }
+            ))
             .count(),
         1
     );
@@ -624,7 +650,10 @@ async fn test_spawn_subagent_terminal_bridge_panic_is_failure() {
         events
             .lock()
             .iter()
-            .filter(|event| matches!(event, ExecutorEvent::SubagentStopped { is_error: true, .. }))
+            .filter(|event| matches!(
+                event.payload(),
+                ExecutorEvent::SubagentStopped { is_error: true, .. }
+            ))
             .count(),
         1
     );

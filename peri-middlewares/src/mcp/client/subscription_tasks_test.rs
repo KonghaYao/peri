@@ -35,6 +35,16 @@ async fn test_unavailable_terminal_settlement_is_retryable() {
     use peri_acp_types::tasks::NoopTaskManager;
     use rmcp::model::{DetailedTask, Task, TaskPayload, TaskStatus};
     let pool = McpClientPool::new_pending();
+    let owner = peri_agent::agent::async_tasks::TaskManager::new();
+    let ticket = owner
+        .register(peri_acp_types::tasks::BgTaskRegistration {
+            task_id: "task".into(),
+            kind: BgTaskKind::Agent,
+            summary: "fixture".into(),
+            pid: None,
+            kill: None,
+        })
+        .unwrap();
     let task = DetailedTask::new(
         Task::new(
             "owner-task",
@@ -50,7 +60,7 @@ async fn test_unavailable_terminal_settlement_is_retryable() {
         let error = pool
             .deliver_managed_task_status(
                 "server",
-                "task",
+                &ticket,
                 transition_id,
                 &task,
                 false,
@@ -303,7 +313,8 @@ async fn terminal_reminder_keeps_the_public_task_id_instead_of_the_remote_shell_
         )
         .unwrap();
     let on_terminal = Arc::clone(&request.on_terminal);
-    let public_id = manager.register_external(request).unwrap();
+    let ticket = manager.register_external(request).unwrap();
+    let public_id = ticket.task_id().to_owned();
     assert!(public_id.starts_with("mcp-"), "{public_id}");
 
     // `settle_external` 的契约：回调收到的 result 已带会话侧公共 id。
@@ -482,4 +493,69 @@ async fn cancel_session_external_tasks_uses_one_total_deadline() {
             .all(|task| task.status == "running"),
         "both tasks stay running after bounded cancellation failure"
     );
+}
+
+/// [回归测试] 订阅重试用原票据确认已接纳终态，不查询已淘汰的 UI 快照行。
+#[tokio::test]
+async fn task_subscription_confirms_terminal_after_snapshot_eviction() {
+    use rmcp::model::{DetailedTask, Task, TaskPayload, TaskStatus};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let pool = McpClientPool::new_pending();
+    let manager = peri_agent::agent::async_tasks::TaskManager::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let delivered = calls.clone();
+    let ticket = manager
+        .register_external(ExternalTaskRegistration {
+            session_id: "session".into(),
+            initiator_session_id: Some("session".into()),
+            owner_identity: "server".into(),
+            owner_task_id: "remote".into(),
+            kind: BgTaskKind::Mcp,
+            summary: "remote".into(),
+            started_at: Some("2026-01-01T00:00:00Z".into()),
+            cancel: Arc::new(|| Box::pin(async { Ok(()) })),
+            on_terminal: Arc::new(move |_, _| {
+                delivered.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(()) })
+            }),
+        })
+        .unwrap();
+    let task = DetailedTask::new(
+        Task::new(
+            "remote",
+            TaskStatus::Completed,
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+        ),
+        TaskPayload::Completed {
+            result: serde_json::Map::new(),
+        },
+    );
+    pool.deliver_managed_task_status("server", &ticket, "terminal", &task, false, &manager)
+        .await
+        .unwrap();
+    for index in 0..600 {
+        let later = manager
+            .register(peri_acp_types::tasks::BgTaskRegistration {
+                task_id: format!("later-{index}"),
+                kind: BgTaskKind::Agent,
+                summary: "later".into(),
+                pid: None,
+                kill: None,
+            })
+            .unwrap();
+        manager.confirm_external_execution_stopped(&later);
+        let mut result = shell_result();
+        result.task_id = later.task_id().to_owned();
+        assert!(manager.complete(&later, result));
+    }
+    assert!(!manager
+        .snapshot()
+        .tasks
+        .iter()
+        .any(|record| record.task_id == ticket.task_id()));
+    pool.deliver_managed_task_status("server", &ticket, "terminal", &task, false, &manager)
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }

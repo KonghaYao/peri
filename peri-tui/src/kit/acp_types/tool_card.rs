@@ -190,6 +190,8 @@ pub struct SubAgentAccumulator {
     pub instance_id: String,
     pub agent_id: String,
     pub agent_name: String,
+    pub execution: Option<peri_acp_types::session::ExecutionBinding>,
+    pub preview_omitted: bool,
     /// 后台 subagent 的生命周期跨 turn，turn 边界只能冻结、不能保留活动容器。
     pub is_background: bool,
     pub is_running: bool,
@@ -216,6 +218,8 @@ impl SubAgentAccumulator {
             ),
             agent_id,
             agent_name,
+            execution: None,
+            preview_omitted: false,
             is_background: false,
             is_running: true,
             archived: false,
@@ -226,28 +230,46 @@ impl SubAgentAccumulator {
         }
     }
 
-    pub(super) fn append_text(&mut self, text: &str) {
-        self.child_turn.append_text(text, None);
+    pub(super) fn append_text(&mut self, text: &str, message_id: Option<&str>) {
+        if !self.is_running {
+            return;
+        }
+        let text = self.admit_preview_text(text);
+        self.child_turn.append_text(text, message_id);
         self.cached_view_model.replace(None);
+        self.bound_preview();
     }
 
-    pub(super) fn append_reasoning(&mut self, text: &str) {
-        self.child_turn.append_reasoning(text, None);
+    pub(super) fn append_reasoning(&mut self, text: &str, message_id: Option<&str>) {
+        if !self.is_running {
+            return;
+        }
+        let text = self.admit_preview_text(text);
+        self.child_turn.append_reasoning(text, message_id);
         self.cached_view_model.replace(None);
+        self.bound_preview();
     }
 
     pub(super) fn start_tool(&mut self, tool: ToolCardAccumulator) {
+        if !self.is_running {
+            return;
+        }
         self.child_turn.start_tool(tool);
         if !self.is_running {
             self.child_turn.deactivate();
         }
         self.cached_view_model.replace(None);
+        self.bound_preview();
     }
 
     pub(super) fn end_tool(&mut self, tool_id: &str, output: String, is_error: bool) -> bool {
+        if !self.is_running {
+            return false;
+        }
         let ended = self.child_turn.end_tool(tool_id, output, is_error);
         if ended {
             self.cached_view_model.replace(None);
+            self.bound_preview();
         }
         ended
     }
@@ -280,6 +302,7 @@ impl SubAgentAccumulator {
             agent_id: self.agent_id.clone(),
             agent_name: self.agent_name.clone(),
             view_models: child_vms.clone(),
+            preview_omitted: self.preview_omitted,
             collapsed: false,
             is_running: self.is_running,
             is_error: self.is_error,

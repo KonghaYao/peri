@@ -150,7 +150,7 @@ async fn receive_commit_crossing_deadline_hands_off_unprocessed_result() {
         child_owner: Some(owner),
         ..Default::default()
     });
-    TaskManagerPort::register(
+    let ticket = TaskManagerPort::register(
         manager.as_ref(),
         BgTaskRegistration {
             task_id: "shell-task".into(),
@@ -184,7 +184,9 @@ async fn receive_commit_crossing_deadline_hands_off_unprocessed_result() {
     for _ in 0..10 {
         tokio::task::yield_now().await;
     }
-    assert!(manager.complete("shell-task", nested_result()));
+    // No process exists in this fixture; the delayed obligation is the message.
+    manager.confirm_external_execution_stopped(&ticket);
+    assert!(manager.complete(&ticket, nested_result()));
     let (entered, release) = store.gate_next_reminder_append();
     let delivery_id = peri_acp_types::messages::MessageId::new();
     let reminder = crate::session::producer_reminders::trusted_reminder(

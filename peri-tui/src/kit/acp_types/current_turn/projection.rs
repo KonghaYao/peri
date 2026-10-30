@@ -287,6 +287,12 @@ impl CurrentTurn {
                             }));
                     }
                 }
+                TurnSegment::SystemReminder(reminder) => {
+                    if self.cached_view_models.len() <= i {
+                        self.cached_view_models
+                            .push_back(TuiRenderUnit::TuiSystemReminder((**reminder).clone()));
+                    }
+                }
                 TurnSegment::UserBubble {
                     text,
                     attachments,

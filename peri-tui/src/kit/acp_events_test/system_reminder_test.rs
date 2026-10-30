@@ -258,8 +258,14 @@ fn trusted_relayed_reminder_marks_source_only_when_expanded() {
         },
     );
 
-    let TuiRenderUnit::TuiSystemReminder(vm) = &state.committed[0] else {
-        panic!("structured reminder should render")
+    assert!(state.committed.is_empty());
+    let TuiRenderUnit::TuiSubAgentGroup(group) = state.current_turn.subagents[0].view_model()
+    else {
+        panic!("child group should remain in the active parent")
+    };
+    let unit = &group.view_models[0];
+    let TuiRenderUnit::TuiSystemReminder(vm) = unit else {
+        panic!("forwarded reminder should render in its child preview")
     };
     assert_eq!(
         vm.relay
@@ -269,7 +275,7 @@ fn trusted_relayed_reminder_marks_source_only_when_expanded() {
         "TUI 已登记该子 Agent 时应使用展示名"
     );
 
-    let collapsed = rendered_text(&state.committed[0]);
+    let collapsed = rendered_text(unit);
     assert!(
         !collapsed.contains(&relay_label_text("coder")),
         "折叠时不展示转发归属标注：{collapsed}"
@@ -285,10 +291,10 @@ fn trusted_relayed_reminder_marks_source_only_when_expanded() {
     );
 }
 
-/// 非 trusted 入口同样附加归属；未登记子 Agent 名时回退 child_thread_id。
+/// Unknown child previews must not fall back into canonical root history.
 #[test]
 #[serial]
-fn wire_relayed_reminder_falls_back_to_agent_id_label() {
+fn wire_relayed_reminder_ignores_unobserved_child() {
     let mut state = make_fold_test_state();
     dispatch_for_bridge(
         &mut state,
@@ -299,14 +305,6 @@ fn wire_relayed_reminder_falls_back_to_agent_id_label() {
         },
     );
 
-    let TuiRenderUnit::TuiSystemReminder(vm) = &state.committed[0] else {
-        panic!("structured reminder should render")
-    };
-    assert_eq!(
-        vm.relay
-            .as_ref()
-            .map(crate::kit::tui_render_unit::ReminderRelay::label),
-        Some("child-unknown-9"),
-        "未登记展示名时不得隐藏来源"
-    );
+    assert!(state.committed.is_empty());
+    assert_eq!(state.current_turn.view_model_count(), 0);
 }

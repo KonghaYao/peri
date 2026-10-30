@@ -638,7 +638,7 @@ fn test_tool_card_without_message_identity_stays_unattributed() {
 /// [回归测试] 同步子 Agent 正文仍没有持久补读通道，继续走未归属账目。
 #[test]
 #[serial]
-fn test_sync_subagent_body_stays_unattributed() {
+fn test_sync_subagent_preview_uses_its_own_budget_without_canonical_credit() {
     let mut state = make_fold_test_state();
     state.active_session_id = "s1".into();
     state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
@@ -686,9 +686,22 @@ fn test_sync_subagent_body_stays_unattributed() {
             .contains_entry(&PersistentEntryKey::own("s1:m-root")),
         "root text remains evictable"
     );
+    assert_eq!(
+        state.window.budget().unattributed_live_bytes,
+        0,
+        "disposable child previews have independent retention, never canonical admission credit"
+    );
     assert!(
-        state.window.budget().unattributed_live_bytes > 0,
-        "sync subagent body has no persistent association and stays unattributed"
+        state.committed.iter().any(|unit| matches!(unit,
+        TuiRenderUnit::TuiSubAgentGroup(group) if !group.view_models.is_empty())),
+        "the unpressured preview remains visible"
+    );
+    assert!(
+        !state
+            .window
+            .index()
+            .contains_entry(&PersistentEntryKey::own("s1:m-child")),
+        "child preview does not fabricate a parent canonical entry"
     );
 }
 
@@ -700,7 +713,7 @@ fn test_history_committed_seals_window_without_touching_execution_state() {
     state.current_request_id = Some("req-1".into());
     state.turn_generation = 5;
     state.last_prompt_generation = 3;
-    state.last_successful_todo_sequence = Some(2);
+    state.todo_baseline_sequence = Some(2);
     state.last_pushed_text_len = 17;
     let before_phase = state.phase;
     let before_request = state.current_request_id.clone();
@@ -720,7 +733,7 @@ fn test_history_committed_seals_window_without_touching_execution_state() {
     assert_eq!(state.phase, before_phase);
     assert_eq!(state.current_request_id, before_request);
     assert_eq!(state.turn_generation, before_generation);
-    assert_eq!(state.last_successful_todo_sequence, Some(2));
+    assert_eq!(state.todo_baseline_sequence, Some(2));
     assert_eq!(state.last_pushed_text_len, 17);
     assert_eq!(state.window.stats().admission_blocked, 0);
 }

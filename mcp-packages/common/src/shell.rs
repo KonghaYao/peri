@@ -2,6 +2,7 @@
 use std::process::Stdio;
 use std::sync::Arc;
 
+use peri_acp_types::tasks::TaskRegistrationTicket;
 use peri_agent::agent::async_tasks::truncate_bytes;
 use tokio::io::AsyncReadExt;
 
@@ -14,7 +15,10 @@ pub struct ShellExecutionGuard {
     child: Option<tokio::process::Child>,
     stopped: bool,
     pid: Option<u32>,
-    registration: Option<(Arc<dyn peri_acp_types::tasks::TaskManager>, String)>,
+    registration: Option<(
+        Arc<dyn peri_acp_types::tasks::TaskManager>,
+        TaskRegistrationTicket,
+    )>,
 }
 
 impl ShellExecutionGuard {
@@ -113,9 +117,9 @@ impl ShellExecutionGuard {
     pub fn track_registration(
         &mut self,
         manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
-        task_id: String,
+        ticket: TaskRegistrationTicket,
     ) {
-        self.registration = Some((manager, task_id));
+        self.registration = Some((manager, ticket));
     }
 
     /// A reaped command leader can leave a live, registered background process group.
@@ -144,8 +148,8 @@ impl ShellExecutionGuard {
             if let Some(owner) = &mut self.ownership {
                 owner.confirm_stopped();
             }
-            if let Some((manager, id)) = self.registration.take() {
-                manager.confirm_external_execution_stopped(&id);
+            if let Some((manager, ticket)) = self.registration.take() {
+                manager.confirm_external_execution_stopped(&ticket);
             }
         }
     }
@@ -188,8 +192,8 @@ impl Drop for ShellExecutionGuard {
                     if let Some(owner) = &mut ownership {
                         owner.confirm_stopped();
                     }
-                    if let Some((manager, id)) = registration {
-                        manager.confirm_external_execution_stopped(&id);
+                    if let Some((manager, ticket)) = registration {
+                        manager.confirm_external_execution_stopped(&ticket);
                     }
                 }
             });

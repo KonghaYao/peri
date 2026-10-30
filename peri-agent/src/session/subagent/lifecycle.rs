@@ -86,6 +86,7 @@ pub(crate) struct BgStopEmitV2 {
     pub(crate) agent_name: String,
     /// v1 协议化直发目标（bg 泵；None = 无 bg 通道，仅 v2 补发）
     pub(crate) sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>,
+    pub(crate) event_stream: peri_acp_types::event::ChildEventStream,
 }
 
 /// bg 任务同步收尾 guard（S3.2）：Drop 时（任务被 abort / panic / 正常结束）执行：
@@ -130,7 +131,7 @@ impl Drop for BgCleanupGuard {
             }
             if let Some(sender) = &stop.sender {
                 if let Some(exec_ev) = observe_event_to_executor(ev) {
-                    let _ = sender.send(exec_ev);
+                    let _ = sender.send(stop.event_stream.wrap(exec_ev));
                 }
             }
         }

@@ -14,7 +14,9 @@ use crate::session::subagent::{
 };
 use crate::session::{FrozenContext, MessageTranscript};
 use crate::tools::BaseTool;
-use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskManager as TaskManagerPort};
+use peri_acp_types::tasks::{
+    BgTaskKind, BgTaskRegistration, TaskManager as TaskManagerPort, TaskRegistrationTicket,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -77,6 +79,7 @@ fn make_child(manager: Arc<TaskManager>, with_owner: bool) -> Arc<Session> {
 
 struct ShellReminderLlm {
     manager: Arc<TaskManager>,
+    ticket: TaskRegistrationTicket,
     reminder_calls: Arc<AtomicUsize>,
     settle_on_reminder: bool,
 }
@@ -99,7 +102,7 @@ impl ReactLLM for ShellReminderLlm {
             if self.settle_on_reminder {
                 let mut result = nested_result();
                 result.task_id = "shell-task".into();
-                assert!(self.manager.complete("shell-task", result));
+                assert!(self.manager.complete(&self.ticket, result));
             }
         }
         Ok(Reasoning::with_answer("", "child answer"))
@@ -113,10 +116,11 @@ fn child_with_shell_task(
     Arc<TaskManager>,
     V2SubagentContext,
     Arc<AtomicUsize>,
+    TaskRegistrationTicket,
 ) {
     let manager = Arc::new(TaskManager::new());
     let child = make_child(manager.clone(), true);
-    TaskManagerPort::register(
+    let ticket = TaskManagerPort::register(
         manager.as_ref(),
         BgTaskRegistration {
             task_id: "shell-task".into(),
@@ -127,6 +131,8 @@ fn child_with_shell_task(
         },
     )
     .unwrap();
+    // This fixture models result timing without an actual process tree.
+    manager.confirm_external_execution_stopped(&ticket);
     child.queue().push(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run shell"),
@@ -136,6 +142,7 @@ fn child_with_shell_task(
         Some(child.clone()),
         Box::new(ShellReminderLlm {
             manager: manager.clone(),
+            ticket: ticket.clone(),
             reminder_calls: reminder_calls.clone(),
             settle_on_reminder,
         }),
@@ -153,7 +160,7 @@ fn child_with_shell_task(
             &child.store().thread_id.clone().unwrap(),
         )),
     );
-    (child, manager, built, reminder_calls)
+    (child, manager, built, reminder_calls, ticket)
 }
 
 struct NestedResultLlm {
@@ -188,10 +195,11 @@ fn child_with_nested_task() -> (
     V2SubagentContext,
     Arc<AtomicUsize>,
     Arc<AtomicUsize>,
+    TaskRegistrationTicket,
 ) {
     let manager = Arc::new(TaskManager::new());
     let child = make_child(manager.clone(), true);
-    TaskManagerPort::register(
+    let ticket = TaskManagerPort::register(
         manager.as_ref(),
         BgTaskRegistration {
             task_id: "nested-task".into(),
@@ -202,6 +210,8 @@ fn child_with_nested_task() -> (
         },
     )
     .unwrap();
+    // This fixture models a nested result; it owns no external execution.
+    manager.confirm_external_execution_stopped(&ticket);
     child.queue().push(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("initial child work"),
@@ -209,7 +219,7 @@ fn child_with_nested_task() -> (
     let initial_calls = Arc::new(AtomicUsize::new(0));
     let result_calls = Arc::new(AtomicUsize::new(0));
     let built = nested_context(&child, initial_calls.clone(), result_calls.clone());
-    (child, manager, built, initial_calls, result_calls)
+    (child, manager, built, initial_calls, result_calls, ticket)
 }
 
 fn nested_context(
@@ -238,14 +248,14 @@ fn nested_context(
     )
 }
 
-fn settle_nested_task(child: &Session, manager: &TaskManager) {
+fn settle_nested_task(child: &Session, manager: &TaskManager, ticket: &TaskRegistrationTicket) {
     let delivery = crate::session::bg_complete::task_bg_complete_callback(
         crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(
             child.queue().clone(),
         ),
     );
     assert!(manager
-        .settle_completed("nested-task", nested_result(), delivery)
+        .settle_completed(ticket, nested_result(), delivery)
         .unwrap());
 }
 
@@ -268,8 +278,8 @@ fn nested_result() -> BackgroundTaskResult {
 /// 无未结任务：不启动收尾窗口，正常立即结束。
 #[tokio::test(start_paused = true)]
 async fn child_without_active_tasks_settles_immediately() {
-    let (child, manager, built, initial_calls, result_calls) = child_with_nested_task();
-    settle_nested_task(&child, &manager);
+    let (child, manager, built, initial_calls, result_calls, ticket) = child_with_nested_task();
+    settle_nested_task(&child, &manager, &ticket);
     let permit = permit_for(&child, &built.context);
     let outcome = tokio::time::timeout(
         Duration::from_secs(1),
@@ -288,7 +298,7 @@ async fn child_without_active_tasks_settles_immediately() {
 /// 截止前 shell 提醒被消费并结算：正常 Settled，不多发提醒。
 #[tokio::test(start_paused = true)]
 async fn shell_reminder_settles_before_deadline() {
-    let (child, manager, built, reminder_calls) = child_with_shell_task(true);
+    let (child, manager, built, reminder_calls, _ticket) = child_with_shell_task(true);
     let permit = permit_for(&child, &built.context);
     let result = tokio::time::timeout(
         Duration::from_secs(5),
@@ -320,7 +330,7 @@ async fn shell_reminder_settles_before_deadline() {
 /// 忽略提醒但在 D 前完成：Settled，不产生交接记录。
 #[tokio::test(start_paused = true)]
 async fn ignored_shell_reminder_settles_when_task_finishes_before_deadline() {
-    let (child, manager, built, reminder_calls) = child_with_shell_task(false);
+    let (child, manager, built, reminder_calls, ticket) = child_with_shell_task(false);
     let permit = permit_for(&child, &built.context);
     let owner = tokio::spawn(async move {
         let outcome = run_child_until_terminal(built.context, 10, &child).await;
@@ -330,7 +340,7 @@ async fn ignored_shell_reminder_settles_when_task_finishes_before_deadline() {
         outcome
     });
     tokio::time::advance(Duration::from_secs(1)).await;
-    assert!(manager.complete("shell-task", nested_result()));
+    assert!(manager.complete(&ticket, nested_result()));
     let result = owner.await.unwrap();
     assert!(matches!(result, ChildRunOutcome::Settled), "{result:?}");
     assert_eq!(reminder_calls.load(Ordering::SeqCst), 1);
@@ -339,7 +349,7 @@ async fn ignored_shell_reminder_settles_when_task_finishes_before_deadline() {
 /// 预算耗尽但任务在 D 前结算：保留 MaxIterations 原因，不附加残留交接。
 #[tokio::test(start_paused = true)]
 async fn exhausted_budget_settles_without_unprocessable_reminder() {
-    let (child, manager, built, reminder_calls) = child_with_shell_task(false);
+    let (child, manager, built, reminder_calls, ticket) = child_with_shell_task(false);
     let turn = built.context.session.turn.clone();
     let child_for_run = child.clone();
     let permit = permit_for(&child, &built.context);
@@ -351,7 +361,7 @@ async fn exhausted_budget_settles_without_unprocessable_reminder() {
         outcome
     });
     tokio::time::advance(Duration::from_secs(1)).await;
-    settle_task(&manager, &child, "shell-task");
+    settle_task(&manager, &child, &ticket);
     let outcome = owner.await.unwrap();
     assert!(
         matches!(
@@ -369,7 +379,7 @@ async fn exhausted_budget_settles_without_unprocessable_reminder() {
 
 #[tokio::test(start_paused = true)]
 async fn cancelled_child_does_not_emit_shell_reminder() {
-    let (child, _manager, built, reminder_calls) = child_with_shell_task(false);
+    let (child, _manager, built, reminder_calls, _ticket) = child_with_shell_task(false);
     child.config().cancel_token.cancel();
     let permit = permit_for(&child, &built.context);
     let outcome = run_child_until_terminal(built.context, 10, &child).await;
@@ -383,7 +393,7 @@ async fn cancelled_child_does_not_emit_shell_reminder() {
 /// 永久 Working 且无通知：D 后交接一次，Shell 保持真实 Running。
 #[tokio::test(start_paused = true)]
 async fn permanent_shell_hands_off_at_deadline_without_notifications() {
-    let (child, manager, built, _) = child_with_shell_task(false);
+    let (child, manager, built, _, _ticket) = child_with_shell_task(false);
     let permit = permit_for(&child, &built.context);
     let started = tokio::time::Instant::now();
     let outcome = tokio::time::timeout(
@@ -416,7 +426,7 @@ async fn permanent_shell_hands_off_at_deadline_without_notifications() {
 /// activity 风暴/任务新增不重置同一个绝对 D。
 #[tokio::test(start_paused = true)]
 async fn activity_and_new_tasks_do_not_reset_deadline() {
-    let (child, manager, built, _) = child_with_shell_task(false);
+    let (child, manager, built, _, _ticket) = child_with_shell_task(false);
     let child_for_run = child.clone();
     let permit = permit_for(&child, &built.context);
     let mut owner = tokio::spawn(async move {
@@ -484,7 +494,7 @@ async fn activity_and_new_tasks_do_not_reset_deadline() {
 /// task 已终态但结果未消费：active=0 不能证明委派完成。
 #[tokio::test(start_paused = true)]
 async fn terminal_result_without_consumption_still_hands_off() {
-    let (child, manager, built, reminder_calls) = child_with_shell_task(false);
+    let (child, manager, built, reminder_calls, ticket) = child_with_shell_task(false);
     child.queue().push(QueuedMessage::info(
         MessageSource::HookStopIntent,
         crate::messages::BaseMessage::human("stop"),
@@ -499,7 +509,7 @@ async fn terminal_result_without_consumption_still_hands_off() {
         outcome
     });
     tokio::time::advance(Duration::from_secs(1)).await;
-    settle_task(&manager, &child, "shell-task");
+    settle_task(&manager, &child, &ticket);
     let outcome = tokio::time::timeout(Duration::from_secs(125), &mut owner)
         .await
         .expect("unconsumed result must keep the bounded settlement obligation")
@@ -513,15 +523,15 @@ async fn terminal_result_without_consumption_still_hands_off() {
     assert_eq!(reminder_calls.load(Ordering::SeqCst), 0);
 }
 
-fn settle_task(manager: &TaskManager, child: &Session, task_id: &str) {
+fn settle_task(manager: &TaskManager, child: &Session, ticket: &TaskRegistrationTicket) {
     let delivery = crate::session::bg_complete::task_bg_complete_callback(
         crate::agent::async_tasks::delivery::SessionTerminalDelivery::for_queue(
             child.queue().clone(),
         ),
     );
     let mut result = nested_result();
-    result.task_id = task_id.to_string();
-    assert!(manager.settle_completed(task_id, result, delivery).unwrap());
+    result.task_id = ticket.task_id().to_owned();
+    assert!(manager.settle_completed(ticket, result, delivery).unwrap());
 }
 
 /// Receive 期间跨过 D：消息已落库并记录引用，但不再准入推理。
@@ -666,7 +676,7 @@ async fn admitted_reason_completes_act_after_deadline() {
 /// 预算耗尽时仍有未结任务：保留原错误并附残留交接。
 #[tokio::test(start_paused = true)]
 async fn max_iterations_keeps_reason_and_residual_handoff() {
-    let (child, manager, built, _) = child_with_shell_task(false);
+    let (child, manager, built, _, ticket) = child_with_shell_task(false);
     TaskManagerPort::register(
         manager.as_ref(),
         BgTaskRegistration {
@@ -695,9 +705,7 @@ async fn max_iterations_keeps_reason_and_residual_handoff() {
     );
     let mut result = nested_result();
     result.task_id = "shell-task".into();
-    assert!(manager
-        .settle_completed("shell-task", result, delivery)
-        .unwrap());
+    assert!(manager.settle_completed(&ticket, result, delivery).unwrap());
     let outcome = tokio::time::timeout(Duration::from_secs(5), &mut owner)
         .await
         .expect("budget error must not wait for D")
@@ -719,7 +727,7 @@ async fn max_iterations_keeps_reason_and_residual_handoff() {
 /// 截止后的晚结果不自动复活旧 run；显式 resume 读取同一队列并推理。
 #[tokio::test(start_paused = true)]
 async fn late_result_after_deadline_requires_explicit_resume() {
-    let (child, manager, built, initial_calls, result_calls) = child_with_nested_task();
+    let (child, manager, built, initial_calls, result_calls, ticket) = child_with_nested_task();
     let child_id = child.store().thread_id.clone().unwrap();
     let first = run_sync_subagent(
         &child_id,
@@ -746,7 +754,7 @@ async fn late_result_after_deadline_requires_explicit_resume() {
         matches!(first, ChildRunOutcome::HandedOff { .. }),
         "{first:?}"
     );
-    settle_nested_task(&child, &manager);
+    settle_nested_task(&child, &manager, &ticket);
     tokio::time::advance(Duration::from_secs(1)).await;
     assert_eq!(
         result_calls.load(Ordering::SeqCst),

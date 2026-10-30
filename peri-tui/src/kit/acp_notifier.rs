@@ -127,15 +127,25 @@ async fn forward_notification(
     bridge_tx: &mpsc::Sender<AcpEventWithEpoch>,
     n: AcpNotification,
 ) -> Option<InteractionOwner> {
-    /// 将 AcpEventData 包装为 AcpEventWithEpoch（注入 session_id）。
-    fn wrap_with_session(event: AcpEventData, session_id: String) -> AcpEventWithEpoch {
-        AcpEventWithEpoch {
-            event,
-            active_session_id: session_id,
-        }
-    }
+    let (child_origin, view_epoch, n) = match n {
+        AcpNotification::ChildEvent {
+            origin,
+            view_epoch,
+            notification,
+        } => (Some(origin), view_epoch, *notification),
+        other => (None, crate::kit::atoms::BRIDGE_RESET_COUNTER.get(), other),
+    };
+    let wrap_with_session = |event: AcpEventData, session_id: String| AcpEventWithEpoch {
+        event,
+        active_session_id: session_id,
+        child_origin: child_origin.clone(),
+        view_epoch,
+    };
 
     match n {
+        AcpNotification::ChildEvent { .. } => {
+            warn!("nested child notification envelope rejected");
+        }
         AcpNotification::UnstableEvent {
             session_id,
             event,
@@ -152,6 +162,8 @@ async fn forward_notification(
             // 索引为空，更早历史会被插到继承前缀之前（REQ-H01-6、A20）。
             if let Some((entry_id, position)) = session_update::decode_entry_marks(&data) {
                 let mark = AcpEventWithEpoch {
+                    child_origin: None,
+                    view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
                     event: AcpEventData::ReplayEntryMarked { entry_id, position },
                     active_session_id: session_id.clone(),
                 };
@@ -330,6 +342,8 @@ async fn handle_session_update(
                 // 条目位置标记必须先于内容事件到达桥接任务：桥接用它登记该条目的
                 // 展示区间（首屏区间索引的唯一来源，见 `history_paging`）。
                 let mark = AcpEventWithEpoch {
+                    child_origin: None,
+                    view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
                     event: AcpEventData::ReplayEntryMarked { entry_id, position },
                     active_session_id: session_id.to_string(),
                 };
@@ -380,7 +394,7 @@ mod execution_done_test {
         )
         .await;
         assert!(matches!(rx.try_recv().unwrap(), AcpEventWithEpoch {
-            event: AcpEventData::AgentDone { request_id: Some(id) }, active_session_id,
+            event: AcpEventData::AgentDone { request_id: Some(id) }, active_session_id, ..
         } if id == "execution" && active_session_id == "s1"));
     }
 }

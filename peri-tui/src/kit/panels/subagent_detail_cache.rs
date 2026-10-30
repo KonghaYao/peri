@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::sync::Arc;
@@ -21,6 +21,9 @@ use crate::kit::tui_render_unit::{FoldKey, FoldState, TuiRenderUnit, TuiSubAgent
 
 const DETAIL_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
+#[path = "subagent_detail_text.rs"]
+mod plain;
+
 #[derive(Default)]
 pub(super) struct DetailRenderCache {
     instance_id: String,
@@ -32,6 +35,7 @@ pub(super) struct DetailRenderCache {
     resident_bytes: usize,
     resident_slots: BTreeSet<usize>,
     header: Vec<Line<'static>>,
+    plain: Option<plain::TextLayout>,
     folds: std::collections::HashMap<FoldKey, FoldState>,
     focused: Option<FoldKey>,
     dirty: bool,
@@ -99,7 +103,8 @@ impl DetailRenderCache {
         language: u64,
         header: Vec<Line<'static>>,
     ) -> bool {
-        let switched = self.instance_id != group.instance_id;
+        let switched = self.instance_id != group.instance_id || self.plain.is_some();
+        self.plain = None;
         let context_changed = switched
             || self.grid != *grid
             || self.context.as_ref().is_none_or(|context| {
@@ -113,7 +118,7 @@ impl DetailRenderCache {
         }
         if switched {
             self.slots = Vec::new();
-            self.folds.clear();
+            self.folds = std::collections::HashMap::new();
             self.focused = None;
             self.instance_id.clone_from(&group.instance_id);
         }
@@ -128,8 +133,21 @@ impl DetailRenderCache {
         });
         self.grid = *grid;
         self.source = group.view_models.clone();
+        if source_changed {
+            let keys: HashSet<_> = self.source.iter().filter_map(fold_key).collect();
+            self.folds.retain(|key, _| keys.contains(key));
+            if self.focused.as_ref().is_some_and(|key| !keys.contains(key)) {
+                self.focused = None;
+            }
+            if self.folds.capacity() > self.folds.len().saturating_mul(2) {
+                self.folds.shrink_to_fit();
+            }
+        }
         self.slots
             .resize_with(self.source.len(), DetailSlot::default);
+        if self.slots.capacity() > self.slots.len().saturating_mul(2) {
+            self.slots.shrink_to_fit();
+        }
         self.prefix.clear();
         self.prefix.push(0);
         self.resident_bytes = 0;
@@ -164,6 +182,9 @@ impl DetailRenderCache {
                 }
             }
         }
+        if self.prefix.capacity() > self.prefix.len().saturating_mul(2) {
+            self.prefix.shrink_to_fit();
+        }
         switched
     }
 
@@ -174,10 +195,35 @@ impl DetailRenderCache {
         };
     }
 
+    pub(super) fn prepare_text(
+        &mut self,
+        header: Vec<Line<'static>>,
+        text: Arc<str>,
+        width: usize,
+    ) {
+        if self
+            .plain
+            .as_ref()
+            .is_some_and(|layout| layout.matches(&text, width))
+        {
+            self.header = header;
+            return;
+        }
+        // Replacing the mode drops all preview body references and fold metadata.
+        *self = Self {
+            header,
+            plain: Some(plain::TextLayout::new(text, width)),
+            ..Self::default()
+        };
+    }
+
     pub(super) fn height(&self) -> usize {
         self.header
             .len()
-            .saturating_add(self.prefix.last().copied().unwrap_or(0))
+            .saturating_add(self.plain.as_ref().map_or_else(
+                || self.prefix.last().copied().unwrap_or(0),
+                plain::TextLayout::height,
+            ))
     }
 
     pub(super) fn focused(&self) -> Option<usize> {
@@ -331,6 +377,21 @@ impl DetailRenderCache {
         }
         let header_height = self.header.len();
         let content_rows = top.saturating_sub(header_height)..bottom.saturating_sub(header_height);
+        if let Some(plain) = &self.plain {
+            for (index, line) in plain.lines(content_rows.clone()).into_iter().enumerate() {
+                drawer.render_widget(
+                    Paragraph::new(line),
+                    Rect {
+                        y: area.y.saturating_add(
+                            (header_height + content_rows.start + index - top) as u16,
+                        ),
+                        height: 1,
+                        ..area
+                    },
+                );
+            }
+            return;
+        }
         let focused_index = self.focused();
         let visible = self.ensure_visible(content_rows.clone());
         for index in visible {
@@ -403,6 +464,7 @@ impl DetailRenderCache {
 
 fn fold_of(vm: &TuiRenderUnit) -> Option<FoldState> {
     match vm {
+        TuiRenderUnit::TuiSystemReminder(reminder) => Some(reminder.fold),
         TuiRenderUnit::TuiToolCard(card) => Some(card.fold),
         TuiRenderUnit::TuiAssistantBubble(bubble) => bubble.reasoning.as_ref().map(|r| r.fold),
         TuiRenderUnit::TuiCollapsedGroup(group) => Some(group.fold),
@@ -412,6 +474,9 @@ fn fold_of(vm: &TuiRenderUnit) -> Option<FoldState> {
 
 fn fold_key(vm: &TuiRenderUnit) -> Option<FoldKey> {
     match vm {
+        TuiRenderUnit::TuiSystemReminder(reminder) => {
+            Some(FoldKey::SystemReminder(reminder.reminder_id))
+        }
         TuiRenderUnit::TuiToolCard(card) => Some(FoldKey::Tool(card.tool_id.clone())),
         TuiRenderUnit::TuiAssistantBubble(bubble) if bubble.reasoning.is_some() => {
             bubble.message_id.clone().map(FoldKey::Reasoning)
@@ -441,6 +506,10 @@ fn projected(vm: &TuiRenderUnit, fold: Option<FoldState>) -> Cow<'_, TuiRenderUn
     };
     let mut vm = vm.clone();
     match &mut vm {
+        TuiRenderUnit::TuiSystemReminder(reminder) => {
+            reminder.fold = fold;
+            reminder.recompute_hash();
+        }
         TuiRenderUnit::TuiToolCard(card) => {
             card.fold = fold;
             card.recompute_hash();

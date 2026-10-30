@@ -42,12 +42,12 @@ async fn test_registry_activity_signal_reports_register_and_complete_once() {
     let mut activity = registry.subscribe_activity();
     assert_eq!(*activity.borrow(), 0);
 
-    registry.register_with_kind(make_task("bg-1")).unwrap();
+    let ticket = registry.register_with_kind(make_task("bg-1")).unwrap();
     assert!(activity.has_changed().unwrap());
     assert_eq!(*activity.borrow_and_update(), 1);
     assert_eq!(registry.active_count(), 1);
 
-    assert!(registry.complete("bg-1", result("bg-1")));
+    assert!(registry.complete(&ticket, result("bg-1")));
     assert!(activity.has_changed().unwrap());
     assert_eq!(*activity.borrow_and_update(), 2);
     assert_eq!(registry.active_count(), 0);
@@ -57,13 +57,13 @@ async fn test_registry_activity_signal_reports_register_and_complete_once() {
 #[tokio::test]
 async fn test_registry_activity_signal_is_observable_after_wait_registration_race() {
     let registry = BackgroundTaskRegistry::new();
-    registry.register_with_kind(make_task("bg-1")).unwrap();
+    let ticket = registry.register_with_kind(make_task("bg-1")).unwrap();
     let mut activity = registry.subscribe_activity();
     assert_eq!(*activity.borrow(), 1);
 
     // A terminal transition may happen before the waiter reaches changed().
     // watch retains the new version, so this cannot become a lost wakeup.
-    assert!(registry.complete("bg-1", result("bg-1")));
+    assert!(registry.complete(&ticket, result("bg-1")));
     activity.changed().await.unwrap();
     assert_eq!(*activity.borrow(), 2);
     assert_eq!(registry.active_count(), 0);
@@ -90,14 +90,14 @@ async fn test_registry_completion_claim_wins_cancel_and_duplicate_claim() {
     // Agent 类不限额：用仍有独立上限的 Workflow 类验证「Completing 仍占用 kind 槽位」
     let mut claimed = make_task("bg-claim");
     claimed.kind = BgTaskKind::Workflow;
-    registry.register_with_kind(claimed).unwrap();
+    let ticket = registry.register_with_kind(claimed).unwrap();
     assert!(matches!(
         events.try_recv().unwrap(),
         BgRegistryEvent::Started { .. }
     ));
 
-    assert!(registry.claim_completion("bg-claim"));
-    assert!(!registry.claim_completion("bg-claim"));
+    assert!(registry.claim_completion(&ticket));
+    assert!(!registry.claim_completion(&ticket));
     assert_eq!(
         registry.active_count(),
         1,
@@ -121,7 +121,7 @@ async fn test_registry_completion_claim_wins_cancel_and_duplicate_claim() {
     let mut over = make_task("bg-wf-over");
     over.kind = BgTaskKind::Workflow;
     assert!(registry.register_with_kind(over).is_err());
-    assert!(registry.complete("bg-claim", result("bg-claim")));
+    assert!(registry.complete(&ticket, result("bg-claim")));
     assert_eq!(
         registry.active_count(),
         BackgroundTaskRegistry::WORKFLOW_LIMIT - 1
@@ -133,12 +133,12 @@ async fn test_registry_cancel_wins_completion_claim_and_suppresses_late_complete
     let registry = BackgroundTaskRegistry::new();
     let (tx, mut events) = tokio::sync::mpsc::unbounded_channel();
     registry.set_event_sender(tx, "cancel-test".to_string());
-    registry.register_with_kind(make_task("bg-cancel")).unwrap();
+    let ticket = registry.register_with_kind(make_task("bg-cancel")).unwrap();
     let _ = events.try_recv();
 
     registry.cancel("bg-cancel").unwrap();
-    assert!(!registry.claim_completion("bg-cancel"));
-    assert!(!registry.complete("bg-cancel", result("bg-cancel")));
+    assert!(!registry.claim_completion(&ticket));
+    assert!(!registry.complete(&ticket, result("bg-cancel")));
     assert_eq!(registry.active_count(), 0);
     let mut saw_cancelled = false;
     let mut saw_completed = false;
@@ -154,8 +154,8 @@ async fn test_registry_cancel_wins_completion_claim_and_suppresses_late_complete
 async fn snapshot_and_events_join_without_missing_a_fast_completion() {
     let registry = BackgroundTaskRegistry::new();
     let mut changes = registry.subscribe_events();
-    registry.register_with_kind(make_task("fast")).unwrap();
-    assert!(registry.complete("fast", result("fast")));
+    let ticket = registry.register_with_kind(make_task("fast")).unwrap();
+    assert!(registry.complete(&ticket, result("fast")));
     let snapshot = registry.snapshot();
     assert_eq!(snapshot.revision, 2);
     assert_eq!(snapshot.tasks.len(), 1);

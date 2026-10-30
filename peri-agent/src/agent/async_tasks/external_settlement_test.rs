@@ -1,5 +1,7 @@
 use super::*;
-use peri_acp_types::tasks::{ExternalNotifyFn, TaskManager as TaskManagerPort};
+use peri_acp_types::tasks::{
+    ExternalNotifyFn, TaskManager as TaskManagerPort, TaskRegistrationTicket,
+};
 
 fn make_result() -> BackgroundTaskResult {
     BackgroundTaskResult {
@@ -35,17 +37,34 @@ fn make_registration(on_terminal: ExternalNotifyFn) -> ExternalTaskRegistration 
     }
 }
 
+async fn reconcile_terminal(
+    manager: &TaskManager,
+    ticket: &TaskRegistrationTicket,
+    request: ExternalTaskRegistration,
+    transition: &str,
+    result: BackgroundTaskResult,
+) -> Result<bool, String> {
+    manager
+        .refresh_external(ticket, request)
+        .map_err(|error| error.to_string())?;
+    manager.settle_external(ticket, transition, result).await
+}
+
 // 回归：未知任务不能以 Ok(false) 让订阅误认为完成投递。
 #[tokio::test]
 async fn test_missing_external_task_reports_unconfirmed_delivery() {
     let manager = TaskManager::new();
+    let other = TaskManager::new();
+    let ticket = other
+        .register_external(make_registration(ok_notify()))
+        .unwrap();
     let error = manager
-        .settle_external("missing", "terminal", make_result())
+        .settle_external(&ticket, "terminal", make_result())
         .await
         .unwrap_err();
     assert_eq!(
         error,
-        "external task missing has no terminal delivery route"
+        BackgroundRegistryError::InvalidRegistration(ticket.task_id().into()).to_string()
     );
     assert!(manager.snapshot().tasks.is_empty());
 }
@@ -55,36 +74,40 @@ async fn test_missing_external_task_reports_unconfirmed_delivery() {
 async fn test_competing_external_settlement_does_not_acknowledge_failed_delivery() {
     let manager = Arc::new(TaskManager::new());
     let weak = Arc::downgrade(&manager);
+    let receipt = Arc::new(std::sync::OnceLock::<TaskRegistrationTicket>::new());
+    let callback_receipt = receipt.clone();
     let request = make_registration(Arc::new(move |result, _| {
         let manager = weak.upgrade().unwrap();
         let result = result.clone();
+        let ticket = callback_receipt.get().unwrap().clone();
         Box::pin(async move {
             let error = manager
-                .settle_external(&result.task_id, "terminal", result.clone())
+                .settle_external(&ticket, "terminal", result.clone())
                 .await
                 .unwrap_err();
             assert!(error.contains("settlement is still pending"), "{error}");
             Err("提交失败".into())
         })
     }));
-    let task_id = manager.register_external(request).unwrap();
+    let ticket = manager.register_external(request).unwrap();
+    receipt.set(ticket.clone()).unwrap();
     assert_eq!(
         manager
-            .settle_external(&task_id, "terminal", make_result())
+            .settle_external(&ticket, "terminal", make_result())
             .await,
         Err("提交失败".into())
     );
     assert_eq!(manager.active_count(), 1);
     manager
-        .register_external(make_registration(ok_notify()))
+        .refresh_external(&ticket, make_registration(ok_notify()))
         .unwrap();
     assert!(manager
-        .settle_external(&task_id, "terminal", make_result())
+        .settle_external(&ticket, "terminal", make_result())
         .await
         .unwrap());
     assert_eq!(manager.active_count(), 0);
     assert!(!manager
-        .settle_external(&task_id, "terminal", make_result())
+        .settle_external(&ticket, "terminal", make_result())
         .await
         .unwrap());
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
@@ -94,14 +117,19 @@ async fn test_competing_external_settlement_does_not_acknowledge_failed_delivery
 #[tokio::test]
 async fn test_restoration_preserves_pending_settlement() {
     let manager = TaskManager::new();
-    let task_id = manager
+    let ticket = manager
         .register_external(make_registration(ok_notify()))
         .unwrap();
-    assert!(manager.registry.claim_completion(&task_id));
-    let error = manager
-        .restore_external_terminal(make_registration(ok_notify()), "terminal", make_result())
-        .await
-        .unwrap_err();
+    assert!(manager.registry.claim_completion(&ticket));
+    let error = reconcile_terminal(
+        &manager,
+        &ticket,
+        make_registration(ok_notify()),
+        "terminal",
+        make_result(),
+    )
+    .await
+    .unwrap_err();
     assert!(error.contains("settlement is still pending"), "{error}");
     assert_eq!(manager.active_count(), 1);
     assert_eq!(manager.snapshot().tasks[0].status, "running");
@@ -111,11 +139,11 @@ async fn test_restoration_preserves_pending_settlement() {
 #[tokio::test]
 async fn test_abandon_external_settles_with_terminal_record() {
     let manager = TaskManager::new();
-    let task_id = manager
+    let ticket = manager
         .register_external(make_registration(ok_notify()))
         .unwrap();
     assert!(manager
-        .abandon_external(&task_id, "owner unreachable")
+        .abandon_external(&ticket, "owner unreachable")
         .await
         .unwrap());
     assert_eq!(manager.active_count(), 0);
@@ -141,29 +169,29 @@ fn assert_snapshot_unchanged(manager: &TaskManager, before: &TaskSnapshot) {
 async fn test_register_external_rejects_conflicting_initiator_before_mutation() {
     let manager = TaskManager::new();
     let original_notify = ok_notify();
-    let task_id = manager
+    let ticket = manager
         .register_external(child_registration(Arc::clone(&original_notify)))
         .unwrap();
     let before = manager.snapshot();
     let mut conflict = make_registration(ok_notify());
     conflict.summary = "conflicting metadata".into();
     conflict.started_at = Some("2026-02-01T00:00:00Z".into());
-    let error = manager.register_external(conflict).unwrap_err();
+    let error = manager.refresh_external(&ticket, conflict).unwrap_err();
     assert!(matches!(
         error,
         BackgroundRegistryError::ExternalInitiatorConflict {
             task_id: ref rejected_task,
             ref recorded,
             ref requested,
-        } if rejected_task == &task_id && recorded == "child-session" && requested == "session"
+        } if rejected_task == ticket.task_id() && recorded == "child-session" && requested == "session"
     ));
     assert_snapshot_unchanged(&manager, &before);
     assert!(Arc::ptr_eq(
-        &manager.registry.external_notify(&task_id).unwrap(),
+        &manager.registry.external_notify(ticket.task_id()).unwrap(),
         &original_notify
     ));
     assert!(manager
-        .settle_external(&task_id, "terminal", make_result())
+        .settle_external(&ticket, "terminal", make_result())
         .await
         .unwrap());
     assert_eq!(
@@ -175,20 +203,18 @@ async fn test_register_external_rejects_conflicting_initiator_before_mutation() 
 #[tokio::test]
 async fn test_register_external_matching_initiator_refreshes_callbacks() {
     let manager = TaskManager::new();
-    let task_id = manager
+    let ticket = manager
         .register_external(child_registration(ok_notify()))
         .unwrap();
     let before = manager.snapshot();
     let replay_notify = ok_notify();
-    assert_eq!(
-        manager
-            .register_external(child_registration(Arc::clone(&replay_notify)))
-            .unwrap(),
-        task_id
-    );
+    manager
+        .refresh_external(&ticket, child_registration(Arc::clone(&replay_notify)))
+        .unwrap();
+    assert_eq!(manager.snapshot().tasks[0].task_id, ticket.task_id());
     assert_snapshot_unchanged(&manager, &before);
     assert!(Arc::ptr_eq(
-        &manager.registry.external_notify(&task_id).unwrap(),
+        &manager.registry.external_notify(ticket.task_id()).unwrap(),
         &replay_notify
     ));
 }
@@ -197,16 +223,17 @@ async fn test_register_external_matching_initiator_refreshes_callbacks() {
 async fn test_register_external_discovery_preserves_known_child_route() {
     let manager = TaskManager::new();
     let original_notify = ok_notify();
-    let task_id = manager
+    let ticket = manager
         .register_external(child_registration(Arc::clone(&original_notify)))
         .unwrap();
     let before = manager.snapshot();
     let mut discovery = make_registration(ok_notify());
     discovery.initiator_session_id = None;
-    assert_eq!(manager.register_external(discovery).unwrap(), task_id);
+    manager.refresh_external(&ticket, discovery).unwrap();
+    assert_eq!(manager.snapshot().tasks[0].task_id, ticket.task_id());
     assert_snapshot_unchanged(&manager, &before);
     assert!(Arc::ptr_eq(
-        &manager.registry.external_notify(&task_id).unwrap(),
+        &manager.registry.external_notify(ticket.task_id()).unwrap(),
         &original_notify
     ));
 }
@@ -215,28 +242,29 @@ async fn test_register_external_discovery_preserves_known_child_route() {
 async fn test_restore_external_rejects_conflicting_initiator_before_settlement() {
     let manager = TaskManager::new();
     let original_notify = ok_notify();
-    let task_id = manager
+    let ticket = manager
         .register_external(child_registration(Arc::clone(&original_notify)))
         .unwrap();
     let before = manager.snapshot();
     let conflicting_notify: ExternalNotifyFn =
         Arc::new(|_, _| panic!("conflicting initiator must not receive a terminal result"));
-    let error = manager
-        .restore_external_terminal(
-            make_registration(conflicting_notify),
-            "conflicting-terminal",
-            make_result(),
-        )
-        .await
-        .unwrap_err();
+    let error = reconcile_terminal(
+        &manager,
+        &ticket,
+        make_registration(conflicting_notify),
+        "conflicting-terminal",
+        make_result(),
+    )
+    .await
+    .unwrap_err();
     assert!(error.contains("initiator conflict"), "{error}");
     assert_snapshot_unchanged(&manager, &before);
     assert!(Arc::ptr_eq(
-        &manager.registry.external_notify(&task_id).unwrap(),
+        &manager.registry.external_notify(ticket.task_id()).unwrap(),
         &original_notify
     ));
     assert!(manager
-        .settle_external(&task_id, "terminal", make_result())
+        .settle_external(&ticket, "terminal", make_result())
         .await
         .unwrap());
 }
@@ -246,7 +274,7 @@ async fn test_restore_external_matching_initiator_uses_replayed_route() {
     let manager = TaskManager::new();
     let original_notify: ExternalNotifyFn =
         Arc::new(|_, _| panic!("matching initiator replay should refresh the callback"));
-    let task_id = manager
+    let ticket = manager
         .register_external(child_registration(original_notify))
         .unwrap();
     let delivered = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -255,13 +283,16 @@ async fn test_restore_external_matching_initiator_uses_replayed_route() {
         received.lock().push(result.output.clone());
         Box::pin(async { Ok(()) })
     });
-    assert_eq!(
-        manager
-            .restore_external_terminal(child_registration(replay_notify), "terminal", make_result())
-            .await
-            .unwrap(),
-        task_id
-    );
+    assert!(reconcile_terminal(
+        &manager,
+        &ticket,
+        child_registration(replay_notify),
+        "terminal",
+        make_result()
+    )
+    .await
+    .unwrap());
+    assert_eq!(manager.snapshot().tasks[0].task_id, ticket.task_id());
     assert_eq!(*delivered.lock(), vec!["done"]);
     let snapshot = manager.snapshot();
     assert_eq!(snapshot.tasks[0].status, "completed");
@@ -280,20 +311,19 @@ async fn test_restore_external_discovery_delivers_to_known_child() {
         received.lock().push(result.output.clone());
         Box::pin(async { Ok(()) })
     });
-    let task_id = manager
+    let ticket = manager
         .register_external(child_registration(child_notify))
         .unwrap();
     let fallback_notify: ExternalNotifyFn =
         Arc::new(|_, _| panic!("discovery must not reroute a known child's terminal result"));
     let mut discovery = make_registration(fallback_notify);
     discovery.initiator_session_id = None;
-    assert_eq!(
-        manager
-            .restore_external_terminal(discovery, "terminal", make_result())
+    assert!(
+        reconcile_terminal(&manager, &ticket, discovery, "terminal", make_result())
             .await
-            .unwrap(),
-        task_id
+            .unwrap()
     );
+    assert_eq!(manager.snapshot().tasks[0].task_id, ticket.task_id());
     assert_eq!(*delivered.lock(), vec!["done"]);
     let snapshot = manager.snapshot();
     assert_eq!(snapshot.tasks[0].status, "completed");
@@ -306,13 +336,16 @@ async fn test_restore_external_discovery_delivers_to_known_child() {
 #[tokio::test]
 async fn test_register_external_rejects_conflict_with_restored_terminal_record() {
     let manager = TaskManager::new();
-    manager
-        .restore_external_terminal(child_registration(ok_notify()), "terminal", make_result())
-        .await
+    let ticket = manager
+        .register_external_terminal(child_registration(ok_notify()))
         .unwrap();
+    assert!(manager
+        .settle_external(&ticket, "terminal", make_result())
+        .await
+        .unwrap());
     let before = manager.snapshot();
     assert!(matches!(
-        manager.register_external(make_registration(ok_notify())),
+        manager.refresh_external(&ticket, make_registration(ok_notify())),
         Err(BackgroundRegistryError::ExternalInitiatorConflict { .. })
     ));
     assert_snapshot_unchanged(&manager, &before);
@@ -322,22 +355,26 @@ async fn test_register_external_rejects_conflict_with_restored_terminal_record()
 #[tokio::test]
 async fn test_restore_external_rejects_conflict_with_terminal_record() {
     let manager = TaskManager::new();
-    manager
-        .restore_external_terminal(child_registration(ok_notify()), "terminal", make_result())
-        .await
+    let ticket = manager
+        .register_external_terminal(child_registration(ok_notify()))
         .unwrap();
+    assert!(manager
+        .settle_external(&ticket, "terminal", make_result())
+        .await
+        .unwrap());
     let before = manager.snapshot();
     let mut conflicting_result = make_result();
     conflicting_result.success = false;
     conflicting_result.output = "conflicting result".into();
-    let error = manager
-        .restore_external_terminal(
-            make_registration(ok_notify()),
-            "other-terminal",
-            conflicting_result,
-        )
-        .await
-        .unwrap_err();
+    let error = reconcile_terminal(
+        &manager,
+        &ticket,
+        make_registration(ok_notify()),
+        "other-terminal",
+        conflicting_result,
+    )
+    .await
+    .unwrap_err();
     assert!(error.contains("initiator conflict"), "{error}");
     assert_snapshot_unchanged(&manager, &before);
 }
@@ -345,20 +382,26 @@ async fn test_restore_external_rejects_conflict_with_terminal_record() {
 #[tokio::test]
 async fn test_restore_external_matching_terminal_replay_is_idempotent() {
     let manager = TaskManager::new();
-    let task_id = manager
-        .restore_external_terminal(child_registration(ok_notify()), "terminal", make_result())
-        .await
+    let ticket = manager
+        .register_external_terminal(child_registration(ok_notify()))
         .unwrap();
+    assert!(manager
+        .settle_external(&ticket, "terminal", make_result())
+        .await
+        .unwrap());
     let before = manager.snapshot();
     let replay_notify: ExternalNotifyFn =
         Arc::new(|_, _| panic!("terminal replay must not redeliver"));
-    assert_eq!(
-        manager
-            .restore_external_terminal(child_registration(replay_notify), "terminal", make_result())
-            .await
-            .unwrap(),
-        task_id
-    );
+    assert!(!reconcile_terminal(
+        &manager,
+        &ticket,
+        child_registration(replay_notify),
+        "terminal",
+        make_result()
+    )
+    .await
+    .unwrap());
+    assert_eq!(manager.snapshot().tasks[0].task_id, ticket.task_id());
     assert_snapshot_unchanged(&manager, &before);
 }
 
@@ -389,17 +432,18 @@ async fn test_cold_restore_reserves_initiator_before_concurrent_registration() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let request = child_registration(paused_notify(Arc::clone(&entered), Arc::clone(&release)));
-    let task_id = external_task_id(&request);
+    let ticket = manager.register_external_terminal(request).unwrap();
+    let pending_ticket = ticket.clone();
     let restoring = Arc::clone(&manager);
     let restore = tokio::spawn(async move {
         restoring
-            .restore_external_terminal(request, "terminal", make_result())
+            .settle_external(&pending_ticket, "terminal", make_result())
             .await
     });
     wait_for_delivery(&entered).await;
     let before = manager.snapshot();
     let error = manager
-        .register_external(make_registration(ok_notify()))
+        .refresh_external(&ticket, make_registration(ok_notify()))
         .unwrap_err();
     assert!(matches!(
         error,
@@ -407,7 +451,8 @@ async fn test_cold_restore_reserves_initiator_before_concurrent_registration() {
     ));
     assert_snapshot_unchanged(&manager, &before);
     release.notify_one();
-    assert_eq!(restore.await.unwrap().unwrap(), task_id);
+    assert!(restore.await.unwrap().unwrap());
+    assert_eq!(manager.snapshot().tasks[0].task_id, ticket.task_id());
     let snapshot = manager.snapshot();
     assert_eq!(snapshot.tasks.len(), 1);
     assert_eq!(
@@ -425,10 +470,12 @@ async fn test_cold_restore_rejects_concurrent_conflicting_restoration() {
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     let request = child_registration(paused_notify(Arc::clone(&entered), Arc::clone(&release)));
+    let ticket = manager.register_external_terminal(request).unwrap();
+    let pending_ticket = ticket.clone();
     let restoring = Arc::clone(&manager);
     let restore = tokio::spawn(async move {
         restoring
-            .restore_external_terminal(request, "terminal", make_result())
+            .settle_external(&pending_ticket, "terminal", make_result())
             .await
     });
     wait_for_delivery(&entered).await;
@@ -438,14 +485,15 @@ async fn test_cold_restore_rejects_concurrent_conflicting_restoration() {
     let mut conflicting_result = make_result();
     conflicting_result.success = false;
     conflicting_result.output = "wrong result".into();
-    let error = manager
-        .restore_external_terminal(
-            make_registration(conflict_notify),
-            "conflicting-terminal",
-            conflicting_result,
-        )
-        .await
-        .unwrap_err();
+    let error = reconcile_terminal(
+        &manager,
+        &ticket,
+        make_registration(conflict_notify),
+        "conflicting-terminal",
+        conflicting_result,
+    )
+    .await
+    .unwrap_err();
     assert!(error.contains("initiator conflict"), "{error}");
     assert_snapshot_unchanged(&manager, &before);
     release.notify_one();
@@ -463,31 +511,36 @@ async fn test_cold_restore_matching_and_discovery_replays_preserve_inflight_deli
     let release = Arc::new(tokio::sync::Notify::new());
     let original_notify = paused_notify(Arc::clone(&entered), Arc::clone(&release));
     let request = child_registration(Arc::clone(&original_notify));
-    let task_id = external_task_id(&request);
+    let ticket = manager.register_external_terminal(request).unwrap();
+    let pending_ticket = ticket.clone();
     let restoring = Arc::clone(&manager);
     let restore = tokio::spawn(async move {
         restoring
-            .restore_external_terminal(request, "terminal", make_result())
+            .settle_external(&pending_ticket, "terminal", make_result())
             .await
     });
     wait_for_delivery(&entered).await;
     let before = manager.snapshot();
-    assert_eq!(
-        manager
-            .register_external(child_registration(ok_notify()))
-            .unwrap(),
-        task_id
-    );
+    manager
+        .refresh_external(&ticket, child_registration(ok_notify()))
+        .unwrap();
+    assert_eq!(manager.snapshot().tasks[0].task_id, ticket.task_id());
     let mut discovery = make_registration(ok_notify());
     discovery.initiator_session_id = None;
-    assert_eq!(manager.register_external(discovery).unwrap(), task_id);
-    let error = manager
-        .restore_external_terminal(child_registration(ok_notify()), "terminal", make_result())
-        .await
-        .unwrap_err();
+    manager.refresh_external(&ticket, discovery).unwrap();
+    assert_eq!(manager.snapshot().tasks[0].task_id, ticket.task_id());
+    let error = reconcile_terminal(
+        &manager,
+        &ticket,
+        child_registration(ok_notify()),
+        "terminal",
+        make_result(),
+    )
+    .await
+    .unwrap_err();
     assert!(error.contains("settlement is still pending"), "{error}");
     assert!(Arc::ptr_eq(
-        &manager.registry.external_notify(&task_id).unwrap(),
+        &manager.registry.external_notify(ticket.task_id()).unwrap(),
         &original_notify
     ));
     assert_snapshot_unchanged(&manager, &before);
@@ -506,10 +559,10 @@ async fn test_cold_restore_delivery_failure_retains_initiator_and_allows_retry()
         Box::pin(async { Err("delivery rejected".into()) })
     });
     let request = child_registration(failed_notify);
-    let task_id = external_task_id(&request);
+    let ticket = manager.register_external_terminal(request).unwrap();
     assert_eq!(
         manager
-            .restore_external_terminal(request, "terminal", make_result())
+            .settle_external(&ticket, "terminal", make_result())
             .await,
         Err("delivery rejected".into())
     );
@@ -517,7 +570,7 @@ async fn test_cold_restore_delivery_failure_retains_initiator_and_allows_retry()
     assert_eq!(before.tasks[0].status, "pending_delivery");
     assert_eq!(manager.active_count(), 1);
     assert!(matches!(
-        manager.register_external(make_registration(ok_notify())),
+        manager.refresh_external(&ticket, make_registration(ok_notify())),
         Err(BackgroundRegistryError::ExternalInitiatorConflict { .. })
     ));
     assert_snapshot_unchanged(&manager, &before);
@@ -526,13 +579,16 @@ async fn test_cold_restore_delivery_failure_retains_initiator_and_allows_retry()
         accepted.lock().push(delivery_id);
         Box::pin(async { Ok(()) })
     });
-    assert_eq!(
-        manager
-            .restore_external_terminal(child_registration(retry_notify), "terminal", make_result())
-            .await
-            .unwrap(),
-        task_id
-    );
+    assert!(reconcile_terminal(
+        &manager,
+        &ticket,
+        child_registration(retry_notify),
+        "terminal",
+        make_result()
+    )
+    .await
+    .unwrap());
+    assert_eq!(manager.snapshot().tasks[0].task_id, ticket.task_id());
     let deliveries = deliveries.lock();
     assert_eq!(deliveries.len(), 2);
     assert_eq!(deliveries[0], deliveries[1]);
@@ -548,10 +604,12 @@ async fn test_cold_restore_aborted_delivery_can_retry_without_losing_initiator()
         Arc::clone(&entered),
         Arc::new(tokio::sync::Notify::new()),
     ));
+    let ticket = manager.register_external_terminal(request).unwrap();
+    let pending_ticket = ticket.clone();
     let restoring = Arc::clone(&manager);
     let restore = tokio::spawn(async move {
         restoring
-            .restore_external_terminal(request, "terminal", make_result())
+            .settle_external(&pending_ticket, "terminal", make_result())
             .await
     });
     wait_for_delivery(&entered).await;
@@ -559,13 +617,18 @@ async fn test_cold_restore_aborted_delivery_can_retry_without_losing_initiator()
     assert!(restore.await.unwrap_err().is_cancelled());
     assert_eq!(manager.snapshot().tasks[0].status, "pending_delivery");
     assert!(matches!(
-        manager.register_external(make_registration(ok_notify())),
+        manager.refresh_external(&ticket, make_registration(ok_notify())),
         Err(BackgroundRegistryError::ExternalInitiatorConflict { .. })
     ));
-    manager
-        .restore_external_terminal(child_registration(ok_notify()), "terminal", make_result())
-        .await
-        .unwrap();
+    reconcile_terminal(
+        &manager,
+        &ticket,
+        child_registration(ok_notify()),
+        "terminal",
+        make_result(),
+    )
+    .await
+    .unwrap();
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
 }
 
@@ -573,10 +636,13 @@ async fn test_cold_restore_aborted_delivery_can_retry_without_losing_initiator()
 async fn test_cold_restore_can_reconcile_after_execution_scope_closes() {
     let manager = TaskManager::new();
     manager.registry.scope.close();
-    manager
-        .restore_external_terminal(child_registration(ok_notify()), "terminal", make_result())
-        .await
+    let ticket = manager
+        .register_external_terminal(child_registration(ok_notify()))
         .unwrap();
+    assert!(manager
+        .settle_external(&ticket, "terminal", make_result())
+        .await
+        .unwrap());
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
     assert_eq!(manager.active_count(), 0);
 }
@@ -592,10 +658,11 @@ async fn test_cold_restore_is_not_blocked_by_execution_concurrency_limit() {
     }
     let mut restored = child_registration(ok_notify());
     restored.kind = BgTaskKind::Shell;
-    manager
-        .restore_external_terminal(restored, "terminal", make_result())
+    let ticket = manager.register_external_terminal(restored).unwrap();
+    assert!(manager
+        .settle_external(&ticket, "terminal", make_result())
         .await
-        .unwrap();
+        .unwrap());
     let snapshot = manager.snapshot();
     assert_eq!(
         snapshot.tasks.len(),

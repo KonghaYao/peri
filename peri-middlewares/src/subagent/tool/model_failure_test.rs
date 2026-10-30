@@ -405,7 +405,7 @@ async fn run_sync_fixture(fixture: FailureFixture, status: Option<u16>) -> SyncF
         .iter()
         .enumerate()
         .filter_map(|(index, event)| {
-            matches!(event, ExecutorEvent::SubagentStopped { .. }).then_some(index)
+            matches!(event.payload(), ExecutorEvent::SubagentStopped { .. }).then_some(index)
         })
         .collect();
     assert_eq!(
@@ -415,7 +415,7 @@ async fn run_sync_fixture(fixture: FailureFixture, status: Option<u16>) -> SyncF
     );
     let start_position = child_events
         .iter()
-        .position(|event| matches!(event, ExecutorEvent::SubagentStarted { .. }))
+        .position(|event| matches!(event.payload(), ExecutorEvent::SubagentStarted { .. }))
         .expect("child start event");
     assert!(
         start_position < stop_positions[0],
@@ -424,7 +424,7 @@ async fn run_sync_fixture(fixture: FailureFixture, status: Option<u16>) -> SyncF
     if matches!(fixture, FailureFixture::VisibleDeltaThenInterruption) {
         let delta_position = child_events
             .iter()
-            .position(|event| matches!(event, ExecutorEvent::TextChunk { .. }))
+            .position(|event| matches!(event.payload(), ExecutorEvent::TextChunk { .. }))
             .expect("visible delta event");
         assert!(
             delta_position < stop_positions[0],
@@ -487,10 +487,13 @@ async fn sync_http_500_reaches_parent_canonical_result_with_safe_identity() {
 #[tokio::test]
 async fn visible_delta_then_interruption_reaches_parent_and_forwards_delta() {
     let fixture = run_sync_fixture(FailureFixture::VisibleDeltaThenInterruption, None).await;
-    let delta = fixture.child_events.iter().find_map(|event| match event {
-        ExecutorEvent::TextChunk { chunk, .. } => Some(chunk.as_str()),
-        _ => None,
-    });
+    let delta = fixture
+        .child_events
+        .iter()
+        .find_map(|event| match event.payload() {
+            ExecutorEvent::TextChunk { chunk, .. } => Some(chunk.as_str()),
+            _ => None,
+        });
     assert_eq!(delta, Some("visible-before-interruption"));
     assert_eq!(
         fixture.tool_message["subagent_failure"]["diagnostic"]["category"],
@@ -595,13 +598,13 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
     }
     let start_position = lifecycle
         .iter()
-        .position(|event| matches!(event, ExecutorEvent::SubagentStarted { .. }))
+        .position(|event| matches!(event.payload(), ExecutorEvent::SubagentStarted { .. }))
         .expect("background child start event");
     let stop_positions: Vec<_> = lifecycle
         .iter()
         .enumerate()
         .filter_map(|(index, event)| {
-            matches!(event, ExecutorEvent::SubagentStopped { .. }).then_some(index)
+            matches!(event.payload(), ExecutorEvent::SubagentStopped { .. }).then_some(index)
         })
         .collect();
     assert_eq!(
@@ -614,7 +617,7 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
         subagent_failure: Some(stop_failure),
         is_error: true,
         ..
-    } = &lifecycle[stop_positions[0]]
+    } = lifecycle[stop_positions[0]].payload()
     {
         assert_eq!(
             stop_failure
@@ -638,7 +641,7 @@ async fn background_http_429_consumes_typed_result_and_safe_notification() {
     // synthesize a BackgroundTaskCompleted event on the event channel.
     assert!(!lifecycle
         .iter()
-        .any(|event| matches!(event, ExecutorEvent::BackgroundTaskCompleted(_))));
+        .any(|event| matches!(event.payload(), ExecutorEvent::BackgroundTaskCompleted(_))));
     let notification = result.to_notification();
     assert!(notification.contains("model_error_status: 429"));
     assert!(notification.contains("model_error_request_id: req-429"));

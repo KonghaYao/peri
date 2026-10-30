@@ -420,10 +420,10 @@ impl BaseTool for McpToolBridge {
                     is_shell,
                     &task_created_at,
                 )?;
-                let public_id = match manager.register_external(registration) {
-                    Ok(task_id) => {
+                let ticket = match manager.register_external(registration) {
+                    Ok(ticket) => {
                         execution_guard.confirm_stopped();
-                        task_id
+                        ticket
                     }
                     Err(reason) => {
                         return Err(Box::new(ToolCallError::CallFailed {
@@ -433,11 +433,12 @@ impl BaseTool for McpToolBridge {
                         }));
                     }
                 };
+                let public_id = ticket.task_id().to_owned();
                 if let Err(error) = pool.spawn_managed_task_subscription(
                     self.server_name.clone(),
                     session_id.to_owned(),
                     task_id.clone(),
-                    public_id.clone(),
+                    ticket,
                     is_shell,
                     peer.clone(),
                 ) {

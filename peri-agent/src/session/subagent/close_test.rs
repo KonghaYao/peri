@@ -134,11 +134,13 @@ async fn close_waits_for_handoff_delivery_retry_and_preserves_failure_diagnostic
     let (retry_sender, retry_receiver) = tokio::sync::oneshot::channel();
     let worker_state = state.clone();
     let worker = state
-        .spawn_sync_worker("child".into(), async move {
-            worker_state.record_sync_delivery_failure("child", "queue rejected result");
-            retry_receiver.await.unwrap();
-            peri_time::sleep(std::time::Duration::from_secs(5)).await;
-            worker_state.settle_sync_delivery("child");
+        .spawn_sync_worker("child".into(), || {
+            Ok(async move {
+                worker_state.record_sync_delivery_failure("child", "queue rejected result");
+                retry_receiver.await.unwrap();
+                peri_time::sleep(std::time::Duration::from_secs(5)).await;
+                worker_state.settle_sync_delivery("child");
+            })
         })
         .unwrap();
     let closing = tokio::spawn(close_subagent_session_scope(session.clone()));
@@ -164,8 +166,10 @@ async fn worker_delivery_failure_is_not_reported_as_successful_close() {
     let state = session.subagent_host().unwrap().close_state.clone();
     let worker_state = state.clone();
     state
-        .spawn_sync_worker("child".into(), async move {
-            worker_state.record_sync_delivery_failure("child", "queue unavailable");
+        .spawn_sync_worker("child".into(), || {
+            Ok(async move {
+                worker_state.record_sync_delivery_failure("child", "queue unavailable");
+            })
         })
         .unwrap()
         .await
@@ -183,11 +187,13 @@ async fn worker_explicit_close_does_not_wait_for_itself_but_external_close_does(
     let worker_session = session.clone();
     let worker_state = state.clone();
     let worker = state
-        .spawn_sync_worker("child".into(), async move {
-            settle_explicit_close(&worker_session, true).await.unwrap();
-            entered_sender.send(()).unwrap();
-            release_receiver.await.unwrap();
-            worker_state.settle_sync_delivery("child");
+        .spawn_sync_worker("child".into(), || {
+            Ok(async move {
+                settle_explicit_close(&worker_session, true).await.unwrap();
+                entered_sender.send(()).unwrap();
+                release_receiver.await.unwrap();
+                worker_state.settle_sync_delivery("child");
+            })
         })
         .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(2), entered_receiver)
@@ -208,7 +214,7 @@ async fn close_rejects_late_worker_registration() {
     let state = session.subagent_host().unwrap().close_state.clone();
     close_subagent_session_scope(session).await.unwrap();
     let error = state
-        .spawn_sync_worker("late".into(), async {})
+        .spawn_sync_worker("late".into(), || Ok(async {}))
         .unwrap_err();
     assert!(error.contains("registered after session close began"));
 }
@@ -231,3 +237,6 @@ fn close_failure_classification_allows_only_unconfirmed_settlement() {
         "Incomplete: child resources remain unsettled"
     ));
 }
+
+#[path = "close_admission_test.rs"]
+mod admission_tests;

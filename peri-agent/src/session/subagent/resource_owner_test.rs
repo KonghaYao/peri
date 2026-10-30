@@ -220,7 +220,7 @@ async fn test_root_queries_cancels_and_closes_nested_owner_tree() {
     );
     b_manager.register_child_owner(c.clone()).unwrap();
     root.register_child_owner(b.clone()).unwrap();
-    c_manager
+    let ticket = c_manager
         .register(peri_acp_types::tasks::BgTaskRegistration {
             task_id: "c-shell".into(),
             kind: peri_acp_types::tasks::BgTaskKind::Shell,
@@ -235,7 +235,17 @@ async fn test_root_queries_cancels_and_closes_nested_owner_tree() {
     c_from_root.cancel_async("c-shell").await.unwrap();
     assert_eq!(c_manager.active_count(), 0);
     // 模拟执行环境确认 kill 已生效；真实 ShellExecutor 由完成回调确认。
-    c_manager.registry().confirm_external_stopped("c-shell");
+    c_manager.registry().confirm_external_stopped(&ticket);
+    c_manager.finalize_bg_shell(
+        &None,
+        ticket,
+        "nested shell".into(),
+        false,
+        "cancelled".into(),
+        0,
+        false,
+        None,
+    );
     root.close_child_resources().await.unwrap();
     assert!(root.child_owner("b").is_none());
     assert!(root.child_owner("c").is_none());

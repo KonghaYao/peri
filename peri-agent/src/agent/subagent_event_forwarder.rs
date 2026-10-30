@@ -37,6 +37,18 @@ use crate::agent::events_v2::{
     ObserveEvent,
 };
 
+/// Capture provenance once for the entire child lifecycle, including handoff.
+pub(crate) fn with_child_event_origin(
+    handler: Option<Arc<dyn AgentEventHandler>>,
+    stream: peri_acp_types::event::ChildEventStream,
+) -> Option<Arc<dyn AgentEventHandler>> {
+    handler.map(|handler| {
+        Arc::new(peri_acp_types::event::FnEventHandler(move |event| {
+            handler.on_event(stream.wrap(event));
+        })) as Arc<dyn AgentEventHandler>
+    })
+}
+
 /// 启动 SubAgent 事件转发器。
 ///
 /// 消费 `handles` 内三层 v2 事件，映射为 ExecutorEvent，注入 source_agent_id 后

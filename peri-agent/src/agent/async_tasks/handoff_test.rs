@@ -275,7 +275,7 @@ async fn test_pending_handoff_snapshot_carries_owner_identity() {
         .unwrap();
     let pending = manager.pending_handoff_tasks();
     assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].task_id, task_id);
+    assert_eq!(pending[0].task_id, task_id.task_id());
     assert_eq!(pending[0].owner_session_id.as_deref(), Some("root-session"));
     assert_eq!(
         pending[0].owner_identity.as_deref(),
