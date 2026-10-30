@@ -375,9 +375,15 @@ async fn child_mcp_task_receipt_registers_under_child_owner() {
     let duplicate = bridge
         .invoke(serde_json::json!({}), fixture.context(0, "."))
         .await
-        .unwrap();
-    assert_eq!(duplicate, output);
-    assert_eq!(owner.active_count(), 1, "同键回执复用已准入 monitor");
+        .unwrap_err();
+    assert!(
+        duplicate
+            .to_string()
+            .contains("do not repeat the invocation"),
+        "{duplicate}"
+    );
+    assert_eq!(owner.active_count(), 1, "重复回执不得准入第二个 monitor");
+    assert_eq!(manager.snapshot().tasks.len(), 1);
     owner.shutdown().await;
     wire.close().await;
 }
