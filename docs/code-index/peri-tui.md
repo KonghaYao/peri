@@ -21,7 +21,7 @@ Markdown 高亮预算在 `kit/markdown/code_block.rs`，超限保留原文，仅
 Live 工具卡归属：`kit/acp_events/live_tool_links.rs` 按 `active_session_id` 分区保存 `tool_id → assistant message / open 页条目`。事件携带 `originMessageId` 时直接归属（纯工具轮次唯一来源）；`originReadable=Some(false)`（嵌套执行，发射点确认无可回读持久身份）时不使用 origin 也不回退流式身份，卡片保持未归属、不可淘汰；字段缺失（旧服务端）才按原启发式回退流式 chunk 身份；turn 边界只清启发式，`tool_id` 归属保留到卡片释放。单会话两份映射的并集上限 1024，超出淘汰最旧关联（已归属段只依赖段与展示账目，不受影响）。`unattributed_live_bytes` 是**可回落**账目：按窗口实例+代次键控工具卡字节，归属成功经 `take_unattributed` + `release_unattributed_live_bytes` 移出，预算重置（`begin_window`/reset）后旧代次记录作废。open 页 adopt 判据是「`committed` 非空」，与本次 open 是否切换身份无关：同身份重试同样按 `tool_id` 去重并回填展示槽位，不重置窗口、不重复入段。open 页回填在页正文与展示账本落定**之后**执行（`handle_window_page_loaded` 的 `merge_window_units` 之后），`DisplayLedger::insert_existing_slot` 原地登记已存在槽位、不右移既有区间；新段的布局位置取「第一个更晚展示区间所属段之前」，保证 `layout`/`index` 顺序与 `committed` 一致。不要用会位移的 `mark_display_block` 回填已存在单元。回归：`history_window_page_test::{open_page_backfill_keeps_trailing_text_slot_and_layout_order,bridge_event_attribution_then_budget_pressure_admits_page}`；`history_window_page_test/reopen_identity.rs::same_identity_open_retry_does_not_duplicate_tool_cards`；`live_tool_links::tests`（含 `tool_links_per_session_are_bounded`）；`history_window_page_test::{rewind_forgets_live_tool_links,open_removing_displayed_tool_card_forgets_live_link}`。
 
 > 速查表：把「我想做什么」映射到文件；细节以代码为准。
-> 依据：peri-tui/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/tui-acp-data-flow.md、源码
+> 依据：docs/standards/architecture-contracts.md、docs/design/tui-acp-data-flow.md、源码
 
 ## 架构速览
 

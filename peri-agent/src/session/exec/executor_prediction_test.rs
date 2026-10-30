@@ -3,7 +3,7 @@
 //! 覆盖 [`extract_prediction_text`]——Prediction 文本提取纯函数，是
 //! [`execute_prediction`] 唯一可独立单测的逻辑（agent 构建需要真实 LLM）。
 //!
-//! Mock 命名遵循 CLAUDE.md：`make_` 前缀（函数）。
+//! Mock 命名约定：`make_` 前缀（函数）。
 
 use peri_acp_types::event_data::PredictionAction;
 use peri_acp_types::messages::BaseMessage;
