@@ -152,6 +152,8 @@ fn accepted_queue_delivery_settles_task_without_another_run() {
         .settle_completed(&ticket, result.clone(), callback.clone())
         .unwrap());
     assert_eq!(manager.active_count(), 0);
+    // 完成投递不等于进程/执行资源已停止；producer 仍须单独确认 cleanup。
+    manager.confirm_external_execution_stopped(&ticket);
     assert!(manager.is_execution_idle());
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
     assert!(queue.has_wake_up());
@@ -211,6 +213,8 @@ fn refused_queue_delivery_retains_task_and_retries_original_once() {
     assert!(queue.is_empty());
     assert_eq!(manager.retry_pending_deliveries(), 1);
     assert_eq!(manager.active_count(), 0);
+    // 重试成功只清除投递责任；真实执行资源仍需 producer 确认已停止。
+    manager.confirm_external_execution_stopped(&ticket);
     assert!(manager.is_execution_idle());
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
     callback(&result, BgTaskKind::Agent).unwrap();
