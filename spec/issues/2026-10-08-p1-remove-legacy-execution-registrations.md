@@ -8,7 +8,7 @@
 关联文档：
 - 实施计划（本 issue 的操作面）：[2026-10-08-remove-legacy-execution-registrations-plan.md](2026-10-08-remove-legacy-execution-registrations-plan.md)
 - 冲突的两份设计（须择一，见 §1 第 2 条）：`docs/design/session-id-environment.md` §3.2（现行设计，身份含对象证据）与 `docs/design/storage-v2-machine-workspace-session.md` §3（已批准目标设计，身份为 `(machine_id, path)`）
-- 结构基线：`2026-10-07-remove-execution-recovery-schema-review.md`（其「保留该表」的结论由本 issue 取代；2026-10-08 已在该文补 superseded 注记，不改写历史记录）
+- 结构基线：当时的执行恢复 schema 审查（其「保留该表」的结论由本 issue 取代；原文见 Git 历史）
 
 ## 1. 问题
 
@@ -70,7 +70,7 @@
 - 不动 `projects`（`bindings.project_id`、Project scope 仍依赖）。
 - 不动 `mcp_oauth_credentials.workspace_id → workspaces(id)`（本来就是 Workspace 级）。
 - 不改 ACP wire 协议与 `session_bindings` 的对外列语义。
-- 不恢复任何执行恢复账本（沿用 `2026-10-07-remove-execution-recovery-schema-review.md` 的九表结论，仅移除其中一张的身份歧义）。
+- 不恢复任何执行恢复账本（沿用当时 schema 审查的九表结论，仅移除其中一张的身份歧义）。
 - 不改 SDK 仓库。
 
 ## 6. 验收

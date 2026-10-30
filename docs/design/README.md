@@ -35,12 +35,13 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | 工具系统 | [tool-system.md](tool-system.md) | session-local 可见性、ToolSearch 与执行边界 |
 | 交互 broker | [interaction-brokers.md](interaction-brokers.md) | Approval/Questions broker 与 transport 交互 |
 | 消息存储 | [message-transcript.md](message-transcript.md) | Transcript、MessageQueue、staging 与持久化 |
-| 会话身份、工作区归属与恢复 | [session-id-environment.md](session-id-environment.md) | Session ID 与机器归属、工作区发现与登记、执行绑定与恢复入口；进度与验收见 [2026-09 月志](../../spec/history/2026-09.md)（2026-09-30 条目） |
+| 会话身份、工作区归属与恢复 | [session-id-environment.md](session-id-environment.md) | Session ID 与机器归属、工作区发现与登记、执行绑定与恢复入口 |
 | 用户待发送队列 | [user-input-queue.md](user-input-queue.md) | Mailbox、单条/全部投递、取回与运行身份 |
+| Session 异步任务统一入口 | [session-async-tasks.md](session-async-tasks.md) | 当前会话任务归属、结果/取消/关闭；**不做冷恢复**，消息与执行服从 RCRA 权威 |
+| SubAgent 活动行 | [tui-subagent-activity.md](tui-subagent-activity.md) | 子 Agent 活动数据源、状态聚合与行投影 |
 | Compact | [micro-compact.md](micro-compact.md) | Step/交换投影、原文回查、原子提交与 Full/fork/rewind 生命周期；门控和能力边界 |
-| MCP 适配 v4-part-1 | [mcp-adaptation-v4-part-1.md](mcp-adaptation-v4-part-1.md) | System MCP 启动依赖、工具注入、MCP 隔离与 middleware 归属 |
-| MCP Apps relay | [mcp-multiplexing.md](mcp-multiplexing.md) | stdio Apps profile、binding lease 与多路数据隔离 |
-| Meta 数据访问 | [meta-control.md](meta-control.md) | 只读 session metadata CLI 与持久化边界 |
+| MCP Apps relay | [mcp-multiplexing.md](mcp-multiplexing.md) | stdio Apps profile、附件与记录绑定、多路数据隔离 |
+| Meta 数据访问 | [meta-control.md](meta-control.md) | 只读 session metadata CLI、machines 目录查询与持久化边界 |
 | Workflow | [workflow.md](workflow.md) | Node wire、runner、任务与进度、journal/state、resume/kill、TUI 投影与 CLI/artifact 分发；MCP 接入与任务信道归 [workflow-mcp.md](workflow-mcp.md) |
 | Ultra-ADLC | [ultra-adlc.md](ultra-adlc.md) | 超大交付模式的文件协议与编排契约 |
 | TUI 数据流 | [tui-acp-data-flow.md](tui-acp-data-flow.md) | ACP event → Atom → render 链路 |
@@ -55,18 +56,17 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 
 | 主题 | 文档 | 进度事实源 |
 | --- | --- | --- |
-| 时间能力边界 | [time-runtime.md](time-runtime.md) | [时间模块边界实施](../../spec/history/2026-10.md)（2026-10-04 条目）；原生边界已落地，WASM 完整验收与既有公开 Chrono 契约范围仍待核实 |
-| RCRA 消息、任务归属与激活 | [rcra-message-activation.md](rcra-message-activation.md) | 当前进程 Task/MQ、canonical 历史与普通执行；**持久执行恢复已剥离**，验证范围见 [active plan](../../spec/issues/2026-10-07-remove-execution-recovery-plan.md) |
-| Session 异步任务统一入口 | [session-async-tasks.md](session-async-tasks.md) | 当前会话任务归属、结果/取消/关闭；**不做冷恢复**，消息与执行服从 RCRA 权威 |
-| 存储 v2：Machine → Workspace → Session | [storage-v2-machine-workspace-session.md](storage-v2-machine-workspace-session.md) | `spec/history/2026-10.md`（2026-10-02 条目）；schema 版本以代码索引为准，Git 使用 worktree 根、非 Git 使用启动 cwd；验收状态见该条目 |
-| Command 系统 | [command-system.md](command-system.md) | 对应 command active issue 与代码 |
-| TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | `spec/history/2026-08.md`（2026-08-10 条目） |
-| SubAgent 活动行 | [tui-subagent-activity.md](tui-subagent-activity.md) | TUI redesign active issue |
-| Workflow as MCP | [workflow-mcp.md](workflow-mcp.md) | [Workflow as MCP 实施](../../spec/issues/2026-10-11-workflow-as-mcp.md)；builtin 实例迁移、任务资源 + 回填信道与旧链删除进行中 |
+| MCP 适配 v4-part-1 | [mcp-adaptation-v4-part-1.md](mcp-adaptation-v4-part-1.md) | System MCP 启动依赖、工具注入、MCP 隔离与 middleware 归属；迁移状态以代码与契约测试为准 |
+| 时间能力边界 | [time-runtime.md](time-runtime.md) | 原生边界已落地；WASM 完整验收与既有公开 Chrono 契约范围仍待核实；入口见 [peri-time 索引](../code-index/peri-time.md) |
+| RCRA 消息、任务归属与激活 | [rcra-message-activation.md](rcra-message-activation.md) | 当前进程 Task/MQ、canonical 历史与普通执行；**持久执行恢复已剥离** |
+| 存储 v2：Machine → Workspace → Session | [storage-v2-machine-workspace-session.md](storage-v2-machine-workspace-session.md) | schema 版本以代码索引为准，Git 使用 worktree 根、非 Git 使用启动 cwd；真实远端验收待执行 |
+| Command 系统 | [command-system.md](command-system.md) | 命令协议与执行边界以代码和契约测试为准 |
+| TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | transcript 展示、组合器与工作台布局的现行约束 |
+| Workflow as MCP | [workflow-mcp.md](workflow-mcp.md) | builtin 实例、任务资源与回填信道已落地；`peri-resources` 门面残留目标 |
+| Serverless 执行环境身份 | [serverless-execution-identity.md](serverless-execution-identity.md) | Emscripten/Node/Bun/workerd 宿主可用；Cloudflare 托管部署与跨实例接管未验收 |
 | TUI 面板架构 | [tui-panel-architecture.md](tui-panel-architecture.md) | [TUI 面板架构重构](../../spec/issues/2026-10-15-tui-architecture-refactor.md)；面板外壳、共享视口、事件入口、操作作用域与完成门、快照发布单点、确认版本守卫已落地；未完成项见该 issue |
 | peri-cf 聊天对象契约 | [peri-cf-chat-objects.md](peri-cf-chat-objects.md) | 前端消费面与对象契约完整性；对象语义继续有效，Worker/DO 与旧控制通道已标注为历史；当前实现见 [Peri SDK Chat](peri-sdk-chat.md) 与 [服务端 Agent](peri-cf-server-agent.md) |
-| peri-cf 浏览器宿主 Agent（已被取代） | [peri-cf-browser-agent.md](peri-cf-browser-agent.md) | 2026-10-11 浏览器宿主时期的历史设计；2026-10-21 起由 [peri-cf-server-agent.md](peri-cf-server-agent.md) 取代 |
-| peri-cf Chat 前端 | [peri-cf-chat-ui.md](peri-cf-chat-ui.md) | 自有 `frontend/chat/{timeline,composer,components}` 渲染；状态来自 SDK `ChatReplica` 经 `ChatProjection` 物化的展示 DTO；`frontend/components/assistant-ui/` 只保留 vendored 审批/问答卡片（无 `@assistant-ui/*` 运行时依赖）；SDK 保持独立；assistant-ui runtime 时期的验收记录见 [历史 spec（已被取代）](../../spec/issues/2026-10-13-peri-cf-chat-ui-assistant-ui.md) |
+| peri-cf Chat 前端 | [peri-cf-chat-ui.md](peri-cf-chat-ui.md) | 自有 `frontend/chat/{timeline,composer,components}` 渲染；状态来自 SDK `ChatReplica` 经 `ChatProjection` 物化的展示 DTO；`frontend/components/assistant-ui/` 只保留 vendored 审批/问答卡片（无 `@assistant-ui/*` 运行时依赖）；SDK 保持独立 |
 
 ## 维护要求
 

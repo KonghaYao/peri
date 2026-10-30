@@ -1,8 +1,7 @@
 # Beta Flag 系统
 
-> 状态：现行设计（已实现：注册表、`config.betas` 配置面投影、装配期消费注入与
-> ConfigPanel 管理区块）。实施记录与剩余跟进项见
-> [2026-10-08 实施 issue](../../spec/issues/2026-10-08-beta-flags-implementation.md)。
+> 状态：现行设计（已实现注册表、`config.betas` 配置面投影、装配期消费注入与
+> ConfigPanel 管理区块）。
 >
 > 事实源：settings 类型 `peri-config/src/app.rs::BetasConfig`（bool 稀疏覆盖表）；配置权威、快照、
 > CAS 与 explain 的通用规则见 [configuration-authority.md](configuration-authority.md)；
@@ -37,7 +36,8 @@ Flag 是受控的 beta 能力开关：能力已在代码中实现但不默认启
 | Flag 覆盖 | settings `config.betas` 的稀疏 `id → bool` 表 | 用户 settings（global / workspace） |
 | 有效值 | `覆盖.get(id).unwrap_or(false)` | resolve 投影 `BetaFlags` |
 
-所有 flag 默认值恒为 false；ACP 注册表不得声明默认开启条目。TUI 本地 beta 也必须默认 false。
+ACP flag 默认值恒为 false，注册表不得声明默认开启条目；TUI 本地 beta 的未配置语义按其
+发布绑定，`history-window-v1` 未配置视为开启（见「TUI 本地 beta」）。
 id 一经发布不得改名（settings 键、日志与面板身份），改名等同于「废除 + 引入」。面板操作产生的
 覆盖是用户偏好数据，不因能力转正而被改写（残留键按未知键规则失效）。
 
@@ -58,8 +58,7 @@ description。消费方以注册表常量（而非字符串字面量）引用 id
 
 ## 配置面接入
 
-settings 位置为 `config.betas`（沿用现有 `BetasConfig` 占位类型，内部为 bool 稀疏
-map）。示例：
+settings 位置为 `config.betas`（`BetasConfig`，内部为 bool 稀疏覆盖表）。示例：
 
 ```json
 { "config": { "betas": { "full-async-tools": true } } }
@@ -112,13 +111,13 @@ flowchart LR
 - 面板显示**合并后的有效值**；未设置与显式 false 均显示为关闭。
 - 区块标注**新会话生效**；已运行会话不受切换影响。
 - 描述优先 i18n key `beta-desc-<id>`，缺失回退注册表 canonical 文本。
-- BetasPanel（Ctrl+B / `/betas`，当前为 mock 列表）退役：ACP flag 列表的单一权威是
-  注册表，不保留第二入口；TUI 本地 beta 例外见下节。
+- BetasPanel（Ctrl+B / `/betas`）已退役：ACP flag 列表的单一权威是注册表，不保留第二入口；
+  TUI 本地 beta 例外见下节。
 
 ## TUI 本地 beta：history-window-v1
 
 `history-window-v1` 是 TUI 历史窗口的本地 beta，键定义在 `peri-config/src/betas.rs`。
-发布启用绑定 S7：**未配置视为开启**，只有用户显式配置 `false` 才关闭。它由 `is_known` 接受并
+**未配置视为开启**，只有用户显式配置 `false` 才关闭。它由 `is_known` 接受并
 进入 `BetaFlags` 投影，但不在 `peri-acp-types::beta_flags::BETA_FLAGS`，因此 ConfigPanel 的
 beta 区块不列出，需手动写入 settings：
 

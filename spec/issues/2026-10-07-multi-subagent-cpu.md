@@ -1,6 +1,6 @@
 # 多 Subagent 并发期间 CPU 偏高：现场调查
 
-> 2026-10-07 后续裁决：本 issue 中持久执行恢复/WorkState 优化部分被[完整剥离计划](2026-10-07-remove-execution-recovery-plan.md)取代；既有历史观察与验证记录保留，不作为保留执行账本的要求。
+> 2026-10-07 后续裁决：本 issue 中持久执行恢复/WorkState 优化部分由后续完整剥离裁决取代（原文见 Git 历史）；既有历史观察与验证记录保留，不作为保留执行账本的要求。
 
 **状态**：Open / 阶段 A 已交付，待性能验收（2026-10-07）。未完成受控单 Agent / 多 Agent 对比，不宣布 CPU 已根治。
 
@@ -69,7 +69,7 @@ durable 的 ignored 为既有崩溃测试子进程入口，由父测试显式启
 
 ## 阶段 A 实施任务（2026-10-07）
 
-依据 `2026-10-07-workstate-no-schema-optimization-proposal.md`，用户要求更新 issue、派出子 Agent 并由主 Agent 主持修复。本轮范围为 A0 / A1a / A1b / A1c；不改数据库表/列/索引/schema17、不改变持久 JSON 形状、不清历史、不迁移现场库、不降低并发。provider A3、执行窄视图 B、选择性物化 C、SQL patch 与缓存不混入本轮。
+依据当时的 WorkState 优化提案（原文见 Git 历史），用户要求更新 issue、派出子 Agent 并由主 Agent 主持修复。本轮范围为 A0 / A1a / A1b / A1c；不改数据库表/列/索引/schema17、不改变持久 JSON 形状、不清历史、不迁移现场库、不降低并发。provider A3、执行窄视图 B、选择性物化 C、SQL patch 与缓存不混入本轮。
 
 - [x] A0：补命令准备与状态阶段诊断/确定性验证，明确 wall time 与 CPU 口径。
 - [x] A1a：WorkRecord 元数据借用；借用式 checkpoint 包装；缩短无关快照驻留，SDK 所需快照保留到最后观察。
@@ -88,7 +88,7 @@ DOC-UPDATE-001：稳定接口与入口已同步 types/resources/agent code-index
 
 以下保留原 WIP 调查，不再作为实施要求；Work 存储、迁移及相关验收已撤销。
 
-按用户要求再次询问 Astra，形成 [增长模式根治提案](2026-10-07-workstate-root-cause-remediation.md)。独立核实除全量 Work JSON 外，GUARD_COMMAND / READ_PENDING / HAS_PENDING 及控制 guard 存在随全库 journal 增长的扫描；仅分离请求正文、缓存或 JSON patch 无法同时去除这些成本。
+按用户要求再次询问 Astra，形成增长模式根治提案（原文见 Git 历史）。独立核实除全量 Work JSON 外，GUARD_COMMAND / READ_PENDING / HAS_PENDING 及控制 guard 存在随全库 journal 增长的扫描；仅分离请求正文、缓存或 JSON patch 无法同时去除这些成本。
 
 推荐活动 head、定址实体/历史及事务 pending 目录，复用既有表主键，保持 schema17，无 DDL。本提案不是现行持久协议：改变 JSON/row 含义、历史校验时机、pending 权威目录与全体 writer 切换必须先裁决，现场迁移另行授权；不删历史、命令或回执，不削弱 Unknown/ACK/生命周期。目标是固定活动工作量时，热动作不再线性处理无关历史或扫描全部 journal，不承诺磁盘、真实大请求或全历史审计零成本。
 

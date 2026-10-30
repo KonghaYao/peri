@@ -50,7 +50,7 @@ mod tests;        // 或 mod foo_tests;（见下）
 |------|----------|-----------|
 | **数据结构序列化** | serde roundtrip、`#[serde(rename)]` 别名、不完全 JSON 反序列化 | 字段错位/丢失直接导致数据损坏 |
 | **事件/消息映射** | `ExecutorEvent → SessionUpdate`（`mapper.rs`） | forward_to_tui、source_agent_id 透传错乱→UI 状态残留 |
-| **纯逻辑函数** | `StopReason::from_display()`、`infer_tool_kind()`、`derive_key()` | 无 I/O、输入确定→输出唯一，天然可测 |
+| **纯逻辑函数** | `classify_summary_step()`、`infer_tool_kind()` | 无 I/O、输入确定→输出唯一，天然可测 |
 | **工具系统** | Edit/Write/Read/Bash 文件系统工具 | 每个工具至少 3 条错误路径（not found / ambiguous / permission） |
 | **中间件链** | `MiddlewareChain` 顺序、cancel 传播、before/after 钩子 | 中间件顺序错乱 = 安全/功能问题 |
 | **CLI/配置解析** | `clap::Parser`、env override 逻辑 | 用户直接暴露的接口 |
@@ -71,7 +71,7 @@ mod tests;        // 或 mod foo_tests;（见下）
 |------|----------|------|
 | 简单 DTO 构造 | `PlanEntry::default()` 所有字段默认值 | 低价值，但 serde 相关仍归 P1 |
 | Display/Debug 实现 | `impl Display for Foo` | 仅当被外部消费时测 |
-| 常量/枚举完整列表 | `COMPACTABLE_TOOLS = [Bash, Read, ...]` | 新增/删除项时需同步更新测试 |
+| 常量/枚举完整列表 | `BUILTIN_MCP_INSTANCES` 的逐工具 `direct` 声明 | 新增/删除项时需同步更新测试 |
 
 ### 不测
 
@@ -255,14 +255,14 @@ impl ReactLLM for EchoLLM {
 | `tempfile::TempDir` | 几乎所有 crate——文件系统操作隔离 |
 | `serial_test` / `#[serial]` | PTY、全局 atom——需要独占资源的测试 |
 | `filetime` | 文件时间戳修改 |
-| `mockito` | HTTP mock server（仅 langfuse-client） |
+| `mockito` | HTTP mock server（langfuse-client、peri-acp） |
 | `temp-env` | 临时环境变量设置 |
 | `tokio-test` | tokio 测试辅助 |
 
 ### 5.4 禁止项
 
 - 禁止用 `mockall` / `mock!` 宏框架——手写更显式、易调试
-- 禁止用 `Mock struct`——CLAUDE.md 明确约定 "Mock `make_` 前缀，不用 Mock struct"
+- 禁止用 `Mock struct`——mock 工厂统一用 `make_` 前缀命名
 - 禁止在非测试代码中 `#[cfg(feature = "test-utils")]` 导出测试专用 API
 
 ---
@@ -317,7 +317,7 @@ cargo test -p peri-theme
 # 单测过滤
 cargo test -p <crate> --lib -- <test_name>
 
-# 资源面重点路由（workspace resources W1/W4b/W5；只列实际可执行入口，见各 crate 索引）
+# 资源面重点路由（只列实际可执行入口，见各 crate 索引）
 cargo test -p peri-acp-types --lib -- workspace_resources
 cargo test -p peri-mcp-workspace --lib -- resources
 cargo test -p peri-middlewares --lib -- mcp::skill_activation
@@ -333,12 +333,12 @@ cargo test -p <crate> --test <target>
 cargo test -p <crate> --test <target> -- --test-threads=1
 
 # pre-commit（不含测试）
-lefthook run pre-commit    # fmt + check + clippy + layer-imports
+lefthook run pre-commit    # fmt + check + clippy（改动命中 crate）+ layer-imports
 ```
 
 ### 8.2 Peri TUI E2E（分层门禁）
 
-Rust 单测与 E2E 分离：**E2E 命令只在 `e2e/CLAUDE.md` 维护**，不要写「28 个文件逐个手跑」或 `npm run e2e -- --all`。
+Rust 单测与 E2E 分离：**E2E 命令只在 `e2e/CLAUDE.md` 维护**，不要写逐文件手跑清单或 `npm run e2e -- --all`。
 
 在 `e2e/` 目录：
 
@@ -356,13 +356,13 @@ npm run e2e:release:strict  # 发版且不容忍首轮 flake
 - `.gitmodules` 当前声明 `peri-cool/` 与 `e2e/tui-tester/`；它们不是根 Cargo workspace crate。先初始化 submodule，再进入其目录读取 manifest/README 并运行本地命令。
 - `side-projects/` 下项目有各自的 `Cargo.toml` 或 `package.json`，不由 `cargo test --workspace` 覆盖。只在任务涉及对应项目时进入目录，按其 manifest scripts 或 README 执行。
 - 仓库顶层出现目录不等于属于根 workspace。`peri-theme/` 虽未写入根 `Cargo.toml` 的显式 members 列表，但当前 `cargo metadata` 将其识别为 workspace package，因此使用 `cargo test -p peri-theme`；分类以命令输出为准。
-- `acp-hub/` 与 `agm/` 当前工作树中不存在 manifest，且近 14 天历史显示其代码已删除；不得保留或执行旧测试矩阵命令，也不得从历史 issue 猜测迁移位置。仅在当前代码重新出现 manifest 后，按其实际归属补回命令。
+- `acp-hub/` 与 `agm/` 当前工作树中不存在 manifest；不得保留或执行旧测试矩阵命令，也不得从历史 issue 猜测迁移位置。仅在当前代码重新出现 manifest 后，按其实际归属补回命令。
 
 ---
 
 ## 九、根 Workspace Crate 测试覆盖范围（参考）
 
-测试数量随演进变化，不作为规范基线；以根 `Cargo.toml`、`cargo metadata`、crate 内测试与 CI 为准。下表只列当前根 workspace packages，不包含 submodule 或独立/side projects。
+测试数量随演进变化，不作为规范基线；以根 `Cargo.toml`、`cargo metadata`、crate 内测试与 CI 为准。下表概览主要 crate，不逐一列举全部 workspace 成员，也不包含 submodule 或独立/side projects。
 
 | Crate | 主要测试类型 |
 |-------|--------------|

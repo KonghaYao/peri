@@ -212,7 +212,7 @@ fn policy_keys_are_unique_and_frozen() {
     );
     // 冻结期望与 `BUILTIN_INSTANCE_POLICY_KEYS` 同步（该常量自行断言与声明表相等）：
     // `"WorkflowMiddleware"` 是 workflow builtin 实例（P1）的关闭键，双轨期与旧链
-    // 槽位同名；旧链删除属 P5 原子切换（`spec/issues/2026-10-11-workflow-as-mcp.md`）。
+    // 槽位同名；旧链已删除，见 `docs/design/workflow-mcp.md`。
     let expected: HashSet<&str> = [
         "WebMiddleware",
         "ArtifactMiddleware",

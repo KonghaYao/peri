@@ -23,7 +23,7 @@ peri-fuse（本地服务 localhost:23332）   ③ 接收端：Langfuse OTel attr
         │  npm 包 peri-fuse，数据目录 ~/.peri-fuse/
         ▼
 ~/.peri-fuse/telemetry.db              ④ 数据落库（observations / traces / scores）
-~/.peri-fuse/langfuse.db               （api_keys 认证，~3GB 数据在 telemetry.db）
+~/.peri-fuse/langfuse.db               （api_keys 认证；观测数据在 telemetry.db）
 ```
 
 ### 事实源路径
@@ -33,7 +33,7 @@ peri-fuse（本地服务 localhost:23332）   ③ 接收端：Langfuse OTel attr
 | 观测生命周期 | `peri-controller/src/langfuse/tracer/`（各 `*_test.rs` 为行为契约） |
 | OTLP 转换 | `langfuse-client/src/types/conversion.rs`（`ingestion_events_to_otel`） |
 | 上报端点 | `langfuse-client/src/client.rs`（`POST {base_url}/api/public/otel/v1/traces`） |
-| 服务端 attribute 映射 | peri-fuse `dist/server.cjs` 内 `LangfuseOtelSpanAttributes`（与官方 Langfuse 一致） |
+| 服务端 attribute 映射 | peri-fuse 服务端的 `LangfuseOtelSpanAttributes`（与官方 Langfuse 一致） |
 | 配置 | 项目根 `.env`：`LANGFUSE_BASE_URL`（**注意不是** `LANGFUSE_HOST`，两者同名键易混淆） |
 | 查询工具 | `.claude/skills/langfuse/`（trace-search / daily-report / analyze / session-analyze 等脚本 + `bunx langfuse-cli`） |
 | 历史问题 | `spec/global/problems.md`（完整记录通过 Git 检索） |
@@ -54,10 +54,10 @@ SHA-256 映射；父子关系共用 span ID 映射。类型以观测字段及 na
 | SPAN(stage) | `stage-receive/reason/act/compact/end` | id(`span_*`)、parent | input | 仅 receive 阶段 input 携带 MQ 计数；其余阶段无 input 为**设计行为**，非缺陷 |
 | SPAN(turn) | `turn <uuid>` | id、parent | input | turn 根 span |
 | SPAN(tool-batch) | `batch_*` | id、input（批量摘要）、output | — | 工具批处理聚合 |
-| SPAN(workflow) | `workflow-<id>` | id(`span_*`)、input（`{"plan": ...}`）、output | — | Act 阶段 Workflow 子 span（2026-08-15 已恢复 plan input） |
-| SPAN(compact) | `compact` / `micro-compact` | id(`span_*`)、input、output | metadata | **name 即类型**：Micro 策略记录 `micro-compact`，Full/Smart/Skip 记录 `compact`（2026-08-15 起）；input=执行前状态（strategy/trigger/estimated_tokens_before/cache_hit_rate_before），output=执行结果（summary/files_count/skills_count/micro_cleared/duration_ms/estimated_tokens_saved/estimated_tokens_after/full_escalation_reason/outcome）；失败时 output=`{"error_class":"compact_failure","message":...}` |
+| SPAN(workflow) | `workflow-<id>` | id(`span_*`)、input（`{"plan": ...}`）、output | — | Act 阶段 Workflow 子 span，input 含 plan |
+| SPAN(compact) | `compact` / `micro-compact` | id(`span_*`)、input、output | metadata | **name 即类型**：Micro 策略记录 `micro-compact`，Full/Smart/Skip 记录 `compact`；input=执行前状态（strategy/trigger/estimated_tokens_before/cache_hit_rate_before），output=执行结果（summary/files_count/skills_count/micro_cleared/duration_ms/estimated_tokens_saved/estimated_tokens_after/full_escalation_reason/outcome）；失败时 output=`{"error_class":"compact_failure","message":...}` |
 | TOOL | 工具名（Bash/Read/Edit…） | id(`obs_*`)、input（工具入参）、output | level | 失败时 output 为 `{"error_class": "tool_failure"}` |
-| AGENT | `agent-run` / `subagent-*` | id、output、input | — | input = on_turn_start 的对话输入（2026-08-15 已恢复上报） |
+| AGENT | `agent-run` / `subagent-*` | id、output、input | — | input = on_turn_start 的对话输入 |
 | EVENT | `cache-hit-rate-low` | id、input（告警指标）、level | output | 告警类；指标事件（`tool.error` / `mcp.error` 等）同属 EVENT，来源见 `peri-controller/src/langfuse/metric_sink.rs`。归属：指标事件挂到该会话活跃 turn 的 trace 根 span 下（父观测 = trace id 映射的根 span，不再制造第二个 root observation）；子 agent 的 thread id 也在 turn 生命周期内登记，其指标归同一 trace；未采样 turn 仍有登记，其指标共享该 turn trace 但无父观测；仅无活跃登记（turn 未开始 / 已结束、无 `sid`）才回退独立 root trace，事件不丢（`turn_traces.rs` 注册表，turn 开始登记/结束按 trace 清理） |
 
 ### 字段来源规则（OTLP attribute 映射）
@@ -142,17 +142,17 @@ bunx langfuse-cli api traces list --limit 10 --json                        # CLI
 
 | # | 异常模式 | 检查命令 | 判据 | 历史 |
 |---|----------|----------|------|------|
-| 1 | **GENERATION 全部/部分无 input** | §3.1 按天趋势 | 某天起 input 完整率骤降为 0 | 曾因 tracer 事件构造 `input` 硬编码 `None` 引入（2026-08-08 重构，2026-08-15 修复）；**修复需重启 peri 进程生效** |
-| 2 | **AGENT 无 input**（agent-run/subagent） | §3.1 类型统计 | AGENT 完整率低 | 同上重构删除 `agent_input` 存储逻辑；2026-08-15 已恢复（`on_turn_start` 暂存 → agent-run input） |
-| 3 | **TOOL 无 input** | §3.1 类型统计 | TOOL 完整率低 | 已修复（2026-08-10）；若出现新缺口按天断点定位 |
+| 1 | **GENERATION 全部/部分无 input** | §3.1 按天趋势 | 某天起 input 完整率骤降为 0 | 曾因 tracer 事件构造 `input` 硬编码 `None` 引入；**修复需重启 peri 进程生效** |
+| 2 | **AGENT 无 input**（agent-run/subagent） | §3.1 类型统计 | AGENT 完整率低 | 曾因重构删除 `agent_input` 存储逻辑；现由 `on_turn_start` 暂存到 agent-run input |
+| 3 | **TOOL 无 input** | §3.1 类型统计 | TOOL 完整率低 | 已修复；若出现新缺口按天断点定位 |
 | 4 | SPAN 数量爆炸（>> turn × 5） | `SELECT COUNT(*) FROM observations WHERE type='SPAN'` | 单 turn 理论 stage 数 5 + batch | stage span 未成对关闭会堆积；按 `spec/global/problems.md` 的 Langfuse 路由查 Git 历史 |
-| 5 | 缓存命中率异常（0% 或缺失 cache_read） | `trace-tokens.ts` / usage 直查 | 同模型同 prompt 应命中缓存 | `2026-07-22-langfuse-cache-tokens-not-recorded.md` |
+| 5 | 缓存命中率异常（0% 或缺失 cache_read） | `trace-tokens.ts` / usage 直查 | 同模型同 prompt 应命中缓存 | 曾出现缓存 token 未记录；查 Git 历史 |
 | 6 | 父链断裂（parent 不存在） | §3.1 父链 SQL | 按实际接收 ID 查父记录；新 hex ID 不以类型前缀分类 | 历史排查入口见 `spec/global/problems.md`；新传输身份与旧记录不等同 |
-| 7 | 并行 subagent 下 step 顺序乱/span 挂错 | `analyze.ts --tools` + trace 详情 | 并行 agent 的 generation 应各归其 AGENT obs | `2026-08-03-langfuse-trace-step-order-shuffled-with-parallel-subagents.md`（已按 agent 隔离修复） |
-| 8 | token 计费异常（input cost 为负等） | `daily-report.ts --days 7` | cost/token 比例异常 | `2026-08-02-langfuse-lib-ts-negative-input-cost.md`（脚本侧已修） |
-| 9 | 上报偶发丢失（batcher 慢 flush 丢弃） | 对拍 trace 数量：UI 数 vs telemetry.db 数 | 差异突增 | `2026-08-05-langfuse-batcher-drops-during-slow-flush.md` |
+| 7 | 并行 subagent 下 step 顺序乱/span 挂错 | `analyze.ts --tools` + trace 详情 | 并行 agent 的 generation 应各归其 AGENT obs | 已按 agent 隔离修复 |
+| 8 | token 计费异常（input cost 为负等） | `daily-report.ts --days 7` | cost/token 比例异常 | 脚本侧已修 |
+| 9 | 上报偶发丢失（batcher 慢 flush 丢弃） | 对拍 trace 数量：UI 数 vs telemetry.db 数 | 差异突增 | batcher 慢 flush 会丢事件；查 Git 历史 |
 | 10 | 401 / 连接失败 | §3.2 | 区分「key 未注册」vs「服务未启动」vs「host 配错」 | `.env` 用 `LANGFUSE_BASE_URL`；`LANGFUSE_HOST` 为空会导致 curl/脚本拿空 host |
-| 11 | **compact 结构异常** | 类型统计按 name 分组 | micro/full 应能通过 name 区分；input 应含 before 状态、output 应含 token 指标 | 2026-08-15 修复：此前 name 统一 `compact`（micro 不可区分）、input 缺失、estimated_tokens_*/cache_hit_rate_before 被 bridge 丢弃；需重启生效 |
+| 11 | **compact 结构异常** | 类型统计按 name 分组 | micro/full 应能通过 name 区分；input 应含 before 状态、output 应含 token 指标 | 此前 name 统一 `compact`（micro 不可区分）、input 缺失、estimated_tokens_*/cache_hit_rate_before 被 bridge 丢弃；需重启生效 |
 
 ### 排查流程（固定套路）
 
@@ -167,6 +167,6 @@ bunx langfuse-cli api traces list --limit 10 --json                        # CLI
 
 - `.env` 键名：`LANGFUSE_BASE_URL`（生效）vs `LANGFUSE_HOST`（skill 文档示例键，脚本两者都读，curl 只认后者）
 - `input: None` 不总是 bug：ErrorTurn 合成 span、非 receive 阶段 stage span 无 input 是设计；GENERATION/TOOL/AGENT 无 input 才是异常
-- generation 的 `input_json` 在 `tracer/generation.rs` 计算（raw_body 优先，回退 messages_json），**必须**被事件构造消费，否则是 dead value（本次事故形态）
-- 服务端数据在 `~/.peri-fuse/telemetry.db`（约 3GB），`langfuse.db` 只存认证 key；两者都别当临时文件删
+- generation 的 `input_json` 在 `tracer/generation.rs` 计算（raw_body 优先，回退 messages_json），**必须**被事件构造消费，否则是 dead value（常见故障形态）
+- 服务端数据在 `~/.peri-fuse/telemetry.db`，`langfuse.db` 只存认证 key；两者都别当临时文件删
 - peri-fuse 是 npx 缓存里的 npm 包，重启方式：`npx peri-fuse` 相关命令（包内 `dist/index.js` CLI）

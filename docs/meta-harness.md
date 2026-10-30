@@ -38,13 +38,14 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 - `"WebMiddleware": false`：关闭 builtin `web` 实例（`WebSearch` /
   `WebFetch` 从 direct tools、deferred 目录与检索、subagent
   `parent_tools`、workflow agent 工具列表一并消失）；
-- `"CronMiddleware": false`：关闭 builtin `cron` 实例。该实例的三个工具是
-  deferred，因此关闭面是 deferred 目录与 `SearchExtraTools` 检索结果（后两个面
+- `"CronMiddleware": false`：关闭 builtin `cron` 实例。该实例的四个模型可见工具
+  （`cron_register` / `cron_list` / `cron_remove` / `cron_toggle`）是 deferred，另有
+  宿主专用 `cron_acknowledge`；因此关闭面是 deferred 目录与 `SearchExtraTools` 检索结果（后两个面
   本来就不含 deferred 工具），实例、handler 与 1s tick 保留；
 - `"WorkspaceMiddleware": false`：关闭 builtin `workspace` 实例的工具面
   （`Read` / `Write` / `Edit` / `Glob` / `Grep` /
-  `folder_operations` / `Bash`）。这 7 个工具全部是 direct，因此关闭面是三个真实面
-  （首个模型请求 tools、subagent `parent_tools`、workflow agent 工具列表）；deferred
+  `folder_operations` / `Bash`）。这些工具全部是 direct，因此关闭面是首个模型请求
+  tools、subagent `parent_tools` 与 workflow agent 工具列表；deferred
   目录与检索面本来就不含 direct 工具（平凡成立）。关闭后链上不再提供任何文件系统与
   shell 工具（该实例之外：外部 MCP server 不在此关闭范围）。实例、handler 与 pool 级
   连接状态保留（策略关闭不是物理销毁）。
@@ -54,7 +55,7 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 段落 ID = `peri-acp/prompts/sections/` 文件名去 `.md`，另有渲染生成段。权威全集以 `peri-acp-types/src/meta_harness.rs::SECTION_IDS` 为准：
 
 `01_intro`、`02_system`、`03_doing_tasks`、`04_actions`、`05_using_tools`、
-`06_tone_style`、`07_runtime`、`10_hitl`、`11_subagent`、`12_ask_user`、
+`06_tone_style`、`07_runtime`、`env`、`10_hitl`、`11_subagent`、`12_ask_user`、
 `13_skills`、`persona`、`language`
 
 - `persona` / `language` 是渲染生成段，可经 `.peri/meta/persona.md` /
@@ -64,8 +65,8 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 
 ## 能力关闭键清单
 
-`false` key 有两张表，**已知键集合是两者的并集**（`peri-acp/src/provider/config.rs`
-消费，ARC-CAPABILITY-CLOSURE-001）：
+`false` key 有两张表，**已知键集合是两者的并集**（配置校验见
+`peri-config/src/app.rs` 的 `AppConfig::validate_meta_harness`，ARC-CAPABILITY-CLOSURE-001）：
 
 1. **链槽位名**：使用装配面 middleware 的 `name()` 返回值；权威清单以
    `peri-acp-types/src/meta_harness.rs::MIDDLEWARE_NAMES` 为准。常用项包括：
@@ -76,28 +77,21 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 `GitAttributionMiddleware`、
 `TodoMiddleware`、`HookMiddleware`、
 `PermissionMiddleware`、`HumanInTheLoopMiddleware`、`SubAgentMiddleware`、
-`McpMiddleware`、`WorkflowMiddleware`、`ToolSearch`、`GoalMiddleware`
+`McpMiddleware`、`ToolSearch`、`GoalMiddleware`
 
-> `FilesystemMiddleware` / `TerminalMiddleware` 已不是链槽位名（v4-part-4 wave 3）：
-> 7 个文件/终端工具迁为由 builtin `workspace` 实例提供，这两个键不再是**已知键**，
-> 配置里继续写它们会按未知键 warn 后丢弃。`AgentDefineMiddleware` 也已退役，定义改由 MCP
-> 资源提供。关闭下面的 `WorkspaceMiddleware` 会关闭整个 workspace 能力面，不等于旧单项关闭。
->
-> `GitWatchMiddleware` 同样已不是已知键（v4 wave 4）：git ref 变化改由 builtin
-> `workspace` 实例的 `workspace://git/ref` 资源 + MCP 2026-07-28 订阅回传，链上不再有
-> 该槽位。关闭办法 = `WorkspaceMiddleware: false`（关实例，同时跳过订阅建立）或实例配置
-> 的 `subscriptions` 覆盖（显式空配置 ⇒ 不订阅）。见
-> [design/git-watch-middleware.md](design/git-watch-middleware.md) §0.1。
+> `FilesystemMiddleware` / `TerminalMiddleware` 与 `GitWatchMiddleware` 已不是链槽位名：
+> 文件/终端工具由 builtin `workspace` 实例提供，git ref 变化改由该实例的
+> `workspace://git/ref` 资源 + MCP 2026-07-28 订阅回传。这些旧键按未知键 warn 后丢弃；
+> 关闭对应能力用 `WorkspaceMiddleware: false`（关实例，同时跳过订阅建立）或实例配置的
+> `subscriptions` 覆盖（显式空配置 ⇒ 不订阅）。`AgentDefineMiddleware` 亦已退役，定义改由
+> MCP 资源提供。见 [design/git-watch-middleware.md](design/git-watch-middleware.md)。
 
 2. **builtin MCP 实例策略键**：`WebMiddleware` / `ArtifactMiddleware` /
-   `CronMiddleware` / `WorkspaceMiddleware`
-   （`BUILTIN_INSTANCE_POLICY_KEYS`）。v4-part-2 起 Web / Artifact、v4-part-3 起
-   Cron、v4-part-4 起 `workspace`（7 个文件/终端工具：`Read` / `Write` /
-   `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`，模型面名字
-   原始名）不再是链槽位——能力由同进程 builtin 实例（`web` /
-   `artifact` / `cron` / `workspace`）提供，这四个键是该实例的关闭键；映射唯一来源是声明表
-   `peri-acp-types/src/builtin_mcp.rs` 的 `policy_key`，**不按 `mcp__` 前缀或实例名
-   硬编码过滤**。实例的另外两条关闭路径是配置片段
+   `CronMiddleware` / `WorkspaceMiddleware` / `WorkflowMiddleware`
+   （`BUILTIN_INSTANCE_POLICY_KEYS`）。这些能力由同进程 builtin 实例（`web` /
+   `artifact` / `cron` / `workspace` / `workflow`）提供，键即该实例的关闭键；映射唯一
+   来源是声明表 `peri-acp-types/src/builtin_mcp.rs` 的 `policy_key`，**不按 `mcp__`
+   前缀或实例名硬编码过滤**。实例的另外两条关闭路径是配置片段
    `{"<实例>": {"disabled": true}}` 与进程级环境开关（`PERI_MCP_BUILTIN=off`），
    详见 [MCP 生态参考](reference/mcp-ecosystem.md)。
 
@@ -105,10 +99,11 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 
 - 关闭 = 该能力提供者退出注入面：链槽位 middleware 不进链（工具、钩子、提示词
   贡献一并消失）；builtin MCP 实例的策略键关闭实例工具面（实例仍在 MCP 面板可见，
-  按配置路径另见上文第 2 条）；
-- **策略关闭不是物理销毁**：四个维度分开看——工具可见性、cron tick、readiness 与
-  物理生命周期互不连坐。关闭 `cron` 实例后 1s tick 由该代 builtin 监督者继续运行、
-  实例保持 1R ready，也不停 handler；
+  按配置路径另见上文第 2 条）。例外：`WorkflowMiddleware: false` 命中会话关闭集时
+  workflow 实例与消费者都不装配（物理关闭特例，见
+  [workflow-mcp 设计](design/workflow-mcp.md)）；
+- **策略关闭不是物理销毁**：关闭只改变会话内可见性与注入面，不销毁实例、连接或
+  后台调度；关闭 `cron` 实例后实例仍保持 ready，也不停 handler；
 - **审批与提问独立**：关闭 `PermissionMiddleware` 会移除审批钩子与
   `10_hitl`；关闭 `HumanInTheLoopMiddleware` 会移除 `AskUserQuestion` 与
   `12_ask_user`；两者互不替代；
@@ -117,7 +112,7 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
   `"PermissionMiddleware": false`；
 - **段落联动**：关闭 `SubAgentMiddleware` / `SkillsMiddleware` /
   `DefaultSystemPromptMiddleware` / `LangMiddleware` 会同时移除其持有的段落
-  （11_subagent / 13_skills / 01-06 + 07_runtime + persona / language）；
+  （11_subagent / 13_skills / 01-06 + 07_runtime + env + persona / language）；
 - 关闭面覆盖全部装配入口（主链 / 子链 / Workflow agent 链 / /bg 后台
   agent），无链下泄漏。
 

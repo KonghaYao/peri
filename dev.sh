@@ -25,8 +25,10 @@ if [[ ! -d "$cwd" ]]; then
     exit 1
 fi
 
-# 加载仓库根目录的 .env
-set -a; source "$repo_root/.env"; set +a
+# 加载仓库根目录的 .env（可选）
+if [[ -f "$repo_root/.env" ]]; then
+    set -a; source "$repo_root/.env"; set +a
+fi
 
 # 确保日志目录存在
 mkdir -p "$(dirname "$RUST_LOG_FILE")"

@@ -31,17 +31,17 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
 | Beta flag 投影 | `betas.rs`：`BetaFlags`（re-export 契约层 `peri_acp_types::beta_flags`）、`resolve`、`from_merged`、`HISTORY_WINDOW_V1`、`is_known`；`system.rs::flags`；`settings.rs::beta_flags` | `config.betas` 稀疏 bool 覆盖表由**合并后 settings** 派生，global→workspace 逐 key 覆盖（workspace 显式 false 可关闭 global true）；未覆盖与未知 id 恒 false；未知键解析后剔除并 warn，非 bool 使该来源解析失败；保存沿用 `ConfigSource::save`（CAS），不新增写路径。TUI 本地键 `history-window-v1` 由 `is_known` 接受但不在 ACP `BETA_FLAGS`，故 ConfigPanel 不列；`peri-tui` 启动读取一次并写 `HISTORY_WINDOW_V1`（未配置视为开启、显式 false 关闭），无热重载，仍需服务端在 initialize 响应中明确回显 `peri.historyWindowV1` |
 | Provider 解析 | `provider.rs`：`try_resolve`、`try_resolve_snapshot`、`resolve_for_alias`、`validate_responses_provider`、`ResolvedProvider`、`ResponsesAuthentication`、`ENVIRONMENT_KEYS` | `MODEL_PROVIDER` + `MODEL_TYPE` 选择配置的 provider ID 和档位；缺省用 active profile；`openai_responses` 显式协议选择，未知 type 拒绝。Responses 须有模型与正整数窗口；已确认 ChatGPT plan 模型缺窗口时派生 1M，不写回配置；API key 与未知模型仍须显式窗口。typed `ProviderAuthConfig` 只保存 API key 模式或 ChatGPT 账户/subject/clientId 引用。`validate_responses_provider` 独立校验 endpoint 与认证，供 resolver 和 TUI 编辑共用；消费者负责 Model adapter 构造。快照/保存边界用 `try_resolve_snapshot`：provider 级错误仍拒绝文档，真正未完成的 model/window 绑定只让 provider 不可用，不阻断其它配置保存；运行时 `try_resolve` 对生效档位保持严格 |
 | MCP 基础配置 | `mcp.rs`：`parse_global`、`parse_project`、`resolve_from_files`、`validate_config`、`server_config_hash` | global/plugin/project 合并、插件手动去重、typed 准入与 cache 关闭优先 |
-| Builtin 环境策略 | `mcp.rs`：`builtin_enabled` | `PERI_MCP_BUILTIN` 解释规则归 core；旧 builtin adapter 只采集 env，不复制规则 |
+| Builtin 环境策略 | `mcp.rs`：`builtin_enabled` | `PERI_MCP_BUILTIN` 解释规则归 core；builtin adapter 只采集 env，不复制规则 |
 | 快照中的插件/普通/bare 投影 | `system.rs`：`mcp_with_plugins`、`bare_mcp`、`cache_policy`、`builtin_mcp_enabled` | 从冻结原始输入派生；插件发现和执行展开留在 middleware |
-| Langfuse 基础键 | `observability.rs`：`LangfuseConfig`、`resolve`、`ENVIRONMENT_KEYS`、`LangfuseCompression`、`ConfigValueSource` | 13 个旧键保持 clamp/忽略非法值语义，`batch_max_event_bytes` 默认 4 MiB；Debug 脱敏；`ENVIRONMENT_KEYS` 现为 24 项，新键常量从 `observability_spool` 拼入，不在别处维护第二份清单 |
-| Langfuse spool/编码/预算键 | `observability_spool.rs`：`SPOOL_ENABLED`…`SHUTDOWN_GRACE_SECS`、逐键解析与 `resolve` | 11 个新键逐键选胜出来源（env > `langfuse.*` settings > default），布尔/压缩/非零十进制规则见[环境变量表](../standards/environment-variables.md)；胜出值非法返回 `LangfuseConfigError`，不回退默认；跨键约束（阈值、块大小与预算）归客户端构造期校验 |
+| Langfuse 基础键 | `observability.rs`：`LangfuseConfig`、`resolve`、`ENVIRONMENT_KEYS`、`LangfuseCompression`、`ConfigValueSource` | 旧键保持 clamp/忽略非法值语义，`batch_max_event_bytes` 默认 4 MiB；Debug 脱敏；`ENVIRONMENT_KEYS` 由本模块与 `observability_spool` 的常量拼入，不在别处维护第二份清单 |
+| Langfuse spool/编码/预算键 | `observability_spool.rs`：`SPOOL_ENABLED`…`SHUTDOWN_GRACE_SECS`、逐键解析与 `resolve` | spool 键逐键选胜出来源（env > `langfuse.*` settings > default），布尔/压缩/非零十进制规则见[环境变量表](../standards/environment-variables.md)；胜出值非法返回 `LangfuseConfigError`，不回退默认；跨键约束（阈值、块大小与预算）归客户端构造期校验 |
 | Langfuse 配置错误 | `observability.rs`：`LangfuseConfigError::Invalid { key, origin, reason }`；`assembly.rs::resolve` | 错误只带键名、来源与原因，不带原值；按来源映射为 `ConfigurationError::InvalidInput`（settings→GlobalFile，env→Environment），拒绝整份快照的发布 |
 | TUI | `ui.rs`：`TuiConfig::{from_extra,sync_to_extra}` | UI 默认值、typed 字段和 extra 保存规则；视图状态留在 TUI |
 
 ## 更新接纳边界
 
 - Hook trust 的 settings 摘要在 `trust.rs::settings_binding` 覆盖来源存在状态，
-  缺失与空文件不共享授权；此摘要格式修复使旧 settings 授权失效，须显式重新授权。
+  缺失与空文件不共享授权；摘要格式变化使旧 settings 授权失效，须显式重新授权。
   回归入口为 `trust_test.rs::missing_settings_file_has_no_digest_collision_with_empty_file`。
 
 - settings 更新保留目标原文 nested `config.mcpServers` / `config.mcpCache`，
@@ -49,10 +49,8 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
   已有 workspace `$schema` 优先。提交后使用 accepted snapshot，不能发布候选草稿。
 - `update_mcp` 只接受显式无来源输入或本 cwd `.mcp.json` 的 Project server；
   拒绝 Global / Plugin / Builtin / 其他 cwd.Project，防止 merged 全局凭据落入项目。
-- expected revision 是编辑开始的基线，提交时不能改取最新版。public core 接口已修复；
-  TUI 即时入口 `save_effective` 仍在提交时取 revision，Login/Model 长草稿已使用
-  `save_effective_at`，但 ACP 远程 wire token 接线仍在 active issue 保持 followup，
-  不宣称端到端版本保护已完整闭环。
+- expected revision 是编辑开始的基线，提交时不能改取最新版。TUI 即时入口 `save_effective` 在提交时取 revision，Login/Model 长草稿使用
+  `save_effective_at`；ACP 远程 wire token 接线不在本 crate 的版本保护闭环内。
 
 ## Consumer 接线
 
@@ -81,13 +79,11 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
 - `settings_test.rs`：固定布局、同文件身份、差异保存、显式 reload、lenient
   错误禁止写错层、unknown 顶层字段保留。
 - `app_test.rs`、`mcp_test.rs`、`observability_test.rs`、`ui_test.rs`、`resources_test.rs`：领域规则。
-- `observability_spool_test.rs`、`assembly_test.rs`：24 键逐项与默认、新键胜出来源与归一化、非法胜出值拒绝快照并保留来源定位、禁用 spool 不改动既有文件。
+- `observability_spool_test.rs`、`assembly_test.rs`：全部键逐项与默认、新键胜出来源与归一化、非法胜出值拒绝快照并保留来源定位、禁用 spool 不改动既有文件。
 - `mcp-packages/config/src/cas_test.rs`：missing/empty 区分、冲突、并发 CAS 与 wire。
 
 典型命令：`cargo test -p peri-config --lib -- system::tests`。
-实际验收记录及独立 pool 接线、跨进程/远端矩阵见
-[2026-10 月志](../../spec/history/2026-10.md)（2026-10-01 条目）。输入读取非跨文件
-事务，CAS 不保护不合作编辑器；旧 pool 与 session prefix 不会自动热更新。
+输入读取非跨文件事务，CAS 不保护不合作编辑器；旧 pool 与 session prefix 不会自动热更新。
 
 ## 配置 I/O 适配
 

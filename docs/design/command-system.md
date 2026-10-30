@@ -1,6 +1,6 @@
 # Command 系统权威架构
 
-> 状态：已批准目标设计；当前代码差距与实施进度由对应 active issue 维护。
+> 状态：已批准目标设计；实现以代码与契约测试为准。
 >
 > 事实源：`peri-acp-types/src/command.rs`（契约，子模块挂载点）+ `command_name.rs`（词法契约）+ `command_registry.rs`（注册表本体）、`peri-acp/src/session/command/mod.rs`（组合根 / register_builtins）、`peri-agent/src/session/exec/executor.rs`（拦截）、`peri-tui/src/kit/input_area.rs` + `slash_completion.rs`（展示）。
 
@@ -66,14 +66,14 @@ CommandName := 裸名                              // 第一等级域（core / u
 - **数据结构：扁平 map，不做树**。`HashMap<fullname_lowercase, RouteEntry>` + `HashMap<alias_lowercase, fullname>`；严格输入下查找永远精确（全名 / 第一等级域内裸名 / alias），域枚举用前缀过滤（`mcp:demo:`）。
 - **冲突裁决在注册路径**：优先级 内置 > 本地 skill > 动态注入（MCP / 插件 / 用户）；低优先级重名 → 拒绝 + 警告，不覆盖、不静默。
 - **生命周期**：发现完成才注册（`Started → Discovered` 不占位）；断连按 namespace 前缀批量注销；变更触发 `on_change` → 投影重建推送（`McpSkillRegistry` 先例泛化）；重连 = 注销 → 重发现 → 重注册，天然无 ABA。
-- **投影协议**：`available_commands_update` = 注册表投影，每条携带 kind / category / args schema 渲染元数据；TUI `build_slash_items` 的反推逻辑整体删除。
-- **ui 域归属：TUI 上送注册**。TUI 是 ui 命令拥有者，连接时把自己的 ui 命令注册进 ACP 注册表（provenance=ui，handler=TUI-local，经 `caps.ui_commands` 通道升级为能力明细）；执行时 TUI 提交前检查 `ui:` 域 → 本地拦截，不发 ACP。
+- **投影协议**：`available_commands_update` = 注册表投影，每条携带 kind / category / args schema 渲染元数据；TUI 只消费投影，不从名称集合反推 kind。
+- **ui 域归属：TUI 上送注册**。TUI 是 ui 命令拥有者，连接时把自己的 ui 命令注册进 ACP 注册表（provenance=ui，handler=TUI-local，明细经 `caps.ui_commands` 上送）；执行时 TUI 提交前检查 `ui:` 域 → 本地拦截，不发 ACP。
 
 ## Execution 层（handler / args / context）
 
 - **handler：trait object 为主，执行域是元数据而非类型**。`trait CommandHandler { fn execute(&self, ctx) -> CommandOutcome }`；`CommandOutcome = Done(CommandResult) | Inject(String) | Delegate(String)`（Done=完成并反馈，Inject=透传指令进 agent 管线，Delegate=转发其他执行者：ui 域回 TUI / 未来 MCP 直连）。`AgentPassthrough` / `McpProxy` 是数据驱动的 handler 实现，不是路由层的分支。新增执行域 = 新增 trait 实现，注册表 / 协议 / 路由核心零改动。
 - **注册表与执行解耦（类型层面）**：注册表只持 `Arc<dyn CommandHandler>` + 元数据，不 import 任何 handler 实现；新增命令 = 新模块在组合根注册。
-- **args schema：serde 完整模型，投影协议成员**。`ArgsSchema { positionals, named, flags }`，`ArgKind = String | Int | Choice(Vec<String>) | Path`，模型第一版即完整（TUI 补全 / 校验器依赖其形状，残缺模型是破坏性变更）；解析器分阶段实现，第一版 Positional / Named / Flag + Choice 校验，Path 校验存在性、补全留待 TUI 能力。
+- **args schema：serde 完整模型，投影协议成员**。`ArgsSchema { positionals, named, flags }`，`ArgKind = String | Int | Choice(Vec<String>) | Path`，模型第一版即完整（TUI 补全 / 校验器依赖其形状，残缺模型是破坏性变更）；解析器覆盖 Positional / Named / Flag + Choice 校验，Path 校验存在性，补全留待 TUI 能力。
 - **CommandContext：接口注册表**。core 常驻（session_id / history / cwd / event_sink / cancel_token）；扩展依赖经 `ctx.dep::<dyn Trait>()` 按接口取（非具体类型，可注入 mock），DependencyBag 内部 `HashMap<TypeId, Arc<dyn Any + Send + Sync>>`；新增依赖不动 Context 结构体；缺失 → 优雅报错。
 
 ## Feedback 层（反馈通道）
@@ -88,7 +88,7 @@ CommandName := 裸名                              // 第一等级域（core / u
 - **投影条目升级**：`AvailableCommand = { fullname（唯一键，注册表层）, kind（Command | Skill | McpSkill | Panel，注册时由 handler 域推导一次）, description, aliases, category?, args?（serde ArgsSchema）, level（1 | 2） }`；wire `name` 字段承载投影渲染形态（见「渲染形态」，Level1 裸名 / Level2 全名），域归属经条目级 `periKind` / `periLevel` 下发。
 - **键模型**：唯一键 = 全名（`core:compact` / `ui:history` / `mcp:demo:hello`）；**裸名不是独立键**，是解析层对第一等级域（core / ui）的快捷匹配——`/compact` 在 core/ui 域内精确匹配 name。本地 skill 与内置命令同键（`core:compact`），冲突裁决在注册路径生效，模型自洽。
 - **渲染形态（协议层投影即渲染形态，TUI/stdio 一条实现）**：投影 name 按 level 渲染——level 1 输出裸名（`compact`），level 2 输出全名（`mcp:demo:hello`）；**display 即 lexical**，用户提交的文本与显示一致，解析器严格命中。注册表唯一键仍为全名；投影 name 允许 core/ui 同裸名重复（`core:hello` 与 `ui:hello` 均投影为 `hello`），消费端按条目级 kind 区分，投影不做按名去重。
-- **caps 升级**：`ui_commands: bool → Vec<UiCommandSpec{ name, aliases, description, args? }>`。TUI 连接时上送明细 → ACP 注册为 `ui:*` 条目（provenance=ui，handler=TuiLocal）；ACP 的 `UI_COMMANDS` 常量整体删除，门控语义反转——从"TUI 声明 bool → ACP 附加硬编码"变为"TUI 声明明细 → ACP 注册"。
+- **caps**：`ui_commands: Vec<UiCommandSpec{ name, aliases, description, args? }>`。TUI 连接时上送明细 → ACP 注册为 `ui:*` 条目（provenance=ui，handler=TuiLocal）。
 - **执行结果回传**：`CommandResult` 增 `feedback: Option<CommandFeedback{ level, message, channel }>`；新增 `CommandFeedback` 事件（ACP → TUI 通知条渲染）；channel=Session 仅 opt-in 才另写系统消息进会话；执行失败 = `level: Error` 走同一事件通道。
 - **动态注册 / 注销**：MCP / 插件发现走 ACP 内部（middleware → 注册表），不经 TUI 协议；变更统一经 `available_commands_update` 投影推送（触发时机 = 注册表 on_change）。
 
@@ -154,8 +154,8 @@ MCP skill 的组合即：声明来源 = 外部系统（动态），执行域 = A
 
 ## 设计不变式
 
-1. **单一事实源**：命令元数据只在 RouteEntry 定义一次；`build_slash_items` 不得再用 SKILL_NAMES / MCP_SKILL_NAMES 集合反推 kind（现状：`peri-tui/src/kit/input_area.rs` 的 `build_slash_items` 在反推）。
+1. **单一事实源**：命令元数据只在 RouteEntry 定义一次；TUI 不得用 SKILL_NAMES / MCP_SKILL_NAMES 集合反推 kind。
 2. **展示与执行解耦**：TUI 不执行命令语义判断，只消费 `available_commands_update` 投影。
-3. **解析唯一实现**：词法切分、严格精确匹配、alias 解析只在注册表一处实现（现状 `find` / `find_arc` 双份复制）。
+3. **解析唯一实现**：词法切分、严格精确匹配、alias 解析只在注册表一处实现。
 4. **handler 开放扩展**：执行域是元数据不是类型；`CommandHandler` trait + `Outcome{Done, Inject, Delegate}`；新增执行域 = 新增 trait 实现，路由核心零改动。
 5. **上下文按需注入**：core 字段常驻，扩展依赖经 `ctx.dep::<dyn Trait>()` 接口注册表按需获取；新增依赖不动 `CommandContext` 结构体；缺注入的命令优雅报错。

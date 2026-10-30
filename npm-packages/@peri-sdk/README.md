@@ -4,7 +4,7 @@
 
 SDK 主入口不启动或停止 Peri CLI、Workspace 进程，也不提供本地 SQLite 后端。可选的 `@peri-code/sdk/sandbox` server-side 子入口按宿主显式注入的 adapter 管理 sandbox 生命周期。宿主负责提供 transport、持久化 Store，并在路由层保证同一 Session 只落在一个实例上。
 
-下面的接入代码来自 [`peri-cf`](../peri-cf/server/agent/compose.ts) 的真实装配，而不是抽象伪代码。
+下面的接入代码来自 [`peri-cf`](../peri-cf/server/compose.ts) 的真实装配，而不是抽象伪代码。
 
 ## 适合什么场景
 
@@ -661,4 +661,4 @@ Machine/workspace 绑定与 SDK 执行所有权是两件独立职责，不能互
 - [Chat 架构设计](../../docs/design/peri-sdk-chat.md)
 - [Ownership 模型](OWNERSHIP-MODEL.md)
 - [代码索引](../../docs/code-index/peri-ts-sdk.md)
-- [peri-cf 服务端装配](../peri-cf/server/agent/compose.ts)
+- [peri-cf 服务端装配](../peri-cf/server/compose.ts)

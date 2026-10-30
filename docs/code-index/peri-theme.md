@@ -17,32 +17,32 @@
 
 | 我想做什么 | 主文件 | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
-| 加载主题 | `peri-theme/src/loader.rs` | `load_theme`:38、`ThemeLoadError`:17 | 返回 `Arc<ThemeDefinition>`；用户文件优先于内置 JSON，已有用户文件解析失败直接返回错误 |
-| 查看主题名称 | `peri-theme/src/loader.rs` | `list_available_themes`:45 | 委托来源目录枚举，排序去重，不预先解析 JSON |
-| 调整 HOME 和内置别名查找 | `peri-theme/src/loader/source.rs` | `ThemeSources::from_environment`:16、`read`:79 | 读取 `~/.peri/themes/{name}.json`，再查 dark/peri-dark、light/peri-light；根加载保留路径和符号链接支持 |
-| 修改继承策略 | `peri-theme/src/loader/source.rs` | `load_flat`:28、`merge_document`:46、`validate_name`:122 | `extends` 只接受主题名；当前链检测循环，最多 10 个父级；父先子后覆盖叶子键，子 name 默认 unnamed、mode 可继承 |
-| 支持更多 JSON 表达形式 | `peri-theme/src/loader/resolve.rs` | `flatten_json_obj`:12 | 对象用点连接，数组用数字索引；保留键大小写，字符串、数字、布尔转为文本 |
-| 修改引用规则 | `peri-theme/src/loader/resolve.rs` | `resolve_refs`:47、`resolve_ref_value`:69 | 每个根独立活动链；先精确键查找再不区分大小写匹配；最多 10 条引用边，未解析键返回错误 |
-| 修改颜色格式 | `peri-theme/src/loader/resolve.rs` | `parse_hex_color`:103 | trim 后仅接受 ASCII #RGB/#RRGGBB；先验证字节再切片，Unicode 非法输入返回错误 |
-| 添加或调整 token 解码 | `peri-theme/src/loader/decode.rs` | `decode_flat`:11、`build_theme_from_flat`:50 | 提取元数据、解析全部引用后构造 Palette/SemanticTokens/ComponentTokens，必填项缺失报错 |
-| 兼容旧版用户主题字段 | `peri-theme/src/loader/decode.rs` | `build_session_title_palette`:32、`build_theme_from_flat`:50 | 新语义键和会话标题色板保留既有默认值；色板逐项允许缺省或非法值回退 |
-| 修改默认主题 | `peri-theme/src/builtin.rs`、`peri-theme/themes/dark.json`、`peri-theme/themes/light.json` | `dark_theme`:82、`light_theme`:239 | Rust 默认与内置 JSON 的整个 ThemeDefinition 由相等测试约束，light 主文字为 #1E1E1E |
-| 将主题映射到 ratatui-kit | `peri-theme/src/bridge.rs` | `ThemeDefinitionExt`:11、`to_palette`:19 | 映射到 kit 的 Palette，保持上游类型边界 |
-| 将主题映射到 Peri 颜色 | `peri-theme/src/bridge.rs` | `to_peri_colors`:39、`default_peri_colors`:81 | 从语义 token 派生 PeriColors，默认构造使用 dark |
-| 切换全局主题 | `peri-theme/src/atoms.rs` | `init_theme_atoms`:27 | 先派生 Palette/PeriColors，再依次写 THEME_ATOM、PALETTE_ATOM、PERI_COLORS_ATOM |
+| 加载主题 | `peri-theme/src/loader.rs` | `load_theme`、`ThemeLoadError` | 返回 `Arc<ThemeDefinition>`；用户文件优先于内置 JSON，已有用户文件解析失败直接返回错误 |
+| 查看主题名称 | `peri-theme/src/loader.rs` | `list_available_themes` | 委托来源目录枚举，排序去重，不预先解析 JSON |
+| 调整 HOME 和内置别名查找 | `peri-theme/src/loader/source.rs` | `ThemeSources::from_environment`、`read` | 读取 `~/.peri/themes/{name}.json`，再查 dark/peri-dark、light/peri-light；根加载保留路径和符号链接支持 |
+| 修改继承策略 | `peri-theme/src/loader/source.rs` | `load_flat`、`merge_document`、`validate_name` | `extends` 只接受主题名；当前链检测循环，最多 10 个父级；父先子后覆盖叶子键，子 name 默认 unnamed、mode 可继承 |
+| 支持更多 JSON 表达形式 | `peri-theme/src/loader/resolve.rs` | `flatten_json_obj` | 对象用点连接，数组用数字索引；保留键大小写，字符串、数字、布尔转为文本 |
+| 修改引用规则 | `peri-theme/src/loader/resolve.rs` | `resolve_refs`、`resolve_ref_value` | 每个根独立活动链；先精确键查找再不区分大小写匹配；最多 10 条引用边，未解析键返回错误 |
+| 修改颜色格式 | `peri-theme/src/loader/resolve.rs` | `parse_hex_color` | trim 后仅接受 ASCII #RGB/#RRGGBB；先验证字节再切片，Unicode 非法输入返回错误 |
+| 添加或调整 token 解码 | `peri-theme/src/loader/decode.rs` | `decode_flat`、`build_theme_from_flat` | 提取元数据、解析全部引用后构造 Palette/SemanticTokens/ComponentTokens，必填项缺失报错 |
+| 兼容旧版用户主题字段 | `peri-theme/src/loader/decode.rs` | `build_session_title_palette`、`build_theme_from_flat` | 新语义键和会话标题色板保留既有默认值；色板逐项允许缺省或非法值回退 |
+| 修改默认主题 | `peri-theme/src/builtin.rs`、`peri-theme/themes/dark.json`、`peri-theme/themes/light.json` | `dark_theme`、`light_theme` | Rust 默认与内置 JSON 的整个 ThemeDefinition 由相等测试约束，light 主文字为 #1E1E1E |
+| 将主题映射到 ratatui-kit | `peri-theme/src/bridge.rs` | `ThemeDefinitionExt`、`to_palette` | 映射到 kit 的 Palette，保持上游类型边界 |
+| 将主题映射到 Peri 颜色 | `peri-theme/src/bridge.rs` | `to_peri_colors`、`default_peri_colors` | 从语义 token 派生 PeriColors，默认构造使用 dark |
+| 切换全局主题 | `peri-theme/src/atoms.rs` | `init_theme_atoms` | 先派生 Palette/PeriColors，再依次写 THEME_ATOM、PALETTE_ATOM、PERI_COLORS_ATOM |
 
 ## 类型与消费边界
 
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
-| 主题身份与模式 | `peri-theme/src/theme.rs` | `ThemeMode`:13、`ThemeDefinition`:21；可克隆、比较和序列化 |
-| 基础色板 | `peri-theme/src/palette.rs` | `Palette`:11；crate 自有类型，区别于 bridge 输出的 kit Palette |
-| 语义色 | `peri-theme/src/semantic.rs` | `SemanticTokens`:11、`AccentTokens`:40、`SyntaxTokens`:55 |
-| 组件 token | `peri-theme/src/component.rs` | `ComponentTokens`:12；message/input/panel/popup/statusbar/markdown/scrollbar |
-| 非组件配色投影 | `peri-theme/src/peri_colors.rs` | `PeriColors`:11；`Default` 使用 Color::Reset，不读取全局 atom |
-| 完整主题订阅 | `peri-theme/src/atoms.rs` | `THEME_ATOM`:18；Arc 包装的 ThemeDefinition |
-| kit 配色订阅 | `peri-theme/src/atoms.rs` | `PALETTE_ATOM`:21；kit Palette 的 Copy 值 |
-| Peri 配色订阅 | `peri-theme/src/atoms.rs` | `PERI_COLORS_ATOM`:24；Arc 包装的 PeriColors |
+| 主题身份与模式 | `peri-theme/src/theme.rs` | `ThemeMode`、`ThemeDefinition`；可克隆、比较和序列化 |
+| 基础色板 | `peri-theme/src/palette.rs` | `Palette`；crate 自有类型，区别于 bridge 输出的 kit Palette |
+| 语义色 | `peri-theme/src/semantic.rs` | `SemanticTokens`、`AccentTokens`、`SyntaxTokens` |
+| 组件 token | `peri-theme/src/component.rs` | `ComponentTokens`；message/input/panel/popup/statusbar/markdown/scrollbar |
+| 非组件配色投影 | `peri-theme/src/peri_colors.rs` | `PeriColors`；`Default` 使用 Color::Reset，不读取全局 atom |
+| 完整主题订阅 | `peri-theme/src/atoms.rs` | `THEME_ATOM`；Arc 包装的 ThemeDefinition |
+| kit 配色订阅 | `peri-theme/src/atoms.rs` | `PALETTE_ATOM`；kit Palette 的 Copy 值 |
+| Peri 配色订阅 | `peri-theme/src/atoms.rs` | `PERI_COLORS_ATOM`；Arc 包装的 PeriColors |
 
 本 crate 不实现 TUI 控件；实际主题加载与模式切换消费者见
 [`peri-tui` 索引](peri-tui.md) 和 `peri-tui/src/kit/entry.rs`。

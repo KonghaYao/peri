@@ -56,7 +56,7 @@ Workspace 由可移植值对象 `WorkspaceRef` 表达：`runtimePath` 是 Agent/
 
 ## 5. 事实与同步
 
-`ChatService` 发布按绑定代次编号的 `ChatFactEnvelope`（seed、历史批次、通知、队列、任务、交互、运行态、关闭）。事实日志供晚挂 View 重放；View 不执行动作、不决定权限、不取消任务、不关闭运行后端。
+`ChatService` 发布按绑定代次编号的 `ChatFactEnvelope`（`seed-config`、`history-*`、`notice`、`input-*`、`task-snapshot`、`interaction-*`、`turn-*`、`run-state`、`closed`）。事实日志供晚挂 View 重放；View 不执行动作、不决定权限、不取消任务、不关闭运行后端。
 
 - 每个绑定代次拥有独立的一对 Y.Doc 与同步源；换代时成对替换，旧代次条目不能混入新代次。
 - `ChatYjsChannel` 只是逻辑帧通道：不创建 WebSocket/HTTP，不携带凭据，鉴权与物理连接由应用完成。
@@ -68,7 +68,7 @@ Workspace 由可移植值对象 `WorkspaceRef` 表达：`runtimePath` 是 Agent/
 
 `ChatRuntime` 描述一次 Chat 的运行实例来源，不是网络主机名；两个分支都产出可供 ACP 使用的 transport。
 
-1. `{ kind: "wasm" }`：Manager 为每次激活启动独立 WASM 运行后端；可注入 `moduleUrl`、`moduleFactory`、`env` 与 `onDiagnostic`。`createChat({ runtime })` 可按 Chat 合并 `env`、覆盖 `onDiagnostic`，并把自己的 `agentConfigJson` 传给启动器。scheduler 与清理/启动超时由运行后端自持，调用方不可配置；`lifecycle` 未显式给出时按 runtime kind 取默认值（wasm 为 activation 25s、shutdown 30s），显式传入仍优先。
+1. `{ kind: "wasm" }`：Manager 为每次激活启动独立 WASM 运行后端；可注入 `moduleUrl`、`moduleFactory`、`env` 与 `onDiagnostic`。`createChat({ runtime })` 可按 Chat 合并 `env`、覆盖 `onDiagnostic`，并把自己的 `agentConfigJson` 传给启动器。scheduler 与清理/启动超时由运行后端自持，调用方不可配置；`lifecycle` 未显式给出时按 runtime kind 取默认值（`src/chat/lifecycle.ts` 的 `DEFAULT_WASM_LIFECYCLE` / `DEFAULT_TRANSPORT_LIFECYCLE`），显式传入仍优先。
 2. `{ kind: "transport", factory }`：调用方按 path 创建 transport；`factory` 收到 `{ signal, chatId, agentConfig }`（旧签名可忽略后两项），`factory.close()` 成功即停止证明，失败保留原因供重试。模型/权限隔离取决于该 factory 创建的运行时，SDK 不额外隔离。
 
 `PeriInstance` 是内部实现，不是发布门面。工厂把句柄的路径、Store、per-chat 运行后端配置（`agentConfigJson`/`runtimeEnv`/`payloadBudgets`）与生命周期上下文转换为一次运行装配；`WasmRuntimePool` 负责运行后端租约与释放证据，`acquire` 透传 per-chat 启动配置。共享 MCP server 地址不共享 MCP client、声明路由或审批状态。

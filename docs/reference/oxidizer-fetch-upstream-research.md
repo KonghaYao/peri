@@ -28,7 +28,7 @@
 
 其他 HTTP 消费方也没有一套同构语义：远程 MCP 在 [`rmcp` transport](../../peri-middlewares/src/mcp/client/transport.rs) 上显式使用 `reqwest::Client` 和 OAuth 包装；[Web 工具](../../mcp-packages/web/src/web_fetch.rs)、[artifact](../../mcp-packages/artifact/src/client.rs) 与 [Langfuse](../../langfuse-client/src/client.rs) 各有请求协议。远程 Store 生产路径使用 [`turso_serverless`](../../peri-resources/Cargo.toml)；该 crate 的 `reqwest` 仅为云端探测测试的 dev dependency，不能靠替换 Peri 自己的 HTTP client 覆盖其内部传输。
 
-当前工作树是 `pre-release/main`，没有 `peri-wasm` crate；[Serverless 执行环境身份](../design/serverless-execution-identity.md) 描述的是 `refactor/wasm` 分支的 `wasm32-unknown-emscripten` + Node/Bun/workerd 宿主路径，并明确普通浏览器不直接使用这条 Node socket 路线。故 Browser Fetch 与 WASI Preview 2 属于潜在后续目标，不是这条已批准目标路径的直接替换后端。该分支的构建结果和依赖闭包需在其工作树单独核对，本文没有替它宣称编译通过。
+本仓库包含 `peri-wasm`（`wasm32-unknown-emscripten`）；[Serverless 执行环境身份](../design/serverless-execution-identity.md) 描述其 Node/Bun/workerd 宿主路径，并明确普通浏览器不直接使用这条 Node socket 路线。故 Browser Fetch 与 WASI Preview 2 属于潜在后续目标，不是这条已批准目标路径的直接替换后端。`peri-wasm` 的构建结果和依赖闭包以该 crate 的实际构建验证为准，本文没有替它宣称编译通过。
 
 ## 判断与建议
 

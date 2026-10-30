@@ -121,7 +121,7 @@
 - 处理状态：关键说明已更新；未以文档同步代替相关运行时部署验收。
 - 类型：文档/职责/路由漂移；按适用契约修正文档，不因此改变已批准目标。
 - 文档：`docs/design/session-id-environment.md:237`、`docs/design/serverless-execution-identity.md:126`、`docs/code-index/peri-resources.md:64`、`docs/code-index/peri-resources.md:90` 仍报当前版本或最终迁移为 14。
-- 证据：`peri-resources/src/sessions/canonical.rs:27` 为 17；`peri-resources/src/sessions/sqlite_store/schema.rs:238` 写入 17。`spec/issues/2026-10-07-workstate-schema17-redesign.md:13` 要求保留 schema17 格式。
+- 证据：`peri-resources/src/sessions/canonical.rs:27` 为 17；`peri-resources/src/sessions/sqlite_store/schema.rs:238` 写入 17。当时的 schema17 保留要求见 Git 历史。
 - 影响/建议：误导兼容和迁移排障。当前版本路由到 canonical 常量，不机械删除 v12/v14 的历史迁移含义，不把版本修正当作 Work 性能优化闭环。
 
 ### P2-07. Micro 文档仍声称压缩历史工具输入（B7）

@@ -2,8 +2,8 @@
 
 > 本文件是「外部 MCP server ↔ view 层」透传信道的设计定稿，回答一个问题：**ACP 只有一条连接，多个 MCP server 的数据（App 交互、工具结果、通知）如何在这条信道上分离路由，保证数据正确送达正确的接收方。**
 >
-> 状态：**现行设计**——stdio relay 由 `PERI_MCP_APPS` deployment profile 启用；Apps envelope、binding lease、resource relay 与 canonical Permission/HITL 工具调用已落地。下游 Web Host、iframe 与 TUI Apps 渲染不在 Peri relay 范围内。
-> 关联文档：`docs/reference/mcp-ecosystem.md`（MCP 生态定位，§6 MCP Apps、§9 内部落地）；`docs/design/peri-acp-protocol.md`（ACP 协议）
+> 状态：**现行设计**——stdio relay 由 `PERI_MCP_APPS` deployment profile 启用；resource relay、canonical Permission/HITL 工具调用与多路数据隔离已落地。ACP 侧规范方法集是 `peri/mcp/apps/*`（`peri-acp/src/host/apps_facade.rs::SessionAppsFacade`）；本文的 `peri/mcp/{open,resource,app,invoke}` 是同一 facade 的薄别名，仅为既有客户端保留。App 调用的授权凭据是 `McpAppRecord`（取代 `McpAppBindingLease`）。下游 Web Host、iframe 与 TUI Apps 渲染不在 Peri relay 范围内。
+> 关联文档：`docs/reference/mcp-ecosystem.md`（下文简称 guide；MCP 生态定位，§6 MCP Apps、§9 内部落地）；`docs/design/peri-acp-protocol.md`（ACP 协议）
 > 本文是 Perihelion 内部 relay 的目标设计，不复制或替代外部 MCP/MCP Apps 规范。
 
 ## 目录
@@ -58,7 +58,7 @@
 
 | # | 决策点 | 选择 | 理由 |
 | --- | --- | --- | --- |
-| D1 | 外层方法名 | **包装**：`peri/mcp/app`、`peri/mcp/resource`（否决定稿前 guide §9.2 的「倾向裸传」） | 见 3.1 |
+| D1 | 外层方法名 | **包装**：规范名 `peri/mcp/apps/*`；`peri/mcp/app`（tools/call）、`peri/mcp/resource`（resources/read）、`peri/mcp/open` 为薄别名（否决定稿前 guide §9.2 的「倾向裸传」） | 见 3.1 |
 | D2 | 信封字段 | `envelopeVersion` + `serverId` + `appSessionId` + `resourceUri` + `mcpProtocolVersion`（可选）+ `appsProtocolVersion`（由 payload/下游协商）+ `payload` | 见第 4 章 |
 | D3 | id 空间 | ACP 外层 transport id 与 payload 内 Apps id 分离；MCP server id 由 MCP client 管理，不假设 Peri 可见 | 见第 5 章 |
 | D4 | 请求-响应关联 | ACP request 用 transport id；payload 保留 Apps request id；Peri 不复制 MCP client 的内部 pending map | 见 5.2 |
@@ -104,8 +104,8 @@ guide §9.2 原方案倾向外层直接使用 Apps 方法名。定稿改为**包
 }
 ```
 
-约束：`payload` 保留下游 Apps JSON-RPC 语义，但不会字节级转发到 MCP server；Peri 将其映射到 MCP client API。`mcpProtocolVersion` 表示 Peri 与 server 的 core MCP 协商结果；`appsProtocolVersion` 表示下游 Apps payload 使用的版本，两者不可互换。
-资源读取（view 拉 `ui://` HTML 渲染）不依赖 App 会话，单独方法：
+约束：示例方法列使用别名 `peri/mcp/app`（规范名 `peri/mcp/apps/request` 的 `tools/call` 形态，同一 `SessionAppsFacade` 处理）。`payload` 保留下游 Apps JSON-RPC 语义，但不会字节级转发到 MCP server；Peri 将其映射到 MCP client API。`mcpProtocolVersion` 表示 Peri 与 server 的 core MCP 协商结果；`appsProtocolVersion` 表示下游 Apps payload 使用的版本，两者不可互换。
+资源读取（view 拉 `ui://` HTML 渲染）不依赖 App 会话，单独方法（别名 `peri/mcp/resource`，规范名为 `peri/mcp/apps/request` 的 `resources/read` 形态）：
 
 ```jsonc
 {
@@ -302,7 +302,7 @@ agent 侧收到 `peri/mcp/app` 时按序校验，任一失败按 §8 返回：
 | 参与方 | 本次是否改造 | 责任 |
 | --- | --- | --- |
 | 进程 launcher | 配置 | 通过 `PERI_MCP_APPS` 是否存在选择 immutable deployment profile；值不解析 |
-| Peri | 是 | prewarm 前冻结 profile；初始连接/重连传播 UI extension；发现 resource/tool metadata；维护 connection-owned binding；resource relay 与 Binding lease/canonical HITL `tools/call` 已接通 |
+| Peri | 是 | prewarm 前冻结 profile；初始连接/重连传播 UI extension；发现 resource/tool metadata；维护 connection-owned binding；resource relay 与 `McpAppRecord`/canonical HITL `tools/call` 已接通 |
 | MCP server | 按规范提供 | 提供 UI resource、tool metadata 和标准结果 |
 | Web Host / our FE | **不由 Peri 实现** | 消费 ACP contract，自行实现 Apps Host/UI |
 | `peri-tui` | 否 | 不实现或消费 MCP Apps UI |
@@ -346,17 +346,17 @@ sequenceDiagram
     P-->>F: 普通 ACP initialize response
     P->>M: tools/list
     M-->>P: Tool + _meta.ui.resourceUri + visibility
-    F->>P: peri/mcp/open(serverId, toolName)
+    F->>P: peri/mcp/apps/attach(serverId, toolName)（别名 peri/mcp/open）
     P-->>F: appSessionId + resourceUri
-    F->>P: peri/mcp/resource(appSessionId)
+    F->>P: peri/mcp/apps/request(ResourcesRead)（别名 peri/mcp/resource）
     P->>M: resources/read(uri=ui://...)
     M-->>P: contents[]（text|blob, mimeType, _meta.ui）
     P-->>F: resource response（完整 resource content）
-    Note over P,F: open 单次消费初始 canonical invocation 签发的 Binding lease
+    Note over P,F: open/attach 单次消费初始 canonical invocation 签发的 McpAppRecord
     Note over F,A: 下游自行完成 ui/initialize / initialized
     A->>F: tools/call request
-    F->>P: peri/mcp/app request
-    P->>M: 经 lease EffectiveToolDispatcher + Permission/HITL 调用 canonical MCP bridge
+    F->>P: peri/mcp/app 请求（规范名为 peri/mcp/apps/request）
+    P->>M: 经 record 的 EffectiveToolDispatcher + Permission/HITL 调用 canonical MCP bridge
     M-->>P: raw CallToolResult
     P-->>F: Apps JSON-RPC response（完整 raw result）
 ```
@@ -371,7 +371,7 @@ sequenceDiagram
 4. 环境变量不存在时不传播 extension，stdio Apps relay backend 不装配，Apps methods 返回 `capability_disabled`。
 5. ACP initialize 不解析或回显任何 MCP Apps capability。
 6. tool 无合法 `_meta.ui.resourceUri`、visibility 不含 `app` 或 resource MIME/body 非法时 fail closed；普通模型 MCP 路径保持可用。
-7. App `tools/call` 必须持有由初始 canonical MCP invocation 签发、`open` 按 server/tool/resource/generation 单次消费并绑定 ACP connection 的 Binding lease；调用经 `EffectiveToolDispatcher` 进入 effective view 与 Permission/HITL，禁止直调 MCP peer。TTL、session 最新 turn generation、cancellation、server generation 与 ACP EOF 共同负责失效/撤销。
+7. App `tools/call` 必须持有由初始 canonical MCP invocation 签发、`peri/mcp/apps/attach`（及别名 `open`）按 server/tool/resource/generation 单次消费并绑定 ACP connection 的 `McpAppRecord`；调用经 `EffectiveToolDispatcher` 进入 effective view 与 Permission/HITL，禁止直调 MCP peer。TTL、session 最新 turn generation、cancellation、server generation 与 ACP EOF 共同负责失效/撤销。
 
 ### 9.8 资源与结果的缓存边界
 

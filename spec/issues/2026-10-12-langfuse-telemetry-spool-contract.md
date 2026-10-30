@@ -4,7 +4,7 @@
 
 - 状态：**已实施，待用户验收**（P5 2026-10-12 回填；文档与验收表同步流复跑后更新）。P1–P5 均已落地：P4b 宿主装配交付后，`peri-acp --lib` 827 passed、workspace `--all-targets` EXIT=0、WASM 目标检查 EXIT=0（命令与数字见[实施报告](2026-10-12-langfuse-telemetry-spool-report.md) §2.1）。§9 已逐行标注实际状态与缺口；真实端点、512 MiB 积压 RSS 与性能项仍未执行，不宣称产品验收完成。已知未通过项：`cargo fmt --all -- --check` EXIT=1（3 个源码文件，属源码流，见报告 §8.3）；§10 新增待裁决偏差 D8。
 - 实施根：`/Users/konghayao/code/ai/peri-v4p3/.worktrees/peri-telemetry-spool`；本次核对 HEAD 与本地 `origin/main` 均为 `607f8a222a4abaf37a7d3d68863cd244a1a37bb3`，未 fetch；开始时工作树干净。
-- 需求原文：同目录 `2026-10-12-langfuse-telemetry-spool.md`（仅加元信息）；以下路径均相对实施根，行号只定位此基线。代码块是冻结待实施的签名，尚未落地，不是现有代码。
+- 需求原文见 Git 历史（仅加元信息）；以下路径均相对实施根，行号只定位此基线。代码块是冻结待实施的签名，尚未落地，不是现有代码。
 - 只改变客户端配置、冻结输入、OTLP 编码/传输、文件暂存及关闭报告；不改服务端、数据库表、模型事件 wire、采样/身份/时间/usage/成本语义。
 - 偏离索引：D1 基线更新；D2 环境变量去掉 `PERI_`；D3 native 适配器留在 `langfuse-client`；D4 新配置解析改为显式 Result；D5 新默认值及测试迁移；D6 OS 阻塞 IO 超时不伪装已 join；D7 已裁决：Cargo.lock 为生成文件，不适用源码行数上限。理由和验证边界见 §10。
 - C1 的“wire 不变”指 gzip 解压后的 OTLP JSON 字段/值与 input 字符串字节不变；gzip 默认开启会改变 HTTP 正文字节及 header，这是计划明确授权。`none` 保留未压缩格式。

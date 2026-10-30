@@ -14,14 +14,14 @@
 
 | 任务 | 优先读取 |
 | --- | --- |
-| RCRA、消息归属、Task/MQ、loop 激活 | `../docs/standards/architecture-contracts.md` + `../docs/design/rcra-message-activation.md`（已批准目标/实施验收中；主/子 Agent 同构，持久执行恢复已撤销，剥离状态查 active issue） |
+| RCRA、消息归属、Task/MQ、loop 激活 | `../docs/standards/architecture-contracts.md` + `../docs/design/rcra-message-activation.md`（现行设计；主/子 Agent 同构，持久执行恢复已撤销） |
 | Prompt frozen、工具 direct/deferred | `../docs/standards/architecture-contracts.md` |
 | 中间件链装配入口与链序蓝本（ARC-MIDDLEWARE-001） | `src/session/factory.rs`；装配实现在 `../peri-middlewares/src/assembly.rs` |
 | hook 状态能力与回写（ARC-MIDDLEWARE-CAPABILITY-001） | `../docs/standards/architecture-contracts.md`；`src/middleware/capabilities.rs` 与 `src/agent/stages/middleware_runner.rs` |
 | Rust、async、文本宽度、doc tests | `../docs/standards/rust.md` |
 | 测试位置与覆盖要求 | `../docs/standards/testing.md` |
 | compact 阈值与环境覆盖 | `src/agent/compact_v2/config.rs` 的 `CompactConfig` |
-| Micro 投影、原文回查与恢复 | `docs/design/micro-compact.md`；`src/agent/compact_v2/`；`src/context_archive.rs`；`docs/code-index/peri-agent.md` |
+| Micro 投影、原文回查与恢复 | `../docs/design/micro-compact.md`；`src/agent/compact_v2/`；`src/context_archive.rs`；`../docs/code-index/peri-agent.md` |
 
 不通过导入扩展默认上下文；需规则时按表显式读取。
 

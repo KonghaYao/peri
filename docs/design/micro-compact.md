@@ -43,9 +43,9 @@ flowchart LR
 | --- | --- |
 | `C` | 完整 `context_window`，不扣输出预留 |
 | `P` | 现有压力估计 |
-| `M` | 最小 Micro 净收益，`u64::from(C).div_ceil(10)`；200,000 → 20,000，200,001 → 20,001 |
+| `M` | 最小 Micro 净收益，`u64::from(C).div_ceil(micro_min_gain_divisor)`（分母默认 10；程序内构造的 0 按 N=1 处理，外部反序列化拒绝 0）。默认分母下 200,000 → 20,000，200,001 → 20,001 |
 | `G` | 同一冻结请求中，已提交模型视图到最终完整渲染候选视图的估算净减少量（`estimated_tokens_saved`，已计入收据、目录与 root 成本） |
-| `R` | 既有 `pressure.target_reclaim_tokens()`（含 2% 下限，本轮不改为 10%） |
+| `R` | 既有 `pressure.target_reclaim_tokens()`（含 2% 下限，与 `M` 的默认 10% 门槛独立） |
 
 | 条件 | 决策 |
 | --- | --- |
@@ -113,7 +113,7 @@ Reason 在 `before_model` 与工具目录发布后，仅在可见压力确有增
 | 签名/Raw/Unknown | 已知 provider 的完整安全闭包可整体移除；未知块及未识别依赖保留并报告 |
 | 助手自由文本、canonical reminder | 当前保留；不以首尾截断伪造语义摘要 |
 
-`Bash` 的 PreviewOnly 预览保留 head/tail、`[N 字符已省略]` 标注与 `archive_ref` 回查后缀；工具参数逐值保持 canonical，不因预览回写或截断。Read/Grep/Glob 的保留策略本轮不变。预览仍可能隐藏输出中部的关键事实，需通过行为对照验收，不以静态测试通过代替质量结论。
+`Bash` 的 PreviewOnly 预览保留 head/tail、`[N 字符已省略]` 标注与 `archive_ref` 回查后缀；工具参数逐值保持 canonical，不因预览回写或截断。Read/Grep/Glob 的保留策略保持不变。预览仍可能隐藏输出中部的关键事实，需通过行为对照验收，不以静态测试通过代替质量结论。
 
 当前 planner 生成 `CompactToolResult`、`OmitToolExchange`、`PreviewArchiveRead`。`ResultReceipt` 等可序列化形状不等于 planner 已覆盖所有内容策略。旧 `CompactToolInput` 只为解码历史保留，当前不生成、不应用参数截断。
 
@@ -190,7 +190,7 @@ rewind 在同一事务中检查保留前缀、组成员、目录锚点与替代�
 | 行为 | 测试入口 |
 | --- | --- |
 | 75%/95%、配置、shadow、去重/补检 | `compact_v2/{config,trigger}_test.rs`、`stages/{stages,compact,compact_retry}_test.rs` |
-| 10% 门槛、G/M 边界、Deferred、Smart 归一、Bash PreviewOnly | `compact_v2/gain_gate_test.rs`、`stages/compact_test.rs` |
+| 默认 10% 门槛、G/M 边界、Deferred、Smart 归一、Bash PreviewOnly | `compact_v2/gain_gate_test.rs`、`stages/compact_test.rs` |
 | Step、混合调用、暴露与净收益 | `compact_v2/{planner,exposure,projection_render,projection_restore}_test.rs`、`stages/micro_exposure_test.rs` |
 | 收据/归档入口位置、预算合并、Full 后 root、冷恢复与 provider 切换 | `compact_v2/projection_position_test.rs`、`compact_v2/projection_borrowed_test.rs` |
 | 批次提交、失败与冷恢复视图 | `compact_v2/micro_test.rs`、`session/transcript_persistence_test.rs` |
@@ -209,5 +209,5 @@ rewind 在同一事务中检查保留前缀、组成员、目录锚点与替代�
 3. 独立用户图片/文档仍受保护；附件回查恢复 canonical 数据，不自动将重组附件转换为新的 vision 输入。外部 URL 不能代表历史媒体读取保证；未知 provider 块也保留。
 4. ArchiveRead 可复用原引用预览；尚无按源范围消除重复请求的独立机制。超过全局收据预算时提供目录入口，必要保护内容和冻结底座不会为满足预算被删。
 5. 目录/成员上限、不同来源数量及签名协议能力会限制可回收量。超大单条未消费内容或固定底座超过窗口时，沿用现有 Full/明确失败路径。
-6. 10% 门槛是提交门槛，不是删除目标：候选不足时允许没有 Micro，不能扩大省略范围凑门槛。preview→整组省略等小增量升级通常低于门槛而延后，这是预期行为。
-7. 合成样本测量与本次执行范围见 [验证记录](../verification/micro-compact-redesign-2026-10-21.md)。反复回查的真实负载和所有支持 provider 的真实请求验收仍需独立证据，不能由合成 wire 测试推断已经完成。
+6. 默认 10% 门槛是提交门槛，不是删除目标：候选不足时允许没有 Micro，不能扩大省略范围凑门槛。preview→整组省略等小增量升级通常低于门槛而延后，这是预期行为。
+7. 合成样本测量只能证明实现边界，不能替代真实 provider 负载与反复回查的验收；行为以第 8 节测试入口和真实 wire 证据为准。

@@ -1,106 +1,32 @@
+# Minimal example
 
-Default to using Bun instead of Node.js.
+## Scope
 
-- Use `bun <file>` instead of `node <file>` or `ts-node <file>`
-- Use `bun test` instead of `jest` or `vitest`
-- Use `bun build <file.html|file.ts|file.css>` instead of `webpack` or `esbuild`
-- Use `bun install` instead of `npm install` or `yarn install` or `pnpm install`
-- Use `bun run <script>` instead of `npm run <script>` or `yarn run <script>` or `pnpm run <script>`
-- Use `bunx <package> <command>` instead of `npx <package> <command>`
-- Bun automatically loads .env, so don't use dotenv.
+A standalone Peri project that demonstrates project-level prompt/config overrides and a minimal
+stdio MCP server. It is not part of the root Cargo workspace.
 
-## APIs
+## Layout
 
-- `Bun.serve()` supports WebSockets, HTTPS, and routes. Don't use `express`.
-- `bun:sqlite` for SQLite. Don't use `better-sqlite3`.
-- `Bun.redis` for Redis. Don't use `ioredis`.
-- `Bun.sql` for Postgres. Don't use `pg` or `postgres.js`.
-- `WebSocket` is built-in. Don't use `ws`.
-- Prefer `Bun.file` over `node:fs`'s readFile/writeFile
-- Bun.$`ls` instead of execa.
+- `.peri/settings.json` — `config.meta_harness` overrides: prompt sections, middleware close keys,
+  builtin instance policy keys, and `BuiltInSubagents: false` to keep only project agents.
+  The full key table lives in `README.md`.
+- `.peri/meta/*.md` — replacement text for the prompt sections enabled above.
+- `.claude/agents/minimal-helper.md` — project subagent with `tools: []`.
+- `.mcp.json` — registers `minimal-mcpp` as `bun run src/index.ts`; Peri 从示例根目录启动时按该目录解析相对路径（MCP 配置没有 `cwd` 字段）。
+- `src/index.ts` — MCP server built on `@peri-code/mcpp`; exposes the `echo` tool over stdio.
 
-## Testing
+## Commands
 
-Use `bun test` to run tests.
-
-```ts#index.test.ts
-import { test, expect } from "bun:test";
-
-test("hello world", () => {
-  expect(1).toBe(1);
-});
+```bash
+bun install
+bun run src/index.ts   # run the MCP server directly; Peri normally starts it from .mcp.json
 ```
 
-## Frontend
+Start Peri from this directory to load these project overrides.
 
-Use HTML imports with `Bun.serve()`. Don't use `vite`. HTML imports fully support React, CSS, Tailwind.
+## Invariants
 
-Server:
-
-```ts#index.ts
-import index from "./index.html"
-
-Bun.serve({
-  routes: {
-    "/": index,
-    "/api/users/:id": {
-      GET: (req) => {
-        return new Response(JSON.stringify({ id: req.params.id }));
-      },
-    },
-  },
-  // optional websocket support
-  websocket: {
-    open: (ws) => {
-      ws.send("Hello, world!");
-    },
-    message: (ws, message) => {
-      ws.send(message);
-    },
-    close: (ws) => {
-      // handle close
-    }
-  },
-  development: {
-    hmr: true,
-    console: true,
-  }
-})
-```
-
-HTML files can import .tsx, .jsx or .js files directly and Bun's bundler will transpile & bundle automatically. `<link>` tags can point to stylesheets and Bun's CSS bundler will bundle.
-
-```html#index.html
-<html>
-  <body>
-    <h1>Hello, world!</h1>
-    <script type="module" src="./frontend.tsx"></script>
-  </body>
-</html>
-```
-
-With the following `frontend.tsx`:
-
-```tsx#frontend.tsx
-import React from "react";
-import { createRoot } from "react-dom/client";
-
-// import .css files directly and it works
-import './index.css';
-
-const root = createRoot(document.body);
-
-export default function Frontend() {
-  return <h1>Hello, world!</h1>;
-}
-
-root.render(<Frontend />);
-```
-
-Then, run index.ts
-
-```sh
-bun --hot ./index.ts
-```
-
-For more information, read the Bun API docs in `node_modules/bun-types/docs/**.mdx`.
+- Configuration and prompt content are frozen when a session is created; start a new session after
+  editing them.
+- Keep the example dependency-light: Bun runtime, `@modelcontextprotocol/server`, `@peri-code/mcpp`,
+  and `zod`. No build step or test suite.

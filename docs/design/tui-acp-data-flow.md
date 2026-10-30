@@ -36,7 +36,7 @@ interaction response 与详情请求等运行时动作仍必须经 ACP client/tr
 
 ```text
 InputArea
-  → SteerCommand / STEER_TX
+  → SteerCommandKind / STEER_TX
   → steer_consumer
   → AcpTuiClient::ensure_session + session/input/enqueue
   → Agent session runtime
@@ -52,7 +52,7 @@ InputArea
 
 ### Agent 输出
 
-真实执行与交互许可由宿主开始/结束身份驱动，不由首 token 或 loading 反推。外部实际 attempt（包括内部 continuation）经 `ExecutionStarted` 提供 session mailbox generation 与非空 request ID；managed 用户输入保留已有开始事件，共用客户端执行身份规则。定时执行前审批先建立独立身份并在审批结束后关闭，实际执行使用另一身份。陈旧终态或提交失败只能结算自己的身份，不能直接写全局 loading。输入回滚记录独立绑定提交请求，external execution 开始不能借用待提交文本的回滚许可，其结束或取消也不能丢弃另一个请求的回滚记录。挂起信号与恢复后的渲染输出共享 FIFO，不能从另一条状态通道越过新输出。实施验证见 `spec/issues/2026-10-08-async-execution-chain-fixes.md`。
+真实执行与交互许可由宿主开始/结束身份驱动，不由首 token 或 loading 反推。外部实际 attempt（包括内部 continuation）经 `ExecutionStarted` 提供 session mailbox generation 与非空 request ID；managed 用户输入保留已有开始事件，共用客户端执行身份规则。定时执行前审批先建立独立身份并在审批结束后关闭，实际执行使用另一身份。陈旧终态或提交失败只能结算自己的身份，不能直接写全局 loading。输入回滚记录独立绑定提交请求，external execution 开始不能借用待提交文本的回滚许可，其结束或取消也不能丢弃另一个请求的回滚记录。挂起信号与恢复后的渲染输出共享 FIFO，不能从另一条状态通道越过新输出。
 
 ```text
 Agent canonical event
@@ -92,7 +92,7 @@ BridgeState.committed + CurrentTurn
 不能替代服务端能力事实。TUI 本地投影开关未开启时，旧 `HISTORY_PAGING` 分页与渲染路径保持不变，
 所有已加载历史继续固定、不淘汰。开关只决定是否采用窗口模型，不改变协议协商结果。
 `HISTORY_WINDOW_V1` 由 settings beta `history-window-v1` 在启动时读取一次并写入 atom；未配置视为
-开启（发布启用绑定 S7），只有显式配置 `false` 才关闭。设置变更不热重载，重启后生效。仍要求
+开启，只有显式配置 `false` 才关闭。设置变更不热重载，重启后生效。仍要求
 服务端明确回显 `peri.historyWindowV1: true`。Beta 设置面板仍只列
 `peri-acp-types::beta_flags::BETA_FLAGS`，该键需手动写入 settings。
 
@@ -124,9 +124,9 @@ BridgeState.committed + CurrentTurn
    字节账目、`durable/sealed/pins`、gap 与锚点，不复制正文。
 2. 段来源区分 `Replay`、`Page`、`LiveSeal`；`SegmentKey` 是本地生命周期句柄，不进入 wire、
    不参与锚点或工具配对。窗口换代后旧键全部作废。
-3. 初始预算（实施初值，不是性能结论）：历史展示正文 16 MiB、页预留上限 2 MiB、
-   普通页目标 512 KiB、页条目 50/最多 100、未配对工具结果 1 MiB/256 条、详情窗口 4 MiB、
-   释放水位 75%、预取门槛 8 MiB、渲染缓存 8 MiB 且超限降到 6 MiB。live、运行中、未持久化
+3. 初始预算（设计初值，不是性能结论）：历史展示正文 16 MiB、页预留上限 2 MiB、
+   普通页目标 512 KiB、页条目 50/最多 100、未配对工具结果 8 MiB/256 条、详情窗口 4 MiB、
+   释放水位 75%、预取门槛 50%、渲染缓存 8 MiB 且超限降到 6 MiB。live、运行中、未持久化
    与继承段计入 `pinned_bytes`（不可淘汰，但仍是 body 占用）；已按真实 assistant 消息归属的
    `LiveSeal` 工具卡在 `peri/history_committed` 解除 `Unpersisted` pin 后转为可淘汰。
    `unattributed_live_bytes` 只承载仍无可核实身份的工具/子 Agent 正文，工具卡每次归属都
@@ -167,7 +167,7 @@ BridgeState.committed + CurrentTurn
    丢弃迟到页；旧页不得合入新窗口。能力缺失、游标失效或通知丢失进入 `Degraded`：停止淘汰、
    保留可读内容与重试入口，禁止自动回退完整 `session/load`。
 
-### 超大条目与详情（S7.3 已交付）
+### 超大条目与详情
 
 服务端定义 `items[].body` 内联描述符（`totalBytes`/`chunkSize`/`readTicket`/`snapshotToken`）
 与 `session/history/body` 有界分块（默认 64 KiB、最大 256 KiB，`bytes` 为 JSON 数字数组），
@@ -192,7 +192,7 @@ TUI 侧由 `PanelKind::HistoryDetail` + `HistoryDetailPanel`（`kit/panels/histo
 
 ### 对象级证据与已知限制
 
-进度与验收记录见 active spec；本节只固定当前实现边界，避免把目标写成现状。
+本节只固定当前实现边界，避免把目标写成现状。
 
 释放验收不以条目数或 RSS 为唯一证据。`release_removes_committed_and_invalidates_holders_before_ack`
 在释放 + 渲染 ack 后断言 `Weak<TuiAssistantBubble>` 无法升级、各 holder 指纹清空；

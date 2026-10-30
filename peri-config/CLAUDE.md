@@ -75,8 +75,8 @@ session 工具池，不新增 daemon 或模型工具。环境来自选中的配�
   global credentials 被写到 project。
 - ACP 持久 configOptions 分支先构造 candidate、验证，再保存；成功后从 accepted
   snapshot 发布。失败不修改 live provider / agent cache、不 notify、不返回成功。
-  TUI `save_effective` 仍是提交时取 revision 的串行当前视图便利入口，不能充当
-  延迟草稿的编辑基线；延迟编辑器与远程 wire token 接线仍须审计。
+  TUI `save_effective` 提交时取最新 revision，不能充当延迟草稿基线（用
+  `save_effective_at` / `persist_draft`）；远程 wire 基线 token 仍须审计。
 - 全局配置更新会失效共享该全局路径的其他 current 项；已经持有的快照仍有效，
   其他 scope 须显式 resolve。MCP pool 初始化前只绑定一次快照，不提供热替换。
 - 输入采集不是跨文件原子读取；文件锁只协调合作写者，不能承诺阻止外部编辑器

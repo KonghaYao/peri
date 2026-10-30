@@ -22,11 +22,15 @@
 ```rust
 #[async_trait]
 pub trait UserInteractionBroker: Send + Sync {
-    async fn request(&self, ctx: InteractionContext) -> InteractionResponse;
+    async fn request(
+        &self,
+        owner: TrustedInteractionOwner,
+        ctx: InteractionContext,
+    ) -> InteractionResponse;
 }
 ```
 
-生产实现为 `AcpTransportBroker`，TUI 与 stdio 宿主共用同一交互语义。
+`owner` 由调用方从真实执行事实铸造；无法给出可信归属的调用方必须显式拒绝，不得传入伪造归属。生产实现为 `AcpTransportBroker`，TUI 与 stdio 宿主共用同一交互语义。
 
 #### 统一交互类型
 
@@ -44,7 +48,7 @@ pub trait UserInteractionBroker: Send + Sync {
 | `Decisions(Vec<ApprovalDecision>)` | 审批决策（Approve / Reject / Edit / Respond） |
 | `Answers(Vec<QuestionAnswer>)` | 问题答案 |
 | `Rejected` | 用户明确拒绝交互 |
-| `Unanswered { cause: UnansweredCause }` | 无人可作答：客户端（如 `-p` 打印模式）声明正常收到提问但无法提供交互界面；`cause` 区分已知原因（`NonInteractiveClient`）与无法识别的声明（`Unknown`）。工具侧以失败结果如实转述，不伪造空答案 |
+| `Unanswered { cause: UnansweredCause }` | 无人可作答：客户端（如 `-p` 打印模式）声明正常收到提问但无法提供交互界面，或本端没有可投递的在线 endpoint。`cause` 区分客户端声明（`NonInteractiveClient`、无法识别的 `Unknown`）与本端事实（`NoOnlineEndpoint`、`OwnerUnmatched`、`AttachmentDetached`）。工具侧以失败结果如实转述，不伪造空答案 |
 
 ### 2.2 Broker 类型
 
@@ -62,16 +66,20 @@ pub trait UserInteractionBroker: Send + Sync {
 
 ### 2.3 Builder 构造逻辑
 
-`peri-middlewares/src/assembly/preparation.rs` 直接使用宿主传入的 broker，
+`peri-middlewares/src/assembly/` 的装配函数直接使用宿主传入的 broker，
 不根据 MCP pool 构建额外通知审批路径。Permission 与 AskUser 都使用明确的
 用户交互端口；MCP 标准 elicitation、Apps relay 与资源订阅不依赖 channel。
 
-### 2.4 HITL 中间件增强
+### 2.4 审批与提问的中间件分工
 
-`peri-middlewares/src/hitl/mod.rs`：
-
-- **SharedPermissionMode**：`Always`（全部审批）/ `Ask`（全部询问）/ `Auto`（LLM 自动分类）
-- **AutoClassifier**：`LlmAutoClassifier` 基于 LLM 判断工具调用是否需要审批，含缓存 TTL
+- 审批：`PermissionMiddleware`（`peri-middlewares/src/permission/`）消费
+  `UserInteractionBroker`；`PermissionMode` 为 `Default` / `AcceptEdit` /
+  `AutoMode` / `Bypass`，`SharedPermissionMode` 是共享状态封装，契约定义在
+  `peri-acp-types/src/permission.rs`。
+- 提问：`HumanInTheLoopMiddleware`（`peri-middlewares/src/hitl/mod.rs`）只持有
+  `AskUserQuestion` 工具，不再承担审批钩子。
+- `LlmAutoClassifier`（`peri-middlewares/src/permission/auto_classifier.rs`）实现
+  `AutoMode` 的工具调用分类，含缓存 TTL。
 
 ## 3. 约束
 

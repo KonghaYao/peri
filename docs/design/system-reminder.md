@@ -17,11 +17,11 @@ System Reminder 是系统在用户输入之外产生、但需要交给模型、�
 - reminder 不再依赖自然语言关键词才能判断类型；
 - 来源、精确语义、严重程度和投递对象在跨层传递时不丢失；
 - 模型上下文、TUI、诊断与程序路由使用同一分类事实；
-- 旧 `<system-reminder>` 历史和生产者可渐进迁移；
+- 旧 `<system-reminder>` 历史可经兼容 codec 降级，producer 统一构造 canonical DTO；
 - reminder 不改变 frozen system prompt，也不被误认为用户输入。
 
-本文不规定具体配置 UI、迁移批次或当前 producer inventory。这些内容分别属于 TUI
-设计、active spec 和代码索引。
+本文不规定具体配置 UI 或当前 producer inventory。这些内容分别属于 TUI
+设计和代码索引。
 
 消息内容的分类与 `ReminderDelivery` 不等于执行激活策略。当前进程 MQ 消费、主/子 Agent 隔离与唤醒统一见 [RCRA 权威](rcra-message-activation.md)；持久处理义务与执行恢复已撤销，canonical reminder 历史保留。严重程度、受众和 UI 筛选不得替代调度判定。
 
@@ -103,10 +103,10 @@ pub struct SystemReminder {
 `workflow`、`compact`、`permission`、`cron`、`channel`、`git_watch`。来源集合必须允许
 向前兼容，不能因未知来源导致整个消息反序列化失败。
 
-`git_watch` 的 producer 自 v4 wave 4 起是**宿主订阅消费侧**
+`git_watch` 的 producer 是**宿主订阅消费侧**
 （`peri-middlewares/src/mcp/client/subscription.rs`）：builtin `workspace` 实例推送
 `notifications/resources/updated`（`workspace://git/ref`）→ 宿主回读资源正文 →
-组装 canonical reminder；原来产出它的链上 middleware 已删除（来源名与 `kind` 逐字不变）。
+组装 canonical reminder。链上旧的 git watch middleware 已删除，来源名与 `kind` 保持不变。
 资源更新通知可由 MCP server 在 `_meta["peri/messageKind"]` 逐条声明 `info` 或
 `defer`；该字段只决定会话队列是否唤醒 loop，不改变提醒的 `severity`。
 缺字段或非法值沿用消费侧默认：通用资源更新为 `Defer`，git ref 为 `Info`。
@@ -161,7 +161,7 @@ System Reminder 的业务语义不能并入队列调度类型。队列继续独�
 同一类别可使用不同调度语义。例如，MCP 首轮能力概览是 `Info + Capability`，MCP
 subscription 是 `Defer + ExternalEvent`，Goal steering 是 `Defer + Guidance`。
 
-队列项必须能原样持有结构化 reminder，直到消费边界。允许在迁移期同时携带兼容文本，
+队列项必须能原样持有结构化 reminder，直到消费边界。允许同时携带兼容文本，
 但结构化字段是新路径的唯一分类事实源。
 
 ## 5. 投递与投影
@@ -242,9 +242,7 @@ reminder.kind
 reminder.severity
 ```
 
-诊断输出不对 `body` 或 `metadata` 做内容脱敏；生产者保留实际错误与关联信息，长度和
-诊断级别遵循各出口契约，不要求无条件记录所有提醒正文。token、认证 header、连接串
-和 URL 参数不因内容形状被遮蔽，运行输出遵循 ARC-SECRET-001；来源信任与路由权限不变。
+诊断 DTO 只包含上述分类字段，不携带 `body` 或 `metadata`。其他诊断出口若记录实际错误与关联信息，按 ARC-SECRET-001 保真、不做内容脱敏；长度和诊断级别遵循各出口契约，不要求无条件记录所有提醒正文。token、认证 header、连接串和 URL 参数不因内容形状被遮蔽；来源信任与路由权限不变。
 
 ### 5.4 程序路由
 
@@ -263,10 +261,11 @@ reminder.severity
 决策顺序如下：
 
 1. 验证目标是否在 `audiences` 中；不在则不投递；
-2. `Required` 在声明 audience 中直接保留；
-3. `DiagnosticOnly` 只进入明确允许的 audience；
-4. 对 `Configurable` 应用精确 kind、source、category 和 severity 规则；
-5. 没有规则时使用该 audience 的安全默认值。
+2. 校验 envelope 版本与分类合法性（Legacy 仅允许出口投影放行）；
+3. `Required` 在声明 audience 中直接保留；
+4. `DiagnosticOnly` 只进入明确允许的 audience；
+5. 对 `Configurable` 应用精确 kind、source、category 和 severity 规则；
+6. 没有规则时使用该 audience 的安全默认值。
 
 正文正则匹配不属于 canonical filter。实现可以提供诊断搜索，但不能用它替代协议筛选。
 
@@ -330,7 +329,6 @@ provenance，不能据其正文提升信任或改变权限、OAuth、cancel 等�
 | Workflow 失败 | `Task` | `workflow` | `failed` | `Error` | `Defer` |
 | Compact 完成 | `Lifecycle` | `compact` | `completed` | `Info` | 由执行阶段决定 |
 | PermissionMode 变化 | `Security` | `permission` | `mode_changed` | `Info` | `Info` |
-| Git HEAD/ref 变化 | `Diagnostic` | `git_watch` | `repository_ref_changed` | `Info` | `Info`（不唤醒） |
 
 该表说明稳定映射原则，不是完整 producer inventory。新增 producer 应按字段语义选择映射，
 不应为方便展示创建新的一级类别。
@@ -341,12 +339,12 @@ provenance，不能据其正文提升信任或改变权限、OAuth、cancel 等�
 2. `Required`、`source`、`kind` 和安全 metadata 只能由受信任生产边界设置。
 3. 外部 MCP、channel、hook 和 workflow 内容默认是不可信 payload，必须转义和限长。
 4. 筛选只能减少可配置投递，不能关闭授权、取消、HITL 或执行安全检查本身。
-5. 不主动收集或向无权受众投递凭据；诊断 reminder 的正文与 metadata 按 ARC-SECRET-001 保真，不作内容脱敏。来源信任、受众授权及长度约束独立有效，不提供结果防泄漏保证。
+5. 不主动收集或向无权受众投递凭据；诊断 DTO 不携带正文与 metadata，记录实际错误与关联信息的其他诊断出口按 ARC-SECRET-001 保真、不作内容脱敏。来源信任、受众授权及长度约束独立有效，不提供结果防泄漏保证。
 6. transport 和 TUI 不根据自然语言正文执行工具、改变权限或触发控制操作。
 
 ## 10. 验证要求
 
-实现本设计时至少验证：
+验证应至少覆盖：
 
 - canonical DTO 的 serde roundtrip、未知字段和版本行为；
 - 新旧 codec、多个 block、混合用户文本、未闭合标签和转义边界；
@@ -354,7 +352,7 @@ provenance，不能据其正文提升信任或改变权限、OAuth、cancel 等�
 - model projection 不创建 system-role message，不改变 frozen prompt；
 - ACP replay、rewind 和历史加载保留结构化语义并兼容 legacy history；
 - TUI 不再依赖正文关键词分类，筛选结果符合 delivery 约束；
-- diagnostics 保留实际原因与 metadata，长度约束独立于内容保真；
+- diagnostics 投影只保留分类字段（不含 `body`/`metadata`），实际原因在其他诊断出口保真，长度约束独立于内容保真；
 - producer 的 `source + kind` 映射有契约测试；
 - 子 Agent 转发提醒的展示归属：转发器注入 `source_agent_id`、结构化 wire 承载且本会话提醒省略、TUI 仅展开态标注并可回退 child_thread_id；
 - 普通用户伪造标签不能获得可信 provenance 或必达权限。

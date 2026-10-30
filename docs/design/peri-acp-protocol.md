@@ -1,6 +1,6 @@
 # peri-acp 协议设计
 
-> 已批准变更（2026-10-07，实施中）：移除持久执行恢复及 Work query/resolve、SDK admission/entered/settlement 和 durable control 协议。普通 prompt、输入队列与取消不依赖这些能力；history list/load/resume/replay 保留。状态见[剥离计划](../../spec/issues/2026-10-07-remove-execution-recovery-plan.md)，撤销接口明确 method-not-found，不保留成功 shim。
+> 已批准变更（2026-10-07）：已移除持久执行恢复及 Work query/resolve、SDK admission/entered/settlement 和 durable control 协议。普通 prompt、输入队列与取消不依赖这些能力；history list/load/resume/replay 保留。撤销接口返回 method-not-found，不保留成功 shim。
 
 > 状态：现行设计
 >
@@ -30,6 +30,7 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 | `session/load` | `{ sessionId, cwd?, mcpServers? }`；分页时 `{ sessionId, cursor, limit? }`；窗口时 `{ sessionId, history: { kind: "open" \| "page" \| "seek", ... } }` | `{ ... }` | 加载指定会话并重放历史；响应可含 modes、models、configOptions，不创建新身份。带 `cursor` 时是旧历史页模式，带 `history` 时是 `peri.historyWindowV1` 只读窗口模式（两者互斥，见 §2.1.1）。声明窗口能力的连接不带 `history` 的 load **不回放历史**，首屏由 `history.open` 提供 |
 | `session/resume` | `{ sessionId, cwd? }` | `{}` | 复用已有 session_id 继续会话；经统一 host lifecycle handler 处理 |
 | `session/close` | `{ sessionId }` | `{}` | 关闭会话 |
+| `session/delete` | `{ sessionId }` | `{}` | 关闭并删除整棵会话树 |
 | `session/fork` | `{ sessionId, cwd?, mcpServers? }` | `{ sessionId, ... }` | 指定源会话并复制到新线程；返回值中的 sessionId 是新身份 |
 | `session/list` | `{ cwd? }` | `{ sessions: SessionInfo[] }` | 列出会话（可按 cwd 过滤） |
 | `session/rename` | `{ sessionId, title }` | `{ sessionId, title }` | 重命名会话并持久化标题 |
@@ -52,7 +53,7 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 
 工作区扩展的门控事实源是**进程级协商值**（`SessionManager::effective_host_caps`）：同一 host 内
 完成过 initialize 的连接所属请求面共享该值，从未 initialize 的连接按 [`PeriCaps::all_enabled`]
-兜底（A25 保留③，实现见 `peri-acp/src/session/caps.rs`）。历史分页与历史窗口相反：按**发起连接**的
+兜底（实现见 `peri-acp/src/session/caps.rs`）。历史分页与历史窗口相反：按**发起连接**的
 `ConnectionFacts::history_pagination()` / `history_window_v1()` 失败关闭判定。两者差异是有意的——
 分页与窗口决定这次 `session/load` 回放什么内容，必须与连接绑定；工作区扩展表达的是本 host 的
 装配事实。同进程多连接接管的部署形态一旦出现，工作区门控需与分页、窗口一起改为按连接判定。
@@ -235,6 +236,11 @@ UTF-8 边界裁剪（只允许跳过开头 1–3 字节的跨块残片并显式�
 类型事实源为 `peri-acp-types::workspace`；身份、恢复与执行准入约束见
 [会话身份与工作区设计](session-id-environment.md)。
 
+存储 v2 与后台任务的版本化扩展另外注册 `peri/machines/list`、`peri/workspaces/list`、
+`peri/session/archive`、`session/metadata`、`peri/session_history` 与 `session/bg-tasks`；
+参数与返回投影见上述工作区扩展及 [peri-acp 代码索引](../code-index/peri-acp.md)，注册事实源为
+`peri-acp/src/host/requests.rs`。
+
 ### 2.2 交互
 
 | 方法 | 参数 | 返回值 | 语义 |
@@ -242,7 +248,7 @@ UTF-8 边界裁剪（只允许跳过开头 1–3 字节的跨块残片并显式�
 | `session/prompt` | `{ sessionId, message: { role: "user", content }, attachments?, bgResults?, requestId? }` | `{ stopReason }` | 提交用户输入（**request-response**，响应携带 `StopReason`；sessionId 同时支持 `session_id` 别名；`requestId` 为可选的本轮 turn 标识，服务器随 `peri/agent_event_done` 回带，供 TUI stale 事件配对）。长耗时 prompt 在服务端 spawn 后台执行，避免阻塞 `session/cancel` 等后续消息 |
 | `session/cancel` | `{ sessionId, generation?, requestId? }` | — | 中断当前 Agent（notification）；待发送队列的运行可携成对 generation/requestId，旧身份不得取消新执行；缺省保留既有取消语义 |
 | `session/input/*` | 见共享 `UserInput*Request` DTO | 队列快照或操作回执 | `peri.userInputQueue` 协商的 enqueue / dispatch / takeback / snapshot；短控制请求与实际运行分离，见[用户待发送设计](user-input-queue.md) |
-| `session/execute-command` | — | — | **无生产调用者**。Slash 命令由 executor 入口的 `session/command/` 注册表（`CommandRegistry`）拦截处理，不走此 JSON-RPC 方法；HITL 审批和 AskUser 回答也不经过它（见 §2.3 注） |
+| `session/execute-command` | — | — | **无宿主注册（遗留 `dispatch/execute_command.rs`，无生产调用者）**。Slash 命令由 executor 入口的 `session/command/` 注册表（`CommandRegistry`）拦截处理，不走此 JSON-RPC 方法；HITL 审批和 AskUser 回答也不经过它（见 §2.3 注） |
 
 ### 2.3 查询与控制
 
@@ -255,6 +261,9 @@ UTF-8 边界裁剪（只允许跳过开头 1–3 字节的跨块残片并显式�
 | `session/switch-provider` | — | — | 未实现，无服务端注册 |
 | `peri/mcp/control` | 严格 `{ sessionId, serverName, action, config? }` | `{ sessionId, serverName, action, status }` | 当前连接显式协商 `peri.mcpControlV1`，按会话环境注册/重启/关闭普通 MCP；完整 wire、生命周期与错误见 [ACP MCP 运行控制](acp-mcp-control.md) |
 | `mcp/list` | `{ sessionId }` | `{ servers }` | 精确查询会话池并返回每个服务的 `control`；新控制能力独立允许查询，旧 OAuth/TUI 查询能力保留 |
+| `mcp/oauth_start` | `{ sessionId, server_name }` | `{ success, authUrl? }` | 按会话环境启动 MCP OAuth；缺 server 或环境不可用时返回 -32602/-32603，不跨会话共享授权状态 |
+| `mcp/oauth_callback` | `{ sessionId, server_name, code, state? }` | `{ success }` | 完成 OAuth 回调并持久化凭证；状态不匹配或过期显式失败 |
+| `mcp/oauth_cancel` | `{ sessionId, server_name }` | `{ success }` | 取消进行中的 OAuth 流程并清理临时状态 |
 
 > **已移除/不存在方法**：`session/approve` 和 `session/answer` 已废弃——HITL 审批经 broker JSON-RPC `session/request_permission` 往返，TUI 通过 `send_response`（JSON-RPC response）回传审批结果（`hitl_response.rs`），AskUser 同理走 `elicitation/create` + `send_response`（`ask_user_action.rs`），均不走 execute-command。`session/query` 和 `session/suggest-files` 未实现——文件补全走本地 `FILE_LIST` atom + `SkimMatcher`。
 
@@ -283,7 +292,7 @@ ACP install/update/uninstall 的 project/local 目录只来自受信 session 状
 
 ### 2.5 后台任务、工作流与 rewind
 
-> 本表方法与 `session/rename`、`plugin/*`、`session/cancel-bg-task`、`workflow/*`、`marketplace/*`、`mcp/*` 均在统一宿主（`host/requests.rs`）注册；stdio 与 TUI 共用同一 `run_acp_server` + `handle_request`（`host/stdio/mod.rs`），stdio 通道同样可用这些方法（wire 验证见 `host/stdio/run_server_integration_test.rs`）。stdio 特有差异仅剩命令面过滤：`stdio_command_filter=true` 时 `core:rewind` / `core:clear` 从命令列表/补全隐藏。
+> 本表方法与 `session/delete`、`session/rename`、`plugin/*`、`session/cancel-bg-task`、`workflow/*`、`marketplace/*`、`mcp/*` 均在统一宿主（`host/requests.rs`）注册；stdio 与 TUI 共用同一 `run_acp_server` + `handle_request`（stdio 装配入口 `host/stdio/mod.rs`），stdio 通道同样可用这些方法（wire 验证见 `host/stdio/run_server_integration_test.rs`）。stdio 特有差异仅剩命令面过滤：`stdio_command_filter=true` 时 `core:rewind` / `core:clear` 从命令列表/补全隐藏。
 
 | 方法 | 参数 | 返回值 | 语义 |
 |------|------|--------|------|
@@ -292,7 +301,7 @@ ACP install/update/uninstall 的 project/local 目录只来自受信 session 状
 | `workflow/kill_agent` | `{ sessionId, runId, agentId }` | `{ killed }` | 终止运行中的工作流 agent |
 | `workflow/kill_run` | `{ sessionId, runId }` | `{ killed }` | 终止整个工作流运行 |
 | `workflow/resume` | `{ sessionId, runId }` | `{ newRunId, resumedFrom }` | 恢复已暂停的工作流运行 |
-| `session/rewind-candidates` | `{ sessionId }` | 最多 64 个 `{ message_id, preview }` | 仅在双向协商 `peri.rewind` 后查询清洗后的 user message 候选 |
+| `session/rewind-candidates` | `{ sessionId }` | 有界 `{ message_id, preview }` 列表（上限见 `REWIND_CANDIDATE_LIMIT`） | 仅在双向协商 `peri.rewind` 后查询清洗后的 user message 候选 |
 | `session/rewind-preview` | `{ sessionId, target_message_id, revert_files }` | `{ preview_fingerprint, file_changes }` | 返回有界、project-relative 的 write/edit 文件影响与一次性预览指纹 |
 | `session/rewind` | `{ sessionId, target_message_id, preview_fingerprint, revert_files }` | `{ status: "executed" }` | 执行前重算当前历史；指纹缺失或过期时在任何截断/文件恢复前拒绝 |
 
@@ -310,12 +319,17 @@ v2 EventBus
 ACP 事件映射 / EventSink
     ├─ `session/update`：标准流式内容、工具与 usage 更新
     ├─ `peri/agent_event`：TUI 专用状态、结构与扩展事件
+    ├─ `peri/agent_activity`：隐私安全的活动摘要（受 caps.agent_activity 门控）
     ├─ `peri/prediction_ready`：输入预测建议（受 caps.prediction 门控）
+    ├─ `peri/systemReminder`：结构化 reminder（仅 stdio sink，且客户端声明 `peri.systemReminder`）
     ├─ 标准交互请求：HITL / Elicitation
     └─ `peri/agent_event_done`：turn 终止通知
 ```
 
-`peri/unstable_event` 不参与上述通用链路；其剩余兼容/扩展用途不应作为新 Agent 事件的目标通道。
+`peri/systemReminder` 是 stdio `StdioEventSink` 的结构化通道，只在客户端声明
+`peri.systemReminder` 时发送；未声明或 TUI 通道继续经既有投影承载 reminder 载荷。
+
+`peri/unstable_event` 承载遗留 `{event, data}` 扩展载荷（如 system reminder、后台任务快照与后台回调消息），不作为新 Agent 事件的默认通道。
 
 ### 3.2 通知格式
 
@@ -323,6 +337,7 @@ ACP 事件映射 / EventSink
 
 - `session/update` 使用标准 ACP `SessionUpdate` payload，承载流式内容、工具调用与 usage 更新。
 - `peri/agent_event` 使用 ACP 的 TUI 专用 DTO，承载低频状态、结构和扩展事件。
+- `peri/agent_activity` 承载活动摘要，不代替 `session/update` 或 `peri/agent_event`。
 - `peri/history_committed` 是 `peri.historyWindowV1` 的私有提交通知，只发给当前持票连接；
   字段与幂等语义见 §2.1.1。
 - `peri/agent_event_done` 承载本轮终止状态，并可带 `requestId` 关联提交请求。
@@ -342,7 +357,7 @@ ACP 事件映射 / EventSink
 
 `peri/agent_event` 的 `ExecutionStarted` DTO 包含 `generation`（当前 session mailbox 代际）与 `request_id`（实际宿主 attempt 的非空身份）。它先于该 attempt 的权限请求与提问送达；对应 `peri/agent_event_done.requestId` 只关闭相同身份。该开始事件不要求用户输入队列能力开启，不代表输入已 claim。内部 continuation 与定时审批也遵循此契约；定时审批和之后执行各有独立身份。managed 用户输入仍使用原有 `UserInputRunStarted`，两者归约到同一客户端执行生命周期。
 
-### 4.1 流式事件（高频，每秒数十次）
+### 4.1 流式事件（高频）
 
 > **已迁移至标准 ACP `session/update` 通道**。以下事件不再走 `peri/unstable_event`，改由 `map_event()` Category ① 映射为标准 ACP `SessionUpdate` 通知（`ContentChunk` / `ToolCall` / `ToolCallUpdate`）。TUI 侧通过 `acp_notifier.rs` 的 `handle_session_update` 处理。
 
@@ -370,7 +385,7 @@ HITL 与 AskUser 通过标准交互协议（`UserInteractionBroker`、`RequestPe
 
 ### 4.3 兼容与扩展事件
 
-`peri/unstable_event` 不再承载 v2 Agent 事件映射。它仅保留给兼容或特定扩展用途；新增 Agent 事件必须经 ARC-EVENT-001 规定的 `session/update` 或 `peri/agent_event` 链路接入。
+`peri/unstable_event` 不承载 v2 Agent 事件的标准映射；它保留遗留 `{event, data}` 扩展载荷（system reminder、后台任务快照、后台回调消息等）。新增 Agent 事件必须经 ARC-EVENT-001 规定的 `session/update`、`peri/agent_event` 或 `peri/agent_activity` 链路接入。
 
 ---
 
@@ -391,6 +406,7 @@ HITL 与 AskUser 通过标准交互协议（`UserInteractionBroker`、`RequestPe
 | 标准 ACP JSON-RPC | `session/new`、`session/prompt` 等 | `{method, params, id?}` | TUI → 服务请求或 notification |
 | 标准 ACP notification | `session/update` | `{method: "session/update", params: {sessionId, update}}` | 服务 → 客户端流式与使用量更新 |
 | TUI 专用 DTO | `peri/agent_event` | `{method: "peri/agent_event", params: {sessionId, event_json}}` | 服务 → TUI 低频状态、结构与扩展事件 |
+| 活动摘要 | `peri/agent_activity` | `{method: "peri/agent_activity", params: {sessionId, activity}}` | 服务 → 客户端；隐私安全的活动摘要，受 caps 门控 |
 | 历史窗口提交 | `peri/history_committed` | `{method: "peri/history_committed", params: {sessionId, sessionGeneration, structureVersion, checkpointId, summaryEntryId, committedTail, hint}}` | 服务 → 当前持票连接；按 checkpoint 幂等，丢失不影响 durable commit |
 | 标准交互 | `session/request_permission`、`elicitation/create` | ACP method/response | HITL 与 AskUser 往返 |
 | 兼容/扩展 | `peri/unstable_event` | 兼容或特定扩展 payload | 不作为新 Agent 事件的默认通道 |
@@ -406,7 +422,7 @@ HITL 与 AskUser 通过标准交互协议（`UserInteractionBroker`、`RequestPe
 
 ### 6.3 stdio 提问转发行为
 
-stdio 路径与 TUI/notify（mpsc）共用同一 `AcpTransportBroker`（`broker/transport_broker.rs`）：broker 只依赖最小面 `RequestTransport` 契约（仅 `send_request`），mpsc 经 `AcpTransport` blanket 桥接（`AcpRequestBridge`），stdio 经 `ConnectionTo<Client>` 直连适配（`transport/mod.rs`），协议帧一致（`elicitation/create` + accept/cancel/decline，共享 `build_elicitation_params` / `parse_elicitation_response`）。stdio 装配差异仅由构造参数表达：`with_auto_approve()`（无审批 UI，审批分支无条件批准）+ `with_timeout()`（提问超时兜底）。行为限制：
+stdio 路径与 TUI/notify（mpsc）共用同一 `AcpTransportBroker`（`broker/transport_broker.rs`）：broker 只依赖最小面 `RequestTransport` 契约（仅 `send_request`），mpsc 经 `AcpTransport` blanket 桥接（`AcpRequestBridge`），stdio 经 `ConnectionTo<Client>` 直连适配（`transport/mod.rs`），协议帧一致（`elicitation/create` + accept/cancel/decline，共享 `build_elicitation_params` / `parse_elicitation_response`）。stdio 装配差异由构造参数表达：审批默认转发给客户端（`Forward`），提问使用 `with_timeout()` 超时兜底；不存在生产 auto-approve 装配。行为限制：
 
 - **`session/cancel` 不解除挂起提问**：挂起的 elicitation request 由 ACP transport 层管理，`session/cancel` 只中断 agent turn；客户端不响应时提问会一直挂起，直到超时或 transport 关闭。
 - **非交互客户端的 cancel 声明**：客户端取消时可在响应 `_meta` 的 `peri.elicitationUnanswered` 声明「无人可作答」（`-p` 声明 `non_interactive_client`）→ `parse_elicitation_response` 产出 `InteractionResponse::Unanswered`，`AskUserQuestion` 以失败工具结果如实转述原因；取值无法识别收敛为 `Unknown`（只说无人可作答，不转述客户端文本）。缺声明的 cancel（用户撤销弹窗、owner 失效、投递失败等生命周期结算）保持旧语义的空答案，不得伪称非交互客户端（ARC-HITL-001）。

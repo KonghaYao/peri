@@ -1,34 +1,18 @@
-# TUI SubAgent 活动行目标设计
+# TUI SubAgent 活动行设计
 
-> 状态：已批准目标设计；实现进度不在本文记录。
+> 状态：现行设计
 >
 > 上位设计：[TUI Chat 与 Tool Activity Workbench](tui-chat-workbench.md)。如有冲突，
 > 以上位设计为准。
 
-实现现状：`peri-tui/src/kit/message_area/render/group.rs`（`subagent_tool_line`、
-`render_subagent_group_lines`、`subagent_error_reason_lines`）。
+实现位置：`peri-tui/src/kit/message_area/render/group.rs`（`render_subagent_group_lines`、
+`subagent_tool_line`、`subagent_error_reason_lines`）；过程区续行前缀
+`process_cont_prefix` 在 `render/helpers.rs`。
 
-> 缩进列自 2026-10-14 起由过程区前缀统一承担（组内行与组头同列，早前的独立常量
-> `SUBAGENT_TOOL_INDENT` 已删除）：见
-> [TUI 消息区：过程区缩进与转场台阶](../../spec/issues/2026-10-14-tui-transcript-process-zone-indent.md)。
+## 1. 目标
 
-## 1. 背景与目标
-
-当前 subagent 运行中展示的「最近工具调用行」与主时间线工具卡片是**同一视觉口径**
-（`render.rs` `subagent_tool_line` 注释原文：「与主时间轴 tool activity row 同一视觉口径——
-label bold primary，summary muted 暗色，duration 右对齐」）。
-
-```text
-// 现状：两处视觉无法区分
-   ✓ Read  src/main.rs                              0.4s    ← 主时间线工具
-   ✓ Read  src/main.rs                              0.4s    ← subagent 工具行（无差异）
-```
-
-问题：subagent 工具调用是**嵌套过程细节**，不是 transcript 顶层的独立事件。两者同口径导致：
-
-1. **层级不可辨**——无法一眼看出某工具调用发生在哪个 subagent 之内；
-2. **权重错位**——子任务的每一行都与主任务工具同等醒目，抢走顶层 entry 的视觉焦点；
-3. **噪声放大**——并行 subagent（§6.7 允许多个各占一行）时，满屏同样的工具行更难扫读。
+subagent 工具调用是**嵌套过程细节**，不是 transcript 顶层的独立事件。若与主时间线工具同口径，
+会失去层级、让子任务每行与主任务同等醒目，并在并行 subagent 时放大噪声。
 
 目标：subagent 工具行获得**明确区别于主时间线工具**的展示形态，体现「从属、弱化、可辨状态」，
 且不改变交互契约（折叠/点击/复制）、不破坏网格与符号体系、通过 NO_COLOR 与窄屏降级。
@@ -40,11 +24,11 @@ label bold primary，summary muted 暗色，duration 右对齐」）。
 | P1 | 从属可视 | 工具行结构上必带「续行竖线 + 缩进」，与 subagent 块同属一列层级；正文起点与顶层 entry 不同 |
 | P2 | 权重弱化 | label 去 bold；状态符号 dim 化——「bold + 状态色」是主时间线工具的专属锚点 |
 | P3 | 错误不弱化 | error 是例外：符号与错误词升级到与主时间线同等显著（错误信息绝不因嵌套而看不清） |
-| P4 | 动态一致 | running 符号仍用 braille 动画帧（§8.2 用户已确认「全部 loading 动态」）；低显著通过**颜色**而非动画有无表达 |
+| P4 | 动态一致 | running 符号仍用 braille 动画帧；低显著通过**颜色**而非动画有无表达 |
 | P5 | 交互不变 | 工具行不可独立折叠、点击命中仍为 subagent 顶层行、语义复制仍输出 `{Verb} {summary}` |
 | P6 | 锚点守恒 | 每屏每行最多一个 bold 主锚点：subagent 名（顶层行）与主时间线工具 label 是 bold；嵌套工具行不是 |
 
-P2 与 P4 共同落实 §8.2「同屏最多一个高显著 spinner」：高显著 = `status.running` 色动画帧（主时间线），
+P2 与 P4 共同落实「同屏最多一个高显著 spinner」：高显著 = `status.running` 色动画帧（主时间线），
 低显著 = `text.dim` 色动画帧（subagent 工具行）——两者都动，但显著度分层。
 
 ## 3. 形态规格（Wide / Standard）
@@ -62,18 +46,17 @@ P2 与 P4 共同落实 §8.2「同屏最多一个高显著 spinner」：高显�
 | 段 | 内容 | 样式 |
 | --- | --- | --- |
 | ① 过程区续行前缀 | `[outer 空][indent 留空][dim 竖线][gap]`（`process_cont_prefix`，与 subagent 块续行同列；`indent` = 过程区右移量，≥60 列 2 / <60 列 0） | `sem.text.dim` 竖线 |
-| ② 缩进 | 无独立缩进常量——`indent` 由 ① 前缀统一承担，组内行与组头同列（决策 5） | 无样式 |
+| ② 缩进 | 无独立缩进常量——`indent` 由 ① 前缀统一承担，组内行与组头同列 | 无样式 |
 | ③ 状态符号 | running=braille 帧 / success=`✓` / error=`×` | running/success → `sem.text.dim`；error → `sem.status.error` |
 | ④ Verb | `format_tool_name` 本地化动词（Read/Bash/Shell/Edit…） | `sem.text.primary`，**无 bold** |
 | ⑤ 摘要 | `input_summary` 截断（预算减去缩进与 duration 列） | `sem.text.muted` |
-| ⑥ 错误词 | error 时 ` — Failed`（i18n `msg-status-failed`，同 §6.4） | `sem.status.error` + bold |
-| ⑦ duration | running 整数秒（`4s`）/ completed 冻结值（一位小数秒 `0.4s`，UI 不出现 `ms`）；四舍五入后即 `0.0s` 的（< 50ms）不渲染，行在 summary 处结束；右对齐到居中带右缘（`line_width`，§3.1；窄终端即 `term_width - 1`） | `sem.text.dim` |
+| ⑥ 错误词 | error 时 ` — Failed`（i18n `msg-status-failed`） | `sem.status.error` + bold |
+| ⑦ duration | running 整数秒（`4s`）/ completed 冻结值（一位小数秒 `0.4s`，UI 不出现 `ms`）；四舍五入后即 `0.0s` 的（< 50ms）不渲染，行在 summary 处结束；右对齐到居中带右缘（`line_width`；窄终端即 `term_width - 1`） | `sem.text.dim` |
 
 要点：
 
-- **缩进固定 2 格而非对齐 subagent 摘要**——流式下最近 3 行持续轮换，固定缩进保证前缀列稳定
-  （与 `SUBAGENT_NAME_WIDTH = 16` 定宽同理，§6.7「running 摘要更新不改前缀列」）；该 2 格自
-  2026-10-14 起由过程区前缀统一承担（组头与组内行同列，决策 5），不再有独立常量。
+- **缩进固定 2 格而非对齐 subagent 摘要**——流式下最近 3 行持续轮换，固定缩进保证前缀列稳定；
+  该 2 格由过程区前缀统一承担（组头与组内行同列），无独立常量。
 - **不用 `├─`/`└─` 树状末梢字符**——最近 3 行窗口滚动时末梢字符会跳动闪烁，且与现有
   「竖线续行」体系冲突；统一竖线 + 缩进即可表达层级，且实现与 wrap_map/语义复制零摩擦。
 - ②③④⑤⑥⑦ 共用 `first_prefix` 之外的构造路径：全部行（含首行）走过程区续行前缀
@@ -81,9 +64,9 @@ P2 与 P4 共同落实 §8.2「同屏最多一个高显著 spinner」：高显�
 
 ## 4. 与主时间线工具对照
 
-| 维度 | 主时间线工具（§6.4） | subagent 工具行（本设计） |
+| 维度 | 主时间线工具 | subagent 工具行（本设计） |
 | --- | --- | --- |
-| 正文起点列 | 过程区列（≥60 列 = col6，§3） | 与组头同列（同一过程区前缀） |
+| 正文起点列 | 过程区列（≥60 列 = col6） | 与组头同列（同一过程区前缀） |
 | 行首竖线 | 仅展开体续行 | 每行都有（块内从属） |
 | Verb | bold + `text.primary` | 无 bold + `text.primary` |
 | 状态符号 | 状态色（`status.running/success/error`） | running/success → `text.dim`；error → `status.error` |
@@ -95,7 +78,7 @@ P2 与 P4 共同落实 §8.2「同屏最多一个高显著 spinner」：高显�
 | 语义复制 | `{Verb} {summary}{suffix}` | `{Verb} {summary}`（无 suffix、无符号、无缩进） |
 
 差异化由「结构（缩进+竖线）+ 权重（无 bold）+ 音调（dim 符号）」三维叠加构成，
-任一维度在 NO_COLOR / 窄屏下丢失时，其余维度仍保持可辨（§12：状态不能只依赖颜色）。
+任一维度在 NO_COLOR / 窄屏下丢失时，其余维度仍保持可辨（状态不能只依赖颜色）。
 
 ## 5. 状态矩阵
 
@@ -105,78 +88,72 @@ P2 与 P4 共同落实 §8.2「同屏最多一个高显著 spinner」：高显�
 | completed | `✓` | `text.dim` | duration 冻结值（一位小数秒，`0.4s`；< 50ms 不显示） |
 | error | `×` | `status.error` | ` — Failed` 错误词 + 原因行（muted 正文） |
 
-- 无工具时（subagent 刚启动、子工具尚未路由）回退单行 activity 摘要——现状行为不变
-  （`render_subagent_group_lines` 的 running 分支已处理）。
+- 无工具时（subagent 刚启动、子工具尚未路由）回退单行 activity 摘要
+  （`render_subagent_group_lines` 的 running 分支）。
 - 失败原因行 `subagent_error_reason_lines` 与工具行同列（过程区续行前缀），
-  与工具行同属一层级；正文保持 muted 不整块染红（§6.7 现状口径）。
+  与工具行同属一层级；正文保持 muted 不整块染红。
 
-## 6. 断点降级（§11）
+## 6. 断点降级
 
 | 断点 | 缩进 | 符号 | duration | 错误词 |
 | --- | --- | --- | --- | --- |
 | Wide ≥ 100 | 2 格 | 完整（braille/✓/×） | 右对齐 | 有 |
 | Standard 60–99 | 2 格 | 完整 | 右对齐 | 有 |
-| Compact 40–59 | 0 格（过程区前缀回退基准形态） | 完整 | 隐藏（§11 非关键 duration） | 有 |
+| Compact 40–59 | 0 格（过程区前缀回退基准形态） | 完整 | 隐藏（非关键 duration） | 有 |
 | Narrow < 40 | 0 格（同上） | 退化：符号位省略（`│  Read  src…`） | 无 | 有 |
 
-Narrow 下符号位省略与主时间线「accent 退化为 bullet」是同一降级哲学（§11）——
+Narrow 下符号位省略与主时间线「accent 退化为 bullet」是同一降级哲学——
 极端窄屏接受状态字符丢失，错误信号由错误词与原因行兜底。
 
 ## 7. 动画规则
 
 - running 符号 = `braille_frame(anim_tick())`，10 帧/100ms，与主时间线 running 工具同一
   帧序列、同一 `anim_frame` 缓存重建机制（`VmCacheSlot.anim_frame`，10Hz 驱动）。
-- 显著度分层（§8.2 落实）：主时间线 running = `status.running` 色；subagent 工具行
+- 显著度分层：主时间线 running = `status.running` 色；subagent 工具行
   running = `text.dim` 色。两者都动，但「高显著 spinner」只可能是顶层工具。
-- ASCII 终端：降级为 `*`（§4.1 降级表），不再区分显著度。
+- ASCII 终端：降级为 `*`，不再区分显著度。
 
-## 8. 语义复制（§9）
+## 8. 语义复制
 
 - 选中 subagent 工具行复制 → `{Verb} {summary}`（与主时间线 tool header 语义同口径，
   无符号、无 duration、无竖线/缩进）。
 - 实现要求：`semantic_line_text` / `strip_visual_prefix` 需识别新前缀结构
   （`[outer 空][indent 留空][标记][gap]` + Verb），对 `TuiSubAgentGroup` 变体剥除缩进与符号列。
-- 原因行复制 → 纯错误正文（现状已剥离前缀，缩进后同样剥离）。
+- 原因行复制 → 纯错误正文（前缀已剥离）。
 
-## 9. 交互契约（延续现状，不新增）
+## 9. 交互契约（不新增）
 
 - 折叠：subagent 工具行无独立折叠键（`fold_key_of` 对 SubAgent 只认顶层）；
   Enter 在顶层行 → 打开 subagent 详情面板（`SubAgentDetail`），工具行不响应。
-- 点击：命中区域 = entry 逻辑首行（§9.1），即 subagent 顶层行；工具行让位给文本选区。
+- 点击：命中区域 = entry 逻辑首行，即 subagent 顶层行；工具行让位给文本选区。
 - 详情面板：面板内是完整嵌套 transcript，工具**按主时间线完整口径渲染**——面板是该
   agent 的「主时间线」，压缩形态的弱化不适用于展开形态。两者自然分工：
   **压缩 = 弱化嵌套行；展开 = 完整口径**。
 
-## 10. 实现落点
+## 10. 实现位置
 
-文件：`peri-tui/src/kit/message_area/render/group.rs`
+- `peri-tui/src/kit/message_area/render/group.rs`：`render_subagent_group_lines`（组装配）、
+  `subagent_tool_line`（前缀、无 bold label、dim 符号、错误词、duration 预算）、
+  `subagent_error_reason_lines`（原因行同列）。
+- `peri-tui/src/kit/message_area/render/helpers.rs`：`process_cont_prefix` 承担缩进与竖线；
+  `place_meta` 负责右对齐 duration。
+- `peri-tui/src/kit/message_area/render/semantic.rs`：`TuiSubAgentGroup` 变体的
+  `semantic_line_text` 剥除竖线、缩进与符号列。
 
-| 位置 | 改动 |
-| --- | --- |
-| 缩进承担 | 无独立常量——缩进列由过程区续行前缀 `process_cont_prefix`（`[outer 空][indent 留空][dim 竖线][gap]`）承担，组内行与组头同列（决策 5） |
-| `subagent_tool_line` | ① 前缀走过程区续行前缀（替代 `first_prefix`）；② label 去 `Modifier::BOLD`；③ 符号色：running/success 用 `sem.text.dim`，error 用 `sem.status.error`；④ error 补 ` — Failed` 错误词（复用 §6.4 的 `msg-status-failed` 逻辑）；⑤ summary 预算与 `place_meta` 的 `used` 计算自然含前缀宽度；⑥ Narrow 断点符号位省略（§6 断点表） |
-| `subagent_error_reason_lines` | 与工具行同列（过程区续行前缀） |
-| `semantic_line_text` | `TuiSubAgentGroup` 变体：子工具行语义 `{Verb} {summary}`，剥竖线+缩进+符号 |
-| `render_test.rs` | 更新 subagent 相关断言：前缀宽度、无 bold、符号 dim 色、error 词、缩进列 |
+不变项：`render_subagent_group_lines` 顶层行形态、`SUBAGENT_TOOL_LINES`、
+braille 动画机制、`place_meta` 右对齐、`fit_summary_to_content`。
 
-不变项：`render_subagent_group_lines` 顶层行形态、`SubAgentSummary` 派生、
-`SUBAGENT_TOOL_LINES = 3`、braille 动画机制、`place_meta` 右对齐、`fit_summary_to_content`。
+## 11. 验证
 
-## 11. 测试要点
+行为与语义复制回归位于 `peri-tui/src/kit/message_area/render_subagent_groups_test.rs`
+（`test_subagent_running_shows_recent_tool_lines`、
+`test_subagent_tool_line_narrow_omits_symbol`、
+`test_subagent_running_with_failed_tool_shows_reason`、
+`test_subagent_failed_reason_line_and_completed`、
+`test_subagent_without_tools_keeps_detail_entry_across_statuses`）与
+`render_semantic_copy_test.rs`（`test_semantic_subagent_tool_line`、
+`test_semantic_subagent_without_tools_copies_entry_and_error_reason`）。
 
-1. **层级结构**：subagent 工具行首列 = `[outer 空][indent 留空][│][gap]`，正文起点与组头同列；
-2. **bold 缺失**：工具行 Verb span 无 `Modifier::BOLD`（对照主时间线工具行有）；
-3. **符号色**：running/success 符号 `fg == text.dim`；error 符号 `fg == status.error`；
-4. **错误词**：error 工具行含 ` — Failed`（bold + error 色），原因行与工具行同列；
-5. **断点矩阵**：Compact 无 duration；Narrow 无符号位且不 panic（宽度 1 回归）；
-6. **语义复制**：选中工具行 → `{Verb} {summary}`，无 `✓`/`│`/前导空格；
-7. **NO_COLOR**：剥离颜色后仍可辨（缩进 + 竖线 + 符号字符 + bold 有无）。
-
-## 12. 验收标准
-
-- [ ] subagent 运行中展示最近 ≤3 工具行，形态与主时间线工具卡片肉眼可辨（缩进/无 bold/dim 符号）；
-- [ ] running 工具行动画推进（braille 帧），色彩 dim 但仍动态；
-- [ ] error 工具行错误词 + 原因行不弱化；subagent 顶层行形态零改动；
-- [ ] 120/80/48 列与 NO_COLOR 下 golden 场景通过；语义复制输出无 chrome；
-- [ ] Enter 打开详情面板、点击命中、折叠行为与现状完全一致；
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings` 与 peri-tui 全量测试通过。
+```bash
+cargo test -p peri-tui --lib -- subagent
+```

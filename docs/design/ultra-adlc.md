@@ -135,9 +135,7 @@ v1 不修改 Workflow RPC、事件、TUI Panel、journal、SubAgent frozen conte
 └── learning/agent-performance.md
 
 .peri/adlc/evolution/
-├── records/
-├── routing-observations.md
-└── eval-candidates/
+└── records/
 ```
 
 任务 ID 使用可预测时间与安全 slug；不得在 Workflow 脚本中用随机或本地时钟生成身份。
@@ -153,8 +151,9 @@ revision 与 completion verdict。每次完成通知后，Main Agent 必须读�
 
 ```text
 discovering → awaiting_user_decision? → planning_delivery → delivering
-            → verifying ↔ converging → complete
-任一执行阶段 → blocked / cancelled
+delivering → verifying → converging → delivering（收敛循环）
+verifying → complete
+任一执行阶段 → blocked / cancelled；blocked → delivering
 ```
 
 `blocked` 不是完成；解除后恢复原逻辑 Workflow。契约 revision 改变时，过期 Handoff、证据

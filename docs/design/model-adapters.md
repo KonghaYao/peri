@@ -31,8 +31,11 @@ Agent 侧 `AgentModelBridge` 是 `peri-model` 与 ReAct 的边界：它把
 - `ModelRequest` 与 `ModelResponse` 描述一次调用；
 - `ModelStreamEvent` 包含 TextDelta、ReasoningDelta、ToolCallDelta、Usage、
   Completed、Interrupted；
-- `Model` trait 的唯一 provider 调用入口是 `stream()`；`complete()` 只是聚合同一
-  stream，不是第二条非流式 transport；
+- `Model` trait 的统一执行入口是 `stream()`；`prepare_stream()` 在 durable checkpoint
+  场景冻结完整请求（默认拒绝不支持的 provider），`complete()` 只是聚合同一 stream，
+  不是第二条非流式 transport；
+- `output_token_limit()` 与 `context_window()` 返回装配处解析的只读上限，调用方不得代为
+  填入常量或从请求反推；
 - 成功流以单个 `Completed(ModelResponse)` 收尾；可见增量后的失败以 `Interrupted`
   交付。EOF、协议错误或取消不能伪造 Completed。
 
@@ -113,21 +116,22 @@ fork 与 rewind 使用同一校验边界。无法解释的可执行 output item 
 ## 5. 观测与诊断
 
 Debug、错误、tracing 与 Langfuse input 不做内容脱敏。`PreparedModelRequest::observe`
-保留键、路径、URL/query、data URI 与原始值，仍遵循观测级别和长度限制；截断不能伪装
-为完整观测。HTTP/provider 失败保留有界实际正文，传输失败保留原因链；既有诊断投影
-须传递实际错误而非只保留分类。运行输出与合成测试数据遵循 ARC-SECRET-001。
+保留键、路径、URL/query 与原始值，仍遵循观测级别和长度限制（超限值替换为截断标记
+并记录 truncated path）；截断不能伪装为完整观测。HTTP/provider 失败保留有界实际正文，
+传输失败保留原因链；既有诊断投影须传递实际错误而非只保留分类。运行输出与合成测试数据
+遵循 ARC-SECRET-001。
 
 Provider 配置由 ACP 装配面构造并注入，不由 `peri-model` 读取环境变量。URL 必须限制
 到 adapter 支持的 scheme；不能因 userinfo/query 的内容形状而拒绝诊断或持久请求。
 
 ## 6. 新增 Provider 检查清单
 
-1. 实现 `Model::capabilities`、`prepare_request` 与 `stream`。
+1. 实现 `Model::capabilities`、`prepare_request`、`stream`；需要 durable checkpoint 时同时实现 `prepare_stream`。
 2. 覆盖全部 `ContentBlock`、tool call/result、usage 与 stop reason 映射。
 3. 使用公共 HTTP/SSE、取消与 retry runtime，不创建平行 transport。
 4. 消费或安全剥离 system prompt cache 控制字，wire 上不得泄漏。
 5. 提供 config/error/observation 保真、错误原因链与长度边界测试。
-6. 在 `peri-acp/src/provider/mod.rs` 的 provider 工厂与 `peri-config` authority
+6. 在 `peri-acp/src/provider/mod.rs` 的 provider 工厂与 `peri-config/src/provider.rs`
    显式注册；未知 provider 类型不得由通配分支意外吞掉。
 7. 运行 provider 相邻测试、`cargo test -p peri-model --lib`，并检查
    ARC-EVENT-001 与 ARC-SERIAL-001 的跨层影响。

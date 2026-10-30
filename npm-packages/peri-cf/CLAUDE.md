@@ -111,12 +111,12 @@ SDK 不感知 assistant-ui。
 `frontend/remote/contracts.ts` 与 `display-state.ts` 的 Zod schema 是浏览器侧 wire/展示 DTO 的单一
 来源。ACP 投影由 SDK `ChatView`/`ChatReplica` 负责，应用只做展示适配。
 
-**生产测试场**：CF 依赖 registry 上的 `@peri-code/sdk` 固定版本，不以源码 alias 或 `file:` 链接消费
-SDK；`server/tsconfig.json` 不映射 SDK 源码，`scripts/wasm-tools.ts` 从 `node_modules` 读取已安装包
-并校验 `exports["./wasm"]`。升级 SDK 必须显式改版本号并重装，使发布产物（入口、类型、WASM 资源）
-在 `bun run typecheck && bun test` 中被真实验证。`peri-sandbox` 未发布前用
-`file:../peri-sandbox`，CF 通过 `@peri-code/sdk/sandbox` 的 `SandboxManager` 为每个实际会话启动
-真实实例：新 Chat 先启动实例，历史会话按 Store cwd 找回同一实例，旧 `/workspace` 会话不启动。
+**生产测试场**：CF 以 `file:` 链接消费 `@peri-code/sdk`（`../@peri-sdk`）与 `peri-sandbox`，
+不以源码 alias 消费；`server/tsconfig.json` 不映射 SDK 源码，`scripts/wasm-tools.ts` 从 `node_modules`
+读取已安装包并校验 `exports["./wasm"]`。升级 SDK 必须显式改依赖并重装，使发布产物（入口、类型、WASM
+资源）在 `bun run typecheck && bun test` 中被真实验证。CF 通过 `@peri-code/sdk/sandbox` 的
+`SandboxManager` 为每个实际会话启动真实实例：新 Chat 先启动实例，历史会话按 Store cwd 找回同一实例，
+旧 `/workspace` 会话不启动。
 `server/sandbox.ts` 持有按 `sandboxId` 引用计数的租约池，`server/registry.ts` 负责把 workspace 与
 MCP 合并进 `createChat`，并在关闭/停机时释放；HTTP 只映射 `sandbox_start_failed`。
 `server/sandbox-adapter.test.ts` 校验 adapter 与已发布 `/sandbox` 的契约。

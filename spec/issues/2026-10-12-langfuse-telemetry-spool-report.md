@@ -2,7 +2,7 @@
 
 - 状态：P1–P5 已实施。P4b 宿主装配已落地：本轮（2026-10-12 19:20 起）实测 `peri-acp` 编译与测试通过，workspace `--all-targets` 全量闸门 exit 0，各 crate 测试全绿（§2.1）。真实 Langfuse 端点演练、512 MiB 积压 RSS 与性能测量仍未执行，不宣称产品验收完成（§3、§4）。
 - 基线 commit：`607f8a222a4abaf37a7d3d68863cd244a1a37bb3`（worktree `.worktrees/peri-telemetry-spool`，未提交任何改动）。
-- 契约与计划：同目录 `2026-10-12-langfuse-telemetry-spool-contract.md`、`2026-10-12-langfuse-telemetry-spool.md`。
+- 契约与计划：同目录 `2026-10-12-langfuse-telemetry-spool-contract.md`；原计划书见 Git 历史。
 - 命令时间：§2 是 2026-10-12 18:00–18:16 的历史快照（当时 P4b 未落地，红点见该表，已由后续交付关闭）；§2.1 是本文档与验收表同步流在同一日 19:20 之后实际重跑的结果，两者都以真实输出为准。
 - 本文只记录实际执行过的命令与结果；未执行的项一律标注为“未测/缺口”，不代替真实端点验收。
 

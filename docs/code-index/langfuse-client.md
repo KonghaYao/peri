@@ -62,7 +62,7 @@
 - `src/spool_test.rs`、`src/client_send_test.rs`：route 指纹与凭据轮换隔离、文件正文从 0 重开、attempt checkpoint。
 - `tests/otel_contract.rs`：真实 HTTP mock 验证认证、OTLP 载荷、身份映射、父关系与 Session record 过滤，不代表真实服务端验收。
 - `tests/spool_http.rs`：真实 TCP 连接上验证中途断连后第二次 attempt 从字节 0 重开、gzip/none 正文与长度、spool 文件正文不出现 chunked 传输；用 TCP 断流而不是 503 代替。
-- 重型验收（1000 次调用长会话、512 MiB 积压、断网 10 分钟恢复、四边界崩溃注入）尚无离线用例文件，缺口见 [实施报告](../../spec/issues/2026-10-12-langfuse-telemetry-spool-report.md)。
+- 重型验收（1000 次调用长会话、512 MiB 积压、断网 10 分钟恢复、四边界崩溃注入）尚无离线用例文件。
 - 命令：`cargo test -p langfuse-client --lib`、`cargo test -p langfuse-client --doc`、`cargo clippy -p langfuse-client --all-targets -- -D warnings`。
 
 ## 生产接线
@@ -72,5 +72,5 @@
 - `peri-controller/src/langfuse/session.rs` 验证并装配 client/batcher，失败沿既有 Option 降级；部署关闭权与 turn-facing flush 分离，`map_shutdown` 把 Pending/PersistedPending/DeliveryIncomplete 显式映射而不落 UnexpectedFailure。
 - `peri-controller/src/langfuse/tracer/` 在观测结束后导出完整 Create；输入经 `tracer/input_snapshot.rs` 借用成快照来源，冻结与落盘由 client worker 完成；子 agent 及 Workflow 不依赖服务端 update/dedup。
 - `peri-controller/src/langfuse/drop_telemetry.rs` 保存有界的 trace/事件类别/拒绝原因计数；拥塞以周期汇总诊断为主。
-- 宿主装配在 `peri-acp/src/host/telemetry.rs::assemble`（契约 §7 P4b，`host/mod.rs` 挂 `mod telemetry`）：按 `spool_enabled`、凭据与 `route_fingerprint` 决定是否打开 native 端口并注入 `LangfuseSession::new_owned`，降级为有界内存模式并留 WARN；宿主只保留共享 session 与 `LangfuseShutdownOwner`，`LangfuseShutdownReport::retains_ownership` 决定待交付结果是否保留下一次关闭上下文。回归入口 `peri-acp/src/host/telemetry_test.rs`（含跨两次 host shutdown 重入）与 `peri-acp/src/host/stdio/langfuse_shutdown_test.rs`；命令与结果见 [实施报告](../../spec/issues/2026-10-12-langfuse-telemetry-spool-report.md)。
+- 宿主装配在 `peri-acp/src/host/telemetry.rs::assemble`（契约 §7 P4b，`host/mod.rs` 挂 `mod telemetry`）：按 `spool_enabled`、凭据与 `route_fingerprint` 决定是否打开 native 端口并注入 `LangfuseSession::new_owned`，降级为有界内存模式并留 WARN；宿主只保留共享 session 与 `LangfuseShutdownOwner`，`LangfuseShutdownReport::retains_ownership` 决定待交付结果是否保留下一次关闭上下文。回归入口 `peri-acp/src/host/telemetry_test.rs`（含跨两次 host shutdown 重入）与 `peri-acp/src/host/stdio/langfuse_shutdown_test.rs`。
 - 跨层所有权以 `docs/standards/architecture-contracts.md` 的 ARC-HOST-SHUTDOWN-001、ARC-TELEMETRY-SPOOL-001 为准；代码索引不承诺负载 SLO 或真实服务端验收。

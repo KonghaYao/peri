@@ -64,7 +64,7 @@ Selection、semantic copy、hover/focus、entry click、scroll、anchor、auto-f
 详情以真实视口绘制，完整 `usize` 高度与虚拟滚动目标参与既有面板鼠标仲裁，不创建全历史
 ScrollView buffer，也不通过截断内容伪造视口优化。
 
-主消息可淘汰派生缓存预算为 16 MiB，详情为 8 MiB；计量包括解析块、owned 文本、
+主消息可淘汰派生缓存预算为 8 MiB，超限降到 6 MiB；详情为 8 MiB；计量包括解析块、owned 文本、
 Lines 与 wrap map 的 retained capacity，同缓存共享 Arc 去重，跨缓存保守计入。
 这是一致的预算估算而非 allocator/RSS 实测；canonical 历史、轻量高度索引、全局高亮缓存、
 可见超大工作集及复制暂态单列。淘汰清除整个重型 entry，不改变高度、锚点或完整内容。

@@ -150,8 +150,7 @@ pub const MIDDLEWARE_NAMES: &[&str] = &[
 /// workflow as MCP（P5 原子切换后）：`"WorkflowMiddleware"` 是 builtin `workflow`
 /// 实例的关闭键，**唯一**归属本表——旧链槽位（[`MIDDLEWARE_NAMES`] 同名键）与
 /// `MIDDLEWARE_TOOL_NAMES` 的 `"Workflow"` 已随 P5 删除，两表零交集。
-/// 口径：命中该键 ⇒ workflow 实例不 spawn（含消费者），见 `docs/design/workflow-mcp.md`
-/// §4.4 与 `spec/issues/2026-10-11-workflow-as-mcp.md` 批次 P5。
+/// 口径：命中该键 ⇒ workflow 实例不 spawn（含消费者），见 `docs/design/workflow-mcp.md`。
 pub const BUILTIN_INSTANCE_POLICY_KEYS: &[&str] = &[
     "WebMiddleware",
     "ArtifactMiddleware",

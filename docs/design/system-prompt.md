@@ -43,7 +43,7 @@ MetaHarness 在冻结期按 section ID 替换持有者提供的段落内容，�
 整个能力。section ID 与 middleware 名清单的代码事实源是
 `peri-acp-types/src/meta_harness.rs`。运行时不得另建平行清单。
 
-所有段落由 middleware 持有，是否装配持有者决定段落可见性；channel 已退役，不保留无持有者的兼容段或独立 feature gate。
+所有段落由 middleware 持有，是否装配持有者决定段落可见性；不保留无持有者的兼容段或独立 feature gate。
 新增能力时必须同时确定：段落所有者、session-local 开关、工具/route/event/TUI 暴露面
 以及 SubAgent/Workflow 继承语义。
 

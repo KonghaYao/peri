@@ -18,9 +18,9 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 
 - **平台装配**：`server/compose.ts` 把 WASM 运行后端、Store、memory KV 与默认配置装配成
   `chatManagerOptions(config)`，可直接断言；入口用它构造具体 `ChatManager`。
-- **生产测试场**：依赖 registry 上的 `@peri-code/sdk` 固定版本；`server/tsconfig.json` 不映射 SDK
-  源码，`scripts/wasm-tools.ts` 从 `node_modules` 校验已安装包的 `exports["./wasm"]`。
-  `server/sandbox-adapter.test.ts` 校验本地 `peri-sandbox` adapter 与已发布 `/sandbox` 的契约。
+- **生产测试场**：以 `file:../@peri-sdk` 消费 SDK，安装后经 `node_modules/@peri-code/sdk` 解析到工作区包；
+  `server/tsconfig.json` 不映射 SDK 源码，`scripts/wasm-tools.ts` 从 `node_modules` 校验已安装包的
+  `exports["./wasm"]`。`server/sandbox-adapter.test.ts` 校验本地 `peri-sandbox` adapter 与工作区 `/sandbox` 的契约。
 - **每会话 sandbox**：`server/sandbox.ts` 用 SDK `SandboxManager` + `peri-sandbox` adapter 组装租约池，
   按 `sandboxId` 引用计数；`server/registry.ts` 在 `createChat` 前启动/复用实例，把
   `workspace` 与 MCP `sandbox` 合并进 Session；历史会话由 Store `cwd` 解析
@@ -112,10 +112,7 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 CF 的 `typecheck`/`test` 通过 `file:../@peri-sdk` 解析到 `node_modules/@peri-code/sdk`。干净 CI 先在
 `npm-packages/@peri-sdk` 执行 `MISE_ENV=wasm mise exec -- bun run build`，再在 CF 执行
 `bun install --force`；该条目会变成指向工作区包的符号链接，直接消费最新 `dist`。SDK build 依赖
-Emscripten 6.0.10 与 peri-wasm 产物。最近一次记录（2026-10-26）：SDK typecheck 通过、`bun test`
-407 pass / 0 fail（49 files、2947 expect）；CF typecheck 通过、`bun run test` 248 pass / 0 fail
-（根测试 203 + server 45；30 + 6 files）；CF `vite build` 通过（2408 modules）；未运行 emcc build、
-`test:wasm` 与 E2E，Hosted Workers 部署未验收。
+Emscripten 6.0.10 与 peri-wasm 产物。未运行 emcc build、`test:wasm` 与 E2E，Hosted Workers 部署未验收。
 
 ## 验证入口
 

@@ -34,7 +34,7 @@ python3 scripts/test-cargo-patches.py
 ./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --release --bin peri
 ```
 
-配置取舍与 macOS 对照范围见[体积调查](../docs/experiment-release-binary-size/conclusion.md)。不通过改变 panic unwind 语义或平台专用导出白名单缩小产物。
+配置取舍以根 `Cargo.toml` 的 `[profile.release]` 为事实源。不通过改变 panic unwind 语义或平台专用导出白名单缩小产物。
 
 脚本下载 crates.io 的固定发布包，核验 SHA-256，用 `patch`（缺少时以独立临时 Git 仓库执行 `git apply`）应用补丁并反向校验缓存，再以 Cargo `[patch.crates-io]` 配置运行所给命令。生成的源码位于 gitignored 的 `target/peri-*-patches/`，按补丁哈希隔离；第二次运行复用缓存。`Cargo.lock` 记录本地 patched crate，因此直接运行 `cargo --locked` 不会偷偷回退到未打补丁的 registry 版本。CI、pre-release、release、Lefthook 和 `./dev.sh` 的编译命令也使用该脚本；Windows CI 用 Git Bash 运行脚本，脚本将 crate 和 Cargo 配置路径统一转换给原生 `cargo.exe`。脚本保留调用者的工作目录，让 `./dev.sh --cwd=...` 仍以指定目录启动 TUI。Linux 的 cross 构建使用 `./scripts/cargo-rmcp-patched.sh --cross build …`；cross 在构建前会先运行一次不带 `--config` 的 `cargo metadata`，调用方（如 release workflow）须把同一份 `[patch.crates-io]` 配置写入 `$CARGO_HOME/config.toml`，否则这次调用会按 crates.io 版本改写 `Cargo.lock`，令 `--locked` 构建失败。更新补丁后，使用脚本执行 `update -p <crate>` 并提交更新后的 lockfile。
 

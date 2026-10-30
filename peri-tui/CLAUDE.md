@@ -56,7 +56,7 @@ ACP notification → acp_notifier → acp_bridge / BridgeState
 - 用户可见文本使用 i18n；新增 key 同步更新 `locales/en/main.ftl` 和 `locales/zh-CN/main.ftl`。主题从 `peri-theme` atoms 获取，不硬编码颜色。
 - 文本编辑、截断与坐标按 Unicode 字符边界和终端显示宽度处理；不得用字节长度替代显示宽度。
 - MCP 详情的重启/关闭经 `peri/mcp/control`；initialize 服务端明确回显 `peri.mcpControlV1=true` 且条目 `control` 允许才显示动作。操作按 session/reset/server 完成门互斥，取消等待和超时表示结果未知、不自动重发；完成后经 `service_snapshot/mcp_refresh.rs` 查询并由唯一快照提交门发布，迟到周期采样不能覆盖主动刷新。
-- TUI 不建 MCP 池、不持 `McpTaskOwner`（遗留 panel pool 已删除，勿重引入）：池生命周期、OAuth 注入与关闭顺序（pool begin-close → owner abort/join → pool close）全归 ACP Host 部署持有；退出只经 `teardown_app` 显式关闭 ACP deployment，Incomplete 不得记录为已关闭（ARC-HOST-SHUTDOWN-001）。
+- TUI 不建 MCP 池、不持 `McpTaskOwner`（不得重引入 panel pool）：池生命周期、OAuth 注入与关闭顺序（pool begin-close → owner abort/join → pool close）全归 ACP Host 部署持有；退出只经 `teardown_app` 显式关闭 ACP deployment，Incomplete 不得记录为已关闭（ARC-HOST-SHUTDOWN-001）。
 
 ## 目标命令
 

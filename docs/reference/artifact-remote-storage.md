@@ -33,7 +33,7 @@
 | `PERI_ARTIFACTS_URL` | 存储服务**基地址**。上传实际打向 `{该值}/upload`（结尾的 `/` 会被自动去掉） | 必填 |
 | `PERI_ARTIFACTS_TOKEN` | 以 `Authorization: Bearer <token>` 发送的凭据 | 按你的服务要求；不设置时回退到内置共享标识 |
 
-这两个变量在 **MCP 实例环境**中生效：写进 `mcpServers.artifact.env`（`~/.peri/settings.json` 的 `config.mcpServers` 或项目 `.mcp.json`，见 §7 的位置说明）。值里可以用 `${VAR}` 引用 shell 变量——Peri 宿主只透传实例环境，不直接读进程环境变量：
+这两个变量在 **MCP 实例环境**中生效：写进 `mcpServers.artifact.env`（`~/.peri/settings.json` 的 `config.mcpServers` 或项目 `.mcp.json`，见 §7 的位置说明）。值里可以用 `${VAR}` 引用宿主进程的环境变量——宿主在建立实例时展开，再把结果作为实例环境透传；只 export 而不写进实例 env 不会生效：
 
 ```jsonc
 // ~/.peri/settings.json
@@ -61,7 +61,7 @@ peri
 
 生效时机：实例环境在 Peri 建立 `artifact` 实例连接时读取一次（即启动新会话时）。**改完要重启 Peri**；会话中途改环境变量不会生效。
 
-凭据纪律：不要把 token 写进仓库、配置模板或截图，也不要贴进 issue；用环境变量或机密管理器注入。Peri 不会把服务地址与 token 打印到工具输出或错误信息里。
+凭据纪律：不要把 token 写进仓库、配置模板或截图，也不要贴进 issue；用环境变量或机密管理器注入。Peri 不会把 token 打印到工具输出或错误信息里；传输失败的错误文本可能包含请求 URL（reqwest 错误），因此也不要把凭据塞进 URL。
 
 ## 4. 你的服务要实现什么（对接契约）
 
@@ -202,7 +202,7 @@ curl -sS -X POST "$PERI_ARTIFACTS_URL/upload" \
 ```
 
 ```bash
-# 3) 进程级紧急闸门：一次关掉 web 与 artifact 两个内置实例
+# 3) 进程级紧急闸门：一次关掉全部内置实例（web / artifact / cron / workspace / workflow）
 export PERI_MCP_BUILTIN=off
 ```
 

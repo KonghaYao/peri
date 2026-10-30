@@ -6,9 +6,9 @@
 
 ## 状态归属
 
-2026-10-07 裁决：待发送队列、发布/领取关系和当前 run ticket 只属于当前进程；不保存 durable Work 命令或恢复发布代际，不承诺重启恢复未发送内容。已提交的 canonical 历史照常持久化。当前发送/取回/取消的身份校验与交互行为保留；实施状态见[剥离计划](../../spec/issues/2026-10-07-remove-execution-recovery-plan.md)。
-
-可靠 Inbox 的撤回、Receive 领取及重新发布统一见 [RCRA 消息权威 §8.5](rcra-message-activation.md#85-用户输入撤回与重发)。实现通过同一 Work reducer 持久保存草稿与发布命令；稳定 input ID 与发布代际分离，不因旧代际重试恢复已撤回义务。本轮持久草稿与选择发布回归尚待主线验证。
+待发送队列、发布/领取关系和当前 run ticket 只属于当前进程；不保存持久 Work 命令或恢复
+发布代际，不承诺重启恢复未发送内容。已提交的 canonical 历史照常持久化。当前发送/取回/取消的
+身份校验与交互行为保留；持久 Inbox 与执行恢复已撤销。
 
 Agent 会话的 `UserInputMailbox` 是投递生命周期的唯一 owner，宿主持有跨 turn 的共享实例。
 它保留待发送内容、稳定输入身份、命令回执及运行 ticket；ACP 定位会话、检查能力和写权限，
@@ -21,7 +21,9 @@ Agent 会话的 `UserInputMailbox` 是投递生命周期的唯一 owner，宿主
 空闲提交同样遵循队首顺序；一次交接占用本次 idle，即使 Receive 尚未开始，也不会追加第二条。
 单条与全部立即发送使用同一个指定 ID 集合的操作，只提前处理选中内容。
 
-`StageUserInput` 只保存完整草稿，不创建 delivery、required obligation 或 SDK 候选。显式发送用一个 `PublishStagedUserInputs` 原子提交选中的完整集合，后到草稿不能加入；自动 idle 发布同一入口但只选择队首一条。发布绑定当前 lifecycle、revision、control generation 与 exact attempt；Unknown 保留原整批命令，不能换身份重建。显式选择可以中止原 exact attempt 的处理责任，沿同一 reducer 的 abandon 规则保留外部结果；停止后的显式发送通过统一 typed Resume 裁决恢复控制状态，不在 Rust 创建执行租约。
+入队保存完整内容与原始草稿，不创建额外持久账本。显式发送原子提交选中的完整集合，后到
+草稿不能加入；自动 idle 只选择队首一条。变更请求绑定当前 lifecycle、revision、generation 与
+attempt；回执不明确时保留原命令与 input ID，不能换身份重建。
 
 ```text
 Queued → Dispatching → Claimed → Delivered
@@ -29,7 +31,7 @@ Queued → Dispatching → Claimed → Delivered
 Dispatching → Queued：仅在已从 MQ 撤出且确认未领取时
 ```
 
-Receive 与 Stop 在 Store 原子裁决领取/撤出，MQ 仅投影已确认结果，随后回报 Mailbox。写入 canonical transcript
+Receive 与 Stop 在 Mailbox 内原子裁决领取/撤出，MQ 只投影已确认结果。写入 canonical transcript
 才算 Delivered；仅入队或交接给 MQ 不能当作用户消息出现在聊天区。
 
 ## 交互与投递
@@ -103,6 +105,6 @@ TUI 依赖通知通道关闭路径收敛（`ACP_STATE.is_loading=false`、清空
 新建/加载会话在同一个 operation gate 内绑定队列 generation 并恢复实际运行身份，之后才
 接纳新交互。带身份的 Stop 不能取消后来的执行。
 
-队列首版只保存在当前进程内；切换会话查询原实例，进程重启或会话销毁不承诺保留待发送内容。
+队列只保存在当前进程内；切换会话查询原实例，进程重启或会话销毁不承诺保留待发送内容。
 
 交互回归见[正式 TUI 测试](../../e2e/tests/smoke/steer-queue-live.test.ts)，使用临时会话配置与本地模型服务；运行方式见 [E2E 指南](../../e2e/CLAUDE.md)。

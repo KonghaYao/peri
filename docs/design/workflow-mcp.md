@@ -1,18 +1,12 @@
 # Workflow as MCP 设计
 
-**状态**：已批准目标设计（2026-10-11 用户裁决；同日对抗审查后修订）
+**状态**：已批准目标设计；MCP 实例与任务信道已落地，残留目标见 §7。
 **范围**：`peri-workflow` 子系统从 middleware 槽位迁移为 builtin MCP 实例；Node 引擎保留为实例执行后端；agent 回调改为「任务资源发布 + 工具回填」的标准信道语义。
 **代码事实源**：`peri-middlewares/src/mcp/builtin/`、`peri-acp-types/src/builtin_mcp.rs`、`peri-workflow/`、`npm-packages/@peri-workflow/`、`peri-acp/src/host/{workflow_agent,requests/workflow}.rs`。
-**实施进度**：`spec/issues/2026-10-11-workflow-as-mcp.md`。
 
-## 1. 动机
+## 1. 背景与取代关系
 
-Workflow 是目前唯一仍以「middleware 槽位 + 私有 wire 协议」接入 Peri 的大能力，其余能力（web / artifact / cron / workspace）已全部迁移为 builtin MCP 实例。现状与目标差距分四类：
-
-1. **注册面特例**：工具经 `ChainSlot::Workflow` 与 `WorkflowMiddlewarePort` 注入，不享受 MCP 工具面的统一机制（桥接、命名、deferred 面、`system_mcp_tools`、关闭语义、权限面）。
-2. **信道私有**：Node 引擎与宿主的 `agent/run`、`progress/event`、`workflow/done` 属定制协议；进度/完成不进入标准资源与订阅面，TUI 依赖 ACP 轮询（2s `workflow/list_runs`）。
-3. **边界未定**：`peri-middlewares/src/workflow/mod.rs` 经 `peri-resources/src/workflow.rs` 门面 re-export 编排 crate，使 Resources 依赖 Workflow；`spec/issues/2026-10-11-module-dependency-boundary-audit.md` 的 Workflow 两项边界待裁决。
-4. **双向依赖不合规**：workflow 引擎需要宿主执行 agent（LLM ReAct + 工具 + skill），现状以「server 向 client 发请求」表达；标准信道上应表达为「任务发布（资源）+ 结果回填（工具）」。
+Workflow 原以 `ChainSlot::Workflow` middleware 槽位与私有 `agent/run` 请求接入，工具、资源、订阅与关闭都不走标准 MCP 面，双方以「server 向 client 发请求」表达执行依赖。本设计以 builtin MCP 实例承载编排能力，并把 agent 回调改为「任务资源发布 + 工具回填」的标准信道；旧槽位、端口与旧 middleware 目录已由该形态取代。
 
 ## 2. 目标与非目标
 
@@ -20,18 +14,18 @@ Workflow 是目前唯一仍以「middleware 槽位 + 私有 wire 协议」接入
 
 1. workflow 以 **builtin MCP 实例**（`workflow`，per-session 池内、同进程 `rmcp::serve_server`）接入；工具、资源、订阅、关闭全部走标准 MCP 面。
 2. agent 回调改为 **MCPP Channel 语义**：agent 任务作为 outbound 资源（event-log）发布，宿主消费者发现并执行，经 inbound 工具回填结果。不新增私有 JSON-RPC method 或 vendor capability。
-3. 删除 `ChainSlot::Workflow`、`WorkflowMiddlewarePort`、`WorkflowMiddlewareAdaptor`、`peri-resources/src/workflow.rs` 门面与 `SessionState.workflow_middleware`。
+3. 删除 `ChainSlot::Workflow`、`WorkflowMiddlewarePort`、`WorkflowMiddlewareAdaptor`、`SessionState.workflow_middleware` 与 `peri-resources/src/workflow.rs` 门面。旧槽位、端口与旧 middleware 目录已删除；`peri-resources/src/workflow.rs` 门面仍保留（残留目标，见 §7）。
 4. 用户可见配置语义保持兼容：MetaHarness 关闭键 `"WorkflowMiddleware"` 沿用（从中间件表迁到 builtin 实例关闭表）；ACP 方法名（`workflow/*`）与 TUI 交互不变。
 
 ### 2.2 非目标
 
 1. 不让 Node 引擎进程直接实现标准 MCP server（外部 stdio 直连）——内置实例已覆盖目标；引擎独立分发留待将来在同一语义上升级。
-2. 不迁移 journal 落盘位置（`.claude/workflow-runs/` 保持现状）；归属属 `2026-10-11-module-dependency-boundary-audit.md` 的独立裁决项。
+2. 不迁移 journal 落盘位置（`.claude/workflow-runs/` 保持现状）；归属另行裁决。
 3. 不改 ACP 方法名、TUI 面板与 `BgTaskKind::Workflow`；不改 `peri-acp-types/src/workflow.rs` 契约类型。
 4. 不做跨进程任务恢复与旧执行恢复：任务表为运行期状态，恢复语义仍由 journal + `resume` 承担（遵循「不恢复旧 Agent 执行」）。
 5. 不做 workflow 的跨实例/远程分发。
 
-### 2.3 分发红线（2026-10-11 用户裁决）
+### 2.3 分发红线
 
 1. **Rust 侧零 JS 嵌入**：`peri-workflow` 及任何 Rust 侧代码不得以 `include_bytes!`、`include_str!`、embed 或等价机制把 JS 产物（如 `@peri-workflow` 的 dist bundle）嵌入二进制。该红线优先于自包含、简化分发等诉求；任何分发缺口都不得以把 JS 产物嵌入二进制的方式解决。
 2. **`@peri-workflow` 分发结构要求**：分发须保持「**构建可复现、不入库**（dist 为构建产物，`bun run build` 可复现字节；由发布链在打包前构建并随发布包携带）+ **发布结构**（发布包保留入口产物与包元数据契约）+ **离线可用**（无网络即可获得并可运行已验证 artifact）+ **完整性校验**（artifact 的身份与内容在使用前经受校验；pin = 构建产物 SHA-256 == 发布产物 SHA-256）」。该要求必须以非嵌入途径实现（文件系统读取、摘要校验、网络获取等类别），不得以嵌入机制作为解法。
@@ -50,7 +44,7 @@ Workflow 是目前唯一仍以「middleware 槽位 + 私有 wire 协议」接入
 │  ┌──────────────── MCP client 池（session_scoped = true）────────────────┐          │
 │  │  workflow 实例连接（duplex + rmcp serve_server）                       │          │
 │  │   ├─ tools：Workflow / WorkflowStatus / WorkflowKill（模型面，deferred）│          │
-│  │   ├─ tools：WorkflowAgentResult（host-only，回填）                     │          │
+│  │   ├─ tools：WorkflowAgentResult 与消费者鉴权工具（host-only）           │          │
 │  │   ├─ resources：workflow://runs、runs/{id}[、events、tasks]、tasks      │          │
 │  │   └─ subscriptions：runs / run 快照 / 事件 / 任务                       │          │
 │  └──────────────────────────┬────────────────────────────────────────────┘          │
@@ -65,7 +59,7 @@ Workflow 是目前唯一仍以「middleware 槽位 + 私有 wire 协议」接入
 
 **角色**：workflow 实例是 MCP server；Peri 池是唯一 client。模型经工具桥消费 deferred 工具；宿主经池的 `tools/call`/`resources/read` 消费宿主面工具与资源；消费者订阅任务资源、执行 agent、回填。
 
-**领域控制接口**：MCP adapter（handler）背后的唯一控制面是 `WorkflowRuntime`（start_run / kill / resume / status / 任务表 / 资源快照）。Node wire（`workflow/start`、`agent/task`、`agent/result` 等）是 `WorkflowRuntime` 的实现细节；MCP 对外契约（工具/资源/订阅）不依赖 wire 形态，**wire 改造与 MCP 面落地解耦实施**。
+**领域控制接口**：MCP adapter（handler）背后的唯一控制面是 `WorkflowRuntime`（start_run / kill / resume / status / 任务表 / 资源快照）。Node wire（`workflow/start`、`agent/task`、`agent/result` 等）是 `WorkflowRuntime` 的实现细节；MCP 对外契约（工具/资源/订阅）不依赖 wire 形态，wire 改造以该领域接口为边界。
 
 **会话隔离**：池按 session 构建（`assemble.rs` `session_scoped=true`），实例与消费者随会话创建、随会话关闭销毁；实例上下文按 `BuiltinInstanceContext` 会话装配期一次性注入（对标 `workspace_resources` 范式）。per-call 身份只走 `peri.invocation.initiatorSessionId`；`_meta["peri/taskOwner"]` 仅注入 builtin workspace 与 `WorkspaceRemote`，workflow 来源不接收该字段。
 
@@ -78,12 +72,12 @@ Workflow 是目前唯一仍以「middleware 槽位 + 私有 wire 协议」接入
 
 ### 4.1 实例声明
 
-`peri-acp-types/src/builtin_mcp.rs` 新增：
+`peri-acp-types/src/builtin_mcp.rs` 声明：
 
-- `WORKFLOW_TOOLS`：9 个工具声明（3 个模型面 `direct: false` + 6 个鉴权 host-only）。
-- `BUILTIN_MCP_INSTANCES` 条目：`name = "workflow"`、`policy_key = "WorkflowMiddleware"`（沿用现有键，用户配置兼容）。
-- `BUILTIN_RESERVED_INSTANCE_NAMES` 增 `"workflow"`。
-- `BuiltinMcpTool` 新增 `model_visible: bool`（host-only 支持；现表内其余实例默认 `true`）。
+- `WORKFLOW_TOOLS`：`Workflow` / `WorkflowStatus` / `WorkflowKill`（模型面，`direct: false`），以及 `WorkflowAgentResult` / `WorkflowAgentClaim` / `WorkflowConsumerReady` / `WorkflowCompletionAck` / `WorkflowClose` / `WorkflowTaskObserved`（host-only，`model_visible: false`）。
+- `BUILTIN_MCP_INSTANCES` 条目：`name = "workflow"`、`policy_key = "WorkflowMiddleware"`（沿用旧槽位键，用户配置兼容）。
+- `BUILTIN_RESERVED_INSTANCE_NAMES` 包含 `"workflow"`。
+- `BuiltinMcpTool::model_visible` 区分模型可见面与 host-only 工具；其余实例默认 `true`。
 
 ### 4.2 工具与授权边界
 
@@ -93,21 +87,27 @@ Workflow 是目前唯一仍以「middleware 槽位 + 私有 wire 协议」接入
 | `WorkflowStatus` | 模型面（deferred） | 查询 run 列表或单 run 快照 | `{ runId?: string, limit?: number }` |
 | `WorkflowKill` | 模型面（deferred） | 终止 run 或单 agent | `{ runId: string, agentId?: string }` |
 | `WorkflowAgentResult` | **host-only** | 回填 agent 任务结果 | `{ runId, taskId, result: AgentRunResult }` |
+| `WorkflowAgentClaim` | **host-only** | 唯一认领一个任务；同一 `claimId` 重试幂等 | `{ runId, taskId, claimId }` |
+| `WorkflowConsumerReady` | **host-only** | 声明消费者就绪（基线读取完成）；`false` 回落就绪并结算遗留执行 | `{ ready: boolean }` |
+| `WorkflowCompletionAck` | **host-only** | 确认已接受终态交付，释放待确认结果 | `{ runId }` |
+| `WorkflowClose` | **host-only** | 密封准入并排空实例执行 | `{}` |
+| `WorkflowTaskObserved` | **host-only** | 确认 run 已进入消费者任务投影 | `{ runId }` |
 
 **可见性 ≠ 授权**。三层分别定义：
 
 1. **发现过滤**：桥接构建跳过 `model_visible = false` 的工具（不进 ToolSearch 索引与 LLM tools 参数）；覆盖 `tool_bridge` 构建、动态重建、`system_mcp_tools` 提升路径的正反向测试。
-2. **调用授权（服务端）**：`WorkflowAgentResult` 在 handler 内校验 `taskId` 属于当前实例的活跃任务表且状态为 `published`，否则返回幂等结果或明确错误；不信任调用方参数声明的身份。即使模型猜中完整工具名，`ensure_model_visible` 与调用授权双重拦截。
+2. **调用授权（服务端）**：`WorkflowAgentResult` 在 handler 内校验消费者令牌，并要求 `taskId` 属于当前实例任务表且状态为 `executing`（外部回填只接受已被唯一 claim 的任务），否则返回幂等结果或明确错误；不信任调用方参数声明的身份。即使模型猜中完整工具名，`ensure_model_visible` 与调用授权双重拦截。
 3. **执行授权**：消费者执行任务时使用 session 既有过滤链（`ToolFilterPolicy`、agent definition、skill 预载）；Node 提供的 `allowedTools` 等字段只能**收缩**、不能授予权限，与现状语义一致。
 
 ### 4.3 资源与订阅
 
 | URI | 形态 | 内容 | 订阅 |
 | --- | --- | --- | --- |
+| `workflow://background-tasks` | state | 后台任务快照与待确认完成结果（宿主投影数据源） | 轮询读取 |
 | `workflow://runs` | state | run 索引快照：`[{ runId, name, status, startedAt, progress 摘要 }]` | ✅ |
-| `workflow://runs/{runId}` | state | 单 run 快照：状态、阶段、agent 统计、终态、limits 使用、`eventWatermark` | ✅ |
-| `workflow://runs/{runId}/events` | event-log | progress 事件、journal 摘要、done 终态；单调 `sequence` + `headSequence` + 保留边界 | ✅ |
-| `workflow://runs/{runId}/tasks` | event-log | 任务事件：`task.published` / `task.completed` / `task.failed` / `task.cancelled` | ✅ |
+| `workflow://runs/{runId}` | state | 单 run 快照：四维状态、阶段、agent 统计、`eventWatermark` | ✅ |
+| `workflow://runs/{runId}/events` | event-log | progress 事件（run / phase / agent / log）与 `RunDone` 终态；单调 `sequence` + `headSequence` + 保留边界 | ✅ |
+| `workflow://runs/{runId}/tasks` | event-log | 任务事件：`published` / `executing` / `completed` / `failed` / `cancelled`（`eventId = {runId}:{taskId}:task.{kind}`） | ✅ |
 | `workflow://tasks` | event-log | session 级任务流（跨 run 聚合，消费主入口） | ✅ |
 
 **发现与补读协议**（通知只是唤醒信号，不承担可靠投递）：
@@ -116,15 +116,16 @@ Workflow 是目前唯一仍以「middleware 槽位 + 私有 wire 协议」接入
 2. 内核保证「先可见后通知」：任务先进入任务表与事件日志，再发 `notifications/resources/updated`；消费者收到通知后 read，按 eventId 去重（幂等）。
 3. 通知丢失/连接重建：重新 `subscriptions/listen` 后重复步骤 1 的全量扫描；扫描幂等，不重复执行已终态任务。
 4. 事件日志读取使用稳定索引 URI + 分页参数（`?after={sequence}&limit=N`）；`headSequence` 为已提交上界；读取方发现游标早于保留边界时重新建立快照，不假装连续。
-5. 清理：run 终态后保留窗口（对标 `cleanup_old_runs` 上限 50）；清理后 `workflow://runs/{runId}*` 返回 not-found，`workflow://tasks` 聚合仍保留其终态摘要直至窗口过期。
+5. 清理：终态 run 与终态任务按 5 分钟保留窗口回收（`WorkflowProgressStore::cleanup_completed`、`TASK_RETENTION_MS`）；清理后 `workflow://runs/{runId}*` 返回 not-found，`workflow://tasks` 聚合仍保留其终态摘要直至窗口过期。
 
 资源内容为不可信模型输入边界：事件日志正文不经模型上下文注入；TUI/ACP 投影由宿主读取资源生成（数据源单一，不新增第二事实源——内存投影 + journal 为真相）。
 
 ### 4.4 关闭
 
-- 关闭键 `"WorkflowMiddleware"` 进 `BUILTIN_INSTANCE_POLICY_KEYS`；`closed_instances` 命中时实例不 spawn、桥接不建（与 workspace 同构）。`MIDDLEWARE_NAMES` 移除该键，`MIDDLEWARE_TOOL_NAMES` 移除 `"Workflow"`。
+- 关闭键 `"WorkflowMiddleware"` 在 `BUILTIN_INSTANCE_POLICY_KEYS` 中声明；`closed_instances` 命中时实例不 spawn、桥接不建、宿主消费者不启动（与 workspace 同构）。
+- `MIDDLEWARE_NAMES` 不含该键，`MIDDLEWARE_TOOL_NAMES` 不含 `"Workflow"`；两表零交集由装配测试断言。
 - 工具归一/过滤面（`tool_catalog`、`permission`）按实例身份自动生效（`mcp__workflow__*`）。
-- 关闭与 policy 键迁移、装配切换、fork 排除**必须同批原子完成**，不得跨批次留下策略失效窗口。
+- 子 Agent 按实例身份整体排除 `workflow`（`CHILD_ABSENT_BUILTIN_INSTANCES`），不另立逐工具名单。
 
 ## 5. Agent 任务信道
 
@@ -166,70 +167,34 @@ published ──► executing ──► completed | failed | cancelled
 
 保留：`workflow/start`、`workflow/kill`（宿主→Node 请求）；`progress/event`、`journal/append|truncate`、`log`、`workflow/done`（Node→宿主通知）。
 
-变更：`agent/run` 请求/响应改为 Node→宿主 `agent/task`（通知）与宿主→Node `agent/result`（通知）。
+变更：Node→宿主 `agent/task`（通知）发布任务，宿主→Node `agent/result`（通知）回填结果；原 `agent/run` 请求/响应不再使用。
 
-`npm-packages/@peri-workflow/src/{adapter,rpc,types}.ts` 重做：adapter 维护 `taskId → pending` 等待表，等待 `agent/result`；超时与 abort 语义保持。`peri-workflow/src/{protocol,runner/message_loop}.rs` 分派改为任务登记/回填投递；Rust wire 类型与 npm `types.ts` 保持两侧同步注释。**wire 改造独立批次实施**，以 `WorkflowRuntime` 的领域接口为边界（先接口、后替换），不与 MCP 面切换捆绑。
+`npm-packages/@peri-workflow/src/{adapter,rpc,types}.ts`：adapter 维护 `taskId → pending` 等待表，等待 `agent/result`；超时与 abort 语义保持。`peri-workflow/src/{protocol,runner/message_loop}.rs` 负责任务登记与回填投递；Rust wire 类型与 npm `types.ts` 保持两侧同步。wire 以 `WorkflowRuntime` 的领域接口为边界，不与 MCP 面切换耦合。
 
 ### 5.5 消费者（WorkflowTaskConsumer）
 
-- 装配于 `peri-acp/src/host/`，session 生命周期内持有；绑定 session 池与实例，唯一所有者持有执行依赖（executor 构造链从 `create_session_workflow_middleware` 迁移，保留 `create_executor(WorkflowAgentContext)` 全参数）。
+- 装配于 `peri-acp/src/host/`，session 生命周期内持有；绑定 session 池与实例，是执行依赖的唯一持有者（executor 由 `create_executor(WorkflowAgentContext)` 构造，经会话装配注入）。
 - 就绪屏障：实例可先初始化，但 `Workflow` 工具在消费者订阅就绪前拒绝新启动（返回明确错误），避免「首个任务无人消费」。
 - 关闭顺序（与 `session_close` 链路同序）：① 停止接受新 run 与新任务发布 → ② 取消或有界等待已登记任务（超时后强制收敛并记录）→ ③ 保留回填通道完成终态处理 → ④ 收割执行任务与 Node 进程 → ⑤ 释放订阅与池。
 
 ## 6. 会话装配与依赖注入
 
-1. `BuiltinInstanceContext` 新增 workflow 槽位 `WorkflowInstanceInput`（对标 `WorkspaceInstanceInput`）：`cwd`、journal 根、`session_id`、执行依赖句柄（executor 工厂）、关闭位；注入时机与 workspace 同点（`assemble.rs` 池装配期，`run_initialize` 前）；会话关闭按 `close_builtin_task` 收敛。
-2. 装配顺序：实例 spawn → 输入注入 → 消费者创建并订阅（就绪）→ 开放工具面；任何一步失败按会话初始化失败处理并回收已建资源。
-3. ACP 面：`host/requests/workflow.rs` 四 handler 改为经池调用 `WorkflowStatus` / `WorkflowKill` / `Workflow`（resume = 携带 `resumeFromRunId` 调 `Workflow`，内核完成 state/journal 读取与启动，ACP 不拼装参数）。`McpPoolPort` 增加 `call_tool` / `read_resource` 端口面（或在 host 层使用 concrete pool 并登记豁免），作为前置工作；端口保留/删除与 wire 改造解耦。
+1. `BuiltinInstanceContext` 持有 workflow 槽位 `WorkflowInstanceInput`（对标 `WorkspaceInstanceInput`）：槽位只承载 `Arc<WorkflowRuntime>` 的首次绑定，`cwd`、journal 根、`session_id`、执行依赖与关闭位都在 runtime 内；注入时机与 workspace 同点（`assemble.rs` 池装配期，`run_initialize` 前），会话关闭按 `close_builtin_task` 收敛。
+2. 装配顺序：上下文注入 → 实例 spawn → 会话创建后绑定 runtime → 消费者订阅并就绪；任何一步失败按会话初始化失败处理并回收已建资源。
+3. ACP 面：`host/requests/workflow.rs` 的 handler 经池调用 `WorkflowStatus` / `WorkflowKill` / `Workflow`（resume = 携带 `resumeFromRunId` 调 `Workflow`，内核完成 state/journal 读取与启动，ACP 不拼装参数）；端口面为 `McpPoolPort::{call_instance_tool, read_instance_resource, subscribe_instance_resource}`。
 4. ACP 调用的权限/错误映射保持现状语义：错误类型、排序、不存在 run 的行为进入兼容契约测试。
 
-## 7. 迁移与删除清单
+## 7. 待裁决记录
 
-**新增**
-
-- `mcp-packages/workflow/`（`WorkflowMcpServer`，形态对照 cron/workspace）：工具、资源、订阅、`WorkflowRuntime` 包装。
-- `peri-acp-types/src/builtin_mcp.rs`：`WORKFLOW_TOOLS`、实例条目、保留名、`model_visible` 字段。
-- `peri-middlewares/src/mcp/builtin/{dispatch,context}.rs`：handler 分支与 `WorkflowInstanceInput`。
-- `WorkflowTaskConsumer`（`peri-acp/src/host/`）。
-- Node wire：`agent/task` / `agent/result`（独立批次）。
-
-**修改**
-
-- `peri-middlewares/src/mcp/builtin/{mod,runtime}.rs`：overlay / spawn / supervisor 分支。
-- `meta_harness.rs`：`"WorkflowMiddleware"` 迁 `BUILTIN_INSTANCE_POLICY_KEYS`；删 `MIDDLEWARE_TOOL_NAMES` "Workflow"；同步 `app.rs` 校验与相关测试（原子批）。
-- `peri-agent/src/session/factory.rs`、`peri-middlewares/src/assembly.rs`：删 `ChainSlot::Workflow` 装配；`fork.rs`、`tool_search/core_tools.rs` 名称排除改实例身份（子 Agent 对 Status/Kill 的排除按实例整体处理）。
-- `peri-acp/src/host/{mod,requests,requests/workflow,session_lifecycle,prepared}.rs`：状态源改为池/实例。
-- `peri-workflow/src/tool.rs`：`WorkflowTool::invoke` 逻辑迁入 `WorkflowRuntime::start_run`（参数校验/GitBaseline/preflight/reserve/cancel 通道保留）。
-
-**删除**
-
-- `ChainSlot::Workflow` 及 arm、`WorkflowMiddlewareAdaptor`、`WorkflowMiddlewarePort`、`SessionState.workflow_middleware`、`peri-resources/src/workflow.rs` 门面、`WorkflowMiddlewareFactory` 端口链（由实例上下文替代）。
-
-**实施顺序原则**：先落 MCP 面与 `WorkflowRuntime` 领域接口（保留旧装配，双轨可验证）→ 再原子切换装配/策略/删除旧链 → wire 改造独立批次（以接口为边界）。任一批次不得让启动、取消、恢复语义处于不可验证状态。
-
-## 8. 验收
-
-**功能与行为矩阵**
-
-1. 工具面：`Workflow` 经 `mcp__workflow__Workflow` 可发现、可调用；`WorkflowAgentResult` 不出现在任何模型可见面（ToolSearch、ExecuteExtraTool、动态重建、提升路径）；关闭后实例不 spawn、工具不可见。
-2. 资源面：run 索引/快照/事件/任务可读、可订阅；`updated` 通知在状态变化后到达；分页游标、`headSequence`、保留边界与清理语义正确。
-3. 任务信道：发布 → 消费者执行 → 回填 → Node 收到结果；任务先可见后通知；通知丢失后重建订阅可完整发现（扫描幂等、不重复执行）；kill 各竞态按 5.3 收敛；迟到回填幂等。
-4. 并行与限制：两个任务可同时进入执行；达到 `maxConcurrency`/limits 时排队与取消正确；limit 计费与现状一致。
-5. 身份与安全：跨 session 回填被拒绝；任务参数不能扩大工具权限；模型猜中 host-only 工具名不能调用。
-6. 会话生命周期：双会话并发 run、任务、执行上下文互不串线；关闭顺序无残留（无 detached 执行、无未结算 promise）；就绪屏障有效。
-7. 兼容回归：MetaHarness 关闭键、ACP 方法行为、TUI 面板；resume cache、Git postcondition、`writeIntent`、limits、long-output 提取、ADLC 检查产物与既有语义一致；启动失败释放 reservation、启动/取消竞态无僵尸 Node 进程。
-8. 边界与验证：`peri-resources` 不再依赖 workflow；删除清单完成后全仓编译、契约测试、`scripts/check-layer-imports.sh` 通过；`git diff --check` 干净。
-
-## 9. 待裁决记录
-
-- journal 落盘归属（工作区工具环境 vs Session Store）：保持现状，独立裁决（`2026-10-11-module-dependency-boundary-audit.md` 第 2 项）。
+- journal 落盘归属（工作区工具环境 vs Session Store）：保持现状（`.claude/workflow-runs/`），独立裁决；原裁决 issue 已归档，可经 Git 历史检索。
+- `peri-resources/src/workflow.rs` 门面删除：未落地残留目标；`peri-resources` 仍依赖 workflow，删除需独立裁决。
 - Node 引擎独立分发为外部 MCP server：本设计在同语义上保留升级路径（`agent/task`/`agent/result` ↔ 标准资源/工具），不在本范围实施。
 
-## MCP 数据边界收口（2026-10-19）
+## 8. MCP 数据边界契约
 
 - `WorkflowInstanceInput` 为实例绑定独立执行管理器；Host 任务目录不注入内核。
 - Host 通过 `workflow://background-tasks` 读取后台任务快照与待确认完成结果，重建外部任务投影。完成结果先交付会话，再调用鉴权的 `WorkflowCompletionAck`；断线与拒收不确认，重复扫描沿稳定终态身份去重。不再共享业务 broadcast。
-- `WorkflowAgentClaim`、`WorkflowConsumerReady`、`WorkflowCompletionAck`、`WorkflowClose` 与 `WorkflowAgentResult` 采用同一消费者 `_meta` 能力令牌。领取、就绪、取消、完成和关闭均经过 MCP，不通过进程内任务表接口。
+- `WorkflowAgentClaim`、`WorkflowConsumerReady`、`WorkflowCompletionAck`、`WorkflowClose`、`WorkflowTaskObserved` 与 `WorkflowAgentResult` 采用同一消费者 `_meta` 能力令牌。领取、就绪、取消、完成和关闭均经过 MCP，不通过进程内任务表接口。
 - `WorkflowClose` 密封准入并等待实例执行管理器清理；Host 在协议确认成功、补读终态后停止投影与消费者，最后释放 MCP 池。失败返回未完成，保留重试能力。
 - 待确认结果为当前实例内存状态，服务端进程崩溃后的恢复不在本变更保证范围内。
 

@@ -50,7 +50,7 @@ graph TB
 
 ### 2.1 BaseTool 契约
 
-所有工具的根 trait（定义已下沉 `peri-acp-types/src/tools.rs:79`）。定义工具对外暴露的接口，不约束内部实现。
+所有工具的根 trait（定义已下沉 `peri-acp-types/src/tools.rs::BaseTool`）。定义工具对外暴露的接口，不约束内部实现。
 
 - 工具向 LLM 暴露三要素：名称、描述、参数 Schema。LLM 依据这三要素决定是否调用及如何传参
 - **描述契约（v1.4）**：描述从单个字符串升级为结构化 `ToolDescription`（`name`/`description`/可选 `title`/可选 `namespace`），并支持提示词层声明模板。详见 [2.5 工具描述契约与提示词层声明](#25-工具描述契约与提示词层声明v14-新增)
@@ -82,11 +82,11 @@ Skills 不是工具——它们通过 System Prompt 注入行为指令，不走�
 | Direct | 当前 session 中直接可见 | 高频工具及桥接元工具 | session-local 工具视图中 `is_direct() = true` |
 | Deferred | 不直接可见 | 低频或动态注册工具 | session-local 工具视图中 `is_direct() = false`，进入 ToolSearch 索引 |
 
-`SearchExtraTools` 与 `ExecuteExtraTool` 由 `ToolSearchMiddleware` 注册，是 Direct 元工具。`ArtifactTool` 则是 builtin `artifact` MCP 实例（`mcp-packages/artifact/src/{server,tool}.rs`）的**工具核心**，模型面名字为原始名 `artifact`，其 Direct 身份来自注册表 `peri-acp-types/src/builtin_mcp.rs` 的逐工具 `direct` 声明（`ArtifactMiddleware` 与 `is_direct()` 覆写已删除）；它只使用 `meta` namespace 分组，并不属于 ToolSearchMiddleware 或 Deferred/ToolSearch 执行路径。宿主侧实例注册、context 与 dispatch 仍由 `peri-middlewares/src/mcp/builtin/` 持有，插件路径总表见 [MCP packages 代码索引](../code-index/mcp-packages.md)。
+`SearchExtraTools` 与 `ExecuteExtraTool` 由 `ToolSearchMiddleware` 注册，是 Direct 元工具。`ArtifactTool` 则是 builtin `artifact` MCP 实例（`mcp-packages/artifact/src/{server,tool}.rs`）的**工具核心**，模型面名字为原始名 `artifact`，其 Direct 身份来自注册表 `peri-acp-types/src/builtin_mcp.rs` 的逐工具 `direct` 声明；它只使用 `meta` namespace 分组，并不属于 ToolSearchMiddleware 或 Deferred/ToolSearch 执行路径。宿主侧实例注册、context 与 dispatch 仍由 `peri-middlewares/src/mcp/builtin/` 持有，插件路径总表见 [MCP packages 代码索引](../code-index/mcp-packages.md)。
 
 工具集合先由 middleware 收集，再应用 disabled middleware 与 agent allowlist/disallowlist 过滤，形成每 turn 的 session-local 工具视图。ToolSearch 的 direct 能力说明、deferred 索引和最终 LLM tools 都必须从该视图派生，不能从静态名称清单推断。
 
-**Deferred 工具来源**：builtin `cron` 实例（`mcp__cron__cron_register` / `mcp__cron__cron_list` / `mcp__cron__cron_remove`）、MCP 外部服务（`mcp__{server}__{tool}`）、Plugin 插件（`plugin:{name}:{server}` 前缀命名空间）、Workflow 工具等；是否进入 Deferred 最终仍由各工具的 `is_direct()` 决定，但 builtin 一等工具例外——其 Direct / Deferred 身份由声明表 `peri-acp-types/src/builtin_mcp.rs` 的逐工具 `direct` 声明（`builtin_mcp.rs:34`）决定，生效点为 `mcp/tool_bridge.rs::is_declared_direct`。
+**Deferred 工具来源**：builtin `cron` 实例（`mcp__cron__cron_register` / `mcp__cron__cron_list` / `mcp__cron__cron_remove` / `mcp__cron__cron_toggle`）、MCP 外部服务（`mcp__{server}__{tool}`）、Plugin 插件（`plugin:{name}:{server}` 前缀命名空间）、Workflow 工具等；是否进入 Deferred 最终仍由各工具的 `is_direct()` 决定，但 builtin 一等工具例外——其 Direct / Deferred 身份由声明表 `peri-acp-types/src/builtin_mcp.rs` 的逐工具 `direct` 声明决定，判定入口为 `peri-middlewares/src/mcp/builtin/mod.rs::is_declared_direct`。
 
 ### 2.3 工具执行生命周期
 
@@ -113,7 +113,7 @@ Meta 工具（SearchExtraTools / ExecuteExtraTool）是 LLM 发现和调用 Defe
 
 #### 2.4.1 搜索算法
 
-`ToolSearchIndex` 实现了 TF-IDF + 关键词混合搜索引擎（`tool_index.rs` + `keyword_search.rs`），评分公式：
+`ToolSearchIndex` 实现了 TF-IDF + 关键词混合搜索引擎（`peri-middlewares/src/tool_search/{tool_index,keyword_search}.rs`），评分公式：
 
 ```
 score = keyword_score × 0.4 + tfidf_score × 0.6
@@ -263,7 +263,7 @@ Arc<MiddlewareChain> 同步收集一次，并追加到不变的 frozen base prom
   空 contribution 不追加分隔符，非空时精确组合为
   `base + "\n\n" + contribution`，不会在历史字符串上累加。
 - **缓存位置**：声明段位于 prompt contribution（frozen 之后），不参与 Anthropic
-  前缀缓存。量小（17 工具 × 1-2 行）可控；若需缓存收益，演进方向为合并进静态
+  前缀缓存。声明段只收录 direct 工具、每工具 1-2 行，体量可控；若需缓存收益，演进方向为合并进静态
   段落（build_system_prompt 感知工具集），记为未来项；当前保持 request-time
   dynamic contribution，以保证 session-local 能力视图准确。
 
@@ -302,10 +302,10 @@ Read a file → `{{name}}` ({{title}}). Use `{{name}}` for file content, not `ca
 - 声明段内容变更（工具描述修改）会使 contribution 变化，但 frozen 前缀不受影响——
   描述迭代不破坏缓存，符合"静态区域冻结、动态区域可演进"原则（peri-agent-system-prompt-v2 第 1 节）
 
-### 2.5.5 与 05_using_tools.md 的关系（全量迁移完成）
+### 2.5.5 与 05_using_tools.md 的关系
 
 05 段落保留**通用纪律**（文件头部的 batch/incremental 规则与 Bash discipline
-节，05_using_tools.md:3-4、6-13）与**通用工具选择原则骨架**（"Tool selection
+节）与**通用工具选择原则骨架**（"Tool selection
 principles" 小节，2 行、不含工具名与逐工具细节）。骨架负责通用选择纪律；
 主 Agent 的当前工具声明从首个 Reason 起即通过 request-time contribution 可见，
 不再承担 turn-1 声明缺口的 fallback 职责。
@@ -322,5 +322,5 @@ principles" 小节，2 行、不含工具名与逐工具细节）。骨架负责
 | 渲染完整性 | 所有 Core/Meta 工具声明渲染后无未识别占位符残留 |
 | 稳定性 | 同一工具集两次收集输出字节级相同（防排序/缓存回归） |
 | 排序 | namespace + name 字典序 |
-| 迁移守护 | 05 段落无工具条目残留（骨架小节不含工具名）；声明段渲染输出与 05 剩余内容无逐字重复（全量迁移完成态） |
+| 迁移守护 | 05 段落无工具条目残留（骨架小节不含工具名）；声明段渲染输出与 05 剩余内容无逐字重复 |
 | 缓存保护 | 注入不同 cwd/date 断言声明段输出不变（不引用会话数据） |

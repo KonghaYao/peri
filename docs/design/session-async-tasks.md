@@ -1,7 +1,7 @@
 # Session 异步任务
 
-- 状态：**执行恢复已剥离，当前任务生命周期保留；结果处理责任由会话级 mailbox 持有**；验证范围见剥离计划。Child 有界收尾 A′ 已实现并通过定向/全库回归；真实 MCP wire、TUI 手测与进程重启自有 fixture 仍未覆盖，见 [active spec](../../spec/issues/2026-10-20-p1-sync-subagent-unbounded-settlement.md)。
-- 消息与运行生命周期服从 [RCRA 权威](rcra-message-activation.md)；实施状态见[剥离计划](../../spec/issues/2026-10-07-remove-execution-recovery-plan.md)。
+- 状态：**现行设计。执行恢复已剥离，当前任务生命周期保留；结果处理责任由会话级 mailbox 持有。**
+- 消息与运行生命周期服从 [RCRA 权威](rcra-message-activation.md)。
 
 ## 1. 归属与当前运行
 
@@ -15,7 +15,7 @@
 
 ### 1.2 Workspace task owner 契约
 
-Workspace MCP 默认是通用 MCP 服务：不发送任何 `peri/*` 元数据的客户端走 generic 模式，7 个基础工具照常可用，后台任务不参与 session 隔离。Peri 宿主只为 builtin workspace 与 `WorkspaceRemote` 注入 `_meta["peri/taskOwner"] = 直接发起会话的 session id`；其他 MCP server 不接收该字段。
+Workspace MCP 默认是通用 MCP 服务：不发送任何 `peri/*` 元数据的客户端走 generic 模式，基础文件与终端工具照常可用，后台任务不参与 session 隔离。Peri 宿主只为 builtin workspace 与 `WorkspaceRemote` 注入 `_meta["peri/taskOwner"] = 直接发起会话的 session id`；其他 MCP server 不接收该字段。
 
 owner 是纯身份，不是秘密或 capability：不存在 per-session token、签发/解析表或调用一致性校验，远程部署的信任来自连接级认证（loopback 或部署认证）。服务端每次请求从 `_meta` 读取可选 owner；后台 Bash、`tasks/get|cancel` 与 `subscriptions/listen` 的任务事件在 owner 存在时按 owner 过滤，owner A 不能读取或取消 owner B 的任务。模型不能通过工具参数伪造 owner，宿主在工具桥接层注入。
 
@@ -31,7 +31,7 @@ owner 是纯身份，不是秘密或 capability：不存在 per-session token、
 
 当前会话宿主持续监听队列激活信号；主 run 自然结束（包括有界等待到期）不撤销该监听。结果晚于 run 退出到达时，仍经原 continuation scheduler、prompt lock 和代际校验启动新 run。监听在订阅后复查队列，run 结束也复查队列，覆盖退出与投递竞态；活跃 run 自己消费结果，不额外并发启动。Info 或已消费的消息不产生空跑，失败不自动反复重试同一输入。
 
-执行失败仅阻止同一输入集合自动重试，不永久关闭会话的后台激活权限。以尝试开始时的队列接纳序号为边界：边界后到达的 Required / EnsureProcessing、模型可见消息可重新激活，包括尝试执行期间或失败之后到达的任务错误结果。Passive、Info 默认策略或仅 UI 可见消息不解禁旧输入；Error 严重度本身不授予调度权。显式 Stop 与会话关闭仍优先，不因新错误结果重新放行。实施记录见 [异步错误激活修复](../../spec/issues/2026-10-08-async-error-notification-activation.md)。
+执行失败仅阻止同一输入集合自动重试，不永久关闭会话的后台激活权限。以尝试开始时的队列接纳序号为边界：边界后到达的 Required / EnsureProcessing、模型可见消息可重新激活，包括尝试执行期间或失败之后到达的任务错误结果。Passive、Info 默认策略或仅 UI 可见消息不解禁旧输入；Error 严重度本身不授予调度权。显式 Stop 与会话关闭仍优先，不因新错误结果重新放行。
 
 本地队列接纳与 TaskManager 终态结算同一回调完成，不把投递放进无人等待的 detached task。显式取消普通 prompt 保留原有一次独立子任务结果续跑；取消正在执行的 continuation 不再次自动续跑，剩余结果留给后续用户输入。会话关闭撤销监听并排空任务，不允许迟到结果重启关闭的会话。此机制仅属于当前进程，不恢复旧执行或持久化唤醒义务。
 
@@ -73,7 +73,7 @@ MQ pending 标记是后续处理提示，不作为排队请求的准入锁。重
 
 ## 6. 当前进程执行链
 
-当前实现由 child runner、宿主 execution 通知及 TUI lifecycle 共同履行以下契约；定向验证范围与待完成的真实使用验收见 `spec/issues/2026-10-08-async-execution-chain-fixes.md`。
+当前实现由 child runner、宿主 execution 通知及 TUI lifecycle 共同履行以下契约。
 
 - Child 的 bounded idle 只结束一次计算推进，不等于委派成果终态；存在未结任务时，当前进程必须仍有可响应取消和结果唤醒的执行责任方。结果留在直接发起 child 的队列，不转投根会话，也不建立持久恢复机制。
 - Child 的事件转发失败是可见失败，不能让已退出的 worker 留在 Running；保留原失败原因，可靠接受一次终态后结算并释放当前运行登记。
@@ -106,6 +106,6 @@ sync wrapper 只在收到已提交 receipt 后 detach；无父投递宿主时等
 
 覆盖当前任务结果/进度/取消、父子消息路由与展示身份、连接关闭失败和新输入处理。覆盖历史加载不触发任务发现或旧副作用；不再验收冷恢复、永久 terminal ACK 和跨进程处理义务。
 
-Child 收尾回归使用 paused-time：永久 Working 无通知、activity/任务新增不重置 D、D 前/后/同刻完成、task 终态但结果未消费、Receive 跨 D、已准入 Act 完成、预算/HookStop、cancel 与 D 同刻、sync/bg × 新建/resume、父注册竞争、交接/状态写失败、late result 后 resume、close 消息结算、A→B→C 归属。真实进程组（父 `sh` + 子 `sleep`）与输出管道清理已由 `real_blocking_shell_tree_survives_deadline_then_cancel_cleans_tree` 覆盖；TUI 手测与真实 MCP wire 仍按仓库 testing 规范另行验收。
+Child 收尾回归使用 paused-time：永久 Working 无通知、activity/任务新增不重置 D、D 前/后/同刻完成、task 终态但结果未消费、Receive 跨 D、已准入 Act 完成、预算/HookStop、cancel 与 D 同刻、sync/bg × 新建/resume、父注册竞争、交接/状态写失败、late result 后 resume、close 消息结算、A→B→C 归属。真实进程组（父 `sh` + 子 `sleep`）与输出管道清理的回归见 `real_blocking_shell_tree_survives_deadline_then_cancel_cleans_tree`；TUI 手测与真实 MCP wire 按仓库 testing 规范验收。
 
-TUI 后台验收使用隔离 HOME、真实二进制与本地模型重放：只提交一次用户输入，核对当前 canonical reminder、直接父会话后续模型请求及回答、child 终态和重复投递。验收只读取当前 threads/messages，不依赖已删除的 Work 表。
+TUI 后台验收使用隔离 HOME、真实二进制与本地模型重放：只提交一次用户输入，核对当前 canonical reminder、直接父会话后续模型请求及回答、child 终态和重复投递。验收只读取当前 threads/messages，不依赖持久执行账本。
