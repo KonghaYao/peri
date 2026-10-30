@@ -34,9 +34,9 @@ impl BuiltAnthropicRequest {
     }
 }
 
-/// Anthropic 协议允许的最小 extended-thinking 预算。
+/// Anthropic 协议允许的最小手动 thinking 预算。
 const MIN_THINKING_BUDGET: u32 = 1_024;
-/// 启用 thinking 时至少为正文保留的输出预算；thinking 与正文共享输出上限。
+/// 手动 thinking 至少为正文保留的输出预算；thinking 与正文共享输出上限。
 const MIN_RESPONSE_RESERVE: u32 = 1_024;
 
 pub(super) fn build_request(
@@ -79,17 +79,23 @@ pub(super) fn build_request(
         body["temperature"] = json!(temperature);
     }
     if config.extended_thinking {
-        // 协议约束：budget_tokens 必须小于 max_tokens，且不低于最小预算。
-        // thinking 与正文共享输出上限，因此还要为正文预留 MIN_RESPONSE_RESERVE；
-        // 请求级 max_tokens 覆盖（验证器、分类器等派生请求）可能放不下
-        // 最小思考预算 + 正文预留，此时不发送 thinking。
-        let available_thinking = max_tokens.saturating_sub(MIN_RESPONSE_RESERVE);
-        let thinking_budget = config.thinking_budget.min(available_thinking);
-        if thinking_budget >= MIN_THINKING_BUDGET {
-            body["thinking"] = json!({
-                "type": "enabled",
-                "budget_tokens": thinking_budget,
-            });
+        let thinking = if config.model == "claude-sonnet-5-5" {
+            // 仅对已确认的精确模型使用 adaptive；不发送手动预算，也不应用其门限。
+            Some(json!({ "type": "adaptive" }))
+        } else {
+            // 手动预算必须不低于最小值，并为正文预留 MIN_RESPONSE_RESERVE。
+            // 请求级 max_tokens 覆盖可能放不下两者，此时不发送 thinking。
+            let available_thinking = max_tokens.saturating_sub(MIN_RESPONSE_RESERVE);
+            let thinking_budget = config.thinking_budget.min(available_thinking);
+            (thinking_budget >= MIN_THINKING_BUDGET).then(|| {
+                json!({
+                    "type": "enabled",
+                    "budget_tokens": thinking_budget,
+                })
+            })
+        };
+        if let Some(thinking) = thinking {
+            body["thinking"] = thinking;
             body["output_config"] = json!({ "effort": config.thinking_effort });
         }
     }

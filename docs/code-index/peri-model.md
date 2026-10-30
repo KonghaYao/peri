@@ -58,8 +58,9 @@ Emscripten 路径：`src/transport/http.rs` 复用 reqwest native/Hyper HTTP/SSE
 
 | 功能 | 文件 | 入口/关键点 |
 | --- | --- | --- |
-| 配置/模型/流入口 | anthropic/mod.rs | `AnthropicConfig` :31（Debug 保留配置原文）；`AnthropicModel` :107；`impl Model` :166（stream → runtime_http_sse_stream） |
-| 请求构建 | anthropic/request.rs | `build_request` :37；`messages_endpoint` :88（拒绝 userinfo/非 http(s)，保留 base path）；`messages_to_anthropic` :111 |
+| 配置/模型/流入口 | anthropic/mod.rs | `AnthropicConfig`（Debug 保留配置原文；`with_extended_thinking` 显式启用 thinking、传递 effort）；`AnthropicModel`；`impl Model`（stream → runtime_http_sse_stream） |
+| 请求构建 | anthropic/request.rs | `build_request`；`messages_endpoint`（拒绝 userinfo/非 http(s)，保留 base path）；`messages_to_anthropic` |
+| thinking 模式/预算 | anthropic/request.rs；回归 anthropic/mod_test.rs | `build_request` 是模型模式选择的唯一权威：启用时仅精确 `claude-sonnet-5-5` 发送 `adaptive`，无 `budget_tokens`、不受手动预算门限影响；其余模型/未知 alias 保留 `enabled` 预算收缩与省略。effort 原样写入 `output_config`；输出上限仍由 request override 优先。回归覆盖默认上限、各 effort、小配置/请求上限、旧模型、alias 与未启用；定向命令：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-model -p peri-acp --lib -- anthropic` |
 | prompt cache | `prompt_cache.rs` + `anthropic/cache.rs`；consumer `anthropic/request.rs` / `openai_compatible/request.rs` | `SYSTEM_PROMPT_DYNAMIC_BOUNDARY` / `combine_system_prompt_with_dynamic` / `strip_system_prompt_dynamic_boundaries` 是共享 transport contract；combine 对空/None frozen base 也保留 request-time dynamic seam；`split_system_blocks` 对单 token 分区、重复 token fail-closed、无 token legacy fallback；`apply_cache_to_messages` 标记首/末/倒数第二 user 的最后一个非空 text 或 tool_result |
 | 流解码 | anthropic/stream.rs | `decoders` :52；`decode_event` :66（生命周期状态机：ensure_streaming :155/start_block :163/apply_delta :226/finish_block :285）；`completed_response` :378 |
 | 非流式响应 | anthropic/response.rs | `token_count` :110（溢出检查） |
