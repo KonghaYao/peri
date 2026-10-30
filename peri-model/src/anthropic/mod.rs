@@ -58,6 +58,8 @@ impl AnthropicConfig {
         }
     }
 
+    /// 启用 thinking 并原样传递 effort；精确模型 `claude-sonnet-5-5` 使用 adaptive，
+    /// 忽略手动预算，其余模型保留手动预算的收缩与省略规则。
     pub fn with_extended_thinking(mut self, budget_tokens: u32, effort: impl Into<String>) -> Self {
         self.extended_thinking = true;
         self.thinking_budget = budget_tokens;

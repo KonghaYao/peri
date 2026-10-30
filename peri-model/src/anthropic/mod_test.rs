@@ -130,6 +130,112 @@ fn request_contract_preserves_system_cache_thinking_and_tool_result_order() {
     assert_eq!(results[1]["is_error"], true);
 }
 
+#[test]
+fn sonnet_5_5_uses_adaptive_thinking_and_preserves_effort() {
+    for effort in ["low", "medium", "high", "xhigh", "max"] {
+        let mut config = config().with_extended_thinking(10_000, effort);
+        config.model = "claude-sonnet-5-5".into();
+        let body = body_for_test(&config, &ModelRequest::default());
+        assert_eq!(body["max_tokens"], 32_000);
+        assert_eq!(body["thinking"], json!({ "type": "adaptive" }));
+        assert_eq!(body["output_config"], json!({ "effort": effort }));
+    }
+}
+
+#[test]
+fn adaptive_thinking_ignores_manual_budget_and_small_config_output_limits() {
+    for max_tokens in [1, 123, 1_024, 1_536, 2_047, 2_048] {
+        let mut config = config()
+            .with_extended_thinking(0, "high")
+            .with_max_tokens(max_tokens);
+        config.model = "claude-sonnet-5-5".into();
+        let body = body_for_test(&config, &ModelRequest::default());
+        assert_eq!(body["max_tokens"], max_tokens);
+        assert_eq!(body["thinking"], json!({ "type": "adaptive" }));
+        assert_eq!(body["output_config"], json!({ "effort": "high" }));
+    }
+}
+
+#[test]
+fn adaptive_thinking_preserves_small_request_output_overrides() {
+    let mut config = config()
+        .with_extended_thinking(10_000, "max")
+        .with_max_tokens(64_000);
+    config.model = "claude-sonnet-5-5".into();
+    for max_tokens in [1, 123, 1_024, 1_536, 2_047, 2_048] {
+        let body = body_for_test(
+            &config,
+            &ModelRequest::default().with_max_tokens(max_tokens),
+        );
+        assert_eq!(body["max_tokens"], max_tokens);
+        assert_eq!(body["thinking"], json!({ "type": "adaptive" }));
+        assert_eq!(body["output_config"], json!({ "effort": "max" }));
+    }
+}
+
+#[test]
+fn legacy_model_preserves_manual_budget_clamp_and_minimum() {
+    for (budget, max_tokens, expected_budget) in [
+        (10_000, 32_000, Some(10_000)),
+        (10_000, 4_096, Some(3_072)),
+        (10_000, 2_048, Some(1_024)),
+        (10_000, 2_047, None),
+        (10_000, 1_024, None),
+        (1_023, 32_000, None),
+        (1_024, 32_000, Some(1_024)),
+    ] {
+        let mut config = config()
+            .with_extended_thinking(budget, "xhigh")
+            .with_max_tokens(max_tokens);
+        config.model = "claude-sonnet-4-6".into();
+        let body = body_for_test(&config, &ModelRequest::default());
+        assert_eq!(body["max_tokens"], max_tokens);
+        if let Some(budget) = expected_budget {
+            assert_eq!(
+                body["thinking"],
+                json!({ "type": "enabled", "budget_tokens": budget })
+            );
+            assert_eq!(body["output_config"], json!({ "effort": "xhigh" }));
+        } else {
+            assert!(body.get("thinking").is_none());
+            assert!(body.get("output_config").is_none());
+        }
+    }
+}
+
+#[test]
+fn unknown_models_and_aliases_keep_manual_thinking() {
+    for model in [
+        "custom-sonnet-alias",
+        "claude-sonnet-5-5-latest",
+        "claude-sonnet-5-5-20261029",
+        "vendor/claude-sonnet-5-5",
+        "claude-sonnet-5.5",
+    ] {
+        let mut config = config().with_extended_thinking(10_000, "high");
+        config.model = model.into();
+        let body = body_for_test(&config, &ModelRequest::default());
+        assert_eq!(body["model"], model);
+        assert_eq!(
+            body["thinking"],
+            json!({ "type": "enabled", "budget_tokens": 10_000 })
+        );
+        assert_eq!(body["output_config"], json!({ "effort": "high" }));
+    }
+}
+
+#[test]
+fn thinking_stays_disabled_without_explicit_enablement() {
+    for model in ["claude-sonnet-5-5", "claude-sonnet-4-6", "custom-alias"] {
+        let mut config = config();
+        config.model = model.into();
+        let body = body_for_test(&config, &ModelRequest::default());
+        assert_eq!(body["max_tokens"], 32_000);
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("output_config").is_none());
+    }
+}
+
 /// 请求级 max_tokens 小于最小思考预算时，不能发送非法的 thinking 配置。
 #[test]
 fn request_budget_below_thinking_minimum_disables_thinking() {
