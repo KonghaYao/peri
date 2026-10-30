@@ -79,12 +79,7 @@ function InstanceDetail({ instance, wasm, generatedAt }: {
         <CodeRow label="Generation" value={instance.generationId} />
         <Row label="启动时间" value={formatDateTime(instance.startedAt)} />
         <Row label="运行时长" value={formatElapsed(instance.startedAt, generatedAt)} />
-        <Row
-          label="状态"
-          value={instance.running
-            ? "执行中"
-            : STATE_LABEL[instance.state]}
-        />
+        <Row label="状态" value={stateLabel(instance)} />
       </div>
 
       {instance.statsError === true ? (

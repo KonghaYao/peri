@@ -168,18 +168,17 @@ export class ProjectStore {
         return this.loaded;
       }
       logError("[peri-cf] Project manifest is unreadable", error, { path: this.filePath });
-      this.loaded = [];
-      return this.loaded;
+      // 不缓存失败结果：瞬时读取错误不能被后续写入固化成空清单。
+      throw error;
     }
     try {
       const parsed = parseProjectFile(JSON.parse(text));
       this.loaded = parsed.projects;
       return this.loaded;
     } catch (error) {
-      // 清单损坏时不让服务整体不可用；保留文件内容，下一次写入会显式覆盖。
+      // 清单损坏时保留文件内容；读取方看到错误，写入方不覆盖不可读数据。
       logError("[peri-cf] Project manifest is invalid", error, { path: this.filePath });
-      this.loaded = [];
-      return this.loaded;
+      throw error;
     }
   }
 

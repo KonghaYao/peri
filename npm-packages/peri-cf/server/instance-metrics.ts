@@ -157,14 +157,18 @@ export class ChatInstanceMetricsCollector {
     const observer: ChatFactObserver = {
       onBinding: (_target, replay) => this.onBinding(chat.id, replay),
       onFact: (envelope) => this.onFact(chat.id, envelope),
-      onClosed: () => { state.subscribed = false; },
+      onClosed: () => {
+        const current = this.states.get(chat.id);
+        if (current) current.subscribed = false;
+      },
     };
     try {
       this.unsubscribers.set(chat.id, chat.subscribeFacts(observer));
     } catch {
       // 订阅失败只关闭计数，不影响 Chat 创建；UI 显示“业务计数不可用”。
-      state.subscribed = false;
-      this.states.set(chat.id, state);
+      const current = this.states.get(chat.id) ?? state;
+      current.subscribed = false;
+      this.states.set(chat.id, current);
     }
   }
 

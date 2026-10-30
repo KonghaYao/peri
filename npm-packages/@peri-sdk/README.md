@@ -88,11 +88,15 @@ const manager = new ChatManager({
       // peri-wasm.js 位置（string | URL）；推荐 new URL("./peri-wasm.js", import.meta.url)，无可用 import.meta.url（如 workerd）时传绝对 URL 或 moduleFactory。
       moduleUrl: process.env.PERI_WASM_MODULE_URL!,
       // 只把遥测变量交给 WASM；未配置 Langfuse 时删除整个 env。
-      env: {
-        LANGFUSE_PUBLIC_KEY: process.env.LANGFUSE_PUBLIC_KEY!,
-        LANGFUSE_SECRET_KEY: process.env.LANGFUSE_SECRET_KEY!,
-        LANGFUSE_BASE_URL: process.env.LANGFUSE_BASE_URL ?? "https://cloud.langfuse.com",
-      },
+      ...(process.env.LANGFUSE_PUBLIC_KEY && process.env.LANGFUSE_SECRET_KEY
+        ? {
+            env: {
+              LANGFUSE_PUBLIC_KEY: process.env.LANGFUSE_PUBLIC_KEY,
+              LANGFUSE_SECRET_KEY: process.env.LANGFUSE_SECRET_KEY,
+              LANGFUSE_BASE_URL: process.env.LANGFUSE_BASE_URL ?? "https://cloud.langfuse.com",
+            },
+          }
+        : {}),
       onDiagnostic: (kind, error) => console.error("[peri]", kind, error),
     },
   },
@@ -258,10 +262,10 @@ SDK 不声明任何 adapter 依赖。使用 `/sandbox` 时自行安装一个 ada
 
 ```bash
 bun add @peri-code/sdk
-bun add peri-sandbox   # 仅在使用 /sandbox 时安装
+# peri-sandbox 尚未发布到 registry；本仓库内使用时从本地 workspace 链接。
 ```
 
-> 官方 `peri-sandbox` adapter 目前未公开发布；发布前可自行实现并注入 adapter。
+> 官方 `peri-sandbox` adapter 目前未公开发布；发布前可自行实现并注入 adapter。下列 `peri-sandbox` CLI 命令仅在已从本地 workspace 链接该包后可用。
 
 `init` 是可选的环境固定步骤，不是启动前置条件。不传 `settingsPath` 时，adapter 使用默认 settings 路径（`~/.peri-sandbox/settings.json`，可用 `PERI_SANDBOX_SETTINGS` 覆盖）；该文件不存在则回退到内存默认配置，`start()` 可直接用。前提是 Peri 可被发现：`PERI_PATH` 或默认 `~/.peri/peri`，否则报 `unsupported_environment`。
 

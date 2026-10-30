@@ -43,6 +43,7 @@ import { ChatCloseController } from "./service-lifecycle";
 import {
     asActionError,
     bindingFailure,
+    controlFailureDisposition,
     messageOf,
     withCleanupFailure,
     withRequestId,
@@ -455,7 +456,12 @@ export class ChatService implements ChatServiceContract {
             await run(port);
             return { requestId, status: "accepted" };
         } catch (error) {
-            throw asActionError(requestId, `${code}_failed`, error, "unknown");
+            throw asActionError(
+                requestId,
+                `${code}_failed`,
+                error,
+                controlFailureDisposition(error),
+            );
         }
     }
 

@@ -11,7 +11,7 @@ import {
   type ActionReceipt, type RemoteActions,
 } from "./actions";
 import { ChatSyncProvider, type SyncConnectionStatus, type WebSocketLike } from "./sync";
-import { DeliveryTracker } from "./delivery";
+import { DeliveryTracker, INPUT_WITHDRAWN_MESSAGE } from "./delivery";
 import { ChatHandleTable, type ChatHandleRecord } from "./handles";
 import {
   bindingTargetOf, deriveLiveSync, deriveLoadState, derivePhase, describeActionFailure,
@@ -234,13 +234,16 @@ export class ChatController {
       return { delivered: true, sessionId: sent.sessionId };
     } catch (error) {
       const message = messageOf(error);
-      this.failAction(new RemoteActionError("input_not_delivered", `消息未送达：${message}`, "rejected"));
+      // 只有撤回是明确未送达；连接释放等拒绝可能已入队或送达。
+      const disposition = error instanceof Error && error.message === INPUT_WITHDRAWN_MESSAGE
+        ? "rejected"
+        : "unknown";
+      this.failAction(new RemoteActionError("input_not_delivered", `消息未送达：${message}`, disposition));
       return {
         delivered: false,
         sessionId: sent.sessionId,
         message: this.actionError || message,
-        // 投递等待被明确拒绝（撤回/拒绝）可安全重试；状态未知不能自动重放。
-        disposition: "rejected",
+        disposition,
       };
     }
   }
@@ -356,8 +359,11 @@ export class ChatController {
         ChatUserAction.setConfigOption({ configId, value }),
         target,
       );
-      this.actionError = "";
-      this.recovery = "none";
+      // 成功写配置不能清掉未知结果留下的横幅；否则界面继续阻断却看不到原因。
+      if (!this.uncertain) {
+        this.actionError = "";
+        this.recovery = "none";
+      }
       this.refresh();
       return { ok: true };
     } catch (error) {

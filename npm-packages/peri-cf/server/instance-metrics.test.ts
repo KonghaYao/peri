@@ -45,6 +45,11 @@ class FakeFactSource implements ChatFactSource {
     };
     for (const observer of [...this.observers]) observer.onFact(envelope);
   }
+
+  close(): void {
+    for (const observer of [...this.observers]) observer.onClosed();
+    this.observers.clear();
+  }
 }
 
 function fakeChat(id: string, source: FakeFactSource): ChatServiceContract {
@@ -109,6 +114,14 @@ function setup() {
 }
 
 describe("ChatInstanceMetricsCollector", () => {
+  test("关闭事实作用于当前绑定代次的状态", () => {
+    const { source, snapshot } = setup();
+    expect(snapshot()).not.toBeNull();
+    source.bind({ ...TARGET, sessionId: "session-2", bindingRevision: 2 });
+    source.close();
+    expect(snapshot()).toBeNull();
+  });
+
   test("回合开始/完成与墙钟，只统计已结算回合", () => {
     const { source, setNow, snapshot } = setup();
     setNow(1_000);

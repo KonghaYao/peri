@@ -336,7 +336,12 @@ export class PeriBackend implements McpBackendPort {
         honoredFilter: opened.honoredFilter,
         close: async () => {
           this.releaseSubscription(active, key);
-          await opened.close();
+          try {
+            await opened.close();
+          } catch (error) {
+            // 后端已退出时关闭订阅失败是预期结果；不能变成未处理的 rejection。
+            console.debug('sandbox subscription close failed', error);
+          }
         },
         closed: opened.closed,
       };

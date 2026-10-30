@@ -884,6 +884,7 @@ impl McpClientPool {
             .get_all_clients_visible_to(Some(session_id))
             .into_iter()
             .filter(|handle| handle.skills_capable)
+            .filter(|handle| matches!(handle.status, ClientStatus::Connected))
             .filter(|handle| {
                 !super::builtin::is_closed_source(&handle.name, handle.source.as_ref(), &closed)
             })

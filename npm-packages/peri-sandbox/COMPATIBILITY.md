@@ -13,7 +13,7 @@
 | `bun run check` | 通过 |
 | `bun run test` | **61/61 passed，0 failed** |
 | `npm run test:mac:programmatic` | 通过：start、同 id `conflict`、占用端口 `conflict`、重复 close、`deleteData` |
-| `node dist/tests/integration/mac.js <tmp-settings>` | 通过：7 个工具；外层 discover 镜像 `resources`/`resources.subscribe`/skills/tasks 扩展；`skills/list` 看到项目技能；`resources/list|read` 可读技能；宿主 `$HOME/.claude/skills` 的 host-only 技能不可见；宿主临时文件 `Read`/`Bash cat` 均被 SRT 拒绝；token 401、同 workspace 重启保留 |
+| `node dist/tests/integration/mac.js <tmp-settings>` | 通过：7 个工具；外层 discover 镜像 `resources`/`resources.subscribe`/skills/tasks 扩展；`skills/list` 看到项目技能；`resources/list\|read` 可读技能；宿主 `$HOME/.claude/skills` 的 host-only 技能不可见；宿主临时文件 `Read`/`Bash cat` 均被 SRT 拒绝；token 401、同 workspace 重启保留 |
 
 真实 macOS 验收的负向补充：默认 profile 的 `runtimeReadPaths` 包含 `/etc`，因此 `/etc/passwd` **可读**（已断言为可读事实）；越界负向改用 `tmpdir()` 下的宿主专用文件。这与旧计划中「`/etc/passwd` 读取失败」的预期不同，未修改默认 profile。
 

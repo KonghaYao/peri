@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -49,6 +49,30 @@ describe("ProjectStore", () => {
       await expect(store.create(DEFAULT_PROJECT_NAME)).rejects.toBeInstanceOf(ProjectNameConflictError);
       await expect(store.create("   ")).rejects.toBeInstanceOf(ProjectNameError);
       await expect(store.create("x".repeat(65))).rejects.toBeInstanceOf(ProjectNameError);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a corrupt manifest is not cached as empty and is never overwritten", async () => {
+    const root = tempRoot();
+    const file = join(root, "projects.json");
+    try {
+      writeFileSync(file, "{ not json", "utf8");
+      const store = new ProjectStore(root, { idFactory: () => "prj_1" });
+
+      await expect(store.listViews()).rejects.toThrow();
+      await expect(store.create("项目 A")).rejects.toThrow();
+      expect(readFileSync(file, "utf8")).toBe("{ not json");
+
+      // 修复文件后同一实例重试读取，不沿用失败结果。
+      writeFileSync(file, JSON.stringify({
+        version: 1,
+        projects: [{ id: "prj_old", name: "旧项目", sandboxId: "sbx_old", createdAt: "" }],
+      }), "utf8");
+      expect(await store.list()).toEqual([
+        { id: "prj_old", name: "旧项目", sandboxId: "sbx_old", createdAt: "" },
+      ]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

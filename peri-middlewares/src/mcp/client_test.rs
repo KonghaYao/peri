@@ -907,6 +907,27 @@ async fn skills_catalog_aggregates_by_capability_across_server_names() {
 }
 
 #[tokio::test]
+async fn skills_catalog_skips_disconnected_handles() {
+    let workspace_peer = skill_peer(Some("beta")).await;
+    let pool = McpClientPool::new_pending();
+    let mut handle = skill_handle(
+        "workspace",
+        &workspace_peer,
+        crate::mcp::config::ConfigSource::Builtin {
+            instance: "workspace".into(),
+        },
+    );
+    Arc::get_mut(&mut handle).unwrap().status = ClientStatus::Disconnected;
+    pool.clients.write().insert("workspace".into(), handle);
+
+    let catalog = pool
+        .read_skills_catalog("session-a")
+        .await
+        .expect("disconnected handles must be skipped, not fail the catalog");
+    assert!(catalog.is_empty());
+}
+
+#[tokio::test]
 async fn non_system_skill_failure_is_tolerated_but_system_workspace_fails_closed() {
     let workspace_peer = skill_peer(Some("beta")).await;
     let failing_peer = skill_peer(None).await;

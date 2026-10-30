@@ -444,6 +444,25 @@ describe('ChatController action recovery', () => {
     await controller.dispose();
   });
 
+  test('a successful config write keeps an unknown-outcome banner visible', async () => {
+    const { controller, sockets } = harness({
+      send: async () => {
+        throw new RemoteActionError('transport_error', '网络请求失败，动作执行状态未知。', 'unknown');
+      },
+    });
+    await openWithSnapshot(controller, summary('session-1'), sockets, { sessionId: 'session-1' });
+    expect(await controller.dispatchSend('你好')).toBeNull();
+    const blocked = controller.getState();
+    expect(blocked).toMatchObject({ phase: 'blocked', recovery: 'reload' });
+    expect(blocked.error).toContain('未确认');
+
+    expect(await controller.setConfigOption('model', 'fast')).toEqual({ ok: true });
+    expect(controller.getState()).toMatchObject({
+      phase: 'blocked', recovery: 'reload', error: blocked.error,
+    });
+    await controller.dispose();
+  });
+
   test('a 409 binding conflict on send exposes rebind and reuses the open-flow fallback', async () => {
     let sendAttempts = 0;
     const { controller, sockets, sentTargets, log } = harness({
@@ -515,7 +534,23 @@ describe('ChatController send delivery', () => {
     const outcome = await sending;
     expect(outcome).toMatchObject({ delivered: false, sessionId: 'session-1' });
     expect(outcome.delivered ? '' : outcome.message).toContain('撤回');
+    expect(outcome.delivered ? '' : outcome.disposition).toBe('rejected');
     expect(controller.getState().error).toContain('撤回');
+    await controller.dispose();
+  });
+
+  test('connection release is reported as unknown, not safely retryable', async () => {
+    const { controller, sockets, sentTargets } = harness();
+    await openWithSnapshot(controller, summary('session-1'), sockets, { sessionId: 'session-1' });
+
+    const sending = controller.send('你好');
+    await waitFor(() => sentTargets.length > 0);
+    await tick();
+    await openWithSnapshot(controller, summary('session-2'), sockets, { sessionId: 'session-2' });
+
+    const outcome = await sending;
+    expect(outcome).toMatchObject({ delivered: false, disposition: 'unknown' });
+    expect(controller.getState()).toMatchObject({ phase: 'blocked' });
     await controller.dispose();
   });
 
