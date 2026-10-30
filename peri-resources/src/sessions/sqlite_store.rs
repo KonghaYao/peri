@@ -51,6 +51,8 @@ pub(in crate::sessions) use failure::{commit_failure, write_failure};
 pub(in crate::sessions) use local::LocalExecution;
 #[cfg(test)]
 use schema::CURRENT_SCHEMA_VERSION;
+/// 多行 INSERT 的分块行数；测试用它构造跨块批次，与生产共用同一个上限。
+pub(in crate::sessions::sqlite_store) use session_data::message_insert_chunk_rows;
 /// 数据面实现：生产组合从 [`LocalExecution::data_port`] 取得它，本重导出供测试夹具直接命名。
 #[cfg(test)]
 pub(crate) use session_data::SqliteSessionData;

@@ -101,10 +101,19 @@ fn values(row: &SqliteRow) -> Vec<Value> {
 }
 
 fn error_of(error: sqlx::Error) -> SdkError {
-    if error
-        .as_database_error()
-        .is_some_and(|error| error.is_unique_violation() || error.is_foreign_key_violation())
-    {
+    // 生产 SDK 把全部 `SQLITE_CONSTRAINT*` 折成 `Constraint`；夹具按同一口径映射，
+    // 不能只认 UNIQUE/FK（批内守卫在单行表上以 NOT NULL 形式触发）。
+    let constraint = error.as_database_error().is_some_and(|error| {
+        matches!(
+            error.kind(),
+            sqlx::error::ErrorKind::UniqueViolation
+                | sqlx::error::ErrorKind::ForeignKeyViolation
+                | sqlx::error::ErrorKind::NotNullViolation
+                | sqlx::error::ErrorKind::CheckViolation
+                | sqlx::error::ErrorKind::ExclusionViolation
+        )
+    });
+    if constraint {
         SdkError::Constraint("local fixture rejected statement".into())
     } else {
         SdkError::Error("local fixture rejected statement".into())

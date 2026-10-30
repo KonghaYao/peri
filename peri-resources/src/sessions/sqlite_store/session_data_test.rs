@@ -477,6 +477,67 @@ async fn test_append_history_rejects_duplicate_ids_instead_of_ignoring_them() {
     ));
 }
 
+/// 跨过多行 INSERT 的分块边界：顺序、正文与计数都按批次原样落库。
+#[tokio::test]
+async fn test_append_history_preserves_order_across_insert_chunks() {
+    let (store, data, directory) = database().await;
+    let workspace = workspace(&store, directory.path()).await;
+    let cwd = workspace.cwd.to_string_lossy().into_owned();
+    data.save_new_session(&session("s-chunk", &cwd, &workspace, frozen("chunk")))
+        .await
+        .unwrap();
+    let batch = payloads(message_insert_chunk_rows() * 2 + 3);
+
+    data.append_history(&"s-chunk".to_owned(), &batch)
+        .await
+        .unwrap();
+
+    let snapshot = data.load_snapshot(&"s-chunk".to_owned()).await.unwrap();
+    let loaded = snapshot
+        .payloads
+        .iter()
+        .map(PersistedPayload::id)
+        .collect::<Vec<_>>();
+    let expected = batch.iter().map(PersistedPayload::id).collect::<Vec<_>>();
+    assert_eq!(loaded, expected, "跨分块插入必须保持批次顺序");
+    assert_eq!(snapshot.meta.message_count, batch.len());
+}
+
+/// 冲突落在后一个分块时，前一个分块已执行的语句也必须随事务整体回滚。
+#[tokio::test]
+async fn test_append_history_rolls_back_earlier_chunks_on_late_conflict() {
+    let (store, data, directory) = database().await;
+    let workspace = workspace(&store, directory.path()).await;
+    let cwd = workspace.cwd.to_string_lossy().into_owned();
+    data.save_new_session(&session("s-chunk", &cwd, &workspace, frozen("chunk")))
+        .await
+        .unwrap();
+    let existing = payloads(1);
+    data.append_history(&"s-chunk".to_owned(), &existing)
+        .await
+        .unwrap();
+
+    // 既有行排在新行之后：第一条 INSERT 成功，第二条撞全局主键。
+    let mut batch = payloads(message_insert_chunk_rows() + 5);
+    batch.push(existing[0].clone());
+    let error = data
+        .append_history(&"s-chunk".to_owned(), &batch)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error.kind(),
+            peri_acp_types::session_resources::SessionResourceErrorKind::InvalidInput { .. }
+        ),
+        "{error}"
+    );
+
+    let snapshot = data.load_snapshot(&"s-chunk".to_owned()).await.unwrap();
+    assert_eq!(snapshot.payloads.len(), 1, "先执行的分块不得留下");
+    assert_eq!(snapshot.payloads[0].id(), existing[0].id());
+    assert_eq!(snapshot.meta.message_count, 1);
+}
+
 // ─── fork：目标完整、来源不变 ──────────────────────────────────────────────────
 
 #[tokio::test]

@@ -79,7 +79,10 @@ mod port;
 #[path = "session_data_helpers.rs"]
 mod helpers;
 use helpers::*;
-pub(super) use helpers::{new_session_draft_row, new_session_row, validate_unbound_legacy_frozen};
+pub(super) use helpers::{
+    message_insert_chunk_rows, new_session_draft_row, new_session_row,
+    validate_unbound_legacy_frozen,
+};
 
 /// 有界读取的性能证据（需求 §9 A04/A05/A06/A07）：默认 `#[ignore]`，不拖慢默认测试。
 ///

@@ -242,6 +242,21 @@ async fn row_flags(
         .unwrap()
 }
 
+/// 追加到不存在的会话：批内守卫中止整批，错误类别仍是 `NotFound`，
+/// 不能被守卫的约束拒绝折成 `InvalidInput`。
+#[tokio::test]
+async fn remote_append_to_a_missing_session_reports_not_found() {
+    let (_fixture, _transport, data) = remote_with_history(&[]).await;
+    let error = data
+        .append_history(&"missing-remote-session".to_owned(), &messages(1))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error.kind(), SessionResourceErrorKind::NotFound),
+        "{error}"
+    );
+}
+
 /// 未知边界：不删除、不清零、不报成功——本机与远端必须是同一个可观察结果。
 #[tokio::test]
 async fn remote_rewind_reports_a_missing_boundary_without_touching_history() {

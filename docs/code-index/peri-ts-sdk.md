@@ -54,7 +54,7 @@
 | 回执 | `src/chat/send-receipt.ts` | `inputId` 稳定；`accepted` 是入队，投递等待是另一件事 |
 | Session ownership（内部） | `src/chat/ownership.ts`、`src/chat/types.ts` | `ChatManager` 接收 3 方法 `KvStorage` 并在内部构造 `KvSessionOwnership`（owner 为实例随机 UUID）；key 为 `ownership:<base64url(sessionId)>`，value 为 `{ sessionId, owner }`；acquire 是读后写、非原子，KV 记录是绑定标记/防御路由 bug，不是互斥原语；无 TTL/续租/CAS，路由层负责串行化与 `clearSessionOwnership`；`LocalSessionIndex` 负责同 Manager 内句柄互斥。`SessionOwnership`/`KvSessionOwnership`/`SessionOwnershipConflictError`/key 函数仅模块内使用；入口只导出 `KvStorage` 与 `clearSessionOwnership` |
 | 工厂 | `src/chat/instance-factory.ts`、`src/chat/service-context.ts` | 把 Chat 上下文转换为一次 `PeriInstance`；WASM 启动传 per-chat `agentConfigJson`/`runtimeEnv`/诊断回调，transport factory 收到 `{ signal, chatId, agentConfig }`，`payloadBudgets` 直接传实例；生产默认装配，测试可注入 |
-| 会话目录 | `src/storage/turso-storage.ts` | `TursoStorage` 直接实现 `ChatDatabase`；`storageConfig` getter 返回只含 `url`/`authToken` 的纯 JSON（token 为 undefined 时省略该键，不含 cwd），供 `store.storage`；显式 `path` 查单个 cwd，省略时串行合并 `legacyCwd`/`currentCwd`；同 id 以当前 cwd 为准，按 `updatedAt` 倒序；缺表为空目录 |
+| 会话目录 | `src/storage/turso-storage.ts` | `TursoStorage` 直接实现 `ChatDatabase`；`storageConfig` getter 返回只含 `url`/`authToken` 的纯 JSON（token 为 undefined 时省略该键，不含 cwd），供 `store.storage`；显式 `path` 查单个 cwd，省略时串行合并 `legacyCwd`/`currentCwd`；同 id 以当前 cwd 为准，按 `updatedAt` 倒序；缺表为空目录；实例复用单条连接，查询与幂等 `close()` 共用串行队列 |
 | 生命周期预算 | `src/util/deadline.ts`、`src/chat/service-lifecycle.ts` | 关闭/启动/shutdown 的有界等待；超时是 Incomplete，不是停止证明 |
 
 ## 运行侧

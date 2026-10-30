@@ -26,7 +26,8 @@ use std::collections::HashSet;
 
 use peri_acp_types::messages::{BaseMessage, MessageId};
 use peri_acp_types::session_resources::{
-    RewindBoundary, RewindOutcome, SessionResourceError, SessionResourceResult,
+    RewindBoundary, RewindOutcome, SessionResourceError, SessionResourceErrorKind,
+    SessionResourceResult,
 };
 use peri_acp_types::store::{
     deserialize_persisted_payload, serialize_persisted_payload, CompactionChange, MessageFlags,
@@ -159,7 +160,8 @@ impl RemoteSessionData {
     ///
     /// 冲突语义与本机一致：批次内重复 id 在发请求前拒绝（`InvalidInput`，同一文案）；
     /// 与已有行（含别会话的行）撞全局主键由约束拒绝整批，同样归 `InvalidInput`
-    /// （本机走唯一键冲突映射）。会话不存在则 `NotFound`。
+    /// （本机走唯一键冲突映射）。会话不存在则 `NotFound`：批内守卫先于效果中止整批，
+    /// 错误类别在失败后复核会话是否存在（不占用成功路径的一次往返）。
     pub(super) async fn write_history_append(
         &self,
         id: &ThreadId,
@@ -174,9 +176,6 @@ impl RemoteSessionData {
                 return Err(invalid_input("history batch repeats a message id"));
             }
         }
-        if !self.exists(id).await? {
-            return Err(not_found());
-        }
         let contents = payloads
             .iter()
             .map(payload_content)
@@ -186,7 +185,10 @@ impl RemoteSessionData {
             .zip(&contents)
             .map(|(payload, content)| (payload.id(), content.clone()))
             .collect::<Vec<_>>();
-        let mut effects = Vec::with_capacity(payloads.len() + 2);
+        let mut effects = Vec::with_capacity(payloads.len() + 3);
+        // 会话缺失必须在效果前中止：追加行不触碰会话行，只看受影响行数无法区分
+        // 「会话不存在」与「写入成功」。
+        effects.push(guard_session_statement(id));
         for (payload, (message, content)) in payloads.iter().zip(&entries) {
             effects.push(append_statement(
                 id,
@@ -201,9 +203,22 @@ impl RemoteSessionData {
         effects.push(refresh_statement(id, &timestamp()));
         let mut inputs = vec![id.as_str().to_owned()];
         inputs.extend(entry_inputs(&entries));
-        self.commit_effects("append_history", &inputs, effects, id)
+        match self
+            .commit_effects("append_history", &inputs, effects, id)
             .await
-            .map(|_| ())
+        {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                // 守卫把「会话不存在」折成批内约束拒绝；对外仍是前置读同一归类
+                // （`NotFound`）。只在失败路径补读一次，成功路径不再多一次往返。
+                if matches!(error.kind(), SessionResourceErrorKind::InvalidInput { .. })
+                    && !self.exists(id).await.unwrap_or(true)
+                {
+                    return Err(not_found());
+                }
+                Err(error)
+            }
+        }
     }
 
     /// 应用投影/flags 变更集：整批生效或整批不生效。
