@@ -351,6 +351,10 @@ npm run e2e:release:strict  # 发版且不容忍首轮 flake
 
 单文件调试：`npm run e2e -- --file tests/<path>.test.ts --serial --retry 0`
 
+自主委派评测需要真实模型，默认跳过：
+`PERI_E2E_AUTONOMY=1 npm run e2e -- --file tests/subagent/autonomous-delegation.test.ts --serial --retry 0`。
+默认要求至少 1 次有效委派；`PERI_E2E_AUTONOMY_MIN_DELEGATIONS=0` 只记录指标、不要求委派。
+
 ### 8.3 Submodule 与独立项目
 
 - `.gitmodules` 当前声明 `peri-cool/` 与 `e2e/tui-tester/`；它们不是根 Cargo workspace crate。先初始化 submodule，再进入其目录读取 manifest/README 并运行本地命令。
