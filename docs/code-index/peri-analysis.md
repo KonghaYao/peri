@@ -14,14 +14,15 @@ Peri 运行数据的离线分析归 `side-projects/agent-defect-analyzer/`，本
   标记被丢弃。继承消息与双写消息需防止重复统计。
 - 分析方法与复核边界见 [ANALYSIS.md](../../side-projects/agent-defect-analyzer/ANALYSIS.md)。
   报告输出改进候选，确认缺陷需回到源消息、当前代码和回归测试。
-- 可继承的研究方法由 [auto-data-researcher](../../.claude/skills/auto-data-researcher/SKILL.md)
-  维护。该目录是仓库内的维护源；会话若加载 `.agents/skills/auto-data-researcher/` 副本，
-  更新时同步对应文件并检查一致性，避免旧方法继续被加载。
+- 可继承的研究方法与任务评价流程由
+  [agent-behavior-research](../../.claude/skills/agent-behavior-research/SKILL.md) 维护，
+  覆盖数据研究、任务质量评价与长流程审计；该目录是仓库内的维护源。
 - 任务级评价的口径与 subagent 复核流程见
   [任务有效性研究](../../side-projects/agent-defect-analyzer/TASK-EVALUATION.md)。
   评审标签独立于持久化事实，缺失证据与评审分歧须保留。
-  编排与提示词实验方法由 [agent-task-evaluator](../../.claude/skills/agent-task-evaluator/SKILL.md)
-  维护，活动 `.agents/skills/` 副本采用上面相同的同步规则。
+  编排与提示词实验方法由同一 skill 的
+  [任务评价参考](../../.claude/skills/agent-behavior-research/references/task-evaluation.md)
+  路由。
 - 持续研究方向 [任务关注点漂移与纠正吸收（RQ-FD-001）](../../side-projects/agent-defect-analyzer/FOCUS-DRIFT.md)
   维护用户纠正、返工、有效约束保留与后续验收的专题口径；运行证据保存在本地 `output/`。
 

@@ -4,7 +4,7 @@
 
 用户纠正、任务返工和目标保持的专题口径见 [任务关注点漂移与纠正吸收](FOCUS-DRIFT.md)；纠正次数不能直接充当漂移次数。
 
-Agent 失败模式研究在工具统计之外，须按 [长流程与恢复审计](../../.claude/skills/agent-task-evaluator/references/workflow-bottlenecks.md) 走查超长对话及 `ultracode`、`multitask` 等任务：显式识别实际执行模式、分层选问题与顺利对照、追踪目标修订和压缩/交接、核对派发回收与最终验收。报告已覆盖和不可用的层，不能只看首尾或以长度、重试数、工具错误率代替任务失败结论。走查证据复用 DataLoader/事实包；任务评价遵循 [TASK-EVALUATION.md](TASK-EVALUATION.md)，未被现有接口表达的转折点留在本地 sidecar，不新增生产表。
+Agent 失败模式研究在工具统计之外，须按 [长流程与恢复审计](../../.claude/skills/agent-behavior-research/references/workflow-bottlenecks.md) 走查超长对话及 `ultracode`、`multitask` 等任务：显式识别实际执行模式、分层选问题与顺利对照、追踪目标修订和压缩/交接、核对派发回收与最终验收。报告已覆盖和不可用的层，不能只看首尾或以长度、重试数、工具错误率代替任务失败结论。走查证据复用 DataLoader/事实包；任务评价遵循 [TASK-EVALUATION.md](TASK-EVALUATION.md)，未被现有接口表达的转折点留在本地 sidecar，不新增生产表。
 
 ## 从观测到改进
 

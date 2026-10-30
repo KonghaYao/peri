@@ -46,7 +46,7 @@ bun run src/cli.ts task-review --packets output/task-packets/task-packets.json -
 ```
 
 任务评价口径见 [TASK-EVALUATION.md](TASK-EVALUATION.md)，编排方法见
-[agent-task-evaluator skill](../../.claude/skills/agent-task-evaluator/SKILL.md)。实际评审需对抽样命令显式加
+[agent-behavior-research skill](../../.claude/skills/agent-behavior-research/SKILL.md)。实际评审需对抽样命令显式加
 `--include-content`；metadata 包只能保留未知。review JSON 以 `src/research/task-reviews.ts` 的
 `TaskReviewInput` 为准，保留每个 reviewer 的身份、任务边界、包 hash、五维标签和证据 ID。
 `task-review` 校验引用和格式，不代替语义复核。`review*` 分布按评审计数，`case*` 分布按唯一任务样本计数；
