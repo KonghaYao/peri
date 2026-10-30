@@ -1,9 +1,10 @@
 import { QueryClient, queryOptions } from '@tanstack/react-query';
-import type { ChatSummary } from './types';
+import type { ChatSummary, ProjectSummary } from './types';
 
 /** 列表读面只返回目录事实；运行态来自选中会话的副本。 */
 export interface ChatReadApi {
   list(signal?: AbortSignal): Promise<ChatSummary[]>;
+  projects(signal?: AbortSignal): Promise<ProjectSummary[]>;
 }
 
 /** 有本地活动时的高频轮询：尽快发现服务端目录变化（外部客户端新建/结算）。 */
@@ -34,6 +35,7 @@ export function listRefetchInterval(
 }
 
 const listKey = ['chats', 'list'] as const;
+const projectsKey = ['projects', 'list'] as const;
 
 export function createChatQueries(api: ChatReadApi) {
   const client = new QueryClient({
@@ -57,9 +59,16 @@ export function createChatQueries(api: ChatReadApi) {
       .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt)),
   });
 
+  /** 项目清单变化远低于会话目录；创建后由调用方显式刷新。 */
+  const projects = queryOptions({
+    queryKey: projectsKey,
+    queryFn: async ({ signal }) => await api.projects(signal),
+  });
+
   return {
     client,
     list,
+    projects,
     dispose() {
       const cancelled = client.cancelQueries();
       client.clear();

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import type { ChatShellChat } from './ChatShell';
 import { installDom } from '../../test/dom';
 
@@ -10,6 +10,13 @@ const { errorBanners } = await import('../runtime');
 const { createElement, useRef, useState } = await import('react');
 
 afterEach(() => cleanup());
+beforeEach(() => {
+  try {
+    window.localStorage.clear();
+  } catch {
+    // 没有 localStorage 的环境不需要隔离持久化草稿。
+  }
+});
 
 /** ChatShell 的 Timeline 使用 LegendList：给 happy-dom 一个最小可滚动布局。 */
 function stubShellLayout(): void {
@@ -80,6 +87,7 @@ function openUIState(text: string, chatId = 'chat-openui') {
 const summary = (sessionId: string, title = sessionId) => ({
   sessionId, title, updatedAt: '2026-10-20T00:00:00Z',
   cwd: '/workspace', messageCount: 0, createdAt: '2026-10-20T00:00:00Z',
+  projectId: 'default',
 });
 
 /** 展示身份 `Chat` 由 `sessionId` 派生，和 `toChat` 一致。 */
@@ -112,6 +120,10 @@ function fakeChat(options: FakeOptions = {}) {
       selected: selected(), state: null, phase: 'idle', historyReady: true,
       loadState: 'ready', liveSync: 'synced', error: '', chatError: '', listError: '',
       chats: [], listLoading: false, banners: {},
+      projects: [], projectsLoading: false,
+      createProject: async (name: string) => ({
+        id: `project-${name}`, name, createdAt: '2026-10-20T00:00:00Z', isDefault: false,
+      }),
       payloadReader: {}, answerInteraction: async () => {},
       refreshList: async () => { calls.refresh += 1; },
       selectChat: async () => { calls.selected.push(null); return true; },
@@ -196,6 +208,20 @@ function Harness({
 }
 
 describe('ChatShell real DOM recovery and panel interactions', () => {
+  test('the header title follows the directory title for the open session', () => {
+    const base = fakeChat({ initialId: 'chat-1' });
+    const chat = {
+      ...base.chat,
+      // 副本会话信息不携带 Store 自动标题；目录轮询已经带回真实标题。
+      chats: [summary('chat-1', '目录里的标题')],
+    };
+    render(createElement(ChatShellView, { chat: chat as ChatFacade, onOpenSettings: () => {} }));
+
+    const header = document.querySelector('[data-slot="peri-chat-header"]') as HTMLElement;
+    expect(within(header).getByText('目录里的标题')).toBeTruthy();
+    expect(within(header).queryByText('chat-1')).toBeNull();
+  });
+
   test('list and chat errors render separate banners with matching retry actions', () => {
     const base = fakeChat();
     const chat = {
@@ -530,5 +556,45 @@ describe('ChatShell OpenUI action routing', () => {
     expect(open).toHaveBeenCalledWith('https://example.com/', '_blank', 'noopener,noreferrer');
     open.mockRestore();
     warn.mockRestore();
+  });
+});
+
+describe('ChatShell composer facts', () => {
+  test('passes config, usage and history facts into the composer', () => {
+    const base = fakeChat({ initialId: 'chat-facts' });
+    const state = {
+      ...emptyState('chat-facts'),
+      entries: [
+        {
+          entryId: 'user-1', id: 'user-1', kind: 'message', turnId: 'turn-1', role: 'user',
+          status: 'completed', createdAt: '2026-10-20T00:00:00Z', createdAtSource: 'observed',
+          completedAt: '2026-10-20T00:00:01Z', error: null,
+          blocks: [{ blockId: 'text:0', type: 'text', text: '旧问题' }],
+        },
+        {
+          entryId: 'assistant-1', id: 'assistant-1', kind: 'message', turnId: 'turn-1', role: 'assistant',
+          status: 'completed', createdAt: '2026-10-20T00:00:02Z', createdAtSource: 'observed',
+          completedAt: '2026-10-20T00:00:03Z', error: null,
+          tokenUsage: { totalTokens: 50, contextWindow: 200 },
+          blocks: [{ blockId: 'text:1', type: 'text', text: '回答' }],
+        },
+      ],
+      session: {
+        configOptions: [{
+          id: 'model', name: 'Model', type: 'select', category: 'model', currentValue: 'fast',
+          options: [{ value: 'fast', name: 'Fast' }, { value: 'quality', name: 'Quality' }],
+        }],
+      },
+    };
+    const chat = { ...base.chat, state } as unknown as ChatFacade;
+    render(createElement(ChatShellView, { chat, onOpenSettings: () => {} }));
+
+    expect(screen.getByText('Fast')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /上下文用量 25%/ })).toBeTruthy();
+
+    const textarea = screen.getByLabelText('输入消息') as HTMLTextAreaElement;
+    textarea.setSelectionRange(0, 0);
+    fireEvent.keyDown(textarea, { key: 'ArrowUp', code: 'ArrowUp', keyCode: 38 });
+    expect(textarea.value).toBe('旧问题');
   });
 });

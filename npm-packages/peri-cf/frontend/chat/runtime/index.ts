@@ -13,6 +13,6 @@ export {
   type ElicitationValues, type InteractionAnswerHandler,
 } from "./interactionForm";
 export type {
-  AskUserQuestion, ChatSummary, Entry, Interaction, ChatDisplayState,
+  AskUserQuestion, ChatSummary, ProjectSummary, Entry, Interaction, ChatDisplayState,
   ToolCall, ToolPayloadReader, Turn, ChatLoadState, ChatSendOutcome,
 } from "./types";

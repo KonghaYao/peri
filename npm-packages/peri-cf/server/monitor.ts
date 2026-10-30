@@ -2,13 +2,13 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { defaultSettingsPath, resolveSandboxSettings, type SandboxProfile } from "peri-sandbox";
 import {
-  SANDBOX_SERVER_NAME,
   publicOrigin,
   type ModelProvider,
   type ModelTier,
   type ServerConfig,
 } from "./config";
 import { DEFAULT_MODEL_ALIAS } from "./compose";
+import type { MonitorInstanceView, MonitorRuntimeView } from "./registry";
 import {
   listSandboxWorkspaces,
   type SandboxPoolSnapshot,
@@ -19,14 +19,16 @@ import {
  * 只读服务端监控快照。
  *
  * 数据只来自「已有配置 + 内存事实 + 只读文件读取」：读取不会启动 sandbox 或 WASM
- * 运行后端，也不会执行 Agent。SDK 没有公开「每个 WASM 运行后端的堆占用」，因此
- * `wasm` 段只给进程级内存与活动句柄上限，不编造单实例数值。
+ * 运行后端，也不会执行 Agent。WASM 线性内存可从 SDK 精确读取（当前容量，不是活跃堆）；
+ * JS/Bun 堆与 CPU 无法按实例拆分，因此只给进程级内存作上下文，不按实例均摊。
  */
 
 const SETTINGS_CACHE_TTL_MS = 30_000;
 const WORKSPACE_CACHE_TTL_MS = 10_000;
 const MAX_ERROR_MESSAGE_LENGTH = 300;
 const MAX_DOMAINS = 100;
+/** 单次快照的实例上限；超出时只映射前 N 条并标记 `truncated`。 */
+const MAX_MONITOR_INSTANCES = 200;
 
 export type SandboxStateLabel = SandboxRuntimeSnapshot["state"];
 
@@ -48,6 +50,48 @@ export interface SandboxSettingsSummary {
   error?: string;
 }
 
+/** WASM 实例的 wire DTO：只含数值、标识与已知状态枚举。 */
+export interface WasmInstanceSnapshot {
+  chatId: string;
+  sessionId: string | null;
+  generationId: string;
+  state: MonitorInstanceView["state"];
+  startedAt: string;
+  uptimeSeconds: number;
+  /** 线性内存当前容量；宿主未暴露时为 null，不用 0 冒充。 */
+  linearMemoryBytes: number | null;
+  running: boolean;
+  lastActivityAt: string | null;
+  queueDepth: number;
+  pendingInteractions: number;
+  turns: {
+    started: number;
+    completed: number;
+    cancelled: number;
+    error: number;
+    totalWallMs: number;
+    lastWallMs: number | null;
+    activeWallMs: number | null;
+  };
+  tokens: {
+    llmCalls: number;
+    inputTokens: number | null;
+    outputTokens: number | null;
+    auxiliaryCalls: number;
+    partial: boolean;
+  } | null;
+  context: { used: number; size: number } | null;
+  tools: {
+    started: number;
+    completed: number;
+    failed: number;
+    cancelled: number;
+  } | null;
+  lastStopReason: string | null;
+  /** 业务计数不可用（订阅失败）；此时 turns 为 0 值，其余可空字段为 null。 */
+  statsError?: true;
+}
+
 export interface MonitorSnapshot {
   generatedAt: string;
   uptimeSeconds: number;
@@ -59,14 +103,7 @@ export interface MonitorSnapshot {
     tiers: Record<ModelTier, string>;
   };
   mcp: {
-    sandboxEnabled: boolean;
     remote: Array<{ name: string; url: string; headerNames: string[] }>;
-    sandbox: Array<{
-      sandboxId: string;
-      name: string;
-      url: string | null;
-      state: SandboxStateLabel;
-    }>;
   };
   wasm: {
     moduleUrl: string;
@@ -77,8 +114,21 @@ export interface MonitorSnapshot {
       /** 进程合计，包含全部 WASM 线性内存；不能拆分到单个实例。 */
       arrayBufferBytes: number;
     };
-    /** 运行后端数量的上限；运行后端在首次 Action 才启动。 */
-    activeChats: number;
+    /** 已创建、未关闭的 Chat 句柄；运行后端数量的上限。 */
+    chatHandles: number;
+    /** 尚未取得租约的启动任务数（无 chat 归属，不进入 `instances`）。 */
+    startingInstances: number;
+    /** 曾有实例关闭未确认；在进程关闭前保持。 */
+    unconfirmed: boolean;
+    /** 实例段读取失败的原因；此时进程级指标仍有效。 */
+    instancesError?: string;
+    /** 实例数超过上限，`instances` 只含前 N 条。 */
+    truncated: boolean;
+    /** 已知实例的线性内存合计；全部不可读或无实例时为 null。 */
+    linearMemoryTotalBytes: number | null;
+    linearMemoryKnownInstances: number;
+    linearMemoryUnknownInstances: number;
+    instances: WasmInstanceSnapshot[];
   };
   sandbox: {
     enabled: boolean;
@@ -108,6 +158,7 @@ export interface MonitorSource {
 export interface MonitorRegistry {
   sandboxSnapshot(): SandboxPoolSnapshot | undefined;
   activeChatCount(): number;
+  runtimeInstances(nowMs: number): MonitorRuntimeView;
 }
 
 export interface MonitorDependencies {
@@ -129,6 +180,42 @@ function errorMessage(error: unknown): string {
 
 function truncate(value: string, limit = MAX_ERROR_MESSAGE_LENGTH): string {
   return value.length > limit ? `${value.slice(0, limit)}…` : value;
+}
+
+function isoFromMs(ms: number | null): string | null {
+  return ms === null ? null : new Date(ms).toISOString();
+}
+
+/** 单实例 wire DTO；业务计数缺失时显式标记 `statsError`，不用 0 冒充 token/工具。 */
+function mapWasmInstance(instance: MonitorInstanceView, generatedAtMs: number): WasmInstanceSnapshot {
+  const business = instance.business;
+  return {
+    chatId: instance.chatId,
+    sessionId: instance.sessionId,
+    generationId: instance.generationId,
+    state: instance.state,
+    startedAt: new Date(instance.startedAtMs).toISOString(),
+    uptimeSeconds: Math.max(0, Math.floor((generatedAtMs - instance.startedAtMs) / 1000)),
+    linearMemoryBytes: instance.linearMemoryBytes,
+    running: business?.running ?? false,
+    lastActivityAt: isoFromMs(business?.lastActivityAtMs ?? null),
+    queueDepth: business?.queueDepth ?? 0,
+    pendingInteractions: business?.pendingInteractions ?? 0,
+    turns: business?.turns ?? {
+      started: 0,
+      completed: 0,
+      cancelled: 0,
+      error: 0,
+      totalWallMs: 0,
+      lastWallMs: null,
+      activeWallMs: null,
+    },
+    tokens: business?.tokens ?? null,
+    context: business?.context ?? null,
+    tools: business?.tools ?? null,
+    lastStopReason: business?.lastStopReason ?? null,
+    ...(business === null ? { statsError: true as const } : {}),
+  };
 }
 
 function publicUrl(raw: string | null): string | null {
@@ -270,6 +357,30 @@ export function createMonitor(input: {
       const memory = deps.processMemory();
       const [sandboxSettings, disk] = await Promise.all([settings(), workspaces()]);
 
+      // 实例段失败只降级本段；进程级指标与 sandbox 段继续返回 200。
+      let runtime: MonitorRuntimeView = { instances: [], starting: 0, unconfirmed: false };
+      let instancesError: string | undefined;
+      try {
+        runtime = registry.runtimeInstances(generatedAtMs);
+      } catch (error) {
+        instancesError = truncate(errorMessage(error));
+      }
+      const truncated = runtime.instances.length > MAX_MONITOR_INSTANCES;
+      const shown = truncated
+        ? runtime.instances.slice(0, MAX_MONITOR_INSTANCES)
+        : runtime.instances;
+      let linearMemoryTotalBytes = 0;
+      let linearMemoryKnownInstances = 0;
+      let linearMemoryUnknownInstances = 0;
+      for (const instance of shown) {
+        if (instance.linearMemoryBytes === null) {
+          linearMemoryUnknownInstances += 1;
+          continue;
+        }
+        linearMemoryKnownInstances += 1;
+        linearMemoryTotalBytes += instance.linearMemoryBytes;
+      }
+
       return {
         generatedAt: new Date(generatedAtMs).toISOString(),
         uptimeSeconds: Math.max(0, Math.floor(deps.uptimeSeconds())),
@@ -280,18 +391,11 @@ export function createMonitor(input: {
           tiers: config.model.tiers,
         },
         mcp: {
-          sandboxEnabled: config.sandbox.enabled,
           remote: config.mcpServers.map((server) => ({
             name: server.name,
             url: publicOrigin(server.url),
             // 只输出名称；header 值（含 token）永不出网。
             headerNames: server.headers.map((header) => header.name),
-          })),
-          sandbox: active.map((entry) => ({
-            sandboxId: entry.sandboxId,
-            name: entry.mcpServerName ?? SANDBOX_SERVER_NAME,
-            url: publicUrl(entry.mcpUrl),
-            state: entry.state,
           })),
         },
         wasm: {
@@ -302,7 +406,15 @@ export function createMonitor(input: {
             heapUsedBytes: memory.heapUsed,
             arrayBufferBytes: memory.arrayBuffers,
           },
-          activeChats: registry.activeChatCount(),
+          chatHandles: registry.activeChatCount(),
+          startingInstances: runtime.starting,
+          unconfirmed: runtime.unconfirmed,
+          ...(instancesError === undefined ? {} : { instancesError }),
+          truncated,
+          linearMemoryTotalBytes: linearMemoryKnownInstances === 0 ? null : linearMemoryTotalBytes,
+          linearMemoryKnownInstances,
+          linearMemoryUnknownInstances,
+          instances: shown.map((instance) => mapWasmInstance(instance, generatedAtMs)),
         },
         sandbox: {
           enabled: config.sandbox.enabled,

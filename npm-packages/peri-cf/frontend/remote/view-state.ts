@@ -26,7 +26,13 @@ export type ChatRecovery = "none" | "reload";
 /** 发送结果：202 只代表入队；`delivered` 由副本队列/用户条目结算。 */
 export type ChatSendOutcome =
   | { delivered: true; sessionId: string }
-  | { delivered: false; sessionId: string | null; message: string };
+  | {
+    delivered: false;
+    sessionId: string | null;
+    message: string;
+    /** 只有 rejected 允许在草稿未改写时直接重试；unknown 必须先重新同步。 */
+    disposition?: "rejected" | "unknown" | "not_sent";
+  };
 
 /** 控制器发布的只读视图；UI 只消费，不直接修改。 */
 export interface ChatView {

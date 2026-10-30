@@ -38,6 +38,7 @@ export class FakePort implements PeriInstancePort {
         interactionId: string;
         answer: InteractionAnswer;
     }> = [];
+    readonly configOptions: Array<{ configId: string; value: string }> = [];
 
     runningValue = false;
     pendingInputValue = 0;
@@ -63,6 +64,7 @@ export class FakePort implements PeriInstancePort {
     dispatchError?: unknown;
     takeBackError?: unknown;
     answerError?: unknown;
+    configOptionError?: unknown;
     payloadReader?:
         | ((ref: ToolPayloadReadRef) => Promise<ToolPayloadResponse>)
         | undefined;
@@ -181,6 +183,12 @@ export class FakePort implements PeriInstancePort {
         this.calls.push(`answer:${interactionId}`);
         if (this.answerError) throw this.answerError;
         this.answers.push({ interactionId, answer });
+    }
+
+    async setConfigOption(configId: string, value: string): Promise<void> {
+        this.calls.push(`setConfigOption:${configId}=${value}`);
+        if (this.configOptionError) throw this.configOptionError;
+        this.configOptions.push({ configId, value });
     }
 
     async loadEarlierHistory(): Promise<{

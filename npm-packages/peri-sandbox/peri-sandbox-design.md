@@ -27,7 +27,7 @@ Host process (SDK / CLI / 测试)
          └─ startSandbox()
               ├─ settings/profile → random token → workspace lock
               ├─ Provider.start() ──> SRT CLI ──> peri mcp-start workspace --stdio
-              ├─ PeriBackend (MCP stdio client, Tasks/limits, runId)
+              ├─ PeriBackend (MCP stdio client; capability mirror, request/notification relay, Bash limits, runId)
               └─ HTTP MCP server 127.0.0.1:<ephemeral>/mcp (Bearer, Host/Origin)
                    └─ ChatSessionInit.mcpServers
                         └─ session/new|load { cwd, mcpServers }
@@ -50,14 +50,14 @@ Host process (SDK / CLI / 测试)
 | `src/instance/instance.ts` | 状态机、`status()`、`close()`/`deleteData` |
 | `src/instance/start.ts` | 启动编排、失败回卷、测试缝 `startSandboxWith` |
 | `src/adapter.ts` | `createPeriSandboxAdapter()`：结构化实现 SDK `SandboxAdapter` 契约，映射 options、`workspace`（`{ id: sandboxId, hostPath, runtimePath }`，本地两者相同）、token 与 `deleteData`；不 import SDK |
-| `src/server/http.ts` | 单实例 HTTP server、鉴权、大小/超时限制 |
-| `src/server/mcp-handler.ts` | MCP `Server`、`tools/list`、`tools/call`、`tasks/*`，pinned `2026-07-28` |
+| `src/server/http.ts` | 单实例 HTTP server、鉴权、大小/超时限制、`subscriptions/listen` SSE relay |
+| `src/server/mcp-handler.ts` | MCP `Server`、能力/identity/instructions 镜像、全部请求与通知透明转发，pinned `2026-07-28` |
 | `src/runtime/provider.ts` | Provider 接口 + `providerFor(platform)` |
 | `src/runtime/systemd-provider.ts` | Linux transient unit 的 start/stop/inspect |
 | `src/runtime/mac-provider.ts` | macOS 进程组 start/stop/leader 校验 |
 | `src/runtime/policy.ts` | SRT `policy.json` 生成、路径/symlink 校验 |
 | `src/runtime/doctor.ts` | cgroup/seccomp/SRT 探针、transient unit 属性 |
-| `src/runtime/backend.ts` | MCP stdio transport、Tasks 映射、Bash 预算/并发限制 |
+| `src/runtime/backend.ts` | MCP stdio transport、能力/请求/通知/subscription 转发、Bash 预算/并发限制 |
 | `src/runtime/diagnostics.ts` | `<sandboxRoot>/diagnostics` 有界轮转日志 |
 | `src/cli.ts` | `init`/`doctor`/`run` |
 
@@ -123,13 +123,17 @@ starting -> ready -> stopping -> closed
 - macOS 临时目录 `/private/tmp/peri-<id前16位>`；Linux 由 `PrivateTmp=yes` 提供。
 - lock 不写在 workspace 内，避免 Agent 误删；删除数据时在停止确认后、持锁状态下进行。
 
-## 7. HTTP MCP
+## 7. HTTP MCP（透明代理）
 
 - 只监听 `127.0.0.1` 或 `::1`；Host 必须匹配绑定端口，Origin 为空或本机来源。
-- 401（token 不匹配）、403（Host/Origin）、404（非 `/mcp`）、405（方法不允许）、413（请求 >1 MiB）、503（starting/stopping/failed）、500（内部）。
-- 响应上限 8 MiB；`maxConnections=32`；请求/头部/连接超时 10–15 秒。
+- 401（token 不匹配）、403（Host/Origin）、404（非 `/mcp`）、405（方法不允许）、413（请求 >8 MiB）、503（starting/stopping/failed）、500（内部）。
+- 响应上限 33 MiB；`maxConnections=32`；`server.timeout=0`（长工具调用/长流不被 15s 空闲掐断），`headersTimeout=10s`、`requestTimeout=15s` 仍限制慢请求头/体。
 - token 比较使用 `timingSafeEqual`；401 只返回 `{error:"unauthorized"}`。
-- MCP handler 固定协议 `2026-07-28`，`legacy: "reject"`；`Bash` 与 `tasks/*` 要求客户端声明 Tasks capability。
+- MCP handler 固定协议 `2026-07-28`，`legacy: "reject"`。外层 `capabilities`、`serverInfo`、`instructions` 从内层已连接 `Client` 镜像，不合并、不裁剪。
+- 所有请求走 `fallbackRequestHandler` 原样转发；`tasks/get|update|cancel` 仅为通过 SDK custom-method 注册而显式声明 schema，仍原样转发。没有 tools 缓存、方法/参数白名单或任务 ID 改写。
+- `subscriptions/listen` 在 HTTP 入口拦截，转为内层 `Client.listen()`：ack 的 `honoredFilter`、通知、任务 ID 均原样回传；只有写给宿主的 subscription id 使用宿主请求 id，内层 id 不外泄。
+- 大小边界：stdio 单条 32 MiB（写侧 pendingBytes 2×）；HTTP 请求 8 MiB、响应 33 MiB；listen 单条通知 1 MiB（超限关闭订阅并记录，不截断）。
+- 失败语义：内层进程退出 ⇒ pending 请求失败、实例 `failed`、新请求 503，不自动重启；内层 JSON-RPC 错误按 `code/message/data` 原样回传；`SandboxError` 映射为 `-32602/-32603`，`data.sandbox` 保留桥接错误码。
 
 ## 8. Provider
 

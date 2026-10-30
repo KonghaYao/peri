@@ -1,3 +1,4 @@
+import { RpcError } from "../transport/rpc-error";
 import {
     ChatActionError,
     ChatBusyError,
@@ -6,10 +7,26 @@ import {
     SessionBindingConflictError,
     SessionCreationError,
     SessionWorkspaceMismatchError,
+    type ChatDisposition,
 } from "./errors";
 
 export function messageOf(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+}
+
+/** JSON-RPC 内部错误：运行侧可能已产生副作用，不能当作明确拒绝。 */
+const JSON_RPC_INTERNAL_ERROR = -32603;
+
+/**
+ * 控制类动作失败的可重试性。
+ *
+ * JSON-RPC 错误响应是运行侧的明确拒绝（动作未生效）；传输失败与
+ * -32603 内部错误的结果未知，不能自动重放。
+ */
+export function controlFailureDisposition(error: unknown): ChatDisposition {
+    return error instanceof RpcError && error.code !== JSON_RPC_INTERNAL_ERROR
+        ? "rejected"
+        : "unknown";
 }
 
 /** 同一动作被合并/重放时，把错误归到当前调用方的 requestId。 */

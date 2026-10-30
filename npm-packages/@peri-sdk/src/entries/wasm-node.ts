@@ -10,8 +10,8 @@ export type { WasmDnsAddress, WasmDnsLookupOptions, WasmDnsPort, WasmDnsPortOpti
 export { WasmRuntimeStartupError, startWasmRuntime } from "../wasm/runtime";
 export { WasmRuntimeLease, WasmRuntimePool } from "../wasm/runtime-pool";
 export type {
-  WasmRuntimeCloseReport, WasmRuntimeLeaseOptions, WasmRuntimePoolOptions, WasmRuntimeStarter,
-  WasmRuntimeState,
+  WasmRuntimeCloseReport, WasmRuntimeInstanceSnapshot, WasmRuntimeLeaseOptions, WasmRuntimePoolOptions,
+  WasmRuntimePoolSnapshot, WasmRuntimeStarter, WasmRuntimeState,
 } from "../wasm/runtime-pool";
 export type {
   WasmRuntimeCleanupOutcome, WasmRuntimeDiagnosticKind, WasmRuntimeLifecycleEvent, WasmRuntimeOptions,

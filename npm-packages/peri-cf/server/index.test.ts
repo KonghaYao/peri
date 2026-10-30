@@ -105,8 +105,13 @@ describe("server wiring", () => {
           tiers: { fable: "gpt-test", opus: "gpt-test", sonnet: "gpt-test", haiku: "gpt-test" },
           baseUrl: "https://api.example.com/v1",
         },
-        mcp: { sandboxEnabled: false, remote: [], sandbox: [] },
-        wasm: { activeChats: 0 },
+        mcp: { remote: [] },
+        wasm: {
+          chatHandles: 0,
+          startingInstances: 0,
+          unconfirmed: false,
+          instances: [],
+        },
         sandbox: {
           enabled: false,
           settings: { source: "disabled" },
@@ -123,7 +128,10 @@ describe("server wiring", () => {
 
       const chats = await fetch(`http://127.0.0.1:${server.port}/api/chats`);
       expect(chats.status).toBe(200);
-      expect(await chats.json()).toEqual({ chats: [directory], available: true });
+      expect(await chats.json()).toEqual({
+        chats: [{ ...directory, projectId: "default" }],
+        available: true,
+      });
 
       const missing = await fetch(
         `http://127.0.0.1:${server.port}/api/chats/missing/sync`,

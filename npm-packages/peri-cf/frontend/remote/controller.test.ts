@@ -29,6 +29,7 @@ function summary(sessionId: string, title = sessionId): ChatSummary {
   return {
     sessionId, title, cwd: '/workspace', messageCount: 1,
     createdAt: '2026-10-20T00:00:00Z', updatedAt: '2026-10-20T01:00:00Z',
+    projectId: 'default',
   };
 }
 
@@ -162,6 +163,10 @@ function harness(options: HarnessOptions = {}) {
   const controller = new ChatController({
     actions,
     list: async () => [summary('session-1'), summary('session-2')],
+    listProjects: async () => [],
+    createProject: async (name) => ({
+      id: 'project-1', name, createdAt: '2026-10-20T00:00:00Z', isDefault: false,
+    }),
     syncUrl: (address) => { log.push(`sync:${address}`); return `ws://example.test/${address}`; },
     webSocketFactory: (url) => {
       const socket = new FakeSocket();
@@ -208,6 +213,22 @@ describe('ChatController history open', () => {
       'createHandle', 'handle-1', 'action:create_new_session', 'sync:handle-1',
     ]);
     expect(controller.getState().selected?.id).toBe('created-session');
+    await controller.dispose();
+  });
+
+  test('new session creation does not persist a placeholder title', async () => {
+    const { controller, sockets, actions } = harness();
+    const createPayloads: unknown[] = [];
+    const execute = actions.execute;
+    actions.execute = async (...args) => {
+      const action = args[1];
+      if (action.type === 'create_new_session') createPayloads.push(action.payload);
+      return execute(...args);
+    };
+
+    expect(await openWithSnapshot(controller, null, sockets, { sessionId: 'created-session' })).toBe(true);
+    // 标题由 Store 在首次 append_history 时从首条用户消息补齐；创建不得写入占位标题。
+    expect(createPayloads).toEqual([{}]);
     await controller.dispose();
   });
 
@@ -423,6 +444,25 @@ describe('ChatController action recovery', () => {
     await controller.dispose();
   });
 
+  test('a successful config write keeps an unknown-outcome banner visible', async () => {
+    const { controller, sockets } = harness({
+      send: async () => {
+        throw new RemoteActionError('transport_error', '网络请求失败，动作执行状态未知。', 'unknown');
+      },
+    });
+    await openWithSnapshot(controller, summary('session-1'), sockets, { sessionId: 'session-1' });
+    expect(await controller.dispatchSend('你好')).toBeNull();
+    const blocked = controller.getState();
+    expect(blocked).toMatchObject({ phase: 'blocked', recovery: 'reload' });
+    expect(blocked.error).toContain('未确认');
+
+    expect(await controller.setConfigOption('model', 'fast')).toEqual({ ok: true });
+    expect(controller.getState()).toMatchObject({
+      phase: 'blocked', recovery: 'reload', error: blocked.error,
+    });
+    await controller.dispose();
+  });
+
   test('a 409 binding conflict on send exposes rebind and reuses the open-flow fallback', async () => {
     let sendAttempts = 0;
     const { controller, sockets, sentTargets, log } = harness({
@@ -494,7 +534,23 @@ describe('ChatController send delivery', () => {
     const outcome = await sending;
     expect(outcome).toMatchObject({ delivered: false, sessionId: 'session-1' });
     expect(outcome.delivered ? '' : outcome.message).toContain('撤回');
+    expect(outcome.delivered ? '' : outcome.disposition).toBe('rejected');
     expect(controller.getState().error).toContain('撤回');
+    await controller.dispose();
+  });
+
+  test('connection release is reported as unknown, not safely retryable', async () => {
+    const { controller, sockets, sentTargets } = harness();
+    await openWithSnapshot(controller, summary('session-1'), sockets, { sessionId: 'session-1' });
+
+    const sending = controller.send('你好');
+    await waitFor(() => sentTargets.length > 0);
+    await tick();
+    await openWithSnapshot(controller, summary('session-2'), sockets, { sessionId: 'session-2' });
+
+    const outcome = await sending;
+    expect(outcome).toMatchObject({ delivered: false, disposition: 'unknown' });
+    expect(controller.getState()).toMatchObject({ phase: 'blocked' });
     await controller.dispose();
   });
 
@@ -604,6 +660,27 @@ describe('ChatController rebind and recovery flows', () => {
     expect(await finishReload(rebuilding, sockets, { sessionId: 'created-session', sequence: 1 })).toBe(true);
     expect(controller.getState().selected?.id).toBe('created-session');
     expect(log).toContain('close:handle-1');
+    await controller.dispose();
+  });
+});
+
+describe('ChatController config options', () => {
+  test('writes config options through the same bound target and action log', async () => {
+    const { controller, log, sockets, sentTargets } = harness();
+    await openWithSnapshot(controller, summary('session-1'), sockets, { sessionId: 'session-1' });
+
+    const result = await controller.setConfigOption('model', 'fast');
+    expect(result).toEqual({ ok: true });
+    expect(log.at(-1)).toBe('action:set_config_option');
+    expect(sentTargets.at(-1)).toEqual({ sessionId: 'session-1', bindingRevision: 1 });
+    await controller.dispose();
+  });
+
+  test('an unbound controller rejects config writes without pretending success', async () => {
+    const { controller } = harness();
+    expect(await controller.setConfigOption('mode', 'auto')).toEqual({
+      ok: false, message: '会话尚未就绪，配置未提交。',
+    });
     await controller.dispose();
   });
 });

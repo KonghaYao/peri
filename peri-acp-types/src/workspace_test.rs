@@ -74,3 +74,52 @@ fn test_workspace_missing_or_malformed_identity_cannot_deserialize() {
     assert!(serde_json::from_str::<WorkspaceId>("\"/path/is/not/an/id\"").is_err());
     assert!(serde_json::from_str::<ProjectId>("null").is_err());
 }
+
+#[test]
+fn test_binding_cwd_keeps_workspace_root_without_trailing_separator() {
+    let root = Path::new("/a/workspace");
+    assert_eq!(binding_cwd(root, Path::new("")), root);
+    assert_eq!(
+        binding_cwd(root, Path::new("")),
+        PathBuf::from("/a/workspace")
+    );
+    assert_eq!(
+        binding_cwd(root, Path::new("sub/dir")),
+        PathBuf::from("/a/workspace/sub/dir")
+    );
+    // 根自身带分隔符时按调用方给出的文本返回，不再叠一层。
+    assert_eq!(
+        binding_cwd(Path::new("/a/workspace/"), Path::new("")),
+        PathBuf::from("/a/workspace/")
+    );
+}
+
+#[test]
+fn test_same_execution_directory_normalizes_text_not_meaning() {
+    // 同一目录的等价文本写法。
+    assert!(same_execution_directory(
+        Path::new("/a/workspace"),
+        Path::new("/a/workspace/")
+    ));
+    assert!(same_execution_directory(
+        Path::new("/a/workspace"),
+        Path::new("/a//workspace")
+    ));
+    assert!(same_execution_directory(
+        Path::new("/a/workspace"),
+        Path::new("/a/./workspace")
+    ));
+    // 不同目录仍不等；`..` 不折叠（不做 canonicalize）。
+    assert!(!same_execution_directory(
+        Path::new("/a/workspace"),
+        Path::new("/a/workspace/sub")
+    ));
+    assert!(!same_execution_directory(
+        Path::new("/a/workspace"),
+        Path::new("/a/workspace/../other")
+    ));
+    assert!(!same_execution_directory(
+        Path::new("/a/workspace"),
+        Path::new("/a/other")
+    ));
+}

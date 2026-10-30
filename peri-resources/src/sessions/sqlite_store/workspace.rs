@@ -69,20 +69,6 @@ pub(super) async fn require_project_exists(
     Ok(())
 }
 
-/// 绑定指向的执行目录：相对路径为空时就是工作区根本身。
-///
-/// 不能直接写 `root.join(relative)`：`join("")` 会追加分隔符（`/a/b` → `/a/b/`），
-/// 同一个目录因此出现两种文本形式——登记解析返回不带分隔符的形式，绑定复核返回
-/// 带分隔符的形式。调用方按字符串比较目录（如 TUI 的线程列表缓存工作区解析结果）
-/// 会把同一个目录当成换了目录，为它重跑一次本应只做一次的完整发现。
-fn binding_cwd(root: &Path, relative: &Path) -> PathBuf {
-    if relative.as_os_str().is_empty() {
-        root.to_path_buf()
-    } else {
-        root.join(relative)
-    }
-}
-
 /// 本次观测能否作为该归属行记录的执行证据。
 ///
 /// 行上还没有已记录快照时（迁移建出的历史惰性行），本次观测就是它的第一条证据：

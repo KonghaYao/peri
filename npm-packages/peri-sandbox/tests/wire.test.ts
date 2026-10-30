@@ -2,12 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { Readable } from 'node:stream';
-import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { Client, ProtocolError, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import type { Implementation, ServerCapabilities } from '@modelcontextprotocol/client';
 import { Server, createMcpHandler } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
+import { createSandboxMcpHandler } from '../src/server/mcp-handler.js';
 import { PeriBackend } from '../src/runtime/backend.js';
+import { startHttpServer } from '../src/server/http.js';
+import type { McpBackendPort, McpBackendSubscription } from '../src/instance/types.js';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 
 test('stdio transport frames batched and split messages without limiting whole chunks', async () => {
@@ -34,7 +38,7 @@ test('stdio transport frames batched and split messages without limiting whole c
   stdout.write(line.slice(100));
   assert.equal(messages.length, 3);
   assert.deepEqual(errors, []);
-  stdout.write('x'.repeat(8 * 1024 * 1024 + 1));
+  stdout.write('x'.repeat(32 * 1024 * 1024 + 1));
   assert.match(errors[0], /message too large/);
 });
 
@@ -50,7 +54,7 @@ test('stdio transport rejects oversized outgoing messages before writing', async
   let writes = 0;
   stdin.on('data', () => writes++);
   await assert.rejects(
-    () => transport.send({ jsonrpc: '2.0', method: 'large', params: { data: 'x'.repeat(8 * 1024 * 1024) } }),
+    () => transport.send({ jsonrpc: '2.0', method: 'large', params: { data: 'x'.repeat(32 * 1024 * 1024) } }),
     /write buffer limit/,
   );
   assert.equal(writes, 0);
@@ -195,5 +199,455 @@ test('pinned 2026-07-28 HTTP codec preserves a native task result and call argum
   } finally {
     await client.close();
     await new Promise<void>((resolve) => http.close(() => resolve()));
+  }
+});
+
+class FakeSandboxBackend implements McpBackendPort {
+  readonly runId = 'run_test';
+  capabilities: ServerCapabilities = {
+    tools: {},
+    resources: { subscribe: true, listChanged: true },
+    prompts: { listChanged: true },
+    extensions: {
+      'io.modelcontextprotocol/skills': {},
+      'io.modelcontextprotocol/tasks': {},
+    },
+  };
+  info: Implementation = { name: 'inner-workspace', version: '9.9.9' };
+  instructionsValue: string | undefined = 'inner instructions';
+  readonly requests: Array<{
+    method: string;
+    params: Record<string, unknown>;
+    requestId?: string | number;
+  }> = [];
+  readonly cancelled: Array<string | number> = [];
+  readonly filters: Record<string, unknown>[] = [];
+  subscriptionCloses = 0;
+  private subscription?:
+    | {
+        sink: (notification: { method: string; params?: Record<string, unknown> }) => void;
+      }
+    | undefined;
+  handler: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown>> = async () => ({
+    resultType: 'complete',
+  });
+  requestImpl?:
+    | ((
+        method: string,
+        params: Record<string, unknown>,
+        options: { requestId?: string | number },
+      ) => Promise<Record<string, unknown>>)
+    | undefined;
+  subscribeImpl?:
+    | ((
+        filter: Record<string, unknown>,
+        options: {
+          sink: (notification: { method: string; params?: Record<string, unknown> }) => void;
+        },
+      ) => Promise<McpBackendSubscription>)
+    | undefined;
+  serverCapabilities(): ServerCapabilities {
+    return this.capabilities;
+  }
+  serverInfo(): Implementation {
+    return this.info;
+  }
+  instructions(): string | undefined {
+    return this.instructionsValue;
+  }
+  async request(
+    method: string,
+    params: Record<string, unknown>,
+    options: { requestId?: string | number },
+  ): Promise<Record<string, unknown>> {
+    this.requests.push({ method, params, requestId: options.requestId });
+    if (this.requestImpl) return this.requestImpl(method, params, options);
+    return this.handler(method, params);
+  }
+  async notify(): Promise<void> {}
+  async subscribe(
+    filter: Record<string, unknown>,
+    options: {
+      requestId: string | number;
+      sink: (notification: { method: string; params?: Record<string, unknown> }) => void;
+    },
+  ): Promise<McpBackendSubscription> {
+    this.filters.push(filter);
+    if (this.subscribeImpl) return this.subscribeImpl(filter, options);
+    let settle: (outcome: 'local' | 'graceful' | 'remote') => void = () => {};
+    const closed = new Promise<'local' | 'graceful' | 'remote'>((resolve) => {
+      settle = resolve;
+    });
+    this.subscription = { sink: options.sink };
+    return {
+      honoredFilter: filter,
+      close: async () => {
+        this.subscriptionCloses += 1;
+        settle('local');
+      },
+      closed,
+    };
+  }
+  emit(notification: { method: string; params?: Record<string, unknown> }): void {
+    this.subscription?.sink(notification);
+  }
+  cancel(requestId: string | number): void {
+    this.cancelled.push(requestId);
+    this.cancelImpl?.(requestId);
+  }
+  cancelImpl?: (requestId: string | number) => void;
+  async close(): Promise<void> {}
+}
+
+async function sandboxEndpoint(backend: McpBackendPort): Promise<{ url: string; close(): Promise<void> }> {
+  const http = await startHttpServer({
+    sandboxId: 'sbx_test',
+    host: '127.0.0.1',
+    port: 0,
+    token: 'test-token',
+    state: () => 'ready',
+    backend: () => backend,
+  });
+  return {
+    url: http.url,
+    close: () => http.close(),
+  };
+}
+
+async function connectSandbox(url: string): Promise<Client> {
+  const client = new Client(
+    { name: 'sandbox-test-client', version: '1' },
+    {
+      capabilities: { extensions: { 'io.modelcontextprotocol/tasks': {} } },
+      versionNegotiation: { mode: { pin: '2026-07-28' } },
+    },
+  );
+  await client.connect(
+    new StreamableHTTPClientTransport(new URL(url), {
+      requestInit: { headers: { Authorization: 'Bearer test-token' } },
+    }),
+  );
+  return client;
+}
+
+function request(client: Client, method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>> {
+  return client.request({ method, params } as never, z.record(z.string(), z.unknown()));
+}
+
+test('outer discover mirrors inner capabilities, identity and instructions', async () => {
+  const backend = new FakeSandboxBackend();
+  const endpoint = await sandboxEndpoint(backend);
+  const client = await connectSandbox(endpoint.url);
+  try {
+    assert.deepEqual(client.getServerCapabilities(), backend.capabilities);
+    assert.deepEqual(client.getServerVersion(), backend.info);
+    assert.equal(client.getInstructions(), 'inner instructions');
+  } finally {
+    await client.close();
+    await endpoint.close();
+  }
+});
+
+test('custom method results keep resultType without the bridge serverInfo stamp', async () => {
+  const backend = new FakeSandboxBackend();
+  backend.handler = async (method) =>
+    method === 'skills/list' ? { skills: [{ name: 'core:commit' }] } : { tools: [] };
+  const handler = createSandboxMcpHandler({ sandboxId: 'sbx_test', backend });
+  const call = async (method: string) => {
+    const response = await handler.fetch(
+      new Request('http://127.0.0.1:7040/mcp', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+          'mcp-protocol-version': '2026-07-28',
+          'mcp-method': method,
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method,
+          params: {
+            _meta: {
+              'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+              'io.modelcontextprotocol/clientCapabilities': {},
+            },
+          },
+        }),
+      }),
+    );
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    const sse = /^data: (.*)$/m.exec(text)?.[1];
+    return JSON.parse(sse ?? text) as { result: Record<string, unknown> };
+  };
+  const custom = await call('skills/list');
+  assert.deepEqual(custom.result.skills, [{ name: 'core:commit' }]);
+  assert.equal(custom.result.resultType, 'complete');
+  assert.equal('_meta' in custom.result, false);
+  const spec = await call('tools/list');
+  assert.equal(spec.result.resultType, 'complete');
+  assert.deepEqual((spec.result._meta as Record<string, unknown>)['io.modelcontextprotocol/serverInfo'], backend.info);
+});
+
+test('resources, prompts, skills, tools, tasks and unknown methods are forwarded verbatim', async () => {
+  const backend = new FakeSandboxBackend();
+  backend.handler = async (method, params) => {
+    switch (method) {
+      case 'tools/list':
+        return { tools: [] };
+      case 'resources/list':
+        return { resources: [] };
+      case 'resources/read':
+        return {
+          contents: [{ uri: String(params.uri), mimeType: 'text/plain', text: 'ok' }],
+        };
+      case 'prompts/list':
+        return { prompts: [] };
+      case 'prompts/get':
+        return { description: 'demo', messages: [] };
+      case 'tasks/get':
+        return {
+          taskId: String(params.taskId),
+          status: 'working',
+          createdAt: '2026-10-26T00:00:00Z',
+          lastUpdatedAt: '2026-10-26T00:00:00Z',
+          ttlMs: null,
+        };
+      case 'tasks/update':
+      case 'tasks/cancel':
+        return {};
+      default:
+        return { echoed: method, params };
+    }
+  };
+  const endpoint = await sandboxEndpoint(backend);
+  const client = await connectSandbox(endpoint.url);
+  try {
+    await request(client, 'tools/list');
+    await request(client, 'resources/list');
+    await request(client, 'resources/read', { uri: 'skill://demo/SKILL.md' });
+    await request(client, 'prompts/list');
+    await request(client, 'prompts/get', { name: 'demo', arguments: { topic: 'mcp' } });
+    await request(client, 'skills/list');
+    await request(client, 'skills/get', { uri: 'skill://demo/SKILL.md' });
+    await request(client, 'x/custom/method', { anything: [1, 2, 3] });
+    await request(client, 'tasks/update', { taskId: 'shell-1', extra: true });
+    await request(client, 'tasks/get', { taskId: 'shell-1' });
+    await request(client, 'tasks/cancel', { taskId: 'shell-1' });
+    assert.deepEqual(
+      backend.requests.map((request) => request.method),
+      [
+        'tools/list',
+        'resources/list',
+        'resources/read',
+        'prompts/list',
+        'prompts/get',
+        'skills/list',
+        'skills/get',
+        'x/custom/method',
+        'tasks/update',
+        'tasks/get',
+        'tasks/cancel',
+      ],
+    );
+    assert.deepEqual(backend.requests[2].params, { uri: 'skill://demo/SKILL.md' });
+    assert.deepEqual(backend.requests[4].params, { name: 'demo', arguments: { topic: 'mcp' } });
+    assert.deepEqual(backend.requests[7].params, { anything: [1, 2, 3] });
+    assert.deepEqual(backend.requests[8].params, { taskId: 'shell-1', extra: true });
+  } finally {
+    await client.close();
+    await endpoint.close();
+  }
+});
+
+test('native task results are not rewritten and inner errors keep code/message/data', async () => {
+  const backend = new FakeSandboxBackend();
+  backend.handler = async (method) =>
+    method === 'tools/call'
+      ? {
+          resultType: 'task',
+          taskId: 'shell-<uuid>',
+          status: 'working',
+          createdAt: '2026-10-26T00:00:00Z',
+          lastUpdatedAt: '2026-10-26T00:00:00Z',
+          ttlMs: null,
+          _meta: { task_id: 'shell-<uuid>' },
+        }
+      : { resultType: 'complete' };
+  const endpoint = await sandboxEndpoint(backend);
+  const client = await connectSandbox(endpoint.url);
+  try {
+    const created = (await request(client, 'tools/call', {
+      name: 'Bash',
+      arguments: { command: 'sleep 5' },
+    })) as { resultType: string; taskId: string; _meta: { task_id: string } };
+    assert.equal(created.resultType, 'task');
+    assert.equal(created.taskId, 'shell-<uuid>');
+    assert.equal(created._meta.task_id, 'shell-<uuid>');
+    backend.requestImpl = async () => {
+      throw ProtocolError.fromError(-32602, 'resource denied', { uri: 'file:///etc/passwd' });
+    };
+    await assert.rejects(
+      () => request(client, 'resources/read', { uri: 'file:///etc/passwd' }),
+      (error: unknown) =>
+        error instanceof ProtocolError &&
+        error.code === -32602 &&
+        error.message === 'resource denied' &&
+        JSON.stringify(error.data) === JSON.stringify({ uri: 'file:///etc/passwd' }),
+    );
+  } finally {
+    await client.close();
+    await endpoint.close();
+  }
+});
+
+test('subscriptions/listen relays inner filters and notifications without rewriting', async () => {
+  const backend = new FakeSandboxBackend();
+  backend.subscribeImpl = async (filter, options) => {
+    let settle: (outcome: 'local' | 'graceful' | 'remote') => void = () => {};
+    const closed = new Promise<'local' | 'graceful' | 'remote'>((resolve) => {
+      settle = resolve;
+    });
+    setImmediate(() => {
+      options.sink({
+        method: 'notifications/tasks',
+        params: { task: { taskId: 'shell-1' }, status: 'working' },
+      });
+      options.sink({
+        method: 'notifications/resources/updated',
+        params: { uri: 'skill://demo/SKILL.md' },
+      });
+    });
+    let closedOnce = false;
+    return {
+      honoredFilter: { ...filter },
+      close: async () => {
+        if (closedOnce) return;
+        closedOnce = true;
+        backend.subscriptionCloses += 1;
+        settle('local');
+      },
+      closed,
+    };
+  };
+  const endpoint = await sandboxEndpoint(backend);
+  const client = await connectSandbox(endpoint.url);
+  const events: Array<{ method: string; params?: Record<string, unknown> }> = [];
+  client.setNotificationHandler('notifications/tasks', { params: z.object({}).passthrough() }, (params) => {
+    events.push({ method: 'notifications/tasks', params: params as never });
+  });
+  client.setNotificationHandler('notifications/resources/updated', { params: z.object({}).passthrough() }, (params) => {
+    events.push({ method: 'notifications/resources/updated', params: params as never });
+  });
+  try {
+    const subscription = await client.listen(
+      {
+        toolsListChanged: true,
+        resourceSubscriptions: ['skill://demo/SKILL.md'],
+        taskIds: ['shell-1'],
+      } as never,
+      { timeout: 5000 },
+    );
+    assert.deepEqual(subscription.honoredFilter, {
+      toolsListChanged: true,
+      resourceSubscriptions: ['skill://demo/SKILL.md'],
+      taskIds: ['shell-1'],
+    });
+    assert.deepEqual(backend.filters[0], {
+      toolsListChanged: true,
+      resourceSubscriptions: ['skill://demo/SKILL.md'],
+      taskIds: ['shell-1'],
+    });
+    const deadline = Date.now() + 5000;
+    while (events.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(
+      events.map((event) => event.method),
+      ['notifications/tasks', 'notifications/resources/updated'],
+    );
+    const subscriptionIds = events.map(
+      (event) =>
+        (event.params?._meta as Record<string, unknown> | undefined)?.['io.modelcontextprotocol/subscriptionId'],
+    );
+    assert.match(String(subscriptionIds[0]), /^listen:\d+$/);
+    assert.deepEqual(subscriptionIds, [subscriptionIds[0], subscriptionIds[0]]);
+    await subscription.close();
+    assert.equal(backend.subscriptionCloses, 1);
+  } finally {
+    await client.close();
+    await endpoint.close();
+  }
+});
+
+test('host cancellation reaches the matching inner request', async () => {
+  const backend = new FakeSandboxBackend();
+  let rejectInner: ((error: Error) => void) | undefined;
+  backend.requestImpl = async () =>
+    new Promise<Record<string, unknown>>((_resolve, reject) => {
+      rejectInner = reject;
+    });
+  backend.cancelImpl = () => rejectInner?.(new ProtocolError(-32800, 'Request cancelled'));
+  const endpoint = await sandboxEndpoint(backend);
+  const client = await connectSandbox(endpoint.url);
+  try {
+    const pending = client.request(
+      { method: 'tools/call', params: { name: 'Bash', arguments: { command: 'sleep 60' } } },
+      { timeout: 30_000 },
+    );
+    const deadline = Date.now() + 5000;
+    while (backend.requests.length === 0 && Date.now() < deadline)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    const hostRequestId = backend.requests[0].requestId;
+    assert.notEqual(hostRequestId, undefined);
+    await client.notification({
+      method: 'notifications/cancelled',
+      params: { requestId: hostRequestId! },
+    });
+    await assert.rejects(
+      () => pending,
+      (error: unknown) => error instanceof ProtocolError && error.code === -32800,
+    );
+    assert.deepEqual(backend.cancelled, [hostRequestId]);
+  } finally {
+    await client.close();
+    await endpoint.close();
+  }
+});
+
+test('long requests survive the previous 15s socket idle window', async () => {
+  const backend = new FakeSandboxBackend();
+  backend.handler = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 16_000));
+    return { content: [], isError: false };
+  };
+  const endpoint = await sandboxEndpoint(backend);
+  const client = await connectSandbox(endpoint.url);
+  try {
+    const begun = Date.now();
+    await request(client, 'tools/call', { name: 'Bash', arguments: { command: 'sleep 15' } });
+    assert(Date.now() - begun >= 15_000);
+  } finally {
+    await client.close();
+    await endpoint.close();
+  }
+});
+
+test('a 10 MiB resource result crosses the HTTP bridge', async () => {
+  const backend = new FakeSandboxBackend();
+  const text = 'x'.repeat(10 * 1024 * 1024);
+  backend.handler = async () => ({
+    contents: [{ uri: 'skill://big/SKILL.md', mimeType: 'text/markdown', text }],
+  });
+  const endpoint = await sandboxEndpoint(backend);
+  const client = await connectSandbox(endpoint.url);
+  try {
+    const result = (await request(client, 'resources/read', {
+      uri: 'skill://big/SKILL.md',
+    })) as { contents: Array<{ text: string }> };
+    assert.equal(result.contents.length, 1);
+    assert.equal(result.contents[0].text.length, text.length);
+  } finally {
+    await client.close();
+    await endpoint.close();
   }
 });

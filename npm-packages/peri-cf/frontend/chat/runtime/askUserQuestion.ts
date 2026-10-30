@@ -30,7 +30,7 @@ export function buildAskUserQuestionContent(
     const custom = draft.custom.trim();
     if (question.multiSelect) {
       const values = [...selected];
-      if (custom.length > 0) values.push(custom);
+      if (custom.length > 0 && !values.includes(custom)) values.push(custom);
       if (values.length === 0) missing.push(question.id);
       else content[question.id] = values;
     } else if (custom.length > 0) {

@@ -237,8 +237,8 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
         }
     }
 
-    async fn read_builtin_workspace_skills(&self) -> Result<Vec<SkillMetadata>, String> {
-        McpClientPool::read_builtin_workspace_skills(self).await
+    async fn read_skills_catalog(&self, session_id: &str) -> Result<Vec<SkillMetadata>, String> {
+        McpClientPool::read_skills_catalog(self, session_id).await
     }
 
     async fn read_builtin_workspace_instructions(

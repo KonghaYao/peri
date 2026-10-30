@@ -1,11 +1,22 @@
 import { createServer, type ServerResponse } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { Readable, Transform, pipeline } from 'node:stream';
-import { SandboxError, type McpBackendPort, type SandboxState } from '../instance/types.js';
+import {
+  SandboxError,
+  type McpBackendPort,
+  type McpBackendSubscription,
+  type SandboxState,
+} from '../instance/types.js';
 import { createSandboxMcpHandler } from './mcp-handler.js';
 
-const MAX_REQUEST_BYTES = 1024 * 1024;
-const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
+const MAX_REQUEST_BYTES = 8 * 1024 * 1024;
+const MAX_RESPONSE_BYTES = 33 * 1024 * 1024;
+const MAX_LISTEN_NOTIFICATION_BYTES = 1024 * 1024;
+const MAX_PRE_ACK_NOTIFICATIONS = 64;
+const KEEPALIVE_MS = 10_000;
+const SUBSCRIPTION_ID_META_KEY = 'io.modelcontextprotocol/subscriptionId';
+const PROTOCOL_VERSION_META_KEY = 'io.modelcontextprotocol/protocolVersion';
+const CLIENT_CAPABILITIES_META_KEY = 'io.modelcontextprotocol/clientCapabilities';
 
 const respond = (res: ServerResponse, status: number, body: unknown) => {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -19,6 +30,62 @@ const validToken = (provided: string | undefined, expected: Buffer) => {
 
 function hostLiteral(host: '127.0.0.1' | '::1'): string {
   return host === '::1' ? '[::1]' : host;
+}
+
+interface ListenRequest {
+  id: string | number;
+  filter: Record<string, unknown>;
+}
+
+/**
+ * Recognizes a modern `subscriptions/listen` request that the SDK's own
+ * listen router cannot serve transparently (it only relays four standard
+ * change events). Anything else falls through to `createMcpHandler` for
+ * normal protocol validation.
+ */
+function listenRequest(body: Buffer): ListenRequest | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body.toString('utf8'));
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const request = parsed as Record<string, unknown>;
+  if (request.method !== 'subscriptions/listen' || !('id' in request)) return null;
+  const id = request.id;
+  if (typeof id !== 'string' && typeof id !== 'number') return null;
+  const params = request.params;
+  if (params === null || typeof params !== 'object' || Array.isArray(params)) return null;
+  const { notifications, _meta: meta } = params as Record<string, unknown>;
+  if (notifications === null || typeof notifications !== 'object' || Array.isArray(notifications)) return null;
+  if (meta === null || typeof meta !== 'object' || Array.isArray(meta)) return null;
+  const envelope = meta as Record<string, unknown>;
+  if (typeof envelope[PROTOCOL_VERSION_META_KEY] !== 'string') return null;
+  if (
+    envelope[CLIENT_CAPABILITIES_META_KEY] === null ||
+    typeof envelope[CLIENT_CAPABILITIES_META_KEY] !== 'object' ||
+    Array.isArray(envelope[CLIENT_CAPABILITIES_META_KEY])
+  )
+    return null;
+  return { id, filter: notifications as Record<string, unknown> };
+}
+
+function errorCode(error: unknown): number {
+  return typeof (error as { code?: unknown })?.code === 'number' ? (error as { code: number }).code : -32603;
+}
+
+function errorBody(requestId: string | number, error: unknown): Record<string, unknown> {
+  const data = (error as { data?: unknown })?.data;
+  return {
+    jsonrpc: '2.0',
+    id: requestId,
+    error: {
+      code: errorCode(error),
+      message: error instanceof Error ? error.message : 'subscription failed',
+      ...(data !== undefined ? { data } : {}),
+    },
+  };
 }
 
 export interface SandboxHttpServerOptions {
@@ -42,6 +109,8 @@ export interface SandboxHttpServer {
  *
  * Requests are rejected unless the bearer token matches, the Host header is
  * loopback for the bound port, the path is `/mcp`, and the instance is ready.
+ * `subscriptions/listen` is served here as a direct relay to the inner
+ * client so the full notification vocabulary passes through untouched.
  */
 export async function startHttpServer(options: SandboxHttpServerOptions): Promise<SandboxHttpServer> {
   const expected = Buffer.from(options.token);
@@ -51,6 +120,163 @@ export async function startHttpServer(options: SandboxHttpServerOptions): Promis
   let listeningPort = 0;
   let closed = false;
   let handler: ReturnType<typeof createSandboxMcpHandler> | null = null;
+
+  async function serveListen(request: ListenRequest, res: ServerResponse): Promise<void> {
+    const backend = options.backend();
+    if (!backend) {
+      respond(res, 503, { error: 'not_running' });
+      return;
+    }
+    const abort = new AbortController();
+    pending.add(abort);
+    let ended = false;
+    let headersSent = false;
+    let ackSent = false;
+    let keepAlive: NodeJS.Timeout | undefined;
+    let subscription: McpBackendSubscription | undefined;
+    const queue: Array<{ method: string; params?: Record<string, unknown> }> = [];
+    let overflow = false;
+
+    const cleanup = () => {
+      if (keepAlive !== undefined) clearInterval(keepAlive);
+      keepAlive = undefined;
+      pending.delete(abort);
+    };
+    const end = () => {
+      if (ended) return;
+      ended = true;
+      cleanup();
+      if (!res.writableEnded) res.end();
+    };
+    res.once('close', () => {
+      if (ended) return;
+      abort.abort(new SandboxError('backend_exited', 'HTTP client disconnected'));
+      void subscription?.close().catch(() => {});
+      end();
+    });
+    const writeEvent = (payload: unknown): boolean => {
+      if (ended || res.writableEnded) return false;
+      const text = JSON.stringify(payload);
+      if (Buffer.byteLength(text) > MAX_LISTEN_NOTIFICATION_BYTES) return false;
+      res.write(`event: message\ndata: ${text}\n\n`);
+      return true;
+    };
+    const notificationPayload = (notification: { method: string; params?: Record<string, unknown> }) => {
+      const params = notification.params ?? {};
+      const meta =
+        params._meta !== null && typeof params._meta === 'object' && !Array.isArray(params._meta)
+          ? (params._meta as Record<string, unknown>)
+          : {};
+      return {
+        jsonrpc: '2.0',
+        method: notification.method,
+        params: { ...params, _meta: { ...meta, [SUBSCRIPTION_ID_META_KEY]: request.id } },
+      };
+    };
+    const writeNotification = (notification: { method: string; params?: Record<string, unknown> }): boolean => {
+      const payload = notificationPayload(notification);
+      const text = JSON.stringify(payload);
+      if (Buffer.byteLength(text) > MAX_LISTEN_NOTIFICATION_BYTES) {
+        console.warn('sandbox listen notification exceeds 1 MiB; closing subscription', {
+          method: notification.method,
+        });
+        void subscription?.close();
+        end();
+        return false;
+      }
+      if (ended || res.writableEnded) return false;
+      res.write(`event: message\ndata: ${text}\n\n`);
+      return true;
+    };
+    const sink = (notification: { method: string; params?: Record<string, unknown> }) => {
+      if (ended) return;
+      if (!ackSent) {
+        if (queue.length >= MAX_PRE_ACK_NOTIFICATIONS) {
+          overflow = true;
+          return;
+        }
+        queue.push(notification);
+        return;
+      }
+      writeNotification(notification);
+    };
+
+    try {
+      try {
+        subscription = await backend.subscribe(request.filter, {
+          signal: abort.signal,
+          requestId: request.id,
+          sink,
+        });
+      } catch (error) {
+        console.warn('sandbox subscriptions/listen failed', error);
+        respond(res, 200, errorBody(request.id, error));
+        cleanup();
+        return;
+      }
+      if (overflow) {
+        console.warn('sandbox subscriptions/listen pre-ack queue overflow');
+        await subscription.close().catch(() => {});
+        respond(res, 200, {
+          jsonrpc: '2.0',
+          id: request.id,
+          error: { code: -32603, message: 'listen notification queue overflow' },
+        });
+        cleanup();
+        return;
+      }
+      if (ended) {
+        await subscription.close().catch(() => {});
+        return;
+      }
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+      });
+      res.flushHeaders();
+      headersSent = true;
+      writeEvent({
+        jsonrpc: '2.0',
+        method: 'notifications/subscriptions/acknowledged',
+        params: {
+          notifications: subscription.honoredFilter,
+          _meta: { [SUBSCRIPTION_ID_META_KEY]: request.id },
+        },
+      });
+      ackSent = true;
+      for (const notification of queue.splice(0)) writeNotification(notification);
+      keepAlive = setInterval(() => {
+        if (!ended && !res.writableEnded) res.write(': keepalive\n\n');
+      }, KEEPALIVE_MS);
+
+      const current = subscription;
+      void current.closed.then((outcome) => {
+        if (ended) return;
+        if (outcome === 'graceful')
+          writeEvent({
+            jsonrpc: '2.0',
+            id: request.id,
+            result: { resultType: 'complete', _meta: { [SUBSCRIPTION_ID_META_KEY]: request.id } },
+          });
+        end();
+      });
+      abort.signal.addEventListener(
+        'abort',
+        () => {
+          void current.close().catch(() => {});
+          end();
+        },
+        { once: true },
+      );
+    } catch (error) {
+      console.warn('sandbox subscriptions/listen relay failed', error);
+      if (!headersSent && !ended) respond(res, 200, errorBody(request.id, error));
+      await subscription?.close().catch(() => {});
+      cleanup();
+      if (!res.writableEnded) res.end();
+    }
+  }
 
   const server = createServer(async (req, res) => {
     if (!validToken(req.headers.authorization, expected)) {
@@ -95,6 +321,14 @@ export async function startHttpServer(options: SandboxHttpServerOptions): Promis
         }
         chunks.push(chunk);
       }
+      const body = Buffer.concat(chunks);
+      if (req.method === 'POST') {
+        const listen = listenRequest(body);
+        if (listen) {
+          await serveListen(listen, res);
+          return;
+        }
+      }
       const url = new URL(req.url!, `http://${req.headers.host}`);
       const abort = new AbortController();
       pending.add(abort);
@@ -107,7 +341,7 @@ export async function startHttpServer(options: SandboxHttpServerOptions): Promis
           method: req.method,
           headers: req.headers as HeadersInit,
           signal: abort.signal,
-          ...(req.method === 'POST' ? { body: Buffer.concat(chunks) } : {}),
+          ...(req.method === 'POST' ? { body } : {}),
         });
         handler ??= createSandboxMcpHandler({ sandboxId: options.sandboxId, backend });
         const response = await handler.fetch(request);
@@ -119,7 +353,7 @@ export async function startHttpServer(options: SandboxHttpServerOptions): Promis
               bytes += chunk.length;
               if (bytes > MAX_RESPONSE_BYTES) {
                 abort.abort();
-                done(new SandboxError('limit_exceeded', 'MCP response exceeds 8 MiB'));
+                done(new SandboxError('limit_exceeded', 'MCP response exceeds 33 MiB'));
               } else done(null, chunk);
             },
           });
@@ -139,7 +373,9 @@ export async function startHttpServer(options: SandboxHttpServerOptions): Promis
   server.maxConnections = 32;
   server.requestTimeout = 15000;
   server.headersTimeout = 10000;
-  server.timeout = 15000;
+  // Long tool calls and listen streams must not be killed by socket idleness;
+  // request/headers timeouts still bound slow request bodies and headers.
+  server.timeout = 0;
   await new Promise<void>((resolve, reject) => {
     const onError = (error: NodeJS.ErrnoException) => {
       server.off('listening', onListening);

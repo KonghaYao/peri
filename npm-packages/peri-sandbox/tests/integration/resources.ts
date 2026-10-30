@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { z } from 'zod';
 import { loadSettings, startSandbox, type SandboxInstance } from '../../src/index.js';
@@ -110,6 +110,35 @@ try {
   await settle(client, await bash(client, 'for number in $(seq 1 80); do sleep 2 & done; wait'));
   assert(event(root, 'pids.events', 'max') > exhausted, 'PID limit was not exercised');
   passed.push('A07: TasksMax blocks excess child processes');
+
+  const capabilities = client.getServerCapabilities();
+  assert(capabilities?.resources, 'outer discover must mirror resources');
+  assert.equal(capabilities.resources.subscribe, true, 'resources.subscribe must be mirrored');
+  assert(capabilities.extensions?.['io.modelcontextprotocol/skills'], 'skills extension must be mirrored');
+  const skillDir = `${limited.workspacePath}/.claude/skills/demo`;
+  mkdirSync(skillDir, { recursive: true });
+  writeFileSync(skillDir + '/SKILL.md', '---\nname: demo\ndescription: linux demo skill\n---\n\nLINUX_DEMO_SKILL\n');
+  const skills = await client.request({ method: 'skills/list', params: {} }, schema);
+  assert(
+    (skills.skills as Array<{ frontmatter?: { name?: string } }>).some((skill) => skill.frontmatter?.name === 'demo'),
+    `skills/list did not expose the sandbox skill: ${JSON.stringify(skills)}`,
+  );
+  const skillRead = await client.request(
+    { method: 'resources/read', params: { uri: 'skill://project/demo/SKILL.md' } },
+    schema,
+  );
+  assert(
+    JSON.stringify(skillRead.contents).includes('LINUX_DEMO_SKILL'),
+    'resources/read did not return the sandbox skill',
+  );
+  const resourceList = await client.request({ method: 'resources/list' }, schema);
+  assert(
+    (resourceList.resources as Array<{ uri: string }>).some(
+      (resource) => resource.uri === 'skill://project/demo/SKILL.md',
+    ),
+    'resources/list did not expose the sandbox skill',
+  );
+  passed.push('A08: capabilities/resources/skills are mirrored and readable inside the sandbox');
   await limited.close({ deleteData: true });
 
   const memory = await start('workspace-memory');

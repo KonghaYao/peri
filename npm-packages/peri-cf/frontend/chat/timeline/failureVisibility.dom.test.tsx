@@ -61,20 +61,24 @@ function state(options: { turnStatus: string; entryStatus: string; error?: { cod
 }
 
 describe('failed and cancelled work is visible on the first screen', () => {
-  test('a completed turn with a failed tool shows the failure label, real output and exit code', () => {
-    const rows = deriveTimeline(state({
+  test('a completed turn with a failed tool collapses first and reveals output when expanded', () => {
+    const projection = state({
       turnStatus: 'completed', entryStatus: 'failed',
       // 真实投影形状：error 是公开文案，具体错误在 result.contentText，退出码可在文本标记里。
       error: { code: 'tool_failed', message: '工具执行失败' },
       result: { contentText: '[stderr]\npermission denied\n[Exit code: 1]' },
-    }) as never);
-    render(createElement(TimelineRows, { rows }));
-
-    // fold 摘要不再只显示 Worked for X。
+    }) as never;
+    const collapsed = render(createElement(TimelineRows, { rows: deriveTimeline(projection), onToggleTurnFold: () => {} }));
+    // fold 摘要显示失败，但工具细节默认收起。
     expect(screen.getByText('Failed after 2.0s')).toBeTruthy();
-    expect(screen.getByText('失败 1')).toBeTruthy();
+    expect(screen.queryByText('运行命令')).toBeNull();
+    expect(screen.queryByText('permission denied · exit code 1')).toBeNull();
+    collapsed.unmount();
+
+    const rows = deriveTimeline(projection, { expandedTurnIds: new Set(['turn:1']) });
+    render(createElement(TimelineRows, { rows, onToggleTurnFold: () => {} }));
     expect(screen.getByText('运行命令')).toBeTruthy();
-    // 首屏保留真实错误文本与退出码；不使用通用 error.message。
+    // 展开后保留真实错误文本与退出码；不使用通用 error.message。
     expect(screen.getByText('permission denied · exit code 1')).toBeTruthy();
     expect(screen.queryByText('工具执行失败')).toBeNull();
 
@@ -82,20 +86,19 @@ describe('failed and cancelled work is visible on the first screen', () => {
     expect(tool.getAttribute('data-tool-failed')).toBe('true');
     const failure = document.querySelector('[data-slot="peri-tool-failure"]')!;
     expect(failure.className).toContain('text-destructive');
-    // 失败组默认展开：失败工具行首屏可见。
-    const group = document.querySelector('[data-slot="peri-work-group"]')!;
-    expect(group.querySelector('button')?.getAttribute('aria-expanded')).toBe('true');
   });
 
-  test('a cancelled turn keeps its work expanded with the neutral cancelled label', () => {
-    const rows = deriveTimeline(state({
+  test('a cancelled turn collapses first and shows the neutral label when expanded', () => {
+    const projection = state({
       turnStatus: 'cancelled', entryStatus: 'cancelled', result: { contentText: 'stopped' },
-    }) as never);
-    render(createElement(TimelineRows, { rows }));
-
+    }) as never;
+    const collapsed = render(createElement(TimelineRows, { rows: deriveTimeline(projection), onToggleTurnFold: () => {} }));
     expect(screen.getByText('Cancelled after 2.0s')).toBeTruthy();
-    const group = document.querySelector('[data-slot="peri-work-group"]')!;
-    expect(group.querySelector('button')?.getAttribute('aria-expanded')).toBe('true');
+    expect(document.querySelector('[data-slot="peri-work-group"]')).toBeNull();
+    collapsed.unmount();
+
+    const rows = deriveTimeline(projection, { expandedTurnIds: new Set(['turn:1']) });
+    render(createElement(TimelineRows, { rows, onToggleTurnFold: () => {} }));
     expect(screen.getByText('已取消')).toBeTruthy();
     expect(document.querySelector('[data-tool-failed="true"]')).toBeNull();
   });
@@ -104,7 +107,7 @@ describe('failed and cancelled work is visible on the first screen', () => {
     const rows = deriveTimeline(state({ turnStatus: 'completed', entryStatus: 'completed' }) as never, {
       expandedTurnIds: new Set(['turn:1']),
     });
-    render(createElement(TimelineRows, { rows }));
+    render(createElement(TimelineRows, { rows, onToggleTurnFold: () => {} }));
 
     expect(screen.getByText(/1 个工具/)).toBeTruthy();
     expect(screen.getByText('运行命令')).toBeTruthy();
@@ -114,7 +117,7 @@ describe('failed and cancelled work is visible on the first screen', () => {
     ).toBe('true');
   });
 
-  test('a group that turns failed after a manual collapse expands again', async () => {
+  test('a group that turns failed after a manual collapse stays collapsed', async () => {
     const running = {
       kind: 'tool' as const, id: 'bash', entryId: 'turn:1:a', blockId: 'tool:bash',
       status: 'running', label: '运行命令', target: 'npm test',
@@ -122,7 +125,7 @@ describe('failed and cancelled work is visible on the first screen', () => {
     };
     const failed = { ...running, status: 'failed', failed: true };
     const view = render(createElement(WorkGroupRow, {
-      items: [running], active: true, failed: false, defaultExpanded: true, forceExpanded: false,
+      items: [running], active: true, failed: false, defaultExpanded: true,
     }));
     const button = () => document.querySelector('[data-slot="peri-work-group"] button')!;
     expect(button().getAttribute('aria-expanded')).toBe('true');
@@ -131,10 +134,10 @@ describe('failed and cancelled work is visible on the first screen', () => {
 
     await act(async () => {
       view.rerender(createElement(WorkGroupRow, {
-        items: [failed], active: false, failed: true, defaultExpanded: true, forceExpanded: true,
+        items: [failed], active: false, failed: true, defaultExpanded: true,
       }));
     });
-    expect(button().getAttribute('aria-expanded')).toBe('true');
+    expect(button().getAttribute('aria-expanded')).toBe('false');
     expect(document.querySelector('[data-work-failed="true"]')).toBeTruthy();
   });
 });
@@ -175,20 +178,19 @@ describe('tool payload detail visibility', () => {
 });
 
 describe('failure evidence and degraded payloads', () => {
-  test('a completed turn with a failed tool renders a static fold without a dead toggle', () => {
+  test('a completed turn with a failed tool starts collapsed with an enabled toggle', () => {
     const rows = deriveTimeline(state({
-      turnStatus: 'completed', entryStatus: 'error',
+      turnStatus: 'completed', entryStatus: 'failed',
       error: { code: 'tool_failed', message: '工具执行失败' },
       result: { contentText: 'boom' },
     }) as never);
-    render(createElement(TimelineRows, { rows }));
+    render(createElement(TimelineRows, { rows, onToggleTurnFold: () => {} }));
 
     const fold = document.querySelector('[data-slot="peri-turn-fold"]')!;
-    expect(fold.getAttribute('data-static')).toBe('true');
-    // 静态摘要不提供无效开关：失败证据始终可见。
-    expect(fold.querySelector('button')).toBeNull();
+    const toggle = fold.querySelector('button')!;
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle.hasAttribute('disabled')).toBe(false);
     expect(screen.getByText('Failed after 2.0s')).toBeTruthy();
-    expect(document.querySelector('[data-tool-failed="true"]')).toBeTruthy();
   });
 
   test('payload_too_large renders as a truncated completed result, not a failure', () => {
@@ -197,7 +199,7 @@ describe('failure evidence and degraded payloads', () => {
       error: { code: 'payload_too_large', message: '工具载荷超出会话接纳预算' },
       result: { contentText: 'partial output' },
     }) as never, { expandedTurnIds: new Set(['turn:1']) });
-    render(createElement(TimelineRows, { rows }));
+    render(createElement(TimelineRows, { rows, onToggleTurnFold: () => {} }));
 
     expect(screen.getByText('Worked for 2.0s')).toBeTruthy();
     const tool = document.querySelector('[data-slot="peri-tool-row"]')!;

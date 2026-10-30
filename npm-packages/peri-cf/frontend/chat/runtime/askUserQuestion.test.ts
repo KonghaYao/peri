@@ -69,4 +69,17 @@ describe('buildAskUserQuestionContent', () => {
       missing: ['ask_user_question_0', 'ask_user_question_1', 'ask_user_question_2'],
     });
   });
+
+  test('does not duplicate a multi-select value repeated in custom text', () => {
+    expect(buildAskUserQuestionContent(questions(), drafts({
+      ask_user_question_1: { selected: ['a'], custom: 'a' },
+    }))).toEqual({
+      ok: true,
+      content: {
+        ask_user_question_0: '生产',
+        ask_user_question_1: ['a'],
+        ask_user_question_2: '自由补充',
+      },
+    });
+  });
 });

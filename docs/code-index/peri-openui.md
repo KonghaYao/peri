@@ -3,7 +3,7 @@
 状态：现行实现。OpenUI 以 `@peri-code/sdk` 的源码 subpath 发布
 （`npm-packages/@peri-sdk/src/openui`），不单独构建；由 `npm-packages/peri-cf` 以
 `file:../@peri-sdk` 消费。组件库、Renderer 与服务端提示词从 CF 前端抽取而来；CF 只保留聊天适配层。
-使用说明见 [SDK README](../../npm-packages/@peri-sdk/README.md#openui-源码-subpath)，
+使用说明见 [SDK README](../../npm-packages/@peri-sdk/README.md#openui)，
 消费侧见 [peri-cf](peri-cf.md)。
 
 ## 架构速览

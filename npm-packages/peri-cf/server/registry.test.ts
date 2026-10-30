@@ -8,12 +8,14 @@ import {
   type ChatAgentConfig,
   type ChatBindingTarget,
   type ChatCreateOptions,
+  type ChatFact,
   type ChatFactObserver,
   type ChatFactSource,
   type ChatManagerContract,
   type ChatServiceContract,
   type ChatSessionDirectoryEntry,
   type ChatYjsChannel,
+  type WasmRuntimePoolSnapshot,
   type WorkspaceRef,
   WorkspaceMismatchError,
 } from "@peri-code/sdk";
@@ -90,6 +92,7 @@ class FakeSandboxPool implements SandboxPoolPort {
 class FakeFactSource implements ChatFactSource {
   binding: ChatBindingTarget | null = null;
   private readonly observers = new Set<ChatFactObserver>();
+  private sequence = 0;
 
   subscribeFacts(observer: ChatFactObserver): () => void {
     this.observers.add(observer);
@@ -97,9 +100,24 @@ class FakeFactSource implements ChatFactSource {
     return () => this.observers.delete(observer);
   }
 
-  bind(target: ChatBindingTarget): void {
+  bind(target: ChatBindingTarget, replay: ChatFact[] = []): void {
     this.binding = { ...target };
-    for (const observer of [...this.observers]) observer.onBinding(this.binding, []);
+    const envelopes = replay.map((fact) => ({
+      ...this.binding!,
+      sequence: ++this.sequence,
+      fact,
+    }));
+    for (const observer of [...this.observers]) observer.onBinding(this.binding, envelopes);
+  }
+
+  emit(fact: ChatFact): void {
+    if (!this.binding) return;
+    const envelope = {
+      ...this.binding,
+      sequence: ++this.sequence,
+      fact,
+    };
+    for (const observer of [...this.observers]) observer.onFact(envelope);
   }
 }
 
@@ -127,6 +145,7 @@ class FakeChatManager implements ChatManagerContract {
   readonly listResults = new Map<string, ChatSessionDirectoryEntry[]>();
   closeError: unknown;
   shutdownError: unknown;
+  runtimePool: WasmRuntimePoolSnapshot = { instances: [], starting: 0, unconfirmed: false };
   private created = 0;
 
   constructor(readonly events: string[] = []) {}
@@ -160,6 +179,10 @@ class FakeChatManager implements ChatManagerContract {
   async shutdown(): Promise<void> {
     this.events.push("port.shutdown");
     if (this.shutdownError !== undefined) throw this.shutdownError;
+  }
+
+  runtimeSnapshot(): WasmRuntimePoolSnapshot {
+    return this.runtimePool;
   }
 }
 
@@ -283,6 +306,85 @@ describe("ChatRegistry", () => {
   test("未启用 sandbox 时监控快照为 undefined", () => {
     const { registry } = hosted();
     expect(registry.sandboxSnapshot()).toBeUndefined();
+  });
+
+  test("runtimeInstances 组合实例、最新 generation、sessionId 与业务计数", async () => {
+    const { registry, chats } = hosted();
+    const chat = await registry.createChat() as ChatServiceContract & { readonly source: FakeFactSource };
+    const target: ChatBindingTarget = {
+      chatId: chat.id,
+      sessionId: "session-live",
+      bindingRevision: 1,
+    };
+    chat.source.bind(target);
+    Object.assign(chat, {
+      sessionId: target.sessionId,
+      bindingRevision: target.bindingRevision,
+      binding: target,
+    });
+    chats.runtimePool = {
+      instances: [
+        {
+          chatId: chat.id,
+          state: "closing",
+          generationId: "generation-old",
+          startedAtMs: 1_000,
+          linearMemoryBytes: null,
+        },
+        {
+          chatId: chat.id,
+          state: "live",
+          generationId: "generation-new",
+          startedAtMs: 2_000,
+          linearMemoryBytes: 65_536,
+        },
+      ],
+      starting: 0,
+      unconfirmed: false,
+    };
+    chat.source.emit({ kind: "run-state", running: true, executionBlocked: false });
+    chat.source.emit({ kind: "turn-complete", status: "completed", stopReason: "end_turn" });
+
+    const view = registry.runtimeInstances(5_000);
+    expect(view.instances).toHaveLength(1);
+    expect(view.instances[0]).toMatchObject({
+      chatId: chat.id,
+      sessionId: "session-live",
+      generationId: "generation-new",
+      linearMemoryBytes: 65_536,
+    });
+    expect(view.instances[0]!.business).toMatchObject({
+      running: false,
+      turns: { started: 1, completed: 1 },
+      lastStopReason: "end_turn",
+    });
+  });
+
+  test("关闭 Chat 后不再提供业务计数，实例仍按快照展示", async () => {
+    const { registry, chats } = hosted();
+    const chat = await registry.createChat();
+    chats.runtimePool = {
+      instances: [{
+        chatId: chat.id,
+        state: "live",
+        generationId: "generation-1",
+        startedAtMs: 1_000,
+        linearMemoryBytes: 65_536,
+      }],
+      starting: 1,
+      unconfirmed: true,
+    };
+    expect(registry.runtimeInstances(2_000).instances[0]!.business).not.toBeNull();
+
+    await registry.closeChat(chat.id);
+    const view = registry.runtimeInstances(2_000);
+    expect(view.starting).toBe(1);
+    expect(view.unconfirmed).toBe(true);
+    expect(view.instances[0]).toMatchObject({
+      sessionId: null,
+      linearMemoryBytes: 65_536,
+      business: null,
+    });
   });
 
   test("新会话启动 sandbox，并把 sandbox MCP 合并进共享 Session 配置", async () => {

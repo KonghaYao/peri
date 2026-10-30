@@ -29,6 +29,8 @@ export interface PeriInstancePort {
     takeBack(inputId: string): Promise<void>;
     cancel(): Promise<"requested" | "idle">;
     answer(interactionId: string, answer: InteractionAnswer): Promise<void>;
+    /** 写入会话配置（model/mode/thinking_effort 等）；实际生效由 ACP 通知投影。 */
+    setConfigOption(configId: string, value: string): Promise<void>;
     loadEarlierHistory(limit?: number): Promise<HistoryPageOutcome>;
     /**
      * 只读运行侧载荷仓库。

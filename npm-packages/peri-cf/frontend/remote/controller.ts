@@ -4,14 +4,14 @@ import {
   type ToolPayloadResponse,
 } from "@peri-code/sdk";
 import { logError } from "./logging";
-import { type ActionTargetDTO, type Chat, type ChatSummary } from "./contracts";
+import { type ActionTargetDTO, type Chat, type ChatSummary, type ProjectSummary } from "./contracts";
 import { ChatProjection } from "./projection";
 import {
   RemoteActionError, RemoteSendReceipt,
   type ActionReceipt, type RemoteActions,
 } from "./actions";
 import { ChatSyncProvider, type SyncConnectionStatus, type WebSocketLike } from "./sync";
-import { DeliveryTracker } from "./delivery";
+import { DeliveryTracker, INPUT_WITHDRAWN_MESSAGE } from "./delivery";
 import { ChatHandleTable, type ChatHandleRecord } from "./handles";
 import {
   bindingTargetOf, deriveLiveSync, deriveLoadState, derivePhase, describeActionFailure,
@@ -35,6 +35,8 @@ interface ActiveChat extends ChatHandleRecord {
 export interface ChatControllerDeps {
   actions: RemoteActions;
   list(signal?: AbortSignal): Promise<ChatSummary[]>;
+  listProjects(signal?: AbortSignal): Promise<ProjectSummary[]>;
+  createProject(name: string, signal?: AbortSignal): Promise<ProjectSummary>;
   syncUrl(chatAddress: string): string;
   webSocketFactory?: (url: string) => WebSocketLike;
   /** 首次同步预算；超时只报告失败，不关闭服务端句柄。 */
@@ -48,6 +50,9 @@ const DELIVERY_UNCONFIRMED = "消息尚未确认送达，请检查连接后重�
 function sameChat(left: Chat | null, right: Chat | null): boolean {
   return left?.id === right?.id && left?.title === right?.title && left?.updatedAt === right?.updatedAt;
 }
+
+/** 打开历史会话只需要目录身份；`projectId` 等其余字段不参与绑定。 */
+type OpenChatTarget = Pick<ChatSummary, "sessionId" | "title" | "updatedAt">;
 
 /**
  * 页面级 Chat 控制器：句柄身份、两步打开历史、绑定代次、Action 与同步连接。
@@ -66,6 +71,8 @@ export class ChatController {
   private active: ActiveChat | undefined;
   private disposed = false;
   private selection = 0;
+  /** 下一次新建会话的目标项目；打开历史会话时清空。 */
+  private newProjectId: string | undefined;
   private actionError = "";
   private connectionError = "";
   private dismissedError = "";
@@ -91,6 +98,14 @@ export class ChatController {
     return this.deps.list(signal);
   }
 
+  listProjects(signal?: AbortSignal): Promise<ProjectSummary[]> {
+    return this.deps.listProjects(signal);
+  }
+
+  createProject(name: string): Promise<ProjectSummary> {
+    return this.deps.createProject(name);
+  }
+
   currentChatId(): string | null {
     return this.view.selected?.id ?? null;
   }
@@ -98,9 +113,15 @@ export class ChatController {
   /**
    * 打开历史会话：先 POST /api/chats 取得句柄，再 change_session，收到 202 后才连 WS。
    * 同一客户端已绑定过的会话复用句柄，不重复换绑。
+   *
+   * `options.projectId` 只对新建会话生效；项目内的新会话共享项目 sandbox。
    */
-  async openChat(target: ChatSummary | null): Promise<boolean> {
+  async openChat(
+    target: OpenChatTarget | null,
+    options: { projectId?: string } = {},
+  ): Promise<boolean> {
     if (this.disposed) return false;
+    this.newProjectId = target === null ? options.projectId : undefined;
     const selected = target === null ? null : toChat(target);
     const boundId = this.active?.projection.state().chat.id ?? null;
     if (target !== null && boundId === selected!.id
@@ -139,7 +160,12 @@ export class ChatController {
    */
   async reloadChat(): Promise<boolean> {
     if (this.disposed) return false;
-    if (!this.view.selected) return await this.openChat(null);
+    if (!this.view.selected) {
+      return await this.openChat(
+        null,
+        this.newProjectId === undefined ? {} : { projectId: this.newProjectId },
+      );
+    }
     if (this.view.state?.running && !this.view.state.executionBlocked
       && this.view.loadState !== "failed" && this.view.liveSync !== "failed") return false;
     const selected = this.view.selected;
@@ -152,7 +178,7 @@ export class ChatController {
     // 先释放 active，`openChat` 也不会命中同 id 的「已打开」短路。
     this.releaseActive();
     return await this.openChat({
-      ...selected, sessionId: selected.id, title: selected.title, cwd: "", messageCount: 0, createdAt: selected.updatedAt,
+      sessionId: selected.id, title: selected.title, updatedAt: selected.updatedAt,
     });
   }
 
@@ -180,7 +206,10 @@ export class ChatController {
     this.actionError = "";
     this.connectionError = "";
     this.clearCancel();
-    return await this.openChat(null);
+    return await this.openChat(
+      null,
+      this.newProjectId === undefined ? {} : { projectId: this.newProjectId },
+    );
   }
 
   /**
@@ -205,11 +234,16 @@ export class ChatController {
       return { delivered: true, sessionId: sent.sessionId };
     } catch (error) {
       const message = messageOf(error);
-      this.failAction(new RemoteActionError("input_not_delivered", `消息未送达：${message}`, "rejected"));
+      // 只有撤回是明确未送达；连接释放等拒绝可能已入队或送达。
+      const disposition = error instanceof Error && error.message === INPUT_WITHDRAWN_MESSAGE
+        ? "rejected"
+        : "unknown";
+      this.failAction(new RemoteActionError("input_not_delivered", `消息未送达：${message}`, disposition));
       return {
         delivered: false,
         sessionId: sent.sessionId,
         message: this.actionError || message,
+        disposition,
       };
     }
   }
@@ -310,6 +344,42 @@ export class ChatController {
   }
 
   /**
+   * 写入会话配置（模型/模式/推理强度）。
+   *
+   * 成功只表示后端接受了请求；界面值仍由 `config_option_update` 投影接管。
+   * 失败沿用 Action 的 disposition 规则，未知结果会阻断后续发送。
+   */
+  async setConfigOption(configId: string, value: string): Promise<{ ok: true } | { ok: false; message: string }> {
+    const active = this.active;
+    const target = active ? this.bindingTarget(active) : null;
+    if (!active || !target) return { ok: false, message: "会话尚未就绪，配置未提交。" };
+    try {
+      await this.deps.actions.execute(
+        active.address,
+        ChatUserAction.setConfigOption({ configId, value }),
+        target,
+      );
+      // 成功写配置不能清掉未知结果留下的横幅；否则界面继续阻断却看不到原因。
+      if (!this.uncertain) {
+        this.actionError = "";
+        this.recovery = "none";
+      }
+      this.refresh();
+      return { ok: true };
+    } catch (error) {
+      // 明确拒绝只影响本次配置切换，由选择器就地回滚；未知结果才升级为全局阻断。
+      const disposition = error instanceof RemoteActionError ? error.disposition : "unknown";
+      if (disposition === "unknown") this.failAction(error);
+      return {
+        ok: false,
+        message: disposition === "unknown"
+          ? this.actionError || messageOf(error)
+          : messageOf(error),
+      };
+    }
+  }
+
+  /**
    * 全文读取：只接受副本里仍被引用的载荷 ID，字节数取自引用事实。
    * 旧会话/丢失引用的 ID 明确 unavailable，不猜字节数。
    */
@@ -352,7 +422,9 @@ export class ChatController {
   // ------------------------------------------------------------------
 
   private async openNew(token: number): Promise<boolean> {
-    const handle = await this.deps.actions.createHandle();
+    const handle = await this.deps.actions.createHandle(
+      this.newProjectId === undefined ? {} : { projectId: this.newProjectId },
+    );
     if (token !== this.selection || this.disposed) {
       await this.closeCandidate(handle.id);
       return false;
@@ -361,7 +433,8 @@ export class ChatController {
     try {
       receipt = await this.deps.actions.execute(
         handle.id,
-        ChatUserAction.createNewSession({ title: "新会话" }),
+        // 标题由 Store 在首次 append_history 时从首条用户消息补齐，前端不伪造。
+        ChatUserAction.createNewSession(),
         { sessionId: null, bindingRevision: 0 },
       );
     } catch (error) {
@@ -382,7 +455,7 @@ export class ChatController {
     return await this.activate(record, token);
   }
 
-  private async openExisting(target: ChatSummary, token: number): Promise<boolean> {
+  private async openExisting(target: OpenChatTarget, token: number): Promise<boolean> {
     const sessionId = target.sessionId;
     let record = this.handles.get(sessionId);
     if (!record) {
@@ -639,6 +712,6 @@ export class ChatController {
   }
 }
 
-function toChat(summary: ChatSummary): Chat {
+function toChat(summary: OpenChatTarget): Chat {
   return { id: summary.sessionId, title: summary.title ?? "新会话", updatedAt: summary.updatedAt };
 }

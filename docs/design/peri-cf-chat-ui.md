@@ -93,10 +93,18 @@
 
 1. **发送**：`ChatComposer` → `controller.send`；`SendReceipt` 的 accepted 与投递等待分别驱动不同 UI。
 2. **停止**：`controller.stop` 只显示 requested；服务端确认停止前不宣称已停止。
-3. **会话切换/新建**：线程列表选择 → `openChat`；新建 → `create_new_session`；历史加载两步打开。
-4. **历史与刷新**：展示态由 Yjs 副本重建；刷新/重连不恢复旧执行，服务端仍持有执行所有权。
-5. **交互**：权限/问题卡片只在副本报告待决交互时出现；回答失败保留原因，不自动重试未知结果。
-6. **多标签页**：各标签页独立连接；不跨标签页协调执行。
+3. **输入区事实**：状态栏只读消费 `session.configOptions`、最新 assistant `tokenUsage` 与
+   `stateSnapshotMeta`；字数上限来自 SDK `CHAT_SEND_TEXT_MAX_LENGTH`，超限只阻断发送、不清空草稿。
+   历史召回只在本会话用户消息中移动，空输入 ArrowUp/Down，编辑即退出。
+4. **草稿**：按会话分槽，localStorage key 版本化（`peri-cf:composer-drafts:v1`），写入去抖、
+   单条不超发送上限、总容量有上限并按最近使用淘汰；存储不可用/损坏时回退内存，可整体清除。
+5. **斜杠命令**：只展示 ACP `availableCommands`；行首 `/` 触发，Enter/Tab 插入命令文本但不发送。
+6. **配置写入**：模型/模式/推理强度经 `ChatUserAction.set_config_option` 提交；界面在 pending 时显示
+   目标值，失败回滚并展示错误，最终值以 `config_option_update` 投影为准。
+7. **会话切换/新建**：线程列表选择 → `openChat`；新建 → `create_new_session`；历史加载两步打开。
+8. **历史与刷新**：展示态由 Yjs 副本重建；刷新/重连不恢复旧执行，服务端仍持有执行所有权。
+9. **交互**：权限/问题卡片只在副本报告待决交互时出现；回答失败保留原因，不自动重试未知结果。
+10. **多标签页**：各标签页独立连接；不跨标签页协调执行。
 
 ## 6. 非目标
 

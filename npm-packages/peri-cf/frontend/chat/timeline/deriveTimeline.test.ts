@@ -305,14 +305,19 @@ describe('turn fold', () => {
     expect(rows.map((row) => row.kind)).toEqual(['user', 'work', 'working']);
   });
 
-  test('failed tools inside a completed turn are never hidden by the fold', () => {
-    const rows = deriveTimeline(state([
+  test('failed tools stay behind the collapsed fold until expanded', () => {
+    const projection = state([
       user('turn:1'),
       entry({
         entryId: 'turn:1:a', id: 'turn:1:a', turnId: 'turn:1',
         blocks: [toolBlock('failed', { status: 'failed' })],
       }),
-    ], { turns: [finished] }));
+    ], { turns: [finished] });
+    const collapsed = deriveTimeline(projection);
+    expect(collapsed.map((row) => row.kind)).toEqual(['user', 'turn-fold']);
+    expect(collapsed[1]).toMatchObject({ kind: 'turn-fold', failed: true, expanded: false });
+
+    const rows = deriveTimeline(projection, { expandedTurnIds: new Set(['turn:1']) });
     expect(rows.map((row) => row.kind)).toEqual(['user', 'turn-fold', 'work']);
     const work = rows[2];
     expect(work?.kind).toBe('work');
@@ -321,7 +326,7 @@ describe('turn fold', () => {
     expect(work.items[0]?.target).toBe('/workspace/README.md');
   });
 
-  test('a failure in a later work group colors the whole-turn fold', () => {
+  test('a later failure colors the whole-turn fold while it stays collapsed', () => {
     const rows = deriveTimeline(state([
       user('turn:1'),
       entry({
@@ -334,10 +339,10 @@ describe('turn fold', () => {
       }),
     ], { turns: [finished] }));
     const fold = rows.find((row) => row.kind === 'turn-fold');
-    expect(fold).toMatchObject({ kind: 'turn-fold', failed: true });
+    expect(fold).toMatchObject({ kind: 'turn-fold', failed: true, expanded: false });
     expect(fold?.kind === 'turn-fold' ? fold.label : '').toMatch(/^Failed after/);
-    // 失败在第二组，第一组也不能被 fold 隐藏。
-    expect(rows.filter((row) => row.kind === 'work')).toHaveLength(2);
+    // 失败也默认收起，展开后才出现两组工作项。
+    expect(rows.filter((row) => row.kind === 'work')).toHaveLength(0);
   });
 
   test('a cancellation in a later work group labels the whole-turn fold as cancelled', () => {
@@ -357,7 +362,7 @@ describe('turn fold', () => {
     expect(fold?.kind === 'turn-fold' ? fold.label : '').toMatch(/^Cancelled after/);
   });
 
-  test('failed or cancelled turns stay expanded with a status summary', () => {
+  test('failed or cancelled turns collapse with a status summary', () => {
     for (const status of ['error', 'cancelled']) {
       const rows = deriveTimeline(state([
         user('turn:1'),
@@ -366,9 +371,9 @@ describe('turn fold', () => {
           blocks: [toolBlock('t1', { status })],
         }),
       ], { turns: [turn('turn:1', { status, completedAt: '2026-10-20T00:00:02Z' })] }));
-      expect(rows.map((row) => row.kind)).toEqual(['user', 'turn-fold', 'work']);
+      expect(rows.map((row) => row.kind)).toEqual(['user', 'turn-fold']);
       const fold = rows[1];
-      expect(fold).toMatchObject({ kind: 'turn-fold', status, expanded: true });
+      expect(fold).toMatchObject({ kind: 'turn-fold', status, expanded: false });
       expect(fold?.kind === 'turn-fold' ? fold.label : '').toContain(status === 'error' ? 'Failed' : 'Cancelled');
     }
   });
@@ -427,7 +432,7 @@ describe('turn fold', () => {
     expect(work.items[0]).toMatchObject({ status: 'completed', failed: false, degraded: true });
   });
 
-  test('failed tools in a completed turn keep a static fold that never hides them', () => {
+  test('failed tools in a completed turn start collapsed and can be expanded', () => {
     const withFailure = state([
       user('turn:1'),
       entry({
@@ -438,14 +443,105 @@ describe('turn fold', () => {
 
     const rows = deriveTimeline(withFailure);
     const fold = rows.find((row) => row.kind === 'turn-fold');
-    expect(fold).toMatchObject({ kind: 'turn-fold', failed: true, expanded: true, static: true });
-    expect(rows.some((row) => row.kind === 'work')).toBe(true);
+    expect(fold).toMatchObject({ kind: 'turn-fold', failed: true, expanded: false });
+    expect(rows.some((row) => row.kind === 'work')).toBe(false);
 
-    // 用户显式折叠也不会让失败证据消失：折叠开关静态化，内容保持可见。
+    // 用户显式折叠也是收起；失败只改变摘要，不强制展开。
     const collapsed = deriveTimeline(withFailure, { collapsedTurnIds: new Set(['turn:1']) });
     expect(collapsed.find((row) => row.kind === 'turn-fold')).toMatchObject({
-      kind: 'turn-fold', expanded: true, static: true,
+      kind: 'turn-fold', expanded: false,
     });
-    expect(collapsed.some((row) => row.kind === 'work')).toBe(true);
+    expect(collapsed.some((row) => row.kind === 'work')).toBe(false);
+
+    const opened = deriveTimeline(withFailure, { expandedTurnIds: new Set(['turn:1']) });
+    expect(opened.find((row) => row.kind === 'turn-fold')).toMatchObject({
+      kind: 'turn-fold', expanded: true,
+    });
+    expect(opened.some((row) => row.kind === 'work')).toBe(true);
+  });
+
+  test('the fold opens the turn and stays before the next user message', () => {
+    const rows = deriveTimeline(state([
+      user('turn:1'),
+      entry({
+        entryId: 'turn:1:a', id: 'turn:1:a', turnId: 'turn:1',
+        blocks: [toolBlock('t1'), textBlock('第一轮回答', 'text:1')],
+      }),
+      user('turn:2'),
+      entry({ entryId: 'turn:2:a', id: 'turn:2:a', turnId: 'turn:2', blocks: [textBlock('第二轮回答')] }),
+    ], { turns: [finished] }));
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'turn-fold', 'assistant', 'user', 'assistant']);
+    expect(rows[1]).toMatchObject({ kind: 'turn-fold', id: 'turn-fold:turn:1' });
+  });
+
+  test('interleaved text and tools emit one fold at the first work group', () => {
+    const base = state([
+      user('turn:1'),
+      entry({
+        entryId: 'turn:1:a', id: 'turn:1:a', turnId: 'turn:1',
+        blocks: [
+          textBlock('先说明', 'text:1'),
+          toolBlock('t1'),
+          textBlock('再说明', 'text:2'),
+          toolBlock('t2'),
+        ],
+      }),
+    ], { turns: [finished] });
+    expect(deriveTimeline(base).map((row) => row.kind))
+      .toEqual(['user', 'assistant', 'turn-fold', 'assistant']);
+    expect(deriveTimeline(base, { expandedTurnIds: new Set(['turn:1']) }).map((row) => row.kind))
+      .toEqual(['user', 'assistant', 'turn-fold', 'work', 'assistant', 'work']);
+  });
+
+  test('a trailing entry error stays visible after the fold', () => {
+    const rows = deriveTimeline(state([
+      user('turn:1'),
+      entry({
+        entryId: 'turn:1:a', id: 'turn:1:a', turnId: 'turn:1', status: 'error',
+        blocks: [toolBlock('t1')], error: { code: 'tool_error', message: '工具执行失败' },
+      }),
+    ], { turns: [finished] }));
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'turn-fold', 'error']);
+  });
+
+  test('an unknown block stays in place after the fold', () => {
+    const rows = deriveTimeline(state([
+      user('turn:1'),
+      entry({
+        entryId: 'turn:1:a', id: 'turn:1:a', turnId: 'turn:1',
+        blocks: [
+          toolBlock('t1'),
+          { blockId: 'unknown:1', type: 'unknown', reason: 'unsupported_content' },
+          toolBlock('t2'),
+        ],
+      }),
+    ], { turns: [finished] }), { expandedTurnIds: new Set(['turn:1']) });
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'turn-fold', 'work', 'unknown', 'work']);
+  });
+
+  test('turns without a settled record keep their work rows and emit no fold', () => {
+    const rows = deriveTimeline(state([
+      user('turn:1'),
+      entry({ entryId: 'turn:1:a', id: 'turn:1:a', turnId: 'turn:1', blocks: [toolBlock('t1')] }),
+    ]));
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'work']);
+    expect(rows.some((row) => row.kind === 'turn-fold')).toBe(false);
+  });
+
+  test('a settled turn folds before the next live turn work rows', () => {
+    const rows = deriveTimeline(state([
+      user('turn:1'),
+      entry({ entryId: 'turn:1:a', id: 'turn:1:a', turnId: 'turn:1', blocks: [toolBlock('t1')] }),
+      user('turn:2'),
+      entry({
+        entryId: 'turn:2:a', id: 'turn:2:a', turnId: 'turn:2', status: 'streaming',
+        blocks: [toolBlock('t2', { status: 'running', completedAt: null })],
+      }),
+    ], {
+      running: true,
+      activeTurn: { turnId: 'turn:2', status: 'streaming' },
+      turns: [finished, turn('turn:2', { status: 'streaming' })],
+    }));
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'turn-fold', 'user', 'work', 'working']);
   });
 });

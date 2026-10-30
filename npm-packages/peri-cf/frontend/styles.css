@@ -92,6 +92,16 @@
 .monitor-table .monitor-badge { white-space: nowrap; }
 .monitor-muted { color: #95988d; font-size: 10px; }
 .monitor-error-text { color: #8a4b3a; overflow-wrap: anywhere; }
+/* WASM 实例：宽屏列表 + 详情两列，窄屏单列。 */
+.instance-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: start; }
+.instance-list { min-width: 0; }
+.instance-detail { min-width: 0; }
+.instance-row { cursor: pointer; }
+.instance-row:hover td { background: #fafbf7; }
+.instance-row[aria-selected="true"] td { background: #eef3e9; }
+.instance-row:focus-visible { outline: 2px solid #5c9275; outline-offset: -2px; }
+.instance-row td { vertical-align: middle; }
+.instance-row .monitor-muted { white-space: nowrap; }
 .monitor-details { margin-top: 6px; color: #6f7566; font-size: 11px; }
 .monitor-details summary { cursor: pointer; color: #5a6b52; }
 .monitor-list { margin: 7px 0 0; padding-left: 17px; line-height: 1.8; overflow-wrap: anywhere; }
@@ -112,6 +122,7 @@
   .monitor-tabs { flex-direction: row; gap: 4px; padding: 8px 10px; border-right: 0; border-bottom: 1px solid #eef0e8; overflow-x: auto; overflow-y: hidden; }
   .monitor-tab { width: auto; flex-shrink: 0; padding: 7px 10px; }
   .monitor-panel { padding: 14px 15px 18px; }
+  .instance-layout { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {

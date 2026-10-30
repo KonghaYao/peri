@@ -1,9 +1,13 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  adoptNewChatDraft, composerDraft, composerDraftKey, withComposerDraft,
+  adoptNewChatDraft, clearComposerDrafts, composerDraft, composerDraftKey, loadComposerDrafts,
+  saveComposerDrafts, withComposerDraft,
   type ComposerDrafts,
 } from '../../composer';
 import type { ChatSendOutcome } from '../../runtime';
+
+/** 草稿写入去抖：连续输入只在停笔后写一次 localStorage。 */
+const DRAFT_PERSIST_DEBOUNCE_MS = 300;
 
 /**
  * Composer 草稿槽：按展示会话隔离，新建期间固定在占位槽。
@@ -38,16 +42,25 @@ export interface ComposerDraftHandle {
   adoptCreatedDraft(): void;
   /** 发送结算：按投递/创建结果迁移或清理草稿，返回实际送达会话。 */
   settleSentDraft(input: SentDraftInput): string | null;
+  /** 清除内存与 localStorage 中的所有草稿。 */
+  clearPersistedDrafts(): void;
 }
 
 export function useComposerDrafts(
   selectedChatId: string | null,
   currentChatId: () => string | null,
 ): ComposerDraftHandle {
-  const [drafts, setDrafts] = useState<ComposerDrafts>({});
+  const [drafts, setDrafts] = useState<ComposerDrafts>(() => loadComposerDrafts());
   const [creating, setCreating] = useState(false);
   /** 本次导航是否在创建新会话；创建成功后即使读面失败也要迁移草稿。 */
   const pendingNewChat = useRef(false);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      saveComposerDrafts(drafts);
+    }, DRAFT_PERSIST_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [drafts]);
 
   // 新建期间固定使用占位草稿槽，创建成功后再迁到新会话，加载期间输入不丢。
   const draftKey = composerDraftKey(selectedChatId, creating);
@@ -105,6 +118,11 @@ export function useComposerDrafts(
     return deliveredId;
   }, [currentChatId]);
 
+  const clearPersistedDrafts = useCallback(() => {
+    clearComposerDrafts();
+    setDrafts({});
+  }, []);
+
   return useMemo(() => ({
     draftKey,
     draft,
@@ -115,8 +133,9 @@ export function useComposerDrafts(
     beginImplicitCreate,
     adoptCreatedDraft,
     settleSentDraft,
+    clearPersistedDrafts,
   }), [
     draftKey, draft, changeDraft, selectPrompt, beginNavigation, finishNavigation,
-    beginImplicitCreate, adoptCreatedDraft, settleSentDraft,
+    beginImplicitCreate, adoptCreatedDraft, settleSentDraft, clearPersistedDrafts,
   ]);
 }

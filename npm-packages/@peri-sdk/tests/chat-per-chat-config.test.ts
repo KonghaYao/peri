@@ -171,6 +171,51 @@ describe("per-chat agent", () => {
         await manager.shutdown();
     });
 
+    test("runtimeSnapshot 按 Chat 归属实例，关闭后立即消失", async () => {
+        class MemoryTransport extends TestTransport {
+            linearMemoryBytes(): number | null { return 65_536; }
+        }
+        let sessions = 0;
+        const manager = new ChatManager({
+            store: {
+                storage: { url: "libsql://shared" },
+                machineId: "machine-1",
+            },
+            database: new FakeDatabase(),
+            kv: new OwnershipProbe(),
+            chatConfig: {
+                runtime: { kind: "wasm" },
+                session: {},
+            },
+            wasmRuntimeStarter: async () =>
+                new MemoryTransport(undefined, `session-${++sessions}`) as unknown as WasmAcpTransport,
+        });
+
+        const first = manager.createChat({ workspace: workspaceAt("/workspace-a", "ws-a"), agent: {} });
+        const second = manager.createChat({ workspace: workspaceAt("/workspace-b", "ws-b"), agent: {} });
+        await bindNew(first, "create-a");
+        await bindNew(second, "create-b");
+
+        const snapshot = manager.runtimeSnapshot();
+        expect(snapshot.starting).toBe(0);
+        expect(snapshot.unconfirmed).toBe(false);
+        expect(snapshot.instances).toHaveLength(2);
+        expect(snapshot.instances.map((instance) => instance.chatId).sort())
+            .toEqual([first.id, second.id].sort());
+        for (const instance of snapshot.instances) {
+            expect(instance.state).toBe("live");
+            expect(instance.linearMemoryBytes).toBe(65_536);
+            expect(instance.startedAtMs).toBeGreaterThan(0);
+        }
+
+        await first.close();
+        expect(manager.runtimeSnapshot().instances.map((instance) => instance.chatId))
+            .toEqual([second.id]);
+
+        await manager.shutdown();
+        expect(manager.runtimeSnapshot().instances).toEqual([]);
+    });
+
     test("each chat gets an independent frozen config with the Manager store injected", async () => {
         const sharedStorage: { nested: { value: string } } = {
             nested: { value: "original" },

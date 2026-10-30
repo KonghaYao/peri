@@ -3,7 +3,9 @@ import { syncRetryAction, useChat } from '../runtime';
 import type { ChatSummary } from '../runtime';
 import { Timeline } from '../timeline';
 import { parseOpenUIAction, type OpenUIActionEvent } from '../openui';
-import { ChatComposer } from '../composer';
+import {
+  ChatComposer, deriveHistoryPrompts, readAvailableCommands, readComposerMeta, readContextUsage,
+} from '../composer';
 import { ChatHeader } from './ChatHeader';
 import { ChatRightPanel } from './ChatRightPanel';
 import { PendingInteractions } from './PendingInteractions';
@@ -75,6 +77,21 @@ export function ChatShellView({ chat, onOpenSettings }: ChatShellViewProps) {
   const syncError = syncRetry === 'reload-chat' && chat.loadState !== 'failed';
   const syncPending = !blocked && !chatBanner && syncRetry === 'none' && chat.selected !== null
     && !chat.historyReady && chat.phase !== 'loading' && chat.loadState !== 'unsupported';
+  // 目录是线程标题的服务端事实：Store 的自动标题不经过副本会话信息，
+  // 页头跟随目录轮询，而不是停在创建时的占位标题。
+  const selectedTitle = chat.chats.find((item) => item.sessionId === chat.selected?.id)?.title
+    || chat.selected?.title
+    || '新会话';
+
+  // Composer 只消费派生事实：状态栏、用量、历史与命令都来自当前展示态。
+  const composerMeta = useMemo(() => readComposerMeta(chat.state), [chat.state]);
+  const composerUsage = useMemo(() => readContextUsage(chat.state), [chat.state]);
+  const composerHistory = useMemo(() => deriveHistoryPrompts(chat.state), [chat.state]);
+  const composerCommands = useMemo(() => readAvailableCommands(chat.state), [chat.state]);
+  const setConfigOption = useCallback(async (configId: string, value: string) => {
+    const result = await chat.setConfigOption(configId, value);
+    if (!result.ok) throw new Error(result.message);
+  }, [chat.setConfigOption]);
 
   const closeSidebar = useCallback(() => {
     setSidebarOpen(false);
@@ -102,6 +119,15 @@ export function ChatShellView({ chat, onOpenSettings }: ChatShellViewProps) {
   }, [select]);
 
   const newChat = useCallback(() => selectFromSidebar(null), [selectFromSidebar]);
+
+  const newChatInProject = useCallback((projectId: string) => {
+    setSidebarOpen(false);
+    void select(null, { projectId });
+  }, [select]);
+
+  const createProject = useCallback(async (name: string) => {
+    await chat.createProject(name);
+  }, [chat.createProject]);
 
   const refreshList = useCallback(() => {
     void chat.refreshList();
@@ -139,20 +165,24 @@ export function ChatShellView({ chat, onOpenSettings }: ChatShellViewProps) {
     <div className="bg-background text-foreground flex h-dvh min-h-[320px] overflow-hidden">
       <Sidebar
         chats={chat.chats}
+        projects={chat.projects}
         selectedId={chat.selected?.id}
         selectedRunning={chat.state?.running === true}
         loading={chat.listLoading}
+        projectsLoading={chat.projectsLoading}
         disabled={navigationDisabled}
         open={sidebarOpen}
         onClose={closeSidebar}
         onNew={newChat}
+        onNewInProject={newChatInProject}
+        onCreateProject={createProject}
         onRefresh={refreshList}
         onSelect={selectFromSidebar}
       />
 
       <main className="flex min-w-0 flex-1 flex-col">
         <ChatHeader
-          title={chat.selected?.title || '新会话'}
+          title={selectedTitle}
           detailsOpen={detailsOpen}
           sidebarOpen={sidebarOpen}
           sidebarTrigger={sidebarTrigger}
@@ -205,6 +235,7 @@ export function ChatShellView({ chat, onOpenSettings }: ChatShellViewProps) {
                 canStop={running}
                 stopping={chat.phase === 'cancelling'}
                 disabledReason={composerDisabledReason}
+                errorBanner={chat.chatError}
                 pendingContent={
                   <PendingInteractions
                     interactions={pendingInteractions}
@@ -215,6 +246,11 @@ export function ChatShellView({ chat, onOpenSettings }: ChatShellViewProps) {
                 onStop={stop}
                 onHeightChange={setComposerHeight}
                 focusSignal={focusSignal}
+                meta={composerMeta}
+                usage={composerUsage}
+                historyPrompts={composerHistory}
+                commands={composerCommands}
+                onConfigOption={setConfigOption}
               />
             </div>
           </div>

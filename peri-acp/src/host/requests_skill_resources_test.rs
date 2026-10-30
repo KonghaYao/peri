@@ -519,12 +519,12 @@ async fn skills_middleware_disabled_hides_all_system_skill_commands() {
         "关闭时系统来源也不得留下带前缀命令"
     );
 
-    // 关闭位不泄漏技能摘要进冻结 prompt：摘要数据仍非空（技能经 MCP 可得），
-    // 但 13_skills 段随 disabled 集不收集、摘要无旁路渲染。
+    // 关闭位不再读取技能目录（显式功能关闭，不发起 skills/list）：
+    // 冻结摘要为空，13_skills 段随 disabled 集不收集、无旁路渲染。
     let frozen = sessions[&id].frozen.as_ref().expect("frozen");
     assert!(
-        !frozen.skill_summary().unwrap_or_default().is_empty(),
-        "关的是宿主技能面：workspace 实例照常，冻结技能摘要数据必须非空"
+        frozen.skill_summary().unwrap_or_default().is_empty(),
+        "SkillsMiddleware 关闭 ⇒ 冻结技能摘要必须为空（不再发起 skills/list）"
     );
     assert!(
         !frozen.system_prompt().contains("# Skills"),

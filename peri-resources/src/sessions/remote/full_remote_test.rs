@@ -239,6 +239,13 @@ async fn virtual_remote_cold_recovery_and_read_only_fallbacks() {
         RemoteWorkspaceEnvironment::virtual_workspace(&machine, root.clone()).unwrap();
     let first = virtual_remote_facade(transport.clone(), environment.clone());
     let workspace = first.resolve_workspace(&root).await.unwrap();
+    // 同一目录的尾分隔符写法必须解析成同一执行目录（创建与恢复同形）。
+    let with_separator = first
+        .resolve_workspace(std::path::Path::new(&format!("{}/", root.display())))
+        .await
+        .unwrap();
+    assert_eq!(with_separator.cwd, workspace.cwd);
+    assert_eq!(with_separator.relative_cwd, workspace.relative_cwd);
     let session_id = "virtual-cold-recovery".to_owned();
     let input = NewSession {
         thread_id: session_id.clone(),
@@ -255,6 +262,27 @@ async fn virtual_remote_cold_recovery_and_read_only_fallbacks() {
         frozen: FrozenSnapshotBytes::new("{}"),
     };
     first.create_session(&input).await.unwrap();
+    // 子目录（sessionPath 非空）：创建与恢复保持同一执行目录。
+    let sub_root = root.join("sub");
+    let sub_workspace = first.resolve_workspace(&sub_root).await.unwrap();
+    assert_eq!(sub_workspace.cwd, sub_root);
+    assert_eq!(sub_workspace.relative_cwd, std::path::PathBuf::from("sub"));
+    let sub_session_id = "virtual-cold-recovery-sub".to_owned();
+    let sub_input = NewSession {
+        thread_id: sub_session_id.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        meta: NewSessionMeta {
+            title: None,
+            cwd: sub_root.to_str().unwrap().to_owned(),
+            parent_thread_id: None,
+            hidden: false,
+            cancel_policy: CancelPolicy::Cascade,
+            snapshot_at_message_id: None,
+        },
+        binding: SessionBinding::from_workspace(&sub_workspace),
+        frozen: FrozenSnapshotBytes::new("{}"),
+    };
+    first.create_session(&sub_input).await.unwrap();
     drop(first);
 
     let cold = virtual_remote_facade(transport.clone(), environment.clone());
@@ -263,6 +291,14 @@ async fn virtual_remote_cold_recovery_and_read_only_fallbacks() {
         .await
         .unwrap();
     assert_eq!(restored.workspace_id, workspace.workspace_id);
+    assert_eq!(restored.cwd, workspace.cwd);
+    assert!(restored.relative_cwd.as_os_str().is_empty());
+    let sub_restored = cold
+        .validate_bound_workspace(&sub_session_id, BindingRecheck::Full)
+        .await
+        .unwrap();
+    assert_eq!(sub_restored.cwd, sub_workspace.cwd);
+    assert_eq!(sub_restored.relative_cwd, sub_workspace.relative_cwd);
     drop(cold);
 
     for changed in [

@@ -76,6 +76,10 @@ describe("chatManagerOptions", () => {
           },
           meta_harness: expect.objectContaining({
             "01_intro": false,
+            "13_skills": true,
+            SkillsMiddleware: true,
+            SkillPreloadMiddleware: true,
+            AgentsMdMiddleware: true,
             TodoMiddleware: true,
             HumanInTheLoopMiddleware: true,
             SubAgentMiddleware: true,
