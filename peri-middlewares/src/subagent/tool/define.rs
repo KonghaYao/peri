@@ -130,7 +130,7 @@ impl BaseTool for SubAgentTool {
                 },
                 "resume_thread_id": {
                     "type": "string",
-                    "description": "目标 subagent 的 child_thread_id（UUID，即回执/通知中 `child_thread_id: ...` 标注的值）；不填即新建。它不是 task id：后台 task id 形如 `bg-<uuid>`，去掉 `bg-` 前缀后的 UUID 仍不是线程身份（形态合法但查无此线程，会以 thread not found 拒绝）。非 UUID 的非空值（例如后台 task_id `bg-...`）一样被明确拒绝，而不是忽略后新建。active 后台执行：将非空 prompt 作为 Defer 入队并立即返回 action: send / status: queued，不中断、不恢复，在后续 Receive 驱动推理，run_in_background 被忽略。非 active：从磁盘恢复，prompt 可省略以隐式继续，run_in_background 决定恢复模式。两种行为均优先于 subagent_type / fork。active 但当前会话没有可投递运行实例时明确报错"
+                    "description": "目标 subagent 的 child_thread_id（UUID，即回执/通知中 `child_thread_id: ...` 标注的值）；不填即新建。它不是 task id：后台 task id 形如 `bg-<uuid>`，去掉 `bg-` 前缀后的 UUID 仍不是线程身份（形态合法但查无此线程，会以 thread not found 拒绝）。非 UUID 的非空值（例如后台 task_id `bg-...`）一样被明确拒绝，而不是忽略后新建。active 后台执行：将非空 prompt 作为 Defer 入队并立即返回 action: send / status: queued，不中断、不恢复，在后续 Receive 驱动推理，run_in_background 被忽略。非 active：从磁盘恢复，prompt 可省略以隐式继续；恢复模式由 run_in_background 决定，强制后台会话中恒为后台（显式 false 被忽略）。两种行为均优先于 subagent_type / fork。active 但当前会话没有可投递运行实例时明确报错"
                 },
                 "description": {
                     "type": "string",
