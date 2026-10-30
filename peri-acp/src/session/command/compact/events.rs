@@ -8,7 +8,7 @@
 //! [TRAP] CompactCompleted 事件被 TUI 通过 StateSnapshot + 流式事件维护状态消费
 //! （MessageAdded 被 TUI 丢弃）。事件字段 messages 与 CommandResult.messages 共享
 //! new_messages.clone() —— 必须保持引用一致性。
-//! （详见 CLAUDE.md TUI 事件映射章节、spec/global/domains/compact.md）
+//! （详见 `docs/code-index/peri-acp.md` 的 TUI 事件映射）
 //!
 //! CompactError 变体与发射辅助已删除（错误反馈收敛到 CommandFeedback）；
 //! CompactCompleted 同时承载重建数据与展示/观测计数。

@@ -65,5 +65,5 @@
 
 1. **P1-04 Beta 开关只对新会话生效**（[issue](../../../spec/issues/2026-10-08-beta-flags-implementation.md)）
    1. 在 Config 面板开启 full-async-tools，保存后保留当前会话并新建会话。
-   2. 分别在两个会话调用未显式指定后台模式的 Bash 或 Agent。
-   3. 核对旧会话仍用原行为、新会话默认后台；显式 false 仍前台，重启后设置保留。
+   2. 分别在两个会话调用未显式指定后台模式的 Bash 与 Agent。
+   3. 核对旧会话仍用原行为、重启后设置保留。新会话中：Bash 未显式指定时走后台、显式 false 仍前台；Agent 省略与显式 false 都后台（MCP Agent 仍同步激活）。

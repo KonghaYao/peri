@@ -20,7 +20,7 @@ F09 事件健康度：共享 `peri-acp-types/src/event_v2/bus.rs` 提供 `BusHea
 
 
 > 速查表：把「我想做什么」映射到文件。细节以代码为准。历史迁移批次与旧机制取代过程由 Git 历史保留，本文件只描述现行实现。
-> 依据：peri-agent/CLAUDE.md、docs/standards/architecture-contracts.md、源码
+> 依据：docs/standards/architecture-contracts.md、源码
 
 Emscripten 最小入口见 [`peri-wasm`](peri-wasm.md)：复用本 crate 的 `run_react_loop` 和 `AgentModelBridge`；`resources` 模块及其 Native 存储依赖在目标平台不编入。
 

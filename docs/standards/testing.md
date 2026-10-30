@@ -338,7 +338,7 @@ lefthook run pre-commit    # fmt + check + clippy（改动命中 crate）+ layer
 
 ### 8.2 Peri TUI E2E（分层门禁）
 
-Rust 单测与 E2E 分离：**E2E 命令只在 `e2e/CLAUDE.md` 维护**，不要写逐文件手跑清单或 `npm run e2e -- --all`。
+Rust 单测与 E2E 分离：**E2E 命令在本文件维护**，不要写逐文件手跑清单或 `npm run e2e -- --all`。
 
 在 `e2e/` 目录：
 
@@ -350,6 +350,10 @@ npm run e2e:release:strict  # 发版且不容忍首轮 flake
 ```
 
 单文件调试：`npm run e2e -- --file tests/<path>.test.ts --serial --retry 0`
+
+自主委派评测需要真实模型，默认跳过：
+`PERI_E2E_AUTONOMY=1 npm run e2e -- --file tests/subagent/autonomous-delegation.test.ts --serial --retry 0`。
+默认要求至少 1 次有效委派；`PERI_E2E_AUTONOMY_MIN_DELEGATIONS=0` 只记录指标、不要求委派。
 
 ### 8.3 Submodule 与独立项目
 

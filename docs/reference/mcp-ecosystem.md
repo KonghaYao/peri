@@ -743,4 +743,4 @@ peri 自带的 Web / Artifact / Cron / Workspace / Workflow 能力不是 middlew
 - Goose 教程：https://goose-docs.ai/docs/tutorials/building-mcp-apps（draft-spec 手写 client 写法，可见其演进前形态）
 - 2026-07-28 发布说明：https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate（Extensions 框架、Tasks、MCP Apps、授权总览）
 
-**调用取消与期限**：调用取消通知传至 builtin handler，Bash 按会话 owner 收尾；blocking 文件扫描仅协作取消。类型化安全原因与任务/日志/草稿恢复引用保留。事实源为 `peri-middlewares/CLAUDE.md` 与 `mcp-packages/common` 的结果映射。
+**调用取消与期限**：调用取消通知传至 builtin handler，Bash 按会话 owner 收尾；blocking 文件扫描仅协作取消。类型化安全原因与任务/日志/草稿恢复引用保留。事实源为 `docs/code-index/peri-middlewares.md` 与 `mcp-packages/common` 的结果映射。

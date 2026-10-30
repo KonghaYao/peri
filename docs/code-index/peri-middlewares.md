@@ -9,7 +9,7 @@
 > Builtin MCP 插件 handler 与工具已移入独立 crate，当前入口和测试命令见 [MCP packages 代码索引](mcp-packages.md)。本页只索引宿主 MCP runtime、policy、context、dispatch 与仍由 middleware 提供的能力。
 
 > 速查表：把「我想做什么」映射到文件。细节以代码为准。历史迁移批次与旧机制取代过程由 Git 历史保留，本文件只描述现行实现。
-> 依据：peri-middlewares/CLAUDE.md、docs/standards/architecture-contracts.md、docs/design/{mcp-multiplexing,middleware-system,workflow}.md、docs/reference/mcp-ecosystem.md、源码
+> 依据：docs/standards/architecture-contracts.md、docs/design/{mcp-multiplexing,middleware-system,workflow}.md、docs/reference/mcp-ecosystem.md、源码
 
 ## 架构速览
 

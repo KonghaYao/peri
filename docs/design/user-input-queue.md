@@ -107,4 +107,4 @@ TUI 依赖通知通道关闭路径收敛（`ACP_STATE.is_loading=false`、清空
 
 队列只保存在当前进程内；切换会话查询原实例，进程重启或会话销毁不承诺保留待发送内容。
 
-交互回归见[正式 TUI 测试](../../e2e/tests/smoke/steer-queue-live.test.ts)，使用临时会话配置与本地模型服务；运行方式见 [E2E 指南](../../e2e/CLAUDE.md)。
+交互回归见[正式 TUI 测试](../../e2e/tests/smoke/steer-queue-live.test.ts)，使用临时会话配置与本地模型服务；运行方式见 [E2E 指南](../standards/testing.md)。
