@@ -73,12 +73,13 @@ pub struct SubAgentTool {
     pub(crate) broker: Option<Arc<dyn peri_agent::interaction::UserInteractionBroker>>,
     /// 子链装配器（middlewares 实现，链序契约 ARC-MIDDLEWARE-001）
     pub(crate) chain_assembler: Arc<dyn peri_agent::session::subagent::SubagentChainAssembler>,
-    /// 调用未显式给出 `run_in_background` 时的**有效缺省**（middleware 装配参数，
-    /// beta flag `full-async-tools` 的投影）。
+    /// 是否**强制**后台执行（middleware 装配参数，beta flag `full-async-tools`
+    /// 的投影）。字段名沿用历史命名，语义以本注释为准。
     ///
-    /// 只改缺省，不覆盖显式意图：显式 `false` 仍走前台。resume 调用
-    /// （携带 `resume_thread_id`）与无任务管理器、MCP Agent 等「后台能力未装配」
-    /// 场景维持既有语义（见 `invoke`）。
+    /// `true` = 本会话 Agent 调用一律后台：省略 `run_in_background` 与显式 `false`
+    /// 都走后台，携带 `resume_thread_id` 的非 active 恢复同样后台。`false` = 既有
+    /// 语义：只消费显式意图，省略字段走前台。MCP Agent 仅支持同步激活，不参与强制
+    /// 后台（见 `invoke`）。
     pub(crate) default_run_in_background: bool,
 }
 
@@ -147,7 +148,7 @@ impl BaseTool for SubAgentTool {
                     "type": "boolean",
                     "default": self.default_run_in_background,
                     "description": if self.default_run_in_background {
-                        "Set to true to run the sub-agent in the background. The main agent continues immediately and receives a notification when the background task completes. No fixed limit on concurrent background tasks. In this session the default is true: omit the field to run in the background, and pass false explicitly to wait for the sub-agent in the foreground."
+                        "Background execution is mandatory in this session: the sub-agent always runs in the background, and an explicit false is ignored (the call still starts in the background). MCP Agents selected via subagent_type are the exception: they support synchronous activation only. The main agent continues immediately and receives a notification when the background task completes. No fixed limit on concurrent background tasks."
                     } else {
                         "Set to true to run the sub-agent in the background. The main agent continues immediately and receives a notification when the background task completes. No fixed limit on concurrent background tasks"
                     }
@@ -218,15 +219,16 @@ impl BaseTool for SubAgentTool {
         // 也不会被静默丢弃后转入新建。
         // invoke_resume 先尝试当前会话的 live Defer 投递；只有恢复路径才需要磁盘。
         //
-        // resume 只消费**显式**意图：beta flag 的缺省后台不改变恢复模式
-        // （设计 §首个 flag：resume 调用不受影响）。
+        // resume 消费强制模式 + 显式意图：`default_run_in_background` 下非 active 恢复同样
+        // 后台；active 线程的 Defer 投递本就忽略该字段。非强制模式只认显式意图
+        // （设计 §首个 flag）。
         if let Some(thread_id) = resume_thread_id.as_ref() {
             return self
                 .invoke_resume(
                     thread_id.clone(),
                     prompt,
                     cwd,
-                    run_in_background.unwrap_or(false),
+                    self.default_run_in_background || run_in_background.unwrap_or(false),
                     parent_tool_call_id.clone(),
                     approval_owner,
                 )
@@ -249,30 +251,44 @@ impl BaseTool for SubAgentTool {
         let is_mcp_agent = subagent_type
             .as_deref()
             .is_some_and(|id| id.starts_with("mcp__"));
-        // 显式 true 与 MCP Agent 互斥（MCP Agents 只支持同步激活）：缺省后台**不**把
-        // MCP Agent 推进报错路径——后台能力对它们未装配，flag 不创造未装配的能力。
+        // 显式 true 与 MCP Agent 互斥（MCP Agents 只支持同步激活）。
         if is_mcp_agent && run_in_background == Some(true) {
             return Err("Error: MCP Agents currently support synchronous activation only".into());
         }
-        // 有效缺省由装配期注入（middleware 装配参数，会话内冻结）：显式意图优先。
+        // 调用模式（装配期注入，会话内冻结）：
         //
-        // [TRAP] 缺省**不对 MCP Agent 生效**：它们的定义准入必须经审批门
-        // （`load_and_approve_mcp_agent`），而后台路径（`invoke_background` →
-        // `load_agent_def` → `registry.activate`）**不经**该门；缺省若在这里生效，
-        // 一次省略 `run_in_background` 的调用就会让远端定义无用户审批即执行。
-        // 显式 true 的既有报错语义见上（保持一致：能力未装配不得借 flag 开启）。
-        //
-        // [TRAP] 语义不对称（与 Bash 有意不同，勿"修平"）：缺省 true 且无
-        // task_manager 时，Bash 报既有错误（`run_in_background is not available`），
-        // 本工具静默落回同步路径——两者各自维持各自引入前的语义。
-        let run_in_background =
-            run_in_background.unwrap_or(self.default_run_in_background && !is_mcp_agent);
+        // - MCP Agent 恒同步：定义准入必须经审批门（`load_and_approve_mcp_agent`），
+        //   而后台路径（`invoke_background` → `load_agent_def` → `registry.activate`）
+        //   **不经**该门。省略或显式 false 都走审批门，`default_run_in_background` 不得把它们
+        //   推进后台 loader；显式 true 的既有报错语义见上。
+        // - `default_run_in_background`：本会话强制后台，省略与显式 `false` 都被忽略。
+        // - 否则只消费显式意图：省略 = 前台（与 flag 引入前逐位一致）。
+        let run_in_background = if is_mcp_agent {
+            false
+        } else if self.default_run_in_background {
+            true
+        } else {
+            run_in_background.unwrap_or(false)
+        };
 
         // 后台路径需要 task_manager（L3：经 parent_session 的 host 或 tool host 回退）。
         // resume_thread_id.is_none() 为双保险（R-M2）：resume 分支已先返回，此处不可能
         // 再有 resume 调用——防止未来分支重排时 resume 被 bg 分支静默吞掉。
-        // task_manager 缺失时维持既有语义：落回同步路径（与显式 true 一致）。
-        let run_in_background = run_in_background && host.task_manager.is_some();
+        //
+        // 强制模式是会话能力承诺：缺失管理器直接报错，不得静默落回同步（那会违背
+        // flag 语义）。非强制模式维持既有语义：显式 true 无管理器时落回同步。
+        // [TRAP] 语义不对称（与 Bash 有意不同，勿"修平"）：Bash 缺省后台无管理器时
+        // 报既有错误（`run_in_background is not available`），本工具非强制时静默落回同步。
+        let run_in_background = if run_in_background && host.task_manager.is_none() {
+            if self.default_run_in_background {
+                return Err(
+                    "Error: full-async Agent execution requires a background task manager; none is configured".into(),
+                );
+            }
+            false
+        } else {
+            run_in_background
+        };
         if resume_thread_id.is_none() && run_in_background {
             // 只有 fork 消费父历史；命名子 agent 的后台路径从零构建 transcript。
             // 在分支内物化，避免命名路径把不会使用的父正文副本带过整个 spawn。
