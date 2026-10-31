@@ -44,7 +44,6 @@ pub(super) fn build_request(
     request: &ModelRequest,
 ) -> ModelResult<BuiltAnthropicRequest> {
     let (mut messages, mut system_prompt) = messages_to_anthropic(&request.messages);
-    cache::ensure_thinking_blocks(&mut messages);
     if config.enable_cache {
         cache::apply_cache_to_messages(&mut messages);
     }
@@ -79,7 +78,7 @@ pub(super) fn build_request(
         body["temperature"] = json!(temperature);
     }
     if config.extended_thinking {
-        let thinking = if config.model == "claude-sonnet-5-5" {
+        let thinking = if uses_adaptive_thinking(&config.model) {
             // 仅对已确认的精确模型使用 adaptive；不发送手动预算，也不应用其门限。
             Some(json!({ "type": "adaptive" }))
         } else {
@@ -87,12 +86,16 @@ pub(super) fn build_request(
             // 请求级 max_tokens 覆盖可能放不下两者，此时不发送 thinking。
             let available_thinking = max_tokens.saturating_sub(MIN_RESPONSE_RESERVE);
             let thinking_budget = config.thinking_budget.min(available_thinking);
-            (thinking_budget >= MIN_THINKING_BUDGET).then(|| {
-                json!({
-                    "type": "enabled",
-                    "budget_tokens": thinking_budget,
+            // 手动 thinking 要求最后一个 assistant turn 以带签名的 thinking 块开始。
+            // 旧历史没有可验证的签名块，伪造空签名会被 API 拒绝，此时按官方建议不启用
+            // thinking；adaptive 没有该要求，仍可回放无 thinking 的旧历史。
+            (thinking_budget >= MIN_THINKING_BUDGET && final_assistant_has_thinking(&messages))
+                .then(|| {
+                    json!({
+                        "type": "enabled",
+                        "budget_tokens": thinking_budget,
+                    })
                 })
-            })
         };
         if let Some(thinking) = thinking {
             body["thinking"] = thinking;
@@ -232,14 +235,53 @@ fn content_to_anthropic_parts(content: &[ContentBlock]) -> Vec<Value> {
     content
         .iter()
         .filter_map(|block| match block {
-            // A foreign reasoning summary is readable history, not an
-            // Anthropic thinking block with an Anthropic replay signature.
-            ContentBlock::Reasoning { text, .. } if foreign_replay => {
-                Some(json!({ "type": "text", "text": text }))
+            // Anthropic 只接受由它签名、可原样回放的 thinking 块。其他 provider 的
+            // reasoning 摘要，以及缺失或空签名的 reasoning，都按普通文本重放；不能
+            // 伪造 signature，也不能把空 thinking 块塞回历史。
+            ContentBlock::Reasoning { text, signature }
+                if foreign_replay || !has_replay_signature(signature) =>
+            {
+                (!text.is_empty()).then(|| json!({ "type": "text", "text": text }))
             }
             _ => block_to_anthropic(block),
         })
         .collect()
+}
+
+/// 已确认只支持 adaptive thinking、拒绝手动 `enabled` 的精确模型。
+fn uses_adaptive_thinking(model: &str) -> bool {
+    model == "claude-sonnet-5-5"
+}
+
+fn has_replay_signature(signature: &Option<String>) -> bool {
+    signature
+        .as_deref()
+        .is_some_and(|signature| !signature.trim().is_empty())
+}
+
+/// 手动 thinking 要求请求中最后一个 assistant turn 以 thinking 块开始。
+/// 没有 assistant turn 时不存在该约束。
+fn final_assistant_has_thinking(messages: &[Value]) -> bool {
+    messages
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "assistant")
+        .is_none_or(|message| {
+            message["content"]
+                .as_array()
+                .and_then(|blocks| blocks.first())
+                .is_some_and(is_replay_thinking_block)
+        })
+}
+
+fn is_replay_thinking_block(block: &Value) -> bool {
+    match block["type"].as_str() {
+        Some("redacted_thinking") => true,
+        Some("thinking") => block["signature"]
+            .as_str()
+            .is_some_and(|signature| !signature.trim().is_empty()),
+        _ => false,
+    }
 }
 
 fn block_to_anthropic(block: &ContentBlock) -> Option<Value> {
