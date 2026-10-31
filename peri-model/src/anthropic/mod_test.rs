@@ -34,10 +34,9 @@ fn switching_from_responses_does_not_misuse_anthropic_signatures() {
         )],
     )]);
     let body = body_for_test(&config(), &request);
-    // The existing Anthropic compatibility layer adds its own empty thinking
-    // placeholder. A converted foreign turn must be exactly the same wire as
-    // ordinary typed text/calls, including that local placeholder, and must not
-    // carry any foreign reasoning state or invent a provider signature.
+    // A converted foreign turn must be exactly the same wire as ordinary typed
+    // text/calls and must not carry any foreign reasoning state or invent a
+    // provider signature.
     let mut ordinary = request.clone();
     if let ModelMessage::Assistant { content, .. } = &mut ordinary.messages[0] {
         *content = vec![
@@ -53,6 +52,80 @@ fn switching_from_responses_does_not_misuse_anthropic_signatures() {
     assert!(encoded.contains("visible"));
     assert!(encoded.contains("call_1"));
     assert!(encoded.contains("tool_use"));
+}
+
+#[test]
+fn old_history_without_thinking_is_not_filled_with_fake_blocks() {
+    let request = ModelRequest::new(vec![
+        ModelMessage::user_text("old question"),
+        ModelMessage::assistant(vec![ContentBlock::text("old answer")], vec![]),
+        ModelMessage::user_text("new question"),
+    ])
+    .with_max_tokens(2_048);
+
+    let body = body_for_test(&config().with_extended_thinking(1_024, "high"), &request);
+    assert_eq!(
+        body["messages"][1]["content"],
+        json!([{ "type": "text", "text": "old answer" }])
+    );
+    assert!(!body.to_string().contains("\"signature\":\"\""));
+    // 手动 thinking 要求最后的 assistant turn 以带签名的 thinking 块开始；
+    // 旧历史无法满足时按官方建议不启用 thinking。
+    assert!(body.get("thinking").is_none());
+    assert!(body.get("output_config").is_none());
+}
+
+#[test]
+fn unsigned_reasoning_is_replayed_as_text() {
+    let request = ModelRequest::new(vec![
+        ModelMessage::user_text("foreign question"),
+        ModelMessage::assistant(
+            vec![
+                ContentBlock::Reasoning {
+                    text: "foreign trace".into(),
+                    signature: None,
+                },
+                ContentBlock::Reasoning {
+                    text: "empty signature trace".into(),
+                    signature: Some(String::new()),
+                },
+                ContentBlock::text("visible"),
+            ],
+            vec![],
+        ),
+        ModelMessage::user_text("next question"),
+    ]);
+
+    let body = body_for_test(&config(), &request);
+    assert_eq!(
+        body["messages"][1]["content"],
+        json!([
+            { "type": "text", "text": "foreign trace" },
+            { "type": "text", "text": "empty signature trace" },
+            { "type": "text", "text": "visible" }
+        ])
+    );
+    assert!(!body.to_string().contains("\"type\":\"thinking\""));
+}
+
+#[test]
+fn adaptive_thinking_keeps_old_history_without_thinking_blocks() {
+    let mut config = config().with_extended_thinking(1_024, "high");
+    config.model = "claude-sonnet-5-5".into();
+    let request = ModelRequest::new(vec![
+        ModelMessage::user_text("old question"),
+        ModelMessage::assistant(vec![ContentBlock::text("old answer")], vec![]),
+        ModelMessage::user_text("new question"),
+    ]);
+
+    let body = body_for_test(&config, &request);
+    assert_eq!(body["thinking"], json!({ "type": "adaptive" }));
+    assert_eq!(body["output_config"], json!({ "effort": "high" }));
+    assert_eq!(
+        body["messages"][1]["content"],
+        json!([{ "type": "text", "text": "old answer" }])
+    );
+    assert!(!body.to_string().contains("\"signature\":\"\""));
 }
 
 fn config_with_retry(max_attempts: u32) -> AnthropicConfig {
