@@ -89,13 +89,14 @@ pub(super) fn build_request(
             // 手动 thinking 要求最后一个 assistant turn 以带签名的 thinking 块开始。
             // 旧历史没有可验证的签名块，伪造空签名会被 API 拒绝，此时按官方建议不启用
             // thinking；adaptive 没有该要求，仍可回放无 thinking 的旧历史。
-            (thinking_budget >= MIN_THINKING_BUDGET && final_assistant_has_thinking(&messages))
-                .then(|| {
-                    json!({
-                        "type": "enabled",
-                        "budget_tokens": thinking_budget,
-                    })
+            (thinking_budget >= MIN_THINKING_BUDGET
+                && final_assistant_turn_starts_with_thinking(&messages))
+            .then(|| {
+                json!({
+                    "type": "enabled",
+                    "budget_tokens": thinking_budget,
                 })
+            })
         };
         if let Some(thinking) = thinking {
             body["thinking"] = thinking;
@@ -260,18 +261,39 @@ fn has_replay_signature(signature: &Option<String>) -> bool {
 }
 
 /// 手动 thinking 要求请求中最后一个 assistant turn 以 thinking 块开始。
+/// tool-use 循环属于同一个 assistant turn：工具结果之后的 assistant 消息只是
+/// 该 turn 的延续，判定必须回溯到 turn 起点，而不是只看最后一条 assistant 消息。
 /// 没有 assistant turn 时不存在该约束。
-fn final_assistant_has_thinking(messages: &[Value]) -> bool {
-    messages
+fn final_assistant_turn_starts_with_thinking(messages: &[Value]) -> bool {
+    let Some(mut index) = messages
         .iter()
-        .rev()
-        .find(|message| message["role"] == "assistant")
-        .is_none_or(|message| {
-            message["content"]
-                .as_array()
-                .and_then(|blocks| blocks.first())
-                .is_some_and(is_replay_thinking_block)
-        })
+        .rposition(|message| message["role"] == "assistant")
+    else {
+        return true;
+    };
+    while index > 0 {
+        let preceding = &messages[index - 1];
+        if preceding["role"] != "user" || !contains_tool_result(preceding) {
+            break;
+        }
+        let Some(turn_start) = messages[..index - 1]
+            .iter()
+            .rposition(|message| message["role"] == "assistant")
+        else {
+            break;
+        };
+        index = turn_start;
+    }
+    messages[index]["content"]
+        .as_array()
+        .and_then(|blocks| blocks.first())
+        .is_some_and(is_replay_thinking_block)
+}
+
+fn contains_tool_result(message: &Value) -> bool {
+    message["content"]
+        .as_array()
+        .is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "tool_result"))
 }
 
 fn is_replay_thinking_block(block: &Value) -> bool {

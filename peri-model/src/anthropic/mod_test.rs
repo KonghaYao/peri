@@ -128,6 +128,69 @@ fn adaptive_thinking_keeps_old_history_without_thinking_blocks() {
     assert!(!body.to_string().contains("\"signature\":\"\""));
 }
 
+#[test]
+fn manual_thinking_follows_tool_loop_turn_start_across_tool_results() {
+    let request = ModelRequest::new(vec![
+        ModelMessage::user_text("check the file"),
+        ModelMessage::assistant(
+            vec![ContentBlock::Reasoning {
+                text: "signed reasoning".into(),
+                signature: Some("sig-1".into()),
+            }],
+            vec![ToolCall::new(
+                "call-1",
+                "Read",
+                JsonObject::from_value(json!({ "path": "a" })).expect("object"),
+            )],
+        ),
+        ModelMessage::tool_result(ToolResult::success("call-1", "Read", "content")),
+        // 同一 tool-use 循环的收尾消息：非交错 thinking 下不会重新产生思考块。
+        ModelMessage::assistant(vec![ContentBlock::text("done")], vec![]),
+        ModelMessage::user_text("next question"),
+    ])
+    .with_max_tokens(2_048);
+
+    let body = body_for_test(&config().with_extended_thinking(1_024, "high"), &request);
+    // 一个 tool-use 循环是一个 assistant turn：turn 起点带签名 thinking，
+    // 收尾的 text-only assistant 消息不能触发省略。
+    assert_eq!(
+        body["thinking"],
+        json!({ "type": "enabled", "budget_tokens": 1_024 })
+    );
+    assert_eq!(body["messages"][1]["content"][0]["type"], "thinking");
+}
+
+#[test]
+fn manual_thinking_ignores_signed_thinking_from_previous_turns() {
+    let request = ModelRequest::new(vec![
+        ModelMessage::user_text("first question"),
+        ModelMessage::assistant(
+            vec![ContentBlock::Reasoning {
+                text: "previous turn reasoning".into(),
+                signature: Some("sig-1".into()),
+            }],
+            vec![],
+        ),
+        ModelMessage::user_text("second question"),
+        ModelMessage::assistant(
+            vec![ContentBlock::text("checking")],
+            vec![ToolCall::new(
+                "call-1",
+                "Read",
+                JsonObject::from_value(json!({ "path": "a" })).expect("object"),
+            )],
+        ),
+        ModelMessage::tool_result(ToolResult::success("call-1", "Read", "content")),
+        ModelMessage::user_text("third question"),
+    ])
+    .with_max_tokens(2_048);
+
+    let body = body_for_test(&config().with_extended_thinking(1_024, "high"), &request);
+    // 上一个 turn 的签名 thinking 不能冒充当前 turn 的起点。
+    assert!(body.get("thinking").is_none());
+    assert!(body.get("output_config").is_none());
+}
+
 fn config_with_retry(max_attempts: u32) -> AnthropicConfig {
     AnthropicConfig::new(
         Url::parse("https://proxy.example.test/custom/").expect("valid endpoint"),
