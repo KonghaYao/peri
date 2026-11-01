@@ -335,8 +335,9 @@ impl BaseTool for McpToolBridge {
         let arguments = input.as_object().cloned().unwrap_or_default();
         let mut request = rmcp::model::CallToolRequestParams::new(self.tool_name.clone())
             .with_arguments(arguments);
-        // per-call 会话身份（`peri/taskOwner`）随源接线：只有 Workspace 实例
-        // 按直接发起会话隔离后台任务，其他 server 不注入 Peri 元数据。
+        // per-call 会话身份（`peri/taskOwner`）随源接线：Workspace（含
+        // WorkspaceRemote）与 monitor 实例按直接发起会话隔离后台任务，其他
+        // server 不注入 Peri 元数据。
         if let Some(owner) = super::client::task_owner_metadata::task_owner_meta(
             self.client.source.as_ref(),
             session_id,

@@ -173,12 +173,30 @@ async fn read_events(
     owner: &str,
     task_id: &str,
 ) -> serde_json::Value {
-    let mut request = CallToolRequestParams::new("monitor_read").with_arguments(
-        serde_json::json!({ "task_id": task_id })
-            .as_object()
-            .expect("object")
-            .clone(),
-    );
+    read_with(client, owner, serde_json::json!({ "task_id": task_id })).await
+}
+
+async fn read_events_after(
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, ClientConfig>,
+    owner: &str,
+    task_id: &str,
+    after_seq: serde_json::Value,
+) -> serde_json::Value {
+    read_with(
+        client,
+        owner,
+        serde_json::json!({ "task_id": task_id, "after_seq": after_seq }),
+    )
+    .await
+}
+
+async fn read_with(
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, ClientConfig>,
+    owner: &str,
+    arguments: serde_json::Value,
+) -> serde_json::Value {
+    let mut request = CallToolRequestParams::new("monitor_read")
+        .with_arguments(arguments.as_object().cloned().expect("object"));
     request.meta = Some(owner_meta(owner));
     let CallToolResponse::Complete(result) = client
         .peer()
@@ -198,6 +216,38 @@ async fn read_events(
         .and_then(|block| block.as_text())
         .expect("read content text");
     serde_json::from_str(&text.text).expect("structured read result")
+}
+
+async fn stop_task(
+    client: &rmcp::service::RunningService<rmcp::service::RoleClient, ClientConfig>,
+    owner: &str,
+    task_id: &str,
+) -> serde_json::Value {
+    let mut request = CallToolRequestParams::new("monitor_stop").with_arguments(
+        serde_json::json!({ "task_id": task_id })
+            .as_object()
+            .expect("object")
+            .clone(),
+    );
+    request.meta = Some(owner_meta(owner));
+    let CallToolResponse::Complete(result) = client
+        .peer()
+        .call_tool_once(request)
+        .await
+        .expect("monitor_stop")
+    else {
+        panic!("monitor_stop must return a completion");
+    };
+    assert_ne!(result.is_error, Some(true));
+    if let Some(value) = result.structured_content {
+        return value;
+    }
+    let text = result
+        .content
+        .first()
+        .and_then(|block| block.as_text())
+        .expect("stop content text");
+    serde_json::from_str(&text.text).expect("structured stop result")
 }
 
 #[tokio::test]
@@ -245,6 +295,50 @@ async fn start_returns_task_read_returns_events_and_owner_isolation_holds() {
         panic!("read completion")
     };
     assert_eq!(result.is_error, Some(true));
+
+    drop(client);
+    server_task.await.expect("join server");
+}
+
+/// Wire keys are camelCase: the model-facing contract uses `nextSeq` and
+/// `processTerminated`. This pins the serialized names and proves the
+/// deserialized cursor round-trips back into `after_seq`.
+#[tokio::test]
+async fn read_and_stop_wire_keys_use_camel_case() {
+    let server = MonitorMcpServer::new(std::env::temp_dir().to_string_lossy().into_owned());
+    let (client, server_task) = connect(server).await;
+    let task_id = start(&client, "session-a", "echo one; echo two").await;
+    terminal_task(&client, "session-a", &task_id).await;
+
+    let page = read_events(&client, "session-a", &task_id).await;
+    assert_eq!(page["nextSeq"], serde_json::json!(2));
+    assert!(
+        page.get("next_seq").is_none(),
+        "the wire cursor must be camelCase: {page}"
+    );
+    assert_eq!(page["truncated"], serde_json::json!(false));
+
+    // Deserialize the wire cursor and pass it back as the next request cursor.
+    let rest = read_events_after(&client, "session-a", &task_id, page["nextSeq"].clone()).await;
+    assert_eq!(rest["events"], serde_json::json!([]));
+    assert_eq!(rest["nextSeq"], serde_json::json!(2));
+
+    let stopped = stop_task(&client, "session-a", &task_id).await;
+    assert_eq!(stopped["status"], serde_json::json!("completed"));
+    assert_eq!(
+        stopped["cleanup"]["requested"],
+        serde_json::json!(false),
+        "stopping a terminal task must not claim a new cancellation: {stopped}"
+    );
+    assert_eq!(
+        stopped["cleanup"]["processTerminated"],
+        serde_json::json!(true),
+        "cleanup facts are camelCase: {stopped}"
+    );
+    assert!(
+        stopped["cleanup"].get("process_terminated").is_none(),
+        "the snake_case cleanup key must not leak: {stopped}"
+    );
 
     drop(client);
     server_task.await.expect("join server");

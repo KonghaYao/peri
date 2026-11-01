@@ -37,20 +37,22 @@ worth observing, and you own the comparison.
 
 | Tool | Purpose |
 | --- | --- |
-| `mcp__monitor__monitor_start(command, cwd?, label?, alert?, deadline_ms?, max_events?, max_bytes?)` | Start a command. The receipt gives `task_id` (host) and `monitor_id` (monitor). |
+| `mcp__monitor__monitor_start(command, cwd?, label?, alert?, deadline_ms?, max_events?, max_bytes?)` | Start a command. The receipt gives `task_id` (host task panel) and `monitor_id` (monitor tools and `tasks/get`). |
 | `mcp__monitor__monitor_read(task_id, after_seq?, limit?, max_bytes?)` | Read events after an exclusive cursor. Pass `monitor_id` as `task_id`. |
 | `mcp__monitor__monitor_stop(task_id, reason?)` | Stop the command (idempotent). Pass `monitor_id` as `task_id`. |
-| `mcp__monitor__monitor_list(include_ended?, limit?)` | List this session's monitor summaries; each `taskId` is a monitor id. |
+| `mcp__monitor__monitor_list(include_ended?, limit?)` | List this session's monitor summaries; each `taskId` is a monitor id accepted by the monitor tools and `tasks/get`. |
 
 ## Task ids
 
 The start receipt exposes two ids. They are different namespaces:
 
-- `task_id` (`mcp-...`): the host background task id. It is for `tasks/get` and
-  the host task panel, **not** for the monitor tools.
+- `task_id` (`mcp-...`): the host background task id. It is for host task
+  management and the host Tasks panel only. Do **not** use it with the monitor
+  tools or MCP `tasks/get`.
 - `monitor_id` (`monitor-...`): the monitor-side id. Pass it as the `task_id`
-  argument of `monitor_read` and `monitor_stop`. `monitor_list` also reports it
-  as each summary's `taskId`.
+  argument of `monitor_read` and `monitor_stop`; MCP `tasks/get` and
+  `tasks/cancel` also accept it. `monitor_list` reports it as each summary's
+  `taskId`.
 
 If you lose `monitor_id`, call `monitor_list` and use its `taskId`. Passing the
 host `task_id` to `monitor_read` or `monitor_stop` returns `unknown task`.
@@ -99,21 +101,33 @@ that are cheap to poll, `monitor_read` on your own schedule is still fine.
 
 ## Incremental Reads
 
-`after_seq` is exclusive. The response's `next_seq` is the cursor to pass back:
+`after_seq` is exclusive. The response's `nextSeq` is the cursor to pass back:
 
 1. Start with no `after_seq` to read from the beginning.
-2. Read `events` and remember `next_seq`.
-3. Call again with `after_seq = next_seq`.
+2. Read `events` and remember `nextSeq`.
+3. Call again with `after_seq = nextSeq`.
 
 A read returns at most 500 events and 128 KiB of text. Page-level
 `truncated: true` means a read bound was reached (event count or byte budget),
 not that event text was cut, and it does not guarantee another event remains.
-Continue with `after_seq = next_seq` while the task is still producing output.
+
+Drive the loop from `truncated`, not from `status`:
+
+- `truncated == true`: keep reading with `after_seq = nextSeq`, even when
+  `status` is already `completed`, `failed`, or `cancelled`. A terminal task
+  still holds unread events in its ring buffer.
+- `truncated == false` and a terminal `status`: stop; everything retained has
+  been read.
+
+Events remain readable after the process ends. They disappear only when the
+task record is pruned by capacity (128 retained tasks per instance; terminal
+tasks are pruned first) or the instance is replaced. `status` becoming terminal
+does not mean the output was fully consumed.
+
 Per-event `truncated` means that one line was cut at 16 KiB. The task ring
 buffer is bounded (`max_events`, `max_bytes`); when it overflows, `dropped`
 reports the number of evicted events. `status` is `working`, `completed`,
-`failed`, or `cancelled`; a task keeps its events until the process ends or the
-instance is replaced.
+`failed`, or `cancelled`.
 
 ## Patterns
 
@@ -151,9 +165,9 @@ removals.
 
 ### Build or test output
 
-Start the build once, keep reading events until `status` becomes `completed` or
-`failed`, then correlate the failure with the exit status. Do not start a new
-monitor for every poll.
+Start the build once and keep reading while `truncated` is true. Once
+`truncated` is false and `status` is `completed` or `failed`, correlate the
+failure with the exit status. Do not start a new monitor for every poll.
 
 ### Streaming feed
 
@@ -165,7 +179,7 @@ Keep the emitted records small; use `label` so `monitor_list` stays readable.
 - `deadline_ms` defaults to 1 hour and cannot exceed 24 hours. At expiry the
   command is terminated and the task becomes `failed`.
 - `max_events` defaults to 2000 and `max_bytes` to 1 MiB per task.
-- `monitor_stop` is idempotent. It reports `cleanup.process_terminated`
+- `monitor_stop` is idempotent. It reports `cleanup.processTerminated`
   separately from the `cancelled` status; a slow child may still be cleaning up.
 - Task state is in memory only. After a process restart or instance replacement,
   old task ids are unknown; there is no recovery or replay.

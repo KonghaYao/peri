@@ -16,7 +16,7 @@
 2. v1 只做 command source。agent 自己编写 shell 轮询命令并负责业务 diff；MonitorMCP 只负责「命令输出 → 事件」。
 3. 任务通信只使用标准 MCP Tasks：`tasks/get`、`tasks/cancel`。不新增自定义任务生命周期方法，不新增 ACP 方法。
 4. 不持久化。任务状态纯内存；重启或实例替换后旧 id 一律 unknown；不恢复、不重放。
-5. 事件存放在内存 ring buffer，`seq` 单调。`monitor_read` 的 `after_seq` 排他，`next_seq` 是下一次读取应传入的游标。
+5. 事件存放在内存 ring buffer，`seq` 单调。`monitor_read` 的 `after_seq` 排他，`nextSeq` 是下一次读取应传入的游标。终态任务仍保留未读事件：读取循环以页级 `truncated` 为准，`truncated == true` 就继续，`truncated == false` 且终态才停止。
 6. 单条事件 ≤ 16 KiB；单次读取 ≤ 500 条 / 128 KiB；超限标记 `truncated` / `dropped`。
 7. deadline 默认 1h、最大 24h；超范围请求拒绝。`monitor_stop` 幂等；`tasks/cancel` 只 ack，进程清理状态单独报告。
 8. 唤醒只由 alert 命中触发；任务成功/失败/取消的终态只更新任务投影（`tasks/get`、`monitor_list`、Tasks 面板），不投递 reminder。未命中 alert 的正常结束不会拉起模型。
@@ -72,7 +72,7 @@ working ──命令退出 0──▶ completed
 2. 注册表、策略键、dispatch、standalone、permission 敏感分支全部接线；宿主既有声明表一致性测试通过。
 3. `peri mcp-start monitor --stdio` 可构造 handler。
 4. `monitor_start` 经工具桥接返回 MCP Tasks 句柄，宿主既有 `tasks/get` 轮询能观察到终态；`tasks/cancel` 不新增方法。
-5. 事件按 `after_seq` 排他、`next_seq` 权威增量读取；超限标记 `truncated` / `dropped`。
+5. 事件按 `after_seq` 排他、`nextSeq` 权威增量读取；超限标记 `truncated` / `dropped`；终态后仍按 `truncated` 继续读完存量事件。
 6. 本地验证：fmt、workspace build、`peri-mcp-monitor` 测试、layer import / MCP data boundary / CI inventory 检查、clippy。
 7. P2：alert 非法正则拒绝、未命中无 wake、命中一条 wake、30 秒合并、outbox 容量与 `wakeDropped`、ack 幂等、owner 隔离、wake 不含正文、`tasks/get` 计数。
 8. P2：宿主泵 push 后 ack、ack 失败重试（同一 delivery id）、owner 无 inbox 丢弃计数、只投 owner、子会话 binding 释放后离线、monitor 缺失 no-op、pool shutdown 停止。

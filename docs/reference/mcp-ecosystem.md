@@ -131,7 +131,7 @@ tools 原语在两个协议版本中基本兼容。2026-07-28 的新增与调整
 
 **例外**：声明为启动依赖的 server 用 `system_mcp_tools` 指名必需工具（配置语义见 §9.2）；这些工具的目标行为是不经 tool search、直接进入 RCRA 工具列表，契约见 `docs/design/mcp-adaptation-v4-part-1.md`。其余 MCP 工具仍全部落在 deferred 面。
 
-**内置实例（builtin）**：peri 自带的 Web / Artifact / Cron / Workspace / Workflow 能力同样以 MCP 实例形态提供，只是 server 与 client 同进程，由本地默认配置层自动注入。各实例的工具、直连性与关闭键以 `peri-acp-types/src/builtin_mcp.rs` 的声明表和 §9.8 为准。
+**内置实例（builtin）**：peri 自带的 Web / Artifact / Cron / Monitor / Workspace / Workflow 能力同样以 MCP 实例形态提供，只是 server 与 client 同进程，由本地默认配置层自动注入。各实例的工具、直连性与关闭键以 `peri-acp-types/src/builtin_mcp.rs` 的声明表和 §9.8 为准。
 
 ### 3.3 桥接与命名
 

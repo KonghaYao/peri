@@ -6,9 +6,10 @@
 //! task id is unknown.
 //!
 //! Task ownership is the initiating session identity carried by
-//! `_meta["peri/taskOwner"]`. A caller without an owner (local standalone use)
-//! is unscoped, matching the Workspace task-owner contract; it never receives a
-//! task owned by another session.
+//! `_meta["peri/taskOwner"]`. A caller with an owner sees only that owner's
+//! tasks. A caller without an owner (local standalone use) is unscoped,
+//! matching the Workspace task-owner contract: it sees every task in the
+//! instance, including tasks owned by another session.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -111,7 +112,8 @@ impl TaskState {
 }
 
 /// Cleanup facts reported by `monitor_stop`. Cancellation acknowledgement and
-/// process cleanup are separate signals.
+/// process cleanup are separate signals. Wire keys are camelCase
+/// (`requested`, `processTerminated`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CleanupReport {
@@ -153,7 +155,12 @@ pub struct StartedMonitor {
     pub label: Option<String>,
 }
 
-/// `monitor_read` response.
+/// `monitor_read` response. Wire keys are camelCase (`nextSeq`,
+/// `truncated`, `dropped`).
+///
+/// A task retains its events after the process reaches a terminal state; only
+/// record pruning or instance replacement removes them. Callers therefore keep
+/// reading while `truncated` is true even if `status` is already terminal.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadResult {

@@ -255,6 +255,22 @@ async fn assert_no_reminder(pool: &Arc<McpClientPool>, queue: &MessageQueue, con
     );
 }
 
+/// Wait until the host task subscription settled the terminal monitor task.
+///
+/// The terminal projection (`tasks/get`) can become visible before the host
+/// subscription poll (2s interval) settles the task; asserting "no reminder"
+/// before settlement would pass even if settlement later delivered one.
+async fn wait_settled_external(manager: &Arc<dyn peri_acp_types::tasks::TaskManager>) {
+    let deadline = tokio::time::Instant::now() + OBSERVE_TIMEOUT;
+    while manager.has_unsettled_external() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the task subscription must settle the terminal task before reminders are asserted"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 async fn start_monitor(peer: &Peer<RoleClient>, owner: &str, label: &str, command: &str) -> String {
     let mut request = CallToolRequestParams::new("monitor_start").with_arguments(
         json!({ "command": command, "alert": "ERROR", "label": label })
@@ -759,7 +775,7 @@ async fn cancelled_monitor_terminal_state_never_wakes_the_owner() {
     let link = connect_monitor().await;
     let (owner, spawner) = McpTaskOwner::new();
     let pool = pool_with_monitor(&link, spawner);
-    let (queue, _manager) = register_bridge_session(&pool, "session-a");
+    let (queue, manager) = register_bridge_session(&pool, "session-a");
 
     let receipt = start_monitor_via_bridge(
         &pool,
@@ -789,6 +805,7 @@ async fn cancelled_monitor_terminal_state_never_wakes_the_owner() {
         TaskStatus::Cancelled,
         "tasks/cancel must end in the cancelled terminal state"
     );
+    wait_settled_external(&manager).await;
     assert_no_reminder(&pool, &queue, "cancelled monitor terminal").await;
 
     shutdown_link(link, pool, owner).await;
@@ -801,7 +818,7 @@ async fn deadline_monitor_terminal_state_never_wakes_the_owner() {
     let link = connect_monitor().await;
     let (owner, spawner) = McpTaskOwner::new();
     let pool = pool_with_monitor(&link, spawner);
-    let (queue, _manager) = register_bridge_session(&pool, "session-a");
+    let (queue, manager) = register_bridge_session(&pool, "session-a");
 
     let receipt = start_monitor_via_bridge(
         &pool,
@@ -825,6 +842,7 @@ async fn deadline_monitor_terminal_state_never_wakes_the_owner() {
         TaskStatus::Failed,
         "deadline expiry must end in the failed terminal state"
     );
+    wait_settled_external(&manager).await;
     assert_no_reminder(&pool, &queue, "deadline monitor terminal").await;
 
     shutdown_link(link, pool, owner).await;

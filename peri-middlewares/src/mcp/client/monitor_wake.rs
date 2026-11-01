@@ -98,9 +98,14 @@ impl McpClientPool {
 
     /// Whether a connected server is the builtin monitor instance.
     ///
-    /// The reserved name is only a fallback: the authoritative identity is the
-    /// runtime-owned `ConfigSource::Builtin { instance }`, which user
-    /// configuration cannot forge.
+    /// The authoritative identity is the runtime-owned
+    /// `ConfigSource::Builtin { instance }`, which user configuration cannot
+    /// forge. The reserved name is only a fallback for directly constructed
+    /// pools (tests / local wiring): a non-builtin connection named `monitor`
+    /// would also match it and have its terminal reminders suppressed. Normal
+    /// configuration cannot reach that state — `monitor` is a reserved builtin
+    /// instance name, and `apply_builtin_overlay` rejects any `command`/`url`
+    /// takeover at load time, even when `PERI_MCP_BUILTIN=off`.
     pub(crate) fn is_monitor_server(&self, server: &str) -> bool {
         if server == MONITOR_INSTANCE {
             return true;

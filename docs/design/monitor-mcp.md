@@ -80,14 +80,15 @@ agent ────────────────────────�
 模型看到的不是上面的原始 `CreateTaskResult`，而是宿主 `tool_bridge` 的回执。
 回执同时给出两个命名空间不同的 id，模型无需猜测：
 
-- `task_id`（`mcp-<uuid>`）：宿主后台任务 registry 的 public id，只用于
-  `tasks/get` / Tasks 面板；它不是 monitor 实例内的任务键。
+- `task_id`（`mcp-<uuid>`）：宿主后台任务 registry 的 public id，只用于宿主任务
+  管理与 Tasks 面板；monitor 实例和 MCP `tasks/get` 都不接受它。
 - `monitor_id`（`monitor-<uuid>`）：monitor 实例内的 raw task id，也就是
-  `monitor_list` 返回的 `taskId`；调用 `monitor_read` / `monitor_stop` 时把它
-  作为 `task_id` 参数传入。
+  `monitor_list` 返回的 `taskId`。把它作为 `task_id` 参数传给 `monitor_read` /
+  `monitor_stop`；MCP `tasks/get` / `tasks/cancel` 也用它（宿主按会话注入 owner）。
 
-用 `task_id` 调 `monitor_read` / `monitor_stop` 会得到 `unknown task`；操作
-monitor 任务时必须使用 `monitor_id`（或 `monitor_list` 的 `taskId`）。
+用 `task_id` 调 `monitor_read` / `monitor_stop` / MCP `tasks/get` 会得到
+`unknown task`；操作 monitor 任务时必须使用 `monitor_id`（或 `monitor_list` 的
+`taskId`）。
 
 ### 2.2 `monitor_read`
 
@@ -105,21 +106,25 @@ monitor 任务时必须使用 `monitor_id`（或 `monitor_list` 的 `taskId`）�
 ```json
 {
   "events": [ /* MonitorEvent */ ],
-  "next_seq": 42,
+  "nextSeq": 42,
   "status": "working",
   "truncated": false,
   "dropped": 0
 }
 ```
 
-`next_seq` 等于本次返回的最后一个 `seq`；没有返回事件时等于请求游标（并夹到当前
-已分配的最大 seq 以内）。下一次调用直接传 `after_seq = next_seq`，不会跳事件。
+`nextSeq` 等于本次返回的最后一个 `seq`；没有返回事件时等于请求游标（并夹到当前
+已分配的最大 seq 以内）。下一次调用直接传 `after_seq = nextSeq`，不会跳事件。
 `truncated` 表示本次读取触达了读取上限（条数或字节预算），不表示事件正文被
 截断——事件正文的截断由事件级 `truncated` 表示。页级标志为 true 不代表一定还有
 剩余事件；即使 `max_bytes` 小于下一条事件的文本长度，也至少返回一条完整事件并
-置页级 `truncated`，保证 `next_seq` 前进；不存在「零进度」的响应。`dropped` 是
-任务内 ring buffer 的累计淘汰数。继续读取时直接传 `after_seq = next_seq`，并根据
-是否还有进程输出或任务状态决定停止。
+置页级 `truncated`，保证 `nextSeq` 前进；不存在「零进度」的响应。`dropped` 是
+任务内 ring buffer 的累计淘汰数。
+
+读取循环以页级 `truncated` 为准：`truncated == true` 就继续（即使 `status` 已是
+终态，因为终态任务仍保留未读事件）；只有 `truncated == false` 且 `status` 为终态
+才停止。终态不代表事件已读完，进程结束后事件仍可继续读取；只有任务记录被容量
+裁剪（单实例保留 128 个任务，先清理终态任务）或实例替换后才会消失。
 未知 task id 与 owner 不匹配统一返回 `unknown task`，不泄露另一会话的任务是否存在。
 
 ### 2.3 `monitor_stop`
@@ -130,7 +135,7 @@ monitor 任务时必须使用 `monitor_id`（或 `monitor_list` 的 `taskId`）�
 响应：`TaskSnapshot`，包含终态、`statusMessage` 与：
 
 ```json
-{ "cleanup": { "requested": true, "process_terminated": true } }
+{ "cleanup": { "requested": true, "processTerminated": true } }
 ```
 
 - 运行中：记录 stop 原因、请求取消、最多等待 3 秒让进程树退出，然后返回快照；
@@ -143,7 +148,8 @@ monitor 任务时必须使用 `monitor_id`（或 `monitor_list` 的 `taskId`）�
 响应：`{ "tasks": [TaskSnapshot...] }`，按 `startedAt` 倒序，只含本会话任务，
 不含事件正文，也不回显命令文本（避免把命令中的敏感值再次带入上下文）。
 `TaskSnapshot` 额外投影 `pendingWakes`、`wakeDropped`、`alertMatched`；`tasks/get`
-在 `_meta["peri/monitor"]` 中投影同一组计数。
+在 `_meta["peri/monitor"]` 中投影同一组计数。`tasks/get` / `tasks/cancel` 使用
+monitor id（`monitor-...`），不是宿主回执里的 `task_id`。
 
 ### 2.5 `monitor_wakes`（host-only）
 
@@ -208,9 +214,12 @@ working ───▶ cancelling（对外仍 working）──▶ cancelled       
 
 - 单条事件文本 ≤ 16 KiB，按 UTF-8 字符边界截断；超长行剩余部分丢弃到下一个换行。
 - 单次读取 ≤ 500 条 / 128 KiB；触达任一上限时页级 `truncated = true`，用
-  `next_seq` 继续。页级标志不承诺还有剩余事件。
+  `nextSeq` 继续。页级标志不承诺还有剩余事件。
 - ring buffer 按 `max_events` / `max_bytes` 淘汰最旧事件；被淘汰事件计入 `dropped`，
-  不会回填。`next_seq` 与 `dropped` 让调用方识别缺口。
+  不会回填。`nextSeq` 与 `dropped` 让调用方识别缺口。
+- 终态任务仍保留事件：读取循环在 `truncated == true` 时继续（即使 `status` 已终态），
+  只有 `truncated == false` 且终态才停止。事件在进程结束后仍可读，直到任务记录被
+  容量裁剪或实例替换。
 - 读取是纯内存操作，不重新执行命令，也不持久化事件。
 
 ## 4.1 alert 与唤醒（P2）
@@ -254,9 +263,10 @@ working ───▶ cancelling（对外仍 working）──▶ cancelled       
   调用、`tasks/get` 与 `tasks/cancel` 上注入 `peri/taskOwner`；其他 MCP server 保持
   generic。
 - **保留策略**：单实例最多保留 128 个任务记录。达到上限时先清理终态任务；仍有活动
-  任务则拒绝新的 `monitor_start`。
+  任务则拒绝新的 `monitor_start`。终态任务在被清理前仍可读取事件；没有「进程结束即
+  删除事件」的规则。
 - **进程所有权**：命令经 `peri_process::ProcessTree` 启动，使用独立进程组（Windows
-  为 Job）；停止/超时先终止整棵进程树，再有界等待退出。`cleanup.process_terminated`
+  为 Job）；停止/超时先终止整棵进程树，再有界等待退出。`cleanup.processTerminated`
   只在确认进程组不存在后为 true。
 - **输出读取**：每路输出一个 capture worker，使用有界行读取，避免无换行输出占满
   内存；终态提交前有界等待 worker 收尾，超时则 abort，避免终态后继续追加事件。

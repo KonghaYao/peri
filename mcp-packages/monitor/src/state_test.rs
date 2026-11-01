@@ -318,6 +318,66 @@ async fn completed_command_exposes_incremental_events_and_cursor() {
     assert_eq!(again.next_seq, 2);
 }
 
+/// A terminal task can still have a truncated first page. The documented loop
+/// (continue while `truncated`, stop only when terminal and `truncated` is
+/// false) must drain every retained event.
+#[cfg(unix)]
+#[tokio::test]
+async fn terminal_task_still_pages_remaining_events() {
+    let state = MonitorState::new(temp_cwd());
+    let started = state
+        .start(request("seq 1 1000"), None)
+        .await
+        .expect("start");
+    let snapshot = wait_terminal(&state, &started.task_id).await;
+    assert_eq!(snapshot.status, MonitorStatus::Completed);
+
+    let first = state
+        .read(
+            &started.task_id,
+            None,
+            None,
+            DEFAULT_READ_LIMIT,
+            DEFAULT_READ_BYTES,
+        )
+        .expect("first page");
+    assert_eq!(first.events.len(), DEFAULT_READ_LIMIT);
+    assert!(
+        first.truncated,
+        "1000 lines must not fit in one 200-event page"
+    );
+    assert_eq!(first.status, MonitorStatus::Completed);
+    assert_eq!(first.next_seq, DEFAULT_READ_LIMIT as u64);
+
+    let mut cursor = first.next_seq;
+    let mut total = first.events.len();
+    let mut pages = 1;
+    let last = loop {
+        pages += 1;
+        assert!(pages <= 10, "every page must make progress without looping");
+        let page = state
+            .read(
+                &started.task_id,
+                None,
+                Some(cursor),
+                DEFAULT_READ_LIMIT,
+                DEFAULT_READ_BYTES,
+            )
+            .expect("page");
+        total += page.events.len();
+        cursor = page.next_seq;
+        if !page.truncated {
+            break page;
+        }
+    };
+    assert_eq!(total, 1000, "the tail must not be lost after terminal");
+    assert_eq!(
+        last.events.last().map(|event| event.text.as_str()),
+        Some("1000")
+    );
+    assert_eq!(cursor, 1000);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn read_with_a_tiny_byte_budget_returns_one_event_and_progress() {
