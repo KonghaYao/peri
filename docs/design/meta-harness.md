@@ -14,7 +14,7 @@ MetaHarness 一个 kv 字段承载三项能力，key 类型决定动作：
 | key 类型 | value | 动作 |
 | --- | --- | --- |
 | 段落 ID | `true` | **覆盖系统提示词**（第一能力） |
-| middleware 名 / builtin 实例策略键 | `false` | **关闭能力**（第二能力）：链槽位名 ⇒ 该 middleware 不进链；builtin 实例策略键（`WebMiddleware` / `ArtifactMiddleware` / `CronMiddleware` / `WorkspaceMiddleware` / `WorkflowMiddleware`）⇒ 该实例的工具面关闭 |
+| middleware 名 / builtin 实例策略键 | `false` | **关闭能力**（第二能力）：链槽位名 ⇒ 该 middleware 不进链；builtin 实例策略键（`WebMiddleware` / `ArtifactMiddleware` / `CronMiddleware` / `MonitorMiddleware` / `WorkspaceMiddleware` / `WorkflowMiddleware`）⇒ 该实例的工具面关闭 |
 | `BuiltInSubagents` | `true` / `false` | 启用 / 屏蔽 compile-time built-in subagent definitions（默认启用） |
 
 `BuiltInSubagents` 只控制 built-in definition provider，不关闭 `SubAgentMiddleware`；
@@ -144,7 +144,7 @@ if !disabled.contains("TodoMiddleware") {
 }
 
 // builtin MCP 实例（`WebMiddleware` / `ArtifactMiddleware` / `CronMiddleware` /
-// `WorkspaceMiddleware` / `WorkflowMiddleware`）不走链构造：它们由关闭集映射为实例关闭集，
+// `MonitorMiddleware` / `WorkspaceMiddleware` / `WorkflowMiddleware`）不走链构造：它们由关闭集映射为实例关闭集，
 // 再交给工具面过滤（`assembly.rs`）。
 let closed_instances = crate::mcp::builtin::closed_instances(&disabled);
 ```

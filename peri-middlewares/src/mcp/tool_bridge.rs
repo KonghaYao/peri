@@ -468,9 +468,10 @@ impl BaseTool for McpToolBridge {
                 if is_monitor {
                     pool.ensure_monitor_wake_pump(session_id);
                     // The model sees the receipt, not the raw `CreateTaskResult`.
-                    // Expose both ids: `public_id` is the host registry id
-                    // (`tasks/get`), while the server task id is what
-                    // `monitor_read`/`monitor_stop` accept.
+                    // Expose both ids: `public_id` is the host task id (host task
+                    // management and the Tasks panel only), while the server task id
+                    // is what `monitor_read`/`monitor_stop`/`monitor_list` and MCP
+                    // `tasks/get` accept.
                     return Ok(super::tool_execution::monitor_started(public_id, &task_id));
                 }
                 // 回执只承诺可达的投递：有 canonical 路由 = 结果到达时持久记录；
