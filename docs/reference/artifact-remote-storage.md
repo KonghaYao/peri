@@ -202,7 +202,7 @@ curl -sS -X POST "$PERI_ARTIFACTS_URL/upload" \
 ```
 
 ```bash
-# 3) 进程级紧急闸门：一次关掉全部内置实例（web / artifact / cron / workspace / workflow）
+# 3) 进程级紧急闸门：一次关掉全部内置实例（web / artifact / cron / monitor / workspace / workflow）
 export PERI_MCP_BUILTIN=off
 ```
 

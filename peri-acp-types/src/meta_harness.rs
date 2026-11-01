@@ -155,6 +155,7 @@ pub const BUILTIN_INSTANCE_POLICY_KEYS: &[&str] = &[
     "WebMiddleware",
     "ArtifactMiddleware",
     "CronMiddleware",
+    "MonitorMiddleware",
     "WorkspaceMiddleware",
     // workflow builtin 实例的关闭键（用户配置兼容：沿用旧链槽位名，P5 后为唯一持有者）。
     "WorkflowMiddleware",

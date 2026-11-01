@@ -70,6 +70,7 @@ impl McpClientPool {
         session_id: String,
         raw_task_id: String,
         ticket: TaskRegistrationTicket,
+        owner_scoped: bool,
         is_workspace_shell: bool,
         initial_peer: Peer<RoleClient>,
     ) -> Result<(), crate::mcp::task_scope::TaskAdmissionError> {
@@ -93,7 +94,7 @@ impl McpClientPool {
                     break;
                 };
                 let mut params = GetTaskParams::new(&raw_task_id);
-                if is_workspace_shell {
+                if owner_scoped {
                     params.meta = pool.task_owner_meta_for(&server, &session_id);
                 }
                 let observed = match known_terminal.as_ref() {

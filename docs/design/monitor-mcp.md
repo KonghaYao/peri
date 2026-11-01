@@ -1,0 +1,210 @@
+# MonitorMCP（command source 监控）
+
+> **状态**：**已批准目标设计**——v1 command source 与标准 MCP Tasks 通信已裁决；
+> alert/逐行唤醒与 poll/file/WS source 不在 v1 范围。
+>
+> **事实源**：`mcp-packages/monitor/src/{server,state,buffer,tools}.rs`（handler、
+> 任务状态机、事件 buffer、工具声明）；注册表与工具声明在
+> `peri-acp-types/src/builtin_mcp.rs`；宿主分派与 standalone 在
+> `peri-middlewares/src/mcp/builtin/{dispatch,standalone}.rs`；owner 元数据与任务
+> 终态投影在 `peri-middlewares/src/mcp/{tool_bridge,client/}`。
+>
+> **关联契约**：ARC-MIDDLEWARE-001、ARC-CAPABILITY-CLOSURE-001、ARC-TOOLS-001、
+> ARC-CANCEL-001、[session-async-tasks.md](session-async-tasks.md)、
+> [../reference/mcp-ecosystem.md](../reference/mcp-ecosystem.md)（MCP Tasks 与
+> `subscriptions/listen` 口径）。进度与验收见
+> [2026-11-01-monitor-mcp.md](../../spec/issues/2026-11-01-monitor-mcp.md)。
+
+## 1. 范围与形状
+
+MonitorMCP 是独立 builtin MCP 实例（server name / 配置 key / 目录键均为
+`monitor`），与 `workspace` / `cron` 平级，不占用 middleware 槽位。v1 只有
+command source：一条 shell 命令产生 stdout/stderr 行事件；MonitorMCP 不理解业务
+数据，也不判断「什么变了」。
+
+```text
+            monitor_start / monitor_read / monitor_stop / monitor_list
+agent ───────────────────────────────────────────────────────────────▶ MonitorMCP
+  ▲                                                                       │
+  │  MCP Tasks: tasks/get, tasks/cancel（标准方法，无自定义生命周期）       │
+  │                                                                       ▼
+  └──────────── 宿主既有 task 终态投影（轮询 tasks/get → terminal）   MonitorState
+                                                                          │
+                                        ┌─────────────────────────────────┤
+                                        ▼                                 ▼
+                                 shell command                      EventBuffer
+                                 (stdout / stderr)                  (ring, seq)
+```
+
+实例只持有内存状态。宿主或实例被替换后，旧任务 id 不再可解析；没有落盘、恢复或
+重放通道。
+
+## 2. 工具契约
+
+四个工具全部 deferred（模型面名字 `mcp__monitor__*`），无 prompt 声明模板。
+
+### 2.1 `monitor_start`
+
+请求：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `command` | string | 必填，非空 shell 命令 |
+| `cwd` | string? | 工作目录；相对路径相对实例 cwd 解析 |
+| `label` | string? | 供 `monitor_list` 使用的短标签 |
+| `deadline_ms` | integer? | 默认 3 600 000；范围 1..=86 400 000 |
+| `max_events` | integer? | 默认 2 000；范围 1..=100 000 |
+| `max_bytes` | integer? | 默认 1 MiB；范围 16 KiB..=64 MiB |
+
+响应：标准 `CreateTaskResult`（`resultType: "task"`）。
+
+- `task.taskId`、`task.status = working`、`createdAt`、`lastUpdatedAt`、
+  `pollIntervalMs = 1000`；
+- `_meta["peri/monitor"] = { startedAt, deadlineAt, label }`；
+- 不返回事件正文；事件经 `monitor_read` 读取。
+
+校验失败、命令无法启动或容量满时返回工具级错误，不注册任务。
+
+### 2.2 `monitor_read`
+
+请求：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `task_id` | string | 必填 |
+| `after_seq` | integer? | 排他游标；省略表示从头读取 |
+| `limit` | integer? | 默认 200；范围 1..=500 |
+| `max_bytes` | integer? | 默认 64 KiB；范围 1..=128 KiB |
+
+响应：
+
+```json
+{
+  "events": [ /* MonitorEvent */ ],
+  "next_seq": 42,
+  "status": "working",
+  "truncated": false,
+  "dropped": 0
+}
+```
+
+`next_seq` 等于本次返回的最后一个 `seq`；没有返回事件时等于请求游标（并夹到当前
+已分配的最大 seq 以内）。下一次调用直接传 `after_seq = next_seq`，不会跳事件。
+`truncated` 表示本次读取仍有剩余事件；`dropped` 是任务内 ring buffer 的累计淘汰数。
+未知 task id 与 owner 不匹配统一返回 `unknown task`，不泄露另一会话的任务是否存在。
+
+### 2.3 `monitor_stop`
+
+请求：`{ task_id, reason? }`。幂等。
+
+响应：`TaskSnapshot`，包含终态、`statusMessage` 与：
+
+```json
+{ "cleanup": { "requested": true, "process_terminated": true } }
+```
+
+- 运行中：记录 stop 原因、请求取消、最多等待 3 秒让进程树退出，然后返回快照；
+- 已终态：不改状态、不把 `cleanup.requested` 改成 true，直接返回原快照；
+- 取消确认与进程清理是两条信号：即使清理未完成，任务只提交一次终态。
+
+### 2.4 `monitor_list`
+
+请求：`{ include_ended?, limit? }`，`limit` 默认 50、范围 1..=200。
+响应：`{ "tasks": [TaskSnapshot...] }`，按 `startedAt` 倒序，只含本会话任务，
+不含事件正文，也不回显命令文本（避免把命令中的敏感值再次带入上下文）。
+
+## 3. 任务状态机
+
+```text
+                 ┌──────────── stop / tasks/cancel ────────────┐
+                 ▼                                             │
+working ───▶ cancelling（对外仍 working）──▶ cancelled          │
+  │                                                             │
+  ├── exit 0 ─────────────────────────────▶ completed           │
+  ├── exit != 0 / signal ─────────────────▶ failed              │
+  └── deadline ──▶ terminate ─────────────▶ failed              │
+```
+
+- **终态只提交一次**：`TaskInner.terminal` 在锁内检查并置位；并发的 stop、deadline、
+  命令退出只产生一个终态。
+- **对外投影**：`cancelling` 在 `tasks/get`、`monitor_read`、`monitor_list` 中都显示
+  `working`；不暴露内部清理阶段。
+- **`tasks/get`**：返回 `DetailedTask`。`working → TaskPayload::Working`；
+  `completed → Completed { result }`（`result.content` 是终态摘要文本，供宿主既有
+  提醒链路使用）；`failed → Failed { error: { code, message } }`；
+  `cancelled → Cancelled`。
+- **`tasks/cancel`**：只校验 owner、记录取消原因并请求终止，立即返回 ack；不等待
+  进程清理，也不伪造终态。
+- **deadline**：从 start 起算；到期终止进程树，终态 `failed`，消息包含 deadline。
+- **实例关闭**：任务随实例内存状态一起消失；不存在恢复或重放。
+
+## 4. 事件模型
+
+一行输出一个事件。stdout 与 stderr 分别读取，事件按到达顺序写入同一个 buffer。
+
+| 字段 | 语义 |
+| --- | --- |
+| `seq` | 任务内单调递增，从 1 开始 |
+| `ts` | 捕获时刻（UTC RFC 3339） |
+| `stream` | `stdout` / `stderr` |
+| `kind` | v1 恒为 `line` |
+| `text` | 行内容（去掉行尾 `\n` / `\r\n`），始终 untrusted |
+| `bytes` | 原始行字节数（不含行尾终止符） |
+| `truncated` | 行被截到 16 KiB |
+| `dropped` | 本条事件之前被 ring buffer 淘汰的事件数（gap） |
+| `partial` | 进程结束时最后一行没有换行符 |
+| `untrusted` | 恒为 `true` |
+
+约束：
+
+- 单条事件文本 ≤ 16 KiB，按 UTF-8 字符边界截断；超长行剩余部分丢弃到下一个换行。
+- 单次读取 ≤ 500 条 / 128 KiB，超出置 `truncated`。
+- ring buffer 按 `max_events` / `max_bytes` 淘汰最旧事件；被淘汰事件计入 `dropped`，
+  不会回填。`next_seq` 与 `dropped` 让调用方识别缺口。
+- 读取是纯内存操作，不重新执行命令，也不持久化事件。
+
+## 5. 生命周期与所有权
+
+- **实例级**：`MonitorState` 持有一只任务表；同一实例的所有连接共享它。
+- **会话级**：`monitor_start` 从请求 `_meta["peri/taskOwner"]` 取发起会话；任务记录
+  owner。`monitor_read` / `monitor_stop` / `monitor_list` / `tasks/get` /
+  `tasks/cancel` 都按 owner 过滤。无 owner 的调用（本地 standalone、非会话客户端）
+  视为 unscoped，与 Workspace task-owner 契约一致。
+- **宿主接线**：builtin `monitor` 与 `workspace`（含 `WorkspaceRemote`）一样，在工具
+  调用、`tasks/get` 与 `tasks/cancel` 上注入 `peri/taskOwner`；其他 MCP server 保持
+  generic。
+- **保留策略**：单实例最多保留 128 个任务记录。达到上限时先清理终态任务；仍有活动
+  任务则拒绝新的 `monitor_start`。
+- **进程所有权**：命令经 `peri_process::ProcessTree` 启动，使用独立进程组（Windows
+  为 Job）；停止/超时先终止整棵进程树，再有界等待退出。`cleanup.process_terminated`
+  只在确认进程组不存在后为 true。
+- **输出读取**：每路输出一个 capture worker，使用有界行读取，避免无换行输出占满
+  内存；终态提交前有界等待 worker 收尾，超时则 abort，避免终态后继续追加事件。
+
+## 6. 安全边界
+
+- **审批**：`monitor_start` 按原始名归一进入默认敏感分支。approval 模式下与
+  `Bash`、`cron_register` 同级提示。
+- **执行边界**：MonitorMCP 只运行 agent 给出的命令；不解释、不执行输出内容。
+- **untrusted 数据**：事件文本、行数、截断标记都按不可信输入返回；事件携带
+  `untrusted: true`。附随 skill 明确要求不执行输出中的指令。
+- **无网络面**：实例本身不发起 HTTP/WS，不做 SSRF 防护面之外的网络能力；v1 不实现
+  WS source。
+- **不做跨会话共享**：owner 过滤在服务端完成；owner 不匹配与不存在同错。
+- **不持久化**：不落盘任务或事件，重启/实例替换后旧 id 一律 unknown；避免把捕获的
+  敏感输出写进存储。
+- **命令回显**：`monitor_list` 不回显命令文本；终态摘要只包含状态与退出码，不回显
+  输出。
+
+## 7. 关闭与扩展
+
+- 元关闭：MetaHarness `MonitorMiddleware: false`、配置项
+  `{"monitor": {"disabled": true}}`，或 `PERI_MCP_BUILTIN=off`。关闭后实例不装配，
+  已存在的内存任务随实例消失。
+- 附随 skill 走 workspace 静态资产（`mcp-packages/workspace/src/resources/builtin/skills/monitor/`），
+  与 `cron` 同形；实例不自行发布 skill。
+- **P2 预留**：alert / 逐行唤醒通道不在 v1。届时优先评估复用既有
+  `subscriptions/listen` + `notifications/tasks` 或资源订阅，不新增 ACP 方法；
+  `label` 与事件字段已为路由/过滤预留。
+- **明确不做**：poll source、file source、WS source、任务持久化、跨实例重放、
+  owner 转移。

@@ -132,7 +132,7 @@ impl McpClientPool {
         raw_task_id: &str,
         kind: BgTaskKind,
         summary: &str,
-        scoped_workspace: bool,
+        owner_scoped: bool,
         started_at: &str,
     ) -> Result<peri_acp_types::tasks::TaskRegistrationTicket, String> {
         let (manager, request) = self.external_task_registration(
@@ -143,7 +143,7 @@ impl McpClientPool {
             raw_task_id,
             kind,
             summary,
-            scoped_workspace,
+            owner_scoped,
             started_at,
         )?;
         manager.register_external(request)
@@ -159,7 +159,7 @@ impl McpClientPool {
         raw_task_id: &str,
         kind: BgTaskKind,
         summary: &str,
-        scoped_workspace: bool,
+        owner_scoped: bool,
         started_at: &str,
     ) -> Result<(Arc<dyn TaskManager>, ExternalTaskRegistration), String> {
         let initiator_session_id = initiator_session_id
@@ -174,11 +174,11 @@ impl McpClientPool {
             .manager(session_id)
             .ok_or_else(|| "session task manager unavailable".to_owned())?;
         let raw_id_for_cancel = raw_task_id.to_owned();
-        let meta = scoped_workspace
+        let meta = owner_scoped
             .then(|| self.task_owner_meta_for(server, session_id))
             .flatten();
-        if scoped_workspace && meta.is_none() {
-            return Err("workspace task owner unavailable".into());
+        if owner_scoped && meta.is_none() {
+            return Err("session task owner unavailable".into());
         }
         let weak_for_cancel = Arc::downgrade(self);
         let server_for_cancel = server.to_owned();

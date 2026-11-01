@@ -576,7 +576,7 @@ Peri 不实现上述 Web Host ↔ App 的 handshake；Peri 只承载下游选择
 ### 9.1 当前代码事实
 
 - MCP client 已进入 peri 主代码（`peri-middlewares/src/mcp/`，基于 rmcp）：tools 桥接、资源读取（`mcp_read_resource`）、OAuth、重连，以及由 `PERI_MCP_APPS` 启用的 stdio Apps relay 均已落地；Web Host、iframe 与 TUI Apps 渲染不属于 relay。
-- **builtin 实例**：`web` / `artifact` / `cron` / `workspace` / `workflow` 是 peri 自身的**同进程** MCP 实例（`TransportConfig::Builtin`：进程内 `duplex` + `rmcp::serve_server`），由默认配置层按 `system_mcp = true` 注入，与外部 server 走完全相同的连接、发现与提升链路：真实 `tools/list` 才提交 ready，工具仍经 `McpToolBridge` 包装，并沿用审批、事件投影与 cancel。旧的 Web / Artifact / Cron / Filesystem / Terminal / GitWatch / Workflow 链槽位均已删除，对应能力只由实例提供，原链槽位名转为实例关闭键（§9.8）。
+- **builtin 实例**：`web` / `artifact` / `cron` / `monitor` / `workspace` / `workflow` 是 peri 自身的**同进程** MCP 实例（`TransportConfig::Builtin`：进程内 `duplex` + `rmcp::serve_server`），由默认配置层按 `system_mcp = true` 注入，与外部 server 走完全相同的连接、发现与提升链路：真实 `tools/list` 才提交 ready，工具仍经 `McpToolBridge` 包装，并沿用审批、事件投影与 cancel。旧的 Web / Artifact / Cron / Filesystem / Terminal / GitWatch / Workflow 链槽位均已删除，对应能力只由实例提供，原链槽位名转为实例关闭键（§9.8）。
 - **workspace 实例**：文件/终端工具的唯一提供面，全部 direct，模型面使用原始名。实现在 `mcp-packages/workspace`（`WorkspaceMcpServer::standalone`；文件工具在 `src/filesystem/`，`BashTool` 在 `src/terminal.rs`），实例自己持有 `ShellTasks`，不向会话注入后台任务状态；会话装配把资源面输入（`WorkspaceResourcesInput`）经 `HostAssemblyInput.workspace_resources` 传入。`--bare` 只装配 workspace（`load_bare_config` / `run_initialize_bare` 保留该实例），bare 下这些工具仍在；链上不存在 middleware 回退面。
 - **MCP 域查询与技能分发**：DiscoverMCP 只读工具（deferred / `meta`，search / list / detail）+ MCP `skill://` 异步发现与命令注入（McpSkillRegistry，session 级，分源合并），形态见 §7.4。
 - **MCP Apps relay**：实际行为与安全边界以 `docs/design/mcp-multiplexing.md`、对应代码和契约测试为准。
@@ -678,7 +678,7 @@ peri 作为 MCP client，对照 2026-07-28 协议能力面的支持度与路线�
 
 ### 9.8 Builtin MCP 实例：名字、关闭语义与保留名
 
-peri 自带的 Web / Artifact / Cron / Workspace / Workflow 能力不是 middleware 提供面，而是 peri 自身的**同进程** MCP 实例：`web`（`WebSearch` / `WebFetch`）、`artifact`（`artifact`）、`cron`（cron 工具）、`workspace`（`Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`）与 `workflow`（编排工具）。工具、直连性与关闭键以 `peri-acp-types/src/builtin_mcp.rs` 的 `BUILTIN_MCP_INSTANCES` 为唯一事实源，下表是当前投影。它们经 `TransportConfig::Builtin`（进程内 `duplex` + `rmcp::serve_server`）接入与外部 server **完全相同**的连接、发现与提升链路：真实 `tools/list` 才提交 ready，工具仍经 `McpToolBridge` 包装，并沿用审批、事件投影与 cancel。
+peri 自带的 Web / Artifact / Cron / Monitor / Workspace / Workflow 能力不是 middleware 提供面，而是 peri 自身的**同进程** MCP 实例：`web`（`WebSearch` / `WebFetch`）、`artifact`（`artifact`）、`cron`（cron 工具）、`monitor`（`monitor_start` / `monitor_read` / `monitor_stop` / `monitor_list`）、`workspace`（`Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`）与 `workflow`（编排工具）。工具、直连性与关闭键以 `peri-acp-types/src/builtin_mcp.rs` 的 `BUILTIN_MCP_INSTANCES` 为唯一事实源，下表是当前投影。它们经 `TransportConfig::Builtin`（进程内 `duplex` + `rmcp::serve_server`）接入与外部 server **完全相同**的连接、发现与提升链路：真实 `tools/list` 才提交 ready，工具仍经 `McpToolBridge` 包装，并沿用审批、事件投影与 cancel。
 
 | 实例（配置 key / server name） | 原始工具名（wire · 配置 · 审批判定） | 模型面名字（LLM tools · 事件 · transcript） | 直连性 | 关闭策略键 |
 | --- | --- | --- | --- | --- |
@@ -686,27 +686,28 @@ peri 自带的 Web / Artifact / Cron / Workspace / Workflow 能力不是 middlew
 | `web` | `WebFetch` | `WebFetch` | direct | `WebMiddleware` |
 | `artifact` | `artifact` | `artifact` | direct | `ArtifactMiddleware` |
 | `cron` | `cron_register` / `cron_list` / `cron_remove` / `cron_toggle`（模型可见）；`cron_acknowledge` 仅宿主 | `mcp__cron__<tool>` | deferred | `CronMiddleware` |
+| `monitor` | `monitor_start` / `monitor_read` / `monitor_stop` / `monitor_list` | `mcp__monitor__<tool>` | deferred | `MonitorMiddleware` |
 | `workspace` | `Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash` | 同名 | direct | `WorkspaceMiddleware` |
 | `workflow` | `Workflow` / `WorkflowStatus` / `WorkflowKill` | `mcp__workflow__<tool>` | deferred | `WorkflowMiddleware` |
 
 `workflow` 实例还声明宿主回填通道工具（`WorkflowAgentResult` 等）：它们保留在实例 `tools/list` 中供宿主经池调用，但不进入桥接、ToolSearch 索引与 LLM tools 参数；可见性不是授权边界，服务端仍校验调用方令牌。
 
-`web` / `artifact` / `workspace` 声明的工具是 **direct**（直接进 LLM tools 参数，不经 tool search，§3.2），模型面使用原始名；`cron` 与 `workflow` 的模型面工具是 **deferred**——只经 `SearchExtraTools` 发现、`ExecuteExtraTool` 执行，且 `system_mcp_tools` 为空数组，不会被提升成 direct。普通 MCP 的工具名仍使用 `mcp__<server>__<tool>`。MCP wire 上的 `tools/call.name` 始终是原始工具名。
+`web` / `artifact` / `workspace` 声明的工具是 **direct**（直接进 LLM tools 参数，不经 tool search，§3.2），模型面使用原始名；`cron`、`monitor` 与 `workflow` 的模型面工具是 **deferred**——只经 `SearchExtraTools` 发现、`ExecuteExtraTool` 执行，且 `system_mcp_tools` 为空数组，不会被提升成 direct。普通 MCP 的工具名仍使用 `mcp__<server>__<tool>`。MCP wire 上的 `tools/call.name` 始终是原始工具名。
 
 模型可见名发生冲突时，启动继续运行并记录 warning；按确定的准入顺序保留先准入者，后续冲突项不覆盖。连接完成先后不参与胜者选择。真实缺失的必需工具和无效 schema 仍使启动失败。`system_mcp_tools: []` 只要求 ready，cron 的 deferred 行为保持不变。
 
 **默认注入与用户覆盖**：全部已实现实例由**本地默认配置层**注入，`.mcp.json` 与 `~/.peri/settings.json` 里不需要写任何东西；注入后它们就是普通的 `system_mcp = true` 实例（三 key 语义见 §9.2）。用户仍可为任一实例写配置条目：
 
-- `{"web": {}}`（任何不带 `command` / `url` 的条目）：仍是 builtin 实例，并自动写入 `system_mcp = true` 与 `system_mcp_tools`（`web` / `artifact` / `workspace` 为该实例声明为 direct 的工具名，`cron` / `workflow` 为 `[]`，均不做字段级深合并）。效果是沿用声明表的直连性、**不会**被配置改写：direct 工具不会静默降级为 deferred，deferred 工具也不会因为没有工具名而被提升为 direct。
+- `{"web": {}}`（任何不带 `command` / `url` 的条目）：仍是 builtin 实例，并自动写入 `system_mcp = true` 与 `system_mcp_tools`（`web` / `artifact` / `workspace` 为该实例声明为 direct 的工具名，`cron` / `monitor` / `workflow` 为 `[]`，均不做字段级深合并）。效果是沿用声明表的直连性、**不会**被配置改写：direct 工具不会静默降级为 deferred，deferred 工具也不会因为没有工具名而被提升为 direct。
 - `{"web": {"disabled": true}}`：**唯一合法的关闭写法**。实例仍在 pool 中，状态为 `Disabled`（`ClientStatus`），不构成 system 启动依赖；其它实例与其它 capability 不受影响。
 - `{"web": {"disabled": true, "system_mcp": true}}`：**加载期拒绝**（typed error），不会启动。禁用与「声明为 system 依赖」互斥——若不拒绝，该组合会走到 readiness 的 fatal 并阻断**所有** session。
 - 给保留名声明 `command` / `url`（试图用外部进程接管这个名字）：**加载期拒绝**（typed error，错误文本只含实例名）。
 
-**保留实例名**：`web` / `artifact` / `cron` / `workspace` / `workflow` 均已实现（`BUILTIN_RESERVED_INSTANCE_NAMES` 即此集合，无「预留但未实现」的名字）。任一保留名都不得被配置用 `command` / `url` 接管：这些名字参与「按原始名判定」的审批与关闭语义，外部同名 server 一旦接管就会继承 builtin 一等工具的判定结果（静默移除 `mcp__*` 审批门），因此加载期即拒绝。该拒绝与非法关闭片段的拒绝都是**与 `PERI_MCP_BUILTIN` 无关**的加载期校验：即使把 env 置为 off，两类非法输入仍报 typed error。
+**保留实例名**：`web` / `artifact` / `cron` / `monitor` / `workspace` / `workflow` 均已实现（`BUILTIN_RESERVED_INSTANCE_NAMES` 即此集合，无「预留但未实现」的名字）。任一保留名都不得被配置用 `command` / `url` 接管：这些名字参与「按原始名判定」的审批与关闭语义，外部同名 server 一旦接管就会继承 builtin 一等工具的判定结果（静默移除 `mcp__*` 审批门），因此加载期即拒绝。该拒绝与非法关闭片段的拒绝都是**与 `PERI_MCP_BUILTIN` 无关**的加载期校验：即使把 env 置为 off，两类非法输入仍报 typed error。
 
 **关闭的三条路径**：关闭必须在同一 turn 的同一份 frozen policy 下**同时**从四个用户可观察面移除该实例的工具——首个 LLM 请求的 `tools`、tool search（`SearchExtraTools`）的 deferred 目录与检索结果、子 agent 继承面（`parent_tools`）、workflow agent 的工具列表。direct 工具会真实出现在后两面；deferred 工具在后两面**平凡成立**——不是被过滤掉，而是本来就不在那里。
 
-1. **MetaHarness 策略键**（会话级）：`"WebMiddleware": false` / `"ArtifactMiddleware": false` / `"CronMiddleware": false` / `"WorkspaceMiddleware": false` / `"WorkflowMiddleware": false`。这些键不再是链槽位名（`MIDDLEWARE_NAMES` 只含链槽位名），而是 builtin 实例关闭键（`BUILTIN_INSTANCE_POLICY_KEYS`）；两表并集才是「已知键」集合，因此旧配置里的这些键**不会**被当成未知键忽略（未知键才是 warn + 忽略；`FilesystemMiddleware` / `TerminalMiddleware` 这两个旧键已是未知键，写它们只 warn 不生效）。
+1. **MetaHarness 策略键**（会话级）：`"WebMiddleware": false` / `"ArtifactMiddleware": false` / `"CronMiddleware": false` / `"MonitorMiddleware": false` / `"WorkspaceMiddleware": false` / `"WorkflowMiddleware": false`。这些键不再是链槽位名（`MIDDLEWARE_NAMES` 只含链槽位名），而是 builtin 实例关闭键（`BUILTIN_INSTANCE_POLICY_KEYS`）；两表并集才是「已知键」集合，因此旧配置里的这些键**不会**被当成未知键忽略（未知键才是 warn + 忽略；`FilesystemMiddleware` / `TerminalMiddleware` 这两个旧键已是未知键，写它们只 warn 不生效）。
 2. **用户配置**（实例级）：`{"web": {"disabled": true}}` 等，任一实例同理。
 3. **环境开关**（进程级紧急闸门）：`PERI_MCP_BUILTIN`。
 

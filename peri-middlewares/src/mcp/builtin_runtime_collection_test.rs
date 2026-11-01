@@ -48,7 +48,7 @@ fn make_tool(name: &str) -> Tool {
     .unwrap()
 }
 
-/// 一个含**四个** builtin 实例（web / artifact / cron / workspace）+ 一个外部
+/// 一个含**六个** builtin 实例（web / artifact / cron / monitor / workspace / workflow）+ 一个外部
 /// server 的 deployment pool。
 ///
 /// 工具清单与 builtin 注册表一致：`web` 提供 WebSearch / WebFetch，`artifact` 提供
@@ -86,6 +86,16 @@ fn pool_with_builtin_instances() -> Arc<McpClientPool> {
     pool.clients.write().insert(
         "workspace".to_string(),
         connected_handle("workspace", &workspace_tools),
+    );
+    let monitor_tools: Vec<&str> = peri_acp_types::builtin_mcp::find("monitor")
+        .expect("monitor 已实现")
+        .tools
+        .iter()
+        .map(|tool| tool.original_name)
+        .collect();
+    pool.clients.write().insert(
+        "monitor".to_string(),
+        connected_handle("monitor", &monitor_tools),
     );
     let workflow_tools: Vec<&str> = peri_acp_types::builtin_mcp::find("workflow")
         .expect("workflow 已实现（wave 5）")

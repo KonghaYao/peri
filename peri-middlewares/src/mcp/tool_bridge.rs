@@ -387,6 +387,9 @@ impl BaseTool for McpToolBridge {
             rmcp::model::CallToolResponse::Task(created) => {
                 let task_created_at = created.task.created_at;
                 let task_id = created.task.task_id;
+                let owner_scoped = super::client::task_owner_metadata::source_uses_task_owner(
+                    self.client.source.as_ref(),
+                );
                 let is_shell = self.tool_name == "Bash"
                     && (matches!(
                         self.client.source.as_ref(),
@@ -417,7 +420,7 @@ impl BaseTool for McpToolBridge {
                     &task_id,
                     kind,
                     summary,
-                    is_shell,
+                    owner_scoped,
                     &task_created_at,
                 )?;
                 let ticket = match manager.register_external(registration) {
@@ -439,6 +442,7 @@ impl BaseTool for McpToolBridge {
                     session_id.to_owned(),
                     task_id.clone(),
                     ticket,
+                    owner_scoped,
                     is_shell,
                     peer.clone(),
                 ) {

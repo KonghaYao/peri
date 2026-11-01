@@ -101,12 +101,13 @@ fn tools_are_non_empty_and_unique_per_instance() {
                 }
             }
             // wave 2：cron 冻结 `None`（A4：声明段零变化）。
+            // monitor：四个工具同样无 `BaseTool::prompt_declaration()` 文本。
             // wave 5：workflow 四项同形（无 `BaseTool::prompt_declaration()` 文本）。
-            "cron" | "workflow" => {
+            "cron" | "monitor" | "workflow" => {
                 for tool in instance.tools {
                     assert!(
                         tool.prompt_declaration.is_none(),
-                        "实例 {} 的工具 {} 必须无声明模板（cron / workflow）",
+                        "实例 {} 的工具 {} 必须无声明模板（cron / monitor / workflow）",
                         instance.name,
                         tool.original_name
                     );
@@ -188,8 +189,15 @@ fn reserved_names_superset_of_implemented_instances() {
             instance.name
         );
     }
-    // 保留名表本身冻结：五个名字逐一覆盖（全部为已实现实例）。
-    for reserved in ["web", "artifact", "cron", "workspace", "workflow"] {
+    // 保留名表本身冻结：六个名字逐一覆盖（全部为已实现实例）。
+    for reserved in [
+        "web",
+        "artifact",
+        "cron",
+        "monitor",
+        "workspace",
+        "workflow",
+    ] {
         assert!(
             BUILTIN_RESERVED_INSTANCE_NAMES.contains(&reserved),
             "保留名表缺失: {reserved}"
@@ -217,6 +225,7 @@ fn policy_keys_are_unique_and_frozen() {
         "WebMiddleware",
         "ArtifactMiddleware",
         "CronMiddleware",
+        "MonitorMiddleware",
         "WorkspaceMiddleware",
         "WorkflowMiddleware",
     ]
@@ -394,7 +403,7 @@ fn wave1_tools_are_all_declared_direct() {
                     "实例 {} 的工具 {} 在 wave 1 必须声明 direct",
                     instance.name, tool.original_name
                 ),
-                "cron" => assert!(
+                "cron" | "monitor" => assert!(
                     !tool.direct,
                     "实例 {} 的工具 {} 必须声明 direct: false（A4：deferred 工具）",
                     instance.name, tool.original_name

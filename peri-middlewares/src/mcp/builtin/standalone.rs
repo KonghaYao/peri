@@ -35,6 +35,8 @@ pub(crate) struct StandaloneFactory {
     context: BuiltinInstanceContext,
     /// Pre-built shared Workspace handler (`None` for every other instance).
     workspace: Option<WorkspaceMcpServer>,
+    /// Pre-built shared Monitor handler (`None` for every other instance).
+    monitor: Option<peri_mcp_monitor::MonitorMcpServer>,
 }
 
 impl StandaloneFactory {
@@ -48,6 +50,7 @@ impl StandaloneFactory {
         let cwd = workspace.to_string_lossy().into_owned();
         let mut context = BuiltinInstanceContext::new(cwd.clone());
         let mut workspace_server = None;
+        let mut monitor_server = None;
         match instance {
             "cron" => {
                 let (trigger_tx, trigger_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -69,6 +72,12 @@ impl StandaloneFactory {
             "workflow" => {
                 context = context.with_workflow(WorkflowInstanceInput::slot());
             }
+            // Monitor needs only the instance cwd; pre-building shares the
+            // in-memory registry across HTTP sessions (owner filtering still
+            // applies per request).
+            "monitor" => {
+                monitor_server = Some(peri_mcp_monitor::MonitorMcpServer::new(cwd.clone()));
+            }
             _ => {}
         }
         Ok(Self {
@@ -76,12 +85,16 @@ impl StandaloneFactory {
             env: std::env::vars().collect(),
             context,
             workspace: workspace_server,
+            monitor: monitor_server,
         })
     }
 
     pub(crate) fn create(&self) -> io::Result<BuiltinServerHandler> {
         if let Some(workspace) = &self.workspace {
             return Ok(BuiltinServerHandler::Workspace(workspace.clone()));
+        }
+        if let Some(monitor) = &self.monitor {
+            return Ok(BuiltinServerHandler::Monitor(monitor.clone()));
         }
         builtin_server_handler_with_env(&self.instance, &self.context, &self.env).ok_or_else(|| {
             io::Error::other(format!(

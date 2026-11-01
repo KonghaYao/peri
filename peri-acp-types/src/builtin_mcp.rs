@@ -10,10 +10,11 @@
 //!
 //! 三分类概念（不要混淆）：
 //! - **已实现实例**：[`BUILTIN_MCP_INSTANCES`]（wave 1 = `web` / `artifact`，
-//!   wave 2 增 `cron`，wave 3 增 `workspace`），可被
+//!   wave 2 增 `cron`，wave 3 增 `workspace`，wave 5 增 `workflow`，之后增
+//!   `monitor`），可被
 //!   `TransportConfig::Builtin` 解析、可参与默认层注入。
 //! - **保留实例名**：[`BUILTIN_RESERVED_INSTANCE_NAMES`] = 已实现实例 +
-//!   后续波次预留。当前四个保留名全部已实现（无「预留但未实现」的名字）。
+//!   后续波次预留。当前六个保留名全部已实现（无「预留但未实现」的名字）。
 //!   用户配置不得用 `command`/`url` 接管任一保留名（加载期 typed error），
 //!   否则会按名字反查继承「按原始名判定」的审批结果，静默移除 `mcp__*` 审批门。
 //! - **归一表**：[`original_tool_name_of_effective`] 只索引本文件的冻结字面量，
@@ -149,6 +150,51 @@ const CRON_TOOLS: &[BuiltinMcpTool] = &[
         effective_name: "mcp__cron__cron_acknowledge",
         direct: false,
         model_visible: false,
+        prompt_declaration: None,
+    },
+];
+
+/// `monitor` 实例的工具声明（4 项；顺序即声明段顺序）。
+///
+/// v1 只做 command source。四个工具一律 deferred（`direct: false`）且无提示词
+/// 声明模板（与 `cron` 同形）。`monitor_start` 返回标准 MCP Tasks 句柄，
+/// `monitor_read` / `monitor_stop` / `monitor_list` 返回 Complete 结果。
+/// 任务状态纯内存；重启或实例替换后旧 id 一律 unknown。
+const MONITOR_TOOLS: &[BuiltinMcpTool] = &[
+    BuiltinMcpTool {
+        context_retention: crate::tools::ContextRetention::SideEffectReceipt,
+        completes_on_response: false,
+        original_name: "monitor_start",
+        effective_name: "mcp__monitor__monitor_start",
+        direct: false,
+        model_visible: true,
+        prompt_declaration: None,
+    },
+    BuiltinMcpTool {
+        context_retention: crate::tools::ContextRetention::Recomputable,
+        completes_on_response: true,
+        original_name: "monitor_read",
+        effective_name: "mcp__monitor__monitor_read",
+        direct: false,
+        model_visible: true,
+        prompt_declaration: None,
+    },
+    BuiltinMcpTool {
+        context_retention: crate::tools::ContextRetention::SideEffectReceipt,
+        completes_on_response: true,
+        original_name: "monitor_stop",
+        effective_name: "mcp__monitor__monitor_stop",
+        direct: false,
+        model_visible: true,
+        prompt_declaration: None,
+    },
+    BuiltinMcpTool {
+        context_retention: crate::tools::ContextRetention::Recomputable,
+        completes_on_response: true,
+        original_name: "monitor_list",
+        effective_name: "mcp__monitor__monitor_list",
+        direct: false,
+        model_visible: true,
         prompt_declaration: None,
     },
 ];
@@ -340,7 +386,7 @@ const WORKFLOW_TOOLS: &[BuiltinMcpTool] = &[
 ];
 
 /// 已实现的 builtin 实例（wave 1 = `web` / `artifact`；wave 2 增 `cron`；
-/// wave 3 增 `workspace`；wave 5 增 `workflow`）。
+/// wave 3 增 `workspace`；wave 5 增 `workflow`；monitor 增 `monitor`）。
 ///
 /// 这是「实例 / 原始工具名 / effective name / 逐工具 `direct` / `prompt_declaration` /
 /// 关闭键」的**唯一事实源**：关闭集判定、默认层注入、`system_mcp_tools`、归一表与
@@ -365,6 +411,12 @@ pub const BUILTIN_MCP_INSTANCES: &[BuiltinMcpInstance] = &[
         tools: CRON_TOOLS,
     },
     BuiltinMcpInstance {
+        name: "monitor",
+        instance: "monitor",
+        policy_key: "MonitorMiddleware",
+        tools: MONITOR_TOOLS,
+    },
+    BuiltinMcpInstance {
         name: "workspace",
         instance: "workspace",
         policy_key: "WorkspaceMiddleware",
@@ -381,10 +433,16 @@ pub const BUILTIN_MCP_INSTANCES: &[BuiltinMcpInstance] = &[
 
 /// 保留实例名：已实现实例 + 后续波次预留。
 ///
-/// 当前五个保留名全部已实现（无「预留但未实现」的名字）；用户配置为任一
+/// 当前六个保留名全部已实现（无「预留但未实现」的名字）；用户配置为任一
 /// 保留名声明 `command` 或 `url` 一律是加载期 typed error。
-pub const BUILTIN_RESERVED_INSTANCE_NAMES: &[&str] =
-    &["web", "artifact", "cron", "workspace", "workflow"];
+pub const BUILTIN_RESERVED_INSTANCE_NAMES: &[&str] = &[
+    "web",
+    "artifact",
+    "cron",
+    "monitor",
+    "workspace",
+    "workflow",
+];
 
 /// 按实例身份解析**已实现**实例；未登记的名字（含后续波次的预留名）返回 `None`。
 pub fn find(instance: &str) -> Option<&'static BuiltinMcpInstance> {

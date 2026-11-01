@@ -119,10 +119,11 @@ fn declared_direct_tools_is_derived_from_registry() {
                 "workspace 的 7 个本地工具必须全部 declared direct（AW3-03）"
             ),
             // wave 2：cron 零 direct —— `system_mcp_tools` 恒为空集（A5）。
+            // monitor 四个工具同形（全部 deferred）。
             // wave 5：workflow 四项同形（模型面 `mcp__workflow__*` 一律 deferred）。
-            "cron" | "workflow" => assert!(
+            "cron" | "monitor" | "workflow" => assert!(
                 declared.is_empty(),
-                "实例 {} 的声明 direct 必须为空（cron / workflow：deferred）",
+                "实例 {} 的声明 direct 必须为空（cron / monitor / workflow：deferred）",
                 instance.name
             ),
             other => panic!("新增实例 {other} 必须在本测试内显式登记 direct 语义"),
@@ -213,11 +214,12 @@ fn builtin_prompt_declaration_matches_registry() {
                     );
                 }
                 // wave 2：cron 冻结 `None`（A4：声明段零变化）。
+                // monitor 四个工具同形（无 `BaseTool::prompt_declaration()` 文本）。
                 // wave 5：workflow 四项同形（无 `BaseTool::prompt_declaration()` 文本）。
-                "cron" | "workflow" => {
+                "cron" | "monitor" | "workflow" => {
                     assert_eq!(
                         template, None,
-                        "实例 {} 的工具 {} 必须无声明模板（cron / workflow）",
+                        "实例 {} 的工具 {} 必须无声明模板（cron / monitor / workflow）",
                         instance.name, tool.original_name
                     );
                     assert_eq!(
@@ -322,11 +324,22 @@ fn injection_policy_all_and_none_shapes() {
     let all = BuiltinInjectionPolicy::all();
     assert_eq!(
         all.enabled_instances().to_vec(),
-        vec!["web", "artifact", "cron", "workspace", "workflow"],
+        vec![
+            "web",
+            "artifact",
+            "cron",
+            "monitor",
+            "workspace",
+            "workflow"
+        ],
         "默认注入全部已实现实例（注册表顺序）"
     );
     assert!(all.enables("web") && all.enables("artifact"));
     assert!(all.enables("cron"));
+    assert!(
+        all.enables("monitor"),
+        "monitor 已实现 ⇒ 默认策略必须注入它"
+    );
     assert!(
         all.enables("workspace"),
         "workspace 已实现（W3-A 注册表 T1）⇒ 默认策略必须注入它"
@@ -343,6 +356,7 @@ fn injection_policy_all_and_none_shapes() {
         !none.enables("web")
             && !none.enables("artifact")
             && !none.enables("cron")
+            && !none.enables("monitor")
             && !none.enables("workspace")
             && !none.enables("workflow")
     );

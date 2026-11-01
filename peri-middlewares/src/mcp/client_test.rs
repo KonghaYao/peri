@@ -41,7 +41,7 @@ fn connected_test_handle(name: &str) -> Arc<McpClientHandle> {
 }
 
 #[test]
-fn task_owner_metadata_is_scoped_to_workspace_sources() {
+fn task_owner_metadata_is_scoped_to_session_capable_builtin_sources() {
     let pool = McpClientPool::new_pending();
     assert!(
         pool.task_owner_meta_for("workspace", "session-a").is_none(),
@@ -60,6 +60,21 @@ fn task_owner_metadata_is_scoped_to_workspace_sources() {
              .0
             .get(peri_mcp_core::task_owner::TASK_OWNER_META_KEY),
         Some(&serde_json::json!("session-a"))
+    );
+
+    let mut monitor = connected_test_handle("monitor");
+    Arc::get_mut(&mut monitor).unwrap().source = Some(crate::mcp::config::ConfigSource::Builtin {
+        instance: "monitor".into(),
+    });
+    pool.clients.write().insert("monitor".into(), monitor);
+    let meta = pool
+        .task_owner_meta_for("monitor", "session-b")
+        .expect("builtin monitor owner");
+    assert_eq!(
+        meta.0
+             .0
+            .get(peri_mcp_core::task_owner::TASK_OWNER_META_KEY),
+        Some(&serde_json::json!("session-b"))
     );
 }
 
@@ -87,7 +102,7 @@ fn task_owner_metadata_covers_remote_workspace_and_skips_other_sources() {
     pool.clients.write().insert("web".into(), web);
     assert!(
         pool.task_owner_meta_for("web", "session-a").is_none(),
-        "non-workspace servers stay generic"
+        "non-session-scoped servers stay generic"
     );
 }
 

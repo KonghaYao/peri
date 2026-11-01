@@ -48,7 +48,7 @@ workflow=".github/workflows/ci.yml"
 # 执行范围的事实源：与 ci.yml 各测试步骤的 `-E` 一一对应。改任一侧都会让
 # `--check` 失败，因此两边必须同时更新。
 #
-# 第一个步骤是「workspace 减去下面 9 个包」，其余步骤只挑具名目标；
+# 第一个步骤是「workspace 减去下面 10 个包」，其余步骤只挑具名目标；
 # 两者合起来构成全部执行范围。
 workspace_excluded=(
     peri-acp
@@ -59,6 +59,7 @@ workspace_excluded=(
     peri-mcp-web
     peri-mcp-artifact
     peri-mcp-cron
+    peri-mcp-monitor
     peri-mcp-workspace
 )
 
@@ -82,6 +83,7 @@ step_includes=(
     'peri-mcp-web:*:*'
     'peri-mcp-artifact:*:*'
     'peri-mcp-cron:*:*'
+    'peri-mcp-monitor:*:*'
     'peri-mcp-workspace:*:*'
 )
 
