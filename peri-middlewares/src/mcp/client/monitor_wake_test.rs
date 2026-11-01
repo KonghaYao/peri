@@ -13,10 +13,12 @@ use peri_acp_types::ports::McpPoolPort;
 use peri_acp_types::session::{
     InboxHandle, MessageKind, MessageQueue, MessageSource, QueuedMessage, SessionInbox,
 };
+use peri_agent::tools::BaseTool;
 use peri_mcp_monitor::MonitorMcpServer;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
     ListToolsResult, PaginatedRequestParams, RequestMetaObject, ServerCapabilities, ServerConfig,
+    Tool,
 };
 use rmcp::service::{Peer, RequestContext, RoleClient, RoleServer};
 use rmcp::{ErrorData, ServerHandler};
@@ -30,6 +32,8 @@ use crate::mcp::builtin::runtime::{
 use crate::mcp::client::{
     serve_client_auto, ClientStatus, McpClientHandle, McpClientPool, McpServiceWrapper,
 };
+use crate::mcp::current_invocation_fixture::CurrentInvocationFixture;
+use crate::mcp::tool_bridge::McpToolBridge;
 use crate::mcp::McpTaskOwner;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -137,6 +141,41 @@ async fn shutdown_link(mut link: MonitorLink, pool: Arc<McpClientPool>, mut owne
     drop(pool);
     owner.begin_shutdown();
     let _ = owner.shutdown().await;
+}
+
+fn monitor_start_tool() -> Tool {
+    serde_json::from_value(json!({
+        "name": "monitor_start",
+        "description": "monitor fixture",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "command": { "type": "string" },
+                "alert": { "type": "string" },
+                "label": { "type": "string" }
+            },
+            "required": ["command"]
+        }
+    }))
+    .expect("monitor_start tool declaration")
+}
+
+/// Start a monitor task through the production `McpToolBridge` path, which is
+/// also the only production path that wires the wake pump.
+async fn start_monitor_via_bridge(
+    pool: &Arc<McpClientPool>,
+    link: &MonitorLink,
+    session_id: &str,
+    arguments: serde_json::Value,
+) -> String {
+    let tool = monitor_start_tool();
+    let bridge = McpToolBridge::new("monitor", &tool, handle("monitor", Some(link.peer())))
+        .with_output_store(pool, Some(session_id));
+    let fixture = CurrentInvocationFixture::new(session_id, "monitor_start", &[json!({})]).await;
+    bridge
+        .invoke(arguments, fixture.context(0, "/"))
+        .await
+        .expect("monitor_start bridge invocation")
 }
 
 async fn start_monitor(peer: &Peer<RoleClient>, owner: &str, label: &str, command: &str) -> String {
@@ -402,6 +441,10 @@ async fn released_child_binding_is_offline_and_counted() {
         drain(&queue).is_empty(),
         "released child must not receive a wake"
     );
+    assert!(
+        pump_until(&pool, || !pool.monitor_wake.owners.lock().contains("child")).await,
+        "a released binding must be removed from the pump owner set after the grace window"
+    );
     shutdown_link(link, pool, owner).await;
 }
 
@@ -434,6 +477,101 @@ async fn pool_shutdown_stops_the_pump() {
     owner.begin_shutdown();
     owner.shutdown().await;
     assert_eq!(owner.active_count(), 0, "pool shutdown must stop the pump");
+}
+
+#[tokio::test]
+async fn registered_owner_without_a_monitor_task_is_not_polled() {
+    let link = connect_monitor().await;
+    let (owner, spawner) = McpTaskOwner::new();
+    let pool = pool_with_monitor(&link, spawner);
+    let queue = Arc::new(MessageQueue::new());
+    pool.register_inbox("session-a", SessionInbox::new(queue).handle());
+
+    assert!(pool.poll_monitor_wakes_once().await);
+    assert!(
+        pool.monitor_wake.owners.lock().is_empty(),
+        "the pump must track monitor-task owners, not every registered session"
+    );
+    shutdown_link(link, pool, owner).await;
+}
+
+/// B9：通过 production bridge 启动 monitor task 后，泵自动接线；alert 命中
+/// 只产生一条 wake，任务终态结算不再追加提醒。
+#[tokio::test]
+async fn bridge_started_monitor_settles_without_a_terminal_wake() {
+    let link = connect_monitor().await;
+    let (owner, spawner) = McpTaskOwner::new();
+    let pool = pool_with_monitor(&link, spawner);
+    let queue = Arc::new(MessageQueue::new());
+    let inbox = SessionInbox::new(Arc::clone(&queue));
+    pool.register_inbox("session-a", inbox.handle());
+    let concrete = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    let manager: Arc<dyn peri_acp_types::tasks::TaskManager> = concrete;
+    pool.bind_session_task_manager("session-a", &manager);
+
+    let text = start_monitor_via_bridge(
+        &pool,
+        &link,
+        "session-a",
+        json!({ "command": "echo ERROR boom", "alert": "ERROR", "label": "build" }),
+    )
+    .await;
+    assert!(text.contains("Background task started"), "{text}");
+    assert!(
+        text.contains("Only alert matches wake"),
+        "the monitor receipt must not promise terminal delivery: {text}"
+    );
+    assert!(
+        pool.monitor_wake.started.load(Ordering::Acquire),
+        "the bridge path must start the wake pump"
+    );
+    assert!(
+        pool.monitor_wake.owners.lock().contains("session-a"),
+        "the bridge path must track the monitor task owner"
+    );
+
+    assert!(
+        pump_until(&pool, || !queue.is_empty()).await,
+        "the alert match must wake the owner"
+    );
+    let first = drain(&queue);
+    assert_eq!(first.len(), 1, "one alert match yields one wake: {first:?}");
+    assert_eq!(first[0].kind, MessageKind::Defer);
+    assert!(
+        reminder_body(&first[0]).contains("matched its alert"),
+        "the single wake must be the alert wake: {}",
+        reminder_body(&first[0])
+    );
+
+    let deadline = tokio::time::Instant::now() + OBSERVE_TIMEOUT;
+    while manager.has_unsettled_external() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the task subscription must settle the terminal task"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    for _ in 0..5 {
+        pool.poll_monitor_wakes_once().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        drain(&queue).is_empty(),
+        "terminal settlement must not add a second wake"
+    );
+    assert_eq!(
+        manager
+            .snapshot()
+            .tasks
+            .iter()
+            .map(|task| task.status.as_str())
+            .collect::<Vec<_>>(),
+        vec!["completed"],
+        "the terminal task must remain observable through the task manager"
+    );
+
+    shutdown_link(link, pool, owner).await;
 }
 
 // ─── Fake monitor server: injects one failed acknowledgement ─────────────────

@@ -678,7 +678,7 @@ peri 作为 MCP client，对照 2026-07-28 协议能力面的支持度与路线�
 
 ### 9.8 Builtin MCP 实例：名字、关闭语义与保留名
 
-peri 自带的 Web / Artifact / Cron / Monitor / Workspace / Workflow 能力不是 middleware 提供面，而是 peri 自身的**同进程** MCP 实例：`web`（`WebSearch` / `WebFetch`）、`artifact`（`artifact`）、`cron`（cron 工具）、`monitor`（`monitor_start` / `monitor_read` / `monitor_stop` / `monitor_list`）、`workspace`（`Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`）与 `workflow`（编排工具）。工具、直连性与关闭键以 `peri-acp-types/src/builtin_mcp.rs` 的 `BUILTIN_MCP_INSTANCES` 为唯一事实源，下表是当前投影。它们经 `TransportConfig::Builtin`（进程内 `duplex` + `rmcp::serve_server`）接入与外部 server **完全相同**的连接、发现与提升链路：真实 `tools/list` 才提交 ready，工具仍经 `McpToolBridge` 包装，并沿用审批、事件投影与 cancel。
+peri 自带的 Web / Artifact / Cron / Monitor / Workspace / Workflow 能力不是 middleware 提供面，而是 peri 自身的**同进程** MCP 实例：`web`（`WebSearch` / `WebFetch`）、`artifact`（`artifact`）、`cron`（cron 工具）、`monitor`（`monitor_start` / `monitor_read` / `monitor_stop` / `monitor_list`，以及 host-only 的 `monitor_wakes` / `monitor_ack`）、`workspace`（`Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`）与 `workflow`（编排工具）。工具、直连性与关闭键以 `peri-acp-types/src/builtin_mcp.rs` 的 `BUILTIN_MCP_INSTANCES` 为唯一事实源，下表是当前投影。它们经 `TransportConfig::Builtin`（进程内 `duplex` + `rmcp::serve_server`）接入与外部 server **完全相同**的连接、发现与提升链路：真实 `tools/list` 才提交 ready，工具仍经 `McpToolBridge` 包装，并沿用审批、事件投影与 cancel。
 
 | 实例（配置 key / server name） | 原始工具名（wire · 配置 · 审批判定） | 模型面名字（LLM tools · 事件 · transcript） | 直连性 | 关闭策略键 |
 | --- | --- | --- | --- | --- |
@@ -686,7 +686,7 @@ peri 自带的 Web / Artifact / Cron / Monitor / Workspace / Workflow 能力不�
 | `web` | `WebFetch` | `WebFetch` | direct | `WebMiddleware` |
 | `artifact` | `artifact` | `artifact` | direct | `ArtifactMiddleware` |
 | `cron` | `cron_register` / `cron_list` / `cron_remove` / `cron_toggle`（模型可见）；`cron_acknowledge` 仅宿主 | `mcp__cron__<tool>` | deferred | `CronMiddleware` |
-| `monitor` | `monitor_start` / `monitor_read` / `monitor_stop` / `monitor_list` | `mcp__monitor__<tool>` | deferred | `MonitorMiddleware` |
+| `monitor` | `monitor_start` / `monitor_read` / `monitor_stop` / `monitor_list`（模型可见）；`monitor_wakes` / `monitor_ack` 仅宿主 | `mcp__monitor__<tool>` | deferred | `MonitorMiddleware` |
 | `workspace` | `Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash` | 同名 | direct | `WorkspaceMiddleware` |
 | `workflow` | `Workflow` / `WorkflowStatus` / `WorkflowKill` | `mcp__workflow__<tool>` | deferred | `WorkflowMiddleware` |
 

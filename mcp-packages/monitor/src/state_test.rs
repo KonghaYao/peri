@@ -103,6 +103,42 @@ fn resolve_start_rejects_empty_command_and_out_of_range_limits() {
 }
 
 #[test]
+fn resolve_start_rejects_oversized_label() {
+    let max_label = "x".repeat(MAX_LABEL_BYTES);
+    assert!(
+        resolve_start(
+            &StartRequest {
+                label: Some(max_label),
+                ..request("true")
+            },
+            "/workspace"
+        )
+        .is_ok(),
+        "label at the byte limit is accepted"
+    );
+
+    let oversized = "x".repeat(MAX_LABEL_BYTES + 1);
+    let error = resolve_start(
+        &StartRequest {
+            label: Some(oversized),
+            ..request("true")
+        },
+        "/workspace",
+    )
+    .expect_err("oversized label must be rejected");
+    assert!(
+        matches!(
+            error,
+            MonitorError::TooLong {
+                field: "label",
+                max: MAX_LABEL_BYTES
+            }
+        ),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn read_limits_are_bounded() {
     assert!(validate_read_limits(1, 1).is_ok());
     assert!(validate_read_limits(MAX_READ_EVENTS, MAX_READ_BYTES).is_ok());
@@ -284,6 +320,35 @@ async fn completed_command_exposes_incremental_events_and_cursor() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn read_with_a_tiny_byte_budget_returns_one_event_and_progress() {
+    let state = MonitorState::new(temp_cwd());
+    let started = state
+        .start(request("printf 'alpha\\nbeta\\n'"), None)
+        .await
+        .expect("start");
+    wait_terminal(&state, &started.task_id).await;
+
+    let first = state
+        .read(&started.task_id, None, None, 10, 1)
+        .expect("read");
+    assert_eq!(
+        first.events.len(),
+        1,
+        "a too-small max_bytes must still return one complete event"
+    );
+    assert_eq!(first.events[0].text, "alpha");
+    assert!(first.truncated);
+    assert_eq!(first.next_seq, 1);
+
+    let second = state
+        .read(&started.task_id, None, Some(first.next_seq), 10, 1)
+        .expect("read next");
+    assert_eq!(second.events[0].text, "beta");
+    assert_eq!(second.next_seq, 2);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn final_line_without_newline_is_partial() {
     let state = MonitorState::new(temp_cwd());
     let started = state
@@ -341,6 +406,120 @@ async fn deadline_expiry_fails_the_task_and_stops_the_process() {
         .as_deref()
         .is_some_and(|message| message.contains("deadline")));
     assert!(snapshot.cleanup.process_terminated);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stop_rejects_oversized_reason_without_requesting_cancel() {
+    let state = MonitorState::new(temp_cwd());
+    let started = state.start(request("sleep 30"), None).await.expect("start");
+
+    let oversized = "x".repeat(MAX_REASON_BYTES + 1);
+    let error = state
+        .stop(&started.task_id, None, Some(oversized))
+        .await
+        .expect_err("oversized stop reason must be rejected");
+    assert!(
+        matches!(
+            error,
+            MonitorError::TooLong {
+                field: "reason",
+                max: MAX_REASON_BYTES
+            }
+        ),
+        "unexpected error: {error}"
+    );
+    let snapshot = state.snapshot(&started.task_id, None).expect("snapshot");
+    assert_eq!(snapshot.status, MonitorStatus::Working);
+    assert!(!snapshot.cleanup.requested);
+
+    let stopped = state
+        .stop(&started.task_id, None, Some("stop for cleanup".into()))
+        .await
+        .expect("bounded stop");
+    assert_eq!(stopped.status, MonitorStatus::Cancelled);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn non_zero_exit_marks_the_task_failed() {
+    let state = MonitorState::new(temp_cwd());
+    let started = state.start(request("exit 3"), None).await.expect("start");
+    let snapshot = wait_terminal(&state, &started.task_id).await;
+    assert_eq!(snapshot.status, MonitorStatus::Failed);
+    assert!(
+        snapshot
+            .status_message
+            .as_deref()
+            .is_some_and(|message| message.contains("status 3")),
+        "status message must expose the non-zero exit: {snapshot:?}"
+    );
+}
+
+#[tokio::test]
+async fn spawn_failure_is_reported_without_registering_a_task() {
+    let state = MonitorState::new(temp_cwd());
+    let missing_cwd = std::env::temp_dir()
+        .join(format!("peri-monitor-missing-{}", uuid::Uuid::now_v7()))
+        .to_string_lossy()
+        .into_owned();
+    let error = state
+        .start(
+            StartRequest {
+                cwd: Some(missing_cwd),
+                ..request("echo never-runs")
+            },
+            None,
+        )
+        .await
+        .expect_err("a missing working directory must fail the spawn");
+    assert!(
+        matches!(error, MonitorError::Spawn(_)),
+        "unexpected error: {error}"
+    );
+    assert!(
+        state.list(None, true, 10).is_empty(),
+        "a failed spawn must not leave a task record"
+    );
+}
+
+#[test]
+fn snapshot_projects_wake_drop_and_alert_counters() {
+    let state = MonitorState::new(".");
+    let mut wakes = WakeOutbox::new();
+    wakes.dropped = 7;
+    let task = MonitorTask {
+        id: "monitor-counters".into(),
+        owner: Some("session-a".into()),
+        label: Some("build".into()),
+        alert: None,
+        started_at: "2026-11-01T00:00:00Z".into(),
+        deadline_at: "2026-11-01T01:00:00Z".into(),
+        deadline: Duration::from_secs(3600),
+        inner: Mutex::new(TaskInner {
+            state: TaskState::Working,
+            status_message: None,
+            last_updated_at: "2026-11-01T00:00:00Z".into(),
+            finished_at: None,
+            terminal: false,
+            cleanup: CleanupReport {
+                requested: false,
+                process_terminated: false,
+            },
+        }),
+        buffer: Arc::new(Mutex::new(EventBuffer::new(10, MIN_TASK_BYTES))),
+        wakes: Mutex::new(wakes),
+        alert_matched: AtomicU64::new(9),
+        cancel: CancellationToken::new(),
+    };
+    state.tasks.lock().insert(task.id.clone(), Arc::new(task));
+
+    let snapshot = state
+        .snapshot("monitor-counters", Some("session-a"))
+        .expect("snapshot");
+    assert_eq!(snapshot.wake_dropped, 7);
+    assert_eq!(snapshot.alert_matched, 9);
+    assert_eq!(snapshot.pending_wakes, 0);
 }
 
 #[cfg(unix)]

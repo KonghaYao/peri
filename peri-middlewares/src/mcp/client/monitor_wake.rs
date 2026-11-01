@@ -18,12 +18,12 @@
 //!   retry after a failed acknowledgement reuses the same canonical id.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Weak,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use peri_acp_types::monitor::{
@@ -40,6 +40,10 @@ const MONITOR_WAKE_TOOL: &str = "monitor_wakes";
 const MONITOR_ACK_TOOL: &str = "monitor_ack";
 const MONITOR_WAKE_POLL_INTERVAL: Duration = Duration::from_millis(750);
 const MONITOR_WAKE_LIMIT: usize = 64;
+/// How long a released owner stays tracked after its binding disappears.
+/// The window lets an in-flight wake be acknowledged as `offline`; afterwards
+/// the owner is dropped so the pump set stays bounded.
+const MONITOR_OFFLINE_OWNER_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 pub(crate) struct MonitorWakeMetrics {
@@ -53,10 +57,12 @@ pub(crate) struct MonitorWakeMetrics {
 #[derive(Default)]
 pub(crate) struct MonitorWakeRuntime {
     started: AtomicBool,
-    /// Owners that ever started a monitor task in this pool. The set survives
-    /// inbox unregistration and child-session release so late wakes can still
-    /// be acknowledged as offline.
+    /// Owners that ever started a monitor task in this pool. Owners without a
+    /// monitor task are never added. A released binding is dropped after
+    /// [`MONITOR_OFFLINE_OWNER_GRACE`], so the set cannot grow without bound.
     owners: parking_lot::Mutex<HashSet<String>>,
+    /// First observation time of each currently offline tracked owner.
+    offline_since: parking_lot::Mutex<HashMap<String, Instant>>,
     pub(crate) metrics: MonitorWakeMetrics,
 }
 
@@ -74,6 +80,7 @@ impl McpClientPool {
             return;
         }
         self.monitor_wake.owners.lock().insert(owner.to_owned());
+        self.monitor_wake.offline_since.lock().remove(owner);
         if self.monitor_wake.started.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -89,6 +96,24 @@ impl McpClientPool {
         self.session_bindings.read().inbox(owner).is_some()
     }
 
+    /// Whether a connected server is the builtin monitor instance.
+    ///
+    /// The reserved name is only a fallback: the authoritative identity is the
+    /// runtime-owned `ConfigSource::Builtin { instance }`, which user
+    /// configuration cannot forge.
+    pub(crate) fn is_monitor_server(&self, server: &str) -> bool {
+        if server == MONITOR_INSTANCE {
+            return true;
+        }
+        self.clients.read().get(server).is_some_and(|client| {
+            matches!(
+                client.source.as_ref(),
+                Some(crate::mcp::config::ConfigSource::Builtin { instance })
+                    if instance == MONITOR_INSTANCE
+            )
+        })
+    }
+
     /// One pump pass. Returns `false` when the monitor instance is absent or not
     /// connected (the pump then stays idle rather than treating it as an error).
     pub(crate) async fn poll_monitor_wakes_once(&self) -> bool {
@@ -98,17 +123,16 @@ impl McpClientPool {
         if !matches!(handle.status, super::ClientStatus::Connected) || handle.peer.is_none() {
             return false;
         }
-        let owners = {
-            let mut owners = self.monitor_wake.owners.lock().clone();
-            owners.extend(self.session_bindings.read().registered_owners());
-            owners
-        };
+        // Only owners that actually started a monitor task are polled. Merging
+        // every registered session would grow the set with sessions that never
+        // used monitor and would issue one owner-scoped call per session per tick.
+        let owners: Vec<String> = self.monitor_wake.owners.lock().iter().cloned().collect();
         for owner in owners {
             if !self.is_open() {
                 break;
             }
             let page = match self.fetch_wakes(&owner).await {
-                Ok(page) => page,
+                Ok(page) => Some(page),
                 Err(error) => {
                     let previous = self
                         .monitor_wake
@@ -120,15 +144,44 @@ impl McpClientPool {
                     } else {
                         tracing::debug!(owner = %owner, %error, "monitor wake poll still failing");
                     }
-                    continue;
+                    None
                 }
             };
-            if page.wakes.is_empty() {
-                continue;
+            if let Some(page) = page {
+                if !page.wakes.is_empty() {
+                    self.deliver_owner_wakes(&owner, page.wakes).await;
+                }
             }
-            self.deliver_owner_wakes(&owner, page.wakes).await;
+            // Binding release (child session end / initial session teardown)
+            // removes the delivery target. Keep the owner for a short grace so
+            // an in-flight wake can still be acknowledged offline, then drop
+            // it from the pump set. Wakes produced afterwards stay
+            // unacknowledged in the server outbox; they are observable through
+            // `monitor_list`/`tasks/get` counters but are never retargeted to
+            // another session.
+            self.retire_offline_owner(&owner);
         }
         true
+    }
+
+    /// Track owner liveness and drop released owners after the grace window.
+    fn retire_offline_owner(&self, owner: &str) {
+        if self.owner_online(owner) {
+            self.monitor_wake.offline_since.lock().remove(owner);
+            return;
+        }
+        let mut offline_since = self.monitor_wake.offline_since.lock();
+        match offline_since.get(owner).copied() {
+            None => {
+                offline_since.insert(owner.to_owned(), Instant::now());
+            }
+            Some(since) if since.elapsed() >= MONITOR_OFFLINE_OWNER_GRACE => {
+                offline_since.remove(owner);
+                drop(offline_since);
+                self.monitor_wake.owners.lock().remove(owner);
+            }
+            Some(_) => {}
+        }
     }
 
     async fn fetch_wakes(&self, owner: &str) -> Result<MonitorWakePage, String> {

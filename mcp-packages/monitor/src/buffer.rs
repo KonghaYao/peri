@@ -150,6 +150,11 @@ impl EventBuffer {
     }
 
     /// Read events strictly after `after_seq`.
+    ///
+    /// The page always includes at least one complete event when one is
+    /// available: a `max_bytes` smaller than the next event cannot stall the
+    /// cursor forever. Such a page is marked `truncated` and the caller can
+    /// advance with `next_seq`.
     pub fn read(&self, after_seq: Option<u64>, limit: usize, max_bytes: usize) -> EventPage {
         let limit = limit.clamp(1, MAX_READ_EVENTS);
         let budget = max_bytes.clamp(1, MAX_READ_BYTES);
@@ -162,9 +167,19 @@ impl EventBuffer {
             .iter()
             .filter(|event| after_seq.is_none_or(|after| event.seq > after))
         {
-            if events.len() == limit || used.saturating_add(event.text.len()) > budget {
+            if events.len() == limit {
                 truncated = true;
                 break;
+            }
+            let exceeds_budget = used.saturating_add(event.text.len()) > budget;
+            if exceeds_budget && !events.is_empty() {
+                truncated = true;
+                break;
+            }
+            if exceeds_budget {
+                // The first event always fits by contract; flag the page so the
+                // caller knows the byte budget was exceeded.
+                truncated = true;
             }
             used = used.saturating_add(event.text.len());
             events.push(event.clone());

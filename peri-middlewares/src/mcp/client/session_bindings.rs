@@ -31,6 +31,7 @@ pub(crate) struct SessionBindings {
 
 impl SessionBindings {
     /// Owners with a live (registered) inbox.
+    #[cfg(test)]
     pub(crate) fn registered_owners(&self) -> Vec<String> {
         self.current
             .keys()

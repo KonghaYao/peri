@@ -1,7 +1,8 @@
 # MonitorMCP（command source 监控）
 
 > **状态**：**已批准目标设计**——v1 command source、标准 MCP Tasks 通信与 P2
-> alert 唤醒已裁决；poll/file/WS source 不在范围。
+> alert 唤醒已实现；只有 alert 命中唤醒 owner，任务终态不唤醒。poll/file/WS
+> source 不在范围。
 >
 > **事实源**：`mcp-packages/monitor/src/{server,state,buffer,tools}.rs`（handler、
 > 任务状态机、事件 buffer、工具声明）；注册表与工具声明在
@@ -59,7 +60,7 @@ agent ────────────────────────�
 | --- | --- | --- |
 | `command` | string | 必填，非空 shell 命令 |
 | `cwd` | string? | 工作目录；相对路径相对实例 cwd 解析 |
-| `label` | string? | 供 `monitor_list` 与 wake 提醒使用的短标签 |
+| `label` | string? | 供 `monitor_list` 与 wake 提醒使用的短标签；≤256 字节 |
 | `alert` | string? | 线性时间正则，≤512 字符；命中行产生宿主 wake |
 | `deadline_ms` | integer? | 默认 3 600 000；范围 1..=86 400 000 |
 | `max_events` | integer? | 默认 2 000；范围 1..=100 000 |
@@ -100,11 +101,13 @@ agent ────────────────────────�
 `next_seq` 等于本次返回的最后一个 `seq`；没有返回事件时等于请求游标（并夹到当前
 已分配的最大 seq 以内）。下一次调用直接传 `after_seq = next_seq`，不会跳事件。
 `truncated` 表示本次读取仍有剩余事件；`dropped` 是任务内 ring buffer 的累计淘汰数。
+即使 `max_bytes` 小于下一条事件的文本长度，也至少返回一条完整事件并置
+`truncated`，保证 `next_seq` 前进；不存在「零进度」的响应。
 未知 task id 与 owner 不匹配统一返回 `unknown task`，不泄露另一会话的任务是否存在。
 
 ### 2.3 `monitor_stop`
 
-请求：`{ task_id, reason? }`。幂等。
+请求：`{ task_id, reason? }`。幂等。`reason` 去空白后 ≤256 字节，超限返回错误且不请求取消。
 
 响应：`TaskSnapshot`，包含终态、`statusMessage` 与：
 
@@ -210,8 +213,14 @@ working ───▶ cancelling（对外仍 working）──▶ cancelled       
 - **幂等**：`delivery_id = f(task_id, wake_id)`（`peri-acp-types::monitor`）。
   ack 失败时下一轮重试，重复投递复用同一 canonical id。
 - **审批**：wake 路径不经过任何交互审批；`monitor_start` 的工具审批覆盖后续 wake。
+- **终态不唤醒**：任务成功、失败、取消或 owner 不可观测的终态只更新任务投影
+  （`tasks/get`、`monitor_list`、TUI Tasks 面板），不向 owner inbox 投递
+  reminder。只有 alert 命中产生 `Defer` wake；因此命令在命中 alert 后立即退出也
+  不会出现「alert wake + 终态 reminder」的重复唤醒。
 - **owner 定向与离线**：wake 只投递给发起会话；owner 已释放（例如子 agent 结束）
-  或没有 inbox 时丢弃并计数，不重投、不跨会话。
+  或没有 inbox 时丢弃并计数，不重投、不跨会话。泵只跟踪启动过 monitor task 的
+  owner，并在 binding 释放后的短暂宽限期（用于把在途 wake 以 `offline` 确认）后
+  移除该 owner，集合不会随会话数无界增长。
 - **不做**：资源通知 hint、`notifications/resources/updated`、unknown task 快速
   收口、cron 改动、持久化、跨会话共享。
 

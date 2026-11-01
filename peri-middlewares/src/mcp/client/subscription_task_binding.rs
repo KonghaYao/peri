@@ -37,6 +37,18 @@ impl McpClientPool {
         delivery: Option<&Arc<dyn peri_acp_types::tasks::TaskTerminalDelivery>>,
         remote_task_id: &str,
     ) -> Result<(), String> {
+        // 用户裁决：alert 命中才唤醒，否则不告知。monitor 任务的终态仍由
+        // `settle_external` 发布到任务投影（`tasks/get` / `monitor_list` /
+        // TUI Tasks 面板），但不再向 owner inbox 投递任何 reminder；否则
+        // 「无 alert 命中」的正常结束/失败/取消也会拉起模型，且 alert 命中后
+        // 立即退出会与 alert wake 形成重复唤醒。
+        //
+        // 按 server 身份判定：`monitor` 是保留 builtin 实例名；连接句柄的
+        // `ConfigSource::Builtin { instance }` 是权威身份（用户配置无法伪造），
+        // 因此其他 MCP 实例（workspace / workflow 等）的终态投递语义不变。
+        if self.is_monitor_server(server) {
+            return Ok(());
+        }
         let is_shell = kind == BgTaskKind::Shell;
         let outcome = result.outcome_label();
         // 标题与正文共用同一终态标签：失败/超时/unresolved 不得显示为已完成。

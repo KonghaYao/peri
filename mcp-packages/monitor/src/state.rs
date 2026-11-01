@@ -56,6 +56,10 @@ pub const MAX_PENDING_WAKES: usize = 256;
 pub const WAKE_MERGE_WINDOW: Duration = Duration::from_secs(30);
 /// Maximum characters accepted for the `alert` regex.
 pub const MAX_ALERT_PATTERN_CHARS: usize = 512;
+/// Maximum bytes accepted for the optional `label`.
+pub const MAX_LABEL_BYTES: usize = 256;
+/// Maximum bytes accepted for a stop `reason`.
+pub const MAX_REASON_BYTES: usize = 256;
 /// Maximum wakes returned by one `monitor_wakes` call.
 pub const MAX_WAKES_PER_READ: usize = 200;
 /// Default wakes returned by one `monitor_wakes` call.
@@ -200,6 +204,8 @@ pub enum MonitorError {
     InvalidLimit { max: usize },
     #[error("invalid alert pattern: {0}")]
     InvalidAlert(String),
+    #[error("{field} exceeds {max} bytes")]
+    TooLong { field: &'static str, max: usize },
     #[error("max_bytes must be between 1 and {max}")]
     InvalidReadBytes { max: usize },
     #[error("unknown task")]
@@ -622,6 +628,12 @@ impl MonitorState {
             .filter(|reason| !reason.is_empty())
             .unwrap_or("Stop requested.")
             .to_string();
+        if reason.len() > MAX_REASON_BYTES {
+            return Err(MonitorError::TooLong {
+                field: "reason",
+                max: MAX_REASON_BYTES,
+            });
+        }
         task.request_stop(&reason);
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         while !task.is_terminal() && std::time::Instant::now() < deadline {
@@ -782,6 +794,15 @@ pub(crate) fn resolve_start(
         .map(str::trim)
         .filter(|label| !label.is_empty())
         .map(str::to_string);
+    if label
+        .as_ref()
+        .is_some_and(|label| label.len() > MAX_LABEL_BYTES)
+    {
+        return Err(MonitorError::TooLong {
+            field: "label",
+            max: MAX_LABEL_BYTES,
+        });
+    }
     let alert = resolve_alert(request.alert.as_deref())?;
     Ok(ResolvedStart {
         command: command.to_string(),

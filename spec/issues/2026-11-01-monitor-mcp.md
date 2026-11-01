@@ -19,7 +19,7 @@
 5. 事件存放在内存 ring buffer，`seq` 单调。`monitor_read` 的 `after_seq` 排他，`next_seq` 是下一次读取应传入的游标。
 6. 单条事件 ≤ 16 KiB；单次读取 ≤ 500 条 / 128 KiB；超限标记 `truncated` / `dropped`。
 7. deadline 默认 1h、最大 24h；超范围请求拒绝。`monitor_stop` 幂等；`tasks/cancel` 只 ack，进程清理状态单独报告。
-8. v1 唤醒只依赖宿主既有 MCP task 终态投影。P2 追加 alert wake：`monitor_start` 的 `alert` 正则命中才产生 wake；未命中只进 ring buffer。
+8. 唤醒只由 alert 命中触发；任务成功/失败/取消的终态只更新任务投影（`tasks/get`、`monitor_list`、Tasks 面板），不投递 reminder。未命中 alert 的正常结束不会拉起模型。
 9. 任务归属发起会话；请求经 `_meta["peri/taskOwner"]` 携带 owner，事件/任务访问按 owner 过滤；不做跨会话共享。
 10. 命令需审批：`monitor_start` 加入默认敏感分支（按原始名归一）。一次工具审批覆盖后续 wake；wake 路径不调用任何交互审批。输出一律 untrusted；不执行输出内容；不做 WS/SSRF。
 11. 附随 skill 走 workspace 静态资产路线（与 cron 同形），内容通用，不出现平台专有词。
@@ -32,8 +32,9 @@
 4. **正文边界**：wake 只含 raw task id、label、seq、matched；不含事件原文。正文由 agent 用 `monitor_read` 拉取，事件始终 untrusted。
 5. **一次审批**：`monitor_start` 的工具审批覆盖后续 wake；wake 路径不经过 HITL。
 6. **幂等**：`delivery_id = f(task_id, wake_id)`；ack 失败下一轮重试，重复投递复用同一 canonical id。
-7. **接线**：`monitor_wakes` / `monitor_ack` 为 host-only 工具；宿主 wake 泵每 0.5–1 秒按 owner 轮询；复用既有 inbox `Defer` + continuation，不新增 ACP 方法。
-8. **不做**：poll/file/WS source、资源通知 hint、`notifications/resources/updated`、unknown task 快速收口、cron 改动、持久化、跨会话共享。
+7. **接线**：`monitor_wakes` / `monitor_ack` 为 host-only 工具；宿主 wake 泵每 0.5–1 秒按 owner 轮询；复用既有 inbox `Defer` + continuation，不新增 ACP 方法。泵只跟踪启动过 monitor task 的 owner，并在 binding 释放后的宽限期后移除，避免集合无界增长。
+8. **终态不唤醒**：monitor 任务的终态结算（成功/失败/取消）只更新任务投影，不投递任何 reminder；alert 命中后立即退出不会产生重复唤醒。
+9. **不做**：poll/file/WS source、资源通知 hint、`notifications/resources/updated`、unknown task 快速收口、cron 改动、持久化、跨会话共享。
 
 ## 目标模型
 
@@ -75,6 +76,8 @@ working ──命令退出 0──▶ completed
 6. 本地验证：fmt、workspace build、`peri-mcp-monitor` 测试、layer import / MCP data boundary / CI inventory 检查、clippy。
 7. P2：alert 非法正则拒绝、未命中无 wake、命中一条 wake、30 秒合并、outbox 容量与 `wakeDropped`、ack 幂等、owner 隔离、wake 不含正文、`tasks/get` 计数。
 8. P2：宿主泵 push 后 ack、ack 失败重试（同一 delivery id）、owner 无 inbox 丢弃计数、只投 owner、子会话 binding 释放后离线、monitor 缺失 no-op、pool shutdown 停止。
+9. P2：终态不唤醒——无 alert 命中完成、失败/取消均不产生 reminder；alert 命中后立即完成只有一条 alert wake；非 monitor 实例终态投递不变。
+10. 边界：`label` / stop `reason` ≤256 字节；`monitor_read` 的过小 `max_bytes` 仍返回一条完整事件并置 `truncated`；泵 owner 集合在 binding 释放后清理。
 
 ## 不做清单
 
@@ -88,7 +91,7 @@ working ──命令退出 0──▶ completed
 
 ## 验证记录
 
-实现后回填（worktree 分支 `feat/issue-317-monitor-mcp`，基线 `origin/main`）：
+P1 基线验证（历史记录，worktree 分支 `feat/issue-317-monitor-mcp`，基线 `origin/main`）：
 
 | 命令 | 结果 |
 | --- | --- |
@@ -107,14 +110,16 @@ working ──命令退出 0──▶ completed
 
 未运行：`scripts/check-file-size.sh`（本机缺 `rg`；新增文件均 < 1000 行）、`lefthook` 与 `cargo-nextest`（本机未安装）。
 
-P2 追加验证（worktree 分支 `feat/issue-317-monitor-mcp`）：
+P2 与验证修复（B9/D17/D18/D19）追加验证（worktree 分支 `feat/issue-317-monitor-mcp`）：
 
 | 命令 | 结果 |
 | --- | --- |
 | `cargo fmt --all --check` | 通过 |
 | `./scripts/cargo-rmcp-patched.sh build --locked --workspace` | 通过 |
-| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-mcp-monitor --lib` | 43 passed（含 alert/wake/outbox/wire） |
-| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib` | 1848 passed；1 个既有网络用例 `plugin::marketplace::tests::test_fetch_url_cache_fallback` 因外部 HTTP 502 失败，与本变更无关 |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-mcp-monitor --lib` | 50 passed（含 alert/wake/outbox/wire、非零退出、spawn 失败、读取进度与边界） |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib` | 1853 passed；1 个既有网络用例 `plugin::marketplace::tests::test_fetch_url_cache_fallback` 因外部 HTTP 502 失败，与本变更无关 |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib -- mcp::client::monitor_wake::tests` | 9 passed（含 bridge 自动接线、终态不重复唤醒、owner 集合清理） |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib -- mcp::client::subscription::tasks::tests` | 17 passed（含 monitor 终态不唤醒与非 monitor 回归） |
 | `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib` | 1112 passed；1 ignored（含新增 Stop 抑制恢复用例） |
 | `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp-types --lib` | 689 passed |
 | `./scripts/cargo-rmcp-patched.sh clippy --locked --workspace --all-targets -- -D warnings` | 通过 |

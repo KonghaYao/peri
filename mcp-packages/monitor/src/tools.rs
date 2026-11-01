@@ -254,7 +254,7 @@ impl BaseTool for MonitorStartTool {
                 },
                 "label": {
                     "type": "string",
-                    "description": "Short label shown by monitor_list and in alert wake reminders."
+                    "description": "Short label (at most 256 bytes) shown by monitor_list and in alert wake reminders."
                 },
                 "alert": {
                     "type": "string",
@@ -339,7 +339,7 @@ impl BaseTool for MonitorReadTool {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 131072,
-                    "description": "Maximum event text bytes to return. Default 65536."
+                    "description": "Maximum event text bytes to return. Default 65536. If the next event exceeds this budget, one complete event is still returned with truncated=true."
                 }
             },
             "required": ["task_id"]
@@ -394,7 +394,7 @@ impl BaseTool for MonitorStopTool {
                 },
                 "reason": {
                     "type": "string",
-                    "description": "Optional reason recorded in the terminal status message."
+                    "description": "Optional reason (at most 256 bytes) recorded in the terminal status message."
                 }
             },
             "required": ["task_id"]

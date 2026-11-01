@@ -3,7 +3,10 @@ use peri_acp_types::{
     event::{BackgroundTaskResult, ShellOutput},
     mcp::McpSubscriptionPort,
     messages::MessageId,
-    session::{MessageQueue, MessageSource, QueuedPayload, SessionInbox},
+    plugin::ConfigSource,
+    session::{
+        MessageKind, MessageQueue, MessageSource, QueuedMessage, QueuedPayload, SessionInbox,
+    },
     system_reminder::TrustedSystemReminder,
     tasks::{BgTaskKind, ExternalTaskRegistration, TaskManager, TaskTerminalDelivery},
 };
@@ -558,4 +561,140 @@ async fn task_subscription_confirms_terminal_after_snapshot_eviction() {
         .await
         .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+fn handle_with_source(
+    name: &str,
+    source: Option<ConfigSource>,
+) -> Arc<crate::mcp::client::McpClientHandle> {
+    Arc::new(crate::mcp::client::McpClientHandle {
+        call_gate: Default::default(),
+        name: name.into(),
+        version: None,
+        connected_at: None,
+        protocol_version: None,
+        cache_version: None,
+        peer: None,
+        tools: vec![],
+        resources: vec![],
+        status: crate::mcp::client::ClientStatus::Connected,
+        oauth_status: Default::default(),
+        source,
+        url: None,
+        skills_capable: false,
+    })
+}
+
+/// Register one external task through the production registration path, settle
+/// it, and return the owner's queued messages plus the published task status.
+async fn settle_registered_task(
+    server: &str,
+    source: Option<ConfigSource>,
+    owner_scoped: bool,
+    success: bool,
+) -> (Vec<QueuedMessage>, String) {
+    let pool = Arc::new(McpClientPool::new_pending());
+    let inbox = SessionInbox::new(Arc::new(MessageQueue::new()));
+    pool.register_inbox("session", inbox.handle());
+    pool.clients
+        .write()
+        .insert(server.into(), handle_with_source(server, source));
+    let manager: Arc<dyn TaskManager> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    pool.bind_session_task_manager("session", &manager);
+
+    let (manager, request) = pool
+        .external_task_registration(
+            "session",
+            Some("session"),
+            None,
+            server,
+            "remote-1",
+            BgTaskKind::Mcp,
+            "fixture task",
+            owner_scoped,
+            "2026-11-01T00:00:00Z",
+        )
+        .expect("registration");
+    let ticket = manager.register_external(request).expect("register");
+    let mut result = shell_result();
+    result.success = success;
+    result.output = if success {
+        "Command exited successfully.".into()
+    } else {
+        "Command exited with status 3.".into()
+    };
+    assert!(
+        manager
+            .settle_external(&ticket, "remote-1:terminal", result)
+            .await
+            .expect("settle"),
+        "terminal projection must be committed"
+    );
+    let status = manager
+        .snapshot()
+        .tasks
+        .into_iter()
+        .find(|record| record.task_id == ticket.task_id())
+        .map(|record| record.status)
+        .expect("terminal task record");
+    (inbox.queue().drain_all(), status)
+}
+
+/// B9: monitor 的终态（成功/失败）只更新任务投影，不向 owner 投递任何 reminder。
+#[tokio::test]
+async fn monitor_terminal_settlement_never_wakes_the_owner() {
+    for success in [true, false] {
+        let (messages, status) = settle_registered_task(
+            "monitor",
+            Some(ConfigSource::Builtin {
+                instance: "monitor".into(),
+            }),
+            true,
+            success,
+        )
+        .await;
+        assert!(
+            messages.is_empty(),
+            "monitor terminal settlement must not queue a reminder (success={success}): {messages:?}"
+        );
+        assert_eq!(
+            status,
+            if success { "completed" } else { "failed" },
+            "terminal projection must still be observable through the task manager"
+        );
+    }
+}
+
+/// B9 回归：非 monitor 实例的终态投递保持不变。
+#[tokio::test]
+async fn non_monitor_terminal_settlement_still_wakes_the_owner() {
+    let (messages, status) = settle_registered_task("workflow", None, false, true).await;
+    assert_eq!(status, "completed");
+    assert_eq!(
+        messages.len(),
+        1,
+        "non-monitor terminal delivery must be unchanged"
+    );
+    assert_eq!(messages[0].kind, MessageKind::Defer);
+    assert_eq!(messages[0].source, MessageSource::McpNotification);
+}
+
+/// B9：身份以 `ConfigSource::Builtin { instance }` 为准，不依赖 server key 字面量。
+#[tokio::test]
+async fn monitor_instance_alias_terminal_settlement_never_wakes_the_owner() {
+    let (messages, status) = settle_registered_task(
+        "monitor-alias",
+        Some(ConfigSource::Builtin {
+            instance: "monitor".into(),
+        }),
+        true,
+        true,
+    )
+    .await;
+    assert!(
+        messages.is_empty(),
+        "monitor instance identity must suppress terminal delivery regardless of server key"
+    );
+    assert_eq!(status, "completed");
 }

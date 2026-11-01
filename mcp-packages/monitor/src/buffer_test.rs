@@ -85,6 +85,36 @@ fn read_byte_budget_marks_truncated() {
 }
 
 #[test]
+fn read_below_one_event_size_still_returns_one_and_advances() {
+    let mut buffer = EventBuffer::new(10, MIN_TASK_BYTES);
+    buffer.push(captured("aaaa"));
+    buffer.push(captured("bbbb"));
+
+    let first = buffer.read(None, 10, 1);
+    assert_eq!(
+        first.events.len(),
+        1,
+        "a too-small byte budget must not return an empty page"
+    );
+    assert_eq!(first.events[0].text, "aaaa");
+    assert!(
+        first.truncated,
+        "an over-budget single event must be flagged as truncated"
+    );
+    assert_eq!(first.next_seq, 1);
+
+    let second = buffer.read(Some(first.next_seq), 10, 1);
+    assert_eq!(second.events.len(), 1);
+    assert_eq!(second.events[0].text, "bbbb");
+    assert!(second.truncated);
+    assert_eq!(second.next_seq, 2);
+
+    let done = buffer.read(Some(second.next_seq), 10, 1);
+    assert!(done.events.is_empty());
+    assert!(!done.truncated);
+}
+
+#[test]
 fn ring_buffer_evicts_oldest_and_reports_gap() {
     let mut buffer = EventBuffer::new(2, MIN_TASK_BYTES);
     buffer.push(captured("one"));
