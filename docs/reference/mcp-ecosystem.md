@@ -138,7 +138,7 @@ tools 原语在两个协议版本中基本兼容。2026-07-28 的新增与调整
 MCP 工具经 `McpToolBridge`（`peri-middlewares/src/mcp/tool_bridge.rs`）包装为 `BaseTool`：
 
 - **命名**：普通 MCP 工具与 deferred MCP 工具使用 `mcp__<server>__<tool>`，server / tool 名经 sanitize（非 `[a-zA-Z0-9_-]` 字符替换为 `_`），与 skills 命名（`mcp__<server>__<skill>`）同规则。被 `system_mcp_tools` 选中的工具以 wire 原始工具名注入模型面。
-- **内置实例工具名**：builtin `web`、`artifact`、`workspace` 的 direct 工具以原始名出现在模型面（`WebSearch`、`WebFetch`、`artifact`、`Read`、`Write`、`Edit`、`Glob`、`Grep`、`folder_operations`、`Bash`）；builtin `cron` / `workflow` 保持 deferred，模型面名为 `mcp__<实例>__<tool>`。普通 system MCP 的选中工具同样使用原始名，其余工具仍带前缀。MCP wire `tools/call.name` 始终使用原始工具名，原名注入不创建前缀别名。
+- **内置实例工具名**：builtin `web`、`artifact`、`workspace` 的 direct 工具以原始名出现在模型面（`WebSearch`、`WebFetch`、`artifact`、`Read`、`Write`、`Edit`、`Glob`、`Grep`、`folder_operations`、`Bash`）；builtin `cron` / `monitor` / `workflow` 保持 deferred，模型面名为 `mcp__<实例>__<tool>`。普通 system MCP 的选中工具同样使用原始名，其余工具仍带前缀。MCP wire `tools/call.name` 始终使用原始工具名，原名注入不创建前缀别名。
 - **按绑定来源判定与匹配**：权限按工具来源和原始工具身份处理；未知或外部 MCP 工具不能因名称恰为 `Read`、`Write` 或 `Bash` 获得 builtin 权限。工具名匹配按实际模型可见名进行，不合成额外可调用别名。
 - **描述**：加 `[MCP:<server>]` 前缀，指明来源 server。
 - **参数**：透传 MCP 工具的 `inputSchema`。
@@ -622,7 +622,7 @@ Peri 不实现上述 Web Host ↔ App 的 handshake；Peri 只承载下游选择
 
 非法配置一律向上传播，不降级为空配置、不当作「未安装」跳过；`disabled = true` 也不绕过校验。三层合并仍是 global < plugin < project，System MCP 不参与跨来源内容 hash 去重（namespace 归属不得因内容相同而消失）。三个 key 只表达启动依赖等级与必需工具清单，不改变 MCP 实例隔离（见「MCP 运行形态」与「最小 MCP 隔离设计」）。
 
-**builtin 实例是本节 key 的自动使用者**：全部已实现实例由默认配置层补上 `system_mcp = true` 与 `system_mcp_tools`——`web` / `artifact` / `workspace` 的值为该实例声明为 direct 的原始工具名（`WebSearch` / `WebFetch` / `artifact` / `Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`），`cron` / `workflow` 的值为**空数组** `[]`（这些实例的工具全部 deferred，零提升，只保留 1R readiness 要求）。用户不需要（也不应）手写这三个 key；如要关闭或覆盖，写法与拒绝规则见 §9.8。
+**builtin 实例是本节 key 的自动使用者**：全部已实现实例由默认配置层补上 `system_mcp = true` 与 `system_mcp_tools`——`web` / `artifact` / `workspace` 的值为该实例声明为 direct 的原始工具名（`WebSearch` / `WebFetch` / `artifact` / `Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`），`cron` / `monitor` / `workflow` 的值为**空数组** `[]`（这些实例的工具全部 deferred，零提升，只保留 1R readiness 要求）。用户不需要（也不应）手写这三个 key；如要关闭或覆盖，写法与拒绝规则见 §9.8。
 
 ### 9.3 信道划分（已定稿）
 

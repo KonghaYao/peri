@@ -75,13 +75,27 @@ agent ────────────────────────�
 
 校验失败、命令无法启动或容量满时返回工具级错误，不注册任务。
 
+#### 宿主回执中的两个 id
+
+模型看到的不是上面的原始 `CreateTaskResult`，而是宿主 `tool_bridge` 的回执。
+回执同时给出两个命名空间不同的 id，模型无需猜测：
+
+- `task_id`（`mcp-<uuid>`）：宿主后台任务 registry 的 public id，只用于
+  `tasks/get` / Tasks 面板；它不是 monitor 实例内的任务键。
+- `monitor_id`（`monitor-<uuid>`）：monitor 实例内的 raw task id，也就是
+  `monitor_list` 返回的 `taskId`；调用 `monitor_read` / `monitor_stop` 时把它
+  作为 `task_id` 参数传入。
+
+用 `task_id` 调 `monitor_read` / `monitor_stop` 会得到 `unknown task`；操作
+monitor 任务时必须使用 `monitor_id`（或 `monitor_list` 的 `taskId`）。
+
 ### 2.2 `monitor_read`
 
 请求：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `task_id` | string | 必填 |
+| `task_id` | string | 必填；monitor id（`monitor-...`），来自宿主回执的 `monitor_id` 或 `monitor_list` 的 `taskId` |
 | `after_seq` | integer? | 排他游标；省略表示从头读取 |
 | `limit` | integer? | 默认 200；范围 1..=500 |
 | `max_bytes` | integer? | 默认 64 KiB；范围 1..=128 KiB |
@@ -100,14 +114,18 @@ agent ────────────────────────�
 
 `next_seq` 等于本次返回的最后一个 `seq`；没有返回事件时等于请求游标（并夹到当前
 已分配的最大 seq 以内）。下一次调用直接传 `after_seq = next_seq`，不会跳事件。
-`truncated` 表示本次读取仍有剩余事件；`dropped` 是任务内 ring buffer 的累计淘汰数。
-即使 `max_bytes` 小于下一条事件的文本长度，也至少返回一条完整事件并置
-`truncated`，保证 `next_seq` 前进；不存在「零进度」的响应。
+`truncated` 表示本次读取触达了读取上限（条数或字节预算），不表示事件正文被
+截断——事件正文的截断由事件级 `truncated` 表示。页级标志为 true 不代表一定还有
+剩余事件；即使 `max_bytes` 小于下一条事件的文本长度，也至少返回一条完整事件并
+置页级 `truncated`，保证 `next_seq` 前进；不存在「零进度」的响应。`dropped` 是
+任务内 ring buffer 的累计淘汰数。继续读取时直接传 `after_seq = next_seq`，并根据
+是否还有进程输出或任务状态决定停止。
 未知 task id 与 owner 不匹配统一返回 `unknown task`，不泄露另一会话的任务是否存在。
 
 ### 2.3 `monitor_stop`
 
-请求：`{ task_id, reason? }`。幂等。`reason` 去空白后 ≤256 字节，超限返回错误且不请求取消。
+请求：`{ task_id, reason? }`，其中 `task_id` 是 monitor id（`monitor-...`，不是宿主
+回执里的 `task_id`）。幂等。`reason` 去空白后 ≤256 字节，超限返回错误且不请求取消。
 
 响应：`TaskSnapshot`，包含终态、`statusMessage` 与：
 
@@ -181,7 +199,7 @@ working ───▶ cancelling（对外仍 working）──▶ cancelled       
 | `kind` | v1 恒为 `line` |
 | `text` | 行内容（去掉行尾 `\n` / `\r\n`），始终 untrusted |
 | `bytes` | 原始行字节数（不含行尾终止符） |
-| `truncated` | 行被截到 16 KiB |
+| `truncated` | 事件级：本行被截到 16 KiB（与读取响应的页级 `truncated` 不同） |
 | `dropped` | 本条事件之前被 ring buffer 淘汰的事件数（gap） |
 | `partial` | 进程结束时最后一行没有换行符 |
 | `untrusted` | 恒为 `true` |
@@ -189,7 +207,8 @@ working ───▶ cancelling（对外仍 working）──▶ cancelled       
 约束：
 
 - 单条事件文本 ≤ 16 KiB，按 UTF-8 字符边界截断；超长行剩余部分丢弃到下一个换行。
-- 单次读取 ≤ 500 条 / 128 KiB，超出置 `truncated`。
+- 单次读取 ≤ 500 条 / 128 KiB；触达任一上限时页级 `truncated = true`，用
+  `next_seq` 继续。页级标志不承诺还有剩余事件。
 - ring buffer 按 `max_events` / `max_bytes` 淘汰最旧事件；被淘汰事件计入 `dropped`，
   不会回填。`next_seq` 与 `dropped` 让调用方识别缺口。
 - 读取是纯内存操作，不重新执行命令，也不持久化事件。

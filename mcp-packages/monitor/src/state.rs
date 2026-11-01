@@ -160,6 +160,8 @@ pub struct ReadResult {
     pub events: Vec<MonitorEvent>,
     pub next_seq: u64,
     pub status: MonitorStatus,
+    /// The page stopped at a read bound (event count or byte budget); more
+    /// events may remain. This is not the per-event "line cut at 16 KiB" flag.
     pub truncated: bool,
     pub dropped: u64,
 }

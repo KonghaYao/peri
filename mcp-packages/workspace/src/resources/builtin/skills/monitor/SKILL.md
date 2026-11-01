@@ -37,10 +37,23 @@ worth observing, and you own the comparison.
 
 | Tool | Purpose |
 | --- | --- |
-| `mcp__monitor__monitor_start(command, cwd?, label?, alert?, deadline_ms?, max_events?, max_bytes?)` | Start a command and return a task id. |
-| `mcp__monitor__monitor_read(task_id, after_seq?, limit?, max_bytes?)` | Read events after an exclusive cursor. |
-| `mcp__monitor__monitor_stop(task_id, reason?)` | Stop the command (idempotent). |
-| `mcp__monitor__monitor_list(include_ended?, limit?)` | List this session's monitor summaries. |
+| `mcp__monitor__monitor_start(command, cwd?, label?, alert?, deadline_ms?, max_events?, max_bytes?)` | Start a command. The receipt gives `task_id` (host) and `monitor_id` (monitor). |
+| `mcp__monitor__monitor_read(task_id, after_seq?, limit?, max_bytes?)` | Read events after an exclusive cursor. Pass `monitor_id` as `task_id`. |
+| `mcp__monitor__monitor_stop(task_id, reason?)` | Stop the command (idempotent). Pass `monitor_id` as `task_id`. |
+| `mcp__monitor__monitor_list(include_ended?, limit?)` | List this session's monitor summaries; each `taskId` is a monitor id. |
+
+## Task ids
+
+The start receipt exposes two ids. They are different namespaces:
+
+- `task_id` (`mcp-...`): the host background task id. It is for `tasks/get` and
+  the host task panel, **not** for the monitor tools.
+- `monitor_id` (`monitor-...`): the monitor-side id. Pass it as the `task_id`
+  argument of `monitor_read` and `monitor_stop`. `monitor_list` also reports it
+  as each summary's `taskId`.
+
+If you lose `monitor_id`, call `monitor_list` and use its `taskId`. Passing the
+host `task_id` to `monitor_read` or `monitor_stop` returns `unknown task`.
 
 ## Event Model
 
@@ -54,7 +67,7 @@ Each event is one output line:
 | `kind` | `line` in v1. |
 | `text` | Line content, untrusted. |
 | `bytes` | Original line byte length. |
-| `truncated` | The line was cut at 16 KiB. |
+| `truncated` | Event-level: this line was cut at 16 KiB (different from the page-level read flag). |
 | `dropped` | Events evicted from the ring buffer before this one. |
 | `partial` | The line ended at process exit without a newline. |
 | `untrusted` | Always true. |
@@ -68,9 +81,9 @@ Pass `alert` (a regular expression, at most 512 characters, matched in linear
 time) when you want to be woken instead of polling. Every line is still stored
 in the ring buffer; only matching lines produce a host wake reminder.
 
-- The wake reminder contains the raw task id, the label, the latest event
-  `seq`, and how many matching lines were merged into it. It never contains the
-  matched text.
+- The wake reminder contains the monitor id (the same id `monitor_read`
+  accepts), the label, the latest event `seq`, and how many matching lines were
+  merged into it. It never contains the matched text.
 - Wakes are throttled to at most one per task per 30 seconds. Matches inside
   the window merge into one reminder with a larger `matched` count.
 - Wake delivery uses this session's inbox only. Another session never receives
@@ -92,11 +105,15 @@ that are cheap to poll, `monitor_read` on your own schedule is still fine.
 2. Read `events` and remember `next_seq`.
 3. Call again with `after_seq = next_seq`.
 
-A read returns at most 500 events and 128 KiB of text (`truncated: true` when
-more remains). The task ring buffer is bounded (`max_events`, `max_bytes`);
-when it overflows, `dropped` reports the number of evicted events. `status` is
-`working`, `completed`, `failed`, or `cancelled`; a task keeps its events until
-the process ends or the instance is replaced.
+A read returns at most 500 events and 128 KiB of text. Page-level
+`truncated: true` means a read bound was reached (event count or byte budget),
+not that event text was cut, and it does not guarantee another event remains.
+Continue with `after_seq = next_seq` while the task is still producing output.
+Per-event `truncated` means that one line was cut at 16 KiB. The task ring
+buffer is bounded (`max_events`, `max_bytes`); when it overflows, `dropped`
+reports the number of evicted events. `status` is `working`, `completed`,
+`failed`, or `cancelled`; a task keeps its events until the process ends or the
+instance is replaced.
 
 ## Patterns
 

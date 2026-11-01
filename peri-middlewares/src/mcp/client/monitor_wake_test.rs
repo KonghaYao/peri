@@ -16,9 +16,9 @@ use peri_acp_types::session::{
 use peri_agent::tools::BaseTool;
 use peri_mcp_monitor::MonitorMcpServer;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-    ListToolsResult, PaginatedRequestParams, RequestMetaObject, ServerCapabilities, ServerConfig,
-    Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, CancelTaskParams, ContentBlock,
+    GetTaskParams, Implementation, ListToolsResult, PaginatedRequestParams, RequestMetaObject,
+    ServerCapabilities, ServerConfig, TaskStatus, Tool,
 };
 use rmcp::service::{Peer, RequestContext, RoleClient, RoleServer};
 use rmcp::{ErrorData, ServerHandler};
@@ -143,21 +143,23 @@ async fn shutdown_link(mut link: MonitorLink, pool: Arc<McpClientPool>, mut owne
     let _ = owner.shutdown().await;
 }
 
-fn monitor_start_tool() -> Tool {
+fn monitor_tool(name: &str) -> Tool {
     serde_json::from_value(json!({
-        "name": "monitor_start",
+        "name": name,
         "description": "monitor fixture",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "command": { "type": "string" },
+                "task_id": { "type": "string" },
                 "alert": { "type": "string" },
-                "label": { "type": "string" }
+                "label": { "type": "string" },
+                "deadline_ms": { "type": "integer" }
             },
             "required": ["command"]
         }
     }))
-    .expect("monitor_start tool declaration")
+    .expect("monitor tool declaration")
 }
 
 /// Start a monitor task through the production `McpToolBridge` path, which is
@@ -168,14 +170,89 @@ async fn start_monitor_via_bridge(
     session_id: &str,
     arguments: serde_json::Value,
 ) -> String {
-    let tool = monitor_start_tool();
+    invoke_monitor_via_bridge(pool, link, session_id, "monitor_start", arguments).await
+}
+
+async fn invoke_monitor_via_bridge(
+    pool: &Arc<McpClientPool>,
+    link: &MonitorLink,
+    session_id: &str,
+    tool_name: &str,
+    arguments: serde_json::Value,
+) -> String {
+    let tool = monitor_tool(tool_name);
     let bridge = McpToolBridge::new("monitor", &tool, handle("monitor", Some(link.peer())))
         .with_output_store(pool, Some(session_id));
-    let fixture = CurrentInvocationFixture::new(session_id, "monitor_start", &[json!({})]).await;
+    let fixture = CurrentInvocationFixture::new(session_id, tool_name, &[json!({})]).await;
     bridge
         .invoke(arguments, fixture.context(0, "/"))
         .await
-        .expect("monitor_start bridge invocation")
+        .expect("monitor bridge invocation")
+}
+
+/// Read one named id out of the host receipt. Ids are single tokens.
+fn receipt_field(receipt: &str, key: &str) -> String {
+    let marker = format!("{key}: ");
+    let start = receipt
+        .find(&marker)
+        .unwrap_or_else(|| panic!("receipt must contain {key}: {receipt}"))
+        + marker.len();
+    let rest = &receipt[start..];
+    let end = rest
+        .find(|c: char| c.is_whitespace() || c == ',' || c == ')')
+        .unwrap_or(rest.len());
+    rest[..end].to_string()
+}
+
+fn register_bridge_session(
+    pool: &Arc<McpClientPool>,
+    session_id: &str,
+) -> (
+    Arc<MessageQueue>,
+    Arc<dyn peri_acp_types::tasks::TaskManager>,
+) {
+    let queue = Arc::new(MessageQueue::new());
+    pool.register_inbox(session_id, SessionInbox::new(Arc::clone(&queue)).handle());
+    let manager: Arc<dyn peri_acp_types::tasks::TaskManager> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    pool.bind_session_task_manager(session_id, &manager);
+    (queue, manager)
+}
+
+async fn monitor_status(peer: &Peer<RoleClient>, owner: &str, task_id: &str) -> TaskStatus {
+    let mut params = GetTaskParams::new(task_id);
+    params.meta = Some(owner_meta(owner));
+    peer.get_task(params)
+        .await
+        .expect("tasks/get")
+        .task
+        .status()
+}
+
+async fn wait_monitor_terminal(peer: &Peer<RoleClient>, owner: &str, task_id: &str) -> TaskStatus {
+    let deadline = tokio::time::Instant::now() + OBSERVE_TIMEOUT;
+    loop {
+        let status = monitor_status(peer, owner, task_id).await;
+        if status.is_terminal() {
+            return status;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "monitor task {task_id} did not reach a terminal state"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+async fn assert_no_reminder(pool: &Arc<McpClientPool>, queue: &MessageQueue, context: &str) {
+    for _ in 0..5 {
+        pool.poll_monitor_wakes_once().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        drain(queue).is_empty(),
+        "{context} must not deliver a Defer reminder"
+    );
 }
 
 async fn start_monitor(peer: &Peer<RoleClient>, owner: &str, label: &str, command: &str) -> String {
@@ -570,6 +647,185 @@ async fn bridge_started_monitor_settles_without_a_terminal_wake() {
         vec!["completed"],
         "the terminal task must remain observable through the task manager"
     );
+
+    shutdown_link(link, pool, owner).await;
+}
+
+/// 宿主回执必须同时给出 host `task_id` 与 monitor `monitor_id`；模型用后者即可
+/// read/stop，不需要先调 `monitor_list` 猜 raw id。
+#[tokio::test]
+async fn bridge_receipt_monitor_id_drives_read_list_and_stop() {
+    let link = connect_monitor().await;
+    let (owner, spawner) = McpTaskOwner::new();
+    let pool = pool_with_monitor(&link, spawner);
+    let (_queue, _manager) = register_bridge_session(&pool, "session-a");
+
+    let receipt = start_monitor_via_bridge(
+        &pool,
+        &link,
+        "session-a",
+        json!({ "command": "echo ready", "label": "ids" }),
+    )
+    .await;
+    let task_id = receipt_field(&receipt, "task_id");
+    let monitor_id = receipt_field(&receipt, "monitor_id");
+    assert!(task_id.starts_with("mcp-"), "{receipt}");
+    assert!(monitor_id.starts_with("monitor-"), "{receipt}");
+    assert_ne!(task_id, monitor_id, "{receipt}");
+
+    let wrong = invoke_monitor_via_bridge(
+        &pool,
+        &link,
+        "session-a",
+        "monitor_read",
+        json!({ "task_id": task_id }),
+    )
+    .await;
+    assert!(
+        wrong.contains("unknown task"),
+        "the host task_id must not resolve inside the monitor instance: {wrong}"
+    );
+
+    let deadline = tokio::time::Instant::now() + OBSERVE_TIMEOUT;
+    let page = loop {
+        let text = invoke_monitor_via_bridge(
+            &pool,
+            &link,
+            "session-a",
+            "monitor_read",
+            json!({ "task_id": monitor_id }),
+        )
+        .await;
+        let page: serde_json::Value = serde_json::from_str(&text).expect("read JSON");
+        if page["events"]
+            .as_array()
+            .is_some_and(|events| !events.is_empty())
+        {
+            break page;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "monitor_read with the receipt monitor_id must observe output: {text}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(page["events"][0]["text"], json!("ready"));
+
+    let listed: serde_json::Value = serde_json::from_str(
+        &invoke_monitor_via_bridge(
+            &pool,
+            &link,
+            "session-a",
+            "monitor_list",
+            json!({ "include_ended": true }),
+        )
+        .await,
+    )
+    .expect("list JSON");
+    assert!(
+        listed["tasks"]
+            .as_array()
+            .is_some_and(|tasks| tasks.iter().any(|task| task["taskId"] == json!(monitor_id))),
+        "monitor_list must report the same monitor id: {listed}"
+    );
+
+    let stopped: serde_json::Value = serde_json::from_str(
+        &invoke_monitor_via_bridge(
+            &pool,
+            &link,
+            "session-a",
+            "monitor_stop",
+            json!({ "task_id": monitor_id, "reason": "bridge id test" }),
+        )
+        .await,
+    )
+    .expect("stop JSON");
+    assert!(
+        matches!(
+            stopped["status"].as_str(),
+            Some("completed") | Some("cancelled")
+        ),
+        "monitor_stop with the receipt monitor_id must succeed: {stopped}"
+    );
+    assert!(stopped["cleanup"].is_object(), "{stopped}");
+
+    shutdown_link(link, pool, owner).await;
+}
+
+/// 取消终态只更新任务投影，不产生 Defer/reminder。
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelled_monitor_terminal_state_never_wakes_the_owner() {
+    let link = connect_monitor().await;
+    let (owner, spawner) = McpTaskOwner::new();
+    let pool = pool_with_monitor(&link, spawner);
+    let (queue, _manager) = register_bridge_session(&pool, "session-a");
+
+    let receipt = start_monitor_via_bridge(
+        &pool,
+        &link,
+        "session-a",
+        json!({ "command": "sleep 30", "label": "cancel" }),
+    )
+    .await;
+    let monitor_id = receipt_field(&receipt, "monitor_id");
+    assert!(
+        pool.monitor_wake.started.load(Ordering::Acquire),
+        "the bridge path must arm the wake pump before the terminal assertion"
+    );
+    assert!(
+        pool.monitor_wake.owners.lock().contains("session-a"),
+        "the pump must track this owner before the terminal assertion"
+    );
+
+    let mut cancel = CancelTaskParams::new(&monitor_id);
+    cancel.meta = Some(owner_meta("session-a"));
+    link.peer()
+        .cancel_task(cancel)
+        .await
+        .expect("tasks/cancel ack");
+    assert_eq!(
+        wait_monitor_terminal(&link.peer(), "session-a", &monitor_id).await,
+        TaskStatus::Cancelled,
+        "tasks/cancel must end in the cancelled terminal state"
+    );
+    assert_no_reminder(&pool, &queue, "cancelled monitor terminal").await;
+
+    shutdown_link(link, pool, owner).await;
+}
+
+/// deadline 终态（failed）只更新任务投影，不产生 Defer/reminder。
+#[cfg(unix)]
+#[tokio::test]
+async fn deadline_monitor_terminal_state_never_wakes_the_owner() {
+    let link = connect_monitor().await;
+    let (owner, spawner) = McpTaskOwner::new();
+    let pool = pool_with_monitor(&link, spawner);
+    let (queue, _manager) = register_bridge_session(&pool, "session-a");
+
+    let receipt = start_monitor_via_bridge(
+        &pool,
+        &link,
+        "session-a",
+        json!({ "command": "sleep 30", "label": "deadline", "deadline_ms": 200 }),
+    )
+    .await;
+    let monitor_id = receipt_field(&receipt, "monitor_id");
+    assert!(
+        pool.monitor_wake.started.load(Ordering::Acquire),
+        "the bridge path must arm the wake pump before the terminal assertion"
+    );
+    assert!(
+        pool.monitor_wake.owners.lock().contains("session-a"),
+        "the pump must track this owner before the terminal assertion"
+    );
+
+    assert_eq!(
+        wait_monitor_terminal(&link.peer(), "session-a", &monitor_id).await,
+        TaskStatus::Failed,
+        "deadline expiry must end in the failed terminal state"
+    );
+    assert_no_reminder(&pool, &queue, "deadline monitor terminal").await;
 
     shutdown_link(link, pool, owner).await;
 }

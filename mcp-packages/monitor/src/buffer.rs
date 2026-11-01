@@ -82,7 +82,9 @@ pub struct EventPage {
     pub events: Vec<MonitorEvent>,
     /// Exclusive cursor to pass as `after_seq` next time.
     pub next_seq: u64,
-    /// More matching events remained after this page.
+    /// The page stopped at a read bound (event count or byte budget); more
+    /// events may remain. Not to be confused with [`MonitorEvent::truncated`],
+    /// which means that one line was cut at [`MAX_EVENT_BYTES`].
     pub truncated: bool,
     /// Cumulative events evicted by the ring buffer.
     pub dropped: u64,
@@ -154,7 +156,8 @@ impl EventBuffer {
     /// The page always includes at least one complete event when one is
     /// available: a `max_bytes` smaller than the next event cannot stall the
     /// cursor forever. Such a page is marked `truncated` and the caller can
-    /// advance with `next_seq`.
+    /// advance with `next_seq`. The flag only reports that a read bound was
+    /// reached; it does not guarantee another event remains.
     pub fn read(&self, after_seq: Option<u64>, limit: usize, max_bytes: usize) -> EventPage {
         let limit = limit.clamp(1, MAX_READ_EVENTS);
         let budget = max_bytes.clamp(1, MAX_READ_BYTES);

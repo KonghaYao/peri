@@ -19,6 +19,22 @@ pub(super) fn task_started(public_id: String, delivery_note: &str) -> ToolOutput
     )
 }
 
+/// Monitor receipt: the host public task id and the monitor-side task id are
+/// different namespaces. The model receives both so it never has to guess which
+/// one `tasks/get` and `monitor_read`/`monitor_stop` accept.
+pub(super) fn monitor_started(public_id: String, monitor_id: &str) -> ToolOutput {
+    ToolOutput::with_execution(
+        format!(
+            "Background task started: {public_id}. task_id: {public_id} (host background task; \
+             use with tasks/get). monitor_id: {monitor_id} (use this as task_id for monitor_read \
+             and monitor_stop; monitor_list also reports it). Do not pass the host task_id to the \
+             monitor tools. Only alert matches wake the initiating session; read progress with \
+             monitor_read."
+        ),
+        evidence(ToolExecutionStatus::Running, Some(public_id)),
+    )
+}
+
 pub(super) fn complete(
     tool: &dyn BaseTool,
     text: String,

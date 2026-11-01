@@ -466,14 +466,16 @@ impl BaseTool for McpToolBridge {
                 );
                 if is_monitor {
                     pool.ensure_monitor_wake_pump(session_id);
+                    // The model sees the receipt, not the raw `CreateTaskResult`.
+                    // Expose both ids: `public_id` is the host registry id
+                    // (`tasks/get`), while the server task id is what
+                    // `monitor_read`/`monitor_stop` accept.
+                    return Ok(super::tool_execution::monitor_started(public_id, &task_id));
                 }
                 // 回执只承诺可达的投递：有 canonical 路由 = 结果到达时持久记录；
                 // 否则只声称活跃期送达。结果尚未产生，不得提前声称已写入 transcript，
                 // 也不承诺进程重启后恢复后台执行。
-                let delivery_note = if is_monitor {
-                    "Only alert matches wake the initiating session; read progress with \
-                     monitor_read and inspect status with monitor_list."
-                } else if delivery.is_some() {
+                let delivery_note = if delivery.is_some() {
                     "Its completion result will be delivered to the initiating session when it \
                      arrives; the delivered result is recorded at that point."
                 } else {
