@@ -71,6 +71,10 @@ API Key 与 ChatGPT plan 共用请求编码、流解码和公共 runtime，通�
 | Platform | 配置 API Key；显式 Responses endpoint | `store: false`、`stream: true`；可配置输出上限 |
 | ChatGptPlan | Sign in with ChatGPT 授权；固定公共 `/v1/responses` | 全历史 `input`，system 转 developer；省略不支持的输出上限等参数；function 工具放在 `peri` namespace |
 
+两种 profile 都不发送 `previous_response_id` 或 `conversation`：请求固定 `store: false`，
+服务端不保证响应可被后续请求取回，重放也不能依赖某个 endpoint、model 或 credential
+保存的会话；续聊由 `ProviderState` 中的有序原生 items 加完整 `input` 完成。
+
 订阅的登录、刷新、状态与登出属于 `mcp-packages/credentials` 的宿主控制面；不进入
 模型工具目录。凭据按账户保存，刷新串行化并原子替换。配置只持有凭据引用，不将
 access/refresh token 写入请求 checkpoint。401 刷新只允许原预算内重新发送冻结请求；
