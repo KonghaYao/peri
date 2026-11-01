@@ -141,7 +141,9 @@ async fn start_returns_task_read_returns_events_and_owner_isolation_holds() {
     let server = MonitorMcpServer::new(std::env::temp_dir().to_string_lossy().into_owned());
     let (client, server_task) = connect(server).await;
 
-    let task_id = start(&client, "session-a", "printf 'one\\ntwo\\n'").await;
+    // `echo a; echo b` 在 bash 与 PowerShell（echo = Write-Output）下都输出两行，
+    // 不依赖 Unix 才有的 printf。
+    let task_id = start(&client, "session-a", "echo one; echo two").await;
     let task = terminal_task(&client, "session-a", &task_id).await;
     assert_eq!(task.task.status(), TaskStatus::Completed);
 

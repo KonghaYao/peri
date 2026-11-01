@@ -27,7 +27,14 @@ fn resolve_start_applies_defaults_and_resolves_relative_cwd() {
     )
     .expect("valid start");
     assert_eq!(resolved.command, "printf hi");
-    assert_eq!(resolved.cwd, "/workspace/nested");
+    // 相对 cwd 由 `PathBuf::join` 拼接，期望值按平台分隔符构造（Windows 为 `\`）。
+    assert_eq!(
+        resolved.cwd,
+        std::path::Path::new("/workspace")
+            .join("nested")
+            .to_string_lossy()
+            .into_owned()
+    );
     assert_eq!(resolved.label.as_deref(), Some("build"));
     assert_eq!(
         resolved.deadline,
