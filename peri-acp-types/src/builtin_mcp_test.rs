@@ -101,7 +101,7 @@ fn tools_are_non_empty_and_unique_per_instance() {
                 }
             }
             // wave 2：cron 冻结 `None`（A4：声明段零变化）。
-            // monitor：四个工具同样无 `BaseTool::prompt_declaration()` 文本。
+            // monitor：六个工具同样无 `BaseTool::prompt_declaration()` 文本。
             // wave 5：workflow 四项同形（无 `BaseTool::prompt_declaration()` 文本）。
             "cron" | "monitor" | "workflow" => {
                 for tool in instance.tools {
@@ -208,6 +208,20 @@ fn reserved_names_superset_of_implemented_instances() {
 }
 
 #[test]
+fn task_owner_scoping_is_a_registry_field() {
+    let scoped: HashSet<&str> = BUILTIN_MCP_INSTANCES
+        .iter()
+        .filter(|instance| instance.task_owner_scoped)
+        .map(|instance| instance.name)
+        .collect();
+    assert_eq!(
+        scoped,
+        HashSet::from(["monitor", "workspace"]),
+        "只有 monitor 与 workspace 按发起会话隔离任务"
+    );
+}
+
+#[test]
 fn policy_keys_are_unique_and_frozen() {
     let keys: HashSet<&str> = BUILTIN_MCP_INSTANCES
         .iter()
@@ -251,6 +265,28 @@ fn find_hits_only_implemented_instances() {
         cron.tools.len(),
         5,
         "cron_register / cron_list / cron_remove / cron_toggle / cron_acknowledge"
+    );
+    let monitor = find("monitor").expect("monitor 是已实现实例");
+    assert_eq!(monitor.name, "monitor");
+    assert_eq!(
+        monitor.tools.len(),
+        6,
+        "monitor_start / monitor_read / monitor_stop / monitor_list / monitor_wakes / monitor_ack"
+    );
+    let host_only: HashSet<&str> = monitor
+        .tools
+        .iter()
+        .filter(|tool| !tool.model_visible)
+        .map(|tool| tool.original_name)
+        .collect();
+    assert_eq!(
+        host_only,
+        HashSet::from(["monitor_wakes", "monitor_ack"]),
+        "wake 泵工具必须是 host-only"
+    );
+    assert!(
+        monitor.tools.iter().all(|tool| !tool.direct),
+        "monitor 工具全部 deferred"
     );
     let workspace = find("workspace").expect("workspace 是已实现实例（AW3-06）");
     assert_eq!(workspace.name, "workspace");

@@ -14,6 +14,9 @@ fn snapshot(status: MonitorStatus, message: &str) -> TaskSnapshot {
         finished_at: status.is_terminal().then(|| "2026-11-01T00:00:01Z".into()),
         event_count: 2,
         dropped: 0,
+        pending_wakes: 0,
+        wake_dropped: 0,
+        alert_matched: 0,
         cleanup: CleanupReport {
             requested: false,
             process_terminated: status.is_terminal(),

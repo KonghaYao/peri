@@ -1,0 +1,267 @@
+//! Host-side monitor wake pump.
+//!
+//! The builtin `monitor` instance holds alert matches in a per-task outbox until
+//! the host acknowledges them. This pump polls `monitor_wakes` per known owner,
+//! delivers a `Defer` reminder into that owner's inbox, and acknowledges the
+//! wake.
+//!
+//! Boundaries:
+//! - **owner-directed**: one `monitor_wakes` call per owner with
+//!   `_meta["peri/taskOwner"]`; a wake is never broadcast.
+//! - **no approval on the wake path**: `monitor_start`'s tool approval covers
+//!   later wakes. This pump never calls HITL or the cron continuation path.
+//! - **no event text**: the reminder carries only task id, label, seq, and the
+//!   matched count; output is pulled with `monitor_read` as untrusted data.
+//! - **offline owners drop**: no inbox ⇒ no push; the wake is acknowledged as
+//!   `offline` and counted. Wakes are never retargeted to another session.
+//! - **idempotent**: the delivery id is derived from `(task_id, wake_id)`; a
+//!   retry after a failed acknowledgement reuses the same canonical id.
+
+use std::{
+    collections::HashSet,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Weak,
+    },
+    time::Duration,
+};
+
+use peri_acp_types::monitor::{
+    monitor_wake_delivery_id, monitor_wake_reminder, MonitorAckOutcome, MonitorWake,
+    MonitorWakePage,
+};
+use peri_acp_types::session::{MessageKind, MessageSource};
+
+use super::McpClientPool;
+use crate::mcp::task_scope::McpTaskKey;
+
+const MONITOR_INSTANCE: &str = "monitor";
+const MONITOR_WAKE_TOOL: &str = "monitor_wakes";
+const MONITOR_ACK_TOOL: &str = "monitor_ack";
+const MONITOR_WAKE_POLL_INTERVAL: Duration = Duration::from_millis(750);
+const MONITOR_WAKE_LIMIT: usize = 64;
+
+#[derive(Default)]
+pub(crate) struct MonitorWakeMetrics {
+    pub(crate) delivered: AtomicU64,
+    pub(crate) offline: AtomicU64,
+    pub(crate) ack_failures: AtomicU64,
+    pub(crate) poll_failures: AtomicU64,
+}
+
+/// Pool-owned wake pump state.
+#[derive(Default)]
+pub(crate) struct MonitorWakeRuntime {
+    started: AtomicBool,
+    /// Owners that ever started a monitor task in this pool. The set survives
+    /// inbox unregistration and child-session release so late wakes can still
+    /// be acknowledged as offline.
+    owners: parking_lot::Mutex<HashSet<String>>,
+    pub(crate) metrics: MonitorWakeMetrics,
+}
+
+impl McpClientPool {
+    /// Register an owner and ensure the wake pump is running.
+    ///
+    /// Called when the first monitor task is admitted for a session. Repeated
+    /// calls only add owners; the pump itself starts at most once per pool.
+    pub(crate) fn ensure_monitor_wake_pump(self: &Arc<Self>, owner: &str) {
+        if !self.is_open() {
+            return;
+        }
+        if self.get_client(MONITOR_INSTANCE).is_none() {
+            tracing::debug!(owner = %owner, "monitor wake pump skipped: monitor instance absent");
+            return;
+        }
+        self.monitor_wake.owners.lock().insert(owner.to_owned());
+        if self.monitor_wake.started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        if let Err(error) = self.spawn_background(McpTaskKey::MonitorWake, run_pump(weak)) {
+            self.monitor_wake.started.store(false, Ordering::Release);
+            tracing::warn!(%error, "monitor wake pump was not admitted");
+        }
+    }
+
+    /// Whether an owner currently has a live inbox.
+    pub(crate) fn owner_online(&self, owner: &str) -> bool {
+        self.session_bindings.read().inbox(owner).is_some()
+    }
+
+    /// One pump pass. Returns `false` when the monitor instance is absent or not
+    /// connected (the pump then stays idle rather than treating it as an error).
+    pub(crate) async fn poll_monitor_wakes_once(&self) -> bool {
+        let Some(handle) = self.get_client(MONITOR_INSTANCE) else {
+            return false;
+        };
+        if !matches!(handle.status, super::ClientStatus::Connected) || handle.peer.is_none() {
+            return false;
+        }
+        let owners = {
+            let mut owners = self.monitor_wake.owners.lock().clone();
+            owners.extend(self.session_bindings.read().registered_owners());
+            owners
+        };
+        for owner in owners {
+            if !self.is_open() {
+                break;
+            }
+            let page = match self.fetch_wakes(&owner).await {
+                Ok(page) => page,
+                Err(error) => {
+                    let previous = self
+                        .monitor_wake
+                        .metrics
+                        .poll_failures
+                        .fetch_add(1, Ordering::Relaxed);
+                    if previous == 0 {
+                        tracing::warn!(owner = %owner, %error, "monitor wake poll failed; retrying");
+                    } else {
+                        tracing::debug!(owner = %owner, %error, "monitor wake poll still failing");
+                    }
+                    continue;
+                }
+            };
+            if page.wakes.is_empty() {
+                continue;
+            }
+            self.deliver_owner_wakes(&owner, page.wakes).await;
+        }
+        true
+    }
+
+    async fn fetch_wakes(&self, owner: &str) -> Result<MonitorWakePage, String> {
+        let text = self
+            .call_instance_tool(
+                MONITOR_INSTANCE,
+                MONITOR_WAKE_TOOL,
+                serde_json::json!({ "limit": MONITOR_WAKE_LIMIT }),
+                Some(owner_meta(owner)),
+            )
+            .await?;
+        serde_json::from_str(&text).map_err(|error| format!("monitor_wakes response: {error}"))
+    }
+
+    async fn deliver_owner_wakes(&self, owner: &str, wakes: Vec<MonitorWake>) {
+        let inbox = self
+            .owner_online(owner)
+            .then(|| self.session_bindings.read().inbox(owner))
+            .flatten();
+        let Some(inbox) = inbox else {
+            // Offline: drop without delivery, but clear the server outbox so the
+            // task's pending count reflects that nobody will read it.
+            let ids: Vec<String> = wakes.iter().map(|wake| wake.wake_id.clone()).collect();
+            match self
+                .ack_wakes(owner, &ids, MonitorAckOutcome::Offline)
+                .await
+            {
+                Ok(acked) => {
+                    self.monitor_wake
+                        .metrics
+                        .offline
+                        .fetch_add(acked, Ordering::Relaxed);
+                }
+                Err(error) => self.note_ack_failure(owner, &error),
+            }
+            return;
+        };
+        for wake in wakes {
+            let delivery_id = monitor_wake_delivery_id(&wake.task_id, &wake.wake_id);
+            let reminder = match monitor_wake_reminder(&wake) {
+                Ok(reminder) => reminder,
+                Err(error) => {
+                    tracing::warn!(
+                        owner = %owner,
+                        wake_id = %wake.wake_id,
+                        %error,
+                        "monitor wake reminder rejected"
+                    );
+                    continue;
+                }
+            };
+            inbox.push_system_reminder_with_delivery_id(
+                MessageKind::Defer,
+                MessageSource::McpNotification,
+                reminder,
+                delivery_id,
+            );
+            self.monitor_wake
+                .metrics
+                .delivered
+                .fetch_add(1, Ordering::Relaxed);
+            match self
+                .ack_wakes(
+                    owner,
+                    std::slice::from_ref(&wake.wake_id),
+                    MonitorAckOutcome::Delivered,
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(error) => self.note_ack_failure(owner, &error),
+            }
+        }
+    }
+
+    async fn ack_wakes(
+        &self,
+        owner: &str,
+        wake_ids: &[String],
+        outcome: MonitorAckOutcome,
+    ) -> Result<u64, String> {
+        let text = self
+            .call_instance_tool(
+                MONITOR_INSTANCE,
+                MONITOR_ACK_TOOL,
+                serde_json::json!({
+                    "wake_ids": wake_ids,
+                    "outcome": outcome.as_str(),
+                }),
+                Some(owner_meta(owner)),
+            )
+            .await?;
+        let value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|error| format!("monitor_ack response: {error}"))?;
+        value
+            .get("acked")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| "monitor_ack response is missing 'acked'".to_owned())
+    }
+
+    fn note_ack_failure(&self, owner: &str, error: &str) {
+        let previous = self
+            .monitor_wake
+            .metrics
+            .ack_failures
+            .fetch_add(1, Ordering::Relaxed);
+        if previous == 0 {
+            tracing::warn!(owner = %owner, %error, "monitor wake acknowledgement failed; retrying");
+        } else {
+            tracing::debug!(owner = %owner, %error, "monitor wake acknowledgement still failing");
+        }
+    }
+}
+
+fn owner_meta(owner: &str) -> serde_json::Value {
+    serde_json::json!({ peri_mcp_core::task_owner::TASK_OWNER_META_KEY: owner })
+}
+
+/// Pump loop. Stops when the pool closes or the pool is dropped.
+async fn run_pump(pool: Weak<McpClientPool>) {
+    loop {
+        let Some(pool) = pool.upgrade() else {
+            return;
+        };
+        if !pool.is_open() {
+            return;
+        }
+        let _ = pool.poll_monitor_wakes_once().await;
+        drop(pool);
+        peri_time::sleep(MONITOR_WAKE_POLL_INTERVAL).await;
+    }
+}
+
+#[cfg(test)]
+#[path = "monitor_wake_test.rs"]
+mod tests;

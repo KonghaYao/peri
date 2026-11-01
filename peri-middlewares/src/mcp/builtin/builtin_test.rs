@@ -119,7 +119,7 @@ fn declared_direct_tools_is_derived_from_registry() {
                 "workspace 的 7 个本地工具必须全部 declared direct（AW3-03）"
             ),
             // wave 2：cron 零 direct —— `system_mcp_tools` 恒为空集（A5）。
-            // monitor 四个工具同形（全部 deferred）。
+            // monitor 六个工具同形（全部 deferred；其中两个 host-only）。
             // wave 5：workflow 四项同形（模型面 `mcp__workflow__*` 一律 deferred）。
             "cron" | "monitor" | "workflow" => assert!(
                 declared.is_empty(),
@@ -214,7 +214,7 @@ fn builtin_prompt_declaration_matches_registry() {
                     );
                 }
                 // wave 2：cron 冻结 `None`（A4：声明段零变化）。
-                // monitor 四个工具同形（无 `BaseTool::prompt_declaration()` 文本）。
+                // monitor 六个工具同形（无 `BaseTool::prompt_declaration()` 文本）。
                 // wave 5：workflow 四项同形（无 `BaseTool::prompt_declaration()` 文本）。
                 "cron" | "monitor" | "workflow" => {
                     assert_eq!(

@@ -4,8 +4,21 @@ use std::sync::Arc;
 use peri_acp_types::session::InboxHandle;
 use peri_acp_types::tasks::TaskManager;
 
+/// Who owns a session binding.
+///
+/// Initial sessions are registered/unregistered by the session manager; child
+/// agent sessions are bound for the duration of the child and released when its
+/// resources settle. The kind is bookkeeping only — liveness is still decided
+/// by the `registered` flag and the inbox handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BindingKind {
+    Initial,
+    Agent,
+}
+
 #[derive(Default)]
 struct Binding {
+    kind: Option<BindingKind>,
     inbox: Option<InboxHandle>,
     manager: Option<Arc<dyn TaskManager>>,
     registered: bool,
@@ -17,13 +30,19 @@ pub(crate) struct SessionBindings {
 }
 
 impl SessionBindings {
-    #[cfg(test)]
-    pub(crate) fn registered_sessions(&self) -> Vec<String> {
+    /// Owners with a live (registered) inbox.
+    pub(crate) fn registered_owners(&self) -> Vec<String> {
         self.current
             .keys()
             .filter(|session| self.inbox(session).is_some())
             .cloned()
             .collect()
+    }
+
+    /// Binding kind for observability and tests.
+    #[cfg(test)]
+    pub(crate) fn kind(&self, session: &str) -> Option<BindingKind> {
+        self.current.get(session)?.kind
     }
 
     pub(crate) fn verify_environment_close(&self, root: &str) -> Result<(), String> {
@@ -70,12 +89,29 @@ impl SessionBindings {
     }
 
     pub(crate) fn bind_initial_manager(&mut self, session: &str, manager: Arc<dyn TaskManager>) {
-        self.current.entry(session.into()).or_default().manager = Some(manager);
+        let binding = self.current.entry(session.into()).or_default();
+        binding.kind.get_or_insert(BindingKind::Initial);
+        binding.manager = Some(manager);
     }
 
     pub(crate) fn register_initial_inbox(&mut self, session: &str, inbox: InboxHandle) {
         let binding = self.current.entry(session.into()).or_default();
+        binding.kind = Some(BindingKind::Initial);
         binding.inbox = Some(inbox);
+        binding.registered = true;
+    }
+
+    /// Bind a child agent session for its whole lifetime.
+    pub(crate) fn bind_agent(
+        &mut self,
+        session: &str,
+        inbox: InboxHandle,
+        manager: Arc<dyn TaskManager>,
+    ) {
+        let binding = self.current.entry(session.into()).or_default();
+        binding.kind = Some(BindingKind::Agent);
+        binding.inbox = Some(inbox);
+        binding.manager = Some(manager);
         binding.registered = true;
     }
 

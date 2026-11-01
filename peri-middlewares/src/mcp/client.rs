@@ -7,6 +7,7 @@ mod cache;
 mod cache_policy_tests;
 mod instance_face;
 mod lifecycle;
+mod monitor_wake;
 mod oauth;
 pub(crate) mod output_store;
 #[cfg(not(target_os = "emscripten"))]
@@ -191,6 +192,8 @@ pub struct McpClientPool {
     /// 与 `acp_owners` 同批写入、同批移除；持久化 cache 只按它 + 当前句柄代号
     /// 计算 origin，凭据从不进入本结构。
     pub(crate) acp_connections: parking_lot::RwLock<HashMap<String, AcpConnectionDeclaration>>,
+    /// monitor alert 唤醒泵：owner 集合、启动标记与投递计数。
+    pub(crate) monitor_wake: monitor_wake::MonitorWakeRuntime,
 }
 
 /// 会话级 ACP 连接的声明事实（非凭据）：`server_id` 是 client 在会话 setup 中
@@ -321,6 +324,7 @@ impl McpClientPool {
             system_readiness: SystemReadinessTracker::new(),
             acp_owners: parking_lot::RwLock::new(HashMap::new()),
             acp_connections: parking_lot::RwLock::new(HashMap::new()),
+            monitor_wake: monitor_wake::MonitorWakeRuntime::default(),
         }
     }
 

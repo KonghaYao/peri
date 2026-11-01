@@ -25,7 +25,7 @@ use rmcp::{
 };
 
 use crate::state::{MonitorState, MonitorStatus, TaskSnapshot};
-use crate::tools::{self, parse_list, parse_read, parse_start, parse_stop};
+use crate::tools::{self, parse_ack, parse_list, parse_read, parse_start, parse_stop, parse_wakes};
 
 /// `Implementation::name` for the monitor server.
 const MONITOR_SERVER_NAME: &str = "peri-monitor-mcp";
@@ -116,6 +116,20 @@ impl ServerHandler for MonitorMcpServer {
                 }
                 Err(error) => Ok(tool_error("monitor_list", &error)),
             },
+            "monitor_wakes" => match parse_wakes(&arguments) {
+                Ok(wakes) => match self.state.wakes(owner.as_deref(), wakes.limit) {
+                    Ok(wakes) => json_response(peri_acp_types::monitor::MonitorWakePage { wakes }),
+                    Err(error) => Ok(tool_error("monitor_wakes", &error)),
+                },
+                Err(error) => Ok(tool_error("monitor_wakes", &error)),
+            },
+            "monitor_ack" => match parse_ack(&arguments) {
+                Ok(ack) => {
+                    let acked = self.state.ack(owner.as_deref(), &ack.wake_ids, ack.outcome);
+                    Ok(success_json(serde_json::json!({ "acked": acked })))
+                }
+                Err(error) => Ok(tool_error("monitor_ack", &error)),
+            },
             other => Err(McpError::invalid_params(
                 format!("unknown tool: {other}"),
                 None,
@@ -133,7 +147,20 @@ impl ServerHandler for MonitorMcpServer {
             .state
             .snapshot(&request.task_id, owner.as_deref())
             .map_err(unknown_task)?;
-        Ok(GetTaskResult::new(detailed_task(snapshot)))
+        let mut result = GetTaskResult::new(detailed_task(snapshot.clone()));
+        // The Tasks projection has no room for custom task fields; the host
+        // reads alert counters from result metadata for observability.
+        let mut meta = JsonObject::new();
+        meta.insert(
+            "peri/monitor".into(),
+            serde_json::json!({
+                "pendingWakes": snapshot.pending_wakes,
+                "wakeDropped": snapshot.wake_dropped,
+                "alertMatched": snapshot.alert_matched,
+            }),
+        );
+        result.meta = Some(MetaObject(meta));
+        Ok(result)
     }
 
     async fn cancel_task(
@@ -258,6 +285,6 @@ fn json_response(value: impl serde::Serialize) -> Result<CallToolResponse, McpEr
 #[path = "server_test.rs"]
 mod tests;
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "server_wire_test.rs"]
 mod wire_tests;

@@ -1,24 +1,25 @@
 use std::sync::Arc;
 
+use peri_acp_types::builtin_mcp::find;
 use peri_acp_types::tasks::TaskManager;
 use rmcp::model::RequestMetaObject;
 
 use super::McpClientPool;
 
-/// Whether `source` is a builtin session-scoped capability that isolates
-/// background tasks by the direct initiating session.
+/// Whether `source` is a session-scoped capability that isolates background
+/// tasks by the direct initiating session.
 ///
-/// Workspace and Monitor both publish task state over MCP Tasks. Other MCP
-/// servers remain generic: they never receive Peri task metadata.
+/// The scoping fact is the registry field `task_owner_scoped`
+/// (`workspace` / `monitor`), not a server-name literal. `WorkspaceRemote`
+/// keeps the same contract for the remote workspace endpoint.
 pub(crate) fn source_uses_task_owner(source: Option<&crate::mcp::config::ConfigSource>) -> bool {
-    matches!(
-        source,
-        Some(crate::mcp::config::ConfigSource::WorkspaceRemote)
-    ) || matches!(
-        source,
-        Some(crate::mcp::config::ConfigSource::Builtin { instance })
-            if instance == "workspace" || instance == "monitor"
-    )
+    match source {
+        Some(crate::mcp::config::ConfigSource::WorkspaceRemote) => true,
+        Some(crate::mcp::config::ConfigSource::Builtin { instance }) => {
+            find(instance).is_some_and(|declared| declared.task_owner_scoped)
+        }
+        Some(_) | None => false,
+    }
 }
 
 /// Build the optional `_meta["peri/taskOwner"]` for a session-scoped request.

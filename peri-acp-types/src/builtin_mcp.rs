@@ -57,6 +57,11 @@ pub struct BuiltinMcpInstance {
     /// MetaHarness 关闭键（`WebMiddleware` / `ArtifactMiddleware`）；
     /// 与 `BUILTIN_INSTANCE_POLICY_KEYS` 集合相等。
     pub policy_key: &'static str,
+    /// 是否按直接发起会话隔离后台任务与资源。
+    ///
+    /// `true` ⇒ 宿主注入 `_meta["peri/taskOwner"]`（`workspace` / `monitor`）；
+    /// 其他实例保持 generic MCP 语义，不接收 Peri 元数据。
+    pub task_owner_scoped: bool,
     /// 实例工具表（非空；名字与 effective name 在实例内唯一）。
     pub tools: &'static [BuiltinMcpTool],
 }
@@ -154,12 +159,14 @@ const CRON_TOOLS: &[BuiltinMcpTool] = &[
     },
 ];
 
-/// `monitor` 实例的工具声明（4 项；顺序即声明段顺序）。
+/// `monitor` 实例的工具声明（6 项；顺序即声明段顺序）。
 ///
-/// v1 只做 command source。四个工具一律 deferred（`direct: false`）且无提示词
+/// v1 只做 command source。六个工具一律 deferred（`direct: false`）且无提示词
 /// 声明模板（与 `cron` 同形）。`monitor_start` 返回标准 MCP Tasks 句柄，
 /// `monitor_read` / `monitor_stop` / `monitor_list` 返回 Complete 结果。
-/// 任务状态纯内存；重启或实例替换后旧 id 一律 unknown。
+/// `monitor_wakes` / `monitor_ack` 是 host-only：保留在 `tools/list` 供宿主唤醒泵
+/// 调用，不进入桥接、ToolSearch 索引或模型 tools 参数。任务状态纯内存；重启或
+/// 实例替换后旧 id 一律 unknown。
 const MONITOR_TOOLS: &[BuiltinMcpTool] = &[
     BuiltinMcpTool {
         context_retention: crate::tools::ContextRetention::SideEffectReceipt,
@@ -195,6 +202,24 @@ const MONITOR_TOOLS: &[BuiltinMcpTool] = &[
         effective_name: "mcp__monitor__monitor_list",
         direct: false,
         model_visible: true,
+        prompt_declaration: None,
+    },
+    BuiltinMcpTool {
+        context_retention: crate::tools::ContextRetention::PreviewOnly,
+        completes_on_response: true,
+        original_name: "monitor_wakes",
+        effective_name: "mcp__monitor__monitor_wakes",
+        direct: false,
+        model_visible: false,
+        prompt_declaration: None,
+    },
+    BuiltinMcpTool {
+        context_retention: crate::tools::ContextRetention::PreviewOnly,
+        completes_on_response: true,
+        original_name: "monitor_ack",
+        effective_name: "mcp__monitor__monitor_ack",
+        direct: false,
+        model_visible: false,
         prompt_declaration: None,
     },
 ];
@@ -396,30 +421,35 @@ pub const BUILTIN_MCP_INSTANCES: &[BuiltinMcpInstance] = &[
         name: "web",
         instance: "web",
         policy_key: "WebMiddleware",
+        task_owner_scoped: false,
         tools: WEB_TOOLS,
     },
     BuiltinMcpInstance {
         name: "artifact",
         instance: "artifact",
         policy_key: "ArtifactMiddleware",
+        task_owner_scoped: false,
         tools: ARTIFACT_TOOLS,
     },
     BuiltinMcpInstance {
         name: "cron",
         instance: "cron",
         policy_key: "CronMiddleware",
+        task_owner_scoped: false,
         tools: CRON_TOOLS,
     },
     BuiltinMcpInstance {
         name: "monitor",
         instance: "monitor",
         policy_key: "MonitorMiddleware",
+        task_owner_scoped: true,
         tools: MONITOR_TOOLS,
     },
     BuiltinMcpInstance {
         name: "workspace",
         instance: "workspace",
         policy_key: "WorkspaceMiddleware",
+        task_owner_scoped: true,
         tools: WORKSPACE_TOOLS,
     },
     BuiltinMcpInstance {
@@ -427,6 +457,7 @@ pub const BUILTIN_MCP_INSTANCES: &[BuiltinMcpInstance] = &[
         instance: "workflow",
         // 沿用旧链槽位名：用户配置兼容（关闭语义从「链槽关闭」变为「实例关闭」）。
         policy_key: "WorkflowMiddleware",
+        task_owner_scoped: false,
         tools: WORKFLOW_TOOLS,
     },
 ];

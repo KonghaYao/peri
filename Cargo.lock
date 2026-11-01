@@ -3517,10 +3517,12 @@ version = "0.2.0"
 dependencies = [
  "async-trait",
  "parking_lot",
+ "peri-acp-types",
  "peri-agent",
  "peri-mcp-common",
  "peri-process",
  "peri-time",
+ "regex",
  "rmcp",
  "serde",
  "serde_json",

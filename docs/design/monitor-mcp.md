@@ -1,7 +1,7 @@
 # MonitorMCP（command source 监控）
 
-> **状态**：**已批准目标设计**——v1 command source 与标准 MCP Tasks 通信已裁决；
-> alert/逐行唤醒与 poll/file/WS source 不在 v1 范围。
+> **状态**：**已批准目标设计**——v1 command source、标准 MCP Tasks 通信与 P2
+> alert 唤醒已裁决；poll/file/WS source 不在范围。
 >
 > **事实源**：`mcp-packages/monitor/src/{server,state,buffer,tools}.rs`（handler、
 > 任务状态机、事件 buffer、工具声明）；注册表与工具声明在
@@ -23,7 +23,7 @@ command source：一条 shell 命令产生 stdout/stderr 行事件；MonitorMCP 
 数据，也不判断「什么变了」。
 
 ```text
-            monitor_start / monitor_read / monitor_stop / monitor_list
+   monitor_start / monitor_read / monitor_stop / monitor_list
 agent ───────────────────────────────────────────────────────────────▶ MonitorMCP
   ▲                                                                       │
   │  MCP Tasks: tasks/get, tasks/cancel（标准方法，无自定义生命周期）       │
@@ -34,6 +34,12 @@ agent ────────────────────────�
                                         ▼                                 ▼
                                  shell command                      EventBuffer
                                  (stdout / stderr)                  (ring, seq)
+                                                                          │ alert match
+                                                                          ▼
+                                                          WakeOutbox（30s 合并，上限 256）
+                                                                          │ monitor_wakes
+                                                                          ▼
+                                                      宿主 wake 泵（owner 定向 Defer）
 ```
 
 实例只持有内存状态。宿主或实例被替换后，旧任务 id 不再可解析；没有落盘、恢复或
@@ -41,7 +47,9 @@ agent ────────────────────────�
 
 ## 2. 工具契约
 
-四个工具全部 deferred（模型面名字 `mcp__monitor__*`），无 prompt 声明模板。
+四个模型工具全部 deferred（模型面名字 `mcp__monitor__*`），无 prompt 声明模板。
+`monitor_wakes` / `monitor_ack` 是 host-only（`model_visible: false`）：保留在实例
+`tools/list` 中供宿主 wake 泵调用，不进入桥接、ToolSearch 索引与模型 tools 参数。
 
 ### 2.1 `monitor_start`
 
@@ -51,7 +59,8 @@ agent ────────────────────────�
 | --- | --- | --- |
 | `command` | string | 必填，非空 shell 命令 |
 | `cwd` | string? | 工作目录；相对路径相对实例 cwd 解析 |
-| `label` | string? | 供 `monitor_list` 使用的短标签 |
+| `label` | string? | 供 `monitor_list` 与 wake 提醒使用的短标签 |
+| `alert` | string? | 线性时间正则，≤512 字符；命中行产生宿主 wake |
 | `deadline_ms` | integer? | 默认 3 600 000；范围 1..=86 400 000 |
 | `max_events` | integer? | 默认 2 000；范围 1..=100 000 |
 | `max_bytes` | integer? | 默认 1 MiB；范围 16 KiB..=64 MiB |
@@ -112,6 +121,25 @@ agent ────────────────────────�
 请求：`{ include_ended?, limit? }`，`limit` 默认 50、范围 1..=200。
 响应：`{ "tasks": [TaskSnapshot...] }`，按 `startedAt` 倒序，只含本会话任务，
 不含事件正文，也不回显命令文本（避免把命令中的敏感值再次带入上下文）。
+`TaskSnapshot` 额外投影 `pendingWakes`、`wakeDropped`、`alertMatched`；`tasks/get`
+在 `_meta["peri/monitor"]` 中投影同一组计数。
+
+### 2.5 `monitor_wakes`（host-only）
+
+请求：`{ limit? }`（默认 50，最大 200）。响应：
+
+```json
+{ "wakes": [ { "wakeId", "taskId", "label", "seq", "matched", "createdAt" } ] }
+```
+
+只返回当前 owner 的待确认 wake，按任务启动时间排序。正文不含事件文本；owner 不匹配
+与不存在同错（返回空列表，不泄露其他会话是否存在 wake）。
+
+### 2.6 `monitor_ack`（host-only）
+
+请求：`{ wake_ids: string[], outcome?: "delivered" | "offline" }`。响应
+`{ "acked": n }`。幂等：未知 id 与重复确认都返回 0，不报错；owner 不匹配时同样按
+不可见处理。`offline` 表示 owner 无 inbox，wake 被丢弃而不投递。
 
 ## 3. 任务状态机
 
@@ -163,6 +191,30 @@ working ───▶ cancelling（对外仍 working）──▶ cancelled       
   不会回填。`next_seq` 与 `dropped` 让调用方识别缺口。
 - 读取是纯内存操作，不重新执行命令，也不持久化事件。
 
+## 4.1 alert 与唤醒（P2）
+
+- **alert-only**：只有 `alert` 命中的事件产生 wake。未命中事件只进 ring buffer，
+  不通知模型。正则使用 `regex` crate（线性时间，无回溯），编译失败或超过 512 字符
+  在启动前拒绝，错误文本为 `invalid alert pattern`。
+- **逐任务 outbox**：wake 记录只有 `wakeId` / `taskId` / `label` / `seq` / `matched`
+  / `createdAt`；不含事件原文。`seq` 是并入该 wake 的最新命中事件序号。
+- **30 秒合并**：最新 pending wake 在 30 秒窗口内接收后续命中，只累加 `matched`
+  并更新 `seq`。窗口外的命中开启新 wake；宿主确认后窗口内的命中先留在 draft，
+  到期或任务终态时再生成一条。该规则保证「每任务最多一条 wake / 30 秒」，即使宿主
+  每次都立即确认也不会形成风暴。
+- **容量**：每任务最多 256 条 pending wake；超出淘汰最旧一条并累加 `wakeDropped`。
+- **投递**：宿主 wake 泵每 0.5–1 秒按 owner 调用 `monitor_wakes`（带
+  `_meta["peri/taskOwner"]`）。有 inbox 时构造 `Defer` 提醒（只含 raw task id、
+  label、seq、matched）并 push；随后 `monitor_ack outcome=delivered`。无 inbox 时
+  不投递，直接 `monitor_ack outcome=offline` 并计数。
+- **幂等**：`delivery_id = f(task_id, wake_id)`（`peri-acp-types::monitor`）。
+  ack 失败时下一轮重试，重复投递复用同一 canonical id。
+- **审批**：wake 路径不经过任何交互审批；`monitor_start` 的工具审批覆盖后续 wake。
+- **owner 定向与离线**：wake 只投递给发起会话；owner 已释放（例如子 agent 结束）
+  或没有 inbox 时丢弃并计数，不重投、不跨会话。
+- **不做**：资源通知 hint、`notifications/resources/updated`、unknown task 快速
+  收口、cron 改动、持久化、跨会话共享。
+
 ## 5. 生命周期与所有权
 
 - **实例级**：`MonitorState` 持有一只任务表；同一实例的所有连接共享它。
@@ -203,8 +255,8 @@ working ───▶ cancelling（对外仍 working）──▶ cancelled       
   已存在的内存任务随实例消失。
 - 附随 skill 走 workspace 静态资产（`mcp-packages/workspace/src/resources/builtin/skills/monitor/`），
   与 `cron` 同形；实例不自行发布 skill。
-- **P2 预留**：alert / 逐行唤醒通道不在 v1。届时优先评估复用既有
-  `subscriptions/listen` + `notifications/tasks` 或资源订阅，不新增 ACP 方法；
-  `label` 与事件字段已为路由/过滤预留。
-- **明确不做**：poll source、file source、WS source、任务持久化、跨实例重放、
-  owner 转移。
+- **P2 已实现**：alert 与 owner 定向 wake 走宿主轮询 + 既有 inbox `Defer`，
+  不新增 ACP 方法。wake 泵与 monitor 实例同池；实例缺失时泵保持 no-op，pool
+  关闭（或任务作用域关闭）时停止。
+- **明确不做**：poll source、file source、WS source、资源通知 hint、unknown task
+  快速收口、任务持久化、跨实例重放、owner 转移、跨会话共享。

@@ -79,6 +79,39 @@ fn task_owner_metadata_is_scoped_to_session_capable_builtin_sources() {
 }
 
 #[test]
+fn task_owner_scoping_follows_the_builtin_registry() {
+    for (instance, expected) in [
+        ("workspace", true),
+        ("monitor", true),
+        ("web", false),
+        ("artifact", false),
+        ("cron", false),
+        ("workflow", false),
+    ] {
+        let declared = peri_acp_types::builtin_mcp::find(instance)
+            .unwrap_or_else(|| panic!("{instance} must be declared"));
+        assert_eq!(
+            declared.task_owner_scoped, expected,
+            "{instance} task_owner_scoped must match the host owner contract"
+        );
+        let source = Some(crate::mcp::config::ConfigSource::Builtin {
+            instance: instance.into(),
+        });
+        assert_eq!(
+            crate::mcp::client::task_owner_metadata::source_uses_task_owner(source.as_ref()),
+            expected,
+            "{instance} owner metadata must be derived from the registry field"
+        );
+    }
+    assert!(
+        crate::mcp::client::task_owner_metadata::source_uses_task_owner(Some(
+            &crate::mcp::config::ConfigSource::WorkspaceRemote
+        ))
+    );
+    assert!(!crate::mcp::client::task_owner_metadata::source_uses_task_owner(None));
+}
+
+#[test]
 fn task_owner_metadata_covers_remote_workspace_and_skips_other_sources() {
     let pool = McpClientPool::new_pending();
     let mut remote = connected_test_handle("remote");

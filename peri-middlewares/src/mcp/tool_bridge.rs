@@ -456,6 +456,14 @@ impl BaseTool for McpToolBridge {
                                 }));
                     }
                 }
+                // Monitor alert wakes are host-pumped; the first admitted
+                // monitor task starts the pump once per pool.
+                if matches!(
+                    self.client.source.as_ref(),
+                    Some(super::config::ConfigSource::Builtin { instance }) if instance == "monitor"
+                ) {
+                    pool.ensure_monitor_wake_pump(session_id);
+                }
                 // 回执只承诺可达的投递：有 canonical 路由 = 结果到达时持久记录；
                 // 否则只声称活跃期送达。结果尚未产生，不得提前声称已写入 transcript，
                 // 也不承诺进程重启后恢复后台执行。

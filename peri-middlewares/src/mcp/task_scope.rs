@@ -34,6 +34,12 @@ pub enum McpTaskKey {
         server: String,
         task_id: String,
     },
+    /// Host-side monitor alert wake pump (one task per pool).
+    ///
+    /// Deliberately distinct from [`Self::Subscription`]: the pump is not a
+    /// server-subscription loop and must survive config-driven subscription
+    /// teardown while the pool is open.
+    MonitorWake,
     /// 会话级 MCP over ACP 发现（`server/discover` 握手 + 工具发现）。
     ///
     /// 会话关闭时按本键终止在建任务，避免连接在会话消失后仍提交进池。

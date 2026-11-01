@@ -13,6 +13,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+#[cfg(test)]
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
@@ -67,6 +68,15 @@ pub struct CapturedEvent {
     pub partial: bool,
 }
 
+/// Admission sink for captured lines.
+///
+/// The production sink is the monitor task: it stores every line in the ring
+/// buffer and also evaluates the alert. Capture workers must not write the
+/// buffer directly, otherwise alert matches would be silently skipped.
+pub trait EventAdmission: Send + Sync {
+    fn admit(&self, event: CapturedEvent);
+}
+
 /// One read page from a task buffer.
 pub struct EventPage {
     pub events: Vec<MonitorEvent>,
@@ -103,7 +113,9 @@ impl EventBuffer {
     }
 
     /// Append one captured event, evicting the oldest entries as needed.
-    pub fn push(&mut self, event: CapturedEvent) {
+    ///
+    /// Returns the sequence number assigned to the event.
+    pub fn push(&mut self, event: CapturedEvent) -> u64 {
         let (text, cut) = cap_text(event.text);
         let truncated = event.truncated || cut;
         let retained = text.len();
@@ -134,6 +146,7 @@ impl EventBuffer {
             partial: event.partial,
             untrusted: true,
         });
+        seq
     }
 
     /// Read events strictly after `after_seq`.
@@ -207,9 +220,10 @@ fn cap_text(mut text: String) -> (String, bool) {
 /// Long lines are capped at [`MAX_EVENT_BYTES`]; the remainder is discarded up
 /// to the next newline so memory stays bounded. A final line without a newline
 /// is emitted with `partial = true`.
-pub async fn capture_lines<R>(mut reader: R, stream: &'static str, buffer: Arc<Mutex<EventBuffer>>)
+pub async fn capture_lines<R, S>(mut reader: R, stream: &'static str, sink: Arc<S>)
 where
     R: AsyncBufRead + Unpin,
+    S: EventAdmission + 'static,
 {
     let mut pending = Vec::new();
     let mut raw_bytes = 0u64;
@@ -226,7 +240,7 @@ where
         if chunk.is_empty() {
             if raw_bytes > 0 || !pending.is_empty() {
                 emit_line(
-                    &buffer,
+                    &sink,
                     stream,
                     std::mem::take(&mut pending),
                     raw_bytes,
@@ -246,7 +260,7 @@ where
             truncated |= take < segment.len();
             reader.consume(position + 1);
             emit_line(
-                &buffer,
+                &sink,
                 stream,
                 std::mem::take(&mut pending),
                 raw_bytes,
@@ -267,8 +281,8 @@ where
     }
 }
 
-fn emit_line(
-    buffer: &Arc<Mutex<EventBuffer>>,
+fn emit_line<S: EventAdmission + ?Sized>(
+    sink: &Arc<S>,
     stream: &'static str,
     mut line: Vec<u8>,
     raw_bytes: u64,
@@ -282,7 +296,7 @@ fn emit_line(
     }
     let text = String::from_utf8_lossy(&line).into_owned();
     let (text, text_truncated) = cap_text(text);
-    buffer.lock().push(CapturedEvent {
+    sink.admit(CapturedEvent {
         ts: peri_time::now_utc_rfc3339(),
         stream,
         kind: "line",
@@ -291,6 +305,13 @@ fn emit_line(
         truncated: truncated || text_truncated,
         partial,
     });
+}
+
+#[cfg(test)]
+impl EventAdmission for Mutex<EventBuffer> {
+    fn admit(&self, event: CapturedEvent) {
+        self.lock().push(event);
+    }
 }
 
 #[cfg(test)]

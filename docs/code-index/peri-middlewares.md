@@ -87,9 +87,10 @@ App 工具结果的**唯一通路是 dispatcher 返回值**：`McpToolBridge::in
 按最旧（record 身份是 UUID v7）淘汰并终态撤销，避免表长超过上限。
 当前 owner 仅用于本进程任务权限与关联，不作为恢复旧执行的证据。
 `tasks/get` 轮询把终态交给 Manager，Manager 先投递带稳定 delivery ID 的 Defer，再发布终态。订阅只有在结算成功，或 `false` 同时有同任务的终态证据时才结束；缺失条目与竞争中的结算必须重试。monitor 准入失败沿工具错误返回已存在的 opaque ID，并明确不保证通知、禁止盲目重跑；同键已有 monitor 可复用。回归入口为 `client/subscription_tasks_test.rs` 与 `client/output_store_test.rs`。
+monitor alert wake 由独立宿主泵 `client/monitor_wake.rs` 消费：首个 monitor task 登记时启动一次（`McpTaskKey::MonitorWake` 作用域，pool 关闭即停；实例缺失时 no-op），每 0.5–1 秒按 owner 调 `monitor_wakes`（带 `_meta["peri/taskOwner"]`）。有 inbox 时 push `Defer` 提醒（raw task id / label / seq / matched，无正文）→ `monitor_ack outcome=delivered`；无 inbox 时 ack `offline` 并计数。`delivery_id = f(task_id, wake_id)`，ack 失败下一轮重试且复用同一 id。owner 集合跨 inbox 注销与子会话 release 保留，所以离线 wake 仍会被 ack 丢弃而不重投。回归入口 `client/monitor_wake_test.rs`。
 `tasks/get` 连续失败达到阈值仅尝试放弃未知任务，不保证投递与结算成功；已经观测到终态后，本次运行缓存真实结果并重试投递，不以「owner 不可观测」覆盖已知终态。查询恢复非终态会重置失败计数，单次挂起的请求不由重试次数约束。
 Builtin Workspace Bash 提醒只带退出信息与输出文件引用；提醒 metadata 的 `task_id` 是会话侧公共 id（`mcp-...`，与启动回执/任务面板一致），`remote_task_id` 是 Workspace owner id（`shell-...`，供 `tasks/get` 查询）。`McpPoolPort::has_active_tasks` 查询 Manager
-未结清的外部任务供 Agent idle probe 使用。builtin workspace / monitor 与 `WorkspaceRemote` 的 owner 元数据都是 `_meta["peri/taskOwner"] = 直接发起 session id`；不签发 token，其他 server 不注入。
+未结清的外部任务供 Agent idle probe 使用。builtin workspace / monitor 与 `WorkspaceRemote` 的 owner 元数据都是 `_meta["peri/taskOwner"] = 直接发起 session id`；作用域事实来自注册表字段 `BuiltinMcpInstance::task_owner_scoped`（workspace/monitor=true，其余 false），不按实例名字面量判定。不签发 token，其他 server 不注入。
 会话释放只取消 Manager 已知 external task 并等待 settled；不存在 `open_workspace_task_scope`/`close_workspace_task_scope`/`reconcile_closing_workspace_scope`、snapshot/`taskClose`/`taskOpen`/epoch CAS，也不从 owner 端补发现未登记任务。
 
 ### OAuth 凭证接入
