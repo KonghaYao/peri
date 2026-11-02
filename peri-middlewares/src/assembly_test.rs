@@ -19,12 +19,15 @@ use peri_agent::{
     agent::{
         async_tasks::TaskManager,
         events::{AgentEventHandler, ExecutorEvent},
+        react::ToolCall,
+        state::AgentState,
         AgentCancellationToken,
     },
     goal::{GoalController, GoalViewSnapshot},
     interaction::{
         InteractionContext, InteractionResponse, TrustedInteractionOwner, UserInteractionBroker,
     },
+    middleware::chain::MiddlewareChain,
     session::factory::{build_middleware_chain, production_blueprint, ChainSlot},
     tools::BaseTool,
 };
@@ -349,6 +352,40 @@ fn make_hook() -> RegisteredHook {
         plugin_data_dir: PathBuf::from("/tmp/test-plugin-data"),
         plugin_options: Default::default(),
     }
+}
+
+/// 生产装配（而非直接构造 HookMiddleware）必须把会话 ID 注入 command hook 的 stdin。
+#[cfg(unix)]
+#[tokio::test]
+async fn production_assembly_passes_session_id_to_command_hook_stdin() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("stdin.json");
+    let mut hook = make_hook();
+    if let HookType::Command { command, .. } = &mut hook.hook {
+        *command = r#"cat > "$CLAUDE_PLUGIN_OPTION_OUT""#.to_string();
+    }
+    hook.plugin_options.insert(
+        "out".to_string(),
+        serde_json::json!(output.to_str().unwrap()),
+    );
+
+    let mut ctx = base_context();
+    ctx.cwd = directory.path().to_string_lossy().into_owned();
+    ctx.hook_groups = vec![vec![hook]];
+
+    let mut chain = MiddlewareChain::new();
+    super::hooks::add_hooks(&ctx, &mut chain);
+    chain
+        .run_before_tool(
+            &mut AgentState::new(ctx.cwd.clone()),
+            ToolCall::new("call", "Bash", serde_json::json!({"command":"test"})),
+        )
+        .await
+        .expect("session_id 注入不应改变 hook 的放行结果");
+
+    let written = std::fs::read_to_string(&output).expect("hook 应把 stdin 写入文件");
+    let input: serde_json::Value = serde_json::from_str(&written).unwrap();
+    assert_eq!(input["session_id"], "session-contract-test");
 }
 
 /// deployment pool：两个 builtin 实例（`web` / `artifact`）的假「已连接」handle，
