@@ -53,7 +53,7 @@ async fn async_tasks_owner_drop_and_cancel_join_panic_are_logged() {
 
     // 直接注册未捕获 panic 的 handle，验证取消等待层，而非后台包装层。
     let handle = tokio::spawn(async { panic!("取消等待测试 panic") });
-    manager
+    let registration = manager
         .register_with_kind(BackgroundTask {
             id: "cancel-panic-task".into(),
             agent_name: "fixture".into(),
@@ -73,8 +73,15 @@ async fn async_tasks_owner_drop_and_cancel_join_panic_are_logged() {
         })
         .unwrap();
     manager.cancel("cancel-panic-task").unwrap();
-    assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
-    assert!(manager.is_execution_idle());
+    // A joined panic proves that computation stopped; without the producer's
+    // result it cannot prove notification/terminal settlement.
+    assert_eq!(manager.shutdown().await, TaskShutdownReport::Incomplete);
+    assert!(!manager.is_execution_idle());
+    assert!(!registration.is_settled());
+    assert_eq!(
+        manager.pending_handoff_tasks()[0].task_id,
+        "cancel-panic-task"
+    );
     let text = String::from_utf8(logs.0.lock().clone()).unwrap();
     for (message, field) in [
         (

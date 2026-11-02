@@ -42,6 +42,9 @@ mod caps_tests;
 #[path = "history_page_window_test.rs"]
 mod window_tests;
 
+#[path = "child_history_test.rs"]
+mod child_history_tests;
+
 /// G5：session/load 不在全局 sessions 锁内做资源/DB I/O。
 #[path = "history_page_window_lock_test.rs"]
 mod window_lock_tests;

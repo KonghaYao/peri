@@ -1,6 +1,6 @@
 # TUI 面板架构目标设计
 
-> 状态：已批准目标设计（部分已落地）；迁移进度、批次与验收见
+> 状态：已批准目标设计（部分已落地）；未完成项见
 > [2026-10-15 TUI 面板架构重构](../../spec/issues/2026-10-15-tui-architecture-refactor.md)
 > 范围：`peri-tui` 的面板外壳、列表视口、面板事件路由、面板操作的作用域与完成门
 > 边界：不改变 ACP 协议、后端能力、依赖与 release profile；新增生产代码只落在 `peri-tui`
@@ -107,14 +107,12 @@
 `cancel_wait` 取消等待但保留在途票，供注销取消后仍接收本地清理结论。面板关闭由门的
 `Drop` 取消在途票，取消表达为 `OutcomeUnknown`。
 
-已接入：插件搜索与插件操作、Cron 动作、Tasks 取消、Workflow 终止运行，以及 Login 的
-ChatGPT 登录/状态/注销。同作用域同目标的在途请求不再重复发送；晚到结果经 `accept`
+适用操作使用同一套原语：同作用域同目标的在途请求不再重复发送；晚到结果经 `accept`
 拒收后只留日志，不改动可见状态（面板已关闭也不产生提示——关闭是观察者状态，不是业务
 终态）。
 
-尚未落地（按 active issue 记录）：搜索路径的取消仍是静默丢弃而不产生结果；已发送变更的任务
-所有权与应用层结果跟踪（方案 §6.2）未接管，本层只做请求协调；客户端内部超时目前仍映射为
-失败而非结果未知（区分它需要客户端返回类型化错误，字符串匹配不予采用）。
+尚未落地：搜索路径的取消仍是静默丢弃而不产生结果；已发送变更的任务所有权与应用层结果
+跟踪未接管，本层只做请求协调。
 
 「确认的目标消失」是统一的守卫结果：确认时固定的身份在列表刷新后已不存在则不执行，
 给出可见提示（`app-confirm-target-missing`），不回退为按下标取「现在这一项」。
@@ -162,12 +160,12 @@ snapshot。revision 冲突单独提示 `config-draft-conflict`，草稿保留且
 
 ### 面板职责映射
 
-每个面板的状态 owner、数据来源、动作入口与完成门（`file:line` 以代码为准）：
+每个面板的状态 owner、数据来源、动作入口与完成门：
 
 | 面板 | 状态 owner | 数据来源 | 动作入口 | 作用域 / 完成门 |
 | --- | --- | --- | --- | --- |
 | Hooks | `HOOK_LIST` | `plugin/list` 投影 | `handle_hooks_event` | 无 mutation（只读） |
-| MCP | `MCP_SERVERS` + 面板内 `view`/`detail_key` | `mcp/list` 投影 | `handle_mcp_event` | 无 mutation；详情按 server 名，目标消失由 effect 收敛 |
+| MCP | `MCP_SERVERS` + 面板内 `view`/`detail_key` | `mcp/list` 投影 | `handle_mcp_event` → `actions::dispatch` | `OperationScope` + `CompletionGate`；`restart` 经 `peri/mcp/control`，受 `server.control.restart` 门控；详情按 server 名，目标消失由 effect 收敛 |
 | Cron | `CRON_JOBS` + 面板内 `selected`/`confirm_delete` | `cron/list` 投影 | `handle_cron_event` → `actions::dispatch` | `OperationScope` + `CompletionGate`；确认固定 `job.id` |
 | Memory | `MEMORY_LIST` | 本地扫描 `memory_scan.rs` | `handle_memory_event` | 无 mutation（只读，编辑器经既有入口） |
 | Tasks | `BG_TASKS`/`BG_TASK_REVISION` + 面板内 `CancelGates` | bridge `handle_bg_task_snapshot` + `CRON_JOBS` + `VIEW_MODELS` | `handle_tasks_event` → `dispatch_cancel` | `OperationScope` + `CompletionGate`；同目标在途重复触发为拒绝 |
@@ -184,8 +182,9 @@ snapshot。revision 冲突单独提示 `config-draft-conflict`，草稿保留且
 | AskUser | `ASK_USER_PENDING` + 面板内 `FormState` | bridge `handle_ask_user` | 内联 handler | owner 指纹重置；提交携固定 owner/request_id |
 | SubAgentDetail | `SELECTED_SUBAGENT_ID` | `VIEW_MODELS` / `BG_LIVE_DETAIL` | 内联 handler | 无 mutation（只读） |
 
-固定行高列表统一走 `panels/shared/list.rs` 视口；分段（Tasks）、可变行高（Agent）与无列表
-（Status、Goal）面板按「公共组件边界」自持测量，理由写在各自文件内。
+已接入的固定行高列表面板统一走 `panels/shared/list.rs` 视口；分段（Tasks）、可变行高
+（Agent）与无列表（Status、Goal）面板按「公共组件边界」自持测量，Theme 因预览正文行数
+可变亦自持行度量，理由写在各自文件内。
 
 Login 的认证就绪状态由 `login/auth_policy.rs` 单一推导，渲染、动作可用性与保存门共用：
 只有当前作用域（配置源 + store/account）、Plan 已授予且草稿身份为空/兼容时才自动采用；
@@ -217,5 +216,4 @@ plan provider、其他 Responses provider 的四档映射，只填空字段；�
 ## 验证要求
 
 行为验证覆盖入口、键鼠、不同终端尺寸、空/加载/失败、返回与主题语言；并发验证覆盖
-确认期间列表刷新、切会话后旧响应、关闭重开后面板状态；性能与体积验证按 active issue
-记录的口径执行，未测量的平台必须标注。
+确认期间列表刷新、切会话后旧响应、关闭重开后面板状态；性能与体积验证须标注未测量的平台。

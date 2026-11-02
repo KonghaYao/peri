@@ -36,7 +36,7 @@ interaction response 与详情请求等运行时动作仍必须经 ACP client/tr
 
 ```text
 InputArea
-  → SteerCommand / STEER_TX
+  → SteerCommandKind / STEER_TX
   → steer_consumer
   → AcpTuiClient::ensure_session + session/input/enqueue
   → Agent session runtime
@@ -52,7 +52,7 @@ InputArea
 
 ### Agent 输出
 
-真实执行与交互许可由宿主开始/结束身份驱动，不由首 token 或 loading 反推。外部实际 attempt（包括内部 continuation）经 `ExecutionStarted` 提供 session mailbox generation 与非空 request ID；managed 用户输入保留已有开始事件，共用客户端执行身份规则。定时执行前审批先建立独立身份并在审批结束后关闭，实际执行使用另一身份。陈旧终态或提交失败只能结算自己的身份，不能直接写全局 loading。输入回滚记录独立绑定提交请求，external execution 开始不能借用待提交文本的回滚许可，其结束或取消也不能丢弃另一个请求的回滚记录。挂起信号与恢复后的渲染输出共享 FIFO，不能从另一条状态通道越过新输出。实施验证见 `spec/issues/2026-10-08-async-execution-chain-fixes.md`。
+真实执行与交互许可由宿主开始/结束身份驱动，不由首 token 或 loading 反推。外部实际 attempt（包括内部 continuation）经 `ExecutionStarted` 提供 session mailbox generation 与非空 request ID；managed 用户输入保留已有开始事件，共用客户端执行身份规则。定时执行前审批先建立独立身份并在审批结束后关闭，实际执行使用另一身份。陈旧终态或提交失败只能结算自己的身份，不能直接写全局 loading。输入回滚记录独立绑定提交请求，external execution 开始不能借用待提交文本的回滚许可，其结束或取消也不能丢弃另一个请求的回滚记录。挂起信号与恢复后的渲染输出共享 FIFO，不能从另一条状态通道越过新输出。
 
 ```text
 Agent canonical event
@@ -92,7 +92,7 @@ BridgeState.committed + CurrentTurn
 不能替代服务端能力事实。TUI 本地投影开关未开启时，旧 `HISTORY_PAGING` 分页与渲染路径保持不变，
 所有已加载历史继续固定、不淘汰。开关只决定是否采用窗口模型，不改变协议协商结果。
 `HISTORY_WINDOW_V1` 由 settings beta `history-window-v1` 在启动时读取一次并写入 atom；未配置视为
-开启（发布启用绑定 S7），只有显式配置 `false` 才关闭。设置变更不热重载，重启后生效。仍要求
+开启，只有显式配置 `false` 才关闭。设置变更不热重载，重启后生效。仍要求
 服务端明确回显 `peri.historyWindowV1: true`。Beta 设置面板仍只列
 `peri-acp-types::beta_flags::BETA_FLAGS`，该键需手动写入 settings。
 
@@ -119,19 +119,21 @@ BridgeState.committed + CurrentTurn
 
 ### 窗口模型、预算与释放
 
-1. `BridgeState.committed: im::Vector<TuiRenderUnit>` 仍是展示正文的唯一强持有者。
+1. `BridgeState.committed: im::Vector<TuiRenderUnit>` 是历史展示正文的权威容器；
+   发布帧与派生缓存也可持有共享强引用，释放验收必须覆盖这些引用。
    `HistoryWindow` 只保存持久身份（`source + entryId + subItem`）、`SegmentKey`、条目/单元计数、
    字节账目、`durable/sealed/pins`、gap 与锚点，不复制正文。
 2. 段来源区分 `Replay`、`Page`、`LiveSeal`；`SegmentKey` 是本地生命周期句柄，不进入 wire、
    不参与锚点或工具配对。窗口换代后旧键全部作废。
-3. 初始预算（实施初值，不是性能结论）：历史展示正文 16 MiB、页预留上限 2 MiB、
-   普通页目标 512 KiB、页条目 50/最多 100、未配对工具结果 1 MiB/256 条、详情窗口 4 MiB、
-   释放水位 75%、预取门槛 8 MiB、渲染缓存 8 MiB 且超限降到 6 MiB。live、运行中、未持久化
+3. 初始预算（设计初值，不是性能结论）：历史展示正文 16 MiB、页预留上限 2 MiB、
+   普通页目标 512 KiB、页条目 50/最多 100、未配对工具结果 8 MiB/256 条、详情窗口 4 MiB、
+   释放水位 75%、预取门槛 50%、渲染缓存 8 MiB 且超限降到 6 MiB。live、运行中、未持久化
    与继承段计入 `pinned_bytes`（不可淘汰，但仍是 body 占用）；已按真实 assistant 消息归属的
    `LiveSeal` 工具卡在 `peri/history_committed` 解除 `Unpersisted` pin 后转为可淘汰。
-   `unattributed_live_bytes` 只承载仍无可核实身份的工具/子 Agent 正文，工具卡每次归属都
+   `unattributed_live_bytes` 承载仍无可核实身份的主会话工具正文，工具卡每次归属都
    按窗口实例+代次扣减，不再只增不减。全部固定时接纳显式失败，
    不能把归档正文长期计为固定。
+   子 Agent 的临时预览使用下述独立保留策略，不伪装成主会话 canonical 段。
 4. 接纳先按字节判断再构造展示单元；超预算时按“距锚点最远 → 最久未访问 → 最早创建”生成
    `ReleasePlan`，跳过所有 pin。全固定时拒绝接纳并记录 `evict_blocked_pinned`，不释放未持久化内容。
 5. 统一释放事务只允许在 bridge 串行链调用。顺序是：移除 `committed` 对应槽位范围 → 清
@@ -167,7 +169,7 @@ BridgeState.committed + CurrentTurn
    丢弃迟到页；旧页不得合入新窗口。能力缺失、游标失效或通知丢失进入 `Degraded`：停止淘汰、
    保留可读内容与重试入口，禁止自动回退完整 `session/load`。
 
-### 超大条目与详情（S7.3 已交付）
+### 超大条目与详情
 
 服务端定义 `items[].body` 内联描述符（`totalBytes`/`chunkSize`/`readTicket`/`snapshotToken`）
 与 `session/history/body` 有界分块（默认 64 KiB、最大 256 KiB，`bytes` 为 JSON 数字数组），
@@ -192,7 +194,7 @@ TUI 侧由 `PanelKind::HistoryDetail` + `HistoryDetailPanel`（`kit/panels/histo
 
 ### 对象级证据与已知限制
 
-进度与验收记录见 active spec；本节只固定当前实现边界，避免把目标写成现状。
+本节只固定当前实现边界，避免把目标写成现状。
 
 释放验收不以条目数或 RSS 为唯一证据。`release_removes_committed_and_invalidates_holders_before_ack`
 在释放 + 渲染 ack 后断言 `Weak<TuiAssistantBubble>` 无法升级、各 holder 指纹清空；
@@ -203,6 +205,50 @@ TUI 侧由 `PanelKind::HistoryDetail` + `HistoryDetailPanel`（`kit/panels/histo
 `bidirectional_page_requests_keep_placement_and_cursors`、
 `stale_or_late_response_is_dropped_and_reservation_released`、
 `one_in_flight_and_one_pending_merge_are_enforced` 覆盖。
+
+### 子任务临时预览与只读历史
+
+临时预览不承担永久档案职责。停止后冻结有限展示单元并释放原始累加器；保留超限时释放
+旧预览，标记 `preview_omitted`。当前主 turn 尚未结束、取消时没有持久化记录、旧视图仍
+存在，均不能令预览目录无限增长。运行中和未结算任务的控制身份保留在业务 owner 中；
+释放展示数据不等同于任务完成、交付成功、取消确认或清理完成。
+
+保留策略的代码权威为 `acp_types/subagent_preview.rs`、`bg_task_live_preview.rs` 与
+`bg_task_identity.rs`。当前实施值：
+
+| 保留对象 | 边界 |
+| --- | --- |
+| 单字段 / 单子任务预览 | 16 KiB / 256 KiB |
+| 当前 turn 的子预览池 | 2 MiB；终态额外受 256 项 / 512 KiB 限制 |
+| committed 子预览 | 独立池；终态目录 256 项 / 512 KiB |
+| 后台预览池 / 终态详情 | 4 MiB / 512 项且 1 MiB |
+| 后台展示和身份终态目录 | 各 512 项且 512 KiB；活动与未结算身份不因额度被删 |
+
+这些是组件保留边界，不是整进程 RSS 或端到端瞬时峰值上限。旧发布帧可能继续共享正文，
+只有最后一个强引用释放后才真正回收；临时预览不得提前返还 canonical 窗口预算。
+移除未映射的子预览槽须同步平移持久条目展示区间、清对应折叠键并失效派生缓存。
+
+真实子 execution 身份和序号由 producer 捕获，经 ACP metadata 到达 bridge；新运行不
+继承旧累加器，晚到旧运行与未知 child 不回退到主消息。退休身份仅保留 512 个水位；
+首次 Started 若极晚到达且已落到退休水位之前，按过期预览拒绝，不据此推断完成，
+也不保证所有仍活动执行的首次分组均可显示。业务 owner 不受该展示窗口影响。
+相同会话的视图 reset 重建带缺失
+标记的活动预览，仍允许当前执行的新观察，不建立生产端时间屏障。业务终态不走预览门禁。
+
+详情 H 打开独立“子会话历史（含多次运行）”。它读取既有 canonical 的可见内容，不加载
+child runtime、不新增表/字段/归档副本；canonical 父链最多校验 64 跳，拒绝外树、环和断链。
+该入口依赖已知且经过授权校验的 child 标识，不提供永久子会话发现目录；运行目录被淘汰或
+进程重启后，不保证能从 UI 重新找到每个 child。
+页最多 20 项 / 256 KiB，超大正文按 64 KiB
+`display_text` 块替换保留，offset/nextOffset 属于安全 UTF-8 展示流并绑定 committedTail。
+ProviderState、签名与未知内部字段不外送；大媒体和无法安全投影的格式显式 Unsupported。身份、snapshot、
+受众与读票据失败必须显式报错。历史跨多个运行，不承诺按 run 完整重建；未持久化且已
+释放的临时片段不能恢复。当前大正文随机偏移需从 canonical 起点流式扫描，空间有界但
+I/O 成本随偏移增长。
+
+验证入口：`memory_retention_audit_test.rs`、`bg_task_live_preview_test.rs`、
+`acp_bridge_child_origin_test.rs`、`panels/child_history_detail_test.rs`，以及 ACP 的
+`host/child_history_test.rs` 与 `history_window/child_display_test.rs`。
 
 已知未完成项：
 

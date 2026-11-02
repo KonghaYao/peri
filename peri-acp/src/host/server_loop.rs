@@ -481,6 +481,42 @@ impl ServerLoop<'_> {
         // 只读它——`caps()` 是展示判据、注册表是进程/会话级的，都不能回答「当前连接声明了
         // 什么」（REQ §5.3）。
         let connection_facts = connection.lock().await.facts();
+        // Child browsing is read-only even when the child has no ACP SessionState.
+        // Route it before all session lifecycle and execution setup paths.
+        if matches!(
+            method.as_str(),
+            "session/history/child" | "session/history/child/body"
+        ) {
+            let result = if !connection_facts.history_window_v1 {
+                Err(history_window::window_error(
+                    peri_acp_types::history_window::HistoryWindowError::NotNegotiated,
+                ))
+            } else {
+                let window_connection = history_window::WindowConnection::new(
+                    connection_facts.connection_id.clone(),
+                    Arc::new(history_window::TransportWindowSink::new(Arc::clone(
+                        self.transport,
+                    ))),
+                );
+                tokio::select! {
+                    biased;
+                    _ = self.connection_cancellation.cancelled() => Err(
+                        crate::transport::types::AcpError::new(-32800, "request cancelled"),
+                    ),
+                    result = async {
+                        if method == "session/history/child/body" {
+                            history_window::child::handle_body(cfg, sessions, &params,
+                                &connection_facts.connection_id).await
+                        } else {
+                            history_window::child::handle(cfg, sessions, &connection_facts.caps,
+                                &params, &window_connection).await
+                        }
+                    } => result,
+                }
+            };
+            let _ = diagnostics.send(transport.as_ref(), result).await;
+            return;
+        }
         // `session/history/body`：V1 正文分块，不进入生命周期路由。
         if method == "session/history/body" {
             let result = if !connection_facts.history_window_v1 {

@@ -1,8 +1,7 @@
 # Serverless 执行环境身份
 
-> 状态：已批准目标设计。Emscripten 目标及 Node、Bun 与本地 `workerd` 宿主已在
-> `refactor/wasm` 实现并验收；Cloudflare 托管部署与跨实例接管仍未验收，进度与验收
-> 证据见该分支 `spec/history/2026-10.md`（2026-10-02 条目）。
+> 状态：已批准目标设计。Emscripten 目标与 Node、Bun、本地 `workerd` 宿主可用；
+> Cloudflare 托管部署与跨实例接管仍未验收。
 >
 > Scope：可替换计算实例中运行 Peri 的 Machine、Workspace 与 Session 身份，以及远端
 > Store 与工具环境的执行准入。归属结构以 [存储 v2](storage-v2-machine-workspace-session.md)
@@ -63,7 +62,7 @@ WASM 是兼容性目标，不是第二套 Peri：`wasm32-unknown-emscripten` 模
 嵌入现有 ACP Host，导出 `PeriWasmAcp`，与宿主只交换原始 JSON-RPC 帧。宿主循环、
 请求路由、Agent 执行、模型与会话规则仍由原有 crate 承担，TypeScript 侧不分派 ACP 方法。
 
-已验收宿主为 Node、Bun 与 Wrangler 本地 `workerd`，均按一宿主一模块实例验收。Workers
+当前宿主覆盖 Node、Bun 与 Wrangler 本地 `workerd`，均按一宿主一模块实例处理。Workers
 需要 `nodejs_compat`、独立 ES 模块、预编译 WASM module import 与 `mainScriptUrlOrBlob`
 启动参数；托管部署、生产端点、资源限制与 Workers 上的 TypeScript SDK 入口尚未验收。
 普通浏览器不能直接使用这条 Node socket 路线。
@@ -125,11 +124,11 @@ workspace root，不要求也不校验真实文件系统事实：项目与工作
   locator 在 WASM 直接失败，不静默落回本机库。
 
 执行所有权唯一由 SDK 管理。当前 schema 由 Resources 的 canonical 常量定义，
-版本与迁移入口见 [Resources 索引](../code-index/peri-resources.md)。当前形状已移除 Store 的 `epoch + nonce` owner、
-Peri 执行 lease 与 Workspace fencing 均已删除；binding/path 校验、事务与任务资源
-关闭不构成另一层执行权。实例消失不能从 Store 中有历史推断上次执行已完成，也不能
-自动重放结果未知的工具调用；跨实例接管的证据链由
-[Session 异步任务统一入口](session-async-tasks.md) 承担，本设计不承诺长任务续跑。
+版本与迁移入口见 [Resources 索引](../code-index/peri-resources.md)。Store 不含执行
+owner/lease 或 Workspace fencing；binding/path 校验、事务与任务资源关闭不构成另一层
+执行权。实例消失不能从 Store 中有历史推断上次执行已完成，也不能自动重放结果未知的
+工具调用；跨实例接管的证据链由 [Session 异步任务统一入口](session-async-tasks.md)
+承担，本设计不承诺长任务续跑。
 
 ## 4. 会话与 SDK 可观察行为
 
@@ -138,10 +137,9 @@ Peri 执行 lease 与 Workspace fencing 均已删除；binding/path 校验、事
 只读历史。仅凭知道 Session ID 不授予访问权。
 
 SDK 复用同一组 ACP 装配：`WasmAcpTransport` 只替换底层传输，`ChatRuntime` 的 `kind:"wasm"` 分支
-按激活启动运行后端，`kind:"transport"` 分支接受部署注入的 transport。旧 `Sandbox`、`ManagedAgents`、
-`Agent` 与 `Session` 业务门面已删除；公开对象是 `ChatManager`、`ChatService`、`ChatUserAction`、
-`ChatView` 与 `ChatReplica`。构建产物（JS 与 WASM）放入 npm 包内 `dist/wasm/`，示例服务与 Workers
-probe 复用同一装配接口。
+按激活启动运行后端，`kind:"transport"` 分支接受部署注入的 transport。公开对象是
+`ChatManager`、`ChatService`、`ChatUserAction`、`ChatView` 与 `ChatReplica`。构建产物
+（JS 与 WASM）放入 npm 包内 `dist/wasm/`，示例服务与 Workers probe 复用同一装配接口。
 
 SDK 的 `ChatView` 把 ACP 通知（含冷 `session/load` 的历史重放）投影为实时 Yjs 视图，并由
 `ChatReplica` 在浏览器只读消费。每个绑定代次拥有一对 `Y.Doc`；它是进程内实时投影，不是持久权威——
@@ -177,8 +175,7 @@ KV 归属记录与执行准入都不改变 Peri 的机器归属、binding/path �
   身份文件和目录检查只描述本地运行实现。
 - [Session 异步任务统一入口](session-async-tasks.md)：SDK 执行协调、关闭接管与恢复
   证据链；不恢复 Peri/Store owner 或 Workspace fencing，这些接管能力未由本设计承诺。
-- 实现入口与验收脚本见当前 `docs/code-index/peri-wasm.md`、`docs/code-index/peri-ts-sdk.md` 与
-  `spec/history/2026-10.md`（2026-10-02 条目）。
+- 实现入口见当前 `docs/code-index/peri-wasm.md` 与 `docs/code-index/peri-ts-sdk.md`。
 
 ## 6. 保证边界
 

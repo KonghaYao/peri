@@ -17,6 +17,19 @@ pub struct DisplayLedger {
 }
 
 impl DisplayLedger {
+    /// Remove a disposable unit that has no canonical entry, preserving every
+    /// later canonical range. Refuse overlap rather than shifting a saved entry.
+    pub fn remove_unmapped_slot(&mut self, slot: usize) -> bool {
+        if self.overlaps(slot, 1) {
+            return false;
+        }
+        self.slots = std::mem::take(&mut self.slots)
+            .into_iter()
+            .map(|(start, value)| (if start > slot { start - 1 } else { start }, value))
+            .collect();
+        true
+    }
+
     pub fn contains(&self, key: &PersistentEntryKey) -> bool {
         self.entries.contains(key)
     }
@@ -198,6 +211,10 @@ impl DisplayLedger {
 }
 
 impl HistoryWindow {
+    pub(crate) fn remove_unmapped_display_slot(&mut self, slot: usize) -> bool {
+        self.display.remove_unmapped_slot(slot)
+    }
+
     pub fn is_entry_displayed(&self, key: &PersistentEntryKey) -> bool {
         self.display.contains(key)
     }

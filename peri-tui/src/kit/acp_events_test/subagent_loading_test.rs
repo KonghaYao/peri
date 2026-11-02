@@ -2,6 +2,7 @@ use super::*;
 
 fn make_state(phase: SessionPhase, variant: u8) -> BridgeState {
     BridgeState {
+        child_runs: Default::default(),
         variant,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -14,7 +15,7 @@ fn make_state(phase: SessionPhase, variant: u8) -> BridgeState {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,
@@ -163,19 +164,18 @@ fn test_bg_subagent_chunk_after_turn_suspended_does_not_leak_to_main() {
         state.current_turn.reasoning
     );
 
-    // 对照组：无组且不在 BG_AGENT_IDS 的 chunk（主 agent 文本）仍正常回退
-    // 主分支——修复不得破坏主 agent 回复显示。
+    // 对照组：真实根事件没有 child sourceAgentId，仍正常进入主分支。
     dispatch_and_notify(
         &mut state,
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "main reply".into(),
             message_id: Some("m1".into()),
-            agent_id: Some("main-agent".into()),
+            agent_id: None, // Root wire events have no child sourceAgentId.
         }),
     );
     assert_eq!(
         state.current_turn.text, "main reply",
-        "主 agent 文本应正常回退主分支"
+        "无 child source 的根文本应正常进入主分支"
     );
     BG_AGENT_IDS.state().write().clear();
 }
@@ -285,7 +285,7 @@ fn test_bg_events_after_turn_suspended_keep_idle_loading() {
         &AcpEventData::TextChunk(crate::kit::stream_data::TuiTextChunk {
             text: "main reply".into(),
             message_id: Some("m1".into()),
-            agent_id: Some("main-agent".into()),
+            agent_id: None, // Root wire events have no child sourceAgentId.
         }),
     );
     assert_eq!(

@@ -11,7 +11,7 @@ use crate::kit::stream_data::{TuiReasoningChunk, TuiTextChunk};
 /// 无条件 reset current_turn（清空 SubAgentAccumulator，`flush_current_turn`
 /// 的 running-subagent 守卫覆盖不到这两条路径），此后 bg 的流式 chunk 找不到
 /// 组。与 tool.rs 的 bg 兜底同口径：bg 内容不进主消息区——命中则跳过（不
-/// 回退主 agent 分支），否则外溢到主回复气泡。
+/// 回退主 agent 分支）；没有活动后台身份的未知 child 同样不得进入主回复。
 fn is_bg_agent_without_group(agent_id: &str) -> bool {
     let is_bg = BG_AGENT_IDS.state().read().contains(agent_id);
     if is_bg {
@@ -34,15 +34,15 @@ pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) -> P
         tc.message_id.as_deref(),
         false,
     );
-    // 先尝试 SubAgent 组路由；带 agent_id 但无匹配组 = 主 agent 文本
-    // （v2 事件身份透传后主 agent chunk 亦携带 agent_id，`append_subagent_text`
-    // 找不到组即回退主 agent 分支，不能静默丢弃——否则主 agent 回复不显示）。
-    // bg subagent 例外：组被 turn 边界清除时不得回退主分支（见
-    // `is_bg_agent_without_group`）。
-    let routed_to_subagent = tc
-        .agent_id
-        .as_deref()
-        .is_some_and(|agent_id| state.current_turn.append_subagent_text(agent_id, &tc.text));
+    // agent_id 在 TUI DTO 中来自 sourceAgentId，明确表示 child 路由。
+    // 组被释放后仍可更新活动后台预览；未知 child 不得退回主回复。
+    let routed_to_subagent = tc.agent_id.as_deref().is_some_and(|agent_id| {
+        state.current_turn.append_subagent_text_with_id(
+            agent_id,
+            &tc.text,
+            tc.message_id.as_deref(),
+        )
+    });
     if routed_to_subagent {
         state.variant = 1;
         // bg subagent 不触碰 phase（Issue 2026-08-12）：bg 生命周期跨越主 turn
@@ -69,6 +69,10 @@ pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) -> P
         }
         state.variant = 1;
         super::render::push_acp_state(state);
+        return PublicationIntent::None;
+    } else if tc.agent_id.is_some() {
+        // sourceAgentId denotes a child. Missing/evicted routing never means root.
+        tracing::debug!(child = ?tc.agent_id, "ignored unobserved child text preview");
         return PublicationIntent::None;
     } else {
         // 根 agent 的流式身份：紧随其后的工具卡按同一 assistant message 归属。
@@ -97,12 +101,13 @@ pub(super) fn handle_reasoning_chunk(
         rc.message_id.as_deref(),
         true,
     );
-    // 同 handle_text_chunk：subagent 路由失败时回退主 agent 推理分支
-    // （主 agent thinking chunk 亦携带 agent_id，不能静默丢弃）。
+    // 同 text：带 child source 身份的推理不得回退主 agent。
     let routed_to_subagent = rc.agent_id.as_deref().is_some_and(|agent_id| {
-        state
-            .current_turn
-            .append_subagent_reasoning(agent_id, &rc.text)
+        state.current_turn.append_subagent_reasoning_with_id(
+            agent_id,
+            &rc.text,
+            rc.message_id.as_deref(),
+        )
     });
     if routed_to_subagent {
         state.variant = 1;
@@ -127,6 +132,9 @@ pub(super) fn handle_reasoning_chunk(
         }
         state.variant = 1;
         super::render::push_acp_state(state);
+        return PublicationIntent::None;
+    } else if rc.agent_id.is_some() {
+        tracing::debug!(child = ?rc.agent_id, "ignored unobserved child reasoning preview");
         return PublicationIntent::None;
     } else {
         live_tool_links::note_assistant_chunk(&state.active_session_id, rc.message_id.as_deref());

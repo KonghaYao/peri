@@ -1,9 +1,9 @@
 //! CompactCommand 行为 + 合约测试。
 //!
-//! 此文件原为 `compact.rs` 内联 `#[cfg(test)] mod tests`，按 CLAUDE.md 编码规范
+//! 此文件原为 `compact.rs` 内联 `#[cfg(test)] mod tests`，按编码规范
 //! （测试 ≥30 行必须分离为同目录 `_test.rs`）与 bg.rs/rewind.rs/mod.rs 对齐外置。
 //!
-//! 6 个 `contract_*` 测试固化 CLAUDE.md 第一优先级 [TRAP]：
+//! 6 个 `contract_*` 测试固化第一优先级 [TRAP]：
 //!   compact 后消息必须以 `BaseMessage::human(summary + continuation)` 开头，
 //!   完整结构为 `[Human(摘要+续接指令), System(文件)..., System(Skills)...]`。
 //!   禁止将摘要放在 `BaseMessage::system()` 中，禁止出现孤立的 ToolUse。
@@ -520,7 +520,7 @@ async fn test_compact_command_does_not_call_push_done_itself() {
 
 // ── Contract Test: compact 后消息结构不变量 ───────────────────────────
 //
-// 验证 CLAUDE.md [TRAP] 不变量：
+// 验证 [TRAP] 不变量：
 //   compact 后消息必须以 BaseMessage::human(summary + continuation) 开头，
 //   完整结构为 [Human(摘要+续接指令), System(文件)..., System(Skills)...]。
 //   禁止将摘要放在 BaseMessage::system() 中，禁止出现孤立的 ToolUse。
@@ -684,7 +684,7 @@ async fn test_contract_compact_output_structure_human_then_system_only() {
     // Assert: 结构契约 — 首条 Human（摘要），其后只能是 Human（re-inject 文件/Skills）
     //
     // [v2] re-inject 消息从 v1 `BaseMessage::system(...)` 改为 `BaseMessage::human(...)`，
-    // 避免 invoke.rs hoist 污染 frozen_system_prompt（CLAUDE.md [TRAP]）。
+    // 避免 invoke.rs hoist 污染 frozen_system_prompt（[TRAP]）。
     // 测试 contract 同步更新——首条 Human 后只能 Human（不再有 System）。
     assert!(
         matches!(result.messages[0], BaseMessage::Human { .. }),

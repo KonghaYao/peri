@@ -790,6 +790,9 @@ pub struct BgLiveDetail {
     pub duration_ms: Option<u64>,
     pub output_preview: Option<String>,
     pub cancel_reason: Option<String>,
+    /// The display preview is incomplete; canonical/task results are unaffected.
+    pub preview_omitted: bool,
+    pub(crate) preview_updated: u64,
     pub nested_units: im::Vector<crate::kit::tui_render_unit::TuiRenderUnit>,
     pub(crate) tool_cards: Vec<crate::kit::acp_types::ToolCardAccumulator>,
     pub(crate) subagent_result: Option<String>,
@@ -810,6 +813,8 @@ impl Default for BgLiveDetail {
             duration_ms: None,
             output_preview: None,
             cancel_reason: None,
+            preview_omitted: false,
+            preview_updated: 0,
             nested_units: im::Vector::new(),
             tool_cards: Vec::new(),
             subagent_result: None,

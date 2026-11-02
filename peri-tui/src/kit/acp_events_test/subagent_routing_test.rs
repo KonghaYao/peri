@@ -2,6 +2,7 @@ use super::*;
 
 fn make_state(phase: SessionPhase, variant: u8) -> BridgeState {
     BridgeState {
+        child_runs: Default::default(),
         variant,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -14,7 +15,7 @@ fn make_state(phase: SessionPhase, variant: u8) -> BridgeState {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,

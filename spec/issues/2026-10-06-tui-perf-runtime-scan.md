@@ -6,7 +6,7 @@
 - 本轮交付：仅新增本 issue；不修改源码、不清理工作树、不联网、不启动或停止用户进程。
 - 定级：没有新增 P0；Astra 将本报告 R1–R7 均定为 P2，确认机制不等于现场高 CPU/RSS 主因。
 
-最终裁决见 [Astra 审计 §5/§6](2026-10-06-tui-perf-astra-audit.md)。R2/R5/R6 由扫描建议 P1 下调 P2；R5 的正常 CLI 退出长期泄漏推断被驳回，存在 runtime drop 与显式 transport close。R6 唯一承接内存 M5 的队列/请求背压及 gap single-flight，R5 共用任务 owner 承接退出。R4 属于 kit render-demand 边界，Ctrl+C 退出是 raw 事件不 render 的例外；R7 已按最新 steer dirty 重核。下文是扫描证据，不以旧行号或初步推断覆盖审计。
+最终裁决见 Astra 审计 §5/§6（原文见 Git 历史）。R2/R5/R6 由扫描建议 P1 下调 P2；R5 的正常 CLI 退出长期泄漏推断被驳回，存在 runtime drop 与显式 transport close。R6 唯一承接内存 M5 的队列/请求背压及 gap single-flight，R5 共用任务 owner 承接退出。R4 属于 kit render-demand 边界，Ctrl+C 退出是 raw 事件不 render 的例外；R7 已按最新 steer dirty 重核。下文是扫描证据，不以旧行号或初步推断覆盖审计。
 
 ## 1. 证据口径与去重
 

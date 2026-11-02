@@ -101,12 +101,13 @@ fn tools_are_non_empty_and_unique_per_instance() {
                 }
             }
             // wave 2：cron 冻结 `None`（A4：声明段零变化）。
+            // monitor：六个工具同样无 `BaseTool::prompt_declaration()` 文本。
             // wave 5：workflow 四项同形（无 `BaseTool::prompt_declaration()` 文本）。
-            "cron" | "workflow" => {
+            "cron" | "monitor" | "workflow" => {
                 for tool in instance.tools {
                     assert!(
                         tool.prompt_declaration.is_none(),
-                        "实例 {} 的工具 {} 必须无声明模板（cron / workflow）",
+                        "实例 {} 的工具 {} 必须无声明模板（cron / monitor / workflow）",
                         instance.name,
                         tool.original_name
                     );
@@ -188,8 +189,15 @@ fn reserved_names_superset_of_implemented_instances() {
             instance.name
         );
     }
-    // 保留名表本身冻结：五个名字逐一覆盖（全部为已实现实例）。
-    for reserved in ["web", "artifact", "cron", "workspace", "workflow"] {
+    // 保留名表本身冻结：六个名字逐一覆盖（全部为已实现实例）。
+    for reserved in [
+        "web",
+        "artifact",
+        "cron",
+        "monitor",
+        "workspace",
+        "workflow",
+    ] {
         assert!(
             BUILTIN_RESERVED_INSTANCE_NAMES.contains(&reserved),
             "保留名表缺失: {reserved}"
@@ -197,6 +205,20 @@ fn reserved_names_superset_of_implemented_instances() {
         assert!(is_reserved_instance_name(reserved));
     }
     assert!(!is_reserved_instance_name("some-user-server"));
+}
+
+#[test]
+fn task_owner_scoping_is_a_registry_field() {
+    let scoped: HashSet<&str> = BUILTIN_MCP_INSTANCES
+        .iter()
+        .filter(|instance| instance.task_owner_scoped)
+        .map(|instance| instance.name)
+        .collect();
+    assert_eq!(
+        scoped,
+        HashSet::from(["monitor", "workspace"]),
+        "只有 monitor 与 workspace 按发起会话隔离任务"
+    );
 }
 
 #[test]
@@ -212,11 +234,12 @@ fn policy_keys_are_unique_and_frozen() {
     );
     // 冻结期望与 `BUILTIN_INSTANCE_POLICY_KEYS` 同步（该常量自行断言与声明表相等）：
     // `"WorkflowMiddleware"` 是 workflow builtin 实例（P1）的关闭键，双轨期与旧链
-    // 槽位同名；旧链删除属 P5 原子切换（`spec/issues/2026-10-11-workflow-as-mcp.md`）。
+    // 槽位同名；旧链已删除，见 `docs/design/workflow-mcp.md`。
     let expected: HashSet<&str> = [
         "WebMiddleware",
         "ArtifactMiddleware",
         "CronMiddleware",
+        "MonitorMiddleware",
         "WorkspaceMiddleware",
         "WorkflowMiddleware",
     ]
@@ -242,6 +265,21 @@ fn find_hits_only_implemented_instances() {
         cron.tools.len(),
         5,
         "cron_register / cron_list / cron_remove / cron_toggle / cron_acknowledge"
+    );
+    let monitor = find("monitor").expect("monitor 是已实现实例");
+    assert_eq!(monitor.name, "monitor");
+    assert_eq!(
+        monitor.tools.len(),
+        4,
+        "monitor_start / monitor_read / monitor_stop / monitor_list"
+    );
+    assert!(
+        monitor.tools.iter().all(|tool| tool.model_visible),
+        "monitor 没有 host-only 工具；告警由宿主任务轮询驱动"
+    );
+    assert!(
+        monitor.tools.iter().all(|tool| !tool.direct),
+        "monitor 工具全部 deferred"
     );
     let workspace = find("workspace").expect("workspace 是已实现实例（AW3-06）");
     assert_eq!(workspace.name, "workspace");
@@ -394,7 +432,7 @@ fn wave1_tools_are_all_declared_direct() {
                     "实例 {} 的工具 {} 在 wave 1 必须声明 direct",
                     instance.name, tool.original_name
                 ),
-                "cron" => assert!(
+                "cron" | "monitor" => assert!(
                     !tool.direct,
                     "实例 {} 的工具 {} 必须声明 direct: false（A4：deferred 工具）",
                     instance.name, tool.original_name

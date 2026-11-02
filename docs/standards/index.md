@@ -5,7 +5,7 @@
 ## 事实、规则与目标
 
 - **现行行为**：由代码、契约测试和可复现结果证明；文档不能把尚未实现的目标写成现状。
-- **工程规则**：`docs/standards/` 是可执行规则的单一事实源；根 `CLAUDE.md` 提供项目目标、设计取舍和路由，模块 `CLAUDE.md` 补充局部不变量与入口，不覆盖 standards。
+- **工程规则**：`docs/standards/` 是可执行规则的单一事实源；根 `CLAUDE.md` 提供项目目标、设计取舍和路由，不覆盖 standards。
 - **变更目标**：由用户已确认的任务契约及已批准设计确定；active spec 记录实施范围与验收，history 仅提供背景。目标尚未实现不构成文档过时，已有测试也可能需要随获批契约变更而更新。
 - **冲突裁决**：按 `STD-INDEX-002` 区分实现缺陷、文档过时与获批契约变更，不用一条信息优先级同时裁决现状和目标。
 
@@ -15,7 +15,7 @@
 | --- | --- |
 | 跨模块边界、事件、Prompt、工具、中间件、能力关闭、安全 | [architecture-contracts.md](architecture-contracts.md) |
 | Rust 实现 | [rust.md](rust.md) |
-| `peri-tui` 界面与交互 | [tui.md](tui.md) 与 `peri-tui/CLAUDE.md` |
+| `peri-tui` 界面与交互 | [tui.md](tui.md) 与 `docs/code-index/peri-tui.md` |
 | `CLAUDE.md` 维护 | [documentation.md](documentation.md) |
 | Git 分支创建、upstream、历史整理与 push 安全 | [git.md](git.md) |
 | 测试（根 workspace、submodule、独立/side project 的范围与命令） | [testing.md](testing.md) |

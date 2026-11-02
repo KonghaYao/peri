@@ -7,7 +7,7 @@
 
 ## 范围与证据口径
 
-- 最终裁决见 [Astra 审计 §3/§6](2026-10-06-tui-perf-astra-audit.md)：CPU-1 确认全量 reasoning 折行；CPU-2 确认稳定逻辑行元数据搬运，不是正文深拷贝。每帧索引及 chrome/content 分离仍归旧 F5，禁止重复计收益。下文保留扫描时证据，是否仍待修及定级以审计为准。
+- 最终裁决见 Astra 审计 §3/§6（原文见 Git 历史）：CPU-1 确认全量 reasoning 折行；CPU-2 确认稳定逻辑行元数据搬运，不是正文深拷贝。每帧索引及 chrome/content 分离仍归旧 F5，禁止重复计收益。下文保留扫描时证据，是否仍待修及定级以审计为准。
 - 已读 standards index / tui / rust / architecture-contracts / testing / documentation、`peri-tui/CLAUDE.md`、`docs/code-index/peri-tui.md`；只写本 issue。
 - 核查主消息区状态订阅、slot 检测、Assistant Markdown 分片、reasoning 渲染、wrap map 与 SlotIndex，以及 bridge 发布入口；未完整扫描其他面板、工具 presentation、ratatui 依赖内部或内存生命周期。这些范围不宣称无问题。
 - **源码确认**指调用与数据操作可直接读出；**推断**指复杂度、潜在 CPU/分配收益；**实测**仅能对应实际被观测的二进制。本报告两个候选均没有当前源码的运行计量。

@@ -83,7 +83,7 @@ pub(super) fn create_session_workflow_chain(
 
 /// P5 用户裁决（2026-10-11）：`"WorkflowMiddleware"` 命中会话关闭集 ⇒ workflow
 /// 实例与消费者都不装配（唯一物理关闭特例；ARC-CAPABILITY-CLOSURE-001 的既有语义
-/// 是非物理投影关闭，本特例经裁决，注记见 `spec/issues/2026-10-11-workflow-as-mcp.md`）。
+/// 是非物理投影关闭，本特例经裁决，注记见 `docs/design/workflow-mcp.md` §4.4）。
 ///
 /// 门控同 [`create_session_workflow_chain`]：该特例只对本地 workflow 运行时生效。
 #[cfg(not(target_os = "emscripten"))]

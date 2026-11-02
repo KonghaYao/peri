@@ -271,7 +271,7 @@ receipt = {
     "seconds_total": int(os.environ["VT_TOTAL_SECS"]),
     "verdict": os.environ["VT_VERDICT"],
     "steps": steps,
-    "not_run": ["cargo test --workspace（留在 CI）", "e2e/（见 e2e/CLAUDE.md）"],
+    "not_run": ["cargo test --workspace（留在 CI）", "e2e/（见 docs/standards/testing.md）"],
     "logs": {
         "check": os.environ["VT_CHECK_OUT"],
         "clippy": os.environ["VT_CLIPPY_OUT"],

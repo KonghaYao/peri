@@ -53,6 +53,7 @@ impl MappedEvent {
 /// - 其余所有变体：无 SessionUpdate 输出
 pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) -> Vec<MappedEvent> {
     match event {
+        ExecutorEvent::Originated(scoped) => map_event(&scoped.event, context_window, caps),
         // ── Category ①: Full SessionUpdate ─────────────────────────────────────────
         ExecutorEvent::TextChunk {
             chunk,

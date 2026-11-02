@@ -18,7 +18,7 @@ use peri_middlewares::mcp::standalone::{self, Options, Transport};
 )]
 #[command(group(ArgGroup::new("transport").required(true).args(["stdio", "http"])))]
 struct Args {
-    /// Builtin instance to serve (web, artifact, cron, workspace, workflow).
+    /// Builtin instance to serve (web, artifact, cron, monitor, workspace, workflow).
     instance: String,
     /// Serve MCP over stdin/stdout.
     #[arg(long, conflicts_with = "http")]

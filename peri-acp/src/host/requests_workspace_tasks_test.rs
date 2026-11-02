@@ -63,7 +63,7 @@ async fn session_local_workspace_tasks_reach_acp_snapshot_and_live_events() {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     let session = cfg.session_manager.get_session(id).unwrap();
-    let task_id = session
+    let ticket = session
         .task_manager
         .register_external(ExternalTaskRegistration {
             session_id: id.to_owned(),
@@ -77,6 +77,7 @@ async fn session_local_workspace_tasks_reach_acp_snapshot_and_live_events() {
             on_terminal: Arc::new(|_, _| Box::pin(async { Ok(()) })),
         })
         .unwrap();
+    let task_id = ticket.task_id().to_owned();
     assert!(
         McpPoolPort::has_active_tasks(pool.as_ref(), id),
         "the session MCP pool must hold the same TaskManager as ACP"

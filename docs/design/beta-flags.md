@@ -1,8 +1,7 @@
 # Beta Flag 系统
 
-> 状态：现行设计（已实现：注册表、`config.betas` 配置面投影、装配期消费注入与
-> ConfigPanel 管理区块）。实施记录与剩余跟进项见
-> [2026-10-08 实施 issue](../../spec/issues/2026-10-08-beta-flags-implementation.md)。
+> 状态：现行设计（已实现注册表、`config.betas` 配置面投影、装配期消费注入与
+> ConfigPanel 管理区块）。
 >
 > 事实源：settings 类型 `peri-config/src/app.rs::BetasConfig`（bool 稀疏覆盖表）；配置权威、快照、
 > CAS 与 explain 的通用规则见 [configuration-authority.md](configuration-authority.md)；
@@ -14,8 +13,8 @@
 ## 定位
 
 Flag 是受控的 beta 能力开关：能力已在代码中实现但不默认启用，用户在 settings 中
-显式开启后，新建会话按其缺省运行。开启只改变行为缺省与能力可见性，不引入第二实现，
-未配置用户的行为与 flag 引入前一致。
+显式开启后，新建会话按该 flag 定义的策略运行。开启改变行为策略（缺省或强制）与
+能力可见性，不引入第二实现，未配置用户的行为与 flag 引入前一致。
 
 边界：
 
@@ -37,7 +36,8 @@ Flag 是受控的 beta 能力开关：能力已在代码中实现但不默认启
 | Flag 覆盖 | settings `config.betas` 的稀疏 `id → bool` 表 | 用户 settings（global / workspace） |
 | 有效值 | `覆盖.get(id).unwrap_or(false)` | resolve 投影 `BetaFlags` |
 
-所有 flag 默认值恒为 false；ACP 注册表不得声明默认开启条目。TUI 本地 beta 也必须默认 false。
+ACP flag 默认值恒为 false，注册表不得声明默认开启条目；TUI 本地 beta 的未配置语义按其
+发布绑定，`history-window-v1` 未配置视为开启（见「TUI 本地 beta」）。
 id 一经发布不得改名（settings 键、日志与面板身份），改名等同于「废除 + 引入」。面板操作产生的
 覆盖是用户偏好数据，不因能力转正而被改写（残留键按未知键规则失效）。
 
@@ -58,8 +58,7 @@ description。消费方以注册表常量（而非字符串字面量）引用 id
 
 ## 配置面接入
 
-settings 位置为 `config.betas`（沿用现有 `BetasConfig` 占位类型，内部为 bool 稀疏
-map）。示例：
+settings 位置为 `config.betas`（`BetasConfig`，内部为 bool 稀疏覆盖表）。示例：
 
 ```json
 { "config": { "betas": { "full-async-tools": true } } }
@@ -71,7 +70,7 @@ flowchart LR
     Resolve --> Snapshot["ConfigurationSnapshot::flags"]
     Snapshot --> Assemble["装配期注入"]
     Assemble --> Bash["Bash 工具缺省"]
-    Assemble --> Agent["Agent 工具缺省"]
+    Assemble --> Agent["Agent 强制后台"]
     Panel["ConfigPanel beta 区块"] -->|"CAS 保存"| Files
 ```
 
@@ -112,13 +111,13 @@ flowchart LR
 - 面板显示**合并后的有效值**；未设置与显式 false 均显示为关闭。
 - 区块标注**新会话生效**；已运行会话不受切换影响。
 - 描述优先 i18n key `beta-desc-<id>`，缺失回退注册表 canonical 文本。
-- BetasPanel（Ctrl+B / `/betas`，当前为 mock 列表）退役：ACP flag 列表的单一权威是
-  注册表，不保留第二入口；TUI 本地 beta 例外见下节。
+- BetasPanel（Ctrl+B / `/betas`）已退役：ACP flag 列表的单一权威是注册表，不保留第二入口；
+  TUI 本地 beta 例外见下节。
 
 ## TUI 本地 beta：history-window-v1
 
 `history-window-v1` 是 TUI 历史窗口的本地 beta，键定义在 `peri-config/src/betas.rs`。
-发布启用绑定 S7：**未配置视为开启**，只有用户显式配置 `false` 才关闭。它由 `is_known` 接受并
+**未配置视为开启**，只有用户显式配置 `false` 才关闭。它由 `is_known` 接受并
 进入 `BetaFlags` 投影，但不在 `peri-acp-types::beta_flags::BETA_FLAGS`，因此 ConfigPanel 的
 beta 区块不列出，需手动写入 settings：
 
@@ -138,11 +137,12 @@ TUI 启动时（`peri-tui/src/kit/entry.rs`）读取一次快照 flags，调用
 | 项 | 语义 |
 | --- | --- |
 | id / 默认 | `full-async-tools` / false |
-| 效果 | `Bash` 与 `Agent` 在调用未显式给出 `run_in_background` 时，缺省由 false 变为 true |
-| 显式优先 | 显式 `run_in_background: false` 仍走前台；flag 只改缺省，不覆盖显式意图。`Agent` 的 resume 调用（携带 `resume_thread_id`）不受影响 |
-| 模型可见 | 工具 schema 中 `run_in_background` 的 `default` 与描述随有效缺省同步；schema 只影响模型倾向，硬缺省由执行路径执行 |
-| 依赖前提 | 缺省转后台要求任务管理器就绪；缺失时维持既有报错语义，flag 不创造未装配的能力。**语义不对称**：缺省 true 且无任务管理器时 `Bash` 报既有错误（`run_in_background is not available`），`Agent` 静默落回前台——两者各自维持引入前的语义 |
-| 不变项 | 任务注册、完成回传、取消、并发上限、前台超时 promote 与输出落盘链均不因 flag 改变 |
+| 效果 | 两种工具语义**不对称**：`Bash` 仅在调用未显式给出 `run_in_background` 时把缺省由 false 改为 true；`Agent` 则强制后台——省略与显式 `false` 都后台（MCP Agent 例外，见下），除该例外外本会话不再有 Agent 同步执行路径 |
+| 显式优先 | `Bash` 显式 `run_in_background: false` 仍走前台；`Agent` 显式 `false` 被忽略并仍然后台启动。`Agent` 的 active 线程 resume（`resume_thread_id` 命中运行实例）仍按 Defer 投递语义处理，该路径本就忽略 `run_in_background`；非 active 恢复同样强制后台 |
+| MCP Agent 例外 | `Agent` 的 `subagent_type` 以 `mcp__` 开头时仍只能同步激活：省略或显式 `false` 走审批门（`load_and_approve_mcp_agent`）的同步路径，显式 `true` 返回既有错误「MCP Agents currently support synchronous activation only」。强制后台不得把 MCP Agent 推入后台 loader（会绕过审批门） |
+| 模型可见 | `Bash` schema 的 `default` 与 `Agent` schema 的 `default` / 描述随有效语义同步：Agent 强制模式为 `default: true`，描述声明显式 `false` 被忽略并仍然后台启动。schema 只影响模型倾向，硬语义由执行路径执行 |
+| 依赖前提 | `Bash` 缺省转后台要求任务管理器就绪，缺失时报既有错误（`run_in_background is not available`）；`Agent` 强制模式没有任务管理器时**直接报错**（`full-async Agent execution requires a background task manager; none is configured`），不静默落回同步。非强制模式维持既有语义：显式 `true` 但无管理器时静默落回同步 |
+| 不变项 | 任务注册、完成回传、取消、并发上限、前台超时 promote 与输出落盘链均不因 flag 改变；Agent 显式 `true` 在无管理器时的落回同步语义（flag 关闭时）不变 |
 
 ## 治理
 

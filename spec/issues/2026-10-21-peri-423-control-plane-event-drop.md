@@ -3,7 +3,7 @@
 状态：根因已复核，修复见 PR #264，等待合入。日期：2026-10-21。
 
 - 原始 issue：<https://gitlab.pazhoulab-huangpu.com/aos-test/peri-test/-/issues/3>
-- 原始报告原文：[`2026-10-21-peri-423-control-plane-event-drop-original-report.md`](2026-10-21-peri-423-control-plane-event-drop-original-report.md)
+- 原始报告原文见 Git 历史（逐字收录，无实施动作）
 - 证据目录：`bugs/2026-10-21-peri-423-event-drop/`（GitLab `main`，含 README 与 8 份证据）
 - 被测版本：`agent-v4.2.3`
 - 复现方式：DeepSWE 单题 Docker；`peri -p` + StreamJson；OpenAI 兼容 → LiteLLM → `deepseek-v4-flash`

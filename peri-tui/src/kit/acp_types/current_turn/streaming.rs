@@ -174,6 +174,17 @@ impl CurrentTurn {
         self.invalidate_cache();
     }
 
+    pub(crate) fn push_system_reminder(
+        &mut self,
+        reminder: crate::kit::tui_render_unit::TuiSystemReminder,
+    ) {
+        self.flush_text_segment();
+        self.segments
+            .push(TurnSegment::SystemReminder(Box::new(reminder)));
+        self.active = true;
+        self.invalidate_cache();
+    }
+
     /// Keep a delivered user prompt after the already visible assistant output
     /// while a running subagent prevents the parent turn from being archived.
     pub(crate) fn push_user_bubble(

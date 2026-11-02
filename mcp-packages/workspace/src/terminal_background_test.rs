@@ -413,17 +413,20 @@ async fn test_sync_timeout_with_rejected_promotion_falls_back_to_killing_the_gro
     let cwd = std::env::temp_dir();
     let manager: Arc<dyn peri_acp_types::tasks::TaskManager> =
         Arc::new(peri_mcp_common::create_local_task_manager());
+    let mut tickets = Vec::new();
     // 占满 Shell 类并发位（纯登记表条目，不产生真进程）⇒ 提升时 `register` 必被拒。
     for index in 0..BackgroundTaskRegistry::SHELL_LIMIT {
-        manager
-            .register(BgTaskRegistration {
-                task_id: format!("occupied-{index}"),
-                kind: BgTaskKind::Shell,
-                summary: "capacity fixture".into(),
-                pid: None,
-                kill: Some(Box::new(|| {})),
-            })
-            .expect("占位登记必须成功");
+        tickets.push(
+            manager
+                .register(BgTaskRegistration {
+                    task_id: format!("occupied-{index}"),
+                    kind: BgTaskKind::Shell,
+                    summary: "capacity fixture".into(),
+                    pid: None,
+                    kill: Some(Box::new(|| {})),
+                })
+                .expect("占位登记必须成功"),
+        );
     }
     assert_eq!(manager.active_count(), BackgroundTaskRegistry::SHELL_LIMIT);
 
@@ -460,10 +463,19 @@ async fn test_sync_timeout_with_rejected_promotion_falls_back_to_killing_the_gro
     assert_eq!(evidence.task_id, None, "提升被拒 ⇒ 没有 task_id");
 
     // 收尾：占位条目按既有夹具的口径撤销（cancel + confirm），再把 manager 关干净。
-    for index in 0..BackgroundTaskRegistry::SHELL_LIMIT {
-        let id = format!("occupied-{index}");
-        manager.cancel(&id).expect("占位条目可取消");
-        manager.confirm_external_execution_stopped(&id);
+    for ticket in tickets {
+        manager.cancel(ticket.task_id()).expect("占位条目可取消");
+        manager.confirm_external_execution_stopped(&ticket);
+        manager.finalize_bg_shell(
+            &None,
+            ticket,
+            "capacity fixture".into(),
+            false,
+            "fixture cancelled".into(),
+            0,
+            false,
+            None,
+        );
     }
     assert_eq!(manager.active_count(), 0, "占位条目必须全部撤销");
     let report = manager.shutdown().await;

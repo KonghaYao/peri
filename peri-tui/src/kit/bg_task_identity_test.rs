@@ -1,6 +1,6 @@
 use super::*;
 use crate::kit::atoms::{
-    BG_AGENT_IDS, BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_IDENTITY, BgDisplayEntry,
+    BG_AGENT_IDS, BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_IDENTITY, BG_TASKS, BgDisplayEntry,
 };
 use serial_test::serial;
 
@@ -10,6 +10,7 @@ fn reset_bg_atoms() {
     BG_TASK_IDENTITY.state().write().clear();
     BG_AGENT_IDS.state().write().clear();
     BG_LIVE_DETAIL.state().write().clear();
+    BG_TASKS.state().write().clear();
 }
 
 #[test]
@@ -29,7 +30,7 @@ fn test_bind_linked_agent_id_on_bg_subagent_started() {
         completed_at: None,
     });
     upsert_identity_from_started("task-1", "agent", "job", None);
-    let bound = bind_linked_agent_on_subagent_started("agent-99", "coder");
+    let bound = bind_linked_agent_on_subagent_started("agent-99", "coder", Some("run"));
     assert_eq!(bound.as_deref(), Some("task-1"));
     assert_eq!(
         BG_DISPLAY.state().read()[0].linked_agent_id.as_deref(),
@@ -151,4 +152,89 @@ fn resumed_agent_events_update_latest_background_run() {
     assert!(details.get("old-task").is_none());
     let new = details.get("new-task").expect("new run detail");
     assert_eq!(new.nested_units.len(), 1);
+}
+
+#[test]
+#[serial]
+fn identity_refresh_and_duplicate_bind_preserve_the_current_agent_mapping() {
+    reset_bg_atoms();
+    let now = peri_time::monotonic_now();
+    for id in ["first", "other"] {
+        BG_DISPLAY.state().write().push(BgDisplayEntry {
+            id: id.into(),
+            linked_agent_id: None,
+            agent_type: "agent".into(),
+            desc: "task".into(),
+            current_tool: None,
+            tool_count: 0,
+            is_active: true,
+            is_error: false,
+            created_at: now,
+            completed_at: None,
+        });
+        upsert_identity_from_started(id, "agent", "task", None);
+    }
+    assert_eq!(
+        bind_linked_agent_on_subagent_started("child", "coder", Some("first-run")).as_deref(),
+        Some("other")
+    );
+    crate::kit::bg_task_live::init_agent_live_detail("other", "child", "coder", Some("first-run"));
+    upsert_identity_from_started("other", "agent", &"工作🙂".repeat(8192), None);
+    assert_eq!(
+        bind_linked_agent_on_subagent_started("child", "coder", Some("first-run")).as_deref(),
+        Some("other")
+    );
+    let identities = BG_TASK_IDENTITY.state();
+    let identities = identities.read();
+    let identity = &identities["other"];
+    assert_eq!(identity.agent_id.as_deref(), Some("child"));
+    assert_eq!(identity.agent_name.as_deref(), Some("coder"));
+    assert!(identity.summary.capacity() <= METADATA_TEXT_BYTES);
+    assert!(identity.summary.ends_with('…'));
+    assert!(BG_DISPLAY.state().read()[0].linked_agent_id.is_none());
+}
+
+#[test]
+#[serial]
+fn resumed_child_binds_new_task_before_the_previous_bg_completion_arrives() {
+    reset_bg_atoms();
+    let now = peri_time::monotonic_now();
+    let row = |id: &str| BgDisplayEntry {
+        id: id.into(),
+        linked_agent_id: None,
+        agent_type: "agent".into(),
+        desc: "task".into(),
+        current_tool: None,
+        tool_count: 0,
+        is_active: true,
+        is_error: false,
+        created_at: now,
+        completed_at: None,
+    };
+    BG_DISPLAY.state().write().push(row("old-task"));
+    upsert_identity_from_started("old-task", "agent", "old", None);
+    assert_eq!(
+        bind_linked_agent_on_subagent_started("child", "coder", Some("old-run")).as_deref(),
+        Some("old-task")
+    );
+    crate::kit::bg_task_live::init_agent_live_detail("old-task", "child", "coder", Some("old-run"));
+    crate::kit::bg_task_live::handle_bg_subagent_stopped("child", "done", false);
+    assert!(BG_DISPLAY.state().read()[0].is_active);
+
+    BG_DISPLAY.state().write().push(row("new-task"));
+    upsert_identity_from_started("new-task", "agent", "new", None);
+    assert_eq!(
+        bind_linked_agent_on_subagent_started("child", "coder", Some("new-run")).as_deref(),
+        Some("new-task")
+    );
+    crate::kit::bg_task_live::init_agent_live_detail("new-task", "child", "coder", Some("new-run"));
+    assert_eq!(task_id_for_agent_id("child").as_deref(), Some("new-task"));
+    assert_eq!(
+        BG_LIVE_DETAIL.state().read()["old-task"].status,
+        BgLiveStatus::Succeeded
+    );
+    assert_eq!(
+        BG_LIVE_DETAIL.state().read()["new-task"].status,
+        BgLiveStatus::Running
+    );
 }

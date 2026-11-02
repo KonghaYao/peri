@@ -18,7 +18,6 @@ const MANAGED_PROMPT_FILES: &[&str] = &[
     ".claude/agents/code-reviewer.md",
     ".claude/skills/blog-writer/SKILL.md",
     ".claude/skills/codebase-index/SKILL.md",
-    ".claude/skills/project-maturity/SKILL.md",
     "peri-acp/prompts/sections/03_doing_tasks.md",
     "peri-acp/prompts/sections/05_using_tools.md",
     "peri-acp/prompts/sections/06_tone_style.md",

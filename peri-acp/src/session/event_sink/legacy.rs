@@ -23,6 +23,8 @@ impl TransportEventSink {
         session_id: &str,
         event: &ExecutorEvent,
     ) -> Result<(), EventSinkError> {
+        let origin = event.child_origin();
+        let event = event.payload();
         let acp_event = match event {
             ExecutorEvent::UserInputRunStarted {
                 generation,
@@ -240,14 +242,10 @@ impl TransportEventSink {
                     )));
                 }
             };
+            let mut payload = json!({ "sessionId": session_id, "event_json": event_json });
+            super::attach_child_origin(&mut payload, origin);
             self.transport
-                .send_notification(
-                    "peri/agent_event",
-                    json!({
-                        "sessionId": session_id,
-                        "event_json": event_json,
-                    }),
-                )
+                .send_notification("peri/agent_event", payload)
                 .await
                 .map_err(|error| {
                     EventSinkError::new(format!("peri/agent_event send failed: {error}"))

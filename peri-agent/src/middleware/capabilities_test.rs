@@ -66,7 +66,7 @@ async fn test_after_agent_background_capability_keeps_completing_active() {
     };
     use crate::agent::events::BackgroundTaskResult;
     let manager = Arc::new(TaskManager::new());
-    manager
+    let registration = manager
         .register_with_kind(BackgroundTask {
             id: "completing".into(),
             agent_name: "边界替身".into(),
@@ -96,7 +96,7 @@ async fn test_after_agent_background_capability_keeps_completing_active() {
         .unwrap();
     assert!(seen.load(Ordering::SeqCst), "Completing 尚未提交终态");
     assert!(manager.complete(
-        "completing",
+        &registration,
         BackgroundTaskResult {
             task_id: "completing".into(),
             agent_name: "边界替身".into(),

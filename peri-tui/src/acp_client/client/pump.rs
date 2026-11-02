@@ -181,6 +181,22 @@ impl AcpTuiClient {
             let msg = transport.recv().await;
             match msg {
                 Some(IncomingMessage::Notification { method, params }) => {
+                    let view_epoch = crate::kit::atoms::BRIDGE_RESET_COUNTER.get();
+                    let child_origin = match params.pointer("/_meta/peri/childRun") {
+                        None => None,
+                        Some(value) => match serde_json::from_value::<
+                            peri_acp_types::event::ChildEventOrigin,
+                        >(value.clone())
+                        {
+                            Ok(origin) if origin.valid() => Some(origin),
+                            _ => {
+                                warn!(
+                                    "ACP child event has invalid producer identity; event ignored"
+                                );
+                                continue;
+                            }
+                        },
+                    };
                     if method == "peri/agent_event" {
                         event_count += 1;
                         let session_id = params
@@ -213,7 +229,11 @@ impl AcpTuiClient {
                                         deliver_or_close(
                                             &transport,
                                             &notification_tx,
-                                            AcpNotification::AgentEvent { session_id, event },
+                                            AcpNotification::AgentEvent { session_id, event }
+                                                .with_child_origin(
+                                                    child_origin.clone(),
+                                                    view_epoch,
+                                                ),
                                         );
                                     }
                                     continue;
@@ -278,7 +298,8 @@ impl AcpTuiClient {
                                         &transport,
                                         &notification_tx,
                                         session_id.clone(),
-                                        AcpNotification::AgentEvent { session_id, event },
+                                        AcpNotification::AgentEvent { session_id, event }
+                                            .with_child_origin(child_origin.clone(), view_epoch),
                                     );
                                     continue;
                                 }
@@ -292,7 +313,8 @@ impl AcpTuiClient {
                                     &transport,
                                     &notification_tx,
                                     session_id.clone(),
-                                    AcpNotification::AgentEvent { session_id, event },
+                                    AcpNotification::AgentEvent { session_id, event }
+                                        .with_child_origin(child_origin.clone(), view_epoch),
                                 );
                             }
                             Err(e) => {
@@ -343,7 +365,8 @@ impl AcpTuiClient {
                             &transport,
                             &notification_tx,
                             session_id.clone(),
-                            AcpNotification::SessionUpdate { session_id, params },
+                            AcpNotification::SessionUpdate { session_id, params }
+                                .with_child_origin(child_origin.clone(), view_epoch),
                         );
                     } else if method == "peri/unstable_event" {
                         let session_id = params
@@ -371,7 +394,8 @@ impl AcpTuiClient {
                                 session_id,
                                 event,
                                 data,
-                            },
+                            }
+                            .with_child_origin(child_origin.clone(), view_epoch),
                         );
                     } else if method == "peri/agent_event_done" {
                         let session_id = params

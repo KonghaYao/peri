@@ -43,7 +43,7 @@ async fn external_completion_notifies_before_terminal_and_retries_failed_deliver
     let manager = TaskManager::new();
     let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let notify_attempts = attempts.clone();
-    let task_id = manager
+    let ticket = manager
         .register_external(ExternalTaskRegistration {
             session_id: "session-a".into(),
             initiator_session_id: Some("session-a".into()),
@@ -65,6 +65,7 @@ async fn external_completion_notifies_before_terminal_and_retries_failed_deliver
             }),
         })
         .unwrap();
+    let task_id = ticket.task_id().to_owned();
     assert!(manager.mark_external_lost(&task_id));
     assert_eq!(manager.snapshot().tasks[0].status, "lost");
     assert_eq!(manager.active_count(), 1);
@@ -72,7 +73,7 @@ async fn external_completion_notifies_before_terminal_and_retries_failed_deliver
     assert_eq!(manager.active_count(), 1);
     assert!(manager
         .settle_external(
-            &task_id,
+            &ticket,
             "terminal-1",
             BackgroundTaskResult {
                 task_id: task_id.clone(),
@@ -106,13 +107,13 @@ async fn external_completion_notifies_before_terminal_and_retries_failed_deliver
         shell_output: None,
     };
     assert!(manager
-        .settle_external(&task_id, "terminal-1", result.clone())
+        .settle_external(&ticket, "terminal-1", result.clone())
         .await
         .unwrap());
     assert_eq!(manager.active_count(), 0);
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
     assert!(!manager
-        .settle_external(&task_id, "terminal-1", result)
+        .settle_external(&ticket, "terminal-1", result)
         .await
         .unwrap());
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
@@ -121,7 +122,7 @@ async fn external_completion_notifies_before_terminal_and_retries_failed_deliver
 #[tokio::test]
 async fn external_cancel_request_keeps_task_active_until_owner_settles() {
     let manager = TaskManager::new();
-    let task_id = manager
+    let ticket = manager
         .register_external(ExternalTaskRegistration {
             session_id: "session-a".into(),
             initiator_session_id: Some("session-a".into()),
@@ -134,12 +135,13 @@ async fn external_cancel_request_keeps_task_active_until_owner_settles() {
             on_terminal: std::sync::Arc::new(|_, _| Box::pin(async { Ok(()) })),
         })
         .unwrap();
+    let task_id = ticket.task_id().to_owned();
     manager.cancel_async(&task_id).await.unwrap();
     assert_eq!(manager.active_count(), 1);
     assert_eq!(manager.snapshot().tasks[0].status, "running");
     assert!(manager
         .settle_external(
-            &task_id,
+            &ticket,
             "terminal-cancel",
             BackgroundTaskResult {
                 task_id: task_id.clone(),
@@ -195,10 +197,12 @@ async fn cold_terminal_restore_tracks_pending_delivery_without_started_event() {
         subagent_failure: None,
         shell_output: None,
     };
-    let id = manager
-        .restore_external_terminal(make_request(), "transition-1", result.clone())
+    let ticket = manager.register_external_terminal(make_request()).unwrap();
+    let id = ticket.task_id().to_owned();
+    assert!(manager
+        .settle_external(&ticket, "transition-1", result.clone())
         .await
-        .unwrap();
+        .unwrap());
     assert_eq!(manager.snapshot().tasks[0].task_id, id);
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
     assert_eq!(
@@ -215,17 +219,17 @@ async fn cold_terminal_restore_tracks_pending_delivery_without_started_event() {
         BgRegistryEvent::Completed { .. }
     ));
     assert!(changes.try_recv().is_err());
-    assert_eq!(
-        manager
-            .restore_external_terminal(make_request(), "transition-1", result)
-            .await
-            .unwrap(),
-        id
-    );
+    manager.refresh_external(&ticket, make_request()).unwrap();
+    assert!(!manager
+        .settle_external(&ticket, "transition-1", result)
+        .await
+        .unwrap());
+    assert_eq!(manager.snapshot().tasks[0].task_id, id);
     assert_eq!(deliveries.load(Ordering::SeqCst), 1);
 
     let live = TaskManager::new();
-    let live_id = live.register_external(make_request()).unwrap();
+    let live_ticket = live.register_external(make_request()).unwrap();
+    let live_id = live_ticket.task_id().to_owned();
     let live_result = BackgroundTaskResult {
         task_id: "finished-raw-id".into(),
         agent_name: "bg-shell".into(),
@@ -239,12 +243,12 @@ async fn cold_terminal_restore_tracks_pending_delivery_without_started_event() {
         subagent_failure: None,
         shell_output: None,
     };
-    assert_eq!(
-        live.restore_external_terminal(make_request(), "transition-1", live_result)
-            .await
-            .unwrap(),
-        live_id
-    );
+    live.refresh_external(&live_ticket, make_request()).unwrap();
+    assert!(live
+        .settle_external(&live_ticket, "transition-1", live_result)
+        .await
+        .unwrap());
+    assert_eq!(live.snapshot().tasks[0].task_id, live_id);
     assert_eq!(live.snapshot().tasks[0].status, "completed");
 }
 
@@ -283,7 +287,7 @@ async fn test_agent_kind_registration_is_not_capped() {
 async fn test_complete_updates_status() {
     let registry = make_registry();
 
-    registry.register_with_kind(make_task("bg-1")).unwrap();
+    let ticket = registry.register_with_kind(make_task("bg-1")).unwrap();
     assert_eq!(registry.active_count(), 1);
 
     let result = BackgroundTaskResult {
@@ -300,7 +304,7 @@ async fn test_complete_updates_status() {
         shell_output: None,
     };
 
-    registry.complete("bg-1", result);
+    registry.complete(&ticket, result);
 
     // 已完成任务应被立即清理，list_tasks 不再返回
     let tasks = registry.list_tasks();
@@ -573,10 +577,10 @@ async fn test_complete_after_cancel_does_not_push_ghost_event() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BgRegistryEvent>();
     registry.set_event_sender(tx, "sess-1".to_string());
 
-    registry.register_with_kind(make_task("bg-1")).unwrap();
+    let ticket = registry.register_with_kind(make_task("bg-1")).unwrap();
     registry.cancel("bg-1").unwrap(); // 条目移除 + Cancelled 事件
 
-    let handled = registry.complete("bg-1", make_result("bg-1", true));
+    let handled = registry.complete(&ticket, make_result("bg-1", true));
 
     assert!(!handled, "已移除条目的 complete 应返回 false");
     let mut saw_completed = false;
@@ -598,7 +602,11 @@ async fn test_complete_unknown_task_returns_false_no_event() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BgRegistryEvent>();
     registry.set_event_sender(tx, "sess-1".to_string());
 
-    let handled = registry.complete("never-registered", make_result("never-registered", true));
+    let other_registry = make_registry();
+    let ticket = other_registry
+        .register_with_kind(make_task("never-registered"))
+        .unwrap();
+    let handled = registry.complete(&ticket, make_result(ticket.task_id(), true));
 
     assert!(!handled, "未注册任务的 complete 应返回 false");
     assert!(
@@ -614,14 +622,14 @@ async fn test_complete_existing_task_returns_true_and_pushes_event() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BgRegistryEvent>();
     registry.set_event_sender(tx, "sess-1".to_string());
 
-    registry.register_with_kind(make_task("bg-1")).unwrap();
+    let ticket = registry.register_with_kind(make_task("bg-1")).unwrap();
     // 消费 register 推的 Started 事件
     assert!(matches!(
         rx.try_recv().unwrap(),
         BgRegistryEvent::Started { .. }
     ));
 
-    let handled = registry.complete("bg-1", make_result("bg-1", true));
+    let handled = registry.complete(&ticket, make_result("bg-1", true));
 
     assert!(handled, "条目存在时 complete 应返回 true");
     let event = rx.try_recv().unwrap();

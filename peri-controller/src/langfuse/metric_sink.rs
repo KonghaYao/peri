@@ -4,8 +4,10 @@
 //! 不占用 span / generation / trace 类型。
 //!
 //! 归属：指标自带 `sid`（会话 = thread id）时，优先挂到该 sid 当前活跃 turn 的
-//! trace（见 [`TurnTraceRegistry`](crate::langfuse::TurnTraceRegistry)）；没有活跃
-//! trace（未登记 / turn 已结束 / 指标无 sid）时回退为独立 root trace，事件不丢。
+//! 根 span 下（见 [`TurnTraceRegistry`](crate::langfuse::TurnTraceRegistry)），
+//! 不再为该 trace 制造第二个 root observation；未采样 turn 仍登记 trace 但无根
+//! span，其指标共享该 trace 而无父观测。只有无活跃登记（turn 未开始 / 已结束 /
+//! 指标无 sid）时才回退为独立 root trace，事件不丢。
 
 use std::sync::Arc;
 
@@ -29,12 +31,17 @@ impl LangfuseMetricsSink {
 
 impl MetricsSink for LangfuseMetricsSink {
     fn record(&self, event: MetricEvent) {
-        // 有活跃 turn trace 时归属该 trace（不再新开）；否则回退独立 root trace。
-        let trace_id = event
+        // 有活跃 turn 登记时归属该 trace 并挂到其根 span 下（不再新开、不再成为
+        // 第二个 root observation；未采样 turn 无根 span，共享 trace 但不带父观测）；
+        // 无活跃登记时回退独立 root trace。
+        let active = event
             .sid
             .as_deref()
-            .and_then(|sid| self.session.turn_traces().resolve(sid))
-            .unwrap_or_else(new_uuid);
+            .and_then(|sid| self.session.turn_traces().resolve(sid));
+        let (trace_id, parent_observation_id) = match active {
+            Some(active) => (active.trace_id, active.parent_observation_id),
+            None => (new_uuid(), None),
+        };
         let body = EventBody {
             id: Some(new_uuid()),
             trace_id: Some(trace_id.clone()),
@@ -51,7 +58,7 @@ impl MetricsSink for LangfuseMetricsSink {
             status_message: None,
             version: Some(VERSION.to_string()),
             environment: None,
-            parent_observation_id: None,
+            parent_observation_id,
         };
         let ingestion_event = IngestionEvent::EventCreate {
             id: new_uuid(),

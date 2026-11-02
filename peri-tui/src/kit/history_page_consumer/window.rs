@@ -689,6 +689,8 @@ fn emit_window_degraded(session_id: &str, reason: &str) {
         return;
     };
     let _ = tx.send(AcpEventWithEpoch {
+        child_origin: None,
+        view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
         event: AcpEventData::HistoryWindowDegraded {
             session_id: session_id.to_string(),
             reason: reason.to_string(),
@@ -816,6 +818,8 @@ pub fn spawn_history_window_consumer(
                         WindowSettlement::Accepted(_) | WindowSettlement::AcceptedEmpty => {
                             if let Some(tx) = atoms::LOCAL_EVENT_TX.get() {
                                 let _ = tx.send(AcpEventWithEpoch {
+                                    child_origin: None,
+                                    view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
                                     event: AcpEventData::HistoryWindowPageLoaded {
                                         context: Box::new(in_flight.context.clone()),
                                         response: Box::new(decoded),

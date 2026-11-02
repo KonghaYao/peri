@@ -215,7 +215,7 @@ impl MiddlewareChainAssembler for ProductionChainAssembler {
         }
 
         // 直接构造 MiddlewareChain（顺序由 Agent 层 production_blueprint 保证）。
-        // 中间件顺序是 [TRAP] 守护契约（禁止重排），详见 peri-middlewares/CLAUDE.md。
+        // 中间件顺序是 [TRAP] 守护契约（禁止重排），详见 docs/code-index/peri-middlewares.md。
         let mut chain = MiddlewareChain::new();
         for slot in blueprint {
             match slot {

@@ -11,6 +11,57 @@ use serde::{Deserialize, Serialize};
 
 use crate::event::BackgroundTaskResult;
 
+/// Runtime evidence owned by a task producer, never reconstructed from a task ID.
+/// Implementations live with the task registry; adapters only retain the ticket.
+pub trait TaskRegistrationReceipt: Send + Sync {
+    fn task_id(&self) -> &str;
+    fn owner_id(&self) -> uuid::Uuid;
+    fn is_settled(&self) -> bool;
+    fn source_identity(&self) -> Option<&str>;
+    fn initiator_session_id(&self) -> Option<String>;
+}
+
+/// One registration's completion capability and retained acceptance evidence.
+///
+/// Clone the original ticket for retries. Dropping a UI row does not revoke it;
+/// an opaque task ID cannot recreate it. Producers release it after their final
+/// callback / source acknowledgement, so settled evidence needs no global log.
+#[derive(Clone)]
+pub struct TaskRegistrationTicket(Arc<dyn TaskRegistrationReceipt>);
+
+impl TaskRegistrationTicket {
+    pub fn from_receipt(receipt: Arc<dyn TaskRegistrationReceipt>) -> Self {
+        Self(receipt)
+    }
+    pub fn task_id(&self) -> &str {
+        self.0.task_id()
+    }
+    pub fn owner_id(&self) -> uuid::Uuid {
+        self.0.owner_id()
+    }
+    pub fn is_settled(&self) -> bool {
+        self.0.is_settled()
+    }
+    pub fn source_identity(&self) -> Option<&str> {
+        self.0.source_identity()
+    }
+    pub fn initiator_session_id(&self) -> Option<String> {
+        self.0.initiator_session_id()
+    }
+    pub fn same_registration(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::fmt::Debug for TaskRegistrationTicket {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskRegistrationTicket")
+            .field("task_id", &self.task_id())
+            .field("settled", &self.is_settled())
+            .finish()
+    }
+}
+
 /// 后台任务类别
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -219,13 +270,18 @@ pub trait TaskManager: std::any::Any + Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + '_>> {
         Box::pin(async { Ok(()) })
     }
-    fn restore_external_terminal(
+    fn register_external_terminal(
         &self,
         _request: ExternalTaskRegistration,
-        _terminal_transition_id: &str,
-        _result: BackgroundTaskResult,
-    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>> {
-        Box::pin(async { Err("external terminal restoration is unavailable".into()) })
+    ) -> Result<TaskRegistrationTicket, String> {
+        Err("external terminal registration is unavailable".into())
+    }
+    fn refresh_external(
+        &self,
+        _ticket: &TaskRegistrationTicket,
+        _request: ExternalTaskRegistration,
+    ) -> Result<(), String> {
+        Err("external task callback refresh is unavailable".into())
     }
     fn external_task_ids(&self) -> Vec<String> {
         Vec::new()
@@ -250,12 +306,15 @@ pub trait TaskManager: std::any::Any + Send + Sync {
         drop(tx);
         rx
     }
-    fn register_external(&self, _request: ExternalTaskRegistration) -> Result<String, String> {
+    fn register_external(
+        &self,
+        _request: ExternalTaskRegistration,
+    ) -> Result<TaskRegistrationTicket, String> {
         Err("external tasks are unavailable".into())
     }
     fn settle_external(
         &self,
-        _task_id: &str,
+        _ticket: &TaskRegistrationTicket,
         _terminal_transition_id: &str,
         _result: BackgroundTaskResult,
     ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + '_>> {
@@ -269,7 +328,7 @@ pub trait TaskManager: std::any::Any + Send + Sync {
     /// was published.
     fn abandon_external(
         &self,
-        _task_id: &str,
+        _ticket: &TaskRegistrationTicket,
         _reason: &str,
     ) -> Pin<Box<dyn Future<Output = Result<bool, String>> + Send + '_>> {
         Box::pin(async { Ok(false) })
@@ -283,7 +342,7 @@ pub trait TaskManager: std::any::Any + Send + Sync {
     }
     /// Record actual external drain without changing notification delivery or UI state.
     /// Call only after the registered execution and its children have joined.
-    fn confirm_external_execution_stopped(&self, _task_id: &str) {}
+    fn confirm_external_execution_stopped(&self, _ticket: &TaskRegistrationTicket) {}
     /// No owned execution or unresolved external cleanup remains. UI task count is insufficient.
     fn is_execution_idle(&self) -> bool {
         false
@@ -311,17 +370,17 @@ pub trait TaskManager: std::any::Any + Send + Sync {
 
     /// 按类型注册任务（Shell / Workflow 有 kind 独立并发上限；Agent 类不限额；
     /// middleware 发起面调用，错误语义经 String 表达——并发上限 / 注册失败）。
-    fn register(&self, request: BgTaskRegistration) -> Result<(), String>;
+    fn register(&self, request: BgTaskRegistration) -> Result<TaskRegistrationTicket, String>;
 
     /// 仅结算无需通知接收方的 execution-only 任务，或已确认交付的外部任务。
     /// 需要通知接收方的 owned 任务必须使用 settle_completed。
-    fn complete(&self, task_id: &str, result: BackgroundTaskResult) -> bool;
+    fn complete(&self, ticket: &TaskRegistrationTicket, result: BackgroundTaskResult) -> bool;
 
     /// 需要通知接收方的 owned 任务统一由 owner 执行交付后结算。
     /// 交付失败保持 delivery_pending；重复已完成结算返回 false。
     fn settle_completed(
         &self,
-        task_id: &str,
+        ticket: &TaskRegistrationTicket,
         result: BackgroundTaskResult,
         delivery: OnBgCompleteFn,
     ) -> Result<bool, String>;
@@ -391,7 +450,7 @@ pub trait TaskManager: std::any::Any + Send + Sync {
     fn finalize_bg_shell(
         &self,
         on_bg_complete: &Option<OnBgCompleteFn>,
-        task_id: String,
+        ticket: TaskRegistrationTicket,
         prompt_summary: String,
         success: bool,
         output: String,
@@ -423,17 +482,17 @@ impl TaskManager for NoopTaskManager {
         0
     }
 
-    fn register(&self, _request: BgTaskRegistration) -> Result<(), String> {
+    fn register(&self, _request: BgTaskRegistration) -> Result<TaskRegistrationTicket, String> {
         Err("no task manager configured".to_string())
     }
 
-    fn complete(&self, _task_id: &str, _result: BackgroundTaskResult) -> bool {
+    fn complete(&self, _ticket: &TaskRegistrationTicket, _result: BackgroundTaskResult) -> bool {
         false
     }
 
     fn settle_completed(
         &self,
-        _task_id: &str,
+        _ticket: &TaskRegistrationTicket,
         _result: BackgroundTaskResult,
         _delivery: OnBgCompleteFn,
     ) -> Result<bool, String> {
@@ -467,7 +526,7 @@ impl TaskManager for NoopTaskManager {
     fn finalize_bg_shell(
         &self,
         _on_bg_complete: &Option<OnBgCompleteFn>,
-        _task_id: String,
+        _ticket: TaskRegistrationTicket,
         _prompt_summary: String,
         _success: bool,
         _output: String,

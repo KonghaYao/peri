@@ -1,6 +1,6 @@
 use super::{BackgroundRegistryError, BackgroundTaskRegistry};
 use crate::agent::events::BackgroundTaskResult;
-use peri_acp_types::tasks::{BgRegistryEvent, BgTaskKind, OnBgCompleteFn};
+use peri_acp_types::tasks::{BgRegistryEvent, BgTaskKind, OnBgCompleteFn, TaskRegistrationTicket};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -23,6 +23,7 @@ impl Drop for SettlementGuard<'_> {
 }
 
 pub(super) struct PendingTaskDelivery {
+    ticket: TaskRegistrationTicket,
     result: BackgroundTaskResult,
     kind: BgTaskKind,
     delivery: OnBgCompleteFn,
@@ -32,30 +33,36 @@ pub(super) struct PendingTaskDelivery {
 impl BackgroundTaskRegistry {
     pub fn settle_completed(
         self: &Arc<Self>,
-        task_id: &str,
+        ticket: &TaskRegistrationTicket,
         mut result: BackgroundTaskResult,
         delivery: OnBgCompleteFn,
     ) -> Result<bool, BackgroundRegistryError> {
         let _settlement = SettlementGuard::new(&self.settlements_in_flight);
+        self.validate_ticket(ticket)?;
+        if ticket.is_settled() {
+            return Ok(false);
+        }
+        let task_id = ticket.task_id();
         let kind = self.tasks.lock().get(task_id).map(|task| task.kind);
-        let commit_terminal = self.claim_completion(task_id);
+        let commit_terminal = self.claim_completion(ticket);
         let kind = if commit_terminal {
             kind.ok_or_else(|| BackgroundRegistryError::TaskNotFound(task_id.into()))?
-        } else if let Some(kind) = self.claim_cancelled_cleanup(task_id) {
+        } else if let Some(kind) = self.claim_cancelled_cleanup(ticket) {
             result.success = false;
             if kind == BgTaskKind::Shell {
                 result.output = "Shell command cancelled; read the output files as needed.".into();
             }
             kind
         } else {
-            return match self.projection_status(task_id).as_deref() {
-                Some("completed" | "failed" | "cancelled") => Ok(false),
-                Some(_) => Err(BackgroundRegistryError::TaskCompleting(task_id.into())),
-                None => Err(BackgroundRegistryError::TaskNotFound(task_id.into())),
+            return if ticket.is_settled() {
+                Ok(false)
+            } else {
+                Err(BackgroundRegistryError::TaskCompleting(task_id.into()))
             };
         };
         result.task_id = task_id.to_owned();
         let outcome = self.deliver_pending(PendingTaskDelivery {
+            ticket: ticket.clone(),
             result,
             kind,
             delivery,
@@ -119,11 +126,14 @@ impl BackgroundTaskRegistry {
             return Err(BackgroundRegistryError::DeliveryFailed { task_id, reason });
         }
         if pending.commit_terminal {
-            if !self.complete(&task_id, pending.result) {
+            if !self.complete(&pending.ticket, pending.result) {
                 return Err(BackgroundRegistryError::TaskNotFound(task_id));
             }
             Ok(true)
         } else {
+            self.mark_registration_settled(&pending.ticket);
+            self.retire_settled_projection(&pending.ticket);
+            self.notify_activity_change();
             Ok(false)
         }
     }

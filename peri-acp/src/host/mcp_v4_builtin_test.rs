@@ -519,8 +519,7 @@ async fn mcp_middleware_closure_removes_every_mcp_tool_from_first_model_request(
 ///    `dispatch_tools` 内结算为模型可见的 error 结果（`tool_dispatch.rs:146-151`），随
 ///    同批结果写入 transcript（`tool_dispatch.rs:220-225`）并触发收尾 Reason，turn 以
 ///    `ok == true` 正常收束、Reason 恰 3 次。请求级拒绝（整条响应作废、turn 冻结、不提交
-///    不续跑）的**唯一**来源是持久执行账本的 target binding 校验，已随账本在
-///    `spec/issues/2026-10-07-remove-execution-recovery-plan.md` §3-B 的剥离中删除；本用例
+///    不续跑）的**唯一**来源是持久执行账本的 target binding 校验，已随账本剥离删除；本用例
 ///    以「恰一条 `ToolEnd(WebSearch, error)`」锁死结算面，不把「整轮失败」当作关闭语义
 ///    （关闭是调用面真事实：该名既不可见、也不进审批/wire，而不是让用户 turn 死掉）。
 /// 4. TUI 侧「关闭后无卡片」**不构成独立证据**：TUI 对任意 `ToolStarted` 都建卡（含本条

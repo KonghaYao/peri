@@ -4,7 +4,7 @@
 
 SDK 主入口不启动或停止 Peri CLI、Workspace 进程，也不提供本地 SQLite 后端。可选的 `@peri-code/sdk/sandbox` server-side 子入口按宿主显式注入的 adapter 管理 sandbox 生命周期。宿主负责提供 transport、持久化 Store，并在路由层保证同一 Session 只落在一个实例上。
 
-下面示例是宿主中可直接照抄的装配顺序。
+下面的接入代码来自 [`peri-cf`](../peri-cf/server/compose.ts) 的真实装配，而不是抽象伪代码。
 
 ## 适合什么场景
 
@@ -187,7 +187,9 @@ await database.close(); // Manager 不关闭注入的 database
 
 `ChatUserAction.send()` 返回 `SendReceipt`（`accepted`、`inputId`）；`create_new_session` 与 `change_session` 返回 `SessionReadyResult`，包含 `chatId`、`sessionId`、`bindingRevision`。单条发送文本上限由 `CHAT_SEND_TEXT_MAX_LENGTH` 导出，调用方不要另写数字。
 
-传入普通 wire 对象时先经 `parseChatUserAction` 校验。Manager 不接收 `execute`；执行调度属于 Peri。路由层可用 `chat.binding` 与 `bindingRevision` 拒绝过期连接的动作。
+输入队列由服务端 generation 标识。SDK 会随 `user_input_queue_changed` 通知与队列回执同步 generation；若服务端在持久化不一致后重建 mailbox，`send` 的 `receipt.accepted` 直接抛出 `SessionQueueStaleError`（`requiresRuntimeRestart: true`），`force_send` / `take_back` 则以 `ChatActionError` 失败并在 `cause` 中携带该错误。当前运行实例会被标记为需要重载，后续动作以 `not_ready` 拒绝。SDK 不会自动重放用户输入；宿主应销毁并重建 runtime 后重新加载 Session。`Session.refreshInputQueue()` 可重新读取 generation，但不能修复已关闭的持久化 writer。
+
+传入普通 wire 对象时先经 `parseChatUserAction` 校验。Manager 不接收 `execute`；执行调度属于 Peri。`peri-cf` 的 HTTP 层还会用 `chat.binding` 与 `bindingRevision` 拒绝过期连接的动作。
 
 ## 展示与同步
 
@@ -629,6 +631,10 @@ next = Button("展开阻塞项", @ToAssistant("展开阻塞项并给出处理建
 
 ## 示例
 
+- [Chat 架构设计](../../docs/design/peri-sdk-chat.md)
+- [Ownership 模型](OWNERSHIP-MODEL.md)
+- [代码索引](../../docs/code-index/peri-ts-sdk.md)
+- [peri-cf 服务端装配](../peri-cf/server/compose.ts)
 - [demo.ts](https://github.com/KonghaYao/peri/blob/main/npm-packages/@peri-sdk/examples/demo/demo.ts) 使用 `runtime.kind="wasm"`。
 - [demo-wasm.ts](https://github.com/KonghaYao/peri/blob/main/npm-packages/@peri-sdk/examples/demo/demo-wasm.ts) 使用 `runtime.kind="transport"` 注入 `WasmAcpTransport`。
 

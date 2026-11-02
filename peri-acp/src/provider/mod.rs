@@ -22,7 +22,6 @@ pub use store::{
 };
 use url::Url;
 
-const MIN_ANTHROPIC_THINKING_BUDGET: u32 = 1_024;
 const DEFAULT_ANTHROPIC_THINKING_BUDGET: u32 = 10_000;
 
 #[derive(Clone)]
@@ -328,10 +327,8 @@ impl LlmProvider {
                 };
                 let output_max_tokens = max_tokens;
                 let mut config = AnthropicConfig::new(endpoint, api_key, model);
-                if let Some(e) = effort
-                    .as_ref()
-                    .filter(|_| output_max_tokens > MIN_ANTHROPIC_THINKING_BUDGET)
-                {
+                // 模式与预算有效性由 Anthropic adapter 决定；adaptive 不受手动预算门限限制。
+                if let Some(e) = &effort {
                     let thinking_budget =
                         DEFAULT_ANTHROPIC_THINKING_BUDGET.min(output_max_tokens.saturating_sub(1));
                     config = config.with_extended_thinking(thinking_budget, e);

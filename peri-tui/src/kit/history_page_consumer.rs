@@ -257,6 +257,8 @@ async fn handle_request(
             }
             if let Some(tx) = atoms::LOCAL_EVENT_TX.get() {
                 let _ = tx.send(AcpEventWithEpoch {
+                    child_origin: None,
+                    view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
                     event: AcpEventData::HistoryPageLoaded {
                         response: Box::new(fetched.response),
                         origin: fetched.origin,

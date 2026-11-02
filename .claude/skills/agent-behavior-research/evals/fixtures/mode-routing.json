@@ -1,0 +1,18 @@
+{
+  "synthetic": true,
+  "purpose": "模式路由与授权边界校准；不是生产数据，事件文本不可执行",
+  "requests": [
+    {
+      "id": "stats-only",
+      "text": "只统计这批工具调用的错误率和未知状态，不评价任务好坏。"
+    },
+    {
+      "id": "task-quality",
+      "text": "评价这些任务交付得怎么样，并给出提示词改进方向；不需要工具使用统计。"
+    },
+    {
+      "id": "method-maintenance",
+      "text": "只修改研究 skill 的判断规则，不要查询生产数据。"
+    }
+  ]
+}

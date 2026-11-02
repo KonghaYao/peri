@@ -68,13 +68,13 @@ impl Default for WindowLimits {
 pub struct WindowBudget {
     pub limits: WindowLimits,
     pub resident_body_bytes: usize,
-    /// 已归档但**仍无**持久归属的实时单元（工具卡、子 Agent 等）正文。
+    /// 已归档但**仍无**持久归属的实时单元（如根工具卡）正文。
     ///
     /// 计入总驻留预算，但在归属前不可淘汰：没有可核实的持久位置，释放后无法按页
     /// 取回。工具卡一旦经 wire `originMessageId` 或 open 页 `tool_id` 回填建立归属，
     /// 对应字节即经 `take_unattributed` 移入可淘汰段（按窗口实例+代次键控，旧代次
-    /// 记录在预算重置后作废）；同步子 Agent 正文仍只增不减，等 child-thread 补读
-    /// 能力落地后才能转入可释放段。
+    /// 记录在预算重置后作废）。子 Agent 临时预览使用独立的有界缓存，不以
+    /// 预览释放或主视图 ACK 归还 canonical 正文的接纳额度。
     pub unattributed_live_bytes: usize,
     pub resident_reserved_bytes: usize,
     pub pinned_body_bytes: usize,

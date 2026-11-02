@@ -191,6 +191,7 @@ fn immutable_render_snapshot_allows_publication_before_derivation() {
     let context = context();
     push_view_models_for_reset();
     let mut bridge = BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: snapshot(64).items,
         current_turn: crate::kit::acp_types::CurrentTurn::new(),
@@ -203,7 +204,7 @@ fn immutable_render_snapshot_allows_publication_before_derivation() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: Default::default(),
         turn_generation: 0,
@@ -389,6 +390,7 @@ fn bridge_publication_after_local_fold_updates_resident_and_appended_entries() {
     };
     bubble.recompute_hash();
     let mut bridge = BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::from(vec![TuiRenderUnit::TuiAssistantBubble(Arc::new(bubble))]),
         current_turn: CurrentTurn::new(),
@@ -401,7 +403,7 @@ fn bridge_publication_after_local_fold_updates_resident_and_appended_entries() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: Default::default(),
         turn_generation: 0,

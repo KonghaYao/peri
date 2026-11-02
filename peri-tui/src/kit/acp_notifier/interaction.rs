@@ -28,6 +28,8 @@ pub(super) async fn handle_elicitation(
         payload: ask_user,
     });
     let wrapped = AcpEventWithEpoch {
+        child_origin: None,
+        view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
         event,
         active_session_id: session_id,
     };
@@ -83,6 +85,8 @@ pub(super) async fn handle_request_permission(
         payload: hp,
     });
     let wrapped = AcpEventWithEpoch {
+        child_origin: None,
+        view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
         event,
         active_session_id: session_id,
     };

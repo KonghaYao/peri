@@ -1,6 +1,6 @@
 # TUI 规则
 
-任务入口为 `peri-tui/CLAUDE.md`；本文件只保留稳定实现约束。
+任务入口为 `docs/code-index/peri-tui.md`；本文件只保留稳定实现约束。
 
 ### TUI-HOOK-001
 

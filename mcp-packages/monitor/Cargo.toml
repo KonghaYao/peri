@@ -1,0 +1,28 @@
+[package]
+name = "peri-mcp-monitor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Builtin monitor MCP instance for command output events"
+license = "Apache-2.0"
+
+[dependencies]
+async-trait.workspace = true
+parking_lot.workspace = true
+peri-acp-types = { path = "../../peri-acp-types" }
+peri-agent = { path = "../../peri-agent" }
+peri-mcp-common = { path = "../common" }
+peri-process = { path = "../../peri-process" }
+peri-time = { path = "../../peri-time" }
+regex = "1"
+rmcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["process"] }
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+rmcp = { workspace = true, features = ["client"] }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use peri_acp_types::tasks::{
     BgRegistryEvent, BgShellHandle, BgTaskKind, BgTaskRegistration, ExternalTaskRegistration,
-    TaskChange, TaskSnapshot,
+    TaskChange, TaskRegistrationTicket, TaskSnapshot,
 };
 use sha2::{Digest, Sha256};
 
@@ -33,7 +33,7 @@ pub struct TaskManager {
     >,
 }
 
-fn external_task_id(request: &ExternalTaskRegistration) -> String {
+fn external_source_identity(request: &ExternalTaskRegistration) -> String {
     let mut hasher = Sha256::new();
     for part in [
         &request.session_id,
@@ -94,12 +94,12 @@ fn external_background_task(
 
 struct ExternalCompletionClaim<'manager> {
     registry: &'manager BackgroundTaskRegistry,
-    task_id: &'manager str,
+    ticket: &'manager TaskRegistrationTicket,
 }
 
 impl Drop for ExternalCompletionClaim<'_> {
     fn drop(&mut self) {
-        self.registry.reset_completion_claim(self.task_id);
+        self.registry.reset_completion_claim(self.ticket);
     }
 }
 
@@ -136,18 +136,20 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
             Ok(())
         })
     }
-    fn restore_external_terminal(
+    fn register_external_terminal(
         &self,
         request: ExternalTaskRegistration,
-        terminal_transition_id: &str,
-        result: BackgroundTaskResult,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + '_>>
-    {
-        let terminal_transition_id = terminal_transition_id.to_owned();
-        Box::pin(async move {
-            self.restore_external_terminal(request, &terminal_transition_id, result)
-                .await
-        })
+    ) -> Result<TaskRegistrationTicket, String> {
+        self.register_external_terminal(request)
+            .map_err(|error| error.to_string())
+    }
+    fn refresh_external(
+        &self,
+        ticket: &TaskRegistrationTicket,
+        request: ExternalTaskRegistration,
+    ) -> Result<(), String> {
+        self.refresh_external(ticket, request)
+            .map_err(|error| error.to_string())
     }
     fn external_task_ids(&self) -> Vec<String> {
         self.registry.external_task_ids()
@@ -169,35 +171,38 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
         self.registry.subscribe_events()
     }
 
-    fn register_external(&self, request: ExternalTaskRegistration) -> Result<String, String> {
+    fn register_external(
+        &self,
+        request: ExternalTaskRegistration,
+    ) -> Result<TaskRegistrationTicket, String> {
         self.register_external(request)
             .map_err(|error| error.to_string())
     }
 
     fn settle_external(
         &self,
-        task_id: &str,
+        ticket: &TaskRegistrationTicket,
         terminal_transition_id: &str,
         result: BackgroundTaskResult,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, String>> + Send + '_>>
     {
-        let task_id = task_id.to_owned();
+        let ticket = ticket.clone();
         let terminal_transition_id = terminal_transition_id.to_owned();
         Box::pin(async move {
-            self.settle_external(&task_id, &terminal_transition_id, result)
+            self.settle_external(&ticket, &terminal_transition_id, result)
                 .await
         })
     }
 
     fn abandon_external(
         &self,
-        task_id: &str,
+        ticket: &TaskRegistrationTicket,
         reason: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, String>> + Send + '_>>
     {
-        let task_id = task_id.to_owned();
+        let ticket = ticket.clone();
         let reason = reason.to_owned();
-        Box::pin(async move { self.abandon_external(&task_id, &reason).await })
+        Box::pin(async move { self.abandon_external(&ticket, &reason).await })
     }
 
     fn cancel_async(
@@ -211,8 +216,8 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
                 .map_err(|error| error.to_string())
         })
     }
-    fn confirm_external_execution_stopped(&self, task_id: &str) {
-        self.registry.confirm_external_stopped(task_id);
+    fn confirm_external_execution_stopped(&self, ticket: &TaskRegistrationTicket) {
+        self.registry.confirm_external_stopped(ticket);
     }
     fn is_execution_idle(&self) -> bool {
         self.registry.scope.is_idle() && self.registry.external_settled()
@@ -233,7 +238,7 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
         self.active_count()
     }
 
-    fn register(&self, request: BgTaskRegistration) -> Result<(), String> {
+    fn register(&self, request: BgTaskRegistration) -> Result<TaskRegistrationTicket, String> {
         let cancel_handle = match request.kind {
             BgTaskKind::Shell => match request.kill {
                 Some(kill) => BgCancelHandle::Kill(Some(kill)),
@@ -282,17 +287,17 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
         self.register_with_kind(task).map_err(|e| e.to_string())
     }
 
-    fn complete(&self, task_id: &str, result: BackgroundTaskResult) -> bool {
-        self.complete(task_id, result)
+    fn complete(&self, ticket: &TaskRegistrationTicket, result: BackgroundTaskResult) -> bool {
+        self.complete(ticket, result)
     }
 
     fn settle_completed(
         &self,
-        task_id: &str,
+        ticket: &TaskRegistrationTicket,
         result: BackgroundTaskResult,
         delivery: peri_acp_types::tasks::OnBgCompleteFn,
     ) -> Result<bool, String> {
-        self.settle_completed(task_id, result, delivery)
+        self.settle_completed(ticket, result, delivery)
             .map_err(|error| error.to_string())
     }
 
@@ -364,7 +369,7 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
     fn finalize_bg_shell(
         &self,
         on_bg_complete: &Option<peri_acp_types::tasks::OnBgCompleteFn>,
-        task_id: String,
+        ticket: TaskRegistrationTicket,
         prompt_summary: String,
         success: bool,
         output: String,
@@ -375,7 +380,7 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
         finalize_bg_shell(
             &self.registry,
             on_bg_complete,
-            task_id,
+            ticket,
             prompt_summary,
             success,
             output,
@@ -419,6 +424,10 @@ impl TaskManager {
 
     pub fn has_pending_deliveries(&self) -> bool {
         self.registry.has_pending_deliveries()
+    }
+
+    pub fn has_unsettled_tasks(&self) -> bool {
+        self.active_count() > 0 || !self.registry.external_settled()
     }
 
     pub(crate) fn register_child_owner(
@@ -471,89 +480,90 @@ impl TaskManager {
     pub fn register_external(
         &self,
         request: ExternalTaskRegistration,
-    ) -> Result<String, BackgroundRegistryError> {
-        let _registration = self.external_registration.lock();
-        let task_id = external_task_id(&request);
-        let refresh_callbacks = self
-            .registry
-            .external_callback_refresh_allowed(&task_id, request.initiator_session_id.as_deref())?;
-        let started_at = external_started_at(&request)?;
-        let cancel = Arc::clone(&request.cancel);
-        let on_terminal = Arc::clone(&request.on_terminal);
-        let task = external_background_task(&request, task_id.clone(), started_at);
-        match self.registry.register_with_kind(task) {
-            Ok(()) => {}
-            Err(BackgroundRegistryError::DuplicateTask(_)) => {
-                if refresh_callbacks {
-                    self.registry.refresh_external_callbacks(
-                        &task_id,
-                        cancel,
-                        on_terminal,
-                        request.initiator_session_id.clone(),
-                    );
-                }
-            }
-            Err(error) => return Err(error),
-        }
-        Ok(task_id)
+    ) -> Result<TaskRegistrationTicket, BackgroundRegistryError> {
+        self.register_external_source(request, false)
     }
 
-    pub async fn restore_external_terminal(
+    pub fn register_external_terminal(
         &self,
         request: ExternalTaskRegistration,
-        terminal_transition_id: &str,
-        result: BackgroundTaskResult,
-    ) -> Result<String, String> {
-        if terminal_transition_id.is_empty() {
-            return Err("terminal transition ID is required".into());
+    ) -> Result<TaskRegistrationTicket, BackgroundRegistryError> {
+        self.register_external_source(request, true)
+    }
+
+    fn register_external_source(
+        &self,
+        request: ExternalTaskRegistration,
+        terminal: bool,
+    ) -> Result<TaskRegistrationTicket, BackgroundRegistryError> {
+        let _registration = self.external_registration.lock();
+        let started_at = external_started_at(&request)?;
+        // A new source admission has a fresh public identity. Callback refresh
+        // and terminal replay must retain its ticket, never reconstruct by ID.
+        let task_id = format!("mcp-{}", uuid::Uuid::now_v7());
+        self.registry.register_external_task(
+            external_background_task(&request, task_id, started_at),
+            external_source_identity(&request),
+            terminal,
+        )
+    }
+
+    pub fn refresh_external(
+        &self,
+        ticket: &TaskRegistrationTicket,
+        request: ExternalTaskRegistration,
+    ) -> Result<(), BackgroundRegistryError> {
+        let _registration = self.external_registration.lock();
+        self.registry.validate_ticket(ticket)?;
+        if ticket.source_identity() != Some(external_source_identity(&request).as_str()) {
+            return Err(BackgroundRegistryError::ExternalIdentityConflict(
+                ticket.task_id().into(),
+            ));
         }
-        let task_id = external_task_id(&request);
-        let started_at = external_started_at(&request).map_err(|error| error.to_string())?;
-        // Registration lock only guards registry mutation; the delivery await
-        // must not run under a non-Send parking_lot guard.
-        {
-            let _registration = self.external_registration.lock();
-            let refresh_callbacks = self
-                .registry
-                .external_callback_refresh_allowed(
-                    &task_id,
-                    request.initiator_session_id.as_deref(),
-                )
-                .map_err(|error| error.to_string())?;
-            match self.registry.projection_status(&task_id) {
-                Some(status)
-                    if matches!(status.as_str(), "running" | "lost" | "pending_delivery") =>
-                {
-                    if refresh_callbacks {
-                        self.registry.refresh_external_callbacks(
-                            &task_id,
-                            Arc::clone(&request.cancel),
-                            Arc::clone(&request.on_terminal),
-                            request.initiator_session_id.clone(),
-                        );
-                    }
-                }
-                Some(_) => return Ok(task_id),
-                None => {
-                    self.registry
-                        .register_restored_external(external_background_task(
-                            &request,
-                            task_id.clone(),
-                            started_at,
-                        ))
-                        .map_err(|error| error.to_string())?;
-                }
+        let recorded = ticket.initiator_session_id();
+        if let (Some(recorded), Some(requested)) = (&recorded, &request.initiator_session_id) {
+            if recorded != requested {
+                return Err(BackgroundRegistryError::ExternalInitiatorConflict {
+                    task_id: ticket.task_id().into(),
+                    recorded: recorded.clone(),
+                    requested: requested.clone(),
+                });
             }
         }
-        self.settle_external(&task_id, terminal_transition_id, result)
-            .await?;
-        Ok(task_id)
+        external_started_at(&request)?;
+        if ticket.is_settled() || (recorded.is_some() && request.initiator_session_id.is_none()) {
+            return Ok(());
+        }
+        let refresh = self.registry.external_callback_refresh_allowed(
+            ticket.task_id(),
+            request.initiator_session_id.as_deref(),
+        )?;
+        if refresh {
+            self.registry.refresh_external_callbacks(
+                ticket.task_id(),
+                request.cancel,
+                request.on_terminal,
+                request.initiator_session_id,
+            );
+        }
+        Ok(())
     }
 
     /// Bounded give-up for a task whose owner stayed unobservable: one final,
     /// explicitly marked reminder plus a terminal projection, so the task can
     /// neither stay active forever nor disappear silently.
-    pub async fn abandon_external(&self, task_id: &str, reason: &str) -> Result<bool, String> {
+    pub async fn abandon_external(
+        &self,
+        ticket: &TaskRegistrationTicket,
+        reason: &str,
+    ) -> Result<bool, String> {
+        self.registry
+            .validate_ticket(ticket)
+            .map_err(|error| error.to_string())?;
+        if ticket.is_settled() {
+            return Ok(false);
+        }
+        let task_id = ticket.task_id();
         let notify = {
             let _registration = self.external_registration.lock();
             let Some(notify) = self.registry.external_notify(task_id) else {
@@ -564,14 +574,14 @@ impl TaskManager {
             self.registry
                 .ensure_external_routable(task_id)
                 .map_err(|error| error.to_string())?;
-            if !self.registry.claim_completion(task_id) {
+            if !self.registry.claim_completion(ticket) {
                 return Ok(false);
             }
             notify
         };
         let _claim = ExternalCompletionClaim {
             registry: &self.registry,
-            task_id,
+            ticket,
         };
         tracing::warn!(task_id, reason, "abandoning unobservable external task");
         let mut result = BackgroundTaskResult {
@@ -594,7 +604,7 @@ impl TaskManager {
         // Stable delivery ID: retries of the give-up converge on one reminder.
         let delivery_id = external_delivery_id(task_id, "abandoned-unresolved");
         notify(&result, delivery_id).await?;
-        if self.registry.complete(task_id, result) {
+        if self.registry.complete(ticket, result) {
             Ok(true)
         } else {
             Err(format!(
@@ -605,19 +615,18 @@ impl TaskManager {
 
     pub async fn settle_external(
         &self,
-        task_id: &str,
+        ticket: &TaskRegistrationTicket,
         terminal_transition_id: &str,
         mut result: BackgroundTaskResult,
     ) -> Result<bool, String> {
         if terminal_transition_id.is_empty() {
             return Err("terminal transition ID is required".into());
         }
-        let already_settled = || {
-            matches!(
-                self.registry.projection_status(task_id).as_deref(),
-                Some("completed" | "failed" | "cancelled")
-            )
-        };
+        self.registry
+            .validate_ticket(ticket)
+            .map_err(|error| error.to_string())?;
+        let task_id = ticket.task_id();
+        let already_settled = || ticket.is_settled();
         let notify = {
             let _registration = self.external_registration.lock();
             let Some(notify) = self.registry.external_notify(task_id) else {
@@ -632,7 +641,7 @@ impl TaskManager {
             self.registry
                 .ensure_external_routable(task_id)
                 .map_err(|error| error.to_string())?;
-            if !self.registry.claim_completion(task_id) {
+            if !self.registry.claim_completion(ticket) {
                 return if already_settled() {
                     Ok(false)
                 } else {
@@ -645,12 +654,12 @@ impl TaskManager {
         };
         let _claim = ExternalCompletionClaim {
             registry: &self.registry,
-            task_id,
+            ticket,
         };
         result.task_id = task_id.to_owned();
         let delivery_id = external_delivery_id(task_id, terminal_transition_id);
         notify(&result, delivery_id).await?;
-        if self.registry.complete(task_id, result) {
+        if self.registry.complete(ticket, result) {
             Ok(true)
         } else {
             Err(format!(
@@ -726,8 +735,32 @@ impl TaskManager {
         self.registry.count_by_kind(kind)
     }
 
-    pub fn register_with_kind(&self, task: BackgroundTask) -> Result<(), BackgroundRegistryError> {
+    pub fn register_with_kind(
+        &self,
+        task: BackgroundTask,
+    ) -> Result<TaskRegistrationTicket, BackgroundRegistryError> {
         self.registry.register_with_kind(task)
+    }
+
+    pub(crate) fn register_pending_start(
+        &self,
+        task: BackgroundTask,
+    ) -> Result<TaskRegistrationTicket, BackgroundRegistryError> {
+        self.registry.register_pending_start(task)
+    }
+
+    pub(crate) fn mark_execution_started(
+        &self,
+        ticket: &TaskRegistrationTicket,
+    ) -> Result<(), BackgroundRegistryError> {
+        self.registry.mark_execution_started(ticket)
+    }
+
+    pub(crate) fn withdraw_unstarted_registration(
+        &self,
+        ticket: &TaskRegistrationTicket,
+    ) -> Result<bool, BackgroundRegistryError> {
+        self.registry.withdraw_unstarted_registration(ticket)
     }
 
     /// Send Defer to a live child in this session. `None` means no registered
@@ -740,17 +773,17 @@ impl TaskManager {
         self.registry.send_subagent_message(thread_id, prompt)
     }
 
-    pub fn complete(&self, task_id: &str, result: BackgroundTaskResult) -> bool {
-        self.registry.complete(task_id, result)
+    pub fn complete(&self, ticket: &TaskRegistrationTicket, result: BackgroundTaskResult) -> bool {
+        self.registry.complete(ticket, result)
     }
 
     pub fn settle_completed(
         &self,
-        task_id: &str,
+        ticket: &TaskRegistrationTicket,
         result: BackgroundTaskResult,
         delivery: peri_acp_types::tasks::OnBgCompleteFn,
     ) -> Result<bool, BackgroundRegistryError> {
-        self.registry.settle_completed(task_id, result, delivery)
+        self.registry.settle_completed(ticket, result, delivery)
     }
 
     pub fn retry_pending_deliveries(&self) -> usize {

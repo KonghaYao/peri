@@ -79,7 +79,7 @@ pub fn json_value_bytes(value: &serde_json::Value) -> BodyReserved {
         Value::Array(items) => {
             let mut bytes = BodyReserved {
                 body: 2 + items.len(),
-                reserved: 2 + items.len(),
+                reserved: items.capacity() * std::mem::size_of::<Value>(),
             };
             for item in items {
                 bytes += json_value_bytes(item);
@@ -89,12 +89,13 @@ pub fn json_value_bytes(value: &serde_json::Value) -> BodyReserved {
         Value::Object(map) => {
             let mut bytes = BodyReserved {
                 body: 2 + map.len(),
-                reserved: 2 + map.len(),
+                // Conservative BTreeMap node/entry charge in addition to owned strings.
+                reserved: map.len() * (128 + std::mem::size_of::<Value>()),
             };
             for (key, item) in map {
                 let item = json_value_bytes(item);
                 bytes.body += key.len() + 4 + item.body;
-                bytes.reserved += key.len() + 4 + item.reserved;
+                bytes.reserved += key.capacity() + item.reserved;
             }
             bytes
         }
@@ -107,6 +108,10 @@ pub fn presentation_bytes(presentation: &TuiToolPresentation) -> BodyReserved {
         TuiToolPresentation::Skill(skill) => string_body_reserved(&skill.name),
         TuiToolPresentation::Todo(todo) => {
             let mut bytes = BodyReserved::default();
+            bytes.reserved += todo.current_items.capacity()
+                * std::mem::size_of::<crate::kit::tui_render_unit::TuiTodoItem>()
+                + todo.changes.capacity()
+                    * std::mem::size_of::<crate::kit::tui_render_unit::TuiTodoChange>();
             for item in &todo.current_items {
                 bytes += string_body_reserved(&item.content);
                 bytes += option_string_body_reserved(&item.active_form);
@@ -238,6 +243,7 @@ pub fn retained_tool_bytes(card: &TuiToolCard) -> usize {
         + card.tool_name.capacity()
         + card.input_summary.capacity()
         + card.output_summary.capacity()
+        + presentation_bytes(&card.presentation).reserved
         + card.diff.as_ref().map_or(0, |diff| {
             std::mem::size_of_val(diff)
                 + diff.path.capacity()
@@ -249,6 +255,11 @@ pub fn retained_tool_bytes(card: &TuiToolCard) -> usize {
                         hunk.old_range.capacity()
                             + hunk.new_range.capacity()
                             + retained_vec_bytes(&hunk.lines)
+                            + hunk
+                                .lines
+                                .iter()
+                                .map(|line| line.text.capacity())
+                                .sum::<usize>()
                     })
                     .sum::<usize>()
         })
@@ -264,10 +275,18 @@ pub fn retained_reminder_bytes(reminder: &TuiSystemReminder) -> usize {
         + reminder.body.capacity()
         + reminder.category.capacity()
         + reminder.source.capacity()
-        + reminder
-            .relay
-            .as_ref()
-            .map_or(0, |relay| relay.agent_id.capacity())
+        + reminder.relay.as_ref().map_or(0, |relay| {
+            relay.agent_id.capacity() + relay.agent_name.as_ref().map_or(0, String::capacity)
+        })
+        + reminder.wire.as_ref().map_or(0, |wire| {
+            wire.source.0.capacity()
+                + wire.kind.capacity()
+                + wire.body.capacity()
+                + wire.summary.as_ref().map_or(0, String::capacity)
+                + wire.audiences.0.capacity()
+                    * std::mem::size_of::<peri_acp_types::system_reminder::ReminderAudience>()
+                + json_value_bytes(&wire.metadata).reserved
+        })
 }
 
 pub fn retained_divider_bytes(divider: &TuiDivider) -> usize {

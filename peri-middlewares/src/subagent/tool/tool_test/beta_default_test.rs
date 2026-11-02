@@ -1,8 +1,8 @@
-//! beta flag `full-async-tools` 的 `Agent` 工具契约：有效缺省后台。
+//! beta flag `full-async-tools` 的 `Agent` 工具契约：强制后台。
 //!
-//! 装配期注入的有效缺省只改「调用未给出 `run_in_background`」时的路径：
-//! 显式 `false` 仍走前台；resume 与 MCP Agent 等「后台能力未装配」场景维持既有语义；
-//! schema 的 `default` 与执行路径缺省同源（同一字段）。
+//! 装配期注入的布尔在 flag 开启时表示强制后台：省略 `run_in_background` 与显式
+//! `false` 都走后台；resume 的非 active 恢复同样强制后台；MCP Agent 仍只支持
+//! 同步激活（审批门例外）。flag 关闭时只消费显式意图，与引入前逐位一致。
 
 use std::sync::Arc;
 
@@ -66,8 +66,8 @@ async fn default_background_omitted_field_starts_background_subagent() {
         params["properties"]["run_in_background"]["description"]
             .as_str()
             .unwrap_or_default()
-            .contains("the default is true"),
-        "描述必须说明该会话缺省为后台"
+            .contains("Background execution is mandatory"),
+        "描述必须说明本会话强制后台"
     );
 
     let result = tool
@@ -88,9 +88,9 @@ async fn default_background_omitted_field_starts_background_subagent() {
     peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref()).await;
 }
 
-/// 有效缺省 = true：显式 `false` 仍走前台（flag 只改缺省）。
+/// 强制后台：显式 `false` 也被忽略，仍走后台。
 #[tokio::test]
-async fn default_background_explicit_false_stays_synchronous() {
+async fn default_background_explicit_false_still_starts_background() {
     let (dir, host, manager) = setup_background_host("beta-bg-explicit-false").await;
     let tool = bind_tool(&host, dir.path(), true).await;
 
@@ -105,16 +105,16 @@ async fn default_background_explicit_false_stays_synchronous() {
             host.context(&[]),
         )
         .await
-        .expect("显式 false 必须走同步路径");
+        .expect("强制模式下显式 false 必须走后台路径");
     assert!(
-        !result.contains("Background task"),
-        "显式 false 不得走后台：{result}"
+        result.contains("Background task"),
+        "显式 false 不得落回同步：{result}"
     );
     assert!(
-        result.contains("echo: sync"),
-        "同步路径必须拿到子代理输出：{result}"
+        !result.contains("echo: sync"),
+        "显式 false 不得执行同步路径：{result}"
     );
-    assert_eq!(manager.active_count(), 0, "同步路径不得登记后台任务");
+    peri_acp_types::tasks::TaskManager::shutdown(manager.as_ref()).await;
 }
 
 /// 未注入缺省（flag 未开启）：schema `default: false`，省略字段仍走前台。

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use peri_acp_types::tasks::{
     BgRegistryEvent, BgTaskKind, ExternalCancelFn, ExternalNotifyFn, TaskChange, TaskRecord,
-    TaskSnapshot,
+    TaskRegistrationTicket, TaskSnapshot,
 };
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
@@ -13,12 +13,20 @@ use crate::agent::events::BackgroundTaskResult;
 
 use super::agent_inbox::{BackgroundAgentInbox, QueuedSubagentMessage, SubagentMessageError};
 
+#[path = "projection.rs"]
+mod projection;
+#[path = "registration.rs"]
+mod registration;
 #[path = "settlement.rs"]
 mod settlement;
+use projection::TaskProjection;
+use registration::RegistrationReceipt;
+#[path = "cancel.rs"]
+mod cancel;
 
-/// bg agent 取消的优雅退出窗口（秒）：cancel() 先 `token.cancel()` 让任务响应
-/// 取消链走完整收尾；超过该窗口任务仍未结束才 abort 兜底。
-const CANCEL_GRACE_SECS: u64 = 3;
+#[cfg(test)]
+#[path = "projection_retention_test.rs"]
+mod projection_retention_tests;
 
 /// 后台任务注册表错误（结构化，取代 String 错误）
 ///
@@ -38,6 +46,12 @@ pub enum BackgroundRegistryError {
     KillUnavailable(String),
     #[error("Task {0} already exists")]
     DuplicateTask(String),
+    #[error("Task {0} registration ticket does not belong to this execution")]
+    InvalidRegistration(String),
+    #[error("Task {0} has already started execution")]
+    TaskAlreadyStarted(String),
+    #[error("External task {0} source identity cannot change")]
+    ExternalIdentityConflict(String),
     #[error("Task {task_id} completion delivery failed: {reason}")]
     DeliveryFailed { task_id: String, reason: String },
     #[error("Task {0} requires asynchronous cancellation")]
@@ -154,6 +168,8 @@ pub struct BgTaskInfo {
 /// 后台任务注册中心
 pub struct BackgroundTaskRegistry {
     tasks: parking_lot::Mutex<HashMap<String, BackgroundTask>>,
+    registration_owner: uuid::Uuid,
+    registrations: parking_lot::Mutex<HashMap<String, Arc<RegistrationReceipt>>>,
     projection: parking_lot::Mutex<TaskProjection>,
     changes: tokio::sync::broadcast::Sender<TaskChange>,
     /// Derived wake signal for consumers waiting on task lifecycle changes.
@@ -172,13 +188,8 @@ pub struct BackgroundTaskRegistry {
 
 enum TaskRegistration {
     Created,
+    PendingStart,
     TerminalRecovery,
-}
-
-#[derive(Default)]
-struct TaskProjection {
-    revision: u64,
-    records: HashMap<String, TaskRecord>,
 }
 
 impl Default for BackgroundTaskRegistry {
@@ -211,6 +222,8 @@ impl BackgroundTaskRegistry {
         let (changes, _) = tokio::sync::broadcast::channel(256);
         Self {
             tasks: parking_lot::Mutex::new(HashMap::new()),
+            registration_owner: uuid::Uuid::now_v7(),
+            registrations: parking_lot::Mutex::new(HashMap::new()),
             projection: parking_lot::Mutex::new(TaskProjection::default()),
             changes,
             activity_version,
@@ -243,14 +256,6 @@ impl BackgroundTaskRegistry {
                 .then_with(|| a.task_id.cmp(&b.task_id))
         });
         TaskSnapshot { revision, tasks }
-    }
-
-    pub(super) fn projection_status(&self, task_id: &str) -> Option<String> {
-        self.projection
-            .lock()
-            .records
-            .get(task_id)
-            .map(|record| record.status.clone())
     }
 
     pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<TaskChange> {
@@ -295,8 +300,12 @@ impl BackgroundTaskRegistry {
     /// The claim is linearized with cancellation while holding the task lock,
     /// but no callback is run under that lock. A claimed task remains active
     /// until [`Self::complete`] settles and removes it.
-    pub(super) fn claim_completion(&self, task_id: &str) -> bool {
+    pub(super) fn claim_completion(&self, ticket: &TaskRegistrationTicket) -> bool {
         let mut tasks = self.tasks.lock();
+        if self.validate_ticket(ticket).is_err() || ticket.is_settled() {
+            return false;
+        }
+        let task_id = ticket.task_id();
         let Some(task) = tasks.get_mut(task_id) else {
             return false;
         };
@@ -307,8 +316,12 @@ impl BackgroundTaskRegistry {
         true
     }
 
-    pub(super) fn reset_completion_claim(&self, task_id: &str) {
-        if let Some(task) = self.tasks.lock().get_mut(task_id) {
+    pub(super) fn reset_completion_claim(&self, ticket: &TaskRegistrationTicket) {
+        let mut tasks = self.tasks.lock();
+        if self.validate_ticket(ticket).is_err() || ticket.is_settled() {
+            return;
+        }
+        if let Some(task) = tasks.get_mut(ticket.task_id()) {
             if matches!(task.status, BackgroundTaskStatus::Completing) {
                 task.status = BackgroundTaskStatus::Running;
             }
@@ -389,6 +402,9 @@ impl BackgroundTaskRegistry {
                 };
                 if task.initiator_session_id.is_none() && initiator_session_id.is_some() {
                     task.initiator_session_id = initiator_session_id.clone();
+                    if let Some(receipt) = self.registrations.lock().get(task_id) {
+                        *receipt.initiator_session_id.write() = initiator_session_id.clone();
+                    }
                     let mut projection = self.projection.lock();
                     if let Some(record) = projection.records.get_mut(task_id) {
                         record.initiator_session_id = initiator_session_id;
@@ -406,8 +422,17 @@ impl BackgroundTaskRegistry {
         }
     }
 
-    pub(super) fn claim_cancelled_cleanup(&self, task_id: &str) -> Option<BgTaskKind> {
-        self.cancelled_tasks_waiting_cleanup.lock().remove(task_id)
+    pub(super) fn claim_cancelled_cleanup(
+        &self,
+        ticket: &TaskRegistrationTicket,
+    ) -> Option<BgTaskKind> {
+        let _tasks = self.tasks.lock();
+        if self.validate_ticket(ticket).is_err() || ticket.is_settled() {
+            return None;
+        }
+        self.cancelled_tasks_waiting_cleanup
+            .lock()
+            .remove(ticket.task_id())
     }
 
     pub(super) fn has_pending_delivery(&self, task_id: &str) -> bool {
@@ -435,6 +460,17 @@ impl BackgroundTaskRegistry {
                 owner_identity: task.owner_identity.clone(),
             })
             .collect();
+        drop(pending_deliveries);
+        for (task_id, receipt) in self.registrations.lock().iter() {
+            if !tasks.contains_key(task_id) {
+                pending.push(super::handoff::PendingHandoffTask {
+                    task_id: task_id.clone(),
+                    kind: receipt.kind,
+                    owner_session_id: receipt.owner_session_id.clone(),
+                    owner_identity: receipt.owner_identity.clone(),
+                });
+            }
+        }
         pending.sort_by(|a, b| a.task_id.cmp(&b.task_id));
         pending
     }
@@ -522,7 +558,10 @@ impl BackgroundTaskRegistry {
     }
 
     /// 按类型注册新任务（Shell / Workflow 有独立上限；Agent 不限额）
-    pub fn register_with_kind(&self, task: BackgroundTask) -> Result<(), BackgroundRegistryError> {
+    pub fn register_with_kind(
+        &self,
+        task: BackgroundTask,
+    ) -> Result<TaskRegistrationTicket, BackgroundRegistryError> {
         let _admission = self
             .scope
             .admit()
@@ -530,20 +569,50 @@ impl BackgroundTaskRegistry {
         self.register_external_admitted(task)
     }
 
+    pub(super) fn register_pending_start(
+        &self,
+        task: BackgroundTask,
+    ) -> Result<TaskRegistrationTicket, BackgroundRegistryError> {
+        let _admission = self
+            .scope
+            .admit()
+            .map_err(|_| BackgroundRegistryError::Closing)?;
+        let limit = Self::kind_limit(task.kind);
+        self.register_task(task, limit, TaskRegistration::PendingStart, None)
+    }
+
     /// Caller holds scope admission across external process creation and registration.
     pub fn register_external_admitted(
         &self,
         task: BackgroundTask,
-    ) -> Result<(), BackgroundRegistryError> {
+    ) -> Result<TaskRegistrationTicket, BackgroundRegistryError> {
         let limit = Self::kind_limit(task.kind);
-        self.register_task(task, limit, TaskRegistration::Created)
+        self.register_task(task, limit, TaskRegistration::Created, None)
     }
 
-    pub(super) fn register_restored_external(
+    pub(super) fn register_external_task(
         &self,
         task: BackgroundTask,
-    ) -> Result<(), BackgroundRegistryError> {
-        self.register_task(task, None, TaskRegistration::TerminalRecovery)
+        source_identity: String,
+        terminal: bool,
+    ) -> Result<TaskRegistrationTicket, BackgroundRegistryError> {
+        // Existing source terminals may still need delivery while execution is
+        // closing; this admission creates no new execution or external resource.
+        let _admission = if terminal {
+            None
+        } else {
+            Some(
+                self.scope
+                    .admit()
+                    .map_err(|_| BackgroundRegistryError::Closing)?,
+            )
+        };
+        let (limit, registration) = if terminal {
+            (None, TaskRegistration::TerminalRecovery)
+        } else {
+            (Self::kind_limit(task.kind), TaskRegistration::Created)
+        };
+        self.register_task(task, limit, registration, Some(source_identity))
     }
 
     fn register_task(
@@ -551,12 +620,14 @@ impl BackgroundTaskRegistry {
         task: BackgroundTask,
         limit: Option<usize>,
         registration: TaskRegistration,
-    ) -> Result<(), BackgroundRegistryError> {
+        source_identity: Option<String>,
+    ) -> Result<TaskRegistrationTicket, BackgroundRegistryError> {
         let kind = task.kind;
         let task_id = task.id.clone();
-        let summary = task.prompt_summary.clone();
+        let summary =
+            super::shell::truncate_bytes(&task.prompt_summary, projection::SUMMARY_BYTE_LIMIT);
         let status = match registration {
-            TaskRegistration::Created => "running",
+            TaskRegistration::Created | TaskRegistration::PendingStart => "running",
             TaskRegistration::TerminalRecovery => "pending_delivery",
         };
 
@@ -581,41 +652,61 @@ impl BackgroundTaskRegistry {
             }
         }
 
-        if tasks.contains_key(&task.id) || self.projection.lock().records.contains_key(&task.id) {
+        if tasks.contains_key(&task.id) || self.registrations.lock().contains_key(&task.id) {
             return Err(BackgroundRegistryError::DuplicateTask(task.id));
         }
+        if let Some(source) = source_identity.as_deref() {
+            if let Some(existing) = self
+                .registrations
+                .lock()
+                .values()
+                .find(|receipt| receipt.ticket().source_identity() == Some(source))
+            {
+                return Err(BackgroundRegistryError::DuplicateTask(
+                    existing.ticket().task_id().into(),
+                ));
+            }
+        }
+        let receipt = RegistrationReceipt::new(
+            task.id.clone(),
+            self.registration_owner,
+            source_identity,
+            &task,
+            !matches!(registration, TaskRegistration::PendingStart),
+        );
+        let ticket = receipt.ticket();
+        self.registrations.lock().insert(task.id.clone(), receipt);
         if !matches!(&task.cancel_handle, BgCancelHandle::Abort(_)) {
             self.unsettled_external.lock().insert(task.id.clone());
         }
         let mut projection = self.projection.lock();
-        projection.records.insert(
-            task.id.clone(),
-            TaskRecord {
-                task_id: task.id.clone(),
-                kind,
-                summary: summary.clone(),
-                started_at: task.chrono_started_at.to_rfc3339(),
-                status: status.into(),
-                duration_ms: 0,
-                output_preview: None,
-                initiator_session_id: task.initiator_session_id.clone(),
-                // 线程身份的事实源是注册时的 live inbox；取快照进投影，终态回收
-                // inbox（complete 时 close、active 条目 retain 移除）后机器消费者
-                // 仍能拿真实身份，不必按到达顺序猜测或由 `bg-` 前缀推导。
-                child_thread_id: task
-                    .agent_inbox
-                    .as_ref()
-                    .map(|inbox| inbox.thread_id.clone()),
-            },
-        );
+        projection.insert(TaskRecord {
+            task_id: task.id.clone(),
+            kind,
+            summary: summary.clone(),
+            started_at: task.chrono_started_at.to_rfc3339(),
+            status: status.into(),
+            duration_ms: 0,
+            output_preview: None,
+            initiator_session_id: task.initiator_session_id.clone(),
+            // 线程身份的事实源是注册时的 live inbox；取快照进投影，终态回收
+            // inbox（complete 时 close、active 条目 retain 移除）后机器消费者
+            // 仍能拿真实身份，不必按到达顺序猜测或由 `bg-` 前缀推导。
+            child_thread_id: task
+                .agent_inbox
+                .as_ref()
+                .map(|inbox| inbox.thread_id.clone()),
+        });
         tasks.insert(task.id.clone(), task);
         let event = match registration {
-            TaskRegistration::Created => BgRegistryEvent::Started {
-                task_id,
-                kind,
-                summary,
-                started_at: peri_time::now_utc_rfc3339(),
-            },
+            TaskRegistration::Created | TaskRegistration::PendingStart => {
+                BgRegistryEvent::Started {
+                    task_id,
+                    kind,
+                    summary,
+                    started_at: peri_time::now_utc_rfc3339(),
+                }
+            }
             TaskRegistration::TerminalRecovery => BgRegistryEvent::Updated {
                 task_id,
                 status: status.into(),
@@ -626,7 +717,7 @@ impl BackgroundTaskRegistry {
         drop(tasks);
         self.notify_activity_change();
 
-        Ok(())
+        Ok(ticket)
     }
 
     /// 任务完成时调用：更新状态 + 推送通知。
@@ -634,7 +725,11 @@ impl BackgroundTaskRegistry {
     /// 返回 `true` 表示条目存在且已处理；`false` 表示任务已不在 registry
     /// （如已被 cancel 移除后自然完成），此时不推送 Completed 事件——否则会
     /// 产生幽灵完成事件（issue 2026-08-05：kill 后仍推 bg-task-completed）。
-    pub fn complete(&self, task_id: &str, result: BackgroundTaskResult) -> bool {
+    pub fn complete(&self, ticket: &TaskRegistrationTicket, result: BackgroundTaskResult) -> bool {
+        if self.validate_ticket(ticket).is_err() || ticket.is_settled() {
+            return false;
+        }
+        let task_id = ticket.task_id();
         tracing::info!(
             task_id = %task_id,
             agent_name = %result.agent_name,
@@ -648,6 +743,9 @@ impl BackgroundTaskRegistry {
 
         // 持锁：更新状态 + 清理所有已结算任务，防止 JoinHandle 长期驻留内存
         let mut tasks = self.tasks.lock();
+        if self.validate_ticket(ticket).is_err() || ticket.is_settled() {
+            return false;
+        }
         let kind = tasks.get(task_id).map(|task| task.kind);
         let existed = tasks
             .get(task_id)
@@ -657,6 +755,7 @@ impl BackgroundTaskRegistry {
             let task = tasks
                 .get_mut(task_id)
                 .expect("active task must remain present while registry lock is held");
+            let external_terminal = matches!(task.cancel_handle, BgCancelHandle::External { .. });
             if let Some(inbox) = &task.agent_inbox {
                 inbox.close();
             }
@@ -674,6 +773,13 @@ impl BackgroundTaskRegistry {
             }
             // Keep the projection lock until the terminal revision is published.
             tasks.retain(|_, t| is_active_status(&t.status));
+            if external_terminal {
+                self.unsettled_external.lock().remove(task_id);
+            }
+            self.mark_registration_settled(ticket);
+            if self.release_settled_registration(task_id) {
+                projection.retire(task_id);
+            }
             self.push_event(
                 &mut projection,
                 BgRegistryEvent::Completed {
@@ -685,7 +791,6 @@ impl BackgroundTaskRegistry {
                     result,
                 },
             );
-            self.unsettled_external.lock().remove(task_id);
             drop(projection);
             drop(tasks);
             self.notify_activity_change();
@@ -693,22 +798,23 @@ impl BackgroundTaskRegistry {
         }
         tasks.retain(|_, t| is_active_status(&t.status));
 
-        // 已移除条目不推幽灵 Completed 事件（cancel 已通知过用户）。
-        // warn 而非静默：任务不在 registry 却走到 complete()，通常是
-        // task_id 碰撞覆盖注册（同毫秒 UUID v7 截断前缀）或双重 complete，
-        // 会导致 TUI 任务条目残留（issue 2026-08-05）。
-        if !existed {
-            drop(tasks);
-            warn!(
-                task_id = %task_id,
-                agent_name = %result.agent_name,
-                success,
-                "background registry: complete() called for unknown task (collision or double-complete); \
-                 Completed event suppressed"
-            );
+        drop(tasks);
+        // Execution-only producers still own their cooperative cancellation
+        // result. Settle that responsibility without a second UI terminal;
+        // real external cleanup remains independently pinned until confirmed.
+        if self.claim_cancelled_cleanup(ticket).is_some() {
+            self.mark_registration_settled(ticket);
+            self.retire_settled_projection(ticket);
+            self.notify_activity_change();
             return false;
         }
-
+        warn!(
+            task_id = %task_id,
+            agent_name = %result.agent_name,
+            success,
+            "background registry: completion has no active or cancelled registration; \
+             Completed event suppressed"
+        );
         false
     }
 
@@ -739,147 +845,17 @@ impl BackgroundTaskRegistry {
             .collect()
     }
 
-    /// 取消指定任务（按 BgCancelHandle 分发取消逻辑）
-    pub fn cancel(&self, task_id: &str) -> Result<(), BackgroundRegistryError> {
-        let mut tasks = self.tasks.lock();
-        let Some(status) = tasks.get(task_id).map(|task| &task.status) else {
-            return Err(BackgroundRegistryError::TaskNotFound(task_id.to_string()));
-        };
-        if matches!(status, BackgroundTaskStatus::Completing) {
-            return Err(BackgroundRegistryError::TaskCompleting(task_id.to_string()));
-        }
-        if !matches!(status, BackgroundTaskStatus::Running) {
-            return Err(BackgroundRegistryError::TaskNotFound(task_id.to_string()));
-        }
-        // 先校验取消句柄可用性：Kill(None) 表示 kill 通道不可用（如 workflow kill 闭包缺失、
-        // shell spawn 失败），此时如实返回错误并保留条目，等待任务自然完成，
-        // 而不是移除条目 + 发 cancelled 事件假装成功（issue 2026-08-05）。
-        let handle_unavailable = matches!(
-            tasks.get(task_id).map(|t| &t.cancel_handle),
-            Some(BgCancelHandle::Kill(None))
-        );
-        if handle_unavailable {
-            return Err(BackgroundRegistryError::KillUnavailable(
-                task_id.to_string(),
-            ));
-        }
-        if matches!(
-            tasks.get(task_id).map(|t| &t.cancel_handle),
-            Some(BgCancelHandle::External { .. })
-        ) {
-            return Err(BackgroundRegistryError::ExternalCancelRequiresAsync(
-                task_id.into(),
-            ));
-        }
-        if let Some(task) = tasks.remove(task_id) {
-            if task.kind == BgTaskKind::Shell
-                || (task.kind == BgTaskKind::Agent
-                    && matches!(task.cancel_handle, BgCancelHandle::Abort(_)))
-            {
-                self.cancelled_tasks_waiting_cleanup
-                    .lock()
-                    .insert(task_id.to_owned(), task.kind);
-            }
-            if let Some(inbox) = &task.agent_inbox {
-                inbox.close();
-            }
-            match task.cancel_handle {
-                BgCancelHandle::Abort(mut handle) => {
-                    // S3.2：先触发工具层取消链——任务在下一个响应 cancel 的 await 点
-                    // （reason LLM 调用 / 工具执行 / idle 等待）退出，走完整收尾
-                    // （SubagentStopped / deregister / thread status / stop hooks）。
-                    if let Some(token) = task.cancel_token.as_ref() {
-                        token.cancel();
-                    }
-                    // 超时兜底：等待任务自然结束（grace 窗口内响应 cancel 则保留
-                    // async 收尾），超时再 abort——否则"取消后任务继续跑"比 abort 更糟。
-                    // abort 兜底路径：任务内同步收尾 guard（deregister_runtime 等）仍执行，
-                    // async 收尾（update_thread_status / stop hooks）丢失并记日志。
-                    match tokio::runtime::Handle::try_current() {
-                        Ok(_) => {
-                            let task_id_owned = task_id.to_string();
-                            self.scope.spawn_admitted(async move {
-                                let joined = match peri_time::timeout(
-                                    std::time::Duration::from_secs(CANCEL_GRACE_SECS),
-                                    &mut handle,
-                                )
-                                .await
-                                {
-                                    Ok(joined) => joined,
-                                    Err(_) => {
-                                        handle.abort();
-                                        let joined = handle.await;
-                                        warn!(
-                                            task_id = %task_id_owned,
-                                            "bg task cancel: grace period elapsed, aborted task \
-                                             (async cleanup lost: thread status / stop hooks; \
-                                             sync cleanup guard still runs)"
-                                        );
-                                        joined
-                                    }
-                                };
-                                if let Err(error) = joined {
-                                    if !error.is_cancelled() {
-                                        warn!(
-                                            task_id = %task_id_owned,
-                                            is_panic = error.is_panic(),
-                                            "bg task cancel: execution join failed"
-                                        );
-                                    }
-                                }
-                            });
-                        }
-                        Err(_) => {
-                            // 无 tokio runtime 上下文（防御；生产调用点均在 async 上下文）：
-                            // 无法异步等待，直接 abort 兜底。
-                            handle.abort();
-                            warn!(
-                                task_id = %task_id,
-                                "bg task cancel: no tokio runtime for graceful wait, aborted task"
-                            );
-                        }
-                    }
-                }
-                BgCancelHandle::Kill(Some(kill)) => {
-                    // 触发 kill 闭包：workflow 场景转发到 WorkflowTaskRegistry::kill
-                    kill();
-                }
-                BgCancelHandle::Kill(None) => {
-                    // 上方已校验，理论不可达；防御性保留
-                    unreachable!("Kill(None) checked before task removal");
-                }
-                BgCancelHandle::External { .. } => {
-                    unreachable!("external cancellation is asynchronous")
-                }
-            }
-            let mut projection = self.projection.lock();
-            if let Some(record) = projection.records.get_mut(task_id) {
-                record.status = "cancelled".into();
-            }
-            self.push_event(
-                &mut projection,
-                BgRegistryEvent::Cancelled {
-                    task_id: task_id.to_string(),
-                    reason: "user cancelled".to_string(),
-                },
-            );
-            drop(projection);
-            drop(tasks);
-            self.notify_activity_change();
-
-            Ok(())
-        } else {
-            Err(BackgroundRegistryError::TaskNotFound(task_id.to_string()))
-        }
-    }
-
     /// 清理已完成的任务
     pub fn cleanup_completed(&self) {
         self.tasks.lock().retain(|_, t| is_active_status(&t.status));
     }
 
     pub(super) fn external_settled(&self) -> bool {
-        self.unsettled_external.lock().is_empty()
+        // A cancelled producer may be between claiming its result and committing
+        // acceptance. The receipt remains its owner across that transition.
+        self.registrations.lock().is_empty()
+            && self.unsettled_external.lock().is_empty()
+            && self.cancelled_tasks_waiting_cleanup.lock().is_empty()
             && self.pending_deliveries.lock().is_empty()
             && self
                 .settlements_in_flight
@@ -922,13 +898,33 @@ impl BackgroundTaskRegistry {
         self.scope.spawn_admitted(task)
     }
 
-    pub fn confirm_external_stopped(&self, task_id: &str) {
-        self.unsettled_external.lock().remove(task_id);
+    pub fn confirm_external_stopped(&self, ticket: &TaskRegistrationTicket) {
+        let _tasks = self.tasks.lock();
+        if self.validate_ticket(ticket).is_err() {
+            return;
+        }
+        // A retired ticket cannot clear cleanup evidence for a reused ID.
+        let current = self
+            .registrations
+            .lock()
+            .get(ticket.task_id())
+            .map(|receipt| receipt.ticket());
+        if current
+            .as_ref()
+            .is_some_and(|current| ticket.same_registration(current))
+        {
+            let changed = self.unsettled_external.lock().remove(ticket.task_id());
+            drop(_tasks);
+            self.retire_settled_projection(ticket);
+            if changed {
+                self.notify_activity_change();
+            }
+        }
     }
 }
 
 impl BackgroundTaskRegistry {
-    fn notify_activity_change(&self) {
+    pub(super) fn notify_activity_change(&self) {
         self.activity_version
             .send_modify(|version| *version = version.wrapping_add(1));
     }

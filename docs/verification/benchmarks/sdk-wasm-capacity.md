@@ -807,7 +807,7 @@ try {
 
 | 检查 | 通过条件 | 不通过的含义 |
 | --- | --- | --- |
-| `wasm.compileCalls` | 1 | `0` 不能单独判定旧路径：旧 dist 的 0 主因是旧 loader 没有 `WebAssembly.compile`；Node 回退、注入 `moduleFactory` 也会得到 0。`instantiateWasm`/`locateFile` 只在直接调用 loader、经 `PeriWasmInstantiateOptions.moduleOptions`（`loader.ts:31-32`）注入时绕过共享缓存；`ChatManager` 不向 loader 透传 `moduleOptions`（`manager.ts:152-160`），基准路径不会因这两个选项得到 0。需同时看 `instantiateSources`（`module` vs `arraybuffer`/`view`）和 `dist/index.js` 是否包含 `loadWasmArtifact`/`WebAssembly.compile` 缓存标记。>1 表示存在多个产物 URL 或绕过了共享缓存。 |
+| `wasm.compileCalls` | 1 | `0` 不能单独判定旧路径：旧 dist 的 0 主因是旧 loader 没有 `WebAssembly.compile`；Node 回退、注入 `moduleFactory` 也会得到 0。`instantiateWasm`/`locateFile` 只在直接调用 loader、经 `PeriWasmInstantiateOptions.moduleOptions` 注入时绕过共享缓存；`ChatManager` 不向 loader 透传 `moduleOptions`，基准路径不会因这两个选项得到 0。需同时看 `instantiateSources`（`module` vs `arraybuffer`/`view`）和 `dist/index.js` 是否包含 `loadWasmArtifact`/`WebAssembly.compile` 缓存标记。>1 表示存在多个产物 URL 或绕过了共享缓存。 |
 | `wasm.instantiateCalls` | 等于本轮实际启动的 Agent 数；0 失败时即 `sessionIds.count` | 少于启动数说明有路径没有实例化；多于启动数说明有额外实例或失败启动也实例化了。 |
 | `wasm.instantiateSources.module` | 等于 `instantiateCalls` | `arraybuffer` / `view` > 0 表示还在用旧 bytes 路径（旧 loader、旧 dist 或 Node 回退）。 |
 | `sessionIds.count / unique` | 二者相等，且每个 `sessionId` 非空 | 重复或空 session 必须按失败处理。 |
@@ -844,7 +844,7 @@ try {
 ### 5.4 偏离基线时的排查顺序
 
 1. `compileCalls > 1`：检查是否解析出多个不同的 wasm 绝对 URL、是否绕过 SDK loader、是否混用旧 dist；共享缓存按绝对 URL 键控。`ChatCreateOptions.runtime` 只有 `env` 和 `onDiagnostic`，没有 `moduleUrl`；`moduleUrl` 只在 Manager 级 `chatConfig.runtime` 设置，不能按 chat 覆盖产物位置。
-2. `compileCalls == 0`：不能单独断定仍走旧路径。旧 dist 为 0 的主因是旧 loader 没有 `WebAssembly.compile`；Node 回退、注入 `moduleFactory` 也会为 0。`instantiateWasm`/`locateFile` 只经 `PeriWasmInstantiateOptions.moduleOptions`（`loader.ts:31-32`）影响直接调用 loader 的宿主，`ChatManager` 不透传 `moduleOptions`（`manager.ts:152-160`），基准路径不会因它们为 0。先看 `instantiateSources`：`arraybuffer`/`view` 等于 `instantiateCalls` 表示旧 bytes 路径；`module` 等于 `instantiateCalls` 表示预编译或注入模块路径。再检查 `dist/index.js` 是否包含 `loadWasmArtifact`/`WebAssembly.compile`（共享缓存实现），并确认其构建时间晚于 `dcb76ed6b`。若 `compileCalls=1` 但 `arraybuffer`/`view` > 0，同样说明没有把共享 Module 交给 glue。
+2. `compileCalls == 0`：不能单独断定仍走旧路径。旧 dist 为 0 的主因是旧 loader 没有 `WebAssembly.compile`；Node 回退、注入 `moduleFactory` 也会为 0。`instantiateWasm`/`locateFile` 只经 `PeriWasmInstantiateOptions.moduleOptions` 影响直接调用 loader 的宿主，`ChatManager` 不透传 `moduleOptions`，基准路径不会因它们为 0。先看 `instantiateSources`：`arraybuffer`/`view` 等于 `instantiateCalls` 表示旧 bytes 路径；`module` 等于 `instantiateCalls` 表示预编译或注入模块路径。再检查 `dist/index.js` 是否包含 `loadWasmArtifact`/`WebAssembly.compile`（共享缓存实现），并确认其构建时间晚于 `dcb76ed6b`。若 `compileCalls=1` 但 `arraybuffer`/`view` > 0，同样说明没有把共享 Module 交给 glue。
 3. p50 接近 79–80 ms：很像优化前的每 Agent 编译路径；确认 dist 是最新提交构建、进程是新建的。
 4. `N_max` 比 219–222 低很多：先确认没有并行构建/测试、sqld 未计入、没有发送 prompt、启动失败为 0；再比较 Bun 版本和主机内存。
 5. 启动失败含 `No LLM provider configured in settings`：`active_alias` 不是合法档位，改成 `haiku` 等四档之一。

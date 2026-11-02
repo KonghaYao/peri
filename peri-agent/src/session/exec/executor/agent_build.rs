@@ -100,9 +100,14 @@ pub(super) async fn build_and_execute_agent(
             let publisher = Arc::clone(&ctx.event_publisher);
             let sid = session_id.to_string();
             move |event: ExecutorEvent| {
+                let origin = event.child_origin();
                 let source = peri_acp_types::runtime::UnstampedEvent::new(
-                    String::new(),
-                    String::new(),
+                    origin
+                        .map(|o| o.execution.turn_id.to_string())
+                        .unwrap_or_default(),
+                    origin
+                        .map(|o| o.child_thread_id.clone())
+                        .unwrap_or_default(),
                     None,
                     peri_acp_types::identity::EventDeliveryClass::Critical,
                 );

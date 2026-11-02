@@ -12,9 +12,24 @@ import { AcpMcpBridge, resolveAcpMcpBindings, type AcpMcpBinding } from "./acp-m
 import { InteractionBroker } from "./interaction-broker";
 import type { InteractionAnswer } from "../contracts/interaction";
 import { Session, SessionStartError, type SessionStartResult } from "./session";
+import { SessionQueueStaleError } from "./session-queue";
 import type { CloseOptions } from "./session-close";
 import type { AcpMcpServer } from "../contracts/acp";
 import type { JsonRpcNotification, Transport } from "../transport/types";
+import {
+    PeriHostCleanupError,
+    PeriInstanceBindError,
+    PeriInstanceCloseIncompleteError,
+    PeriInstanceNotBoundError,
+    type PeriInstanceBindStage,
+} from "./peri-instance-errors";
+
+export {
+    PeriHostCleanupError,
+    PeriInstanceBindError,
+    PeriInstanceCloseIncompleteError,
+    PeriInstanceNotBoundError,
+} from "./peri-instance-errors";
 
 /**
  * 一次激活的宿主 + Session 装配与运行事实输出。
@@ -34,58 +49,6 @@ export type PeriHostActivator = (
     path: string,
     options: { signal: AbortSignal },
 ) => Promise<PeriHostActivation>;
-
-type PeriInstanceBindStage =
-    | "mcp-connect" | "session/new" | "claim" | "session/load" | "rename" | "input-snapshot";
-
-/** 绑定阶段失败；`createdSessionId` 已创建时上层不得盲目重复新建。 */
-export class PeriInstanceBindError extends Error {
-    constructor(
-        readonly stage: PeriInstanceBindStage,
-        readonly createdSessionId: string | null,
-        message: string,
-        options?: { cause?: unknown },
-    ) {
-        super(message, options);
-        this.name = "PeriInstanceBindError";
-    }
-}
-
-export class PeriInstanceNotBoundError extends Error {
-    constructor(message = "Peri instance is not bound to a Session") {
-        super(message);
-        this.name = "PeriInstanceNotBoundError";
-    }
-}
-
-/** 宿主清理未确认；资源保留，调用方可重试 close。 */
-export class PeriHostCleanupError extends Error {
-    constructor(message: string, options?: { cause?: unknown }) {
-        super(message, options);
-        this.name = "PeriHostCleanupError";
-    }
-}
-
-/** 关闭未在预算内确认；资源保留，不产生 `closed` 事实，可第二次 close。 */
-export class PeriInstanceCloseIncompleteError extends Error {
-    readonly failures: readonly unknown[];
-
-    constructor(
-        failures: readonly unknown[] = [],
-        message = "Peri instance close is incomplete; resources are preserved for retry",
-        options?: { cause?: unknown },
-    ) {
-        super(message, {
-            cause: options?.cause ?? (failures.length === 0
-                ? undefined
-                : failures.length === 1
-                    ? failures[0]
-                    : new AggregateError(failures, message)),
-        });
-        this.name = "PeriInstanceCloseIncompleteError";
-        this.failures = failures;
-    }
-}
 
 export interface PeriInstanceCloseOptions extends CloseOptions {
     /** 中止启动后等待绑定调用结算；默认 5000ms。 */
@@ -457,6 +420,7 @@ export class PeriInstance implements PeriInstancePort {
             if (this.trackedInputs.has(inputId)) this.trackedInputs.set(inputId, state);
         } catch (error) {
             this.trackedInputs.delete(inputId);
+            this.blockStaleQueue(error);
             throw error;
         }
     }
@@ -467,14 +431,32 @@ export class PeriInstance implements PeriInstancePort {
 
     async dispatch(inputId: string): Promise<void> {
         const session = this.requireSession();
-        await session.dispatch(inputId);
+        try {
+            await session.dispatch(inputId);
+        } catch (error) {
+            this.blockStaleQueue(error);
+            throw error;
+        }
         if (this.trackedInputs.has(inputId)) this.trackedInputs.set(inputId, "dispatching");
     }
 
     async takeBack(inputId: string): Promise<void> {
         const session = this.requireSession();
-        await session.takeBack(inputId);
+        try {
+            await session.takeBack(inputId);
+        } catch (error) {
+            this.blockStaleQueue(error);
+            throw error;
+        }
         this.trackedInputs.delete(inputId);
+    }
+
+    /**
+     * 旧代次队列写入不再有持久化保证：与关闭未确认一样阻断新执行，
+     * 由宿主销毁 runtime 后重新加载。SDK 不自动重放用户内容。
+     */
+    private blockStaleQueue(error: unknown): void {
+        if (error instanceof SessionQueueStaleError) this.markBlocked();
     }
 
     async cancel(): Promise<"requested" | "idle"> {

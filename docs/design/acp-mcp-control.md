@@ -103,6 +103,6 @@ stdio 注册使用同一 action，`args`、`env` 缺省为空；执行目录由�
 2. 真实本地 MCP wire：register → 发现/调用 → stop → 旧 bridge 拒绝 → restart → 新 handle 可用；重复 stop、同名注册冲突。
 3. session 环境隔离、同 server 并发控制、跨 server 关闭与连接提交并发、关闭与迟到连接发布竞态、cleanup 不完整不能报告成功。
 4. Reason/ToolSearch 与子 Agent spawn/resume 的父关闭策略及子过滤交集、固定快照仍成立；刷新不能复活已关闭能力，skill/command 旧代不可回写。
-5. TUI 操作 wire、稳定目标与切换会话后的完成门；12 秒成功回执、60 秒到期及普通请求默认期限；不新增视觉快照测试。
+5. TUI 操作 wire、稳定目标与切换会话后的完成门；控制请求的 60 秒期限与普通请求默认的 10 秒期限；不新增视觉快照测试。
 6. 旧 DynamicMCP 名称、专属类型/工具/提示词/配置键/实现与测试全部退出当前源码和当前权威文档。历史月志可保留历史表述。
 7. 按变更范围执行 cargo check、相关契约测试、fmt、层依赖与文档/文件规模检查；记录准确退出状态及未执行范围。

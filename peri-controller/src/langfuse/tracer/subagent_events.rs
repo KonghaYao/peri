@@ -128,7 +128,16 @@ impl LangfuseTracer {
         agent_name: &str,
         is_background: bool,
     ) {
-        if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
+        // 子 agent 的 thread id 就是 child_agent_id（与子 agent 会话上下文里的
+        // session_id 一致）。先登记、再按采样早退：子 agent 的工具失败等指标经其
+        // thread id 归到本 turn trace，而不是各自开 root trace。
+        let sampled = self.sampling.should_emit(&self.trace_id, &self.session_id);
+        let parent = sampled.then(|| self.trace_id.clone());
+        self.session
+            .turn_traces()
+            .register(child_agent_id, &self.trace_id, parent.as_deref());
+
+        if !sampled {
             return;
         }
         let outcome = self.subagent.on_subagent_start(
@@ -148,6 +157,12 @@ impl LangfuseTracer {
         result: &str,
         is_error: bool,
     ) {
+        // 先清理子 agent 的指标归属登记（compare-and-remove，不误删后一 turn），
+        // 再按采样早退：无论是否采样，子 agent 结束后都不再复用本 turn trace。
+        self.session
+            .turn_traces()
+            .clear(child_agent_id, &self.trace_id);
+
         if !self.sampling.should_emit(&self.trace_id, &self.session_id) {
             return;
         }

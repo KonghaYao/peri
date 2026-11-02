@@ -945,3 +945,6 @@ async fn system_reminder_source_agent_id_is_carried_only_when_relayed_structural
 
 #[path = "event_sink_failure_test.rs"]
 mod failure_tests;
+
+#[path = "event_sink_origin_test.rs"]
+mod origin_tests;

@@ -61,16 +61,19 @@ async fn cancellation_escalation_stays_owned_until_process_and_pipes_stop() {
 #[tokio::test]
 async fn test_failed_shell_spawn_with_full_registry_returns_error() {
     let manager = crate::create_local_task_manager();
+    let mut tickets = Vec::new();
     for index in 0..BackgroundTaskRegistry::SHELL_LIMIT {
-        manager
-            .register(BgTaskRegistration {
-                task_id: format!("occupied-{index}"),
-                kind: BgTaskKind::Shell,
-                summary: "capacity fixture".into(),
-                pid: None,
-                kill: Some(Box::new(|| {})),
-            })
-            .unwrap();
+        tickets.push(
+            manager
+                .register(BgTaskRegistration {
+                    task_id: format!("occupied-{index}"),
+                    kind: BgTaskKind::Shell,
+                    summary: "capacity fixture".into(),
+                    pid: None,
+                    kill: Some(Box::new(|| {})),
+                })
+                .unwrap(),
+        );
     }
     let fixture = tempfile::tempdir().unwrap();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -88,10 +91,19 @@ async fn test_failed_shell_spawn_with_full_registry_returns_error() {
         })),
     );
     assert_eq!(manager.active_count(), BackgroundTaskRegistry::SHELL_LIMIT);
-    for index in 0..BackgroundTaskRegistry::SHELL_LIMIT {
-        let id = format!("occupied-{index}");
-        manager.cancel(&id).unwrap();
-        manager.confirm_external_execution_stopped(&id);
+    for ticket in tickets {
+        manager.cancel(ticket.task_id()).unwrap();
+        manager.confirm_external_execution_stopped(&ticket);
+        manager.finalize_bg_shell(
+            &None,
+            ticket,
+            "capacity fixture".into(),
+            false,
+            "fixture cancelled".into(),
+            0,
+            false,
+            None,
+        );
     }
     assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
     assert!(
@@ -179,6 +191,103 @@ async fn test_timed_out_shell_can_close_cleanly() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn pending_shell_delivery_survives_terminal_display_eviction() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let manager = crate::create_local_task_manager();
+    let cwd = tempfile::tempdir().unwrap();
+    let accept_delivery = Arc::new(AtomicBool::new(false));
+    let receiver_ready = Arc::clone(&accept_delivery);
+    let (delivered, mut deliveries) = tokio::sync::mpsc::unbounded_channel();
+    let shell = manager
+        .spawn_shell(
+            "printf x >> executions; printf receipt-output".into(),
+            cwd.path().to_str().unwrap().into(),
+            None,
+            Some(Arc::new(move |result, kind| {
+                assert_eq!(kind, BgTaskKind::Shell);
+                if !receiver_ready.load(Ordering::SeqCst) {
+                    return Err("receiver unavailable".into());
+                }
+                delivered.send(result.clone()).unwrap();
+                Ok(())
+            })),
+        )
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if manager
+                .snapshot()
+                .tasks
+                .iter()
+                .any(|task| task.task_id == shell.task_id && task.status == "delivery_pending")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    // Exceed the recent terminal window while the real process's result still
+    // belongs to its pending delivery. Display eviction cannot revoke it.
+    for index in 0..600 {
+        let ticket = manager
+            .register(BgTaskRegistration {
+                task_id: format!("retention-fixture-{index}"),
+                kind: BgTaskKind::Shell,
+                summary: "completed fixture".into(),
+                pid: None,
+                kill: Some(Box::new(|| {})),
+            })
+            .unwrap();
+        manager.confirm_external_execution_stopped(&ticket);
+        manager.finalize_bg_shell(
+            &None,
+            ticket,
+            "completed fixture".into(),
+            true,
+            "fixture complete".into(),
+            1,
+            false,
+            None,
+        );
+    }
+    let snapshot = manager.snapshot();
+    assert!(snapshot.tasks.len() < 601, "terminal rows must be evicted");
+    assert!(!snapshot
+        .tasks
+        .iter()
+        .any(|task| task.task_id == "retention-fixture-0"));
+    assert!(snapshot
+        .tasks
+        .iter()
+        .any(|task| { task.task_id == shell.task_id && task.status == "delivery_pending" }));
+
+    accept_delivery.store(true, Ordering::SeqCst);
+    assert_eq!(manager.retry_pending_deliveries(), 1);
+    assert_eq!(manager.retry_pending_deliveries(), 0);
+    let result = deliveries
+        .try_recv()
+        .expect("the original result is delivered");
+    assert_eq!(result.task_id, shell.task_id);
+    assert!(result.success);
+    assert!(result.shell_output.is_some());
+    assert!(deliveries.try_recv().is_err(), "delivery is accepted once");
+    assert_eq!(manager.shutdown().await, TaskShutdownReport::Complete);
+    assert_eq!(
+        std::fs::read_to_string(cwd.path().join("executions")).unwrap(),
+        "x"
+    );
+    assert_eq!(
+        std::fs::read_to_string(shell.stdout_log.unwrap()).unwrap(),
+        "receipt-output"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn test_shell_guard_detaches_session_before_command_execution() {
     use std::os::unix::process::CommandExt;
 
@@ -255,7 +364,7 @@ async fn test_rejected_promoted_task_settles_registered_process_after_cleanup() 
     execution.prepare(&mut command).unwrap();
     let mut child = command.spawn().unwrap();
     execution.attach(&child).unwrap();
-    manager
+    let ticket = manager
         .register(BgTaskRegistration {
             task_id: "promoted".into(),
             kind: BgTaskKind::Shell,
@@ -264,7 +373,7 @@ async fn test_rejected_promoted_task_settles_registered_process_after_cleanup() 
             kill: None,
         })
         .unwrap();
-    execution.track_registration(manager.clone(), "promoted".into());
+    execution.track_registration(manager.clone(), ticket.clone());
     let mut shutdown = manager.shutdown();
     assert!(futures::poll!(&mut shutdown).is_pending());
     assert!(manager
@@ -273,5 +382,21 @@ async fn test_rejected_promoted_task_settles_registered_process_after_cleanup() 
             execution.confirm_stopped();
         }))
         .is_err());
+    // The failed handoff is returned synchronously to the tool caller. Only
+    // its delivery obligation closes here; the guard must still prove cleanup.
+    manager.finalize_bg_shell(
+        &None,
+        ticket,
+        "shell".into(),
+        false,
+        "Background handoff failed; process cleanup is pending.".into(),
+        0,
+        false,
+        None,
+    );
+    assert!(
+        !manager.is_execution_idle(),
+        "failed handoff delivery must not claim that process cleanup already finished"
+    );
     assert_eq!(shutdown.await, TaskShutdownReport::Complete);
 }

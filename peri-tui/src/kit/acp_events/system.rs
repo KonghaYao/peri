@@ -27,6 +27,10 @@ use std::time::Duration;
 mod bg_task;
 mod interaction;
 
+#[cfg(test)]
+#[path = "system/child_reminder_test.rs"]
+mod child_reminder_tests;
+
 // ── Re-exports ──
 // 搬移后保持既有调用路径可用：`system::handle_bg_task_*` / `system::request_bg_task_snapshot`、
 // `system::handle_{hitl_pending,ask_user,interaction_terminal}`（生产调用方：本模块 `acp_events/mod.rs`）。
@@ -135,6 +139,10 @@ pub(super) fn handle_trusted_system_reminder(
     reminder: peri_acp_types::system_reminder::SystemReminder,
     source_agent_id: Option<&str>,
 ) {
+    if let Some(agent_id) = source_agent_id {
+        route_child_reminder(state, &reminder, agent_id, true);
+        return;
+    }
     if let Some(mut vm) = TuiSystemReminder::from_trusted_structured(
         DisplayTrusted::after_current_session_gate(reminder),
     ) {
@@ -151,6 +159,10 @@ pub(super) fn handle_system_reminder(
     reminder: &peri_acp_types::system_reminder::SystemReminder,
     source_agent_id: Option<&str>,
 ) {
+    if let Some(agent_id) = source_agent_id {
+        route_child_reminder(state, reminder, agent_id, false);
+        return;
+    }
     if let Some(mut vm) = TuiSystemReminder::from_wire(reminder.clone()) {
         vm.attach_relay(resolve_reminder_relay(state, source_agent_id));
         state.flush_current_turn();
@@ -158,6 +170,71 @@ pub(super) fn handle_system_reminder(
             .committed
             .push_back(TuiRenderUnit::TuiSystemReminder(vm));
     }
+}
+
+/// Forwarded reminders are child display data. Validate the original policy and
+/// copy only a bounded preview; the producer's business reminder is unchanged.
+fn route_child_reminder(
+    state: &mut BridgeState,
+    reminder: &peri_acp_types::system_reminder::SystemReminder,
+    agent_id: &str,
+    trusted: bool,
+) {
+    use crate::kit::acp_types::subagent_preview::{FIELD_BYTES, text};
+    let background = crate::kit::atoms::BG_AGENT_IDS
+        .state()
+        .read()
+        .contains(agent_id);
+    if !background
+        && !state
+            .current_turn
+            .subagents
+            .iter()
+            .any(|child| child.agent_id == agent_id && child.is_running)
+    {
+        return;
+    }
+    if reminder.validate().is_err() {
+        return;
+    }
+    let (body, mut omitted) = text(&reminder.body, FIELD_BYTES);
+    let metadata = if crate::kit::retained_bytes::json_value_bytes(&reminder.metadata).reserved
+        > FIELD_BYTES
+    {
+        omitted = true;
+        serde_json::json!({})
+    } else {
+        reminder.metadata.clone()
+    };
+    let display = peri_acp_types::system_reminder::SystemReminder {
+        version: reminder.version,
+        category: reminder.category.clone(),
+        source: reminder.source.clone(),
+        kind: reminder.kind.clone(),
+        severity: reminder.severity,
+        delivery: reminder.delivery,
+        audiences: reminder.audiences.clone(),
+        body: body.to_owned(),
+        summary: reminder.summary.clone(),
+        metadata,
+    };
+    let projected = if trusted {
+        TuiSystemReminder::from_trusted_structured(DisplayTrusted::after_current_session_gate(
+            display,
+        ))
+    } else {
+        TuiSystemReminder::from_wire(display)
+    };
+    let Some(mut vm) = projected else { return };
+    vm.attach_relay(resolve_reminder_relay(state, Some(agent_id)));
+    if background {
+        crate::kit::bg_task_live::append_bg_system_reminder(agent_id, vm, omitted);
+    } else {
+        state
+            .current_turn
+            .append_subagent_reminder(agent_id, vm, omitted);
+    }
+    state.publish_barrier();
 }
 
 pub(super) fn handle_system_reminder_fallback(state: &mut BridgeState, text: &str) {
@@ -277,13 +354,13 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
                 let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
                 match role {
                     "user" => {
-                        let text = super::extract_message_text(msg);
+                        let text = extract_message_text(msg);
                         state.committed.push_back(TuiRenderUnit::TuiUserBubble(
                             crate::kit::tui_render_unit::TuiUserBubble::new(text),
                         ));
                     }
                     "assistant" | "ai" => {
-                        let text = super::extract_message_text(msg);
+                        let text = extract_message_text(msg);
                         let content_hash =
                             crate::kit::tui_render_unit::tui_hash_str(&format!("{}|", text));
                         state.committed.push_back(TuiRenderUnit::TuiAssistantBubble(
@@ -325,7 +402,7 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
                             .unwrap_or("")
                             .to_string();
                         let text = peri_acp_types::messages::strip_system_reminders(
-                            &super::extract_message_text(msg),
+                            &extract_message_text(msg),
                         );
                         let text = text.trim();
                         if role != "user" || text.is_empty() {
@@ -508,3 +585,32 @@ pub(super) fn handle_workflow_progress(
 }
 
 pub(super) fn handle_unknown() {}
+
+/// 从 BaseMessage JSON 提取纯文本（H3 辅助函数）。
+///
+/// content 可能是 string 或 array of {type:text, text:...}，
+/// 两种格式都兼容。**仅提取 type=="text" 的 block**——tool_use / tool_result /
+/// reasoning / image 等非文本 block 在 rewind 视图下不还原（用户看不到历史工具
+/// 调用卡片与 reasoning），这是 display-only 的简化设计，避免在 H3 反序列化
+/// 路径重建完整 ViewModel（成本过高且非 rewind 主场景）。
+fn extract_message_text(msg: &serde_json::Value) -> String {
+    // content 为 string 的简单格式
+    if let Some(s) = msg.get("content").and_then(|v| v.as_str()) {
+        return s.to_string();
+    }
+    // content 为 array 的复杂格式
+    if let Some(arr) = msg.get("content").and_then(|v| v.as_array()) {
+        return arr
+            .iter()
+            .filter_map(|block| {
+                if block.get("type").and_then(|v| v.as_str()) == Some("text") {
+                    block.get("text").and_then(|v| v.as_str()).map(String::from)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("");
+    }
+    String::new()
+}

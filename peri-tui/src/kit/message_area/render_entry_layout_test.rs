@@ -96,6 +96,7 @@ fn test_vm_to_lines_all_variants_width_1() {
             false,
         ))]),
         collapsed: false,
+        preview_omitted: false,
         is_running: false,
         is_error: false,
         error_reason: None,

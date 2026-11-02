@@ -91,6 +91,7 @@ pub fn map_agent_activity(event: &ExecutorEvent) -> Option<AgentActivityWire> {
     use AgentActivityStatus as S;
 
     let mut activity = match event {
+        ExecutorEvent::Originated(scoped) => return map_agent_activity(&scoped.event),
         ExecutorEvent::SubagentStarted {
             agent_name,
             instance_id,

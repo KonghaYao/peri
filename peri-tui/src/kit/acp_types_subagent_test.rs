@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn test_stopped_subagent_late_tool_start_keeps_children_terminal() {
+fn test_stopped_subagent_late_tool_start_cannot_reopen_frozen_preview() {
     let mut turn = CurrentTurn::new();
     turn.start_subagent("child".into(), "coder".into(), None);
     turn.start_subagent_tool(
@@ -15,7 +15,7 @@ fn test_stopped_subagent_late_tool_start_keeps_children_terminal() {
         ),
     );
     turn.stop_subagent("child", false, "done");
-    turn.start_subagent_tool(
+    assert!(!turn.start_subagent_tool(
         "child",
         ToolCardAccumulator::with_input(
             "early".into(),
@@ -24,8 +24,8 @@ fn test_stopped_subagent_late_tool_start_keeps_children_terminal() {
             serde_json::json!({"command": "echo done"}),
             None,
         ),
-    );
-    turn.start_subagent_tool(
+    ));
+    assert!(!turn.start_subagent_tool(
         "child",
         ToolCardAccumulator::with_input(
             "late".into(),
@@ -34,16 +34,20 @@ fn test_stopped_subagent_late_tool_start_keeps_children_terminal() {
             serde_json::json!({"command": "pwd"}),
             None,
         ),
-    );
+    ));
+    assert_eq!(turn.subagents[0].child_turn.raw_memory_bytes().reserved, 0);
     let TuiRenderUnit::TuiSubAgentGroup(group) = &turn.view_models()[0] else {
         panic!("expected subagent group");
     };
     assert!(!group.is_running);
-    assert_eq!(group.view_models.len(), 2);
+    assert_eq!(group.view_models.len(), 1);
     let TuiRenderUnit::TuiToolCard(early) = &group.view_models[0] else {
         panic!("expected tool card");
     };
-    assert_eq!(early.input_summary, "echo done");
+    assert_eq!(
+        early.input_summary, "null",
+        "late input cannot mutate a terminal preview"
+    );
     assert!(group.view_models.iter().all(|unit| matches!(unit,
         TuiRenderUnit::TuiToolCard(card) if !card.is_running
     )));
@@ -114,24 +118,13 @@ fn test_current_turn_resumed_subagent_routes_to_new_agent_group() {
     );
     assert_eq!(ct.subagents[0].agent_id, ct.subagents[1].agent_id);
     assert_eq!(ct.subagents.len(), 2, "恢复应创建第二个可见分组");
-    assert_eq!(
-        ct.subagents[0].child_turn.text, "before interruption",
-        "旧失败分组不得接收恢复后的消息"
-    );
     assert!(!ct.subagents[0].is_running);
-    assert_eq!(ct.subagents[1].child_turn.text, "after resume");
-    assert_eq!(ct.subagents[1].child_turn.reasoning, "resumed reasoning");
     assert!(!ct.subagents[1].is_running);
     assert!(!ct.subagents[1].is_error);
-    assert_eq!(ct.subagents[0].child_turn.tool_cards.len(), 1);
-    assert_eq!(
-        ct.subagents[0].child_turn.tool_cards[0].tool_id,
-        "child-tool-1"
-    );
-    assert_eq!(ct.subagents[1].child_turn.tool_cards.len(), 1);
-    assert_eq!(
-        ct.subagents[1].child_turn.tool_cards[0].tool_id,
-        "child-tool-2"
+    assert!(
+        ct.subagents
+            .iter()
+            .all(|s| s.child_turn.raw_memory_bytes().reserved == 0)
     );
     assert!(
         ct.tool_cards.iter().all(|tool| tool.claimed_by_subagent),
@@ -144,6 +137,38 @@ fn test_current_turn_resumed_subagent_routes_to_new_agent_group() {
     assert!(matches!(vms[1], TuiRenderUnit::TuiSubAgentGroup(_)));
     assert!(matches!(vms[2], TuiRenderUnit::TuiToolCard(_)));
     assert!(matches!(vms[3], TuiRenderUnit::TuiSubAgentGroup(_)));
+    for (index, expected_text, expected_tool) in [
+        (1, "before interruption", "child-tool-1"),
+        (3, "after resume", "child-tool-2"),
+    ] {
+        let TuiRenderUnit::TuiSubAgentGroup(group) = &vms[index] else {
+            unreachable!()
+        };
+        let text: String = group
+            .view_models
+            .iter()
+            .filter_map(|unit| match unit {
+                TuiRenderUnit::TuiAssistantBubble(body) => Some(body.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, expected_text, "每次运行的冻结预览保持独立");
+        let tools: Vec<_> = group
+            .view_models
+            .iter()
+            .filter_map(|unit| match unit {
+                TuiRenderUnit::TuiToolCard(card) => Some(card.tool_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tools, [expected_tool]);
+    }
+    let TuiRenderUnit::TuiSubAgentGroup(resumed) = &vms[3] else {
+        unreachable!()
+    };
+    assert!(resumed.view_models.iter().any(|unit| matches!(unit,
+        TuiRenderUnit::TuiAssistantBubble(body) if body.reasoning.as_ref()
+            .is_some_and(|reasoning| reasoning.text == "resumed reasoning"))));
 }
 
 /// [回归测试] Agent ToolCard 晚于 SubagentStarted 到达 TUI（并行多 Agent 批次里
@@ -406,9 +431,16 @@ fn test_stop_subagent_without_tool_ended_deactivates_child_turn() {
         !s.child_turn.active,
         "stop_subagent 后 child_turn 必须 deactivate（ToolStarted 无 ToolEnded 场景）"
     );
-    let vms: Vec<_> = s.child_turn.view_models().iter().cloned().collect();
-    assert_eq!(vms.len(), 1, "child_turn 应仍保留工具卡");
-    match &vms[0] {
+    assert_eq!(
+        s.child_turn.raw_memory_bytes().reserved,
+        0,
+        "终态释放原始累加器"
+    );
+    let TuiRenderUnit::TuiSubAgentGroup(group) = s.view_model() else {
+        unreachable!()
+    };
+    assert_eq!(group.view_models.len(), 1, "冻结预览仍保留工具卡");
+    match &group.view_models[0] {
         TuiRenderUnit::TuiToolCard(card) => {
             assert!(
                 !card.is_running,
@@ -424,7 +456,7 @@ fn test_stop_subagent_without_tool_ended_deactivates_child_turn() {
 #[test]
 fn test_subagent_content_hash_changes_with_child_content() {
     let mut acc1 = SubAgentAccumulator::new("agent-1".into(), "worker".into());
-    acc1.append_text("hello");
+    acc1.append_text("hello", None);
     let vm1 = acc1.view_model();
     let hash1 = match &vm1 {
         TuiRenderUnit::TuiSubAgentGroup(g) => g.content_hash,
@@ -432,7 +464,7 @@ fn test_subagent_content_hash_changes_with_child_content() {
     };
 
     let mut acc2 = SubAgentAccumulator::new("agent-1".into(), "worker".into());
-    acc2.append_text("world");
+    acc2.append_text("world", None);
     let vm2 = acc2.view_model();
     let hash2 = match &vm2 {
         TuiRenderUnit::TuiSubAgentGroup(g) => g.content_hash,

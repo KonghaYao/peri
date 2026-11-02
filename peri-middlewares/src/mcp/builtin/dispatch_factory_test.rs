@@ -205,6 +205,7 @@ fn all_registered_instances_have_handler() {
             BuiltinServerHandler::Web(_) => "web",
             BuiltinServerHandler::Artifact(_) => "artifact",
             BuiltinServerHandler::Cron(_) => "cron",
+            BuiltinServerHandler::Monitor(_) => "monitor",
             BuiltinServerHandler::Workspace(_) => "workspace",
             #[cfg(not(target_os = "emscripten"))]
             BuiltinServerHandler::Workflow(_) => "workflow",

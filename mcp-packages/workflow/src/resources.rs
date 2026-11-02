@@ -110,10 +110,26 @@ pub fn read_payload(runtime: &WorkflowRuntime, uri: &str) -> Result<Value, Resou
         return Err(ResourceReadError::NotSupported(uri.to_string()));
     };
     match resource {
-        WorkflowResource::BackgroundTasks => Ok(json!({
-            "snapshot": runtime.bg_registry().map(|manager| manager.snapshot()),
-            "completions": runtime.registry().pending_completions(),
-        })),
+        WorkflowResource::BackgroundTasks => {
+            let mut snapshot = runtime.bg_registry().map(|manager| manager.snapshot());
+            let (running, pending) = runtime.registry().background_tasks();
+            if let Some(snapshot) = &mut snapshot {
+                let mut records = snapshot
+                    .tasks
+                    .drain(..)
+                    .filter(|record| running.contains(&record.task_id))
+                    .map(|record| (record.task_id.clone(), record))
+                    .collect::<std::collections::HashMap<_, _>>();
+                for (record, _) in &pending {
+                    records.insert(record.task_id.clone(), record.clone());
+                }
+                snapshot.tasks = records.into_values().collect();
+            }
+            Ok(json!({
+                "snapshot": snapshot,
+                "completions": pending.into_iter().map(|(_, result)| result).collect::<Vec<_>>(),
+            }))
+        }
         WorkflowResource::Runs => {
             Ok(serde_json::to_value(runtime.runs_snapshot()).unwrap_or_else(|_| json!([])))
         }

@@ -27,7 +27,7 @@ pub(crate) static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_d
 // [LRU] 读 + 写均更新顺序；满时淘汰最旧。
 //
 // [TRAP] parking_lot::RwLock 而非 std——std RwLockReadGuard 非 Send，未来若移入
-// async 上下文会编译报错（CLAUDE.md 已记录）。
+// async 上下文会编译报错。
 type CacheValue = Option<Arc<Vec<Line<'static>>>>;
 
 #[cfg(test)]

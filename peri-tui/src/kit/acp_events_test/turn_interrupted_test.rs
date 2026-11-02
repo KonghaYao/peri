@@ -21,6 +21,7 @@ fn test_stale_turn_interrupted_does_not_rollback_new_turn() {
 
     // turn A：LocalUserBubble + PromptSubmitted（gen=1, last_prompt=1）
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -33,7 +34,7 @@ fn test_stale_turn_interrupted_does_not_rollback_new_turn() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,
@@ -160,6 +161,7 @@ fn test_turn_interrupted_zero_output_rollback_still_works() {
     let mut drain_rx = ensure_submit_tx_observable();
 
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -172,7 +174,7 @@ fn test_turn_interrupted_zero_output_rollback_still_works() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,
@@ -256,6 +258,7 @@ fn test_turn_interrupted_archive_branch_drains_input_buffer() {
     let mut drain_rx = ensure_submit_tx_observable();
 
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -268,7 +271,7 @@ fn test_turn_interrupted_archive_branch_drains_input_buffer() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,
@@ -346,6 +349,7 @@ fn test_stale_turn_interrupted_request_id_mismatch() {
     }
 
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -358,7 +362,7 @@ fn test_stale_turn_interrupted_request_id_mismatch() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,
@@ -473,6 +477,7 @@ fn test_stale_turn_interrupted_queued_branch_still_stale() {
     let mut drain_rx = ensure_submit_tx_observable();
 
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -485,7 +490,7 @@ fn test_stale_turn_interrupted_queued_branch_still_stale() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,
@@ -570,6 +575,7 @@ fn test_stale_turn_interrupted_drain_is_idempotent() {
     let drain_rx = ensure_submit_tx_observable();
 
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -582,7 +588,7 @@ fn test_stale_turn_interrupted_drain_is_idempotent() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,
@@ -681,6 +687,7 @@ fn test_turn_interrupted_current_request_id_rollback() {
     let mut drain_rx = ensure_submit_tx_observable();
 
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -693,7 +700,7 @@ fn test_turn_interrupted_current_request_id_rollback() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,
@@ -771,6 +778,7 @@ fn test_turn_interrupted_none_request_id_falls_back() {
     }
 
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -783,7 +791,7 @@ fn test_turn_interrupted_none_request_id_falls_back() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,
@@ -846,6 +854,7 @@ fn test_double_cancel_request_id_pairs() {
     }
 
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -858,7 +867,7 @@ fn test_double_cancel_request_id_pairs() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,

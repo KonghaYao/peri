@@ -6,7 +6,7 @@
 //! 渲染）留在 ACP 宿主侧（`host/executor_flow_test.rs`——stage 装配注入面
 //! 在 ACP，测试经宿主构造点注入真实 stage_build 桥）。
 //!
-//! Mock 命名遵循 CLAUDE.md：`make_` 前缀（函数），`Mock` 前缀（结构体）。
+//! Mock 命名约定：`make_` 前缀（函数），`Mock` 前缀（结构体）。
 
 use std::sync::{
     atomic::{AtomicUsize, Ordering},

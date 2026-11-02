@@ -7,10 +7,13 @@ use super::*;
 use crate::i18n;
 use crate::kit::acp_types::{BgTaskEntry, BgTaskSnapshotSource};
 use crate::kit::atoms::{
-    ACP_CLIENT_HANDLE, ACTIVE_SESSION_ID, BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_REVISION, BG_TASKS,
-    NOTIFICATION,
+    ACP_CLIENT_HANDLE, ACTIVE_SESSION_ID, BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_IDENTITY,
+    BG_TASK_REVISION, BG_TASKS, NOTIFICATION,
 };
-use crate::kit::bg_task_identity::upsert_identity_from_started;
+use crate::kit::bg_task_identity::{
+    METADATA_TEXT_BYTES, RECENT_METADATA_BYTES, RECENT_METADATA_ENTRIES, bounded_label,
+    protected_task_ids, prune_metadata, upsert_identity_from_started,
+};
 use crate::kit::bg_task_live::{
     mark_task_cancelled, mark_task_completed, seed_live_from_running_snapshot,
     seed_live_from_started, seed_live_from_terminal_snapshot, seed_unobserved_snapshot,
@@ -33,14 +36,15 @@ pub(crate) fn apply_bg_task_snapshot(
         return false;
     }
     *BG_TASK_REVISION.state().write() = revision;
-    let tasks_vec: Vec<BgTaskEntry> = tasks.to_vec();
-    BG_TASKS.state().write().clone_from(&tasks_vec);
+    let selected = bounded_snapshot_tasks(tasks, source);
+    let tasks: Vec<_> = selected.into_iter().map(project_task).collect();
+    BG_TASKS.state().write().clone_from(&tasks);
     let previous_display = BG_DISPLAY.state().read().clone();
     let live_source = source == BgTaskSnapshotSource::Live;
     // 当前权威 live 快照是活动证据：running/None 可以创建（漏 Started）或恢复
     // （lost 后）live detail。历史回放只建立只读事实，不赋予活动。
     if live_source {
-        for task in tasks {
+        for task in &tasks {
             if BgTaskStatus::classify(task.status.as_deref()).is_active() {
                 seed_live_from_running_snapshot(&task.task_id, &task.kind, &task.summary, task.pid);
             }
@@ -58,7 +62,15 @@ pub(crate) fn apply_bg_task_snapshot(
             }
             Some(crate::kit::atoms::BgDisplayEntry {
                 id: t.task_id.clone(),
-                linked_agent_id: previous.and_then(|row| row.linked_agent_id.clone()),
+                linked_agent_id: previous
+                    .and_then(|row| row.linked_agent_id.clone())
+                    .or_else(|| {
+                        BG_TASK_IDENTITY
+                            .state()
+                            .read()
+                            .get(&t.task_id)
+                            .and_then(|identity| identity.agent_id.clone())
+                    }),
                 agent_type: t.kind.clone(),
                 desc: bg_task_description(&t.summary, t.status.as_deref()),
                 is_active: active,
@@ -73,7 +85,7 @@ pub(crate) fn apply_bg_task_snapshot(
     if live_source {
         BG_DISPLAY.state().write().clone_from(&entries);
     }
-    for t in tasks {
+    for t in &tasks {
         upsert_identity_from_started(&t.task_id, &t.kind, &t.summary, t.pid);
         let status = BgTaskStatus::classify(t.status.as_deref());
         if status.is_terminal() {
@@ -95,7 +107,58 @@ pub(crate) fn apply_bg_task_snapshot(
             seed_unobserved_snapshot(&t.task_id, &t.kind, &t.summary, t.pid);
         }
     }
+    if live_source {
+        crate::kit::bg_task_live::reconcile_snapshot_tasks(&protected_task_ids());
+    }
+    prune_metadata();
     true
+}
+
+fn project_task(task: &BgTaskEntry) -> BgTaskEntry {
+    BgTaskEntry {
+        task_id: task.task_id.clone(),
+        kind: bounded_label(&task.kind),
+        summary: bounded_label(&task.summary),
+        started_at: bounded_label(&task.started_at),
+        pid: task.pid,
+        revision: task.revision,
+        status: task.status.as_deref().map(bounded_label),
+    }
+}
+
+/// Live nonterminal control rows, including pending delivery, survive. Historical
+/// status text is not live evidence: all historical rows share the recent budget.
+fn bounded_snapshot_tasks(
+    tasks: &[BgTaskEntry],
+    source: BgTaskSnapshotSource,
+) -> Vec<&BgTaskEntry> {
+    let (mut count, mut bytes) = (0usize, 0usize);
+    let mut selected = Vec::new();
+    for task in tasks.iter().rev() {
+        if source == BgTaskSnapshotSource::Historical
+            || BgTaskStatus::classify(task.status.as_deref()).is_terminal()
+        {
+            let size = std::mem::size_of::<BgTaskEntry>()
+                + task.task_id.len()
+                + task.kind.len().min(METADATA_TEXT_BYTES)
+                + task.summary.len().min(METADATA_TEXT_BYTES)
+                + task.started_at.len().min(METADATA_TEXT_BYTES)
+                + task
+                    .status
+                    .as_ref()
+                    .map_or(0, |status| status.len().min(METADATA_TEXT_BYTES));
+            if count >= RECENT_METADATA_ENTRIES
+                || bytes.saturating_add(size) > RECENT_METADATA_BYTES
+            {
+                continue;
+            }
+            count += 1;
+            bytes += size;
+        }
+        selected.push(task);
+    }
+    selected.reverse();
+    selected
 }
 
 fn has_live_detail(task_id: &str) -> bool {
@@ -103,12 +166,13 @@ fn has_live_detail(task_id: &str) -> bool {
 }
 
 fn bg_task_description(summary: &str, status: Option<&str>) -> String {
+    let summary = bounded_label(summary);
     match BgTaskStatus::classify(status) {
         BgTaskStatus::Lost => format!("{summary} · {}", i18n::tr("bg-task-status-lost")),
         BgTaskStatus::Reconciling => {
             format!("{summary} · {}", i18n::tr("bg-task-status-reconciling"))
         }
-        _ => summary.to_owned(),
+        _ => summary,
     }
 }
 
@@ -188,9 +252,9 @@ pub(crate) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEnt
         let tasks = BG_TASKS.state();
         let mut tasks = tasks.write();
         if let Some(existing) = tasks.iter_mut().find(|t| t.task_id == entry.task_id) {
-            *existing = entry.clone();
+            *existing = project_task(entry);
         } else {
-            tasks.push(entry.clone());
+            tasks.push(project_task(entry));
         }
     }
     upsert_identity_from_started(&entry.task_id, &entry.kind, &entry.summary, entry.pid);
@@ -198,7 +262,7 @@ pub(crate) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEnt
     let display_entry = crate::kit::atoms::BgDisplayEntry {
         id: entry.task_id.clone(),
         linked_agent_id: None,
-        agent_type: entry.kind.clone(),
+        agent_type: bounded_label(&entry.kind),
         desc: bg_task_description(&entry.summary, entry.status.as_deref()),
         is_active: true,
         is_error: false,
@@ -210,13 +274,15 @@ pub(crate) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEnt
     let display = BG_DISPLAY.state();
     let mut display = display.write();
     if let Some(existing) = display.iter_mut().find(|e| e.id == entry.task_id) {
-        existing.agent_type = entry.kind.clone();
+        existing.agent_type = bounded_label(&entry.kind);
         existing.desc = bg_task_description(&entry.summary, entry.status.as_deref());
         existing.is_active = true;
         existing.completed_at = None;
     } else {
         display.push(display_entry);
     }
+    drop(display);
+    prune_metadata();
 }
 
 pub(crate) fn handle_bg_task_completed(
@@ -243,6 +309,7 @@ pub(crate) fn handle_bg_task_completed(
         entry.is_error = !success;
         entry.completed_at = Some(now);
     }
+    prune_metadata();
     let msg = if success {
         i18n::tr_args(
             "app-note-bg-task-completed",
@@ -287,6 +354,7 @@ pub(crate) fn handle_bg_task_cancelled(task_id: &str, reason: &str, revision: Op
         entry.is_error = true;
         entry.completed_at = Some(now);
     }
+    prune_metadata();
 }
 
 pub(crate) fn handle_bg_task_updated(task_id: &str, status: &str, revision: Option<u64>) {
@@ -296,7 +364,7 @@ pub(crate) fn handle_bg_task_updated(task_id: &str, status: &str, revision: Opti
     let tasks = BG_TASKS.state();
     let mut tasks = tasks.write();
     if let Some(task) = tasks.iter_mut().find(|task| task.task_id == task_id) {
-        task.status = Some(status.to_owned());
+        task.status = Some(bounded_label(status));
         let description = bg_task_description(&task.summary, task.status.as_deref());
         if let Some(entry) = BG_DISPLAY
             .state()
@@ -311,3 +379,7 @@ pub(crate) fn handle_bg_task_updated(task_id: &str, status: &str, revision: Opti
     drop(tasks);
     apply_bg_task_snapshot(&snapshot, revision, BgTaskSnapshotSource::Live);
 }
+
+#[cfg(test)]
+#[path = "bg_task_metadata_test.rs"]
+mod metadata_tests;

@@ -3,9 +3,7 @@
     "minimal-mcpp": {
       "type": "stdio",
       "command": "bun",
-      "args": ["run", "src/index.ts"],
-      "cwd": ".",
-    "protocolVersion": "2026-07-28"
+      "args": ["run", "src/index.ts"]
     }
   }
 }

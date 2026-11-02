@@ -54,7 +54,7 @@ fn make_task(id: &str) -> BackgroundTask {
 #[tokio::test]
 async fn test_idle_loop_exits_when_registry_completes_without_queue_message() {
     let manager = Arc::new(TaskManager::new());
-    manager.register_with_kind(make_task("bg-1")).unwrap();
+    let registration = manager.register_with_kind(make_task("bg-1")).unwrap();
     let session = crate::session::Session::new(
         Arc::from("/tmp/terminal-wake-test"),
         FrozenContext::builder().build(),
@@ -82,7 +82,7 @@ async fn test_idle_loop_exits_when_registry_completes_without_queue_message() {
     .expect("loop must reach idle wait before completion");
 
     assert!(manager.complete(
-        "bg-1",
+        &registration,
         BackgroundTaskResult {
             task_id: "bg-1".to_string(),
             agent_name: "test-agent".to_string(),
@@ -148,7 +148,7 @@ async fn test_idle_loop_cancel_returns_interrupted_and_clears_suspended() {
 #[tokio::test]
 async fn test_idle_loop_consumes_queued_completion_before_terminal_registry_check() {
     let manager = Arc::new(TaskManager::new());
-    manager.register_with_kind(make_task("bg-queued")).unwrap();
+    let registration = manager.register_with_kind(make_task("bg-queued")).unwrap();
     let session = crate::session::Session::new(
         Arc::from("/tmp/terminal-wake-queued-test"),
         FrozenContext::builder().build(),
@@ -177,7 +177,7 @@ async fn test_idle_loop_consumes_queued_completion_before_terminal_registry_chec
                         MessageSource::SubAgentComplete,
                         BaseMessage::human("background done"),
                     );
-                    assert!(manager.complete("bg-queued", completion_result("bg-queued")));
+                    assert!(manager.complete(&registration, completion_result("bg-queued")));
                 }
                 manager.active_count() > 0
             })

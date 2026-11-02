@@ -1,9 +1,9 @@
 # Workflow 系统设计
 
-**状态**：现行设计（2026-10-11 Workflow as MCP 迁移后）
+**状态**：现行设计
 **范围**：workflow 子系统运行内核——脚本与 Node wire、runner 与进程所有权、agent 任务与进度、journal/state 落盘、resume/kill、TUI 投影、CLI 与 artifact 分发。
 **接入语义**：MCP 实例（工具/资源/订阅）、任务信道（`agent/task` + `agent/result`）、会话装配与关闭以 [workflow-mcp.md](workflow-mcp.md) 为权威；本文不重复其设计，只保留运行侧事实。
-**代码事实源**：`peri-workflow/`、`mcp-packages/workflow/`（crate `peri-mcp-workflow`）、`npm-packages/@peri-workflow/`、`peri-acp/src/host/{workflow_agent,workflow_consumer,requests/workflow}.rs`、`peri-js-runtime/`；定位入口见 [peri-workflow 代码索引](../code-index/peri-workflow.md)。
+**代码事实源**：`peri-workflow/`、`mcp-packages/workflow/`（crate `peri-mcp-workflow`）、`npm-packages/@peri-workflow/`、`peri-acp/src/host/{workflow_agent,workflow_consumer,workflow_projection,requests/workflow}.rs`、`peri-js-runtime/`；定位入口见 [peri-workflow 代码索引](../code-index/peri-workflow.md)。
 
 ## 1. 概述
 
@@ -47,7 +47,7 @@ Workflow 是 Peri 的多 Agent 编排子系统：用户在 JS 脚本中声明并
 模型面（peri-agent）
   mcp__workflow__{Workflow,WorkflowStatus,WorkflowKill}（deferred 桥接）
 宿主面（peri-acp host）
-  ACP workflow/* handler（经池调用实例）· WorkflowTaskConsumer · 会话装配
+  ACP workflow/* handler（经池调用实例）· WorkflowTaskConsumer · WorkflowProjection · 会话装配
 实例面（peri-mcp-workflow）
   WorkflowMcpServer：tools / resources / subscriptions（协议映射，业务语义委托 runtime）
 领域面（peri-workflow）
@@ -138,10 +138,10 @@ Workflow 是 Peri 的多 Agent 编排子系统：用户在 JS 脚本中声明并
 |------|------|
 | `reserve` | 并发限流检查（默认上限 3，`with_max_concurrent` 可调）后登记 run（含 kill 通道） |
 | `attach_child` | 绑定执行任务句柄；记录已被取消时不 abort，kill 信号仍拥有清理证明 |
-| `complete` | 更新 run 状态并经 broadcast 发布 `WorkflowTaskResult`（保留历史供查询与调试） |
+| `complete` | 更新 run 状态，写入完成 outbox 并发出内部唤醒（保留历史供查询与调试） |
 | `kill` | 触发 kill 通道并移除记录，返回是否命中运行中的 run；进程与任务清理由 runner 收敛 |
 
-完成通知的发送端同时提供给宿主消费的 `WorkflowNotifications` 与 TUI 后台任务视图。
+run 终态进入 registry 的完成 outbox（`pending_completions` / `acknowledge_completion`），由宿主 `WorkflowProjection` 经 `workflow://background-tasks` 读取并按 `WorkflowCompletionAck` 确认；TUI 后台任务视图消费同一外部任务投影。
 
 ### 3.5 WorkflowProgressStore
 
@@ -221,9 +221,9 @@ Git postcondition 只比较 Workflow 前后发生变化的路径，已有且未�
 
 ### 5.3 通知与投递
 
-`RunCompletion::project` 结算外部执行证据后经 registry 广播 `WorkflowTaskResult`：
+`RunCompletion::project` 结算外部执行证据后写入 registry 完成 outbox，并发出仅供唤醒的内部通知：
 
-- **Agent 面**：会话级单次消费者（`WorkflowNotifications::claim_consumer`）订阅广播，把结果作为 Defer 投递进 MessageQueue 并唤醒 Receive；任务 active count 在投递后递减。结果先入队再结清，调用者取消等待不丢完成通知。
+- **Agent 面**：宿主 `WorkflowProjection` 扫描 `workflow://background-tasks`，把未确认终态经 `TaskManager::restore_external_terminal` 投影为会话后台完成并唤醒 Receive；结果先交付会话，再调用鉴权的 `WorkflowCompletionAck`，断线与拒收不确认，重复扫描按稳定终态身份去重。
 - **TUI 面**：后台任务完成事件（`BgTaskKind::Workflow`）。
 - **状态词**：`completed` / `killed` / `failed`；delivery blocked 时不得显示成 completed。
 
@@ -267,7 +267,7 @@ Git postcondition 只比较 Workflow 前后发生变化的路径，已有且未�
 | `WorkflowProgressStore` / `WorkflowTaskRegistry` / `WorkflowJournalStore` / `WorkflowRunner` | session | 随 runtime 构造 | session end |
 | `RpcChannel` 与 run 任务表记录 | per-run | runner 启动 | run 结束或 kill |
 | Node 子进程 | per-run | runner spawn | 正常退出、kill 或崩溃 |
-| 完成通知消费者 | per-session | set-once（`claim_consumer`） | session end |
+| `WorkflowProjection`（完成投递） | per-session | 装配后轮询 `workflow://background-tasks` | session end；未确认结果保留至实例清理 |
 | TUI 快照轮询 | 进程（有会话时） | 启动轮询任务 | CancellationToken 取消 |
 
 ---
@@ -347,4 +347,4 @@ Git postcondition 只比较 Workflow 前后发生变化的路径，已有且未�
 - **工具面**：`Workflow` / `WorkflowStatus` / `WorkflowKill` 经 MCP 桥接成为 deferred 工具（`mcp__workflow__*`，经 `SearchExtraTools → ExecuteExtraTool` 发现与调用）；`WorkflowAgentResult` 是 host-only 回填通道，不进入模型可见面。工具与资源声明以 [workflow-mcp.md](workflow-mcp.md) §4 为权威。
 - **关闭**：策略键 `"WorkflowMiddleware"`（沿用旧链槽位名，用户配置兼容）进 `BUILTIN_INSTANCE_POLICY_KEYS`；workflow 是唯一物理关闭特例——命中关闭集时不 spawn 实例、不建桥接、宿主消费者不启动（`ARC-CAPABILITY-CLOSURE-001`）。
 - **模型手册**：builtin skill `ultracode`（`mcp-packages/workspace/src/resources/builtin/skills/ultracode/SKILL.md`，宿主注册表经 `include_str!` 引用），按需加载，不常驻系统提示词；复杂全生命周期交付由 `ultra-adlc` skill 与 [Ultra-ADLC 设计](ultra-adlc.md)约束。
-- **入口命令**：`/workflows` 打开面板（`PanelKind::Workflow`）；ACP 方法名（`workflow/list_runs`、`workflow/kill_run`、`workflow/kill_agent`、`workflow/resume`）与 TUI 交互在迁移后保持不变。
+- **入口命令**：`/workflows` 打开面板（`PanelKind::Workflow`）；ACP 方法名（`workflow/list_runs`、`workflow/kill_run`、`workflow/kill_agent`、`workflow/resume`）与 TUI 交互保持不变。

@@ -944,7 +944,7 @@ fn test_pending_task_count_reflects_unsettled_tasks() {
     assert_eq!(pending_task_count(none.as_ref()), 0);
     let manager: Arc<dyn TaskManagerPort> = Arc::new(crate::agent::async_tasks::TaskManager::new());
     assert_eq!(pending_task_count(Some(&manager)), 0);
-    manager
+    let ticket = manager
         .register(BgTaskRegistration {
             task_id: "bg-pending".into(),
             kind: BgTaskKind::Shell,
@@ -955,7 +955,7 @@ fn test_pending_task_count_reflects_unsettled_tasks() {
         .unwrap();
     assert_eq!(pending_task_count(Some(&manager)), 1);
     manager.complete(
-        "bg-pending",
+        &ticket,
         peri_acp_types::event::BackgroundTaskResult {
             task_id: "bg-pending".into(),
             agent_name: "bg-shell".into(),

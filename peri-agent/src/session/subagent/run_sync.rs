@@ -187,18 +187,6 @@ where
     }
     let manager = parent_manager.expect("checked above");
     let worker_task_id = task_id.expect("checked above");
-    if let Err(error) = manager.register(BgTaskRegistration {
-        task_id: worker_task_id.clone(),
-        kind: BgTaskKind::Agent,
-        summary: format!("synchronous sub-agent {agent_name}"),
-        kill: None,
-        pid: None,
-    }) {
-        tracing::error!(%error, task_id = %worker_task_id, "sync child parent task registration failed; finishing synchronously");
-        let outcome = await_execution(execution).await?;
-        cancel_guard.disarm();
-        return Ok(SyncCompletion::Finished(outcome));
-    }
 
     let log_task_id = worker_task_id.clone();
     let worker_session = Arc::clone(&session);
@@ -207,9 +195,19 @@ where
     let worker_close_state = Arc::clone(&host.close_state);
     let delivery = on_complete.expect("checked above");
     let close_task_id = worker_task_id.clone();
-    host.close_state
-        .spawn_sync_worker(close_task_id, async move {
+    // Keep ownership until close admission has atomically installed both the
+    // registration and completion worker. Rejection creates no parent receipt.
+    let mut execution = Some(execution);
+    let spawned = host.close_state.spawn_sync_worker(close_task_id, || {
+        let registration = manager.register(BgTaskRegistration {
+            task_id: worker_task_id.clone(), kind: BgTaskKind::Agent,
+            summary: format!("synchronous sub-agent {agent_name}"), kill: None, pid: None,
+        })?;
+        let execution = execution.take().expect("worker admitted only once");
+        Ok(async move {
             let outcome = await_execution(execution).await;
+            // The child task has joined; only this producer can prove its resources stopped.
+            manager.confirm_external_execution_stopped(&registration);
             let result = parent_result(
                 &outcome,
                 &worker_session,
@@ -233,7 +231,7 @@ where
                     }
                 }
             });
-            match manager.settle_completed(&worker_task_id, result, confirmed) {
+            match manager.settle_completed(&registration, result, confirmed) {
                 Ok(true) => worker_close_state.settle_sync_delivery(&worker_task_id),
                 Ok(false) => worker_close_state.record_sync_delivery_failure(
                     &worker_task_id,
@@ -252,7 +250,14 @@ where
                 }
             }
         })
-        .map_err(|error| format!("sync child worker registration failed: {error}"))?;
+    });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, task_id = %log_task_id, "sync worker admission rejected; finishing synchronously without a parent receipt");
+        let outcome =
+            await_execution(execution.expect("rejected factory leaves execution owned")).await?;
+        cancel_guard.disarm();
+        return Ok(SyncCompletion::Finished(outcome));
+    }
 
     tracing::warn!(
         %child_thread_id,
@@ -405,6 +410,13 @@ pub(super) async fn run_sync_subagent(
         .and_then(|host| host.child_owner.clone())
         .map(|owner| owner.acquire(v2_ctx.context.session.turn.execution_binding()))
         .transpose()?;
+    let event_handler = crate::agent::subagent_event_forwarder::with_child_event_origin(
+        event_handler,
+        peri_acp_types::event::ChildEventStream::new(
+            child_thread_id.to_string(),
+            v2_ctx.context.session.turn.execution_binding(),
+        ),
+    );
     let agent_name = agent_name.to_string();
     let cwd = cwd.to_string();
 

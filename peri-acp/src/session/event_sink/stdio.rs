@@ -28,6 +28,8 @@ struct PeriSystemReminderNotification {
         skip_serializing_if = "Option::is_none"
     )]
     source_agent_id: Option<String>,
+    #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+    meta: Option<agent_client_protocol::schema::v1::Meta>,
 }
 
 /// Build ACP-standard metadata for routing output to its originating SubAgent.
@@ -76,6 +78,54 @@ impl StdioEventSink {
             session_id,
             caps,
         }
+    }
+
+    async fn push_system_reminder_with_origin(
+        &self,
+        reminder: &peri_acp_types::system_reminder::SystemReminder,
+        replay: bool,
+        source_agent_id: Option<&str>,
+        origin: Option<&peri_acp_types::event::ChildEventOrigin>,
+    ) -> Result<(), peri_acp_types::event::EventSinkError> {
+        match reminder_carriage(&self.caps, reminder) {
+            StdioReminderCarriage::FilteredOut => {
+                debug!(
+                    source = %reminder.source,
+                    kind = %reminder.kind,
+                    delivery = ?reminder.delivery,
+                    replay,
+                    "stdio sink: system reminder is not addressed to the client audience"
+                );
+                return Ok(());
+            }
+            StdioReminderCarriage::NotCarried => {
+                debug!(
+                    source = %reminder.source,
+                    kind = %reminder.kind,
+                    delivery = ?reminder.delivery,
+                    replay,
+                    "stdio sink: client did not negotiate peri.systemReminder; the structured reminder is not carried"
+                );
+                return Ok(());
+            }
+            StdioReminderCarriage::Structured => {}
+        }
+        let notification = PeriSystemReminderNotification {
+            session_id: self.session_id.clone(),
+            reminder: reminder.clone(),
+            replay,
+            source_agent_id: source_agent_id.map(str::to_string),
+            meta: origin.map(|origin| {
+                serde_json::Map::from_iter([("peri".to_string(), json!({"childRun": origin}))])
+            }),
+        };
+        if let Err(e) = self.cx.send_notification(notification) {
+            error!(error = %e, "StdioEventSink: failed to send system reminder");
+            return Err(peri_acp_types::event::EventSinkError::new(format!(
+                "stdio system reminder failed: {e}"
+            )));
+        }
+        Ok(())
     }
 
     /// Send an arbitrary `SessionUpdate` notification through the SDK connection.
@@ -134,42 +184,8 @@ impl EventSink for StdioEventSink {
         replay: bool,
         source_agent_id: Option<&str>,
     ) -> Result<(), peri_acp_types::event::EventSinkError> {
-        match reminder_carriage(&self.caps, reminder) {
-            StdioReminderCarriage::FilteredOut => {
-                debug!(
-                    source = %reminder.source,
-                    kind = %reminder.kind,
-                    delivery = ?reminder.delivery,
-                    replay,
-                    "stdio sink: system reminder is not addressed to the client audience"
-                );
-                return Ok(());
-            }
-            StdioReminderCarriage::NotCarried => {
-                debug!(
-                    source = %reminder.source,
-                    kind = %reminder.kind,
-                    delivery = ?reminder.delivery,
-                    replay,
-                    "stdio sink: client did not negotiate peri.systemReminder; the structured reminder is not carried"
-                );
-                return Ok(());
-            }
-            StdioReminderCarriage::Structured => {}
-        }
-        let notification = PeriSystemReminderNotification {
-            session_id: self.session_id.clone(),
-            reminder: reminder.clone(),
-            replay,
-            source_agent_id: source_agent_id.map(str::to_string),
-        };
-        if let Err(e) = self.cx.send_notification(notification) {
-            error!(error = %e, "StdioEventSink: failed to send system reminder");
-            return Err(peri_acp_types::event::EventSinkError::new(format!(
-                "stdio system reminder failed: {e}"
-            )));
-        }
-        Ok(())
+        self.push_system_reminder_with_origin(reminder, replay, source_agent_id, None)
+            .await
     }
 
     async fn push_event(
@@ -178,23 +194,40 @@ impl EventSink for StdioEventSink {
         event: &ExecutorEvent,
         context_window: u32,
     ) -> Result<(), peri_acp_types::event::EventSinkError> {
+        let origin = event.child_origin();
+        let event = event.payload();
         if let ExecutorEvent::SystemReminder {
             reminder,
             source_agent_id,
         } = event
         {
-            self.push_system_reminder(_session_id, reminder, false, source_agent_id.as_deref())
-                .await?;
+            self.push_system_reminder_with_origin(
+                reminder,
+                false,
+                source_agent_id.as_deref(),
+                origin,
+            )
+            .await?;
             return Ok(());
         }
         let mapped = map_event(event, context_window, &self.caps);
         for m in mapped {
             for update in m.updates {
-                let notif = session_notification(
+                let mut notif = session_notification(
                     self.session_id.clone(),
                     update,
                     m.source_agent_id.as_deref(),
                 );
+                if let Some(origin) = origin {
+                    let mut meta = m
+                        .source_agent_id
+                        .as_deref()
+                        .map(source_agent_meta)
+                        .unwrap_or_default();
+                    let peri = meta.entry("peri").or_insert_with(|| json!({}));
+                    peri["childRun"] = json!(origin);
+                    notif = notif.meta(meta);
+                }
                 if let Err(e) = self.cx.send_notification(notif) {
                     error!(error = %e, "StdioEventSink: failed to send SessionNotification");
                     return Err(peri_acp_types::event::EventSinkError::new(format!(

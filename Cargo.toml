@@ -13,6 +13,7 @@ members = [
     "mcp-packages/web",
     "mcp-packages/artifact",
     "mcp-packages/cron",
+    "mcp-packages/monitor",
     "mcp-packages/workspace",
     "mcp-packages/workflow",
     "peri-model",
@@ -123,6 +124,7 @@ peri-mcp-credentials = { path = "mcp-packages/credentials" }
 peri-mcp-web = { path = "mcp-packages/web" }
 peri-mcp-artifact = { path = "mcp-packages/artifact" }
 peri-mcp-cron = { path = "mcp-packages/cron" }
+peri-mcp-monitor = { path = "mcp-packages/monitor" }
 peri-mcp-workspace = { path = "mcp-packages/workspace" }
 peri-mcp-workflow = { path = "mcp-packages/workflow" }
 # Apply patches/rmcp-3.5.1-task-subscriptions.patch via scripts/cargo-rmcp-patched.sh.

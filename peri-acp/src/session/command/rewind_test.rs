@@ -748,7 +748,7 @@ async fn test_execute_rewind_completed_event_carries_retained_messages() {
 
 #[tokio::test]
 async fn test_execute_does_not_call_push_done_itself() {
-    // 对应 TRAP: CLAUDE.md issue_2026-05-29-immediate-command-missing-push-done
+    // 对应 TRAP: issue_2026-05-29-immediate-command-missing-push-done
     // RewindCommand 是 Immediate 命令，自身不应调用 push_done（由 executor 负责）。
     //
     // Arrange

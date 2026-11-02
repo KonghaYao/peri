@@ -113,6 +113,144 @@ fn with_max_tokens_overrides_output_limit_without_changing_model() {
     );
 }
 
+fn anthropic_thinking_provider(model: &str, effort: &str) -> LlmProvider {
+    let mut provider = anthropic_provider(model);
+    if let LlmProvider::Anthropic {
+        effort: configured_effort,
+        ..
+    } = &mut provider
+    {
+        *configured_effort = Some(effort.to_string());
+    }
+    provider
+}
+
+#[test]
+fn into_model_anthropic_sonnet_5_5_uses_adaptive_with_default_profile_effort() {
+    let profile = ProfileConfig::default();
+    let model = anthropic_thinking_provider("claude-sonnet-5-5", &profile.effort)
+        .with_max_tokens(profile.max_tokens)
+        .into_model();
+    let prepared = model
+        .prepare_request(&peri_model::ModelRequest::default())
+        .expect("prepare_request 必须成功");
+    let body = prepared.body().as_value();
+    assert_eq!(body["max_tokens"], serde_json::json!(32_000));
+    assert_eq!(body["thinking"], serde_json::json!({ "type": "adaptive" }));
+    assert_eq!(
+        body["output_config"],
+        serde_json::json!({ "effort": "xhigh" })
+    );
+}
+
+#[test]
+fn into_model_anthropic_adaptive_thinking_preserves_explicit_effort() {
+    for effort in ["high", "xhigh", "max"] {
+        let model = anthropic_thinking_provider("claude-sonnet-5-5", effort).into_model();
+        let prepared = model
+            .prepare_request(&peri_model::ModelRequest::default())
+            .expect("prepare_request 必须成功");
+        let body = prepared.body().as_value();
+        assert_eq!(body["max_tokens"], serde_json::json!(32_000));
+        assert_eq!(body["thinking"], serde_json::json!({ "type": "adaptive" }));
+        assert_eq!(
+            body["output_config"],
+            serde_json::json!({ "effort": effort })
+        );
+    }
+}
+
+#[test]
+fn into_model_anthropic_adaptive_thinking_survives_small_config_output_limits() {
+    for max_tokens in [1, 1_024, 1_536, 2_047, 2_048] {
+        let model = anthropic_thinking_provider("claude-sonnet-5-5", "high")
+            .with_max_tokens(max_tokens)
+            .into_model();
+        assert_eq!(model.output_token_limit(), Some(max_tokens));
+        let prepared = model
+            .prepare_request(&peri_model::ModelRequest::default())
+            .expect("prepare_request 必须成功");
+        let body = prepared.body().as_value();
+        assert_eq!(body["max_tokens"], serde_json::json!(max_tokens));
+        assert_eq!(body["thinking"], serde_json::json!({ "type": "adaptive" }));
+        assert_eq!(
+            body["output_config"],
+            serde_json::json!({ "effort": "high" })
+        );
+    }
+}
+
+#[test]
+fn into_model_anthropic_adaptive_thinking_survives_small_request_output_overrides() {
+    let model = anthropic_thinking_provider("claude-sonnet-5-5", "max").into_model();
+    assert_eq!(model.output_token_limit(), Some(32_000));
+    for max_tokens in [1, 1_024, 1_536, 2_047, 2_048] {
+        let prepared = model
+            .prepare_request(&peri_model::ModelRequest::default().with_max_tokens(max_tokens))
+            .expect("prepare_request 必须成功");
+        let body = prepared.body().as_value();
+        assert_eq!(body["max_tokens"], serde_json::json!(max_tokens));
+        assert_eq!(body["thinking"], serde_json::json!({ "type": "adaptive" }));
+        assert_eq!(
+            body["output_config"],
+            serde_json::json!({ "effort": "max" })
+        );
+    }
+}
+
+#[test]
+fn into_model_anthropic_small_manual_config_budget_stays_disabled_after_request_override() {
+    for model_id in ["claude-sonnet-4-6", "custom-sonnet-alias"] {
+        for max_tokens in [1, 1_024] {
+            let model = anthropic_thinking_provider(model_id, "high")
+                .with_max_tokens(max_tokens)
+                .into_model();
+            let prepared = model
+                .prepare_request(&peri_model::ModelRequest::default().with_max_tokens(64_000))
+                .expect("prepare_request 必须成功");
+            let body = prepared.body().as_value();
+            assert_eq!(body["max_tokens"], serde_json::json!(64_000));
+            assert!(body.get("thinking").is_none());
+            assert!(body.get("output_config").is_none());
+        }
+    }
+}
+
+#[test]
+fn into_model_anthropic_unknown_alias_keeps_manual_thinking() {
+    let model = anthropic_thinking_provider("custom-sonnet-alias", "high").into_model();
+    let prepared = model
+        .prepare_request(&peri_model::ModelRequest::default())
+        .expect("prepare_request 必须成功");
+    let body = prepared.body().as_value();
+    assert_eq!(
+        body["thinking"],
+        serde_json::json!({ "type": "enabled", "budget_tokens": 10_000 })
+    );
+    assert_eq!(
+        body["output_config"],
+        serde_json::json!({ "effort": "high" })
+    );
+}
+
+#[test]
+fn into_model_anthropic_without_effort_omits_thinking() {
+    for model_id in [
+        "claude-sonnet-5-5",
+        "claude-sonnet-4-6",
+        "custom-sonnet-alias",
+    ] {
+        let model = anthropic_provider(model_id).into_model();
+        let prepared = model
+            .prepare_request(&peri_model::ModelRequest::default())
+            .expect("prepare_request 必须成功");
+        let body = prepared.body().as_value();
+        assert_eq!(body["max_tokens"], serde_json::json!(32_000));
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("output_config").is_none());
+    }
+}
+
 #[test]
 fn into_model_anthropic_extended_thinking_applied() {
     let provider = LlmProvider::Anthropic {

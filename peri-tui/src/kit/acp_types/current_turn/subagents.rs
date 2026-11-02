@@ -81,7 +81,9 @@ impl CurrentTurn {
                 .push(TurnSegment::SubAgent { subagent_idx: idx });
         }
 
-        let mut subagent = SubAgentAccumulator::new(agent_id, agent_name);
+        let (agent_name, name_omitted) = super::super::subagent_preview::text(&agent_name, 1024);
+        let mut subagent = SubAgentAccumulator::new(agent_id, agent_name.to_owned());
+        subagent.preview_omitted = name_omitted;
         subagent.is_background = is_background;
         self.subagents.push(subagent);
         self.active = true;
@@ -256,10 +258,12 @@ impl CurrentTurn {
             .subagents
             .iter_mut()
             .rev()
-            .find(|s| s.agent_id == agent_id)
+            .find(|s| s.agent_id == agent_id && s.is_running)
         {
             s.is_running = false;
             s.is_error = is_error;
+            let (result, omitted) = super::super::subagent_preview::text(result, 1024);
+            s.preview_omitted |= omitted;
             s.error_reason = (is_error && !result.trim().is_empty()).then(|| result.to_string());
             // [§6.7] 冻结子 turn 的 trailing 流式段——子 turn 不经过快照折叠
             // pass，不冻结则 trailing bubble 保持 Running 形态（started_at
@@ -271,19 +275,29 @@ impl CurrentTurn {
             // output_summary 的工具卡保持 Running（is_running = active && 无输出）。
             s.child_turn.deactivate();
             s.cached_view_model.replace(None);
+            s.seal_preview();
             self.invalidate_cache();
         }
     }
 
     /// Route text chunks into a sub-agent child message.
     pub fn append_subagent_text(&mut self, agent_id: &str, text: &str) -> bool {
+        self.append_subagent_text_with_id(agent_id, text, None)
+    }
+
+    pub fn append_subagent_text_with_id(
+        &mut self,
+        agent_id: &str,
+        text: &str,
+        message_id: Option<&str>,
+    ) -> bool {
         if let Some(s) = self
             .subagents
             .iter_mut()
             .rev()
-            .find(|s| s.agent_id == agent_id)
+            .find(|s| s.agent_id == agent_id && s.is_running)
         {
-            s.append_text(text);
+            s.append_text(text, message_id);
             self.active = true;
             self.invalidate_cache();
             true
@@ -294,13 +308,22 @@ impl CurrentTurn {
 
     /// Route reasoning chunks into a sub-agent child message.
     pub fn append_subagent_reasoning(&mut self, agent_id: &str, text: &str) -> bool {
+        self.append_subagent_reasoning_with_id(agent_id, text, None)
+    }
+
+    pub fn append_subagent_reasoning_with_id(
+        &mut self,
+        agent_id: &str,
+        text: &str,
+        message_id: Option<&str>,
+    ) -> bool {
         if let Some(s) = self
             .subagents
             .iter_mut()
             .rev()
-            .find(|s| s.agent_id == agent_id)
+            .find(|s| s.agent_id == agent_id && s.is_running)
         {
-            s.append_reasoning(text);
+            s.append_reasoning(text, message_id);
             self.active = true;
             self.invalidate_cache();
             true
@@ -315,7 +338,7 @@ impl CurrentTurn {
             .subagents
             .iter_mut()
             .rev()
-            .find(|s| s.agent_id == agent_id)
+            .find(|s| s.agent_id == agent_id && s.is_running)
         {
             s.start_tool(tool);
             self.active = true;
@@ -346,7 +369,7 @@ impl CurrentTurn {
             .subagents
             .iter_mut()
             .rev()
-            .find(|s| s.agent_id == agent_id)
+            .find(|s| s.agent_id == agent_id && s.is_running)
         {
             let ended = s.end_tool(tool_id, output, is_error);
             if ended {

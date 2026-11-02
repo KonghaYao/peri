@@ -12,7 +12,8 @@
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{
-    BG_DISPLAY, BG_LIVE_DETAIL, BgDisplayEntry, LANG_VERSION, SELECTED_SUBAGENT_ID, VIEW_MODELS,
+    ACTIVE_SESSION_ID, BG_DISPLAY, BG_LIVE_DETAIL, BRIDGE_RESET_COUNTER, BgDisplayEntry,
+    LANG_VERSION, SELECTED_SUBAGENT_ID, VIEW_MODELS,
 };
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::tui_render_unit::{
@@ -32,6 +33,9 @@ use ratatui_kit::{
 #[path = "subagent_detail_cache.rs"]
 mod render_cache;
 
+#[path = "child_history_detail.rs"]
+mod child_history;
+
 #[component]
 pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
@@ -40,6 +44,10 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let sv = hooks.use_state(|| 0usize);
     let scrollbar_grab = hooks.use_state(|| None::<usize>);
     let render_cache = hooks.use_state(render_cache::DetailRenderCache::default);
+    let history = hooks.use_state(child_history::ChildHistoryView::default);
+    let _ = hooks.use_atom(&ACTIVE_SESSION_ID);
+    let _ = hooks.use_atom(&BRIDGE_RESET_COUNTER);
+    let _ = hooks.use_atom(&SELECTED_SUBAGENT_ID);
     hooks.use_hook(move || DetailViewportHook {
         cache: render_cache,
         scroll: sv,
@@ -63,6 +71,23 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let _ = vm_store;
     let _ = display_store;
     let _ = live_store;
+
+    let history_scope = history.read().scope_for(
+        selected_id.as_deref().unwrap_or_default(),
+        group.as_ref().map(|group| group.agent_id.as_str()),
+    );
+    hooks.use_effect(
+        {
+            let scope = history_scope.clone();
+            move || {
+                history.write().reset(scope);
+                render_cache.write().clear(Vec::new());
+                *sv.write() = 0;
+            }
+        },
+        history_scope.clone(),
+    );
+    let event_scope = history_scope.clone();
 
     hooks.use_event_handler(EventScope::Current, EventPriority::Normal, move |event| {
         let key = match event {
@@ -135,10 +160,62 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         if key.kind != KeyEventKind::Press {
             return EventResult::Ignored;
         }
+        if key.code == KeyCode::Char('h') {
+            let enabled = history.read().enabled;
+            if enabled {
+                history.write().close();
+            } else {
+                history.write().reset(event_scope.clone());
+                child_history::request(history, child_history::Action::Open);
+            }
+            render_cache.write().clear(Vec::new());
+            *sv.write() = 0;
+            return EventResult::Consumed;
+        }
+        if history.read().enabled {
+            use child_history::Action;
+            let action = match key.code {
+                KeyCode::Char('[') => Some(Action::Older),
+                KeyCode::Char(']') => Some(Action::Newer),
+                KeyCode::Char('r') => Some(Action::Open),
+                KeyCode::Enter => Some(Action::Body),
+                KeyCode::Char('n') => Some(Action::NextChunk),
+                KeyCode::Char('p') => Some(Action::RestartBody),
+                _ => None,
+            };
+            if let Some(action) = action {
+                child_history::request(history, action);
+                *sv.write() = 0;
+                return EventResult::Consumed;
+            }
+            match key.code {
+                KeyCode::Esc => {
+                    history.write().close();
+                    render_cache.write().clear(Vec::new());
+                    *sv.write() = 0;
+                    return EventResult::Consumed;
+                }
+                KeyCode::Char('b') => {
+                    history.write().back_to_page();
+                    *sv.write() = 0;
+                    return EventResult::Consumed;
+                }
+                KeyCode::Tab | KeyCode::BackTab => {
+                    history.write().select_body(key.code == KeyCode::BackTab);
+                    *sv.write() = 0;
+                    return EventResult::Consumed;
+                }
+                _ => {}
+            }
+        }
         // Esc 单层关闭（面板打开时 active_layer=Panel，消息区 Esc 分支放行，
         // 这里栈顶弹栈收尾；嵌套消息不参与消息区焦点仲裁）。
         match key.code {
-            KeyCode::Esc => close_panel(),
+            KeyCode::Esc => {
+                history.write().close();
+                render_cache.write().clear(Vec::new());
+                close_panel();
+            }
             KeyCode::Tab => {
                 if let Some(row) = render_cache.write().focus_next(false) {
                     focus_detail_row(sv, row, area.height.saturating_sub(2) as usize);
@@ -199,41 +276,58 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 嵌套渲染：组内 view_models → vm_to_lines_cached（复用统一水平网格与
     // markdown 增量缓存；md 复制按钮关闭——嵌套内容不提供复制按钮）。
     let mut lines: Vec<Line<'static>> = Vec::new();
-    match &group {
-        Some(g) => {
-            lines.push(Line::from(vec![Span::styled(
-                crate::truncate::truncate_by_width(
-                    &g.agent_name,
-                    area.width.saturating_sub(1) as usize,
-                ),
-                Style::new()
-                    .fg(theme_def.read().component.panel.title)
-                    .bold(),
-            )]));
-            lines.push(Line::from(vec![Span::styled(
-                crate::truncate::truncate_by_width(
-                    &format!("  [{}]", g.agent_id),
-                    area.width.saturating_sub(1) as usize,
-                ),
-                Style::new().fg(theme_def.read().semantic.text.dim),
-            )]));
-            lines.push(Line::from(""));
-            let theme = theme_def.read().clone();
-            let mut cache = render_cache.write_no_update();
-            if cache.prepare(g, &grid, theme, LANG_VERSION.get(), lines) {
-                *sv.write_no_update() = initial_detail_offset(
-                    g.is_running,
-                    cache.height(),
-                    area.height.saturating_sub(2) as usize,
-                );
+    let reading_history = {
+        let history = history.read();
+        history.enabled && history.matches(&history_scope)
+    };
+    if reading_history {
+        let width = area.width.saturating_sub(1) as usize;
+        let (header, text) = history.read().presentation(width);
+        // The sparse layout keeps total height without allocating every rendered row.
+        render_cache
+            .write_no_update()
+            .prepare_text(header, text, width);
+    } else {
+        match &group {
+            Some(g) => {
+                lines.push(Line::from(vec![Span::styled(
+                    crate::truncate::truncate_by_width(
+                        &g.agent_name,
+                        area.width.saturating_sub(1) as usize,
+                    ),
+                    Style::new()
+                        .fg(theme_def.read().component.panel.title)
+                        .bold(),
+                )]));
+                lines.push(Line::from(vec![Span::styled(
+                    crate::truncate::truncate_by_width(
+                        &format!("  [{}]", g.agent_id),
+                        area.width.saturating_sub(1) as usize,
+                    ),
+                    Style::new().fg(theme_def.read().semantic.text.dim),
+                )]));
+                lines.push(Line::from(""));
+                if g.preview_omitted {
+                    lines.push(Line::from(i18n::tr("subagent-preview-omitted")));
+                }
+                lines.push(Line::from(i18n::tr("subagent-history-open-hint")));
+                let theme = theme_def.read().clone();
+                let mut cache = render_cache.write_no_update();
+                if cache.prepare(g, &grid, theme, LANG_VERSION.get(), lines) {
+                    *sv.write_no_update() = initial_detail_offset(
+                        g.is_running,
+                        cache.height(),
+                        area.height.saturating_sub(2) as usize,
+                    );
+                }
             }
-        }
-        None => {
-            lines.push(Line::from(vec![Span::styled(
-                i18n::tr("subagent-detail-not-found"),
-                Style::new().fg(theme_def.read().semantic.text.muted),
-            )]));
-            render_cache.write_no_update().clear(lines);
+            None => {
+                lines.push(Line::from(vec![Span::styled(
+                    i18n::tr("subagent-detail-not-found"),
+                    Style::new().fg(theme_def.read().semantic.text.muted),
+                )]));
+                render_cache.write_no_update().clear(lines);
+            }
         }
     }
 
@@ -510,6 +604,7 @@ fn find_live_detail_subagent(
         is_running: detail.status == crate::kit::atoms::BgLiveStatus::Running,
         is_error: detail.subagent_is_error,
         error_reason: detail.subagent_result.clone(),
+        preview_omitted: detail.preview_omitted,
         fold: fold_for_status(FoldTarget::SubAgent, status),
         user_modified: false,
         content_hash: 0,

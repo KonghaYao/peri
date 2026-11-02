@@ -27,8 +27,11 @@ fn shell_result(id: &str, output: &str) -> BackgroundTaskResult {
     }
 }
 
-fn register_shell(manager: &TaskManager, id: &str) {
-    manager
+fn register_shell(
+    manager: &TaskManager,
+    id: &str,
+) -> peri_acp_types::tasks::TaskRegistrationTicket {
+    let ticket = manager
         .register(BgTaskRegistration {
             task_id: id.into(),
             kind: BgTaskKind::Shell,
@@ -37,6 +40,9 @@ fn register_shell(manager: &TaskManager, id: &str) {
             kill: Some(Box::new(|| {})),
         })
         .unwrap();
+    // The synthetic task has no process; mailbox/result responsibility remains.
+    manager.confirm_external_execution_stopped(&ticket);
+    ticket
 }
 
 struct SummaryCapture(Arc<parking_lot::Mutex<Vec<peri_model::ModelRequest>>>);
@@ -152,8 +158,8 @@ async fn failed_child_resume_preserves_blocked_result_through_full_compact(
         .unwrap();
     let parent_manager = Arc::new(TaskManager::new());
     let child_manager = Arc::new(TaskManager::new());
-    register_shell(&child_manager, "task-A");
-    register_shell(&child_manager, "task-B");
+    let ticket_a = register_shell(&child_manager, "task-A");
+    let ticket_b = register_shell(&child_manager, "task-B");
     let owner = ParkedChildOwner::new(
         child_id.clone(),
         "parent-thread".into(),
@@ -176,7 +182,11 @@ async fn failed_child_resume_preserves_blocked_result_through_full_compact(
         crate::session::bg_complete::queue_terminal_delivery(owner.queue.clone()),
     );
     child_manager
-        .settle_completed("task-A", shell_result("task-A", RESULT_A), initial_delivery)
+        .settle_completed(
+            &ticket_a,
+            shell_result("task-A", RESULT_A),
+            initial_delivery,
+        )
         .unwrap();
     let result_a_id = terminal_delivery_id("task-A", "terminal");
     let mut failed_config = resume_config_with(
@@ -337,7 +347,7 @@ async fn failed_child_resume_preserves_blocked_result_through_full_compact(
     );
     let result_b = shell_result("task-B", RESULT_B);
     child_manager
-        .settle_completed("task-B", result_b.clone(), old_delivery.clone())
+        .settle_completed(&ticket_b, result_b.clone(), old_delivery.clone())
         .unwrap();
     old_delivery(&result_b, BgTaskKind::Shell).unwrap();
     let result_b_id = terminal_delivery_id("task-B", "terminal");

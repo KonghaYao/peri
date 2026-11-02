@@ -498,7 +498,7 @@ async fn test_post_handoff_history_flush_failure(background: bool) {
         .unwrap();
     let parent_manager = Arc::new(TaskManager::new());
     let child_manager = Arc::new(TaskManager::new());
-    child_manager
+    let ticket = child_manager
         .register(BgTaskRegistration {
             task_id: "flush-shell".into(),
             kind: BgTaskKind::Shell,
@@ -613,7 +613,7 @@ async fn test_post_handoff_history_flush_failure(background: bool) {
         .expect("交接必须到达 canonical 提交")
         .unwrap();
     assert!(child_manager.complete(
-        "flush-shell",
+        &ticket,
         BackgroundTaskResult {
             task_id: "flush-shell".into(),
             agent_name: "shell".into(),
