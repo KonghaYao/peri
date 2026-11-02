@@ -893,7 +893,9 @@ fn summary_instruction_lists_recovery_resources_before_current_state() {
     );
     assert!(prompt.contains("SkillTool(\"<exact canonical name>\")"));
     assert!(prompt.contains("body archived by this compaction"));
+    assert!(prompt.contains("when retention is not explicitly shown"));
     assert!(prompt.contains("preloaded; do not reload"));
+    assert!(prompt.contains("work which depends on their results waits"));
     assert!(prompt.contains("Contract: X. Recent actual: Y (deviation)."));
     assert!(prompt.contains("Recovery targets the contract"));
     assert!(prompt.contains("report it as unrecoverable"));
@@ -926,6 +928,9 @@ fn continuation_hint_is_single_line_and_gates_the_first_action() {
         "The summary below",
         "before any other tool call",
         "SkillTool",
+        "If a reload fails",
+        "DiscoverSkillsTool",
+        "cannot be recovered",
         "authoritative",
         "user instruction takes precedence",
     ] {

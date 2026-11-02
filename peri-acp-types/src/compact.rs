@@ -9,7 +9,7 @@ use crate::messages::BaseMessage;
 /// Full Compact 摘要消息的内部续接标记。
 ///
 /// 必须保持单行：识别方按完整首行匹配，不解析多行结构。
-pub const CONTINUATION_HINT: &str = "[Context has been compacted. The summary below replaced earlier history. If it contains Recovery resources, complete their required first action before any other tool call: use SkillTool to reload every listed, non-preloaded skill by its exact canonical name. Rules in the summary are hints; the reloaded body is authoritative. A newer explicit user instruction takes precedence.]";
+pub const CONTINUATION_HINT: &str = "[Context has been compacted. The summary below replaced earlier history. If it contains Recovery resources, before any other tool call use SkillTool to reload each listed, non-preloaded skill by its exact canonical name. If a reload fails, use the failure guidance, including DiscoverSkillsTool when directed, or report that the skill cannot be recovered. Rules in the summary are hints; the reloaded body is authoritative. A newer explicit user instruction takes precedence.]";
 
 /// 历史持久化摘要使用过的旧续接标记。
 ///

@@ -73,6 +73,12 @@
 - `cargo fmt --all -- --check` → exit 0。
 - `git diff --check` → exit 0。
 
+CodeRabbit 复审处理：
+
+- Major：摘要输入不区分 inherited/own，保留状态无法证明。接受提示词方案：留存未显式标记时默认 `body archived by this compaction` 并要求重载；不新增 boundary marker（输入结构改动超出本次范围）。
+- Minor：重载失败时允许按 `SkillTool` 的错误引导使用 `DiscoverSkillsTool`，或报告不可恢复。
+- Minor：仍在运行的后台任务只阻塞依赖其结果的工作，不阻塞无关工作。
+
 夹具调整（均由续接标记变长引起，非产品行为变化）：
 
 - `projection_borrowed_test.rs` 的旧摘要金标改用 `LEGACY_CONTINUATION_HINT`。
