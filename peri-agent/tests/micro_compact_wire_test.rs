@@ -117,6 +117,19 @@ fn adaptive_model() -> (AgentModelBridge, ProviderCapabilities) {
     )
 }
 
+fn deepseek_model() -> (AgentModelBridge, ProviderCapabilities) {
+    let endpoint = "https://api.deepseek.com/anthropic".parse().unwrap();
+    let model = Arc::new(AnthropicModel::new(
+        AnthropicConfig::new(endpoint, "fixture", "deepseek-v4-flash")
+            .without_cache()
+            .with_extended_thinking(1024, "medium"),
+    ));
+    (
+        AgentModelBridge::new(model).with_system("Trusted system."),
+        ProviderCapabilities::anthropic(),
+    )
+}
+
 fn pending_arguments() -> Value {
     json!({"path":"保留.rs","content":"line 1\n`literal ${var}`\nfull code", "padding":"pending-argument".repeat(2000)})
 }
@@ -517,16 +530,22 @@ fn closed_signed_step(transcript: &mut MessageTranscript) -> (MessageId, Message
     (ai, done)
 }
 
-async fn micro_compacted_wire_contract(adaptive: bool) {
+enum CompactThinkingMode {
+    Manual,
+    Adaptive,
+    DeepSeek,
+}
+
+async fn micro_compacted_wire_contract(mode: CompactThinkingMode) {
     let fixture = Fixture::open().await;
     let mut transcript = fixture.transcript();
     transcript.append(BaseMessage::human("Old closed task."));
     let (ai, done) = closed_signed_step(&mut transcript);
     transcript.append(BaseMessage::human("NEW TASK after the old step."));
-    let (bridge, caps) = if adaptive {
-        adaptive_model()
-    } else {
-        model(true)
+    let (bridge, caps) = match mode {
+        CompactThinkingMode::Manual => model(true),
+        CompactThinkingMode::Adaptive => adaptive_model(),
+        CompactThinkingMode::DeepSeek => deepseek_model(),
     };
     let plan = plan_micro_with_facts(
         &transcript,
@@ -554,32 +573,52 @@ async fn micro_compacted_wire_contract(adaptive: bool) {
         !encoded.contains("\"signature\":\"\""),
         "不能回填空签名 thinking"
     );
-    assert!(
-        !body["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .flat_map(|message| message["content"].as_array().into_iter().flatten())
-            .any(|block| block["type"] == "thinking"),
-        "micro compact 已移除 signed reasoning，适配器不得伪造 thinking"
-    );
-    if adaptive {
-        assert_eq!(body["thinking"], json!({"type": "adaptive"}));
-        assert_eq!(body["output_config"], json!({"effort": "max"}));
+    if matches!(mode, CompactThinkingMode::DeepSeek) {
+        for message in body["messages"].as_array().unwrap() {
+            if message["role"] == "assistant" {
+                assert_eq!(
+                    message["content"][0],
+                    json!({"type": "thinking", "thinking": ""})
+                );
+            }
+        }
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "enabled", "budget_tokens": 1024})
+        );
     } else {
         assert!(
-            body.get("thinking").is_none(),
-            "manual thinking 缺少带签名闭包时必须省略"
+            !body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|message| message["content"].as_array().into_iter().flatten())
+                .any(|block| block["type"] == "thinking"),
+            "micro compact 已移除 signed reasoning，官方适配器不得伪造 thinking"
         );
+        if matches!(mode, CompactThinkingMode::Adaptive) {
+            assert_eq!(body["thinking"], json!({"type": "adaptive"}));
+            assert_eq!(body["output_config"], json!({"effort": "max"}));
+        } else {
+            assert!(
+                body.get("thinking").is_none(),
+                "manual thinking 缺少带签名闭包时必须省略"
+            );
+        }
     }
 }
 
 #[tokio::test]
 async fn test_micro_compacted_manual_history_omits_thinking_without_fake_blocks() {
-    micro_compacted_wire_contract(false).await;
+    micro_compacted_wire_contract(CompactThinkingMode::Manual).await;
 }
 
 #[tokio::test]
 async fn test_micro_compacted_adaptive_history_keeps_adaptive_without_fake_blocks() {
-    micro_compacted_wire_contract(true).await;
+    micro_compacted_wire_contract(CompactThinkingMode::Adaptive).await;
+}
+
+#[tokio::test]
+async fn test_micro_compacted_deepseek_history_restores_thinking_before_retry() {
+    micro_compacted_wire_contract(CompactThinkingMode::DeepSeek).await;
 }

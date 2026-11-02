@@ -39,11 +39,47 @@ const MIN_THINKING_BUDGET: u32 = 1_024;
 /// 手动 thinking 至少为正文保留的输出预算；thinking 与正文共享输出上限。
 const MIN_RESPONSE_RESERVE: u32 = 1_024;
 
+/// 历史 reasoning 回放策略，由端点与模型共同决定。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ThinkingReplay {
+    /// 官方 Anthropic：只回放带非空 signature 的 thinking，不伪造占位块。
+    Signed,
+    /// 兼容端点：不校验 signature，history 中 assistant 消息必须携带 thinking 块。
+    Verbatim,
+}
+
+impl ThinkingReplay {
+    /// 端点身份优先于模型名：DeepSeek 接受 claude* 别名并映射到自家模型，
+    /// 但回放规则仍由端点决定。
+    fn for_endpoint(endpoint: &Url, model: &str) -> Self {
+        let host = endpoint.host_str().unwrap_or_default().to_ascii_lowercase();
+        if host == "deepseek.com" || host.ends_with(".deepseek.com") {
+            return Self::Verbatim;
+        }
+        if host == "api.anthropic.com" {
+            return Self::Signed;
+        }
+        let model = model.to_ascii_lowercase();
+        // 覆盖 OpenRouter 的 `anthropic/claude-*` 形式。
+        if model.starts_with("claude") || model.contains("/claude") {
+            Self::Signed
+        } else {
+            Self::Verbatim
+        }
+    }
+}
+
 pub(super) fn build_request(
     config: &AnthropicConfig,
     request: &ModelRequest,
 ) -> ModelResult<BuiltAnthropicRequest> {
-    let (mut messages, mut system_prompt) = messages_to_anthropic(&request.messages);
+    let replay = ThinkingReplay::for_endpoint(&config.endpoint, &config.model);
+    let (mut messages, mut system_prompt) = messages_to_anthropic(&request.messages, replay);
+    if replay == ThinkingReplay::Verbatim {
+        // DeepSeek 等兼容端点要求 thinking 模式下的历史 assistant 消息携带 thinking 块，
+        // 且不校验输入 signature；缺块时用空 thinking 占位补齐。占位须在 cache 处理前插入。
+        cache::ensure_thinking_blocks(&mut messages);
+    }
     if config.enable_cache {
         cache::apply_cache_to_messages(&mut messages);
     }
@@ -88,9 +124,10 @@ pub(super) fn build_request(
             let thinking_budget = config.thinking_budget.min(available_thinking);
             // 手动 thinking 要求最后一个 assistant turn 以带签名的 thinking 块开始。
             // 旧历史没有可验证的签名块，伪造空签名会被 API 拒绝，此时按官方建议不启用
-            // thinking；adaptive 没有该要求，仍可回放无 thinking 的旧历史。
+            // thinking；兼容端点不校验签名且强制回放，不受该门控约束。
             (thinking_budget >= MIN_THINKING_BUDGET
-                && final_assistant_turn_starts_with_thinking(&messages))
+                && (replay == ThinkingReplay::Verbatim
+                    || final_assistant_turn_starts_with_thinking(&messages)))
             .then(|| {
                 json!({
                     "type": "enabled",
@@ -132,7 +169,10 @@ pub(super) fn messages_endpoint(endpoint: &Url) -> ModelResult<Url> {
     Ok(endpoint)
 }
 
-fn messages_to_anthropic(messages: &[ModelMessage]) -> (Vec<Value>, cache::SplitSystemPrompt) {
+fn messages_to_anthropic(
+    messages: &[ModelMessage],
+    replay: ThinkingReplay,
+) -> (Vec<Value>, cache::SplitSystemPrompt) {
     let mut system = Vec::new();
     let mut result = Vec::new();
 
@@ -146,13 +186,13 @@ fn messages_to_anthropic(messages: &[ModelMessage]) -> (Vec<Value>, cache::Split
             }
             ModelMessage::User { content } => result.push(json!({
                 "role": "user",
-                "content": content_to_anthropic(content),
+                "content": content_to_anthropic(content, replay),
             })),
             ModelMessage::Assistant {
                 content,
                 tool_calls,
             } => {
-                let mut parts = content_to_anthropic_parts(content);
+                let mut parts = content_to_anthropic_parts(content, replay);
                 let content_tool_use_ids = content
                     .iter()
                     .filter_map(|block| match block {
@@ -171,7 +211,7 @@ fn messages_to_anthropic(messages: &[ModelMessage]) -> (Vec<Value>, cache::Split
             ModelMessage::ToolResult {
                 result: tool_result,
             } => {
-                let block = tool_result_to_anthropic(tool_result);
+                let block = tool_result_to_anthropic(tool_result, replay);
                 let appended = result.last_mut().is_some_and(|message: &mut Value| {
                     if message["role"] != "user" {
                         return false;
@@ -208,12 +248,12 @@ fn tool_call_to_anthropic(tool_call: &ToolCall) -> Value {
     })
 }
 
-fn tool_result_to_anthropic(result: &ToolResult) -> Value {
+fn tool_result_to_anthropic(result: &ToolResult, replay: ThinkingReplay) -> Value {
     json!({
         "type": "tool_result",
         "id": result.id.clone().unwrap_or_else(|| result.tool_call_id.clone()),
         "tool_use_id": result.tool_call_id,
-        "content": content_to_anthropic(&result.content),
+        "content": content_to_anthropic(&result.content, replay),
         "is_error": result.is_error,
     })
 }
@@ -225,26 +265,26 @@ fn content_text(content: &[ContentBlock]) -> String {
         .collect()
 }
 
-fn content_to_anthropic(content: &[ContentBlock]) -> Value {
-    Value::Array(content_to_anthropic_parts(content))
+fn content_to_anthropic(content: &[ContentBlock], replay: ThinkingReplay) -> Value {
+    Value::Array(content_to_anthropic_parts(content, replay))
 }
 
-fn content_to_anthropic_parts(content: &[ContentBlock]) -> Vec<Value> {
+fn content_to_anthropic_parts(content: &[ContentBlock], replay: ThinkingReplay) -> Vec<Value> {
     let foreign_replay = content
         .iter()
         .any(|block| matches!(block, ContentBlock::ProviderState { .. }));
     content
         .iter()
         .filter_map(|block| match block {
-            // Anthropic 只接受由它签名、可原样回放的 thinking 块。其他 provider 的
-            // reasoning 摘要，以及缺失或空签名的 reasoning，都按普通文本重放；不能
-            // 伪造 signature，也不能把空 thinking 块塞回历史。
+            // 官方 Anthropic 只接受由它签名、可原样回放的 thinking 块；其他 provider
+            // 的 reasoning 摘要跨协议回放时一律降级为文本，避免泄漏原生状态。
             ContentBlock::Reasoning { text, signature }
-                if foreign_replay || !has_replay_signature(signature) =>
+                if foreign_replay
+                    || (replay == ThinkingReplay::Signed && !has_replay_signature(signature)) =>
             {
                 (!text.is_empty()).then(|| json!({ "type": "text", "text": text }))
             }
-            _ => block_to_anthropic(block),
+            _ => block_to_anthropic(block, replay),
         })
         .collect()
 }
@@ -306,7 +346,7 @@ fn is_replay_thinking_block(block: &Value) -> bool {
     }
 }
 
-fn block_to_anthropic(block: &ContentBlock) -> Option<Value> {
+fn block_to_anthropic(block: &ContentBlock, replay: ThinkingReplay) -> Option<Value> {
     match block {
         ContentBlock::Text { text } => Some(json!({ "type": "text", "text": text })),
         ContentBlock::Image { source } => match source {
@@ -337,7 +377,7 @@ fn block_to_anthropic(block: &ContentBlock) -> Option<Value> {
             Some(value)
         }
         ContentBlock::ToolUse { tool_call } => Some(tool_call_to_anthropic(tool_call)),
-        ContentBlock::ToolResult { result } => Some(tool_result_to_anthropic(result)),
+        ContentBlock::ToolResult { result } => Some(tool_result_to_anthropic(result, replay)),
         ContentBlock::RedactedReasoning { data } => Some(json!({
             "type": "redacted_thinking",
             "data": data,

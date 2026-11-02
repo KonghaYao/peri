@@ -108,6 +108,132 @@ fn unsigned_reasoning_is_replayed_as_text() {
     assert!(!body.to_string().contains("\"type\":\"thinking\""));
 }
 
+fn deepseek_config() -> AnthropicConfig {
+    AnthropicConfig::new(
+        Url::parse("https://api.deepseek.com/anthropic").expect("valid endpoint"),
+        "test-credential",
+        "deepseek-v4-flash",
+    )
+}
+
+#[test]
+fn deepseek_compatible_history_fills_missing_thinking_blocks() {
+    let request = ModelRequest::new(vec![
+        ModelMessage::user_text("read the file"),
+        ModelMessage::assistant(
+            vec![],
+            vec![ToolCall::new(
+                "call-1",
+                "Read",
+                JsonObject::from_value(json!({ "path": "a" })).expect("object"),
+            )],
+        ),
+        ModelMessage::tool_result(ToolResult::success("call-1", "Read", "content")),
+    ])
+    .with_max_tokens(64_000);
+
+    let body = body_for_test(
+        &deepseek_config().with_extended_thinking(10_000, "max"),
+        &request,
+    );
+    assert_eq!(
+        body["thinking"],
+        json!({ "type": "enabled", "budget_tokens": 10_000 })
+    );
+    assert_eq!(body["output_config"], json!({ "effort": "max" }));
+    for message in body["messages"].as_array().expect("messages array") {
+        if message["role"] != "assistant" {
+            continue;
+        }
+        assert_eq!(message["content"][0]["type"], "thinking");
+        assert_eq!(message["content"][0]["thinking"], "");
+        assert!(message["content"][0].get("signature").is_none());
+    }
+    assert!(!body.to_string().contains("\"signature\":\"\""));
+}
+
+#[test]
+fn deepseek_compatible_replays_unsigned_reasoning_as_thinking() {
+    let request = ModelRequest::new(vec![
+        ModelMessage::user_text("question"),
+        ModelMessage::assistant(
+            vec![
+                ContentBlock::Reasoning {
+                    text: "unsigned trace".into(),
+                    signature: None,
+                },
+                ContentBlock::Reasoning {
+                    text: "empty signature trace".into(),
+                    signature: Some(String::new()),
+                },
+            ],
+            vec![ToolCall::new(
+                "call-1",
+                "Read",
+                JsonObject::from_value(json!({ "path": "a" })).expect("object"),
+            )],
+        ),
+        ModelMessage::tool_result(ToolResult::success("call-1", "Read", "content")),
+    ])
+    .with_max_tokens(64_000);
+
+    let body = body_for_test(
+        &deepseek_config().with_extended_thinking(10_000, "max"),
+        &request,
+    );
+    assert_eq!(
+        body["messages"][1]["content"][0],
+        json!({ "type": "thinking", "thinking": "unsigned trace" })
+    );
+    assert_eq!(
+        body["messages"][1]["content"][1],
+        json!({ "type": "thinking", "thinking": "empty signature trace", "signature": "" })
+    );
+}
+
+#[test]
+fn deepseek_endpoint_keeps_verbatim_replay_for_claude_alias() {
+    let mut config = deepseek_config();
+    config.model = "claude-alias".into();
+    let request = ModelRequest::new(vec![
+        ModelMessage::user_text("old question"),
+        ModelMessage::assistant(vec![ContentBlock::text("old answer")], vec![]),
+        ModelMessage::user_text("new question"),
+    ])
+    .with_max_tokens(64_000);
+
+    let body = body_for_test(&config.with_extended_thinking(10_000, "max"), &request);
+    // 端点身份优先：alias 模型仍按兼容端点补块并启用 thinking。
+    assert_eq!(body["messages"][1]["content"][0]["type"], "thinking");
+    assert_eq!(
+        body["thinking"],
+        json!({ "type": "enabled", "budget_tokens": 10_000 })
+    );
+}
+
+#[test]
+fn official_anthropic_endpoint_requires_signed_replay_even_with_non_claude_model() {
+    let config = AnthropicConfig::new(
+        Url::parse("https://api.anthropic.com").expect("valid endpoint"),
+        "test-credential",
+        "model-alias",
+    )
+    .with_extended_thinking(1_024, "high");
+    let request = ModelRequest::new(vec![
+        ModelMessage::user_text("old question"),
+        ModelMessage::assistant(vec![ContentBlock::text("old answer")], vec![]),
+        ModelMessage::user_text("new question"),
+    ])
+    .with_max_tokens(2_048);
+
+    let body = body_for_test(&config, &request);
+    assert_eq!(
+        body["messages"][1]["content"],
+        json!([{ "type": "text", "text": "old answer" }])
+    );
+    assert!(body.get("thinking").is_none());
+}
+
 #[test]
 fn adaptive_thinking_keeps_old_history_without_thinking_blocks() {
     let mut config = config().with_extended_thinking(1_024, "high");
