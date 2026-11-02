@@ -56,7 +56,7 @@
 - [x] ThreadMq 领域接口与契约测试（`ThreadMqStore`、`Mq*` DTO、内存实现、契约 v7）
 - [x] 运行时生产者/Receive/child close 收敛（Receive 同事务移交并镜像 Transcript）
 - [x] ACP/TUI 接线（既有 `session/input/*`、快照 DTO 与 generation 不变）
-- [ ] 全量目标验证、PR、CI 与 CodeRabbit
+- [x] 全量目标验证、PR、CI 与 CodeRabbit
 
 ## 验证记录
 
@@ -76,3 +76,19 @@
 | `git diff --check` | 通过 |
 
 未覆盖项：`e2e/` 按 `docs/standards/testing.md` 留在 CI 运行；本地未跑 TUI 人工烟测。
+
+2026-11-02 合并 `origin/main` 后（PR [#321](https://github.com/KonghaYao/peri/pull/321)，提交 `f2cc2fef9`）：
+
+| 命令 | 结果 |
+| --- | --- |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-agent` | 14 个 target 全绿（含三套 compact 对抗） |
+| `... -p peri-acp-types --lib` / `-p peri-resources --lib` | 706 / 632 passed，0 failed |
+| `... -p peri-middlewares --lib` | 1865 passed / 0 failed / 2 ignored |
+| `... -p peri-acp --lib` | 1111 passed / 0 failed / 1 ignored（1 例 `HOME` 并发夹具冲突，单跑通过；nextest 进程隔离下不出现） |
+| `peri-agent --lib --test-threads=24` 连跑 8 次 | 均 1418 passed / 0 failed（修复前 6 次中 2 次失败） |
+| `bash scripts/verify-async.sh` | verdict=pass（receipt `20261102T070142Z`） |
+| CI run [41404015459](https://github.com/KonghaYao/peri/actions/runs/41404015459) | ubuntu / macOS / Windows 全部 success |
+
+修复记录：同步 middleware hook 经 `enqueue_detached` 入队时写入被投递到 runtime，
+Receive 在选择前缀前不等提交，会把在途消息判成空闲而退出。`MessageQueue` 增加在途
+分离入队计数与 `await_pending_enqueues`，Receive 与循环退出判定各等一次。
