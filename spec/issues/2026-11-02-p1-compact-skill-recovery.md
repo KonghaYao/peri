@@ -82,5 +82,5 @@ CodeRabbit 复审处理：
 夹具调整（均由续接标记变长引起，非产品行为变化）：
 
 - `projection_borrowed_test.rs` 的旧摘要金标改用 `LEGACY_CONTINUATION_HINT`。
-- `resident_budget_test.rs` 的新增工具结果从 1000 字节降为 700 字节，保留「总量超限、自有区未超限」边界。
+- `resident_budget_test.rs` 的新增工具结果从 1000 字节降为 500 字节，保留「总量超限、自有区未超限」边界；Ubuntu 与 macOS 的字节差需要两侧安全余量。
 - `compaction_loop_test.rs` 第二次 Full 的 `estimated_tokens_before` 期望从 97082 更新为 97081。

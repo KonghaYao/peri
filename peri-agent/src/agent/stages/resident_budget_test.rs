@@ -666,7 +666,7 @@ async fn resident_below_inherited_limit_keeps_new_work_gate() {
         let mut transcript = handle.write();
         transcript.append(make_ai_with_tool("", "Bash", "below_limit_call"));
         // 续接标记变长后仍要留出「总量超限、自有区未超限」的边界余量。
-        transcript.append(make_small_tool_result("below_limit_call", &"n".repeat(700)));
+        transcript.append(make_small_tool_result("below_limit_call", &"n".repeat(500)));
     }
     let before_second =
         ResidentHistoryPressure::from_transcript(LIMIT, &session.transcript().read());
