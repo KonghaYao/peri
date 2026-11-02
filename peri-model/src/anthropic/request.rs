@@ -60,11 +60,10 @@ impl ThinkingReplay {
             return Self::Signed;
         }
         let model = model.to_ascii_lowercase();
-        // 覆盖 OpenRouter 的 `anthropic/claude-*` 形式。
-        if model.starts_with("claude") || model.contains("/claude") {
-            Self::Signed
-        } else {
+        if model.starts_with("deepseek-") || model.contains("/deepseek-") {
             Self::Verbatim
+        } else {
+            Self::Signed
         }
     }
 }

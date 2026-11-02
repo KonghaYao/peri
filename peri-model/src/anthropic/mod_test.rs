@@ -235,6 +235,44 @@ fn official_anthropic_endpoint_requires_signed_replay_even_with_non_claude_model
 }
 
 #[test]
+fn unknown_proxy_model_alias_defaults_to_signed_replay() {
+    let mut config = config().with_extended_thinking(1_024, "high");
+    config.model = "model-alias".into();
+    let request = ModelRequest::new(vec![
+        ModelMessage::user_text("old question"),
+        ModelMessage::assistant(vec![ContentBlock::text("old answer")], vec![]),
+        ModelMessage::user_text("new question"),
+    ])
+    .with_max_tokens(2_048);
+
+    let body = body_for_test(&config, &request);
+    assert_eq!(
+        body["messages"][1]["content"],
+        json!([{ "type": "text", "text": "old answer" }])
+    );
+    assert!(body.get("thinking").is_none());
+}
+
+#[test]
+fn deepseek_model_on_compatible_proxy_keeps_verbatim_replay() {
+    let mut config = config().with_extended_thinking(1_024, "high");
+    config.model = "deepseek-v4-flash".into();
+    let request = ModelRequest::new(vec![
+        ModelMessage::user_text("old question"),
+        ModelMessage::assistant(vec![ContentBlock::text("old answer")], vec![]),
+        ModelMessage::user_text("new question"),
+    ])
+    .with_max_tokens(2_048);
+
+    let body = body_for_test(&config, &request);
+    assert_eq!(body["messages"][1]["content"][0]["type"], "thinking");
+    assert_eq!(
+        body["thinking"],
+        json!({ "type": "enabled", "budget_tokens": 1_024 })
+    );
+}
+
+#[test]
 fn adaptive_thinking_keeps_old_history_without_thinking_blocks() {
     let mut config = config().with_extended_thinking(1_024, "high");
     config.model = "claude-sonnet-5-5".into();
