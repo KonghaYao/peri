@@ -11,7 +11,7 @@ use peri_agent::agent::stages::{run_react_loop, LoopResult, StageContext};
 use peri_agent::agent::token::ContextBudget;
 use peri_agent::error::{AgentError, AgentResult};
 use peri_agent::messages::{BaseMessage, ToolCallRequest};
-use peri_agent::session::{FrozenContext, MessageSource, QueuedMessage, Session};
+use peri_agent::session::{FrozenContext, MessageQueue, MessageSource, QueuedMessage, Session};
 use peri_agent::tools::BaseTool;
 use peri_model::{
     ModelCapabilities, ModelError, ModelMessage, ModelRequest, ModelResponse, ModelStream,
@@ -101,6 +101,22 @@ impl BoundSession {
             db,
             repo,
         }
+    }
+
+    /// 绑定本会话真实资源与 thread 的 MQ 门面（与生产装配同形）。
+    fn queue(&self) -> MessageQueue {
+        MessageQueue::bind(self.resources.clone(), self.thread_id.clone())
+    }
+
+    /// 生产形态的会话：MQ 与 transcript 共用同一存储和 thread。
+    fn session(&self, cwd: &str) -> Arc<Session> {
+        Session::new_with_cancel_and_queue(
+            Arc::from(cwd),
+            FrozenContext::builder().build(),
+            Some(self.thread_id.clone()),
+            Arc::new(CancellationToken::new()),
+            self.queue(),
+        )
     }
 }
 
@@ -273,11 +289,7 @@ async fn make_case(
     EventHandles,
 ) {
     let bound = BoundSession::open().await;
-    let session = Session::new(
-        Arc::from(bound.repo.path().to_string_lossy().as_ref()),
-        FrozenContext::builder().build(),
-        Some(bound.thread_id.clone()),
-    );
+    let session = bound.session(bound.repo.path().to_string_lossy().as_ref());
     {
         let transcript = session.transcript();
         let mut guard = transcript.write();
@@ -331,10 +343,13 @@ async fn make_case(
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
     });
-    ctx.session.queue.push_sync(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        BaseMessage::human("continue now"),
-    ));
+    ctx.session
+        .queue
+        .push_async(QueuedMessage::prompt(
+            MessageSource::UserInput,
+            BaseMessage::human("continue now"),
+        ))
+        .await;
     (bound, ctx, reason, summary, handles)
 }
 

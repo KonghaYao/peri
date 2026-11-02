@@ -19,6 +19,7 @@ use crate::thread::ThreadId;
 use anyhow::Result;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// 单次 Receive 的上限；与旧 `drain_batch` 的批次上限一致。
@@ -289,9 +290,25 @@ struct Mailbox {
     wake: tokio::sync::Notify,
     wake_version: tokio::sync::watch::Sender<u64>,
     send_selection: Mutex<Vec<MessageId>>,
+    /// 已受理但尚未提交的分离入队数量（同步 hook 桥，见 [`MessageQueue::begin_detached_enqueue`]）。
+    pending_enqueues: AtomicUsize,
+    pending_drained: tokio::sync::Notify,
     /// 仅测试：记录被 `suppress_sync` 处置的消息，供旧断言读取。
     #[cfg(feature = "test-support")]
     suppressed: Mutex<Vec<QueuedMessage>>,
+}
+
+/// 一次分离入队的在途凭证；Drop 即宣告该写入结束（见 [`MessageQueue::begin_detached_enqueue`]）。
+pub struct DetachedEnqueue {
+    inner: Arc<Mailbox>,
+}
+
+impl Drop for DetachedEnqueue {
+    fn drop(&mut self) {
+        if self.inner.pending_enqueues.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.inner.pending_drained.notify_waiters();
+        }
+    }
 }
 
 impl Default for MessageQueue {
@@ -332,6 +349,8 @@ impl MessageQueue {
                 wake: tokio::sync::Notify::new(),
                 wake_version: tokio::sync::watch::channel(0).0,
                 send_selection: Mutex::new(Vec::new()),
+                pending_enqueues: AtomicUsize::new(0),
+                pending_drained: tokio::sync::Notify::new(),
                 #[cfg(feature = "test-support")]
                 suppressed: Mutex::new(Vec::new()),
             }),
@@ -341,6 +360,34 @@ impl MessageQueue {
     /// 本门面绑定的 thread。
     pub fn thread_id(&self) -> &ThreadId {
         &self.inner.thread_id
+    }
+
+    /// 登记一次「已受理、尚未提交」的分离入队。
+    ///
+    /// 同步 middleware hook 无法就地 await 持久提交，只能把写入投递到 runtime；
+    /// 调用方在下一次 [`Self::await_pending_enqueues`] 之前不得据此断定收件箱为空。
+    /// 返回的 guard 在写入结束（成功或失败）时 Drop，才把入队计为已完成。
+    pub fn begin_detached_enqueue(&self) -> DetachedEnqueue {
+        self.inner.pending_enqueues.fetch_add(1, Ordering::AcqRel);
+        DetachedEnqueue {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+
+    /// 等待所有已受理的分离入队提交完成。
+    ///
+    /// Receive 在选择前缀前必须调用：否则本轮选择会漏掉刚由 hook 投递的消息，
+    /// 循环据此判定空闲并退出。
+    pub async fn await_pending_enqueues(&self) {
+        loop {
+            let notified = self.inner.pending_drained.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.inner.pending_enqueues.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
+        }
     }
 
     // ── 事实操作 ──

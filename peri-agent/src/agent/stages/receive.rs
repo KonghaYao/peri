@@ -56,6 +56,8 @@ pub(super) async fn run_receive_with_budget(
 ) -> crate::error::AgentResult<ReceiveOutput> {
     let execution = input.context.session.turn.execution_binding();
     let queue = input.context.session.queue.clone();
+    // 同步 hook 的分离入队可能仍在提交：先等它落库，本轮选择才不会漏掉该消息。
+    queue.await_pending_enqueues().await;
     let permit = queue.begin_receive(MqReceivePurpose::ModelLoop, execution.clone());
     let selected = queue
         .select_for_receive(&permit)

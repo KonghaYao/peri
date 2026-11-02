@@ -24,8 +24,8 @@ use peri_agent::{
     error::{AgentError, AgentResult},
     messages::BaseMessage,
     session::{
-        exec::compact_pipeline::execute_compact, FrozenContext, MessageSource, MessageTranscript,
-        QueuedMessage, Session,
+        exec::compact_pipeline::execute_compact, FrozenContext, MessageQueue, MessageSource,
+        MessageTranscript, QueuedMessage, Session,
     },
     tools::BaseTool,
 };
@@ -82,10 +82,12 @@ impl BoundSession {
     }
 
     fn session(&self, payloads: Vec<PersistedPayload>) -> Arc<Session> {
-        let session = Session::new(
+        let session = Session::new_with_cancel_and_queue(
             Arc::from(self.cwd.as_str()),
             FrozenContext::builder().build(),
             Some(self.thread_id.clone()),
+            Arc::new(CancellationToken::new()),
+            MessageQueue::bind(self.resources.clone(), self.thread_id.clone()),
         );
         *session.transcript().write() = MessageTranscript::new()
             .with_own_payloads(payloads)
@@ -204,10 +206,13 @@ async fn test_compact_session_next_prompt_restores_pressure_before_reason() {
     let session = bound.session(Vec::new());
     let (model, summary) = make_models(true);
     let first = make_context(&session, model.clone(), summary.clone());
-    session.queue().push_sync(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        BaseMessage::human("x".repeat(360_000)),
-    ));
+    session
+        .queue()
+        .push_async(QueuedMessage::prompt(
+            MessageSource::UserInput,
+            BaseMessage::human("x".repeat(360_000)),
+        ))
+        .await;
     assert!(matches!(
         run_react_loop(first.clone(), 4).await,
         LoopResult::Completed
@@ -221,10 +226,13 @@ async fn test_compact_session_next_prompt_restores_pressure_before_reason() {
         Some(90_000)
     );
     let second = make_context(&session, model.clone(), summary.clone());
-    session.queue().push_sync(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        BaseMessage::human("y".repeat(60_000)),
-    ));
+    session
+        .queue()
+        .push_async(QueuedMessage::prompt(
+            MessageSource::UserInput,
+            BaseMessage::human("y".repeat(60_000)),
+        ))
+        .await;
     let result = run_react_loop(second, 4).await;
     assert!(
         matches!(result, LoopResult::Completed),
@@ -259,10 +267,13 @@ async fn test_compact_session_cold_snapshot_compacts_before_first_reason() {
     let session = bound.session(snapshot.payloads);
     let (model, summary) = make_models(false);
     let context = make_context(&session, model.clone(), summary.clone());
-    session.queue().push_sync(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        BaseMessage::human("continue"),
-    ));
+    session
+        .queue()
+        .push_async(QueuedMessage::prompt(
+            MessageSource::UserInput,
+            BaseMessage::human("continue"),
+        ))
+        .await;
     let result = run_react_loop(context, 4).await;
     assert!(
         matches!(result, LoopResult::Completed),
@@ -298,10 +309,13 @@ async fn test_compact_session_small_prompts_do_not_call_summary() {
     let (model, summary) = make_models(false);
     for text in ["first small task", "second small task"] {
         let context = make_context(&session, model.clone(), summary.clone());
-        session.queue().push_sync(QueuedMessage::prompt(
-            MessageSource::UserInput,
-            BaseMessage::human(text),
-        ));
+        session
+            .queue()
+            .push_async(QueuedMessage::prompt(
+                MessageSource::UserInput,
+                BaseMessage::human(text),
+            ))
+            .await;
         let result = run_react_loop(context, 4).await;
         assert!(matches!(result, LoopResult::Completed), "{result:?}");
     }
@@ -349,10 +363,13 @@ async fn test_compact_session_cold_compacted_history_keeps_exclusions() {
     session.transcript().write().set_flags_batch(snapshot.flags);
     let (model, summary) = make_models(false);
     let context = make_context(&session, model.clone(), summary.clone());
-    session.queue().push_sync(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        BaseMessage::human("continue"),
-    ));
+    session
+        .queue()
+        .push_async(QueuedMessage::prompt(
+            MessageSource::UserInput,
+            BaseMessage::human("continue"),
+        ))
+        .await;
     let result = run_react_loop(context, 4).await;
     assert!(matches!(result, LoopResult::Completed), "{result:?}");
     assert_eq!(summary.calls.load(Ordering::SeqCst), 0);
@@ -392,10 +409,13 @@ async fn test_compact_session_before_model_growth_is_checked_once_before_request
     chain.add(Box::new(AppendBeforeModel(calls.clone())));
     let mut context = make_context(&session, model.clone(), summary.clone());
     context.runtime.middleware_chain = Arc::new(chain);
-    session.queue().push_sync(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        BaseMessage::human("small task"),
-    ));
+    session
+        .queue()
+        .push_async(QueuedMessage::prompt(
+            MessageSource::UserInput,
+            BaseMessage::human("small task"),
+        ))
+        .await;
     let result = run_react_loop(context, 4).await;
     assert!(matches!(result, LoopResult::Completed), "{result:?}");
     assert_eq!(*model.order.lock(), ["summary", "reason"]);
@@ -584,10 +604,13 @@ async fn test_compact_session_micro_shrink_does_not_hide_new_before_model_growth
         ]),
     )))
     .build();
-    session.queue().push_sync(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        BaseMessage::human("continue"),
-    ));
+    session
+        .queue()
+        .push_async(QueuedMessage::prompt(
+            MessageSource::UserInput,
+            BaseMessage::human("continue"),
+        ))
+        .await;
     let result = run_react_loop(context.clone(), 5).await;
     assert!(
         std::iter::from_fn(|| events.try_observe()).any(|event| matches!(

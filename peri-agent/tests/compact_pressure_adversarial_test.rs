@@ -135,10 +135,14 @@ impl BaseTool for GrowthTool {
         _: ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         match self.growth {
-            Growth::User => self.queue.push_sync(QueuedMessage::prompt(
-                MessageSource::UserInput,
-                BaseMessage::human("new ".repeat(12_000)),
-            )),
+            Growth::User => {
+                self.queue
+                    .push_async(QueuedMessage::prompt(
+                        MessageSource::UserInput,
+                        BaseMessage::human("new ".repeat(12_000)),
+                    ))
+                    .await
+            }
             Growth::Reminder => {
                 let reminder = TrustedSystemReminderFactory::for_producer()
                     .construct(SystemReminder {
@@ -154,11 +158,13 @@ impl BaseTool for GrowthTool {
                         metadata: serde_json::json!({}),
                     })
                     .unwrap();
-                self.queue.push_sync(QueuedMessage::system_reminder(
-                    MessageKind::Defer,
-                    MessageSource::SystemInjected,
-                    reminder,
-                ));
+                self.queue
+                    .push_async(QueuedMessage::system_reminder(
+                        MessageKind::Defer,
+                        MessageSource::SystemInjected,
+                        reminder,
+                    ))
+                    .await;
             }
             _ => {}
         }
@@ -270,10 +276,12 @@ async fn make_bound_session() -> BoundSession {
         })
         .await
         .unwrap();
-    let session = Session::new(
+    let session = Session::new_with_cancel_and_queue(
         Arc::from(cwd.as_str()),
         FrozenContext::builder().build(),
         Some(thread_id.clone()),
+        Arc::new(CancellationToken::new()),
+        MessageQueue::bind(resources.clone(), thread_id.clone()),
     );
     {
         let transcript = session.transcript();
@@ -320,10 +328,13 @@ async fn assert_growth_compacted_before_next_reason(growth: Growth) {
         std::collections::BTreeMap::from([("Work".into(), tool as Arc<dyn BaseTool>)]),
     )))
     .build();
-    ctx.session.queue.push_sync(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        BaseMessage::human("log ".repeat(90_000)),
-    ));
+    ctx.session
+        .queue
+        .push_async(QueuedMessage::prompt(
+            MessageSource::UserInput,
+            BaseMessage::human("log ".repeat(90_000)),
+        ))
+        .await;
     let result = run_react_loop(ctx.clone(), 5).await;
     assert!(matches!(result, LoopResult::Completed), "下一次 Reason 前应压缩；result={result:?}, real_request_tokens={:?}, tracker={:?}, summary_calls={}", *model.request_tokens.lock(), ctx.compact.token_tracker.read().estimated_context_tokens(), summary.0.load(Ordering::SeqCst));
     assert_eq!(
@@ -496,28 +507,38 @@ async fn assert_binary_attachment_reaches_first_reason(cold_document: bool) {
             .load_session_snapshot(&bound.thread_id)
             .await
             .unwrap();
-        let restored = Session::new(
+        let restored = Session::new_with_cancel_and_queue(
             Arc::from(bound._repo.path().to_string_lossy().as_ref()),
             FrozenContext::builder().build(),
             Some(bound.thread_id.clone()),
+            Arc::new(CancellationToken::new()),
+            MessageQueue::bind(bound.resources.clone(), bound.thread_id.clone()),
         );
         let transcript = restored.transcript();
-        let mut guard = transcript.write();
-        *guard = peri_agent::session::MessageTranscript::new()
-            .with_own_payloads(snapshot.payloads)
-            .with_persistence(bound.resources.clone(), bound.thread_id.clone());
-        guard.set_flags_batch(snapshot.flags);
-        drop(guard);
-        restored.queue().push_sync(QueuedMessage::prompt(
-            MessageSource::UserInput,
-            BaseMessage::human("Continue inspecting the attachment."),
-        ));
+        {
+            let mut guard = transcript.write();
+            *guard = peri_agent::session::MessageTranscript::new()
+                .with_own_payloads(snapshot.payloads)
+                .with_persistence(bound.resources.clone(), bound.thread_id.clone());
+            guard.set_flags_batch(snapshot.flags);
+        }
+        restored
+            .queue()
+            .push_async(QueuedMessage::prompt(
+                MessageSource::UserInput,
+                BaseMessage::human("Continue inspecting the attachment."),
+            ))
+            .await;
         restored
     } else {
-        bound.session.queue().push_sync(QueuedMessage::prompt(
-            MessageSource::UserInput,
-            attachment.clone(),
-        ));
+        bound
+            .session
+            .queue()
+            .push_async(QueuedMessage::prompt(
+                MessageSource::UserInput,
+                attachment.clone(),
+            ))
+            .await;
         bound.session.clone()
     };
     let model = Arc::new(AttachmentReasoner::default());

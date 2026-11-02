@@ -436,7 +436,9 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 // 不能以“队列为空”为由提前退出并留下自动续跑候选。
                 && !context.session.async_result_mailbox.has_ready()
             {
-                // 竞态保护：退出前再检查一次队列是否有新消息到达
+                // 竞态保护：退出前再检查一次队列是否有新消息到达。
+                // 分离入队可能仍在提交，先等它落库，否则会把在途消息判成空闲。
+                context.session.queue.await_pending_enqueues().await;
                 if context
                     .session
                     .queue

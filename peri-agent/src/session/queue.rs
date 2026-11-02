@@ -25,7 +25,10 @@ pub(crate) fn enqueue_detached(queue: &MessageQueue, message: QueuedMessage) {
     }
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => {
+            // 在途凭证随写入任务结束释放；Receive 会等计数归零再选择前缀。
+            let pending = queue.begin_detached_enqueue();
             handle.spawn(async move {
+                let _pending = pending;
                 if let Err(error) = queue.enqueue(message).await {
                     tracing::warn!(%error, "middleware MQ enqueue failed");
                 }
