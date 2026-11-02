@@ -44,6 +44,22 @@ mod cases {
     }
 
     #[test]
+    fn test_detect_legacy_compact_continuation_hint_without_reminder_tags() {
+        let text = format!(
+            "{}\n\ncompact summary body",
+            peri_acp_types::compact::LEGACY_CONTINUATION_HINT
+        );
+        let info =
+            detect_reminder(&text).expect("legacy compact continuation hint should be detected");
+
+        assert!(matches!(info.reminder_type, ReminderType::ContinuationHint));
+        assert!(
+            info.summary.is_empty(),
+            "旧 compact 控制文本同样不应作为用户可见摘要"
+        );
+    }
+
+    #[test]
     fn test_detect_channel_message() {
         i18n::init(None);
         let info = detect_reminder(
