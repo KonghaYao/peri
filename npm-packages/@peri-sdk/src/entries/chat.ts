@@ -10,6 +10,7 @@ export { ChatService } from "../chat/service";
 export { ChatUserAction, parseChatUserAction } from "../chat/action";
 export { clearSessionOwnership } from "../chat/ownership";
 export * from "../chat/errors";
+export { SessionQueueStaleError } from "../agent/session-queue";
 export { WorkspaceMismatchError } from "../workspace/errors";
 export type { WorkspaceRef } from "../workspace/types";
 

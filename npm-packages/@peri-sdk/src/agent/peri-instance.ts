@@ -12,6 +12,7 @@ import { AcpMcpBridge, resolveAcpMcpBindings, type AcpMcpBinding } from "./acp-m
 import { InteractionBroker } from "./interaction-broker";
 import type { InteractionAnswer } from "../contracts/interaction";
 import { Session, SessionStartError, type SessionStartResult } from "./session";
+import { SessionQueueStaleError } from "./session-queue";
 import type { CloseOptions } from "./session-close";
 import type { AcpMcpServer } from "../contracts/acp";
 import type { JsonRpcNotification, Transport } from "../transport/types";
@@ -457,6 +458,7 @@ export class PeriInstance implements PeriInstancePort {
             if (this.trackedInputs.has(inputId)) this.trackedInputs.set(inputId, state);
         } catch (error) {
             this.trackedInputs.delete(inputId);
+            this.blockStaleQueue(error);
             throw error;
         }
     }
@@ -467,14 +469,32 @@ export class PeriInstance implements PeriInstancePort {
 
     async dispatch(inputId: string): Promise<void> {
         const session = this.requireSession();
-        await session.dispatch(inputId);
+        try {
+            await session.dispatch(inputId);
+        } catch (error) {
+            this.blockStaleQueue(error);
+            throw error;
+        }
         if (this.trackedInputs.has(inputId)) this.trackedInputs.set(inputId, "dispatching");
     }
 
     async takeBack(inputId: string): Promise<void> {
         const session = this.requireSession();
-        await session.takeBack(inputId);
+        try {
+            await session.takeBack(inputId);
+        } catch (error) {
+            this.blockStaleQueue(error);
+            throw error;
+        }
         this.trackedInputs.delete(inputId);
+    }
+
+    /**
+     * 旧代次队列写入不再有持久化保证：与关闭未确认一样阻断新执行，
+     * 由宿主销毁 runtime 后重新加载。SDK 不自动重放用户内容。
+     */
+    private blockStaleQueue(error: unknown): void {
+        if (error instanceof SessionQueueStaleError) this.markBlocked();
     }
 
     async cancel(): Promise<"requested" | "idle"> {
