@@ -275,37 +275,8 @@ enum PluginAction {
         /// 搜索关键词
         query: String,
     },
-    /// 管理 hook 执行来源信任（项目/local settings、插件来源 hooks 默认不执行）
-    Trust {
-        #[command(subcommand)]
-        action: TrustAction,
-    },
     /// 清理 7 天未使用的孤儿插件文件
     Cleanup,
-}
-
-#[derive(Subcommand)]
-enum TrustAction {
-    /// 显式授权当前 workspace 的来源 hooks（settings 或插件来源，二选一）
-    Grant {
-        /// 来源范围：project / local（`--plugin` 时忽略）
-        #[arg(long, default_value = "project")]
-        scope: String,
-        /// 插件来源（安装记录 id 或插件名；身份的 origin/scope/projectPath 取自安装记录）
-        #[arg(long)]
-        plugin: Option<String>,
-    },
-    /// 撤销来源 hooks 的授权
-    Revoke {
-        /// 来源范围：project / local（`--plugin` 时忽略）
-        #[arg(long, default_value = "project")]
-        scope: String,
-        /// 插件来源（安装记录 id 或插件名）
-        #[arg(long)]
-        plugin: Option<String>,
-    },
-    /// 查看当前 workspace 的授权状态（含插件来源）
-    Status,
 }
 
 #[derive(Subcommand)]
@@ -901,15 +872,6 @@ fn main() -> Result<()> {
                     }
                     PluginAction::Info { plugin } => cli_plugin::run_plugin_info(&plugin),
                     PluginAction::Search { query } => cli_plugin::run_plugin_search(&query),
-                    PluginAction::Trust { action } => match action {
-                        TrustAction::Grant { scope, plugin } => {
-                            cli_plugin::run_plugin_trust_grant(&scope, plugin.as_deref())
-                        }
-                        TrustAction::Revoke { scope, plugin } => {
-                            cli_plugin::run_plugin_trust_revoke(&scope, plugin.as_deref())
-                        }
-                        TrustAction::Status => cli_plugin::run_plugin_trust_status(),
-                    },
                     PluginAction::Cleanup => {
                         let claude_dir = dirs::home_dir()
                             .unwrap_or_else(|| std::path::PathBuf::from("."))

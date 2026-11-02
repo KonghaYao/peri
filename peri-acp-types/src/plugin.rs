@@ -562,7 +562,7 @@ pub struct LoadedPlugin {
     /// 插件来源 marketplace（如 "claude-plugins-official"），用于追踪插件来源
     pub marketplace: String,
     /// 来源作用域身份（M6）：显式元数据，供「用户全局 vs 项目声明」区分与
-    /// hook 信任门控使用；不靠名称或路径猜。
+    /// hook 来源身份匹配使用；不靠名称或路径猜。
     pub scope: PluginScope,
 }
 
