@@ -159,14 +159,14 @@ const CRON_TOOLS: &[BuiltinMcpTool] = &[
     },
 ];
 
-/// `monitor` 实例的工具声明（6 项；顺序即声明段顺序）。
+/// `monitor` 实例的工具声明（4 项；顺序即声明段顺序）。
 ///
-/// v1 只做 command source。六个工具一律 deferred（`direct: false`）且无提示词
+/// v1 只做 command source。四个工具一律 deferred（`direct: false`）且无提示词
 /// 声明模板（与 `cron` 同形）。`monitor_start` 返回标准 MCP Tasks 句柄，
 /// `monitor_read` / `monitor_stop` / `monitor_list` 返回 Complete 结果。
-/// `monitor_wakes` / `monitor_ack` 是 host-only：保留在 `tools/list` 供宿主唤醒泵
-/// 调用，不进入桥接、ToolSearch 索引或模型 tools 参数。任务状态纯内存；重启或
-/// 实例替换后旧 id 一律 unknown。
+/// alert 提醒由宿主任务订阅轮询 `tasks/get` 的 `_meta["peri/monitor"]` 驱动，
+/// 没有额外的 host-only 工具。任务状态纯内存；重启或实例替换后旧 id 一律
+/// unknown。
 const MONITOR_TOOLS: &[BuiltinMcpTool] = &[
     BuiltinMcpTool {
         context_retention: crate::tools::ContextRetention::SideEffectReceipt,
@@ -202,24 +202,6 @@ const MONITOR_TOOLS: &[BuiltinMcpTool] = &[
         effective_name: "mcp__monitor__monitor_list",
         direct: false,
         model_visible: true,
-        prompt_declaration: None,
-    },
-    BuiltinMcpTool {
-        context_retention: crate::tools::ContextRetention::PreviewOnly,
-        completes_on_response: true,
-        original_name: "monitor_wakes",
-        effective_name: "mcp__monitor__monitor_wakes",
-        direct: false,
-        model_visible: false,
-        prompt_declaration: None,
-    },
-    BuiltinMcpTool {
-        context_retention: crate::tools::ContextRetention::PreviewOnly,
-        completes_on_response: true,
-        original_name: "monitor_ack",
-        effective_name: "mcp__monitor__monitor_ack",
-        direct: false,
-        model_visible: false,
         prompt_declaration: None,
     },
 ];

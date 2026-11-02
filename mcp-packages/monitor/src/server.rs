@@ -25,7 +25,8 @@ use rmcp::{
 };
 
 use crate::state::{MonitorState, MonitorStatus, TaskSnapshot};
-use crate::tools::{self, parse_ack, parse_list, parse_read, parse_start, parse_stop, parse_wakes};
+use crate::tools::{self, parse_list, parse_read, parse_start, parse_stop};
+use peri_acp_types::monitor::{MonitorAlertMeta, MONITOR_META_KEY};
 
 /// `Implementation::name` for the monitor server.
 const MONITOR_SERVER_NAME: &str = "peri-monitor-mcp";
@@ -116,20 +117,6 @@ impl ServerHandler for MonitorMcpServer {
                 }
                 Err(error) => Ok(tool_error("monitor_list", &error)),
             },
-            "monitor_wakes" => match parse_wakes(&arguments) {
-                Ok(wakes) => match self.state.wakes(owner.as_deref(), wakes.limit) {
-                    Ok(wakes) => json_response(peri_acp_types::monitor::MonitorWakePage { wakes }),
-                    Err(error) => Ok(tool_error("monitor_wakes", &error)),
-                },
-                Err(error) => Ok(tool_error("monitor_wakes", &error)),
-            },
-            "monitor_ack" => match parse_ack(&arguments) {
-                Ok(ack) => {
-                    let acked = self.state.ack(owner.as_deref(), &ack.wake_ids, ack.outcome);
-                    Ok(success_json(serde_json::json!({ "acked": acked })))
-                }
-                Err(error) => Ok(tool_error("monitor_ack", &error)),
-            },
             other => Err(McpError::invalid_params(
                 format!("unknown tool: {other}"),
                 None,
@@ -149,15 +136,18 @@ impl ServerHandler for MonitorMcpServer {
             .map_err(unknown_task)?;
         let mut result = GetTaskResult::new(detailed_task(snapshot.clone()));
         // The Tasks projection has no room for custom task fields; the host
-        // reads alert counters from result metadata for observability.
+        // task-subscription poller reads the cumulative alert projection from
+        // result metadata and owns rate limiting / delivery.
+        let alert = MonitorAlertMeta {
+            alert_matched: snapshot.alert_matched,
+            last_alert_seq: snapshot.last_alert_seq,
+            label: snapshot.label.clone(),
+        };
         let mut meta = JsonObject::new();
         meta.insert(
-            "peri/monitor".into(),
-            serde_json::json!({
-                "pendingWakes": snapshot.pending_wakes,
-                "wakeDropped": snapshot.wake_dropped,
-                "alertMatched": snapshot.alert_matched,
-            }),
+            MONITOR_META_KEY.into(),
+            serde_json::to_value(alert)
+                .expect("monitor alert metadata is always JSON-serializable"),
         );
         result.meta = Some(MetaObject(meta));
         Ok(result)

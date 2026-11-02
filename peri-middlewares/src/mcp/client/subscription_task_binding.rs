@@ -41,7 +41,7 @@ impl McpClientPool {
         // `settle_external` 发布到任务投影（`tasks/get` / `monitor_list` /
         // TUI Tasks 面板），但不再向 owner inbox 投递任何 reminder；否则
         // 「无 alert 命中」的正常结束/失败/取消也会拉起模型，且 alert 命中后
-        // 立即退出会与 alert wake 形成重复唤醒。
+        // 立即退出会与 alert 提醒形成重复唤醒。
         //
         // 按 server 身份判定：`monitor` 是保留 builtin 实例名；连接句柄的
         // `ConfigSource::Builtin { instance }` 是权威身份（用户配置无法伪造），

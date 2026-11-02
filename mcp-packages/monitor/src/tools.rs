@@ -8,14 +8,12 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use peri_acp_types::monitor::{MonitorAckOutcome, MonitorWakePage};
 use peri_agent::tools::{BaseTool, ToolContext};
 use serde_json::{Map, Value};
 
 use crate::state::{
     validate_read_limits, MonitorError, MonitorState, ReadResult, StartRequest, StartedMonitor,
-    DEFAULT_READ_BYTES, DEFAULT_READ_LIMIT, DEFAULT_WAKES_LIMIT, MAX_ALERT_PATTERN_CHARS,
-    MAX_DEADLINE_MS, MAX_WAKES_PER_READ,
+    DEFAULT_READ_BYTES, DEFAULT_READ_LIMIT, MAX_ALERT_PATTERN_CHARS, MAX_DEADLINE_MS,
 };
 
 /// Maximum tasks returned by `monitor_list`.
@@ -27,17 +25,6 @@ pub(crate) struct ReadArguments {
     pub after_seq: Option<u64>,
     pub limit: usize,
     pub max_bytes: usize,
-}
-
-/// `monitor_wakes` request.
-pub(crate) struct WakesArguments {
-    pub limit: usize,
-}
-
-/// `monitor_ack` request.
-pub(crate) struct AckArguments {
-    pub wake_ids: Vec<String>,
-    pub outcome: MonitorAckOutcome,
 }
 
 /// `monitor_stop` request.
@@ -94,62 +81,6 @@ pub(crate) fn parse_list(arguments: &Map<String, Value>) -> Result<ListArguments
         include_ended: optional_bool(arguments, "include_ended")?.unwrap_or(false),
         limit,
     })
-}
-
-pub(crate) fn parse_wakes(arguments: &Map<String, Value>) -> Result<WakesArguments, MonitorError> {
-    let limit = optional_usize(arguments, "limit")?.unwrap_or(DEFAULT_WAKES_LIMIT);
-    if limit == 0 || limit > MAX_WAKES_PER_READ {
-        return Err(MonitorError::InvalidLimit {
-            max: MAX_WAKES_PER_READ,
-        });
-    }
-    Ok(WakesArguments { limit })
-}
-
-pub(crate) fn parse_ack(arguments: &Map<String, Value>) -> Result<AckArguments, MonitorError> {
-    let wake_ids = match arguments.get("wake_ids") {
-        Some(Value::Array(values)) if !values.is_empty() => {
-            let mut ids = Vec::with_capacity(values.len());
-            for value in values {
-                match value {
-                    Value::String(id) if !id.trim().is_empty() => ids.push(id.clone()),
-                    _ => {
-                        return Err(MonitorError::InvalidParameter(
-                            "'wake_ids' must contain non-empty strings".into(),
-                        ))
-                    }
-                }
-            }
-            ids
-        }
-        Some(Value::Array(_)) => {
-            return Err(MonitorError::InvalidParameter(
-                "'wake_ids' must not be empty".into(),
-            ))
-        }
-        Some(_) => {
-            return Err(MonitorError::InvalidParameter(
-                "'wake_ids' must be an array of strings".into(),
-            ))
-        }
-        None => {
-            return Err(MonitorError::InvalidParameter(
-                "missing required field 'wake_ids'".into(),
-            ))
-        }
-    };
-    let outcome = match arguments.get("outcome") {
-        None | Some(Value::Null) => MonitorAckOutcome::Delivered,
-        Some(Value::String(value)) => MonitorAckOutcome::parse(value).ok_or_else(|| {
-            MonitorError::InvalidParameter("'outcome' must be 'delivered' or 'offline'".into())
-        })?,
-        Some(_) => {
-            return Err(MonitorError::InvalidParameter(
-                "'outcome' must be a string".into(),
-            ))
-        }
-    };
-    Ok(AckArguments { wake_ids, outcome })
 }
 
 fn required_string(arguments: &Map<String, Value>, key: &str) -> Result<String, MonitorError> {
@@ -214,9 +145,7 @@ pub fn tools(state: Arc<MonitorState>) -> Vec<Arc<dyn BaseTool>> {
         Arc::new(MonitorStartTool::new(Arc::clone(&state))),
         Arc::new(MonitorReadTool::new(Arc::clone(&state))),
         Arc::new(MonitorStopTool::new(Arc::clone(&state))),
-        Arc::new(MonitorListTool::new(Arc::clone(&state))),
-        Arc::new(MonitorWakesTool::new(Arc::clone(&state))),
-        Arc::new(MonitorAckTool::new(state)),
+        Arc::new(MonitorListTool::new(state)),
     ]
 }
 
@@ -254,12 +183,12 @@ impl BaseTool for MonitorStartTool {
                 },
                 "label": {
                     "type": "string",
-                    "description": "Short label (at most 256 bytes) shown by monitor_list and in alert wake reminders."
+                    "description": "Short label (at most 256 bytes) shown by monitor_list and in alert reminders."
                 },
                 "alert": {
                     "type": "string",
                     "maxLength": MAX_ALERT_PATTERN_CHARS,
-                    "description": "Optional linear-time regular expression. A matching output line produces a host wake reminder (throttled to one per 30s per task, with a matched count). The reminder contains no event text; read it with monitor_read."
+                    "description": "Optional linear-time regular expression. A matching output line contributes to a host alert reminder (merged per task; the count is cumulative and the reminder bypasses the merge window on task end). The reminder contains no event text; read it with monitor_read."
                 },
                 "deadline_ms": {
                     "type": "integer",
@@ -469,112 +398,6 @@ impl BaseTool for MonitorListTool {
         Ok(serde_json::to_string(&serde_json::json!({
             "tasks": tasks,
         }))?)
-    }
-}
-
-/// Host-only: list pending alert wakes for the calling session.
-pub struct MonitorWakesTool {
-    state: Arc<MonitorState>,
-}
-
-impl MonitorWakesTool {
-    pub fn new(state: Arc<MonitorState>) -> Self {
-        Self { state }
-    }
-}
-
-#[async_trait]
-impl BaseTool for MonitorWakesTool {
-    fn name(&self) -> &str {
-        "monitor_wakes"
-    }
-
-    fn description(&self) -> &str {
-        "List pending alert wake records for the current session. Used by the host wake pump; never exposed to the model."
-    }
-
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": MAX_WAKES_PER_READ,
-                    "description": "Maximum wakes to return. Default 50."
-                }
-            }
-        })
-    }
-
-    async fn invoke(
-        &self,
-        input: Value,
-        ctx: ToolContext<'_>,
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let arguments = input.as_object().cloned().unwrap_or_default();
-        let request = parse_wakes(&arguments)?;
-        let wakes = self.state.wakes(ctx.session_id.as_deref(), request.limit)?;
-        Ok(serde_json::to_string(&MonitorWakePage { wakes })?)
-    }
-}
-
-/// Host-only: acknowledge delivered or offline wakes.
-pub struct MonitorAckTool {
-    state: Arc<MonitorState>,
-}
-
-impl MonitorAckTool {
-    pub fn new(state: Arc<MonitorState>) -> Self {
-        Self { state }
-    }
-}
-
-#[async_trait]
-impl BaseTool for MonitorAckTool {
-    fn name(&self) -> &str {
-        "monitor_ack"
-    }
-
-    fn description(&self) -> &str {
-        "Acknowledge delivered or offline monitor wakes for the current session. Idempotent. Used by the host wake pump; never exposed to the model."
-    }
-
-    fn parameters(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "wake_ids": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "minItems": 1,
-                    "description": "Wake ids returned by monitor_wakes."
-                },
-                "outcome": {
-                    "type": "string",
-                    "enum": ["delivered", "offline"],
-                    "description": "delivered when the reminder was pushed into the owner inbox; offline when the owner has no live inbox. Default delivered."
-                }
-            },
-            "required": ["wake_ids"]
-        })
-    }
-
-    async fn invoke(
-        &self,
-        input: Value,
-        ctx: ToolContext<'_>,
-    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let arguments = input.as_object().cloned().unwrap_or_default();
-        let request = parse_ack(&arguments)?;
-        let acked = self.state.ack(
-            ctx.session_id.as_deref(),
-            &request.wake_ids,
-            request.outcome,
-        );
-        Ok(serde_json::to_string(
-            &serde_json::json!({ "acked": acked }),
-        )?)
     }
 }
 

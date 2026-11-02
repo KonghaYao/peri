@@ -12,17 +12,13 @@
 //! instance, including tasks owned by another session.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-    time::{Duration, Instant},
+    sync::Arc,
+    time::Duration,
 };
 
 use parking_lot::Mutex;
-use peri_acp_types::monitor::{MonitorAckOutcome, MonitorWake};
 use peri_process::ProcessTree;
 use regex::Regex;
 use serde::Serialize;
@@ -50,21 +46,12 @@ pub const DEFAULT_READ_LIMIT: usize = 200;
 pub const DEFAULT_READ_BYTES: usize = 64 * 1024;
 /// Retained task records per instance. Terminal tasks are pruned first.
 pub const MAX_RETAINED_TASKS: usize = 128;
-/// Pending alert wakes retained per task. The oldest wake is evicted first.
-pub const MAX_PENDING_WAKES: usize = 256;
-/// Per-task wake merge window. Matching events inside the window merge into the
-/// newest pending wake instead of creating another one.
-pub const WAKE_MERGE_WINDOW: Duration = Duration::from_secs(30);
 /// Maximum characters accepted for the `alert` regex.
 pub const MAX_ALERT_PATTERN_CHARS: usize = 512;
 /// Maximum bytes accepted for the optional `label`.
 pub const MAX_LABEL_BYTES: usize = 256;
 /// Maximum bytes accepted for a stop `reason`.
 pub const MAX_REASON_BYTES: usize = 256;
-/// Maximum wakes returned by one `monitor_wakes` call.
-pub const MAX_WAKES_PER_READ: usize = 200;
-/// Default wakes returned by one `monitor_wakes` call.
-pub const DEFAULT_WAKES_LIMIT: usize = 50;
 
 /// Public task status. Internal cancellation cleanup projects as `working`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -138,9 +125,8 @@ pub struct TaskSnapshot {
     pub finished_at: Option<String>,
     pub event_count: usize,
     pub dropped: u64,
-    pub pending_wakes: usize,
-    pub wake_dropped: u64,
     pub alert_matched: u64,
+    pub last_alert_seq: Option<u64>,
     pub cleanup: CleanupReport,
 }
 
@@ -238,107 +224,12 @@ struct TaskInner {
     cleanup: CleanupReport,
 }
 
-/// Per-task alert wake outbox.
-///
-/// Matches merge into the newest pending wake while that wake is younger than
-/// the merge window. Older unacknowledged wakes stay queued but receive no new
-/// matches; after the window a fresh wake is opened, so a slow consumer cannot
-/// hold one wake open forever. Once the host acknowledges the newest wake,
-/// further matches are held in `draft` until the window elapses, so an eager
-/// acknowledger still cannot cause a wake storm. `draft` is flushed by the next
-/// read after the window or when the task reaches a terminal state.
-struct WakeOutbox {
-    ready: VecDeque<PendingWake>,
-    draft: Option<PendingWake>,
-    last_emitted: Option<Instant>,
-    dropped: u64,
-}
-
-struct PendingWake {
-    wake: MonitorWake,
-    created: Instant,
-}
-
-impl WakeOutbox {
-    fn new() -> Self {
-        Self {
-            ready: VecDeque::new(),
-            draft: None,
-            last_emitted: None,
-            dropped: 0,
-        }
-    }
-
-    fn admit_match(&mut self, task_id: &str, label: Option<&str>, seq: u64, now: Instant) {
-        if let Some(latest) = self.ready.back_mut() {
-            if now.saturating_duration_since(latest.created) < WAKE_MERGE_WINDOW {
-                latest.wake.seq = seq;
-                latest.wake.matched = latest.wake.matched.saturating_add(1);
-                return;
-            }
-        }
-        match self.draft.as_mut() {
-            Some(draft) => {
-                draft.wake.seq = seq;
-                draft.wake.matched = draft.wake.matched.saturating_add(1);
-            }
-            None => {
-                self.draft = Some(PendingWake {
-                    wake: MonitorWake {
-                        wake_id: format!("wake-{}", uuid::Uuid::now_v7()),
-                        task_id: task_id.to_string(),
-                        label: label.map(str::to_string),
-                        seq,
-                        matched: 1,
-                        created_at: peri_time::now_utc_rfc3339(),
-                    },
-                    created: now,
-                });
-            }
-        }
-        self.flush_if_due(now, false);
-    }
-
-    fn flush_if_due(&mut self, now: Instant, terminal: bool) {
-        if self.draft.is_none() {
-            return;
-        }
-        let due = terminal
-            || self
-                .last_emitted
-                .is_none_or(|last| now.saturating_duration_since(last) >= WAKE_MERGE_WINDOW);
-        if !due {
-            return;
-        }
-        if let Some(pending) = self.draft.take() {
-            if self.ready.len() >= MAX_PENDING_WAKES {
-                self.ready.pop_front();
-                self.dropped = self.dropped.saturating_add(1);
-            }
-            self.ready.push_back(pending);
-            self.last_emitted = Some(now);
-        }
-    }
-
-    fn pending_len(&self) -> usize {
-        self.ready.len() + usize::from(self.draft.is_some())
-    }
-
-    fn visible(&mut self, limit: usize, now: Instant, terminal: bool) -> Vec<MonitorWake> {
-        self.flush_if_due(now, terminal);
-        self.ready
-            .iter()
-            .take(limit)
-            .map(|pending| pending.wake.clone())
-            .collect()
-    }
-
-    fn ack(&mut self, wake_ids: &[String]) -> usize {
-        let before = self.ready.len();
-        self.ready
-            .retain(|pending| !wake_ids.iter().any(|id| id == &pending.wake.wake_id));
-        before - self.ready.len()
-    }
+/// Cumulative alert projection updated together with the latest match sequence,
+/// so a `tasks/get` snapshot cannot observe the count without its sequence.
+#[derive(Debug, Clone, Copy, Default)]
+struct AlertCounters {
+    matched: u64,
+    last_seq: Option<u64>,
 }
 
 struct MonitorTask {
@@ -351,8 +242,7 @@ struct MonitorTask {
     deadline: Duration,
     inner: Mutex<TaskInner>,
     buffer: Arc<Mutex<EventBuffer>>,
-    wakes: Mutex<WakeOutbox>,
-    alert_matched: AtomicU64,
+    alerts: Mutex<AlertCounters>,
     cancel: CancellationToken,
 }
 
@@ -363,8 +253,8 @@ impl EventAdmission for MonitorTask {
 }
 
 impl MonitorTask {
-    /// Admit one captured line: the ring buffer stores every event, while only
-    /// alert matches enter the wake outbox.
+    /// Admit one captured line into the ring buffer and update the cumulative
+    /// alert projection when it matches.
     pub(crate) fn admit_event(&self, event: crate::buffer::CapturedEvent) {
         let matched = self
             .alert
@@ -374,10 +264,9 @@ impl MonitorTask {
         if !matched {
             return;
         }
-        self.alert_matched.fetch_add(1, Ordering::Relaxed);
-        self.wakes
-            .lock()
-            .admit_match(&self.id, self.label.as_deref(), seq, Instant::now());
+        let mut alerts = self.alerts.lock();
+        alerts.matched = alerts.matched.saturating_add(1);
+        alerts.last_seq = Some(seq);
     }
 
     fn visible_to(&self, owner: Option<&str>) -> bool {
@@ -440,11 +329,6 @@ impl MonitorTask {
         inner.finished_at = Some(now);
         inner.cleanup.process_terminated = process_terminated;
         inner.terminal = true;
-        drop(inner);
-        // A merged draft must not be lost because the command ended inside the
-        // merge window; terminal tasks are observed once more by `tasks/get`
-        // and `monitor_wakes`.
-        self.wakes.lock().flush_if_due(Instant::now(), true);
     }
 
     fn snapshot(&self) -> TaskSnapshot {
@@ -472,10 +356,7 @@ impl MonitorTask {
             let buffer = self.buffer.lock();
             (buffer.len(), buffer.dropped())
         };
-        let (pending_wakes, wake_dropped) = {
-            let wakes = self.wakes.lock();
-            (wakes.pending_len(), wakes.dropped)
-        };
+        let alerts = *self.alerts.lock();
         TaskSnapshot {
             task_id: self.id.clone(),
             label: self.label.clone(),
@@ -487,9 +368,8 @@ impl MonitorTask {
             finished_at,
             event_count,
             dropped,
-            pending_wakes,
-            wake_dropped,
-            alert_matched: self.alert_matched.load(Ordering::Relaxed),
+            alert_matched: alerts.matched,
+            last_alert_seq: alerts.last_seq,
             cleanup,
         }
     }
@@ -580,8 +460,7 @@ impl MonitorState {
                 resolved.max_events,
                 resolved.max_bytes,
             ))),
-            wakes: Mutex::new(WakeOutbox::new()),
-            alert_matched: AtomicU64::new(0),
+            alerts: Mutex::new(AlertCounters::default()),
             cancel: CancellationToken::new(),
         });
 
@@ -690,68 +569,6 @@ impl MonitorState {
         snapshots.sort_by(|left, right| right.started_at.cmp(&left.started_at));
         snapshots.truncate(limit);
         snapshots
-    }
-
-    /// Pending alert wakes for one owner, oldest task first.
-    ///
-    /// The response never carries event text; callers read events with
-    /// `monitor_read` and treat them as untrusted data.
-    pub fn wakes(
-        &self,
-        owner: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<MonitorWake>, MonitorError> {
-        if limit == 0 || limit > MAX_WAKES_PER_READ {
-            return Err(MonitorError::InvalidLimit {
-                max: MAX_WAKES_PER_READ,
-            });
-        }
-        let tasks = self.tasks.lock();
-        let mut ordered: Vec<&Arc<MonitorTask>> = tasks
-            .values()
-            .filter(|task| task.visible_to(owner))
-            .collect();
-        ordered.sort_by(|left, right| left.started_at.cmp(&right.started_at));
-        let now = Instant::now();
-        let mut wakes = Vec::new();
-        for task in ordered {
-            let remaining = limit - wakes.len();
-            if remaining == 0 {
-                break;
-            }
-            let terminal = task.is_terminal();
-            wakes.extend(task.wakes.lock().visible(remaining, now, terminal));
-        }
-        Ok(wakes)
-    }
-
-    /// Acknowledge delivered or offline wakes. Idempotent: unknown ids are
-    /// ignored and repeat acknowledgements report zero.
-    ///
-    /// Ownership is enforced by visibility: a wake owned by another session is
-    /// simply not found, matching the `unknown task` contract without revealing
-    /// the other session's wake.
-    pub fn ack(
-        &self,
-        owner: Option<&str>,
-        wake_ids: &[String],
-        outcome: MonitorAckOutcome,
-    ) -> usize {
-        let tasks = self.tasks.lock();
-        let mut acked = 0;
-        for task in tasks.values().filter(|task| task.visible_to(owner)) {
-            let count = task.wakes.lock().ack(wake_ids);
-            if count > 0 {
-                tracing::debug!(
-                    task_id = %task.id,
-                    count,
-                    outcome = outcome.as_str(),
-                    "monitor wakes acknowledged"
-                );
-                acked += count;
-            }
-        }
-        acked
     }
 
     fn task(&self, task_id: &str, owner: Option<&str>) -> Result<Arc<MonitorTask>, MonitorError> {

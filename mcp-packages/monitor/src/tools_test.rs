@@ -3,9 +3,8 @@ use serde_json::json;
 use super::*;
 use crate::state::{
     DEFAULT_DEADLINE_MS, DEFAULT_MAX_BYTES, DEFAULT_MAX_EVENTS, DEFAULT_READ_BYTES,
-    DEFAULT_READ_LIMIT, DEFAULT_WAKES_LIMIT, MAX_WAKES_PER_READ,
+    DEFAULT_READ_LIMIT,
 };
-use peri_acp_types::monitor::MonitorAckOutcome;
 
 fn map(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
     value.as_object().cloned().expect("object")
@@ -112,36 +111,7 @@ fn declared_tools_are_deferred_and_in_registry_order() {
             "monitor_read",
             "monitor_stop",
             "monitor_list",
-            "monitor_wakes",
-            "monitor_ack"
         ]
     );
     assert!(tools.iter().all(|tool| !tool.is_direct()));
-}
-
-#[test]
-fn wakes_arguments_apply_defaults_and_bounds() {
-    let parsed = parse_wakes(&map(json!({}))).expect("valid");
-    assert_eq!(parsed.limit, DEFAULT_WAKES_LIMIT);
-    assert!(parse_wakes(&map(json!({ "limit": 0 }))).is_err());
-    assert!(parse_wakes(&map(json!({ "limit": MAX_WAKES_PER_READ + 1 }))).is_err());
-}
-
-#[test]
-fn ack_arguments_require_wake_ids_and_known_outcome() {
-    let parsed = parse_ack(&map(json!({ "wake_ids": ["wake-1"] }))).expect("default outcome");
-    assert_eq!(parsed.wake_ids, vec!["wake-1".to_string()]);
-    assert_eq!(parsed.outcome, MonitorAckOutcome::Delivered);
-
-    let parsed = parse_ack(&map(json!({
-        "wake_ids": ["wake-1", "wake-2"],
-        "outcome": "offline"
-    })))
-    .expect("valid");
-    assert_eq!(parsed.outcome, MonitorAckOutcome::Offline);
-
-    assert!(parse_ack(&map(json!({}))).is_err());
-    assert!(parse_ack(&map(json!({ "wake_ids": [] }))).is_err());
-    assert!(parse_ack(&map(json!({ "wake_ids": [3] }))).is_err());
-    assert!(parse_ack(&map(json!({ "wake_ids": ["wake-1"], "outcome": "x" }))).is_err());
 }

@@ -34,7 +34,7 @@
 //! - `meta_harness` — MetaHarness 契约（MetaHarnessState + SECTION_IDS/MIDDLEWARE_NAMES）
 //! - `beta_flags` — Beta flag 注册表与投影/冻结值契约（BETA_FLAGS + BetaFlags）
 //! - `cron` — cron 契约（CronTrigger + CronSchedulerPort）
-//! - `monitor` — monitor alert 唤醒契约（wake DTO / delivery id / reminder）
+//! - `monitor` — monitor alert 契约（`tasks/get` meta 投影 / delivery id / reminder）
 //! - `workflow` — workflow 协议契约（AgentRunParams/ProgressEvent/AgentExecutor/...）
 //! - `hooks` — hook 契约（HookEvent/HookType/RegisteredHook/...）
 //! - `plugin` — 插件契约（PluginManifest/LoadedPlugin/PluginLoadResult/PluginManagerPort）

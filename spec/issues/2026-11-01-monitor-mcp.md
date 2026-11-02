@@ -21,20 +21,21 @@
 7. deadline 默认 1h、最大 24h；超范围请求拒绝。`monitor_stop` 幂等；`tasks/cancel` 只 ack，进程清理状态单独报告。
 8. 唤醒只由 alert 命中触发；任务成功/失败/取消的终态只更新任务投影（`tasks/get`、`monitor_list`、Tasks 面板），不投递 reminder。未命中 alert 的正常结束不会拉起模型。
 9. 任务归属发起会话；请求经 `_meta["peri/taskOwner"]` 携带 owner，事件/任务访问按 owner 过滤；不做跨会话共享。
-10. 命令需审批：`monitor_start` 加入默认敏感分支（按原始名归一）。一次工具审批覆盖后续 wake；wake 路径不调用任何交互审批。输出一律 untrusted；不执行输出内容；不做 WS/SSRF。
+10. 命令需审批：`monitor_start` 加入默认敏感分支（按原始名归一）。一次工具审批覆盖后续 alert 提醒；提醒路径不调用任何交互审批。输出一律 untrusted；不执行输出内容；不做 WS/SSRF。
 11. 附随 skill 走 workspace 静态资产路线（与 cron 同形），内容通用，不出现平台专有词。
 
-## P2 alert 唤醒契约（已实现）
+## P2 alert 提醒契约（已实现）
 
-1. **alert-only**：`monitor_start` 增加 `alert`（线性时间正则，≤512 字符）。命中事件才写 wake outbox；未命中只进 ring buffer。
-2. **owner 定向**：wake 只投递给 owner session，不广播；owner 无 inbox 时不投递、ack `offline` 并计数，不重投、不跨会话。
-3. **节流与容量**：每 task 30 秒最多一条 wake（窗口内命中合并并累加 `matched`）；outbox 上限 256，淘汰最旧并计入 `wakeDropped`。
-4. **正文边界**：wake 只含 raw task id、label、seq、matched；不含事件原文。正文由 agent 用 `monitor_read` 拉取，事件始终 untrusted。
-5. **一次审批**：`monitor_start` 的工具审批覆盖后续 wake；wake 路径不经过 HITL。
-6. **幂等**：`delivery_id = f(task_id, wake_id)`；ack 失败下一轮重试，重复投递复用同一 canonical id。
-7. **接线**：`monitor_wakes` / `monitor_ack` 为 host-only 工具；宿主 wake 泵每 0.5–1 秒按 owner 轮询；复用既有 inbox `Defer` + continuation，不新增 ACP 方法。泵只跟踪启动过 monitor task 的 owner，并在 binding 释放后的宽限期后移除，避免集合无界增长。
-8. **终态不唤醒**：monitor 任务的终态结算（成功/失败/取消）只更新任务投影，不投递任何 reminder；alert 命中后立即退出不会产生重复唤醒。
-9. **不做**：poll/file/WS source、资源通知 hint、`notifications/resources/updated`、unknown task 快速收口、cron 改动、持久化、跨会话共享。
+1. **alert-only**：`monitor_start` 增加 `alert`（线性时间正则，≤512 字符）。命中事件累计计数并更新 `lastAlertSeq`；未命中只进 ring buffer。
+2. **`_meta` 投影**：`tasks/get` 顶层 `_meta["peri/monitor"] = { alertMatched, lastAlertSeq, label }`（camelCase；`lastAlertSeq` 未命中为 `null`；不含事件正文）。只在 `tasks/get` 写；`CreateTaskResult` 现有字段不变。
+3. **owner 定向**：提醒只投递给发起 session（订阅参数 `session_id`，子 agent 即子 session id），不广播；无 inbox 时丢弃、推进 processed、记录 warn，不重投、不跨会话。
+4. **节流与首轮**：宿主每任务内存 `processed = 0`、`next_allowed: Option<Instant>`。首轮 `alertMatched > 0` 立即投递（包含启动以来的全部命中，不以首轮值做基线）；非终态投递后 30 秒内抑制且 `processed` 不推进；窗口结束后以累计值投递。服务端无 outbox / draft / ack。
+5. **正文边界**：提醒只含 raw monitor id、label、`alert_matched`、`last_alert_seq`；不含事件原文。正文是这四项的纯函数，不含时间 / delta / 终态标记 / pending 数；事件由 agent 用 `monitor_read` 拉取，始终 untrusted。`lastAlertSeq` 只是提示，读取游标由调用方用 `after_seq` 维护。
+6. **幂等与失败**：`delivery_id = f(raw_monitor_id, alert_matched)`；同一 `(id, hits)` 正文逐字相同；reminder 构造失败是确定性失败，推进并 warn。
+7. **接线**：复用既有 `spawn_managed_task_subscription` 的 `tasks/get` 轮询（2 秒）读取顶层 `_meta`，不新增 ACP 方法或任务生命周期方法；没有独立 wake 泵、outbox 或 host-only 工具。
+8. **终态 flush**：观察到终态且 `alertMatched > processed` 时，在 `deliver_managed_task_status` / `settle_external` 之前无条件立即投递最终摘要（绕过 30 秒）；`alertMatched == processed` 时静默结算。终态投递失败或无 inbox 不得阻塞结算。
+9. **meta 缺失**：`_meta` 缺失或字段类型错误时不推进计数、每任务记录一次 warn、下一轮重试；终态观测遇到该情况保持 unsettled。身份判定以 `ConfigSource::Builtin { instance: "monitor" }` 为权威，名称回退兜底。
+10. **不做**：poll/file/WS source、资源通知 hint、`notifications/resources/updated`、unknown task 快速收口、cron 改动、持久化、跨会话共享。
 
 ## 目标模型
 
@@ -74,10 +75,10 @@ working ──命令退出 0──▶ completed
 4. `monitor_start` 经工具桥接返回 MCP Tasks 句柄，宿主既有 `tasks/get` 轮询能观察到终态；`tasks/cancel` 不新增方法。
 5. 事件按 `after_seq` 排他、`nextSeq` 权威增量读取；超限标记 `truncated` / `dropped`；终态后仍按 `truncated` 继续读完存量事件。
 6. 本地验证：fmt、workspace build、`peri-mcp-monitor` 测试、layer import / MCP data boundary / CI inventory 检查、clippy。
-7. P2：alert 非法正则拒绝、未命中无 wake、命中一条 wake、30 秒合并、outbox 容量与 `wakeDropped`、ack 幂等、owner 隔离、wake 不含正文、`tasks/get` 计数。
-8. P2：宿主泵 push 后 ack、ack 失败重试（同一 delivery id）、owner 无 inbox 丢弃计数、只投 owner、子会话 binding 释放后离线、monitor 缺失 no-op、pool shutdown 停止。
-9. P2：终态不唤醒——无 alert 命中完成、失败/取消均不产生 reminder；alert 命中后立即完成只有一条 alert wake；非 monitor 实例终态投递不变。
-10. 边界：`label` / stop `reason` ≤256 字节；`monitor_read` 的过小 `max_bytes` 仍返回一条完整事件并置 `truncated`；泵 owner 集合在 binding 释放后清理。
+7. P2：alert 非法正则拒绝、未命中无提醒、命中产生提醒、30 秒合并、终态 flush、`tasks/get` `_meta` 的 camelCase 与 `lastAlertSeq` 更新。
+8. P2：首轮命中即投、窗口内抑制且不推进、窗口后投累计值、离线丢弃并推进、`_meta` 缺失不推进、同一 `(id, hits)` 正文逐字相同。
+9. P2：只投发起会话；终态无未报告命中不提醒；alert 命中后立即完成只有一条对应提醒；非 monitor 实例终态投递不变、实例别名同样抑制；取消与 deadline 终态不唤醒（等待 `has_unsettled_external() == false`）。
+10. 边界：`label` / stop `reason` ≤256 字节；`monitor_read` 的过小 `max_bytes` 仍返回一条完整事件并置 `truncated`；`mcp-` host id 调 monitor 工具返回 `unknown task`，`monitor-` id 驱动 read/list/stop。
 
 ## 不做清单
 
@@ -110,18 +111,18 @@ P1 基线验证（历史记录，worktree 分支 `feat/issue-317-monitor-mcp`，
 
 未运行：`scripts/check-file-size.sh`（本机缺 `rg`；新增文件均 < 1000 行）、`lefthook` 与 `cargo-nextest`（本机未安装）。
 
-P2 与验证修复（B9/D17/D18/D19）追加验证（worktree 分支 `feat/issue-317-monitor-mcp`）：
+P2 架构收缩（alert 改用任务轮询 `_meta` 驱动）最终验证（worktree 分支 `feat/issue-317-monitor-mcp`）：
 
 | 命令 | 结果 |
 | --- | --- |
-| `cargo fmt --all --check` | 通过 |
+| `./scripts/cargo-rmcp-patched.sh fmt --all -- --check` | 通过 |
 | `./scripts/cargo-rmcp-patched.sh build --locked --workspace` | 通过 |
-| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-mcp-monitor --lib` | 50 passed（含 alert/wake/outbox/wire、非零退出、spawn 失败、读取进度与边界） |
-| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib` | 1853 passed；1 个既有网络用例 `plugin::marketplace::tests::test_fetch_url_cache_fallback` 因外部 HTTP 502 失败，与本变更无关 |
-| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib -- mcp::client::monitor_wake::tests` | 9 passed（含 bridge 自动接线、终态不重复唤醒、owner 集合清理） |
-| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib -- mcp::client::subscription::tasks::tests` | 17 passed（含 monitor 终态不唤醒与非 monitor 回归） |
-| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib` | 1112 passed；1 ignored（含新增 Stop 抑制恢复用例） |
-| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp-types --lib` | 689 passed |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-mcp-monitor --lib` | 46 passed（含 `_meta` camelCase、`lastAlertSeq`、wire 往返与工具面收缩） |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib` | 1860 passed；1 failed（既有网络用例 `plugin::marketplace::tests::test_fetch_url_cache_fallback` 因外部 HTTP 502，与本变更无关）；2 ignored |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib -- mcp::client::monitor_alert::tests` | 9 passed（首轮即时、30 秒抑制、累计值、终态绕过、delta=0、离线推进、meta 缺失、正文逐字相同） |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib -- monitor_subscription` | 7 passed（id 契约、取消/deadline、只投发起会话、终态 flush、离线结算） |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib -- mcp::client::subscription::tasks::tests` | 17 passed（含 monitor 终态短路、非 monitor 回归与实例别名） |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp-types --lib` | 691 passed |
 | `./scripts/cargo-rmcp-patched.sh clippy --locked --workspace --all-targets -- -D warnings` | 通过 |
 | `bash scripts/check-layer-imports.sh` | 通过（违规边 0） |
 | `bash scripts/check-mcp-data-boundary.sh` | 通过 |

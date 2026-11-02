@@ -270,19 +270,12 @@ fn find_hits_only_implemented_instances() {
     assert_eq!(monitor.name, "monitor");
     assert_eq!(
         monitor.tools.len(),
-        6,
-        "monitor_start / monitor_read / monitor_stop / monitor_list / monitor_wakes / monitor_ack"
+        4,
+        "monitor_start / monitor_read / monitor_stop / monitor_list"
     );
-    let host_only: HashSet<&str> = monitor
-        .tools
-        .iter()
-        .filter(|tool| !tool.model_visible)
-        .map(|tool| tool.original_name)
-        .collect();
-    assert_eq!(
-        host_only,
-        HashSet::from(["monitor_wakes", "monitor_ack"]),
-        "wake 泵工具必须是 host-only"
+    assert!(
+        monitor.tools.iter().all(|tool| tool.model_visible),
+        "monitor 没有 host-only 工具；告警由宿主任务轮询驱动"
     );
     assert!(
         monitor.tools.iter().all(|tool| !tool.direct),

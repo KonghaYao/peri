@@ -457,16 +457,15 @@ impl BaseTool for McpToolBridge {
                                 }));
                     }
                 }
-                // Monitor alert wakes are host-pumped; the first admitted
-                // monitor task starts the pump once per pool. Monitor terminal
-                // states never wake the owner (only alert matches do), so the
-                // receipt below must not promise completion delivery.
+                // Monitor alert reminders are driven by the task subscription's
+                // `tasks/get` polling; monitor terminal states never wake the
+                // owner (only alert matches do), so the receipt below must not
+                // promise completion delivery.
                 let is_monitor = matches!(
                     self.client.source.as_ref(),
                     Some(super::config::ConfigSource::Builtin { instance }) if instance == "monitor"
                 );
                 if is_monitor {
-                    pool.ensure_monitor_wake_pump(session_id);
                     // The model sees the receipt, not the raw `CreateTaskResult`.
                     // Expose both ids: `public_id` is the host task id (host task
                     // management and the Tasks panel only), while the server task id

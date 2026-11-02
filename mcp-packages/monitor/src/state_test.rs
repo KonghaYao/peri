@@ -197,79 +197,6 @@ fn invalid_alert_patterns_are_rejected_before_start() {
     .is_some());
 }
 
-#[test]
-fn wake_outbox_merges_matches_inside_the_window() {
-    let mut outbox = WakeOutbox::new();
-    let start = Instant::now();
-    outbox.admit_match("monitor-1", Some("build"), 1, start);
-    outbox.admit_match(
-        "monitor-1",
-        Some("build"),
-        2,
-        start + Duration::from_secs(5),
-    );
-
-    let page = outbox.visible(10, start + Duration::from_secs(5), false);
-    assert_eq!(page.len(), 1, "one wake per merge window");
-    assert_eq!(page[0].seq, 2);
-    assert_eq!(page[0].matched, 2);
-    assert_eq!(page[0].label.as_deref(), Some("build"));
-}
-
-#[test]
-fn acknowledged_wakes_delay_the_next_emission_until_the_window_elapses() {
-    let mut outbox = WakeOutbox::new();
-    let start = Instant::now();
-    outbox.admit_match("monitor-1", None, 1, start);
-    let first = outbox.visible(10, start, false);
-    assert_eq!(outbox.ack(&[first[0].wake_id.clone()]), 1);
-
-    outbox.admit_match("monitor-1", None, 3, start + Duration::from_secs(10));
-    assert!(
-        outbox
-            .visible(10, start + Duration::from_secs(10), false)
-            .is_empty(),
-        "matches inside the window stay in the draft"
-    );
-    outbox.admit_match("monitor-1", None, 4, start + Duration::from_secs(20));
-
-    let page = outbox.visible(10, start + Duration::from_secs(31), false);
-    assert_eq!(page.len(), 1);
-    assert_eq!(page[0].seq, 4);
-    assert_eq!(page[0].matched, 2, "both draft matches merge into one wake");
-}
-
-#[test]
-fn wake_outbox_capacity_drops_the_oldest_and_counts_it() {
-    let mut outbox = WakeOutbox::new();
-    let start = Instant::now();
-    let total = MAX_PENDING_WAKES + 44;
-    for index in 0..total {
-        let now = start + WAKE_MERGE_WINDOW * (index as u32 + 1);
-        outbox.admit_match("monitor-1", None, index as u64 + 1, now);
-    }
-    let page = outbox.visible(MAX_PENDING_WAKES, start + WAKE_MERGE_WINDOW * 400, false);
-    assert_eq!(page.len(), MAX_PENDING_WAKES);
-    assert_eq!(outbox.dropped, 44);
-    assert_eq!(
-        page.last().map(|wake| wake.seq),
-        Some(total as u64),
-        "the newest wake is retained"
-    );
-}
-
-#[test]
-fn terminal_flush_emits_a_draft_inside_the_window() {
-    let mut outbox = WakeOutbox::new();
-    let start = Instant::now();
-    outbox.admit_match("monitor-1", None, 1, start);
-    let first = outbox.visible(10, start, false);
-    assert_eq!(outbox.ack(&[first[0].wake_id.clone()]), 1);
-    outbox.admit_match("monitor-1", None, 2, start + Duration::from_secs(5));
-    let page = outbox.visible(10, start + Duration::from_secs(5), true);
-    assert_eq!(page.len(), 1, "terminal commit flushes the pending draft");
-}
-
 async fn wait_terminal(state: &MonitorState, task_id: &str) -> TaskSnapshot {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -544,10 +471,8 @@ async fn spawn_failure_is_reported_without_registering_a_task() {
 }
 
 #[test]
-fn snapshot_projects_wake_drop_and_alert_counters() {
+fn snapshot_projects_alert_counters_and_last_seq() {
     let state = MonitorState::new(".");
-    let mut wakes = WakeOutbox::new();
-    wakes.dropped = 7;
     let task = MonitorTask {
         id: "monitor-counters".into(),
         owner: Some("session-a".into()),
@@ -568,8 +493,10 @@ fn snapshot_projects_wake_drop_and_alert_counters() {
             },
         }),
         buffer: Arc::new(Mutex::new(EventBuffer::new(10, MIN_TASK_BYTES))),
-        wakes: Mutex::new(wakes),
-        alert_matched: AtomicU64::new(9),
+        alerts: Mutex::new(AlertCounters {
+            matched: 9,
+            last_seq: Some(17),
+        }),
         cancel: CancellationToken::new(),
     };
     state.tasks.lock().insert(task.id.clone(), Arc::new(task));
@@ -577,9 +504,8 @@ fn snapshot_projects_wake_drop_and_alert_counters() {
     let snapshot = state
         .snapshot("monitor-counters", Some("session-a"))
         .expect("snapshot");
-    assert_eq!(snapshot.wake_dropped, 7);
     assert_eq!(snapshot.alert_matched, 9);
-    assert_eq!(snapshot.pending_wakes, 0);
+    assert_eq!(snapshot.last_alert_seq, Some(17));
 }
 
 #[cfg(unix)]
@@ -634,14 +560,14 @@ async fn mcp_cancel_acknowledges_before_terminal_commit() {
 }
 
 #[tokio::test]
-async fn alert_match_creates_one_owner_scoped_wake_without_event_text() {
+async fn alert_match_updates_cumulative_count_and_last_seq_without_event_text() {
     let state = MonitorState::new(temp_cwd());
     let started = state
         .start(
             StartRequest {
                 alert: Some("ERROR".into()),
                 label: Some("build".into()),
-                ..request("echo ok; echo ERROR boom")
+                ..request("echo ERROR one; echo ERROR two")
             },
             Some("session-a".into()),
         )
@@ -649,67 +575,33 @@ async fn alert_match_creates_one_owner_scoped_wake_without_event_text() {
         .expect("start");
     wait_terminal(&state, &started.task_id).await;
 
-    let wakes = state
-        .wakes(Some("session-a"), 50)
-        .expect("wakes for the owner");
-    assert_eq!(wakes.len(), 1);
-    let wake = &wakes[0];
-    assert_eq!(wake.task_id, started.task_id);
-    assert_eq!(wake.label.as_deref(), Some("build"));
-    assert_eq!(wake.seq, 2);
-    assert_eq!(wake.matched, 1);
-    let wire = serde_json::to_string(wake).expect("serialize");
+    let snapshot = state
+        .snapshot(&started.task_id, Some("session-a"))
+        .expect("snapshot");
+    assert_eq!(snapshot.alert_matched, 2);
+    assert_eq!(snapshot.last_alert_seq, Some(2));
+    assert_eq!(snapshot.label.as_deref(), Some("build"));
+
+    let meta = peri_acp_types::monitor::MonitorAlertMeta {
+        alert_matched: snapshot.alert_matched,
+        last_alert_seq: snapshot.last_alert_seq,
+        label: snapshot.label.clone(),
+    };
+    let wire = serde_json::to_string(&meta).expect("serialize");
     assert!(
-        !wire.contains("ERROR boom"),
-        "wake must not carry event text"
+        !wire.contains("ERROR one"),
+        "meta must not carry event text"
+    );
+    assert!(
+        !wire.contains("ERROR two"),
+        "meta must not carry event text"
     );
 
-    let snapshot = state
-        .snapshot(&started.task_id, Some("session-a"))
-        .expect("snapshot");
-    assert_eq!(snapshot.pending_wakes, 1);
-    assert_eq!(snapshot.alert_matched, 1);
-    assert_eq!(snapshot.wake_dropped, 0);
-
-    // Foreign owners see neither the task nor its wakes.
-    assert!(state
-        .wakes(Some("session-b"), 50)
-        .expect("empty page")
-        .is_empty());
-    assert_eq!(
-        state.ack(
-            Some("session-b"),
-            std::slice::from_ref(&wake.wake_id),
-            MonitorAckOutcome::Delivered
-        ),
-        0
-    );
-    assert_eq!(
-        state.ack(
-            Some("session-a"),
-            std::slice::from_ref(&wake.wake_id),
-            MonitorAckOutcome::Offline
-        ),
-        1
-    );
-    assert_eq!(
-        state.ack(
-            Some("session-a"),
-            std::slice::from_ref(&wake.wake_id),
-            MonitorAckOutcome::Delivered
-        ),
-        0,
-        "ack is idempotent"
-    );
-    assert!(state
-        .wakes(Some("session-a"), 50)
-        .expect("drained page")
-        .is_empty());
-    let snapshot = state
-        .snapshot(&started.task_id, Some("session-a"))
-        .expect("snapshot");
-    assert_eq!(snapshot.pending_wakes, 0);
-    assert_eq!(snapshot.alert_matched, 1);
+    // Foreign owners see neither the task nor its alert counters.
+    assert!(matches!(
+        state.snapshot(&started.task_id, Some("session-b")),
+        Err(MonitorError::UnknownTask)
+    ));
 }
 
 #[tokio::test]
@@ -728,6 +620,5 @@ async fn non_matching_output_only_fills_the_ring_buffer() {
     let snapshot = wait_terminal(&state, &started.task_id).await;
     assert_eq!(snapshot.event_count, 1);
     assert_eq!(snapshot.alert_matched, 0);
-    assert_eq!(snapshot.pending_wakes, 0);
-    assert!(state.wakes(None, 50).expect("empty page").is_empty());
+    assert_eq!(snapshot.last_alert_seq, None);
 }

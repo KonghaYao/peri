@@ -79,66 +79,6 @@ async fn start_with(
     created.task.task_id
 }
 
-async fn wakes(
-    client: &rmcp::service::RunningService<rmcp::service::RoleClient, ClientConfig>,
-    owner: &str,
-) -> serde_json::Value {
-    let mut request = CallToolRequestParams::new("monitor_wakes")
-        .with_arguments(serde_json::json!({}).as_object().cloned().expect("object"));
-    request.meta = Some(owner_meta(owner));
-    let CallToolResponse::Complete(result) = client
-        .peer()
-        .call_tool_once(request)
-        .await
-        .expect("monitor_wakes")
-    else {
-        panic!("monitor_wakes must return a completion");
-    };
-    assert_ne!(result.is_error, Some(true));
-    if let Some(value) = result.structured_content {
-        return value;
-    }
-    let text = result
-        .content
-        .first()
-        .and_then(|block| block.as_text())
-        .expect("wakes content text");
-    serde_json::from_str(&text.text).expect("structured wakes result")
-}
-
-async fn ack(
-    client: &rmcp::service::RunningService<rmcp::service::RoleClient, ClientConfig>,
-    owner: &str,
-    wake_ids: &[String],
-    outcome: &str,
-) -> serde_json::Value {
-    let mut request = CallToolRequestParams::new("monitor_ack").with_arguments(
-        serde_json::json!({ "wake_ids": wake_ids, "outcome": outcome })
-            .as_object()
-            .cloned()
-            .expect("object"),
-    );
-    request.meta = Some(owner_meta(owner));
-    let CallToolResponse::Complete(result) = client
-        .peer()
-        .call_tool_once(request)
-        .await
-        .expect("monitor_ack")
-    else {
-        panic!("monitor_ack must return a completion");
-    };
-    assert_ne!(result.is_error, Some(true));
-    if let Some(value) = result.structured_content {
-        return value;
-    }
-    let text = result
-        .content
-        .first()
-        .and_then(|block| block.as_text())
-        .expect("ack content text");
-    serde_json::from_str(&text.text).expect("structured ack result")
-}
-
 async fn get_task(
     client: &rmcp::service::RunningService<rmcp::service::RoleClient, ClientConfig>,
     owner: &str,
@@ -384,80 +324,83 @@ async fn tasks_cancel_is_acknowledged_and_owner_checked() {
 }
 
 #[tokio::test]
-async fn alert_wake_is_owner_scoped_has_no_event_text_and_is_ackable() {
+async fn get_task_meta_projects_camel_case_alert_counters_and_no_event_text() {
     let server = MonitorMcpServer::new(std::env::temp_dir().to_string_lossy().into_owned());
     let (client, server_task) = connect(server).await;
     let task_id = start_with(
         &client,
         "session-a",
         serde_json::json!({
-            "command": "echo ok; echo ERROR boom",
+            "command": "echo ok; echo ERROR first; echo ERROR second",
             "alert": "ERROR",
             "label": "build"
         }),
     )
     .await;
 
-    // The first match emits a wake immediately; poll until it is visible.
+    // Poll `tasks/get` until both matches are projected. The first observation
+    // of `alertMatched > 0` is what lets the host deliver without a baseline.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let wake = loop {
-        let page = wakes(&client, "session-a").await;
-        if let Some(wake) = page["wakes"]
-            .as_array()
-            .and_then(|wakes| wakes.first())
-            .cloned()
-        {
-            break wake;
+    let meta = loop {
+        let result = get_task(&client, "session-a", &task_id)
+            .await
+            .expect("tasks/get");
+        let projected = result
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.0.get("peri/monitor"))
+            .cloned();
+        if let Some(meta) = projected {
+            if meta["alertMatched"] == serde_json::json!(2) {
+                break meta;
+            }
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "alert wake never became visible"
+            "alert counters never reached 2"
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
-    assert_eq!(wake["taskId"], serde_json::json!(task_id));
-    assert_eq!(wake["label"], serde_json::json!("build"));
-    assert_eq!(wake["seq"], serde_json::json!(2));
-    assert_eq!(wake["matched"], serde_json::json!(1));
-    let wire = wake.to_string();
+    assert_eq!(meta["alertMatched"], serde_json::json!(2));
+    assert_eq!(meta["lastAlertSeq"], serde_json::json!(3));
+    assert_eq!(meta["label"], serde_json::json!("build"));
+    let object = meta.as_object().expect("object");
+    assert!(!object.contains_key("pendingWakes"));
+    assert!(!object.contains_key("wakeDropped"));
     assert!(
-        !wire.contains("ERROR boom"),
-        "wake must not carry event text"
+        !meta.to_string().contains("ERROR first"),
+        "tasks/get meta must not carry event text"
     );
 
-    let foreign = wakes(&client, "session-b").await;
-    assert_eq!(foreign["wakes"], serde_json::json!([]));
+    // Removing the outbox also removes the two host-only tools.
+    let mut removed = CallToolRequestParams::new("monitor_wakes")
+        .with_arguments(serde_json::json!({}).as_object().cloned().expect("object"));
+    removed.meta = Some(owner_meta("session-a"));
+    let error = client
+        .peer()
+        .call_tool_once(removed)
+        .await
+        .expect_err("monitor_wakes must no longer be callable");
+    assert!(matches!(error, rmcp::ServiceError::McpError(error)
+        if error.code == rmcp::model::ErrorCode::INVALID_PARAMS));
 
-    let wake_id = wake["wakeId"].as_str().expect("wake id").to_string();
-    let acked = ack(
-        &client,
-        "session-a",
-        std::slice::from_ref(&wake_id),
-        "delivered",
-    )
-    .await;
-    assert_eq!(acked["acked"], serde_json::json!(1));
-    let again = ack(&client, "session-a", &[wake_id], "delivered").await;
-    assert_eq!(
-        again["acked"],
-        serde_json::json!(0),
-        "ack must be idempotent"
-    );
-    assert_eq!(
-        wakes(&client, "session-a").await["wakes"],
-        serde_json::json!([])
-    );
+    // Owner scoping still hides the task from foreign sessions.
+    let foreign = get_task(&client, "session-b", &task_id)
+        .await
+        .expect_err("foreign tasks/get must be rejected");
+    assert!(matches!(foreign, rmcp::ServiceError::McpError(error)
+        if error.code == rmcp::model::ErrorCode::INVALID_PARAMS));
 
+    // Terminal projection retains the final counters (the host caches the
+    // terminal meta instead of re-fetching it).
     let terminal = terminal_task(&client, "session-a", &task_id).await;
     assert_eq!(terminal.task.status(), TaskStatus::Completed);
-    assert_eq!(
-        terminal
-            .meta
-            .and_then(|meta| meta.0.get("peri/monitor").cloned())
-            .and_then(|monitor| monitor.get("alertMatched").cloned()),
-        Some(serde_json::json!(1)),
-        "tasks/get must project alert counters"
-    );
+    let terminal_meta = terminal
+        .meta
+        .and_then(|meta| meta.0.get("peri/monitor").cloned())
+        .expect("terminal meta");
+    assert_eq!(terminal_meta["alertMatched"], serde_json::json!(2));
+    assert_eq!(terminal_meta["lastAlertSeq"], serde_json::json!(3));
 
     drop(client);
     server_task.await.expect("join server");

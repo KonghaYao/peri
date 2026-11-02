@@ -1,13 +1,29 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use peri_acp_types::event::BackgroundTaskResult;
 use peri_acp_types::tasks::{TaskManager, TaskRegistrationTicket};
 use rmcp::{
-    model::{DetailedTask, GetTaskParams, TaskPayload},
+    model::{DetailedTask, GetTaskParams, MetaObject, TaskPayload},
     service::{Peer, RoleClient},
 };
 
+use super::super::monitor_alert::{
+    parse_monitor_meta, push_monitor_alert, MonitorAlertAction, MonitorAlertState,
+};
 use super::super::McpClientPool;
+
+/// One `tasks/get` observation: the protocol task plus its result metadata.
+///
+/// The metadata is retained with the terminal cache so a terminal retry keeps
+/// the final alert projection instead of re-fetching it.
+#[derive(Clone)]
+struct ObservedTask {
+    task: DetailedTask,
+    meta: Option<MetaObject>,
+}
 
 /// After this many consecutive failed status queries, attempt to settle an
 /// unobservable owner as unresolved. Settlement itself can still fail, and a
@@ -85,7 +101,9 @@ impl McpClientPool {
             let mut peer = initial_peer;
             let mut lost_owner_attempts: usize = 0;
             let mut terminal_delivery_failures: usize = 0;
-            let mut known_terminal: Option<DetailedTask> = None;
+            let mut known_terminal: Option<ObservedTask> = None;
+            let mut monitor_alerts = MonitorAlertState::default();
+            let mut monitor_meta_warned = false;
             loop {
                 let Some(pool) = weak_pool.upgrade() else {
                     break;
@@ -98,34 +116,62 @@ impl McpClientPool {
                     params.meta = pool.task_owner_meta_for(&server, &session_id);
                 }
                 let observed = match known_terminal.as_ref() {
-                    Some(task) => Ok(task.clone()),
-                    None => peer.get_task(params).await.map(|snapshot| snapshot.task),
+                    Some(observed) => Ok(observed.clone()),
+                    None => peer.get_task(params).await.map(|snapshot| ObservedTask {
+                        task: snapshot.task,
+                        meta: snapshot.meta,
+                    }),
                 };
                 match observed {
-                    Ok(task) if task.status().is_terminal() => {
-                        known_terminal = Some(task.clone());
-                        let transition_id = format!("{raw_task_id}:terminal");
-                        let result = pool
-                            .deliver_managed_task_status(
-                                &server,
-                                &ticket,
-                                &transition_id,
-                                &task,
-                                is_workspace_shell,
-                                manager.as_ref(),
-                            )
-                            .await;
-                        if let Err(error) = result {
-                            terminal_delivery_failures =
-                                terminal_delivery_failures.saturating_add(1);
-                            tracing::warn!(server = %server, session_id = %session_id,
-                                task_id = %raw_task_id, terminal_delivery_failures, %error,
-                                "MCP task terminal delivery pending reconciliation");
-                        } else {
-                            break;
+                    Ok(observed) if observed.task.status().is_terminal() => {
+                        // Terminal alert flush must happen before settlement:
+                        // settlement commits the terminal projection and the
+                        // loop then stops polling this task. A missing or
+                        // malformed projection keeps the task unsettled so the
+                        // next poll can retry instead of losing the hits.
+                        let alert_ready = pool.observe_monitor_alert(
+                            &session_id,
+                            &server,
+                            &raw_task_id,
+                            observed.meta.as_ref(),
+                            true,
+                            &mut monitor_alerts,
+                            &mut monitor_meta_warned,
+                        );
+                        if alert_ready {
+                            known_terminal = Some(observed.clone());
+                            let transition_id = format!("{raw_task_id}:terminal");
+                            let result = pool
+                                .deliver_managed_task_status(
+                                    &server,
+                                    &ticket,
+                                    &transition_id,
+                                    &observed.task,
+                                    is_workspace_shell,
+                                    manager.as_ref(),
+                                )
+                                .await;
+                            if let Err(error) = result {
+                                terminal_delivery_failures =
+                                    terminal_delivery_failures.saturating_add(1);
+                                tracing::warn!(server = %server, session_id = %session_id,
+                                    task_id = %raw_task_id, terminal_delivery_failures, %error,
+                                    "MCP task terminal delivery pending reconciliation");
+                            } else {
+                                break;
+                            }
                         }
                     }
-                    Ok(_) => {
+                    Ok(observed) => {
+                        pool.observe_monitor_alert(
+                            &session_id,
+                            &server,
+                            &raw_task_id,
+                            observed.meta.as_ref(),
+                            false,
+                            &mut monitor_alerts,
+                            &mut monitor_meta_warned,
+                        );
                         lost_owner_attempts = 0;
                         manager.mark_external_running(&task_id);
                     }
@@ -171,6 +217,73 @@ impl McpClientPool {
                 }
             }
         })
+    }
+
+    /// Apply one monitor alert observation to the per-task delivery state.
+    ///
+    /// Returns `false` when the server is the monitor instance but the
+    /// `tasks/get` metadata is missing or malformed; the caller must keep the
+    /// task unsettled so the next poll retries. Non-monitor servers always
+    /// return `true`.
+    #[allow(clippy::too_many_arguments)]
+    fn observe_monitor_alert(
+        &self,
+        session_id: &str,
+        server: &str,
+        raw_task_id: &str,
+        meta: Option<&MetaObject>,
+        terminal: bool,
+        state: &mut MonitorAlertState,
+        warned_meta: &mut bool,
+    ) -> bool {
+        if !self.is_monitor_server(server) {
+            return true;
+        }
+        let meta = match parse_monitor_meta(meta) {
+            Ok(meta) => meta,
+            Err(reason) => {
+                if !*warned_meta {
+                    *warned_meta = true;
+                    tracing::warn!(
+                        server = %server,
+                        session_id = %session_id,
+                        task_id = %raw_task_id,
+                        terminal,
+                        reason,
+                        "monitor alert projection unavailable; keeping the processed count"
+                    );
+                }
+                return false;
+            }
+        };
+        let now = Instant::now();
+        let has_inbox = self.owner_online(session_id);
+        match state.decide(meta.alert_matched, now, terminal, has_inbox) {
+            MonitorAlertAction::Nothing => {}
+            MonitorAlertAction::Send { hits } => {
+                push_monitor_alert(self, session_id, raw_task_id, &meta, hits);
+            }
+            MonitorAlertAction::DropOffline { hits } => {
+                tracing::warn!(
+                    server = %server,
+                    session_id = %session_id,
+                    task_id = %raw_task_id,
+                    hits,
+                    terminal,
+                    "monitor alert dropped: initiating session has no inbox"
+                );
+            }
+            MonitorAlertAction::Suppressed => {
+                tracing::debug!(
+                    server = %server,
+                    session_id = %session_id,
+                    task_id = %raw_task_id,
+                    hits = meta.alert_matched,
+                    "monitor alert suppressed by the merge window"
+                );
+            }
+        }
+        true
     }
 
     async fn deliver_managed_task_status(
@@ -260,3 +373,7 @@ mod binding;
 #[cfg(test)]
 #[path = "subscription_tasks_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "monitor_subscription_test.rs"]
+mod monitor_subscription_tests;
