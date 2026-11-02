@@ -44,7 +44,7 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
             let mut requests = self.requests.lock().unwrap();
             requests.push(messages);
             if requests.len() == 1 {
-                self.queue.push(QueuedMessage::prompt(
+                self.queue.push_sync(QueuedMessage::prompt(
                     MessageSource::UserInput,
                     self.next_input.clone(),
                 ));
@@ -102,7 +102,7 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
         "@image {}\n按照图中的数据修改",
         image_path.display()
     ));
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         first.clone(),
     ));
@@ -290,7 +290,7 @@ async fn test_image_batch_prepares_first_input_and_never_reloads_history() {
         .write()
         .append(BaseMessage::ai("之前的回复"));
     for input in [&first, &last] {
-        session.queue().push(QueuedMessage::prompt(
+        session.queue().push_sync(QueuedMessage::prompt(
             MessageSource::UserInput,
             input.clone(),
         ));

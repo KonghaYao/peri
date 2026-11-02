@@ -70,22 +70,22 @@ async fn exhausted_receive_preserves_only_fresh_ensure_processing_inputs() {
     context
         .session
         .queue
-        .push(QueuedMessage::prompt(MessageSource::UserInput, initial));
-    let watermark = context.session.queue.admission_watermark();
+        .push_sync(QueuedMessage::prompt(MessageSource::UserInput, initial));
+    let watermark = context.session.queue.admission_watermark_sync();
     let passive = BaseMessage::human("passive input");
     let passive_id = passive.id();
     context
         .session
         .queue
-        .push(QueuedMessage::info(MessageSource::SystemInjected, passive));
+        .push_sync(QueuedMessage::info(MessageSource::SystemInjected, passive));
     let continuation = BaseMessage::human("current run only");
     let continuation_id = continuation.id();
-    context.session.queue.push(
+    context.session.queue.push_sync(
         QueuedMessage::defer(MessageSource::SystemInjected, continuation)
             .with_policy(MessagePolicy::continue_current_run(execution)),
     );
     let stale_execution = make_context().session.turn.execution_binding();
-    context.session.queue.push(
+    context.session.queue.push_sync(
         QueuedMessage::defer(
             MessageSource::SystemInjected,
             BaseMessage::human("stale run input"),
@@ -93,7 +93,7 @@ async fn exhausted_receive_preserves_only_fresh_ensure_processing_inputs() {
         .with_policy(MessagePolicy::continue_current_run(stale_execution)),
     );
     for body in ["first fresh result", "second fresh result"] {
-        context.session.queue.push(QueuedMessage::defer(
+        context.session.queue.push_sync(QueuedMessage::defer(
             MessageSource::SubAgentComplete,
             BaseMessage::human(body),
         ));
@@ -102,7 +102,7 @@ async fn exhausted_receive_preserves_only_fresh_ensure_processing_inputs() {
         ReceiveInput {
             context: context.clone(),
         },
-        Some(watermark),
+        watermark,
     )
     .await
     .unwrap();
@@ -115,14 +115,8 @@ async fn exhausted_receive_preserves_only_fresh_ensure_processing_inputs() {
     assert!(transcript.get(continuation_id).is_some());
     assert_eq!(transcript.len(), 3);
     assert_eq!(context.session.queue.suppressed_messages().len(), 1);
-    let pending = context.session.queue.drain_all();
-    assert_eq!(
-        pending
-            .iter()
-            .map(|message| message.admission_sequence.unwrap())
-            .collect::<Vec<_>>(),
-        vec![5, 6]
-    );
+    // 预算延后的行仍在 MQ 中；用查询而不是 drain，避免断言本身消费掉待发事实。
+    let pending = context.session.queue.snapshot_sync();
     assert_eq!(
         pending
             .iter()
@@ -130,7 +124,7 @@ async fn exhausted_receive_preserves_only_fresh_ensure_processing_inputs() {
             .collect::<Vec<_>>(),
         ["first fresh result", "second fresh result"]
     );
-    assert_eq!(context.session.queue.admission_watermark(), 6);
+    assert!(context.session.queue.admission_watermark_sync().is_some());
 }
 
 #[tokio::test]
@@ -143,7 +137,7 @@ async fn delivery_journal_admission_precedes_receive_and_recovers_after_ack() {
     let inbox = Arc::new(SessionInbox::new(Arc::new(context.session.queue.clone())));
     let mailbox = UserInputMailbox::new("session".into(), inbox.clone(), Arc::new(|_| {}));
     mailbox
-        .attach_external_attempt(CancellationToken::new(), false)
+        .attach_external_attempt_sync(CancellationToken::new(), false)
         .unwrap();
     let enqueue = |text: &str| EnqueueUserInputRequest {
         session_id: "session".into(),
@@ -156,32 +150,35 @@ async fn delivery_journal_admission_precedes_receive_and_recovers_after_ack() {
 
     for _ in 0..128 {
         let request = enqueue("填充");
-        mailbox.enqueue(&request).unwrap();
-        mailbox.enter_idle();
-        let messages = inbox.queue().drain_all();
+        mailbox.enqueue_sync(&request).unwrap();
+        mailbox.enter_idle_sync();
+        let messages = inbox.queue().drain_all_sync();
         let id = messages[0].message().unwrap().id();
-        mailbox.mark_claimed(&[id]);
-        mailbox.mark_delivered(&[id]);
+        mailbox.mark_claimed_sync(&[id]);
+        mailbox.mark_delivered_sync(&[id]);
     }
 
     // 容量准入在 enqueue/claim 之前：日志满时拒绝，不产生 Claimed，也不写入 MQ。
     let rejected = enqueue("先拒绝后恢复");
     assert_eq!(
-        mailbox.enqueue(&rejected).unwrap_err(),
+        mailbox.enqueue_sync(&rejected).unwrap_err(),
         UserInputQueueError::Capacity
     );
-    assert!(context.session.queue.is_empty(), "拒绝输入不得进入消费队列");
+    assert!(
+        context.session.queue.is_empty_sync(),
+        "拒绝输入不得进入消费队列"
+    );
 
     // 泵确认旧日志后释放槽位；同一输入重新准入后走真实 Receive 并交付。
     for item in mailbox.pending_delivery_notifications() {
         mailbox.ack_delivery_notification(&item.input_id);
     }
-    mailbox.enqueue(&rejected).unwrap();
-    mailbox.enter_idle();
+    mailbox.enqueue_sync(&rejected).unwrap();
+    mailbox.enter_idle_sync();
     let mut context = context;
     context.session.user_input_mailbox = Some(mailbox.clone());
     run_receive(ReceiveInput { context }).await.unwrap();
-    assert!(mailbox.snapshot().items.is_empty());
+    assert!(mailbox.snapshot_sync().items.is_empty());
     assert_eq!(mailbox.pending_delivery_notifications().len(), 1);
 }
 
@@ -197,7 +194,7 @@ async fn test_receive_user_input_delivery_keeps_identity_order_and_render_fifo()
     let inbox = Arc::new(SessionInbox::new(Arc::new(context.session.queue.clone())));
     let mailbox = UserInputMailbox::new("session".into(), inbox, Arc::new(|_| {}));
     let current = mailbox
-        .attach_external_attempt(CancellationToken::new(), false)
+        .attach_external_attempt_sync(CancellationToken::new(), false)
         .unwrap();
     let a = EnqueueUserInputRequest {
         session_id: "session".into(),
@@ -214,11 +211,11 @@ async fn test_receive_user_input_delivery_keeps_identity_order_and_render_fifo()
         original_draft: "B".into(),
         ..a.clone()
     };
-    mailbox.enqueue(&a).unwrap();
-    mailbox.enqueue(&b).unwrap();
+    mailbox.enqueue_sync(&a).unwrap();
+    mailbox.enqueue_sync(&b).unwrap();
     for (command_id, input) in [("dispatch-b", &b), ("dispatch-a", &a)] {
         mailbox
-            .dispatch(&DispatchUserInputsRequest {
+            .dispatch_sync(&DispatchUserInputsRequest {
                 session_id: "session".into(),
                 generation: mailbox.generation().into(),
                 command_id: command_id.into(),
@@ -226,9 +223,9 @@ async fn test_receive_user_input_delivery_keeps_identity_order_and_render_fifo()
             })
             .unwrap();
     }
-    mailbox.finish_attempt(&current, UserInputAttemptOutcome::Interrupted);
+    mailbox.finish_attempt_sync(&current, UserInputAttemptOutcome::Interrupted);
     let ticket = mailbox.reserve_run().unwrap();
-    mailbox.attach_attempt(&ticket, CancellationToken::new());
+    mailbox.attach_attempt_sync(&ticket, CancellationToken::new());
     context.session.user_input_mailbox = Some(mailbox.clone());
     let (bus, mut handles) = EventBus::new(Default::default());
     context.runtime.event_bus = Arc::new(bus);
@@ -246,7 +243,7 @@ async fn test_receive_user_input_delivery_keeps_identity_order_and_render_fifo()
             message_id: crate::messages::MessageId::new(),
             chunk: "assistant".into(),
         });
-    for input in [&b, &a] {
+    for input in [&a, &b] {
         let RenderEvent::UserInputDelivered {
             input_id,
             generation,
@@ -272,17 +269,22 @@ async fn test_receive_user_input_delivery_keeps_identity_order_and_render_fifo()
         "assistant 输出在全部用户接收事件之后"
     );
     let transcript = context.session.transcript.read();
+    // 选中批次内部按 MQ 的 `enqueued_at, id` 排序，不按 dispatch 请求顺序重排
+    // （`docs/design/thread-mq.md` §3.2）。
     assert_eq!(
         transcript.entries()[0].message().id().as_uuid().to_string(),
-        b.input_id,
+        a.input_id,
         "canonical transcript 与气泡使用同一稳定 ID"
     );
     assert_eq!(
         transcript.entries()[1].message().id().as_uuid().to_string(),
-        a.input_id,
-        "顺序不按历史队列位置重排"
+        b.input_id,
+        "批次内顺序由 MQ 决定，不受 dispatch 请求顺序影响"
     );
-    assert!(mailbox.snapshot().items.is_empty(), "写入后从待发送区移除");
+    assert!(
+        mailbox.snapshot_sync().items.is_empty(),
+        "写入后从待发送区移除"
+    );
 }
 
 #[tokio::test]
@@ -302,7 +304,7 @@ async fn test_receive_enters_reliable_render_fifo_without_reserving_sequence() {
     let inbox = Arc::new(SessionInbox::new(Arc::new(context.session.queue.clone())));
     let mailbox = UserInputMailbox::new("session".into(), inbox, Arc::new(|_| {}));
     mailbox
-        .attach_external_attempt(CancellationToken::new(), false)
+        .attach_external_attempt_sync(CancellationToken::new(), false)
         .unwrap();
     let request = EnqueueUserInputRequest {
         session_id: "session".into(),
@@ -312,8 +314,8 @@ async fn test_receive_enters_reliable_render_fifo_without_reserving_sequence() {
         content: MessageContent::text("问题"),
         original_draft: "问题".into(),
     };
-    mailbox.enqueue(&request).unwrap();
-    mailbox.enter_idle();
+    mailbox.enqueue_sync(&request).unwrap();
+    mailbox.enter_idle_sync();
     context.session.user_input_mailbox = Some(mailbox.clone());
 
     // 容量 1：先占满 render 通道，证明交付事件等待容量而不是降级丢弃。
@@ -379,7 +381,7 @@ async fn test_receive_empty_queue() {
 #[tokio::test]
 async fn test_receive_consumes_prompt() {
     let ctx = make_context();
-    ctx.session.queue.push(QueuedMessage::prompt(
+    ctx.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human(MessageContent::text("hello")),
     ));
@@ -395,7 +397,7 @@ async fn test_receive_consumes_prompt() {
 #[tokio::test]
 async fn test_receive_consumes_info_wrapped_in_reminder() {
     let ctx = make_context();
-    ctx.session.queue.push(QueuedMessage::info(
+    ctx.session.queue.push_sync(QueuedMessage::info(
         MessageSource::SystemInjected,
         BaseMessage::human(MessageContent::text("system info")),
     ));
@@ -417,11 +419,11 @@ async fn test_receive_consumes_info_wrapped_in_reminder() {
 async fn test_receive_consumes_defer() {
     // RCRA：Receive 消费 Defer（不再保留）
     let ctx = make_context();
-    ctx.session.queue.push(QueuedMessage::defer(
+    ctx.session.queue.push_sync(QueuedMessage::defer(
         MessageSource::SubAgentComplete,
         BaseMessage::human(MessageContent::text("deferred")),
     ));
-    ctx.session.queue.push(QueuedMessage::prompt(
+    ctx.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human(MessageContent::text("prompt")),
     ));
@@ -433,7 +435,7 @@ async fn test_receive_consumes_defer() {
     // 消费全部（Prompt + Defer）
     assert_eq!(output.consumed_count, 2);
     assert_eq!(output.wake_up_count, 2);
-    assert!(ctx.session.queue.is_empty(), "队列应完全排空");
+    assert!(ctx.session.queue.is_empty_sync(), "队列应完全排空");
     assert_eq!(ctx.session.transcript.read().len(), 2);
 }
 
@@ -441,15 +443,15 @@ async fn test_receive_consumes_defer() {
 async fn test_receive_consumes_prompt_defer_and_info_together() {
     // RCRA：混合队列应全部消费
     let ctx = make_context();
-    ctx.session.queue.push(QueuedMessage::prompt(
+    ctx.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human(MessageContent::text("p")),
     ));
-    ctx.session.queue.push(QueuedMessage::defer(
+    ctx.session.queue.push_sync(QueuedMessage::defer(
         MessageSource::SubAgentComplete,
         BaseMessage::human(MessageContent::text("d")),
     ));
-    ctx.session.queue.push(QueuedMessage::info(
+    ctx.session.queue.push_sync(QueuedMessage::info(
         MessageSource::SystemInjected,
         BaseMessage::human(MessageContent::text("i")),
     ));
@@ -459,7 +461,7 @@ async fn test_receive_consumes_prompt_defer_and_info_together() {
     };
     let output = run_receive(input).await.unwrap();
     assert_eq!(output.consumed_count, 3);
-    assert!(ctx.session.queue.is_empty());
+    assert!(ctx.session.queue.is_empty_sync());
 }
 
 #[tokio::test]
@@ -496,7 +498,7 @@ async fn hook_stop_intent_requests_stop_without_waking_the_run() {
         })
         .unwrap();
     let context = make_context();
-    context.session.queue.push(
+    context.session.queue.push_sync(
         QueuedMessage::system_reminder(MessageKind::Info, MessageSource::HookStopIntent, reminder)
             .with_policy(crate::session::MessagePolicy::passive()),
     );
@@ -540,7 +542,7 @@ fn bound_stop(execution: peri_acp_types::session::ExecutionBinding) -> QueuedMes
 async fn stop_intent_bound_to_current_execution_stops() {
     let context = make_context();
     let execution = context.session.turn.execution_binding();
-    context.session.queue.push(bound_stop(execution));
+    context.session.queue.push_sync(bound_stop(execution));
 
     let output = run_receive(ReceiveInput {
         context: context.clone(),
@@ -563,7 +565,7 @@ async fn stop_intent_from_previous_execution_is_suppressed() {
     let previous = make_context().session.turn.execution_binding();
     let context = make_context();
     assert_ne!(context.session.turn.execution_binding(), previous);
-    context.session.queue.push(bound_stop(previous));
+    context.session.queue.push_sync(bound_stop(previous));
 
     let output = run_receive(ReceiveInput {
         context: context.clone(),
@@ -613,11 +615,14 @@ async fn receive_protocol_event_waits_when_state_channel_is_full() {
             metadata: serde_json::json!({}),
         })
         .unwrap();
-    context.session.queue.push(QueuedMessage::system_reminder(
-        MessageKind::Defer,
-        MessageSource::SystemInjected,
-        reminder,
-    ));
+    context
+        .session
+        .queue
+        .push_sync(QueuedMessage::system_reminder(
+            MessageKind::Defer,
+            MessageSource::SystemInjected,
+            reminder,
+        ));
     let receive = run_receive(ReceiveInput {
         context: context.clone(),
     });

@@ -24,7 +24,7 @@ use crate::provider::LlmProvider;
 
 /// 返回 `Some(ContinuationRequest)` 表示调用方需在 **sessions 锁外** 补发一次
 /// continuation 通知（`session/cancel` race 兜底），其余通知返回 `None`。
-pub(crate) fn handle_notification(
+pub(crate) async fn handle_notification(
     method: &str,
     params: &Value,
     sessions: &mut HashMap<String, SessionState>,
@@ -46,14 +46,14 @@ pub(crate) fn handle_notification(
                         return None;
                     };
                     let mailbox = cfg.session_manager.user_input_mailbox_for(session_id)?;
-                    if !mailbox.stop_attempt(request_id, generation) {
+                    if !mailbox.stop_attempt(request_id, generation).await {
                         debug!(session_id, "Cancel ignored: superseded user input attempt");
                         return None;
                     }
                 } else if let Some(mailbox) = cfg.session_manager.user_input_mailbox_for(session_id)
                 {
                     // Legacy cancellation also revokes a ticket still waiting for its prompt lock.
-                    mailbox.stop();
+                    mailbox.stop().await;
                 }
                 state.continuation_epoch += 1;
                 if let Some(runtime) = cfg.session_manager.get_session(session_id) {
@@ -89,14 +89,17 @@ pub(crate) fn handle_notification(
                 // 恒为 Agent——Shell/Workflow 虽可经 route_bg_result 入队，但使用
                 // 各自独立的 MessageSource，不会产生 SubAgentComplete Defer，天然
                 // 不会误触发。
-                let has_pending = cfg
+                let queue = cfg
                     .session_manager
                     .get_session(session_id)
-                    .map(|s| {
-                        s.v2_message_queue
-                            .has_pending_defer(&MessageSource::SubAgentComplete)
-                    })
-                    .unwrap_or(false);
+                    .map(|s| s.v2_message_queue.clone());
+                let has_pending = match queue {
+                    Some(queue) => queue
+                        .has_pending_defer(&MessageSource::SubAgentComplete)
+                        .await
+                        .unwrap_or(false),
+                    None => false,
+                };
                 if cancel_should_schedule_continuation(state, has_pending) {
                     return Some(ContinuationRequest {
                         session_id: session_id.to_string(),

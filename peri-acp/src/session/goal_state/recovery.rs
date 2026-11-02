@@ -265,7 +265,7 @@ async fn run_recovery(
                         );
                     }
                 }
-                if let Err(error) = push_recovery_reminder(&queue, &goal, &trigger, attempt) {
+                if let Err(error) = push_recovery_reminder(&queue, &goal, &trigger, attempt).await {
                     tracing::warn!(
                         error = %error,
                         goal_id = %goal.goal_id,
@@ -278,7 +278,7 @@ async fn run_recovery(
     }
 }
 
-fn push_recovery_reminder(
+async fn push_recovery_reminder(
     queue: &MessageQueue,
     goal: &ThreadGoal,
     trigger: &RecoveryTrigger,
@@ -327,11 +327,14 @@ fn push_recovery_reminder(
     let trusted = TrustedSystemReminderFactory::for_recovery()
         .construct(reminder)
         .map_err(|error| error.to_string())?;
-    queue.push(
+    let message =
         QueuedMessage::system_reminder(MessageKind::Defer, MessageSource::GoalSteering, trusted)
-            .with_policy(MessagePolicy::ensure_processing()),
-    );
-    Ok(())
+            .with_policy(MessagePolicy::ensure_processing());
+    queue
+        .enqueue(message)
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// 将恢复提醒中的自由文本限制在 canonical reminder 预算内（按字符边界）。

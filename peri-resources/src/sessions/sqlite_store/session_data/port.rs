@@ -995,6 +995,42 @@ impl SessionDataPort for SqliteSessionData {
         Ok(())
     }
 
+    async fn mq_enqueue(
+        &self,
+        thread_id: &ThreadId,
+        input: MqInput,
+    ) -> SessionResourceResult<MqEnqueueOutcome> {
+        self.enqueue_mq(thread_id, input).await
+    }
+
+    async fn mq_query(
+        &self,
+        thread_id: &ThreadId,
+        filter: MqFilter,
+    ) -> SessionResourceResult<Vec<MqEntry>> {
+        self.query_mq(thread_id, filter).await
+    }
+
+    async fn mq_cancel(
+        &self,
+        thread_id: &ThreadId,
+        id: MessageId,
+    ) -> SessionResourceResult<MqCancelOutcome> {
+        self.cancel_mq(thread_id, id).await
+    }
+
+    async fn mq_receive(
+        &self,
+        thread_id: &ThreadId,
+        selection: MqReceiveSelection,
+    ) -> SessionResourceResult<MqReceiveOutcome> {
+        self.receive_mq(thread_id, selection).await
+    }
+
+    async fn mq_clear(&self, thread_id: &ThreadId) -> SessionResourceResult<()> {
+        self.clear_mq(thread_id).await
+    }
+
     async fn close(&self) -> SessionResourceResult<()> {
         // 连接池由共享库句柄所有（执行面也可能在用），这里只关闭数据侧的写入入口。
         self.closed.store(true, Ordering::Release);

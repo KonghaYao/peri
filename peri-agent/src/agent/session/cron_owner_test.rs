@@ -26,10 +26,10 @@ async fn test_cron_owner_forwards_trigger_to_inbox() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Should have one defer message in the queue
-    assert_eq!(inbox.queue().len(), 1);
+    assert_eq!(inbox.queue().len_sync(), 1);
 
     // Verify it's a CronTrigger defer
-    let drained = inbox.queue().drain_all();
+    let drained = inbox.queue().drain_all_sync();
     assert_eq!(drained.len(), 1, "应有一条消息");
     assert_eq!(drained[0].source, MessageSource::CronTrigger);
 
@@ -63,7 +63,7 @@ async fn test_cron_owner_stops_on_shutdown() {
     );
 
     // Queue should be empty — no trigger was sent before shutdown.
-    assert!(inbox.queue().is_empty());
+    assert!(inbox.queue().is_empty_sync());
 
     owner.shutdown();
 }
@@ -87,7 +87,7 @@ async fn test_cron_owner_stops_when_rx_closed() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Queue should be empty
-    assert!(inbox.queue().is_empty());
+    assert!(inbox.queue().is_empty_sync());
 }
 
 #[tokio::test]

@@ -72,7 +72,7 @@ async fn test_e2e_final_answer_no_tools() {
         .build();
 
     // 推入用户输入
-    ctx.session.queue.push(QueuedMessage::prompt(
+    ctx.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human(MessageContent::text("do the task")),
     ));
@@ -134,7 +134,7 @@ async fn test_run_react_loop_idle_dispatches_queued_prompts_one_at_a_time() {
     let inbox = Arc::new(SessionInbox::new(Arc::new(context.session.queue.clone())));
     let mailbox = UserInputMailbox::new("session".into(), inbox.clone(), Arc::new(|_| {}));
     mailbox
-        .attach_external_attempt(context.session.turn.cancel_token.as_ref().clone(), false)
+        .attach_external_attempt_sync(context.session.turn.cancel_token.as_ref().clone(), false)
         .unwrap();
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let resume = Arc::new(tokio::sync::Notify::new());
@@ -152,7 +152,7 @@ async fn test_run_react_loop_idle_dispatches_queued_prompts_one_at_a_time() {
     });
     let (bus, mut handles) = crate::agent::events_v2::EventBus::new(Default::default());
     context.runtime.event_bus = Arc::new(bus);
-    context.session.queue.push(QueuedMessage::prompt(
+    context.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("初始任务"),
     ));
@@ -165,7 +165,7 @@ async fn test_run_react_loop_idle_dispatches_queued_prompts_one_at_a_time() {
     for text in ["A", "B"] {
         let input_id = uuid::Uuid::now_v7().to_string();
         let receipt = mailbox
-            .enqueue(&EnqueueUserInputRequest {
+            .enqueue_sync(&EnqueueUserInputRequest {
                 session_id: "session".into(),
                 generation: mailbox.generation().into(),
                 command_id: format!("enqueue-{text}"),
@@ -177,7 +177,10 @@ async fn test_run_react_loop_idle_dispatches_queued_prompts_one_at_a_time() {
         assert_eq!(receipt.results[0].state, UserInputState::Queued);
         input_ids.push(input_id);
     }
-    assert!(inbox.queue().is_empty(), "loading 期间不能交接普通待办");
+    assert!(
+        inbox.queue().is_empty_sync(),
+        "loading 期间不能交接普通待办"
+    );
     resume.notify_one();
     let result = tokio::time::timeout(std::time::Duration::from_secs(1), task)
         .await
@@ -193,7 +196,7 @@ async fn test_run_react_loop_idle_dispatches_queued_prompts_one_at_a_time() {
         ],
         "每次进入 idle 只交接 FIFO 队首"
     );
-    assert!(mailbox.snapshot().items.is_empty());
+    assert!(mailbox.snapshot_sync().items.is_empty());
     let mut delivered = Vec::new();
     while let Ok(event) = handles.render_rx.try_recv() {
         assert!(
@@ -255,7 +258,7 @@ async fn test_run_react_loop_cancel_during_reason_is_interrupted() {
         }))
         .with_event_bus(Arc::new(bus))
         .build();
-    ctx.session.queue.push(QueuedMessage::prompt(
+    ctx.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("cancel while reasoning"),
     ));

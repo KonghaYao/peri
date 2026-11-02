@@ -308,11 +308,20 @@ pub(super) async fn resume_subagent_impl(
     // 7. prompt 入队：Some(p) 原样追加（不套 fork directive——恢复目标仍是原
     //    任务，直接追加指令）；None 注入隐式 continue 常量（issue 决策 9）
     let prompt_text = prompt.unwrap_or_else(|| IMPLICIT_CONTINUE_PROMPT.to_string());
-    v2_ctx.context.session.queue.push(QueuedMessage::new(
+    let prompt_message = QueuedMessage::new(
         MessageKind::Prompt,
         MessageSource::UserInput,
         BaseMessage::human(prompt_text.clone()),
-    ));
+    );
+    if let Err(error) = v2_ctx
+        .context
+        .session
+        .queue
+        .enqueue_sent(prompt_message)
+        .await
+    {
+        tracing::warn!(%error, "resume prompt enqueue failed");
+    }
 
     // 8. 执行（run mode 由本次调用决定，issue 决策 8）
     // 认领已写入 Active；准备门在进入执行前释放，避免与本次 run 的

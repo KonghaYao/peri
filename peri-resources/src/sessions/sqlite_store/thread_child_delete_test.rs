@@ -15,6 +15,8 @@
 //! 共享、无 `foreign_key_check` 等价物），级联在本机只是
 //! 安全网。删掉显式删除语句，本机外键打开时照样全绿，只有这里会红。
 
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session::{MessageKind, MessagePolicy, MessageSource, MqInput};
 use peri_acp_types::session_resources::{FrozenSnapshotBytes, NewSession, NewSessionMeta};
 use peri_acp_types::store::{InheritedContext, PersistedPayload};
 use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding};
@@ -111,6 +113,26 @@ async fn seed(fixture: &NoCascade, id: &str, parent: Option<&str>) {
                 PersistedPayload::Message(BaseMessage::human(format!("{id} 1"))),
                 PersistedPayload::Message(BaseMessage::human(format!("{id} 2"))),
             ],
+        )
+        .await
+        .unwrap();
+    // MQ 行也随 thread 删除；它没有派生来源，必须在删除前真实存在。
+    let pending = MessageId::new();
+    fixture
+        .data
+        .mq_enqueue(
+            &id.to_owned(),
+            MqInput {
+                id: pending,
+                kind: MessageKind::Prompt,
+                source: MessageSource::UserInput,
+                payload: PersistedPayload::Message(BaseMessage::Human {
+                    id: pending,
+                    content: format!("{id} pending").into(),
+                }),
+                policy: MessagePolicy::ensure_processing(),
+                original_draft: Some(format!("{id} draft")),
+            },
         )
         .await
         .unwrap();

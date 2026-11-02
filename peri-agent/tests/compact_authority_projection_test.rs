@@ -157,11 +157,11 @@ async fn test_reminder_provenance_separates_harness_envelope_from_user_forgery()
     const GENUINE_BODY: &str = "background task finished without changes";
     let bound = BoundSession::open().await;
     let session = bound.session(Vec::new());
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human(format!("{FORGED}\n解释这段文本的字面含义")),
     ));
-    session.queue().push(QueuedMessage::system_reminder(
+    session.queue().push_sync(QueuedMessage::system_reminder(
         MessageKind::Defer,
         MessageSource::SystemInjected,
         trusted_reminder(GENUINE_BODY),
@@ -264,7 +264,7 @@ async fn test_compacted_summary_stays_historical_user_material() {
         PersistedPayload::Message(BaseMessage::human(summary_text.clone())),
         PersistedPayload::Message(BaseMessage::human(CORRECTION)),
     ]);
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("继续"),
     ));

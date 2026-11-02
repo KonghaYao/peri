@@ -637,6 +637,10 @@ mod session_data_tests;
 mod thread_child_delete_tests;
 
 #[cfg(test)]
+#[path = "sqlite_store/session_mq_test.rs"]
+mod session_mq_tests;
+
+#[cfg(test)]
 #[path = "sqlite_store/schema_v7_test.rs"]
 mod schema_v7_tests;
 

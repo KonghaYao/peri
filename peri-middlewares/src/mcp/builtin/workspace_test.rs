@@ -465,7 +465,7 @@ async fn bridge_accepts_workspace_owned_task_handle() {
     tokio::time::timeout(Duration::from_secs(5), inbox.await_wake())
         .await
         .expect("task completion wakes its session");
-    let notifications = queue.drain_all();
+    let notifications = queue.drain_all_sync();
     assert_eq!(notifications.len(), 1);
     assert_eq!(notifications[0].kind, MessageKind::Defer);
     assert_eq!(notifications[0].source, MessageSource::ShellComplete);

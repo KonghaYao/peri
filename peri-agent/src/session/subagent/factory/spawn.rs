@@ -364,7 +364,9 @@ pub(super) async fn spawn_subagent_impl(
         MessageSource::UserInput,
         BaseMessage::human(prompt_message),
     );
-    v2_ctx.context.session.queue.push(queued);
+    if let Err(error) = v2_ctx.context.session.queue.enqueue_sent(queued).await {
+        tracing::warn!(%error, "child prompt enqueue failed");
+    }
 
     match run_mode {
         SubagentRunMode::Sync => {

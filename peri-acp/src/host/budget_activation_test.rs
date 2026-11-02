@@ -1,6 +1,22 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// mockito 的回调运行在它自己的 tokio 运行时里，`ready_only` 会拒绝就地阻塞；
+/// 与终态投递相同，换一个独立 runtime 线程等待真实提交。
+fn on_mq_runtime<T: Send + 'static>(
+    work: impl std::future::Future<Output = T> + Send + 'static,
+) -> T {
+    std::thread::spawn(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test MQ bridge runtime")
+            .block_on(work)
+    })
+    .join()
+    .expect("test MQ bridge thread panicked")
+}
+
 #[tokio::test]
 #[serial]
 async fn late_background_result_is_processed_without_default_iteration_limit() {
@@ -41,9 +57,15 @@ async fn late_background_result_is_processed_without_default_iteration_limit() {
             move |request| {
                 let call = calls.fetch_add(1, Ordering::SeqCst) + 1;
                 if call < limit {
-                    queue.push(QueuedMessage::defer(
-                        MessageSource::SystemInjected, BaseMessage::human("next step"),
-                    ));
+                    let queue = queue.clone();
+                    on_mq_runtime(async move {
+                        queue
+                            .push_async(QueuedMessage::defer(
+                                MessageSource::SystemInjected,
+                                BaseMessage::human("next step"),
+                            ))
+                            .await;
+                    });
                 } else if call == limit {
                     complete(&peri_acp_types::event::BackgroundTaskResult {
                         task_id: "budget-boundary-child".into(), agent_name: "child".into(),
@@ -52,10 +74,21 @@ async fn late_background_result_is_processed_without_default_iteration_limit() {
                         duration_ms: 1, child_thread_id: None, timed_out: false,
                         subagent_failure: None, shell_output: None,
                     }, BgTaskKind::Agent).unwrap();
-                    let pending = queue.drain_all();
-                    assert_eq!(pending.len(), 1);
-                    *published_result.lock().unwrap() = Some(pending[0].clone());
-                    queue.push_batch(pending);
+                    // MQ 的 Receive 会原子提交到历史，不能再 drain 后重投；这里只读快照，
+                    // 让晚到结果留在队列里由下一轮 Receive 交付。
+                    let published = {
+                        let queue = queue.clone();
+                        on_mq_runtime(async move {
+                            queue
+                                .snapshot()
+                                .await
+                                .expect("test MQ snapshot")
+                                .into_iter()
+                                .find(|message| message.source == MessageSource::SubAgentComplete)
+                                .expect("late child result must stay queued")
+                        })
+                    };
+                    *published_result.lock().unwrap() = Some(published);
                 } else {
                     *followup_body.lock().unwrap() = Some(
                         serde_json::from_slice::<Value>(request.body().unwrap()).unwrap()
@@ -123,8 +156,8 @@ async fn late_background_result_is_processed_without_default_iteration_limit() {
     let published = published_result.lock().unwrap().take().unwrap();
     let delivery_id = published.delivery_id.unwrap();
     assert_eq!(
-        published.admission_sequence,
-        Some(queue.admission_watermark())
+        published.admission_sequence, None,
+        "MQ 以 (enqueued_at, id) 定序，旧接纳序号不再赋值"
     );
     assert_eq!(
         history
@@ -133,7 +166,7 @@ async fn late_background_result_is_processed_without_default_iteration_limit() {
             .count(),
         1
     );
-    assert!(queue.is_empty());
+    assert!(queue.is_empty().await.expect("test MQ len"));
     let sessions = harness.sessions.lock().await;
     assert!(sessions[&harness.session_id].cancel_token.is_none());
     assert!(!sessions[&harness.session_id].continuation_in_flight);

@@ -340,7 +340,7 @@ async fn recover_lag(ctx: &PumpSinkContext<'_>, health: &BusHealth, skipped: u64
     health.record_state(EmitOutcome::Lagging, skipped);
     tracing::warn!(session_id = %ctx.session_id, skipped, "事件订阅落后，会话需要重同步");
     if let Some(mailbox) = ctx.delivery_journal {
-        let snapshot = mailbox.snapshot();
+        let snapshot = mailbox.snapshot().await;
         if let Err(error) = ctx
             .sink
             .push_event(

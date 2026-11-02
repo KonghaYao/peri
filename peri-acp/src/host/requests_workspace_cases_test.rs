@@ -359,7 +359,7 @@ impl peri_acp_types::ports::McpPoolPort for RetryShutdownPool {
         self
     }
 
-    fn verify_shared_environment_close(&self, _session_id: &str) -> Result<(), String> {
+    async fn verify_shared_environment_close(&self, _session_id: &str) -> Result<(), String> {
         Ok(())
     }
 

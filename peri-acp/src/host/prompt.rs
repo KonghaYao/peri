@@ -204,16 +204,17 @@ pub(crate) async fn run_prompt(
 ) -> Result<Value, AcpError> {
     let notifications = super::execution::ExecutionNotifications::from_params(&mut params)?;
     let session_id = super::extract_session_id(&params, "").to_owned();
-    let attempt_activation = deployment
-        .session_manager
-        .get_session(&session_id)
-        .map(|runtime| {
-            (
-                Arc::clone(&runtime.activation),
-                runtime.v2_message_queue.admission_watermark(),
-                runtime.async_result_mailbox.admission_watermark(),
-            )
-        });
+    let attempt_activation = match deployment.session_manager.get_session(&session_id) {
+        Some(runtime) => {
+            let activation = Arc::clone(&runtime.activation);
+            let queue = runtime.v2_message_queue.clone();
+            let result_watermark = runtime.async_result_mailbox.admission_watermark();
+            drop(runtime);
+            let watermark = queue.admission_watermark().await.unwrap_or(None);
+            Some((activation, watermark, result_watermark))
+        }
+        None => None,
+    };
     let result = run_prompt_attempt(
         params,
         sessions,
@@ -229,7 +230,7 @@ pub(crate) async fn run_prompt(
     .await;
     if result.is_err() {
         if let Some((activation, watermark, result_watermark)) = &attempt_activation {
-            activation.record_failed_attempt(*watermark);
+            activation.record_failed_attempt(watermark.clone());
             activation.record_failed_result_watermark(*result_watermark);
         }
         notifications
@@ -250,7 +251,11 @@ async fn run_prompt_attempt(
     continuation: bool,
     input_ticket: Option<super::user_input::UserInputRun>,
     notifications: &super::execution::ExecutionNotifications,
-    attempt_activation: Option<&(Arc<crate::session::SessionActivation>, u64, u64)>,
+    attempt_activation: Option<&(
+        Arc<crate::session::SessionActivation>,
+        Option<peri_acp_types::session::MqWatermark>,
+        u64,
+    )>,
 ) -> Result<Value, AcpError> {
     // Borrow deployment services; turn-owned callbacks clone only their existing handles.
     // Provider/config snapshots remain below, after the session snapshot is captured.
@@ -289,7 +294,8 @@ async fn run_prompt_attempt(
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    let user_input_mailbox = super::user_input::ensure_mailbox(&session_id, deployment, transport)?;
+    let user_input_mailbox =
+        super::user_input::ensure_mailbox(&session_id, deployment, transport).await?;
 
     // Create cancel token and register in sessions.
     // `AgentCancellationToken` 即 `tokio_util::sync::CancellationToken` 别名
@@ -305,13 +311,17 @@ async fn run_prompt_attempt(
     let managed_input = input_ticket.is_some();
     let input_attempt = match &input_ticket {
         Some(run) => {
-            if !user_input_mailbox.attach_attempt(&run.ticket, cancel.clone()) {
+            if !user_input_mailbox
+                .attach_attempt(&run.ticket, cancel.clone())
+                .await
+            {
                 return Ok(Value::Null);
             }
             run.ticket.clone()
         }
         None => user_input_mailbox
             .attach_external_attempt(cancel.clone(), !continuation && content.is_empty())
+            .await
             .ok_or_else(|| AcpError::new(-32800, "user input attempt superseded"))?,
     };
     let mut input_attempt_guard = super::user_input::InputAttemptGuard::new(
@@ -653,7 +663,7 @@ async fn run_prompt_attempt(
                     runtime.async_result_mailbox.suspend_scope("cancelled");
                 }
             } else {
-                activation.record_failed_attempt(*watermark);
+                activation.record_failed_attempt(watermark.clone());
                 activation.record_failed_result_watermark(*result_watermark);
                 // 阶段内部已按阶段记录；这里是未进入阶段或早退失败的兜底：未覆盖
                 // 结果保留为 Blocked，不自动重试。
@@ -679,7 +689,7 @@ async fn run_prompt_attempt(
             .session_manager
             .invalidate_user_input_mailbox(&session_id);
     }
-    input_attempt_guard.finish(&result);
+    input_attempt_guard.finish(&result).await;
 
     let compact_committed =
         result.history_replaced_by_compaction && !result.persistence_inconsistent;

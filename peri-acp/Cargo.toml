@@ -85,6 +85,7 @@ rmcp = { workspace = true, features = ["client", "transport-async-rw", "server"]
 # `test-support`：跨 crate 夹具入口（空池 + 装入进程内 peer）。dev-dependency 的
 # 特性只在本 crate 的测试构建生效，不进生产 API 面。
 peri-middlewares = { path = "../peri-middlewares", features = ["test-support"] }
+peri-acp-types = { path = "../peri-acp-types", features = ["test-support"] }
 
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
 peri-mcp-common.workspace = true

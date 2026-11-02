@@ -30,11 +30,11 @@ async fn background_resume_without_custom_callback_wakes_parent() {
     .await
     .expect("background resume must settle before checking its delivery");
     assert_eq!(manager.active_count(), 0);
-    assert!(parent.queue().has_ensure_processing());
+    assert!(parent.queue().has_ensure_processing_sync());
     assert!(parent
         .queue()
-        .has_pending_defer(&MessageSource::SubAgentComplete));
-    assert!(spawned.session.queue().is_empty());
+        .has_pending_defer_sync(&MessageSource::SubAgentComplete));
+    assert!(spawned.session.queue().is_empty_sync());
     let model = RecordingLLM::new();
     let received = model.received.clone();
     let built = build_v2_subagent_context(
@@ -58,7 +58,7 @@ async fn background_resume_without_custom_callback_wakes_parent() {
         crate::agent::stages::run_react_loop(built.context, 2).await,
         crate::agent::stages::LoopResult::Completed
     ));
-    assert!(parent.queue().is_empty());
+    assert!(parent.queue().is_empty_sync());
     let requests = received.read();
     assert_eq!(requests.len(), 1);
     assert_eq!(

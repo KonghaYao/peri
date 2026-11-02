@@ -167,12 +167,20 @@ impl ParkedChildOwner {
     }
 
     /// 用于状态提交后判断 owner 是否仍有未确认的委托义务。
-    pub fn has_unsettled_obligations(&self) -> bool {
+    pub async fn has_unsettled_obligations(&self) -> bool {
         let unconfirmed = {
             let state = self.state.lock();
             state.failure.is_some() || state.pending_receipt.is_some()
         };
-        unconfirmed || self.manager.has_unsettled_tasks() || self.queue.has_required()
+        unconfirmed
+            || self.manager.has_unsettled_tasks()
+            || self.queue.has_required().await.unwrap_or(true)
+    }
+
+    /// 仅测试：同步适配同一 async 判定。
+    #[cfg(test)]
+    pub fn has_unsettled_obligations_sync(&self) -> bool {
+        futures::executor::block_on(self.has_unsettled_obligations())
     }
 
     pub fn freeze_receipt(
@@ -274,7 +282,7 @@ impl ParkedChildOwner {
             ));
         }
         self.settle_retained_messages().await?;
-        if self.queue.has_required() {
+        if self.queue.has_required().await.unwrap_or(true) {
             return Err("Incomplete: retained child messages remain unprocessed".into());
         }
         if let Some(pool) = &self.pool {
@@ -289,7 +297,7 @@ impl ParkedChildOwner {
 
     async fn settle_retained_messages(&self) -> Result<(), String> {
         let Some(resources) = &self.resources else {
-            if self.queue.has_required() {
+            if self.queue.has_required().await.unwrap_or(true) {
                 return Err(
                     "Incomplete: canonical child history unavailable for retained messages".into(),
                 );
@@ -317,16 +325,41 @@ impl ParkedChildOwner {
                 }
             }
         }
-        loop {
-            let drained = self.queue.drain_all();
-            if drained.is_empty() {
-                break;
-            }
-            if let Err(error) = self.commit_retained(resources, &drained).await {
-                self.queue.push_batch(drained);
-                return Err(error);
-            }
+        // 非模型结算：先按既有规则写终态/汇总，再经同一 Receive 删除 MQ 行。
+        // 两次写入不是单一事务（本机 Store 只对模型 Receive 暴露原子移交），
+        // 失败时保留 MQ 行并由下一次 close 重试；汇总使用稳定 delivery ID 幂等。
+        let entries = self
+            .queue
+            .query(peri_acp_types::session::MqFilter::default())
+            .await
+            .map_err(|error| format!("Incomplete: child MQ query failed: {error}"))?;
+        if entries.is_empty() {
+            return Ok(());
         }
+        let queued: Vec<peri_acp_types::session::QueuedMessage> = entries
+            .iter()
+            .cloned()
+            .map(peri_acp_types::session::QueuedMessage::from_mq_entry)
+            .collect();
+        self.commit_retained(resources, &queued).await?;
+        let permit = self.queue.begin_receive(
+            peri_acp_types::session::MqReceivePurpose::NonModelSettlement,
+            ExecutionBinding {
+                turn_id: peri_acp_types::session::TurnId::new(),
+                attempt_id: peri_acp_types::identity::AttemptId::new(),
+            },
+        );
+        let items = entries
+            .into_iter()
+            .map(|entry| peri_acp_types::session::MqReceiveItem {
+                entry,
+                disposition: peri_acp_types::session::MqReceiveDisposition::Suppress,
+            })
+            .collect();
+        self.queue
+            .receive(permit, items)
+            .await
+            .map_err(|error| format!("Incomplete: child MQ settlement failed: {error}"))?;
         Ok(())
     }
 

@@ -160,7 +160,7 @@ struct LoopState {
     stream_recoveries: usize,
 }
 
-fn enqueue_stream_interruption_continuation(context: &StageContext) {
+async fn enqueue_stream_interruption_continuation(context: &StageContext) {
     use crate::session::queue::{MessageKind, MessageSource};
     use peri_acp_types::system_reminder::{ReminderCategory, ReminderDelivery, ReminderSeverity};
 
@@ -174,17 +174,19 @@ fn enqueue_stream_interruption_continuation(context: &StageContext) {
         Some("模型流中断，正在继续。".into()),
         serde_json::json!({"reason": "stream_interrupted"}),
     );
-    context.session.queue.push(
+    let message =
         QueuedMessage::system_reminder(MessageKind::Defer, MessageSource::SystemInjected, reminder)
             .with_policy(
                 peri_acp_types::session::MessagePolicy::continue_current_run(
                     context.session.turn.execution_binding(),
                 ),
-            ),
-    );
+            );
+    if let Err(error) = context.session.queue.enqueue(message).await {
+        tracing::warn!(%error, "continuation enqueue failed");
+    }
 }
 
-fn enqueue_truncation_continuation(context: &StageContext) {
+async fn enqueue_truncation_continuation(context: &StageContext) {
     use crate::session::queue::{MessageKind, MessageSource};
     use peri_acp_types::system_reminder::{ReminderCategory, ReminderDelivery, ReminderSeverity};
 
@@ -198,17 +200,19 @@ fn enqueue_truncation_continuation(context: &StageContext) {
         Some("Model response was truncated; continuing.".into()),
         serde_json::json!({"stop_reason": "max_tokens"}),
     );
-    context.session.queue.push(
+    let message =
         QueuedMessage::system_reminder(MessageKind::Defer, MessageSource::SystemInjected, reminder)
             .with_policy(
                 peri_acp_types::session::MessagePolicy::continue_current_run(
                     context.session.turn.execution_binding(),
                 ),
-            ),
-    );
+            );
+    if let Err(error) = context.session.queue.enqueue(message).await {
+        tracing::warn!(%error, "continuation enqueue failed");
+    }
 }
 
-fn enqueue_model_continuation(context: &StageContext) {
+async fn enqueue_model_continuation(context: &StageContext) {
     use crate::session::queue::{MessageKind, MessageSource};
     use peri_acp_types::system_reminder::{ReminderCategory, ReminderDelivery, ReminderSeverity};
 
@@ -222,14 +226,16 @@ fn enqueue_model_continuation(context: &StageContext) {
         Some("Model turn is incomplete; continuing.".into()),
         serde_json::json!({"stop_reason": "continue"}),
     );
-    context.session.queue.push(
+    let message =
         QueuedMessage::system_reminder(MessageKind::Defer, MessageSource::SystemInjected, reminder)
             .with_policy(
                 peri_acp_types::session::MessagePolicy::continue_current_run(
                     context.session.turn.execution_binding(),
                 ),
-            ),
-    );
+            );
+    if let Err(error) = context.session.queue.enqueue(message).await {
+        tracing::warn!(%error, "continuation enqueue failed");
+    }
 }
 
 /// 阶段失败时保留后台结果的处理责任：用户 Stop 进入 Suspended，其它失败进入
@@ -336,7 +342,13 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
     let mut loop_state = LoopState::default();
     let mut semantic_iterations = 0usize;
     let execution = context.session.turn.execution_binding();
-    let initial_input_watermark = context.session.queue.admission_watermark();
+    let initial_input_watermark = match context.session.queue.admission_watermark().await {
+        Ok(watermark) => watermark,
+        Err(error) => {
+            tracing::warn!(%error, "Receive: MQ watermark unavailable; budget guard disabled");
+            None
+        }
+    };
     // Keep one receiver for the lifetime of this loop so its observed version
     // advances across idle retries. StageContext clones are short-lived stage
     // inputs and must not own the receive cursor.
@@ -361,7 +373,9 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     ReceiveInput {
                         context: context.clone(),
                     },
-                    (semantic_iterations >= max_iterations).then_some(initial_input_watermark),
+                    (semantic_iterations >= max_iterations)
+                        .then(|| initial_input_watermark.clone())
+                        .flatten(),
                 )
                 .await
             })
@@ -423,7 +437,13 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                 && !context.session.async_result_mailbox.has_ready()
             {
                 // 竞态保护：退出前再检查一次队列是否有新消息到达
-                if context.session.queue.has_required_for_run(&execution) {
+                if context
+                    .session
+                    .queue
+                    .has_required_for_run(&execution)
+                    .await
+                    .unwrap_or(false)
+                {
                     tracing::debug!("Receive: consumed=0 but queue has wake-up, continue");
                     continue;
                 }
@@ -446,11 +466,17 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     .unwrap_or(false);
                 if should_wait && context.async_ctx.idle_wait_enabled {
                     if let Some(mailbox) = &context.session.user_input_mailbox {
-                        mailbox.enter_idle();
+                        mailbox.enter_idle().await;
                     }
                     // loading 期间的队首输入在 idle 边界交接，直接回 Receive，
                     // 不先发布一个并未真正等待的 TurnSuspended。
-                    if context.session.queue.has_required_for_run(&execution) {
+                    if context
+                        .session
+                        .queue
+                        .has_required_for_run(&execution)
+                        .await
+                        .unwrap_or(false)
+                    {
                         if let Some(mailbox) = &context.session.user_input_mailbox {
                             mailbox.leave_idle();
                         }
@@ -530,9 +556,10 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                             if context.session.turn.is_cancelled() {
                                 return interrupted(&context);
                             }
+                            let queue_len = context.session.queue.len().await.unwrap_or(0);
                             tracing::debug!(
                                 turn_id = %context.session.turn.turn_id(),
-                                queue_len_after_wake = context.session.queue.len(),
+                                queue_len_after_wake = queue_len,
                                 "run_react_loop: idle inbox woken, continue to Receive"
                             );
                             // 醒来直接 continue 回 Receive——下一轮 Receive 用 drain_all()
@@ -560,9 +587,10 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                             if let Some(mailbox) = &context.session.user_input_mailbox {
                                 mailbox.leave_idle();
                             }
+                            let queue_len = context.session.queue.len().await.unwrap_or(0);
                             tracing::debug!(
                                 turn_id = %context.session.turn.turn_id(),
-                                queue_len_after_wake = context.session.queue.len(),
+                                queue_len_after_wake = queue_len,
                                 "run_react_loop: registry activity changed, continue to Receive"
                             );
                             // The signal carries no task result. Receive must
@@ -571,9 +599,16 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                         }
                     }
                 }
-                if context.session.queue.has_required_for_run(&execution) {
+                if context
+                    .session
+                    .queue
+                    .has_required_for_run(&execution)
+                    .await
+                    .unwrap_or(false)
+                {
+                    let queue_len = context.session.queue.len().await.unwrap_or(0);
                     tracing::debug!(
-                        queue_len = context.session.queue.len(),
+                        queue_len,
                         "run_react_loop: queue has pending messages, continue Receive"
                     );
                     continue;
@@ -588,9 +623,10 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                         continue;
                     }
                 }
+                let queue_len = context.session.queue.len().await.unwrap_or(0);
                 tracing::debug!(
                     idle_should_wait = should_wait,
-                    queue_len = context.session.queue.len(),
+                    queue_len,
                     "run_react_loop: exit (queue empty, no idle wait)"
                 );
                 // 有界等待到期：仍有未结算任务时写可观测交接后结束本轮，
@@ -621,7 +657,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     max_iterations,
                     semantic_iterations,
                     budget_deferred_count = receive_out.budget_deferred_count,
-                    initial_input_watermark,
+                    initial_input_watermark = ?initial_input_watermark,
                     "ReAct v2 循环达到最大语义迭代次数"
                 );
                 let failure = LoopResult::Error(crate::error::AgentError::MaxIterationsExceeded(
@@ -783,7 +819,7 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     record_stage_failure(&context, "stream_recovery", &failure);
                     return failure;
                 }
-                enqueue_stream_interruption_continuation(&context);
+                enqueue_stream_interruption_continuation(&context).await;
             }
             if truncated_without_tools {
                 loop_state.consecutive_truncations += 1;
@@ -803,9 +839,9 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
                     return failure;
                 }
                 if model_wants_continuation {
-                    enqueue_model_continuation(&context);
+                    enqueue_model_continuation(&context).await;
                 } else {
-                    enqueue_truncation_continuation(&context);
+                    enqueue_truncation_continuation(&context).await;
                 }
             } else {
                 loop_state.consecutive_truncations = 0;
@@ -814,7 +850,13 @@ pub async fn run_react_loop(context: StageContext, max_iterations: usize) -> Loo
             continue;
         }
 
-        if context.session.queue.has_required_for_run(&execution) {
+        if context
+            .session
+            .queue
+            .has_required_for_run(&execution)
+            .await
+            .unwrap_or(false)
+        {
             loop_state.has_tool_calls = false;
             continue 'receive_retry;
         }

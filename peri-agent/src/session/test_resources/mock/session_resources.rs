@@ -1,6 +1,7 @@
 //! `SessionResources` 门面替身：实现契约语义，未覆盖的行为按 `Unsupported` 拒绝而不是静默 no-op。
 
 use super::*;
+use peri_acp_types::session::ThreadMqStore as _;
 
 /// 替身的工作区投影：按保存路径造一个自洽的 `ResolvedWorkspace`。
 ///
@@ -251,6 +252,93 @@ impl SessionResources for MockSessionResources {
         Ok(())
     }
 
+    async fn mq_enqueue(
+        &self,
+        thread_id: &ThreadId,
+        input: peri_acp_types::session::MqInput,
+    ) -> SessionResourceResult<peri_acp_types::session::MqEnqueueOutcome> {
+        self.ensure_writable()?;
+        // 历史优先：已移交的 ID 不再回到 MQ（与真实 adapter 的判定顺序一致）。
+        let handed_off = self.region(thread_id).is_some_and(|region| {
+            region
+                .payloads
+                .iter()
+                .any(|payload| payload.id() == input.id)
+        });
+        if handed_off {
+            let mut clock = self.mq_clock.lock().unwrap();
+            *clock += 1;
+            let enqueued_at = format!("1970-01-01T00:00:00.{:06}Z", *clock);
+            return Ok(peri_acp_types::session::MqEnqueueOutcome {
+                disposition: peri_acp_types::session::MqEnqueueDisposition::AlreadyHandedOff,
+                entry: peri_acp_types::session::MqEntry {
+                    id: input.id,
+                    enqueued_at,
+                    kind: input.kind,
+                    source: input.source,
+                    payload: input.payload,
+                    policy: input.policy,
+                    original_draft: input.original_draft,
+                },
+            });
+        }
+        self.mq.mq_enqueue(thread_id, input).await
+    }
+
+    async fn mq_query(
+        &self,
+        thread_id: &ThreadId,
+        filter: peri_acp_types::session::MqFilter,
+    ) -> SessionResourceResult<Vec<peri_acp_types::session::MqEntry>> {
+        self.mq.mq_query(thread_id, filter).await
+    }
+
+    async fn mq_cancel(
+        &self,
+        thread_id: &ThreadId,
+        id: peri_acp_types::messages::MessageId,
+    ) -> SessionResourceResult<peri_acp_types::session::MqCancelOutcome> {
+        self.ensure_writable()?;
+        self.mq.mq_cancel(thread_id, id).await
+    }
+
+    async fn mq_receive(
+        &self,
+        thread_id: &ThreadId,
+        selection: peri_acp_types::session::MqReceiveSelection,
+    ) -> SessionResourceResult<peri_acp_types::session::MqReceiveOutcome> {
+        self.ensure_writable()?;
+        let outcome = self.mq.mq_receive(thread_id, selection).await?;
+        for item in &outcome.items {
+            if item.status != peri_acp_types::session::MqReceiveStatus::Committed {
+                continue;
+            }
+            let Some(entry) = item.entry.as_ref() else {
+                continue;
+            };
+            let payload = entry.payload.clone();
+            self.with_region(thread_id, |region| {
+                if !region
+                    .payloads
+                    .iter()
+                    .any(|known| known.id() == payload.id())
+                {
+                    region.payloads.push(payload);
+                }
+            });
+        }
+        Ok(outcome)
+    }
+
+    async fn mq_clear(&self, thread_id: &ThreadId) -> SessionResourceResult<()> {
+        self.ensure_writable()?;
+        self.mq.mq_clear(thread_id).await
+    }
+
+    fn install_receive_gate(&self, gate: peri_acp_types::session::ReceiveGate) {
+        self.mq.install_receive_gate(gate);
+    }
+
     async fn append_reminder_if_absent(
         &self,
         id: &ThreadId,
@@ -258,11 +346,7 @@ impl SessionResources for MockSessionResources {
         reminder: &peri_acp_types::system_reminder::TrustedSystemReminder,
     ) -> SessionResourceResult<bool> {
         self.ensure_writable()?;
-        let gate = self.reminder_append_gate.lock().unwrap().take();
-        if let Some((entered, release)) = gate {
-            let _ = entered.send(());
-            let _ = release.await;
-        }
+        Self::wait_gate(&self.reminder_append_gate).await;
         self.with_region(id, |region| {
             if let Some(existing) = region
                 .payloads

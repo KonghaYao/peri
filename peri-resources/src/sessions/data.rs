@@ -14,6 +14,10 @@ use peri_acp_types::history_window::{
     HistoryBodyChunk, HistoryCommittedTail, HistoryReadTicket, HistorySource,
 };
 use peri_acp_types::messages::MessageId;
+use peri_acp_types::session::{
+    MqCancelOutcome, MqEnqueueOutcome, MqEntry, MqFilter, MqInput, MqReceiveOutcome,
+    MqReceiveSelection,
+};
 use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes,
     FrozenState, HistoryWindowPagePlan, HistoryWindowRows, NewSession, PersistenceRecovery,
@@ -556,9 +560,49 @@ pub(crate) trait SessionDataPort: Send + Sync {
         &self,
         id: &ThreadId,
     ) -> SessionResourceResult<PersistenceRecovery>;
-
     /// 排空该会话已排队的持久化写入（有界等待）。
     async fn drain(&self, id: &ThreadId) -> SessionResourceResult<()>;
+
+    // ── Thread MQ（持久收件箱） ──
+    //
+    // 默认实现是显式「不支持」：adapter 要么提供原子移交，要么让调用方看到 typed 错误，
+    // 不允许退化成两次独立写入（先写历史再删 MQ）。
+
+    async fn mq_enqueue(
+        &self,
+        _thread_id: &ThreadId,
+        _input: MqInput,
+    ) -> SessionResourceResult<MqEnqueueOutcome> {
+        Err(super::failure::unsupported())
+    }
+
+    async fn mq_query(
+        &self,
+        _thread_id: &ThreadId,
+        _filter: MqFilter,
+    ) -> SessionResourceResult<Vec<MqEntry>> {
+        Err(super::failure::unsupported())
+    }
+
+    async fn mq_cancel(
+        &self,
+        _thread_id: &ThreadId,
+        _id: MessageId,
+    ) -> SessionResourceResult<MqCancelOutcome> {
+        Err(super::failure::unsupported())
+    }
+
+    async fn mq_receive(
+        &self,
+        _thread_id: &ThreadId,
+        _selection: MqReceiveSelection,
+    ) -> SessionResourceResult<MqReceiveOutcome> {
+        Err(super::failure::unsupported())
+    }
+
+    async fn mq_clear(&self, _thread_id: &ThreadId) -> SessionResourceResult<()> {
+        Err(super::failure::unsupported())
+    }
 
     /// 关闭数据端口：返回后不再接受新写入。
     async fn close(&self) -> SessionResourceResult<()>;

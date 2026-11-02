@@ -4,6 +4,10 @@ use super::*;
 use crate::host::{prompt::finish_prompt_turn, SessionState, SharedSessions};
 use peri_acp_types::{
     messages::MessageId,
+    session::{
+        MqCancelOutcome, MqEnqueueOutcome, MqEntry, MqFilter, MqInput, MqReceiveOutcome,
+        MqReceiveSelection,
+    },
     session_resources::{
         ChildResumeClaim, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, NewSession,
         NewSessionMeta, PersistenceRecovery, RewindBoundary, RewindOutcome, SessionAvailability,
@@ -319,6 +323,46 @@ impl SessionResources for CompactStore {
 
     async fn drain_persistence(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.inner.drain_persistence(id).await
+    }
+
+    async fn mq_enqueue(
+        &self,
+        thread_id: &ThreadId,
+        input: MqInput,
+    ) -> SessionResourceResult<MqEnqueueOutcome> {
+        self.inner.mq_enqueue(thread_id, input).await
+    }
+
+    async fn mq_query(
+        &self,
+        thread_id: &ThreadId,
+        filter: MqFilter,
+    ) -> SessionResourceResult<Vec<MqEntry>> {
+        self.inner.mq_query(thread_id, filter).await
+    }
+
+    async fn mq_cancel(
+        &self,
+        thread_id: &ThreadId,
+        id: MessageId,
+    ) -> SessionResourceResult<MqCancelOutcome> {
+        self.inner.mq_cancel(thread_id, id).await
+    }
+
+    async fn mq_receive(
+        &self,
+        thread_id: &ThreadId,
+        selection: MqReceiveSelection,
+    ) -> SessionResourceResult<MqReceiveOutcome> {
+        self.inner.mq_receive(thread_id, selection).await
+    }
+
+    async fn mq_clear(&self, thread_id: &ThreadId) -> SessionResourceResult<()> {
+        self.inner.mq_clear(thread_id).await
+    }
+
+    fn install_receive_gate(&self, gate: peri_acp_types::session::ReceiveGate) {
+        self.inner.install_receive_gate(gate);
     }
 }
 

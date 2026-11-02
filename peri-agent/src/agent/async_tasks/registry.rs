@@ -531,30 +531,35 @@ impl BackgroundTaskRegistry {
             .count()
     }
 
-    pub(super) fn send_subagent_message(
+    pub(super) async fn send_subagent_message(
         &self,
         thread_id: &str,
         prompt: Option<&str>,
     ) -> Result<Option<QueuedSubagentMessage>, SubagentMessageError> {
-        let _admission = self
-            .scope
-            .admit()
-            .map_err(|_| SubagentMessageError::Closed)?;
-        let tasks = self.tasks.lock();
-        let target = tasks.values().find_map(|task| {
-            if task.kind != BgTaskKind::Agent
-                || !matches!(task.status, BackgroundTaskStatus::Running)
-            {
-                return None;
-            }
-            task.agent_inbox
-                .as_ref()
-                .filter(|inbox| inbox.thread_id == thread_id)
-                .map(|inbox| (task, inbox))
-        });
-        target
-            .map(|(task, inbox)| inbox.send(&task.id, prompt))
-            .transpose()
+        let target = {
+            // admission guard 只覆盖“查找到 live inbox”的同步窗口；MQ 提交必须
+            // 在锁外 await，关闭竞态由 inbox 自身的 cancel/close 裁决。
+            let _admission = self
+                .scope
+                .admit()
+                .map_err(|_| SubagentMessageError::Closed)?;
+            let tasks = self.tasks.lock();
+            tasks.values().find_map(|task| {
+                if task.kind != BgTaskKind::Agent
+                    || !matches!(task.status, BackgroundTaskStatus::Running)
+                {
+                    return None;
+                }
+                task.agent_inbox
+                    .as_ref()
+                    .filter(|inbox| inbox.thread_id == thread_id)
+                    .map(|inbox| (task.id.clone(), Arc::clone(inbox)))
+            })
+        };
+        match target {
+            Some((task_id, inbox)) => Ok(Some(inbox.send(&task_id, prompt).await?)),
+            None => Ok(None),
+        }
     }
 
     /// 按类型注册新任务（Shell / Workflow 有独立上限；Agent 不限额）

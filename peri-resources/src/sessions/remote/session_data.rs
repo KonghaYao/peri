@@ -934,6 +934,42 @@ impl SessionDataPort for RemoteSessionData {
         self.write_tree_deletion(id).await
     }
 
+    async fn mq_enqueue(
+        &self,
+        thread_id: &ThreadId,
+        input: peri_acp_types::session::MqInput,
+    ) -> SessionResourceResult<peri_acp_types::session::MqEnqueueOutcome> {
+        self.enqueue_mq(thread_id, input).await
+    }
+
+    async fn mq_query(
+        &self,
+        thread_id: &ThreadId,
+        filter: peri_acp_types::session::MqFilter,
+    ) -> SessionResourceResult<Vec<peri_acp_types::session::MqEntry>> {
+        self.query_mq(thread_id, filter).await
+    }
+
+    async fn mq_cancel(
+        &self,
+        thread_id: &ThreadId,
+        id: MessageId,
+    ) -> SessionResourceResult<peri_acp_types::session::MqCancelOutcome> {
+        self.cancel_mq(thread_id, id).await
+    }
+
+    async fn mq_receive(
+        &self,
+        thread_id: &ThreadId,
+        selection: peri_acp_types::session::MqReceiveSelection,
+    ) -> SessionResourceResult<peri_acp_types::session::MqReceiveOutcome> {
+        self.receive_mq(thread_id, selection).await
+    }
+
+    async fn mq_clear(&self, thread_id: &ThreadId) -> SessionResourceResult<()> {
+        self.clear_mq(thread_id).await
+    }
+
     /// 远端未决收敛：拿本机日志里的操作 id 向远端账本求证终态（C §5.1 第 4 步）。
     ///
     /// 每条未结清记录只有三种结论，且都由**写确认过的证据**给出，不靠空查询或超时推断：

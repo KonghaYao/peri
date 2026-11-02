@@ -133,7 +133,7 @@ fn child_with_shell_task(
     .unwrap();
     // This fixture models result timing without an actual process tree.
     manager.confirm_external_execution_stopped(&ticket);
-    child.queue().push(QueuedMessage::prompt(
+    child.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run shell"),
     ));
@@ -212,7 +212,7 @@ fn child_with_nested_task() -> (
     .unwrap();
     // This fixture models a nested result; it owns no external execution.
     manager.confirm_external_execution_stopped(&ticket);
-    child.queue().push(QueuedMessage::prompt(
+    child.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("initial child work"),
     ));
@@ -495,7 +495,7 @@ async fn activity_and_new_tasks_do_not_reset_deadline() {
 #[tokio::test(start_paused = true)]
 async fn terminal_result_without_consumption_still_hands_off() {
     let (child, manager, built, reminder_calls, ticket) = child_with_shell_task(false);
-    child.queue().push(QueuedMessage::info(
+    child.queue().push_sync(QueuedMessage::info(
         MessageSource::HookStopIntent,
         crate::messages::BaseMessage::human("stop"),
     ));
@@ -550,7 +550,7 @@ async fn receive_across_deadline_preserves_committed_result() {
     let message_id = message.id();
     child
         .queue()
-        .push(QueuedMessage::prompt(MessageSource::UserInput, message));
+        .push_sync(QueuedMessage::prompt(MessageSource::UserInput, message));
     let received = run_receive(ReceiveInput {
         context: built.context.clone(),
     })
@@ -589,10 +589,10 @@ async fn deadline_before_receive_does_not_consume_new_input() {
     let message_id = message.id();
     child
         .queue()
-        .push(QueuedMessage::prompt(MessageSource::UserInput, message));
+        .push_sync(QueuedMessage::prompt(MessageSource::UserInput, message));
     let outcome = run_react_loop(built.context.clone(), 10).await;
     assert!(matches!(outcome, LoopResult::SettlementDue { .. }));
-    assert!(child.queue().snapshot().iter().any(|message| message
+    assert!(child.queue().snapshot_sync().iter().any(|message| message
         .message()
         .is_some_and(|message| message.id() == message_id)));
     assert_eq!(initial_calls.load(Ordering::SeqCst), 0);
@@ -628,7 +628,7 @@ impl ReactLLM for ToolThenExpireLlm {
 async fn admitted_reason_completes_act_after_deadline() {
     let manager = Arc::new(TaskManager::new());
     let child = make_child(manager.clone(), true);
-    child.queue().push(QueuedMessage::prompt(
+    child.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("use a tool"),
     ));
@@ -761,7 +761,7 @@ async fn late_result_after_deadline_requires_explicit_resume() {
         0,
         "旧 run 不得自动消费截止后的结果"
     );
-    child.queue().push(QueuedMessage::prompt(
+    child.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("continue explicitly"),
     ));
@@ -808,7 +808,7 @@ async fn missing_owner_reports_capability_failure() {
         },
     )
     .unwrap();
-    child.queue().push(QueuedMessage::prompt(
+    child.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run shell"),
     ));
@@ -875,7 +875,7 @@ async fn handoff_persistence_failure_is_not_reported_as_handed_off() {
         },
     )
     .unwrap();
-    child.queue().push(QueuedMessage::prompt(
+    child.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run shell"),
     ));

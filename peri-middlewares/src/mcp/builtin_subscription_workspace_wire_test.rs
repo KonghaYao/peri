@@ -391,7 +391,7 @@ async fn t6_session_delivery_is_info_and_closure_skips_subscription() {
 
     let drained = timeout(OBSERVE_TIMEOUT, async {
         loop {
-            let messages = queue.drain_all();
+            let messages = queue.drain_all_sync();
             if !messages.is_empty() {
                 return messages;
             }
@@ -560,7 +560,7 @@ async fn t7b_read_failure_falls_back_to_generic_reminder() {
 
     let drained = timeout(OBSERVE_TIMEOUT, async {
         loop {
-            let messages = queue.drain_all();
+            let messages = queue.drain_all_sync();
             if !messages.is_empty() {
                 return messages;
             }

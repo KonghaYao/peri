@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use peri_acp_types::session::InboxHandle;
+use peri_acp_types::session::{InboxHandle, MessageQueue};
 use peri_acp_types::tasks::TaskManager;
 
 #[derive(Default)]
@@ -26,7 +26,12 @@ impl SessionBindings {
             .collect()
     }
 
-    pub(crate) fn verify_environment_close(&self, root: &str) -> Result<(), String> {
+    /// 收集需要关闭检查的子会话句柄；锁不跨 await。
+    pub(crate) fn close_candidates(
+        &self,
+        root: &str,
+    ) -> Result<Vec<(String, Arc<dyn TaskManager>, MessageQueue)>, String> {
+        let mut candidates = Vec::new();
         for (session, binding) in &self.current {
             if session == root {
                 continue;
@@ -34,18 +39,15 @@ impl SessionBindings {
             let manager = binding
                 .manager
                 .as_ref()
-                .ok_or_else(|| format!("Incomplete: child {session} ownership unknown"))?;
+                .ok_or_else(|| format!("Incomplete: child {session} ownership unknown"))?
+                .clone();
             let inbox = binding
                 .inbox
                 .as_ref()
                 .ok_or_else(|| format!("Incomplete: child {session} inbox unknown"))?;
-            if !manager.is_execution_idle() || inbox.queue().has_required() {
-                return Err(format!(
-                    "Incomplete: child {session} resources or required messages unfinished"
-                ));
-            }
+            candidates.push((session.clone(), manager, inbox.queue().clone()));
         }
-        Ok(())
+        Ok(candidates)
     }
 
     pub(crate) fn binding(&self, session: &str) -> Option<(InboxHandle, Arc<dyn TaskManager>)> {

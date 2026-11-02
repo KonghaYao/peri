@@ -218,18 +218,10 @@ async fn test_run_react_loop_successful_full_replaces_history_without_file_re_re
     let bound = TestSession::open().await;
     let store = bound.resources();
     let thread_id = bound.thread_id();
-    let store_dyn: Arc<dyn peri_acp_types::session_resources::SessionResources> = store.clone();
-    let session = Session::new(
-        Arc::from(dir.path().to_string_lossy().as_ref()),
+    let session = bound.session(
+        dir.path().to_string_lossy().as_ref(),
         FrozenContext::builder().build(),
-        Some(thread_id.clone()),
     );
-    {
-        let transcript = session.transcript();
-        let mut transcript = transcript.write();
-        *transcript =
-            std::mem::take(&mut *transcript).with_persistence(store_dyn.clone(), thread_id.clone());
-    }
 
     let reason_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let reason_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -265,10 +257,14 @@ async fn test_run_react_loop_successful_full_replaces_history_without_file_re_re
         }))
         .build();
     let prompt_marker = "successful full original prompt marker";
-    context.session.queue.push(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        BaseMessage::human(prompt_marker),
-    ));
+    context
+        .session
+        .queue
+        .push_async(QueuedMessage::prompt(
+            MessageSource::UserInput,
+            BaseMessage::human(prompt_marker),
+        ))
+        .await;
 
     assert!(matches!(
         run_react_loop(context.clone(), 2).await,
@@ -367,17 +363,10 @@ async fn test_run_react_loop_new_high_usage_generations_preserve_unexposed_histo
     let reason_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let compact_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let bound = crate::session::test_resources::TestSession::open().await;
-    let session = Session::new(
-        Arc::from("/tmp/usage-churn-characterization"),
+    let session = bound.session(
+        "/tmp/usage-churn-characterization",
         FrozenContext::builder().build(),
-        Some(bound.thread_id.clone()),
     );
-    {
-        let transcript = session.transcript();
-        let mut guard = transcript.write();
-        *guard = std::mem::take(&mut *guard)
-            .with_persistence(bound.resources(), bound.thread_id.clone());
-    }
     let turn = session.start_turn();
     let (bus, mut handles) = crate::agent::events_v2::EventBus::new(Default::default());
     let tools: SharedToolMap = Arc::new(parking_lot::RwLock::new(BTreeMap::from([(
@@ -408,10 +397,14 @@ async fn test_run_react_loop_new_high_usage_generations_preserve_unexposed_histo
             calls: Arc::clone(&compact_calls),
         }))
         .build();
-    context.session.queue.push(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        BaseMessage::human("characterize usage churn"),
-    ));
+    context
+        .session
+        .queue
+        .push_async(QueuedMessage::prompt(
+            MessageSource::UserInput,
+            BaseMessage::human("characterize usage churn"),
+        ))
+        .await;
 
     let result = run_react_loop(context.clone(), 4).await;
 
@@ -524,17 +517,7 @@ async fn test_run_react_loop_successful_full_does_not_recompact_excluded_history
     let bound = TestSession::open().await;
     let store = bound.resources();
     let thread_id = bound.thread_id();
-    let session = Session::new(
-        Arc::from("/tmp"),
-        FrozenContext::builder().build(),
-        Some(thread_id.clone()),
-    );
-    {
-        let transcript = session.transcript();
-        let mut transcript = transcript.write();
-        *transcript =
-            std::mem::take(&mut *transcript).with_persistence(store.clone(), thread_id.clone());
-    }
+    let session = bound.session("/tmp", FrozenContext::builder().build());
     let reason_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let compact_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (bus, mut handles) = crate::agent::events_v2::EventBus::new(Default::default());
@@ -566,10 +549,14 @@ async fn test_run_react_loop_successful_full_does_not_recompact_excluded_history
         calls: compact_calls.clone(),
     }))
     .build();
-    context.session.queue.push(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        BaseMessage::human("audit churn"),
-    ));
+    context
+        .session
+        .queue
+        .push_async(QueuedMessage::prompt(
+            MessageSource::UserInput,
+            BaseMessage::human("audit churn"),
+        ))
+        .await;
     assert!(matches!(
         run_react_loop(context.clone(), 5).await,
         LoopResult::Completed

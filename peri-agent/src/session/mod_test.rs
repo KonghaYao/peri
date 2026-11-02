@@ -13,7 +13,7 @@ fn test_session_construction() {
     assert_eq!(&*session.store().cwd, "/tmp/project");
     assert_eq!(&*session.store().frozen.system_prompt, "You are Peri.");
     assert!(session.transcript().read().is_empty());
-    assert!(session.queue().is_empty());
+    assert!(session.queue().is_empty_sync());
     assert_eq!(session.config().permission_mode(), PermissionMode::Default);
 }
 
@@ -51,8 +51,8 @@ fn test_session_queue_access() {
     let session = Session::new(cwd, frozen, None);
 
     let q = session.queue();
-    assert!(q.is_empty());
-    assert_eq!(q.len(), 0);
+    assert!(q.is_empty_sync());
+    assert_eq!(q.len_sync(), 0);
 }
 
 #[test]
@@ -122,7 +122,7 @@ fn test_new_with_cancel_and_queue_shares_underlying_queue() {
     let shared = MessageQueue::new();
 
     // 在创建 session 前 push 一条——验证 session 内部 queue 能看到
-    shared.push(QueuedMessage::new(
+    shared.push_sync(QueuedMessage::new(
         MessageKind::Info,
         MessageSource::SystemInjected,
         BaseMessage::human(MessageContent::text("pre-existing")),
@@ -132,17 +132,21 @@ fn test_new_with_cancel_and_queue_shares_underlying_queue() {
 
     // session.queue() 应看到外部 push 的消息
     assert_eq!(
-        session.queue().len(),
+        session.queue().len_sync(),
         1,
         "session.queue() 应与外部 shared 共享同一底层 VecDeque"
     );
 
     // 从 session.queue() push，外部 shared 应看到
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human(MessageContent::text("from session")),
     ));
-    assert_eq!(shared.len(), 2, "外部 shared 应看到 session 侧 push 的消息");
+    assert_eq!(
+        shared.len_sync(),
+        2,
+        "外部 shared 应看到 session 侧 push 的消息"
+    );
 }
 
 #[test]

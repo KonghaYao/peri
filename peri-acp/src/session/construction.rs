@@ -77,7 +77,11 @@ impl SessionManager {
         let task_manager = task_manager.unwrap_or_else(|| self.new_session_task_manager());
         // Session-level queue is shared by the executor and the blocked-goal
         // recovery scheduler; build it before GoalState so both hold the same handle.
-        let v2_message_queue = peri_acp_types::session::MessageQueue::new();
+        // 待发事实的权威在 `thread_mq`，门面必须绑定本会话的真实资源与 thread。
+        let v2_message_queue = peri_acp_types::session::MessageQueue::bind(
+            Arc::clone(&self.inner.session_resources),
+            thread_id.clone(),
+        );
         // Mailbox 的 scope 需要在结构体字段初始化时使用 thread_id，
         // 而 `thread_id` 本身会被移动进 `AcpSession`，这里先固化标签。
         let thread_scope = thread_id.to_string();

@@ -161,6 +161,37 @@ impl SessionResources for ClaimResources {
             .append_reminder_if_absent(id, message_id, reminder)
             .await
     }
+    async fn mq_enqueue(
+        &self,
+        thread_id: &ThreadId,
+        input: peri_acp_types::session::MqInput,
+    ) -> SessionResourceResult<peri_acp_types::session::MqEnqueueOutcome> {
+        self.inner.mq_enqueue(thread_id, input).await
+    }
+    async fn mq_query(
+        &self,
+        thread_id: &ThreadId,
+        filter: peri_acp_types::session::MqFilter,
+    ) -> SessionResourceResult<Vec<peri_acp_types::session::MqEntry>> {
+        self.inner.mq_query(thread_id, filter).await
+    }
+    async fn mq_cancel(
+        &self,
+        thread_id: &ThreadId,
+        id: MessageId,
+    ) -> SessionResourceResult<peri_acp_types::session::MqCancelOutcome> {
+        self.inner.mq_cancel(thread_id, id).await
+    }
+    async fn mq_receive(
+        &self,
+        thread_id: &ThreadId,
+        selection: peri_acp_types::session::MqReceiveSelection,
+    ) -> SessionResourceResult<peri_acp_types::session::MqReceiveOutcome> {
+        self.inner.mq_receive(thread_id, selection).await
+    }
+    async fn mq_clear(&self, thread_id: &ThreadId) -> SessionResourceResult<()> {
+        self.inner.mq_clear(thread_id).await
+    }
     async fn mark_session_closing(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.inner.mark_session_closing(id).await
     }

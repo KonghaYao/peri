@@ -378,7 +378,8 @@ async fn test_handle_consecutive_failures_success_resets() {
     handle_consecutive_failures(
         &ctx,
         &[execution::SettledInvocation::unreported(ok_call, ok_result)],
-    );
+    )
+    .await;
     assert_eq!(
         ctx.compact
             .consecutive_failures

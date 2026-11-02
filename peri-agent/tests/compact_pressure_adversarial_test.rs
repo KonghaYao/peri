@@ -135,7 +135,7 @@ impl BaseTool for GrowthTool {
         _: ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         match self.growth {
-            Growth::User => self.queue.push(QueuedMessage::prompt(
+            Growth::User => self.queue.push_sync(QueuedMessage::prompt(
                 MessageSource::UserInput,
                 BaseMessage::human("new ".repeat(12_000)),
             )),
@@ -154,7 +154,7 @@ impl BaseTool for GrowthTool {
                         metadata: serde_json::json!({}),
                     })
                     .unwrap();
-                self.queue.push(QueuedMessage::system_reminder(
+                self.queue.push_sync(QueuedMessage::system_reminder(
                     MessageKind::Defer,
                     MessageSource::SystemInjected,
                     reminder,
@@ -320,7 +320,7 @@ async fn assert_growth_compacted_before_next_reason(growth: Growth) {
         std::collections::BTreeMap::from([("Work".into(), tool as Arc<dyn BaseTool>)]),
     )))
     .build();
-    ctx.session.queue.push(QueuedMessage::prompt(
+    ctx.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("log ".repeat(90_000)),
     ));
@@ -508,13 +508,13 @@ async fn assert_binary_attachment_reaches_first_reason(cold_document: bool) {
             .with_persistence(bound.resources.clone(), bound.thread_id.clone());
         guard.set_flags_batch(snapshot.flags);
         drop(guard);
-        restored.queue().push(QueuedMessage::prompt(
+        restored.queue().push_sync(QueuedMessage::prompt(
             MessageSource::UserInput,
             BaseMessage::human("Continue inspecting the attachment."),
         ));
         restored
     } else {
-        bound.session.queue().push(QueuedMessage::prompt(
+        bound.session.queue().push_sync(QueuedMessage::prompt(
             MessageSource::UserInput,
             attachment.clone(),
         ));

@@ -124,10 +124,19 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         super::workspace::validate_expected(cfg, &prompt_session_id, None).await?;
         let (_, content, _attachments) = extract_and_validate_run_prompt_params(&params)?;
         if let Some(inbox) = cfg.session_manager.session_inbox_for(&prompt_session_id) {
-            inbox.handle().push_prompt(
-                peri_acp_types::session::MessageSource::UserInput,
-                BaseMessage::human(content),
-            );
+            if let Err(error) = inbox
+                .handle()
+                .push_prompt(
+                    peri_acp_types::session::MessageSource::UserInput,
+                    BaseMessage::human(content),
+                )
+                .await
+            {
+                return Err(AcpError::new(
+                    -32603,
+                    format!("prompt injection into suspended turn failed: {error}"),
+                ));
+            }
             tracing::info!(
                 session_id = %prompt_session_id,
                 "prompt injected while turn suspended (await_wake); loop will wake and consume"
@@ -168,76 +177,93 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     if let Some(epoch) = continuation_epoch {
         #[cfg(test)]
         admission_gate::wait(&prompt_session_id).await;
-        let dispatchable = {
-            let mut sessions = sessions.lock().await;
-            sessions.get_mut(&prompt_session_id).is_some_and(|state| {
-                if state.closing
-                    || cfg
-                        .session_manager
-                        .get_session(&prompt_session_id)
-                        .is_none_or(|runtime| runtime.cancel_token.is_cancelled())
-                {
+        let mq_steering = matches!(
+            origin,
+            PromptOrigin::Scheduled
+                | PromptOrigin::Continuation {
+                    mq_steering: true,
+                    ..
+                }
+        );
+        // 只有显式的 continuation mq steering 需要激活门；Scheduled 已获调度批准，
+        // 不能再用上一次失败留下的抑制状态拒绝它。
+        let continuation_mq_steering = matches!(
+            origin,
+            PromptOrigin::Continuation {
+                mq_steering: true,
+                ..
+            }
+        );
+        let pending_result = matches!(
+            origin,
+            PromptOrigin::Continuation {
+                pending_result: true,
+                ..
+            }
+        );
+        // MQ 激活查询不能持有 sessions 锁。
+        let (cancelled, has_subagent, has_mq, has_ready_result) =
+            match cfg.session_manager.get_session(&prompt_session_id) {
+                Some(session) => {
+                    let cancelled = session.cancel_token.is_cancelled();
+                    let queue = session.v2_message_queue.clone();
+                    let has_ready_result = session.async_result_mailbox.has_ready();
+                    drop(session);
+                    (
+                        cancelled,
+                        queue
+                            .has_pending_defer(
+                                &peri_acp_types::session::MessageSource::SubAgentComplete,
+                            )
+                            .await
+                            .unwrap_or(false),
+                        queue.needs_mq_continuation().await.unwrap_or(false),
+                        has_ready_result,
+                    )
+                }
+                None => (true, false, false, false),
+            };
+        let base_dispatchable = {
+            let sessions = sessions.lock().await;
+            sessions.get(&prompt_session_id).is_some_and(|state| {
+                if state.closing || cancelled {
                     return false;
                 }
-                let (has_subagent, has_mq, has_ready_result) = cfg
-                    .session_manager
-                    .get_session(&prompt_session_id)
-                    .map(|session| {
-                        (
-                            session.v2_message_queue.has_pending_defer(
-                                &peri_acp_types::session::MessageSource::SubAgentComplete,
-                            ),
-                            session.v2_message_queue.needs_mq_continuation(),
-                            session.async_result_mailbox.has_ready(),
-                        )
-                    })
-                    .unwrap_or((false, false, false));
-                let mq_steering = matches!(
-                    origin,
-                    PromptOrigin::Scheduled
-                        | PromptOrigin::Continuation {
-                            mq_steering: true,
-                            ..
-                        }
-                );
-                let pending_result = matches!(
-                    origin,
-                    PromptOrigin::Continuation {
-                        pending_result: true,
-                        ..
-                    }
-                );
-                let dispatchable =
-                    continuation::continuation_dispatchable(
-                        state,
-                        epoch,
-                        has_subagent,
-                        has_mq,
-                        mq_steering,
-                        pending_result,
-                        has_ready_result,
-                    ) && (!matches!(
-                        origin,
-                        PromptOrigin::Continuation {
-                            mq_steering: true,
-                            ..
-                        }
-                    ) || super::activation::mq_allowed(cfg, &prompt_session_id))
-                        && (!pending_result
-                            || super::activation::result_allowed(cfg, &prompt_session_id));
-                if dispatchable {
-                    state.continuation_in_flight = true;
-                    state.continuation_mq_steering_pending = false;
-                    state.cancel_token = Some(tokio_util::sync::CancellationToken::new());
-                }
-                dispatchable
+                continuation::continuation_dispatchable(
+                    state,
+                    epoch,
+                    has_subagent,
+                    has_mq,
+                    mq_steering,
+                    pending_result,
+                    has_ready_result,
+                )
             })
         };
-        if !dispatchable {
+        let mq_allowed = super::activation::mq_allowed(cfg, &prompt_session_id).await;
+        if !base_dispatchable
+            || (continuation_mq_steering && !mq_allowed)
+            || (pending_result && !super::activation::result_allowed(cfg, &prompt_session_id).await)
+        {
             tracing::debug!(
                 session_id = %prompt_session_id,
                 "continuation: superseded (newer prompt or Defer consumed), aborting"
             );
+            return Ok(serde_json::Value::Null);
+        }
+        let dispatchable = {
+            let mut sessions = sessions.lock().await;
+            sessions.get_mut(&prompt_session_id).is_some_and(|state| {
+                if state.closing {
+                    return false;
+                }
+                state.continuation_in_flight = true;
+                state.continuation_mq_steering_pending = false;
+                state.cancel_token = Some(tokio_util::sync::CancellationToken::new());
+                true
+            })
+        };
+        if !dispatchable {
             return Ok(serde_json::Value::Null);
         }
         #[cfg(test)]
@@ -292,20 +318,32 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         }
     }
 
-    let continuation_request = {
+    let pending_state = {
         let mut sessions = sessions.lock().await;
-        sessions.get_mut(&prompt_session_id).and_then(|state| {
+        sessions.get_mut(&prompt_session_id).map(|state| {
             state.continuation_mq_steering_pending = false;
-            let queue = cfg.session_manager.v2_queue_for(&prompt_session_id)?;
-            let runtime = cfg.session_manager.get_session(&prompt_session_id)?;
+            super::activation::PendingState::from_state(state)
+        })
+    };
+    let continuation_request = match (
+        pending_state,
+        cfg.session_manager.get_session(&prompt_session_id),
+    ) {
+        (Some(state), Some(runtime)) => {
+            let queue = runtime.v2_message_queue.clone();
+            let activation = Arc::clone(&runtime.activation);
+            let mailbox = Arc::clone(&runtime.async_result_mailbox);
+            drop(runtime);
             super::activation::pending_request(
                 &prompt_session_id,
-                state,
+                &state,
                 &queue,
-                &runtime.activation,
-                &runtime.async_result_mailbox,
+                &activation,
+                &mailbox,
             )
-        })
+            .await
+        }
+        _ => None,
     };
     if let Some(request) = continuation_request {
         if cont_tx.send(request).is_err() {

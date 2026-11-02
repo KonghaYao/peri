@@ -208,6 +208,10 @@ pub(super) async fn migrate_shape(connection: &mut SqliteConnection) -> Result<(
             .execute(&mut *connection)
             .await?;
     }
+    // MQ 表属于当前形状的必需表（13）：搬运终点与新建库下发同一份 DDL。
+    sqlx::query(canonical::CREATE_THREAD_MQ_TABLE_SQL)
+        .execute(&mut *connection)
+        .await?;
     // 迁移终点必须带齐 canonical 索引集：`DROP TABLE` 会把旧表上的索引一并删掉，而输入库
     // 也可能本来就缺索引（`user_version` 已是 11 的开发期库）。整表重放一次是幂等的，
     // 也是「一个 schema、两种执行器」在索引上的同一份语句（远端批次末尾同样整表重放）。

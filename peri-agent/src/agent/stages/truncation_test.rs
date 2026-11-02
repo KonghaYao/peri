@@ -150,7 +150,7 @@ async fn test_terminal_provider_failure_preserves_partial_without_continuation()
     assert_eq!(model.requests.lock().len(), 1);
     assert_eq!(model.tool_executions.load(Ordering::SeqCst), 0);
     assert_eq!(completions.load(Ordering::SeqCst), 0);
-    assert!(ctx.session.queue.is_empty());
+    assert!(ctx.session.queue.is_empty_sync());
     assert_eq!(
         ctx.session
             .transcript
@@ -212,7 +212,7 @@ async fn test_stream_interruption_exhausts_event_budget() {
         }
         assert_eq!(model.requests.lock().len(), budget as usize);
         assert_eq!(completions.load(Ordering::SeqCst), 0);
-        assert!(ctx.session.queue.is_empty());
+        assert!(ctx.session.queue.is_empty_sync());
         assert_eq!(
             ctx.session
                 .transcript
@@ -256,7 +256,10 @@ async fn test_stream_recovery_exhaustion_preempts_truncation_record() {
     );
     assert_eq!(model.requests.lock().len(), 1, "耗尽后不得再请求模型");
     assert_eq!(completions.load(Ordering::SeqCst), 0);
-    assert!(ctx.session.queue.is_empty(), "耗尽后不能留下额外续跑请求");
+    assert!(
+        ctx.session.queue.is_empty_sync(),
+        "耗尽后不能留下额外续跑请求"
+    );
     let logs = capture.text();
     assert_eq!(
         logs.matches("连续无工具截断耗尽续跑预算").count(),
@@ -288,12 +291,12 @@ fn test_stream_interruption_reminder_contract() {
     use crate::session::queue::{MessageKind, QueuedPayload};
     use peri_acp_types::system_reminder::{ReminderCategory, ReminderDelivery, ReminderSeverity};
     let (ctx, _, _) = make_context(vec![], None);
-    ctx.session.queue.drain_all();
-    enqueue_stream_interruption_continuation(&ctx);
+    ctx.session.queue.drain_all_sync();
+    futures::executor::block_on(enqueue_stream_interruption_continuation(&ctx));
     let execution = ctx.session.turn.execution_binding();
-    assert!(ctx.session.queue.has_required_for_run(&execution));
-    assert!(!ctx.session.queue.has_ensure_processing());
-    let queued = ctx.session.queue.drain_all();
+    assert!(ctx.session.queue.has_required_for_run_sync(&execution));
+    assert!(!ctx.session.queue.has_ensure_processing_sync());
+    let queued = ctx.session.queue.drain_all_sync();
     assert_eq!(queued.len(), 1);
     assert_eq!(queued[0].kind, MessageKind::Defer);
     assert_eq!(queued[0].source, MessageSource::SystemInjected);
@@ -426,7 +429,7 @@ fn make_bridge_harness() -> BridgeHarness {
     .with_tools(Arc::new(RwLock::new(tools)))
     .with_middleware_chain(Arc::new(chain))
     .build();
-    ctx.session.queue.push(QueuedMessage::prompt(
+    ctx.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("finish the task"),
     ));
@@ -575,7 +578,7 @@ fn make_context(
     .with_tools(Arc::new(RwLock::new(tools)))
     .with_middleware_chain(Arc::new(chain))
     .build();
-    ctx.session.queue.push(QueuedMessage::prompt(
+    ctx.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("finish the task"),
     ));
@@ -644,7 +647,10 @@ async fn test_truncation_repeated_responses_stop_with_bounded_attempts() {
         "{result:?}"
     );
     assert_eq!(completions.load(Ordering::SeqCst), 0);
-    assert!(ctx.session.queue.is_empty(), "耗尽后不能留下额外续跑请求");
+    assert!(
+        ctx.session.queue.is_empty_sync(),
+        "耗尽后不能留下额外续跑请求"
+    );
     assert_eq!(
         ctx.session
             .transcript

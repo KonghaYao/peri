@@ -20,7 +20,7 @@ impl ReactLLM for RepeatingLlm {
     ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
         let calls = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         if calls <= 500 {
-            self.queue.push(QueuedMessage::defer(
+            self.queue.push_sync(QueuedMessage::defer(
                 MessageSource::SystemInjected,
                 BaseMessage::human("continue"),
             ));
@@ -37,7 +37,7 @@ async fn default_iteration_budget_allows_more_than_500_steps() {
         FrozenContext::builder().build(),
         None,
     );
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("start"),
     ));

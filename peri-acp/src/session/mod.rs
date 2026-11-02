@@ -344,10 +344,10 @@ impl SessionManager {
         &self.inner.sessions
     }
 
-    pub fn cancel_session(&self, session_id: &str) {
+    pub async fn cancel_session(&self, session_id: &str) {
         if let Some(mut session) = self.inner.sessions.get_mut(session_id) {
             if let Some(mailbox) = &session.user_input_mailbox {
-                mailbox.stop();
+                mailbox.stop().await;
             }
             // Cascade/Independent 判定与终止执行归 Agent 层（L5：cancel 最终
             // 执行权在 Agent，top-level.md §2/§9）；此处仅定位并传递注册表。

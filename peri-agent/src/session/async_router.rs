@@ -143,18 +143,16 @@ impl AsyncRouter {
             BgTaskKind::Mcp => MessageSource::McpNotification,
         };
         let reminder = background_result_reminder(result, kind);
-        self.inbox.push(
-            QueuedMessage::system_reminder_with_delivery_id(
-                MessageKind::Defer,
-                source,
-                reminder,
-                crate::agent::async_tasks::delivery::terminal_delivery_id(
-                    &result.task_id,
-                    "terminal",
-                ),
-            )
-            .with_policy(MessagePolicy::ensure_processing()),
-        );
+        let message = QueuedMessage::system_reminder_with_delivery_id(
+            MessageKind::Defer,
+            source,
+            reminder,
+            crate::agent::async_tasks::delivery::terminal_delivery_id(&result.task_id, "terminal"),
+        )
+        .with_policy(MessagePolicy::ensure_processing());
+        // 同步 `OnBgCompleteFn` 回调无法 await 持久提交；投递到当前 runtime，
+        // 失败只留日志（待回调签名 async 化后删除该桥）。
+        crate::session::queue::enqueue_detached(self.inbox.queue(), message);
         debug!(
             task_id = %result.task_id,
             agent_name = %result.agent_name,
@@ -288,15 +286,14 @@ impl AsyncRouter {
                 "tool_calls_count": tool_calls_count,
             }),
         );
-        self.inbox.push(
-            QueuedMessage::system_reminder_with_delivery_id(
-                MessageKind::Defer,
-                MessageSource::WorkflowComplete,
-                reminder,
-                crate::agent::async_tasks::delivery::terminal_delivery_id(run_id, "terminal"),
-            )
-            .with_policy(MessagePolicy::ensure_processing()),
-        );
+        let message = QueuedMessage::system_reminder_with_delivery_id(
+            MessageKind::Defer,
+            MessageSource::WorkflowComplete,
+            reminder,
+            crate::agent::async_tasks::delivery::terminal_delivery_id(run_id, "terminal"),
+        )
+        .with_policy(MessagePolicy::ensure_processing());
+        crate::session::queue::enqueue_detached(self.inbox.queue(), message);
     }
 }
 

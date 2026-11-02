@@ -22,6 +22,10 @@ use peri_acp_types::history_window::{
     HistoryBodyChunk, HistoryCommittedTail, HistoryReadTicket, HistorySource,
 };
 use peri_acp_types::messages::MessageId;
+use peri_acp_types::session::{
+    MqCancelOutcome, MqEnqueueOutcome, MqEntry, MqFilter, MqInput, MqReceiveOutcome,
+    MqReceiveSelection,
+};
 use peri_acp_types::session_resources::{
     AccessMode, ActiveSessionSnapshot, BindingRecheck, BindingState, ChildResumeClaim,
     ChildSnapshot, CloseSettlement, DataCapabilities, ExecutionAvailability, ForkSnapshot,
@@ -870,6 +874,53 @@ impl SessionResources for SessionResourcesImpl {
 
     async fn drain_persistence(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.gate.drain(id).await
+    }
+
+    async fn mq_enqueue(
+        &self,
+        thread_id: &ThreadId,
+        input: MqInput,
+    ) -> SessionResourceResult<MqEnqueueOutcome> {
+        self.gate
+            .with_mutation(thread_id, || self.gate.data().mq_enqueue(thread_id, input))
+            .await
+    }
+
+    async fn mq_query(
+        &self,
+        thread_id: &ThreadId,
+        filter: MqFilter,
+    ) -> SessionResourceResult<Vec<MqEntry>> {
+        // 只读投影：不经过 mutation 门禁，也不建立写屏障。
+        self.gate.data().mq_query(thread_id, filter).await
+    }
+
+    async fn mq_cancel(
+        &self,
+        thread_id: &ThreadId,
+        id: MessageId,
+    ) -> SessionResourceResult<MqCancelOutcome> {
+        self.gate
+            .with_mutation(thread_id, || self.gate.data().mq_cancel(thread_id, id))
+            .await
+    }
+
+    async fn mq_receive(
+        &self,
+        thread_id: &ThreadId,
+        selection: MqReceiveSelection,
+    ) -> SessionResourceResult<MqReceiveOutcome> {
+        self.gate
+            .with_mutation(thread_id, || {
+                self.gate.data().mq_receive(thread_id, selection)
+            })
+            .await
+    }
+
+    async fn mq_clear(&self, thread_id: &ThreadId) -> SessionResourceResult<()> {
+        self.gate
+            .with_mutation(thread_id, || self.gate.data().mq_clear(thread_id))
+            .await
     }
 }
 

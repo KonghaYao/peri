@@ -73,7 +73,7 @@ fn mailbox_with_delivery() -> (Arc<UserInputMailbox>, String) {
     let inbox = Arc::new(SessionInbox::new(Arc::new(MessageQueue::new())));
     let mailbox = UserInputMailbox::new("session".into(), inbox.clone(), Arc::new(|_| {}));
     mailbox
-        .attach_external_attempt(CancellationToken::new(), false)
+        .attach_external_attempt_sync(CancellationToken::new(), false)
         .unwrap();
     let request = EnqueueUserInputRequest {
         session_id: "session".into(),
@@ -83,12 +83,12 @@ fn mailbox_with_delivery() -> (Arc<UserInputMailbox>, String) {
         content: MessageContent::text("问题"),
         original_draft: "问题".into(),
     };
-    mailbox.enqueue(&request).unwrap();
-    mailbox.enter_idle();
-    let messages = inbox.queue().drain_all();
+    mailbox.enqueue_sync(&request).unwrap();
+    mailbox.enter_idle_sync();
+    let messages = inbox.queue().drain_all_sync();
     let id = messages[0].message().unwrap().id();
-    mailbox.mark_claimed(&[id]);
-    mailbox.mark_delivered(&[id]);
+    mailbox.mark_claimed_sync(&[id]);
+    mailbox.mark_delivered_sync(&[id]);
     (mailbox, request.input_id)
 }
 

@@ -198,7 +198,7 @@ async fn cron_register_tick_approval_continuation() {
     assert_eq!(trigger.task_id, task_id);
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert_eq!(transport.approvals(), 0);
-    assert!(queue.is_empty());
+    assert!(queue.is_empty().await.expect("test MQ len"));
     assert_eq!(turn_model.calls(), 0);
     drop(gate_guard);
     assert!(
@@ -209,7 +209,7 @@ async fn cron_register_tick_approval_continuation() {
         )
         .await
     );
-    assert!(queue.is_empty());
+    assert!(queue.is_empty().await.expect("test MQ len"));
     assert_eq!(turn_model.calls(), 0);
     tokio::time::timeout(std::time::Duration::from_secs(15), async {
         loop {
@@ -235,7 +235,7 @@ async fn cron_register_tick_approval_continuation() {
     assert_eq!(trigger.task_id, task_id);
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert_eq!(transport.approvals(), 1);
-    assert!(queue.is_empty());
+    assert!(queue.is_empty().await.expect("test MQ len"));
     assert_eq!(turn_model.calls(), 0);
     drop(gate_guard);
     assert!(
@@ -253,12 +253,21 @@ async fn cron_register_tick_approval_continuation() {
         .await
         .expect("审批结束必须释放 prompt lock");
     assert!(
-        wait_until(
-            "approved trigger queued before model dispatch",
-            std::time::Duration::from_secs(15),
-            || queue.has_pending_defer(&MessageSource::CronTrigger)
-        )
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                if queue
+                    .has_pending_defer(&MessageSource::CronTrigger)
+                    .await
+                    .expect("test MQ defer")
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
         .await
+        .is_ok(),
+        "approved trigger queued before model dispatch"
     );
     assert_eq!(turn_model.calls(), 0);
     drop(gate_guard);

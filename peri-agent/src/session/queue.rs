@@ -9,6 +9,34 @@ pub use peri_acp_types::session::{
     MessageQueue, MessageRequirement, MessageSource, QueuedMessage, QueuedPayload,
 };
 
+/// 同步中间件能力面的过渡桥。
+///
+/// 中间件 hook 的窄接口仍是同步 `fn`，而 MQ 入队必须 await 持久提交。这里把
+/// 提交投递到当前 runtime；调用方拿不到“已持久”的结论，失败只留日志。
+/// `docs/design/thread-mq.md` §4.1 要求业务方经统一接口入队，待中间件能力
+/// 改为 async 后删除本桥。
+pub(crate) fn enqueue_detached(queue: &MessageQueue, message: QueuedMessage) {
+    let queue = queue.clone();
+    if let Some(result) = queue.enqueue_now(message.clone()) {
+        if let Err(error) = result {
+            tracing::warn!(%error, "middleware MQ enqueue failed");
+        }
+        return;
+    }
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(async move {
+                if let Err(error) = queue.enqueue(message).await {
+                    tracing::warn!(%error, "middleware MQ enqueue failed");
+                }
+            });
+        }
+        Err(_) => {
+            tracing::warn!("middleware MQ enqueue skipped: no active Tokio runtime");
+        }
+    }
+}
+
 #[cfg(test)]
 #[path = "queue_test.rs"]
 mod tests;

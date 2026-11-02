@@ -331,7 +331,7 @@ async fn make_case(
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
     });
-    ctx.session.queue.push(QueuedMessage::prompt(
+    ctx.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("continue now"),
     ));

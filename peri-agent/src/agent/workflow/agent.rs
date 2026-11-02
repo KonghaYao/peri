@@ -454,7 +454,8 @@ impl AgentExecutor for WorkflowAgentExecutor {
             crate::session::FrozenContext::builder().build(),
             Some(session_id.clone()),
             Arc::new(cancel_token.clone()),
-            crate::session::MessageQueue::new(),
+            // workflow agent 的待发事实同样落本 thread 的 `thread_mq`。
+            crate::session::MessageQueue::bind(execution.resources.clone(), session_id.clone()),
         );
         {
             let transcript = session.transcript();
@@ -532,11 +533,18 @@ impl AgentExecutor for WorkflowAgentExecutor {
         );
 
         // push prompt 到 queue
-        context.session.queue.push(QueuedMessage::new(
-            MessageKind::Prompt,
-            MessageSource::UserInput,
-            BaseMessage::human(params.prompt.clone()),
-        ));
+        if let Err(error) = context
+            .session
+            .queue
+            .enqueue_sent(QueuedMessage::new(
+                MessageKind::Prompt,
+                MessageSource::UserInput,
+                BaseMessage::human(params.prompt.clone()),
+            ))
+            .await
+        {
+            tracing::warn!(%error, "workflow agent prompt enqueue failed");
+        }
 
         let mut execution_guard = match peri_acp_types::tasks::TaskManager::begin_external_execution(
             task_manager.as_ref(),

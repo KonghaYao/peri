@@ -573,6 +573,10 @@ pub(super) async fn spawn_background_subagent(
             .subagent_host()
             .and_then(|host| host.child_owner.clone());
         // residual 是已确认的交接；无 receipt 时仍须检查动态到达的义务。
+        let unsettled_obligations = match owner.as_ref() {
+            Some(owner) => owner.has_unsettled_obligations().await,
+            None => false,
+        };
         let permit_result = if !terminal_persisted {
             Err("terminal_status_persist_failed".to_string())
         } else if let Some(error) = drain_failure.as_ref() {
@@ -582,9 +586,7 @@ pub(super) async fn spawn_background_subagent(
         } else if matches!(outcome, ChildRunOutcome::HandoffFailed { .. }) {
             Err("child handoff persistence is unconfirmed".to_string())
         } else if matches!(outcome, ChildRunOutcome::Failed { residual: None, .. })
-            && owner
-                .as_ref()
-                .is_some_and(|owner| owner.has_unsettled_obligations())
+            && unsettled_obligations
         {
             Err("child settlement is unconfirmed after execution failure".to_string())
         } else {

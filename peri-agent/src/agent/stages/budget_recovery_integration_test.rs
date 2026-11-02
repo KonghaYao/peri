@@ -7,7 +7,7 @@ use crate::middleware::{
 };
 use crate::session::store::FrozenContext;
 use crate::session::test_resources::TestSession;
-use crate::session::{MessageKind, MessageQueue, MessageSource, Session};
+use crate::session::{MessageKind, MessageQueue, MessageSource};
 use crate::thread::ThreadId;
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::system_reminder::{
@@ -47,11 +47,13 @@ impl Middleware for ContinuingReminderMiddleware {
     }
 
     async fn before_agent(&self, _state: &mut dyn BeforeAgentState) -> AgentResult<()> {
-        self.queue.push(QueuedMessage::system_reminder(
-            MessageKind::Defer,
-            MessageSource::GoalSteering,
-            make_reminder("before_agent reminder"),
-        ));
+        self.queue
+            .push_async(QueuedMessage::system_reminder(
+                MessageKind::Defer,
+                MessageSource::GoalSteering,
+                make_reminder("before_agent reminder"),
+            ))
+            .await;
         Ok(())
     }
 
@@ -156,15 +158,13 @@ async fn make_scenario(cancel_on_third: bool) -> BudgetScenario {
     let bound = TestSession::open().await;
     let store = bound.resources();
     let thread_id = bound.thread_id();
-    let session = Session::new(
-        Arc::from(dir.path().to_string_lossy().as_ref()),
+    let session = bound.session(
+        dir.path().to_string_lossy().as_ref(),
         FrozenContext::builder().build(),
-        Some(thread_id.clone()),
     );
     {
         let transcript = session.transcript();
         let mut guard = transcript.write();
-        *guard = std::mem::take(&mut *guard).with_persistence(store.clone(), thread_id.clone());
         guard.append_system_reminder(make_reminder("initial retained reminder A"));
         guard.append_system_reminder(make_reminder("initial retained reminder B"));
     }
@@ -192,10 +192,14 @@ async fn make_scenario(cancel_on_third: bool) -> BudgetScenario {
     .with_middleware_chain(Arc::new(chain))
     .with_event_bus(Arc::new(bus))
     .build();
-    context.session.queue.push(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        BaseMessage::human("original budget task"),
-    ));
+    context
+        .session
+        .queue
+        .push_async(QueuedMessage::prompt(
+            MessageSource::UserInput,
+            BaseMessage::human("original budget task"),
+        ))
+        .await;
     BudgetScenario {
         _dir: dir,
         _bound: bound,
@@ -284,10 +288,18 @@ async fn test_budget_recovery_loop_stops_after_two_committed_fulls() {
             _ => None,
         })
         .collect();
+    // 预算终止后仍有一条 after_agent 提醒留在 MQ：待下次移交，不丢事实。
+    let pending = scenario
+        .context
+        .session
+        .queue
+        .snapshot()
+        .await
+        .expect("test MQ snapshot");
     assert_eq!(
-        reminder_ids.len(),
+        reminder_ids.len() + pending.len(),
         5,
-        "初始两条、before_agent一条及两次after_agent提醒都持久保留"
+        "初始两条、before_agent一条及两次after_agent提醒要么已持久、要么仍在 MQ"
     );
     assert!(reminder_ids
         .iter()

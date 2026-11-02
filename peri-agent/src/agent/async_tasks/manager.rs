@@ -765,12 +765,12 @@ impl TaskManager {
 
     /// Send Defer to a live child in this session. `None` means no registered
     /// receiver; an error must not fall through to resume or create an execution.
-    pub fn send_subagent_message(
+    pub async fn send_subagent_message(
         &self,
         thread_id: &str,
         prompt: Option<&str>,
     ) -> Result<Option<QueuedSubagentMessage>, SubagentMessageError> {
-        self.registry.send_subagent_message(thread_id, prompt)
+        self.registry.send_subagent_message(thread_id, prompt).await
     }
 
     pub fn complete(&self, ticket: &TaskRegistrationTicket, result: BackgroundTaskResult) -> bool {

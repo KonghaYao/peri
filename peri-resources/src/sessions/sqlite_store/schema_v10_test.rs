@@ -204,6 +204,7 @@ async fn preserved_table_definitions(connection: &mut SqliteConnection) -> Vec<(
             && name != "session_execution_workspace_descriptors"
             && name != "inherited_snapshot_index"
             && name != "inherited_payload_index"
+            && name != "thread_mq"
     });
     rows
 }
@@ -255,6 +256,7 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
             "session_close_intents".to_owned(),
             "inherited_snapshot_index".to_owned(),
             "inherited_payload_index".to_owned(),
+            "thread_mq".to_owned(),
         ]);
         expected.sort();
         assert_eq!(tables_after, expected, "来源版本 {source_version}");
@@ -341,6 +343,7 @@ async fn test_database_without_remote_tables_is_idempotent() {
         "session_close_intents".to_owned(),
         "inherited_snapshot_index".to_owned(),
         "inherited_payload_index".to_owned(),
+        "thread_mq".to_owned(),
     ]);
     expected.sort();
     assert_eq!(table_names(&mut connection).await, expected);

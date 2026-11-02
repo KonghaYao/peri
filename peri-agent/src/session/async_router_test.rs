@@ -36,8 +36,11 @@ fn test_route_bg_result_pushes_defer() {
 
     router.route_bg_result(&result, BgTaskKind::Agent);
 
-    assert_eq!(inbox.queue().len(), 1);
-    assert!(inbox.queue().has_wake_up(), "Defer should wake the inbox");
+    assert_eq!(inbox.queue().len_sync(), 1);
+    assert!(
+        inbox.queue().has_wake_up_sync(),
+        "Defer should wake the inbox"
+    );
 }
 
 #[test]
@@ -51,10 +54,11 @@ fn retried_terminal_publication_preserves_delivery_identity() {
         &make_bg_result("other", "test-agent", "done"),
         BgTaskKind::Agent,
     );
-    let messages = inbox.queue().drain_all();
+    let messages = inbox.queue().drain_all_sync();
+    // MQ 以稳定投递身份去重：重试不再产生第二行，身份也不变。
+    assert_eq!(messages.len(), 2);
     assert!(messages[0].delivery_id.is_some());
-    assert_eq!(messages[0].delivery_id, messages[1].delivery_id);
-    assert_ne!(messages[0].delivery_id, messages[2].delivery_id);
+    assert_ne!(messages[0].delivery_id, messages[1].delivery_id);
 }
 
 #[test]
@@ -65,7 +69,7 @@ fn test_route_bg_result_uses_subagent_complete_source() {
 
     router.route_bg_result(&result, BgTaskKind::Agent);
 
-    let msgs = inbox.queue().drain_all();
+    let msgs = inbox.queue().drain_all_sync();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].source, MessageSource::SubAgentComplete);
 }
@@ -81,10 +85,10 @@ fn test_route_bg_result_shell_uses_shell_complete_source() {
     assert!(
         !inbox
             .queue()
-            .has_pending_defer(&MessageSource::SubAgentComplete),
+            .has_pending_defer_sync(&MessageSource::SubAgentComplete),
         "shell completion must not qualify as a background-agent callback"
     );
-    let msgs = inbox.queue().drain_all();
+    let msgs = inbox.queue().drain_all_sync();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].source, MessageSource::ShellComplete);
 }
@@ -97,7 +101,7 @@ fn test_route_bg_result_workflow_uses_workflow_complete_source() {
 
     router.route_bg_result(&result, BgTaskKind::Workflow);
 
-    let msgs = inbox.queue().drain_all();
+    let msgs = inbox.queue().drain_all_sync();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].source, MessageSource::WorkflowComplete);
 }
@@ -116,8 +120,8 @@ fn terminal_results_share_ensure_processing_policy_across_task_kinds() {
             let mut result = make_bg_result("typed-terminal", "worker", "done");
             result.success = success;
             router.route_bg_result(&result, kind);
-            assert!(inbox.queue().has_ensure_processing());
-            let messages = inbox.queue().drain_all();
+            assert!(inbox.queue().has_ensure_processing_sync());
+            let messages = inbox.queue().drain_all_sync();
             assert_eq!(messages.len(), 1);
             assert_eq!(
                 messages[0].policy,
@@ -135,7 +139,7 @@ fn test_route_bg_result_notification_text_contains_task_info() {
 
     router.route_bg_result(&result, BgTaskKind::Agent);
 
-    let msgs = inbox.queue().drain_all();
+    let msgs = inbox.queue().drain_all_sync();
     let text = match &msgs[0].payload {
         QueuedPayload::SystemReminder(r) => r.as_reminder().body.as_str(),
         _ => panic!("expected reminder"),
@@ -160,8 +164,8 @@ fn test_route_shell_output_only_injects_file_references() {
         exit_code: Some(1),
     }));
     router.route_bg_result(&result, BgTaskKind::Shell);
-    assert!(inbox.queue().has_wake_up());
-    let messages = inbox.queue().drain_all();
+    assert!(inbox.queue().has_wake_up_sync());
+    let messages = inbox.queue().drain_all_sync();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].source, MessageSource::ShellComplete);
     let QueuedPayload::SystemReminder(reminder) = &messages[0].payload else {
@@ -195,8 +199,8 @@ fn test_invalid_background_notification_reports_delivery_failure_without_panicki
         exit_code: Some(0),
     }));
     router.route_bg_result(&result, BgTaskKind::Shell);
-    assert!(inbox.queue().has_wake_up());
-    let messages = inbox.queue().drain_all();
+    assert!(inbox.queue().has_wake_up_sync());
+    let messages = inbox.queue().drain_all_sync();
     assert_eq!(messages.len(), 1);
     let QueuedPayload::SystemReminder(reminder) = &messages[0].payload else {
         panic!("expected diagnostic reminder");
@@ -226,8 +230,11 @@ fn test_route_workflow_event_pushes_defer() {
         &[],
     );
 
-    assert_eq!(inbox.queue().len(), 1);
-    assert!(inbox.queue().has_wake_up(), "Defer should wake the inbox");
+    assert_eq!(inbox.queue().len_sync(), 1);
+    assert!(
+        inbox.queue().has_wake_up_sync(),
+        "Defer should wake the inbox"
+    );
 }
 
 #[test]
@@ -245,7 +252,7 @@ fn test_route_workflow_event_uses_workflow_complete_source() {
         &[],
     );
 
-    let msgs = inbox.queue().drain_all();
+    let msgs = inbox.queue().drain_all_sync();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].source, MessageSource::WorkflowComplete);
 }
@@ -265,7 +272,7 @@ fn test_route_workflow_event_notification_format() {
         &[],
     );
 
-    let msgs = inbox.queue().drain_all();
+    let msgs = inbox.queue().drain_all_sync();
     let text = match &msgs[0].payload {
         QueuedPayload::SystemReminder(r) => r.as_reminder().body.as_str(),
         _ => panic!("expected reminder"),
@@ -294,7 +301,7 @@ fn test_route_workflow_event_status_text_distinguishes_killed_failed() {
     router.route_workflow_event("wf-failed", "deploy", "failed", 100, 1, 2, &[]);
     router.route_workflow_event("wf-ok", "deploy", "completed", 100, 1, 2, &[]);
 
-    let msgs = inbox.queue().drain_all();
+    let msgs = inbox.queue().drain_all_sync();
     assert_eq!(msgs.len(), 3);
     let texts: Vec<String> = msgs
         .iter()
@@ -335,9 +342,9 @@ fn test_multiple_routes_accumulate_in_queue() {
     router.route_workflow_event("wf-3", "test-wf", "completed", 100, 1, 2, &[]);
     router.route_bg_result(&result2, BgTaskKind::Agent);
 
-    assert_eq!(inbox.queue().len(), 3);
+    assert_eq!(inbox.queue().len_sync(), 3);
 
-    let msgs = inbox.queue().drain_all();
+    let msgs = inbox.queue().drain_all_sync();
     assert_eq!(msgs[0].source, MessageSource::SubAgentComplete);
     assert_eq!(msgs[1].source, MessageSource::WorkflowComplete);
     assert_eq!(msgs[2].source, MessageSource::SubAgentComplete);

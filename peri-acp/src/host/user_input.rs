@@ -49,7 +49,7 @@ impl InputAttemptGuard {
         }
     }
 
-    pub(super) fn finish(&mut self, result: &crate::session::executor::PromptResult) {
+    pub(super) async fn finish(&mut self, result: &crate::session::executor::PromptResult) {
         let outcome = if result.failure.is_some() || result.persistence_inconsistent {
             UserInputAttemptOutcome::Failed
         } else if result.ok {
@@ -57,7 +57,7 @@ impl InputAttemptGuard {
         } else {
             UserInputAttemptOutcome::Interrupted
         };
-        self.mailbox.finish_attempt(&self.ticket, outcome);
+        self.mailbox.finish_attempt(&self.ticket, outcome).await;
         self.finished = true;
     }
 }
@@ -118,7 +118,7 @@ pub(super) async fn publish_run_started(
     }
 }
 
-pub(super) fn ensure_mailbox(
+pub(super) async fn ensure_mailbox(
     session_id: &str,
     cfg: &AcpServerConfig,
     transport: &Arc<dyn AcpTransport>,
@@ -197,7 +197,7 @@ pub(super) fn ensure_mailbox(
                                 tracing::warn!(skipped, "user input queue subscription lagged");
                                 // 广播落后会丢失快照；立即补发当前快照。Delivered 本身由
                                 // 事件泵的交付日志补发，客户端不再从终态合成气泡。
-                                let snapshot = lag_mailbox.snapshot();
+                                let snapshot = lag_mailbox.snapshot().await;
                                 if snapshot.generation == generation {
                                     if let Err(error) = sink
                                         .push_event(
@@ -227,6 +227,11 @@ pub(super) fn ensure_mailbox(
         )
         .map_err(|_| AcpError::new(-32800, "session is closing"))?;
     session.user_input_mailbox = Some(Arc::clone(&mailbox));
+    drop(session);
+    // 会话加载/构造后从 MQ 恢复尚未移交的用户输入；不 promote、不发送。
+    if let Err(error) = mailbox.hydrate().await {
+        tracing::warn!(%error, "user input queue hydrate failed");
+    }
     Ok(mailbox)
 }
 

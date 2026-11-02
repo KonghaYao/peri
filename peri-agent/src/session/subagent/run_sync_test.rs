@@ -225,7 +225,7 @@ async fn settled_sync_child_returns_finished_without_parent_task() {
     let parent_manager = Arc::new(TaskManager::new());
     let (session, _owner) = bound_child(manager.clone());
     let ticket = shell_task(&manager, "shell-task");
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run shell"),
     ));
@@ -353,7 +353,7 @@ async fn handoff_sync_child_returns_pending_and_registry_retries_delivery() {
     let parent_manager = Arc::new(TaskManager::new());
     let (session, _owner) = bound_child(manager.clone());
     let ticket = shell_task(&manager, "shell-task");
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run shell"),
     ));
@@ -453,7 +453,7 @@ async fn handoff_without_parent_owner_finishes_incomplete_without_task() {
     let manager = Arc::new(TaskManager::new());
     let (session, _owner) = bound_child(manager.clone());
     shell_task(&manager, "shell-task");
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run shell"),
     ));
@@ -506,7 +506,7 @@ async fn parent_close_retains_unconfirmed_delivery_and_reports_incomplete() {
     let parent_manager = Arc::new(TaskManager::new());
     let (session, _owner) = bound_child(manager.clone());
     shell_task(&manager, "shell-task");
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run shell"),
     ));
@@ -576,7 +576,7 @@ async fn handoff_with_closing_parent_finishes_incomplete_without_registration() 
     parent_manager.begin_session_close();
     let (session, _owner) = bound_child(manager.clone());
     shell_task(&manager, "shell-task");
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run shell"),
     ));
@@ -633,11 +633,11 @@ async fn handoff_with_empty_task_list_keeps_retained_messages() {
     let parent_manager = Arc::new(TaskManager::new());
     let (session, _owner) = bound_child(manager.clone());
     let ticket = shell_task(&manager, "shell-task");
-    session.queue().push(QueuedMessage::info(
+    session.queue().push_sync(QueuedMessage::info(
         MessageSource::HookStopIntent,
         crate::messages::BaseMessage::human("stop"),
     ));
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run shell"),
     ));
@@ -717,7 +717,7 @@ async fn sync_worker_releases_session_llm_and_context_after_takeover() {
     let parent_manager = Arc::new(TaskManager::new());
     let (session, _owner) = bound_child(manager.clone());
     shell_task(&manager, "shell-task");
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run shell"),
     ));
@@ -800,7 +800,7 @@ async fn run_sync_handoff_failure_preserves_error_and_receipt() {
     let manager = Arc::new(TaskManager::new());
     let (session, owner, store) = bound_child_with_store(manager.clone());
     shell_task(&manager, "shell-task");
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run shell"),
     ));
@@ -821,6 +821,12 @@ async fn run_sync_handoff_failure_preserves_error_and_receipt() {
         Some(agent_id_from_child_thread(&child_id)),
     );
     store.restrict_to_history_read_only();
+    // MQ 原子移交不再排队异步持久化，handoff 前的 flush 只能因 writer 关闭而失败。
+    let writer = session.transcript().read().persist_tx_handle().unwrap();
+    session.transcript().read().shutdown_persistence();
+    tokio::time::timeout(std::time::Duration::from_secs(10), writer.closed())
+        .await
+        .expect("测试 writer 必须在 handoff 前关闭");
     let error = run_sync_subagent(
         &child_id, "fixture", "/tmp", 10, None, None, None, None, None, None, None, None, None,
         built, session, None, None,

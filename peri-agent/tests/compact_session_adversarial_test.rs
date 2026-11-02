@@ -204,7 +204,7 @@ async fn test_compact_session_next_prompt_restores_pressure_before_reason() {
     let session = bound.session(Vec::new());
     let (model, summary) = make_models(true);
     let first = make_context(&session, model.clone(), summary.clone());
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("x".repeat(360_000)),
     ));
@@ -221,7 +221,7 @@ async fn test_compact_session_next_prompt_restores_pressure_before_reason() {
         Some(90_000)
     );
     let second = make_context(&session, model.clone(), summary.clone());
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("y".repeat(60_000)),
     ));
@@ -259,7 +259,7 @@ async fn test_compact_session_cold_snapshot_compacts_before_first_reason() {
     let session = bound.session(snapshot.payloads);
     let (model, summary) = make_models(false);
     let context = make_context(&session, model.clone(), summary.clone());
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("continue"),
     ));
@@ -298,7 +298,7 @@ async fn test_compact_session_small_prompts_do_not_call_summary() {
     let (model, summary) = make_models(false);
     for text in ["first small task", "second small task"] {
         let context = make_context(&session, model.clone(), summary.clone());
-        session.queue().push(QueuedMessage::prompt(
+        session.queue().push_sync(QueuedMessage::prompt(
             MessageSource::UserInput,
             BaseMessage::human(text),
         ));
@@ -349,7 +349,7 @@ async fn test_compact_session_cold_compacted_history_keeps_exclusions() {
     session.transcript().write().set_flags_batch(snapshot.flags);
     let (model, summary) = make_models(false);
     let context = make_context(&session, model.clone(), summary.clone());
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("continue"),
     ));
@@ -392,7 +392,7 @@ async fn test_compact_session_before_model_growth_is_checked_once_before_request
     chain.add(Box::new(AppendBeforeModel(calls.clone())));
     let mut context = make_context(&session, model.clone(), summary.clone());
     context.runtime.middleware_chain = Arc::new(chain);
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("small task"),
     ));
@@ -584,7 +584,7 @@ async fn test_compact_session_micro_shrink_does_not_hide_new_before_model_growth
         ]),
     )))
     .build();
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("continue"),
     ));

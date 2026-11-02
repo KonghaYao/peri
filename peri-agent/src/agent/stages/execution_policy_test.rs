@@ -24,7 +24,7 @@ impl ReactLLM for PolicyLlm {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         if call == 0 {
             if let Some(policy) = &self.tail {
-                self.queue.push(
+                self.queue.push_sync(
                     QueuedMessage::new(
                         MessageKind::Info,
                         MessageSource::ChannelMessage,
@@ -55,17 +55,20 @@ fn context() -> StageContext {
 #[test]
 fn recovery_instructions_bind_both_turn_and_attempt() {
     let context = context();
-    enqueue_truncation_continuation(&context);
-    enqueue_stream_interruption_continuation(&context);
+    futures::executor::block_on(enqueue_truncation_continuation(&context));
+    futures::executor::block_on(enqueue_stream_interruption_continuation(&context));
     let execution = context.session.turn.execution_binding();
     let other_attempt = ExecutionBinding {
         turn_id: execution.turn_id,
         attempt_id: peri_acp_types::identity::AttemptId::new(),
     };
-    assert!(context.session.queue.has_required_for_run(&execution));
-    assert!(!context.session.queue.has_required_for_run(&other_attempt));
-    assert!(!context.session.queue.has_ensure_processing());
-    for message in context.session.queue.drain_all() {
+    assert!(context.session.queue.has_required_for_run_sync(&execution));
+    assert!(!context
+        .session
+        .queue
+        .has_required_for_run_sync(&other_attempt));
+    assert!(!context.session.queue.has_ensure_processing_sync());
+    for message in context.session.queue.drain_all_sync() {
         assert_eq!(
             message.policy,
             MessagePolicy::continue_current_run(execution.clone())
@@ -81,7 +84,7 @@ fn recovery_instructions_bind_both_turn_and_attempt() {
 async fn passive_tail_projects_without_another_reason() {
     let mut context = context();
     let calls = Arc::new(AtomicUsize::new(0));
-    context.session.queue.push(QueuedMessage::prompt(
+    context.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("start"),
     ));
@@ -96,8 +99,8 @@ async fn passive_tail_projects_without_another_reason() {
         LoopResult::Completed
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
-    assert!(queue.is_empty());
-    assert!(!queue.has_ensure_processing());
+    assert!(queue.is_empty_sync());
+    assert!(!queue.has_ensure_processing_sync());
 }
 
 #[tokio::test]
@@ -105,12 +108,12 @@ async fn required_message_behind_multiple_passive_batches_is_not_starved() {
     let mut context = context();
     let calls = Arc::new(AtomicUsize::new(0));
     for _ in 0..130 {
-        context.session.queue.push(QueuedMessage::info(
+        context.session.queue.push_sync(QueuedMessage::info(
             MessageSource::SystemInjected,
             BaseMessage::human("progress"),
         ));
     }
-    context.session.queue.push(QueuedMessage::prompt(
+    context.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("start"),
     ));
@@ -131,7 +134,7 @@ async fn required_tail_continues_current_run_without_source_dispatch() {
     let mut context = context();
     let execution = context.session.turn.execution_binding();
     let calls = Arc::new(AtomicUsize::new(0));
-    context.session.queue.push(QueuedMessage::prompt(
+    context.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("start"),
     ));
@@ -151,7 +154,7 @@ async fn required_tail_continues_current_run_without_source_dispatch() {
 async fn stale_attempt_steering_is_suppressed_without_reason() {
     let context = context();
     let execution = context.session.turn.execution_binding();
-    context.session.queue.push(
+    context.session.queue.push_sync(
         QueuedMessage::defer(MessageSource::TodoSteering, BaseMessage::human("stale")).with_policy(
             MessagePolicy::continue_current_run(ExecutionBinding {
                 turn_id: execution.turn_id,
@@ -165,7 +168,7 @@ async fn stale_attempt_steering_is_suppressed_without_reason() {
         LoopResult::Completed
     ));
     assert_eq!(queue.suppressed_messages().len(), 1);
-    assert!(queue.is_empty());
+    assert!(queue.is_empty_sync());
 }
 
 #[tokio::test]
@@ -194,11 +197,11 @@ async fn idle_run_wakes_for_its_bound_steering() {
     })
     .await
     .expect("run must enter idle before steering");
-    queue.push(
+    queue.push_sync(
         QueuedMessage::defer(MessageSource::TodoSteering, BaseMessage::human("continue"))
             .with_policy(MessagePolicy::continue_current_run(execution)),
     );
-    assert!(!queue.has_ensure_processing());
+    assert!(!queue.has_ensure_processing_sync());
     let result = tokio::time::timeout(std::time::Duration::from_secs(2), task)
         .await
         .expect("bound steering must wake its idle run")

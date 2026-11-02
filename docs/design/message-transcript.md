@@ -2,7 +2,7 @@
 
 > BaseMessage、ContentBlock 枚举、MessageTranscript 与 staging 事务写
 >
-> 状态：现行内容模型；2026-10-07 已批准撤销持久执行恢复。MessageQueue 属于当前进程，canonical 历史继续持久化；会话隔离、类型化消费和历史加载边界由 [RCRA 权威](rcra-message-activation.md) 定义。有效上下文所有权、手动 Compact 有效集读取与 `peri.historyWindowV1` 窗口边界见正文；窗口协议默认关闭。
+> 状态：现行内容模型；2026-10-07 已批准撤销持久执行恢复。待发送消息由 [Thread MQ](thread-mq.md) 持久化，canonical 历史继续持久化；会话隔离、类型化消费和历史加载边界由 [RCRA 权威](rcra-message-activation.md) 定义。有效上下文所有权、手动 Compact 有效集读取与 `peri.historyWindowV1` 窗口边界见正文；窗口协议默认关闭。
 >
 > 运行时事实源为 `peri-agent/src/session/transcript.rs`、消息契约类型与相邻测试；有效上下文所有权与窗口事实源为 `peri-acp/src/host/{mod,prompt,history_window}.rs`、`peri-acp-types/src/history_window.rs` 与 `peri-tui/src/kit/history_window/`。
 
@@ -11,7 +11,7 @@
 1. **永远 id 寻址**：每条消息拥有唯一 `MessageId`（UUID v7，时间有序）。所有外部操作——rewind、compact、持久化恢复——一律按 id 定位消息。禁止使用 Vec 下标定位——下标可因消息标记漂移而引入隐性错误。
 2. **只追加优先**：正常 ReAct 循环中消息仅尾部追加，禁止 prepend 或中间插入。Compact 保留消息本体，通过标记改变模型视图，Full 另行追加摘要。
 3. **修改即新消息**：消息内容不可原地修改。需要变更时，正常路径产生新消息（新 id）。Micro 持久化 projection directive，Full 标 `excluded`；标记不改变消息内容本身。（Smart Compact 为 planner 兼容入口，见 §2.6）
-4. **Transcript 为运行时事实源**：运行时从 Transcript 构造消息视图；冷恢复从持久化 payload 与 flags 重建。已提交的 compact 结果跨 turn 保留，包括随后取消或失败的 turn。不持久化 MessageQueue——Queue 是临时收件箱。
+4. **Transcript 为运行时事实源**：运行时从 Transcript 构造消息视图；冷恢复从持久化 payload 与 flags 重建。已提交的 compact 结果跨 turn 保留，包括随后取消或失败的 turn。待发送消息位于 Thread MQ，Receive 在同一事务写入历史并删除 MQ 行，不保留第二份待发副本。
 5. **追加异步、提交有确认**：普通追加经异步 writer，compact lifecycle 与 turn 收尾必须检查持久化结果。writer 失败后停止使用热会话，保留已落盘内容，重新加载后才能继续；不以删除新增 ID 模拟事务回滚。
 6. **标记代替删除**：Compact 不删除、不修改消息内容。Micro 以 directive 预览结果或省略合格交换，Full 标 `excluded`（LLM 请求时跳过该消息）。（Smart Compact 已实现为 planner 兼容入口，见 §2.6）标记可撤销，消息本体不变。仅 rewind 允许真删除。
 
@@ -24,7 +24,7 @@ graph TB
     EXT["外部输入<br/>用户 · 管线 · Hook"]
     EXT --> MQ
 
-    MQ["MessageQueue<br/>临时收件箱·不持久化"] -->|"Receive 排空"| TRANSCRIPT
+    MQ["Thread MQ<br/>持久待发送·同一 Store"] -->|"Receive 原子移交"| TRANSCRIPT
 
     subgraph TRANSCRIPT["MessageTranscript"]
         MSGS["消息列表<br/>id 寻址·按序追加<br/>id 索引表常驻"]
@@ -68,13 +68,11 @@ graph TB
 - **ancestor 边界**：SubAgent 引用父上下文时，将 payload 与 flags 一起冻结为版本化 `InheritedContext`，并在 `threads.inherited_context` 列一次性写入；恢复时先放 ancestor、再放 child own history。窗口 `inherited` 来源的 `frozenSnapshotId` 由子会话、字节数、条数、祖先与首尾消息 id 派生，父会话后续 append/compact/rewind 不改变该快照。祖先标记允许初始化恢复，普通标记 setter 与 compact lifecycle 拒绝改写祖先；本机 SQLite 提供 inherited 窗口读取，remote/emscripten adapter 未覆写该端口时返回 `Unsupported`。ACP `session/fork` 经 `load_fork_snapshot` 合并冻结 inherited 与 own 历史，按冻结授权补齐归档，复制后的 payload 使用新 `MessageId` 并归新 thread 所有，因此属于可压缩 own region；归档正文保持 excluded。授权与重映射规则见 [Micro 生命周期](micro-compact.md#7-full继承fork-与-rewind)。
 - **Staging 两阶段写入**：Reason 阶段产出的 AI 消息（含 tool_calls）不直接追加到 Transcript——先 Staging。Act 阶段收集所有 ToolResult 后，AI 消息 + ToolResult 作为一组原子提交到 Transcript。Staging 期间的消息 LLM 请求不可见。提交后触发持久化。若 Act 阶段异常终止（Cancel/Error），staging 消息丢弃——Transcript 回到本轮开始前的状态，不留半个 AI 消息。
 
-### 2.3 MessageQueue
+### 2.3 Thread MQ
 
-临时收件箱，独立于 Transcript，**不持久化**。冷重建会话时 Queue 从空开始；同一宿主会话跨 turn 共享队列实例。实现位于 `peri-acp-types/src/session/queue.rs`，Agent session 模块保留 re-export。
+Thread MQ 是待发送消息的持久事实源，与 `messages` 位于同一 Thread Store。入队提交后消息可跨重启恢复；Receive 在短事务内按 `enqueued_at, id` 选择允许消费的集合，写入 `messages` 并删除对应 MQ 行，再镜像到 Transcript。唤醒信号仍是进程内机制，只提示重查，不构成消息存在性证明。
 
-用户尚未获准消费的内容保存在 Agent `UserInputMailbox` 待发区，不能提前进入本消费 MQ。
-只有指定发送或运行协调允许的内容才交接，Receive 领取与 Stop 精确撤出共享同一队列锁。
-完整投递和恢复语义见[用户待发送队列](user-input-queue.md)。
+用户尚未获准消费的内容同样保存在 MQ，但展示、模型可见性与唤醒分别判定；运行协调只把本次准入的选择交给 Receive，不能无条件排空整队。完整投递、取消与恢复语义见 [Thread MQ](thread-mq.md) 与[用户待发送队列](user-input-queue.md)。
 
 #### MessageKind 三类消息
 

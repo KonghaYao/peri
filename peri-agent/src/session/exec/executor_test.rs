@@ -405,7 +405,7 @@ async fn test_user_input_keepgoing_with_empty_history_reaches_stage_for_resumed_
         Arc::new(|_| {}),
     );
     mailbox
-        .enqueue(&EnqueueUserInputRequest {
+        .enqueue_sync(&EnqueueUserInputRequest {
             session_id: "queued-keepgoing".into(),
             generation: mailbox.generation().into(),
             command_id: "enqueue".into(),
@@ -414,9 +414,9 @@ async fn test_user_input_keepgoing_with_empty_history_reaches_stage_for_resumed_
             original_draft: "首条输入尚未领取".into(),
         })
         .unwrap();
-    mailbox.stop();
+    mailbox.stop_sync();
     mailbox
-        .attach_external_attempt(AgentCancellationToken::new(), true)
+        .attach_external_attempt_sync(AgentCancellationToken::new(), true)
         .unwrap();
     context.user_input_mailbox = Some(mailbox);
     let sink = Arc::new(MockEventSink::new());
@@ -795,7 +795,7 @@ async fn test_run_session_loop_intercept_inject_enters_agent_pipeline() {
         1,
         "Inject 分发必须构建 agent 管线（stage_build 被调用一次）"
     );
-    let queued = session_arc.queue().drain_all();
+    let queued = session_arc.queue().drain_all_sync();
     let injected = queued.iter().find(|q| q.kind == MessageKind::Prompt);
     assert!(
         matches!(injected, Some(q) if q.message().unwrap().content().contains("/skill tdd")),

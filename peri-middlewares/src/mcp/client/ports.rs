@@ -24,10 +24,19 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
     fn cancel_oauth_flow(&self, flow_id: &str) -> Result<bool, String> {
         Ok(McpClientPool::cancel_oauth_flow(self, flow_id))
     }
-    fn verify_shared_environment_close(&self, root_session_id: &str) -> Result<(), String> {
-        self.session_bindings
+    async fn verify_shared_environment_close(&self, root_session_id: &str) -> Result<(), String> {
+        let candidates = self
+            .session_bindings
             .read()
-            .verify_environment_close(root_session_id)
+            .close_candidates(root_session_id)?;
+        for (session, manager, queue) in candidates {
+            if !manager.is_execution_idle() || queue.has_required().await.unwrap_or(true) {
+                return Err(format!(
+                    "Incomplete: child {session} resources or required messages unfinished"
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn release_agent_session(&self, session_id: &str) -> Result<(), String> {

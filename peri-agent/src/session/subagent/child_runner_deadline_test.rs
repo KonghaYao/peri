@@ -174,7 +174,7 @@ async fn cancel_just_after_deadline_hands_off_without_cancelling_shell() {
 async fn admitted_act_tool_result_hands_off_instead_of_settled() {
     let manager = Arc::new(TaskManager::new());
     let child = make_child(manager.clone(), true);
-    child.queue().push(QueuedMessage::prompt(
+    child.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("use a tool"),
     ));
@@ -225,7 +225,7 @@ async fn admitted_act_tool_result_parent_result_is_failure() {
     let manager = Arc::new(TaskManager::new());
     let parent_manager = Arc::new(TaskManager::new());
     let child = make_child(manager, true);
-    child.queue().push(QueuedMessage::prompt(
+    child.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("use a tool"),
     ));
@@ -420,7 +420,7 @@ async fn assert_act_receipt(stop: bool) {
         child_owner: Some(owner),
         ..Default::default()
     });
-    child.queue().push(QueuedMessage::prompt(
+    child.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("执行工具"),
     ));
@@ -469,7 +469,7 @@ async fn assert_act_receipt(stop: bool) {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(manager.active_count(), 0);
     assert!(!manager.has_pending_deliveries());
-    assert!(!child.queue().has_required());
+    assert!(!child.queue().has_required_sync());
     assert!(receipt.tasks.is_empty());
     assert!(receipt.message_ids.is_empty());
     assert_eq!(receipt.unprocessed_tool_calls, vec!["call-1"]);
@@ -511,7 +511,7 @@ async fn hook_stop_after_act_hands_off_tool_result_and_parent_fails() {
     let manager = Arc::new(TaskManager::new());
     let parent_manager = Arc::new(TaskManager::new());
     let child = make_child(manager, true);
-    child.queue().push(QueuedMessage::prompt(
+    child.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run a tool then stop"),
     ));

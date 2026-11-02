@@ -92,7 +92,7 @@ async fn test_input_batch_reaches_single_before_agent_without_history_or_backgro
     let first = BaseMessage::human("A @image current.png");
     let second = BaseMessage::human("B @src/current.rs");
     let background = BaseMessage::human("background @image ignored.png");
-    ctx.session.queue.push_batch(vec![
+    ctx.session.queue.push_batch_sync(vec![
         QueuedMessage::prompt(MessageSource::UserInput, first.clone()),
         QueuedMessage::prompt(MessageSource::UserInput, second.clone()),
         QueuedMessage::prompt(MessageSource::UserInput, BaseMessage::human("")),
@@ -144,7 +144,7 @@ async fn test_input_batch_empty_background_attempt_does_not_reprocess_history() 
     ctx.runtime.middleware_chain = Arc::new(chain);
     let historical = BaseMessage::human("history @image old.png");
     ctx.session.transcript.write().append(historical.clone());
-    ctx.session.queue.push(QueuedMessage::defer(
+    ctx.session.queue.push_sync(QueuedMessage::defer(
         MessageSource::SubAgentComplete,
         BaseMessage::human("background result"),
     ));
@@ -293,7 +293,7 @@ async fn test_p0_2_before_agent_runs_once_after_tool_round_trip() {
         .with_tools(tools)
         .with_middleware_chain(Arc::new(chain))
         .build();
-    context.session.queue.push(QueuedMessage::prompt(
+    context.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("p0-2 prompt marker"),
     ));
@@ -377,7 +377,7 @@ async fn test_p0_2_before_agent_runs_once_after_receive_and_skips_empty_or_cance
         .with_llm(Arc::new(CountingLLM(Arc::clone(&llm_calls))))
         .with_middleware_chain(Arc::new(chain))
         .build();
-    context.session.queue.push(QueuedMessage::prompt(
+    context.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("p0-2 prompt marker"),
     ));

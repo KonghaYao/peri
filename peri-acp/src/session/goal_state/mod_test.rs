@@ -29,7 +29,8 @@ async fn next_recovery(queue: &MessageQueue) -> QueuedMessage {
     peri_time::timeout(Duration::from_secs(2), async {
         loop {
             if let Some(message) = queue
-                .drain_all()
+                .drain_all_async()
+                .await
                 .into_iter()
                 .find(|message| message.source == MessageSource::GoalSteering)
             {
@@ -417,7 +418,10 @@ async fn test_recovery_repeats_until_acknowledged() {
 
     GoalController::acknowledge_recovery(&state).await;
     peri_time::sleep(Duration::from_millis(120)).await;
-    assert!(queue.is_empty(), "确认恢复后不应再投递提醒");
+    assert!(
+        queue.is_empty().await.expect("test MQ len"),
+        "确认恢复后不应再投递提醒"
+    );
     assert_eq!(state.snapshot().status, Some(GoalStatus::Active));
 }
 
@@ -429,7 +433,10 @@ async fn test_clear_stops_recovery_schedule() {
     state.clear().await.unwrap();
 
     peri_time::sleep(Duration::from_millis(100)).await;
-    assert!(queue.is_empty(), "clear 后不得继续恢复");
+    assert!(
+        queue.is_empty().await.expect("test MQ len"),
+        "clear 后不得继续恢复"
+    );
     assert!(state.snapshot().objective.is_none());
 }
 
@@ -442,7 +449,10 @@ async fn test_complete_after_recovery_stops_schedule() {
     state.complete_goal().await.unwrap();
 
     peri_time::sleep(Duration::from_millis(100)).await;
-    assert!(queue.is_empty(), "complete 后不得继续恢复");
+    assert!(
+        queue.is_empty().await.expect("test MQ len"),
+        "complete 后不得继续恢复"
+    );
     assert_eq!(state.snapshot().status, Some(GoalStatus::Complete));
 }
 
@@ -503,7 +513,10 @@ async fn test_error_recovery_not_armed_for_terminal_goal() {
 
     GoalController::recover_after_error(&state, "model_error").await;
     peri_time::sleep(Duration::from_millis(80)).await;
-    assert!(queue.is_empty(), "终态 goal 不应安排恢复");
+    assert!(
+        queue.is_empty().await.expect("test MQ len"),
+        "终态 goal 不应安排恢复"
+    );
 }
 
 #[tokio::test]
@@ -515,7 +528,10 @@ async fn test_acknowledge_stops_error_recovery() {
 
     GoalController::acknowledge_recovery(&state).await;
     peri_time::sleep(Duration::from_millis(100)).await;
-    assert!(queue.is_empty(), "成功 turn 确认后不得继续错误重试");
+    assert!(
+        queue.is_empty().await.expect("test MQ len"),
+        "成功 turn 确认后不得继续错误重试"
+    );
 }
 
 #[tokio::test]

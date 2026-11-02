@@ -32,8 +32,11 @@ async fn server_notification_kind_controls_resource_update_wake() {
         assert_eq!(MessageKind::from(declared), expected);
         pool.dispatch_resource_updated("server", "resource://x", "subscription", Some(declared))
             .await;
-        assert_eq!(inbox.queue().has_wake_up(), expected == MessageKind::Defer);
-        assert_eq!(inbox.queue().drain_all()[0].kind, expected);
+        assert_eq!(
+            inbox.queue().has_wake_up_sync(),
+            expected == MessageKind::Defer
+        );
+        assert_eq!(inbox.queue().drain_all_sync()[0].kind, expected);
     }
     assert_eq!(notification_message_kind("server", None), None);
     let mut invalid = NotificationMetaObject::new();
@@ -41,7 +44,7 @@ async fn server_notification_kind_controls_resource_update_wake() {
     assert_eq!(notification_message_kind("server", Some(&invalid)), None);
     pool.dispatch_resource_updated("server", "resource://x", "subscription", None)
         .await;
-    assert_eq!(inbox.queue().drain_all()[0].kind, MessageKind::Defer);
+    assert_eq!(inbox.queue().drain_all_sync()[0].kind, MessageKind::Defer);
     assert_eq!(McpNotificationMessageKind::Info.as_str(), "info");
 }
 

@@ -1,4 +1,7 @@
 //! 用户待发区与执行准入的会话级 owner，普通待办在 idle 时逐条交接给 MQ。
+//!
+//! 待发事实（内容、原稿、是否存在）只存在 MQ；本模块的运行期记录仅保存
+//! 调度状态、身份与交付槽位（`docs/design/thread-mq.md` §4/§6）。
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -12,11 +15,12 @@ use peri_acp_types::{
     identity::AgentId,
     messages::{BaseMessage, MessageContent, MessageId},
     session::{
-        DispatchUserInputsRequest, EnqueueUserInputRequest, MessageSource, QueuedMessage,
-        SessionInbox, TakeBackUserInputRequest, TurnId, UserInput, UserInputItemResult,
-        UserInputQueueItem, UserInputQueueReceipt, UserInputQueueSnapshot,
-        UserInputQueueTerminalItem, UserInputState,
+        DispatchUserInputsRequest, EnqueueUserInputRequest, MessagePolicy, MessageSource,
+        MqCancelOutcome, MqEnqueueDisposition, MqEntry, MqFilter, QueuedMessage, SessionInbox,
+        TakeBackUserInputRequest, TurnId, UserInput, UserInputItemResult, UserInputQueueItem,
+        UserInputQueueReceipt, UserInputQueueSnapshot, UserInputQueueTerminalItem, UserInputState,
     },
+    store::PersistedPayload,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -57,6 +61,8 @@ pub enum UserInputQueueError {
     Capacity,
     #[error("Identity was already used for a different operation")]
     IdentityConflict,
+    #[error("Thread MQ storage failed: {0}")]
+    Store(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -74,8 +80,9 @@ struct ActiveRun {
     managed: bool,
 }
 
+/// 运行期调度记录；内容与原稿一律回查 MQ，不在此复制。
 struct InputRecord {
-    input: UserInput,
+    input_id: String,
     fingerprint: u64,
     state: UserInputState,
     handed_off: bool,
@@ -107,6 +114,9 @@ struct MailboxState {
     ready: Vec<String>,
     commands: HashMap<String, CommandReceipt>,
     active: Option<ActiveRun>,
+    /// 正在等待 MQ 提交的接纳数；容量判定必须把这段异步窗口计入，
+    /// 否则并发 enqueue 可以同时通过检查（MQ 才是事实源，不能先写记录）。
+    admissions_in_flight: usize,
     paused: bool,
     suspended: bool,
     valid: bool,
@@ -123,6 +133,13 @@ pub struct UserInputMailbox {
     emit: Arc<dyn Fn(StateEvent) + Send + Sync>,
     control_turn: TurnId,
     control_agent: AgentId,
+}
+
+/// 组装快照所需的运行期切片；获取后必须解锁再查询 MQ。
+struct SnapshotSeed {
+    revision: u64,
+    active_request_id: Option<String>,
+    terminal_items: Vec<UserInputQueueTerminalItem>,
 }
 
 impl UserInputMailbox {
@@ -143,6 +160,7 @@ impl UserInputMailbox {
                 ready: Vec::new(),
                 commands: HashMap::new(),
                 active: None,
+                admissions_in_flight: 0,
                 paused: false,
                 suspended: false,
                 valid: true,
@@ -155,8 +173,91 @@ impl UserInputMailbox {
         })
     }
 
-    pub fn snapshot(&self) -> UserInputQueueSnapshot {
-        self.snapshot_locked(&self.state.lock())
+    /// 从 MQ 恢复尚未移交的用户输入；不 promote、不发送、不启动执行。
+    ///
+    /// ACP 在会话加载/构造后调用。重复调用按 ID 合并，保留既有运行期状态。
+    pub async fn hydrate(&self) -> Result<(), UserInputQueueError> {
+        let entries = self.query_user_inputs().await?;
+        let mut state = self.state.lock();
+        let mut changed = false;
+        for entry in entries {
+            let Some((content, original_draft)) = user_input_payload(&entry) else {
+                tracing::warn!(
+                    input_id = %entry.id.as_uuid(),
+                    "MQ user input row has a non-human payload; skipped during hydrate"
+                );
+                continue;
+            };
+            let input_id = entry.id.as_uuid().to_string();
+            if state
+                .records
+                .iter()
+                .any(|record| record.input_id == input_id)
+                || state.terminal_identities.contains_key(&entry.id.as_uuid())
+            {
+                continue;
+            }
+            state.records.push(InputRecord {
+                fingerprint: fingerprint_for(&input_id, &content, &original_draft),
+                input_id,
+                state: UserInputState::Queued,
+                handed_off: false,
+                delivery_reserved: true,
+            });
+            changed = true;
+        }
+        if changed {
+            state.revision += 1;
+        }
+        Ok(())
+    }
+
+    pub async fn snapshot(&self) -> UserInputQueueSnapshot {
+        let entries = self.query_user_inputs().await;
+        let mut state = self.state.lock();
+        let (contents, known) = match &entries {
+            Ok(entries) => {
+                let mut contents = HashMap::with_capacity(entries.len());
+                for entry in entries {
+                    if let Some((content, original_draft)) = user_input_payload(entry) {
+                        contents.insert(entry.id.as_uuid().to_string(), (content, original_draft));
+                    }
+                }
+                (contents, true)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "user input snapshot: MQ query failed; content unavailable");
+                (HashMap::new(), false)
+            }
+        };
+        if known {
+            // MQ 行消失说明已被 Receive 消费或取消。只清理尚未发送的
+            // Queued；Dispatching/Claimed 仍可能处于交付确认窗口，必须保留。
+            let before = state.records.len();
+            state.records.retain(|record| {
+                record.state != UserInputState::Queued || contents.contains_key(&record.input_id)
+            });
+            if state.records.len() != before {
+                state.revision += 1;
+            }
+        }
+        let items = state
+            .records
+            .iter()
+            .filter(|record| is_pending(record.state))
+            .filter_map(|record| {
+                let (content, original_draft) = contents.get(&record.input_id)?.clone();
+                Some(UserInputQueueItem {
+                    input_id: record.input_id.clone(),
+                    content,
+                    original_draft,
+                    state: record.state,
+                })
+            })
+            .collect();
+        let seed = snapshot_seed(&state);
+        drop(state);
+        assemble_snapshot(&self.session_id, &self.generation, seed, items)
     }
 
     pub fn generation(&self) -> &str {
@@ -179,19 +280,17 @@ impl UserInputMailbox {
             .is_some_and(|active| active.managed)
     }
 
-    pub fn enqueue(
+    pub async fn enqueue(
         &self,
         request: &EnqueueUserInputRequest,
     ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
         let fingerprint = compute_fingerprint(("enqueue", request));
-        let mut state = self.state.lock();
-        self.validate(
-            &state,
+        self.validate_current(
             &request.session_id,
             &request.generation,
             &request.command_id,
         )?;
-        if let Some(receipt) = self.replay(&state, &request.command_id, fingerprint)? {
+        if let Some(receipt) = self.replay(&request.command_id, fingerprint).await? {
             return Ok(receipt);
         }
         validate_input_id(&request.input_id)?;
@@ -200,71 +299,146 @@ impl UserInputMailbox {
         if request.content.is_empty() {
             return Err(UserInputQueueError::EmptyContent);
         }
-        let input = UserInput {
-            input_id: request.input_id.clone(),
-            content: request.content.clone(),
-            original_draft: request.original_draft.clone(),
-        };
-        let input_fingerprint = compute_fingerprint(&input);
-        if let Some(record) = state
-            .records
-            .iter()
-            .find(|record| record.input.input_id == input.input_id)
-        {
-            if record.fingerprint != input_fingerprint {
-                return Err(UserInputQueueError::IdentityConflict);
-            }
-        } else if let Some(identity) = state.terminal_identities.get(&input_uuid) {
-            if identity.fingerprint != input_fingerprint {
-                return Err(UserInputQueueError::IdentityConflict);
-            }
-        } else {
-            if state
+        let input_fingerprint =
+            fingerprint_for(&request.input_id, &request.content, &request.original_draft);
+        let early = {
+            let mut state = self.state.lock();
+            self.validate(
+                &state,
+                &request.session_id,
+                &request.generation,
+                &request.command_id,
+            )?;
+            if let Some(record) = state
                 .records
                 .iter()
-                .filter(|record| is_pending(record.state))
-                .count()
-                >= PENDING_CAPACITY
-                || state.delivery_journal.len() + reserved_delivery_slots(&state)
-                    >= DELIVERY_JOURNAL_CAPACITY
+                .find(|record| record.input_id == request.input_id)
             {
-                return Err(UserInputQueueError::Capacity);
+                if record.fingerprint != input_fingerprint {
+                    return Err(UserInputQueueError::IdentityConflict);
+                }
+                // 已经在待发或执行中：重复 enqueue 不改写既有事实。
+                let results = results_for(&state, std::slice::from_ref(&request.input_id));
+                remember_command(
+                    &mut state,
+                    &request.command_id,
+                    fingerprint,
+                    results.clone(),
+                    None,
+                );
+                Some(results)
+            } else if let Some(identity) = state.terminal_identities.get(&input_uuid) {
+                if identity.fingerprint != input_fingerprint {
+                    return Err(UserInputQueueError::IdentityConflict);
+                }
+                let results = results_for(&state, std::slice::from_ref(&request.input_id));
+                remember_command(
+                    &mut state,
+                    &request.command_id,
+                    fingerprint,
+                    results.clone(),
+                    None,
+                );
+                Some(results)
+            } else {
+                if state
+                    .records
+                    .iter()
+                    .filter(|record| is_pending(record.state))
+                    .count()
+                    + state.admissions_in_flight
+                    >= PENDING_CAPACITY
+                    || state.delivery_journal.len()
+                        + reserved_delivery_slots(&state)
+                        + state.admissions_in_flight
+                        >= DELIVERY_JOURNAL_CAPACITY
+                {
+                    return Err(UserInputQueueError::Capacity);
+                }
+                state.admissions_in_flight += 1;
+                None
             }
-            state.records.push(InputRecord {
-                input,
-                fingerprint: input_fingerprint,
-                state: UserInputState::Queued,
-                handed_off: false,
-                delivery_reserved: true,
-            });
-            state.revision += 1;
-            if state.active.is_none() || state.paused {
-                state.paused = false;
-                promote_next(&mut state);
-            }
-            // 已 ready 的输入不再走 promotion；这里必须允许直接交接给当前挂起执行。
-            self.wake_suspended_locked(&mut state);
+        };
+        if let Some(results) = early {
+            return Ok(self.receipt(results, None).await);
         }
-        let results = results_for(&state, std::slice::from_ref(&request.input_id));
-        let receipt = self.remember(&mut state, &request.command_id, fingerprint, results, None);
-        drop(state);
-        self.publish(receipt.snapshot.clone());
-        Ok(receipt)
+
+        let message = QueuedMessage::prompt(
+            MessageSource::UserInput,
+            BaseMessage::Human {
+                id: MessageId::from(input_uuid),
+                content: request.content.clone(),
+            },
+        )
+        .with_original_draft(request.original_draft.clone())
+        // 用户输入是必须处理的消息；「未 dispatch 不激活」由 MQ 的发送选择
+        // （`send_inputs`）保证，而不是把策略降级为 passive。
+        .with_policy(MessagePolicy::ensure_processing());
+        let outcome = match self.inbox.queue().enqueue(message).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let mut state = self.state.lock();
+                state.admissions_in_flight = state.admissions_in_flight.saturating_sub(1);
+                return Err(UserInputQueueError::Store(error.to_string()));
+            }
+        };
+
+        let (sent_ready, results) = {
+            let mut state = self.state.lock();
+            state.admissions_in_flight = state.admissions_in_flight.saturating_sub(1);
+            let sent_ready = match outcome.disposition {
+                MqEnqueueDisposition::Inserted | MqEnqueueDisposition::Existing => {
+                    if !state
+                        .records
+                        .iter()
+                        .any(|record| record.input_id == request.input_id)
+                    {
+                        state.records.push(InputRecord {
+                            input_id: request.input_id.clone(),
+                            fingerprint: input_fingerprint,
+                            state: UserInputState::Queued,
+                            handed_off: false,
+                            delivery_reserved: true,
+                        });
+                        state.revision += 1;
+                        if state.active.is_none() || state.paused {
+                            state.paused = false;
+                            promote_next(&mut state);
+                        }
+                    }
+                    if self.wake_suspended_locked(&mut state) {
+                        ready_ids(&state)
+                    } else {
+                        Vec::new()
+                    }
+                }
+                MqEnqueueDisposition::AlreadyHandedOff => Vec::new(),
+            };
+            let results = results_for(&state, std::slice::from_ref(&request.input_id));
+            remember_command(
+                &mut state,
+                &request.command_id,
+                fingerprint,
+                results.clone(),
+                None,
+            );
+            (sent_ready, results)
+        };
+        self.send_ready_ids(sent_ready, true).await;
+        Ok(self.receipt(results, None).await)
     }
 
-    pub fn dispatch(
+    pub async fn dispatch(
         &self,
         request: &DispatchUserInputsRequest,
     ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
         let fingerprint = compute_fingerprint(("dispatch", request));
-        let mut state = self.state.lock();
-        self.validate(
-            &state,
+        self.validate_current(
             &request.session_id,
             &request.generation,
             &request.command_id,
         )?;
-        if let Some(receipt) = self.replay(&state, &request.command_id, fingerprint)? {
+        if let Some(receipt) = self.replay(&request.command_id, fingerprint).await? {
             return Ok(receipt);
         }
         let mut distinct = std::collections::HashSet::new();
@@ -275,73 +449,216 @@ impl UserInputMailbox {
         {
             return Err(UserInputQueueError::InvalidIdentity);
         }
-        let accepted = promote_ids(&mut state, &request.input_ids);
-        let cancel = if accepted {
-            state.paused = false;
-            state.active.as_mut().and_then(|active| {
-                // 用户在 Stop 后重新发送是明确继续；旧 attempt 仍须先完成收尾。
-                active.reason = InterruptReason::Steer;
-                active.cancel.clone()
-            })
-        } else {
-            None
+        let promoted = {
+            let mut state = self.state.lock();
+            self.validate(
+                &state,
+                &request.session_id,
+                &request.generation,
+                &request.command_id,
+            )?;
+            let promoted = promote_ids(&mut state, &request.input_ids);
+            if !promoted.is_empty() {
+                state.paused = false;
+            }
+            promoted
         };
-        let results = results_for(&state, &request.input_ids);
-        let receipt = self.remember(&mut state, &request.command_id, fingerprint, results, None);
-        drop(state);
+        let ids: Vec<MessageId> = promoted
+            .iter()
+            .map(|id| MessageId::from(uuid::Uuid::parse_str(id).expect("准入已校验 UUID")))
+            .collect();
+        let send = if ids.is_empty() {
+            None
+        } else {
+            match self.inbox.queue().send_inputs(ids.clone()).await {
+                Ok(outcome) => Some(outcome),
+                Err(error) => {
+                    self.revert_promotion(&promoted);
+                    return Err(UserInputQueueError::Store(error.to_string()));
+                }
+            }
+        };
+        let accepted: HashSet<MessageId> = send
+            .as_ref()
+            .map(|outcome| outcome.accepted.iter().map(|entry| entry.id).collect())
+            .unwrap_or_default();
+        let mut cancel = None;
+        let results = {
+            let mut state = self.state.lock();
+            if !accepted.is_empty() {
+                for record in &mut state.records {
+                    if promoted.contains(&record.input_id)
+                        && accepted
+                            .iter()
+                            .any(|id| id.as_uuid().to_string() == record.input_id)
+                    {
+                        record.handed_off = true;
+                    }
+                }
+                if let Some(active) = state.active.as_mut() {
+                    // 用户在 Stop 后重新发送是明确继续；旧 attempt 仍须先完成收尾。
+                    active.reason = InterruptReason::Steer;
+                    cancel = active.cancel.clone();
+                }
+            }
+            // missing 表示已移交或不存在：不能继续显示为 Dispatching。
+            let missing: Vec<&String> = promoted
+                .iter()
+                .filter(|id| {
+                    !send.as_ref().is_some_and(|outcome| {
+                        outcome
+                            .accepted
+                            .iter()
+                            .any(|e| e.id.as_uuid().to_string() == **id)
+                    })
+                })
+                .collect();
+            for id in missing {
+                let Some(index) = state
+                    .records
+                    .iter()
+                    .position(|record| record.input_id == *id)
+                else {
+                    continue;
+                };
+                let terminal = uuid::Uuid::parse_str(id)
+                    .ok()
+                    .and_then(|uuid| state.terminal_identities.get(&uuid))
+                    .map(|identity| identity.state);
+                match terminal {
+                    Some(terminal) => {
+                        state.records[index].state = terminal;
+                        state.records[index].handed_off = true;
+                    }
+                    None => {
+                        state.records.remove(index);
+                    }
+                }
+                state.revision += 1;
+            }
+            let results = results_for(&state, &request.input_ids);
+            remember_command(
+                &mut state,
+                &request.command_id,
+                fingerprint,
+                results.clone(),
+                None,
+            );
+            results
+        };
         if let Some(cancel) = cancel {
             cancel.cancel();
         }
-        self.publish(receipt.snapshot.clone());
-        Ok(receipt)
+        Ok(self.receipt(results, None).await)
     }
 
-    pub fn take_back(
+    pub async fn take_back(
         &self,
         request: &TakeBackUserInputRequest,
     ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
         let fingerprint = compute_fingerprint(("takeback", request));
-        let mut state = self.state.lock();
-        self.validate(
-            &state,
+        self.validate_current(
             &request.session_id,
             &request.generation,
             &request.command_id,
         )?;
-        if let Some(receipt) = self.replay(&state, &request.command_id, fingerprint)? {
+        if let Some(receipt) = self.replay(&request.command_id, fingerprint).await? {
             return Ok(receipt);
         }
         validate_input_id(&request.input_id)?;
-        let taken_back = state
-            .records
-            .iter_mut()
-            .find(|record| {
-                record.input.input_id == request.input_id && record.state == UserInputState::Queued
+        let queued = {
+            let state = self.state.lock();
+            self.validate(
+                &state,
+                &request.session_id,
+                &request.generation,
+                &request.command_id,
+            )?;
+            state.records.iter().any(|record| {
+                record.input_id == request.input_id && record.state == UserInputState::Queued
             })
-            .map(|record| {
-                record.state = UserInputState::Withdrawn;
-                // 未交付即撤回：释放 enqueue 时预留的日志槽位。
-                record.delivery_reserved = false;
-                let input = record.input.clone();
-                discard_payload(record);
-                input
-            });
-        if taken_back.is_some() {
-            state.revision += 1;
-            retain_terminal(&mut state, &request.input_id);
-            prune_terminal_records(&mut state);
+        };
+        if !queued {
+            let results = {
+                let mut state = self.state.lock();
+                let results = results_for(&state, std::slice::from_ref(&request.input_id));
+                remember_command(
+                    &mut state,
+                    &request.command_id,
+                    fingerprint,
+                    results.clone(),
+                    None,
+                );
+                results
+            };
+            return Ok(self.receipt(results, None).await);
         }
-        let results = results_for(&state, std::slice::from_ref(&request.input_id));
-        let receipt = self.remember(
-            &mut state,
-            &request.command_id,
-            fingerprint,
-            results,
-            taken_back,
+        let id = MessageId::from(
+            uuid::Uuid::parse_str(&request.input_id).expect("input id was validated above"),
         );
-        drop(state);
-        self.publish(receipt.snapshot.clone());
-        Ok(receipt)
+        let cancel_outcome = self
+            .inbox
+            .queue()
+            .cancel_user_input(&id)
+            .await
+            .map_err(|error| UserInputQueueError::Store(error.to_string()))?;
+        let (results, taken_back) = {
+            let mut state = self.state.lock();
+            let mut taken_back = None;
+            match cancel_outcome {
+                MqCancelOutcome::Cancelled(entry) => {
+                    if let Some(record) = state
+                        .records
+                        .iter_mut()
+                        .find(|record| record.input_id == request.input_id)
+                    {
+                        record.state = UserInputState::Withdrawn;
+                        // 未交付即撤回：释放 enqueue 时预留的日志槽位。
+                        record.delivery_reserved = false;
+                    }
+                    state.revision += 1;
+                    retain_terminal(&mut state, &request.input_id);
+                    prune_terminal_records(&mut state);
+                    taken_back = user_input_from_entry(&entry);
+                }
+                MqCancelOutcome::AlreadyHandedOff => {
+                    // 已移交历史：不能回删冒充取消；保留运行期记录等待 Receive
+                    // 的 Claimed/Delivered 收尾，结果如实反映已移交。
+                    if let Some(record) = state
+                        .records
+                        .iter_mut()
+                        .find(|record| record.input_id == request.input_id)
+                    {
+                        record.handed_off = true;
+                        if record.state == UserInputState::Queued {
+                            record.state = UserInputState::Claimed;
+                            state.revision += 1;
+                        }
+                    }
+                }
+                MqCancelOutcome::NotFound => {
+                    // 幂等：当前 MQ 与历史都没有这个 ID，不能伪造撤回回执。
+                    state.records.retain(|record| {
+                        !(record.input_id == request.input_id
+                            && matches!(
+                                record.state,
+                                UserInputState::Queued | UserInputState::Dispatching
+                            ))
+                    });
+                    state.revision += 1;
+                }
+            }
+            let results = results_for(&state, std::slice::from_ref(&request.input_id));
+            remember_command(
+                &mut state,
+                &request.command_id,
+                fingerprint,
+                results.clone(),
+                taken_back.clone(),
+            );
+            (results, taken_back)
+        };
+        Ok(self.receipt(results, taken_back).await)
     }
 
     /// 只预留一次执行，不交接消息；宿主取得既有 prompt lock 后再 attach。
@@ -362,55 +679,63 @@ impl UserInputMailbox {
     }
 
     /// 使用真实执行 token 绑定预留身份；交接与 Stop 在 owner 内顺序裁决。
-    pub fn attach_attempt(&self, ticket: &UserInputRunTicket, cancel: CancellationToken) -> bool {
-        let mut state = self.state.lock();
-        if !state.valid || state.paused {
-            return false;
-        }
-        let Some(active) = state
-            .active
-            .as_mut()
-            .filter(|active| active.ticket == *ticket && active.cancel.is_none())
-        else {
-            return false;
+    pub async fn attach_attempt(
+        &self,
+        ticket: &UserInputRunTicket,
+        cancel: CancellationToken,
+    ) -> bool {
+        let ready = {
+            let mut state = self.state.lock();
+            if !state.valid || state.paused {
+                return false;
+            }
+            let Some(active) = state
+                .active
+                .as_mut()
+                .filter(|active| active.ticket == *ticket && active.cancel.is_none())
+            else {
+                return false;
+            };
+            active.cancel = Some(cancel);
+            // 预留期间的 dispatch 还没有真正中断一个执行。
+            active.reason = InterruptReason::None;
+            state.revision += 1;
+            ready_ids(&state)
         };
-        active.cancel = Some(cancel);
-        // 预留期间的 dispatch 还没有真正中断一个执行。
-        active.reason = InterruptReason::None;
-        self.handoff_locked(&mut state);
-        state.revision += 1;
-        let snapshot = self.snapshot_locked(&state);
-        drop(state);
+        self.send_ready_ids(ready, true).await;
+        let snapshot = self.snapshot().await;
         self.publish(snapshot);
         true
     }
 
     /// 旧 prompt / 后台 continuation 也注册真实执行，以统一判断运行中准入。
-    pub fn attach_external_attempt(
+    pub async fn attach_external_attempt(
         &self,
         cancel: CancellationToken,
         resume_pending: bool,
     ) -> Option<UserInputRunTicket> {
-        let mut state = self.state.lock();
-        if !state.valid || state.active.is_some() {
-            return None;
-        }
-        let ticket = new_ticket();
-        state.active = Some(ActiveRun {
-            ticket: ticket.clone(),
-            cancel: Some(cancel),
-            reason: InterruptReason::None,
-            outcome: None,
-            managed: false,
-        });
-        state.revision += 1;
-        if resume_pending {
-            state.paused = false;
-            promote_next(&mut state);
-            self.handoff_locked(&mut state);
-        }
-        let snapshot = self.snapshot_locked(&state);
-        drop(state);
+        let (ticket, ready) = {
+            let mut state = self.state.lock();
+            if !state.valid || state.active.is_some() {
+                return None;
+            }
+            let ticket = new_ticket();
+            state.active = Some(ActiveRun {
+                ticket: ticket.clone(),
+                cancel: Some(cancel),
+                reason: InterruptReason::None,
+                outcome: None,
+                managed: false,
+            });
+            state.revision += 1;
+            if resume_pending {
+                state.paused = false;
+                promote_next(&mut state);
+            }
+            (ticket, ready_ids(&state))
+        };
+        self.send_ready_ids(ready, true).await;
+        let snapshot = self.snapshot().await;
         self.publish(snapshot);
         Some(ticket)
     }
@@ -465,42 +790,55 @@ impl UserInputMailbox {
     }
 
     /// fallback 只处理尚未进入 Agent 的早退；正常终态优先采用 Agent 的记录。
-    pub fn finish_attempt(&self, ticket: &UserInputRunTicket, fallback: UserInputAttemptOutcome) {
-        let mut state = self.state.lock();
-        if !state
-            .active
-            .as_ref()
-            .is_some_and(|active| active.ticket == *ticket)
-        {
-            return;
-        }
-        let active = state.active.take().expect("已核对执行身份");
-        state.revision += 1;
-        state.suspended = false;
-        let outcome = active.outcome.unwrap_or(fallback);
-        if !state.valid {
-            return;
-        }
-        if outcome == UserInputAttemptOutcome::Failed
-            || (outcome == UserInputAttemptOutcome::Interrupted
-                && active.reason == InterruptReason::None)
-        {
-            state.paused = true;
-            self.reclaim_locked(&mut state);
-        } else if state.paused {
-            self.reclaim_locked(&mut state);
-        } else if active.reason == InterruptReason::None
-            && outcome == UserInputAttemptOutcome::Completed
-        {
+    pub async fn finish_attempt(
+        &self,
+        ticket: &UserInputRunTicket,
+        fallback: UserInputAttemptOutcome,
+    ) {
+        let (reclaim, promote) = {
+            let mut state = self.state.lock();
+            if !state
+                .active
+                .as_ref()
+                .is_some_and(|active| active.ticket == *ticket)
+            {
+                return;
+            }
+            let active = state.active.take().expect("已核对执行身份");
+            state.revision += 1;
+            state.suspended = false;
+            let outcome = active.outcome.unwrap_or(fallback);
+            if !state.valid {
+                return;
+            }
+            let reclaim = outcome == UserInputAttemptOutcome::Failed
+                || (outcome == UserInputAttemptOutcome::Interrupted
+                    && active.reason == InterruptReason::None)
+                || state.paused;
+            let promote = !reclaim
+                && active.reason == InterruptReason::None
+                && outcome == UserInputAttemptOutcome::Completed;
+            if reclaim {
+                state.paused = true;
+            }
+            (reclaim, promote)
+        };
+        if reclaim {
+            self.reclaim().await;
+        } else if promote {
             // 已接受的立即发送优先；普通待办每次只释放队首一条。
+            // 这里只做运行期 promotion；真实 `send_inputs` 留给下一次 attach。
+            let mut state = self.state.lock();
             promote_next(&mut state);
         }
-        let snapshot = self.snapshot_locked(&state);
-        drop(state);
+        let snapshot = self.snapshot().await;
         self.publish(snapshot);
     }
 
     /// 宿主任务在开始或执行途中被丢弃时，保留确认尚未被 Receive 领取的输入。
+    ///
+    /// Drop 路径不能 await，只能做保守的运行期复位；MQ 行仍在，下一次
+    /// `hydrate`/`reclaim` 会按持久事实核对。
     pub fn fail_reserved(&self, ticket: &UserInputRunTicket) {
         let cancel = self
             .state
@@ -512,68 +850,120 @@ impl UserInputMailbox {
         if let Some(cancel) = cancel {
             cancel.cancel();
         }
-        self.finish_attempt(ticket, UserInputAttemptOutcome::Failed);
-    }
-
-    pub fn stop(&self) {
-        self.stop_matching(None);
-    }
-
-    /// 携带服务端执行身份的 Stop；迟到请求不得取消后来的执行。
-    pub fn stop_attempt(&self, request_id: &str, generation: &str) -> bool {
-        self.stop_matching(Some((request_id, generation)))
-    }
-
-    fn stop_matching(&self, target: Option<(&str, &str)>) -> bool {
         let mut state = self.state.lock();
-        if let Some((request_id, generation)) = target {
-            if generation != self.generation
-                || !state.valid
-                || !state.active.as_ref().is_some_and(|active| {
-                    active.managed && active.cancel.is_some() && active.ticket.id == request_id
-                })
-            {
-                return false;
-            }
-        }
-        state.paused = true;
-        state.suspended = false;
-        let cancel = state.active.as_mut().and_then(|active| {
-            active.reason = InterruptReason::Stop;
-            active.cancel.clone()
-        });
         if state
             .active
             .as_ref()
-            .is_some_and(|active| active.cancel.is_none())
+            .is_some_and(|active| active.ticket == *ticket)
         {
             state.active = None;
         }
-        self.reclaim_locked(&mut state);
-        let snapshot = self.snapshot_locked(&state);
+        state.revision += 1;
+        state.paused = true;
+        state.suspended = false;
+        for record in &mut state.records {
+            if record.state == UserInputState::Dispatching {
+                record.state = UserInputState::Queued;
+                record.handed_off = false;
+            }
+        }
+        state.ready.clear();
+        let reset_ids: Vec<MessageId> = state
+            .records
+            .iter()
+            .filter(|record| record.state == UserInputState::Queued && !record.handed_off)
+            .filter_map(|record| {
+                uuid::Uuid::parse_str(&record.input_id)
+                    .ok()
+                    .map(MessageId::from)
+            })
+            .collect();
         drop(state);
+        self.inbox.queue().withdraw_send_inputs(&reset_ids);
+    }
+
+    pub async fn stop(&self) {
+        self.stop_matching(None).await;
+    }
+
+    /// 携带服务端执行身份的 Stop；迟到请求不得取消后来的执行。
+    pub async fn stop_attempt(&self, request_id: &str, generation: &str) -> bool {
+        self.stop_matching(Some((request_id, generation))).await
+    }
+
+    async fn stop_matching(&self, target: Option<(&str, &str)>) -> bool {
+        let cancel = {
+            let mut state = self.state.lock();
+            if let Some((request_id, generation)) = target {
+                if generation != self.generation
+                    || !state.valid
+                    || !state.active.as_ref().is_some_and(|active| {
+                        active.managed && active.cancel.is_some() && active.ticket.id == request_id
+                    })
+                {
+                    return false;
+                }
+            }
+            state.paused = true;
+            state.suspended = false;
+            let cancel = state.active.as_mut().and_then(|active| {
+                active.reason = InterruptReason::Stop;
+                active.cancel.clone()
+            });
+            if state
+                .active
+                .as_ref()
+                .is_some_and(|active| active.cancel.is_none())
+            {
+                state.active = None;
+            }
+            cancel
+        };
         if let Some(cancel) = cancel {
             cancel.cancel();
         }
-        self.publish(snapshot);
+        self.reclaim().await;
         true
     }
 
     /// 会话关闭或持久化不确定时冻结当前 owner，旧 generation 永不重新准入。
+    ///
+    /// 关闭路径不能再查询 MQ；MQ 行留给重载后的 `hydrate`，这里只失效运行期状态。
     pub fn invalidate(&self) {
-        self.state.lock().valid = false;
-        self.stop();
+        let mut state = self.state.lock();
+        if !state.valid {
+            return;
+        }
+        state.valid = false;
+        state.paused = true;
+        state.suspended = false;
+        state.active = None;
+        state.ready.clear();
+        for record in &mut state.records {
+            if record.state == UserInputState::Dispatching {
+                record.state = UserInputState::Queued;
+                record.handed_off = false;
+            }
+        }
+        state.revision += 1;
     }
 
     /// idle 边界与 enqueue 共用同一把锁，覆盖输入在挂起前后到达的两种顺序。
-    pub(crate) fn enter_idle(&self) {
-        let mut state = self.state.lock();
-        state.suspended = true;
-        if self.wake_suspended_locked(&mut state) {
-            let snapshot = self.snapshot_locked(&state);
-            drop(state);
-            self.publish(snapshot);
+    pub(crate) async fn enter_idle(&self) {
+        let ready = {
+            let mut state = self.state.lock();
+            state.suspended = true;
+            match self.wake_suspended_locked(&mut state) {
+                true => ready_ids(&state),
+                false => Vec::new(),
+            }
+        };
+        if ready.is_empty() {
+            return;
         }
+        self.send_ready_ids(ready, true).await;
+        let snapshot = self.snapshot().await;
+        self.publish(snapshot);
     }
 
     pub(crate) fn leave_idle(&self) {
@@ -602,26 +992,29 @@ impl UserInputMailbox {
         }
         // 交接即占用本次 idle，后续 enqueue 不能在 Receive 开始前追加第二条。
         state.suspended = false;
-        self.handoff_locked(state);
         true
     }
 
     /// Receive 已从 MQ 独占取走这些 ID；任何 Stop 都不得再将它们恢复 queued。
-    pub(crate) fn mark_claimed(&self, ids: &[MessageId]) {
-        let mut state = self.state.lock();
-        let mut changed = false;
-        for record in &mut state.records {
-            if record.state == UserInputState::Dispatching && matches_id(record, ids) {
-                record.state = UserInputState::Claimed;
-                changed = true;
+    pub(crate) async fn mark_claimed(&self, ids: &[MessageId]) {
+        let changed = {
+            let mut state = self.state.lock();
+            let mut changed = false;
+            for record in &mut state.records {
+                if record.state == UserInputState::Dispatching && matches_id(record, ids) {
+                    record.state = UserInputState::Claimed;
+                    changed = true;
+                }
             }
-        }
+            if changed {
+                state.revision += 1;
+            }
+            changed
+        };
         if !changed {
             return;
         }
-        state.revision += 1;
-        let snapshot = self.snapshot_locked(&state);
-        drop(state);
+        let snapshot = self.snapshot().await;
         self.publish(snapshot);
     }
 
@@ -629,8 +1022,11 @@ impl UserInputMailbox {
     ///
     /// 日志槽位在 enqueue 时已预留，因此这里不会因容量在 transcript 写入后
     /// 失败；预留随日志条目转移，泵确认后才释放。
-    pub(crate) fn mark_delivered(&self, ids: &[MessageId]) -> Vec<String> {
-        self.mark_delivery_notifications(ids)
+    pub(crate) async fn mark_delivered(
+        &self,
+        inputs: &[(MessageId, MessageContent)],
+    ) -> Vec<String> {
+        self.mark_delivery_notifications(inputs).await
     }
 
     /// 事件泵的补发来源：按 Receive 实际交付顺序返回尚未推送的确认。
@@ -652,122 +1048,183 @@ impl UserInputMailbox {
         }
     }
 
-    fn mark_delivery_notifications(&self, ids: &[MessageId]) -> Vec<String> {
-        let mut state = self.state.lock();
-        if !state.valid {
-            return Vec::new();
-        }
-        let mut delivered = Vec::new();
-        let MailboxState {
-            records,
-            delivered_notifications,
-            delivery_journal,
-            ..
-        } = &mut *state;
-        // Receive 的 ids 是 MQ 实际消费顺序，不可按 enqueue 的 records 顺序补确认。
-        for id in ids {
-            let Some(record) = records.iter_mut().find(|record| matches_id(record, &[*id])) else {
-                continue;
-            };
-            if matches!(
-                record.state,
-                UserInputState::Claimed | UserInputState::Delivered
-            ) && delivered_notifications.insert(record.input.input_id.clone())
-            {
-                debug_assert!(
-                    record.delivery_reserved,
-                    "accepted input must hold a delivery journal slot"
-                );
-                if !record.delivery_reserved && delivery_journal.len() >= DELIVERY_JOURNAL_CAPACITY
-                {
-                    tracing::error!(
-                        input_id = %record.input.input_id,
-                        "delivery reservation invariant broken; journal temporarily over capacity"
-                    );
-                }
-                record.state = UserInputState::Delivered;
-                record.delivery_reserved = false;
-                delivered.push(record.input.input_id.clone());
-                // 正文在 discard_payload 之前进入有序日志：事件通道即使丢掉
-                // UserInputDelivered，日志条目仍会在本轮尾部补发，不会静默丢失。
-                delivery_journal.push_back(PendingDeliveryNotification {
-                    input_id: record.input.input_id.clone(),
-                    content: record.input.content.clone(),
-                    session_seq: None,
-                });
-                discard_payload(record);
+    async fn mark_delivery_notifications(
+        &self,
+        inputs: &[(MessageId, MessageContent)],
+    ) -> Vec<String> {
+        let delivered = {
+            let mut state = self.state.lock();
+            if !state.valid {
+                return Vec::new();
             }
-        }
-        if delivered.is_empty() {
-            return delivered;
-        }
-        state.revision += 1;
-        for id in &delivered {
-            retain_terminal(&mut state, id);
-        }
-        prune_terminal_records(&mut state);
-        let snapshot = self.snapshot_locked(&state);
-        drop(state);
+            let mut delivered = Vec::new();
+            {
+                let MailboxState {
+                    records,
+                    delivered_notifications,
+                    delivery_journal,
+                    ..
+                } = &mut *state;
+                // Receive 的 ids 是 MQ 实际消费顺序，不可按 enqueue 的 records 顺序补确认。
+                for (id, content) in inputs {
+                    let Some(record) = records.iter_mut().find(|record| matches_id(record, &[*id]))
+                    else {
+                        continue;
+                    };
+                    if matches!(
+                        record.state,
+                        UserInputState::Claimed | UserInputState::Delivered
+                    ) && delivered_notifications.insert(record.input_id.clone())
+                    {
+                        debug_assert!(
+                            record.delivery_reserved,
+                            "accepted input must hold a delivery journal slot"
+                        );
+                        if !record.delivery_reserved
+                            && delivery_journal.len() >= DELIVERY_JOURNAL_CAPACITY
+                        {
+                            tracing::error!(
+                                input_id = %record.input_id,
+                                "delivery reservation invariant broken; journal temporarily over capacity"
+                            );
+                        }
+                        record.state = UserInputState::Delivered;
+                        record.delivery_reserved = false;
+                        delivered.push(record.input_id.clone());
+                        // 正文在记录清理之前进入有序日志：事件通道即使丢掉
+                        // UserInputDelivered，日志条目仍会在本轮尾部补发，不会静默丢失。
+                        delivery_journal.push_back(PendingDeliveryNotification {
+                            input_id: record.input_id.clone(),
+                            content: content.clone(),
+                            session_seq: None,
+                        });
+                    }
+                }
+            }
+            if delivered.is_empty() {
+                return delivered;
+            }
+            state.revision += 1;
+            for id in &delivered {
+                retain_terminal(&mut state, id);
+            }
+            prune_terminal_records(&mut state);
+            delivered
+        };
+        let snapshot = self.snapshot().await;
         self.publish(snapshot);
         delivered
     }
 
-    fn handoff_locked(&self, state: &mut MailboxState) {
-        let ready = std::mem::take(&mut state.ready);
-        let messages = ready
-            .into_iter()
-            .filter_map(|id| {
-                let record = state
-                    .records
-                    .iter_mut()
-                    .find(|record| record.input.input_id == id)?;
-                if record.state != UserInputState::Dispatching || record.handed_off {
-                    return None;
+    /// 仍存在于 MQ 的 Dispatching 记录恢复 Queued；已移交的不恢复。
+    async fn reclaim(&self) {
+        let ids = {
+            let state = self.state.lock();
+            if !state.valid {
+                return;
+            }
+            let ids: Vec<String> = state
+                .records
+                .iter()
+                .filter(|record| record.state == UserInputState::Dispatching)
+                .map(|record| record.input_id.clone())
+                .collect();
+            ids
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let existing: HashSet<String> = match self.query_user_inputs().await {
+            Ok(entries) => entries
+                .iter()
+                .map(|entry| entry.id.as_uuid().to_string())
+                .collect(),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "user input reclaim: MQ query failed; keeping dispatching runtime state"
+                );
+                return;
+            }
+        };
+        let mut reclaimed = Vec::new();
+        {
+            let mut state = self.state.lock();
+            let mut changed = false;
+            for record in &mut state.records {
+                if record.state == UserInputState::Dispatching
+                    && (!record.handed_off || existing.contains(&record.input_id))
+                {
+                    record.state = UserInputState::Queued;
+                    record.handed_off = false;
+                    reclaimed.push(record.input_id.clone());
+                    changed = true;
                 }
-                let id = MessageId::from(uuid::Uuid::parse_str(&id).expect("准入已校验 UUID"));
-                record.handed_off = true;
-                Some(QueuedMessage::prompt(
-                    MessageSource::UserInput,
-                    BaseMessage::Human {
-                        id,
-                        content: record.input.content.clone(),
-                    },
-                ))
-            })
-            .collect();
-        self.inbox.handle().push_batch(messages);
-    }
-
-    fn reclaim_locked(&self, state: &mut MailboxState) {
-        let ids: Vec<_> = state
-            .records
-            .iter()
-            .filter(|record| record.state == UserInputState::Dispatching && record.handed_off)
-            .filter_map(|record| {
-                uuid::Uuid::parse_str(&record.input.input_id)
-                    .ok()
-                    .map(MessageId::from)
-            })
-            .collect();
-        let withdrawn = self.inbox.queue().withdraw_user_inputs(&ids);
-        let withdrawn_ids: Vec<_> = withdrawn
-            .iter()
-            .filter_map(|message| message.message().map(BaseMessage::id))
-            .collect();
-        let mut changed = false;
-        for record in &mut state.records {
-            if record.state == UserInputState::Dispatching
-                && (!record.handed_off || matches_id(record, &withdrawn_ids))
-            {
-                record.state = UserInputState::Queued;
-                record.handed_off = false;
-                changed = true;
+            }
+            state.ready.clear();
+            if changed {
+                state.revision += 1;
             }
         }
-        state.ready.clear();
-        if changed {
-            state.revision += 1;
+        let reclaimed_ids: Vec<MessageId> = reclaimed
+            .iter()
+            .filter_map(|id| uuid::Uuid::parse_str(id).ok().map(MessageId::from))
+            .collect();
+        if !reclaimed_ids.is_empty() {
+            self.inbox.queue().withdraw_send_inputs(&reclaimed_ids);
         }
+        let snapshot = self.snapshot().await;
+        self.publish(snapshot);
+    }
+
+    async fn query_user_inputs(&self) -> Result<Vec<MqEntry>, UserInputQueueError> {
+        self.inbox
+            .queue()
+            .query(MqFilter {
+                user_input_only: true,
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| UserInputQueueError::Store(error.to_string()))
+    }
+
+    /// 发送一组 ready 记录；`clear_ready` 为 true 时同时消费运行期 ready 队列。
+    async fn send_ready_ids(&self, ids: Vec<String>, clear_ready: bool) {
+        let message_ids: Vec<MessageId> = ids
+            .iter()
+            .filter_map(|id| uuid::Uuid::parse_str(id).ok().map(MessageId::from))
+            .collect();
+        if message_ids.is_empty() {
+            return;
+        }
+        match self.inbox.queue().send_inputs(message_ids).await {
+            Ok(_) => {
+                let mut state = self.state.lock();
+                for record in &mut state.records {
+                    if ids.contains(&record.input_id) {
+                        record.handed_off = true;
+                    }
+                }
+                if clear_ready {
+                    state.ready.retain(|id| !ids.contains(id));
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "user input send selection failed; input stays queued");
+            }
+        }
+    }
+
+    fn revert_promotion(&self, ids: &[String]) {
+        let mut state = self.state.lock();
+        for record in &mut state.records {
+            if record.state == UserInputState::Dispatching && ids.contains(&record.input_id) {
+                record.state = UserInputState::Queued;
+                record.handed_off = false;
+            }
+        }
+        state.ready.retain(|id| !ids.contains(id));
+        state.revision += 1;
     }
 
     fn validate(
@@ -789,83 +1246,49 @@ impl UserInputMailbox {
         Ok(())
     }
 
-    fn snapshot_locked(&self, state: &MailboxState) -> UserInputQueueSnapshot {
-        UserInputQueueSnapshot {
-            session_id: self.session_id.clone(),
-            generation: self.generation.clone(),
-            revision: state.revision,
-            active_request_id: state
-                .active
-                .as_ref()
-                .filter(|active| active.managed && active.cancel.is_some())
-                .map(|active| active.ticket.id.clone()),
-            items: state
-                .records
-                .iter()
-                .filter(|record| is_pending(record.state))
-                .map(|record| UserInputQueueItem {
-                    input_id: record.input.input_id.clone(),
-                    content: record.input.content.clone(),
-                    original_draft: record.input.original_draft.clone(),
-                    state: record.state,
-                })
-                .collect(),
-            // 终态不随 pending 项消失：客户端据此补齐丢失的交付确认。
-            terminal_items: state
-                .terminal_display
-                .iter()
-                .filter_map(|item| {
-                    let input_uuid = uuid::Uuid::parse_str(&item.input_id).ok()?;
-                    let identity = state.terminal_identities.get(&input_uuid)?;
-                    Some(UserInputQueueTerminalItem {
-                        input_id: item.input_id.clone(),
-                        state: identity.state,
-                    })
-                })
-                .collect(),
-        }
-    }
-
-    fn remember(
+    fn validate_current(
         &self,
-        state: &mut MailboxState,
+        session: &str,
+        generation: &str,
         command: &str,
-        fingerprint: u64,
-        results: Vec<UserInputItemResult>,
-        taken_back: Option<UserInput>,
-    ) -> UserInputQueueReceipt {
-        state.commands.insert(
-            command.to_owned(),
-            CommandReceipt {
-                fingerprint,
-                results: results.clone(),
-                taken_back: taken_back.clone(),
-            },
-        );
-        UserInputQueueReceipt {
-            snapshot: self.snapshot_locked(state),
-            results,
-            taken_back,
-        }
+    ) -> Result<(), UserInputQueueError> {
+        let state = self.state.lock();
+        self.validate(&state, session, generation, command)
     }
 
-    fn replay(
+    async fn replay(
         &self,
-        state: &MailboxState,
         command: &str,
         fingerprint: u64,
     ) -> Result<Option<UserInputQueueReceipt>, UserInputQueueError> {
-        let Some(receipt) = state.commands.get(command) else {
-            return Ok(None);
+        let replayed = {
+            let state = self.state.lock();
+            let Some(receipt) = state.commands.get(command) else {
+                return Ok(None);
+            };
+            if receipt.fingerprint != fingerprint {
+                return Err(UserInputQueueError::IdentityConflict);
+            }
+            Some((receipt.results.clone(), receipt.taken_back.clone()))
         };
-        if receipt.fingerprint != fingerprint {
-            return Err(UserInputQueueError::IdentityConflict);
+        match replayed {
+            Some((results, taken_back)) => Ok(Some(self.receipt(results, taken_back).await)),
+            None => Ok(None),
         }
-        Ok(Some(UserInputQueueReceipt {
-            snapshot: self.snapshot_locked(state),
-            results: receipt.results.clone(),
-            taken_back: receipt.taken_back.clone(),
-        }))
+    }
+
+    async fn receipt(
+        &self,
+        results: Vec<UserInputItemResult>,
+        taken_back: Option<UserInput>,
+    ) -> UserInputQueueReceipt {
+        let snapshot = self.snapshot().await;
+        self.publish(snapshot.clone());
+        UserInputQueueReceipt {
+            snapshot,
+            results,
+            taken_back,
+        }
     }
 
     fn publish(&self, snapshot: UserInputQueueSnapshot) {
@@ -891,6 +1314,144 @@ impl UserInputMailbox {
     }
 }
 
+fn snapshot_seed(state: &MailboxState) -> SnapshotSeed {
+    SnapshotSeed {
+        revision: state.revision,
+        active_request_id: state
+            .active
+            .as_ref()
+            .filter(|active| active.managed && active.cancel.is_some())
+            .map(|active| active.ticket.id.clone()),
+        // 终态不随 pending 项消失：客户端据此补齐丢失的交付确认。
+        terminal_items: state
+            .terminal_display
+            .iter()
+            .filter_map(|item| {
+                let input_uuid = uuid::Uuid::parse_str(&item.input_id).ok()?;
+                let identity = state.terminal_identities.get(&input_uuid)?;
+                Some(UserInputQueueTerminalItem {
+                    input_id: item.input_id.clone(),
+                    state: identity.state,
+                })
+            })
+            .collect(),
+    }
+}
+
+fn assemble_snapshot(
+    session_id: &str,
+    generation: &str,
+    seed: SnapshotSeed,
+    items: Vec<UserInputQueueItem>,
+) -> UserInputQueueSnapshot {
+    UserInputQueueSnapshot {
+        session_id: session_id.to_owned(),
+        generation: generation.to_owned(),
+        revision: seed.revision,
+        active_request_id: seed.active_request_id,
+        items,
+        terminal_items: seed.terminal_items,
+    }
+}
+
+fn remember_command(
+    state: &mut MailboxState,
+    command: &str,
+    fingerprint: u64,
+    results: Vec<UserInputItemResult>,
+    taken_back: Option<UserInput>,
+) {
+    state.commands.insert(
+        command.to_owned(),
+        CommandReceipt {
+            fingerprint,
+            results,
+            taken_back,
+        },
+    );
+}
+
+#[cfg(test)]
+impl UserInputMailbox {
+    // 旧单元测试以同步断言描述队列；这里 block_on 同一 async 实现，不复制事实源。
+    pub fn enqueue_sync(
+        &self,
+        request: &EnqueueUserInputRequest,
+    ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
+        futures::executor::block_on(self.enqueue(request))
+    }
+
+    pub fn dispatch_sync(
+        &self,
+        request: &DispatchUserInputsRequest,
+    ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
+        futures::executor::block_on(self.dispatch(request))
+    }
+
+    pub fn take_back_sync(
+        &self,
+        request: &TakeBackUserInputRequest,
+    ) -> Result<UserInputQueueReceipt, UserInputQueueError> {
+        futures::executor::block_on(self.take_back(request))
+    }
+
+    pub fn snapshot_sync(&self) -> UserInputQueueSnapshot {
+        futures::executor::block_on(self.snapshot())
+    }
+
+    pub fn hydrate_sync(&self) -> Result<(), UserInputQueueError> {
+        futures::executor::block_on(self.hydrate())
+    }
+
+    pub fn attach_attempt_sync(
+        &self,
+        ticket: &UserInputRunTicket,
+        cancel: CancellationToken,
+    ) -> bool {
+        futures::executor::block_on(self.attach_attempt(ticket, cancel))
+    }
+
+    pub fn attach_external_attempt_sync(
+        &self,
+        cancel: CancellationToken,
+        resume_pending: bool,
+    ) -> Option<UserInputRunTicket> {
+        futures::executor::block_on(self.attach_external_attempt(cancel, resume_pending))
+    }
+
+    pub fn finish_attempt_sync(
+        &self,
+        ticket: &UserInputRunTicket,
+        fallback: UserInputAttemptOutcome,
+    ) {
+        futures::executor::block_on(self.finish_attempt(ticket, fallback));
+    }
+
+    pub fn stop_sync(&self) {
+        futures::executor::block_on(self.stop());
+    }
+
+    pub fn stop_attempt_sync(&self, request_id: &str, generation: &str) -> bool {
+        futures::executor::block_on(self.stop_attempt(request_id, generation))
+    }
+
+    pub fn enter_idle_sync(&self) {
+        futures::executor::block_on(self.enter_idle());
+    }
+
+    pub fn mark_claimed_sync(&self, ids: &[MessageId]) {
+        futures::executor::block_on(self.mark_claimed(ids));
+    }
+
+    pub fn mark_delivered_sync(&self, ids: &[MessageId]) -> Vec<String> {
+        let inputs: Vec<_> = ids
+            .iter()
+            .map(|id| (*id, MessageContent::text("")))
+            .collect();
+        futures::executor::block_on(self.mark_delivered(&inputs))
+    }
+}
+
 fn new_ticket() -> UserInputRunTicket {
     UserInputRunTicket {
         id: uuid::Uuid::now_v7().to_string(),
@@ -913,14 +1474,13 @@ fn is_pending(state: UserInputState) -> bool {
 }
 
 fn matches_id(record: &InputRecord, ids: &[MessageId]) -> bool {
-    uuid::Uuid::parse_str(&record.input.input_id)
+    uuid::Uuid::parse_str(&record.input_id)
         .ok()
         .is_some_and(|id| ids.contains(&MessageId::from(id)))
 }
 
-fn discard_payload(record: &mut InputRecord) {
-    record.input.content = MessageContent::text("");
-    record.input.original_draft.clear();
+fn ready_ids(state: &MailboxState) -> Vec<String> {
+    state.ready.clone()
 }
 
 fn promote_next(state: &mut MailboxState) -> bool {
@@ -938,25 +1498,25 @@ fn promote_next(state: &mut MailboxState) -> bool {
         .records
         .iter()
         .find(|record| record.state == UserInputState::Queued)
-        .map(|record| record.input.input_id.clone());
-    next.is_some_and(|id| promote_ids(state, &[id]))
+        .map(|record| record.input_id.clone());
+    next.is_some_and(|id| !promote_ids(state, &[id]).is_empty())
 }
 
-fn promote_ids(state: &mut MailboxState, ids: &[String]) -> bool {
-    let mut changed = false;
+fn promote_ids(state: &mut MailboxState, ids: &[String]) -> Vec<String> {
+    let mut promoted = Vec::new();
     // 单次 ALL 按服务端原顺序；后续命令追加到 ready，保持 B 后 A 的接受顺序。
     for record in &mut state.records {
-        if record.state == UserInputState::Queued && ids.contains(&record.input.input_id) {
+        if record.state == UserInputState::Queued && ids.contains(&record.input_id) {
             record.state = UserInputState::Dispatching;
             record.handed_off = false;
-            state.ready.push(record.input.input_id.clone());
-            changed = true;
+            state.ready.push(record.input_id.clone());
+            promoted.push(record.input_id.clone());
         }
     }
-    if changed {
+    if !promoted.is_empty() {
         state.revision += 1;
     }
-    changed
+    promoted
 }
 
 fn results_for(state: &MailboxState, ids: &[String]) -> Vec<UserInputItemResult> {
@@ -966,7 +1526,7 @@ fn results_for(state: &MailboxState, ids: &[String]) -> Vec<UserInputItemResult>
             state: state
                 .records
                 .iter()
-                .find(|record| record.input.input_id == *id)
+                .find(|record| record.input_id == *id)
                 .map(|record| record.state)
                 .or_else(|| {
                     uuid::Uuid::parse_str(id)
@@ -977,6 +1537,29 @@ fn results_for(state: &MailboxState, ids: &[String]) -> Vec<UserInputItemResult>
                 .unwrap_or(UserInputState::Unknown),
         })
         .collect()
+}
+
+fn user_input_payload(entry: &MqEntry) -> Option<(MessageContent, String)> {
+    match &entry.payload {
+        PersistedPayload::Message(BaseMessage::Human { content, .. }) => Some((
+            content.clone(),
+            entry.original_draft.clone().unwrap_or_default(),
+        )),
+        _ => None,
+    }
+}
+
+fn user_input_from_entry(entry: &MqEntry) -> Option<UserInput> {
+    let (content, original_draft) = user_input_payload(entry)?;
+    Some(UserInput {
+        input_id: entry.id.as_uuid().to_string(),
+        content,
+        original_draft,
+    })
+}
+
+fn fingerprint_for(input_id: &str, content: &MessageContent, original_draft: &str) -> u64 {
+    compute_fingerprint(("user_input", input_id, content, original_draft))
 }
 
 fn compute_fingerprint<T: serde::Serialize>(value: T) -> u64 {
