@@ -55,6 +55,10 @@ pub static BUILTIN_SKILLS: &[BuiltinSkill] = &[
         name: "cron",
         content: include_str!("builtin/skills/cron/SKILL.md"),
     },
+    BuiltinSkill {
+        name: "monitor",
+        content: include_str!("builtin/skills/monitor/SKILL.md"),
+    },
 ];
 
 /// builtin 技能的原始字节（`SkillRecord::read_file` 的静态读取路径）。

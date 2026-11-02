@@ -7,6 +7,8 @@ mod cache;
 mod cache_policy_tests;
 mod instance_face;
 mod lifecycle;
+mod monitor_alert;
+mod monitor_identity;
 mod oauth;
 pub(crate) mod output_store;
 #[cfg(not(target_os = "emscripten"))]

@@ -19,6 +19,23 @@ pub(super) fn task_started(public_id: String, delivery_note: &str) -> ToolOutput
     )
 }
 
+/// Monitor receipt: the host public task id and the monitor-side task id are
+/// different namespaces. `monitor_id` is what the monitor tools and MCP
+/// `tasks/get` accept; the host `task_id` belongs to host task management and
+/// the Tasks panel only.
+pub(super) fn monitor_started(public_id: String, monitor_id: &str) -> ToolOutput {
+    ToolOutput::with_execution(
+        format!(
+            "Background task started: {public_id}. task_id: {public_id} (host background task id; \
+             only for host task management and the Tasks panel). monitor_id: {monitor_id} (use this \
+             as task_id for monitor_read, monitor_stop, and MCP tasks/get; monitor_list also reports \
+             it). Do not pass the host task_id to the monitor tools. Only alert matches wake the \
+             initiating session; read progress with monitor_read."
+        ),
+        evidence(ToolExecutionStatus::Running, Some(public_id)),
+    )
+}
+
 pub(super) fn complete(
     tool: &dyn BaseTool,
     text: String,

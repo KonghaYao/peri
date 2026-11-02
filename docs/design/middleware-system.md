@@ -98,7 +98,7 @@ for aspect in chain:
 - **#12/#13**：审批与提问是独立能力。`PermissionMiddleware` 负责审批；`HumanInTheLoopMiddleware::collect_tools()` 使用原始 broker 提供 `AskUserQuestion`。
 - **#14 subagent**：`SubAgentMiddleware` 提供 `Agent`，TaskManager 可用时额外提供 `AgentResultTool`；后台任务生命周期遵循 [Session 异步任务架构](session-async-tasks.md)。
 - **#17 goal**：`GoalTool` 是 deferred tool，仅通过 `SearchExtraTools` → `ExecuteExtraTool` 访问；`after_agent` 注入 steering 并触发自驱续跑。
-- **builtin MCP 实例不是链槽位**：Web 搜索 / 抓取、artifact 上传、cron 调度、7 个文件/终端工具与 workflow 编排由 `mcp` 槽位（#15）客户端侧的同进程 builtin MCP 实例（`web` / `artifact` / `cron` / `workspace` / `workflow`）提供；实例、原始工具名与逐工具 direct 的单一事实源是 `peri-acp-types/src/builtin_mcp.rs::BUILTIN_MCP_INSTANCES`。关闭键为策略键 `WebMiddleware` / `ArtifactMiddleware` / `CronMiddleware` / `WorkspaceMiddleware` / `WorkflowMiddleware`（`BUILTIN_INSTANCE_POLICY_KEYS`，与只含链槽位名的 `MIDDLEWARE_NAMES` 是两张表），机制见 [meta-harness.md](meta-harness.md)。
+- **builtin MCP 实例不是链槽位**：Web 搜索 / 抓取、artifact 上传、cron 调度、monitor 输出监控、7 个文件/终端工具与 workflow 编排由 `mcp` 槽位（#15）客户端侧的同进程 builtin MCP 实例（`web` / `artifact` / `cron` / `monitor` / `workspace` / `workflow`）提供；实例、原始工具名与逐工具 direct 的单一事实源是 `peri-acp-types/src/builtin_mcp.rs::BUILTIN_MCP_INSTANCES`。关闭键为策略键 `WebMiddleware` / `ArtifactMiddleware` / `CronMiddleware` / `MonitorMiddleware` / `WorkspaceMiddleware` / `WorkflowMiddleware`（`BUILTIN_INSTANCE_POLICY_KEYS`，与只含链槽位名的 `MIDDLEWARE_NAMES` 是两张表），机制见 [meta-harness.md](meta-harness.md)。
 
 ---
 

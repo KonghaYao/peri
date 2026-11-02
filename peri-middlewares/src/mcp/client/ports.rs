@@ -63,8 +63,9 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
         inbox: InboxHandle,
         manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
     ) {
-        self.bind_session_task_manager(session_id, &manager);
-        self.register_inbox(session_id, inbox);
+        self.session_bindings
+            .write()
+            .bind_agent(session_id, inbox, manager);
     }
 
     fn agent_session_binding(
