@@ -772,9 +772,9 @@ fn system_mcp_tools_equals_declared_direct_set_for_every_instance() {
                 "{} 的 direct 集合为空 ⇒ 该实例注入后不产生任何 direct 工具",
                 instance.name
             ),
-            "cron" => assert!(
+            "cron" | "monitor" => assert!(
                 tools.is_empty(),
-                "{} 的 direct 集合必须为空（A4：cron 工具一律 deferred）",
+                "{} 的 direct 集合必须为空（cron / monitor 工具一律 deferred）",
                 instance.name
             ),
             // workflow（wave 5 注册表）：与 cron 同形——四项一律 deferred（模型面

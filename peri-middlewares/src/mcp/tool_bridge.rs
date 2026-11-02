@@ -335,8 +335,9 @@ impl BaseTool for McpToolBridge {
         let arguments = input.as_object().cloned().unwrap_or_default();
         let mut request = rmcp::model::CallToolRequestParams::new(self.tool_name.clone())
             .with_arguments(arguments);
-        // per-call 会话身份（`peri/taskOwner`）随源接线：只有 Workspace 实例
-        // 按直接发起会话隔离后台任务，其他 server 不注入 Peri 元数据。
+        // per-call 会话身份（`peri/taskOwner`）随源接线：Workspace（含
+        // WorkspaceRemote）与 monitor 实例按直接发起会话隔离后台任务，其他
+        // server 不注入 Peri 元数据。
         if let Some(owner) = super::client::task_owner_metadata::task_owner_meta(
             self.client.source.as_ref(),
             session_id,
@@ -387,6 +388,9 @@ impl BaseTool for McpToolBridge {
             rmcp::model::CallToolResponse::Task(created) => {
                 let task_created_at = created.task.created_at;
                 let task_id = created.task.task_id;
+                let owner_scoped = super::client::task_owner_metadata::source_uses_task_owner(
+                    self.client.source.as_ref(),
+                );
                 let is_shell = self.tool_name == "Bash"
                     && (matches!(
                         self.client.source.as_ref(),
@@ -417,7 +421,7 @@ impl BaseTool for McpToolBridge {
                     &task_id,
                     kind,
                     summary,
-                    is_shell,
+                    owner_scoped,
                     &task_created_at,
                 )?;
                 let ticket = match manager.register_external(registration) {
@@ -439,6 +443,7 @@ impl BaseTool for McpToolBridge {
                     session_id.to_owned(),
                     task_id.clone(),
                     ticket,
+                    owner_scoped,
                     is_shell,
                     peer.clone(),
                 ) {
@@ -451,6 +456,22 @@ impl BaseTool for McpToolBridge {
                                     ),
                                 }));
                     }
+                }
+                // Monitor alert reminders are driven by the task subscription's
+                // `tasks/get` polling; monitor terminal states never wake the
+                // owner (only alert matches do), so the receipt below must not
+                // promise completion delivery.
+                let is_monitor = matches!(
+                    self.client.source.as_ref(),
+                    Some(super::config::ConfigSource::Builtin { instance }) if instance == "monitor"
+                );
+                if is_monitor {
+                    // The model sees the receipt, not the raw `CreateTaskResult`.
+                    // Expose both ids: `public_id` is the host task id (host task
+                    // management and the Tasks panel only), while the server task id
+                    // is what `monitor_read`/`monitor_stop`/`monitor_list` and MCP
+                    // `tasks/get` accept.
+                    return Ok(super::tool_execution::monitor_started(public_id, &task_id));
                 }
                 // 回执只承诺可达的投递：有 canonical 路由 = 结果到达时持久记录；
                 // 否则只声称活跃期送达。结果尚未产生，不得提前声称已写入 transcript，

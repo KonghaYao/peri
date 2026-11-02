@@ -265,7 +265,7 @@ async fn run_workflow_mcp(scenario: Scenario<'_>) -> Outcome {
         .await;
     let run_elapsed = run_started.elapsed();
     let agent_session_id = {
-        let sessions = pool.session_bindings.read().registered_sessions();
+        let sessions = pool.session_bindings.read().registered_owners();
         assert_eq!(sessions.len(), 1);
         sessions[0].clone()
     };

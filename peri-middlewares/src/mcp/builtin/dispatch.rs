@@ -30,6 +30,7 @@ use rmcp::{
 use super::context::BuiltinInstanceContext;
 use peri_mcp_artifact::ArtifactMcpServer;
 use peri_mcp_cron::CronMcpServer;
+use peri_mcp_monitor::MonitorMcpServer;
 use peri_mcp_web::WebMcpServer;
 #[cfg(not(target_os = "emscripten"))]
 use peri_mcp_workflow::WorkflowMcpServer;
@@ -46,6 +47,7 @@ pub(crate) enum BuiltinServerHandler {
     Web(WebMcpServer),
     Artifact(ArtifactMcpServer),
     Cron(CronMcpServer),
+    Monitor(MonitorMcpServer),
     Workspace(WorkspaceMcpServer),
     #[cfg(not(target_os = "emscripten"))]
     Workflow(WorkflowMcpServer),
@@ -59,6 +61,7 @@ impl ServerHandler for BuiltinServerHandler {
             Self::Web(server) => server.get_info(),
             Self::Artifact(server) => server.get_info(),
             Self::Cron(server) => server.get_info(),
+            Self::Monitor(server) => server.get_info(),
             Self::Workspace(server) => server.get_info(),
             #[cfg(not(target_os = "emscripten"))]
             Self::Workflow(server) => server.get_info(),
@@ -74,6 +77,7 @@ impl ServerHandler for BuiltinServerHandler {
             Self::Web(server) => server.list_tools(request, context).await,
             Self::Artifact(server) => server.list_tools(request, context).await,
             Self::Cron(server) => server.list_tools(request, context).await,
+            Self::Monitor(server) => server.list_tools(request, context).await,
             Self::Workspace(server) => server.list_tools(request, context).await,
             #[cfg(not(target_os = "emscripten"))]
             Self::Workflow(server) => server.list_tools(request, context).await,
@@ -89,6 +93,7 @@ impl ServerHandler for BuiltinServerHandler {
             Self::Web(server) => server.call_tool(request, context).await,
             Self::Artifact(server) => server.call_tool(request, context).await,
             Self::Cron(server) => server.call_tool(request, context).await,
+            Self::Monitor(server) => server.call_tool(request, context).await,
             Self::Workspace(server) => server.call_tool(request, context).await,
             #[cfg(not(target_os = "emscripten"))]
             Self::Workflow(server) => server.call_tool(request, context).await,
@@ -198,6 +203,7 @@ impl ServerHandler for BuiltinServerHandler {
     ) -> Result<GetTaskResult, McpError> {
         match self {
             Self::Workspace(server) => server.get_task(request, context).await,
+            Self::Monitor(server) => server.get_task(request, context).await,
             _ => Err(McpError::invalid_params("unknown task", None)),
         }
     }
@@ -220,6 +226,7 @@ impl ServerHandler for BuiltinServerHandler {
     ) -> Result<(), McpError> {
         match self {
             Self::Workspace(server) => server.cancel_task(request, context).await,
+            Self::Monitor(server) => server.cancel_task(request, context).await,
             _ => Err(McpError::invalid_params("unknown task", None)),
         }
     }
@@ -284,6 +291,9 @@ pub(crate) fn builtin_server_handler_with_env(
         "cron" => ctx.cron.as_ref().map(|cron| {
             BuiltinServerHandler::Cron(CronMcpServer::new(Arc::clone(&cron.scheduler)))
         }),
+        "monitor" => Some(BuiltinServerHandler::Monitor(MonitorMcpServer::new(
+            ctx.cwd.clone(),
+        ))),
         "workspace" => {
             // The MCP instance owns its Bash tasks. Session state is never
             // injected into the capability server.

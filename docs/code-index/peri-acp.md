@@ -238,7 +238,7 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 - ARC-TOOLS-001：`BaseTool::is_direct()` 自声明可见性（工具注册在 Agent/middlewares 层，ACP 只持 `shared_tools` 视图）
 - ARC-SERIAL-001：prompt cache 相关序列化顺序确定，禁止 HashMap 迭代序（`shared_tools` 用 BTreeMap）
 - ARC-MIDDLEWARE-001：中间件链序事实源 `production_blueprint`（peri-agent session 工厂），ACP 不重排；链内已无 Web / Artifact / Cron / Filesystem / Terminal 槽位
-- ARC-CAPABILITY-CLOSURE-001：builtin 实例关闭（策略键 / `disabled: true` / `PERI_MCP_BUILTIN=off`）必须同时从首个模型请求 tools、deferred 目录、subagent 继承面与 workflow agent 工具列表消失；ACP 侧的落点是 host seam 断言与 workflow agent 工厂注池（`host/assemble.rs`）。实例与工具声明以 `peri-acp-types/src/builtin_mcp.rs` 的 `BUILTIN_MCP_INSTANCES` 为准；deferred 实例（cron / workflow）在 deferred 目录与继承面上有过滤效果，direct 工具面只对 direct 声明生效（`open_builtin_bridges` 只收 `is_direct()`）
+- ARC-CAPABILITY-CLOSURE-001：builtin 实例关闭（策略键 / `disabled: true` / `PERI_MCP_BUILTIN=off`）必须同时从首个模型请求 tools、deferred 目录、subagent 继承面与 workflow agent 工具列表消失；ACP 侧的落点是 host seam 断言与 workflow agent 工厂注池（`host/assemble.rs`）。实例与工具声明以 `peri-acp-types/src/builtin_mcp.rs` 的 `BUILTIN_MCP_INSTANCES` 为准；deferred 实例（cron / monitor / workflow）在 deferred 目录与继承面上有过滤效果，direct 工具面只对 direct 声明生效（`open_builtin_bridges` 只收 `is_direct()`）
 - ARC-SECRET-001：日志/错误/遥测不得泄露 secret（provider api_key 仅在 LlmProvider 内部持有）
 
 - 部署关闭回归：`host/stdio/langfuse_shutdown_test.rs` 的真实尾部事件、waiter 取消、共享会话、MCP/session Incomplete 重试与 HTTP 失败终态；`transport/mpsc_test.rs::test_explicit_close_rejects_both_pending_directions_and_delivers_eof` 证明显式 close 结算双向 pending 并让两端 EOF。

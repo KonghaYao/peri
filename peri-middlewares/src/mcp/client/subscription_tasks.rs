@@ -1,13 +1,29 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use peri_acp_types::event::BackgroundTaskResult;
 use peri_acp_types::tasks::{TaskManager, TaskRegistrationTicket};
 use rmcp::{
-    model::{DetailedTask, GetTaskParams, TaskPayload},
+    model::{DetailedTask, GetTaskParams, MetaObject, TaskPayload},
     service::{Peer, RoleClient},
 };
 
+use super::super::monitor_alert::{
+    parse_monitor_meta, push_monitor_alert, MonitorAlertAction, MonitorAlertState,
+};
 use super::super::McpClientPool;
+
+/// One `tasks/get` observation: the protocol task plus its result metadata.
+///
+/// The metadata is retained with the terminal cache so a terminal retry keeps
+/// the final alert projection instead of re-fetching it.
+#[derive(Clone)]
+struct ObservedTask {
+    task: DetailedTask,
+    meta: Option<MetaObject>,
+}
 
 /// After this many consecutive failed status queries, attempt to settle an
 /// unobservable owner as unresolved. Settlement itself can still fail, and a
@@ -70,6 +86,7 @@ impl McpClientPool {
         session_id: String,
         raw_task_id: String,
         ticket: TaskRegistrationTicket,
+        owner_scoped: bool,
         is_workspace_shell: bool,
         initial_peer: Peer<RoleClient>,
     ) -> Result<(), crate::mcp::task_scope::TaskAdmissionError> {
@@ -84,7 +101,9 @@ impl McpClientPool {
             let mut peer = initial_peer;
             let mut lost_owner_attempts: usize = 0;
             let mut terminal_delivery_failures: usize = 0;
-            let mut known_terminal: Option<DetailedTask> = None;
+            let mut known_terminal: Option<ObservedTask> = None;
+            let mut monitor_alerts = MonitorAlertState::default();
+            let mut monitor_meta_warned = false;
             loop {
                 let Some(pool) = weak_pool.upgrade() else {
                     break;
@@ -93,23 +112,42 @@ impl McpClientPool {
                     break;
                 };
                 let mut params = GetTaskParams::new(&raw_task_id);
-                if is_workspace_shell {
+                if owner_scoped {
                     params.meta = pool.task_owner_meta_for(&server, &session_id);
                 }
                 let observed = match known_terminal.as_ref() {
-                    Some(task) => Ok(task.clone()),
-                    None => peer.get_task(params).await.map(|snapshot| snapshot.task),
+                    Some(observed) => Ok(observed.clone()),
+                    None => peer.get_task(params).await.map(|snapshot| ObservedTask {
+                        task: snapshot.task,
+                        meta: snapshot.meta,
+                    }),
                 };
                 match observed {
-                    Ok(task) if task.status().is_terminal() => {
-                        known_terminal = Some(task.clone());
+                    Ok(observed) if observed.task.status().is_terminal() => {
+                        // Terminal alert flush must happen before settlement:
+                        // settlement commits the terminal projection and the
+                        // loop then stops polling this task. Delivery is
+                        // best-effort; a missing or malformed projection warns
+                        // once and skips the reminder, but settlement never
+                        // depends on the alert metadata being available.
+                        pool.observe_monitor_alert(
+                            &session_id,
+                            &server,
+                            &raw_task_id,
+                            observed.meta.as_ref(),
+                            true,
+                            &mut monitor_alerts,
+                            &mut monitor_meta_warned,
+                        )
+                        .await;
+                        known_terminal = Some(observed.clone());
                         let transition_id = format!("{raw_task_id}:terminal");
                         let result = pool
                             .deliver_managed_task_status(
                                 &server,
                                 &ticket,
                                 &transition_id,
-                                &task,
+                                &observed.task,
                                 is_workspace_shell,
                                 manager.as_ref(),
                             )
@@ -124,7 +162,17 @@ impl McpClientPool {
                             break;
                         }
                     }
-                    Ok(_) => {
+                    Ok(observed) => {
+                        pool.observe_monitor_alert(
+                            &session_id,
+                            &server,
+                            &raw_task_id,
+                            observed.meta.as_ref(),
+                            false,
+                            &mut monitor_alerts,
+                            &mut monitor_meta_warned,
+                        )
+                        .await;
                         lost_owner_attempts = 0;
                         manager.mark_external_running(&task_id);
                     }
@@ -170,6 +218,74 @@ impl McpClientPool {
                 }
             }
         })
+    }
+
+    /// Apply one monitor alert observation to the per-task delivery state.
+    ///
+    /// A missing or malformed `tasks/get` projection warns once per task, since
+    /// the observation cannot be turned into a delivery. That is the whole
+    /// failure mode: the caller settles terminal tasks regardless, so a server
+    /// that merely matches the monitor identity by name can never keep a task
+    /// unsettled. Non-terminal observations are retried by the next poll, which
+    /// keeps the processed count untouched.
+    #[allow(clippy::too_many_arguments)]
+    async fn observe_monitor_alert(
+        &self,
+        session_id: &str,
+        server: &str,
+        raw_task_id: &str,
+        meta: Option<&MetaObject>,
+        terminal: bool,
+        state: &mut MonitorAlertState,
+        warned_meta: &mut bool,
+    ) {
+        if !self.is_monitor_server(server) {
+            return;
+        }
+        let meta = match parse_monitor_meta(meta) {
+            Ok(meta) => meta,
+            Err(reason) => {
+                if !*warned_meta {
+                    *warned_meta = true;
+                    tracing::warn!(
+                        server = %server,
+                        session_id = %session_id,
+                        task_id = %raw_task_id,
+                        terminal,
+                        reason,
+                        "monitor alert projection unavailable; skipping reminder delivery"
+                    );
+                }
+                return;
+            }
+        };
+        let now = Instant::now();
+        let has_inbox = self.owner_online(session_id);
+        match state.decide(meta.alert_matched, now, terminal, has_inbox) {
+            MonitorAlertAction::Nothing => {}
+            MonitorAlertAction::Send { hits } => {
+                push_monitor_alert(self, session_id, raw_task_id, &meta, hits).await;
+            }
+            MonitorAlertAction::DropOffline { hits } => {
+                tracing::warn!(
+                    server = %server,
+                    session_id = %session_id,
+                    task_id = %raw_task_id,
+                    hits,
+                    terminal,
+                    "monitor alert dropped: initiating session has no inbox"
+                );
+            }
+            MonitorAlertAction::Suppressed => {
+                tracing::debug!(
+                    server = %server,
+                    session_id = %session_id,
+                    task_id = %raw_task_id,
+                    hits = meta.alert_matched,
+                    "monitor alert suppressed by the merge window"
+                );
+            }
+        }
     }
 
     async fn deliver_managed_task_status(
@@ -259,3 +375,7 @@ mod binding;
 #[cfg(test)]
 #[path = "subscription_tasks_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "monitor_subscription_test.rs"]
+mod monitor_subscription_tests;

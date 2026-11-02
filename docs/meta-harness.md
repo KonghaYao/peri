@@ -87,9 +87,9 @@ MetaHarness 是 Peri 的一项配置能力：一个 `settings.json` kv 字段（
 > MCP 资源提供。见 [design/git-watch-middleware.md](design/git-watch-middleware.md)。
 
 2. **builtin MCP 实例策略键**：`WebMiddleware` / `ArtifactMiddleware` /
-   `CronMiddleware` / `WorkspaceMiddleware` / `WorkflowMiddleware`
+   `CronMiddleware` / `MonitorMiddleware` / `WorkspaceMiddleware` / `WorkflowMiddleware`
    （`BUILTIN_INSTANCE_POLICY_KEYS`）。这些能力由同进程 builtin 实例（`web` /
-   `artifact` / `cron` / `workspace` / `workflow`）提供，键即该实例的关闭键；映射唯一
+   `artifact` / `cron` / `monitor` / `workspace` / `workflow`）提供，键即该实例的关闭键；映射唯一
    来源是声明表 `peri-acp-types/src/builtin_mcp.rs` 的 `policy_key`，**不按 `mcp__`
    前缀或实例名硬编码过滤**。实例的另外两条关闭路径是配置片段
    `{"<实例>": {"disabled": true}}` 与进程级环境开关（`PERI_MCP_BUILTIN=off`），

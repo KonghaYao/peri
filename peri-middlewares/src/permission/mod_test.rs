@@ -536,6 +536,9 @@ fn sensitive_entries_match_default_requires_approval() {
         "AskUserQuestion",
         "cron_list",
         "cron_remove",
+        "monitor_read",
+        "monitor_stop",
+        "monitor_list",
         "mcp_read_resource",
     ] {
         assert!(
@@ -545,14 +548,14 @@ fn sensitive_entries_match_default_requires_approval() {
     }
 }
 
-/// 条目集合与判定分支数一致（精确 8 项 + 前缀 3 项 = 11 项；
+/// 条目集合与判定分支数一致（精确 9 项 + 前缀 3 项 = 12 项；
 /// 变更 `default_requires_approval` 分支时必须同步条目清单）。
 #[test]
 fn sensitive_entries_cover_all_requires_approval_branches() {
     let entries = sensitive_tool_entries();
     assert_eq!(
         entries.len(),
-        11,
+        12,
         "条目清单应覆盖 default_requires_approval 全部分支"
     );
     // 前缀条目恰好 3 项（delete_ / rm_ / mcp__）
@@ -927,7 +930,7 @@ fn workspace_sensitive_entries_use_model_names() {
 fn cron_sensitive_markdown_uses_registry_effective_name() {
     let rendered = format_sensitive_tools();
     let lines: Vec<&str> = rendered.lines().collect();
-    assert_eq!(lines.len(), 11, "敏感工具完整列表应逐项渲染");
+    assert_eq!(lines.len(), 12, "敏感工具完整列表应逐项渲染");
 
     let cron = peri_acp_types::builtin_mcp::find("cron").expect("cron 实例应有声明");
     let register = cron
@@ -935,11 +938,26 @@ fn cron_sensitive_markdown_uses_registry_effective_name() {
         .iter()
         .find(|tool| tool.original_name == "cron_register")
         .expect("cron 实例应声明 cron_register");
+    let cron_line = format!(
+        "- `{}` — scheduled task registration (can trigger arbitrary prompts later, equivalent to delegated execution rights)",
+        register.effective_name
+    );
+    assert!(
+        lines.contains(&cron_line.as_str()),
+        "cron 条目显示名必须是注册表解析出的 effective name，实际渲染：\n{rendered}"
+    );
+
+    let monitor = peri_acp_types::builtin_mcp::find("monitor").expect("monitor 实例应有声明");
+    let start = monitor
+        .tools
+        .iter()
+        .find(|tool| tool.original_name == "monitor_start")
+        .expect("monitor 实例应声明 monitor_start");
     assert_eq!(
         *lines.last().expect("敏感工具列表非空"),
         format!(
-            "- `{}` — scheduled task registration (can trigger arbitrary prompts later, equivalent to delegated execution rights)",
-            register.effective_name
+            "- `{}` — monitor command execution (starts a shell command and watches its output)",
+            start.effective_name
         ),
         "末项显示名必须是注册表解析出的 effective name，实际渲染：\n{rendered}"
     );
@@ -972,12 +990,15 @@ fn cron_sensitive_markdown_uses_registry_effective_name() {
 fn deployment_closed_builtin_is_omitted_from_prompt_without_weakening_approval() {
     let disabled = std::collections::HashSet::from([
         "CronMiddleware".to_owned(),
+        "MonitorMiddleware".to_owned(),
         "WorkspaceMiddleware".to_owned(),
     ]);
     let visible = format_sensitive_tools_for_disabled(&disabled);
     assert!(!visible.contains("mcp__cron__cron_register"));
+    assert!(!visible.contains("mcp__monitor__monitor_start"));
     assert!(!visible.lines().any(|line| line.starts_with("- `Bash`")));
     assert!(visible.lines().any(|line| line.starts_with("- `WebFetch`")));
     assert!(default_requires_approval("cron_register"));
-    assert_eq!(format_sensitive_tools().lines().count(), 11);
+    assert!(default_requires_approval("monitor_start"));
+    assert_eq!(format_sensitive_tools().lines().count(), 12);
 }

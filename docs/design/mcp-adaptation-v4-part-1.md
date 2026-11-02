@@ -19,7 +19,7 @@
 - MCP 配置与协议行为：`peri-middlewares/src/mcp/config.rs`、`peri-middlewares/src/mcp/client/transport.rs` 及其契约测试。
 - 当前实现验证优先级：代码与契约测试 > `docs/standards/` > 本设计文档 > 对应 active issue。本文作为 v4 目标架构文档，不替代当前实现的事实记录。
 
-当前路径导航：Builtin MCP 的 handler 与工具位于 `mcp-packages/{common,web,artifact,cron,workspace,workflow}` 独立 crate；`peri-middlewares` 继续持有实例装配、context、dispatch、transport 与生命周期。具体入口、边界及测试命令见 [MCP packages 代码索引](../code-index/mcp-packages.md) 与 [`peri-middlewares` 代码索引](../code-index/peri-middlewares.md)。旧 middleware 路径不是现行源码路径。
+当前路径导航：Builtin MCP 的 handler 与工具位于 `mcp-packages/{common,web,artifact,cron,monitor,workspace,workflow}` 独立 crate；`peri-middlewares` 继续持有实例装配、context、dispatch、transport 与生命周期。具体入口、边界及测试命令见 [MCP packages 代码索引](../code-index/mcp-packages.md) 与 [`peri-middlewares` 代码索引](../code-index/peri-middlewares.md)。旧 middleware 路径不是现行源码路径。
 
 ## MCP 运行形态
 

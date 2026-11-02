@@ -78,6 +78,7 @@ peri-process = { path = "../peri-process" }
 peri-mcp-web.workspace = true
 peri-mcp-artifact.workspace = true
 peri-mcp-cron.workspace = true
+peri-mcp-monitor.workspace = true
 peri-mcp-workspace.workspace = true
 peri-mcp-workflow.workspace = true
 rmcp = { workspace = true, features = ["transport-child-process"] }
