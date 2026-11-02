@@ -312,6 +312,12 @@ fn test_subagent_section_does_not_hardcode_built_in_agent_ids() {
     assert!(result.contains("not by file count"));
     assert!(!result.contains("tasks involving only 2-3 files"));
     assert!(result.contains("do not redo its investigation or edits in the foreground"));
+    // 分派条件分别判断：coder 默认承接实现；plan / verification 不互相隐含，
+    // 数量、后端/API 分类、跨模块与一次失败都不构成自动升级。
+    assert!(result.contains("the default owner is `coder`"));
+    assert!(result.contains("Decide planning and independent verification separately"));
+    assert!(result.contains("File count, backend/API labels, crossing modules"));
+    assert!(result.contains("A routine implementation failure stays with `coder`"));
     // 角色发现：完整职责经 agent:// 资源读取。
     assert!(result.contains("agent://builtin/<id>/agent.md"));
     assert!(result.contains("mcp_read_resource"));
@@ -369,7 +375,8 @@ fn test_subagent_resume_model_and_optional_ui_contract() {
 
 /// 11_subagent 段落重构守护（设计 §3.5.1 步骤 1）：Agent Selection Guide
 /// 删除具体任务→agent 映射（仓库级调度建议由 catalog id/description 承载），
-/// 通用选择原则保留，但不绑定任何 built-in agent ID。
+/// 通用选择原则保留；默认实现/规划/验证角色只在 Default delegation policy
+/// 中按条件声明，不在 Selection Guide 里绑定具体任务。
 #[test]
 fn test_subagent_selection_guide_has_no_specific_mapping() {
     let state = MetaHarnessState {
@@ -402,7 +409,7 @@ fn test_subagent_selection_guide_has_no_specific_mapping() {
     assert!(result.contains("verify the loaded definition before choosing parallelism"));
     assert!(
         !result.contains("`general-purpose`") && !result.contains("subagent_type: \"explorer\""),
-        "静态段落不应硬编码 built-in agent ID"
+        "Selection Guide 不应含具体任务→agent 映射"
     );
     assert!(
         result

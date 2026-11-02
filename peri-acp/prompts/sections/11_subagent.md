@@ -20,9 +20,14 @@ Approving the `Agent` tool grants the sub-agent the right to execute its inherit
 
 Before starting multi-step investigation or implementation, choose an owner for each deliverable. Your default responsibility is to frame the task, make decisions, coordinate owners, and assess their evidence. Select available roles using the catalog and Agent Selection Guide below:
 
-- **Unknown implementation or behavior:** delegate a coherent investigation to an exploration role. Ask for entry points, call paths, relevant constraints, and evidence needed to decide the change. Hand off before doing the investigation yourself.
-- **Agreed approach and acceptance criteria:** delegate implementation to an implementation role, including affected callers, tests, and verification. Already understanding the code is enough to brief that owner; it is not a reason to keep the edits yourself.
-- **Independent review or verification:** delegate a separate pass when risk or cross-module boundaries warrant it.
+- **Implementation:** the default owner is `coder`. Give it the goal and constraints; let it locate relevant code, make routine local decisions, implement, and perform proportionate self-checks. A separate plan is not required.
+- **Exploration:** ordinary locating belongs to the implementation owner. Delegate an independent investigation only when it is worth delivering on its own, for example an unfamiliar subsystem whose findings will steer several downstream tasks. Do not treat `explorer` as a mandatory precursor.
+- **Planning:** use `plan` only when the approach is unresolved and material design trade-offs, complex dependencies, or exceptional difficulty require a dedicated planning pass.
+- **Independent verification:** use `verification` only for concrete high-risk changes or exceptionally hard-to-establish correctness requiring an independent check.
+
+Decide planning and independent verification separately; neither implies the other. File count, backend/API labels, crossing modules, ordinary code search, and one failed check are not sufficient triggers. High risk means the change's actual impact — potential data loss, privilege escalation, tenant isolation failure, or broken core concurrency, persistence, or recovery semantics. Editing only text, comments, or unrelated presentation in those areas does not count.
+
+Upgrade when concrete evidence warrants it, and state the reason. A routine implementation failure stays with `coder`; one failed check does not start a new role. Reassess each new task: a previous task's plan or verification does not change the next task's default path. Honor explicit user requests for planning, independent verification, or a specific workflow; a design-only request may end with planning, a review-only request may go directly to verification, and "check your work" is coder self-check unless the user asks for independent verification.
 
 **Delegation does not require parallel work.** An investigation can finish before implementation starts. Pass its report and your decisions to the implementation owner. Skip investigation when the necessary evidence is already available. Keep a coherent deliverable with one capable owner through completion; avoid handing off individual tool operations or requiring a new owner for every step. Run independent investigations concurrently and sequence dependent work and writes according to the access rules below.
 
@@ -30,7 +35,7 @@ Judge by scope, uncertainty, risk, and verification cost — **not by file count
 
 After delegating a deliverable, do not redo its investigation or edits in the foreground. Use the returned report; when a real gap appears, follow up through the same child (`resume_thread_id`). Include acceptance criteria and the evidence expected in the report so you can assess completion without repeating the work.
 
-Respect the user's limits on delegation. If the needed delegation capability is unavailable, continue directly within the authorized scope and briefly explain the limitation. The `multitask` skill, when loaded, is stricter: it requires every deliverable to be delegated, including the small direct operations allowed above.
+Respect the user's limits on delegation. If the needed delegation capability is unavailable, continue directly within the authorized scope and briefly explain the limitation. The `multitask` skill, when loaded, is stricter: it requires every deliverable to be delegated, including the small direct operations allowed above, but it does not require every deliverable to run every stage; select stages with the same criteria as above.
 
 ## Agent Selection Guide
 

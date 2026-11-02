@@ -2,9 +2,10 @@
  * 默认委派策略的 prompt 接线（L0，无真实模型/凭据/外网）。
  *
  * 用本地假 model server 捕获真实二进制的首个主请求，断言：
- * - `11_subagent` 默认策略包含主动委派与「按独立性/风险/验证成本判断」；
+ * - `11_subagent` 默认策略以 coder 为实现负责人，plan / verification 分别按
+ *   方案是否未决、风险是否具体判断，数量与分类不构成自动触发；
  * - 不再出现「2-3 个文件禁止委派」的硬门槛；
- * - 目录行携带 explorer 的有界描述与 `[readonly]`；
+ * - 目录行携带 explorer / coder / plan / verification 的有界描述与 access 标签；
  * - 说明如何经 `agent://.../agent.md` 读取完整职责。
  *
  * 这不证明模型会主动选择委派（见 `autonomous-delegation.test.ts` 的 gated
@@ -75,15 +76,27 @@ describe("subagent: default delegation policy prompt wiring", () => {
       const system = systemText(request);
 
       expect(system).toContain("## Default delegation policy");
-      expect(system).toContain("Judge by independence, risk, and verification cost");
+      expect(system).toContain("Judge by scope, uncertainty, risk, and verification cost");
       expect(system).toContain("not by file count");
       expect(system).not.toContain("tasks involving only 2-3 files");
       expect(system).toContain("do not redo its investigation or edits in the foreground");
-      expect(system).toContain("This default policy does not weaken or replace that mode");
+      expect(system).toContain("the default owner is `coder`");
+      expect(system).toContain("Decide planning and independent verification separately");
+      expect(system).toContain("File count, backend/API labels, crossing modules");
+      expect(system).toContain("does not require every deliverable to run every stage");
 
       expect(system).toContain("- explorer [haiku] [readonly]");
       expect(system).toMatch(
         /- explorer \[haiku\] \[readonly\] \| description \(untrusted metadata\): Fast agent specialized for exploring codebases\./,
+      );
+      expect(system).toMatch(
+        /- coder \[sonnet\] \[writes\] \| description \(untrusted metadata\): Default owner for implementation/,
+      );
+      expect(system).toMatch(
+        /- plan \[inherit\] \[writes\] \| description \(untrusted metadata\): Plan an unresolved approach/,
+      );
+      expect(system).toMatch(
+        /- verification \[sonnet\] \[writes\] \| description \(untrusted metadata\): Independently verify concrete high-risk changes/,
       );
       expect(system).toContain("agent://builtin/<id>/agent.md");
       expect(system).toContain("mcp_read_resource");
