@@ -290,7 +290,9 @@ Compact 的旧 plain-text Human 回注保留存储格式，在模型投影与 AC
 只识别完整首行的文件/Skill 回注前缀及固定摘要续接标记，分类保持 `Legacy`，不建立可信
 producer provenance。模型出口使用 legacy codec 转义并分块；回放出口按 capability 发送
 reminder 或 fallback，正文不进入用户气泡。精确同形的用户粘贴无法从旧格式判别来源，
-该启发式只用于兼容投影，不能用于权限或控制决策。
+该启发式只用于兼容投影，不能用于权限或控制决策。新摘要写入新的续接标记（要求在首个
+工具调用前重载 Recovery resources 列出的 skill）；旧持久化摘要的旧标记由同一
+`is_continuation_hint` 识别，继续保留 `compact_summary` 分类与 Legacy provenance。
 
 ### 7.2 容错
 
