@@ -93,7 +93,7 @@ workspace；使用说明见 [包 README](../../npm-packages/peri-cf/README.md)�
 | 职责 | 入口 |
 | --- | --- |
 | 包命令、依赖 | `npm-packages/peri-cf/package.json` |
-| Hono 应用 + Bun 入口（HTTP + 静态资源 + WS + 信号） | `server/index.ts` |
+| Hono 应用 + Bun 入口（HTTP + 静态资源 + WS + 信号） | `server/index.ts`；`startServer` 返回 `{server,registry,database}`，信号停机先 `registry.shutdown()` 再关闭入口持有的 `TursoStorage` |
 | 环境变量解析与启动校验 | `server/config.ts` |
 | 平台装配（`chatManagerOptions`） | `server/compose.ts` |
 | 服务端注册表（句柄端口 + View 生命周期） | `server/registry.ts` |

@@ -207,6 +207,10 @@ export interface ChatManagerOptions {
      * 序列化每个 Chat 的内部 `agentConfig` JSON 时注入 `storage`/`machineId`。
      */
     store: ChatStoreConfig;
+    /**
+     * 只读会话目录。连接归宿主所有：Manager 不会关闭注入实例；
+     * 宿主在进程退出前应调用实现的 close()（如 `TursoStorage.close()`）。
+     */
     database: ChatDatabase;
     /** Session 归属记录存储；Manager 内部构造 ownership 并生成 owner。 */
     kv: KvStorage;

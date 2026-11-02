@@ -249,7 +249,13 @@ export class ChatRegistry {
     if (!projects || !sandboxesRoot) {
       return entries.map((entry) => ({ ...entry, projectId: DEFAULT_PROJECT_ID }));
     }
-    const records: ProjectRecord[] = await projects.list();
+    let records: ProjectRecord[];
+    try {
+      records = await projects.list();
+    } catch {
+      // ProjectStore 已记录读取失败；仅降级只读目录归属，不影响项目读写的拒绝语义。
+      return entries.map((entry) => ({ ...entry, projectId: DEFAULT_PROJECT_ID }));
+    }
     return entries.map((entry) => ({
       ...entry,
       projectId: projects.projectIdForCwd(entry.cwd, records, sandboxesRoot),

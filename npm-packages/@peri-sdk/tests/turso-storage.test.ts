@@ -176,4 +176,29 @@ describe("TursoStorage connection lifecycle", () => {
       "TursoStorage is closed",
     );
   });
+
+  test("retries the close after a failure while still rejecting new queries", async () => {
+    let closes = 0;
+    const storage = new TursoStorage(
+      { url: "http://127.0.0.1:8081" },
+      () => ({
+        all: async () => [sessionRow("a")],
+        close: async () => {
+          closes += 1;
+          if (closes === 1) throw new Error("close failed");
+        },
+      }) as unknown as Connection,
+    );
+
+    expect(await storage.getSession("a")).toMatchObject({ sessionId: "a" });
+    await expect(storage.close()).rejects.toThrow("close failed");
+    // 第一次 close 未确认：连接仍保留，但新查询立即拒绝。
+    await expect(storage.getSession("a")).rejects.toThrow(
+      "TursoStorage is closed",
+    );
+    await storage.close();
+    expect(closes).toBe(2);
+    await storage.close();
+    expect(closes).toBe(2);
+  });
 });

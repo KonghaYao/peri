@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -19,6 +19,7 @@ import {
   type WorkspaceRef,
   WorkspaceMismatchError,
 } from "@peri-code/sdk";
+import { DEFAULT_PROJECT_ID, ProjectStore } from "./projects";
 import { ChatRegistry } from "./registry";
 import type { SandboxLease, SandboxPoolPort, SandboxPoolSnapshot } from "./sandbox";
 
@@ -232,6 +233,7 @@ function hosted(options: {
   sessions?: { getSession(id: string): Promise<ChatSessionDirectoryEntry | null> };
   sandbox?: SandboxPoolPort;
   sandboxesRoot?: string;
+  projects?: ProjectStore;
 } = {}) {
   const events = options.events ?? [];
   const chats = options.chats ?? new FakeChatManager(events);
@@ -241,6 +243,7 @@ function hosted(options: {
       mcpServers: { remote: { type: "http", url: "https://mcp.example.com" } },
     },
     sessions: options.sessions ?? { getSession: async () => null },
+    projects: options.projects,
     ...(options.sandbox
       ? {
         sandbox: options.sandbox,
@@ -497,6 +500,122 @@ describe("ChatRegistry", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+  test.each([
+    ["JSON 损坏", "{ not json", SyntaxError],
+    ["schema 无效", JSON.stringify({ version: 1, projects: {} }), TypeError],
+  ] as const)("项目清单 %s 时目录保留会话，修复后同实例恢复归属", async (_label, text, ErrorType) => {
+    const root = mkdtempSync(join(tmpdir(), "peri-cf-projects-"));
+    const file = join(root, "projects.json");
+    try {
+      const workspace = join(root, SANDBOX_ID, "workspace");
+      mkdirSync(workspace, { recursive: true });
+      writeFileSync(file, text, "utf8");
+      const projects = new ProjectStore(root);
+      const { registry, chats } = hosted({
+        projects,
+        sandbox: new FakeSandboxPool(),
+        sandboxesRoot: root,
+      });
+      const legacy = { ...DIRECTORY, sessionId: "legacy", updatedAt: "2026-10-20T12:00:00Z" };
+      const sandboxed = {
+        ...DIRECTORY,
+        sessionId: "sandboxed",
+        cwd: workspace,
+        title: "项目会话",
+        updatedAt: "2026-10-20T14:00:00Z",
+      };
+      const nested = { ...DIRECTORY, sessionId: "nested", cwd: join(workspace, "nested") };
+      const scoped = [nested, sandboxed];
+      chats.listResults.set("", [legacy]);
+      chats.listResults.set(workspace, scoped);
+
+      expect(await registry.listSessions()).toEqual(
+        [sandboxed, nested, legacy].map((entry) => ({ ...entry, projectId: DEFAULT_PROJECT_ID })),
+      );
+      expect(await registry.listSessions(workspace)).toEqual(
+        scoped.map((entry) => ({ ...entry, projectId: DEFAULT_PROJECT_ID })),
+      );
+      await expect(projects.list()).rejects.toBeInstanceOf(ErrorType);
+      await expect(registry.listProjects()).rejects.toBeInstanceOf(ErrorType);
+      await expect(registry.createProject("新项目")).rejects.toBeInstanceOf(ErrorType);
+      await expect(projects.assignSandbox("prj_1", SANDBOX_ID)).rejects.toBeInstanceOf(ErrorType);
+      expect(readFileSync(file, "utf8")).toBe(text);
+
+      // 失败不能缓存为空清单：修复后沿用同一 ProjectStore 与注册表重试。
+      const project = { id: "prj_1", name: "项目 A", sandboxId: SANDBOX_ID, createdAt: "" };
+      const repaired = JSON.stringify({ version: 1, projects: [project] });
+      writeFileSync(file, repaired, "utf8");
+      expect(await registry.listSessions()).toEqual([
+        { ...sandboxed, projectId: project.id },
+        { ...nested, projectId: project.id },
+        { ...legacy, projectId: DEFAULT_PROJECT_ID },
+      ]);
+      expect(await registry.listSessions(workspace)).toEqual(
+        scoped.map((entry) => ({ ...entry, projectId: project.id })),
+      );
+      expect((await registry.listProjects()).map((entry) => entry.id))
+        .toEqual([DEFAULT_PROJECT_ID, project.id]);
+      expect(readFileSync(file, "utf8")).toBe(repaired);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("项目清单非 ENOENT 读取失败只降级会话目录", async () => {
+    const root = mkdtempSync(join(tmpdir(), "peri-cf-projects-"));
+    try {
+      mkdirSync(join(root, "projects.json"));
+      const projects = new ProjectStore(root);
+      const { registry, chats } = hosted({
+        projects,
+        sandbox: new FakeSandboxPool(),
+        sandboxesRoot: root,
+      });
+      chats.listResults.set("", [DIRECTORY]);
+      chats.listResults.set(DIRECTORY.cwd, [DIRECTORY]);
+
+      expect(await registry.listSessions()).toEqual([{ ...DIRECTORY, projectId: DEFAULT_PROJECT_ID }]);
+      expect(await registry.listSessions(DIRECTORY.cwd))
+        .toEqual([{ ...DIRECTORY, projectId: DEFAULT_PROJECT_ID }]);
+      await expect(registry.listProjects()).rejects.toMatchObject({ code: "EISDIR" });
+      await expect(registry.createProject("新项目")).rejects.toMatchObject({ code: "EISDIR" });
+      await expect(projects.assignSandbox("prj_1", SANDBOX_ID))
+        .rejects.toMatchObject({ code: "EISDIR" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("项目归属计算异常不会被清单读取降级掩盖", async () => {
+    const root = mkdtempSync(join(tmpdir(), "peri-cf-projects-"));
+    try {
+      const projects = new ProjectStore(root);
+      const { registry, chats } = hosted({
+        projects,
+        sandbox: new FakeSandboxPool(),
+        sandboxesRoot: root,
+      });
+      chats.listResults.set("", [DIRECTORY]);
+      chats.listResults.set(DIRECTORY.cwd, [DIRECTORY]);
+      const failure = new Error("project projection failed");
+      projects.projectIdForCwd = () => { throw failure; };
+
+      await expect(registry.listSessions()).rejects.toBe(failure);
+      await expect(registry.listSessions(DIRECTORY.cwd)).rejects.toBe(failure);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("Store 会话目录失败不会被项目投影降级掩盖", async () => {
+    const { registry, chats } = hosted();
+    const failure = new Error("Store directory unavailable");
+    chats.listSessions = async () => { throw failure; };
+
+    await expect(registry.listSessions()).rejects.toBe(failure);
+    await expect(registry.listSessions("/workspace")).rejects.toBe(failure);
+  });
+
   test("closeChat 先关闭端口句柄，再释放 View", async () => {
     const events: string[] = [];
     const { registry, chats, views } = hosted({ events });

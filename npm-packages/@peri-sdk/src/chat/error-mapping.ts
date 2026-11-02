@@ -1,4 +1,4 @@
-import { RpcError } from "../transport/rpc-error";
+import { isRpcError } from "../transport/rpc-error";
 import {
     ChatActionError,
     ChatBusyError,
@@ -24,7 +24,7 @@ const JSON_RPC_INTERNAL_ERROR = -32603;
  * -32603 内部错误的结果未知，不能自动重放。
  */
 export function controlFailureDisposition(error: unknown): ChatDisposition {
-    return error instanceof RpcError && error.code !== JSON_RPC_INTERNAL_ERROR
+    return isRpcError(error) && error.code !== JSON_RPC_INTERNAL_ERROR
         ? "rejected"
         : "unknown";
 }

@@ -68,16 +68,17 @@ export class TursoStorage implements ChatDatabase {
   }
 
   /**
-   * 关闭实例持有的连接。幂等：重复调用不会再发 close；在途查询完成后才关闭。
+   * 关闭实例持有的连接。幂等：成功后重复调用不再发 close；在途查询完成后才关闭。
+   * close 失败时保留连接，后续调用可重试；`closed` 已置位，新查询仍会被拒绝。
    * `ChatDatabase` 契约本身没有关闭动作，长生命周期宿主应在丢弃实例前调用一次。
    */
   close(): Promise<void> {
     return this.serialize(async () => {
-      if (this.closed) return;
       this.closed = true;
       const connection = this.connection;
-      this.connection = null;
+      // 失败时不清空：下一次 close() 仍能拿到同一条连接重试。
       await connection?.close();
+      this.connection = null;
     });
   }
 

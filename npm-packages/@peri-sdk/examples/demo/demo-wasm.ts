@@ -135,6 +135,11 @@ try {
         process.once("SIGTERM", done);
     });
 } finally {
-    await server?.stop(true);
-    await demo.close();
+    try {
+        await server?.stop(true);
+        await demo.close();
+    } finally {
+        // ChatManager.shutdown 不关闭注入的数据库；连接归宿主所有。
+        await database.close();
+    }
 }

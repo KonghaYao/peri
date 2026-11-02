@@ -1,5 +1,5 @@
 import type { Server } from "bun";
-import { ChatManager } from "@peri-code/sdk";
+import { ChatManager, type TursoStorage } from "@peri-code/sdk";
 import { Hono } from "hono";
 import {
   serveStatic,
@@ -81,7 +81,11 @@ export function createServer(
 /** 进程级入口：构造注册表，再启动服务。 */
 export function startServer(
   config: ServerConfig,
-): { server: Server<BunWebSocketData>; registry: ChatRegistry } {
+): {
+  server: Server<BunWebSocketData>;
+  registry: ChatRegistry;
+  database: TursoStorage;
+} {
   const database = createChatDatabase(config);
   const sandbox = createSandboxPool(config);
   const registry = new ChatRegistry(
@@ -100,7 +104,7 @@ export function startServer(
         : {}),
     },
   );
-  return { server: createServer(config, registry), registry };
+  return { server: createServer(config, registry), registry, database };
 }
 
 function startFromEnvironment(): void {
@@ -110,7 +114,7 @@ function startFromEnvironment(): void {
     process.exit(1);
   }
   const config = loaded.config;
-  const { server, registry } = startServer(config);
+  const { server, registry, database } = startServer(config);
   console.log(`[peri-cf] server listening on http://${server.hostname}:${server.port}`);
   console.log(
     `[peri-cf] model=${config.model.provider}`
@@ -126,15 +130,28 @@ function startFromEnvironment(): void {
   // ChatManager.shutdown 与 ChatView.dispose 都会合并并发关闭，因此不设防重入闸门；
   // 同一信号重复到达时 process.once 已移除监听，交给默认行为立即退出。
   const stop = async (): Promise<void> => {
-    // 只停新准入；不等待 Promise。进程会在 registry.shutdown() 结算后退出。
+    // 只停新准入；不等待 Promise。进程会在 registry.shutdown() 与连接关闭后退出。
     void server.stop();
+    const failures: unknown[] = [];
     try {
       await registry.shutdown();
-      process.exit(0);
     } catch (error) {
-      console.error("[peri-cf] shutdown is incomplete; exiting", error);
+      failures.push(error);
+    }
+    // 目录连接归入口持有：Manager/Registry 不关闭注入的 database。
+    try {
+      await database.close();
+    } catch (error) {
+      failures.push(error);
+    }
+    if (failures.length > 0) {
+      console.error(
+        "[peri-cf] shutdown is incomplete; exiting",
+        new AggregateError(failures, "Peri CF shutdown is incomplete"),
+      );
       process.exit(1);
     }
+    process.exit(0);
   };
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     process.once(signal, () => { void stop(); });

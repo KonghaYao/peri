@@ -141,9 +141,10 @@ view.sync(channel); // channel: ChatYjsChannel
 await manager.closeChat(chat.id);
 await views.dispose(chat.id);
 
-// 进程退出：先释放所有 View，再让 Manager 聚合关闭。
+// 进程退出：先释放所有 View，再让 Manager 聚合关闭，最后关闭宿主持有的数据库。
 await views.disposeAll();
 await manager.shutdown();
+await database.close(); // Manager 不关闭注入的 database
 ```
 
 ### 必填与可选
@@ -154,6 +155,7 @@ await manager.shutdown();
 | `createChat` | `workspace`、`agent` | `sessionPath`、`session`、`lifecycle`、`runtime`、`payloadBudgets` |
 
 - `store.storage` 是 Peri 写侧 Store，`database` 是 SDK 只读会话目录；`TursoStorage` 同时提供（实例给 `database`，`storageConfig` 给 `store.storage`）。
+- `database` 的连接归宿主所有：`manager.shutdown()` 只结算 Chat，不关闭注入实例；同一进程内重建 Manager 前必须调用 `database.close()`（如 `TursoStorage.close()`），否则旧连接会一直保留。
 - `kv` 只需 `getItem`/`setItem`/`removeItem`；`unstorage` 的 `Storage` 直接满足。进程内 memory 只适合单进程，多实例必须换共享 driver 并由路由层串行化。
 - `machineId` 是宿主持久化的执行环境身份，不是 session/workspace id；每个 WASM 实例只使用一个 `machineId`。
 - per-chat `agent.cwd` 由 `workspace.runtimePath` 派生；`agent` 顶层不能声明 `storage`/`machineId`（由 Manager 注入）；每个 Chat 独立深拷贝。
@@ -338,8 +340,9 @@ const chat = manager.createChat({
   },
 });
 
-// 先关闭 Chat 控制面，再关闭沙箱
+// 先关闭 Chat 控制面，再关闭宿主持有的连接与沙箱
 await manager.shutdown();
+await database.close(); // Manager 不关闭注入的 database
 await sandbox.close(); // 终止实例，保留 workspace
 // 或：await sandbox.close({ deleteData: true }); // 同时删除 <sandboxesRoot>/<sandboxId>
 // 或：await sandboxes.closeAll(); // 关闭 manager 跟踪的全部 handle
