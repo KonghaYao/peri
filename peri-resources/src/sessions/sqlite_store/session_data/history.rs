@@ -43,8 +43,7 @@ pub(in crate::sessions) const HISTORY_PAGE_BODY_SQL: &str =
     "SELECT content FROM messages WHERE thread_id = ?1 AND message_id = ?2";
 
 /// 自有有效条目位置读取的语句原文（计划证据与生产读取同一份文本）。
-pub(in crate::sessions) const ACTIVE_ENTRY_POSITIONS_SQL: &str =
-    "SELECT message_id, rowid FROM messages WHERE thread_id = ?1 AND excluded = 0 ORDER BY rowid ASC";
+pub(in crate::sessions) const ACTIVE_ENTRY_POSITIONS_SQL: &str = "SELECT message_id, rowid FROM messages WHERE thread_id = ?1 AND excluded = 0 ORDER BY rowid ASC";
 
 // ─── 窗口读取（peri.historyWindowV1，archive 视图） ──────────────────────────
 
