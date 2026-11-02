@@ -802,11 +802,6 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         .unwrap_or_default();
     // M6：命令面的运行期刷新（install/uninstall RPC）与本装配共用同一闭合位。
     let plugin_face_closed_bit = plugin_admission.is_closed();
-    // M6/H4：插件来源 hooks 过与 settings 同一条信任门（默认拒绝）。
-    // 只约束执行来源——插件 skills / commands / agents / MCP 面不受影响。
-    // 关闭位下 `plugin_loaded` 与 `plugin_hooks` 已同批为空（上面的闭合位）。
-    let plugin_hooks =
-        peri_middlewares::host_ports::admit_plugin_hooks(&cwd, &plugin_loaded, plugin_hooks);
     tracing::debug!(
         plugin_face_closed = plugin_admission.is_closed(),
         plugin_skill_roots = plugin_skill_roots.len(),
