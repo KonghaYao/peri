@@ -316,6 +316,7 @@ fn test_subagent_section_does_not_hardcode_built_in_agent_ids() {
     // 数量、后端/API 分类、跨模块与一次失败都不构成自动升级。
     assert!(result.contains("the default owner is `coder`"));
     assert!(result.contains("Decide planning and independent verification separately"));
+    assert!(result.contains("sensitive-data exposure"));
     assert!(result.contains("File count, backend/API labels, crossing modules"));
     assert!(result.contains("A routine implementation failure stays with `coder`"));
     // 角色发现：完整职责经 agent:// 资源读取。
