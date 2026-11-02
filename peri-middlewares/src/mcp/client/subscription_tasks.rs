@@ -126,10 +126,11 @@ impl McpClientPool {
                     Ok(observed) if observed.task.status().is_terminal() => {
                         // Terminal alert flush must happen before settlement:
                         // settlement commits the terminal projection and the
-                        // loop then stops polling this task. A missing or
-                        // malformed projection keeps the task unsettled so the
-                        // next poll can retry instead of losing the hits.
-                        let alert_ready = pool.observe_monitor_alert(
+                        // loop then stops polling this task. Delivery is
+                        // best-effort; a missing or malformed projection warns
+                        // once and skips the reminder, but settlement never
+                        // depends on the alert metadata being available.
+                        pool.observe_monitor_alert(
                             &session_id,
                             &server,
                             &raw_task_id,
@@ -138,28 +139,26 @@ impl McpClientPool {
                             &mut monitor_alerts,
                             &mut monitor_meta_warned,
                         );
-                        if alert_ready {
-                            known_terminal = Some(observed.clone());
-                            let transition_id = format!("{raw_task_id}:terminal");
-                            let result = pool
-                                .deliver_managed_task_status(
-                                    &server,
-                                    &ticket,
-                                    &transition_id,
-                                    &observed.task,
-                                    is_workspace_shell,
-                                    manager.as_ref(),
-                                )
-                                .await;
-                            if let Err(error) = result {
-                                terminal_delivery_failures =
-                                    terminal_delivery_failures.saturating_add(1);
-                                tracing::warn!(server = %server, session_id = %session_id,
-                                    task_id = %raw_task_id, terminal_delivery_failures, %error,
-                                    "MCP task terminal delivery pending reconciliation");
-                            } else {
-                                break;
-                            }
+                        known_terminal = Some(observed.clone());
+                        let transition_id = format!("{raw_task_id}:terminal");
+                        let result = pool
+                            .deliver_managed_task_status(
+                                &server,
+                                &ticket,
+                                &transition_id,
+                                &observed.task,
+                                is_workspace_shell,
+                                manager.as_ref(),
+                            )
+                            .await;
+                        if let Err(error) = result {
+                            terminal_delivery_failures =
+                                terminal_delivery_failures.saturating_add(1);
+                            tracing::warn!(server = %server, session_id = %session_id,
+                                task_id = %raw_task_id, terminal_delivery_failures, %error,
+                                "MCP task terminal delivery pending reconciliation");
+                        } else {
+                            break;
                         }
                     }
                     Ok(observed) => {
@@ -221,10 +220,12 @@ impl McpClientPool {
 
     /// Apply one monitor alert observation to the per-task delivery state.
     ///
-    /// Returns `false` when the server is the monitor instance but the
-    /// `tasks/get` metadata is missing or malformed; the caller must keep the
-    /// task unsettled so the next poll retries. Non-monitor servers always
-    /// return `true`.
+    /// A missing or malformed `tasks/get` projection warns once per task, since
+    /// the observation cannot be turned into a delivery. That is the whole
+    /// failure mode: the caller settles terminal tasks regardless, so a server
+    /// that merely matches the monitor identity by name can never keep a task
+    /// unsettled. Non-terminal observations are retried by the next poll, which
+    /// keeps the processed count untouched.
     #[allow(clippy::too_many_arguments)]
     fn observe_monitor_alert(
         &self,
@@ -235,9 +236,9 @@ impl McpClientPool {
         terminal: bool,
         state: &mut MonitorAlertState,
         warned_meta: &mut bool,
-    ) -> bool {
+    ) {
         if !self.is_monitor_server(server) {
-            return true;
+            return;
         }
         let meta = match parse_monitor_meta(meta) {
             Ok(meta) => meta,
@@ -250,10 +251,10 @@ impl McpClientPool {
                         task_id = %raw_task_id,
                         terminal,
                         reason,
-                        "monitor alert projection unavailable; keeping the processed count"
+                        "monitor alert projection unavailable; skipping reminder delivery"
                     );
                 }
-                return false;
+                return;
             }
         };
         let now = Instant::now();
@@ -283,7 +284,6 @@ impl McpClientPool {
                 );
             }
         }
-        true
     }
 
     async fn deliver_managed_task_status(

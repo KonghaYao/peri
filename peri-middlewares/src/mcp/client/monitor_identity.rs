@@ -20,6 +20,12 @@ impl McpClientPool {
     /// configuration cannot reach that state — `monitor` is a reserved builtin
     /// instance name, and `apply_builtin_overlay` rejects any `command`/`url`
     /// takeover at load time, even when `PERI_MCP_BUILTIN=off`.
+    ///
+    /// This identity only selects the alert semantics (parse the
+    /// `_meta["peri/monitor"]` projection instead of delivering a terminal
+    /// reminder); it is never a settlement gate. A name-matched server whose
+    /// `tasks/get` omits that metadata just loses alert delivery — its terminal
+    /// tasks still settle.
     pub(crate) fn is_monitor_server(&self, server: &str) -> bool {
         if server == MONITOR_INSTANCE {
             return true;

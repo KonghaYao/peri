@@ -34,7 +34,7 @@
 6. **幂等与失败**：`delivery_id = f(raw_monitor_id, alert_matched)`；同一 `(id, hits)` 正文逐字相同；reminder 构造失败是确定性失败，推进并 warn。
 7. **接线**：复用既有 `spawn_managed_task_subscription` 的 `tasks/get` 轮询（2 秒）读取顶层 `_meta`，不新增 ACP 方法或任务生命周期方法；没有独立 wake 泵、outbox 或 host-only 工具。
 8. **终态 flush**：观察到终态且 `alertMatched > processed` 时，在 `deliver_managed_task_status` / `settle_external` 之前无条件立即投递最终摘要（绕过 30 秒）；`alertMatched == processed` 时静默结算。终态投递失败或无 inbox 不得阻塞结算。
-9. **meta 缺失**：`_meta` 缺失或字段类型错误时不推进计数、每任务记录一次 warn、下一轮重试；终态观测遇到该情况保持 unsettled。身份判定以 `ConfigSource::Builtin { instance: "monitor" }` 为权威，名称回退兜底。
+9. **meta 缺失**：`_meta` 缺失或字段类型错误时非终态不推进计数、每任务记录一次 warn、下一轮重试；终态观测遇到该情况只跳过告警投递，仍照常结算（`deliver_managed_task_status` / `settle_external`），不阻塞任务结算。身份判定以 `ConfigSource::Builtin { instance: "monitor" }` 为权威，名称回退兜底。
 10. **不做**：poll/file/WS source、资源通知 hint、`notifications/resources/updated`、unknown task 快速收口、cron 改动、持久化、跨会话共享。
 
 ## 目标模型
@@ -86,7 +86,7 @@ working ──命令退出 0──▶ completed
 - 自定义任务生命周期方法或 ACP 方法。
 - 任务持久化、重启恢复、跨实例重放。
 - 跨会话共享与 owner 转移。
-- （P2 已实现 alert 唤醒，移出不做清单。）
+- （P2 已实现 alert 提醒，移出不做清单。）
 - 实例自发布 skill。
 - WS / SSRF 相关能力。
 

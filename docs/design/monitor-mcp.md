@@ -249,8 +249,10 @@ working ───▶ cancelling（对外仍 working）──▶ cancelled       
   终态文案。
 - **失败与离线**：inbox 不存在 → 丢弃、推进 `processed`、warn，不重投、不跨会话；
   `push_system_reminder_with_delivery_id` 本身不返回错误；reminder 构造失败是确定性
-  失败 → 推进并 warn。meta 缺失或字段类型错误 → 不推进、每任务记录一次 warn，下一
-  轮再试；终态观测遇到该情况时保持 unsettled，避免丢失未报告的命中。
+  失败 → 推进并 warn。meta 缺失或字段类型错误 → 非终态不推进、每任务记录一次 warn、
+  下一轮再试；终态观测遇到该情况只跳过提醒，仍照常执行
+  `deliver_managed_task_status` / `settle_external`——结算不依赖 meta 是否可用，
+  名称回退匹配到的 server 也不会因此把终态任务永远留在 unsettled。
 - **审批**：提醒路径不经过任何交互审批；`monitor_start` 的工具审批覆盖后续提醒。
 - **终态不唤醒**：任务成功、失败、取消或 owner 不可观测的终态只更新任务投影
   （`tasks/get`、`monitor_list`、TUI Tasks 面板）；只有未报告的 alert 命中会触发
