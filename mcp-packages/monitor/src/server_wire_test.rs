@@ -361,8 +361,31 @@ async fn get_task_meta_projects_camel_case_alert_counters_and_no_event_text() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
+    // Shells differ in how many lines one command produces (Windows PowerShell
+    // emits an extra event here), so derive the expected `lastAlertSeq` from
+    // the events that actually matched the alert instead of pinning a line
+    // number. Events are buffered before the alert counters advance, so both
+    // matches are readable once `alertMatched` reaches 2.
+    let page = read_events(&client, "session-a", &task_id).await;
+    let alert_seqs: Vec<u64> = page["events"]
+        .as_array()
+        .expect("events")
+        .iter()
+        .filter(|event| {
+            event["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("ERROR"))
+        })
+        .map(|event| event["seq"].as_u64().expect("alert event seq"))
+        .collect();
+    assert_eq!(
+        alert_seqs.len(),
+        2,
+        "every alert match must be one matching event: {page}"
+    );
+    let last_alert_seq = alert_seqs.iter().copied().max().expect("alert events");
     assert_eq!(meta["alertMatched"], serde_json::json!(2));
-    assert_eq!(meta["lastAlertSeq"], serde_json::json!(3));
+    assert_eq!(meta["lastAlertSeq"], serde_json::json!(last_alert_seq));
     assert_eq!(meta["label"], serde_json::json!("build"));
     let object = meta.as_object().expect("object");
     assert!(!object.contains_key("pendingWakes"));
@@ -400,7 +423,10 @@ async fn get_task_meta_projects_camel_case_alert_counters_and_no_event_text() {
         .and_then(|meta| meta.0.get("peri/monitor").cloned())
         .expect("terminal meta");
     assert_eq!(terminal_meta["alertMatched"], serde_json::json!(2));
-    assert_eq!(terminal_meta["lastAlertSeq"], serde_json::json!(3));
+    assert_eq!(
+        terminal_meta["lastAlertSeq"],
+        serde_json::json!(last_alert_seq)
+    );
 
     drop(client);
     server_task.await.expect("join server");
