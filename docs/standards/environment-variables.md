@@ -35,6 +35,7 @@ Compact 的三项环境变量在宿主装配时覆盖 `config.compact`；Agent �
 | `PERI_MCP_APPS` | stdio ACP 的 MCP Apps deployment profile；支持 MCP Apps 的客户端启动 Peri 时携带此变量，**存在即启用**，空串或 `0` 也启用；缺省关闭。Peri 提供 ACP relay，客户端负责 Apps UI。 | `peri-acp/src/host/stdio/mod.rs` |
 | `PERI_ASK_USER_TIMEOUT_SECS` | AskUser 等待 ACP 客户端回答的超时秒数；无效或缺省为 300 秒，`0` 为无限等待。适用于 TUI 和 stdio 共用 broker。 | `peri-acp/src/broker/transport_broker.rs` |
 | `PERI_MACHINE_ID` | 当前机器的 session environment 身份覆盖；必须为 UUID，解析后规范化，首次初始化后进程内缓存；缺省使用本机 `~/.peri/machine-id`。 | `peri-resources/src/sessions/machine.rs` |
+| `PERI_DB_PATH` | 宿主启动时向 hooks / 插件 MCP 子进程导出的本机会话 SQLite 绝对路径（默认库或 `--db-path`）；远程 locator 不设置，进程内已有同名变量会被本次解析结果覆盖。**宿主内部设置，不是用户开关**。 | `peri-tui/src/main.rs` |
 | `PERI_ARTIFACTS_URL` | Artifact MCP 实例 `env` 中的上传服务地址；缺省使用内置公共服务。Peri 宿主只透传实例环境。 | `mcp-packages/artifact/src/client.rs` |
 | `PERI_ARTIFACTS_TOKEN` | Artifact MCP 实例 `env` 中的上传 token；缺省使用公共服务协议标识。宿主不解释、不记录值。 | 同上 |
 | `PERI_WEB_SEARCH_URL` | Web MCP 实例 `env` 中的搜索后端地址；缺省使用内置公共服务。Peri 宿主只透传实例环境。 | `mcp-packages/web/src/web_search.rs` |
