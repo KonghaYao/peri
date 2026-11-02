@@ -575,11 +575,24 @@ async fn alert_match_updates_cumulative_count_and_last_seq_without_event_text() 
         .expect("start");
     wait_terminal(&state, &started.task_id).await;
 
+    // 事件序列取决于 shell 的行输出行为（PowerShell 会把 `echo ERROR one`
+    // 拆成 `ERROR` 与 `one` 两行），所以命中 seq 从实际事件页推导。
+    let page = state
+        .read(&started.task_id, Some("session-a"), None, 100, 128 * 1024)
+        .expect("read");
+    let matched_seqs: Vec<u64> = page
+        .events
+        .iter()
+        .filter(|event| event.text.contains("ERROR"))
+        .map(|event| event.seq)
+        .collect();
+    assert_eq!(matched_seqs.len(), 2);
+
     let snapshot = state
         .snapshot(&started.task_id, Some("session-a"))
         .expect("snapshot");
     assert_eq!(snapshot.alert_matched, 2);
-    assert_eq!(snapshot.last_alert_seq, Some(2));
+    assert_eq!(snapshot.last_alert_seq, matched_seqs.iter().copied().max());
     assert_eq!(snapshot.label.as_deref(), Some("build"));
 
     let meta = peri_acp_types::monitor::MonitorAlertMeta {
