@@ -288,7 +288,7 @@ interface KvStorage {
 
 `ChatUserAction.send()` 返回 `SendReceipt`：`accepted` 表示已入队，不是执行完成。`create_new_session` 与 `change_session` 返回 `SessionReadyResult`，包含 `chatId`、`sessionId`、`bindingRevision`。
 
-输入队列由服务端 generation 标识。SDK 会随 `user_input_queue_changed` 通知与队列回执同步 generation；若服务端在持久化不一致后重建 mailbox，`send` / `force_send` / `take_back` 以 `SessionQueueStaleError` 失败（`requiresRuntimeRestart: true`），当前运行实例被标记为需要重载，后续动作以 `not_ready` 拒绝。SDK 不会自动重放用户输入；宿主应销毁并重建 runtime 后重新加载 Session。`Session.refreshInputQueue()` 可重新读取 generation，但不能修复已关闭的持久化 writer。
+输入队列由服务端 generation 标识。SDK 会随 `user_input_queue_changed` 通知与队列回执同步 generation；若服务端在持久化不一致后重建 mailbox，`send` 的 `receipt.accepted` 直接抛出 `SessionQueueStaleError`（`requiresRuntimeRestart: true`），`force_send` / `take_back` 则以 `ChatActionError` 失败并在 `cause` 中携带该错误。当前运行实例会被标记为需要重载，后续动作以 `not_ready` 拒绝。SDK 不会自动重放用户输入；宿主应销毁并重建 runtime 后重新加载 Session。`Session.refreshInputQueue()` 可重新读取 generation，但不能修复已关闭的持久化 writer。
 
 传入普通 wire 对象时先经 `parseChatUserAction` 校验。Manager 不接收 `execute`；执行调度属于 Peri。`peri-cf` 的 HTTP 层还会用 `chat.binding` 与 `bindingRevision` 拒绝过期连接的动作。
 
