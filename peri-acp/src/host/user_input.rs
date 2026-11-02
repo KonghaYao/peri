@@ -49,6 +49,27 @@ impl InputAttemptGuard {
         }
     }
 
+    /// 正常返回后标记终态已由本轮结算，Drop 兜底不得再改写并发事实。
+    ///
+    /// 只用于 `dispatch_prompt_turn_with_input` 已返回的路径：否则会撤回本轮期间
+    /// 新 dispatch 的输入（`fail_reserved` 会把 `paused` 置真并清空发送选择）。
+    pub(super) fn disarm(&mut self) {
+        self.finished = true;
+    }
+
+    /// 仅当本 ticket 已不再持有 active 时解除 Drop 兜底，返回是否已结算。
+    ///
+    /// `run_prompt` 在 attach 失败时返回 `Ok(Value::Null)`，此时 active 仍属本
+    /// ticket；无条件 disarm 会让预留的 `active` 永久残留，`reserve_run` 直到
+    /// Stop 或重载前一直返回 None。
+    pub(super) fn disarm_if_settled(&mut self) -> bool {
+        if self.mailbox.is_active_ticket(&self.ticket) {
+            return false;
+        }
+        self.finished = true;
+        true
+    }
+
     pub(super) async fn finish(&mut self, result: &crate::session::executor::PromptResult) {
         let outcome = if result.failure.is_some() || result.persistence_inconsistent {
             UserInputAttemptOutcome::Failed
@@ -267,7 +288,8 @@ pub(super) fn schedule_mailbox(
             let mut next_ticket = Some(ticket);
             while let Some(ticket) = next_ticket {
                 // 覆盖等待 prompt lock 期间的任务丢弃；进入 Agent 后由本轮 guard 结算。
-                let _reserved_guard = InputAttemptGuard::new(Arc::clone(&mailbox), ticket.clone());
+                let mut reserved_guard =
+                    InputAttemptGuard::new(Arc::clone(&mailbox), ticket.clone());
                 let run = UserInputRun::new(ticket.clone());
                 let params = serde_json::json!({
                     "sessionId": sid,
@@ -293,8 +315,18 @@ pub(super) fn schedule_mailbox(
                             .push_done(&sid, "error", Some(&ticket.id)).await;
                     }
                     tracing::warn!(session_id = %sid, code = error.code, "user input execution failed");
+                    // 上面的显式 fail_reserved 已结算本 ticket 的 active。
+                    reserved_guard.disarm();
+                    next_ticket = mailbox.reserve_run();
+                } else if reserved_guard.disarm_if_settled() {
+                    // 终态已由内层 finish_attempt 结算：外层 Drop 只兜底
+                    // “等锁期间/执行途中任务被丢弃”，不得再改写并发事实。
+                    next_ticket = mailbox.reserve_run();
+                } else {
+                    // attach 未成功（`Ok(Value::Null)`）且 active 仍属本 ticket：
+                    // 保留 Drop 兜底，由 fail_reserved 清理后再交给后续调度。
+                    next_ticket = None;
                 }
-                next_ticket = mailbox.reserve_run();
             }
         },
     );

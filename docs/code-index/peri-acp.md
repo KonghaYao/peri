@@ -35,11 +35,11 @@ F09：`SessionState.event_health` 仅保存在内存，`event_health()` 提供�
 
 当前进程内部执行的交互身份由 `host/execution.rs` 与 `host/prompt.rs` 管理，`ExecutionStarted` 经 `session/event_sink.rs` 可靠发送，正常终态及装配早退匹配同一 request ID。定时审批持有同一会话 prompt lock，在独立交互作用域内批准、拒绝、取消并收尾；之后实际执行不复用审批身份。完整宿主测试在 `activation_tests::execution_tests`，挂起/恢复 FIFO 验证在 `event::forwarder_test`。
 
-当前进程的晚到异步结果由 `host/activation.rs` 监听会话队列的 retained wake 信号；`session/activation.rs` 将监听与自动续跑许可绑定运行时。主 run 正常结束不撤销监听，订阅及 dispatch 结束都复查队列，续跑统一经过 `host/continuation.rs` 与 `prompt_dispatch.rs` 的序列化和代际校验。取消 continuation 抑制再次激活，关闭取消监听；`run_prompt` 捕获尝试开始的队列接纳边界，失败仅禁止边界内输入自动重试，边界后的 Required / EnsureProcessing 消息仍通过统一 `can_activate` 准入。定向宿主回归入口 `host::requests::tests::activation_tests`，边界状态回归 `session::activation::tests`。
+当前进程的晚到异步结果由 `host/activation.rs` 监听会话队列的 retained wake 信号；`session/activation.rs` 将监听与自动续跑许可绑定运行时。主 run 正常结束不撤销监听，订阅及 dispatch 结束都复查队列，续跑统一经过 `host/continuation.rs` 与 `prompt_dispatch.rs` 的序列化和代际校验。取消 continuation 抑制再次激活，关闭取消监听；`run_prompt` 捕获尝试开始的队列接纳边界，失败仅禁止边界内输入自动重试，边界后的 Required / EnsureProcessing 消息仍通过统一 `can_activate` 准入。定向宿主回归入口 `host::requests::tests::activation_tests`，边界状态回归 `session::activation::tests`。用户暂存区 steer 打断当前 attempt 时，取消分支对 steer 不 `suppress`：该输入已在 MQ 放行，续跑由 dispatch 尾端评估与 scheduler 复查决定；`schedule_mailbox` 的预留 guard 正常返回时 disarm，失败结算仍由显式 `fail_reserved` 或 Drop 兜底完成。同一 managed loop 收尾后也会通过 `reserve_run` 消费 ready 输入（不只 scheduler）。
 
 续跑 MQ pending 不是排队准入锁：空跑或早退不能阻塞下一次结果；重复通知在 prompt lock 内复核真实待处理消息。回归 `activation_tests::empty_queued_continuation_does_not_block_the_next_child_result` 覆盖旧请求排队后消息被消费、空跑退出、下一子任务结果仍能启动续跑。
 
-`host/prompt_dispatch.rs` 在同一 sessions 临界区复核 epoch/closing/runtime/MQ/activation 并提交 in-flight 与取消令牌；`host/prompt.rs` 复用已提交令牌，`host/notify.rs` 的 Stop 在无令牌时也撤销排队代际。真实 scheduler 与 HTTP 失败恢复回归位于 `host/{error_activation_test,admission_activation_test,stop_activation_test}.rs`，覆盖失败期间/之后的新增结果、原子准入交错与普通 prompt 的一次独立 child 续跑，不以手工驱动 scheduler 代替行为验收。
+`host/prompt_dispatch.rs` 在同一 sessions 临界区复核 epoch/closing/runtime/MQ/activation 并提交 in-flight 与取消令牌；`host/prompt.rs` 复用已提交令牌，`host/notify.rs` 的 Stop 在无令牌时也撤销排队代际。真实 scheduler 与 HTTP 失败恢复回归位于 `host/{error_activation_test,admission_activation_test,stop_activation_test,steer_activation_test}.rs`，覆盖失败期间/之后的新增结果、原子准入交错与普通 prompt 的一次独立 child 续跑，不以手工驱动 scheduler 代替行为验收。
 
 预算拒绝前尚未进入 Reason 的新增 EnsureProcessing 输入由 Agent Receive 保留原队列身份，宿主继续使用既有失败 watermark、prompt lock、代际与 Stop/关闭检查。`activation_tests::budget_activation_tests::budget_boundary_result_is_automatically_processed_by_host_scheduler` 通过真实 HTTP Reason 请求耗尽 root 默认预算，由真实 continuation scheduler 自动续跑，验证后续模型请求只包含一次结果、canonical 历史只提交一次且执行清理完成；辅助模型请求单独匹配，不计入语义 Reason 次数。
 

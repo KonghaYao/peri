@@ -783,10 +783,22 @@ impl UserInputMailbox {
         }
     }
 
-    pub(crate) fn is_steer_interruption(&self, ticket: &UserInputRunTicket) -> bool {
+    /// 当前 attempt 是否被用户暂存区发送打断（steer 而非 Stop）。
+    ///
+    /// 必须在 `finish_attempt` 之前判定：收尾会移除 active 记录，之后恒为 false。
+    pub fn is_steer_interruption(&self, ticket: &UserInputRunTicket) -> bool {
         self.state.lock().active.as_ref().is_some_and(|active| {
             active.ticket == *ticket && active.reason == InterruptReason::Steer
         })
+    }
+
+    /// 本 ticket 是否仍持有执行准入；宿主据此判断一次尝试是否已结算。
+    pub fn is_active_ticket(&self, ticket: &UserInputRunTicket) -> bool {
+        self.state
+            .lock()
+            .active
+            .as_ref()
+            .is_some_and(|active| active.ticket == *ticket)
     }
 
     /// fallback 只处理尚未进入 Agent 的早退；正常终态优先采用 Agent 的记录。

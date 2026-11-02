@@ -31,9 +31,25 @@ impl ActivationHarness {
             .with_header("content-type", "text/event-stream")
             .with_body("data: {\"id\":\"test-response\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
             .create_async().await;
+        let base_url = server.url();
+        Self::assemble(&base_url, server, mock).await
+    }
+
+    /// 由测试自控模型端点的 harness：首个请求何时响应由调用方决定。
+    async fn with_base_url(base_url: &str) -> Self {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(200)
+            .create_async()
+            .await;
+        Self::assemble(base_url, server, mock).await
+    }
+
+    async fn assemble(base_url: &str, server: mockito::ServerGuard, mock: mockito::Mock) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let mut provider = make_provider_config("local", "openai", "test", "gpt-test");
-        provider.base_url = server.url();
+        provider.base_url = base_url.to_string();
         let config = make_peri_config_with_provider(provider);
         let provider = LlmProvider::from_config(&config).unwrap();
         let cfg = Arc::new(make_server_config(config, provider, &directory).await);
@@ -150,6 +166,9 @@ mod admission_activation_tests;
 
 #[path = "stop_activation_test.rs"]
 mod stop_activation_tests;
+
+#[path = "steer_activation_test.rs"]
+mod steer_activation_tests;
 
 #[tokio::test]
 #[serial]
