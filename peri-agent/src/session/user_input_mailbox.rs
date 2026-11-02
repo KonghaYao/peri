@@ -740,7 +740,11 @@ impl UserInputMailbox {
         Some(ticket)
     }
 
-    pub(crate) fn active_run_ticket(&self) -> Option<UserInputRunTicket> {
+    /// 当前预留的执行身份。
+    ///
+    /// 宿主在 attach 之前绑定取消令牌、或核对在途 ticket 时使用；只读快照，
+    /// 不改变预留状态。
+    pub fn active_run_ticket(&self) -> Option<UserInputRunTicket> {
         self.state
             .lock()
             .active
@@ -849,48 +853,48 @@ impl UserInputMailbox {
 
     /// 宿主任务在开始或执行途中被丢弃时，保留确认尚未被 Receive 领取的输入。
     ///
-    /// Drop 路径不能 await，只能做保守的运行期复位；MQ 行仍在，下一次
-    /// `hydrate`/`reclaim` 会按持久事实核对。
+    /// 只结算仍属于本 ticket 的预留：该预留若已被后续执行接管，再复位会把
+    /// 下一条输入一起暂停。Drop 路径不能 await，只能做保守的运行期复位；
+    /// MQ 行仍在，下一次 `hydrate`/`reclaim` 会按持久事实核对。
     pub fn fail_reserved(&self, ticket: &UserInputRunTicket) {
-        let cancel = self
-            .state
-            .lock()
-            .active
-            .as_ref()
-            .filter(|active| active.ticket == *ticket)
-            .and_then(|active| active.cancel.clone());
+        let (cancel, reset_ids) = {
+            let mut state = self.state.lock();
+            let cancel = {
+                let Some(active) = state
+                    .active
+                    .as_ref()
+                    .filter(|active| active.ticket == *ticket)
+                else {
+                    return;
+                };
+                active.cancel.clone()
+            };
+            state.active = None;
+            state.revision += 1;
+            state.paused = true;
+            state.suspended = false;
+            for record in &mut state.records {
+                if record.state == UserInputState::Dispatching {
+                    record.state = UserInputState::Queued;
+                    record.handed_off = false;
+                }
+            }
+            state.ready.clear();
+            let reset_ids: Vec<MessageId> = state
+                .records
+                .iter()
+                .filter(|record| record.state == UserInputState::Queued && !record.handed_off)
+                .filter_map(|record| {
+                    uuid::Uuid::parse_str(&record.input_id)
+                        .ok()
+                        .map(MessageId::from)
+                })
+                .collect();
+            (cancel, reset_ids)
+        };
         if let Some(cancel) = cancel {
             cancel.cancel();
         }
-        let mut state = self.state.lock();
-        if state
-            .active
-            .as_ref()
-            .is_some_and(|active| active.ticket == *ticket)
-        {
-            state.active = None;
-        }
-        state.revision += 1;
-        state.paused = true;
-        state.suspended = false;
-        for record in &mut state.records {
-            if record.state == UserInputState::Dispatching {
-                record.state = UserInputState::Queued;
-                record.handed_off = false;
-            }
-        }
-        state.ready.clear();
-        let reset_ids: Vec<MessageId> = state
-            .records
-            .iter()
-            .filter(|record| record.state == UserInputState::Queued && !record.handed_off)
-            .filter_map(|record| {
-                uuid::Uuid::parse_str(&record.input_id)
-                    .ok()
-                    .map(MessageId::from)
-            })
-            .collect();
-        drop(state);
         self.inbox.queue().withdraw_send_inputs(&reset_ids);
     }
 

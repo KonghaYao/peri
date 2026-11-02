@@ -477,8 +477,6 @@ async fn steer_dispatch_cancelled_turn_keeps_activation_and_consumes_input() {
 #[tokio::test]
 #[serial]
 async fn failed_attach_keeps_drop_fallback_and_allows_next_dispatch() {
-    use peri_agent::session::user_input_mailbox::UserInputRunTicket;
-
     let harness = ActivationHarness::new().await;
     let mailbox = crate::host::user_input::ensure_mailbox(
         &harness.session_id,
@@ -519,11 +517,18 @@ async fn failed_attach_keeps_drop_fallback_and_allows_next_dispatch() {
         &harness.sender,
     );
 
-    // 跨 ticket 的失败结算把队列置为 paused，但 T1 仍独占 active：
-    // 下一次 attach_attempt 返回 false，`run_prompt` 以 Ok(Value::Null) 早退。
-    mailbox.fail_reserved(&UserInputRunTicket {
-        id: "foreign-attempt".into(),
-    });
+    // T1 仍在等锁、尚未 attach。先替它绑定取消令牌再 Stop：Stop 只清掉没有
+    // 令牌的 active，T1 因此留在 active 上，随后的 attach 必然因 paused 失败。
+    let ticket = mailbox
+        .active_run_ticket()
+        .expect("schedule_mailbox 应已预留 T1");
+    assert!(
+        mailbox
+            .attach_attempt(&ticket, tokio_util::sync::CancellationToken::new())
+            .await,
+        "T1 首次 attach 必须成功"
+    );
+    mailbox.stop().await;
     let revision_before_release = mailbox.snapshot().await.revision;
     drop(held);
 

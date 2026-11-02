@@ -59,13 +59,30 @@ token；`peri-acp/src/host/prompt.rs` 的取消分支对**所有**取消调用
    `disarm_if_settled()` 为真才 `reserve_run()`；attach 未成功
    （`Ok(Value::Null)` 且 active 仍属本 ticket）保留 Drop 兜底。
 3. `user_input_mailbox.rs`：`is_steer_interruption` 提升为 `pub`，新增只读
-   `is_active_ticket`。
+   `is_active_ticket`，`active_run_ticket` 提升为 `pub`（宿主在 attach 前绑定
+   取消令牌）；`fail_reserved` 在同一把锁内按 ticket 收窄，预留已被下一次执行
+   接管时不再暂停队列、清空 `ready`。
 4. 回归用例：`steer_activation_test.rs`（tail 级、真实 `schedule_mailbox` +
    `run_continuation_scheduler` 无需二次点击、attach 失败保留 Drop 兜底）、
-   `stop_activation_test.rs`（Stop 仍抑制 continuation）。
+   `stop_activation_test.rs`（Stop 仍抑制 continuation）、
+   `user_input_mailbox_test.rs`（迟到的 `fail_reserved` 不影响已接管预留）。
 5. `docs/code-index/peri-acp.md` 补 steer 例外与消费路径。
 
-不在本次范围：数据库表结构、`fail_reserved` 的跨 ticket 回滚收窄（见残留风险）。
+不在本次范围：数据库表结构、其余基线缺陷（见下节）。
+
+## 基线关联缺陷（#321，未在本次修复）
+
+以下 4 条在 `feat/thread-mq` 基线代码上由独立审查确认，与本缺陷同属暂存区 /
+MQ 链路，本次不改动，需在 #321 内单独处理：
+
+1. `snapshot()` 先查 MQ 再锁内存：查询期间新入队的记录会被旧结果清掉
+   （`user_input_mailbox.rs::snapshot`）。
+2. 异步结果先在 mailbox 登记去重再写 MQ：首次写失败后重试命中
+   `Duplicate → Ok`，结果不再投递（`peri-agent/src/agent/async_tasks/delivery.rs`）。
+3. `receive` 在 MQ→历史事务成功后仍用 `has_processable_work().await?`
+   传播错误，丢弃已成功的 outcome（`peri-acp-types/src/session/queue.rs`）。
+4. 直接 prompt、子 Agent 与 Workflow 的初始指令入队失败只记 warning，
+   循环可能以空队列返回 `Completed`（`v2_execute.rs`、`subagent/factory/spawn.rs`）。
 
 ## 验收
 
@@ -79,10 +96,9 @@ token；`peri-acp/src/host/prompt.rs` 的取消分支对**所有**取消调用
 
 ## 残留风险
 
-1. host 级 `Err`（非普通模型/工具失败）在途时，用户已发送的下一条输入会被
-   弹回 `Queued` 并撤回发送选择，需要再点一次。消息不丢失，触发概率低。
-   完整修复需让 `fail_reserved` 按 ticket 收窄，或拆分「释放本 ticket 预留」
-   与「host 丢失任务后的全局恢复」。
+1. host 级 `Err` 发生在 A 仍持有 active 时，已发送的 B 会被回滚为 `Queued`
+   并撤回发送选择（需再点一次，消息不丢失）。ticket 收窄只挡住「A 已交棒
+   给 B 之后」的迟到 Drop；本路径仍属全局复位语义。
 2. steer 轮次仍执行 `async_result_mailbox.suspend_scope("cancelled")`，
    期间完成的后台结果不会由本次 continuation 接管。
 3. Stop 的既有窄窗口（定向 cancel 被判 superseded 时不取消也不 suppress）
