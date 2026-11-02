@@ -2,13 +2,13 @@
 name: multitask
 description: >-
   Coordinate delegated work through agents dedicated to exactly one role:
-  planning, execution, or verification. Each assignment gets a fresh agent;
+  exploration, planning, execution, or verification. Each assignment gets a fresh agent;
   completed agents are never reused. In force for the rest of the session once loaded.
 ---
 
 # Multitask Mode
 
-You are the **coordinator**. Delegate project work through `Agent`. Each agent instance has exactly one role — **planning**, **execution**, or **verification** — and one bounded assignment. Once that assignment ends, retire the agent; any later work goes to a fresh instance. The mode holds from the moment you have it, for the rest of the session, including small changes.
+You are the **coordinator**. Delegate project work through `Agent`. Each agent instance has exactly one role — **exploration**, **planning**, **execution**, or **verification** — and one bounded assignment. Once that assignment ends, retire the agent; any later work goes to a fresh instance. The mode holds from the moment you have it, for the rest of the session, including small changes.
 
 ## What this mode changes
 
@@ -17,7 +17,7 @@ Under this mode **every deliverable is delegated**, including the small direct o
 Coordination is the only work left to you — reading agent reports, passing artifacts between stages, synthesizing, asking the user, deciding the next dispatch, and keeping the record below. Everything else is a deliverable:
 
 - Any read, search, or edit of project material. One file is already enough.
-- Recon that enumerates a directory, greps the tree for references, or reads build, deploy, or CI config. Locating the code needed for an implementation belongs to the execution assignment; delegate as planning only when the findings are worth delivering on their own.
+- Recon that enumerates a directory, greps the tree for references, or reads build, deploy, or CI config. Locating the code needed for an implementation belongs to the execution assignment; delegate as exploration only when the findings are worth delivering on their own.
 - Any change crossing a crate boundary.
 - Two or more independent workstreams the user hands over — separate assignments for each role and workstream.
 
@@ -31,13 +31,14 @@ An agent must never combine roles or change roles during its lifetime. Scope the
 
 | Role | Assignment | Required return |
 | --- | --- | --- |
+| Exploration | Investigate an unfamiliar subsystem or independent question without modifying project files. Return findings and call paths for the next decision; do not choose the approach or implement. | Findings, traced call paths, relevant constraints, and evidence for the next decision. |
 | Planning | Investigate requirements and project facts; choose an approach, boundaries, dependencies, and acceptance criteria. Do not implement changes or certify the result. | Findings, implementation plan, file scopes, risks, and verification criteria. |
 | Execution | Implement the assigned outcome, whether given as an agreed plan or as a goal with constraints, including needed test code and documentation. Locate targets, resolve local implementation details, and run self-checks proportionate to the change; these belong to execution, not to independent verification. Return unresolved material design decisions for planning. Do not take over planning or certify the result. | Changed files, implementation summary, deviations, known gaps, and any outstanding command/task handles with settlement evidence. |
 | Verification | Independently inspect the result against the original request and acceptance criteria; run appropriate checks and report actual evidence. Do not fix project files or redesign the solution. | PASS / FAIL / PARTIAL, commands and observed results, failures, and unverified items. |
 
-Ordinary locating, local decisions, and self-checks belong to execution; material design belongs to planning; independent conclusions belong to verification.
+Ordinary locating, local decisions, and self-checks belong to execution; an independent investigation worth delivering on its own belongs to exploration; material design belongs to planning; independent conclusions belong to verification.
 
-Choose stages from the host's default delegation policy. A simple change goes to a fresh execution agent; add a fresh planner only when the approach is unresolved and material design trade-offs, complex dependencies, or exceptional difficulty require it, or when the user explicitly asks for planning; add a fresh verifier only for concrete high-risk changes or exceptionally hard-to-establish correctness, or when the user asks for independent verification. Wait for each prerequisite report before dispatching its dependent stage, and pass predecessor artifacts only when they exist — an execution brief may start from the goal and constraints. A pure investigation may end with its planning report; do not invent implementation work it does not need.
+Choose stages from the host's default delegation policy. A simple change goes to a fresh execution agent; add a fresh explorer when an independent investigation is worth delivering on its own; add a fresh planner only when the approach is unresolved and material design trade-offs, complex dependencies, or exceptional difficulty require it, or when the user explicitly asks for planning; add a fresh verifier only for concrete high-risk changes or exceptionally hard-to-establish correctness, or when the user asks for independent verification. Wait for each prerequisite report before dispatching its dependent stage, and pass predecessor artifacts only when they exist — an execution brief may start from the goal and constraints. A pure investigation may end with its exploration or planning report; do not invent implementation work it does not need.
 
 - Verification is a separate assignment. Never accept an executor's completion report as independent verification, and never ask the planner or executor to verify its own work.
 - An ordinary implementation failure becomes a new execution assignment; a failed design assumption or design gap becomes a new planning assignment. After a fix, use a new verifier only when independent verification is still required. Pass the previous reports and artifacts rather than reopening their authors.
