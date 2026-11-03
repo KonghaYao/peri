@@ -159,6 +159,10 @@ pub struct McpClientPool {
     /// 会话首 turn 的 `first_turn_reminder` 概览已覆盖初始连接结果，避免与
     /// 逐台上线事件重复（初始化未完成时，迟到的连接成功自然成为运行中变化）。
     pub(crate) initialized: std::sync::atomic::AtomicBool,
+    /// System MCP（启动依赖）是否已处理完。普通 MCP 不是启动依赖：会话创建
+    /// 只等这个位，不等整池 `initPhase`，否则不可达的普通 transport 会拖住
+    /// 首个会话（每个 HTTP 连接失败要等满超时）。
+    pub(crate) system_settled: std::sync::atomic::AtomicBool,
     /// 运行中状态变化的待注入文本缓冲（McpMiddleware::before_model drain 后
     /// 以 Info 消息推送进模型上下文；全局缓冲，任一会话消费一次即清空）。
     pub(crate) pending_changes: parking_lot::Mutex<Vec<String>>,
@@ -313,6 +317,7 @@ impl McpClientPool {
             plugin_sources: parking_lot::RwLock::new(HashMap::new()),
             init_status: parking_lot::RwLock::new(McpInitStatus::Pending),
             initialized: std::sync::atomic::AtomicBool::new(false),
+            system_settled: std::sync::atomic::AtomicBool::new(false),
             pending_changes: parking_lot::Mutex::new(Vec::new()),
             notifier: parking_lot::RwLock::new(None),
             oauth_event_callback: parking_lot::RwLock::new(None),
