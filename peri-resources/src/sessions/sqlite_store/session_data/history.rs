@@ -43,8 +43,7 @@ pub(in crate::sessions) const HISTORY_PAGE_BODY_SQL: &str =
     "SELECT content FROM messages WHERE thread_id = ?1 AND message_id = ?2";
 
 /// 自有有效条目位置读取的语句原文（计划证据与生产读取同一份文本）。
-pub(in crate::sessions) const ACTIVE_ENTRY_POSITIONS_SQL: &str =
-    "SELECT message_id, rowid FROM messages WHERE thread_id = ?1 AND excluded = 0 ORDER BY rowid ASC";
+pub(in crate::sessions) const ACTIVE_ENTRY_POSITIONS_SQL: &str = "SELECT message_id, rowid FROM messages WHERE thread_id = ?1 AND excluded = 0 ORDER BY rowid ASC";
 
 // ─── 窗口读取（peri.historyWindowV1，archive 视图） ──────────────────────────
 
@@ -510,22 +509,18 @@ impl SqliteSessionData {
             // 目标会话不存在与「外键拒绝」是两个不同的原因，前者更可诊断。
             return Err(not_found());
         }
+        let mut rows = Vec::with_capacity(payloads.len());
         for payload in payloads {
-            sqlx::query(
-                "INSERT INTO messages (message_id, thread_id, role, content)
-                 VALUES (?1, ?2, ?3, ?4)",
-            )
-            .bind(payload.id().as_uuid().to_string())
-            .bind(id.as_str())
-            .bind(payload_role(payload))
-            .bind(
-                serialize_persisted_payload(payload)
+            rows.push(MessageInsertRow {
+                id: payload.id().as_uuid().to_string(),
+                role: payload_role(payload),
+                content: serialize_persisted_payload(payload)
                     .map_err(|_| corrupt("history entry is not serializable"))?,
-            )
-            .execute(&mut *tx)
+            });
+        }
+        insert_message_rows(&mut tx, id, &rows)
             .await
             .map_err(|error| map_sqlx(&error))?;
-        }
         let now = peri_time::now_utc_rfc3339();
         let updated = sqlx::query(
             "UPDATE threads SET updated_at = ?1,

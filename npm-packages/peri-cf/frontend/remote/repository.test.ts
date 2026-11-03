@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { ChatSessionDirectoryEntry } from "@peri-code/sdk";
 import { ChatDirectoryUnavailableError, createHttpRepository } from "./repository";
 
-/** 与服务端 `GET /api/chats` 的目录条目同形：直接来自 SDK 目录事实。 */
+/** 与服务端 `GET /api/chats` 的目录条目同形：SDK 目录事实 + 服务端派生的项目归属。 */
 const directoryEntry = {
   sessionId: "session-1",
   title: null,
@@ -10,7 +10,8 @@ const directoryEntry = {
   messageCount: 3,
   createdAt: "2026-10-20T12:00:00Z",
   updatedAt: "2026-10-20T13:00:00Z",
-} satisfies ChatSessionDirectoryEntry;
+  projectId: "default",
+} satisfies ChatSessionDirectoryEntry & { projectId: string };
 
 function respond(body: unknown, status = 200): typeof fetch {
   return (async () => new Response(JSON.stringify(body), {

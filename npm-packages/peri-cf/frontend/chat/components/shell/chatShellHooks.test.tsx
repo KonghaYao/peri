@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { installDom } from '../../../test/dom';
 
 installDom();
@@ -8,6 +8,13 @@ const { useComposerDrafts } = await import('./useComposerDrafts');
 const { useChatNavigation } = await import('./useChatNavigation');
 
 afterEach(() => cleanup());
+beforeEach(() => {
+  try {
+    window.localStorage.clear();
+  } catch {
+    // 测试环境没有 localStorage 时，草稿持久化用例会退化为内存模式。
+  }
+});
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -29,6 +36,7 @@ function baseChat() {
 const summary = (sessionId: string) => ({
   sessionId, title: sessionId, cwd: '/workspace', messageCount: 0,
   createdAt: '2026-10-20T00:00:00Z', updatedAt: '2026-10-20T00:00:00Z',
+  projectId: 'default',
 });
 
 describe('useComposerDrafts', () => {
@@ -123,6 +131,26 @@ describe('useComposerDrafts', () => {
     expect(result.current.drafts.draft).toBe('你好');
     expect(result.current.navigation.send).toBe(send);
     expect(result.current.navigation.runAction).toBe(runAction);
+  });
+
+  test('persists drafts per session, debounces writes and clears on request', async () => {
+    const first = renderHook(() => useComposerDrafts('chat-persist', () => 'chat-persist'));
+    act(() => { first.result.current.changeDraft('持久草稿'); });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+    first.unmount();
+
+    const second = renderHook(() => useComposerDrafts('chat-persist', () => 'chat-persist'));
+    expect(second.result.current.draft).toBe('持久草稿');
+
+    act(() => { second.result.current.clearPersistedDrafts(); });
+    expect(second.result.current.draft).toBe('');
+    second.unmount();
+
+    const third = renderHook(() => useComposerDrafts('chat-persist', () => 'chat-persist'));
+    expect(third.result.current.draft).toBe('');
+    third.unmount();
   });
 });
 

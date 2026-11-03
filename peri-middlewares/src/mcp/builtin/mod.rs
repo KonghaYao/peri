@@ -253,6 +253,12 @@ pub(crate) fn is_closed_source(
         && is_closed(server_name, closed)
 }
 
+/// 该来源是否为宿主系统资源面（instructions / meta / agents）的信任来源。
+///
+/// 这是 **host-assigned 身份**判定，不是 MCP 能力过滤：技能发现与冻结快照
+/// 按 `skills_capable` 能力聚合（`McpClientPool::read_skills_catalog`），
+/// 不要求来源是 workspace；本函数只决定哪些连接可以承载 `peri-instruction://`
+/// / `peri-meta://` 等宿主系统 URI。
 pub(crate) fn is_workspace_source(source: Option<&ConfigSource>) -> bool {
     matches!(source, Some(ConfigSource::Builtin { instance }) if instance == "workspace")
         || matches!(source, Some(ConfigSource::WorkspaceRemote))

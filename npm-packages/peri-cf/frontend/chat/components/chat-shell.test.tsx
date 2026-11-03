@@ -8,6 +8,7 @@ import { Sidebar, type SidebarProps } from './Sidebar';
 const summary = (sessionId: string, title: string): ChatSummary => ({
   sessionId, title, updatedAt: '2026-10-20T00:00:00Z',
   cwd: '/workspace', messageCount: 1, createdAt: '2026-10-20T00:00:00Z',
+  projectId: 'default',
 });
 
 const selected = summary('chat-a', '选中会话');
@@ -17,13 +18,17 @@ function renderSidebar(overrides: Partial<SidebarProps> = {}): string {
   return renderToStaticMarkup(
     <Sidebar
       chats={[selected, other]}
+      projects={[{ id: 'default', name: '默认项目', createdAt: '', isDefault: true }]}
       selectedId={selected.sessionId}
       selectedRunning={false}
       loading={false}
+      projectsLoading={false}
       disabled={false}
       open
       onClose={() => {}}
       onNew={() => {}}
+      onNewInProject={() => {}}
+      onCreateProject={async () => ({})}
       onRefresh={() => {}}
       onSelect={() => {}}
       {...overrides}

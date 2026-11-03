@@ -11,11 +11,13 @@ import type {
 } from "../payload/reader";
 import type { Transport } from "../transport/types";
 import type { WasmRuntimeDiagnosticKind } from "../wasm/runtime";
+import type { WasmRuntimePoolSnapshot } from "../wasm/runtime-pool";
 import type { PeriWasmModuleFactory } from "../wasm/loader";
 import type { PeriInstanceOptions } from "../agent/peri-instance";
 import type { WorkspaceRef } from "../workspace/types";
 import type {
-    AnswerAction, CancelAction, ForceSendAction, HistoryAction, SendAction, SessionAction, TakeBackAction,
+    AnswerAction, CancelAction, ForceSendAction, HistoryAction, SendAction, SessionAction,
+    SetConfigOptionAction, TakeBackAction,
 } from "./action";
 
 /**
@@ -205,6 +207,10 @@ export interface ChatManagerOptions {
      * 序列化每个 Chat 的内部 `agentConfig` JSON 时注入 `storage`/`machineId`。
      */
     store: ChatStoreConfig;
+    /**
+     * 只读会话目录。连接归宿主所有：Manager 不会关闭注入实例；
+     * 宿主在进程退出前应调用实现的 close()（如 `TursoStorage.close()`）。
+     */
     database: ChatDatabase;
     /** Session 归属记录存储；Manager 内部构造 ownership 并生成 owner。 */
     kv: KvStorage;
@@ -223,6 +229,8 @@ export interface ChatManager {
     closeChat(id: string): Promise<void>;
     /** 先封新准入，再聚合清理；可重试。 */
     shutdown(): Promise<void>;
+    /** 只读 WASM 运行后端快照；transport runtime 返回空快照。 */
+    runtimeSnapshot?(): WasmRuntimePoolSnapshot;
 }
 
 export interface ChatService {
@@ -234,7 +242,9 @@ export interface ChatService {
     execute(action: SendAction): SendReceipt;
     execute(action: SessionAction): Promise<SessionReadyResult>;
     execute(action: CancelAction): Promise<CancelRequestResult>;
-    execute(action: ForceSendAction | TakeBackAction | AnswerAction): Promise<ControlResult>;
+    execute(
+        action: ForceSendAction | TakeBackAction | AnswerAction | SetConfigOptionAction,
+    ): Promise<ControlResult>;
     execute(action: HistoryAction): Promise<HistoryPageOutcome>;
 
     readPayload(

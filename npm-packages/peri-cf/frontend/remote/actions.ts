@@ -175,6 +175,12 @@ function parseSuccess(response: Response, body: unknown, action: ChatUserAction)
   };
 }
 
+/** 句柄创建目标：历史会话用 `sessionId`，项目内新会话用 `projectId`。 */
+export interface CreateHandleTarget {
+  sessionId?: string;
+  projectId?: string;
+}
+
 /**
  * 新 HTTP 面：句柄创建、Action、载荷与显式关闭。
  *
@@ -184,13 +190,20 @@ export function createRemoteActions(options: RemoteActionClientOptions = {}) {
   const base = options.origin ?? "";
   const fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
 
-  async function createHandle(sessionId?: string, signal?: AbortSignal): Promise<RemoteChatHandle> {
+  async function createHandle(
+    target?: string | CreateHandleTarget,
+    signal?: AbortSignal,
+  ): Promise<RemoteChatHandle> {
+    const request: CreateHandleTarget = typeof target === "string" ? { sessionId: target } : target ?? {};
     let response: Response;
     try {
       response = await fetchImpl(apiUrl(base, "/api/chats"), {
         method: "POST",
         headers: { "content-type": "application/json", accept: "application/json" },
-        body: JSON.stringify(sessionId === undefined ? {} : { sessionId }),
+        body: JSON.stringify({
+          ...(request.sessionId === undefined ? {} : { sessionId: request.sessionId }),
+          ...(request.projectId === undefined ? {} : { projectId: request.projectId }),
+        }),
         signal,
       });
     } catch (error) {

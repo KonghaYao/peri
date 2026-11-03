@@ -1,4 +1,5 @@
 use super::*;
+use sqlx::AssertSqlSafe;
 
 pub(in crate::sessions::sqlite_store) fn validate_unbound_legacy_frozen(
     frozen: Option<&str>,
@@ -203,6 +204,63 @@ pub(in crate::sessions) async fn thread_exists_on(
 
 // ─── 端口实现 ─────────────────────────────────────────────────────────────────
 
+/// 待写入 `messages` 的一行：正文已完成序列化，SQL 文本里不出现任何数据。
+pub(in crate::sessions) struct MessageInsertRow {
+    pub id: String,
+    pub role: &'static str,
+    pub content: String,
+}
+
+/// `messages` 插入的列数（message_id、thread_id、role、content）。
+const MESSAGE_INSERT_COLUMNS: usize = 4;
+
+/// 每条 INSERT 的绑定变量上限。SQLite 旧版上限是 999，取 900 留余量；按列数折算成
+/// 行数后分块（当前 225 行/语句）。分块不改变事务边界：调用方仍在同一事务里执行全部分块。
+const MESSAGE_INSERT_MAX_VARIABLES: usize = 900;
+
+/// 单条多行 INSERT 的行数上限；列数变化时分块自动收紧。
+pub(in crate::sessions) fn message_insert_chunk_rows() -> usize {
+    (MESSAGE_INSERT_MAX_VARIABLES / MESSAGE_INSERT_COLUMNS).max(1)
+}
+
+/// 分块多行插入 `messages`：保持传入顺序，每块仍全部走绑定参数。
+///
+/// 中途失败直接上抛，已写入的块由调用方的事务整批回滚（与本函数出现前的逐行插入同一
+/// 可观察结果）。`thread_id` 每行重复绑定一次，不为省变量数复用到跨行占位符。
+pub(in crate::sessions) async fn insert_message_rows(
+    connection: &mut SqliteConnection,
+    thread_id: &ThreadId,
+    rows: &[MessageInsertRow],
+) -> Result<(), sqlx::Error> {
+    for chunk in rows.chunks(message_insert_chunk_rows()) {
+        let mut statement =
+            String::from("INSERT INTO messages (message_id, thread_id, role, content) VALUES ");
+        for index in 0..chunk.len() {
+            if index > 0 {
+                statement.push(',');
+            }
+            let base = index * MESSAGE_INSERT_COLUMNS;
+            statement.push_str(&format!(
+                "(?{},?{},?{},?{})",
+                base + 1,
+                base + 2,
+                base + 3,
+                base + 4
+            ));
+        }
+        let mut query = sqlx::query(AssertSqlSafe(statement));
+        for row in chunk {
+            query = query
+                .bind(&row.id)
+                .bind(thread_id.as_str())
+                .bind(row.role)
+                .bind(&row.content);
+        }
+        query.execute(&mut *connection).await?;
+    }
+    Ok(())
+}
+
 /// 批量插入 canonical payload；返回批次内 ID 集合。
 pub(in crate::sessions) async fn insert_history_rows(
     connection: &mut SqliteConnection,
@@ -210,21 +268,18 @@ pub(in crate::sessions) async fn insert_history_rows(
     payloads: &[PersistedPayload],
 ) -> anyhow::Result<HashSet<MessageId>> {
     let mut ids = HashSet::with_capacity(payloads.len());
+    let mut rows = Vec::with_capacity(payloads.len());
     for payload in payloads {
         if !ids.insert(payload.id()) {
             anyhow::bail!("history batch repeats a message id");
         }
-        sqlx::query(
-            "INSERT INTO messages (message_id, thread_id, role, content)
-             VALUES (?1, ?2, ?3, ?4)",
-        )
-        .bind(payload.id().as_uuid().to_string())
-        .bind(thread_id.as_str())
-        .bind(payload_role(payload))
-        .bind(serialize_persisted_payload(payload)?)
-        .execute(&mut *connection)
-        .await?;
+        rows.push(MessageInsertRow {
+            id: payload.id().as_uuid().to_string(),
+            role: payload_role(payload),
+            content: serialize_persisted_payload(payload)?,
+        });
     }
+    insert_message_rows(connection, thread_id, &rows).await?;
     Ok(ids)
 }
 

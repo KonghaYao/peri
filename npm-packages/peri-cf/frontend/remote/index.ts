@@ -13,6 +13,10 @@ export {
   type ChatDirectoryRepository,
 } from "./repository";
 export {
+  ProjectDirectoryUnavailableError, createHttpProjectRepository,
+  type ProjectDirectoryRepository,
+} from "./projects";
+export {
   MonitorUnavailableError, createHttpMonitorRepository,
   type MonitorRepository,
 } from "./monitor";

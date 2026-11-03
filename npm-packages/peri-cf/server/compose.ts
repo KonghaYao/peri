@@ -72,6 +72,15 @@ const LANGFUSE_ENV_KEYS = [
  */
 const SERVER_HARNESS_CONFIG = Object.freeze({
   ...BareHarnessConfig,
+  // sandbox 的 workspace MCP 已声明 `io.modelcontextprotocol/skills` 能力；
+  // 不装配 SkillsMiddleware 时 SkillTool/DiscoverSkillsTool 与 13_skills 段落
+  // 会被整体丢弃（section gate 由持有者 middleware 决定）。
+  "13_skills": true,
+  SkillsMiddleware: true,
+  // 子代理已启用；允许定义型 subagent 按声明预载技能，减少一次发现往返。
+  SkillPreloadMiddleware: true,
+  // 读取 sandbox 项目内的 CLAUDE.md / AGENTS.md（无文件时为空快照）。
+  AgentsMdMiddleware: true,
   TodoMiddleware: true,
   HumanInTheLoopMiddleware: true,
   SubAgentMiddleware: true,

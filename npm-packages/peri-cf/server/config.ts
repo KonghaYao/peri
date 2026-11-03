@@ -34,9 +34,11 @@ export interface SandboxConfig {
 /**
  * sandbox MCP 的 server key；远程 MCP 不得占用。
  *
- * 不能使用 ACP 保留名 `workspace`：宿主把它视为 WorkspaceRemote，要求
- * `resources/list` 成功；sandbox MCP 只提供工具、不实现资源发现，`-32601`
- * 会让整个会话启动失败。
+ * 仍不使用 ACP 保留名 `workspace`：宿主会把该名字的来源视为
+ * WorkspaceRemote，把 `peri-instruction://` / `peri-meta://` / agent 资源纳入
+ * 系统面。桥接层现在镜像内层实际能力（tools/resources/skills/prompts），
+ * 所以 `sandbox` 同样能声明并转发资源与技能；名字只决定宿主信任哪一类
+ * 系统资源面，不再决定能力是否可见。
  */
 export const SANDBOX_SERVER_NAME = "sandbox";
 

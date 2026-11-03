@@ -3,6 +3,7 @@ import {
     WasmRuntimePool,
     type WasmRuntimeAcquireOptions,
     type WasmRuntimeLease,
+    type WasmRuntimePoolSnapshot,
     type WasmRuntimeStarter,
 } from "../wasm/runtime-pool";
 import { startWasmRuntime, type WasmRuntimeDiagnosticKind } from "../wasm/runtime";
@@ -244,6 +245,15 @@ export class ChatManager implements ChatManagerContract {
         const chat = this.chats.get(id);
         if (!chat) return;
         await chat.close();
+    }
+
+    /**
+     * 只读 WASM 运行后端快照；transport runtime 没有 WASM 池时返回空快照。
+     * 读取不会启动运行后端。
+     */
+    runtimeSnapshot(): WasmRuntimePoolSnapshot {
+        return this.wasmRuntimes?.snapshot()
+            ?? { instances: [], starting: 0, unconfirmed: false };
     }
 
     /**

@@ -3,12 +3,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, test } from "bun:test";
 import type { ServerConfig } from "./config";
+import type { InstanceBusinessSnapshot } from "./instance-metrics";
 import {
   createMonitor,
   type MonitorDependencies,
   type MonitorRegistry,
   type SandboxSettingsSummary,
 } from "./monitor";
+import type { MonitorInstanceView } from "./registry";
 
 const ID = "sbx_0123456789abcdef0123456789abcdef";
 const NOW = Date.parse("2026-10-27T10:00:00.000Z");
@@ -59,6 +61,46 @@ function registry(overrides: Partial<MonitorRegistry> = {}): MonitorRegistry & {
       calls.push("activeChatCount");
       return 0;
     },
+    runtimeInstances() {
+      calls.push("runtimeInstances");
+      return { instances: [], starting: 0, unconfirmed: false };
+    },
+    ...overrides,
+  };
+}
+
+function business(overrides: Partial<InstanceBusinessSnapshot> = {}): InstanceBusinessSnapshot {
+  return {
+    running: false,
+    lastActivityAtMs: NOW - 5_000,
+    queueDepth: 0,
+    pendingInteractions: 0,
+    turns: {
+      started: 0,
+      completed: 0,
+      cancelled: 0,
+      error: 0,
+      totalWallMs: 0,
+      lastWallMs: null,
+      activeWallMs: null,
+    },
+    tokens: null,
+    context: null,
+    tools: null,
+    lastStopReason: null,
+    ...overrides,
+  };
+}
+
+function instance(overrides: Partial<MonitorInstanceView> = {}): MonitorInstanceView {
+  return {
+    chatId: "chat-a",
+    sessionId: "session-a",
+    generationId: "generation-a",
+    state: "live",
+    startedAtMs: NOW - 60_000,
+    linearMemoryBytes: 16 * 1024 * 1024,
+    business: business(),
     ...overrides,
   };
 }
@@ -158,17 +200,21 @@ describe("createMonitor", () => {
       url: "https://mcp.example.com/mcp",
       headerNames: ["Authorization", "X-Test"],
     }]);
-    expect(snapshot.mcp.sandbox).toEqual([{
-      sandboxId: ID,
-      name: "workspace",
-      url: "http://127.0.0.1:9000/mcp",
-      state: "ready",
-    }]);
+    expect(snapshot.mcp).not.toHaveProperty("sandbox");
+    expect(snapshot.mcp).not.toHaveProperty("sandboxEnabled");
     expect(snapshot.wasm).toEqual({
       moduleUrl: "/opt/peri/peri-wasm.js",
       process: { rssBytes: 100, heapTotalBytes: 80, heapUsedBytes: 40, arrayBufferBytes: 64 },
-      activeChats: 3,
+      chatHandles: 3,
+      startingInstances: 0,
+      unconfirmed: false,
+      truncated: false,
+      linearMemoryTotalBytes: null,
+      linearMemoryKnownInstances: 0,
+      linearMemoryUnknownInstances: 0,
+      instances: [],
     });
+    expect(snapshot.wasm).not.toHaveProperty("activeChats");
     expect(snapshot.sandbox.settings).toEqual(SETTINGS);
     expect(snapshot.sandbox.workspacesOnDisk).toBe(2);
     expect(snapshot.sandbox.starting).toBe(1);
@@ -221,8 +267,8 @@ describe("createMonitor", () => {
     const snapshot = await monitor.snapshot();
 
     expect(calls).toEqual([]);
-    expect(snapshot.mcp.sandboxEnabled).toBe(false);
-    expect(snapshot.mcp.sandbox).toEqual([]);
+    expect(snapshot.mcp).toEqual({ remote: [] });
+    expect(snapshot.mcp).not.toHaveProperty("sandboxEnabled");
     expect(snapshot.sandbox).toMatchObject({
       enabled: false,
       root: "/sandboxes",
@@ -357,7 +403,7 @@ describe("createMonitor", () => {
       profile: null,
       error: "settings unreadable",
     });
-    expect(snapshot.wasm.activeChats).toBe(1);
+    expect(snapshot.wasm.chatHandles).toBe(1);
   });
 
   test("工作区计数失败返回 null + 原因，且失败不缓存", async () => {
@@ -382,6 +428,189 @@ describe("createMonitor", () => {
     expect(recovered.sandbox.workspacesOnDisk).toBe(4);
     expect(recovered.sandbox).not.toHaveProperty("workspacesError");
     expect(reads).toBe(2);
+  });
+
+  test("实例段映射身份、线性内存合计与业务计数", async () => {
+    const monitor = createMonitor({
+      config: config(),
+      registry: registry({
+        runtimeInstances: () => ({
+          instances: [
+            instance({
+              chatId: "chat-a",
+              sessionId: "session-a",
+              generationId: "gen-a",
+              state: "live",
+              startedAtMs: NOW - 60_000,
+              linearMemoryBytes: 16 * 1024 * 1024,
+              business: business({
+                running: true,
+                lastActivityAtMs: NOW - 5_000,
+                queueDepth: 2,
+                pendingInteractions: 1,
+                turns: {
+                  started: 4,
+                  completed: 3,
+                  cancelled: 0,
+                  error: 1,
+                  totalWallMs: 120_000,
+                  lastWallMs: 30_000,
+                  activeWallMs: 5_000,
+                },
+                tokens: {
+                  llmCalls: 12,
+                  inputTokens: 34_567,
+                  outputTokens: 1_234,
+                  auxiliaryCalls: 2,
+                  partial: false,
+                },
+                context: { used: 12_345, size: 200_000 },
+                tools: { started: 5, completed: 4, failed: 1, cancelled: 0 },
+                lastStopReason: "end_turn",
+              }),
+            }),
+            instance({
+              chatId: "chat-b",
+              sessionId: null,
+              generationId: "gen-b",
+              state: "close-unconfirmed",
+              startedAtMs: NOW - 10_000,
+              linearMemoryBytes: null,
+              business: null,
+            }),
+          ],
+          starting: 1,
+          unconfirmed: true,
+        }),
+      }),
+      deps: deps(),
+    });
+
+    const snapshot = await monitor.snapshot();
+
+    expect(snapshot.wasm.chatHandles).toBe(0);
+    expect(snapshot.wasm.startingInstances).toBe(1);
+    expect(snapshot.wasm.unconfirmed).toBe(true);
+    expect(snapshot.wasm.linearMemoryTotalBytes).toBe(16 * 1024 * 1024);
+    expect(snapshot.wasm.linearMemoryKnownInstances).toBe(1);
+    expect(snapshot.wasm.linearMemoryUnknownInstances).toBe(1);
+    expect(snapshot.wasm.instances[0]).toEqual({
+      chatId: "chat-a",
+      sessionId: "session-a",
+      generationId: "gen-a",
+      state: "live",
+      startedAt: "2026-10-27T09:59:00.000Z",
+      uptimeSeconds: 60,
+      linearMemoryBytes: 16 * 1024 * 1024,
+      running: true,
+      lastActivityAt: "2026-10-27T09:59:55.000Z",
+      queueDepth: 2,
+      pendingInteractions: 1,
+      turns: {
+        started: 4,
+        completed: 3,
+        cancelled: 0,
+        error: 1,
+        totalWallMs: 120_000,
+        lastWallMs: 30_000,
+        activeWallMs: 5_000,
+      },
+      tokens: {
+        llmCalls: 12,
+        inputTokens: 34_567,
+        outputTokens: 1_234,
+        auxiliaryCalls: 2,
+        partial: false,
+      },
+      context: { used: 12_345, size: 200_000 },
+      tools: { started: 5, completed: 4, failed: 1, cancelled: 0 },
+      lastStopReason: "end_turn",
+    });
+    expect(snapshot.wasm.instances[1]).toMatchObject({
+      chatId: "chat-b",
+      state: "close-unconfirmed",
+      linearMemoryBytes: null,
+      statsError: true,
+      turns: { started: 0 },
+      tokens: null,
+      context: null,
+      tools: null,
+    });
+  });
+
+  test("实例段失败时只标记 instancesError，进程指标仍返回", async () => {
+    const monitor = createMonitor({
+      config: config(),
+      registry: registry({
+        runtimeInstances: () => { throw new Error("instance snapshot failed"); },
+      }),
+      deps: deps(),
+    });
+
+    const snapshot = await monitor.snapshot();
+    expect(snapshot.wasm.instancesError).toBe("instance snapshot failed");
+    expect(snapshot.wasm.instances).toEqual([]);
+    expect(snapshot.wasm.process.rssBytes).toBe(100);
+    expect(snapshot.wasm.linearMemoryTotalBytes).toBeNull();
+  });
+
+  test("无实例时不伪造内存合计；超过上限时截断并标记", async () => {
+    const empty = createMonitor({ config: config(), registry: registry(), deps: deps() });
+    const emptySnapshot = await empty.snapshot();
+    expect(emptySnapshot.wasm.instances).toEqual([]);
+    expect(emptySnapshot.wasm.linearMemoryTotalBytes).toBeNull();
+    expect(emptySnapshot.wasm.truncated).toBe(false);
+
+    const many = Array.from({ length: 201 }, (_, index) =>
+      instance({ chatId: `chat-${index}`, linearMemoryBytes: 65_536 }));
+    const truncated = createMonitor({
+      config: config(),
+      registry: registry({
+        runtimeInstances: () => ({ instances: many, starting: 0, unconfirmed: false }),
+      }),
+      deps: deps(),
+    });
+    const snapshot = await truncated.snapshot();
+    expect(snapshot.wasm.instances).toHaveLength(200);
+    expect(snapshot.wasm.truncated).toBe(true);
+    expect(snapshot.wasm.linearMemoryTotalBytes).toBe(200 * 65_536);
+  });
+
+  test("实例 wire DTO 只含白名单字段，不携带内容", async () => {
+    const monitor = createMonitor({
+      config: config(),
+      registry: registry({
+        runtimeInstances: () => ({
+          instances: [instance({ chatId: "chat-secret" })],
+          starting: 0,
+          unconfirmed: false,
+        }),
+      }),
+      deps: deps(),
+    });
+    const snapshot = await monitor.snapshot();
+    const wire = snapshot.wasm.instances[0]!;
+    expect(Object.keys(wire).sort()).toEqual([
+      "chatId",
+      "context",
+      "generationId",
+      "lastActivityAt",
+      "lastStopReason",
+      "linearMemoryBytes",
+      "pendingInteractions",
+      "queueDepth",
+      "running",
+      "sessionId",
+      "startedAt",
+      "state",
+      "tokens",
+      "tools",
+      "turns",
+      "uptimeSeconds",
+    ]);
+    for (const forbidden of ["title", "arguments", "result", "message", "content", "error", "prompt"]) {
+      expect(wire).not.toHaveProperty(forbidden);
+    }
   });
 
   test("settings 缓存 30s、工作区缓存 10s，按注入时钟失效", async () => {

@@ -307,6 +307,20 @@ describe("control actions", () => {
         ).toBe("accepted");
         expect(port.answers[0].interactionId).toBe("interaction-1");
 
+        expect(
+            (
+                await chat.execute(
+                    ChatUserAction.setConfigOption({
+                        configId: "thinking_effort",
+                        value: "high",
+                    }),
+                )
+            ).status,
+        ).toBe("accepted");
+        expect(port.configOptions).toEqual([
+            { configId: "thinking_effort", value: "high" },
+        ]);
+
         await expect(
             chat.execute(ChatUserAction.loadEarlierHistory({ limit: 20 })),
         ).resolves.toEqual({ applied: 2, nextCursor: "cursor-2" });
@@ -323,6 +337,23 @@ describe("control actions", () => {
         ).rejects.toMatchObject({
             requestId: "hist-1",
             code: "history_failed",
+            disposition: "unknown",
+        });
+    });
+
+    test("set_config_option failures keep the request identity", async () => {
+        const { chat, port } = await readyChat();
+        port.configOptionError = new Error("config rejected");
+
+        await expect(
+            chat.execute(
+                ChatUserAction.setConfigOption({
+                    configId: "model", value: "fast", requestId: "config-1",
+                }),
+            ),
+        ).rejects.toMatchObject({
+            requestId: "config-1",
+            code: "set_config_option_failed",
             disposition: "unknown",
         });
     });

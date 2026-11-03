@@ -108,16 +108,47 @@ export interface SandboxSettings {
   stopTimeoutMs?: number;
 }
 
-/** Minimal backend surface consumed by the HTTP MCP handler and the instance. */
+/** Options for one forwarded MCP request. */
+export interface McpBackendRequestOptions {
+  signal: AbortSignal;
+  /** Outer JSON-RPC id, used only to resolve host cancellation. */
+  requestId?: string | number;
+  onProgress?: (progress: { progress: number; total?: number; message?: string }) => void;
+}
+
+/** One host-side subscription over the inner `subscriptions/listen` stream. */
+export interface McpBackendSubscriptionOptions {
+  signal: AbortSignal;
+  /** Host JSON-RPC id; the only id exposed back to the host. */
+  requestId: string | number;
+  sink: (notification: { method: string; params?: Record<string, unknown> }) => void;
+}
+
+export interface McpBackendSubscription {
+  honoredFilter: unknown;
+  close(): Promise<void>;
+  closed: Promise<'local' | 'graceful' | 'remote'>;
+}
+
+/**
+ * Minimal backend surface consumed by the HTTP MCP handler and the instance.
+ *
+ * The bridge is protocol-transparent: capabilities, identity, requests and
+ * notifications are read from / forwarded to the inner MCP client without
+ * filtering or rewriting.
+ */
 export interface McpBackendPort {
   readonly runId: string;
-  listTools(): unknown;
-  forward(
+  serverCapabilities(): import('@modelcontextprotocol/client').ServerCapabilities | undefined;
+  serverInfo(): import('@modelcontextprotocol/client').Implementation | undefined;
+  instructions(): string | undefined;
+  request(
     method: string,
     params: Record<string, unknown>,
-    owner: string | undefined,
-    signal: AbortSignal,
-    onProgress?: (progress: { progress: number; total?: number; message?: string }) => void,
+    options: McpBackendRequestOptions,
   ): Promise<Record<string, unknown>>;
+  notify(notification: { method: string; params?: Record<string, unknown> }): Promise<void>;
+  subscribe(filter: Record<string, unknown>, options: McpBackendSubscriptionOptions): Promise<McpBackendSubscription>;
+  cancel(requestId: string | number): void;
   close(): Promise<void>;
 }

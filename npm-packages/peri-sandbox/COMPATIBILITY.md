@@ -2,6 +2,30 @@
 
 > 本文件只记录**实际执行过**的命令与结果。旧版 daemon/registry/control socket 的验收数字已作废，不再沿用。
 
+## 2026-10-27：MCP 透明代理（capabilities / resources / skills / 通知）
+
+环境：Apple Silicon macOS，Node `v24.18.0`，Bun `1.4.3`，`@anthropic-ai/sandbox-runtime` `0.0.81`，真实 Peri `~/.peri/peri`（4.4.1）。
+
+| 命令 | 结果 |
+| --- | --- |
+| `bun install` | 成功；SDK patch 重新应用到 `SubscriptionFilterSchema.passthrough()` 与自定义方法缺省 `resultType` 容错 |
+| `bun run format:check` | 通过 |
+| `bun run check` | 通过 |
+| `bun run test` | **61/61 passed，0 failed** |
+| `npm run test:mac:programmatic` | 通过：start、同 id `conflict`、占用端口 `conflict`、重复 close、`deleteData` |
+| `node dist/tests/integration/mac.js <tmp-settings>` | 通过：7 个工具；外层 discover 镜像 `resources`/`resources.subscribe`/skills/tasks 扩展；`skills/list` 看到项目技能；`resources/list\|read` 可读技能；宿主 `$HOME/.claude/skills` 的 host-only 技能不可见；宿主临时文件 `Read`/`Bash cat` 均被 SRT 拒绝；token 401、同 workspace 重启保留 |
+
+真实 macOS 验收的负向补充：默认 profile 的 `runtimeReadPaths` 包含 `/etc`，因此 `/etc/passwd` **可读**（已断言为可读事实）；越界负向改用 `tmpdir()` 下的宿主专用文件。这与旧计划中「`/etc/passwd` 读取失败」的预期不同，未修改默认 profile。
+
+### 宿主 Rust
+
+| 命令 | 结果 |
+| --- | --- |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-middlewares --lib` | 1839 passed；3 failed（`plugin::marketplace::tests::test_fetch_url_cache_fallback`、`subagent::tool::tests::invoke_test::test_skill_preload_registered`、`subagent::tool::tests::integration_v2_test::test_p0_2_background_defined_skill_preload_once_after_parent_cancel`）。三者已在**同 HEAD 的 stash 基线**复现，与本轮改动无关 |
+| `./scripts/cargo-rmcp-patched.sh test --locked -p peri-acp --lib` | **1086 passed，0 failed，1 ignored** |
+| `bash scripts/check-changed.sh` | 通过（changed-crate `cargo check --locked`） |
+| `bash scripts/verify-async.sh start && read` | 通过：全量 `check --workspace --all-targets` + `clippy -D warnings`；最终回执见 `target/verify-receipts/latest.json` |
+
 ## 2026-10-27：单实例迁移基线
 
 环境：Apple Silicon macOS，Node `v24.18.0`，Bun `1.4.3`，`@anthropic-ai/sandbox-runtime` `0.0.81`。

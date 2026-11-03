@@ -46,6 +46,8 @@ pub(crate) struct SessionEnvironment {
     mcp_owner: tokio::sync::Mutex<Box<dyn peri_acp_types::ports::McpTaskOwnerPort>>,
     session_id: String,
     pub(crate) mcp_control_enabled: bool,
+    /// `SkillsMiddleware` 关闭位：显式功能关闭，不是按 server 名过滤。
+    skills_face_closed: bool,
     cwd: String,
     end_hooks: tokio::sync::Mutex<SessionEndState>,
     cleanup_tasks: Arc<dyn peri_acp_types::tasks::TaskManager>,
@@ -95,49 +97,44 @@ pub(crate) fn take_shutdown_observations() -> Vec<String> {
 }
 
 impl SessionEnvironment {
-    /// 冻结期技能清单快照（W4b / F3，J1）：内容准入期从 **system 来源**
-    /// （builtin `workspace` 实例）取一次技能元数据，供冻结 system prompt 的
-    /// 技能摘要渲染。
+    /// 冻结期技能清单快照（W4b / F3）：内容准入期按 **skills 能力**聚合本会话
+    /// 可见连接（builtin `workspace`、WorkspaceRemote、sandbox 等），供冻结
+    /// system prompt 的技能摘要渲染。
     ///
-    /// 与 [`Self::read_meta_docs`] 同一节奏与同一判定链（P4，activate 之后、
-    /// `commit_frozen` 之前）：
-    /// - 池未装配 / 句柄未出现且池初始化已收口 / 实例被 A24 关闭集关闭 /
-    ///   未声明 skills 能力 ⇒ `Ok(空)`：技能面不适用，**不是失败**（X5/X4），
-    ///   也不回落磁盘（J5 后宿主已无技能 FS 读取点）；
-    /// - 句柄已连接但读取失败 ⇒ `Err`：system 已声明且被选中的投递失败
-    ///   fail-closed（J2 补偿：调用方排空环境并撤销未发布的创建）；
-    /// - 有界等待（同 `read_meta_docs` 的 10s 上界，同进程 builtin 握手毫秒级）：
-    ///   全程 `await`，不 `block_on`（ARC-MIDDLEWARE-CAPABILITY-001 的
-    ///   「异步工作在明示生命周期阶段完成」）。
-    pub(crate) async fn read_workspace_skill_catalog(
+    /// 判定链：
+    /// - `SkillsMiddleware` 关闭位为真 ⇒ `Ok(空)`：显式功能关闭，不发起
+    ///   `skills/list`（这是功能开关，不是按 server 名过滤）；
+    /// - 池未装配 ⇒ `Ok(空)`；
+    /// - 等待 `init_status` 离开 `pending/initializing`（或 10s 上界），然后调用
+    ///   [`peri_acp_types::ports::McpPoolPort::read_skills_catalog`] 聚合当前已连接
+    ///   的 skills-capable server；
+    /// - host-assigned system workspace 读取失败 ⇒ `Err`（调用方 fail-closed）；
+    ///   其他 server 读取失败 ⇒ 中间件记录诊断并继续（不静默）。
+    ///
+    /// 全程 `await`，不 `block_on`（ARC-MIDDLEWARE-CAPABILITY-001 的
+    /// 「异步工作在明示生命周期阶段完成」）。
+    pub(crate) async fn read_skill_catalog(
         &self,
     ) -> Result<Vec<peri_acp_types::skills::SkillMetadata>, AcpError> {
         let Some(pool) = self.cfg.mcp_pool.as_ref() else {
             return Ok(Vec::new());
         };
+        if self.skills_face_closed {
+            return Ok(Vec::new());
+        }
         let deadline = peri_time::monotonic_now() + std::time::Duration::from_secs(10);
         loop {
-            match pool.builtin_workspace_state() {
-                McpBuiltinWorkspaceState::Connected => {
-                    return pool
-                        .read_builtin_workspace_skills()
-                        .await
-                        .map_err(|error| AcpError::new(-32603, error));
-                }
-                McpBuiltinWorkspaceState::Unavailable | McpBuiltinWorkspaceState::NotConnected => {
-                    return Ok(Vec::new());
-                }
-                McpBuiltinWorkspaceState::Absent => {}
-            }
             let phase = pool.snapshot()["initPhase"]
                 .as_str()
                 .unwrap_or("pending")
                 .to_owned();
-            if !matches!(phase.as_str(), "pending" | "initializing") {
-                return Ok(Vec::new());
-            }
-            if peri_time::monotonic_now() >= deadline {
-                return Ok(Vec::new());
+            if !matches!(phase.as_str(), "pending" | "initializing")
+                || peri_time::monotonic_now() >= deadline
+            {
+                return pool
+                    .read_skills_catalog(&self.session_id)
+                    .await
+                    .map_err(|error| AcpError::new(-32603, error));
             }
             peri_time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -147,7 +144,7 @@ impl SessionEnvironment {
     /// （builtin `workspace` 实例）读 `peri-instruction://workspace/{main|local}`，
     /// 供冻结 system prompt 之前的指令段使用。
     ///
-    /// 与 [`Self::read_meta_docs`] / [`Self::read_workspace_skill_catalog`] 同一
+    /// 与 [`Self::read_meta_docs`] / [`Self::read_skill_catalog`] 同一
     /// 节奏与同一判定链（P4，activate 之后、`commit_frozen` 之前）：
     /// - 池未装配 / 句柄未出现且池初始化已收口 / 实例被 A24 关闭集关闭 ⇒
     ///   `Ok(默认空)`：指令面不适用，**不是失败**（X4/X5），也不回落磁盘
@@ -604,6 +601,7 @@ impl SessionEnvironment {
             mcp_owner: tokio::sync::Mutex::new(mcp_owner),
             session_id: session_id.to_owned(),
             mcp_control_enabled: !source.bare && !disabled_middlewares.contains("McpMiddleware"),
+            skills_face_closed,
             cwd,
             end_hooks: tokio::sync::Mutex::new(SessionEndState::Pending),
             cleanup_tasks: Arc::new(peri_agent::agent::async_tasks::TaskManager::new()),
