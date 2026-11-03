@@ -399,6 +399,10 @@ fn test_rewind_completed_invalidates_v2_window() {
         status: crate::kit::history_v2::HistoryV2Status::Ready,
         session_id: Some("s-rewind".to_owned()),
         execution_ready: true,
+        live_boundary: Some(peri_acp_types::history_v2::HistoryLiveBoundary {
+            stream_id: "live-rewind".to_owned(),
+            after_seq: peri_acp_types::history_v2::DecimalU64::new(40),
+        }),
         ..Default::default()
     });
     crate::kit::atoms::HISTORY_V2_PREFIX_LEN.set(3);
@@ -434,13 +438,27 @@ fn test_rewind_completed_invalidates_v2_window() {
 
     dispatch_and_notify(&mut state, &AcpEventData::RewindCompleted { messages_json });
 
-    assert!(
-        !crate::kit::history_v2::snapshot().is_ready(),
-        "rewind 后旧 V2 窗口必须作废"
+    let rewound = crate::kit::history_v2::snapshot();
+    assert!(!rewound.is_ready(), "rewind 后旧 V2 窗口必须作废");
+    assert!(rewound.window.is_none(), "旧窗口必须清空");
+    assert_eq!(
+        rewound.session_id.as_deref(),
+        Some("s-rewind"),
+        "rewind 不得清空会话身份"
+    );
+    assert!(rewound.execution_ready, "rewind 不得清空执行事实");
+    assert_eq!(
+        rewound
+            .live_boundary
+            .as_ref()
+            .map(|boundary| boundary.after_seq.get()),
+        Some(40),
+        "rewind 不得清空已接纳的实时投递边界"
     );
     assert_eq!(
         crate::kit::atoms::HISTORY_V2_PREFIX_LEN.get(),
-        0,
-        "rewind 后投影前缀必须清零"
+        1,
+        "rewind 回填内容是窗口前缀，等待新 open 整体替换"
     );
+    crate::kit::history_v2::live::clear_all_pending();
 }

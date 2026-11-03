@@ -288,6 +288,15 @@ pub fn admit_open_response(
         .as_ref()
         .map(|window| window.paging.clone())
         .unwrap_or_default();
+    // open 响应不携带 liveBoundary：窗口为空时只能用同会话保留的投递边界重建
+    // 接纳状态（rewind 后重开）。无边界保持默认，`accept_live_event` 仍为 NotReady。
+    if previous.window.is_none() {
+        paging.live = previous
+            .live_boundary
+            .as_ref()
+            .map(HistoryV2LiveState::from_boundary)
+            .unwrap_or_default();
+    }
     paging.view_epoch = view_epoch;
     paging.in_flight = None;
     paging.reserved_bytes = 0;

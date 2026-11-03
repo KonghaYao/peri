@@ -296,9 +296,9 @@ async fn handle_session_update(params: Value, session_id: &str) -> Option<AcpEve
     }
 }
 
-/// F2b：initial 发布后重放暂存的 live 更新。
+/// initial 发布或 open 接纳后重放暂存的 live 更新。
 ///
-/// 只重放与 initial `liveBoundary.streamId` 相同的 stream；每条先走与实时路径相同
+/// 只重放与当前窗口 `paging.live.streamId` 相同的 stream；每条先走与实时路径相同
 /// 的接纳门，只有连续的 `Accepted` 才解码为 bridge 事件。返回的事件仍由调用方按
 /// 顺序发送（`publish_initial` 经 `LOCAL_EVENT_TX` 与视图发布同序）。
 pub(crate) fn replay_pending_initial(

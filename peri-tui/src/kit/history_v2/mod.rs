@@ -176,6 +176,34 @@ pub fn reset_state() {
     atoms::HISTORY_V2_STATE.set(HistoryV2State::default());
 }
 
+/// rewind 专用复位：只作废窗口与投影，保留连接级投递事实。
+///
+/// open 响应不携带投递边界，若连同 `liveBoundary` 一起清空，新窗口无法重建
+/// `paging.live`，rewind 后的实时更新会因 `NotReady` 被整条丢弃。这里保留会话、
+/// delivery 与已接纳高水位；不发布视图，避免旧窗口投影覆盖 rewind 回填内容。
+pub fn reset_for_rewind() {
+    live::clear_all_pending();
+    let previous = atoms::HISTORY_V2_STATE.state().read().clone();
+    let live_boundary = previous.live_boundary.map(|boundary| HistoryLiveBoundary {
+        stream_id: boundary.stream_id,
+        after_seq: previous
+            .window
+            .as_ref()
+            .and_then(|window| window.paging.live.last_applied_seq)
+            .unwrap_or(boundary.after_seq),
+    });
+    atoms::HISTORY_V2_STATE.set(HistoryV2State {
+        status: HistoryV2Status::Idle,
+        session_id: previous.session_id,
+        execution_ready: previous.execution_ready,
+        runtime_generation: previous.runtime_generation,
+        delivery_id: previous.delivery_id,
+        live_boundary,
+        window: None,
+        failure: None,
+    });
+}
+
 /// 只读取当前状态快照。
 pub fn snapshot() -> HistoryV2State {
     atoms::HISTORY_V2_STATE.state().read().clone()

@@ -229,6 +229,28 @@ struct Projection {
     targets: Vec<HistoryDetailTarget>,
 }
 
+/// 从 `entryId = {sessionId}:{messageUuid}` 取出裸消息身份。
+///
+/// 与 live `messageId` 直接比较需要同一口径；缺前缀或 uuid 为空视为无身份。
+fn entry_message_id(window: &HistoryV2Window, entry: &HistoryEntry) -> Option<String> {
+    let uuid = entry
+        .entry_id
+        .strip_prefix(window.session_id.as_str())?
+        .strip_prefix(':')?;
+    (!uuid.is_empty()).then(|| uuid.to_owned())
+}
+
+/// 历史 `invocationKey` 带会话前缀（`{sessionId}:{toolCallId}`），live 的
+/// `TuiToolCard.tool_id` 是裸 `toolCallId`；卡片身份统一为裸 id。跨条目配对
+/// 仍使用完整 `invocationKey`。
+fn bare_tool_id<'a>(window: &HistoryV2Window, invocation_key: &'a str) -> &'a str {
+    invocation_key
+        .strip_prefix(window.session_id.as_str())
+        .and_then(|rest| rest.strip_prefix(':'))
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(invocation_key)
+}
+
 fn project(window: &HistoryV2Window) -> Projection {
     let mut projection = Projection::default();
     // invocationKey → (entry 下标, 单元下标)：结果可在后续条目原地升级调用卡片。
@@ -238,11 +260,13 @@ fn project(window: &HistoryV2Window) -> Projection {
     for entry in &window.items {
         let entry_index = entries.len();
         entries.push(Vec::new());
+        let message_id = entry_message_id(window, entry);
         for sub_item in &entry.sub_items {
             project_sub_item(
                 window,
                 entry,
                 sub_item,
+                message_id.as_deref(),
                 entry_index,
                 &mut entries,
                 &mut calls,
@@ -272,6 +296,7 @@ fn project_sub_item(
     window: &HistoryV2Window,
     entry: &HistoryEntry,
     sub_item: &HistorySubItem,
+    message_id: Option<&str>,
     entry_index: usize,
     entries: &mut [Vec<TuiRenderUnit>],
     calls: &mut HashMap<String, (usize, usize)>,
@@ -280,12 +305,18 @@ fn project_sub_item(
     match sub_item {
         HistorySubItem::Text(item) => match (&item.text, &item.body) {
             (Some(text), _) if item.role == "user" => {
-                entries[entry_index].push(TuiRenderUnit::TuiUserBubble(TuiUserBubble::new(
-                    text.clone(),
-                )));
+                let mut bubble = TuiUserBubble::new(text.clone());
+                if let Some(id) = message_id {
+                    bubble = bubble.with_message_id(id);
+                }
+                entries[entry_index].push(TuiRenderUnit::TuiUserBubble(bubble));
             }
             (Some(text), _) => {
-                entries[entry_index].push(super::turn::committed_assistant_unit(text, &None));
+                entries[entry_index].push(super::turn::committed_assistant_unit_with_message_id(
+                    text,
+                    &None,
+                    message_id.map(str::to_owned),
+                ));
             }
             (None, Some(_)) => {
                 push_body_placeholder(window, entry, sub_item, &mut entries[entry_index], targets)
@@ -295,7 +326,11 @@ fn project_sub_item(
         HistorySubItem::Reasoning(item) => match (&item.text, &item.body) {
             (Some(text), _) => {
                 let reasoning = Some(text.clone());
-                entries[entry_index].push(super::turn::committed_assistant_unit("", &reasoning));
+                entries[entry_index].push(super::turn::committed_assistant_unit_with_message_id(
+                    "",
+                    &reasoning,
+                    message_id.map(str::to_owned),
+                ));
             }
             (None, Some(_)) => {
                 push_body_placeholder(window, entry, sub_item, &mut entries[entry_index], targets)
@@ -311,7 +346,7 @@ fn project_sub_item(
                 ),
             };
             let card = as_tool_card(super::tool::replay_tool_started_unit(
-                &item.invocation_key,
+                bare_tool_id(window, &item.invocation_key),
                 &item.title,
                 &input_summary,
                 &raw_input,
@@ -354,7 +389,7 @@ fn project_sub_item(
                 return;
             }
             let card = as_tool_card(super::tool::replay_tool_started_unit(
-                &item.invocation_key,
+                bare_tool_id(window, &item.invocation_key),
                 "tool",
                 "",
                 &serde_json::Value::Null,
