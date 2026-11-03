@@ -281,6 +281,11 @@ impl BufferedInput {
 pub static PENDING_ATTACHMENTS: AtomStatic<Vec<PendingAttachment>> = AtomStatic::new(Vec::new);
 
 pub static ACP_STATE: AtomStatic<AcpStateSnapshot> = AtomStatic::new(AcpStateSnapshot::default);
+
+/// OSC 7501 上报值。bridge 写入，AppShell effect 实际写 stdout——effect 与绘制
+/// 同线程串行，避免状态序列插进一帧中间。
+pub static PROGRAM_STATUS: AtomStatic<crate::kit::program_status::ProgramStatus> =
+    AtomStatic::new(|| crate::kit::program_status::ProgramStatus::Idle);
 /// 用户手动折叠覆盖表（Slice 2）——key 为 entry 身份（message_id/tool_id/agent_id），
 /// value 为手动 fold 目标。存在即视为 `user_modified=true`：折叠 pass
 /// （`acp_events/render.rs::apply_fold_pass`）必须跳过这些 entry 的自动策略，
