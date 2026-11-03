@@ -1,4 +1,5 @@
 use super::*;
+use serial_test::serial;
 
 fn no_env(_: &str) -> Option<String> {
     None
@@ -146,6 +147,7 @@ fn write_failure_propagates() {
 }
 
 #[test]
+#[serial]
 fn publish_updates_atom_only_on_change() {
     use crate::kit::atoms;
 
