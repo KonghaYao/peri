@@ -87,7 +87,7 @@ pub(in crate::sessions) fn write_failure(error: anyhow::Error) -> SessionResourc
             }
             None => match error.downcast_ref::<sqlx::Error>() {
                 Some(sql_error) => map_sqlx(sql_error),
-                None => corrupt("stored session data is not writable"),
+                None => corrupt(&format!("stored session data is not writable: {error:#}")),
             },
         },
     }

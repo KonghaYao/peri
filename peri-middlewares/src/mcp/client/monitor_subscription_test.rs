@@ -231,7 +231,7 @@ async fn wait_settled_external(manager: &Arc<dyn TaskManager>) {
 async fn wait_for_reminder(queue: &MessageQueue) -> Vec<QueuedMessage> {
     let deadline = tokio::time::Instant::now() + OBSERVE_TIMEOUT;
     loop {
-        let messages = queue.drain_all();
+        let messages = queue.drain_all_sync();
         if !messages.is_empty() {
             return messages;
         }
@@ -244,7 +244,7 @@ async fn wait_for_reminder(queue: &MessageQueue) -> Vec<QueuedMessage> {
 }
 
 fn drain(queue: &MessageQueue) -> Vec<QueuedMessage> {
-    queue.drain_all()
+    queue.drain_all_sync()
 }
 
 fn reminder_body(message: &QueuedMessage) -> String {

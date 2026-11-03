@@ -259,7 +259,7 @@ pub trait McpPoolPort: Send + Sync {
         None
     }
 
-    fn verify_shared_environment_close(&self, _root_session_id: &str) -> Result<(), String> {
+    async fn verify_shared_environment_close(&self, _root_session_id: &str) -> Result<(), String> {
         Err("Incomplete: shared environment child ownership unknown".into())
     }
 

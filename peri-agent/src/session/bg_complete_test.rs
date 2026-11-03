@@ -51,7 +51,7 @@ fn current_terminal_delivery_is_accepted_once_without_a_ledger() {
     let result = shell_result("shell-current");
     callback(&result, BgTaskKind::Shell).unwrap();
     callback(&result, BgTaskKind::Shell).unwrap();
-    assert_eq!(queue.drain_batch(64).len(), 1);
+    assert_eq!(queue.drain_batch_sync(64).len(), 1);
 }
 
 #[test]
@@ -64,7 +64,7 @@ fn same_terminal_identity_cannot_acknowledge_changed_payload() {
     assert!(callback(&result, BgTaskKind::Shell)
         .unwrap_err()
         .contains("conflicting"));
-    assert_eq!(queue.drain_batch(64).len(), 1);
+    assert_eq!(queue.drain_batch_sync(64).len(), 1);
 }
 
 /// [回归测试] 去重指纹是固定长度摘要，不随通知正文体积增长；
@@ -111,7 +111,11 @@ fn large_output_dedup_is_idempotent_and_still_detects_conflicts() {
     result.output = "y".repeat(1024 * 1024);
     callback(&result, BgTaskKind::Shell).unwrap();
     callback(&result, BgTaskKind::Shell).unwrap();
-    assert_eq!(queue.drain_batch(64).len(), 1, "相同大输出重试只能投递一次");
+    assert_eq!(
+        queue.drain_batch_sync(64).len(),
+        1,
+        "相同大输出重试只能投递一次"
+    );
 
     result.output.push('z');
     assert!(
@@ -120,7 +124,7 @@ fn large_output_dedup_is_idempotent_and_still_detects_conflicts() {
             .contains("conflicting"),
         "同一 identity 的不同大输出仍必须拒绝"
     );
-    assert_eq!(queue.drain_batch(64).len(), 0, "冲突不得追加投递");
+    assert_eq!(queue.drain_batch_sync(64).len(), 0, "冲突不得追加投递");
 }
 
 fn registered_manager(
@@ -156,14 +160,14 @@ fn accepted_queue_delivery_settles_task_without_another_run() {
     manager.confirm_external_execution_stopped(&ticket);
     assert!(manager.is_execution_idle());
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
-    assert!(queue.has_wake_up());
-    assert_eq!(queue.len(), 1);
+    assert!(queue.has_wake_up_sync());
+    assert_eq!(queue.len_sync(), 1);
     callback(&result, BgTaskKind::Agent).unwrap();
     assert!(!manager
         .settle_completed(&ticket, result.clone(), callback)
         .unwrap());
     assert_eq!(manager.retry_pending_deliveries(), 0);
-    assert_eq!(queue.len(), 1);
+    assert_eq!(queue.len_sync(), 1);
 }
 
 struct RetryDelivery {
@@ -210,7 +214,7 @@ fn refused_queue_delivery_retains_task_and_retries_original_once() {
     assert!(error.to_string().contains("queue acceptance refused"));
     assert_eq!(manager.active_count(), 1);
     assert_eq!(manager.snapshot().tasks[0].status, "delivery_pending");
-    assert!(queue.is_empty());
+    assert!(queue.is_empty_sync());
     assert_eq!(manager.retry_pending_deliveries(), 1);
     assert_eq!(manager.active_count(), 0);
     // 重试成功只清除投递责任；真实执行资源仍需 producer 确认已停止。
@@ -220,7 +224,7 @@ fn refused_queue_delivery_retains_task_and_retries_original_once() {
     callback(&result, BgTaskKind::Agent).unwrap();
     assert_eq!(manager.retry_pending_deliveries(), 0);
     assert_eq!(route.attempts.load(Ordering::SeqCst), 2);
-    let accepted = queue.drain_all();
+    let accepted = queue.drain_all_sync();
     assert_eq!(accepted.len(), 1);
     assert_eq!(
         accepted[0].source,

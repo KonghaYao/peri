@@ -33,6 +33,7 @@ libc = "0.2"
 tokio = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 url.workspace = true
+peri-acp-types = { path = "../peri-acp-types", features = ["test-support"] }
 
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
 tokio = { workspace = true, features = ["full"] }

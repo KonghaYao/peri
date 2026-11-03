@@ -877,7 +877,7 @@ impl ServerLoop<'_> {
         // 在释放 sessions 锁后发送，避免 notify 路径持锁触碰 scheduler。
         let cont_req = {
             let mut sessions = sessions.lock().await;
-            handle_notification(&method, &params, &mut sessions, cfg)
+            handle_notification(&method, &params, &mut sessions, cfg).await
         };
         if let Some(req) = cont_req {
             if cont_tx.send(req).is_err() {

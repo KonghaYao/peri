@@ -18,6 +18,7 @@ pub(in crate::host) async fn run_session_loop(
             ctx.cancel.clone(),
             !turn.continuation && turn.content.is_empty(),
         )
+        .await
         .unwrap();
     let result = crate::session::executor::run_session_loop(ctx, turn).await;
     let outcome = if result.failure.is_some() || result.persistence_inconsistent {
@@ -27,7 +28,7 @@ pub(in crate::host) async fn run_session_loop(
     } else {
         UserInputAttemptOutcome::Interrupted
     };
-    mailbox.finish_attempt(&ticket, outcome);
+    mailbox.finish_attempt(&ticket, outcome).await;
     result
 }
 
@@ -40,7 +41,18 @@ pub(in crate::host) async fn new_resources(
             .await
             .unwrap(),
     );
-    let workspace = resources.resolve_workspace(directory.path()).await.unwrap();
+    register_session_row(&resources, session_id, directory.path()).await;
+    (resources, directory)
+}
+
+/// 生产装配先 `create_session` 再派发 prompt；MQ 入队要求 thread 行已存在，
+/// 夹具必须复刻这一步，否则持久入队会被当作未知会话拒绝。
+pub(in crate::host) async fn register_session_row(
+    resources: &Arc<dyn SessionResources>,
+    session_id: &str,
+    cwd: &std::path::Path,
+) {
+    let workspace = resources.resolve_workspace(cwd).await.unwrap();
     resources
         .create_session(&NewSession {
             thread_id: session_id.into(),
@@ -58,7 +70,6 @@ pub(in crate::host) async fn new_resources(
         })
         .await
         .unwrap();
-    (resources, directory)
 }
 
 pub(in crate::host) fn initialize_runtime(
@@ -66,9 +77,17 @@ pub(in crate::host) fn initialize_runtime(
     directory: Option<Arc<tempfile::TempDir>>,
 ) {
     if ctx.session_access.is_none() {
+        // 与生产装配同形：有会话存储时 MQ 必须绑定同一份 resources/thread，
+        // 否则 Receive 只改内存、Full Compact 在存储里找不到已显示的消息。
+        let queue = match (&ctx.session_resources, &ctx.thread_id) {
+            (Some(resources), Some(thread_id)) => {
+                MessageQueue::bind(Arc::clone(resources), thread_id.clone())
+            }
+            _ => MessageQueue::new(),
+        };
         ctx.session_access = Some(Arc::new(MockSessionAccess {
             session_id: ctx.session_id.clone(),
-            inbox: Arc::new(SessionInbox::new(Arc::new(MessageQueue::new()))),
+            inbox: Arc::new(SessionInbox::new(Arc::new(queue))),
             tasks: Arc::new(peri_agent::agent::async_tasks::TaskManager::new()),
             idle: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             _directory: directory,

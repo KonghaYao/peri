@@ -368,11 +368,12 @@ fn cron_queue() -> peri_acp_types::session::MessageQueue {
     peri_acp_types::session::MessageQueue::default()
 }
 
-fn drain_reminders(
+async fn drain_reminders(
     queue: &peri_acp_types::session::MessageQueue,
 ) -> Vec<peri_acp_types::system_reminder::SystemReminder> {
     queue
-        .drain_all()
+        .drain_all_async()
+        .await
         .into_iter()
         .filter_map(|message| match message.payload {
             peri_acp_types::session::QueuedPayload::SystemReminder(reminder) => {
@@ -393,13 +394,14 @@ async fn cron_trigger_is_delivered_with_stable_identity_and_identity_only_metada
         prompt: "检查构建状态".into(),
     };
 
-    let first = super::enqueue_cron_trigger(&queue, &trigger);
+    let first = super::enqueue_cron_trigger(&queue, &trigger).await;
     assert_eq!(first, super::CronTriggerAdmission::Delivered);
-    let delivered_again = super::enqueue_cron_trigger(&queue, &trigger);
+    let delivered_again = super::enqueue_cron_trigger(&queue, &trigger).await;
     assert_eq!(delivered_again, super::CronTriggerAdmission::Delivered);
 
-    let reminders = drain_reminders(&queue);
-    assert_eq!(reminders.len(), 2, "两次投递都进入队列");
+    let reminders = drain_reminders(&queue).await;
+    // MQ 以稳定 ID 去重：同一 firing 的重复投递复用同一行，不产生两条提醒。
+    assert_eq!(reminders.len(), 1, "同一 firing 只进入队列一次");
     for reminder in &reminders {
         assert_eq!(reminder.kind, "triggered");
         assert!(reminder.metadata.get("prompt").is_none());
@@ -429,7 +431,7 @@ async fn oversized_historical_cron_trigger_fails_observably_without_truncated_ex
         prompt: prompt.clone(),
     };
 
-    match super::enqueue_cron_trigger(&queue, &trigger) {
+    match super::enqueue_cron_trigger(&queue, &trigger).await {
         super::CronTriggerAdmission::Rejected { reason } => {
             assert!(
                 reason.contains(&peri_acp_types::cron::MAX_CRON_PROMPT_BYTES.to_string()),
@@ -439,7 +441,7 @@ async fn oversized_historical_cron_trigger_fails_observably_without_truncated_ex
         super::CronTriggerAdmission::Delivered => panic!("超长任务不得被静默接纳"),
     }
 
-    let reminders = drain_reminders(&queue);
+    let reminders = drain_reminders(&queue).await;
     assert_eq!(reminders.len(), 1, "必须留下恰好一条失败证据");
     let notice = &reminders[0];
     assert_eq!(notice.kind, "trigger_undeliverable");

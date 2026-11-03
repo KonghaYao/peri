@@ -145,9 +145,24 @@ const INHERITED_PAYLOAD_INDEX_COLUMNS: &[&str] = &[
     "raw_len",
     "logical_len",
 ];
+/// Thread MQ 列（`docs/design/thread-mq.md` §3）：待发事实 + 派生的入队时间，没有状态列。
+const THREAD_MQ_COLUMNS: &[&str] = &[
+    "thread_id",
+    "id",
+    "enqueued_at",
+    "kind",
+    "source",
+    "policy_json",
+    "payload_json",
+    "original_draft",
+];
 
-/// 当前形状（canonical 10 张表）的逐表声明。顺序与 `canonical::CANONICAL_TABLES` 一致。
-pub(super) const CURRENT_TABLES: &[TableShape] = &[
+/// 上一代当前形状（v12）的逐表声明：本代当前形状去掉 `thread_mq` 后的**冻结快照**。
+///
+/// 冻结而不是复用当前声明：v12 的库只有这些表，判定必须按代际比对，不能因为本代新增
+/// 了一张表就把健康的 v12 库判成漂移（那会关掉升级路径）。顺序与
+/// `canonical::CANONICAL_TABLES` 的父表在前顺序一致。
+pub(super) const V12_TABLES: &[TableShape] = &[
     TableShape {
         name: "machines",
         optional: false,
@@ -248,6 +263,45 @@ pub(super) const CURRENT_TABLES: &[TableShape] = &[
         primary_key: &["snapshot_id", "ordinal"],
     },
 ];
+
+/// Thread MQ：当前形状必需的表（缺失即不是本代形状，不得直接读写）。
+///
+/// 与「派生索引可选」不同：MQ 承载唯一一份待发事实，没有回退来源；缺表必须让升级路径
+/// 建出来，而不是让仓库把它当成空队列。
+pub(super) const THREAD_MQ_TABLE: TableShape = TableShape {
+    name: "thread_mq",
+    optional: false,
+    columns: THREAD_MQ_COLUMNS,
+    not_null: &[
+        "thread_id",
+        "id",
+        "enqueued_at",
+        "kind",
+        "source",
+        "policy_json",
+        "payload_json",
+    ],
+    primary_key: &["thread_id", "id"],
+};
+
+/// 当前形状（v13）的逐表声明：v12 的冻结声明 + 本代新增的 `thread_mq`。
+///
+/// 用函数而不是 `const` 拼接：「本代形状」只能是「上一代声明 + 本代增量」，另抄一份
+/// 11 表声明会让两份形状第二次各自维护。
+pub(super) fn current_tables() -> Vec<&'static TableShape> {
+    V12_TABLES
+        .iter()
+        .chain(std::iter::once(&THREAD_MQ_TABLE))
+        .collect()
+}
+
+/// 当前形状（v13）的表名序列：`V12_TABLES` + `thread_mq`。
+///
+/// 远端打开按它逐表下发 `PRAGMA table_xinfo`：探测面与 [`check_current_shape`] 的判定面
+/// 必须逐表一致，否则会出现「读了却没判」的表。
+pub(super) fn current_table_names() -> impl Iterator<Item = &'static str> {
+    current_tables().into_iter().map(|table| table.name)
+}
 
 /// 压缩前形状的 `threads` 列（= 当前形状去掉 `workspace_id` / `archived`）。
 const INPUT_THREADS_COLUMNS: &[&str] = &[
@@ -415,6 +469,7 @@ pub(super) const CURRENT_COLUMNS_SQL: &str = "SELECT 'machines' AS t, name, \"no
     UNION ALL SELECT 'session_close_intents', name, \"notnull\", pk, cid FROM pragma_table_xinfo('session_close_intents')
     UNION ALL SELECT 'inherited_snapshot_index', name, \"notnull\", pk, cid FROM pragma_table_xinfo('inherited_snapshot_index')
     UNION ALL SELECT 'inherited_payload_index', name, \"notnull\", pk, cid FROM pragma_table_xinfo('inherited_payload_index')
+    UNION ALL SELECT 'thread_mq', name, \"notnull\", pk, cid FROM pragma_table_xinfo('thread_mq')
     ORDER BY 1, 5";
 
 /// 读回迁移输入形状的全部列形状（缺表在结果里没有行，由[`check_input`]判定）。
@@ -511,15 +566,28 @@ pub(super) fn check_input(table: &InputTable, actual: &[ActualColumn]) -> Result
     Ok(())
 }
 
-/// 完整当前形状：8 张表逐表严格判定（[`TableShape::optional`] 表缺表容忍，存在即逐项相符）。
-pub(super) fn check_current_shape(
-    tables: &HashMap<String, Vec<ActualColumn>>,
-) -> Result<(), String> {
-    for table in CURRENT_TABLES {
+/// 完整上一代当前形状（v12，10 张表）的判定：只用于把 v11/v12 的库认成升级来源。
+pub(super) fn check_v12_shape(tables: &HashMap<String, Vec<ActualColumn>>) -> Result<(), String> {
+    for table in V12_TABLES {
         let actual = tables.get(table.name).map(Vec::as_slice).unwrap_or(&[]);
         check_strict(table, actual)?;
     }
     Ok(())
+}
+
+/// 完整当前形状（v13）：v12 的 10 张表 + `thread_mq` 逐表严格判定。
+///
+/// 两段分开判定，因为 v12 是独立的升级来源：同一份读回结果既能回答「这是不是本代形状」，
+/// 也能回答「这是不是上一代形状」——两者的差别只是 `thread_mq` 一行。
+pub(super) fn check_current_shape(
+    tables: &HashMap<String, Vec<ActualColumn>>,
+) -> Result<(), String> {
+    check_v12_shape(tables)?;
+    let actual = tables
+        .get(THREAD_MQ_TABLE.name)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    check_strict(&THREAD_MQ_TABLE, actual)
 }
 
 /// 删除前的形状判定：缺表不算错（要不要删见 [`dropped_plan`]），存在即必须逐项相符。

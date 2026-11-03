@@ -70,7 +70,7 @@ async fn all_owned_kinds_publish_before_terminal_and_wake_idle_consumer() {
         let delivery: OnBgCompleteFn = Arc::new(move |result, actual_kind| {
             assert_eq!(actual_kind, kind);
             assert_eq!(owner.upgrade().unwrap().active_count(), 1);
-            output.push(QueuedMessage::new(
+            output.push_sync(QueuedMessage::new(
                 MessageKind::Defer,
                 MessageSource::SystemInjected,
                 crate::messages::BaseMessage::human(result.output.clone()),
@@ -84,7 +84,7 @@ async fn all_owned_kinds_publish_before_terminal_and_wake_idle_consumer() {
             .await
             .unwrap();
         assert_eq!(registry.active_count(), 0);
-        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.len_sync(), 1);
     }
 }
 
@@ -402,13 +402,13 @@ async fn automatic_retry_uses_original_delivery_identity_without_duplicate_queue
     assert!(registry
         .settle_completed(&ticket, result(), delivery)
         .is_err());
-    assert_eq!(queue.len(), 1);
+    assert_eq!(queue.len_sync(), 1);
     assert!(wake.has_changed().unwrap());
     wake.borrow_and_update();
-    assert_eq!(queue.drain_batch(64).len(), 1);
+    assert_eq!(queue.drain_batch_sync(64).len(), 1);
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     assert_eq!(registry.active_count(), 0);
-    assert_eq!(queue.len(), 0);
+    assert_eq!(queue.len_sync(), 0);
     assert!(!wake.has_changed().unwrap());
     let ids = route.ids.lock();
     assert_eq!(ids.len(), 2);
@@ -433,7 +433,7 @@ fn frozen_queue_route_rejects_conflicting_payload_or_source_without_waking() {
         .accept(delivery_id, &reminder, MessageSource::SubAgentComplete)
         .unwrap();
     wake.borrow_and_update();
-    assert_eq!(queue.drain_batch(64).len(), 1);
+    assert_eq!(queue.drain_batch_sync(64).len(), 1);
     route
         .accept(delivery_id, &reminder, MessageSource::SubAgentComplete)
         .unwrap();
@@ -453,7 +453,7 @@ fn frozen_queue_route_rejects_conflicting_payload_or_source_without_waking() {
         .accept(delivery_id, &reminder, MessageSource::ShellComplete)
         .unwrap_err()
         .contains("conflicting"));
-    assert_eq!(queue.len(), 0);
+    assert_eq!(queue.len_sync(), 0);
     assert!(!wake.has_changed().unwrap());
 }
 

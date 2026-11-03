@@ -516,6 +516,7 @@ async fn make_session_context_with_manager(
         peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
             .await
             .unwrap();
+    execution_fixture::register_session_row(&session_resources, session_id, tmp.path()).await;
     let mut peri_config = PeriConfig::default();
     peri_config.config.active_alias = "sonnet".to_string();
     peri_config.config.providers = vec![ProviderConfig {

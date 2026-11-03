@@ -105,7 +105,7 @@ async fn parent_completes_after_real_agent_resume_missing_thread() {
     );
     *parent.transcript().write() =
         MessageTranscript::new().with_persistence(fixture.facade(), parent_id.clone());
-    parent.queue().push(QueuedMessage::prompt(
+    parent.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("resume the missing child and report back"),
     ));

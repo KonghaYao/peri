@@ -128,7 +128,7 @@ async fn run_script_with_observer(
     .with_middleware_chain(Arc::new(chain))
     .with_event_bus(Arc::new(bus))
     .build();
-    ctx.session.queue.push(QueuedMessage::prompt(
+    ctx.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("finish the task"),
     ));

@@ -88,6 +88,7 @@ async fn test_user_input_takeback_and_dispatch_share_server_state() {
     let mailbox = cfg.session_manager.user_input_mailbox_for(&sid).unwrap();
     mailbox
         .attach_external_attempt(tokio_util::sync::CancellationToken::new(), false)
+        .await
         .unwrap();
     let first_id = "00000000-0000-0000-0000-000000000001";
     let second_id = "00000000-0000-0000-0000-000000000002";
@@ -140,9 +141,21 @@ async fn test_user_input_takeback_and_dispatch_share_server_state() {
         1,
         "剩余队列只有已发布的第二条"
     );
+    // thread_mq 中待发输入入队即写 MQ，「未交付」由发送选择约束；
+    // 取回只需保证被撤回的行不残留。
+    let withdrawn = peri_acp_types::messages::MessageId::from(
+        uuid::Uuid::parse_str(first_id).expect("first input id is a uuid"),
+    );
+    let remaining = cfg
+        .session_manager
+        .v2_queue_for(&sid)
+        .unwrap()
+        .query(peri_acp_types::session::MqFilter::default())
+        .await
+        .expect("test MQ query");
     assert!(
-        cfg.session_manager.v2_queue_for(&sid).unwrap().is_empty(),
-        "中断收尾前不能提前交 MQ"
+        remaining.iter().all(|row| row.id != withdrawn),
+        "取回后不能把被撤回的输入留在 MQ"
     );
 }
 
@@ -219,18 +232,21 @@ async fn test_user_input_stop_revokes_ticket_before_cancel_token_registration() 
     .unwrap();
     let mailbox = cfg.session_manager.user_input_mailbox_for(&sid).unwrap();
     let ticket = mailbox.reserve_run().unwrap();
-    crate::host::notify::handle_notification(
+    let _ = crate::host::notify::handle_notification(
         "session/cancel",
         &json!({"sessionId":sid}),
         &mut sessions,
         &cfg,
-    );
+    )
+    .await;
     assert!(
-        !mailbox.attach_attempt(&ticket, tokio_util::sync::CancellationToken::new()),
+        !mailbox
+            .attach_attempt(&ticket, tokio_util::sync::CancellationToken::new())
+            .await,
         "Stop 后旧 ticket 不能进入执行"
     );
     assert_eq!(
-        mailbox.snapshot().items[0].state,
+        mailbox.snapshot().await.items[0].state,
         peri_acp_types::session::UserInputState::Queued,
         "尚未领取的输入恢复为可取回"
     );
@@ -251,11 +267,16 @@ async fn test_user_input_wire_control_responds_while_prompt_lock_is_held() {
     let (client, server) = crate::transport::mpsc::mpsc_transport_pair();
     let client = Arc::new(client);
     let server: Arc<dyn AcpTransport> = Arc::new(server);
-    let mailbox = crate::host::user_input::ensure_mailbox(&sid, &cfg, &server).unwrap();
+    let mailbox = crate::host::user_input::ensure_mailbox(&sid, &cfg, &server)
+        .await
+        .unwrap();
     let cancel = CancellationToken::new();
     states.get_mut(&sid).unwrap().cancel_token = Some(cancel.clone());
-    mailbox.attach_external_attempt(cancel, false).unwrap();
-    let generation = mailbox.snapshot().generation;
+    mailbox
+        .attach_external_attempt(cancel, false)
+        .await
+        .unwrap();
+    let generation = mailbox.snapshot().await.generation;
     let states = Arc::new(tokio::sync::Mutex::new(states));
     let prompt_lock = Arc::new(tokio::sync::Mutex::new(()));
     let _running_prompt = Arc::clone(&prompt_lock).lock_owned().await;
@@ -354,7 +375,11 @@ async fn test_user_input_run_started_is_delivered_before_execution_can_continue(
     .unwrap();
     let mailbox = cfg.session_manager.user_input_mailbox_for(&sid).unwrap();
     let ticket = mailbox.reserve_run().unwrap();
-    assert!(mailbox.attach_attempt(&ticket, tokio_util::sync::CancellationToken::new()));
+    assert!(
+        mailbox
+            .attach_attempt(&ticket, tokio_util::sync::CancellationToken::new())
+            .await
+    );
     crate::host::user_input::publish_run_started(&sid, &mailbox, &ticket, &cfg, &transport_dyn)
         .await
         .unwrap();
@@ -399,11 +424,14 @@ async fn test_user_input_stdio_uses_same_short_control_requests() {
             transport_read,
             transport_write,
         ));
-    let mailbox = crate::host::user_input::ensure_mailbox(&sid, &cfg, &server).unwrap();
+    let mailbox = crate::host::user_input::ensure_mailbox(&sid, &cfg, &server)
+        .await
+        .unwrap();
     mailbox
         .attach_external_attempt(CancellationToken::new(), false)
+        .await
         .unwrap();
-    let generation = mailbox.snapshot().generation;
+    let generation = mailbox.snapshot().await.generation;
     let task = tokio::spawn(async move {
         let states = Arc::new(tokio::sync::Mutex::new(states));
         let locks = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
@@ -501,9 +529,11 @@ async fn test_user_input_cancel_rejects_stale_ticket_without_cancelling_current_
     .unwrap();
     let mailbox = cfg.session_manager.user_input_mailbox_for(&sid).unwrap();
     let old = mailbox.reserve_run().unwrap();
-    assert!(mailbox.attach_attempt(&old, CancellationToken::new()));
-    mailbox.stop();
-    mailbox.finish_attempt(&old, UserInputAttemptOutcome::Interrupted);
+    assert!(mailbox.attach_attempt(&old, CancellationToken::new()).await);
+    mailbox.stop().await;
+    mailbox
+        .finish_attempt(&old, UserInputAttemptOutcome::Interrupted)
+        .await;
     handle_request(
         "session/input/dispatch",
         &json!({
@@ -520,24 +550,30 @@ async fn test_user_input_cancel_rejects_stale_ticket_without_cancelling_current_
     .unwrap();
     let current = mailbox.reserve_run().unwrap();
     let current_cancel = CancellationToken::new();
-    assert!(mailbox.attach_attempt(&current, current_cancel.clone()));
+    assert!(
+        mailbox
+            .attach_attempt(&current, current_cancel.clone())
+            .await
+    );
     sessions.get_mut(&sid).unwrap().cancel_token = Some(current_cancel.clone());
-    crate::host::notify::handle_notification(
+    let _ = crate::host::notify::handle_notification(
         "session/cancel",
         &json!({"sessionId":sid,"generation":generation,"requestId":old.id}),
         &mut sessions,
         &cfg,
-    );
+    )
+    .await;
     assert!(
         !current_cancel.is_cancelled(),
         "旧 ticket 的迟到 Stop 不得取消新执行"
     );
-    crate::host::notify::handle_notification(
+    let _ = crate::host::notify::handle_notification(
         "session/cancel",
         &json!({"sessionId":sid,"generation":generation,"requestId":current.id}),
         &mut sessions,
         &cfg,
-    );
+    )
+    .await;
     assert!(
         current_cancel.is_cancelled(),
         "当前 ticket 的 Stop 必须传到真实执行 token"

@@ -57,7 +57,7 @@ async fn real_blocking_shell_tree_survives_deadline_then_cancel_cleans_tree() {
         })
         .unwrap();
     let child = make_child(manager.clone(), true);
-    child.queue().push(QueuedMessage::prompt(
+    child.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run a real blocking shell tree"),
     ));

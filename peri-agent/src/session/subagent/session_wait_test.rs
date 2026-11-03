@@ -73,10 +73,12 @@ async fn terminal_after_optional_first_attempt(first_attempt: bool) {
         .with_persistence(bound.resources(), child_id.clone());
     let calls = Arc::new(AtomicUsize::new(0));
     if first_attempt {
-        child.queue().push(crate::session::QueuedMessage::prompt(
-            crate::session::MessageSource::UserInput,
-            crate::messages::BaseMessage::human("initial child work"),
-        ));
+        child
+            .queue()
+            .push_sync(crate::session::QueuedMessage::prompt(
+                crate::session::MessageSource::UserInput,
+                crate::messages::BaseMessage::human("initial child work"),
+            ));
         run_child(child.clone(), calls.clone()).await;
     }
     let callback = crate::session::bg_complete::task_bg_complete_callback(

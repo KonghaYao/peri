@@ -26,7 +26,7 @@ impl McpClientPool {
     ///
     /// 通知以 canonical ExternalEvent reminder 注入；Defer 唤醒 idle executor，
     /// Info 留待下一次主动执行消费。
-    fn broadcast_subscription_notification(
+    async fn broadcast_subscription_notification(
         &self,
         server: &str,
         uri: &str,
@@ -64,7 +64,12 @@ impl McpClientPool {
             })
             .expect("MCP subscription reminder mapping must be valid");
         for handle in handles {
-            handle.push_system_reminder(kind, MessageSource::McpNotification, reminder.clone());
+            if let Err(error) = handle
+                .push_system_reminder(kind, MessageSource::McpNotification, reminder.clone())
+                .await
+            {
+                tracing::warn!(%error, "MCP subscription reminder enqueue failed");
+            }
         }
         tracing::info!(server = %server, uri = %uri, sessions = %self.session_bindings.read().inboxes().len(), "订阅通知已广播到会话 inbox");
     }
@@ -99,11 +104,15 @@ impl McpClientPool {
                 uri,
                 subscription_id,
                 declared_kind.map(Into::into).unwrap_or(MessageKind::Defer),
-            );
+            )
+            .await;
             return;
         }
         match self.read_git_ref_body(server, uri).await {
-            Some(body) => self.broadcast_git_watch_notification(server, uri, &body, declared_kind),
+            Some(body) => {
+                self.broadcast_git_watch_notification(server, uri, &body, declared_kind)
+                    .await
+            }
             None => {
                 tracing::warn!(
                     server = %server,
@@ -115,7 +124,8 @@ impl McpClientPool {
                     uri,
                     subscription_id,
                     declared_kind.map(Into::into).unwrap_or(MessageKind::Defer),
-                );
+                )
+                .await;
             }
         }
     }
@@ -144,7 +154,7 @@ impl McpClientPool {
     }
 
     /// 把宿主内置的 `git_watch` 提醒推到所有注册会话 inbox（`Info`，不唤醒）。
-    fn broadcast_git_watch_notification(
+    async fn broadcast_git_watch_notification(
         &self,
         server: &str,
         uri: &str,
@@ -159,7 +169,12 @@ impl McpClientPool {
         let (default_kind, reminder) = git_watch_reminder_from_resource(uri, body);
         let kind = declared_kind.map(Into::into).unwrap_or(default_kind);
         for handle in handles {
-            handle.push_system_reminder(kind, MessageSource::McpNotification, reminder.clone());
+            if let Err(error) = handle
+                .push_system_reminder(kind, MessageSource::McpNotification, reminder.clone())
+                .await
+            {
+                tracing::warn!(%error, "MCP subscription reminder enqueue failed");
+            }
         }
         tracing::info!(server = %server, uri = %uri, sessions = %self.session_bindings.read().inboxes().len(), "git ref 变化已注入会话");
     }

@@ -109,14 +109,17 @@ pub(crate) fn parse_monitor_meta(
 /// `processed` has already advanced before this call (the decision is final),
 /// so a missing inbox race or a rejected reminder is a deterministic drop, not
 /// a retry. Returns `false` when nothing was pushed.
-pub(crate) fn push_monitor_alert(
+pub(crate) async fn push_monitor_alert(
     pool: &McpClientPool,
     session_id: &str,
     raw_monitor_id: &str,
     meta: &MonitorAlertMeta,
     hits: u64,
 ) -> bool {
-    let inbox = pool.session_bindings.read().inbox(session_id);
+    let inbox = {
+        let bindings = pool.session_bindings.read();
+        bindings.inbox(session_id)
+    };
     let Some(inbox) = inbox else {
         tracing::warn!(
             session_id = %session_id,
@@ -144,12 +147,24 @@ pub(crate) fn push_monitor_alert(
             return false;
         }
     };
-    inbox.push_system_reminder_with_delivery_id(
-        MessageKind::Defer,
-        MessageSource::McpNotification,
-        reminder,
-        monitor_alert_delivery_id(raw_monitor_id, hits),
-    );
+    let outcome = inbox
+        .push_system_reminder_with_delivery_id(
+            MessageKind::Defer,
+            MessageSource::McpNotification,
+            reminder,
+            monitor_alert_delivery_id(raw_monitor_id, hits),
+        )
+        .await;
+    if let Err(error) = outcome {
+        tracing::warn!(
+            session_id = %session_id,
+            task_id = %raw_monitor_id,
+            hits,
+            %error,
+            "monitor alert reminder enqueue failed"
+        );
+        return false;
+    }
     tracing::debug!(
         session_id = %session_id,
         task_id = %raw_monitor_id,

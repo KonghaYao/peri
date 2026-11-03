@@ -35,8 +35,8 @@ async fn parent_without_custom_callback_still_receives_terminal_and_wake() {
     tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
         .await
         .unwrap();
-    assert_eq!(parent.queue().len(), 1);
-    assert!(parent.queue().drain_all()[0].delivery_id.is_some());
+    assert_eq!(parent.queue().len_sync(), 1);
+    assert!(parent.queue().drain_all_sync()[0].delivery_id.is_some());
 }
 
 #[test]

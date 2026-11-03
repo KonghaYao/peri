@@ -13,6 +13,8 @@ use peri_acp_types::thread::{CancelPolicy, ThreadId};
 use peri_acp_types::workspace::{SessionBinding, SESSION_BINDING_VERSION};
 use peri_resources::sessions::SessionResourcesImpl;
 
+use super::{FrozenContext, Session};
+
 /// 一条已创建、已绑定的会话（临时库 + 临时 git 工作区）。
 pub(crate) struct TestSession {
     pub(crate) resources: Arc<dyn SessionResources>,
@@ -68,6 +70,30 @@ impl TestSession {
 
     pub(crate) fn thread_id(&self) -> ThreadId {
         self.thread_id.clone()
+    }
+
+    /// 绑定本会话真实资源与 thread 的 MQ 门面（与生产装配同形）。
+    pub(crate) fn queue(&self) -> peri_acp_types::session::MessageQueue {
+        peri_acp_types::session::MessageQueue::bind(self.resources(), self.thread_id())
+    }
+
+    /// 生产形态的会话：MQ 与 transcript 共用同一存储和 thread。
+    ///
+    /// 内存队列 + 持久 transcript 会让 MQ 移交的消息不在历史里，写入随即失败。
+    pub(crate) fn session(&self, cwd: &str, frozen: FrozenContext) -> Arc<Session> {
+        let session = Session::new_with_cancel_and_queue(
+            Arc::from(cwd),
+            frozen,
+            Some(self.thread_id.clone()),
+            Arc::new(tokio_util::sync::CancellationToken::new()),
+            self.queue(),
+        );
+        let transcript = session.transcript();
+        let mut guard = transcript.write();
+        *guard =
+            std::mem::take(&mut *guard).with_persistence(self.resources(), self.thread_id.clone());
+        drop(guard);
+        session
     }
 
     pub(crate) async fn read_only_resources(&self) -> Arc<dyn SessionResources> {

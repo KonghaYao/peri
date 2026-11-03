@@ -100,10 +100,11 @@ async fn dispatch_bash(
     context
         .session
         .queue
-        .push(peri_agent::session::QueuedMessage::prompt(
+        .push_async(peri_agent::session::QueuedMessage::prompt(
             peri_agent::session::MessageSource::UserInput,
             BaseMessage::human("exercise Bash execution evidence"),
-        ));
+        ))
+        .await;
     context.runtime.llm = Arc::new(DispatchLlm(input));
     peri_agent::agent::stages::receive::run_receive(peri_agent::agent::stages::ReceiveInput {
         context: context.clone(),

@@ -30,6 +30,10 @@ use crate::history_window::{
     HistoryBodyChunk, HistoryCommittedTail, HistoryReadTicket, HistorySource,
 };
 use crate::messages::MessageId;
+use crate::session::{
+    MqCancelOutcome, MqEnqueueOutcome, MqEntry, MqFilter, MqInput, MqReceiveOutcome,
+    MqReceiveSelection,
+};
 use crate::store::{CompactionChange, InheritedContext, MessageFlags, PersistedPayload};
 use crate::system_reminder::TrustedSystemReminder;
 use crate::thread::{AgentStatus, CancelPolicy, ThreadId, ThreadMeta};
@@ -1013,6 +1017,83 @@ pub trait SessionResources: Send + Sync {
 
     /// 排空该会话已排队的持久化写入（有界等待）。
     async fn drain_persistence(&self, id: &ThreadId) -> SessionResourceResult<()>;
+
+    // ── Thread MQ（持久收件箱） ──
+    //
+    // 五个方法构成一个行为面：`thread_mq` 只保存「尚未移交」的消息，移交与取消都物理
+    // 删除行，不保存终态、墓碑或消费留档。默认实现一律返回 `Unsupported`——后端要么
+    // 支持原子移交，要么显式拒绝；回退成「先写历史再删 MQ」的两次独立写入不允许
+    // （见 `docs/design/thread-mq.md` §4.2）。
+
+    /// 接纳一条入站消息到目标 thread 的 MQ。
+    ///
+    /// 同一 ID 的既有 MQ 行内容一致时复用原接纳结果（含原入队时间）；同一 ID 已在历史
+    /// 返回 [`MqEnqueueDisposition::AlreadyHandedOff`]；内容冲突或 ID 属于其他 thread
+    /// 返回 [`SessionResourceErrorKind::Conflict`]，不覆盖旧行也不改路由。
+    /// `enqueued_at` 由存储端生成，重试不得改写。
+    async fn mq_enqueue(
+        &self,
+        _thread_id: &ThreadId,
+        _input: MqInput,
+    ) -> SessionResourceResult<MqEnqueueOutcome> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    /// 按 `(enqueued_at, id)` 升序读取本 thread 的 MQ 行；只读，不消费。
+    async fn mq_query(
+        &self,
+        _thread_id: &ThreadId,
+        _filter: MqFilter,
+    ) -> SessionResourceResult<Vec<MqEntry>> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    /// 取消一条仍在 MQ 的用户输入，并返回整行原稿。
+    ///
+    /// 只允许 `source == UserInput`（否则 `InvalidInput`）。并发 Receive 已提交时返回
+    /// [`MqCancelOutcome::AlreadyHandedOff`]，两条路径都没有该 ID 时返回
+    /// [`MqCancelOutcome::NotFound`]。
+    async fn mq_cancel(
+        &self,
+        _thread_id: &ThreadId,
+        _id: MessageId,
+    ) -> SessionResourceResult<MqCancelOutcome> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    /// 原子移交：同一事务/批次内写历史并删除 MQ 行。
+    ///
+    /// 逐项按选择顺序处理；MQ 行不存在或 `enqueued_at` 已变是 `Missing`（不写历史）。
+    /// 提交成功才返回结果，提交结果未知时调用方须按稳定 ID 重查，不得当作成功。
+    async fn mq_receive(
+        &self,
+        _thread_id: &ThreadId,
+        _selection: MqReceiveSelection,
+    ) -> SessionResourceResult<MqReceiveOutcome> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    /// 清空本 thread 的全部 MQ 行；只给 rewind 与 thread 生命周期调用。
+    async fn mq_clear(&self, _thread_id: &ThreadId) -> SessionResourceResult<()> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    /// 仅测试：让下一次原子移交在写入前暂停；默认实现忽略门控。
+    ///
+    /// 必须经适配器转发到真正的存储实现，否则 `MessageQueue::gate_next_receive`
+    /// 在绑定资源的路径上静默失效。
+    #[cfg(feature = "test-support")]
+    fn install_receive_gate(&self, _gate: crate::session::ReceiveGate) {}
 }
 
 mod lifecycle;

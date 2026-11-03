@@ -5,10 +5,10 @@ use peri_acp_types::session::QueuedPayload;
 fn test_user_input_recall_preserves_unicode_and_model_only_audience() {
     let queue = MessageQueue::new();
     let body = "回顾\n".repeat(MAX_REMINDER_BODY_BYTES / 3);
-    push_input_recalls(&queue, std::slice::from_ref(&body));
-    assert!(!queue.has_wake_up(), "recall 不单独唤醒新执行");
+    futures::executor::block_on(push_input_recalls(&queue, std::slice::from_ref(&body)));
+    assert!(!queue.has_wake_up_sync(), "recall 不单独唤醒新执行");
     let chunks: Vec<_> = queue
-        .drain_all()
+        .drain_all_sync()
         .into_iter()
         .map(|message| {
             let QueuedPayload::SystemReminder(reminder) = message.payload else {
@@ -29,6 +29,6 @@ fn test_user_input_recall_preserves_unicode_and_model_only_audience() {
 #[test]
 fn test_user_input_recall_empty_is_noop() {
     let queue = MessageQueue::new();
-    push_input_recalls(&queue, &[]);
-    assert!(queue.is_empty(), "空 recall 不引入空消息");
+    futures::executor::block_on(push_input_recalls(&queue, &[]));
+    assert!(queue.is_empty_sync(), "空 recall 不引入空消息");
 }

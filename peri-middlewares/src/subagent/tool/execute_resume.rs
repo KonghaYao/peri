@@ -66,6 +66,7 @@ impl super::SubAgentTool {
         if let Some(manager) = &host.task_manager {
             let receipt = manager
                 .send_subagent_message(&thread_id, prompt.as_deref())
+                .await
                 .map_err(|error| {
                     use peri_agent::agent::async_tasks::SubagentMessageError;
                     let code = match &error {
@@ -74,7 +75,9 @@ impl super::SubAgentTool {
                         | SubagentMessageError::InvalidEnvelope(_) => {
                             EffectiveToolErrorCode::InvalidInput
                         }
-                        SubagentMessageError::Closed | SubagentMessageError::Full => {
+                        SubagentMessageError::Closed
+                        | SubagentMessageError::Full
+                        | SubagentMessageError::Store(_) => {
                             EffectiveToolErrorCode::ApplicationFailed
                         }
                     };

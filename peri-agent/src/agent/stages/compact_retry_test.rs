@@ -9,7 +9,7 @@ use crate::error::AgentError;
 use crate::messages::BaseMessage;
 use crate::session::store::FrozenContext;
 use crate::session::test_resources::TestSession;
-use crate::session::{MessageSource, QueuedMessage, Session};
+use crate::session::{MessageSource, QueuedMessage};
 use crate::tools::{BaseTool, ToolContext};
 use peri_model::{ModelCapabilities, ModelMessage, ModelRequest, ModelResponse, ModelStream};
 use std::sync::{
@@ -134,17 +134,7 @@ async fn make_scenario(
     EventHandles,
 ) {
     let bound = TestSession::open().await;
-    let session = Session::new(
-        Arc::from("/tmp/compact-retry"),
-        FrozenContext::builder().build(),
-        Some(bound.thread_id.clone()),
-    );
-    {
-        let transcript = session.transcript();
-        let mut guard = transcript.write();
-        *guard = std::mem::take(&mut *guard)
-            .with_persistence(bound.resources(), bound.thread_id.clone());
-    }
+    let session = bound.session("/tmp/compact-retry", FrozenContext::builder().build());
     let order = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let model = Arc::new(LoopModel {
         requests: Default::default(),
@@ -172,10 +162,13 @@ async fn make_scenario(
         )))
         .with_event_bus(Arc::new(bus))
         .build();
-    ctx.session.queue.push(QueuedMessage::prompt(
-        MessageSource::UserInput,
-        BaseMessage::human("original task"),
-    ));
+    ctx.session
+        .queue
+        .push_async(QueuedMessage::prompt(
+            MessageSource::UserInput,
+            BaseMessage::human("original task"),
+        ))
+        .await;
     (bound, ctx, model, summary, handles)
 }
 

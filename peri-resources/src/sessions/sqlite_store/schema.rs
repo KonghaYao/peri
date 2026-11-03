@@ -28,8 +28,9 @@ pub(super) enum SchemaState {
     Version8,
     Version9,
     Version10,
-    /// `user_version` 是上一代当前形状（11）：列形状与本代相同，只是还没有 inherited
-    /// 派生索引表；写打开做一次增量补齐，不搬运任何会话事实。
+    /// `user_version` 是上一代当前形状（11|12）：列形状与本代相同（11 只缺 inherited
+    /// 派生索引表，12 已补齐但还没有 `thread_mq`）；写打开做一次增量补齐，不搬运任何
+    /// 会话事实。
     PreviousCurrent,
     /// `user_version` 已是上一代版本，但形状还是压缩前的登记形状（v4 内部用过）。
     /// 名字取形状而不是版本号：它与 [`PreviousCurrent`](Self::PreviousCurrent) 的差别是
@@ -55,7 +56,11 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         .await?;
     match version {
         v if v == CURRENT_SCHEMA_VERSION => return current_shape(connection).await,
-        // 11 既可能是上一代 canonical 形状（只缺派生索引表），也可能是压缩前的登记形状；
+        // 12 只会是上一代当前形状：形状判定按 v12 的冻结声明逐表比对。
+        canonical::PREVIOUS_CURRENT_SCHEMA_VERSION => {
+            return previous_shape(connection).await;
+        }
+        // 11 既可能是上一代当前形状（只缺派生索引表），也可能是压缩前的登记形状；
         // 两者都只做一次幂等升级，但走不同的路径。
         canonical::LEGACY_REGISTRATION_SCHEMA_VERSION => {
             return previous_shape(connection).await;
@@ -122,7 +127,8 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
 
 /// 版本已是当前版本时的形状判定（fail-closed）：与 `sessions::schema_shape` 的同一份声明
 /// 逐项比对（远端只读探测与远端迁移批次用的是同一份声明）。当前版本只接受当前形状：
-/// 版本 12 配上搬运输入形状不是合法的升级来源，不猜形状，也不把读不懂当成可用。
+/// 版本 13 配上 v12 形状（缺 `thread_mq`）不是合法的直接读写来源，不猜形状，也不把
+/// 读不懂当成可用。
 async fn current_shape(connection: &mut SqliteConnection) -> Result<SchemaState> {
     let tables =
         schema_shape::read_local_columns(&mut *connection, schema_shape::CURRENT_COLUMNS_SQL)
@@ -141,13 +147,14 @@ async fn current_shape(connection: &mut SqliteConnection) -> Result<SchemaState>
     }
 }
 
-/// 版本 11 的形状判定：先看上一代 canonical 形状（只缺派生索引表），再看压缩前的
-/// 登记形状（搬运输入）。两者都不是就拒绝——版本 11 只服务这两种已知输入。
+/// 上一代当前形状（11|12）的形状判定：先看 v12 冻结声明（10 张表，缺 `thread_mq`），
+/// 再看压缩前的登记形状（搬运输入，只可能是 11）。两者都不是就拒绝——这两个版本号
+/// 只服务这两种已知输入。
 async fn previous_shape(connection: &mut SqliteConnection) -> Result<SchemaState> {
     let tables =
         schema_shape::read_local_columns(&mut *connection, schema_shape::CURRENT_COLUMNS_SQL)
             .await?;
-    let current_reason = match schema_shape::check_current_shape(&tables) {
+    let current_reason = match schema_shape::check_v12_shape(&tables) {
         Ok(()) => return Ok(SchemaState::PreviousCurrent),
         Err(reason) => reason,
     };
@@ -287,11 +294,12 @@ impl SqliteSessionDatabase {
         Ok(())
     }
 
-    /// 上一代 canonical 形状（版本 11）→ 当前形状：只补派生索引表与 canonical 索引集，
-    /// 不改写任何会话事实。整段一个事务，失败时库保持版本 11，旧二进制仍可打开。
+    /// 上一代当前形状（版本 11|12）→ 当前形状：只补派生索引表、`thread_mq` 与 canonical
+    /// 索引集，不改写任何会话事实。整段一个事务，失败时库保持原版本，旧二进制仍可打开。
     async fn upgrade_previous_current(connection: &mut SqliteConnection) -> Result<()> {
         ensure_canonical_names_hold_tables(connection, canonical::CREATE_INHERITED_INDEX_TABLES)
             .await?;
+        ensure_canonical_names_hold_tables(connection, &[canonical::THREAD_MQ_TABLE]).await?;
         let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
         for statement in canonical::CREATE_INHERITED_INDEX_TABLES {
             // 语句文本来自 `canonical` 的静态清单，不含外部输入。
@@ -299,6 +307,10 @@ impl SqliteSessionDatabase {
                 .execute(&mut *tx)
                 .await?;
         }
+        // `thread_mq` 与它的排序索引：12→13 的唯一形状增量；对 11 的库是同一份幂等 DDL。
+        sqlx::query(canonical::CREATE_THREAD_MQ_TABLE_SQL)
+            .execute(&mut *tx)
+            .await?;
         for statement in canonical::CREATE_INDEXES {
             sqlx::raw_sql(AssertSqlSafe((*statement).to_owned()))
                 .execute(&mut *tx)

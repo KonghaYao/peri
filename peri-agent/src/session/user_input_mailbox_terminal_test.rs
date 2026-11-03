@@ -2,7 +2,7 @@ use super::*;
 
 fn withdraw(mailbox: &UserInputMailbox, input: &EnqueueUserInputRequest) {
     mailbox
-        .take_back(&TakeBackUserInputRequest {
+        .take_back_sync(&TakeBackUserInputRequest {
             session_id: input.session_id.clone(),
             generation: input.generation.clone(),
             command_id: uuid::Uuid::now_v7().to_string(),
@@ -14,7 +14,7 @@ fn withdraw(mailbox: &UserInputMailbox, input: &EnqueueUserInputRequest) {
 fn fill_withdrawn(mailbox: &UserInputMailbox) {
     for _ in 0..TERMINAL_CAPACITY {
         let input = make_input(mailbox, "撤回填充");
-        mailbox.enqueue(&input).unwrap();
+        mailbox.enqueue_sync(&input).unwrap();
         withdraw(mailbox, &input);
     }
 }
@@ -24,35 +24,35 @@ fn overflow_preserves_delivered_and_withdrawn_identity() {
     for terminal in [UserInputState::Delivered, UserInputState::Withdrawn] {
         let (mailbox, inbox) = make_mailbox();
         mailbox
-            .attach_external_attempt(CancellationToken::new(), false)
+            .attach_external_attempt_sync(CancellationToken::new(), false)
             .unwrap();
         let mut input = make_input(&mailbox, "只执行一次");
-        mailbox.enqueue(&input).unwrap();
+        mailbox.enqueue_sync(&input).unwrap();
         if terminal == UserInputState::Delivered {
-            mailbox.enter_idle();
-            let messages = inbox.queue().drain_all();
+            mailbox.enter_idle_sync();
+            let messages = inbox.queue().drain_all_sync();
             let id = messages[0].message().unwrap().id();
-            mailbox.mark_claimed(&[id]);
-            mailbox.mark_delivered(&[id]);
+            mailbox.mark_claimed_sync(&[id]);
+            mailbox.mark_delivered_sync(&[id]);
         } else {
             withdraw(&mailbox, &input);
         }
         fill_withdrawn(&mailbox);
         assert!(!mailbox
-            .snapshot()
+            .snapshot_sync()
             .terminal_items
             .iter()
             .any(|item| item.input_id == input.input_id));
         input.command_id = uuid::Uuid::now_v7().to_string();
-        let receipt = mailbox.enqueue(&input).unwrap();
+        let receipt = mailbox.enqueue_sync(&input).unwrap();
         assert_eq!(receipt.results[0].state, terminal);
         assert!(receipt.snapshot.items.is_empty());
-        mailbox.enter_idle();
-        assert!(inbox.queue().is_empty());
+        mailbox.enter_idle_sync();
+        assert!(inbox.queue().is_empty_sync());
         input.command_id = uuid::Uuid::now_v7().to_string();
         input.content = MessageContent::text("更换载荷");
         assert_eq!(
-            mailbox.enqueue(&input).unwrap_err(),
+            mailbox.enqueue_sync(&input).unwrap_err(),
             UserInputQueueError::IdentityConflict
         );
     }
@@ -73,24 +73,24 @@ fn old_enqueue_new_delivery_survives_overflow_and_lost_event() {
         }),
     );
     mailbox
-        .attach_external_attempt(CancellationToken::new(), false)
+        .attach_external_attempt_sync(CancellationToken::new(), false)
         .unwrap();
     let input = make_input(&mailbox, "最早入队，最后交付");
-    mailbox.enqueue(&input).unwrap();
+    mailbox.enqueue_sync(&input).unwrap();
     fill_withdrawn(&mailbox);
     snapshots.lock().clear();
-    mailbox.enter_idle();
-    let messages = inbox.queue().drain_all();
+    mailbox.enter_idle_sync();
+    let messages = inbox.queue().drain_all_sync();
     let id = messages[0].message().unwrap().id();
-    mailbox.mark_claimed(&[id]);
-    mailbox.mark_delivered(&[id]);
+    mailbox.mark_claimed_sync(&[id]);
+    mailbox.mark_delivered_sync(&[id]);
     assert!(snapshots.lock().iter().any(|snapshot| snapshot
         .terminal_items
         .iter()
         .any(|item| item.input_id == input.input_id)));
     // 丢弃所有发布事件后，轮询仍保留最后交付项，而不是按 enqueue 顺序挤掉它。
     snapshots.lock().clear();
-    let snapshot = mailbox.snapshot();
+    let snapshot = mailbox.snapshot_sync();
     assert_eq!(snapshot.terminal_items.len(), TERMINAL_CAPACITY);
     assert_eq!(
         snapshot.terminal_items.last().unwrap().input_id,
@@ -102,21 +102,25 @@ fn old_enqueue_new_delivery_survives_overflow_and_lost_event() {
 fn same_batch_delivery_uses_receive_order_not_enqueue_order() {
     let (mailbox, _) = make_mailbox();
     mailbox
-        .attach_external_attempt(CancellationToken::new(), false)
+        .attach_external_attempt_sync(CancellationToken::new(), false)
         .unwrap();
     let a = make_input(&mailbox, "A");
     let b = make_input(&mailbox, "B");
-    mailbox.enqueue(&a).unwrap();
-    mailbox.enqueue(&b).unwrap();
-    mailbox.dispatch(&make_dispatch(&mailbox, &[&b])).unwrap();
-    mailbox.dispatch(&make_dispatch(&mailbox, &[&a])).unwrap();
+    mailbox.enqueue_sync(&a).unwrap();
+    mailbox.enqueue_sync(&b).unwrap();
+    mailbox
+        .dispatch_sync(&make_dispatch(&mailbox, &[&b]))
+        .unwrap();
+    mailbox
+        .dispatch_sync(&make_dispatch(&mailbox, &[&a]))
+        .unwrap();
     let ids: Vec<_> = [&b, &a]
         .iter()
         .map(|input| MessageId::from(uuid::Uuid::parse_str(&input.input_id).unwrap()))
         .collect();
-    mailbox.mark_claimed(&ids);
+    mailbox.mark_claimed_sync(&ids);
     assert_eq!(
-        mailbox.mark_delivered(&ids),
+        mailbox.mark_delivered_sync(&ids),
         vec![b.input_id.clone(), a.input_id.clone()]
     );
     assert_eq!(
@@ -139,12 +143,12 @@ fn same_batch_delivery_uses_receive_order_not_enqueue_order() {
         "ack 只移除已推送项，不改变剩余顺序"
     );
     assert!(
-        mailbox.mark_delivered(&ids).is_empty(),
+        mailbox.mark_delivered_sync(&ids).is_empty(),
         "重复确认不得重复进入交付日志"
     );
     assert_eq!(
         mailbox
-            .snapshot()
+            .snapshot_sync()
             .terminal_items
             .iter()
             .map(|item| item.input_id.clone())
@@ -157,28 +161,28 @@ fn same_batch_delivery_uses_receive_order_not_enqueue_order() {
 fn delivery_journal_admission_rejects_before_claim_and_recovers_after_ack() {
     let (mailbox, inbox) = make_mailbox();
     mailbox
-        .attach_external_attempt(CancellationToken::new(), false)
+        .attach_external_attempt_sync(CancellationToken::new(), false)
         .unwrap();
     for index in 0..DELIVERY_JOURNAL_CAPACITY {
         let input = make_input(&mailbox, &format!("交付 {index}"));
-        mailbox.enqueue(&input).unwrap();
-        mailbox.enter_idle();
-        let messages = inbox.queue().drain_all();
+        mailbox.enqueue_sync(&input).unwrap();
+        mailbox.enter_idle_sync();
+        let messages = inbox.queue().drain_all_sync();
         let id = messages[0].message().unwrap().id();
-        mailbox.mark_claimed(&[id]);
-        assert_eq!(mailbox.mark_delivered(&[id]).len(), 1);
+        mailbox.mark_claimed_sync(&[id]);
+        assert_eq!(mailbox.mark_delivered_sync(&[id]).len(), 1);
     }
     // 日志已满：新输入在 enqueue 准入处被拒绝，尚未进入 MQ/Claimed。
     let rejected = make_input(&mailbox, "准入拒绝输入");
     assert_eq!(
-        mailbox.enqueue(&rejected).unwrap_err(),
+        mailbox.enqueue_sync(&rejected).unwrap_err(),
         UserInputQueueError::Capacity,
         "日志容量必须在消费前拒绝，不能留下 Claimed"
     );
-    assert!(inbox.queue().is_empty(), "拒绝的输入不能交接给 MQ");
+    assert!(inbox.queue().is_empty_sync(), "拒绝的输入不能交接给 MQ");
     assert!(
         !mailbox
-            .snapshot()
+            .snapshot_sync()
             .items
             .iter()
             .any(|item| item.input_id == rejected.input_id),
@@ -191,13 +195,13 @@ fn delivery_journal_admission_rejects_before_claim_and_recovers_after_ack() {
     for item in pending {
         mailbox.ack_delivery_notification(&item.input_id);
     }
-    mailbox.enqueue(&rejected).unwrap();
-    mailbox.enter_idle();
-    let messages = inbox.queue().drain_all();
+    mailbox.enqueue_sync(&rejected).unwrap();
+    mailbox.enter_idle_sync();
+    let messages = inbox.queue().drain_all_sync();
     let rejected_id = messages[0].message().unwrap().id();
-    mailbox.mark_claimed(&[rejected_id]);
+    mailbox.mark_claimed_sync(&[rejected_id]);
     assert_eq!(
-        mailbox.mark_delivered(&[rejected_id]),
+        mailbox.mark_delivered_sync(&[rejected_id]),
         vec![rejected.input_id]
     );
     assert_eq!(mailbox.pending_delivery_notifications().len(), 1);
@@ -233,16 +237,16 @@ fn unpublished_terminal_cannot_be_evicted() {
         }),
     );
     mailbox
-        .attach_external_attempt(CancellationToken::new(), false)
+        .attach_external_attempt_sync(CancellationToken::new(), false)
         .unwrap();
     let input = make_input(&mailbox, "等待首次发布");
-    mailbox.enqueue(&input).unwrap();
-    mailbox.enter_idle();
-    let messages = inbox.queue().drain_all();
+    mailbox.enqueue_sync(&input).unwrap();
+    mailbox.enter_idle_sync();
+    let messages = inbox.queue().drain_all_sync();
     let id = messages[0].message().unwrap().id();
-    mailbox.mark_claimed(&[id]);
+    mailbox.mark_claimed_sync(&[id]);
     let delivering = mailbox.clone();
-    let thread = std::thread::spawn(move || delivering.mark_delivered(&[id]));
+    let thread = std::thread::spawn(move || delivering.mark_delivered_sync(&[id]));
     entered_rx
         .recv_timeout(std::time::Duration::from_secs(2))
         .unwrap();
@@ -257,5 +261,8 @@ fn unpublished_terminal_cannot_be_evicted() {
     release.wait();
     thread.join().unwrap();
     assert!(observed, "并发终结不能在首次快照发布之前挤掉旧终态");
-    assert_eq!(mailbox.snapshot().terminal_items.len(), TERMINAL_CAPACITY);
+    assert_eq!(
+        mailbox.snapshot_sync().terminal_items.len(),
+        TERMINAL_CAPACITY
+    );
 }

@@ -309,11 +309,55 @@ impl Fixture {
         }
     }
 
-    /// 上一代当前形状（`v5` + 11）：canonical 会话表齐全，只缺两张 inherited 派生索引表。
+    /// 上一代当前形状（`v6` + 12）：canonical 会话表齐全，只缺 `thread_mq`。
     ///
-    /// 从本构建的初始化计划建库，再删掉派生索引表并把元数据退回上一代——这正是
-    /// `v5` 库在两端形状一致之后的样子。
+    /// 从本构建的初始化计划建库，再删掉 `thread_mq` 并把元数据退回上一代——这正是
+    /// `v6` 库在两端形状一致之后的样子。
     pub(super) async fn previous_current() -> Self {
+        let fixture = Self::built_from_initialization_plan().await;
+        sqlx::query("DROP TABLE thread_mq")
+            .execute(&fixture.transport.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE peri_store_meta SET schema_version = 12, contract = ?1 WHERE singleton = 0",
+        )
+        .bind(schema::PREVIOUS_CURRENT_STORE_CONTRACT)
+        .execute(&fixture.transport.pool)
+        .await
+        .unwrap();
+        Self {
+            snapshot: Self::snapshot_of(&fixture.transport).await,
+            ..fixture
+        }
+    }
+
+    /// 再上一代当前形状（`v5` + 11）：canonical 会话表齐全，缺两张 inherited 派生索引表
+    /// 与 `thread_mq`。
+    pub(super) async fn legacy_current() -> Self {
+        let fixture = Self::built_from_initialization_plan().await;
+        sqlx::raw_sql(
+            "DROP TABLE inherited_payload_index;
+             DROP TABLE inherited_snapshot_index;
+             DROP TABLE thread_mq;",
+        )
+        .execute(&fixture.transport.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE peri_store_meta SET schema_version = 11, contract = ?1 WHERE singleton = 0",
+        )
+        .bind(schema::LEGACY_CURRENT_STORE_CONTRACT)
+        .execute(&fixture.transport.pool)
+        .await
+        .unwrap();
+        Self {
+            snapshot: Self::snapshot_of(&fixture.transport).await,
+            ..fixture
+        }
+    }
+
+    async fn built_from_initialization_plan() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let options = sqlx::sqlite::SqliteConnectOptions::new()
             .filename(directory.path().join("remote.db"))
@@ -333,28 +377,29 @@ impl Fixture {
         sqlx::query(
             "INSERT INTO peri_store_meta VALUES (0, 11, 'existing-store', ?1, 'original timestamp')",
         )
-        .bind(schema::PREVIOUS_CURRENT_STORE_CONTRACT)
+        .bind(schema::LEGACY_CURRENT_STORE_CONTRACT)
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::raw_sql(
-            "DROP TABLE inherited_payload_index;
-             DROP TABLE inherited_snapshot_index;
-             INSERT INTO projects VALUES ('project', 'locator', 'identity');",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO projects VALUES ('project', 'locator', 'identity');")
+            .execute(&pool)
+            .await
+            .unwrap();
         let transport = Arc::new(SqliteTransport::for_test(pool));
-        let store = Self::store_for(&transport, StoreAccess::ReadWrite);
-        let StoreIdentityRead::Present(snapshot) = store.read_identity().await.unwrap() else {
-            panic!("missing fixture identity")
-        };
+        let snapshot = Self::snapshot_of(&transport).await;
         Self {
             _directory: directory,
             transport,
             snapshot,
         }
+    }
+
+    async fn snapshot_of(transport: &Arc<SqliteTransport>) -> StoreSnapshot {
+        let store = Self::store_for(transport, StoreAccess::ReadWrite);
+        let StoreIdentityRead::Present(snapshot) = store.read_identity().await.unwrap() else {
+            panic!("missing fixture identity")
+        };
+        snapshot
     }
 
     fn store_for(transport: &Arc<SqliteTransport>, access: StoreAccess) -> RemoteStore {

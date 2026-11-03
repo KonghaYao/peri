@@ -211,9 +211,8 @@ pub(super) async fn upgrade(
         .await
         .map_err(|_| unsupported())?;
     let current_machine = crate::sessions::machine::current().map_err(|_| unsupported())?;
-    if snapshot.contract == schema::PREVIOUS_CURRENT_STORE_CONTRACT && snapshot.schema_version == 11
-    {
-        // 上一代当前形状只缺派生索引表：增量补齐，不搬运、不删除任何会话事实。
+    if additive_source(snapshot) {
+        // 上一代/再上一代当前形状只缺派生对象：增量补齐，不搬运、不删除任何会话事实。
         return store
             .apply_schema_upgrade(additive_upgrade_plan(snapshot, current_machine)?)
             .await;
@@ -232,14 +231,24 @@ pub(super) async fn upgrade(
         .await
 }
 
-/// 上一代当前形状（`v5` + 11）的升级批次：补派生索引表与 canonical 索引集，
+/// 增量补齐的升级来源：`v6` + 12（缺 `thread_mq`）与 `v5` + 11（还缺派生索引表）。
+///
+/// 两条来源共用同一份幂等批次：全部语句都是 `CREATE ... IF NOT EXISTS`，对已经建好的
+/// 对象是空操作；把两份形状会聚到同一终点，比按代际各写一条路径更不容易漂移。
+pub(super) fn additive_source(snapshot: &StoreSnapshot) -> bool {
+    matches!(
+        (snapshot.contract.as_str(), snapshot.schema_version),
+        (schema::PREVIOUS_CURRENT_STORE_CONTRACT, 12) | (schema::LEGACY_CURRENT_STORE_CONTRACT, 11)
+    )
+}
+
+/// 上一代/再上一代当前形状的升级批次：补派生索引表、`thread_mq` 与 canonical 索引集，
 /// 末尾推进版本与契约。整批仍是受管批次，守卫与推进语义与搬运路径一致。
 pub(super) fn additive_upgrade_plan(
     snapshot: &StoreSnapshot,
     current_machine: &str,
 ) -> SessionResourceResult<Vec<StatementSpec>> {
-    if snapshot.contract != schema::PREVIOUS_CURRENT_STORE_CONTRACT || snapshot.schema_version != 11
-    {
+    if !additive_source(snapshot) {
         return Err(unsupported());
     }
     let mut statements = vec![StatementSpec::new(
@@ -255,6 +264,7 @@ pub(super) fn additive_upgrade_plan(
             .iter()
             .map(|sql| StatementSpec::bare(sql)),
     );
+    statements.push(StatementSpec::bare(canonical::CREATE_THREAD_MQ_TABLE_SQL));
     statements.extend(
         canonical::CREATE_INDEXES
             .iter()
@@ -606,6 +616,9 @@ pub(super) fn upgrade_plan(
             .iter()
             .map(|sql| StatementSpec::bare(sql)),
     );
+    // `thread_mq` 与索引集里的 `idx_thread_mq_order` 是同一代新增的形状：重建路径不经过
+    // `CREATE_TABLES`，必须在这里显式建表，否则末尾的索引重放会撞上「表不存在」。
+    statements.push(StatementSpec::bare(canonical::CREATE_THREAD_MQ_TABLE_SQL));
     // 索引重放：`DROP TABLE` 把被重建的表（`threads` / `session_bindings`）上的索引一并删掉，
     // 批次末尾把 canonical 的**整份**索引集一次性重放，升级终点因此天然带齐索引——
     // 按表分组、逐表补索引会漏掉「某张表被重建而那张表的清单没跟上」这种漂移。

@@ -190,11 +190,8 @@ async fn model_failure_recovers_automatically(during_failure: bool) {
     assert!(state.cancel_token.is_none());
     assert!(!state.continuation_in_flight);
     drop(sessions);
-    assert!(queue.is_empty());
-    assert!(!crate::host::activation::mq_allowed(
-        &harness.cfg,
-        &harness.session_id
-    ));
+    assert!(queue.is_empty().await.expect("test MQ len"));
+    assert!(!crate::host::activation::mq_allowed(&harness.cfg, &harness.session_id).await);
     harness
         .cfg
         .session_manager
@@ -236,16 +233,16 @@ async fn assembly_failure_blocks_old_watermark_and_automatically_processes_new_e
     harness.complete_child("old-input");
     harness.listen();
     harness.wait_for_terminals(1).await;
-    assert!(!crate::host::activation::mq_allowed(
-        &harness.cfg,
-        &harness.session_id
-    ));
+    assert!(!crate::host::activation::mq_allowed(&harness.cfg, &harness.session_id).await);
     let queue = harness
         .cfg
         .session_manager
         .v2_queue_for(&harness.session_id)
         .unwrap();
-    let old_watermark = queue.admission_watermark();
+    let old_watermark = queue
+        .admission_watermark()
+        .await
+        .expect("test MQ watermark");
     for _ in 0..8 {
         harness
             .sender
@@ -275,7 +272,13 @@ async fn assembly_failure_blocks_old_watermark_and_automatically_processes_new_e
         .unwrap()
         .frozen = frozen;
     harness.complete_task("failed-workflow", BgTaskKind::Workflow, false);
-    assert!(queue.admission_watermark() > old_watermark);
+    assert!(
+        queue
+            .admission_watermark()
+            .await
+            .expect("test MQ watermark")
+            > old_watermark
+    );
     harness.wait_for_terminals(2).await;
     let history = harness
         .cfg
@@ -296,7 +299,7 @@ async fn assembly_failure_blocks_old_watermark_and_automatically_processes_new_e
             1
         );
     }
-    assert!(queue.is_empty());
+    assert!(queue.is_empty().await.expect("test MQ len"));
     harness
         .cfg
         .session_manager

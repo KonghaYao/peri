@@ -16,9 +16,9 @@ fn test_inbox_handle_push_prompt_wakes() {
     let inbox = SessionInbox::new(queue);
     let handle = inbox.handle();
 
-    handle.push_prompt(MessageSource::UserInput, make_msg("hello"));
-    assert!(inbox.queue().has_wake_up());
-    assert_eq!(inbox.queue().len(), 1);
+    handle.push_prompt_sync(MessageSource::UserInput, make_msg("hello"));
+    assert!(inbox.queue().has_wake_up_sync());
+    assert_eq!(inbox.queue().len_sync(), 1);
 }
 
 #[test]
@@ -27,8 +27,8 @@ fn test_inbox_handle_push_defer_wakes() {
     let inbox = SessionInbox::new(queue);
     let handle = inbox.handle();
 
-    handle.push_defer(MessageSource::SubAgentComplete, make_msg("done"));
-    assert!(inbox.queue().has_wake_up());
+    handle.push_defer_sync(MessageSource::SubAgentComplete, make_msg("done"));
+    assert!(inbox.queue().has_wake_up_sync());
 }
 
 #[test]
@@ -37,10 +37,10 @@ fn test_inbox_handle_push_info_does_not_wake() {
     let inbox = SessionInbox::new(queue);
     let handle = inbox.handle();
 
-    handle.push_info(MessageSource::SystemInjected, make_msg("info"));
-    assert!(!inbox.queue().has_wake_up());
+    handle.push_info_sync(MessageSource::SystemInjected, make_msg("info"));
+    assert!(!inbox.queue().has_wake_up_sync());
     // Info is still in the queue
-    assert_eq!(inbox.queue().len(), 1);
+    assert_eq!(inbox.queue().len_sync(), 1);
 }
 
 #[test]
@@ -50,18 +50,18 @@ fn test_inbox_handle_push_arbitrary_conditional_wake() {
     let handle = inbox.handle();
 
     // Info via push() — no wake
-    handle.push(QueuedMessage::info(
+    handle.push_sync(QueuedMessage::info(
         MessageSource::SystemInjected,
         make_msg("info"),
     ));
-    assert!(!inbox.queue().has_wake_up());
+    assert!(!inbox.queue().has_wake_up_sync());
 
     // Prompt via push() — wakes
-    handle.push(QueuedMessage::prompt(
+    handle.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         make_msg("prompt"),
     ));
-    assert!(inbox.queue().has_wake_up());
+    assert!(inbox.queue().has_wake_up_sync());
 }
 
 #[test]
@@ -71,18 +71,18 @@ fn test_inbox_handle_batch_wakes_on_any_prompt_or_defer() {
     let handle = inbox.handle();
 
     // Batch of only Info — no wake
-    handle.push_batch(vec![QueuedMessage::info(
+    handle.push_batch_sync(vec![QueuedMessage::info(
         MessageSource::SystemInjected,
         make_msg("info1"),
     )]);
-    assert!(!inbox.queue().has_wake_up());
+    assert!(!inbox.queue().has_wake_up_sync());
 
     // Batch with one Prompt — wakes
-    handle.push_batch(vec![
+    handle.push_batch_sync(vec![
         QueuedMessage::info(MessageSource::SystemInjected, make_msg("info2")),
         QueuedMessage::prompt(MessageSource::UserInput, make_msg("prompt")),
     ]);
-    assert!(inbox.queue().has_wake_up());
+    assert!(inbox.queue().has_wake_up_sync());
 }
 
 #[test]
@@ -91,8 +91,8 @@ fn test_inbox_handle_batch_empty_no_op() {
     let inbox = SessionInbox::new(queue);
     let handle = inbox.handle();
 
-    handle.push_batch(vec![]);
-    assert!(inbox.queue().is_empty());
+    handle.push_batch_sync(vec![]);
+    assert!(inbox.queue().is_empty_sync());
 }
 
 #[test]
@@ -102,11 +102,11 @@ fn test_inbox_handle_clone_independence() {
     let handle1 = inbox.handle();
     let handle2 = inbox.handle();
 
-    handle1.push_prompt(MessageSource::UserInput, make_msg("from h1"));
-    handle2.push_defer(MessageSource::CronTrigger, make_msg("from h2"));
+    handle1.push_prompt_sync(MessageSource::UserInput, make_msg("from h1"));
+    handle2.push_defer_sync(MessageSource::CronTrigger, make_msg("from h2"));
 
     // Both handles write to the same underlying queue
-    assert_eq!(inbox.queue().len(), 2);
+    assert_eq!(inbox.queue().len_sync(), 2);
 }
 
 #[tokio::test]
@@ -116,7 +116,7 @@ async fn test_await_wake_returns_immediately_when_pending() {
     let handle = inbox.handle();
 
     // Push before await — should return immediately
-    handle.push_prompt(MessageSource::UserInput, make_msg("already here"));
+    handle.push_prompt_sync(MessageSource::UserInput, make_msg("already here"));
 
     // Should not hang
     tokio::time::timeout(Duration::from_millis(100), inbox.await_wake())
@@ -136,7 +136,7 @@ async fn test_await_wake_blocks_until_prompt() {
     let h = tokio::spawn(async move {
         // Wait a bit then push
         tokio::time::sleep(Duration::from_millis(50)).await;
-        handle_async.push_prompt(MessageSource::UserInput, make_msg("wake me"));
+        handle_async.push_prompt_sync(MessageSource::UserInput, make_msg("wake me"));
     });
 
     // await_wake should block until the push
@@ -158,10 +158,10 @@ async fn test_await_wake_ignores_info_only() {
 
     let h = tokio::spawn(async move {
         // Push Info (should NOT wake)
-        handle_async.push_info(MessageSource::SystemInjected, make_msg("info"));
+        handle_async.push_info_sync(MessageSource::SystemInjected, make_msg("info"));
         // Wait then push Prompt (should wake)
         tokio::time::sleep(Duration::from_millis(50)).await;
-        handle_async.push_prompt(MessageSource::UserInput, make_msg("now wake"));
+        handle_async.push_prompt_sync(MessageSource::UserInput, make_msg("now wake"));
     });
 
     // await_wake should NOT return on Info, only on Prompt
@@ -179,9 +179,9 @@ async fn test_await_wake_non_destructive() {
     let inbox = SessionInbox::new(queue);
     let handle = inbox.handle();
 
-    handle.push_prompt(MessageSource::UserInput, make_msg("preserve me"));
+    handle.push_prompt_sync(MessageSource::UserInput, make_msg("preserve me"));
     inbox.await_wake().await;
 
     // Message should still be in the queue
-    assert_eq!(inbox.queue().len(), 1, "await_wake should not drain");
+    assert_eq!(inbox.queue().len_sync(), 1, "await_wake should not drain");
 }

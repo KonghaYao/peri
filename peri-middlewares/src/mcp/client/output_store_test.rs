@@ -563,7 +563,7 @@ async fn child_initiated_task_receipt_delivers_to_the_child_not_root() {
         );
     }
     assert!(root_manager.snapshot().tasks.is_empty());
-    assert!(root_inbox.queue().drain_all().is_empty());
+    assert!(root_inbox.queue().drain_all_sync().is_empty());
     owner.shutdown().await;
     wire.close().await;
 }

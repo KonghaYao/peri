@@ -32,6 +32,8 @@ uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# 测试面需要 `MessageQueue::*_async`（drain 夹具）；生产构建不含这些方法。
+peri-acp-types = { path = "../../peri-acp-types", features = ["test-support"] }
 
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
 tokio = { workspace = true, features = ["full"] }

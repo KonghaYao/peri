@@ -26,6 +26,8 @@ pub enum SubagentMessageError {
     Full,
     #[error("send_subagent: invalid message envelope: {0}")]
     InvalidEnvelope(#[from] peri_acp_types::system_reminder::ReminderValidationError),
+    #[error("send_subagent: MQ admission failed: {0}")]
+    Store(String),
 }
 
 /// A queue receipt, not a claim that the model has read or persisted the message.
@@ -42,6 +44,16 @@ pub struct BackgroundAgentInbox {
 }
 
 impl BackgroundAgentInbox {
+    /// 仅测试：同步适配同一 async 入队实现。
+    #[cfg(test)]
+    pub(crate) fn send_sync(
+        &self,
+        task_id: &str,
+        prompt: Option<&str>,
+    ) -> Result<QueuedSubagentMessage, SubagentMessageError> {
+        futures::executor::block_on(self.send(task_id, prompt))
+    }
+
     pub(crate) fn new(
         thread_id: String,
         queue: MessageQueue,
@@ -54,13 +66,16 @@ impl BackgroundAgentInbox {
         })
     }
 
-    pub(super) fn send(
+    pub(super) async fn send(
         &self,
         task_id: &str,
         prompt: Option<&str>,
     ) -> Result<QueuedSubagentMessage, SubagentMessageError> {
-        let queue = self.queue.lock();
-        let queue = queue.as_ref().ok_or(SubagentMessageError::Closed)?;
+        let queue = {
+            let guard = self.queue.lock();
+            let queue = guard.as_ref().ok_or(SubagentMessageError::Closed)?;
+            queue.clone()
+        };
         if self.cancel.is_cancelled() {
             return Err(SubagentMessageError::Closed);
         }
@@ -72,7 +87,12 @@ impl BackgroundAgentInbox {
         }
         // Only this producer's admission is bounded; other queue producers retain
         // their existing semantics. The admission lock serializes concurrent sends.
-        if queue.len() >= MAX_PENDING_MESSAGES {
+        if queue
+            .len()
+            .await
+            .map_err(|error| SubagentMessageError::Store(error.to_string()))?
+            >= MAX_PENDING_MESSAGES
+        {
             return Err(SubagentMessageError::Full);
         }
         let reminder = TrustedSystemReminderFactory::for_producer().construct(SystemReminder {
@@ -90,11 +110,14 @@ impl BackgroundAgentInbox {
                 "task_id": task_id,
             }),
         })?;
-        queue.push(QueuedMessage::system_reminder(
-            MessageKind::Defer,
-            MessageSource::SystemInjected,
-            reminder,
-        ));
+        queue
+            .enqueue(QueuedMessage::system_reminder(
+                MessageKind::Defer,
+                MessageSource::SystemInjected,
+                reminder,
+            ))
+            .await
+            .map_err(|error| SubagentMessageError::Store(error.to_string()))?;
         Ok(QueuedSubagentMessage {
             task_id: task_id.to_owned(),
         })

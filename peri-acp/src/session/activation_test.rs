@@ -2,67 +2,90 @@ use super::*;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::session::{MessageKind, MessageSource, QueuedMessage};
 
-fn enqueue(queue: &MessageQueue, kind: MessageKind) {
-    queue.push(QueuedMessage::new(
-        kind,
-        MessageSource::ShellComplete,
-        BaseMessage::human("task result"),
-    ));
+async fn enqueue(queue: &MessageQueue, kind: MessageKind) {
+    queue
+        .push_async(QueuedMessage::new(
+            kind,
+            MessageSource::ShellComplete,
+            BaseMessage::human("task result"),
+        ))
+        .await;
 }
 
-#[test]
-fn failed_inputs_and_passive_arrivals_do_not_restart_execution() {
+#[tokio::test]
+async fn failed_inputs_and_passive_arrivals_do_not_restart_execution() {
     let activation = SessionActivation::default();
     let queue = MessageQueue::new();
     activation.allow();
-    enqueue(&queue, MessageKind::Defer);
-    activation.record_failed_attempt(queue.admission_watermark());
-    assert!(!activation.can_activate(&queue));
-    enqueue(&queue, MessageKind::Info);
-    assert!(!activation.can_activate(&queue));
-    enqueue(&queue, MessageKind::Defer);
-    assert!(activation.can_activate(&queue));
+    enqueue(&queue, MessageKind::Defer).await;
+    activation.record_failed_attempt(
+        queue
+            .admission_watermark()
+            .await
+            .expect("test MQ watermark"),
+    );
+    assert!(!activation.can_activate(&queue).await);
+    enqueue(&queue, MessageKind::Info).await;
+    assert!(!activation.can_activate(&queue).await);
+    enqueue(&queue, MessageKind::Defer).await;
+    assert!(activation.can_activate(&queue).await);
 }
 
-#[test]
-fn required_arrival_during_failed_attempt_remains_eligible() {
+#[tokio::test]
+async fn required_arrival_during_failed_attempt_remains_eligible() {
     let activation = SessionActivation::default();
     let queue = MessageQueue::new();
     activation.allow();
-    enqueue(&queue, MessageKind::Defer);
-    let watermark = queue.admission_watermark();
-    enqueue(&queue, MessageKind::Defer);
+    enqueue(&queue, MessageKind::Defer).await;
+    let watermark = queue
+        .admission_watermark()
+        .await
+        .expect("test MQ watermark");
+    enqueue(&queue, MessageKind::Defer).await;
     activation.record_failed_attempt(watermark);
-    assert!(activation.can_activate(&queue));
+    assert!(activation.can_activate(&queue).await);
 }
 
-#[test]
-fn explicit_stop_survives_failure_and_fresh_required_work() {
+#[tokio::test]
+async fn explicit_stop_survives_failure_and_fresh_required_work() {
     let activation = SessionActivation::default();
     let queue = MessageQueue::new();
     activation.allow();
-    enqueue(&queue, MessageKind::Defer);
-    let watermark = queue.admission_watermark();
+    enqueue(&queue, MessageKind::Defer).await;
+    let watermark = queue
+        .admission_watermark()
+        .await
+        .expect("test MQ watermark");
     activation.suppress();
     activation.record_failed_attempt(watermark);
-    enqueue(&queue, MessageKind::Defer);
-    assert!(!activation.can_activate(&queue));
+    enqueue(&queue, MessageKind::Defer).await;
+    assert!(!activation.can_activate(&queue).await);
     activation.allow();
-    assert!(activation.can_activate(&queue));
+    assert!(activation.can_activate(&queue).await);
 }
 
-#[test]
-fn requeued_failed_input_preserves_its_admission_boundary() {
+#[tokio::test]
+async fn requeued_failed_input_preserves_its_admission_boundary() {
     let activation = SessionActivation::default();
     let queue = MessageQueue::new();
     activation.allow();
-    enqueue(&queue, MessageKind::Defer);
-    let watermark = queue.admission_watermark();
-    let messages = queue.drain_all();
-    activation.record_failed_attempt(watermark);
-    queue.push_batch(messages);
-    assert_eq!(queue.admission_watermark(), watermark);
-    assert!(!activation.can_activate(&queue));
+    enqueue(&queue, MessageKind::Defer).await;
+    let watermark = queue
+        .admission_watermark()
+        .await
+        .expect("test MQ watermark");
+    // MQ 失败重试不先提交：快照后按稳定 ID 重投是幂等的，接纳边界保持不变。
+    let messages = queue.snapshot().await.expect("test MQ snapshot");
+    activation.record_failed_attempt(watermark.clone());
+    queue.push_batch_async(messages).await;
+    assert_eq!(
+        queue
+            .admission_watermark()
+            .await
+            .expect("test MQ watermark"),
+        watermark
+    );
+    assert!(!activation.can_activate(&queue).await);
 }
 
 // ─── 后台结果：失败水位、Stop 与显式继续（T05/T12）──────────────────────────────

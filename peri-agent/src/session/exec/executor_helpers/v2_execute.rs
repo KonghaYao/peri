@@ -276,10 +276,18 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // （append_messages_to_transcript 跳过空 Prompt），也不产生空 user 气泡。
     // continuation（含队列交接路径）不 push——其输入经 mailbox handoff 入队。
     if !req.continuation {
-        v2_out.context.session.queue.push(QueuedMessage::prompt(
-            V2MessageSource::UserInput,
-            BaseMessage::human(req.agent_input.content.clone()),
-        ));
+        if let Err(error) = v2_out
+            .context
+            .session
+            .queue
+            .enqueue_sent(QueuedMessage::prompt(
+                V2MessageSource::UserInput,
+                BaseMessage::human(req.agent_input.content.clone()),
+            ))
+            .await
+        {
+            tracing::warn!(%error, "user prompt enqueue failed");
+        }
     }
 
     let input_ticket = req
@@ -460,11 +468,19 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         {
             Ok(reminders) if !reminders.is_empty() => {
                 for text in reminders {
-                    v2_out.context.session.queue.push(QueuedMessage::new(
-                        MessageKind::Info,
-                        V2MessageSource::SystemInjected,
-                        BaseMessage::human(text),
-                    ));
+                    if let Err(error) = v2_out
+                        .context
+                        .session
+                        .queue
+                        .enqueue(QueuedMessage::new(
+                            MessageKind::Info,
+                            V2MessageSource::SystemInjected,
+                            BaseMessage::human(text),
+                        ))
+                        .await
+                    {
+                        tracing::warn!(%error, "first turn reminder enqueue failed");
+                    }
                 }
             }
             Ok(_) => {}
@@ -528,7 +544,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         LoopResult::Completed | LoopResult::HookStopped { .. }
     ) {
         let queue = v2_out.session.queue();
-        if queue.has_ensure_processing() {
+        if queue.has_ensure_processing().await.unwrap_or(false) {
             if let Some(ref tx) = req.continuation_notify {
                 let _ = tx.send(crate::session::exec::executor::ContinuationRequest {
                     session_id: req.session_id.clone(),
@@ -536,9 +552,10 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                     mq_steering: true,
                     pending_result: false,
                 });
+                let queue_len = queue.len().await.unwrap_or(0);
                 tracing::debug!(
                     session_id = %req.session_id,
-                    queue_len = queue.len(),
+                    queue_len,
                     "[v2] MQ steering continuation notified after run_react_loop"
                 );
             }

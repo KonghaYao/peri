@@ -135,14 +135,9 @@ pub(crate) struct MockSessionResources {
     pub(crate) inherited_load_gate: Mutex<Option<ResumeLoadGate>>,
     pub(crate) flags_load_gate: Mutex<Option<ResumeLoadGate>>,
     pub(crate) active_write_gate: Mutex<Option<ResumeLoadGate>>,
+    /// 交接提醒的持久化门：让用例在「flush 已成功、提醒尚未写入」之间观察。
+    pub(crate) reminder_append_gate: Mutex<Option<ResumeLoadGate>>,
     pub(crate) archive_probe_gate: Mutex<Option<ResumeLoadGate>>,
-    /// 下一次 canonical reminder 提交的阶段门：进入后等待用例放行。
-    reminder_append_gate: Mutex<
-        Option<(
-            tokio::sync::oneshot::Sender<()>,
-            tokio::sync::oneshot::Receiver<()>,
-        )>,
-    >,
     /// 认领事实：`claim_child_resume` 成功返回后置位，结清时复位。
     ///
     /// 阶段门（[`ResumeLoadGate`]）只在**认领后**的快照读取生效：resume 的第一次读取是
@@ -160,6 +155,12 @@ pub(crate) struct MockSessionResources {
     history_read_only: AtomicBool,
     /// 单次 compaction 成功写入替身数据区后、返回前触发（测试精确取消时序用）。
     compaction_applied_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    /// MQ 行事实：替身也必须提供持久收件箱，Receive 才能像生产路径一样原子移交。
+    ///
+    /// 提交后的载荷同步写回本区 `payloads`，让 `load_session_history` 与 MQ 看到同一份事实。
+    mq: peri_acp_types::session::InMemoryMqStore,
+    /// `enqueued_at` 生成器：同一进程内单调递增，测试不依赖真实时钟。
+    mq_clock: Mutex<u64>,
 }
 
 impl MockSessionResources {
@@ -176,13 +177,15 @@ impl MockSessionResources {
             inherited_load_gate: Mutex::new(None),
             flags_load_gate: Mutex::new(None),
             active_write_gate: Mutex::new(None),
-            archive_probe_gate: Mutex::new(None),
             reminder_append_gate: Mutex::new(None),
+            archive_probe_gate: Mutex::new(None),
             claimed: Arc::new(AtomicBool::new(false)),
             fail_snapshot_at: AtomicUsize::new(0),
             snapshot_reads: AtomicUsize::new(0),
             history_read_only: AtomicBool::new(false),
             compaction_applied_hook: Mutex::new(None),
+            mq: peri_acp_types::session::InMemoryMqStore::new(),
+            mq_clock: Mutex::new(0),
         })
     }
 
@@ -281,19 +284,6 @@ impl MockSessionResources {
             id,
             status,
         );
-    }
-
-    /// 下一次 canonical reminder 提交进入后暂停，返回 (entered, release)。
-    pub(crate) fn gate_next_reminder_append(
-        &self,
-    ) -> (
-        tokio::sync::oneshot::Receiver<()>,
-        tokio::sync::oneshot::Sender<()>,
-    ) {
-        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        *self.reminder_append_gate.lock().unwrap() = Some((entered_tx, release_rx));
-        (entered_rx, release_tx)
     }
 
     /// 切换为只读能力面（测试后端能力差异用）。

@@ -58,7 +58,8 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | --- | --- | --- |
 | MCP 适配 v4-part-1 | [mcp-adaptation-v4-part-1.md](mcp-adaptation-v4-part-1.md) | System MCP 启动依赖、工具注入、MCP 隔离与 middleware 归属；迁移状态以代码与契约测试为准 |
 | 时间能力边界 | [time-runtime.md](time-runtime.md) | 原生边界已落地；WASM 完整验收与既有公开 Chrono 契约范围仍待核实；入口见 [peri-time 索引](../code-index/peri-time.md) |
-| RCRA 消息、任务归属与激活 | [rcra-message-activation.md](rcra-message-activation.md) | 当前进程 Task/MQ、canonical 历史与普通执行；**持久执行恢复已剥离** |
+| RCRA 消息、任务归属与激活 | [rcra-message-activation.md](rcra-message-activation.md) | 当前进程 Task/执行、canonical 历史与普通执行；待发送消息持久化见 [Thread MQ](thread-mq.md)，**持久执行恢复仍剥离** |
+| Thread MQ 持久收件箱 | [thread-mq.md](thread-mq.md) | 主、子与 Workflow Agent 的统一持久 MQ、原子 Receive 与 Rust 操作接口；实施与验收见 [active issue](../../spec/issues/2026-11-01-thread-mq-implementation.md) |
 | 存储 v2：Machine → Workspace → Session | [storage-v2-machine-workspace-session.md](storage-v2-machine-workspace-session.md) | schema 版本以代码索引为准，Git 使用 worktree 根、非 Git 使用启动 cwd；真实远端验收待执行 |
 | Command 系统 | [command-system.md](command-system.md) | 命令协议与执行边界以代码和契约测试为准 |
 | TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | transcript 展示、组合器与工作台布局的现行约束 |

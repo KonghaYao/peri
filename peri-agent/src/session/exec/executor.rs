@@ -265,7 +265,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         .and_then(|sa| sa.v2_message_queue(&ctx.session_id))
         .unwrap_or_default();
     if mailbox_input && !incoming_recalls.is_empty() {
-        input_recalls::push_input_recalls(&v2_message_queue, &incoming_recalls);
+        input_recalls::push_input_recalls(&v2_message_queue, &incoming_recalls).await;
         incoming_recalls.clear();
     }
 

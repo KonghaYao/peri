@@ -208,7 +208,7 @@ pub(crate) async fn run_cron_continuation_scheduler(
                     }
                     // M13：本次触发必须可观察地被接纳或拒绝，不得静默丢触发。
                     // 拒绝即不执行任务指令——超长提示绝不截断后照常执行。
-                    match enqueue_cron_trigger(&current_inbox, &req.trigger) {
+                    match enqueue_cron_trigger(&current_inbox, &req.trigger).await {
                         CronTriggerAdmission::Delivered => {}
                         CronTriggerAdmission::Rejected { reason } => {
                             warn!(
@@ -298,7 +298,7 @@ pub(super) enum CronTriggerAdmission {
 /// - 超出可承载预算的历史任务不会 panic，也不会被静默截断后照常执行：
 ///   改为投递一条可观察的失败通知（Tui/Automation 受众，不唤醒模型推理），
 ///   失败证据随持久化投递保留。
-pub(super) fn enqueue_cron_trigger(
+pub(super) async fn enqueue_cron_trigger(
     queue: &MessageQueue,
     trigger: &CronTrigger,
 ) -> CronTriggerAdmission {
@@ -306,22 +306,37 @@ pub(super) fn enqueue_cron_trigger(
         Ok(reminder) => {
             let delivery_id =
                 peri_acp_types::cron::cron_firing_delivery_id(&trigger.task_id, &trigger.firing_id);
-            queue.push(QueuedMessage::system_reminder_with_delivery_id(
+            let message = QueuedMessage::system_reminder_with_delivery_id(
                 MessageKind::Defer,
                 MessageSource::CronTrigger,
                 reminder,
                 delivery_id,
-            ));
-            CronTriggerAdmission::Delivered
+            );
+            match queue.enqueue(message).await {
+                Ok(_) => CronTriggerAdmission::Delivered,
+                Err(error) => CronTriggerAdmission::Rejected {
+                    reason: error.to_string(),
+                },
+            }
         }
         Err(error) => {
             let notice = undeliverable_cron_reminder(trigger, &error);
             match notice {
-                Some(notice) => queue.push(QueuedMessage::system_reminder(
-                    MessageKind::Info,
-                    MessageSource::CronTrigger,
-                    notice,
-                )),
+                Some(notice) => {
+                    let message = QueuedMessage::system_reminder(
+                        MessageKind::Info,
+                        MessageSource::CronTrigger,
+                        notice,
+                    );
+                    if let Err(enqueue_error) = queue.enqueue(message).await {
+                        warn!(
+                            task_id = %trigger.task_id,
+                            firing_id = %trigger.firing_id,
+                            %enqueue_error,
+                            "cron undeliverable notice enqueue failed"
+                        );
+                    }
+                }
                 None => warn!(
                     task_id = %trigger.task_id,
                     firing_id = %trigger.firing_id,
@@ -391,28 +406,29 @@ pub(crate) async fn run_continuation_scheduler(
         let Some(req) = recv_until_shutdown(&mut rx, &shutdown).await else {
             break;
         };
-        // eligibility + 原子 take（每 session 只运行一次）
+        // eligibility：先在锁内复制环境与关闭事实，释放锁后再查询激活水位。
+        let (environment, closing) = {
+            let sessions = sessions.lock().await;
+            match sessions.get(&req.session_id) {
+                Some(state) => (state.environment.clone(), state.closing),
+                None => (None, false),
+            }
+        };
+        if closing {
+            continue;
+        }
+        let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(&cfg);
+        if (req.mq_steering && !super::activation::mq_allowed(local, &req.session_id).await)
+            || (req.pending_result
+                && !super::activation::result_allowed(local, &req.session_id).await)
+        {
+            continue;
+        }
         let epoch = {
             let mut sessions = sessions.lock().await;
             match sessions.get_mut(&req.session_id) {
-                Some(state) => {
-                    let local = state
-                        .environment
-                        .as_ref()
-                        .map(|env| &env.cfg)
-                        .unwrap_or(&cfg);
-                    if state.closing
-                        || (req.mq_steering
-                            && !super::activation::mq_allowed(local, &req.session_id))
-                        || (req.pending_result
-                            && !super::activation::result_allowed(local, &req.session_id))
-                    {
-                        None
-                    } else {
-                        take_continuation_for_request(state, &req)
-                    }
-                }
-                None => None,
+                Some(state) if !state.closing => take_continuation_for_request(state, &req),
+                _ => None,
             }
         };
         let Some(epoch) = epoch else {

@@ -404,7 +404,7 @@ async fn test_stage_completion_reminders_share_assembled_task_manager() {
                 result.block_continue.is_none(),
                 "supplied={supplied}, {kind:?}: 装配后的后台任务必须抑制提醒"
             );
-            assert!(built.session.queue().is_empty());
+            assert!(built.session.queue().is_empty_sync());
             assert_eq!(controller.0.load(std::sync::atomic::Ordering::SeqCst), 0);
             let host = built
                 .session
@@ -439,7 +439,7 @@ async fn test_stage_completion_reminders_share_assembled_task_manager() {
                 Some("todo_require_completion")
             );
             assert_eq!(
-                built.session.queue().drain_all().len(),
+                built.session.queue().drain_all_sync().len(),
                 1,
                 "双开时 Todo 优先，不重复注入 Goal"
             );
@@ -457,7 +457,7 @@ async fn test_stage_completion_reminders_share_assembled_task_manager() {
                 .await
                 .unwrap();
             assert_eq!(result.block_continue.as_deref(), Some("goal_active"));
-            assert_eq!(built.session.queue().drain_all().len(), 1);
+            assert_eq!(built.session.queue().drain_all_sync().len(), 1);
             assert_eq!(controller.0.load(std::sync::atomic::Ordering::SeqCst), 1);
             let mut blocked = output;
             blocked.block_continue = Some("stop_hook_block".into());
@@ -465,7 +465,7 @@ async fn test_stage_completion_reminders_share_assembled_task_manager() {
                 .await
                 .unwrap();
             assert_eq!(result.block_continue.as_deref(), Some("stop_hook_block"));
-            assert!(built.session.queue().is_empty());
+            assert!(built.session.queue().is_empty_sync());
             assert_eq!(controller.0.load(std::sync::atomic::Ordering::SeqCst), 1);
         }
     }

@@ -64,10 +64,21 @@ impl CronOwner {
                                         prompt
                                     )),
                                 );
-                                inbox.push(QueuedMessage::defer(
-                                    MessageSource::CronTrigger,
-                                    message,
-                                ));
+                                // 入队失败必须留下诊断：触发器已从通道取走，本任务不再重试。
+                                if let Err(error) = inbox
+                                    .push(QueuedMessage::defer(
+                                        MessageSource::CronTrigger,
+                                        message,
+                                    ))
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        prompt = %prompt,
+                                        %error,
+                                        "cron_owner: failed to enqueue cron trigger"
+                                    );
+                                    continue;
+                                }
                                 tracing::debug!(prompt = %prompt, "cron_owner: trigger pushed to inbox");
                             }
                             None => {
@@ -113,3 +124,7 @@ impl std::fmt::Debug for CronOwner {
             .finish()
     }
 }
+
+#[cfg(test)]
+#[path = "cron_owner_test.rs"]
+mod tests;

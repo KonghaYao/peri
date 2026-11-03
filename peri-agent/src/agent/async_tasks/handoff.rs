@@ -279,7 +279,11 @@ pub async fn commit_child_handoff(
 ) -> Result<crate::session::subagent::ChildHandoffReceipt, HandoffCommitError> {
     use crate::session::subagent::ChildHandoffReceipt;
     let execution = session.turn.execution_binding();
-    let queued = owner.queue.snapshot();
+    let queued = owner
+        .queue
+        .snapshot()
+        .await
+        .map_err(|error| HandoffCommitError::Persistence(anyhow::anyhow!(error)))?;
     let mut message_ids = received_messages;
     message_ids.extend(queued.iter().filter_map(|message| {
         message

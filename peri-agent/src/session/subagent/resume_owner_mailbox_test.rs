@@ -164,7 +164,7 @@ async fn failed_child_resume_preserves_blocked_result_through_full_compact(
         child_id.clone(),
         "parent-thread".into(),
         child_manager.clone(),
-        MessageQueue::new(),
+        MessageQueue::bind(store.clone(), child_id.clone()),
         Some(store.clone()),
         None,
     );
@@ -354,7 +354,7 @@ async fn failed_child_resume_preserves_blocked_result_through_full_compact(
     assert_eq!(
         owner
             .queue
-            .snapshot()
+            .snapshot_sync()
             .iter()
             .filter(|message| message.delivery_id == Some(result_b_id))
             .count(),
@@ -708,7 +708,7 @@ async fn test_background_forced_abort_reblocks_unsettled_mailbox() {
         task_manager: Some(parent_manager.clone()),
         ..Default::default()
     });
-    let (entered, release) = store.gate_next_reminder_append();
+    let (entered, release) = owner.queue.gate_next_receive();
     let config = resume_config_with(
         store,
         child_id,

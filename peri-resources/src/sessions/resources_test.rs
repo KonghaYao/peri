@@ -274,3 +274,6 @@ mod composition;
 
 #[path = "resources_legacy_relink_test.rs"]
 mod legacy_relink;
+
+#[path = "resources_mq_test.rs"]
+mod mq;

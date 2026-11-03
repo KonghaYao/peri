@@ -252,7 +252,7 @@ async fn test_react_start_gate_publishes_candidate_before_first_reason_and_runs_
         .with_tool_catalog(Arc::clone(&catalog))
         .with_middleware_chain(Arc::new(chain))
         .build();
-    context.session.queue.push(QueuedMessage::prompt(
+    context.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("startup gate prompt"),
     ));
@@ -331,7 +331,7 @@ async fn test_react_start_gate_error_stops_before_compact_without_publishing_can
         .with_event_bus(Arc::new(bus))
         .build();
     let published_before = catalog.snapshot();
-    context.session.queue.push(QueuedMessage::prompt(
+    context.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("startup gate prompt"),
     ));
@@ -397,7 +397,7 @@ async fn test_react_start_gate_interrupted_maps_to_interrupted_not_fatal() {
         .with_middleware_chain(Arc::new(chain))
         .build();
     let published_before = catalog.snapshot();
-    context.session.queue.push(QueuedMessage::prompt(
+    context.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("startup gate prompt"),
     ));
@@ -450,7 +450,7 @@ async fn test_before_agent_soft_failure_still_reaches_reason_after_startup_gate(
         .with_tool_catalog(Arc::clone(&catalog))
         .with_middleware_chain(Arc::new(chain))
         .build();
-    context.session.queue.push(QueuedMessage::prompt(
+    context.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("startup gate prompt"),
     ));

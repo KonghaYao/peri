@@ -89,7 +89,7 @@ async fn test_post_tool_batch_block_reinjects_bounded_feedback() {
         "Block 不得伪装 ToolRejected（工具已执行）: {result:?}"
     );
 
-    let drained = state.v2_queue().drain_batch(64);
+    let drained = state.v2_queue().drain_batch_sync(64);
     assert_eq!(drained.len(), 1, "Block 必须回注一条反馈");
     let message = &drained[0];
     assert_eq!(message.kind, MessageKind::Defer);
@@ -123,7 +123,7 @@ async fn test_post_tool_batch_block_is_bounded_by_guard() {
         assert!(result.is_ok(), "第 {attempt} 次 Block 不得报错: {result:?}");
     }
     assert_eq!(
-        state.v2_queue().drain_batch(64).len(),
+        state.v2_queue().drain_batch_sync(64).len(),
         8,
         "上限内每次 Block 回注一条反馈"
     );
@@ -131,7 +131,7 @@ async fn test_post_tool_batch_block_is_bounded_by_guard() {
     let result = mw.fire_post_tool_batch(&mut state).await;
     assert!(result.is_ok(), "超限后忽略 block，不得报错: {result:?}");
     assert!(
-        state.v2_queue().drain_batch(64).is_empty(),
+        state.v2_queue().drain_batch_sync(64).is_empty(),
         "超过防循环上限后不得继续回注"
     );
 }
@@ -151,7 +151,7 @@ async fn test_post_tool_batch_continue_false_enqueues_stop_intent() {
         "continue:false 不得伪装 ToolRejected: {result:?}"
     );
 
-    let drained = state.v2_queue().drain_batch(64);
+    let drained = state.v2_queue().drain_batch_sync(64);
     assert_eq!(drained.len(), 1, "必须投递一条显式停止意图");
     let message = &drained[0];
     assert!(
@@ -177,5 +177,5 @@ async fn test_post_tool_batch_without_hooks_is_noop() {
     let mut state = make_state();
     let result = mw.fire_post_tool_batch(&mut state).await;
     assert!(result.is_ok());
-    assert!(state.v2_queue().drain_batch(64).is_empty());
+    assert!(state.v2_queue().drain_batch_sync(64).is_empty());
 }

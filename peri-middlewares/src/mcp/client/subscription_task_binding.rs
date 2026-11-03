@@ -116,13 +116,17 @@ impl McpClientPool {
                 .await?;
             return Ok(());
         }
-        if let Some(inbox) = self.session_bindings.read().inbox(target_session) {
-            inbox.push_system_reminder_with_delivery_id(
-                MessageKind::Defer,
-                source,
-                reminder,
-                delivery_id,
-            );
+        let inbox = self.session_bindings.read().inbox(target_session);
+        if let Some(inbox) = inbox {
+            inbox
+                .push_system_reminder_with_delivery_id(
+                    MessageKind::Defer,
+                    source,
+                    reminder,
+                    delivery_id,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
             return Ok(());
         }
         if delivery.is_some() {

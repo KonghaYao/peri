@@ -5,10 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 description = "Type contract layer across layers. Data contracts plus layer-boundary event/session/runtime contracts (tokio-backed channel types)."
 
+[features]
+# 仅测试：为仍使用同步队列断言的旧测试提供 block_on 适配；生产 API 仍只有 async。
+test-support = []
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+futures.workspace = true
 parking_lot.workspace = true
 peri-model = { path = "../peri-model" }
 serde.workspace = true

@@ -1,11 +1,11 @@
 # RCRA 消息、执行与历史会话加载
 
-- 状态：**已批准目标设计**。执行恢复已剥离，当前进程执行与历史加载保留；验证以代码与契约测试为准。
-- 2026-10-07 用户裁决：撤销持久 Inbox/处理义务、WorkState、阶段检查点、执行恢复及其 journal/control 回执，保留历史会话加载、冻结上下文、普通续聊和当前进程执行；此前可靠执行恢复目标已被取代，剥离过程见 Git 历史。
+- 状态：**已批准目标设计**。执行恢复已剥离；待发送消息的持久化由 [Thread MQ](thread-mq.md) 定义，当前进程执行与历史加载保留；验证以代码与契约测试为准。
+- 2026-10-07 用户裁决：撤销持久执行恢复、WorkState、阶段检查点及其 journal/control 回执，保留历史会话加载、冻结上下文、普通续聊和当前进程执行；待发送消息的持久收件箱随后由 [Thread MQ](thread-mq.md) 重新批准。剥离过程见 Git 历史。
 
 ## 1. 数据与生命周期
 
-会话 ID、历史消息、配置、frozen/inherited context 持久保存。消息队列、处理批次、阶段、调用关联、执行预算和待发送输入是当前进程运行态，不以完整 WorkState 或替代执行账本持久化。
+会话 ID、历史消息、配置、frozen/inherited context 与待发送消息持久保存。处理批次、阶段、调用关联、执行预算和运行 ticket 是当前进程运行态，不以完整 WorkState 或替代执行账本持久化。待发送消息的结构与恢复边界见 [Thread MQ](thread-mq.md)，MQ 行只表示尚未移交，不表示模型已处理。
 
 RCRA 主路径为 `MessageQueue → Receive → Compact → Reason → Act → MessageQueue`。Receive 是唯一退出判断点；普通 Transcript 写入、压缩和消息 flags/projection 保持。进程退出终止该进程的执行责任，不承诺重启恢复模型请求、工具调用、子 Agent、审批或待发队列。
 
@@ -17,7 +17,7 @@ RCRA 主路径为 `MessageQueue → Receive → Compact → Reason → Act → M
 
 失败尝试不能永久撤销新消息的激活资格：仅封锁尝试开始时已接纳输入的自动重试，之后接纳的模型可见 Required / EnsureProcessing 消息仍可激活。显式 Stop、关闭与过期执行身份的限制不被此规则覆盖；详见 [Session 异步任务](session-async-tasks.md)。
 
-用户输入和当前异步结果通过内存队列进入 Receive，再追加 Transcript。queue 接收不是磁盘持久接纳，不再使用 durable delivery/obligation/ACK 证明跨重启处理。当前进程可为重复通知去重，但不建立永久执行 journal。
+用户输入和当前异步结果先接纳到持久 Thread MQ，再由 Receive 原子写入 Transcript。入队是磁盘持久接纳，但 MQ 行不建立跨重启的执行义务；当前进程可为重复通知去重，不建立永久执行 journal，也不恢复旧发送、取消或外部副作用。
 
 语义迭代预算耗尽时，Receive 按本次 loop 入口的接纳序号边界区分首批输入与后续新增输入：后续模型可见 Required / EnsureProcessing 原始消息保留在 MQ，不先提交 Transcript，保持 delivery ID、接纳序号及顺序，由宿主现有失败边界准入下一次执行。当前 run 仍返回 `MaxIterationsExceeded`；首批零预算输入仍提交历史后超限，空队列零预算正常结束。当前 run 绑定输入和工具结果不因此获得跨 run 重试，模型、Compact 或工具失败也不泛化回队。child 的累计预算不重置，耗尽后明确失败。同一 Receive 批次包含 HookStopIntent 时仍消费整批并优先停止，不因本机制保留消息触发额外续跑；显式用户 Stop、关闭及过期执行限制保持独立。
 

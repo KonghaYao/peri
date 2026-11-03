@@ -407,7 +407,7 @@ async fn test_continuation_skips_empty_prompt_push() {
         .v2_message_queue
         .clone();
     assert!(
-        queue.drain_all().is_empty(),
+        queue.drain_all_async().await.is_empty(),
         "continuation 不得向 v2 queue 写入空 human prompt"
     );
 
@@ -455,7 +455,8 @@ async fn test_continuation_skips_empty_prompt_push() {
         .expect("session 应存在")
         .v2_message_queue
         .clone()
-        .drain_all();
+        .drain_all_async()
+        .await;
     assert_eq!(drained.len(), 1, "keepgoing 应 push 一条空 Prompt 唤醒信号");
     assert_eq!(
         drained[0].kind,

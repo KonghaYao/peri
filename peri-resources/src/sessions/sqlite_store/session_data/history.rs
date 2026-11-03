@@ -606,6 +606,13 @@ impl SqliteSessionData {
                 // 边界删除与有效视图重建同属这一事务：任何一半生效都会让热态与冷恢复分叉。
                 super::history_projection::reconcile_rewind(&mut tx, id, clear_excluded).await?;
                 refresh_history_derivations(&mut tx, id).await?;
+                // rewind 把历史退回到某个边界：仍留在 MQ 的待发项属于被退回的那段上下文，
+                // 与边界删除同一事务清理（设计 §5.5「rewind 按现有作用域规则清理 MQ」）。
+                sqlx::query(crate::sessions::canonical::DELETE_THREAD_MQ_BY_THREAD_SQL)
+                    .bind(id.as_str())
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| map_sqlx(&error))?;
                 RewindOutcome::Applied
             }
             None => RewindOutcome::BoundaryMissing,

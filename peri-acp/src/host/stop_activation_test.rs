@@ -1,12 +1,14 @@
 use super::*;
 
-fn stop(harness: &ActivationHarness, sessions: &mut HashMap<String, SessionState>) {
+async fn stop(harness: &ActivationHarness, sessions: &mut HashMap<String, SessionState>) {
     if let Some(request) = crate::host::notify::handle_notification(
         "session/cancel",
         &json!({"sessionId": harness.session_id}),
         sessions,
         &harness.cfg,
-    ) {
+    )
+    .await
+    {
         harness.sender.send(request).unwrap();
     }
 }
@@ -31,20 +33,19 @@ async fn explicit_stop_after_failure_does_not_release_a_new_child_error() {
         &harness.transport, &harness.cfg, &harness.sender,
     ).await;
     assert!(result.unwrap_err().message.contains("400"));
-    stop(&harness, &mut *harness.sessions.lock().await);
+    stop(&harness, &mut *harness.sessions.lock().await).await;
     harness.complete_task("after-stop", BgTaskKind::Agent, false);
     tokio::time::sleep(Duration::from_millis(100)).await;
     failure.assert_async().await;
-    assert!(!crate::host::activation::mq_allowed(
-        &harness.cfg,
-        &harness.session_id
-    ));
+    assert!(!crate::host::activation::mq_allowed(&harness.cfg, &harness.session_id).await);
     assert!(harness
         .cfg
         .session_manager
         .v2_queue_for(&harness.session_id)
         .unwrap()
-        .has_ensure_processing());
+        .has_ensure_processing()
+        .await
+        .expect("test MQ policy"));
     let sessions = harness.sessions.lock().await;
     let state = &sessions[&harness.session_id];
     assert!(!state.continuation_in_flight);
@@ -115,7 +116,7 @@ async fn stopped_user_turn_allows_exactly_one_automatic_independent_child_turn()
     })
     .await
     .expect("real parent must be suspended waiting for its independent child");
-    stop(&harness, &mut *harness.sessions.lock().await);
+    stop(&harness, &mut *harness.sessions.lock().await).await;
     let response = tokio::time::timeout(Duration::from_secs(10), prompt)
         .await
         .unwrap()
@@ -146,14 +147,11 @@ async fn stopped_user_turn_allows_exactly_one_automatic_independent_child_turn()
         .session_manager
         .v2_queue_for(&harness.session_id)
         .unwrap();
-    assert!(queue.is_empty());
+    assert!(queue.is_empty().await.expect("test MQ len"));
     harness.complete_task("second-child", BgTaskKind::Agent, false);
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(queue.has_ensure_processing());
-    assert!(!crate::host::activation::mq_allowed(
-        &harness.cfg,
-        &harness.session_id
-    ));
+    assert!(queue.has_ensure_processing().await.expect("test MQ policy"));
+    assert!(!crate::host::activation::mq_allowed(&harness.cfg, &harness.session_id).await);
     assert_eq!(
         harness
             .recorded
@@ -184,21 +182,20 @@ async fn stop_suppression_blocks_defer_until_the_next_user_prompt_restores_it() 
     let mut harness = ActivationHarness::new().await;
     harness.start_scheduler();
     harness.listen();
-    stop(&harness, &mut *harness.sessions.lock().await);
-    assert!(!crate::host::activation::mq_allowed(
-        &harness.cfg,
-        &harness.session_id
-    ));
+    stop(&harness, &mut *harness.sessions.lock().await).await;
+    assert!(!crate::host::activation::mq_allowed(&harness.cfg, &harness.session_id).await);
 
     let queue = harness
         .cfg
         .session_manager
         .v2_queue_for(&harness.session_id)
         .unwrap();
-    queue.push(QueuedMessage::defer(
-        MessageSource::McpNotification,
-        BaseMessage::human("monitor alert"),
-    ));
+    queue
+        .push_async(QueuedMessage::defer(
+            MessageSource::McpNotification,
+            BaseMessage::human("monitor alert"),
+        ))
+        .await;
     tokio::time::sleep(Duration::from_millis(150)).await;
     assert!(
         harness
@@ -208,7 +205,10 @@ async fn stop_suppression_blocks_defer_until_the_next_user_prompt_restores_it() 
             .all(|(method, _)| method != "peri/agent_event_done"),
         "a suppressed defer must not start a turn"
     );
-    assert!(queue.has_ensure_processing(), "the defer stays queued");
+    assert!(
+        queue.has_ensure_processing().await.expect("test MQ policy"),
+        "the defer stays queued"
+    );
 
     let response = crate::host::dispatch_prompt_turn(
         json!({"sessionId": harness.session_id, "message": {
@@ -235,7 +235,10 @@ async fn stop_suppression_blocks_defer_until_the_next_user_prompt_restores_it() 
             .is_allowed(),
         "a user prompt restores automatic activation"
     );
-    assert!(queue.is_empty(), "the user turn consumes the deferred wake");
+    assert!(
+        queue.is_empty().await.expect("test MQ len"),
+        "the user turn consumes the deferred wake"
+    );
     harness
         .cfg
         .session_manager

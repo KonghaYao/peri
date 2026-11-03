@@ -71,7 +71,7 @@ pub(super) fn retain_terminal(state: &mut MailboxState, id: &str) {
     let record = state
         .records
         .iter()
-        .find(|record| record.input.input_id == id)
+        .find(|record| record.input_id == id)
         .expect("终态记录存在");
     if state.terminal_identities.contains_key(&input_uuid) {
         return;
@@ -99,7 +99,7 @@ pub(super) fn prune_terminal_records(state: &mut MailboxState) {
         let removed = state.terminal_display.remove(0);
         state
             .records
-            .retain(|record| record.input.input_id != removed.input_id);
+            .retain(|record| record.input_id != removed.input_id);
         state.delivered_notifications.remove(&removed.input_id);
     }
 }

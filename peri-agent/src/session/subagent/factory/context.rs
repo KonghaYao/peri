@@ -85,7 +85,12 @@ pub(super) async fn build_subagent_session_v2(
     let queue = binding
         .as_ref()
         .map(|(inbox, _)| inbox.queue().clone())
-        .unwrap_or_else(MessageQueue::new);
+        // 没有可复用的既有绑定（冷恢复 / 首次 spawn）时按子 thread 绑定真实资源；
+        // 内存后端会让 Receive 只写热态而不落历史（`docs/design/thread-mq.md` §1）。
+        .unwrap_or_else(|| match &session_resources {
+            Some(resources) => MessageQueue::bind(Arc::clone(resources), child_thread_id.clone()),
+            None => MessageQueue::new(),
+        });
     let session = Session::new_with_cancel_and_queue(
         Arc::from(cwd.as_str()),
         frozen,

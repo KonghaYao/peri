@@ -303,8 +303,8 @@ async fn tool_and_agent_feedback_use_queue_capability_without_writing_history() 
         .await
         .unwrap();
     assert_eq!(output.block_continue.as_deref(), Some("queued feedback"));
-    assert!(ctx.session.queue.has_wake_up());
+    assert!(ctx.session.queue.has_wake_up_sync());
     inbox.await_wake().await;
-    assert_eq!(ctx.session.queue.len(), 2);
+    assert_eq!(ctx.session.queue.len_sync(), 2);
     assert!(ctx.session.transcript.read().is_empty());
 }

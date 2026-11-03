@@ -159,7 +159,7 @@ async fn workspace_shell_reminder_uses_file_references() {
     )
     .await
     .unwrap();
-    let messages = inbox.queue().drain_all();
+    let messages = inbox.queue().drain_all_sync();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].source, MessageSource::ShellComplete);
     let QueuedPayload::SystemReminder(reminder) = &messages[0].payload else {
@@ -198,7 +198,7 @@ async fn async_result_shell_reminder_body_keeps_full_identity_and_evidence() {
     )
     .await
     .unwrap();
-    let messages = inbox.queue().drain_all();
+    let messages = inbox.queue().drain_all_sync();
     let QueuedPayload::SystemReminder(reminder) = &messages[0].payload else {
         panic!("reminder")
     };
@@ -247,7 +247,7 @@ async fn async_result_unresolved_reminder_reports_unknown_side_effects() {
     )
     .await
     .unwrap();
-    let messages = inbox.queue().drain_all();
+    let messages = inbox.queue().drain_all_sync();
     let QueuedPayload::SystemReminder(reminder) = &messages[0].payload else {
         panic!("reminder")
     };
@@ -283,7 +283,7 @@ async fn async_result_failed_mcp_reminder_is_not_projected_as_completed() {
     )
     .await
     .unwrap();
-    let messages = inbox.queue().drain_all();
+    let messages = inbox.queue().drain_all_sync();
     let QueuedPayload::SystemReminder(reminder) = &messages[0].payload else {
         panic!("reminder")
     };
@@ -377,7 +377,7 @@ async fn terminal_reminder_is_delivered_to_the_initiator_not_the_task_owner() {
     assert_eq!(metadata["initiator"], "child");
     assert_eq!(metadata["task_owner"], "root");
     assert_eq!(metadata["delivery"], "initiator");
-    assert!(owner_inbox.queue().drain_all().is_empty());
+    assert!(owner_inbox.queue().drain_all_sync().is_empty());
 }
 
 #[tokio::test]
@@ -399,7 +399,7 @@ async fn unknown_initiator_cannot_register_or_deliver_to_root() {
         )
         .unwrap_err();
     assert!(error.contains("Unroutable"), "{error}");
-    assert!(owner_inbox.queue().is_empty());
+    assert!(owner_inbox.queue().is_empty_sync());
 }
 
 // 回归：投递失败必须报错（任务保持未结清），不能静默当成功。
@@ -456,7 +456,7 @@ async fn failed_canonical_commit_does_not_enqueue_the_reminder() {
         .await
         .unwrap_err();
     assert_eq!(error, "canonical reminder commit failed");
-    assert!(owner_inbox.queue().drain_all().is_empty());
+    assert!(owner_inbox.queue().drain_all_sync().is_empty());
 }
 
 /// Close settlement has one shared deadline: a pending external cancel on the
@@ -657,7 +657,7 @@ async fn settle_registered_task(
         .find(|record| record.task_id == ticket.task_id())
         .map(|record| record.status)
         .expect("terminal task record");
-    (inbox.queue().drain_all(), status)
+    (inbox.queue().drain_all_sync(), status)
 }
 
 /// B9: monitor 的终态（成功/失败）只更新任务投影，不向 owner 投递任何 reminder。
@@ -817,7 +817,7 @@ impl RecordingManager {
 }
 
 fn has_monitor_alert(queue: &MessageQueue) -> bool {
-    queue.snapshot().iter().any(|message| {
+    queue.snapshot_sync().iter().any(|message| {
         message.kind == MessageKind::Defer && message.source == MessageSource::McpNotification
     })
 }
@@ -1087,7 +1087,7 @@ async fn terminal_monitor_without_meta_still_settles() {
         "the terminal observation must settle directly instead of re-polling"
     );
     assert!(
-        fixture.queue.drain_all().is_empty(),
+        fixture.queue.drain_all_sync().is_empty(),
         "a missing alert projection must not deliver a reminder"
     );
     assert!(
@@ -1114,7 +1114,7 @@ async fn terminal_monitor_with_malformed_meta_still_settles() {
         "a malformed projection must not keep the terminal task polling"
     );
     assert!(
-        fixture.queue.drain_all().is_empty(),
+        fixture.queue.drain_all_sync().is_empty(),
         "a malformed alert projection must not deliver a reminder"
     );
     assert!(
@@ -1139,7 +1139,7 @@ async fn terminal_alert_enters_the_inbox_before_settlement() {
         fixture.manager.alert_before_settle.load(Ordering::SeqCst),
         "the terminal alert must be delivered before settlement starts"
     );
-    let messages = fixture.queue.drain_all();
+    let messages = fixture.queue.drain_all_sync();
     assert_eq!(messages.len(), 1, "one alert observation: {messages:?}");
     assert_eq!(messages[0].kind, MessageKind::Defer);
     assert_eq!(messages[0].source, MessageSource::McpNotification);
@@ -1170,7 +1170,7 @@ async fn failed_settlement_retry_does_not_duplicate_the_alert() {
         1,
         "the retry reuses the cached terminal observation"
     );
-    let messages = fixture.queue.drain_all();
+    let messages = fixture.queue.drain_all_sync();
     assert_eq!(
         messages.len(),
         1,

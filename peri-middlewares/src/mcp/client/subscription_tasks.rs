@@ -138,7 +138,8 @@ impl McpClientPool {
                             true,
                             &mut monitor_alerts,
                             &mut monitor_meta_warned,
-                        );
+                        )
+                        .await;
                         known_terminal = Some(observed.clone());
                         let transition_id = format!("{raw_task_id}:terminal");
                         let result = pool
@@ -170,7 +171,8 @@ impl McpClientPool {
                             false,
                             &mut monitor_alerts,
                             &mut monitor_meta_warned,
-                        );
+                        )
+                        .await;
                         lost_owner_attempts = 0;
                         manager.mark_external_running(&task_id);
                     }
@@ -227,7 +229,7 @@ impl McpClientPool {
     /// unsettled. Non-terminal observations are retried by the next poll, which
     /// keeps the processed count untouched.
     #[allow(clippy::too_many_arguments)]
-    fn observe_monitor_alert(
+    async fn observe_monitor_alert(
         &self,
         session_id: &str,
         server: &str,
@@ -262,7 +264,7 @@ impl McpClientPool {
         match state.decide(meta.alert_matched, now, terminal, has_inbox) {
             MonitorAlertAction::Nothing => {}
             MonitorAlertAction::Send { hits } => {
-                push_monitor_alert(self, session_id, raw_task_id, &meta, hits);
+                push_monitor_alert(self, session_id, raw_task_id, &meta, hits).await;
             }
             MonitorAlertAction::DropOffline { hits } => {
                 tracing::warn!(

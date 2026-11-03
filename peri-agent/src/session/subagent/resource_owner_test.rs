@@ -152,7 +152,7 @@ async fn test_close_settles_terminal_and_records_retained_input() {
         None,
         serde_json::json!({}),
     );
-    child.queue.push(
+    child.queue.push_sync(
         crate::session::QueuedMessage::system_reminder_with_delivery_id(
             crate::session::MessageKind::Defer,
             crate::session::MessageSource::SystemInjected,
@@ -160,12 +160,15 @@ async fn test_close_settles_terminal_and_records_retained_input() {
             terminal_id,
         ),
     );
-    child.queue.push(crate::session::QueuedMessage::prompt(
+    child.queue.push_sync(crate::session::QueuedMessage::prompt(
         crate::session::MessageSource::UserInput,
         crate::messages::BaseMessage::human("追加输入"),
     ));
     child.close().await.unwrap();
-    assert!(!child.queue.has_required(), "已结算输入不得残留 Required");
+    assert!(
+        !child.queue.has_required_sync(),
+        "已结算输入不得残留 Required"
+    );
     let payloads = resources.payloads();
     assert_eq!(payloads.len(), 2, "终态按原 ID 落库，未处理输入单独记录");
     assert!(payloads.iter().any(|payload| {
@@ -188,12 +191,15 @@ async fn test_close_without_canonical_port_refuses_to_drop_required_input() {
         None,
         None,
     );
-    child.queue.push(crate::session::QueuedMessage::prompt(
+    child.queue.push_sync(crate::session::QueuedMessage::prompt(
         crate::session::MessageSource::UserInput,
         crate::messages::BaseMessage::human("追加输入"),
     ));
     assert!(child.close().await.unwrap_err().contains("canonical"));
-    assert!(child.queue.has_required(), "缺 canonical 能力时不得清空");
+    assert!(
+        child.queue.has_required_sync(),
+        "缺 canonical 能力时不得清空"
+    );
 }
 
 /// root 可在真实三层 owner 树中查询、取消、关闭任意后代资源。
@@ -259,7 +265,7 @@ async fn test_unconfirmed_failure_and_pending_receipt_count_as_obligations() {
     let child = owner("root", "child");
     let permit = child.acquire(execution()).unwrap();
     permit.finish(Err("handoff persistence failed".into()));
-    assert!(child.has_unsettled_obligations());
+    assert!(child.has_unsettled_obligations_sync());
     assert!(child.check_resume().is_err());
     assert!(child
         .acquire(execution())
@@ -283,7 +289,7 @@ async fn test_unconfirmed_failure_and_pending_receipt_count_as_obligations() {
     };
     child.freeze_receipt(receipt).unwrap();
     permit.finish(Ok(()));
-    assert!(child.has_unsettled_obligations());
+    assert!(child.has_unsettled_obligations_sync());
     let error = child.acquire(execution()).err().unwrap();
     assert!(
         error.contains("unconfirmed") || error.contains("pending"),

@@ -204,7 +204,7 @@ async fn cancel_pending_hook(hook: PendingHook) {
     }));
     context.runtime.middleware_chain = Arc::new(chain);
     context.runtime.llm = Arc::new(FinalAnswer);
-    context.session.queue.push(QueuedMessage::prompt(
+    context.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human(MessageContent::text("original input")),
     ));
@@ -246,7 +246,7 @@ async fn cancel_pending_hook(hook: PendingHook) {
     );
     let mut next = StageContext::new(next_turn, session.transcript(), session.queue().clone());
     next.runtime.llm = Arc::new(FinalAnswer);
-    next.session.queue.push(QueuedMessage::prompt(
+    next.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human(MessageContent::text("next prompt")),
     ));

@@ -173,7 +173,7 @@ async fn test_idle_loop_consumes_queued_completion_before_terminal_registry_chec
             let injected = Arc::clone(&injected);
             Arc::new(move || {
                 if !injected.swap(true, AtomicOrdering::SeqCst) {
-                    handle.push_defer(
+                    handle.push_defer_sync(
                         MessageSource::SubAgentComplete,
                         BaseMessage::human("background done"),
                     );

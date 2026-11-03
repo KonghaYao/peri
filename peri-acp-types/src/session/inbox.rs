@@ -1,18 +1,21 @@
 //! Session inbox 与生产者 handle 是同一 mailbox 的消费与发布能力。
 
-use super::{MessageKind, MessageQueue, MessageSource, QueuedMessage};
-use crate::{messages::BaseMessage, system_reminder::TrustedSystemReminder};
+use super::{MessageKind, MessageQueue, MessageSource, MqEnqueueOutcome, QueuedMessage};
+use crate::messages::BaseMessage;
+use crate::system_reminder::TrustedSystemReminder;
+use anyhow::Result;
 use std::sync::Arc;
 
 // ─── SessionInbox / InboxHandle ──────────────────────────────────────────────
 
-/// Wraps the existing v2 MessageQueue with an async await-wake mechanism.
+/// Wraps the persistent MQ facade with an async await-wake mechanism.
 ///
-/// During ReAct loop, `stages/receive.rs` calls `drain_all`
-/// to consume pending messages — no wake needed (loop is already spinning).
+/// During the ReAct loop, the Receive stage selects and hands off messages through
+/// [`MessageQueue`] — no wake needed (the loop is already spinning).
 ///
-/// During IDLE (between ReAct loops), the ACP executor calls [`await_wake`](Self::await_wake)
-/// which blocks until a new Prompt/Defer is enqueued, then the loop resumes.
+/// During IDLE (between ReAct loops), the ACP executor calls
+/// [`await_wake`](Self::await_wake), which blocks until MQ holds new work, then the
+/// loop resumes and re-reads the facts.
 pub struct SessionInbox {
     queue: Arc<MessageQueue>,
 }
@@ -26,21 +29,21 @@ impl SessionInbox {
         Self { queue }
     }
 
-    /// Block until the inbox has at least one wake-able message (Prompt or Defer).
+    /// Block until MQ holds at least one wake-able message (see [`MessageQueue::has_wake_up`]).
     ///
     /// Called by ACP executor's `run_session_loop` when the previous iteration ends
     /// with `should_continue = false` (no more messages to process).
     ///
     /// ## Non-destructive
     ///
-    /// This method does NOT drain any messages. The actual consumption happens in
-    /// `stages/receive.rs` via `drain_all`.
+    /// This method does NOT consume any messages. The actual consumption happens in
+    /// the Receive stage via [`MessageQueue::select_for_receive`]/[`MessageQueue::receive`].
     ///
     /// ## Spurious wakeup guard
     ///
-    /// After waking, we re-check `has_wake_up()`. If only Info messages arrived
-    /// (which don't wake the loop), we go back to waiting. This prevents the executor
-    /// from spinning on Info-only notifications.
+    /// After waking, the MQ facts are re-checked. If only non-waking messages arrived,
+    /// we go back to waiting. This prevents the executor from spinning on Info-only
+    /// notifications.
     pub async fn await_wake(&self) {
         self.queue.await_wake().await;
     }
@@ -55,9 +58,10 @@ impl SessionInbox {
         }
     }
 
-    /// Access the underlying MessageQueue (read-only reference).
+    /// Access the underlying MessageQueue facade.
     ///
-    /// Used by stages that need to drain (e.g., `StageContext` construction).
+    /// The facade exposes no destructive memory operations: reading questions are
+    /// answered by the store, and consumption only happens through Receive.
     pub fn queue(&self) -> &MessageQueue {
         &self.queue
     }
@@ -66,7 +70,7 @@ impl SessionInbox {
 impl std::fmt::Debug for SessionInbox {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SessionInbox")
-            .field("queue_len", &self.queue.len())
+            .field("queue", &self.queue)
             .finish()
     }
 }
@@ -90,69 +94,90 @@ impl InboxHandle {
 
     /// Push a Prompt message (user input or external request) and wake the executor.
     ///
-    /// Prompt messages are consumed by `drain_all` during the Receive stage
-    /// and wake the loop.
-    pub fn push_prompt(&self, source: MessageSource, message: BaseMessage) {
-        self.queue.push(QueuedMessage::prompt(source, message));
+    /// Prompt messages are consumed by the Receive stage and wake the loop.
+    pub async fn push_prompt(
+        &self,
+        source: MessageSource,
+        message: BaseMessage,
+    ) -> Result<MqEnqueueOutcome> {
+        let queued = QueuedMessage::prompt(source, message);
+        if queued.source == MessageSource::UserInput {
+            // 直接 prompt 没有待发送区：入队即放行，否则 Receive 会按未 dispatch 跳过。
+            self.queue.enqueue_sent(queued).await
+        } else {
+            self.queue.enqueue(queued).await
+        }
     }
 
     /// Push a Defer message (SubAgent complete, Cron trigger, bg result) and wake.
-    ///
-    /// In RCRA, Defer messages are consumed by `drain_all` during the Receive stage.
-    pub fn push_defer(&self, source: MessageSource, message: BaseMessage) {
-        self.queue.push(QueuedMessage::defer(source, message));
+    pub async fn push_defer(
+        &self,
+        source: MessageSource,
+        message: BaseMessage,
+    ) -> Result<MqEnqueueOutcome> {
+        self.queue
+            .enqueue(QueuedMessage::defer(source, message))
+            .await
     }
 
     /// Push an Info message (system reminder, hook injection) — does NOT wake.
     ///
-    /// Info messages are consumed by `drain_all`, but never wake the loop.
+    /// Info messages are handed off by Receive, but never wake the loop.
     /// They must be carried out by a Prompt message arriving later.
-    pub fn push_info(&self, source: MessageSource, message: BaseMessage) {
-        self.queue.push(QueuedMessage::info(source, message));
+    pub async fn push_info(
+        &self,
+        source: MessageSource,
+        message: BaseMessage,
+    ) -> Result<MqEnqueueOutcome> {
+        self.queue
+            .enqueue(QueuedMessage::info(source, message))
+            .await
     }
 
     /// Push a trusted reminder and preserve its scheduling semantics.
-    pub fn push_system_reminder(
+    pub async fn push_system_reminder(
         &self,
         kind: MessageKind,
         source: MessageSource,
         reminder: TrustedSystemReminder,
-    ) {
-        self.push(QueuedMessage::system_reminder(kind, source, reminder));
+    ) -> Result<MqEnqueueOutcome> {
+        self.push(QueuedMessage::system_reminder(kind, source, reminder))
+            .await
     }
 
-    pub fn push_system_reminder_with_delivery_id(
+    pub async fn push_system_reminder_with_delivery_id(
         &self,
         kind: MessageKind,
         source: MessageSource,
         reminder: TrustedSystemReminder,
         delivery_id: crate::messages::MessageId,
-    ) {
+    ) -> Result<MqEnqueueOutcome> {
         self.push(QueuedMessage::system_reminder_with_delivery_id(
             kind,
             source,
             reminder,
             delivery_id,
-        ));
+        ))
+        .await
     }
 
     /// Push an arbitrary QueuedMessage and conditionally wake.
     ///
-    /// Wakes only if the message kind is Prompt or Defer (i.e., `kind.wakes_up()`).
-    pub fn push(&self, msg: QueuedMessage) {
-        self.queue.push(msg);
+    /// Wakes only for a non-passive policy (i.e., `policy.notifies_execution()`).
+    pub async fn push(&self, msg: QueuedMessage) -> Result<MqEnqueueOutcome> {
+        self.queue.enqueue(msg).await
     }
 
-    /// Batch push messages; wakes once if any message is wake-able.
-    pub fn push_batch(&self, msgs: Vec<QueuedMessage>) {
-        self.queue.push_batch(msgs);
+    /// Batch push messages; commits one by one and wakes once if any was wake-able.
+    pub async fn push_batch(&self, msgs: Vec<QueuedMessage>) -> Result<Vec<MqEnqueueOutcome>> {
+        self.queue.enqueue_batch(msgs).await
     }
 }
 
 impl std::fmt::Debug for InboxHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InboxHandle")
-            .field("queue_len", &self.queue.len())
+            .field("queue", &self.queue)
             .finish()
     }
 }

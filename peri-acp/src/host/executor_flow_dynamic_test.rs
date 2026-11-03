@@ -59,11 +59,15 @@ async fn test_production_first_reason_sees_after_before_agent_dynamic_contributi
     let frozen = FrozenSessionData::from_frozen_parts(context, None);
     let (out, _) = make_stage_build(&ctx)(make_stage_request(frozen, None)).unwrap();
     let parent = Arc::clone(&out.session);
-    out.context.session.queue.push(QueuedMessage::new(
-        MessageKind::Prompt,
-        MessageSource::UserInput,
-        BaseMessage::human("finish"),
-    ));
+    out.context
+        .session
+        .queue
+        .push_async(QueuedMessage::new(
+            MessageKind::Prompt,
+            MessageSource::UserInput,
+            BaseMessage::human("finish"),
+        ))
+        .await;
 
     let loop_result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -437,11 +441,15 @@ async fn test_production_stage_keeps_empty_frozen_prompt_inputs_after_late_files
     let (out, _) = stage_build(make_stage_request(frozen, None)).unwrap();
     let parent = Arc::clone(&out.session);
     let chain = Arc::clone(&out.context.runtime.middleware_chain);
-    out.context.session.queue.push(QueuedMessage::new(
-        MessageKind::Prompt,
-        MessageSource::UserInput,
-        BaseMessage::human("finish"),
-    ));
+    out.context
+        .session
+        .queue
+        .push_async(QueuedMessage::new(
+            MessageKind::Prompt,
+            MessageSource::UserInput,
+            BaseMessage::human("finish"),
+        ))
+        .await;
 
     let loop_result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
