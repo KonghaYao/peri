@@ -105,6 +105,7 @@ pub struct McpClientPool {
     pub(super) builtin_available: std::sync::atomic::AtomicBool,
     pub(super) stdio_available: std::sync::atomic::AtomicBool,
     pub(super) plugin_discovery_available: std::sync::atomic::AtomicBool,
+    pub(super) plugin_source_failed: std::sync::atomic::AtomicBool,
     /// 插件来源闭合位（M6）：会话装配从冻结/session-local 策略派生后注入，
     /// 与 `plugin_discovery_available`（部署是否具备插件能力）是两个事实。
     pub(super) plugin_face_closed: std::sync::atomic::AtomicBool,
@@ -286,6 +287,7 @@ impl McpClientPool {
             builtin_available: std::sync::atomic::AtomicBool::new(true),
             stdio_available: std::sync::atomic::AtomicBool::new(crate::platform::STDIO_TRANSPORT),
             plugin_discovery_available: std::sync::atomic::AtomicBool::new(true),
+            plugin_source_failed: std::sync::atomic::AtomicBool::new(false),
             // 默认不关闭：只有会话装配注入的冻结策略才置真（M6）。
             plugin_face_closed: std::sync::atomic::AtomicBool::new(false),
             shared_services: parking_lot::Mutex::new(Vec::new()),

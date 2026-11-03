@@ -100,6 +100,53 @@ fn deployment_can_skip_plugin_discovery_and_builtin_overlay() {
 }
 
 #[test]
+fn failed_session_plugin_preparation_skips_valid_plugin_mcp_servers() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let claude_home = temp.path().join("claude");
+    install_enabled_plugin(&claude_home);
+    let snapshot = snapshot_for(
+        &cwd,
+        &temp.path().join("settings.json"),
+        r#"{"mcpServers":{"global":{"command":"global"}}}"#,
+        "{}",
+        HashMap::new(),
+    );
+    let pool = crate::mcp::McpClientPool::new_pending();
+    let (enabled, _) = load_merged_config_from_snapshot_with_capabilities(
+        &cwd,
+        &claude_home,
+        &snapshot,
+        false,
+        pool.plugin_sources_available(),
+        false,
+    )
+    .unwrap();
+    assert!(enabled
+        .mcp_servers
+        .keys()
+        .any(|name| name.starts_with("plugin:")));
+
+    pool.set_plugin_source_failed(true).unwrap();
+    let (degraded, sources) = load_merged_config_from_snapshot_with_capabilities(
+        &cwd,
+        &claude_home,
+        &snapshot,
+        false,
+        pool.plugin_sources_available(),
+        false,
+    )
+    .unwrap();
+    assert!(degraded.mcp_servers.contains_key("global"));
+    assert!(!degraded
+        .mcp_servers
+        .keys()
+        .any(|name| name.starts_with("plugin:")));
+    assert!(sources.is_empty());
+}
+
+#[test]
 fn snapshot_loader_accepts_the_same_directory_with_canonical_or_alternate_spelling() {
     let temp = tempfile::tempdir().unwrap();
     let cwd = temp.path().join("project");

@@ -194,6 +194,29 @@ impl McpClientPool {
         Ok(())
     }
 
+    /// 会话级准备失败与部署能力、冻结关闭策略分开记录；MCP 不重试该来源。
+    pub fn set_plugin_source_failed(&self, failed: bool) -> std::io::Result<()> {
+        let context = self.builtin_context.lock();
+        if context.initialize_started || !self.is_open() {
+            self.plugin_source_failed
+                .store(true, std::sync::atomic::Ordering::Release);
+            return Err(std::io::Error::other(
+                "MCP capability injection window is closed",
+            ));
+        }
+        self.plugin_source_failed
+            .store(failed, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
+    pub(crate) fn plugin_sources_available(&self) -> bool {
+        self.plugin_discovery_available
+            .load(std::sync::atomic::Ordering::Acquire)
+            && !self
+                .plugin_source_failed
+                .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// 绑定插件来源闭合位（M6）：会话装配从**冻结/session-local** 的
     /// `meta_harness` 派生后在这里注入，必须早于 MCP 初始化（注入窗口与其余
     /// 能力位同一条规则）。
@@ -283,8 +306,7 @@ impl McpClientPool {
                 snapshot,
                 pool.builtin_available
                     .load(std::sync::atomic::Ordering::Acquire),
-                pool.plugin_discovery_available
-                    .load(std::sync::atomic::Ordering::Acquire),
+                pool.plugin_sources_available(),
                 pool.plugin_face_closed(),
             ),
             None => super::config::load_merged_config_full_with_capabilities(
@@ -292,8 +314,7 @@ impl McpClientPool {
                 claude_home,
                 pool.builtin_available
                     .load(std::sync::atomic::Ordering::Acquire),
-                pool.plugin_discovery_available
-                    .load(std::sync::atomic::Ordering::Acquire),
+                pool.plugin_sources_available(),
                 pool.plugin_face_closed(),
             ),
         };

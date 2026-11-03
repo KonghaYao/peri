@@ -787,6 +787,7 @@ async fn broken_plugin_manifest_does_not_block_session_preparation() {
     assert!(prepared.frozen_encoded.is_some());
     assert!(prepared.plugins().data.is_none());
     assert!(prepared.plugins().skill_roots.is_empty());
+    assert!(prepared.plugins().discovery_failed);
     assert!(!plugin_dir.join(".claude-plugin/plugin.json").exists());
 
     let restored = PreparedSessionInputs::prepare_restore(
@@ -796,6 +797,7 @@ async fn broken_plugin_manifest_does_not_block_session_preparation() {
     )
     .expect("missing plugin manifest must not block session restore");
     assert!(restored.plugins().data.is_none());
+    assert!(restored.plugins().discovery_failed);
 }
 
 #[tokio::test]
