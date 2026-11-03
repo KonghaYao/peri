@@ -67,11 +67,12 @@ impl RetryableErrorClasses {
         }
         if self.protocol {
             // 瞬态集合；ToolCallMissingId/Name/InvalidArguments、AssistantMessageRequired、
-            // InvalidEndpoint、Other 保持不重试。
+            // InvalidEndpoint、ProviderTerminal、Other 保持不重试。
             if let Some(protocol) = error.protocol_error() {
                 if matches!(
                     protocol.kind(),
                     crate::ProtocolErrorKind::Provider
+                        | crate::ProtocolErrorKind::AuthenticationRefreshed
                         | crate::ProtocolErrorKind::InvalidJsonObject
                         | crate::ProtocolErrorKind::StreamEndedWithoutCompleted
                 ) {

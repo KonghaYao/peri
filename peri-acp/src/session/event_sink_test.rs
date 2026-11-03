@@ -948,3 +948,6 @@ mod live_delivery_tests;
 
 #[path = "event_sink_failure_test.rs"]
 mod failure_tests;
+
+#[path = "event_sink_origin_test.rs"]
+mod origin_tests;

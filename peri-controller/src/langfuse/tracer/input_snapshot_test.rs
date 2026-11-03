@@ -854,6 +854,27 @@ fn retained_accounts_reserved_capacity_not_json_length() {
     );
 }
 
+#[test]
+fn provider_replay_snapshot_charges_json_capacity_and_preserves_canonical_bytes() {
+    use peri_agent::messages::{ContentBlock, MessageContent};
+    let mut opaque = String::with_capacity(1024 * 1024);
+    opaque.push_str("opaque-replay");
+    let message = BaseMessage::ai(MessageContent::Blocks(vec![
+        ContentBlock::text("visible"),
+        ContentBlock::ProviderState {
+            provider: "openai_responses".into(),
+            data: serde_json::Value::String(opaque),
+        },
+    ]));
+    let expected = fallback_baseline(std::slice::from_ref(&message), &[]);
+    let source = messages_source(vec![message]);
+    let mut bytes = Vec::new();
+    source.write_json(&mut bytes).unwrap();
+    assert_eq!(bytes, expected.as_bytes());
+    assert!(bytes.len() < 4096);
+    assert!(source.retained_bytes().unwrap() >= 1024 * 1024);
+}
+
 /// 计量与真实分配单调一致：正文真实增长多少容量，上界至少增长同样多。
 #[test]
 fn retained_grows_with_real_allocation() {

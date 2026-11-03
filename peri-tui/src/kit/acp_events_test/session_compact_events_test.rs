@@ -6,6 +6,7 @@ use super::*;
 #[serial]
 fn test_auto_compact_completed_injects_detailed_system_note() {
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -18,7 +19,7 @@ fn test_auto_compact_completed_injects_detailed_system_note() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,
@@ -55,6 +56,7 @@ fn test_auto_compact_completed_injects_detailed_system_note() {
 #[serial]
 fn test_full_compact_completed_shows_unmeasured_token_saving() {
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -67,7 +69,7 @@ fn test_full_compact_completed_shows_unmeasured_token_saving() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,
@@ -101,6 +103,7 @@ fn test_full_compact_completed_shows_unmeasured_token_saving() {
 fn test_unknown_and_empty_compact_strategy_use_full_unmeasured_detail() {
     for strategy in ["unknown", ""] {
         let mut state = BridgeState {
+            child_runs: Default::default(),
             variant: 0,
             committed: im::Vector::new(),
             current_turn: CurrentTurn::new(),
@@ -113,7 +116,7 @@ fn test_unknown_and_empty_compact_strategy_use_full_unmeasured_detail() {
             last_pushed_text_len: 0,
             last_pushed_reasoning_len: 0,
             last_successful_todos: None,
-            last_successful_todo_sequence: None,
+            todo_baseline_sequence: None,
             next_todo_sequence: 0,
             todo_call_inputs: std::collections::HashMap::new(),
             turn_generation: 0,
@@ -183,6 +186,7 @@ async fn test_compact_turndone_keeps_window_without_reload() {
     }
 
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -195,7 +199,7 @@ async fn test_compact_turndone_keeps_window_without_reload() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,
@@ -272,6 +276,7 @@ async fn test_compact_turndone_keeps_window_without_reload() {
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
 
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 1,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -284,7 +289,7 @@ async fn test_compact_turndone_keeps_window_without_reload() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,

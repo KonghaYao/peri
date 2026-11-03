@@ -215,6 +215,7 @@ pub async fn run_act(input: ActInput) -> AgentResult<ActOutput> {
 
         // 截断的正文/思考仍是事实，但不是最终回答；不能触发 Stop/Goal 完成 hook。
         if input.reasoning.stop_reason == peri_model::StopReason::MaxTokens
+            || input.reasoning.stop_reason == peri_model::StopReason::Continue
             || input.reasoning.stream_interruption.is_some()
         {
             emit_turn_completed(ctx).await;

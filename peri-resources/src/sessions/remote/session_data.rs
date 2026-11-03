@@ -54,8 +54,9 @@ use peri_acp_types::history_page::{HistoryForwardCursor, HistorySegment};
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes,
-    FrozenState, NewSession, PersistenceRecovery, RewindBoundary, RewindOutcome, SessionMetaPatch,
-    SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionSnapshot,
+    FrozenState, NewSession, PersistenceRecovery, RewindBoundary, RewindCandidate, RewindOutcome,
+    SessionMetaPatch, SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
+    SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::system_reminder::TrustedSystemReminder;
@@ -718,6 +719,14 @@ impl SessionDataPort for RemoteSessionData {
         id: &ThreadId,
     ) -> SessionResourceResult<Vec<PersistedPayload>> {
         self.read_history(id).await
+    }
+
+    async fn load_rewind_candidates(
+        &self,
+        id: &ThreadId,
+        limit: usize,
+    ) -> SessionResourceResult<Vec<RewindCandidate>> {
+        self.read_rewind_candidates(id, limit).await
     }
 
     async fn load_history_segment(

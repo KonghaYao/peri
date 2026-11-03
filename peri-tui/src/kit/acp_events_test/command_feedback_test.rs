@@ -9,6 +9,7 @@ fn test_command_feedback_injects_system_note() {
     crate::kit::atoms::init_atoms();
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -21,7 +22,7 @@ fn test_command_feedback_injects_system_note() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,

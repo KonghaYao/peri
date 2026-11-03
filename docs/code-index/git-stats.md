@@ -16,11 +16,11 @@
 | 我想做什么 | 主文件（项目目录内） | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
 | 改 CLI 或日期窗口 | `src/main.rs` | `Cli`；`resolve_dates`；`main` | 保留 `--days` / `--since` / `--until` / `--repo` 参数及日期冲突规则；Git 失败打印错误并 exit 1 |
-| 改 Git 调用 | `src/git.rs` | `build_git_command`（:10）；`fetch_commits`（:30） | 运行 no-merges/no-renames 的 numstat log；stdout 保持 bytes 交给 parser，非成功状态保留 stderr 错误 |
-| 改记录 framing / numstat | `src/git/log.rs` | `parse_log_output`（:5）；`take_field`（:35）；`parse_numstat`（:49） | 每 commit 以 NUL 开始，hash/name/email/subject/body 五个 NUL 字段；`-z` 令整条 numstat 路径 NUL 结尾，路径 tab/newline 和消息 marker 不作为记录边界；二进制 `-` 计 0，截断或非法计数返回错误 |
-| 改 commit 分类或 co-author 识别 | `src/commit.rs` | `CommitType::from_subject`（:27）；`parse_co_authors`（:89）；`ParsedCommit`（:75） | subject 识别 conventional commit 类型；body 按行识别大小写不敏感的 `Co-Authored-By`；不截掉含 marker 的正文 |
-| 改作者名称与归属聚合 | `src/analysis.rs` | `aggregate`（:74）；`PersonStats::add_commit`（:44）；`is_ai_email`（:63） | email 首次入表时确定名称，较旧 commit 不覆盖；同提交 email 去重；统计按提交数降序/email升序稳定排序 |
-| 改终端表格 | `src/render.rs` | `render_table`（:7） | 消费 PersonStats，保留现有列、颜色与空窗口提示；不执行 Git 或聚合 |
+| 改 Git 调用 | `src/git.rs` | `build_git_command`；`fetch_commits` | 运行 no-merges/no-renames 的 numstat log；stdout 保持 bytes 交给 parser，非成功状态保留 stderr 错误 |
+| 改记录 framing / numstat | `src/git/log.rs` | `parse_log_output`；`take_field`；`parse_numstat` | 每 commit 以 NUL 开始，hash/name/email/subject/body 五个 NUL 字段；`-z` 令整条 numstat 路径 NUL 结尾，路径 tab/newline 和消息 marker 不作为记录边界；二进制 `-` 计 0，截断或非法计数返回错误 |
+| 改 commit 分类或 co-author 识别 | `src/commit.rs` | `CommitType::from_subject`；`parse_co_authors`；`ParsedCommit` | subject 识别 conventional commit 类型；body 按行识别大小写不敏感的 `Co-Authored-By`；不截掉含 marker 的正文 |
+| 改作者名称与归属聚合 | `src/analysis.rs` | `aggregate`；`PersonStats::add_commit`；`is_ai_email` | email 首次入表时确定名称，较旧 commit 不覆盖；同提交 email 去重；统计按提交数降序/email升序稳定排序 |
+| 改终端表格 | `src/render.rs` | `render_table` | 消费 PersonStats，保留现有列、颜色与空窗口提示；不执行 Git 或聚合 |
 | 验证真实 Git 边界与名称顺序 | `src/git_test.rs` | `git::tests` | 独占临时目录 + 隔离 Git 配置 + 固定日期；分别验证 marker/特殊文件名/空提交/二进制/co-author 全链，以及同 email 最新作者和 co-author 名称 |
 | 验证坏 framing 的错误结果 | `src/git/log_test.rs` | `git::log::tests` | 截断 body、非法 numstat 不得被跳过或记为 0；空 log 合法；marker 与字段/记录边界分离 |
 

@@ -425,32 +425,12 @@ pub fn OAuthPopup(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     popup_text_shell!(title, popup_tokens.action_primary, lines)
 }
 
-/// I20-D：用系统命令打开 auth_url——best-effort，失败仅记日志不报错。
+/// I20-D：用系统命令打开 auth_url——best-effort。
 ///
-/// macOS 用 `open`，Linux 用 `xdg-open`，Windows 用 `cmd /C start`。任何错误
-/// （命令不存在、权限不足等）都不应 panic——OAuth 弹窗仍展示完整 URL，
-/// 用户可经「复制链接」按钮手动复制到浏览器。
+/// 共用 [`crate::kit::auth_browser`]：不在日志中记录授权 URL（含 state/nonce），
+/// 失败仅记日志，弹窗仍展示完整 URL，用户可经「复制链接」手动复制到浏览器。
 fn open_auth_url_in_browser(url: &str) {
-    use std::process::Command;
-
-    let (program, args): (&str, Vec<&str>) = if cfg!(target_os = "macos") {
-        ("open", vec![url])
-    } else if cfg!(target_os = "windows") {
-        ("cmd", vec!["/C", "start", "", url])
-    } else {
-        ("xdg-open", vec![url])
-    };
-
-    match Command::new(program).args(&args).spawn() {
-        Ok(_child) => {
-            tracing::info!(program, url, "OAuthPopup: 已调用系统命令打开浏览器");
-        }
-        Err(e) => {
-            tracing::warn!(
-                program,
-                error = %e,
-                "OAuthPopup: 调用系统浏览器失败，用户可复制 URL"
-            );
-        }
+    if let Err(error) = crate::kit::auth_browser::open_browser(url) {
+        tracing::warn!(%error, "OAuthPopup: 调用系统浏览器失败，用户可复制 URL");
     }
 }

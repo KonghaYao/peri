@@ -292,11 +292,21 @@ impl BaseTool for ReadFileTool {
             }
 
             if kept_lines == 0 {
-                // 单行就超过上限：退回字节截断，引导跳过该行继续读。
+                // 当前行自身就超过上限（issue #287）：offset/limit 是行号语义，
+                // 无法表达行内续读。不能沿用 start + 2：单行文件会越界，多行
+                // 文件会静默跳过该行剩余内容。
+                let line_no = start + 1;
                 let truncated_line = truncate_bytes(&numbered[0], MAX_OUTPUT_BYTES);
-                let next_offset = start + 2;
+                let continuation = if line_no < total_lines {
+                    format!(
+                        "continue with offset={} for the following lines",
+                        line_no + 1
+                    )
+                } else {
+                    "use a byte-oriented tool such as Bash to inspect the remainder".to_string()
+                };
                 output = format!(
-                    "{truncated_line}\n[Output truncated: {original_output_bytes} bytes total; line {next_offset} exceeds the output limit; use offset={next_offset} to read the rest of the file]"
+                    "{truncated_line}\n[Output truncated: {original_output_bytes} bytes total; line {line_no} alone exceeds the {MAX_OUTPUT_BYTES}-byte output limit, so the rest of this line cannot be read with line-based offset/limit; {continuation}]"
                 );
             } else {
                 let shown_start = start + 1;

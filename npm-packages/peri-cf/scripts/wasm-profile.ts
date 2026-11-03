@@ -1,6 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { CF_WASM_MAX_MEMORY_BYTES, CF_WASM_STACK_BYTES } from "../shared/runtime-limits";
+
+/** CF WASM 运行期内存预算；本文件随 `scripts/` 一并进入 provenance 构建输入。 */
+export const CF_WASM_MAX_MEMORY_BYTES = 64 * 1024 * 1024;
+export const CF_WASM_STACK_BYTES = 8 * 1024 * 1024;
 
 export const WASM_TARGET = "wasm32-unknown-emscripten";
 export const DEFAULT_WASM_PROFILE = "cf-wasm-size";

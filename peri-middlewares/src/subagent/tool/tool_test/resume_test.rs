@@ -606,6 +606,129 @@ async fn test_resume_thread_id_background_combination() {
     );
 }
 
+/// 强制后台（beta flag `full-async-tools`）：resume 省略 `run_in_background` 或
+/// 显式 `false` 时，非 active 恢复仍走后台；完成通知照常回传。
+#[tokio::test]
+async fn test_resume_thread_id_background_forced() {
+    use peri_agent::agent::events::ExecutorEvent;
+    use tokio::sync::mpsc;
+
+    let dir = tempdir().unwrap();
+    let store = SessionFixture::open_in(dir.path()).await;
+    let cwd = store.workspace_cwd();
+    let parent_id = store
+        .create_thread(ThreadMeta::new_at(cwd.clone(), peri_time::now_wall()))
+        .await
+        .expect("建立父会话失败");
+    let parent = peri_agent::session::Session::new(
+        std::sync::Arc::from(cwd.as_str()),
+        peri_agent::session::FrozenContext::builder().build(),
+        Some(parent_id.clone()),
+    );
+    let id = uuid::Uuid::now_v7().to_string();
+    preset_resumable_thread(&store, &id, "fork", Some(parent_id.as_str()), Vec::new()).await;
+
+    let registry = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    let (bg_tx, mut bg_rx) = mpsc::unbounded_channel::<ExecutorEvent>();
+    parent.set_subagent_host(peri_agent::session::subagent::SubagentHost {
+        session_resources: Some(store.facade()),
+        parent_thread_id: Some(parent_id.clone()),
+        task_manager: Some(Arc::clone(&registry)),
+        bg_event_sender: Some(bg_tx),
+        on_bg_complete: Some(peri_agent::session::bg_complete::task_bg_complete_callback(
+            peri_agent::session::bg_complete::queue_terminal_delivery(parent.queue().clone()),
+        )),
+        ..Default::default()
+    });
+    let t = make_subagent_tool(vec![])
+        .with_session_resources(store.facade())
+        .with_parent_thread_id(parent_id.clone())
+        .with_parent_session(parent.clone())
+        .with_default_run_in_background(true);
+
+    // 关键：不给出 run_in_background —— 强制后台必须让非 active 恢复也走后台。
+    let result = t
+        .invoke(
+            serde_json::json!({ "resume_thread_id": id.clone() }),
+            preset_child_ctx(&id, "."),
+        )
+        .await
+        .expect("强制后台下 resume 应启动后台任务");
+    assert!(
+        result.contains("Background task"),
+        "强制后台 resume 应返回启动确认文本: {result}"
+    );
+    assert!(
+        result.contains("bg-"),
+        "bg 启动文本应携带 task_id（bg- 前缀）: {result}"
+    );
+    assert!(
+        result.contains(&id),
+        "bg 启动文本应携带 thread_id: {result}"
+    );
+
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match bg_rx.recv().await {
+                Some(ExecutorEvent::BackgroundTaskCompleted(res)) => return res,
+                Some(_) => continue,
+                None => panic!("bg 通道关闭"),
+            }
+        }
+    })
+    .await
+    .expect("强制后台 resume 应在超时内完成");
+    assert!(completed.success);
+    assert_eq!(
+        completed.child_thread_id.as_deref(),
+        Some(id.as_str()),
+        "BackgroundTaskResult 必须携带 child_thread_id"
+    );
+    assert_eq!(registry.active_count(), 0, "父任务目录必须已结算新任务");
+
+    // 显式 false 也不能落回同步：强制后台对 resume 同样生效。
+    let explicit_false_id = uuid::Uuid::now_v7().to_string();
+    preset_resumable_thread(
+        &store,
+        &explicit_false_id,
+        "fork",
+        Some(parent_id.as_str()),
+        Vec::new(),
+    )
+    .await;
+    let explicit_false_result = t
+        .invoke(
+            serde_json::json!({
+                "resume_thread_id": explicit_false_id.clone(),
+                "run_in_background": false,
+            }),
+            preset_child_ctx(&explicit_false_id, "."),
+        )
+        .await
+        .expect("强制后台下 resume 显式 false 应启动后台任务");
+    assert!(
+        explicit_false_result.contains("Background task"),
+        "强制后台 resume 显式 false 应返回后台启动文本: {explicit_false_result}"
+    );
+    let explicit_false_completed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match bg_rx.recv().await {
+                Some(ExecutorEvent::BackgroundTaskCompleted(res)) => return res,
+                Some(_) => continue,
+                None => panic!("bg 通道关闭"),
+            }
+        }
+    })
+    .await
+    .expect("强制后台 resume 显式 false 应在超时内完成");
+    assert!(explicit_false_completed.success);
+    assert_eq!(
+        explicit_false_completed.child_thread_id.as_deref(),
+        Some(explicit_false_id.as_str())
+    );
+    assert_eq!(registry.active_count(), 0);
+}
+
 /// 成功路径：预置非 active thread（带消息）→ resume → 完成文本含
 /// child_thread_id + 结果（旧 transcript 重放；prompt 缺省 → 隐式 continue）
 #[tokio::test]

@@ -24,6 +24,7 @@ pub async fn apply_micro_plan(
     validate_source_flags(transcript, plan)?;
     validate_plan_metadata(transcript, plan)
         .map_err(|error| anyhow::anyhow!("recovery_unavailable: {error}"))?;
+    let verify_started = std::time::Instant::now();
     let mut committed_tails = HashMap::new();
     if !plan.catalogs.is_empty() {
         transcript.flush_persistence().await?;
@@ -49,18 +50,29 @@ pub async fn apply_micro_plan(
             .map_err(|error| anyhow::anyhow!("recovery_unavailable: {error}"))?;
         committed_tails.insert(session_id, tail);
     }
+    let verify_elapsed = verify_started.elapsed();
     validate_source_flags(transcript, plan)?;
     let flag_updates = prepare_updates(transcript, plan, &committed_tails)
         .map_err(|error| anyhow::anyhow!("recovery_unavailable: {error}"))?;
     let affected = flag_updates.len();
+    let commit_started = std::time::Instant::now();
     transcript
         .commit_compaction_lifecycle(CompactionChange {
             flag_updates,
             appended_messages: Vec::new(),
         })
         .await?;
+    let commit_elapsed = commit_started.elapsed();
     tracing::debug!(
         affected,
+        changed_messages = plan.changed_messages,
+        changed_fields = plan.changed_fields,
+        no_op_candidates = plan.no_op_candidates,
+        catalogs = plan.catalogs.len(),
+        archive_verifications = plan.catalogs.len(),
+        writes = affected,
+        verify_elapsed_ms = verify_elapsed.as_millis() as u64,
+        commit_elapsed_ms = commit_elapsed.as_millis() as u64,
         policy_version = plan.policy_version,
         "Micro projection committed"
     );

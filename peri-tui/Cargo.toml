@@ -66,7 +66,7 @@ peri-theme = { path = "../peri-theme" }
 peri-config.workspace = true
 peri-acp = { path = "../peri-acp" }
 peri-acp-types = { path = "../peri-acp-types" }
-agent-client-protocol = { version = "3.4", features = ["unstable"] }
+agent-client-protocol = { version = "3.5", features = ["unstable"] }
 agent-client-protocol-schema = { version = "=1.12.0" }
 unicode-width = "0.2"
 unicode-segmentation = "1"

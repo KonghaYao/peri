@@ -145,7 +145,50 @@ fn context(session: &Arc<Session>, answer: &'static str) -> V2SubagentContext {
     )
 }
 
-fn shell_task(manager: &TaskManager, id: &str) {
+/// 阻塞在模型调用中、直到测试放行（或任务被丢弃）的假模型。
+struct BlockingLlm {
+    entered: Arc<tokio::sync::Notify>,
+    gate: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl ReactLLM for BlockingLlm {
+    async fn generate_reasoning(
+        &self,
+        _messages: &[crate::messages::BaseMessage],
+        _tools: &[&dyn BaseTool],
+        _streaming: Option<StreamingContext>,
+    ) -> crate::error::AgentResult<Reasoning> {
+        self.entered.notify_one();
+        self.gate.notified().await;
+        Ok(Reasoning::with_answer("", "released"))
+    }
+}
+
+fn blocking_context(
+    session: &Arc<Session>,
+    entered: Arc<tokio::sync::Notify>,
+    gate: Arc<tokio::sync::Notify>,
+) -> V2SubagentContext {
+    let id = session.store().thread_id.clone().unwrap();
+    build_v2_subagent_context(
+        Some(session.clone()),
+        Box::new(BlockingLlm { entered, gate }),
+        Arc::new(MiddlewareChain::new()),
+        Vec::new(),
+        Arc::new(|_| true),
+        None,
+        "/tmp",
+        session.config().cancel_token.as_ref().clone(),
+        None,
+        None,
+        None,
+        None,
+        Some(agent_id_from_child_thread(&id)),
+    )
+}
+
+fn shell_task(manager: &TaskManager, id: &str) -> peri_acp_types::tasks::TaskRegistrationTicket {
     TaskManagerPort::register(
         manager,
         BgTaskRegistration {
@@ -156,7 +199,7 @@ fn shell_task(manager: &TaskManager, id: &str) {
             kill: Some(Box::new(|| {})),
         },
     )
-    .unwrap();
+    .unwrap()
 }
 
 fn shell_result(id: &str) -> crate::agent::events::BackgroundTaskResult {
@@ -181,7 +224,7 @@ async fn settled_sync_child_returns_finished_without_parent_task() {
     let manager = Arc::new(TaskManager::new());
     let parent_manager = Arc::new(TaskManager::new());
     let (session, _owner) = bound_child(manager.clone());
-    shell_task(&manager, "shell-task");
+    let ticket = shell_task(&manager, "shell-task");
     session.queue().push(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run shell"),
@@ -223,7 +266,8 @@ async fn settled_sync_child_returns_finished_without_parent_task() {
     for _ in 0..20 {
         tokio::task::yield_now().await;
     }
-    assert!(manager.complete("shell-task", shell_result("shell-task")));
+    manager.confirm_external_execution_stopped(&ticket);
+    assert!(manager.complete(&ticket, shell_result("shell-task")));
     let completion = call.await.unwrap().unwrap();
     let SyncCompletion::Finished(outcome) = completion else {
         panic!("settled run must not detach");
@@ -308,7 +352,7 @@ async fn handoff_sync_child_returns_pending_and_registry_retries_delivery() {
     let manager = Arc::new(TaskManager::new());
     let parent_manager = Arc::new(TaskManager::new());
     let (session, _owner) = bound_child(manager.clone());
-    shell_task(&manager, "shell-task");
+    let ticket = shell_task(&manager, "shell-task");
     session.queue().push(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run shell"),
@@ -396,7 +440,8 @@ async fn handoff_sync_child_returns_pending_and_registry_retries_delivery() {
         sync_state.sync_delivery_errors().is_empty(),
         "成功重试必须清除此前 delivery 失败记录"
     );
-    assert!(manager.complete("shell-task", shell_result("shell-task")));
+    manager.confirm_external_execution_stopped(&ticket);
+    assert!(manager.complete(&ticket, shell_result("shell-task")));
     crate::session::subagent::close_subagent_session_scope(close_session)
         .await
         .expect("成功回执后显式 close 必须成功");
@@ -587,7 +632,7 @@ async fn handoff_with_empty_task_list_keeps_retained_messages() {
     let manager = Arc::new(TaskManager::new());
     let parent_manager = Arc::new(TaskManager::new());
     let (session, _owner) = bound_child(manager.clone());
-    shell_task(&manager, "shell-task");
+    let ticket = shell_task(&manager, "shell-task");
     session.queue().push(QueuedMessage::info(
         MessageSource::HookStopIntent,
         crate::messages::BaseMessage::human("stop"),
@@ -648,9 +693,8 @@ async fn handoff_with_empty_task_list_keeps_retained_messages() {
     );
     let mut result = shell_result("shell-task");
     result.agent_name = "shell".into();
-    assert!(manager
-        .settle_completed("shell-task", result, delivery)
-        .unwrap());
+    manager.confirm_external_execution_stopped(&ticket);
+    assert!(manager.settle_completed(&ticket, result, delivery).unwrap());
     let completion = call.await.unwrap().unwrap();
     let SyncCompletion::Pending(pending) = completion else {
         panic!("retained message must hand off even with empty task list");
@@ -820,18 +864,5 @@ async fn run_sync_handoff_failure_preserves_error_and_receipt() {
     assert!(owner.check_resume().is_err(), "未确认交接必须拒绝 resume");
 }
 
-/// 关闭失败必须保留诊断，不因同步 worker 结束而宣称成功。
-#[tokio::test]
-async fn explicit_close_reports_failed_sync_delivery() {
-    let manager = Arc::new(TaskManager::new());
-    let session = child(manager.clone());
-    session
-        .subagent_host()
-        .unwrap()
-        .close_state
-        .record_sync_delivery_failure("sync-broken", "callback rejected");
-    let error = super::super::close::close_subagent_session_scope(session)
-        .await
-        .unwrap_err();
-    assert!(error.contains("callback rejected"), "{error}");
-}
+#[path = "run_sync_cancellation_test.rs"]
+mod cancellation_tests;

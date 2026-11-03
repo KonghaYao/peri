@@ -690,3 +690,19 @@ async fn drop_stops_fake_transport_backoff_without_cancelling_parent() {
     assert_eq!(transport.calls(), 1);
     assert!(!parent.is_cancelled());
 }
+
+#[tokio::test]
+async fn subscription_http_quota_codes_are_terminal_without_retries() {
+    for body in [
+        br#"{"error":{"code":"subscription_sharing_usage_limit_exceeded","message":"plan allowance exhausted"}}"#.to_vec(),
+        br#"{"error":{"code":"usage_limit_exceeded","message":"plan allowance exhausted"}}"#.to_vec(),
+        br#"{"code":"usage_limit_exceeded","message":"plan allowance exhausted"}"#.to_vec(),
+    ] {
+        let transport = Arc::new(FakeTransport::new(vec![Response::Ready { status: 429, chunks: vec![Ok(body.clone())] }]));
+        let mut events = Box::pin(stream_for(transport.clone(), CancellationToken::new(), config()));
+        let error = events.next().await.unwrap().unwrap_err();
+        assert!(error.is_terminal_provider_failure());
+        assert_eq!(error.diagnostic().body(), Some(std::str::from_utf8(&body).unwrap()));
+        assert_eq!(transport.calls(), 1);
+    }
+}

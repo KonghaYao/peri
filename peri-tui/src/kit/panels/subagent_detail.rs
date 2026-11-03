@@ -12,7 +12,8 @@
 use crate::app::panel_types::PanelKind;
 use crate::i18n;
 use crate::kit::atoms::{
-    BG_DISPLAY, BG_LIVE_DETAIL, BgDisplayEntry, LANG_VERSION, SELECTED_SUBAGENT_ID, VIEW_MODELS,
+    ACTIVE_SESSION_ID, BG_DISPLAY, BG_LIVE_DETAIL, BRIDGE_RESET_COUNTER, BgDisplayEntry,
+    LANG_VERSION, SELECTED_SUBAGENT_ID, VIEW_MODELS,
 };
 use crate::kit::message_area::grid::GridSpec;
 use crate::kit::tui_render_unit::{
@@ -40,6 +41,9 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let sv = hooks.use_state(|| 0usize);
     let scrollbar_grab = hooks.use_state(|| None::<usize>);
     let render_cache = hooks.use_state(render_cache::DetailRenderCache::default);
+    let _ = hooks.use_atom(&ACTIVE_SESSION_ID);
+    let _ = hooks.use_atom(&BRIDGE_RESET_COUNTER);
+    let _ = hooks.use_atom(&SELECTED_SUBAGENT_ID);
     hooks.use_hook(move || DetailViewportHook {
         cache: render_cache,
         scroll: sv,
@@ -138,7 +142,10 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         // Esc 单层关闭（面板打开时 active_layer=Panel，消息区 Esc 分支放行，
         // 这里栈顶弹栈收尾；嵌套消息不参与消息区焦点仲裁）。
         match key.code {
-            KeyCode::Esc => close_panel(),
+            KeyCode::Esc => {
+                render_cache.write().clear(Vec::new());
+                close_panel();
+            }
             KeyCode::Tab => {
                 if let Some(row) = render_cache.write().focus_next(false) {
                     focus_detail_row(sv, row, area.height.saturating_sub(2) as usize);
@@ -218,6 +225,9 @@ pub fn SubAgentDetailPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
                 Style::new().fg(theme_def.read().semantic.text.dim),
             )]));
             lines.push(Line::from(""));
+            if g.preview_omitted {
+                lines.push(Line::from(i18n::tr("subagent-preview-omitted")));
+            }
             let theme = theme_def.read().clone();
             let mut cache = render_cache.write_no_update();
             if cache.prepare(g, &grid, theme, LANG_VERSION.get(), lines) {
@@ -510,6 +520,7 @@ fn find_live_detail_subagent(
         is_running: detail.status == crate::kit::atoms::BgLiveStatus::Running,
         is_error: detail.subagent_is_error,
         error_reason: detail.subagent_result.clone(),
+        preview_omitted: detail.preview_omitted,
         fold: fold_for_status(FoldTarget::SubAgent, status),
         user_modified: false,
         content_hash: 0,

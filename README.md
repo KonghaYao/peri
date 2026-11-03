@@ -108,6 +108,8 @@ curl -fsSL https://github-proxy-5ad00a.netlify.app/konghayao/peri/raw/main/scrip
     bash
 ```
 
+安装完成后，运行 `peri update --use-proxy` 通过同一代理更新。
+
 **Windows PowerShell**
 
 ```powershell
@@ -150,8 +152,9 @@ Requires Rust with Edition 2024 support and native build tools.
 ```bash
 git clone https://github.com/konghayao/peri.git
 cd peri
-cargo build -p peri-tui --release
-cargo run -p peri-tui
+./dev.sh   # 开发模式；读取仓库根 .env（可选）
+# 构建发布二进制：
+./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --release --bin peri
 ```
 
 AI-assisted development, with human responsibility for review and release.

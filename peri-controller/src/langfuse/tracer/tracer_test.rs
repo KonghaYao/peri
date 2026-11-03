@@ -1,7 +1,7 @@
 //! LangfuseTracer 集成烟雾测试。
 //!
 //! 覆盖完整的 turn 生命周期、采样率控制、ErrorSpan 机制、
-//! text chunk 累积和 LLM generation 事件流。
+//! 文本增量无副作用和 LLM generation 事件流。
 //!
 //! 注意：`on_turn_end()` 内部调用 `tokio::spawn`，因此需要 `#[tokio::test]`
 //! 提供异步运行时。
@@ -401,14 +401,62 @@ async fn test_unsampled_failure_emits_parent_before_error_and_preserves_message(
     }
 }
 
-// ── TextChunk 累积测试 ─────────────────────────────────────────────────────
+// ── TextChunk 无副作用回归测试 ─────────────────────────────────────────────
 
+/// [回归] TextChunk 曾无条件累积到 `LangfuseTracer::final_answer`（无读取者、
+/// 无上限、无清理）。文本增量不得进入 Langfuse 事件模型。
 #[test]
-fn test_on_text_chunk_accumulates() {
-    let (mut t, _session) = make_tracer(1.0);
-    t.on_text_chunk("Hello ");
-    t.on_text_chunk("World");
-    assert_eq!(t.final_answer, "Hello World");
+fn test_text_chunks_produce_no_langfuse_events() {
+    use crate::langfuse::bridge::UnifiedLangfuseEvent;
+    use peri_agent::agent::events::ExecutorEvent;
+    use peri_agent::agent::events_v2::RenderEvent;
+
+    for chunk in ["Hello ", "World"] {
+        assert!(
+            UnifiedLangfuseEvent::from_executor_event(ExecutorEvent::TextChunk {
+                message_id: peri_acp_types::messages::MessageId::new(),
+                chunk: chunk.to_string(),
+                source_agent_id: None,
+            })
+            .is_none(),
+            "v1 TextChunk 不应产生 Langfuse 事件"
+        );
+        assert!(
+            UnifiedLangfuseEvent::from_render_event(RenderEvent::TextChunk {
+                turn_id: peri_acp_types::session::TurnId::new(),
+                agent_id: peri_acp_types::identity::AgentId::new(),
+                message_id: peri_acp_types::messages::MessageId::new(),
+                chunk: chunk.to_string(),
+            })
+            .is_none(),
+            "v2 TextChunk 不应产生 Langfuse 事件"
+        );
+    }
+}
+
+/// 文本增量不进入 tracer 后，完整文本仍由 `on_llm_end` 的 Generation output 承载。
+#[tokio::test]
+async fn test_generation_output_remains_complete_after_text_chunks() {
+    let (mut t, session) = make_tracer(1.0);
+    t.on_turn_start("turn_1");
+    t.on_llm_start("main", 0, &[], &[]);
+    t.on_llm_end("main", 0, "gpt-4", "openai", "Hello World", None, None);
+    let _handle = t.on_turn_end(peri_acp_types::session::TurnTelemetryOutcome::Completed);
+    tokio::task::yield_now().await;
+    let events = session.events_snapshot();
+
+    let generation_output = events.iter().find_map(|e| {
+        if let langfuse_client::IngestionEvent::GenerationCreate { body, .. } = e {
+            body.output.clone()
+        } else {
+            None
+        }
+    });
+    assert_eq!(
+        generation_output,
+        Some(serde_json::json!({"text": "Hello World"})),
+        "文本增量不进入 tracer 后，Generation output 仍须是完整文本"
+    );
 }
 
 // ── LLM Generation 事件测试 ─────────────────────────────────────────────────
@@ -977,10 +1025,15 @@ async fn turn_lifecycle_registers_and_clears_active_trace_for_metrics() {
     let trace_id = t.trace_id.clone();
 
     t.on_turn_start("turn_metrics");
+    let active = session
+        .turn_traces()
+        .resolve("sess_smoke")
+        .expect("turn 开始后指标出口应能取到本 turn 的 trace");
+    assert_eq!(active.trace_id, trace_id);
     assert_eq!(
-        session.turn_traces().resolve("sess_smoke").as_deref(),
+        active.parent_observation_id.as_deref(),
         Some(trace_id.as_str()),
-        "turn 开始后指标出口应能取到本 turn 的 trace"
+        "采样 turn 的指标应挂到 turn 根 span（id = trace id）下"
     );
 
     let _flush = t.on_turn_end(TurnTelemetryOutcome::Completed);
@@ -988,4 +1041,60 @@ async fn turn_lifecycle_registers_and_clears_active_trace_for_metrics() {
         session.turn_traces().resolve("sess_smoke").is_none(),
         "turn 结束后应清理活跃登记，后续指标回退独立 root trace"
     );
+}
+
+#[tokio::test]
+async fn unsampled_turn_registers_without_parent_observation() {
+    let (mut t, session) = make_tracer(0.0);
+    let trace_id = t.trace_id.clone();
+
+    t.on_turn_start("turn_unsampled");
+    let active = session
+        .turn_traces()
+        .resolve("sess_smoke")
+        .expect("登记不受采样影响");
+    assert_eq!(active.trace_id, trace_id);
+    assert!(
+        active.parent_observation_id.is_none(),
+        "未采样 turn 没有根 span，指标只共享 trace 不挂父观测"
+    );
+
+    let _flush = t.on_turn_end(TurnTelemetryOutcome::Completed);
+    assert!(session.turn_traces().resolve("sess_smoke").is_none());
+}
+
+#[tokio::test]
+async fn subagent_sid_follows_turn_trace_and_is_cleared() {
+    let (mut t, session) = make_tracer(1.0);
+    let trace_id = t.trace_id.clone();
+
+    t.on_turn_start("turn_subagent_metrics");
+    t.on_subagent_start("main", "child-thread-1", "worker", false);
+    let child = session
+        .turn_traces()
+        .resolve("child-thread-1")
+        .expect("子 agent 的 thread id 应在本 turn 登记");
+    assert_eq!(child.trace_id, trace_id, "子 agent 指标归同一 turn trace");
+    assert_eq!(
+        child.parent_observation_id.as_deref(),
+        Some(trace_id.as_str()),
+        "子 agent 指标挂到同一 turn 根 span 下"
+    );
+
+    t.on_subagent_stop("main", "child-thread-1", "done", false);
+    assert!(
+        session.turn_traces().resolve("child-thread-1").is_none(),
+        "子 agent 结束后应清理其指标归属"
+    );
+
+    // 未正常收 Stop 的子 agent：turn 结束时由 clear_trace 兜底清理
+    t.on_subagent_start("main", "child-thread-2", "worker", false);
+    assert!(session.turn_traces().resolve("child-thread-2").is_some());
+
+    let _flush = t.on_turn_end(TurnTelemetryOutcome::Completed);
+    assert!(
+        session.turn_traces().resolve("child-thread-2").is_none(),
+        "turn 结束应清理残留的子 agent sid"
+    );
+    assert!(session.turn_traces().resolve("sess_smoke").is_none());
 }

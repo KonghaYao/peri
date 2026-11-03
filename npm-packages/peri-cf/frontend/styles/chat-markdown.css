@@ -1,0 +1,208 @@
+/*
+ * 消息流 Markdown 排版与代码块外观。
+ *
+ * 由 streamdown-text.tsx 自行 import，保证对话正文与 reasoning 内的 Markdown
+ * 共用一套视觉契约。字号、行高、字重、圆角、颜色与间距均消费基础层
+ * chat-tokens.css 的 --chat-* 变量；括号内 fallback 只用于 token 未加载时
+ * 保持可读。
+ *
+ * 本文件未分层，规则天然高于 Tailwind 的 components / utilities 层；
+ * 基础层 `chat-tokens.css` 已不承担 Markdown 样式，这里用单类 `.aui-md`
+ * 选择器即可生效。reasoning 的排版与折叠由 `ReasoningRow` 的 Tailwind 工具类负责。
+ */
+.aui-md {
+  --chat-markdown-font-mono: var(
+    --chat-font-mono,
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    "Liberation Mono",
+    "Courier New",
+    monospace
+  );
+
+  min-width: 0;
+  color: var(--chat-fg, inherit);
+  font-size: var(--chat-text-body, 14px);
+  font-weight: 400;
+  line-height: var(--chat-leading-body, 24px);
+  overflow-wrap: anywhere;
+}
+
+/* 首尾块不额外留白，避免消息气泡上下出现悬空间距。 */
+.aui-md > :first-child {
+  margin-top: 0;
+}
+
+.aui-md > :last-child {
+  margin-bottom: 0;
+}
+
+.aui-md p {
+  margin: var(--chat-space-5, 16px) 0;
+}
+
+.aui-md h1,
+.aui-md h2,
+.aui-md h3 {
+  font-weight: var(--chat-weight-heading, 700);
+}
+
+.aui-md h4,
+.aui-md h5,
+.aui-md h6 {
+  font-weight: var(--chat-weight-strong, 600);
+}
+
+.aui-md h1 {
+  margin: var(--chat-space-7, 32px) 0 var(--chat-space-5, 16px);
+  font-size: 21px;
+  line-height: 30px;
+}
+
+.aui-md h2 {
+  margin: var(--chat-space-7, 32px) 0 var(--chat-space-5, 16px);
+  font-size: 19px;
+  line-height: 28px;
+}
+
+.aui-md h3 {
+  margin: var(--chat-space-7, 32px) 0 var(--chat-space-5, 16px);
+  font-size: 18px;
+  line-height: 26px;
+}
+
+.aui-md h4 {
+  margin: var(--chat-space-5, 16px) 0 var(--chat-space-3, 8px);
+  font-size: var(--chat-text-body, 14px);
+  line-height: var(--chat-leading-body, 24px);
+}
+
+.aui-md h5,
+.aui-md h6 {
+  margin: var(--chat-space-5, 16px) 0 var(--chat-space-3, 8px);
+  font-size: var(--chat-text-body, 14px);
+  line-height: var(--chat-leading-body, 24px);
+}
+
+.aui-md :where(h1, h2, h3, h4, h5, h6) strong {
+  font-weight: inherit;
+}
+
+.aui-md a {
+  color: var(--chat-link, var(--primary));
+  font-weight: var(--chat-weight-link, 500);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.aui-md a:hover {
+  color: var(--chat-link, var(--primary));
+  opacity: 0.8;
+}
+
+.aui-md strong {
+  font-weight: var(--chat-weight-strong, 600);
+}
+
+.aui-md :where(sup, sub) {
+  font-size: var(--chat-text-small, 12px);
+  line-height: var(--chat-leading-small, 18px);
+}
+
+.aui-md ul,
+.aui-md ol {
+  margin: var(--chat-space-5, 16px) 0;
+  padding-inline-start: 1.5em;
+}
+
+/* Tailwind preflight 清掉了列表标记，这里恢复正文语义。 */
+.aui-md ul {
+  list-style: disc;
+}
+
+.aui-md ol {
+  list-style: decimal;
+}
+
+.aui-md li {
+  margin: var(--chat-space-2, 6px) 0 0;
+}
+
+.aui-md li:first-child {
+  margin-top: 0;
+}
+
+.aui-md li::marker {
+  color: var(--chat-fg-3, var(--muted-foreground));
+}
+
+.aui-md li > :where(ul, ol) {
+  margin: var(--chat-space-1, 4px) 0;
+}
+
+.aui-md li > p {
+  margin: var(--chat-space-3, 8px) 0;
+}
+
+.aui-md li > :first-child {
+  margin-top: 0;
+}
+
+.aui-md li > :last-child {
+  margin-bottom: 0;
+}
+
+.aui-md blockquote {
+  margin: var(--chat-space-5, 16px) 0;
+  padding-inline-start: 14px;
+  border-inline-start: 2px solid
+    var(--chat-border-3, var(--chat-border-1, var(--border)));
+  color: var(--chat-fg-2, var(--muted-foreground));
+}
+
+.aui-md hr {
+  height: 1px;
+  margin: var(--chat-space-7, 32px) 0;
+  border: 0;
+  background: var(--chat-border-2, var(--chat-border-1, var(--border)));
+}
+
+/* ---------- 行内代码 ---------- */
+
+.aui-md :not(pre) > code {
+  padding: 0 5px;
+  border: 1px solid var(--chat-border-1, var(--border));
+  border-radius: var(--chat-radius-inline, 8px);
+  background: var(--chat-inline-code, var(--muted));
+  font-family: var(--chat-markdown-font-mono);
+  font-size: 0.875em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+.aui-md pre code {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  font: inherit;
+  white-space: inherit;
+  word-break: inherit;
+}
+
+/* 代码块外观由 Streamdown 的 CodeBlock 负责；这里只保留 pre code 的字体重置。 */
+
+/* ---------- 图片 ---------- */
+
+.aui-md .aui-md-img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: min(100%, 640px);
+  max-height: 360px;
+  margin: 0;
+  border-radius: 12px;
+  object-fit: contain;
+}

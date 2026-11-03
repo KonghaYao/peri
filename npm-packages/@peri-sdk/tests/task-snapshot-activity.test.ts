@@ -1,20 +1,20 @@
 import { expect, test } from "bun:test";
 import * as Y from "yjs";
-import { SessionDocs } from "../src/state/session-docs";
+import { ChatDocument } from "../src/view/chat-document";
 import { readSessionView } from "../src/view/session-view";
 
-function send(docs: SessionDocs, event: string, data: Record<string, unknown>): void {
+function send(docs: ChatDocument, event: string, data: Record<string, unknown>): void {
   docs.accept({ jsonrpc: "2.0", method: "peri/unstable_event", params: { sessionId: "s1", event, data } });
 }
 
-function task(docs: SessionDocs): Y.Map<unknown> | undefined {
+function task(docs: ChatDocument): Y.Map<unknown> | undefined {
   const tasks = docs.session.getMap("root").get("tasks") as Y.Map<Y.Map<unknown>>;
   return tasks.get("task-1");
 }
 
 for (const status of ["running", "lost", "reconciling", "delivery_pending", "waiting", "future_status"]) {
   test(`snapshot ${status} is visible but cannot establish current activity`, () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     send(docs, "bg-task-snapshot", { revision: 10, tasks: [{
       task_id: "task-1", status, kind: "shell", summary: "Build", duration_ms: 15,
     }] });
@@ -30,7 +30,7 @@ for (const status of ["running", "lost", "reconciling", "delivery_pending", "wai
 
 for (const status of ["completed", "failed", "cancelled"]) {
   test(`snapshot preserves ${status} and rejects later nonterminal rollback`, () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     send(docs, "bg-task-snapshot", { revision: 1, tasks: [{ task_id: "task-1", status }] });
     expect(task(docs)?.get("status")).toBe(status);
     send(docs, "bg-task-snapshot", { revision: 2, tasks: [{ task_id: "task-1", status: "running" }] });
@@ -40,7 +40,7 @@ for (const status of ["completed", "failed", "cancelled"]) {
 }
 
 test("current start and updates remain live through snapshots and settle normally", () => {
-  const docs = new SessionDocs();
+  const docs = new ChatDocument();
   send(docs, "bg-task-snapshot", { revision: 1, tasks: [{ task_id: "task-1", status: "running" }] });
   send(docs, "bg-task-started", { task_id: "task-1", summary: "Current build", revision: 2 });
   expect(task(docs)?.get("status")).toBe("running");
@@ -53,20 +53,17 @@ test("current start and updates remain live through snapshots and settle normall
   docs.destroy();
 });
 
-test("snapshot gap repair restores content without granting activity to another task", async () => {
-  const docs = new SessionDocs();
-  let requested = 0;
-  docs.setTaskSnapshotRequester(async () => {
-    requested++;
-    return { revision: 4, tasks: [
-      { task_id: "task-1", status: "running", summary: "Updated build", duration_ms: 22 },
-      { task_id: "old-task", status: "running", summary: "Old build" },
-    ] };
-  });
+test("snapshot gap repair is driven by runtime facts and preserves activity evidence", () => {
+  const docs = new ChatDocument();
   send(docs, "bg-task-started", { task_id: "task-1", revision: 1 });
+  // revision 4 的增量有缺口：View 不自行补读，也不把缺口当作新活动。
   send(docs, "bg-task-updated", { task_id: "task-1", status: "running", revision: 4 });
-  await Promise.resolve();
-  expect(requested).toBe(1);
+  expect(task(docs)?.get("status")).toBe("running");
+  // 运行侧 TaskGapDetector 取得快照后投递 task-snapshot 事实。
+  docs.applyFact({ kind: "task-snapshot", snapshot: { revision: 4, tasks: [
+    { task_id: "task-1", status: "running", summary: "Updated build", duration_ms: 22 },
+    { task_id: "old-task", status: "running", summary: "Old build" },
+  ] } });
   expect(task(docs)?.get("status")).toBe("running");
   expect(task(docs)?.get("summary")).toBe("Updated build");
   expect(task(docs)?.get("durationMs")).toBe(22);
@@ -76,7 +73,7 @@ test("snapshot gap repair restores content without granting activity to another 
 });
 
 test("removing a task clears its live evidence before a later snapshot reintroduces it", () => {
-  const docs = new SessionDocs();
+  const docs = new ChatDocument();
   send(docs, "bg-task-started", { task_id: "task-1", revision: 1 });
   send(docs, "bg-task-snapshot", { revision: 2, tasks: [] });
   expect(task(docs)).toBeUndefined();
@@ -86,7 +83,7 @@ test("removing a task clears its live evidence before a later snapshot reintrodu
 });
 
 test("snapshot terminal fact settles a current live task", () => {
-  const docs = new SessionDocs();
+  const docs = new ChatDocument();
   send(docs, "bg-task-started", { task_id: "task-1", revision: 1 });
   send(docs, "bg-task-snapshot", { revision: 2, tasks: [{ task_id: "task-1", status: "completed" }] });
   expect(task(docs)?.get("status")).toBe("completed");
@@ -98,7 +95,7 @@ test("snapshot terminal fact settles a current live task", () => {
 for (const status of ["lost", "reconciling", "delivery_pending", "future_status"]) {
   for (const source of ["bg-task-snapshot", "bg-task-updated"]) {
     test(`${source} ${status} revokes live evidence until a new start`, () => {
-      const docs = new SessionDocs();
+      const docs = new ChatDocument();
       send(docs, "bg-task-started", { task_id: "task-1", revision: 1 });
       expect(task(docs)?.get("status")).toBe("running");
       send(docs, source, source === "bg-task-snapshot"

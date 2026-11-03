@@ -1,0 +1,24 @@
+{
+  "sandboxesRoot": "/Users/you/.peri-sandbox/sandboxes",
+  "periPath": "/Users/you/.peri/peri",
+  "periSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "defaultProfile": "workspace-default",
+  "profiles": {
+    "workspace-default": {
+      "allowedDomains": ["github.com", "api.github.com", "registry.npmjs.org", "api.anthropic.com", "api.openai.com"],
+      "runtimeReadPaths": [
+        "/usr",
+        "/bin",
+        "/sbin",
+        "/usr/local",
+        "/opt/homebrew",
+        "/System",
+        "/Library",
+        "/private/etc"
+      ],
+      "memoryMax": "1G",
+      "tasksMax": 128,
+      "cpuQuota": "100%"
+    }
+  }
+}

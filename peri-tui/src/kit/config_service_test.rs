@@ -6,8 +6,8 @@
 //! `kit::panels::config_test::base_row_save_failure_keeps_persisted_value_and_reports`
 //! 与 `kit::panels::model::commit_test::model_commit_save_failure_keeps_memory_and_pushes_nothing`。
 
-use super::persist_candidate_with;
-use crate::config::PeriConfig;
+use super::{DraftSaveError, persist_candidate_with, persist_draft_with};
+use crate::config::{ConfigSource, ConfigurationRevision, PeriConfig};
 use crate::i18n;
 use crate::kit::atoms::{NOTIFICATION, Notification};
 use fluent_bundle::FluentValue;
@@ -108,6 +108,90 @@ fn failure_reports_reason_with_two_second_ttl() {
         message.contains("configuration revision conflict"),
         "失败提示必须携带原因：{message}"
     );
+    assert!(
+        ttl > SAVE_FAILED_TTL_FLOOR && ttl <= Duration::from_secs(2),
+        "失败提示时长应为 2s，实际 {ttl:?}"
+    );
+}
+
+/// 一个真实 revision（`ConfigurationRevision` 无公开构造器，从临时配置源取得）。
+fn revision() -> ConfigurationRevision {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("workspace");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let source = ConfigSource::load_at(&cwd, dir.path().join("settings.json")).unwrap();
+    source.snapshot().unwrap().revision()
+}
+
+/// 显式 revision 入口：expected 原样传给 authority，返回 accepted 值，提示为成功。
+#[test]
+#[serial]
+fn draft_save_passes_expected_revision_and_returns_accepted_snapshot() {
+    let guard = NotificationGuard::install();
+    let candidate = candidate();
+    let expected = revision();
+    let mut accepted = candidate.clone();
+    accepted.config.active_alias = "haiku".into();
+    let accepted_for_assert = accepted.clone();
+
+    let result = persist_draft_with(&candidate, expected, |passed, saved| {
+        assert_eq!(passed, expected, "expected revision 必须原样传递");
+        assert_eq!(saved, &candidate, "保存入口必须收到调用方草稿");
+        Ok(accepted_for_assert)
+    });
+
+    assert_eq!(
+        result.unwrap(),
+        accepted,
+        "调用方只能发布 authority 接纳后的快照"
+    );
+    let (message, ttl) = guard.latest();
+    assert_eq!(message, i18n::tr("config-saved"));
+    assert!(
+        ttl > SAVED_TTL_FLOOR && ttl <= Duration::from_secs(1),
+        "成功提示时长应为 1s，实际 {ttl:?}"
+    );
+}
+
+/// revision 冲突：返回 Conflict、提示单独的重新载入文案，不走普通保存失败。
+#[test]
+#[serial]
+fn draft_save_reports_revision_conflict_separately() {
+    let guard = NotificationGuard::install();
+    let expected = revision();
+
+    let result = persist_draft_with(&candidate(), expected, |_, _| Err(DraftSaveError::Conflict));
+
+    assert!(matches!(result, Err(DraftSaveError::Conflict)));
+    let (message, ttl) = guard.latest();
+    assert_eq!(message, i18n::tr("config-draft-conflict"));
+    assert!(
+        ttl > Duration::from_millis(2900) && ttl <= Duration::from_secs(3),
+        "冲突提示时长应为 3s，实际 {ttl:?}"
+    );
+}
+
+/// 普通失败：沿用 config-save-failed，携带原因并返回 Failed。
+#[test]
+#[serial]
+fn draft_save_reports_generic_failure_with_reason() {
+    let guard = NotificationGuard::install();
+    let expected = revision();
+
+    let result = persist_draft_with(&candidate(), expected, |_, _| {
+        Err(DraftSaveError::Failed(anyhow::anyhow!("disk is read-only")))
+    });
+
+    assert!(matches!(result, Err(DraftSaveError::Failed(_))));
+    let (message, ttl) = guard.latest();
+    assert_eq!(
+        message,
+        i18n::tr_args(
+            "config-save-failed",
+            &[("error".to_string(), FluentValue::from("disk is read-only"),)],
+        )
+    );
+    assert!(message.contains("disk is read-only"));
     assert!(
         ttl > SAVE_FAILED_TTL_FLOOR && ttl <= Duration::from_secs(2),
         "失败提示时长应为 2s，实际 {ttl:?}"

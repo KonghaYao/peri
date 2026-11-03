@@ -148,7 +148,7 @@ jobs:
                   ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
                   -E 'not (package(=peri-acp) | package(=peri-agent) | package(=peri-tui) | package(=peri-middlewares)
                   | package(=peri-mcp-common) | package(=peri-mcp-web) | package(=peri-mcp-artifact)
-                  | package(=peri-mcp-cron) | package(=peri-mcp-workspace))'
+                  | package(=peri-mcp-cron) | package(=peri-mcp-monitor) | package(=peri-mcp-workspace))'
 
             - name: Run ACP tests (excluding SDK E2E)
               shell: bash
@@ -190,13 +190,13 @@ jobs:
                   ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
                   -E 'package(=peri-middlewares) & kind(lib)'
 
-            # 5 个 MCP 能力包的全部 target 同属 serial-process-state 互斥组。
+            # 6 个 MCP 能力包的全部 target 同属 serial-process-state 互斥组。
             - name: Run MCP capability tests (serial)
               shell: bash
               run: >-
                   ./scripts/cargo-rmcp-patched.sh nextest run --locked --workspace --no-tests=fail
                   -E 'package(=peri-mcp-common) | package(=peri-mcp-web) | package(=peri-mcp-artifact)
-                  | package(=peri-mcp-cron) | package(=peri-mcp-workspace)'
+                  | package(=peri-mcp-cron) | package(=peri-mcp-monitor) | package(=peri-mcp-workspace)'
 
             # doctest 独立入口：nextest 不支持 doctest（stable Rust 限制），
             # 范围与原 `cargo test` 一致 —— workspace 去掉 4 个改用显式 target 选择的包。

@@ -351,6 +351,8 @@ fn project_sub_item(
                 &input_summary,
                 &raw_input,
                 None,
+                // 历史页不持有执行侧 Todo 基线，不得据缺省快照推断变更集。
+                true,
             ));
             let slot = entries[entry_index].len();
             push_tool_card(
@@ -394,6 +396,7 @@ fn project_sub_item(
                 "",
                 &serde_json::Value::Null,
                 None,
+                true,
             ));
             let completed = super::tool::completed_tool_card(&card, &summary, is_error);
             push_tool_card_with_body(&mut entries[entry_index], completed, body, targets, window);

@@ -217,6 +217,66 @@ pub(super) fn render_choose_step(
     ("setup-welcome-title".to_string(), lines)
 }
 
+pub(super) fn render_chatgpt_step(
+    state: &SetupWizardState,
+    dim: Color,
+    accent: Color,
+    cursor_color: Color,
+    text_color: Color,
+) -> (String, Vec<Line<'static>>) {
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            i18n::tr("setup-chatgpt-intro"),
+            Style::default().fg(text_color).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            i18n::tr("setup-chatgpt-login-step"),
+            Style::default().fg(accent),
+        )),
+        Line::from(Span::styled(
+            i18n::tr("setup-chatgpt-login-detail"),
+            Style::default().fg(dim),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            i18n::tr("setup-chatgpt-model-step"),
+            Style::default().fg(accent),
+        )),
+        Line::from(Span::styled(
+            i18n::tr("setup-chatgpt-model-detail"),
+            Style::default().fg(dim),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            i18n::tr("setup-chatgpt-privacy"),
+            Style::default().fg(dim),
+        )),
+        Line::from(""),
+    ];
+    lines.extend(render_cursor_items(
+        vec![
+            (i18n::tr("setup-chatgpt-continue"), String::new()),
+            (i18n::tr("setup-chatgpt-cancel"), String::new()),
+        ],
+        state.chatgpt_cursor,
+        cursor_color,
+        text_color,
+        dim,
+    ));
+    lines.push(make_hint_line(
+        vec![
+            ("Enter".to_string(), i18n::tr("setup-key-confirm")),
+            ("↑/↓".to_string(), i18n::tr("setup-key-select")),
+            ("Esc".to_string(), i18n::tr("setup-key-back")),
+        ],
+        dim,
+        accent,
+    ));
+    ("setup-chatgpt-title".to_string(), lines)
+}
+
 pub(super) fn render_preset_step(
     state: &SetupWizardState,
     dim: Color,

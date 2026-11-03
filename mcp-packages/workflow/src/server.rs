@@ -300,7 +300,7 @@ impl WorkflowMcpServer {
             Ok(outcome) => {
                 if tokio::time::timeout(
                     std::time::Duration::from_secs(10),
-                    runtime.registry().wait_for_observation(&outcome.run_id),
+                    outcome.wait_for_observation(),
                 )
                 .await
                 .is_err()

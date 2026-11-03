@@ -204,7 +204,7 @@ impl SessionDataPort for SqliteSessionData {
                         SessionResourceErrorKind::Workspace(
                             WorkspaceError::ExecutionBindingMismatch,
                         ),
-                    ))
+                    ));
                 }
             }
         }
@@ -421,6 +421,14 @@ impl SessionDataPort for SqliteSessionData {
             .map_err(read_failure)?;
         tx.commit().await.map_err(|error| map_sqlx(&error))?;
         Ok(payloads)
+    }
+
+    async fn load_rewind_candidates(
+        &self,
+        id: &ThreadId,
+        limit: usize,
+    ) -> SessionResourceResult<Vec<RewindCandidate>> {
+        self.read_rewind_candidates(id, limit).await
     }
 
     async fn load_history_segment(

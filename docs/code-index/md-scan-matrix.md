@@ -15,16 +15,16 @@
 
 | 我想做什么 | 主文件（项目目录内） | 入口/关键函数 | 关键逻辑 |
 | --- | --- | --- | --- |
-| 新增 Markdown 实验输入 | `src/matrix.rs` | `Case`（:6）；`matrix_a`（:18）至 `matrix_g`（:323） | 每个输入明确命中数、说明与指定 token 碰撞；45 个原矩阵 case 按输入族组织 |
-| 改扫描范围、alt/url/title/id | `src/scanner.rs` | `md_options`（:30）；`scan_images`（:39） | pulldown-cmark OffsetIter 的原文 byte range；代码块/字面回退不当图片；不调用 report |
-| 改占位 token 或重编号 | `src/scanner.rs` | `TokenKind`（:78）；`replace_images`（:98）；`replace_collision_free`（:108） | 逆序替换原区间；重编号跳过源文本已存在的 token，保持图片与 side table 顺序 |
-| 改结构与 span 投影 | `src/scanner.rs` | `block_rows`（:144）；`shape`（:185）；`parse`（:191） | shape 比较块种类与每行 span 数，忽略内容；token 保留另行评估 |
-| 改矩阵语义或精确负例 | `src/evaluation.rs` | `evaluate`（:41）；`tokens_match_expectation`（:140）；`Outcome::pass` | 命中、原文切片、两种占位结构、token 精确计数、语法残留分别裁决；负例不反转整条保留断言 |
-| 改流式序列与前缀检查 | `src/evaluation.rs` | `streaming_checks`（:249）；`closed_prefix_stable`（:233） | F1–F4 零命中、F5 一命中；`get(..n)` 比较已闭合前缀，当前块减少时判失败且不越界 |
-| 改碰撞解决验收 | `src/evaluation.rs` | `collision_checks`（:305）；`collision_resolved`（:375） | NUL/PUA/Plain 朴素碰撞精确两次；重编号后每图一个唯一 token，源文本不占用新 token，用户原串计数不变 |
-| 改 reference 验收 | `src/evaluation.rs` | `reference_checks`（:389） | 检查定义/未定义引用及 inline 混排的 alt/url/id 与原文切片 |
-| 改进程退出结果 | `src/main.rs` + `src/evaluation.rs` | `main`；`Experiment::{failures,exit_code}`；`run`（:211） | 所有实验组统一决定退出码；空组不能以空集合视为通过 |
-| 改展示 | `src/report.rs` | `print`（:5）；`verdict`（:59） | 只消费结构化 verdict，显示 PASS / EXPECTED COLLISION / FAIL 与失败数 |
+| 新增 Markdown 实验输入 | `src/matrix.rs` | `Case`；`matrix_a` 至 `matrix_g` | 每个输入明确命中数、说明与指定 token 碰撞；原矩阵 case 按输入族组织 |
+| 改扫描范围、alt/url/title/id | `src/scanner.rs` | `md_options`；`scan_images` | pulldown-cmark OffsetIter 的原文 byte range；代码块/字面回退不当图片；不调用 report |
+| 改占位 token 或重编号 | `src/scanner.rs` | `TokenKind`；`replace_images`；`replace_collision_free` | 逆序替换原区间；重编号跳过源文本已存在的 token，保持图片与 side table 顺序 |
+| 改结构与 span 投影 | `src/scanner.rs` | `block_rows`；`shape`；`parse` | shape 比较块种类与每行 span 数，忽略内容；token 保留另行评估 |
+| 改矩阵语义或精确负例 | `src/evaluation.rs` | `evaluate`；`tokens_match_expectation`；`Outcome::pass` | 命中、原文切片、两种占位结构、token 精确计数、语法残留分别裁决；负例不反转整条保留断言 |
+| 改流式序列与前缀检查 | `src/evaluation.rs` | `streaming_checks`；`closed_prefix_stable` | F1–F4 零命中、F5 一命中；`get(..n)` 比较已闭合前缀，当前块减少时判失败且不越界 |
+| 改碰撞解决验收 | `src/evaluation.rs` | `collision_checks`；`collision_resolved` | NUL/PUA/Plain 朴素碰撞精确两次；重编号后每图一个唯一 token，源文本不占用新 token，用户原串计数不变 |
+| 改 reference 验收 | `src/evaluation.rs` | `reference_checks` | 检查定义/未定义引用及 inline 混排的 alt/url/id 与原文切片 |
+| 改进程退出结果 | `src/main.rs` + `src/evaluation.rs` | `main`；`Experiment::{failures,exit_code}`；`run` | 所有实验组统一决定退出码；空组不能以空集合视为通过 |
+| 改展示 | `src/report.rs` | `print`；`verdict` | 只消费结构化 verdict，显示 PASS / EXPECTED COLLISION / FAIL 与失败数 |
 | 验证评估与退出契约 | `src/evaluation_test.rs` | `evaluation::tests` | 用真实 Markdown 解析验证额外碰撞、字面回退、前缀缩短、重编号吞字与漏组导致非零退出 |
 
 ## 验证入口

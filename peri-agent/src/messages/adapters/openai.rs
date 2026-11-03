@@ -59,7 +59,8 @@ impl OpenAiAdapter {
             // - Reasoning → 大多数 OpenAI 兼容 provider 不支持 "thinking" content type
             ContentBlock::ToolUse { .. }
             | ContentBlock::ToolResult { .. }
-            | ContentBlock::Reasoning { .. } => None,
+            | ContentBlock::Reasoning { .. }
+            | ContentBlock::ProviderState { .. } => None,
             ContentBlock::Document { source, title } => {
                 let src = serde_json::to_value(source).unwrap_or_default();
                 Some(json!({ "type": "document", "source": src, "title": title }))

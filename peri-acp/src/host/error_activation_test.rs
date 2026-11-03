@@ -97,7 +97,7 @@ async fn model_failure_recovers_automatically(during_failure: bool) {
         .with_status(400)
         .with_body_from_request(move |_| {
             if during_failure {
-                tasks
+                let ticket = tasks
                     .register(BgTaskRegistration {
                         task_id: "during-failure".into(),
                         kind: BgTaskKind::Agent,
@@ -106,12 +106,9 @@ async fn model_failure_recovers_automatically(during_failure: bool) {
                         kill: None,
                     })
                     .unwrap();
+                tasks.confirm_external_execution_stopped(&ticket);
                 tasks
-                    .settle_completed(
-                        "during-failure",
-                        failed_child("during-failure"),
-                        callback.clone(),
-                    )
+                    .settle_completed(&ticket, failed_child("during-failure"), callback.clone())
                     .unwrap();
             }
             br#"{"error":{"message":"invalid request","type":"invalid_request_error"}}"#.to_vec()

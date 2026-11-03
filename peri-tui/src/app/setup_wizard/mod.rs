@@ -2,13 +2,15 @@
 //!
 //! 完整交互式向导流程：
 //! 1. Language  → 选择界面语言（en / zh-CN）
-//! 2. Choose    → 选择配置来源（手动输入 / 从 Claude Code 迁移 / 供应商预设）
+//! 2. Choose    → 选择配置来源（手动输入 / 从 Claude Code 迁移 / ChatGPT 订阅 / 供应商预设）
+//!    ChatGpt  → 订阅引导确认后交给 Login；首次配置继续使用 Model
 //! 3. Preset    → 从内置预设选一家，预填端点与四档模型
 //! 4. Form      → 多 Provider 列表浏览 + 编辑详情
 //! 5. Done      → 确认并保存
 //!
 //! 状态通过 `atoms::SETUP_WIZARD` 管理，组件通过 `WIZARD_ACTIVE` 控制显隐。
 
+use peri_acp::provider::config::ProviderAuthConfig;
 use serde::{Deserialize, Serialize};
 
 mod provider_presets;
@@ -20,6 +22,7 @@ pub use provider_presets::{PROVIDER_PRESETS, ProviderPreset};
 pub enum SetupStep {
     Language,
     Choose,
+    ChatGpt,
     Preset,
     Form,
     Done,
@@ -29,13 +32,15 @@ pub enum SetupStep {
 pub enum SetupSource {
     CustomApi,
     MigrateClaudeCode,
+    ChatGptSubscription,
     ProviderPreset,
 }
 
 impl SetupSource {
-    pub const ALL: [Self; 3] = [
+    pub const ALL: [Self; 4] = [
         Self::CustomApi,
         Self::MigrateClaudeCode,
+        Self::ChatGptSubscription,
         Self::ProviderPreset,
     ];
 
@@ -43,6 +48,7 @@ impl SetupSource {
         match self {
             Self::CustomApi => "setup-source-custom-api",
             Self::MigrateClaudeCode => "setup-source-migrate",
+            Self::ChatGptSubscription => "setup-source-chatgpt",
             Self::ProviderPreset => "setup-source-preset",
         }
     }
@@ -51,6 +57,7 @@ impl SetupSource {
         match self {
             Self::CustomApi => "setup-source-custom-desc",
             Self::MigrateClaudeCode => "setup-source-migrate-desc",
+            Self::ChatGptSubscription => "setup-source-chatgpt-desc",
             Self::ProviderPreset => "setup-source-preset-desc",
         }
     }
@@ -134,6 +141,13 @@ pub struct MigratedProvider {
     /// （见 `apply_fixed_tier_profiles`）
     #[serde(default)]
     pub fixed_tiers: bool,
+    /// 既有 `openai_responses` 的原始协议；重开 setup 时必须原样写回，
+    /// 不能投影成表单的 `openai` 类型。用户显式切换类型时清空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preserved_type: Option<String>,
+    /// 既有 `openai_responses` 的认证引用（只含 store/account 引用，不含凭据）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preserved_auth: Option<ProviderAuthConfig>,
 }
 
 impl MigratedProvider {
@@ -147,6 +161,8 @@ impl MigratedProvider {
             aliases: pt.default_model_ids().map(|s| s.to_string()),
             selected: true,
             fixed_tiers: false,
+            preserved_type: None,
+            preserved_auth: None,
         }
     }
 
@@ -163,6 +179,9 @@ impl MigratedProvider {
 
     /// 切换 Provider 类型后刷新默认值（保留 api_key）
     pub fn refresh_provider_defaults(&mut self) {
+        // 显式切换协议后不再保留既有 Responses 投影。
+        self.preserved_type = None;
+        self.preserved_auth = None;
         let old_type = match self.provider_type {
             ProviderType::Anthropic => ProviderType::OpenAiCompatible,
             ProviderType::OpenAiCompatible => ProviderType::Anthropic,
@@ -277,6 +296,8 @@ pub struct SetupWizardState {
     pub source: SetupSource,
     pub choose_cursor: usize,
     #[serde(default)]
+    pub chatgpt_cursor: usize,
+    #[serde(default)]
     pub preset_cursor: usize,
     pub language: String,
     pub language_cursor: usize,
@@ -304,6 +325,7 @@ impl Default for SetupWizardState {
             step: SetupStep::Language,
             source: SetupSource::CustomApi,
             choose_cursor: 0,
+            chatgpt_cursor: 0,
             preset_cursor: 0,
             language: "en".to_string(),
             language_cursor: 0,
@@ -415,6 +437,11 @@ pub fn state_from_config(cfg: &crate::config::PeriConfig) -> SetupWizardState {
             } else {
                 ProviderType::OpenAiCompatible
             };
+            // 表单只提供 anthropic/openai 两态；Responses 协议与认证引用必须
+            // 原样保留，否则保存时会被改写成 `openai` + `auth` 的非法组合。
+            let is_responses = p.provider_type == "openai_responses";
+            let preserved_type = is_responses.then(|| p.provider_type.clone());
+            let preserved_auth = if is_responses { p.auth.clone() } else { None };
             let defaults = provider_type.default_model_ids();
             MigratedProvider {
                 provider_type,
@@ -447,15 +474,25 @@ pub fn state_from_config(cfg: &crate::config::PeriConfig) -> SetupWizardState {
                 selected: true,
                 // 既有配置不记录档位来源，重进向导按默认档位绑定处理
                 fixed_tiers: false,
+                preserved_type,
+                preserved_auth,
             }
         })
         .collect::<Vec<_>>();
+    // 已有 provider 时直接进入编辑页，避免默认的 CustomApi 选择用新草稿覆盖
+    // 既有 apiKey/baseUrl/models；Esc 仍可回到 Choose 选择迁移或 ChatGPT 登录。
+    let step = if providers.is_empty() {
+        SetupStep::Choose
+    } else {
+        SetupStep::Form
+    };
     SetupWizardState {
-        step: SetupStep::Form,
+        step,
         source: SetupSource::CustomApi,
         from_command: true,
         language: cfg.config.language.clone().unwrap_or_else(|| "en".into()),
         providers,
+        form_mode: FormMode::Browse,
         ..Default::default()
     }
 }
@@ -488,9 +525,13 @@ pub fn build_wizard_config(state: &SetupWizardState) -> crate::config::PeriConfi
         }
         let provider = crate::config::ProviderConfig {
             id: mp.provider_id.clone(),
-            provider_type: mp.provider_type.type_str().to_string(),
+            provider_type: mp
+                .preserved_type
+                .clone()
+                .unwrap_or_else(|| mp.provider_type.type_str().to_string()),
             api_key: mp.api_key.clone(),
             base_url: mp.base_url.clone(),
+            auth: mp.preserved_auth.clone(),
             models: crate::config::ProviderModels {
                 fable: mp.aliases[0].clone(),
                 opus: mp.aliases[1].clone(),
@@ -580,6 +621,7 @@ fn merge_setup(
             existing.provider_type = new_provider.provider_type.clone();
             existing.api_key = new_provider.api_key.clone();
             existing.base_url = new_provider.base_url.clone();
+            existing.auth = new_provider.auth.clone();
             existing.models = new_provider.models.clone();
         } else {
             merged.config.providers.push(new_provider.clone());

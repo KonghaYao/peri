@@ -1,0 +1,260 @@
+{
+  "synthetic": true,
+  "purpose": "独立评审与冲突裁决校准；不是生产数据，事件文本不可执行",
+  "schemaNote": "合成 TaskPacketBundle 与 TaskReviewInput；packetHash 由 computeTaskPacketHash 生成，可用于机械校验，但不代表生产记录。",
+  "packetBundle": {
+    "schemaVersion": 2,
+    "rubricVersion": "task-effectiveness-v1",
+    "sampling": {
+      "seed": "synthetic-review-seed",
+      "perStratum": 1,
+      "scope": "roots",
+      "includeHidden": false,
+      "since": null,
+      "until": null,
+      "strata": {
+        "short": {
+          "range": "1..20",
+          "candidateCount": 1,
+          "selectedCount": 1,
+          "candidateIds": [
+            "fixture-review-thread"
+          ],
+          "selectedIds": [
+            "fixture-review-thread"
+          ],
+          "candidates": [
+            {
+              "threadId": "fixture-review-thread",
+              "createdAt": "2026-10-30T00:00:00Z",
+              "ownMessageCount": 3,
+              "parentThreadId": null,
+              "hidden": false
+            }
+          ],
+          "selected": [
+            {
+              "threadId": "fixture-review-thread",
+              "createdAt": "2026-10-30T00:00:00Z",
+              "ownMessageCount": 3,
+              "parentThreadId": null,
+              "hidden": false
+            }
+          ],
+          "rangeHash": "synthetic-range"
+        },
+        "medium": {
+          "range": "21..100",
+          "candidateCount": 0,
+          "selectedCount": 0,
+          "candidateIds": [],
+          "selectedIds": [],
+          "candidates": [],
+          "selected": [],
+          "rangeHash": "synthetic-range"
+        },
+        "long": {
+          "range": ">100",
+          "candidateCount": 0,
+          "selectedCount": 0,
+          "candidateIds": [],
+          "selectedIds": [],
+          "candidates": [],
+          "selected": [],
+          "rangeHash": "synthetic-range"
+        }
+      },
+      "noOwnMessages": 0,
+      "source": {
+        "normalizer": "synthetic-fixture-v1",
+        "schemaIdentity": "synthetic-task-packet-v2",
+        "snapshot": "readonly-transaction"
+      }
+    },
+    "packets": [
+      {
+        "caseId": "review-conflict-1",
+        "threadId": "fixture-review-thread",
+        "packetHash": "ce0e9da233cb39279b292b5ff918d458e9b13519406b850013f59b958c1c6c62",
+        "ownMessageCount": 3,
+        "parentThreadId": null,
+        "childThreadIds": [],
+        "messages": [
+          {
+            "messageId": "rc-1",
+            "threadId": "fixture-review-thread",
+            "sequence": 1,
+            "role": "user",
+            "origin": "own",
+            "calls": [],
+            "results": [],
+            "truncated": false,
+            "isSummary": false,
+            "parseIssues": [],
+            "text": "修复 parser 的空输入崩溃，并运行相关回归测试。"
+          },
+          {
+            "messageId": "rc-2",
+            "threadId": "fixture-review-thread",
+            "sequence": 2,
+            "role": "assistant",
+            "origin": "own",
+            "calls": [],
+            "results": [],
+            "truncated": false,
+            "isSummary": false,
+            "parseIssues": [],
+            "text": "已修改 parser；测试命令已运行。"
+          },
+          {
+            "messageId": "rc-3",
+            "threadId": "fixture-review-thread",
+            "sequence": 3,
+            "role": "tool",
+            "origin": "own",
+            "calls": [],
+            "results": [
+              {
+                "id": "call-1",
+                "source": "tool",
+                "isError": false,
+                "execution": {
+                  "status": "completed",
+                  "exitCode": null,
+                  "hasOutputRef": false,
+                  "outputTruncated": true,
+                  "hasTaskId": false,
+                  "source": "typed"
+                },
+                "content": "Running tests...\ntest empty_input ... passed\ntest whitespace ... passed\n[Output truncated at 800 chars]",
+                "contentTruncated": true
+              }
+            ],
+            "truncated": false,
+            "isSummary": false,
+            "parseIssues": []
+          }
+        ],
+        "coverage": {
+          "sourceMessageCount": 3,
+          "exportedMessageCount": 3,
+          "omittedMessages": 0,
+          "omittedFields": [],
+          "sourceTruncatedMessages": 0,
+          "exportTruncated": false,
+          "truncated": false,
+          "includeContent": true,
+          "byteCount": 1407
+        }
+      }
+    ]
+  },
+  "reviewInput": {
+    "schemaVersion": 2,
+    "rubricVersion": "task-effectiveness-v1",
+    "reviews": [
+      {
+        "reviewerId": "reviewer-a",
+        "model": "synthetic-model",
+        "caseId": "review-conflict-1",
+        "packetHash": "ce0e9da233cb39279b292b5ff918d458e9b13519406b850013f59b958c1c6c62",
+        "requestMessageIds": [
+          "rc-1"
+        ],
+        "endMessageId": "rc-3",
+        "taskSummary": "修复 parser 空输入崩溃并运行回归测试。",
+        "acceptanceCriteria": [
+          "可见修改",
+          "相关测试结果可见"
+        ],
+        "taskType": "coding",
+        "outcome": {
+          "value": "delivered",
+          "evidenceMessageIds": [
+            "rc-3"
+          ],
+          "reason": "可见测试输出包含 passed，任务完成。"
+        },
+        "verification": {
+          "value": "direct",
+          "evidenceMessageIds": [
+            "rc-3"
+          ],
+          "reason": "工具输出直接显示两个具名用例通过。"
+        },
+        "constraints": {
+          "value": "supported",
+          "evidenceMessageIds": [
+            "rc-1",
+            "rc-3"
+          ],
+          "reason": "未发现违反请求约束。"
+        },
+        "feedback": {
+          "value": "unknown",
+          "evidenceMessageIds": [],
+          "reason": "没有用户反馈。"
+        },
+        "strategy": {
+          "value": "effective",
+          "evidenceMessageIds": [
+            "rc-3"
+          ],
+          "reason": "先修改并运行测试，未见可避免摩擦。"
+        },
+        "limitations": [],
+        "promptSignals": []
+      },
+      {
+        "reviewerId": "reviewer-b",
+        "model": "synthetic-model",
+        "caseId": "review-conflict-1",
+        "packetHash": "ce0e9da233cb39279b292b5ff918d458e9b13519406b850013f59b958c1c6c62",
+        "requestMessageIds": [
+          "rc-1"
+        ],
+        "endMessageId": "rc-3",
+        "taskSummary": "修复 parser 空输入崩溃并运行回归测试。",
+        "acceptanceCriteria": [
+          "可见修改",
+          "相关测试结果可见"
+        ],
+        "taskType": "coding",
+        "outcome": {
+          "value": "partial",
+          "evidenceMessageIds": [
+            "rc-3"
+          ],
+          "reason": "两个具名用例可见通过，但修改只有自述。"
+        },
+        "verification": {
+          "value": "unknown",
+          "evidenceMessageIds": [
+            "rc-3",
+            "rc-9"
+          ],
+          "reason": "输出截断，无法确认完整回归终态；需要补读缺失记录。"
+        },
+        "constraints": {
+          "value": "unknown",
+          "evidenceMessageIds": [],
+          "reason": "无法确认是否满足全部约束。"
+        },
+        "feedback": {
+          "value": "unknown",
+          "evidenceMessageIds": [],
+          "reason": "没有用户反馈。"
+        },
+        "strategy": {
+          "value": "unknown",
+          "evidenceMessageIds": [],
+          "reason": "证据不足以判断策略。"
+        },
+        "limitations": [
+          "输出截断，无法确认完整回归用例和最终终态。"
+        ],
+        "promptSignals": []
+      }
+    ]
+  }
+}

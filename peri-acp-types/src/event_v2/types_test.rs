@@ -78,6 +78,8 @@ fn test_render_event_tool_started_id_extraction() {
         tool_call_id: "tc_1".to_string(),
         name: "Read".to_string(),
         input: serde_json::Value::Null,
+        origin_message_id: None,
+        origin_readable: None,
     };
     assert_eq!(event.turn_id(), turn_id);
     assert_eq!(event.agent_id(), agent_id);

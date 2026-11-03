@@ -1,7 +1,7 @@
 //! Workflow MCP data → Host task projection. No runtime or owner registry references.
 use peri_acp_types::{
     ports::McpPoolPort,
-    tasks::{ExternalTaskRegistration, TaskManager, TaskSnapshot},
+    tasks::{ExternalTaskRegistration, TaskManager, TaskRegistrationTicket, TaskSnapshot},
     workflow::WorkflowTaskResult,
 };
 use serde::Deserialize;
@@ -32,6 +32,9 @@ pub(crate) struct Client {
     token: String,
     deliver: Deliver,
     scan: tokio::sync::Mutex<()>,
+    // Active/unacknowledged source registrations only. A successful owner ACK
+    // closes replay eligibility and releases the last producer-held receipt.
+    registrations: parking_lot::Mutex<std::collections::HashMap<String, TaskRegistrationTicket>>,
 }
 
 impl WorkflowProjection {
@@ -49,6 +52,7 @@ impl WorkflowProjection {
             token,
             deliver,
             scan: tokio::sync::Mutex::new(()),
+            registrations: parking_lot::Mutex::default(),
         });
         let cancel = CancellationToken::new();
         let task_cancel = cancel.clone();
@@ -114,13 +118,27 @@ impl Client {
                 .find(|record| record.task_id == completion.run_id)
                 .ok_or_else(|| "workflow completion has no owner task record".to_string())?;
             let registration = self.registration(record, Some(completion.clone()));
+            let existing = self.registrations.lock().get(&completion.run_id).cloned();
+            let ticket = if let Some(ticket) = existing {
+                self.manager.refresh_external(&ticket, registration)?;
+                ticket
+            } else {
+                let ticket = self.manager.register_external_terminal(registration)?;
+                self.registrations
+                    .lock()
+                    .insert(completion.run_id.clone(), ticket.clone());
+                ticket
+            };
             self.manager
-                .restore_external_terminal(
-                    registration,
+                .settle_external(
+                    &ticket,
                     &format!("{}:terminal", completion.run_id),
                     completion.background_result(),
                 )
                 .await?;
+            if !ticket.is_settled() {
+                return Err("workflow terminal delivery is not accepted".into());
+            }
             self.pool
                 .call_instance_tool(
                     "workflow",
@@ -129,6 +147,7 @@ impl Client {
                     Some(json!({CONSUMER_META:self.token})),
                 )
                 .await?;
+            self.registrations.lock().remove(&completion.run_id);
         }
         for record in &page.snapshot.tasks {
             if record.status == "running"
@@ -137,8 +156,21 @@ impl Client {
                     .iter()
                     .any(|result| result.run_id == record.task_id)
             {
-                self.manager
-                    .register_external(self.registration(record, None))?;
+                let existing = self.registrations.lock().get(&record.task_id).cloned();
+                if let Some(ticket) = existing {
+                    if ticket.is_settled() {
+                        return Err("workflow owner regressed an accepted task to running".into());
+                    }
+                    self.manager
+                        .refresh_external(&ticket, self.registration(record, None))?;
+                } else {
+                    let ticket = self
+                        .manager
+                        .register_external(self.registration(record, None))?;
+                    self.registrations
+                        .lock()
+                        .insert(record.task_id.clone(), ticket);
+                }
                 self.pool
                     .call_instance_tool(
                         "workflow",
@@ -149,6 +181,17 @@ impl Client {
                     .await?;
             }
         }
+        // If an ACK was accepted but its response was lost, a subsequent full
+        // owner snapshot without that completion closes the same replay scope.
+        self.registrations.lock().retain(|run_id, ticket| {
+            !ticket.is_settled()
+                || page.completions.iter().any(|item| &item.run_id == run_id)
+                || page
+                    .snapshot
+                    .tasks
+                    .iter()
+                    .any(|record| &record.task_id == run_id && record.status == "running")
+        });
         Ok(())
     }
 

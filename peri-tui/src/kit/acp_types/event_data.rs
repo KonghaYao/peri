@@ -12,6 +12,12 @@ use serde_json::Value;
 /// acp_bridge 消费时与 state.active_session_id 比较以丢弃陈旧滞留事件。
 #[derive(Debug, Clone)]
 pub struct AcpEventWithEpoch {
+    /// Real child execution identity, captured before the parent event path.
+    pub child_origin: Option<peri_acp_types::event::ChildEventOrigin>,
+    /// Local transport-ingress epoch, not a server producer barrier. It rejects
+    /// queued old-view deliveries; unseen higher sequences of a still-live run
+    /// may continue after a same-session reset and remain incomplete previews.
+    pub view_epoch: u64,
     pub event: AcpEventData,
     pub active_session_id: String,
 }

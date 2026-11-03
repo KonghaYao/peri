@@ -1,9 +1,8 @@
 # 会话身份、工作区归属与恢复
 
-> 状态：现行设计；核心路径已实施，并发与端到端验收仍有未完成项。
+> 状态：现行设计。核心路径已实施；并发、跨实例与真实端到端验收仍有未完成项，须按契约测试与真实运行单独报告。
 >
 > Scope：会话身份、机器环境分区、工作区发现与登记、执行绑定与恢复入口。
-> 进度与验收见 [2026-09 月志](../../spec/history/2026-09.md)（2026-09-30 条目）。
 > Machine → Workspace → Session 归属与单条 schema 迁移见 [存储 v2 设计](storage-v2-machine-workspace-session.md)；
 > 当前执行与任务生命周期边界见 [Session 异步任务统一入口](session-async-tasks.md)。
 > 术语见 [领域语言](../../CONTEXT.md)；冻结与生命周期约束遵循 [架构契约](../standards/architecture-contracts.md)（ARC-WORKSPACE-001）。
@@ -39,7 +38,7 @@ Session ID 是唯一会话身份，不改为路径、机器地址或 env + path 
 | 执行绑定 | `SessionBinding` | 项目、工作区、工作区内相对目录与绑定版本 |
 | 执行协调 | 当前进程 runtime 与外部部署编排 | Peri 校验 binding/path 并管理任务资源生命周期，不保证跨实例唯一执行 |
 
-不再增加与 `ProjectId` 重叠的 RepositoryId。身份范围限于同一台主机的同一 Peri 存储；跨主机、跨数据库合并和仓库克隆身份传播不在本设计范围。`WorkspaceInfo` 携带 machine ID、路径与路径来源（discovered / derived_legacy / unverified），`ResolvedWorkspace` 只带一个工作区归属身份（`(machine_id, canonical path)`）与本次准入的执行目录；项目、文件对象与发现快照另行存放在归属行上，用于项目复用与诊断；执行准入只要求 cwd 可用（远端组合仍需绑定快照定位 root，virtual 远端另有快照校验，见 §3.2）；存储侧约束见 [存储 v2 设计](storage-v2-machine-workspace-session.md)。
+不再增加与 `ProjectId` 重叠的 RepositoryId。身份范围限于同一台主机的同一 Peri 存储；跨主机、跨数据库合并和仓库克隆身份传播不在本设计范围。`WorkspaceInfo` 携带 machine ID、路径与路径来源（discovered / derived_legacy / unverified）；`ResolvedWorkspace` 携带 workspace_id、项目与本次准入的 root/cwd 投影，发现快照只作诊断。执行准入只要求 cwd 可用（远端组合仍需绑定快照定位 root，virtual 远端另有快照校验，见 §3.2）；存储侧约束见 [存储 v2 设计](storage-v2-machine-workspace-session.md)。
 
 `SessionBinding` 的持久化字段为：
 
@@ -190,19 +189,19 @@ executable-not-found 时，可以建立目录项目；后者仅表示未启用 G
 
 ACP `requests/session_restore.rs::prepare_existing` 按 ID 读取会话，检查环境、绑定、持久化与 frozen 完整性。执行加载不认领所有权或检查旧 Agent 是否停止；Peri 不保证跨实例唯一执行者。环境不可用时明确拒绝执行加载，历史仍可独立查询。legacy 使用保存 cwd，不借当前终端路径改绑。
 
-执行准入复核保存的执行目录，而不是以请求或期望 cwd 重新决定归属：一次准入复核归属关系与 cwd 可用性（`validate_expected`），准入内后续检查复用同一判定（`reassert_expected`）。文件对象身份与 Git 布局不参与准入，因此不再重新 canonicalize 归属或复核最近 Git 仓库。请求环境与保存绑定的环境不匹配时返回 `ExecutionBindingMismatch`，不因项目相同就放行。
+执行准入复核保存的执行目录，而不是以请求或期望 cwd 重新决定归属：一次准入复核归属关系与 cwd 可用性（`validate_expected`），准入内后续检查复用同一判定（`reassert_expected`）。文件对象身份与 Git 布局不参与准入，因此不再重新 canonicalize 归属或复核最近 Git 仓库。绑定归属与解析出的工作区不一致时返回 `ExecutionBindingMismatch`，不因项目相同就放行；请求 cwd 不参与恢复认领。
 
 显式 load/resume/fork 可接纳未绑定根会话：从保存的绝对 `ThreadMeta.cwd` 发现并验证当前工作区，请求 cwd 不参与恢复认领或期望路径比对，也不使用当前终端目录兜底。接纳在写事务中重读 cwd、根关系与绑定，验证解析结果仍有效，原子插入 binding 并只在 frozen 缺失时保存兼容快照；缺失快照的配置、语言、MetaHarness 与插件目录均从保存 cwd 发现，不沿用启动项目，也不提前装配执行资源。已有快照先校验并保持原样，并发竞争复用赢家，失败或中断不得只提交其中一项。旧数据未保存目录对象身份，接纳以保存 cwd 和当前可验证身份为依据；缺目录或非绝对 cwd 保留只读历史。
 
 执行加载仍校验环境与工作区绑定，不能悄悄在当前机器同名绝对路径执行或自动迁移会话；这些环境约束不是执行所有权。Peri 不获取 lease、Store owner 或工具 fencing 凭证。
 
-取得执行准入后，重读 binding、重新验证位置与运行恢复状态，再恢复 frozen、构建有效环境和资源，最后提交 live state。装配失败必须收回本次新建资源，不能泄漏 MCP 或后台任务。热态复用必须校验同一 binding 和环境；冷态不从请求重新决定 cwd。metadata、Git 定位、资源装配或 frozen 恢复失败，都不能提交新的 active session。已有 `ARC-SESSION-LOAD-001` 的同步 reservation 和 operation gate 保留；新旧 session 切换只有在目标提交时才公布有效目录和 active identity，失败必须恢复真实可用的原状态或明确 NoSession。
+取得执行准入后，重读 binding、重新验证位置与绑定状态，再恢复 frozen、构建有效环境和资源，最后提交 live state。装配失败必须收回本次新建资源，不能泄漏 MCP 或后台任务。热态复用必须校验同一 binding 和环境；冷态不从请求重新决定 cwd。metadata、Git 定位、资源装配或 frozen 恢复失败，都不能提交新的 active session。已有 `ARC-SESSION-LOAD-001` 的同步 reservation 和 operation gate 保留；新旧 session 切换只有在目标提交时才公布有效目录和 active identity，失败必须恢复真实可用的原状态或明确 NoSession。
 
 目录缺失时，历史通过只读查询/回放路径仍可访问。这条路径不得创建执行资源、回填 frozen、启动 continuation 或认领执行所有权；标准可执行 load 则明确失败。
 
 Peri 不维护 session 执行锁、租约、owner token、续租或接管证明；跨实例执行唯一性须由部署方外部协调。同 ID 创建重试仍校验不可变的绑定、冻结快照及父链，不覆盖已有内容。未决持久化不能因重开被视为结清；取消、子任务关系、MCP 关闭与事务仍遵守自身生命周期。
 
-SDK alpha 的独立 claim/KV 实现不在本次修改范围，不构成当前 Peri 普通执行或 history 加载的验收前提。旧 admission、entered、settle 和 work query 协议已从后端撤销；不得以旧 SDK 测试推断当前协议兼容或跨实例执行保证。SDK 源码的独立状态见 [SDK 代码索引](../code-index/peri-ts-sdk.md)。
+SDK alpha 的独立 claim/KV 实现不构成 Peri 普通执行或 history 加载的验收前提。旧 admission、entered、settle 和 work query 协议已从后端撤销；不得以旧 SDK 测试推断当前协议兼容或跨实例执行保证。SDK 源码的独立状态见 [SDK 代码索引](../code-index/peri-ts-sdk.md)。
 
 ## 5. 执行环境装配
 
@@ -226,17 +225,17 @@ Host 可以共享 transport、全局配置来源与确定可共享的服务；�
 
 跨工作区续作定义为独立、显式的新环境操作：新 `ThreadId`、新 binding、目标环境重新冻结，历史以带来源和截止点的快照复制；不得改写旧消息中的绝对路径，亦不得把旧工具结果当作目标工作区已执行的事实。跨环境的说明持久化为可信上下文。它不继承进行中的工具、审批、队列、cron、Workflow、子 Agent 或旧运行句柄。
 
-初始交付不提供该操作。普通 fork/load 不承担它的兼容别名；将来实现时应独立定义 wire capability 与历史投影验收，不修改普通 fork 的冻结语义。
+当前不提供该操作。普通 fork/load 不承担它的兼容别名；将来实现时应独立定义 wire capability 与历史投影验收，不修改普通 fork 的冻结语义。
 
 ### 6.3 位置重定位
 
-初始交付不提供重定位或重关联操作：没有把已有 binding 改指到新位置或新对象的入口。目录移动或暂时不可用使原绑定返回 `Unavailable`（cwd 不存在），保留历史，不自动修改 binding 或 frozen。移除后重建、Git 管理目录变化不阻断旧会话执行。用户可完成的前进路径是在当前可访问目录建立新会话：该目录按 §3.2 归属（同路径复用原归属行，新路径新建），旧会话与历史保持可查。该绑定失败的原因与这条前进路径随错误一并呈现，不提示产品中不存在的操作；会话未能建立的失败发生在输入受理之前，其提示不得表述为输入被拒。后续显式重定位若要保留 `WorkspaceId`，必须由上层停止执行后校验 Git 关联，并让位置更新与执行准入共享线性化点。
+当前不提供重定位或重关联操作：没有把已有 binding 改指到新位置或新对象的入口。目录移动或暂时不可用使原绑定返回 `Unavailable`（cwd 不存在），保留历史，不自动修改 binding 或 frozen。移除后重建、Git 管理目录变化不阻断旧会话执行。用户可完成的前进路径是在当前可访问目录建立新会话：该目录按 §3.2 归属（同路径复用原归属行，新路径新建），旧会话与历史保持可查。该绑定失败的原因与这条前进路径随错误一并呈现，不提示产品中不存在的操作；会话未能建立的失败发生在输入受理之前，其提示不得表述为输入被拒。后续显式重定位若要保留 `WorkspaceId`，必须由上层停止执行后校验 Git 关联，并让位置更新与执行准入共享线性化点。
 
 当前在 new/load/resume/fork 和新 prompt 准入时验证 cwd 可用性。运行中的外部 `git worktree move/remove` 不触发自动迁移，也不承诺隔离任意外部文件系统改动。因此活动执行期间应保持其工作区位置稳定；下一次准入发现 cwd 消失必须拒绝。
 
 ## 7. 查询、TUI 与 ACP 兼容
 
-查询入口：`list_sessions(ThreadScope)` 按 scope 在 SQL 层过滤，`load_session(session_id)` / `resume_session(session_id)` 按 ID 读取历史与元数据（恢复语义见 §4）。提供统一的强类型 scope：`Environment(machine_id)`、`Project(ProjectId)`、`Workspace(WorkspaceId)`、`ExactDirectory(WorkspaceId, relative_dir)` 与显式 `All`。筛选使用稳定排序 `(updated_at, ThreadId)` 与 cursor 分页；索引覆盖项目/工作区及排序。列表条目的 `binding` 可为空表示未绑定历史，`effective_cwd` 只用于展示，可执行 load 必须独立验证。
+查询入口：`list_sessions(&ScopedThreadQuery)` 按 scope 在 SQL 层过滤，`load_session_snapshot` / `load_session_history` / `load_session_meta` 按 ID 读取历史与元数据（恢复语义见 §4）。`ScopedThreadQuery` 提供统一的强类型 scope：`Environment(machine_id)`、`Project(ProjectId)`、`Workspace(WorkspaceId)`、`ExactDirectory(WorkspaceId, relative_dir)` 与显式 `All`。筛选使用稳定排序 `(updated_at, ThreadId)` 与 cursor 分页；索引覆盖项目/工作区及排序。列表条目的 `binding` 可为空表示未绑定历史，`effective_cwd` 只用于展示，可执行 load 必须独立验证。
 
 普通 TUI 列表默认为 Project，允许 Workspace 筛选。选择其他工作区的会话时，客户端从宿主取得已验证的有效执行目录，再发起恢复；宿主仍独立校验 binding。界面在提交成功后显示这个目录，@mention、路径展示和相关文件视图同步切换。hooks、插件与 MCP 展示取当前会话环境。TUI 本地配置面板仍编辑宿主启动配置，必须显示“宿主配置”及实际保存路径；它不代表当前工作区的会话配置。
 
@@ -248,7 +247,7 @@ Host 可以共享 transport、全局配置来源与确定可共享的服务；�
 
 ## 8. 存储打开与版本边界
 
-默认读写使用 `~/.peri/threads/threads.db`，`--db-path` 可选择显式路径；schema 版本记录在 `PRAGMA user_version`，当前版本由 `peri-resources/src/sessions/canonical.rs::CURRENT_SCHEMA_VERSION` 定义（压缩后的 11 合并了开发期各代的迁移结果：建立 Machine/Workspace/Session 归属、删除持久执行所有权与执行恢复账本、删除执行登记表并把绑定收敛到归属行；当前 12 在 11 上只增 `inherited_snapshot_index`/`inherited_payload_index` 两张派生索引表，可由 `threads.inherited_context` 重建；执行恢复表移除与压缩背景见 active spec）。版本与迁移入口见 [Resources 代码索引](../code-index/peri-resources.md)，历史归属设计见 [存储 v2](storage-v2-machine-workspace-session.md)；开发期 13..19 中间代不再被接受，升级来源是正式基线 ≤10（远端 v2 契约的 10|11）与 11 的当前形状（远端 `v5`，只增派生索引表的增量升级）。
+默认读写使用 `~/.peri/threads/threads.db`，`--db-path` 可选择显式路径；schema 版本记录在 `PRAGMA user_version`，当前版本由 `peri-resources/src/sessions/canonical.rs::CURRENT_SCHEMA_VERSION` 定义（当前 12：在 11 的归属形状上只增 `inherited_snapshot_index`/`inherited_payload_index` 两张派生索引表，可由 `threads.inherited_context` 重建）。升级来源是正式基线 ≤10（远端 `peri.session.store/v2` 契约的 10|11）与 11 的当前形状（远端 `v5`，只增派生索引表的增量升级）；不认识的版本明确拒绝。版本与迁移入口见 [Resources 代码索引](../code-index/peri-resources.md)，历史归属设计见 [存储 v2](storage-v2-machine-workspace-session.md)。
 
 只读 metadata 打开不创建数据库、不升级 schema、不登记或绑定；缺失的默认库按空历史处理，损坏与不兼容 shape 返回错误。启动时写打开失败（schema 锁被占、库文件或 WAL 不可写）降级为只读打开并记 warning：进入与历史浏览不受影响，但降级不假装可写——新会话与目录登记在进入 SQL 前按 `ReadOnlyStore` 失败。写打开走到版本判定时，本构建不认识的 schema 与 `user_version` 返回 `UnsupportedDatabaseSchema` / `UnsupportedSchemaVersion`，且不降级；升级前必须停止所有旧 writer，不支持新旧二进制混用同一库。schema 版本号不是对不遵守协议的旧 writer 或外部 SQLite writer 的访问控制。
 
@@ -257,4 +256,4 @@ Host 可以共享 transport、全局配置来源与确定可共享的服务；�
 - hardlink 发布只解决初次身份文件的完整可见性与竞争创建，不代表整个系统全面并发安全。文件系统须支持同目录 hardlink；目录创建未强制私有权限，已有身份文件权限/符号链接未额外校验，非 Unix 不提供 `0600` 保证。未同步父目录，也未保证崩溃后无残留临时文件或身份目录项持久性。
 - 执行所有权与跨实例协调由部署方外部处理；Peri 的事务、访问模式和关闭意图不提供跨实例单执行者或工具副作用去重保证。普通 ACP 执行不要求 SDK 持久 admission；跨实例部署的唯一性由其外部编排管理，Peri 不恢复旧 Agent 执行。
 - Session ID 可查找性不是认证，env 分区不是多用户权限隔离；机器 ID 文件与 override 都不是安全凭证。数据库/服务访问授权独立，不能仅靠列表过滤或执行只读标记宣称安全。
-- 本设计不承诺任意缺路径/缺快照/坏库均能完整恢复，也不宣称只读界面替代所有存储写权限检查。全面 URI/VFS、插件与 MCP 缓存迁移不是本次前置条件。
+- 本设计不承诺任意缺路径/缺快照/坏库均能完整恢复，也不宣称只读界面替代所有存储写权限检查。全面 URI/VFS、插件与 MCP 缓存迁移不在本设计范围。

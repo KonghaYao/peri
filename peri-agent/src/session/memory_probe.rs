@@ -162,6 +162,7 @@ fn content_block_bytes(block: &ContentBlock) -> ObjectBytes {
         ContentBlock::Reasoning { text, signature } => {
             string_bytes(text) + option_string_bytes(signature)
         }
+        ContentBlock::ProviderState { provider, data } => string_bytes(provider) + json_bytes(data),
         ContentBlock::Unknown(value) => json_bytes(value),
     }
 }
@@ -250,7 +251,7 @@ pub fn payload_bytes(payload: &PersistedPayload) -> ObjectBytes {
     }
 }
 
-fn transcript_entry_bytes(entry: &TranscriptEntry) -> ObjectBytes {
+pub(crate) fn transcript_entry_bytes(entry: &TranscriptEntry) -> ObjectBytes {
     match entry {
         TranscriptEntry::Message(message) => message_bytes(message),
         TranscriptEntry::Reminder { reminder, .. } => reminder_bytes(reminder),

@@ -30,13 +30,15 @@ pub(super) fn handle_subagent_started(
     // 仅后台 subagent 注册到 BG_AGENT_IDS——同步 subagent 不进入后台显示区域
     if is_background {
         BG_AGENT_IDS.state().write().insert(agent_id.to_string());
-        if let Some(task_id) = bind_linked_agent_on_subagent_started(agent_id, agent_name) {
-            // 记下本次运行的 occurrence：详情面板按选中 id 回查 live 明细时，
-            // agent_id 不足以区分 resume 复用的同一 thread。
-            let instance_id = state
-                .current_turn
-                .subagent_instance_id(agent_id)
-                .map(str::to_string);
+        // Carry the occurrence into binding too: an old run can still be Running
+        // in BG_LIVE_DETAIL when its Stop was lost and a newer execution starts.
+        let instance_id = state
+            .current_turn
+            .subagent_instance_id(agent_id)
+            .map(str::to_string);
+        if let Some(task_id) =
+            bind_linked_agent_on_subagent_started(agent_id, agent_name, instance_id.as_deref())
+        {
             init_agent_live_detail(&task_id, agent_id, agent_name, instance_id.as_deref());
         }
     }

@@ -1,77 +1,92 @@
 import { expect, test } from "bun:test";
 import * as Y from "yjs";
-import { SessionDocs } from "../src/state/session-docs";
+import { ChatDocument } from "../src/view/chat-document";
 import { readSessionView, type ToolView } from "../src/view/session-view";
 
-function update(docs: SessionDocs, fields: Record<string, unknown>): void {
+function update(docs: ChatDocument, fields: Record<string, unknown>): void {
     docs.accept({ jsonrpc: "2.0", method: "session/update", params: { sessionId: "s1", update: fields } });
 }
-function card(docs: SessionDocs): ToolView {
+function card(docs: ChatDocument): ToolView {
     const block = readSessionView(docs.chat, docs.session).entries[1]!.blocks[0]!;
     if (block.type !== "tool_call" || !block.tool) throw new Error("Missing tool");
     return block.tool;
 }
 
-test("large JSON stays exact on demand and is absent from hot snapshots", () => {
-    const docs = new SessionDocs(); docs.acceptDeliveredUserInput("u", "read");
-    const argumentsValue = { text: "🌙中文\u0000".repeat(10000), values: [null, false, 42] };
-    const result = { contentText: "完整结果".repeat(30000), rawOutput: { code: 0, nested: argumentsValue } };
-    update(docs, { sessionUpdate: "tool_call", toolCallId: "call", status: "completed", rawInput: argumentsValue,
-        content: [{ type: "text", text: result.contentText }], rawOutput: result.rawOutput });
-    const tool = card(docs);
-    expect(tool.arguments).toBeUndefined(); expect(tool.result).toBeUndefined();
-    expect(JSON.parse(docs.readPayload(tool.argumentsRef!.id)!)).toEqual(argumentsValue);
-    expect(JSON.parse(docs.readPayload(tool.resultRef!.id)!)).toEqual(result);
-    expect(tool.resultRef!.bytes).toBe(new TextEncoder().encode(JSON.stringify(result)).length);
-    expect(tool.resultRef!.preview.length).toBeLessThanOrEqual(512);
-    expect(Y.encodeStateAsUpdateV2(docs.chat).byteLength).toBeLessThan(8000);
-    expect(docs.readPayload("another-session:1")).toBeUndefined();
-    docs.destroy(); expect(docs.readPayload(tool.resultRef!.id)).toBeUndefined();
-});
+test("normalized inline and external payload fields stay mutually exclusive", () => {
+    const docs = new ChatDocument(); docs.acceptDeliveredUserInput("u", "read");
+    const argumentsValue = { text: "🌙中文\u0000".repeat(100), values: [null, false, 42] };
+    update(docs, { sessionUpdate: "tool_call", toolCallId: "call", status: "completed", arguments: argumentsValue });
+    expect(card(docs).arguments).toEqual(argumentsValue);
+    expect(card(docs).argumentsRef).toBeUndefined();
 
-test("payload versions deduplicate repeats and retire when replaced, inlined, or rewound", () => {
-    const docs = new SessionDocs(); docs.acceptDeliveredUserInput("u", "read");
-    const set = (value: unknown) => update(docs, { sessionUpdate: "tool_call", toolCallId: "call", status: "completed", rawInput: value });
-    set("x".repeat(8000)); const first = card(docs).argumentsRef!;
-    set("x".repeat(8000)); expect(card(docs).argumentsRef!.id).toBe(first.id);
-    set("y".repeat(9000)); const second = card(docs).argumentsRef!;
-    expect(second.id).not.toBe(first.id); expect(docs.readPayload(first.id)).toBeUndefined();
-    set({ small: true }); expect(card(docs).arguments).toEqual({ small: true });
-    expect(card(docs).argumentsRef).toBeUndefined(); expect(docs.readPayload(second.id)).toBeUndefined();
-    set("z".repeat(10000)); const last = card(docs).argumentsRef!;
-    docs.accept({ jsonrpc: "2.0", method: "peri/agent_event", params: { sessionId: "s1",
-        event_json: JSON.stringify({ type: "rewind_completed", value: { messages_json: "[]" } }) } });
-    expect(docs.readPayload(last.id)).toBeUndefined(); expect(readSessionView(docs.chat, docs.session).entries).toEqual([]);
+    const ref = { id: "payload:1", bytes: 9000, preview: "preview" };
+    update(docs, { sessionUpdate: "tool_call", toolCallId: "call", status: "completed", argumentsRef: ref });
+    expect(card(docs).arguments).toBeUndefined();
+    expect(card(docs).argumentsRef).toEqual(ref);
+    expect(Y.encodeStateAsUpdateV2(docs.chat).byteLength).toBeLessThan(3000);
+
+    update(docs, { sessionUpdate: "tool_call", toolCallId: "call", status: "completed", arguments: { small: true } });
+    expect(card(docs).arguments).toEqual({ small: true });
+    expect(card(docs).argumentsRef).toBeUndefined();
     docs.destroy();
 });
 
-test("caller mutation cannot alter inline or external payloads after projection", () => {
-    const docs = new SessionDocs(); docs.acceptDeliveredUserInput("u", "read");
+test("caller mutation cannot alter a normalized inline payload after projection", () => {
+    const docs = new ChatDocument(); docs.acceptDeliveredUserInput("u", "read");
     const input = { nested: { value: "before" } };
-    const result = { value: "r".repeat(8000) };
-    update(docs, { sessionUpdate: "tool_call", toolCallId: "call", status: "completed", rawInput: input, rawOutput: result });
-    input.nested.value = "after"; result.value = "after";
+    update(docs, { sessionUpdate: "tool_call", toolCallId: "call", status: "completed", arguments: input });
+    input.nested.value = "after";
     expect(card(docs).arguments).toEqual({ nested: { value: "before" } });
-    expect(JSON.parse(docs.readPayload(card(docs).resultRef!.id)!)).toEqual({ rawOutput: { value: "r".repeat(8000) } });
+    docs.destroy();
+});
+
+test("a payload rejection is reported as a public tool error without dropping the previous value", () => {
+    const docs = new ChatDocument(); docs.acceptDeliveredUserInput("u", "read");
+    update(docs, { sessionUpdate: "tool_call", toolCallId: "call", status: "in_progress", arguments: { keep: true } });
+    update(docs, {
+        sessionUpdate: "tool_call_update", toolCallId: "call", status: "in_progress",
+        _meta: { periPayloadTooLarge: ["result"] },
+    });
+    const tool = readSessionView(docs.chat, docs.session).toolCalls[0]!;
+    expect(tool.arguments).toEqual({ keep: true });
+    expect(tool.error).toEqual({ code: "payload_too_large", message: "工具载荷超出会话接纳预算" });
     docs.destroy();
 });
 
 // Compact 不再整表替换（REQ-C02）；窗口刷新是 rewind 的语义。
-test("canonical rewind uses the same bounded payload structure and preserves full content", () => {
-    const docs = new SessionDocs(); const text = "result".repeat(3000);
+test("canonical rewind keeps normalized tool arguments and result content", () => {
+    const docs = new ChatDocument(); const text = "result".repeat(3000);
     docs.accept({ jsonrpc: "2.0", method: "peri/agent_event", params: { sessionId: "s1", event_json: JSON.stringify({
         type: "rewind_completed", value: { messages_json: JSON.stringify([
             { id: "u", role: "user", content: "read" },
-            { id: "a", role: "assistant", content: [{ type: "tool_use", id: "call", name: "Read", input: { key: "x".repeat(5000) } }] },
+            { id: "a", role: "assistant", content: [{ type: "tool_use", id: "call", name: "Read", input: { key: "x" } }] },
             { id: "t", role: "tool", tool_call_id: "call", content: text },
         ]) },
     }) } });
-    expect(JSON.parse(docs.readPayload(card(docs).resultRef!.id)!)).toEqual({ contentText: text });
-    expect(card(docs).status).toBe("completed"); docs.destroy();
+    expect(card(docs).arguments).toEqual({ key: "x" });
+    expect(card(docs).result).toEqual({ contentText: text });
+    expect(card(docs).status).toBe("completed");
+    docs.destroy();
+});
+
+test("canonical rewind accepts a runtime-normalized external argument reference", () => {
+    const docs = new ChatDocument();
+    docs.accept({ jsonrpc: "2.0", method: "peri/agent_event", params: { sessionId: "s1", event_json: JSON.stringify({
+        type: "rewind_completed", value: { messages_json: JSON.stringify([
+            { id: "u", role: "user", content: "read" },
+            { id: "a", role: "assistant", content: [{
+                type: "tool_use", id: "call", name: "Read",
+                argumentsRef: { id: "payload:9", bytes: 2048, preview: "preview" },
+            }] },
+        ]) },
+    }) } });
+    expect(card(docs).arguments).toBeUndefined();
+    expect(card(docs).argumentsRef).toEqual({ id: "payload:9", bytes: 2048, preview: "preview" });
+    docs.destroy();
 });
 
 test("canonical rewind tool call arrays preserve order while deduplicating content-block identities", () => {
-    const docs = new SessionDocs();
+    const docs = new ChatDocument();
     docs.accept({ jsonrpc: "2.0", method: "peri/agent_event", params: { event_json: JSON.stringify({
         type: "rewind_completed", value: { messages_json: JSON.stringify([
             { id: "u", role: "user", content: "read" },

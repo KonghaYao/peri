@@ -208,7 +208,10 @@ async fn test_bg_register_failure_does_not_execute_task() {
         if remaining.is_zero() {
             break;
         }
-        match tokio::time::timeout(remaining, bg_rx.recv()).await {
+        match tokio::time::timeout(remaining, bg_rx.recv())
+            .await
+            .map(|event| event.map(|event| event.payload().clone()))
+        {
             Ok(Some(ExecutorEvent::SubagentStarted { .. })) => started += 1,
             Ok(Some(ExecutorEvent::SubagentStopped { .. })) => stopped += 1,
             Ok(Some(ExecutorEvent::BackgroundTaskCompleted(_))) => completed += 1,
@@ -383,7 +386,10 @@ async fn test_bg_cancel_trigger_token_and_cleanup() {
         if remaining.is_zero() {
             break;
         }
-        match tokio::time::timeout(remaining, bg_rx.recv()).await {
+        match tokio::time::timeout(remaining, bg_rx.recv())
+            .await
+            .map(|event| event.map(|event| event.payload().clone()))
+        {
             Ok(Some(ExecutorEvent::SubagentStarted { .. })) => started += 1,
             Ok(Some(ExecutorEvent::SubagentStopped { .. })) => stopped += 1,
             Ok(Some(ExecutorEvent::BackgroundTaskCompleted(res))) => {
@@ -578,7 +584,7 @@ async fn test_bg_more_than_three_concurrent_tasks_start_complete_cancel() {
     );
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         while stopped < 3 || cancelled_completed < 3 {
-            match bg_rx.recv().await {
+            match bg_rx.recv().await.map(|event| event.payload().clone()) {
                 Some(ExecutorEvent::SubagentStarted { .. }) => started += 1,
                 Some(ExecutorEvent::SubagentStopped { .. }) => stopped += 1,
                 Some(ExecutorEvent::BackgroundTaskCompleted(res)) => {
@@ -598,7 +604,7 @@ async fn test_bg_more_than_three_concurrent_tasks_start_complete_cancel() {
     let mut succeeded = 0usize;
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         while succeeded < 3 {
-            match bg_rx.recv().await {
+            match bg_rx.recv().await.map(|event| event.payload().clone()) {
                 Some(ExecutorEvent::SubagentStarted { .. }) => started += 1,
                 Some(ExecutorEvent::SubagentStopped { .. }) => stopped += 1,
                 Some(ExecutorEvent::BackgroundTaskCompleted(res)) => {

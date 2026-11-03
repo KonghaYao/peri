@@ -26,24 +26,32 @@ async fn scope_reconciliation_keeps_recorded_initiator_route() {
     let manager = TaskManager::new();
     let child_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let root_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let task_id = manager
+    let ticket = manager
         .register_external(external_request(
             Some("child-session"),
             "shell-raw-1",
             child_calls.clone(),
         ))
         .unwrap();
-    let reconciled = manager
-        .register_external(external_request(None, "shell-raw-1", root_calls.clone()))
+    let task_id = ticket.task_id().to_owned();
+    manager
+        .refresh_external(
+            &ticket,
+            external_request(None, "shell-raw-1", root_calls.clone()),
+        )
         .unwrap();
-    assert_eq!(reconciled, task_id, "两条路径必须落在同一公共任务 id");
+    assert_eq!(
+        manager.snapshot().tasks[0].task_id,
+        task_id,
+        "两条路径必须落在同一公共任务 id"
+    );
     assert_eq!(
         manager.snapshot().tasks[0].initiator_session_id.as_deref(),
         Some("child-session"),
         "对账注册不得抹掉已记录的投递归属"
     );
     assert!(manager
-        .settle_external(&task_id, "terminal-1", make_result(&task_id, true))
+        .settle_external(&ticket, "terminal-1", make_result(&task_id, true))
         .await
         .unwrap());
     assert_eq!(
@@ -63,22 +71,25 @@ async fn terminal_reconciliation_keeps_recorded_initiator_route() {
     let manager = TaskManager::new();
     let child_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let root_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let task_id = manager
+    let ticket = manager
         .register_external(external_request(
             Some("child-session"),
             "shell-raw-2",
             child_calls.clone(),
         ))
         .unwrap();
-    let restored = manager
-        .restore_external_terminal(
+    let task_id = ticket.task_id().to_owned();
+    manager
+        .refresh_external(
+            &ticket,
             external_request(None, "shell-raw-2", root_calls.clone()),
-            "transition-1",
-            make_result(&task_id, true),
         )
-        .await
         .unwrap();
-    assert_eq!(restored, task_id);
+    assert!(manager
+        .settle_external(&ticket, "transition-1", make_result(&task_id, true))
+        .await
+        .unwrap());
+    assert_eq!(manager.snapshot().tasks[0].task_id, task_id);
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
     assert_eq!(child_calls.load(Ordering::SeqCst), 1);
     assert_eq!(root_calls.load(Ordering::SeqCst), 0);
@@ -89,19 +100,17 @@ async fn reconciliation_with_rebuilt_initiator_may_take_over_route() {
     let manager = TaskManager::new();
     let cold_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let rebuilt_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let task_id = manager
+    let ticket = manager
         .register_external(external_request(None, "shell-raw-3", cold_calls.clone()))
         .unwrap();
-    assert_eq!(
-        manager
-            .register_external(external_request(
-                Some("child-session"),
-                "shell-raw-3",
-                rebuilt_calls.clone(),
-            ))
-            .unwrap(),
-        task_id
-    );
+    let task_id = ticket.task_id().to_owned();
+    manager
+        .refresh_external(
+            &ticket,
+            external_request(Some("child-session"), "shell-raw-3", rebuilt_calls.clone()),
+        )
+        .unwrap();
+    assert_eq!(manager.snapshot().tasks[0].task_id, task_id);
     assert_eq!(
         manager.snapshot().tasks[0].initiator_session_id.as_deref(),
         Some("child-session")
@@ -109,16 +118,19 @@ async fn reconciliation_with_rebuilt_initiator_may_take_over_route() {
     let before = serde_json::to_value(manager.snapshot()).unwrap();
     let conflicting_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     assert!(matches!(
-        manager.register_external(external_request(
-            Some("other-session"),
-            "shell-raw-3",
-            conflicting_calls.clone(),
-        )),
+        manager.refresh_external(
+            &ticket,
+            external_request(
+                Some("other-session"),
+                "shell-raw-3",
+                conflicting_calls.clone(),
+            )
+        ),
         Err(BackgroundRegistryError::ExternalInitiatorConflict { .. })
     ));
     assert_eq!(serde_json::to_value(manager.snapshot()).unwrap(), before);
     assert!(manager
-        .settle_external(&task_id, "terminal-1", make_result(&task_id, true))
+        .settle_external(&ticket, "terminal-1", make_result(&task_id, true))
         .await
         .unwrap());
     assert_eq!(rebuilt_calls.load(Ordering::SeqCst), 1);
@@ -131,31 +143,38 @@ async fn terminal_reconciliation_completes_missing_initiator_identity() {
     let manager = TaskManager::new();
     let unknown_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let child_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let task_id = manager
+    let ticket = manager
         .register_external(external_request(None, "shell-raw-4", unknown_calls.clone()))
         .unwrap();
+    let task_id = ticket.task_id().to_owned();
     manager
-        .restore_external_terminal(
+        .refresh_external(
+            &ticket,
             external_request(Some("child-session"), "shell-raw-4", child_calls.clone()),
-            "terminal-1",
-            make_result(&task_id, true),
         )
-        .await
         .unwrap();
+    assert!(manager
+        .settle_external(&ticket, "terminal-1", make_result(&task_id, true))
+        .await
+        .unwrap());
     assert_eq!(
         manager.snapshot().tasks[0].initiator_session_id.as_deref(),
         Some("child-session")
     );
     let before = serde_json::to_value(manager.snapshot()).unwrap();
     let error = manager
-        .restore_external_terminal(
+        .refresh_external(
+            &ticket,
             external_request(Some("other-session"), "shell-raw-4", unknown_calls.clone()),
-            "terminal-1",
-            make_result(&task_id, true),
         )
-        .await
         .unwrap_err();
-    assert!(error.contains("initiator conflict"), "{error}");
+    assert!(
+        matches!(
+            error,
+            BackgroundRegistryError::ExternalInitiatorConflict { .. }
+        ),
+        "{error}"
+    );
     assert_eq!(serde_json::to_value(manager.snapshot()).unwrap(), before);
     assert_eq!(child_calls.load(Ordering::SeqCst), 1);
     assert_eq!(unknown_calls.load(Ordering::SeqCst), 0);
@@ -166,12 +185,13 @@ async fn unknown_initiator_cannot_settle_until_identity_is_completed() {
     let manager = TaskManager::new();
     let unknown_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let child_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let task_id = manager
+    let ticket = manager
         .register_external(external_request(None, "shell-raw-5", unknown_calls.clone()))
         .unwrap();
+    let task_id = ticket.task_id().to_owned();
     let before = serde_json::to_value(manager.snapshot()).unwrap();
     let error = manager
-        .settle_external(&task_id, "terminal-1", make_result(&task_id, true))
+        .settle_external(&ticket, "terminal-1", make_result(&task_id, true))
         .await
         .unwrap_err();
     assert!(error.contains("Unroutable"), "{error}");
@@ -179,17 +199,16 @@ async fn unknown_initiator_cannot_settle_until_identity_is_completed() {
     assert_eq!(manager.active_count(), 1);
     assert_eq!(unknown_calls.load(Ordering::SeqCst), 0);
     manager
-        .register_external(external_request(
-            Some("child-session"),
-            "shell-raw-5",
-            child_calls.clone(),
-        ))
+        .refresh_external(
+            &ticket,
+            external_request(Some("child-session"), "shell-raw-5", child_calls.clone()),
+        )
         .unwrap();
     let mut discovery = external_request(None, "shell-raw-5", unknown_calls.clone());
     discovery.summary = "discovery metadata must not replace the original".into();
-    manager.register_external(discovery).unwrap();
+    manager.refresh_external(&ticket, discovery).unwrap();
     assert!(manager
-        .settle_external(&task_id, "terminal-1", make_result(&task_id, true))
+        .settle_external(&ticket, "terminal-1", make_result(&task_id, true))
         .await
         .unwrap());
     assert_eq!(child_calls.load(Ordering::SeqCst), 1);
@@ -205,12 +224,11 @@ async fn cold_restore_unknown_initiator_remains_unsettled_without_delivery() {
     let manager = TaskManager::new();
     let unknown_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let child_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let ticket = manager
+        .register_external_terminal(external_request(None, "shell-raw-6", unknown_calls.clone()))
+        .unwrap();
     let error = manager
-        .restore_external_terminal(
-            external_request(None, "shell-raw-6", unknown_calls.clone()),
-            "terminal-1",
-            make_result("owner-task", true),
-        )
+        .settle_external(&ticket, "terminal-1", make_result(ticket.task_id(), true))
         .await
         .unwrap_err();
     assert!(error.contains("Unroutable"), "{error}");
@@ -218,13 +236,15 @@ async fn cold_restore_unknown_initiator_remains_unsettled_without_delivery() {
     assert_eq!(manager.snapshot().tasks[0].status, "pending_delivery");
     assert_eq!(manager.active_count(), 1);
     manager
-        .restore_external_terminal(
+        .refresh_external(
+            &ticket,
             external_request(Some("child-session"), "shell-raw-6", child_calls.clone()),
-            "terminal-1",
-            make_result("owner-task", true),
         )
-        .await
         .unwrap();
+    assert!(manager
+        .settle_external(&ticket, "terminal-1", make_result(ticket.task_id(), true))
+        .await
+        .unwrap());
     assert_eq!(child_calls.load(Ordering::SeqCst), 1);
     assert_eq!(unknown_calls.load(Ordering::SeqCst), 0);
     assert_eq!(manager.snapshot().tasks[0].status, "completed");
@@ -239,12 +259,12 @@ async fn cold_restore_unknown_initiator_remains_unsettled_without_delivery() {
 async fn unknown_initiator_cannot_abandon_through_untrusted_route() {
     let manager = TaskManager::new();
     let unknown_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let task_id = manager
+    let ticket = manager
         .register_external(external_request(None, "shell-raw-7", unknown_calls.clone()))
         .unwrap();
     let before = serde_json::to_value(manager.snapshot()).unwrap();
     let error = manager
-        .abandon_external(&task_id, "owner unreachable")
+        .abandon_external(&ticket, "owner unreachable")
         .await
         .unwrap_err();
     assert!(error.contains("Unroutable"), "{error}");

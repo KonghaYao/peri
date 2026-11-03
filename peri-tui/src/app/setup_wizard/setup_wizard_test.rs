@@ -1,6 +1,80 @@
 //! Tests for setup_wizard
 use super::*;
 use serial_test::serial;
+use std::path::{Path, PathBuf};
+
+const SETUP_CHILD: &str = "PERI_SETUP_REOPEN_CHILD";
+
+fn read_if_exists(path: &Path) -> Option<Vec<u8>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => panic!("read {}: {error}", path.display()),
+    }
+}
+
+/// 真实配置只做前后比对，测试本身永远不读写它们。
+fn guarded_config_paths() -> [PathBuf; 2] {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("peri-tui 位于 workspace 内")
+        .join(".peri/settings.json");
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .expect("HOME 已设置")
+        .join(".peri/settings.json");
+    [repo, home]
+}
+
+/// 配置提交用例在独立子进程中冻结临时 HOME/cwd，父进程核对真实配置文件未变。
+fn isolated(name: &str, scenario: fn()) {
+    if std::env::var(SETUP_CHILD).as_deref() == Ok(name) {
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let cwd = std::env::current_dir().unwrap();
+        assert!(
+            home.canonicalize()
+                .unwrap()
+                .starts_with(cwd.canonicalize().unwrap()),
+            "子进程 HOME 必须位于临时 cwd 内"
+        );
+        assert_ne!(cwd, Path::new(env!("CARGO_MANIFEST_DIR")));
+        scenario();
+        return;
+    }
+
+    let guarded = guarded_config_paths().map(|path| (read_if_exists(&path), path));
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            &format!("{}::{name}", module_path!().split_once("::").unwrap().1),
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(SETUP_CHILD, name)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+    for (before, path) in guarded {
+        assert_eq!(
+            read_if_exists(&path),
+            before,
+            "真实配置被测试触碰：{}",
+            path.display()
+        );
+    }
+}
 
 #[test]
 #[serial]
@@ -230,6 +304,7 @@ fn test_reopened_setup_preserves_active_profile_and_provider_metadata() {
     let mut draft = state_from_config(&cfg);
     assert!(draft.from_command);
     assert_eq!(draft.step, SetupStep::Form);
+    assert_eq!(draft.source, SetupSource::CustomApi);
     assert_eq!(draft.form_mode, FormMode::Browse);
     draft.providers[0].base_url = "http://localhost:7001/v1".into();
     let merged = merge_setup(&draft, cfg);
@@ -248,6 +323,236 @@ fn test_reopened_setup_preserves_active_profile_and_provider_metadata() {
     );
     assert_eq!(merged.config.providers[0].extra["custom-option"], true);
     assert_eq!(merged.config.extra["unrelated-option"], 42);
+}
+
+/// [回归测试] 已有自定义 provider 时重开 `/setup` 并保存，不得用默认值覆盖，
+/// 也不得新增同 ID 的重复 provider；真实 HOME/仓库配置只由父进程做前后比对。
+#[test]
+fn test_reopened_setup_save_preserves_existing_custom_provider_fields() {
+    isolated(
+        "test_reopened_setup_save_preserves_existing_custom_provider_fields",
+        || {
+            for key in [
+                "ANTHROPIC_API_KEY",
+                "OPENAI_API_KEY",
+                "CODEX_API_KEY",
+                "ANTHROPIC_BASE_URL",
+                "OPENAI_BASE_URL",
+                "CODEX_BASE_URL",
+            ] {
+                // SAFETY: 当前用例独占子进程，且尚未派发任何任务。
+                unsafe { std::env::remove_var(key) };
+            }
+            let root = std::env::current_dir().unwrap();
+            let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+            let cwd = root.join("workspace");
+            std::fs::create_dir_all(cwd.join(".peri")).unwrap();
+            let global = home.join(".peri/settings.json");
+            let cfg: crate::config::PeriConfig = serde_json::from_value(serde_json::json!({
+                "config": {
+                    "active_alias": "opus",
+                    "language": "zh-CN",
+                    "profiles": {
+                        "opus": {
+                            "provider": "custom",
+                            "model": "keep-model",
+                            "effort": "high"
+                        }
+                    },
+                    "providers": [{
+                        "id": "custom",
+                        "name": "Keep me",
+                        "type": "openai",
+                        "apiKey": "custom-key",
+                        "baseUrl": "https://custom.example/v1",
+                        "models": {
+                            "fable": "fable-keep",
+                            "opus": "opus-keep",
+                            "sonnet": "sonnet-keep",
+                            "haiku": "haiku-keep"
+                        }
+                    }]
+                }
+            }))
+            .unwrap();
+            crate::config::save_to(&cfg, &global).unwrap();
+            let global_before = std::fs::read(&global).unwrap();
+            std::fs::write(
+                cwd.join(".peri/settings.json"),
+                r#"{"config":{"language":"zh-CN"}}"#,
+            )
+            .unwrap();
+            let sentinel = root.join(".peri/settings.json");
+            std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+            std::fs::write(&sentinel, "do-not-touch-sentinel").unwrap();
+
+            let source = std::sync::Arc::new(
+                crate::config::ConfigSource::load_at(&cwd, global.clone()).unwrap(),
+            );
+            assert!(
+                crate::kit::atoms::CONFIG_SOURCE_HANDLE
+                    .set(source.clone())
+                    .is_ok()
+            );
+
+            let state = state_from_config(&source.loaded_merged());
+            assert_eq!(state.step, SetupStep::Form, "已有 provider 直接进入 Form");
+            assert_eq!(state.providers.len(), 1);
+            assert_eq!(state.providers[0].provider_id, "custom");
+
+            let merged = save_setup(&state).unwrap();
+            assert_eq!(merged.config.providers.len(), 1, "不得新增重复 provider");
+            let disk = crate::config::ConfigSource::load_at(&cwd, global.clone())
+                .unwrap()
+                .loaded_merged();
+            assert_eq!(disk.config.providers.len(), 1);
+            let provider = disk
+                .config
+                .providers
+                .iter()
+                .find(|provider| provider.id == "custom")
+                .expect("既有 provider 必须保留");
+            assert_eq!(provider.provider_type, "openai");
+            assert_eq!(provider.api_key, "custom-key");
+            assert_eq!(provider.base_url, "https://custom.example/v1");
+            assert_eq!(provider.models.fable, "fable-keep");
+            assert_eq!(provider.models.opus, "opus-keep");
+            assert_eq!(provider.models.sonnet, "sonnet-keep");
+            assert_eq!(provider.models.haiku, "haiku-keep");
+            assert_eq!(provider.name.as_deref(), Some("Keep me"));
+            assert_eq!(disk.config.profiles.opus.provider, "custom");
+            assert_eq!(
+                disk.config.profiles.opus.model.as_deref(),
+                Some("keep-model")
+            );
+            assert_eq!(std::fs::read(&global).unwrap(), global_before);
+            assert_eq!(
+                std::fs::read_to_string(&sentinel).unwrap(),
+                "do-not-touch-sentinel"
+            );
+        },
+    );
+}
+
+/// [回归测试] 已有 `openai_responses` provider（含 apiKey/auth/endpoint/models）
+/// 重开 `/setup` 保存时，表单投影不得把原始协议或认证引用改写为 `openai`。
+#[test]
+fn test_reopened_setup_preserves_openai_responses_provider() {
+    isolated(
+        "test_reopened_setup_preserves_openai_responses_provider",
+        || {
+            for key in [
+                "ANTHROPIC_API_KEY",
+                "OPENAI_API_KEY",
+                "CODEX_API_KEY",
+                "ANTHROPIC_BASE_URL",
+                "OPENAI_BASE_URL",
+                "CODEX_BASE_URL",
+            ] {
+                // SAFETY: 当前用例独占子进程，且尚未派发任何任务。
+                unsafe { std::env::remove_var(key) };
+            }
+            let root = std::env::current_dir().unwrap();
+            let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+            let cwd = root.join("workspace");
+            std::fs::create_dir_all(cwd.join(".peri")).unwrap();
+            let global = home.join(".peri/settings.json");
+            let responses_url = "https://api.openai.com/v1/responses";
+            let cfg: crate::config::PeriConfig = serde_json::from_value(serde_json::json!({
+                "config": {
+                    "active_alias": "opus",
+                    "profiles": {
+                        "opus": {
+                            "provider": "codex",
+                            "model": "gpt-6-astra",
+                            "contextWindow": 64000
+                        }
+                    },
+                    "providers": [{
+                        "id": "codex",
+                        "name": "Keep Responses",
+                        "type": "openai_responses",
+                        "apiKey": "responses-key",
+                        "baseUrl": responses_url,
+                        "auth": {"kind": "api_key"},
+                        "models": {
+                            "fable": "gpt-6-astra",
+                            "opus": "gpt-6-astra",
+                            "sonnet": "gpt-6.1-sol",
+                            "haiku": "gpt-6-luna"
+                        }
+                    }]
+                }
+            }))
+            .unwrap();
+            crate::config::save_to(&cfg, &global).unwrap();
+            let global_before = std::fs::read(&global).unwrap();
+            std::fs::write(
+                cwd.join(".peri/settings.json"),
+                r#"{"config":{"language":"en"}}"#,
+            )
+            .unwrap();
+            let sentinel = root.join(".peri/settings.json");
+            std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+            std::fs::write(&sentinel, "do-not-touch-sentinel").unwrap();
+
+            let source = std::sync::Arc::new(
+                crate::config::ConfigSource::load_at(&cwd, global.clone()).unwrap(),
+            );
+            assert!(
+                crate::kit::atoms::CONFIG_SOURCE_HANDLE
+                    .set(source.clone())
+                    .is_ok()
+            );
+
+            let state = state_from_config(&source.loaded_merged());
+            assert_eq!(state.step, SetupStep::Form, "已有 provider 直接进入 Form");
+            assert_eq!(state.providers.len(), 1);
+            assert_eq!(state.providers[0].provider_id, "codex");
+
+            let merged = save_setup(&state).expect("既有 Responses provider 必须可保存");
+            let provider = merged
+                .config
+                .providers
+                .iter()
+                .find(|provider| provider.id == "codex")
+                .expect("既有 provider 必须保留");
+            assert_eq!(provider.provider_type, "openai_responses");
+            assert_eq!(
+                serde_json::to_value(&provider.auth).unwrap(),
+                serde_json::json!({"kind": "api_key"})
+            );
+            assert_eq!(provider.api_key, "responses-key");
+            assert_eq!(provider.base_url, responses_url);
+            assert_eq!(provider.models.fable, "gpt-6-astra");
+            assert_eq!(provider.models.opus, "gpt-6-astra");
+            assert_eq!(provider.models.sonnet, "gpt-6.1-sol");
+            assert_eq!(provider.models.haiku, "gpt-6-luna");
+            assert_eq!(provider.name.as_deref(), Some("Keep Responses"));
+
+            let disk = crate::config::ConfigSource::load_at(&cwd, global.clone())
+                .unwrap()
+                .loaded_merged();
+            let provider = disk
+                .config
+                .providers
+                .iter()
+                .find(|provider| provider.id == "codex")
+                .expect("落盘后 provider 必须保留");
+            assert_eq!(provider.provider_type, "openai_responses");
+            assert_eq!(
+                serde_json::to_value(&provider.auth).unwrap(),
+                serde_json::json!({"kind": "api_key"})
+            );
+            assert_eq!(provider.base_url, responses_url);
+            assert_eq!(provider.models.haiku, "gpt-6-luna");
+            assert_eq!(std::fs::read(&global).unwrap(), global_before);
+            assert_eq!(
+                std::fs::read_to_string(&sentinel).unwrap(),
+                "do-not-touch-sentinel"
+            );
+        },
+    );
 }
 
 #[test]

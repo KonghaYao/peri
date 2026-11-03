@@ -43,6 +43,8 @@ mod interaction_test;
 mod legacy_group_probe_test;
 #[path = "acp_events_test/memory_probe_test.rs"]
 mod memory_probe_test;
+#[path = "acp_events_test/memory_retention_audit_test.rs"]
+mod memory_retention_audit_test;
 #[path = "acp_events_test/perf_probe_test.rs"]
 mod perf_probe_test;
 #[path = "acp_events_test/prefix_archive_test.rs"]
@@ -104,6 +106,7 @@ pub(crate) fn make_fold_test_state() -> BridgeState {
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
     *crate::kit::atoms::TODO_ITEMS.state().write() = Vec::new();
     BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -116,7 +119,7 @@ pub(crate) fn make_fold_test_state() -> BridgeState {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,

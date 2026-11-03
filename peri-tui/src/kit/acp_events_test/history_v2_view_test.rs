@@ -1051,6 +1051,7 @@ fn historical_tool_card_uses_bare_tool_call_id_and_dedupes_live_card() {
             &input_summary,
             &json!({"path": "/tmp/a"}),
             None,
+            true,
         ));
 
     let reopened = page(

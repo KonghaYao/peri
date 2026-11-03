@@ -26,8 +26,8 @@
   "dependencies": {},
   "devDependencies": {
     "@claude-code-best/workflow-engine": "^0.1.0",
-    "@types/node": "^26.0.0",
-    "bun-types": "latest",
-    "typescript": "^7"
+    "@types/node": "^26.6.5",
+    "bun-types": "^1.4.4",
+    "typescript": "^7.0.2"
   }
 }

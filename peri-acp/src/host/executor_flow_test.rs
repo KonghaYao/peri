@@ -7,7 +7,7 @@
 //! 短路 / permission 通知纯函数测试随 `run_session_loop` 迁入
 //! peri-agent（`session::exec::executor_test.rs`）。
 //!
-//! Mock 命名遵循 CLAUDE.md：`make_` 前缀（函数），`Mock` 前缀（结构体）。
+//! Mock 命名约定：`make_` 前缀（函数），`Mock` 前缀（结构体）。
 
 use std::{
     ffi::OsString,
@@ -309,6 +309,7 @@ pub(super) async fn make_session_context(session_id: &str) -> SessionContext {
         effort: None,
         max_tokens: 32000,
         context_1m: false,
+        context_window: 200_000,
         retry_observer: None,
     };
     let pool = Arc::new(parking_lot::Mutex::new(AgentPool::new()));

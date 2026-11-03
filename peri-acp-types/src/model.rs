@@ -9,3 +9,17 @@
 //! 随 StageBuildFn 签名改造 / v1 退役时可收敛。
 
 pub use peri_model::{prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY, Model, TokenUsage};
+
+/// 模型认证账号引用：1..=128 个 ASCII 字母、数字、下划线或连字符。
+/// 不做 trim；调用方必须校验实际传递和保存的引用。
+pub fn valid_account_reference(account: &str) -> bool {
+    !account.is_empty()
+        && account.len() <= 128
+        && account
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+#[cfg(test)]
+#[path = "model_account_test.rs"]
+mod account_tests;

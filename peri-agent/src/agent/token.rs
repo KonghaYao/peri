@@ -205,6 +205,13 @@ impl TokenTracker {
 // 每个二进制块只放一个固定预算占位。此值不是成本上限，实际 usage 仍为权威。
 pub(crate) const BINARY_MEDIA_ESTIMATED_TOKENS: u64 = 1_024;
 
+// Opaque replay can include hidden reasoning whose token cost is unavailable to
+// the generic estimator. Reserve a nonzero placeholder without counting the
+// duplicated typed projection or treating ciphertext length as tokenizer output.
+// This is not an upper bound; TokenTracker uses authoritative input usage once
+// available and adds positive view growth between requests.
+pub(crate) const PROVIDER_REPLAY_ESTIMATED_TOKENS: u64 = 1_024;
+
 /// 无 tokenizer 时按文字和有界媒体占位估算请求内容。它用于提前压缩，
 /// 不替代 provider usage；媒体尺寸/页数、协议开销和语言密度仍是近似边界。
 pub(crate) fn estimate_request_tokens(
@@ -290,6 +297,7 @@ pub(crate) fn estimate_block_chars(
             .iter()
             .map(|block| estimate_block_chars(block, &[]))
             .fold(0u64, u64::saturating_add),
+        ContentBlock::ProviderState { .. } => PROVIDER_REPLAY_ESTIMATED_TOKENS * 4,
         // 未知 JSON 没有可信媒体类型，保持文本预算，不能按 data 字段名删除成本。
         ContentBlock::Unknown(value) => value.to_string().chars().count() as u64,
     }

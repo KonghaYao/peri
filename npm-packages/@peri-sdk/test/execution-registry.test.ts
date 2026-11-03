@@ -1,8 +1,7 @@
 import { expect, test } from "bun:test";
-import { MemoryExecutionRegistry } from "../src/execution/memory-registry";
+import { MemoryExecutionKv } from "../src/execution/memory-registry";
 import { ExecutionCoordinator } from "../src/execution/coordinator";
 import { KvExecutionRegistry, type AtomicExecutionKv, type ExecutionKvValue } from "../src/execution/kv-registry";
-import { MemoryKV } from "../src/kv/memory-kv";
 import type { DomainWorkCommand, ExecutionAction, ExecutionMutation, ExecutionRegistry, ExecutionTicket, ExecutionDomainPort } from "../src/execution/types";
 
 const instance = { instanceId: "instance", generationId: "generation", proofRoute: { kind: "external" as const, reference: "owner" } };
@@ -42,7 +41,7 @@ async function contract(registry: ExecutionRegistry) {
 /** 原子 KV 适配器：与部署方的 durable 后端共用同一份 envelope 契约。 */
 function kvAdapter(durability: "durable" | "bestEffort") {
     const values = new Map<string, ExecutionKvValue>();
-    const kv: AtomicExecutionKv = Object.assign(new MemoryKV(), {
+    const kv: AtomicExecutionKv = {
         durability,
         readExecutionValue: async (key: string) => structuredClone(values.get(key) ?? null),
         compareAndSetExecutionValue: async (key: string, version: number | null, next: ExecutionKvValue) => {
@@ -50,12 +49,12 @@ function kvAdapter(durability: "durable" | "bestEffort") {
             values.set(key, structuredClone(next));
             return true;
         },
-    });
+    };
     return { values, registry: new KvExecutionRegistry(kv) };
 }
 
 test("memory CAS follows contract but explicitly remains bestEffort", async () => {
-    const registry = new MemoryExecutionRegistry();
+    const registry = new KvExecutionRegistry(new MemoryExecutionKv());
     expect(registry.durability).toBe("bestEffort"); await contract(registry);
     expect(() => new ExecutionCoordinator({ registry, instance, maxAttemptsPerWork: 1,
         domain: {} as ExecutionDomainPort, proofProvider: { proveStopped: async () => ({ status: "unknown" }) } })).toThrow("bestEffort");
@@ -81,7 +80,7 @@ test("atomic KV adapter uses one versioned envelope for the same receipt and lif
 });
 
 test("coordinator Unknown entry freezes and resolves the exact original ticket, not a second execute", async () => {
-    const registry = new MemoryExecutionRegistry();
+    const registry = new KvExecutionRegistry(new MemoryExecutionKv());
     const executions: ExecutionTicket[] = [];
     const resolutions: ExecutionTicket[] = [];
     const domain: ExecutionDomainPort = {
@@ -104,7 +103,7 @@ test("coordinator Unknown entry freezes and resolves the exact original ticket, 
 });
 
 test("pending domain mutation resolves its complete original command before any attempt is admitted", async () => {
-    const registry = new MemoryExecutionRegistry();
+    const registry = new KvExecutionRegistry(new MemoryExecutionKv());
     const command: DomainWorkCommand = { sessionId: "session", recipientLifecycle: 1, mutationId: "original-publication",
         action: { kind: "publish", expectedRevision: 37, expectedControlGeneration: 9, inputId: "original-input" } };
     const resolved: DomainWorkCommand[] = [];
@@ -133,7 +132,7 @@ test("pending domain mutation resolves its complete original command before any 
 });
 
 test("actual stopped executionError persists failure without draining the stable-work budget", async () => {
-    const registry = new MemoryExecutionRegistry();
+    const registry = new KvExecutionRegistry(new MemoryExecutionKv());
     let executions = 0;
     const domain: ExecutionDomainPort = {
         queryWork: async () => ({ control, work: { workId: "work", revision: 0, lifecycle: 1, controlGeneration: 0 } }),

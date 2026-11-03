@@ -165,6 +165,10 @@ pub(super) fn derive_providers(config: &SharedPeriConfig) -> Vec<ProviderSummary
             provider_type: provider.provider_type.clone(),
             is_active: provider.id == active_provider,
             has_api_key: !provider.api_key.is_empty(),
+            has_chatgpt_plan: matches!(
+                &provider.auth,
+                Some(peri_acp::provider::config::ProviderAuthConfig::ChatGptPlan { .. })
+            ),
             base_url: (!provider.base_url.is_empty()).then(|| provider.base_url.clone()),
         })
         .collect()

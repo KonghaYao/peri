@@ -142,6 +142,7 @@ fn test_provider_config_models_serde_roundtrip() {
         provider_type: "anthropic".to_string(),
         api_key: "key".to_string(),
         base_url: String::new(),
+        auth: None,
         name: Some("Test".to_string()),
         models: ProviderModels {
             opus: "claude-opus-4-7".to_string(),
@@ -227,6 +228,7 @@ fn test_app_config_compact_serde_roundtrip() {
     let compact = peri_acp_types::compact::CompactConfig {
         auto_compact_enabled: false,
         auto_compact_threshold: 0.9,
+        max_resident_history_bytes: 4096,
         ..Default::default()
     };
     let cfg = AppConfig {
@@ -238,6 +240,14 @@ fn test_app_config_compact_serde_roundtrip() {
     let c = back.compact.unwrap();
     assert!(!c.auto_compact_enabled);
     assert!((c.auto_compact_threshold - 0.9).abs() < 0.001);
+    assert_eq!(c.max_resident_history_bytes, 4096);
+
+    // 缺省 compact 字段使用 128 MiB 默认值。
+    let cfg: AppConfig = serde_json::from_str(r#"{"compact": {}}"#).unwrap();
+    assert_eq!(
+        cfg.compact.unwrap().max_resident_history_bytes,
+        128 * 1024 * 1024
+    );
 }
 
 #[test]
@@ -347,4 +357,23 @@ fn test_app_config_claude_md_excludes_roundtrip() {
         back.claude_md_excludes,
         Some(vec!["node_modules/**".to_string()])
     );
+}
+
+#[test]
+fn save_effective_error_classifies_revision_conflicts() {
+    use peri_config::settings::SettingsError;
+
+    assert!(SaveEffectiveError::Settings(SettingsError::Conflict).is_conflict());
+    assert!(
+        !SaveEffectiveError::Settings(SettingsError::GlobalBaselineChanged).is_conflict(),
+        "global baseline 变化需要重启，重新载入不能恢复，不得提示重载"
+    );
+    assert!(
+        SaveEffectiveError::Settings(SettingsError::Resolution(
+            peri_config::ConfigurationError::Conflict
+        ))
+        .is_conflict()
+    );
+    assert!(!SaveEffectiveError::SourceUnavailable.is_conflict());
+    assert!(!SaveEffectiveError::Settings(SettingsError::AuthorityUnavailable).is_conflict());
 }

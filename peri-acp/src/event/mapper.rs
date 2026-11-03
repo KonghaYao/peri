@@ -53,6 +53,7 @@ impl MappedEvent {
 /// - 其余所有变体：无 SessionUpdate 输出
 pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) -> Vec<MappedEvent> {
     match event {
+        ExecutorEvent::Originated(scoped) => map_event(&scoped.event, context_window, caps),
         // ── Category ①: Full SessionUpdate ─────────────────────────────────────────
         ExecutorEvent::TextChunk {
             chunk,
@@ -92,12 +93,38 @@ pub fn map_event(event: &ExecutorEvent, context_window: u32, caps: &PeriCaps) ->
             name,
             input,
             source_agent_id,
+            origin_message_id,
+            origin_readable,
             ..
         } => {
+            let mut tool_call = project_tool_start(tool_call_id, name, input);
+            // 真实所属 assistant 消息经 ACP `_meta` 扩展透传；标准 `ToolCall`
+            // 没有消息归属字段，且 `message_id` 仍是 turn 派生的 v1 兼容值。
+            // `originReadable` 区分「已持久化可回读」与「确认没有可回读 origin」
+            // （嵌套执行）；旧服务端/旧事件缺该字段时不写，客户端自行回退。
+            let mut peri_meta = serde_json::Map::new();
+            if *origin_readable != Some(false) {
+                if let Some(message_id) = origin_message_id {
+                    peri_meta.insert(
+                        "originMessageId".to_string(),
+                        serde_json::Value::String(message_id.as_uuid().to_string()),
+                    );
+                }
+            }
+            if let Some(readable) = origin_readable {
+                peri_meta.insert(
+                    "originReadable".to_string(),
+                    serde_json::Value::Bool(*readable),
+                );
+            }
+            if !peri_meta.is_empty() {
+                tool_call = tool_call.meta(serde_json::Map::from_iter([(
+                    "peri".to_string(),
+                    serde_json::Value::Object(peri_meta),
+                )]));
+            }
             vec![MappedEvent::standard_with_src(
-                vec![SessionUpdate::ToolCall(
-                    project_tool_start(tool_call_id, name, input),
-                )],
+                vec![SessionUpdate::ToolCall(tool_call)],
                 source_agent_id.clone(),
             )]
         }
@@ -281,6 +308,7 @@ fn stop_reason_wire(reason: &peri_model::StopReason) -> String {
         peri_model::StopReason::EndTurn => "end_turn".into(),
         peri_model::StopReason::ToolUse => "tool_use".into(),
         peri_model::StopReason::MaxTokens => "max_tokens".into(),
+        peri_model::StopReason::Continue => "continue".into(),
         peri_model::StopReason::Other { value } => value.clone(),
     }
 }

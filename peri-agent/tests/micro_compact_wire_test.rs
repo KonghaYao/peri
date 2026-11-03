@@ -104,6 +104,32 @@ fn model(anthropic: bool) -> (AgentModelBridge, ProviderCapabilities) {
     )
 }
 
+fn adaptive_model() -> (AgentModelBridge, ProviderCapabilities) {
+    let endpoint = "http://127.0.0.1:9/no-network".parse().unwrap();
+    let model = Arc::new(AnthropicModel::new(
+        AnthropicConfig::new(endpoint, "fixture", "claude-sonnet-5-5")
+            .without_cache()
+            .with_extended_thinking(1024, "max"),
+    ));
+    (
+        AgentModelBridge::new(model).with_system("Trusted system."),
+        ProviderCapabilities::anthropic(),
+    )
+}
+
+fn deepseek_model() -> (AgentModelBridge, ProviderCapabilities) {
+    let endpoint = "https://api.deepseek.com/anthropic".parse().unwrap();
+    let model = Arc::new(AnthropicModel::new(
+        AnthropicConfig::new(endpoint, "fixture", "deepseek-v4-flash")
+            .without_cache()
+            .with_extended_thinking(1024, "medium"),
+    ));
+    (
+        AgentModelBridge::new(model).with_system("Trusted system."),
+        ProviderCapabilities::anthropic(),
+    )
+}
+
 fn pending_arguments() -> Value {
     json!({"path":"保留.rs","content":"line 1\n`literal ${var}`\nfull code", "padding":"pending-argument".repeat(2000)})
 }
@@ -352,6 +378,63 @@ async fn test_signed_mixed_batch_stays_protocol_complete_for_both_adapters() {
 }
 
 #[tokio::test]
+async fn test_final_wire_keeps_receipt_before_a_later_user_task() {
+    for anthropic in [false, true] {
+        let fixture = Fixture::open().await;
+        let mut transcript = fixture.transcript();
+        transcript.append(BaseMessage::human("Do the old task."));
+        let (ai, done) = mixed_step(&mut transcript, false);
+        // 新用户任务出现在旧工具步骤之后：派生收据不得越过它成为最新历史。
+        transcript.append(BaseMessage::human("NEW TASK after the old step."));
+        let (bridge, caps) = model(anthropic);
+        let plan = plan_micro_with_facts(
+            &transcript,
+            &CompactConfig {
+                micro_compact_stale_steps: 0,
+                ..Default::default()
+            },
+            &ContextPressure {
+                estimated_tokens: 15_000,
+                context_window: 20_000,
+                output_reserve: 1_000,
+                predicted_tool_growth: 0,
+                safety_buffer: 0,
+                cache_hit_rate: 0.0,
+            },
+            &facts(&transcript, &fixture.id, ai, done),
+            &caps,
+        )
+        .unwrap();
+        assert!(
+            plan.actions
+                .iter()
+                .any(|entry| matches!(entry.action, ProjectionAction::OmitToolExchange { .. })),
+            "真实 planner 必须生成整组退场"
+        );
+        apply_micro_plan(&mut transcript, &plan).await.unwrap();
+        let body = wire(&bridge, &fixture.restore().await, &caps);
+        let messages = body["messages"].as_array().unwrap();
+        let position = |needle: &str| {
+            messages
+                .iter()
+                .position(|message| message.to_string().contains(needle))
+                .unwrap_or_else(|| panic!("missing {needle} in final provider request"))
+        };
+        let receipt = position("Historical receipt");
+        let new_task = position("NEW TASK after the old step.");
+        assert!(
+            receipt < new_task,
+            "收据必须留在旧步骤附近，不能出现在新用户任务之后"
+        );
+        assert_eq!(
+            results(&body, anthropic),
+            vec!["pending".to_string()],
+            "最终请求配对合法，且不补造结果"
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_v2_restores_then_upgrades_and_unknown_version_blocks_wire() {
     for anthropic in [false, true] {
         let fixture = Fixture::open().await;
@@ -417,4 +500,125 @@ async fn test_v2_restores_then_upgrades_and_unknown_version_blocks_wire() {
             "未知版本应明确拒绝，不全文回灌再发送: {error}"
         );
     }
+}
+
+/// Assistant turn whose only tool call is closed: micro compact drops the
+/// signed reasoning but keeps the visible text.
+fn closed_signed_step(transcript: &mut MessageTranscript) -> (MessageId, MessageId) {
+    let input = json!({"path": "closed.rs"});
+    let ai = transcript.append(BaseMessage::ai_with_tool_calls(
+        MessageContent::Blocks(vec![
+            ContentBlock::Reasoning {
+                text: "signed reasoning".repeat(1000),
+                signature: Some("EXACT_SIGNATURE".into()),
+            },
+            ContentBlock::Text {
+                text: "Independent conclusion must remain.".into(),
+            },
+            ContentBlock::ToolUse {
+                id: "closed".into(),
+                name: "Read".into(),
+                input: input.clone(),
+            },
+        ]),
+        vec![ToolCallRequest::new("closed", "Read", input)],
+    ));
+    let done = transcript.append(BaseMessage::tool_result(
+        "closed",
+        "old output".repeat(5000),
+    ));
+    (ai, done)
+}
+
+enum CompactThinkingMode {
+    Manual,
+    Adaptive,
+    DeepSeek,
+}
+
+async fn micro_compacted_wire_contract(mode: CompactThinkingMode) {
+    let fixture = Fixture::open().await;
+    let mut transcript = fixture.transcript();
+    transcript.append(BaseMessage::human("Old closed task."));
+    let (ai, done) = closed_signed_step(&mut transcript);
+    transcript.append(BaseMessage::human("NEW TASK after the old step."));
+    let (bridge, caps) = match mode {
+        CompactThinkingMode::Manual => model(true),
+        CompactThinkingMode::Adaptive => adaptive_model(),
+        CompactThinkingMode::DeepSeek => deepseek_model(),
+    };
+    let plan = plan_micro_with_facts(
+        &transcript,
+        &CompactConfig {
+            micro_compact_stale_steps: 0,
+            ..Default::default()
+        },
+        &pressure(),
+        &facts(&transcript, &fixture.id, ai, done),
+        &caps,
+    )
+    .unwrap();
+    assert!(
+        plan.actions
+            .iter()
+            .any(|entry| matches!(entry.action, ProjectionAction::OmitToolExchange { .. })),
+        "全部调用已关闭时必须整组退场"
+    );
+    apply_micro_plan(&mut transcript, &plan).await.unwrap();
+    transcript.flush_persistence().await.unwrap();
+    let body = wire(&bridge, &fixture.restore().await, &caps);
+    let encoded = body.to_string();
+    assert!(encoded.contains("Independent conclusion must remain."));
+    assert!(
+        !encoded.contains("\"signature\":\"\""),
+        "不能回填空签名 thinking"
+    );
+    if matches!(mode, CompactThinkingMode::DeepSeek) {
+        for message in body["messages"].as_array().unwrap() {
+            if message["role"] == "assistant" {
+                assert_eq!(
+                    message["content"][0],
+                    json!({"type": "thinking", "thinking": ""})
+                );
+            }
+        }
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "enabled", "budget_tokens": 1024})
+        );
+    } else {
+        assert!(
+            !body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|message| message["content"].as_array().into_iter().flatten())
+                .any(|block| block["type"] == "thinking"),
+            "micro compact 已移除 signed reasoning，官方适配器不得伪造 thinking"
+        );
+        if matches!(mode, CompactThinkingMode::Adaptive) {
+            assert_eq!(body["thinking"], json!({"type": "adaptive"}));
+            assert_eq!(body["output_config"], json!({"effort": "max"}));
+        } else {
+            assert!(
+                body.get("thinking").is_none(),
+                "manual thinking 缺少带签名闭包时必须省略"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_micro_compacted_manual_history_omits_thinking_without_fake_blocks() {
+    micro_compacted_wire_contract(CompactThinkingMode::Manual).await;
+}
+
+#[tokio::test]
+async fn test_micro_compacted_adaptive_history_keeps_adaptive_without_fake_blocks() {
+    micro_compacted_wire_contract(CompactThinkingMode::Adaptive).await;
+}
+
+#[tokio::test]
+async fn test_micro_compacted_deepseek_history_restores_thinking_before_retry() {
+    micro_compacted_wire_contract(CompactThinkingMode::DeepSeek).await;
 }

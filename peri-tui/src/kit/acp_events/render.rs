@@ -24,6 +24,7 @@ use std::sync::Mutex;
 /// 3. todo 进度摘要行（§6.9：TODO_ITEMS 派生，插在最终回答前）；
 /// 4. `group_successful_tools`（§7：相邻成功工具压成 `TuiCollapsedGroup`）。
 pub(crate) fn push_view_models(state: &mut BridgeState) {
+    super::subagent_preview::enforce(state);
     // running child 可以阻止归档，但主 turn 的终态时长仍只冻结一次。
     if state.phase != SessionPhase::PromptRunning {
         state.current_turn.freeze_trailing();

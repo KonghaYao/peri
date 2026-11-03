@@ -49,6 +49,7 @@
 | `/plugin` | Plugin |
 | `/cron-list` | Cron |
 | `/workflows` | Workflow |
+| `/theme` | Theme |
 | `/login` | Login |
 | `/threads` | Threads |
 
@@ -115,6 +116,7 @@
 - [ ] Plugins
 - [ ] Cron
 - [ ] Workflow
+- [ ] Theme
 - [ ] Login
 - [ ] Threads
 
@@ -150,7 +152,7 @@
 
 ### AskUser 面板特别检查
 
-AskUser 已从 popup 迁移为 Panel（由 agent 提问被动触发，不在上面的 panel 清单里）：
+AskUser 是 Panel（由 agent 提问被动触发，不在上面的 panel 清单里）：
 
 - [ ] 显示的问题与 agent 实际问题一致
 - [ ] 选择选项后 UI 状态正确更新
@@ -209,9 +211,7 @@ AskUser 已从 popup 迁移为 Panel（由 agent 提问被动触发，不在上�
 
 ---
 
-## 自动验证结果
-
-提交前已通过：
+## 自动验证（辅助，不替代手工清单）
 
 ```bash
 cargo check -p peri-tui
@@ -220,6 +220,4 @@ cargo test -p peri-tui --lib
 lefthook run pre-commit
 ```
 
-- `peri-tui --lib` 全量：**316 passed**
-- `cargo check`：通过
-- `cargo clippy`：通过（warnings 均为既有代码）
+结果以当次运行输出为准，不在本文记录。

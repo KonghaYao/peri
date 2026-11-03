@@ -1,6 +1,7 @@
 //! v2 → ExecutorEvent 的协议兼容转换，穷尽声明每个变体的映射或过滤。
 //!
-//! chunk 透传消息级 message_id；工具事件从 turn_id 派生 message_id。
+//! chunk 透传消息级 message_id；工具事件的 `message_id` 沿用 turn_id 派生值
+//! （v1 兼容），真实所属 assistant 消息经 `origin_message_id` 独立透传。
 //! 共享转换不把 agent_id 解释为子 Agent 来源，source_agent_id 保持 None；
 //! root 身份由 forwarder 的 envelope 传递，子 Agent 转发器显式注入来源。
 //! SubagentStart/Stop 的 child_agent_id 透传为 instance_id。
@@ -50,9 +51,17 @@ pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
             tool_call_id,
             name,
             input,
+            origin_message_id,
+            origin_readable,
             ..
         } => Some(ExecutorEvent::ToolStart {
+            // `message_id` 保持既有 turn_id 语义（v1 兼容），真实所属 assistant
+            // 消息另经 `origin_message_id` 透传；发射点不可知时保持 None。
             message_id: MessageId::from(turn_id.as_uuid()),
+            origin_message_id,
+            // 可回读性原样透传：`Some(false)`（嵌套执行）必须让消费方知道
+            // origin 确实不存在，而不是旧载荷的「未知」。
+            origin_readable,
             tool_call_id,
             name,
             input,

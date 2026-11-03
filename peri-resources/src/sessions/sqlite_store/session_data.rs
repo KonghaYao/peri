@@ -25,7 +25,7 @@ use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, BindingState, ChildSnapshot, CloseSettlement, ForkSnapshot,
     FrozenSnapshotBytes, FrozenState, NewSession, NewSessionDraft, PersistenceRecovery,
-    RewindBoundary, RewindOutcome, SessionMetaPatch, SessionResourceError,
+    RewindBoundary, RewindCandidate, RewindOutcome, SessionMetaPatch, SessionResourceError,
     SessionResourceErrorKind, SessionResourceResult, SessionSnapshot,
 };
 use peri_acp_types::store::{
@@ -66,6 +66,8 @@ mod inherited_page;
 mod inherited_read;
 #[path = "session_data/lifecycle.rs"]
 mod lifecycle;
+#[path = "session_data/rewind_candidates.rs"]
+mod rewind_candidates;
 
 #[path = "session_data/handle.rs"]
 mod handle;
@@ -77,6 +79,8 @@ mod port;
 
 #[path = "session_data_helpers.rs"]
 mod helpers;
+#[cfg(test)]
+pub(super) use helpers::message_insert_chunk_rows;
 use helpers::*;
 pub(super) use helpers::{new_session_draft_row, new_session_row, validate_unbound_legacy_frozen};
 

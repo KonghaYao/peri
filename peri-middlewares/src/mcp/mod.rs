@@ -29,6 +29,10 @@ pub mod session_invocation;
 pub(crate) mod skill_activation;
 pub(crate) mod skill_discovery;
 pub(crate) mod system_tools;
+// 进程内 standalone serving（`peri mcp-start <instance>`）：通用 serve 在
+// `peri-mcp-common`，实例构造在 `builtin/standalone.rs`。
+#[cfg(not(target_os = "emscripten"))]
+pub mod standalone;
 pub mod task_scope;
 pub mod tool_bridge;
 mod tool_execution;
@@ -111,6 +115,7 @@ mod workspace_recovery_tests;
 #[path = "builtin_cron_runtime_test.rs"]
 mod builtin_cron_runtime_tests;
 
+#[cfg(not(target_os = "emscripten"))]
 mod context_archive;
 
 #[cfg(test)]

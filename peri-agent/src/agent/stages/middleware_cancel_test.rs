@@ -321,6 +321,7 @@ async fn cancel_pending_batch_approval_preserves_result_count() {
         &context,
         ExecutionEntryOrigin::ModelBatch,
         context.session.turn.cancel_token.as_ref().clone(),
+        None,
     );
     let no_bound_targets = std::collections::HashMap::new();
     let mut approval = Box::pin(run_before_bound_tools_batch(

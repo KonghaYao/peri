@@ -116,6 +116,7 @@ fn test_fold_key_of_maps_vm_identities() {
         agent_name: "explorer".into(),
         view_models: im::Vector::new(),
         collapsed: false,
+        preview_omitted: false,
         is_running: false,
         is_error: false,
         error_reason: None,

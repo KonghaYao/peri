@@ -16,24 +16,12 @@ function validTime(raw: unknown): string | null {
     return value && Number.isFinite(Date.parse(value)) ? value : null;
 }
 
-/** Subagent and background task projections, with snapshot repair for revision gaps. */
+/** Subagent and background task projection. Snapshot repair is initiated by the runtime. */
 export class TaskProjection {
     private backgroundRevision: number | null = null;
-    private awaitingSnapshot = false;
-    private requestSnapshot: (() => void) | null = null;
     private readonly liveBackgroundTasks = new Set<string>();
 
     constructor(private readonly docs: DocModel) {}
-
-    setSnapshotRequester(request: (() => void) | null): void {
-        this.requestSnapshot = request;
-        if (request && this.awaitingSnapshot) request();
-    }
-
-    private needSnapshot(): void {
-        this.awaitingSnapshot = true;
-        this.requestSnapshot?.();
-    }
 
     private backgroundStatus(id: string, status: string): string | UnobservedTaskStatus {
         return TERMINAL.has(status) || this.liveBackgroundTasks.has(id)
@@ -96,7 +84,6 @@ export class TaskProjection {
             : string(data.status);
         if (!status) return false;
         if (name === "bg-task-updated" && !existing) {
-            this.needSnapshot();
             return false;
         }
         if (existing && existing.get("kind") === "subagent") {
@@ -129,15 +116,8 @@ export class TaskProjection {
     private acceptRevision(raw: unknown): boolean {
         const revision = finite(raw);
         if (revision === null) return this.backgroundRevision === null;
-        if (this.awaitingSnapshot) { this.requestSnapshot?.(); return false; }
-        if (this.backgroundRevision === null) {
-            if (revision === 1) return true;
-            this.needSnapshot();
-            return false;
-        }
-        if (revision === this.backgroundRevision + 1) return true;
-        if (revision > this.backgroundRevision + 1) this.needSnapshot();
-        return false;
+        if (this.backgroundRevision === null) return revision === 1;
+        return revision === this.backgroundRevision + 1;
     }
 
     private acceptSnapshot(data: RecordValue | null): boolean {
@@ -182,7 +162,6 @@ export class TaskProjection {
             }
         });
         this.backgroundRevision = revision;
-        this.awaitingSnapshot = false;
         return true;
     }
 }

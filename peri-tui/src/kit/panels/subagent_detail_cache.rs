@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::sync::Arc;
@@ -113,7 +113,7 @@ impl DetailRenderCache {
         }
         if switched {
             self.slots = Vec::new();
-            self.folds.clear();
+            self.folds = std::collections::HashMap::new();
             self.focused = None;
             self.instance_id.clone_from(&group.instance_id);
         }
@@ -128,8 +128,21 @@ impl DetailRenderCache {
         });
         self.grid = *grid;
         self.source = group.view_models.clone();
+        if source_changed {
+            let keys: HashSet<_> = self.source.iter().filter_map(fold_key).collect();
+            self.folds.retain(|key, _| keys.contains(key));
+            if self.focused.as_ref().is_some_and(|key| !keys.contains(key)) {
+                self.focused = None;
+            }
+            if self.folds.capacity() > self.folds.len().saturating_mul(2) {
+                self.folds.shrink_to_fit();
+            }
+        }
         self.slots
             .resize_with(self.source.len(), DetailSlot::default);
+        if self.slots.capacity() > self.slots.len().saturating_mul(2) {
+            self.slots.shrink_to_fit();
+        }
         self.prefix.clear();
         self.prefix.push(0);
         self.resident_bytes = 0;
@@ -163,6 +176,9 @@ impl DetailRenderCache {
                     self.resident_slots.insert(index);
                 }
             }
+        }
+        if self.prefix.capacity() > self.prefix.len().saturating_mul(2) {
+            self.prefix.shrink_to_fit();
         }
         switched
     }
@@ -403,6 +419,7 @@ impl DetailRenderCache {
 
 fn fold_of(vm: &TuiRenderUnit) -> Option<FoldState> {
     match vm {
+        TuiRenderUnit::TuiSystemReminder(reminder) => Some(reminder.fold),
         TuiRenderUnit::TuiToolCard(card) => Some(card.fold),
         TuiRenderUnit::TuiAssistantBubble(bubble) => bubble.reasoning.as_ref().map(|r| r.fold),
         TuiRenderUnit::TuiCollapsedGroup(group) => Some(group.fold),
@@ -412,6 +429,9 @@ fn fold_of(vm: &TuiRenderUnit) -> Option<FoldState> {
 
 fn fold_key(vm: &TuiRenderUnit) -> Option<FoldKey> {
     match vm {
+        TuiRenderUnit::TuiSystemReminder(reminder) => {
+            Some(FoldKey::SystemReminder(reminder.reminder_id))
+        }
         TuiRenderUnit::TuiToolCard(card) => Some(FoldKey::Tool(card.tool_id.clone())),
         TuiRenderUnit::TuiAssistantBubble(bubble) if bubble.reasoning.is_some() => {
             bubble.message_id.clone().map(FoldKey::Reasoning)
@@ -441,6 +461,10 @@ fn projected(vm: &TuiRenderUnit, fold: Option<FoldState>) -> Cow<'_, TuiRenderUn
     };
     let mut vm = vm.clone();
     match &mut vm {
+        TuiRenderUnit::TuiSystemReminder(reminder) => {
+            reminder.fold = fold;
+            reminder.recompute_hash();
+        }
         TuiRenderUnit::TuiToolCard(card) => {
             card.fold = fold;
             card.recompute_hash();

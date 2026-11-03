@@ -17,6 +17,7 @@ impl AgentExecutor for Executor {
 struct WirePool {
     peer: rmcp::service::Peer<rmcp::RoleClient>,
     disconnected: AtomicBool,
+    reject_ack: AtomicBool,
 }
 #[async_trait::async_trait]
 impl McpPoolPort for WirePool {
@@ -57,6 +58,9 @@ impl McpPoolPort for WirePool {
         assert_eq!(instance, "workflow");
         if self.disconnected.load(Ordering::SeqCst) {
             return Err("wire disconnected".into());
+        }
+        if tool == "WorkflowCompletionAck" && self.reject_ack.load(Ordering::SeqCst) {
+            return Err("owner ACK unavailable".into());
         }
         let mut params = rmcp::model::CallToolRequestParams::new(tool.to_owned())
             .with_arguments(arguments.as_object().unwrap().clone());
@@ -124,6 +128,7 @@ async fn workflow_projection_requires_wire_and_acknowledges_only_accepted_termin
     let pool = Arc::new(WirePool {
         peer: service.peer().clone(),
         disconnected: AtomicBool::new(false),
+        reject_ack: AtomicBool::new(false),
     });
     let accepted = Arc::new(AtomicUsize::new(0));
     let reject = Arc::new(AtomicBool::new(true));
@@ -148,8 +153,21 @@ async fn workflow_projection_requires_wire_and_acknowledges_only_accepted_termin
             Ok(())
         }),
         scan: tokio::sync::Mutex::new(()),
+        registrations: parking_lot::Mutex::default(),
     };
-    owner
+    let source_ticket = runtime
+        .registry()
+        .reserve(peri_workflow::registry::WorkflowRun {
+            run_id: "run-a".into(),
+            workflow_name: "wire run".into(),
+            script_preview: "return 1".into(),
+            status: WorkflowRunStatus::Running,
+            started_at: std::time::Instant::now(),
+            child_handle: None,
+            kill_tx: None,
+        })
+        .unwrap();
+    let owner_ticket = owner
         .register(BgTaskRegistration {
             task_id: "run-a".into(),
             kind: BgTaskKind::Workflow,
@@ -157,6 +175,12 @@ async fn workflow_projection_requires_wire_and_acknowledges_only_accepted_termin
             pid: None,
             kill: None,
         })
+        .unwrap();
+    let source_record = owner
+        .snapshot()
+        .tasks
+        .into_iter()
+        .find(|record| record.task_id == "run-a")
         .unwrap();
     assert!(
         host.snapshot().tasks.is_empty(),
@@ -182,11 +206,13 @@ async fn workflow_projection_requires_wire_and_acknowledges_only_accepted_termin
         phase_summaries: vec![],
         attempts: vec![],
     };
-    runtime.registry().complete("run-a", terminal.clone());
-    owner.confirm_external_execution_stopped("run-a");
+    runtime
+        .registry()
+        .complete(&source_ticket, terminal.clone(), source_record);
+    owner.confirm_external_execution_stopped(&owner_ticket);
     owner
         .settle_completed(
-            "run-a",
+            &owner_ticket,
             terminal.background_result(),
             Arc::new(|_, _| Ok(())),
         )
@@ -201,9 +227,48 @@ async fn workflow_projection_requires_wire_and_acknowledges_only_accepted_termin
     );
     assert_eq!(runtime.registry().pending_completions().len(), 1);
     reject.store(false, Ordering::SeqCst);
+    pool.reject_ack.store(true, Ordering::SeqCst);
+    assert!(client
+        .reconcile()
+        .await
+        .unwrap_err()
+        .contains("ACK unavailable"));
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    let host_task_id = client.registrations.lock()["run-a"].task_id().to_owned();
+    // 两端展示缓存都淘汰这条终态，待 ACK 来源与 producer receipt 仍须保真。
+    for manager in [&owner, &host] {
+        for index in 0..600 {
+            let ticket = manager
+                .register(BgTaskRegistration {
+                    task_id: format!("history-{index}"),
+                    kind: BgTaskKind::Agent,
+                    summary: "history".into(),
+                    pid: None,
+                    kill: None,
+                })
+                .unwrap();
+            let mut result = terminal.background_result();
+            result.task_id = ticket.task_id().to_owned();
+            manager.confirm_external_execution_stopped(&ticket);
+            assert!(manager.complete(&ticket, result));
+        }
+    }
+    assert!(!owner
+        .snapshot()
+        .tasks
+        .iter()
+        .any(|task| task.task_id == "run-a"));
+    assert!(!host
+        .snapshot()
+        .tasks
+        .iter()
+        .any(|task| task.task_id == host_task_id));
+    assert_eq!(runtime.registry().pending_completions().len(), 1);
+    pool.reject_ack.store(false, Ordering::SeqCst);
     client.reconcile().await.unwrap();
     assert!(runtime.registry().pending_completions().is_empty());
     assert_eq!(host.active_count(), 0);
+    assert!(client.registrations.lock().is_empty());
     client.reconcile().await.unwrap();
     assert_eq!(accepted.load(Ordering::SeqCst), 1);
     client.close().await.unwrap();
@@ -256,6 +321,7 @@ async fn workflow_real_engine_start_ack_cancel_and_close_cross_mcp_wire() {
     let pool = Arc::new(WirePool {
         peer: service.peer().clone(),
         disconnected: AtomicBool::new(false),
+        reject_ack: AtomicBool::new(false),
     });
     let accepted = Arc::new(AtomicUsize::new(0));
     let delivered = accepted.clone();
@@ -269,6 +335,7 @@ async fn workflow_real_engine_start_ack_cancel_and_close_cross_mcp_wire() {
             Ok(())
         }),
         scan: tokio::sync::Mutex::new(()),
+        registrations: parking_lot::Mutex::default(),
     };
     let starter = pool.clone();
     let mut started = tokio::spawn(async move {

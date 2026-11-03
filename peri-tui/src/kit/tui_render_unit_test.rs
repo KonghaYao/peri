@@ -534,6 +534,7 @@ fn test_tui_render_unit_subagent_group_construction() {
         content_hash: tui_hash_str("inner"),
     });
     let vm = TuiRenderUnit::TuiSubAgentGroup(TuiSubAgentGroup {
+        preview_omitted: false,
         instance_id: "instance-sa-1".into(),
         agent_id: "sa-1".into(),
         agent_name: "explorer".into(),
@@ -567,6 +568,7 @@ fn test_subagent_group_hash_and_eq_include_is_error_and_error_reason() {
             agent_name: "explorer".into(),
             view_models: im::Vector::new(),
             collapsed: false,
+            preview_omitted: false,
             is_running: false,
             is_error,
             error_reason: error_reason.map(String::from),

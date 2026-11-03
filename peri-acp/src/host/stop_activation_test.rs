@@ -72,7 +72,7 @@ async fn explicit_stop_after_failure_does_not_release_a_new_child_error() {
 async fn stopped_user_turn_allows_exactly_one_automatic_independent_child_turn() {
     let mut harness = ActivationHarness::new().await;
     harness.start_scheduler();
-    harness
+    let ticket = harness
         .cfg
         .session_manager
         .get_session(&harness.session_id)
@@ -86,6 +86,11 @@ async fn stopped_user_turn_allows_exactly_one_automatic_independent_child_turn()
             kill: None,
         })
         .unwrap();
+    harness
+        .task_tickets
+        .lock()
+        .unwrap()
+        .insert("independent-child".into(), ticket);
     let cfg = harness.cfg.clone();
     let sessions = harness.sessions.clone();
     let locks = harness.locks.clone();
@@ -164,6 +169,73 @@ async fn stopped_user_turn_allows_exactly_one_automatic_independent_child_turn()
     assert!(!state.continuation_in_flight);
     assert!(state.cancel_token.is_none());
     drop(sessions);
+    harness
+        .cfg
+        .session_manager
+        .pre_close_session(&harness.session_id);
+}
+
+/// Stop suppresses autonomous activation: a deferred monitor wake stays in the
+/// queue and does not start a turn. The next user prompt re-enables activation
+/// and consumes the deferred message inside that turn.
+#[tokio::test]
+#[serial]
+async fn stop_suppression_blocks_defer_until_the_next_user_prompt_restores_it() {
+    let mut harness = ActivationHarness::new().await;
+    harness.start_scheduler();
+    harness.listen();
+    stop(&harness, &mut *harness.sessions.lock().await);
+    assert!(!crate::host::activation::mq_allowed(
+        &harness.cfg,
+        &harness.session_id
+    ));
+
+    let queue = harness
+        .cfg
+        .session_manager
+        .v2_queue_for(&harness.session_id)
+        .unwrap();
+    queue.push(QueuedMessage::defer(
+        MessageSource::McpNotification,
+        BaseMessage::human("monitor alert"),
+    ));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(
+        harness
+            .recorded
+            .notifications()
+            .iter()
+            .all(|(method, _)| method != "peri/agent_event_done"),
+        "a suppressed defer must not start a turn"
+    );
+    assert!(queue.has_ensure_processing(), "the defer stays queued");
+
+    let response = crate::host::dispatch_prompt_turn(
+        json!({"sessionId": harness.session_id, "message": {
+            "role": "user", "content": "continue after stop"
+        }}),
+        crate::host::PromptOrigin::User,
+        None,
+        &harness.sessions,
+        &harness.locks,
+        &harness.transport,
+        &harness.cfg,
+        &harness.sender,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response["stopReason"], "end_turn");
+    assert!(
+        harness
+            .cfg
+            .session_manager
+            .get_session(&harness.session_id)
+            .unwrap()
+            .activation
+            .is_allowed(),
+        "a user prompt restores automatic activation"
+    );
+    assert!(queue.is_empty(), "the user turn consumes the deferred wake");
     harness
         .cfg
         .session_manager

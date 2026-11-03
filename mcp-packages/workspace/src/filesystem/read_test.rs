@@ -145,6 +145,58 @@ async fn test_read_large_output_reports_truncation_and_segment_hint() {
 }
 
 #[tokio::test]
+async fn test_read_single_line_over_budget_points_at_that_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("minified.json");
+    std::fs::write(&path, "x".repeat(7_000)).unwrap();
+    let tool = ReadFileTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "minified.json"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        result.contains("line 1 alone exceeds"),
+        "单行超限提示应指向第 1 行: {result}"
+    );
+    assert!(
+        !result.contains("line 2 exceeds") && !result.contains("offset=2"),
+        "单行文件不存在可续读的 offset=2，不得误导: {result}"
+    );
+    assert!(
+        result.contains("cannot be read") && result.contains("Bash"),
+        "应明确剩余内容无法用按行 offset 读取，并给出替代方式: {result}"
+    );
+}
+
+#[tokio::test]
+async fn test_read_long_first_line_continues_at_next_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("long-first.txt");
+    std::fs::write(&path, format!("{}\nsecond", "x".repeat(7_000))).unwrap();
+    let tool = ReadFileTool::new(dir.path().to_str().unwrap());
+    let result = tool
+        .invoke(
+            serde_json::json!({"file_path": "long-first.txt"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        result.contains("line 1 alone exceeds"),
+        "超限提示应指向第 1 行而不是第 2 行: {result}"
+    );
+    assert!(
+        result.contains("offset=2") && !result.contains("line 2 exceeds"),
+        "第 1 行剩余不可读，但可用 offset=2 继续读后续行: {result}"
+    );
+}
+
+#[tokio::test]
 async fn test_read_file_offset_limit() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("lines.txt");

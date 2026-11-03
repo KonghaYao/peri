@@ -221,17 +221,13 @@
 
     <script type="module">
       import { EventStreamContentType, fetchEventSource } from "/vendor/fetch-event-source.js";
-      import { Y, SessionViewStore, SessionDocReplica } from "/vendor/peri-session-view.js";
+      import { ChatReplica } from "/vendor/peri-session-view.js";
       const $ = (id) => document.getElementById(id);
-      let cursor = 0;
       let session = null;
       let selected = "field:sessionId";
       const entries = [];
-      const replica = new SessionDocReplica();
-      let chatDoc = replica.chat;
-      let sessionDoc = replica.session;
-      const viewStore = new SessionViewStore(chatDoc, sessionDoc);
-      let docGeneration = null;
+      const replica = new ChatReplica();
+      let activeChannel = null;
       let visibleBlockLimit = 200;
       const renderedBlocks = new Map();
       const interactionCards = new Map();
@@ -284,6 +280,7 @@
       }
 
       function eventPayload(entry) {
+        if (entry?.fact) return entry.fact;
         const notification = entry.notification;
         if (notification.method !== "peri/agent_event")
           return notification.params?.update;
@@ -323,7 +320,7 @@
           try {
             const values = await Promise.all(["arguments", "result"].map(async (field) => {
               const ref = tool?.[`${field}Ref`];
-              const value = ref ? await postJson("/api/session/payload", { sessionId: session.sessionId, id: ref.id }) : tool?.[field];
+              const value = ref ? await postJson("/api/session/payload", { sessionId: session.sessionId, id: ref.id, bytes: ref.bytes }) : tool?.[field];
               return `${field === "arguments" ? "输入" : "结果"}\n${formatToolValue(value)}`;
             }));
             body.textContent = values.join("\n\n");
@@ -406,13 +403,13 @@
       }
 
       function renderView() {
-        const view = viewStore.getSnapshot();
+        const view = replica.read();
         const scroller = $("chat-scroll");
         const wasAtBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
         renderMessages(view);
         if (wasAtBottom) scrollToLatest();
 
-        const status = view.session?.activeTurnInteractionStatus ?? view.activeTurnStatus ?? "空闲";
+        const status = view.session?.activeTurnInteractionStatus ?? view.activeTurn?.status ?? "空闲";
         const queued = view.inputQueue?.items?.filter((item) =>
           ["queued", "dispatching", "claimed"].includes(item.state)).length ?? 0;
         if (session) $("status").textContent = `已连接 · ${status}${queued ? ` · ${queued} 条待处理输入` : ""}`;
@@ -448,26 +445,6 @@
         let binary = "";
         for (const byte of bytes) binary += String.fromCharCode(byte);
         return btoa(binary);
-      }
-
-      function resumeState() {
-        const vector = replica.stateVector();
-        return vector ? { ...vector, chat: encodeUpdate(vector.chat), session: encodeUpdate(vector.session) } : undefined;
-      }
-
-      function acceptDocSnapshot(payload) {
-        const change = replica.applySnapshot({ ...payload, chat: decodeUpdate(payload.chat), session: decodeUpdate(payload.session) });
-        if (docGeneration !== payload.generation) interactionCards.clear();
-        docGeneration = payload.generation;
-        chatDoc = replica.chat;
-        sessionDoc = replica.session;
-        if (change === "replaced") viewStore.replaceDocs(chatDoc, sessionDoc);
-      }
-
-      function acceptDocUpdate(payload) {
-        replica.applyUpdate({ ...payload,
-          ...(payload.chat ? { chat: decodeUpdate(payload.chat) } : {}),
-          ...(payload.session ? { session: decodeUpdate(payload.session) } : {}) });
       }
 
       async function respondToInteraction(interaction, decision, card) {
@@ -548,7 +525,7 @@
       }
 
       let renderScheduled = false;
-      viewStore.subscribe(() => {
+      replica.subscribe(() => {
         if (renderScheduled) return;
         renderScheduled = true;
         requestAnimationFrame(() => { renderScheduled = false; renderView(); });
@@ -600,14 +577,12 @@
         }));
         const events = [...entries].reverse().map((entry) => {
           const payload = eventPayload(entry);
+          const kind = entry?.fact?.kind ?? entry?.notification?.method ?? "fact";
           return {
-            key: `event:${entry.id}`,
-            title:
-              payload?.sessionUpdate ??
-              payload?.type ??
-              entry.notification.method,
-            subtitle: `#${entry.id} · ${entry.notification.method}`,
-            detail: JSON.stringify(entry.notification, null, 2),
+            key: `event:${entry?.sequence ?? entry?.id ?? kind}`,
+            title: payload?.sessionUpdate ?? payload?.type ?? kind,
+            subtitle: `#${entry?.sequence ?? entry?.id ?? "?"} · ${kind}`,
+            detail: JSON.stringify(entry, null, 2),
           };
         });
         return { fields, events };
@@ -644,8 +619,8 @@
       const eventController = new AbortController();
       addEventListener("beforeunload", () => {
         eventController.abort();
-        viewStore.destroy();
-        replica.destroy();
+        activeChannel?.close();
+        void replica.dispose();
       }, { once: true });
 
       function connectSession(requestedSessionId) {
@@ -656,15 +631,57 @@
           rejectReady = reject;
         });
         const requestId = crypto.randomUUID();
+
+        // 每个 SSE 连接一个 ChatYjsChannel；HELLO/ACK 通过 POST 回送。
+        function makeChannel() {
+          const controller = new AbortController();
+          const messages = new Set();
+          const closes = new Set();
+          const channel = {
+            closed: false,
+            connectionId: null,
+            controller,
+            send(frame) {
+              if (channel.closed || !channel.connectionId)
+                return Promise.reject(new Error("Chat sync channel is not ready"));
+              return postJson("/api/session/sync", {
+                connectionId: channel.connectionId,
+                frame: encodeUpdate(frame),
+              });
+            },
+            onMessage(listener) {
+              messages.add(listener);
+              return () => messages.delete(listener);
+            },
+            onClose(listener) {
+              closes.add(listener);
+              return () => closes.delete(listener);
+            },
+            close(reason) {
+              if (channel.closed) return;
+              channel.closed = true;
+              controller.abort();
+              for (const listener of [...closes]) listener(reason);
+              closes.clear();
+              messages.clear();
+            },
+            deliver(frame) {
+              for (const listener of [...messages]) listener(frame);
+            },
+          };
+          return channel;
+        }
+
         void (async () => {
           while (!eventController.signal.aborted) {
+            const channel = makeChannel();
+            activeChannel = channel;
             try {
               await fetchEventSource("/api/session/create", {
                 method: "POST",
                 headers: { "content-type": "application/json" },
-                body: JSON.stringify({ sessionId: session?.sessionId ?? requestedSessionId, after: cursor, requestId,
-                  resume: resumeState(), diagnostics: new URLSearchParams(location.search).get("diagnostics") === "1" }),
-                signal: eventController.signal,
+                body: JSON.stringify({ sessionId: session?.sessionId ?? requestedSessionId, requestId }),
+                signal: channel.controller.signal,
                 openWhenHidden: true,
                 async onopen(response) {
                   if (!response.ok || !response.headers.get("content-type")?.startsWith(EventStreamContentType)) {
@@ -677,35 +694,33 @@
                 onmessage(message) {
                   if (message.event === "session") {
                     session = JSON.parse(message.data);
+                    channel.connectionId = session.connectionId;
+                    entries.length = 0;
+                    interactionCards.clear();
                     $("status").textContent = "已连接 · 本地演示";
                     $("error").textContent = "";
+                    replica.connect(channel);
                     resolveReady();
                     return;
                   }
-                  if (message.event === "docs:snapshot") {
-                    acceptDocSnapshot(JSON.parse(message.data));
+                  if (message.event === "sync") {
+                    channel.deliver(decodeUpdate(message.data));
                     return;
                   }
-                  if (message.event === "docs:update") {
-                    acceptDocUpdate(JSON.parse(message.data));
-                    return;
+                  if (message.event === "fact") {
+                    const entry = JSON.parse(message.data);
+                    entries.push(entry);
+                    if (entries.length > 256) entries.shift();
+                    if (["input-delivered", "turn-complete"].includes(entry.fact?.kind))
+                      scheduleSessionRefresh();
+                    if (!$("info-overlay").classList.contains("hidden")) renderInfo();
                   }
-                  if (message.event !== "notification") return;
-                  const entry = JSON.parse(message.data);
-                  if (entry.id <= cursor) return;
-                  cursor = entry.id;
-                  entries.push(entry);
-                  if (entries.length > 256) entries.shift();
-                  // ACP notifications remain available in the information panel for debugging.
-                  const payload = eventPayload(entry);
-                  if (["user_input_delivered", "user_message_chunk", "usage_update"].includes(payload?.type ?? payload?.sessionUpdate))
-                    scheduleSessionRefresh();
-                  if (!$("info-overlay").classList.contains("hidden")) renderInfo();
                 },
                 onclose() { throw new Error("Session event stream closed"); },
                 onerror(error) { throw error; },
               });
             } catch (error) {
+              channel.close(error instanceof Error ? error : new Error(String(error)));
               if (eventController.signal.aborted) break;
               if (error.fatal) {
                 rejectReady(error);

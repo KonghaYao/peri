@@ -156,7 +156,9 @@ async fn test_image_later_input_reaches_model_after_micro_compact() {
             ));
             transcript.append(BaseMessage::tool_result(
                 format!("call-{i}"),
-                "x".repeat(4_000),
+                // 净收益必须跨过完整窗口 10%（200k → 20k）；4 个可回收步骤各需
+                // 约 24k 字符，才能在 Bash PreviewOnly 下实际提交 Micro。
+                "x".repeat(24_000),
             ));
         }
     }

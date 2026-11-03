@@ -25,6 +25,10 @@ pub(crate) mod context;
 // 有界关闭（owner E-03，W2）。与两个 handler 一样是「行为」子模块，由本模块统一挂载。
 pub(crate) mod runtime;
 
+// standalone：进程内 CLI serving（`peri mcp-start <instance>`）的 handler 构造。
+#[cfg(not(target_os = "emscripten"))]
+pub(crate) mod standalone;
+
 // workspace_subscription：`workspace` 实例的默认订阅（git ref 资源；Git Watch 下沉的
 // 宿主落点，D-5）。默认层注入只在本模块的 `builtin_default_entry` / 规则 2 消费它；
 // 客户端消费侧（`mcp::client::subscription`）经下面的再导出判定「哪些实例的哪些 URI
@@ -249,6 +253,12 @@ pub(crate) fn is_closed_source(
         && is_closed(server_name, closed)
 }
 
+/// 该来源是否为宿主系统资源面（instructions / meta / agents）的信任来源。
+///
+/// 这是 **host-assigned 身份**判定，不是 MCP 能力过滤：技能发现与冻结快照
+/// 按 `skills_capable` 能力聚合（`McpClientPool::read_skills_catalog`），
+/// 不要求来源是 workspace；本函数只决定哪些连接可以承载 `peri-instruction://`
+/// / `peri-meta://` 等宿主系统 URI。
 pub(crate) fn is_workspace_source(source: Option<&ConfigSource>) -> bool {
     matches!(source, Some(ConfigSource::Builtin { instance }) if instance == "workspace")
         || matches!(source, Some(ConfigSource::WorkspaceRemote))

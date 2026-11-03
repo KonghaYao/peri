@@ -115,7 +115,9 @@ fn event_trace_id(event: &IngestionEvent) -> String {
 #[test]
 fn metric_follows_active_turn_trace() {
     let session = FakeLangfuseSession::new("sess_metrics_active");
-    session.turn_traces().register("sid-1", "turn-trace-1");
+    session
+        .turn_traces()
+        .register("sid-1", "turn-trace-1", Some("turn-trace-1"));
     let sink = sink_with(&session);
 
     sink.record(metric(
@@ -132,6 +134,14 @@ fn metric_follows_active_turn_trace() {
         "turn-trace-1",
         "metric must attach to the active turn trace, not open its own"
     );
+    let IngestionEvent::EventCreate { body, .. } = &events[0] else {
+        panic!("metrics must be reported as EventCreate");
+    };
+    assert_eq!(
+        body.parent_observation_id.as_deref(),
+        Some("turn-trace-1"),
+        "metric must hang under the turn root span instead of becoming a second root"
+    );
 }
 
 #[test]
@@ -139,7 +149,7 @@ fn metric_without_active_trace_opens_own_root_trace() {
     let session = FakeLangfuseSession::new("sess_metrics_fallback");
     session
         .turn_traces()
-        .register("sid-other", "turn-trace-other");
+        .register("sid-other", "turn-trace-other", None);
     let sink = sink_with(&session);
 
     // sid 未登记（或无 sid）→ 回退独立 root trace，事件不丢
@@ -160,7 +170,9 @@ fn metric_without_active_trace_opens_own_root_trace() {
 #[test]
 fn metric_after_turn_clear_falls_back_to_own_trace() {
     let session = FakeLangfuseSession::new("sess_metrics_closed");
-    session.turn_traces().register("sid-1", "turn-trace-1");
+    session
+        .turn_traces()
+        .register("sid-1", "turn-trace-1", Some("turn-trace-1"));
     session.turn_traces().clear("sid-1", "turn-trace-1");
     let sink = sink_with(&session);
 
@@ -174,13 +186,24 @@ fn metric_after_turn_clear_falls_back_to_own_trace() {
     let events = session.events_snapshot();
     assert_eq!(events.len(), 1);
     assert_ne!(event_trace_id(&events[0]), "turn-trace-1");
+    let IngestionEvent::EventCreate { body, .. } = &events[0] else {
+        panic!("metrics must be reported as EventCreate");
+    };
+    assert!(
+        body.parent_observation_id.is_none(),
+        "fallback root trace has no parent observation"
+    );
 }
 
 #[test]
 fn metrics_of_different_sids_follow_their_own_trace() {
     let session = FakeLangfuseSession::new("sess_metrics_isolated");
-    session.turn_traces().register("sid-a", "turn-trace-a");
-    session.turn_traces().register("sid-b", "turn-trace-b");
+    session
+        .turn_traces()
+        .register("sid-a", "turn-trace-a", Some("turn-trace-a"));
+    session
+        .turn_traces()
+        .register("sid-b", "turn-trace-b", None);
     let sink = sink_with(&session);
 
     sink.record(metric(

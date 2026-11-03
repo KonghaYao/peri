@@ -772,6 +772,36 @@ fn poison_plugin_manifest(plugin_dir: &Path) {
 
 #[tokio::test]
 #[serial]
+async fn broken_plugin_manifest_does_not_block_session_preparation() {
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let _home = PreparedHomeGuard::set(&home);
+    let plugin_dir = seed_enabled_plugin(&home);
+    std::fs::remove_file(plugin_dir.join(".claude-plugin/plugin.json")).unwrap();
+    let cwd = canonical_workspace_dir(&tmp, "workspace");
+    let host = host_with_plugin_face(&tmp, &cwd, false).await;
+
+    let prepared = PreparedSessionInputs::prepare_new(&host, &cwd)
+        .expect("missing plugin manifest must not block a new session");
+    assert!(prepared.frozen_encoded.is_some());
+    assert!(prepared.plugins().data.is_none());
+    assert!(prepared.plugins().skill_roots.is_empty());
+    assert!(prepared.plugins().discovery_failed);
+    assert!(!plugin_dir.join(".claude-plugin/plugin.json").exists());
+
+    let restored = PreparedSessionInputs::prepare_restore(
+        &host,
+        &cwd,
+        prepared.frozen_encoded.as_deref().unwrap(),
+    )
+    .expect("missing plugin manifest must not block session restore");
+    assert!(restored.plugins().data.is_none());
+    assert!(restored.plugins().discovery_failed);
+}
+
+#[tokio::test]
+#[serial]
 async fn restore_and_fork_take_the_plugin_decision_from_the_frozen_snapshot() {
     let tmp = TempDir::new().unwrap();
     let home = tmp.path().join("home");

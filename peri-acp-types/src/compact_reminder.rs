@@ -1,6 +1,6 @@
 //! Legacy Compact context projection; storage stays unchanged and provenance stays legacy.
 
-use crate::compact::CONTINUATION_HINT;
+use crate::compact::is_continuation_hint;
 use crate::messages::{BaseMessage, MessageContent};
 use crate::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
@@ -32,7 +32,7 @@ pub fn legacy_compact_reminders(message: &BaseMessage) -> Vec<SystemReminder> {
             .filter(|value| !value.trim().is_empty())
             .map(|_| kind)
     })
-    .or_else(|| (header == CONTINUATION_HINT).then_some("compact_summary"));
+    .or_else(|| is_continuation_hint(header).then_some("compact_summary"));
     let Some(kind) = kind else {
         return Vec::new();
     };

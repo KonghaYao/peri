@@ -3,7 +3,7 @@
 - 状态：**设计已裁决，待实施**。
 - 日期：2026-10-10。
 - 落点：`merge/v4-to-main`（PR #179）；pre-release/main 保持 schema 19，两线漂移以 PR 为准。
-- 关联：`2026-10-07-remove-execution-recovery-schema-review.md`、`2026-10-08-remove-legacy-execution-registrations-plan.md`。
+- 关联：执行恢复剥离与旧执行登记移除的历史决策（原文见 Git 历史）。
 
 ## 1. 背景
 

@@ -53,6 +53,175 @@ fn published_params(run_id: &str, agent_id: u64) -> AgentRunParams {
     }
 }
 
+fn completed_workflow(run_id: &str) -> peri_workflow::registry::WorkflowTaskResult {
+    peri_workflow::registry::WorkflowTaskResult {
+        run_id: run_id.into(),
+        workflow_name: "retained source".into(),
+        success: true,
+        status: peri_workflow::registry::WorkflowRunStatus::Completed,
+        execution_status: Default::default(),
+        acceptance_status: Default::default(),
+        post_processing_status: Default::default(),
+        delivery_status: Default::default(),
+        state_artifact_exists: false,
+        duration_ms: 1,
+        agent_count: 0,
+        tool_calls_count: 0,
+        error: None,
+        phase_summaries: vec![],
+        attempts: vec![],
+    }
+}
+
+#[tokio::test]
+async fn unacknowledged_completions_keep_source_records_after_display_eviction() {
+    use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskShutdownReport};
+    use peri_workflow::registry::{WorkflowRun, WorkflowRunStatus};
+
+    let runtime = make_runtime();
+    let _input = crate::WorkflowInstanceInput::new(Arc::clone(&runtime));
+    let owner = runtime.bg_registry().unwrap();
+    let mut first_started_at = None;
+    for index in 0..600 {
+        let run_id = format!("unacked-{index}");
+        let source_ticket = runtime
+            .registry()
+            .reserve(WorkflowRun {
+                run_id: run_id.clone(),
+                workflow_name: "retained source".into(),
+                script_preview: "return 1".into(),
+                status: WorkflowRunStatus::Running,
+                started_at: std::time::Instant::now(),
+                child_handle: None,
+                kill_tx: None,
+            })
+            .unwrap();
+        let owner_ticket = owner
+            .register(BgTaskRegistration {
+                task_id: run_id.clone(),
+                kind: BgTaskKind::Workflow,
+                summary: "retained source".into(),
+                pid: None,
+                kill: None,
+            })
+            .unwrap();
+        let record = owner
+            .snapshot()
+            .tasks
+            .into_iter()
+            .find(|task| task.task_id == run_id)
+            .unwrap();
+        if index == 0 {
+            first_started_at = Some(record.started_at.clone());
+        }
+        let terminal = completed_workflow(&run_id);
+        assert!(runtime
+            .registry()
+            .complete(&source_ticket, terminal.clone(), record));
+        owner.confirm_external_execution_stopped(&owner_ticket);
+        owner
+            .settle_completed(
+                &owner_ticket,
+                terminal.background_result(),
+                Arc::new(|_, _| Ok(())),
+            )
+            .unwrap();
+    }
+    let display = owner.snapshot();
+    assert!(
+        display.tasks.len() < 600,
+        "the display window must actually evict old terminals"
+    );
+    assert!(display
+        .tasks
+        .iter()
+        .all(|record| record.task_id != "unacked-0"));
+
+    let payload = read_payload(&runtime, "workflow://background-tasks").unwrap();
+    assert_eq!(payload["completions"].as_array().unwrap().len(), 600);
+    let source_records = payload["snapshot"]["tasks"].as_array().unwrap();
+    assert_eq!(source_records.len(), 600);
+    let first = source_records
+        .iter()
+        .find(|record| record["task_id"] == "unacked-0")
+        .unwrap();
+    assert_eq!(first["started_at"].as_str(), first_started_at.as_deref());
+    assert_eq!(first["status"], "completed");
+
+    for index in 0..600 {
+        runtime
+            .registry()
+            .acknowledge_completion(&format!("unacked-{index}"));
+    }
+    let payload = read_payload(&runtime, "workflow://background-tasks").unwrap();
+    assert!(payload["completions"].as_array().unwrap().is_empty());
+    assert!(runtime.registry().list_runs().is_empty());
+    assert!(payload["snapshot"]["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|record| record["task_id"] != "unacked-0"));
+    assert_eq!(owner.shutdown().await, TaskShutdownReport::Complete);
+}
+
+#[tokio::test]
+async fn source_ack_before_owner_settlement_cannot_republish_a_running_task() {
+    use peri_acp_types::tasks::{BgTaskKind, BgTaskRegistration, TaskShutdownReport};
+    use peri_workflow::registry::{WorkflowRun, WorkflowRunStatus};
+
+    let runtime = make_runtime();
+    let _input = crate::WorkflowInstanceInput::new(Arc::clone(&runtime));
+    let owner = runtime.bg_registry().unwrap();
+    let source_ticket = runtime
+        .registry()
+        .reserve(WorkflowRun {
+            run_id: "fast-ack".into(),
+            workflow_name: "fast ACK".into(),
+            script_preview: "return 1".into(),
+            status: WorkflowRunStatus::Running,
+            started_at: std::time::Instant::now(),
+            child_handle: None,
+            kill_tx: None,
+        })
+        .unwrap();
+    let owner_ticket = owner
+        .register(BgTaskRegistration {
+            task_id: "fast-ack".into(),
+            kind: BgTaskKind::Workflow,
+            summary: "fast ACK".into(),
+            pid: None,
+            kill: None,
+        })
+        .unwrap();
+    let record = owner.snapshot().tasks.pop().unwrap();
+    let result = completed_workflow("fast-ack");
+    assert!(runtime
+        .registry()
+        .complete(&source_ticket, result.clone(), record));
+    runtime.registry().acknowledge_completion("fast-ack");
+    assert_eq!(
+        owner.snapshot().tasks[0].status,
+        "running",
+        "reproduce the window before owner settlement"
+    );
+    let payload = read_payload(&runtime, "workflow://background-tasks").unwrap();
+    assert!(payload["completions"].as_array().unwrap().is_empty());
+    assert!(
+        payload["snapshot"]["tasks"].as_array().unwrap().is_empty(),
+        "an acknowledged source must not be re-admitted from a stale display row"
+    );
+
+    owner.confirm_external_execution_stopped(&owner_ticket);
+    owner
+        .settle_completed(
+            &owner_ticket,
+            result.background_result(),
+            Arc::new(|_, _| Ok(())),
+        )
+        .unwrap();
+    assert_eq!(owner.shutdown().await, TaskShutdownReport::Complete);
+}
+
 /// F3 回归：长寿命活跃任务的发布事件被事件日志淘汰后，读取方必须仍能从
 /// 任务资源返回的基线快照找回未终态任务（不能只依赖事件页）。
 #[test]

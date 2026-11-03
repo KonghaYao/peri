@@ -1,4 +1,4 @@
-import { RpcError } from "../transport/rpc-error";
+import { isRpcError, type RpcError } from "../transport/rpc-error";
 
 /**
  * 会话关闭的有界重试。
@@ -21,7 +21,7 @@ export class SessionCloseIncompleteError extends Error {
     }
 }
 
-export type CloseRetryClock = {
+type CloseRetryClock = {
     now: () => number;
     sleep: (milliseconds: number) => Promise<unknown>;
 };
@@ -51,7 +51,7 @@ export async function closeUntilSettled(
             await close();
             return;
         } catch (error) {
-            if (!(error instanceof RpcError) || error.code !== INCOMPLETE_CLOSE_CODE) {
+            if (!isRpcError(error) || error.code !== INCOMPLETE_CLOSE_CODE) {
                 if (incomplete) throw new SessionCloseIncompleteError(incomplete.message,
                     new AggregateError([incomplete, error], "Session close ended with a new failure after an incomplete attempt"));
                 throw error;

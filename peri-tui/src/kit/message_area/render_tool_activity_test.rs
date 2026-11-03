@@ -546,6 +546,7 @@ fn test_subagent_completed_shows_tool_lines_only() {
             false,
         ))]),
         collapsed: false,
+        preview_omitted: false,
         is_running: false,
         is_error: false,
         error_reason: None,

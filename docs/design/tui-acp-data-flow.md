@@ -36,7 +36,7 @@ interaction response 与详情请求等运行时动作仍必须经 ACP client/tr
 
 ```text
 InputArea
-  → SteerCommand / STEER_TX
+  → SteerCommandKind / STEER_TX
   → steer_consumer
   → AcpTuiClient::ensure_session + session/input/enqueue
   → Agent session runtime
@@ -52,7 +52,7 @@ InputArea
 
 ### Agent 输出
 
-真实执行与交互许可由宿主开始/结束身份驱动，不由首 token 或 loading 反推。外部实际 attempt（包括内部 continuation）经 `ExecutionStarted` 提供 session mailbox generation 与非空 request ID；managed 用户输入保留已有开始事件，共用客户端执行身份规则。定时执行前审批先建立独立身份并在审批结束后关闭，实际执行使用另一身份。陈旧终态或提交失败只能结算自己的身份，不能直接写全局 loading。输入回滚记录独立绑定提交请求，external execution 开始不能借用待提交文本的回滚许可，其结束或取消也不能丢弃另一个请求的回滚记录。挂起信号与恢复后的渲染输出共享 FIFO，不能从另一条状态通道越过新输出。实施验证见 `spec/issues/2026-10-08-async-execution-chain-fixes.md`。
+真实执行与交互许可由宿主开始/结束身份驱动，不由首 token 或 loading 反推。外部实际 attempt（包括内部 continuation）经 `ExecutionStarted` 提供 session mailbox generation 与非空 request ID；managed 用户输入保留已有开始事件，共用客户端执行身份规则。定时执行前审批先建立独立身份并在审批结束后关闭，实际执行使用另一身份。陈旧终态或提交失败只能结算自己的身份，不能直接写全局 loading。输入回滚记录独立绑定提交请求，external execution 开始不能借用待提交文本的回滚许可，其结束或取消也不能丢弃另一个请求的回滚记录。挂起信号与恢复后的渲染输出共享 FIFO，不能从另一条状态通道越过新输出。
 
 ```text
 Agent canonical event
@@ -171,6 +171,52 @@ V2 链路回归入口：`kit/history_v2/{initial,paging,body,consumer,live}_test
 - `_peri/history/changed` 未发送，失效发现依赖后续请求错误。
 - `HISTORY_V2_STATE` 是进程级 atom；多连接共享同一 TUI 状态，切换连接时按协商结果重置。
 - 未做长时间滚动 RSS、真实 100 MiB 工具输出与多实例/远端 V2 验收。
+- ACP host rewind 的错误出口仍由集中后的文本 marker 判定持久化不确定（`PERSISTENCE_UNCERTAIN_MARKER`）；底层资源错误与 Transcript rewind 已使用 `MutationOutcome`，host 的错误出口尚未完整传递该类型。
+
+### 子任务临时预览与只读历史
+
+临时预览不承担永久档案职责。停止后冻结有限展示单元并释放原始累加器；保留超限时释放
+旧预览，标记 `preview_omitted`。当前主 turn 尚未结束、取消时没有持久化记录、旧视图仍
+存在，均不能令预览目录无限增长。运行中和未结算任务的控制身份保留在业务 owner 中；
+释放展示数据不等同于任务完成、交付成功、取消确认或清理完成。
+
+保留策略的代码权威为 `acp_types/subagent_preview.rs`、`bg_task_live_preview.rs` 与
+`bg_task_identity.rs`。当前实施值：
+
+| 保留对象 | 边界 |
+| --- | --- |
+| 单字段 / 单子任务预览 | 16 KiB / 256 KiB |
+| 当前 turn 的子预览池 | 2 MiB；终态额外受 256 项 / 512 KiB 限制 |
+| committed 子预览 | 独立池；终态目录 256 项 / 512 KiB |
+| 后台预览池 / 终态详情 | 4 MiB / 512 项且 1 MiB |
+| 后台展示和身份终态目录 | 各 512 项且 512 KiB；活动与未结算身份不因额度被删 |
+
+这些是组件保留边界，不是整进程 RSS 或端到端瞬时峰值上限。旧发布帧可能继续共享正文，
+只有最后一个强引用释放后才真正回收；临时预览不得提前返还 canonical 窗口预算。
+移除未映射的子预览槽须清对应折叠键并失效派生缓存。
+
+真实子 execution 身份和序号由 producer 捕获，经 ACP metadata 到达 bridge；新运行不
+继承旧累加器，晚到旧运行与未知 child 不回退到主消息。退休身份仅保留 512 个水位；
+首次 Started 若极晚到达且已落到退休水位之前，按过期预览拒绝，不据此推断完成，
+也不保证所有仍活动执行的首次分组均可显示。业务 owner 不受该展示窗口影响。
+相同会话的视图 reset 重建带缺失
+标记的活动预览，仍允许当前执行的新观察，不建立生产端时间屏障。业务终态不走预览门禁。
+
+子会话历史入口已随 history v1 协议移除；当前子任务详情只展示任务层与临时预览，
+待 History V2 提供对应读取能力后再接入。
+
+验证入口：`memory_retention_audit_test.rs`、`bg_task_live_preview_test.rs`、
+`acp_bridge_child_origin_test.rs`。
+
+已知未完成项：
+
+- 折叠组/子 Agent 组尚未真正惰性化：构造时 `im::Vector` 结构共享、不深复制正文，但释放只
+  整体失效 `FoldedHistory`/分组缓存，没有按段惰性物化与精准清理。
+- `structural_epoch` 目前清空全部渲染 slot，未按段精准清理。
+- 详情交互限制：鼠标单击只设焦点，需再 Enter 打开；`e` 复制已加载正文，文件导出/超窗流式
+  导出尚未接入 UI（模型 `export_stream` 已支持分块）；未做 JSON 字段级展示；inherited 段内部
+  不插入独立占位行。
+- remote/emscripten adapter 未实现窗口/继承读取，默认 `Unsupported`；readTicket 无密码学签名。
 
 ## 状态模型
 
@@ -202,7 +248,7 @@ snapshot/event 重建。
 | 事件族 | TUI 归约 |
 | --- | --- |
 | assistant text / thought chunk | 追加到当前 message segment；维持 message 与 source identity |
-| tool start/update | 按调用 identity 原地更新 tool activity；历史 replay 走同一语义归约 |
+| tool start/update | 按调用 identity 原地更新 tool activity；历史 replay 走同一语义归约。live `ToolCall` 经 ACP 扩展位 `ToolCall._meta.peri.originMessageId` 携带真实所属 assistant 消息（纯工具轮次唯一归属来源）；replay 路径不写该字段 |
 | plan / usage / context metadata | 更新计划或资源投影，不伪装成普通消息 |
 | turn terminal / suspended / execution failure | 归档、回滚或保留当前回合，并退出 loading |
 | compact / rewind | `CompactCompleted` 只显示提示；rewind 以服务端 snapshot 重建 transcript，旧 V2 窗口按错误重新 `open`，不复用旧窗口身份 |
@@ -213,6 +259,15 @@ snapshot/event 重建。
 
 `session/update` 承载标准 ACP 流式内容、工具、计划和 usage；Peri 扩展只用于 ACP 标准面不能
 表达的低频语义。扩展不得建立第二条语义不一致的 tool/turn 终态通道。
+
+### Live 工具卡归属、回填与释放
+
+工具卡在 wire 上没有独立持久身份：ACP `ToolCall.toolCallId` 是调用身份，持久归属是所属
+assistant 消息的 `messageId`。
+
+live 工具卡归属（`live_tool_links` / `LiveSeal` / `DisplayLedger`）随 history v1 窗口移除；
+当前 TUI 不再按 assistant 消息身份登记工具卡字节。历史工具卡的身份归一与 live 去重见
+`history_v2_view_test::historical_tool_card_uses_bare_tool_call_id_and_dedupes_live_card`。
 
 Root cache coverage 只使用当前 root turn 最近一次有效 observation；auxiliary agent usage 不得
 覆盖父 turn。missing、zero 或不一致 observation 要显式清除旧样本。低覆盖提示在回合终态前

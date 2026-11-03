@@ -1,8 +1,7 @@
 # RCRA 消息、执行与历史会话加载
 
-- 状态：**执行恢复已剥离，当前进程执行与历史加载保留**；验证范围见 active spec。
-- 2026-10-07 用户裁决：撤销持久 Inbox/处理义务、WorkState、阶段检查点、执行恢复及其 journal/control 回执；保留历史会话加载、冻结上下文、普通续聊和当前进程执行。
-- 实施契约：[执行恢复剥离计划](../../spec/issues/2026-10-07-remove-execution-recovery-plan.md)。此前的可靠执行恢复目标不再作为验收要求。
+- 状态：**已批准目标设计**。执行恢复已剥离，当前进程执行与历史加载保留；验证以代码与契约测试为准。
+- 2026-10-07 用户裁决：撤销持久 Inbox/处理义务、WorkState、阶段检查点、执行恢复及其 journal/control 回执，保留历史会话加载、冻结上下文、普通续聊和当前进程执行；此前可靠执行恢复目标已被取代，剥离过程见 Git 历史。
 
 ## 1. 数据与生命周期
 
@@ -28,7 +27,7 @@ RCRA 主路径为 `MessageQueue → Receive → Compact → Reason → Act → M
 
 普通 ACP prompt 和当前输入队列能直接驱动 Agent，不要求 SDK durable admission ticket、entered evidence 或 settlement proof。Peri 保留进程内的并发/取消/关闭协调，不重建 Store 执行租约、owner CAS、dirty reset 或 sidecar 锁。
 
-SDK 可在部署层管理跨进程执行，但其 alpha 协调器本轮不修改；Peri 不再提供 Work query/resolve、持久 control 或恢复结算协议，也不保留兼容 shim。旧客户端应得到明确不支持错误，而不是伪成功。
+SDK 可在部署层管理跨进程执行，其 alpha 协调器不在本文范围内；Peri 不再提供 Work query/resolve、持久 control 或恢复结算协议，也不保留兼容 shim。旧客户端应得到明确不支持错误，而不是伪成功。
 
 Pause/Stop 和输入取回依据当前 runtime/队列裁决；取消与关闭仍须诚实报告是否结清。执行预算按当前运行管理，不承诺跨重启累计。显式会话关闭意图与一般存储写入事务不属于撤销的阶段恢复机制。
 
@@ -42,7 +41,7 @@ Pause/Stop 和输入取回依据当前 runtime/队列裁决；取消与关闭仍
 
 ## 5. 存储与故障
 
-删除 `session_work_state/events/receipts/commands` 和 `session_control_state/receipts`。保留会话、消息、环境绑定、OAuth、普通显式关闭及远端存储身份/普通 operation ledger。表结构与版本迁移以 active spec 和 canonical DDL 为准，不复建 main 的旧 dirty/lease 表。
+执行恢复相关表（`session_work_state/events/receipts/commands` 与 `session_control_state/receipts`）已删除。保留会话、消息、环境绑定、OAuth、普通显式关闭及远端存储身份/普通 operation ledger。表结构与版本迁移以 canonical DDL 为准，不复建旧 dirty/lease 表。
 
 消息写入/压缩使用真实事务；失败返回错误并记录，不能把未知提交报告为成功。一般存储完整性、只读访问、环境检查和当前写入排空不因移除执行恢复而取消。
 
@@ -54,4 +53,4 @@ Pause/Stop 和输入取回依据当前 runtime/队列裁决；取消与关闭仍
 
 重启后旧阶段/工具/子 Agent 不自动执行，历史缺少终态不显示为当前 active；旧账本不阻塞新输入。迁移保留历史 rowid、flags、绑定、OAuth、关闭意图及未知扩展对象。本地和远端采用相同业务表语义。
 
-实现状态、命令和结果仅记录 active spec，不把本文目标宣称为已实现。
+验证命令与结果记录在交付/验收记录；本文只固定行为与边界，不保存某次执行状态。

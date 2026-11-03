@@ -242,7 +242,8 @@ fn block_to_openai_part(block: &ContentBlock, supports_thinking_content: bool) -
         ContentBlock::Reasoning { .. }
         | ContentBlock::ToolUse { .. }
         | ContentBlock::ToolResult { .. }
-        | ContentBlock::RedactedReasoning { .. } => None,
+        | ContentBlock::RedactedReasoning { .. }
+        | ContentBlock::ProviderState { .. } => None,
     }
 }
 

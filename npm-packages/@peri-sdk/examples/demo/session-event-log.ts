@@ -3,7 +3,7 @@ import { notificationBytes } from "../../src/transport/notification-budget";
 
 export type SessionEvent = { id: number; notification: JsonRpcNotification };
 
-/** Bounded diagnostic replay; SessionDocs is the current-state projection. */
+/** Bounded diagnostic replay; ChatView is the current-state projection. */
 export class SessionEventLog {
   private nextId = 1;
   private readonly entries: SessionEvent[] = [];

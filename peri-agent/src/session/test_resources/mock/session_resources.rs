@@ -389,6 +389,9 @@ impl SessionResources for MockSessionResources {
                     .push(PersistedPayload::Message(message.clone()));
             }
         });
+        if let Some(hook) = self.compaction_applied_hook.lock().unwrap().take() {
+            hook();
+        }
         Ok(())
     }
 

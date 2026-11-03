@@ -15,7 +15,7 @@ export const COMPACTION_STATUS = {
     cancelled: "cancelled",
 } as const;
 
-export type CompactionStatus = typeof COMPACTION_STATUS[keyof typeof COMPACTION_STATUS];
+type CompactionStatus = typeof COMPACTION_STATUS[keyof typeof COMPACTION_STATUS];
 
 /** Display-safe session metadata; chat content and task lifecycles live in their own modules. */
 export class SessionProjection {
@@ -30,6 +30,16 @@ export class SessionProjection {
         if (kind === "plan") return this.acceptPlan(update);
         if (kind === "config_option_update") return this.acceptConfigOptions(update.configOptions);
         return false;
+    }
+
+    /** 运行侧上报的展示状态；不代表 View 可授予执行资格。 */
+    acceptRunState(running: boolean, executionBlocked: boolean): boolean {
+        this.docs.session.transact(() => {
+            const info = this.docs.info();
+            info.set("running", running);
+            info.set("executionBlocked", executionBlocked);
+        });
+        return true;
     }
 
     seedConfig(response: unknown): void {

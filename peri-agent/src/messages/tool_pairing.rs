@@ -197,6 +197,18 @@ fn repair(mut messages: Vec<BaseMessage>) -> AgentResult<Vec<BaseMessage>> {
             *result_index > call_index + messages[*call_index].tool_calls().len()
         })
     });
+    for (tool_call_id, call_index) in &calls {
+        if messages[*call_index].message_content().has_provider_state()
+            && !results.contains_key(tool_call_id)
+            && !inline_results.contains_key(tool_call_id)
+        {
+            // Rewind/fork may cut a call batch before its results. Do not pair
+            // encrypted replay state with a newly invented result placeholder.
+            return Err(invalid(format!(
+                "incomplete provider replay unit: missing result for {tool_call_id}"
+            )));
+        }
+    }
     if !needs_repair {
         return Ok(messages);
     }

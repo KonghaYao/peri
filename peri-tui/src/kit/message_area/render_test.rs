@@ -168,6 +168,7 @@ fn subagent_group(
         agent_name: "Agent explorer".into(),
         view_models: children,
         collapsed: false,
+        preview_omitted: false,
         is_running,
         is_error,
         error_reason: error_reason.map(String::from),

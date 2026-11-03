@@ -1,39 +1,80 @@
 {
   "name": "@peri-code/sdk",
   "version": "0.0.0",
-  "private": true,
   "type": "module",
-  "description": "Peri ACP host SDK over host-injected transports, including the Emscripten WASM host",
+  "description": "Peri ACP host SDK over host-injected transports, including the Emscripten WASM runtime",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KonghaYao/peri.git",
+    "directory": "npm-packages/@peri-sdk"
+  },
+  "homepage": "https://github.com/KonghaYao/peri/tree/main/npm-packages/@peri-sdk#readme",
+  "bugs": {
+    "url": "https://github.com/KonghaYao/peri/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": {
-      "types": "./dist/sdk/index.d.ts",
+      "types": "./dist/entries/index.d.ts",
       "import": "./dist/index.js"
     },
     "./portable": {
-      "types": "./dist/portable.d.ts",
+      "types": "./dist/entries/portable.d.ts",
       "import": "./dist/portable.js"
     },
     "./wasm": {
-      "types": "./dist/wasm.d.ts",
+      "types": "./dist/entries/wasm.d.ts",
       "import": "./dist/wasm.js"
     },
-    "./wasm-host": {
-      "types": "./dist/wasm-host.d.ts",
-      "import": "./dist/wasm-host.js"
+    "./wasm-node": {
+      "types": "./dist/entries/wasm-node.d.ts",
+      "import": "./dist/wasm-node.js"
     },
     "./view": {
-      "types": "./dist/view/index.d.ts",
-      "import": "./dist/view/index.js"
+      "types": "./dist/entries/view.d.ts",
+      "import": "./dist/view.js"
+    },
+    "./sandbox": {
+      "types": "./dist/entries/sandbox.d.ts",
+      "import": "./dist/sandbox.js",
+      "default": "./dist/sandbox.js"
+    },
+    "./openui": {
+      "types": "./src/openui/index.ts",
+      "import": "./src/openui/index.ts"
+    },
+    "./openui/renderer": {
+      "types": "./src/openui/renderer.tsx",
+      "import": "./src/openui/renderer.tsx"
+    },
+    "./openui/error-boundary": {
+      "types": "./src/openui/openui-error-boundary.tsx",
+      "import": "./src/openui/openui-error-boundary.tsx"
+    },
+    "./openui/prompt": {
+      "types": "./src/openui/prompt.ts",
+      "import": "./src/openui/prompt.ts"
+    },
+    "./openui/spec.json": {
+      "types": "./src/openui/spec.json",
+      "import": "./src/openui/spec.json"
     }
   },
   "files": [
     "dist",
+    "src/openui",
     "README.md"
   ],
   "scripts": {
     "build": "bun run scripts/build.ts",
     "build:workers": "bun examples/workers/build-worker.mjs",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.demo.json",
+    "openui:spec": "bun scripts/generate-openui-spec.ts",
+    "openui:check": "bun scripts/generate-openui-spec.ts --check",
+    "prebuild": "bun run openui:check",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.demo.json && tsc --noEmit -p tsconfig.type-tests.json",
     "test": "bun run build && bun test",
     "dev": "bun run examples/demo/demo.ts",
     "db:dev": "mise exec -- sqld --no-welcome --http-listen-addr 127.0.0.1:8081 --db-path ../../target/peri-sdk-local-turso",
@@ -42,15 +83,38 @@
     "smoke:workers": "bun examples/workers/smoke.mjs"
   },
   "devDependencies": {
-    "bun-types": "^1.4.2",
-    "hono": "^4.6",
-    "typescript": "^7.0.0",
-    "wrangler": "4.147.0"
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "bun-types": "^1.4.4",
+    "happy-dom": "^21.0.4",
+    "hono": "^4.13.14",
+    "peri-sandbox": "file:../peri-sandbox",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "typescript": "^7.0.2",
+    "wrangler": "4.152.0"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-dom": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    }
   },
   "dependencies": {
     "@microsoft/fetch-event-source": "2.0.1",
-    "@tursodatabase/serverless": "1.4.0",
+    "@openuidev/lang-core": "1.0.2",
+    "@openuidev/react-lang": "1.0.2",
+    "@tursodatabase/serverless": "1.4.1",
     "lib0": "^0.2.119",
-    "yjs": "^13.6.33"
+    "yjs": "^13.6.33",
+    "zod": "^4.6.7"
   }
 }

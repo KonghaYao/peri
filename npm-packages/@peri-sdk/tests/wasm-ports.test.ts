@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { Socket } from "node:net";
-import { createNodeNetworkPort, createNodeSchedulerPort } from "../src/wasm/ports";
+import { createNodeNetworkPort } from "../src/wasm/ports";
+import { createSchedulerPort } from "../src/wasm/scheduler";
 
 test("网络端口只销毁自有 socket", async () => {
   const network = createNodeNetworkPort();
@@ -53,7 +54,7 @@ test("socket 销毁失败可观测且可重试", async () => {
 });
 
 test("宿主关闭取消自有 timer 且拒绝新增回调", async () => {
-  const scheduler = createNodeSchedulerPort();
+  const scheduler = createSchedulerPort();
   let calls = 0;
   scheduler.schedule(() => { calls++; });
   scheduler.close();

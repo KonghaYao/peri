@@ -14,6 +14,7 @@ fn test_rewind_completed_replaces_committed() {
         "old".into(),
     ))]);
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 1,
         committed: pre_existing,
         current_turn: CurrentTurn::new(),
@@ -26,7 +27,7 @@ fn test_rewind_completed_replaces_committed() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,
@@ -80,6 +81,7 @@ fn test_rewind_completed_rebuild_preview_strips_reminder() {
     crate::kit::atoms::init_atoms();
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 1,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -92,7 +94,7 @@ fn test_rewind_completed_rebuild_preview_strips_reminder() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,
@@ -146,6 +148,7 @@ fn test_rewind_completed_restores_target_text_to_input() {
     let hb_before = *crate::kit::atoms::RENDER_HEARTBEAT.state().read();
 
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 1,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -158,7 +161,7 @@ fn test_rewind_completed_restores_target_text_to_input() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,
@@ -207,6 +210,7 @@ fn test_rewind_completed_without_target_text_no_restore() {
     }
 
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 1,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -219,7 +223,7 @@ fn test_rewind_completed_without_target_text_no_restore() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,
@@ -245,6 +249,7 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
     crate::kit::atoms::init_atoms();
     *VIEW_MODELS.state().write() = ViewModelsSnapshot::default();
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 0,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -257,7 +262,7 @@ fn test_multi_turn_reasoning_preserved_in_committed() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,
@@ -409,6 +414,7 @@ fn test_rewind_completed_invalidates_v2_window() {
     crate::kit::atoms::ACTIVE_SESSION_ID.set("s-rewind".to_owned());
 
     let mut state = BridgeState {
+        child_runs: Default::default(),
         variant: 1,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -421,7 +427,7 @@ fn test_rewind_completed_invalidates_v2_window() {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,

@@ -8,9 +8,9 @@ use std::sync::{
     Arc,
 };
 
-fn registered(kind: BgTaskKind) -> Arc<BackgroundTaskRegistry> {
+fn registered(kind: BgTaskKind) -> (Arc<BackgroundTaskRegistry>, TaskRegistrationTicket) {
     let registry = Arc::new(BackgroundTaskRegistry::new());
-    registry
+    let ticket = registry
         .register_with_kind(BackgroundTask {
             id: "task".into(),
             agent_name: "fixture".into(),
@@ -29,7 +29,9 @@ fn registered(kind: BgTaskKind) -> Arc<BackgroundTaskRegistry> {
             owner_identity: None,
         })
         .unwrap();
-    registry
+    // 此夹具没有外部进程；真实资源证明由专门生命周期用例覆盖。
+    registry.confirm_external_stopped(&ticket);
+    (registry, ticket)
 }
 
 fn result() -> BackgroundTaskResult {
@@ -52,7 +54,7 @@ fn result() -> BackgroundTaskResult {
 #[tokio::test]
 async fn all_owned_kinds_publish_before_terminal_and_wake_idle_consumer() {
     for kind in [BgTaskKind::Agent, BgTaskKind::Shell, BgTaskKind::Workflow] {
-        let registry = registered(kind);
+        let (registry, ticket) = registered(kind);
         let queue = Arc::new(MessageQueue::new());
         let inbox = SessionInbox::new(Arc::clone(&queue));
         let waiting = inbox.await_wake();
@@ -76,7 +78,7 @@ async fn all_owned_kinds_publish_before_terminal_and_wake_idle_consumer() {
             Ok(())
         });
         assert!(registry
-            .settle_completed("task", result(), delivery)
+            .settle_completed(&ticket, result(), delivery)
             .unwrap());
         tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
             .await
@@ -89,7 +91,7 @@ async fn all_owned_kinds_publish_before_terminal_and_wake_idle_consumer() {
 /// [回归测试] 回调拒绝交付时保留结果，不允许 active count 提前归零。
 #[test]
 fn rejected_delivery_is_visible_retained_and_retried_once() {
-    let registry = registered(BgTaskKind::Agent);
+    let (registry, ticket) = registered(BgTaskKind::Agent);
     let attempts = Arc::new(AtomicUsize::new(0));
     let called = Arc::clone(&attempts);
     let delivery: OnBgCompleteFn = Arc::new(move |result, kind| {
@@ -102,7 +104,7 @@ fn rejected_delivery_is_visible_retained_and_retried_once() {
         }
     });
     assert!(matches!(
-        registry.settle_completed("task", result(), Arc::clone(&delivery)),
+        registry.settle_completed(&ticket, result(), Arc::clone(&delivery)),
         Err(BackgroundRegistryError::DeliveryFailed { .. })
     ));
     assert_eq!(registry.active_count(), 1);
@@ -115,7 +117,7 @@ fn rejected_delivery_is_visible_retained_and_retried_once() {
     assert_eq!(registry.active_count(), 0);
     assert_eq!(registry.snapshot().tasks[0].status, "completed");
     assert!(!registry
-        .settle_completed("task", result(), delivery)
+        .settle_completed(&ticket, result(), delivery)
         .unwrap());
     assert_eq!(registry.retry_pending_deliveries(), 0);
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
@@ -123,7 +125,7 @@ fn rejected_delivery_is_visible_retained_and_retried_once() {
 
 #[test]
 fn delivery_panic_keeps_terminal_unpublished_until_retry() {
-    let registry = registered(BgTaskKind::Workflow);
+    let (registry, ticket) = registered(BgTaskKind::Workflow);
     let attempts = Arc::new(AtomicUsize::new(0));
     let called = Arc::clone(&attempts);
     let delivery: OnBgCompleteFn = Arc::new(move |_, _| {
@@ -133,7 +135,7 @@ fn delivery_panic_keeps_terminal_unpublished_until_retry() {
         Ok(())
     });
     assert!(registry
-        .settle_completed("task", result(), delivery)
+        .settle_completed(&ticket, result(), delivery)
         .is_err());
     assert_eq!(registry.active_count(), 1);
     assert_eq!(registry.retry_pending_deliveries(), 1);
@@ -142,7 +144,7 @@ fn delivery_panic_keeps_terminal_unpublished_until_retry() {
 
 #[test]
 fn cancelled_shell_cleanup_is_delivered_without_ghost_completion() {
-    let registry = registered(BgTaskKind::Shell);
+    let (registry, ticket) = registered(BgTaskKind::Shell);
     registry.cancel("task").unwrap();
     let attempts = Arc::new(AtomicUsize::new(0));
     let called = Arc::clone(&attempts);
@@ -153,10 +155,10 @@ fn cancelled_shell_cleanup_is_delivered_without_ghost_completion() {
         Ok(())
     });
     assert!(!registry
-        .settle_completed("task", result(), Arc::clone(&delivery))
+        .settle_completed(&ticket, result(), Arc::clone(&delivery))
         .unwrap());
     assert!(!registry
-        .settle_completed("task", result(), delivery)
+        .settle_completed(&ticket, result(), delivery)
         .unwrap());
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
     assert_eq!(registry.snapshot().tasks[0].status, "cancelled");
@@ -165,18 +167,19 @@ fn cancelled_shell_cleanup_is_delivered_without_ghost_completion() {
 #[test]
 fn unknown_task_does_not_call_delivery() {
     let registry = Arc::new(BackgroundTaskRegistry::new());
+    let (_, ticket) = registered(BgTaskKind::Agent);
     let delivery: OnBgCompleteFn = Arc::new(|_, _| panic!("unknown task cannot publish"));
     assert!(matches!(
-        registry.settle_completed("task", result(), delivery),
-        Err(BackgroundRegistryError::TaskNotFound(_))
+        registry.settle_completed(&ticket, result(), delivery),
+        Err(BackgroundRegistryError::InvalidRegistration(_))
     ));
 }
 
 #[test]
 fn cancelled_cleanup_retry_cannot_report_idle_while_delivery_is_in_flight() {
-    let registry = registered(BgTaskKind::Shell);
+    let (registry, ticket) = registered(BgTaskKind::Shell);
     registry.cancel("task").unwrap();
-    registry.confirm_external_stopped("task");
+    registry.confirm_external_stopped(&ticket);
     let owner = Arc::downgrade(&registry);
     let attempts = Arc::new(AtomicUsize::new(0));
     let called = Arc::clone(&attempts);
@@ -189,7 +192,7 @@ fn cancelled_cleanup_retry_cannot_report_idle_while_delivery_is_in_flight() {
         }
     });
     assert!(registry
-        .settle_completed("task", result(), delivery)
+        .settle_completed(&ticket, result(), delivery)
         .is_err());
     assert!(!registry.external_settled());
     assert_eq!(registry.retry_pending_deliveries(), 1);
@@ -199,7 +202,7 @@ fn cancelled_cleanup_retry_cannot_report_idle_while_delivery_is_in_flight() {
 /// [回归测试] 当前进程的暂时投递失败不能依赖下一次用户输入才能恢复。
 #[tokio::test(start_paused = true)]
 async fn pending_delivery_recovers_without_new_input() {
-    let registry = registered(BgTaskKind::Agent);
+    let (registry, ticket) = registered(BgTaskKind::Agent);
     let attempts = Arc::new(AtomicUsize::new(0));
     let called = Arc::clone(&attempts);
     let delivery: OnBgCompleteFn = Arc::new(move |_, _| {
@@ -210,7 +213,7 @@ async fn pending_delivery_recovers_without_new_input() {
         }
     });
     assert!(registry
-        .settle_completed("task", result(), delivery)
+        .settle_completed(&ticket, result(), delivery)
         .is_err());
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     assert_eq!(registry.active_count(), 0);
@@ -220,12 +223,12 @@ async fn pending_delivery_recovers_without_new_input() {
 
 #[tokio::test(start_paused = true)]
 async fn permanent_delivery_failure_backs_off_and_close_drains_worker() {
-    let registry = registered(BgTaskKind::Agent);
+    let (registry, ticket) = registered(BgTaskKind::Agent);
     let attempts = Arc::new(AtomicUsize::new(0));
     let called = attempts.clone();
     assert!(registry
         .settle_completed(
-            "task",
+            &ticket,
             result(),
             Arc::new(move |_, _| {
                 called.fetch_add(1, Ordering::SeqCst);
@@ -251,7 +254,7 @@ async fn permanent_delivery_failure_backs_off_and_close_drains_worker() {
 
 #[tokio::test]
 async fn concurrent_manual_retry_does_not_reenter_or_strand_delivery() {
-    let registry = registered(BgTaskKind::Agent);
+    let (registry, ticket) = registered(BgTaskKind::Agent);
     let attempts = Arc::new(AtomicUsize::new(0));
     let called = attempts.clone();
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
@@ -270,7 +273,7 @@ async fn concurrent_manual_retry_does_not_reenter_or_strand_delivery() {
             _ => panic!("duplicate delivery"),
         });
     assert!(registry
-        .settle_completed("task", result(), delivery)
+        .settle_completed(&ticket, result(), delivery)
         .is_err());
     let retry_owner = registry.clone();
     let manual = std::thread::spawn(move || retry_owner.retry_pending_deliveries());
@@ -298,14 +301,16 @@ async fn shutdown_retries_pending_delivery_once_and_reports_remaining_failure() 
     use peri_acp_types::tasks::{TaskManager as _, TaskShutdownReport};
     for recover in [true, false] {
         let manager = super::super::super::TaskManager::new();
-        let fixture = registered(BgTaskKind::Agent);
+        let (fixture, _) = registered(BgTaskKind::Agent);
         let task = fixture.tasks.lock().remove("task").unwrap();
-        manager.register_with_kind(task).unwrap();
+        let ticket = manager.register_with_kind(task).unwrap();
+        // Moving this no-resource fixture creates a new cleanup receipt.
+        manager.confirm_external_execution_stopped(&ticket);
         let attempts = Arc::new(AtomicUsize::new(0));
         let called = attempts.clone();
         assert!(manager
             .settle_completed(
-                "task",
+                &ticket,
                 result(),
                 Arc::new(move |_, _| {
                     let prior = called.fetch_add(1, Ordering::SeqCst);
@@ -333,10 +338,14 @@ async fn shutdown_retries_pending_delivery_once_and_reports_remaining_failure() 
 
 #[tokio::test(start_paused = true)]
 async fn pending_delivery_worker_does_not_keep_registry_alive() {
-    let registry = registered(BgTaskKind::Agent);
+    let (registry, ticket) = registered(BgTaskKind::Agent);
     let owner = Arc::downgrade(&registry);
     assert!(registry
-        .settle_completed("task", result(), Arc::new(|_, _| Err("unavailable".into())))
+        .settle_completed(
+            &ticket,
+            result(),
+            Arc::new(|_, _| Err("unavailable".into()))
+        )
         .is_err());
     tokio::task::yield_now().await;
     drop(registry);
@@ -380,7 +389,7 @@ impl peri_acp_types::tasks::TaskTerminalDelivery for AmbiguousQueueAcceptance {
 
 #[tokio::test(start_paused = true)]
 async fn automatic_retry_uses_original_delivery_identity_without_duplicate_queue_message() {
-    let registry = registered(BgTaskKind::Agent);
+    let (registry, ticket) = registered(BgTaskKind::Agent);
     let queue = MessageQueue::new();
     let mut wake = queue.subscribe_wake();
     let route = Arc::new(AmbiguousQueueAcceptance {
@@ -391,7 +400,7 @@ async fn automatic_retry_uses_original_delivery_identity_without_duplicate_queue
     });
     let delivery = crate::session::bg_complete::task_bg_complete_callback(route.clone());
     assert!(registry
-        .settle_completed("task", result(), delivery)
+        .settle_completed(&ticket, result(), delivery)
         .is_err());
     assert_eq!(queue.len(), 1);
     assert!(wake.has_changed().unwrap());
@@ -450,7 +459,7 @@ fn frozen_queue_route_rejects_conflicting_payload_or_source_without_waking() {
 
 #[tokio::test(start_paused = true)]
 async fn cooperative_agent_cancellation_retries_original_delivery_without_new_terminal() {
-    let registry = registered(BgTaskKind::Agent);
+    let (registry, ticket) = registered(BgTaskKind::Agent);
     let cancel = tokio_util::sync::CancellationToken::new();
     let execution_cancel = cancel.clone();
     let owner = Arc::downgrade(&registry);
@@ -468,6 +477,7 @@ async fn cooperative_agent_cancellation_retries_original_delivery_without_new_te
         }
     });
     let task_delivery = delivery.clone();
+    let task_ticket = ticket.clone();
     let handle = registry
         .scope
         .spawn(async move {
@@ -478,11 +488,16 @@ async fn cooperative_agent_cancellation_retries_original_delivery_without_new_te
             cancelled.output = "Background sub-agent was interrupted".into();
             cancelled.child_thread_id = Some("original-child".into());
             assert!(registry
-                .settle_completed("task", cancelled.clone(), task_delivery.clone())
+                .settle_completed(&task_ticket, cancelled.clone(), task_delivery.clone())
                 .is_err());
-            assert!(!registry
-                .settle_completed("task", cancelled, task_delivery)
-                .unwrap());
+            assert!(matches!(
+                registry.settle_completed(&task_ticket, cancelled, task_delivery),
+                Err(BackgroundRegistryError::TaskCompleting(_))
+            ));
+            assert!(
+                !task_ticket.is_settled(),
+                "pending delivery is not acceptance"
+            );
         })
         .unwrap();
     {
@@ -491,14 +506,14 @@ async fn cooperative_agent_cancellation_retries_original_delivery_without_new_te
         task.cancel_handle = BgCancelHandle::Abort(handle);
         task.cancel_token = Some(cancel);
     }
-    registry.confirm_external_stopped("task");
+    registry.confirm_external_stopped(&ticket);
     let mut events = registry.subscribe_events();
     registry.cancel("task").unwrap();
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
     assert_eq!(registry.snapshot().tasks[0].status, "cancelled");
     assert!(!registry
-        .settle_completed("task", result(), delivery)
+        .settle_completed(&ticket, result(), delivery)
         .unwrap());
     assert_eq!(registry.retry_pending_deliveries(), 0);
     assert!(matches!(
@@ -513,10 +528,11 @@ async fn cooperative_agent_cancellation_retries_original_delivery_without_new_te
 
 #[tokio::test(start_paused = true)]
 async fn aborted_agent_does_not_fabricate_cleanup_delivery() {
-    let registry = registered(BgTaskKind::Agent);
+    let (registry, ticket) = registered(BgTaskKind::Agent);
     let delivered = Arc::new(AtomicUsize::new(0));
     let called = delivered.clone();
     let owner = Arc::downgrade(&registry);
+    let task_ticket = ticket.clone();
     let handle = registry
         .scope
         .spawn(async move {
@@ -524,7 +540,7 @@ async fn aborted_agent_does_not_fabricate_cleanup_delivery() {
             if let Some(registry) = owner.upgrade() {
                 registry
                     .settle_completed(
-                        "task",
+                        &task_ticket,
                         result(),
                         Arc::new(move |_, _| {
                             called.fetch_add(1, Ordering::SeqCst);
@@ -543,7 +559,7 @@ async fn aborted_agent_does_not_fabricate_cleanup_delivery() {
         task.cancel_handle = BgCancelHandle::Abort(handle);
         task.cancel_token = Some(cancel.clone());
     }
-    registry.confirm_external_stopped("task");
+    registry.confirm_external_stopped(&ticket);
     registry.cancel("task").unwrap();
     assert!(cancel.is_cancelled());
     tokio::task::yield_now().await;

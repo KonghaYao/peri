@@ -125,18 +125,42 @@ pub(crate) fn fingerprint(provider: &LlmProvider) -> String {
     let mut digest = Sha256::new();
     digest.update(SALT.get_or_init(uuid::Uuid::new_v4).as_bytes());
     let (api_key, base_url, max_tokens) = match provider {
+        LlmProvider::Responses {
+            auth,
+            endpoint,
+            max_tokens,
+            ..
+        } => {
+            match auth {
+                peri_config::provider::ResponsesAuthentication::ApiKey { api_key } => {
+                    digest.update(api_key)
+                }
+                peri_config::provider::ResponsesAuthentication::ChatGptPlan {
+                    store,
+                    account,
+                    subject,
+                    client_id,
+                } => {
+                    digest.update(
+                        serde_json::to_vec(&(store, account, subject, client_id))
+                            .expect("credential reference is serializable"),
+                    );
+                }
+            }
+            ("", Some(endpoint.as_str()), max_tokens)
+        }
         LlmProvider::OpenAi {
             api_key,
             base_url,
             max_tokens,
             ..
-        } => (api_key, Some(base_url.as_str()), max_tokens),
+        } => (api_key.as_str(), Some(base_url.as_str()), max_tokens),
         LlmProvider::Anthropic {
             api_key,
             base_url,
             max_tokens,
             ..
-        } => (api_key, base_url.as_deref(), max_tokens),
+        } => (api_key.as_str(), base_url.as_deref(), max_tokens),
     };
     // JSON tuple framing keeps arbitrary credential/URL strings unambiguous.
     digest.update(
@@ -148,6 +172,7 @@ pub(crate) fn fingerprint(provider: &LlmProvider) -> String {
             base_url,
             max_tokens,
             provider.context_1m(),
+            provider.effective_context_window(),
         ))
         .expect("provider cache identity contains only serializable primitives"),
     );

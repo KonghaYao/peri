@@ -15,7 +15,7 @@ use peri_acp_types::messages::MessageId;
 use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes,
     FrozenState, HistoryWindowPagePlan, HistoryWindowRows, NewSession, PersistenceRecovery,
-    RewindBoundary, RewindOutcome, SessionHistoryWindowBounds, SessionMetaPatch,
+    RewindBoundary, RewindCandidate, RewindOutcome, SessionHistoryWindowBounds, SessionMetaPatch,
     SessionResourceResult, SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
@@ -188,6 +188,17 @@ pub(crate) trait SessionDataPort: Send + Sync {
         id: &ThreadId,
     ) -> SessionResourceResult<Vec<PersistedPayload>>;
 
+    async fn load_rewind_candidates(
+        &self,
+        id: &ThreadId,
+        limit: usize,
+    ) -> SessionResourceResult<Vec<RewindCandidate>>;
+
+    /// 有界读取一页历史（更早方向），含已排除的归档条目；语义见
+    /// [`peri_acp_types::session_resources::SessionResources::load_history_page`]。
+    ///
+    /// 默认失败：空页在契约里是「更早方向没有内容了」的合法含义，没有实现分页读取的后端
+    /// 不得拿它冒充，也不得只读一段再截断。
     /// 自有有效条目的存储序键（`message_id → 存储序键`），语义见
     /// [`peri_acp_types::session_resources::SessionResources::load_entry_positions`]。
     ///

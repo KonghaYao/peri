@@ -1,0 +1,1833 @@
+{
+  "spec": {
+    "root": "Stack",
+    "components": {
+      "Stack": {
+        "signature": "Stack(children: (Grid | Card | Row | Text | H1 | H2 | H3 | Code | Link | Pill | Spacer | Divider | Callout | Stat | UsageBar | Gauge | DiffStats | DiffView | ChangedFiles | Sources | TodoList | Table | BarChart | LineChart | PieChart | TextInput | TextArea | Checkbox | Toggle | Select | Button)[], gap?: number)",
+        "description": "Vertical page root; use as `root = Stack([...])`. args: children(Grid, Card, Row or leaf), gap?."
+      },
+      "Row": {
+        "signature": "Row(children: (Text | H1 | H2 | H3 | Code | Link | Pill | Spacer | Divider | Callout | Stat | UsageBar | Gauge | DiffStats | DiffView | ChangedFiles | Sources | TodoList | Table | BarChart | LineChart | PieChart | TextInput | TextArea | Checkbox | Toggle | Select | Button)[], gap?: number, align?: \"start\" | \"center\" | \"end\" | \"stretch\", justify?: \"start\" | \"center\" | \"end\" | \"space-between\", wrap?: boolean)",
+        "description": "Horizontal layout. Children must be leaf components (no Card or Grid). args: children, gap?, align?, justify?, wrap?."
+      },
+      "Grid": {
+        "signature": "Grid(columns: number, children: (Card | Row | Text | H1 | H2 | H3 | Code | Link | Pill | Spacer | Divider | Callout | Stat | UsageBar | Gauge | DiffStats | DiffView | ChangedFiles | Sources | TodoList | Table | BarChart | LineChart | PieChart | TextInput | TextArea | Checkbox | Toggle | Select | Button)[], gap?: number, align?: \"start\" | \"center\" | \"end\" | \"stretch\")",
+        "description": "N-column grid; only allowed directly under Stack. args: columns(1-6), children(Card, Row or leaf), gap?, align?."
+      },
+      "Spacer": {
+        "signature": "Spacer()",
+        "description": "Flexible filler inside Row or Stack. No props."
+      },
+      "Divider": {
+        "signature": "Divider()",
+        "description": "Horizontal separator line. No props."
+      },
+      "Text": {
+        "signature": "Text(content: string | number, tone?: \"primary\" | \"secondary\" | \"tertiary\" | \"quaternary\", size?: \"body\" | \"small\", weight?: \"normal\" | \"medium\" | \"semibold\" | \"bold\", italic?: boolean, truncate?: boolean)",
+        "description": "Body text. args: content, tone?(primary|secondary|tertiary|quaternary), size?(body|small), weight?(normal|medium|semibold|bold), italic?, truncate?."
+      },
+      "H1": {
+        "signature": "H1(content: string)",
+        "description": "Level-1 heading. arg: content."
+      },
+      "H2": {
+        "signature": "H2(content: string)",
+        "description": "Level-2 heading. arg: content."
+      },
+      "H3": {
+        "signature": "H3(content: string)",
+        "description": "Level-3 heading. arg: content."
+      },
+      "Code": {
+        "signature": "Code(content: string)",
+        "description": "Inline code span. arg: content. Use Markdown fenced blocks for multi-line code."
+      },
+      "Link": {
+        "signature": "Link(label: string, href: string)",
+        "description": "Hyperlink to an http(s) URL. args: label, href. Non-http(s) URLs are not rendered as links."
+      },
+      "Pill": {
+        "signature": "Pill(label: string, size?: \"sm\" | \"md\")",
+        "description": "Compact status or label chip. args: label, size?(sm|md)."
+      },
+      "Card": {
+        "signature": "Card(title: string, children: (Row | Text | H1 | H2 | H3 | Code | Link | Pill | Spacer | Divider | Callout | Stat | UsageBar | Gauge | DiffStats | DiffView | ChangedFiles | Sources | TodoList | Table | BarChart | LineChart | PieChart | TextInput | TextArea | Checkbox | Toggle | Select | Button)[], subtitle?: string, collapsible?: boolean, defaultOpen?: boolean)",
+        "description": "Bordered card with header and body; optional collapse. args: title, children(Row or leaf), subtitle?, collapsible?, defaultOpen?."
+      },
+      "Callout": {
+        "signature": "Callout(tone?: \"info\" | \"success\" | \"warning\" | \"danger\" | \"neutral\", content: string, title?: string)",
+        "description": "Highlighted note. args: tone?(info|success|warning|danger|neutral), content, title?."
+      },
+      "Stat": {
+        "signature": "Stat(value: string | number, label: string, tone?: \"success\" | \"danger\" | \"warning\" | \"info\")",
+        "description": "Single metric. args: value(string|number), label, tone?(success|danger|warning|info)."
+      },
+      "UsageBar": {
+        "signature": "UsageBar(segments: {id: string, value: number, color?: \"gray\" | \"purple\" | \"green\" | \"yellow\" | \"cyan\" | \"pink\" | \"blue\" | \"orange\" | \"red\"}[], total: number, topLeftLabel?: string, topRightLabel?: string)",
+        "description": "Segmented usage bar. args: segments(id,value,color?), total, topLeftLabel?, topRightLabel?. color: gray|purple|green|yellow|cyan|pink|blue|orange|red."
+      },
+      "Gauge": {
+        "signature": "Gauge(value: number, label: string, max?: number, unit?: string, detail?: string, tone?: \"success\" | \"danger\" | \"warning\" | \"info\", size?: number)",
+        "description": "Single-value ring gauge for usage or completion. args: value, label, max?(default 100, must be >0), unit?, detail?, tone?(success|danger|warning|info), size?(72-160, default 96). Display-only; use UsageBar for multi-segment composition and Stat for plain metrics."
+      },
+      "DiffStats": {
+        "signature": "DiffStats(additions: number, deletions: number, layout?: \"aligned\" | \"inline\", showParentheses?: boolean)",
+        "description": "Inline or aligned +additions/-deletions counts. args: additions, deletions, layout?(inline|aligned, default inline), showParentheses?. Counts >=1000 use compact k/m/b notation."
+      },
+      "DiffView": {
+        "signature": "DiffView(lines: {type: \"added\" | \"removed\" | \"unchanged\", content: string, lineNumber?: number}[], path?: string, language?: string, showLineNumbers?: boolean, showAccentStrip?: boolean)",
+        "description": "Unified diff. args: lines(type added|removed|unchanged, content, lineNumber?), path?, language?, showLineNumbers?, showAccentStrip?."
+      },
+      "ChangedFiles": {
+        "signature": "ChangedFiles(files: {path: string, additions?: number, deletions?: number, status?: \"added\" | \"modified\" | \"deleted\" | \"renamed\"}[], title?: string, maxRows?: number)",
+        "description": "Changed-files summary grouped by directory; display-only, not authoritative. args: files(path, additions?, deletions?, status?: added|modified|deleted|renamed)[], title?, maxRows?(1-200, default 50). Paths use '/'; excess rows collapse to '+N more files'."
+      },
+      "Sources": {
+        "signature": "Sources(items: {title: string, url: string, snippet?: string}[], title?: string)",
+        "description": "Ordered source list (1-10 items). args: items(title, url, snippet?)[], title?(default Sources). Only plain http(s) URLs without credentials are linked; rejected URLs render as plain text."
+      },
+      "TodoList": {
+        "signature": "TodoList(todos: {id: string, content: string, status: \"pending\" | \"in_progress\" | \"completed\" | \"cancelled\"}[])",
+        "description": "Compact todo list. args: todos(id, content, status: pending|in_progress|completed|cancelled)."
+      },
+      "Table": {
+        "signature": "Table(headers: string[], rows: (string | number)[][], columnAlign?: \"left\" | \"center\" | \"right\"[], rowTone?: \"success\" | \"danger\" | \"warning\" | \"info\" | \"neutral\"[], striped?: boolean, framed?: boolean, emptyMessage?: string)",
+        "description": "Data table. args: headers(string[]), rows((string|number)[][]), columnAlign?, rowTone?, striped?, framed?, emptyMessage?. Rows are truncated/padded to headers length."
+      },
+      "BarChart": {
+        "signature": "BarChart(categories: string[], series: {name: string, data: number[], tone?: \"success\" | \"danger\" | \"warning\" | \"info\" | \"neutral\"}[], height?: number, stacked?: boolean, horizontal?: boolean, normalized?: boolean, valuePrefix?: string, valueSuffix?: string, showValues?: boolean)",
+        "description": "Bar chart. args: categories(string[]), series(name, data:number[], tone?), height?(120-600), stacked?, horizontal?, normalized?, valuePrefix?, valueSuffix?, showValues?. Every series.data length must equal categories length."
+      },
+      "LineChart": {
+        "signature": "LineChart(categories: string[], series: {name: string, data: number[], tone?: \"success\" | \"danger\" | \"warning\" | \"info\" | \"neutral\"}[], height?: number, fill?: boolean, valuePrefix?: string, valueSuffix?: string, showValues?: boolean)",
+        "description": "Line chart. args: categories(string[]), series(name, data:number[], tone?), height?(120-600), fill?, valuePrefix?, valueSuffix?, showValues?. Every series.data length must equal categories length."
+      },
+      "PieChart": {
+        "signature": "PieChart(data: {label: string, value: number, tone?: \"success\" | \"danger\" | \"warning\" | \"info\" | \"neutral\"}[], size?: number, donut?: boolean)",
+        "description": "Pie or donut chart. args: data(label, value, tone?), size?(100-400), donut?. Non-finite values are dropped."
+      },
+      "TextInput": {
+        "signature": "TextInput(name: string, label?: string, placeholder?: string, type?: \"text\" | \"email\" | \"url\" | \"search\" | \"number\", defaultValue?: string)",
+        "description": "Single-line input bound to a form field. args: name, label?, placeholder?, type?(text|email|url|search|number), defaultValue?."
+      },
+      "TextArea": {
+        "signature": "TextArea(name: string, label?: string, placeholder?: string, rows?: number, defaultValue?: string)",
+        "description": "Multi-line input bound to a form field. args: name, label?, placeholder?, rows?, defaultValue?."
+      },
+      "Checkbox": {
+        "signature": "Checkbox(name: string, label: string, defaultValue?: boolean)",
+        "description": "Boolean checkbox bound to a form field. args: name, label, defaultValue?."
+      },
+      "Toggle": {
+        "signature": "Toggle(name: string, label?: string, defaultValue?: boolean)",
+        "description": "Boolean switch bound to a form field. args: name, label?, defaultValue?."
+      },
+      "Select": {
+        "signature": "Select(name: string, options: {value: string, label: string}[], label?: string, placeholder?: string, defaultValue?: string)",
+        "description": "Dropdown bound to a form field. args: name, options(value,label)[], label?, placeholder?, defaultValue?."
+      },
+      "Button": {
+        "signature": "Button(label: string, action: ActionExpression, variant?: \"primary\" | \"secondary\" | \"ghost\", disabled?: boolean)",
+        "description": "Action button. args: label, action(@ToAssistant(\"...\") or @OpenUrl(\"...\")), variant?(primary|secondary|ghost), disabled?."
+      }
+    },
+    "componentGroups": [
+      {
+        "name": "Layout & text",
+        "components": [
+          "Stack",
+          "Row",
+          "Grid",
+          "Spacer",
+          "Divider",
+          "Text",
+          "H1",
+          "H2",
+          "H3",
+          "Code",
+          "Link",
+          "Pill"
+        ],
+        "notes": [
+          "Stack is the only root. Grid may appear only as a direct child of Stack.",
+          "Row children must be leaves; Card children may be Row or leaves."
+        ]
+      },
+      {
+        "name": "Containers & data",
+        "components": [
+          "Card",
+          "Callout",
+          "Stat",
+          "UsageBar",
+          "Gauge",
+          "DiffStats",
+          "DiffView",
+          "ChangedFiles",
+          "Sources",
+          "TodoList",
+          "Table"
+        ],
+        "notes": [
+          "Use Card for grouping; do not nest Cards."
+        ]
+      },
+      {
+        "name": "Charts",
+        "components": [
+          "BarChart",
+          "LineChart",
+          "PieChart"
+        ],
+        "notes": [
+          "All series must have exactly one value per category; mismatches are shown as a warning instead of a chart."
+        ]
+      },
+      {
+        "name": "Forms & actions",
+        "components": [
+          "TextInput",
+          "TextArea",
+          "Checkbox",
+          "Toggle",
+          "Select",
+          "Button"
+        ],
+        "notes": [
+          "Form values are ephemeral; place a Button with @ToAssistant in the same Card to submit."
+        ]
+      }
+    ],
+    "schema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "properties": {
+        "Stack": {
+          "$ref": "#/$defs/Stack"
+        },
+        "Row": {
+          "$ref": "#/$defs/Row"
+        },
+        "Grid": {
+          "$ref": "#/$defs/Grid"
+        },
+        "Spacer": {
+          "$ref": "#/$defs/Spacer"
+        },
+        "Divider": {
+          "$ref": "#/$defs/Divider"
+        },
+        "Text": {
+          "$ref": "#/$defs/Text"
+        },
+        "H1": {
+          "$ref": "#/$defs/H1"
+        },
+        "H2": {
+          "$ref": "#/$defs/H2"
+        },
+        "H3": {
+          "$ref": "#/$defs/H3"
+        },
+        "Code": {
+          "$ref": "#/$defs/Code"
+        },
+        "Link": {
+          "$ref": "#/$defs/Link"
+        },
+        "Pill": {
+          "$ref": "#/$defs/Pill"
+        },
+        "Card": {
+          "$ref": "#/$defs/Card"
+        },
+        "Callout": {
+          "$ref": "#/$defs/Callout"
+        },
+        "Stat": {
+          "$ref": "#/$defs/Stat"
+        },
+        "UsageBar": {
+          "$ref": "#/$defs/UsageBar"
+        },
+        "Gauge": {
+          "$ref": "#/$defs/Gauge"
+        },
+        "DiffStats": {
+          "$ref": "#/$defs/DiffStats"
+        },
+        "DiffView": {
+          "$ref": "#/$defs/DiffView"
+        },
+        "ChangedFiles": {
+          "$ref": "#/$defs/ChangedFiles"
+        },
+        "Sources": {
+          "$ref": "#/$defs/Sources"
+        },
+        "TodoList": {
+          "$ref": "#/$defs/TodoList"
+        },
+        "Table": {
+          "$ref": "#/$defs/Table"
+        },
+        "BarChart": {
+          "$ref": "#/$defs/BarChart"
+        },
+        "LineChart": {
+          "$ref": "#/$defs/LineChart"
+        },
+        "PieChart": {
+          "$ref": "#/$defs/PieChart"
+        },
+        "TextInput": {
+          "$ref": "#/$defs/TextInput"
+        },
+        "TextArea": {
+          "$ref": "#/$defs/TextArea"
+        },
+        "Checkbox": {
+          "$ref": "#/$defs/Checkbox"
+        },
+        "Toggle": {
+          "$ref": "#/$defs/Toggle"
+        },
+        "Select": {
+          "$ref": "#/$defs/Select"
+        },
+        "Button": {
+          "$ref": "#/$defs/Button"
+        }
+      },
+      "required": [
+        "Stack",
+        "Row",
+        "Grid",
+        "Spacer",
+        "Divider",
+        "Text",
+        "H1",
+        "H2",
+        "H3",
+        "Code",
+        "Link",
+        "Pill",
+        "Card",
+        "Callout",
+        "Stat",
+        "UsageBar",
+        "Gauge",
+        "DiffStats",
+        "DiffView",
+        "ChangedFiles",
+        "Sources",
+        "TodoList",
+        "Table",
+        "BarChart",
+        "LineChart",
+        "PieChart",
+        "TextInput",
+        "TextArea",
+        "Checkbox",
+        "Toggle",
+        "Select",
+        "Button"
+      ],
+      "additionalProperties": false,
+      "$defs": {
+        "Stack": {
+          "type": "object",
+          "properties": {
+            "children": {
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Grid"
+                  },
+                  {
+                    "$ref": "#/$defs/Card"
+                  },
+                  {
+                    "$ref": "#/$defs/Row"
+                  },
+                  {
+                    "$ref": "#/$defs/Text"
+                  },
+                  {
+                    "$ref": "#/$defs/H1"
+                  },
+                  {
+                    "$ref": "#/$defs/H2"
+                  },
+                  {
+                    "$ref": "#/$defs/H3"
+                  },
+                  {
+                    "$ref": "#/$defs/Code"
+                  },
+                  {
+                    "$ref": "#/$defs/Link"
+                  },
+                  {
+                    "$ref": "#/$defs/Pill"
+                  },
+                  {
+                    "$ref": "#/$defs/Spacer"
+                  },
+                  {
+                    "$ref": "#/$defs/Divider"
+                  },
+                  {
+                    "$ref": "#/$defs/Callout"
+                  },
+                  {
+                    "$ref": "#/$defs/Stat"
+                  },
+                  {
+                    "$ref": "#/$defs/UsageBar"
+                  },
+                  {
+                    "$ref": "#/$defs/Gauge"
+                  },
+                  {
+                    "$ref": "#/$defs/DiffStats"
+                  },
+                  {
+                    "$ref": "#/$defs/DiffView"
+                  },
+                  {
+                    "$ref": "#/$defs/ChangedFiles"
+                  },
+                  {
+                    "$ref": "#/$defs/Sources"
+                  },
+                  {
+                    "$ref": "#/$defs/TodoList"
+                  },
+                  {
+                    "$ref": "#/$defs/Table"
+                  },
+                  {
+                    "$ref": "#/$defs/BarChart"
+                  },
+                  {
+                    "$ref": "#/$defs/LineChart"
+                  },
+                  {
+                    "$ref": "#/$defs/PieChart"
+                  },
+                  {
+                    "$ref": "#/$defs/TextInput"
+                  },
+                  {
+                    "$ref": "#/$defs/TextArea"
+                  },
+                  {
+                    "$ref": "#/$defs/Checkbox"
+                  },
+                  {
+                    "$ref": "#/$defs/Toggle"
+                  },
+                  {
+                    "$ref": "#/$defs/Select"
+                  },
+                  {
+                    "$ref": "#/$defs/Button"
+                  }
+                ]
+              }
+            },
+            "gap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 48
+            }
+          },
+          "required": [
+            "children"
+          ],
+          "additionalProperties": false,
+          "description": "Vertical page root; use as `root = Stack([...])`. args: children(Grid, Card, Row or leaf), gap?."
+        },
+        "Grid": {
+          "type": "object",
+          "properties": {
+            "columns": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 6
+            },
+            "children": {
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Card"
+                  },
+                  {
+                    "$ref": "#/$defs/Row"
+                  },
+                  {
+                    "$ref": "#/$defs/Text"
+                  },
+                  {
+                    "$ref": "#/$defs/H1"
+                  },
+                  {
+                    "$ref": "#/$defs/H2"
+                  },
+                  {
+                    "$ref": "#/$defs/H3"
+                  },
+                  {
+                    "$ref": "#/$defs/Code"
+                  },
+                  {
+                    "$ref": "#/$defs/Link"
+                  },
+                  {
+                    "$ref": "#/$defs/Pill"
+                  },
+                  {
+                    "$ref": "#/$defs/Spacer"
+                  },
+                  {
+                    "$ref": "#/$defs/Divider"
+                  },
+                  {
+                    "$ref": "#/$defs/Callout"
+                  },
+                  {
+                    "$ref": "#/$defs/Stat"
+                  },
+                  {
+                    "$ref": "#/$defs/UsageBar"
+                  },
+                  {
+                    "$ref": "#/$defs/Gauge"
+                  },
+                  {
+                    "$ref": "#/$defs/DiffStats"
+                  },
+                  {
+                    "$ref": "#/$defs/DiffView"
+                  },
+                  {
+                    "$ref": "#/$defs/ChangedFiles"
+                  },
+                  {
+                    "$ref": "#/$defs/Sources"
+                  },
+                  {
+                    "$ref": "#/$defs/TodoList"
+                  },
+                  {
+                    "$ref": "#/$defs/Table"
+                  },
+                  {
+                    "$ref": "#/$defs/BarChart"
+                  },
+                  {
+                    "$ref": "#/$defs/LineChart"
+                  },
+                  {
+                    "$ref": "#/$defs/PieChart"
+                  },
+                  {
+                    "$ref": "#/$defs/TextInput"
+                  },
+                  {
+                    "$ref": "#/$defs/TextArea"
+                  },
+                  {
+                    "$ref": "#/$defs/Checkbox"
+                  },
+                  {
+                    "$ref": "#/$defs/Toggle"
+                  },
+                  {
+                    "$ref": "#/$defs/Select"
+                  },
+                  {
+                    "$ref": "#/$defs/Button"
+                  }
+                ]
+              }
+            },
+            "gap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 48
+            },
+            "align": {
+              "type": "string",
+              "enum": [
+                "start",
+                "center",
+                "end",
+                "stretch"
+              ]
+            }
+          },
+          "required": [
+            "columns",
+            "children"
+          ],
+          "additionalProperties": false,
+          "description": "N-column grid; only allowed directly under Stack. args: columns(1-6), children(Card, Row or leaf), gap?, align?."
+        },
+        "Card": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "children": {
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Row"
+                  },
+                  {
+                    "$ref": "#/$defs/Text"
+                  },
+                  {
+                    "$ref": "#/$defs/H1"
+                  },
+                  {
+                    "$ref": "#/$defs/H2"
+                  },
+                  {
+                    "$ref": "#/$defs/H3"
+                  },
+                  {
+                    "$ref": "#/$defs/Code"
+                  },
+                  {
+                    "$ref": "#/$defs/Link"
+                  },
+                  {
+                    "$ref": "#/$defs/Pill"
+                  },
+                  {
+                    "$ref": "#/$defs/Spacer"
+                  },
+                  {
+                    "$ref": "#/$defs/Divider"
+                  },
+                  {
+                    "$ref": "#/$defs/Callout"
+                  },
+                  {
+                    "$ref": "#/$defs/Stat"
+                  },
+                  {
+                    "$ref": "#/$defs/UsageBar"
+                  },
+                  {
+                    "$ref": "#/$defs/Gauge"
+                  },
+                  {
+                    "$ref": "#/$defs/DiffStats"
+                  },
+                  {
+                    "$ref": "#/$defs/DiffView"
+                  },
+                  {
+                    "$ref": "#/$defs/ChangedFiles"
+                  },
+                  {
+                    "$ref": "#/$defs/Sources"
+                  },
+                  {
+                    "$ref": "#/$defs/TodoList"
+                  },
+                  {
+                    "$ref": "#/$defs/Table"
+                  },
+                  {
+                    "$ref": "#/$defs/BarChart"
+                  },
+                  {
+                    "$ref": "#/$defs/LineChart"
+                  },
+                  {
+                    "$ref": "#/$defs/PieChart"
+                  },
+                  {
+                    "$ref": "#/$defs/TextInput"
+                  },
+                  {
+                    "$ref": "#/$defs/TextArea"
+                  },
+                  {
+                    "$ref": "#/$defs/Checkbox"
+                  },
+                  {
+                    "$ref": "#/$defs/Toggle"
+                  },
+                  {
+                    "$ref": "#/$defs/Select"
+                  },
+                  {
+                    "$ref": "#/$defs/Button"
+                  }
+                ]
+              }
+            },
+            "subtitle": {
+              "type": "string"
+            },
+            "collapsible": {
+              "type": "boolean"
+            },
+            "defaultOpen": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "children"
+          ],
+          "additionalProperties": false,
+          "description": "Bordered card with header and body; optional collapse. args: title, children(Row or leaf), subtitle?, collapsible?, defaultOpen?."
+        },
+        "Row": {
+          "type": "object",
+          "properties": {
+            "children": {
+              "type": "array",
+              "items": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Text"
+                  },
+                  {
+                    "$ref": "#/$defs/H1"
+                  },
+                  {
+                    "$ref": "#/$defs/H2"
+                  },
+                  {
+                    "$ref": "#/$defs/H3"
+                  },
+                  {
+                    "$ref": "#/$defs/Code"
+                  },
+                  {
+                    "$ref": "#/$defs/Link"
+                  },
+                  {
+                    "$ref": "#/$defs/Pill"
+                  },
+                  {
+                    "$ref": "#/$defs/Spacer"
+                  },
+                  {
+                    "$ref": "#/$defs/Divider"
+                  },
+                  {
+                    "$ref": "#/$defs/Callout"
+                  },
+                  {
+                    "$ref": "#/$defs/Stat"
+                  },
+                  {
+                    "$ref": "#/$defs/UsageBar"
+                  },
+                  {
+                    "$ref": "#/$defs/Gauge"
+                  },
+                  {
+                    "$ref": "#/$defs/DiffStats"
+                  },
+                  {
+                    "$ref": "#/$defs/DiffView"
+                  },
+                  {
+                    "$ref": "#/$defs/ChangedFiles"
+                  },
+                  {
+                    "$ref": "#/$defs/Sources"
+                  },
+                  {
+                    "$ref": "#/$defs/TodoList"
+                  },
+                  {
+                    "$ref": "#/$defs/Table"
+                  },
+                  {
+                    "$ref": "#/$defs/BarChart"
+                  },
+                  {
+                    "$ref": "#/$defs/LineChart"
+                  },
+                  {
+                    "$ref": "#/$defs/PieChart"
+                  },
+                  {
+                    "$ref": "#/$defs/TextInput"
+                  },
+                  {
+                    "$ref": "#/$defs/TextArea"
+                  },
+                  {
+                    "$ref": "#/$defs/Checkbox"
+                  },
+                  {
+                    "$ref": "#/$defs/Toggle"
+                  },
+                  {
+                    "$ref": "#/$defs/Select"
+                  },
+                  {
+                    "$ref": "#/$defs/Button"
+                  }
+                ]
+              }
+            },
+            "gap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 48
+            },
+            "align": {
+              "type": "string",
+              "enum": [
+                "start",
+                "center",
+                "end",
+                "stretch"
+              ]
+            },
+            "justify": {
+              "type": "string",
+              "enum": [
+                "start",
+                "center",
+                "end",
+                "space-between"
+              ]
+            },
+            "wrap": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "children"
+          ],
+          "additionalProperties": false,
+          "description": "Horizontal layout. Children must be leaf components (no Card or Grid). args: children, gap?, align?, justify?, wrap?."
+        },
+        "Text": {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": [
+                "string",
+                "number"
+              ]
+            },
+            "tone": {
+              "type": "string",
+              "enum": [
+                "primary",
+                "secondary",
+                "tertiary",
+                "quaternary"
+              ]
+            },
+            "size": {
+              "type": "string",
+              "enum": [
+                "body",
+                "small"
+              ]
+            },
+            "weight": {
+              "type": "string",
+              "enum": [
+                "normal",
+                "medium",
+                "semibold",
+                "bold"
+              ]
+            },
+            "italic": {
+              "type": "boolean"
+            },
+            "truncate": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "content"
+          ],
+          "additionalProperties": false,
+          "description": "Body text. args: content, tone?(primary|secondary|tertiary|quaternary), size?(body|small), weight?(normal|medium|semibold|bold), italic?, truncate?."
+        },
+        "H1": {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content"
+          ],
+          "additionalProperties": false,
+          "description": "Level-1 heading. arg: content."
+        },
+        "H2": {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content"
+          ],
+          "additionalProperties": false,
+          "description": "Level-2 heading. arg: content."
+        },
+        "H3": {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content"
+          ],
+          "additionalProperties": false,
+          "description": "Level-3 heading. arg: content."
+        },
+        "Code": {
+          "type": "object",
+          "properties": {
+            "content": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content"
+          ],
+          "additionalProperties": false,
+          "description": "Inline code span. arg: content. Use Markdown fenced blocks for multi-line code."
+        },
+        "Link": {
+          "type": "object",
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "href": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "label",
+            "href"
+          ],
+          "additionalProperties": false,
+          "description": "Hyperlink to an http(s) URL. args: label, href. Non-http(s) URLs are not rendered as links."
+        },
+        "Pill": {
+          "type": "object",
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "size": {
+              "type": "string",
+              "enum": [
+                "sm",
+                "md"
+              ]
+            }
+          },
+          "required": [
+            "label"
+          ],
+          "additionalProperties": false,
+          "description": "Compact status or label chip. args: label, size?(sm|md)."
+        },
+        "Spacer": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false,
+          "description": "Flexible filler inside Row or Stack. No props."
+        },
+        "Divider": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false,
+          "description": "Horizontal separator line. No props."
+        },
+        "Callout": {
+          "type": "object",
+          "properties": {
+            "tone": {
+              "type": "string",
+              "enum": [
+                "info",
+                "success",
+                "warning",
+                "danger",
+                "neutral"
+              ]
+            },
+            "content": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "content"
+          ],
+          "additionalProperties": false,
+          "description": "Highlighted note. args: tone?(info|success|warning|danger|neutral), content, title?."
+        },
+        "Stat": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": [
+                "string",
+                "number"
+              ]
+            },
+            "label": {
+              "type": "string"
+            },
+            "tone": {
+              "type": "string",
+              "enum": [
+                "success",
+                "danger",
+                "warning",
+                "info"
+              ]
+            }
+          },
+          "required": [
+            "value",
+            "label"
+          ],
+          "additionalProperties": false,
+          "description": "Single metric. args: value(string|number), label, tone?(success|danger|warning|info)."
+        },
+        "UsageBar": {
+          "type": "object",
+          "properties": {
+            "segments": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "number"
+                  },
+                  "color": {
+                    "type": "string",
+                    "enum": [
+                      "gray",
+                      "purple",
+                      "green",
+                      "yellow",
+                      "cyan",
+                      "pink",
+                      "blue",
+                      "orange",
+                      "red"
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "value"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "total": {
+              "type": "number"
+            },
+            "topLeftLabel": {
+              "type": "string"
+            },
+            "topRightLabel": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "segments",
+            "total"
+          ],
+          "additionalProperties": false,
+          "description": "Segmented usage bar. args: segments(id,value,color?), total, topLeftLabel?, topRightLabel?. color: gray|purple|green|yellow|cyan|pink|blue|orange|red."
+        },
+        "Gauge": {
+          "type": "object",
+          "properties": {
+            "value": {
+              "type": "number"
+            },
+            "label": {
+              "type": "string"
+            },
+            "max": {
+              "type": "number"
+            },
+            "unit": {
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "tone": {
+              "type": "string",
+              "enum": [
+                "success",
+                "danger",
+                "warning",
+                "info"
+              ]
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 72,
+              "maximum": 160
+            }
+          },
+          "required": [
+            "value",
+            "label"
+          ],
+          "additionalProperties": false,
+          "description": "Single-value ring gauge for usage or completion. args: value, label, max?(default 100, must be >0), unit?, detail?, tone?(success|danger|warning|info), size?(72-160, default 96). Display-only; use UsageBar for multi-segment composition and Stat for plain metrics."
+        },
+        "DiffStats": {
+          "type": "object",
+          "properties": {
+            "additions": {
+              "type": "number"
+            },
+            "deletions": {
+              "type": "number"
+            },
+            "layout": {
+              "type": "string",
+              "enum": [
+                "aligned",
+                "inline"
+              ]
+            },
+            "showParentheses": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "additions",
+            "deletions"
+          ],
+          "additionalProperties": false,
+          "description": "Inline or aligned +additions/-deletions counts. args: additions, deletions, layout?(inline|aligned, default inline), showParentheses?. Counts >=1000 use compact k/m/b notation."
+        },
+        "DiffView": {
+          "type": "object",
+          "properties": {
+            "lines": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "added",
+                      "removed",
+                      "unchanged"
+                    ]
+                  },
+                  "content": {
+                    "type": "string"
+                  },
+                  "lineNumber": {
+                    "type": "integer",
+                    "minimum": -9007199254740991,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "type",
+                  "content"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "path": {
+              "type": "string"
+            },
+            "language": {
+              "type": "string"
+            },
+            "showLineNumbers": {
+              "type": "boolean"
+            },
+            "showAccentStrip": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "lines"
+          ],
+          "additionalProperties": false,
+          "description": "Unified diff. args: lines(type added|removed|unchanged, content, lineNumber?), path?, language?, showLineNumbers?, showAccentStrip?."
+        },
+        "ChangedFiles": {
+          "type": "object",
+          "properties": {
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  },
+                  "additions": {
+                    "type": "number"
+                  },
+                  "deletions": {
+                    "type": "number"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "added",
+                      "modified",
+                      "deleted",
+                      "renamed"
+                    ]
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "title": {
+              "type": "string"
+            },
+            "maxRows": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          },
+          "required": [
+            "files"
+          ],
+          "additionalProperties": false,
+          "description": "Changed-files summary grouped by directory; display-only, not authoritative. args: files(path, additions?, deletions?, status?: added|modified|deleted|renamed)[], title?, maxRows?(1-200, default 50). Paths use '/'; excess rows collapse to '+N more files'."
+        },
+        "Sources": {
+          "type": "object",
+          "properties": {
+            "items": {
+              "minItems": 1,
+              "maxItems": 10,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  },
+                  "snippet": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title",
+                  "url"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "items"
+          ],
+          "additionalProperties": false,
+          "description": "Ordered source list (1-10 items). args: items(title, url, snippet?)[], title?(default Sources). Only plain http(s) URLs without credentials are linked; rejected URLs render as plain text."
+        },
+        "TodoList": {
+          "type": "object",
+          "properties": {
+            "todos": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "content": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "pending",
+                      "in_progress",
+                      "completed",
+                      "cancelled"
+                    ]
+                  }
+                },
+                "required": [
+                  "id",
+                  "content",
+                  "status"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "todos"
+          ],
+          "additionalProperties": false,
+          "description": "Compact todo list. args: todos(id, content, status: pending|in_progress|completed|cancelled)."
+        },
+        "Table": {
+          "type": "object",
+          "properties": {
+            "headers": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "rows": {
+              "type": "array",
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": [
+                    "string",
+                    "number"
+                  ]
+                }
+              }
+            },
+            "columnAlign": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "left",
+                  "center",
+                  "right"
+                ]
+              }
+            },
+            "rowTone": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "success",
+                  "danger",
+                  "warning",
+                  "info",
+                  "neutral"
+                ]
+              }
+            },
+            "striped": {
+              "type": "boolean"
+            },
+            "framed": {
+              "type": "boolean"
+            },
+            "emptyMessage": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "headers",
+            "rows"
+          ],
+          "additionalProperties": false,
+          "description": "Data table. args: headers(string[]), rows((string|number)[][]), columnAlign?, rowTone?, striped?, framed?, emptyMessage?. Rows are truncated/padded to headers length."
+        },
+        "BarChart": {
+          "type": "object",
+          "properties": {
+            "categories": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "series": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "data": {
+                    "type": "array",
+                    "items": {
+                      "type": "number"
+                    }
+                  },
+                  "tone": {
+                    "type": "string",
+                    "enum": [
+                      "success",
+                      "danger",
+                      "warning",
+                      "info",
+                      "neutral"
+                    ]
+                  }
+                },
+                "required": [
+                  "name",
+                  "data"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "height": {
+              "type": "integer",
+              "minimum": 120,
+              "maximum": 600
+            },
+            "stacked": {
+              "type": "boolean"
+            },
+            "horizontal": {
+              "type": "boolean"
+            },
+            "normalized": {
+              "type": "boolean"
+            },
+            "valuePrefix": {
+              "type": "string"
+            },
+            "valueSuffix": {
+              "type": "string"
+            },
+            "showValues": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "categories",
+            "series"
+          ],
+          "additionalProperties": false,
+          "description": "Bar chart. args: categories(string[]), series(name, data:number[], tone?), height?(120-600), stacked?, horizontal?, normalized?, valuePrefix?, valueSuffix?, showValues?. Every series.data length must equal categories length."
+        },
+        "LineChart": {
+          "type": "object",
+          "properties": {
+            "categories": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "series": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "data": {
+                    "type": "array",
+                    "items": {
+                      "type": "number"
+                    }
+                  },
+                  "tone": {
+                    "type": "string",
+                    "enum": [
+                      "success",
+                      "danger",
+                      "warning",
+                      "info",
+                      "neutral"
+                    ]
+                  }
+                },
+                "required": [
+                  "name",
+                  "data"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "height": {
+              "type": "integer",
+              "minimum": 120,
+              "maximum": 600
+            },
+            "fill": {
+              "type": "boolean"
+            },
+            "valuePrefix": {
+              "type": "string"
+            },
+            "valueSuffix": {
+              "type": "string"
+            },
+            "showValues": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "categories",
+            "series"
+          ],
+          "additionalProperties": false,
+          "description": "Line chart. args: categories(string[]), series(name, data:number[], tone?), height?(120-600), fill?, valuePrefix?, valueSuffix?, showValues?. Every series.data length must equal categories length."
+        },
+        "PieChart": {
+          "type": "object",
+          "properties": {
+            "data": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "label": {
+                    "type": "string"
+                  },
+                  "value": {
+                    "type": "number"
+                  },
+                  "tone": {
+                    "type": "string",
+                    "enum": [
+                      "success",
+                      "danger",
+                      "warning",
+                      "info",
+                      "neutral"
+                    ]
+                  }
+                },
+                "required": [
+                  "label",
+                  "value"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 400
+            },
+            "donut": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "data"
+          ],
+          "additionalProperties": false,
+          "description": "Pie or donut chart. args: data(label, value, tone?), size?(100-400), donut?. Non-finite values are dropped."
+        },
+        "TextInput": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "label": {
+              "type": "string"
+            },
+            "placeholder": {
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "enum": [
+                "text",
+                "email",
+                "url",
+                "search",
+                "number"
+              ]
+            },
+            "defaultValue": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "additionalProperties": false,
+          "description": "Single-line input bound to a form field. args: name, label?, placeholder?, type?(text|email|url|search|number), defaultValue?."
+        },
+        "TextArea": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "label": {
+              "type": "string"
+            },
+            "placeholder": {
+              "type": "string"
+            },
+            "rows": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 12
+            },
+            "defaultValue": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "additionalProperties": false,
+          "description": "Multi-line input bound to a form field. args: name, label?, placeholder?, rows?, defaultValue?."
+        },
+        "Checkbox": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "label": {
+              "type": "string"
+            },
+            "defaultValue": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "label"
+          ],
+          "additionalProperties": false,
+          "description": "Boolean checkbox bound to a form field. args: name, label, defaultValue?."
+        },
+        "Toggle": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "label": {
+              "type": "string"
+            },
+            "defaultValue": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "additionalProperties": false,
+          "description": "Boolean switch bound to a form field. args: name, label?, defaultValue?."
+        },
+        "Select": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "options": {
+              "minItems": 1,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "value": {
+                    "type": "string"
+                  },
+                  "label": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "value",
+                  "label"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "label": {
+              "type": "string"
+            },
+            "placeholder": {
+              "type": "string"
+            },
+            "defaultValue": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "options"
+          ],
+          "additionalProperties": false,
+          "description": "Dropdown bound to a form field. args: name, options(value,label)[], label?, placeholder?, defaultValue?."
+        },
+        "Button": {
+          "type": "object",
+          "properties": {
+            "label": {
+              "type": "string"
+            },
+            "action": {
+              "$ref": "#/$defs/ActionExpression"
+            },
+            "variant": {
+              "type": "string",
+              "enum": [
+                "primary",
+                "secondary",
+                "ghost"
+              ]
+            },
+            "disabled": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "label",
+            "action"
+          ],
+          "additionalProperties": false,
+          "description": "Action button. args: label, action(@ToAssistant(\"...\") or @OpenUrl(\"...\")), variant?(primary|secondary|ghost), disabled?."
+        },
+        "ActionExpression": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "open_url"
+                },
+                "url": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "url"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "const": "continue_conversation"
+                },
+                "context": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string"
+                },
+                "params": {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                }
+              },
+              "required": [
+                "type"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        }
+      }
+    },
+    "id": "peri-openui"
+  },
+  "promptOptions": {
+    "preamble": "You are Peri's assistant. Answer in ordinary Markdown by default.\nWhen a compact structured visual (metrics, comparison, chart, status card, todo list, or a small form) is clearly better than prose, you may emit ONE complete OpenUI Lang program as a fenced code block tagged `openui`.\nNever use OpenUI for code, shell commands, file paths, or ordinary lists.",
+    "additionalRules": [
+      "Every openui block must be a complete standalone program, never a patch or only changed statements.",
+      "The first line of every program is `root = Stack([...])`.",
+      "Put explanation outside the fence; inside the fence there is only OpenUI Lang.",
+      "Use at most one openui block per response.",
+      "Form values are ephemeral. Add a Button with `@ToAssistant(\"...\")` to submit them.",
+      "When the user asks to see OpenUI source, use a `text` code fence, not an `openui` fence."
+    ],
+    "examples": [
+      "root = Stack([title, metrics, table])\ntitle = H2(\"本周交付\")\nmetrics = Grid(3, [done, blocked, onTime])\ndone = Stat(\"12\", \"已完成任务\", \"success\")\nblocked = Stat(\"3\", \"阻塞\", \"danger\")\nonTime = Stat(\"87%\", \"按期率\", \"info\")\ntable = Table([\"模块\", \"状态\", \"负责人\"], [[\"渲染\", \"完成\", \"A\"], [\"回传\", \"进行中\", \"B\"]])",
+      "root = Stack([title, chart, actions])\ntitle = H3(\"近 7 天请求量\")\nchart = LineChart([\"周一\", \"周二\", \"周三\", \"周四\", \"周五\", \"周六\", \"周日\"], [{ name: \"请求\", data: [120, 160, 140, 200, 180, 240, 220] }])\nactions = Row([more], 8, \"end\", \"end\")\nmore = Button(\"继续分析\", @ToAssistant(\"继续分析这张图\"), \"secondary\")",
+      "root = Stack([gauge])\ngauge = Gauge(72, \"上下文用量\", 100, \"%\", \"144k / 200k tokens\", \"info\")",
+      "root = Stack([changes])\nchanges = ChangedFiles([{ path: \"src/library.tsx\", additions: 12, deletions: 3, status: \"modified\" }, { path: \"README.md\", additions: 2 }], \"本次改动\", 20)",
+      "root = Stack([sources])\nsources = Sources([{ title: \"Peri 文档\", url: \"https://example.com/peri\", snippet: \"Agent loop overview\" }])"
+    ],
+    "inlineMode": false,
+    "editMode": false,
+    "toolCalls": false,
+    "bindings": false,
+    "builtinFunctions": false
+  }
+}

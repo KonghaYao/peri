@@ -324,6 +324,8 @@ pub(crate) fn notify_view(state: &HistoryV2State) {
         return;
     };
     let _ = tx.send(AcpEventWithEpoch {
+        child_origin: None,
+        view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
         event: AcpEventData::HistoryV2ViewChanged {
             state: Box::new(state.clone()),
         },

@@ -1,13 +1,77 @@
 use std::collections::BTreeMap;
 
-use crate::app::{AppConfig, PeriConfig, ProfileConfig, ProviderConfig};
+use crate::app::{AppConfig, PeriConfig, ProfileConfig, ProviderAuthConfig, ProviderConfig};
+use thiserror::Error;
+use url::Url;
 
 const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-5-5";
 const DEFAULT_OPENAI_MODEL: &str = "gpt-6.1-sol";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+pub const DEFAULT_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
+const DEFAULT_CHATGPT_PLAN_CONTEXT_WINDOW: u32 = 1_000_000;
+
+fn default_chatgpt_plan_context_window(model: &str) -> Option<u32> {
+    matches!(
+        model,
+        "gpt-6.1-sol" | "gpt-6.1-terra" | "gpt-6-luna" | "gpt-6-astra"
+    )
+    .then_some(DEFAULT_CHATGPT_PLAN_CONTEXT_WINDOW)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResponsesAuthentication {
+    ApiKey {
+        api_key: String,
+    },
+    ChatGptPlan {
+        store: std::path::PathBuf,
+        account: String,
+        subject: String,
+        client_id: String,
+    },
+}
+
+#[derive(Debug, Error)]
+pub enum ProviderError {
+    #[error("unsupported provider type; use anthropic, openai, or openai_responses")]
+    UnknownType,
+    #[error("Responses requires a model and positive profile contextWindow unless the ChatGPT plan model has a supported default")]
+    MissingModelCapacity,
+    #[error(
+        "Responses baseUrl must be an absolute HTTP(S) URL without user info, query, or fragment"
+    )]
+    InvalidEndpoint,
+    #[error("ChatGPT plan requires an absolute credentials store, a valid account, and nonempty subject/clientId references, with no apiKey")]
+    InvalidSubscriptionReference,
+    #[error("ChatGPT plan requires the official https://api.openai.com/v1/responses endpoint")]
+    InvalidSubscriptionEndpoint,
+    #[error("auth configuration is only supported by openai_responses")]
+    UnexpectedAuth,
+    #[error("Responses API key mode requires apiKey; choose chatgpt_plan explicitly for subscription authentication")]
+    MissingApiKey,
+}
+
+/// Provider-level Responses endpoint and authentication, validated independently of any
+/// profile.
+///
+/// This is the single implementation shared by [`resolve_responses`] and configuration
+/// editors: a Responses provider must be valid even before it owns a profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResponsesProviderAccess {
+    pub endpoint: Url,
+    pub auth: ResponsesAuthentication,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedProvider {
+    Responses {
+        auth: ResponsesAuthentication,
+        endpoint: Url,
+        model: String,
+        effort: Option<String>,
+        max_tokens: u32,
+        context_window: u32,
+    },
     Anthropic {
         api_key: String,
         model: String,
@@ -15,6 +79,7 @@ pub enum ResolvedProvider {
         effort: Option<String>,
         max_tokens: u32,
         context_1m: bool,
+        context_window: u32,
     },
     OpenAi {
         api_key: String,
@@ -23,27 +88,169 @@ pub enum ResolvedProvider {
         effort: Option<String>,
         max_tokens: u32,
         context_1m: bool,
+        context_window: u32,
     },
+}
+
+impl ResolvedProvider {
+    pub fn effective_context_window(&self) -> u32 {
+        match self {
+            Self::Responses { context_window, .. }
+            | Self::Anthropic { context_window, .. }
+            | Self::OpenAi { context_window, .. } => *context_window,
+        }
+    }
+}
+
+/// 返回档位的有效容量，不要求认证已就绪，也不将默认值写回配置。
+pub fn effective_context_window(settings: &PeriConfig, alias: &str) -> Option<u32> {
+    let (provider, profile) = resolve_profile(&settings.config, alias)?;
+    resolve_context_window(
+        provider,
+        profile,
+        &resolve_model_name(provider, alias, profile),
+    )
+    .ok()
+}
+
+fn resolve_context_window(
+    provider: &ProviderConfig,
+    profile: &ProfileConfig,
+    model: &str,
+) -> Result<u32, ProviderError> {
+    if provider.provider_type != "openai_responses" {
+        return Ok(if profile.context_1m {
+            1_000_000
+        } else {
+            profile
+                .context_window
+                .filter(|value| *value > 0)
+                .unwrap_or(200_000)
+        });
+    }
+    profile
+        .context_window
+        .or_else(|| match &provider.auth {
+            Some(ProviderAuthConfig::ChatGptPlan { .. }) => {
+                default_chatgpt_plan_context_window(model)
+            }
+            _ => None,
+        })
+        .filter(|value| *value > 0 && !model.trim().is_empty())
+        .ok_or(ProviderError::MissingModelCapacity)
 }
 
 pub fn resolve(
     settings: &PeriConfig,
     environment: &BTreeMap<String, String>,
 ) -> Option<ResolvedProvider> {
-    match (
+    try_resolve(settings, environment).unwrap_or_else(|error| {
+        tracing::warn!(%error, "provider configuration rejected");
+        None
+    })
+}
+
+/// Runtime resolution: the effective profile must resolve strictly.
+///
+/// Configured auxiliary tiers are scanned at the same boundary so an invalid subscription
+/// tier cannot later become a factory's implicit primary fallback. Provider-level errors
+/// (endpoint/auth) reject resolution; a missing model/window on an auxiliary tier is an
+/// unfinished binding and is ignored until edited. Persistence uses
+/// [`try_resolve_snapshot`], which additionally tolerates a capacity gap on the effective
+/// profile.
+pub fn try_resolve(
+    settings: &PeriConfig,
+    environment: &BTreeMap<String, String>,
+) -> Result<Option<ResolvedProvider>, ProviderError> {
+    resolve_with_policy(settings, environment, ResolutionPolicy::Runtime)
+}
+
+/// Resolve a candidate configuration document at the persistence boundary.
+///
+/// Provider-level defects (unknown type, unexpected auth, invalid endpoint or
+/// subscription, missing API key) still reject the document. A profile that only lacks
+/// model capacity is an unfinished binding: it yields no effective provider, but must not
+/// turn every configuration save into a failure. Runtime resolution ([`try_resolve`])
+/// stays strict for the effective profile.
+///
+/// Validate every configured provider before resolving profiles: unbound providers and
+/// unfinished profile bindings cannot hide provider-level errors.
+pub(crate) fn try_resolve_snapshot(
+    settings: &PeriConfig,
+    environment: &BTreeMap<String, String>,
+) -> Result<Option<ResolvedProvider>, ProviderError> {
+    resolve_with_policy(settings, environment, ResolutionPolicy::Snapshot)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResolutionPolicy {
+    Runtime,
+    Snapshot,
+}
+
+fn resolve_with_policy(
+    settings: &PeriConfig,
+    environment: &BTreeMap<String, String>,
+    policy: ResolutionPolicy,
+) -> Result<Option<ResolvedProvider>, ProviderError> {
+    if policy == ResolutionPolicy::Snapshot {
+        for provider in &settings.config.providers {
+            validate_provider(provider)?;
+        }
+    }
+    for alias in crate::app::Profiles::ALL {
+        let Some(profile) = settings.config.profiles.get(alias) else {
+            continue;
+        };
+        if profile.is_default() {
+            continue;
+        }
+        match try_resolve_for_alias(settings, alias) {
+            Ok(_) => {}
+            Err(ProviderError::MissingModelCapacity) => {
+                tracing::warn!(
+                    alias,
+                    "profile lacks model or context window; ignoring until edited"
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let selected = match (
         environment.get("MODEL_PROVIDER"),
         environment.get("MODEL_TYPE"),
     ) {
-        (None, None) => resolve_for_alias(settings, &settings.config.active_alias),
+        (None, None) => try_resolve_for_alias(settings, &settings.config.active_alias),
         (Some(provider_id), Some(alias)) => {
             resolve_for_provider_alias(settings, provider_id, alias)
         }
-        _ => None,
-    }
+        _ => Ok(None),
+    };
+    selected.or_else(|error| match error {
+        ProviderError::MissingModelCapacity if policy == ResolutionPolicy::Snapshot => {
+            tracing::warn!(
+                "effective profile lacks model or context window; provider unavailable until edited"
+            );
+            Ok(None)
+        }
+        error => Err(error),
+    })
 }
 
 pub fn resolve_for_alias(settings: &PeriConfig, alias: &str) -> Option<ResolvedProvider> {
-    let (provider, profile) = resolve_profile(&settings.config, alias)?;
+    try_resolve_for_alias(settings, alias).unwrap_or_else(|error| {
+        tracing::warn!(%error, "provider profile rejected");
+        None
+    })
+}
+
+pub fn try_resolve_for_alias(
+    settings: &PeriConfig,
+    alias: &str,
+) -> Result<Option<ResolvedProvider>, ProviderError> {
+    let Some((provider, profile)) = resolve_profile(&settings.config, alias) else {
+        return Ok(None);
+    };
     resolve_configured(
         provider,
         profile,
@@ -58,42 +265,55 @@ fn resolve_for_provider_alias(
     settings: &PeriConfig,
     provider_id: &str,
     alias: &str,
-) -> Option<ResolvedProvider> {
-    let provider = settings
+) -> Result<Option<ResolvedProvider>, ProviderError> {
+    let Some(provider) = settings
         .config
         .providers
         .iter()
-        .find(|provider| provider.id == provider_id && !provider_id.is_empty())?;
-    let profile = settings.config.profiles.get(alias)?;
-    let model = provider
+        .find(|provider| provider.id == provider_id && !provider_id.is_empty())
+    else {
+        return Ok(None);
+    };
+    let Some(profile) = settings.config.profiles.get(alias) else {
+        return Ok(None);
+    };
+    let Some(model) = provider
         .models
         .get_model(alias)
         .filter(|model| !model.is_empty())
-        .map(str::to_owned)?;
-    resolve_configured(provider, profile, model)
+    else {
+        return Ok(None);
+    };
+    resolve_configured(provider, profile, model.to_owned())
 }
 
 fn resolve_configured(
     provider: &ProviderConfig,
     profile: &ProfileConfig,
     model: String,
-) -> Option<ResolvedProvider> {
+) -> Result<Option<ResolvedProvider>, ProviderError> {
+    if provider.provider_type == "openai_responses" {
+        return resolve_responses(provider, profile, model);
+    }
+    validate_provider(provider)?;
     if provider.api_key.is_empty() {
-        return None;
+        return Ok(None);
     }
     let effort = Some(profile.effort.clone());
     let max_tokens = profile.max_tokens;
     let context_1m = profile.context_1m;
-    match provider.provider_type.as_str() {
-        "anthropic" => Some(ResolvedProvider::Anthropic {
+    let context_window = resolve_context_window(provider, profile, &model)?;
+    Ok(Some(match provider.provider_type.as_str() {
+        "anthropic" => ResolvedProvider::Anthropic {
             api_key: provider.api_key.clone(),
             model,
             base_url: (!provider.base_url.is_empty()).then(|| provider.base_url.clone()),
             effort,
             max_tokens,
             context_1m,
-        }),
-        _ => Some(ResolvedProvider::OpenAi {
+            context_window,
+        },
+        "openai" | "" => ResolvedProvider::OpenAi {
             api_key: provider.api_key.clone(),
             model,
             base_url: if provider.base_url.is_empty() {
@@ -104,8 +324,101 @@ fn resolve_configured(
             effort,
             max_tokens,
             context_1m,
-        }),
+            context_window,
+        },
+        _ => return Err(ProviderError::UnknownType),
+    }))
+}
+
+fn validate_provider(provider: &ProviderConfig) -> Result<(), ProviderError> {
+    if provider.provider_type == "openai_responses" {
+        return validate_responses_provider(provider).map(|_| ());
     }
+    if provider.auth.is_some() {
+        return Err(ProviderError::UnexpectedAuth);
+    }
+    if !matches!(provider.provider_type.as_str(), "anthropic" | "openai" | "") {
+        return Err(ProviderError::UnknownType);
+    }
+    Ok(())
+}
+
+fn resolve_responses(
+    provider: &ProviderConfig,
+    profile: &ProfileConfig,
+    model: String,
+) -> Result<Option<ResolvedProvider>, ProviderError> {
+    let ResponsesProviderAccess { endpoint, auth } = validate_responses_provider(provider)?;
+    let context_window = resolve_context_window(provider, profile, &model)?;
+    Ok(Some(ResolvedProvider::Responses {
+        auth,
+        endpoint,
+        model,
+        effort: (!profile.effort.is_empty()).then(|| profile.effort.clone()),
+        max_tokens: profile.max_tokens,
+        context_window,
+    }))
+}
+
+/// Validate the endpoint and authentication of a Responses provider without consulting a
+/// profile.
+///
+/// Editors use this to locate provider-field errors before any profile is bound; the
+/// resolver calls it at the same authority boundary so both paths accept exactly the same
+/// configurations. Profile model/capacity remains the caller's responsibility.
+pub fn validate_responses_provider(
+    provider: &ProviderConfig,
+) -> Result<ResponsesProviderAccess, ProviderError> {
+    let endpoint = Url::parse(if provider.base_url.is_empty() {
+        DEFAULT_RESPONSES_URL
+    } else {
+        &provider.base_url
+    })
+    .map_err(|_| ProviderError::InvalidEndpoint)?;
+    if !matches!(endpoint.scheme(), "http" | "https")
+        || endpoint.host_str().is_none()
+        || !endpoint.username().is_empty()
+        || endpoint.password().is_some()
+        || endpoint.query().is_some()
+        || endpoint.fragment().is_some()
+    {
+        return Err(ProviderError::InvalidEndpoint);
+    }
+    let auth = match &provider.auth {
+        Some(ProviderAuthConfig::ChatGptPlan {
+            store,
+            account,
+            subject,
+            client_id,
+        }) => {
+            if !provider.api_key.is_empty()
+                || !store.is_absolute()
+                || !peri_acp_types::model::valid_account_reference(account)
+                || subject.trim().is_empty()
+                || client_id.trim().is_empty()
+            {
+                return Err(ProviderError::InvalidSubscriptionReference);
+            }
+            if endpoint.as_str() != DEFAULT_RESPONSES_URL {
+                return Err(ProviderError::InvalidSubscriptionEndpoint);
+            }
+            ResponsesAuthentication::ChatGptPlan {
+                store: store.clone(),
+                account: account.clone(),
+                subject: subject.clone(),
+                client_id: client_id.clone(),
+            }
+        }
+        Some(ProviderAuthConfig::ApiKey) | None => {
+            if provider.api_key.is_empty() {
+                return Err(ProviderError::MissingApiKey);
+            }
+            ResponsesAuthentication::ApiKey {
+                api_key: provider.api_key.clone(),
+            }
+        }
+    };
+    Ok(ResponsesProviderAccess { endpoint, auth })
 }
 
 fn resolve_profile<'a>(
@@ -138,12 +451,18 @@ fn resolve_model_name(provider: &ProviderConfig, alias: &str, profile: &ProfileC
 fn default_model_name(provider_type: &str) -> &str {
     if provider_type == "anthropic" {
         DEFAULT_ANTHROPIC_MODEL
+    } else if provider_type == "openai_responses" {
+        ""
     } else {
         DEFAULT_OPENAI_MODEL
     }
 }
 
 pub const ENVIRONMENT_KEYS: &[&str] = &["MODEL_PROVIDER", "MODEL_TYPE"];
+
+#[cfg(test)]
+#[path = "provider_responses_test.rs"]
+mod responses_tests;
 
 #[cfg(test)]
 mod tests {
@@ -192,6 +511,7 @@ mod tests {
                 effort: Some("xhigh".into()),
                 max_tokens: 32000,
                 context_1m: false,
+                context_window: 200_000,
             })
         );
     }
@@ -268,6 +588,7 @@ mod tests {
             effort: "max".into(),
             max_tokens: 64000,
             context_1m: true,
+            context_window: None,
         };
         assert_eq!(
             resolve(&config, &BTreeMap::new()),
@@ -278,6 +599,7 @@ mod tests {
                 effort: Some("max".into()),
                 max_tokens: 64000,
                 context_1m: true,
+                context_window: 1_000_000,
             })
         );
     }
@@ -323,11 +645,36 @@ mod tests {
         assert!(
             matches!(resolve_for_alias(&config, "fable"), Some(ResolvedProvider::Anthropic { model, .. }) if model == DEFAULT_ANTHROPIC_MODEL)
         );
-        config.config.providers[0].provider_type = "custom".into();
+        config.config.providers[0].provider_type = "openai".into();
         config.config.providers[0].base_url = "https://configured.example/v1".into();
         assert!(
             matches!(resolve_for_alias(&config, "fable"), Some(ResolvedProvider::OpenAi { model, base_url, .. }) if model == DEFAULT_OPENAI_MODEL && base_url == "https://configured.example/v1")
         );
+    }
+
+    #[test]
+    fn legacy_provider_capacity_is_resolved_once_for_both_protocols() {
+        for provider_type in ["anthropic", "openai"] {
+            let mut config = settings(provider_type);
+            for (window, context_1m, expected) in [
+                (Some(128_000), false, 128_000),
+                (None, false, 200_000),
+                (Some(0), false, 200_000),
+                (Some(0), true, 1_000_000),
+                (Some(128_000), true, 1_000_000),
+                (None, true, 1_000_000),
+            ] {
+                config.config.profiles.opus.context_window = window;
+                config.config.profiles.opus.context_1m = context_1m;
+                let resolved = try_resolve_for_alias(&config, "opus").unwrap().unwrap();
+                assert_eq!(
+                    resolved.effective_context_window(),
+                    expected,
+                    "{provider_type}"
+                );
+                assert_eq!(effective_context_window(&config, "opus"), Some(expected));
+            }
+        }
     }
 
     #[test]

@@ -2,6 +2,7 @@ use super::*;
 
 fn make_state(phase: SessionPhase, variant: u8) -> BridgeState {
     BridgeState {
+        child_runs: Default::default(),
         variant,
         committed: im::Vector::new(),
         current_turn: CurrentTurn::new(),
@@ -14,7 +15,7 @@ fn make_state(phase: SessionPhase, variant: u8) -> BridgeState {
         last_pushed_text_len: 0,
         last_pushed_reasoning_len: 0,
         last_successful_todos: None,
-        last_successful_todo_sequence: None,
+        todo_baseline_sequence: None,
         next_todo_sequence: 0,
         todo_call_inputs: std::collections::HashMap::new(),
         turn_generation: 0,
@@ -295,6 +296,8 @@ fn test_dispatch_sync_subagent_tool_routed_to_group() {
             tool_id: "tc-1".into(),
             input_summary: "path: foo.rs".into(),
             raw_input: serde_json::Value::Null,
+            origin_message_id: None,
+            origin_readable: None,
         }),
     );
     // 工具结束
@@ -350,6 +353,8 @@ fn test_late_agent_tool_card_adopts_early_subagent_group() {
             tool_id: tool_id.into(),
             input_summary: summary.into(),
             raw_input: serde_json::json!({ "prompt": summary }),
+            origin_message_id: None,
+            origin_readable: None,
         })
     };
     let child_tool = |agent_id: &str, tool_id: &str, name: &str| {
@@ -359,6 +364,8 @@ fn test_late_agent_tool_card_adopts_early_subagent_group() {
             tool_id: tool_id.into(),
             input_summary: format!("{name} input"),
             raw_input: serde_json::Value::Null,
+            origin_message_id: None,
+            origin_readable: None,
         })
     };
 
@@ -446,6 +453,8 @@ fn test_concurrent_agent_calls_pair_by_parent_tool_call_id() {
                 tool_id: tool_id.into(),
                 input_summary: summary.into(),
                 raw_input: serde_json::json!({ "prompt": summary }),
+                origin_message_id: None,
+                origin_readable: None,
             }),
         );
     }
@@ -472,6 +481,8 @@ fn test_concurrent_agent_calls_pair_by_parent_tool_call_id() {
                 tool_id: format!("{agent_id}-tool"),
                 input_summary: "file.rs".into(),
                 raw_input: serde_json::Value::Null,
+                origin_message_id: None,
+                origin_readable: None,
             }),
         );
     }
@@ -542,6 +553,8 @@ fn test_flush_does_not_reorder_completed_subagent_after_running_group() {
                 tool_id: tool_id.into(),
                 input_summary: format!("start {agent_id}"),
                 raw_input: serde_json::json!({ "prompt": agent_id }),
+                origin_message_id: None,
+                origin_readable: None,
             }),
         );
         dispatch_and_notify(

@@ -390,6 +390,30 @@ fn test_unknown_block_preserved_with_explicit_coverage_gap() {
 }
 
 #[test]
+fn provider_replay_preserves_whole_call_result_step_under_micro_pressure() {
+    let mut transcript = MessageTranscript::new();
+    let (assistant_id, _) = step(&mut transcript, 0, "Read", &"large result".repeat(5000));
+    let mut assistant = transcript.get(assistant_id).unwrap().message().clone();
+    if let BaseMessage::Ai { content, .. } = &mut assistant {
+        *content = MessageContent::blocks(vec![ContentBlock::ProviderState {
+            provider: "openai_responses".into(),
+            data: serde_json::json!({"version":1,"items":[{"type":"reasoning","encrypted_content":"opaque"}]}),
+        }]);
+    }
+    transcript.replace_by_id(assistant);
+    let expected = serde_json::to_value(transcript.visible_messages()).unwrap();
+    let plan = plan(
+        &transcript,
+        &facts(&transcript, ContextRetention::Recomputable),
+    );
+    assert!(plan.actions.is_empty());
+    assert_eq!(plan.diagnostics.archived_exchange_count, 0);
+    let view = render_micro_plan(&transcript, &plan, &ProviderCapabilities::openai()).unwrap();
+    assert_eq!(serde_json::to_value(&view).unwrap(), expected);
+    assert!(view[0].message_content().has_provider_state());
+}
+
+#[test]
 fn test_small_window_recent_budget_scales_and_does_not_preserve_entire_task() {
     let mut transcript = MessageTranscript::new();
     step(&mut transcript, 0, "Read", &"large recent".repeat(5000));

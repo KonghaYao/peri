@@ -185,6 +185,8 @@ async fn handle_agent_text_submit(
     {
         if let Some(tx) = LOCAL_EVENT_TX.get() {
             let _ = tx.send(AcpEventWithEpoch {
+                child_origin: None,
+                view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
                 event: AcpEventData::PromptSubmitted {
                     request_id: Some(request_id.clone()),
                 },
@@ -243,6 +245,8 @@ async fn handle_keepgoing_submit(
     // 由 bridge 统一管理 phase/variant/is_loading 状态。
     if let Some(tx) = LOCAL_EVENT_TX.get() {
         let _ = tx.send(AcpEventWithEpoch {
+            child_origin: None,
+            view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
             event: AcpEventData::PromptSubmitted {
                 request_id: Some(request_id.clone()),
             },
@@ -411,6 +415,8 @@ fn clear_loading_state() {
     }
     if let Some(tx) = LOCAL_EVENT_TX.get() {
         let _ = tx.send(AcpEventWithEpoch {
+            child_origin: None,
+            view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
             event: AcpEventData::LocalLoadingReset,
             active_session_id: String::new(),
         });
@@ -422,6 +428,8 @@ fn clear_loading_state() {
 fn reset_failed_prompt(session_id: &str, request_id: &str) {
     if let Some(tx) = LOCAL_EVENT_TX.get() {
         let _ = tx.send(AcpEventWithEpoch {
+            child_origin: None,
+            view_epoch: crate::kit::atoms::BRIDGE_RESET_COUNTER.get(),
             event: AcpEventData::PromptFailed {
                 request_id: request_id.to_owned(),
             },

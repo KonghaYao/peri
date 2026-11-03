@@ -1,6 +1,7 @@
 //! Canonical state and lifecycle for one streaming turn.
 
 mod archive;
+mod preview;
 mod projection;
 mod streaming;
 mod subagents;
@@ -157,6 +158,48 @@ impl Default for CurrentTurn {
 }
 
 impl CurrentTurn {
+    pub(crate) fn preview_memory_bytes(&self) -> usize {
+        let segment_bytes = self.segments.capacity() * std::mem::size_of::<TurnSegment>()
+            + self
+                .segments
+                .iter()
+                .map(|segment| match segment {
+                    TurnSegment::AssistantText { message_id, .. } => {
+                        message_id.as_ref().map_or(0, String::capacity)
+                    }
+                    TurnSegment::SystemNote { text, .. } => text.capacity(),
+                    TurnSegment::SystemReminder(reminder) => {
+                        crate::kit::retained_bytes::retained_reminder_bytes(reminder)
+                    }
+                    TurnSegment::UserBubble {
+                        text,
+                        attachments,
+                        message_id,
+                    } => {
+                        text.capacity()
+                            + attachments.capacity()
+                                * std::mem::size_of::<crate::kit::tui_render_unit::UserAttachment>()
+                            + message_id.as_ref().map_or(0, String::capacity)
+                    }
+                    _ => 0,
+                })
+                .sum::<usize>()
+            + self.pending_subagent_groups.capacity() * std::mem::size_of::<PendingSubagentGroup>()
+            + self
+                .pending_subagent_groups
+                .iter()
+                .map(|g| g.parent_tool_call_id.as_ref().map_or(0, String::capacity))
+                .sum::<usize>()
+            + self.last_message_id.as_ref().map_or(0, String::capacity);
+        self.raw_memory_bytes()
+            .reserved
+            .saturating_add(segment_bytes)
+            .saturating_add(crate::kit::retained_bytes::retained_units_bytes(
+                self.cached_view_models.iter(),
+                &mut crate::kit::retained_bytes::SeenAllocations::default(),
+            ))
+    }
+
     /// 原始累积器的只读计量。
     ///
     /// 只覆盖真正持有正文的原始字段：`text`/`reasoning`、`tool_cards` 的
@@ -208,7 +251,7 @@ pub(super) struct PendingSubagentGroup {
 }
 
 /// A single entry in the chronological ordering of a turn's streaming events.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum TurnSegment {
     /// Text and reasoning belonging to one assistant bubble.
     /// `text_end_byte`: end (exclusive) of the text slice in `CurrentTurn.text`.
@@ -239,6 +282,8 @@ enum TurnSegment {
         level: TuiNoteLevel,
         content_hash: u64,
     },
+    /// A forwarded child reminder belongs to that child's bounded display timeline.
+    SystemReminder(Box<crate::kit::tui_render_unit::TuiSystemReminder>),
     /// A user input delivered while a running subagent keeps this turn open.
     UserBubble {
         text: String,

@@ -1,7 +1,6 @@
 # 配置权威面
 
-> 状态：现行设计。Peri 内部核心权威面已实现；专属领域扩展与部署验收见
-> 进度与验收记录：[2026-10 月志](../../spec/history/2026-10.md)（2026-10-01 条目）。
+> 状态：现行设计。Peri 内部核心权威面已实现；专属领域边界与未闭环的部署接线见文内。
 > 本文定义稳定边界，代码入口见 [peri-config 索引](../code-index/peri-config.md)。
 
 ## 权威与依赖
@@ -50,7 +49,7 @@ JSON merge。`ConfigurationSnapshot::resolve(scope, inputs)` 不进行 I/O，校
 | 领域 | 核心规则 |
 | --- | --- |
 | Settings | workspace 按领域覆盖 global；profiles 整体替换，MetaHarness 逐 key 合并 |
-| Provider | `MODEL_PROVIDER` + `MODEL_TYPE` 成对指定配置中的 provider ID 与档位；未指定时取 active profile；默认值与 alias 规则归 core |
+| Provider | `MODEL_PROVIDER` + `MODEL_TYPE` 成对指定配置中的 provider ID 与档位；未指定时取 active profile；默认值与 alias 规则归 core。快照/保存边界只拒绝 provider 级缺陷（type/endpoint/auth），缺 model/`contextWindow` 的未完成绑定只让 provider 不可用，不拒绝整份文档；运行时解析对生效档位保持严格 |
 | MCP | global → plugin → project；手动内容去重插件，typed 准入；cache 任一来源 false 关闭 |
 | Langfuse | global settings 后具名环境覆盖；维持 clamp、非法数值 fallback 与 batch 语义 |
 | UI | 从合并 settings extra 投影 `TuiConfig`；bool 写回与可选键移除规则归 core |
@@ -82,7 +81,7 @@ revision 由 scope 和输入内容确定，包含文件正文与具名环境；�
 正常 `settings::ConfigSource` 固定布局并持有 `ConfigurationSystem`，为宿主提供
 snapshot、显式 `reload_merged` 与 `save`；ACP store 仅 re-export。lenient 加载
 失败可维持可用的设置视图，但没有成功 authority 时不能声称发布了有效快照，
-仅临时可读、不可写。无 authority 的旧合并/保存路径已删除，reload/save 必须
+仅临时可读、不可写。不存在无 authority 的合并/保存路径，reload/save 必须
 明确失败，布局失败不得误写全局层。
 
 `ConfigSource::save(expected_revision, &PeriConfig)` 返回
@@ -116,13 +115,21 @@ MCP 更新只维护 `.mcp.json` 的 MCP 键，保留同文件其他领域。`loa
 
 ## Consumer 生命周期
 
+Responses 运行时窗口由 `peri-config::provider` 统一解析：已确认的 ChatGPT plan
+模型缺失 `contextWindow` 时派生 1M 默认值，不写回 settings；其他 Responses
+绑定仍需显式窗口，显式无效值不能被默认值覆盖。
+
 ACP 持久 configOptions 分支与 `update_config` 按 candidate → 验证 → 保存成功 →
 用 accepted snapshot 发布处理；保存失败不更新 live provider 或 agent cache，
-不发送配置通知、不返回成功。该失败顺序已修复，但不意味着客户端延迟编辑的
-revision token 已通过远程 wire 传递。
-TUI `save_effective` 当前为串行当前视图便利入口，仍在提交时读取 snapshot revision；
-延迟编辑器必须保留编辑开始的 token，远程请求也须携带对应基线。这些接线审计
-见 active issue，不能把 public core 接受 expected revision 等同于全链路已闭环。
+不发送配置通知、不返回成功。但客户端延迟编辑的 revision token 仍未通过远程 wire 传递。
+TUI `save_effective` 仍为即时编辑便利入口，提交时读取 snapshot revision；Login provider
+编辑与 Model 的 Responses 档位/contextWindow 长草稿改用 `save_effective_at(expected, cfg)`：
+进入编辑时捕获 token，成功后只发布 authority 返回的 accepted snapshot，冲突要求重新载入。
+打开 Login/Model 与冲突后的 `Ctrl+R` 走显式 `reload_merged` 并刷新缓存，不写文件；重载
+使当前草稿失效，再次进入编辑以新 revision 为基线，不自动 rebase 或重试保存。只有
+revision/authority 冲突显示重新载入提示，字段错误不提供该动作。
+ACP `update_config` 仍不携带草稿 revision token，远程延迟编辑的 wire 级 CAS 尚未闭环；
+public core 接受 expected revision 不等于全链路已闭环。
 
 ACP 宿主装配将同一 `ConfigSource` snapshot 注入其新建 MCP pool，并从该快照
 取 provider/观测投影。pool 初始化前一次绑定 revision；middleware 消费冻结的
@@ -131,10 +138,10 @@ MCP snapshot 的执行目录准入先比较路径；写法不同时，经配置 
 解析为同一目录，接受 Windows 普通路径与 canonical verbatim 路径等别名。目录
 不可核对或不同仍拒绝，核对不重读 settings，也不重解析冻结输入或改变 revision。
 workspace 资源 consumer 从 `snapshot.resources().disable_bundled_skills` 取开关，
-正常 snapshot 路径已停止重新读取全局值；这不意味着存储或全部资源配置已迁入。
+不重新读取全局值；这不意味着存储或全部资源配置已迁入。
 
 未注入快照的独立 pool adapter 仍委托 core 解析，不能据此声称所有 pool 已绑定
-同一 revision。部署接线范围在 active issue 核对。
+同一 revision。
 文件变动、save 或显式 reload 不会热替换既有 pool，也不重写已冻结 session prefix；
 未来会话、当前 provider 刷新与 UI 草稿的生效边界由对应宿主操作决定。
 读取新来源需要显式 reload 并重新取得新 snapshot；旧 pool 固定旧 Arc，没有 hot watcher。
@@ -144,4 +151,4 @@ workspace 资源 consumer 从 `snapshot.resources().disable_bundled_skills` 取�
 插件安装/启用/市场生命周期、hook 格式与来源、OS 工具执行环境、
 存储 locator 与 credentials 不因新增核心而自动迁入。后续扩展须明确 typed
 规则、来源 ownership、scope 与生效生命周期，不能把它们统一成任意 JSON merge。
-本设计描述核心权威面，完整扩展与验证状态仅由 active issue 维护。
+本设计只描述核心权威面；扩展落地须另行补充 typed 规则、来源 ownership、scope 与生效生命周期，并按这些边界验证。

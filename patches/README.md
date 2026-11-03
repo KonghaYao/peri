@@ -19,6 +19,8 @@ python3 scripts/test-cargo-patches.py
 
 仓库使用 `rmcp 3.5.1`，并通过 [补丁](rmcp-3.5.1-task-subscriptions.patch)补齐 Tasks 扩展的 `taskIds` 订阅和 `notifications/tasks`。补丁不依赖 GitHub fork，也不提交第三方源码。
 
+同一补丁还限制 generic service loop 的成功 response 日志：`CustomResult` 可能承载凭据，且 response 事件没有 method 关联，故收发 TRACE 仅记录请求 ID 与方向，handler DEBUG 仅记录请求 ID。请求、通知、JSON-RPC 错误与传输错误仍保留完整诊断；业务 `Err` 被成功 `CustomResult` 包装时，由 credentials handler 自己记录类型化错误。此调整不修改 MCP wire、不隐藏错误内容、不绕过 credentials MCP。回归位于 `mcp-packages/credentials` 的模型认证测试，覆盖 DEBUG/TRACE 下合成成功 token 不落日志和错误诊断保留。
+
 从新 checkout 构建时，用仓库脚本代替直接调用 Cargo：
 
 ```bash
@@ -32,11 +34,11 @@ python3 scripts/test-cargo-patches.py
 ./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --release --bin peri
 ```
 
-配置取舍与 macOS 对照范围见[体积调查](../docs/experiment-release-binary-size/conclusion.md)。不通过改变 panic unwind 语义或平台专用导出白名单缩小产物。
+配置取舍以根 `Cargo.toml` 的 `[profile.release]` 为事实源。不通过改变 panic unwind 语义或平台专用导出白名单缩小产物。
 
 脚本下载 crates.io 的固定发布包，核验 SHA-256，用 `patch`（缺少时以独立临时 Git 仓库执行 `git apply`）应用补丁并反向校验缓存，再以 Cargo `[patch.crates-io]` 配置运行所给命令。生成的源码位于 gitignored 的 `target/peri-*-patches/`，按补丁哈希隔离；第二次运行复用缓存。`Cargo.lock` 记录本地 patched crate，因此直接运行 `cargo --locked` 不会偷偷回退到未打补丁的 registry 版本。CI、pre-release、release、Lefthook 和 `./dev.sh` 的编译命令也使用该脚本；Windows CI 用 Git Bash 运行脚本，脚本将 crate 和 Cargo 配置路径统一转换给原生 `cargo.exe`。脚本保留调用者的工作目录，让 `./dev.sh --cwd=...` 仍以指定目录启动 TUI。Linux 的 cross 构建使用 `./scripts/cargo-rmcp-patched.sh --cross build …`；cross 在构建前会先运行一次不带 `--config` 的 `cargo metadata`，调用方（如 release workflow）须把同一份 `[patch.crates-io]` 配置写入 `$CARGO_HOME/config.toml`，否则这次调用会按 crates.io 版本改写 `Cargo.lock`，令 `--locked` 构建失败。更新补丁后，使用脚本执行 `update -p <crate>` 并提交更新后的 lockfile。
 
-Emscripten 目标固定 Cloudflare 的 Mio 与 Tokio 分支。`reqwest 0.13.4` 与 `turso_serverless 0.1.3` 使用官方发布版，经 native/Hyper HTTP 后端保持远程 MCP、模型和存储的 `Send` 契约。WASM 构建用 `scripts/cargo-wasm.sh` 加上 linker 和 Tokio 事件循环参数；用法与已验证范围见 [`peri-wasm/README.md`](../peri-wasm/README.md)。
+Emscripten 目标固定 Cloudflare 的 Mio 与 Tokio 分支。`reqwest 0.13.4` 使用官方发布版，经 native/Hyper HTTP 后端保持远程 MCP、模型和存储的 `Send` 契约。[`turso_serverless 0.1.3`](turso-serverless-0.1.3-wasm-fetch.patch) 的补丁把驱动的网络原语抽成 `HttpExecutor`：默认仍是 reqwest，Emscripten 目标可经 `wasm-fetch` feature 改用宿主 `fetch`（浏览器没有 POSIX socket）。驱动线路协议、错误形态与 `Send` 契约不变；原生目标行为不变。WASM 构建用 `scripts/cargo-wasm.sh` 加上 linker 和 Tokio 事件循环参数；用法与已验证范围见 [`peri-wasm/README.md`](../peri-wasm/README.md)。
 
 [`hyper-util 0.1.21`](hyper-util-0.1.21-emscripten-dns.patch) 的默认 GAI resolver 原本调用 `spawn_blocking`，Emscripten 无法启动 worker thread。目标专用补丁把域名查找交给 Cloudflare Tokio 的异步 DNS，原生目标仍用原解析器。脚本按固定发布包 SHA-256 获取并校验该补丁；`Cargo.lock` 锁定 patched crate。
 

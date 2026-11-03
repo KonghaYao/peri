@@ -37,7 +37,7 @@ impl BaseTool for ReadFixture {
         _: ToolContext<'_>,
     ) -> Result<ToolOutput, Box<dyn std::error::Error + Send + Sync>> {
         Ok(ToolOutput::with_execution(
-            "canonical-read-data ".repeat(1000),
+            "canonical-read-data ".repeat(4000),
             ToolExecutionEvidence {
                 status: ToolExecutionStatus::Completed,
                 task_id: None,
@@ -186,7 +186,7 @@ async fn successful_response_barrier_allows_only_previously_exposed_results() {
             .iter()
             .find(|m| matches!(m, BaseMessage::Tool {tool_call_id,..} if tool_call_id == "read-0"));
         assert!(
-            old.is_none_or(|m| m.content().chars().count() < 19_000),
+            old.is_none_or(|m| m.content().chars().count() < 70_000),
             "consumed old result should be projected"
         );
         let newest = requests[3]
@@ -197,7 +197,7 @@ async fn successful_response_barrier_allows_only_previously_exposed_results() {
             newest.content(),
             format!(
                 "{}\n[Execution status: completed]",
-                "canonical-read-data ".repeat(1000)
+                "canonical-read-data ".repeat(4000)
             ),
             "fresh result has not crossed a successful response barrier"
         );
@@ -222,7 +222,7 @@ async fn successful_response_barrier_allows_only_previously_exposed_results() {
         .all(|m| m.content()
             == format!(
                 "{}\n[Execution status: completed]",
-                "canonical-read-data ".repeat(1000)
+                "canonical-read-data ".repeat(4000)
             )));
 }
 

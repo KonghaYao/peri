@@ -49,6 +49,21 @@ fn acp_settings_stdin_is_explicit_opt_in() {
     assert!(validate_cli(&cli).is_err());
 }
 
+#[test]
+fn update_use_proxy_is_opt_in() {
+    let cli = Cli::try_parse_from(["peri", "update"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Update { use_proxy: false })
+    ));
+
+    let cli = Cli::try_parse_from(["peri", "update", "--use-proxy"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Update { use_proxy: true })
+    ));
+}
+
 fn make_temp_file(content: &str) -> tempfile::TempPath {
     use std::io::Write;
     let mut file = tempfile::NamedTempFile::new().unwrap();
@@ -366,6 +381,36 @@ fn test_session_store_deployment_normalizes_locator_options() {
     assert_eq!(deployment.engine_name(), Some("turso"));
     assert_eq!(deployment.credential_env_name(), Some("TURSO_TOEKN"));
     assert_eq!(deployment.access(), AccessMode::ReadOnly);
+}
+
+/// 本机会话库路径：默认库、`--db-path` 绝对化、远程 locator 不猜。
+#[test]
+fn test_local_session_db_path_default_is_threads_db() {
+    let path = local_session_db_path(&SessionStoreDeployment::default_local())
+        .expect("默认本机库应可定位");
+    assert!(path.is_absolute());
+    assert!(path.ends_with(PathBuf::from(".peri").join("threads").join("threads.db")));
+}
+
+#[test]
+fn test_local_session_db_path_keeps_absolute_local_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let expected = directory.path().join("custom.db");
+    let deployment = SessionStoreDeployment::local_path(expected.clone());
+    assert_eq!(local_session_db_path(&deployment), Some(expected));
+}
+
+#[test]
+fn test_local_session_db_path_absolutizes_relative_local_path() {
+    let deployment = SessionStoreDeployment::local_path(PathBuf::from("relative/custom.db"));
+    let expected = std::env::current_dir().unwrap().join("relative/custom.db");
+    assert_eq!(local_session_db_path(&deployment), Some(expected));
+}
+
+#[test]
+fn test_local_session_db_path_ignores_remote_locator() {
+    let deployment = SessionStoreDeployment::from_locator("libsql://example/db");
+    assert_eq!(local_session_db_path(&deployment), None);
 }
 
 /// `Debug` 保留 locator 原文，供运行时诊断。

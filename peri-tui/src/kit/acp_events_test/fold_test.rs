@@ -35,6 +35,8 @@ fn test_turn_interrupted_stops_running_tool_card_animation() {
             input_summary: "sleep 10".into(),
             raw_input: serde_json::json!({"command": "sleep 10"}),
             agent_id: None,
+            origin_message_id: None,
+            origin_readable: None,
         }),
     );
     let running = VIEW_MODELS.state().read().clone();
@@ -146,6 +148,8 @@ fn test_fold_pass_tool_preview_then_terminal_collapsed() {
             input_summary: "README.md".into(),
             raw_input: serde_json::json!({"path": "README.md"}),
             agent_id: None,
+            origin_message_id: None,
+            origin_readable: None,
         }),
     );
     let snap = VIEW_MODELS.state().read().clone();
@@ -180,6 +184,8 @@ fn test_fold_pass_tool_preview_then_terminal_collapsed() {
             input_summary: "false".into(),
             raw_input: serde_json::json!({"command": "false"}),
             agent_id: None,
+            origin_message_id: None,
+            origin_readable: None,
         }),
     );
     dispatch_and_notify(
@@ -355,6 +361,8 @@ fn test_subagent_completed_with_failed_child_tool_not_error() {
             input_summary: "src".into(),
             raw_input: serde_json::json!({"pattern": "x"}),
             agent_id: Some("sa-1".into()),
+            origin_message_id: None,
+            origin_readable: None,
         }),
     );
     // 子工具失败
@@ -503,6 +511,8 @@ fn test_fold_pass_tool_manual_override_restores_user_modified() {
             input_summary: "a".into(),
             raw_input: serde_json::json!({"path": "a"}),
             agent_id: None,
+            origin_message_id: None,
+            origin_readable: None,
         }),
     );
     dispatch_and_notify(

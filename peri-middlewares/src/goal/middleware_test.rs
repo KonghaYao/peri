@@ -97,7 +97,7 @@ async fn test_after_agent_background_tasks_suppress_and_resume_goal() {
                 .await
                 .unwrap();
             session.queue().drain_all();
-            manager
+            let registration = manager
                 .register(BgTaskRegistration {
                     task_id: "background".into(),
                     kind,
@@ -119,8 +119,9 @@ async fn test_after_agent_background_tasks_suppress_and_resume_goal() {
                     "紧迫感不应增长"
                 );
             }
+            manager.confirm_external_execution_stopped(&registration);
             assert!(manager.complete(
-                "background",
+                &registration,
                 BackgroundTaskResult {
                     task_id: "background".into(),
                     agent_name: "边界替身".into(),

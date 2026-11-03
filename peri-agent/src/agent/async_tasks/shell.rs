@@ -124,7 +124,7 @@ pub fn parse_background_timeout(
 pub fn finalize_bg_shell(
     registry: &Arc<BackgroundTaskRegistry>,
     on_bg_complete: &Option<peri_acp_types::tasks::OnBgCompleteFn>,
-    task_id: String,
+    ticket: peri_acp_types::tasks::TaskRegistrationTicket,
     prompt_summary: String,
     success: bool,
     output: String,
@@ -132,6 +132,14 @@ pub fn finalize_bg_shell(
     timed_out: bool,
     shell_output: Option<peri_acp_types::event::ShellOutput>,
 ) {
+    let task_id = ticket.task_id().to_owned();
+    if let Err(error) = registry.validate_ticket(&ticket) {
+        tracing::error!(%task_id, %error, "shell result has no registration capability");
+        return;
+    }
+    if ticket.is_settled() {
+        return;
+    }
     let result = BackgroundTaskResult {
         task_id: task_id.clone(),
         agent_name: "bg-shell".to_string(),
@@ -157,15 +165,19 @@ pub fn finalize_bg_shell(
         shell_output: shell_output.map(Box::new),
     };
     if let Some(delivery) = on_bg_complete {
-        if let Err(error) = registry.settle_completed(&task_id, result, Arc::clone(delivery)) {
+        if let Err(error) = registry.settle_completed(&ticket, result, Arc::clone(delivery)) {
             tracing::error!(%task_id, %error, "shell terminal delivery is pending");
         }
         return;
     }
-    if registry.claim_completion(&task_id) {
-        registry.complete(&result.task_id.clone(), result);
+    if registry.claim_completion(&ticket) {
+        registry.complete(&ticket, result);
     } else {
-        registry.claim_cancelled_cleanup(&task_id);
+        if registry.claim_cancelled_cleanup(&ticket).is_some() {
+            registry.mark_registration_settled(&ticket);
+            registry.retire_settled_projection(&ticket);
+            registry.notify_activity_change();
+        }
     }
 }
 
@@ -175,12 +187,12 @@ mod tests {
     use crate::agent::async_tasks::{
         BackgroundTask, BackgroundTaskRegistry, BackgroundTaskStatus, BgCancelHandle,
     };
-    use peri_acp_types::tasks::BgTaskKind;
+    use peri_acp_types::tasks::{BgTaskKind, TaskRegistrationTicket};
     use std::sync::Arc;
 
-    fn registered_shell() -> Arc<BackgroundTaskRegistry> {
+    fn registered_shell() -> (Arc<BackgroundTaskRegistry>, TaskRegistrationTicket) {
         let registry = Arc::new(BackgroundTaskRegistry::new());
-        registry
+        let ticket = registry
             .register_with_kind(BackgroundTask {
                 id: "shell-panic".into(),
                 agent_name: "bg-shell".into(),
@@ -199,12 +211,13 @@ mod tests {
                 owner_identity: None,
             })
             .expect("register test shell");
-        registry
+        registry.confirm_external_stopped(&ticket);
+        (registry, ticket)
     }
 
     #[test]
     fn callback_panic_retains_registered_shell_until_delivery_retry() {
-        let registry = registered_shell();
+        let (registry, ticket) = registered_shell();
         let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
         registry.set_event_sender(sender, "fixture".into());
         let callback_registry = Arc::clone(&registry);
@@ -224,7 +237,7 @@ mod tests {
         finalize_bg_shell(
             &registry,
             &Some(Arc::clone(&callback)),
-            "shell-panic".into(),
+            ticket.clone(),
             "test".into(),
             true,
             "completed".into(),
@@ -254,7 +267,7 @@ mod tests {
 
     #[test]
     fn cancelled_shell_reports_owner_cleanup_once_without_second_registry_terminal() {
-        let registry = registered_shell();
+        let (registry, ticket) = registered_shell();
         let mut changes = registry.subscribe_events();
         registry.cancel("shell-panic").unwrap();
         let called = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -267,7 +280,7 @@ mod tests {
         finalize_bg_shell(
             &registry,
             &Some(Arc::clone(&callback)),
-            "shell-panic".into(),
+            ticket.clone(),
             "test".into(),
             true,
             "completed".into(),
@@ -278,7 +291,7 @@ mod tests {
         finalize_bg_shell(
             &registry,
             &Some(callback),
-            "shell-panic".into(),
+            ticket.clone(),
             "test".into(),
             true,
             "completed".into(),

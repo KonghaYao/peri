@@ -1,0 +1,168 @@
+/*
+ * 空会话欢迎页（chat-welcome）。
+ * 颜色、字号、间距与圆角消费基础层 chat-tokens.css 的 `--chat-*` 变量；
+ * 括号内的 fallback 只在 token 尚未加载时兜底。
+ * 欢迎页使用 `chat-welcome-*` 选择器；旧 `.welcome-*` / `.suggestion-*` 规则已从 styles.css 删除。
+ */
+@layer components {
+  .chat-welcome {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    max-width: var(--chat-column-width, 48rem);
+    margin-inline: auto;
+    padding: var(--chat-space-6, 24px) 0;
+    text-align: center;
+    color: var(--chat-fg, inherit);
+    font-family: var(--chat-font-sans, inherit);
+  }
+
+  .chat-welcome-mark {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    margin-bottom: var(--chat-space-4, 12px);
+    color: var(--chat-fg-2, currentColor);
+  }
+
+  .chat-welcome-title {
+    margin: 0;
+    color: var(--chat-fg, inherit);
+    font-size: clamp(24px, 2.6vw, 30px);
+    font-weight: 500;
+    line-height: 1.4;
+    letter-spacing: -0.6px;
+  }
+
+  .chat-welcome-break {
+    display: none;
+  }
+
+  .chat-welcome-description {
+    max-width: 36rem;
+    margin: var(--chat-space-3, 8px) auto 0;
+    color: var(--chat-fg-2, color-mix(in oklab, currentColor 58%, transparent));
+    font-size: var(--chat-text-secondary, 13px);
+    line-height: var(--chat-leading-body, 24px);
+  }
+
+  .chat-welcome-suggestions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--chat-space-1, 4px) var(--chat-space-3, 8px);
+    width: 100%;
+    margin-top: var(--chat-space-7, 32px);
+    text-align: left;
+  }
+
+  .chat-welcome-suggestion {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--chat-space-4, 12px);
+    width: 100%;
+    min-width: 0;
+    padding: var(--chat-space-4, 12px);
+    border: 0;
+    border-radius: var(--chat-radius-inline, 8px);
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    transition: background-color var(--chat-transition-fast, 120ms) ease;
+  }
+
+  .chat-welcome-suggestion:hover:not(:disabled) {
+    background: var(--chat-hover, color-mix(in oklab, currentColor 5%, transparent));
+  }
+
+  .chat-welcome-suggestion-icon {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 24px;
+    height: 24px;
+    margin-top: 1px;
+    color: var(--chat-caption, color-mix(in oklab, currentColor 48%, transparent));
+  }
+
+  .chat-welcome-suggestion-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .chat-welcome-suggestion-text strong {
+    color: var(--chat-fg, inherit);
+    font-size: var(--chat-text-secondary, 13px);
+    font-weight: 500;
+    line-height: var(--chat-leading-secondary, 20px);
+  }
+
+  .chat-welcome-suggestion-description {
+    overflow: hidden;
+    color: var(--chat-fg-2, color-mix(in oklab, currentColor 52%, transparent));
+    font-size: var(--chat-text-small, 12px);
+    line-height: var(--chat-leading-small, 18px);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .chat-welcome-suggestion-arrow {
+    flex: none;
+    margin: 3px 0 0 auto;
+    color: var(--chat-caption, color-mix(in oklab, currentColor 48%, transparent));
+    opacity: 0;
+    transform: translateX(-3px);
+    transition:
+      opacity var(--chat-transition-fast, 120ms) ease,
+      transform var(--chat-transition-fast, 120ms) ease;
+  }
+
+  .chat-welcome-suggestion:hover:not(:disabled) .chat-welcome-suggestion-arrow,
+  .chat-welcome-suggestion:focus-visible .chat-welcome-suggestion-arrow {
+    opacity: 0.7;
+    transform: none;
+  }
+
+  @media (max-width: 760px) {
+    .chat-welcome {
+      padding: var(--chat-space-4, 12px) 0;
+    }
+
+    .chat-welcome-title {
+      font-size: 23px;
+    }
+
+    .chat-welcome-break {
+      display: block;
+    }
+
+    .chat-welcome-description {
+      font-size: var(--chat-text-small, 12px);
+      line-height: var(--chat-leading-secondary, 20px);
+    }
+
+    .chat-welcome-suggestions {
+      grid-template-columns: 1fr;
+      gap: var(--chat-space-1, 4px);
+      margin-top: var(--chat-space-5, 16px);
+    }
+
+    .chat-welcome-suggestion {
+      padding: var(--chat-space-3, 8px) var(--chat-space-4, 12px);
+    }
+
+    .chat-welcome-suggestion-arrow {
+      display: none;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .chat-welcome-suggestion,
+    .chat-welcome-suggestion-arrow {
+      transition: none;
+    }
+  }
+}

@@ -15,6 +15,8 @@ pub use numeric::parse_optional_u64;
 pub mod shell;
 mod shell_executor;
 pub mod shell_output;
+#[cfg(not(target_os = "emscripten"))]
+pub mod standalone;
 
 #[cfg(all(test, unix))]
 mod shell_session_complete_test;

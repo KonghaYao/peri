@@ -270,7 +270,7 @@ write set 之间共享编译错误由协调者整合，不保留被删除字段�
 
 ### 9.7 文档同步（STD-INDEX-002）
 
-`docs/design/session-id-environment.md`（§3.2 身份键、§3.3 情景表、§4/§6.3 措辞、§8 版本行）、`docs/design/storage-v2-machine-workspace-session.md`（状态块后续变更注记、§6.2 两行、§6.3 注记、§6.2 版本段）、`docs/standards/architecture-contracts.md`（ARC-WORKSPACE-001、ARC-TURSO-STORAGE-001）、`docs/code-index/peri-resources.md`（速览、schema 行、归属行、契约版本、当前版本号）、`spec/issues/2026-10-07-remove-execution-recovery-schema-review.md`（superseded 注记）。
+`docs/design/session-id-environment.md`（§3.2 身份键、§3.3 情景表、§4/§6.3 措辞、§8 版本行）、`docs/design/storage-v2-machine-workspace-session.md`（状态块后续变更注记、§6.2 两行、§6.3 注记、§6.2 版本段）、`docs/standards/architecture-contracts.md`（ARC-WORKSPACE-001、ARC-TURSO-STORAGE-001）、`docs/code-index/peri-resources.md`（速览、schema 行、归属行、契约版本、当前版本号）、当时的执行恢复 schema 审查（superseded 注记，原文见 Git 历史）。
 
 ### 9.8 基线红归因（对照实验，2026-10-08）
 

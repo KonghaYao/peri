@@ -150,6 +150,8 @@ fn test_block_stream_unicode_tool_barrier_and_turn_reset() {
             input_summary: "命令".into(),
             raw_input: serde_json::Value::Null,
             agent_id: None,
+            origin_message_id: None,
+            origin_readable: None,
         }),
     );
     assert_eq!(state.last_pushed_text_len, state.current_turn.text.len());

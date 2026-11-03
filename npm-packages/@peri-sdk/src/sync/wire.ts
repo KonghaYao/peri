@@ -6,10 +6,12 @@ import type { DocSnapshot, DocStateVector, DocUpdate } from "./session-doc-sync"
  * Binary wire for read-only document replication: one WebSocket message carries exactly one frame,
  * `tag:u8, wireVersion:u8, body`. Document bytes and state vectors stay `Uint8Array`; delivery
  * numbering is transport identity and is never confused with the document generation/sequence.
+ * Version 2 removed the handshake credential: the opening hello frame carries only the optional
+ * resume vector, and authentication is not part of the wire.
  */
 
-export const SYNC_WIRE_VERSION = 1;
-export const FRAME_AUTH = 0x01;
+export const SYNC_WIRE_VERSION = 2;
+export const FRAME_HELLO = 0x01;
 export const FRAME_SNAPSHOT = 0x02;
 export const FRAME_UPDATE = 0x03;
 export const FRAME_ACK = 0x04;
@@ -20,24 +22,23 @@ const SESSION_BIT = 0b10;
 const PROTOCOL_V2 = 2;
 
 export const MAX_SYNC_FRAME_BYTES = 16 * 1024 * 1024;
-export const MAX_AUTH_FRAME_BYTES = 192 * 1024;
+export const MAX_HELLO_FRAME_BYTES = 192 * 1024;
 export const MAX_ACK_FRAME_BYTES = 128;
 const MAX_DOCUMENT_BYTES = 4 * 1024 * 1024;
 const MAX_VECTOR_BYTES = 64 * 1024;
-const MAX_TOKEN_CHARS = 4096;
-const MAX_TOKEN_BYTES = MAX_TOKEN_CHARS * 4;
 const MAX_GENERATION_CHARS = 128;
 const MAX_GENERATION_BYTES = MAX_GENERATION_CHARS * 4;
 
 const INVALID_SYNC = "Invalid document sync frame";
-const INVALID_AUTH = "Invalid document sync authentication";
+const INVALID_HELLO = "Invalid document sync hello frame";
 const INVALID_ACK = "Invalid document delivery acknowledgement";
 const FRAME_BUDGET = "Document sync frame exceeds byte budget";
 
 /** Snapshot/update before the transport assigns its delivery number. */
 export type SyncFramePayload = { type: "snapshot"; snapshot: DocSnapshot } | { type: "update"; update: DocUpdate };
 export type SyncFrame = SyncFramePayload & { delivery: number };
-export type AuthFrame = { type: "auth"; token: string; resume?: DocStateVector };
+/** Opening client frame: the optional resume vector the server must honour before any document is sent. */
+export type HelloFrame = { type: "hello"; resume?: DocStateVector };
 export type AckFrame = { type: "ack"; delivery: number };
 
 const utf8Encoder = new TextEncoder();
@@ -101,10 +102,6 @@ function isSafeCount(value: unknown, minimum: number): value is number {
 
 function validGeneration(value: unknown): value is string {
     return typeof value === "string" && value.length >= 1 && value.length <= MAX_GENERATION_CHARS;
-}
-
-function validToken(value: unknown): value is string {
-    return typeof value === "string" && value.length >= 1 && value.length <= MAX_TOKEN_CHARS;
 }
 
 function validDocument(value: unknown): value is Uint8Array {
@@ -178,30 +175,26 @@ export function encodeSyncFrame(frame: SyncFrame): Uint8Array<ArrayBuffer> {
     return bytes;
 }
 
-export function decodeAuthFrame(raw: unknown): AuthFrame {
-    return decodeFrame<AuthFrame>(raw, MAX_AUTH_FRAME_BYTES, INVALID_AUTH, (decoder): AuthFrame => {
-        if (readUint8(decoder) !== FRAME_AUTH || readUint8(decoder) !== SYNC_WIRE_VERSION) return fail(INVALID_AUTH);
-        const token = readText(decoder, MAX_TOKEN_BYTES, INVALID_AUTH);
-        if (!validToken(token)) return fail(INVALID_AUTH);
+export function decodeHelloFrame(raw: unknown): HelloFrame {
+    return decodeFrame<HelloFrame>(raw, MAX_HELLO_FRAME_BYTES, INVALID_HELLO, (decoder): HelloFrame => {
+        if (readUint8(decoder) !== FRAME_HELLO || readUint8(decoder) !== SYNC_WIRE_VERSION) return fail(INVALID_HELLO);
         const hasResume = readUint8(decoder);
-        if (hasResume === 0) return { type: "auth", token };
-        if (hasResume !== 1) return fail(INVALID_AUTH);
+        if (hasResume === 0) return { type: "hello" };
+        if (hasResume !== 1) return fail(INVALID_HELLO);
         const protocol = readVarUint(decoder);
-        const generation = readText(decoder, MAX_GENERATION_BYTES, INVALID_AUTH);
-        const chat = readBlob(decoder, MAX_VECTOR_BYTES, INVALID_AUTH);
-        const session = readBlob(decoder, MAX_VECTOR_BYTES, INVALID_AUTH);
-        if (protocol !== PROTOCOL_V2 || !validGeneration(generation)) return fail(INVALID_AUTH);
-        return { type: "auth", token, resume: { protocol: PROTOCOL_V2, generation, chat, session } };
+        const generation = readText(decoder, MAX_GENERATION_BYTES, INVALID_HELLO);
+        const chat = readBlob(decoder, MAX_VECTOR_BYTES, INVALID_HELLO);
+        const session = readBlob(decoder, MAX_VECTOR_BYTES, INVALID_HELLO);
+        if (protocol !== PROTOCOL_V2 || !validGeneration(generation)) return fail(INVALID_HELLO);
+        return { type: "hello", resume: { protocol: PROTOCOL_V2, generation, chat, session } };
     });
 }
 
-export function encodeAuthFrame(frame: AuthFrame): Uint8Array<ArrayBuffer> {
-    if (frame.type !== "auth" || !validToken(frame.token) ||
-        (frame.resume !== undefined && !validVector(frame.resume))) fail(INVALID_AUTH);
+export function encodeHelloFrame(frame: HelloFrame): Uint8Array<ArrayBuffer> {
+    if (frame.type !== "hello" || (frame.resume !== undefined && !validVector(frame.resume))) fail(INVALID_HELLO);
     const encoder = createEncoder();
-    writeUint8(encoder, FRAME_AUTH);
+    writeUint8(encoder, FRAME_HELLO);
     writeUint8(encoder, SYNC_WIRE_VERSION);
-    writeText(encoder, frame.token);
     if (frame.resume) {
         writeUint8(encoder, 1);
         writeVarUint(encoder, frame.resume.protocol);
@@ -212,9 +205,9 @@ export function encodeAuthFrame(frame: AuthFrame): Uint8Array<ArrayBuffer> {
         writeUint8(encoder, 0);
     }
     const bytes = toUint8Array(encoder);
-    if (bytes.byteLength > MAX_AUTH_FRAME_BYTES) fail(FRAME_BUDGET);
+    if (bytes.byteLength > MAX_HELLO_FRAME_BYTES) fail(FRAME_BUDGET);
     // Every consumer must accept the frame this module produces.
-    decodeAuthFrame(bytes);
+    decodeHelloFrame(bytes);
     return bytes;
 }
 

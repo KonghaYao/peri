@@ -98,6 +98,7 @@ fn structured_reminder_notification_pins_the_peri_wire_contract() {
         ),
         replay: true,
         source_agent_id: Some("child-thread-99".into()),
+        meta: None,
     };
 
     assert_eq!(notification.method(), "peri/systemReminder");
@@ -141,6 +142,7 @@ fn structured_reminder_notification_pins_the_peri_wire_contract() {
         ),
         replay: false,
         source_agent_id: None,
+        meta: None,
     };
     let local_params = local.to_untyped_message().unwrap().params().clone();
     assert!(

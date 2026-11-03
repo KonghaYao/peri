@@ -1,11 +1,4 @@
-export interface SessionSummary {
-  id: string;
-  title: string | null;
-  cwd: string;
-  messageCount: number;
-  createdAt: string;
-  updatedAt: string;
-}
+import type { ChatSessionDirectoryEntry } from "../contracts/chat";
 
 export const SESSION_LIST_SQL = `
   SELECT id, title, cwd, message_count, created_at, updated_at
@@ -29,9 +22,12 @@ export type SessionRow = {
   updated_at: string;
 };
 
-export function sessionSummary(row: SessionRow): SessionSummary {
+/** 存储行 → SDK 只读目录条目；`title` 保持可空，不把缺失标题伪造成“New chat”。 */
+export function sessionDirectoryEntry(
+  row: SessionRow,
+): ChatSessionDirectoryEntry {
   return {
-    id: row.id,
+    sessionId: row.id,
     title: row.title,
     cwd: row.cwd,
     messageCount: row.message_count,

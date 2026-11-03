@@ -68,6 +68,7 @@ impl AnthropicAdapter {
                 }
                 Some(obj)
             }
+            ContentBlock::ProviderState { .. } => None,
             ContentBlock::Unknown(v) => Some(v.clone()),
         }
     }
@@ -76,8 +77,16 @@ impl AnthropicAdapter {
         match content {
             MessageContent::Text(s) => json!(s),
             MessageContent::Blocks(blocks) => {
-                let parts: Vec<Value> =
-                    blocks.iter().filter_map(Self::block_to_anthropic).collect();
+                let foreign_replay = content.has_provider_state();
+                let parts: Vec<Value> = blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        ContentBlock::Reasoning { text, .. } if foreign_replay => {
+                            Some(json!({ "type": "text", "text": text }))
+                        }
+                        _ => Self::block_to_anthropic(block),
+                    })
+                    .collect();
                 Value::Array(parts)
             }
             MessageContent::Raw(values) => Value::Array(values.clone()),

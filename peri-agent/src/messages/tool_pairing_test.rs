@@ -13,6 +13,50 @@ fn assistant(ids: &[&str]) -> BaseMessage {
     )
 }
 
+fn replay_assistant() -> BaseMessage {
+    BaseMessage::ai_from_blocks(vec![
+        ContentBlock::tool_use("replay", "Read", json!({})),
+        ContentBlock::ProviderState {
+            provider: "openai_responses".into(),
+            data: json!({"version":1,"items":[{"type":"reasoning","encrypted_content":"opaque"}]}),
+        },
+    ])
+}
+
+#[tokio::test]
+async fn rewind_cannot_repair_partial_replay_unit_with_invented_result() {
+    let mut transcript = MessageTranscript::new();
+    let assistant_id = transcript.append(replay_assistant());
+    transcript.append(BaseMessage::tool_result("replay", "actual evidence"));
+    transcript.append(BaseMessage::human("continue"));
+    assert!(render_persisted_llm_view(&transcript, &ProviderCapabilities::openai()).is_ok());
+    transcript.rewind_to(assistant_id).await.unwrap();
+    let error =
+        render_persisted_llm_view(&transcript, &ProviderCapabilities::openai()).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("incomplete provider replay unit"));
+    assert_eq!(transcript.visible_messages().len(), 1);
+    assert!(transcript.visible_messages()[0]
+        .message_content()
+        .has_provider_state());
+}
+
+#[test]
+fn fork_keeps_complete_replay_unit_and_rejects_partial_ancestor() {
+    let original = vec![
+        replay_assistant(),
+        BaseMessage::tool_result("replay", "actual evidence"),
+    ];
+    let saved = serde_json::to_vec(&original).unwrap();
+    let restored: Vec<BaseMessage> = serde_json::from_slice(&saved).unwrap();
+    let complete = MessageTranscript::new().with_ancestor(restored.clone());
+    let view = render_persisted_llm_view(&complete, &ProviderCapabilities::openai()).unwrap();
+    assert_eq!(serialized(&view), serialized(&original));
+    let partial = MessageTranscript::new().with_ancestor(vec![restored[0].clone()]);
+    assert!(render_persisted_llm_view(&partial, &ProviderCapabilities::openai()).is_err());
+}
+
 fn serialized(messages: &[BaseMessage]) -> serde_json::Value {
     serde_json::to_value(messages).unwrap()
 }

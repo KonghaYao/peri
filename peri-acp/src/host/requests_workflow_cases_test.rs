@@ -1,6 +1,9 @@
 use super::*;
 use peri_acp_types::ports::{McpPoolPort, McpPoolShutdownReport};
 
+#[path = "requests_task_cancel_test.rs"]
+mod task_cancel_tests;
+
 #[tokio::test]
 async fn session_new_and_load_publish_task_snapshots_and_revisioned_changes() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -45,7 +48,7 @@ async fn session_new_and_load_publish_task_snapshots_and_revisioned_changes() {
         .unwrap()
         .task_manager
         .clone();
-    manager
+    let ticket = manager
         .register(peri_acp_types::tasks::BgTaskRegistration {
             task_id: "wf-revision-1".into(),
             kind: BgTaskKind::Workflow,
@@ -77,7 +80,7 @@ async fn session_new_and_load_publish_task_snapshots_and_revisioned_changes() {
     // （kill 为空操作 ⇒ 无真实执行），并确认该作用域确已排空（Kill 句柄无法
     // 自证清空，生产由工具层调用点在执行真停止后确认）。
     manager.cancel("wf-revision-1").unwrap();
-    manager.confirm_external_execution_stopped("wf-revision-1");
+    manager.confirm_external_execution_stopped(&ticket);
     handle_request(
         "session/close",
         &json!({"sessionId": sid}),

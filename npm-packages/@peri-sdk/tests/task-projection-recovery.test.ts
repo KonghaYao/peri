@@ -1,60 +1,62 @@
 import { expect, test } from "bun:test";
 import * as Y from "yjs";
-import { SessionDocs } from "../src/state/session-docs";
-import { MemoryKV } from "../src/kv/memory-kv";
-import { ManagedAgents } from "../src/managed/managed-agents";
-import { Sandbox } from "../src/sandbox/sandbox";
+import { PeriInstance } from "../src/agent/peri-instance";
+import { ChatFactHub } from "../src/chat/fact-hub";
+import type { ChatFact } from "../src/contracts/chat";
+import { ChatDocument } from "../src/view/chat-document";
+import { readSessionView } from "../src/view/session-view";
 import type { JsonRpcNotification, Transport } from "../src/transport/types";
 
-function tasks(docs: SessionDocs): Y.Map<Y.Map<unknown>> {
-  return docs.session.getMap<unknown>("root").get("tasks") as Y.Map<Y.Map<unknown>>;
+function tasks(document: ChatDocument): Y.Map<Y.Map<unknown>> {
+  return document.session.getMap<unknown>("root").get("tasks") as Y.Map<Y.Map<unknown>>;
 }
 
 function event(name: string, data: Record<string, unknown>) {
   return { jsonrpc: "2.0" as const, method: "peri/unstable_event", params: { sessionId: "s1", event: name, data } };
 }
 
-test("a missed client revision requests the Peri snapshot and converges", async () => {
-  const docs = new SessionDocs();
-  let requested = 0;
-  docs.setTaskSnapshotRequester(async () => {
-    requested++;
-    return { revision: 4, tasks: [
-      { task_id: "task-1", kind: "shell", summary: "Build", started_at: "2026-10-04T00:00:00Z", status: "completed", duration_ms: 12, output_preview: "private output" },
-    ] };
-  });
-  docs.accept(event("bg-task-snapshot", { revision: 1, tasks: [
+test("a missed client revision converges through the runtime task snapshot", () => {
+  const document = new ChatDocument();
+  document.accept(event("bg-task-snapshot", { revision: 1, tasks: [
     { task_id: "task-1", kind: "shell", summary: "Build", started_at: "2026-10-04T00:00:00Z", status: "running", duration_ms: null, output_preview: null },
   ] }));
-  const original = tasks(docs).get("task-1");
-  docs.accept(event("bg-task-completed", { task_id: "task-1", kind: "shell", success: true, duration_ms: 12, revision: 4 }));
-  await Promise.resolve();
-  expect(requested).toBe(1);
-  expect(tasks(docs).get("task-1")).toBe(original);
+  const original = tasks(document).get("task-1");
+
+  // 运行侧 TaskGapDetector 补读后投递结构化 task-snapshot 事实（PeriInstance 测试覆盖触发）。
+  document.applyFact({
+    kind: "task-snapshot",
+    snapshot: { revision: 4, tasks: [
+      { task_id: "task-1", kind: "shell", summary: "Build", started_at: "2026-10-04T00:00:00Z", status: "completed", duration_ms: 12, output_preview: "private output" },
+    ] },
+  });
+
+  expect(tasks(document).get("task-1")).toBe(original);
   expect(original?.get("status")).toBe("completed");
   expect(original?.get("taskSubtype")).toBe("shell");
   expect(original?.get("summary")).toBe("Build");
   expect(original?.get("startedAt")).toBe("2026-10-04T00:00:00Z");
   expect(original?.get("durationMs")).toBe(12);
-  expect(JSON.stringify(docs.session.getMap("root").toJSON())).not.toContain("private output");
+  expect(JSON.stringify(document.session.getMap("root").toJSON())).not.toContain("private output");
+  document.destroy();
 });
 
 test("subagent lifecycle preserves background identity and rejects terminal rollback", () => {
-  const docs = new SessionDocs();
-  const send = (type: string, value: Record<string, unknown>) => docs.accept({
+  const document = new ChatDocument();
+  const send = (type: string, value: Record<string, unknown>) => document.accept({
     jsonrpc: "2.0", method: "peri/agent_event",
     params: { sessionId: "s1", event_json: JSON.stringify({ type, value }) },
   });
   send("subagent_started", { instance_id: "sub-1", agent_name: "Research", is_background: true });
   send("subagent_stopped", { instance_id: "sub-1", agent_name: "Research", is_error: false, result: "private result" });
   send("subagent_started", { instance_id: "sub-1", agent_name: "Research", is_background: true });
-  const sub = tasks(docs).get("sub-1");
+  const sub = tasks(document).get("sub-1");
   expect(sub?.get("status")).toBe("completed");
   expect(sub?.get("isBackground")).toBe(true);
-  expect(JSON.stringify(docs.session.getMap("root").toJSON())).not.toContain("private result");
+  expect(JSON.stringify(document.session.getMap("root").toJSON())).not.toContain("private result");
+  document.destroy();
 });
 
-test("Session asks Peri for a task snapshot after a missed notification", async () => {
+test("PeriInstance asks Peri for a task snapshot after a missed notification", async () => {
   class TaskTransport implements Transport {
     private listeners = new Set<(event: JsonRpcNotification) => void>();
     snapshotCalls = 0;
@@ -85,38 +87,39 @@ test("Session asks Peri for a task snapshot after a missed notification", async 
     async close(): Promise<void> {}
   }
   const transport = new TaskTransport();
-  const sandbox = new Sandbox({
-    id: "ws", transportFactory: () => transport,
-    storage: {
-      getSessions: async () => [],
-      getSession: async (id) => ({ id, cwd: "/tmp/ws", title: null, messageCount: 0, createdAt: "now", updatedAt: "now" }),
-    },
+  const instance = new PeriInstance({
+    acquireHost: async () => ({ transport, close: async () => ({ confirmed: true }) }),
+    resolveSessionPath: async () => "/tmp/ws",
+    close: { drainTimeoutMs: 1000, bindingSettleTimeoutMs: 1000, activationCloseTimeoutMs: 1000 },
   });
-  const agent = new ManagedAgents({ kv: new MemoryKV() }).createAgent({ path: "/tmp/ws", id: "agent", sandbox });
-  await agent.session.start("s1");
+  const document = new ChatDocument();
+  instance.attach((fact) => document.applyFact(fact));
+  await instance.bindExisting("s1");
   transport.emit(event("bg-task-snapshot", { revision: 1, tasks: [{ task_id: "shell-1", status: "running", kind: "shell" }] }));
   transport.emit(event("bg-task-completed", { task_id: "shell-1", success: true, revision: 5 }));
   await Promise.resolve();
   expect(transport.snapshotCalls).toBe(1);
-  expect(tasks(agent.docs).get("shell-1")?.get("status")).toBe("completed");
-  const projectionError = new Error("projection failed /tmp/fixture?token=synthetic", { cause: new Error("fixture source") });
-  const originalAccept = agent.docs.accept;
-  const originalLog = console.error;
-  const logs: unknown[][] = [];
-  agent.docs.accept = () => { throw projectionError; };
-  console.error = (...args: unknown[]) => { logs.push(args); };
-  const raw = { jsonrpc: "2.0" as const, method: "peri/agent_event", params: {
-    sessionId: "s1", event_json: JSON.stringify({ type: "subagent_started", value: { instance_id: "fixture", agent_name: "Fixture" } }),
-  } };
-  try {
-    transport.emit(raw);
-    expect(logs.some((args) => args[1] === projectionError)).toBe(true);
-    const stream = agent.session.stream()[Symbol.asyncIterator]();
-    expect((await stream.next()).value).toEqual(raw);
-    await stream.return?.();
-  } finally {
-    agent.docs.accept = originalAccept;
-    console.error = originalLog;
-  }
-  await agent.close();
+  expect(tasks(document).get("shell-1")?.get("status")).toBe("completed");
+  expect(readSessionView(document.chat, document.session).tasks.find((task) => task.taskId === "shell-1")?.status)
+    .toBe("completed");
+  await instance.close();
+  document.destroy();
+});
+
+test("a failing view observer cannot block task facts or other observers", () => {
+  const hub = new ChatFactHub("chat-1");
+  const seen: ChatFact[] = [];
+  hub.bind({ chatId: "chat-1", sessionId: "s1", bindingRevision: 1 }, []);
+  hub.subscribe({
+    onBinding() {},
+    onFact() { throw new Error("projection failed /tmp/fixture?token=synthetic"); },
+    onClosed() {},
+  });
+  hub.subscribe({
+    onBinding() {},
+    onFact(envelope) { seen.push(envelope.fact); },
+    onClosed() {},
+  });
+  hub.push({ kind: "task-snapshot", snapshot: { revision: 5, tasks: [] } });
+  expect(seen).toEqual([{ kind: "task-snapshot", snapshot: { revision: 5, tasks: [] } }]);
 });

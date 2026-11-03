@@ -594,7 +594,8 @@ async fn test_cancel_on_last_empty_attempt_wins_over_exhaustion() {
 }
 
 #[tokio::test]
-async fn test_micro_persists_when_full_empty_attempts_exhaust() {
+async fn test_full_failure_leaves_no_hidden_micro_projection() {
+    // 新契约：达到 Full 条件而收益不足时直接 Full；Full 失败不得留下本轮 Micro 提交。
     let (bound, ctx, reason, summary, _) =
         make_case(Failure::AnalysisOnly, usize::MAX, true, None).await;
     let result = run_react_loop(ctx.clone(), 4).await;
@@ -620,8 +621,8 @@ async fn test_micro_persists_when_full_empty_attempts_exhaust() {
         snapshot
             .flags
             .values()
-            .any(|flags| flags.projection.is_some()),
-        "Full 失败不能丢掉 Micro projection"
+            .all(|flags| flags.projection.is_none()),
+        "Full 失败前不得先写本轮 Micro projection"
     );
     assert!(
         snapshot.flags.values().all(|flags| !flags.excluded),
@@ -635,7 +636,8 @@ async fn test_micro_persists_when_full_empty_attempts_exhaust() {
 }
 
 #[tokio::test]
-async fn test_cancel_after_micro_preserves_projection_without_reason() {
+async fn test_cancel_before_full_commit_leaves_no_micro_projection() {
+    // 新契约：提交前取消不得留下本轮 Micro，也不得伪造 MessagesCompacted。
     let (bound, ctx, reason, summary, mut handles) =
         make_case(Failure::AnalysisOnly, usize::MAX, true, Some(1)).await;
     let result = run_react_loop(ctx.clone(), 4).await;
@@ -653,25 +655,34 @@ async fn test_cancel_after_micro_preserves_projection_without_reason() {
         snapshot
             .flags
             .values()
-            .any(|flags| flags.projection.is_some()),
-        "取消应保留 Micro projection"
+            .all(|flags| flags.projection.is_none()),
+        "取消发生在提交前，不得留下 Micro projection"
     );
     assert!(
         snapshot.flags.values().all(|flags| !flags.excluded),
         "空摘要不得 excluded"
     );
     assert_eq!(snapshot.payloads.len(), 27);
+    let events: Vec<_> = std::iter::from_fn(|| handles.try_observe()).collect();
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, ObserveEvent::MessagesCompacted { .. })),
+        "未提交变更不得发 MessagesCompacted"
+    );
     assert_eq!(
-        std::iter::from_fn(|| handles.try_observe())
+        events
+            .iter()
             .filter(|event| matches!(
                 event,
-                ObserveEvent::MessagesCompacted {
-                    outcome: peri_agent::agent::compact_v2::CompactOutcome::InterruptedAfterCommit,
+                ObserveEvent::CompactEnded {
+                    outcome: peri_agent::agent::compact_v2::CompactOutcome::Interrupted,
                     ..
                 }
             ))
             .count(),
-        1
+        1,
+        "取消必须闭合 CompactStarted"
     );
 }
 
@@ -755,7 +766,8 @@ async fn test_manual_force_still_applies_full_when_shadow_enabled() {
 }
 
 #[tokio::test]
-async fn test_cancel_on_provider_failure_wins_after_micro_commit() {
+async fn test_cancel_on_provider_failure_leaves_no_micro_projection() {
+    // 新契约：Full provider 调用期间取消，本轮 Micro 从未提交，取消优先。
     let (bound, ctx, reason, summary, _) =
         make_case(Failure::Http, usize::MAX, true, Some(1)).await;
     let result = run_react_loop(ctx.clone(), 4).await;
@@ -770,10 +782,13 @@ async fn test_cancel_on_provider_failure_wins_after_micro_commit() {
         .await
         .unwrap();
     assert_eq!(snapshot.payloads.len(), 27);
-    assert!(snapshot
-        .flags
-        .values()
-        .any(|flags| flags.projection.is_some()));
+    assert!(
+        snapshot
+            .flags
+            .values()
+            .all(|flags| flags.projection.is_none()),
+        "提交前取消不得留下本轮 Micro projection"
+    );
     assert!(snapshot.flags.values().all(|flags| !flags.excluded));
 }
 

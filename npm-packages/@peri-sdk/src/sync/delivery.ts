@@ -18,7 +18,7 @@ export interface DeliveryCreditPolicy {
     maxFrames: number;
     maxBytes: number;
     timeoutMs: number;
-    now?: () => number;
+    nowMs?: () => number;
 }
 
 export function reserveDeliveryFrame(ledger: DeliveryLedger, frame: SyncFramePayload,
@@ -30,7 +30,7 @@ export function reserveDeliveryFrame(ledger: DeliveryLedger, frame: SyncFramePay
     const outstanding = ledger.pending.reduce((total, pending) => total + pending.bytes, 0);
     if (ledger.pending.length >= policy.maxFrames || outstanding + bytes > policy.maxBytes)
         throw new Error("Sync peer exceeded outstanding delivery credit");
-    ledger.pending.push({ delivery, bytes, deadline: (policy.now?.() ?? Date.now()) + policy.timeoutMs });
+    ledger.pending.push({ delivery, bytes, deadline: (policy.nowMs?.() ?? Date.now()) + policy.timeoutMs });
     ledger.nextDelivery++;
     return encoded;
 }
@@ -39,10 +39,4 @@ export function acknowledgeDelivery(ledger: DeliveryLedger, delivery: number): v
     if (ledger.pending[0]?.delivery !== delivery) throw new Error("Unexpected delivery acknowledgement");
     ledger.pending.shift();
     ledger.acknowledged = delivery;
-}
-
-/** Stable fingerprint that binds a persisted connection attachment to a credential without storing it. */
-export async function credentialFingerprint(token: string): Promise<string> {
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
-    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }

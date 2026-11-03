@@ -1,18 +1,105 @@
-use super::worker_path;
+use std::ffi::OsString;
+use std::path::PathBuf;
+
+use clap::Parser;
+use peri_acp_types::builtin_mcp::BUILTIN_RESERVED_INSTANCE_NAMES;
+
+use super::{Args, run};
 
 #[test]
-fn worker_must_be_packaged_beside_peri() {
-    let directory = tempfile::tempdir().unwrap();
-    let peri = directory.path().join("peri");
-    let error = worker_path(peri).unwrap_err().to_string();
-    assert!(error.contains("Workspace MCP executable is missing"));
+fn instance_is_required() {
+    let error = run(&[]).unwrap_err().to_string();
+    assert!(error.contains("<INSTANCE>"), "{error}");
 }
 
 #[test]
-fn worker_resolution_uses_the_executable_directory() {
-    let directory = tempfile::tempdir().unwrap();
-    let peri = directory.path().join("peri");
-    let worker = directory.path().join(super::WORKSPACE_BINARY);
-    std::fs::write(&worker, "").unwrap();
-    assert_eq!(worker_path(peri).unwrap(), worker);
+fn unknown_instance_is_rejected() {
+    let error = run(&[OsString::from("sandbox"), OsString::from("--stdio")])
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("unknown builtin MCP instance: sandbox"));
+    for name in BUILTIN_RESERVED_INSTANCE_NAMES {
+        assert!(error.contains(name), "error should list {name}: {error}");
+    }
+}
+
+#[test]
+fn transport_is_required_and_exclusive() {
+    let missing = Args::try_parse_from(["peri mcp-start", "workspace"])
+        .unwrap_err()
+        .to_string();
+    assert!(missing.contains("--stdio"), "{missing}");
+    assert!(missing.contains("--http"), "{missing}");
+    let both = Args::try_parse_from(["peri mcp-start", "workspace", "--stdio", "--http"])
+        .unwrap_err()
+        .to_string();
+    assert!(both.contains("cannot be used with"), "{both}");
+}
+
+#[test]
+fn http_defaults_to_loopback_8765() {
+    let args = Args::try_parse_from(["peri mcp-start", "web", "--http"]).unwrap();
+    assert_eq!(args.instance, "web");
+    assert!(args.http);
+    assert!(!args.stdio);
+    assert_eq!(args.host, "127.0.0.1");
+    assert_eq!(args.port, 8765);
+    assert_eq!(args.workspace, None);
+}
+
+#[test]
+fn http_accepts_host_port_and_workspace() {
+    let args = Args::try_parse_from([
+        "peri mcp-start",
+        "artifact",
+        "--http",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "9000",
+        "--workspace",
+        "/tmp/project",
+    ])
+    .unwrap();
+    assert_eq!(args.host, "0.0.0.0");
+    assert_eq!(args.port, 9000);
+    assert_eq!(args.workspace, Some(PathBuf::from("/tmp/project")));
+}
+
+#[test]
+fn allowed_host_parses_repeatedly() {
+    let args = Args::try_parse_from([
+        "peri mcp-start",
+        "workspace",
+        "--http",
+        "--allowed-host",
+        "sandbox.local",
+        "--allowed-host",
+        "sandbox.local:8765",
+    ])
+    .unwrap();
+    assert_eq!(args.allowed_host, ["sandbox.local", "sandbox.local:8765"]);
+}
+
+#[test]
+fn allowed_host_requires_http() {
+    let error = run(&[
+        OsString::from("web"),
+        OsString::from("--stdio"),
+        OsString::from("--allowed-host"),
+        OsString::from("sandbox.local"),
+    ])
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("--allowed-host requires --http"), "{error}");
+}
+
+#[test]
+fn every_reserved_instance_parses() {
+    for name in BUILTIN_RESERVED_INSTANCE_NAMES {
+        let args = Args::try_parse_from(["peri mcp-start", name, "--stdio"])
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(args.instance, *name);
+        assert!(args.stdio);
+    }
 }

@@ -237,9 +237,10 @@ async fn test_new_turn_retains_exposure_and_terminal_evidence() {
     );
 }
 
-/// [回归测试] 已提交 preview 的 canonical 消费证据跨 turn 保留，后续压力可升级。
+/// [回归测试] 已提交 preview 的 canonical 消费证据跨 turn 保留；
+/// 但 preview→整组省略的增量收益低于完整窗口 10% 时必须延后，不得为凑门槛扩大删除。
 #[tokio::test]
-async fn test_committed_preview_can_upgrade_after_new_turn() {
+async fn test_committed_preview_upgrade_below_gain_gate_is_deferred() {
     let bound = TestSession::open().await;
     let (_old_session, first, id) = first_turn(&bound).await;
     first
@@ -271,7 +272,12 @@ async fn test_committed_preview_can_upgrade_after_new_turn() {
     let session = session(&bound, true).await;
     session.set_compact_exposure(Arc::clone(&first.compact.exposure));
     let second = context(&session, script(false, false));
-    prompt(&session, "user-owned constraint ".repeat(12_000));
+    // 新 turn 的真实用户任务已在 canonical 中；它不参与本轮的省略候选。
+    second
+        .session
+        .transcript
+        .write()
+        .append(BaseMessage::human("user-owned constraint ".repeat(12_000)));
     // Provider usage is a separate pressure authority from the reduced visible view.
     second
         .compact
@@ -283,11 +289,28 @@ async fn test_committed_preview_can_upgrade_after_new_turn() {
             cache_creation_input_tokens: None,
             cache_read_input_tokens: None,
         });
-    let result = run_react_loop(second.clone(), 2).await;
-    assert!(matches!(result, LoopResult::Completed), "{result:?}");
+    let deferred = run_compact(CompactInput {
+        context: second.clone(),
+        has_tool_calls: false,
+    })
+    .await
+    .unwrap();
+    assert!(!deferred.compacted, "低收益升级必须延后");
     assert!(
-        has_whole_omission(&second, id),
-        "preview 应可在新 turn 升级为整组省略"
+        !has_whole_omission(&second, id),
+        "延后不得把已提交 preview 升级为整组省略"
+    );
+    assert!(
+        second
+            .session
+            .transcript
+            .read()
+            .projection_ref(id)
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| matches!(entry.action, ProjectionAction::CompactToolResult { .. })),
+        "延后必须保留原已提交 preview"
     );
 }
 

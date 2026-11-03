@@ -25,9 +25,9 @@ use peri_acp_types::session_resources::{
     ChildSnapshot, CloseSettlement, DataCapabilities, ExecutionAvailability, ForkSnapshot,
     FrozenSnapshotBytes, FrozenState, HistoryEntryMetadata, HistoryWindowPagePlan,
     HistoryWindowRows, NewSession, NewSessionDraft, PersistenceRecovery, RewindBoundary,
-    RewindOutcome, SessionAvailability, SessionHistoryWindowBounds, SessionInitialization,
-    SessionMetaPatch, SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
-    SessionResources, SessionSnapshot,
+    RewindCandidate, RewindOutcome, SessionAvailability, SessionHistoryWindowBounds,
+    SessionInitialization, SessionMetaPatch, SessionResourceError, SessionResourceErrorKind,
+    SessionResourceResult, SessionResources, SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
@@ -474,6 +474,14 @@ impl SessionResources for SessionResourcesImpl {
         id: &ThreadId,
     ) -> SessionResourceResult<Vec<PersistedPayload>> {
         self.gate.data().load_session_history(id).await
+    }
+
+    async fn load_rewind_candidates(
+        &self,
+        id: &ThreadId,
+        limit: usize,
+    ) -> SessionResourceResult<Vec<RewindCandidate>> {
+        self.gate.data().load_rewind_candidates(id, limit).await
     }
 
     async fn load_history_segment(

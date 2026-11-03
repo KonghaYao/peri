@@ -10,6 +10,7 @@ impl UnifiedLangfuseEvent {
     /// 无 Langfuse 映射的变体返回 `None`。
     pub fn from_executor_event(ev: ExecutorEvent) -> Option<Self> {
         match ev {
+            ExecutorEvent::Originated(scoped) => Self::from_executor_event(*scoped.event),
             ExecutorEvent::LlmCallStart {
                 step,
                 messages,
@@ -59,9 +60,6 @@ impl UnifiedLangfuseEvent {
                 delay_ms,
                 error,
             }),
-            ExecutorEvent::TextChunk { chunk, .. } => {
-                Some(UnifiedLangfuseEvent::TextChunk { chunk })
-            }
             ExecutorEvent::ToolStart {
                 tool_call_id,
                 name,
@@ -160,7 +158,8 @@ impl UnifiedLangfuseEvent {
                 tool_calls,
             }),
             // 无 Langfuse 映射的事件
-            ExecutorEvent::TurnStarted { .. }
+            ExecutorEvent::TextChunk { .. }
+            | ExecutorEvent::TurnStarted { .. }
             | ExecutorEvent::UserInputRunStarted { .. }
             | ExecutorEvent::UserInputQueueChanged(_)
             | ExecutorEvent::UserInputDelivered { .. }

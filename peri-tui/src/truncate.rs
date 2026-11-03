@@ -97,6 +97,60 @@ pub fn truncate_by_width(s: &str, max_width: usize) -> String {
     out
 }
 
+/// Middle-truncate text to `max_width` terminal display columns, keeping head and tail.
+///
+/// 与尾部截断的 [`truncate_by_width`] 相对：路径/URL 的尾部通常比中段更有辨识度，
+/// 因此保留头尾、用单个 `…` 连接，输出显示宽度 ≤ `max_width`。预算过小（< 4 列）
+/// 时退化为尾部截断，避免只剩省略号。
+pub fn middle_truncate_by_width(s: &str, max_width: usize) -> String {
+    if s.width() <= max_width {
+        return s.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width < 4 {
+        // truncate_by_width 的省略号不占预算，这里预留 1 列保证输出不超宽。
+        return truncate_by_width(s, max_width - 1);
+    }
+    // 省略号占 1 列，其余头尾平分（头部略多 1 列，保留路径根）。
+    let head_budget = (max_width - 1) / 2;
+    let tail_budget = max_width - 1 - head_budget;
+    let head = prefix_by_width(s, head_budget);
+    let tail = suffix_by_width(s, tail_budget);
+    format!("{head}…{tail}")
+}
+
+/// 按显示宽度取前缀（不追加省略号，按 grapheme cluster 迭代）。
+fn prefix_by_width(s: &str, max_width: usize) -> String {
+    let mut width = 0usize;
+    let mut out = String::new();
+    for g in s.graphemes(true) {
+        let w = g.width();
+        if width + w > max_width {
+            break;
+        }
+        out.push_str(g);
+        width += w;
+    }
+    out
+}
+
+/// 按显示宽度取后缀（从尾部反向累计，不追加省略号）。
+fn suffix_by_width(s: &str, max_width: usize) -> String {
+    let mut width = 0usize;
+    let mut parts: Vec<&str> = Vec::new();
+    for g in s.graphemes(true).rev() {
+        let w = g.width();
+        if width + w > max_width {
+            break;
+        }
+        parts.push(g);
+        width += w;
+    }
+    parts.into_iter().rev().collect()
+}
+
 /// Wrap text into lines of at most `max_width` terminal display columns.
 ///
 /// 按 grapheme cluster + display width 折行（§12 口径：CJK 双宽 / emoji ZWJ /

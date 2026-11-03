@@ -164,3 +164,29 @@ fn timed_out_outcome_keeps_its_own_reason_and_is_not_a_failure() {
         "来源必须可区分，便于展示与后续重查"
     );
 }
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct HostScope(String);
+
+#[test]
+fn generic_host_scope_uses_the_same_generation_and_cancellation_implementation() {
+    let mut gate: CompletionGate<HostScope> = CompletionGate::default();
+    let ticket = gate.begin(HostScope("store/work".into()));
+    assert!(gate.scope_matches(&HostScope("store/work".into())));
+    assert!(gate.is_current(&ticket));
+    assert!(gate.accept(&ticket));
+    assert!(!gate.is_pending());
+}
+
+#[test]
+fn cancel_wait_keeps_the_ticket_current_for_mandatory_local_cleanup() {
+    let mut gate: CompletionGate<HostScope> = CompletionGate::default();
+    let ticket = gate.begin(HostScope("store/work".into()));
+    assert!(gate.cancel_wait());
+    assert!(ticket.is_cancelled(), "等待方必须观察到取消");
+    assert!(
+        gate.is_current(&ticket),
+        "注销取消只停止远端等待，本地清理结果仍属于本次操作"
+    );
+    assert!(gate.accept(&ticket));
+}

@@ -1,0 +1,718 @@
+import { describe, expect, spyOn, test } from "bun:test";
+import {
+  ChatActionError,
+  ChatCloseIncompleteError,
+  PayloadReadError,
+  SessionCreationError,
+  SessionWorkspaceMismatchError,
+  type AnswerAction,
+  type CancelAction,
+  type CancelRequestResult,
+  type ChatAgentConfig,
+  type ChatBindingTarget,
+  type ChatCreateOptions,
+  type ChatManagerContract,
+  type ChatServiceContract,
+  type ChatSessionDirectoryEntry,
+  type ChatUserAction,
+  type ChatYjsChannel,
+  type ControlResult,
+  type ForceSendAction,
+  type HistoryAction,
+  type HistoryPageOutcome,
+  type SendAction,
+  type SendReceipt,
+  type SessionAction,
+  type SessionReadyResult,
+  type SetConfigOptionAction,
+  type TakeBackAction,
+  type ToolPayloadReadRef,
+  type ToolPayloadResponse,
+  type WorkspaceRef,
+} from "@peri-code/sdk";
+import type { MonitorSnapshot, MonitorSource } from "../monitor";
+import { ChatRegistry } from "../registry";
+import { SandboxStartError, type SandboxLease, type SandboxPoolPort } from "../sandbox";
+import { createApi } from ".";
+
+const monitorSnapshot: MonitorSnapshot = {
+  generatedAt: "2026-10-27T10:00:00.000Z",
+  uptimeSeconds: 120,
+  llm: {
+    provider: "openai",
+    activeAlias: "sonnet",
+    baseUrl: "https://api.example.com/v1",
+    tiers: { fable: "gpt-test", opus: "gpt-test", sonnet: "gpt-test", haiku: "gpt-test" },
+  },
+  mcp: { remote: [] },
+  wasm: {
+    moduleUrl: "/tmp/peri-wasm.js",
+    process: { rssBytes: 1, heapTotalBytes: 2, heapUsedBytes: 3, arrayBufferBytes: 4 },
+    chatHandles: 0,
+    startingInstances: 0,
+    unconfirmed: false,
+    truncated: false,
+    linearMemoryTotalBytes: null,
+    linearMemoryKnownInstances: 0,
+    linearMemoryUnknownInstances: 0,
+    instances: [],
+  },
+  sandbox: {
+    enabled: false,
+    root: "/tmp/peri-sandbox",
+    settings: {
+      path: "/tmp/peri-sandbox/settings.json",
+      source: "disabled",
+      profileName: null,
+      profile: null,
+    },
+    workspacesOnDisk: null,
+    active: [],
+    starting: 0,
+  },
+};
+
+function stubMonitor(snapshot: MonitorSnapshot = monitorSnapshot): MonitorSource {
+  return { snapshot: async () => snapshot };
+}
+
+const entry: ChatSessionDirectoryEntry = {
+  sessionId: "session-1",
+  title: null,
+  cwd: "/workspace/",
+  messageCount: 3,
+  createdAt: "2026-10-20T12:00:00Z",
+  updatedAt: "2026-10-20T13:00:00Z",
+};
+
+interface StubChat extends ChatServiceContract {
+  readonly calls: ChatUserAction[];
+  readonly closeCalls: { value: number };
+  failNext?: unknown;
+  payloadError?: unknown;
+}
+
+function stubChat(
+  id: string,
+  initial?: { sessionId: string; bindingRevision: number },
+): StubChat {
+  const calls: ChatUserAction[] = [];
+  const closeCalls = { value: 0 };
+  const state: {
+    sessionId: string | null;
+    bindingRevision: number;
+    binding: ChatBindingTarget | null;
+    failNext?: unknown;
+    payloadError?: unknown;
+  } = {
+    sessionId: initial?.sessionId ?? null,
+    bindingRevision: initial?.bindingRevision ?? 0,
+    binding: initial
+      ? { chatId: id, sessionId: initial.sessionId, bindingRevision: initial.bindingRevision }
+      : null,
+  };
+
+  function execute(action: SendAction): SendReceipt;
+  function execute(action: SessionAction): Promise<SessionReadyResult>;
+  function execute(action: CancelAction): Promise<CancelRequestResult>;
+  function execute(action: ForceSendAction | TakeBackAction | AnswerAction | SetConfigOptionAction): Promise<ControlResult>;
+  function execute(action: HistoryAction): Promise<HistoryPageOutcome>;
+  function execute(action: ChatUserAction): unknown {
+    calls.push(action);
+    if (state.failNext !== undefined) throw state.failNext;
+    const target = (): ChatBindingTarget => {
+      if (!state.binding) throw new Error("stub has no binding");
+      return state.binding;
+    };
+    switch (action.type) {
+      case "send": {
+        const binding = target();
+        return Object.assign(Promise.resolve(), {
+          requestId: action.requestId,
+          inputId: "input-1",
+          target: binding,
+          accepted: Promise.resolve(),
+          isSent: false,
+        });
+      }
+      case "create_new_session":
+      case "change_session": {
+        const sessionId = action.type === "change_session"
+          ? action.payload.sessionId
+          : "created-session";
+        state.sessionId = sessionId;
+        state.bindingRevision += 1;
+        state.binding = { chatId: id, sessionId, bindingRevision: state.bindingRevision };
+        return Promise.resolve({
+          requestId: action.requestId,
+          ...state.binding,
+        });
+      }
+      case "cancel":
+        return Promise.resolve({ requestId: action.requestId, status: "idle" });
+      case "force_send":
+      case "take_back":
+      case "answer":
+      case "set_config_option":
+        return Promise.resolve({ requestId: action.requestId, status: "accepted" });
+      case "load_earlier_history":
+        return Promise.resolve({ applied: 1, nextCursor: "next" });
+    }
+  }
+
+  const chat = {
+    id,
+    get sessionId() { return state.sessionId; },
+    get bindingRevision() { return state.bindingRevision; },
+    get binding() { return state.binding; },
+    calls,
+    closeCalls,
+    get failNext() { return state.failNext; },
+    set failNext(value: unknown) { state.failNext = value; },
+    get payloadError() { return state.payloadError; },
+    set payloadError(value: unknown) { state.payloadError = value; },
+
+    execute,
+
+    async readPayload(ref: ToolPayloadReadRef): Promise<ToolPayloadResponse> {
+      if (state.payloadError !== undefined) throw state.payloadError;
+      return { id: ref.id, bytes: ref.bytes, json: '{"ok":true}' };
+    },
+
+    async close(): Promise<void> {
+      closeCalls.value += 1;
+    },
+
+    subscribeFacts() { return () => {}; },
+  };
+  return chat;
+}
+
+interface ApiFixture {
+  app: ReturnType<typeof createApi>;
+  registry: ChatRegistry;
+  chats: Map<string, StubChat>;
+  created: StubChat[];
+  createOptions: ChatCreateOptions[];
+  listCalls: Array<{ path?: string } | undefined>;
+  closeErrors: Map<string, unknown>;
+}
+
+/** 服务唯一工作区；HTTP 层的 path 在注册表内映射为相对 sessionPath。 */
+const WORKSPACE: WorkspaceRef = {
+  id: "default",
+  hostPath: "/workspace",
+  runtimePath: "/workspace",
+};
+
+/** 进程级 agent 模板；HTTP 层只决定 path，不重复构造 settings。 */
+const AGENT: ChatAgentConfig = {
+  settings: { config: { active_alias: "sonnet" } },
+};
+
+/** View 首次释放失败、重试成功；其余通道成员不参与 DELETE 测试。 */
+class FailingCloseChannel implements ChatYjsChannel {
+  closed = false;
+  failures = 1;
+
+  send(): void {}
+  onMessage(): () => void { return () => {}; }
+  onClose(): () => void { return () => {}; }
+
+  close(): void {
+    if (this.failures > 0) {
+      this.failures -= 1;
+      throw new Error("view dispose failed");
+    }
+    this.closed = true;
+  }
+}
+
+/** 最小 sandbox 端口：成功时返回固定工作区与 MCP，失败时抛启动错误。 */
+class StubSandboxPool implements SandboxPoolPort {
+  readonly acquired: Array<string | undefined> = [];
+
+  constructor(private readonly fail = false) {}
+
+  async acquire(sandboxId?: string): Promise<SandboxLease> {
+    this.acquired.push(sandboxId);
+    if (this.fail) throw new SandboxStartError("sandbox start failed");
+    const id = sandboxId ?? "sbx_0123456789abcdef0123456789abcdef";
+    const workspace = `/sandboxes/${id}/workspace`;
+    return {
+      sandboxId: id,
+      workspace: { id, hostPath: workspace, runtimePath: workspace },
+      mcp: {
+        name: "workspace",
+        config: { type: "http", url: "http://127.0.0.1/mcp", headers: {} },
+      },
+      release: async () => {},
+    };
+  }
+
+  async closeAll(): Promise<void> {}
+
+  snapshot() {
+    return { active: [], starting: 0 };
+  }
+}
+
+function apiWith(options: {
+  chats?: StubChat[];
+  listError?: unknown;
+  listResult?: ChatSessionDirectoryEntry[];
+  sandbox?: SandboxPoolPort;
+  sandboxesRoot?: string;
+  sessions?: { getSession(id: string): Promise<ChatSessionDirectoryEntry | null> };
+  monitor?: MonitorSource;
+} = {}): ApiFixture {
+  const chats = new Map((options.chats ?? []).map((chat) => [chat.id, chat]));
+  const created: StubChat[] = [];
+  const createOptions: ChatCreateOptions[] = [];
+  const listCalls: Array<{ path?: string } | undefined> = [];
+  const closeErrors = new Map<string, unknown>();
+  const manager: ChatManagerContract = {
+    async listSessions(params) {
+      listCalls.push(params);
+      if (options.listError !== undefined) throw options.listError;
+      return options.listResult ?? [entry];
+    },
+    createChat(options: ChatCreateOptions) {
+      createOptions.push(options);
+      const chat = stubChat("chat-new");
+      created.push(chat);
+      chats.set(chat.id, chat);
+      return chat;
+    },
+    getChat: (id) => chats.get(id),
+    findChatBySession: (id) =>
+      [...chats.values()].find((chat) => chat.sessionId === id),
+    async closeChat(id) {
+      const failure = closeErrors.get(id);
+      if (failure !== undefined) throw failure;
+      const chat = chats.get(id);
+      if (chat) await chat.close();
+      chats.delete(id);
+    },
+    async shutdown() {},
+  };
+  const registry = new ChatRegistry(manager, WORKSPACE, AGENT, {
+    session: { instructions: "test", mcpServers: {} },
+    sessions: options.sessions ?? { getSession: async () => null },
+    ...(options.sandbox === undefined
+      ? {}
+      : { sandbox: options.sandbox, sandboxesRoot: options.sandboxesRoot ?? "/sandboxes" }),
+  });
+  const app = createApi({ registry, monitor: options.monitor ?? stubMonitor() });
+  return {
+    app,
+    registry,
+    chats,
+    created,
+    createOptions,
+    listCalls,
+    closeErrors,
+  };
+}
+
+function postAction(
+  app: ReturnType<typeof createApi>,
+  chatId: string,
+  action: Record<string, unknown>,
+  target: unknown,
+) {
+  return app.request(`/api/chats/${chatId}/actions`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ...action, target }),
+  });
+}
+
+const boundTarget = { sessionId: "session-1", bindingRevision: 1 };
+
+describe("server api", () => {
+  test("GET /api/monitor 返回单一快照，旧 /api/info 已移除", async () => {
+    const { app, created, createOptions } = apiWith();
+    const response = await app.request("/api/monitor");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, ...monitorSnapshot });
+    // 监控读取不得创建 Chat 或启动 sandbox。
+    expect(created).toHaveLength(0);
+    expect(createOptions).toHaveLength(0);
+    expect((await app.request("/api/info")).status).toBe(404);
+  });
+
+  test("快照构建失败返回 503 monitor_unavailable", async () => {
+    const logged = spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { app } = apiWith({
+        monitor: { snapshot: async () => { throw new Error("snapshot boom"); } },
+      });
+      const response = await app.request("/api/monitor");
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({
+        ok: false,
+        code: "monitor_unavailable",
+        message: "Monitor snapshot is unavailable",
+      });
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  test("目录返回 Store 事实并附加项目归属", async () => {
+    const { app } = apiWith();
+    const response = await app.request("/api/chats");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      chats: [{ ...entry, projectId: "default" }],
+      available: true,
+    });
+    expect(JSON.stringify(await (await app.request("/api/chats")).json()))
+      .not.toContain("running");
+  });
+
+  test("目录不可达返回 503 与 available:false", async () => {
+    const { app } = apiWith({ listError: new Error("store down") });
+    const response = await app.request("/api/chats");
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      chats: [],
+      available: false,
+      error: "Session directory is unavailable",
+    });
+  });
+
+  test("createChat 只登记句柄，注入 workspace/agent 并转换 path", async () => {
+    const { app, created, createOptions } = apiWith();
+    const response = await app.request("/api/chats", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: "/workspace/project" }),
+    });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual({
+      chat: { id: "chat-new", sessionId: null, bindingRevision: 0 },
+    });
+    expect(created).toHaveLength(1);
+    expect(created[0]?.calls).toEqual([]);
+    expect(createOptions).toEqual([{
+      workspace: WORKSPACE,
+      sessionPath: "project",
+      agent: AGENT,
+    }]);
+  });
+
+  test("createChat 未指定 path 时使用工作区根 sessionPath", async () => {
+    const { app, createOptions } = apiWith();
+    const response = await app.request("/api/chats", { method: "POST" });
+    expect(response.status).toBe(201);
+    expect(createOptions).toHaveLength(1);
+    expect(createOptions[0]?.workspace).toBe(WORKSPACE);
+    expect(createOptions[0]?.sessionPath).toBe("");
+    expect(createOptions[0]?.agent).toBe(AGENT);
+    expect(createOptions[0]).not.toHaveProperty("path");
+  });
+
+  test("createChat 按 sessionId 启动会话所属 sandbox 并合并 MCP", async () => {
+    const sandbox = new StubSandboxPool();
+    const workspace = "/sandboxes/sbx_0123456789abcdef0123456789abcdef/workspace";
+    const { app, createOptions } = apiWith({
+      sandbox,
+      sessions: { getSession: async () => ({ ...entry, cwd: workspace }) },
+    });
+    const response = await app.request("/api/chats", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: "session-1" }),
+    });
+    expect(response.status).toBe(201);
+    expect(sandbox.acquired).toEqual(["sbx_0123456789abcdef0123456789abcdef"]);
+    expect(createOptions[0]?.workspace).toEqual({
+      id: "sbx_0123456789abcdef0123456789abcdef",
+      hostPath: workspace,
+      runtimePath: workspace,
+    });
+    expect(createOptions[0]?.sessionPath).toBeUndefined();
+    expect(createOptions[0]?.session?.mcpServers?.workspace).toMatchObject({
+      type: "http",
+      url: "http://127.0.0.1/mcp",
+    });
+  });
+
+  test("createChat sandbox 启动失败返回 503 sandbox_start_failed", async () => {
+    const { app, created } = apiWith({ sandbox: new StubSandboxPool(true) });
+    const response = await app.request("/api/chats", { method: "POST" });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      code: "sandbox_start_failed",
+    });
+    expect(created).toHaveLength(0);
+  });
+
+  test("createChat 拒绝同时给 path 与 sessionId", async () => {
+    const { app, created } = apiWith();
+    const response = await app.request("/api/chats", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: "project", sessionId: "session-1" }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      code: "invalid_request",
+    });
+    expect(created).toHaveLength(0);
+  });
+
+  test("createChat 拒绝工作区外绝对 path：400 workspace_mismatch 且不创建句柄", async () => {
+    const { app, created, createOptions } = apiWith();
+    for (const path of ["/workspace-other", "/tmp/project"]) {
+      const response = await app.request("/api/chats", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body).toMatchObject({ ok: false, code: "workspace_mismatch" });
+      expect(body.message).toContain("outside the workspace runtime root");
+    }
+    expect(created).toEqual([]);
+    expect(createOptions).toEqual([]);
+  });
+
+  test("session workspace 越界映射为 409 并保留 disposition", async () => {
+    const chat = stubChat("chat-1");
+    chat.failNext = new SessionWorkspaceMismatchError(
+      "request-1", "/other/session", "/workspace",
+    );
+    const { app } = apiWith({ chats: [chat] });
+    const response = await postAction(app, "chat-1", {
+      type: "change_session", requestId: "request-1", payload: { sessionId: "session-1" },
+    }, { sessionId: null, bindingRevision: 0 });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      code: "workspace_mismatch",
+      disposition: "rejected",
+      requestId: "request-1",
+      chatId: "chat-1",
+    });
+  });
+
+  test("非法 JSON 与非法 Action 不触达执行层", async () => {
+    const chat = stubChat("chat-1", { sessionId: "session-1", bindingRevision: 1 });
+    const { app } = apiWith({ chats: [chat] });
+
+    const broken = await app.request("/api/chats/chat-1/actions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{",
+    });
+    expect(broken.status).toBe(400);
+    expect((await broken.json()).code).toBe("invalid_action");
+
+    const invalid = await postAction(app, "chat-1", {
+      type: "send", requestId: "request-1", payload: { text: "  " },
+    }, boundTarget);
+    expect(invalid.status).toBe(400);
+    expect((await invalid.json()).code).toBe("invalid_action");
+    expect(chat.calls).toEqual([]);
+  });
+
+  test("未知 Chat 返回 410", async () => {
+    const { app } = apiWith();
+    const response = await postAction(app, "missing", {
+      type: "cancel", requestId: "request-1", payload: {},
+    }, { sessionId: null, bindingRevision: 0 });
+    expect(response.status).toBe(410);
+    expect(await response.json()).toEqual({
+      ok: false,
+      code: "chat_not_found",
+      message: "Chat not found",
+      disposition: "rejected",
+      chatId: "missing",
+    });
+  });
+
+  test("目标绑定不符返回 409 且不执行", async () => {
+    const chat = stubChat("chat-1", { sessionId: "session-1", bindingRevision: 1 });
+    const { app } = apiWith({ chats: [chat] });
+    const response = await postAction(app, "chat-1", {
+      type: "send", requestId: "request-1", payload: { text: "继续" },
+    }, { sessionId: "session-1", bindingRevision: 2 });
+    expect(response.status).toBe(409);
+    const body = await response.json();
+    expect(body).toMatchObject({
+      code: "binding_conflict", disposition: "rejected", requestId: "request-1",
+    });
+    expect(chat.calls).toEqual([]);
+  });
+
+  test("send 返回 202 与 inputId/绑定身份", async () => {
+    const chat = stubChat("chat-1", { sessionId: "session-1", bindingRevision: 1 });
+    const { app } = apiWith({ chats: [chat] });
+    const response = await postAction(app, "chat-1", {
+      type: "send", requestId: "request-1", payload: { text: "继续" },
+    }, boundTarget);
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({
+      ok: true,
+      requestId: "request-1",
+      chatId: "chat-1",
+      sessionId: "session-1",
+      bindingRevision: 1,
+      inputId: "input-1",
+      accepted: true,
+    });
+  });
+
+  test("空句柄 create_new_session 使用 null/0 目标并返回新绑定", async () => {
+    const chat = stubChat("chat-1");
+    const { app } = apiWith({ chats: [chat] });
+    const response = await postAction(app, "chat-1", {
+      type: "create_new_session", requestId: "request-1", payload: { title: "新对话" },
+    }, { sessionId: null, bindingRevision: 0 });
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({
+      ok: true,
+      requestId: "request-1",
+      chatId: "chat-1",
+      sessionId: "created-session",
+      bindingRevision: 1,
+    });
+  });
+
+  test("绑定失败映射为 500 并保留 disposition", async () => {
+    const chat = stubChat("chat-1");
+    chat.failNext = new ChatActionError(
+      "request-1", "binding_failed", "load failed", "rejected",
+    );
+    const { app } = apiWith({ chats: [chat] });
+    const response = await postAction(app, "chat-1", {
+      type: "change_session", requestId: "request-1", payload: { sessionId: "session-1" },
+    }, { sessionId: null, bindingRevision: 0 });
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      code: "binding_failed",
+      disposition: "rejected",
+      requestId: "request-1",
+      chatId: "chat-1",
+    });
+  });
+
+  test("session/new 后续失败携带 createdSessionId 与 stage", async () => {
+    const chat = stubChat("chat-1");
+    chat.failNext = new SessionCreationError(
+      "request-1", "created-session", "rename", "rename failed",
+    );
+    const { app } = apiWith({ chats: [chat] });
+    const response = await postAction(app, "chat-1", {
+      type: "create_new_session", requestId: "request-1", payload: {},
+    }, { sessionId: null, bindingRevision: 0 });
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({
+      ok: false,
+      code: "session_creation_failed",
+      disposition: "unknown",
+      createdSessionId: "created-session",
+      stage: "rename",
+    });
+  });
+
+  test("未分类错误返回 500 internal_error 与 unknown", async () => {
+    const chat = stubChat("chat-1", { sessionId: "session-1", bindingRevision: 1 });
+    chat.failNext = new Error("boom");
+    const { app } = apiWith({ chats: [chat] });
+    const response = await postAction(app, "chat-1", {
+      type: "cancel", requestId: "request-1", payload: {},
+    }, boundTarget);
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({
+      ok: false, code: "internal_error", disposition: "unknown", chatId: "chat-1",
+    });
+  });
+
+  test("close 成功 204，未知 Chat 410，未确认 500 + incomplete/errors", async () => {
+    const chat = stubChat("chat-1", { sessionId: "session-1", bindingRevision: 1 });
+    const fixture = apiWith({ chats: [chat] });
+
+    const missing = await fixture.app.request("/api/chats/missing", { method: "DELETE" });
+    expect(missing.status).toBe(410);
+
+    fixture.closeErrors.set("chat-1", new ChatCloseIncompleteError([
+      new Error("registry close failed"),
+    ]));
+    const incomplete = await fixture.app.request("/api/chats/chat-1", { method: "DELETE" });
+    expect(incomplete.status).toBe(500);
+    const body = await incomplete.json();
+    expect(body).toMatchObject({
+      ok: false,
+      code: "close_incomplete",
+      disposition: "unknown",
+      incomplete: true,
+      chatId: "chat-1",
+    });
+    expect(body.errors[0]).toContain("registry close failed");
+
+    fixture.closeErrors.delete("chat-1");
+    const closed = await fixture.app.request("/api/chats/chat-1", { method: "DELETE" });
+    expect(closed.status).toBe(204);
+    expect(chat.closeCalls.value).toBe(1);
+  });
+
+  test("View 释放失败后 DELETE 以同一 chatId 重试并清理残留", async () => {
+    const chat = stubChat("chat-1", { sessionId: "session-1", bindingRevision: 1 });
+    const fixture = apiWith({ chats: [chat] });
+    fixture.registry.views
+      .attach(chat)
+      .sync(new FailingCloseChannel());
+
+    const first = await fixture.app.request("/api/chats/chat-1", { method: "DELETE" });
+    expect(first.status).toBe(500);
+    const firstBody = await first.json();
+    expect(firstBody).toMatchObject({
+      ok: false,
+      code: "close_incomplete",
+      disposition: "unknown",
+      incomplete: true,
+      chatId: "chat-1",
+    });
+    expect(firstBody.errors[0]).toContain("ChatView disposal failed");
+    // 句柄已移除（WS 不能再解析到该 Chat），但 View 残留仍可被同一 DELETE 重试。
+    expect(fixture.chats.has("chat-1")).toBe(false);
+    expect(fixture.registry.hasPendingClose("chat-1")).toBe(true);
+
+    const second = await fixture.app.request("/api/chats/chat-1", { method: "DELETE" });
+    expect(second.status).toBe(204);
+    expect(fixture.registry.hasPendingClose("chat-1")).toBe(false);
+    expect(chat.closeCalls.value).toBe(1);
+  });
+
+  test("payload 按引用读取，不可用映射 404", async () => {
+    const chat = stubChat("chat-1", { sessionId: "session-1", bindingRevision: 1 });
+    const { app } = apiWith({ chats: [chat] });
+
+    const ok = await app.request("/api/chats/chat-1/payload/tool%2F1?bytes=11");
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({
+      ok: true,
+      payload: { id: "tool/1", bytes: 11, json: '{"ok":true}' },
+    });
+
+    chat.payloadError = new PayloadReadError("unavailable", "no payload");
+    const missing = await app.request("/api/chats/chat-1/payload/tool%2F1?bytes=11");
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toMatchObject({ ok: false, code: "unavailable" });
+  });
+
+  test("payload bytes 非法为 400", async () => {
+    const chat = stubChat("chat-1", { sessionId: "session-1", bindingRevision: 1 });
+    const { app } = apiWith({ chats: [chat] });
+    const response = await app.request("/api/chats/chat-1/payload/tool-1?bytes=-1");
+    expect(response.status).toBe(400);
+  });
+});

@@ -92,8 +92,9 @@ fn make_subagent_tool(parent_tools: Vec<Arc<dyn BaseTool>>) -> SubAgentTool {
 /// W4b（J5）测试夹具：把会话级 MCP skill registry 接到子链装配器上
 /// （子代理 `skills:` 预载的唯一来源；未接线 ⇒ 缺口，不回落磁盘）。
 ///
-/// 条目用 legacy 形状（`content: Some(..)`、无 `resources[]` 绑定）：统一
-/// activation 在该形状下使用发现期正文——本夹具因此不需要真实 peer。
+/// 条目用已校验的 legacy 形状（无 `resources[]` 绑定）：activation 允许
+/// 使用发现正文，但仍要求当前代 Connected McpClientHandle 与调用 gate。
+/// 该合法 legacy 路径无需 RPC peer；任意 type-erased token 不代表连接。
 pub(crate) fn with_skill_registry(
     tool: SubAgentTool,
     server: &str,
@@ -102,7 +103,22 @@ pub(crate) fn with_skill_registry(
     use peri_acp_types::mcp_skills::{HandleToken, McpSkillRegistry};
     use peri_acp_types::skills::{SkillMetadata, SkillOrigin, SkillSource};
     let reg = std::sync::Arc::new(McpSkillRegistry::new());
-    let handle: HandleToken = std::sync::Arc::new(server.to_string());
+    let handle: HandleToken = std::sync::Arc::new(crate::mcp::client::McpClientHandle {
+        call_gate: Default::default(),
+        name: server.to_string(),
+        version: None,
+        cache_version: None,
+        connected_at: None,
+        protocol_version: None,
+        peer: None,
+        tools: vec![],
+        resources: vec![],
+        status: crate::mcp::client::ClientStatus::Connected,
+        oauth_status: Default::default(),
+        source: None,
+        url: None,
+        skills_capable: false,
+    });
     reg.mark_discovery_started(server, handle.clone());
     reg.mark_discovery_completed(
         server,
@@ -843,6 +859,8 @@ mod events_contract_test;
 mod fork_test;
 #[path = "tool_test/input_contract_test.rs"]
 mod input_contract_test;
+#[path = "tool_test/integration_modes_test.rs"]
+mod integration_modes_test;
 #[path = "tool_test/integration_v2_test.rs"]
 mod integration_v2_test;
 #[path = "tool_test/invoke_test.rs"]

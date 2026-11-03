@@ -164,6 +164,8 @@ fn apply_cache_to_message(message: &mut Value) {
     }
 }
 
+/// 兼容端点要求 thinking 模式下的历史 assistant 消息携带 thinking 块；
+/// 输入签名不被校验，因此缺失时补空 thinking 占位，不伪造 signature。
 pub(super) fn ensure_thinking_blocks(messages: &mut [Value]) {
     for message in messages {
         if message["role"] != "assistant" || has_thinking_block(message) {
@@ -172,7 +174,6 @@ pub(super) fn ensure_thinking_blocks(messages: &mut [Value]) {
         let placeholder = json!({
             "type": "thinking",
             "thinking": "",
-            "signature": "",
         });
         match message.get_mut("content") {
             Some(Value::Array(blocks)) => blocks.insert(0, placeholder),

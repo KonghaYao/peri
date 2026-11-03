@@ -63,7 +63,12 @@ fn should_emit_settled_tool_render(call: &ToolCall) -> bool {
 ///
 /// 流式 Reason 可能已提前 emit `ToolStarted`；此处仍成对发送 Started/Ended，
 /// TUI 侧对同 id 的 Started 做 upsert，Ended 负责结束 loading。
-fn emit_settled_tool_render(ctx: &StageContext, call: &ToolCall, result: &ToolResult) {
+fn emit_settled_tool_render(
+    ctx: &StageContext,
+    call: &ToolCall,
+    result: &ToolResult,
+    origin_message_id: crate::messages::MessageId,
+) {
     let turn_id = ctx.turn_id();
     let agent_id = ctx.session.agent_id;
     ctx.runtime.event_bus.emit_render(RenderEvent::ToolStarted {
@@ -72,6 +77,9 @@ fn emit_settled_tool_render(ctx: &StageContext, call: &ToolCall, result: &ToolRe
         tool_call_id: call.id.clone(),
         name: call.name.clone(),
         input: call.input.clone(),
+        origin_message_id: Some(origin_message_id),
+        // 模型批次的工具调用归属于本次 LLM 调用的持久 assistant 消息。
+        origin_readable: Some(true),
     });
     ctx.runtime.event_bus.emit_render(RenderEvent::ToolEnded {
         turn_id,
@@ -176,7 +184,7 @@ pub async fn dispatch_tools(
             "tool call resolution failed"
         );
         if should_emit_settled_tool_render(call) {
-            emit_settled_tool_render(ctx, call, result);
+            emit_settled_tool_render(ctx, call, result, ai_msg_id);
         }
     }
     // Invocation events/tool cards project the effective canonical target. The LLM's
@@ -208,8 +216,12 @@ pub async fn dispatch_tools(
     //
     // canonical 执行上下文只投影会话事实与端口：transcript 提交、after_tools_batch、
     // 失败计数与事件投影留在本函数（Act 侧）。
-    let invocation_context =
-        InvocationContext::from_stage(ctx, ExecutionEntryOrigin::ModelBatch, cancel.clone());
+    let invocation_context = InvocationContext::from_stage(
+        ctx,
+        ExecutionEntryOrigin::ModelBatch,
+        cancel.clone(),
+        Some(&ai_msg),
+    );
     let mut collect_outcome = collect_tool_results(
         &invocation_context,
         policy_calls,
@@ -217,7 +229,9 @@ pub async fn dispatch_tools(
         &target_tools,
         catalog,
         cancel,
-        ai_msg_id,
+        Some(ai_msg_id),
+        // 模型批次：归属本次 LLM 调用的真实持久 assistant 消息。
+        Some(true),
         &ai_msg,
         None,
     )

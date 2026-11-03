@@ -21,7 +21,13 @@ fn append_full_result(state: &mut CompactBudgetRecovery, transcript: &mut Messag
     transcript.append(BaseMessage::human(
         "[激活的 Skill 指令: /skills/a/SKILL.md]",
     ));
-    state.record_full_applied(transcript, new_work);
+    state.record_full_applied(
+        new_work,
+        ResidentFullSnapshot::capture(
+            transcript,
+            ResidentHistoryPressure::from_transcript(0, transcript),
+        ),
+    );
 }
 
 fn append_reminder(transcript: &mut MessageTranscript) {
@@ -43,12 +49,24 @@ fn append_reminder(transcript: &mut MessageTranscript) {
     );
 }
 
+fn begin(
+    state: &mut CompactBudgetRecovery,
+    transcript: &MessageTranscript,
+) -> Option<FullBudgetProbe> {
+    let new_visible_work =
+        CompactBudgetRecovery::has_new_work_after(state.full_watermark, transcript, true);
+    state.begin_request(
+        new_visible_work,
+        transcript.entries().last().map(|entry| entry.id()),
+    )
+}
+
 fn observe(
     state: &mut CompactBudgetRecovery,
     transcript: &MessageTranscript,
     input_tokens: u32,
 ) -> AgentResult<()> {
-    let probe = state.begin_request(transcript);
+    let probe = begin(state, transcript);
     state.observe_response(
         probe,
         Some(&make_usage(input_tokens)),
@@ -145,9 +163,9 @@ fn test_budget_recovery_stale_request_and_repeated_response_are_ignored() {
     let mut transcript = MessageTranscript::new();
     let mut state = CompactBudgetRecovery::default();
     append_full_result(&mut state, &mut transcript);
-    let old_probe = state.begin_request(&transcript);
+    let old_probe = begin(&mut state, &transcript);
     append_full_result(&mut state, &mut transcript);
-    let current_probe = state.begin_request(&transcript);
+    let current_probe = begin(&mut state, &transcript);
     let config = CompactConfig::default();
     let budget = ContextBudget::new(100_000);
     let usage = make_usage(96_000);
@@ -171,7 +189,7 @@ fn test_budget_recovery_missing_and_zero_usage_never_borrow_stale_pressure() {
     append_full_result(&mut state, &mut transcript);
     observe(&mut state, &transcript, 96_000).unwrap();
     append_full_result(&mut state, &mut transcript);
-    let probe = state.begin_request(&transcript);
+    let probe = begin(&mut state, &transcript);
     let config = CompactConfig::default();
     let budget = ContextBudget::new(100_000);
     state
@@ -197,7 +215,13 @@ fn test_budget_recovery_watermark_survives_shrink_and_missing_watermark_is_new_w
     before_shrink.append(prior.clone());
     before_shrink.append(summary.clone());
     let mut state = CompactBudgetRecovery::default();
-    state.record_full_applied(&before_shrink, true);
+    state.record_full_applied(
+        true,
+        ResidentFullSnapshot::capture(
+            &before_shrink,
+            ResidentHistoryPressure::from_transcript(0, &before_shrink),
+        ),
+    );
     assert_eq!(
         state.full_watermark,
         Some(summary_id),
@@ -235,8 +259,8 @@ fn test_budget_recovery_previous_request_after_same_full_is_not_current_probe() 
     let mut transcript = MessageTranscript::new();
     let mut state = CompactBudgetRecovery::default();
     append_full_result(&mut state, &mut transcript);
-    let previous_request = state.begin_request(&transcript);
-    let current_request = state.begin_request(&transcript);
+    let previous_request = begin(&mut state, &transcript);
+    let current_request = begin(&mut state, &transcript);
     let config = CompactConfig::default();
     let budget = ContextBudget::new(100_000);
     let usage = make_usage(96_000);

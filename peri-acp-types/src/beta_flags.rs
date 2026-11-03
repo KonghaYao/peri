@@ -30,8 +30,9 @@ pub struct BetaFlag {
     pub description: &'static str,
 }
 
-/// `full-async-tools`：`Bash` 与 `Agent` 在调用未显式给出 `run_in_background` 时
-/// 缺省走后台（显式 `false` 仍前台）。
+/// `full-async-tools`：`Bash` 在调用未显式给出 `run_in_background` 时缺省走后台
+/// （显式 `false` 仍前台）；`Agent` 则强制后台——省略与显式 `false` 都后台，
+/// MCP Agent 仍只支持同步激活。
 ///
 /// 消费方引用本常量，不写 `"full-async-tools"` 字面量。
 pub const FULL_ASYNC_TOOLS: &str = "full-async-tools";
@@ -40,7 +41,7 @@ pub const FULL_ASYNC_TOOLS: &str = "full-async-tools";
 pub const BETA_FLAGS: &[BetaFlag] = &[BetaFlag {
     id: FULL_ASYNC_TOOLS,
     description:
-        "Bash and Agent default to background execution when the call omits run_in_background",
+        "Bash defaults to background execution when the call omits run_in_background; Agent always runs in the background (explicit false is ignored; MCP Agents stay synchronous)",
 }];
 
 /// 按 id 查注册表条目；未命中返回 `None`（未知 id 不是错误，按未覆盖处理）。

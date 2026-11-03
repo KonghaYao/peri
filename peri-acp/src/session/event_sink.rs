@@ -31,6 +31,16 @@ use tracing::{debug, error};
 use crate::host::live_delivery::{LiveDelivery, PublishOutcome};
 use crate::{event::activity::map_agent_activity, event::map_event, transport::AcpTransport};
 
+/// Preserve producer identity in ACP's extension envelope without changing its payload.
+pub(super) fn attach_child_origin(
+    payload: &mut serde_json::Value,
+    origin: Option<&peri_acp_types::event::ChildEventOrigin>,
+) {
+    if let Some(origin) = origin {
+        payload["_meta"]["peri"]["childRun"] = serde_json::json!(origin);
+    }
+}
+
 /// EventSink 契约（L5：事实源 peri-acp-types::event）。
 pub use peri_acp_types::event::EventSink;
 use peri_acp_types::event::EventSinkError;
@@ -166,14 +176,14 @@ impl TransportEventSink {
     }
 }
 
-#[async_trait]
-impl EventSink for TransportEventSink {
-    async fn push_system_reminder(
+impl TransportEventSink {
+    async fn push_system_reminder_with_origin(
         &self,
         session_id: &str,
         reminder: &peri_acp_types::system_reminder::SystemReminder,
         replay: bool,
         source_agent_id: Option<&str>,
+        origin: Option<&peri_acp_types::event::ChildEventOrigin>,
     ) -> Result<(), EventSinkError> {
         // H8：客户端出口必须先按目标受众过滤；结构化事件与文本 fallback 使用
         // 同一条规则，fallback 不得绕过过滤下发 Model-only 内容。
@@ -209,13 +219,26 @@ impl EventSink for TransportEventSink {
                 json!({ "text": reminder.summary.as_deref().unwrap_or(&reminder.body), "replay": replay, "legacy": true }),
             )
         };
+        let mut payload = json!({ "sessionId": session_id, "event": event, "data": data });
+        attach_child_origin(&mut payload, origin);
         self.transport
-            .send_notification(
-                "peri/unstable_event",
-                json!({ "sessionId": session_id, "event": event, "data": data }),
-            )
+            .send_notification("peri/unstable_event", payload)
             .await
             .map_err(|error| EventSinkError::new(format!("system reminder send failed: {error}")))
+    }
+}
+
+#[async_trait]
+impl EventSink for TransportEventSink {
+    async fn push_system_reminder(
+        &self,
+        session_id: &str,
+        reminder: &peri_acp_types::system_reminder::SystemReminder,
+        replay: bool,
+        source_agent_id: Option<&str>,
+    ) -> Result<(), EventSinkError> {
+        self.push_system_reminder_with_origin(session_id, reminder, replay, source_agent_id, None)
+            .await
     }
 
     async fn push_event(
@@ -224,13 +247,22 @@ impl EventSink for TransportEventSink {
         event: &ExecutorEvent,
         context_window: u32,
     ) -> Result<(), EventSinkError> {
+        let original_event = event;
+        let origin = event.child_origin();
+        let event = event.payload();
         if let ExecutorEvent::SystemReminder {
             reminder,
             source_agent_id,
         } = event
         {
-            self.push_system_reminder(session_id, reminder, false, source_agent_id.as_deref())
-                .await?;
+            self.push_system_reminder_with_origin(
+                session_id,
+                reminder,
+                false,
+                source_agent_id.as_deref(),
+                origin,
+            )
+            .await?;
             return Ok(());
         }
         let caps = self
@@ -255,7 +287,7 @@ impl EventSink for TransportEventSink {
                 .get(session_id)
                 .is_some_and(|caps| caps.user_input_queue)
             {
-                self.push_legacy_event(session_id, event).await?;
+                self.push_legacy_event(session_id, original_event).await?;
             }
             return Ok(());
         }
@@ -307,6 +339,7 @@ impl EventSink for TransportEventSink {
                         );
                     }
                 }
+                attach_child_origin(&mut payload, origin);
                 let payload = match (&self.live_delivery, transcript) {
                     (Some(live), true) => match live.publish(session_id, payload) {
                         PublishOutcome::Send(payload) => Some(payload),
@@ -358,7 +391,7 @@ impl EventSink for TransportEventSink {
         // SubagentStarted/SubagentStopped 等事件不产生 SessionUpdate，
         // 但必须通过 peri/agent_event 通道送达 TUI 以创建/销毁 SubAgentGroup 容器。
         if caps.agent_event {
-            self.push_legacy_event(session_id, event).await?;
+            self.push_legacy_event(session_id, original_event).await?;
         }
         Ok(())
     }

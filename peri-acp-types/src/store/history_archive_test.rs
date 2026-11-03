@@ -3,6 +3,44 @@ use crate::context_archive::{build_catalog, ArchiveRoot};
 use crate::projection::{ArchiveGroupLink, ProjectionActionEntry, ProjectionTarget};
 
 #[test]
+fn provider_replay_cannot_be_exposed_as_archive_tool_text() {
+    use crate::context_archive::ArchiveError;
+    use crate::messages::{BaseMessage, ContentBlock, MessageContent};
+    let state = ContentBlock::ProviderState {
+        provider: "openai_responses".into(),
+        data: serde_json::json!({"items":[{"encrypted_content":"opaque"}]}),
+    };
+    for content in [
+        MessageContent::Blocks(vec![state.clone()]),
+        MessageContent::Blocks(vec![ContentBlock::tool_result("call", vec![state], false)]),
+    ] {
+        let payload = PersistedPayload::Message(BaseMessage::ai(content));
+        assert!(matches!(
+            build_catalog(
+                "session".into(),
+                "group".into(),
+                payload.id(),
+                &[payload],
+                "receipt".into(),
+            ),
+            Err(ArchiveError::Unsupported)
+        ));
+    }
+    let plain = PersistedPayload::Message(BaseMessage::ai("visible"));
+    let mut catalog = build_catalog(
+        "session".into(),
+        "group".into(),
+        plain.id(),
+        &[plain],
+        "receipt".into(),
+    )
+    .unwrap();
+    catalog.members[0].block_types.push("provider_state".into());
+    assert!(matches!(catalog.validate(), Err(ArchiveError::Unsupported)));
+    assert!(matches!(catalog.digest(), Err(ArchiveError::Unsupported)));
+}
+
+#[test]
 fn test_archive_root_upgrade_before_old_anchor_keeps_the_complete_range() {
     use crate::context_archive::coalesce_archive_roots;
     // IDs deliberately oppose canonical order: UUID comparisons are not history order.

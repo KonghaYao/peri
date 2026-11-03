@@ -42,6 +42,12 @@ pub use shared_mode::{PermissionMode, SharedPermissionMode};
 /// 模块只允许出现一次，避免两处字面量漂移（effective name 仍只从声明表解析）。
 const CRON_REGISTER_TOOL_NAME: &str = "cron_register";
 
+/// `monitor_start` 的**原始**工具名（不是 effective name）。
+///
+/// 与 [`CRON_REGISTER_TOOL_NAME`] 同形：判定分支与敏感清单条目共用同一字面量，
+/// effective name 只从声明表解析。
+const MONITOR_START_TOOL_NAME: &str = "monitor_start";
+
 /// 默认敏感工具判断规则
 ///
 /// builtin direct 工具使用原名，deferred 工具仍可能使用前缀名。命中声明表
@@ -55,6 +61,7 @@ const CRON_REGISTER_TOOL_NAME: &str = "cron_register";
 /// - `folder_operations`：目录操作
 /// - `Agent`：子 Agent 委派（子 Agent 不含 HITL，可传递绕过审批）
 /// - `cron_register`：定时任务注册（可定时触发任意 prompt，等价于代理执行权）
+/// - `monitor_start`：启动监控命令（可执行任意 shell，等价于命令执行权）
 pub fn default_requires_approval(tool_name: &str) -> bool {
     match original_tool_name_of_effective(tool_name) {
         Some(original_name) => default_requires_approval_without_builtin(original_name),
@@ -75,6 +82,7 @@ fn default_requires_approval_without_builtin(tool_name: &str) -> bool {
         || tool_name == TOOL_WEBSEARCH
         || tool_name.starts_with("mcp__")
         || tool_name == CRON_REGISTER_TOOL_NAME
+        || tool_name == MONITOR_START_TOOL_NAME
 }
 
 /// 判断工具是否为文件编辑类工具（AcceptEdits 模式使用）
@@ -152,13 +160,13 @@ fn builtin_tool_effective_name(instance: &str, original_name: &str) -> &'static 
 /// 与 [`default_requires_approval`] 的判定分支一一对应——段落不再硬编码
 /// 列表（设计 §3.1.2 重复段处理：修改代码无需同步段落，防失同步）。
 /// 清单包括精确工具条目和前缀规则；已迁移为 builtin 一等工具的条目
-/// （web×2 + cron×1 + workspace×4）名为**模型面名字**，经
+/// （web×2 + cron×1 + monitor×1 + workspace×4）名为**模型面名字**，经
 /// [`builtin_tool_effective_name`] 从 `peri_acp_types::builtin_mcp` 声明表解析
 /// （A19/IF-G3：模型看到的名字就是 effective name，条目名若留裸名会点名一个
 /// 已不存在的工具）。只列需审批的 workspace 条目：`Read` / `Glob` / `Grep`
 /// 归一后走免审批分支（[`default_requires_approval`] 为假），进清单即与
 /// 「每条目必须判定为敏感」的一致性断言冲突。
-pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 11] {
+pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 12] {
     [
         SensitiveToolEntry {
             name: builtin_tool_effective_name("workspace", TOOL_BASH),
@@ -213,6 +221,11 @@ pub fn sensitive_tool_entries() -> [SensitiveToolEntry; 11] {
         SensitiveToolEntry {
             name: builtin_tool_effective_name("cron", CRON_REGISTER_TOOL_NAME),
             description: "scheduled task registration (can trigger arbitrary prompts later, equivalent to delegated execution rights)",
+            prefix_match: false,
+        },
+        SensitiveToolEntry {
+            name: builtin_tool_effective_name("monitor", MONITOR_START_TOOL_NAME),
+            description: "monitor command execution (starts a shell command and watches its output)",
             prefix_match: false,
         },
     ]

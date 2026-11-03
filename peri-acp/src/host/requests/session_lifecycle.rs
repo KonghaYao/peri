@@ -81,7 +81,7 @@ pub(super) fn create_session_workflow_chain(
 
 /// P5 用户裁决（2026-10-11）：`"WorkflowMiddleware"` 命中会话关闭集 ⇒ workflow
 /// 实例与消费者都不装配（唯一物理关闭特例；ARC-CAPABILITY-CLOSURE-001 的既有语义
-/// 是非物理投影关闭，本特例经裁决，注记见 `spec/issues/2026-10-11-workflow-as-mcp.md`）。
+/// 是非物理投影关闭，本特例经裁决，注记见 `docs/design/workflow-mcp.md` §4.4）。
 ///
 /// 门控同 [`create_session_workflow_chain`]：该特例只对本地 workflow 运行时生效。
 #[cfg(not(target_os = "emscripten"))]
@@ -344,12 +344,12 @@ pub(crate) async fn new_session_from_prepared(
         }
         _ => HashMap::new(),
     };
-    // W4b（F3/J1）：system 来源（builtin `workspace` 实例）的技能元数据快照——
-    // 冻结 system prompt 的技能摘要由它渲染（非 system 来源不进冻结面）。
-    // X5 失败语义：技能面不适用（未装配/未连接/未声明/被关闭）⇒ 空快照不是失败；
-    // 已声明且被选中却读取失败 ⇒ fail-closed（下面按 J2 补偿后返回错误）。
+    // W4b（F3/J1）：按 skills 能力聚合本会话可见的 MCP 技能元数据快照——
+    // 冻结 system prompt 的技能摘要由它渲染。SkillsMiddleware 关闭时为空；
+    // host-assigned system workspace 读取失败 ⇒ fail-closed（下面按 J2 补偿后
+    // 返回错误），其他声明 skills 的 server 失败只记录诊断并保留其余条目。
     let skill_catalog = match environment.as_ref() {
-        Some(env) => match env.read_workspace_skill_catalog().await {
+        Some(env) => match env.read_skill_catalog().await {
             Ok(catalog) => catalog,
             Err(error) => {
                 drain_and_abandon(environment.as_ref(), &initialization).await?;
@@ -654,7 +654,7 @@ pub(crate) async fn handle_list(params: &Value, cfg: &AcpServerConfig) -> Result
 
 #[path = "session_tasks.rs"]
 mod session_tasks;
-pub(super) use session_tasks::{handle_bg_tasks, handle_cancel_bg_task};
+pub(crate) use session_tasks::{handle_bg_tasks, handle_cancel_bg_task};
 
 #[path = "session_close.rs"]
 mod close;

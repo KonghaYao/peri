@@ -212,6 +212,7 @@ fn make_invocation(ctx: &StageContext) -> InvocationContext {
         ctx,
         ExecutionEntryOrigin::ModelBatch,
         ctx.session.turn.cancel_token.as_ref().clone(),
+        None,
     )
 }
 
@@ -592,7 +593,9 @@ async fn idle_entry_returns_typed_not_available_without_turn() {
         &HashMap::new(),
         &stage.runtime.tool_catalog.snapshot(),
         &CancellationToken::new(),
-        crate::messages::MessageId::new(),
+        Some(crate::messages::MessageId::new()),
+        // 无 turn 的执行不发 render，可回读性保持未知。
+        None,
         &BaseMessage::ai("call"),
         None,
     )
@@ -663,7 +666,9 @@ async fn idle_app_invocation_runs_without_turn_facts_or_model_ownership() {
         &HashMap::from([("call-1".to_string(), tool)]),
         &stage.runtime.tool_catalog.snapshot(),
         &CancellationToken::new(),
-        crate::messages::MessageId::new(),
+        None,
+        // 无 turn 的执行不发 render，可回读性保持未知。
+        None,
         &BaseMessage::ai("call"),
         None,
     )
@@ -683,4 +688,117 @@ async fn idle_app_invocation_runs_without_turn_facts_or_model_ownership() {
         )],
         "idle 执行的归属必须是 App 归属（模型 turn 事实缺失时不得伪造）"
     );
+}
+
+/// 同一模型批次的两个工具共享同一份 dispatch 历史快照：工具看到的首地址与
+/// `InvocationContext` 已绑定的快照一致，不再 `to_vec()` 深复制；hook 视图
+/// 仍是不含本批 AI 的前缀。
+#[tokio::test]
+async fn dispatch_reuses_bound_history_snapshot_without_copy() {
+    type Snapshots = Arc<parking_lot::Mutex<Vec<(usize, usize)>>>;
+    struct SnapshotProbe(Snapshots);
+    #[async_trait::async_trait]
+    impl BaseTool for SnapshotProbe {
+        fn name(&self) -> &str {
+            "SnapshotProbe"
+        }
+        fn description(&self) -> &str {
+            "history snapshot probe"
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn invoke(
+            &self,
+            _: serde_json::Value,
+            context: crate::tools::ToolContext<'_>,
+        ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+            self.0
+                .lock()
+                .push((context.messages.as_ptr() as usize, context.messages.len()));
+            Ok("ok".into())
+        }
+    }
+
+    let stage = make_test_ctx();
+    stage
+        .session
+        .transcript
+        .write()
+        .append(BaseMessage::human("history"));
+    let ai = BaseMessage::ai("batch");
+    let invocation = InvocationContext::from_stage(
+        &stage,
+        ExecutionEntryOrigin::ModelBatch,
+        stage.session.turn.cancel_token.as_ref().clone(),
+        Some(&ai),
+    );
+    assert_eq!(invocation.messages().len(), 1, "hook 视图不含本批 AI");
+    let shared = invocation.messages_for_dispatch(&ai);
+    assert_eq!(shared.len(), 2);
+
+    let snapshots: Snapshots = Arc::default();
+    let tool: Arc<dyn BaseTool> = Arc::new(SnapshotProbe(snapshots.clone()));
+    let calls = vec![
+        ToolCall::new("call-1", "SnapshotProbe", serde_json::json!({})),
+        ToolCall::new("call-2", "SnapshotProbe", serde_json::json!({})),
+    ];
+    let targets = HashMap::from([
+        ("call-1".to_string(), tool.clone()),
+        ("call-2".to_string(), tool),
+    ]);
+    let turn = invocation
+        .require_turn("snapshot test")
+        .expect("active turn");
+    let output = dispatch_concurrent(
+        &invocation,
+        Some(turn),
+        &calls,
+        &HashMap::new(),
+        &targets,
+        &stage.runtime.tool_catalog.snapshot(),
+        &CancellationToken::new(),
+        &ai,
+        None,
+    )
+    .await;
+
+    assert!(output.iter().all(Result::is_ok));
+    let snapshots = snapshots.lock();
+    assert_eq!(snapshots.len(), 2);
+    assert!(
+        snapshots
+            .iter()
+            .all(|(ptr, len)| *ptr == shared.as_ptr() as usize && *len == shared.len()),
+        "两个工具必须共享同一份 dispatch 历史快照（仅不同 AI 身份才回退拼接）"
+    );
+    assert_eq!(invocation.messages().len(), 1, "分派不改变 hook 前缀视图");
+}
+
+// ── tool.error 指标入参摘要 ─────────────────────────────────────────────────
+
+#[test]
+fn input_summary_keeps_string_input_verbatim() {
+    assert_eq!(
+        input_summary(&serde_json::json!("plain text")),
+        "plain text",
+        "字符串型入参取原值，不额外加 JSON 引号"
+    );
+}
+
+#[test]
+fn input_summary_serializes_object_input() {
+    assert_eq!(
+        input_summary(&serde_json::json!({"command": "exit 1"})),
+        r#"{"command":"exit 1"}"#,
+        "对象型入参必须序列化，不能退化为空串（生产上曾全部为空）"
+    );
+}
+
+#[test]
+fn input_summary_truncates_overlong_input_to_200_chars() {
+    let long = "界".repeat(250);
+    let summary = input_summary(&serde_json::json!(long));
+    assert_eq!(summary.chars().count(), 200, "按字符截断，不切坏多字节字符");
+    assert_eq!(summary, "界".repeat(200));
 }

@@ -20,5 +20,7 @@ spawn 失败，不回落共享终端。Unix 仅管理所属进程组，显式 se
 
 验证：`./scripts/cargo-rmcp-patched.sh test --locked -p peri-process`，以及各 transport
 的真实子进程关闭测试。`tests/pty_isolation.rs` 为同步/异步准备及 broker 路径的真实
-PTY 回归入口，`src/unix_test.rs` 覆盖 session/group 身份、Command 配置与启动失败。
+PTY 回归入口，`src/unix_test.rs` 覆盖 session/group 身份、Command 配置与启动失败；
+`settled_owner_does_not_signal_reassigned_owned_group` 通过私有 owner pid 注入自有活跃组，
+验证 settled 后 `terminate` 不再信号旧身份，不依赖系统实际复用 PID。
 Windows tests 的交叉编译不等于 Windows 主机运行验收。

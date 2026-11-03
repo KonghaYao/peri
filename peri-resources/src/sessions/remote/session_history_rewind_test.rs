@@ -2,7 +2,7 @@
 //! 整批不生效并如实回报，而不是静默删掉一条本次操作从未看见的条目。清零侧同样钉住载荷
 //! 语义：被清零的行整条 `projection` 一并清掉，`truncated` 与未清零行的 flags 都原样。
 //!
-//! 夹具与 [`super::session_history_page_tests`] 同形：一个真 SQLite 池扮演远端服务端，走真实
+//! 夹具与 [`super::session_history_replay_tests`] 同形：一个真 SQLite 池扮演远端服务端，走真实
 //! 批次与账本（传输面的并发注入点 `before_batch` 见 `schema_upgrade_test.rs`）。四个观察点：
 //!
 //! | 用例 | 断言的事实 |
@@ -240,6 +240,21 @@ async fn row_flags(
         .fetch_one(pool)
         .await
         .unwrap()
+}
+
+/// 追加到不存在的会话：批内守卫中止整批，错误类别仍是 `NotFound`，
+/// 不能被守卫的约束拒绝折成 `InvalidInput`。
+#[tokio::test]
+async fn remote_append_to_a_missing_session_reports_not_found() {
+    let (_fixture, _transport, data) = remote_with_history(&[]).await;
+    let error = data
+        .append_history(&"missing-remote-session".to_owned(), &messages(1))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error.kind(), SessionResourceErrorKind::NotFound),
+        "{error}"
+    );
 }
 
 /// 未知边界：不删除、不清零、不报成功——本机与远端必须是同一个可观察结果。

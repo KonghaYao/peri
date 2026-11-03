@@ -474,15 +474,9 @@ async fn background_grandchild_resumes_route_to_direct_parent_with_unique_delive
             }
         }
         let result = terminal.unwrap();
-        let router =
-            peri_agent::session::async_router::AsyncRouter::for_queue(child.session.queue());
-        let delivery: peri_acp_types::tasks::OnBgCompleteFn = Arc::new(move |result, kind| {
-            router.route_bg_result(result, kind);
-            Ok(())
-        });
-        assert!(!manager
-            .settle_completed(&result.task_id.clone(), result, delivery)
-            .unwrap());
+        assert_eq!(result.task_id, resumed.task_id.unwrap());
+        // 事件只有可读任务身份，不能重新取得 producer 的结算资格。
+        // 原票据的重复回调/淘汰后幂等由 registry projection_retention_tests 覆盖。
         assert!(child.session.queue().is_empty());
         assert!(root.queue().is_empty());
         assert_eq!(

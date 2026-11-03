@@ -280,6 +280,8 @@ async fn test_event_bus_multiple_events_in_order() {
         tool_call_id: "tc_1".to_string(),
         name: "Bash".to_string(),
         input: serde_json::Value::Null,
+        origin_message_id: None,
+        origin_readable: None,
     });
 
     // 按 FIFO 顺序消费
@@ -296,7 +298,7 @@ async fn test_event_bus_multiple_events_in_order() {
 /// 历史背景：TurnCompleted 原在 StateEvent（state_tx 独立通道），biased select!
 /// 只保证单次迭代内优先级，不保证跨迭代——iter2 的 TextChunk 会先于 iter1 的
 /// TurnCompleted 被消费，TUI 把 iter2 文本追加到 iter1 partial 上，渲染出
-/// "新文本在旧工具之前"的错乱（CLAUDE.md P2-C 修复后回归）。
+/// "新文本在旧工具之前"的错乱（P2-C 修复后回归）。
 ///
 /// 本测试 emit iter1 全部 Render 事件 + iter1 TurnCompleted + iter2 TextChunk，
 /// 断言消费顺序：iter1.tool_end → iter1.turn_completed → iter2.text。
@@ -321,6 +323,8 @@ async fn test_event_bus_turn_completed_in_render_channel_preserves_cross_iter_or
         tool_call_id: "tc_iter1".to_string(),
         name: "Read".to_string(),
         input: serde_json::Value::Null,
+        origin_message_id: None,
+        origin_readable: None,
     });
     bus.emit_render(RenderEvent::ToolEnded {
         turn_id: turn1,

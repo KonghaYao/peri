@@ -57,14 +57,14 @@ graph TB
 核心容器为消息列表，顺序即对话时间线。尾部追加是唯一正常写入路径。内部通过 id 索引表支持 O(1) 按 id 查找。
 
 - **BaseMessage**：统一消息类型。`content` 为 `MessageContent`（纯文本、ContentBlock 列表、Provider 原生格式）。`content_blocks()` 懒解析，Provider 按需选择最优格式。
-- **ContentBlock**：七种变体——Text、Image、Document、ToolUse、ToolResult、Reasoning、Unknown。Transcript 存储完整 ContentBlock。
+- **ContentBlock**：八种变体——Text、Image、Document、ToolUse、ToolResult、Reasoning、ProviderState、Unknown。Transcript 存储完整 ContentBlock。
 - **只追加规则**：
   - ✅ Reason 产出的 AI 消息、Act 产出的 ToolResult → 尾部追加
   - ✅ Info 类型消息（含 SystemReminder）经 MessageQueue 中转后尾部追加
   - ✅ `append_batch()` 批量追加——逐条触发独立 `PersistOp::Append`
   - ❌ 禁止 prepend 或中间插入——破坏 Prompt Cache 前缀
   - ❌ 禁止删除或修改——Compact 通过标记改变模型视图，不改变消息本体
-- **代码位置**：`BaseMessage` / `ContentBlock` / `MessageContent` 定义于 `peri-agent/src/messages/`；`MessageTranscript` 定义于 `peri-agent/src/session/transcript.rs`；`MessageQueue` 定义于 `peri-agent/src/session/queue.rs`。Transcript 和 Queue 属于 session 模块，messages 模块仅含消息数据类型定义。
+- **代码位置**：`BaseMessage` / `ContentBlock` / `MessageContent` 定义于 `peri-acp-types/src/messages/`，`peri-agent/src/messages/` 负责 re-export 与工具配对适配；`MessageTranscript` 定义于 `peri-agent/src/session/transcript.rs`；`MessageQueue` 定义于 `peri-acp-types/src/session/queue.rs`，Agent session 模块 re-export。Transcript 和 Queue 属于 session 模块，messages 模块仅含消息数据类型定义。
 - **ancestor 边界**：SubAgent 引用父上下文时，将 payload 与 flags 一起冻结为版本化 `InheritedContext`，并在 `threads.inherited_context` 列一次性写入；恢复时先放 ancestor、再放 child own history。窗口 `inherited` 来源的 `frozenSnapshotId` 由子会话、字节数、条数、祖先与首尾消息 id 派生，父会话后续 append/compact/rewind 不改变该快照。祖先标记允许初始化恢复，普通标记 setter 与 compact lifecycle 拒绝改写祖先；本机 SQLite 提供 inherited 窗口读取，remote/emscripten adapter 未覆写该端口时返回 `Unsupported`。ACP `session/fork` 经 `load_fork_snapshot` 合并冻结 inherited 与 own 历史，按冻结授权补齐归档，复制后的 payload 使用新 `MessageId` 并归新 thread 所有，因此属于可压缩 own region；归档正文保持 excluded。授权与重映射规则见 [Micro 生命周期](micro-compact.md#7-full继承fork-与-rewind)。
 - **Staging 两阶段写入**：Reason 阶段产出的 AI 消息（含 tool_calls）不直接追加到 Transcript——先 Staging。Act 阶段收集所有 ToolResult 后，AI 消息 + ToolResult 作为一组原子提交到 Transcript。Staging 期间的消息 LLM 请求不可见。提交后触发持久化。若 Act 阶段异常终止（Cancel/Error），staging 消息丢弃——Transcript 回到本轮开始前的状态，不留半个 AI 消息。
 
@@ -78,26 +78,26 @@ graph TB
 
 #### MessageKind 三类消息
 
-消息按 Kind 分为三类，控制循环唤醒和消费行为：
+消息按 Kind 分为三类，控制循环唤醒和消费行为；`MessageKind` 是展示标签，运行调度以 `MessagePolicy` 为准：
 
-| Kind | 来源示例 | `drain_all` 行为 | 通知活跃等待者（不保证启动新 turn） |
+| Kind | 来源示例 | Receive 消费 | 默认唤醒 |
 |------|---------|----------------|------------|
 | `Prompt` | 用户输入、外部主动请求 | 消费（写入 Transcript） | ✅ |
 | `Defer` | SubAgent 完成、Cron 触发、延迟结果 | 消费（写入 Transcript，emit `SyntheticUserMessage`） | ✅ |
 | `Info` | SystemReminder、Hook 注入 | 消费（写入 Transcript） | ❌ |
 
-#### MessageSource 九种来源
+#### MessageSource 来源枚举
 
-每条 `QueuedMessage` 携带 `MessageSource` 标注来源，用于调试和事件追踪：`UserInput` / `SubAgentComplete` / `GoalSteering` / `CronTrigger` / `StopHookFeedback` / `ChannelMessage` / `SystemInjected` / `ToolFailureWarning` / `WorkflowComplete`。
+每条 `QueuedMessage` 携带 `MessageSource` 标注来源，用于调试和事件追踪：`UserInput` / `SubAgentComplete` / `ShellComplete` / `GoalSteering` / `TodoSteering` / `CronTrigger` / `StopHookFeedback` / `ChannelMessage` / `McpNotification` / `SystemInjected` / `HookStopIntent` / `ToolFailureWarning` / `WorkflowComplete`。
 
-#### 排空 API（RCRA 重构后）
+#### 排空 API
 
-- **`drain_all()`**（`peri-acp-types/src/session.rs:222`）：Receive 阶段一次性消费队列中全部消息（Prompt + Info + Defer），写入 Transcript。原 `drain_for_receive` / `drain_for_end` 双排空 API 已移除——RCRA 重构后 Receive 是唯一队列消费点，End 阶段不再单独消费 Defer（见 `peri-agent/src/agent/stages/receive.rs:12-16` 与 `agent/session/inbox.rs:11` 注释，二者仅剩注释提及）。
-- **`has_wake_up()`**（`session.rs:231`）：Receive 消费后队列空且无工具调用时，退出判断前检查队列是否还有可唤醒消息（Prompt 或 Defer）——有则继续循环，无则退出（见 `stages/mod.rs:649`）。Info 永远不会单独唤醒循环——必须被 Prompt 带出。
+- **`drain_batch(limit)`**：Receive 阶段按批消费队列消息，写入 Transcript；`drain_all()` 保留给显式全量消费的调用方。RCRA 下 Receive 是唯一队列消费点，End 阶段不单独消费 Defer。
+- **`has_wake_up()` / `has_required_for_run(execution)`**：退出判断前检查队列是否还有要求新执行处理的消息；`await_wake_for_run(execution)` 负责阻塞等待。Info 永远不会单独唤醒循环——必须被 Prompt 带出。
 
 ### 2.4 持久化
 
-ThreadStore 负责 Transcript 的完整持久化。`ThreadStore` trait 定义已下沉 `peri-acp-types/src/store/mod.rs`（`pub trait ThreadStore` :221），实现迁至 `peri-resources/src/sessions/`（`filesystem.rs` 的 `FilesystemThreadStore` / `sqlite_store.rs` 的 `SqliteThreadStore`），`thread/mod.rs` 仅 re-export。该 trait 是**迁移桥**：目标契约是 `peri-acp-types/src/session_resources.rs` 的 `SessionResources`（行为门面，数据与本机执行两面分离），历史纯变换（fork/投影/compaction/rewind）在 `peri-acp-types/src/store/{history,history_projection}.rs`，消费侧迁移见 active spec 2026-09-26-session-store。
+ThreadStore 负责 Transcript 的完整持久化。`ThreadStore` trait 定义在 `peri-acp-types/src/store/mod.rs`，实现位于 `peri-resources/src/sessions/`（`filesystem.rs` 的 `FilesystemThreadStore` / `sqlite_store.rs` 的 `SqliteThreadStore`），`peri-acp-types/src/thread/mod.rs` 只承载 thread 元数据类型。该 trait 是**迁移桥**：目标契约是 `peri-acp-types/src/session_resources.rs` 的 `SessionResources`（行为门面，数据与本机执行两面分离），历史纯变换（fork/投影/compaction/rewind）在 `peri-acp-types/src/store/{history,history_projection}.rs`。
 
 #### ThreadStore trait 核心方法概览
 
@@ -148,7 +148,7 @@ Compact 保留消息本体，通过标记改变可见性或模型投影；Micro 
 | **Session** | Transcript 是 Session 核心实体之一。Session 创建时 Transcript 为空，销毁时丢弃。CronOwner 由 AcpSession（session 级）持有，跨 turn 存活；SessionInbox 为 session 级 lazy-init，cron/channel 事件经 inbox 唤醒 executor，绕过 TUI 轮询 |
 | **LLM 适配器** | Reason 过滤 excluded 并恢复已提交 projection 构造 ModelRequest，即使关闭自动 compact 也恢复投影。无 directive 时使用 canonical 可见消息，不在 Reason 规划新 Micro。Token 计数在 LLM adapter 层完成 |
 | **ReAct 循环** | Receive 将 Queue 消息写入 Transcript。Act 将工具结果写入 Transcript |
-| **AgentGroup** | Fork Agent 创建时 Transcript 全量 Copy |
+| **AgentGroup / Fork** | Fork Agent 经 `SessionResources::load_fork_snapshot` 合并冻结 inherited 与 own 历史，复制后的 payload 归新 thread 所有；不复制父 transcript 本体 |
 | **Hook 系统** | Hook 不能直接写 Transcript——通过 MessageQueue 注入 |
 | **事件流 / TUI** | `visible_messages()` 过滤 excluded 标记返回可见消息（LLM 请求构造用）；`visible_snapshot()` 返回 `Arc<Vec<BaseMessage>>` 快照，用于 TUI 事件传递（如 TurnCompleted 事件）。Transcript 变更产生事件，外部据此刷新 UI |
 
@@ -183,7 +183,7 @@ Compact 保留消息本体，通过标记改变可见性或模型投影；Micro 
 
 #### 2.8.4 对象级证据与已知边界
 
-进度与验收记录见 active spec；本节只固定当前实现边界，避免把目标写成现状。
+验证以代码与契约测试为准；本节只固定当前实现边界，不把目标写成现状。
 
 历史读取与窗口状态不能以 `committed.len()`、`VIEW_MODELS.items.len()` 或 RSS 单独证明。当前验收使用以下证据：
 
@@ -198,5 +198,8 @@ Compact 保留消息本体，通过标记改变可见性或模型投影；Micro 
 - `_peri/history/changed` 未发送；窗口失效依赖后续请求错误。
 - TUI 的 `HISTORY_V2_STATE` 是进程级 atom，多连接共享；未做长时间滚动 RSS 或 100 MiB 工具输出实测。
 - 超大条目详情已交付（`HistoryDetailPanel`、V2 `body`、4 MiB 预算、UTF-8 跨块重组、关闭释放 chunks）。限制：鼠标单击只设焦点需再 Enter；UI 导出为剪贴板复制已加载正文；未做 JSON 字段级展示；inherited 段内部不插入独立占位行。
+- 折叠组/子 Agent 组尚未真正惰性化：构造时 `im::Vector` 结构共享、不深复制正文，但释放只整体失效 `FoldedHistory`/分组缓存，没有按段惰性物化与精准清理。
+- `structural_epoch` 目前清空全部渲染 slot，未按段精准清理。
+- ACP host rewind 的错误出口仍由集中后的文本 marker 判定持久化不确定（`PERSISTENCE_UNCERTAIN_MARKER`）；底层资源错误与 Transcript rewind 已使用 `MutationOutcome`，host 的错误出口尚未完整传递该类型。
 - remote/emscripten 的 `supports_history_v2()` 为 false，协商显式失败，不能宣称这些后端已支持历史窗口。
 - `readTicket` 是进程内不透明值与精确匹配，没有密码学签名，也不是访问授权。
