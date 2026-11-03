@@ -164,7 +164,7 @@ impl SqliteSessionData {
                             plan,
                             "inherited history anchor is not present in this frozen snapshot",
                         )
-                        .into())
+                        .into());
                     }
                 }
             }

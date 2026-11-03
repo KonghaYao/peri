@@ -268,7 +268,12 @@ pub(super) async fn spawn_subagent_impl(
                 .into())
             }
         };
-        if snapshot.meta.cwd != cwd {
+        // 父快照与本次派发是同一执行目录的两种文本形态（如绑定恢复自带尾分隔符）时
+        // 仍属同一目录；按组件比较，不把文本差异当成换了工作区。
+        if !peri_acp_types::workspace::same_execution_directory(
+            std::path::Path::new(&snapshot.meta.cwd),
+            std::path::Path::new(&cwd),
+        ) {
             return Err(peri_acp_types::workspace::WorkspaceError::ExecutionBindingMismatch.into());
         }
         let root_id = super::execution_root(store.as_ref(), &parent_id).await?;

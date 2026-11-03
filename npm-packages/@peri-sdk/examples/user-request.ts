@@ -94,4 +94,6 @@ async function releaseChat() {
     await view.dispose();
     await chat.close();
     await manager.shutdown();
+    // Manager 不关闭注入的 database；宿主退出前自行释放连接。
+    await storage.close();
 }

@@ -181,7 +181,7 @@ export async function startWasmRuntime(options: WasmRuntimeOptions): Promise<Was
     if (signal?.aborted) throw signal.reason;
     transport = WasmAcpTransport.fromPort({
       send: (frame) => native!.send(frame), recv: () => native!.recv(), close: closePort, free: freePort,
-    });
+    }, { memory: module.wasmMemory });
     notify({ type: "ready", generationId: transport.generationId });
     return transport;
   });

@@ -112,7 +112,8 @@ Peri 的 Agent 执行驻留在独立的 Bun/Node 长驻进程：
   必要条件。
 - Bun 服务是唯一后端入口；Cloudflare Worker relay 与 `wrangler.jsonc` 已删除。
 - `/api/monitor` 只读四段事实（LLM / MCP / WASM / Sandbox）：去敏地址、MCP header 名称、运行中 sandbox
-  与进程级内存事实；读取不启动 sandbox 或 WASM。
+  与进程级内存事实，以及每个 WASM 实例的线性内存当前容量与回合/token/工具计数；不采集 prompt、消息、
+  工具内容或错误原文，读取不启动 sandbox 或 WASM。HTTP 实例段失败只标记 `instancesError`，不影响进程级指标。
 - 单进程 ownership 与 sandbox 引用计数不能宣称跨实例接管；多实例部署需要改造装配接入共享 storage，
   并由路由层做串行化/崩溃清理。
 - 真实模型/Store/远程 MCP、浏览器验收与 hosted 部署仍需环境验收；单元测试或类型检查不替代真实运行后端。

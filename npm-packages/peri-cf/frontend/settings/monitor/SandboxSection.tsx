@@ -18,7 +18,7 @@ export function SandboxSection({
 }) {
   const { settings } = sandbox;
   return (
-    <section className="monitor-section" aria-label="Sandbox 情况">
+    <section className="monitor-section" aria-label="Sandbox 实例">
       <div className="settings-group">
         <h2>配置</h2>
         <div className="monitor-row">
@@ -107,9 +107,9 @@ export function SandboxSection({
       </div>
 
       <div className="settings-group">
-        <h2>运行实例</h2>
+        <h2>Sandbox 实例</h2>
         {sandbox.active.length === 0 ? (
-          <p className="settings-empty">当前没有运行中的 sandbox。</p>
+          <p className="settings-empty">当前没有运行中的 Sandbox 实例。</p>
         ) : (
           <div className="monitor-table-scroll">
             <table className="monitor-table">

@@ -40,6 +40,31 @@ test("ready 不提供停止证明，close 与 free 完成后才宣告 closed", a
   native.reader.resolve(null);
 });
 
+test("线性内存容量可读，关闭后返回 null", async () => {
+  const native = nativePort();
+  const memory = new WebAssembly.Memory({ initial: 1, maximum: 1 });
+  const transport = await startWasmRuntime({ configJson: "{}",
+    moduleFactory: async () => ({
+      PeriWasmAcp: { start: async () => native.port },
+      wasmMemory: memory,
+    }),
+  });
+  expect(transport.linearMemoryBytes()).toBe(65_536);
+  await transport.close();
+  expect(transport.linearMemoryBytes()).toBeNull();
+  native.reader.resolve(null);
+});
+
+test("宿主未暴露 memory 时线性内存为 null", async () => {
+  const native = nativePort();
+  const transport = await startWasmRuntime({ configJson: "{}",
+    moduleFactory: async () => ({ PeriWasmAcp: { start: async () => native.port } }),
+  });
+  expect(transport.linearMemoryBytes()).toBeNull();
+  native.reader.resolve(null);
+  await transport.close();
+});
+
 test("加载前 abort 不调用 factory", async () => {
   let loads = 0;
   const error = await startWasmRuntime({ configJson: "{}", signal: AbortSignal.abort(),

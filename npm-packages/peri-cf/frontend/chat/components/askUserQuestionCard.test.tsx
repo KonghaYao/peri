@@ -40,49 +40,73 @@ const render = (interaction: Interaction, onAnswer?: InteractionAnswerHandler) =
   renderToStaticMarkup(<InteractionCard interaction={interaction} onAnswer={onAnswer} />);
 
 describe('AskUserQuestion card', () => {
-  test('renders every question as a labelled group with its own controls', () => {
+  test('renders only the first question as a labelled group with its own controls', () => {
     const output = render(questionInteraction(), answer);
     expect(output).toContain('data-slot="ask-user-question"');
-    expect(output).toContain('3 个问题');
-    for (const question of questions) {
-      expect(output).toContain(`data-question-id="${question.id}"`);
-      expect(output).toContain(question.header);
-      expect(output).toContain(question.question);
-    }
+    expect(output).toContain('第 1 / 3 题');
+    expect(output).toContain('data-question-id="ask_user_question_0"');
+    expect(output).not.toContain('data-question-id="ask_user_question_1"');
+    expect(output).toContain('部署环境');
+    expect(output).toContain('选择部署环境？');
     expect(output).toContain('type="radio"');
-    expect(output).toContain('type="checkbox"');
     expect(output).toContain('value="生产"');
     expect(output).toContain('生产环境');
-    expect(output).toContain('desc-a');
-    expect(output).toContain('可多选');
-    expect(output).toContain('自由输入');
-    expect(output).toContain('aria-label="自定义回答：部署环境"');
-    expect(output).toContain('aria-label="自定义回答：补充"');
-    expect(output).toContain('取消');
-    expect(output).toContain('提交回答');
+    expect(output).toContain('单选');
+    expect(output).toContain('其他答案（可选，替代所选）');
+    expect(output).toContain('aria-label="第 1 题：其他答案"');
+    expect(output).toContain('拒绝回答');
+    expect(output).toContain('下一题');
+    expect(output).not.toContain('提交回答');
   });
 
-  test('blocks submission until every question is answered', () => {
+  test('progress marks every question and a single question submits directly', () => {
     const output = render(questionInteraction(), answer);
-    expect(output).toContain('还有 3 个问题未回答。');
-    expect(output).toMatch(/<button[^>]*disabled=""[^>]*>提交回答<\/button>/);
+    expect(output).toContain('aria-label="第 1 题，未回答"');
+    expect(output).toContain('aria-label="第 2 题，未回答"');
+    expect(output).toContain('aria-label="第 3 题，未回答"');
+    expect(output).toContain('aria-current="step"');
+
+    const single = renderToStaticMarkup(
+      <InteractionCard
+        interaction={questionInteraction({ questions: [questions[0]!] })}
+        onAnswer={answer}
+      />,
+    );
+    expect(single).toContain('1 个问题');
+    expect(single).toContain('提交回答');
+    expect(single).not.toMatch(/<button[^>]*disabled=""[^>]*>提交回答/);
+    expect(single).not.toContain('下一题');
   });
 
-  test('questions stay visible but unanswerable when the connection is not ready', () => {
+  test('questions stay unanswerable when the connection is not ready', () => {
     const output = render(questionInteraction());
     expect(output).toContain('部署环境');
     expect(output).toContain('连接就绪后可以回答这条交互。');
     expect(output).toMatch(/<input[^>]*disabled=""/);
-    expect(output).toMatch(/<button[^>]*disabled=""[^>]*>取消<\/button>/);
-    expect(output).toMatch(/<button[^>]*disabled=""[^>]*>提交回答<\/button>/);
+    expect(output).toMatch(/<button[^>]*disabled=""[^>]*>拒绝回答<\/button>/);
+    expect(output).toMatch(/<button[^>]*disabled=""[^>]*>下一题/);
   });
 
-  test('expired interactions keep the questions readonly', () => {
+  test('free-form questions render a textarea and require an answer', () => {
+    const output = renderToStaticMarkup(
+      <InteractionCard
+        interaction={questionInteraction({ questions: [questions[2]!] })}
+        onAnswer={answer}
+      />,
+    );
+    expect(output).toContain('回答（必填）');
+    expect(output).toContain('<textarea');
+    expect(output).toContain('aria-label="第 1 题：回答"');
+    expect(output).toContain('提交回答');
+  });
+
+  test('expired interactions keep the first question readonly', () => {
     const output = renderToStaticMarkup(
       <InteractionCard interaction={questionInteraction({ status: 'expired' })} onAnswer={answer} />,
     );
     expect(output).toContain('已失效');
     expect(output).not.toContain('提交回答');
+    expect(output).not.toContain('下一题');
     expect(output).toMatch(/<fieldset[^>]*disabled=""/);
   });
 });

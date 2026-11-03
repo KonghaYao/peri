@@ -1,5 +1,6 @@
 import { createRemoteActions } from "./actions";
 import { ChatController, type ChatView } from "./controller";
+import { createHttpProjectRepository } from "./projects";
 import { createHttpRepository } from "./repository";
 import type { WebSocketLike } from "./sync";
 
@@ -20,9 +21,12 @@ export type { ChatView };
 export function createChatApplication(options: ChatApplicationOptions = {}): ChatController {
   const base = options.origin ?? globalThis.location.origin;
   const repository = createHttpRepository(base);
+  const projects = createHttpProjectRepository(base);
   return new ChatController({
     actions: createRemoteActions({ origin: options.origin }),
     list: (signal) => repository.list(signal),
+    listProjects: (signal) => projects.list(signal),
+    createProject: (name) => projects.create(name),
     syncUrl: (address) => new URL(
       `/api/chats/${encodeURIComponent(address)}/sync`, base,
     ).href.replace(/^http/, "ws"),

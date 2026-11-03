@@ -68,7 +68,6 @@ function TimelineRowView({
           active={row.active}
           failed={row.failed}
           defaultExpanded={row.defaultExpanded}
-          forceExpanded={row.forceExpanded}
           bare={row.bare}
           payloadReader={payloadReader}
         />
@@ -85,7 +84,6 @@ function TimelineRowView({
           summary={row.summary}
           expanded={row.expanded}
           failed={row.failed}
-          isStatic={row.static === true}
           onToggle={onToggleTurnFold ? () => onToggleTurnFold(row.turnId, row.expanded) : undefined}
         />
       </div>;

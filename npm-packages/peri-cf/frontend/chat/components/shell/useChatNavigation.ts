@@ -12,7 +12,7 @@ import type { ComposerDraftHandle } from './useComposerDrafts';
 
 /** 外壳需要的最小命令面；DOM 测试可注入同形对象。 */
 export interface ChatNavigationTarget {
-  selectChat(target: ChatSummary | null): Promise<boolean>;
+  selectChat(target: ChatSummary | null, options?: { projectId?: string }): Promise<boolean>;
   reloadChat(): Promise<boolean>;
   rebuildChat(): Promise<boolean>;
   refreshList(): Promise<void>;
@@ -21,8 +21,8 @@ export interface ChatNavigationTarget {
 }
 
 export interface ChatNavigationHandle {
-  /** 选择/新建会话；调用方负责先关闭 sidebar。 */
-  select(target: ChatSummary | null): Promise<void>;
+  /** 选择/新建会话；调用方负责先关闭 sidebar。`projectId` 只对新建生效。 */
+  select(target: ChatSummary | null, options?: { projectId?: string }): Promise<void>;
   runAction(action: ChatRetryAction): void;
   send(content: string): Promise<ChatSendOutcome>;
   focusComposer(): void;
@@ -45,10 +45,13 @@ export function useChatNavigation(
     setFocusSignal((value) => value + 1);
   }, []);
 
-  const select = useCallback(async (target: ChatSummary | null) => {
+  const select = useCallback(async (
+    target: ChatSummary | null,
+    options?: { projectId?: string },
+  ) => {
     beginNavigation(target === null);
     const request = ++navigationRequest.current;
-    const opened = await selectChat(target);
+    const opened = await selectChat(target, options);
     // 被更晚的导航取代时，由后一次选择负责草稿槽与焦点。
     if (request !== navigationRequest.current) return;
     finishNavigation();

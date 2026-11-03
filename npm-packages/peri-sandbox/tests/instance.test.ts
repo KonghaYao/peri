@@ -64,12 +64,27 @@ class FakeBackend implements McpBackendPort {
   constructor(runId: string) {
     this.runId = runId;
   }
-  listTools(): unknown {
-    return { tools: [{ name: 'Read' }] };
+  serverCapabilities() {
+    return { tools: {} };
   }
-  async forward(): Promise<Record<string, unknown>> {
+  serverInfo() {
+    return { name: 'fake', version: '1' };
+  }
+  instructions() {
+    return undefined;
+  }
+  async request(): Promise<Record<string, unknown>> {
     return { resultType: 'complete' };
   }
+  async notify(): Promise<void> {}
+  async subscribe() {
+    return {
+      honoredFilter: {},
+      close: async () => {},
+      closed: Promise.resolve('local' as const),
+    };
+  }
+  cancel(): void {}
   async close(): Promise<void> {
     this.closed += 1;
   }

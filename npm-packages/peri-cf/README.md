@@ -46,6 +46,8 @@ peri-cf 是 `@peri-code/sdk` 与 `peri-sandbox` 的生产测试场：SDK 固定�
 
 ## Generative UI (OpenUI)
 
+接入方式（最小示例、action、服务端提示词、本地 `file:` 依赖）见 [`@peri-code/sdk` README](../@peri-sdk/README.md#openui)。
+
 - 模型默认继续用 Markdown。只有结构化视觉明显更好时，才输出**一个**标记为 `openui` 的围栏代码块，内含完整程序，首行 `root = Stack([...])`；解释文字在围栏外。
 - 前端只认顶层完整围栏；流式中未闭合围栏显示“正在生成界面…”骨架，不显示半截代码。解析失败、root 存在但 prop 校验失败/引用未解析、`meta.incomplete`、懒加载或渲染异常都会回退到 Markdown 原文，用户始终能看到模型输出。流结束后，整段以 `root = Stack(` 开头的裸 DSL 也会被识别；普通代码块或列表项内的 `openui` 字样不算。
 - OpenUI 组件库与 spec 作为 `@peri-code/sdk/openui*` 源码 subpath 发布，源码在 `../@peri-sdk/src/openui`。唯一事实源是 `../@peri-sdk/src/openui/library.tsx`；`bun run openui:spec` 转发到 `../@peri-sdk/scripts/generate-openui-spec.ts` 生成 `../@peri-sdk/src/openui/spec.json`，`bun run openui:check` 校验新鲜度；`bun run build` 已前置该检查。
@@ -76,7 +78,7 @@ peri-cf 是 `@peri-code/sdk` 与 `peri-sandbox` 的生产测试场：SDK 固定�
 
 | 方法 | 路径 | 行为 |
 | --- | --- | --- |
-| GET | `/api/monitor` | 只读监控快照：LLM / MCP / WASM / Sandbox；地址去敏，header 只给名称 |
+| GET | `/api/monitor` | 只读监控快照：LLM / MCP / WASM 实例 / Sandbox；地址去敏，header 只给名称，WASM 段含每实例线性内存与回合/token/工具计数 |
 | GET | `/api/chats` | Store 目录；不可达 503 + `available:false` |
 | POST | `/api/chats` | 按目标启动/复用 sandbox 并登记句柄，不创建 Session；body 可带 `sessionId` 或 `path`（互斥） |
 | POST | `/api/chats/:chatId/actions` | `ChatUserAction`；202 回执 |

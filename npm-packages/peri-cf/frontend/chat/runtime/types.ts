@@ -1,5 +1,5 @@
 export type {
-  Chat, ChatSummary, EntryDTO as Entry, ToolCallDTO as ToolCall, TurnDTO as Turn,
+  Chat, ChatSummary, ProjectSummary, EntryDTO as Entry, ToolCallDTO as ToolCall, TurnDTO as Turn,
   InteractionDTO as Interaction, AskUserQuestionDTO as AskUserQuestion,
 } from '../../remote';
 export type { ChatDisplayState } from '../../remote';

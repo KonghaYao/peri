@@ -16,6 +16,8 @@ export interface WasmRuntimeAcquireOptions {
   env?: Readonly<Record<string, string>>;
   /** 该 Chat 的 WASM 诊断回调。 */
   onDiagnostic?: (kind: WasmRuntimeDiagnosticKind, error: unknown) => void;
+  /** 监控归属；只写入快照，不参与启动或容量决策。 */
+  ownerChatId?: string;
 }
 
 export interface WasmRuntimeStarterOptions extends WasmRuntimeAcquireOptions {
@@ -30,6 +32,25 @@ export type WasmRuntimeStarter = (
 /** 单运行后端状态：`live → closing → closed | close-unconfirmed`。 */
 export type WasmRuntimeState = "live" | "closing" | "closed" | "close-unconfirmed";
 
+/** 只读单实例快照；只含数值与标识，不含运行内容。 */
+export interface WasmRuntimeInstanceSnapshot {
+  /** 归属 Chat；未提供时为 null。 */
+  chatId: string | null;
+  state: WasmRuntimeState;
+  generationId: string;
+  /** 运行后端就绪（租约创建）的本地时间。 */
+  startedAtMs: number;
+  /** 线性内存当前容量；宿主未暴露或已关闭时为 null。 */
+  linearMemoryBytes: number | null;
+}
+
+/** 只读池快照；`starting` 是尚未拿到租约的启动任务数。 */
+export interface WasmRuntimePoolSnapshot {
+  instances: WasmRuntimeInstanceSnapshot[];
+  starting: number;
+  unconfirmed: boolean;
+}
+
 export interface WasmRuntimeLeaseOptions {
   /** 启动超时；超时后中止启动并拒绝 `start`。 */
   startupTimeoutMs?: number;
@@ -37,6 +58,10 @@ export interface WasmRuntimeLeaseOptions {
   closeTimeoutMs?: number;
   /** 外部取消信号；释放实例或进程退出时中止启动。 */
   signal?: AbortSignal;
+  /** 监控归属；只写入快照。 */
+  ownerChatId?: string;
+  /** 确认关闭后的通知；只用于登记表清理，异常不影响关闭结果。 */
+  onClosed?: (lease: WasmRuntimeLease) => void;
   /** 启动已判定失败、但迟到运行后端仍被关闭时的证据回调。 */
   onLateCleanup?: (outcome: WasmRuntimeCleanupOutcome) => void;
   /**
@@ -64,10 +89,14 @@ export class WasmRuntimeLease {
   private stateValue: WasmRuntimeState = "live";
   /** 关闭结算的幂等缓存。 */
   private closePromise: Promise<WasmRuntimeCloseReport> | undefined;
+  /** 租约创建（运行后端就绪）时间；监控用。 */
+  readonly startedAtMs = Date.now();
 
   /** 关闭超时；超时或失败记为 `close-unconfirmed`。 */
   private constructor(private readonly transportValue: WasmAcpTransport,
-    private readonly closeTimeoutMs: number) {}
+    private readonly closeTimeoutMs: number,
+    private readonly ownerChatId: string | null,
+    private readonly onClosed?: (lease: WasmRuntimeLease) => void) {}
 
   /** 启动运行后端；超时/取消后中止内部信号并保留原始错误。 */
   static async start(starter: WasmRuntimeStarter,
@@ -84,7 +113,7 @@ export class WasmRuntimeLease {
         options.startupTimeoutMs ?? DEFAULT_WASM_RUNTIME_STARTUP_TIMEOUT_MS,
         "Peri WASM runtime startup",
       );
-      return new WasmRuntimeLease(transport, closeTimeoutMs);
+      return new WasmRuntimeLease(transport, closeTimeoutMs, options.ownerChatId ?? null, options.onClosed);
     } catch (error) {
       controller.abort(error);
       // 启动可能仍会成功，也可能迟到地以启动错误拒绝。两种情况都必须结算
@@ -124,6 +153,29 @@ export class WasmRuntimeLease {
   /** 宿主身份；日志与诊断使用。 */
   get generationId(): string { return this.transportValue.generationId; }
 
+  /**
+   * 只读实例快照；不暴露 transport 或 `WebAssembly.Memory` 本身。
+   *
+   * 已确认关闭的租约不再计入（`closed` 状态只可能短暂存在，池会立即移除）。
+   */
+  snapshot(): WasmRuntimeInstanceSnapshot {
+    let linearMemoryBytes: number | null = null;
+    if (this.stateValue !== "closed") {
+      try {
+        linearMemoryBytes = this.transportValue.linearMemoryBytes?.() ?? null;
+      } catch {
+        linearMemoryBytes = null;
+      }
+    }
+    return {
+      chatId: this.ownerChatId,
+      state: this.stateValue,
+      generationId: this.generationId,
+      startedAtMs: this.startedAtMs,
+      linearMemoryBytes,
+    };
+  }
+
   /** 关闭宿主；超时或失败返回 unconfirmed，不抛出；重复调用返回同一结果。 */
   close(): Promise<WasmRuntimeCloseReport> {
     this.closePromise ??= this.closeOnce();
@@ -135,6 +187,11 @@ export class WasmRuntimeLease {
     try {
       await withDeadline(this.transportValue.close(), this.closeTimeoutMs, "Peri WASM runtime close");
       this.stateValue = "closed";
+      try {
+        this.onClosed?.(this);
+      } catch {
+        // 监控清理回调失败不能改写关闭结果。
+      }
       return { confirmed: true, generationId: this.generationId };
     } catch (error) {
       this.stateValue = "close-unconfirmed";
@@ -184,6 +241,12 @@ export class WasmRuntimePool {
         startupTimeoutMs: this.options.startupTimeoutMs,
         closeTimeoutMs: this.options.closeTimeoutMs,
         signal: controller.signal,
+        ...(options.ownerChatId === undefined ? {} : { ownerChatId: options.ownerChatId }),
+        onClosed: (lease) => {
+          // 正常关闭路径不会调用 `release`；登记表必须在这里收缩，
+          // 否则已关闭实例会一直被监控持有，实例数也永不下降。
+          this.leases.delete(lease);
+        },
         onLateCleanupStart: (cleanup) => {
           this.pendingLateCleanups.add(cleanup);
           void cleanup.finally(() => this.pendingLateCleanups.delete(cleanup));
@@ -206,6 +269,21 @@ export class WasmRuntimePool {
 
   /** 当前跟踪的运行后端数（含关闭未确认的运行后端）。 */
   get size(): number { return this.leases.size; }
+
+  /** 只读快照：只含数值与标识；启动中的任务只计数、不归属实例。 */
+  snapshot(): WasmRuntimePoolSnapshot {
+    const instances = [...this.leases]
+      .filter((lease) => lease.state !== "closed")
+      .map((lease) => lease.snapshot())
+      .sort((left, right) =>
+        left.startedAtMs - right.startedAtMs
+        || (left.chatId ?? "").localeCompare(right.chatId ?? ""));
+    return {
+      instances,
+      starting: this.startups.size,
+      unconfirmed: this.unconfirmed,
+    };
+  }
 
   /** 是否存在关闭未确认的运行后端；为真时调用方不得再启动新执行。 */
   get unconfirmed(): boolean {
