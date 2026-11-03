@@ -1,5 +1,6 @@
 use super::*;
 use crate::mcp::builtin::context::BuiltinInstanceContext;
+use peri_acp_types::ports::McpPoolPort;
 
 const SCRIPT: &str = r#"
 const fs = require('node:fs');
@@ -864,6 +865,20 @@ async fn system_requirement_is_discovered_before_gated_ordinary_server() {
         );
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
+    // System 批次处理完即向启动等待方收口：普通 server 还卡在握手时，
+    // systemPhase 必须已经是 settled，而整池 initPhase 仍是 initializing。
+    while pool.snapshot()["systemPhase"] != "settled" {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "System 收口位必须在普通 server 放行前发布"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        pool.snapshot()["initPhase"],
+        "initializing",
+        "普通 MCP 未完成时整池不得发布 ready"
+    );
     assert!(
         pool.get_client("gated-ordinary").is_none(),
         "普通 server 尚未放行，不应已经写入句柄（说明它排在 System 之前）"

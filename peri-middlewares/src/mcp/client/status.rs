@@ -314,6 +314,19 @@ impl McpClientPool {
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// 标记 System MCP（启动依赖）已处理完。普通 MCP 不参与该判定：会话创建
+    /// 只等这个位，避免慢速普通 transport 拖住首个会话。
+    pub(crate) fn mark_system_settled(&self) {
+        self.system_settled
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// System MCP 是否已处理完（含失败与空清单）。
+    pub(crate) fn system_settled(&self) -> bool {
+        self.system_settled
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// 记录一次状态变化（统一出口）。
     ///
     /// `old` 为调用方在修改客户端表**之前**捕获的旧状态；`None` 表示表内

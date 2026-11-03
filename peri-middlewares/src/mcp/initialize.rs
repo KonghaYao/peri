@@ -151,6 +151,9 @@ fn publish_config_failure(
     message: &str,
 ) {
     pool.publish_system_manifest(SystemMcpManifest::Failed);
+    // 配置失败也是 System 依赖的终态：启动等待方要立即拿到结论，而不是把
+    // 「不可用」睡成 10s 上限。
+    pool.mark_system_settled();
     let status = McpInitStatus::Failed(message.to_string());
     *pool.init_status.write() = status.clone();
     let _ = status_tx.send(status);
@@ -384,6 +387,7 @@ impl McpClientPool {
                 // 执行目录绑定失败后本 pool 不可能再发布配置清单：等待方必须立刻
                 // 拿到终态，而不是把「不可用」睡成 bootstrap 超时。
                 pool.publish_system_manifest(SystemMcpManifest::Failed);
+                pool.mark_system_settled();
                 let status = McpInitStatus::Failed(error.to_string());
                 *pool.init_status.write() = status.clone();
                 let _ = status_tx.send(status);
@@ -398,6 +402,7 @@ impl McpClientPool {
         if config.mcp_servers.is_empty() {
             // 空集合也是**完整**清单：此后 system 依赖（零个）是可信事实。
             pool.publish_system_manifest(SystemMcpManifest::Loaded);
+            pool.mark_system_settled();
             let _ = status_tx.send(McpInitStatus::Ready { total: 0 });
             *pool.init_status.write() = McpInitStatus::Ready { total: 0 };
             pool.mark_initialized();
@@ -442,8 +447,18 @@ impl McpClientPool {
                 .then_with(|| left_name.cmp(right_name))
         });
 
+        let system_total = ordered
+            .iter()
+            .filter(|(_, server)| server.system_mcp == Some(true))
+            .count();
         let mut connected = 0usize;
-        for (name, server_config) in ordered {
+        for (index, (name, server_config)) in ordered.into_iter().enumerate() {
+            // System MCP 是本轮启动的阻塞条件，普通 MCP 不是：System 批次处理
+            // 完即向等待方收口。后续普通 transport 即使每个都等满超时，也只
+            // 影响它们自己的工具可用时间，不再拖住会话创建。
+            if index == system_total {
+                pool.mark_system_settled();
+            }
             let slot = pool.server_slot(name);
             let Ok(_operation) = slot.operation.clone().try_lock_owned() else {
                 continue;
@@ -780,6 +795,9 @@ impl McpClientPool {
                 }
             }
         }
+
+        // 全部是 System，或在 System 批次内因池关闭 break：同样要对等待方收口。
+        pool.mark_system_settled();
 
         if connectable > 0 && connected == 0 {
             let all_need_auth = pool

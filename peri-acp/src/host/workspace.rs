@@ -105,9 +105,10 @@ impl SessionEnvironment {
     /// - `SkillsMiddleware` 关闭位为真 ⇒ `Ok(空)`：显式功能关闭，不发起
     ///   `skills/list`（这是功能开关，不是按 server 名过滤）；
     /// - 池未装配 ⇒ `Ok(空)`；
-    /// - 等待 `init_status` 离开 `pending/initializing`（或 10s 上界），然后调用
+    /// - 等待 System MCP 收口（或 10s 上界），然后调用
     ///   [`peri_acp_types::ports::McpPoolPort::read_skills_catalog`] 聚合当前已连接
-    ///   的 skills-capable server；
+    ///   的 skills-capable server；普通 MCP 不是启动依赖，不参与该等待（不可达
+    ///   的普通 transport 不得拖住会话创建）；
     /// - host-assigned system workspace 读取失败 ⇒ `Err`（调用方 fail-closed）；
     ///   其他 server 读取失败 ⇒ 中间件记录诊断并继续（不静默）。
     ///
@@ -124,13 +125,11 @@ impl SessionEnvironment {
         }
         let deadline = peri_time::monotonic_now() + std::time::Duration::from_secs(10);
         loop {
-            let phase = pool.snapshot()["initPhase"]
+            let phase = pool.snapshot()["systemPhase"]
                 .as_str()
                 .unwrap_or("pending")
                 .to_owned();
-            if !matches!(phase.as_str(), "pending" | "initializing")
-                || peri_time::monotonic_now() >= deadline
-            {
+            if phase != "pending" || peri_time::monotonic_now() >= deadline {
                 return pool
                     .read_skills_catalog(&self.session_id)
                     .await
@@ -174,11 +173,11 @@ impl SessionEnvironment {
                 }
                 McpBuiltinWorkspaceState::Absent => {}
             }
-            let phase = pool.snapshot()["initPhase"]
+            let phase = pool.snapshot()["systemPhase"]
                 .as_str()
                 .unwrap_or("pending")
                 .to_owned();
-            if !matches!(phase.as_str(), "pending" | "initializing") {
+            if phase != "pending" {
                 return Ok(Default::default());
             }
             if peri_time::monotonic_now() >= deadline {
@@ -666,13 +665,14 @@ impl SessionEnvironment {
                 }
                 McpBuiltinWorkspaceState::Absent => {}
             }
-            // 池初始化已收口而 workspace 句柄仍不存在（实例未装配 / 被关闭 / 非 bare
-            // 配置类另有故障）：不再等待，按覆盖不可得处理。
-            let phase = pool.snapshot()["initPhase"]
+            // System 依赖已收口而 workspace 句柄仍不存在（实例未装配 / 被关闭 /
+            // 非 bare 配置类另有故障）：不再等待，按覆盖不可得处理。普通 MCP 不是
+            // 启动依赖，不参与这里的收口判定。
+            let phase = pool.snapshot()["systemPhase"]
                 .as_str()
                 .unwrap_or("pending")
                 .to_owned();
-            if !matches!(phase.as_str(), "pending" | "initializing") {
+            if phase != "pending" {
                 return Ok(Default::default());
             }
             if peri_time::monotonic_now() >= deadline {
