@@ -843,6 +843,8 @@ enum OpenSettlement {
     /// 已修改状态；成功接纳时携带待关闭的旧窗口身份。
     Changed {
         close: Option<HistoryV2WindowIdentity>,
+        /// 新窗口已接纳（而不是被拒绝后标为需重开）。
+        accepted: bool,
     },
 }
 
@@ -909,6 +911,7 @@ fn apply_open(
             OpenSettlement::Changed {
                 // 只有新窗口被接纳后才释放旧身份；相同身份不重复关闭。
                 close: previous_window.filter(|old| next_window.as_ref() != Some(old)),
+                accepted: true,
             }
         }
         Err(error) => {
@@ -919,7 +922,10 @@ fn apply_open(
                 window.paging.last_error = Some(error.to_string());
             }
             warn!(reason = %error, "history_v2: reopen response rejected");
-            OpenSettlement::Changed { close: None }
+            OpenSettlement::Changed {
+                close: None,
+                accepted: false,
+            }
         }
     }
 }
@@ -935,7 +941,7 @@ fn settle_open(
 ) -> Option<HistoryV2WindowIdentity> {
     match apply_open(state, session_id, request_key, None, page, limits) {
         OpenSettlement::Unchanged => None,
-        OpenSettlement::Changed { close } => {
+        OpenSettlement::Changed { close, .. } => {
             publish_state(state.clone());
             close
         }
@@ -1038,7 +1044,7 @@ async fn handle_window_request(
             };
             // 原子写锁内只修改状态；发布（notify_view）必须等锁释放后，否则
             // `Atom::set` 会再次申请同一把写锁而自我阻塞。
-            let (close_target, notify) = {
+            let (close_target, notify, replay_pending) = {
                 let handle = atoms::HISTORY_V2_STATE.state();
                 let mut state = handle.write();
                 match &request {
@@ -1064,22 +1070,33 @@ async fn handle_window_request(
                             &page,
                             &limits,
                         ) {
-                            OpenSettlement::Unchanged => (None, false),
-                            OpenSettlement::Changed { close } => (close, true),
+                            OpenSettlement::Unchanged => (None, false, false),
+                            OpenSettlement::Changed { close, accepted } => (close, true, accepted),
                         }
                     }
-                    HistoryV2ConsumerRequest::Page(page_request) => {
-                        (None, apply_page(&mut state, page_request, &page, &limits))
-                    }
-                    HistoryV2ConsumerRequest::Seek(seek_request) => {
-                        (None, apply_seek(&mut state, seek_request, &page, &limits))
-                    }
+                    HistoryV2ConsumerRequest::Page(page_request) => (
+                        None,
+                        apply_page(&mut state, page_request, &page, &limits),
+                        false,
+                    ),
+                    HistoryV2ConsumerRequest::Seek(seek_request) => (
+                        None,
+                        apply_seek(&mut state, seek_request, &page, &limits),
+                        false,
+                    ),
                     // Close 已在解析页之前处理并返回。
-                    HistoryV2ConsumerRequest::Close { .. } => (None, false),
+                    HistoryV2ConsumerRequest::Close { .. } => (None, false, false),
                 }
             };
             if notify {
                 notify_current_state();
+            }
+            if replay_pending {
+                // open 接纳后与 initial 同样的顺序保证：视图事件先入队，随后按
+                // seq 重放 open 完成前暂存的 live 更新（见 `reset_for_rewind`）。
+                let state = atoms::HISTORY_V2_STATE.state().read().clone();
+                let replayed = crate::kit::acp_notifier::replay_pending_initial(&state);
+                crate::kit::acp_notifier::dispatch_local_events(replayed);
             }
             close_target
         }

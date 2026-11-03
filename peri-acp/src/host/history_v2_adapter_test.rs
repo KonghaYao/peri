@@ -773,6 +773,13 @@ async fn tool_call_and_result_share_invocation_key_across_entries() {
         Some(expected.as_str()),
         "结果必须与调用使用同一跨行键，不能各自绑定 entryId"
     );
+    // TUI 依赖 `{sessionId}:{toolCallId}` 形状把历史工具卡归一为 live 的裸 toolCallId。
+    let shaped = format!("{}:{}", fixture.sid, "call-1");
+    assert_eq!(
+        call_key.as_deref(),
+        Some(shaped.as_str()),
+        "adapter 输出的 invocationKey 形状回归"
+    );
 }
 
 #[tokio::test]

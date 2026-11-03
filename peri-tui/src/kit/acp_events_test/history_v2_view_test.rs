@@ -11,7 +11,7 @@ use super::*;
 use crate::kit::atoms;
 use crate::kit::history_v2::consumer;
 use crate::kit::history_v2::error::HistoryV2WireFailure;
-use crate::kit::history_v2::initial::admit_load_response;
+use crate::kit::history_v2::initial::{admit_load_response, admit_open_response};
 use crate::kit::history_v2::paging::HistoryV2PagingStatus;
 use crate::kit::tui_render_unit::TuiNoteLevel;
 use peri_acp_types::history_v2::DecimalU64;
@@ -837,4 +837,235 @@ fn different_invocation_keys_do_not_merge() {
         TuiRenderUnit::TuiToolCard(card)
             if card.tool_id == "inv-2" && card.output_summary == "other"
     ));
+}
+
+/// rewind 只作废窗口：连接级投递事实必须保留，open 接纳后新事件才能继续被接纳。
+#[test]
+#[serial]
+fn rewind_keeps_live_boundary_and_open_restores_admission() {
+    let _guard = setup();
+    let mut v2 = admitted();
+    let mut state = make_fold_test_state();
+    state.active_session_id = "s1".into();
+    dispatch_view(&mut state, &v2);
+    for seq in [121, 122] {
+        assert!(matches!(
+            v2.window_mut()
+                .unwrap()
+                .accept_live_event("live-7", DecimalU64::new(seq)),
+            crate::kit::history_v2::live::HistoryV2LiveAdmission::Accepted { .. }
+        ));
+    }
+    atoms::HISTORY_V2_STATE.set(v2);
+    atoms::ACTIVE_SESSION_ID.set("s1".to_owned());
+
+    let messages_json = json!([
+        {"role": "user", "id": "msg-1", "content": "回退后"},
+    ])
+    .to_string();
+    dispatch_and_notify(&mut state, &AcpEventData::RewindCompleted { messages_json });
+
+    let rewound = crate::kit::history_v2::snapshot();
+    assert_eq!(
+        rewound
+            .live_boundary
+            .as_ref()
+            .map(|boundary| boundary.after_seq.get()),
+        Some(122),
+        "rewind 后已接纳高水位必须保留"
+    );
+    assert_eq!(rewound.session_id.as_deref(), Some("s1"));
+    assert!(rewound.window.is_none(), "旧窗口必须作废");
+
+    // open 响应不携带 liveBoundary：接纳时用保留边界重建 paging.live。
+    let reopened = page(
+        Some("before-2"),
+        json!([
+            item("m1", 1, json!([text("m1", "user", "回退后")])),
+            item("m2", 2, json!([text("m2", "assistant", "继续")])),
+        ]),
+    );
+    let mut opened = admit_open_response(
+        &rewound,
+        "s1",
+        &serde_json::from_value(reopened).unwrap(),
+        &HistoryLimits::default(),
+        DecimalU64::new(20),
+    )
+    .expect("open admitted after rewind");
+    dispatch_view(&mut state, &opened);
+
+    assert!(
+        matches!(
+            opened
+                .window_mut()
+                .unwrap()
+                .accept_live_event("live-7", DecimalU64::new(123)),
+            crate::kit::history_v2::live::HistoryV2LiveAdmission::Accepted { .. }
+        ),
+        "open 接纳后下一条实时更新必须正常接纳，不能停留在 NotReady"
+    );
+    crate::kit::history_v2::live::clear_all_pending();
+}
+
+/// rewind 回填是窗口前缀：新 open 页整体替换它，不叠加在历史页之后。
+#[test]
+#[serial]
+fn rewind_backfill_is_replaced_by_the_opened_window() {
+    let _guard = setup();
+    let v2 = admitted();
+    let mut state = make_fold_test_state();
+    state.active_session_id = "s1".into();
+    dispatch_view(&mut state, &v2);
+    atoms::HISTORY_V2_STATE.set(v2);
+    atoms::ACTIVE_SESSION_ID.set("s1".to_owned());
+
+    let backfill: Vec<Value> = (0..13)
+        .map(|index| {
+            json!({
+                "role": "user",
+                "id": format!("old-{index}"),
+                "content": format!("回退消息 {index}"),
+            })
+        })
+        .collect();
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::RewindCompleted {
+            messages_json: Value::Array(backfill).to_string(),
+        },
+    );
+    assert_eq!(state.committed.len(), 13);
+    assert_eq!(
+        atoms::HISTORY_V2_PREFIX_LEN.get(),
+        13,
+        "回填内容标记为窗口前缀"
+    );
+
+    let rewound = crate::kit::history_v2::snapshot();
+    let reopened = page(
+        Some("before-2"),
+        json!([
+            item("n1", 20, json!([text("n1", "user", "新页 1")])),
+            item("n2", 21, json!([text("n2", "user", "新页 2")])),
+        ]),
+    );
+    let opened = admit_open_response(
+        &rewound,
+        "s1",
+        &serde_json::from_value(reopened).unwrap(),
+        &HistoryLimits::default(),
+        DecimalU64::new(20),
+    )
+    .expect("open admitted after rewind");
+    dispatch_view(&mut state, &opened);
+
+    assert_eq!(
+        state.committed.len(),
+        2,
+        "新页整体替换回填内容，不叠加整批回退历史"
+    );
+    assert_eq!(atoms::HISTORY_V2_PREFIX_LEN.get(), 2);
+    crate::kit::history_v2::live::clear_all_pending();
+}
+
+/// 历史投影携带 `entryId` 中的消息身份，同文不同 id 的 live 尾部不得被删除。
+#[test]
+#[serial]
+fn historical_user_bubble_carries_message_id_and_keeps_same_text_live_tail() {
+    let _guard = setup();
+    let mut v2 = admitted();
+    let mut state = make_fold_test_state();
+    state.active_session_id = "s1".into();
+    v2.window.as_mut().unwrap().items =
+        serde_json::from_value(json!([item("m1", 1, json!([text("m1", "user", "继续")])),]))
+            .unwrap();
+    dispatch_view(&mut state, &v2);
+
+    assert_eq!(state.committed.len(), 1);
+    match &state.committed[0] {
+        TuiRenderUnit::TuiUserBubble(bubble) => {
+            assert_eq!(bubble.message_id.as_deref(), Some("m1"));
+        }
+        other => panic!("expected user bubble, got {other:?}"),
+    }
+
+    state.committed.push_back(TuiRenderUnit::TuiUserBubble(
+        TuiUserBubble::new("继续".into()).with_message_id("m2"),
+    ));
+    let reopened = page(
+        Some("before-2"),
+        json!([item("m1", 1, json!([text("m1", "user", "继续")]))]),
+    );
+    let opened = admit_open_response(
+        &v2,
+        "s1",
+        &serde_json::from_value(reopened).unwrap(),
+        &HistoryLimits::default(),
+        DecimalU64::new(20),
+    )
+    .expect("reopened");
+    dispatch_view(&mut state, &opened);
+
+    let same_text = state
+        .committed
+        .iter()
+        .filter(
+            |unit| matches!(unit, TuiRenderUnit::TuiUserBubble(bubble) if bubble.text == "继续"),
+        )
+        .count();
+    assert_eq!(same_text, 2, "同文不同身份的消息都必须保留");
+}
+
+/// 历史工具卡身份归一为裸 toolCallId，与 live 卡片按同一身份去重。
+#[test]
+#[serial]
+fn historical_tool_card_uses_bare_tool_call_id_and_dedupes_live_card() {
+    let _guard = setup();
+    let mut v2 = admitted();
+    let mut state = make_fold_test_state();
+    state.active_session_id = "s1".into();
+    v2.window.as_mut().unwrap().items = serde_json::from_value(json!([item(
+        "e1",
+        1,
+        json!([tool_call("s1:inv-1", "Read")])
+    ),]))
+    .unwrap();
+    dispatch_view(&mut state, &v2);
+
+    assert_eq!(state.committed.len(), 1);
+    let (tool_name, input_summary) = match &state.committed[0] {
+        TuiRenderUnit::TuiToolCard(card) => {
+            assert_eq!(card.tool_id, "inv-1", "历史 invocationKey 必须归一为裸 id");
+            (card.tool_name.clone(), card.input_summary.clone())
+        }
+        other => panic!("expected tool card, got {other:?}"),
+    };
+
+    // live 侧 toolCallId 不带会话前缀。
+    state
+        .committed
+        .push_back(crate::kit::acp_events::tool::replay_tool_started_unit(
+            "inv-1",
+            &tool_name,
+            &input_summary,
+            &json!({"path": "/tmp/a"}),
+            None,
+        ));
+
+    let reopened = page(
+        Some("before-2"),
+        json!([item("e1", 1, json!([tool_call("s1:inv-1", "Read")]))]),
+    );
+    let opened = admit_open_response(
+        &v2,
+        "s1",
+        &serde_json::from_value(reopened).unwrap(),
+        &HistoryLimits::default(),
+        DecimalU64::new(20),
+    )
+    .expect("reopened");
+    dispatch_view(&mut state, &opened);
+
+    assert_eq!(state.committed.len(), 1, "同一 toolCallId 只保留一张卡片");
 }

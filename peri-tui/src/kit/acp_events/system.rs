@@ -352,12 +352,16 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
         Ok(msgs) => {
             // rewind 改变了会话有效范围：旧窗口、在途请求与投影前缀全部作废，
             // 再重新 open 最新窗口。旧页/旧 open 响应由会话与窗口身份及
-            // consumer epoch 拦截，不能回写到回退后的历史。
+            // consumer epoch 拦截，不能回写到回退后的历史。连接级投递事实
+            // （stream/delivery/已接纳 seq）必须保留，否则 open 完成前的新
+            // transcript 更新会因窗口未就绪被丢弃。
             crate::kit::history_v2::consumer::request_close_current();
-            crate::kit::history_v2::reset_state();
+            crate::kit::history_v2::reset_for_rewind();
             crate::kit::history_v2::consumer::reset_consumer_state();
             let session_id = crate::kit::atoms::ACTIVE_SESSION_ID.state().read().clone();
             if !session_id.is_empty() {
+                // open 完成前的更新先进入暂存，接纳成功后按 seq 重放。
+                crate::kit::history_v2::live::begin_pending(&session_id);
                 crate::kit::history_v2::consumer::request_open_latest(&session_id);
             }
             state.committed.clear();
@@ -391,6 +395,9 @@ pub(super) fn handle_rewind_completed(state: &mut BridgeState, messages_json: &s
                     _ => {}
                 }
             }
+            // 回填内容是「窗口前缀」：新 open 页整体替换它；open 完成前追加的
+            // live 单元位于其后，仍作为尾部保留。
+            crate::kit::atoms::HISTORY_V2_PREFIX_LEN.set(state.committed.len());
             // 同步重建 REWIND_PREVIEW：rewind 后消息列表已变，旧 preview 中的
             // 消息 id 已从服务端 history 删除——不重建会导致连续第二次回滚
             // 时 target 找不到（服务端 emit_rewind_not_found）。从回滚后的
