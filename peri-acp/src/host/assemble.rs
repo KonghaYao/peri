@@ -144,11 +144,14 @@ fn pending_mcp_pool(
 
 /// 准备路径一次加载的插件数据：聚合本身 + 由该聚合派生的 roots。
 ///
-/// 装配面消费同一对象，不重读插件目录；`data` 为 `None` 表示 host 级/bare。
+/// 装配面消费同一对象，不重读插件目录；准备失败与 host 级/bare 的
+/// `data: None` 分开记录，以便 MCP 侧遵守本会话的降级决定。
 #[derive(Clone)]
 pub struct PreparedPlugins {
     pub data: Option<PluginLoadResult>,
     pub skill_roots: Vec<SkillRoot>,
+    /// 会话准备时插件来源失败，禁止 MCP 初始化再次发现插件来源。
+    pub discovery_failed: bool,
 }
 
 pub struct HostAssemblyInput {
@@ -271,6 +274,7 @@ pub async fn assemble_wasm_server_config(input: WasmHostAssemblyInput) -> AcpSer
             prepared_plugins: Some(PreparedPlugins {
                 data: None,
                 skill_roots: Vec::new(),
+                discovery_failed: false,
             }),
             session_mcp_servers: None,
             builtin_closed: Default::default(),
@@ -436,6 +440,10 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         plugin_face_closed,
     } = input;
 
+    let plugin_discovery_failed = prepared_plugins
+        .as_ref()
+        .is_some_and(|prepared| prepared.discovery_failed);
+
     // 用户级 `.claude` 与准备面、插件 RPC 共用同一权威（HOME 优先）：
     // 见 `peri_middlewares::plugin::claude_home`。
     let claude_dir = capabilities
@@ -524,6 +532,9 @@ pub(crate) async fn assemble_server_config_with_mcp_profile(
         // 是否读插件来源。判定源是 frozen/session-local 策略，不是当轮配置。
         if let Err(error) = pool.set_plugin_face_closed(plugin_face_closed) {
             tracing::error!(%error, "MCP plugin face closure binding failed");
+        }
+        if let Err(error) = pool.set_plugin_source_failed(plugin_discovery_failed) {
+            tracing::error!(%error, "MCP session plugin source binding failed");
         }
         if let Err(error) = pool.set_stdio_available(capabilities.stdio_mcp) {
             tracing::error!(%error, "MCP stdio availability binding failed");

@@ -100,6 +100,53 @@ fn deployment_can_skip_plugin_discovery_and_builtin_overlay() {
 }
 
 #[test]
+fn failed_session_plugin_preparation_skips_valid_plugin_mcp_servers() {
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("project");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let claude_home = temp.path().join("claude");
+    install_enabled_plugin(&claude_home);
+    let snapshot = snapshot_for(
+        &cwd,
+        &temp.path().join("settings.json"),
+        r#"{"mcpServers":{"global":{"command":"global"}}}"#,
+        "{}",
+        HashMap::new(),
+    );
+    let pool = crate::mcp::McpClientPool::new_pending();
+    let (enabled, _) = load_merged_config_from_snapshot_with_capabilities(
+        &cwd,
+        &claude_home,
+        &snapshot,
+        false,
+        pool.plugin_sources_available(),
+        false,
+    )
+    .unwrap();
+    assert!(enabled
+        .mcp_servers
+        .keys()
+        .any(|name| name.starts_with("plugin:")));
+
+    pool.set_plugin_source_failed(true).unwrap();
+    let (degraded, sources) = load_merged_config_from_snapshot_with_capabilities(
+        &cwd,
+        &claude_home,
+        &snapshot,
+        false,
+        pool.plugin_sources_available(),
+        false,
+    )
+    .unwrap();
+    assert!(degraded.mcp_servers.contains_key("global"));
+    assert!(!degraded
+        .mcp_servers
+        .keys()
+        .any(|name| name.starts_with("plugin:")));
+    assert!(sources.is_empty());
+}
+
+#[test]
 fn snapshot_loader_accepts_the_same_directory_with_canonical_or_alternate_spelling() {
     let temp = tempfile::tempdir().unwrap();
     let cwd = temp.path().join("project");
@@ -324,16 +371,19 @@ fn closed_plugin_face_skips_plugin_mcp_merging() {
     // 非插件来源不受关闭位影响（global 仍在）。
     assert!(closed.mcp_servers.contains_key("global"));
 
-    // 关闭位生效的前提是「不读插件目录」：换成一个非法插件 MCP 声明，
-    // 严格路径会在开启时报错，而关闭位下连解析都不会发生。
+    // 非法插件 MCP 声明不得阻止其他来源启动；关闭位下连目录也不读取。
     let poisoned = temp.path().join("poisoned-claude");
     poison_plugin_mcp_config(&poisoned);
-    assert!(matches!(
-        load_merged_config_from_snapshot_with_capabilities(
-            &cwd, &poisoned, &snapshot, false, true, false,
-        ),
-        Err(McpConfigError::PluginLoadError { .. })
-    ));
+    let (degraded, sources) = load_merged_config_from_snapshot_with_capabilities(
+        &cwd, &poisoned, &snapshot, false, true, false,
+    )
+    .unwrap();
+    assert!(degraded.mcp_servers.contains_key("global"));
+    assert!(!degraded
+        .mcp_servers
+        .keys()
+        .any(|name| name.starts_with("plugin:")));
+    assert!(sources.is_empty());
     assert!(load_merged_config_from_snapshot_with_capabilities(
         &cwd, &poisoned, &snapshot, false, true, true,
     )

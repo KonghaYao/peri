@@ -56,6 +56,8 @@ pub(crate) struct PreparedSessionInputs {
     /// 一次加载的插件聚合（roots/commands/hooks/mcp）。
     pub(crate) plugin_data: Option<PluginLoadResult>,
     pub(crate) skill_roots: Vec<SkillRoot>,
+    /// 准备期插件来源读取失败时，本会话的 MCP 来源也不得再次读盘。
+    pub(crate) plugin_discovery_failed: bool,
     /// ACP session/new 准入后的暂存正文；冻结成功后移交独立 owner 字段。
     pub(crate) agent_instructions: Option<String>,
     /// MCP servers declared by the ACP client for this session.
@@ -69,8 +71,8 @@ pub(crate) struct PreparedSessionInputs {
     pub(crate) legacy: Option<LegacyAdoptionInputs>,
 }
 
-/// 插件发现结果：一次加载的聚合、技能根与 agent 目录。
-type DiscoveredPlugins = (Option<PluginLoadResult>, Vec<SkillRoot>);
+/// 插件发现结果：一次加载的聚合、技能根与失败标记。
+type DiscoveredPlugins = (Option<PluginLoadResult>, Vec<SkillRoot>, bool);
 
 /// frozen 的来源：新建/legacy 构建一次，fork 直接复用 source 的精确字节。
 enum FrozenSource<'a> {
@@ -202,6 +204,7 @@ impl PreparedSessionInputs {
         PreparedPlugins {
             data: self.plugin_data.clone(),
             skill_roots: self.skill_roots.clone(),
+            discovery_failed: self.plugin_discovery_failed,
         }
     }
 
@@ -220,7 +223,7 @@ impl PreparedSessionInputs {
                 (Some(frozen), Some(snapshot.to_owned()))
             }
         };
-        let (plugin_data, skill_roots) =
+        let (plugin_data, skill_roots, plugin_discovery_failed) =
             Self::discover_plugins(host, cwd, frozen.as_ref(), configuration.config.as_ref())?;
         Ok(Self {
             cwd: cwd.to_owned(),
@@ -232,6 +235,7 @@ impl PreparedSessionInputs {
             configuration,
             plugin_data,
             skill_roots,
+            plugin_discovery_failed,
             agent_instructions: None,
             session_mcp_servers: HashMap::new(),
             frozen,
@@ -268,8 +272,8 @@ impl PreparedSessionInputs {
         })
     }
 
-    /// 插件发现：session 级装配经**严格只读**入口一次加载，失败即准备失败
-    /// （缺失/非法清单定位到具体插件，不生成合成清单、不写插件缓存）；
+    /// 插件发现：session 级装配经**严格只读**入口一次加载，失败时记录诊断并
+    /// 跳过插件来源（不生成合成清单、不写插件缓存），不阻止核心会话启动；
     /// host 级与 bare 沿用既有形状（无插件聚合）。
     ///
     /// M6：插件来源闭合位在本会话的准备期**先于任何读取**判定，且与装配面取
@@ -284,22 +288,29 @@ impl PreparedSessionInputs {
         config: &PeriConfig,
     ) -> Result<DiscoveredPlugins, AcpError> {
         match host.workspace_assembly.as_ref() {
-            None => Ok((None, host.plugin_skill_roots.clone())),
-            Some(source) if source.bare || !source.capabilities.plugins => Ok((None, Vec::new())),
+            None => Ok((None, host.plugin_skill_roots.clone(), false)),
+            Some(source) if source.bare || !source.capabilities.plugins => {
+                Ok((None, Vec::new(), false))
+            }
             Some(_) => {
                 // 严格只读发现：用户级 `.claude` 由装配面解析（HOME 优先的唯一
                 // 权威在 `plugin::claude_home`，见 `assemble` 函数 doc），
                 // 准备面只提供执行目录；准入（含「关闭 ⇒ 不读」）在装配面单点决定，
                 // `frozen` 优先于当轮 config。
-                let data = super::assemble::discover_prepared_plugins(cwd, frozen, config)
-                    .map_err(|error| {
-                        AcpError::new(-32603, format!("Plugin discovery failed: {error}"))
-                    })?;
+                let (data, discovery_failed) = match super::assemble::discover_prepared_plugins(
+                    cwd, frozen, config,
+                ) {
+                    Ok(data) => (data, false),
+                    Err(error) => {
+                        tracing::warn!(%error, cwd, "Plugin discovery failed; continuing without plugins");
+                        (None, true)
+                    }
+                };
                 let skill_roots = data
                     .as_ref()
                     .map(|data| data.all_skill_roots.clone())
                     .unwrap_or_default();
-                Ok((data, skill_roots))
+                Ok((data, skill_roots, discovery_failed))
             }
         }
     }
