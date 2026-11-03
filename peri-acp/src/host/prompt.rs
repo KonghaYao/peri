@@ -657,7 +657,18 @@ async fn run_prompt_attempt(
     if !result.ok || result.failure.is_some() {
         if let Some((activation, watermark, result_watermark)) = attempt_activation {
             if result.stop_reason == executor::PromptStopReason::Cancelled {
-                activation.suppress();
+                if user_input_mailbox.is_steer_interruption(&input_attempt) {
+                    // 用户显式发送打断当前 turn：MQ 已放行输入，收尾后必须继续调度。
+                    tracing::debug!(
+                        session_id = %session_id,
+                        thread_id = %thread_id,
+                        attempt_id = %input_attempt.id,
+                        reason = "steer",
+                        "steer interruption keeps activation armed"
+                    );
+                } else {
+                    activation.suppress();
+                }
                 // Stop 优先：未覆盖结果暂停，新完成通知也不能绕过显式继续。
                 if let Some(runtime) = deployment.session_manager.get_session(&session_id) {
                     runtime.async_result_mailbox.suspend_scope("cancelled");

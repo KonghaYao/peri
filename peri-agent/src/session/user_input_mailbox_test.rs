@@ -454,6 +454,31 @@ fn test_mailbox_stop_invalidates_reserved_ticket_without_affecting_next_attempt(
 }
 
 #[test]
+fn test_mailbox_late_fail_reserved_keeps_next_attempt_runnable() {
+    let (mailbox, _) = make_mailbox();
+    let input = make_input(&mailbox, "旧预留");
+    mailbox.enqueue_sync(&input).unwrap();
+    let old = mailbox.reserve_run().unwrap();
+    mailbox.stop_sync();
+    mailbox
+        .dispatch_sync(&make_dispatch(&mailbox, &[&input]))
+        .unwrap();
+    let next = mailbox.reserve_run().unwrap();
+
+    // 旧 turn 的外层 guard 此时才 Drop：它已不是当前执行，不得复位队列。
+    mailbox.fail_reserved(&old);
+
+    assert!(
+        mailbox.is_active_ticket(&next),
+        "过期清理不能移除新预留的执行身份"
+    );
+    assert!(
+        mailbox.attach_attempt_sync(&next, CancellationToken::new()),
+        "过期清理暂停队列会让新输入永远无法启动"
+    );
+}
+
+#[test]
 fn test_mailbox_stale_stop_cannot_cancel_new_managed_attempt() {
     let (mailbox, _) = make_mailbox();
     let input = make_input(&mailbox, "延迟停止");
