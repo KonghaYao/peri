@@ -272,13 +272,8 @@ pub(super) const V12_TABLES: &[TableShape] = &[
         // 悄悄换成「没有凭证」），因此缺表必须在判定里可接受。
         optional: true,
         columns: OAUTH_COLUMNS,
-        not_null: &[
-            "principal_id",
-            "workspace_id",
-            "server_key",
-            "credentials_blob",
-            "updated_at",
-        ],
+        // 本表所有已知列都是 NOT NULL：列清单与 NOT NULL 集合同一份声明。
+        not_null: OAUTH_COLUMNS,
         primary_key: &["principal_id", "workspace_id", "server_key"],
     },
     TableShape {
@@ -364,7 +359,8 @@ pub(super) fn current_table_names() -> impl Iterator<Item = &'static str> {
     current_tables().into_iter().map(|table| table.name)
 }
 
-/// 压缩前形状的 `threads` 列（= 当前形状去掉 `workspace_id` / `archived`）。
+/// 压缩前形状的 `threads` 列（14 列；当前形状的 `workspace_id` / `archived` 与两列工作
+/// 快照都不在其中）。
 const INPUT_THREADS_COLUMNS: &[&str] = &[
     "id",
     "title",
@@ -381,6 +377,10 @@ const INPUT_THREADS_COLUMNS: &[&str] = &[
     "inherited_context",
     "agent_status",
 ];
+
+/// 迁移输入 `workspaces` 的已知列：下界与上界相同（重建后由当前 DDL 定形）。
+const INPUT_WORKSPACE_COLUMNS: &[&str] =
+    &["id", "project_id", "root", "root_identity", "discovery"];
 
 /// 压缩前形状的 `mcp_oauth_credentials` 列（machine 作用域；当前形状换成 workspace 作用域）。
 /// 同一份清单同时是迁移输入的列上界（[`INPUT_TABLES`]）与删除前的形状判定（[`DROPPED_TABLES`]）。
@@ -401,8 +401,8 @@ pub(super) const INPUT_TABLES: &[InputTable] = &[
         name: "threads",
         required_table: true,
         required: INPUT_THREADS_COLUMNS,
-        // 上界 = 当前列 ∪ 正式发布里退役的两个缓存列（`removal_plan` 在搬运开始前显式删除
-        // 它们，因此允许出现；重建只搬运当前列，除此之外的列没有去处）。
+        // 上界 = 14 列下界 ∪ 正式发布里退役的两个缓存列（`removal_plan` 在搬运开始前显式
+        // 删除它们，因此允许出现；重建只搬运当前列，除此之外的列没有去处）。
         allowed: Some(&[
             "id",
             "title",
@@ -425,8 +425,8 @@ pub(super) const INPUT_TABLES: &[InputTable] = &[
     InputTable {
         name: "workspaces",
         required_table: true,
-        required: &["id", "project_id", "root", "root_identity", "discovery"],
-        allowed: Some(&["id", "project_id", "root", "root_identity", "discovery"]),
+        required: INPUT_WORKSPACE_COLUMNS,
+        allowed: Some(INPUT_WORKSPACE_COLUMNS),
     },
     InputTable {
         name: "session_bindings",

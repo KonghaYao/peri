@@ -56,17 +56,12 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         .await?;
     match version {
         v if v == CURRENT_SCHEMA_VERSION => return current_shape(connection).await,
-        // 13 只会是上一代当前形状：有 `thread_mq`、`threads` 缺两列工作快照。
-        canonical::PREVIOUS_CURRENT_SCHEMA_VERSION => {
-            return previous_shape(connection).await;
-        }
-        // 12 是 v13 之前的那一代当前形状（有 inherited 派生索引表，没有 `thread_mq`）。
-        canonical::LEGACY_CURRENT_SCHEMA_VERSION => {
-            return previous_shape(connection).await;
-        }
-        // 11 既可能是 v12 的当前形状（只缺派生索引表），也可能是压缩前的登记形状；
-        // 两者都只做一次幂等升级，但走不同的路径。
-        canonical::LEGACY_REGISTRATION_SCHEMA_VERSION => {
+        // 11→12 补 inherited 派生索引表（11 也可能是压缩前的登记形状），12→13 补
+        // `thread_mq`，13→14 补 `threads` 的两列工作快照；三者都先交给同一条形状判定，
+        // 再按判定结果走对应的幂等升级或搬运。
+        canonical::LEGACY_REGISTRATION_SCHEMA_VERSION
+        | canonical::LEGACY_CURRENT_SCHEMA_VERSION
+        | canonical::PREVIOUS_CURRENT_SCHEMA_VERSION => {
             return previous_shape(connection).await;
         }
         10 => return Ok(SchemaState::Version10),
@@ -248,7 +243,7 @@ impl SqliteSessionDatabase {
             return Self::create_current_schema(&mut connection).await;
         }
         if state == SchemaState::PreviousCurrent {
-            // 上一代 canonical 形状只缺派生索引表：增量补齐，不搬运任何会话事实。
+            // 上一代 canonical 形状只缺派生对象与两列工作快照：增量补齐，不搬运任何会话事实。
             return Self::upgrade_previous_current(&mut connection).await;
         }
         if state == SchemaState::RegistrationShape {
@@ -307,8 +302,8 @@ impl SqliteSessionDatabase {
     /// 快照与 canonical 索引集，不改写任何会话事实。整段一个事务，失败时库保持原版本，
     /// 旧二进制仍可打开。
     ///
-    /// v12→v14 是链式升级（先补 `thread_mq`，再补两列），v13→v14 只补两列；两者共用同一条
-    /// 幂等路径，避免按代际各写一份。
+    /// v11→v14 依次补齐派生索引表、`thread_mq` 与两列，v12 少第一步、v13 只缺最后一步；
+    /// 三者共用同一条幂等路径，避免按代际各写一份。
     async fn upgrade_previous_current(connection: &mut SqliteConnection) -> Result<()> {
         ensure_canonical_names_hold_tables(connection, canonical::CREATE_INHERITED_INDEX_TABLES)
             .await?;

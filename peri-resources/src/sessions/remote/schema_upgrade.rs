@@ -130,6 +130,12 @@ fn unsupported() -> SessionResourceError {
     SessionResourceError::new(SessionResourceErrorKind::Unsupported)
 }
 
+/// 搬运路径的升级来源：压缩前的存储契约（`v2`）+ 版本 10|11。
+fn legacy_migration_source(snapshot: &StoreSnapshot) -> bool {
+    matches!(snapshot.schema_version, 10 | 11)
+        && snapshot.contract == schema::PREVIOUS_STORE_CONTRACT
+}
+
 fn optional_text(row: &[Value], index: usize) -> SessionResourceResult<Option<String>> {
     match row.get(index) {
         Some(Value::Null) => Ok(None),
@@ -217,9 +223,7 @@ pub(super) async fn upgrade(
             .apply_schema_upgrade(additive_upgrade_plan(snapshot, current_machine)?)
             .await;
     }
-    if !matches!(snapshot.schema_version, 10 | 11)
-        || snapshot.contract != schema::PREVIOUS_STORE_CONTRACT
-    {
+    if !legacy_migration_source(snapshot) {
         return Err(unsupported());
     }
     let read = read_input(store).await?;
@@ -269,15 +273,7 @@ pub(super) fn additive_upgrade_plan(
             .map(|sql| StatementSpec::bare(sql)),
     );
     statements.push(StatementSpec::bare(canonical::CREATE_THREAD_MQ_TABLE_SQL));
-    statements.extend(
-        canonical::THREADS_V14_COLUMNS
-            .iter()
-            .map(|(name, definition)| {
-                StatementSpec::bare(Box::leak(
-                    format!("ALTER TABLE threads ADD COLUMN {name} {definition}").into_boxed_str(),
-                ))
-            }),
-    );
+    statements.extend(threads_v14_column_statements());
     statements.extend(
         canonical::CREATE_INDEXES
             .iter()
@@ -369,9 +365,7 @@ pub(super) fn upgrade_plan(
     read: &MigrationRead,
     current_machine: &str,
 ) -> SessionResourceResult<Vec<StatementSpec>> {
-    if !matches!(snapshot.schema_version, 10 | 11)
-        || snapshot.contract != schema::PREVIOUS_STORE_CONTRACT
-    {
+    if !legacy_migration_source(snapshot) {
         return Err(unsupported());
     }
     let mut statements = vec![StatementSpec::new(
@@ -565,15 +559,7 @@ pub(super) fn upgrade_plan(
         "ALTER TABLE threads ADD COLUMN archived BOOLEAN NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))",
     ));
     // v14 的两列也必须赶在重建之前：重建语句按当前形状逐列搬运，而输入形状本来没有它们。
-    statements.extend(
-        canonical::THREADS_V14_COLUMNS
-            .iter()
-            .map(|(name, definition)| {
-                StatementSpec::bare(Box::leak(
-                    format!("ALTER TABLE threads ADD COLUMN {name} {definition}").into_boxed_str(),
-                ))
-            }),
-    );
+    statements.extend(threads_v14_column_statements());
     for session in &sessions {
         let workspace_id = workspace_plan
             .session_workspace_ids
@@ -661,6 +647,17 @@ fn current_machine_statement(current_machine: &str) -> StatementSpec {
         canonical::INSERT_CURRENT_MACHINE_SQL,
         vec![Value::Text(current_machine.to_owned())],
     )
+}
+
+/// v14 的 `threads` 增量列：增量批次与搬运重建都要在收尾前补齐，DDL 文本只在这里生成。
+fn threads_v14_column_statements() -> impl Iterator<Item = StatementSpec> {
+    canonical::THREADS_V14_COLUMNS
+        .iter()
+        .map(|(name, definition)| {
+            StatementSpec::bare(Box::leak(
+                format!("ALTER TABLE threads ADD COLUMN {name} {definition}").into_boxed_str(),
+            ))
+        })
 }
 
 /// 版本与契约一起推进：形状变了，代数跟着变。
