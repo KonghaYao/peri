@@ -324,16 +324,19 @@ fn closed_plugin_face_skips_plugin_mcp_merging() {
     // 非插件来源不受关闭位影响（global 仍在）。
     assert!(closed.mcp_servers.contains_key("global"));
 
-    // 关闭位生效的前提是「不读插件目录」：换成一个非法插件 MCP 声明，
-    // 严格路径会在开启时报错，而关闭位下连解析都不会发生。
+    // 非法插件 MCP 声明不得阻止其他来源启动；关闭位下连目录也不读取。
     let poisoned = temp.path().join("poisoned-claude");
     poison_plugin_mcp_config(&poisoned);
-    assert!(matches!(
-        load_merged_config_from_snapshot_with_capabilities(
-            &cwd, &poisoned, &snapshot, false, true, false,
-        ),
-        Err(McpConfigError::PluginLoadError { .. })
-    ));
+    let (degraded, sources) = load_merged_config_from_snapshot_with_capabilities(
+        &cwd, &poisoned, &snapshot, false, true, false,
+    )
+    .unwrap();
+    assert!(degraded.mcp_servers.contains_key("global"));
+    assert!(!degraded
+        .mcp_servers
+        .keys()
+        .any(|name| name.starts_with("plugin:")));
+    assert!(sources.is_empty());
     assert!(load_merged_config_from_snapshot_with_capabilities(
         &cwd, &poisoned, &snapshot, false, true, true,
     )

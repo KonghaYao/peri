@@ -268,8 +268,8 @@ impl PreparedSessionInputs {
         })
     }
 
-    /// 插件发现：session 级装配经**严格只读**入口一次加载，失败即准备失败
-    /// （缺失/非法清单定位到具体插件，不生成合成清单、不写插件缓存）；
+    /// 插件发现：session 级装配经**严格只读**入口一次加载，失败时记录诊断并
+    /// 跳过插件来源（不生成合成清单、不写插件缓存），不阻止核心会话启动；
     /// host 级与 bare 沿用既有形状（无插件聚合）。
     ///
     /// M6：插件来源闭合位在本会话的准备期**先于任何读取**判定，且与装配面取
@@ -291,10 +291,13 @@ impl PreparedSessionInputs {
                 // 权威在 `plugin::claude_home`，见 `assemble` 函数 doc），
                 // 准备面只提供执行目录；准入（含「关闭 ⇒ 不读」）在装配面单点决定，
                 // `frozen` 优先于当轮 config。
-                let data = super::assemble::discover_prepared_plugins(cwd, frozen, config)
-                    .map_err(|error| {
-                        AcpError::new(-32603, format!("Plugin discovery failed: {error}"))
-                    })?;
+                let data = match super::assemble::discover_prepared_plugins(cwd, frozen, config) {
+                    Ok(data) => data,
+                    Err(error) => {
+                        tracing::warn!(%error, cwd, "Plugin discovery failed; continuing without plugins");
+                        None
+                    }
+                };
                 let skill_roots = data
                     .as_ref()
                     .map(|data| data.all_skill_roots.clone())

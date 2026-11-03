@@ -149,8 +149,7 @@ fn test_system_mcp_merged_errors_are_not_empty_success() {
 }
 
 #[test]
-fn test_system_mcp_plugin_strict_error_reaches_merge() {
-    // 插件来源非法：严格插件路径必须把错误带到合并入口，而不是返回空 plugins。
+fn test_system_mcp_plugin_error_does_not_block_other_sources() {
     let dir = tempfile::tempdir().unwrap();
     let cwd = dir.path().join("project");
     std::fs::create_dir_all(&cwd).unwrap();
@@ -166,24 +165,15 @@ fn test_system_mcp_plugin_strict_error_reaches_merge() {
     )
     .unwrap();
 
-    let error = load_merged_config_full_with_paths(
+    let (merged, sources) = load_merged_config_full_with_paths(
         &cwd,
         &claude_home,
         &missing_global_path(dir.path()),
         &BuiltinInjectionPolicy::none(),
     )
-    .expect_err("插件非法 MCP 配置必须失败");
-
-    let McpConfigError::PluginLoadError { source } = &error else {
-        panic!("插件来源非法应返回 PluginLoadError，实际: {error}");
-    };
-    let crate::plugin::LoaderError::McpConfigInvalid { path, message } = source else {
-        panic!("插件 MCP 配置无效应保留 McpConfigInvalid，实际: {source}");
-    };
-    assert_eq!(path, &broken);
-    assert_eq!(message, &format!("bad: {SYSTEM_TOOLS_RULE}"));
-    // 错误链必须保留固定规则正文：面板/日志可以据此定位。
-    assert!(error.to_string().contains(SYSTEM_TOOLS_RULE));
+    .expect("插件非法 MCP 配置不得阻止会话启动");
+    assert!(merged.mcp_servers.is_empty());
+    assert!(sources.is_empty());
 }
 
 #[test]

@@ -17,6 +17,28 @@ pub use peri_acp_types::plugin::{ConfigSource, McpServerConfig, OAuthConfig};
 
 use crate::plugin::PluginSourceAdmission;
 
+fn load_plugin_mcp_servers(
+    claude_home: &Path,
+    available: bool,
+    face_closed: bool,
+) -> (HashMap<String, McpServerConfig>, HashMap<String, String>) {
+    if !available {
+        return (HashMap::new(), HashMap::new());
+    }
+    let plugins = match PluginSourceAdmission::from_closed(face_closed)
+        .load_for_mcp(claude_home, None)
+    {
+        Ok(plugins) => plugins,
+        Err(error) => {
+            tracing::warn!(%error, path = %claude_home.display(), "Plugin MCP discovery failed; continuing without plugin servers");
+            return (HashMap::new(), HashMap::new());
+        }
+    };
+    let mut sources = HashMap::new();
+    let servers = collect_plugin_mcp_servers(&plugins, &mut sources);
+    (servers, sources)
+}
+
 /// MCP 配置加载错误
 #[derive(Debug, Error)]
 pub enum McpConfigError {
@@ -55,7 +77,7 @@ pub enum McpConfigError {
         #[source]
         source: peri_acp_types::plugin::McpServerConfigValidationError,
     },
-    /// 插件 MCP 配置加载失败（MCP 专用严格插件路径）。
+    /// 插件 MCP 配置加载失败（保留结构化错误供直接调用方使用）。
     #[error("插件 MCP 配置加载失败: {source}")]
     PluginLoadError {
         #[source]
@@ -350,9 +372,10 @@ pub(crate) fn load_bare_config() -> Result<McpConfigFile, McpConfigError> {
 /// 与工具名 `mcp__{plugin_name}__{server_name}` 中的 server 部分一致
 ///
 /// 内部实现：允许注入全局路径（测试 seam）。加载顺序与校验顺序一致——被选择加载的
-/// global / plugin / project 输入先验证，再覆盖与去重；缺文件仍是空配置，非法文件不是。
-/// 插件来源走 MCP 专用严格入口（`load_enabled_plugins_for_mcp`），宽容聚合 API
-/// 不作为启动输入。
+/// global / plugin / project 输入先验证，再覆盖与去重；缺文件视为空配置，
+/// 非法插件来源跳过并告警，非法非插件配置仍报错。
+/// 插件来源走 MCP 专用严格入口（`load_enabled_plugins_for_mcp`），校验失败时
+/// 仅跳过插件 MCP 来源并记录诊断；非插件来源的加载/校验错误仍上抛。
 ///
 /// `policy` 是 builtin 默认层的**显式**注入策略（A1 / IF-D3）：本函数不读 env，
 /// 调用方（`load_merged_config_full` 或测试）负责给出策略。
@@ -393,8 +416,6 @@ fn load_merged_config_with_environment(
     plugin_discovery_available: bool,
     plugin_face_closed: bool,
 ) -> Result<(McpConfigFile, HashMap<String, String>), McpConfigError> {
-    let mut plugin_sources: HashMap<String, String> = HashMap::new();
-
     // 1. 加载全局配置（~/.peri/settings.json）
     let mut global = load_global_config(global_path)?;
     for cfg in global.mcp_servers.values_mut() {
@@ -404,14 +425,8 @@ fn load_merged_config_with_environment(
     // 2. 加载插件 MCP 配置（claude_home 目录下的已启用插件）
     // 每插件独立上下文展开 env 变量，同时构建 plugin_sources（marketplace 追踪）
     // M6：与快照路径同一闭合位——关闭时不读插件目录。
-    let plugin_servers = if plugin_discovery_available {
-        let plugins = PluginSourceAdmission::from_closed(plugin_face_closed)
-            .load_for_mcp(claude_home, None)
-            .map_err(|source| McpConfigError::PluginLoadError { source })?;
-        collect_plugin_mcp_servers(&plugins, &mut plugin_sources)
-    } else {
-        HashMap::new()
-    };
+    let (plugin_servers, plugin_sources) =
+        load_plugin_mcp_servers(claude_home, plugin_discovery_available, plugin_face_closed);
 
     // 3. 加载项目级配置（{cwd}/.mcp.json）
     let project_path = cwd.join(".mcp.json");
@@ -463,18 +478,9 @@ pub(crate) fn load_merged_config_from_snapshot_with_capabilities(
         });
     }
 
-    let mut plugin_sources = HashMap::new();
-    let plugin_servers = if plugin_discovery_available {
-        // M6：插件来源闭合位来自**本会话冻结/session-local 策略**（装配期一次
-        // 派生后注入 pool），在读取插件目录之前判定——关闭的会话既不合并插件
-        // MCP，也不因插件的非法 MCP 配置让会话启动失败（严格路径不被触发）。
-        let plugins = PluginSourceAdmission::from_closed(plugin_face_closed)
-            .load_for_mcp(claude_home, None)
-            .map_err(|source| McpConfigError::PluginLoadError { source })?;
-        collect_plugin_mcp_servers(&plugins, &mut plugin_sources)
-    } else {
-        HashMap::new()
-    };
+    // 关闭位在读取插件目录之前判定；插件来源错误不影响冻结的其他 MCP 配置。
+    let (plugin_servers, plugin_sources) =
+        load_plugin_mcp_servers(claude_home, plugin_discovery_available, plugin_face_closed);
     let merged = snapshot.mcp_with_plugins(&plugin_servers)?;
     let policy = if builtin_available {
         crate::platform::builtin_policy(snapshot.builtin_mcp_enabled())
