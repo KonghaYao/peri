@@ -292,6 +292,9 @@ fn project(window: &HistoryV2Window) -> Projection {
     projection
 }
 
+// 投影需要同时持有窗口、条目、子项与三份可变输出；拆结构体只会把同一组
+// 状态再包装一层，调用关系反而更难读。
+#[allow(clippy::too_many_arguments)]
 fn project_sub_item(
     window: &HistoryV2Window,
     entry: &HistoryEntry,
