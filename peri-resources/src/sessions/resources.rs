@@ -36,7 +36,7 @@ use peri_acp_types::session_resources::{
     SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
-use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
+use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta, WorkState};
 use peri_acp_types::workspace::{
     ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding, WorkspaceError,
 };
@@ -637,6 +637,13 @@ impl SessionResources for SessionResourcesImpl {
         self.gate.data().load_meta(id).await
     }
 
+    async fn load_recovery_scope(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::recovery::RecoveryScope> {
+        self.gate.data().recovery_scope(id).await
+    }
+
     async fn session_environment_id(&self, id: &ThreadId) -> SessionResourceResult<Option<String>> {
         self.gate.data().machine_id_of(id).await
     }
@@ -856,6 +863,22 @@ impl SessionResources for SessionResourcesImpl {
     ) -> SessionResourceResult<()> {
         self.gate
             .with_mutation(id, || self.gate.data().update_meta(id, patch))
+            .await
+    }
+
+    async fn set_work_state(&self, id: &ThreadId, state: WorkState) -> SessionResourceResult<()> {
+        self.gate
+            .with_mutation(id, || self.gate.data().set_work_state(id, state))
+            .await
+    }
+
+    async fn set_context_usage(
+        &self,
+        id: &ThreadId,
+        tokens: Option<u64>,
+    ) -> SessionResourceResult<()> {
+        self.gate
+            .with_mutation(id, || self.gate.data().set_context_usage(id, tokens))
             .await
     }
 

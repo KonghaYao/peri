@@ -168,6 +168,28 @@ pub(super) async fn mq_allowed(cfg: &AcpServerConfig, session_id: &str) -> bool 
     activation.can_activate(&queue).await
 }
 
+/// mq steering 的放行判定：正常激活之外，Host 注入且仍在队列里的恢复提醒也必须
+/// 能推进——失败水位记录的是「尝试开始时的 MQ 水位」，一个在 Receive 之前就失败的
+/// 尝试会把刚注入的提醒误算成已处理。提醒仍在队列是队列事实，epoch 与 Stop 判定
+/// 不变，因此这里只补回「已进入但尚未接管」的提醒，不放宽 superseded 保护。
+pub(super) async fn mq_steering_allowed(cfg: &AcpServerConfig, session_id: &str) -> bool {
+    if mq_allowed(cfg, session_id).await {
+        return true;
+    }
+    let Some(runtime) = cfg.session_manager.get_session(session_id) else {
+        return false;
+    };
+    if runtime.cancel_token.is_cancelled() || !runtime.activation.is_allowed() {
+        return false;
+    }
+    let queue = runtime.v2_message_queue.clone();
+    drop(runtime);
+    queue
+        .has_pending_defer(&MessageSource::SessionRecovery)
+        .await
+        .unwrap_or(false)
+}
+
 /// Ready 结果是否仍允许自动尝试（Stop 抑制与失败水位在 owner 内统一判定）。
 pub(super) async fn result_allowed(cfg: &AcpServerConfig, session_id: &str) -> bool {
     let Some(runtime) = cfg.session_manager.get_session(session_id) else {

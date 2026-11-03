@@ -1,0 +1,357 @@
+//! 冷 child 恢复（设计 §3/§4、§9「主会话 idle、async child working」）：
+//! 独立装配、逐 thread 提醒、父级结果通知与幂等/Stop/装配失败分类。
+//!
+//! 与 `recovery_behavior_test.rs` 同夹具；本文件只覆盖 child 路径。
+
+use super::*;
+use peri_acp_types::session::{MessageKind, MessageSource};
+use peri_acp_types::thread::WorkState;
+
+/// 该 thread 的 MQ 行（不按来源过滤）。
+async fn entries(harness: &RecoveryHarness, thread: &str) -> Vec<peri_acp_types::session::MqEntry> {
+    harness
+        .queue(thread)
+        .query(peri_acp_types::session::MqFilter::default())
+        .await
+        .unwrap()
+}
+
+/// 父 thread 收到的结果通知（`SubAgentComplete` 来源）。
+async fn parent_notices(
+    harness: &RecoveryHarness,
+    parent: &str,
+) -> Vec<peri_acp_types::session::MqEntry> {
+    entries(harness, parent)
+        .await
+        .into_iter()
+        .filter(|entry| entry.source == MessageSource::SubAgentComplete)
+        .collect()
+}
+
+/// 只信 wire 事实：本次 turn 的模型输出以 `child` 的 session id 流出。
+fn child_streamed(harness: &RecoveryHarness, child: &str) -> bool {
+    harness
+        .recorded
+        .notifications()
+        .iter()
+        .any(|(method, params)| {
+            method == "session/update"
+                && params["sessionId"] == child
+                && params["update"]["sessionUpdate"] == "agent_message_chunk"
+                && params.to_string().contains("recovered")
+        })
+}
+
+async fn set_cwd(db_path: &std::path::Path, thread: &str, cwd: &str) {
+    use sqlx::Connection as _;
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(db_path),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE threads SET cwd = ?1 WHERE id = ?2")
+        .bind(cwd)
+        .bind(thread)
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+}
+
+/// 1. 根 `idle` + child `working`：只跑 child 一个 turn，父 MQ 收到不带
+///    `ensure_processing` 的结果通知，父级不被唤醒。
+#[tokio::test]
+async fn idle_root_recovers_working_child_and_only_the_child_runs_a_turn() {
+    let mut harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-b", &root).await;
+    harness.set_working("child-b").await;
+    harness.spawn_continuation_scheduler();
+    let recovery = harness.recovery();
+
+    let report = recovery.enter(&root).await.expect("恢复准备必须成功");
+    assert_eq!(report.recovered, vec!["child-b".to_owned()]);
+    assert_eq!(
+        report.skipped,
+        vec![peri_acp_types::recovery::RecoverySkip {
+            thread_id: root.clone(),
+            reason: RecoverySkipReason::Idle,
+        }],
+        "根 idle 只报告跳过，不注入"
+    );
+    assert!(
+        harness.recovery_rows(&root).await.is_empty(),
+        "child 的提醒不得写进父队列"
+    );
+    assert_eq!(harness.recovery_rows("child-b").await.len(), 1);
+    assert!(!harness._mock.matched(), "准备阶段不得调用模型");
+
+    recovery.launch(&report).await;
+    wait_for("父 MQ 收到子任务结果通知", || async {
+        !parent_notices(&harness, &root).await.is_empty()
+    })
+    .await;
+    // 全流程只允许一次模型请求：根 idle，只有 child 跑了一个 turn。
+    harness._mock.assert_async().await;
+    assert!(
+        child_streamed(&harness, "child-b"),
+        "结果必须从 child 的会话流出"
+    );
+    wait_for("child 的恢复提醒被 Receive 移交", || async {
+        harness.recovery_rows("child-b").await.is_empty()
+    })
+    .await;
+
+    let notices = parent_notices(&harness, &root).await;
+    assert_eq!(notices.len(), 1, "只允许一条结果通知");
+    assert_eq!(notices[0].kind, MessageKind::Defer);
+    assert!(
+        !notices[0].policy.ensures_processing(),
+        "结果通知不得授予执行资格"
+    );
+    assert!(
+        !harness.queue(&root).has_ensure_processing().await.unwrap(),
+        "父级 idle 不得被结果通知唤醒"
+    );
+    assert!(!harness.listener_started(&root), "父级不建立执行监听");
+    let body = reminder_body(&notices[0]);
+    assert!(body.contains("child-b"), "通知必须指明来源 thread：{body}");
+    // child 的收尾是 durable 的：正常结束后不再有自动续跑意图。
+    assert_eq!(
+        harness
+            .cfg
+            .session_resources
+            .load_session_meta(&"child-b".to_owned())
+            .await
+            .unwrap()
+            .work_state,
+        WorkState::Idle,
+        "child turn 结束后不得残留 working"
+    );
+}
+
+/// 1b. 根与 child 同为 `working`：各自启动自己的 turn，不相互顶替。
+#[tokio::test]
+async fn working_root_and_child_each_launch_their_own_turn() {
+    let mut harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-b", &root).await;
+    harness.set_working(&root).await;
+    harness.set_working("child-b").await;
+    harness.spawn_continuation_scheduler();
+    let recovery = harness.recovery();
+
+    let report = recovery.enter(&root).await.unwrap();
+    let mut recovered = report.recovered.clone();
+    recovered.sort();
+    let mut expected = vec![root.clone(), "child-b".to_owned()];
+    expected.sort();
+    assert_eq!(recovered, expected);
+
+    recovery.launch(&report).await;
+    wait_for("根与 child 各跑一个 turn", || async {
+        child_streamed(&harness, &root) && child_streamed(&harness, "child-b")
+    })
+    .await;
+    wait_for("两个 thread 的提醒都被移交", || async {
+        harness.recovery_rows(&root).await.is_empty()
+            && harness.recovery_rows("child-b").await.is_empty()
+    })
+    .await;
+}
+
+/// 2. 嵌套 `A(idle) → B(idle) → C(working)`：只恢复 C，A/B 无模型请求，
+///    结果只投给 C 的直接父 B。
+#[tokio::test]
+async fn nested_idle_chain_recovers_only_the_working_leaf() {
+    let mut harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-b", &root).await;
+    harness.add_child("child-b", "child-c", &root).await;
+    harness.set_working("child-c").await;
+    harness.spawn_continuation_scheduler();
+    let recovery = harness.recovery();
+
+    let report = recovery.enter(&root).await.unwrap();
+    assert_eq!(report.recovered, vec!["child-c".to_owned()]);
+    assert_eq!(
+        report
+            .skipped
+            .iter()
+            .map(|skip| (skip.thread_id.as_str(), skip.reason))
+            .collect::<Vec<_>>(),
+        [(root.as_str(), RecoverySkipReason::Idle)],
+        "B 不是候选（idle）只体现在范围里，不产生逐项报告"
+    );
+    assert!(harness.recovery_rows(&root).await.is_empty());
+    assert!(harness.recovery_rows("child-b").await.is_empty());
+    assert_eq!(harness.recovery_rows("child-c").await.len(), 1);
+
+    recovery.launch(&report).await;
+    wait_for("C 的直接父收到结果通知", || async {
+        !parent_notices(&harness, "child-b").await.is_empty()
+    })
+    .await;
+    harness._mock.assert_async().await;
+    assert!(child_streamed(&harness, "child-c"));
+    assert!(
+        parent_notices(&harness, &root).await.is_empty(),
+        "结果不统一转投 root"
+    );
+}
+
+/// 3. 重复进入：提醒与 turn 都不成倍。
+#[tokio::test]
+async fn repeat_enter_keeps_one_reminder_and_one_turn() {
+    let mut harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-b", &root).await;
+    harness.set_working("child-b").await;
+    harness.spawn_continuation_scheduler();
+    let recovery = harness.recovery();
+
+    let first = recovery.enter(&root).await.unwrap();
+    assert_eq!(first.recovered, vec!["child-b".to_owned()]);
+    let second = recovery.enter(&root).await.unwrap();
+    assert!(second.recovered.is_empty(), "第二次进入不得再注入");
+    assert_eq!(
+        second.skipped,
+        vec![
+            peri_acp_types::recovery::RecoverySkip {
+                thread_id: root.clone(),
+                reason: RecoverySkipReason::Idle,
+            },
+            peri_acp_types::recovery::RecoverySkip {
+                thread_id: "child-b".to_owned(),
+                reason: RecoverySkipReason::AlreadyRunning,
+            },
+        ]
+    );
+    assert_eq!(harness.recovery_rows("child-b").await.len(), 1);
+
+    recovery.launch(&first).await;
+    wait_for("父 MQ 收到结果通知", || async {
+        !parent_notices(&harness, &root).await.is_empty()
+    })
+    .await;
+    harness._mock.assert_async().await;
+    assert_eq!(parent_notices(&harness, &root).await.len(), 1);
+}
+
+/// 4. child 已有活实例（turn 正在跑）：复用，不重复注入也不启动第二个 turn。
+#[tokio::test]
+async fn live_child_instance_is_reused() {
+    let mut harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-b", &root).await;
+    harness.set_working("child-b").await;
+    // `session/load` 先装配 child，并把它标记为正在执行。
+    harness.load_session("child-b").await;
+    {
+        let mut states = harness.sessions.lock().await;
+        states.get_mut("child-b").unwrap().cancel_token =
+            Some(tokio_util::sync::CancellationToken::new());
+    }
+    let recovery = harness.recovery();
+
+    let report = recovery.enter(&root).await.unwrap();
+    assert_eq!(report.reused, vec!["child-b".to_owned()]);
+    assert!(report.recovered.is_empty());
+    assert!(
+        harness.recovery_rows("child-b").await.is_empty(),
+        "已有实例不注入"
+    );
+}
+
+/// 5. child 在准备期间被 Stop：不启动，提醒留在它自己的 MQ。
+#[tokio::test]
+async fn stop_during_preparation_never_launches_the_child() {
+    let mut harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-b", &root).await;
+    harness.set_working("child-b").await;
+    harness.spawn_continuation_scheduler();
+    let recovery = harness.recovery();
+
+    let report = recovery.enter(&root).await.unwrap();
+    assert_eq!(report.recovered, vec!["child-b".to_owned()]);
+    // 准备完成、启动前：用户 Stop 了该 child（Stop 同时提交停止意图）。
+    harness
+        .cfg
+        .session_manager
+        .get_session("child-b")
+        .expect("child 运行时必须已装配")
+        .activation
+        .suppress();
+    harness
+        .cfg
+        .session_resources
+        .set_work_state(&"child-b".to_owned(), WorkState::Stopped)
+        .await
+        .unwrap();
+
+    recovery.launch(&report).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!harness._mock.matched(), "Stop 之后不得启动 turn");
+    assert_eq!(harness.recovery_rows("child-b").await.len(), 1, "提醒保留");
+    assert!(
+        parent_notices(&harness, &root).await.is_empty(),
+        "没有 turn 就没有结果通知"
+    );
+}
+
+/// 6. child 装配失败：请求仍成功，报告里是 Skip，数据与工作意图原样保留。
+#[tokio::test]
+async fn child_assembly_failure_is_reported_as_skip_without_failing_the_entry() {
+    let harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-b", &root).await;
+    harness.set_working("child-b").await;
+    // 执行目录不可用：`session/load` 同款准入会拒绝该 child（WorkspaceUnavailable）。
+    set_cwd(
+        &harness.db_path,
+        "child-b",
+        "/nonexistent/peri/recovery-child",
+    )
+    .await;
+    let recovery = harness.recovery();
+
+    let report = recovery
+        .enter(&root)
+        .await
+        .expect("child 装配失败不得失败请求");
+    assert!(report.recovered.is_empty());
+    assert!(
+        report.failures.is_empty(),
+        "装配失败按 Skip 报告：{report:?}"
+    );
+    assert_eq!(
+        report.skipped,
+        vec![
+            peri_acp_types::recovery::RecoverySkip {
+                thread_id: root.clone(),
+                reason: RecoverySkipReason::Idle,
+            },
+            peri_acp_types::recovery::RecoverySkip {
+                thread_id: "child-b".to_owned(),
+                reason: RecoverySkipReason::AssemblyFailed,
+            },
+        ]
+    );
+    assert!(!harness._mock.matched());
+    assert!(
+        harness.recovery_rows("child-b").await.is_empty(),
+        "装配失败不得注入提醒"
+    );
+    assert_eq!(
+        harness
+            .cfg
+            .session_resources
+            .load_session_meta(&"child-b".to_owned())
+            .await
+            .unwrap()
+            .work_state,
+        WorkState::Working,
+        "失败不得改写工作意图"
+    );
+}

@@ -231,14 +231,18 @@ pub(super) async fn upgrade(
         .await
 }
 
-/// 增量补齐的升级来源：`v6` + 12（缺 `thread_mq`）与 `v5` + 11（还缺派生索引表）。
+/// 增量补齐的升级来源：`v7` + 13（只缺两列）、`v6` + 12（还缺 `thread_mq`）与
+/// `v5` + 11（还缺派生索引表）。
 ///
-/// 两条来源共用同一份幂等批次：全部语句都是 `CREATE ... IF NOT EXISTS`，对已经建好的
-/// 对象是空操作；把两份形状会聚到同一终点，比按代际各写一条路径更不容易漂移。
+/// 三条来源共用同一份幂等批次：建表都是 `CREATE ... IF NOT EXISTS`；两列是 v14 的
+/// 唯一 `ALTER`，三条来源都必然缺它们。把几份形状会聚到同一终点，比按代际各写一条
+/// 路径更不容易漂移。
 pub(super) fn additive_source(snapshot: &StoreSnapshot) -> bool {
     matches!(
         (snapshot.contract.as_str(), snapshot.schema_version),
-        (schema::PREVIOUS_CURRENT_STORE_CONTRACT, 12) | (schema::LEGACY_CURRENT_STORE_CONTRACT, 11)
+        (schema::PREVIOUS_CURRENT_STORE_CONTRACT, 13)
+            | (schema::LEGACY_CURRENT_STORE_CONTRACT, 12)
+            | (schema::OLDER_CURRENT_STORE_CONTRACT, 11)
     )
 }
 
@@ -265,6 +269,15 @@ pub(super) fn additive_upgrade_plan(
             .map(|sql| StatementSpec::bare(sql)),
     );
     statements.push(StatementSpec::bare(canonical::CREATE_THREAD_MQ_TABLE_SQL));
+    statements.extend(
+        canonical::THREADS_V14_COLUMNS
+            .iter()
+            .map(|(name, definition)| {
+                StatementSpec::bare(Box::leak(
+                    format!("ALTER TABLE threads ADD COLUMN {name} {definition}").into_boxed_str(),
+                ))
+            }),
+    );
     statements.extend(
         canonical::CREATE_INDEXES
             .iter()
@@ -551,6 +564,16 @@ pub(super) fn upgrade_plan(
     statements.push(StatementSpec::bare(
         "ALTER TABLE threads ADD COLUMN archived BOOLEAN NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))",
     ));
+    // v14 的两列也必须赶在重建之前：重建语句按当前形状逐列搬运，而输入形状本来没有它们。
+    statements.extend(
+        canonical::THREADS_V14_COLUMNS
+            .iter()
+            .map(|(name, definition)| {
+                StatementSpec::bare(Box::leak(
+                    format!("ALTER TABLE threads ADD COLUMN {name} {definition}").into_boxed_str(),
+                ))
+            }),
+    );
     for session in &sessions {
         let workspace_id = workspace_plan
             .session_workspace_ids

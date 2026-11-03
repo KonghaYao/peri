@@ -309,18 +309,22 @@ impl Fixture {
         }
     }
 
-    /// 上一代当前形状（`v6` + 12）：canonical 会话表齐全，只缺 `thread_mq`。
+    /// 上一代当前形状（`v7` + 13）：canonical 会话表齐全，只缺两列工作快照。
     ///
-    /// 从本构建的初始化计划建库，再删掉 `thread_mq` 并把元数据退回上一代——这正是
-    /// `v6` 库在两端形状一致之后的样子。
+    /// 从本构建的初始化计划建库，删掉两列与 `thread_mq` 的差集后把元数据退回上一代——
+    /// 这正是 `v7` 库在两端形状一致之后的样子。
     pub(super) async fn previous_current() -> Self {
         let fixture = Self::built_from_initialization_plan().await;
-        sqlx::query("DROP TABLE thread_mq")
-            .execute(&fixture.transport.pool)
-            .await
-            .unwrap();
+        sqlx::raw_sql(
+            "ALTER TABLE threads DROP COLUMN context_usage_tokens;
+             ALTER TABLE threads DROP COLUMN work_state;
+             DROP TABLE thread_mq;",
+        )
+        .execute(&fixture.transport.pool)
+        .await
+        .unwrap();
         sqlx::query(
-            "UPDATE peri_store_meta SET schema_version = 12, contract = ?1 WHERE singleton = 0",
+            "UPDATE peri_store_meta SET schema_version = 13, contract = ?1 WHERE singleton = 0",
         )
         .bind(schema::PREVIOUS_CURRENT_STORE_CONTRACT)
         .execute(&fixture.transport.pool)
@@ -332,13 +336,38 @@ impl Fixture {
         }
     }
 
-    /// 再上一代当前形状（`v5` + 11）：canonical 会话表齐全，缺两张 inherited 派生索引表
-    /// 与 `thread_mq`。
+    /// 再上一代当前形状（`v6` + 12）：canonical 会话表齐全，缺 `thread_mq` 与两列工作快照。
     pub(super) async fn legacy_current() -> Self {
+        let fixture = Self::built_from_initialization_plan().await;
+        sqlx::raw_sql(
+            "ALTER TABLE threads DROP COLUMN context_usage_tokens;
+             ALTER TABLE threads DROP COLUMN work_state;
+             DROP TABLE thread_mq;",
+        )
+        .execute(&fixture.transport.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE peri_store_meta SET schema_version = 12, contract = ?1 WHERE singleton = 0",
+        )
+        .bind(schema::LEGACY_CURRENT_STORE_CONTRACT)
+        .execute(&fixture.transport.pool)
+        .await
+        .unwrap();
+        Self {
+            snapshot: Self::snapshot_of(&fixture.transport).await,
+            ..fixture
+        }
+    }
+
+    /// 更早的当前形状（`v5` + 11）：还缺两张 inherited 派生索引表。
+    pub(super) async fn older_current() -> Self {
         let fixture = Self::built_from_initialization_plan().await;
         sqlx::raw_sql(
             "DROP TABLE inherited_payload_index;
              DROP TABLE inherited_snapshot_index;
+             ALTER TABLE threads DROP COLUMN context_usage_tokens;
+             ALTER TABLE threads DROP COLUMN work_state;
              DROP TABLE thread_mq;",
         )
         .execute(&fixture.transport.pool)
@@ -347,7 +376,7 @@ impl Fixture {
         sqlx::query(
             "UPDATE peri_store_meta SET schema_version = 11, contract = ?1 WHERE singleton = 0",
         )
-        .bind(schema::LEGACY_CURRENT_STORE_CONTRACT)
+        .bind(schema::OLDER_CURRENT_STORE_CONTRACT)
         .execute(&fixture.transport.pool)
         .await
         .unwrap();
@@ -754,7 +783,11 @@ async fn upgrade_builds_the_current_shape_for_an_identity_only_store() {
         .fetch_one(&fixture.transport.pool)
         .await
         .unwrap();
-    assert_eq!(columns, 16);
+    assert_eq!(
+        columns,
+        16 + crate::sessions::canonical::THREADS_V14_COLUMNS.len() as i64,
+        "v13 的 16 列 + 两列工作快照"
+    );
     for table in [
         "machines",
         "session_bindings",

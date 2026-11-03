@@ -28,7 +28,7 @@ use crate::system_reminder::{
     decode_system_reminder_json, reminder_egress_allowed, SystemReminder, TrustedSystemReminder,
     TrustedSystemReminderFactory,
 };
-use crate::thread::{ThreadId, ThreadListEntry, ThreadMeta};
+use crate::thread::{ThreadId, ThreadListEntry, ThreadMeta, WorkState};
 
 /// Current inline history envelope version.
 pub const PERSISTED_PAYLOAD_VERSION: u16 = 1;
@@ -527,6 +527,20 @@ pub trait ThreadStore: Send + Sync {
 
     /// 更新 thread 的 agent_status 字段
     async fn update_thread_status(&self, id: &ThreadId, status: &str) -> Result<()>;
+
+    /// 更新 durable 工作意图（`threads.work_state`）。
+    ///
+    /// 只写这一列：它表达中断后的续跑意图，不承担运行态与列表排序。
+    async fn set_work_state(&self, _id: &ThreadId, _state: WorkState) -> Result<()> {
+        Err(crate::workspace::WorkspaceError::Unsupported.into())
+    }
+
+    /// 更新最近一次有效上下文占用快照（`threads.context_usage_tokens`）。
+    ///
+    /// `None` 表示「未知」，写 NULL；只写这一列，不更新 `updated_at`。
+    async fn set_context_usage(&self, _id: &ThreadId, _tokens: Option<u64>) -> Result<()> {
+        Err(crate::workspace::WorkspaceError::Unsupported.into())
+    }
 
     /// 按 message_id 列表精确删除消息，并刷新派生计数。
     async fn delete_messages(&self, thread_id: &ThreadId, message_ids: &[MessageId]) -> Result<()>;

@@ -30,6 +30,8 @@ pub(super) const REQUIRED_THREAD_COLUMNS: &[&str] = &[
     "agent_status",
 ];
 pub(super) const REQUIRED_MESSAGE_COLUMNS: &[&str] = &["thread_id", "content"];
+/// v14 才有的工作快照列；只读打开按它们是否存在选择 metadata 投影。
+const WORK_SNAPSHOT_COLUMNS: &[&str] = &["context_usage_tokens", "work_state"];
 
 /// 只读 session 数据库访问的稳定失败分类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,12 +209,16 @@ impl SqliteSessionDatabase {
             .map_err(|_| {
                 ReadOnlyThreadStoreError::from_kind(ReadOnlyStoreErrorKind::DatabaseUnreadable)
             })?;
-        let store = Self::new(pool, true, db_path.to_path_buf());
-        store.probe_load_meta_shape().await?;
+        let mut store = Self::new(pool, true, db_path.to_path_buf());
+        if !store.probe_load_meta_shape().await? {
+            store.use_legacy_meta_columns();
+        }
         Ok(store)
     }
 
-    async fn probe_load_meta_shape(&self) -> std::result::Result<(), ReadOnlyThreadStoreError> {
+    /// 校验只读库具备读取所需的列；返回 `threads` 是否已带 v14 的两列工作快照。
+    async fn probe_load_meta_shape(&self) -> std::result::Result<bool, ReadOnlyThreadStoreError> {
+        let mut has_work_snapshot = false;
         for (table, required) in [
             ("threads", REQUIRED_THREAD_COLUMNS),
             ("messages", REQUIRED_MESSAGE_COLUMNS),
@@ -229,8 +235,13 @@ impl SqliteSessionDatabase {
                     ReadOnlyStoreErrorKind::SchemaIncompatible,
                 ));
             }
+            if table == "threads" {
+                has_work_snapshot = WORK_SNAPSHOT_COLUMNS
+                    .iter()
+                    .all(|column| actual.contains(*column));
+            }
         }
-        Ok(())
+        Ok(has_work_snapshot)
     }
 
     /// 默认数据库位置 `~/.peri/threads/threads.db`；不创建目录、数据库或连接。

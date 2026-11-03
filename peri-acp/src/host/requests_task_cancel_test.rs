@@ -40,6 +40,7 @@ async fn start_cancel_server_loop(
         crate::host::connection::ConnectionContext::new(false),
     ));
     let cancellation = tokio_util::sync::CancellationToken::new();
+    let recovery = recovery_for(&cfg, &sessions, &cont_tx);
     let task = tokio::spawn(async move {
         let _cont_rx = cont_rx;
         crate::host::server_loop::ServerLoop {
@@ -50,6 +51,7 @@ async fn start_cancel_server_loop(
             cont_tx: &cont_tx,
             connection: &connection,
             connection_cancellation: &cancellation,
+            recovery: &recovery,
         }
         .run()
         .await;

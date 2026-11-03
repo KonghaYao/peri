@@ -5,6 +5,7 @@ use std::sync::Arc;
 use super::continuation;
 use crate::dispatch::prompt::extract_and_validate_run_prompt_params;
 use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::thread::{ThreadId, WorkState};
 use serde_json::Value;
 
 use super::{extract_session_id, run_prompt, AcpServerConfig, PromptLocks, SharedSessions};
@@ -240,7 +241,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
                 )
             })
         };
-        let mq_allowed = super::activation::mq_allowed(cfg, &prompt_session_id).await;
+        let mq_allowed = super::activation::mq_steering_allowed(cfg, &prompt_session_id).await;
         if !base_dispatchable
             || (continuation_mq_steering && !mq_allowed)
             || (pending_result && !super::activation::result_allowed(cfg, &prompt_session_id).await)
@@ -277,14 +278,34 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     // per-session 锁，若在锁外取出，并发的用户 prompt 会取走被 `mem::replace`
     // 换出的空池并先行归还，导致两轮共享同一缓存的两个池实例互相覆盖、
     // 缓存丢失（跨轮次热缓存是本池的核心价值）。归还仍在锁内（函数末尾）。
-    let pool_arc = {
+    let (pool_arc, turn_thread) = {
         let mut sessions = sessions.lock().await;
-        let pool = sessions
-            .get_mut(&prompt_session_id)
-            .map(|s| std::mem::take(&mut s.agent_pool))
-            .unwrap_or_default();
-        Arc::new(parking_lot::Mutex::new(pool))
+        let state = sessions.get_mut(&prompt_session_id);
+        // session/load 与 resume 的 thread 身份可以和 ACP session id 不同，工作意图只认 thread。
+        let turn_thread = state.as_ref().map(|state| state.thread_id.clone());
+        let pool = match state {
+            Some(state) => std::mem::take(&mut state.agent_pool),
+            None => Default::default(),
+        };
+        (Arc::new(parking_lot::Mutex::new(pool)), turn_thread)
     };
+
+    // 准入已通过、执行尚未开始：先提交 durable 工作意图。进程若在这一刻退出，下次进入
+    // 仍能看出这一轮需要继续；辅助写失败只告警，不阻断已经获准的执行。
+    if let Some(thread_id) = turn_thread.as_deref() {
+        if let Err(error) = cfg
+            .session_manager
+            .session_resources()
+            .set_work_state(&ThreadId::from(thread_id.to_owned()), WorkState::Working)
+            .await
+        {
+            tracing::warn!(
+                session_id = %prompt_session_id,
+                %error,
+                "work state write before prompt failed"
+            );
+        }
+    }
 
     let result = run_prompt(
         params,
@@ -303,6 +324,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         super::prediction::spawn_prediction(transport, &prompt_session_id, sessions, cfg);
     }
 
+    let mut abandoned_thread = None;
     {
         let mut sessions = sessions.lock().await;
         if let Some(state) = sessions.get_mut(&prompt_session_id) {
@@ -310,12 +332,49 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             if result.is_err() {
                 // Early assembly/controller errors may precede finish_prompt_turn.
                 // The prompt lock still identifies this attempt as the sole writer.
-                state.cancel_token = None;
+                // 只有还能取到 cancel_token 才说明本轮从未收尾：否则错误只是收尾后的
+                // wire 投影，工作意图已经写好（可能是 stopped），不得覆盖。
+                if state.cancel_token.take().is_some() {
+                    abandoned_thread = Some(state.thread_id.clone());
+                }
             }
             if let Ok(mutex) = Arc::try_unwrap(pool_arc) {
                 state.agent_pool = mutex.into_inner();
             }
         }
+    }
+    // 准入后从未进入收尾的尝试按「明确失败」回收工作意图，避免 `working` 无限期滞留。
+    if let Some(thread_id) = abandoned_thread {
+        if let Err(error) = cfg
+            .session_manager
+            .session_resources()
+            .set_work_state(&ThreadId::from(thread_id), WorkState::Idle)
+            .await
+        {
+            tracing::warn!(
+                session_id = %prompt_session_id,
+                %error,
+                "work state recovery after aborted prompt failed"
+            );
+        }
+    }
+
+    // 冷 child 恢复的 turn 结束：结果通知投递回父 thread 的持久队列。目标挂在会话
+    // 实例上，所以用户 prompt、激活监听与启动门任一路径跑完都只投递一次；被取代的
+    // 续跑在本函数早期返回，走不到这里。
+    let recovery_parent = cfg
+        .session_manager
+        .get_session(&prompt_session_id)
+        .and_then(|runtime| runtime.take_recovery_parent());
+    if let Some(parent) = recovery_parent {
+        super::recovery::deliver_child_turn(
+            cfg,
+            sessions,
+            &prompt_session_id,
+            &parent,
+            super::recovery::turn_outcome(&result),
+        )
+        .await;
     }
 
     let pending_state = {

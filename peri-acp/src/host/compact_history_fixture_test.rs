@@ -310,6 +310,22 @@ impl SessionResources for CompactStore {
         self.inner.update_session_meta(id, patch).await
     }
 
+    async fn set_work_state(
+        &self,
+        id: &ThreadId,
+        state: peri_acp_types::thread::WorkState,
+    ) -> SessionResourceResult<()> {
+        self.inner.set_work_state(id, state).await
+    }
+
+    async fn set_context_usage(
+        &self,
+        id: &ThreadId,
+        tokens: Option<u64>,
+    ) -> SessionResourceResult<()> {
+        self.inner.set_context_usage(id, tokens).await
+    }
+
     async fn delete_session_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.inner.delete_session_tree(id).await
     }
@@ -550,6 +566,7 @@ fn synthetic_result(compact: bool) -> peri_acp_types::session::PromptResult {
         history_replaced_by_compaction: compact,
         recall_items: Vec::new(),
         pending_tasks: 0,
+        context_usage_tokens: None,
     }
 }
 
@@ -637,4 +654,54 @@ async fn concurrent_rewind_discards_compact_bounds_metadata() {
         "stale bounds must not be published across a rewind"
     );
     assert!(state.history_window.committed_tail.is_none());
+}
+
+/// 取消收尾必须留下 `stopped`：Stop 之后不得被同一次收尾写成 `idle`。
+#[tokio::test]
+#[serial]
+async fn cancelled_turn_persists_stopped_work_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(dir.path());
+    let (ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
+    let thread_id = ctx.thread_id.clone().unwrap();
+    let resources: Arc<dyn SessionResources> = store.clone();
+
+    let mut result = synthetic_result(false);
+    result.ok = false;
+    result.stop_reason = peri_acp_types::command::PromptStopReason::Cancelled;
+    finish_prompt_turn(&sessions, &ctx.session_id, false, result, Some(resources))
+        .await
+        .expect("cancelled turn");
+
+    let meta = store.load_session_meta(&thread_id).await.unwrap();
+    assert_eq!(
+        meta.work_state,
+        peri_acp_types::thread::WorkState::Stopped,
+        "取消收尾不得把显式停止写成 idle"
+    );
+}
+
+/// 正常收尾回到 `idle`，占用快照与工作意图在同一收尾里落库。
+#[tokio::test]
+#[serial]
+async fn completed_turn_persists_idle_and_context_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(dir.path());
+    let (ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
+    let thread_id = ctx.thread_id.clone().unwrap();
+    let resources: Arc<dyn SessionResources> = store.clone();
+
+    let mut result = synthetic_result(false);
+    result.context_usage_tokens = Some(4321);
+    finish_prompt_turn(&sessions, &ctx.session_id, false, result, Some(resources))
+        .await
+        .expect("completed turn");
+
+    let meta = store.load_session_meta(&thread_id).await.unwrap();
+    assert_eq!(
+        meta.work_state,
+        peri_acp_types::thread::WorkState::Idle,
+        "正常收尾不保留自动续跑意图"
+    );
+    assert_eq!(meta.context_usage_tokens, Some(4321));
 }

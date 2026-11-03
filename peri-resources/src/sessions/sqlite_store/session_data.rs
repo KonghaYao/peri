@@ -38,7 +38,7 @@ use peri_acp_types::store::{
     MessageFlags, PersistedPayload,
 };
 use peri_acp_types::system_reminder::TrustedSystemReminder;
-use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
+use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta, WorkState};
 use peri_acp_types::workspace::{
     ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding, WorkspaceError,
     SESSION_BINDING_VERSION,

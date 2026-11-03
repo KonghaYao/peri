@@ -284,6 +284,8 @@ fn test_meta_decoder_rejects_negative_derived_content_size() {
         "cascade".into(),
         None,
         "active".into(),
+        None,
+        "idle".into(),
     )
     .unwrap_err();
     assert!(error.to_string().contains("content_size is negative"));

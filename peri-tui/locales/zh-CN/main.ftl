@@ -893,6 +893,7 @@ composer-attachments = @ { $count } 个文件
 composer-image-attachment = [图片] { $name }
 composer-image-attachments = [图片] ×{ $count } · { $names }
 composer-context-usage = { $pct }% ctx
+composer-context-usage-unknown = ctx 未知
 
 # ---- 消息视图占位符 ----
 

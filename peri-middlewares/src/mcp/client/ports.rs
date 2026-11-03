@@ -178,6 +178,10 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
         McpClientPool::bind_session_task_manager(self, session_id, manager);
     }
 
+    async fn workspace_live_tasks(&self, owner: &str) -> peri_acp_types::ports::PeripheralTasks {
+        McpClientPool::workspace_live_tasks(self, owner).await
+    }
+
     fn attach_connection_notifier(
         self: Arc<Self>,
         registry: Option<&Arc<McpSkillRegistry>>,

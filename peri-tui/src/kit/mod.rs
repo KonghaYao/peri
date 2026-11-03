@@ -21,6 +21,7 @@ pub(crate) mod bg_task_status;
 pub(crate) mod child_run_routing;
 pub(crate) mod clipboard;
 pub(crate) mod config_service;
+pub(crate) mod context_usage;
 pub mod diff_parser;
 pub mod entry;
 pub(crate) mod entry_render_cache;

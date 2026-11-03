@@ -291,6 +291,7 @@ async fn test_user_input_wire_control_responds_while_prompt_lock_is_held() {
             crate::host::connection::ConnectionContext::new(false),
         ));
         let cancellation = CancellationToken::new();
+        let recovery = recovery_for(&cfg, &states, &cont_tx);
         crate::host::server_loop::ServerLoop {
             transport: &server,
             cfg: &cfg,
@@ -299,6 +300,7 @@ async fn test_user_input_wire_control_responds_while_prompt_lock_is_held() {
             cont_tx: &cont_tx,
             connection: &connection,
             connection_cancellation: &cancellation,
+            recovery: &recovery,
         }
         .run()
         .await;
@@ -441,6 +443,7 @@ async fn test_user_input_stdio_uses_same_short_control_requests() {
             crate::host::connection::ConnectionContext::new(false),
         ));
         let cancellation = CancellationToken::new();
+        let recovery = recovery_for(&cfg, &states, &cont_tx);
         crate::host::server_loop::ServerLoop {
             transport: &server,
             cfg: &cfg,
@@ -449,6 +452,7 @@ async fn test_user_input_stdio_uses_same_short_control_requests() {
             cont_tx: &cont_tx,
             connection: &connection,
             connection_cancellation: &cancellation,
+            recovery: &recovery,
         }
         .run()
         .await;

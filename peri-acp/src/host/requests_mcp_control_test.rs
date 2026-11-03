@@ -257,6 +257,7 @@ async fn slow_control_keeps_server_loop_and_new_capability_list_responsive() {
         crate::host::connection::ConnectionContext::new(false),
     ));
     let cancellation = tokio_util::sync::CancellationToken::new();
+    let recovery = recovery_for(&cfg, &sessions, &tx);
     crate::host::server_loop::ServerLoop {
         transport: &erased,
         cfg: &cfg,
@@ -265,6 +266,7 @@ async fn slow_control_keeps_server_loop_and_new_capability_list_responsive() {
         cont_tx: &tx,
         connection: &connection,
         connection_cancellation: &cancellation,
+        recovery: &recovery,
     }
     .run()
     .await;

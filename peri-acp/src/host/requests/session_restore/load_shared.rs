@@ -47,6 +47,9 @@ pub(crate) async fn handle_load_shared(
     )
     .await?;
     let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+    // 进入会话的占用初值：已保存快照 + 当前有效 window。读取失败不阻断 load，
+    // 缺失字段由客户端按未知展示（设计 §2.2）。
+    let context_usage = saved_context_usage(cfg, sessions, &prepared.id).await;
     finish_load_response(
         cfg,
         transport,
@@ -54,8 +57,34 @@ pub(crate) async fn handle_load_shared(
         prepared.identity,
         &connection,
         &generation,
+        context_usage,
     )
     .await
+}
+
+/// `threads.context_usage_tokens` 与当前有效 context window 的只读投影。
+async fn saved_context_usage(
+    cfg: &AcpServerConfig,
+    sessions: &SharedSessions,
+    session_id: &str,
+) -> Option<Value> {
+    let thread_id = {
+        let states = sessions.lock().await;
+        states
+            .get(session_id)
+            .map(|state| ThreadId::from(state.thread_id.clone()))
+    }?;
+    let tokens = cfg
+        .session_resources
+        .load_session_meta(&thread_id)
+        .await
+        .ok()
+        .and_then(|meta| meta.context_usage_tokens);
+    let window = u64::from(cfg.provider.read().effective_context_window());
+    Some(serde_json::json!({
+        "tokens": tokens,
+        "window": window,
+    }))
 }
 
 /// 共享的“确保会话已 live”阶段：load/resume/fork 复用，不包含回放或具体响应语义。
@@ -398,6 +427,7 @@ async fn finish_load_response(
     identity: Option<Value>,
     connection: &ConnectionFacts,
     generation: &LoadGeneration,
+    context_usage: Option<Value>,
 ) -> Result<Value, AcpError> {
     let session_caps = cfg.session_manager.ensure_session_caps(session_id);
     send_config_option_update(transport.as_ref(), session_id, cfg).await;
@@ -425,6 +455,9 @@ async fn finish_load_response(
     )?;
     if connection.caps.replay {
         response["_meta"]["periLoadGeneration"] = Value::String(generation.as_str().to_owned());
+    }
+    if let Some(usage) = context_usage {
+        response["_meta"]["peri.contextUsage"] = usage;
     }
     Ok(response)
 }

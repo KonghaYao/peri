@@ -576,6 +576,12 @@ impl AcpTuiClient {
         crate::kit::history_paging::note_initial_cursor(session_id, snapshot_token, next_cursor);
         self.lifecycle
             .commit_stable(start.generation, session_id.to_string());
+        if self.projection_mode == ClientProjectionMode::Interactive {
+            // 进入会话先展示已保存占用；缺失字段由解码侧落成未知，不沿用上一会话。
+            crate::kit::context_usage::establish_session_usage(
+                crate::kit::context_usage::from_load_response(&loaded),
+            );
+        }
         self.finish_session_initialization(start.generation, session_id)
             .await?;
         self.flush_buffered();

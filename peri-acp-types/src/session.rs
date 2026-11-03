@@ -46,7 +46,8 @@ pub use queue_policy::{
     ExecutionBinding, MessageActivation, MessageDisposition, MessagePolicy, MessageRequirement,
 };
 pub use runtime::{
-    cancel_all_agents, cancel_all_in, cancel_cascade_agents, cancel_cascade_in, AgentRuntime,
+    cancel_all_agents, cancel_all_in, cancel_cascade_agents, cancel_cascade_agents_collecting,
+    cancel_cascade_in, AgentRuntime,
 };
 pub use user_input::{
     DispatchUserInputsRequest, EnqueueUserInputRequest, TakeBackUserInputRequest, UserInput,

@@ -710,10 +710,42 @@ pub static LOCAL_EVENT_TX: OnceLock<UnboundedSender<AcpEventWithEpoch>> = OnceLo
 /// 最终在 spinner 行右侧显示 `↓ X.Xk tokens`。render body 纯只读，不写 spinner state。
 pub static SPINNER_TOKEN_COUNT: AtomStatic<usize> = AtomStatic::new(|| 0);
 
-/// 上下文窗口使用率信息：(pct 0.0-100.0, context_total_tokens)。
-/// 由 acp_notifier 在收到 StateSnapshotMeta 时从 budget_pct 写入。
-/// StatusBarRow1 订阅此 atom 显示。
-pub static CONTEXT_USAGE: AtomStatic<Option<(f64, u64)>> = AtomStatic::new(|| None);
+/// 上下文占用展示值。
+///
+/// 进入会话时来自 `threads.context_usage_tokens`（已保存的展示快照），运行中由
+/// `StateSnapshotMeta` 覆盖；两者都不是本次请求的精确 usage。百分比一律按当前
+/// 有效 context window 现算，`Unknown` 必须显式显示为未知而不是 0%。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextUsage {
+    /// 有效占用 token 数与当前有效 context window。
+    Known { tokens: u64, window: u64 },
+    /// 占用未知（保存值为 NULL / 启动载荷缺失）。
+    Unknown,
+}
+
+impl ContextUsage {
+    /// 只有 token 与有效 window 都已知时才能计算占用比例。
+    pub fn from_tokens(tokens: Option<u64>, window: Option<u64>) -> Self {
+        match (tokens, window) {
+            (Some(tokens), Some(window)) if window > 0 => Self::Known { tokens, window },
+            _ => Self::Unknown,
+        }
+    }
+
+    /// 占用百分比（0.0-100.0）；未知或 window 无效时为 `None`。
+    pub fn percent(&self) -> Option<f64> {
+        match self {
+            Self::Known { tokens, window } if *window > 0 => {
+                Some(*tokens as f64 / *window as f64 * 100.0)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// 上下文窗口使用信息：进入会话时先显示已保存值，随 StateSnapshot 更新。
+/// 由 acp_notifier / context_usage 写入，composer footer 订阅显示。
+pub static CONTEXT_USAGE: AtomStatic<Option<ContextUsage>> = AtomStatic::new(|| None);
 
 /// 当前 session 的 Goal 只读投影，由 ACP GoalSnapshot 状态事件更新。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

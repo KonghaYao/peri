@@ -35,6 +35,11 @@ pub async fn collect_result(req: CollectRequest<'_>) -> PromptResult {
     wait_for_pump(pump_handle.pump_done_rx, session_id).await;
 
     let recall_items = exec_outcome.agent_state.drain_recall();
+    // 占用快照必须在 `into_messages` 之前取：tracker 随 agent_state 一起被消费。
+    let context_usage_tokens = exec_outcome
+        .agent_state
+        .token_tracker
+        .estimated_context_tokens();
     PromptResult {
         persisted_payloads: exec_outcome.persisted_payloads,
         messages: exec_outcome.agent_state.into_messages(),
@@ -45,6 +50,7 @@ pub async fn collect_result(req: CollectRequest<'_>) -> PromptResult {
         history_replaced_by_compaction: exec_outcome.history_replaced_by_compaction,
         recall_items,
         pending_tasks,
+        context_usage_tokens,
     }
 }
 

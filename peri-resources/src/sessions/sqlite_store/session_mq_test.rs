@@ -792,9 +792,10 @@ async fn deleting_the_thread_drops_pending_rows() {
     assert_eq!(rows, 0);
 }
 
-// ─── 迁移：v12 → v13 与 v11 → v13 ─────────────────────────────────────────────
+// ─── 迁移：v13 → v14、v12 → v14 与 v11 → v14 ─────────────────────────────────
 
-/// 把库降级成 v12 形状（删 `thread_mq`）后重开：幂等补齐并推进到当前版本。
+/// 把库降级成 v13 形状（删两列工作快照）或更早形状（再删 `thread_mq`）后重开：
+/// 幂等补齐并推进到当前版本。
 #[tokio::test]
 async fn migration_adds_thread_mq_from_the_previous_generation() {
     let fixture = Fixture::new().await;
@@ -859,7 +860,9 @@ async fn downgrade(path: &Path, version: i64) {
     sqlx::raw_sql(
         "DROP TABLE thread_mq;
          DROP TABLE IF EXISTS inherited_payload_index;
-         DROP TABLE IF EXISTS inherited_snapshot_index;",
+         DROP TABLE IF EXISTS inherited_snapshot_index;
+         ALTER TABLE threads DROP COLUMN context_usage_tokens;
+         ALTER TABLE threads DROP COLUMN work_state;",
     )
     .execute(&pool)
     .await

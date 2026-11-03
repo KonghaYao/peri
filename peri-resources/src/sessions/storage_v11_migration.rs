@@ -166,6 +166,16 @@ pub(super) async fn migrate_shape(connection: &mut SqliteConnection) -> Result<(
             .execute(&mut *connection)
             .await?;
     }
+    // v14 的两列工作快照也赶在重建之前补上：重建语句按当前形状逐列搬运，输入形状
+    // （≤10 / 登记形状）本来不含这两列。旧行取 `idle` 与 NULL，不唤醒历史会话。
+    for (name, definition) in canonical::THREADS_V14_COLUMNS {
+        // 标识符和列定义来自 `canonical` 的静态清单，未包含外部输入。
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "ALTER TABLE threads ADD COLUMN {name} {definition}"
+        )))
+        .execute(&mut *connection)
+        .await?;
+    }
     rebuild_threads(connection).await?;
 
     sqlx::query(canonical::CREATE_BINDINGS_TABLE_SQL)

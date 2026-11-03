@@ -36,7 +36,7 @@ use crate::session::{
 };
 use crate::store::{CompactionChange, InheritedContext, MessageFlags, PersistedPayload};
 use crate::system_reminder::TrustedSystemReminder;
-use crate::thread::{AgentStatus, CancelPolicy, ThreadId, ThreadMeta};
+use crate::thread::{AgentStatus, CancelPolicy, ThreadId, ThreadMeta, WorkState};
 use crate::workspace::{ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding};
 
 // 历史读取视图与 rewind 契约类型按职责拆入子模块 `history`（见该模块文档）；
@@ -846,6 +846,20 @@ pub trait SessionResources: Send + Sync {
 
     /// 小型 metadata 投影；不加载历史或大快照。
     async fn load_session_meta(&self, id: &ThreadId) -> SessionResourceResult<ThreadMeta>;
+
+    /// 进入会话时的恢复范围：沿已有父链解析根，再读取该根子树里仍为 `working`
+    /// 的 thread（设计 §3）。
+    ///
+    /// 只读：不写工作意图、不建收件地址、不授权启动。默认实现返回 `Unsupported`，
+    /// 让非生产后端显式失败，而不是把「不支持」当成「没有候选」。
+    async fn load_recovery_scope(
+        &self,
+        _id: &ThreadId,
+    ) -> SessionResourceResult<crate::recovery::RecoveryScope> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
     async fn session_environment_id(
         &self,
         _id: &ThreadId,
@@ -1002,6 +1016,29 @@ pub trait SessionResources: Send + Sync {
         id: &ThreadId,
         patch: &SessionMetaPatch,
     ) -> SessionResourceResult<()>;
+
+    /// 写入 durable 工作意图（`threads.work_state`）。
+    ///
+    /// 只写这一列：它表达中断后的续跑意图，不承担运行态与列表排序。默认实现返回
+    /// `Unsupported`——后端要么如实持久化停止/续跑意图，要么显式拒绝。
+    async fn set_work_state(&self, _id: &ThreadId, _state: WorkState) -> SessionResourceResult<()> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
+
+    /// 写入最近一次有效上下文占用快照（`threads.context_usage_tokens`）。
+    ///
+    /// `None` 表示「未知」，写 NULL；不更新 `updated_at`。默认实现返回 `Unsupported`。
+    async fn set_context_usage(
+        &self,
+        _id: &ThreadId,
+        _tokens: Option<u64>,
+    ) -> SessionResourceResult<()> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
 
     /// 删除整棵会话树。
     ///

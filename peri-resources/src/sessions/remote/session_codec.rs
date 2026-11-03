@@ -21,14 +21,14 @@ use peri_acp_types::store::{
     deserialize_persisted_payload, serialize_persisted_payload, InheritedContext, MessageFlags,
     PersistedPayload,
 };
-use peri_acp_types::thread::{AgentStatus, CancelPolicy, ThreadMeta};
+use peri_acp_types::thread::{AgentStatus, CancelPolicy, ThreadMeta, WorkState};
 use peri_acp_types::workspace::{ProjectId, SessionBinding, WorkspaceId};
 use turso_serverless::Value;
 
 use super::session_sql::{
-    META_AGENT_STATUS, META_CANCEL_POLICY, META_CONFIG, META_CONTENT_SIZE, META_CREATED_AT,
-    META_CWD, META_HIDDEN, META_ID, META_MESSAGE_COUNT, META_PARENT, META_SNAPSHOT_AT, META_TITLE,
-    META_UPDATED_AT,
+    META_AGENT_STATUS, META_CANCEL_POLICY, META_CONFIG, META_CONTENT_SIZE,
+    META_CONTEXT_USAGE_TOKENS, META_CREATED_AT, META_CWD, META_HIDDEN, META_ID, META_MESSAGE_COUNT,
+    META_PARENT, META_SNAPSHOT_AT, META_TITLE, META_UPDATED_AT, META_WORK_STATE,
 };
 use super::sql::{int_at, text_at};
 use crate::sessions::canonical;
@@ -96,6 +96,15 @@ pub(super) fn decode_meta(values: &[Value]) -> SessionResourceResult<ThreadMeta>
     let content_size = int_field(values, META_CONTENT_SIZE, "content_size")?;
     let cancel_policy = text_field(values, META_CANCEL_POLICY, "cancel_policy")?;
     let agent_status = text_field(values, META_AGENT_STATUS, "agent_status")?;
+    // 旧代投影把这两列读作常量 `NULL` / `'idle'`：同一份解码，不需要第二套 codec。
+    let context_usage_tokens = match values.get(META_CONTEXT_USAGE_TOKENS) {
+        Some(Value::Null) => None,
+        Some(Value::Integer(tokens)) => {
+            Some(u64::try_from(*tokens).map_err(|_| corrupt("context_usage_tokens is negative"))?)
+        }
+        _ => return Err(corrupt("context_usage_tokens is missing or not an integer")),
+    };
+    let work_state = text_field(values, META_WORK_STATE, "work_state")?;
     Ok(ThreadMeta {
         id,
         title: optional_text_field(values, META_TITLE),
@@ -116,6 +125,10 @@ pub(super) fn decode_meta(values: &[Value]) -> SessionResourceResult<ThreadMeta>
         // 远端不保存物化缓存：这里没有第二份真相可返回。
         agent_status: AgentStatus::from_str(&agent_status)
             .map_err(|_| corrupt("agent_status is not a known value"))?,
+        // `work_state` 的合法值由 CHECK 约束圈定；非法值仍是损坏，不猜成 `Idle`。
+        work_state: WorkState::from_str(&work_state)
+            .map_err(|_| corrupt("work_state is not a known value"))?,
+        context_usage_tokens,
     })
 }
 

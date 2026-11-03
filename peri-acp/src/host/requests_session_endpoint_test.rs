@@ -152,6 +152,7 @@ async fn session_load_registers_connection_endpoint_and_scheduled_approval_is_de
         crate::host::connection::ConnectionContext::new(true),
     ));
     let cancellation = tokio_util::sync::CancellationToken::new();
+    let recovery = recovery_for(&cfg, &sessions, &cont_tx);
     crate::host::server_loop::ServerLoop {
         transport: &erased,
         cfg: &cfg,
@@ -160,6 +161,7 @@ async fn session_load_registers_connection_endpoint_and_scheduled_approval_is_de
         cont_tx: &cont_tx,
         connection: &connection,
         connection_cancellation: &cancellation,
+        recovery: &recovery,
     }
     .run()
     .await;
@@ -255,6 +257,7 @@ async fn session_load_binds_restored_task_manager() {
         crate::host::connection::ConnectionContext::new(true),
     ));
     let cancellation = tokio_util::sync::CancellationToken::new();
+    let recovery = recovery_for(&cfg, &sessions, &cont_tx);
     crate::host::server_loop::ServerLoop {
         transport: &erased,
         cfg: &cfg,
@@ -263,6 +266,7 @@ async fn session_load_binds_restored_task_manager() {
         cont_tx: &cont_tx,
         connection: &connection,
         connection_cancellation: &cancellation,
+        recovery: &recovery,
     }
     .run()
     .await;
@@ -393,6 +397,7 @@ async fn session_fork_registers_connection_endpoint_and_scheduled_approval_is_de
         crate::host::connection::ConnectionContext::new(true),
     ));
     let cancellation = tokio_util::sync::CancellationToken::new();
+    let recovery = recovery_for(&cfg, &sessions, &cont_tx);
     crate::host::server_loop::ServerLoop {
         transport: &erased,
         cfg: &cfg,
@@ -401,6 +406,7 @@ async fn session_fork_registers_connection_endpoint_and_scheduled_approval_is_de
         cont_tx: &cont_tx,
         connection: &connection,
         connection_cancellation: &cancellation,
+        recovery: &recovery,
     }
     .run()
     .await;
@@ -561,6 +567,7 @@ async fn invoke_during_prompt_is_admitted_through_the_real_server_loop() {
         crate::host::connection::ConnectionContext::new(true),
     ));
     let cancellation = tokio_util::sync::CancellationToken::new();
+    let recovery = recovery_for(&cfg, &sessions, &cont_tx);
     crate::host::server_loop::ServerLoop {
         transport: &erased,
         cfg: &cfg,
@@ -569,6 +576,7 @@ async fn invoke_during_prompt_is_admitted_through_the_real_server_loop() {
         cont_tx: &cont_tx,
         connection: &connection,
         connection_cancellation: &cancellation,
+        recovery: &recovery,
     }
     .run()
     .await;

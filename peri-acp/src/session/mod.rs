@@ -54,7 +54,7 @@ use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::permission::SharedPermissionMode;
 use peri_acp_types::session_resources::SessionResources;
-use peri_acp_types::thread::ThreadId;
+use peri_acp_types::thread::{ThreadId, WorkState};
 use tokio_util::sync::CancellationToken;
 
 use peri_acp_types::PeriCaps;
@@ -127,6 +127,11 @@ pub struct AcpSession {
     pub task_manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
     /// The ACP task event stream is bound once per session runtime.
     pub(crate) task_events_started: std::sync::atomic::AtomicBool,
+    /// 冷 child 恢复的待投递父 thread：该会话下一次 turn 结束后投递结果通知。
+    ///
+    /// 挂在会话实例上而不是续跑请求上：本轮能由启动门、激活监听或用户 prompt
+    /// 任何一条路径发起，投递都只发生一次（收尾取走即清空）。
+    pub(crate) recovery_parent: parking_lot::Mutex<Option<ThreadId>>,
     pub(crate) task_events_cancel: CancellationToken,
     /// idle-suspended 标志：executor 在 await_wake 挂起期间置 true（跨 turn
     /// 持久，Arc 共享）。宿主 `dispatch_prompt_turn` 据此把挂起期间到达的
@@ -184,6 +189,16 @@ pub struct SessionManager {
 }
 
 impl AcpSession {
+    /// 登记冷 child 恢复的父 thread（Host 恢复协调在接纳提醒后调用）。
+    pub(crate) fn record_recovery_parent(&self, parent: ThreadId) {
+        *self.recovery_parent.lock() = Some(parent);
+    }
+
+    /// 取走待投递的父 thread：一次 turn 只投递一次。
+    pub(crate) fn take_recovery_parent(&self) -> Option<ThreadId> {
+        self.recovery_parent.lock().take()
+    }
+
     /// Close the same resources again after Incomplete; no registry guard crosses await.
     pub(crate) async fn close_resources(&self) -> bool {
         if let Some(mailbox) = &self.user_input_mailbox {
@@ -416,20 +431,45 @@ impl SessionManager {
 
     /// 取消指定 session 的所有 cascade 子 agent（暴露给 TUI/stdio 用于 session/cancel）。
     pub fn cancel_cascade_children_for(&self, session_id: &str) {
-        if let Some(session) = self.inner.sessions.get(session_id) {
-            session.cancel_cascade_children();
+        let cancelled = match self.inner.sessions.get(session_id) {
+            Some(session) => session.cancel_cascade_children(),
+            None => return,
+        };
+        if cancelled.is_empty() {
+            return;
         }
+        // 停止意图在取消之后落库：受取消影响的对象必须保留显式停止，随后各自的收尾
+        // 不得把它们改回可自动续跑。落库不阻塞取消本身，因此交给独立任务。
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!(
+                session_id,
+                cancelled = cancelled.len(),
+                "cascade stop intent not persisted: no async runtime"
+            );
+            return;
+        };
+        let resources = Arc::clone(self.session_resources());
+        handle.spawn(async move {
+            for thread_id in cancelled {
+                if let Err(error) = resources
+                    .set_work_state(&thread_id, WorkState::Stopped)
+                    .await
+                {
+                    tracing::warn!(%thread_id, %error, "cascade child work state write failed");
+                }
+            }
+        });
     }
 }
 
 impl AcpSession {
-    /// 取消指定 agent 的所有 cascade 子 agent。
+    /// 取消指定 agent 的所有 cascade 子 agent，并返回被取消的 thread 身份。
     ///
     /// 薄委托：Cascade/Independent 判定与终止执行归 Agent 层
-    /// （`peri_acp_types::session::cancel_cascade_agents`，L5 cancel
+    /// （`peri_acp_types::session::cancel_cascade_agents_collecting`，L5 cancel
     /// 最终执行权归位）；本方法仅定位（持有 active_agents 注册表）。
-    pub fn cancel_cascade_children(&self) {
-        peri_acp_types::session::cancel_cascade_agents(self.active_agents.values());
+    pub fn cancel_cascade_children(&self) -> Vec<ThreadId> {
+        peri_acp_types::session::cancel_cascade_agents_collecting(self.active_agents.values())
     }
 
     /// 取消所有 agent（session 结束时）

@@ -83,6 +83,10 @@ pub enum MessageSource {
     ToolFailureWarning,
     /// 工作流完成
     WorkflowComplete,
+    /// 进入会话时的恢复提醒（进程中断后从已提交历史继续）。
+    ///
+    /// 只有 Host 恢复协调以可信 SystemReminder 构造；旧行没有该来源，反序列化不受影响。
+    SessionRecovery,
 }
 
 // ─── QueuedMessage ───────────────────────────────────────────────────────────
@@ -1086,6 +1090,10 @@ impl super::InboxHandle {
 #[cfg(test)]
 #[path = "queue_mq_test.rs"]
 mod mq_tests;
+
+#[cfg(test)]
+#[path = "queue_source_test.rs"]
+mod source_tests;
 
 #[cfg(test)]
 #[path = "queue_wake_test.rs"]

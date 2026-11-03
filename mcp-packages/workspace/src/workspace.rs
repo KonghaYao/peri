@@ -54,10 +54,10 @@ use crate::git_watch::{run_git_sample, GitWatchState, SampleOutcome, GIT_REF_RES
 use crate::resources::{
     ResourceBody, ResourceError, WorkspaceResourceProvider, WorkspaceResourcesInput,
 };
-use crate::shell_tasks::ShellTasks;
+use crate::shell_tasks::{ShellTaskListTool, ShellTasks, SHELL_TASK_LIST_TOOL};
 use crate::terminal::BashTool;
 use crate::WorkspaceInstanceInput;
-use peri_mcp_common::task_owner::task_owner_from_meta;
+use peri_mcp_common::task_owner::{task_owner_from_meta, thread_owner_from_meta};
 
 /// `workspace` 实例的 `ServerConfig` 名字（`Implementation::name`）；实例名仍是注册表里的
 /// `"workspace"`（`Implementation::name` 与注册表 key 是两件事，不要合并）。
@@ -172,6 +172,18 @@ impl WorkspaceMcpServer {
         task_owner_from_meta(&context.meta)
     }
 
+    /// Optional agent thread that issued the current request; recorded beside
+    /// the session owner for recovery queries (design §6).
+    ///
+    /// Hosts may omit it (current ACP tool bridge only knows the session
+    /// identity); the query then falls back to the session owner.
+    fn thread_owner(
+        &self,
+        context: &RequestContext<RoleServer>,
+    ) -> Result<Option<String>, McpError> {
+        thread_owner_from_meta(&context.meta)
+    }
+
     /// Stop new work and wait for Workspace-owned shell process cleanup.
     pub async fn shutdown_shell_tasks(&self) -> Option<peri_acp_types::tasks::TaskShutdownReport> {
         match &self.shell_tasks {
@@ -185,6 +197,7 @@ impl WorkspaceMcpServer {
         request: &CallToolRequestParams,
         client_supports_tasks: bool,
         owner: Option<&str>,
+        thread_owner: Option<&str>,
     ) -> Result<CallToolResponse, McpError> {
         let tasks = self
             .shell_tasks
@@ -206,7 +219,13 @@ impl WorkspaceMcpServer {
             let timeout = parse_background_timeout(&timeout_input)
                 .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
             let task = tasks
-                .spawn_owned(command.into(), self.cwd.clone(), timeout, owner)
+                .spawn_owned_scoped(
+                    command.into(),
+                    self.cwd.clone(),
+                    timeout,
+                    owner,
+                    thread_owner,
+                )
                 .await?;
             if client_supports_tasks {
                 return Ok(CallToolResponse::Task(CreateTaskResult::new(task)));
@@ -229,16 +248,24 @@ impl WorkspaceMcpServer {
         }
 
         let input = serde_json::Value::Object(request.arguments.clone().unwrap_or_default());
-        let callback = tasks.completion_callback_for(owner.map(str::to_owned));
+        let callback = tasks.completion_callback_for_scope(
+            owner.map(str::to_owned),
+            thread_owner.map(str::to_owned),
+        );
         let started_owner = tasks.clone();
         let started_operation_owner = owner.map(str::to_owned);
+        let started_operation_thread_owner = thread_owner.map(str::to_owned);
         // 前景路径的工具实例**不带**缺省后台位：后台/前台判定已在上方完成，这里只提供
         // 前台执行能力与超时 promote（`false` 保持 `BashTool::new` 的缺省）。
         let bash = BashTool::new(&self.cwd)
             .with_task_manager(tasks.manager())
             .with_on_bg_complete(callback)
             .with_on_bg_started(Arc::new(move |task_id| {
-                started_owner.track_promoted_owned(task_id, started_operation_owner.as_deref());
+                started_owner.track_promoted_scoped(
+                    task_id,
+                    started_operation_owner.as_deref(),
+                    started_operation_thread_owner.as_deref(),
+                );
             }));
         let result = match bash.execute(input, ToolContext::new(&[], &self.cwd)).await {
             Ok(output) => {
@@ -251,7 +278,7 @@ impl WorkspaceMcpServer {
                     .flatten()
                 });
                 if let Some(task_id) = promoted {
-                    let task = tasks.track_promoted_owned(task_id, owner);
+                    let task = tasks.track_promoted_scoped(task_id, owner, thread_owner);
                     if client_supports_tasks {
                         return Ok(CallToolResponse::Task(CreateTaskResult::new(task)));
                     }
@@ -704,7 +731,9 @@ impl ServerHandler for WorkspaceMcpServer {
             .client_capabilities()
             .is_some_and(|caps| caps.supports_tasks());
         let owner = self.task_owner(&context)?;
+        let thread_owner = self.thread_owner(&context)?;
         let owner = owner.as_deref();
+        let thread_owner = thread_owner.as_deref();
         // 传实例冻结的 host cwd（不走 `web` / `cron` 的空串形态）。**注意**：本参
         // 只落进 `ToolContext`，而本波 7 个工具都忽略 `ToolContext`（`invoke` 的 `_ctx`），
         // 真正生效的 cwd 绑定点是 [`Self::new`] 注入各工具的 `cwd` 字段——不得据本行推断
@@ -713,8 +742,38 @@ impl ServerHandler for WorkspaceMcpServer {
             biased;
             _ = context.ct.cancelled() => Ok(CallToolResponse::Complete(rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text("Tool execution cancelled.")]))),
             result = async {
+                // Host-only query face (design §6): answered here instead of
+                // `tools/list` so the model-facing seven-tool surface stays put.
+                // Legacy instances without task state answer `unknown`, never an
+                // MCP error.
+                if request.name.as_ref() == SHELL_TASK_LIST_TOOL {
+                    // The filter is an explicit argument; request metadata is not
+                    // used here so a host can query another owner's thread state.
+                    let owner = match request
+                        .arguments
+                        .as_ref()
+                        .and_then(|arguments| arguments.get("owner"))
+                    {
+                        None | Some(serde_json::Value::Null) => None,
+                        Some(serde_json::Value::String(owner)) if !owner.is_empty() => {
+                            Some(owner.as_str())
+                        }
+                        Some(_) => {
+                            return Err(McpError::invalid_params(
+                                "owner must be a non-empty string",
+                                None,
+                            ));
+                        }
+                    };
+                    let body = ShellTaskListTool::new(self.shell_tasks.clone()).list_text(owner);
+                    return Ok(CallToolResponse::Complete(
+                        rmcp::model::CallToolResult::success(vec![
+                            rmcp::model::ContentBlock::text(body),
+                        ]),
+                    ));
+                }
                 if request.name.as_ref() == "Bash" && self.shell_tasks.is_some() {
-                    self.call_owned_bash(&request, client_supports_tasks, owner).await
+                    self.call_owned_bash(&request, client_supports_tasks, owner, thread_owner).await
                 } else {
                     invoke_tool_call(self.tools(), &self.cwd, &request).await
                 }

@@ -20,7 +20,8 @@
 /// 契约类型（peri-acp-types 事实源，经 `crate::thread` re-export）。
 pub use crate::thread::{AgentStatus, CancelPolicy};
 pub use peri_acp_types::session::{
-    cancel_all_agents, cancel_all_in, cancel_cascade_agents, cancel_cascade_in, AgentRuntime,
+    cancel_all_agents, cancel_all_in, cancel_cascade_agents, cancel_cascade_agents_collecting,
+    cancel_cascade_in, AgentRuntime,
 };
 
 #[cfg(test)]
@@ -40,6 +41,15 @@ mod tests {
         cancel_cascade_agents([&cascade, &independent]);
         assert!(cascade.cancel_token.is_cancelled());
         assert!(!independent.cancel_token.is_cancelled());
+    }
+
+    /// 返回的停止目标与真正被取消的对象一致：Independent 不得被写进停止意图。
+    #[test]
+    fn cancel_cascade_reports_exactly_the_cancelled_threads() {
+        let cascade = make_runtime(Policy::Cascade);
+        let independent = make_runtime(Policy::Independent);
+        let cancelled = cancel_cascade_agents_collecting([&cascade, &independent]);
+        assert_eq!(cancelled, vec![cascade.thread_id.clone()]);
     }
 
     /// cancel_all 不区分 policy，全部终止（session 结束语义）。

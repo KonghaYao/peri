@@ -168,14 +168,14 @@ async fn history_rows(fixture: &Fixture, thread: &ThreadId) -> i64 {
         .unwrap()
 }
 
-/// 契约与版本代数是本代：`v7` + 13。
+/// 契约与版本代数是本代：`v8` + 14。
 #[test]
 fn the_mq_generation_is_the_current_contract() {
-    assert_eq!(schema::STORE_CONTRACT, "peri.session.store/v7");
-    assert_eq!(schema::REMOTE_SCHEMA_VERSION, 13);
+    assert_eq!(schema::STORE_CONTRACT, "peri.session.store/v8");
+    assert_eq!(schema::REMOTE_SCHEMA_VERSION, 14);
     assert_eq!(
         schema::PREVIOUS_CURRENT_STORE_CONTRACT,
-        "peri.session.store/v6"
+        "peri.session.store/v7"
     );
 }
 

@@ -35,12 +35,21 @@ use peri_acp_types::{messages::BaseMessage, store::PersistedPayload};
 ///
 /// 13 是 Thread MQ 这一代：只新增 `thread_mq` 与其排序索引，12 的形状与数据原样保留
 /// （见 `docs/design/thread-mq.md` §3）。
-pub(super) const CURRENT_SCHEMA_VERSION: i64 = 13;
-
-/// 上一代当前形状（inherited 派生索引已就位、还没有 `thread_mq`）的版本号。
 ///
-/// 只作为升级来源：写打开按 [`CREATE_THREAD_MQ_TABLE_SQL`] 幂等补齐并推进到 13。
-pub(super) const PREVIOUS_CURRENT_SCHEMA_VERSION: i64 = 12;
+/// 14 是工作意图与上下文占用快照这一代：`threads` 只新增 `work_state` 与
+/// `context_usage_tokens` 两列（见 `docs/design/session-durability.md` §2）；旧行升级后
+/// 分别是 `idle` 与 `NULL`，旧 `agent_status = 'active'` 不构成自动续跑资格。
+pub(super) const CURRENT_SCHEMA_VERSION: i64 = 14;
+
+/// 上一代当前形状（Thread MQ 已就位、还没有两列工作快照）的版本号。
+///
+/// 只作为升级来源：写打开按 v14 的增量列幂等补齐并推进到 14。
+pub(super) const PREVIOUS_CURRENT_SCHEMA_VERSION: i64 = 13;
+
+/// 再上一代当前形状（inherited 派生索引已就位、还没有 `thread_mq`）的版本号。
+///
+/// 同样只作为升级来源：写打开先补 `thread_mq`，再补两列工作快照。
+pub(super) const LEGACY_CURRENT_SCHEMA_VERSION: i64 = 12;
 
 /// 压缩前登记形状使用的版本号（历史事实，不随当前版本推进）。
 pub(super) const LEGACY_REGISTRATION_SCHEMA_VERSION: i64 = 11;
@@ -213,6 +222,9 @@ pub(super) const CREATE_WORKSPACES_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS
     UNIQUE(machine_id, path)
 )";
 /// 会话事实表：归属由 `workspace_id` 唯一表达。
+///
+/// v14 的两个新列只能追加在末尾：旧库按同一列序 `ALTER TABLE ADD COLUMN` 补齐，形状判定
+/// （`schema_shape`）对列序列逐项比对，迁移终点因此必须与新建库同形。
 pub(super) const CREATE_THREADS_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS threads (
     id TEXT PRIMARY KEY, title TEXT, cwd TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL, message_count INTEGER NOT NULL DEFAULT 0,
@@ -220,8 +232,27 @@ pub(super) const CREATE_THREADS_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS th
     cancel_policy TEXT NOT NULL DEFAULT 'cascade', config TEXT,
     frozen_context TEXT, inherited_context TEXT, agent_status TEXT NOT NULL DEFAULT 'active',
     workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-    archived BOOLEAN NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))
+    archived BOOLEAN NOT NULL DEFAULT 0 CHECK(archived IN (0, 1)),
+    context_usage_tokens INTEGER
+        CHECK(context_usage_tokens IS NULL OR context_usage_tokens >= 0),
+    work_state TEXT NOT NULL DEFAULT 'idle'
+        CHECK(work_state IN ('idle', 'working', 'stopped'))
 )";
+
+/// v14 相对 v13 的 `threads` 增量列（名称与列定义）；本机与远端迁移共用同一份文本。
+///
+/// `context_usage_tokens` 允许 NULL（未知不是零占用）；`work_state` 的非空默认值让旧行
+/// 升级后落在 `idle`，不会因为旧 `agent_status` 被批量唤醒。
+pub(super) const THREADS_V14_COLUMNS: &[(&str, &str)] = &[
+    (
+        "context_usage_tokens",
+        "INTEGER CHECK(context_usage_tokens IS NULL OR context_usage_tokens >= 0)",
+    ),
+    (
+        "work_state",
+        "TEXT NOT NULL DEFAULT 'idle' CHECK(work_state IN ('idle', 'working', 'stopped'))",
+    ),
+];
 /// 绑定表：workspace 归属由 `threads.workspace_id` 唯一表达，绑定行只保存自己的
 /// 不可变执行证据。没有指向归属表的外键——归属关系不靠外键维护（两端都不强制）。
 pub(super) const CREATE_BINDINGS_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS session_bindings (
@@ -369,15 +400,19 @@ pub(super) const CREATE_REBUILD_THREADS_TABLE_SQL: &str = "CREATE TABLE threads_
     cancel_policy TEXT NOT NULL DEFAULT 'cascade', config TEXT,
     frozen_context TEXT, inherited_context TEXT, agent_status TEXT NOT NULL DEFAULT 'active',
     workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-    archived BOOLEAN NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))
+    archived BOOLEAN NOT NULL DEFAULT 0 CHECK(archived IN (0, 1)),
+    context_usage_tokens INTEGER
+        CHECK(context_usage_tokens IS NULL OR context_usage_tokens >= 0),
+    work_state TEXT NOT NULL DEFAULT 'idle'
+        CHECK(work_state IN ('idle', 'working', 'stopped'))
 )";
 
 /// 重建搬运：`threads` → 暂存表（列清单与当前 `threads` 形状一致，由
 /// `schema_shape_test::rebuild_statements_carry_the_canonical_threads_columns` 断言）。
-pub(super) const INSERT_THREADS_INTO_REBUILD_SQL: &str = "INSERT INTO threads_rebuild (id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status, workspace_id, archived) SELECT id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status, workspace_id, archived FROM threads";
+pub(super) const INSERT_THREADS_INTO_REBUILD_SQL: &str = "INSERT INTO threads_rebuild (id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status, workspace_id, archived, context_usage_tokens, work_state) SELECT id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status, workspace_id, archived, context_usage_tokens, work_state FROM threads";
 
 /// 重建搬运：新建的 `threads` ← 暂存表（列清单同上）。
-pub(super) const INSERT_REBUILD_INTO_THREADS_SQL: &str = "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status, workspace_id, archived) SELECT id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status, workspace_id, archived FROM threads_rebuild";
+pub(super) const INSERT_REBUILD_INTO_THREADS_SQL: &str = "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status, workspace_id, archived, context_usage_tokens, work_state) SELECT id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status, workspace_id, archived, context_usage_tokens, work_state FROM threads_rebuild";
 
 pub(super) const SELECT_OAUTH_CREDENTIAL_SQL: &str = "SELECT credentials_blob FROM mcp_oauth_credentials WHERE principal_id = ?1 AND workspace_id = ?2 AND server_key = ?3";
 pub(super) const UPSERT_OAUTH_CREDENTIAL_SQL: &str = "INSERT INTO mcp_oauth_credentials(principal_id, workspace_id, server_key, credentials_blob, updated_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(principal_id, workspace_id, server_key) DO UPDATE SET credentials_blob = excluded.credentials_blob, updated_at = excluded.updated_at";

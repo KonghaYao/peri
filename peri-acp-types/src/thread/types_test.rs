@@ -183,3 +183,59 @@ fn test_agent_status_serde_lowercase() {
     let back: AgentStatus = serde_json::from_str("\"error\"").unwrap();
     assert_eq!(back, AgentStatus::Error);
 }
+
+// ── durable 工作意图：turn / 终态 → WorkState（设计 §2.1）────────────────────
+
+#[test]
+fn cancelled_turn_keeps_explicit_stop_intent() {
+    // Stop 之后的收尾必须写 stopped；写成 idle 会抹掉用户的显式停止意图。
+    assert_eq!(
+        WorkState::after_prompt_turn(crate::command::PromptStopReason::Cancelled, false),
+        Some(WorkState::Stopped)
+    );
+}
+
+#[test]
+fn finished_turn_returns_to_idle() {
+    for reason in [
+        crate::command::PromptStopReason::EndTurn,
+        crate::command::PromptStopReason::MaxTurnRequests,
+        crate::command::PromptStopReason::MaxTokens,
+    ] {
+        assert_eq!(
+            WorkState::after_prompt_turn(reason, false),
+            Some(WorkState::Idle),
+            "{reason:?} 收尾后不应保留自动续跑意图"
+        );
+    }
+}
+
+#[test]
+fn inconsistent_persistence_does_not_overwrite_work_state() {
+    // 提交结果不确定：不写任何值，保留最后一次已提交的事实。
+    for reason in [
+        crate::command::PromptStopReason::EndTurn,
+        crate::command::PromptStopReason::Cancelled,
+    ] {
+        assert_eq!(
+            WorkState::after_prompt_turn(reason, true),
+            None,
+            "{reason:?} 在持久化不一致时不得写工作意图"
+        );
+    }
+}
+
+#[test]
+fn terminal_agent_status_maps_to_work_state() {
+    assert_eq!(
+        WorkState::after_agent_terminal(AgentStatus::Cancelled),
+        WorkState::Stopped
+    );
+    for status in [AgentStatus::Done, AgentStatus::Error] {
+        assert_eq!(
+            WorkState::after_agent_terminal(status),
+            WorkState::Idle,
+            "{status:?} 终态不应保留自动续跑意图"
+        );
+    }
+}

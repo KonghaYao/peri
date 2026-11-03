@@ -895,6 +895,7 @@ composer-attachments = @ { $count } files
 composer-image-attachment = [Image] { $name }
 composer-image-attachments = [Image] ×{ $count } · { $names }
 composer-context-usage = { $pct }% ctx
+composer-context-usage-unknown = ctx unknown
 
 # ---- Message View Placeholders ----
 

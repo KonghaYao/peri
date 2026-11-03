@@ -1,4 +1,5 @@
 use super::*;
+use crate::sessions::sqlite_store::row_mapping::THREAD_META_COLUMNS;
 use peri_acp_types::history_window::{
     HistoryBodyChunk, HistoryEntryId, HistoryInheritedSnapshot, HistoryWindowError,
 };
@@ -364,10 +365,11 @@ impl SqliteSessionData {
                     .await
                     .map_err(|error| map_sqlx(&error))?;
                 let rows = read_content_lengths(&mut tx, rows).await?;
-                let inherited = context::load_inherited_context_on(&mut tx, id)
-                    .await
-                    .map_err(read_failure)?
-                    .payloads;
+                let inherited =
+                    context::load_inherited_context_on(&mut tx, id, THREAD_META_COLUMNS)
+                        .await
+                        .map_err(read_failure)?
+                        .payloads;
                 (inherited, tail, rows)
             }
             Some((after, tail)) => {

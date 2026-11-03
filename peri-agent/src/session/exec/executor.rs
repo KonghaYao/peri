@@ -247,6 +247,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
             recall_items: Vec::new(),
             pending_tasks: 0,
             failure: None,
+            context_usage_tokens: None,
         };
     }
 

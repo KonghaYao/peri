@@ -18,7 +18,7 @@ use peri_acp_types::session_resources::{
     SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, InheritedContext, MessageFlags, PersistedPayload};
-use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
+use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta, WorkState};
 use peri_acp_types::workspace::{
     ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding, WorkspaceError,
     SESSION_BINDING_VERSION,
@@ -284,6 +284,32 @@ impl MockSessionResources {
             id,
             status,
         );
+    }
+
+    /// durable 工作意图写入：只改 meta 的那一列，不进入状态序列。
+    fn write_work_state(&self, id: &ThreadId, state: WorkState) {
+        self.with_region(id, |region| {
+            let mut meta = region
+                .meta
+                .clone()
+                .unwrap_or_else(|| ThreadMeta::new_at("/test", peri_time::now_wall()));
+            meta.id = id.clone();
+            meta.work_state = state;
+            region.meta = Some(meta);
+        });
+    }
+
+    /// 上下文占用快照写入：只改 meta 的那一列。
+    fn write_context_usage(&self, id: &ThreadId, tokens: Option<u64>) {
+        self.with_region(id, |region| {
+            let mut meta = region
+                .meta
+                .clone()
+                .unwrap_or_else(|| ThreadMeta::new_at("/test", peri_time::now_wall()));
+            meta.id = id.clone();
+            meta.context_usage_tokens = tokens;
+            region.meta = Some(meta);
+        });
     }
 
     /// 切换为只读能力面（测试后端能力差异用）。

@@ -580,6 +580,26 @@ impl SessionResources for MockSessionResources {
         Ok(())
     }
 
+    async fn set_work_state(
+        &self,
+        id: &ThreadId,
+        state: peri_acp_types::thread::WorkState,
+    ) -> SessionResourceResult<()> {
+        self.ensure_writable()?;
+        self.write_work_state(id, state);
+        Ok(())
+    }
+
+    async fn set_context_usage(
+        &self,
+        id: &ThreadId,
+        tokens: Option<u64>,
+    ) -> SessionResourceResult<()> {
+        self.ensure_writable()?;
+        self.write_context_usage(id, tokens);
+        Ok(())
+    }
+
     async fn delete_session_tree(&self, _id: &ThreadId) -> SessionResourceResult<()> {
         Err(unsupported("delete_session_tree"))
     }

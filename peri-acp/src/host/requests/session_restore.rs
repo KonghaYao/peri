@@ -35,6 +35,22 @@ pub(crate) use fork_shared::handle_fork_shared;
 pub(crate) use load_shared::cleanup_unpublished_restore;
 pub(crate) use load_shared::{handle_load_shared, handle_resume_shared};
 
+/// 冷 child 恢复的会话装配：与 `session/load` 同一条路径（含可用性、绑定、frozen
+/// 与运行登记），但不回放历史、不发会话响应。
+///
+/// 调用方必须已经确认该 thread 仍为 `working` 并持有它的父 thread；装配只建立
+/// 运行实例，提醒接纳与启动由恢复协调器决定。
+pub(crate) async fn assemble_for_recovery(
+    cfg: &AcpServerConfig,
+    sessions: &crate::host::SharedSessions,
+    thread_id: &str,
+) -> Result<(), AcpError> {
+    let params = serde_json::json!({ "sessionId": thread_id });
+    load_shared::prepare_shared(&params, cfg, sessions)
+        .await
+        .map(|_| ())
+}
+
 async fn reject_closing_session(params: &Value, cfg: &AcpServerConfig) -> Result<(), AcpError> {
     let id = params
         .get("sessionId")

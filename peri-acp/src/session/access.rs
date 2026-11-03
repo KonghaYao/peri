@@ -6,12 +6,34 @@ use std::sync::{atomic::AtomicBool, Arc};
 use peri_acp_types::command_registry::CommandRegistry;
 use peri_acp_types::mcp_skills::McpSkillRegistry;
 use peri_acp_types::session::{AgentRuntime, SessionAccessPort};
-use peri_acp_types::thread::CancelPolicy;
+use peri_acp_types::thread::{CancelPolicy, ThreadId};
 use tokio_util::sync::CancellationToken;
 
 use super::SessionManager;
 
 impl SessionManager {
+    /// 由 thread 身份反查会话记录 key（恢复协调用；只读，不创建、不装配）。
+    ///
+    /// 当前两处发布点都令 `session_id == thread_id`，仍按 thread 身份查找以兼容
+    /// 未来的「进入 child 会话」路径。
+    pub fn session_id_for_thread(&self, thread_id: &ThreadId) -> Option<String> {
+        self.inner
+            .sessions
+            .iter()
+            .find(|entry| entry.value().thread_id == *thread_id)
+            .map(|entry| entry.key().clone())
+    }
+
+    /// 该 thread 是否已有本进程内的子 agent 运行实例（`active_agents` 登记）。
+    ///
+    /// 根 thread 的运行实例不在这里：它以 Host `SessionState.cancel_token` 表达。
+    pub fn thread_has_runtime(&self, thread_id: &ThreadId) -> bool {
+        self.inner
+            .sessions
+            .iter()
+            .any(|entry| entry.value().active_agents.contains_key(thread_id))
+    }
+
     pub(crate) fn user_input_mailbox_for(
         &self,
         session_id: &str,

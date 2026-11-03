@@ -193,6 +193,10 @@ mod session_history_page_tests;
 mod session_mq_tests;
 
 #[cfg(test)]
+#[path = "session_work_state_test.rs"]
+mod session_work_state_tests;
+
+#[cfg(test)]
 #[path = "session_rewind_candidates_test.rs"]
 mod session_rewind_candidates_tests;
 

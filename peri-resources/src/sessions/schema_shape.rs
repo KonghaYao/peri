@@ -86,6 +86,7 @@ const WORKSPACES_COLUMNS: &[&str] = &[
     "identity",
     "discovery",
 ];
+/// 当前（v14）`threads` 列：v13 的 16 列 + 工作意图与上下文占用快照。
 const THREADS_COLUMNS: &[&str] = &[
     "id",
     "title",
@@ -103,7 +104,49 @@ const THREADS_COLUMNS: &[&str] = &[
     "agent_status",
     "workspace_id",
     "archived",
+    "context_usage_tokens",
+    "work_state",
 ];
+
+/// v13 冻结的 `threads` 列（= 当前形状去掉两列工作快照）；v12 的 `threads` 形状与它相同。
+const V13_THREADS_COLUMNS: &[&str] = &[
+    "id",
+    "title",
+    "cwd",
+    "created_at",
+    "updated_at",
+    "message_count",
+    "parent_thread_id",
+    "snapshot_at_message_id",
+    "hidden",
+    "cancel_policy",
+    "config",
+    "frozen_context",
+    "inherited_context",
+    "agent_status",
+    "workspace_id",
+    "archived",
+];
+
+/// 当前（v14）的 `threads` 声明；`work_state` 非空，占用快照可空（NULL = 未知）。
+const CURRENT_THREADS_TABLE: TableShape = TableShape {
+    name: "threads",
+    optional: false,
+    columns: THREADS_COLUMNS,
+    not_null: &[
+        "cwd",
+        "created_at",
+        "updated_at",
+        "message_count",
+        "hidden",
+        "cancel_policy",
+        "agent_status",
+        "workspace_id",
+        "archived",
+        "work_state",
+    ],
+    primary_key: &["id"],
+};
 const MESSAGES_COLUMNS: &[&str] = &[
     "message_id",
     "thread_id",
@@ -157,7 +200,9 @@ const THREAD_MQ_COLUMNS: &[&str] = &[
     "original_draft",
 ];
 
-/// 上一代当前形状（v12）的逐表声明：本代当前形状去掉 `thread_mq` 后的**冻结快照**。
+/// 上一代当前形状（v12）的逐表声明：本代当前形状去掉 `thread_mq` 与两列工作快照后的
+/// **冻结快照**。v13 的 `threads` 形状与它相同，因此同一份声明同时服务 v12 与 v13 的
+/// 形状判定。
 ///
 /// 冻结而不是复用当前声明：v12 的库只有这些表，判定必须按代际比对，不能因为本代新增
 /// 了一张表就把健康的 v12 库判成漂移（那会关掉升级路径）。顺序与
@@ -187,7 +232,7 @@ pub(super) const V12_TABLES: &[TableShape] = &[
     TableShape {
         name: "threads",
         optional: false,
-        columns: THREADS_COLUMNS,
+        columns: V13_THREADS_COLUMNS,
         not_null: &[
             "cwd",
             "created_at",
@@ -284,18 +329,34 @@ pub(super) const THREAD_MQ_TABLE: TableShape = TableShape {
     primary_key: &["thread_id", "id"],
 };
 
-/// 当前形状（v13）的逐表声明：v12 的冻结声明 + 本代新增的 `thread_mq`。
+/// 上一代当前形状（v13）的逐表声明：v12 的冻结声明 + 本代（v14）未改形的 `thread_mq`。
 ///
-/// 用函数而不是 `const` 拼接：「本代形状」只能是「上一代声明 + 本代增量」，另抄一份
-/// 11 表声明会让两份形状第二次各自维护。
-pub(super) fn current_tables() -> Vec<&'static TableShape> {
+/// v13 与 v14 的差别只有 `threads` 末尾的两列，因此表集合与 v12 相比只多 `thread_mq`。
+pub(super) fn v13_tables() -> Vec<&'static TableShape> {
     V12_TABLES
         .iter()
         .chain(std::iter::once(&THREAD_MQ_TABLE))
         .collect()
 }
 
-/// 当前形状（v13）的表名序列：`V12_TABLES` + `thread_mq`。
+/// 当前形状（v14）的逐表声明：v13 的冻结声明，仅将 `threads` 换成带两列工作快照的声明。
+///
+/// 用函数而不是 `const` 拼接：「本代形状」只能是「上一代声明 + 本代增量」，另抄一份
+/// 12 表声明会让两份形状第二次各自维护。
+pub(super) fn current_tables() -> Vec<&'static TableShape> {
+    v13_tables()
+        .into_iter()
+        .map(|table| {
+            if table.name == CURRENT_THREADS_TABLE.name {
+                &CURRENT_THREADS_TABLE
+            } else {
+                table
+            }
+        })
+        .collect()
+}
+
+/// 当前形状（v14）的表名序列：`v13_tables()`（表集合在两代之间不变）。
 ///
 /// 远端打开按它逐表下发 `PRAGMA table_xinfo`：探测面与 [`check_current_shape`] 的判定面
 /// 必须逐表一致，否则会出现「读了却没判」的表。
@@ -575,19 +636,29 @@ pub(super) fn check_v12_shape(tables: &HashMap<String, Vec<ActualColumn>>) -> Re
     Ok(())
 }
 
-/// 完整当前形状（v13）：v12 的 10 张表 + `thread_mq` 逐表严格判定。
+/// 上一代当前形状（v13）：v12 的 10 张表 + `thread_mq` 逐表严格判定。
 ///
-/// 两段分开判定，因为 v12 是独立的升级来源：同一份读回结果既能回答「这是不是本代形状」，
-/// 也能回答「这是不是上一代形状」——两者的差别只是 `thread_mq` 一行。
-pub(super) fn check_current_shape(
-    tables: &HashMap<String, Vec<ActualColumn>>,
-) -> Result<(), String> {
+/// 两段分开判定，因为 v12 是独立的升级来源：同一份读回结果既能回答「这是不是 v13」，
+/// 也能回答「这是不是 v12」——两者的差别只是 `thread_mq`，与 v14 的差别只是 `threads`
+/// 末尾两列。
+pub(super) fn check_v13_shape(tables: &HashMap<String, Vec<ActualColumn>>) -> Result<(), String> {
     check_v12_shape(tables)?;
     let actual = tables
         .get(THREAD_MQ_TABLE.name)
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     check_strict(&THREAD_MQ_TABLE, actual)
+}
+
+/// 完整当前形状（v14）：`current_tables()` 逐表严格判定。
+pub(super) fn check_current_shape(
+    tables: &HashMap<String, Vec<ActualColumn>>,
+) -> Result<(), String> {
+    for table in current_tables() {
+        let actual = tables.get(table.name).map(Vec::as_slice).unwrap_or(&[]);
+        check_strict(table, actual)?;
+    }
+    Ok(())
 }
 
 /// 删除前的形状判定：缺表不算错（要不要删见 [`dropped_plan`]），存在即必须逐项相符。

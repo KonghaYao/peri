@@ -26,7 +26,7 @@ use peri_acp_types::session_resources::{
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::system_reminder::TrustedSystemReminder;
-use peri_acp_types::thread::{ThreadId, ThreadMeta};
+use peri_acp_types::thread::{ThreadId, ThreadMeta, WorkState};
 use peri_acp_types::workspace::{
     ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding,
 };
@@ -426,6 +426,15 @@ pub(crate) trait SessionDataPort: Send + Sync {
     /// 因此「这条会话属于哪棵树」只能由持有 canonical 父链的一侧回答。
     async fn session_root(&self, id: &ThreadId) -> SessionResourceResult<ThreadId>;
 
+    /// 恢复范围：先严格解析根，再读该根子树里仍为 `working` 的候选。
+    ///
+    /// 只读事实；根缺失或父链成环按 `Corrupt` 报告，不退回自身（范围变窄不能
+    /// 把未知当已知）。旧代际库没有工作快照列时读作 `idle`，自然零候选。
+    async fn recovery_scope(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::recovery::RecoveryScope>;
+
     /// 分页列举：过滤在数据端完成。
     async fn list_sessions(
         &self,
@@ -547,6 +556,22 @@ pub(crate) trait SessionDataPort: Send + Sync {
         id: &ThreadId,
         patch: &SessionMetaPatch,
     ) -> SessionResourceResult<()>;
+
+    /// 只写 durable 工作意图这一列，不改 `updated_at`，也不改运行态。
+    ///
+    /// 默认实现返回 `Unsupported`：工作意图要么如实持久化，要么显式拒绝。
+    async fn set_work_state(&self, _id: &ThreadId, _state: WorkState) -> SessionResourceResult<()> {
+        Err(super::failure::unsupported())
+    }
+
+    /// 只写上下文占用快照这一列；`None` 写 NULL（未知，不是零占用）。
+    async fn set_context_usage(
+        &self,
+        _id: &ThreadId,
+        _tokens: Option<u64>,
+    ) -> SessionResourceResult<()> {
+        Err(super::failure::unsupported())
+    }
 
     /// 删除会话树：删除即删除，数据删除之后本机与远端都不再持有该会话的终态证据。
     async fn delete_tree(&self, id: &ThreadId) -> SessionResourceResult<()>;

@@ -81,10 +81,10 @@ async fn current_store_has_eleven_business_tables_and_normal_history() {
     reopened.close().await;
 }
 
-/// 压缩掉的开发期代数（14..19）一律拒绝：不迁移、不改写，库留在原位由上一版二进制打开。
+/// 压缩掉的开发期代数（15..19）一律拒绝：不迁移、不改写，库留在原位由上一版二进制打开。
 #[tokio::test]
 async fn compressed_dev_generations_are_refused_without_touching_the_database() {
-    for version in 14..=19_i64 {
+    for version in 15..=19_i64 {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("threads.db");
         let store = SqliteThreadStore::new(&path).await.unwrap();

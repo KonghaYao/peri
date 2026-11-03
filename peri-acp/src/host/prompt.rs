@@ -15,6 +15,7 @@ use peri_acp_types::interaction::{
 };
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 use peri_acp_types::session::{ExecutionFailure, ExecutionFailureKind};
+use peri_acp_types::thread::{ThreadId, WorkState};
 use serde_json::Value;
 use tracing::info;
 
@@ -808,10 +809,12 @@ pub(super) async fn finish_prompt_turn(
     let mut commit_thread = None;
     let mut commit_generation = None;
     let mut commit_structure = None;
+    let mut turn_thread = None;
     let adoption_memory = {
         let mut sessions = sessions.lock().await;
         let mut adoption_memory = None;
         if let Some(state) = sessions.get_mut(session_id) {
+            turn_thread = Some(state.thread_id.clone());
             if result.persistence_inconsistent {
                 // 提交结果不确定：不保留任何可继续执行的旧正文，也不删除身份。
                 // 下一次 prompt / restore 从权威存储恢复（ReloadRequired）。
@@ -863,7 +866,7 @@ pub(super) async fn finish_prompt_turn(
     // 更新轻量 checkpoint/tail，不由 UI 事件反推提交成功。失败只撤销窗口可信元数据，
     // 不把已经提交成功的 turn 改成失败。
     if let (Some(resources), Some(thread_id), Some(generation), Some(structure)) = (
-        session_resources,
+        session_resources.as_ref(),
         commit_thread,
         commit_generation,
         commit_structure,
@@ -898,6 +901,27 @@ pub(super) async fn finish_prompt_turn(
                 if let Some(state) = sessions.get_mut(session_id) {
                     super::history_window::revoke(state);
                 }
+            }
+        }
+    }
+    // durable 收尾：先落续跑意图，再落占用快照。取消分支写 `stopped`，此后再无 `idle`
+    // 写入覆盖它——这就是 Stop 意图不被收尾覆盖的顺序保证。提交结果不确定时不写，
+    // 保留最后一次已提交的事实。
+    if let Some(work_state) =
+        WorkState::after_prompt_turn(result.stop_reason, result.persistence_inconsistent)
+    {
+        if let (Some(resources), Some(thread_id)) =
+            (session_resources.as_ref(), turn_thread.as_ref())
+        {
+            let thread_id = ThreadId::from(thread_id.clone());
+            if let Err(error) = resources.set_work_state(&thread_id, work_state).await {
+                tracing::warn!(session_id, %error, "work state write after prompt failed");
+            }
+            if let Err(error) = resources
+                .set_context_usage(&thread_id, result.context_usage_tokens)
+                .await
+            {
+                tracing::warn!(session_id, %error, "context usage write after prompt failed");
             }
         }
     }

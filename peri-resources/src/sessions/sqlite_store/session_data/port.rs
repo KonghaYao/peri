@@ -1,6 +1,7 @@
 //! `SessionDataPort` 的 SQLite 接线；数据面主体文件只保留类型、模块装配与测试挂载。
 
 use super::*;
+use crate::sessions::sqlite_store::row_mapping::THREAD_META_COLUMNS;
 
 #[async_trait]
 impl SessionDataPort for SqliteSessionData {
@@ -281,7 +282,7 @@ impl SessionDataPort for SqliteSessionData {
         let mut tx = sqlx::Connection::begin(&mut *connection)
             .await
             .map_err(|error| map_sqlx(&error))?;
-        let meta = context::load_meta_on(&mut tx, id)
+        let meta = context::load_meta_on(&mut tx, id, THREAD_META_COLUMNS)
             .await
             .map_err(read_failure)?;
         let parent = meta.parent_thread_id.clone();
@@ -300,7 +301,7 @@ impl SessionDataPort for SqliteSessionData {
         let flags = compaction::load_flags_on(&mut tx, id)
             .await
             .map_err(read_failure)?;
-        let inherited = context::load_inherited_context_on(&mut tx, id)
+        let inherited = context::load_inherited_context_on(&mut tx, id, THREAD_META_COLUMNS)
             .await
             .map_err(read_failure)?;
         // 只读事务：没有写入效果可以证明，提交失败仍按原因分类，不判 `Unknown`。
@@ -331,7 +332,7 @@ impl SessionDataPort for SqliteSessionData {
         let mut tx = sqlx::Connection::begin(&mut *connection)
             .await
             .map_err(|error| map_sqlx(&error))?;
-        let meta = context::load_meta_on(&mut tx, id)
+        let meta = context::load_meta_on(&mut tx, id, THREAD_META_COLUMNS)
             .await
             .map_err(read_failure)?;
         let parent = meta.parent_thread_id.clone();
@@ -350,7 +351,7 @@ impl SessionDataPort for SqliteSessionData {
         let flags = compaction::load_active_flags_on(&mut tx, id)
             .await
             .map_err(read_failure)?;
-        let inherited = context::load_inherited_context_on(&mut tx, id)
+        let inherited = context::load_inherited_context_on(&mut tx, id, THREAD_META_COLUMNS)
             .await
             .map_err(read_failure)?;
         tx.commit().await.map_err(|error| map_sqlx(&error))?;
@@ -391,7 +392,7 @@ impl SessionDataPort for SqliteSessionData {
         let mut tx = sqlx::Connection::begin(&mut *connection)
             .await
             .map_err(|error| map_sqlx(&error))?;
-        let meta = context::load_meta_on(&mut tx, id)
+        let meta = context::load_meta_on(&mut tx, id, THREAD_META_COLUMNS)
             .await
             .map_err(read_failure)?;
         let state = match binding_row_state_on(&mut tx, id).await? {
@@ -418,7 +419,7 @@ impl SessionDataPort for SqliteSessionData {
         let mut tx = sqlx::Connection::begin(&mut *connection)
             .await
             .map_err(|error| map_sqlx(&error))?;
-        let payloads = context::load_context_payloads_on(&mut tx, id)
+        let payloads = context::load_context_payloads_on(&mut tx, id, THREAD_META_COLUMNS)
             .await
             .map_err(read_failure)?;
         tx.commit().await.map_err(|error| map_sqlx(&error))?;
@@ -601,6 +602,59 @@ impl SessionDataPort for SqliteSessionData {
         Ok(thread_root_on(&mut connection, id)
             .await
             .unwrap_or_else(|_| id.clone()))
+    }
+
+    async fn recovery_scope(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::recovery::RecoveryScope> {
+        let mut connection = self
+            .database
+            .pool
+            .acquire()
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        // 根必须严格解析：缺失或成环时范围不可解释，退回自身会把未知当已知。
+        let root = match strict_thread_root_on(&mut connection, id).await {
+            Ok(root) => root,
+            Err(ThreadRootFailure::Missing) => return Err(corrupt("thread ancestry is missing")),
+            Err(ThreadRootFailure::Cyclic) => return Err(corrupt("cyclic thread ancestry")),
+            Err(ThreadRootFailure::Store(error)) => return Err(read_failure(error)),
+        };
+        let (projection, filter) = self.database.recovery_scope_sql_parts();
+        let rows: Vec<(String, Option<String>, Option<i64>, String)> = sqlx::query_as(
+            sqlx::AssertSqlSafe(recovery_scope_statement_with(projection, filter)),
+        )
+        .bind(root.as_str())
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(|error| map_sqlx(&error))?;
+        let mut candidates = Vec::with_capacity(rows.len());
+        for (thread_id, parent_thread_id, usage, state) in rows {
+            let state = state
+                .parse::<peri_acp_types::thread::WorkState>()
+                .map_err(|_| corrupt("stored work state is not a known value"))?;
+            // SQL 已按 working 过滤；这里只防御未来投影漂移，不静默改成候选。
+            if state != peri_acp_types::thread::WorkState::Working {
+                continue;
+            }
+            let context_usage_tokens = match usage {
+                None => None,
+                Some(usage) => Some(
+                    u64::try_from(usage)
+                        .map_err(|_| corrupt("stored context usage is negative"))?,
+                ),
+            };
+            candidates.push(peri_acp_types::recovery::RecoveryCandidate {
+                thread_id,
+                parent_thread_id,
+                context_usage_tokens,
+            });
+        }
+        Ok(peri_acp_types::recovery::RecoveryScope {
+            root_thread_id: root,
+            candidates,
+        })
     }
 
     async fn list_sessions(
@@ -977,6 +1031,23 @@ impl SessionDataPort for SqliteSessionData {
         patch: &SessionMetaPatch,
     ) -> SessionResourceResult<()> {
         self.update_stored_meta(id, patch).await
+    }
+
+    async fn set_work_state(&self, id: &ThreadId, state: WorkState) -> SessionResourceResult<()> {
+        // 单列写入与迁移桥共用同一份 SQL：不碰 `updated_at`，不改运行态。
+        session_rows::write_work_state(&self.database.pool, id, state)
+            .await
+            .map_err(write_failure)
+    }
+
+    async fn set_context_usage(
+        &self,
+        id: &ThreadId,
+        tokens: Option<u64>,
+    ) -> SessionResourceResult<()> {
+        session_rows::write_context_usage(&self.database.pool, id, tokens)
+            .await
+            .map_err(write_failure)
     }
 
     async fn delete_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {

@@ -15,6 +15,7 @@
 //! 阶段一/阶段二落在同一个只读事务里：候选身份与取回的正文来自同一快照。
 
 use super::*;
+use crate::sessions::sqlite_store::row_mapping::THREAD_META_COLUMNS;
 use peri_acp_types::session_resources::{rewind_candidate, RewindCandidate};
 
 /// 阶段一：user 行身份 + 存储序键，keyset 向更早方向，最多 `limit` 行。
@@ -98,7 +99,7 @@ impl SqliteSessionData {
         }
 
         if candidates.len() < limit {
-            let inherited = context::load_inherited_context_on(&mut tx, id)
+            let inherited = context::load_inherited_context_on(&mut tx, id, THREAD_META_COLUMNS)
                 .await
                 .map_err(read_failure)?;
             for payload in inherited.payloads.iter().rev() {

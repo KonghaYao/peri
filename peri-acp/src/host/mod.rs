@@ -106,6 +106,8 @@ mod prepared_tests;
 mod prompt;
 mod prompt_dispatch;
 pub mod prompt_handle;
+/// 进入会话时的恢复（设计 §3/§4）：范围、实例判定、提醒接纳与延后启动。
+mod recovery;
 mod requests;
 mod server_loop;
 mod shutdown;
@@ -515,6 +517,14 @@ async fn run_acp_server_inner(
     );
 
     let connection_cancellation = connection.lock().await.cancellation();
+    // 进入会话时的恢复协调：同一进程内一次构造，跨请求复用 single-flight 与启动门。
+    let recovery = recovery::HostSessionRecovery::new(
+        Arc::clone(&cfg.session_resources),
+        cfg.session_manager.clone(),
+        Arc::clone(&sessions),
+        Arc::clone(&cfg),
+        Arc::clone(&cont_tx),
+    );
     server_loop::ServerLoop {
         transport: &transport,
         cfg: &cfg,
@@ -523,6 +533,7 @@ async fn run_acp_server_inner(
         cont_tx: &cont_tx,
         connection: &connection,
         connection_cancellation: &connection_cancellation,
+        recovery: &recovery,
     }
     .run()
     .await;

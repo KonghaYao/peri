@@ -120,7 +120,16 @@ async fn thread_mq_is_a_mandatory_current_table_with_exactly_the_pending_columns
         .unwrap();
     let error = check_current_shape(&tables).unwrap_err();
     assert!(error.contains("thread_mq"), "{error}");
-    // v12 的冻结声明不含它：上一代形状仍然可判，升级路径不会被关掉。
+    // v12 的冻结声明不含它，也不含 v14 的两列：上一代形状仍然可判，升级路径不会被关掉。
+    execute(
+        &mut connection,
+        "ALTER TABLE threads DROP COLUMN context_usage_tokens;
+         ALTER TABLE threads DROP COLUMN work_state;",
+    )
+    .await;
+    let tables = read_local_columns(&mut connection, CURRENT_COLUMNS_SQL)
+        .await
+        .unwrap();
     check_v12_shape(&tables).unwrap();
 }
 
@@ -165,14 +174,20 @@ fn missing_table_is_refused() {
     assert!(check_strict(table, &actual).is_err());
 }
 
-/// 压缩前形状的列序列缺失即失败：`workspace_id` / `archived` 是当前形状才有的列。
+/// 压缩前形状的列序列缺失即失败：`workspace_id` / `archived` 与两列工作快照都是当前形状
+/// 才有的列。
 #[test]
 fn current_only_columns_are_not_expected_in_the_input_shape() {
     let table = input_table("threads").unwrap();
     let actual: Vec<ActualColumn> = THREADS_COLUMNS
         .iter()
         .copied()
-        .filter(|name| *name != "workspace_id" && *name != "archived")
+        .filter(|name| {
+            !matches!(
+                *name,
+                "workspace_id" | "archived" | "context_usage_tokens" | "work_state"
+            )
+        })
         .map(|name| ActualColumn::new(name, false, 0))
         .collect();
     check_input(table, &actual).unwrap();

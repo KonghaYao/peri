@@ -277,3 +277,9 @@ mod legacy_relink;
 
 #[path = "resources_mq_test.rs"]
 mod mq;
+
+#[path = "resources_work_state_test.rs"]
+mod work_state;
+
+#[path = "resources_recovery_scope_test.rs"]
+mod recovery_scope;

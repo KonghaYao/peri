@@ -26,7 +26,7 @@ use crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder_for_c
 use crate::agent::LangfuseBridgeLike;
 use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
 use peri_acp_types::session_resources::{SessionMetaPatch, SessionResources};
-use peri_acp_types::thread::{AgentStatus, ThreadId};
+use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
 
 pub(super) struct BackgroundStartGate {
     pub(super) alive: Arc<parking_lot::Mutex<bool>>,
@@ -211,6 +211,23 @@ pub(super) async fn spawn_background_subagent(
             return;
         }
         unstarted_registration.armed = false;
+        // 执行已获准开跑：先提交续跑意图再进入 loop，进程若在此刻退出，下次进入仍
+        // 能看出这个 child 需要继续。辅助写失败不阻断执行。
+        if let Some(resources) = session_resources.as_deref() {
+            if let Err(error) = resources
+                .set_work_state(
+                    &ThreadId::from(child_thread_id_for_task.clone()),
+                    WorkState::Working,
+                )
+                .await
+            {
+                tracing::warn!(
+                    thread_id = %child_thread_id_for_task,
+                    %error,
+                    "subagent work state write failed"
+                );
+            }
+        }
         let started_at = peri_time::monotonic_now();
         // context 将被 move 进 run_react_loop，turn_id 提前提取（Start/Stop emit 用）
         let execution_turn = v2_ctx.context.session.turn.clone();
@@ -741,6 +758,17 @@ async fn persist_background_terminal(
             result.output
         );
         return false;
+    }
+    // 终态与续跑意图同一 seam 收尾：被取消保留停止意图，完成/失败不再自动续跑。
+    // 意图是辅助事实：写失败不能吞掉已经产出的结果，保留最后提交的值并留日志。
+    if let Err(error) = store
+        .set_work_state(
+            &ThreadId::from(thread_id),
+            WorkState::after_agent_terminal(status),
+        )
+        .await
+    {
+        tracing::warn!(%thread_id, %error, "subagent terminal work state write failed");
     }
     true
 }

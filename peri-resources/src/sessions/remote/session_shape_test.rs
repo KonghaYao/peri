@@ -15,7 +15,7 @@ use peri_acp_types::session_resources::{
     FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionMetaPatch, SessionResourceErrorKind,
 };
 use peri_acp_types::store::{InheritedContext, MessageFlags, PersistedPayload};
-use peri_acp_types::thread::{AgentStatus, CancelPolicy};
+use peri_acp_types::thread::{AgentStatus, CancelPolicy, WorkState};
 use peri_acp_types::workspace::{
     ProjectId, ScopedThreadQuery, SessionBinding, ThreadScope, WorkspaceId,
 };
@@ -78,15 +78,55 @@ fn meta_projection_matches_decoding_indices() {
             "s.cancel_policy",
             "s.config",
             "s.agent_status",
+            "s.context_usage_tokens",
+            "s.work_state",
         ]
     );
     assert_eq!(columns.len(), session_sql::META_COLUMN_COUNT);
+    // 下标由投影末尾推出：追加列时列数常量与解码下标同时移动。
+    assert_eq!(session_sql::META_CONTEXT_USAGE_TOKENS, 13);
+    assert_eq!(session_sql::META_WORK_STATE, 14);
+    assert_eq!(
+        session_sql::META_COLUMN_COUNT,
+        session_sql::META_WORK_STATE + 1
+    );
+}
+
+/// 旧代投影与当前投影**同形**：同一套解码、同一组下标，只有最后两列换成占位常量。
+///
+/// 这条断言把「列数常量 ↔ SELECT 列表 ↔ codec 下标」钉在一起：三者任一漂移都会失败。
+#[test]
+fn legacy_projection_keeps_the_same_meta_shape_for_one_codec() {
+    let current = projected_columns(session_sql::META_PROJECTION);
+    let legacy = projected_columns(session_sql::META_PROJECTION_LEGACY);
+    assert_eq!(legacy.len(), current.len(), "列数必须一致");
+    assert_eq!(legacy.len(), session_sql::META_COLUMN_COUNT);
+    assert_eq!(
+        legacy[..session_sql::META_AGENT_STATUS],
+        current[..session_sql::META_AGENT_STATUS],
+        "占位只替换两列工作快照，前缀逐列相同"
+    );
+    assert_eq!(
+        &legacy[session_sql::META_CONTEXT_USAGE_TOKENS..],
+        ["context_usage_tokens", "work_state"]
+    );
+    assert_eq!(
+        legacy[session_sql::META_CONTEXT_USAGE_TOKENS],
+        "context_usage_tokens"
+    );
+    assert!(
+        session_sql::META_PROJECTION_LEGACY.contains("NULL as context_usage_tokens")
+            && session_sql::META_PROJECTION_LEGACY.contains("'idle' as work_state"),
+        "旧代两列读作本代默认值，而不是读取不存在的列"
+    );
 }
 
 #[test]
 fn bigger_projections_extend_the_same_meta_source() {
     assert!(session_sql::FACT_PROJECTION.starts_with(session_sql::META_PROJECTION));
     assert!(session_sql::PAGE_PROJECTION.starts_with(session_sql::META_PROJECTION));
+    assert!(session_sql::FACT_PROJECTION_LEGACY.starts_with(session_sql::META_PROJECTION_LEGACY));
+    assert!(session_sql::PAGE_PROJECTION_LEGACY.starts_with(session_sql::META_PROJECTION_LEGACY));
     assert_eq!(
         appended_columns(session_sql::FACT_PROJECTION),
         [
@@ -252,6 +292,8 @@ fn fact_row() -> Vec<Value> {
         text("cascade"),
         Value::Null,
         text("active"),
+        Value::Integer(4096),
+        text("working"),
         text("{\"frozen\":true}"),
         Value::Null,
         Value::Integer(1),
@@ -274,6 +316,19 @@ fn meta_row_decodes_field_by_field() {
     assert!(!meta.hidden);
     assert_eq!(meta.cancel_policy, CancelPolicy::Cascade);
     assert_eq!(meta.agent_status, AgentStatus::Active);
+    assert_eq!(meta.work_state, WorkState::Working);
+    assert_eq!(meta.context_usage_tokens, Some(4096));
+}
+
+/// 旧代投影送的占位值（`NULL` / `'idle'`）经同一份解码得到本代默认值。
+#[test]
+fn legacy_placeholders_decode_to_idle_and_unknown_usage() {
+    let mut row = fact_row();
+    row[session_sql::META_CONTEXT_USAGE_TOKENS] = Value::Null;
+    row[session_sql::META_WORK_STATE] = text("idle");
+    let meta = codec::decode_meta(&row).expect("legacy placeholder row is a valid meta row");
+    assert_eq!(meta.work_state, WorkState::Idle);
+    assert_eq!(meta.context_usage_tokens, None);
 }
 
 #[test]
@@ -335,6 +390,18 @@ fn broken_meta_cells_are_corrupt_not_defaulted() {
     let mut bad_flag = fact_row();
     bad_flag[session_sql::META_HIDDEN] = Value::Integer(7);
     assert!(codec::decode_meta(&bad_flag).is_err());
+
+    // 工作快照两列同样不宽容：非法枚举值与负计数都是损坏，不落回 Idle / None。
+    let mut bad_state = fact_row();
+    bad_state[session_sql::META_WORK_STATE] = text("resumable");
+    assert!(matches!(
+        codec::decode_meta(&bad_state),
+        Err(error) if matches!(error.kind(), SessionResourceErrorKind::Corrupt { .. })
+    ));
+
+    let mut negative_usage = fact_row();
+    negative_usage[session_sql::META_CONTEXT_USAGE_TOKENS] = Value::Integer(-1);
+    assert!(codec::decode_meta(&negative_usage).is_err());
 }
 
 // ─── 历史行编解码 ─────────────────────────────────────────────────────────────
@@ -642,10 +709,10 @@ async fn draft_revocation_cleans_environment_without_cascade_and_preserves_commi
 #[test]
 fn read_statements_are_read_only_and_parameterized() {
     let single_id_reads = [
-        session_sql::select_session_statement("s"),
-        session_sql::select_meta_statement("s"),
-        session_sql::select_children_statement("s"),
-        session_sql::select_tree_statement("s"),
+        session_sql::select_session_statement("s", session_sql::MetaProjection::Current),
+        session_sql::select_meta_statement("s", session_sql::MetaProjection::Current),
+        session_sql::select_children_statement("s", session_sql::MetaProjection::Current),
+        session_sql::select_tree_statement("s", session_sql::MetaProjection::Current),
         session_sql::select_messages_statement("s"),
         session_sql::select_root_statement("s"),
         session_sql::select_active_messages_statement("s"),
@@ -661,7 +728,11 @@ fn read_statements_are_read_only_and_parameterized() {
     // 树查询是递归 CTE，不是「查一层再查一层」。
     assert!(single_id_reads[3].sql.starts_with("WITH RECURSIVE"));
 
-    let page = session_sql::page_statement(&query(ThreadScope::All, None)).expect("bindable");
+    let page = session_sql::page_statement(
+        &query(ThreadScope::All, None),
+        session_sql::MetaProjection::Current,
+    )
+    .expect("bindable");
     assert!(page.is_read_only(), "分页列举不得写: {}", page.sql);
     assert_eq!(
         page.params.len(),
@@ -705,13 +776,15 @@ fn active_and_bounded_flag_reads_carry_their_own_scope_conditions() {
 fn page_statement_binds_scope_cursor_and_limit() {
     let project = ProjectId::from_str_expect("11111111-1111-1111-1111-111111111111");
     let all = query(ThreadScope::All, None);
-    let spec = session_sql::page_statement(&all).expect("bindable");
+    let spec =
+        session_sql::page_statement(&all, session_sql::MetaProjection::Current).expect("bindable");
     assert_eq!(spec.params[0], Value::Integer(0));
     assert_eq!(spec.params[1], Value::Null);
     assert_eq!(spec.params[3], Value::Integer(0), "无游标时不带比较值");
 
     let scoped = query(ThreadScope::Project(project), None);
-    let spec = session_sql::page_statement(&scoped).expect("bindable");
+    let spec = session_sql::page_statement(&scoped, session_sql::MetaProjection::Current)
+        .expect("bindable");
     assert_eq!(spec.params[0], Value::Integer(1));
     assert_eq!(spec.params[1], Value::Text(project.to_string()));
 
@@ -726,7 +799,8 @@ fn page_statement_binds_scope_cursor_and_limit() {
         },
         Some(cursor),
     );
-    let spec = session_sql::page_statement(&paged).expect("bindable");
+    let spec = session_sql::page_statement(&paged, session_sql::MetaProjection::Current)
+        .expect("bindable");
     assert_eq!(spec.params[0], Value::Integer(3));
     assert_eq!(spec.params[2], Value::Text("sub".to_owned()));
     assert_eq!(spec.params[3], Value::Integer(1));
@@ -744,13 +818,18 @@ fn page_statement_binds_scope_cursor_and_limit() {
     // 上限被夹到 200：请求 1000 行时仍然只取 201 行。
     let mut oversized = query(ThreadScope::All, None);
     oversized.limit = 1000;
-    let spec = session_sql::page_statement(&oversized).expect("bindable");
+    let spec = session_sql::page_statement(&oversized, session_sql::MetaProjection::Current)
+        .expect("bindable");
     assert_eq!(spec.params[6], Value::Integer(201));
 
     // 两次不同 scope 的 SQL 文本相同：过滤值全在参数里。
     assert_eq!(
-        session_sql::page_statement(&all).expect("bindable").sql,
-        session_sql::page_statement(&scoped).expect("bindable").sql
+        session_sql::page_statement(&all, session_sql::MetaProjection::Current)
+            .expect("bindable")
+            .sql,
+        session_sql::page_statement(&scoped, session_sql::MetaProjection::Current)
+            .expect("bindable")
+            .sql
     );
 }
 
@@ -810,7 +889,8 @@ impl OpaqueIdExt for WorkspaceId {
 /// 语句形状断言不依赖客户端：`StatementSpec` 的 Debug 保留绑定值供诊断。
 #[test]
 fn statement_debug_preserves_bound_values() {
-    let spec: StatementSpec = session_sql::select_meta_statement("session-secret");
+    let spec: StatementSpec =
+        session_sql::select_meta_statement("session-secret", session_sql::MetaProjection::Current);
     let rendered = format!("{spec:?}");
     assert!(rendered.contains("session-secret"));
 }

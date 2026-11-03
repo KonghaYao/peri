@@ -44,8 +44,9 @@ use super::history::{
 };
 use crate::sessions::sqlite_store::compaction::ACTIVE_FLAGS_SQL;
 use crate::sessions::sqlite_store::context::{
-    meta_by_id_statement, ACTIVE_PAYLOADS_SQL, INHERITED_CONTEXT_SQL, PARENT_THREAD_ID_SQL,
+    meta_by_id_statement_with, ACTIVE_PAYLOADS_SQL, INHERITED_CONTEXT_SQL, PARENT_THREAD_ID_SQL,
 };
+use crate::sessions::sqlite_store::row_mapping::THREAD_META_COLUMNS;
 use peri_acp_types::history_page::HistoryCursor;
 use peri_acp_types::messages::{BaseMessage, MessageId};
 use peri_acp_types::session_resources::{
@@ -393,7 +394,7 @@ async fn explain_plan(pool: &SqlitePool, sql: &str, params: &[Param<'_>]) -> Vec
 
 /// 初始恢复（门面 `load_active_snapshot`）的语句链与计划，顺序 = `session_data.rs` 里的执行顺序。
 async fn restore_chain_plans(pool: &SqlitePool, thread: &str) -> Vec<PlanEvidence> {
-    let meta = meta_by_id_statement();
+    let meta = meta_by_id_statement_with(THREAD_META_COLUMNS);
     vec![
         PlanEvidence {
             label: "load_meta_on",

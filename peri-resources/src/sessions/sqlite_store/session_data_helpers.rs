@@ -39,28 +39,74 @@ pub(in crate::sessions) async fn thread_tree_on(
     Ok(rows.into_iter().map(|(id,)| id).collect())
 }
 
+/// 会话树根解析失败：根缺失与成环都让「这棵树」不可解释。
+pub(in crate::sessions) enum ThreadRootFailure {
+    /// 父链上某一行不存在。
+    Missing,
+    /// 父链回到已访问的节点。
+    Cyclic,
+    /// 读取本身失败（锁、IO、解码）。
+    Store(anyhow::Error),
+}
+
 /// 会话树根的持久化事实：沿 parent 链向上回溯。
 pub(in crate::sessions) async fn thread_root_on(
     connection: &mut SqliteConnection,
     id: &ThreadId,
 ) -> anyhow::Result<ThreadId> {
+    match strict_thread_root_on(connection, id).await {
+        Ok(root) => Ok(root),
+        Err(ThreadRootFailure::Missing) => anyhow::bail!("session row is missing"),
+        Err(ThreadRootFailure::Cyclic) => anyhow::bail!("cyclic thread ancestry"),
+        Err(ThreadRootFailure::Store(error)) => Err(error),
+    }
+}
+
+/// 同 [`thread_root_on`]，但把「缺失 / 成环」作为可分类事实交给调用方。
+///
+/// 恢复范围必须严格解析根：退回自身会让范围悄悄变窄，把未知父链当成已知的根。
+pub(in crate::sessions) async fn strict_thread_root_on(
+    connection: &mut SqliteConnection,
+    id: &ThreadId,
+) -> Result<ThreadId, ThreadRootFailure> {
     let mut current = id.clone();
     let mut visited = HashSet::new();
     loop {
         if !visited.insert(current.clone()) {
-            anyhow::bail!("cyclic thread ancestry");
+            return Err(ThreadRootFailure::Cyclic);
         }
         let row: Option<(Option<String>,)> =
             sqlx::query_as("SELECT parent_thread_id FROM threads WHERE id = ?1")
                 .bind(current.as_str())
                 .fetch_optional(&mut *connection)
-                .await?;
+                .await
+                .map_err(|error| ThreadRootFailure::Store(error.into()))?;
         match row {
             Some((Some(parent),)) => current = parent,
             Some((None,)) => return Ok(current),
-            None => anyhow::bail!("session row is missing"),
+            None => return Err(ThreadRootFailure::Missing),
         }
     }
+}
+
+/// 恢复范围查询的语句原文：候选 = 根子树中工作意图仍为 `working` 的 thread。
+///
+/// `projection` / `filter` 由 metadata 投影的同一 legacy 开关产出（见
+/// `SqliteSessionDatabase::recovery_scope_sql_parts`）；`UNION`（非 `ALL`）保证环上终止。
+/// 参数只有 `?1 = 根 thread`。
+pub(in crate::sessions) fn recovery_scope_statement_with(projection: &str, filter: &str) -> String {
+    format!(
+        "WITH RECURSIVE thread_scope(id) AS (
+            SELECT id FROM threads WHERE id = ?1
+            UNION
+            SELECT child.id FROM threads AS child
+            JOIN thread_scope AS parent ON child.parent_thread_id = parent.id
+        )
+        SELECT t.id, t.parent_thread_id, {projection}
+        FROM threads AS t JOIN thread_scope AS scope ON scope.id = t.id
+        WHERE {filter}
+        ORDER BY t.created_at ASC"
+    )
 }
 
 /// 绑定行的事实：绑定、指向已消失的登记、或没有绑定行。

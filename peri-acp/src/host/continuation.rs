@@ -418,7 +418,8 @@ pub(crate) async fn run_continuation_scheduler(
             continue;
         }
         let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(&cfg);
-        if (req.mq_steering && !super::activation::mq_allowed(local, &req.session_id).await)
+        if (req.mq_steering
+            && !super::activation::mq_steering_allowed(local, &req.session_id).await)
             || (req.pending_result
                 && !super::activation::result_allowed(local, &req.session_id).await)
         {

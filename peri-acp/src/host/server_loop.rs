@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use peri_acp_types::recovery::SessionRecovery;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -22,6 +23,8 @@ pub(super) struct ServerLoop<'a> {
         &'a Arc<tokio::sync::mpsc::UnboundedSender<crate::session::executor::ContinuationRequest>>,
     pub(super) connection: &'a Arc<tokio::sync::Mutex<ConnectionContext>>,
     pub(super) connection_cancellation: &'a CancellationToken,
+    /// 进入会话时的恢复协调（设计 §3/§4）：只由 setup 请求触发，启动延后到响应之后。
+    pub(super) recovery: &'a super::recovery::HostSessionRecovery,
 }
 
 impl ServerLoop<'_> {
@@ -735,6 +738,28 @@ impl ServerLoop<'_> {
                 result = Err(error);
             }
         }
+        // 进入会话时的恢复（设计 §3/§4）：装配成功后、响应发出前完成准备。
+        // 生命周期锁已在上面释放；准备阶段只读范围并接纳提醒，不启动执行。
+        let mut recovery_report = None;
+        if result.is_ok() && starts_session_recovery(&method) {
+            if let Some(session_id) = session_setup(&method, &params, result.as_ref().ok()) {
+                match self.enter_recovery(&session_id).await {
+                    Ok(Some(report)) => recovery_report = Some(report),
+                    Ok(None) => {}
+                    // 根/环/只读/提醒接纳失败：历史已回放，但执行不得放行。
+                    Err(error) => {
+                        result = Err(recovery_failure(error));
+                    }
+                }
+            }
+        }
+        // `session/new` 的进入在响应之后：新 thread 的工作意图恒为库默认的 idle，
+        // 不可能有候选；放在响应前只会推迟会话响应（响应必须是首个帧）。
+        let new_session_id = if method == "session/new" && result.is_ok() {
+            session_setup(&method, &params, result.as_ref().ok())
+        } else {
+            None
+        };
         if result.is_ok() && super::user_input::starts_execution(&method) {
             if let Some(session_id) = params.get("sessionId").and_then(Value::as_str) {
                 super::user_input::schedule_mailbox(
@@ -806,7 +831,23 @@ impl ServerLoop<'_> {
             }
         }
         let response_sent = diagnostics.send(transport.as_ref(), result).await.is_ok();
+        // 恢复的启动门：响应已发出才放行执行；发送失败则丢弃本次启动资格。
+        match (response_sent, recovery_report.take()) {
+            (true, Some(report)) => self.recovery.launch(&report).await,
+            (false, Some(report)) => self.recovery.discard(&report),
+            _ => {}
+        }
         if response_sent {
+            // 新建会话的进入只可能是空范围：结果不需要启动，失败只记日志。
+            if let Some(session_id) = new_session_id.as_deref() {
+                if let Err(error) = self.enter_recovery(session_id).await {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %error,
+                        "new session recovery entry failed"
+                    );
+                }
+            }
             if let Some(session_id) = setup_session_id {
                 let environment = sessions
                     .lock()
@@ -830,6 +871,31 @@ impl ServerLoop<'_> {
                 );
             }
         }
+    }
+
+    /// 进入已装配会话的恢复入口：thread 身份取自已发布的 `SessionState`。
+    ///
+    /// 没有发布 thread 身份时不进入恢复（只记日志）：恢复必须绑定到确切的 thread，
+    /// 不能拿 session id 猜。
+    async fn enter_recovery(
+        &self,
+        session_id: &str,
+    ) -> Result<
+        Option<peri_acp_types::recovery::RecoveryReport>,
+        peri_acp_types::recovery::RecoveryError,
+    > {
+        let thread_id = {
+            let states = self.sessions.lock().await;
+            states.get(session_id).map(|state| state.thread_id.clone())
+        };
+        let Some(thread_id) = thread_id else {
+            tracing::warn!(
+                session_id = %session_id,
+                "session recovery skipped: no thread identity was published"
+            );
+            return Ok(None);
+        };
+        self.recovery.enter(&thread_id).await.map(Some)
     }
 
     async fn dispatch_notification(&self, method: String, params: Value) {
@@ -922,6 +988,21 @@ pub(super) async fn register_session_endpoint(
             "session interaction endpoint registration rejected"
         );
     }
+}
+
+/// 恢复失败的出口映射：`-32011`；消息保留恢复分类与 thread，不解析文本。
+fn recovery_failure(
+    error: peri_acp_types::recovery::RecoveryError,
+) -> crate::transport::types::AcpError {
+    crate::transport::types::AcpError::new(-32011, format!("session recovery failed: {error}"))
+}
+
+/// 进入会话时触发恢复的 setup 方法。`session/fork` 派生新会话，不恢复旧工作。
+///
+/// `session/new` 不在此列：新 thread 的工作意图恒为 `idle`，进入在响应之后完成
+/// （见 `dispatch_request`），避免恢复准备推迟会话响应。
+fn starts_session_recovery(method: &str) -> bool {
+    matches!(method, "session/load" | "session/resume")
 }
 
 /// 会话 setup 方法涉及的会话 id：`session/new` | `session/fork` 取响应里的新 id，
