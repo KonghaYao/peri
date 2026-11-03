@@ -87,7 +87,7 @@ pub(in crate::host) fn initialize_runtime(
         };
         ctx.session_access = Some(Arc::new(MockSessionAccess {
             session_id: ctx.session_id.clone(),
-            inbox: Arc::new(SessionInbox::new(Arc::new(queue))),
+            queue,
             tasks: Arc::new(peri_agent::agent::async_tasks::TaskManager::new()),
             idle: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             _directory: directory,
@@ -108,7 +108,7 @@ pub(in crate::host) fn initialize_runtime(
 
 struct MockSessionAccess {
     session_id: String,
-    inbox: Arc<SessionInbox>,
+    queue: MessageQueue,
     tasks: Arc<dyn peri_acp_types::tasks::TaskManager>,
     idle: Arc<std::sync::atomic::AtomicBool>,
     _directory: Option<Arc<tempfile::TempDir>>,
@@ -116,10 +116,11 @@ struct MockSessionAccess {
 
 impl SessionAccessPort for MockSessionAccess {
     fn v2_message_queue(&self, session_id: &str) -> Option<MessageQueue> {
-        (session_id == self.session_id).then(|| self.inbox.queue().clone())
+        (session_id == self.session_id).then(|| self.queue.clone())
     }
     fn session_inbox(&self, session_id: &str) -> Option<Arc<SessionInbox>> {
-        (session_id == self.session_id).then(|| self.inbox.clone())
+        (session_id == self.session_id)
+            .then(|| Arc::new(SessionInbox::new(Arc::new(self.queue.clone()))))
     }
     fn idle_suspended_flag(&self, session_id: &str) -> Option<Arc<std::sync::atomic::AtomicBool>> {
         (session_id == self.session_id).then(|| self.idle.clone())

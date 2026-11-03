@@ -1,6 +1,7 @@
 use super::*;
-use peri_acp_types::identity::SessionSeq;
-use peri_acp_types::session::MessageQueue;
+use crate::session::test_resources::mock::MockSessionResources;
+use peri_acp_types::identity::{AttemptId, SessionSeq};
+use peri_acp_types::session::{ExecutionBinding, MessageQueue, MqReceivePurpose};
 
 #[path = "user_input_mailbox_terminal_test.rs"]
 mod terminal_tests;
@@ -36,6 +37,28 @@ fn make_dispatch(
     }
 }
 
+/// 真实 SessionResources 替身绑定的 mailbox：可注入历史查询失败。
+fn make_mock_mailbox(
+    resources: Arc<MockSessionResources>,
+) -> (Arc<UserInputMailbox>, MessageQueue) {
+    let queue = MessageQueue::bind(resources, "thread-x".into());
+    let inbox = Arc::new(SessionInbox::new(Arc::new(queue.clone())));
+    (
+        UserInputMailbox::new("session".into(), inbox, Arc::new(|_| {})),
+        queue,
+    )
+}
+
+fn record_state(mailbox: &UserInputMailbox, input_id: &str) -> Option<(UserInputState, bool)> {
+    mailbox
+        .state
+        .lock()
+        .records
+        .iter()
+        .find(|record| record.input_id == input_id)
+        .map(|record| (record.state, record.handed_off))
+}
+
 #[test]
 fn test_mailbox_running_enqueue_never_wakes_consumption_queue() {
     let (mailbox, inbox) = make_mailbox();
@@ -49,9 +72,12 @@ fn test_mailbox_running_enqueue_never_wakes_consumption_queue() {
         UserInputState::Queued,
         "运行中输入应保持待发"
     );
-    assert!(!inbox.queue().has_wake_up_sync(), "普通待办不参与 MQ 唤醒");
     assert!(
-        !inbox.queue().needs_mq_continuation_sync(),
+        !inbox.queue_for_test().has_wake_up_sync(),
+        "普通待办不参与 MQ 唤醒"
+    );
+    assert!(
+        !inbox.queue_for_test().needs_mq_continuation_sync(),
         "普通待办不触发后台空转"
     );
 }
@@ -74,7 +100,10 @@ fn test_mailbox_idle_input_handoff_is_once_and_keeps_message_identity() {
         "预留阶段还没有客户端执行身份"
     );
     assert!(mailbox.reserve_run().is_none(), "执行预留只能成功一次");
-    assert!(inbox.queue().is_empty_sync(), "取得运行锁前不能交接");
+    assert!(
+        inbox.queue_for_test().is_empty_sync(),
+        "取得运行锁前不能交接"
+    );
     assert!(
         mailbox.attach_attempt_sync(&ticket, CancellationToken::new()),
         "预留身份应允许执行"
@@ -88,7 +117,7 @@ fn test_mailbox_idle_input_handoff_is_once_and_keeps_message_identity() {
         !mailbox.attach_attempt_sync(&ticket, CancellationToken::new()),
         "相同 ticket 不能启动两次"
     );
-    let messages = inbox.queue().drain_all_sync();
+    let messages = inbox.queue_for_test().drain_all_sync();
     assert_eq!(messages.len(), 1, "相同输入只交接一次");
     assert_eq!(
         messages[0].message().unwrap().id().as_uuid().to_string(),
@@ -111,7 +140,10 @@ fn test_mailbox_failed_attached_attempt_recovers_unclaimed_and_clears_active_ide
     );
     mailbox.fail_reserved(&ticket);
     assert!(cancel.is_cancelled(), "早退清理取消真实 token");
-    assert!(inbox.queue().is_empty_sync(), "实际未领取项必须从 MQ 撤出");
+    assert!(
+        inbox.queue_for_test().is_empty_sync(),
+        "实际未领取项必须从 MQ 撤出"
+    );
     assert_eq!(
         mailbox.snapshot_sync().items[0].state,
         UserInputState::Queued,
@@ -157,7 +189,7 @@ fn test_mailbox_single_dispatch_preserves_ordinary_queue_until_natural_completio
     mailbox.finish_attempt_sync(&first, UserInputAttemptOutcome::Interrupted);
     let next = mailbox.reserve_run().unwrap();
     mailbox.attach_attempt_sync(&next, CancellationToken::new());
-    let received = inbox.queue().drain_all_sync();
+    let received = inbox.queue_for_test().drain_all_sync();
     assert_eq!(
         received
             .iter()
@@ -186,7 +218,7 @@ fn test_mailbox_single_dispatch_preserves_ordinary_queue_until_natural_completio
     mailbox.finish_attempt_sync(&next, UserInputAttemptOutcome::Failed);
     let last = mailbox.reserve_run().unwrap();
     mailbox.attach_attempt_sync(&last, CancellationToken::new());
-    let received = inbox.queue().drain_all_sync();
+    let received = inbox.queue_for_test().drain_all_sync();
     assert_eq!(
         received
             .iter()
@@ -205,7 +237,7 @@ fn test_mailbox_single_dispatch_preserves_ordinary_queue_until_natural_completio
     mailbox.finish_attempt_sync(&last, UserInputAttemptOutcome::Completed);
     let next = mailbox.reserve_run().unwrap();
     mailbox.attach_attempt_sync(&next, CancellationToken::new());
-    let received = inbox.queue().drain_all_sync();
+    let received = inbox.queue_for_test().drain_all_sync();
     assert_eq!(received.len(), 1);
     assert_eq!(
         received[0].message().unwrap().content(),
@@ -242,7 +274,7 @@ fn test_mailbox_dispatch_snapshot_and_consecutive_commands_preserve_acceptance_o
     mailbox.attach_attempt_sync(&next, CancellationToken::new());
     assert_eq!(
         inbox
-            .queue()
+            .queue_for_test()
             .drain_all_sync()
             .iter()
             .map(|message| message.message().unwrap().content())
@@ -305,7 +337,10 @@ fn test_mailbox_takeback_restores_full_multimodal_input_and_blocks_dispatch() {
         UserInputState::Withdrawn,
         "取回后不能重新发送旧输入"
     );
-    assert!(inbox.queue().is_empty_sync(), "已取回内容不进入消费路径");
+    assert!(
+        inbox.queue_for_test().is_empty_sync(),
+        "已取回内容不进入消费路径"
+    );
 }
 
 #[test]
@@ -362,7 +397,7 @@ fn test_mailbox_stop_reclaims_only_unclaimed_and_old_command_cannot_resend() {
         "未领取条目恢复可取回"
     );
     assert!(mailbox.reserve_run().is_none(), "旧命令重试不应恢复执行");
-    let remaining = inbox.queue().drain_all_sync();
+    let remaining = inbox.queue_for_test().drain_all_sync();
     assert_eq!(remaining.len(), 1, "撤回不能清除后台消息");
     assert_eq!(
         remaining[0].source,
@@ -397,7 +432,10 @@ fn test_mailbox_replayed_dispatch_after_stop_keeps_original_receipt_without_new_
         mailbox.reserve_run().is_none(),
         "旧 dispatch 重试不能重新启动"
     );
-    assert!(inbox.queue().is_empty_sync(), "重试不能再次交接消息");
+    assert!(
+        inbox.queue_for_test().is_empty_sync(),
+        "重试不能再次交接消息"
+    );
 }
 
 #[test]
@@ -407,7 +445,7 @@ fn test_mailbox_stop_cannot_reclaim_between_drain_and_claim_receipt() {
     mailbox.enqueue_sync(&input).unwrap();
     let ticket = mailbox.reserve_run().unwrap();
     mailbox.attach_attempt_sync(&ticket, CancellationToken::new());
-    let received = inbox.queue().drain_all_sync();
+    let received = inbox.queue_for_test().drain_all_sync();
     let ids = [received[0].message().unwrap().id()];
     mailbox.mark_claimed_sync(&ids);
     mailbox.stop_sync();
@@ -450,7 +488,7 @@ fn test_mailbox_stop_invalidates_reserved_ticket_without_affecting_next_attempt(
         mailbox.attach_attempt_sync(&next, CancellationToken::new()),
         "旧终态不能取消新执行"
     );
-    assert_eq!(inbox.queue().len_sync(), 1, "新执行只交接一次");
+    assert_eq!(inbox.queue_for_test().len_sync(), 1, "新执行只交接一次");
 }
 
 #[test]
@@ -530,7 +568,11 @@ fn test_mailbox_recorded_failure_overrides_host_success_and_keepgoing_resumes() 
     mailbox
         .attach_external_attempt_sync(CancellationToken::new(), true)
         .unwrap();
-    assert_eq!(inbox.queue().len_sync(), 1, "显式 keepgoing 才恢复普通待办");
+    assert_eq!(
+        inbox.queue_for_test().len_sync(),
+        1,
+        "显式 keepgoing 才恢复普通待办"
+    );
 }
 
 #[test]
@@ -630,7 +672,7 @@ async fn test_mailbox_suspended_input_handoff_wakes_same_attempt() {
     tokio::time::timeout(std::time::Duration::from_secs(1), inbox.await_wake())
         .await
         .expect("已有待办必须唤醒同一 inbox");
-    let received = inbox.queue().drain_all_sync();
+    let received = inbox.queue_for_test().drain_all_sync();
     assert_eq!(received.len(), 1, "进入 idle 自动交接第一条已有待办");
     assert_eq!(
         received[0].message().unwrap().id().as_uuid().to_string(),
@@ -674,7 +716,7 @@ fn test_mailbox_idle_transition_dispatches_first_queued_input() {
         })
         .unwrap();
     mailbox.enter_idle_sync();
-    let delivered = inbox.queue().drain_all_sync();
+    let delivered = inbox.queue_for_test().drain_all_sync();
     assert_eq!(delivered.len(), 1, "进入 idle 应只交接第一条可执行输入");
     let id = delivered[0].message().unwrap().id();
     assert_eq!(id.as_uuid().to_string(), first.input_id);
@@ -687,7 +729,7 @@ fn test_mailbox_idle_transition_dispatches_first_queued_input() {
     mailbox.mark_claimed_sync(&[id]);
     mailbox.mark_delivered_sync(&[id]);
     mailbox.enter_idle_sync();
-    let delivered = inbox.queue().drain_all_sync();
+    let delivered = inbox.queue_for_test().drain_all_sync();
     assert_eq!(delivered.len(), 1, "下一次 idle 才交接下一条");
     assert_eq!(
         delivered[0].message().unwrap().id().as_uuid().to_string(),
@@ -708,7 +750,7 @@ fn test_mailbox_suspended_burst_hands_off_only_one_input() {
     mailbox.enqueue_sync(&first).unwrap();
     let receipt = mailbox.enqueue_sync(&second).unwrap();
     assert_eq!(receipt.results[0].state, UserInputState::Queued);
-    let delivered = inbox.queue().drain_all_sync();
+    let delivered = inbox.queue_for_test().drain_all_sync();
     assert_eq!(delivered.len(), 1, "一次 idle 只能自动交接一条");
     assert_eq!(
         delivered[0].message().unwrap().id().as_uuid().to_string(),
@@ -729,7 +771,10 @@ fn test_mailbox_cancelled_attempt_does_not_dispatch_on_idle() {
         .unwrap();
     cancel.cancel();
     mailbox.enter_idle_sync();
-    assert!(inbox.queue().is_empty_sync(), "取消后的旧执行不能领取待办");
+    assert!(
+        inbox.queue_for_test().is_empty_sync(),
+        "取消后的旧执行不能领取待办"
+    );
     assert_eq!(
         mailbox.snapshot_sync().items[0].state,
         UserInputState::Queued
@@ -773,7 +818,7 @@ fn test_mailbox_steer_then_late_idle_preserves_selected_continuation() {
     mailbox.finish_attempt_sync(&current, UserInputAttemptOutcome::Interrupted);
     let continuation = mailbox.reserve_run().expect("B 仍须保留可启动的续跑");
     assert!(mailbox.attach_attempt_sync(&continuation, CancellationToken::new()));
-    let delivered = inbox.queue().drain_all_sync();
+    let delivered = inbox.queue_for_test().drain_all_sync();
     assert_eq!(delivered.len(), 1, "新执行只领取所选 B");
     assert_eq!(
         delivered[0].message().unwrap().id().as_uuid().to_string(),
@@ -803,7 +848,10 @@ fn test_mailbox_stop_then_late_suspend_waits_for_fresh_attempt() {
     mailbox.stop_sync();
     // 旧 loop 可能已越过取消检查，迟到报告挂起。
     mailbox.enter_idle_sync();
-    assert!(inbox.queue().is_empty_sync(), "迟到 idle 不能绕过 Stop");
+    assert!(
+        inbox.queue_for_test().is_empty_sync(),
+        "迟到 idle 不能绕过 Stop"
+    );
     assert_eq!(
         mailbox.snapshot_sync().items[0].state,
         UserInputState::Queued
@@ -811,14 +859,14 @@ fn test_mailbox_stop_then_late_suspend_waits_for_fresh_attempt() {
     let resumed = make_input(&mailbox, "用户明确重新提交");
     mailbox.enqueue_sync(&resumed).unwrap();
     assert!(
-        inbox.queue().is_empty_sync(),
+        inbox.queue_for_test().is_empty_sync(),
         "新输入不能唤醒已被 Stop 的旧执行"
     );
 
     mailbox.finish_attempt_sync(&current, UserInputAttemptOutcome::Interrupted);
     let next = mailbox.reserve_run().expect("明确恢复必须保留新执行的准入");
     assert!(mailbox.attach_attempt_sync(&next, CancellationToken::new()));
-    let delivered = inbox.queue().drain_all_sync();
+    let delivered = inbox.queue_for_test().drain_all_sync();
     assert_eq!(delivered.len(), 1, "显式恢复只交接第一条原待办");
     assert_eq!(
         delivered[0].message().unwrap().id().as_uuid().to_string(),
@@ -862,7 +910,7 @@ fn test_mailbox_new_input_wakes_background_attempt_after_finished_stop() {
         mailbox.reserve_run().is_none(),
         "已有执行时不能启动第二个执行"
     );
-    let received = inbox.queue().drain_all_sync();
+    let received = inbox.queue_for_test().drain_all_sync();
     assert_eq!(received.len(), 1, "应交接给当前未取消的后台执行");
     assert_eq!(
         received[0].message().unwrap().id().as_uuid().to_string(),
@@ -886,7 +934,7 @@ fn test_mailbox_ready_input_is_handed_off_when_external_attempt_enters_idle() {
     mailbox.enter_idle_sync();
 
     assert_eq!(mailbox.active_run_ticket(), Some(background));
-    let received = inbox.queue().drain_all_sync();
+    let received = inbox.queue_for_test().drain_all_sync();
     assert_eq!(received.len(), 1, "已有 ready 不能因未再次 promote 被跳过");
     assert_eq!(
         received[0].message().unwrap().id().as_uuid().to_string(),
@@ -915,7 +963,7 @@ fn test_mailbox_ready_input_survives_attach_before_idle() {
     mailbox.enter_idle_sync();
 
     assert_eq!(mailbox.active_run_ticket(), Some(background));
-    let received = inbox.queue().drain_all_sync();
+    let received = inbox.queue_for_test().drain_all_sync();
     assert_eq!(received.len(), 1);
     assert_eq!(
         received[0].message().unwrap().id().as_uuid().to_string(),
@@ -934,7 +982,7 @@ fn test_mailbox_snapshot_exposes_terminal_states_and_deduplicates_delivery() {
     let delivered_input = make_input(&mailbox, "已交付");
     mailbox.enqueue_sync(&delivered_input).unwrap();
     mailbox.enter_idle_sync();
-    let messages = inbox.queue().drain_all_sync();
+    let messages = inbox.queue_for_test().drain_all_sync();
     let delivered_id = messages[0].message().unwrap().id();
     mailbox.mark_claimed_sync(&[delivered_id]);
     assert_eq!(mailbox.mark_delivered_sync(&[delivered_id]).len(), 1);
@@ -974,7 +1022,7 @@ fn test_bind_delivery_sequence_orders_journal_and_is_idempotent() {
     let input = make_input(&mailbox, "带序号交付");
     mailbox.enqueue_sync(&input).unwrap();
     mailbox.enter_idle_sync();
-    let messages = inbox.queue().drain_all_sync();
+    let messages = inbox.queue_for_test().drain_all_sync();
     let id = messages[0].message().unwrap().id();
     mailbox.mark_claimed_sync(&[id]);
     mailbox.mark_delivered_sync(&[id]);
@@ -1012,7 +1060,7 @@ fn test_mailbox_terminal_snapshot_is_bounded() {
         let input = make_input(&mailbox, &format!("终态输入 {index}"));
         mailbox.enqueue_sync(&input).unwrap();
         mailbox.enter_idle_sync();
-        let messages = inbox.queue().drain_all_sync();
+        let messages = inbox.queue_for_test().drain_all_sync();
         assert_eq!(messages.len(), 1);
         let id = messages[0].message().unwrap().id();
         mailbox.mark_claimed_sync(&[id]);
@@ -1028,4 +1076,178 @@ fn test_mailbox_terminal_snapshot_is_bounded() {
         .terminal_items
         .iter()
         .all(|item| item.state == UserInputState::Delivered));
+}
+
+/// [回归] 快照先查询 MQ、后加锁时，旧查询结果不得清理查询期间新入队的记录：
+/// MQ 里已有消息，但界面与发送操作找不到内存记录。
+#[tokio::test]
+async fn snapshot_keeps_records_enqueued_while_its_mq_query_is_in_flight() {
+    let (mailbox, inbox) = make_mailbox();
+    mailbox
+        .attach_external_attempt_sync(CancellationToken::new(), false)
+        .unwrap();
+    let (entered, release) = inbox.queue_for_test().gate_next_query();
+
+    let snapshot = tokio::spawn({
+        let mailbox = mailbox.clone();
+        async move { mailbox.snapshot().await }
+    });
+    entered.await.expect("snapshot MQ query must start");
+    let input = make_input(&mailbox, "查询期间入队");
+    mailbox.enqueue(&input).await.unwrap();
+    release.send(()).expect("release snapshot query");
+
+    let stale = snapshot.await.unwrap();
+    assert!(
+        stale
+            .items
+            .iter()
+            .all(|item| item.input_id != input.input_id),
+        "旧查询结果看不到新消息，本次快照内容可以缺席"
+    );
+    let fresh = mailbox.snapshot().await;
+    assert!(
+        fresh
+            .items
+            .iter()
+            .any(|item| item.input_id == input.input_id),
+        "新入队的记录必须仍在内存中，不能被过期快照删除"
+    );
+}
+
+/// [回归] `MessageQueue::bind()` 必须把查询门转发到 store：否则 `gate_next_query`
+/// 在绑定资源的路径上静默失效，调用方会在 `entered` 上一直等待。
+#[tokio::test]
+async fn bound_queue_forwards_query_gate_to_the_store() {
+    let resources = MockSessionResources::new();
+    let queue = MessageQueue::bind(resources, "thread-gate".into());
+    let (entered, release) = queue.gate_next_query();
+    let query = tokio::spawn({
+        let queue = queue.clone();
+        async move { queue.snapshot().await }
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), entered)
+        .await
+        .expect("query gate must reach the bound store")
+        .expect("query gate sender dropped");
+    release.send(()).expect("release bound query");
+    query.await.unwrap().unwrap();
+}
+
+/// [回归] 历史查询无法回答时，`Unknown` 不是「不存在」：待发记录必须保留。
+#[tokio::test]
+async fn unknown_send_result_keeps_the_input_queued() {
+    let resources = MockSessionResources::new();
+    let (mailbox, queue) = make_mock_mailbox(Arc::clone(&resources));
+    mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .await
+        .unwrap();
+    let input = make_input(&mailbox, "无法确认是否移交");
+    mailbox.enqueue(&input).await.unwrap();
+    let id = MessageId::from(uuid::Uuid::parse_str(&input.input_id).unwrap());
+    assert!(matches!(
+        queue.cancel_user_input(&id).await.unwrap(),
+        MqCancelOutcome::Cancelled(_)
+    ));
+    resources.fail_mq_history_lookup();
+
+    let error = mailbox
+        .dispatch(&make_dispatch(&mailbox, &[&input]))
+        .await
+        .expect_err("无法确认移交时必须返回错误");
+    assert!(matches!(error, UserInputQueueError::Store(_)));
+    let (state, handed_off) = record_state(&mailbox, &input.input_id).expect("记录必须保留");
+    assert_eq!(state, UserInputState::Queued);
+    assert!(!handed_off, "Unknown 不能宣称已移交");
+}
+
+/// [回归] `send_ready_ids` 不得把 `Unknown` 记录标成已移交。
+#[tokio::test]
+async fn send_ready_ids_does_not_claim_handoff_for_unknown() {
+    let resources = MockSessionResources::new();
+    let (mailbox, queue) = make_mock_mailbox(Arc::clone(&resources));
+    mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .await
+        .unwrap();
+    let input = make_input(&mailbox, "idle 无法确认");
+    mailbox.enqueue(&input).await.unwrap();
+    let id = MessageId::from(uuid::Uuid::parse_str(&input.input_id).unwrap());
+    assert!(matches!(
+        queue.cancel_user_input(&id).await.unwrap(),
+        MqCancelOutcome::Cancelled(_)
+    ));
+    resources.fail_mq_history_lookup();
+
+    mailbox.enter_idle().await;
+
+    let (state, handed_off) = record_state(&mailbox, &input.input_id).expect("记录必须保留");
+    assert_eq!(state, UserInputState::Dispatching);
+    assert!(!handed_off, "Unknown 不是移交结论");
+    assert!(
+        mailbox.state.lock().ready.contains(&input.input_id),
+        "Unknown 必须保留重试资格"
+    );
+}
+
+/// 空闲会话在 dispatch 的有界窗口内完成真实 Receive 时，本次调用应确认移交。
+#[tokio::test]
+async fn dispatch_confirms_handoff_on_an_idle_session() {
+    let queue = Arc::new(MessageQueue::new());
+    let inbox = Arc::new(SessionInbox::new(Arc::clone(&queue)));
+    let mailbox = UserInputMailbox::new("session".into(), inbox, Arc::new(|_| {}));
+    let input = make_input(&mailbox, "空闲确认");
+    mailbox
+        .attach_external_attempt(CancellationToken::new(), false)
+        .await
+        .unwrap();
+    mailbox.enqueue(&input).await.unwrap();
+    mailbox.stop().await;
+
+    // 真实 Receive：选中后停在提交门，由独立任务放行，模拟空闲会话的移交。
+    let (entered, release) = queue.gate_next_receive();
+    let worker_queue = Arc::clone(&queue);
+    let worker = tokio::spawn(async move {
+        loop {
+            let owner = worker_queue.owner();
+            let permit = owner.begin_receive(
+                MqReceivePurpose::ModelLoop,
+                ExecutionBinding {
+                    turn_id: TurnId::new(),
+                    attempt_id: AttemptId::new(),
+                },
+            );
+            let items = owner.select_for_receive(&permit).await.unwrap();
+            if !items.is_empty() {
+                return owner.receive(permit, items).await.unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    });
+    let releaser = tokio::spawn(async move {
+        entered.await.expect("receive must reach the commit gate");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        release.send(()).expect("release receive gate");
+    });
+
+    let receipt = mailbox
+        .dispatch(&make_dispatch(&mailbox, &[&input]))
+        .await
+        .unwrap();
+    assert_eq!(receipt.results[0].state, UserInputState::Dispatching);
+    assert!(
+        queue.snapshot().await.unwrap().is_empty(),
+        "dispatch 返回时必须已完成移交"
+    );
+    assert!(
+        record_state(&mailbox, &input.input_id).unwrap().1,
+        "确认移交后记录必须标记 handed_off"
+    );
+
+    tokio::time::timeout(Duration::from_secs(2), worker)
+        .await
+        .expect("receive worker must finish")
+        .expect("receive worker panicked");
+    releaser.await.unwrap();
 }

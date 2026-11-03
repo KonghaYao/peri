@@ -117,6 +117,28 @@ impl AsyncRouter {
         Self { inbox }
     }
 
+    /// 结果消息的规范投影：稳定投递身份 + 可唤醒策略。
+    ///
+    /// 后台终态的原子提交与回调重放共用这一处，二者必须是同一条消息。
+    pub(crate) fn background_result_message(
+        result: &BackgroundTaskResult,
+        kind: BgTaskKind,
+    ) -> QueuedMessage {
+        let source = match kind {
+            BgTaskKind::Agent => MessageSource::SubAgentComplete,
+            BgTaskKind::Shell => MessageSource::ShellComplete,
+            BgTaskKind::Workflow => MessageSource::WorkflowComplete,
+            BgTaskKind::Mcp => MessageSource::McpNotification,
+        };
+        QueuedMessage::system_reminder_with_delivery_id(
+            MessageKind::Defer,
+            source,
+            background_result_reminder(result, kind),
+            crate::agent::async_tasks::delivery::terminal_delivery_id(&result.task_id, "terminal"),
+        )
+        .with_policy(MessagePolicy::ensure_processing())
+    }
+
     /// Route a background task result into the session inbox.
     ///
     /// Converts the [`BackgroundTaskResult`] into a notification string via
@@ -128,7 +150,13 @@ impl AsyncRouter {
     /// This replaces the executor's direct `v2_message_queue.push(QueuedMessage::new(
     /// Defer, ..., human(result.to_notification())))` — the only difference is
     /// that this path also triggers the inbox wake `Notify`.
-    pub fn route_bg_result(&self, result: &BackgroundTaskResult, kind: BgTaskKind) {
+    ///
+    /// 返回前已等到持久提交：失败必须交给生产者，不能只留日志。
+    pub async fn route_bg_result(
+        &self,
+        result: &BackgroundTaskResult,
+        kind: BgTaskKind,
+    ) -> Result<(), String> {
         tracing::info!(
             task_id = %result.task_id,
             agent_name = %result.agent_name,
@@ -136,33 +164,54 @@ impl AsyncRouter {
             output_len = result.output.len(),
             "[bg-diag] route_bg_result: calling push_defer"
         );
-        let source = match kind {
-            BgTaskKind::Agent => MessageSource::SubAgentComplete,
-            BgTaskKind::Shell => MessageSource::ShellComplete,
-            BgTaskKind::Workflow => MessageSource::WorkflowComplete,
-            BgTaskKind::Mcp => MessageSource::McpNotification,
-        };
-        let reminder = background_result_reminder(result, kind);
-        let message = QueuedMessage::system_reminder_with_delivery_id(
-            MessageKind::Defer,
-            source,
-            reminder,
-            crate::agent::async_tasks::delivery::terminal_delivery_id(&result.task_id, "terminal"),
-        )
-        .with_policy(MessagePolicy::ensure_processing());
-        // 同步 `OnBgCompleteFn` 回调无法 await 持久提交；投递到当前 runtime，
-        // 失败只留日志（待回调签名 async 化后删除该桥）。
-        crate::session::queue::enqueue_detached(self.inbox.queue(), message);
+        self.inbox
+            .queue()
+            .enqueue(Self::background_result_message(result, kind))
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())?;
         debug!(
             task_id = %result.task_id,
             agent_name = %result.agent_name,
             success = result.success,
             "AsyncRouter: routed bg SubAgent result to inbox"
         );
+        Ok(())
+    }
+
+    /// 同步回调面上的同一投递：等待真实提交后再返回结论。
+    ///
+    /// `OnBgCompleteFn` 仍是同步签名（任务登记/投递重试在同步面上），这里用独立
+    /// runtime 等到写入结束，失败原样返回给生产者重试。
+    pub(crate) fn route_bg_result_blocking(
+        &self,
+        result: &BackgroundTaskResult,
+        kind: BgTaskKind,
+    ) -> Result<(), String> {
+        tracing::info!(
+            task_id = %result.task_id,
+            agent_name = %result.agent_name,
+            success = result.success,
+            output_len = result.output.len(),
+            "[bg-diag] route_bg_result: calling push_defer"
+        );
+        crate::session::queue::enqueue_blocking(
+            self.inbox.queue(),
+            Self::background_result_message(result, kind),
+        )?;
+        debug!(
+            task_id = %result.task_id,
+            agent_name = %result.agent_name,
+            success = result.success,
+            "AsyncRouter: routed bg SubAgent result to inbox"
+        );
+        Ok(())
     }
 
     /// Route a workflow completion using the canonical [`WorkflowTaskResult::to_notification`].
-    pub fn route_workflow_task_result(&self, result: &WorkflowTaskResult) {
+    ///
+    /// 返回前已等到持久提交：失败必须交给回调的生产者，不能只留日志。
+    pub fn route_workflow_task_result(&self, result: &WorkflowTaskResult) -> Result<(), String> {
         self.push_workflow_reminder(
             &result.run_id,
             &result.workflow_name,
@@ -172,12 +221,13 @@ impl AsyncRouter {
             result.duration_ms,
             result.agent_count,
             result.tool_calls_count,
-        );
+        )?;
         debug!(
             run_id = %result.run_id,
             workflow_name = %result.workflow_name,
             "AsyncRouter: routed workflow task result to inbox"
         );
+        Ok(())
     }
 
     /// Route a workflow completion event into the session inbox.
@@ -202,7 +252,7 @@ impl AsyncRouter {
         agent_count: usize,
         tool_calls_count: usize,
         phase_summaries: &[PhaseSummary],
-    ) {
+    ) -> Result<(), String> {
         let mut phase_lines = String::new();
         for s in phase_summaries {
             let token_info = if s.token_count > 0 {
@@ -240,12 +290,13 @@ impl AsyncRouter {
             duration_ms,
             agent_count,
             tool_calls_count,
-        );
+        )?;
         debug!(
             run_id = %run_id,
             workflow_name = %workflow_name,
             "AsyncRouter: routed workflow event to inbox"
         );
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -259,7 +310,7 @@ impl AsyncRouter {
         duration_ms: u64,
         agent_count: usize,
         tool_calls_count: usize,
-    ) {
+    ) -> Result<(), String> {
         let kind = match status {
             "completed" => "completed",
             "killed" => "cancelled",
@@ -293,7 +344,8 @@ impl AsyncRouter {
             crate::agent::async_tasks::delivery::terminal_delivery_id(run_id, "terminal"),
         )
         .with_policy(MessagePolicy::ensure_processing());
-        crate::session::queue::enqueue_detached(self.inbox.queue(), message);
+        // 终态投递与后台结果同等对待：等到真实提交，失败返回给调用方。
+        crate::session::queue::enqueue_blocking(self.inbox.queue(), message)
     }
 }
 

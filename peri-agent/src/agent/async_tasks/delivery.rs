@@ -5,7 +5,7 @@ use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::tasks::TaskTerminalDelivery;
 use sha2::{Digest, Sha256};
 
-use crate::session::async_result_mailbox::{AcceptOutcome, AsyncResultMailbox};
+use crate::session::async_result_mailbox::AsyncResultMailbox;
 use crate::session::MessageQueue;
 
 pub(crate) fn terminal_delivery_id(
@@ -79,20 +79,25 @@ impl TaskTerminalDelivery for SessionTerminalDelivery {
         Box::pin(async move {
             // 先建立 Queued 责任，再让队列消息可见：消费者不可能看到一条
             // “已入队但 mailbox 尚未登记”的终态通知。锁不跨 await。
-            match self.mailbox.accept(delivery_id, reminder, source.clone())? {
-                AcceptOutcome::Accepted => self
-                    .queue
-                    .enqueue(QueuedMessage::system_reminder_with_delivery_id(
-                        MessageKind::Defer,
-                        source,
-                        reminder.clone(),
-                        delivery_id,
-                    ))
-                    .await
-                    .map_err(|error| error.to_string())
-                    .map(|_| ()),
-                AcceptOutcome::Duplicate => Ok(()),
-            }
+            //
+            // 已登记（包括上一次落库失败留下的 Queued）不等于已交付：落库是否成立
+            // 只由存储回答。同一稳定 ID 的重放会得到 Existing/AlreadyHandedOff，
+            // 所以每次都以存储事实为准入队，不把内存去重当成已投递。
+            self.mailbox.accept(delivery_id, reminder, source.clone())?;
+            self.queue
+                .enqueue(QueuedMessage::system_reminder_with_delivery_id(
+                    MessageKind::Defer,
+                    source,
+                    reminder.clone(),
+                    delivery_id,
+                ))
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
         })
     }
 }
+
+#[cfg(test)]
+#[path = "delivery_test.rs"]
+mod tests;

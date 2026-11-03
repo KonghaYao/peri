@@ -585,6 +585,7 @@ async fn test_post_handoff_history_flush_failure(background: bool) {
             None,
             None,
             Some(store.clone()),
+            None,
             Some(deregister),
             None,
             None,

@@ -141,10 +141,20 @@ pub(super) async fn write_work_state(
     id: &ThreadId,
     state: WorkState,
 ) -> Result<()> {
+    let mut connection = pool.acquire().await?;
+    write_work_state_on(&mut connection, id, state).await
+}
+
+/// 同一份单列写入的事务内形态：调用方与终态、MQ 接纳共用一次提交。
+pub(super) async fn write_work_state_on(
+    connection: &mut SqliteConnection,
+    id: &ThreadId,
+    state: WorkState,
+) -> Result<()> {
     sqlx::query("UPDATE threads SET work_state = ?1 WHERE id = ?2")
         .bind(state.as_str())
         .bind(id.as_str())
-        .execute(pool)
+        .execute(&mut *connection)
         .await?;
     Ok(())
 }

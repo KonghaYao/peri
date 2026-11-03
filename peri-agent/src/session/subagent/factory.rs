@@ -24,8 +24,7 @@ fn completion_delivery(
             let router = crate::session::async_router::AsyncRouter::for_queue(parent.queue());
             Arc::new(
                 move |result: &peri_acp_types::event::BackgroundTaskResult, kind| {
-                    router.route_bg_result(result, kind);
-                    Ok(())
+                    router.route_bg_result_blocking(result, kind)
                 },
             ) as peri_acp_types::tasks::OnBgCompleteFn
         })

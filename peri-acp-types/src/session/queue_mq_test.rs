@@ -4,7 +4,10 @@ use super::*;
 use crate::identity::AttemptId;
 use crate::messages::{BaseMessage, MessageId};
 use crate::session::mq_memory::InMemoryMqStore;
-use crate::session::{MqCancelOutcome, MqEnqueueDisposition, MqReceiveStatus, TurnId};
+use crate::session::SessionInbox;
+use crate::session::{
+    MqCancelOutcome, MqEnqueueDisposition, MqReceiveStatus, MqSendStatus, TurnId,
+};
 use crate::session_resources::{
     BindingRecheck, BindingState, ChildResumeClaim, ChildSnapshot, CloseSettlement, ForkSnapshot,
     FrozenSnapshotBytes, FrozenState, NewSession, NewSessionDraft, PersistenceRecovery,
@@ -54,9 +57,11 @@ fn reminder(body: &str) -> TrustedSystemReminder {
 }
 
 async fn receive_all(queue: &MessageQueue) -> MqReceiveOutcome {
-    let permit = queue.begin_receive(MqReceivePurpose::ModelLoop, execution());
-    let items = queue.select_for_receive(&permit).await.unwrap();
-    queue.receive(permit, items).await.unwrap()
+    let permit = queue
+        .owner()
+        .begin_receive(MqReceivePurpose::ModelLoop, execution());
+    let items = queue.owner().select_for_receive(&permit).await.unwrap();
+    queue.owner().receive(permit, items).await.unwrap()
 }
 
 // ─── bind：门面不复制事实 ────────────────────────────────────────────────────
@@ -201,13 +206,18 @@ async fn send_selection_consumes_only_selected_user_inputs() {
         .unwrap()
         .entry;
 
-    let sent = queue.send_inputs(vec![second.id]).await.unwrap();
-    assert_eq!(sent.accepted.len(), 1);
-    assert_eq!(sent.accepted[0].id, second.id);
-    assert!(sent.missing.is_empty());
+    let sent = queue
+        .send_inputs_within(vec![second.id], std::time::Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(sent.accepted().len(), 1);
+    assert_eq!(sent.accepted()[0].id, second.id);
+    assert!(sent.missing().is_empty());
 
-    let permit = queue.begin_receive(MqReceivePurpose::ModelLoop, execution());
-    let items = queue.select_for_receive(&permit).await.unwrap();
+    let permit = queue
+        .owner()
+        .begin_receive(MqReceivePurpose::ModelLoop, execution());
+    let items = queue.owner().select_for_receive(&permit).await.unwrap();
     let selected = items.iter().map(|item| item.entry.id).collect::<Vec<_>>();
     assert_eq!(
         selected,
@@ -216,7 +226,7 @@ async fn send_selection_consumes_only_selected_user_inputs() {
     );
     assert_eq!(items[0].disposition, MqReceiveDisposition::Commit);
 
-    let outcome = queue.receive(permit, items).await.unwrap();
+    let outcome = queue.owner().receive(permit, items).await.unwrap();
     assert!(outcome
         .items
         .iter()
@@ -233,13 +243,16 @@ async fn send_selection_consumes_only_selected_user_inputs() {
 async fn send_inputs_reports_missing_for_handed_off_or_unknown_ids() {
     let queue = MessageQueue::new();
     let entry = queue.enqueue(prompt("already sent")).await.unwrap().entry;
-    queue.send_inputs(vec![entry.id]).await.unwrap();
+    queue
+        .send_inputs_within(vec![entry.id], std::time::Duration::ZERO)
+        .await
+        .unwrap();
     receive_all(&queue).await;
 
     let unknown = MessageId::new();
     let sent = queue.send_inputs(vec![entry.id, unknown]).await.unwrap();
-    assert!(sent.accepted.is_empty());
-    assert_eq!(sent.missing, vec![entry.id, unknown]);
+    assert!(sent.accepted().is_empty());
+    assert_eq!(sent.missing(), vec![entry.id, unknown]);
 }
 
 #[tokio::test]
@@ -290,6 +303,14 @@ async fn failed_receive_keeps_send_selection() {
         async fn mq_clear(&self, thread_id: &ThreadId) -> SessionResourceResult<()> {
             self.inner.mq_clear(thread_id).await
         }
+
+        async fn mq_history_contains(
+            &self,
+            thread_id: &ThreadId,
+            id: MessageId,
+        ) -> SessionResourceResult<bool> {
+            self.inner.mq_history_contains(thread_id, id).await
+        }
     }
 
     let queue = MessageQueue::from_store(
@@ -297,12 +318,114 @@ async fn failed_receive_keeps_send_selection() {
         "thread-x".to_owned(),
     );
     let entry = queue.enqueue(prompt("keep me")).await.unwrap().entry;
-    queue.send_inputs(vec![entry.id]).await.unwrap();
-    let permit = queue.begin_receive(MqReceivePurpose::ModelLoop, execution());
-    let items = queue.select_for_receive(&permit).await.unwrap();
-    assert!(queue.receive(permit, items).await.is_err());
+    queue
+        .send_inputs_within(vec![entry.id], std::time::Duration::ZERO)
+        .await
+        .unwrap();
+    let permit = queue
+        .owner()
+        .begin_receive(MqReceivePurpose::ModelLoop, execution());
+    let items = queue.owner().select_for_receive(&permit).await.unwrap();
+    assert!(queue.owner().receive(permit, items).await.is_err());
     assert_eq!(queue.take_send_selection(), vec![entry.id]);
     assert_eq!(queue.len().await.unwrap(), 1);
+}
+
+/// [回归] 移交已提交后，唤醒检查失败不能把成功变成错误：历史与 MQ 都已结算，
+/// 调用方看不到 `Ok` 就会丢弃这次移交（Transcript 镜像与交付事件都不执行）。
+#[tokio::test]
+async fn post_receive_query_failure_keeps_the_committed_outcome() {
+    #[derive(Default)]
+    struct FailingAfterReceiveStore {
+        inner: InMemoryMqStore,
+        received: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait]
+    impl ThreadMqStore for FailingAfterReceiveStore {
+        async fn mq_enqueue(
+            &self,
+            thread_id: &ThreadId,
+            input: MqInput,
+        ) -> SessionResourceResult<MqEnqueueOutcome> {
+            self.inner.mq_enqueue(thread_id, input).await
+        }
+
+        async fn mq_query(
+            &self,
+            thread_id: &ThreadId,
+            filter: MqFilter,
+        ) -> SessionResourceResult<Vec<MqEntry>> {
+            if self.received.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(SessionResourceError::new(
+                    SessionResourceErrorKind::Unavailable {
+                        detail: "injected post-receive query failure".to_owned(),
+                    },
+                ));
+            }
+            self.inner.mq_query(thread_id, filter).await
+        }
+
+        async fn mq_cancel(
+            &self,
+            thread_id: &ThreadId,
+            id: MessageId,
+        ) -> SessionResourceResult<MqCancelOutcome> {
+            self.inner.mq_cancel(thread_id, id).await
+        }
+
+        async fn mq_receive(
+            &self,
+            thread_id: &ThreadId,
+            selection: MqReceiveSelection,
+        ) -> SessionResourceResult<MqReceiveOutcome> {
+            let outcome = self.inner.mq_receive(thread_id, selection).await;
+            self.received
+                .store(true, std::sync::atomic::Ordering::Release);
+            outcome
+        }
+
+        async fn mq_clear(&self, thread_id: &ThreadId) -> SessionResourceResult<()> {
+            self.inner.mq_clear(thread_id).await
+        }
+
+        async fn mq_history_contains(
+            &self,
+            thread_id: &ThreadId,
+            id: MessageId,
+        ) -> SessionResourceResult<bool> {
+            self.inner.mq_history_contains(thread_id, id).await
+        }
+    }
+
+    let queue = MessageQueue::from_store(
+        Arc::new(FailingAfterReceiveStore::default()),
+        "thread-x".to_owned(),
+    );
+    let entry = queue
+        .enqueue(prompt("must stay committed"))
+        .await
+        .unwrap()
+        .entry;
+    queue
+        .send_inputs_within(vec![entry.id], std::time::Duration::ZERO)
+        .await
+        .unwrap();
+    let permit = queue
+        .owner()
+        .begin_receive(MqReceivePurpose::ModelLoop, execution());
+    let items = queue.owner().select_for_receive(&permit).await.unwrap();
+    let outcome = queue
+        .owner()
+        .receive(permit, items)
+        .await
+        .expect("已提交的移交必须返回成功结果");
+    assert_eq!(outcome.items.len(), 1);
+    assert_eq!(outcome.items[0].status, MqReceiveStatus::Committed);
+    assert!(
+        queue.take_send_selection().is_empty(),
+        "已结算的选择必须清空"
+    );
 }
 
 #[tokio::test]
@@ -317,11 +440,13 @@ async fn expired_run_binding_is_suppressed_without_writing_history() {
         .await
         .unwrap();
 
-    let permit = queue.begin_receive(MqReceivePurpose::ModelLoop, execution());
-    let items = queue.select_for_receive(&permit).await.unwrap();
+    let permit = queue
+        .owner()
+        .begin_receive(MqReceivePurpose::ModelLoop, execution());
+    let items = queue.owner().select_for_receive(&permit).await.unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].disposition, MqReceiveDisposition::Suppress);
-    let outcome = queue.receive(permit, items).await.unwrap();
+    let outcome = queue.owner().receive(permit, items).await.unwrap();
     assert_eq!(outcome.items[0].status, MqReceiveStatus::Suppressed);
     assert!(queue.is_empty().await.unwrap());
 }
@@ -462,7 +587,10 @@ async fn send_inputs_publishes_a_wake_hint() {
         .unwrap()
         .entry;
     assert_eq!(*changes.borrow_and_update(), 0, "Passive 入队不发布唤醒");
-    queue.send_inputs(vec![entry.id]).await.unwrap();
+    queue
+        .send_inputs_within(vec![entry.id], std::time::Duration::ZERO)
+        .await
+        .unwrap();
     assert_eq!(*changes.borrow_and_update(), 1);
 }
 
@@ -492,4 +620,295 @@ async fn await_wake_rechecks_mq_after_waking() {
         .unwrap();
     assert_eq!(observed.len(), 1);
     assert_eq!(observed[0].id(), entry.id);
+}
+
+// ─── 发送结果契约：接纳 / 移交 / 历史 / 不存在 / 未知 ─────────────────────────
+
+/// 无 Receive 消费时超时只报告「已接纳未移交」，不得伪称已移交。
+#[tokio::test]
+async fn send_inputs_timeout_reports_accepted_without_claiming_handoff() {
+    let queue = MessageQueue::new();
+    let entry = queue.enqueue(prompt("still queued")).await.unwrap().entry;
+
+    let sent = queue
+        .send_inputs_within(vec![entry.id], std::time::Duration::from_millis(20))
+        .await
+        .unwrap();
+
+    assert_eq!(sent.status_of(&entry.id), Some(MqSendStatus::Accepted));
+    assert_eq!(sent.accepted().len(), 1);
+    assert_eq!(sent.accepted()[0].id, entry.id);
+    assert!(sent.missing().is_empty());
+    assert_eq!(queue.take_send_selection(), vec![entry.id]);
+}
+
+/// 已提交发送选择后，确认查询失败不得把整次调用变成 `Err`。
+#[tokio::test]
+async fn send_inputs_within_query_failure_keeps_accepted() {
+    #[derive(Default)]
+    struct FailingQueryStore {
+        inner: InMemoryMqStore,
+        queries: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ThreadMqStore for FailingQueryStore {
+        async fn mq_enqueue(
+            &self,
+            thread_id: &ThreadId,
+            input: MqInput,
+        ) -> SessionResourceResult<MqEnqueueOutcome> {
+            self.inner.mq_enqueue(thread_id, input).await
+        }
+
+        async fn mq_query(
+            &self,
+            thread_id: &ThreadId,
+            filter: MqFilter,
+        ) -> SessionResourceResult<Vec<MqEntry>> {
+            // 第一次查询属于接纳；之后的确认查询注入失败。
+            if self
+                .queries
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                > 0
+            {
+                return Err(SessionResourceError::new(
+                    SessionResourceErrorKind::Unavailable {
+                        detail: "injected confirmation query failure".into(),
+                    },
+                ));
+            }
+            self.inner.mq_query(thread_id, filter).await
+        }
+
+        async fn mq_cancel(
+            &self,
+            thread_id: &ThreadId,
+            id: MessageId,
+        ) -> SessionResourceResult<MqCancelOutcome> {
+            self.inner.mq_cancel(thread_id, id).await
+        }
+
+        async fn mq_receive(
+            &self,
+            thread_id: &ThreadId,
+            selection: MqReceiveSelection,
+        ) -> SessionResourceResult<MqReceiveOutcome> {
+            self.inner.mq_receive(thread_id, selection).await
+        }
+
+        async fn mq_clear(&self, thread_id: &ThreadId) -> SessionResourceResult<()> {
+            self.inner.mq_clear(thread_id).await
+        }
+
+        async fn mq_history_contains(
+            &self,
+            thread_id: &ThreadId,
+            id: MessageId,
+        ) -> SessionResourceResult<bool> {
+            self.inner.mq_history_contains(thread_id, id).await
+        }
+    }
+
+    let queue = MessageQueue::from_store(Arc::new(FailingQueryStore::default()), "thread-q".into());
+    let entry = queue.enqueue(prompt("accepted")).await.unwrap().entry;
+
+    let sent = queue
+        .send_inputs_within(vec![entry.id], std::time::Duration::from_millis(20))
+        .await
+        .expect("确认查询失败不能把已接纳的发送变成错误");
+    assert_eq!(sent.status_of(&entry.id), Some(MqSendStatus::Accepted));
+    assert_eq!(queue.take_send_selection(), vec![entry.id]);
+}
+
+/// 已移交的确认必须来自存储：MQ 行消失且历史有该 ID 才是 `HandedOff`。
+#[tokio::test]
+async fn send_inputs_confirms_handoff_from_mq_and_history() {
+    let queue = Arc::new(MessageQueue::new());
+    let entry = queue.enqueue(prompt("handoff")).await.unwrap().entry;
+
+    let worker = tokio::spawn({
+        let queue = Arc::clone(&queue);
+        async move {
+            for _ in 0..200 {
+                let owner = queue.owner();
+                let permit = owner.begin_receive(MqReceivePurpose::ModelLoop, execution());
+                let items = owner.select_for_receive(&permit).await.unwrap();
+                if !items.is_empty() {
+                    return owner.receive(permit, items).await.unwrap();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            panic!("send selection never became visible to Receive");
+        }
+    });
+
+    let sent = queue
+        .send_inputs_within(vec![entry.id], std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+    worker.await.expect("receive worker failed");
+
+    assert_eq!(sent.status_of(&entry.id), Some(MqSendStatus::HandedOff));
+    assert_eq!(sent.accepted().len(), 1, "移交后仍保留接纳时的行投影");
+    let owner = queue.owner();
+    let permit = owner.begin_receive(MqReceivePurpose::ModelLoop, execution());
+    assert!(
+        owner.select_for_receive(&permit).await.unwrap().is_empty(),
+        "移交后 MQ 不得再出现该行"
+    );
+    assert!(queue.snapshot().await.unwrap().is_empty());
+}
+
+/// 发送前历史已有该 ID：不重复接纳，也不制造第二次投递。
+#[tokio::test]
+async fn send_inputs_reports_already_in_history_without_accepting() {
+    let queue = MessageQueue::new();
+    let entry = queue
+        .enqueue(prompt("delivered earlier"))
+        .await
+        .unwrap()
+        .entry;
+    queue
+        .send_inputs_within(vec![entry.id], std::time::Duration::ZERO)
+        .await
+        .unwrap();
+    {
+        let owner = queue.owner();
+        let permit = owner.begin_receive(MqReceivePurpose::ModelLoop, execution());
+        let items = owner.select_for_receive(&permit).await.unwrap();
+        owner.receive(permit, items).await.unwrap();
+    }
+
+    let sent = queue
+        .send_inputs_within(vec![entry.id], std::time::Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(
+        sent.status_of(&entry.id),
+        Some(MqSendStatus::AlreadyInHistory)
+    );
+    assert!(sent.accepted().is_empty());
+    assert!(queue.take_send_selection().is_empty());
+}
+
+/// 历史与 MQ 都没有该 ID：如实报告不存在。
+#[tokio::test]
+async fn send_inputs_reports_not_found_for_unknown_id() {
+    let queue = MessageQueue::new();
+    let unknown = MessageId::new();
+    let sent = queue
+        .send_inputs_within(vec![unknown], std::time::Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(sent.status_of(&unknown), Some(MqSendStatus::NotFound));
+    assert_eq!(sent.missing(), vec![unknown]);
+}
+
+/// 历史查询无法回答时报告 `Unknown`，不得退化成「不存在」。
+#[tokio::test]
+async fn send_inputs_reports_unknown_when_history_lookup_is_unavailable() {
+    #[derive(Default)]
+    struct NoHistoryStore {
+        inner: InMemoryMqStore,
+    }
+
+    #[async_trait]
+    impl ThreadMqStore for NoHistoryStore {
+        async fn mq_enqueue(
+            &self,
+            thread_id: &ThreadId,
+            input: MqInput,
+        ) -> SessionResourceResult<MqEnqueueOutcome> {
+            self.inner.mq_enqueue(thread_id, input).await
+        }
+
+        async fn mq_query(
+            &self,
+            thread_id: &ThreadId,
+            filter: MqFilter,
+        ) -> SessionResourceResult<Vec<MqEntry>> {
+            self.inner.mq_query(thread_id, filter).await
+        }
+
+        async fn mq_cancel(
+            &self,
+            thread_id: &ThreadId,
+            id: MessageId,
+        ) -> SessionResourceResult<MqCancelOutcome> {
+            self.inner.mq_cancel(thread_id, id).await
+        }
+
+        async fn mq_receive(
+            &self,
+            thread_id: &ThreadId,
+            selection: MqReceiveSelection,
+        ) -> SessionResourceResult<MqReceiveOutcome> {
+            self.inner.mq_receive(thread_id, selection).await
+        }
+
+        async fn mq_clear(&self, thread_id: &ThreadId) -> SessionResourceResult<()> {
+            self.inner.mq_clear(thread_id).await
+        }
+
+        async fn mq_history_contains(
+            &self,
+            _thread_id: &ThreadId,
+            _id: MessageId,
+        ) -> SessionResourceResult<bool> {
+            Err(SessionResourceError::new(
+                SessionResourceErrorKind::Unsupported,
+            ))
+        }
+    }
+
+    let queue = MessageQueue::from_store(Arc::new(NoHistoryStore::default()), "thread-x".into());
+    let unknown = MessageId::new();
+    let sent = queue
+        .send_inputs_within(vec![unknown], std::time::Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(sent.status_of(&unknown), Some(MqSendStatus::Unknown));
+    assert!(sent.missing().is_empty(), "Unknown 不是确定的不存在");
+    assert_eq!(sent.unconfirmed(), vec![unknown]);
+}
+
+// ─── 操作权限边界：生产者视图 / 生命周期 owner 视图 ──────────────────────────
+
+/// [接口层] 生产者只能拿到 `ProducerQueue`（入队、查询、发送选择）；
+/// `begin_receive` / `select_for_receive` / `receive` / `clear` 只存在于
+/// `QueueOwner`，不能从生产者视图直接调用。`MessageQueue::owner()` 仍是同一
+/// mailbox 上的显式升级（owner 本来就能拿到 `MessageQueue`），不构成编译期边界。
+#[tokio::test]
+async fn producer_view_exposes_enqueue_and_reads_but_not_lifecycle_capabilities() {
+    let queue = Arc::new(MessageQueue::new());
+    let inbox = SessionInbox::new(Arc::clone(&queue));
+    let handle = inbox.handle();
+
+    let producer: ProducerQueue<'_> = handle.queue();
+    let entry = producer
+        .enqueue(prompt("via producer"))
+        .await
+        .unwrap()
+        .entry;
+    let sent = producer
+        .send_inputs_within(vec![entry.id], std::time::Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(sent.status_of(&entry.id), Some(MqSendStatus::Accepted));
+    assert_eq!(producer.len().await.unwrap(), 1);
+
+    // 生命周期 owner：同一 mailbox 上的消费与清空。
+    let owner: QueueOwner<'_> = queue.owner();
+    let permit = owner.begin_receive(MqReceivePurpose::ModelLoop, execution());
+    let items = owner.select_for_receive(&permit).await.unwrap();
+    assert_eq!(items.len(), 1);
+    owner.receive(permit, items).await.unwrap();
+    assert!(producer.is_empty().await.unwrap());
+
+    // 两种视图不可互相替换：类型签名本身就是能力边界。
+    fn takes_owner(_: QueueOwner<'_>) {}
+    fn takes_producer(_: ProducerQueue<'_>) {}
+    takes_owner(queue.owner());
+    takes_producer(handle.queue());
 }

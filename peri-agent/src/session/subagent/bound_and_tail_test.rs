@@ -670,3 +670,34 @@ async fn test_spawn_subagent_terminal_bridge_panic_is_failure() {
         AgentStatus::Error
     );
 }
+
+/// [回归] 子 agent 的初始指令未被 MQ 接纳时，启动必须失败并把已持久化的 child
+/// 标记为 Error；不得留下没有输入却继续运行的幽灵任务。
+#[tokio::test(flavor = "current_thread")]
+async fn test_spawn_subagent_fails_when_initial_prompt_cannot_be_admitted() {
+    let store = MockSessionResources::new();
+    store.fail_mq_enqueues();
+    let config = tail_spawn_config(store.clone(), TailOutcome::Completed);
+
+    let error = match SessionFactory::spawn_subagent(None, config).await {
+        Ok(_) => panic!("初始指令未接纳不得返回成功"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("child initial prompt could not be admitted"),
+        "错误必须指认初始指令入队失败: {error}"
+    );
+
+    let child = store
+        .threads()
+        .into_iter()
+        .find(|meta| meta.parent_thread_id.as_deref() == Some("tail-parent"))
+        .expect("child thread was persisted before the failed enqueue");
+    assert_eq!(
+        child.agent_status,
+        AgentStatus::Error,
+        "失败启动的 child 必须标记为 Error"
+    );
+}

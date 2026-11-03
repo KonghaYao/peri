@@ -58,8 +58,10 @@ pub(super) async fn run_receive_with_budget(
     let queue = input.context.session.queue.clone();
     // 同步 hook 的分离入队可能仍在提交：先等它落库，本轮选择才不会漏掉该消息。
     queue.await_pending_enqueues().await;
-    let permit = queue.begin_receive(MqReceivePurpose::ModelLoop, execution.clone());
-    let selected = queue
+    // Receive 是消费能力：只有生命周期 owner 视图能取得许可并原子移交。
+    let owner = queue.owner();
+    let permit = owner.begin_receive(MqReceivePurpose::ModelLoop, execution.clone());
+    let selected = owner
         .select_for_receive(&permit)
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
@@ -108,7 +110,7 @@ pub(super) async fn run_receive_with_budget(
             }
         }
     }
-    let outcome = queue
+    let outcome = owner
         .receive(permit, consumed)
         .await
         .map_err(|error| anyhow::anyhow!(error))?;

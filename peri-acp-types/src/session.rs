@@ -34,13 +34,14 @@ pub use mq::ReceiveGate;
 pub use mq::{
     MqCancelOutcome, MqEnqueueDisposition, MqEnqueueOutcome, MqEntry, MqFilter, MqInput,
     MqReceiveDisposition, MqReceiveItem, MqReceiveItemOutcome, MqReceiveOutcome, MqReceivePurpose,
-    MqReceiveSelection, MqReceiveStatus, MqSendOutcome, MqWatermark, SessionResourcesMqStore,
-    ThreadMqStore,
+    MqReceiveSelection, MqReceiveStatus, MqSendItemOutcome, MqSendOutcome, MqSendStatus,
+    MqWatermark, RetainedReminder, SessionResourcesMqStore, ThreadMqStore,
 };
 #[doc(hidden)]
 pub use mq_memory::InMemoryMqStore;
 pub use queue::{
-    MessageKind, MessageQueue, MessageSource, QueuedMessage, QueuedPayload, ReceivePermit,
+    MessageKind, MessageQueue, MessageSource, ProducerQueue, QueueOwner, QueuedMessage,
+    QueuedPayload, ReceivePermit,
 };
 pub use queue_policy::{
     ExecutionBinding, MessageActivation, MessageDisposition, MessagePolicy, MessageRequirement,

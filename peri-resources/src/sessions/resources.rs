@@ -945,6 +945,48 @@ impl SessionResources for SessionResourcesImpl {
             .with_mutation(thread_id, || self.gate.data().mq_clear(thread_id))
             .await
     }
+
+    async fn mq_history_contains(
+        &self,
+        thread_id: &ThreadId,
+        id: MessageId,
+    ) -> SessionResourceResult<bool> {
+        // 只读事实查询：不经过 mutation 门禁，也不建立写屏障。
+        self.gate.data().mq_history_contains(thread_id, id).await
+    }
+
+    /// 终态与结果接纳一次提交：门禁按 child 的树根进入，`target` 必须同属该树。
+    async fn finalize_child_terminal(
+        &self,
+        child: &ThreadId,
+        status: AgentStatus,
+        work_state: WorkState,
+        target: &ThreadId,
+        message: MqInput,
+    ) -> SessionResourceResult<MqEnqueueOutcome> {
+        self.gate
+            .with_mutation(child, || {
+                self.gate
+                    .data()
+                    .finalize_child_terminal(child, status, work_state, target, message)
+            })
+            .await
+    }
+
+    async fn settle_retained_mq(
+        &self,
+        thread_id: &ThreadId,
+        reminders: &[peri_acp_types::session::RetainedReminder],
+        rows: &[MqEntry],
+    ) -> SessionResourceResult<()> {
+        self.gate
+            .with_mutation(thread_id, || {
+                self.gate
+                    .data()
+                    .settle_retained_mq(thread_id, reminders, rows)
+            })
+            .await
+    }
 }
 
 #[path = "resources/deployment.rs"]

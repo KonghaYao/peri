@@ -112,7 +112,7 @@ pub(crate) struct InvocationQueuePort {
 impl InvocationQueuePort {
     /// 投递一条 canonical 队列消息。
     pub(crate) fn enqueue(&self, message: QueuedMessage) {
-        crate::session::queue::enqueue_detached(&self.queue, message);
+        crate::session::queue::enqueue_detached(self.queue.producer(), message);
     }
 
     /// 会话队列引用（`QueueState::v2_queue` 的事实源）。

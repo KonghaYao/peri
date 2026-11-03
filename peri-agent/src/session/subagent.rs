@@ -29,6 +29,7 @@ mod resource_owner;
 pub use close::{close_subagent_session_scope, SubagentCloseState};
 pub use resource_owner::{ChildExecutionPermit, ParkedChildOwner};
 mod run_sync;
+mod terminal_settlement;
 mod types;
 mod util;
 mod v2_bridge;

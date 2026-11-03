@@ -69,8 +69,10 @@ async fn expired_guidance_is_explicitly_suppressed() {
         MessageDisposition::Suppressed
     );
     queue.enqueue(guidance).await.unwrap();
-    let permit = queue.begin_receive(MqReceivePurpose::ModelLoop, execution());
-    let items = queue.select_for_receive(&permit).await.unwrap();
+    let permit = queue
+        .owner()
+        .begin_receive(MqReceivePurpose::ModelLoop, execution());
+    let items = queue.owner().select_for_receive(&permit).await.unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].disposition, MqReceiveDisposition::Suppress);
     assert!(!queue.has_ensure_processing().await.unwrap());
@@ -88,16 +90,20 @@ async fn receive_selection_is_bounded_and_preserves_remaining_order() {
             .unwrap();
         ids.push(outcome.entry.id);
     }
-    let permit = queue.begin_receive(MqReceivePurpose::ModelLoop, execution());
-    let claimed = queue.select_for_receive(&permit).await.unwrap();
+    let permit = queue
+        .owner()
+        .begin_receive(MqReceivePurpose::ModelLoop, execution());
+    let claimed = queue.owner().select_for_receive(&permit).await.unwrap();
     assert_eq!(claimed.len(), 64);
     let claimed_ids = claimed.iter().map(|item| item.entry.id).collect::<Vec<_>>();
     assert_eq!(claimed_ids, ids[..64]);
-    queue.receive(permit, claimed).await.unwrap();
+    queue.owner().receive(permit, claimed).await.unwrap();
     assert_eq!(queue.len().await.unwrap(), 6);
 
-    let permit = queue.begin_receive(MqReceivePurpose::ModelLoop, execution());
-    let remaining = queue.select_for_receive(&permit).await.unwrap();
+    let permit = queue
+        .owner()
+        .begin_receive(MqReceivePurpose::ModelLoop, execution());
+    let remaining = queue.owner().select_for_receive(&permit).await.unwrap();
     let remaining_ids = remaining
         .iter()
         .map(|item| item.entry.id)

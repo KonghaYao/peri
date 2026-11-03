@@ -20,6 +20,8 @@ pub(crate) enum BindingKind {
 struct Binding {
     kind: Option<BindingKind>,
     inbox: Option<InboxHandle>,
+    /// 子会话的同一 mailbox；resume owner 复用，生产者不从此处取用。
+    queue: Option<MessageQueue>,
     manager: Option<Arc<dyn TaskManager>>,
     registered: bool,
 }
@@ -50,7 +52,7 @@ impl SessionBindings {
     pub(crate) fn close_candidates(
         &self,
         root: &str,
-    ) -> Result<Vec<(String, Arc<dyn TaskManager>, MessageQueue)>, String> {
+    ) -> Result<Vec<(String, Arc<dyn TaskManager>, InboxHandle)>, String> {
         let mut candidates = Vec::new();
         for (session, binding) in &self.current {
             if session == root {
@@ -65,14 +67,21 @@ impl SessionBindings {
                 .inbox
                 .as_ref()
                 .ok_or_else(|| format!("Incomplete: child {session} inbox unknown"))?;
-            candidates.push((session.clone(), manager, inbox.queue().clone()));
+            candidates.push((session.clone(), manager, inbox.clone()));
         }
         Ok(candidates)
     }
 
-    pub(crate) fn binding(&self, session: &str) -> Option<(InboxHandle, Arc<dyn TaskManager>)> {
+    pub(crate) fn binding(
+        &self,
+        session: &str,
+    ) -> Option<(InboxHandle, MessageQueue, Arc<dyn TaskManager>)> {
         let binding = self.current.get(session)?;
-        Some((binding.inbox.clone()?, binding.manager.clone()?))
+        Some((
+            binding.inbox.clone()?,
+            binding.queue.clone()?,
+            binding.manager.clone()?,
+        ))
     }
 
     pub(crate) fn manager(&self, session: &str) -> Option<Arc<dyn TaskManager>> {
@@ -109,11 +118,13 @@ impl SessionBindings {
         &mut self,
         session: &str,
         inbox: InboxHandle,
+        queue: MessageQueue,
         manager: Arc<dyn TaskManager>,
     ) {
         let binding = self.current.entry(session.into()).or_default();
         binding.kind = Some(BindingKind::Agent);
         binding.inbox = Some(inbox);
+        binding.queue = Some(queue);
         binding.manager = Some(manager);
         binding.registered = true;
     }

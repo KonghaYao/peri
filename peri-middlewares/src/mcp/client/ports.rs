@@ -29,8 +29,8 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
             .session_bindings
             .read()
             .close_candidates(root_session_id)?;
-        for (session, manager, queue) in candidates {
-            if !manager.is_execution_idle() || queue.has_required().await.unwrap_or(true) {
+        for (session, manager, inbox) in candidates {
+            if !manager.is_execution_idle() || inbox.has_required().await.unwrap_or(true) {
                 return Err(format!(
                     "Incomplete: child {session} resources or required messages unfinished"
                 ));
@@ -70,18 +70,23 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
         &self,
         session_id: &str,
         inbox: InboxHandle,
+        queue: peri_acp_types::session::MessageQueue,
         manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
     ) {
         self.session_bindings
             .write()
-            .bind_agent(session_id, inbox, manager);
+            .bind_agent(session_id, inbox, queue, manager);
     }
 
     fn agent_session_binding(
         &self,
         session_id: &str,
-    ) -> Option<(InboxHandle, Arc<dyn peri_acp_types::tasks::TaskManager>)> {
-        let (inbox, manager) = self.session_bindings.read().binding(session_id)?;
+    ) -> Option<(
+        InboxHandle,
+        peri_acp_types::session::MessageQueue,
+        Arc<dyn peri_acp_types::tasks::TaskManager>,
+    )> {
+        let (inbox, queue, manager) = self.session_bindings.read().binding(session_id)?;
         if manager
             .as_any()
             .downcast_ref::<peri_agent::agent::async_tasks::TaskManager>()
@@ -89,7 +94,7 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
         {
             return None;
         }
-        Some((inbox, manager))
+        Some((inbox, queue, manager))
     }
 
     fn begin_shutdown(&self) {

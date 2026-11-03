@@ -178,7 +178,7 @@ async fn test_run_react_loop_idle_dispatches_queued_prompts_one_at_a_time() {
         input_ids.push(input_id);
     }
     assert!(
-        inbox.queue().is_empty_sync(),
+        inbox.queue_for_test().is_empty_sync(),
         "loading 期间不能交接普通待办"
     );
     resume.notify_one();

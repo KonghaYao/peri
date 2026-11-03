@@ -275,6 +275,10 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // 「继续」按钮一点就停且无模型调用）。空 human 不写入 transcript
     // （append_messages_to_transcript 跳过空 Prompt），也不产生空 user 气泡。
     // continuation（含队列交接路径）不 push——其输入经 mailbox handoff 入队。
+    let input_ticket = req
+        .user_input_mailbox
+        .as_ref()
+        .and_then(|mailbox| mailbox.active_run_ticket());
     if !req.continuation {
         if let Err(error) = v2_out
             .context
@@ -286,14 +290,41 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
             ))
             .await
         {
-            tracing::warn!(%error, "user prompt enqueue failed");
+            // 初始指令没有进入 MQ：本轮不得继续跑并报告 Completed。
+            error!(session_id = %req.session_id, %error, "initial prompt enqueue failed");
+            let failure = ExecutionFailure::internal(format!(
+                "Initial prompt could not be admitted to the thread MQ: {error}"
+            ));
+            let source = UnstampedEvent::new(
+                String::new(),
+                String::new(),
+                None,
+                EventDeliveryClass::Critical,
+            );
+            req.publisher.publish_event(
+                &req.session_id,
+                &source,
+                ExecutorEvent::AgentExecutionFailed {
+                    message: failure.public_message.clone(),
+                },
+            );
+            if let (Some(mailbox), Some(ticket)) = (&req.user_input_mailbox, &input_ticket) {
+                mailbox.record_attempt_outcome(
+                    ticket,
+                    crate::session::user_input_mailbox::UserInputAttemptOutcome::Failed,
+                );
+            }
+            return ExecOutcome {
+                ok: false,
+                stop_reason: PromptStopReason::EndTurn,
+                failure: Some(failure),
+                history_replaced_by_compaction: false,
+                persisted_payloads: req.history_payloads,
+                persistence_inconsistent: false,
+                agent_state: AgentState::new(&req.cwd),
+            };
         }
     }
-
-    let input_ticket = req
-        .user_input_mailbox
-        .as_ref()
-        .and_then(|mailbox| mailbox.active_run_ticket());
 
     // Phase 2: bg event pump（复用 V2AgentOutput.bg_event_rx）
     // 事件三层化：发射点统一经 `EventPublisher`（身份：v2 循环 turn_id / 主

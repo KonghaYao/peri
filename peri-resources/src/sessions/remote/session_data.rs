@@ -1040,6 +1040,14 @@ impl SessionDataPort for RemoteSessionData {
         self.clear_mq(thread_id).await
     }
 
+    async fn mq_history_contains(
+        &self,
+        thread_id: &ThreadId,
+        id: MessageId,
+    ) -> SessionResourceResult<bool> {
+        self.history_contains(thread_id, id).await
+    }
+
     /// 远端未决收敛：拿本机日志里的操作 id 向远端账本求证终态（C §5.1 第 4 步）。
     ///
     /// 每条未结清记录只有三种结论，且都由**写确认过的证据**给出，不靠空查询或超时推断：

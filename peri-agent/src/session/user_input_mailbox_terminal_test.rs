@@ -30,7 +30,7 @@ fn overflow_preserves_delivered_and_withdrawn_identity() {
         mailbox.enqueue_sync(&input).unwrap();
         if terminal == UserInputState::Delivered {
             mailbox.enter_idle_sync();
-            let messages = inbox.queue().drain_all_sync();
+            let messages = inbox.queue_for_test().drain_all_sync();
             let id = messages[0].message().unwrap().id();
             mailbox.mark_claimed_sync(&[id]);
             mailbox.mark_delivered_sync(&[id]);
@@ -48,7 +48,7 @@ fn overflow_preserves_delivered_and_withdrawn_identity() {
         assert_eq!(receipt.results[0].state, terminal);
         assert!(receipt.snapshot.items.is_empty());
         mailbox.enter_idle_sync();
-        assert!(inbox.queue().is_empty_sync());
+        assert!(inbox.queue_for_test().is_empty_sync());
         input.command_id = uuid::Uuid::now_v7().to_string();
         input.content = MessageContent::text("更换载荷");
         assert_eq!(
@@ -80,7 +80,7 @@ fn old_enqueue_new_delivery_survives_overflow_and_lost_event() {
     fill_withdrawn(&mailbox);
     snapshots.lock().clear();
     mailbox.enter_idle_sync();
-    let messages = inbox.queue().drain_all_sync();
+    let messages = inbox.queue_for_test().drain_all_sync();
     let id = messages[0].message().unwrap().id();
     mailbox.mark_claimed_sync(&[id]);
     mailbox.mark_delivered_sync(&[id]);
@@ -167,7 +167,7 @@ fn delivery_journal_admission_rejects_before_claim_and_recovers_after_ack() {
         let input = make_input(&mailbox, &format!("交付 {index}"));
         mailbox.enqueue_sync(&input).unwrap();
         mailbox.enter_idle_sync();
-        let messages = inbox.queue().drain_all_sync();
+        let messages = inbox.queue_for_test().drain_all_sync();
         let id = messages[0].message().unwrap().id();
         mailbox.mark_claimed_sync(&[id]);
         assert_eq!(mailbox.mark_delivered_sync(&[id]).len(), 1);
@@ -179,7 +179,10 @@ fn delivery_journal_admission_rejects_before_claim_and_recovers_after_ack() {
         UserInputQueueError::Capacity,
         "日志容量必须在消费前拒绝，不能留下 Claimed"
     );
-    assert!(inbox.queue().is_empty_sync(), "拒绝的输入不能交接给 MQ");
+    assert!(
+        inbox.queue_for_test().is_empty_sync(),
+        "拒绝的输入不能交接给 MQ"
+    );
     assert!(
         !mailbox
             .snapshot_sync()
@@ -197,7 +200,7 @@ fn delivery_journal_admission_rejects_before_claim_and_recovers_after_ack() {
     }
     mailbox.enqueue_sync(&rejected).unwrap();
     mailbox.enter_idle_sync();
-    let messages = inbox.queue().drain_all_sync();
+    let messages = inbox.queue_for_test().drain_all_sync();
     let rejected_id = messages[0].message().unwrap().id();
     mailbox.mark_claimed_sync(&[rejected_id]);
     assert_eq!(
@@ -242,7 +245,7 @@ fn unpublished_terminal_cannot_be_evicted() {
     let input = make_input(&mailbox, "等待首次发布");
     mailbox.enqueue_sync(&input).unwrap();
     mailbox.enter_idle_sync();
-    let messages = inbox.queue().drain_all_sync();
+    let messages = inbox.queue_for_test().drain_all_sync();
     let id = messages[0].message().unwrap().id();
     mailbox.mark_claimed_sync(&[id]);
     let delivering = mailbox.clone();

@@ -320,7 +320,12 @@ pub(super) async fn resume_subagent_impl(
         .enqueue_sent(prompt_message)
         .await
     {
-        tracing::warn!(%error, "resume prompt enqueue failed");
+        // 没有接纳到初始指令的恢复不得继续跑：先撤销本次认领，再把失败交给调用方。
+        let detail = format!("resume prompt enqueue failed: {error}");
+        if let Err(rollback) = claim.rollback().await {
+            return Err(format!("{detail}; resume claim rollback failed: {rollback}").into());
+        }
+        return Err(detail.into());
     }
 
     // 8. 执行（run mode 由本次调用决定，issue 决策 8）
@@ -419,6 +424,13 @@ pub(super) async fn resume_subagent_impl(
             // 调用点对齐；prompt 传实际注入文本——用户 prompt 或 continue 常量，
             // 仅用于 prompt_summary 展示，R2-LOW-3）
             let task_id = format!("bg-{}", uuid::Uuid::now_v7());
+            // 终态结果投递到父会话的 MQ（无父 thread 时不做跨会话投递）。
+            let terminal_route = super::spawn::parent_thread_id_of(parent).map(|target| {
+                super::super::terminal_settlement::TerminalMqRoute {
+                    store: Arc::clone(&session_resources),
+                    target: peri_acp_types::thread::ThreadId::from(target.as_str()),
+                }
+            });
             match spawn_background_subagent(
                 task_id.clone(),
                 thread_id.clone(),
@@ -431,6 +443,7 @@ pub(super) async fn resume_subagent_impl(
                 super::completion_delivery(parent, on_bg_complete),
                 langfuse_bridge,
                 Some(Arc::clone(&session_resources)),
+                terminal_route,
                 deregister_runtime,
                 on_subagent_start,
                 on_subagent_stop,

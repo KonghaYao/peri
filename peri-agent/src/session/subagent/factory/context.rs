@@ -74,6 +74,7 @@ pub(super) async fn build_subagent_session_v2(
             let inbox = peri_acp_types::session::SessionInbox::new(Arc::new(owner.queue.clone()));
             (
                 inbox.handle(),
+                owner.queue.clone(),
                 owner.manager.clone() as Arc<dyn peri_acp_types::tasks::TaskManager>,
             )
         })
@@ -84,7 +85,7 @@ pub(super) async fn build_subagent_session_v2(
         });
     let queue = binding
         .as_ref()
-        .map(|(inbox, _)| inbox.queue().clone())
+        .map(|(_, queue, _)| queue.clone())
         // 没有可复用的既有绑定（冷恢复 / 首次 spawn）时按子 thread 绑定真实资源；
         // 内存后端会让 Receive 只写热态而不落历史（`docs/design/thread-mq.md` §1）。
         .unwrap_or_else(|| match &session_resources {
@@ -101,7 +102,7 @@ pub(super) async fn build_subagent_session_v2(
     host.session_resources = session_resources.clone();
     host.close_state = Arc::default();
     host.task_manager = Some(match binding {
-        Some((_, manager)) => {
+        Some((_, _, manager)) => {
             let manager: Arc<dyn std::any::Any + Send + Sync> = manager;
             Arc::downcast::<crate::agent::async_tasks::TaskManager>(manager)
                 .map_err(|_| "subagent session task directory has incompatible manager")?
@@ -157,7 +158,12 @@ pub(super) async fn build_subagent_session_v2(
     ));
     if let (Some(pool), Some(manager)) = (&host.mcp_pool, &host.task_manager) {
         let inbox = peri_acp_types::session::SessionInbox::new(Arc::new(session.queue().clone()));
-        pool.bind_agent_session(&child_thread_id, inbox.handle(), manager.clone());
+        pool.bind_agent_session(
+            &child_thread_id,
+            inbox.handle(),
+            session.queue().clone(),
+            manager.clone(),
+        );
     }
 
     // transcript 绑定（ancestor 先于 with_persistence，顺序不可反）

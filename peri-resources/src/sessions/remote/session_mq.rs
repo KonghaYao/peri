@@ -355,6 +355,19 @@ impl RemoteSessionData {
         .map(|_| ())
     }
 
+    /// MQ 行是否仍在该 thread 待发（只读事实）。
+    pub(super) async fn history_contains(
+        &self,
+        thread_id: &ThreadId,
+        id: MessageId,
+    ) -> SessionResourceResult<bool> {
+        if !self.exists(thread_id).await? {
+            return Err(not_found());
+        }
+        let (message, _mq) = self.read_mq_facts(&label(id)).await?;
+        Ok(matches!(message, Some((owner, _)) if owner == thread_id.as_str()))
+    }
+
     /// 同一次一致读取里取「历史同 ID 行」与「MQ 行」：两者的先后不由两次请求给出。
     async fn read_mq_facts(
         &self,

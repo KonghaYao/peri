@@ -280,15 +280,21 @@ pub trait McpPoolPort: Send + Sync {
         &self,
         _session_id: &str,
         _inbox: crate::session::InboxHandle,
+        _queue: crate::session::MessageQueue,
         _manager: Arc<dyn crate::tasks::TaskManager>,
     ) {
     }
 
+    /// 已登记的子会话绑定：生产者句柄、同一 mailbox 与任务目录。
+    ///
+    /// `MessageQueue` 只供 owner 路径重建会话时复用同一 mailbox；生产者不得据此
+    /// 取得 Receive／清空能力。
     fn agent_session_binding(
         &self,
         _session_id: &str,
     ) -> Option<(
         crate::session::InboxHandle,
+        crate::session::MessageQueue,
         Arc<dyn crate::tasks::TaskManager>,
     )> {
         None

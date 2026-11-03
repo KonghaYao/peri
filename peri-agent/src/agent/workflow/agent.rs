@@ -478,7 +478,12 @@ impl AgentExecutor for WorkflowAgentExecutor {
         if let Some(pool) = &mcp_pool {
             let inbox =
                 peri_acp_types::session::SessionInbox::new(Arc::new(session.queue().clone()));
-            pool.bind_agent_session(&session_id, inbox.handle(), task_manager.clone());
+            pool.bind_agent_session(
+                &session_id,
+                inbox.handle(),
+                session.queue().clone(),
+                task_manager.clone(),
+            );
         }
         let v2_ctx = ctx_builder.build(
             Some(session),
@@ -533,17 +538,14 @@ impl AgentExecutor for WorkflowAgentExecutor {
         );
 
         // push prompt 到 queue
-        if let Err(error) = context
-            .session
-            .queue
-            .enqueue_sent(QueuedMessage::new(
-                MessageKind::Prompt,
-                MessageSource::UserInput,
-                BaseMessage::human(params.prompt.clone()),
-            ))
-            .await
+        if let Err(detail) = enqueue_workflow_initial_prompt(session.queue(), &params.prompt).await
         {
-            tracing::warn!(%error, "workflow agent prompt enqueue failed");
+            // 没有接纳到初始指令的任务不得继续跑：先关闭本次会话作用域与转发器，
+            // 再把失败原样交给工作流执行器（任务终态为失败）。
+            drop(context);
+            let _ = await_workflow_forwarder(event_bus, forwarder_handle).await;
+            close_session_scope(&session, &session_id).await;
+            return initial_prompt_enqueue_failure(detail);
         }
 
         let mut execution_guard = match peri_acp_types::tasks::TaskManager::begin_external_execution(
@@ -596,6 +598,35 @@ impl AgentExecutor for WorkflowAgentExecutor {
         close_session_scope(&session, &session_id).await;
 
         projected.result
+    }
+}
+
+/// 启动 workflow agent 前的初始指令入队。
+///
+/// 接纳失败必须让本次任务失败：没有初始指令的运行只会走完空循环并被报告为成功。
+async fn enqueue_workflow_initial_prompt(
+    queue: &crate::session::MessageQueue,
+    prompt: &str,
+) -> Result<(), String> {
+    queue
+        .enqueue_sent(QueuedMessage::new(
+            MessageKind::Prompt,
+            MessageSource::UserInput,
+            BaseMessage::human(prompt.to_owned()),
+        ))
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            warn!(%error, "workflow agent prompt enqueue failed");
+            format!("workflow initial prompt could not be admitted to the thread MQ: {error}")
+        })
+}
+
+/// 初始指令未接纳时的任务终态：失败，绝不继续运行。
+fn initial_prompt_enqueue_failure(detail: String) -> peri_acp_types::workflow::AgentRunResult {
+    peri_acp_types::workflow::AgentRunResult::Dead {
+        reason: Some("initial-prompt-enqueue-failed".into()),
+        detail: Some(detail),
     }
 }
 

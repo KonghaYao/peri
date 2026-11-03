@@ -3,6 +3,7 @@
 use super::*;
 use peri_acp_types::session::{QueuedPayload, SessionInbox};
 use peri_acp_types::tasks::BgTaskKind;
+use peri_acp_types::workflow::WorkflowRunStatus;
 use std::sync::Arc;
 
 fn make_inbox() -> (SessionInbox, InboxHandle) {
@@ -34,11 +35,13 @@ fn test_route_bg_result_pushes_defer() {
     let router = AsyncRouter::new(handle);
     let result = make_bg_result("abc123", "test-agent", "done");
 
-    router.route_bg_result(&result, BgTaskKind::Agent);
+    router
+        .route_bg_result_blocking(&result, BgTaskKind::Agent)
+        .unwrap();
 
-    assert_eq!(inbox.queue().len_sync(), 1);
+    assert_eq!(inbox.queue_for_test().len_sync(), 1);
     assert!(
-        inbox.queue().has_wake_up_sync(),
+        inbox.queue_for_test().has_wake_up_sync(),
         "Defer should wake the inbox"
     );
 }
@@ -48,13 +51,19 @@ fn retried_terminal_publication_preserves_delivery_identity() {
     let (inbox, handle) = make_inbox();
     let router = AsyncRouter::new(handle);
     let result = make_bg_result("task", "test-agent", "done");
-    router.route_bg_result(&result, BgTaskKind::Agent);
-    router.route_bg_result(&result, BgTaskKind::Agent);
-    router.route_bg_result(
-        &make_bg_result("other", "test-agent", "done"),
-        BgTaskKind::Agent,
-    );
-    let messages = inbox.queue().drain_all_sync();
+    router
+        .route_bg_result_blocking(&result, BgTaskKind::Agent)
+        .unwrap();
+    router
+        .route_bg_result_blocking(&result, BgTaskKind::Agent)
+        .unwrap();
+    router
+        .route_bg_result_blocking(
+            &make_bg_result("other", "test-agent", "done"),
+            BgTaskKind::Agent,
+        )
+        .unwrap();
+    let messages = inbox.queue_for_test().drain_all_sync();
     // MQ 以稳定投递身份去重：重试不再产生第二行，身份也不变。
     assert_eq!(messages.len(), 2);
     assert!(messages[0].delivery_id.is_some());
@@ -67,9 +76,11 @@ fn test_route_bg_result_uses_subagent_complete_source() {
     let router = AsyncRouter::new(handle);
     let result = make_bg_result("abc123", "test-agent", "done");
 
-    router.route_bg_result(&result, BgTaskKind::Agent);
+    router
+        .route_bg_result_blocking(&result, BgTaskKind::Agent)
+        .unwrap();
 
-    let msgs = inbox.queue().drain_all_sync();
+    let msgs = inbox.queue_for_test().drain_all_sync();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].source, MessageSource::SubAgentComplete);
 }
@@ -80,15 +91,17 @@ fn test_route_bg_result_shell_uses_shell_complete_source() {
     let router = AsyncRouter::new(handle);
     let result = make_bg_result("shell-123", "Bash", "done");
 
-    router.route_bg_result(&result, BgTaskKind::Shell);
+    router
+        .route_bg_result_blocking(&result, BgTaskKind::Shell)
+        .unwrap();
 
     assert!(
         !inbox
-            .queue()
+            .queue_for_test()
             .has_pending_defer_sync(&MessageSource::SubAgentComplete),
         "shell completion must not qualify as a background-agent callback"
     );
-    let msgs = inbox.queue().drain_all_sync();
+    let msgs = inbox.queue_for_test().drain_all_sync();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].source, MessageSource::ShellComplete);
 }
@@ -99,9 +112,11 @@ fn test_route_bg_result_workflow_uses_workflow_complete_source() {
     let router = AsyncRouter::new(handle);
     let result = make_bg_result("workflow-123", "workflow", "done");
 
-    router.route_bg_result(&result, BgTaskKind::Workflow);
+    router
+        .route_bg_result_blocking(&result, BgTaskKind::Workflow)
+        .unwrap();
 
-    let msgs = inbox.queue().drain_all_sync();
+    let msgs = inbox.queue_for_test().drain_all_sync();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].source, MessageSource::WorkflowComplete);
 }
@@ -119,9 +134,9 @@ fn terminal_results_share_ensure_processing_policy_across_task_kinds() {
             let router = AsyncRouter::new(handle);
             let mut result = make_bg_result("typed-terminal", "worker", "done");
             result.success = success;
-            router.route_bg_result(&result, kind);
-            assert!(inbox.queue().has_ensure_processing_sync());
-            let messages = inbox.queue().drain_all_sync();
+            router.route_bg_result_blocking(&result, kind).unwrap();
+            assert!(inbox.queue_for_test().has_ensure_processing_sync());
+            let messages = inbox.queue_for_test().drain_all_sync();
             assert_eq!(messages.len(), 1);
             assert_eq!(
                 messages[0].policy,
@@ -137,9 +152,11 @@ fn test_route_bg_result_notification_text_contains_task_info() {
     let router = AsyncRouter::new(handle);
     let result = make_bg_result("task-12345", "my-agent", "output text");
 
-    router.route_bg_result(&result, BgTaskKind::Agent);
+    router
+        .route_bg_result_blocking(&result, BgTaskKind::Agent)
+        .unwrap();
 
-    let msgs = inbox.queue().drain_all_sync();
+    let msgs = inbox.queue_for_test().drain_all_sync();
     let text = match &msgs[0].payload {
         QueuedPayload::SystemReminder(r) => r.as_reminder().body.as_str(),
         _ => panic!("expected reminder"),
@@ -163,9 +180,11 @@ fn test_route_shell_output_only_injects_file_references() {
         error: None,
         exit_code: Some(1),
     }));
-    router.route_bg_result(&result, BgTaskKind::Shell);
-    assert!(inbox.queue().has_wake_up_sync());
-    let messages = inbox.queue().drain_all_sync();
+    router
+        .route_bg_result_blocking(&result, BgTaskKind::Shell)
+        .unwrap();
+    assert!(inbox.queue_for_test().has_wake_up_sync());
+    let messages = inbox.queue_for_test().drain_all_sync();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].source, MessageSource::ShellComplete);
     let QueuedPayload::SystemReminder(reminder) = &messages[0].payload else {
@@ -198,9 +217,11 @@ fn test_invalid_background_notification_reports_delivery_failure_without_panicki
         error: None,
         exit_code: Some(0),
     }));
-    router.route_bg_result(&result, BgTaskKind::Shell);
-    assert!(inbox.queue().has_wake_up_sync());
-    let messages = inbox.queue().drain_all_sync();
+    router
+        .route_bg_result_blocking(&result, BgTaskKind::Shell)
+        .unwrap();
+    assert!(inbox.queue_for_test().has_wake_up_sync());
+    let messages = inbox.queue_for_test().drain_all_sync();
     assert_eq!(messages.len(), 1);
     let QueuedPayload::SystemReminder(reminder) = &messages[0].payload else {
         panic!("expected diagnostic reminder");
@@ -220,19 +241,21 @@ fn test_route_workflow_event_pushes_defer() {
     let (inbox, handle) = make_inbox();
     let router = AsyncRouter::new(handle);
 
-    router.route_workflow_event(
-        "wf-run-999",
-        "deploy-pipeline",
-        "completed",
-        5000,
-        4,
-        12,
-        &[],
-    );
+    router
+        .route_workflow_event(
+            "wf-run-999",
+            "deploy-pipeline",
+            "completed",
+            5000,
+            4,
+            12,
+            &[],
+        )
+        .unwrap();
 
-    assert_eq!(inbox.queue().len_sync(), 1);
+    assert_eq!(inbox.queue_for_test().len_sync(), 1);
     assert!(
-        inbox.queue().has_wake_up_sync(),
+        inbox.queue_for_test().has_wake_up_sync(),
         "Defer should wake the inbox"
     );
 }
@@ -242,17 +265,19 @@ fn test_route_workflow_event_uses_workflow_complete_source() {
     let (inbox, handle) = make_inbox();
     let router = AsyncRouter::new(handle);
 
-    router.route_workflow_event(
-        "wf-run-999",
-        "deploy-pipeline",
-        "completed",
-        5000,
-        4,
-        12,
-        &[],
-    );
+    router
+        .route_workflow_event(
+            "wf-run-999",
+            "deploy-pipeline",
+            "completed",
+            5000,
+            4,
+            12,
+            &[],
+        )
+        .unwrap();
 
-    let msgs = inbox.queue().drain_all_sync();
+    let msgs = inbox.queue_for_test().drain_all_sync();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].source, MessageSource::WorkflowComplete);
 }
@@ -262,17 +287,19 @@ fn test_route_workflow_event_notification_format() {
     let (inbox, handle) = make_inbox();
     let router = AsyncRouter::new(handle);
 
-    router.route_workflow_event(
-        "wf-run-999",
-        "deploy-pipeline",
-        "completed",
-        5000,
-        4,
-        12,
-        &[],
-    );
+    router
+        .route_workflow_event(
+            "wf-run-999",
+            "deploy-pipeline",
+            "completed",
+            5000,
+            4,
+            12,
+            &[],
+        )
+        .unwrap();
 
-    let msgs = inbox.queue().drain_all_sync();
+    let msgs = inbox.queue_for_test().drain_all_sync();
     let text = match &msgs[0].payload {
         QueuedPayload::SystemReminder(r) => r.as_reminder().body.as_str(),
         _ => panic!("expected reminder"),
@@ -297,11 +324,17 @@ fn test_route_workflow_event_status_text_distinguishes_killed_failed() {
     let (inbox, handle) = make_inbox();
     let router = AsyncRouter::new(handle);
 
-    router.route_workflow_event("wf-killed", "deploy", "killed", 100, 1, 2, &[]);
-    router.route_workflow_event("wf-failed", "deploy", "failed", 100, 1, 2, &[]);
-    router.route_workflow_event("wf-ok", "deploy", "completed", 100, 1, 2, &[]);
+    router
+        .route_workflow_event("wf-killed", "deploy", "killed", 100, 1, 2, &[])
+        .unwrap();
+    router
+        .route_workflow_event("wf-failed", "deploy", "failed", 100, 1, 2, &[])
+        .unwrap();
+    router
+        .route_workflow_event("wf-ok", "deploy", "completed", 100, 1, 2, &[])
+        .unwrap();
 
-    let msgs = inbox.queue().drain_all_sync();
+    let msgs = inbox.queue_for_test().drain_all_sync();
     assert_eq!(msgs.len(), 3);
     let texts: Vec<String> = msgs
         .iter()
@@ -338,14 +371,93 @@ fn test_multiple_routes_accumulate_in_queue() {
 
     let result1 = make_bg_result("task-1", "agent-a", "output-a");
     let result2 = make_bg_result("task-2", "agent-b", "output-b");
-    router.route_bg_result(&result1, BgTaskKind::Agent);
-    router.route_workflow_event("wf-3", "test-wf", "completed", 100, 1, 2, &[]);
-    router.route_bg_result(&result2, BgTaskKind::Agent);
+    router
+        .route_bg_result_blocking(&result1, BgTaskKind::Agent)
+        .unwrap();
+    router
+        .route_workflow_event("wf-3", "test-wf", "completed", 100, 1, 2, &[])
+        .unwrap();
+    router
+        .route_bg_result_blocking(&result2, BgTaskKind::Agent)
+        .unwrap();
 
-    assert_eq!(inbox.queue().len_sync(), 3);
+    assert_eq!(inbox.queue_for_test().len_sync(), 3);
 
-    let msgs = inbox.queue().drain_all_sync();
+    let msgs = inbox.queue_for_test().drain_all_sync();
     assert_eq!(msgs[0].source, MessageSource::SubAgentComplete);
     assert_eq!(msgs[1].source, MessageSource::WorkflowComplete);
     assert_eq!(msgs[2].source, MessageSource::SubAgentComplete);
+}
+
+/// [回归] 投递回调必须等到持久提交，并把失败交回生产者重试。
+///
+/// 只读门面在真实 `SessionResources` 上拒绝写入：返回 `Ok` 就等于宣称投递成功。
+#[tokio::test]
+async fn route_bg_result_reports_persistence_failure() {
+    use peri_acp_types::session_resources::SessionResources;
+
+    let session = crate::session::test_resources::TestSession::open().await;
+    let read_only: Arc<dyn SessionResources> = session.read_only_resources().await;
+    let router = AsyncRouter::for_queue(&MessageQueue::bind(read_only, session.thread_id()));
+    let result = make_bg_result("task-durable", "test-agent", "done");
+
+    assert!(
+        router
+            .route_bg_result(&result, BgTaskKind::Agent)
+            .await
+            .is_err(),
+        "入队失败必须返回错误，而不是 detached 写入后报成功"
+    );
+    assert!(
+        router
+            .route_bg_result_blocking(&result, BgTaskKind::Agent)
+            .is_err(),
+        "同步回调面同样不能把失败当成功"
+    );
+
+    // 同一稳定身份在可写门面上只落一条：失败的那次没有留下任何行。
+    let writable = AsyncRouter::for_queue(&session.queue());
+    writable
+        .route_bg_result(&result, BgTaskKind::Agent)
+        .await
+        .unwrap();
+    assert_eq!(session.queue().snapshot().await.unwrap().len(), 1);
+}
+
+/// [回归] workflow 终态投递同样是终态事实：持久化失败必须返回给调用方。
+#[tokio::test]
+async fn route_workflow_result_reports_persistence_failure() {
+    use peri_acp_types::session_resources::SessionResources;
+
+    let session = crate::session::test_resources::TestSession::open().await;
+    let read_only: Arc<dyn SessionResources> = session.read_only_resources().await;
+    let router = AsyncRouter::for_queue(&MessageQueue::bind(read_only, session.thread_id()));
+    let result = WorkflowTaskResult {
+        run_id: "run-durable".into(),
+        workflow_name: "test-workflow".into(),
+        success: false,
+        status: WorkflowRunStatus::Failed,
+        execution_status: Default::default(),
+        acceptance_status: Default::default(),
+        post_processing_status: Default::default(),
+        delivery_status: Default::default(),
+        state_artifact_exists: false,
+        duration_ms: 1,
+        agent_count: 0,
+        tool_calls_count: 0,
+        error: Some("failed".into()),
+        phase_summaries: vec![],
+        attempts: vec![],
+    };
+
+    assert!(
+        router.route_workflow_task_result(&result).is_err(),
+        "workflow 终态投递失败必须返回错误"
+    );
+    assert!(
+        router
+            .route_workflow_event("run-durable", "test-workflow", "failed", 1, 0, 0, &[])
+            .is_err(),
+        "workflow 事件投递失败必须返回错误"
+    );
 }

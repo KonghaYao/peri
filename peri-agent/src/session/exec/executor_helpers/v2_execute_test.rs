@@ -85,7 +85,7 @@ fn mailbox_with_delivery() -> (Arc<UserInputMailbox>, String) {
     };
     mailbox.enqueue_sync(&request).unwrap();
     mailbox.enter_idle_sync();
-    let messages = inbox.queue().drain_all_sync();
+    let messages = inbox.queue_for_test().drain_all_sync();
     let id = messages[0].message().unwrap().id();
     mailbox.mark_claimed_sync(&[id]);
     mailbox.mark_delivered_sync(&[id]);
@@ -361,4 +361,113 @@ async fn main_executor_hook_stop_finishes_done_without_panic() {
     assert_eq!(outcome.stop_reason, PromptStopReason::EndTurn);
     assert!(outcome.failure.is_none(), "HookStop 不得产生 failure");
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+// ── 初始指令入队失败：本轮必须失败，不得继续跑成 Completed ──────────────────
+
+/// [回归] 初始 prompt 未被 MQ 接纳时，executor 仍继续执行空循环并报告成功；
+/// 现在必须返回失败终态，并把本次 attempt 记为 Failed。
+#[tokio::test]
+async fn main_executor_fails_when_initial_prompt_cannot_be_admitted() {
+    use crate::session::test_resources::mock::MockSessionResources;
+    use peri_acp_types::session::{MessageQueue, SessionInbox};
+
+    let resources = MockSessionResources::new();
+    resources.fail_mq_enqueues();
+    let queue = MessageQueue::bind(resources, "main-enqueue-failed".into());
+    let inbox = Arc::new(SessionInbox::new(Arc::new(queue.clone())));
+    let mailbox = UserInputMailbox::new("main-enqueue-failed".into(), inbox, Arc::new(|_| {}));
+    mailbox
+        .attach_external_attempt_sync(CancellationToken::new(), false)
+        .unwrap();
+    let ticket = mailbox.active_run_ticket().expect("attempt attached");
+
+    let queue_for_build = queue.clone();
+    let stage_build: super::StageBuildFn = Arc::new(move |sbr: super::StageBuildRequest| {
+        use crate::agent::stages::StageContext;
+        use crate::middleware::chain::MiddlewareChain;
+        use peri_acp_types::event_v2::EventBus;
+
+        let session = crate::session::Session::new_with_cancel_and_queue(
+            Arc::from("/tmp"),
+            sbr.frozen_session.v2_frozen().clone(),
+            None,
+            Arc::new(CancellationToken::new()),
+            queue_for_build.clone(),
+        );
+        let turn = session.start_turn();
+        let chain = MiddlewareChain::new();
+        let tools: crate::agent::stages::SharedToolMap =
+            Arc::new(parking_lot::RwLock::new(Default::default()));
+        let (bus, handles) = EventBus::new(Default::default());
+        let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+            .with_llm(Arc::new(OneToolLlm {
+                calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }))
+            .with_tools(tools)
+            .with_middleware_chain(Arc::new(chain))
+            .with_event_bus(Arc::new(bus))
+            .build();
+        let (_todo_tx, todo_rx) = tokio::sync::mpsc::channel(8);
+        let (_bg_tx, bg_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        Ok((
+            crate::session::exec::stage_builder::V2AgentOutput {
+                context,
+                session,
+                event_handles: handles,
+                todo_rx,
+                bg_event_rx,
+            },
+            None,
+        ))
+    });
+
+    let outcome = super::build_and_execute_agent_v2(super::V2ExecuteRequest {
+        session_id: "main-enqueue-failed".into(),
+        user_input_mailbox: Some(mailbox.clone()),
+        async_result_mailbox: None,
+        cwd: "/tmp".into(),
+        cancel: CancellationToken::new(),
+        session_resources: None,
+        thread_id: None,
+        agent_input: crate::agent::react::AgentInput::text("must not run"),
+        history_payloads: vec![],
+        cached_llm: None,
+        task_manager: None,
+        continuation: false,
+        frozen_session: crate::session::exec::executor::FrozenSessionData::from_frozen_parts(
+            crate::session::FrozenContext::builder().build(),
+            None,
+        ),
+        event_handler: Arc::new(peri_acp_types::event::FnEventHandler(|_: ExecutorEvent| {})),
+        agent_overrides: None,
+        preload_skills: vec![],
+        child_handler_factory: None,
+        auxiliary_model: None,
+        thread_persistence: Default::default(),
+        goal_controller: None,
+        on_bg_complete: None,
+        publisher: Arc::new(NoopPublisher),
+        stage_build,
+        store_llm: Arc::new(|_| {}),
+        cancel_cascade: Arc::new(|_| {}),
+        forwarder_launcher: draining_forwarder(),
+        continuation_notify: None,
+    })
+    .await;
+
+    assert!(!outcome.ok, "初始指令未接纳时不得报告成功");
+    let failure = outcome.failure.expect("必须给出失败原因");
+    assert!(
+        failure
+            .public_message
+            .contains("Initial prompt could not be admitted"),
+        "失败原因应指认初始指令入队失败: {}",
+        failure.public_message
+    );
+    assert_eq!(
+        mailbox.recorded_attempt_outcome(&ticket),
+        Some(crate::session::user_input_mailbox::UserInputAttemptOutcome::Failed),
+        "本次 attempt 必须记为 Failed，不能留在运行中"
+    );
 }

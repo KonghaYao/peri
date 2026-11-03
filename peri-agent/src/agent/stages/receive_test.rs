@@ -152,7 +152,7 @@ async fn delivery_journal_admission_precedes_receive_and_recovers_after_ack() {
         let request = enqueue("填充");
         mailbox.enqueue_sync(&request).unwrap();
         mailbox.enter_idle_sync();
-        let messages = inbox.queue().drain_all_sync();
+        let messages = inbox.queue_for_test().drain_all_sync();
         let id = messages[0].message().unwrap().id();
         mailbox.mark_claimed_sync(&[id]);
         mailbox.mark_delivered_sync(&[id]);
@@ -215,12 +215,13 @@ async fn test_receive_user_input_delivery_keeps_identity_order_and_render_fifo()
     mailbox.enqueue_sync(&b).unwrap();
     for (command_id, input) in [("dispatch-b", &b), ("dispatch-a", &a)] {
         mailbox
-            .dispatch_sync(&DispatchUserInputsRequest {
+            .dispatch(&DispatchUserInputsRequest {
                 session_id: "session".into(),
                 generation: mailbox.generation().into(),
                 command_id: command_id.into(),
                 input_ids: vec![input.input_id.clone()],
             })
+            .await
             .unwrap();
     }
     mailbox.finish_attempt_sync(&current, UserInputAttemptOutcome::Interrupted);

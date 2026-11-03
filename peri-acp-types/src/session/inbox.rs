@@ -1,6 +1,8 @@
 //! Session inbox 与生产者 handle 是同一 mailbox 的消费与发布能力。
 
-use super::{MessageKind, MessageQueue, MessageSource, MqEnqueueOutcome, QueuedMessage};
+use super::{
+    MessageKind, MessageQueue, MessageSource, MqEnqueueOutcome, ProducerQueue, QueuedMessage,
+};
 use crate::messages::BaseMessage;
 use crate::system_reminder::TrustedSystemReminder;
 use anyhow::Result;
@@ -58,11 +60,19 @@ impl SessionInbox {
         }
     }
 
-    /// Access the underlying MessageQueue facade.
+    /// Access the producer-level view of the underlying queue.
     ///
-    /// The facade exposes no destructive memory operations: reading questions are
+    /// The view exposes no destructive memory operations: reading questions are
     /// answered by the store, and consumption only happens through Receive.
-    pub fn queue(&self) -> &MessageQueue {
+    pub fn queue(&self) -> ProducerQueue<'_> {
+        self.queue.producer()
+    }
+
+    /// 仅测试：测试 helper 需要直接观察 mailbox 事实。
+    ///
+    /// 生产构建不提供，避免把 owner 能力重新从 inbox 暴露出去。
+    #[cfg(feature = "test-support")]
+    pub fn queue_for_test(&self) -> &MessageQueue {
         &self.queue
     }
 }
@@ -87,9 +97,38 @@ pub struct InboxHandle {
     queue: Arc<MessageQueue>,
 }
 
+impl ProducerQueue<'_> {
+    /// 取得可 `'static` 的生产者句柄；仍是窄能力面（没有 Receive／清空）。
+    pub fn to_handle(&self) -> InboxHandle {
+        InboxHandle {
+            queue: Arc::new(MessageQueue::clone(self.queue_ref())),
+        }
+    }
+}
+
 impl InboxHandle {
-    pub fn queue(&self) -> &MessageQueue {
-        &self.queue
+    /// 生产侧能力面：入队、只读查询与发送选择。
+    ///
+    /// 本视图**没有** Receive／清空能力；这些只属于 [`QueueOwner`](super::QueueOwner)，
+    /// 由 Agent Loop、rewind 与 thread 关闭路径直接持有 `MessageQueue` 取得。
+    pub fn queue(&self) -> ProducerQueue<'_> {
+        self.queue.producer()
+    }
+
+    /// 入队一条消息（生产侧统一入口，按策略唤醒）。
+    pub async fn enqueue(&self, message: QueuedMessage) -> Result<MqEnqueueOutcome> {
+        self.queue.enqueue(message).await
+    }
+
+    /// 同步能力面的入队：仅当存储声明无需 I/O 时立即完成。
+    #[doc(hidden)]
+    pub fn enqueue_now(&self, message: QueuedMessage) -> Option<Result<MqEnqueueOutcome>> {
+        self.queue.enqueue_now(message)
+    }
+
+    /// 是否仍有 required 消息未结清（关闭检查用）。
+    pub async fn has_required(&self) -> Result<bool> {
+        self.queue.has_required().await
     }
 
     /// Push a Prompt message (user input or external request) and wake the executor.

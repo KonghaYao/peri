@@ -261,8 +261,7 @@ async fn nested_a_b_c_reports_incomplete_only_to_direct_parent() {
         Some(b_manager.clone()),
         Some(crate::session::subagent::run_sync::new_sync_task_id()),
         Some(Arc::new(move |result, kind| {
-            inbox.route_bg_result(result, kind);
-            Ok(())
+            inbox.route_bg_result_blocking(result, kind)
         })),
         move |handoff, _| async move {
             crate::session::subagent::run_sync::run_sync_subagent(

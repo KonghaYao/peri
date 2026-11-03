@@ -629,8 +629,138 @@ pub(crate) trait SessionDataPort: Send + Sync {
         Err(super::failure::unsupported())
     }
 
+    /// 按稳定消息 ID 查询本 thread 的历史事实（只读、单条有界）。
+    async fn mq_history_contains(
+        &self,
+        _thread_id: &ThreadId,
+        _id: MessageId,
+    ) -> SessionResourceResult<bool> {
+        Err(super::failure::unsupported())
+    }
+
+    /// 本地 child 终态结算：终态、工作意图与结果消息的 MQ 接纳一次提交。
+    ///
+    /// 默认实现逐步组合既有行为；远端存储没有跨行为事务，只能保证「失败前不宣称
+    /// 完成」，进程在两步之间退出可能留下已写的终态。本机 SQLite adapter 覆写为
+    /// 单个 `BEGIN IMMEDIATE` 事务。组合逻辑与 `SessionResources` 的默认实现共用
+    /// 同一份代码。
+    async fn finalize_child_terminal(
+        &self,
+        child: &ThreadId,
+        status: peri_acp_types::thread::AgentStatus,
+        work_state: WorkState,
+        target: &ThreadId,
+        message: MqInput,
+    ) -> SessionResourceResult<MqEnqueueOutcome> {
+        peri_acp_types::session_resources::composed_finalize_child_terminal(
+            &DataPortOps(self),
+            child,
+            status,
+            work_state,
+            target,
+            message,
+        )
+        .await
+    }
+
+    /// 关闭结算：写入保留消息的终态提醒并删除对应 MQ 行，一次提交。
+    ///
+    /// 默认实现逐步组合；语义差异同 [`Self::finalize_child_terminal`]。
+    async fn settle_retained_mq(
+        &self,
+        thread_id: &ThreadId,
+        reminders: &[peri_acp_types::session::RetainedReminder],
+        rows: &[MqEntry],
+    ) -> SessionResourceResult<()> {
+        peri_acp_types::session_resources::composed_settle_retained_mq(
+            &DataPortOps(self),
+            thread_id,
+            reminders,
+            rows,
+        )
+        .await
+    }
+
     /// 关闭数据端口：返回后不再接受新写入。
     async fn close(&self) -> SessionResourceResult<()>;
+}
+
+/// 把数据端口接到组合回退上的最小适配器。
+///
+/// 组合逻辑只有一份（`peri_acp_types::session_resources::settlement`）：本机 SQLite
+/// 覆写为单事务，远端只走这里的组合路径。
+struct DataPortOps<'a, T: SessionDataPort + ?Sized>(&'a T);
+
+#[async_trait]
+impl<T: SessionDataPort + ?Sized> peri_acp_types::session_resources::ComposedSettlementOps
+    for DataPortOps<'_, T>
+{
+    async fn settlement_agent_status(
+        &self,
+        child: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::thread::AgentStatus> {
+        Ok(self.0.load_meta(child).await?.agent_status)
+    }
+
+    async fn settlement_update_status(
+        &self,
+        child: &ThreadId,
+        status: peri_acp_types::thread::AgentStatus,
+    ) -> SessionResourceResult<()> {
+        self.0
+            .update_meta(
+                child,
+                &SessionMetaPatch {
+                    status: Some(status),
+                    ..Default::default()
+                },
+            )
+            .await
+    }
+
+    async fn settlement_set_work_state(
+        &self,
+        child: &ThreadId,
+        state: WorkState,
+    ) -> SessionResourceResult<()> {
+        self.0.set_work_state(child, state).await
+    }
+
+    async fn settlement_history_contains(
+        &self,
+        thread_id: &ThreadId,
+        message_id: MessageId,
+    ) -> SessionResourceResult<bool> {
+        self.0.mq_history_contains(thread_id, message_id).await
+    }
+
+    async fn settlement_mq_enqueue(
+        &self,
+        target: &ThreadId,
+        message: MqInput,
+    ) -> SessionResourceResult<MqEnqueueOutcome> {
+        self.0.mq_enqueue(target, message).await
+    }
+
+    async fn settlement_append_reminder(
+        &self,
+        thread_id: &ThreadId,
+        message_id: MessageId,
+        reminder: &TrustedSystemReminder,
+    ) -> SessionResourceResult<()> {
+        self.0
+            .append_reminder_if_absent(thread_id, message_id, reminder)
+            .await
+            .map(|_| ())
+    }
+
+    async fn settlement_mq_receive(
+        &self,
+        thread_id: &ThreadId,
+        selection: MqReceiveSelection,
+    ) -> SessionResourceResult<MqReceiveOutcome> {
+        self.0.mq_receive(thread_id, selection).await
+    }
 }
 
 // ─── child 快照的输入一致性：唯一一条规则 ─────────────────────────────────────

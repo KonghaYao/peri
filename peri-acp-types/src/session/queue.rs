@@ -8,7 +8,8 @@
 use super::mq::{
     MqCancelOutcome, MqEnqueueDisposition, MqEnqueueOutcome, MqEntry, MqFilter, MqInput,
     MqReceiveDisposition, MqReceiveItem, MqReceiveOutcome, MqReceivePurpose, MqReceiveSelection,
-    MqReceiveStatus, MqSendOutcome, MqWatermark, SessionResourcesMqStore, ThreadMqStore,
+    MqReceiveStatus, MqSendItemOutcome, MqSendOutcome, MqSendStatus, MqWatermark,
+    SessionResourcesMqStore, ThreadMqStore,
 };
 use super::{ExecutionBinding, MessageDisposition, MessagePolicy};
 use crate::messages::{BaseMessage, MessageId};
@@ -21,9 +22,13 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// 单次 Receive 的上限；与旧 `drain_batch` 的批次上限一致。
 const RECEIVE_BATCH_LIMIT: usize = 64;
+
+/// 显式发送等待移交时的查询间隔；只影响确认延迟，不改变任何事实。
+const SEND_HANDOFF_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// [`MessageQueue::new`] 的内存 thread 标识；不参与生产路由。
 const IN_MEMORY_THREAD_ID: &str = "in-memory";
@@ -420,7 +425,8 @@ impl MessageQueue {
         let id = message.id();
         let outcome = self.enqueue(message).await?;
         if outcome.disposition != MqEnqueueDisposition::AlreadyHandedOff {
-            self.send_inputs(vec![id]).await?;
+            // 这里只写入发送选择：启动路径随后才跑 Receive，不能在此等待移交。
+            self.accept_for_send(vec![id]).await?;
         }
         Ok(outcome)
     }
@@ -492,37 +498,146 @@ impl MessageQueue {
 
     /// 提交运行期发送选择：只接受仍在 MQ 的用户输入，不写历史（`§5.3`）。
     ///
-    /// 未命中的 id（已移交或不存在）如实进入 `missing`；被接受的消息仍是待发事实，
-    /// 直到下一次 Receive 移交成功。
+    /// 只报告当下事实：被接纳的消息仍是待发事实（`Accepted`），直到 Receive 移交成功。
+    /// 未命中的 id 按历史的持久事实区分「已在历史」与「不存在」，无法查询时报告 `Unknown`。
+    /// 需要确认移交时调用 [`Self::send_inputs_within`]（有界等待，不得在阻塞运行时里用）。
     pub async fn send_inputs(&self, ids: Vec<MessageId>) -> Result<MqSendOutcome> {
+        self.accept_for_send(ids).await
+    }
+
+    /// [`Self::send_inputs`] 的有界等待版本：尽可能确认移交，超时仍报 `Accepted`。
+    ///
+    /// 等待必须有界（`handoff_timeout` 由调用方给出）；必须从活跃的异步上下文调用，
+    /// 调用方若在 `block_on` 里等待它，就会阻塞唯一能推进 Receive 的线程。
+    pub async fn send_inputs_within(
+        &self,
+        ids: Vec<MessageId>,
+        handoff_timeout: std::time::Duration,
+    ) -> Result<MqSendOutcome> {
+        let mut outcome = self.accept_for_send(ids).await?;
+        // 没有 Tokio 运行时就没有并发的 Receive：不进入周期性查询（也无法 sleep），
+        // 如实报告「已接纳未移交」。
+        let handoff_timeout = if tokio::runtime::Handle::try_current().is_err() {
+            std::time::Duration::ZERO
+        } else {
+            handoff_timeout
+        };
+        if handoff_timeout.is_zero() {
+            return Ok(outcome);
+        }
+        let deadline = std::time::Instant::now() + handoff_timeout;
+        // 只等待仍记作 Accepted 的项：其余结论已经由存储事实给出。
+        loop {
+            let pending = outcome
+                .items
+                .iter()
+                .filter(|item| item.status == MqSendStatus::Accepted)
+                .map(|item| item.id)
+                .collect::<Vec<_>>();
+            if pending.is_empty() {
+                return Ok(outcome);
+            }
+            let entries = match self.query(MqFilter::default()).await {
+                Ok(entries) => entries,
+                Err(error) => {
+                    // 发送选择已经提交：查询失败只能停止确认，不能把整次调用变成
+                    // 「未接纳」，否则调用方会误以为重试是安全的。
+                    tracing::warn!(
+                        %error,
+                        "hand-off confirmation query failed; keeping accepted status"
+                    );
+                    return Ok(outcome);
+                }
+            };
+            for item in &mut outcome.items {
+                if item.status != MqSendStatus::Accepted || entries.iter().any(|e| e.id == item.id)
+                {
+                    continue;
+                }
+                item.status = match self
+                    .inner
+                    .store
+                    .mq_history_contains(&self.inner.thread_id, item.id)
+                    .await
+                {
+                    Ok(true) => MqSendStatus::HandedOff,
+                    Ok(false) => MqSendStatus::NotFound,
+                    Err(error) => {
+                        tracing::warn!(%error, "hand-off confirmation failed; reporting unknown");
+                        MqSendStatus::Unknown
+                    }
+                };
+                if item.status != MqSendStatus::HandedOff {
+                    item.entry = None;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(outcome);
+            }
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            tokio::time::sleep(remaining.min(SEND_HANDOFF_POLL_INTERVAL)).await;
+        }
+    }
+
+    /// 只写入发送选择并报告当下事实，不做移交等待（`enqueue_sent` 的同步语义）。
+    async fn accept_for_send(&self, ids: Vec<MessageId>) -> Result<MqSendOutcome> {
         let entries = self
             .query(MqFilter {
                 user_input_only: true,
                 ..Default::default()
             })
             .await?;
-        let mut accepted = Vec::new();
-        let mut missing = Vec::new();
-        {
-            let mut selection = self.inner.send_selection.lock();
-            for id in ids {
-                match entries.iter().find(|entry| entry.id == id) {
-                    Some(entry) => {
-                        if !selection.contains(&id) {
-                            selection.push(id);
-                        }
-                        if !accepted.iter().any(|item: &MqEntry| item.id == id) {
-                            accepted.push(entry.clone());
-                        }
+        let mut items = Vec::with_capacity(ids.len());
+        let mut accepted_ids = Vec::new();
+        for id in ids {
+            match entries.iter().find(|entry| entry.id == id) {
+                Some(entry) => {
+                    if !accepted_ids.contains(&id) {
+                        accepted_ids.push(id);
                     }
-                    None => missing.push(id),
+                    items.push(MqSendItemOutcome {
+                        id,
+                        status: MqSendStatus::Accepted,
+                        entry: Some(entry.clone()),
+                    });
+                }
+                None => {
+                    // 先查持久历史事实，再一次性写入发送选择：锁不能跨 await。
+                    let status = match self
+                        .inner
+                        .store
+                        .mq_history_contains(&self.inner.thread_id, id)
+                        .await
+                    {
+                        Ok(true) => MqSendStatus::AlreadyInHistory,
+                        Ok(false) => MqSendStatus::NotFound,
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "history lookup failed for a missing send id; reporting unknown"
+                            );
+                            MqSendStatus::Unknown
+                        }
+                    };
+                    items.push(MqSendItemOutcome {
+                        id,
+                        status,
+                        entry: None,
+                    });
                 }
             }
         }
-        if !accepted.is_empty() {
+        if !accepted_ids.is_empty() {
+            let mut selection = self.inner.send_selection.lock();
+            for id in accepted_ids {
+                if !selection.contains(&id) {
+                    selection.push(id);
+                }
+            }
+            drop(selection);
             self.notify_wake();
         }
-        Ok(MqSendOutcome { accepted, missing })
+        Ok(MqSendOutcome { items })
     }
 
     /// 取走本次运行期发送选择（仅内存，不影响 MQ 行）。
@@ -544,7 +659,7 @@ impl MessageQueue {
     ///
     /// 顺序固定为 `(enqueued_at, id)`；`Suppressed` 策略与空 Prompt 唤醒信号
     /// 标记为只删不写历史。最多 [`RECEIVE_BATCH_LIMIT`] 条，且不消费发送选择。
-    pub async fn select_for_receive(&self, permit: &ReceivePermit) -> Result<Vec<MqReceiveItem>> {
+    async fn select_for_receive(&self, permit: &ReceivePermit) -> Result<Vec<MqReceiveItem>> {
         let entries = self.query(MqFilter::default()).await?;
         let selection = self.inner.send_selection.lock().clone();
         let mut items = Vec::new();
@@ -570,8 +685,9 @@ impl MessageQueue {
 
     /// 原子移交：成功后结清发送选择中已结算的 id，仍有可处理项时补一次唤醒。
     ///
-    /// 失败时选择保持原样（未确认移交前不能假装已发送）。
-    pub async fn receive(
+    /// 失败时选择保持原样（未确认移交前不能假装已发送）。提交成功之后的唤醒检查是
+    /// best-effort：它只影响「是否立刻再取一次」，不能让已提交的移交变成调用方眼中的失败。
+    async fn receive(
         &self,
         permit: ReceivePermit,
         items: Vec<MqReceiveItem>,
@@ -612,8 +728,16 @@ impl MessageQueue {
                 .lock()
                 .retain(|id| !settled.contains(id));
         }
-        if self.has_processable_work().await? {
-            self.notify_wake();
+        // 移交已经提交：此后的唤醒只是「还有活」的提示，查询失败不能把成功结果
+        // 变成错误——调用方会据此丢弃已提交的移交（历史已写、MQ 已删）。
+        match self.has_processable_work().await {
+            Ok(true) => self.notify_wake(),
+            Ok(false) => {}
+            Err(error) => tracing::warn!(
+                thread_id = %self.inner.thread_id,
+                %error,
+                "post-receive wake check failed; committed handoff is kept"
+            ),
         }
         Ok(outcome)
     }
@@ -621,8 +745,7 @@ impl MessageQueue {
     /// 取一次 Receive 许可：仅 Agent Loop 与同 thread 生命周期 owner 调用。
     ///
     /// 许可不可 Clone，`receive` 会消费它，防止重放同一次准入。
-    #[doc(hidden)]
-    pub fn begin_receive(
+    fn begin_receive(
         &self,
         purpose: MqReceivePurpose,
         execution: ExecutionBinding,
@@ -716,8 +839,8 @@ impl MessageQueue {
 
     /// 清空本 thread 的全部 MQ 行：只给 rewind 与 thread 生命周期调用。
     ///
-    /// 常规消费必须走 [`receive`](Self::receive)；本方法会丢弃尚未处理的待发事实。
-    pub async fn clear(&self) -> Result<()> {
+    /// 常规消费必须走 [`QueueOwner::receive`]；本方法会丢弃尚未处理的待发事实。
+    async fn clear(&self) -> Result<()> {
         self.inner.store.mq_clear(&self.inner.thread_id).await?;
         self.inner.send_selection.lock().clear();
         Ok(())
@@ -786,6 +909,165 @@ impl MessageQueue {
     /// 移交后是否仍有本轮可继续消费的工作；调用方据此补一次唤醒。
     async fn has_processable_work(&self) -> Result<bool> {
         self.has_ensure_processing().await
+    }
+}
+
+// ─── 能力视图：生产者 / 生命周期 owner ────────────────────────────────────────
+//
+// 同一份 MQ 事实有两个能力面：生产者只能入队、查询与写发送选择；Receive 与清空
+// 会改变消费事实，只出现在生命周期 owner 视图上。两者是不同名义类型，生产者拿到的
+// （`InboxHandle::queue`）没有通往 owner 视图的方法，误用在编译期就失败。
+
+/// 生产者视图：入队、只读查询与运行期发送选择，不含消费与清空。
+#[derive(Clone, Copy, Debug)]
+pub struct ProducerQueue<'a> {
+    queue: &'a MessageQueue,
+}
+
+/// 生命周期 owner 视图：Receive 许可、原子移交与 thread 级清空。
+///
+/// 由 [`MessageQueue::owner`] 取得；调用方必须是 Agent Loop、rewind 或 thread 关闭
+/// 等生命周期 owner。
+#[derive(Clone, Copy, Debug)]
+pub struct QueueOwner<'a> {
+    queue: &'a MessageQueue,
+}
+
+impl MessageQueue {
+    /// 生产者能力面（窄接口）。
+    pub fn producer(&self) -> ProducerQueue<'_> {
+        ProducerQueue { queue: self }
+    }
+
+    /// 生命周期 owner 能力面（含消费与清空）。
+    pub fn owner(&self) -> QueueOwner<'_> {
+        QueueOwner { queue: self }
+    }
+}
+
+impl ProducerQueue<'_> {
+    /// 同一 mailbox 的底层门面；只在 crate 内用于构造可 `'static` 的窄句柄。
+    pub(crate) fn queue_ref(&self) -> &MessageQueue {
+        self.queue
+    }
+
+    pub fn thread_id(&self) -> &ThreadId {
+        self.queue.thread_id()
+    }
+
+    pub fn begin_detached_enqueue(&self) -> DetachedEnqueue {
+        self.queue.begin_detached_enqueue()
+    }
+
+    pub async fn await_pending_enqueues(&self) {
+        self.queue.await_pending_enqueues().await;
+    }
+
+    pub async fn enqueue(&self, message: QueuedMessage) -> Result<MqEnqueueOutcome> {
+        self.queue.enqueue(message).await
+    }
+
+    pub async fn enqueue_sent(&self, message: QueuedMessage) -> Result<MqEnqueueOutcome> {
+        self.queue.enqueue_sent(message).await
+    }
+
+    pub fn enqueue_now(&self, message: QueuedMessage) -> Option<Result<MqEnqueueOutcome>> {
+        self.queue.enqueue_now(message)
+    }
+
+    pub async fn enqueue_batch(
+        &self,
+        messages: Vec<QueuedMessage>,
+    ) -> Result<Vec<MqEnqueueOutcome>> {
+        self.queue.enqueue_batch(messages).await
+    }
+
+    pub async fn query(&self, filter: MqFilter) -> Result<Vec<MqEntry>> {
+        self.queue.query(filter).await
+    }
+
+    pub async fn snapshot(&self) -> Result<Vec<QueuedMessage>> {
+        self.queue.snapshot().await
+    }
+
+    pub async fn cancel_user_input(&self, id: &MessageId) -> Result<MqCancelOutcome> {
+        self.queue.cancel_user_input(id).await
+    }
+
+    pub async fn send_inputs(&self, ids: Vec<MessageId>) -> Result<MqSendOutcome> {
+        self.queue.send_inputs(ids).await
+    }
+
+    pub async fn send_inputs_within(
+        &self,
+        ids: Vec<MessageId>,
+        timeout: Duration,
+    ) -> Result<MqSendOutcome> {
+        self.queue.send_inputs_within(ids, timeout).await
+    }
+
+    pub fn take_send_selection(&self) -> Vec<MessageId> {
+        self.queue.take_send_selection()
+    }
+
+    pub fn withdraw_send_inputs(&self, ids: &[MessageId]) {
+        self.queue.withdraw_send_inputs(ids);
+    }
+
+    pub async fn await_wake(&self) {
+        self.queue.await_wake().await;
+    }
+
+    pub fn subscribe_wake(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.queue.subscribe_wake()
+    }
+
+    pub async fn has_ensure_processing(&self) -> Result<bool> {
+        self.queue.has_ensure_processing().await
+    }
+
+    pub async fn has_required(&self) -> Result<bool> {
+        self.queue.has_required().await
+    }
+
+    pub async fn has_wake_up(&self) -> Result<bool> {
+        self.queue.has_wake_up().await
+    }
+
+    pub async fn is_empty(&self) -> Result<bool> {
+        self.queue.is_empty().await
+    }
+
+    pub async fn len(&self) -> Result<usize> {
+        self.queue.len().await
+    }
+}
+
+impl QueueOwner<'_> {
+    /// 取一次 Receive 许可；许可不可 Clone，移交时被消费。
+    pub fn begin_receive(
+        &self,
+        purpose: MqReceivePurpose,
+        execution: ExecutionBinding,
+    ) -> ReceivePermit {
+        self.queue.begin_receive(purpose, execution)
+    }
+
+    pub async fn select_for_receive(&self, permit: &ReceivePermit) -> Result<Vec<MqReceiveItem>> {
+        self.queue.select_for_receive(permit).await
+    }
+
+    pub async fn receive(
+        &self,
+        permit: ReceivePermit,
+        items: Vec<MqReceiveItem>,
+    ) -> Result<MqReceiveOutcome> {
+        self.queue.receive(permit, items).await
+    }
+
+    /// 清空本 thread 的全部 MQ 行：只给 rewind 与 thread 生命周期调用。
+    pub async fn clear(&self) -> Result<()> {
+        self.queue.clear().await
     }
 }
 
@@ -877,6 +1159,21 @@ impl MessageQueue {
         self.inner
             .store
             .install_receive_gate((entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+
+    /// 仅测试：下一次 MQ 查询在读取前暂停；返回（进入通知，放行信号）。
+    pub fn gate_next_query(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        self.inner
+            .store
+            .install_query_gate((entered_tx, release_rx));
         (entered_rx, release_tx)
     }
 
@@ -1037,6 +1334,17 @@ impl MessageQueue {
 
     pub fn has_ensure_processing_after_sync(&self, watermark: &Option<MqWatermark>) -> bool {
         ready_only(self.has_ensure_processing_after(watermark)).expect("test MQ watermark policy")
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl ProducerQueue<'_> {
+    pub fn push_sync(&self, message: QueuedMessage) {
+        self.queue.push_sync(message);
+    }
+
+    pub fn push_batch_sync(&self, messages: Vec<QueuedMessage>) {
+        self.queue.push_batch_sync(messages);
     }
 }
 

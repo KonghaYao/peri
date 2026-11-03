@@ -1102,6 +1102,46 @@ impl SessionDataPort for SqliteSessionData {
         self.clear_mq(thread_id).await
     }
 
+    async fn mq_history_contains(
+        &self,
+        thread_id: &ThreadId,
+        id: MessageId,
+    ) -> SessionResourceResult<bool> {
+        let mut connection = self
+            .database
+            .pool
+            .acquire()
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        Ok(
+            super::mq::message_fact(&mut connection, &id.as_uuid().to_string())
+                .await?
+                .is_some_and(|(owner, _)| owner == thread_id.as_str()),
+        )
+    }
+
+    async fn finalize_child_terminal(
+        &self,
+        child: &ThreadId,
+        status: AgentStatus,
+        work_state: WorkState,
+        target: &ThreadId,
+        message: MqInput,
+    ) -> SessionResourceResult<MqEnqueueOutcome> {
+        self.finalize_child_terminal_mq(child, status, work_state, target, message)
+            .await
+    }
+
+    async fn settle_retained_mq(
+        &self,
+        thread_id: &ThreadId,
+        reminders: &[peri_acp_types::session::RetainedReminder],
+        rows: &[MqEntry],
+    ) -> SessionResourceResult<()> {
+        self.settle_retained_mq_rows(thread_id, reminders, rows)
+            .await
+    }
+
     async fn close(&self) -> SessionResourceResult<()> {
         // 连接池由共享库句柄所有（执行面也可能在用），这里只关闭数据侧的写入入口。
         self.closed.store(true, Ordering::Release);

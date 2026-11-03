@@ -13,9 +13,11 @@ fn execution() -> ExecutionBinding {
 }
 
 async fn receive_all(queue: &MessageQueue) {
-    let permit = queue.begin_receive(MqReceivePurpose::ModelLoop, execution());
-    let items = queue.select_for_receive(&permit).await.unwrap();
-    queue.receive(permit, items).await.unwrap();
+    let permit = queue
+        .owner()
+        .begin_receive(MqReceivePurpose::ModelLoop, execution());
+    let items = queue.owner().select_for_receive(&permit).await.unwrap();
+    queue.owner().receive(permit, items).await.unwrap();
 }
 
 #[tokio::test]
@@ -193,17 +195,26 @@ async fn unsent_user_input_waits_for_send_selection() {
     assert!(!queue.has_required_for_run(&execution).await.unwrap());
     assert!(!queue.has_wake_up().await.unwrap());
     assert!(!queue.needs_mq_continuation().await.unwrap());
-    let permit = queue.begin_receive(MqReceivePurpose::ModelLoop, execution.clone());
-    assert!(queue.select_for_receive(&permit).await.unwrap().is_empty());
+    let permit = queue
+        .owner()
+        .begin_receive(MqReceivePurpose::ModelLoop, execution.clone());
+    assert!(queue
+        .owner()
+        .select_for_receive(&permit)
+        .await
+        .unwrap()
+        .is_empty());
     drop(permit);
 
     queue.send_inputs(vec![id]).await.unwrap();
     assert!(queue.has_required_for_run(&execution).await.unwrap());
     assert!(queue.has_wake_up().await.unwrap());
-    let permit = queue.begin_receive(MqReceivePurpose::ModelLoop, execution.clone());
-    let items = queue.select_for_receive(&permit).await.unwrap();
+    let permit = queue
+        .owner()
+        .begin_receive(MqReceivePurpose::ModelLoop, execution.clone());
+    let items = queue.owner().select_for_receive(&permit).await.unwrap();
     assert_eq!(items.len(), 1);
-    queue.receive(permit, items).await.unwrap();
+    queue.owner().receive(permit, items).await.unwrap();
     assert!(!queue.has_required_for_run(&execution).await.unwrap());
     assert!(queue.is_empty().await.unwrap());
 }

@@ -133,7 +133,7 @@ fn mailbox_with_two_deliveries() -> Arc<UserInputMailbox> {
     mailbox.enqueue_sync(&a).unwrap();
     for _ in [&b, &a] {
         mailbox.enter_idle_sync();
-        let messages = inbox.queue().drain_all_sync();
+        let messages = inbox.queue_for_test().drain_all_sync();
         assert_eq!(messages.len(), 1);
         let id = messages[0].message().unwrap().id();
         mailbox.mark_claimed_sync(&[id]);
@@ -536,7 +536,7 @@ fn mailbox_with_claimed_input() -> (Arc<UserInputMailbox>, MessageId) {
     let request = input(&mailbox, "00000000-0000-0000-0000-00000000000c", "并发");
     mailbox.enqueue_sync(&request).unwrap();
     mailbox.enter_idle_sync();
-    let messages = inbox.queue().drain_all_sync();
+    let messages = inbox.queue_for_test().drain_all_sync();
     let id = messages[0].message().unwrap().id();
     mailbox.mark_claimed_sync(&[id]);
     (mailbox, id)

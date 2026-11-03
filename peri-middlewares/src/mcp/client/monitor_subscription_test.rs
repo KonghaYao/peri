@@ -488,7 +488,7 @@ async fn offline_initiating_session_drops_the_alert_and_still_settles() {
     let inbox = SessionInbox::new(Arc::clone(&queue)).handle();
     let manager: Arc<dyn TaskManager> =
         Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
-    pool.bind_agent_session("child", inbox, Arc::clone(&manager));
+    pool.bind_agent_session("child", inbox, queue.as_ref().clone(), Arc::clone(&manager));
     assert_eq!(
         pool.session_bindings.read().kind("child"),
         Some(crate::mcp::client::session_bindings::BindingKind::Agent)

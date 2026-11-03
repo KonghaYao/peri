@@ -8,6 +8,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use super::lifecycle::drain_subagent_events;
+use super::terminal_settlement::TerminalMqRoute;
 use super::types::{
     ChildRunOutcome, SubagentFailure, SubagentLifecycleStart, SubagentLifecycleStop,
 };
@@ -97,6 +98,7 @@ pub(super) async fn spawn_background_subagent(
     on_bg_complete: Option<peri_acp_types::tasks::OnBgCompleteFn>,
     langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     session_resources: Option<Arc<dyn SessionResources>>,
+    terminal_route: Option<TerminalMqRoute>,
     deregister_runtime: Option<DeregisterRuntimeFn>,
     on_subagent_start: Option<SubagentLifecycleStart>,
     on_subagent_stop: Option<SubagentLifecycleStop>,
@@ -153,6 +155,7 @@ pub(super) async fn spawn_background_subagent(
     let panic_on_complete = on_bg_complete.clone();
     let panic_manager = Arc::clone(&task_manager);
     let panic_resources = session_resources.clone();
+    let panic_terminal_route = terminal_route.clone();
     let runtime_started = Arc::new(AtomicBool::new(false));
     let cleanup_runtime: Option<DeregisterRuntimeFn> = deregister_runtime.map(|deregister| {
         let runtime_started = runtime_started.clone();
@@ -553,6 +556,7 @@ pub(super) async fn spawn_background_subagent(
             &child_thread_id_for_task,
             status,
             &mut result,
+            terminal_route.as_ref(),
         )
         .await;
         if !terminal_persisted {
@@ -585,6 +589,8 @@ pub(super) async fn spawn_background_subagent(
                 );
             }
         }
+        // 终态提交失败时仍按既有协议交付失败结果：父会话需要知道结算没完成，
+        // 而这次提交没有留下任何事实（终态、意图与 MQ 行都没写）。
         settle_background_terminal(&task_manager_spawn, &registration, result, on_bg_complete);
         let owner = session
             .subagent_host()
@@ -653,6 +659,7 @@ pub(super) async fn spawn_background_subagent(
                     &panic_thread_id,
                     AgentStatus::Error,
                     &mut result,
+                    panic_terminal_route.as_ref(),
                 )
                 .await;
                 if let Some(registration) = panic_registration.lock().clone() {
@@ -737,7 +744,22 @@ async fn persist_background_terminal(
     thread_id: &str,
     status: AgentStatus,
     result: &mut crate::agent::events::BackgroundTaskResult,
+    terminal_route: Option<&TerminalMqRoute>,
 ) -> bool {
+    // 有投递路由时，终态、续跑意图与结果消息由存储一次提交：三条事实不能分两次写，
+    // 否则中断会留下「子任务已结束、父会话没收到结果」。
+    if let Some(route) = terminal_route {
+        if let Err(error) = route.settle(thread_id, status, result).await {
+            tracing::error!(%thread_id, %error, "subagent terminal status write failed");
+            result.success = false;
+            result.output = format!(
+                "{}; subagent terminal status write failed: {error}",
+                result.output
+            );
+            return false;
+        }
+        return true;
+    }
     let Some(store) = store else {
         return true;
     };

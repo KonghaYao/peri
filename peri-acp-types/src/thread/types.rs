@@ -77,6 +77,11 @@ impl AgentStatus {
     pub fn is_active(&self) -> bool {
         matches!(self, Self::Active)
     }
+
+    /// 是否已是终态（结束、失败或取消）
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Done | Self::Cancelled | Self::Error)
+    }
 }
 
 impl fmt::Display for AgentStatus {

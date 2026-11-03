@@ -20,7 +20,6 @@ use peri_acp_types::session::{
     MqInput, MqReceiveDisposition, MqReceiveItem, MqReceiveItemOutcome, MqReceiveOutcome,
     MqReceiveSelection, MqReceiveStatus,
 };
-
 /// 单行读取的列（`thread_id` 在最前，用于跨 thread 判定）。
 type MqRow = (
     String,
@@ -383,6 +382,152 @@ impl SqliteSessionData {
         Ok(item_outcome(item.entry.id, status, Some(entry)))
     }
 
+    /// 本地 child 终态结算：终态、工作意图与结果接纳共用一次 `BEGIN IMMEDIATE`。
+    ///
+    /// 三步分开提交会留下「子任务已结束、父会话没收到结果」：中途崩溃后终态已写、
+    /// 结果永远不落库（`docs/design/session-durability.md` §5.3）。
+    pub(super) async fn finalize_child_terminal_mq(
+        &self,
+        child: &ThreadId,
+        status: peri_acp_types::thread::AgentStatus,
+        work_state: peri_acp_types::thread::WorkState,
+        target: &ThreadId,
+        input: MqInput,
+    ) -> SessionResourceResult<MqEnqueueOutcome> {
+        self.writable()?;
+        if input.payload.id() != input.id {
+            return Err(invalid_input(
+                "MQ payload id must match the queued message id",
+            ));
+        }
+        let mut tx = self
+            .database
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        self.require_session(&mut tx, child).await?;
+        // 幂等判据是「这次结算是否已落地」，不是「状态是否相同」：同状态但不同
+        // 正文的 panic 兜底重放也必须被吞掉。判定与写入同在本次 `BEGIN IMMEDIATE`
+        // 内，ID 只按主键等值查询（`thread_mq.id` / `messages.message_id`）。
+        let message_id = input.id.as_uuid().to_string();
+        let current = stored_agent_status(&mut tx, child).await?;
+        if current.is_terminal() && settlement_landed(&mut tx, target, &message_id).await? {
+            tx.commit()
+                .await
+                .map_err(|_| commit_failure(Some(child.clone())))?;
+            return Ok(settled_without_write(input));
+        }
+        if target != child {
+            self.require_session(&mut tx, target).await?;
+        }
+        let payload = payload_json(&input.payload)?;
+        let policy = policy_json(&input.policy);
+        let kind = kind_token(input.kind)?;
+        let source = source_token(&input.source)?;
+        let incoming = RawMqRow {
+            id: &message_id,
+            enqueued_at: "",
+            kind: &kind,
+            source: &source,
+            policy_json: &policy,
+            payload_json: &payload,
+            original_draft: input.original_draft.as_deref(),
+        };
+        // 终态：与 `update_meta(status)` 同列同时间戳语义，只是不再单独提交。
+        sqlx::query("UPDATE threads SET agent_status = ?1, updated_at = ?2 WHERE id = ?3")
+            .bind(status.as_str())
+            .bind(peri_time::now_utc_rfc3339())
+            .bind(child.as_str())
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        session_rows::write_work_state_on(&mut tx, child, work_state)
+            .await
+            .map_err(write_failure)?;
+        // 结果接纳：与 `enqueue_mq` 同一判定顺序（历史 → MQ → 条件插入）。
+        let outcome = match self.mq_enqueue_fact(&mut tx, target, &incoming).await? {
+            Some(outcome) => outcome,
+            None => {
+                let enqueued_at = enqueued_at_now();
+                let inserted = sqlx::query(INSERT_THREAD_MQ_SQL)
+                    .bind(target.as_str())
+                    .bind(incoming.id)
+                    .bind(&enqueued_at)
+                    .bind(incoming.kind)
+                    .bind(incoming.source)
+                    .bind(incoming.policy_json)
+                    .bind(incoming.payload_json)
+                    .bind(incoming.original_draft)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| map_sqlx(&error))?;
+                if inserted.rows_affected() != 1 {
+                    return Err(conflict(
+                        "MQ enqueue raced the same message id; read the id back before retrying",
+                    ));
+                }
+                MqEnqueueOutcome {
+                    disposition: MqEnqueueDisposition::Inserted,
+                    entry: decode_entry(RawMqRow {
+                        enqueued_at: &enqueued_at,
+                        ..incoming
+                    })?,
+                }
+            }
+        };
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(child.clone())))?;
+        Ok(outcome)
+    }
+
+    /// 关闭结算：写终态提醒与删除 MQ 行共用一次 `BEGIN IMMEDIATE`。
+    ///
+    /// 两次独立提交会留下「提醒已写、待发行还在」或反过来的半完成状态；这里失败即
+    /// 全部不生效，下一次 close 从同一份事实重试。
+    pub(super) async fn settle_retained_mq_rows(
+        &self,
+        thread_id: &ThreadId,
+        reminders: &[peri_acp_types::session::RetainedReminder],
+        rows: &[MqEntry],
+    ) -> SessionResourceResult<()> {
+        self.writable()?;
+        let mut tx = self
+            .database
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        self.require_session(&mut tx, thread_id).await?;
+        for reminder in reminders {
+            self.append_terminal_reminder_on(&mut tx, thread_id, reminder.id, &reminder.reminder)
+                .await?;
+        }
+        for row in rows {
+            let message_id = row.id.as_uuid().to_string();
+            let Some(current) = mq_row_by_id(&mut tx, &message_id).await? else {
+                // 并发 Receive 已结算：与 `receive` 的 `Missing` 同义，不是失败。
+                continue;
+            };
+            let entry = entry_of(&current)?;
+            if current.0 != thread_id.as_str() || !is_same_watermark(&entry, &row.watermark()) {
+                continue;
+            }
+            sqlx::query(DELETE_THREAD_MQ_ROW_SQL)
+                .bind(thread_id.as_str())
+                .bind(&message_id)
+                .bind(&entry.enqueued_at)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| map_sqlx(&error))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(thread_id.clone())))?;
+        Ok(())
+    }
+
     pub(super) async fn clear_mq(&self, thread_id: &ThreadId) -> SessionResourceResult<()> {
         self.writable()?;
         let mut tx = self
@@ -415,7 +560,7 @@ async fn mq_row_by_id(
         .map_err(|error| map_sqlx(&error))
 }
 
-async fn message_fact(
+pub(super) async fn message_fact(
     connection: &mut SqliteConnection,
     id: &str,
 ) -> SessionResourceResult<Option<(String, String)>> {
@@ -424,4 +569,57 @@ async fn message_fact(
         .fetch_optional(&mut *connection)
         .await
         .map_err(|error| map_sqlx(&error))
+}
+
+/// 当前 `threads.agent_status`；调用方必须落在同一个事务里（判定与写入同一快照）。
+async fn stored_agent_status(
+    connection: &mut SqliteConnection,
+    id: &ThreadId,
+) -> SessionResourceResult<peri_acp_types::thread::AgentStatus> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT agent_status FROM threads WHERE id = ?1")
+        .bind(id.as_str())
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|error| map_sqlx(&error))?;
+    let Some((status,)) = row else {
+        return Err(not_found());
+    };
+    status
+        .parse()
+        .map_err(|_| corrupt("stored agent status is not readable"))
+}
+
+/// 按稳定消息 ID 判断这次结算是否已经落在目标 thread：MQ 行或历史行恰好一处成立。
+///
+/// 只做主键等值查询，不扫描；调用方必须已在同一事务内。
+async fn settlement_landed(
+    connection: &mut SqliteConnection,
+    target: &ThreadId,
+    message_id: &str,
+) -> SessionResourceResult<bool> {
+    if mq_row_by_id(&mut *connection, message_id)
+        .await?
+        .is_some_and(|row| row.0 == target.as_str())
+    {
+        return Ok(true);
+    }
+    Ok(message_fact(&mut *connection, message_id)
+        .await?
+        .is_some_and(|(owner, _)| owner == target.as_str()))
+}
+
+/// 另一个终态已经写下时的成功结果：本次没有写入任何行，entry 只是请求投影。
+fn settled_without_write(input: MqInput) -> MqEnqueueOutcome {
+    MqEnqueueOutcome {
+        disposition: MqEnqueueDisposition::Existing,
+        entry: MqEntry {
+            id: input.id,
+            enqueued_at: enqueued_at_now(),
+            kind: input.kind,
+            source: input.source,
+            payload: input.payload,
+            policy: input.policy,
+            original_draft: input.original_draft,
+        },
+    }
 }

@@ -159,6 +159,10 @@ pub(crate) struct MockSessionResources {
     ///
     /// 提交后的载荷同步写回本区 `payloads`，让 `load_session_history` 与 MQ 看到同一份事实。
     mq: peri_acp_types::session::InMemoryMqStore,
+    /// 故障注入：置位后所有 MQ 入队返回内部错误（验证启动路径不得吞掉接纳失败）。
+    mq_enqueue_failure: AtomicBool,
+    /// 故障注入：置位后历史查询返回内部错误（验证 `Unknown` 不得被当作不存在）。
+    mq_history_failure: AtomicBool,
     /// `enqueued_at` 生成器：同一进程内单调递增，测试不依赖真实时钟。
     mq_clock: Mutex<u64>,
 }
@@ -185,6 +189,8 @@ impl MockSessionResources {
             history_read_only: AtomicBool::new(false),
             compaction_applied_hook: Mutex::new(None),
             mq: peri_acp_types::session::InMemoryMqStore::new(),
+            mq_enqueue_failure: AtomicBool::new(false),
+            mq_history_failure: AtomicBool::new(false),
             mq_clock: Mutex::new(0),
         })
     }
@@ -192,6 +198,16 @@ impl MockSessionResources {
     /// 注册一次 compaction 已写入后的回调；回调在成功返回前执行一次。
     pub(crate) fn on_compaction_applied(&self, hook: impl Fn() + Send + Sync + 'static) {
         *self.compaction_applied_hook.lock().unwrap() = Some(Box::new(hook));
+    }
+
+    /// 故障注入：让后续 MQ 入队全部失败。
+    pub(crate) fn fail_mq_enqueues(&self) {
+        self.mq_enqueue_failure.store(true, Ordering::SeqCst);
+    }
+
+    /// 故障注入：让后续 MQ 历史查询全部失败。
+    pub(crate) fn fail_mq_history_lookup(&self) {
+        self.mq_history_failure.store(true, Ordering::SeqCst);
     }
 
     /// 当前 meta 状态序列（`(thread_id, status)`），只含真实发生变更的写入。

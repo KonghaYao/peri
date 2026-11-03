@@ -7,6 +7,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     hash::{Hash, Hasher},
     sync::Arc,
+    time::Duration,
 };
 
 use parking_lot::Mutex;
@@ -16,9 +17,10 @@ use peri_acp_types::{
     messages::{BaseMessage, MessageContent, MessageId},
     session::{
         DispatchUserInputsRequest, EnqueueUserInputRequest, MessagePolicy, MessageSource,
-        MqCancelOutcome, MqEnqueueDisposition, MqEntry, MqFilter, QueuedMessage, SessionInbox,
-        TakeBackUserInputRequest, TurnId, UserInput, UserInputItemResult, UserInputQueueItem,
-        UserInputQueueReceipt, UserInputQueueSnapshot, UserInputQueueTerminalItem, UserInputState,
+        MqCancelOutcome, MqEnqueueDisposition, MqEntry, MqFilter, MqSendStatus, QueuedMessage,
+        SessionInbox, TakeBackUserInputRequest, TurnId, UserInput, UserInputItemResult,
+        UserInputQueueItem, UserInputQueueReceipt, UserInputQueueSnapshot,
+        UserInputQueueTerminalItem, UserInputState,
     },
     store::PersistedPayload,
 };
@@ -33,6 +35,10 @@ use window::{
 };
 
 const PENDING_CAPACITY: usize = 32;
+
+/// dispatch 等待空闲会话确认移交的上限；只用于同一次调用内消除显而易见的
+/// 「已接纳 vs 已移交」歧义，必须远小于用户可感知的停顿。
+const DISPATCH_HANDOFF_WINDOW: Duration = Duration::from_millis(50);
 
 /// 预留的单次执行身份；失效 ticket 不能启动或结算后来的一次执行。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,12 +89,22 @@ struct ActiveRun {
 /// 运行期调度记录；内容与原稿一律回查 MQ，不在此复制。
 struct InputRecord {
     input_id: String,
+    /// 记录进入内存的单调序号：快照只能清理查询开始前已存在的记录。
+    seq: u64,
     fingerprint: u64,
     state: UserInputState,
     handed_off: bool,
     /// 交付日志槽位在 enqueue 时预留；交付时转为日志条目，撤回时释放。
     /// 这样 `mark_delivered` 永远不会在消息已写入 transcript 后才因容量失败。
     delivery_reserved: bool,
+}
+
+impl MailboxState {
+    fn next_record_seq(&mut self) -> u64 {
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        seq
+    }
 }
 
 struct CommandReceipt {
@@ -99,6 +115,8 @@ struct CommandReceipt {
 
 struct MailboxState {
     revision: u64,
+    /// 记录序号的下一个值；用于判断一条记录是否早于某次 MQ 查询。
+    next_seq: u64,
     records: Vec<InputRecord>,
     // generation 内的终态身份不可淘汰，否则同 ID 会重新获得执行资格。
     //
@@ -154,6 +172,7 @@ impl UserInputMailbox {
             inbox,
             state: Mutex::new(MailboxState {
                 revision: 0,
+                next_seq: 0,
                 records: Vec::new(),
                 terminal_identities: HashMap::new(),
                 terminal_display: Vec::new(),
@@ -197,9 +216,11 @@ impl UserInputMailbox {
             {
                 continue;
             }
+            let seq = state.next_record_seq();
             state.records.push(InputRecord {
                 fingerprint: fingerprint_for(&input_id, &content, &original_draft),
                 input_id,
+                seq,
                 state: UserInputState::Queued,
                 handed_off: false,
                 delivery_reserved: true,
@@ -213,6 +234,9 @@ impl UserInputMailbox {
     }
 
     pub async fn snapshot(&self) -> UserInputQueueSnapshot {
+        // 查询开始前已存在的记录（seq < boundary）才允许按查询结果清理；查询期间
+        // 新入队的记录即使不在旧结果里也保留，否则界面与发送操作会找不到它。
+        let prune_before = self.state.lock().next_seq;
         let entries = self.query_user_inputs().await;
         let mut state = self.state.lock();
         let (contents, known) = match &entries {
@@ -235,7 +259,9 @@ impl UserInputMailbox {
             // Queued；Dispatching/Claimed 仍可能处于交付确认窗口，必须保留。
             let before = state.records.len();
             state.records.retain(|record| {
-                record.state != UserInputState::Queued || contents.contains_key(&record.input_id)
+                record.state != UserInputState::Queued
+                    || record.seq >= prune_before
+                    || contents.contains_key(&record.input_id)
             });
             if state.records.len() != before {
                 state.revision += 1;
@@ -393,9 +419,11 @@ impl UserInputMailbox {
                         .iter()
                         .any(|record| record.input_id == request.input_id)
                     {
+                        let seq = state.next_record_seq();
                         state.records.push(InputRecord {
                             input_id: request.input_id.clone(),
                             fingerprint: input_fingerprint,
+                            seq,
                             state: UserInputState::Queued,
                             handed_off: false,
                             delivery_reserved: true,
@@ -470,7 +498,12 @@ impl UserInputMailbox {
         let send = if ids.is_empty() {
             None
         } else {
-            match self.inbox.queue().send_inputs(ids.clone()).await {
+            match self
+                .inbox
+                .queue()
+                .send_inputs_within(ids.clone(), DISPATCH_HANDOFF_WINDOW)
+                .await
+            {
                 Ok(outcome) => Some(outcome),
                 Err(error) => {
                     self.revert_promotion(&promoted);
@@ -478,10 +511,26 @@ impl UserInputMailbox {
                 }
             }
         };
-        let accepted: HashSet<MessageId> = send
-            .as_ref()
-            .map(|outcome| outcome.accepted.iter().map(|entry| entry.id).collect())
-            .unwrap_or_default();
+        let statuses: Vec<(String, MqSendStatus)> = promoted
+            .iter()
+            .map(|id| {
+                let status = send.as_ref().and_then(|outcome| {
+                    uuid::Uuid::parse_str(id)
+                        .ok()
+                        .and_then(|uuid| outcome.status_of(&MessageId::from(uuid)))
+                });
+                // 没有结论时按未知处理：不能把它当作「不存在」而删掉待发记录。
+                (id.clone(), status.unwrap_or(MqSendStatus::Unknown))
+            })
+            .collect();
+        let accepted: HashSet<MessageId> = statuses
+            .iter()
+            .filter(|(_, status)| {
+                matches!(status, MqSendStatus::Accepted | MqSendStatus::HandedOff)
+            })
+            .filter_map(|(id, _)| uuid::Uuid::parse_str(id).ok().map(MessageId::from))
+            .collect();
+        let mut unknown = Vec::new();
         let mut cancel = None;
         let results = {
             let mut state = self.state.lock();
@@ -501,53 +550,60 @@ impl UserInputMailbox {
                     cancel = active.cancel.clone();
                 }
             }
-            // missing 表示已移交或不存在：不能继续显示为 Dispatching。
-            let missing: Vec<&String> = promoted
-                .iter()
-                .filter(|id| {
-                    !send.as_ref().is_some_and(|outcome| {
-                        outcome
-                            .accepted
+            // 只有存储给出确定结论的 ID 才能离开待发投影；Unknown 保留记录等待重试。
+            for (id, status) in &statuses {
+                match status {
+                    MqSendStatus::Accepted | MqSendStatus::HandedOff => {}
+                    MqSendStatus::AlreadyInHistory | MqSendStatus::NotFound => {
+                        let Some(index) = state
+                            .records
                             .iter()
-                            .any(|e| e.id.as_uuid().to_string() == **id)
-                    })
-                })
-                .collect();
-            for id in missing {
-                let Some(index) = state
-                    .records
-                    .iter()
-                    .position(|record| record.input_id == *id)
-                else {
-                    continue;
-                };
-                let terminal = uuid::Uuid::parse_str(id)
-                    .ok()
-                    .and_then(|uuid| state.terminal_identities.get(&uuid))
-                    .map(|identity| identity.state);
-                match terminal {
-                    Some(terminal) => {
-                        state.records[index].state = terminal;
-                        state.records[index].handed_off = true;
+                            .position(|record| record.input_id == *id)
+                        else {
+                            continue;
+                        };
+                        let terminal = uuid::Uuid::parse_str(id)
+                            .ok()
+                            .and_then(|uuid| state.terminal_identities.get(&uuid))
+                            .map(|identity| identity.state);
+                        match terminal {
+                            Some(terminal) => {
+                                state.records[index].state = terminal;
+                                state.records[index].handed_off = true;
+                            }
+                            None => {
+                                state.records.remove(index);
+                            }
+                        }
+                        state.revision += 1;
                     }
-                    None => {
-                        state.records.remove(index);
-                    }
+                    MqSendStatus::Unknown => unknown.push(id.clone()),
                 }
-                state.revision += 1;
             }
-            let results = results_for(&state, &request.input_ids);
-            remember_command(
-                &mut state,
-                &request.command_id,
-                fingerprint,
-                results.clone(),
-                None,
-            );
-            results
+            if unknown.is_empty() {
+                let results = results_for(&state, &request.input_ids);
+                remember_command(
+                    &mut state,
+                    &request.command_id,
+                    fingerprint,
+                    results.clone(),
+                    None,
+                );
+                results
+            } else {
+                Vec::new()
+            }
         };
         if let Some(cancel) = cancel {
             cancel.cancel();
+        }
+        if !unknown.is_empty() {
+            // 已 Accepted 的记录保持已标记；只回退无法确认的 ID，重试同 ID 是幂等的。
+            self.revert_promotion(&unknown);
+            return Err(UserInputQueueError::Store(format!(
+                "cannot confirm whether {} input(s) were handed off; they remain queued",
+                unknown.len()
+            )));
         }
         Ok(self.receipt(results, None).await)
     }
@@ -803,6 +859,20 @@ impl UserInputMailbox {
             .active
             .as_ref()
             .is_some_and(|active| active.ticket == *ticket)
+    }
+
+    /// 仅测试：观察 Agent 已记录的权威终态（收尾前有效）。
+    #[cfg(test)]
+    pub(crate) fn recorded_attempt_outcome(
+        &self,
+        ticket: &UserInputRunTicket,
+    ) -> Option<UserInputAttemptOutcome> {
+        self.state
+            .lock()
+            .active
+            .as_ref()
+            .filter(|active| active.ticket == *ticket)
+            .and_then(|active| active.outcome)
     }
 
     /// fallback 只处理尚未进入 Agent 的早退；正常终态优先采用 Agent 的记录。
@@ -1214,15 +1284,26 @@ impl UserInputMailbox {
             return;
         }
         match self.inbox.queue().send_inputs(message_ids).await {
-            Ok(_) => {
+            Ok(outcome) => {
                 let mut state = self.state.lock();
+                let mut unknown = Vec::new();
                 for record in &mut state.records {
-                    if ids.contains(&record.input_id) {
-                        record.handed_off = true;
+                    if !ids.contains(&record.input_id) {
+                        continue;
+                    }
+                    let status = uuid::Uuid::parse_str(&record.input_id)
+                        .ok()
+                        .and_then(|uuid| outcome.status_of(&MessageId::from(uuid)));
+                    match status {
+                        // Unknown 不是结论：不宣称已移交，留在 ready 里等下一次重试。
+                        Some(MqSendStatus::Unknown) | None => unknown.push(record.input_id.clone()),
+                        Some(_) => record.handed_off = true,
                     }
                 }
                 if clear_ready {
-                    state.ready.retain(|id| !ids.contains(id));
+                    state
+                        .ready
+                        .retain(|id| !ids.contains(id) || unknown.contains(id));
                 }
             }
             Err(error) => {

@@ -258,6 +258,13 @@ impl SessionResources for MockSessionResources {
         input: peri_acp_types::session::MqInput,
     ) -> SessionResourceResult<peri_acp_types::session::MqEnqueueOutcome> {
         self.ensure_writable()?;
+        if self.mq_enqueue_failure.load(Ordering::SeqCst) {
+            return Err(SessionResourceError::new(
+                SessionResourceErrorKind::Internal {
+                    detail: "injected MQ enqueue failure".to_owned(),
+                },
+            ));
+        }
         // 历史优先：已移交的 ID 不再回到 MQ（与真实 adapter 的判定顺序一致）。
         let handed_off = self.region(thread_id).is_some_and(|region| {
             region
@@ -335,8 +342,27 @@ impl SessionResources for MockSessionResources {
         self.mq.mq_clear(thread_id).await
     }
 
+    async fn mq_history_contains(
+        &self,
+        thread_id: &ThreadId,
+        id: peri_acp_types::messages::MessageId,
+    ) -> SessionResourceResult<bool> {
+        if self.mq_history_failure.load(Ordering::SeqCst) {
+            return Err(SessionResourceError::new(
+                SessionResourceErrorKind::Internal {
+                    detail: "injected MQ history lookup failure".to_owned(),
+                },
+            ));
+        }
+        self.mq.mq_history_contains(thread_id, id).await
+    }
+
     fn install_receive_gate(&self, gate: peri_acp_types::session::ReceiveGate) {
         self.mq.install_receive_gate(gate);
+    }
+
+    fn install_query_gate(&self, gate: peri_acp_types::session::ReceiveGate) {
+        self.mq.install_query_gate(gate);
     }
 
     async fn append_reminder_if_absent(

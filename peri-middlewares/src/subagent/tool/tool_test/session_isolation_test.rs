@@ -234,6 +234,7 @@ async fn agent_binding_retains_task_directory_and_routes_only_to_child() {
     pool.bind_agent_session(
         "child",
         SessionInbox::new(child_queue.clone()).handle(),
+        child_queue.as_ref().clone(),
         manager,
     );
     assert!(manager_weak.upgrade().is_some());
@@ -287,6 +288,7 @@ async fn completed_child_shell_blocks_shared_close_and_reopen_rebuilds_binding()
     pool.bind_agent_session(
         &child_id,
         SessionInbox::new(old_queue.clone()).handle(),
+        old_queue.as_ref().clone(),
         old_manager.clone(),
     );
     let parent = Session::new(

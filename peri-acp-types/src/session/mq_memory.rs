@@ -54,6 +54,8 @@ pub struct InMemoryMqStore {
     state: Arc<Mutex<MemoryState>>,
     #[cfg(feature = "test-support")]
     receive_gate: Arc<Mutex<Option<super::mq::ReceiveGate>>>,
+    #[cfg(feature = "test-support")]
+    query_gate: Arc<Mutex<Option<super::mq::ReceiveGate>>>,
 }
 
 impl InMemoryMqStore {
@@ -151,7 +153,30 @@ impl ThreadMqStore for InMemoryMqStore {
             .map(|row| row.entry.clone())
             .collect::<Vec<_>>();
         entries.sort_by_key(MqEntry::watermark);
-        Ok(filter_entries(entries, &filter))
+        let entries = filter_entries(entries, &filter);
+        #[cfg(feature = "test-support")]
+        {
+            // 暂停「读取完成、尚未返回」的窗口：调用方的旧快照正是从这里开始过期。
+            let gate = self.query_gate.lock().take();
+            if let Some((entered, release)) = gate {
+                let _ = entered.send(());
+                let _ = release.await;
+            }
+        }
+        Ok(entries)
+    }
+
+    async fn mq_history_contains(
+        &self,
+        thread_id: &ThreadId,
+        id: MessageId,
+    ) -> SessionResourceResult<bool> {
+        Ok(self
+            .state
+            .lock()
+            .history
+            .get(&id)
+            .is_some_and(|history| history.thread_id == *thread_id))
     }
 
     async fn mq_cancel(
@@ -263,6 +288,11 @@ impl ThreadMqStore for InMemoryMqStore {
     #[cfg(feature = "test-support")]
     fn install_receive_gate(&self, gate: super::mq::ReceiveGate) {
         *self.receive_gate.lock() = Some(gate);
+    }
+
+    #[cfg(feature = "test-support")]
+    fn install_query_gate(&self, gate: super::mq::ReceiveGate) {
+        *self.query_gate.lock() = Some(gate);
     }
 }
 

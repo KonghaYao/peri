@@ -21,6 +21,7 @@ use crate::messages::MessageId;
 use crate::session::{ExecutionBinding, MessageKind, MessagePolicy, MessageSource};
 use crate::session_resources::{SessionResourceResult, SessionResources};
 use crate::store::PersistedPayload;
+use crate::system_reminder::TrustedSystemReminder;
 use crate::thread::ThreadId;
 
 /// 一次入队请求：调用方给内容，存储给入队时间与目标。
@@ -90,6 +91,16 @@ impl Ord for MqWatermark {
             self.id.as_uuid().cmp(&other.id.as_uuid())
         })
     }
+}
+
+/// 关闭结算要写入历史的一条提醒：稳定消息身份 + 已校验内容。
+///
+/// 身份由调用方按内容算出（同 ID 同内容幂等），存储只负责在删除 MQ 行的同一提交里
+/// 落这一条，不重新解释业务语义。
+#[derive(Debug, Clone)]
+pub struct RetainedReminder {
+    pub id: MessageId,
+    pub reminder: TrustedSystemReminder,
 }
 
 /// 一次限定查询：只表达投影用途，不暴露任意 SQL。
@@ -199,14 +210,88 @@ pub struct MqReceiveOutcome {
     pub items: Vec<MqReceiveItemOutcome>,
 }
 
-/// 显式发送的运行期结论。
+/// 单条显式发送的结论。
 ///
-/// `accepted` 只表示已写入本次发送选择——消息仍在 MQ，尚未移交；`missing` 要么已移交到
-/// 历史，要么当前不存在。发送不写历史、不生成本地回执（`docs/design/thread-mq.md` §5.3）。
+/// `Accepted` 只表示已写入本次发送选择——消息仍在 MQ，尚未移交；判定 `HandedOff` /
+/// `AlreadyInHistory` 必须由存储按消息 ID 查询历史的持久事实，不能凭内存推断。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MqSendStatus {
+    /// 已接纳到发送选择，等待中的移交确认超时；消息仍在 MQ。
+    Accepted,
+    /// 本次发送后确认已移交给历史（MQ 行已删除、历史已有该 ID）。
+    HandedOff,
+    /// 发送前历史里已有该 ID：不重复接纳，也不制造第二次投递。
+    AlreadyInHistory,
+    /// 当前 MQ 与历史都没有该 ID。
+    NotFound,
+    /// 后端无法回答「历史是否已有该 ID」：结论未知，调用方不得当作不存在。
+    Unknown,
+}
+
+/// 单条发送结果；`entry` 是接纳时读到的 MQ 行投影（`Accepted`/`HandedOff` 才有）。
+#[derive(Debug, Clone)]
+pub struct MqSendItemOutcome {
+    pub id: MessageId,
+    pub status: MqSendStatus,
+    pub entry: Option<MqEntry>,
+}
+
+/// 一次显式发送的逐项结论。
+///
+/// 发送不写历史、不生成本地回执（`docs/design/thread-mq.md` §5.3）；移交只能由 Receive
+/// 完成，因此「已移交」必须有存储事实支撑，超时只报告 `Accepted`。
 #[derive(Debug, Clone, Default)]
 pub struct MqSendOutcome {
-    pub accepted: Vec<MqEntry>,
-    pub missing: Vec<MessageId>,
+    pub items: Vec<MqSendItemOutcome>,
+}
+
+impl MqSendOutcome {
+    pub fn status_of(&self, id: &MessageId) -> Option<MqSendStatus> {
+        self.items
+            .iter()
+            .find(|item| item.id == *id)
+            .map(|item| item.status)
+    }
+
+    /// 已进入发送选择的消息行（`Accepted` / `HandedOff`）。
+    pub fn accepted(&self) -> Vec<&MqEntry> {
+        self.items
+            .iter()
+            .filter_map(|item| {
+                matches!(
+                    item.status,
+                    MqSendStatus::Accepted | MqSendStatus::HandedOff
+                )
+                .then_some(item.entry.as_ref())
+                .flatten()
+            })
+            .collect()
+    }
+
+    /// 存储已确定「不在待发区」的 ID（已在历史或不存在）。
+    ///
+    /// 只包含确定的否定事实；`Unknown` 表示无法确认，不属于 missing。
+    pub fn missing(&self) -> Vec<MessageId> {
+        self.items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.status,
+                    MqSendStatus::AlreadyInHistory | MqSendStatus::NotFound
+                )
+            })
+            .map(|item| item.id)
+            .collect()
+    }
+
+    /// 无法确认是否已移交的 ID（仅 `Unknown`）：调用方不得当作不存在。
+    pub fn unconfirmed(&self) -> Vec<MessageId> {
+        self.items
+            .iter()
+            .filter(|item| item.status == MqSendStatus::Unknown)
+            .map(|item| item.id)
+            .collect()
+    }
 }
 
 // ─── ThreadMqStore ───────────────────────────────────────────────────────────
@@ -251,6 +336,15 @@ pub trait ThreadMqStore: Send + Sync {
 
     async fn mq_clear(&self, thread_id: &ThreadId) -> SessionResourceResult<()>;
 
+    /// 该 ID 是否已作为本 thread 的历史消息持久存在。
+    ///
+    /// 只读、按稳定 ID 查询；`false` 是有界查询给出的否定事实，不是「没读到」。
+    async fn mq_history_contains(
+        &self,
+        thread_id: &ThreadId,
+        id: MessageId,
+    ) -> SessionResourceResult<bool>;
+
     /// 入队是否无需 I/O：为 true 时调用方可以在同步能力面里等到提交结果。
     fn supports_immediate_enqueue(&self) -> bool {
         false
@@ -259,6 +353,10 @@ pub trait ThreadMqStore: Send + Sync {
     /// 仅测试：让下一次原子提交在写入前暂停；默认实现忽略门控。
     #[cfg(feature = "test-support")]
     fn install_receive_gate(&self, _gate: ReceiveGate) {}
+
+    /// 仅测试：让下一次 MQ 查询在读取前暂停；默认实现忽略门控。
+    #[cfg(feature = "test-support")]
+    fn install_query_gate(&self, _gate: ReceiveGate) {}
 }
 
 /// [`ThreadMqStore`] 的 `SessionResources` 转发实现：生产路径的唯一适配器。
@@ -317,8 +415,21 @@ impl ThreadMqStore for SessionResourcesMqStore {
         self.resources.mq_clear(thread_id).await
     }
 
+    async fn mq_history_contains(
+        &self,
+        thread_id: &ThreadId,
+        id: MessageId,
+    ) -> SessionResourceResult<bool> {
+        self.resources.mq_history_contains(thread_id, id).await
+    }
+
     #[cfg(feature = "test-support")]
     fn install_receive_gate(&self, gate: ReceiveGate) {
         self.resources.install_receive_gate(gate);
+    }
+
+    #[cfg(feature = "test-support")]
+    fn install_query_gate(&self, gate: ReceiveGate) {
+        self.resources.install_query_gate(gate);
     }
 }
