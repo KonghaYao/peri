@@ -143,3 +143,22 @@ fn same_session_replay_keeps_running_background_task() {
     atoms::BRIDGE_RESET_COUNTER.set(old_reset);
     *atoms::BG_TASKS.state().write() = old_tasks;
 }
+
+#[test]
+#[serial]
+fn session_boundary_resets_stale_program_status() {
+    let old_active = atoms::ACTIVE_SESSION_ID.state().read().clone();
+    let old_status = *atoms::PROGRAM_STATUS.state().read();
+    atoms::PROGRAM_STATUS.set(crate::kit::program_status::ProgramStatus::Done);
+
+    project_session_boundary(Some("next-status"));
+
+    assert_eq!(
+        *atoms::PROGRAM_STATUS.state().read(),
+        crate::kit::program_status::ProgramStatus::Idle,
+        "切会话后不得继续上报上一会话的 done"
+    );
+
+    *atoms::ACTIVE_SESSION_ID.state().write() = old_active;
+    atoms::PROGRAM_STATUS.set(old_status);
+}

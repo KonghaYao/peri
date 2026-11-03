@@ -12,6 +12,7 @@ use crate::i18n;
 use crate::kit::acp_types::{FeedbackChannel, FeedbackLevel, TuiCommandFeedback};
 use crate::kit::atoms::PluginSummary;
 use crate::kit::atoms::{NOTIFICATION, PLUGIN_LIST, PREDICTION, RENDER_HEARTBEAT};
+use crate::kit::program_status::{self, BlockedKind, ProgramStatus};
 use crate::kit::tui_render_unit::{
     DisplayTrusted, ReminderRelay, TuiNoteLevel, TuiRenderUnit, TuiSystemReminder,
 };
@@ -463,6 +464,7 @@ pub(super) fn handle_oauth_needed(state: &mut BridgeState, on: &OauthNeeded) {
         .set((!state.active_session_id.is_empty()).then(|| state.active_session_id.clone()));
     state.popup_kind = Some(crate::kit::atoms::PopupKind::OAuth);
     state.variant = 2;
+    program_status::publish(ProgramStatus::Blocked(BlockedKind::Auth));
     super::render::push_popup_kind(state);
     super::render::push_acp_state(state);
 }
@@ -473,6 +475,13 @@ fn close_oauth_popup(state: &mut BridgeState) {
     *crate::kit::atoms::OAUTH_INFO.state().write() = None;
     crate::kit::atoms::OAUTH_SESSION_ID.set(None);
     super::render::push_popup_kind(state);
+    // 授权交互结束：agent 仍在等结果就回到 working，否则回到 idle。
+    let status = if state.phase == crate::kit::acp_events::SessionPhase::PromptRunning {
+        ProgramStatus::Working
+    } else {
+        ProgramStatus::Idle
+    };
+    program_status::publish(status);
 }
 
 pub(super) fn handle_oauth_completed(state: &mut BridgeState, server_name: &str) {
