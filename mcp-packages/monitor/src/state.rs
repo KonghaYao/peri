@@ -14,8 +14,11 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
 };
 
 use parking_lot::Mutex;
@@ -31,6 +34,10 @@ use crate::buffer::{
     capture_lines, EventAdmission, EventBuffer, EventPage, MonitorEvent, MAX_READ_BYTES,
     MAX_READ_EVENTS, MAX_TASK_BYTES, MAX_TASK_EVENTS, MIN_TASK_BYTES,
 };
+use crate::buffer_budget::{BufferBudget, INSTANCE_EVENT_BYTES};
+
+#[path = "retention.rs"]
+mod retention;
 
 /// Default task lifetime: one hour.
 pub const DEFAULT_DEADLINE_MS: u64 = 60 * 60 * 1000;
@@ -46,6 +53,9 @@ pub const DEFAULT_READ_LIMIT: usize = 200;
 pub const DEFAULT_READ_BYTES: usize = 64 * 1024;
 /// Retained task records per instance. Terminal tasks are pruned first.
 pub const MAX_RETAINED_TASKS: usize = 128;
+/// Terminal records and their remaining events expire five minutes after exit.
+pub const TERMINAL_RETENTION: Duration = Duration::from_secs(5 * 60);
+const RETENTION_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 /// Maximum characters accepted for the `alert` regex.
 pub const MAX_ALERT_PATTERN_CHARS: usize = 512;
 /// Maximum bytes accepted for the optional `label`.
@@ -144,9 +154,9 @@ pub struct StartedMonitor {
 /// `monitor_read` response. Wire keys are camelCase (`nextSeq`,
 /// `truncated`, `dropped`).
 ///
-/// A task retains its events after the process reaches a terminal state; only
-/// record pruning or instance replacement removes them. Callers therefore keep
-/// reading while `truncated` is true even if `status` is already terminal.
+/// A terminal task remains readable until its record expires or is pruned.
+/// Task and instance budgets may evict old events earlier and report `dropped`.
+/// Keep reading while `truncated` is true even if `status` is already terminal.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadResult {
@@ -220,6 +230,7 @@ struct TaskInner {
     status_message: Option<String>,
     last_updated_at: String,
     finished_at: Option<String>,
+    finished_at_monotonic: Option<Instant>,
     terminal: bool,
     cleanup: CleanupReport,
 }
@@ -238,10 +249,12 @@ struct MonitorTask {
     label: Option<String>,
     alert: Option<Regex>,
     started_at: String,
+    started_at_monotonic: Instant,
     deadline_at: String,
     deadline: Duration,
     inner: Mutex<TaskInner>,
     buffer: Arc<Mutex<EventBuffer>>,
+    buffers: Arc<BufferBudget>,
     alerts: Mutex<AlertCounters>,
     cancel: CancellationToken,
 }
@@ -260,7 +273,9 @@ impl MonitorTask {
             .alert
             .as_ref()
             .is_some_and(|alert| alert.is_match(&event.text));
-        let seq = self.buffer.lock().push(event);
+        let Some(seq) = self.buffers.push(&self.id, event) else {
+            return;
+        };
         if !matched {
             return;
         }
@@ -327,6 +342,7 @@ impl MonitorTask {
         inner.status_message = Some(message);
         inner.last_updated_at = now.clone();
         inner.finished_at = Some(now);
+        inner.finished_at_monotonic = Some(Instant::now());
         inner.cleanup.process_terminated = process_terminated;
         inner.terminal = true;
     }
@@ -379,14 +395,24 @@ impl MonitorTask {
 /// same builtin instance; tasks are filtered by session owner on access.
 pub struct MonitorState {
     cwd: String,
-    tasks: Mutex<HashMap<String, Arc<MonitorTask>>>,
+    tasks: Arc<Mutex<HashMap<String, Arc<MonitorTask>>>>,
+    buffers: Arc<BufferBudget>,
+    maintenance_started: AtomicBool,
+    maintenance_cancel: CancellationToken,
+    retention: Duration,
+    sweep_interval: Duration,
 }
 
 impl MonitorState {
     pub fn new(cwd: impl Into<String>) -> Self {
         Self {
             cwd: cwd.into(),
-            tasks: Mutex::new(HashMap::new()),
+            tasks: Arc::new(Mutex::new(HashMap::new())),
+            buffers: Arc::new(BufferBudget::new(INSTANCE_EVENT_BYTES)),
+            maintenance_started: AtomicBool::new(false),
+            maintenance_cancel: CancellationToken::new(),
+            retention: TERMINAL_RETENTION,
+            sweep_interval: RETENTION_SWEEP_INTERVAL,
         }
     }
 
@@ -398,17 +424,18 @@ impl MonitorState {
     ) -> Result<StartedMonitor, MonitorError> {
         let resolved = resolve_start(&request, &self.cwd)?;
 
-        {
-            let mut tasks = self.tasks.lock();
+        // Keep capacity admission and insertion in one synchronous lock scope;
+        // simultaneous starts must not each reserve the last free slot.
+        let mut tasks = self.tasks.lock();
+        if tasks.len() >= MAX_RETAINED_TASKS {
+            prune_terminal(&mut tasks, &self.buffers);
             if tasks.len() >= MAX_RETAINED_TASKS {
-                prune_terminal(&mut tasks);
-                if tasks.len() >= MAX_RETAINED_TASKS {
-                    return Err(MonitorError::CapacityReached);
-                }
+                return Err(MonitorError::CapacityReached);
             }
         }
 
         let task_id = format!("monitor-{}", uuid::Uuid::now_v7());
+        let started_at_monotonic = Instant::now();
         let started_at = peri_time::now_utc_rfc3339();
         let deadline_at = peri_time::format_utc_rfc3339(peri_time::now_wall() + resolved.deadline);
 
@@ -441,6 +468,7 @@ impl MonitorState {
             label: resolved.label.clone(),
             alert: resolved.alert.clone(),
             started_at: started_at.clone(),
+            started_at_monotonic,
             deadline_at: deadline_at.clone(),
             deadline: resolved.deadline,
             inner: Mutex::new(TaskInner {
@@ -450,6 +478,7 @@ impl MonitorState {
                 ),
                 last_updated_at: started_at.clone(),
                 finished_at: None,
+                finished_at_monotonic: None,
                 terminal: false,
                 cleanup: CleanupReport {
                     requested: false,
@@ -460,11 +489,16 @@ impl MonitorState {
                 resolved.max_events,
                 resolved.max_bytes,
             ))),
+            buffers: Arc::clone(&self.buffers),
             alerts: Mutex::new(AlertCounters::default()),
             cancel: CancellationToken::new(),
         });
 
-        self.tasks.lock().insert(task_id.clone(), Arc::clone(&task));
+        self.buffers
+            .register(task_id.clone(), Arc::clone(&task.buffer));
+        tasks.insert(task_id.clone(), Arc::clone(&task));
+        drop(tasks);
+        self.start_maintenance();
         tokio::spawn(run_task(task, child, tree, stdout, stderr));
 
         Ok(StartedMonitor {
@@ -552,6 +586,17 @@ impl MonitorState {
         Ok(self.task(task_id, owner)?.snapshot())
     }
 
+    /// MCP TTL is measured from creation, while terminal retention begins at
+    /// completion. Publish the matching finite lifetime on each observation.
+    pub(crate) fn task_ttl_ms(&self, task_id: &str) -> Result<u64, MonitorError> {
+        let task = self.task(task_id, None)?;
+        let finished = task.inner.lock().finished_at_monotonic;
+        let lifetime = finished.map_or(task.deadline, |finished| {
+            finished.saturating_duration_since(task.started_at_monotonic)
+        });
+        Ok(u64::try_from(lifetime.saturating_add(self.retention).as_millis()).unwrap_or(u64::MAX))
+    }
+
     /// Session-scoped summaries, newest first, without event bodies.
     pub fn list(
         &self,
@@ -579,14 +624,27 @@ impl MonitorState {
         }
         Ok(Arc::clone(task))
     }
+
+    fn start_maintenance(&self) {
+        if !self.maintenance_started.swap(true, Ordering::AcqRel) {
+            retention::spawn(
+                Arc::downgrade(&self.tasks),
+                Arc::downgrade(&self.buffers),
+                self.maintenance_cancel.clone(),
+                self.retention,
+                self.sweep_interval,
+            );
+        }
+    }
 }
 
 impl Drop for MonitorState {
     fn drop(&mut self) {
+        self.maintenance_cancel.cancel();
         // Instance replacement / process shutdown: request cancellation for
         // every live command. The runner owns process-tree cleanup; this drop
         // only stops new work from outliving the instance's registry.
-        for task in self.tasks.get_mut().values() {
+        for task in self.tasks.lock().values() {
             task.cancel.cancel();
         }
     }
@@ -673,13 +731,14 @@ fn resolve_cwd(requested: Option<&str>, default_cwd: &str) -> String {
     }
 }
 
-fn prune_terminal(tasks: &mut HashMap<String, Arc<MonitorTask>>) {
+fn prune_terminal(tasks: &mut HashMap<String, Arc<MonitorTask>>, buffers: &BufferBudget) {
     let terminal: Vec<String> = tasks
         .values()
         .filter(|task| task.is_terminal())
         .map(|task| task.id.clone())
         .collect();
     for task_id in terminal {
+        buffers.remove(&task_id);
         tasks.remove(&task_id);
     }
 }
@@ -797,3 +856,7 @@ pub(crate) fn validate_read_limits(
 #[cfg(test)]
 #[path = "state_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "retention_test.rs"]
+mod retention_tests;

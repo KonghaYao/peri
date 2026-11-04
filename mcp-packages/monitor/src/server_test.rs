@@ -33,15 +33,19 @@ fn server_advertises_tasks_extension_and_tools() {
 
 #[test]
 fn seed_task_carries_deadline_metadata() {
-    let result = seed_task(crate::state::StartedMonitor {
-        task_id: "monitor-1".into(),
-        status: "working",
-        started_at: "2026-11-01T00:00:00Z".into(),
-        deadline_at: "2026-11-01T01:00:00Z".into(),
-        label: Some("build".into()),
-    });
+    let result = seed_task(
+        crate::state::StartedMonitor {
+            task_id: "monitor-1".into(),
+            status: "working",
+            started_at: "2026-11-01T00:00:00Z".into(),
+            deadline_at: "2026-11-01T01:00:00Z".into(),
+            label: Some("build".into()),
+        },
+        3_900_000,
+    );
     assert_eq!(result.task.status, TaskStatus::Working);
     assert_eq!(result.task.task_id, "monitor-1");
+    assert_eq!(result.task.ttl_ms, Some(3_900_000));
     let metadata = result.meta.expect("monitor metadata");
     assert_eq!(
         metadata
@@ -55,19 +59,23 @@ fn seed_task_carries_deadline_metadata() {
 
 #[test]
 fn detailed_task_maps_terminal_statuses_and_payloads() {
-    let completed = detailed_task(snapshot(MonitorStatus::Completed, "Command exited."));
+    let completed = detailed_task(
+        snapshot(MonitorStatus::Completed, "Command exited."),
+        301_000,
+    );
     assert_eq!(completed.task.status, TaskStatus::Completed);
+    assert_eq!(completed.task.ttl_ms, Some(301_000));
     assert!(matches!(completed.payload, TaskPayload::Completed { .. }));
 
-    let failed = detailed_task(snapshot(MonitorStatus::Failed, "Command failed."));
+    let failed = detailed_task(snapshot(MonitorStatus::Failed, "Command failed."), 301_000);
     assert_eq!(failed.task.status, TaskStatus::Failed);
     assert!(matches!(failed.payload, TaskPayload::Failed { .. }));
 
-    let cancelled = detailed_task(snapshot(MonitorStatus::Cancelled, "Stopped."));
+    let cancelled = detailed_task(snapshot(MonitorStatus::Cancelled, "Stopped."), 301_000);
     assert_eq!(cancelled.task.status, TaskStatus::Cancelled);
     assert!(matches!(cancelled.payload, TaskPayload::Cancelled));
 
-    let working = detailed_task(snapshot(MonitorStatus::Working, "Running."));
+    let working = detailed_task(snapshot(MonitorStatus::Working, "Running."), 3_900_000);
     assert_eq!(working.task.status, TaskStatus::Working);
     assert!(matches!(working.payload, TaskPayload::Working));
 }

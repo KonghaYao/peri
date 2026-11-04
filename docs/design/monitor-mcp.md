@@ -72,6 +72,8 @@ agent ────────────────────────�
 - `task.taskId`、`task.status = working`、`createdAt`、`lastUpdatedAt`、
   `pollIntervalMs = 1000`；
 - `_meta["peri/monitor"] = { startedAt, deadlineAt, label }`；
+- `ttlMs` 为有限值并从 `createdAt` 计算：活动期为 deadline 加 5 分钟，终态更新为
+  实际运行时长加 5 分钟；不再用 `null` 宣称无限保留。
 - 不返回事件正文；事件经 `monitor_read` 读取。
 
 校验失败、命令无法启动或容量满时返回工具级错误，不注册任务。
@@ -124,8 +126,9 @@ agent ────────────────────────�
 
 读取循环以页级 `truncated` 为准：`truncated == true` 就继续（即使 `status` 已是
 终态，因为终态任务仍保留未读事件）；只有 `truncated == false` 且 `status` 为终态
-才停止。终态不代表事件已读完，进程结束后事件仍可继续读取；只有任务记录被容量
-裁剪（单实例保留 128 个任务，先清理终态任务）或实例替换后才会消失。
+才停止。终态不代表事件已读完，进程结束后事件仍可继续读取；所有任务共享 32 MiB
+事件存储预算，超压可先淘汰未读旧事件并增加 `dropped`。终态记录保留 5 分钟，每
+30 秒主动清理一次；容量裁剪（最多 128 个任务，先清理终态）和实例替换也会删除记录。
 未知 task id 与 owner 不匹配统一返回 `unknown task`，不泄露另一会话的任务是否存在。
 
 ### 2.3 `monitor_stop`
@@ -217,8 +220,11 @@ working ───▶ cancelling（对外仍 working）──▶ cancelled       
 - ring buffer 按 `max_events` / `max_bytes` 淘汰最旧事件；被淘汰事件计入 `dropped`，
   不会回填。`nextSeq` 与 `dropped` 让调用方识别缺口。
 - 终态任务仍保留事件：读取循环在 `truncated == true` 时继续（即使 `status` 已终态），
-  只有 `truncated == false` 且终态才停止。事件在进程结束后仍可读，直到任务记录被
-  容量裁剪或实例替换。
+  只有 `truncated == false` 且终态才停止。事件在进程结束后仍可读，直到任务记录因
+  5 分钟到期、容量裁剪或实例替换被删除；共享预算压力仍可能提前淘汰旧事件。
+- 单实例 active 与 terminal 事件环共享 32 MiB 实际保留预算；计入事件结构的 deque
+  capacity 与各字符串 capacity。超压分批淘汰旧事件并实际收缩环存储，保留原 seq 与
+  累计 `dropped`，不重置 alert 计数。该预算不包含有界读取页的临时副本和任务元数据。
 - 读取是纯内存操作，不重新执行命令，也不持久化事件。
 
 ## 4.1 alert 与提醒（P2）
@@ -276,8 +282,10 @@ working ───▶ cancelling（对外仍 working）──▶ cancelled       
   调用、`tasks/get` 与 `tasks/cancel` 上注入 `peri/taskOwner`；其他 MCP server 保持
   generic。
 - **保留策略**：单实例最多保留 128 个任务记录。达到上限时先清理终态任务；仍有活动
-  任务则拒绝新的 `monitor_start`。终态任务在被清理前仍可读取事件；没有「进程结束即
-  删除事件」的规则。
+  任务则拒绝新的 `monitor_start`，并发准入与注册在同一锁内完成。终态记录自完成起
+  保留 5 分钟，每 30 秒主动清理，不依赖新的工具调用；过期后返回 `unknown task`。
+  `monitor_stop` 不清空未读正文；清理记录时先实际释放环存储，即使并发读取仍持 task
+  Arc 也不能保留过期负载。维护任务仅持弱引用并随实例取消，活动任务不受终态 TTL 影响。
 - **进程所有权**：命令经 `peri_process::ProcessTree` 启动，使用独立进程组（Windows
   为 Job）；停止/超时先终止整棵进程树，再有界等待退出。`cleanup.processTerminated`
   只在确认进程组不存在后为 true。
