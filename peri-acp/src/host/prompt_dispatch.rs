@@ -224,15 +224,17 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             }
         );
         // MQ 激活查询不能持有 sessions 锁。
-        let (cancelled, has_subagent, has_mq, has_ready_result) =
+        let (cancelled, user_stopped, has_subagent, has_mq, has_ready_result) =
             match cfg.session_manager.get_session(&prompt_session_id) {
                 Some(session) => {
                     let cancelled = session.cancel_token.is_cancelled();
+                    let user_stopped = session.activation.user_stopped();
                     let queue = session.v2_message_queue.clone();
                     let has_ready_result = session.async_result_mailbox.has_ready();
                     drop(session);
                     (
                         cancelled,
+                        user_stopped,
                         queue
                             .has_pending_defer(
                                 &peri_acp_types::session::MessageSource::SubAgentComplete,
@@ -243,8 +245,17 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
                         has_ready_result,
                     )
                 }
-                None => (true, false, false, false),
+                None => (true, false, false, false, false),
             };
+        // 定时调度是已批准的调度，不受上次失败的水位影响；但它是被动回调，
+        // 不能解除用户显式 Stop（设计 §2.1/§5.2）。否则准入会写 working 覆盖 stopped。
+        if matches!(origin, PromptOrigin::Scheduled) && user_stopped {
+            tracing::debug!(
+                session_id = %prompt_session_id,
+                "scheduled continuation: user stop is still in effect, aborting"
+            );
+            return Ok(serde_json::Value::Null);
+        }
         let base_dispatchable = {
             let sessions = sessions.lock().await;
             sessions.get(&prompt_session_id).is_some_and(|state| {

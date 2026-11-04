@@ -33,6 +33,8 @@ pub(crate) struct NotificationOutcome {
     pub(crate) continuation: Option<ContinuationRequest>,
     /// 本次取消实际影响的 thread（本会话与 cascade children），需要写 `stopped`。
     pub(crate) stop_targets: Vec<ThreadId>,
+    /// 模型配置变化后旧占用快照失效的 thread，需要写 `NULL`（设计 §2.2）。
+    pub(crate) context_usage_invalidations: Vec<ThreadId>,
 }
 
 /// 返回 [`NotificationOutcome`]：调用方需在 **sessions 锁外** 补发 continuation，
@@ -140,6 +142,8 @@ pub(crate) async fn handle_notification(
             // Two formats:
             // 1. {"config": PeriConfig} — full config replace (from update_config)
             // 2. {"configId": "model"/"provider", "value": "..."} — partial (from set_config_option)
+            let mut outcome = NotificationOutcome::default();
+            let mut model_config_changed = false;
             if let Some(config_val) = params.get("config") {
                 let new_cfg: crate::provider::PeriConfig = match serde_json::from_value(
                     config_val.clone(),
@@ -165,6 +169,7 @@ pub(crate) async fn handle_notification(
                 if let Some(p) = LlmProvider::from_config(&new_cfg) {
                     *cfg.provider.write() = p;
                 }
+                model_config_changed = true;
             } else if let (Some(config_id), Some(value)) = (
                 params.get("configId").and_then(|v| v.as_str()),
                 params.get("value").and_then(|v| v.as_str()),
@@ -182,6 +187,7 @@ pub(crate) async fn handle_notification(
                             tracing::info!(alias = %value, "config_update notification: model changed");
                             *cfg.provider.write() = p;
                         }
+                        model_config_changed = true;
                     }
                     other => {
                         tracing::debug!(config_id = %other, "config_update notification: unhandled configId");
@@ -190,8 +196,19 @@ pub(crate) async fn handle_notification(
             } else {
                 tracing::debug!("config_update notification: missing config/configId");
             }
-            // No sessions to invalidate — pool will be built fresh on next session/new
-            NotificationOutcome::default()
+            // 模型/供应商变化会让旧 token 快照失效：只对本次通知指向的会话写 NULL，
+            // 不猜测其他会话的配置（设计 §2.2）。
+            if model_config_changed {
+                if let Some(thread) = params
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .and_then(|session_id| sessions.get(session_id))
+                    .map(|state| ThreadId::from(state.thread_id.clone()))
+                {
+                    outcome.context_usage_invalidations.push(thread);
+                }
+            }
+            outcome
         }
         _ => {
             debug!(method = %method, "Unhandled notification");

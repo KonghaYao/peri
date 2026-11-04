@@ -990,5 +990,21 @@ impl ServerLoop<'_> {
                 );
             }
         }
+        // 模型配置变化后旧 context 占用快照失效：写 NULL（未知不是零占用，设计 §2.2）。
+        for thread_id in outcome.context_usage_invalidations {
+            if let Err(error) = cfg
+                .session_manager
+                .session_resources()
+                .set_context_usage(&thread_id, None)
+                .await
+            {
+                tracing::error!(
+                    method,
+                    %thread_id,
+                    %error,
+                    "context usage invalidation failed"
+                );
+            }
+        }
     }
 }

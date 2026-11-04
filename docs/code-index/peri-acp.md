@@ -39,7 +39,7 @@ F09：`SessionState.event_health` 仅保存在内存，`event_health()` 提供�
 
 续跑 MQ pending 不是排队准入锁：空跑或早退不能阻塞下一次结果；重复通知在 prompt lock 内复核真实待处理消息。回归 `activation_tests::empty_queued_continuation_does_not_block_the_next_child_result` 覆盖旧请求排队后消息被消费、空跑退出、下一子任务结果仍能启动续跑。
 
-`host/prompt_dispatch.rs` 在同一 sessions 临界区复核 epoch/closing/runtime/MQ/activation 并提交 in-flight 与取消令牌；`host/prompt.rs` 复用已提交令牌，`host/notify.rs` 的 Stop 在无令牌时也撤销排队代际。真实 scheduler 与 HTTP 失败恢复回归位于 `host/{error_activation_test,admission_activation_test,stop_activation_test,steer_activation_test}.rs`，覆盖失败期间/之后的新增结果、原子准入交错与普通 prompt 的一次独立 child 续跑，不以手工驱动 scheduler 代替行为验收。
+`host/prompt_dispatch.rs` 在同一 sessions 临界区复核 epoch/closing/runtime/MQ/activation 并提交 in-flight 与取消令牌；`host/prompt.rs` 复用已提交令牌，`host/notify.rs` 的 Stop 在无令牌时也撤销排队代际。定时调度（`PromptOrigin::Scheduled`）不受失败水位影响，但用户显式 Stop 仍生效，不能把 `stopped` 改回 `working`；模型/供应商配置变化时对通知指向的 thread 写入 `context_usage_tokens = NULL`。真实 scheduler 与 HTTP 失败恢复回归位于 `host/{error_activation_test,admission_activation_test,stop_activation_test,steer_activation_test}.rs`，覆盖失败期间/之后的新增结果、原子准入交错与普通 prompt 的一次独立 child 续跑，不以手工驱动 scheduler 代替行为验收。
 
 预算拒绝前尚未进入 Reason 的新增 EnsureProcessing 输入由 Agent Receive 保留原队列身份，宿主继续使用既有失败 watermark、prompt lock、代际与 Stop/关闭检查。`activation_tests::budget_activation_tests::budget_boundary_result_is_automatically_processed_by_host_scheduler` 通过真实 HTTP Reason 请求耗尽 root 默认预算，由真实 continuation scheduler 自动续跑，验证后续模型请求只包含一次结果、canonical 历史只提交一次且执行清理完成；辅助模型请求单独匹配，不计入语义 Reason 次数。
 

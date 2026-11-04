@@ -61,6 +61,13 @@ fn task_owner_metadata_is_scoped_to_session_capable_builtin_sources() {
             .get(peri_mcp_core::task_owner::TASK_OWNER_META_KEY),
         Some(&serde_json::json!("session-a"))
     );
+    assert_eq!(
+        meta.0
+             .0
+            .get(peri_mcp_core::task_owner::THREAD_OWNER_META_KEY),
+        Some(&serde_json::json!("session-a")),
+        "恢复查询按 thread id 过滤存活任务，宿主必须注入 thread owner"
+    );
 
     let mut monitor = connected_test_handle("monitor");
     Arc::get_mut(&mut monitor).unwrap().source = Some(crate::mcp::config::ConfigSource::Builtin {

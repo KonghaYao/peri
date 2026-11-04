@@ -4,6 +4,7 @@ use peri_acp_types::event::ExecutorEvent;
 use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::session::{MessageKind, MessageSource, QueuedMessage};
 use peri_acp_types::tasks::BgTaskRegistration;
+use peri_acp_types::thread::{ThreadId, WorkState};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -585,6 +586,107 @@ async fn approved_schedule_runs_without_reenabling_suppressed_passive_results() 
         .unwrap()
         .activation
         .is_allowed());
+    harness
+        .cfg
+        .session_manager
+        .pre_close_session(&harness.session_id);
+}
+
+/// 模型配置变化会让旧 token 快照失效（设计 §2.2）。
+#[tokio::test]
+#[serial]
+async fn model_config_update_invalidates_saved_context_usage() {
+    let harness = ActivationHarness::new().await;
+    let alias = harness.cfg.peri_config.read().config.active_alias.clone();
+    let mut sessions = harness.sessions.lock().await;
+    let outcome = crate::host::notify::handle_notification(
+        "session/config_update",
+        &json!({
+            "sessionId": harness.session_id,
+            "configId": "model",
+            "value": alias,
+        }),
+        &mut sessions,
+        &harness.cfg,
+    )
+    .await;
+    assert_eq!(
+        outcome.context_usage_invalidations,
+        vec![ThreadId::from(harness.session_id.clone())]
+    );
+    drop(sessions);
+    harness
+        .cfg
+        .session_manager
+        .pre_close_session(&harness.session_id);
+}
+
+/// 定时调度是已批准的调度，但被动回调不能解除用户显式 Stop（设计 §2.1/§5.2）。
+#[tokio::test]
+#[serial]
+async fn scheduled_continuation_does_not_override_user_stop() {
+    let harness = ActivationHarness::new().await;
+    let queue = harness
+        .cfg
+        .session_manager
+        .v2_queue_for(&harness.session_id)
+        .unwrap();
+    queue
+        .push_async(QueuedMessage::defer(
+            MessageSource::CronTrigger,
+            BaseMessage::human("approved schedule"),
+        ))
+        .await;
+    harness
+        .cfg
+        .session_manager
+        .get_session(&harness.session_id)
+        .unwrap()
+        .activation
+        .suppress();
+    let thread = ThreadId::from(harness.session_id.clone());
+    harness
+        .cfg
+        .session_manager
+        .session_resources()
+        .set_work_state(&thread, WorkState::Stopped)
+        .await
+        .unwrap();
+    harness
+        .sessions
+        .lock()
+        .await
+        .get_mut(&harness.session_id)
+        .unwrap()
+        .continuation_mq_steering_pending = true;
+    let params =
+        json!({"sessionId": harness.session_id, "message": {"role": "user", "content": []}});
+    let response = crate::host::dispatch_prompt_turn(
+        params,
+        crate::host::PromptOrigin::Scheduled,
+        Some(0),
+        &harness.sessions,
+        &harness.locks,
+        &harness.transport,
+        &harness.cfg,
+        &harness.sender,
+    )
+    .await
+    .unwrap();
+    assert!(response.is_null(), "用户 Stop 后不得自动运行定时调度");
+    assert!(queue.has_ensure_processing().await.expect("test MQ policy"));
+    assert_eq!(
+        harness
+            .cfg
+            .session_manager
+            .session_resources()
+            .load_session_meta(&thread)
+            .await
+            .unwrap()
+            .work_state,
+        WorkState::Stopped,
+        "定时调度不得把 stopped 改回 working"
+    );
     harness
         .cfg
         .session_manager
