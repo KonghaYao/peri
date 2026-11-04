@@ -39,7 +39,10 @@ pub(crate) use load_shared::{handle_load_shared, handle_resume_shared};
 /// 与运行登记），但不回放历史、不发会话响应。
 ///
 /// 调用方必须已经确认该 thread 仍为 `working` 并持有它的父 thread；装配只建立
-/// 运行实例，提醒接纳与启动由恢复协调器决定。
+/// 运行实例，提醒接纳与启动由恢复协调器决定。运行期绑定（`bind_session_tasks`）
+/// 与在线 endpoint 注册是传输层调用方的责任：经 server loop 的恢复由
+/// `host/recovery/wiring::bind_recovered_sessions` 在响应前补齐，不经 server loop
+/// 的入口必须自行调用同一 helper。
 pub(crate) async fn assemble_for_recovery(
     cfg: &AcpServerConfig,
     sessions: &crate::host::SharedSessions,

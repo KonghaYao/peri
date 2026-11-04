@@ -36,14 +36,23 @@ pub(crate) struct HostSessionRecovery {
     cont_tx: Arc<tokio::sync::mpsc::UnboundedSender<ContinuationRequest>>,
     /// 正在准备的根 → 该根的串行锁；并发进入在同一把锁上排队。
     in_flight: DashMap<ThreadId, Arc<Mutex<()>>>,
-    /// 已接纳提醒、等待响应之后启动的根。
-    prepared: DashMap<ThreadId, PreparedLaunch>,
+    /// 已接纳提醒的 thread：进程内唯一防重复事实（需要覆盖 `discard` 后的复用）。
+    admitted: DashMap<ThreadId, AdmittedRecovery>,
+}
+
+/// 一次准入的生命周期：提醒已入队（`Prepared`）与执行已放行（`Launched`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdmissionPhase {
+    Prepared,
+    Launched,
 }
 
 /// 启动门的快照：响应发出后再复核同一代次与同一打开态。
-struct PreparedLaunch {
+#[derive(Debug, Clone)]
+struct AdmittedRecovery {
     generation: u64,
     session_id: String,
+    phase: AdmissionPhase,
 }
 
 /// 一次生命周期快照；拿到即释放 `sessions` 锁。
@@ -78,14 +87,18 @@ impl HostSessionRecovery {
             cfg,
             cont_tx,
             in_flight: DashMap::new(),
-            prepared: DashMap::new(),
+            admitted: DashMap::new(),
         }
     }
 
-    /// 响应未能发出时丢弃本次启动资格：提醒留在 MQ，但本次不启动执行。
+    /// 响应未能发出时丢弃本次启动资格：提醒留在 MQ，下一次进入可采纳并重新启动。
+    ///
+    /// 只移除 `Prepared`：`Launched` 已有本进程执行证据，不能因响应丢弃而失忆。
     pub(crate) fn discard(&self, report: &RecoveryReport) {
         for thread_id in &report.recovered {
-            self.prepared.remove(thread_id);
+            self.admitted.remove_if(thread_id, |_, entry| {
+                entry.phase == AdmissionPhase::Prepared
+            });
         }
     }
 
@@ -319,7 +332,9 @@ impl HostSessionRecovery {
             return self.thread_failure(thread, "session state is not published", fatal);
         };
         if before.turn_active {
-            // 已有实例正在执行本 thread：连接现有运行，不重复注入。
+            // 已有实例正在执行本 thread：连接现有运行，不重复注入。运行中的 turn
+            // 会消费 MQ 中尚未移交的提醒，本次准入资格随之失效。
+            self.admitted.remove(thread);
             return Ok(ThreadOutcome::Reused);
         }
         if before.closing {
@@ -336,8 +351,59 @@ impl HostSessionRecovery {
         }
 
         let queue = self.queue_for(thread);
-        if reminder::already_injected(&queue).await {
-            return Ok(ThreadOutcome::Skipped(RecoverySkipReason::AlreadyRunning));
+        // 防重复的唯一进程内事实是 admitted；MQ 行只表示「有一条可复用的待消费提醒」。
+        // 这样 `discard`、响应失败或进程内表项被清理后，下一次进入仍能采纳旧提醒，
+        // 而不会把它误判成永久 AlreadyRunning。
+        let mut inject = true;
+        if let Some(entry) = self.admitted.get(thread).map(|entry| entry.clone()) {
+            let same_lifecycle =
+                entry.generation == before.generation && entry.session_id == session_id;
+            if !same_lifecycle {
+                self.admitted.remove_if(thread, |_, current| {
+                    current.generation == entry.generation && current.session_id == entry.session_id
+                });
+            } else if entry.phase == AdmissionPhase::Prepared {
+                return Ok(ThreadOutcome::Skipped(RecoverySkipReason::AlreadyRunning));
+            } else {
+                match reminder::find_pending_recovery(&queue).await {
+                    Ok(Some(_)) => {
+                        return Ok(ThreadOutcome::Skipped(RecoverySkipReason::AlreadyRunning))
+                    }
+                    Ok(None) => {
+                        // 提醒已被上一次启动的 turn 消费：表项过期，继续按当前事实重新判定。
+                        self.admitted.remove_if(thread, |_, current| {
+                            current.generation == entry.generation
+                                && current.session_id == entry.session_id
+                                && current.phase == AdmissionPhase::Launched
+                        });
+                    }
+                    Err(error) => {
+                        // 已有本进程启动证据：查询失败时保守不复注第二条。
+                        tracing::warn!(
+                            thread_id = %thread,
+                            %error,
+                            "recovery: pending reminder recheck failed"
+                        );
+                        return Ok(ThreadOutcome::Skipped(RecoverySkipReason::AlreadyRunning));
+                    }
+                }
+            }
+        } else {
+            match reminder::find_pending_recovery(&queue).await {
+                Ok(Some(_)) => inject = false,
+                Ok(None) => {}
+                Err(error) if fatal => {
+                    return Err(RecoveryError::from(error).with_thread(thread));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        thread_id = %thread,
+                        %error,
+                        "recovery: pending reminder query failed"
+                    );
+                    return Ok(ThreadOutcome::Skipped(RecoverySkipReason::AssemblyFailed));
+                }
+            }
         }
 
         // 注入前复核：等待根锁或读写期间会话可能已换代或个人已停止。
@@ -358,22 +424,27 @@ impl HostSessionRecovery {
         // 设计 §6：外围任务只按本 thread 的直接 owner 查询。查询失败 / 未接线
         // 都是 Unknown，绝不写成「没有任务」；它也不阻断本 thread 的恢复。
         let peripheral_tasks = self.peripheral_tasks(session_id, thread).await;
-        let trusted =
-            match reminder::recovery_reminder(root, thread, direct_children, &peripheral_tasks) {
-                Ok(trusted) => trusted,
-                Err(detail) => {
-                    return self.thread_failure(
-                        thread,
-                        format!("recovery reminder was rejected: {detail}"),
-                        fatal,
-                    )
-                }
-            };
-
-        // 提醒接纳要能通过 `pending_request` 的激活门：放行执行资格在启动前最后一次复核。
-        activation.allow();
-        if let Err(error) = queue.enqueue(reminder::queued_recovery(trusted)).await {
-            return self.thread_failure(thread, error.to_string(), fatal);
+        if inject {
+            let trusted =
+                match reminder::recovery_reminder(root, thread, direct_children, &peripheral_tasks)
+                {
+                    Ok(trusted) => trusted,
+                    Err(detail) => {
+                        return self.thread_failure(
+                            thread,
+                            format!("recovery reminder was rejected: {detail}"),
+                            fatal,
+                        )
+                    }
+                };
+            // 提醒接纳要能通过 `pending_request` 的激活门：放行执行资格在启动前最后一次复核。
+            activation.allow();
+            if let Err(error) = queue.enqueue(reminder::queued_recovery(trusted)).await {
+                return self.thread_failure(thread, error.to_string(), fatal);
+            }
+        } else {
+            // 采纳旧提醒：不重复入队；任务实时状态由当前 turn 的工具查询修正。
+            activation.allow();
         }
         // 结果通知挂在会话实例上：本轮无论由启动门、激活监听还是用户 prompt 发起，
         // 收尾都能投递一次（不依赖哪一条续跑请求真正跑到）。
@@ -382,11 +453,12 @@ impl HostSessionRecovery {
                 runtime.record_recovery_parent(parent);
             }
         }
-        self.prepared.insert(
+        self.admitted.insert(
             thread.clone(),
-            PreparedLaunch {
+            AdmittedRecovery {
                 generation: before.generation,
                 session_id: session_id.to_owned(),
+                phase: AdmissionPhase::Prepared,
             },
         );
         Ok(ThreadOutcome::Injected(peripheral_tasks))
@@ -525,14 +597,26 @@ impl HostSessionRecovery {
     /// 由 continuation scheduler 把结果通知投递回父级持久队列。
     pub(crate) async fn launch(&self, report: &RecoveryReport) {
         for thread_id in &report.recovered {
-            let Some((_, prepared)) = self.prepared.remove(thread_id) else {
-                continue;
+            // Prepared → Launched 原子推进：二次 launch 看到 Launched 就不再发 continuation。
+            let prepared = {
+                let Some(mut entry) = self.admitted.get_mut(thread_id) else {
+                    continue;
+                };
+                if entry.phase != AdmissionPhase::Prepared {
+                    continue;
+                }
+                entry.phase = AdmissionPhase::Launched;
+                AdmittedRecovery {
+                    generation: entry.generation,
+                    session_id: entry.session_id.clone(),
+                    phase: AdmissionPhase::Launched,
+                }
             };
             self.launch_prepared(prepared).await;
         }
     }
 
-    async fn launch_prepared(&self, prepared: PreparedLaunch) {
+    async fn launch_prepared(&self, prepared: AdmittedRecovery) {
         let Some(state) = self.lifecycle(&prepared.session_id).await else {
             tracing::warn!(
                 session_id = %prepared.session_id,

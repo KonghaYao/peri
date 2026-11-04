@@ -146,16 +146,20 @@ pub(super) async fn write_work_state(
 }
 
 /// 同一份单列写入的事务内形态：调用方与终态、MQ 接纳共用一次提交。
+///
+/// 目标行不存在（0 行）是 NotFound，不是「写成功」；超过 1 行说明 thread 身份不再
+/// 唯一（Corrupt）。工作意图是续跑准入的事实源，这里不能静默吞掉未写入。
 pub(super) async fn write_work_state_on(
     connection: &mut SqliteConnection,
     id: &ThreadId,
     state: WorkState,
 ) -> Result<()> {
-    sqlx::query("UPDATE threads SET work_state = ?1 WHERE id = ?2")
+    let result = sqlx::query("UPDATE threads SET work_state = ?1 WHERE id = ?2")
         .bind(state.as_str())
         .bind(id.as_str())
         .execute(&mut *connection)
         .await?;
+    require_single_row(result.rows_affected(), "work_state")?;
     Ok(())
 }
 
@@ -168,12 +172,24 @@ pub(super) async fn write_context_usage(
     let tokens = tokens
         .map(|tokens| i64::try_from(tokens).context("context_usage_tokens exceeds i64"))
         .transpose()?;
-    sqlx::query("UPDATE threads SET context_usage_tokens = ?1 WHERE id = ?2")
+    let result = sqlx::query("UPDATE threads SET context_usage_tokens = ?1 WHERE id = ?2")
         .bind(tokens)
         .bind(id.as_str())
         .execute(pool)
         .await?;
+    require_single_row(result.rows_affected(), "context_usage_tokens")?;
     Ok(())
+}
+
+/// 单列写入必须恰好命中一行：0 行是目标不存在，多于一行说明身份不再唯一。
+fn require_single_row(rows_affected: u64, column: &str) -> Result<()> {
+    match rows_affected {
+        1 => Ok(()),
+        0 => Err(anyhow::Error::from(crate::sessions::failure::not_found())),
+        rows => Err(anyhow::Error::from(crate::sessions::failure::corrupt(
+            &format!("threads row is not unique for {column} write: {rows} rows affected"),
+        ))),
+    }
 }
 
 /// 表存在性探测：派生索引表是可选对象，旧库或手工删表后删除路径不得因此失败。

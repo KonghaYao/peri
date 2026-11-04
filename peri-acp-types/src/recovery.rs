@@ -17,7 +17,8 @@ use crate::thread::ThreadId;
 /// 进入会话时的恢复入口。
 ///
 /// 调用方必须已经完成会话装配（`SessionState` 已发布）并在**生命周期锁之外**调用；
-/// 实现方负责与本进程既有的执行协调合并重复进入。
+/// 实现方负责与本进程既有的执行协调合并重复进入。装配冷 child 运行实例的调用方
+/// 还要在放行执行前补齐 TaskManager 绑定与在线 endpoint；本 trait 不依赖传输层。
 #[async_trait]
 pub trait SessionRecovery: Send + Sync {
     async fn enter(&self, thread_id: &ThreadId) -> Result<RecoveryReport, RecoveryError>;
@@ -94,7 +95,7 @@ pub enum RecoverySkipReason {
     AssemblyFailed,
     /// 准备期间会话代次变化：旧准备不得落到新生命周期。
     Superseded,
-    /// MQ 中已有本进程注入的恢复提醒：视为本次已注入。
+    /// 本进程已有准备中/已启动的恢复，或 MQ 仍有未消费的 entry 提醒。
     AlreadyRunning,
 }
 
@@ -151,6 +152,14 @@ impl RecoveryErrorKind {
             Self::Unsupported => "unsupported",
             Self::Superseded => "superseded",
         }
+    }
+
+    /// 该失败是否使会话无法执行：恢复需要读写归属、frozen 与提醒接纳。
+    ///
+    /// `Unavailable` / `Superseded` 仍可由用户显式继续或下一次进入重试；
+    /// `Unsupported` 只表示后端不提供恢复查询，不等于不可执行。
+    pub fn blocks_execution(self) -> bool {
+        matches!(self, Self::Corrupt | Self::ReadOnly | Self::NotFound)
     }
 }
 
@@ -240,6 +249,126 @@ impl From<SessionResourceError> for RecoveryError {
             _ => RecoveryErrorKind::Unavailable,
         };
         Self::new(kind, None, source)
+    }
+}
+
+/// 一次进入会话的恢复结果投影（wire 形状；不是持久记录）。
+///
+/// 会话装配与历史回放成功后，恢复准备失败仍以成功响应返回，结果放在
+/// `_meta.peri.recovery`。`status = failed` 且 `execution_blocked = true` 时，
+/// 服务端同时拒绝该会话的 prompt 执行。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryView {
+    pub status: RecoveryViewStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_thread_id: Option<ThreadId>,
+    pub entered_thread_id: ThreadId,
+    pub recovered: Vec<ThreadId>,
+    pub reused: Vec<ThreadId>,
+    pub skipped: Vec<RecoverySkipView>,
+    pub failures: Vec<RecoveryFailureView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<RecoveryFailureView>,
+    pub execution_blocked: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryViewStatus {
+    Ok,
+    /// 逐项准备失败：相关会话保留，但不自动续跑。
+    Partial,
+    /// 进入会话的恢复准备本身失败。
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoverySkipView {
+    pub thread_id: ThreadId,
+    pub reason: RecoverySkipReason,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryFailureView {
+    pub thread_id: ThreadId,
+    pub kind: RecoveryErrorKind,
+    pub detail: String,
+    pub execution_blocked: bool,
+}
+
+impl RecoveryView {
+    pub fn from_report(report: &RecoveryReport) -> Self {
+        let status = if report.failures.is_empty() {
+            RecoveryViewStatus::Ok
+        } else {
+            RecoveryViewStatus::Partial
+        };
+        Self {
+            status,
+            root_thread_id: Some(report.root_thread_id.clone()),
+            entered_thread_id: report.entered_thread_id.clone(),
+            recovered: report.recovered.clone(),
+            reused: report.reused.clone(),
+            skipped: report
+                .skipped
+                .iter()
+                .map(|skip| RecoverySkipView {
+                    thread_id: skip.thread_id.clone(),
+                    reason: skip.reason,
+                })
+                .collect(),
+            failures: report
+                .failures
+                .iter()
+                .map(RecoveryFailureView::from_failure)
+                .collect(),
+            error: None,
+            execution_blocked: false,
+        }
+    }
+
+    pub fn from_error(entered_thread_id: &ThreadId, error: &RecoveryError) -> Self {
+        let failure = RecoveryFailureView {
+            thread_id: error.thread_id().cloned().unwrap_or_else(|| {
+                // 存储没给出 thread 时仍以本次进入的会话定位；不猜其他会话。
+                entered_thread_id.clone()
+            }),
+            kind: error.kind(),
+            detail: error.source().to_string(),
+            execution_blocked: error.kind().blocks_execution(),
+        };
+        Self {
+            status: RecoveryViewStatus::Failed,
+            root_thread_id: error.thread_id().cloned(),
+            entered_thread_id: entered_thread_id.clone(),
+            recovered: Vec::new(),
+            reused: Vec::new(),
+            skipped: Vec::new(),
+            failures: Vec::new(),
+            error: Some(failure),
+            execution_blocked: error.kind().blocks_execution(),
+        }
+    }
+
+    /// 普通 idle load 不产生恢复噪声：只有实际注入或失败才附加。
+    pub fn should_attach(&self) -> bool {
+        self.status != RecoveryViewStatus::Ok
+            || !self.recovered.is_empty()
+            || !self.failures.is_empty()
+    }
+}
+
+impl RecoveryFailureView {
+    fn from_failure(failure: &RecoveryFailure) -> Self {
+        Self {
+            thread_id: failure.thread_id.clone(),
+            kind: failure.kind,
+            detail: failure.detail.clone(),
+            execution_blocked: failure.kind.blocks_execution(),
+        }
     }
 }
 

@@ -127,6 +127,7 @@ impl SessionManager {
             task_events_started: std::sync::atomic::AtomicBool::new(false),
             task_events_cancel: CancellationToken::new(),
             recovery_parent: parking_lot::Mutex::new(None),
+            recovery_execution_block: parking_lot::Mutex::new(None),
             idle_suspended: Arc::new(AtomicBool::new(false)),
             mcp_skill_registry: Arc::new(McpSkillRegistry::new()),
             command_registry: self.build_command_registry(),

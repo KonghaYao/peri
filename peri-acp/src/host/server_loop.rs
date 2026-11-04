@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
-use peri_acp_types::recovery::SessionRecovery;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use super::diagnostics::ResponseDiagnostics;
+use super::session_endpoint::register_session_endpoint;
 use super::{
     connection::ConnectionContext, dispatch_prompt_turn, extract_session_id, handle_notification,
     handle_request_for_connection, history_page, history_window, mcp_apps, requests,
@@ -740,15 +740,48 @@ impl ServerLoop<'_> {
         }
         // 进入会话时的恢复（设计 §3/§4）：装配成功后、响应发出前完成准备。
         // 生命周期锁已在上面释放；准备阶段只读范围并接纳提醒，不启动执行。
+        // 装配成功 + 恢复准备失败 = 部分成功：历史保留、响应 Ok，结果放 `_meta`。
         let mut recovery_report = None;
-        if result.is_ok() && starts_session_recovery(&method) {
-            if let Some(session_id) = session_setup(&method, &params, result.as_ref().ok()) {
-                match self.enter_recovery(&session_id).await {
-                    Ok(Some(report)) => recovery_report = Some(report),
+        if result.is_ok() && super::recovery::wiring::starts_session_recovery(&method) {
+            if let Some(session_id) =
+                super::recovery::wiring::session_setup(&method, &params, result.as_ref().ok())
+            {
+                match super::recovery::wiring::enter_recovery(
+                    self.recovery,
+                    self.sessions,
+                    &session_id,
+                )
+                .await
+                {
+                    Ok(Some(report)) => {
+                        let view = peri_acp_types::recovery::RecoveryView::from_report(&report);
+                        super::recovery::wiring::apply_recovery_execution_block(
+                            cfg,
+                            &session_id,
+                            &view,
+                        );
+                        super::recovery::wiring::attach_recovery_meta(&mut result, &view);
+                        // 冷 child 已装配但还没有运行期绑定：响应后的 launch 启动 child 前
+                        // 必须补齐 TaskManager 与在线 endpoint。
+                        super::recovery::wiring::bind_recovered_sessions(
+                            cfg,
+                            self.sessions,
+                            self.connection,
+                            self.transport,
+                            &report,
+                        )
+                        .await;
+                        recovery_report = Some(report);
+                    }
                     Ok(None) => {}
-                    // 根/环/只读/提醒接纳失败：历史已回放，但执行不得放行。
                     Err(error) => {
-                        result = Err(recovery_failure(error));
+                        let view = super::recovery::wiring::error_view(&session_id, &error);
+                        super::recovery::wiring::apply_recovery_execution_block(
+                            cfg,
+                            &session_id,
+                            &view,
+                        );
+                        super::recovery::wiring::attach_recovery_meta(&mut result, &view);
                     }
                 }
             }
@@ -756,7 +789,7 @@ impl ServerLoop<'_> {
         // `session/new` 的进入在响应之后：新 thread 的工作意图恒为库默认的 idle，
         // 不可能有候选；放在响应前只会推迟会话响应（响应必须是首个帧）。
         let new_session_id = if method == "session/new" && result.is_ok() {
-            session_setup(&method, &params, result.as_ref().ok())
+            super::recovery::wiring::session_setup(&method, &params, result.as_ref().ok())
         } else {
             None
         };
@@ -797,7 +830,8 @@ impl ServerLoop<'_> {
                 }
             }
         }
-        let setup_session_id = session_setup(&method, &params, result.as_ref().ok());
+        let setup_session_id =
+            super::recovery::wiring::session_setup(&method, &params, result.as_ref().ok());
         // 会话级 endpoint 注册（审查中 3①）：**连接归属是会话，不是某一轮**。
         // `session/new` / `session/fork` / `session/load` / `session/resume` 建立会话后
         // 立刻把当前连接登记为在线 endpoint，否则「会话建立后从未 prompt」的连接在调度
@@ -840,7 +874,13 @@ impl ServerLoop<'_> {
         if response_sent {
             // 新建会话的进入只可能是空范围：结果不需要启动，失败只记日志。
             if let Some(session_id) = new_session_id.as_deref() {
-                if let Err(error) = self.enter_recovery(session_id).await {
+                if let Err(error) = super::recovery::wiring::enter_recovery(
+                    self.recovery,
+                    self.sessions,
+                    session_id,
+                )
+                .await
+                {
                     tracing::warn!(
                         session_id = %session_id,
                         error = %error,
@@ -871,31 +911,6 @@ impl ServerLoop<'_> {
                 );
             }
         }
-    }
-
-    /// 进入已装配会话的恢复入口：thread 身份取自已发布的 `SessionState`。
-    ///
-    /// 没有发布 thread 身份时不进入恢复（只记日志）：恢复必须绑定到确切的 thread，
-    /// 不能拿 session id 猜。
-    async fn enter_recovery(
-        &self,
-        session_id: &str,
-    ) -> Result<
-        Option<peri_acp_types::recovery::RecoveryReport>,
-        peri_acp_types::recovery::RecoveryError,
-    > {
-        let thread_id = {
-            let states = self.sessions.lock().await;
-            states.get(session_id).map(|state| state.thread_id.clone())
-        };
-        let Some(thread_id) = thread_id else {
-            tracing::warn!(
-                session_id = %session_id,
-                "session recovery skipped: no thread identity was published"
-            );
-            return Ok(None);
-        };
-        self.recovery.enter(&thread_id).await.map(Some)
     }
 
     async fn dispatch_notification(&self, method: String, params: Value) {
@@ -954,71 +969,5 @@ impl ServerLoop<'_> {
                 );
             }
         }
-    }
-}
-
-/// 把当前连接注册为本会话的交互 endpoint（幂等；表满/离线时记 warn 并继续——
-/// 该连接的审批随后按无在线 endpoint 处理，是 fail-closed 而不是静默降级）。
-pub(super) async fn register_session_endpoint(
-    sessions: &SharedSessions,
-    session_id: &str,
-    connection: &Arc<tokio::sync::Mutex<ConnectionContext>>,
-    transport: &Arc<dyn crate::transport::AcpTransport>,
-) {
-    if session_id.is_empty() {
-        return;
-    }
-    let connection_id = connection.lock().await.id().to_string();
-    let environment = sessions
-        .lock()
-        .await
-        .get(session_id)
-        .and_then(|state| state.environment.clone());
-    let Some(environment) = environment else {
-        return;
-    };
-    if let Err(error) = environment
-        .interaction_router()
-        .register_connection(&connection_id, Arc::clone(transport))
-    {
-        tracing::warn!(
-            session_id,
-            connection_id = %connection_id,
-            %error,
-            "session interaction endpoint registration rejected"
-        );
-    }
-}
-
-/// 恢复失败的出口映射：`-32011`；消息保留恢复分类与 thread，不解析文本。
-fn recovery_failure(
-    error: peri_acp_types::recovery::RecoveryError,
-) -> crate::transport::types::AcpError {
-    crate::transport::types::AcpError::new(-32011, format!("session recovery failed: {error}"))
-}
-
-/// 进入会话时触发恢复的 setup 方法。`session/fork` 派生新会话，不恢复旧工作。
-///
-/// `session/new` 不在此列：新 thread 的工作意图恒为 `idle`，进入在响应之后完成
-/// （见 `dispatch_request`），避免恢复准备推迟会话响应。
-fn starts_session_recovery(method: &str) -> bool {
-    matches!(method, "session/load" | "session/resume")
-}
-
-/// 会话 setup 方法涉及的会话 id：`session/new` | `session/fork` 取响应里的新 id，
-/// `session/load` | `session/resume` 取请求里的 `sessionId`；非 setup 方法与失败的
-/// 调用返回 `None`（失败响应不做后置初始化）。
-fn session_setup(method: &str, params: &Value, response: Option<&Value>) -> Option<String> {
-    let response = response?;
-    match method {
-        "session/new" | "session/fork" => response
-            .get("sessionId")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        "session/load" | "session/resume" => {
-            let session_id = extract_session_id(params, "");
-            (!session_id.is_empty()).then(|| session_id.to_owned())
-        }
-        _ => None,
     }
 }

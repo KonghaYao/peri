@@ -21,6 +21,7 @@ const WAIT_TIMEOUT: Duration = Duration::from_secs(20);
 struct RecordingTransport {
     incoming: StdMutex<VecDeque<IncomingMessage>>,
     responses: StdMutex<Vec<(RequestId, std::result::Result<Value, String>)>>,
+    errors: StdMutex<Vec<(RequestId, AcpError)>>,
     notifications: StdMutex<Vec<(String, Value)>>,
     /// 响应与恢复启动的相对顺序：`response` 由这里写入，`continuation` 由转发任务写入。
     order: Arc<StdMutex<Vec<&'static str>>>,
@@ -41,6 +42,15 @@ impl RecordingTransport {
 
     fn responses(&self) -> Vec<(RequestId, std::result::Result<Value, String>)> {
         self.responses.lock().unwrap().clone()
+    }
+
+    fn error_for(&self, id: RequestId) -> Option<AcpError> {
+        self.errors
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(request_id, _)| *request_id == id)
+            .map(|(_, error)| error.clone())
     }
 }
 
@@ -68,10 +78,17 @@ impl crate::transport::AcpTransport for RecordingTransport {
         result: std::result::Result<Value, AcpError>,
     ) -> Result<(), AcpError> {
         self.order.lock().unwrap().push("response");
+        let errors = result
+            .as_ref()
+            .err()
+            .map(|error| (id.clone(), error.clone()));
         self.responses
             .lock()
             .unwrap()
-            .push((id, result.map_err(|error| error.to_string())));
+            .push((id.clone(), result.map_err(|error| error.to_string())));
+        if let Some(error) = errors {
+            self.errors.lock().unwrap().push(error);
+        }
         Ok(())
     }
 }
@@ -98,11 +115,22 @@ struct RecoveryHarness {
 impl RecoveryHarness {
     /// `session/new` 建会话：恢复前置条件（已发布 `SessionState` + 冻结上下文）走生产路径。
     async fn new() -> Self {
+        Self::new_with_workspace(false).await
+    }
+
+    /// 需要真实会话环境（交互 router / endpoint）的用例显式打开工作区装配。
+    async fn new_with_workspace(with_workspace: bool) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let db_path = directory.path().join("threads.db");
         let cwd = directory.path().to_str().unwrap().to_owned();
-        let mut harness =
-            Self::assemble(directory, db_path.clone(), cwd, open_facade(&db_path).await).await;
+        let mut harness = Self::assemble(
+            directory,
+            db_path.clone(),
+            cwd,
+            open_facade(&db_path).await,
+            with_workspace,
+        )
+        .await;
         harness.create_session().await;
         harness
     }
@@ -115,7 +143,7 @@ impl RecoveryHarness {
         let db_path = workspace.join("threads.db");
         let facade = open_facade(&db_path).await;
         let cwd = workspace.to_string_lossy().into_owned();
-        Self::assemble(tempfile::tempdir().unwrap(), db_path, cwd, facade).await
+        Self::assemble(tempfile::tempdir().unwrap(), db_path, cwd, facade, false).await
     }
 
     /// 用给定门面装配夹具：只读旧库、跨进程复用同一路径都走这里。
@@ -126,6 +154,7 @@ impl RecoveryHarness {
         db_path: std::path::PathBuf,
         cwd: String,
         resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,
+        with_workspace: bool,
     ) -> Self {
         let mut server = mockito::Server::new_async().await;
         let mock = server
@@ -142,7 +171,17 @@ impl RecoveryHarness {
         provider.base_url = server.url();
         let config = make_peri_config_with_provider(provider);
         let provider = LlmProvider::from_config(&config).unwrap();
-        let cfg = Arc::new(build_server_config(config, provider, &directory, resources).await);
+        let mut cfg = build_server_config(config, provider, &directory, resources).await;
+        if with_workspace {
+            cfg.workspace_assembly = Some(crate::host::assemble::WorkspaceAssembly {
+                startup_cwd: cwd.clone(),
+                bare: true,
+                drive_cron_tick: false,
+                mcp_profile: peri_middlewares::mcp::apps::McpCapabilityProfile::disabled(),
+                capabilities: Default::default(),
+            });
+        }
+        let cfg = Arc::new(cfg);
         let order = Arc::new(StdMutex::new(Vec::<&'static str>::new()));
         let recorded = Arc::new(RecordingTransport::new(Arc::clone(&order), Vec::new()));
         let transport: Arc<dyn crate::transport::AcpTransport> = recorded.clone();
@@ -391,3 +430,6 @@ mod durability_tests;
 
 #[path = "recovery_legacy_store_test.rs"]
 mod legacy_store_tests;
+
+#[path = "prompt_admission_test.rs"]
+mod prompt_admission_tests;

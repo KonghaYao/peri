@@ -132,6 +132,11 @@ pub struct AcpSession {
     /// 挂在会话实例上而不是续跑请求上：本轮能由启动门、激活监听或用户 prompt
     /// 任何一条路径发起，投递都只发生一次（收尾取走即清空）。
     pub(crate) recovery_parent: parking_lot::Mutex<Option<ThreadId>>,
+    /// 恢复准备失败且分类为不可执行时的执行阻断（仅内存，不持久化）。
+    ///
+    /// 每次 `session/load|resume` 重新尝试恢复：成功清除，失败按当前分类重设。
+    pub(crate) recovery_execution_block:
+        parking_lot::Mutex<Option<peri_acp_types::recovery::RecoveryFailureView>>,
     pub(crate) task_events_cancel: CancellationToken,
     /// idle-suspended 标志：executor 在 await_wake 挂起期间置 true（跨 turn
     /// 持久，Arc 共享）。宿主 `dispatch_prompt_turn` 据此把挂起期间到达的
@@ -197,6 +202,26 @@ impl AcpSession {
     /// 取走待投递的父 thread：一次 turn 只投递一次。
     pub(crate) fn take_recovery_parent(&self) -> Option<ThreadId> {
         self.recovery_parent.lock().take()
+    }
+
+    /// 设置执行阻断：恢复准备失败且当前分类不可执行。
+    pub(crate) fn set_recovery_execution_block(
+        &self,
+        failure: peri_acp_types::recovery::RecoveryFailureView,
+    ) {
+        *self.recovery_execution_block.lock() = Some(failure);
+    }
+
+    /// 每次新的 load/resume 或恢复成功都清除旧阻断。
+    pub(crate) fn clear_recovery_execution_block(&self) {
+        *self.recovery_execution_block.lock() = None;
+    }
+
+    /// 当前执行阻断；只由服务端 prompt 准入读取。
+    pub(crate) fn recovery_execution_block(
+        &self,
+    ) -> Option<peri_acp_types::recovery::RecoveryFailureView> {
+        self.recovery_execution_block.lock().clone()
     }
 
     /// Close the same resources again after Incomplete; no registry guard crosses await.

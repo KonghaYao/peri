@@ -110,6 +110,10 @@ pub struct MqFilter {
     pub user_input_only: bool,
     /// 只保留这些来源；为空表示不按来源过滤。
     pub sources: Vec<MessageSource>,
+    /// 只保留这些 `MessageKind`；为空表示不按 Kind 过滤。
+    ///
+    /// SQLite / remote adapter 都先取行再在 Rust 过滤，不产生 SQL 或 schema 分支。
+    pub kinds: Vec<MessageKind>,
     /// 严格晚于该水位的行。
     pub after: Option<MqWatermark>,
     /// 上限；按 `(enqueued_at, id)` 升序取前 N 条。

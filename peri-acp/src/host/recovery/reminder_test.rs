@@ -58,3 +58,55 @@ fn unknown_peripheral_tasks_say_they_cannot_be_confirmed() {
         "未知不得写成没有任务: {body}"
     );
 }
+
+#[test]
+fn pending_recovery_predicate_matches_only_entry_defer() {
+    let trusted = recovery_reminder(
+        &"root".to_owned(),
+        &"root".to_owned(),
+        &[],
+        &PeripheralTasks::Known(Vec::new()),
+    )
+    .unwrap();
+    let id = peri_acp_types::messages::MessageId::new();
+    let entry = |kind, source| peri_acp_types::session::MqEntry {
+        id,
+        enqueued_at: "2026-11-04T00:00:00.000000Z".to_owned(),
+        kind,
+        source,
+        payload: peri_acp_types::store::PersistedPayload::SystemReminder {
+            id,
+            reminder: trusted.clone(),
+        },
+        policy: MessagePolicy::ensure_processing(),
+        original_draft: None,
+    };
+    assert!(is_pending_recovery(&entry(
+        MessageKind::Defer,
+        MessageSource::SessionRecovery
+    )));
+    assert!(!is_pending_recovery(&entry(
+        MessageKind::Info,
+        MessageSource::SessionRecovery
+    )));
+    assert!(!is_pending_recovery(&entry(
+        MessageKind::Defer,
+        MessageSource::SystemInjected
+    )));
+
+    // 同一来源的 Defer 但 payload 不是 entry 提醒：不是恢复提醒。
+    let mut failures = entry(MessageKind::Defer, MessageSource::SessionRecovery);
+    failures.payload = peri_acp_types::store::PersistedPayload::SystemReminder {
+        id,
+        reminder: failure_notice(
+            &"root".to_owned(),
+            &[peri_acp_types::recovery::RecoveryFailure {
+                thread_id: "child".to_owned(),
+                kind: peri_acp_types::recovery::RecoveryErrorKind::Unavailable,
+                detail: "down".to_owned(),
+            }],
+        )
+        .unwrap(),
+    };
+    assert!(!is_pending_recovery(&failures));
+}

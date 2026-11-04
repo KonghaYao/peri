@@ -70,3 +70,32 @@ async fn context_usage_writes_round_trip_without_touching_updated_at() {
     assert_eq!(unknown.context_usage_tokens, None, "未知占用必须写回 NULL");
     assert_eq!(unknown.updated_at, before.updated_at);
 }
+
+/// 目标 thread 不存在时单列写入必须失败：0 行不是「已提交」。
+#[tokio::test]
+async fn work_state_write_to_missing_thread_is_not_found() {
+    let fixture = Fixture::new().await;
+    let missing = ThreadId::from("missing".to_owned());
+    let error = fixture
+        .facade
+        .set_work_state(&missing, WorkState::Working)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error.kind(),
+            peri_acp_types::session_resources::SessionResourceErrorKind::NotFound
+        ),
+        "缺失 thread 必须是 NotFound：{error:?}"
+    );
+
+    let error = fixture
+        .facade
+        .set_context_usage(&missing, Some(1))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error.kind(),
+        peri_acp_types::session_resources::SessionResourceErrorKind::NotFound
+    ));
+}

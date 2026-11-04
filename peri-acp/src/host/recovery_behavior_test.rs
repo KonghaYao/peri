@@ -88,6 +88,107 @@ async fn repeat_enter_keeps_a_single_reminder() {
     assert_eq!(harness.recovery_rows(&thread_id).await.len(), 1);
 }
 
+/// 2b. 响应发送失败（discard）后再次进入：旧提醒被采纳而不是永久 AlreadyRunning。
+#[tokio::test]
+async fn discard_keeps_reminder_and_next_enter_adopts_without_duplicate() {
+    let mut harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    harness.set_working(&thread_id).await;
+    harness.spawn_continuation_scheduler();
+    let recovery = harness.recovery();
+
+    let first = recovery.enter(&thread_id).await.unwrap();
+    assert_eq!(first.recovered, vec![thread_id.clone()]);
+    recovery.discard(&first);
+    assert_eq!(
+        harness.recovery_rows(&thread_id).await.len(),
+        1,
+        "discard 只丢弃启动资格，提醒仍留在 MQ"
+    );
+
+    let second = recovery.enter(&thread_id).await.unwrap();
+    assert_eq!(
+        second.recovered,
+        vec![thread_id.clone()],
+        "下一次进入必须采纳旧提醒：{second:?}"
+    );
+    assert_eq!(
+        harness.recovery_rows(&thread_id).await.len(),
+        1,
+        "采纳不得重复入队"
+    );
+
+    recovery.launch(&second).await;
+    wait_for("采纳后的恢复 turn 调用模型", || async {
+        harness._mock.matched()
+    })
+    .await;
+    harness._mock.assert_async().await;
+}
+
+/// 2c. 同来源的 Info（诊断提醒）不构成恢复 entry，不得抑制注入。
+#[tokio::test]
+async fn info_notice_does_not_suppress_recovery() {
+    let harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    harness.set_working(&thread_id).await;
+    let notice = recovery_shaped_reminder(&thread_id);
+    harness
+        .queue(&thread_id)
+        .enqueue(peri_acp_types::session::QueuedMessage::system_reminder(
+            peri_acp_types::session::MessageKind::Info,
+            peri_acp_types::session::MessageSource::SessionRecovery,
+            notice,
+        ))
+        .await
+        .unwrap();
+
+    let report = harness.recovery().enter(&thread_id).await.unwrap();
+    assert_eq!(
+        report.recovered,
+        vec![thread_id.clone()],
+        "Info 提醒不是待消费的恢复 entry"
+    );
+    let rows = harness.recovery_rows(&thread_id).await;
+    assert_eq!(rows.len(), 2, "必须新增一条 Defer entry：{rows:?}");
+    assert_eq!(
+        rows.iter()
+            .filter(|row| row.kind == peri_acp_types::session::MessageKind::Defer)
+            .count(),
+        1
+    );
+}
+
+/// 2d. MQ 查询失败必须让进入显式失败，不能静默注入第二条提醒。
+#[tokio::test]
+async fn mq_query_failure_fails_entry_instead_of_reinjecting() {
+    let harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    harness.set_working(&thread_id).await;
+    use sqlx::Connection as _;
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(&harness.db_path),
+    )
+    .await
+    .unwrap();
+    sqlx::query("DROP TABLE thread_mq")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    let error = harness
+        .recovery()
+        .enter(&thread_id)
+        .await
+        .expect_err("MQ 查询失败不得被当作没有提醒");
+    assert_eq!(
+        error.kind(),
+        peri_acp_types::recovery::RecoveryErrorKind::Unavailable,
+        "缺少 MQ 表必须作为不可用失败上报：{error}"
+    );
+}
+
 /// 3. 并发进入同一根：合并为一次注入。
 #[tokio::test]
 async fn concurrent_enter_merges_into_one_reminder() {
@@ -236,4 +337,29 @@ async fn existing_turn_is_reused_without_a_second_reminder() {
     assert_eq!(report.reused, vec![thread_id.clone()]);
     assert!(report.recovered.is_empty());
     assert!(harness.recovery_rows(&thread_id).await.is_empty());
+}
+
+/// 构造与真实恢复提醒同形状的可信提醒（来源/kind 由调用方经 QueuedMessage 指定）。
+fn recovery_shaped_reminder(
+    thread_id: &str,
+) -> peri_acp_types::system_reminder::TrustedSystemReminder {
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    let reminder = SystemReminder {
+        version: SYSTEM_REMINDER_VERSION,
+        category: ReminderCategory::Lifecycle,
+        source: ReminderSource("session_recovery".to_owned()),
+        kind: "entry".to_owned(),
+        severity: ReminderSeverity::Warning,
+        delivery: ReminderDelivery::Required,
+        audiences: ReminderAudiences(vec![ReminderAudience::Tui]),
+        body: "diagnostic notice".to_owned(),
+        summary: None,
+        metadata: serde_json::json!({"thread_id": thread_id}),
+    };
+    TrustedSystemReminderFactory::for_recovery()
+        .construct(reminder)
+        .expect("trusted recovery reminder")
 }

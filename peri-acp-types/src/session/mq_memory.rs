@@ -315,6 +315,9 @@ fn filter_entries(entries: impl IntoIterator<Item = MqEntry>, filter: &MqFilter)
         if !filter.sources.is_empty() && !filter.sources.contains(&entry.source) {
             continue;
         }
+        if !filter.kinds.is_empty() && !filter.kinds.contains(&entry.kind) {
+            continue;
+        }
         if let Some(after) = &filter.after {
             if entry.watermark() <= *after {
                 continue;

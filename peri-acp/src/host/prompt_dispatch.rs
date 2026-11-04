@@ -75,6 +75,27 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         .get(&prompt_session_id)
         .and_then(|state| state.environment.clone());
     let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+    // 恢复准备失败且分类为不可执行时，服务端拒绝本会话的全部执行入口：
+    // 用户 prompt、scheduled、continuation 与 idle-suspended 注入都在这里截住。
+    if let Some(block) = cfg
+        .session_manager
+        .get_session(&prompt_session_id)
+        .and_then(|session| session.recovery_execution_block())
+    {
+        return Err(AcpError::new(
+            -32017,
+            format!(
+                "Session execution is blocked by a failed recovery: {}: {}",
+                block.kind, block.detail
+            ),
+        )
+        .with_data(serde_json::json!({
+            "reason": "recovery_execution_blocked",
+            "kind": block.kind.as_str(),
+            "threadId": block.thread_id,
+            "detail": block.detail,
+        })));
+    }
     {
         let sessions = sessions.lock().await;
         let state = sessions
@@ -271,6 +292,38 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         admission_gate::wait(&format!("{prompt_session_id}:committed")).await;
     }
 
+    // 准入已通过、执行尚未开始：先提交 durable 工作意图。进程若在这一刻退出，
+    // 下次进入仍能看出这一轮需要继续；提交失败必须拒绝本轮，不能在没有续跑意图
+    // 证据的情况下放行模型调用。
+    let thread_id = {
+        let sessions = sessions.lock().await;
+        sessions
+            .get(&prompt_session_id)
+            .map(|state| state.thread_id.clone())
+    };
+    let Some(thread_id) = thread_id else {
+        rollback_continuation_admission(sessions, &prompt_session_id, is_continuation).await;
+        return Err(work_intent_error(
+            None,
+            "session thread identity is missing".to_owned(),
+        ));
+    };
+    let thread = ThreadId::from(thread_id.clone());
+    if let Err(error) = cfg
+        .session_manager
+        .session_resources()
+        .set_work_state(&thread, WorkState::Working)
+        .await
+    {
+        rollback_continuation_admission(sessions, &prompt_session_id, is_continuation).await;
+        tracing::error!(
+            session_id = %prompt_session_id,
+            %error,
+            "work state write before prompt failed; prompt rejected"
+        );
+        return Err(work_intent_error(Some(&thread_id), error.to_string()));
+    }
+
     // Extract AgentPool from session, wrap in Arc<Mutex> for
     // in-place modification inside executor.
     //
@@ -278,34 +331,14 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     // per-session 锁，若在锁外取出，并发的用户 prompt 会取走被 `mem::replace`
     // 换出的空池并先行归还，导致两轮共享同一缓存的两个池实例互相覆盖、
     // 缓存丢失（跨轮次热缓存是本池的核心价值）。归还仍在锁内（函数末尾）。
-    let (pool_arc, turn_thread) = {
+    let pool_arc = {
         let mut sessions = sessions.lock().await;
-        let state = sessions.get_mut(&prompt_session_id);
-        // session/load 与 resume 的 thread 身份可以和 ACP session id 不同，工作意图只认 thread。
-        let turn_thread = state.as_ref().map(|state| state.thread_id.clone());
-        let pool = match state {
+        let pool = match sessions.get_mut(&prompt_session_id) {
             Some(state) => std::mem::take(&mut state.agent_pool),
             None => Default::default(),
         };
-        (Arc::new(parking_lot::Mutex::new(pool)), turn_thread)
+        Arc::new(parking_lot::Mutex::new(pool))
     };
-
-    // 准入已通过、执行尚未开始：先提交 durable 工作意图。进程若在这一刻退出，下次进入
-    // 仍能看出这一轮需要继续；辅助写失败只告警，不阻断已经获准的执行。
-    if let Some(thread_id) = turn_thread.as_deref() {
-        if let Err(error) = cfg
-            .session_manager
-            .session_resources()
-            .set_work_state(&ThreadId::from(thread_id.to_owned()), WorkState::Working)
-            .await
-        {
-            tracing::warn!(
-                session_id = %prompt_session_id,
-                %error,
-                "work state write before prompt failed"
-            );
-        }
-    }
 
     let result = run_prompt(
         params,
@@ -344,14 +377,16 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         }
     }
     // 准入后从未进入收尾的尝试按「明确失败」回收工作意图，避免 `working` 无限期滞留。
+    // 收尾阶段 turn 已经结束，失败只能重试并显式告警，不能伪装成成功。
     if let Some(thread_id) = abandoned_thread {
-        if let Err(error) = cfg
-            .session_manager
-            .session_resources()
-            .set_work_state(&ThreadId::from(thread_id), WorkState::Idle)
-            .await
+        if let Err(error) = set_work_state_with_retry(
+            cfg.session_manager.session_resources(),
+            &ThreadId::from(thread_id),
+            WorkState::Idle,
+        )
+        .await
         {
-            tracing::warn!(
+            tracing::error!(
                 session_id = %prompt_session_id,
                 %error,
                 "work state recovery after aborted prompt failed"
@@ -410,6 +445,51 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         }
     }
     result
+}
+
+/// 准入前工作意图提交失败：确定性拒绝，不进入模型调用。
+fn work_intent_error(thread_id: Option<&str>, detail: String) -> AcpError {
+    AcpError::new(
+        -32603,
+        format!("work state write before prompt failed: {detail}"),
+    )
+    .with_data(serde_json::json!({
+        "reason": "work_intent_commit_failed",
+        "threadId": thread_id,
+        "detail": detail,
+    }))
+}
+
+/// 回滚本轮 continuation 准入时设置的内存标记；用户 prompt 路径无事可做。
+async fn rollback_continuation_admission(
+    sessions: &SharedSessions,
+    session_id: &str,
+    is_continuation: bool,
+) {
+    if !is_continuation {
+        return;
+    }
+    let mut sessions = sessions.lock().await;
+    if let Some(state) = sessions.get_mut(session_id) {
+        state.continuation_in_flight = false;
+        state.cancel_token = None;
+    }
+}
+
+/// 收尾写入的有限重试：turn 已执行并提交正文，失败不能再拒绝执行，只能重试一次
+/// 并让调用方记录可诊断错误。
+pub(super) async fn set_work_state_with_retry(
+    resources: &Arc<dyn peri_acp_types::session_resources::SessionResources>,
+    thread_id: &ThreadId,
+    state: WorkState,
+) -> Result<(), String> {
+    match resources.set_work_state(thread_id, state).await {
+        Ok(()) => Ok(()),
+        Err(first) => match resources.set_work_state(thread_id, state).await {
+            Ok(()) => Ok(()),
+            Err(second) => Err(format!("{second} (first attempt: {first})")),
+        },
+    }
 }
 
 #[cfg(test)]

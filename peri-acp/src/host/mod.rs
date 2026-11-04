@@ -110,6 +110,7 @@ pub mod prompt_handle;
 mod recovery;
 mod requests;
 mod server_loop;
+mod session_endpoint;
 mod shutdown;
 pub mod stage_builder;
 #[cfg(not(target_os = "emscripten"))]
@@ -407,7 +408,7 @@ pub struct AcpServerConfig {
 
 // ── Main server loop ────────────────────────────────────────────────────────
 
-type SharedSessions = Arc<tokio::sync::Mutex<HashMap<String, SessionState>>>;
+pub(crate) type SharedSessions = Arc<tokio::sync::Mutex<HashMap<String, SessionState>>>;
 /// Per-session prompt serialization lock map（与 prompt dispatch 共用，
 /// continuation scheduler 通过同一把锁串行化内部续跑）。
 pub(crate) type PromptLocks = Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>;

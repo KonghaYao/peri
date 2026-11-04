@@ -168,6 +168,9 @@ pub(in crate::sessions) fn filter_entries(
         if !filter.sources.is_empty() && !filter.sources.contains(&entry.source) {
             continue;
         }
+        if !filter.kinds.is_empty() && !filter.kinds.contains(&entry.kind) {
+            continue;
+        }
         if let Some(after) = &filter.after {
             if entry.watermark() <= *after {
                 continue;

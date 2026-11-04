@@ -4,8 +4,12 @@
 
 use peri_acp_types::ports::PeripheralTasks;
 use peri_acp_types::session::{
-    MessageKind, MessagePolicy, MessageQueue, MessageSource, QueuedMessage,
+    MessageKind, MessagePolicy, MessageQueue, MessageSource, MqEntry, MqFilter, QueuedMessage,
 };
+use peri_acp_types::session_resources::{
+    SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
+};
+use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
     ReminderSource, SystemReminder, TrustedSystemReminder, TrustedSystemReminderFactory,
@@ -129,17 +133,41 @@ pub(super) fn failure_notice(
         .map_err(|error| error.to_string())
 }
 
-/// 本 thread MQ 中是否已有本进程注入的恢复提醒。
-pub(super) async fn already_injected(queue: &MessageQueue) -> bool {
-    queue
-        .query(peri_acp_types::session::MqFilter {
+/// 一条待消费的恢复 entry 提醒：只有 `Defer` + 本来源 + `kind = "entry"` 才算。
+///
+/// failure notice 是 `Info`，其它来源的提醒也不得复用为恢复资格。
+pub(super) fn is_pending_recovery(entry: &MqEntry) -> bool {
+    entry.kind == MessageKind::Defer
+        && entry.source == MessageSource::SessionRecovery
+        && matches!(
+            &entry.payload,
+            PersistedPayload::SystemReminder { reminder, .. }
+                if reminder.as_reminder().kind == "entry"
+        )
+}
+
+/// 本 thread MQ 中尚未被 Receive 消费的恢复 entry 提醒。
+///
+/// 存在只表示「本次可复用」，不再等价于「已注入」；防重复由协调器的 admitted 状态机
+/// 负责。查询错误必须原样返回：调用方不能把「查不到」当成「没有提醒」。
+pub(super) async fn find_pending_recovery(
+    queue: &MessageQueue,
+) -> SessionResourceResult<Option<MqEntry>> {
+    let rows = queue
+        .query(MqFilter {
             sources: vec![MessageSource::SessionRecovery],
-            limit: Some(1),
+            kinds: vec![MessageKind::Defer],
+            limit: Some(8),
             ..Default::default()
         })
         .await
-        .map(|rows| !rows.is_empty())
-        .unwrap_or(false)
+        .map_err(|error| match error.downcast::<SessionResourceError>() {
+            Ok(domain) => domain,
+            Err(error) => SessionResourceError::new(SessionResourceErrorKind::Unavailable {
+                detail: error.to_string(),
+            }),
+        })?;
+    Ok(rows.into_iter().find(is_pending_recovery))
 }
 
 /// 提醒接纳：`Defer` + `ensure_processing`，由既有 Receive 移交。

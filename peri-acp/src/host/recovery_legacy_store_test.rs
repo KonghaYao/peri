@@ -28,6 +28,7 @@ async fn seed_schema_v13(db_path: &std::path::Path, cwd: &str) -> String {
         db_path.to_path_buf(),
         cwd.to_owned(),
         Arc::new(facade),
+        false,
     )
     .await;
     seed.create_session().await;
@@ -233,6 +234,7 @@ async fn schema_v13_read_only_entry_is_rejected_without_writing() {
         db_path.clone(),
         cwd.clone(),
         facade,
+        false,
     )
     .await;
     load_through_server_loop(&harness, &thread_id, &cwd);

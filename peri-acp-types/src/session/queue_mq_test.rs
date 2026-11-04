@@ -190,6 +190,49 @@ async fn enqueue_is_visible_through_bound_session_resources() {
         .is_empty());
 }
 
+#[tokio::test]
+async fn mq_filter_kinds_is_applied_after_source_filter() {
+    let queue = MessageQueue::new();
+    queue.enqueue(prompt("prompt")).await.unwrap();
+    queue
+        .enqueue(QueuedMessage::defer(
+            MessageSource::SubAgentComplete,
+            BaseMessage::human("defer"),
+        ))
+        .await
+        .unwrap();
+    queue
+        .enqueue(QueuedMessage::info(
+            MessageSource::SystemInjected,
+            BaseMessage::human("info"),
+        ))
+        .await
+        .unwrap();
+
+    let defers = queue
+        .query(MqFilter {
+            kinds: vec![MessageKind::Defer],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(defers.len(), 1);
+    assert_eq!(defers[0].kind, MessageKind::Defer);
+
+    let source_and_kind = queue
+        .query(MqFilter {
+            sources: vec![MessageSource::SystemInjected],
+            kinds: vec![MessageKind::Defer, MessageKind::Prompt],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert!(
+        source_and_kind.is_empty(),
+        "来源与 Kind 必须同时满足：{source_and_kind:?}"
+    );
+}
+
 // ─── 发送选择与 Receive ──────────────────────────────────────────────────────
 
 #[tokio::test]

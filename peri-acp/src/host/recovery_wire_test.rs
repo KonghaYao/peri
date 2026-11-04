@@ -111,9 +111,10 @@ async fn load_response_precedes_the_recovery_turn() {
     );
 }
 
-/// 8. 缺父：`enter` 返回 `Corrupt`，响应是 `-32011`；历史推送已经发出。
+/// 8. 缺父：会话装配与历史回放成功，恢复失败以 `_meta.peri.recovery` 报告；
+///    执行被阻断，历史通知仍然存在，MQ 不注入提醒。
 #[tokio::test]
-async fn corrupt_scope_returns_recovery_failure_code_after_history_replay() {
+async fn corrupt_scope_returns_success_with_failed_recovery_meta_after_history_replay() {
     let harness = RecoveryHarness::new().await;
     let root = harness.thread_id.clone();
     harness.add_child(&root, "orphan-child", &root).await;
@@ -154,20 +155,191 @@ async fn corrupt_scope_returns_recovery_failure_code_after_history_replay() {
         .iter()
         .find(|(id, _)| *id == RequestId::Number(2))
         .expect("load 必须有响应");
-    let error = result.as_ref().expect_err("缺父必须显式失败，不能放行执行");
-    assert!(error.contains("-32011"), "必须是恢复失败错误码：{error}");
-    assert!(error.contains("corrupt"), "失败分类必须可定位：{error}");
+    let response = result.as_ref().expect("会话装配成功时 load 必须返回 Ok");
+    let recovery = &response["_meta"]["peri.recovery"];
+    assert_eq!(recovery["status"], "failed", "{response}");
+    assert_eq!(recovery["error"]["kind"], "corrupt", "{response}");
+    assert_eq!(recovery["error"]["executionBlocked"], true, "{response}");
+    assert_eq!(recovery["executionBlocked"], true, "{response}");
     let notifications = harness.recorded.notifications();
     assert!(
         notifications.iter().any(|(method, params)| {
             method == "session/update" && params.to_string().contains("kept history")
         }),
-        "历史回放必须先于错误响应：{notifications:?}"
+        "历史回放必须先于恢复结果：{notifications:?}"
     );
     assert!(
         harness.recovery_rows("orphan-child").await.is_empty(),
         "失败进入不得注入提醒"
     );
+    let session_id = "orphan-child";
+    assert!(
+        harness
+            .cfg
+            .session_manager
+            .get_session(session_id)
+            .expect("会话 runtime 必须已登记")
+            .recovery_execution_block()
+            .is_some(),
+        "不可执行分类必须留下执行阻断"
+    );
+}
+
+/// 8b. 被阻断的会话拒绝 prompt：`-32017` + data.reason，模型零调用。
+#[tokio::test]
+async fn blocked_session_prompt_returns_recovery_execution_blocked() {
+    let harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "orphan-child", &root).await;
+    use sqlx::Connection as _;
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(&harness.db_path),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE threads SET parent_thread_id = 'ghost-parent' WHERE id = 'orphan-child'")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    push_request(
+        &harness,
+        2,
+        "session/load",
+        json!({"sessionId": "orphan-child"}),
+    );
+    run_server_loop(&harness).await;
+    push_request(
+        &harness,
+        3,
+        "session/prompt",
+        json!({
+            "sessionId": "orphan-child",
+            "prompt": [{"type": "text", "text": "continue"}],
+        }),
+    );
+    run_server_loop(&harness).await;
+
+    wait_for("阻断的 prompt 返回错误", || async {
+        harness.recorded.error_for(RequestId::Number(3)).is_some()
+    })
+    .await;
+    let error = harness
+        .recorded
+        .error_for(RequestId::Number(3))
+        .expect("prompt 必须有错误响应");
+    assert_eq!(error.code, -32017, "{error:?}");
+    assert_eq!(
+        error.data.as_ref().unwrap()["reason"],
+        "recovery_execution_blocked"
+    );
+    assert_eq!(error.data.as_ref().unwrap()["kind"], "corrupt");
+    assert!(!harness._mock.matched(), "阻断必须在模型调用之前");
+}
+
+/// 8c. 普通 idle load 不产生恢复字段：只有实际恢复或失败才附加。
+#[tokio::test]
+async fn idle_load_has_no_recovery_meta() {
+    let harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    push_request(&harness, 2, "session/load", json!({"sessionId": thread_id}));
+    run_server_loop(&harness).await;
+
+    let responses = harness.recorded.responses();
+    let (_, result) = responses
+        .iter()
+        .find(|(id, _)| *id == RequestId::Number(2))
+        .expect("load 必须有响应");
+    let response = result.as_ref().expect("idle load 必须成功");
+    assert!(
+        response["_meta"].get("peri.recovery").is_none(),
+        "idle load 不应有恢复字段：{response}"
+    );
+}
+
+/// 8d. working load：status ok，recovered 列表给出实际注入提醒的 thread。
+#[tokio::test]
+async fn working_load_meta_reports_recovered_threads() {
+    let harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    harness.set_working(&thread_id).await;
+    push_request(&harness, 2, "session/load", json!({"sessionId": thread_id}));
+    run_server_loop(&harness).await;
+
+    let responses = harness.recorded.responses();
+    let (_, result) = responses
+        .iter()
+        .find(|(id, _)| *id == RequestId::Number(2))
+        .expect("load 必须有响应");
+    let response = result.as_ref().expect("working load 必须成功");
+    let recovery = &response["_meta"]["peri.recovery"];
+    assert_eq!(recovery["status"], "ok", "{response}");
+    assert_eq!(recovery["executionBlocked"], false, "{response}");
+    assert_eq!(recovery["recovered"], json!([thread_id]), "{response}");
+    assert_eq!(recovery["enteredThreadId"], thread_id, "{response}");
+}
+
+/// 15. root idle + child working：load root 后，冷 child 必须取得 TaskManager 绑定
+///     与当前连接 endpoint；父级不启动模型。
+#[tokio::test]
+async fn cold_child_recovery_binds_task_manager_and_registers_endpoint() {
+    let harness = RecoveryHarness::new_with_workspace(true).await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-b", &root).await;
+    harness.set_working("child-b").await;
+    push_request(&harness, 2, "session/load", json!({"sessionId": root}));
+    run_server_loop(&harness).await;
+
+    let responses = harness.recorded.responses();
+    let (_, result) = responses
+        .iter()
+        .find(|(id, _)| *id == RequestId::Number(2))
+        .expect("load 必须有响应");
+    let response = result.as_ref().expect("root idle load 必须成功");
+    assert_eq!(
+        response["_meta"]["peri.recovery"]["recovered"],
+        json!(["child-b"]),
+        "{response}"
+    );
+
+    let session_id = harness
+        .cfg
+        .session_manager
+        .session_id_for_thread(&"child-b".to_owned())
+        .expect("冷 child 必须取得运行实例");
+    let (task_events_started, environment, published) = {
+        let session = harness
+            .cfg
+            .session_manager
+            .get_session(&session_id)
+            .expect("会话 runtime 必须已登记");
+        let task_events_started = session
+            .task_events_started
+            .load(std::sync::atomic::Ordering::Acquire);
+        drop(session);
+        let states = harness.sessions.lock().await;
+        (
+            task_events_started,
+            states
+                .get(&session_id)
+                .and_then(|state| state.environment.clone()),
+            states
+                .iter()
+                .map(|(key, state)| (key.clone(), state.environment.is_some()))
+                .collect::<Vec<_>>(),
+        )
+    };
+    assert!(task_events_started, "恢复后必须绑定 TaskManager 事件");
+    let Some(environment) = environment else {
+        panic!("冷 child 环境必须已发布；session_id={session_id} published={published:?}");
+    };
+    assert_eq!(
+        environment.interaction_router().online_endpoint_count(),
+        1,
+        "当前连接必须登记为冷 child 的在线 endpoint"
+    );
+    assert!(!harness._mock.matched(), "父级不因 child 恢复而启动模型");
 }
 
 /// 12. `session/load` 载荷带已保存占用与当前有效 window；NULL 如实为 null。

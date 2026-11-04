@@ -108,7 +108,7 @@ WHERE t.work_state = 'working';
 
 这条查询确定候选，不直接授权启动。主会话不是 `working` 时，仍检查同范围内各 child 的自身状态；为 child 重建必要的父级收件地址，不意味着启动父级模型。
 
-只读 Store、不可执行环境或损坏关系不能放行执行；已能读取的历史与占用仍可展示，恢复错误显式报告。
+只读 Store、不可执行环境或损坏关系不能放行执行；已能读取的历史与占用仍可展示，恢复错误显式报告。会话装配与历史回放成功后，恢复准备失败按「部分成功」返回：`session/load|resume` 仍为 Ok，结果写入 `_meta.peri.recovery`；使会话不可执行的失败（`Corrupt` / `ReadOnly` / `NotFound`）另以 `-32017` 拒绝 prompt。只读 Store 下的 `session/load` 仍在回放前明确拒绝（`ReadOnlyStore`）；经 `-r` 浏览只读历史本版本不提供，需独立的只读视图会话生命周期，不能用小补丁伪装成可重试。
 
 ## 4. 恢复流程
 
@@ -172,6 +172,10 @@ pub trait SessionRecovery: Send + Sync {
 
 `RecoveryReport` 返回本次根 thread、复用的实例、实际恢复的 thread、保持不运行的 thread 及逐项失败。它是调用结果，不持久化为恢复记录表。正常只读加载不调用 `enter`。
 
+进入完成后，Host 把报告投影为 `RecoveryView`（`peri_acp_types::recovery`）并附加到 `session/load|resume` 响应的 `_meta.peri.recovery`；仅在本次实际恢复或失败时附加。`Failed` 且 `executionBlocked` 的失败在会话 runtime 上留下内存执行阻断，`session/prompt` 统一返回 `-32017` + `data.reason = "recovery_execution_blocked"`；`Unavailable` / `Superseded` 保持可重试，不阻断显式继续。阻断状态不持久化，每次新的 load/resume 重新判定。
+
+冷 child 的 `assemble_for_recovery` 只建立运行实例；调用它的 server loop 必须在响应前补齐 TaskManager 绑定与在线 endpoint。`discard` 只丢弃 `Prepared` 启动资格，MQ 中的提醒保留，下一次进入采纳同一条提醒而不是重复注入。
+
 `enter`、普通执行准入、Stop、关闭和显式 resume 共用同一运行协调。恢复提醒与任务完成仍调用既有设计中的 `ThreadMq` 接口；状态变化由生命周期行为提交到 `SessionResources`，业务方不通过裸 setter 或 SQL 分别修改 MQ、历史与工作意图。
 
 ## 5. 工作意图与 MQ 的事务关系
@@ -179,9 +183,10 @@ pub trait SessionRecovery: Send + Sync {
 ### 5.1 运行准入和收尾
 
 - 主会话或 async 执行放行前提交 `working`。若提交后、worker 启动前退出，下次进入仍可继续原 thread。
-- 自然收尾不能无条件写 `idle`。它与消息接纳共用协调，并在存储操作中确认没有仍要求继续处理的新工作，避免覆盖刚到的消息。
+- 准入前的 `working` 写入是 fail-closed：目标 thread 不存在或写入失败时拒绝本轮，不取 AgentPool、不调用模型；continuation 路径回滚本函数刚设置的 `continuation_in_flight` 与取消令牌。
+- 自然收尾不能无条件写 `idle`。它与消息接纳共用协调，并在存储操作中确认没有仍要求继续处理的新工作，避免覆盖刚到的消息。收尾发生在 turn 之后，失败只能有限重试并记录 error，不能把已提交正文改回失败。
 - 明确失败按现有失败规则停止本次自动尝试；后来的新输入仍按既有准入规则判断。
-- 恢复准备失败不伪造任务完成或已取消；显示错误，保留已提交事实供下一次明确进入／继续重试，不建立无限后台恢复循环。
+- 恢复准备失败不伪造任务完成或已取消；显示错误，保留已提交事实供下一次明确进入／继续重试，不建立无限后台恢复循环。残留提醒不再等价于「已注入」：进程内 admitted 状态负责防重复，MQ 中未消费的 entry 提醒可被下一次进入采纳。
 
 ### 5.2 消息接纳
 
@@ -276,6 +281,10 @@ Peri 启动时不执行恢复查询。进入 `root-a` 后，第 3 节查询返�
 | Context 初次展示与失效 | 已保存值立即显示；NULL 不显示为 0；失效值不用于精确预算判断。 |
 | 旧库升级 | 只新增本文两列；旧 Active 不触发自动恢复，历史与 MQ 内容不被改写。 |
 | 结果处理范围 | 不出现任务绑定表、历史处理标记或隐藏的 pending-result 持久副本。 |
+| 恢复准备失败（装配成功） | load/resume 返回 Ok，`_meta.peri.recovery` 报 `failed`/`partial`，历史保留；不可执行分类另以 `-32017` 拒绝 prompt。 |
+| 响应发送失败后再次进入 | 只丢弃 Prepared 启动资格，MQ 提醒保留；下一次进入采纳同一条提醒，不重复注入。 |
+| 冷 child 恢复 | 响应前补齐 TaskManager 绑定与在线 endpoint；父级不启动模型。 |
+| 准入工作意图写入失败 | prompt 拒绝、模型零调用、工作意图不留下 `working`。 |
 
 所有业务写入经 Rust 行为接口和同一 Session Store。恢复入口负责装配与准入，普通执行负责正常状态变化；TUI、ACP 和回调不直接执行 SQL。
 

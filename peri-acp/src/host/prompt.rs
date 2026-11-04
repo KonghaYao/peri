@@ -914,8 +914,15 @@ pub(super) async fn finish_prompt_turn(
             (session_resources.as_ref(), turn_thread.as_ref())
         {
             let thread_id = ThreadId::from(thread_id.clone());
-            if let Err(error) = resources.set_work_state(&thread_id, work_state).await {
-                tracing::warn!(session_id, %error, "work state write after prompt failed");
+            if let Err(error) =
+                super::prompt_dispatch::set_work_state_with_retry(resources, &thread_id, work_state)
+                    .await
+            {
+                tracing::error!(
+                    session_id,
+                    %error,
+                    "work state write after prompt failed after retry"
+                );
             }
             if let Err(error) = resources
                 .set_context_usage(&thread_id, result.context_usage_tokens)
