@@ -66,11 +66,20 @@ impl ReadFileTool {
                 )
                 .into());
             }
-            Err(
-                crate::image::ImageReadError::NotFound
-                | crate::image::ImageReadError::NotFile
-                | crate::image::ImageReadError::NotImage,
-            ) => return Ok(None),
+            Err(crate::image::ImageReadError::NotFound) => {
+                return Err(ToolFailure::new(
+                    super::path_hints::with_path_hint(
+                        "File not found. Verify file_path or locate the file with Glob.",
+                        &self.cwd,
+                        &resolved,
+                    ),
+                    format!("Error: File not found at {}", request.file_path),
+                )
+                .into());
+            }
+            Err(crate::image::ImageReadError::NotFile | crate::image::ImageReadError::NotImage) => {
+                return Ok(None)
+            }
         };
         let text = format!("Image read: {} ({}).", resolved.display(), image.media_type);
         let raw = RawToolResult::new(serde_json::json!({

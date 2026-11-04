@@ -402,6 +402,23 @@ async fn test_read_oversized_png_is_an_explanatory_error() {
 }
 
 #[tokio::test]
+async fn test_read_missing_image_reports_file_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let tool = ReadFileTool::new(dir.path().to_str().unwrap());
+    let error = tool
+        .invoke_output(
+            serde_json::json!({"file_path": "missing.png"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .expect_err("missing image must not be reported as binary");
+    assert!(
+        error.to_string().contains("File not found"),
+        "error: {error}"
+    );
+}
+
+#[tokio::test]
 async fn test_read_image_still_validates_shared_parameters() {
     let dir = tempfile::tempdir().unwrap();
     image::RgbImage::new(1, 1)
