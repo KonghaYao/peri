@@ -166,6 +166,7 @@ fn model_media_blocks(outcome: &ToolOutcome) -> Vec<ContentBlock> {
     let Some(raw) = outcome.raw() else {
         return Vec::new();
     };
+    let mut accepted_chars = 0usize;
     raw.content()
         .iter()
         .filter_map(|block| {
@@ -185,14 +186,16 @@ fn model_media_blocks(outcome: &ToolOutcome) -> Vec<ContentBlock> {
                 tracing::warn!(mime_type = media_type, "dropping empty tool image payload");
                 return None;
             }
-            if data.len() > MAX_MODEL_IMAGE_DATA_CHARS {
+            if data.len() > MAX_MODEL_IMAGE_DATA_CHARS - accepted_chars {
                 tracing::warn!(
                     mime_type = media_type,
                     data_chars = data.len(),
-                    "dropping oversized tool image payload"
+                    accepted_chars,
+                    "dropping tool image payload beyond the message budget"
                 );
                 return None;
             }
+            accepted_chars += data.len();
             Some(ContentBlock::image_base64(media_type, data))
         })
         .collect()

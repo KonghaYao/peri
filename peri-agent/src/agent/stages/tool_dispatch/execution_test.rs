@@ -886,6 +886,23 @@ fn unsupported_or_empty_tool_images_are_dropped_without_losing_text() {
 }
 
 #[test]
+fn aggregate_image_payload_budget_is_shared_across_one_tool_message() {
+    let chunk = "A".repeat(8 * 1024 * 1024);
+    let raw = peri_acp_types::tool_outcome::RawToolResult::new(serde_json::json!({
+        "content": [
+            {"type": "image", "data": chunk.clone(), "mimeType": "image/png"},
+            {"type": "image", "data": chunk, "mimeType": "image/png"}
+        ]
+    }));
+    let outcome = ToolOutcome::from_raw(raw);
+    assert_eq!(
+        model_media_blocks(&outcome).len(),
+        1,
+        "第二张图不得让同一条工具消息的 base64 总量超过预算"
+    );
+}
+
+#[test]
 fn text_only_tool_results_keep_the_legacy_text_message_shape() {
     let settled = SettledInvocation::unreported(
         ToolCall::new("call-2", "Read", serde_json::json!({})),
