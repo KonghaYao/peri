@@ -164,17 +164,30 @@ fn test_empty_replay_snapshot_keeps_sentinel_armed() {
     assert!(consume_reset_force_bottom(&mut prev_items_len, 25));
 }
 
-// ── 滚动节流：反向落地与位置转换（纯函数） ─────────────────────────────
+// ── 滚动落地：逐事件位置转换（纯函数） ─────────────────────────────────
+
+/// 关键回归：同一毫秒到达的两个滚轮事件必须各落地一次 `SCROLL_LINES`，
+/// 而不是按时间窗合并成一次 2×`SCROLL_LINES` 跳变。
+/// 边界：这里验证落地计算逐事件执行（每次调用只应用传入 delta）；
+/// `apply_scroll` 的 State 写入依赖 hook 构造，未在单测覆盖。
+#[test]
+fn test_two_wheel_events_land_two_steps_not_one_merged_jump() {
+    let max_scroll = 100;
+    let mut offset = 10;
+    offset = land_scroll_delta(offset, SCROLL_LINES as i32, max_scroll);
+    assert_eq!(offset, 10 + SCROLL_LINES as usize, "第一个事件立即落地");
+    offset = land_scroll_delta(offset, SCROLL_LINES as i32, max_scroll);
+    assert_eq!(
+        offset,
+        10 + 2 * SCROLL_LINES as usize,
+        "第二个事件再落地一步"
+    );
+}
 
 #[test]
-fn test_is_reverse_direction() {
-    // 同向或零 pending：不触发反向落地
-    assert!(!is_reverse_direction(0, 3));
-    assert!(!is_reverse_direction(3, 3));
-    assert!(!is_reverse_direction(-3, -3));
-    // 反向：旧 pending 立即落地，再累积新方向
-    assert!(is_reverse_direction(3, -3));
-    assert!(is_reverse_direction(-3, 3));
+fn test_land_scroll_delta_normalizes_bottom_sentinel() {
+    // 跟随态 offset 是 usize::MAX 哨兵：上滚先归一化到当帧底部，不"滚空气"。
+    assert_eq!(land_scroll_delta(usize::MAX, -3, 80), 77);
 }
 
 #[test]
@@ -742,27 +755,9 @@ fn test_gesture_up_settle_decision() {
 // 触发不能只挂在渲染 effect 上：effect deps 不含滚动偏移 / follow_bottom，
 // 空闲会话（无 turn、无内容变化）里滚到已载入窗口顶端时 deps 不变、
 // `use_effect` 不重跑（ratatui-kit 0.10.3 `hooks/use_effect.rs`：deps 相等即跳过），
-// 于是完全没有触发源。且滚轮的 offset 要等节流 flush 才落地，只看当帧事实
-// 会漏掉「整段上滚落到顶端」那一次滚动。
+// 于是完全没有触发源。滚轮在事件派发前已逐事件落地，事件路径直接读当帧视口事实。
 
-/// 节流窗口内的 pending 必须能投影出「落地后贴向前边界」这件事。
-#[test]
-fn test_project_pending_scroll_lands_at_top() {
-    // 连续两格滚轮（3 行/格）还在节流窗口里：offset 未落地仍是 5，落地后是 0。
-    let (landed, landed_follow) =
-        project_viewport_after_pending(5, -(SCROLL_LINES as i32) * 2, 100, 20);
-    assert_eq!(landed, 0, "pending 落地后视口到已载入窗口顶端");
-    assert!(!landed_follow, "离开底部 → 浏览态");
-    // 哨兵（scroll_to_bottom 设置的 usize::MAX）先归一化再应用 pending——
-    // 与 apply_pending 同口径，否则上滚要先"滚空气"。
-    let (landed, _) = project_viewport_after_pending(usize::MAX, -(SCROLL_LINES as i32), 100, 20);
-    assert_eq!(landed, 77);
-    // 内容不足一屏（稀疏首屏形态）：落地仍停在顶端。
-    let (landed, _) = project_viewport_after_pending(0, -(SCROLL_LINES as i32), 5, 20);
-    assert_eq!(landed, 0);
-}
-
-/// 滚动事件路径的决策层：当帧事实未贴边、pending 落地后贴边 → 必须派发取页，
+/// 滚动事件路径的决策层：视口贴向已载入窗口顶端 → 必须派发取页，
 /// 且请求带冻结的会话身份与游标（走真实 `HISTORY_PAGES_TX` 通道观察）。
 #[test]
 #[serial]
@@ -775,19 +770,19 @@ fn test_scroll_lands_at_top_dispatches_older_page_request() {
         Some("tok".to_string()),
         Some("c1".to_string()),
     );
+    let rx = pages_channel();
 
-    // 当帧事实（offset 尚未落地，仍在向前边界 2 行之外）判定为「未贴边」——
-    // 修复前的事件路径只看它，因此这一次滚动不派发任何请求。
-    assert!(!crate::kit::history_paging::viewport_at_forward_boundary(
+    // 离顶端 5 行：未贴边，不派发。
+    assert!(!event::request_older_page_at_scroll_facts(
         false, 5, 100, 20
     ));
+    assert!(rx.lock().try_recv().is_err(), "未贴边不派发任何请求");
 
-    // 整段上滚（两格 = 6 行）落地后 offset = 0：必须派发一次。
+    // 滚轮落地后 offset=0：贴向前边界，必须派发一次。
     assert!(
-        event::request_older_page_at_scroll_facts(false, 5, -(SCROLL_LINES as i32) * 2, 100, 20),
-        "pending 落地后贴向前边界 → 派发取页"
+        event::request_older_page_at_scroll_facts(false, 0, 100, 20),
+        "贴向前边界 → 派发取页"
     );
-    let rx = pages_channel();
     let request = rx.lock().try_recv().expect("one dispatched request");
     assert_eq!(request.session_id, "s1");
     assert_eq!(request.snapshot_token, "tok");
@@ -795,7 +790,7 @@ fn test_scroll_lands_at_top_dispatches_older_page_request() {
     assert_eq!(request.limit, crate::kit::history_paging::PAGE_LIMIT);
     // 相同 cursor 已在途 → 后续滚动事件合并为 no-op（REQ-C01-2）。
     assert!(!event::request_older_page_at_scroll_facts(
-        false, 0, 0, 100, 20
+        false, 0, 100, 20
     ));
     assert!(rx.lock().try_recv().is_err(), "在途请求只派发一次");
 }
@@ -827,7 +822,7 @@ fn test_scroll_at_bottom_dispatches_window_after_page_and_stops() {
     assert!(crate::kit::atoms::HISTORY_WINDOW_TX.set(tx).is_ok());
 
     assert!(event::request_newer_page_at_scroll_facts(
-        false, 80, 0, 100, 20
+        false, 80, 100, 20
     ));
     let request = rx.try_recv().expect("after page request");
     let request_id = match &request {
@@ -840,7 +835,7 @@ fn test_scroll_at_bottom_dispatches_window_after_page_and_stops() {
         other => panic!("expected after page, got {other:?}"),
     };
     assert!(
-        !event::request_newer_page_at_scroll_facts(false, 80, 0, 100, 20),
+        !event::request_newer_page_at_scroll_facts(false, 80, 100, 20),
         "same in-flight window page must merge"
     );
     assert!(rx.try_recv().is_err());
@@ -851,7 +846,7 @@ fn test_scroll_at_bottom_dispatches_window_after_page_and_stops() {
         .write()
         .after_cursor = None;
     assert!(!event::request_newer_page_at_scroll_facts(
-        false, 80, 0, 100, 20
+        false, 80, 100, 20
     ));
 
     // 视口无锚点 + 桥接发布 gap 目标：滚动触发 seek，内容返回前不跳底。
@@ -954,17 +949,13 @@ fn test_scroll_away_from_top_does_not_dispatch() {
         Some("c1".to_string()),
     );
 
-    // 浏览态、视口离顶端很远、pending 也只向上走一小段 → 不派发。
+    // 浏览态、视口离顶端很远 → 不派发。
     assert!(!event::request_older_page_at_scroll_facts(
-        false,
-        40,
-        -(SCROLL_LINES as i32),
-        200,
-        20
+        false, 40, 200, 20
     ));
     // 跟随态且内容超一屏（看的是尾部）→ 不派发。
     assert!(!event::request_older_page_at_scroll_facts(
-        true, 180, 0, 200, 20
+        true, 180, 200, 20
     ));
     assert!(pages_channel().lock().try_recv().is_err(), "不派发任何请求");
     assert!(

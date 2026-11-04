@@ -42,7 +42,7 @@ pub fn ThreadBrowserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let last_viewport = hooks.use_state(|| 0usize);
     // 确认删除模式（仿 Cron 面板）：d/Delete 进入，Enter 确认 / Esc 取消
     let confirm_delete = hooks.use_state(|| None::<String>);
-    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
+    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格
     let sv = hooks.use_state(ScrollViewState::default);
     let preview_sv = hooks.use_state(ScrollViewState::default);
     let preview_id = hooks.use_state(|| None::<String>);

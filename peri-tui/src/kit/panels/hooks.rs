@@ -50,7 +50,7 @@ fn event_description(event: &str) -> String {
 pub fn HooksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let selected = hooks.use_state(|| 0usize);
-    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
+    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格
     let sv = hooks.use_state(ScrollViewState::default);
     let store = hooks.use_atom(&HOOK_LIST);
     let hook_list: Vec<HookSummary> = store.read().clone();

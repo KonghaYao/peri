@@ -1,4 +1,4 @@
-//! 滚动节流 + 鼠标事件处理 + 吸底自动跟随。
+//! 滚轮事件处理 + 吸底自动跟随。
 
 use ratatui_kit::prelude::*;
 
@@ -27,12 +27,10 @@ pub(super) use self::gesture::{
 use self::gesture::{entry_click_target, freeze_down, is_click, is_click_for};
 use self::gesture::{selection_bounds_on_release, selection_captures_pointer, selection_position};
 use self::throttle::apply_scroll;
-pub(super) use self::throttle::{
-    DragThrottle, SCROLL_PADDING, flush_scroll_if_due, project_viewport_after_pending,
-};
-pub(crate) use self::throttle::{SCROLL_LINES, ScrollThrottle, scroll_frame_ms};
+pub(super) use self::throttle::{DragThrottle, SCROLL_PADDING};
+pub(crate) use self::throttle::{SCROLL_LINES, scroll_frame_ms};
 #[cfg(test)]
-use self::throttle::{apply_delta_to_offset, is_reverse_direction};
+use self::throttle::{apply_delta_to_offset, land_scroll_delta};
 use super::viewport_anchor::PrependRelocation;
 #[cfg(test)]
 use crate::kit::message_area::props::ScrollbarFields;

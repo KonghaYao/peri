@@ -15,7 +15,7 @@
 | `PERI_CLIPBOARD` | 复制通道覆盖：`native` 强制系统剪贴板，`osc52` 与 `terminal` 强制终端 OSC 52；其他值（含 `auto`）与未设置等价，走自动探测——SSH/herdr 或非 macOS 的 Unix 上无 `DISPLAY`、`WAYLAND_DISPLAY` 时用终端剪贴板，其余用系统剪贴板。大小写与首尾空白不敏感。 | 同上 |
 | `LC_ALL` | 终端 locale 的优先来源；为 `C` 或 `POSIX` 时使用 ASCII 符号。 | 同上 |
 | `LANG` | `LC_ALL` 缺失时的 locale；为 `C` 或 `POSIX` 时使用 ASCII 符号。 | 同上 |
-| `PERI_SCROLL_THROTTLE_MS` | 消息滚动节流毫秒数；有效整数至少按 1 ms 处理，`TuiConfig.scroll_fps` 优先；缺省 50 ms。 | `peri-tui/src/kit/message_area/scroll/throttle.rs` |
+| `PERI_SCROLL_THROTTLE_MS` | 鼠标拖拽（滚动条 / 文本选区）节流毫秒数；滚轮滚动已逐事件落地，不受此值影响。有效整数至少按 1 ms 处理，`TuiConfig.scroll_fps` 优先；缺省 50 ms。 | `peri-tui/src/kit/message_area/scroll/throttle.rs` |
 | `PERI_RENDER_TIMING` | `1` 或 `true`（不区分大小写）时记录渲染阶段耗时；缺省关闭。 | `peri-tui/src/kit/message_area/vm_cache.rs` |
 | `PERI_NO_HIGHLIGHT` | `1` 或 `true` 时关闭消息区选中文本高亮；缺省关闭此回退。 | `peri-tui/src/kit/message_area/mod.rs` |
 | `PERI_DISABLE_DRAG_SELECT` | `1` 或 `true` 时跳过消息区鼠标拖拽选中；缺省允许。 | `peri-tui/src/kit/message_area/scroll/event.rs` |

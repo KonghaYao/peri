@@ -135,7 +135,7 @@ pub fn ModelPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 左侧 profile 列表的滚动状态（ScrollView 自身状态；列表窗口由
     // `viewport` 推导，鼠标命中不再读这里的偏移）。
     let left_scroll = hooks.use_state(ScrollViewState::default);
-    // 右栏详情滚动——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
+    // 右栏详情滚动——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格
     let right_scroll = hooks.use_state(ScrollViewState::default);
     // 面板绘制区域（上一帧，绝对坐标）——鼠标命中反推、滚轮仲裁注册与右列
     // 文本对齐共用这一份区域。

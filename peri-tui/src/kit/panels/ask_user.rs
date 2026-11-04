@@ -56,7 +56,7 @@ fn reset_for_owner_change(
 pub fn AskUserPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let pending_store = hooks.use_atom(&ASK_USER_PENDING);
-    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
+    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格
     let sv = hooks.use_state(ScrollViewState::default);
     let interaction = pending_store.read().clone();
     let pending: Option<AskUser> = interaction.as_ref().map(|p| p.payload.clone());

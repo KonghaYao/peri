@@ -95,7 +95,7 @@ pub fn LoginPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // ── hooks：无条件、稳定顺序（TUI-HOOK-001）──
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let cursor = hooks.use_state(|| 0usize);
-    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
+    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格
     let sv = hooks.use_state(ScrollViewState::default);
     let mode = hooks.use_state(|| LoginPanelMode::Browse);
     let edit_state = hooks.use_state(|| None::<LoginEditState>);
