@@ -5,8 +5,6 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use peri_acp_types::thread::WorkState;
-
 use super::diagnostics::ResponseDiagnostics;
 use super::session_endpoint::register_session_endpoint;
 use super::{
@@ -985,39 +983,14 @@ impl ServerLoop<'_> {
                 );
             }
         }
-        // 用户 Stop 先落停止意图：受本次取消影响的 thread（本会话与 cascade children）
-        // 在锁外写 `stopped`。失败只记录错误，不阻断取消本身；后续收尾只把 `working`
-        // 收敛为 `idle`，不会解除已保存的 `stopped`（设计 §5.4）。
-        for thread_id in outcome.stop_targets {
-            if let Err(error) = cfg
-                .session_manager
-                .session_resources()
-                .set_work_state(&thread_id, WorkState::Stopped)
-                .await
-            {
-                tracing::error!(
-                    method,
-                    %thread_id,
-                    %error,
-                    "stop intent persistence failed; cancel remains effective"
-                );
-            }
-        }
-        // 模型配置变化后旧 context 占用快照失效：写 NULL（未知不是零占用，设计 §2.2）。
-        for thread_id in outcome.context_usage_invalidations {
-            if let Err(error) = cfg
-                .session_manager
-                .session_resources()
-                .set_context_usage(&thread_id, None)
-                .await
-            {
-                tracing::error!(
-                    method,
-                    %thread_id,
-                    %error,
-                    "context usage invalidation failed"
-                );
-            }
-        }
+        // 用户 Stop 与模型配置变化的锁外持久化：停止意图先落库；占用快照失效写
+        // NULL。失败只记 error，不阻断取消/配置更新本身（设计 §5.4 / §2.2）。
+        super::notify::persist_notification_effects(
+            &method,
+            cfg,
+            outcome.stop_targets,
+            outcome.context_usage_invalidations,
+        )
+        .await;
     }
 }

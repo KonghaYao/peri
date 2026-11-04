@@ -219,6 +219,47 @@ pub(crate) async fn handle_notification(
 
 // ── Notification helpers ───────────────────────────────────────────────────────
 
+/// 通知的锁外持久化副作用：Stop 意图与模型配置变化后的占用失效。
+///
+/// 调用方必须已释放 sessions 锁；写失败只记 error，不改变取消/配置更新本身。
+pub(crate) async fn persist_notification_effects(
+    method: &str,
+    cfg: &AcpServerConfig,
+    stop_targets: Vec<ThreadId>,
+    context_usage_invalidations: Vec<ThreadId>,
+) {
+    for thread_id in stop_targets {
+        if let Err(error) = cfg
+            .session_manager
+            .session_resources()
+            .set_work_state(&thread_id, peri_acp_types::thread::WorkState::Stopped)
+            .await
+        {
+            tracing::error!(
+                method,
+                %thread_id,
+                %error,
+                "stop intent persistence failed; cancel remains effective"
+            );
+        }
+    }
+    for thread_id in context_usage_invalidations {
+        if let Err(error) = cfg
+            .session_manager
+            .session_resources()
+            .set_context_usage(&thread_id, None)
+            .await
+        {
+            tracing::error!(
+                method,
+                %thread_id,
+                %error,
+                "context usage invalidation failed"
+            );
+        }
+    }
+}
+
 /// Extract `sessionId` from JSON-RPC params, returning `default_value` if absent.
 pub(crate) fn extract_session_id<'a>(params: &'a Value, default_value: &'a str) -> &'a str {
     params
