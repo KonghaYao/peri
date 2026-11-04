@@ -99,6 +99,14 @@ pub(crate) struct PreparedSession {
     pub(super) identity: Option<Value>,
 }
 
+/// 只读/不可执行 store 的装配错误带上视图态标记。
+///
+/// `session/load|resume` 识别该标记后改为「历史与会话占用可展示、执行阻断」的
+/// 只读视图生命周期，而不是把整次 load 变成错误（设计 §3）。
+pub(super) fn view_only_error(kind: &'static str, error: AcpError) -> AcpError {
+    error.with_data(serde_json::json!({ "reason": "view_only", "kind": kind }))
+}
+
 /// 进程内/测试入口：调用方持有的是本地 map 引用，不是生产 `SharedSessions` 锁。
 /// 生产 `ServerLoop` 的 `session/load` 走 [`load_shared::handle_load_shared`]
 /// （短锁读取 → 锁外 I/O → 短锁写回），不得从生产路径调用本函数。
@@ -121,16 +129,19 @@ pub(crate) async fn prepare_existing(
         AccessMode, ExecutionAvailability, SessionResourceError, SessionResourceErrorKind,
     };
     if availability.access == AccessMode::ReadOnly {
-        return Err(crate::host::workspace::resource_error(
-            SessionResourceError::new(SessionResourceErrorKind::ReadOnlyStore),
+        return Err(view_only_error(
+            "read_only",
+            crate::host::workspace::resource_error(SessionResourceError::new(
+                SessionResourceErrorKind::ReadOnlyStore,
+            )),
         ));
     }
     match availability.execution {
         Some(ExecutionAvailability::Available | ExecutionAvailability::BindingMissing) => {}
         reason => {
-            return Err(AcpError::new(
-                -32010,
-                format!("Session execution unavailable: {reason:?}"),
+            return Err(view_only_error(
+                "unavailable",
+                AcpError::new(-32010, format!("Session execution unavailable: {reason:?}")),
             ))
         }
     }
@@ -282,6 +293,7 @@ pub(crate) async fn prepare_existing(
                 continuation_in_flight: false,
                 continuation_mq_steering_pending: false,
                 recovery_settlement_pending: false,
+                view_only: false,
                 frozen,
                 recall_items: Vec::new(),
                 agent_pool: crate::session::agent_pool::AgentPool::new(),

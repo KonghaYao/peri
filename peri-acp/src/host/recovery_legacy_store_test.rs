@@ -3,7 +3,7 @@
 //! 阶段 2 已在 store 层验证「只读打开旧库读作 `idle`」；这里补 wire 层的两条：
 //!
 //! 1. 旧库按生产意图（读写）进入：只补两列，旧 Active 不触发恢复，历史与 MQ 内容不被改写；
-//! 2. 只读 Store 进入：显式报错、零恢复、零写入——恢复不放行执行，也不悄悄升级旧库。
+//! 2. 只读 Store 进入：返回可浏览的视图（历史/占用），执行被阻断、零写入——恢复不放行执行，也不悄悄升级旧库。
 
 use super::*;
 use peri_acp_types::messages::BaseMessage;
@@ -214,9 +214,9 @@ async fn schema_v13_upgrade_on_entry_recovers_nothing_and_keeps_history_and_queu
     );
 }
 
-/// 2. 只读进入 schema 13 库：显式报错、零恢复、零写入（不升级、不改形状）。
+/// 2. 只读进入 schema 13 库：历史可浏览、执行被阻断、库文件零写入（不升级、不改形状）。
 #[tokio::test]
-async fn schema_v13_read_only_entry_is_rejected_without_writing() {
+async fn schema_v13_read_only_entry_serves_history_with_execution_block() {
     let workspace = tempfile::tempdir().unwrap();
     let db_path = workspace.path().join("threads.db");
     let cwd = workspace.path().to_string_lossy().into_owned();
@@ -245,10 +245,20 @@ async fn schema_v13_read_only_entry_is_rejected_without_writing() {
         .iter()
         .find(|(id, _)| *id == RequestId::Number(2))
         .expect("session/load 必须有响应");
-    let error = result.as_ref().expect_err("只读 Store 不得放行执行");
+    let response = result
+        .as_ref()
+        .expect("只读 Store 必须返回可浏览的视图，而不是失败整次 load");
+    let recovery = &response["_meta"]["peri.recovery"];
+    assert_eq!(recovery["status"], "failed", "{response}");
+    assert_eq!(recovery["error"]["kind"], "read_only", "{response}");
+    assert_eq!(recovery["error"]["executionBlocked"], true, "{response}");
+    assert_eq!(recovery["executionBlocked"], true, "{response}");
+    let notifications = harness.recorded.notifications();
     assert!(
-        error.contains("read-only"),
-        "只读失败必须是显式分类，不是静默降级：{error}"
+        notifications.iter().any(|(method, params)| {
+            method == "session/update" && params.to_string().contains(LEGACY_MESSAGE)
+        }),
+        "只读视图必须先回放历史：{notifications:?}"
     );
     assert!(!harness._mock.matched(), "只读进入不得启动 turn");
     assert_eq!(
@@ -261,4 +271,31 @@ async fn schema_v13_read_only_entry_is_rejected_without_writing() {
         before_bytes,
         "只读进入不得写入库文件"
     );
+
+    // 视图态仍拒绝执行：prompt 在模型调用前返回 -32017。
+    super::wire_tests::push_request(
+        &harness,
+        3,
+        "session/prompt",
+        json!({
+            "sessionId": thread_id,
+            "prompt": [{"type": "text", "text": "continue"}],
+        }),
+    );
+    super::wire_tests::run_server_loop(&harness).await;
+    wait_for("只读视图的 prompt 被阻断", || async {
+        harness.recorded.error_for(RequestId::Number(3)).is_some()
+    })
+    .await;
+    let error = harness
+        .recorded
+        .error_for(RequestId::Number(3))
+        .expect("prompt 必须有错误响应");
+    assert_eq!(error.code, -32017, "{error:?}");
+    assert_eq!(
+        error.data.as_ref().unwrap()["reason"],
+        "recovery_execution_blocked"
+    );
+    assert_eq!(error.data.as_ref().unwrap()["kind"], "read_only");
+    assert!(!harness._mock.matched(), "阻断必须在模型调用之前");
 }

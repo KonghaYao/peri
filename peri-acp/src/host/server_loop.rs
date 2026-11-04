@@ -748,43 +748,56 @@ impl ServerLoop<'_> {
             if let Some(session_id) =
                 super::recovery::wiring::session_setup(&method, &params, result.as_ref().ok())
             {
-                match super::recovery::wiring::enter_recovery(
-                    self.recovery,
-                    self.sessions,
-                    &session_id,
-                )
-                .await
-                {
-                    Ok(Some(entered)) => {
-                        let view =
-                            peri_acp_types::recovery::RecoveryView::from_report(&entered.report);
-                        super::recovery::wiring::apply_recovery_execution_block(
-                            cfg,
-                            &session_id,
-                            &view,
-                        );
-                        super::recovery::wiring::attach_recovery_meta(&mut result, &view);
-                        // 冷 child 已装配但还没有运行期绑定：响应后的 launch 启动 child 前
-                        // 必须补齐 TaskManager 与在线 endpoint。
-                        super::recovery::wiring::bind_recovered_sessions(
-                            cfg,
-                            self.sessions,
-                            self.connection,
-                            self.transport,
-                            &entered.report,
-                        )
-                        .await;
-                        recovery_report = Some(entered);
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        let view = super::recovery::wiring::error_view(&session_id, &error);
-                        super::recovery::wiring::apply_recovery_execution_block(
-                            cfg,
-                            &session_id,
-                            &view,
-                        );
-                        super::recovery::wiring::attach_recovery_meta(&mut result, &view);
+                // 视图态只有历史与占用，没有执行环境：保留 load 已附带的只读阻断与
+                // 恢复元数据，不进入恢复协调（否则会清掉 executionBlocked）。
+                let view_only = {
+                    let states = self.sessions.lock().await;
+                    states
+                        .get(&session_id)
+                        .is_some_and(|state| state.is_view_only())
+                };
+                if view_only {
+                    // 不启动恢复；响应与阻断已由只读视图加载写入。
+                } else {
+                    match super::recovery::wiring::enter_recovery(
+                        self.recovery,
+                        self.sessions,
+                        &session_id,
+                    )
+                    .await
+                    {
+                        Ok(Some(entered)) => {
+                            let view = peri_acp_types::recovery::RecoveryView::from_report(
+                                &entered.report,
+                            );
+                            super::recovery::wiring::apply_recovery_execution_block(
+                                cfg,
+                                &session_id,
+                                &view,
+                            );
+                            super::recovery::wiring::attach_recovery_meta(&mut result, &view);
+                            // 冷 child 已装配但还没有运行期绑定：响应后的 launch 启动 child 前
+                            // 必须补齐 TaskManager 与在线 endpoint。
+                            super::recovery::wiring::bind_recovered_sessions(
+                                cfg,
+                                self.sessions,
+                                self.connection,
+                                self.transport,
+                                &entered.report,
+                            )
+                            .await;
+                            recovery_report = Some(entered);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            let view = super::recovery::wiring::error_view(&session_id, &error);
+                            super::recovery::wiring::apply_recovery_execution_block(
+                                cfg,
+                                &session_id,
+                                &view,
+                            );
+                            super::recovery::wiring::attach_recovery_meta(&mut result, &view);
+                        }
                     }
                 }
             }

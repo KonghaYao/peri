@@ -50,6 +50,7 @@ fn seeded_sessions(provider: &LlmProvider) -> HashMap<String, SessionState> {
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,
             recovery_settlement_pending: false,
+            view_only: false,
             frozen: None,
             recall_items: Vec::new(),
             agent_pool,

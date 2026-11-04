@@ -173,6 +173,7 @@ pub(crate) async fn handle_fork_shared(
         continuation_in_flight: false,
         continuation_mq_steering_pending: false,
         recovery_settlement_pending: false,
+        view_only: false,
         frozen: Some(frozen_data),
         recall_items: Vec::new(),
         agent_pool: crate::session::agent_pool::AgentPool::new(),

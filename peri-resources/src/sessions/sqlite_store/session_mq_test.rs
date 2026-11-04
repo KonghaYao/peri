@@ -887,6 +887,56 @@ async fn finalize_child_terminal_commits_status_work_state_and_result() {
     assert_eq!(mq_count(&fixture, &target).await, 1);
 }
 
+/// 结果接纳与接收方工作意图共用一次提交：EnsureProcessing 提升，passive 不授予。
+#[tokio::test]
+async fn finalize_child_terminal_maintains_receiver_work_intent() {
+    use peri_acp_types::thread::{AgentStatus, WorkState};
+
+    let fixture = Fixture::new().await;
+    let child = fixture.thread("child").await;
+    let target = fixture.thread("parent").await;
+    fixture
+        .data
+        .set_work_state(&child, WorkState::Working)
+        .await
+        .unwrap();
+
+    fixture
+        .data
+        .finalize_child_terminal(
+            &child,
+            AgentStatus::Done,
+            WorkState::Idle,
+            &target,
+            terminal_input(MessageId::new(), "child done"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.data.load_meta(&target).await.unwrap().work_state,
+        WorkState::Working,
+        "EnsureProcessing 结果必须在同一事务内提升接收方工作意图"
+    );
+
+    fixture
+        .data
+        .set_work_state(&target, WorkState::Idle)
+        .await
+        .unwrap();
+    let mut passive = terminal_input(MessageId::new(), "passive result");
+    passive.policy = MessagePolicy::passive();
+    fixture
+        .data
+        .finalize_child_terminal(&child, AgentStatus::Done, WorkState::Idle, &target, passive)
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.data.load_meta(&target).await.unwrap().work_state,
+        WorkState::Idle,
+        "passive 结果不得授予执行资格"
+    );
+}
+
 /// [回归] 结果接纳失败必须让整次结算回滚：终态已写、MQ 没收到结果正是原缺陷。
 ///
 /// 用「同 ID 已属于别的 thread 历史」注入冲突——冲突只在最后一步出现，前两步若

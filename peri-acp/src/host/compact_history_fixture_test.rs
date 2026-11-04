@@ -414,6 +414,7 @@ fn make_host_sessions(ctx: &SessionContext, payloads: Vec<PersistedPayload>) -> 
         continuation_in_flight: false,
         continuation_mq_steering_pending: false,
         recovery_settlement_pending: false,
+        view_only: false,
         frozen: Some(make_sentinel_frozen()),
         recall_items: vec![],
         agent_pool: AgentPool::new(),
