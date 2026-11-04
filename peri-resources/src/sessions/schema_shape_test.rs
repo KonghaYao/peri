@@ -429,3 +429,26 @@ CREATE INDEX idx_messages_thread_id ON messages(thread_id);
 CREATE INDEX idx_bindings_project ON session_bindings(project_id, thread_id);
 CREATE INDEX idx_bindings_workspace ON session_bindings(workspace_id, relative_cwd, thread_id);
 CREATE INDEX idx_threads_updated ON threads(updated_at DESC, id DESC) WHERE hidden = 0 AND message_count > 0;";
+
+/// 会话持久化不引入任务绑定表或逐条结果处理标记（设计 §2/§9 #16）。
+#[tokio::test]
+async fn durability_adds_no_auxiliary_binding_tables_or_response_columns() {
+    let (_directory, mut connection) = fresh_database().await;
+    let tables: Vec<(String,)> =
+        sqlx::query_as("SELECT name FROM sqlite_master WHERE type = 'table'")
+            .fetch_all(&mut connection)
+            .await
+            .unwrap();
+    assert!(
+        !tables.iter().any(|(name,)| name == "agent_task_bindings"),
+        "不得新增异步任务绑定表"
+    );
+    let columns: Vec<(String,)> = sqlx::query_as("SELECT name FROM pragma_table_info('messages')")
+        .fetch_all(&mut connection)
+        .await
+        .unwrap();
+    assert!(
+        !columns.iter().any(|(name,)| name == "awaiting_response"),
+        "不得新增逐条结果处理标记"
+    );
+}
