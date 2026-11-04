@@ -4,7 +4,7 @@
 //! - **state 来源**：v2 用 `StageContext.session.transcript`（通过 middleware_runner 桥接
 //!   StageContext 调用 middleware chain）
 //! - **事件总线**：v2 用 `ctx.runtime.event_bus.emit_render(RenderEvent::*)`
-//! - **写入语义**：v2 用 `stage_ai_message` / `stage_tool_result` / `commit_staged`
+//! - **写入语义**：完整交换经唯一 writer 原子持久化，确认后发布 transcript
 //!
 //! 不变量（与 v1 一致）：
 //! - **延迟写入**：before_tool / after_tool 期间 transcript 不含本轮 AI 消息
@@ -238,25 +238,28 @@ pub async fn dispatch_tools(
     )
     .await?;
 
-    // 阶段 B：原子写入 transcript（staging 模式）
-    {
-        let allow_tool_images = matches!(
-            ctx.runtime.llm.provider_capabilities().protocol,
-            ProviderProtocol::Anthropic | ProviderProtocol::OpenAiResponses
-        );
-        let mut tx = ctx.session.transcript.write();
-        tx.stage_ai_message(ai_msg);
-        for settled in &collect_outcome.results {
-            tx.stage_tool_result(settled_tool_message(settled, allow_tool_images));
-        }
-        for (_, result) in &resolution_errors {
-            tx.stage_tool_result(BaseMessage::tool_error(
-                &result.tool_call_id,
-                result.output.as_str(),
-            ));
-        }
-        tx.commit_staged();
+    // 阶段 B：完整交换由 writer 原子落库，确认后才发布 canonical；大图片批次
+    // 不再先深拷贝到 16 MiB 普通 Append 积压，也不把半个交换暴露给恢复路径。
+    let allow_tool_images = matches!(
+        ctx.runtime.llm.provider_capabilities().protocol,
+        ProviderProtocol::Anthropic | ProviderProtocol::OpenAiResponses
+    );
+    let mut exchange =
+        Vec::with_capacity(1 + collect_outcome.results.len() + resolution_errors.len());
+    exchange.push(ai_msg);
+    for settled in &mut collect_outcome.results {
+        exchange.push(settled_tool_message(settled, allow_tool_images));
+        // canonical 已取得所需媒体；Act 后续只用文本结果，不跨落库等待保留 raw 副本。
+        settled.outcome = crate::tools::ToolOutcome::Unreported;
     }
+    for (_, result) in &resolution_errors {
+        exchange.push(BaseMessage::tool_error(
+            &result.tool_call_id,
+            result.output.as_str(),
+        ));
+    }
+    crate::session::MessageTranscript::commit_tool_exchange(&ctx.session.transcript, exchange)
+        .await?;
 
     // 只计入已提交的工具结果，包括错误结果。
     // 提交，不在这里重复计量。先记账再运行后置 hook，确保 hook 失败也不丢增长。

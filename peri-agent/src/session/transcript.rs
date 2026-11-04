@@ -47,8 +47,9 @@ pub const DEFAULT_PENDING_MAX_ITEMS: usize = 1024;
 /// 待持久化积压默认上限（字节，按 canonical payload 编码长度估算）。
 pub const DEFAULT_PENDING_MAX_BYTES: usize = 16 * 1024 * 1024;
 
-// The command interceptor retains a clone while its cancellable pipeline owns the
-// transcript, so dropping that future cannot erase the persistence outcome.
+// Shared history-commit outcome: callers retain this signal when a cancellable
+// commit owns the transcript. State 2 specifically records a completed Full Compact;
+// an ordinary atomic exchange restores its previous state after publication.
 #[derive(Debug, Clone, Default)]
 pub struct CompactionCommitState(Arc<AtomicU8>);
 
@@ -78,8 +79,9 @@ impl CompactionCommitState {
 
 /// 持久化操作 — 通过异步通道传递富操作给 writer task
 ///
-/// 每个会产生写入的操作携带自己的[预算预留](Reservation)：追加方在持锁时同步预留，
-/// writer 在效果确定后归还。Barrier / Shutdown 不产生写入，也就不占额度。
+/// 普通异步写入携带[预算预留](Reservation)，writer 在效果确定后归还。
+/// `CommitBatch` 由共享 pending 信号单飞准入，持有本次不可分交换的原有正文，
+/// 不额外深拷贝进普通 Append 积压；Barrier / Shutdown 不占额度。
 #[derive(Debug)]
 pub enum PersistOp {
     /// 追加新消息（canonical payload）
@@ -87,6 +89,8 @@ pub enum PersistOp {
         payload: PersistedPayload,
         reserved: Reservation,
     },
+    /// 一次已结算交换的原子持久化；不进入普通 Append 的异步积压。
+    CommitBatch(AtomicBatchCommit),
     /// 更新消息标记（投影变更集）
     UpdateFlags {
         id: MessageId,
@@ -104,6 +108,8 @@ pub enum PersistOp {
     Shutdown,
 }
 
+mod atomic_batch;
+pub use atomic_batch::AtomicBatchCommit;
 mod entry;
 mod persistence;
 mod persistence_port;

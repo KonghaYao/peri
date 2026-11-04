@@ -509,18 +509,12 @@ impl SqliteSessionData {
             // 目标会话不存在与「外键拒绝」是两个不同的原因，前者更可诊断。
             return Err(not_found());
         }
-        let mut rows = Vec::with_capacity(payloads.len());
-        for payload in payloads {
-            rows.push(MessageInsertRow {
-                id: payload.id().as_uuid().to_string(),
-                role: payload_role(payload),
-                content: serialize_persisted_payload(payload)
-                    .map_err(|_| corrupt("history entry is not serializable"))?,
-            });
+        for chunk in SerializedHistoryChunks::new(payloads) {
+            let rows = chunk.map_err(|_| corrupt("history entry is not serializable"))?;
+            insert_message_rows(&mut tx, id, rows)
+                .await
+                .map_err(|error| map_sqlx(&error))?;
         }
-        insert_message_rows(&mut tx, id, &rows)
-            .await
-            .map_err(|error| map_sqlx(&error))?;
         let now = peri_time::now_utc_rfc3339();
         let updated = sqlx::query(
             "UPDATE threads SET updated_at = ?1,
@@ -535,12 +529,8 @@ impl SqliteSessionData {
         if updated.rows_affected() != 1 {
             return Err(not_found());
         }
-        let messages = payloads
-            .iter()
-            .filter_map(PersistedPayload::as_message)
-            .cloned()
-            .collect::<Vec<_>>();
-        if let Some(title) = extract_title(&messages) {
+        if let Some(title) = extract_title(payloads.iter().filter_map(PersistedPayload::as_message))
+        {
             sqlx::query("UPDATE threads SET title = ?1 WHERE id = ?2 AND title IS NULL")
                 .bind(&title)
                 .bind(id.as_str())

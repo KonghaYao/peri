@@ -97,6 +97,7 @@ pub struct EventBuffer {
     max_bytes: usize,
     next_seq: u64,
     retained_bytes: usize,
+    payload_capacity_bytes: usize,
     dropped: u64,
     pending_dropped: u64,
 }
@@ -109,6 +110,7 @@ impl EventBuffer {
             max_bytes: max_bytes.max(MIN_TASK_BYTES),
             next_seq: 1,
             retained_bytes: 0,
+            payload_capacity_bytes: 0,
             dropped: 0,
             pending_dropped: 0,
         }
@@ -125,18 +127,15 @@ impl EventBuffer {
         while self.events.len() >= self.max_events
             || self.retained_bytes.saturating_add(retained) > self.max_bytes
         {
-            let Some(evicted) = self.events.pop_front() else {
+            if !self.evict_oldest() {
                 break;
-            };
-            self.retained_bytes = self.retained_bytes.saturating_sub(evicted.text.len());
-            self.dropped = self.dropped.saturating_add(1);
-            self.pending_dropped = self.pending_dropped.saturating_add(1);
+            }
         }
 
         let seq = self.next_seq;
         self.next_seq = self.next_seq.saturating_add(1);
         self.retained_bytes = self.retained_bytes.saturating_add(retained);
-        self.events.push_back(MonitorEvent {
+        let event = MonitorEvent {
             seq,
             ts: event.ts,
             stream: event.stream.to_string(),
@@ -147,8 +146,40 @@ impl EventBuffer {
             dropped: std::mem::take(&mut self.pending_dropped),
             partial: event.partial,
             untrusted: true,
-        });
+        };
+        self.payload_capacity_bytes += event_capacity(&event);
+        self.events.push_back(event);
         seq
+    }
+
+    /// Heap storage held by the ring, including empty slots and string capacity.
+    pub(crate) fn resident_bytes(&self) -> usize {
+        self.events.capacity() * std::mem::size_of::<MonitorEvent>() + self.payload_capacity_bytes
+    }
+
+    /// Reclaim actual allocations without resetting the task's cursor or gaps.
+    pub(crate) fn reclaim_to(&mut self, target: usize) {
+        while self.events.len() * std::mem::size_of::<MonitorEvent>() + self.payload_capacity_bytes
+            > target
+            && self.evict_oldest()
+        {}
+        self.events.shrink_to_fit();
+        while self.resident_bytes() > target && self.evict_oldest() {
+            self.events.shrink_to_fit();
+        }
+    }
+
+    fn evict_oldest(&mut self) -> bool {
+        let Some(evicted) = self.events.pop_front() else {
+            return false;
+        };
+        self.retained_bytes = self.retained_bytes.saturating_sub(evicted.text.len());
+        self.payload_capacity_bytes = self
+            .payload_capacity_bytes
+            .saturating_sub(event_capacity(&evicted));
+        self.dropped = self.dropped.saturating_add(1);
+        self.pending_dropped = self.pending_dropped.saturating_add(1);
+        true
     }
 
     /// Read events strictly after `after_seq`.
@@ -216,6 +247,10 @@ impl EventBuffer {
     pub fn dropped(&self) -> u64 {
         self.dropped
     }
+}
+
+fn event_capacity(event: &MonitorEvent) -> usize {
+    event.ts.capacity() + event.stream.capacity() + event.kind.capacity() + event.text.capacity()
 }
 
 /// Cut `text` at the event byte ceiling without splitting a UTF-8 character.
