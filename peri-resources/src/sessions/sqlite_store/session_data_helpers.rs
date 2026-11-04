@@ -218,46 +218,107 @@ const MESSAGE_INSERT_COLUMNS: usize = 4;
 /// 行数后分块（当前 225 行/语句）。分块不改变事务边界：调用方仍在同一事务里执行全部分块。
 const MESSAGE_INSERT_MAX_VARIABLES: usize = 900;
 
+/// 序列化正文窗口；超窗单条独占一批，保真写入而不截断。
+const MESSAGE_INSERT_MAX_BYTES: usize = 1024 * 1024;
+
 /// 单条多行 INSERT 的行数上限；列数变化时分块自动收紧。
 pub(in crate::sessions) fn message_insert_chunk_rows() -> usize {
     (MESSAGE_INSERT_MAX_VARIABLES / MESSAGE_INSERT_COLUMNS).max(1)
 }
 
-/// 分块多行插入 `messages`：保持传入顺序，每块仍全部走绑定参数。
+/// 按正文累计字节和绑定变量上限惰性序列化；最多额外持有一条待下批写入的正文。
+pub(super) struct SerializedHistoryChunks<'a> {
+    payloads: std::slice::Iter<'a, PersistedPayload>,
+    pending: Option<MessageInsertRow>,
+}
+
+impl<'a> SerializedHistoryChunks<'a> {
+    pub(super) fn new(payloads: &'a [PersistedPayload]) -> Self {
+        Self {
+            payloads: payloads.iter(),
+            pending: None,
+        }
+    }
+}
+
+impl Iterator for SerializedHistoryChunks<'_> {
+    type Item = anyhow::Result<Vec<MessageInsertRow>>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let limit = message_insert_chunk_rows();
+        let mut rows = Vec::with_capacity((self.payloads.len() + 1).min(limit));
+        let mut bytes = 0usize;
+        while rows.len() < limit {
+            let row = match self.pending.take() {
+                Some(row) => row,
+                None => {
+                    let Some(payload) = self.payloads.next() else {
+                        break;
+                    };
+                    let content = match serialize_persisted_payload(payload) {
+                        Ok(content) => content,
+                        Err(error) => return Some(Err(error)),
+                    };
+                    MessageInsertRow {
+                        id: payload.id().as_uuid().to_string(),
+                        role: payload_role(payload),
+                        content,
+                    }
+                }
+            };
+            if !rows.is_empty()
+                && bytes.saturating_add(row.content.len()) > MESSAGE_INSERT_MAX_BYTES
+            {
+                self.pending = Some(row);
+                break;
+            }
+            bytes = bytes.saturating_add(row.content.len());
+            rows.push(row);
+            if bytes >= MESSAGE_INSERT_MAX_BYTES {
+                break;
+            }
+        }
+        (!rows.is_empty()).then_some(Ok(rows))
+    }
+}
+
+/// 写入一个有界窗口：保持传入顺序，每行仍全部走绑定参数。
 ///
 /// 中途失败直接上抛，已写入的块由调用方的事务整批回滚（与本函数出现前的逐行插入同一
 /// 可观察结果）。`thread_id` 每行重复绑定一次，不为省变量数复用到跨行占位符。
 pub(in crate::sessions) async fn insert_message_rows(
     connection: &mut SqliteConnection,
     thread_id: &ThreadId,
-    rows: &[MessageInsertRow],
+    rows: Vec<MessageInsertRow>,
 ) -> Result<(), sqlx::Error> {
-    for chunk in rows.chunks(message_insert_chunk_rows()) {
-        let mut statement =
-            String::from("INSERT INTO messages (message_id, thread_id, role, content) VALUES ");
-        for index in 0..chunk.len() {
-            if index > 0 {
-                statement.push(',');
-            }
-            let base = index * MESSAGE_INSERT_COLUMNS;
-            statement.push_str(&format!(
-                "(?{},?{},?{},?{})",
-                base + 1,
-                base + 2,
-                base + 3,
-                base + 4
-            ));
-        }
-        let mut query = sqlx::query(AssertSqlSafe(statement));
-        for row in chunk {
-            query = query
-                .bind(&row.id)
-                .bind(thread_id.as_str())
-                .bind(row.role)
-                .bind(&row.content);
-        }
-        query.execute(&mut *connection).await?;
+    if rows.is_empty() {
+        return Ok(());
     }
+    debug_assert!(rows.len() <= message_insert_chunk_rows());
+    let mut statement =
+        String::from("INSERT INTO messages (message_id, thread_id, role, content) VALUES ");
+    for index in 0..rows.len() {
+        if index > 0 {
+            statement.push(',');
+        }
+        let base = index * MESSAGE_INSERT_COLUMNS;
+        statement.push_str(&format!(
+            "(?{},?{},?{},?{})",
+            base + 1,
+            base + 2,
+            base + 3,
+            base + 4
+        ));
+    }
+    let mut query = sqlx::query(AssertSqlSafe(statement));
+    for row in rows {
+        query = query
+            .bind(row.id)
+            .bind(thread_id.as_str())
+            .bind(row.role)
+            .bind(row.content);
+    }
+    query.execute(&mut *connection).await?;
     Ok(())
 }
 
@@ -268,20 +329,20 @@ pub(in crate::sessions) async fn insert_history_rows(
     payloads: &[PersistedPayload],
 ) -> anyhow::Result<HashSet<MessageId>> {
     let mut ids = HashSet::with_capacity(payloads.len());
-    let mut rows = Vec::with_capacity(payloads.len());
     for payload in payloads {
         if !ids.insert(payload.id()) {
             anyhow::bail!("history batch repeats a message id");
         }
-        rows.push(MessageInsertRow {
-            id: payload.id().as_uuid().to_string(),
-            role: payload_role(payload),
-            content: serialize_persisted_payload(payload)?,
-        });
     }
-    insert_message_rows(connection, thread_id, &rows).await?;
+    for chunk in SerializedHistoryChunks::new(payloads) {
+        insert_message_rows(connection, thread_id, chunk?).await?;
+    }
     Ok(ids)
 }
+
+#[cfg(test)]
+#[path = "session_data_helpers_test.rs"]
+mod tests;
 
 pub(in crate::sessions) fn projection_json(
     flags: &MessageFlags,
