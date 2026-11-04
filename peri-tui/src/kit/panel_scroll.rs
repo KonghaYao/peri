@@ -1,14 +1,13 @@
-//! 面板滚轮仲裁——统一面板区滚轮语义，消除与消息区的 3:1 速度分裂。
+//! 面板滚轮仲裁——统一面板区滚轮语义，消除与消息区的速度分裂。
 //!
 //! [Why] 面板的 ratatui-kit ScrollView（框架内置 handler，`Current+Normal`）
-//! 滚轮固定 1 行/事件、无节流；消息区为 3 行/格 + 50ms 节流（`SCROLL_LINES` +
-//! `scroll_fps`）。同一物理滚轮跨区域滚动速度断层 3 倍，且面板在 ghostty/ssh
-//! 高频滚轮事件下每事件一次 draw。
+//! 滚轮固定 1 行/事件；消息区为 `SCROLL_LINES` 行/事件。同一物理滚轮跨区域
+//! 滚动速度断层 3 倍。
 //!
 //! 本模块在 `Global+High`（Phase 1，先于 ScrollView 的层内 handler）拦截面板区
-//! 滚轮：节流（复用消息区同一 `ScrollThrottle` 与 `scroll_fps` 配置）+
-//! `SCROLL_LINES` 步长驱动 ScrollView 或虚拟视口，`Consumed` 阻止框架
-//! 1 行/事件的默认处理。
+//! 滚轮：每个事件立即按 `SCROLL_LINES` 步长驱动 ScrollView 或虚拟视口，`Consumed`
+//! 阻止框架 1 行/事件的默认处理。逐事件落地（而非时间窗合并）保证一次物理刻度
+//! 即使被终端拆成多个事件，步长也稳定。
 //!
 //! ## 注册契约
 //!
@@ -22,11 +21,10 @@
 //!
 //! - 弹窗打开（`POPUP_KIND` 非空）→ Ignored（让路，与消息区 `is_occluded` 一致）
 //! - 鼠标不在任何槽位区域 → Ignored（放行给消息区 / ScrollView 默认处理）
-//! - 命中槽位 → 节流累积 + 按 `SCROLL_LINES` 驱动对应目标 → Consumed
+//! - 命中槽位 → 按 `SCROLL_LINES` 立即驱动对应目标 → Consumed
 //! - 面板内容区内但未命中具体槽位（border/divider 列）→ Consumed（防双滚）
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 
 use ratatui_kit::components::scroll_view::ScrollViewState;
 use ratatui_kit::crossterm::event::{Event, MouseEventKind};
@@ -34,11 +32,8 @@ use ratatui_kit::prelude::*;
 use ratatui_kit::ratatui::layout::Rect;
 
 use crate::app::panel_types::PanelKind;
-use crate::kit::atoms::{
-    ACTIVE_PANEL, PANEL_SCROLL_OWNER, PANEL_SCROLL_PENDING_TARGET, PANEL_SCROLL_THROTTLE,
-    POPUP_KIND,
-};
-use crate::kit::message_area::scroll::{SCROLL_LINES, scroll_frame_ms};
+use crate::kit::atoms::{ACTIVE_PANEL, PANEL_SCROLL_OWNER, POPUP_KIND};
+use crate::kit::message_area::scroll::SCROLL_LINES;
 
 // ── 注册表 ──────────────────────────────────────────────────────────────
 
@@ -73,21 +68,21 @@ enum ScrollDriver {
 }
 
 impl ScrollDriver {
-    fn try_apply(self, pending: i32) -> bool {
+    fn try_apply(self, delta: i32) -> bool {
         match self {
             Self::View(state) => {
                 let Some(mut scroll) = state.try_write_no_update() else {
                     return false;
                 };
-                apply_pending_to_view(&mut scroll, pending);
+                apply_scroll_to_view(&mut scroll, delta);
             }
             Self::Virtual(slot) => {
                 let Some(mut offset) = slot.offset.try_write_no_update() else {
                     return false;
                 };
-                apply_pending_to_virtual(
+                apply_scroll_to_virtual(
                     &mut offset,
-                    pending,
+                    delta,
                     slot.content_height,
                     slot.viewport_height,
                 );
@@ -131,7 +126,7 @@ impl PanelScrollOwner {
     }
 }
 
-/// 节流 pending 的精确归属，避免双栏串滚或面板切换后误投递。
+/// 滚轮目标的精确归属，避免双栏串滚或面板切换后误投递。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PanelScrollTarget {
     pub kind: PanelKind,
@@ -220,7 +215,7 @@ fn hovered_area(
 // ── 仲裁 handler ────────────────────────────────────────────────────────
 
 /// 面板滚轮仲裁（`Global+High`，由 PanelOverlay 挂载）。
-/// 命中面板区滚轮 → 节流 + `SCROLL_LINES` 步长驱动 → Consumed。
+/// 命中面板区滚轮 → 按 `SCROLL_LINES` 逐事件立即驱动 → Consumed。
 pub fn handle_panel_scroll(event: &Event) -> EventResult {
     let Event::Mouse(mouse) = event else {
         return EventResult::Ignored;
@@ -259,109 +254,68 @@ pub fn handle_panel_scroll(event: &Event) -> EventResult {
         _ => unreachable!(),
     };
     // 只驱动鼠标所在槽位；面板整体区域内的 border/divider 由消息区遮挡判定吞掉。
-    if let Some(driver) = owner.driver(slot_index) {
-        accumulate_and_flush(
-            driver,
-            delta,
-            PanelScrollTarget {
-                kind: owner.kind,
-                slot_index,
-                generation: owner.generation,
-            },
-        );
-    }
+    apply_panel_scroll(
+        PanelScrollTarget {
+            kind: owner.kind,
+            slot_index,
+            generation: owner.generation,
+        },
+        delta,
+    );
     EventResult::Consumed
 }
 
-/// 渲染帧兜底 flush（PanelOverlay 渲染 body 调用）：ratatui-kit 无 tick，
-/// 停手后残留 pending 在任意后续渲染帧落地（与消息区 flush_scroll_if_due 同语义）。
-pub fn flush_panel_scroll_due() {
-    let throttle = PANEL_SCROLL_THROTTLE.state();
-    let mut st = throttle.write_no_update();
-    if peri_time::monotonic_now().duration_since(st.last_flush)
-        < Duration::from_millis(scroll_frame_ms())
-    {
-        return;
-    }
-    let target = PANEL_SCROLL_PENDING_TARGET.state().read().as_ref().copied();
-    let Some(target) = target else {
-        st.pending_delta = 0;
+/// 逐事件立即落地：每个滚轮事件固定移动 `delta` 行。
+///
+/// [Why 再校验] 事件分发与落地之间面板可能关闭/切换，注册表也可能被下一帧覆盖；
+/// 只有 kind + generation 与读取时一致才允许驱动目标句柄。
+fn apply_panel_scroll(target: PanelScrollTarget, delta: i32) {
+    let Some(owner) = PANEL_SCROLL_OWNER.state().read().clone() else {
         return;
     };
-    let pending = st.pending_delta;
-    st.pending_delta = 0;
-    st.last_flush = peri_time::monotonic_now();
-    drop(st);
-    if let Some(owner) = PANEL_SCROLL_OWNER.state().read().clone()
-        && *ACTIVE_PANEL.state().read() == Some(owner.kind)
-        && owner.kind == target.kind
-        && owner.generation == target.generation
-        && let Some(driver) = owner.driver(target.slot_index)
+    if owner.kind != target.kind
+        || owner.generation != target.generation
+        || *ACTIVE_PANEL.state().read() != Some(owner.kind)
     {
-        // [Fix 竞态崩溃] 本函数在 PanelOverlay::update（组件 update 遍历）内执行，
-        // 而 slot.state 是面板 ScrollView 组件的 State——同一遍历中 ScrollView 正在
-        // 更新，可能已持有该 state 的写引用（如面板第二次打开帧）。write_no_update()
-        // 内部 expect 会 panic 崩溃整个 TUI（.tmp/agent-tui 17:47:31 复现，e2e
-        // workflow-run 2/2）。改用 try_write_no_update：借用冲突时跳过本次落地并把
-        // pending 归还节流器，下一节流窗口到期后重试——滚动量不丢、语义不变。
-        if !driver.try_apply(pending) && pending != 0 {
-            let mut st = throttle.write_no_update();
-            st.pending_delta += pending;
-        }
-    }
-}
-
-/// 节流累积 + 窗口到点即 flush（事件驱动路径）。
-fn accumulate_and_flush(driver: ScrollDriver, delta: i32, target: PanelScrollTarget) {
-    let throttle = PANEL_SCROLL_THROTTLE.state();
-    let mut st = throttle.write_no_update();
-    let previous_target = PANEL_SCROLL_PENDING_TARGET.state().read().as_ref().copied();
-    if previous_target != Some(target) {
-        st.pending_delta = 0;
-        *PANEL_SCROLL_PENDING_TARGET.state().write_no_update() = Some(target);
-    }
-    st.pending_delta += delta;
-    let now = peri_time::monotonic_now();
-    if now.duration_since(st.last_flush) < Duration::from_millis(scroll_frame_ms()) {
         return;
     }
-    let pending = st.pending_delta;
-    st.pending_delta = 0;
-    st.last_flush = now;
-    drop(st);
-    if !driver.try_apply(pending) && pending != 0 {
-        throttle.write_no_update().pending_delta += pending;
-    }
+    let Some(driver) = owner.driver(target.slot_index) else {
+        return;
+    };
+    // [Fix 竞态崩溃] 组件 update 遍历可能已持有目标 State 的写引用，write_no_update
+    // 会 panic；try_write 冲突时丢弃本次——逐事件语义没有可回放的 pending，
+    // 累积重试会重新引入时间窗合并。
+    let _ = driver.try_apply(delta);
 }
 
-fn apply_pending_to_virtual(
+fn apply_scroll_to_virtual(
     offset: &mut usize,
-    pending: i32,
+    delta: i32,
     content_height: usize,
     viewport_height: usize,
 ) {
-    let next = if pending >= 0 {
-        offset.saturating_add(pending as usize)
+    let next = if delta >= 0 {
+        offset.saturating_add(delta as usize)
     } else {
-        offset.saturating_sub(pending.unsigned_abs() as usize)
+        offset.saturating_sub(delta.unsigned_abs() as usize)
     };
     *offset = next.min(content_height.saturating_sub(viewport_height));
 }
 
-/// 把 pending 滚动量应用到 ScrollViewState（正=向下，负=向上；边界 clamp）。
+/// 把一次滚轮事件的滚动量应用到 ScrollViewState（正=向下，负=向上；边界 clamp）。
 /// 独立函数便于单测（构造 ScrollViewState 无需 State 句柄）。
-fn apply_pending_to_view(scroll: &mut ScrollViewState, pending: i32) {
-    if pending == 0 {
+fn apply_scroll_to_view(scroll: &mut ScrollViewState, delta: i32) {
+    if delta == 0 {
         return;
     }
-    if pending > 0 {
-        let mut n = pending as u16;
+    if delta > 0 {
+        let mut n = delta as u16;
         while n > 0 && !scroll.is_at_bottom() {
             scroll.scroll_down();
             n -= 1;
         }
     } else {
-        let mut n = (-pending) as u16;
+        let mut n = (-delta) as u16;
         while n > 0 && scroll.offset().y > 0 {
             scroll.scroll_up();
             n -= 1;
@@ -398,39 +352,39 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_pending_up_clamps_at_top() {
+    fn test_apply_scroll_up_clamps_at_top() {
         let mut scroll =
             ScrollViewState::with_offset(ratatui_kit::ratatui::layout::Position::new(0, 3));
-        apply_pending_to_view(&mut scroll, -99);
+        apply_scroll_to_view(&mut scroll, -99);
         assert_eq!(scroll.offset().y, 0);
         // 已在顶部：再向上 no-op
-        apply_pending_to_view(&mut scroll, -1);
+        apply_scroll_to_view(&mut scroll, -1);
         assert_eq!(scroll.offset().y, 0);
     }
 
     #[test]
-    fn test_apply_pending_zero_noop() {
+    fn test_apply_scroll_zero_noop() {
         let mut scroll =
             ScrollViewState::with_offset(ratatui_kit::ratatui::layout::Position::new(0, 4));
-        apply_pending_to_view(&mut scroll, 0);
+        apply_scroll_to_view(&mut scroll, 0);
         assert_eq!(scroll.offset().y, 4);
     }
 
     #[test]
-    fn test_apply_pending_down_before_first_render_noop() {
+    fn test_apply_scroll_down_before_first_render_noop() {
         // 渲染前 size=None → is_at_bottom() 恒 true：向下驱动为 no-op，
         // 绝不越界（防御：句柄就绪但内容几何未知时静默丢弃）。
         let mut scroll = ScrollViewState::default();
-        apply_pending_to_view(&mut scroll, 3);
+        apply_scroll_to_view(&mut scroll, 3);
         assert_eq!(scroll.offset().y, 0);
     }
 
     #[test]
-    fn test_apply_pending_up_from_bottom_sentinel() {
+    fn test_apply_scroll_up_from_bottom_sentinel() {
         // scroll_to_bottom 在 size 未知时设 u16::MAX 哨兵；向上仍正常回滚
         let mut scroll = ScrollViewState::default();
         scroll.scroll_to_bottom();
-        apply_pending_to_view(&mut scroll, -3);
+        apply_scroll_to_view(&mut scroll, -3);
         assert_eq!(scroll.offset().y, u16::MAX - 3);
     }
 

@@ -397,14 +397,6 @@ pub static PANEL_AREA: AtomStatic<Option<Rect>> = AtomStatic::new(|| None);
 /// 见 panel_scroll.rs）。写入用 write_no_update（仲裁读取不依赖订阅唤醒）。
 pub static PANEL_SCROLL_OWNER: AtomStatic<Option<crate::kit::panel_scroll::PanelScrollOwner>> =
     AtomStatic::new(|| None);
-/// 面板滚轮仲裁节流器（复用消息区 ScrollThrottle 与 scroll_fps 配置）。
-pub(crate) static PANEL_SCROLL_THROTTLE: AtomStatic<
-    crate::kit::message_area::scroll::ScrollThrottle,
-> = AtomStatic::new(crate::kit::message_area::scroll::ScrollThrottle::default);
-/// 节流 pending 所属的面板与槽位；防止延迟滚动落到其他栏或新打开的面板。
-pub(crate) static PANEL_SCROLL_PENDING_TARGET: AtomStatic<
-    Option<crate::kit::panel_scroll::PanelScrollTarget>,
-> = AtomStatic::new(|| None);
 /// 模型快速切换弹窗锚点（屏幕坐标：状态栏模型段起点 (x, y)）。
 /// StatusBarRow1 在 open_popup(ModelQuickSwitch) 前写入，弹窗组件读取后
 /// 自定位到锚点上方（非居中大弹窗）。

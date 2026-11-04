@@ -58,7 +58,7 @@ pub fn WorkflowPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 一次，用户 Tab / Shift+Tab 切走后不会被外部选择再次拉回
     let preselect_key = hooks.use_state(|| None::<(String, Vec<String>)>);
     let run_sync_missing = hooks.use_state(|| false);
-    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
+    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格
     let sv_phase = hooks.use_state(ScrollViewState::default);
     let sv_agent = hooks.use_state(ScrollViewState::default);
     let focus_left = hooks.use_state(|| true);

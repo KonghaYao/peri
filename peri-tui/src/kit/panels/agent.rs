@@ -43,7 +43,7 @@ const PANEL_CONTENT_INSET: u16 = 2;
 pub fn AgentPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let cursor = hooks.use_state(|| 0usize);
-    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
+    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格
     let sv = hooks.use_state(ScrollViewState::default);
     // 上一帧的逐行实测命中区间——渲染体覆盖写入（render 派生缓存，
     // `write_no_update` 不触发重渲染：TUI-RENDER-001），鼠标事件按最近完成帧的

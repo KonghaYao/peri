@@ -72,7 +72,7 @@ pub fn TasksPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         },
         cancel_scope.clone(),
     );
-    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
+    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格
     let sv = hooks.use_state(ScrollViewState::default);
 
     // Background Tasks（从 BG_TASKS atom）

@@ -27,9 +27,9 @@ use ratatui_kit::{
 /// 面板覆盖层组件。
 ///
 /// 订阅 `ACTIVE_PANEL` atom，渲染当前激活面板。无面板时返回空 View。
-/// 同时挂载面板滚轮仲裁 handler（Global+High，先于 ScrollView 的层内处理）
-/// 与渲染帧兜底 flush（消除停手后残留 pending），并登记面板整体区域
-/// （`PANEL_AREA`，供 `mouse_router::occludes_scroll` 区分「面板内/外」滚轮）。
+/// 同时挂载面板滚轮仲裁 handler（Global+High，先于 ScrollView 的层内处理），
+/// 并登记面板整体区域（`PANEL_AREA`，供 `mouse_router::occludes_scroll`
+/// 区分「面板内/外」滚轮）。
 #[component]
 pub fn PanelOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let active_panel = hooks.use_atom(&atoms::ACTIVE_PANEL);
@@ -49,7 +49,6 @@ pub fn PanelOverlay(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     hooks.use_event_handler(EventScope::Global, EventPriority::High, |event| {
         crate::kit::panel_scroll::handle_panel_scroll(&event)
     });
-    crate::kit::panel_scroll::flush_panel_scroll_due();
     match active {
         Some(kind) => match panel_registry::render(kind) {
             Some(panel) => render_panel(kind, panel, term_h),

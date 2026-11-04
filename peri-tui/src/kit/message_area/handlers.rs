@@ -11,7 +11,7 @@ use super::grid::GridSpec;
 use super::hits::{CopyButtonHit, ImageHoverState, ImageLineHit, InteractionOptionHit};
 use super::image_action::{hover_target_for, try_open_image};
 use super::props::ScrollbarFields;
-use super::scroll::{self, DragThrottle, ScrollThrottle, ScrollbarDragState};
+use super::scroll::{self, DragThrottle, ScrollbarDragState};
 use super::selection::{self, copy_to_clipboard};
 use crate::kit::atoms::{
     FOCUSED_ENTRY, IMAGE_HOVER, IMAGE_PREVIEW_HOVER, KEEPGOING_BLOCKED_UNTIL, RENDER_HEARTBEAT,
@@ -495,7 +495,6 @@ pub(super) fn register_scroll_events(
     scrollbar_rect: Option<Rect>,
     vis_width: u16,
     scroll_state: State<scroll::ScrollPos>,
-    scroll_throttle: State<ScrollThrottle>,
     text_sel: State<TextSelection>,
     gesture: State<Option<scroll::GesturePending>>,
     drag_throttle: State<DragThrottle>,
@@ -523,7 +522,6 @@ pub(super) fn register_scroll_events(
             scrollbar_rect,
             vis_width,
             &scroll_state,
-            &scroll_throttle,
             &text_sel,
             &gesture,
             &drag_throttle,
