@@ -12,6 +12,9 @@ pub(crate) struct SessionActivation {
     ///
     /// 与 `allowed` 分开：`allowed` 还会被失败尝试复位，恢复入口只信用户是否显式停止。
     user_stop: AtomicBool,
+    /// Stop 与恢复放行的线性化点：`try_allow()` 在同一把锁内确认停止意图，
+    /// 复核之后落下的 Stop 不会被放行覆盖。
+    stop_gate: Mutex<()>,
     /// 最近一次失败尝试开始时 MQ 接纳水位；只检查其后的 EnsureProcessing。
     failed_input_watermark: Mutex<Option<MqWatermark>>,
     /// 最近一次失败尝试开始时 mailbox 已接纳结果的最大代数。只有其后新到达的
@@ -28,8 +31,23 @@ impl SessionActivation {
     }
 
     pub(crate) fn suppress(&self) {
+        let _gate = self.stop_gate.lock();
         self.user_stop.store(true, Ordering::Release);
         self.allowed.store(false, Ordering::Release);
+    }
+
+    /// 恢复放行：与 [`suppress()`](Self::suppress) 共用互斥，显式 Stop 优先。
+    ///
+    /// 返回 `false` 时保持停止意图与失败水位不变：恢复准备不得清除 Stop。
+    pub(crate) fn try_allow(&self) -> bool {
+        let _gate = self.stop_gate.lock();
+        if self.user_stop.load(Ordering::Acquire) {
+            return false;
+        }
+        *self.failed_input_watermark.lock() = None;
+        self.failed_result_watermark.store(0, Ordering::Release);
+        self.allowed.store(true, Ordering::Release);
+        true
     }
 
     pub(crate) fn is_allowed(&self) -> bool {

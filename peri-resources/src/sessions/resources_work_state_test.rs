@@ -4,6 +4,9 @@
 //! 改写会话排序时间。断言以读回的可观察事实为准。
 
 use super::*;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::session::{MessageKind, MessagePolicy, MessageSource, MqInput};
+use peri_acp_types::store::PersistedPayload;
 
 /// 固定会话的 `updated_at`：若写入顺手更新了它，哨兵值就会被当前时间替换。
 async fn freeze_updated_at(fixture: &Fixture, id: &ThreadId) -> peri_acp_types::thread::ThreadMeta {
@@ -98,4 +101,131 @@ async fn work_state_write_to_missing_thread_is_not_found() {
         error.kind(),
         peri_acp_types::session_resources::SessionResourceErrorKind::NotFound
     ));
+}
+
+fn pending_input(text: &str, policy: MessagePolicy) -> MqInput {
+    let id = peri_acp_types::messages::MessageId::new();
+    MqInput {
+        id,
+        kind: MessageKind::Prompt,
+        source: MessageSource::UserInput,
+        payload: PersistedPayload::Message(BaseMessage::Human {
+            id,
+            content: text.into(),
+        }),
+        policy,
+        original_draft: None,
+    }
+}
+
+/// 仍有待处理的 `EnsureProcessing` 消息时收尾保持 `working`：不能覆盖刚到的消息。
+#[tokio::test]
+async fn settle_work_state_keeps_working_while_processing_is_pending() {
+    let fixture = Fixture::new().await;
+    fixture.create("settle-pending").await;
+    let id = ThreadId::from("settle-pending".to_owned());
+    fixture
+        .facade
+        .set_work_state(&id, WorkState::Working)
+        .await
+        .unwrap();
+    fixture
+        .facade
+        .mq_enqueue(
+            &id,
+            pending_input("still queued", MessagePolicy::ensure_processing()),
+        )
+        .await
+        .unwrap();
+
+    let written = fixture
+        .facade
+        .settle_work_state_after_turn(&id)
+        .await
+        .unwrap();
+    assert!(!written, "有待处理消息时收尾不得写入 idle");
+    assert_eq!(
+        fixture
+            .facade
+            .load_session_meta(&id)
+            .await
+            .unwrap()
+            .work_state,
+        WorkState::Working
+    );
+}
+
+/// 没有待处理工作时收尾把 `working` 收敛为 `idle`；Passive 消息不构成待处理工作。
+#[tokio::test]
+async fn settle_work_state_returns_working_to_idle_without_pending_work() {
+    let fixture = Fixture::new().await;
+    fixture.create("settle-idle").await;
+    let id = ThreadId::from("settle-idle".to_owned());
+    fixture
+        .facade
+        .set_work_state(&id, WorkState::Working)
+        .await
+        .unwrap();
+    fixture
+        .facade
+        .mq_enqueue(&id, pending_input("info only", MessagePolicy::passive()))
+        .await
+        .unwrap();
+
+    assert!(
+        fixture
+            .facade
+            .settle_work_state_after_turn(&id)
+            .await
+            .unwrap(),
+        "没有待处理工作应写入 idle"
+    );
+    assert_eq!(
+        fixture
+            .facade
+            .load_session_meta(&id)
+            .await
+            .unwrap()
+            .work_state,
+        WorkState::Idle
+    );
+    assert!(
+        !fixture
+            .facade
+            .settle_work_state_after_turn(&id)
+            .await
+            .unwrap(),
+        "已 idle 的 thread 收尾不产生写入"
+    );
+}
+
+/// 收尾不解除显式停止：`stopped` 保持到下一次执行准入。
+#[tokio::test]
+async fn settle_work_state_does_not_lift_stopped() {
+    let fixture = Fixture::new().await;
+    fixture.create("settle-stopped").await;
+    let id = ThreadId::from("settle-stopped".to_owned());
+    fixture
+        .facade
+        .set_work_state(&id, WorkState::Stopped)
+        .await
+        .unwrap();
+
+    assert!(
+        !fixture
+            .facade
+            .settle_work_state_after_turn(&id)
+            .await
+            .unwrap(),
+        "stopped 不在收尾的写入条件里"
+    );
+    assert_eq!(
+        fixture
+            .facade
+            .load_session_meta(&id)
+            .await
+            .unwrap()
+            .work_state,
+        WorkState::Stopped
+    );
 }

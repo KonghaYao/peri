@@ -420,7 +420,7 @@ fn reminder_body(entry: &peri_acp_types::session::MqEntry) -> String {
 mod behavior_tests;
 
 #[path = "recovery_child_test.rs"]
-mod child_tests;
+mod recovery_child;
 
 #[path = "recovery_wire_test.rs"]
 mod wire_tests;

@@ -5,6 +5,8 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
+use peri_acp_types::thread::WorkState;
+
 use super::diagnostics::ResponseDiagnostics;
 use super::session_endpoint::register_session_endpoint;
 use super::{
@@ -753,8 +755,9 @@ impl ServerLoop<'_> {
                 )
                 .await
                 {
-                    Ok(Some(report)) => {
-                        let view = peri_acp_types::recovery::RecoveryView::from_report(&report);
+                    Ok(Some(entered)) => {
+                        let view =
+                            peri_acp_types::recovery::RecoveryView::from_report(&entered.report);
                         super::recovery::wiring::apply_recovery_execution_block(
                             cfg,
                             &session_id,
@@ -768,10 +771,10 @@ impl ServerLoop<'_> {
                             self.sessions,
                             self.connection,
                             self.transport,
-                            &report,
+                            &entered.report,
                         )
                         .await;
-                        recovery_report = Some(report);
+                        recovery_report = Some(entered);
                     }
                     Ok(None) => {}
                     Err(error) => {
@@ -867,8 +870,8 @@ impl ServerLoop<'_> {
         let response_sent = diagnostics.send(transport.as_ref(), result).await.is_ok();
         // 恢复的启动门：响应已发出才放行执行；发送失败则丢弃本次启动资格。
         match (response_sent, recovery_report.take()) {
-            (true, Some(report)) => self.recovery.launch(&report).await,
-            (false, Some(report)) => self.recovery.discard(&report),
+            (true, Some(entered)) => self.recovery.launch(&entered.report).await,
+            (false, Some(entered)) => self.recovery.discard(&entered),
             _ => {}
         }
         if response_sent {
@@ -956,16 +959,34 @@ impl ServerLoop<'_> {
         // （race 兜底：bg 结果已 route 为 Defer，但通知可能在 cancel
         // 置位前被 scheduler 跳过）。unbounded send 虽不阻塞，仍统一
         // 在释放 sessions 锁后发送，避免 notify 路径持锁触碰 scheduler。
-        let cont_req = {
+        let outcome = {
             let mut sessions = sessions.lock().await;
             handle_notification(&method, &params, &mut sessions, cfg).await
         };
-        if let Some(req) = cont_req {
+        if let Some(req) = outcome.continuation {
             if cont_tx.send(req).is_err() {
                 tracing::warn!(
                     method,
                     session_id = extract_session_id(&params, ""),
                     "ACP continuation scheduling failed: channel closed"
+                );
+            }
+        }
+        // 用户 Stop 先落停止意图：受本次取消影响的 thread（本会话与 cascade children）
+        // 在锁外写 `stopped`。失败只记录错误，不阻断取消本身；后续收尾只把 `working`
+        // 收敛为 `idle`，不会解除已保存的 `stopped`（设计 §5.4）。
+        for thread_id in outcome.stop_targets {
+            if let Err(error) = cfg
+                .session_manager
+                .session_resources()
+                .set_work_state(&thread_id, WorkState::Stopped)
+                .await
+            {
+                tracing::error!(
+                    method,
+                    %thread_id,
+                    %error,
+                    "stop intent persistence failed; cancel remains effective"
                 );
             }
         }

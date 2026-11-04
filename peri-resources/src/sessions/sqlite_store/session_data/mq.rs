@@ -11,9 +11,10 @@ use super::*;
 use crate::sessions::failure::conflict;
 use crate::sessions::mq_rows::{
     decode_entry, enqueued_at_now, filter_entries, is_same_watermark, item_outcome, kind_token,
-    payload_json, policy_json, same_payload, source_token, title_of, RawMqRow,
-    DELETE_THREAD_MQ_ROW_SQL, INSERT_MESSAGE_SQL, INSERT_THREAD_MQ_SQL, SELECT_MESSAGE_ROW_SQL,
-    SELECT_THREAD_MQ_BY_ID_SQL, SELECT_THREAD_MQ_SQL,
+    payload_json, policy_ensures_processing, policy_json, same_payload, source_token, title_of,
+    RawMqRow, DELETE_THREAD_MQ_ROW_SQL, INSERT_MESSAGE_SQL, INSERT_THREAD_MQ_SQL,
+    SELECT_MESSAGE_ROW_SQL, SELECT_THREAD_MQ_BY_ID_SQL, SELECT_THREAD_MQ_POLICIES_SQL,
+    SELECT_THREAD_MQ_SQL,
 };
 use peri_acp_types::session::{
     MessageSource, MqCancelOutcome, MqEnqueueDisposition, MqEnqueueOutcome, MqEntry, MqFilter,
@@ -85,6 +86,7 @@ impl SqliteSessionData {
         let policy = policy_json(&input.policy);
         let kind = kind_token(input.kind)?;
         let source = source_token(&input.source)?;
+        let ensures_processing = input.policy.ensures_processing();
         let message_id = input.id.as_uuid().to_string();
         let incoming = RawMqRow {
             id: &message_id,
@@ -106,6 +108,10 @@ impl SqliteSessionData {
         // （本机写入由 `BEGIN IMMEDIATE` 串行化，跨进程的竞争者也被同一把锁挡住）。
         // 这时不重试出新行，而是回到事实判定。
         if let Some(outcome) = self.mq_enqueue_fact(&mut tx, thread_id, &incoming).await? {
+            // 已移交历史的消息不再要求继续工作：重复接纳不能把它重新提升为 working。
+            let pending = outcome.disposition != MqEnqueueDisposition::AlreadyHandedOff;
+            self.maintain_work_intent_on_accept(&mut tx, thread_id, ensures_processing && pending)
+                .await?;
             tx.commit()
                 .await
                 .map_err(|_| commit_failure(Some(thread_id.clone())))?;
@@ -139,10 +145,68 @@ impl SqliteSessionData {
                 "MQ enqueue raced the same message id; read the id back before retrying",
             ));
         };
+        self.maintain_work_intent_on_accept(&mut tx, thread_id, ensures_processing)
+            .await?;
         tx.commit()
             .await
             .map_err(|_| commit_failure(Some(thread_id.clone())))?;
         Ok(outcome)
+    }
+
+    /// 接纳维护目标工作意图：只有 `EnsureProcessing` 授予执行资格，且只把 `idle`
+    /// 提升为 `working`——`stopped` 不被被动回调解除（设计 §5.2）。
+    async fn maintain_work_intent_on_accept(
+        &self,
+        connection: &mut SqliteConnection,
+        thread_id: &ThreadId,
+        ensures_processing: bool,
+    ) -> SessionResourceResult<()> {
+        if !ensures_processing {
+            return Ok(());
+        }
+        sqlx::query(
+            "UPDATE threads SET work_state = 'working' WHERE id = ?1 AND work_state = 'idle'",
+        )
+        .bind(thread_id.as_str())
+        .execute(&mut *connection)
+        .await
+        .map_err(|error| map_sqlx(&error))?;
+        Ok(())
+    }
+
+    /// turn 收尾：没有待处理的 `EnsureProcessing` 条目才把 `working` 收敛为 `idle`。
+    ///
+    /// 判定与写入在同一次 `BEGIN IMMEDIATE` 内，避免覆盖刚到的消息；`stopped` 不在
+    /// 条件里，收尾不能解除显式停止（设计 §5.1）。返回是否真的写入。
+    pub(super) async fn settle_work_state_after_turn_mq(
+        &self,
+        thread_id: &ThreadId,
+    ) -> SessionResourceResult<bool> {
+        self.writable()?;
+        let mut tx = self
+            .database
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        self.require_session(&mut tx, thread_id).await?;
+        if pending_ensures_processing(&mut tx, thread_id).await? {
+            tx.commit()
+                .await
+                .map_err(|_| commit_failure(Some(thread_id.clone())))?;
+            return Ok(false);
+        }
+        let updated = sqlx::query(
+            "UPDATE threads SET work_state = 'idle' WHERE id = ?1 AND work_state = 'working'",
+        )
+        .bind(thread_id.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| map_sqlx(&error))?;
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(thread_id.clone())))?;
+        Ok(updated.rows_affected() == 1)
     }
 
     /// 入队的事实判定：已经成立的「同 ID」事实优先于本次插入。
@@ -558,6 +622,26 @@ async fn mq_row_by_id(
         .fetch_optional(&mut *connection)
         .await
         .map_err(|error| map_sqlx(&error))
+}
+
+/// 该 thread 是否有仍要求继续处理的待发行。
+///
+/// 待发事实就是 `thread_mq` 里的行；判定只看 typed policy，不按 kind 或来源猜。
+async fn pending_ensures_processing(
+    connection: &mut SqliteConnection,
+    thread_id: &ThreadId,
+) -> SessionResourceResult<bool> {
+    let rows: Vec<(String,)> = sqlx::query_as(SELECT_THREAD_MQ_POLICIES_SQL)
+        .bind(thread_id.as_str())
+        .fetch_all(&mut *connection)
+        .await
+        .map_err(|error| map_sqlx(&error))?;
+    for (policy_json,) in &rows {
+        if policy_ensures_processing(policy_json)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(super) async fn message_fact(

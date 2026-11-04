@@ -324,6 +324,19 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         return Err(work_intent_error(Some(&thread_id), error.to_string()));
     }
 
+    // 冷 child 恢复的本轮把终态、工作意图与结果消息交给一次原子结算（§5.3）：
+    // 在 run_prompt 前标记，finish_prompt_turn 据此跳过独立的 work_state 写入。
+    let recovery_parent = cfg
+        .session_manager
+        .get_session(&prompt_session_id)
+        .and_then(|runtime| runtime.recovery_parent());
+    if recovery_parent.is_some() {
+        let mut sessions = sessions.lock().await;
+        if let Some(state) = sessions.get_mut(&prompt_session_id) {
+            state.recovery_settlement_pending = true;
+        }
+    }
+
     // Extract AgentPool from session, wrap in Arc<Mutex> for
     // in-place modification inside executor.
     //
@@ -358,16 +371,23 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     }
 
     let mut abandoned_thread = None;
+    let mut recovery_early_failure = false;
     {
         let mut sessions = sessions.lock().await;
         if let Some(state) = sessions.get_mut(&prompt_session_id) {
+            let recovery_settlement_pending =
+                std::mem::take(&mut state.recovery_settlement_pending);
             state.continuation_in_flight = false;
             if result.is_err() {
                 // Early assembly/controller errors may precede finish_prompt_turn.
                 // The prompt lock still identifies this attempt as the sole writer.
                 // 只有还能取到 cancel_token 才说明本轮从未收尾：否则错误只是收尾后的
                 // wire 投影，工作意图已经写好（可能是 stopped），不得覆盖。
-                if state.cancel_token.take().is_some() {
+                // 恢复结算由 finalize 统一写终态与工作意图，这里不能再单独写 idle。
+                let never_finished = state.cancel_token.take().is_some();
+                if never_finished && recovery_settlement_pending {
+                    recovery_early_failure = true;
+                } else if never_finished {
                     abandoned_thread = Some(state.thread_id.clone());
                 }
             }
@@ -376,13 +396,25 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             }
         }
     }
+    // 恢复 turn 在进入收尾前明确失败：本轮没有产生可结算的终态。按设计 §5.1
+    // 不伪造完成或取消，保留 `working` 与原提醒供下一次显式进入重试；同时把当前
+    // MQ 水位记为失败水位，避免遗留提醒立刻触发第二次自动尝试。
+    if recovery_early_failure {
+        if let Some(runtime) = cfg.session_manager.get_session(&prompt_session_id) {
+            let queue = runtime.v2_message_queue.clone();
+            let activation = Arc::clone(&runtime.activation);
+            drop(runtime);
+            let watermark = queue.admission_watermark().await.ok().flatten();
+            activation.record_failed_attempt(watermark);
+        }
+    }
     // 准入后从未进入收尾的尝试按「明确失败」回收工作意图，避免 `working` 无限期滞留。
+    // 回收同样走收尾口径：仍需处理的新消息留在 MQ 时保持 `working`，显式停止不被解除，
     // 收尾阶段 turn 已经结束，失败只能重试并显式告警，不能伪装成成功。
     if let Some(thread_id) = abandoned_thread {
-        if let Err(error) = set_work_state_with_retry(
+        if let Err(error) = settle_work_state_with_retry(
             cfg.session_manager.session_resources(),
             &ThreadId::from(thread_id),
-            WorkState::Idle,
         )
         .await
         {
@@ -394,13 +426,17 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         }
     }
 
-    // 冷 child 恢复的 turn 结束：结果通知投递回父 thread 的持久队列。目标挂在会话
-    // 实例上，所以用户 prompt、激活监听与启动门任一路径跑完都只投递一次；被取代的
-    // 续跑在本函数早期返回，走不到这里。
-    let recovery_parent = cfg
-        .session_manager
-        .get_session(&prompt_session_id)
-        .and_then(|runtime| runtime.take_recovery_parent());
+    // 冷 child 恢复的 turn 结束：终态、工作意图与结果通知由一次原子结算提交到父
+    // thread。目标挂在会话实例上，所以用户 prompt、激活监听与启动门任一路径跑完都只
+    // 结算一次；被取代的续跑在本函数早期返回，走不到这里。早失败没有终态可结算，
+    // 不向父级投递「已完成/已失败」的结果事实。
+    let recovery_parent = if recovery_early_failure {
+        None
+    } else {
+        cfg.session_manager
+            .get_session(&prompt_session_id)
+            .and_then(|runtime| runtime.take_recovery_parent())
+    };
     if let Some(parent) = recovery_parent {
         super::recovery::deliver_child_turn(
             cfg,
@@ -487,6 +523,21 @@ pub(super) async fn set_work_state_with_retry(
         Ok(()) => Ok(()),
         Err(first) => match resources.set_work_state(thread_id, state).await {
             Ok(()) => Ok(()),
+            Err(second) => Err(format!("{second} (first attempt: {first})")),
+        },
+    }
+}
+
+/// [`SessionResources::settle_work_state_after_turn`] 的有限重试；语义同
+/// [`set_work_state_with_retry`]，返回是否真的写入 `idle`。
+pub(super) async fn settle_work_state_with_retry(
+    resources: &Arc<dyn peri_acp_types::session_resources::SessionResources>,
+    thread_id: &ThreadId,
+) -> Result<bool, String> {
+    match resources.settle_work_state_after_turn(thread_id).await {
+        Ok(written) => Ok(written),
+        Err(first) => match resources.settle_work_state_after_turn(thread_id).await {
+            Ok(written) => Ok(written),
             Err(second) => Err(format!("{second} (first attempt: {first})")),
         },
     }

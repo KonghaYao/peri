@@ -199,6 +199,11 @@ impl AcpSession {
         *self.recovery_parent.lock() = Some(parent);
     }
 
+    /// 只读查看待投递的父 thread：用于在 turn 开始前决定本轮是否走恢复结算。
+    pub(crate) fn recovery_parent(&self) -> Option<ThreadId> {
+        self.recovery_parent.lock().clone()
+    }
+
     /// 取走待投递的父 thread：一次 turn 只投递一次。
     pub(crate) fn take_recovery_parent(&self) -> Option<ThreadId> {
         self.recovery_parent.lock().take()

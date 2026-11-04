@@ -992,6 +992,10 @@ impl SessionDataPort for RemoteSessionData {
         self.write_work_state(id, state).await
     }
 
+    async fn settle_work_state_after_turn(&self, id: &ThreadId) -> SessionResourceResult<bool> {
+        self.settle_work_state_after_turn_mq(id).await
+    }
+
     async fn set_context_usage(
         &self,
         id: &ThreadId,

@@ -3,10 +3,10 @@
 use super::*;
 use crate::host::{prompt::finish_prompt_turn, SessionState, SharedSessions};
 use peri_acp_types::{
-    messages::MessageId,
+    messages::{BaseMessage, MessageId},
     session::{
-        MqCancelOutcome, MqEnqueueOutcome, MqEntry, MqFilter, MqInput, MqReceiveOutcome,
-        MqReceiveSelection,
+        MessageKind, MessagePolicy, MessageSource, MqCancelOutcome, MqEnqueueOutcome, MqEntry,
+        MqFilter, MqInput, MqReceiveOutcome, MqReceiveSelection,
     },
     session_resources::{
         ChildResumeClaim, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes, NewSession,
@@ -318,6 +318,10 @@ impl SessionResources for CompactStore {
         self.inner.set_work_state(id, state).await
     }
 
+    async fn settle_work_state_after_turn(&self, id: &ThreadId) -> SessionResourceResult<bool> {
+        self.inner.settle_work_state_after_turn(id).await
+    }
+
     async fn set_context_usage(
         &self,
         id: &ThreadId,
@@ -409,6 +413,7 @@ fn make_host_sessions(ctx: &SessionContext, payloads: Vec<PersistedPayload>) -> 
         continuation_epoch: 0,
         continuation_in_flight: false,
         continuation_mq_steering_pending: false,
+        recovery_settlement_pending: false,
         frozen: Some(make_sentinel_frozen()),
         recall_items: vec![],
         agent_pool: AgentPool::new(),
@@ -704,4 +709,93 @@ async fn completed_turn_persists_idle_and_context_usage() {
         "正常收尾不保留自动续跑意图"
     );
     assert_eq!(meta.context_usage_tokens, Some(4321));
+}
+
+/// 自然收尾遇到仍需处理的新消息时保持 `working`：收尾与接纳共用协调，
+/// 不得覆盖刚到的消息（设计 §5.1）。
+#[tokio::test]
+#[serial]
+async fn completed_turn_keeps_working_while_processing_work_is_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(dir.path());
+    let (ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
+    let thread_id = ctx.thread_id.clone().unwrap();
+    let resources: Arc<dyn SessionResources> = store.clone();
+    resources
+        .set_work_state(&thread_id, peri_acp_types::thread::WorkState::Working)
+        .await
+        .unwrap();
+    let pending_id = MessageId::new();
+    resources
+        .mq_enqueue(
+            &thread_id,
+            MqInput {
+                id: pending_id,
+                kind: MessageKind::Prompt,
+                source: MessageSource::UserInput,
+                payload: PersistedPayload::Message(BaseMessage::Human {
+                    id: pending_id,
+                    content: "still queued".into(),
+                }),
+                policy: MessagePolicy::ensure_processing(),
+                original_draft: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    finish_prompt_turn(
+        &sessions,
+        &ctx.session_id,
+        false,
+        synthetic_result(false),
+        Some(resources),
+    )
+    .await
+    .expect("turn itself remains successful");
+
+    assert_eq!(
+        store
+            .load_session_meta(&thread_id)
+            .await
+            .unwrap()
+            .work_state,
+        peri_acp_types::thread::WorkState::Working,
+        "仍有待处理消息时收尾必须保留续跑意图"
+    );
+}
+
+/// 收尾不得解除显式停止：`stopped` 只能被新的执行准入改成 `working`。
+#[tokio::test]
+#[serial]
+async fn completed_turn_does_not_lift_a_stopped_intent() {
+    let dir = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(dir.path());
+    let (ctx, store, sessions) = make_compact_context(&dir, Arc::new(SummaryModel)).await;
+    let thread_id = ctx.thread_id.clone().unwrap();
+    let resources: Arc<dyn SessionResources> = store.clone();
+    resources
+        .set_work_state(&thread_id, peri_acp_types::thread::WorkState::Stopped)
+        .await
+        .unwrap();
+
+    finish_prompt_turn(
+        &sessions,
+        &ctx.session_id,
+        false,
+        synthetic_result(false),
+        Some(resources),
+    )
+    .await
+    .expect("turn itself remains successful");
+
+    assert_eq!(
+        store
+            .load_session_meta(&thread_id)
+            .await
+            .unwrap()
+            .work_state,
+        peri_acp_types::thread::WorkState::Stopped,
+        "收尾不能把显式停止改回 idle"
+    );
 }

@@ -43,7 +43,19 @@ impl ShellState {
             .is_some_and(|existing| existing == owner)
     }
 
-    /// Live (non-terminal) tasks, optionally narrowed to one direct owner.
+    /// Direct-owner match for the recovery query. Recovery asks by agent thread
+    /// id while tool calls carry the session id, so either recorded identity
+    /// identifies the owner (design §6); subtrees are never scanned.
+    fn visible_to(&self, id: &str, owner: &str) -> bool {
+        self.owned_by(id, owner)
+            || self
+                .thread_owners
+                .get(id)
+                .is_some_and(|existing| existing == owner)
+    }
+
+    /// Live (non-terminal) tasks, optionally narrowed to one direct owner
+    /// (session or thread id).
     ///
     /// Terminal records stay queryable through `tasks/get` but are not live
     /// tasks a recovery pass can still observe.
@@ -53,7 +65,7 @@ impl ShellState {
             .iter()
             .filter(|(id, record)| {
                 !record.task.status.is_terminal()
-                    && owner.is_none_or(|owner| self.owned_by(id, owner))
+                    && owner.is_none_or(|owner| self.visible_to(id, owner))
             })
             .map(|(id, record)| ShellTaskEntry {
                 task_id: id.clone(),

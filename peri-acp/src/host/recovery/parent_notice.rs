@@ -1,21 +1,20 @@
-//! 冷 child 恢复的结果通知：本次 turn 结束后投递给父 thread 的持久队列。
+//! 冷 child 恢复的终态结算：本次 turn 结束后把 child 终态、工作意图与结果通知
+//! 一次提交到父 thread 的持久队列（设计 §5.3）。
 //!
 //! 通知按 `SubAgentComplete` 语义入队，但使用 `passive` 策略：它是结果事实，
 //! 不是执行授权。父级 `idle` 不因它被唤醒；父级下次执行时由既有 Receive 消费
 //! 同一份持久行（父级已有活实例时也是这份队列）。
 
-use std::sync::Arc;
-
-use peri_acp_types::session::{
-    MessageKind, MessagePolicy, MessageQueue, MessageSource, QueuedMessage,
-};
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session::{MessageKind, MessagePolicy, MessageSource, QueuedMessage};
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
     ReminderSource, SystemReminder, TrustedSystemReminder, TrustedSystemReminderFactory,
     SYSTEM_REMINDER_VERSION,
 };
-use peri_acp_types::thread::ThreadId;
+use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use super::super::{AcpServerConfig, SharedSessions};
 
@@ -40,6 +39,16 @@ impl ChildTurnOutcome<'_> {
             Self::Failed { .. } => "failed",
         }
     }
+
+    /// child 的持久终态（设计 §5.3）：取消保留停止意图，失败是 Error，其余收尾为
+    /// Done；`work_state` 由 [`WorkState::after_agent_terminal`] 统一派生。
+    fn agent_status(&self) -> AgentStatus {
+        match self {
+            Self::Finished { stop_reason } if *stop_reason == "cancelled" => AgentStatus::Cancelled,
+            Self::Finished { .. } => AgentStatus::Done,
+            Self::Failed { .. } => AgentStatus::Error,
+        }
+    }
 }
 
 /// 一次 prompt dispatch 的结果 → 通知的结束事实。
@@ -62,9 +71,10 @@ pub(crate) fn turn_outcome(
     }
 }
 
-/// 把一次恢复 turn 的结语投递到父 thread 的 MQ。
+/// 把一次恢复 turn 的结语结算到父 thread 的持久队列。
 ///
-/// 投递失败只告警：结果已提交在 child 自己的历史里，父级下次进入仍可读到。
+/// 终态、`work_state` 与结果消息共用一次 `finalize_child_terminal`
+/// （设计 §5.3）：提交成功前不宣称已投递，重复结算按稳定消息身份幂等。
 pub(crate) async fn deliver_child_turn(
     cfg: &AcpServerConfig,
     sessions: &SharedSessions,
@@ -89,7 +99,7 @@ pub(crate) async fn deliver_child_turn(
         match child_result_reminder(&child_thread_id, parent, agent_name.as_deref(), &outcome) {
             Ok(reminder) => reminder,
             Err(detail) => {
-                tracing::warn!(
+                tracing::error!(
                     child_thread_id = %child_thread_id,
                     parent_thread_id = %parent,
                     %detail,
@@ -98,29 +108,50 @@ pub(crate) async fn deliver_child_turn(
                 return;
             }
         };
-    let message = QueuedMessage::system_reminder(
+    let status = outcome.agent_status();
+    let message = QueuedMessage::system_reminder_with_delivery_id(
         MessageKind::Defer,
         MessageSource::SubAgentComplete,
         reminder,
+        settlement_delivery_id(&child_thread_id, parent),
     )
     .with_policy(MessagePolicy::passive());
-    let queue = parent_queue(cfg, parent);
-    if let Err(error) = queue.enqueue(message).await {
-        tracing::warn!(
+    if let Err(error) = cfg
+        .session_resources
+        .finalize_child_terminal(
+            &child_thread_id,
+            status,
+            WorkState::after_agent_terminal(status),
+            parent,
+            message.into_mq_input(),
+        )
+        .await
+    {
+        tracing::error!(
             child_thread_id = %child_thread_id,
             parent_thread_id = %parent,
             %error,
-            "recovered child result notification was not admitted"
+            "recovered child terminal settlement was not committed"
         );
     }
 }
 
-/// 父 thread 的持久队列：父级有活实例时复用同一份门面，否则只绑定同一 thread。
-fn parent_queue(cfg: &AcpServerConfig, parent: &ThreadId) -> MessageQueue {
-    cfg.session_manager
-        .session_id_for_thread(parent)
-        .and_then(|session_id| cfg.session_manager.v2_queue_for(&session_id))
-        .unwrap_or_else(|| MessageQueue::bind(Arc::clone(&cfg.session_resources), parent.clone()))
+/// 同一 child 恢复 turn 的稳定投递身份：重复结算不产生第二条结果。
+///
+/// 身份只取 child 与直接父 thread，不取正文/停止原因：同一 child 的终态只投递一次，
+/// 正文变化不能变成新的投递身份（设计 §5.3）。
+fn settlement_delivery_id(child_thread_id: &str, parent: &ThreadId) -> MessageId {
+    let mut hasher = Sha256::new();
+    for part in ["peri-recovered-child-terminal", child_thread_id, parent] {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    MessageId::from(uuid::Uuid::from_bytes(bytes))
 }
 
 fn child_result_reminder(

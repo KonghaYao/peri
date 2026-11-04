@@ -9,7 +9,8 @@
 //!    effective name，如 `mcp__workspace__Write`），逆向恢复文件
 //! 3. 验证保留消息的 ToolUse/ToolResult 配对完整性
 //! 4. 从 SQLite 持久化中删除被移除的消息
-//! 5. 发送 RewindCompleted 事件通知 TUI 刷新（重建信号，保留原样）
+//! 5. 提交成功后把 `threads.context_usage_tokens` 写回 NULL（旧快照随截断失效，§2.2）
+//! 6. 发送 RewindCompleted 事件通知 TUI 刷新（重建信号，保留原样）
 //!
 //! 事件载荷是「提交成功后**有效**的保留前缀」：调用方按边界计划算出（见
 //! [`DurableRewindCommit::Boundary`] 的 `effective_history`），与发布到热态、以及 RPC 响应里的
@@ -30,7 +31,7 @@ use peri_acp_types::builtin_mcp::original_tool_name_of_effective;
 use peri_acp_types::command::{ArgKind, ArgSpec, ArgsSchema, FlagSpec};
 use peri_acp_types::messages::{BaseMessage, ContentBlock, MessageId};
 use peri_acp_types::session_resources::RewindOutcome;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use super::{CommandContext, CommandFeedback, CommandResult, FeedbackChannel, FeedbackLevel};
 use crate::session::executor::PromptStopReason;
@@ -311,6 +312,20 @@ pub(crate) async fn execute_rewind(
         }
     };
 
+    // §2.2：截断让旧的占用快照失效，暂时拿不到有效的重算值就写 NULL（未知不是零占用）。
+    // rewind 已经提交，写快照失败只留日志——不能让已生效的回滚伪装成失败。
+    if let (Some(store), Some(tid), RewindDurability::Applied) =
+        (&ctx.session_resources, &ctx.thread_id, durability)
+    {
+        if let Err(error) = store.set_context_usage(tid, None).await {
+            error!(
+                session_id = %ctx.session_id,
+                %error,
+                "rewind: context usage snapshot clear failed"
+            );
+        }
+    }
+
     // Step 6: 发送 RewindCompleted 事件（重建信号）。载荷是**有效视图**：调用方在边界
     // 提交里给出（与热态发布、wire `history` 同源），不是入参里的 canonical 前缀。
     let summary = format!("已回滚 {removed_count} 条消息");
@@ -500,3 +515,7 @@ fn validate_tool_pairing(messages: &[BaseMessage]) {
 #[cfg(test)]
 #[path = "rewind_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "rewind_context_usage_test.rs"]
+mod context_usage_tests;

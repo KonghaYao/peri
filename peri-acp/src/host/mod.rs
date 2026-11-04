@@ -230,6 +230,9 @@ pub(crate) struct SessionState {
     pub(crate) continuation_epoch: u64,
     pub(crate) continuation_in_flight: bool,
     pub(crate) continuation_mq_steering_pending: bool,
+    /// 本轮属于冷 child 恢复结算：`finish_prompt_turn` 跳过独立的 `work_state`
+    /// 写入，由 prompt dispatch 在 turn 后统一 `finalize_child_terminal`（§5.3）。
+    pub(crate) recovery_settlement_pending: bool,
     // ── Frozen session data (populated at creation, immutable thereafter) ──
     pub(crate) frozen: Option<crate::session::executor::FrozenSessionData>,
     /// Recall items from previous turn (injected as <system-reminder> in next user message).

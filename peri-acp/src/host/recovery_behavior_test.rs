@@ -97,8 +97,8 @@ async fn discard_keeps_reminder_and_next_enter_adopts_without_duplicate() {
     harness.spawn_continuation_scheduler();
     let recovery = harness.recovery();
 
-    let first = recovery.enter(&thread_id).await.unwrap();
-    assert_eq!(first.recovered, vec![thread_id.clone()]);
+    let first = recovery.enter_prepared(&thread_id).await.unwrap();
+    assert_eq!(first.report.recovered, vec![thread_id.clone()]);
     recovery.discard(&first);
     assert_eq!(
         harness.recovery_rows(&thread_id).await.len(),
@@ -339,9 +339,213 @@ async fn existing_turn_is_reused_without_a_second_reminder() {
     assert!(harness.recovery_rows(&thread_id).await.is_empty());
 }
 
+/// 8. 准备窗口内发生 Stop：恢复放行不得清除停止意图，也不得入队提醒或启动。
+#[tokio::test]
+async fn stop_during_the_preparation_window_blocks_admission() {
+    use crate::host::recovery::admission_gate::{self, PausePoint};
+
+    let harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    harness.set_working(&thread_id).await;
+    let recovery = Arc::new(harness.recovery());
+    let gate = admission_gate::install(&thread_id, PausePoint::BeforeAdmit);
+
+    let entering = {
+        let recovery = Arc::clone(&recovery);
+        let thread_id = thread_id.clone();
+        tokio::spawn(async move { recovery.enter_prepared(&thread_id).await })
+    };
+    gate.wait_arrived(1).await;
+    harness
+        .cfg
+        .session_manager
+        .get_session(&thread_id)
+        .expect("会话运行时必须已登记")
+        .activation
+        .suppress();
+    gate.release(1);
+
+    let entered = entering
+        .await
+        .expect("进入任务不得 panic")
+        .expect("准备本身不是请求错误");
+    assert!(entered.report.recovered.is_empty());
+    assert_eq!(
+        entered.report.skipped,
+        vec![peri_acp_types::recovery::RecoverySkip {
+            thread_id: thread_id.clone(),
+            reason: RecoverySkipReason::Stopped,
+        }]
+    );
+    assert!(
+        harness.recovery_rows(&thread_id).await.is_empty(),
+        "Stop 之后不得入队恢复提醒"
+    );
+    assert!(!harness.activation_allowed(&thread_id));
+
+    recovery.launch(&entered.report).await;
+    assert!(!harness.listener_started(&thread_id));
+    assert!(!harness._mock.matched());
+    admission_gate::uninstall(&thread_id, PausePoint::BeforeAdmit);
+}
+
+/// 9. 三路并发进入共用同一把根锁：等待者未退出前不得删表重建第二把门。
+#[tokio::test]
+async fn three_way_enter_shares_one_gate_and_injects_once() {
+    use crate::host::recovery::admission_gate::{self, PausePoint};
+    use peri_acp_types::thread::ThreadId;
+
+    let harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    let root = ThreadId::from(thread_id.clone());
+    harness.set_working(&thread_id).await;
+    let recovery = Arc::new(harness.recovery());
+    let gate = admission_gate::install(&thread_id, PausePoint::InsideGate);
+
+    let spawn_enter = |recovery: Arc<crate::host::recovery::HostSessionRecovery>,
+                       thread_id: String| {
+        tokio::spawn(async move { recovery.enter_prepared(&ThreadId::from(thread_id)).await })
+    };
+
+    let first = spawn_enter(Arc::clone(&recovery), thread_id.clone());
+    gate.wait_arrived(1).await;
+    let second = spawn_enter(Arc::clone(&recovery), thread_id.clone());
+    wait_for("第二个进入持有同一把根锁", || async {
+        recovery.in_flight_gate_count(&root) >= 3
+    })
+    .await;
+
+    gate.release(1);
+    let first = first
+        .await
+        .expect("第一个进入不得 panic")
+        .expect("准备本身不是请求错误");
+    gate.wait_arrived(2).await;
+    assert!(
+        recovery.in_flight_gate(&root).is_some(),
+        "仍有等待者时删表会让下一次进入新建并行的锁"
+    );
+
+    let third = spawn_enter(Arc::clone(&recovery), thread_id.clone());
+    wait_for("第三个进入排在同一把门后", || async {
+        recovery.in_flight_gate_count(&root) >= 3
+    })
+    .await;
+    gate.release(2);
+
+    let second = second
+        .await
+        .expect("第二个进入不得 panic")
+        .expect("准备本身不是请求错误");
+    let third = third
+        .await
+        .expect("第三个进入不得 panic")
+        .expect("准备本身不是请求错误");
+    assert_eq!(first.report.recovered, vec![thread_id.clone()]);
+    assert!(second.report.recovered.is_empty(), "{second:?}");
+    assert!(third.report.recovered.is_empty(), "{third:?}");
+    assert_eq!(harness.recovery_rows(&thread_id).await.len(), 1);
+    admission_gate::uninstall(&thread_id, PausePoint::InsideGate);
+}
+
+/// 10. `discard` 只按本次准入快照删除：会话换代后的新 `Prepared` 必须保留。
+#[tokio::test]
+async fn discard_does_not_remove_a_newer_generation_admission() {
+    let mut harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    harness.set_working(&thread_id).await;
+    let recovery = harness.recovery();
+
+    let first = recovery.enter_prepared(&thread_id).await.unwrap();
+    assert_eq!(first.report.recovered, vec![thread_id.clone()]);
+    // 会话重新 load：代次前进，下一次进入写下新的准入。
+    harness
+        .sessions
+        .lock()
+        .await
+        .get_mut(&thread_id)
+        .unwrap()
+        .refresh_session_generation();
+    let second = recovery.enter_prepared(&thread_id).await.unwrap();
+    assert_eq!(
+        second.report.recovered,
+        vec![thread_id.clone()],
+        "新代次写入自己的准入"
+    );
+
+    recovery.discard(&first);
+    // 再次进入若仍看到 `Prepared` 准入，说明旧报告的 discard 没有误删新代次。
+    let third = recovery.enter(&thread_id).await.unwrap();
+    assert_eq!(
+        third.skipped,
+        vec![peri_acp_types::recovery::RecoverySkip {
+            thread_id: thread_id.clone(),
+            reason: RecoverySkipReason::AlreadyRunning,
+        }],
+        "discard 不得删除新代次的准入"
+    );
+
+    harness.spawn_continuation_scheduler();
+    recovery.launch(&second.report).await;
+    wait_for("新代次的准入仍可启动", || async {
+        harness._mock.matched()
+    })
+    .await;
+    harness._mock.assert_async().await;
+}
+
+/// 11. 同线程超过 8 条 Defer 提醒时，靠后的可复用 entry 仍然可见。
+#[tokio::test]
+async fn pending_recovery_is_found_behind_more_than_eight_defer_rows() {
+    use peri_acp_types::session::{MessageKind, MessageSource, QueuedMessage};
+
+    let harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    harness.set_working(&thread_id).await;
+    let queue = harness.queue(&thread_id);
+    for index in 0..9 {
+        queue
+            .enqueue(QueuedMessage::system_reminder(
+                MessageKind::Defer,
+                MessageSource::SessionRecovery,
+                recovery_shaped_reminder_with_kind(&thread_id, &format!("stale_{index}")),
+            ))
+            .await
+            .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    queue
+        .enqueue(QueuedMessage::system_reminder(
+            MessageKind::Defer,
+            MessageSource::SessionRecovery,
+            recovery_shaped_reminder_with_kind(&thread_id, "entry"),
+        ))
+        .await
+        .unwrap();
+
+    let report = harness.recovery().enter(&thread_id).await.unwrap();
+    assert_eq!(
+        report.recovered,
+        vec![thread_id.clone()],
+        "必须采纳第 10 条可复用 entry"
+    );
+    assert_eq!(
+        harness.recovery_rows(&thread_id).await.len(),
+        10,
+        "采纳不得重复注入"
+    );
+}
+
 /// 构造与真实恢复提醒同形状的可信提醒（来源/kind 由调用方经 QueuedMessage 指定）。
 fn recovery_shaped_reminder(
     thread_id: &str,
+) -> peri_acp_types::system_reminder::TrustedSystemReminder {
+    recovery_shaped_reminder_with_kind(thread_id, "entry")
+}
+
+fn recovery_shaped_reminder_with_kind(
+    thread_id: &str,
+    kind: &str,
 ) -> peri_acp_types::system_reminder::TrustedSystemReminder {
     use peri_acp_types::system_reminder::{
         ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
@@ -351,7 +555,7 @@ fn recovery_shaped_reminder(
         version: SYSTEM_REMINDER_VERSION,
         category: ReminderCategory::Lifecycle,
         source: ReminderSource("session_recovery".to_owned()),
-        kind: "entry".to_owned(),
+        kind: kind.to_owned(),
         severity: ReminderSeverity::Warning,
         delivery: ReminderDelivery::Required,
         audiences: ReminderAudiences(vec![ReminderAudience::Tui]),

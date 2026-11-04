@@ -936,6 +936,7 @@ async fn prompt_without_frozen_snapshot_fails_closed() {
             continuation_epoch: 0,
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,
+            recovery_settlement_pending: false,
             frozen: None,
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),

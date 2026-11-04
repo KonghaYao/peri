@@ -479,6 +479,8 @@ pub(crate) async fn handle_resume_shared(
             .clone()
     };
     let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+    // 与 load 同一展示契约：进入会话先给出已保存占用（设计 §2.2）。
+    let context_usage = saved_context_usage(cfg, sessions, &prepared.id).await;
     let caps = cfg.session_manager.ensure_session_caps(&prepared.id);
     send_available_commands_update(
         transport,
@@ -490,8 +492,12 @@ pub(crate) async fn handle_resume_shared(
     .await;
     prewarm_session_mcp_discovery(cfg, &prepared.id);
     let resp = ResumeSessionResponse::new();
-    identity_response(
+    let mut response = identity_response(
         serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, e.to_string()))?,
         prepared.identity,
-    )
+    )?;
+    if let Some(usage) = context_usage {
+        response["_meta"]["peri.contextUsage"] = usage;
+    }
+    Ok(response)
 }

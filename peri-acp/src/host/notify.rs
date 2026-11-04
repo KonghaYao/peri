@@ -13,6 +13,7 @@ use peri_acp_types::command::command_route::RouteEntry;
 use peri_acp_types::command_registry::CommandRegistry;
 use peri_acp_types::session::MessageSource;
 use peri_acp_types::tasks::BgTaskKind;
+use peri_acp_types::thread::ThreadId;
 use peri_acp_types::PeriCaps;
 use serde_json::Value;
 use tracing::{debug, info};
@@ -22,16 +23,29 @@ use crate::provider::LlmProvider;
 
 // ── Notification dispatch ────────────────────────────────────────────────────
 
-/// 返回 `Some(ContinuationRequest)` 表示调用方需在 **sessions 锁外** 补发一次
-/// continuation 通知（`session/cancel` race 兜底），其余通知返回 `None`。
+/// 通知处理后交给调用方的后续动作。
+///
+/// `session/cancel` 需要两类**锁外**副作用：race 兜底的 continuation 补发，以及用户
+/// Stop 的停止意图落库。通知路径自身不写库——持久化由调用方在释放 sessions 锁后完成。
+#[derive(Default)]
+pub(crate) struct NotificationOutcome {
+    /// 需要在锁外补发一次 continuation（`session/cancel` race 兜底）。
+    pub(crate) continuation: Option<ContinuationRequest>,
+    /// 本次取消实际影响的 thread（本会话与 cascade children），需要写 `stopped`。
+    pub(crate) stop_targets: Vec<ThreadId>,
+}
+
+/// 返回 [`NotificationOutcome`]：调用方需在 **sessions 锁外** 补发 continuation，
+/// 并对 `stop_targets` 持久化停止意图。
 pub(crate) async fn handle_notification(
     method: &str,
     params: &Value,
     sessions: &mut HashMap<String, SessionState>,
     cfg: &AcpServerConfig,
-) -> Option<ContinuationRequest> {
+) -> NotificationOutcome {
     match method {
         "session/cancel" => {
+            let mut outcome = NotificationOutcome::default();
             let session_id = extract_session_id(params, "");
             if let Some(state) = sessions.get_mut(session_id) {
                 let environment = state.environment.clone();
@@ -43,12 +57,15 @@ pub(crate) async fn handle_notification(
                         params.get("requestId").and_then(Value::as_str),
                         params.get("generation").and_then(Value::as_str),
                     ) else {
-                        return None;
+                        return outcome;
                     };
-                    let mailbox = cfg.session_manager.user_input_mailbox_for(session_id)?;
+                    let Some(mailbox) = cfg.session_manager.user_input_mailbox_for(session_id)
+                    else {
+                        return outcome;
+                    };
                     if !mailbox.stop_attempt(request_id, generation).await {
                         debug!(session_id, "Cancel ignored: superseded user input attempt");
-                        return None;
+                        return outcome;
                     }
                 } else if let Some(mailbox) = cfg.session_manager.user_input_mailbox_for(session_id)
                 {
@@ -56,15 +73,23 @@ pub(crate) async fn handle_notification(
                     mailbox.stop().await;
                 }
                 state.continuation_epoch += 1;
+                // 用户 Stop 的实际受影响对象由既有取消策略确定：本会话 thread 与本次
+                // 取消的 cascade children。这里只收集身份，不写库（§5.4）。
+                outcome
+                    .stop_targets
+                    .push(ThreadId::from(state.thread_id.clone()));
                 if let Some(runtime) = cfg.session_manager.get_session(session_id) {
                     runtime.activation.suppress();
                     // 显式用户取消终止当前 blocked 周期的自动恢复；新 prompt 不取消。
                     runtime.goal_state.cancel_recovery();
+                    outcome
+                        .stop_targets
+                        .extend(runtime.cancel_cascade_children());
                 }
                 state.continuation_mq_steering_pending = false;
                 let Some(token) = state.cancel_token.as_ref() else {
                     state.continuation_armed = false;
-                    return None;
+                    return outcome;
                 };
                 token.cancel();
                 // 置位内部续跑标记（只影响当前被取消的 prompt）：被取消 prompt
@@ -101,7 +126,7 @@ pub(crate) async fn handle_notification(
                     None => false,
                 };
                 if cancel_should_schedule_continuation(state, has_pending) {
-                    return Some(ContinuationRequest {
+                    outcome.continuation = Some(ContinuationRequest {
                         session_id: session_id.to_string(),
                         kind: BgTaskKind::Agent,
                         mq_steering: false,
@@ -109,7 +134,7 @@ pub(crate) async fn handle_notification(
                     });
                 }
             }
-            None
+            outcome
         }
         "session/config_update" => {
             // Two formats:
@@ -122,7 +147,7 @@ pub(crate) async fn handle_notification(
                     Ok(c) => c,
                     Err(e) => {
                         tracing::warn!(error = %e, "config_update notification: invalid config");
-                        return None;
+                        return NotificationOutcome::default();
                     }
                 };
                 let active_profile_provider = new_cfg
@@ -166,11 +191,11 @@ pub(crate) async fn handle_notification(
                 tracing::debug!("config_update notification: missing config/configId");
             }
             // No sessions to invalidate — pool will be built fresh on next session/new
-            None
+            NotificationOutcome::default()
         }
         _ => {
             debug!(method = %method, "Unhandled notification");
-            None
+            NotificationOutcome::default()
         }
     }
 }

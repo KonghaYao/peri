@@ -64,6 +64,31 @@ async fn explicit_stop_survives_failure_and_fresh_required_work() {
     assert!(activation.can_activate(&queue).await);
 }
 
+#[test]
+fn recovery_allow_does_not_clear_an_explicit_stop() {
+    let activation = SessionActivation::default();
+    activation.suppress();
+
+    assert!(!activation.try_allow());
+    assert!(activation.user_stopped());
+    assert!(!activation.is_allowed());
+
+    // 显式继续仍是唯一能解除 Stop 的入口。
+    activation.allow();
+    assert!(activation.is_allowed());
+}
+
+#[test]
+fn recovery_allow_arms_execution_without_a_stop() {
+    let activation = SessionActivation::default();
+    activation.suppress();
+    activation.allow();
+
+    assert!(activation.try_allow());
+    assert!(activation.is_allowed());
+    assert!(!activation.user_stopped());
+}
+
 #[tokio::test]
 async fn requeued_failed_input_preserves_its_admission_boundary() {
     let activation = SessionActivation::default();
