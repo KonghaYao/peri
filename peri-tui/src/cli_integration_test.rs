@@ -490,3 +490,47 @@ fn test_real_cli_accepts_explicit_default_permission_mode() {
     let cli = Cli::try_parse_from(["peri", "--permission-mode", "default"]).unwrap();
     assert_eq!(cli.permission_mode.as_deref(), Some("default"));
 }
+
+// ─── 会话选择参数的校验边界（P1-1 / P1-2）──────────────────────────────────
+
+#[test]
+fn resume_without_value_is_rejected_by_validation() {
+    let cli = Cli::try_parse_from(["peri", "-r"]).unwrap();
+    assert_eq!(cli.resume, Some(None), "解析仍接受可选值，校验负责拒绝");
+    let error = validate_cli(&cli).expect_err("无值 -r 必须被拒绝");
+    assert!(error.contains("--resume"), "{error}");
+    assert!(error.contains("session ID"), "{error}");
+}
+
+#[test]
+fn resume_with_empty_value_is_rejected() {
+    let cases: &[&[&str]] = &[&["peri", "-r", ""], &["peri", "--resume="]];
+    for args in cases {
+        let cli = Cli::try_parse_from(*args).unwrap();
+        let error = validate_cli(&cli).expect_err("空会话 ID 必须被拒绝");
+        assert!(error.contains("--resume"), "{error}");
+        assert!(error.contains("non-empty"), "{error}");
+    }
+}
+
+#[test]
+fn print_rejects_resume_before_startup() {
+    let cli = Cli::try_parse_from(["peri", "-p", "-r", "session-a"]).unwrap();
+    let error = validate_cli(&cli).expect_err("print 模式不得静默忽略 -r");
+    assert!(error.contains("print"), "{error}");
+    assert!(error.contains("--resume"), "{error}");
+}
+
+#[test]
+fn continue_with_resume_is_rejected() {
+    let cli = Cli::try_parse_from(["peri", "-c", "-r", "session-a"]).unwrap();
+    let error = validate_cli(&cli).expect_err("-c 与 -r 必须冲突");
+    assert!(error.contains("--continue"), "{error}");
+    assert!(error.contains("--resume"), "{error}");
+}
+
+#[test]
+fn valid_resume_still_passes_validation() {
+    let cli = Cli::try_parse_from(["peri", "-r", "session-a"]).unwrap();
+    assert!(validate_cli(&cli).is_ok());
+}

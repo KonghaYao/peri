@@ -229,6 +229,7 @@ impl AcpTuiClient {
     pub(crate) async fn fail_startup_restore(&self, error: &AcpError) {
         let _operation = self.lifecycle.operation_gate().lock().await;
         *self.restore_error.lock().unwrap() = Some(error.to_string());
+        *self.startup_restore_target.lock().unwrap() = None;
         self.startup_restore_tx.send_replace(false);
     }
 

@@ -152,6 +152,12 @@ pub(crate) fn spawn_steer_consumer(
 /// 不能沿用「输入未被接收」这一结论——用户据此无法判断是输入被拒还是环境不可用。
 /// 入队被拒或回执不明的结论保持原样。
 fn failure_notice(stage: SteerStage, rejected: bool, error: &AcpError) -> String {
+    if error.code == super::RECOVERY_EXECUTION_BLOCKED_CODE {
+        return crate::i18n::tr_args(
+            "steer-recovery-blocked",
+            &[("error".into(), error.message.clone().into())],
+        );
+    }
     match (stage, rejected) {
         (SteerStage::Prepare, true) => crate::i18n::tr_args(
             "steer-session-unavailable",
@@ -190,7 +196,10 @@ fn reject_command(command: &mut SteerCommand, error: &AcpError) -> bool {
         command.epoch = epoch;
     }
     // 入队请求尚未发送时，会话准备失败是确定未受理；不能把原稿卡在未知回执中。
-    let rejected = not_admitted || matches!(error.code, -32602..=-32600);
+    // `-32017` 是服务端对不可执行会话的确定性拒绝，重试同一 prompt 不会成功。
+    let rejected = not_admitted
+        || matches!(error.code, -32602..=-32600)
+        || error.code == super::RECOVERY_EXECUTION_BLOCKED_CODE;
     STEERS.state().write().reject(command, rejected);
     rejected
 }

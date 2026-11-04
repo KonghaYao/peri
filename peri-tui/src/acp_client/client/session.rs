@@ -154,6 +154,7 @@ impl AcpTuiClient {
     ) -> Result<String, AcpError> {
         let _preparing = PreparingSessionGuard::enter();
         *self.restore_error.lock().unwrap() = None;
+        self.clear_startup_restore_target();
         self.project_execution_cwd(None);
         let start = self
             .lifecycle
@@ -302,6 +303,15 @@ impl AcpTuiClient {
             .and_then(|pending| pending.resume_load.clone())
     }
 
+    /// 启动恢复失败后保留的目标；存在时下一次 ensure 先重试。
+    fn startup_retry_target(&self) -> Option<String> {
+        self.startup_restore_target.lock().unwrap().clone()
+    }
+
+    fn clear_startup_restore_target(&self) {
+        *self.startup_restore_target.lock().unwrap() = None;
+    }
+
     #[cfg(test)]
     pub(super) fn install_transition_commit_hook(
         &self,
@@ -360,6 +370,10 @@ impl AcpTuiClient {
                     AcpError::new(-32603, "startup restore reservation closed unexpectedly")
                 })?;
                 continue;
+            }
+            // 启动恢复失败但目标仍保留：先重试同一会话一次，不静默新建。
+            if let Some(target) = self.startup_retry_target() {
+                return self.load_session_under_gate(&target, cwd, model).await;
             }
             self.check_restore_error()?;
             // 上一次加载 B 被关闭失败打断：先完成同一加载（`load_session_under_gate`
@@ -460,6 +474,8 @@ impl AcpTuiClient {
         model: Option<&str>,
     ) -> Result<String, AcpError> {
         let _operation = self.lifecycle.operation_gate().lock().await;
+        // 启动恢复失败后仍保留目标：下一次 ensure 先重试同一会话，不静默新建。
+        *self.startup_restore_target.lock().unwrap() = Some(session_id.to_owned());
         let reservation = StartupRestoreGuard(&self.startup_restore_tx);
         let result = self.load_session_under_gate(session_id, cwd, model).await;
         drop(reservation);
@@ -469,6 +485,7 @@ impl AcpTuiClient {
     /// Release a startup reservation when resume lookup cannot select a target.
     pub async fn release_startup_restore(&self) {
         let _operation = self.lifecycle.operation_gate().lock().await;
+        self.clear_startup_restore_target();
         self.startup_restore_tx.send_replace(false);
     }
 
@@ -483,6 +500,8 @@ impl AcpTuiClient {
         model: Option<&str>,
     ) -> Result<String, AcpError> {
         let _operation = self.lifecycle.operation_gate().lock().await;
+        // 交互式切换是新的用户意图：不再自动重试上一次启动恢复目标。
+        self.clear_startup_restore_target();
         self.load_session_under_gate(session_id, cwd, model).await
     }
 
@@ -573,6 +592,8 @@ impl AcpTuiClient {
         // 响应解码失败不改变 load 的成败——浏览能力降级，会话本身已经装配成功。
         let (snapshot_token, next_cursor) =
             crate::kit::history_paging::decode_session_cursor(&loaded);
+        // 恢复结果是成功响应的一部分：解码失败只降级提示，不影响会话可用性。
+        let recovery = super::recovery_view::decode(&loaded);
         crate::kit::history_paging::note_initial_cursor(session_id, snapshot_token, next_cursor);
         self.lifecycle
             .commit_stable(start.generation, session_id.to_string());
@@ -584,6 +605,9 @@ impl AcpTuiClient {
         }
         self.finish_session_initialization(start.generation, session_id)
             .await?;
+        if let Some(view) = recovery.as_ref() {
+            super::recovery_view::present(session_id, view);
+        }
         self.flush_buffered();
         // S5.4：协商过窗口能力且开关开启时，额外建立 V1 窗口（默认关闭时无行为）。
         //
@@ -595,6 +619,12 @@ impl AcpTuiClient {
         );
         self.project_execution_cwd(Some(effective_cwd));
         *self.restore_error.lock().unwrap() = None;
+        {
+            let mut target = self.startup_restore_target.lock().unwrap();
+            if target.as_deref() == Some(session_id) {
+                *target = None;
+            }
+        }
         projection.committed = true;
         transition.disarm();
         if self.projection_mode == ClientProjectionMode::Interactive {
