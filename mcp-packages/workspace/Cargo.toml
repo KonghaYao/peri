@@ -8,10 +8,6 @@ license = "Apache-2.0"
 
 [dependencies]
 peri-time = { path = "../../peri-time" }
-anyhow.workspace = true
-axum.workspace = true
-clap = { version = "4", features = ["derive"] }
-dirs.workspace = true
 peri-agent = { path = "../../peri-agent" }
 peri-acp-types = { path = "../../peri-acp-types" }
 peri-mcp-common = { path = "../common" }
@@ -27,25 +23,20 @@ parking_lot.workspace = true
 rmcp = { workspace = true, features = ["transport-streamable-http-server"] }
 serde.workspace = true
 serde_json.workspace = true
-serde_norway.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-sha2.workspace = true
 walkdir = "2.5"
 
 [dev-dependencies]
-peri-mcp-web = { path = "../web" }
-peri-model = { path = "../../peri-model" }
 peri-resources = { path = "../../peri-resources" }
+peri-mcp-web = { path = "../web" }
 filetime = "0.2"
 futures.workspace = true
 regex = "1"
 rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
-reqwest.workspace = true
-serial_test.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tokio-util.workspace = true

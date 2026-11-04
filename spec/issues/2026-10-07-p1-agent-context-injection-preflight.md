@@ -43,17 +43,16 @@
 - **旧数据策略**：推荐旧 snapshot 保留已有 system 字节，缺少的结构化环境值标记 unavailable；需要派生新 prompt 时显式提示限制，不伪造旧环境，也不在每次恢复时重探。若选择一次性迁移补齐，须单独批准迁移语义，不覆盖 write-once 原快照。
 - **验收**：冻结后改变 Git 状态/探测器返回值，主、子与 workflow 重渲染仍稳定；用探测计数器验证每个新快照只采集一次，冷恢复不调用探测；覆盖旧版本、未知版本与远端环境身份。
 
-### H4 Hook 安全三项（`peri-middlewares/src/hooks/`）
+### H4 Hook 决策与参数隔离（`peri-middlewares/src/hooks/`）
 
 - `permissionDecision: "deny"` 解析后落入 `_ => Ok(tool_call.clone())`（`action_resolver.rs` / `dispatcher.rs`）：按 Claude Code 兼容字段写「拒绝」的 hook 实际 fail-open。
 - `$ARGUMENTS` 明文替换进 command 字符串后经 `bash -c` 执行（`variables.rs` + `executor.rs`），HookInput（含用户 prompt 与 tool 输出）可驱动命令注入。
-- cwd 级 `.claude/settings.json` hooks 默认加载并在首个 prompt 执行（`loader.rs` + `assembly.rs`），无工作区信任门、无审批。
 
 **方案备注**
 - **拒绝决策**：在 parser/dispatcher 的统一决策归并处处理 deny，优先级高于 `updatedInput`；当前二者同时返回时 parser 还可能先取 updatedInput 而丢掉 deny。deny 必须让执行计数为零；ask 必须交既有审批端口，端口不可用则明确拒绝，不能放行；allow 不得越过宿主权限上限。保留判定与反馈的不同字段，避免单个 action 枚举吞掉组合输出。
 - **参数隔离**：推荐废除 HookInput 向 shell command 的 `$ARGUMENTS` 文本替换，使用现有 stdin JSON 作为数据通道；需要额外参数时使用结构化 argv。已配置 shell 脚本属于受信代码，但用户 prompt/tool output 永远只是数据。不把“统一加引号”当作适配任意 shell 上下文的安全修复。旧写法须给可定位的迁移错误与说明，不能静默改变含义。
-- **信任门（2026-11-02 已移除）**：hook trust 校验已全部移除（`peri plugin trust` CLI、`hook-trust.json`、`peri-config/src/trust.rs` 与装配准入均删除），项目/local settings hooks 与插件来源 hooks 直接装配执行；决策见 `spec/issues/2026-11-02-p1-remove-hook-trust.md`。原文保留为历史：由宿主在 hooks 装配/执行准入处消费显式 workspace trust；信任记录及路径/来源身份由配置 MCP 数据面持有，不在核心新增读盘。未信任项目/local 来源不执行，非交互客户端须显式授权，否则保持关闭并告知；用户全局配置不自动授权项目或项目声明的插件 hook。信任需绑定工作区和执行来源，支持撤销与来源变化重新确认；权限审批与工作区信任是两道不同边界。
-- **验收/取舍**：覆盖 deny+updatedInput、ask 无审批端口、非法决策、含引号/换行的良性 JSON 原样传输、未信任/受信任/撤销/非交互入口，断言不该执行时进程与工具调用数均为零。信任交互、持久授权范围与旧 hook 命令迁移需批准；测试和日志不记录 prompt、tool output 或凭据正文。
+- **来源策略**：项目/local settings hooks 与插件 hooks 直接装配执行；来源信任门已移除，不属于本任务的待实施目标。现行装配见 `peri-middlewares/src/host_ports.rs` 与 `assembly/hooks.rs`，历史决策见 [2026-11 月志](../history/2026-11.md)。
+- **验收/取舍**：覆盖 deny+updatedInput、ask 无审批端口、非法决策、含引号/换行的良性 JSON 原样传输，断言不该执行时进程与工具调用数均为零。旧 hook 命令迁移需批准；测试和日志不记录 prompt、tool output 或凭据正文。
 
 ### H5 app-only（`model:false`）工具经 deferred 面仍可见且可执行
 

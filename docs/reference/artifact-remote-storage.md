@@ -2,7 +2,7 @@
 
 > 面向使用者：怎么把 `artifact` 工具的上传目标从默认公共服务换到你自己的远程存储。
 > 本文是操作参考，不构成仓库设计或工程规则；发生冲突时以代码、`docs/standards/` 与
-> `docs/design/` 为准。内置实例的名字与关闭语义另见 [mcp-ecosystem.md](mcp-ecosystem.md) §9.8。
+> `docs/design/` 为准。内置实例的名字、工具与关闭键见 [MCP packages 索引](../code-index/mcp-packages.md)。
 
 ## 1. 这个能力做什么
 

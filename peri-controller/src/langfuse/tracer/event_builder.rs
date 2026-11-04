@@ -26,26 +26,6 @@ pub(crate) fn new_uuid() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
-/// 将事件同步入队 batcher，背压诊断由 batcher 汇总。
-///
-/// [不变量] 同步入队保留同一生产路径的调用顺序及 FIFO 屏障语义。
-/// 父 observation ID 在生命周期内保持稳定，父观测可延迟到终态导出；
-/// 不承诺父观测先于子观测导出，也不承诺并发 HTTP 请求的到达顺序。
-/// try_add 失败时背压丢弃且不阻断。禁止改为 panic 或返回 Result 中断追踪。
-pub(crate) fn try_add_or_warn(
-    batcher: &langfuse_client::Batcher,
-    event: IngestionEvent,
-    trace_id: &str,
-    context_msg: &str,
-) {
-    let event_kind = LangfuseEventKind::from_event(&event);
-    if let Err(error) = batcher.try_add(event) {
-        if LangfuseDropReason::from_error(&error).is_none() {
-            tracing::warn!(target: "langfuse::drop", trace_id = %trace_id, event_kind = ?event_kind, "{} was not queued", context_msg);
-        }
-    }
-}
-
 /// 将事件同步入队 session，背压仅计数，未知错误作安全诊断。
 ///
 /// [不变量] 同步入队保留同一生产路径的调用顺序及 FIFO 屏障语义，父 ID 保持稳定。

@@ -17,12 +17,6 @@ pub(crate) mod process;
 #[path = "client/process_wasm.rs"]
 pub(crate) mod process;
 mod queries;
-// System MCP 启动准入 seam：清单发布与闸门已接线（`initialize` / `middleware`），
-// 仍有三处冻结但尚无生产读取方的成员——`DiscoveryEvidence::is_complete`（只有测试在问）、
-// `NegotiatedSystemMcp::handle`（协商结果保留句柄，消费方只读 `requirement`/`generation`）、
-// `SystemReadinessError::CatalogPublicationFailed`（清单发布失败分支待接）。三者都由
-// crate 内测试覆盖，接线波次落地后连同本豁免一起删除。
-#[allow(dead_code)]
 mod readiness;
 mod rewind;
 mod service;
@@ -66,14 +60,8 @@ use std::{
 pub(crate) use cache::cache_scope_allows_persistence;
 pub(crate) use cache::ConnectionResourceCache;
 pub use oauth::OAuthStartDisposition;
-// System MCP 启动准入（IF-M3）：证据、等待与类型化错误；子模块声明留在本文件，
-// 不占 `mcp/mod.rs`（其 owner 为 C-INJ-02 / D-02）。消费方：B-02（证据提交 /
-// 清单发布，已接线）、B-03（闸门与 C 接线，W4 消费 `NegotiatedSystemMcp` /
-// `SystemMcpRequirement` / `SystemReadinessError`）。
-#[allow(unused_imports)]
 pub(crate) use readiness::{
-    DiscoveryEvidence, NegotiatedSystemMcp, SystemMcpManifest, SystemMcpRequirement,
-    SystemReadinessError,
+    DiscoveryEvidence, NegotiatedSystemMcp, SystemMcpManifest, SystemReadinessError,
 };
 #[cfg(test)]
 pub(crate) use service::ControlledMcpService;

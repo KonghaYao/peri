@@ -82,15 +82,7 @@ impl super::SubAgentTool {
             };
 
             let build_result = self
-                .build_agent_from_def(
-                    &agent_def,
-                    &agent_id,
-                    &cwd,
-                    SubagentCancelPolicy::Independent,
-                    true,  // skip_events
-                    false, // don't setup event handler
-                    model,
-                )
+                .build_agent_from_def(&agent_def, &agent_id, &cwd, model)
                 .await?;
 
             let llm = build_result.llm;

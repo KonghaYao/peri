@@ -19,7 +19,7 @@ SDK 只做 Chat 控制面、ACP 运行装配与只读展示投影；模型执行
 | --- | --- | --- |
 | `ChatManager` | 部署/Store 边界：`store.storage`/`machineId` 快照、句柄目录、SessionOwnership 协调、整体释放；per-chat 通过 `createChat({ workspace, agent })` 提供边界与运行配置（`cwd` 由 workspace 派生），可覆盖 `lifecycle`/runtime env；不接收普通执行动作 | 进程/宿主内可重建；`shutdown` 后封闭新准入 |
 | `ChatService` | 单 Chat 的绑定状态机、动作分派、事实日志、载荷读取；不持有 Manager，不依赖 Yjs | 由 `createChat` 同步登记；绑定在首次动作时建立 |
-| `ChatUserAction` | 八类纯数据用户意图，携带稳定 `requestId` | 单次请求；结果按 `disposition` 判断可重试性 |
+| `ChatUserAction` | 纯数据用户意图，携带稳定 `requestId` | 单次请求；结果按 `disposition` 判断可重试性 |
 | `PeriInstance` | 一次激活的 ACP Session/运行后端装配，交互、队列、历史与载荷控制 | 由 `ChatService` 拥有；绑定换代或关闭时释放 |
 | `ChatView` / `ChatReplica` | 服务端事实到 Yjs 的投影、逻辑同步连接与浏览器只读副本 | `ChatView` 由 Chat 所有者释放；`ChatReplica` 由浏览器释放 |
 
@@ -31,7 +31,7 @@ Workspace 由可移植值对象 `WorkspaceRef` 表达：`runtimePath` 是 Agent/
 
 ## 3. 动作与回执
 
-八类动作：`create_new_session`、`change_session`、`send`、`force_send`、`take_back`、`load_earlier_history`、`cancel`、`answer`。
+动作类型由 `src/chat/action.ts::ChatUserAction` 定义：`create_new_session`、`change_session`、`send`、`force_send`、`take_back`、`load_earlier_history`、`cancel`、`answer`、`set_config_option`。
 
 - `send` 同步返回 `SendReceipt`：`inputId` 与 `accepted` 表示入队被接受，`then`/投递等待表示 Peri 已交付输入；两者不能混为一谈。
 - `cancel` 的 `requested` 只表示取消通知已写出，不是停止证明。停止必须由 ACP 关闭/结算证据确认。

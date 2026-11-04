@@ -88,14 +88,6 @@ pub(super) fn handle_cache_usage_updated(
     }
 }
 
-/// Turn-end helper for tests; production warnings emit on each root `usage_update`.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn finalize_cache_coverage(state: &mut BridgeState, show_warning: bool) {
-    if let Some(sample) = state.pending_cache_usage.take() {
-        inject_cache_coverage_warning_if_needed(state, &sample, show_warning);
-    }
-}
-
 fn inject_cache_coverage_warning_if_needed(
     state: &mut BridgeState,
     sample: &crate::kit::acp_types::CacheUsageSample,

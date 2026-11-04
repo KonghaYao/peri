@@ -3,7 +3,7 @@
 > 本文件是「外部 MCP server ↔ view 层」透传信道的设计定稿，回答一个问题：**ACP 只有一条连接，多个 MCP server 的数据（App 交互、工具结果、通知）如何在这条信道上分离路由，保证数据正确送达正确的接收方。**
 >
 > 状态：**现行设计**——stdio relay 由 `PERI_MCP_APPS` deployment profile 启用；resource relay、canonical Permission/HITL 工具调用与多路数据隔离已落地。ACP 侧规范方法集是 `peri/mcp/apps/*`（`peri-acp/src/host/apps_facade.rs::SessionAppsFacade`）；本文的 `peri/mcp/{open,resource,app,invoke}` 是同一 facade 的薄别名，仅为既有客户端保留。App 调用的授权凭据是 `McpAppRecord`（取代 `McpAppBindingLease`）。下游 Web Host、iframe 与 TUI Apps 渲染不在 Peri relay 范围内。
-> 关联文档：`docs/reference/mcp-ecosystem.md`（下文简称 guide；MCP 生态定位，§6 MCP Apps、§9 内部落地）；`docs/design/peri-acp-protocol.md`（ACP 协议）
+> 关联文档：[MCP 生态与互通参考](../reference/mcp-ecosystem.md)、[ACP wire 契约](peri-acp-protocol.md)；本文定义 Peri relay，生态参考不替代本设计。
 > 本文是 Perihelion 内部 relay 的目标设计，不复制或替代外部 MCP/MCP Apps 规范。
 
 ## 目录
@@ -29,9 +29,9 @@
 ### 1.2 范围
 
 - **在**：环境 deployment capability、MCP server capability 传播、透传帧、id 映射、会话绑定、错误语义与可靠性。
-- **不在**：MCP Apps 协议本身（`ui/initialize` 等代表性方法，见 guide §6.3）；Web Host/iframe 渲染、sandbox、CSP、Permissions Policy、`postMessage` bridge 及 MCP Apps FE 内部实现；HITL 权限机制（共用现有执行路径，不重新设计）。
+- **不在**：MCP Apps 协议本身（`ui/initialize` 等代表性方法，见 [MCP Apps 互通参考](../reference/mcp-ecosystem.md)）；Web Host/iframe 渲染、sandbox、CSP、Permissions Policy、`postMessage` bridge 及 MCP Apps FE 内部实现；HITL 权限机制（共用现有执行路径，不重新设计）。
 
-### 1.3 设计原则（沿用 guide §6.2/§9.2 既有结论）
+### 1.3 设计原则
 
 1. **payload 保留 MCP Apps 原始消息**：下游 Web Host 可将 payload 交给其自己的 Apps bridge；Peri 不解析或实现 `postMessage`，但必须解析外层 envelope 并执行 server/session 路由校验。
 2. **透传不绕过安全模型**：App 发起的 `tools/call` 与 agent 发起的工具调用共用同一执行路径与 HITL 权限。
@@ -49,16 +49,15 @@
 | `RequestRouter`：全局递增 i64 id + pending map（oneshot 匹配 Response） | `peri-acp/src/transport/router.rs` | 传输层 id 空间是**单一共享**的；String id 不参与匹配（落 unmatched 转发路径） |
 | 事件链是 agent → view **单向 notification**（`session/update`、`peri/agent_event*`、`peri/unstable-event`） | `peri-acp/src/session/event_sink.rs` | 事件链不能承载「需要响应的请求」；透传请求必须走 `send_request`/`send_response` |
 | `McpClientPool` 以 `server_name`（String）为 key | `peri-middlewares/src/mcp/client.rs` | `server_name` 是 MCP 侧唯一路由键 |
-| 订阅通知（server → agent）默认**进 agent inbox、不进 view** | guide §9.1，`McpSubscriptionPort` | 已避开通知风暴；本文不改变该决策 |
-| 工具名 `mcp__<server>__<tool>` 携带 server 前缀 | guide §3.4 | view 可从工具名解析 `serverId`，事件链无需新增字段即可关联 server |
-| 现有 ACP 方法名空间：`session/*`、`plugin/*`、`peri/agent_event*`、`mcp/oauth_*`、`marketplace/*`、`elicitation/create` | guide §9.2 | 新方法名必须避开全部既有前缀 |
-| 代码中**不存在** `serverId` / `appSessionId` 字段 | 全仓 grep | 透传信封与会话注册表是全新代码，无既有约定可破坏 |
+| 订阅通知（server → agent）默认**进 agent inbox、不进 view** | [System Reminder](system-reminder.md)、`peri-middlewares/src/mcp/client/subscription.rs` | 提醒类型、是否唤醒和关闭规则由订阅消费面决定 |
+| MCP 工具保持绑定的 server 与原始工具身份 | [工具系统](tool-system.md)、`peri-middlewares/src/mcp/tool_bridge.rs` | 路由依赖绑定身份；direct 工具可以使用原名，不从展示名推导 server |
+| ACP 业务方法与扩展方法共用信道 | [ACP wire 契约](peri-acp-protocol.md)、`peri-acp/src/host/mcp_apps.rs` | Apps 以 `peri/mcp/apps/*` 独立分组 |
 
 ## 3. 设计决策总览
 
 | # | 决策点 | 选择 | 理由 |
 | --- | --- | --- | --- |
-| D1 | 外层方法名 | **包装**：规范名 `peri/mcp/apps/*`；`peri/mcp/app`（tools/call）、`peri/mcp/resource`（resources/read）、`peri/mcp/open` 为薄别名（否决定稿前 guide §9.2 的「倾向裸传」） | 见 3.1 |
+| D1 | 外层方法名 | **包装**：规范名 `peri/mcp/apps/*`；`peri/mcp/app`（tools/call）、`peri/mcp/resource`（resources/read）、`peri/mcp/open` 为薄别名 | 见 3.1 |
 | D2 | 信封字段 | `envelopeVersion` + `serverId` + `appSessionId` + `resourceUri` + `mcpProtocolVersion`（可选）+ `appsProtocolVersion`（由 payload/下游协商）+ `payload` | 见第 4 章 |
 | D3 | id 空间 | ACP 外层 transport id 与 payload 内 Apps id 分离；MCP server id 由 MCP client 管理，不假设 Peri 可见 | 见第 5 章 |
 | D4 | 请求-响应关联 | ACP request 用 transport id；payload 保留 Apps request id；Peri 不复制 MCP client 的内部 pending map | 见 5.2 |
@@ -68,16 +67,15 @@
 | D8 | 背压 | App 事件天然低频 + 同类通知 coalesce；具体队列策略待实现时验证 | 见 9.2 |
 | D9 | 协议版本 | 分离 ACP、envelope、MCP core、MCP Apps 四类版本；不以 server core version 替代 Apps version | 见 9.3 |
 
-### 3.1 D1：为什么包装，而不是裸传（对 §9.2 的修订）
+### 3.1 D1：ACP 包装边界
 
-guide §9.2 原方案倾向外层直接使用 Apps 方法名。定稿改为**包装一层**，理由基于代码事实：
+外层使用 `peri/mcp/apps/*`，由 `SessionAppsFacade` 校验会话、附件身份、
+请求 namespace 与序号；内层保留允许的 MCP Apps 操作与 payload 语义。
 
-1. **方法名空间平铺共享**：`session/*`、`plugin/*`、`marketplace/*`、`mcp/oauth_*` 都在同一信道。裸传 `tools/call`、`ui/initialize` 与 ACP 原生方法名无结构性区分——view 侧桥 JS 必须维护一份「MCP 方法名白名单」才能分辨「剥信封」与「正常处理」，而白名单会随 MCP 规范演进失效。
-2. **`mcp/` 前缀已被占用**：`mcp/oauth_*` 占用了 `mcp/` 前缀（guide §6.2 已知冲突点）。裸传方案必须与 `mcp/oauth_*` 共存或改名，包装用 `peri/mcp/` 天然避让。
-3. **参照系一致**：grok-build 选择 `x.ai/mcp/*` 包装（guide §9.2 记录），非裸传。
-4. **成本为零**：包装只是信封——`payload` 仍是 MCP 原始消息（原则 1 不破），view 剥信封即得原文。
-
-**取舍代价**：view 侧桥 JS 多一次信封编解码（约 10 行），换来方法名空间的确定性隔离。值。
+1. ACP 业务方法与 Apps 操作在同一信道，独立方法组让分发不依赖随规范演进的 MCP 方法白名单。
+2. `mcp/oauth_*` 已用于 OAuth，`peri/mcp/apps/*` 保持路由边界明确。
+3. 信封身份与 MCP/Apps payload 身份分别校验和匹配响应；具体公开方法与兼容别名见
+   [ACP wire 契约](peri-acp-protocol.md)，执行边界见本文「设计原则」。
 
 ## 4. 信封与消息类型
 
@@ -251,10 +249,10 @@ agent 侧收到 `peri/mcp/app` 时按序校验，任一失败按 §8 返回：
 
 | 数据 | 通道 | 依据 |
 | --- | --- | --- |
-| agent 发起的工具调用结果（带 `ui.resourceUri`） | 事件链（现状，不变） | guide §9.4；view 从工具名 `mcp__<server>__<tool>` 解析 serverId |
+| agent 发起的工具调用结果（带 `ui.resourceUri`） | 事件链 | [ACP wire 契约](peri-acp-protocol.md)；server/tool 归属来自 canonical invocation 与 App descriptor |
 | App 发起的 `tools/call` 结果 | 透传 response（**不进事件链**） | 双写会致 view 收两份结果 |
 | `ui://` HTML 内容 | `peri/mcp/resource` 响应（**不进事件链**） | 渲染数据不是事件 |
-| 订阅通知（`resources/updated` 等） | agent inbox（现状，不变） | guide §9.1 已定：通知默认进 agent 不进 view |
+| 订阅通知（`resources/updated` 等） | agent inbox | [System Reminder](system-reminder.md)、`peri-middlewares/src/mcp/client/subscription.rs`；订阅通知不作为 Apps 结果发给 view |
 | server 上下线 | 事件链 `SystemNotification`（现状，不变） | `event_sink.rs` 已有该通道 |
 
 **唯一的新增双写风险点**：App 发起的 `tools/call` 若同时走「共用执行路径」的事件链发射与透传 response，view 会收到两份。定稿规则：**执行路径共用（含 HITL），发射路径分流——App 发起的调用只走透传，不进事件链**。

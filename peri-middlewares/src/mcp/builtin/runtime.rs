@@ -117,6 +117,7 @@ impl BuiltinServerTask {
     }
 
     /// task 是否已结束——「无 orphan」的可观察证据。
+    #[cfg(test)]
     pub(crate) fn is_finished(&self) -> bool {
         self.handle.is_finished()
     }
@@ -166,6 +167,7 @@ pub(crate) struct TickGuard {
     cancel: CancellationToken,
     join: JoinHandle<()>,
     /// tick task 退出前触发一次（测试观测点）。生产不等待它，也不据它判收敛。
+    #[cfg(test)]
     stopped: Arc<tokio::sync::Notify>,
 }
 
@@ -178,8 +180,10 @@ impl TickGuard {
         mut on_tick: impl FnMut() + Send + 'static,
     ) -> Self {
         let cancel = CancellationToken::new();
+        #[cfg(test)]
         let stopped = Arc::new(tokio::sync::Notify::new());
         let task_cancel = cancel.clone();
+        #[cfg(test)]
         let task_stopped = Arc::clone(&stopped);
         let join = tokio::spawn(async move {
             let mut interval = peri_time::interval(interval);
@@ -189,11 +193,13 @@ impl TickGuard {
                     _ = interval.tick() => on_tick(),
                 }
             }
+            #[cfg(test)]
             task_stopped.notify_waiters();
         });
         Self {
             cancel,
             join,
+            #[cfg(test)]
             stopped,
         }
     }
@@ -216,6 +222,7 @@ impl TickGuard {
     }
 
     /// task 是否已结束。
+    #[cfg(test)]
     pub(crate) fn is_finished(&self) -> bool {
         self.join.is_finished()
     }
@@ -273,11 +280,17 @@ impl BuiltinInstanceSupervisor {
         let tick = match self.tick.take() {
             Some(guard) => {
                 let outcome = guard.shutdown(timeout).await;
-                if matches!(outcome, TickCloseOutcome::AbortedAfterTimeout) {
-                    tracing::warn!(
+                match &outcome {
+                    TickCloseOutcome::AbortedAfterTimeout => tracing::warn!(
                         server = %self.instance,
                         "builtin tick task 未在有界等待内退出，已 abort"
-                    );
+                    ),
+                    TickCloseOutcome::TaskFailed(reason) => tracing::warn!(
+                        server = %self.instance,
+                        error = %reason,
+                        "builtin tick task 退出失败"
+                    ),
+                    TickCloseOutcome::NotSpawned | TickCloseOutcome::Joined => {}
                 }
                 outcome
             }
@@ -293,16 +306,29 @@ impl BuiltinInstanceSupervisor {
                 tracing::warn!("builtin Workspace task cleanup timed out");
             }
         }
-        if matches!(server, BuiltinServerExit::AbortedAfterTimeout) {
-            tracing::warn!(
+        match &server {
+            BuiltinServerExit::Quit(reason) => tracing::debug!(
+                server = %self.instance,
+                ?reason,
+                "builtin server task 已退出"
+            ),
+            BuiltinServerExit::NotStarted(reason) | BuiltinServerExit::TaskFailed(reason) => {
+                tracing::warn!(
+                    server = %self.instance,
+                    error = %reason,
+                    "builtin server task 退出失败"
+                );
+            }
+            BuiltinServerExit::AbortedAfterTimeout => tracing::warn!(
                 server = %self.instance,
                 "builtin server task 未在有界等待内收敛，已 abort"
-            );
+            ),
         }
         BuiltinCloseOutcome { tick, server }
     }
 
     /// 所属实例名（server name / 配置 key）。
+    #[cfg(test)]
     pub(crate) fn instance(&self) -> &str {
         &self.instance
     }
@@ -311,6 +337,7 @@ impl BuiltinInstanceSupervisor {
     ///
     /// 无 tick 的一代不存在「tick 还在跑」的风险；读成 `false` 会让非 cron 实例永远
     /// 无法通过关闭检查。
+    #[cfg(test)]
     pub(crate) fn tick_is_finished(&self) -> bool {
         match &self.tick {
             Some(guard) => guard.is_finished(),

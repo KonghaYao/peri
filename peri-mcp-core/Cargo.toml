@@ -6,7 +6,6 @@ rust-version.workspace = true
 description = "Shared MCP contract logic independent of capability packages"
 
 [dependencies]
-parking_lot.workspace = true
 rmcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
