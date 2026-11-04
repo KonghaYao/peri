@@ -507,10 +507,10 @@ fn validate_cli(cli: &Cli) -> std::result::Result<(), String> {
                 .into(),
         );
     }
-    if let Some(Some(session_id)) = &cli.resume {
-        if session_id.trim().is_empty() {
-            return Err("--resume requires a non-empty session ID".into());
-        }
+    if let Some(Some(session_id)) = &cli.resume
+        && session_id.trim().is_empty()
+    {
+        return Err("--resume requires a non-empty session ID".into());
     }
     if matches!(cli.command, Some(Commands::Meta { .. }))
         && (cli.print.is_some()

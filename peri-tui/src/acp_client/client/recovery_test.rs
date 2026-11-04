@@ -448,15 +448,15 @@ async fn failed_recovery_meta_keeps_session_and_sets_notification() {
         "恢复失败不得写粘滞 restore_error"
     );
     let notification_state = atoms::NOTIFICATION.state();
-    let notice = notification_state.read();
-    let notice = notice.as_ref().expect("恢复失败必须有用户可见注记");
+    let notice_guard = notification_state.read();
+    let notice = notice_guard.as_ref().expect("恢复失败必须有用户可见注记");
     assert!(notice.message.contains("corrupt"), "{}", notice.message);
     assert!(
         notice.message.contains("missing parent"),
         "{}",
         notice.message
     );
-    drop(notice);
+    drop(notice_guard);
     assert!(CONFIRM_PAYLOAD.state().read().is_none());
     assert_no_request(&server, Duration::from_millis(50)).await;
 }

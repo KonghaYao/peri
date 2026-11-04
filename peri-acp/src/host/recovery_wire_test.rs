@@ -1,4 +1,5 @@
-//! 恢复的 wire 接线：请求 seam、错误码 `-32011` 与「响应先于恢复通知」。
+//! 恢复的 wire 接线：请求 seam、`_meta.peri.recovery` 与 `-32017` 执行阻断，
+//! 以及「响应先于恢复通知」。
 //!
 //! 走真实 `ServerLoop`：模式分流、生命周期锁与响应装配都是分发层的职责，只测
 //! `HostSessionRecovery` 会漏掉「恢复是否在响应之后放行」这一层。
@@ -360,6 +361,54 @@ async fn load_response_carries_saved_context_usage() {
         .await
         .unwrap();
     load_and_check_usage(&harness, 2, &thread_id, json!(4096), window).await;
+}
+
+/// `session/resume` 与 load 共用恢复接线：恢复失败仍是成功响应，原因放 `_meta`。
+#[tokio::test]
+async fn resume_returns_success_with_failed_recovery_meta() {
+    let harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "orphan-child", &root).await;
+    use sqlx::Connection as _;
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(&harness.db_path),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE threads SET parent_thread_id = 'ghost-parent' WHERE id = 'orphan-child'")
+        .execute(&mut connection)
+        .await
+        .unwrap();
+    drop(connection);
+
+    push_request(
+        &harness,
+        2,
+        "session/resume",
+        json!({"sessionId": "orphan-child"}),
+    );
+    run_server_loop(&harness).await;
+
+    let responses = harness.recorded.responses();
+    let (_, result) = responses
+        .iter()
+        .find(|(id, _)| *id == RequestId::Number(2))
+        .expect("resume 必须有响应");
+    let response = result.as_ref().expect("会话装配成功时 resume 必须返回 Ok");
+    let recovery = &response["_meta"]["peri.recovery"];
+    assert_eq!(recovery["status"], "failed", "{response}");
+    assert_eq!(recovery["error"]["kind"], "corrupt", "{response}");
+    assert_eq!(recovery["executionBlocked"], true, "{response}");
+    assert!(
+        harness
+            .cfg
+            .session_manager
+            .get_session("orphan-child")
+            .expect("会话 runtime 必须已登记")
+            .recovery_execution_block()
+            .is_some(),
+        "resume 的失败分类同样留下执行阻断"
+    );
 }
 
 async fn load_and_check_usage(

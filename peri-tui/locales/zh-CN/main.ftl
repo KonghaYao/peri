@@ -1431,6 +1431,7 @@ session-recovery-blocked = 历史已加载，但恢复准备失败（{ $kind }�
 session-recovery-failed-retryable = 历史已加载，但恢复准备失败（{ $kind }）：{ $detail }。可重试发送消息继续。
 session-recovery-partial = 历史已加载；{ $count } 个相关会话未能恢复。
 steer-recovery-blocked = 会话恢复未能完成，执行被阻止：{ $error }。原稿已保留；可重新进入会话重试，或用 /clear 新建。
+prompt-recovery-blocked = 会话恢复未能完成，执行被阻止：{ $error }。可重新进入会话重试，或用 /clear 新建。
 session-creation-failed = 会话创建失败：{ $error }
 
 panel-host-settings = 宿主配置

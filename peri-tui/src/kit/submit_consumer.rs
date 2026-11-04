@@ -213,9 +213,10 @@ async fn handle_agent_text_submit(
         reset_failed_prompt(&session_id, &request_id);
         if e.code == crate::kit::RECOVERY_EXECUTION_BLOCKED_CODE {
             // 非 steer 的直接提交只有日志；恢复阻断必须让用户看到原因。
+            // 该路径没有把文本放回输入框，文案不能声称「原稿已保留」。
             NOTIFICATION.set(Some(crate::kit::atoms::Notification {
                 message: i18n::tr_args(
-                    "steer-recovery-blocked",
+                    "prompt-recovery-blocked",
                     &[("error".into(), e.message.clone().into())],
                 ),
                 until: peri_time::monotonic_now() + Duration::from_secs(15),
