@@ -408,3 +408,29 @@ fn test_streaming_system_note_survives_turn_suspended_archive() {
     );
     assert!(state.current_turn.is_empty());
 }
+
+#[test]
+#[serial]
+fn test_streaming_error_note_visible_at_execution_failure_boundary() {
+    let mut state = make_fold_test_state();
+    dispatch_for_bridge(&mut state, &text_chunk("正文", None));
+    dispatch_for_bridge(
+        &mut state,
+        &AcpEventData::AgentExecutionFailed {
+            message: "boom".into(),
+        },
+    );
+
+    let labels = committed_labels(&state);
+    assert_eq!(
+        labels.len(),
+        2,
+        "失败边界应立即归档正文与错误 note: {labels:?}"
+    );
+    assert_eq!(labels[0], "bubble:正文");
+    assert!(
+        labels[1].starts_with("note:") && labels[1].contains("boom"),
+        "错误 note 必须不依赖后续 TurnDone 才可见: {labels:?}"
+    );
+    assert!(state.current_turn.is_empty());
+}

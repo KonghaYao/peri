@@ -42,8 +42,9 @@ MCP 连接在后台异步完成 → `SystemNotification` 与流式 `TextChunk` �
 
 ## 验证记录
 
-- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --lib -- kit::acp_events::acp_events_test::streaming_test` → 18 passed，0 failed；新增 6 条 SystemNote 用例全部通过。
-- `... -- kit::acp_events::acp_events_test` → 290 passed，0 failed，4 ignored。首跑出现一次 `history_window_page_test::accepted_page_with_commit_receipt_seals_immediately` 失败；该用例隔离运行通过，随后连续 3 次全模块运行均 290 passed，且不涉及本改动路径。
+- `./scripts/cargo-rmcp-patched.sh test --locked -p peri-tui --lib -- kit::acp_events::acp_events_test::streaming_test` → 19 passed，0 failed；新增 7 条 SystemNote 用例全部通过。
+- CodeRabbit 意见（成立）：`AgentExecutionFailed` 是终态，排队中的错误 note 不能依赖后续 `TurnDone` 才可见；`agent.rs` 在注入后立即归档，并新增回归用例。该路径同时暴露 `is_empty()` 未计入尚未投影的 `segments`，已补齐。
+- `... -- kit::acp_events::acp_events_test` → 291 passed，0 failed，4 ignored。首跑出现一次 `history_window_page_test::accepted_page_with_commit_receipt_seals_immediately` 失败；该用例隔离运行通过，随后连续 3 次全模块运行均通过，且不涉及本改动路径。
 - `./scripts/check-changed.sh` → `cargo check --locked -p peri-tui` Finished，无错误。
 - `cargo fmt -p peri-tui -- --check` → 通过。
 - `git diff --check` → 通过。

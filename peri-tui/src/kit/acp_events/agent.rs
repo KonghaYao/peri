@@ -30,6 +30,8 @@ pub(super) fn handle_agent_execution_failed(state: &mut BridgeState, message: &s
     state
         .current_turn
         .push_system_note(text, TuiNoteLevel::Error, content_hash);
+    // 失败是终态：立即归档，排队中的错误 note 不依赖后续 TurnDone 才可见。
+    state.flush_current_turn();
     state.publish_barrier();
     super::render::push_acp_state(state);
 }

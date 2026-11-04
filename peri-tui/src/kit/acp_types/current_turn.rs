@@ -432,6 +432,7 @@ impl CurrentTurn {
             && self.tool_cards.is_empty()
             && self.subagents.is_empty()
             && self.pending_notes.is_empty()
+            && self.segments.is_empty()
             && self.cached_view_models.is_empty()
     }
 
