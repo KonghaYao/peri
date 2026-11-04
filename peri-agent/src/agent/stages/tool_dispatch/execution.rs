@@ -20,7 +20,7 @@ use super::effective_dispatcher::StageEffectiveToolDispatcher;
 use crate::agent::events_v2::RenderEvent;
 use crate::agent::react::{ToolCall, ToolResult};
 use crate::error::{AgentError, AgentResult};
-use crate::messages::{BaseMessage, MessageId};
+use crate::messages::{BaseMessage, ContentBlock, MessageContent, MessageId};
 use crate::session::subagent::SubagentFailure;
 use crate::session::tool_catalog::SessionToolCatalogSnapshot;
 use crate::tools::{
@@ -139,6 +139,9 @@ pub(super) struct SettledInvocation {
     pub(super) call: ToolCall,
     pub(super) result: ToolResult,
     pub(super) outcome: ToolOutcome,
+    /// 工具 raw content 中的图片块：模型面工具消息在多模态协议上追加这些块。
+    /// 文本投影（`result.output` / 事件）保持不变。
+    pub(super) media: Vec<ContentBlock>,
 }
 
 impl SettledInvocation {
@@ -148,8 +151,51 @@ impl SettledInvocation {
             call,
             result,
             outcome: ToolOutcome::Unreported,
+            media: Vec::new(),
         }
     }
+}
+
+/// 把 `ToolOutput.raw` 中 MCP 形状的图片块转成模型消息内容块。
+///
+/// 只提升图片；文本仍使用 `ToolOutput.text` 的既有投影，保证截断/摘要语义不变。
+fn model_media_blocks(output: &ToolOutput) -> Vec<ContentBlock> {
+    let Some(raw) = output.raw() else {
+        return Vec::new();
+    };
+    raw.content()
+        .iter()
+        .filter_map(|block| {
+            if block.get("type").and_then(serde_json::Value::as_str) != Some("image") {
+                return None;
+            }
+            let media_type = block.get("mimeType").and_then(serde_json::Value::as_str)?;
+            let data = block.get("data").and_then(serde_json::Value::as_str)?;
+            Some(ContentBlock::image_base64(media_type, data))
+        })
+        .collect()
+}
+
+/// 生成模型可见的工具结果消息；有图片时用 Blocks 携带文本 + 图片。
+pub(super) fn settled_tool_message(settled: &SettledInvocation) -> BaseMessage {
+    let result = &settled.result;
+    let content = if settled.media.is_empty() {
+        MessageContent::text(result.output.clone())
+    } else {
+        let mut blocks = Vec::with_capacity(settled.media.len() + 1);
+        if !result.output.is_empty() {
+            blocks.push(ContentBlock::text(result.output.clone()));
+        }
+        blocks.extend(settled.media.iter().cloned());
+        MessageContent::Blocks(blocks)
+    };
+    BaseMessage::tool_result_with_execution_and_failure(
+        &result.tool_call_id,
+        content,
+        result.is_error,
+        result.execution.clone(),
+        result.subagent_failure.clone(),
+    )
 }
 
 /// 分配一次 canonical 执行的执行身份。
@@ -620,8 +666,14 @@ async fn settle_results(
             Ok(output) => output.outcome.clone(),
             Err(_) => ToolOutcome::Unreported,
         };
-        let mut result = match tool_result {
-            Ok(output) => ToolResult::from_output(&modified_call.id, &modified_call.name, output),
+        let (mut result, media) = match tool_result {
+            Ok(output) => {
+                let media = model_media_blocks(&output);
+                (
+                    ToolResult::from_output(&modified_call.id, &modified_call.name, output),
+                    media,
+                )
+            }
             Err(ref e) => {
                 let mut result =
                     ToolResult::error(&modified_call.id, &modified_call.name, e.to_string());
@@ -632,7 +684,7 @@ async fn settle_results(
                     result.output.push('\n');
                     result.output.push_str(&failure.render_model_summary());
                 }
-                result
+                (result, Vec::new())
             }
         };
 
@@ -661,6 +713,7 @@ async fn settle_results(
             call: modified_call,
             result,
             outcome,
+            media,
         });
     }
 

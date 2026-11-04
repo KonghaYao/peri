@@ -320,7 +320,7 @@ async fn test_read_file_binary_extension() {
     let tool = ReadFileTool::new(dir.path().to_str().unwrap());
     let result = tool
         .invoke(
-            serde_json::json!({"file_path": "image.png"}),
+            serde_json::json!({"file_path": "archive.zip"}),
             peri_agent::tools::ToolContext::new(&[], "."),
         )
         .await
@@ -328,6 +328,76 @@ async fn test_read_file_binary_extension() {
     assert!(
         result.contains("BINARY FILE DETECTED"),
         "should detect binary: {result}"
+    );
+}
+
+#[tokio::test]
+async fn test_read_png_returns_image_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pixel.png");
+    image::RgbImage::new(1, 1).save(&path).unwrap();
+    let tool = ReadFileTool::new(dir.path().to_str().unwrap());
+    let output = tool
+        .invoke_output(
+            serde_json::json!({"file_path": "pixel.png"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+
+    assert!(output.text.contains("image/png"), "text: {}", output.text);
+    let raw = output.raw().expect("image read must report raw content");
+    let image_block = raw
+        .content()
+        .iter()
+        .find(|block| block["type"] == "image")
+        .expect("raw content must include an image block");
+    assert_eq!(image_block["mimeType"], "image/png");
+    assert!(!image_block["data"].as_str().unwrap_or_default().is_empty());
+}
+
+#[tokio::test]
+async fn test_read_non_image_with_png_extension_falls_back_to_binary_notice() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("fake.png"), "not an image").unwrap();
+    let tool = ReadFileTool::new(dir.path().to_str().unwrap());
+    let output = tool
+        .invoke_output(
+            serde_json::json!({"file_path": "fake.png"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        output.raw().is_none(),
+        "non-image bytes must not report raw"
+    );
+    assert!(
+        output.text.contains("BINARY FILE DETECTED"),
+        "text: {}",
+        output.text
+    );
+}
+
+#[tokio::test]
+async fn test_read_oversized_png_is_an_explanatory_error() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::File::create(dir.path().join("large.png"))
+        .unwrap()
+        .set_len(crate::image::MAX_IMAGE_BYTES as u64 + 1)
+        .unwrap();
+    let tool = ReadFileTool::new(dir.path().to_str().unwrap());
+    let error = tool
+        .invoke_output(
+            serde_json::json!({"file_path": "large.png"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .expect_err("oversized image must fail");
+    assert!(
+        error.to_string().contains("Image too large"),
+        "error: {error}"
     );
 }
 

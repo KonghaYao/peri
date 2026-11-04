@@ -130,3 +130,45 @@ async fn tool_failures_preserve_diagnostic_error_result() {
         "固定规则文本必须含工具名：{bash_text}"
     );
 }
+
+/// Read 的图片必须经 MCP content 原样到达宿主；文本仍保留路径与 mime 供
+/// 不支持图片块的客户端降级显示。
+#[tokio::test]
+async fn read_png_returns_mcp_image_content() {
+    use base64::Engine as _;
+
+    let dir = tempfile::tempdir().expect("临时目录夹具必须可创建");
+    let path = dir.path().join("pixel.png");
+    image::RgbImage::new(1, 1).save(&path).unwrap();
+    let server = server_in(&dir);
+
+    let result = complete(
+        invoke_tool_call(
+            server.tools(),
+            &server.cwd,
+            &request("Read", json!({"file_path": "pixel.png"})),
+        )
+        .await
+        .expect("图片读取必须返回协议结果"),
+    );
+
+    let image = result
+        .content
+        .iter()
+        .find_map(|block| match block {
+            ContentBlock::Image(image) => Some(image),
+            _ => None,
+        })
+        .expect("Read 必须返回 MCP image content");
+    assert_eq!(image.mime_type, "image/png");
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&image.data)
+        .expect("图片块必须是标准 base64");
+    assert_eq!(
+        decoded,
+        std::fs::read(&path).unwrap(),
+        "图片字节不得被重新编码或截断"
+    );
+    let text = first_text(&result).expect("图片结果仍需文本块");
+    assert!(text.contains("image/png"), "文本必须标注 mime：{text}");
+}

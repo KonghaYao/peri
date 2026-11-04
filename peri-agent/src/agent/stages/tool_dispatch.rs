@@ -27,7 +27,7 @@ use crate::error::{AgentError, AgentResult};
 use crate::messages::{BaseMessage, ToolCallRequest};
 use crate::session::tool_catalog::SessionToolCatalogSnapshot;
 use crate::tools::{BaseTool, CanonicalToolInvocation};
-use execution::{collect_tool_results, SettledInvocation};
+use execution::{collect_tool_results, settled_tool_message, SettledInvocation};
 
 /// 连续失败检测阈值
 const CONSECUTIVE_FAILURE_THRESHOLD: u32 = 5;
@@ -242,15 +242,7 @@ pub async fn dispatch_tools(
         let mut tx = ctx.session.transcript.write();
         tx.stage_ai_message(ai_msg);
         for settled in &collect_outcome.results {
-            let result = &settled.result;
-            let tool_msg = BaseMessage::tool_result_with_execution_and_failure(
-                &result.tool_call_id,
-                result.output.as_str(),
-                result.is_error,
-                result.execution.clone(),
-                result.subagent_failure.clone(),
-            );
-            tx.stage_tool_result(tool_msg);
+            tx.stage_tool_result(settled_tool_message(settled));
         }
         for (_, result) in &resolution_errors {
             tx.stage_tool_result(BaseMessage::tool_error(

@@ -1,4 +1,5 @@
-use peri_agent::tools::BaseTool;
+use peri_acp_types::tool_outcome::RawToolResult;
+use peri_agent::tools::{BaseTool, ToolOutput};
 use peri_mcp_common::failure::ToolFailure;
 use serde_json::Value;
 
@@ -14,6 +15,69 @@ pub struct ReadFileTool {
 impl ReadFileTool {
     pub fn new(cwd: impl Into<String>) -> Self {
         Self { cwd: cwd.into() }
+    }
+
+    /// 图片读取：扩展名命中图片集时返回带 image 内容块的 MCP 风格结果。
+    ///
+    /// `NotFound` / `NotFile` / `NotImage` 回落既有文本/二进制分支，让缺文件、
+    /// 目录和伪装图片保持原有诊断；只有真正读到的图片才携带 base64 内容。
+    fn try_read_image(
+        &self,
+        input: &Value,
+    ) -> Result<Option<ToolOutput>, Box<dyn std::error::Error + Send + Sync>> {
+        let Some(file_path) = input["file_path"].as_str() else {
+            return Ok(None);
+        };
+        let resolved = resolve_path(&self.cwd, file_path);
+        let is_image = resolved
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| is_image_extension(&ext.to_lowercase()));
+        if !is_image {
+            return Ok(None);
+        }
+        let image = match crate::image::read_image_data(
+            &self.cwd,
+            &resolved.to_string_lossy(),
+            crate::image::MAX_IMAGE_BYTES,
+        ) {
+            Ok(image) => image,
+            Err(crate::image::ImageReadError::TooLarge) => {
+                return Err(ToolFailure::new(
+                    "Image too large. Resize the image or read it with a shell tool.",
+                    format!(
+                        "Error: Image too large (max {} bytes): {}",
+                        crate::image::MAX_IMAGE_BYTES,
+                        resolved.display()
+                    ),
+                )
+                .into());
+            }
+            Err(crate::image::ImageReadError::CannotRead) => {
+                return Err(ToolFailure::new(
+                    "Cannot read image file. Verify permissions or use a shell tool.",
+                    format!("Error: Cannot read image at {}", resolved.display()),
+                )
+                .into());
+            }
+            Err(
+                crate::image::ImageReadError::NotFound
+                | crate::image::ImageReadError::NotFile
+                | crate::image::ImageReadError::NotImage,
+            ) => return Ok(None),
+        };
+        let text = format!(
+            "Image read: {} ({}). Image content is attached below.",
+            resolved.display(),
+            image.media_type
+        );
+        let raw = RawToolResult::new(serde_json::json!({
+            "content": [
+                {"type": "text", "text": text.clone()},
+                {"type": "image", "data": image.data, "mimeType": image.media_type},
+            ]
+        }));
+        Ok(Some(ToolOutput::from_raw_result(text, raw)))
     }
 }
 
@@ -55,6 +119,10 @@ fn parse_line_number(
         .into());
     }
     Ok(n as usize)
+}
+
+fn is_image_extension(ext: &str) -> bool {
+    matches!(ext, "png" | "jpg" | "jpeg" | "gif" | "webp")
 }
 
 fn is_binary_extension(ext: &str) -> bool {
@@ -154,6 +222,17 @@ impl BaseTool for ReadFileTool {
 
     fn aliases(&self) -> &[&str] {
         &["reading"]
+    }
+
+    async fn invoke_output(
+        &self,
+        input: Value,
+        ctx: peri_agent::tools::ToolContext<'_>,
+    ) -> Result<ToolOutput, Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(output) = self.try_read_image(&input)? {
+            return Ok(output);
+        }
+        self.invoke(input, ctx).await.map(ToolOutput::from_legacy)
     }
 
     async fn invoke(
