@@ -1,6 +1,8 @@
 use super::super::tool_card::ToolCardAccumulator;
-use super::{CurrentTurn, TurnSegment};
-use crate::kit::tui_render_unit::{TuiNoteLevel, tui_hash_roll_update};
+use super::{CurrentTurn, PendingNote, TurnSegment};
+use crate::kit::tui_render_unit::{
+    TuiNoteLevel, TuiRenderUnit, TuiSystemNote, tui_hash_roll_update,
+};
 
 impl CurrentTurn {
     /// If text has grown since the last `AssistantText` segment, push a new
@@ -44,6 +46,44 @@ impl CurrentTurn {
             // 段切走后新消息的推理重新计时（幂等：无增长时 no-op 不重置）。
             self.trailing_reasoning_frozen_ms = None;
         }
+        // 必须在缓存尾部截断之后落 note：同步 cache 的 `len() <= i` 守卫要求
+        // `segments[i] ↔ cached_view_models[i]` 对齐。无增长时本就无 trailing 可截断。
+        self.materialize_pending_notes();
+    }
+
+    /// 按 FIFO 把待落 note 转成 `SystemNote` 段。
+    ///
+    /// 只由 [`Self::flush_text_segment`] 在文本段冻结后调用；不得再调用
+    /// `flush_text_segment`（会递归）。归档路径走 [`Self::take_pending_notes`]。
+    fn materialize_pending_notes(&mut self) {
+        if self.pending_notes.is_empty() {
+            return;
+        }
+        for note in self.pending_notes.drain(..) {
+            self.segments.push(TurnSegment::SystemNote {
+                text: note.text,
+                level: note.level,
+                content_hash: note.content_hash,
+            });
+        }
+        self.invalidate_cache();
+    }
+
+    /// 取出待落 note 并转成渲染单元，供 turn 归档追加到 committed。
+    ///
+    /// 归档不能为落 note 而 flush trailing 文本（会丢失正文时长），因此调用方
+    /// 先归档含 trailing 气泡的 `view_models()`，再追加本方法结果。
+    pub(crate) fn take_pending_notes(&mut self) -> Vec<TuiRenderUnit> {
+        self.pending_notes
+            .drain(..)
+            .map(|note| {
+                TuiRenderUnit::TuiSystemNote(TuiSystemNote {
+                    text: note.text,
+                    level: note.level,
+                    content_hash: note.content_hash,
+                })
+            })
+            .collect()
     }
 
     /// Append a text chunk from `"text-chunk"`.
@@ -160,10 +200,23 @@ impl CurrentTurn {
 
     /// 在 current_turn 内部时序位置注入一条 SystemNote（如 final cache coverage 警告）。
     ///
-    /// 先 flush 挂起的 text segment，再将 SystemNote 作为独立 segment 追加。
-    /// 这样 SystemNote 天然位于已产出 AI 内容之后、后续内容之前，
+    /// 有未冻结文本时不打断正在增长的 assistant 消息：note 入队，等当前文本段
+    /// 冻结后再落段（否则同一 ACP 消息会被拆成多个气泡，Markdown 上下文断裂）。
+    /// 无流式文本时保持立即落段，note 天然位于已产出 AI 内容之后、后续内容之前，
     /// 不再依赖 `flush_current_turn()` 及其 `has_running_subagent` 守卫。
     pub fn push_system_note(&mut self, text: String, level: TuiNoteLevel, content_hash: u64) {
+        if self.text.len() > self.last_text_flush
+            || self.reasoning.len() > self.last_reasoning_flush
+        {
+            self.pending_notes.push(PendingNote {
+                text,
+                level,
+                content_hash,
+            });
+            self.active = true;
+            self.invalidate_cache();
+            return;
+        }
         self.flush_text_segment();
         self.segments.push(TurnSegment::SystemNote {
             text,
