@@ -181,6 +181,26 @@ impl AcpTuiClient {
             let msg = transport.recv().await;
             match msg {
                 Some(IncomingMessage::Notification { method, params }) => {
+                    // 服务端撤销挂起请求（提问超时）：按 wire id 认领并结算，
+                    // 关闭问答面板/交互块，让后续输入恢复为普通 prompt。
+                    if method
+                        == agent_client_protocol_schema::v1::PROTOCOL_LEVEL_METHOD_NAMES
+                            .cancel_request
+                    {
+                        let request_id = params.get("requestId").and_then(|value| {
+                            serde_json::from_value::<RequestId>(value.clone()).ok()
+                        });
+                        if let Some(request_id) = request_id {
+                            let _gate = lifecycle.operation_gate().lock().await;
+                            if let Some(claim) = lifecycle
+                                .claim_by_request_id(&request_id, ClaimCause::ServerCancelled)
+                            {
+                                Self::settle_claims(&transport, &notification_tx, vec![claim])
+                                    .await;
+                            }
+                        }
+                        continue;
+                    }
                     let view_epoch = crate::kit::atoms::BRIDGE_RESET_COUNTER.get();
                     let child_origin = match params.pointer("/_meta/peri/childRun") {
                         None => None,

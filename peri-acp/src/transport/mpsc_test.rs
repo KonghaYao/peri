@@ -330,3 +330,55 @@ async fn test_send_or_close_times_out_and_closes_connection_when_peer_stalls() {
         "等待超时后连接必须关闭，避免后续写入继续排队"
     );
 }
+
+/// 服务端放弃等待（提问超时等）而丢弃 future 时，必须向客户端发
+/// `$/cancel_request`：否则客户端会把已放弃的 elicitation 永久当作 pending，
+/// 阻塞后续输入（镜像 ACP SDK 的 drop-time cancellation）。
+#[tokio::test]
+async fn test_abandoned_server_request_sends_cancel_notification() {
+    let (client, server) = mpsc_transport_pair();
+    let request = tokio::spawn(async move {
+        server
+            .send_request("elicitation/create", json!({"sessionId": "s1"}))
+            .await
+    });
+
+    let IncomingMessage::Request { id, .. } = client.recv().await.unwrap() else {
+        panic!("expected server request");
+    };
+    request.abort();
+
+    let message = tokio::time::timeout(Duration::from_secs(1), client.recv())
+        .await
+        .expect("丢弃请求后必须送达取消通知")
+        .unwrap();
+    let IncomingMessage::Notification { method, params } = message else {
+        panic!("expected cancel notification");
+    };
+    assert_eq!(method, "$/cancel_request");
+    assert_eq!(
+        serde_json::from_value::<RequestId>(params["requestId"].clone()).unwrap(),
+        id
+    );
+}
+
+/// 正常完成的请求不得发送取消通知（drop guard 只在放弃等待时生效）。
+#[tokio::test]
+async fn test_completed_server_request_sends_no_cancel_notification() {
+    let (client, server) = mpsc_transport_pair();
+    let request = tokio::spawn(async move { server.send_request("test/echo", json!({})).await });
+
+    let IncomingMessage::Request { id, .. } = client.recv().await.unwrap() else {
+        panic!("expected server request");
+    };
+    client
+        .send_response(id, Ok(json!({"ok": true})))
+        .await
+        .unwrap();
+    assert_eq!(request.await.unwrap().unwrap(), json!({"ok": true}));
+
+    match tokio::time::timeout(Duration::from_millis(100), client.recv()).await {
+        Err(_) | Ok(None) => {}
+        Ok(Some(message)) => panic!("已完成的请求不应产生取消通知: {message:?}"),
+    }
+}
