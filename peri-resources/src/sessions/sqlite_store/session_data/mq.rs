@@ -542,10 +542,16 @@ impl SqliteSessionData {
             }
         };
         // 接收方工作意图与结果接纳共用同一事务（设计 §5.3）。已移交历史的结果
-        // 不再要求继续处理，重复结算不能把目标重新提升为 working。
-        let pending = outcome.disposition != MqEnqueueDisposition::AlreadyHandedOff;
-        self.maintain_work_intent_on_accept(&mut tx, target, ensures_processing && pending)
-            .await?;
+        // 不再要求继续处理；结果投递回 child 自己（恢复期自投递）不构成新的接收方，
+        // 不能把它刚写的终态 work_state 重新提升为 working。
+        let receiver_pending =
+            target != child && outcome.disposition != MqEnqueueDisposition::AlreadyHandedOff;
+        self.maintain_work_intent_on_accept(
+            &mut tx,
+            target,
+            ensures_processing && receiver_pending,
+        )
+        .await?;
         tx.commit()
             .await
             .map_err(|_| commit_failure(Some(child.clone())))?;
