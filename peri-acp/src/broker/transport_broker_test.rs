@@ -812,6 +812,49 @@ async fn test_questions_timeout_returns_rejected() {
 }
 
 #[tokio::test]
+async fn test_questions_timeout_notifies_client_cancel_request() {
+    // 回归：超时放弃 elicitation 后必须通知客户端撤销，否则 TUI 面板会永久
+    // pending，后续输入无法作为普通 prompt 发出。
+    use crate::transport::mpsc::mpsc_transport_pair;
+    use crate::transport::types::{IncomingMessage, RequestId};
+    use crate::transport::{AcpRequestBridge, AcpTransport};
+
+    let (client, server) = mpsc_transport_pair();
+    let broker = AcpTransportBroker::new(
+        Arc::new(AcpRequestBridge(Arc::new(server))),
+        SessionId::new("s1"),
+        interaction_gate(),
+    )
+    .with_timeout(Some(Duration::from_millis(50)));
+    let resp = broker
+        .request(
+            owner(),
+            InteractionContext::Questions {
+                requests: sample_questions(),
+            },
+        )
+        .await;
+    assert!(matches!(resp, InteractionResponse::Rejected));
+
+    let IncomingMessage::Request { id, method, .. } = client.recv().await.unwrap() else {
+        panic!("expected elicitation request");
+    };
+    assert_eq!(method, "elicitation/create");
+    let message = tokio::time::timeout(Duration::from_secs(1), client.recv())
+        .await
+        .expect("超时后必须送达取消通知")
+        .unwrap();
+    let IncomingMessage::Notification { method, params } = message else {
+        panic!("expected cancel notification");
+    };
+    assert_eq!(method, "$/cancel_request");
+    assert_eq!(
+        serde_json::from_value::<RequestId>(params["requestId"].clone()).unwrap(),
+        id
+    );
+}
+
+#[tokio::test]
 async fn test_questions_transport_error_returns_empty_answers() {
     // transport 断连（send_request 报错）：空 Answers 而非挂死。
     struct ErrorTransport;
