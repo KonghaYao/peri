@@ -255,6 +255,11 @@ impl BridgeState {
             for vm in self.current_turn.view_models() {
                 self.committed.push_back(vm.clone());
             }
+            // 不为落 note 而 flush trailing 文本（会丢失正文时长）：先归档含
+            // trailing 气泡的 VM，再把待落 note 依序追加到整条回复之后。
+            for note in self.current_turn.take_pending_notes() {
+                self.committed.push_back(note);
+            }
         }
         self.current_turn.take_completed_subagents();
         let range = start..self.committed.len();
