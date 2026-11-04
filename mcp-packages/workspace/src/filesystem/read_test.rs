@@ -385,7 +385,7 @@ async fn test_read_oversized_png_is_an_explanatory_error() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::File::create(dir.path().join("large.png"))
         .unwrap()
-        .set_len(crate::image::MAX_IMAGE_BYTES as u64 + 1)
+        .set_len(READ_IMAGE_MAX_BYTES as u64 + 1)
         .unwrap();
     let tool = ReadFileTool::new(dir.path().to_str().unwrap());
     let error = tool
@@ -398,6 +398,58 @@ async fn test_read_oversized_png_is_an_explanatory_error() {
     assert!(
         error.to_string().contains("Image too large"),
         "error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_read_image_still_validates_shared_parameters() {
+    let dir = tempfile::tempdir().unwrap();
+    image::RgbImage::new(1, 1)
+        .save(dir.path().join("pixel.png"))
+        .unwrap();
+    let tool = ReadFileTool::new(dir.path().to_str().unwrap());
+
+    for (input, expected) in [
+        (
+            serde_json::json!({"file_path": "pixel.png", "pages": "1-2"}),
+            "pages",
+        ),
+        (
+            serde_json::json!({"file_path": "pixel.png", "offset": 0}),
+            "positive integer",
+        ),
+    ] {
+        let error = tool
+            .invoke_output(input, peri_agent::tools::ToolContext::new(&[], "."))
+            .await
+            .expect_err("image path must not bypass shared validation");
+        assert!(
+            error.to_string().contains(expected),
+            "error must mention {expected}: {error}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_read_image_uses_requested_extension_before_canonicalize() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    image::RgbImage::new(1, 1)
+        .save_with_format(&target, image::ImageFormat::Png)
+        .unwrap();
+    std::os::unix::fs::symlink(&target, dir.path().join("photo.png")).unwrap();
+    let tool = ReadFileTool::new(dir.path().to_str().unwrap());
+    let output = tool
+        .invoke_output(
+            serde_json::json!({"file_path": "photo.png"}),
+            peri_agent::tools::ToolContext::new(&[], "."),
+        )
+        .await
+        .unwrap();
+    assert!(
+        output.raw().is_some(),
+        "symlink 的请求侧扩展名也必须触发图片读取"
     );
 }
 

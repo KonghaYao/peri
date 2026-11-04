@@ -13,12 +13,13 @@ Usage:
 - This tool reads files from the local filesystem; it cannot handle URLs
 - You can call multiple tools in a single response.
 - You should prefer using the Read tool over the Bash tool with commands like cat, head, tail, or sed to read files. This provides better output formatting and filtering
-- Images: .png, .jpg, .jpeg, .gif, and .webp files up to 20 MB are returned as image content for multimodal inspection, not as text
+- Images: .png, .jpg, .jpeg, .gif, and .webp files up to 10 MB are returned as image content for multimodal inspection, not as text
 - For open-ended searches that may require multiple rounds of globbing and grepping, use the Agent tool instead
 
 Error handling:
 - File not found: returns an error message indicating the path does not exist
 - Other binary files: detected by extension and returns a message indicating the file cannot be displayed as text
+- Images over 10 MB: returns an error; resize the image or inspect it with a shell tool
 - Files exceeding 32 MB: returns an error; offset/limit cannot bypass the file-size limit, so use Grep to locate content or another suitable file-processing tool
 - Offset exceeds file length: returns the actual line count and valid offset range. Do not guess another offset; omit it to restart from the beginning
 - Empty files: return an explicit `[EMPTY FILE]` marker instead of a numbered blank line

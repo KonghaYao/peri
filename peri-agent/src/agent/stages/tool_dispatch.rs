@@ -21,6 +21,7 @@ mod execution;
 
 use super::middleware_runner::run_after_tools_batch;
 use super::{ExecutionEntryOrigin, InvocationContext, StageContext};
+use crate::agent::compact_v2::projection::ProviderProtocol;
 use crate::agent::events_v2::RenderEvent;
 use crate::agent::react::{Reasoning, ToolCall, ToolResult};
 use crate::error::{AgentError, AgentResult};
@@ -239,10 +240,14 @@ pub async fn dispatch_tools(
 
     // 阶段 B：原子写入 transcript（staging 模式）
     {
+        let allow_tool_images = matches!(
+            ctx.runtime.llm.provider_capabilities().protocol,
+            ProviderProtocol::Anthropic | ProviderProtocol::OpenAiResponses
+        );
         let mut tx = ctx.session.transcript.write();
         tx.stage_ai_message(ai_msg);
         for settled in &collect_outcome.results {
-            tx.stage_tool_result(settled_tool_message(settled));
+            tx.stage_tool_result(settled_tool_message(settled, allow_tool_images));
         }
         for (_, result) in &resolution_errors {
             tx.stage_tool_result(BaseMessage::tool_error(

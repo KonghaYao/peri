@@ -17,37 +17,43 @@ impl ReadFileTool {
         Self { cwd: cwd.into() }
     }
 
-    /// 图片读取：扩展名命中图片集时返回带 image 内容块的 MCP 风格结果。
+    /// 图片读取：请求路径或解析目标命中图片扩展名时返回带 image 内容块的 MCP 风格结果。
     ///
     /// `NotFound` / `NotFile` / `NotImage` 回落既有文本/二进制分支，让缺文件、
     /// 目录和伪装图片保持原有诊断；只有真正读到的图片才携带 base64 内容。
-    fn try_read_image(
+    async fn try_read_image(
         &self,
         input: &Value,
     ) -> Result<Option<ToolOutput>, Box<dyn std::error::Error + Send + Sync>> {
-        let Some(file_path) = input["file_path"].as_str() else {
-            return Ok(None);
-        };
-        let resolved = resolve_path(&self.cwd, file_path);
-        let is_image = resolved
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| is_image_extension(&ext.to_lowercase()));
+        let request = parse_read_request(input)?;
+        let resolved = resolve_path(&self.cwd, request.file_path);
+        // 同时看请求名与解析目标：`photo.png -> target` 的 symlink 不能因
+        // canonicalize 丢失请求侧扩展名，反向链接也保持可用。
+        let is_image = has_image_extension(std::path::Path::new(request.file_path))
+            || has_image_extension(&resolved);
         if !is_image {
             return Ok(None);
         }
-        let image = match crate::image::read_image_data(
-            &self.cwd,
-            &resolved.to_string_lossy(),
-            crate::image::MAX_IMAGE_BYTES,
-        ) {
+        let cwd = self.cwd.clone();
+        let request_path = request.file_path.to_owned();
+        let image = tokio::task::spawn_blocking(move || {
+            crate::image::read_image_data(&cwd, &request_path, READ_IMAGE_MAX_BYTES)
+        })
+        .await
+        .map_err(|_| {
+            ToolFailure::new(
+                "Image read failed. Retry the Read call.",
+                "Error: Image read task failed",
+            )
+        })?;
+        let image = match image {
             Ok(image) => image,
             Err(crate::image::ImageReadError::TooLarge) => {
                 return Err(ToolFailure::new(
                     "Image too large. Resize the image or read it with a shell tool.",
                     format!(
                         "Error: Image too large (max {} bytes): {}",
-                        crate::image::MAX_IMAGE_BYTES,
+                        READ_IMAGE_MAX_BYTES,
                         resolved.display()
                     ),
                 )
@@ -66,11 +72,7 @@ impl ReadFileTool {
                 | crate::image::ImageReadError::NotImage,
             ) => return Ok(None),
         };
-        let text = format!(
-            "Image read: {} ({}). Image content is attached below.",
-            resolved.display(),
-            image.media_type
-        );
+        let text = format!("Image read: {} ({}).", resolved.display(), image.media_type);
         let raw = RawToolResult::new(serde_json::json!({
             "content": [
                 {"type": "text", "text": text.clone()},
@@ -84,6 +86,9 @@ impl ReadFileTool {
 const MAX_LINES: usize = 2000;
 /// 最大允许读取的文件大小（32 MB）
 const MAX_FILE_SIZE: u64 = 32 * 1024 * 1024;
+/// Read 图片上限：10 MiB 解码后 base64 约 13.3 MiB，低于 transcript 单次
+/// 持久化 16 MiB 预算；`@image` 附件通路仍按 `image::MAX_IMAGE_BYTES`。
+const READ_IMAGE_MAX_BYTES: usize = 10 * 1024 * 1024;
 /// 单行最大字符数（超过则截断）
 const MAX_CHARS_PER_LINE: usize = 65536;
 /// 输出最大字节数（超过后按行截断并提示分段读取；Read 不落盘——落盘文件会被
@@ -119,6 +124,48 @@ fn parse_line_number(
         .into());
     }
     Ok(n as usize)
+}
+
+/// 图片分支与文本分支共用的参数集合；图片不得绕过 pages/offset/limit 校验。
+struct ReadRequest<'a> {
+    file_path: &'a str,
+    offset: usize,
+    limit: usize,
+}
+
+fn parse_read_request(
+    input: &Value,
+) -> Result<ReadRequest<'_>, Box<dyn std::error::Error + Send + Sync>> {
+    let file_path = input["file_path"]
+        .as_str()
+        .ok_or_else(|| ToolFailure::new("The 'file_path' parameter is required for the Read tool. Provide the absolute path to the file.", "The 'file_path' parameter is required for the Read tool. Provide the absolute path to the file."))?;
+
+    // offset 语义为 1-based 行号（1 = 首行），与 schema 描述、输出行号一致；
+    // 缺省 offset=1（读全文起点）、limit=2000。
+    let offset = parse_line_number(&input["offset"], "offset", 1)?;
+    let limit = parse_line_number(&input["limit"], "limit", MAX_LINES)?;
+
+    if input.get("pages").is_some_and(|pages| !pages.is_null()) {
+        let workaround = peri_acp_types::builtin_mcp::effective_name_of("workspace", "Bash")
+            .map_or_else(
+                || "Use a shell command with a PDF reader".to_string(),
+                |name| format!("Use the `{name}` tool with a PDF reader command"),
+            );
+        let message = format!("The 'pages' parameter is not supported by Read. {workaround}.");
+        return Err(ToolFailure::new(message.clone(), message).into());
+    }
+
+    Ok(ReadRequest {
+        file_path,
+        offset,
+        limit,
+    })
+}
+
+fn has_image_extension(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| is_image_extension(&ext.to_lowercase()))
 }
 
 fn is_image_extension(ext: &str) -> bool {
@@ -229,7 +276,7 @@ impl BaseTool for ReadFileTool {
         input: Value,
         ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<ToolOutput, Box<dyn std::error::Error + Send + Sync>> {
-        if let Some(output) = self.try_read_image(&input)? {
+        if let Some(output) = self.try_read_image(&input).await? {
             return Ok(output);
         }
         self.invoke(input, ctx).await.map(ToolOutput::from_legacy)
@@ -240,26 +287,11 @@ impl BaseTool for ReadFileTool {
         input: Value,
         _ctx: peri_agent::tools::ToolContext<'_>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let file_path = input["file_path"]
-            .as_str()
-            .ok_or_else(|| ToolFailure::new("The 'file_path' parameter is required for the Read tool. Provide the absolute path to the file.", "The 'file_path' parameter is required for the Read tool. Provide the absolute path to the file."))?;
-
-        // offset 语义为 1-based 行号（1 = 首行），与 schema 描述、输出行号一致；
-        // 缺省 offset=1（读全文起点）、limit=2000。
-        let offset = parse_line_number(&input["offset"], "offset", 1)?;
-        let limit = parse_line_number(&input["limit"], "limit", MAX_LINES)?;
-
+        let request = parse_read_request(&input)?;
+        let offset = request.offset;
+        let limit = request.limit;
+        let file_path = request.file_path;
         let resolved = resolve_path(&self.cwd, file_path);
-
-        if input.get("pages").is_some_and(|pages| !pages.is_null()) {
-            let workaround = peri_acp_types::builtin_mcp::effective_name_of("workspace", "Bash")
-                .map_or_else(
-                    || "Use a shell command with a PDF reader".to_string(),
-                    |name| format!("Use the `{name}` tool with a PDF reader command"),
-                );
-            let message = format!("The 'pages' parameter is not supported by Read. {workaround}.");
-            return Err(ToolFailure::new(message.clone(), message).into());
-        }
 
         if let Some(ext) = resolved.extension().and_then(|e| e.to_str()) {
             if is_binary_extension(&ext.to_lowercase()) {

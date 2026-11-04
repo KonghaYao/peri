@@ -139,9 +139,6 @@ pub(super) struct SettledInvocation {
     pub(super) call: ToolCall,
     pub(super) result: ToolResult,
     pub(super) outcome: ToolOutcome,
-    /// 工具 raw content 中的图片块：模型面工具消息在多模态协议上追加这些块。
-    /// 文本投影（`result.output` / 事件）保持不变。
-    pub(super) media: Vec<ContentBlock>,
 }
 
 impl SettledInvocation {
@@ -151,16 +148,22 @@ impl SettledInvocation {
             call,
             result,
             outcome: ToolOutcome::Unreported,
-            media: Vec::new(),
         }
     }
 }
 
-/// 把 `ToolOutput.raw` 中 MCP 形状的图片块转成模型消息内容块。
+/// 单条工具消息 base64 图片上限（字符）。transcript 单次持久化预留上限为
+/// 16 MiB；15 MiB 为 JSON 元数据与文本投影留出余量。
+const MAX_MODEL_IMAGE_DATA_CHARS: usize = 15 * 1024 * 1024;
+/// 模型/transcript 接受的内联图片类型；其余类型只保留 `[image: mime]` 文本占位。
+const MODEL_IMAGE_MIME_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+/// 把 `ToolOutcome.raw` 中 MCP 形状的图片块转成模型消息内容块。
 ///
 /// 只提升图片；文本仍使用 `ToolOutput.text` 的既有投影，保证截断/摘要语义不变。
-fn model_media_blocks(output: &ToolOutput) -> Vec<ContentBlock> {
-    let Some(raw) = output.raw() else {
+/// 畸形、未知 mime 或超预算的图片只记录警告并丢弃块，不阻塞工具结果。
+fn model_media_blocks(outcome: &ToolOutcome) -> Vec<ContentBlock> {
+    let Some(raw) = outcome.raw() else {
         return Vec::new();
     };
     raw.content()
@@ -170,23 +173,53 @@ fn model_media_blocks(output: &ToolOutput) -> Vec<ContentBlock> {
                 return None;
             }
             let media_type = block.get("mimeType").and_then(serde_json::Value::as_str)?;
+            if !MODEL_IMAGE_MIME_TYPES.contains(&media_type) {
+                tracing::warn!(
+                    mime_type = media_type,
+                    "dropping unsupported tool image type"
+                );
+                return None;
+            }
             let data = block.get("data").and_then(serde_json::Value::as_str)?;
+            if data.is_empty() {
+                tracing::warn!(mime_type = media_type, "dropping empty tool image payload");
+                return None;
+            }
+            if data.len() > MAX_MODEL_IMAGE_DATA_CHARS {
+                tracing::warn!(
+                    mime_type = media_type,
+                    data_chars = data.len(),
+                    "dropping oversized tool image payload"
+                );
+                return None;
+            }
             Some(ContentBlock::image_base64(media_type, data))
         })
         .collect()
 }
 
-/// 生成模型可见的工具结果消息；有图片时用 Blocks 携带文本 + 图片。
-pub(super) fn settled_tool_message(settled: &SettledInvocation) -> BaseMessage {
+/// 生成模型可见的工具结果消息；有图片且协议允许时用 Blocks 携带文本 + 图片。
+///
+/// OpenAI Chat Completions 的 `tool` 角色不接受图片 part，因此只有 Anthropic
+/// 与 Responses 保留图片块；其他协议只保留文本投影中的 `[image: mime]`。
+pub(super) fn settled_tool_message(
+    settled: &SettledInvocation,
+    allow_tool_images: bool,
+) -> BaseMessage {
     let result = &settled.result;
-    let content = if settled.media.is_empty() {
+    let media = if allow_tool_images {
+        model_media_blocks(&settled.outcome)
+    } else {
+        Vec::new()
+    };
+    let content = if media.is_empty() {
         MessageContent::text(result.output.clone())
     } else {
-        let mut blocks = Vec::with_capacity(settled.media.len() + 1);
+        let mut blocks = Vec::with_capacity(media.len() + 1);
         if !result.output.is_empty() {
             blocks.push(ContentBlock::text(result.output.clone()));
         }
-        blocks.extend(settled.media.iter().cloned());
+        blocks.extend(media);
         MessageContent::Blocks(blocks)
     };
     BaseMessage::tool_result_with_execution_and_failure(
@@ -666,14 +699,8 @@ async fn settle_results(
             Ok(output) => output.outcome.clone(),
             Err(_) => ToolOutcome::Unreported,
         };
-        let (mut result, media) = match tool_result {
-            Ok(output) => {
-                let media = model_media_blocks(&output);
-                (
-                    ToolResult::from_output(&modified_call.id, &modified_call.name, output),
-                    media,
-                )
-            }
+        let mut result = match tool_result {
+            Ok(output) => ToolResult::from_output(&modified_call.id, &modified_call.name, output),
             Err(ref e) => {
                 let mut result =
                     ToolResult::error(&modified_call.id, &modified_call.name, e.to_string());
@@ -684,7 +711,7 @@ async fn settle_results(
                     result.output.push('\n');
                     result.output.push_str(&failure.render_model_summary());
                 }
-                (result, Vec::new())
+                result
             }
         };
 
@@ -713,7 +740,6 @@ async fn settle_results(
             call: modified_call,
             result,
             outcome,
-            media,
         });
     }
 
