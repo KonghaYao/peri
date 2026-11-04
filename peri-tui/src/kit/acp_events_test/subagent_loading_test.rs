@@ -24,7 +24,6 @@ fn make_state(phase: SessionPhase, variant: u8) -> BridgeState {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
-        window: Default::default(),
     }
 }
 

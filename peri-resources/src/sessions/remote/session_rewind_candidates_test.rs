@@ -7,7 +7,7 @@ use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::store::{MessageFlags, PersistedPayload};
 use peri_acp_types::thread::ThreadId;
 
-use super::session_history_page_tests::{remote_with_history, REWIND_CANDIDATES_SESSION};
+use super::session_history_replay_tests::{remote_with_history, REWIND_CANDIDATES_SESSION};
 use crate::sessions::data::SessionDataPort;
 
 fn texts(candidates: &[peri_acp_types::session_resources::RewindCandidate]) -> Vec<String> {

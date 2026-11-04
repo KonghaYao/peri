@@ -2,7 +2,7 @@
 
 use super::*;
 
-use peri_acp_types::history_window::{
+use peri_acp_types::history_common::{
     HistorySource, HistoryWindowDirection, HISTORY_WINDOW_DEFAULT_BYTE_BUDGET,
 };
 use peri_acp_types::session_resources::{
@@ -55,7 +55,7 @@ async fn set_inherited_context(
 }
 
 fn inherited_source(
-    snapshot: &peri_acp_types::history_window::HistoryInheritedSnapshot,
+    snapshot: &peri_acp_types::history_common::HistoryInheritedSnapshot,
 ) -> HistorySource {
     HistorySource::inherited_with_ancestor(
         snapshot.snapshot_id.clone(),
@@ -204,7 +204,7 @@ async fn inherited_page_seek_and_chunks_are_bounded_and_isolated_from_parent_cha
             0,
             100_000,
             None,
-            &peri_acp_types::history_window::HistoryReadTicket::new("ticket"),
+            &peri_acp_types::history_common::HistoryReadTicket::new("ticket"),
         )
         .await
         .unwrap();
@@ -380,7 +380,7 @@ fn inherited_ids(
 async fn inherited_snapshot_source(
     data: &SqliteSessionData,
     id: &str,
-) -> peri_acp_types::history_window::HistorySource {
+) -> peri_acp_types::history_common::HistorySource {
     let snapshot = data
         .history_window_bounds(&id.to_owned())
         .await

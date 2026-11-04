@@ -1,6 +1,5 @@
 //! Regression evidence through the real bridge; synthetic provider events, not RSS.
 use super::*;
-use crate::kit::history_window::{HistoryWindow, HistoryWindowConfig, WindowIdentity};
 use std::sync::Arc;
 
 fn start(state: &mut BridgeState, id: &str) {
@@ -137,13 +136,6 @@ fn memory_retention_regression_long_parent_releases_actual_child_allocations() {
 fn memory_retention_regression_committed_preview_directory_is_bounded() {
     let mut state = make_fold_test_state();
     state.active_session_id = "memory-regression-window".into();
-    state.window = HistoryWindow::new(HistoryWindowConfig::enabled());
-    state.window.begin_window(WindowIdentity::new(
-        "memory-regression-window",
-        "gen",
-        1,
-        "snapshot",
-    ));
     for index in 0..1000 {
         let id = format!("window-child-{index}");
         start(&mut state, &id);
@@ -164,11 +156,6 @@ fn memory_retention_regression_committed_preview_directory_is_bounded() {
         .filter(|u| matches!(u, TuiRenderUnit::TuiSubAgentGroup(_)))
         .count();
     assert!(groups <= 256);
-    assert_eq!(
-        state.window.budget().unattributed_live_bytes,
-        0,
-        "preview expiry must not borrow or return canonical admission credit"
-    );
     assert!(state.memory_snapshot().committed_body_bytes < 2 * 1024 * 1024);
     evidence(
         "committed.json",

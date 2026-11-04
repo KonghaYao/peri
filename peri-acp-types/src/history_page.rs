@@ -1,8 +1,8 @@
-//! ACP 历史分页契约 — 游标、页与页装配规则（REQ-H01~H03）。
+//! 历史存储读取契约 — keyset 行读取、窗口页装配规则与标准回放段。
 //!
-//! 分页读取的是**归档区**：被 compact 标成 `excluded` 的条目仍要能翻出来（这正是本功能的
-//! 用途），因此读取条件里没有 `excluded` 过滤。过滤只发生在展示出口：System 条目与
-//! Model-only reminder 没有客户端渲染形式，它们不进入页，但**位置照常推进**。
+//! 本模块只描述**存储读取**与展示装配：条目可来自归档区（被 compact 标成 `excluded`
+//! 的条目仍要能读出来），过滤只发生在展示出口。ACP 已不再暴露旧私有分页请求；这些类型
+//! 服务于 `SessionResources` 的存储端口与 History V2 的窗口读取计划。
 //!
 //! ## 读取分两阶段，装配规则只有一份
 //!
@@ -11,76 +11,43 @@
 //! 1. 阶段一只读「id + 存储序键 + 正文长度」，最多 `limit + 1` 行，**不取正文**；
 //!    [`HistoryPagePlan::plan`] 按长度决定本页推进哪些行。
 //! 2. 阶段二只取**这些行**的正文（[`HistoryPagePlan::body_ids`]），交给
-//!    [`HistoryPagePlan::materialize`] 装配。
+//!    [`HistoryPagePlan::materialize_omitting_oversize`] 装配。
 //!
-//! 多读的那一条候选行只回答「更早方向还有没有内容」，它的正文**永远不进内存**：
-//! 这是 REQ-H03「禁止先批量物化 100 条大正文再裁成一页」的落点。页的边界、字节预算与
-//! oversize 判定也只有一份实现（[`HistoryPagePlan::plan`] 与
-//! [`HistoryPagePlan::materialize`]）：两个存储 adapter 只负责把有界 SQL 的行交进来。
+//! 多读的那一条候选行只回答该方向还有没有内容，它的正文**永远不进内存**。
+//! 页的边界、字节预算与 oversize 判定也只有一份实现（[`HistoryPagePlan::plan`] 与
+//! [`HistoryPagePlan::materialize_omitting_oversize`]）：存储 adapter 只负责把有界 SQL 的
+//! 行交进来。
 //!
-//! ## 客户端可以依赖的合并契约（REQ-H01-3、REQ-H01-6）
+//! ## 条目身份与位置
 //!
-//! 首次 cursor、之后每一页与初始 load 回放携带的是**同一套条目身份**：
-//!
-//! - `entryId`（回放的 `_meta.periEntryId`、页条目的 `entryId`）：`{会话}:{条目 id}`。
-//!   同一次浏览里同一个持久 payload 只有这一个身份，客户端据此去重。
-//! - [`HistoryPageItem::position`]（回放的 `_meta.periPosition`、页条目的 `position`）：
-//!   **物理排序键**（存储序，`rowid`）原样给出的**不透明整数**。客户端**不得**解释它、
-//!   不得用它做时间或大小推断，只能在同一 `snapshotToken` 内做大小比较（排序与区间合并）。
-//!   跨 `snapshotToken` 不保证可比：rewind / 精确删除会删掉尾部行，新插入的行会复用
-//!   这些 rowid。
-//! - 一页的条目严格**更早于**上一页（首屏之后的页严格更早于首屏自有有效区），页内按
-//!   历史正序给出，且不重叠、不遗漏（REQ-H01-4）。子项位置（`subItems[].position`）是
-//!   该子项在**本条 payload 自己的投影序列**中的下标，不参与跨条目比较。
-//!
-//! 继承区（冻结的祖先前缀）条目在**本线程没有行**，因此没有 `position`：它们先于全部
-//! 有条目的自有条目，这一点对首屏与页都成立。
-//!
-//! ## 游标有效性
-//!
-//! 客户端持有的游标是**两层**：内层 [`HistoryCursor`] 是存储契约（会话 + 锚点条目 +
-//! 浏览范围身份），外层 [`HistoryCursorEnvelope`] 是运行期事实（结构版本 + 浏览/投影
-//! 身份）。范围身份从既有数据派生（当前实现 = 该会话自有历史最旧一条的 id，见
-//! [`RangeToken`]）；结构版本是**内存里**的每会话计数器，没有列可写（那需要 DDL）。
-//! 两层的失效判定：
-//!
-//! | 之后的变更 | 游标 |
-//! | --- | --- |
-//! | rewind / 精确删除（提交成功，结构版本 +1） | 失效（版本不匹配 → [`HistoryCursorError::Expired`]） |
-//! | rewind / 精确删除删掉了**锚点行**或**范围起点** | 失效（存储读取的查表失败） |
-//! | 追加消息（`append_history` / `append_reminder_if_absent`） | 有效：起点、锚点与版本都没变 |
-//! | 再一次 Full/Smart compact（改 flags + 追加摘要） | 有效：不改行集合与顺序，也不参与可展示性判定 |
-//!
-//! 追加与 Full 都不推进结构版本：REQ-H02 要求一次在途浏览不被它们打断（「Full 引入的
-//! 新摘要按实时新增展示处理，不重置旧浏览快照及其已消费位置」）。
-//!
-//! 锚点身份必须查 `message_id`，**不得**查 `rowid`：SQLite 删掉尾部行之后新插入的行会复用
-//! 这些 rowid，同一个 rowid 在不同时刻指向不同条目。锚点查不到就是查不到，绝不能兜底成
-//! 「从最新一页开始」——那会把一个过期请求变成一段静默的错误内容。
+//! - 条目身份是 `{会话}:{条目 id}`；同一个持久 payload 只有这一个身份。
+//! - [`HistoryPageItem::position`] 是存储序（`rowid`）原样给出的不透明整数，只在同一
+//!   快照内可比；rewind / 精确删除后新插入的行会复用 rowid。
+//! - 继承区（冻结的祖先前缀）条目在本线程没有行，因此没有 `position`。
 //!
 //! ## canonical 完整回放（向前方向，REQ §5.3）
 //!
-//! 未协商 `peri.historyPagination` 的通用 ACP 客户端走的是**标准完整回放**：继承区 + 全部
+//! 标准 ACP 客户端走**完整回放**：继承区 + 全部
 //! 自有行（含 Full 归档原文）。核心不重新持有整份历史，改用**向前**方向流式投递：
 //! [`HistorySegment`]（一段载荷）+ [`HistoryForwardCursor`]（本段推进到哪、本次回放的固定
 //! 上界是谁）+ [`HistorySegmentPlan`]（两个存储 adapter 共用的唯一一份段规则）。
 //!
-//! 与归档分页的三点差别是刻意的：
+//! 与窗口页读取的三点差别是刻意的：
 //!
-//! - 方向相反：分页向「更早」翻，回放从最旧一行向「更晚」推进（`rowid` 升序）。
+//! - 方向相反：窗口按锚点向两侧读，回放从最旧一行向「更晚」推进（`rowid` 升序）。
 //! - **不做可展示性过滤**：段里 System 条目与 model-only reminder 照常出现——完整回放不
 //!   允许静默丢内容，过滤属于出口投影。
 //! - 游标承载**物理排序键**（`rowid` 的十进制文本）而不是条目身份：回放区间由首段那一刻的
 //!   最大 `rowid`（`tail`）固定，之后**追加**的行只要 `rowid > tail` 就不进入本次遍历；
-//!   起点行消失仍失败关闭（不得回退成从头开始，也不得用空段冒充结束）。两种游标各有自己的
-//!   线上形式与结构版本，不得互相混用。
+//!   起点行消失仍失败关闭（不得回退成从头开始，也不得用空段冒充结束）。游标的线上形式
+//!   有独立的结构版本。
 //!   已知边界（契约不保证、也不加校验）：`tail` 那一行被删（rewind 的尾部切除）之后，SQLite
 //!   会把它的 `rowid` 复用给新插入的行，这类新行 `rowid <= tail` 因而会被本次遍历读到，而被
 //!   删行的内容静默消失（实测见 `.recon/S9-boundedness.md` 第 3.4 节第 6 点与第 6 节 R1）。
 
 #[path = "history_page_visibility.rs"]
 mod visibility;
-pub use visibility::history_body_displayable_to_client;
+pub use visibility::{history_body_displayable_to_client, HistoryEntryRole};
 
 use serde::{Deserialize, Serialize};
 
@@ -91,27 +58,15 @@ use crate::session_resources::{
 use crate::store::{deserialize_persisted_payload, PersistedPayload};
 use crate::thread::ThreadId;
 
-/// 浏览范围身份：同一次向上翻页期间，只要范围起点没被删掉就保持不变。
+/// 回放游标不能用于本次读取。
 ///
-/// 当前实现取该会话自有历史**最旧一条**的 `message_id`。这不是版本计数器，也不承诺单调：
-/// 它只回答「游标当初浏览的那一段还在不在」。rewind 删掉尾部行不会改它，删掉起点会。
-pub type RangeToken = String;
-
-/// 游标不能用于本次读取。
-///
-/// 三种失败对应三种客户端处置：形式/版本错误是坏请求，跨会话是客户端状态串了缓存，
-/// 失效（锚点或浏览范围已不存在）是「重新从最新一页开始」。三者都必须**显式失败**：
-/// 降级成首屏会把一个坏请求变成一段看起来正常的历史。
+/// 两种失败对应两种客户端处置：形式/版本错误是坏请求，失效（起点行或回放上界已不存在）
+/// 是「重新开始回放」。两者都必须**显式失败**：降级成首段会把一段续读变成从头重放。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HistoryCursorError {
     /// 形式无法解释：不是本实现产出的游标（损坏、缺字段、版本不支持）。
     Malformed { detail: String },
-    /// 游标属于别的会话。
-    CrossSession {
-        expected: ThreadId,
-        cursor: ThreadId,
-    },
-    /// 锚点条目、浏览范围起点已不存在，或游标的**结构版本**已过期（rewind / 删除）。
+    /// 起点行已不存在（rewind / 删除）。
     Expired { thread_id: ThreadId },
 }
 
@@ -121,10 +76,6 @@ impl std::fmt::Display for HistoryCursorError {
             Self::Malformed { detail } => {
                 write!(formatter, "history cursor is malformed: {detail}")
             }
-            Self::CrossSession { expected, cursor } => write!(
-                formatter,
-                "history cursor belongs to session {cursor}, not {expected}"
-            ),
             Self::Expired { thread_id } => write!(
                 formatter,
                 "history cursor anchor no longer exists in session {thread_id}"
@@ -141,176 +92,9 @@ impl From<HistoryCursorError> for SessionResourceError {
     }
 }
 
-/// 历史分页游标。
-///
-/// 客户端只把它当成**不透明字符串**（[`Self::encode`] 的产物）；字段是服务端语义，客户端
-/// 不得解释，也不得自行拼装。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HistoryCursor {
-    /// 游标所属会话。
-    pub thread_id: ThreadId,
-    /// 下一页的读取位置：本页最旧一条**已读出**的条目（更早方向）。
-    ///
-    /// 不可展示的行也参与推进，所以锚点可能指向一条调用方从未收到过的条目。
-    pub anchor: MessageId,
-    /// 浏览范围身份，见 [`RangeToken`]。
-    pub range_token: RangeToken,
-}
-
-/// 线上形式：版本化 JSON。客户端不解释，只在下一页请求里原样回传。
-#[derive(Serialize, Deserialize)]
-struct WireHistoryCursor {
-    v: u8,
-    thread: ThreadId,
-    anchor: MessageId,
-    range: RangeToken,
-}
-
-const WIRE_HISTORY_CURSOR_VERSION: u8 = 1;
-
-impl HistoryCursor {
-    pub fn new(thread_id: ThreadId, anchor: MessageId, range_token: impl Into<RangeToken>) -> Self {
-        Self {
-            thread_id,
-            anchor,
-            range_token: range_token.into(),
-        }
-    }
-
-    /// 线上不透明形式。
-    pub fn encode(&self) -> String {
-        serde_json::to_string(&WireHistoryCursor {
-            v: WIRE_HISTORY_CURSOR_VERSION,
-            thread: self.thread_id.clone(),
-            anchor: self.anchor,
-            range: self.range_token.clone(),
-        })
-        .expect("history cursor is a JSON object of strings and uuids")
-    }
-
-    /// 解析线上形式并校验会话归属。
-    ///
-    /// 形式错误与跨会话都不降级：调用方据此拒绝请求，不得退回首屏。
-    pub fn decode(raw: &str, expected: &ThreadId) -> Result<Self, HistoryCursorError> {
-        let wire: WireHistoryCursor =
-            serde_json::from_str(raw).map_err(|error| HistoryCursorError::Malformed {
-                detail: error.to_string(),
-            })?;
-        if wire.v != WIRE_HISTORY_CURSOR_VERSION {
-            return Err(HistoryCursorError::Malformed {
-                detail: format!("unsupported history cursor version {}", wire.v),
-            });
-        }
-        if wire.thread != *expected {
-            return Err(HistoryCursorError::CrossSession {
-                expected: expected.clone(),
-                cursor: wire.thread,
-            });
-        }
-        Ok(Self {
-            thread_id: wire.thread,
-            anchor: wire.anchor,
-            range_token: wire.range,
-        })
-    }
-}
-
-/// 游标的**版本化封装**：客户端持有的那一整层不透明值（REQ-T04 末段、REQ-H02）。
-///
-/// 为什么不把结构版本并进 [`HistoryCursor`]：那个类型是**存储契约**的一部分（两个后端按
-/// 它定位锚点与范围），版本与浏览/投影身份却是 ACP 运行期的事实，没有对应列可写
-/// （本仓不加 DDL）。因此存储看不见的两件事留在这层：
-///
-/// - [`Self::structure_version`]：破坏历史范围的提交（rewind / 精确删除）递增一次，
-///   旧游标**在进入存储之前**就被拒绝。
-/// - [`Self::snapshot_token`]：一次浏览固定的展示口径（投影版本 + 页预算）与范围身份
-///   铸成的身份；存储契约不认识它，ACP 只做原样回传。
-///
-/// 版本不匹配与「锚点行被删」映射到**同一个**失败分类（[`HistoryCursorError::Expired`]）：
-/// 客户端的处置本来就是同一个（丢弃游标、重新从最新一页开始），拆成两个码只会多出一个
-/// 永远不该被走到的分支。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HistoryCursorEnvelope {
-    /// 铸造本游标时的会话结构版本（`SessionState::structure_version`）。
-    pub structure_version: u64,
-    /// 浏览/投影身份；ACP 响应里的 `snapshotToken` 就是它。
-    pub snapshot_token: RangeToken,
-    /// 存储契约游标。
-    pub cursor: HistoryCursor,
-}
-
-/// 线上形式：版本化 JSON 包着一串内层游标文本。
-#[derive(Serialize, Deserialize)]
-struct WireHistoryCursorEnvelope {
-    v: u8,
-    structure: u64,
-    snapshot: RangeToken,
-    cursor: String,
-}
-
-const WIRE_HISTORY_CURSOR_ENVELOPE_VERSION: u8 = 1;
-
-impl HistoryCursorEnvelope {
-    pub fn new(
-        structure_version: u64,
-        snapshot_token: impl Into<RangeToken>,
-        cursor: HistoryCursor,
-    ) -> Self {
-        Self {
-            structure_version,
-            snapshot_token: snapshot_token.into(),
-            cursor,
-        }
-    }
-
-    /// 线上不透明形式。
-    pub fn encode(&self) -> String {
-        serde_json::to_string(&WireHistoryCursorEnvelope {
-            v: WIRE_HISTORY_CURSOR_ENVELOPE_VERSION,
-            structure: self.structure_version,
-            snapshot: self.snapshot_token.clone(),
-            cursor: self.cursor.encode(),
-        })
-        .expect("history cursor envelope is a JSON object of strings and numbers")
-    }
-
-    /// 解析线上形式；内层游标的会话归属同样在此校验。
-    pub fn decode(raw: &str, expected: &ThreadId) -> Result<Self, HistoryCursorError> {
-        let wire: WireHistoryCursorEnvelope =
-            serde_json::from_str(raw).map_err(|error| HistoryCursorError::Malformed {
-                detail: error.to_string(),
-            })?;
-        if wire.v != WIRE_HISTORY_CURSOR_ENVELOPE_VERSION {
-            return Err(HistoryCursorError::Malformed {
-                detail: format!("unsupported history cursor envelope version {}", wire.v),
-            });
-        }
-        Ok(Self {
-            structure_version: wire.structure,
-            snapshot_token: wire.snapshot,
-            cursor: HistoryCursor::decode(&wire.cursor, expected)?,
-        })
-    }
-
-    /// 校验结构版本仍是当前版本；不一致即与「锚点被删」同类的失效。
-    ///
-    /// 调用方必须在**委派存储读取之前**调用它：旧游标不该再用一次存储往返换取一个
-    /// 更含糊的答案。
-    pub fn verify_structure_version(&self, current: u64) -> Result<(), HistoryCursorError> {
-        if self.structure_version == current {
-            Ok(())
-        } else {
-            Err(HistoryCursorError::Expired {
-                thread_id: self.cursor.thread_id.clone(),
-            })
-        }
-    }
-}
-
 /// canonical 完整回放（向前方向）的游标：本次回放的**固定区间**。
 ///
-/// 与 [`HistoryCursor`] 刻意不共用：那个游标的锚点是**条目身份**（`message_id`，跨快照可比，
-/// 见模块文档），本游标承载的是**物理排序键**——`rowid` 的十进制文本，只在本次回放内有效。
+/// 本游标承载的是**物理排序键**——`rowid` 的十进制文本，只在本次回放内有效。
 /// 区间由首段读取那一刻的最大 `rowid`（[`Self::tail`]）固定：回放期间**追加**的行只要
 /// `rowid > tail` 就不进入本次遍历；起点行消失时读取失败关闭，不回退成从头开始，也不用空段
 /// 冒充结束。
@@ -318,7 +102,7 @@ impl HistoryCursorEnvelope {
 /// 已知边界：`tail` 那一行被删后 `rowid` 会被新插入的行复用，这类新行因此落在区间内被读到
 /// （见模块文档的 rowid 复用边界；契约不保证行集合同源，也不加校验）。
 ///
-/// 字段是服务端语义，客户端不解释它；两个游标的线上形式也**不得**互相解析（各有结构版本）。
+/// 字段是服务端语义，客户端不解释它；游标的线上形式有独立的结构版本。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HistoryForwardCursor {
     /// 本段最后一条**已推进**的自有行：更晚方向继续从它之后读（`rowid > after`）。
@@ -416,50 +200,6 @@ fn rowid_of(key: &str) -> Result<i64, HistoryCursorError> {
         })
 }
 
-/// 浏览范围的边界事实：一次**有界单行**读取就够的两条事实。
-///
-/// 由「该会话自有历史最旧一条」派生的同一份事实有两种用途，因此一起给出：
-///
-/// - [`Self::range_head`]：`None` = 这个会话没有更早的历史。ACP 初始 load 据此把
-///   `nextCursor` 回答成 `null`（空会话不该被编造出一个游标，也不该触发任何兜底摘要）。
-/// - [`Self::range_token`]：同一段区间的范围身份，正是初始游标要携带的
-///   [`HistoryCursor::range_token`]；没有它，ACP 层只能拿首屏第一条消息去冒充起点。
-///
-/// 读取必须保持在**单行**量级（起点子查询 + 锚点存在性），不得扫描或聚合整条线程：
-/// 它发生在初始 load 的路径上。契约里没有「猜一个起点」的分支——会话不存在是
-/// `NotFound`，没有起点就是 `None`。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct HistoryPageBounds {
-    /// 该会话自有历史最旧一条的 id；空会话为 `None`。
-    pub range_head: Option<MessageId>,
-    /// 范围身份，见 [`RangeToken`]。
-    pub range_token: RangeToken,
-}
-
-impl HistoryPageBounds {
-    /// 由持久化行的 id 文本构造（存储适配器手里正是这个形状：边界 SQL 选出的 `message_id`）。
-    ///
-    /// `range_token` **直接取原文本**，不重新序列化：分页读取是拿同一列的文本与游标比较的，
-    /// 两边各转换一次就可能把一次正常翻页变成 `Expired`。id 不是 uuid 即损坏（与
-    /// [`HistoryPageRow::new`] 同规），不降级成空范围。
-    pub fn new(range_head: Option<&str>) -> SessionResourceResult<Self> {
-        match range_head {
-            Some(range_head) => Ok(Self {
-                range_head: Some(
-                    uuid::Uuid::parse_str(range_head)
-                        .map(MessageId::from)
-                        .map_err(|_| corrupt("persisted payload message id is not a uuid"))?,
-                ),
-                range_token: range_head.to_owned(),
-            }),
-            None => Ok(Self {
-                range_head: None,
-                range_token: RangeToken::default(),
-            }),
-        }
-    }
-}
-
 /// 页内一条条目：**原始**持久化载荷 + 计量。
 ///
 /// 展示投影（转成客户端能渲染的更新）是 ACP 层的事，存储层不预先裁剪正文。
@@ -473,49 +213,17 @@ pub struct HistoryPageItem {
     /// 内可比较，跨快照不可比（删尾部行后新插入的行会复用 rowid）。客户端不得解释它，
     /// 只用于排序与区间合并（合并契约见模块文档）。
     pub position: u64,
-    /// 单条就超过字节预算：独占一页。调用方不得因为它大而丢掉它。
-    pub oversized: bool,
 }
 
 /// 一页历史（页内正序：更早 → 更晚）。
+///
+/// History V2 的窗口读取用它承载同一方向的行；是否还有更多由窗口邻接事实单独回答。
 #[derive(Clone, Debug)]
 pub struct HistoryPage {
     pub items: Vec<HistoryPageItem>,
-    /// `None` = 更早方向没有内容了。
-    ///
-    /// `items` 为空**不**等于到头：一整段不可展示条目会得到空页 + 前进的游标。
-    pub next_cursor: Option<HistoryCursor>,
 }
 
-impl HistoryPage {
-    /// 页内条目编码字节之和（单条 oversize 时可能超过预算，这是唯一的例外）。
-    pub fn total_bytes(&self) -> usize {
-        self.items.iter().map(|item| item.encoded_bytes).sum()
-    }
-}
-
-/// 由边界事实判定游标能否继续：返回本次浏览范围身份，或游标的失败分类。
-///
-/// 边界事实来自一次一致读取（两个后端同一形状）：该会话自有历史最旧一条的 id、锚点行
-/// 是否还在。首屏（`cursor = None`）允许没有起点（空会话）；带游标时**两者都必须还在**，
-/// 且起点必须与游标携带的一致——锚点消失时失败，绝不回退到最新一页。
-pub fn resolve_browsing_range(
-    cursor: Option<&HistoryCursor>,
-    range_head: Option<String>,
-    anchor_present: bool,
-) -> Result<RangeToken, HistoryCursorError> {
-    match cursor {
-        Some(cursor) => match range_head {
-            Some(head) if head == cursor.range_token && anchor_present => Ok(head),
-            _ => Err(HistoryCursorError::Expired {
-                thread_id: cursor.thread_id.clone(),
-            }),
-        },
-        None => Ok(range_head.unwrap_or_default()),
-    }
-}
-
-/// 一次有界读取读出的一行候选（尚未解码），按存储序（`rowid`）**降序**：最靠近游标锚点的在前。
+/// 一次有界读取读出的一行候选（尚未解码），按存储序（`rowid`）**降序**：最靠近读取锚点的在前。
 #[derive(Clone, Debug)]
 pub struct HistoryPageRow {
     pub message_id: MessageId,
@@ -544,6 +252,8 @@ pub struct HistoryPageCandidate {
     pub position: u64,
     /// 持久化信封的编码字节数。
     pub encoded_bytes: usize,
+    /// `messages.role` 的粗分类；窗口读取用它判定 oversize 可见性。
+    pub role: HistoryEntryRole,
 }
 
 impl HistoryPageCandidate {
@@ -552,39 +262,54 @@ impl HistoryPageCandidate {
     /// id 不是 uuid 即损坏（与 [`HistoryPageRow::new`] 同规）；负的行号或长度不可能出现
     /// （`rowid` 与长度都非负），出现即损坏，不取绝对值兜底。
     pub fn new(message_id: &str, position: i64, encoded_bytes: i64) -> SessionResourceResult<Self> {
+        Self::new_with_role(
+            message_id,
+            position,
+            encoded_bytes,
+            HistoryEntryRole::Unknown,
+        )
+    }
+
+    /// 带存储 role 的候选行；窗口读取用它避免为可见性判定解码正文。
+    pub fn new_with_role(
+        message_id: &str,
+        position: i64,
+        encoded_bytes: i64,
+        role: HistoryEntryRole,
+    ) -> SessionResourceResult<Self> {
         Ok(Self {
             message_id: message_id_of(message_id)?,
             position: u64::try_from(position)
                 .map_err(|_| corrupt("history row position is negative"))?,
             encoded_bytes: usize::try_from(encoded_bytes)
                 .map_err(|_| corrupt("history entry length is negative"))?,
+            role,
         })
     }
 }
 
 /// 一页的读取计划（阶段一的产物）：**先按长度定页，再只取这些行的正文**。
 ///
-/// 这是两个存储 adapter 共用的唯一一份页规则：候选行按存储序降序给入，本类型决定
-/// 本页推进哪些行、游标停在哪一条、更早方向还有没有内容。
+/// 这是两个存储 adapter 共用的唯一一份页规则：候选行按存储序给入，本类型决定
+/// 本页推进哪些行。
 ///
 /// 规则：
 ///
-/// 1. 一次只推进 `limit` 行；调用方多给一条候选行（最多 `limit + 1` 行），用来判断更早
+/// 1. 一次只推进 `limit` 行；调用方多给一条候选行（最多 `limit + 1` 行），用来判断该
 ///    方向是否还有内容。判据是**未过滤的**行数而不是展示条数，所以一整段不可展示条目
 ///    不会假造终点。
 /// 2. 字节预算按**被推进的每一行**计（含不可展示行）：不可展示行的正文同样要读出来才
 ///    知道它能不能展示，预算要约束的正是「读了多少」。因此 [`Self::plan`] 只看长度就能
 ///    定页，不必先解码。
 /// 3. 预算之外**只多留一条**：整行原文就超预算的那条留给下一页，本页已推进的行不受
-///    影响；第一条就超预算时独占用一页（[`HistoryPageItem::oversized`]），仍然推进并
-///    给出游标——否则大条目之后的历史永远读不到。
-/// 4. 页内顺序与展示性在阶段二（[`Self::materialize`]）决定：不可展示行不进入 `items`，
-///    但位置照常推进。
+///    影响；第一条就超预算时独占一页（作为 descriptor 候选返回），仍然推进。
+/// 4. 页内顺序与展示性在阶段二（[`Self::materialize_omitting_oversize`]）决定：不可展示
+///    行不进入 `items`，但位置照常推进。
 ///
 /// 候选行的给入顺序：同一条预算规则，两个方向。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PlanOrder {
-    /// 存储序降序（最靠近最新一行在前）：旧分页的「更早」方向。
+    /// 存储序降序（最靠近最新一行在前）：继承区窗口的「更早」方向。
     NewestFirst,
     /// 存储序升序（最靠近锚点一行在前）：窗口的「更晚」方向。
     OldestFirst,
@@ -592,15 +317,9 @@ enum PlanOrder {
 
 #[derive(Clone, Debug)]
 pub struct HistoryPagePlan {
-    thread_id: ThreadId,
-    range_token: RangeToken,
     byte_budget: usize,
     /// 本页推进的行，也是阶段二**唯一**允许取正文的集合。
     entries: Vec<HistoryPageCandidate>,
-    /// 游标锚点 = 本页推进的最后一行；没有推进任何行时为 `None`。
-    anchor: Option<MessageId>,
-    /// 对应方向是否还有内容（`false` ⇒ `nextCursor = None`）。
-    has_more: bool,
     order: PlanOrder,
 }
 
@@ -608,22 +327,9 @@ impl HistoryPagePlan {
     /// 按长度决定本页推进哪些行（阶段一，不解码任何正文）。
     ///
     /// `candidates` 必须按存储序降序给入，最多 `limit + 1` 行（多出的那一条只用于
-    /// 「更早方向还有没有内容」）。
-    pub fn plan(
-        thread_id: &ThreadId,
-        range_token: &str,
-        candidates: Vec<HistoryPageCandidate>,
-        limit: usize,
-        byte_budget: usize,
-    ) -> Self {
-        Self::plan_ordered(
-            thread_id,
-            range_token,
-            candidates,
-            limit,
-            byte_budget,
-            PlanOrder::NewestFirst,
-        )
+    /// 判断「更早方向还有没有内容」）。
+    pub fn plan(candidates: Vec<HistoryPageCandidate>, limit: usize, byte_budget: usize) -> Self {
+        Self::plan_ordered(candidates, limit, byte_budget, PlanOrder::NewestFirst)
     }
 
     /// 窗口「更晚」方向的页计划（同一份长度预算规则，方向相反）。
@@ -631,25 +337,14 @@ impl HistoryPagePlan {
     /// `candidates` 必须按存储序**升序**给入（离锚点最近的一行在前），最多 `limit + 1`
     /// 行；多出的那一条只用于判断「更晚方向还有没有内容」。页内顺序仍是历史正序。
     pub fn plan_after(
-        thread_id: &ThreadId,
-        range_token: &str,
         candidates: Vec<HistoryPageCandidate>,
         limit: usize,
         byte_budget: usize,
     ) -> Self {
-        Self::plan_ordered(
-            thread_id,
-            range_token,
-            candidates,
-            limit,
-            byte_budget,
-            PlanOrder::OldestFirst,
-        )
+        Self::plan_ordered(candidates, limit, byte_budget, PlanOrder::OldestFirst)
     }
 
     fn plan_ordered(
-        thread_id: &ThreadId,
-        range_token: &str,
         candidates: Vec<HistoryPageCandidate>,
         limit: usize,
         byte_budget: usize,
@@ -669,16 +364,9 @@ impl HistoryPagePlan {
             remaining = remaining.saturating_sub(candidate.encoded_bytes);
             entries.push(*candidate);
         }
-        let anchor = entries.last().map(|entry| entry.message_id);
-        // 只有「候选行全部推进完」且「没有多出来的那一条」才表示该方向确实没有内容。
-        let exhausted = entries.len() == candidates.len() && candidates.len() <= limit;
         Self {
-            thread_id: thread_id.clone(),
-            range_token: range_token.to_owned(),
             byte_budget,
             entries,
-            anchor,
-            has_more: !exhausted,
             order,
         }
     }
@@ -686,16 +374,6 @@ impl HistoryPagePlan {
     /// 本页推进的行（按候选给入顺序），含不可展示行。
     pub fn entries(&self) -> &[HistoryPageCandidate] {
         &self.entries
-    }
-
-    /// 本页在对应方向上的推进锚点（最后一条被推进的行）。
-    pub fn anchor(&self) -> Option<MessageId> {
-        self.anchor
-    }
-
-    /// 对应方向是否还有内容。
-    pub fn has_more(&self) -> bool {
-        self.has_more
     }
 
     /// 本页使用的字节预算（窗口据此区分 descriptor 条目）。
@@ -710,41 +388,22 @@ impl HistoryPagePlan {
         self.entries.iter().map(|entry| entry.message_id).collect()
     }
 
-    /// 阶段二：把正文交给页（两个存储 adapter 共用的唯一装配实现）。
+    /// 窗口装配：超预算的条目**不取正文**，原样作为 descriptor 候选返回。
     ///
     /// `rows` 必须与 [`Self::entries`] **同一集合、同一顺序**（阶段二只按 [`Self::body_ids`]
     /// 取行）。集合或顺序不符即损坏：把少读/多读的行静默装配成一页，等于把一次不完整读取
     /// 当成正常页返回。长度与位置取阶段一的事实（页面预算当初就是按它判定的）。
-    pub fn materialize(self, rows: Vec<HistoryPageRow>) -> SessionResourceResult<HistoryPage> {
-        let (page, _) = self.materialize_selected(rows, false)?;
-        Ok(page)
-    }
-
-    /// 窗口装配：超预算的条目**不取正文**，原样作为 descriptor 候选返回。
     ///
     /// 返回值第二项是被省略的条目（`encoded_bytes > byte_budget`），调用方据此签发
-    /// [`crate::history_window::HistoryBodyDescriptor`]；不得先把完整正文取回再切片。
+    /// [`crate::history_common::HistoryBodyDescriptor`]；不得先把完整正文取回再切片。
     pub fn materialize_omitting_oversize(
         self,
         rows: Vec<HistoryPageRow>,
     ) -> SessionResourceResult<(HistoryPage, Vec<HistoryPageCandidate>)> {
-        self.materialize_selected(rows, true)
-    }
-
-    fn materialize_selected(
-        self,
-        rows: Vec<HistoryPageRow>,
-        omit_oversize: bool,
-    ) -> SessionResourceResult<(HistoryPage, Vec<HistoryPageCandidate>)> {
         let selected: Vec<(HistoryPageCandidate, bool)> = self
             .entries
             .iter()
-            .map(|entry| {
-                (
-                    *entry,
-                    omit_oversize && entry.encoded_bytes > self.byte_budget,
-                )
-            })
+            .map(|entry| (*entry, entry.encoded_bytes > self.byte_budget))
             .collect();
         let loaded: Vec<HistoryPageCandidate> = selected
             .iter()
@@ -770,31 +429,24 @@ impl HistoryPagePlan {
                     payload,
                     encoded_bytes: planned.encoded_bytes,
                     position: planned.position,
-                    // 预算之内不会再收下超预算的行，因此超预算只可能是本页第一条。
-                    oversized: planned.encoded_bytes > self.byte_budget,
                 });
             }
         }
-        // 旧分页按存储序降序进入（更靠近最新一行的在前），返回前反转成历史正序；
+        // 继承区窗口按存储序降序进入（更靠近最新一行的在前），返回前反转成历史正序；
         // 窗口的「更晚」计划已经按升序给入，保持原序。
         if self.order == PlanOrder::NewestFirst {
             items.reverse();
         }
-        let next_cursor = self.anchor.and_then(|anchor| {
-            self.has_more.then(|| {
-                HistoryCursor::new(self.thread_id.clone(), anchor, self.range_token.clone())
-            })
-        });
         let omitted = selected
             .into_iter()
             .filter(|(_, omitted)| *omitted)
             .map(|(entry, _)| entry)
             .collect();
-        Ok((HistoryPage { items, next_cursor }, omitted))
+        Ok((HistoryPage { items }, omitted))
     }
 }
 
-/// 一段 canonical 完整回放（未协商 `peri.historyPagination` 的标准客户端路径）。
+/// 一段 canonical 完整回放（标准 ACP 客户端路径）。
 ///
 /// 段内载荷按 canonical 顺序给出：继承区在前（**只在首段**出现），其后是自有行按 `rowid`
 /// 升序。**不过滤任何条目**：已排除的归档原文、System 条目、model-only reminder 都在其中——
@@ -951,15 +603,3 @@ fn invalid_input(detail: &str) -> SessionResourceError {
 #[cfg(test)]
 #[path = "history_page_test.rs"]
 mod tests;
-
-// V1 窗口协议按职责拆在 `history_window`；这里保持既有公开模块路径的可用性，
-// 让消费方既能从 `history_page` 找到分页/窗口的关联类型，也不改变旧类型语义。
-pub use crate::history_window::{
-    HistoryBodyChunk, HistoryBodyDescriptor, HistoryCheckpoint, HistoryCommitMetadata,
-    HistoryCommittedTail, HistoryEntryId, HistoryInheritedSnapshot, HistoryInheritedWindow,
-    HistoryReadTicket, HistoryReadTicketBinding, HistoryRewindInvalidation, HistoryRewindStatus,
-    HistorySource, HistoryWindowAnchor, HistoryWindowCursor, HistoryWindowDirection,
-    HistoryWindowError, HistoryWindowMetadata, HistoryWindowOpenPlan, HistoryWindowOpenRequest,
-    HistoryWindowPage, HistoryWindowPageRequest, HistoryWindowRequest, HistoryWindowSeekAnchor,
-    HistoryWindowSeekRequest,
-};

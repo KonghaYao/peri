@@ -28,7 +28,6 @@ fn test_auto_compact_completed_injects_detailed_system_note() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
-        window: Default::default(),
     };
 
     super::super::compact::handle_compact_completed(&mut state, "", "auto", "micro", 7, 2048, 2, 1);
@@ -79,7 +78,6 @@ fn test_full_compact_completed_shows_unmeasured_token_saving() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
-        window: Default::default(),
     };
 
     super::super::compact::handle_compact_completed(&mut state, "", "auto", "full", 7, 0, 2, 1);
@@ -127,7 +125,6 @@ fn test_unknown_and_empty_compact_strategy_use_full_unmeasured_detail() {
             pending_cache_usage: None,
             publication_intent: Default::default(),
             folded_history: Default::default(),
-            window: Default::default(),
         };
 
         super::super::compact::handle_compact_completed(
@@ -211,7 +208,6 @@ async fn test_compact_turndone_keeps_window_without_reload() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
-        window: Default::default(),
     };
 
     // Phase 5 Step 7 补遗（Step 8 回归修复）：manual compact 场景的 UiOnly
@@ -302,7 +298,6 @@ async fn test_compact_turndone_keeps_window_without_reload() {
         pending_cache_usage: None,
         publication_intent: Default::default(),
         folded_history: Default::default(),
-        window: Default::default(),
     };
 
     // ① CompactCompleted（auto）：不置标志（S4.1 方案 A——服务端透传 trigger，

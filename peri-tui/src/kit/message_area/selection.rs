@@ -392,7 +392,7 @@ pub(super) fn capture_selection_anchor(
     let lookup = index.visual_lookup(visual.0)?;
     let vm = items.get(lookup.slot_index)?;
     let start = index.slot_visual_start(lookup.slot_index)?;
-    let token = super::window_identity_token(vm);
+    let token = super::unit_identity_token(vm);
     Some(SelectionAnchor {
         unit_kind: token.kind,
         unit_hash: token.hash,
@@ -412,7 +412,7 @@ pub(super) fn resolve_selection_anchor(
     let items = index.canonical_items()?;
     let mut hit: Option<usize> = None;
     for (slot, vm) in items.iter().enumerate() {
-        let token = super::window_identity_token(vm);
+        let token = super::unit_identity_token(vm);
         if token.kind == anchor.unit_kind && token.hash == anchor.unit_hash {
             if hit.is_some() {
                 return None;

@@ -349,7 +349,7 @@ async fn load_history_segment_defaults_to_unsupported() {
 /// 冒充「这个会话没有历史」或「已经读完」。
 #[tokio::test]
 async fn history_window_reads_default_to_unsupported() {
-    use crate::history_window::{
+    use crate::history_common::{
         HistoryCommittedTail, HistoryReadTicket, HistorySource, HistoryWindowDirection,
     };
 
@@ -408,4 +408,11 @@ async fn history_window_reads_default_to_unsupported() {
             SessionResourceErrorKind::Unsupported
         ));
     }
+}
+
+/// 能力协商必须 fail-closed：没有实现读取的后端不得声明 History V2 / V1 能力。
+#[test]
+fn unsupported_backend_does_not_claim_history_capabilities() {
+    let resources = SegmentlessResources;
+    assert!(!resources.supports_history_v2());
 }

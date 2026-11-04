@@ -2,7 +2,7 @@
 //! 整批不生效并如实回报，而不是静默删掉一条本次操作从未看见的条目。清零侧同样钉住载荷
 //! 语义：被清零的行整条 `projection` 一并清掉，`truncated` 与未清零行的 flags 都原样。
 //!
-//! 夹具与 [`super::session_history_page_tests`] 同形：一个真 SQLite 池扮演远端服务端，走真实
+//! 夹具与 [`super::session_history_replay_tests`] 同形：一个真 SQLite 池扮演远端服务端，走真实
 //! 批次与账本（传输面的并发注入点 `before_batch` 见 `schema_upgrade_test.rs`）。四个观察点：
 //!
 //! | 用例 | 断言的事实 |

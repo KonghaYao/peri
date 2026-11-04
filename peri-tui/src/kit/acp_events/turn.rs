@@ -157,7 +157,6 @@ pub(super) fn handle_turn_interrupted(
         return;
     }
     state.current_request_id = None;
-    super::live_tool_links::note_turn_boundary(&state.active_session_id);
     if is_stale {
         tracing::info!(
             turn_generation = state.turn_generation,
@@ -264,7 +263,6 @@ pub(super) fn handle_turn_suspended(state: &mut BridgeState) {
     // Turn 挂起（idle/await_wake）——与 TurnDone 类似但 Agent 保持存活。
     // 归档 current_turn → committed，停止 loading，但不 drain_input_buffer
     // （Agent 还在 await_wake，新 turn 的流事件会自动恢复 loading）
-    super::live_tool_links::note_turn_boundary(&state.active_session_id);
     let has_running_sync_subagent = state.current_turn.has_running_sync_subagent();
     if !state.current_turn.committed && !state.current_turn.is_empty() {
         state.commit_current_turn_units();
@@ -325,7 +323,6 @@ pub(super) fn handle_execution_started(state: &mut BridgeState, request_id: &Opt
 
 pub(super) fn handle_session_replay_started(state: &mut BridgeState) {
     tracing::trace!("dead path: SessionReplayStarted not emitted by notifier");
-    super::live_tool_links::note_turn_boundary(&state.active_session_id);
     state.phase = SessionPhase::ReplayingHistory;
     state.variant = 0;
     state.current_turn.reset();
@@ -459,6 +456,17 @@ pub(super) fn handle_committed_assistant_text(
 /// 历史页与回放共用同一份构造：两者的入口差别只在「怎么进窗口」（回放 push_back、
 /// 历史页按区间插入，见 `acp_events::history_page`）。
 pub(super) fn committed_assistant_unit(text: &str, reasoning: &Option<String>) -> TuiRenderUnit {
+    committed_assistant_unit_with_message_id(text, reasoning, None)
+}
+
+/// 与 [`committed_assistant_unit`] 相同，但携带持久消息身份。
+///
+/// 历史页从 `entryId` 解析出裸消息 uuid，才能与 live `messageId` 做稳定去重。
+pub(super) fn committed_assistant_unit_with_message_id(
+    text: &str,
+    reasoning: &Option<String>,
+    message_id: Option<String>,
+) -> TuiRenderUnit {
     // 完整消息（非流式）→ reasoning 视为已完成：按 §7 表折叠为单行。
     // [G1] hash 统一走 TuiAssistantBubble::compute_hash（含 fold/status）。
     let reason_block = reasoning.as_ref().map(|r| TuiReasoningBlock {
@@ -477,9 +485,8 @@ pub(super) fn committed_assistant_unit(text: &str, reasoning: &Option<String>) -
     let mut bubble = TuiAssistantBubble {
         text: text.to_string(),
         reasoning: reason_block,
-        // 非流式通道无 message_id 来源（重放/commit 路径）——不可作为
-        // FoldKey::Reasoning 覆盖目标，Slice 2 接受此限制。
-        message_id: None,
+        // 非流式通道通常无 message_id 来源；历史页从 entryId 解析后传入。
+        message_id,
         // 非流式通道无文本起始时刻——正文时长不可得（G-Tokens 降级：
         // 不显示 `12.4s`）。
         started_at: None,

@@ -1,6 +1,11 @@
 # 实现蓝图：Full Compact 后 Transcript 收缩与 ACP 历史分页
 
 状态：原 REQ-T/H/C 范围交付完成（验收报告 `.recon/A-acceptance-report.md`）；两项待裁决已经对抗裁决结案、A05 索引经用户授权并实施、D8 已闭合（取代关系落在既有 `projection` 载荷，无 DDL；见 D17）。2026-10-17 起 S4–S8 扩展见 §8：窗口协议默认关闭，S7.3 详情与 S7.4 inherited 已交付（限制见 §8.4），S6.3/S6.4/S6.5 与 remote/emscripten 仍未完成。基线 `7f0de56e8`（worktree `.worktrees/peri-transcript-history`，分支 `feat/transcript-shrink-history-pagination`）。
+
+> **历史文档**：本文描述的 `history-window-v1` beta 开关与 `peri.historyWindowV1`
+> 私有窗口协议已随 History V2 删除；History V2 是本地 TUI 的唯一历史路径，不存在
+> “关闭 beta 回滚旧协议”的路径。以下涉及该键的内容均为历史记录，不代表当前行为。
+
 需求源：`/Users/konghayao/Desktop/peri-transcript-history-requirements.md`。
 现状侦察报告：`.recon/A-core-transcript.md`、`B-acp-host.md`、`C-storage-contract.md`、`D-test-infra.md`、`E-tui-sdk.md`（所有行号基于基线 commit）。
 
@@ -267,7 +272,7 @@ D7 的存储契约要点（S9a 落地，供复核对照）：`HistoryForwardCurs
 | S7.1/S7.2 描述符/分块 | 已实现（本机 SQLite） | 服务端 descriptor 与有界 body 分块；TUI 详情面板已交付（S7.3） |
 | S7.4 冻结继承 | 已实现（本机 SQLite，协议默认关闭） | inherited source/冻结读取/父变更隔离；TUI 继承详情已交付；remote/emscripten 未实现 |
 | S7.3 TUI 详情/超大条目/继承 | 已交付（默认关闭） | `PanelKind::HistoryDetail`/`HistoryDetailPanel`、占位 note Enter 打开、Esc/q 关闭、滚动补块、`e` 复制已加载正文、`session/history/body` 分块与 4 MiB 预算、inherited 详情走冻结 snapshot；交互限制见 §8.4 |
-| 配置入口 | 已接通（默认 false） | settings beta `history-window-v1` 启动读取一次并写 `HISTORY_WINDOW_V1`；无热重载；仍需 `peri.historyWindowV1` 协商；Beta 面板未列该键 |
+| 配置入口 | 已删除（历史记录：当时默认 false） | settings beta `history-window-v1` 曾在启动读取一次并写 `HISTORY_WINDOW_V1`；该键与 `peri.historyWindowV1` 协议已随 History V2 删除，不存在关闭 beta 回滚旧协议的路径 |
 | S8 文档与契约同步 | 本次完成 | 只改 `docs/**`、`spec/**`；不涉及代码、Cargo、`.peri/**` 或子模块 |
 
 ### 8.2 已落地范围
@@ -277,7 +282,7 @@ D7 的存储契约要点（S9a 落地，供复核对照）：`HistoryForwardCurs
 3. **窗口协议**：`session/load` 的 `history`（`open/page/seek`）与旧顶层 `cursor/limit/loadGeneration/cwd/mcpServers` 互斥；响应含 generation/structure/snapshot/tail/checkpoint/readTicket/双向 cursor/items/inherited/rewindInvalidation；oversize 只在 `items[].body` 内联 descriptor；`session/history/body` 有界分块；`peri/history_committed` 私有通知按 checkpointId 幂等且只发持票连接；ticket per-connection、单活动票据、新 open 成功才原子替换、失败保留旧票据；page/seek/body 二次校验；rewind durable 成功恰好 `structureVersion+1` 并撤销 ticket；继承使用 `threads.inherited_context` 冻结列与边界派生 snapshotId。
 4. **TUI 窗口**：窗口模型/预算/接纳/淘汰（`ReleasePlan` 不直接删正文）、段窗口合并进 `committed`、双向滚动/gap、`HistoryCommitted` 封印 durable 段、统一释放事务（DisplayLedger/HistorySpans/ResidentIndex/WINDOW_UNIT_KEYS/FoldedHistory/渲染缓存/pending tool results）、`structural_epoch` + 渲染 ack、8/6 MiB 缓存、对象级 Weak 断言。
 5. **默认关闭**：`PeriCaps::history_window_v1` 与 TUI `HistoryWindowConfig::history_window_v1` / `HISTORY_WINDOW_V1` 默认 false；关闭时旧 `HISTORY_PAGING` 路径行为不变。TUI 的 initialize 仍以 `PeriCaps::all_enabled` 声明能力，但不等于启用窗口模型/淘汰。
-6. **S7.3 详情与配置入口**：TUI 交付 `PanelKind::HistoryDetail` + `HistoryDetailPanel`，占位 note 命中后 Enter 打开，Esc/q 关闭，Up/Down/PageUp/PageDown 滚动并在缺块时请求，`e` 复制已加载正文；`load_history_body` 走 `session/history/body`，支持 UTF-8 跨块重组、4 MiB 预算、关闭释放 chunks。settings beta `history-window-v1`（默认 false）在 TUI 启动读取一次并写 `HISTORY_WINDOW_V1`，无热重载；仍需服务端 `peri.historyWindowV1` 同时为真。
+6. **S7.3 详情与配置入口**：TUI 交付 `PanelKind::HistoryDetail` + `HistoryDetailPanel`，占位 note 命中后 Enter 打开，Esc/q 关闭，Up/Down/PageUp/PageDown 滚动并在缺块时请求，`e` 复制已加载正文；`load_history_body` 走 `session/history/body`，支持 UTF-8 跨块重组、4 MiB 预算、关闭释放 chunks。settings beta `history-window-v1`（默认 false，已随 History V2 删除）曾在 TUI 启动读取一次并写 `HISTORY_WINDOW_V1`，无热重载；服务端 `peri.historyWindowV1` 同时为真的旧协议已删除。
 7. **inherited 对齐**：`HistorySource::Inherited{frozen_snapshot_id, ancestor_thread_id}`、open 响应 `inherited` 对象、inherited 条目 `position:null`、inherited 段固定不释放、详情走冻结 snapshot；`ancestor_thread_id` 来自 `parent_thread_id`（旧数据 None），snapshotId 按边界 SHA-256 派生；`inheritedUnsupported` 显式提示。服务端 SQLite 使用 `json_each` keyset 分页/seek 与 `substr` 分块。
 
 ### 8.3 验收映射
@@ -307,7 +312,7 @@ D7 的存储契约要点（S9a 落地，供复核对照）：`HistoryForwardCurs
 2. **S6.4 结构性失效清全部 slot**：`Transcript::prepare` 观察到 `STRUCTURAL_EPOCH` 变化时清空全部渲染缓存，尚未按段精准清理。完成条件：按段清理 slot/index 并保留未受影响缓存，Weak 行缓存断言通过。
 3. **S6.5 旧分页 pending 表未迁移**：旧 `HISTORY_PAGING` 路径仍使用轻量静态 `PENDING_TOOL_ENDS`（1 MiB/256 条），未完全迁移到 `ResidentIndex`；窗口路径共享清理入口。完成条件：旧分页也经 `ResidentIndex` 配对，删除静态表并补跨段配对用例。
 4. **详情交互限制（S7.3 已交付）**：鼠标单击只设焦点，需再 Enter 打开；`e` 只复制已加载正文，文件导出/超窗流式导出尚未接入 UI（模型 `export_stream` 已支持分块）；未做 JSON 字段级展示；inherited 段内部不插入独立占位行，使用全局 inherited notice；TUI 仍接受旧顶层 `bodyDescriptors` 兼容输入，服务端已不再发送。完成条件：按需接入文件/流式导出、字段级展示与段内占位，或明确保持当前交互。
-5. **Beta 面板未列 `history-window-v1`**：settings beta 已接通，TUI 启动读取一次并写 `HISTORY_WINDOW_V1`，无热重载；但 ConfigPanel 只列 ACP `BETA_FLAGS`，该键需手动写入 settings。完成条件：把 TUI 本地 beta 纳入面板行模型，或明确保持手动配置。
+5. **Beta 面板未列 `history-window-v1`（历史；该键已删除）**：settings beta 已删除，TUI 不再读取该键；历史记录：TUI 启动读取一次并写 `HISTORY_WINDOW_V1`，无热重载，但 ConfigPanel 只列 ACP `BETA_FLAGS`，该键需手动写入 settings。该完成条件随旧协议删除失效。
 6. **remote/emscripten**：未覆写窗口/继承端口，默认 `Unsupported`（出口 `-32603`），不宣称已支持。能力协商是连接级客户端声明，服务端当前不按后端关闭协商；因此“协商成功”不等于该后端可读，实际读取失败必须显式处理。完成条件：adapter 覆写端口并通过 open/page/seek/body/inherited 契约测试。
 7. **ticket 无密码学签名**：进程内 opaque 值 + 精确匹配，绑定 connection/session/generation/structure/snapshot/source/tail/投影版本/时间/nonce；不是访问授权。当前票据只在进程内使用；若未来跨进程/网络读取，需另行设计签名/认证，不能沿用当前 opaque ticket。
 8. **rewind uncertain 依赖文本 marker**：`PERSISTENCE_UNCERTAIN_MARKER` 集中于 `host/requests/rewind.rs`，尚无 typed mutation outcome。完成条件：存储/门面返回 typed outcome，删除字符串 marker 判定并补失败路径用例。

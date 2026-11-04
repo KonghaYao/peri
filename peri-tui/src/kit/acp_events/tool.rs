@@ -1,13 +1,11 @@
 //! Tool event handlers — ToolStarted, ToolEnded, ToolCount, Progress,
 //! ReplayToolStarted, ReplayToolEnded + update_committed_tool_card helper.
 
-use super::live_tool_links;
 use super::*;
 use crate::kit::acp_types::ToolCardAccumulator;
 use crate::kit::atoms::BG_AGENT_IDS;
 use crate::kit::bg_task_identity::{bounded_label, with_bg_display_for_agent};
 use crate::kit::bg_task_live::{handle_bg_tool_ended, handle_bg_tool_started};
-use crate::kit::retained_bytes::{SeenAllocations, retained_unit_bytes};
 use crate::kit::stream_data::{TuiToolEnded, TuiToolStarted};
 use crate::kit::tui_render_unit::{
     EntryStatus, FoldTarget, TuiRenderUnit, TuiToolCard, TuiToolPresentation, fold_for_status,
@@ -72,15 +70,6 @@ pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) 
             state.last_pushed_reasoning_len = state.current_turn.reasoning.len();
         }
     } else {
-        // 根 agent 工具卡：优先使用服务端给出的真实所属 assistant 消息（纯工具
-        // 响应轮次没有文本/推理 chunk）；没有时回退同一段流式输出的身份，
-        // 仍不可知则保持未归属，不猜测。
-        live_tool_links::note_root_tool_started(
-            &state.active_session_id,
-            &ts.tool_id,
-            ts.origin_message_id.as_deref(),
-            ts.origin_readable,
-        );
         let tool = if ts.tool_name == "TodoWrite" && state.todo_baseline_unknown() {
             // Do not derive an initial Todo presentation from a missing baseline.
             let mut tool = ToolCardAccumulator::new(
@@ -158,12 +147,10 @@ pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
                 .current_turn
                 .end_tool(&te.tool_id, te.output_summary.clone(), te.is_error);
         // 取消/挂起会把仍在运行的工具卡整段归档；迟到终点必须同步已归档单元，
-        // 不能留下永久 running 的卡片或过期字节账目。
+        // 不能留下永久 running 的卡片。
         if !ended {
             complete_archived_tool_card(state, &te.tool_id, &te.output_summary, te.is_error);
         }
-        // 该 assistant 响应已结束；下一个响应的工具卡不得沿用本消息 id。
-        live_tool_links::note_root_tool_ended(&state.active_session_id, &te.tool_id);
         state.variant = 1;
         state.phase = SessionPhase::PromptRunning;
         state.publish_barrier();
@@ -337,9 +324,9 @@ pub(super) fn completed_tool_card(
     updated
 }
 
-/// 迟到终点落在已归档卡片上：原地更新并同步窗口字节账目。
+/// 迟到终点落在已归档卡片上：原地更新。
 ///
-/// 卡片已被释放时不做任何事（无悬挂引用）；未归属卡片只改 `unattributed` 账目。
+/// 卡片已被释放时不做任何事（无悬挂引用）。
 fn complete_archived_tool_card(
     state: &mut BridgeState,
     tool_id: &str,
@@ -357,43 +344,15 @@ fn complete_archived_tool_card(
             {
                 return false;
             }
-            let mut seen = SeenAllocations::default();
-            let old_bytes = retained_unit_bytes(&state.committed[slot], &mut seen);
-            let updated = completed_tool_card(card, output_summary, is_error);
-            let mut seen = SeenAllocations::default();
-            let new_bytes =
-                retained_unit_bytes(&TuiRenderUnit::TuiToolCard(updated.clone()), &mut seen);
-            found = Some((slot, updated, old_bytes, new_bytes));
+            found = Some((slot, completed_tool_card(card, output_summary, is_error)));
             break;
         }
     }
-    let Some((slot, updated, old_bytes, new_bytes)) = found else {
+    let Some((slot, updated)) = found else {
         return false;
     };
     state.committed = state
         .committed
         .update(slot, TuiRenderUnit::TuiToolCard(updated));
-    let delta = new_bytes as i64 - old_bytes as i64;
-    if delta != 0 {
-        if let Some(owner) = live_tool_links::owner_for_tool(&state.active_session_id, tool_id)
-            && state
-                .window
-                .adjust_live_entry_bytes(&owner.entry, delta, delta)
-        {
-            return true;
-        }
-        let unattributed_delta = live_tool_links::resize_unattributed(
-            &state.active_session_id,
-            state.window.instance_id(),
-            state.window.generation(),
-            tool_id,
-            new_bytes,
-        );
-        if unattributed_delta != 0 {
-            state
-                .window
-                .adjust_unattributed_live_bytes(unattributed_delta);
-        }
-    }
     true
 }

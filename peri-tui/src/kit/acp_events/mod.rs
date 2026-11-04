@@ -7,9 +7,7 @@
 mod agent;
 mod compact;
 mod fold;
-mod history_page;
-pub(crate) mod history_window;
-pub(crate) mod live_tool_links;
+pub(crate) mod history_v2;
 mod memory_probe;
 pub(crate) mod render;
 mod streaming;
@@ -135,9 +133,6 @@ pub struct BridgeState {
     pub variant: u8,
     /// 已提交的 TuiRenderUnit 列表——im::Vector 支持 O(1) clone + O(log n) push_back。
     pub committed: im::Vector<TuiRenderUnit>,
-    /// S5：历史窗口模型与账目。默认关闭；关闭时不改变旧渲染/滚动/事件行为。
-    /// `committed` 仍是展示正文的唯一强持有者，窗口只保存持久身份与字节账目。
-    pub window: crate::kit::history_window::HistoryWindow,
     /// 当前轮次的增量数据
     pub current_turn: CurrentTurn,
     /// 当前 session lifecycle 阶段。loading 只由该阶段派生。
@@ -198,18 +193,6 @@ pub struct BridgeState {
     pub(crate) folded_history: fold::FoldedHistory,
 }
 
-/// 一次归档中共享同一持久条目身份的 live 单元组。
-struct LiveSealGroup {
-    key: crate::kit::history_window::PersistentEntryKey,
-    /// open 页给出的持久位置；纯 live 归属时为 `None`，等提交/页回执提升。
-    position: Option<u64>,
-    slots: Vec<usize>,
-    body_bytes: usize,
-    reserved_bytes: usize,
-    /// 组内工具卡的 `(tool_id, 既有 retained 字节)`，用于归属后回落未归属账目。
-    tool_bytes: Vec<(String, usize)>,
-}
-
 impl BridgeState {
     /// 显式同步 barrier：保留 terminal 发布先于 drain/replay 等副作用的顺序。
     fn publish_barrier(&mut self) {
@@ -224,7 +207,6 @@ impl BridgeState {
     /// 运行中分组之后的子 Agent **不能**单独抽到 committed：committed 整段渲染在
     /// current_turn 之前，抽走会让它跨越仍在运行的分组，破坏原时间线顺序（R05）。
     fn archive_current_turn(&mut self) {
-        let start = self.committed.len();
         // 任何运行中的分组（含后台）都可能继续增长，只能搬稳定前缀；调用方
         // 在此路径不得 reset current_turn。后台组跨 turn 由全局 live 明细维护。
         if self.current_turn.has_running_subagent() {
@@ -237,10 +219,7 @@ impl BridgeState {
             }
         } else {
             self.archive_current_turn_fully();
-            return;
         }
-        let range = start..self.committed.len();
-        self.register_live_seal_segments(range);
     }
 
     /// 冻结整轮：所有展示单元搬入 committed，活动容器由调用方 reset。
@@ -248,7 +227,6 @@ impl BridgeState {
     /// 用于 turn 边界（stale / cancel / suspend）没有同步运行组的情况；此时
     /// 后台组也必须整体归档，否则调用方的 reset 会把它丢掉。
     fn archive_current_turn_fully(&mut self) {
-        let start = self.committed.len();
         // 整轮归档沿用 segment 顺序，不能先抽走子 Agent 再追加根内容。
         if !self.current_turn.committed && !self.current_turn.is_empty() {
             self.current_turn.deactivate();
@@ -257,14 +235,11 @@ impl BridgeState {
             }
         }
         self.current_turn.take_completed_subagents();
-        let range = start..self.committed.len();
-        self.register_live_seal_segments(range);
     }
 
-    /// 已产出轮次归档的统一入口：先搬 VM，再按实际槽位登记窗口预算。
+    /// 已产出轮次归档的统一入口。
     ///
-    /// stale / cancel / suspend 等直接归档路径必须共用，避免绕过
-    /// `register_live_seal_segments` 形成未记账的驻留正文。
+    /// stale / cancel / suspend 等直接归档路径必须共用，避免各路径行为漂移。
     ///
     /// 返回是否仍有运行中的**同步** subagent。调用方在 true 时不得重置
     /// `current_turn`：同步运行组仍在累积正文，重置会让后续 chunk /
@@ -285,255 +260,11 @@ impl BridgeState {
         has_running_sync_subagent
     }
 
-    /// live 展示单元登记为可淘汰的 LiveSeal 段。
-    ///
-    /// 工具卡没有 ACP live `messageId`：先按 [`live_tool_links`] 保存的 live 归属
-    /// 找所属 assistant 条目；open 页按 `tool_id` 回填的持久条目同样可用。找不到
-    /// 归属的单元不伪造身份，继续计入未归属预算。
-    ///
-    /// 同一消息可能先归档文本、后归档工具卡：身份已驻留在 LiveSeal 段时把新增
-    /// 单元并入原段，不登记第二个条目身份（驻留索引要求条目身份唯一）。
-    fn register_live_seal_segments(&mut self, slots: impl Iterator<Item = usize>) {
-        if !self.window.is_enabled() {
-            return;
-        }
-        use crate::kit::history_window::{
-            HistoryEntryView, PersistentEntryKey, SegmentDraft, SegmentOrigin, SegmentPlacement,
-            WindowUnitMapping, publish_window_unit_mappings,
-        };
-
-        let window_id = self.window.instance_id();
-        let generation = self.window.generation();
-        let mut groups: Vec<LiveSealGroup> = Vec::new();
-        let mut group_indices: HashMap<PersistentEntryKey, usize> = HashMap::new();
-        let mut unattributed_bytes = 0usize;
-        let mut unattributed_tool_delta = 0i64;
-        let mut unattributed_seen = crate::kit::retained_bytes::SeenAllocations::default();
-        for slot in slots {
-            let unit = &self.committed[slot];
-            // Child previews have their own bounded disposable cache. They are
-            // not canonical rows and cannot borrow/return canonical admission credit.
-            if matches!(unit, TuiRenderUnit::TuiSubAgentGroup(_)) {
-                continue;
-            }
-            let unit_bytes =
-                crate::kit::retained_bytes::retained_unit_bytes(unit, &mut unattributed_seen);
-            let Some((key, position)) = self.live_unit_owner(unit) else {
-                // 子 Agent 组、无持久身份的正文：不能建可淘汰段，但正文确实驻留，
-                // 必须计入同一预算，避免账目低估。
-                if let TuiRenderUnit::TuiToolCard(card) = unit {
-                    unattributed_tool_delta += live_tool_links::note_unattributed(
-                        &self.active_session_id,
-                        window_id,
-                        generation,
-                        &card.tool_id,
-                        unit_bytes,
-                    );
-                } else {
-                    unattributed_bytes += unit_bytes;
-                }
-                continue;
-            };
-            // 工具卡正文沿用 `retained_unit_bytes` 的既有口径（containers +
-            // summaries + presentation 之外的既有范围）。归属后这部分从
-            // unattributed 移入可淘汰段，总账不缩小。
-            let body_bytes = match unit {
-                TuiRenderUnit::TuiUserBubble(bubble) => bubble.text.len(),
-                TuiRenderUnit::TuiAssistantBubble(bubble) => {
-                    bubble.text.len() + bubble.reasoning.as_ref().map_or(0, |r| r.text.len())
-                }
-                TuiRenderUnit::TuiToolCard(_) => unit_bytes,
-                _ => 0,
-            };
-            let index = *group_indices.entry(key.clone()).or_insert_with(|| {
-                groups.push(LiveSealGroup {
-                    key,
-                    position,
-                    slots: Vec::new(),
-                    body_bytes: 0,
-                    reserved_bytes: 0,
-                    tool_bytes: Vec::new(),
-                });
-                groups.len() - 1
-            });
-            let group = &mut groups[index];
-            if position.is_some() {
-                group.position = position;
-            }
-            group.slots.push(slot);
-            group.body_bytes += body_bytes;
-            group.reserved_bytes += unit_bytes;
-            if let TuiRenderUnit::TuiToolCard(card) = unit {
-                group.tool_bytes.push((card.tool_id.clone(), unit_bytes));
-            }
-        }
-        if unattributed_bytes > 0 {
-            self.window.note_unattributed_live_bytes(unattributed_bytes);
-        }
-        if unattributed_tool_delta > 0 {
-            self.window
-                .note_unattributed_live_bytes(unattributed_tool_delta as usize);
-        } else if unattributed_tool_delta < 0 {
-            self.window
-                .adjust_unattributed_live_bytes(unattributed_tool_delta);
-        }
-
-        // 回填槽位可能早于既有展示区间：按 `committed` 顺序处理，段的布局位置由
-        // 第一个更晚的展示区间决定，不能一律追加到尾部（否则 index 槽位顺序与
-        // `committed` 不一致，释放会删错区间）。
-        groups.sort_by_key(|group| group.slots.first().copied().unwrap_or(usize::MAX));
-        let mut mappings = Vec::new();
-        for group in groups {
-            // 展示账目冲突意味着回填证据不可信：宁可不建段（继续按未归属记账），
-            // 也不能让段的单位数与真实槽位错位。必须在并入既有段之前判定。
-            if !group
-                .slots
-                .iter()
-                .all(|slot| self.window.display_slot_available(*slot))
-            {
-                tracing::warn!(
-                    key = ?group.key,
-                    slots = ?group.slots,
-                    "history_window: live seal display slots already covered"
-                );
-                self.note_group_unattributed(&group, window_id, generation);
-                continue;
-            }
-            let resident = self.window.index().contains_entry(&group.key);
-            let attached = resident
-                && self.window.extend_live_entry(
-                    &group.key,
-                    group.slots.len(),
-                    group.body_bytes,
-                    group.reserved_bytes,
-                );
-            if resident && !attached {
-                // 同一身份已驻留在页段（非 LiveSeal）：不能并入，正文仍是真实占用。
-                self.note_group_unattributed(&group, window_id, generation);
-                continue;
-            }
-            if !resident {
-                let entry = HistoryEntryView::new(
-                    group.key.clone(),
-                    group.position,
-                    group.slots.len(),
-                    group.body_bytes,
-                    group.reserved_bytes,
-                    Vec::new(),
-                );
-                let draft = SegmentDraft::new(
-                    group.key.source.clone(),
-                    vec![entry],
-                    group.body_bytes,
-                    group.reserved_bytes,
-                )
-                .durable(false)
-                .origin(SegmentOrigin::LiveSeal);
-                let placement = self
-                    .window
-                    .segment_after_display_slot(group.slots[0])
-                    .map_or(SegmentPlacement::Tail, SegmentPlacement::BeforeSegment);
-                if let Err(error) = self.window.register_segment(draft, placement) {
-                    tracing::error!(?error, "history_window: live seal registration failed");
-                    self.note_group_unattributed(&group, window_id, generation);
-                    continue;
-                }
-            }
-            // 归属成功：把先前计入 unattributed 的工具卡字节移出，避免只增不减。
-            let mut returned = 0usize;
-            for (tool_id, _) in &group.tool_bytes {
-                returned += live_tool_links::take_unattributed(
-                    &self.active_session_id,
-                    window_id,
-                    generation,
-                    tool_id,
-                );
-            }
-            if returned > 0 {
-                self.window.release_unattributed_live_bytes(returned);
-            }
-            // 单元已在 `committed` 中：只补展示账目，不得右移其他区间。
-            for slot in &group.slots {
-                if !self
-                    .window
-                    .mark_existing_display_slot(group.key.clone(), *slot, 1)
-                {
-                    tracing::error!(
-                        slot,
-                        key = ?group.key,
-                        "history_window: live seal display slot registration lost race"
-                    );
-                    continue;
-                }
-                mappings.push(WindowUnitMapping {
-                    token: crate::kit::message_area::window_identity_token(&self.committed[*slot]),
-                    entry: group.key.clone(),
-                });
-            }
-        }
-        publish_window_unit_mappings(mappings);
-    }
-
-    /// live 单元到持久条目的定位。
-    fn live_unit_owner(
-        &self,
-        unit: &TuiRenderUnit,
-    ) -> Option<(crate::kit::history_window::PersistentEntryKey, Option<u64>)> {
-        use crate::kit::history_window::PersistentEntryKey;
-        match unit {
-            TuiRenderUnit::TuiUserBubble(bubble) => bubble.message_id.as_ref().map(|id| {
-                (
-                    PersistentEntryKey::own(format!("{}:{id}", self.active_session_id)),
-                    None,
-                )
-            }),
-            TuiRenderUnit::TuiAssistantBubble(bubble) => bubble.message_id.as_ref().map(|id| {
-                (
-                    PersistentEntryKey::own(format!("{}:{id}", self.active_session_id)),
-                    None,
-                )
-            }),
-            TuiRenderUnit::TuiToolCard(card) => {
-                live_tool_links::owner_for_tool(&self.active_session_id, &card.tool_id)
-                    .map(|owner| (owner.entry, owner.position))
-            }
-            _ => None,
-        }
-    }
-
-    /// 无法归属的一组单元按未归属正文计入预算。
-    fn note_group_unattributed(&mut self, group: &LiveSealGroup, window_id: u64, generation: u64) {
-        let mut tool_total = 0usize;
-        let mut tool_delta = 0i64;
-        for (tool_id, bytes) in &group.tool_bytes {
-            tool_total = tool_total.saturating_add(*bytes);
-            tool_delta += live_tool_links::note_unattributed(
-                &self.active_session_id,
-                window_id,
-                generation,
-                tool_id,
-                *bytes,
-            );
-        }
-        let non_tool = group.reserved_bytes.saturating_sub(tool_total);
-        if non_tool > 0 {
-            self.window.note_unattributed_live_bytes(non_tool);
-        }
-        if tool_delta > 0 {
-            self.window
-                .note_unattributed_live_bytes(tool_delta as usize);
-        } else if tool_delta < 0 {
-            self.window.adjust_unattributed_live_bytes(tool_delta);
-        }
-    }
-
     /// 将 current_turn 已产出内容 flush 到 committed，然后 reset。
     ///
     /// 需要保证时序正确性的位置会调用该入口；running subagent 不会清除 current_turn，
     /// 只归档它之前的稳定前缀，其余内容保留到分组结束后按原顺序整体提交。
     fn flush_current_turn(&mut self) {
-        // 消息身份只在同一段流式输出内有效；turn 边界后不得沿用到下一轮。
-        live_tool_links::note_turn_boundary(&self.active_session_id);
         let has_running_subagent = self.current_turn.has_running_subagent();
         if has_running_subagent {
             tracing::debug!(
@@ -576,10 +307,8 @@ impl BridgeState {
         let mut bubble = TuiUserBubble::with_attachments(text, attachments);
         bubble.message_id = message_id;
         if self.current_turn.is_empty() {
-            let start = self.committed.len();
             self.committed
                 .push_back(TuiRenderUnit::TuiUserBubble(bubble));
-            self.register_live_seal_segments(start..self.committed.len());
         } else {
             self.current_turn
                 .push_user_bubble(bubble.text, bubble.attachments, bubble.message_id);
@@ -629,8 +358,6 @@ pub(crate) fn dispatch_for_bridge(
     event: &AcpEventData,
 ) -> PublicationIntent {
     state.publication_intent = PublicationIntent::None;
-    // 回放条目区间登记需要「本事件推入了哪个槽位」——在 handler 之前取长度。
-    let committed_len_before = state.committed.len();
     use AcpEventData::*;
     // S4.1 方案 B：CompactCompleted 置 compact_just_completed 后，任何流事件
     // 到达即清除标志——agent 内部 auto-compact 后 ReAct 循环继续产出，流事件
@@ -671,11 +398,7 @@ pub(crate) fn dispatch_for_bridge(
         }
         CacheUsageUpdated(sample) => turn::handle_cache_usage_updated(state, sample),
         SessionReplayStarted => turn::handle_session_replay_started(state),
-        SessionReplayDone => {
-            // 回放结束：关闭正在铺的条目区间（首屏区间索引在此定型）。
-            crate::kit::history_paging::close_own_entry();
-            turn::handle_session_replay_done(state)
-        }
+        SessionReplayDone => turn::handle_session_replay_done(state),
         TurnDone => turn::handle_turn_done(state),
         AgentDone { request_id } => turn::handle_agent_done(state, request_id),
         TurnInterrupted { reason, request_id } => {
@@ -852,33 +575,8 @@ pub(crate) fn dispatch_for_bridge(
             output_summary,
             is_error,
         } => tool::handle_replay_tool_ended(state, tool_id, output_summary, *is_error),
-        // 历史分页：整页并入窗口（本地事件，非 wire；见 `acp_events::history_page`）。
-        // 它只动 committed，不碰执行 / 审批 / Todo / 输入状态（REQ-C01-6、A24）。
-        HistoryPageLoaded {
-            response,
-            origin,
-            refetch,
-        } => history_page::handle_history_page_loaded(
-            state,
-            response.as_ref(),
-            origin.as_ref(),
-            refetch.as_deref(),
-        ),
-        HistoryCommitted(info) => history_window::handle_history_committed(state, info),
-        HistoryWindowPageLoaded { context, response } => {
-            state.publication_intent = history_window::handle_window_page_loaded(
-                state,
-                context.as_ref(),
-                response.as_ref(),
-            );
-        }
-        HistoryWindowDegraded { session_id, reason } => {
-            history_window::handle_window_degraded(state, session_id, reason);
-        }
-        // 回放条目位置标记：只登记区间，不产生展示单元。
-        ReplayEntryMarked { entry_id, position } => {
-            crate::kit::history_paging::mark_own_entry(entry_id, *position)
-        }
+        // 历史 V2 状态整体发布（本地事件，非 wire）。
+        HistoryV2ViewChanged { state: v2 } => history_v2::handle_view(state, v2.as_ref()),
 
         // ── §4.7 Background Tasks ──
         BgTaskSnapshot {
@@ -916,26 +614,6 @@ pub(crate) fn dispatch_for_bridge(
     }
 
     let requested = std::mem::take(&mut state.publication_intent);
-    // 回放条目区间：这些变体各自在末尾推入**恰好一个**展示单元，槽位即
-    // `committed.len() - 1`。计数不符（例如 user 气泡落进 current_turn，或
-    // reminder 前 `flush_current_turn` 并入了流式产出）时不登记，避免把区间错标到
-    // 别的条目上。
-    //
-    // reminder（含 fallback）必须在集合里：首屏自有条目**只有 reminder** 是合法
-    // 形状，漏登记会让区间索引为空、更早历史插到继承前缀之前（REQ-H01-6、A20）。
-    if state.committed.len() == committed_len_before + 1
-        && matches!(
-            event,
-            CommittedAssistantText { .. }
-                | ReplayToolStarted { .. }
-                | ReplayedUserBubble { .. }
-                | LocalUserBubble { .. }
-                | SystemReminder { .. }
-                | SystemReminderFallback { .. }
-        )
-    {
-        crate::kit::history_paging::note_own_entry_unit(committed_len_before);
-    }
     if requested != PublicationIntent::None {
         requested
     } else if matches!(
@@ -943,8 +621,7 @@ pub(crate) fn dispatch_for_bridge(
         CommittedAssistantText { .. }
             | ReplayToolStarted { .. }
             | ReplayToolEnded { .. }
-            | HistoryPageLoaded { .. }
-            | HistoryWindowPageLoaded { .. }
+            | HistoryV2ViewChanged { .. }
     ) {
         PublicationIntent::Deferred
     } else {

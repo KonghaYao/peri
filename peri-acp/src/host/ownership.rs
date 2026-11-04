@@ -27,7 +27,6 @@ impl Drop for HandoffGuard {
         if let Ok(mut states) = self.sessions.try_lock() {
             if let Some(state) = states.get_mut(&self.session_id) {
                 let same_attempt = state
-                    .history_window
                     .handed_off_alive
                     .as_ref()
                     .is_some_and(|current| Arc::ptr_eq(current, &self.alive));
@@ -48,7 +47,7 @@ pub(crate) fn begin_handoff(
     let payloads = std::mem::take(&mut state.history_payloads);
     state.context_ownership = ContextOwnership::HandedOff;
     let alive = Arc::new(AtomicBool::new(true));
-    state.history_window.handed_off_alive = Some(Arc::clone(&alive));
+    state.handed_off_alive = Some(Arc::clone(&alive));
     (
         payloads,
         HandoffGuard {
@@ -67,7 +66,7 @@ pub(crate) fn mark_stale_if_dead(state: &mut SessionState) -> bool {
         return false;
     }
     // 没有本模块登记的标记时保守保持忙；不把其他所有者误判为失活 attempt。
-    let Some(alive) = state.history_window.handed_off_alive.as_ref() else {
+    let Some(alive) = state.handed_off_alive.as_ref() else {
         return false;
     };
     if alive.load(Ordering::Acquire) {
@@ -76,8 +75,7 @@ pub(crate) fn mark_stale_if_dead(state: &mut SessionState) -> bool {
     tracing::warn!(session_id = %state.session_id, "prompt 已失活，丢弃热态并等待存储恢复");
     state.history_payloads.clear();
     state.context_ownership = ContextOwnership::ReloadRequired;
-    state.history_window.handed_off_alive = None;
+    state.handed_off_alive = None;
     state.cancel_token = None;
-    super::history_window::invalidate(state);
     true
 }

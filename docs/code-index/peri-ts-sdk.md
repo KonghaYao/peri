@@ -96,3 +96,5 @@
 
 - `npm-packages/peri-cf` 通过主入口与 `/view` 消费 Manager/Action/View/Replica；平台装配、HTTP/WS 与鉴权留在应用。索引见 [peri-cf](peri-cf.md)。
 - Workers smoke 入口在 `examples/workers/`；只证明当前 Host 方法表与本地 `workerd` 路径，不代表 hosted Workers 验收。
+
+实时投影边界：`task-projection.ts` 将缺少本次 started 证据的后台非终态快照标为 `unobserved:<原状态>`，保留历史事实但不宣称当前运行；终态事实与真实 started 驱动的活动仍投影，失去观察后仅靠 running 快照不能复活活动。回归见 `tests/task-snapshot-activity.test.ts`。Peri 的 `session/load` 历史回放投递失败会使 load 整体失败（`-32603`），SDK 不能把失败响应当作完整首屏。长期会话反复 rewind 会在同一 Y.Doc 内产生删除记录（Compact 不再整表替换，不产生这类删除）；当前保持根集合对象身份以供订阅者使用，尚无 Fenix Doc Hub 式文档换代与快照压缩协议。

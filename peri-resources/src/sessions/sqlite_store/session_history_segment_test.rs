@@ -1,7 +1,7 @@
 //! canonical 完整回放（向前段读取）的端到端行为：首段继承区、固定上界、段边界与失效锚点。
 //!
 //! 断言以调用方能观察到的东西为准：段的载荷顺序与内容、游标是否存在与它给出的区间、错误
-//! 分类。同一份语义在远端 adapter 上由 `remote/session_history_page_test.rs` 断言（两个
+//! 分类。同一份语义在远端 adapter 上由 `remote/session_history_replay_test.rs` 断言（两个
 //! 后端必须同形）。
 
 use super::*;

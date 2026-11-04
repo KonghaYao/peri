@@ -20,7 +20,7 @@ async fn streamed_canonical_replay_reads_bounded_segments_and_never_the_full_his
     assert_eq!(total, messages.len());
     fixture.reset_reads();
 
-    fixture.load_unnegotiated().await.unwrap();
+    fixture.load().await.unwrap();
 
     let calls = fixture.spy.segment_calls();
     assert!(
@@ -57,7 +57,7 @@ async fn streamed_canonical_replay_failure_closes_the_load() {
     fixture.reset_reads();
 
     let error = fixture
-        .load_unnegotiated()
+        .load()
         .await
         .expect_err("段读取失败必须让本次 load 失败");
     assert_eq!(error.code, -32603, "错误码: {error:?}");
@@ -86,7 +86,7 @@ async fn streamed_canonical_replay_fails_closed_when_the_anchor_vanishes_mid_str
     fixture.reset_reads();
 
     let error = fixture
-        .load_unnegotiated()
+        .load()
         .await
         .expect_err("锚点消失必须让本次 load 失败");
     assert_eq!(error.code, -32603, "错误码: {error:?}");
@@ -128,7 +128,7 @@ async fn streamed_canonical_replay_falls_back_to_the_full_read_when_the_segment_
     fixture.set_caps(PeriCaps::default());
     fixture.reset_reads();
 
-    fixture.load_unnegotiated().await.unwrap();
+    fixture.load().await.unwrap();
 
     let expected: Vec<String> = canonical.iter().map(payload_text).collect();
     assert_eq!(fixture.texts(), expected, "回退同样交付完整 canonical 历史");

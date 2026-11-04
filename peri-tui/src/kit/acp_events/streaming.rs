@@ -75,9 +75,6 @@ pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) -> P
         tracing::debug!(child = ?tc.agent_id, "ignored unobserved child text preview");
         return PublicationIntent::None;
     } else {
-        // 根 agent 的流式身份：紧随其后的工具卡按同一 assistant message 归属。
-        // 空 message_id 会清掉旧身份，禁止把工具卡跨消息沿用。
-        live_tool_links::note_assistant_chunk(&state.active_session_id, tc.message_id.as_deref());
         state
             .current_turn
             .append_text(&tc.text, tc.message_id.as_deref());
@@ -137,7 +134,6 @@ pub(super) fn handle_reasoning_chunk(
         tracing::debug!(child = ?rc.agent_id, "ignored unobserved child reasoning preview");
         return PublicationIntent::None;
     } else {
-        live_tool_links::note_assistant_chunk(&state.active_session_id, rc.message_id.as_deref());
         state
             .current_turn
             .append_reasoning(&rc.text, rc.message_id.as_deref());

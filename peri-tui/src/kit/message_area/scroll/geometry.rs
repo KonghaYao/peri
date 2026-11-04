@@ -3,6 +3,50 @@ use std::time::Instant;
 use crate::kit::message_area::props::ScrollbarFields;
 use ratatui_kit::ratatui::layout::Rect;
 
+// ── 历史翻页边界判定 ──────────────────────────────────────────────────────
+
+/// 触发阈值：视口顶端距**向前边界**不超过这么多视觉行时请求更早一页。
+pub(super) const FETCH_MARGIN_LINES: usize = 2;
+
+/// 视口是否已经贴到**向前边界**（已载入窗口的最早一行）。
+///
+/// - 浏览态（`follow_bottom == false`）：视口顶端落在最早一行附近；
+/// - 内容不足一屏：没有「尾部」可言，视口顶端就是边界；
+/// - 跟随态且内容超出一屏：看的是尾部，不在向前边界上。
+pub(super) fn viewport_at_forward_boundary(
+    follow_bottom: bool,
+    scroll_y: usize,
+    total_visual_rows: usize,
+    vis_height: usize,
+) -> bool {
+    if vis_height == 0 || total_visual_rows == 0 {
+        return false;
+    }
+    let content_fits = total_visual_rows <= vis_height;
+    let browsing = !follow_bottom;
+    (browsing || content_fits) && (scroll_y <= FETCH_MARGIN_LINES || content_fits)
+}
+
+/// 向后边界：接近已载入窗口最底部（含内容不足一屏/跟随态）。
+pub(super) fn viewport_at_backward_boundary(
+    follow_bottom: bool,
+    scroll_y: usize,
+    total_visual_rows: usize,
+    vis_height: usize,
+) -> bool {
+    if vis_height == 0 || total_visual_rows == 0 {
+        return false;
+    }
+    let content_fits = total_visual_rows <= vis_height;
+    if content_fits || follow_bottom {
+        return true;
+    }
+    scroll_y
+        .saturating_add(vis_height)
+        .saturating_add(FETCH_MARGIN_LINES)
+        >= total_visual_rows
+}
+
 // ── 滚动条拖拽状态 ────────────────────────────────────────────────────────
 
 /// 滚动条 thumb 拖拽状态。

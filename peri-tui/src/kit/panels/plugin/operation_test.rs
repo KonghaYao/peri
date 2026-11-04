@@ -477,6 +477,7 @@ fn controlled_client() -> (
 ) {
     let (transport, server) = mpsc_transport_pair();
     let (client, notification_tx, _notification_rx) = AcpTuiClient::new(transport);
+    crate::acp_client::client::test_support::install_history_v2(&client);
     client.force_stable_for_test("plugin-operation-session", false);
     client.spawn_pump(notification_tx);
     (Arc::new(client), server)
@@ -486,6 +487,13 @@ async fn mutation_request(
     server: &peri_acp::transport::mpsc::MpscServerTransport,
     method: &str,
 ) -> peri_acp::transport::types::RequestId {
+    mutation_request_with_params(server, method).await.0
+}
+
+async fn mutation_request_with_params(
+    server: &peri_acp::transport::mpsc::MpscServerTransport,
+    method: &str,
+) -> (peri_acp::transport::types::RequestId, serde_json::Value) {
     let incoming = tokio::time::timeout(Duration::from_secs(2), server.recv())
         .await
         .unwrap()
@@ -500,7 +508,7 @@ async fn mutation_request(
     };
     assert_eq!(actual, method);
     assert_eq!(params["sessionId"], "plugin-operation-session");
-    id
+    (id, params)
 }
 
 #[test]
@@ -685,8 +693,21 @@ fn mounted_same_session_reload_isolates_real_client_generation() {
                     .load_session("plugin-operation-session", "/tmp", None)
                     .await
             });
-            let load_id = mutation_request(&server, "session/load").await;
-            server.send_response(load_id, Ok(json!({}))).await.unwrap();
+            let (load_id, load_params) =
+                mutation_request_with_params(&server, "session/load").await;
+            server
+                .send_response(
+                    load_id,
+                    Ok(
+                        crate::acp_client::client::test_support::with_history_v2_initial(
+                            json!({}),
+                            "plugin-operation-session",
+                            &load_params,
+                        ),
+                    ),
+                )
+                .await
+                .unwrap();
             load.await.unwrap().unwrap();
             assert_ne!(client.stable_session_identity().unwrap(), original);
             assert_eq!(BRIDGE_RESET_COUNTER.get(), reset);

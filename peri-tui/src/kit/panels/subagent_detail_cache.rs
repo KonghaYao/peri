@@ -21,9 +21,6 @@ use crate::kit::tui_render_unit::{FoldKey, FoldState, TuiRenderUnit, TuiSubAgent
 
 const DETAIL_CACHE_BYTES: usize = 8 * 1024 * 1024;
 
-#[path = "subagent_detail_text.rs"]
-mod plain;
-
 #[derive(Default)]
 pub(super) struct DetailRenderCache {
     instance_id: String,
@@ -35,7 +32,6 @@ pub(super) struct DetailRenderCache {
     resident_bytes: usize,
     resident_slots: BTreeSet<usize>,
     header: Vec<Line<'static>>,
-    plain: Option<plain::TextLayout>,
     folds: std::collections::HashMap<FoldKey, FoldState>,
     focused: Option<FoldKey>,
     dirty: bool,
@@ -103,8 +99,7 @@ impl DetailRenderCache {
         language: u64,
         header: Vec<Line<'static>>,
     ) -> bool {
-        let switched = self.instance_id != group.instance_id || self.plain.is_some();
-        self.plain = None;
+        let switched = self.instance_id != group.instance_id;
         let context_changed = switched
             || self.grid != *grid
             || self.context.as_ref().is_none_or(|context| {
@@ -195,35 +190,10 @@ impl DetailRenderCache {
         };
     }
 
-    pub(super) fn prepare_text(
-        &mut self,
-        header: Vec<Line<'static>>,
-        text: Arc<str>,
-        width: usize,
-    ) {
-        if self
-            .plain
-            .as_ref()
-            .is_some_and(|layout| layout.matches(&text, width))
-        {
-            self.header = header;
-            return;
-        }
-        // Replacing the mode drops all preview body references and fold metadata.
-        *self = Self {
-            header,
-            plain: Some(plain::TextLayout::new(text, width)),
-            ..Self::default()
-        };
-    }
-
     pub(super) fn height(&self) -> usize {
         self.header
             .len()
-            .saturating_add(self.plain.as_ref().map_or_else(
-                || self.prefix.last().copied().unwrap_or(0),
-                plain::TextLayout::height,
-            ))
+            .saturating_add(self.prefix.last().copied().unwrap_or(0))
     }
 
     pub(super) fn focused(&self) -> Option<usize> {
@@ -377,21 +347,6 @@ impl DetailRenderCache {
         }
         let header_height = self.header.len();
         let content_rows = top.saturating_sub(header_height)..bottom.saturating_sub(header_height);
-        if let Some(plain) = &self.plain {
-            for (index, line) in plain.lines(content_rows.clone()).into_iter().enumerate() {
-                drawer.render_widget(
-                    Paragraph::new(line),
-                    Rect {
-                        y: area.y.saturating_add(
-                            (header_height + content_rows.start + index - top) as u16,
-                        ),
-                        height: 1,
-                        ..area
-                    },
-                );
-            }
-            return;
-        }
         let focused_index = self.focused();
         let visible = self.ensure_visible(content_rows.clone());
         for index in visible {

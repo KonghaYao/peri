@@ -87,11 +87,6 @@ async fn test_rewind_missing_boundary_changes_nothing_and_reports_it() {
         before_payloads,
         "热态有效集合不得改变"
     );
-    assert_eq!(
-        sessions.get(&sid).unwrap().structure_version,
-        0,
-        "未生效的提交不得推进结构版本（内存不得领先于已提交事实）"
-    );
     assert!(
         agent_events(&mock, "rewind_completed").is_empty(),
         "提交没生效就不得发重建信号: {:?}",
@@ -195,11 +190,6 @@ async fn test_rewind_commit_failure_leaves_memory_untouched() {
         .map(PersistedPayload::id)
         .collect();
     assert_eq!(after_payloads, before_payloads, "热态有效集合不得改变");
-    assert_eq!(
-        sessions.get(&sid).unwrap().structure_version,
-        0,
-        "失败的提交不得推进结构版本（内存不得领先于已提交事实）"
-    );
     // 存储同样是提交前状态：完整历史仍是三条，排除标记仍在。
     let stored: Vec<peri_acp_types::messages::MessageId> = cfg
         .controller

@@ -1,4 +1,5 @@
 use super::*;
+use crate::acp_client::client::test_support::{install_history_v2, with_history_v2_initial};
 use peri_acp::transport::{mpsc::mpsc_transport_pair, types::IncomingMessage};
 use serde_json::json;
 
@@ -174,16 +175,18 @@ async fn test_user_input_command_does_not_migrate_to_new_session() {
 async fn test_user_input_load_binds_snapshot_before_live_delivery() {
     let (client_transport, server_transport) = mpsc_transport_pair();
     let (client, notification_tx, mut notifications) = AcpTuiClient::new(client_transport);
+    install_history_v2(&client);
     client.user_input_queue.store(true, Ordering::Release);
     client.spawn_pump(notification_tx);
     let loader = client.clone();
     let loading = tokio::spawn(async move { loader.load_session("s", "/tmp", None).await });
-    let IncomingMessage::Request { id, method, .. } = server_transport.recv().await.unwrap() else {
+    let IncomingMessage::Request { id, method, params } = server_transport.recv().await.unwrap()
+    else {
         panic!("应收到 load");
     };
     assert_eq!(method, "session/load", "先加载同一会话");
     server_transport
-        .send_response(id, Ok(json!({})))
+        .send_response(id, Ok(with_history_v2_initial(json!({}), "s", &params)))
         .await
         .unwrap();
     let IncomingMessage::Request {

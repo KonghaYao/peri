@@ -1,4 +1,4 @@
-//! 有界读取的性能证据（需求 §9：A04 / A05 / A06 / A07）。
+//! 有界读取的性能证据（需求 §9：A04 / A05 / 手动 compact 有效集合 / 向前段）。
 //!
 //! 除末尾的 `history_segment_statements_are_index_located`（只看计划、不建夹具，因此默认
 //! 运行）外，全部用例 `#[ignore]`：默认测试运行既不生成大夹具，也不计入时长。命令、原始
@@ -9,8 +9,7 @@
 //!     -- history_perf_tests --ignored --nocapture
 //! ```
 //!
-//! 环境变量：`PERI_PERF_ROWS`（默认 `10000,100000,1000000`）、`PERI_PERF_ITERS`（默认 20）、
-//! `PERI_PERF_PAGES`（默认 20）。
+//! 环境变量：`PERI_PERF_ROWS`（默认 `10000,100000,1000000`）、`PERI_PERF_ITERS`（默认 20）。
 //!
 //! 测量口径（逐项标注在输出与报告里，不发明毫秒承诺）：
 //!
@@ -28,25 +27,23 @@
 //!    条数，正文回表也只取命中的行。sqlx 公开面上没有「实际触达行数」计数器（本任务不新增
 //!    依赖），因此定界结论由计划形状 + 跨规模耗时共同给出，行数探针照旧记录但不冒充触达行数。
 //! 5. 字节：只报告实测值——解码回来的 payload 正文字节、`dbstat`/`page_count` 的落库占用。
-//!    页级实际读盘字节在 sqlx 公开面上不可观测（本任务不得新增依赖），报告里标为未测量。
+//!    段级实际读盘字节在 sqlx 公开面上不可观测（本任务不得新增依赖），报告里标为未测量。
 //! 6. 查询次数：按代码路径逐条列出（`file:line`），不冒充执行期计数。
 //! 7. 冷/热：冷 = 每次测量前新开一个部署句柄（新连接池 ⇒ SQLite 页缓存为空），热 = 同一个
 //!    句柄上的连续读取。两者都**不**刷新 OS 页缓存（无权限），报告里同样写明。
 //!
-//! 模块结构：A04–A07 场景用例见 `cases`，verification 独立复核的审计补充见 `audit`；
+//! 模块结构：场景用例见 `cases`，verification 独立复核的审计补充见 `audit`；
 //! 本模块保留夹具、计划证据与统计口径。
 
 use super::helpers::{BINDING_ROW_STATE_SQL, FROZEN_CONTEXT_SQL, THREAD_EXISTS_SQL};
 use super::history::{
-    ACTIVE_ENTRY_POSITIONS_SQL, HISTORY_PAGE_BODY_SQL, HISTORY_PAGE_BOUNDS_SQL,
-    HISTORY_PAGE_ROWS_SQL, HISTORY_SEGMENT_ANCHOR_SQL, HISTORY_SEGMENT_HEAD_SQL,
+    ACTIVE_ENTRY_POSITIONS_SQL, HISTORY_SEGMENT_ANCHOR_SQL, HISTORY_SEGMENT_HEAD_SQL,
     HISTORY_SEGMENT_NEXT_SQL, HISTORY_SEGMENT_TAIL_SQL,
 };
 use crate::sessions::sqlite_store::compaction::ACTIVE_FLAGS_SQL;
 use crate::sessions::sqlite_store::context::{
     meta_by_id_statement, ACTIVE_PAYLOADS_SQL, INHERITED_CONTEXT_SQL, PARENT_THREAD_ID_SQL,
 };
-use peri_acp_types::history_page::HistoryCursor;
 use peri_acp_types::messages::{BaseMessage, MessageId};
 use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources,
@@ -69,14 +66,11 @@ const LIVE_BODY_BYTES: usize = 64 * 1024;
 /// 归档正文默认大小：归档段行数与正文大小是夹具参数，需求未固定。
 const ARCHIVED_BODY_BYTES: usize = 1024;
 
-/// 页参数 = ACP 侧配置值（`peri-acp/src/host/history_page.rs` 的 `DEFAULT_PAGE_LIMIT` 与
-/// `PAGE_BYTE_BUDGET`）：peri-resources 不能依赖 peri-acp，这里按同一数值传入并记录实际值。
-const PAGE_LIMIT: usize = 50;
-const PAGE_BYTE_BUDGET: usize = 512 * 1024;
+/// 段长参数：与标准回放使用的有界读取段长同一量级，记录实际值。
+const SEGMENT_LIMIT: usize = 50;
 
 const DEFAULT_ROWS: &str = "10000,100000,1000000";
 const DEFAULT_ITERS: usize = 20;
-const DEFAULT_PAGES: usize = 20;
 const DEFAULT_TRIPWIRE_ROWS: usize = 10_000;
 
 /// 单条 INSERT 的行数：占位符按行数生成（每行 6 个参数），值全部绑定。
@@ -360,7 +354,6 @@ async fn build_fixture(
 /// 计划参数：显式枚举，绑定形状与生产调用一致（`EXPLAIN` 不执行，值不参与计划）。
 enum Param<'a> {
     Text(&'a str),
-    OptionalText(Option<&'a str>),
     Integer(i64),
 }
 
@@ -377,7 +370,6 @@ async fn explain_plan(pool: &SqlitePool, sql: &str, params: &[Param<'_>]) -> Vec
     for param in params {
         query = match param {
             Param::Text(value) => query.bind(*value),
-            Param::OptionalText(value) => query.bind(*value),
             Param::Integer(value) => query.bind(*value),
         };
     }
@@ -433,16 +425,11 @@ async fn restore_chain_plans(pool: &SqlitePool, thread: &str) -> Vec<PlanEvidenc
     ]
 }
 
-/// 初始 load 的附带读取与分页读取的计划（`anchor` 为空 = 首屏游标）。
-async fn initial_load_extras(
-    pool: &SqlitePool,
-    thread: &str,
-    anchor: Option<&str>,
-    limit: usize,
-) -> Vec<PlanEvidence> {
-    let evidence = vec![
+/// 初始 load 的附带读取计划（会话存在性、初始回放位置表）。
+async fn initial_load_extras(pool: &SqlitePool, thread: &str) -> Vec<PlanEvidence> {
+    vec![
         PlanEvidence {
-            label: "require_session（分页路径）",
+            label: "require_session（存储读取路径）",
             statement: THREAD_EXISTS_SQL.to_owned(),
             plan: explain_plan(pool, THREAD_EXISTS_SQL, &[Param::Text(thread)]).await,
         },
@@ -451,51 +438,12 @@ async fn initial_load_extras(
             statement: ACTIVE_ENTRY_POSITIONS_SQL.to_owned(),
             plan: explain_plan(pool, ACTIVE_ENTRY_POSITIONS_SQL, &[Param::Text(thread)]).await,
         },
-        PlanEvidence {
-            label: "read_history_page_bounds",
-            statement: HISTORY_PAGE_BOUNDS_SQL.to_owned(),
-            plan: explain_plan(
-                pool,
-                HISTORY_PAGE_BOUNDS_SQL,
-                &[Param::Text(thread), Param::OptionalText(anchor)],
-            )
-            .await,
-        },
-        PlanEvidence {
-            label: "read_history_page/阶段一",
-            statement: HISTORY_PAGE_ROWS_SQL.to_owned(),
-            plan: explain_plan(
-                pool,
-                HISTORY_PAGE_ROWS_SQL,
-                &[
-                    Param::Text(thread),
-                    Param::OptionalText(anchor),
-                    Param::Integer(limit.saturating_add(1) as i64),
-                ],
-            )
-            .await,
-        },
-    ];
-    evidence
-}
-
-/// 阶段二正文读取的计划（按 id 的主键单行读取）。
-async fn page_body_plan(pool: &SqlitePool, thread: &str, body_id: &str) -> Vec<PlanEvidence> {
-    vec![PlanEvidence {
-        label: "read_page_bodies/阶段二",
-        statement: HISTORY_PAGE_BODY_SQL.to_owned(),
-        plan: explain_plan(
-            pool,
-            HISTORY_PAGE_BODY_SQL,
-            &[Param::Text(thread), Param::Text(body_id)],
-        )
-        .await,
-    }]
+    ]
 }
 
 /// 向前段读取（canonical 完整回放）的计划：边界（上界）、首段、锚点存在性、非首段。
 ///
-/// 与分页读取同一套参数形状：会话文本、存储序键（`after`/`tail`，数值）与段长。
+/// 参数形状：会话文本、存储序键（`after`/`tail`，数值）与段长。
 async fn segment_read_plans(
     pool: &SqlitePool,
     thread: &str,

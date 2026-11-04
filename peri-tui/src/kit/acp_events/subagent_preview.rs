@@ -54,13 +54,6 @@ pub(super) fn enforce(state: &mut BridgeState) {
         }
     }
     for index in remove {
-        if !state.window.remove_unmapped_display_slot(index) {
-            tracing::warn!(
-                index,
-                "child preview overlaps a canonical display range; eviction refused"
-            );
-            continue;
-        }
         if let TuiRenderUnit::TuiSubAgentGroup(group) = state.committed.remove(index) {
             retired.push(group.instance_id);
         }
@@ -75,9 +68,6 @@ pub(super) fn enforce(state: &mut BridgeState) {
         overrides.shrink_to_fit();
     }
     if changed {
-        state.folded_history.invalidate();
-        super::render::invalidate_structural_caches();
-        crate::kit::history_paging::sync_spans_from_window(&state.window);
         crate::kit::atoms::FOCUSED_ENTRY.set(None);
         let epoch = crate::kit::atoms::STRUCTURAL_EPOCH.get().saturating_add(1);
         crate::kit::atoms::STRUCTURAL_EPOCH.set(epoch);

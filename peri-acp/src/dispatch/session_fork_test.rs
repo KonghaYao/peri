@@ -25,11 +25,6 @@ const SOURCE: &str = "source";
 #[path = "session_fork_archive_test.rs"]
 mod archive;
 
-/// 本文件的用例只读三条短条目：页预算够装下它们即可。取值刻意不引用
-/// `host::history_page::PAGE_BYTE_BUDGET`（那是协议面默认值，与本用例要判的
-/// 「父收缩是否改动子页内容」无关）。
-const FORK_TEST_PAGE_BYTE_BUDGET: usize = 64 * 1024;
-
 async fn open_facade(tmp: &tempfile::TempDir) -> Arc<dyn SessionResources> {
     peri_agent::resources::open_session_resources_with(Some(tmp.path().join("threads.db")))
         .await
@@ -334,14 +329,14 @@ async fn fork_rejects_source_with_incomplete_tool_calls() {
     assert_eq!(session_ids(&resources).await, vec![SOURCE.to_owned()]);
 }
 
-/// A14 第三句：**既有 fork 之后，父会话再走一次 Full**——子快照与子分页内容都不变。
+/// A14 第三句：**既有 fork 之后，父会话再走一次 Full**——子快照内容不变。
 ///
 /// 与 `forked_payloads_have_independent_ids_flags_and_compaction_lifecycle` 方向相反：
-/// 那条断言「子 Full 不改父」，本用例断言「父收缩不得回流到子」。两条读取都是子侧对外的
-/// 事实源（[`SessionResources::load_session_snapshot`] = 子快照、
-/// [`SessionResources::load_history_page`] = 子分页内容），断言不重新推导存储事实。
+/// 那条断言「子 Full 不改父」，本用例断言「父收缩不得回流到子」。子侧对外的唯一事实源是
+/// [`SessionResources::load_session_snapshot`]（标准回放的 payload 顺序与内容），断言不重新
+/// 推导存储事实。
 #[tokio::test]
-async fn a_parent_full_after_fork_leaves_the_child_snapshot_and_pages_intact() {
+async fn a_parent_full_after_fork_leaves_the_child_snapshot_intact() {
     let temp = tempfile::tempdir().unwrap();
     let resources = open_facade(&temp).await;
     let cwd = temp.path().to_string_lossy().into_owned();
@@ -376,25 +371,12 @@ async fn a_parent_full_after_fork_leaves_the_child_snapshot_and_pages_intact() {
     .await
     .unwrap();
 
-    // 父收缩之前的子侧事实：快照（身份 + 正文 + flags）与首页（条目身份 + 顺序键 + 游标链）。
+    // 父收缩之前的子侧事实：快照（身份 + 正文 + flags）。
     let before_snapshot = resources.load_session_snapshot(&fork_id).await.unwrap();
-    let before_page = resources
-        .load_history_page(&fork_id, None, 50, FORK_TEST_PAGE_BYTE_BUDGET)
-        .await
-        .unwrap();
     assert_eq!(
         before_snapshot.payloads.len(),
         parent_messages.len(),
         "先决条件：fork 复制出父会话的全部自有条目"
-    );
-    assert_eq!(
-        before_page.items.len(),
-        parent_messages.len(),
-        "先决条件：子首页一次读尽（否则下面的「等价」可能是两边都空）"
-    );
-    assert!(
-        before_page.next_cursor.is_none(),
-        "先决条件：子历史已到起点，没有更早页"
     );
     // 「不变」必须钉在**绝对值**上：先把收缩前的子侧事实对齐父会话的三条原文，
     // 否则「前后一致」可能只是两边都错成同一个样子。
@@ -408,16 +390,6 @@ async fn a_parent_full_after_fork_leaves_the_child_snapshot_and_pages_intact() {
             .collect::<Vec<_>>(),
         expected_contents,
         "先决条件：子快照就是父会话复制来的这三条"
-    );
-    assert_eq!(
-        before_page
-            .items
-            .iter()
-            .filter_map(|item| item.payload.as_message())
-            .map(BaseMessage::content)
-            .collect::<Vec<_>>(),
-        expected_contents,
-        "先决条件：子首页内容就是这三条（父收缩之前）"
     );
 
     // 父会话的后续 Full：自有条目全部归档 + 追加摘要（与 `PageFixture::archive` 同形状）。
@@ -466,13 +438,14 @@ async fn a_parent_full_after_fork_leaves_the_child_snapshot_and_pages_intact() {
             .collect::<Vec<_>>(),
         "父收缩不得改变子快照的条目身份"
     );
+    let after_contents: Vec<String> = after_snapshot
+        .payloads
+        .iter()
+        .filter_map(PersistedPayload::as_message)
+        .map(BaseMessage::content)
+        .collect();
     assert_eq!(
-        after_snapshot
-            .payloads
-            .iter()
-            .filter_map(PersistedPayload::as_message)
-            .map(BaseMessage::content)
-            .collect::<Vec<_>>(),
+        after_contents,
         before_snapshot
             .payloads
             .iter()
@@ -482,59 +455,12 @@ async fn a_parent_full_after_fork_leaves_the_child_snapshot_and_pages_intact() {
         "父收缩不得改变子快照的正文（父会话新摘要不得进入子快照）"
     );
     assert_eq!(
+        after_contents, expected_contents,
+        "父收缩后子快照的顺序与正文必须仍是父会话复制来的三条"
+    );
+    assert_eq!(
         after_snapshot.flags, before_snapshot.flags,
         "父收缩不得改变子条目的 flags"
-    );
-
-    // 子分页：同一批条目、同一顺序键、同一条游标链。
-    let after_page = resources
-        .load_history_page(&fork_id, None, 50, FORK_TEST_PAGE_BYTE_BUDGET)
-        .await
-        .unwrap();
-    assert_eq!(
-        after_page
-            .items
-            .iter()
-            .map(|item| item.id)
-            .collect::<Vec<_>>(),
-        before_page
-            .items
-            .iter()
-            .map(|item| item.id)
-            .collect::<Vec<_>>(),
-        "父收缩不得改变子分页的条目身份"
-    );
-    assert_eq!(
-        after_page
-            .items
-            .iter()
-            .map(|item| item.position)
-            .collect::<Vec<_>>(),
-        before_page
-            .items
-            .iter()
-            .map(|item| item.position)
-            .collect::<Vec<_>>(),
-        "父收缩不得改变子分页的顺序键"
-    );
-    assert_eq!(
-        after_page
-            .items
-            .iter()
-            .filter_map(|item| item.payload.as_message())
-            .map(BaseMessage::content)
-            .collect::<Vec<_>>(),
-        before_page
-            .items
-            .iter()
-            .filter_map(|item| item.payload.as_message())
-            .map(BaseMessage::content)
-            .collect::<Vec<_>>(),
-        "父会话新摘要不得出现在子分页里"
-    );
-    assert_eq!(
-        after_page.next_cursor, before_page.next_cursor,
-        "父收缩不得改变子浏览的游标链"
     );
 
     // 反向对照：这一轮收缩**确实**落在父会话上（否则上面的「不变」是空转）。

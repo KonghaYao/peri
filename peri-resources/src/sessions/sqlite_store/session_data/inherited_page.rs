@@ -14,8 +14,8 @@ use super::history_window::{empty_window_page, window_anchor_failure};
 use super::inherited_blob::{map_inherited_blob_error, InheritedFactsRead};
 use super::inherited_facts::InheritedLayout;
 use super::*;
+use peri_acp_types::history_common::{HistoryInheritedSnapshot, HistorySource, HistoryWindowError};
 use peri_acp_types::history_page::HistoryPagePlan;
-use peri_acp_types::history_window::{HistoryInheritedSnapshot, HistorySource, HistoryWindowError};
 use peri_acp_types::session_resources::{
     HistoryWindowPagePlan, HistoryWindowRows, InheritedHistoryEntry,
 };
@@ -107,7 +107,7 @@ impl SqliteSessionData {
                 return Err(not_found());
             };
             let built = Self::inherited_blob_scope(&mut tx, rowid, |reader| {
-                build_inherited_page(reader, id, plan, snapshot, layout, anchor_key)
+                build_inherited_page(reader, plan, snapshot, layout, anchor_key)
             })
             .await?;
             tx.commit().await.map_err(|error| map_sqlx(&error))?;
@@ -185,8 +185,6 @@ impl SqliteSessionData {
                     .map_err(|error| map_sqlx(&error))?;
             let candidates = decode_inherited_candidates(candidates)?;
             Some(HistoryPagePlan::plan(
-                id,
-                &snapshot.snapshot_id,
                 candidates,
                 plan.before_limit,
                 plan.byte_budget,
@@ -207,13 +205,7 @@ impl SqliteSessionData {
                         .await
                         .map_err(|error| map_sqlx(&error))?;
                 let candidates = decode_inherited_candidates(candidates)?;
-                Some(HistoryPagePlan::plan_after(
-                    id,
-                    &snapshot.snapshot_id,
-                    candidates,
-                    limit,
-                    after_budget,
-                ))
+                Some(HistoryPagePlan::plan_after(candidates, limit, after_budget))
             }
         };
 
@@ -275,7 +267,6 @@ impl SqliteSessionData {
 /// canonical 布局的页构造：所有读取共享同一个 blob 句柄。
 fn build_inherited_page(
     reader: &super::blob_reader::BlobReader,
-    id: &ThreadId,
     plan: &HistoryWindowPagePlan,
     snapshot: &HistoryInheritedSnapshot,
     layout: &InheritedLayout,
@@ -292,8 +283,6 @@ fn build_inherited_page(
             plan.before_limit + 1,
         )?;
         Some(HistoryPagePlan::plan(
-            id,
-            &snapshot.snapshot_id,
             candidates,
             plan.before_limit,
             plan.byte_budget,
@@ -312,13 +301,7 @@ fn build_inherited_page(
                 plan.after_includes_anchor(),
                 limit + 1,
             )?;
-            Some(HistoryPagePlan::plan_after(
-                id,
-                &snapshot.snapshot_id,
-                candidates,
-                limit,
-                after_budget,
-            ))
+            Some(HistoryPagePlan::plan_after(candidates, limit, after_budget))
         }
     };
 
@@ -405,6 +388,7 @@ fn layout_candidate(
         message_id,
         position,
         encoded_bytes,
+        role: peri_acp_types::history_page::HistoryEntryRole::Unknown,
     })
 }
 
@@ -542,11 +526,14 @@ fn assemble_inherited_rows(
 fn oversized_entry(entry: HistoryPageCandidate) -> InheritedHistoryEntry {
     InheritedHistoryEntry::Oversized {
         entry_id: entry.message_id,
+        // candidate.position 在 canonical 路径来自 layout 下标，在 SQL 回退来自
+        // `json_each.key`；两者都与 `inherited_payload_index.ordinal` 同序。
+        ordinal: entry.position,
         total_bytes: entry.encoded_bytes as u64,
     }
 }
 
-fn verify_inherited_source(
+pub(super) fn verify_inherited_source(
     snapshot: &HistoryInheritedSnapshot,
     frozen_snapshot_id: &str,
     ancestor_thread_id: Option<&ThreadId>,

@@ -73,40 +73,7 @@ pub(super) fn decode_commands(update: &Value) -> Option<Vec<SlashCommandEntry>> 
     Some(entries)
 }
 
-/// 从回放通知里取出条目位置标记（`_meta.periEntryId` + `_meta.periPosition`）。
-///
-/// 两者必须同时存在才是**自有条目**：继承区条目没有存储行，因此没有 `periPosition`
-/// （契约见 `peri-acp-types` 的 `history_page` 模块文档）。位置是不透明整数，客户端
-/// 不解释它，只拿去排序与区间合并。
-///
-/// 戳的位置随出口形状不同（`peri-acp` 的 `dispatch::write_entry_marks` 是唯一拼装点）：
-/// `session/update` 写在 update 的 `_meta`（或 `meta` / `content._meta`）；而
-/// `peri/unstable_event`（回放 reminder）的 `data` 直接把两个字段摊在**顶层**——
-/// 那边没有 `_meta` 包装，顶层回退是 reminder 条目进入区间索引的唯一通道
-/// （缺少它时「首屏自有条目只有 reminder」会让更早历史越过继承前缀，见 REQ-H01-6、A20）。
-pub(super) fn decode_entry_marks(update: &Value) -> Option<(String, u64)> {
-    let meta = update
-        .get("_meta")
-        .or_else(|| update.get("meta"))
-        .or_else(|| update.get("content").and_then(|c| c.get("_meta")))
-        .or_else(|| update.get("content").and_then(|c| c.get("meta")));
-    let scope = meta.unwrap_or(update);
-    let entry_id = scope.get("periEntryId").and_then(Value::as_str)?;
-    let position = scope.get("periPosition").and_then(Value::as_u64)?;
-    Some((entry_id.to_string(), position))
-}
-
 pub(super) fn decode_stream_update(params: &Value, session_id: &str) -> StreamUpdate {
-    decode_stream_update_with(params, session_id, false)
-}
-
-/// [`decode_stream_update`] 的实现体：`force_replay` 用于历史页等**本来就是历史**的出口
-/// （那边没有可靠的 `periReplay` 标记可依赖）。
-pub(super) fn decode_stream_update_with(
-    params: &Value,
-    session_id: &str,
-    force_replay: bool,
-) -> StreamUpdate {
     let Some(update) = params.get("update") else {
         return StreamUpdate::default();
     };
@@ -114,15 +81,14 @@ pub(super) fn decode_stream_update_with(
     // ACP schema 的 ContentChunk / ToolCall / ToolCallUpdate 都标注了
     // #[serde(rename = "_meta")]，运行时 key 是 "_meta"（带下划线），不是 "meta"。
     // 检查顺序：_meta（生产格式）→ meta（兼容旧格式 / 测试格式）→ content._meta → content.meta
-    let is_session_replay = force_replay
-        || update
-            .get("_meta")
-            .or_else(|| update.get("meta"))
-            .or_else(|| update.get("content").and_then(|c| c.get("_meta")))
-            .or_else(|| update.get("content").and_then(|c| c.get("meta")))
-            .and_then(|m| m.get("periReplay"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+    let is_session_replay = update
+        .get("_meta")
+        .or_else(|| update.get("meta"))
+        .or_else(|| update.get("content").and_then(|c| c.get("_meta")))
+        .or_else(|| update.get("content").and_then(|c| c.get("meta")))
+        .and_then(|m| m.get("periReplay"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // SubAgent identity uses ACP's typed params._meta extension field. Keep the
     // legacy params._peri lookup while older Peri servers may still emit it.

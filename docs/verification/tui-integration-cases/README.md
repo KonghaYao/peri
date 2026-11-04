@@ -35,6 +35,7 @@
 23. [配置与能力开关](10-configuration.md)：P0-83～P0-85。确认仅用 TUI 完成 Responses provider 配置、类型防误改、四档隔离与 revision 冲突不落盘。
 24. [面板与详情显示](13-panel-display.md)：P0-86～P0-88。确认 Model 内联窗口原子保存、ChatGPT 登录取消竞态、状态身份与注销两阶段结果。
 25. [阻塞交互与弹出层显示](14-popup-display.md)：P0-89。确认 Login 认证子视图与 Model 草稿在窄屏、长 URL 和双语下键鼠可用。
+26. [消息区与覆盖层](06-transcript-ui.md)：P0-83（History V2，与配置用例共用编号，待统一）。确认 History V2 的首屏/翻页/seek/详情/失效恢复只走单一消费链，不回到 V1 路径。
 
 ## 后续优先级
 

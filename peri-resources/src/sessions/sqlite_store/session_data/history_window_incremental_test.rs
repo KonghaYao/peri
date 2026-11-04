@@ -8,7 +8,7 @@ use super::history::{HISTORY_WINDOW_CHECKPOINT_FAST_SQL, HISTORY_WINDOW_CHECKPOI
 use super::*;
 use crate::sessions::data::SessionDataPort;
 use crate::sessions::sqlite_store::SqliteThreadStore;
-use peri_acp_types::history_window::{HistoryReadTicket, HistorySource, HistoryWindowError};
+use peri_acp_types::history_common::{HistoryReadTicket, HistorySource, HistoryWindowError};
 use peri_acp_types::messages::{BaseMessage, MessageId};
 use peri_acp_types::projection::MessageProjectionDirective;
 use peri_acp_types::session_resources::{
@@ -132,7 +132,7 @@ async fn set_inherited_context(
 }
 
 fn inherited_source(
-    source: &peri_acp_types::history_window::HistoryInheritedSnapshot,
+    source: &peri_acp_types::history_common::HistoryInheritedSnapshot,
 ) -> HistorySource {
     HistorySource::inherited_with_ancestor(
         source.snapshot_id.clone(),
@@ -271,7 +271,7 @@ async fn incremental_large_body_chunks_stay_bounded_and_exact() {
             .unwrap();
         chunk
             .validate(
-                &peri_acp_types::history_window::HistoryEntryId::new(&id, large.id()).encode(),
+                &peri_acp_types::history_common::HistoryEntryId::new(&id, large.id()).encode(),
                 offset,
                 CHUNK_BYTES,
             )

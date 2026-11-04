@@ -228,9 +228,6 @@ forward_session_resources_except_rewind! {
 #[path = "requests_rewind_effective_view_test.rs"]
 mod effective_view_tests;
 
-#[path = "requests_rewind_cursor_expiry_test.rs"]
-mod cursor_expiry_tests;
-
 #[path = "requests_rewind_failure_paths_test.rs"]
 mod failure_paths_tests;
 

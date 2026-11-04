@@ -7,7 +7,7 @@
 use super::*;
 use crate::sessions::data::SessionDataPort;
 use crate::sessions::sqlite_store::SqliteThreadStore;
-use peri_acp_types::history_window::{
+use peri_acp_types::history_common::{
     HistoryReadTicket, HistorySource, HistoryWindowDirection, HistoryWindowError,
 };
 use peri_acp_types::messages::{BaseMessage, MessageId};
@@ -139,7 +139,7 @@ async fn session_with_inherited(
 }
 
 fn inherited_source(
-    source: &peri_acp_types::history_window::HistoryInheritedSnapshot,
+    source: &peri_acp_types::history_common::HistoryInheritedSnapshot,
 ) -> HistorySource {
     HistorySource::inherited_with_ancestor(
         source.snapshot_id.clone(),

@@ -37,6 +37,35 @@ async fn test_pump_parses_agent_event_done_request_id() {
     }
 }
 
+/// 旧私有通知 `peri/history_committed` 不再有类型化解析路径：pump 只能把它
+/// 当作未知通知（`Other`），不得生成历史提交事件。
+#[tokio::test]
+async fn test_pump_has_no_typed_path_for_legacy_history_committed() {
+    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
+    client.lifecycle.force_stable("s1", false);
+    client.spawn_pump(notification_tx);
+
+    server_transport
+        .send_notification(
+            "peri/history_committed",
+            json!({
+                "sessionId": "s1",
+                "checkpointId": "cp-1",
+                "structureVersion": 7,
+            }),
+        )
+        .await
+        .unwrap();
+
+    match notification_rx.recv().await.unwrap() {
+        AcpNotification::Other { msg } => {
+            assert!(msg.contains("peri/history_committed"));
+        }
+        other => panic!("legacy commit must not be typed: {other:?}"),
+    }
+}
+
 /// 兼容性：requestId 缺失时 AgentDone.request_id 应为 None（continuation /
 /// Immediate 命令 / stdio 等路径）。
 #[tokio::test]

@@ -604,7 +604,7 @@ struct P07Stage {
 /// T3：handoff 与持久化队列排空；
 /// T4：当前长任务继续工作若干轮；
 /// T5：任务结束；
-/// T6：反复读取归档页（存储级向更早翻页）后重新读取有效尾部。
+/// T6：反复读取归档段（存储级向前回放）后重新读取有效尾部。
 ///
 /// 每个阶段同时记录逻辑驻留、allocator in-use 与 RSS/footprint。T6 的窗口级
 /// 渲染缓存证据见 TUI 的 P03；本用例不把 RSS 单独当作正文泄漏证据。
@@ -751,33 +751,42 @@ async fn p07_history_body_scale_curves() {
     );
     assert_ids_absent(&transcript, &archived_ids);
 
-    // T6：存储级向更早翻页若干页，再重新读取有效尾部。
+    // T6：存储级向前回放若干段（含归档区），再重新读取有效尾部。
     let stage_started = Instant::now();
     let memory_before_pages = sample_process_memory();
-    let mut cursor: Option<peri_acp_types::history_page::HistoryCursor> = None;
+    let mut cursor: Option<peri_acp_types::history_page::HistoryForwardCursor> = None;
     let mut pages_read = 0usize;
     let mut items_read = 0usize;
     let mut total_page_bytes = 0usize;
     let mut max_page_bytes = 0usize;
     let mut oversize_items = 0usize;
     for _ in 0..pages_to_read {
-        let page = session
+        let segment = session
             .resources()
-            .load_history_page(&session.thread_id, cursor.as_ref(), page_limit, page_budget)
+            .load_history_segment(&session.thread_id, cursor.as_ref(), page_limit, page_budget)
             .await
             .unwrap();
-        let bytes = page.total_bytes();
+        let bytes: usize = segment
+            .payloads
+            .iter()
+            .map(|payload| {
+                peri_acp_types::store::serialize_persisted_payload(payload)
+                    .expect("回放载荷必须可序列化")
+                    .len()
+            })
+            .sum();
+        let oversize = segment.payloads.len() == 1 && bytes > page_budget;
         assert!(
-            bytes <= page_budget || page.items.iter().any(|item| item.oversized),
-            "普通页不得超过字节预算：{bytes} > {page_budget}"
+            bytes <= page_budget || oversize,
+            "普通段不得超过字节预算：{bytes} > {page_budget}"
         );
-        oversize_items += page.items.iter().filter(|item| item.oversized).count();
+        oversize_items += usize::from(oversize);
         pages_read += 1;
-        items_read += page.items.len();
+        items_read += segment.payloads.len();
         total_page_bytes += bytes;
         max_page_bytes = max_page_bytes.max(bytes);
-        cursor = page.next_cursor.clone();
-        drop(page);
+        cursor = segment.next_cursor.clone();
+        drop(segment);
         if cursor.is_none() {
             break;
         }
@@ -809,14 +818,14 @@ async fn p07_history_body_scale_curves() {
         "有效尾部不得接近归档规模"
     );
     println!(
-        "  T6 paging pages={pages_read} items={items_read} total_page_bytes={total_page_bytes}B \
-         max_page_bytes={max_page_bytes}B oversize={oversize_items} \
+        "  T6 replay segments={pages_read} items={items_read} total_bytes={total_page_bytes}B \
+         max_segment_bytes={max_page_bytes}B oversize={oversize_items} \
          active_payloads={} active_body={}B",
         active.payloads.len(),
         active_payloads.bytes.body
     );
-    print_memory("T6 paging before", &memory_before_pages);
-    print_memory("T6 paging after", &stages.last().unwrap().memory);
+    print_memory("T6 replay before", &memory_before_pages);
+    print_memory("T6 replay after", &stages.last().unwrap().memory);
 
     println!("== P07 阶段汇总（{mib} MiB） ==");
     for stage in &stages {

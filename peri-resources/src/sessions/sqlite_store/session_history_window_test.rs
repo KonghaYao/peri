@@ -5,7 +5,7 @@
 //! 「lookahead / 超大正文没有被解码」这类可由损坏行反证的事实。
 
 use super::*;
-use peri_acp_types::history_window::{
+use peri_acp_types::history_common::{
     HistoryCommittedTail, HistorySource, HistoryWindowDirection, HISTORY_WINDOW_DEFAULT_BYTE_BUDGET,
 };
 use peri_acp_types::messages::MessageId;
@@ -119,7 +119,7 @@ async fn checkpoint_is_rebuilt_from_the_latest_superseded_by_target() {
     assert_eq!(checkpoint.position, 4);
     assert_eq!(
         checkpoint.checkpoint_id,
-        peri_acp_types::history_window::HistoryEntryId::new(&id, summary_id).encode()
+        peri_acp_types::history_common::HistoryEntryId::new(&id, summary_id).encode()
     );
     assert_eq!(
         bounds.own_latest.as_ref().map(|tail| tail.entry_id),
@@ -723,13 +723,13 @@ async fn body_chunks_are_bounded_and_reconstruct_the_exact_bytes() {
                 offset,
                 7,
                 Some(&bounds_tail),
-                &peri_acp_types::history_window::HistoryReadTicket::new("ticket"),
+                &peri_acp_types::history_common::HistoryReadTicket::new("ticket"),
             )
             .await
             .unwrap();
         chunk
             .validate(
-                &peri_acp_types::history_window::HistoryEntryId::new(&id, payload.id()).encode(),
+                &peri_acp_types::history_common::HistoryEntryId::new(&id, payload.id()).encode(),
                 offset,
                 7,
             )
@@ -757,7 +757,7 @@ async fn body_chunks_are_bounded_and_reconstruct_the_exact_bytes() {
             100_000,
             7,
             Some(&bounds_tail),
-            &peri_acp_types::history_window::HistoryReadTicket::new("ticket"),
+            &peri_acp_types::history_common::HistoryReadTicket::new("ticket"),
         )
         .await
         .unwrap_err();
@@ -876,7 +876,7 @@ async fn body_chunk_is_bounded_by_the_snapshot_tail() {
             0,
             16,
             Some(&old_tail),
-            &peri_acp_types::history_window::HistoryReadTicket::new("ticket"),
+            &peri_acp_types::history_common::HistoryReadTicket::new("ticket"),
         )
         .await
         .unwrap_err();
@@ -900,7 +900,7 @@ async fn body_chunk_is_bounded_by_the_snapshot_tail() {
             0,
             16,
             Some(&fresh_tail),
-            &peri_acp_types::history_window::HistoryReadTicket::new("ticket"),
+            &peri_acp_types::history_common::HistoryReadTicket::new("ticket"),
         )
         .await
         .expect("a fresh snapshot can read the appended entry");

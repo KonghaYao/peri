@@ -34,7 +34,7 @@ async fn explain_bytecode(pool: &SqlitePool, sql: &str) -> Vec<String> {
 
 /// 审计证据（独立复核，不改动生产语义）：
 ///
-/// ① 两条阶段一语句的 `EXPLAIN` 字节码（残差判定位置）；
+/// ① 段读取阶段一语句的 `EXPLAIN` 字节码（残差判定位置）；
 /// ② 探针夹具：本段之后那一条候选行的正文不可解码——本段仍能读出（阶段二没取它），
 ///    而把它推进为下一段时以 `Corrupt` 失败（证明探针真的不可解码）；
 /// ③ 段长与字节预算的实测：逐段打印行数与编码字节。
@@ -48,10 +48,6 @@ async fn audit_segment_lookahead_and_plan_shape() {
     let pool = fixture_pool(&db_path).await;
     println!("== EXPLAIN（VDBE 字节码，生产语句原文；参数未绑定） ==");
     for (label, sql) in [
-        (
-            "HISTORY_PAGE_ROWS_SQL（分页阶段一，带游标）",
-            HISTORY_PAGE_ROWS_SQL,
-        ),
         (
             "HISTORY_SEGMENT_NEXT_SQL（回放非首段）",
             HISTORY_SEGMENT_NEXT_SQL,

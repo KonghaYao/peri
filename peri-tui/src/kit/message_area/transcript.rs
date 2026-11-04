@@ -345,22 +345,6 @@ impl Transcript {
                 .max(structural_epoch),
         );
         crate::kit::atoms::TUI_RENDER_CACHE_BYTES.set(self.retained_bytes);
-        if crate::kit::history_page_consumer::window_path_enabled() {
-            let handle = crate::kit::atoms::WINDOW_VIEWPORT.state();
-            let follow = handle
-                .read()
-                .as_ref()
-                .is_some_and(|viewport| viewport.follow_bottom);
-            if let Some(anchor) = ViewportAnchor::capture(&self.index, scroll_y) {
-                crate::kit::history_window::publish_viewport_from_token(
-                    anchor.window_token(),
-                    anchor.offset_within_unit(),
-                    follow,
-                );
-            } else {
-                crate::kit::history_window::publish_viewport_unanchored(follow);
-            }
-        }
         self.generation = Some(snapshot.generation);
         self.reset = reset;
         self.grid = Some(grid);

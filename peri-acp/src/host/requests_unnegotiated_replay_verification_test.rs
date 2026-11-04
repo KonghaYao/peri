@@ -59,7 +59,7 @@ async fn s9_verification_unnegotiated_replay_equals_canonical_history_for_mixed_
     );
     fixture.reset_reads();
 
-    let response = fixture.load_unnegotiated().await.unwrap();
+    let response = fixture.load().await.unwrap();
 
     let observed = observed_wire_facts(&fixture);
     let expected = expected_wire_facts(&canonical);
@@ -113,93 +113,13 @@ async fn s9_verification_fallback_full_read_failure_still_closes_the_load() {
     fixture.reset_reads();
 
     let error = fixture
-        .load_unnegotiated()
+        .load()
         .await
         .expect_err("回退读取也失败时必须让本次 load 失败");
     assert_eq!(error.code, -32603, "错误码: {error:?}");
     assert_eq!(fixture.spy.segment_calls().len(), 1, "先试段读取");
     assert_eq!(fixture.spy.full_reads(), 1, "再试全量回退读取");
     assert!(fixture.updates().is_empty(), "失败路径不得留下半份首屏");
-}
-
-/// 对照（§5.3 的另一半）：**协商过**分页的当前连接仍然拿到条目身份 / 位置戳与代次；
-/// 同一份含归档行的夹具上，协商路径回放的是**有效集合**（归档原文不重放）。
-///
-/// 声明在**连接**上：门只看当前连接，会话级注册表里是别的连接留下的值也不影响（这里刻意
-/// 留空 = `PeriCaps::default()`，若实现回读注册表，本用例的标记断言会失败）。
-#[tokio::test]
-async fn s9_verification_negotiated_connection_still_carries_the_entry_marks() {
-    let mut fixture = ReplayFixture::new(SpyMode::Forward).await;
-    fixture.create_session("s9-verification-negotiated").await;
-    fixture
-        .append(&[
-            BaseMessage::human("归档：问题"),
-            BaseMessage::ai_from_blocks(vec![
-                ContentBlock::text("归档：回答"),
-                ContentBlock::tool_use("call-arch", "bash", json!({ "cmd": "ls" })),
-            ]),
-            BaseMessage::tool_result("call-arch", "归档：工具结果"),
-            BaseMessage::human("有效：问题"),
-            BaseMessage::ai("有效：回答"),
-        ])
-        .await;
-    let canonical = fixture.canonical().await;
-    let archived: Vec<MessageId> = payload_ids(&canonical)[..3].to_vec();
-    fixture.archive(&archived).await;
-    fixture.set_connection_caps(PeriCaps {
-        replay: true,
-        history_pagination: true,
-        ..PeriCaps::default()
-    });
-    fixture.reset_reads();
-
-    let sid = fixture.id.clone();
-    let response = fixture.load_negotiated().await.unwrap();
-
-    let generation = response["_meta"]["periLoadGeneration"]
-        .as_str()
-        .expect("协商连接在响应里拿到代次")
-        .to_owned();
-    assert_eq!(
-        fixture.texts(),
-        vec!["有效：问题", "有效：回答"],
-        "协商连接回放的是有效集合（归档原文不重放）"
-    );
-    let updates = fixture.updates();
-    assert_eq!(updates.len(), 2, "有效集合只有两条可展示条目");
-    for (params, payload) in updates.iter().zip(&canonical[3..]) {
-        let meta = &params["update"]["_meta"];
-        assert_eq!(meta["periReplay"], Value::Bool(true));
-        assert_eq!(
-            meta["periLoadGeneration"],
-            Value::String(generation.clone())
-        );
-        assert_eq!(
-            meta["periEntryId"],
-            Value::String(format!("{sid}:{}", payload.id().as_uuid())),
-            "协商连接的条目身份与历史页同一格式"
-        );
-        assert!(
-            meta["periPosition"].as_u64().is_some(),
-            "协商连接的条目必须带存储序位置戳: {meta}"
-        );
-    }
-    for params in &updates {
-        let entry = params["update"]["_meta"]["periEntryId"].clone();
-        for id in &archived {
-            assert_ne!(
-                entry,
-                Value::String(format!("{sid}:{}", id.as_uuid())),
-                "归档条目不得出现在协商回放里"
-            );
-        }
-    }
-    assert_eq!(fixture.spy.full_reads(), 0, "协商路径不读全量 canonical");
-    assert_eq!(
-        fixture.spy.segment_calls().len(),
-        0,
-        "协商路径不走向前段读取"
-    );
 }
 
 /// 本用例内的**第二实现**：按 ACP 投影契约从 canonical payload 推导期望 wire 事实序列。///
