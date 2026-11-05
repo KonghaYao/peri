@@ -21,6 +21,8 @@ python3 scripts/test-cargo-patches.py
 
 同一补丁还限制 generic service loop 的成功 response 日志：`CustomResult` 可能承载凭据，且 response 事件没有 method 关联，故收发 TRACE 仅记录请求 ID 与方向，handler DEBUG 仅记录请求 ID。请求、通知、JSON-RPC 错误与传输错误仍保留完整诊断；业务 `Err` 被成功 `CustomResult` 包装时，由 credentials handler 自己记录类型化错误。此调整不修改 MCP wire、不隐藏错误内容、不绕过 credentials MCP。回归位于 `mcp-packages/credentials` 的模型认证测试，覆盖 DEBUG/TRACE 下合成成功 token 不落日志和错误诊断保留。
 
+补丁为 `matches_response_id`、`set_client_request_metadata`、`is_authorization_required` 加 `cfg_attr(not(feature = "client"), allow(dead_code))`：三者只在 `client` feature 下被调用，而 path 覆盖的依赖不享受 Cargo 对 registry 依赖的 lint cap，未启用该 feature 时会暴露 dead_code 告警。
+
 从新 checkout 构建时，用仓库脚本代替直接调用 Cargo：
 
 ```bash

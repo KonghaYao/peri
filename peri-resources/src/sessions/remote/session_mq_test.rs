@@ -682,5 +682,69 @@ async fn remote_normalized_retry_promotes_work_intent() {
     );
 }
 
+/// #342 回归按单批接纳语义适配：插入与提升同批，提升失败时整批不生效；同一 ID
+/// 重试才真正接纳并提升，不会留下 `idle + pending`。
+#[tokio::test]
+async fn remote_promotion_failure_surfaces_and_same_id_retry_promotes() {
+    let fixture = fixture().await;
+    let thread = thread("mq-thread");
+    let id = MessageId::new();
+    fixture
+        .data
+        .set_work_state(&thread, WorkState::Idle)
+        .await
+        .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_work_promote BEFORE UPDATE ON threads
+         WHEN NEW.work_state = 'working'
+         BEGIN SELECT RAISE(ABORT, 'injected promote failure'); END",
+    )
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
+
+    let error = fixture
+        .data
+        .mq_enqueue(&thread, input(id, "wake"))
+        .await
+        .expect_err("a failed promotion must not be reported as an accepted enqueue");
+    // 触发器中止的 SDK 分类随驱动而定：这里只要求「确定未生效」，语义由回滚断言覆盖。
+    assert!(
+        matches!(
+            error.kind(),
+            SessionResourceErrorKind::InvalidInput { .. }
+                | SessionResourceErrorKind::Unavailable { .. }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        mq_rows(&fixture, &thread).await,
+        0,
+        "插入必须随提升失败一起回滚，等待同一 ID 重试"
+    );
+    assert_eq!(
+        fixture.data.load_meta(&thread).await.unwrap().work_state,
+        WorkState::Idle,
+        "首次接纳失败时不能留下 idle + pending"
+    );
+
+    sqlx::query("DROP TRIGGER fail_work_promote")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+    let again = fixture
+        .data
+        .mq_enqueue(&thread, input(id, "wake"))
+        .await
+        .unwrap();
+    assert_eq!(again.disposition, MqEnqueueDisposition::Inserted);
+    assert_eq!(
+        fixture.data.load_meta(&thread).await.unwrap().work_state,
+        WorkState::Working,
+        "同一 ID 重试必须完成提升"
+    );
+    assert_eq!(mq_rows(&fixture, &thread).await, 1);
+}
+
 #[path = "session_settlement_test.rs"]
 mod settlement_tests;
