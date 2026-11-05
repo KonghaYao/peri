@@ -99,7 +99,6 @@ pub fn release_window_plans(
     {
         crate::kit::atoms::FOCUSED_ENTRY.set(None);
     }
-    state.window.note_released_entries(&keys);
 
     let body_bytes = accepted.iter().map(|plan| plan.body_bytes).sum::<usize>();
     let structural_epoch = crate::kit::atoms::STRUCTURAL_EPOCH.get().saturating_add(1);
@@ -177,10 +176,4 @@ impl HistoryWindow {
     ) -> Vec<(usize, usize)> {
         self.display.remove_entries_at(keys)
     }
-
-    /// 释放事务的条目级 UI 清理接口（详情窗口 S7.3 接入）。
-    pub fn note_released_entries(&self, _keys: &HashSet<PersistentEntryKey>) {}
 }
-
-#[allow(dead_code)]
-fn _release_reason_marker(_: ReleaseReason) {}

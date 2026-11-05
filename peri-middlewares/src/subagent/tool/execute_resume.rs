@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use peri_acp_types::session_resources::SessionResourceErrorKind;
 use peri_agent::session::subagent::{
-    extract_last_ai_text, format_subagent_result, SubagentCancelPolicy, SubagentRunMode,
+    extract_last_ai_text, format_subagent_result, SubagentRunMode,
 };
 use peri_agent::tools::{BaseTool, EffectiveToolError, EffectiveToolErrorCode};
 
@@ -190,12 +190,7 @@ impl super::SubAgentTool {
             };
             let build_result = self
                 .build_agent_from_def(
-                    &agent_def,
-                    &title,
-                    &cwd,
-                    SubagentCancelPolicy::Cascade,
-                    false,
-                    true,
+                    &agent_def, &title, &cwd,
                     // 恢复路径不允许 model 覆盖：LLM 按 thread title 选中的
                     // agent 定义（当前磁盘 frontmatter model）重建，与工具过滤
                     // 的权限漂移防护同构；调用参数 model 与 subagent_type/fork

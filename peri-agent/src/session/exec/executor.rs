@@ -54,10 +54,8 @@ use tokio::sync::oneshot as exec_oneshot;
 
 use peri_acp_types::{
     event::ExecutorEvent,
-    interaction::UserInteractionBroker,
     messages::{ContentBlock, MessageContent},
 };
-use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
 use peri_acp_types::tasks::BgTaskKind;
 
@@ -141,17 +139,11 @@ pub fn is_keepgoing(content: &peri_acp_types::messages::MessageContent) -> bool 
 /// Built once at the top of [`run_session_loop`], passed by reference to
 /// [`build_and_execute_agent`] to avoid recomputing and to keep the agent
 /// builder function signature manageable.
-#[allow(dead_code)]
 struct TurnConfig<'a> {
     cwd: &'a str,
     frozen: Option<&'a FrozenSessionData>,
     language: Option<String>,
-    cancel: &'a AgentCancellationToken,
-    permission_mode: &'a Arc<peri_acp_types::permission::SharedPermissionMode>,
-    broker: &'a Arc<dyn UserInteractionBroker>,
-    session_start_source: Option<String>,
     auxiliary_model: Option<Arc<dyn peri_model::Model>>,
-    effective_context_window: u32,
 }
 
 /// Shared agent execution pipeline with auto-compact support.
@@ -371,14 +363,10 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         AgentInput::blocks(MessageContent::blocks(blocks))
     };
 
-    // [v2] Context budget 由 AgentComponents 传给 StageContext，此处不再需要本地变量。
-
     // Event channel (lives for entire run_session_loop lifetime)
     let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<ExecutorEvent>();
     let event_tx = Arc::new(parking_lot::Mutex::new(Some(event_tx)));
 
-    // 将会 move 的 middleware resources（无法借用，必须 move）。
-    // turn 仍以引用形式借用 cwd/cancel/permission_mode/broker。
     let turn = TurnConfig {
         cwd: &ctx.cwd,
         frozen: frozen.as_ref(),
@@ -386,12 +374,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
             .as_ref()
             .and_then(|f| f.language().map(|s| s.to_string()))
             .or_else(|| ctx.language.clone()),
-        cancel: &ctx.cancel,
-        permission_mode: &ctx.permission_mode,
-        broker: &ctx.broker,
-        session_start_source: ctx.session_start_source.clone(),
         auxiliary_model: auxiliary_model.clone(),
-        effective_context_window,
     };
 
     // Langfuse 遥测经注入闭包（宿主构造的 LangfuseHooks）接入。

@@ -14,8 +14,8 @@
 > **关联契约**：ARC-MIDDLEWARE-001、ARC-CAPABILITY-CLOSURE-001、ARC-TOOLS-001、
 > ARC-CANCEL-001、[session-async-tasks.md](session-async-tasks.md)、
 > [../reference/mcp-ecosystem.md](../reference/mcp-ecosystem.md)（MCP Tasks 与
-> `subscriptions/listen` 口径）。进度与验收见
-> [2026-11-01-monitor-mcp.md](../../spec/issues/2026-11-01-monitor-mcp.md)。
+> `subscriptions/listen` 口径）。实现与测试入口见
+> [MCP packages 索引](../code-index/mcp-packages.md)和 [Middleware 索引](../code-index/peri-middlewares.md)。
 
 ## 1. 范围与形状
 

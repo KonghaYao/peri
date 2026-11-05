@@ -249,16 +249,6 @@ pub(crate) fn resolve_shell_detail_context(
     None
 }
 
-/// 按 `SELECTED_BG_TASK_ID` 在 `BG_TASKS` 中查找 shell 任务（仅活跃列表）。
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn resolve_shell_task<'a>(
-    tasks: &'a [BgTaskEntry],
-    task_id: Option<&str>,
-) -> Option<&'a BgTaskEntry> {
-    let id = task_id?;
-    tasks.iter().find(|t| t.task_id == id && t.kind == "shell")
-}
-
 fn close_panel() {
     crate::kit::panel_registry::close_active_panel();
 }

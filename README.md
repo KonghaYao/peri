@@ -51,7 +51,7 @@ Plan delivery. Coordinate agents. Delegate tasks.
 <td colspan="2">
 <h3>🔌 MCP Plus</h3>
 <strong>More than tools.</strong>
-<p>Load remote skills and agents on demand. Exchange messages and approvals through compatible channels.</p>
+<p>Load remote skills and agents on demand.</p>
 </td>
 </tr>
 <tr>

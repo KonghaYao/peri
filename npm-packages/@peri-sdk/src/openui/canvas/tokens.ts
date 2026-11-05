@@ -146,8 +146,6 @@ export const categoryPaletteLight: CategoryPalette = {
   red: "#BE1744",
 };
 
-export const colorPalette: CategoryPalette = categoryPaletteDark;
-
 export const usageColorSequence: readonly Color[] = [
   "gray",
   "purple",

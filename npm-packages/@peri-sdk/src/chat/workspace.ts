@@ -43,16 +43,3 @@ export function workspaceRelation(
     }
     return "outside";
 }
-
-/** 读取 `agentConfig.cwd`；非字符串/空串视为未配置。 */
-export function agentConfigCwd(agentConfig: unknown): string | undefined {
-    if (
-        agentConfig === null ||
-        typeof agentConfig !== "object" ||
-        Array.isArray(agentConfig)
-    ) {
-        return undefined;
-    }
-    const cwd = (agentConfig as Record<string, unknown>).cwd;
-    return typeof cwd === "string" && cwd.length > 0 ? cwd : undefined;
-}

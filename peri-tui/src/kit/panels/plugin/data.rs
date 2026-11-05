@@ -218,11 +218,6 @@ fn load_marketplace_data() -> Vec<MsEntry> {
                 plugin_count,
                 installed_count,
                 status,
-                last_updated: if km.last_updated.is_empty() {
-                    None
-                } else {
-                    Some(km.last_updated.clone())
-                },
                 auto_update: km.auto_update,
             }
         })

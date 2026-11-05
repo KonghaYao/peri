@@ -13,7 +13,6 @@
 //! CompactCommand 自身不调用 push_done（由 executor.rs 的 Immediate 路径负责）。
 //! （详见 spec/global/domains/agent.md#issue_2026-05-29-immediate-command-missing-push-done）
 
-pub(crate) mod events;
 mod pipeline;
 
 use async_trait::async_trait;

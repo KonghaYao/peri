@@ -17,11 +17,10 @@ pub mod tracer;
 mod turn_traces;
 
 pub use config::LangfuseConfig;
+#[cfg(test)]
+pub(crate) use fake_session::FakeLangfuseSession;
 pub use metric_sink::LangfuseMetricsSink;
 pub use session::{LangfuseSession, LangfuseShutdownOwner, LangfuseShutdownReport};
 pub use session_like::LangfuseSessionLike;
-pub use turn_traces::{ActiveTurnTrace, TurnTraceRegistry};
-// TODO: Phase 5 引入 fake session 测试后将移除此 allow
-#[allow(unused_imports)]
-pub(crate) use fake_session::FakeLangfuseSession;
 pub use tracer::LangfuseTracer;
+pub use turn_traces::{ActiveTurnTrace, TurnTraceRegistry};

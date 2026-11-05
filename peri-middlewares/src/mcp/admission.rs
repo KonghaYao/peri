@@ -1,10 +1,8 @@
 //! Session-owned MCP 准入准备原语（readiness → candidate）。
 //!
-//! 本模块抽取自 [`super::middleware::McpMiddleware`] 的 `before_react_start` 前半段
-//! （设计 §4.2：撤回「整体前移」，只抽**不依赖输入**的 readiness / candidate 准备
-//! 原语）。全部输入都是 session 级事实——deployment tool pool、session id、取消
+//! 全部输入都是 session 级事实——deployment tool pool、session id、取消
 //! 令牌、关闭实例集——不读 turn 输入（消息、工具视图、catalog），因此 session 级
-//! 持有者可以构造一次并跨 turn 复用；原 MCP startup hook 与后续 idle invocation
+//! 持有者可以构造一次并跨 turn 复用；MCP startup hook 与 session invocation
 //! 消费**同一份**实现（业务规则单一权威，不复制第二份）。
 //!
 //! 与链序无关：本模块不决定何时准入（那仍由 `McpMiddleware` 的 hook 在既有槽位
@@ -159,9 +157,7 @@ impl McpAdmissionPreparation {
     ///   （`None` 语义不存在：空集即不关闭任何实例）；
     /// - `cancel` 与 session 同生命周期（取消后本次准入返回 `Cancelled`）。
     ///
-    /// 目前唯一构造点是 `McpMiddleware::admission`（每 turn 新建的链实例按同一
-    /// session 级输入投影一份）。将来 idle invocation 的 session 级持有者直接调用
-    /// 本函数构造并长期持有；届时若持有者位于别的 crate，可见性一并放宽。
+    /// `McpMiddleware::admission` 与 session invocation 均按本会话的冻结策略投影。
     pub(crate) fn new(
         tool_pool: Arc<McpClientPool>,
         session_id: Option<String>,

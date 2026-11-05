@@ -33,8 +33,6 @@ export const canvasSpacing = {
   10: 40,
 } as const;
 
-export type CanvasSpacing = typeof canvasSpacing;
-
 export const canvasRadius = {
   none: 0,
   xs: 2,
@@ -45,13 +43,5 @@ export const canvasRadius = {
   full: 9999,
 } as const;
 
-export type CanvasRadius = typeof canvasRadius;
-
-export const CANVAS_SANS_FONT_STACK =
-  '-apple-system, BlinkMacSystemFont, "Segoe WPC", "Segoe UI", system-ui, "Ubuntu", "Droid Sans", sans-serif';
-
 export const CANVAS_MONO_FONT_STACK =
   'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
-
-export const CANVAS_BODY_PADDING_VERTICAL_PX = 24;
-export const CANVAS_BODY_PADDING_HORIZONTAL_PX = 32;

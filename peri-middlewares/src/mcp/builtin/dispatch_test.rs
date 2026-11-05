@@ -104,14 +104,8 @@ const WAVE2_INSTANCES: [&str; 1] = ["cron"];
 
 /// 非法 cron 表达式（1 段，解析必然失败）：逼出 `CronError::InvalidExpression`。
 const INVALID_EXPRESSION: &str = "not-a-cron-expression";
-/// 合法 cron 表达式（填充任务上限用）。
-const VALID_EXPRESSION: &str = "*/5 * * * *";
 /// 用户 prompt 的可辨认形状串：任何失败文本里**不得**出现。
 const LEAK_PROMPT: &str = "SENTINEL-PROMPT-must-not-leak";
-/// 路径形状串（§9 规则 7：路径不入模型面文本）。
-const LEAK_PATH_MARKER: &str = "secret-marker";
-/// 无路由扩展名（不得回传给模型）。
-const LEAK_EXTENSION: &str = "zzz";
 
 /// `serve_client_auto` 侧握手上界（同进程链路）。
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -126,7 +120,6 @@ const CLOSE_TIMEOUT: Duration = Duration::from_millis(500);
 /// 上下文可喂给五个已实现实例的工厂。
 struct CrossFixture {
     ctx: BuiltinInstanceContext,
-    scheduler: Arc<Mutex<CronScheduler>>,
     /// cron 触发通道接收端（保持存活，使发送端始终有对端；本文件不驱动 tick）。
     _cron_triggers: mpsc::UnboundedReceiver<CronTrigger>,
     /// 夹具临时目录（仅靠 `Drop` 持有生命周期）。
@@ -149,7 +142,6 @@ impl CrossFixture {
         let ctx = ctx.with_workflow(WorkflowInstanceInput::slot());
         Self {
             ctx,
-            scheduler,
             _cron_triggers: cron_triggers,
             _dir: dir,
         }

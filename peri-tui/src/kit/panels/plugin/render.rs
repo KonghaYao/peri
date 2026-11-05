@@ -553,17 +553,13 @@ pub(super) fn render_marketplaces(
 
         // 状态图标
         let (icon, icon_color) = match entry.status {
-            MsStatus::Fresh => ("●", success_color),
             MsStatus::Cached => ("●", success_color),
-            MsStatus::Fetching => ("◌", warning_color),
             MsStatus::Stale => ("○", dim_color),
             MsStatus::Failed => ("✗", error_style.fg.unwrap_or_default()),
             MsStatus::NotFound => ("○", dim_color),
         };
         let status_text = match entry.status {
-            MsStatus::Fresh => "fresh",
             MsStatus::Cached => "cached",
-            MsStatus::Fetching => "fetching",
             MsStatus::Stale => "stale",
             MsStatus::Failed => "failed",
             MsStatus::NotFound => "not fetched",

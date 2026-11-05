@@ -108,16 +108,6 @@ impl LangfuseTracer {
         self.replayed_stage_handles.remove(agent_id)
     }
 
-    /// 取出全部未领取的重放 stage handle(turn 结束兜底用)。
-    /// 对应 StageEnded 可能因事件流截断/乱序丢失，由调用方立即补发，
-    /// 否则工具 batch 的 parent 引用一个从未创建的 span（孤儿 batch）。
-    pub(crate) fn take_all_replayed(&mut self) -> Vec<StageHandle> {
-        self.replayed_stage_handles
-            .drain()
-            .map(|(_, h)| h)
-            .collect()
-    }
-
     /// SubagentStart：join 成功后仅缓存身份、开始时间、输入及 parent，
     /// 并重放该 child 被注册闸门缓存的内容事件。结束双信号齐备或 turn-end 兜底时，
     /// 一次导出含开始和结束时间的完整 ObservationCreate，不导出 open 观测。
@@ -306,17 +296,4 @@ impl LangfuseTracer {
             "SubAgent ObservationCreate",
         );
     }
-}
-
-/// 从 subagent 输出文本中剥离 `child_thread_id: <uuid>\n` 前缀。
-/// 若输出以前缀开头，返回剥离后的剩余内容；否则返回原输出。
-fn strip_child_thread_id(output: &str) -> &str {
-    // 匹配模式: "child_thread_id: <uuid>\n"
-    if let Some(rest) = output.strip_prefix("child_thread_id: ") {
-        // 找到第一个换行符后的内容
-        if let Some(newline_pos) = rest.find('\n') {
-            return &rest[newline_pos + 1..];
-        }
-    }
-    output
 }

@@ -369,7 +369,6 @@ fn assert_root_cache_clear_suppresses_earlier_low_sample(observation: &str) {
         "{observation} root observation must clear the earlier low sample"
     );
 
-    turn::finalize_cache_coverage(&mut state, true);
     turn::handle_turn_done(&mut state);
     let note_count = state
         .committed
