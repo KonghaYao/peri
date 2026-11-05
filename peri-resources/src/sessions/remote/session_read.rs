@@ -44,7 +44,7 @@ impl RemoteSessionData {
         let store = self.store().await?;
         let (facts, messages) = store
             .read_pair(
-                session_sql::select_session_statement(id),
+                session_sql::select_session_statement(id, self.meta_projection()),
                 session_sql::select_messages_statement(id),
             )
             .await?;
@@ -70,7 +70,7 @@ impl RemoteSessionData {
         let store = self.store().await?;
         let (facts, messages) = store
             .read_pair(
-                session_sql::select_session_statement(id),
+                session_sql::select_session_statement(id, self.meta_projection()),
                 session_sql::select_active_messages_statement(id),
             )
             .await?;
@@ -149,7 +149,10 @@ impl RemoteSessionData {
     ) -> SessionResourceResult<BindingState> {
         let store = self.store().await?;
         let facts = store
-            .fetch_row(&session_sql::select_session_statement(id))
+            .fetch_row(&session_sql::select_session_statement(
+                id,
+                self.meta_projection(),
+            ))
             .await?
             .ok_or_else(not_found)?;
         let binding = codec::decode_binding(&facts, session_sql::FACT_BINDING_VERSION)?;
@@ -165,7 +168,7 @@ impl RemoteSessionData {
         let store = self.store().await?;
         let (facts, messages) = store
             .read_pair(
-                session_sql::select_session_statement(id),
+                session_sql::select_session_statement(id, self.meta_projection()),
                 session_sql::select_messages_statement(id),
             )
             .await?;
@@ -514,7 +517,10 @@ impl RemoteSessionData {
     pub(super) async fn read_meta(&self, id: &ThreadId) -> SessionResourceResult<ThreadMeta> {
         let store = self.store().await?;
         let row = store
-            .fetch_row(&session_sql::select_meta_statement(id))
+            .fetch_row(&session_sql::select_meta_statement(
+                id,
+                self.meta_projection(),
+            ))
             .await?
             .ok_or_else(not_found)?;
         codec::decode_meta(&row)
@@ -546,9 +552,9 @@ impl RemoteSessionData {
         let limit = query.limit.clamp(1, 200) as usize;
         let store = self.store().await?;
         let statement = if self.legacy_shape {
-            session_sql::page_statement_v11(query)?
+            session_sql::page_statement_v11(query, self.meta_projection())?
         } else {
-            session_sql::page_statement_for_archive(query, archived)?
+            session_sql::page_statement_for_archive(query, archived, self.meta_projection())?
         };
         let rows = store.fetch_rows(&statement).await?;
         let mut entries = Vec::with_capacity(rows.len());
@@ -592,7 +598,10 @@ impl RemoteSessionData {
     ) -> SessionResourceResult<Vec<ThreadMeta>> {
         let store = self.store().await?;
         let rows = store
-            .fetch_rows(&session_sql::select_children_statement(parent))
+            .fetch_rows(&session_sql::select_children_statement(
+                parent,
+                self.meta_projection(),
+            ))
             .await?;
         rows.iter().map(|row| codec::decode_meta(row)).collect()
     }
@@ -604,7 +613,10 @@ impl RemoteSessionData {
     ) -> SessionResourceResult<Vec<ThreadMeta>> {
         let store = self.store().await?;
         let rows = store
-            .fetch_rows(&session_sql::select_tree_statement(root))
+            .fetch_rows(&session_sql::select_tree_statement(
+                root,
+                self.meta_projection(),
+            ))
             .await?;
         rows.iter().map(|row| codec::decode_meta(row)).collect()
     }
@@ -613,7 +625,10 @@ impl RemoteSessionData {
     pub(super) async fn exists(&self, id: &ThreadId) -> SessionResourceResult<bool> {
         let store = self.store().await?;
         Ok(store
-            .fetch_row(&session_sql::select_meta_statement(id))
+            .fetch_row(&session_sql::select_meta_statement(
+                id,
+                self.meta_projection(),
+            ))
             .await?
             .is_some())
     }
@@ -622,7 +637,10 @@ impl RemoteSessionData {
     pub(super) async fn frozen_of(&self, id: &ThreadId) -> SessionResourceResult<Option<String>> {
         let store = self.store().await?;
         let facts = store
-            .fetch_row(&session_sql::select_session_statement(id))
+            .fetch_row(&session_sql::select_session_statement(
+                id,
+                self.meta_projection(),
+            ))
             .await?
             .ok_or_else(not_found)?;
         Ok(text_at(&facts, session_sql::FACT_FROZEN).map(str::to_owned))
@@ -635,7 +653,10 @@ impl RemoteSessionData {
     ) -> SessionResourceResult<Option<SessionBinding>> {
         let store = self.store().await?;
         let facts = store
-            .fetch_row(&session_sql::select_session_statement(id))
+            .fetch_row(&session_sql::select_session_statement(
+                id,
+                self.meta_projection(),
+            ))
             .await?
             .ok_or_else(not_found)?;
         codec::decode_binding(&facts, session_sql::FACT_BINDING_VERSION)

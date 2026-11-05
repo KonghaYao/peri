@@ -411,7 +411,9 @@ fn apply_bridge_reset(state: &mut BridgeState, last_reset_counter: &mut u64, cou
     state.active_session_id = active_session_id;
     state.committed = im::Vector::new();
     state.window.reset();
-    crate::kit::history_page_consumer::reset_window_paging_state();
+    // consumer 侧请求状态由同步的会话边界（`project_session_boundary`）负责清空。
+    // bridge 只是迟到地观察到同一个计数器；此处再清一次会抹掉新会话刚发出的首个
+    // `history.open`，其响应随后被判过期，首屏因此永远为空。
     crate::kit::history_window::clear_window_viewport();
     crate::kit::atoms::HISTORY_DETAIL.set(None);
     state.current_turn.reset();

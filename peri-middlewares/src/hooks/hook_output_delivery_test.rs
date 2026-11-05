@@ -71,7 +71,7 @@ fn state_with_prompt() -> AgentState {
 fn reminders(state: &AgentState) -> Vec<peri_acp_types::system_reminder::SystemReminder> {
     state
         .v2_queue()
-        .drain_all()
+        .drain_all_sync()
         .into_iter()
         .filter_map(|message| match message.payload {
             QueuedPayload::SystemReminder(reminder) => Some(reminder.into_inner()),

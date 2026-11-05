@@ -412,14 +412,18 @@ async fn bound_child_mcp_task_receipt_uses_its_own_catalog_without_root_override
     wire.install(&pool, "source", false);
     let root = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
     let child = Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    let root_queue = MessageQueue::new();
     pool.bind_agent_session(
         "root-session",
-        SessionInbox::new(Arc::new(MessageQueue::new())).handle(),
+        SessionInbox::new(Arc::new(root_queue.clone())).handle(),
+        root_queue,
         root.clone(),
     );
+    let child_queue = MessageQueue::new();
     pool.bind_agent_session(
         "child-thread",
-        SessionInbox::new(Arc::new(MessageQueue::new())).handle(),
+        SessionInbox::new(Arc::new(child_queue.clone())).handle(),
+        child_queue,
         child.clone(),
     );
     let bridge = McpToolBridge::new("source", &test_tool(), pool.get_client("source").unwrap())
@@ -563,7 +567,7 @@ async fn child_initiated_task_receipt_delivers_to_the_child_not_root() {
         );
     }
     assert!(root_manager.snapshot().tasks.is_empty());
-    assert!(root_inbox.queue().drain_all().is_empty());
+    assert!(root_inbox.queue_for_test().drain_all_sync().is_empty());
     owner.shutdown().await;
     wire.close().await;
 }

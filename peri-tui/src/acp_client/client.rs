@@ -19,6 +19,7 @@ mod child_history;
 mod history_page;
 mod interaction;
 mod pump;
+mod recovery_view;
 mod requests;
 mod session;
 mod steer;
@@ -125,6 +126,9 @@ pub struct AcpTuiClient {
     mcp_control: Arc<std::sync::atomic::AtomicBool>,
     execution_cwd: watch::Sender<Option<String>>,
     restore_error: Arc<Mutex<Option<String>>>,
+    /// 启动恢复的目标：load 失败后仍保留，下一次 `ensure_session` 先重试同一目标，
+    /// 不静默降级成新会话。交互式切换或 `/clear` 会清除这个意图。
+    startup_restore_target: Arc<Mutex<Option<String>>>,
     /// 关闭旧会话失败（`-32010` incomplete）后仍未完成的切换：旧身份与被打断的
     /// 加载目标。`fail_transition` 会清掉 lifecycle 里的旧身份，若不在这里留住，
     /// 下一次建立会话会直接 `session/new`，把服务端仍处于 Closing 的旧会话和用户
@@ -207,6 +211,7 @@ impl AcpTuiClient {
             mcp_control: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             execution_cwd: watch::channel(None).0,
             restore_error: Arc::new(Mutex::new(None)),
+            startup_restore_target: Arc::new(Mutex::new(None)),
             pending_close: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             transition_commit_hook: Arc::new(Mutex::new(None)),

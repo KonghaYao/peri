@@ -58,6 +58,7 @@ use peri_acp_types::{
 };
 
 use peri_acp_types::tasks::BgTaskKind;
+use peri_acp_types::{event::BackgroundTaskResult, session::ExecutionFailure};
 
 use crate::agent::react::AgentInput;
 use crate::session::async_router::AsyncRouter;
@@ -132,6 +133,24 @@ pub use peri_acp_types::session::PromptResult;
 /// 空白 user prompt = "继续跑 loop"，唯一生产者为 TUI keepgoing 按钮。
 pub fn is_keepgoing(content: &peri_acp_types::messages::MessageContent) -> bool {
     content.is_empty()
+}
+
+/// 把本轮 `bg_results` 注入 MQ；任一失败都必须回到调用方（一次性投递）。
+async fn inject_bg_results(
+    router: &AsyncRouter,
+    results: &[BackgroundTaskResult],
+) -> Result<(), String> {
+    let mut failures = Vec::new();
+    for result in results {
+        if let Err(error) = router.route_bg_result(result, BgTaskKind::Agent).await {
+            failures.push(format!("task {}: {error}", result.task_id));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
 /// Per-turn computed configuration derived from [`SessionContext`].
@@ -239,6 +258,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
             recall_items: Vec::new(),
             pending_tasks: 0,
             failure: None,
+            context_usage_tokens: None,
         };
     }
 
@@ -257,7 +277,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         .and_then(|sa| sa.v2_message_queue(&ctx.session_id))
         .unwrap_or_default();
     if mailbox_input && !incoming_recalls.is_empty() {
-        input_recalls::push_input_recalls(&v2_message_queue, &incoming_recalls);
+        input_recalls::push_input_recalls(&v2_message_queue, &incoming_recalls).await;
         incoming_recalls.clear();
     }
 
@@ -267,8 +287,30 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
             count = bg_results.len(),
             "[bg-diag] ctx.bg_results is non-empty, will inject each via AsyncRouter"
         );
-        for result in &bg_results {
-            async_router.route_bg_result(result, BgTaskKind::Agent);
+        // bg_results 来自一次性 ACP prompt 参数，没有第二次投递机会：失败必须
+        // 以本轮失败暴露，不能只留日志。
+        if let Err(error) = inject_bg_results(&async_router, &bg_results).await {
+            event_sink
+                .push_done(&ctx.session_id, "error", ctx.request_id.as_deref())
+                .await;
+            let messages = history_payloads
+                .iter()
+                .filter_map(|payload| payload.as_message().cloned())
+                .collect();
+            return PromptResult {
+                persisted_payloads: history_payloads,
+                messages,
+                ok: false,
+                stop_reason: PromptStopReason::EndTurn,
+                history_replaced_by_compaction: false,
+                persistence_inconsistent: false,
+                recall_items: Vec::new(),
+                pending_tasks: 0,
+                failure: Some(ExecutionFailure::internal(format!(
+                    "background result injection failed: {error}"
+                ))),
+                context_usage_tokens: None,
+            };
         }
     }
 

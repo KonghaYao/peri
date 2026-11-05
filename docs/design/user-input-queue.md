@@ -6,24 +6,25 @@
 
 ## 状态归属
 
-待发送队列、发布/领取关系和当前 run ticket 只属于当前进程；不保存持久 Work 命令或恢复
-发布代际，不承诺重启恢复未发送内容。已提交的 canonical 历史照常持久化。当前发送/取回/取消的
-身份校验与交互行为保留；持久 Inbox 与执行恢复已撤销。
+待发送消息及其原稿由 [Thread MQ](thread-mq.md) 持久保存在所属 thread 的 MQ 中；发布/领取选择、
+当前 run ticket 和执行恢复仍只属于当前进程。不保存持久 Work 命令或回放旧发送命令；重启后
+尚未移交的消息仍待发送，但旧执行不恢复。已提交的 canonical 历史照常持久化。当前发送/取回/取消的
+身份校验与交互行为保留。
 
 Agent 会话的 `UserInputMailbox` 是投递生命周期的唯一 owner，宿主持有跨 turn 的共享实例。
-它保留待发送内容、稳定输入身份、命令回执及运行 ticket；ACP 定位会话、检查能力和写权限，
-执行 Agent 给出的准入决定；TUI 只保存编辑器草稿、未确认请求及服务端投影。
+它保留稳定输入身份、命令回执及运行 ticket，待发送内容一律经 Thread MQ 查询，不另存副本；
+ACP 定位会话、检查能力和写权限，执行 Agent 给出的准入决定；TUI 只保存编辑器草稿、未确认请求及服务端投影。
 
-待发区与现有消费 MQ 分开。loading 期间普通输入只进入待发区，不打断当前模型或工具执行。
-主 Agent 进入 idle 时，Mailbox 按 FIFO 取第一条 Queued 输入交给 MQ，跳过已撤回或已投递项。
+loading 期间普通输入只进入 Thread MQ 的待发投影，不打断当前模型或工具执行。
+主 Agent 进入 idle 时，Mailbox 按 FIFO 选择队首一条 Queued 输入并提交发送选择，跳过已撤回或已投递项。
 等待后台任务而 idle 时，复用当前 attempt 唤醒 loop，不必等待后台任务全部完成；
 当前 turn 自然成功结束时，由宿主按同一规则启动下一条。后续普通输入等待下一次 idle。
 空闲提交同样遵循队首顺序；一次交接占用本次 idle，即使 Receive 尚未开始，也不会追加第二条。
 单条与全部立即发送使用同一个指定 ID 集合的操作，只提前处理选中内容。
 
-入队保存完整内容与原始草稿，不创建额外持久账本。显式发送原子提交选中的完整集合，后到
-草稿不能加入；自动 idle 只选择队首一条。变更请求绑定当前 lifecycle、revision、generation 与
-attempt；回执不明确时保留原命令与 input ID，不能换身份重建。
+入队保存完整内容与原始草稿，不创建额外持久账本。显式发送提交选中的完整集合，由下一次
+Receive 原子写入历史；后到草稿不能加入，自动 idle 只选择队首一条。变更请求绑定当前 lifecycle、
+revision、generation 与 attempt；回执不明确时保留原命令与 input ID，不能换身份重建。
 
 ```text
 Queued → Dispatching → Claimed → Delivered
@@ -31,8 +32,8 @@ Queued → Dispatching → Claimed → Delivered
 Dispatching → Queued：仅在已从 MQ 撤出且确认未领取时
 ```
 
-Receive 与 Stop 在 Mailbox 内原子裁决领取/撤出，MQ 只投影已确认结果。写入 canonical transcript
-才算 Delivered；仅入队或交接给 MQ 不能当作用户消息出现在聊天区。
+Receive 在 MQ 事务中领取，Stop 通过 `cancel_input` 撤出未被领取的输入；展示状态只投影已确认结果。
+写入 canonical transcript 才算 Delivered；仅入队或提交发送选择不能当作用户消息出现在聊天区。
 
 ## 交互与投递
 

@@ -74,13 +74,13 @@ struct Cli {
     /// 按 session ID 恢复对话
     #[arg(short = 'r', long = "resume")]
     resume: Option<Option<String>>,
-    /// 指定会话 ID（必须是有效 UUID）
+    /// 指定会话 ID（尚未实现，当前忽略）
     #[arg(long = "session-id", visible_alias = "sessionId")]
     session_id: Option<String>,
-    /// 设置会话显示名称
+    /// 设置会话显示名称（尚未实现，当前忽略）
     #[arg(short = 'n', long = "name")]
     session_name: Option<String>,
-    /// 禁用会话持久化（需 -p）
+    /// 禁用会话持久化（尚未实现，当前忽略）
     #[arg(long = "no-session-persistence")]
     no_session_persistence: bool,
 
@@ -442,7 +442,7 @@ fn pre_scan_config_file(args: impl Iterator<Item = std::ffi::OsString>) -> Optio
     result
 }
 
-fn validate_cli(cli: &Cli) -> std::result::Result<(), &'static str> {
+fn validate_cli(cli: &Cli) -> std::result::Result<(), String> {
     if matches!(
         cli.command,
         Some(Commands::Acp {
@@ -451,14 +451,37 @@ fn validate_cli(cli: &Cli) -> std::result::Result<(), &'static str> {
         })
     ) && cli.config_file.is_some()
     {
-        return Err("--settings-stdin cannot be combined with --config-file");
+        return Err("--settings-stdin cannot be combined with --config-file".into());
     }
     if cli.print.is_some() && cli.command.is_some() {
-        return Err("--print cannot be used with a subcommand");
+        return Err("--print cannot be used with a subcommand".into());
     }
     if cli.db_path.is_some() && cli.session_store.is_some() {
         // 两个定位入口没有隐式覆盖顺序：同时出现直接是参数错误（早于任何 I/O）。
-        return Err("--db-path cannot be combined with --session-store");
+        return Err("--db-path cannot be combined with --session-store".into());
+    }
+    // 会话选择参数只驱动默认 TUI 的启动恢复；print 模式不消费它们，静默忽略会让
+    // 用户以为续聊到了历史会话。只拒绝 -r：其余会话参数保持现状，不扩大拒绝面。
+    if cli.print.is_some() && cli.resume.is_some() {
+        return Err(
+            "print mode (-p) does not support --resume; remove -r/--resume or run without -p"
+                .into(),
+        );
+    }
+    if cli.cont && cli.resume.is_some() {
+        return Err("--continue cannot be combined with --resume; choose one session".into());
+    }
+    // 无值 `-r` 会被解析成 `Some(None)`；继续跑会把用户意图无声降级成新会话。
+    if cli.resume == Some(None) {
+        return Err(
+            "--resume requires a session ID; use --resume <id> or --continue for the latest session"
+                .into(),
+        );
+    }
+    if let Some(Some(session_id)) = &cli.resume
+        && session_id.trim().is_empty()
+    {
+        return Err("--resume requires a non-empty session ID".into());
     }
     if matches!(cli.command, Some(Commands::Meta { .. }))
         && (cli.print.is_some()
@@ -480,7 +503,8 @@ fn validate_cli(cli: &Cli) -> std::result::Result<(), &'static str> {
             || cli.config_file.is_some())
     {
         return Err(
-            "meta only accepts session store options (--db-path / --session-store*) and session --json",
+            "meta only accepts session store options (--db-path / --session-store*) and session --json"
+                .into(),
         );
     }
     Ok(())
@@ -816,7 +840,7 @@ fn main() -> Result<()> {
             model: cli.model,
             effort: cli.effort,
             continue_session: cli.cont,
-            resume_session: cli.resume.and_then(|o| o),
+            resume_session: cli.resume.flatten(),
             session_id: cli.session_id,
             session_name: cli.session_name,
             settings: cli.settings,

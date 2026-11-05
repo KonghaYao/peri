@@ -15,6 +15,7 @@ use peri_acp_types::interaction::{
 };
 use peri_acp_types::permission::{PermissionMode, SharedPermissionMode};
 use peri_acp_types::session::{ExecutionFailure, ExecutionFailureKind};
+use peri_acp_types::thread::{ThreadId, WorkState};
 use serde_json::Value;
 use tracing::info;
 
@@ -204,16 +205,17 @@ pub(crate) async fn run_prompt(
 ) -> Result<Value, AcpError> {
     let notifications = super::execution::ExecutionNotifications::from_params(&mut params)?;
     let session_id = super::extract_session_id(&params, "").to_owned();
-    let attempt_activation = deployment
-        .session_manager
-        .get_session(&session_id)
-        .map(|runtime| {
-            (
-                Arc::clone(&runtime.activation),
-                runtime.v2_message_queue.admission_watermark(),
-                runtime.async_result_mailbox.admission_watermark(),
-            )
-        });
+    let attempt_activation = match deployment.session_manager.get_session(&session_id) {
+        Some(runtime) => {
+            let activation = Arc::clone(&runtime.activation);
+            let queue = runtime.v2_message_queue.clone();
+            let result_watermark = runtime.async_result_mailbox.admission_watermark();
+            drop(runtime);
+            let watermark = queue.admission_watermark().await.unwrap_or(None);
+            Some((activation, watermark, result_watermark))
+        }
+        None => None,
+    };
     let result = run_prompt_attempt(
         params,
         sessions,
@@ -229,7 +231,7 @@ pub(crate) async fn run_prompt(
     .await;
     if result.is_err() {
         if let Some((activation, watermark, result_watermark)) = &attempt_activation {
-            activation.record_failed_attempt(*watermark);
+            activation.record_failed_attempt(watermark.clone());
             activation.record_failed_result_watermark(*result_watermark);
         }
         notifications
@@ -250,7 +252,11 @@ async fn run_prompt_attempt(
     continuation: bool,
     input_ticket: Option<super::user_input::UserInputRun>,
     notifications: &super::execution::ExecutionNotifications,
-    attempt_activation: Option<&(Arc<crate::session::SessionActivation>, u64, u64)>,
+    attempt_activation: Option<&(
+        Arc<crate::session::SessionActivation>,
+        Option<peri_acp_types::session::MqWatermark>,
+        u64,
+    )>,
 ) -> Result<Value, AcpError> {
     // Borrow deployment services; turn-owned callbacks clone only their existing handles.
     // Provider/config snapshots remain below, after the session snapshot is captured.
@@ -289,7 +295,8 @@ async fn run_prompt_attempt(
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    let user_input_mailbox = super::user_input::ensure_mailbox(&session_id, deployment, transport)?;
+    let user_input_mailbox =
+        super::user_input::ensure_mailbox(&session_id, deployment, transport).await?;
 
     // Create cancel token and register in sessions.
     // `AgentCancellationToken` 即 `tokio_util::sync::CancellationToken` 别名
@@ -305,13 +312,17 @@ async fn run_prompt_attempt(
     let managed_input = input_ticket.is_some();
     let input_attempt = match &input_ticket {
         Some(run) => {
-            if !user_input_mailbox.attach_attempt(&run.ticket, cancel.clone()) {
+            if !user_input_mailbox
+                .attach_attempt(&run.ticket, cancel.clone())
+                .await
+            {
                 return Ok(Value::Null);
             }
             run.ticket.clone()
         }
         None => user_input_mailbox
             .attach_external_attempt(cancel.clone(), !continuation && content.is_empty())
+            .await
             .ok_or_else(|| AcpError::new(-32800, "user input attempt superseded"))?,
     };
     let mut input_attempt_guard = super::user_input::InputAttemptGuard::new(
@@ -647,13 +658,24 @@ async fn run_prompt_attempt(
     if !result.ok || result.failure.is_some() {
         if let Some((activation, watermark, result_watermark)) = attempt_activation {
             if result.stop_reason == executor::PromptStopReason::Cancelled {
-                activation.suppress();
+                if user_input_mailbox.is_steer_interruption(&input_attempt) {
+                    // 用户显式发送打断当前 turn：MQ 已放行输入，收尾后必须继续调度。
+                    tracing::debug!(
+                        session_id = %session_id,
+                        thread_id = %thread_id,
+                        attempt_id = %input_attempt.id,
+                        reason = "steer",
+                        "steer interruption keeps activation armed"
+                    );
+                } else {
+                    activation.suppress();
+                }
                 // Stop 优先：未覆盖结果暂停，新完成通知也不能绕过显式继续。
                 if let Some(runtime) = deployment.session_manager.get_session(&session_id) {
                     runtime.async_result_mailbox.suspend_scope("cancelled");
                 }
             } else {
-                activation.record_failed_attempt(*watermark);
+                activation.record_failed_attempt(watermark.clone());
                 activation.record_failed_result_watermark(*result_watermark);
                 // 阶段内部已按阶段记录；这里是未进入阶段或早退失败的兜底：未覆盖
                 // 结果保留为 Blocked，不自动重试。
@@ -679,7 +701,7 @@ async fn run_prompt_attempt(
             .session_manager
             .invalidate_user_input_mailbox(&session_id);
     }
-    input_attempt_guard.finish(&result);
+    input_attempt_guard.finish(&result).await;
 
     let compact_committed =
         result.history_replaced_by_compaction && !result.persistence_inconsistent;
@@ -787,10 +809,12 @@ pub(super) async fn finish_prompt_turn(
     let mut commit_thread = None;
     let mut commit_generation = None;
     let mut commit_structure = None;
+    let mut turn_thread = None;
     let adoption_memory = {
         let mut sessions = sessions.lock().await;
         let mut adoption_memory = None;
         if let Some(state) = sessions.get_mut(session_id) {
+            turn_thread = Some(state.thread_id.clone());
             if result.persistence_inconsistent {
                 // 提交结果不确定：不保留任何可继续执行的旧正文，也不删除身份。
                 // 下一次 prompt / restore 从权威存储恢复（ReloadRequired）。
@@ -842,7 +866,7 @@ pub(super) async fn finish_prompt_turn(
     // 更新轻量 checkpoint/tail，不由 UI 事件反推提交成功。失败只撤销窗口可信元数据，
     // 不把已经提交成功的 turn 改成失败。
     if let (Some(resources), Some(thread_id), Some(generation), Some(structure)) = (
-        session_resources,
+        session_resources.as_ref(),
         commit_thread,
         commit_generation,
         commit_structure,
@@ -877,6 +901,34 @@ pub(super) async fn finish_prompt_turn(
                 if let Some(state) = sessions.get_mut(session_id) {
                     super::history_window::revoke(state);
                 }
+            }
+        }
+    }
+    // durable 收尾：先落续跑意图，再落占用快照。取消分支写 `stopped`，此后再无 `idle`
+    // 写入覆盖它——这就是 Stop 意图不被收尾覆盖的顺序保证。提交结果不确定时不写，
+    // 保留最后一次已提交的事实。
+    if let Some(work_state) =
+        WorkState::after_prompt_turn(result.stop_reason, result.persistence_inconsistent)
+    {
+        if let (Some(resources), Some(thread_id)) =
+            (session_resources.as_ref(), turn_thread.as_ref())
+        {
+            let thread_id = ThreadId::from(thread_id.clone());
+            if let Err(error) =
+                super::prompt_dispatch::set_work_state_with_retry(resources, &thread_id, work_state)
+                    .await
+            {
+                tracing::error!(
+                    session_id,
+                    %error,
+                    "work state write after prompt failed after retry"
+                );
+            }
+            if let Err(error) = resources
+                .set_context_usage(&thread_id, result.context_usage_tokens)
+                .await
+            {
+                tracing::warn!(session_id, %error, "context usage write after prompt failed");
             }
         }
     }

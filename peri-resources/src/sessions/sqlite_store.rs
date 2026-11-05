@@ -34,9 +34,9 @@ use peri_acp_types::{
         deserialize_persisted_payload, serialize_persisted_payload, CompactionChange,
         InheritedContext, MessageFlags, PersistedPayload, ThreadStore,
     },
-    thread::{AgentStatus, ThreadId, ThreadListEntry, ThreadMeta},
+    thread::{AgentStatus, ThreadId, ThreadListEntry, ThreadMeta, WorkState},
 };
-use row_mapping::{extract_title, meta_from_row, role_of, ThreadRow, THREAD_META_COLUMNS};
+use row_mapping::{extract_title, meta_from_row, role_of, ThreadRow};
 use sqlx::AssertSqlSafe;
 use std::{collections::HashMap, path::PathBuf, str::FromStr, sync::Arc};
 
@@ -289,7 +289,8 @@ impl ThreadStore for SqliteThreadStore {
 
     async fn load_meta(&self, id: &ThreadId) -> Result<ThreadMeta> {
         let row: ThreadRow = match sqlx::query_as(AssertSqlSafe(format!(
-            "SELECT {THREAD_META_COLUMNS} FROM threads t WHERE t.id = ?1"
+            "SELECT {} FROM threads t WHERE t.id = ?1",
+            self.database.thread_meta_columns()
         )))
         .bind(id.as_str())
         .fetch_one(&self.database.pool)
@@ -314,7 +315,7 @@ impl ThreadStore for SqliteThreadStore {
 
         let result = meta_from_row(
             row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10, row.11,
-            row.12,
+            row.12, row.13, row.14,
         );
         if self.database.read_only {
             result.map_err(|_| {
@@ -405,7 +406,8 @@ impl ThreadStore for SqliteThreadStore {
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>> {
         let rows: Vec<ThreadRow> = sqlx::query_as(AssertSqlSafe(format!(
-            "SELECT {THREAD_META_COLUMNS} FROM threads t WHERE t.hidden = 0 ORDER BY t.updated_at DESC"
+            "SELECT {} FROM threads t WHERE t.hidden = 0 ORDER BY t.updated_at DESC",
+            self.database.thread_meta_columns()
         )))
         .fetch_all(&self.database.pool)
         .await?;
@@ -414,7 +416,7 @@ impl ThreadStore for SqliteThreadStore {
             .map(|row| {
                 meta_from_row(
                     row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10,
-                    row.11, row.12,
+                    row.11, row.12, row.13, row.14,
                 )
             })
             .collect()
@@ -549,6 +551,14 @@ impl ThreadStore for SqliteThreadStore {
         result
     }
 
+    async fn set_work_state(&self, id: &ThreadId, state: WorkState) -> Result<()> {
+        session_rows::write_work_state(&self.database.pool, id, state).await
+    }
+
+    async fn set_context_usage(&self, id: &ThreadId, tokens: Option<u64>) -> Result<()> {
+        session_rows::write_context_usage(&self.database.pool, id, tokens).await
+    }
+
     async fn delete_messages(
         &self,
         thread_id: &ThreadId,
@@ -640,6 +650,10 @@ mod session_data_tests;
 mod thread_child_delete_tests;
 
 #[cfg(test)]
+#[path = "sqlite_store/session_mq_test.rs"]
+mod session_mq_tests;
+
+#[cfg(test)]
 #[path = "sqlite_store/schema_v7_test.rs"]
 mod schema_v7_tests;
 
@@ -650,6 +664,10 @@ mod schema_v10_tests;
 #[cfg(test)]
 #[path = "sqlite_store/schema_v11_test.rs"]
 mod schema_v11_tests;
+
+#[cfg(test)]
+#[path = "sqlite_store/schema_v14_test.rs"]
+mod schema_v14_tests;
 
 #[cfg(test)]
 #[path = "sqlite_store/session_id_environment_test.rs"]

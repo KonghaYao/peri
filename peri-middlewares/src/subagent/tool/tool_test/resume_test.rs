@@ -583,7 +583,7 @@ async fn test_resume_thread_id_background_combination() {
         "BackgroundTaskResult 必须携带 child_thread_id"
     );
     assert_eq!(registry.active_count(), 0, "父任务目录必须已结算新任务");
-    let delivered = parent.queue().drain_all();
+    let delivered = parent.queue().drain_all_sync();
     assert_eq!(delivered.len(), 1, "完成结果必须投递给直接发起的父会话");
     assert_eq!(
         delivered[0].source,

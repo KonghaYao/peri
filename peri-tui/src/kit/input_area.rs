@@ -798,12 +798,16 @@ pub fn InputArea(props: &InputAreaProps, mut hooks: Hooks) -> impl Into<AnyEleme
             format!("MEM {}MB", snap.memory_mb),
             Style::default().fg(sem.text.muted),
         ));
-        if let Some((pct, _)) = ctx_usage.read().as_ref() {
+        if let Some(usage) = ctx_usage.read().as_ref() {
             spans.push(footer_separator(sem.text.muted));
-            let c = i18n::tr_args(
-                "composer-context-usage",
-                &[("pct".to_string(), FluentValue::from(pct.round() as u64))],
-            );
+            // 未知显式展示为未知：进入会话时保存值为 NULL 不能落成 0%。
+            let c = match usage.percent() {
+                Some(pct) => i18n::tr_args(
+                    "composer-context-usage",
+                    &[("pct".to_string(), FluentValue::from(pct.round() as u64))],
+                ),
+                None => i18n::tr("composer-context-usage-unknown"),
+            };
             spans.push(Span::styled(
                 format!(" {c} "),
                 Style::default().fg(sem.text.muted),

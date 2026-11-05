@@ -47,6 +47,7 @@ use super::mutation::{RemoteStore, StoreAccess};
 use super::schema::{StoreId, StoreIdentityRead, StoreShapeRead};
 use super::schema_upgrade;
 use super::session_schema;
+use super::session_sql;
 use super::sql::StatementSpec;
 use crate::sessions::data::{ChildResumeRecord, SessionDataPort};
 use async_trait::async_trait;
@@ -62,7 +63,7 @@ use peri_acp_types::session_resources::{
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::system_reminder::TrustedSystemReminder;
-use peri_acp_types::thread::{ThreadId, ThreadMeta};
+use peri_acp_types::thread::{ThreadId, ThreadMeta, WorkState};
 use peri_acp_types::workspace::{
     ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding,
 };
@@ -231,6 +232,12 @@ impl RemoteSessionData {
             },
             initialization,
         ))
+    }
+
+    /// metadata 投影代数：打开时的身份读回判为旧代只读形状（`legacy_shape`）时，
+    /// `threads` 没有两列工作快照，读取改用同形占位列；codec 仍是同一套。
+    pub(super) fn meta_projection(&self) -> session_sql::MetaProjection {
+        session_sql::MetaProjection::from_legacy_shape(self.legacy_shape)
     }
 
     /// 操作所属 root：已有会话沿父链上溯（带缓存），解析失败退回自身。
@@ -780,6 +787,57 @@ impl SessionDataPort for RemoteSessionData {
         Ok(self.root_for(id).await)
     }
 
+    async fn recovery_scope(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::recovery::RecoveryScope> {
+        // 与本地 adapter 同语义：先严格解析根（远端不退回自身），再读根子树的 working 候选。
+        let root = self.root_of(id).await?;
+        // 旧形状（v10/v11 只读）没有两列工作快照：读不到工作意图就是零候选，不能猜成 working。
+        if self.legacy_shape {
+            return Ok(peri_acp_types::recovery::RecoveryScope::idle(root));
+        }
+        let store = self.store().await?;
+        let rows = store
+            .fetch_rows(&session_sql::select_working_tree_statement(&root))
+            .await?;
+        let mut candidates = Vec::with_capacity(rows.len());
+        for row in rows {
+            let thread_id = super::sql::text_at(&row, 0)
+                .ok_or_else(|| {
+                    super::session_codec::corrupt("recovery scope row has no thread id")
+                })?
+                .to_owned();
+            let parent_thread_id = super::sql::text_at(&row, 1).map(str::to_owned);
+            let context_usage_tokens = match super::sql::int_at(&row, 2) {
+                None => None,
+                Some(usage) => Some(u64::try_from(usage).map_err(|_| {
+                    super::session_codec::corrupt("recovery scope row has a negative context usage")
+                })?),
+            };
+            let state = super::sql::text_at(&row, 3).ok_or_else(|| {
+                super::session_codec::corrupt("recovery scope row has no work state")
+            })?;
+            let state = state
+                .parse::<peri_acp_types::thread::WorkState>()
+                .map_err(|_| {
+                    super::session_codec::corrupt("stored work state is not a known value")
+                })?;
+            if state != peri_acp_types::thread::WorkState::Working {
+                continue;
+            }
+            candidates.push(peri_acp_types::recovery::RecoveryCandidate {
+                thread_id,
+                parent_thread_id,
+                context_usage_tokens,
+            });
+        }
+        Ok(peri_acp_types::recovery::RecoveryScope {
+            root_thread_id: root,
+            candidates,
+        })
+    }
+
     async fn list_sessions(
         &self,
         query: &ScopedThreadQuery,
@@ -930,8 +988,64 @@ impl SessionDataPort for RemoteSessionData {
         self.write_meta(id, patch).await
     }
 
+    async fn set_work_state(&self, id: &ThreadId, state: WorkState) -> SessionResourceResult<()> {
+        self.write_work_state(id, state).await
+    }
+
+    async fn set_context_usage(
+        &self,
+        id: &ThreadId,
+        tokens: Option<u64>,
+    ) -> SessionResourceResult<()> {
+        self.write_context_usage(id, tokens).await
+    }
+
     async fn delete_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.write_tree_deletion(id).await
+    }
+
+    async fn mq_enqueue(
+        &self,
+        thread_id: &ThreadId,
+        input: peri_acp_types::session::MqInput,
+    ) -> SessionResourceResult<peri_acp_types::session::MqEnqueueOutcome> {
+        self.enqueue_mq(thread_id, input).await
+    }
+
+    async fn mq_query(
+        &self,
+        thread_id: &ThreadId,
+        filter: peri_acp_types::session::MqFilter,
+    ) -> SessionResourceResult<Vec<peri_acp_types::session::MqEntry>> {
+        self.query_mq(thread_id, filter).await
+    }
+
+    async fn mq_cancel(
+        &self,
+        thread_id: &ThreadId,
+        id: MessageId,
+    ) -> SessionResourceResult<peri_acp_types::session::MqCancelOutcome> {
+        self.cancel_mq(thread_id, id).await
+    }
+
+    async fn mq_receive(
+        &self,
+        thread_id: &ThreadId,
+        selection: peri_acp_types::session::MqReceiveSelection,
+    ) -> SessionResourceResult<peri_acp_types::session::MqReceiveOutcome> {
+        self.receive_mq(thread_id, selection).await
+    }
+
+    async fn mq_clear(&self, thread_id: &ThreadId) -> SessionResourceResult<()> {
+        self.clear_mq(thread_id).await
+    }
+
+    async fn mq_history_contains(
+        &self,
+        thread_id: &ThreadId,
+        id: MessageId,
+    ) -> SessionResourceResult<bool> {
+        self.history_contains(thread_id, id).await
     }
 
     /// 远端未决收敛：拿本机日志里的操作 id 向远端账本求证终态（C §5.1 第 4 步）。

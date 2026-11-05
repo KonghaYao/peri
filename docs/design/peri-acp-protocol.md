@@ -27,7 +27,7 @@ TUI 的所有主动行为通过标准 ACP JSON-RPC 方法调用。不定义自�
 | 方法 | 参数 | 返回值 | 语义 |
 |------|------|--------|------|
 | `session/new` | `{ cwd?, mcpServers? }` | `{ sessionId, ... }` | 创建新会话；可返回 modes、models、configOptions 等协商字段 |
-| `session/load` | `{ sessionId, cwd?, mcpServers? }`；分页时 `{ sessionId, cursor, limit? }`；窗口时 `{ sessionId, history: { kind: "open" \| "page" \| "seek", ... } }` | `{ ... }` | 加载指定会话并重放历史；响应可含 modes、models、configOptions，不创建新身份。带 `cursor` 时是旧历史页模式，带 `history` 时是 `peri.historyWindowV1` 只读窗口模式（两者互斥，见 §2.1.1）。声明窗口能力的连接不带 `history` 的 load **不回放历史**，首屏由 `history.open` 提供 |
+| `session/load` | `{ sessionId, cwd?, mcpServers? }`；分页时 `{ sessionId, cursor, limit? }`；窗口时 `{ sessionId, history: { kind: "open" \| "page" \| "seek", ... } }` | `{ ... }` | 加载指定会话并重放历史；响应可含 modes、models、configOptions，不创建新身份。带 `cursor` 时是旧历史页模式，带 `history` 时是 `peri.historyWindowV1` 只读窗口模式（两者互斥，见 §2.1.2）。声明窗口能力的连接不带 `history` 的 load **不回放历史**，首屏由 `history.open` 提供 |
 | `session/resume` | `{ sessionId, cwd? }` | `{}` | 复用已有 session_id 继续会话；经统一 host lifecycle handler 处理 |
 | `session/close` | `{ sessionId }` | `{}` | 关闭会话 |
 | `session/delete` | `{ sessionId }` | `{}` | 关闭并删除整棵会话树 |
@@ -73,7 +73,31 @@ reminder 出口），客户端据此把通知与那次 load 配对；历史页�
 失败使 `session/load` 失败（`-32603`），不返回半回放的「成功」响应；服务端已装配的会话态
 保持完整，留给下一次 load 原位修复。
 
-#### 2.1.1 历史窗口 `peri.historyWindowV1`（默认关闭）
+#### 2.1.1 会话恢复结果 `_meta.peri.recovery`
+
+`session/load` / `session/resume` 的**会话装配与历史回放成功**后，即使进入会话的恢复准备失败也返回 `Ok`：历史与占用保留可展示，恢复结果放在 `_meta["peri.recovery"]`；该字段只在实际注入提醒或发生失败时附加，普通 idle load 不产生。失败不再使用 `-32011`（该码保留给历史游标跨会话错误）。
+
+```json
+{
+  "status": "ok | partial | failed",
+  "rootThreadId": "...",
+  "enteredThreadId": "...",
+  "recovered": ["..."],
+  "reused": ["..."],
+  "skipped": [{ "threadId": "...", "reason": "idle" }],
+  "failures": [{ "threadId": "...", "kind": "unavailable", "detail": "...", "executionBlocked": false }],
+  "error": { "threadId": "...", "kind": "corrupt", "detail": "...", "executionBlocked": true },
+  "executionBlocked": true
+}
+```
+
+- `status`：无失败为 `ok`；仅逐项失败为 `partial`；进入会话的恢复本身失败为 `failed`。
+- `Corrupt` / `ReadOnly` / `NotFound` 使会话不可执行：服务端在内存中设置执行阻断，`session/prompt` 返回 `-32017`，`data.reason = "recovery_execution_blocked"`（附 `kind`/`threadId`/`detail`），模型与 continuation 均不启动。
+- `Unavailable` / `Superseded` / `Unsupported` 不阻断：用户可显式发送消息继续，服务端仍按正常准入复核。
+- 每次新的 load/resume 重新尝试恢复并按本次结果重设阻断；成功或可重试失败清除旧阻断。阻断不持久化。
+- 只读 Store 下的 `session/load` 仍在回放前明确拒绝（`ReadOnlyStore`），本版本不提供经 `-r` 浏览只读历史；只读历史查询走独立入口。
+
+#### 2.1.2 历史窗口 `peri.historyWindowV1`（默认关闭）
 
 窗口协议是 `session/load` 上的只读扩展，用于双向浏览与按需回读；它与旧 `cursor` 分页是两套
 独立语义。`PeriCaps::history_window_v1` 的 wire key 为 `peri.historyWindowV1`，只接受显式
@@ -339,7 +363,7 @@ ACP 事件映射 / EventSink
 - `peri/agent_event` 使用 ACP 的 TUI 专用 DTO，承载低频状态、结构和扩展事件。
 - `peri/agent_activity` 承载活动摘要，不代替 `session/update` 或 `peri/agent_event`。
 - `peri/history_committed` 是 `peri.historyWindowV1` 的私有提交通知，只发给当前持票连接；
-  字段与幂等语义见 §2.1.1。
+  字段与幂等语义见 §2.1.2。
 - `peri/agent_event_done` 承载本轮终止状态，并可带 `requestId` 关联提交请求。
 
 不要为新 Agent 事件定义平行的 `{event, data}` 协议；需要新增或扩展时，按 ARC-EVENT-001 同步更新事件类型、ACP 映射与 TUI 消费。

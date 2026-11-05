@@ -75,7 +75,7 @@ pub trait MiddlewareState: Send + Sync {
 
     /// 发布到同一会话 mailbox，由消息类型统一决定唤醒。
     fn enqueue_v2_message(&self, msg: crate::session::QueuedMessage) {
-        self.v2_queue().push(msg);
+        crate::session::queue::enqueue_detached(self.v2_queue().producer(), msg);
     }
 
     /// 返回当前 turn 的本地工具视图（stage_builder 每 turn 构建，含当前链

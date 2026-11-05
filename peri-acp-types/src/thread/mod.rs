@@ -7,4 +7,5 @@ mod types;
 
 pub use types::{
     AgentStatus, CancelPolicy, ThreadId, ThreadListEntry, ThreadMeta, ThreadMetaParseError,
+    WorkState,
 };

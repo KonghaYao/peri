@@ -31,9 +31,25 @@ impl ActivationHarness {
             .with_header("content-type", "text/event-stream")
             .with_body("data: {\"id\":\"test-response\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
             .create_async().await;
+        let base_url = server.url();
+        Self::assemble(&base_url, server, mock).await
+    }
+
+    /// 由测试自控模型端点的 harness：首个请求何时响应由调用方决定。
+    async fn with_base_url(base_url: &str) -> Self {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(200)
+            .create_async()
+            .await;
+        Self::assemble(base_url, server, mock).await
+    }
+
+    async fn assemble(base_url: &str, server: mockito::ServerGuard, mock: mockito::Mock) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let mut provider = make_provider_config("local", "openai", "test", "gpt-test");
-        provider.base_url = server.url();
+        provider.base_url = base_url.to_string();
         let config = make_peri_config_with_provider(provider);
         let provider = LlmProvider::from_config(&config).unwrap();
         let cfg = Arc::new(make_server_config(config, provider, &directory).await);
@@ -150,6 +166,9 @@ mod admission_activation_tests;
 
 #[path = "stop_activation_test.rs"]
 mod stop_activation_tests;
+
+#[path = "steer_activation_test.rs"]
+mod steer_activation_tests;
 
 #[tokio::test]
 #[serial]
@@ -280,11 +299,13 @@ async fn listener_rechecks_existing_work_and_does_not_activate_info() {
         .unwrap()
         .activation
         .allow();
-    queue.push(QueuedMessage::new(
-        MessageKind::Info,
-        MessageSource::SystemInjected,
-        BaseMessage::human("passive"),
-    ));
+    queue
+        .push_async(QueuedMessage::new(
+            MessageKind::Info,
+            MessageSource::SystemInjected,
+            BaseMessage::human("passive"),
+        ))
+        .await;
     harness.listen();
     tokio::task::yield_now().await;
     assert!(harness.receiver.as_mut().unwrap().try_recv().is_err());
@@ -334,7 +355,7 @@ async fn empty_queued_continuation_does_not_block_the_next_child_result() {
         )
         .unwrap()
     };
-    assert_eq!(queue.drain_all().len(), 1);
+    assert_eq!(queue.drain_all_async().await.len(), 1);
     let params =
         json!({"sessionId": harness.session_id, "message": {"role": "user", "content": []}});
     let empty = crate::host::dispatch_prompt_turn(
@@ -378,7 +399,7 @@ async fn empty_queued_continuation_does_not_block_the_next_child_result() {
     .await
     .unwrap();
     assert_eq!(response["stopReason"], "end_turn");
-    assert!(queue.is_empty());
+    assert!(queue.is_empty().await.expect("test MQ len"));
     harness
         .cfg
         .session_manager
@@ -400,12 +421,13 @@ async fn cancellation_allows_one_child_continuation_but_never_restarts_cancelled
         let mut sessions = harness.sessions.lock().await;
         sessions.get_mut(&harness.session_id).unwrap().cancel_token =
             Some(CancellationToken::new());
-        crate::host::notify::handle_notification(
+        let _ = crate::host::notify::handle_notification(
             "session/cancel",
             &json!({"sessionId": harness.session_id}),
             &mut sessions,
             &harness.cfg,
-        );
+        )
+        .await;
         sessions.get_mut(&harness.session_id).unwrap().cancel_token = None;
     }
     harness.complete_child("cancelled-parent-child");
@@ -423,7 +445,7 @@ async fn cancellation_allows_one_child_continuation_but_never_restarts_cancelled
         .session_manager
         .v2_queue_for(&harness.session_id)
         .unwrap();
-    queue.drain_all();
+    queue.drain_all_async().await;
     {
         let mut sessions = harness.sessions.lock().await;
         let state = sessions.get_mut(&harness.session_id).unwrap();
@@ -432,12 +454,13 @@ async fn cancellation_allows_one_child_continuation_but_never_restarts_cancelled
         );
         state.continuation_in_flight = true;
         state.cancel_token = Some(CancellationToken::new());
-        crate::host::notify::handle_notification(
+        let _ = crate::host::notify::handle_notification(
             "session/cancel",
             &json!({"sessionId": harness.session_id}),
             &mut sessions,
             &harness.cfg,
-        );
+        )
+        .await;
         let state = sessions.get_mut(&harness.session_id).unwrap();
         state.continuation_in_flight = false;
         state.cancel_token = None;
@@ -445,7 +468,10 @@ async fn cancellation_allows_one_child_continuation_but_never_restarts_cancelled
     harness.complete_child("after-continuation-stop");
     tokio::task::yield_now().await;
     assert!(harness.receiver.as_mut().unwrap().try_recv().is_err());
-    assert!(queue.has_pending_defer(&MessageSource::SubAgentComplete));
+    assert!(queue
+        .has_pending_defer(&MessageSource::SubAgentComplete)
+        .await
+        .expect("test MQ defer"));
     harness
         .cfg
         .session_manager
@@ -476,10 +502,12 @@ async fn closing_session_does_not_activate_late_work() {
         .session_manager
         .v2_queue_for(&harness.session_id)
         .unwrap();
-    queue.push(QueuedMessage::defer(
-        MessageSource::SubAgentComplete,
-        BaseMessage::human("late"),
-    ));
+    queue
+        .push_async(QueuedMessage::defer(
+            MessageSource::SubAgentComplete,
+            BaseMessage::human("late"),
+        ))
+        .await;
     tokio::task::yield_now().await;
     assert!(harness.receiver.as_mut().unwrap().try_recv().is_err());
     let owner = Arc::get_mut(&mut harness.cfg)
@@ -504,10 +532,12 @@ async fn approved_schedule_runs_without_reenabling_suppressed_passive_results() 
         .session_manager
         .v2_queue_for(&harness.session_id)
         .unwrap();
-    queue.push(QueuedMessage::defer(
-        MessageSource::CronTrigger,
-        BaseMessage::human("approved schedule"),
-    ));
+    queue
+        .push_async(QueuedMessage::defer(
+            MessageSource::CronTrigger,
+            BaseMessage::human("approved schedule"),
+        ))
+        .await;
     harness
         .sessions
         .lock()
@@ -533,7 +563,7 @@ async fn approved_schedule_runs_without_reenabling_suppressed_passive_results() 
     .await
     .unwrap();
     assert!(suppressed.is_null());
-    assert!(queue.has_ensure_processing());
+    assert!(queue.has_ensure_processing().await.expect("test MQ policy"));
     let response = crate::host::dispatch_prompt_turn(
         params,
         crate::host::PromptOrigin::Scheduled,
@@ -547,7 +577,7 @@ async fn approved_schedule_runs_without_reenabling_suppressed_passive_results() 
     .await
     .unwrap();
     assert_eq!(response["stopReason"], "end_turn");
-    assert!(queue.is_empty());
+    assert!(queue.is_empty().await.expect("test MQ len"));
     assert!(!harness
         .cfg
         .session_manager

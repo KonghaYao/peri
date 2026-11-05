@@ -191,7 +191,7 @@ async fn run_script(responses: Vec<String>) -> Evidence {
     .with_middleware_chain(Arc::new(chain))
     .with_event_bus(Arc::new(bus))
     .build();
-    context.session.queue.push(QueuedMessage::prompt(
+    context.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("Count once, then finish"),
     ));
@@ -229,7 +229,7 @@ async fn run_script(responses: Vec<String>) -> Evidence {
         observations,
         executions: executions.load(Ordering::SeqCst),
         completions: completions.load(Ordering::SeqCst),
-        queue_empty: context.session.queue.is_empty(),
+        queue_empty: context.session.queue.is_empty_sync(),
     }
 }
 

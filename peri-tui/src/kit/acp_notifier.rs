@@ -289,19 +289,20 @@ async fn forward_notification(
 /// Preserve legacy context publication at the same synchronous dispatch boundary.
 fn convert_agent_event(event: AcpEvent) -> Option<AcpEventData> {
     match event {
-        // StateSnapshotMeta：从 budget_pct 写入 CONTEXT_USAGE atom（供 StatusBarRow1 显示）
+        // StateSnapshotMeta：更新 CONTEXT_USAGE atom（供 composer footer 显示）。
+        // budget_pct 缺失（首轮/token_tracker 无 last_usage）时保留进入会话时的
+        // 已保存值，不得写成 0%。
         AcpEvent::StateSnapshotMeta {
+            total_tokens,
             context_total_tokens,
             budget_pct,
             ..
         } => {
-            if let Some(total) = context_total_tokens {
-                // budget_pct 可能为 None（首轮/token_tracker 无 last_usage），此时仅存总量
-                let pct = budget_pct.unwrap_or(0.0);
-                *crate::kit::atoms::CONTEXT_USAGE.state().write() = Some((pct, total));
-                crate::kit::atoms::RENDER_HEARTBEAT
-                    .set(crate::kit::atoms::RENDER_HEARTBEAT.get().wrapping_add(1));
-            }
+            crate::kit::context_usage::apply_state_snapshot(
+                total_tokens,
+                budget_pct.is_some(),
+                context_total_tokens,
+            );
             None
         }
         event => agent_event::decode_agent_event(event),

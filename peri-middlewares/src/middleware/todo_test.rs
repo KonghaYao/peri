@@ -76,7 +76,10 @@ async fn test_after_agent_background_tasks_suppress_and_resume_todo() {
                     .await
                     .unwrap();
                 assert!(result.block_continue.is_none(), "{kind:?} 活跃时不应续跑");
-                assert!(session.queue().drain_all().is_empty(), "后台期间不应注入");
+                assert!(
+                    session.queue().drain_all_sync().is_empty(),
+                    "后台期间不应注入"
+                );
                 let todo = todo.lock().await;
                 assert!(todo.require_completion);
                 assert_eq!(todo.items[0].status, TodoStatus::InProgress);
@@ -105,7 +108,7 @@ async fn test_after_agent_background_tasks_suppress_and_resume_todo() {
                 result.block_continue.as_deref(),
                 Some("todo_require_completion")
             );
-            let messages = session.queue().drain_all();
+            let messages = session.queue().drain_all_sync();
             assert_eq!(messages.len(), 1);
             assert_eq!(messages[0].kind, MessageKind::Defer);
             assert_eq!(messages[0].source, MessageSource::TodoSteering);
@@ -181,9 +184,9 @@ async fn test_after_agent_未完成_注入_steering_并设_block_continue() {
     );
 
     // 注入路径：v2 MessageQueue 应收到 1 条 Defer（TodoSteering），内容含 todo 状态
-    assert!(session.queue().has_required_for_run(&execution));
-    assert!(!session.queue().has_ensure_processing());
-    let drained = session.queue().drain_all();
+    assert!(session.queue().has_required_for_run_sync(&execution));
+    assert!(!session.queue().has_ensure_processing_sync());
+    let drained = session.queue().drain_all_sync();
     assert_eq!(drained.len(), 1, "应 push 1 条 todo steering Defer 消息");
     assert_eq!(drained[0].kind, MessageKind::Defer);
     assert_eq!(
@@ -232,7 +235,7 @@ async fn test_after_agent_全部completed_放行() {
         .unwrap();
 
     assert!(result.block_continue.is_none(), "全部 completed 不应拦截");
-    let drained = state.v2_queue().drain_all();
+    let drained = state.v2_queue().drain_all_sync();
     assert!(drained.is_empty(), "不应注入任何消息");
 }
 
@@ -258,7 +261,7 @@ async fn test_after_agent_未开启标记_放行() {
         result.block_continue.is_none(),
         "未开启 requireCompletion 不应拦截"
     );
-    let drained = state.v2_queue().drain_all();
+    let drained = state.v2_queue().drain_all_sync();
     assert!(drained.is_empty(), "不应注入任何消息");
 }
 
@@ -273,7 +276,7 @@ async fn test_after_agent_空列表_放行() {
         .unwrap();
 
     assert!(result.block_continue.is_none(), "空列表不应拦截");
-    let drained = state.v2_queue().drain_all();
+    let drained = state.v2_queue().drain_all_sync();
     assert!(drained.is_empty(), "不应注入任何消息");
 }
 
@@ -298,7 +301,7 @@ async fn test_after_agent_已有block_continue_不干预() {
 
     // 尊重前置中间件的优先级：保留原 block_continue，不覆盖也不重复注入
     assert_eq!(result.block_continue.as_deref(), Some("stop_hook_block"));
-    let drained = state.v2_queue().drain_all();
+    let drained = state.v2_queue().drain_all_sync();
     assert!(drained.is_empty(), "已有 block_continue 时不应注入");
 }
 
@@ -347,7 +350,7 @@ async fn test_after_agent_steering_解除后_不再拦截() {
         Some("todo_require_completion"),
         "未完成时应拦截续跑"
     );
-    session.queue().drain_all();
+    session.queue().drain_all_sync();
 
     // 全部标记 completed → 停止轮放行
     tool.invoke(
@@ -366,7 +369,7 @@ async fn test_after_agent_steering_解除后_不再拦截() {
         .await
         .unwrap();
     assert!(result.block_continue.is_none(), "全部完成应放行");
-    let drained = session.queue().drain_all();
+    let drained = session.queue().drain_all_sync();
     assert!(drained.is_empty(), "不应再注入");
 }
 
@@ -386,5 +389,5 @@ async fn todo_steering_without_execution_identity_is_rejected() {
     assert!(
         matches!(result, Err(AgentError::MiddlewareError { reason, .. }) if reason.contains("execution binding"))
     );
-    assert!(state.v2_queue().is_empty());
+    assert!(state.v2_queue().is_empty_sync());
 }

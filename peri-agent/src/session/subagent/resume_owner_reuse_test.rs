@@ -64,7 +64,7 @@ async fn test_resume_suppresses_stop_intent_from_previous_execution() {
         None,
         serde_json::json!({}),
     );
-    owner.queue.push(
+    owner.queue.push_sync(
         QueuedMessage::system_reminder(
             crate::session::MessageKind::Info,
             MessageSource::HookStopIntent,
@@ -74,7 +74,7 @@ async fn test_resume_suppresses_stop_intent_from_previous_execution() {
             previous_execution,
         )),
     );
-    owner.queue.push(QueuedMessage::prompt(
+    owner.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("resume without old stop"),
     ));
@@ -107,7 +107,7 @@ async fn test_resume_suppresses_stop_intent_from_previous_execution() {
         1,
         "旧 Stop 不得阻止 resume 新执行推理"
     );
-    assert_eq!(owner.queue.len(), 0);
+    assert_eq!(owner.queue.len_sync(), 0);
     assert_eq!(
         owner.queue.suppressed_messages().len(),
         1,
@@ -150,7 +150,7 @@ async fn test_resume_factory_reuses_handoff_owner_queue_and_manager() {
         Some(store.clone()),
         None,
     );
-    owner.queue.push(QueuedMessage::prompt(
+    owner.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("late handoff context"),
     ));
@@ -168,7 +168,7 @@ async fn test_resume_factory_reuses_handoff_owner_queue_and_manager() {
     .await
     .expect("factory resume must accept the handed-off owner");
     assert_eq!(spawned.child_thread_id, thread_id);
-    assert_eq!(owner.queue.len(), 0, "恢复必须复用并消费原 owner 队列");
+    assert_eq!(owner.queue.len_sync(), 0, "恢复必须复用并消费原 owner 队列");
     assert!(
         owner.check_resume().is_ok(),
         "恢复完成后 owner 必须释放执行准入"
@@ -186,7 +186,7 @@ impl FailWithQueuedInput {
         _request: peri_model::ModelRequest,
         _cancellation: CancellationToken,
     ) -> Vec<peri_model::ModelResult<peri_model::ModelStreamEvent>> {
-        self.queue.push(crate::session::QueuedMessage::prompt(
+        self.queue.push_sync(crate::session::QueuedMessage::prompt(
             crate::session::MessageSource::UserInput,
             BaseMessage::human("未消费的失败后输入"),
         ));
@@ -331,7 +331,10 @@ async fn test_failed_model_handoff_then_resume(background: bool, fail_drain: boo
         .iter()
         .any(|task| task.task_id == "retained-shell"));
     assert!(owner.pending_receipt().is_none());
-    assert!(owner.queue.has_required(), "失败期间到达的输入必须保留");
+    assert!(
+        owner.queue.has_required_sync(),
+        "失败期间到达的输入必须保留"
+    );
     assert_eq!(child_manager.active_count(), 1);
     if fail_drain {
         assert!(owner.failure().unwrap().contains("event drain failed"));
@@ -528,10 +531,12 @@ async fn test_post_handoff_history_flush_failure(background: bool) {
         child_owner: Some(owner.clone()),
         ..Default::default()
     });
-    child.queue().push(crate::session::QueuedMessage::prompt(
-        crate::session::MessageSource::UserInput,
-        BaseMessage::human("开始执行"),
-    ));
+    child
+        .queue()
+        .push_sync(crate::session::QueuedMessage::prompt(
+            crate::session::MessageSource::UserInput,
+            BaseMessage::human("开始执行"),
+        ));
     let built = build_v2_subagent_context(
         Some(child.clone()),
         Box::new(FailingReactLlm),
@@ -547,7 +552,19 @@ async fn test_post_handoff_history_flush_failure(background: bool) {
         None,
         Some(agent_id_from_child_thread(&child_id)),
     );
-    let (entered, release) = store.gate_next_reminder_append();
+    // 交接提醒的持久化门：flush 已成功、提醒尚未写入时暂停，
+    // 让用例在「canonical 提交」与「后续 flush 失败」之间插入观察。
+    let (entered, release) = {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *store.reminder_append_gate.lock().unwrap() =
+            Some(crate::session::test_resources::mock::ResumeLoadGate {
+                entered: entered_tx,
+                release: release_rx,
+                dropped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            });
+        (entered_rx, release_tx)
+    };
     let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
     let finished_tx = parking_lot::Mutex::new(Some(finished_tx));
     let deregister: crate::session::factory::DeregisterRuntimeFn = Arc::new(move |_| {
@@ -568,6 +585,7 @@ async fn test_post_handoff_history_flush_failure(background: bool) {
             None,
             None,
             Some(store.clone()),
+            None,
             Some(deregister),
             None,
             None,
@@ -628,7 +646,7 @@ async fn test_post_handoff_history_flush_failure(background: bool) {
             shell_output: None,
         }
     ));
-    child.queue().drain_all();
+    child.queue().drain_all_sync();
     let writer = child.transcript().read().persist_tx_handle().unwrap();
     child.transcript().read().shutdown_persistence();
     tokio::time::timeout(Duration::from_secs(10), writer.closed())
@@ -647,7 +665,7 @@ async fn test_post_handoff_history_flush_failure(background: bool) {
     assert!(owner.receipt().is_some(), "交接必须先于后续 flush 失败提交");
     assert!(owner.pending_receipt().is_none());
     assert_eq!(child_manager.active_count(), 0);
-    assert!(!owner.queue.has_required());
+    assert!(!owner.queue.has_required_sync());
     assert_eq!(
         owner.failure().as_deref(),
         Some("child history flush is unconfirmed")
@@ -763,7 +781,7 @@ async fn test_failed_without_receipt_resume(background: bool, late_obligations: 
                     kill: Some(Box::new(|| {})),
                 })
                 .unwrap();
-            late_queue.push(crate::session::QueuedMessage::prompt(
+            late_queue.push_sync(crate::session::QueuedMessage::prompt(
                 crate::session::MessageSource::UserInput,
                 BaseMessage::human("结算期间到达的输入"),
             ));
@@ -816,7 +834,7 @@ async fn test_failed_without_receipt_resume(background: bool, late_obligations: 
         return;
     }
     assert_eq!(child_manager.active_count(), 1);
-    assert!(owner.queue.has_required());
+    assert!(owner.queue.has_required_sync());
     assert_eq!(
         owner.failure().as_deref(),
         Some("child settlement is unconfirmed after execution failure")

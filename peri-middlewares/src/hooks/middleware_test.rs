@@ -853,9 +853,9 @@ async fn test_stop_block_continue_sets_block_continue_field() {
 
     let result = mw.after_agent(&mut state, &output).await.unwrap();
     assert!(result.block_continue.is_some());
-    assert!(session.queue().has_required_for_run(&execution));
-    assert!(!session.queue().has_ensure_processing());
-    let drained = session.queue().drain_all();
+    assert!(session.queue().has_required_for_run_sync(&execution));
+    assert!(!session.queue().has_ensure_processing_sync());
+    let drained = session.queue().drain_all_sync();
     assert_eq!(drained.len(), 1);
     assert_eq!(drained[0].kind, peri_agent::session::MessageKind::Defer);
     assert_eq!(
@@ -906,7 +906,7 @@ async fn stop_block_without_execution_identity_is_rejected() {
     assert!(
         matches!(result, Err(AgentError::MiddlewareError { reason, .. }) if reason.contains("execution binding"))
     );
-    assert!(state.v2_queue().is_empty());
+    assert!(state.v2_queue().is_empty_sync());
 }
 
 #[tokio::test]

@@ -140,10 +140,12 @@ async fn fixture(
             .with_persistence(bound.resources(), bound.thread_id.clone());
         guard.append(BaseMessage::human("Keep the API unchanged."));
     }
-    session.queue().push(crate::session::QueuedMessage::prompt(
-        crate::session::MessageSource::UserInput,
-        BaseMessage::human("Continue the task."),
-    ));
+    session
+        .queue()
+        .push_sync(crate::session::QueuedMessage::prompt(
+            crate::session::MessageSource::UserInput,
+            BaseMessage::human("Continue the task."),
+        ));
     let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let tools: SharedToolMap = Arc::new(parking_lot::RwLock::new(BTreeMap::from([
         (

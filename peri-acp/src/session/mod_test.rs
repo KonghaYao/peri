@@ -423,7 +423,12 @@ async fn test_cron_bridge_survives_turn_error() {
     assert_eq!(request.session_id, session_id);
     assert_eq!(request.trigger.task_id, task_id);
     assert_eq!(request.trigger.prompt, "turn-error-survival");
-    assert!(mgr.v2_queue_for(session_id).unwrap().is_empty());
+    assert!(mgr
+        .v2_queue_for(session_id)
+        .unwrap()
+        .is_empty()
+        .await
+        .expect("test MQ len"));
 
     mgr.close_session(session_id).await.unwrap();
 }
@@ -455,7 +460,12 @@ async fn test_cron_bridge_idle_trigger_forwards_continuation_without_early_enque
     assert_eq!(request.session_id, session_id);
     assert_eq!(request.trigger.task_id, task_id);
     assert_eq!(request.trigger.prompt, "idle-survival");
-    assert!(mgr.v2_queue_for(session_id).unwrap().is_empty());
+    assert!(mgr
+        .v2_queue_for(session_id)
+        .unwrap()
+        .is_empty()
+        .await
+        .expect("test MQ len"));
 
     mgr.close_session(session_id).await.unwrap();
 }

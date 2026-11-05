@@ -19,7 +19,7 @@ use peri_acp_types::session_resources::{
     SessionMetaPatch, SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
 };
 use peri_acp_types::store::MessageFlags;
-use peri_acp_types::thread::ThreadId;
+use peri_acp_types::thread::{ThreadId, WorkState};
 use peri_acp_types::workspace::{ResolvedWorkspace, SessionBinding, WorkspaceError};
 
 use crate::sessions::data::ensure_child_relation;
@@ -361,6 +361,69 @@ impl RemoteSessionData {
             Some(0) => Err(not_found()),
             Some(_) => Err(corrupt(
                 "session metadata update did not apply to exactly one row",
+            )),
+        }
+    }
+
+    /// 写入 durable 工作意图：单列更新，不碰 `updated_at`。
+    pub(super) async fn write_work_state(
+        &self,
+        id: &ThreadId,
+        state: WorkState,
+    ) -> SessionResourceResult<()> {
+        let inputs = vec![
+            format!("id:{}", id.as_str()),
+            format!("work_state:{}", state.as_str()),
+        ];
+        self.commit_single_row_effect(
+            "set_work_state",
+            &inputs,
+            vec![session_sql::work_state_statement(id, state)],
+            id,
+        )
+        .await
+    }
+
+    /// 写入上下文占用快照：单列更新，`None` 写 NULL，不碰 `updated_at`。
+    pub(super) async fn write_context_usage(
+        &self,
+        id: &ThreadId,
+        tokens: Option<u64>,
+    ) -> SessionResourceResult<()> {
+        let inputs = vec![
+            format!("id:{}", id.as_str()),
+            format!(
+                "context_usage_tokens:{}",
+                tokens.map_or(String::from("null"), |tokens| tokens.to_string())
+            ),
+        ];
+        self.commit_single_row_effect(
+            "set_context_usage",
+            &inputs,
+            vec![session_sql::context_usage_statement(id, tokens)?],
+            id,
+        )
+        .await
+    }
+
+    /// 一次「资格先于效果」的单行写入，效果必须恰好命中一行。
+    async fn commit_single_row_effect(
+        &self,
+        behavior: &str,
+        inputs: &[String],
+        statements: Vec<StatementSpec>,
+        id: &ThreadId,
+    ) -> SessionResourceResult<()> {
+        let counts = self
+            .commit_effects(behavior, inputs, statements, id)
+            .await?;
+        match counts.first() {
+            // 重放：原操作已生效，效果落在第一次提交里。
+            None => Ok(()),
+            Some(1) => Ok(()),
+            Some(0) => Err(not_found()),
+            Some(_) => Err(corrupt(
+                "single-row session write matched more than one row",
             )),
         }
     }

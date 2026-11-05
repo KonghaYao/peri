@@ -21,6 +21,7 @@ pub(crate) mod bg_task_status;
 pub(crate) mod child_run_routing;
 pub(crate) mod clipboard;
 pub(crate) mod config_service;
+pub(crate) mod context_usage;
 pub mod diff_parser;
 pub mod entry;
 pub(crate) mod entry_render_cache;
@@ -78,6 +79,9 @@ pub mod tool_semantics;
 pub mod tui_render_unit;
 pub mod ui_command;
 pub mod welcome;
+
+/// 服务端恢复准备失败且该会话不可执行时，`session/prompt` 的确定性拒绝码。
+pub(crate) const RECOVERY_EXECUTION_BLOCKED_CODE: i64 = -32017;
 pub mod workflow_snapshot;
 
 // Phase 3: 导出布局组件

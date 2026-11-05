@@ -214,6 +214,10 @@ pub struct PromptResult {
     /// turn 退出时仍未结算的后台任务数（§7.3 有界等待摘要）。
     /// `0` = 无未结算任务，宿主不在 ACP 响应上附加 pending 标记。
     pub pending_tasks: u32,
+    /// 最近一次有效上下文占用（token）；`None` = 本次取不到有效值。
+    ///
+    /// 它是最后提交的展示快照，不是下一次请求的精确 usage。
+    pub context_usage_tokens: Option<u64>,
 }
 
 impl Default for PromptResult {
@@ -231,6 +235,7 @@ impl Default for PromptResult {
             persistence_inconsistent: true,
             recall_items: Vec::new(),
             pending_tasks: 0,
+            context_usage_tokens: None,
             failure: Some(ExecutionFailure::missing_result()),
         }
     }

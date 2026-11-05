@@ -255,8 +255,8 @@ fn test_before_model_pushes_info_messages() {
     let mut state = TestMiddlewareState::new();
 
     // 空缓冲：无消息
-    mw.push_status_changes(&mut state);
-    assert!(state.queue.drain_all().is_empty(), "空缓冲不应推送");
+    futures::executor::block_on(mw.push_status_changes(&mut state));
+    assert!(state.queue.drain_all_sync().is_empty(), "空缓冲不应推送");
 
     // 两条变化 + 首条附 tool search 提示
     pool.clients
@@ -268,8 +268,8 @@ fn test_before_model_pushes_info_messages() {
     }
     pool.record_status_change("github", Some(&ClientStatus::Connected));
 
-    mw.push_status_changes(&mut state);
-    let drained = state.queue.drain_all();
+    futures::executor::block_on(mw.push_status_changes(&mut state));
+    let drained = state.queue.drain_all_sync();
     let texts: Vec<String> = drained
         .iter()
         .map(|m| match &m.payload {
@@ -297,8 +297,8 @@ fn test_before_model_pushes_info_messages() {
     );
 
     // 缓冲已 drain：再次调用无操作
-    mw.push_status_changes(&mut state);
-    assert!(state.queue.drain_all().is_empty(), "缓冲恰好一次");
+    futures::executor::block_on(mw.push_status_changes(&mut state));
+    assert!(state.queue.drain_all_sync().is_empty(), "缓冲恰好一次");
 
     // 队列内消息均为 canonical Info + Lifecycle/MCP mapping
     for msg in &drained {
@@ -335,10 +335,10 @@ fn test_tool_search_hint_once_per_instance() {
             .write()
             .insert("github".to_string(), make_connected_handle("github", 1));
         pool.record_status_change("github", Some(&ClientStatus::Disconnected));
-        mw.push_status_changes(&mut state);
+        futures::executor::block_on(mw.push_status_changes(&mut state));
         let texts: Vec<String> = state
             .queue
-            .drain_all()
+            .drain_all_sync()
             .iter()
             .map(|m| match &m.payload {
                 peri_agent::session::QueuedPayload::SystemReminder(reminder) => {

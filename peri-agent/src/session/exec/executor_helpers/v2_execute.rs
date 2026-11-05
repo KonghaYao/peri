@@ -275,17 +275,56 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // 「继续」按钮一点就停且无模型调用）。空 human 不写入 transcript
     // （append_messages_to_transcript 跳过空 Prompt），也不产生空 user 气泡。
     // continuation（含队列交接路径）不 push——其输入经 mailbox handoff 入队。
-    if !req.continuation {
-        v2_out.context.session.queue.push(QueuedMessage::prompt(
-            V2MessageSource::UserInput,
-            BaseMessage::human(req.agent_input.content.clone()),
-        ));
-    }
-
     let input_ticket = req
         .user_input_mailbox
         .as_ref()
         .and_then(|mailbox| mailbox.active_run_ticket());
+    if !req.continuation {
+        if let Err(error) = v2_out
+            .context
+            .session
+            .queue
+            .enqueue_sent(QueuedMessage::prompt(
+                V2MessageSource::UserInput,
+                BaseMessage::human(req.agent_input.content.clone()),
+            ))
+            .await
+        {
+            // 初始指令没有进入 MQ：本轮不得继续跑并报告 Completed。
+            error!(session_id = %req.session_id, %error, "initial prompt enqueue failed");
+            let failure = ExecutionFailure::internal(format!(
+                "Initial prompt could not be admitted to the thread MQ: {error}"
+            ));
+            let source = UnstampedEvent::new(
+                String::new(),
+                String::new(),
+                None,
+                EventDeliveryClass::Critical,
+            );
+            req.publisher.publish_event(
+                &req.session_id,
+                &source,
+                ExecutorEvent::AgentExecutionFailed {
+                    message: failure.public_message.clone(),
+                },
+            );
+            if let (Some(mailbox), Some(ticket)) = (&req.user_input_mailbox, &input_ticket) {
+                mailbox.record_attempt_outcome(
+                    ticket,
+                    crate::session::user_input_mailbox::UserInputAttemptOutcome::Failed,
+                );
+            }
+            return ExecOutcome {
+                ok: false,
+                stop_reason: PromptStopReason::EndTurn,
+                failure: Some(failure),
+                history_replaced_by_compaction: false,
+                persisted_payloads: req.history_payloads,
+                persistence_inconsistent: false,
+                agent_state: AgentState::new(&req.cwd),
+            };
+        }
+    }
 
     // Phase 2: bg event pump（复用 V2AgentOutput.bg_event_rx）
     // 事件三层化：发射点统一经 `EventPublisher`（身份：v2 循环 turn_id / 主
@@ -460,11 +499,19 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         {
             Ok(reminders) if !reminders.is_empty() => {
                 for text in reminders {
-                    v2_out.context.session.queue.push(QueuedMessage::new(
-                        MessageKind::Info,
-                        V2MessageSource::SystemInjected,
-                        BaseMessage::human(text),
-                    ));
+                    if let Err(error) = v2_out
+                        .context
+                        .session
+                        .queue
+                        .enqueue(QueuedMessage::new(
+                            MessageKind::Info,
+                            V2MessageSource::SystemInjected,
+                            BaseMessage::human(text),
+                        ))
+                        .await
+                    {
+                        tracing::warn!(%error, "first turn reminder enqueue failed");
+                    }
                 }
             }
             Ok(_) => {}
@@ -528,7 +575,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
         LoopResult::Completed | LoopResult::HookStopped { .. }
     ) {
         let queue = v2_out.session.queue();
-        if queue.has_ensure_processing() {
+        if queue.has_ensure_processing().await.unwrap_or(false) {
             if let Some(ref tx) = req.continuation_notify {
                 let _ = tx.send(crate::session::exec::executor::ContinuationRequest {
                     session_id: req.session_id.clone(),
@@ -536,9 +583,10 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                     mq_steering: true,
                     pending_result: false,
                 });
+                let queue_len = queue.len().await.unwrap_or(0);
                 tracing::debug!(
                     session_id = %req.session_id,
-                    queue_len = queue.len(),
+                    queue_len,
                     "[v2] MQ steering continuation notified after run_react_loop"
                 );
             }

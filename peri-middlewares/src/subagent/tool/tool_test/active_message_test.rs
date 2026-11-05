@@ -294,6 +294,7 @@ async fn test_active_message_background_fork_defer_extends_final_answer() {
     assert!(fixture
         .manager
         .send_subagent_message(&id, Some("late"))
+        .await
         .unwrap()
         .is_none());
 }
@@ -435,8 +436,12 @@ async fn test_active_message_panic_revokes_before_runtime_deregistration() {
         let tx = tx.clone();
         let cleanup_manager = host_callback_manager.clone();
         Arc::new(move |thread_id| {
-            tx.send(matches!(
+            // DeregisterRuntimeFn 是同步回调：block_on 只观察收件箱关闭态。
+            let outcome = futures::executor::block_on(
                 cleanup_manager.send_subagent_message(thread_id, Some("cleanup message")),
+            );
+            tx.send(matches!(
+                outcome,
                 Err(peri_agent::agent::async_tasks::SubagentMessageError::Closed)
             ))
             .unwrap();
@@ -470,8 +475,12 @@ async fn test_active_message_panic_revokes_before_runtime_deregistration() {
             let tx = tx.clone();
             let cleanup_manager = cleanup_manager.clone();
             Arc::new(move |thread_id| {
-                tx.send(matches!(
+                // DeregisterRuntimeFn 是同步回调：block_on 只观察收件箱关闭态。
+                let outcome = futures::executor::block_on(
                     cleanup_manager.send_subagent_message(thread_id, Some("cleanup message")),
+                );
+                tx.send(matches!(
+                    outcome,
                     Err(peri_agent::agent::async_tasks::SubagentMessageError::Closed)
                 ))
                 .unwrap();

@@ -43,6 +43,10 @@ mod acp_mcp_loop_tests;
 #[path = "activation_test.rs"]
 mod activation_tests;
 
+/// 进入会话时的恢复：准备、去重、Stop、实例复用、启动门与 wire 顺序。
+#[path = "recovery_test.rs"]
+mod recovery_tests;
+
 #[path = "requests_mcp_control_test.rs"]
 mod mcp_control_tests;
 
@@ -217,6 +221,23 @@ pub(in crate::host) async fn build_server_config(
         session_manager,
         stdio_command_filter: false,
     }
+}
+
+/// 真实 `ServerLoop` 夹具共用的恢复协调器：与生产构造同形（同一门面 / 同一队列）。
+pub(in crate::host) fn recovery_for(
+    cfg: &Arc<AcpServerConfig>,
+    sessions: &crate::host::SharedSessions,
+    cont_tx: &Arc<
+        tokio::sync::mpsc::UnboundedSender<crate::session::executor::ContinuationRequest>,
+    >,
+) -> crate::host::recovery::HostSessionRecovery {
+    crate::host::recovery::HostSessionRecovery::new(
+        Arc::clone(&cfg.session_resources),
+        cfg.session_manager.clone(),
+        Arc::clone(sessions),
+        Arc::clone(cfg),
+        Arc::clone(cont_tx),
+    )
 }
 
 /// 夹具建一条**已绑定**会话：门面一次保存 binding/frozen。

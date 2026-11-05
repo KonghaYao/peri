@@ -32,7 +32,24 @@ use peri_acp_types::{messages::BaseMessage, store::PersistedPayload};
 ///
 /// 12 是 inherited 派生索引这一代：只新增两张**派生**表（可从 inherited 信封重建），
 /// 11 的 canonical 形状与数据原样保留。
-pub(super) const CURRENT_SCHEMA_VERSION: i64 = 12;
+///
+/// 13 是 Thread MQ 这一代：只新增 `thread_mq` 与其排序索引，12 的形状与数据原样保留
+/// （见 `docs/design/thread-mq.md` §3）。
+///
+/// 14 是工作意图与上下文占用快照这一代：`threads` 只新增 `work_state` 与
+/// `context_usage_tokens` 两列（见 `docs/design/session-durability.md` §2）；旧行升级后
+/// 分别是 `idle` 与 `NULL`，旧 `agent_status = 'active'` 不构成自动续跑资格。
+pub(super) const CURRENT_SCHEMA_VERSION: i64 = 14;
+
+/// 上一代当前形状（Thread MQ 已就位、还没有两列工作快照）的版本号。
+///
+/// 只作为升级来源：写打开按 v14 的增量列幂等补齐并推进到 14。
+pub(super) const PREVIOUS_CURRENT_SCHEMA_VERSION: i64 = 13;
+
+/// 再上一代当前形状（inherited 派生索引已就位、还没有 `thread_mq`）的版本号。
+///
+/// 同样只作为升级来源：写打开先补 `thread_mq`，再补两列工作快照。
+pub(super) const LEGACY_CURRENT_SCHEMA_VERSION: i64 = 12;
 
 /// 压缩前登记形状使用的版本号（历史事实，不随当前版本推进）。
 pub(super) const LEGACY_REGISTRATION_SCHEMA_VERSION: i64 = 11;
@@ -64,6 +81,12 @@ pub(super) const INHERITED_SNAPSHOT_INDEX_TABLE: &str = "inherited_snapshot_inde
 /// inherited 派生索引的逐 payload 定位。
 pub(super) const INHERITED_PAYLOAD_INDEX_TABLE: &str = "inherited_payload_index";
 
+/// Thread MQ：每个 thread 尚未移交的消息（`docs/design/thread-mq.md` §3）。
+///
+/// 只保存待发事实：没有终态、撤回墓碑、消费留档、`seq`、展示状态或执行状态列。
+/// 移交/取消/清理一律物理删除行。
+pub(super) const THREAD_MQ_TABLE: &str = "thread_mq";
+
 /// 压缩前形状独有的执行环境表；当前形状不再有它（迁移完成后删除）。
 pub(super) const SESSION_ENVIRONMENTS_TABLE: &str = "session_environments";
 pub(super) const OAUTH_CREDENTIALS_TABLE: &str = "mcp_oauth_credentials";
@@ -90,6 +113,7 @@ pub(super) const CANONICAL_TABLES: &[&str] = &[
     SESSION_CLOSE_INTENTS_TABLE,
     INHERITED_SNAPSHOT_INDEX_TABLE,
     INHERITED_PAYLOAD_INDEX_TABLE,
+    THREAD_MQ_TABLE,
 ];
 
 /// 迁移输入形状（正式基线 ≤10）的表清单：建表预检与补齐按它判定。
@@ -198,6 +222,9 @@ pub(super) const CREATE_WORKSPACES_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS
     UNIQUE(machine_id, path)
 )";
 /// 会话事实表：归属由 `workspace_id` 唯一表达。
+///
+/// v14 的两个新列只能追加在末尾：旧库按同一列序 `ALTER TABLE ADD COLUMN` 补齐，形状判定
+/// （`schema_shape`）对列序列逐项比对，迁移终点因此必须与新建库同形。
 pub(super) const CREATE_THREADS_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS threads (
     id TEXT PRIMARY KEY, title TEXT, cwd TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL, message_count INTEGER NOT NULL DEFAULT 0,
@@ -205,8 +232,27 @@ pub(super) const CREATE_THREADS_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS th
     cancel_policy TEXT NOT NULL DEFAULT 'cascade', config TEXT,
     frozen_context TEXT, inherited_context TEXT, agent_status TEXT NOT NULL DEFAULT 'active',
     workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-    archived BOOLEAN NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))
+    archived BOOLEAN NOT NULL DEFAULT 0 CHECK(archived IN (0, 1)),
+    context_usage_tokens INTEGER
+        CHECK(context_usage_tokens IS NULL OR context_usage_tokens >= 0),
+    work_state TEXT NOT NULL DEFAULT 'idle'
+        CHECK(work_state IN ('idle', 'working', 'stopped'))
 )";
+
+/// v14 相对 v13 的 `threads` 增量列（名称与列定义）；本机与远端迁移共用同一份文本。
+///
+/// `context_usage_tokens` 允许 NULL（未知不是零占用）；`work_state` 的非空默认值让旧行
+/// 升级后落在 `idle`，不会因为旧 `agent_status` 被批量唤醒。
+pub(super) const THREADS_V14_COLUMNS: &[(&str, &str)] = &[
+    (
+        "context_usage_tokens",
+        "INTEGER CHECK(context_usage_tokens IS NULL OR context_usage_tokens >= 0)",
+    ),
+    (
+        "work_state",
+        "TEXT NOT NULL DEFAULT 'idle' CHECK(work_state IN ('idle', 'working', 'stopped'))",
+    ),
+];
 /// 绑定表：workspace 归属由 `threads.workspace_id` 唯一表达，绑定行只保存自己的
 /// 不可变执行证据。没有指向归属表的外键——归属关系不靠外键维护（两端都不强制）。
 pub(super) const CREATE_BINDINGS_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS session_bindings (
@@ -251,6 +297,7 @@ pub(super) const CREATE_TABLES: &[&str] = &[
     CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL,
     CREATE_INHERITED_SNAPSHOT_INDEX_TABLE_SQL,
     CREATE_INHERITED_PAYLOAD_INDEX_TABLE_SQL,
+    CREATE_THREAD_MQ_TABLE_SQL,
 ];
 
 /// 显式关闭已接纳的持久事实；不保存异步任务目录。
@@ -292,6 +339,32 @@ pub(super) const CREATE_INHERITED_INDEX_TABLES: &[&str] = &[
     CREATE_INHERITED_PAYLOAD_INDEX_TABLE_SQL,
 ];
 
+/// Thread MQ 表：每个 thread 尚未移交的消息。
+///
+/// `PRIMARY KEY(thread_id, id)` 表达「行属于 thread」，`UNIQUE(id)` 让同一稳定消息 ID
+/// 在整个库里只有一个待发副本——跨 thread 的同 ID 复用因此是真实的身份冲突，而不是
+/// 两个各自合法的队列项。`REFERENCES threads(id)` 与其余 canonical 表同源：本机是级联
+/// 安全网，远端执行器不强制外键，两端都按 [`THREAD_CHILD_DELETES`] 显式删子行。
+///
+/// `STRICT` 把这四类列的取值钉在声明类型上：JSON 与时间戳都是按列契约写入的文本，
+/// 类型漂移（数字时间戳、BLOB payload）会让读取端解码错误而不是静默容忍。
+pub(super) const CREATE_THREAD_MQ_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS thread_mq (
+    thread_id TEXT NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+    id TEXT NOT NULL,
+    enqueued_at TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    source TEXT NOT NULL,
+    policy_json TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    original_draft TEXT,
+    PRIMARY KEY(thread_id, id),
+    UNIQUE(id)
+) STRICT";
+
+/// 消费顺序键 `(enqueued_at, id)` 的覆盖索引：`mq_query` 的排序与 `after` 过滤都走它。
+pub(super) const CREATE_THREAD_MQ_ORDER_INDEX_SQL: &str =
+    "CREATE INDEX IF NOT EXISTS idx_thread_mq_order ON thread_mq(thread_id, enqueued_at, id)";
+
 /// 索引语句：必须在建表**与旧库补列之后**执行（`idx_threads_updated` 引用后补的列）。
 pub(super) const CREATE_INDEXES: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_messages_thread_id ON messages(thread_id)",
@@ -308,6 +381,8 @@ pub(super) const CREATE_INDEXES: &[&str] = &[
     "CREATE INDEX IF NOT EXISTS idx_messages_active ON messages(thread_id, excluded)",
     // 派生索引按线程定位快照；payload 行的查询键 `(snapshot_id, ordinal)` 由主键覆盖。
     "CREATE INDEX IF NOT EXISTS idx_inherited_snapshot_thread ON inherited_snapshot_index(thread_id)",
+    // MQ 读取与 `after` 水位过滤的唯一排序键。
+    CREATE_THREAD_MQ_ORDER_INDEX_SQL,
 ];
 
 /// 迁移期重建 `threads` 的暂存表（`threads_rebuild`）：`workspace_id` 必须落在 **NOT NULL**
@@ -325,15 +400,19 @@ pub(super) const CREATE_REBUILD_THREADS_TABLE_SQL: &str = "CREATE TABLE threads_
     cancel_policy TEXT NOT NULL DEFAULT 'cascade', config TEXT,
     frozen_context TEXT, inherited_context TEXT, agent_status TEXT NOT NULL DEFAULT 'active',
     workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-    archived BOOLEAN NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))
+    archived BOOLEAN NOT NULL DEFAULT 0 CHECK(archived IN (0, 1)),
+    context_usage_tokens INTEGER
+        CHECK(context_usage_tokens IS NULL OR context_usage_tokens >= 0),
+    work_state TEXT NOT NULL DEFAULT 'idle'
+        CHECK(work_state IN ('idle', 'working', 'stopped'))
 )";
 
 /// 重建搬运：`threads` → 暂存表（列清单与当前 `threads` 形状一致，由
 /// `schema_shape_test::rebuild_statements_carry_the_canonical_threads_columns` 断言）。
-pub(super) const INSERT_THREADS_INTO_REBUILD_SQL: &str = "INSERT INTO threads_rebuild (id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status, workspace_id, archived) SELECT id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status, workspace_id, archived FROM threads";
+pub(super) const INSERT_THREADS_INTO_REBUILD_SQL: &str = "INSERT INTO threads_rebuild (id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status, workspace_id, archived, context_usage_tokens, work_state) SELECT id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status, workspace_id, archived, context_usage_tokens, work_state FROM threads";
 
 /// 重建搬运：新建的 `threads` ← 暂存表（列清单同上）。
-pub(super) const INSERT_REBUILD_INTO_THREADS_SQL: &str = "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status, workspace_id, archived) SELECT id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status, workspace_id, archived FROM threads_rebuild";
+pub(super) const INSERT_REBUILD_INTO_THREADS_SQL: &str = "INSERT INTO threads (id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status, workspace_id, archived, context_usage_tokens, work_state) SELECT id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status, workspace_id, archived, context_usage_tokens, work_state FROM threads_rebuild";
 
 pub(super) const SELECT_OAUTH_CREDENTIAL_SQL: &str = "SELECT credentials_blob FROM mcp_oauth_credentials WHERE principal_id = ?1 AND workspace_id = ?2 AND server_key = ?3";
 pub(super) const UPSERT_OAUTH_CREDENTIAL_SQL: &str = "INSERT INTO mcp_oauth_credentials(principal_id, workspace_id, server_key, credentials_blob, updated_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(principal_id, workspace_id, server_key) DO UPDATE SET credentials_blob = excluded.credentials_blob, updated_at = excluded.updated_at";
@@ -355,6 +434,7 @@ pub(super) const THREAD_CHILD_DELETES: &[(&str, &str)] = &[
         "session_close_intents",
         "DELETE FROM session_close_intents WHERE thread_id = ?1",
     ),
+    (THREAD_MQ_TABLE, DELETE_THREAD_MQ_BY_THREAD_SQL),
 ];
 
 /// 删除一条 `threads` 行之前清理的**派生**表：子表名 + 语句。
@@ -392,6 +472,10 @@ pub(super) const DELETE_MESSAGES_BY_THREAD_SQL: &str = "DELETE FROM messages WHE
 /// 删除一个会话的不可变绑定行。
 pub(super) const DELETE_BINDINGS_BY_THREAD_SQL: &str =
     "DELETE FROM session_bindings WHERE thread_id = ?1";
+
+/// 删除一个会话的全部待发 MQ 行（thread 删除与 rewind 共用）。
+pub(super) const DELETE_THREAD_MQ_BY_THREAD_SQL: &str =
+    "DELETE FROM thread_mq WHERE thread_id = ?1";
 
 /// 删除 `threads` 行本身；只在 [`THREAD_CHILD_DELETES`] 之后执行（先子后父）。
 pub(super) const DELETE_THREAD_ROW_SQL: &str = "DELETE FROM threads WHERE id = ?1";

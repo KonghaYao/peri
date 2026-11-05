@@ -166,6 +166,16 @@ pub(super) async fn migrate_shape(connection: &mut SqliteConnection) -> Result<(
             .execute(&mut *connection)
             .await?;
     }
+    // v14 的两列工作快照也赶在重建之前补上：重建语句按当前形状逐列搬运，输入形状
+    // （≤10 / 登记形状）本来不含这两列。旧行取 `idle` 与 NULL，不唤醒历史会话。
+    for (name, definition) in canonical::THREADS_V14_COLUMNS {
+        // 标识符和列定义来自 `canonical` 的静态清单，未包含外部输入。
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "ALTER TABLE threads ADD COLUMN {name} {definition}"
+        )))
+        .execute(&mut *connection)
+        .await?;
+    }
     rebuild_threads(connection).await?;
 
     sqlx::query(canonical::CREATE_BINDINGS_TABLE_SQL)
@@ -208,6 +218,10 @@ pub(super) async fn migrate_shape(connection: &mut SqliteConnection) -> Result<(
             .execute(&mut *connection)
             .await?;
     }
+    // MQ 表属于当前形状的必需表（13）：搬运终点与新建库下发同一份 DDL。
+    sqlx::query(canonical::CREATE_THREAD_MQ_TABLE_SQL)
+        .execute(&mut *connection)
+        .await?;
     // 迁移终点必须带齐 canonical 索引集：`DROP TABLE` 会把旧表上的索引一并删掉，而输入库
     // 也可能本来就缺索引（`user_version` 已是 11 的开发期库）。整表重放一次是幂等的，
     // 也是「一个 schema、两种执行器」在索引上的同一份语句（远端批次末尾同样整表重放）。

@@ -18,7 +18,7 @@ use peri_acp_types::session_resources::{
     SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, InheritedContext, MessageFlags, PersistedPayload};
-use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
+use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta, WorkState};
 use peri_acp_types::workspace::{
     ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding, WorkspaceError,
     SESSION_BINDING_VERSION,
@@ -136,14 +136,9 @@ pub(crate) struct MockSessionResources {
     pub(crate) inherited_load_gate: Mutex<Option<ResumeLoadGate>>,
     pub(crate) flags_load_gate: Mutex<Option<ResumeLoadGate>>,
     pub(crate) active_write_gate: Mutex<Option<ResumeLoadGate>>,
+    /// 交接提醒的持久化门：让用例在「flush 已成功、提醒尚未写入」之间观察。
+    pub(crate) reminder_append_gate: Mutex<Option<ResumeLoadGate>>,
     pub(crate) archive_probe_gate: Mutex<Option<ResumeLoadGate>>,
-    /// 下一次 canonical reminder 提交的阶段门：进入后等待用例放行。
-    reminder_append_gate: Mutex<
-        Option<(
-            tokio::sync::oneshot::Sender<()>,
-            tokio::sync::oneshot::Receiver<()>,
-        )>,
-    >,
     /// 认领事实：`claim_child_resume` 成功返回后置位，结清时复位。
     ///
     /// 阶段门（[`ResumeLoadGate`]）只在**认领后**的快照读取生效：resume 的第一次读取是
@@ -161,6 +156,16 @@ pub(crate) struct MockSessionResources {
     history_read_only: AtomicBool,
     /// 单次 compaction 成功写入替身数据区后、返回前触发（测试精确取消时序用）。
     compaction_applied_hook: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    /// MQ 行事实：替身也必须提供持久收件箱，Receive 才能像生产路径一样原子移交。
+    ///
+    /// 提交后的载荷同步写回本区 `payloads`，让 `load_session_history` 与 MQ 看到同一份事实。
+    mq: peri_acp_types::session::InMemoryMqStore,
+    /// 故障注入：置位后所有 MQ 入队返回内部错误（验证启动路径不得吞掉接纳失败）。
+    mq_enqueue_failure: AtomicBool,
+    /// 故障注入：置位后历史查询返回内部错误（验证 `Unknown` 不得被当作不存在）。
+    mq_history_failure: AtomicBool,
+    /// `enqueued_at` 生成器：同一进程内单调递增，测试不依赖真实时钟。
+    mq_clock: Mutex<u64>,
 }
 
 impl MockSessionResources {
@@ -178,19 +183,33 @@ impl MockSessionResources {
             inherited_load_gate: Mutex::new(None),
             flags_load_gate: Mutex::new(None),
             active_write_gate: Mutex::new(None),
-            archive_probe_gate: Mutex::new(None),
             reminder_append_gate: Mutex::new(None),
+            archive_probe_gate: Mutex::new(None),
             claimed: Arc::new(AtomicBool::new(false)),
             fail_snapshot_at: AtomicUsize::new(0),
             snapshot_reads: AtomicUsize::new(0),
             history_read_only: AtomicBool::new(false),
             compaction_applied_hook: Mutex::new(None),
+            mq: peri_acp_types::session::InMemoryMqStore::new(),
+            mq_enqueue_failure: AtomicBool::new(false),
+            mq_history_failure: AtomicBool::new(false),
+            mq_clock: Mutex::new(0),
         })
     }
 
     /// 注册一次 compaction 已写入后的回调；回调在成功返回前执行一次。
     pub(crate) fn on_compaction_applied(&self, hook: impl Fn() + Send + Sync + 'static) {
         *self.compaction_applied_hook.lock().unwrap() = Some(Box::new(hook));
+    }
+
+    /// 故障注入：让后续 MQ 入队全部失败。
+    pub(crate) fn fail_mq_enqueues(&self) {
+        self.mq_enqueue_failure.store(true, Ordering::SeqCst);
+    }
+
+    /// 故障注入：让后续 MQ 历史查询全部失败。
+    pub(crate) fn fail_mq_history_lookup(&self) {
+        self.mq_history_failure.store(true, Ordering::SeqCst);
     }
 
     /// 当前 meta 状态序列（`(thread_id, status)`），只含真实发生变更的写入。
@@ -285,17 +304,30 @@ impl MockSessionResources {
         );
     }
 
-    /// 下一次 canonical reminder 提交进入后暂停，返回 (entered, release)。
-    pub(crate) fn gate_next_reminder_append(
-        &self,
-    ) -> (
-        tokio::sync::oneshot::Receiver<()>,
-        tokio::sync::oneshot::Sender<()>,
-    ) {
-        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
-        *self.reminder_append_gate.lock().unwrap() = Some((entered_tx, release_rx));
-        (entered_rx, release_tx)
+    /// durable 工作意图写入：只改 meta 的那一列，不进入状态序列。
+    fn write_work_state(&self, id: &ThreadId, state: WorkState) {
+        self.with_region(id, |region| {
+            let mut meta = region
+                .meta
+                .clone()
+                .unwrap_or_else(|| ThreadMeta::new_at("/test", peri_time::now_wall()));
+            meta.id = id.clone();
+            meta.work_state = state;
+            region.meta = Some(meta);
+        });
+    }
+
+    /// 上下文占用快照写入：只改 meta 的那一列。
+    fn write_context_usage(&self, id: &ThreadId, tokens: Option<u64>) {
+        self.with_region(id, |region| {
+            let mut meta = region
+                .meta
+                .clone()
+                .unwrap_or_else(|| ThreadMeta::new_at("/test", peri_time::now_wall()));
+            meta.id = id.clone();
+            meta.context_usage_tokens = tokens;
+            region.meta = Some(meta);
+        });
     }
 
     /// 切换为只读能力面（测试后端能力差异用）。

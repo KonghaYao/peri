@@ -204,6 +204,41 @@ impl Drop for McpResourceSubscription {
     }
 }
 
+/// One live peripheral (MCP-owned) task observed during recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveTask {
+    pub task_id: String,
+    /// Direct owner that started the task (session identity).
+    pub owner: Option<String>,
+    /// Provider-reported state label (`working`, `input_required`, ...).
+    pub state: String,
+}
+
+/// Result of querying live peripheral tasks for one thread.
+///
+/// `Unknown` is not an empty list: the caller must not report "no tasks" when
+/// the query could not be answered (design §6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PeripheralTasks {
+    Known(Vec<LiveTask>),
+    Unknown { detail: String },
+}
+
+impl PeripheralTasks {
+    /// Query was not answered; `detail` keeps the diagnostic cause.
+    pub fn unknown(detail: impl Into<String>) -> Self {
+        Self::Unknown {
+            detail: detail.into(),
+        }
+    }
+}
+
+impl Default for PeripheralTasks {
+    fn default() -> Self {
+        Self::unknown("peripheral task state was not queried")
+    }
+}
+
 /// MCP 客户端池端口（`peri-middlewares::mcp::McpClientPool` 实现）。
 ///
 /// 宿主装配点构造 `McpClientPool` 后 upcast 注入；ACP 协议面只传递
@@ -245,21 +280,27 @@ pub trait McpPoolPort: Send + Sync {
         &self,
         _session_id: &str,
         _inbox: crate::session::InboxHandle,
+        _queue: crate::session::MessageQueue,
         _manager: Arc<dyn crate::tasks::TaskManager>,
     ) {
     }
 
+    /// 已登记的子会话绑定：生产者句柄、同一 mailbox 与任务目录。
+    ///
+    /// `MessageQueue` 只供 owner 路径重建会话时复用同一 mailbox；生产者不得据此
+    /// 取得 Receive／清空能力。
     fn agent_session_binding(
         &self,
         _session_id: &str,
     ) -> Option<(
         crate::session::InboxHandle,
+        crate::session::MessageQueue,
         Arc<dyn crate::tasks::TaskManager>,
     )> {
         None
     }
 
-    fn verify_shared_environment_close(&self, _root_session_id: &str) -> Result<(), String> {
+    async fn verify_shared_environment_close(&self, _root_session_id: &str) -> Result<(), String> {
         Err("Incomplete: shared environment child ownership unknown".into())
     }
 
@@ -372,6 +413,15 @@ pub trait McpPoolPort: Send + Sync {
 
     /// 在初始快照后保持 scope 游标（长驻任务；`cancel` 触发即退出）。默认立即返回。
     async fn watch_workspace_tasks(self: Arc<Self>, _session_id: &str, _cancel: CancellationToken) {
+    }
+
+    /// 按直接 owner（thread id）查询外围存活任务（设计 §6，只读）。
+    ///
+    /// 默认实现表示「实现方不提供该能力」：返回 [`PeripheralTasks::Unknown`]，
+    /// **不得**以 `Known(vec![])` 伪装成「没有任务」。传输 / 解析失败同样归入
+    /// `Unknown`，由恢复提醒如实表达。
+    async fn workspace_live_tasks(&self, _owner: &str) -> PeripheralTasks {
+        PeripheralTasks::unknown("peripheral task query capability unavailable")
     }
 
     // ── 会话 MCP 发现接线（session/new 预热路径） ─────────────────────────

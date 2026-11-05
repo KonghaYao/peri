@@ -121,7 +121,7 @@ fn test_stage_context_construction() {
     let ctx = make_stage_context();
     assert_eq!(&*ctx.session.turn.cwd, "/tmp/test");
     assert_eq!(ctx.session.turn.current_step(), 0);
-    assert!(ctx.session.queue.is_empty());
+    assert!(ctx.session.queue.is_empty_sync());
     assert!(ctx.session.transcript.read().is_empty());
 }
 
@@ -238,7 +238,7 @@ async fn test_e2e_defer_consumed_in_receive() {
         .with_llm(Arc::new(FinalAnswerLLM { answer: "ok" }))
         .build();
 
-    ctx.session.queue.push(QueuedMessage::defer(
+    ctx.session.queue.push_sync(QueuedMessage::defer(
         MessageSource::SubAgentComplete,
         BaseMessage::human(MessageContent::text("bg-result-payload")),
     ));

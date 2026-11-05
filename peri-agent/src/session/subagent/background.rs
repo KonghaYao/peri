@@ -8,6 +8,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use super::lifecycle::drain_subagent_events;
+use super::terminal_settlement::TerminalMqRoute;
 use super::types::{
     ChildRunOutcome, SubagentFailure, SubagentLifecycleStart, SubagentLifecycleStop,
 };
@@ -26,7 +27,7 @@ use crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder_for_c
 use crate::agent::LangfuseBridgeLike;
 use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
 use peri_acp_types::session_resources::{SessionMetaPatch, SessionResources};
-use peri_acp_types::thread::{AgentStatus, ThreadId};
+use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
 
 pub(super) struct BackgroundStartGate {
     pub(super) alive: Arc<parking_lot::Mutex<bool>>,
@@ -97,6 +98,7 @@ pub(super) async fn spawn_background_subagent(
     on_bg_complete: Option<peri_acp_types::tasks::OnBgCompleteFn>,
     langfuse_bridge: Option<Arc<dyn LangfuseBridgeLike>>,
     session_resources: Option<Arc<dyn SessionResources>>,
+    terminal_route: Option<TerminalMqRoute>,
     deregister_runtime: Option<DeregisterRuntimeFn>,
     on_subagent_start: Option<SubagentLifecycleStart>,
     on_subagent_stop: Option<SubagentLifecycleStop>,
@@ -153,6 +155,7 @@ pub(super) async fn spawn_background_subagent(
     let panic_on_complete = on_bg_complete.clone();
     let panic_manager = Arc::clone(&task_manager);
     let panic_resources = session_resources.clone();
+    let panic_terminal_route = terminal_route.clone();
     let runtime_started = Arc::new(AtomicBool::new(false));
     let cleanup_runtime: Option<DeregisterRuntimeFn> = deregister_runtime.map(|deregister| {
         let runtime_started = runtime_started.clone();
@@ -211,6 +214,23 @@ pub(super) async fn spawn_background_subagent(
             return;
         }
         unstarted_registration.armed = false;
+        // 执行已获准开跑：先提交续跑意图再进入 loop，进程若在此刻退出，下次进入仍
+        // 能看出这个 child 需要继续。辅助写失败不阻断执行。
+        if let Some(resources) = session_resources.as_deref() {
+            if let Err(error) = resources
+                .set_work_state(
+                    &ThreadId::from(child_thread_id_for_task.clone()),
+                    WorkState::Working,
+                )
+                .await
+            {
+                tracing::warn!(
+                    thread_id = %child_thread_id_for_task,
+                    %error,
+                    "subagent work state write failed"
+                );
+            }
+        }
         let started_at = peri_time::monotonic_now();
         // context 将被 move 进 run_react_loop，turn_id 提前提取（Start/Stop emit 用）
         let execution_turn = v2_ctx.context.session.turn.clone();
@@ -536,6 +556,7 @@ pub(super) async fn spawn_background_subagent(
             &child_thread_id_for_task,
             status,
             &mut result,
+            terminal_route.as_ref(),
         )
         .await;
         if !terminal_persisted {
@@ -568,11 +589,17 @@ pub(super) async fn spawn_background_subagent(
                 );
             }
         }
+        // 终态提交失败时仍按既有协议交付失败结果：父会话需要知道结算没完成，
+        // 而这次提交没有留下任何事实（终态、意图与 MQ 行都没写）。
         settle_background_terminal(&task_manager_spawn, &registration, result, on_bg_complete);
         let owner = session
             .subagent_host()
             .and_then(|host| host.child_owner.clone());
         // residual 是已确认的交接；无 receipt 时仍须检查动态到达的义务。
+        let unsettled_obligations = match owner.as_ref() {
+            Some(owner) => owner.has_unsettled_obligations().await,
+            None => false,
+        };
         let permit_result = if !terminal_persisted {
             Err("terminal_status_persist_failed".to_string())
         } else if let Some(error) = drain_failure.as_ref() {
@@ -582,9 +609,7 @@ pub(super) async fn spawn_background_subagent(
         } else if matches!(outcome, ChildRunOutcome::HandoffFailed { .. }) {
             Err("child handoff persistence is unconfirmed".to_string())
         } else if matches!(outcome, ChildRunOutcome::Failed { residual: None, .. })
-            && owner
-                .as_ref()
-                .is_some_and(|owner| owner.has_unsettled_obligations())
+            && unsettled_obligations
         {
             Err("child settlement is unconfirmed after execution failure".to_string())
         } else {
@@ -634,6 +659,7 @@ pub(super) async fn spawn_background_subagent(
                     &panic_thread_id,
                     AgentStatus::Error,
                     &mut result,
+                    panic_terminal_route.as_ref(),
                 )
                 .await;
                 if let Some(registration) = panic_registration.lock().clone() {
@@ -718,7 +744,22 @@ async fn persist_background_terminal(
     thread_id: &str,
     status: AgentStatus,
     result: &mut crate::agent::events::BackgroundTaskResult,
+    terminal_route: Option<&TerminalMqRoute>,
 ) -> bool {
+    // 有投递路由时，终态、续跑意图与结果消息由存储一次提交：三条事实不能分两次写，
+    // 否则中断会留下「子任务已结束、父会话没收到结果」。
+    if let Some(route) = terminal_route {
+        if let Err(error) = route.settle(thread_id, status, result).await {
+            tracing::error!(%thread_id, %error, "subagent terminal status write failed");
+            result.success = false;
+            result.output = format!(
+                "{}; subagent terminal status write failed: {error}",
+                result.output
+            );
+            return false;
+        }
+        return true;
+    }
     let Some(store) = store else {
         return true;
     };
@@ -739,6 +780,17 @@ async fn persist_background_terminal(
             result.output
         );
         return false;
+    }
+    // 终态与续跑意图同一 seam 收尾：被取消保留停止意图，完成/失败不再自动续跑。
+    // 意图是辅助事实：写失败不能吞掉已经产出的结果，保留最后提交的值并留日志。
+    if let Err(error) = store
+        .set_work_state(
+            &ThreadId::from(thread_id),
+            WorkState::after_agent_terminal(status),
+        )
+        .await
+    {
+        tracing::warn!(%thread_id, %error, "subagent terminal work state write failed");
     }
     true
 }

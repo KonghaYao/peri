@@ -203,6 +203,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                     persistence_inconsistent: false,
                     recall_items: Vec::new(),
                     pending_tasks: 0,
+                    context_usage_tokens: None,
                     failure: None,
                 }));
             }
@@ -349,6 +350,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                 persistence_inconsistent,
                 recall_items: Vec::new(),
                 pending_tasks: 0,
+                context_usage_tokens: None,
                 failure,
             }))
         }

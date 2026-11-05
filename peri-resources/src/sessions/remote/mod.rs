@@ -141,6 +141,7 @@ mod session_data;
 mod session_evidence;
 mod session_history;
 mod session_lifecycle;
+mod session_mq;
 mod session_read;
 mod session_schema;
 mod session_sql;
@@ -186,6 +187,14 @@ mod session_shape_tests;
 #[cfg(test)]
 #[path = "session_history_page_test.rs"]
 mod session_history_page_tests;
+
+#[cfg(test)]
+#[path = "session_mq_test.rs"]
+mod session_mq_tests;
+
+#[cfg(test)]
+#[path = "session_work_state_test.rs"]
+mod session_work_state_tests;
 
 #[cfg(test)]
 #[path = "session_rewind_candidates_test.rs"]

@@ -1,0 +1,264 @@
+//! 旧库（schema 13）的进入语义（设计 §9「旧库升级」一行、§3「只读 Store 不能放行执行」）。
+//!
+//! 阶段 2 已在 store 层验证「只读打开旧库读作 `idle`」；这里补 wire 层的两条：
+//!
+//! 1. 旧库按生产意图（读写）进入：只补两列，旧 Active 不触发恢复，历史与 MQ 内容不被改写；
+//! 2. 只读 Store 进入：显式报错、零恢复、零写入——恢复不放行执行，也不悄悄升级旧库。
+
+use super::*;
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::session::MqFilter;
+use peri_acp_types::session_resources::AccessMode;
+use peri_acp_types::session_store::SessionStoreDeployment;
+use peri_acp_types::store::PersistedPayload;
+use peri_resources::sessions::open_store_and_facade_for_tests;
+use sqlx::Connection as _;
+
+const V13: i64 = 13;
+const LEGACY_MESSAGE: &str = "interrupted before upgrade";
+
+/// 生产路径建一条会话（含 frozen 上下文）与一条历史，再写一条待发 MQ 行，最后退回
+/// schema 13 形状。
+///
+/// 关库用 `close()` 而非 `Drop`：只读打开要等在 WAL 收尾之后，否则会撞上 mmap 独占锁。
+async fn seed_schema_v13(db_path: &std::path::Path, cwd: &str) -> String {
+    let (bridge, facade) = open_store_and_facade_for_tests(db_path).await.unwrap();
+    let mut seed = RecoveryHarness::assemble(
+        tempfile::tempdir().unwrap(),
+        db_path.to_path_buf(),
+        cwd.to_owned(),
+        Arc::new(facade),
+        false,
+    )
+    .await;
+    seed.create_session().await;
+    let thread_id = seed.thread_id.clone();
+    seed.cfg
+        .session_resources
+        .append_history(
+            &thread_id,
+            &[PersistedPayload::Message(BaseMessage::human(
+                LEGACY_MESSAGE,
+            ))],
+        )
+        .await
+        .unwrap();
+    seed.queue(&thread_id)
+        .enqueue(peri_acp_types::session::QueuedMessage::new(
+            peri_acp_types::session::MessageKind::Info,
+            peri_acp_types::session::MessageSource::SystemInjected,
+            BaseMessage::human("queued before upgrade"),
+        ))
+        .await
+        .unwrap();
+    let cfg = Arc::clone(&seed.cfg);
+    drop(seed);
+    drop(cfg);
+    bridge.close().await;
+    downgrade_to_v13(db_path).await;
+    thread_id
+}
+
+async fn downgrade_to_v13(db_path: &std::path::Path) {
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(db_path),
+    )
+    .await
+    .unwrap();
+    // 旧库遗留的 Active 状态：v13 没有工作意图列，Active 不是自动续跑的依据。
+    sqlx::raw_sql(
+        "UPDATE threads SET agent_status = 'active';
+         ALTER TABLE threads DROP COLUMN work_state;
+         ALTER TABLE threads DROP COLUMN context_usage_tokens;
+         PRAGMA user_version = 13;",
+    )
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    connection.close().await.unwrap();
+}
+
+/// 当前代际以新建库为准：测试不重复写版本号常量。
+async fn current_schema_version() -> i64 {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("threads.db");
+    let store = peri_resources::sessions::SqliteThreadStore::new(&path)
+        .await
+        .unwrap();
+    store.close().await;
+    read_shape(&path).await.0
+}
+
+async fn read_shape(db_path: &std::path::Path) -> (i64, Vec<String>) {
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(db_path),
+    )
+    .await
+    .unwrap();
+    let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    let columns: Vec<(String,)> = sqlx::query_as("SELECT name FROM pragma_table_info('threads')")
+        .fetch_all(&mut connection)
+        .await
+        .unwrap();
+    connection.close().await.unwrap();
+    (version, columns.into_iter().map(|(name,)| name).collect())
+}
+
+/// 经真实 `ServerLoop` 发 `initialize` + `session/load`。
+fn load_through_server_loop(harness: &RecoveryHarness, thread_id: &str, cwd: &str) {
+    super::wire_tests::push_request(
+        harness,
+        1,
+        "initialize",
+        json!({"protocolVersion": 1, "clientCapabilities": {"_meta": {}}}),
+    );
+    super::wire_tests::push_request(
+        harness,
+        2,
+        "session/load",
+        json!({"sessionId": thread_id, "cwd": cwd}),
+    );
+}
+
+fn load_result(harness: &RecoveryHarness) -> bool {
+    harness
+        .recorded
+        .responses()
+        .iter()
+        .find(|(id, _)| *id == RequestId::Number(2))
+        .expect("session/load 必须有响应")
+        .1
+        .is_ok()
+}
+
+/// 1. 读写进入 schema 13 库：load 成功、零恢复；只补两列，历史与 MQ 内容原样。
+#[tokio::test]
+async fn schema_v13_upgrade_on_entry_recovers_nothing_and_keeps_history_and_queue() {
+    let workspace = tempfile::tempdir().unwrap();
+    let db_path = workspace.path().join("threads.db");
+    let cwd = workspace.path().to_string_lossy().into_owned();
+    let thread_id = seed_schema_v13(&db_path, &cwd).await;
+    let (version, columns) = read_shape(&db_path).await;
+    assert_eq!(version, V13);
+    assert!(!columns.iter().any(|name| name == "work_state"));
+
+    let harness = RecoveryHarness::durable(workspace.path()).await;
+    load_through_server_loop(&harness, &thread_id, &cwd);
+    super::wire_tests::run_server_loop(&harness).await;
+
+    assert!(load_result(&harness), "旧库读写进入必须成功");
+    assert!(
+        harness.recovery_rows(&thread_id).await.is_empty(),
+        "旧 Active 不得触发自动恢复"
+    );
+    assert!(!harness._mock.matched(), "旧库不得启动 turn");
+
+    let (version, columns) = read_shape(&db_path).await;
+    assert_eq!(
+        version,
+        current_schema_version().await,
+        "读写打开按当前代际升级"
+    );
+    assert_eq!(
+        columns.iter().filter(|name| *name == "work_state").count(),
+        1,
+        "只补一列工作意图"
+    );
+    let (state, usage): (String, Option<i64>) = {
+        let mut connection = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new().filename(&db_path),
+        )
+        .await
+        .unwrap();
+        let row: (String, Option<i64>) =
+            sqlx::query_as("SELECT work_state, context_usage_tokens FROM threads WHERE id = ?1")
+                .bind(&thread_id)
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+        connection.close().await.unwrap();
+        row
+    };
+    assert_eq!(state, "idle", "旧行升级后不得自动续跑");
+    assert_eq!(usage, None, "未知占用不是零占用");
+
+    let queued = harness
+        .queue(&thread_id)
+        .query(MqFilter::default())
+        .await
+        .unwrap();
+    assert_eq!(queued.len(), 1, "v13 已有的 MQ 行必须保留");
+    let (count, content) = {
+        let mut connection = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new().filename(&db_path),
+        )
+        .await
+        .unwrap();
+        let row: (i64, String) = sqlx::query_as(
+            "SELECT COUNT(*), COALESCE(MAX(content), '') FROM messages WHERE thread_id = ?1",
+        )
+        .bind(&thread_id)
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+        connection.close().await.unwrap();
+        row
+    };
+    assert_eq!(count, 1, "历史不得被改写");
+    assert!(
+        content.contains(LEGACY_MESSAGE),
+        "历史内容原样保留：{content}"
+    );
+}
+
+/// 2. 只读进入 schema 13 库：显式报错、零恢复、零写入（不升级、不改形状）。
+#[tokio::test]
+async fn schema_v13_read_only_entry_is_rejected_without_writing() {
+    let workspace = tempfile::tempdir().unwrap();
+    let db_path = workspace.path().join("threads.db");
+    let cwd = workspace.path().to_string_lossy().into_owned();
+    let thread_id = seed_schema_v13(&db_path, &cwd).await;
+    let before_shape = read_shape(&db_path).await;
+    let before_bytes = std::fs::read(&db_path).unwrap();
+
+    let deployment =
+        SessionStoreDeployment::local_path(db_path.clone()).with_access(AccessMode::ReadOnly);
+    let (facade, _shutdown) = peri_agent::resources::open_session_resources_deployment(&deployment)
+        .await
+        .unwrap();
+    let harness = RecoveryHarness::assemble(
+        tempfile::tempdir().unwrap(),
+        db_path.clone(),
+        cwd.clone(),
+        facade,
+        false,
+    )
+    .await;
+    load_through_server_loop(&harness, &thread_id, &cwd);
+    super::wire_tests::run_server_loop(&harness).await;
+
+    let responses = harness.recorded.responses();
+    let (_, result) = responses
+        .iter()
+        .find(|(id, _)| *id == RequestId::Number(2))
+        .expect("session/load 必须有响应");
+    let error = result.as_ref().expect_err("只读 Store 不得放行执行");
+    assert!(
+        error.contains("read-only"),
+        "只读失败必须是显式分类，不是静默降级：{error}"
+    );
+    assert!(!harness._mock.matched(), "只读进入不得启动 turn");
+    assert_eq!(
+        read_shape(&db_path).await,
+        before_shape,
+        "只读进入不得升级或改写旧库形状"
+    );
+    assert_eq!(
+        std::fs::read(&db_path).unwrap(),
+        before_bytes,
+        "只读进入不得写入库文件"
+    );
+}

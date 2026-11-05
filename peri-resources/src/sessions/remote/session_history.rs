@@ -421,6 +421,11 @@ impl RemoteSessionData {
             sql,
             vec![Value::Text(id.as_str().to_owned()), codec::int_value(rowid)],
         ));
+        // rewind 退回历史边界：仍待发的 MQ 行属于被退回的那段上下文，同一批清理。
+        effects.push(StatementSpec::new(
+            crate::sessions::canonical::DELETE_THREAD_MQ_BY_THREAD_SQL,
+            vec![Value::Text(id.as_str().to_owned())],
+        ));
         for (message, flags) in &updates {
             effects.push(guard_message_statement(id, *message));
             effects.push(flag_statement(id, *message, flags));

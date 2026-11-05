@@ -35,6 +35,8 @@ fn meta_with_control_characters() -> ThreadMeta {
         cancel_policy: Default::default(),
         config: Some("forbidden-config-secret".to_owned()),
         agent_status: AgentStatus::Done,
+        work_state: Default::default(),
+        context_usage_tokens: None,
     }
 }
 

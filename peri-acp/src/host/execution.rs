@@ -44,7 +44,7 @@ pub(super) async fn approve_schedule(
     }
     let runtime_cancel = runtime.cancel_token.clone();
     drop(runtime);
-    let mailbox = super::user_input::ensure_mailbox(&request.session_id, cfg, transport)?;
+    let mailbox = super::user_input::ensure_mailbox(&request.session_id, cfg, transport).await?;
     let mut params = serde_json::json!({});
     let notifications = ExecutionNotifications::from_params(&mut params)?;
     let cancel = tokio_util::sync::CancellationToken::new();

@@ -105,11 +105,19 @@ pub(crate) fn build_stage_context(
     let frozen = frozen_session.v2_frozen();
     // ── 会话级共享变量（原 session_manager 端口化；None = print mode）──
     let session_access = ctx.session_access.clone();
-    // 会话级共享 v2 MessageQueue（每 turn 同一实例，跨 turn 存活）
+    // 会话级共享 v2 MessageQueue（每 turn 同一实例，跨 turn 存活）。
+    // print 模式没有 SessionManager，但仍必须把门面绑到本 thread 的真实资源：
+    // 内存后端会让 Receive 只写热态而不落 `messages`，历史在进程退出后即丢失。
     let shared_queue = session_access
         .as_ref()
         .and_then(|sa| sa.v2_message_queue(&ctx.session_id))
-        .unwrap_or_default();
+        .unwrap_or_else(|| match (&ctx.session_resources, &ctx.thread_id) {
+            (Some(resources), Some(thread_id)) => peri_acp_types::session::MessageQueue::bind(
+                Arc::clone(resources),
+                thread_id.clone(),
+            ),
+            _ => peri_acp_types::session::MessageQueue::new(),
+        });
     // 会话级 SessionInbox（await-wake 路径；allow_await_wake 由宿主装配面判定）
     let idle_inbox: Option<Arc<SessionInbox>> = if ctx.allow_await_wake {
         session_access

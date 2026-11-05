@@ -69,7 +69,7 @@ impl Model for ReportModel {
     ) -> ModelResult<ModelResponse> {
         self.requests.lock().unwrap().push(request);
         if let Some(queue) = &self.incoming {
-            queue.push(QueuedMessage::system_reminder(
+            queue.push_sync(QueuedMessage::system_reminder(
                 MessageKind::Defer,
                 MessageSource::SubAgentComplete,
                 report("REPORT_ARRIVED_DURING_FULL"),
@@ -446,7 +446,13 @@ async fn test_full_report_arriving_during_summary_stays_available() {
     let request = serde_json::to_string(&model.requests.lock().unwrap()[0]).unwrap();
     assert!(request.contains("OLD_REPORT"));
     assert!(!request.contains("REPORT_ARRIVED_DURING_FULL"));
-    crate::agent::stages::append_messages_to_transcript(&mut transcript, queue.drain_all());
+    let arrived = queue.drain_all_sync().pop().expect("报告必须留在 MQ");
+    assert!(queue.is_empty_sync());
+    // 到达只落在 MQ，交付仍走 canonical 追加；旧快照的排除集合不得覆盖它。
+    let peri_acp_types::session::QueuedPayload::SystemReminder(reminder) = arrived.payload else {
+        panic!("expected a system reminder payload");
+    };
+    transcript.append_system_reminder(reminder);
     transcript.flush_persistence().await.unwrap();
     assert!(
         transcript.get(old).is_none(),

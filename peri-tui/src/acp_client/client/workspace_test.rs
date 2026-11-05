@@ -199,14 +199,31 @@ async fn failed_startup_load_leaves_no_session_and_does_not_create_a_new_one() {
     );
     assert_eq!(client.current_session_id(), None);
     assert_eq!(client.current_execution_cwd(), None);
+    // 失败目标保留给下一次 ensure：先重试同一会话，失败后仍不静默新建。
+    let retry_client = client.clone();
+    let retry = tokio::spawn(async move { retry_client.ensure_session("/main", None).await });
+    let (id, _) = request(&server, "peri/session_context").await;
+    server
+        .send_response(id, Ok(context("/worktrees/feature/src")))
+        .await
+        .unwrap();
+    let (id, _) = request(&server, "session/load").await;
+    server
+        .send_response(
+            id,
+            Err(AcpError::new(-32001, "session owned by another host")),
+        )
+        .await
+        .unwrap();
     assert!(
-        client
-            .ensure_session("/main", None)
+        retry
             .await
+            .unwrap()
             .unwrap_err()
             .to_string()
             .contains("another host")
     );
+    assert_eq!(client.current_session_id(), None);
 }
 
 #[tokio::test]

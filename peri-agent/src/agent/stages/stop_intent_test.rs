@@ -69,7 +69,9 @@ fn new_session() -> Arc<Session> {
 async fn stop_intent_for_current_execution_returns_hook_stopped() {
     let session = new_session();
     let turn = session.start_turn();
-    session.queue().push(stop_message(turn.execution_binding()));
+    session
+        .queue()
+        .push_sync(stop_message(turn.execution_binding()));
     let calls = Arc::new(AtomicUsize::new(0));
 
     let result = run_react_loop(context_with_turn(&session, turn, calls.clone()), 10).await;
@@ -86,8 +88,8 @@ async fn stop_intent_for_current_execution_returns_hook_stopped() {
 async fn stale_stop_intent_does_not_stop_new_execution() {
     let stale = new_session().start_turn().execution_binding();
     let session = new_session();
-    session.queue().push(stop_message(stale));
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(stop_message(stale));
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("resume work"),
     ));
@@ -115,7 +117,7 @@ async fn deadline_left_stop_intent_does_not_stop_resumed_execution() {
     let first_turn = session.start_turn();
     session
         .queue()
-        .push(stop_message(first_turn.execution_binding()));
+        .push_sync(stop_message(first_turn.execution_binding()));
     let window = Arc::new(ChildSettlementWindow::default());
     window.start();
     tokio::time::advance(Duration::from_secs(121)).await;
@@ -125,10 +127,14 @@ async fn deadline_left_stop_intent_does_not_stop_resumed_execution() {
     first.async_ctx.child_settlement = Some(window);
     let first_result = run_react_loop(first, 10).await;
     assert!(matches!(first_result, LoopResult::SettlementDue { .. }));
-    assert_eq!(session.queue().len(), 1, "D 到期不得消费旧 stop intent");
+    assert_eq!(
+        session.queue().len_sync(),
+        1,
+        "D 到期不得消费旧 stop intent"
+    );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("resume after handoff"),
     ));
@@ -144,7 +150,7 @@ async fn deadline_left_stop_intent_does_not_stop_resumed_execution() {
     let stop_turn = session.start_turn();
     session
         .queue()
-        .push(stop_message(stop_turn.execution_binding()));
+        .push_sync(stop_message(stop_turn.execution_binding()));
     let stopped = run_react_loop(context_with_turn(&session, stop_turn, calls.clone()), 10).await;
     assert!(
         matches!(stopped, LoopResult::HookStopped { .. }),

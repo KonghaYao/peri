@@ -171,10 +171,12 @@ async fn session(bound: &TestSession, cold: bool) -> Arc<Session> {
     session
 }
 fn prompt(session: &Session, text: impl Into<String>) {
-    session.queue().push(crate::session::QueuedMessage::prompt(
-        crate::session::MessageSource::UserInput,
-        BaseMessage::human(text.into()),
-    ));
+    session
+        .queue()
+        .push_sync(crate::session::QueuedMessage::prompt(
+            crate::session::MessageSource::UserInput,
+            BaseMessage::human(text.into()),
+        ));
 }
 fn receipt_id(ctx: &StageContext) -> crate::messages::MessageId {
     ctx.session

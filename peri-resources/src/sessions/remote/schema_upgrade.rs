@@ -130,6 +130,12 @@ fn unsupported() -> SessionResourceError {
     SessionResourceError::new(SessionResourceErrorKind::Unsupported)
 }
 
+/// 搬运路径的升级来源：压缩前的存储契约（`v2`）+ 版本 10|11。
+fn legacy_migration_source(snapshot: &StoreSnapshot) -> bool {
+    matches!(snapshot.schema_version, 10 | 11)
+        && snapshot.contract == schema::PREVIOUS_STORE_CONTRACT
+}
+
 fn optional_text(row: &[Value], index: usize) -> SessionResourceResult<Option<String>> {
     match row.get(index) {
         Some(Value::Null) => Ok(None),
@@ -211,16 +217,13 @@ pub(super) async fn upgrade(
         .await
         .map_err(|_| unsupported())?;
     let current_machine = crate::sessions::machine::current().map_err(|_| unsupported())?;
-    if snapshot.contract == schema::PREVIOUS_CURRENT_STORE_CONTRACT && snapshot.schema_version == 11
-    {
-        // 上一代当前形状只缺派生索引表：增量补齐，不搬运、不删除任何会话事实。
+    if additive_source(snapshot) {
+        // 上一代/再上一代当前形状只缺派生对象：增量补齐，不搬运、不删除任何会话事实。
         return store
             .apply_schema_upgrade(additive_upgrade_plan(snapshot, current_machine)?)
             .await;
     }
-    if !matches!(snapshot.schema_version, 10 | 11)
-        || snapshot.contract != schema::PREVIOUS_STORE_CONTRACT
-    {
+    if !legacy_migration_source(snapshot) {
         return Err(unsupported());
     }
     let read = read_input(store).await?;
@@ -232,14 +235,28 @@ pub(super) async fn upgrade(
         .await
 }
 
-/// 上一代当前形状（`v5` + 11）的升级批次：补派生索引表与 canonical 索引集，
+/// 增量补齐的升级来源：`v7` + 13（只缺两列）、`v6` + 12（还缺 `thread_mq`）与
+/// `v5` + 11（还缺派生索引表）。
+///
+/// 三条来源共用同一份幂等批次：建表都是 `CREATE ... IF NOT EXISTS`；两列是 v14 的
+/// 唯一 `ALTER`，三条来源都必然缺它们。把几份形状会聚到同一终点，比按代际各写一条
+/// 路径更不容易漂移。
+pub(super) fn additive_source(snapshot: &StoreSnapshot) -> bool {
+    matches!(
+        (snapshot.contract.as_str(), snapshot.schema_version),
+        (schema::PREVIOUS_CURRENT_STORE_CONTRACT, 13)
+            | (schema::LEGACY_CURRENT_STORE_CONTRACT, 12)
+            | (schema::OLDER_CURRENT_STORE_CONTRACT, 11)
+    )
+}
+
+/// 上一代/再上一代当前形状的升级批次：补派生索引表、`thread_mq` 与 canonical 索引集，
 /// 末尾推进版本与契约。整批仍是受管批次，守卫与推进语义与搬运路径一致。
 pub(super) fn additive_upgrade_plan(
     snapshot: &StoreSnapshot,
     current_machine: &str,
 ) -> SessionResourceResult<Vec<StatementSpec>> {
-    if snapshot.contract != schema::PREVIOUS_CURRENT_STORE_CONTRACT || snapshot.schema_version != 11
-    {
+    if !additive_source(snapshot) {
         return Err(unsupported());
     }
     let mut statements = vec![StatementSpec::new(
@@ -255,6 +272,8 @@ pub(super) fn additive_upgrade_plan(
             .iter()
             .map(|sql| StatementSpec::bare(sql)),
     );
+    statements.push(StatementSpec::bare(canonical::CREATE_THREAD_MQ_TABLE_SQL));
+    statements.extend(threads_v14_column_statements());
     statements.extend(
         canonical::CREATE_INDEXES
             .iter()
@@ -346,9 +365,7 @@ pub(super) fn upgrade_plan(
     read: &MigrationRead,
     current_machine: &str,
 ) -> SessionResourceResult<Vec<StatementSpec>> {
-    if !matches!(snapshot.schema_version, 10 | 11)
-        || snapshot.contract != schema::PREVIOUS_STORE_CONTRACT
-    {
+    if !legacy_migration_source(snapshot) {
         return Err(unsupported());
     }
     let mut statements = vec![StatementSpec::new(
@@ -541,6 +558,8 @@ pub(super) fn upgrade_plan(
     statements.push(StatementSpec::bare(
         "ALTER TABLE threads ADD COLUMN archived BOOLEAN NOT NULL DEFAULT 0 CHECK(archived IN (0, 1))",
     ));
+    // v14 的两列也必须赶在重建之前：重建语句按当前形状逐列搬运，而输入形状本来没有它们。
+    statements.extend(threads_v14_column_statements());
     for session in &sessions {
         let workspace_id = workspace_plan
             .session_workspace_ids
@@ -606,6 +625,9 @@ pub(super) fn upgrade_plan(
             .iter()
             .map(|sql| StatementSpec::bare(sql)),
     );
+    // `thread_mq` 与索引集里的 `idx_thread_mq_order` 是同一代新增的形状：重建路径不经过
+    // `CREATE_TABLES`，必须在这里显式建表，否则末尾的索引重放会撞上「表不存在」。
+    statements.push(StatementSpec::bare(canonical::CREATE_THREAD_MQ_TABLE_SQL));
     // 索引重放：`DROP TABLE` 把被重建的表（`threads` / `session_bindings`）上的索引一并删掉，
     // 批次末尾把 canonical 的**整份**索引集一次性重放，升级终点因此天然带齐索引——
     // 按表分组、逐表补索引会漏掉「某张表被重建而那张表的清单没跟上」这种漂移。
@@ -625,6 +647,17 @@ fn current_machine_statement(current_machine: &str) -> StatementSpec {
         canonical::INSERT_CURRENT_MACHINE_SQL,
         vec![Value::Text(current_machine.to_owned())],
     )
+}
+
+/// v14 的 `threads` 增量列：增量批次与搬运重建都要在收尾前补齐，DDL 文本只在这里生成。
+fn threads_v14_column_statements() -> impl Iterator<Item = StatementSpec> {
+    canonical::THREADS_V14_COLUMNS
+        .iter()
+        .map(|(name, definition)| {
+            StatementSpec::bare(Box::leak(
+                format!("ALTER TABLE threads ADD COLUMN {name} {definition}").into_boxed_str(),
+            ))
+        })
 }
 
 /// 版本与契约一起推进：形状变了，代数跟着变。

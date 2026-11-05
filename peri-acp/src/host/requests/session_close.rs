@@ -124,6 +124,7 @@ pub(in crate::host::requests) async fn close_session(
     if let Some(environment) = environment.as_ref() {
         if let Some(pool) = environment.cfg.mcp_pool.as_ref() {
             pool.verify_shared_environment_close(session_id)
+                .await
                 .map_err(|error| {
                     AcpError::new(-32010, format!("Session close incomplete: {error}"))
                 })?;

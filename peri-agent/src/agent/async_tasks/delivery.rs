@@ -5,7 +5,7 @@ use peri_acp_types::system_reminder::TrustedSystemReminder;
 use peri_acp_types::tasks::TaskTerminalDelivery;
 use sha2::{Digest, Sha256};
 
-use crate::session::async_result_mailbox::{AcceptOutcome, AsyncResultMailbox};
+use crate::session::async_result_mailbox::AsyncResultMailbox;
 use crate::session::MessageQueue;
 
 pub(crate) fn terminal_delivery_id(
@@ -52,21 +52,22 @@ impl TaskTerminalDelivery for SessionTerminalDelivery {
         reminder: &TrustedSystemReminder,
         source: MessageSource,
     ) -> Result<(), String> {
-        // 先建立 Queued 责任，再让队列消息可见：消费者不可能看到一条
-        // “已入队但 mailbox 尚未登记”的终态通知。锁不跨 await。
-        match self.mailbox.accept(delivery_id, reminder, source.clone())? {
-            AcceptOutcome::Accepted => {
-                self.queue
-                    .push(QueuedMessage::system_reminder_with_delivery_id(
-                        MessageKind::Defer,
-                        source,
-                        reminder.clone(),
-                        delivery_id,
-                    ));
-                Ok(())
-            }
-            AcceptOutcome::Duplicate => Ok(()),
-        }
+        let future = self.deliver(delivery_id, reminder, source);
+        // 调用方可能是 runtime 线程（shell 监视线程不会），也可能完全没有 runtime
+        // （同步测试）。统一在独立线程的新 runtime 上等待真实提交：既不依赖调用
+        // 线程模型，也不允许先返回成功再 detached 写入。
+        std::thread::scope(|scope| {
+            scope
+                .spawn(move || {
+                    let bridge = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|error| format!("terminal delivery bridge runtime: {error}"))?;
+                    bridge.block_on(future)
+                })
+                .join()
+                .map_err(|_| "terminal delivery bridge thread panicked".to_string())?
+        })
     }
 
     fn deliver<'a>(
@@ -75,6 +76,28 @@ impl TaskTerminalDelivery for SessionTerminalDelivery {
         reminder: &'a TrustedSystemReminder,
         source: MessageSource,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + 'a>> {
-        Box::pin(async move { self.accept(delivery_id, reminder, source) })
+        Box::pin(async move {
+            // 先建立 Queued 责任，再让队列消息可见：消费者不可能看到一条
+            // “已入队但 mailbox 尚未登记”的终态通知。锁不跨 await。
+            //
+            // 已登记（包括上一次落库失败留下的 Queued）不等于已交付：落库是否成立
+            // 只由存储回答。同一稳定 ID 的重放会得到 Existing/AlreadyHandedOff，
+            // 所以每次都以存储事实为准入队，不把内存去重当成已投递。
+            self.mailbox.accept(delivery_id, reminder, source.clone())?;
+            self.queue
+                .enqueue(QueuedMessage::system_reminder_with_delivery_id(
+                    MessageKind::Defer,
+                    source,
+                    reminder.clone(),
+                    delivery_id,
+                ))
+                .await
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
     }
 }
+
+#[cfg(test)]
+#[path = "delivery_test.rs"]
+mod tests;

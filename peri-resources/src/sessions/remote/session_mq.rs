@@ -1,0 +1,495 @@
+//! Thread MQ 的远端行为：条件批处理 + 一致读取，不回落成两次独立写入。
+//!
+//! 远端的执行器只有一种原子单位——托管事务批（`BEGIN IMMEDIATE` … `COMMIT`），且批次内
+//! 只回受影响行数、不回结果集。因此每条领域操作都写成「静态 SQL + 参数 + 条件语句」：
+//!
+//! - **入队**用 `INSERT ... SELECT ... WHERE NOT EXISTS` 做条件插入，0 行即可判定「已有
+//!   同 ID 事实」，再走一次一致读取把事实读成 `Existing`/`AlreadyHandedOff`/冲突；
+//! - **移交**把「写历史」与「删 MQ 行」放进同一批，插入语句的正文取自 `thread_mq`
+//!   （不读回本机），删除条件带 `enqueued_at`，两边的行数共同决定 `Committed`/`Missing`；
+//! - **取消**先一致读取整行（要返回原稿与来源），再按 `(thread_id, id, enqueued_at)` 删除。
+//!
+//! 读与写之间的空档由**条件语句**吸收：删除/插入都带自己的前提，读到旧事实不会导致误删或
+//! 重复移交。批次提交本身仍由 [`super::session_write::RemoteSessionData::commit_effects`]
+//! 的资格写 + 确定性三分类负责。
+
+use peri_acp_types::messages::MessageId;
+use peri_acp_types::session::{
+    MessageSource, MqCancelOutcome, MqEnqueueDisposition, MqEnqueueOutcome, MqEntry, MqFilter,
+    MqInput, MqReceiveDisposition, MqReceiveOutcome, MqReceiveSelection, MqReceiveStatus,
+};
+use peri_acp_types::session_resources::SessionResourceResult;
+use peri_acp_types::thread::ThreadId;
+use turso_serverless::Value;
+
+use crate::sessions::mq_rows::{
+    decode_entry, enqueued_at_now, filter_entries, item_outcome, kind_token, payload_json,
+    policy_json, same_payload, source_token, title_of, RawMqRow, DELETE_THREAD_MQ_ROW_SQL,
+    DERIVE_THREAD_TITLE_SQL, INSERT_MESSAGE_FROM_MQ_SQL, INSERT_THREAD_MQ_SQL,
+    REFRESH_THREAD_COUNT_SQL, SELECT_MESSAGE_ROW_SQL, SELECT_THREAD_MQ_BY_ID_SQL,
+    SELECT_THREAD_MQ_SQL,
+};
+
+use crate::sessions::failure::conflict;
+
+use super::session_codec::corrupt;
+use super::session_data::{invalid_input, not_found, RemoteSessionData};
+use super::sql::{text_at, StatementSpec};
+
+impl RemoteSessionData {
+    pub(super) async fn enqueue_mq(
+        &self,
+        thread_id: &ThreadId,
+        input: MqInput,
+    ) -> SessionResourceResult<MqEnqueueOutcome> {
+        if !self.exists(thread_id).await? {
+            return Err(not_found());
+        }
+        // 与本机同一条边界校验：MQ 行与最终历史必须共用一个稳定 ID。
+        if input.payload.id() != input.id {
+            return Err(invalid_input(
+                "MQ payload id must match the queued message id",
+            ));
+        }
+        let message_id = label(input.id);
+        let payload = payload_json(&input.payload)?;
+        let policy = policy_json(&input.policy);
+        let kind = kind_token(input.kind)?;
+        let source = source_token(&input.source)?;
+        let enqueued_at = enqueued_at_now();
+        let insert = StatementSpec::new(
+            INSERT_THREAD_MQ_SQL,
+            vec![
+                Value::Text(thread_id.as_str().to_owned()),
+                Value::Text(message_id.clone()),
+                Value::Text(enqueued_at.clone()),
+                Value::Text(kind.clone()),
+                Value::Text(source.clone()),
+                Value::Text(policy.clone()),
+                Value::Text(payload.clone()),
+                super::session_codec::optional_text(input.original_draft.as_deref()),
+            ],
+        );
+        let inputs = vec![
+            thread_id.as_str().to_owned(),
+            message_id.clone(),
+            kind.clone(),
+            source.clone(),
+            policy.clone(),
+            payload.clone(),
+        ];
+        let incoming = RawMqRow {
+            id: &message_id,
+            enqueued_at: &enqueued_at,
+            kind: &kind,
+            source: &source,
+            policy_json: &policy,
+            payload_json: &payload,
+            original_draft: input.original_draft.as_deref(),
+        };
+        // 一次条件写入：0 行只表示「已有同 ID 事实」，回到读取判定，不重试出第二行。
+        let counts = self
+            .commit_effects("mq_enqueue", &inputs, vec![insert], thread_id)
+            .await?;
+        if counts.first() == Some(&1) {
+            return Ok(MqEnqueueOutcome {
+                disposition: MqEnqueueDisposition::Inserted,
+                entry: decode_entry(RawMqRow { ..incoming })?,
+            });
+        }
+        if let Some(outcome) = self.enqueue_mq_fact(thread_id, &incoming).await? {
+            return Ok(outcome);
+        }
+        Err(conflict(
+            "MQ enqueue raced the same message id; read the id back before retrying",
+        ))
+    }
+
+    /// 条件插入没命中时的事实判定：历史优先，其次 MQ。
+    async fn enqueue_mq_fact(
+        &self,
+        thread_id: &ThreadId,
+        incoming: &RawMqRow<'_>,
+    ) -> SessionResourceResult<Option<MqEnqueueOutcome>> {
+        let (message, mq) = self.read_mq_facts(incoming.id).await?;
+        if let Some((owner, _content)) = message {
+            if owner != thread_id.as_str() {
+                return Err(conflict(
+                    "message id already belongs to another thread's history",
+                ));
+            }
+            return Ok(Some(MqEnqueueOutcome {
+                disposition: MqEnqueueDisposition::AlreadyHandedOff,
+                entry: decode_entry(RawMqRow {
+                    enqueued_at: &enqueued_at_now(),
+                    ..*incoming
+                })?,
+            }));
+        }
+        let Some(row) = mq else {
+            return Ok(None);
+        };
+        if row.thread_id != thread_id.as_str() {
+            return Err(conflict("message id already belongs to another thread"));
+        }
+        let same = row.kind == incoming.kind
+            && row.source == incoming.source
+            && row.policy_json == incoming.policy_json
+            && same_payload(&row.payload_json, incoming.payload_json)
+            && row.original_draft.as_deref() == incoming.original_draft;
+        if !same {
+            return Err(conflict(
+                "a different message already uses this id in the thread MQ",
+            ));
+        }
+        Ok(Some(MqEnqueueOutcome {
+            disposition: MqEnqueueDisposition::Existing,
+            entry: row.into_entry()?,
+        }))
+    }
+
+    pub(super) async fn query_mq(
+        &self,
+        thread_id: &ThreadId,
+        filter: MqFilter,
+    ) -> SessionResourceResult<Vec<MqEntry>> {
+        let store = self.store().await?;
+        // 一致读取：排序与投影取自同一快照，不会出现「按这页排序、读那页内容」。
+        let mut batches = store
+            .read_batch(vec![StatementSpec::new(
+                SELECT_THREAD_MQ_SQL,
+                vec![Value::Text(thread_id.as_str().to_owned())],
+            )])
+            .await?;
+        let rows = batches
+            .pop()
+            .ok_or_else(|| super::mutation::incomplete_reply("expected the MQ result set"))?;
+        let entries = rows
+            .iter()
+            .map(|row| decode_remote_entry(row))
+            .collect::<SessionResourceResult<Vec<_>>>()?;
+        Ok(filter_entries(entries, &filter))
+    }
+
+    pub(super) async fn cancel_mq(
+        &self,
+        thread_id: &ThreadId,
+        id: MessageId,
+    ) -> SessionResourceResult<MqCancelOutcome> {
+        if !self.exists(thread_id).await? {
+            return Err(not_found());
+        }
+        let message_id = label(id);
+        let (message, mq) = self.read_mq_facts(&message_id).await?;
+        let Some(row) = mq.filter(|row| row.thread_id == thread_id.as_str()) else {
+            return Ok(match message {
+                Some((owner, _)) if owner == thread_id.as_str() => {
+                    MqCancelOutcome::AlreadyHandedOff
+                }
+                _ => MqCancelOutcome::NotFound,
+            });
+        };
+        let entry = row.clone().into_entry()?;
+        if entry.source != MessageSource::UserInput {
+            return Err(invalid_input(
+                "only pending user input can be cancelled from the thread MQ",
+            ));
+        }
+        let inputs = vec![
+            thread_id.as_str().to_owned(),
+            message_id.clone(),
+            entry.enqueued_at.clone(),
+        ];
+        let counts = self
+            .commit_effects(
+                "mq_cancel",
+                &inputs,
+                vec![StatementSpec::new(
+                    DELETE_THREAD_MQ_ROW_SQL,
+                    vec![
+                        Value::Text(thread_id.as_str().to_owned()),
+                        Value::Text(message_id),
+                        Value::Text(entry.enqueued_at.clone()),
+                    ],
+                )],
+                thread_id,
+            )
+            .await?;
+        if counts.first() == Some(&1) {
+            return Ok(MqCancelOutcome::Cancelled(entry));
+        }
+        // 条件删除没命中：行已被并发 Receive 移交，或取消/重新入队后水位已变。
+        let (message, mq) = self.read_mq_facts(&label(id)).await?;
+        Ok(match (message, mq) {
+            (Some((owner, _)), _) if owner == thread_id.as_str() => {
+                MqCancelOutcome::AlreadyHandedOff
+            }
+            _ => MqCancelOutcome::NotFound,
+        })
+    }
+
+    pub(super) async fn receive_mq(
+        &self,
+        thread_id: &ThreadId,
+        selection: MqReceiveSelection,
+    ) -> SessionResourceResult<MqReceiveOutcome> {
+        if !self.exists(thread_id).await? {
+            return Err(not_found());
+        }
+        let mut effects = Vec::with_capacity(selection.items.len() * 2 + 2);
+        // 每条选择项在批次里的语句位置：`(插入历史, 删除 MQ)`，`None` 表示这类处置不写该语句。
+        let mut placements = Vec::with_capacity(selection.items.len());
+        let mut inputs = vec![thread_id.as_str().to_owned()];
+        let mut committed = Vec::new();
+        for item in &selection.items {
+            let message_id = label(item.entry.id);
+            inputs.push(message_id.clone());
+            inputs.push(item.entry.enqueued_at.clone());
+            let insert = match item.disposition {
+                MqReceiveDisposition::Commit => {
+                    committed.push(item.entry.clone());
+                    let at = effects.len();
+                    effects.push(StatementSpec::new(
+                        INSERT_MESSAGE_FROM_MQ_SQL,
+                        vec![
+                            Value::Text(thread_id.as_str().to_owned()),
+                            Value::Text(message_id.clone()),
+                            Value::Text(item.entry.enqueued_at.clone()),
+                            Value::Text(
+                                crate::sessions::canonical::payload_role(&item.entry.payload)
+                                    .to_owned(),
+                            ),
+                        ],
+                    ));
+                    Some(at)
+                }
+                MqReceiveDisposition::Suppress => None,
+            };
+            let delete = effects.len();
+            effects.push(StatementSpec::new(
+                DELETE_THREAD_MQ_ROW_SQL,
+                vec![
+                    Value::Text(thread_id.as_str().to_owned()),
+                    Value::Text(message_id),
+                    Value::Text(item.entry.enqueued_at.clone()),
+                ],
+            ));
+            placements.push((insert, delete));
+        }
+        if !committed.is_empty() {
+            // 派生计数只在历史真的增长时推进；标题只在为空时补齐（与本机同一份派生规则）。
+            effects.push(StatementSpec::new(
+                REFRESH_THREAD_COUNT_SQL,
+                vec![
+                    Value::Text(thread_id.as_str().to_owned()),
+                    Value::Text(timestamp()),
+                ],
+            ));
+            effects.push(StatementSpec::new(
+                DERIVE_THREAD_TITLE_SQL,
+                vec![
+                    Value::Text(thread_id.as_str().to_owned()),
+                    super::session_codec::optional_text(title_of(&committed).as_deref()),
+                ],
+            ));
+        }
+        let counts = self
+            .commit_effects("mq_receive", &inputs, effects, thread_id)
+            .await?;
+        let mut items = Vec::with_capacity(selection.items.len());
+        for (item, (insert, delete)) in selection.items.iter().zip(&placements) {
+            let deleted = counts.get(*delete) == Some(&1);
+            if !deleted {
+                items.push(item_outcome(item.entry.id, MqReceiveStatus::Missing, None));
+                continue;
+            }
+            let status = match (item.disposition, *insert) {
+                (MqReceiveDisposition::Suppress, _) => MqReceiveStatus::Suppressed,
+                (MqReceiveDisposition::Commit, Some(index)) => {
+                    if counts.get(index) == Some(&1) {
+                        MqReceiveStatus::Committed
+                    } else {
+                        // 插入被 `NOT EXISTS` 挡住：同 ID 已在历史。内容相同是幂等命中，
+                        // 不同（或属于别的 thread）是身份冲突——两种都只删 MQ 行、不写历史。
+                        let (message, _) = self.read_mq_facts(&label(item.entry.id)).await?;
+                        match message {
+                            Some((owner, content))
+                                if owner == thread_id.as_str()
+                                    && same_payload(
+                                        &content,
+                                        &payload_json(&item.entry.payload)?,
+                                    ) =>
+                            {
+                                MqReceiveStatus::AlreadyPresent
+                            }
+                            _ => MqReceiveStatus::Conflict,
+                        }
+                    }
+                }
+                (MqReceiveDisposition::Commit, None) => MqReceiveStatus::Missing,
+            };
+            items.push(item_outcome(
+                item.entry.id,
+                status,
+                Some(item.entry.clone()),
+            ));
+        }
+        Ok(MqReceiveOutcome { items })
+    }
+
+    pub(super) async fn clear_mq(&self, thread_id: &ThreadId) -> SessionResourceResult<()> {
+        if !self.exists(thread_id).await? {
+            return Err(not_found());
+        }
+        let inputs = vec![thread_id.as_str().to_owned()];
+        self.commit_effects(
+            "mq_clear",
+            &inputs,
+            vec![StatementSpec::new(
+                crate::sessions::canonical::DELETE_THREAD_MQ_BY_THREAD_SQL,
+                vec![Value::Text(thread_id.as_str().to_owned())],
+            )],
+            thread_id,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// MQ 行是否仍在该 thread 待发（只读事实）。
+    pub(super) async fn history_contains(
+        &self,
+        thread_id: &ThreadId,
+        id: MessageId,
+    ) -> SessionResourceResult<bool> {
+        if !self.exists(thread_id).await? {
+            return Err(not_found());
+        }
+        let (message, _mq) = self.read_mq_facts(&label(id)).await?;
+        Ok(matches!(message, Some((owner, _)) if owner == thread_id.as_str()))
+    }
+
+    /// 同一次一致读取里取「历史同 ID 行」与「MQ 行」：两者的先后不由两次请求给出。
+    async fn read_mq_facts(
+        &self,
+        message_id: &str,
+    ) -> SessionResourceResult<(Option<(String, String)>, Option<RemoteMqRow>)> {
+        let store = self.store().await?;
+        let batches = store
+            .read_batch(vec![
+                StatementSpec::new(
+                    SELECT_MESSAGE_ROW_SQL,
+                    vec![Value::Text(message_id.to_owned())],
+                ),
+                StatementSpec::new(
+                    SELECT_THREAD_MQ_BY_ID_SQL,
+                    vec![Value::Text(message_id.to_owned())],
+                ),
+            ])
+            .await?;
+        let mut batches = batches.into_iter();
+        let message_rows = batches
+            .next()
+            .ok_or_else(|| super::mutation::incomplete_reply("expected the message result set"))?;
+        let mq_rows = batches
+            .next()
+            .ok_or_else(|| super::mutation::incomplete_reply("expected the MQ result set"))?;
+        let message = match message_rows.first() {
+            Some(row) => Some((
+                text_at(row, 0)
+                    .ok_or_else(|| corrupt("invalid history row"))?
+                    .to_owned(),
+                text_at(row, 1)
+                    .ok_or_else(|| corrupt("invalid history row"))?
+                    .to_owned(),
+            )),
+            None => None,
+        };
+        let mq = match mq_rows.first() {
+            Some(row) => Some(RemoteMqRow::decode(row)?),
+            None => None,
+        };
+        Ok((message, mq))
+    }
+}
+
+/// 远端读回的一行 MQ 事实（列序与 [`SELECT_THREAD_MQ_BY_ID_SQL`] 一致）。
+#[derive(Clone)]
+struct RemoteMqRow {
+    thread_id: String,
+    id: String,
+    enqueued_at: String,
+    kind: String,
+    source: String,
+    policy_json: String,
+    payload_json: String,
+    original_draft: Option<String>,
+}
+
+impl RemoteMqRow {
+    fn decode(values: &[Value]) -> SessionResourceResult<Self> {
+        Ok(Self {
+            thread_id: text_at(values, 0)
+                .ok_or_else(|| corrupt("invalid MQ row"))?
+                .to_owned(),
+            id: text_at(values, 1)
+                .ok_or_else(|| corrupt("invalid MQ row"))?
+                .to_owned(),
+            enqueued_at: text_at(values, 2)
+                .ok_or_else(|| corrupt("invalid MQ row"))?
+                .to_owned(),
+            kind: text_at(values, 3)
+                .ok_or_else(|| corrupt("invalid MQ row"))?
+                .to_owned(),
+            source: text_at(values, 4)
+                .ok_or_else(|| corrupt("invalid MQ row"))?
+                .to_owned(),
+            policy_json: text_at(values, 5)
+                .ok_or_else(|| corrupt("invalid MQ row"))?
+                .to_owned(),
+            payload_json: text_at(values, 6)
+                .ok_or_else(|| corrupt("invalid MQ row"))?
+                .to_owned(),
+            original_draft: optional_text_at(values, 7),
+        })
+    }
+
+    fn into_entry(self) -> SessionResourceResult<MqEntry> {
+        decode_entry(RawMqRow {
+            id: &self.id,
+            enqueued_at: &self.enqueued_at,
+            kind: &self.kind,
+            source: &self.source,
+            policy_json: &self.policy_json,
+            payload_json: &self.payload_json,
+            original_draft: self.original_draft.as_deref(),
+        })
+    }
+}
+
+/// 列表行的列序与常量 SQL 一致（不带 `thread_id`）。
+fn decode_remote_entry(values: &[Value]) -> SessionResourceResult<MqEntry> {
+    decode_entry(RawMqRow {
+        id: text_at(values, 0).ok_or_else(|| corrupt("invalid MQ row"))?,
+        enqueued_at: text_at(values, 1).ok_or_else(|| corrupt("invalid MQ row"))?,
+        kind: text_at(values, 2).ok_or_else(|| corrupt("invalid MQ row"))?,
+        source: text_at(values, 3).ok_or_else(|| corrupt("invalid MQ row"))?,
+        policy_json: text_at(values, 4).ok_or_else(|| corrupt("invalid MQ row"))?,
+        payload_json: text_at(values, 5).ok_or_else(|| corrupt("invalid MQ row"))?,
+        original_draft: optional_text_at(values, 6).as_deref(),
+    })
+}
+
+fn optional_text_at(values: &[Value], index: usize) -> Option<String> {
+    match values.get(index) {
+        Some(Value::Text(text)) => Some(text.clone()),
+        _ => None,
+    }
+}
+
+fn label(id: MessageId) -> String {
+    id.as_uuid().to_string()
+}
+
+fn timestamp() -> String {
+    peri_time::now_utc_rfc3339()
+}

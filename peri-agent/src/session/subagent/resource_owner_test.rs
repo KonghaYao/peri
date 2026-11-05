@@ -137,7 +137,8 @@ async fn test_close_settles_terminal_and_records_retained_input() {
         "child".into(),
         "root".into(),
         Arc::new(TaskManager::new()),
-        MessageQueue::new(),
+        // 与生产同形：收件箱绑定同一份存储与 thread，结算才能在同一处删除 MQ 行。
+        MessageQueue::bind(resources.clone(), "child".to_owned()),
         Some(resources.clone()),
         None,
     );
@@ -152,7 +153,7 @@ async fn test_close_settles_terminal_and_records_retained_input() {
         None,
         serde_json::json!({}),
     );
-    child.queue.push(
+    child.queue.push_sync(
         crate::session::QueuedMessage::system_reminder_with_delivery_id(
             crate::session::MessageKind::Defer,
             crate::session::MessageSource::SystemInjected,
@@ -160,12 +161,15 @@ async fn test_close_settles_terminal_and_records_retained_input() {
             terminal_id,
         ),
     );
-    child.queue.push(crate::session::QueuedMessage::prompt(
+    child.queue.push_sync(crate::session::QueuedMessage::prompt(
         crate::session::MessageSource::UserInput,
         crate::messages::BaseMessage::human("追加输入"),
     ));
     child.close().await.unwrap();
-    assert!(!child.queue.has_required(), "已结算输入不得残留 Required");
+    assert!(
+        !child.queue.has_required_sync(),
+        "已结算输入不得残留 Required"
+    );
     let payloads = resources.payloads();
     assert_eq!(payloads.len(), 2, "终态按原 ID 落库，未处理输入单独记录");
     assert!(payloads.iter().any(|payload| {
@@ -178,6 +182,92 @@ async fn test_close_settles_terminal_and_records_retained_input() {
     }));
 }
 
+/// [回归] close 的结算在真实 SQLite 上整批回滚：第二步（未处理输入汇总提醒）
+/// 与历史里同 ID 的条目冲突时，第一步已写的终态提醒也必须撤销，MQ 行原样保留。
+///
+/// 旧实现「先写提醒、再删 MQ」分两次提交，失败后第一步已落库。
+#[tokio::test]
+async fn test_close_rolls_back_retained_settlement_on_sqlite() {
+    let session = crate::session::test_resources::TestSession::open().await;
+    let child_id = session.thread_id();
+    let resources = session.resources();
+    let queue = session.queue();
+
+    let terminal_id = peri_acp_types::messages::MessageId::new();
+    let terminal = crate::session::producer_reminders::trusted_reminder(
+        ReminderCategory::Task,
+        "subagent_task_lifecycle",
+        "terminal_result",
+        ReminderSeverity::Info,
+        ReminderDelivery::Required,
+        "terminal result".into(),
+        None,
+        serde_json::json!({}),
+    );
+    queue
+        .push_async(
+            crate::session::QueuedMessage::system_reminder_with_delivery_id(
+                crate::session::MessageKind::Defer,
+                crate::session::MessageSource::SystemInjected,
+                terminal,
+                terminal_id,
+            ),
+        )
+        .await;
+    let pending = crate::session::QueuedMessage::prompt(
+        crate::session::MessageSource::UserInput,
+        crate::messages::BaseMessage::human("追加输入"),
+    );
+    // 汇总提醒的稳定 ID 与顺序无关：未处理输入永远排在终态提醒之后。
+    let unprocessed_id = close_settlement_delivery_id(&child_id, std::slice::from_ref(&pending));
+    queue.push_async(pending).await;
+
+    resources
+        .append_history(
+            &child_id,
+            &[PersistedPayload::Message(
+                peri_acp_types::messages::BaseMessage::Human {
+                    id: unprocessed_id,
+                    content: "already there".into(),
+                },
+            )],
+        )
+        .await
+        .unwrap();
+    let before = resources.load_session_history(&child_id).await.unwrap();
+
+    let owner = ParkedChildOwner::new(
+        child_id.clone(),
+        "root".into(),
+        Arc::new(TaskManager::new()),
+        queue.clone(),
+        Some(resources.clone()),
+        None,
+    );
+    let error = owner
+        .close()
+        .await
+        .expect_err("第二步冲突必须让 close 失败");
+    assert!(
+        error.contains("child MQ settlement failed"),
+        "结算失败必须如实上报: {error}"
+    );
+
+    let after = resources.load_session_history(&child_id).await.unwrap();
+    assert_eq!(after.len(), before.len(), "失败的结算不得留下已写提醒");
+    assert!(
+        !after
+            .iter()
+            .any(|payload| matches!(payload, PersistedPayload::SystemReminder { .. })),
+        "终态提醒必须随事务回滚"
+    );
+    assert_eq!(
+        queue.snapshot().await.unwrap().len(),
+        2,
+        "MQ 行必须原样保留"
+    );
+}
+
 #[tokio::test]
 async fn test_close_without_canonical_port_refuses_to_drop_required_input() {
     let child = ParkedChildOwner::new(
@@ -188,12 +278,15 @@ async fn test_close_without_canonical_port_refuses_to_drop_required_input() {
         None,
         None,
     );
-    child.queue.push(crate::session::QueuedMessage::prompt(
+    child.queue.push_sync(crate::session::QueuedMessage::prompt(
         crate::session::MessageSource::UserInput,
         crate::messages::BaseMessage::human("追加输入"),
     ));
     assert!(child.close().await.unwrap_err().contains("canonical"));
-    assert!(child.queue.has_required(), "缺 canonical 能力时不得清空");
+    assert!(
+        child.queue.has_required_sync(),
+        "缺 canonical 能力时不得清空"
+    );
 }
 
 /// root 可在真实三层 owner 树中查询、取消、关闭任意后代资源。
@@ -259,7 +352,7 @@ async fn test_unconfirmed_failure_and_pending_receipt_count_as_obligations() {
     let child = owner("root", "child");
     let permit = child.acquire(execution()).unwrap();
     permit.finish(Err("handoff persistence failed".into()));
-    assert!(child.has_unsettled_obligations());
+    assert!(child.has_unsettled_obligations_sync());
     assert!(child.check_resume().is_err());
     assert!(child
         .acquire(execution())
@@ -283,7 +376,7 @@ async fn test_unconfirmed_failure_and_pending_receipt_count_as_obligations() {
     };
     child.freeze_receipt(receipt).unwrap();
     permit.finish(Ok(()));
-    assert!(child.has_unsettled_obligations());
+    assert!(child.has_unsettled_obligations_sync());
     let error = child.acquire(execution()).err().unwrap();
     assert!(
         error.contains("unconfirmed") || error.contains("pending"),

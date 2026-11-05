@@ -22,6 +22,10 @@ use peri_acp_types::history_window::{
     HistoryBodyChunk, HistoryCommittedTail, HistoryReadTicket, HistorySource,
 };
 use peri_acp_types::messages::MessageId;
+use peri_acp_types::session::{
+    MqCancelOutcome, MqEnqueueOutcome, MqEntry, MqFilter, MqInput, MqReceiveOutcome,
+    MqReceiveSelection,
+};
 use peri_acp_types::session_resources::{
     AccessMode, ActiveSessionSnapshot, BindingRecheck, BindingState, ChildResumeClaim,
     ChildSnapshot, CloseSettlement, DataCapabilities, ExecutionAvailability, ForkSnapshot,
@@ -32,7 +36,7 @@ use peri_acp_types::session_resources::{
     SessionSnapshot,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
-use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
+use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta, WorkState};
 use peri_acp_types::workspace::{
     ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding, WorkspaceError,
 };
@@ -633,6 +637,13 @@ impl SessionResources for SessionResourcesImpl {
         self.gate.data().load_meta(id).await
     }
 
+    async fn load_recovery_scope(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<peri_acp_types::recovery::RecoveryScope> {
+        self.gate.data().recovery_scope(id).await
+    }
+
     async fn session_environment_id(&self, id: &ThreadId) -> SessionResourceResult<Option<String>> {
         self.gate.data().machine_id_of(id).await
     }
@@ -855,6 +866,22 @@ impl SessionResources for SessionResourcesImpl {
             .await
     }
 
+    async fn set_work_state(&self, id: &ThreadId, state: WorkState) -> SessionResourceResult<()> {
+        self.gate
+            .with_mutation(id, || self.gate.data().set_work_state(id, state))
+            .await
+    }
+
+    async fn set_context_usage(
+        &self,
+        id: &ThreadId,
+        tokens: Option<u64>,
+    ) -> SessionResourceResult<()> {
+        self.gate
+            .with_mutation(id, || self.gate.data().set_context_usage(id, tokens))
+            .await
+    }
+
     async fn delete_session_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.gate
             .with_mutation(id, || self.gate.data().delete_tree(id))
@@ -870,6 +897,95 @@ impl SessionResources for SessionResourcesImpl {
 
     async fn drain_persistence(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.gate.drain(id).await
+    }
+
+    async fn mq_enqueue(
+        &self,
+        thread_id: &ThreadId,
+        input: MqInput,
+    ) -> SessionResourceResult<MqEnqueueOutcome> {
+        self.gate
+            .with_mutation(thread_id, || self.gate.data().mq_enqueue(thread_id, input))
+            .await
+    }
+
+    async fn mq_query(
+        &self,
+        thread_id: &ThreadId,
+        filter: MqFilter,
+    ) -> SessionResourceResult<Vec<MqEntry>> {
+        // 只读投影：不经过 mutation 门禁，也不建立写屏障。
+        self.gate.data().mq_query(thread_id, filter).await
+    }
+
+    async fn mq_cancel(
+        &self,
+        thread_id: &ThreadId,
+        id: MessageId,
+    ) -> SessionResourceResult<MqCancelOutcome> {
+        self.gate
+            .with_mutation(thread_id, || self.gate.data().mq_cancel(thread_id, id))
+            .await
+    }
+
+    async fn mq_receive(
+        &self,
+        thread_id: &ThreadId,
+        selection: MqReceiveSelection,
+    ) -> SessionResourceResult<MqReceiveOutcome> {
+        self.gate
+            .with_mutation(thread_id, || {
+                self.gate.data().mq_receive(thread_id, selection)
+            })
+            .await
+    }
+
+    async fn mq_clear(&self, thread_id: &ThreadId) -> SessionResourceResult<()> {
+        self.gate
+            .with_mutation(thread_id, || self.gate.data().mq_clear(thread_id))
+            .await
+    }
+
+    async fn mq_history_contains(
+        &self,
+        thread_id: &ThreadId,
+        id: MessageId,
+    ) -> SessionResourceResult<bool> {
+        // 只读事实查询：不经过 mutation 门禁，也不建立写屏障。
+        self.gate.data().mq_history_contains(thread_id, id).await
+    }
+
+    /// 终态与结果接纳一次提交：门禁按 child 的树根进入，`target` 必须同属该树。
+    async fn finalize_child_terminal(
+        &self,
+        child: &ThreadId,
+        status: AgentStatus,
+        work_state: WorkState,
+        target: &ThreadId,
+        message: MqInput,
+    ) -> SessionResourceResult<MqEnqueueOutcome> {
+        self.gate
+            .with_mutation(child, || {
+                self.gate
+                    .data()
+                    .finalize_child_terminal(child, status, work_state, target, message)
+            })
+            .await
+    }
+
+    async fn settle_retained_mq(
+        &self,
+        thread_id: &ThreadId,
+        reminders: &[peri_acp_types::session::RetainedReminder],
+        rows: &[MqEntry],
+    ) -> SessionResourceResult<()> {
+        self.gate
+            .with_mutation(thread_id, || {
+                self.gate
+                    .data()
+                    .settle_retained_mq(thread_id, reminders, rows)
+            })
+            .await
     }
 }
 

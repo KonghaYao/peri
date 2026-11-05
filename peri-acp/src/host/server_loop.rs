@@ -6,6 +6,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use super::diagnostics::ResponseDiagnostics;
+use super::session_endpoint::register_session_endpoint;
 use super::{
     connection::ConnectionContext, dispatch_prompt_turn, extract_session_id, handle_notification,
     handle_request_for_connection, history_page, history_window, mcp_apps, requests,
@@ -22,6 +23,8 @@ pub(super) struct ServerLoop<'a> {
         &'a Arc<tokio::sync::mpsc::UnboundedSender<crate::session::executor::ContinuationRequest>>,
     pub(super) connection: &'a Arc<tokio::sync::Mutex<ConnectionContext>>,
     pub(super) connection_cancellation: &'a CancellationToken,
+    /// 进入会话时的恢复协调（设计 §3/§4）：只由 setup 请求触发，启动延后到响应之后。
+    pub(super) recovery: &'a super::recovery::HostSessionRecovery,
 }
 
 impl ServerLoop<'_> {
@@ -735,6 +738,61 @@ impl ServerLoop<'_> {
                 result = Err(error);
             }
         }
+        // 进入会话时的恢复（设计 §3/§4）：装配成功后、响应发出前完成准备。
+        // 生命周期锁已在上面释放；准备阶段只读范围并接纳提醒，不启动执行。
+        // 装配成功 + 恢复准备失败 = 部分成功：历史保留、响应 Ok，结果放 `_meta`。
+        let mut recovery_report = None;
+        if result.is_ok() && super::recovery::wiring::starts_session_recovery(&method) {
+            if let Some(session_id) =
+                super::recovery::wiring::session_setup(&method, &params, result.as_ref().ok())
+            {
+                match super::recovery::wiring::enter_recovery(
+                    self.recovery,
+                    self.sessions,
+                    &session_id,
+                )
+                .await
+                {
+                    Ok(Some(report)) => {
+                        let view = peri_acp_types::recovery::RecoveryView::from_report(&report);
+                        super::recovery::wiring::apply_recovery_execution_block(
+                            cfg,
+                            &session_id,
+                            &view,
+                        );
+                        super::recovery::wiring::attach_recovery_meta(&mut result, &view);
+                        // 冷 child 已装配但还没有运行期绑定：响应后的 launch 启动 child 前
+                        // 必须补齐 TaskManager 与在线 endpoint。
+                        super::recovery::wiring::bind_recovered_sessions(
+                            cfg,
+                            self.sessions,
+                            self.connection,
+                            self.transport,
+                            &report,
+                        )
+                        .await;
+                        recovery_report = Some(report);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        let view = super::recovery::wiring::error_view(&session_id, &error);
+                        super::recovery::wiring::apply_recovery_execution_block(
+                            cfg,
+                            &session_id,
+                            &view,
+                        );
+                        super::recovery::wiring::attach_recovery_meta(&mut result, &view);
+                    }
+                }
+            }
+        }
+        // `session/new` 的进入在响应之后：新 thread 的工作意图恒为库默认的 idle，
+        // 不可能有候选；放在响应前只会推迟会话响应（响应必须是首个帧）。
+        let new_session_id = if method == "session/new" && result.is_ok() {
+            super::recovery::wiring::session_setup(&method, &params, result.as_ref().ok())
+        } else {
+            None
+        };
         if result.is_ok() && super::user_input::starts_execution(&method) {
             if let Some(session_id) = params.get("sessionId").and_then(Value::as_str) {
                 super::user_input::schedule_mailbox(
@@ -772,7 +830,8 @@ impl ServerLoop<'_> {
                 }
             }
         }
-        let setup_session_id = session_setup(&method, &params, result.as_ref().ok());
+        let setup_session_id =
+            super::recovery::wiring::session_setup(&method, &params, result.as_ref().ok());
         // 会话级 endpoint 注册（审查中 3①）：**连接归属是会话，不是某一轮**。
         // `session/new` / `session/fork` / `session/load` / `session/resume` 建立会话后
         // 立刻把当前连接登记为在线 endpoint，否则「会话建立后从未 prompt」的连接在调度
@@ -806,7 +865,29 @@ impl ServerLoop<'_> {
             }
         }
         let response_sent = diagnostics.send(transport.as_ref(), result).await.is_ok();
+        // 恢复的启动门：响应已发出才放行执行；发送失败则丢弃本次启动资格。
+        match (response_sent, recovery_report.take()) {
+            (true, Some(report)) => self.recovery.launch(&report).await,
+            (false, Some(report)) => self.recovery.discard(&report),
+            _ => {}
+        }
         if response_sent {
+            // 新建会话的进入只可能是空范围：结果不需要启动，失败只记日志。
+            if let Some(session_id) = new_session_id.as_deref() {
+                if let Err(error) = super::recovery::wiring::enter_recovery(
+                    self.recovery,
+                    self.sessions,
+                    session_id,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        error = %error,
+                        "new session recovery entry failed"
+                    );
+                }
+            }
             if let Some(session_id) = setup_session_id {
                 let environment = sessions
                     .lock()
@@ -877,7 +958,7 @@ impl ServerLoop<'_> {
         // 在释放 sessions 锁后发送，避免 notify 路径持锁触碰 scheduler。
         let cont_req = {
             let mut sessions = sessions.lock().await;
-            handle_notification(&method, &params, &mut sessions, cfg)
+            handle_notification(&method, &params, &mut sessions, cfg).await
         };
         if let Some(req) = cont_req {
             if cont_tx.send(req).is_err() {
@@ -888,56 +969,5 @@ impl ServerLoop<'_> {
                 );
             }
         }
-    }
-}
-
-/// 把当前连接注册为本会话的交互 endpoint（幂等；表满/离线时记 warn 并继续——
-/// 该连接的审批随后按无在线 endpoint 处理，是 fail-closed 而不是静默降级）。
-pub(super) async fn register_session_endpoint(
-    sessions: &SharedSessions,
-    session_id: &str,
-    connection: &Arc<tokio::sync::Mutex<ConnectionContext>>,
-    transport: &Arc<dyn crate::transport::AcpTransport>,
-) {
-    if session_id.is_empty() {
-        return;
-    }
-    let connection_id = connection.lock().await.id().to_string();
-    let environment = sessions
-        .lock()
-        .await
-        .get(session_id)
-        .and_then(|state| state.environment.clone());
-    let Some(environment) = environment else {
-        return;
-    };
-    if let Err(error) = environment
-        .interaction_router()
-        .register_connection(&connection_id, Arc::clone(transport))
-    {
-        tracing::warn!(
-            session_id,
-            connection_id = %connection_id,
-            %error,
-            "session interaction endpoint registration rejected"
-        );
-    }
-}
-
-/// 会话 setup 方法涉及的会话 id：`session/new` | `session/fork` 取响应里的新 id，
-/// `session/load` | `session/resume` 取请求里的 `sessionId`；非 setup 方法与失败的
-/// 调用返回 `None`（失败响应不做后置初始化）。
-fn session_setup(method: &str, params: &Value, response: Option<&Value>) -> Option<String> {
-    let response = response?;
-    match method {
-        "session/new" | "session/fork" => response
-            .get("sessionId")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        "session/load" | "session/resume" => {
-            let session_id = extract_session_id(params, "");
-            (!session_id.is_empty()).then(|| session_id.to_owned())
-        }
-        _ => None,
     }
 }

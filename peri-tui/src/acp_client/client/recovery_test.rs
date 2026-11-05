@@ -61,6 +61,26 @@ impl UiAtomsGuard {
     }
 }
 
+/// 通知没有 `Clone`：按消息文本保存/恢复，避免全局 atom 在并行测试间泄漏。
+struct NotificationGuard(Option<String>);
+
+impl NotificationGuard {
+    fn capture() -> Self {
+        let state = atoms::NOTIFICATION.state();
+        let notice = state.read();
+        Self(notice.as_ref().map(|notice| notice.message.clone()))
+    }
+}
+
+impl Drop for NotificationGuard {
+    fn drop(&mut self) {
+        atoms::NOTIFICATION.set(self.0.take().map(|message| atoms::Notification {
+            message,
+            until: peri_time::monotonic_now() + Duration::from_secs(1),
+        }));
+    }
+}
+
 impl Drop for UiAtomsGuard {
     fn drop(&mut self) {
         for restore in self.0.drain(..) {
@@ -382,4 +402,259 @@ async fn incomplete_close_keeps_pending_load_target() {
     assert_eq!(resumed.await.unwrap().unwrap(), TARGET);
     assert_eq!(client.current_session_id().as_deref(), Some(TARGET));
     assert!(client.check_restore_error().is_ok());
+}
+
+/// load Ok + recovery failed meta：会话与历史保留，错误只作为可见注记。
+#[tokio::test]
+#[serial_test::serial]
+async fn failed_recovery_meta_keeps_session_and_sets_notification() {
+    let _guard = UiAtomsGuard::capture();
+    let _notification = NotificationGuard::capture();
+    let (client, server) = interactive_client();
+    let (load, _) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            client.load_session(TARGET, "/startup", None),
+            reach_load(
+                &server,
+                Ok(json!({"_meta": {"peri.recovery": {
+                    "status": "failed",
+                    "rootThreadId": TARGET,
+                    "enteredThreadId": TARGET,
+                    "recovered": [],
+                    "reused": [],
+                    "skipped": [],
+                    "failures": [],
+                    "error": {
+                        "threadId": TARGET,
+                        "kind": "corrupt",
+                        "detail": "missing parent",
+                        "executionBlocked": true
+                    },
+                    "executionBlocked": true
+                }}}))
+            )
+        )
+    })
+    .await
+    .expect("load 必须在部分成功契约下完成");
+    assert_eq!(load.unwrap(), TARGET);
+    assert_eq!(
+        atoms::ACTIVE_SESSION_ID.state().read().as_str(),
+        TARGET,
+        "恢复失败不得清空目标会话"
+    );
+    assert!(
+        client.check_restore_error().is_ok(),
+        "恢复失败不得写粘滞 restore_error"
+    );
+    let notification_state = atoms::NOTIFICATION.state();
+    let notice_guard = notification_state.read();
+    let notice = notice_guard.as_ref().expect("恢复失败必须有用户可见注记");
+    assert!(notice.message.contains("corrupt"), "{}", notice.message);
+    assert!(
+        notice.message.contains("missing parent"),
+        "{}",
+        notice.message
+    );
+    drop(notice_guard);
+    assert!(CONFIRM_PAYLOAD.state().read().is_none());
+    assert_no_request(&server, Duration::from_millis(50)).await;
+}
+
+/// partial：历史加载成功，提示相关会话数量，不覆盖会话身份。
+#[tokio::test]
+#[serial_test::serial]
+async fn partial_recovery_meta_sets_notification() {
+    let _guard = UiAtomsGuard::capture();
+    let _notification = NotificationGuard::capture();
+    let (client, server) = interactive_client();
+    let (load, _) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            client.load_session(TARGET, "/startup", None),
+            reach_load(
+                &server,
+                Ok(json!({"_meta": {"peri.recovery": {
+                    "status": "partial",
+                    "rootThreadId": TARGET,
+                    "enteredThreadId": TARGET,
+                    "recovered": [TARGET],
+                    "reused": [],
+                    "skipped": [],
+                    "failures": [{
+                        "threadId": "broken-child",
+                        "kind": "unavailable",
+                        "detail": "store down",
+                        "executionBlocked": false
+                    }],
+                    "executionBlocked": false
+                }}}))
+            )
+        )
+    })
+    .await
+    .expect("partial load 必须成功");
+    assert_eq!(load.unwrap(), TARGET);
+    assert_eq!(atoms::ACTIVE_SESSION_ID.state().read().as_str(), TARGET);
+    let notification_state = atoms::NOTIFICATION.state();
+    let notice = notification_state.read();
+    let notice = notice.as_ref().unwrap();
+    assert!(notice.message.contains('1'), "{}", notice.message);
+    assert!(client.check_restore_error().is_ok());
+}
+
+/// 无法解析的 recovery meta 只告警，不影响 load。
+#[tokio::test]
+#[serial_test::serial]
+async fn malformed_recovery_meta_is_ignored() {
+    let _guard = UiAtomsGuard::capture();
+    let _notification = NotificationGuard::capture();
+    let (client, server) = interactive_client();
+    let (load, _) = tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::join!(
+            client.load_session(TARGET, "/startup", None),
+            reach_load(
+                &server,
+                Ok(json!({"_meta": {"peri.recovery": {"status": "unknown-shape"}}}))
+            )
+        )
+    })
+    .await
+    .expect("损坏的恢复字段不得阻断 load");
+    assert_eq!(load.unwrap(), TARGET);
+    assert!(client.check_restore_error().is_ok());
+    assert_eq!(atoms::ACTIVE_SESSION_ID.state().read().as_str(), TARGET);
+    assert!(atoms::NOTIFICATION.state().read().is_none());
+}
+
+/// 启动恢复失败后，下一次 ensure 先重试同一目标，而不是 session/new。
+#[tokio::test]
+#[serial_test::serial]
+async fn startup_load_failure_is_retried_by_next_ensure() {
+    let _guard = UiAtomsGuard::capture();
+    let (client, server) = interactive_client();
+    client.reserve_startup_restore().await;
+    let loader = client.clone();
+    let load =
+        tokio::spawn(async move { loader.load_startup_session(TARGET, "/startup", None).await });
+
+    let (id, method, params) = next_request(&server).await;
+    assert_eq!(method, "peri/session_context");
+    assert_eq!(params["sessionId"], TARGET);
+    server
+        .send_response(id, Ok(context(EFFECTIVE_CWD)))
+        .await
+        .unwrap();
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/load");
+    server
+        .send_response(id, Err(AcpError::new(-32603, "load failed")))
+        .await
+        .unwrap();
+    assert_eq!(load.await.unwrap().unwrap_err().code, -32603);
+    assert_eq!(
+        client.startup_retry_target().as_deref(),
+        Some(TARGET),
+        "失败目标必须保留给下一次 ensure"
+    );
+
+    let retry_client = client.clone();
+    let retry = tokio::spawn(async move { retry_client.ensure_session("/startup", None).await });
+    let (id, method, params) = next_request(&server).await;
+    assert_eq!(method, "peri/session_context", "重试必须先解析同一目标");
+    assert_eq!(params["sessionId"], TARGET);
+    server
+        .send_response(id, Ok(context(EFFECTIVE_CWD)))
+        .await
+        .unwrap();
+    let (id, method, params) = next_request(&server).await;
+    assert_eq!(method, "session/load", "重试不得变成 session/new");
+    assert_eq!(params["sessionId"], TARGET);
+    server.send_response(id, Ok(json!({}))).await.unwrap();
+    assert_eq!(retry.await.unwrap().unwrap(), TARGET);
+    assert_eq!(client.startup_retry_target(), None);
+    assert!(client.check_restore_error().is_ok());
+    assert_eq!(atoms::ACTIVE_SESSION_ID.state().read().as_str(), TARGET);
+}
+
+/// 重试再次失败：返回真实错误，不静默新建会话。
+#[tokio::test]
+#[serial_test::serial]
+async fn startup_load_failure_retry_does_not_create_a_new_session() {
+    let _guard = UiAtomsGuard::capture();
+    let (client, server) = interactive_client();
+    client.reserve_startup_restore().await;
+    let loader = client.clone();
+    let load =
+        tokio::spawn(async move { loader.load_startup_session(TARGET, "/startup", None).await });
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "peri/session_context");
+    server
+        .send_response(id, Ok(context(EFFECTIVE_CWD)))
+        .await
+        .unwrap();
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/load");
+    server
+        .send_response(id, Err(AcpError::new(-32603, "load failed")))
+        .await
+        .unwrap();
+    assert_eq!(load.await.unwrap().unwrap_err().code, -32603);
+
+    let retry_client = client.clone();
+    let retry = tokio::spawn(async move { retry_client.ensure_session("/startup", None).await });
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "peri/session_context");
+    server
+        .send_response(id, Ok(context(EFFECTIVE_CWD)))
+        .await
+        .unwrap();
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/load");
+    server
+        .send_response(id, Err(AcpError::new(-32603, "still failing")))
+        .await
+        .unwrap();
+    assert_eq!(retry.await.unwrap().unwrap_err().code, -32603);
+    assert_eq!(client.startup_retry_target().as_deref(), Some(TARGET));
+    assert_no_request(&server, Duration::from_millis(100)).await;
+}
+
+/// `/clear` 是显式新会话：清除失败目标与粘滞错误，下一次 ensure 不再重试。
+#[tokio::test]
+#[serial_test::serial]
+async fn clear_after_startup_failure_creates_new_session() {
+    let _guard = UiAtomsGuard::capture();
+    let (client, server) = interactive_client();
+    client.reserve_startup_restore().await;
+    let loader = client.clone();
+    let load =
+        tokio::spawn(async move { loader.load_startup_session(TARGET, "/startup", None).await });
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "peri/session_context");
+    server
+        .send_response(id, Ok(context(EFFECTIVE_CWD)))
+        .await
+        .unwrap();
+    let (id, method, _) = next_request(&server).await;
+    assert_eq!(method, "session/load");
+    server
+        .send_response(id, Err(AcpError::new(-32603, "load failed")))
+        .await
+        .unwrap();
+    assert_eq!(load.await.unwrap().unwrap_err().code, -32603);
+
+    let clearer = client.clone();
+    let clear = tokio::spawn(async move { clearer.new_session("/w", None).await });
+    let (id, method, params) = next_request(&server).await;
+    assert_eq!(method, "session/new");
+    assert_eq!(params["cwd"], "/w");
+    server
+        .send_response(id, Ok(json!({ "sessionId": "fresh" })))
+        .await
+        .unwrap();
+    assert_eq!(clear.await.unwrap().unwrap(), "fresh");
+    assert_eq!(client.startup_retry_target(), None);
+    assert!(client.check_restore_error().is_ok());
+    let ensured = client.ensure_session("/w", None).await.unwrap();
+    assert_eq!(ensured, "fresh");
 }

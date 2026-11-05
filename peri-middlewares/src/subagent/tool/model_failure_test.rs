@@ -281,7 +281,7 @@ async fn run_sync_fixture(fixture: FailureFixture, status: Option<u16>) -> SyncF
         .with_tools(shared_tools)
         .with_event_bus(Arc::new(event_bus))
         .build();
-    queue.push(QueuedMessage::prompt(
+    queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human("parent request"),
     ));

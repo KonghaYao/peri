@@ -96,7 +96,7 @@ async fn test_after_agent_background_tasks_suppress_and_resume_goal() {
             Middleware::after_agent(&mw, &mut state, &output)
                 .await
                 .unwrap();
-            session.queue().drain_all();
+            session.queue().drain_all_sync();
             let registration = manager
                 .register(BgTaskRegistration {
                     task_id: "background".into(),
@@ -111,7 +111,10 @@ async fn test_after_agent_background_tasks_suppress_and_resume_goal() {
                     .await
                     .unwrap();
                 assert!(result.block_continue.is_none(), "{kind:?} 活跃时不应续跑");
-                assert!(session.queue().drain_all().is_empty(), "后台期间不应注入");
+                assert!(
+                    session.queue().drain_all_sync().is_empty(),
+                    "后台期间不应注入"
+                );
                 assert_eq!(controller.continuation_count.load(Ordering::Relaxed), 1);
                 assert_eq!(
                     mw.pending_rounds.load(Ordering::Relaxed),
@@ -142,7 +145,7 @@ async fn test_after_agent_background_tasks_suppress_and_resume_goal() {
             assert_eq!(result.block_continue.as_deref(), Some("goal_active"));
             assert_eq!(controller.continuation_count.load(Ordering::Relaxed), 2);
             assert_eq!(mw.pending_rounds.load(Ordering::Relaxed), 2);
-            let messages = session.queue().drain_all();
+            let messages = session.queue().drain_all_sync();
             assert_eq!(messages.len(), 1);
             assert_eq!(messages[0].kind, peri_agent::session::MessageKind::Defer);
             assert_eq!(
@@ -236,7 +239,7 @@ async fn test_after_agent_goal_active_注入_steering_并设_block_continue() {
     );
 
     // 注入路径：v2 MessageQueue 应收到 1 条 Defer（GoalSteering）
-    let drained = state.v2_queue().drain_all();
+    let drained = state.v2_queue().drain_all_sync();
     assert_eq!(drained.len(), 1, "应 push 1 条 goal steering Defer 消息");
     assert_eq!(drained[0].kind, peri_agent::session::MessageKind::Defer);
     assert_eq!(
@@ -276,7 +279,7 @@ async fn test_after_agent_no_goal_放行_不注入() {
         "无 goal 时不应设 block_continue"
     );
     // 无 goal 时 queue 应为空
-    let drained = state.v2_queue().drain_all();
+    let drained = state.v2_queue().drain_all_sync();
     assert!(drained.is_empty(), "无 goal 时不应 push 任何消息");
 }
 
@@ -306,7 +309,7 @@ async fn test_after_agent_existing_block_continue_不干预() {
     assert_eq!(controller.continuation_count.load(Ordering::Relaxed), 0);
     assert_eq!(mw.pending_rounds.load(Ordering::Relaxed), 0);
     // 不干预时 queue 应为空
-    let drained = state.v2_queue().drain_all();
+    let drained = state.v2_queue().drain_all_sync();
     assert!(
         drained.is_empty(),
         "已有 block_continue 时不应 push steering"
@@ -364,7 +367,7 @@ async fn test_after_agent_terminal_重置_pending_rounds() {
     );
 
     // 验证 queue 累积：两次 active（r1 / r3）各 push 1 条 Defer，r2 终态不 push
-    let drained_msg = state.v2_queue().drain_all();
+    let drained_msg = state.v2_queue().drain_all_sync();
     assert_eq!(
         drained_msg.len(),
         2,

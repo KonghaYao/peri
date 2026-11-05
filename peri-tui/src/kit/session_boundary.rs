@@ -71,6 +71,8 @@ pub fn project_session_boundary(target_session_id: Option<&str>) {
     *atoms::REWIND_QUERY_ERROR.state().write() = None;
     *atoms::TODO_ITEMS.state().write() = Vec::new();
     *atoms::GOAL_SNAPSHOT.state().write() = None;
+    // 占用展示属于会话：新会话的已保存值由 load 响应重新建立，不能沿用上一会话。
+    *atoms::CONTEXT_USAGE.state().write() = None;
     panel_registry::close_panel(PanelKind::Goal);
     if previous_session_id != target_session_id.unwrap_or_default() {
         atoms::BG_TASKS.state().write().clear();

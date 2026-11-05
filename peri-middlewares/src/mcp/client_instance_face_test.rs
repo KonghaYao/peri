@@ -378,3 +378,142 @@ async fn instance_face_reports_unknown_and_disconnected_instances() {
     owner.begin_shutdown();
     let _ = owner.shutdown().await;
 }
+
+// ─── 阶段 4：外围存活任务查询（`workspace_live_tasks`） ─────────────────────
+
+/// 传输不可用 ⇒ `Unknown`，**不是** `Known(vec![])`。
+///
+/// 「查不到」与「确认没有」是两个事实：恢复提醒据此区分「无法确认」和「没有任务」。
+#[tokio::test]
+async fn workspace_live_tasks_transport_failure_is_unknown() {
+    let pool = Arc::new(McpClientPool::new_empty());
+    let port: Arc<dyn McpPoolPort> = pool;
+    let result = port.workspace_live_tasks("thread-a").await;
+    match result {
+        peri_acp_types::ports::PeripheralTasks::Unknown { detail } => {
+            assert!(!detail.is_empty(), "未知必须携带原因");
+        }
+        other => panic!("传输失败必须归入 Unknown，而不是 {other:?}"),
+    }
+}
+
+/// 直接 owner 的查询面读取真实 Workspace 实例状态：Known 携带 task id / owner / state。
+#[tokio::test]
+async fn workspace_live_tasks_reads_owner_scoped_shell_state() {
+    use peri_mcp_workspace::WorkspaceMcpServer;
+    use rmcp::model::{
+        CallToolRequestParams, CallToolResponse, CancelTaskParams, RequestMetaObject,
+    };
+
+    fn owner_meta(owner: &str) -> RequestMetaObject {
+        let mut fields = serde_json::Map::new();
+        fields.insert(
+            peri_mcp_common::task_owner::TASK_OWNER_META_KEY.into(),
+            owner.into(),
+        );
+        RequestMetaObject(rmcp::model::MetaObject(fields))
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy().into_owned(), false);
+    let transport = spawn_builtin_transport_with_handler("workspace", server.clone());
+    let (io, supervisor) = transport.into_parts();
+    let mut service = serve_client_auto(io, &McpCapabilityProfile::disabled(), HANDSHAKE_TIMEOUT)
+        .await
+        .expect("workspace 握手不得超时")
+        .expect("workspace 握手不得失败");
+    let peer = service.peer().clone();
+
+    let (mut owner, spawner) = McpTaskOwner::new();
+    let mut pool = McpClientPool::new_pending_with_spawner(spawner);
+    pool.resource_cache = crate::mcp::resource_cache::McpResourceCache::isolated_for_test();
+    let pool = Arc::new(pool);
+    pool.clients.write().insert(
+        "workspace".to_string(),
+        Arc::new(McpClientHandle {
+            call_gate: Default::default(),
+            name: "workspace".to_string(),
+            version: None,
+            connected_at: None,
+            protocol_version: None,
+            cache_version: None,
+            peer: Some(peer.clone()),
+            tools: Vec::new(),
+            resources: Vec::new(),
+            status: ClientStatus::Connected,
+            oauth_status: Default::default(),
+            source: Some(ConfigSource::Builtin {
+                instance: "workspace".to_string(),
+            }),
+            url: None,
+            skills_capable: false,
+        }),
+    );
+
+    let mut spawn = CallToolRequestParams::new("Bash").with_arguments(
+        json!({"command": "sleep 30", "run_in_background": true})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    spawn.meta = Some(owner_meta("thread-a"));
+    let task_id = match peer
+        .call_tool_once(spawn)
+        .await
+        .expect("background shell starts")
+    {
+        CallToolResponse::Task(created) => created.task.task_id,
+        CallToolResponse::Complete(result) => result
+            .content
+            .iter()
+            .filter_map(|block| block.as_text().map(|text| text.text.clone()))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .lines()
+            .find_map(|line| line.strip_prefix("task_id: ").map(str::to_owned))
+            .expect("receipt carries the task id"),
+        other => panic!("unexpected background start response: {other:?}"),
+    };
+
+    let port: Arc<dyn McpPoolPort> = pool.clone();
+    let listed = port.workspace_live_tasks("thread-a").await;
+    let peri_acp_types::ports::PeripheralTasks::Known(tasks) = listed else {
+        panic!("已连接实例必须给出已知结果: {listed:?}")
+    };
+    assert_eq!(tasks.len(), 1, "只返回该 owner 的存活任务: {tasks:?}");
+    assert_eq!(tasks[0].task_id, task_id);
+    assert_eq!(tasks[0].owner.as_deref(), Some("thread-a"));
+    assert_eq!(tasks[0].state, "working");
+
+    let listed = port.workspace_live_tasks("thread-b").await;
+    let peri_acp_types::ports::PeripheralTasks::Known(tasks) = listed else {
+        panic!("其他 owner 也是已知结果（只是空集）: {listed:?}")
+    };
+    assert!(tasks.is_empty(), "不得看到其他 owner 的任务");
+
+    let mut cancel = CancelTaskParams::new(&task_id);
+    cancel.meta = Some(owner_meta("thread-a"));
+    peer.cancel_task(cancel).await.expect("cancel owned task");
+    tokio::time::timeout(OBSERVE_TIMEOUT, async {
+        loop {
+            match pool.workspace_live_tasks("thread-a").await {
+                peri_acp_types::ports::PeripheralTasks::Known(tasks) if tasks.is_empty() => break,
+                _ => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+    })
+    .await
+    .expect("terminal task leaves the live list");
+
+    pool.clients.write().clear();
+    let _ = service.close_with_timeout(CLOSE_TIMEOUT).await;
+    let outcome = supervisor.close(BUILTIN_CONVERGE_TIMEOUT).await;
+    assert!(
+        !matches!(outcome.server, BuiltinServerExit::AbortedAfterTimeout),
+        "server task 必须收敛，不得 abort: {outcome:?}"
+    );
+    let _ = server.shutdown_shell_tasks().await;
+    drop(pool);
+    owner.begin_shutdown();
+    let _ = owner.shutdown().await;
+}

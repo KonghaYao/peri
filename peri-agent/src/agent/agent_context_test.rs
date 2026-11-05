@@ -108,7 +108,7 @@ fn test_v2_queue_is_shared() {
     let ctx = make_context();
     let ac = AgentContext::from_stage(&ctx);
     // 验证 queue 是同一个实例（通过地址比较或行为验证）
-    assert!(ac.v2_queue().is_empty());
+    assert!(ac.v2_queue().is_empty_sync());
 }
 
 #[test]

@@ -77,6 +77,11 @@ impl AgentStatus {
     pub fn is_active(&self) -> bool {
         matches!(self, Self::Active)
     }
+
+    /// 是否已是终态（结束、失败或取消）
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, Self::Done | Self::Cancelled | Self::Error)
+    }
 }
 
 impl fmt::Display for AgentStatus {
@@ -99,6 +104,77 @@ impl FromStr for AgentStatus {
     }
 }
 
+/// durable 工作意图：中断后是否允许进入会话时自动续跑。
+///
+/// 与实时运行状态（`AgentStatus`）分开：它只记录「下次进入会话是否继续」，不表达
+/// TUI loading 或 TaskManager 的当前忙碌状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkState {
+    /// 不自动续跑。
+    #[default]
+    Idle,
+    /// 允许进入会话后自动续跑。
+    Working,
+    /// 保留显式停止意图，不自动续跑。
+    Stopped,
+}
+
+impl WorkState {
+    /// 序列化为稳定的蛇形字符串，用于 SQLite 列值
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Working => "working",
+            Self::Stopped => "stopped",
+        }
+    }
+
+    /// 一轮 prompt 收尾后的 durable 工作意图（见 `docs/design/session-durability.md` §2.1）。
+    ///
+    /// 用户取消保留显式停止意图；正常完成、明确失败与交还控制都回到不自动续跑。
+    /// 持久化结果不确定时返回 `None`：最后提交的值才是权威事实，本次不能覆盖它。
+    pub fn after_prompt_turn(
+        stop_reason: crate::command::PromptStopReason,
+        persistence_inconsistent: bool,
+    ) -> Option<Self> {
+        if persistence_inconsistent {
+            return None;
+        }
+        Some(match stop_reason {
+            crate::command::PromptStopReason::Cancelled => Self::Stopped,
+            _ => Self::Idle,
+        })
+    }
+
+    /// 子 agent 终态对应的 durable 工作意图：被取消保留停止意图，其余收尾不再续跑。
+    pub fn after_agent_terminal(status: AgentStatus) -> Self {
+        match status {
+            AgentStatus::Cancelled => Self::Stopped,
+            _ => Self::Idle,
+        }
+    }
+}
+
+impl fmt::Display for WorkState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for WorkState {
+    type Err = ThreadMetaParseError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "idle" => Ok(Self::Idle),
+            "working" => Ok(Self::Working),
+            "stopped" => Ok(Self::Stopped),
+            other => Err(ThreadMetaParseError::invalid_work_state(other)),
+        }
+    }
+}
+
 /// 强类型枚举解析失败错误
 ///
 /// 关键约束：禁止 `_ => default` 静默 fallback。任何来自 DB / 外部字符串
@@ -110,6 +186,9 @@ pub enum ThreadMetaParseError {
 
     #[error("非法 agent_status 值: {0:?}（合法值: active / done / cancelled / error）")]
     InvalidAgentStatus(String),
+
+    #[error("非法 work_state 值: {0:?}（合法值: idle / working / stopped）")]
+    InvalidWorkState(String),
 }
 
 impl ThreadMetaParseError {
@@ -119,6 +198,10 @@ impl ThreadMetaParseError {
 
     pub fn invalid_agent_status(s: impl Into<String>) -> Self {
         Self::InvalidAgentStatus(s.into())
+    }
+
+    pub fn invalid_work_state(s: impl Into<String>) -> Self {
+        Self::InvalidWorkState(s.into())
     }
 }
 
@@ -176,6 +259,12 @@ pub struct ThreadMeta {
     /// agent 运行状态（强类型，旧 JSON 缺失时默认 Active）
     #[serde(default)]
     pub agent_status: AgentStatus,
+    /// durable 工作意图（旧 JSON 缺失时默认 Idle）
+    #[serde(default)]
+    pub work_state: WorkState,
+    /// 最近一次有效上下文占用的 token 数；`None` 表示未知，不是零占用。
+    #[serde(default)]
+    pub context_usage_tokens: Option<u64>,
 }
 
 impl ThreadMeta {
@@ -197,6 +286,8 @@ impl ThreadMeta {
             cancel_policy: CancelPolicy::default(),
             config: None,
             agent_status: AgentStatus::default(),
+            work_state: WorkState::default(),
+            context_usage_tokens: None,
         }
     }
 
@@ -222,6 +313,8 @@ impl ThreadMeta {
             cancel_policy: CancelPolicy::default(),
             config: None,
             agent_status: AgentStatus::default(),
+            work_state: WorkState::default(),
+            context_usage_tokens: None,
         }
     }
 }

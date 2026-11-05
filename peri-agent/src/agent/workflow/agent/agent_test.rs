@@ -346,3 +346,204 @@ async fn workflow_bridge_appends_external_after_each_internal_projection() {
         );
     }
 }
+
+/// [回归] workflow agent 的初始指令未被 MQ 接纳时，`execute` 必须直接失败：
+/// 返回 Dead、等 forwarder 收尾、关闭会话作用域，并把原始原因带进失败详情。
+///
+/// 把 `if let Err` 改回 `warn!` 后，执行体会继续跑空循环并返回非 Dead 结果。
+#[tokio::test]
+async fn workflow_initial_prompt_enqueue_failure_is_a_dead_task() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use peri_acp_types::workflow::{AgentExecutor, AgentRunParams, AgentRunResult};
+
+    struct EnqueueFailingFactory;
+
+    #[async_trait::async_trait]
+    impl crate::agent::workflow::WorkflowAgentFactory for EnqueueFailingFactory {
+        async fn resolve_agent_definition(
+            &self,
+            agent_type: &str,
+            _cwd: &str,
+        ) -> Result<WorkflowAgentDefinition, String> {
+            Err(format!("unexpected agent type: {agent_type}"))
+        }
+
+        fn build_tools(
+            &self,
+            _cwd: &str,
+            _disabled: &std::collections::HashSet<String>,
+            _execution_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
+            _mcp_skill_registry: Option<Arc<peri_acp_types::mcp_skills::McpSkillRegistry>>,
+        ) -> Vec<Box<dyn crate::tools::BaseTool>> {
+            Vec::new()
+        }
+
+        fn build_middlewares(
+            &self,
+            _ctx: &crate::agent::workflow::WorkflowAgentContext,
+            _model_name: &str,
+            _skill_names: &[String],
+            _execution_manager: Option<Arc<dyn peri_acp_types::tasks::TaskManager>>,
+        ) -> Vec<Box<dyn crate::middleware::r#trait::Middleware>> {
+            Vec::new()
+        }
+
+        fn build_tool_resolver(&self) -> Arc<dyn crate::tools::ToolInvocationResolver> {
+            Arc::new(crate::tools::DirectToolInvocationResolver)
+        }
+    }
+
+    /// 记录 `execute` 真正构建出的 v2 会话，供作用域关闭断言。
+    struct CapturingV2Builder {
+        session: std::sync::Mutex<Option<Arc<crate::session::Session>>>,
+    }
+
+    impl crate::session::subagent::SubagentV2ContextBuilder for CapturingV2Builder {
+        #[allow(clippy::too_many_arguments)]
+        fn build(
+            &self,
+            session: Option<Arc<crate::session::Session>>,
+            llm: Box<dyn crate::agent::react::ReactLLM + Send + Sync>,
+            chain: Arc<crate::middleware::chain::MiddlewareChain>,
+            tools: Vec<Arc<dyn crate::tools::BaseTool>>,
+            cwd: &str,
+            cancel_token: tokio_util::sync::CancellationToken,
+            tool_invocation_resolver: Option<Arc<dyn crate::tools::ToolInvocationResolver>>,
+            compact_config: Option<crate::agent::CompactConfig>,
+            context_budget: Option<crate::agent::ContextBudget>,
+            compact_llm: Option<Arc<dyn peri_model::Model>>,
+            agent_id: Option<peri_acp_types::identity::AgentId>,
+        ) -> crate::session::subagent::V2SubagentContext {
+            if let Some(session) = session.as_ref() {
+                *self.session.lock().unwrap() = Some(Arc::clone(session));
+            }
+            crate::session::subagent::DefaultSubagentV2ContextBuilder.build(
+                session,
+                llm,
+                chain,
+                tools,
+                cwd,
+                cancel_token,
+                tool_invocation_resolver,
+                compact_config,
+                context_budget,
+                compact_llm,
+                agent_id,
+            )
+        }
+    }
+
+    let resources = crate::session::test_resources::mock::MockSessionResources::new();
+    let cwd = "/workflow-enqueue";
+    resources.register_bound_session("workflow-parent", cwd);
+    resources.fail_mq_enqueues();
+
+    let forwarder_done = Arc::new(AtomicBool::new(false));
+    let done_for_launcher = Arc::clone(&forwarder_done);
+    let captured = Arc::new(CapturingV2Builder {
+        session: std::sync::Mutex::new(None),
+    });
+    let captured_for_ctx = Arc::clone(&captured);
+
+    let ctx = crate::agent::workflow::WorkflowAgentContext {
+        cwd: cwd.to_owned(),
+        frozen_claude_md: None,
+        frozen_claude_local_md: None,
+        frozen_skill_summary: None,
+        mcp_skill_registry: None,
+        session_id: Some("workflow-parent".into()),
+        session_resources: Some(
+            resources.clone() as Arc<dyn peri_acp_types::session_resources::SessionResources>
+        ),
+        compact_config: None,
+        cancel: None,
+        system_prompt: Some("workflow system".into()),
+        external_instructions: None,
+        environment_prompt: None,
+        legacy_embedded_instructions: false,
+        broker: None,
+        permission_mode: None,
+        frozen_date: None,
+        frozen_language: None,
+        progress_tx: None,
+        subagent_ctx_builder: Some(
+            captured_for_ctx as Arc<dyn crate::session::subagent::SubagentV2ContextBuilder>,
+        ),
+        agent_prompt_builder: Arc::new(|_, _, _, _| String::new()),
+        model_factory: Arc::new(|_, _, _| crate::agent::workflow::WorkflowModel {
+            model: Arc::new(WorkflowCaptureModel {
+                requests: std::sync::Mutex::new(Vec::new()),
+            }),
+            model_name: "workflow-test".into(),
+            tier: None,
+        }),
+        middleware_factory: Arc::new(EnqueueFailingFactory),
+        system_prompt_fallback: Arc::new(|_, _, _| "fallback".into()),
+        forwarder_launcher: Arc::new(move |mut handles, _session_id, _on_event| {
+            let done = Arc::clone(&done_for_launcher);
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        Some(_) = handles.render_rx.recv() => {},
+                        Some(_) = handles.state_rx.recv() => {},
+                        Ok(_) = handles.observe_rx.recv() => {},
+                        else => break,
+                    }
+                }
+                done.store(true, Ordering::SeqCst);
+            })
+        }),
+        publish_hook: None,
+        langfuse_hooks: None,
+        langfuse_event_handler: None,
+        meta_harness_disabled: Default::default(),
+    };
+
+    let result = crate::agent::workflow::WorkflowAgentExecutor::new(ctx)
+        .execute(AgentRunParams {
+            run_id: "workflow-enqueue-run".into(),
+            agent_id: 1,
+            prompt: "task".into(),
+            schema: None,
+            model: None,
+            max_tokens: None,
+            agent_type: None,
+            isolation: None,
+            allowed_tools: None,
+            label: None,
+            phase: None,
+        })
+        .await;
+
+    match result {
+        AgentRunResult::Dead { reason, detail } => {
+            assert_eq!(reason.as_deref(), Some("initial-prompt-enqueue-failed"));
+            let detail = detail.unwrap_or_default();
+            assert!(
+                detail.contains("could not be admitted"),
+                "失败详情必须指认入队失败: {detail}"
+            );
+            assert!(
+                detail.contains("injected MQ enqueue failure"),
+                "失败详情必须带原始原因: {detail}"
+            );
+        }
+        other => panic!("expected Dead, got {other:?}"),
+    }
+    assert!(
+        forwarder_done.load(Ordering::SeqCst),
+        "失败分支必须等 forwarder 结束"
+    );
+    let session = captured
+        .session
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("execute 必须已构建 v2 会话");
+    assert!(
+        session.config().cancel_token.is_cancelled(),
+        "失败分支必须关闭会话作用域"
+    );
+}

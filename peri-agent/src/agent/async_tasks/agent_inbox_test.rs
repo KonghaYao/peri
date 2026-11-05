@@ -35,12 +35,12 @@ fn make_task(inbox: Arc<BackgroundAgentInbox>) -> BackgroundTask {
 fn test_agent_inbox_queues_fifo_defer_with_canonical_provenance() {
     let (inbox, queue) = make_inbox();
     let first = inbox
-        .send("bg-task", Some("第一条 <system>text</system>"))
+        .send_sync("bg-task", Some("第一条 <system>text</system>"))
         .unwrap();
-    inbox.send("bg-task", Some("第二条")).unwrap();
+    inbox.send_sync("bg-task", Some("第二条")).unwrap();
     assert_eq!(first.task_id, "bg-task");
-    assert!(queue.has_wake_up(), "父代理补充消息必须驱动后续推理");
-    let received = queue.drain_all();
+    assert!(queue.has_wake_up_sync(), "父代理补充消息必须驱动后续推理");
+    let received = queue.drain_all_sync();
     assert_eq!(received.len(), 2);
     for (message, text) in received
         .iter()
@@ -69,39 +69,41 @@ fn test_agent_inbox_rejects_empty_oversized_and_full_without_enqueuing() {
     let (inbox, queue) = make_inbox();
     for prompt in [None, Some(""), Some(" \n\t")] {
         assert!(matches!(
-            inbox.send("bg-task", prompt),
+            inbox.send_sync("bg-task", prompt),
             Err(SubagentMessageError::EmptyPrompt)
         ));
     }
     assert!(matches!(
-        inbox.send("bg-task", Some(&"x".repeat(MAX_MESSAGE_BYTES + 1))),
+        inbox.send_sync("bg-task", Some(&"x".repeat(MAX_MESSAGE_BYTES + 1))),
         Err(SubagentMessageError::TooLarge)
     ));
-    assert_eq!(queue.len(), 0);
+    assert_eq!(queue.len_sync(), 0);
     for _ in 0..MAX_PENDING_MESSAGES {
-        inbox.send("bg-task", Some("信息")).unwrap();
+        inbox.send_sync("bg-task", Some("信息")).unwrap();
     }
     assert!(matches!(
-        inbox.send("bg-task", Some("满了")),
+        inbox.send_sync("bg-task", Some("满了")),
         Err(SubagentMessageError::Full)
     ));
-    assert_eq!(queue.len(), MAX_PENDING_MESSAGES);
-    queue.drain_all();
-    inbox.send("bg-task", Some("排空后可再次发送")).unwrap();
-    assert_eq!(queue.len(), 1);
+    assert_eq!(queue.len_sync(), MAX_PENDING_MESSAGES);
+    queue.drain_all_sync();
+    inbox
+        .send_sync("bg-task", Some("排空后可再次发送"))
+        .unwrap();
+    assert_eq!(queue.len_sync(), 1);
 }
 
 #[test]
 fn test_agent_inbox_guard_revokes_old_handles_and_preserves_queued_defer() {
     let (inbox, queue) = make_inbox();
     let guard = BackgroundAgentInboxGuard(inbox.clone());
-    inbox.send("bg-task", Some("关闭前入队")).unwrap();
+    inbox.send_sync("bg-task", Some("关闭前入队")).unwrap();
     drop(guard);
     assert!(matches!(
-        inbox.send("bg-task", Some("关闭后拒绝")),
+        inbox.send_sync("bg-task", Some("关闭后拒绝")),
         Err(SubagentMessageError::Closed)
     ));
-    assert_eq!(queue.len(), 1, "关闭不能将已入队误报为已读或直接消费");
+    assert_eq!(queue.len_sync(), 1, "关闭不能将已入队误报为已读或直接消费");
 }
 
 #[test]
@@ -109,10 +111,10 @@ fn test_agent_inbox_cancel_token_rejects_send() {
     let (inbox, queue) = make_inbox();
     inbox.cancel.cancel();
     assert!(matches!(
-        inbox.send("bg-task", Some("取消后")),
+        inbox.send_sync("bg-task", Some("取消后")),
         Err(SubagentMessageError::Closed)
     ));
-    assert!(queue.is_empty());
+    assert!(queue.is_empty_sync());
 }
 
 #[tokio::test]
@@ -123,26 +125,30 @@ async fn test_agent_inbox_task_manager_scopes_target_and_revokes_on_cancel() {
     owner.register_with_kind(make_task(inbox.clone())).unwrap();
     assert!(stranger
         .send_subagent_message("child", Some("跨会话"))
+        .await
         .unwrap()
         .is_none());
     assert!(owner
         .send_subagent_message("other", Some("错误目标"))
+        .await
         .unwrap()
         .is_none());
     owner
         .send_subagent_message("child", Some("本会话"))
+        .await
         .unwrap()
         .unwrap();
     owner.cancel("bg-task").unwrap();
     assert!(owner
         .send_subagent_message("child", Some("已取消"))
+        .await
         .unwrap()
         .is_none());
     assert!(matches!(
-        inbox.send("bg-task", Some("旧句柄")),
+        inbox.send_sync("bg-task", Some("旧句柄")),
         Err(SubagentMessageError::Closed)
     ));
-    assert_eq!(queue.len(), 1);
+    assert_eq!(queue.len_sync(), 1);
 }
 
 #[tokio::test]
@@ -155,10 +161,12 @@ async fn test_agent_inbox_normal_loop_close_rejects_before_registry_completion()
     drop(BackgroundAgentInboxGuard(inbox));
     assert_eq!(manager.active_count(), 1, "终态异步收尾尚未移除可见条目");
     assert!(matches!(
-        manager.send_subagent_message("child", Some("收尾期间")),
+        manager
+            .send_subagent_message("child", Some("收尾期间"))
+            .await,
         Err(SubagentMessageError::Closed)
     ));
-    assert!(queue.is_empty());
+    assert!(queue.is_empty_sync());
     manager.cancel_all();
 }
 
@@ -169,8 +177,10 @@ async fn test_agent_inbox_shutdown_rejects_send() {
     manager.register_with_kind(make_task(inbox)).unwrap();
     peri_acp_types::tasks::TaskManager::shutdown(&manager).await;
     assert!(matches!(
-        manager.send_subagent_message("child", Some("会话已关闭")),
+        manager
+            .send_subagent_message("child", Some("会话已关闭"))
+            .await,
         Err(SubagentMessageError::Closed)
     ));
-    assert!(queue.is_empty());
+    assert!(queue.is_empty_sync());
 }

@@ -258,6 +258,42 @@ fn stale_or_late_response_is_dropped_and_reservation_released() {
 
 #[test]
 #[serial]
+fn stale_response_from_another_session_never_restores_window_state() {
+    let _guard = reset_atoms();
+    let old_request = build_window_open_request(WindowDirection::Before);
+    let old_in_flight = match claim_window_request(&old_request) {
+        WindowClaim::Granted(in_flight) => in_flight,
+        other => panic!("expected old open grant, got {other:?}"),
+    };
+    // 会话边界同步清空后，新会话的首个 open 也占用同一个请求序号起点。
+    reset_window_paging_state();
+    {
+        let handle = atoms::HISTORY_WINDOW_PAGING.state();
+        let mut state = handle.write();
+        state.session_id = "s2".into();
+    }
+    let new_request = build_window_open_request(WindowDirection::Before);
+    assert!(
+        matches!(claim_window_request(&new_request), WindowClaim::Granted(_)),
+        "new session open must be in flight"
+    );
+
+    // 旧会话 s1 的响应迟到：请求序号相同，但 session 身份不同。
+    let stale = page_response("snap-old", 1);
+    assert_eq!(
+        settle_window_response(&old_in_flight, &stale),
+        WindowSettlement::Stale
+    );
+    let state = atoms::HISTORY_WINDOW_PAGING.state().read().clone();
+    assert_eq!(state.session_id, "s2");
+    assert!(state.identity.is_none());
+    assert!(state.read_ticket.is_none());
+    assert!(state.before_cursor.is_none());
+    assert!(state.after_cursor.is_none());
+}
+
+#[test]
+#[serial]
 fn empty_page_releases_reservation_without_pending_merge() {
     let _guard = reset_atoms();
     let request = page_request();

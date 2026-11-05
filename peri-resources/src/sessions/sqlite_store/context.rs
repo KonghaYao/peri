@@ -6,7 +6,7 @@
 
 use super::{
     database::SqliteSessionDatabase,
-    row_mapping::{meta_from_row, ThreadRow, THREAD_META_COLUMNS},
+    row_mapping::{meta_from_row, ThreadRow},
 };
 use anyhow::Result;
 use peri_acp_types::{
@@ -21,7 +21,7 @@ impl SqliteSessionDatabase {
     /// 小型 metadata 投影；上下文事实由独立历史读取提供。
     pub(super) async fn load_meta(&self, id: &ThreadId) -> Result<ThreadMeta> {
         let mut connection = self.pool.acquire().await?;
-        load_meta_on(&mut connection, id).await
+        load_meta_on(&mut connection, id, self.thread_meta_columns()).await
     }
 
     pub(super) async fn load_payloads(&self, id: &ThreadId) -> Result<Vec<PersistedPayload>> {
@@ -35,7 +35,7 @@ impl SqliteSessionDatabase {
         thread_id: &ThreadId,
     ) -> Result<Vec<PersistedPayload>> {
         let mut connection = self.pool.acquire().await?;
-        load_context_payloads_on(&mut connection, thread_id).await
+        load_context_payloads_on(&mut connection, thread_id, self.thread_meta_columns()).await
     }
 
     pub(super) async fn load_inherited_context(
@@ -43,7 +43,7 @@ impl SqliteSessionDatabase {
         thread_id: &ThreadId,
     ) -> Result<InheritedContext> {
         let mut connection = self.pool.acquire().await?;
-        load_inherited_context_on(&mut connection, thread_id).await
+        load_inherited_context_on(&mut connection, thread_id, self.thread_meta_columns()).await
     }
 
     pub(super) async fn load_context(&self, thread_id: &ThreadId) -> Result<Vec<BaseMessage>> {
@@ -56,13 +56,13 @@ impl SqliteSessionDatabase {
     }
 
     pub(super) async fn list_child_threads(&self, parent_id: &ThreadId) -> Result<Vec<ThreadMeta>> {
-        let rows: Vec<ThreadRow> =
-            sqlx::query_as(AssertSqlSafe(format!(
-                "SELECT {THREAD_META_COLUMNS} FROM threads t WHERE t.parent_thread_id = ?1 ORDER BY t.created_at ASC"
-            )))
-            .bind(parent_id.as_str())
-            .fetch_all(&self.pool)
-            .await?;
+        let rows: Vec<ThreadRow> = sqlx::query_as(AssertSqlSafe(format!(
+            "SELECT {} FROM threads t WHERE t.parent_thread_id = ?1 ORDER BY t.created_at ASC",
+            self.thread_meta_columns()
+        )))
+        .bind(parent_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
 
         decode_meta_rows(rows)
     }
@@ -75,7 +75,8 @@ impl SqliteSessionDatabase {
                     SELECT t.* FROM threads t
                     INNER JOIN session_tree st ON t.parent_thread_id = st.id
                 )
-                SELECT {THREAD_META_COLUMNS} FROM session_tree t ORDER BY t.created_at ASC"
+                SELECT {} FROM session_tree t ORDER BY t.created_at ASC",
+            self.thread_meta_columns()
         )))
         .bind(root_id.as_str())
         .fetch_all(&self.pool)
@@ -90,32 +91,33 @@ fn decode_meta_rows(rows: Vec<ThreadRow>) -> Result<Vec<ThreadMeta>> {
         .map(|row| {
             meta_from_row(
                 row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10,
-                row.11, row.12,
+                row.11, row.12, row.13, row.14,
             )
         })
         .collect()
 }
 
-/// 单条 metadata 的语句原文：列投影与谓词只有这一份定义。
+/// 指定投影的单条 metadata 语句；列投影只有 `THREAD_META_COLUMNS` 与其旧库变体两份。
 ///
 /// 投影里**不得**出现全历史聚合（曾经的 `SUM(LENGTH(content))`，见 `row_mapping.rs`）：恢复
 /// 热路径执行的就是这条语句，有界读取的计划证据必须与它同文（见 `session_history_perf_test.rs`）。
-pub(in crate::sessions) fn meta_by_id_statement() -> String {
-    format!("SELECT {THREAD_META_COLUMNS} FROM threads t WHERE t.id = ?1")
+pub(super) fn meta_by_id_statement_with(columns: &str) -> String {
+    format!("SELECT {columns} FROM threads t WHERE t.id = ?1")
 }
 
 /// 单条 metadata 读取。
 pub(super) async fn load_meta_on(
     connection: &mut SqliteConnection,
     id: &ThreadId,
+    columns: &str,
 ) -> Result<ThreadMeta> {
-    let row: ThreadRow = sqlx::query_as(AssertSqlSafe(meta_by_id_statement()))
+    let row: ThreadRow = sqlx::query_as(AssertSqlSafe(meta_by_id_statement_with(columns)))
         .bind(id.as_str())
         .fetch_one(&mut *connection)
         .await?;
     meta_from_row(
         row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7, row.8, row.9, row.10, row.11,
-        row.12,
+        row.12, row.13, row.14,
     )
 }
 
@@ -166,8 +168,9 @@ fn decode_payload_rows(rows: Vec<(String, String)>) -> Result<Vec<PersistedPaylo
 pub(super) async fn load_context_payloads_on(
     connection: &mut SqliteConnection,
     thread_id: &ThreadId,
+    meta_columns: &str,
 ) -> Result<Vec<PersistedPayload>> {
-    let mut payloads = load_inherited_context_on(connection, thread_id)
+    let mut payloads = load_inherited_context_on(connection, thread_id, meta_columns)
         .await?
         .payloads;
     payloads.extend(load_payloads_on(connection, thread_id).await?);
@@ -185,6 +188,7 @@ pub(in crate::sessions) const PARENT_THREAD_ID_SQL: &str =
 pub(super) async fn load_inherited_context_on(
     connection: &mut SqliteConnection,
     thread_id: &ThreadId,
+    meta_columns: &str,
 ) -> Result<InheritedContext> {
     // 已保存的继承快照是权威值：父会话之后的 compact/rewind 都不改变它。
     let stored: (Option<String>,) = sqlx::query_as(INHERITED_CONTEXT_SQL)
@@ -210,7 +214,7 @@ pub(super) async fn load_inherited_context_on(
         if index == 0 {
             continue;
         }
-        let meta = load_meta_on(connection, tid).await?;
+        let meta = load_meta_on(connection, tid, meta_columns).await?;
         let Some(cutoff) = meta.snapshot_at_message_id else {
             context = InheritedContext::default();
             continue;

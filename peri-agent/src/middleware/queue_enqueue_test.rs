@@ -63,8 +63,8 @@ async fn enqueue_v2_message_wakes_registered_consumer_without_extra_handle() {
         BaseMessage::human(MessageContent::text("steer")),
     );
     state.enqueue_v2_message(msg);
-    assert_eq!(queue.len(), 1);
-    assert!(queue.has_wake_up());
+    assert_eq!(queue.len_sync(), 1);
+    assert!(queue.has_wake_up_sync());
     tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
         .await
         .expect("middleware publication must wake the shared mailbox");
@@ -83,6 +83,6 @@ fn enqueue_v2_message_publishes_without_a_consumer() {
         BaseMessage::human(MessageContent::text("steer")),
     );
     state.enqueue_v2_message(msg);
-    assert_eq!(queue.len(), 1);
-    assert!(queue.has_wake_up());
+    assert_eq!(queue.len_sync(), 1);
+    assert!(queue.has_wake_up_sync());
 }

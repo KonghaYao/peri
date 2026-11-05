@@ -369,7 +369,23 @@ pub(super) async fn spawn_subagent_impl(
         MessageSource::UserInput,
         BaseMessage::human(prompt_message),
     );
-    v2_ctx.context.session.queue.push(queued);
+    if let Err(error) = v2_ctx.context.session.queue.enqueue_sent(queued).await {
+        // 初始指令没有进入 MQ：本次启动必须失败，不能在没有输入的情况下继续跑完并
+        // 报告 Completed。已持久化的 child 标记为 Error，避免留下「看起来还在跑」的记录。
+        let detail = format!("child initial prompt could not be admitted: {error}");
+        if let Some(store) = session_resources.as_ref() {
+            let patch = peri_acp_types::session_resources::SessionMetaPatch {
+                status: Some(peri_acp_types::thread::AgentStatus::Error),
+                ..Default::default()
+            };
+            if let Err(mark) = store.update_session_meta(&child_thread_id, &patch).await {
+                return Err(
+                    format!("{detail}; child error status could not be recorded: {mark}").into(),
+                );
+            }
+        }
+        return Err(detail.into());
+    }
 
     match run_mode {
         SubagentRunMode::Sync => {
@@ -460,6 +476,16 @@ pub(super) async fn spawn_subagent_impl(
         }
         SubagentRunMode::Background => {
             let task_id_clone = task_id.clone();
+            // 终态结果投递到父会话的 MQ（无父 thread 时不做跨会话投递）。
+            let terminal_route = match (&session_resources, parent_thread_id.clone()) {
+                (Some(store), Some(target)) => {
+                    Some(super::super::terminal_settlement::TerminalMqRoute {
+                        store: Arc::clone(store),
+                        target: peri_acp_types::thread::ThreadId::from(target.as_str()),
+                    })
+                }
+                _ => None,
+            };
             spawn_background_subagent(
                 task_id.clone(),
                 child_thread_id.clone(),
@@ -472,6 +498,7 @@ pub(super) async fn spawn_subagent_impl(
                 super::completion_delivery(parent, on_bg_complete),
                 langfuse_bridge,
                 session_resources,
+                terminal_route,
                 deregister_runtime,
                 on_subagent_start,
                 on_subagent_stop,

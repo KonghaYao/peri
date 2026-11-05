@@ -895,6 +895,7 @@ composer-attachments = @ { $count } files
 composer-image-attachment = [Image] { $name }
 composer-image-attachments = [Image] ×{ $count } · { $names }
 composer-context-usage = { $pct }% ctx
+composer-context-usage-unknown = ctx unknown
 
 # ---- Message View Placeholders ----
 
@@ -1427,7 +1428,12 @@ thread-history-user = User
 thread-history-assistant = Assistant
 thread-history-system = System context
 thread-history-tool = Tool result
-session-restore-failed = Session restore failed: { $error }. Retry or use /clear to create a session.
+session-restore-failed = Session restore failed: { $error }. Resend your message to retry, or use /clear to create a session; you can also pick a historical session in /threads.
+session-recovery-blocked = History was loaded, but recovery preparation failed ({ $kind }): { $detail }. This session cannot execute; re-enter to retry, or use /clear to create a new session.
+session-recovery-failed-retryable = History was loaded, but recovery preparation failed ({ $kind }): { $detail }. Resend your message to continue.
+session-recovery-partial = History was loaded; { $count } related session(s) could not be recovered.
+steer-recovery-blocked = Session recovery did not complete, so execution is blocked: { $error }. Your draft has been kept; re-enter the session to retry, or use /clear.
+prompt-recovery-blocked = Session recovery did not complete, so execution is blocked: { $error }. Re-enter the session to retry, or use /clear.
 session-creation-failed = Session creation failed: { $error }
 
 panel-host-settings = Host settings

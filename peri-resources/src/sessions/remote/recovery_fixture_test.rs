@@ -237,14 +237,19 @@ impl FakeBackend {
                 None => Vec::new(),
             };
         }
-        if spec.sql == session_sql::select_meta_statement("probe").sql {
+        if spec.sql
+            == session_sql::select_meta_statement("probe", session_sql::MetaProjection::Current).sql
+        {
             return if self.session_row.load(Ordering::SeqCst) {
-                vec![vec![Value::Null; session_sql::META_AGENT_STATUS + 1]]
+                vec![vec![Value::Null; session_sql::META_COLUMN_COUNT]]
             } else {
                 Vec::new()
             };
         }
-        if spec.sql == session_sql::select_session_statement("probe").sql {
+        if spec.sql
+            == session_sql::select_session_statement("probe", session_sql::MetaProjection::Current)
+                .sql
+        {
             return if self.session_row.load(Ordering::SeqCst) {
                 vec![vec![Value::Null; session_sql::FACT_COLUMN_TOTAL]]
             } else {

@@ -116,7 +116,11 @@ fn missing_session_identity_stays_absent_and_ports_share_the_session_queue() {
         BaseMessage::human("notice"),
     );
     context.queue().enqueue(message);
-    assert_eq!(queue.drain_all().len(), 1, "队列端口必须绑定会话级队列实例");
+    assert_eq!(
+        queue.drain_all_sync().len(),
+        1,
+        "队列端口必须绑定会话级队列实例"
+    );
 }
 
 #[test]

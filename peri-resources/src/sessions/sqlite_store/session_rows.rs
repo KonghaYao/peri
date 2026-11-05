@@ -4,9 +4,10 @@
 //! 份列清单、绑定校验与删除语句，避免同一张表的 INSERT/DELETE 与同一套绑定规则在两处
 //! 各自维护。这里只做同事务内的行写入，不决定准入、不落锚点。
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use peri_acp_types::thread::{ThreadId, WorkState};
 use peri_acp_types::workspace::{SessionBinding, WorkspaceId};
-use sqlx::SqliteConnection;
+use sqlx::{SqliteConnection, SqlitePool};
 
 use crate::sessions::canonical;
 use crate::sessions::sqlite_store::workspace::require_project_exists;
@@ -128,6 +129,68 @@ pub(super) const THREAD_DERIVED_DELETES: &[(&str, &str)] = canonical::THREAD_DER
 /// 删除 `threads` 行本身的语句；只在 [`delete_thread_child_rows`] 之后执行（先子后父，
 /// 与远端 `session_lifecycle` 的 messages → session_bindings → threads 顺序一致）。
 pub(super) const DELETE_THREAD_SQL: &str = canonical::DELETE_THREAD_ROW_SQL;
+
+// ── 工作意图与上下文占用：单列写入 ──────────────────────────────────────────
+//
+// 两列都是「最后提交的展示/续跑快照」：只改自己，不碰 `updated_at`，否则每一轮 turn
+// 都会改写会话排序时间。数据面与迁移桥共用这里的 SQL，避免两份列语义。
+
+/// 只写 durable 工作意图这一列。
+pub(super) async fn write_work_state(
+    pool: &SqlitePool,
+    id: &ThreadId,
+    state: WorkState,
+) -> Result<()> {
+    let mut connection = pool.acquire().await?;
+    write_work_state_on(&mut connection, id, state).await
+}
+
+/// 同一份单列写入的事务内形态：调用方与终态、MQ 接纳共用一次提交。
+///
+/// 目标行不存在（0 行）是 NotFound，不是「写成功」；超过 1 行说明 thread 身份不再
+/// 唯一（Corrupt）。工作意图是续跑准入的事实源，这里不能静默吞掉未写入。
+pub(super) async fn write_work_state_on(
+    connection: &mut SqliteConnection,
+    id: &ThreadId,
+    state: WorkState,
+) -> Result<()> {
+    let result = sqlx::query("UPDATE threads SET work_state = ?1 WHERE id = ?2")
+        .bind(state.as_str())
+        .bind(id.as_str())
+        .execute(&mut *connection)
+        .await?;
+    require_single_row(result.rows_affected(), "work_state")?;
+    Ok(())
+}
+
+/// 只写上下文占用快照这一列；`None` 写 NULL（未知，不是零占用）。
+pub(super) async fn write_context_usage(
+    pool: &SqlitePool,
+    id: &ThreadId,
+    tokens: Option<u64>,
+) -> Result<()> {
+    let tokens = tokens
+        .map(|tokens| i64::try_from(tokens).context("context_usage_tokens exceeds i64"))
+        .transpose()?;
+    let result = sqlx::query("UPDATE threads SET context_usage_tokens = ?1 WHERE id = ?2")
+        .bind(tokens)
+        .bind(id.as_str())
+        .execute(pool)
+        .await?;
+    require_single_row(result.rows_affected(), "context_usage_tokens")?;
+    Ok(())
+}
+
+/// 单列写入必须恰好命中一行：0 行是目标不存在，多于一行说明身份不再唯一。
+fn require_single_row(rows_affected: u64, column: &str) -> Result<()> {
+    match rows_affected {
+        1 => Ok(()),
+        0 => Err(anyhow::Error::from(crate::sessions::failure::not_found())),
+        rows => Err(anyhow::Error::from(crate::sessions::failure::corrupt(
+            &format!("threads row is not unique for {column} write: {rows} rows affected"),
+        ))),
+    }
+}
 
 /// 表存在性探测：派生索引表是可选对象，旧库或手工删表后删除路径不得因此失败。
 async fn table_exists(

@@ -80,12 +80,14 @@ impl TaskTerminalDelivery for RecordingTerminalDelivery {
         let mut receipts = self.receipts.lock().unwrap();
         if receipts.insert(delivery_id.as_uuid().to_string()) {
             self.queue
-                .push(QueuedMessage::system_reminder_with_delivery_id(
+                .enqueue_now(QueuedMessage::system_reminder_with_delivery_id(
                     MessageKind::Defer,
                     source,
                     reminder.clone(),
                     delivery_id,
-                ));
+                ))
+                .expect("内存队列必须同步提交")
+                .expect("test MQ enqueue");
         }
         Ok(())
     }
@@ -185,9 +187,9 @@ async fn test_cancelled_background_shell_delivers_cleanup_once_without_second_te
     );
     assert_eq!(calls.load(Ordering::SeqCst), callback_calls);
     assert_eq!(delivery.receipts.lock().unwrap().len(), 1);
-    assert_eq!(queue.len(), 1);
-    assert!(queue.has_wake_up());
-    let messages = queue.drain_all();
+    assert_eq!(queue.len().await.expect("test MQ len"), 1);
+    assert!(queue.has_wake_up().await.expect("test MQ wake"));
+    let messages = queue.drain_all_async().await;
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].kind, MessageKind::Defer);
     assert_eq!(messages[0].source, MessageSource::ShellComplete);
@@ -254,10 +256,17 @@ async fn test_natural_background_shell_completion_delivers_defer_through_the_man
     );
     assert_eq!(calls.load(Ordering::SeqCst), callback_calls);
     assert_eq!(delivery.receipts.lock().unwrap().len(), 1);
-    assert_eq!(queue.len(), 1, "自然完成必须投递 1 条消息");
-    assert!(queue.has_wake_up(), "Defer 必须唤醒 idle 会话循环");
+    assert_eq!(
+        queue.len().await.expect("test MQ len"),
+        1,
+        "自然完成必须投递 1 条消息"
+    );
+    assert!(
+        queue.has_wake_up().await.expect("test MQ wake"),
+        "Defer 必须唤醒 idle 会话循环"
+    );
 
-    let messages = queue.drain_all();
+    let messages = queue.drain_all_async().await;
     assert_eq!(messages.len(), 1);
     assert_eq!(
         messages[0].kind,

@@ -10,19 +10,42 @@ use crate::session::executor::ContinuationRequest;
 use crate::session::SessionActivation;
 use crate::transport::types::AcpError;
 
-pub(super) fn pending_request(
+/// 调度准入只需要这几个布尔事实；复制后必须释放 sessions 锁，再查询 MQ。
+pub(super) struct PendingState {
+    pub closing: bool,
+    pub cancel_active: bool,
+    pub continuation_in_flight: bool,
+    pub continuation_armed: bool,
+}
+
+impl PendingState {
+    pub(super) fn from_state(state: &SessionState) -> Self {
+        Self {
+            closing: state.closing,
+            cancel_active: state.cancel_token.is_some(),
+            continuation_in_flight: state.continuation_in_flight,
+            continuation_armed: state.continuation_armed,
+        }
+    }
+}
+
+pub(super) async fn pending_request(
     session_id: &str,
-    state: &SessionState,
+    state: &PendingState,
     queue: &MessageQueue,
     activation: &SessionActivation,
     mailbox: &AsyncResultMailbox,
 ) -> Option<ContinuationRequest> {
-    if state.closing || state.cancel_token.is_some() || state.continuation_in_flight {
+    if state.closing || state.cancel_active || state.continuation_in_flight {
         return None;
     }
-    let (mq_steering, pending_result) = if activation.can_activate(queue) {
+    let (mq_steering, pending_result) = if activation.can_activate(queue).await {
         (true, false)
-    } else if state.continuation_armed && queue.has_pending_defer(&MessageSource::SubAgentComplete)
+    } else if state.continuation_armed
+        && queue
+            .has_pending_defer(&MessageSource::SubAgentComplete)
+            .await
+            .unwrap_or(false)
     {
         (false, false)
     } else if activation.can_activate_result(mailbox) {
@@ -76,7 +99,7 @@ pub(super) fn ensure_listener(
                 }
                 wake.borrow_and_update();
                 result_changed.borrow_and_update();
-                let request = {
+                let pending = {
                     let sessions = tokio::select! {
                         biased;
                         _ = cancellation.cancelled() => return,
@@ -92,14 +115,16 @@ pub(super) fn ensure_listener(
                     if !Arc::ptr_eq(&runtime.activation, &listener_activation) {
                         return;
                     }
-                    pending_request(
-                        &session_id,
-                        state,
-                        &queue,
-                        &runtime.activation,
-                        &runtime.async_result_mailbox,
-                    )
+                    PendingState::from_state(state)
                 };
+                let request = pending_request(
+                    &session_id,
+                    &pending,
+                    &queue,
+                    &listener_activation,
+                    &mailbox,
+                )
+                .await;
                 if let Some(request) = request {
                     if sender.send(request).is_err() {
                         tracing::error!(%session_id, "session activation channel closed");
@@ -130,23 +155,50 @@ pub(super) fn ensure_listener(
     Ok(())
 }
 
-pub(super) fn mq_allowed(cfg: &AcpServerConfig, session_id: &str) -> bool {
-    cfg.session_manager
-        .get_session(session_id)
-        .is_some_and(|runtime| {
-            !runtime.cancel_token.is_cancelled()
-                && runtime.activation.can_activate(&runtime.v2_message_queue)
-        })
+pub(super) async fn mq_allowed(cfg: &AcpServerConfig, session_id: &str) -> bool {
+    let Some(runtime) = cfg.session_manager.get_session(session_id) else {
+        return false;
+    };
+    if runtime.cancel_token.is_cancelled() {
+        return false;
+    }
+    let activation = Arc::clone(&runtime.activation);
+    let queue = runtime.v2_message_queue.clone();
+    drop(runtime);
+    activation.can_activate(&queue).await
+}
+
+/// mq steering 的放行判定：正常激活之外，Host 注入且仍在队列里的恢复提醒也必须
+/// 能推进——失败水位记录的是「尝试开始时的 MQ 水位」，一个在 Receive 之前就失败的
+/// 尝试会把刚注入的提醒误算成已处理。提醒仍在队列是队列事实，epoch 与 Stop 判定
+/// 不变，因此这里只补回「已进入但尚未接管」的提醒，不放宽 superseded 保护。
+pub(super) async fn mq_steering_allowed(cfg: &AcpServerConfig, session_id: &str) -> bool {
+    if mq_allowed(cfg, session_id).await {
+        return true;
+    }
+    let Some(runtime) = cfg.session_manager.get_session(session_id) else {
+        return false;
+    };
+    if runtime.cancel_token.is_cancelled() || !runtime.activation.is_allowed() {
+        return false;
+    }
+    let queue = runtime.v2_message_queue.clone();
+    drop(runtime);
+    queue
+        .has_pending_defer(&MessageSource::SessionRecovery)
+        .await
+        .unwrap_or(false)
 }
 
 /// Ready 结果是否仍允许自动尝试（Stop 抑制与失败水位在 owner 内统一判定）。
-pub(super) fn result_allowed(cfg: &AcpServerConfig, session_id: &str) -> bool {
-    cfg.session_manager
-        .get_session(session_id)
-        .is_some_and(|runtime| {
-            !runtime.cancel_token.is_cancelled()
-                && runtime
-                    .activation
-                    .can_activate_result(&runtime.async_result_mailbox)
-        })
+pub(super) async fn result_allowed(cfg: &AcpServerConfig, session_id: &str) -> bool {
+    let Some(runtime) = cfg.session_manager.get_session(session_id) else {
+        return false;
+    };
+    if runtime.cancel_token.is_cancelled() {
+        return false;
+    }
+    runtime
+        .activation
+        .can_activate_result(&runtime.async_result_mailbox)
 }

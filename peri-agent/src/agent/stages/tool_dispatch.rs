@@ -285,7 +285,7 @@ pub async fn dispatch_tools(
     );
 
     // 连续失败追踪 + ToolFailureWarning 注入
-    handle_consecutive_failures(ctx, &collect_outcome.results);
+    handle_consecutive_failures(ctx, &collect_outcome.results).await;
 
     if collect_outcome.was_cancelled {
         tracing::warn!("dispatch_tools: returning Interrupted (was_cancelled)");
@@ -308,7 +308,7 @@ pub async fn dispatch_tools(
 ///
 /// v2 简化为总计数（AtomicU32）。失败累计达阈值时推送 Info 消息到 v2 queue，
 /// 下轮 Receive 阶段消费（带 `<system-reminder>` 包裹）。
-fn handle_consecutive_failures(ctx: &StageContext, results: &[SettledInvocation]) {
+async fn handle_consecutive_failures(ctx: &StageContext, results: &[SettledInvocation]) {
     for settled in results {
         let result = &settled.result;
         if result.is_error {
@@ -341,13 +341,14 @@ fn handle_consecutive_failures(ctx: &StageContext, results: &[SettledInvocation]
                         "failure_count": current,
                     }),
                 );
-                ctx.session
-                    .queue
-                    .push(crate::session::queue::QueuedMessage::system_reminder(
-                        crate::session::queue::MessageKind::Info,
-                        crate::session::queue::MessageSource::ToolFailureWarning,
-                        reminder,
-                    ));
+                let message = crate::session::queue::QueuedMessage::system_reminder(
+                    crate::session::queue::MessageKind::Info,
+                    crate::session::queue::MessageSource::ToolFailureWarning,
+                    reminder,
+                );
+                if let Err(error) = ctx.session.queue.enqueue(message).await {
+                    tracing::warn!(%error, "tool failure warning enqueue failed");
+                }
             }
         } else {
             // 任一成功 → 重置计数

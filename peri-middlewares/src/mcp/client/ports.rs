@@ -24,10 +24,19 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
     fn cancel_oauth_flow(&self, flow_id: &str) -> Result<bool, String> {
         Ok(McpClientPool::cancel_oauth_flow(self, flow_id))
     }
-    fn verify_shared_environment_close(&self, root_session_id: &str) -> Result<(), String> {
-        self.session_bindings
+    async fn verify_shared_environment_close(&self, root_session_id: &str) -> Result<(), String> {
+        let candidates = self
+            .session_bindings
             .read()
-            .verify_environment_close(root_session_id)
+            .close_candidates(root_session_id)?;
+        for (session, manager, inbox) in candidates {
+            if !manager.is_execution_idle() || inbox.has_required().await.unwrap_or(true) {
+                return Err(format!(
+                    "Incomplete: child {session} resources or required messages unfinished"
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn release_agent_session(&self, session_id: &str) -> Result<(), String> {
@@ -61,18 +70,23 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
         &self,
         session_id: &str,
         inbox: InboxHandle,
+        queue: peri_acp_types::session::MessageQueue,
         manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
     ) {
         self.session_bindings
             .write()
-            .bind_agent(session_id, inbox, manager);
+            .bind_agent(session_id, inbox, queue, manager);
     }
 
     fn agent_session_binding(
         &self,
         session_id: &str,
-    ) -> Option<(InboxHandle, Arc<dyn peri_acp_types::tasks::TaskManager>)> {
-        let (inbox, manager) = self.session_bindings.read().binding(session_id)?;
+    ) -> Option<(
+        InboxHandle,
+        peri_acp_types::session::MessageQueue,
+        Arc<dyn peri_acp_types::tasks::TaskManager>,
+    )> {
+        let (inbox, queue, manager) = self.session_bindings.read().binding(session_id)?;
         if manager
             .as_any()
             .downcast_ref::<peri_agent::agent::async_tasks::TaskManager>()
@@ -80,7 +94,7 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
         {
             return None;
         }
-        Some((inbox, manager))
+        Some((inbox, queue, manager))
     }
 
     fn begin_shutdown(&self) {
@@ -175,6 +189,10 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
 
     fn bind_session_task_manager(&self, session_id: &str, manager: &Arc<dyn TaskManager>) {
         McpClientPool::bind_session_task_manager(self, session_id, manager);
+    }
+
+    async fn workspace_live_tasks(&self, owner: &str) -> peri_acp_types::ports::PeripheralTasks {
+        McpClientPool::workspace_live_tasks(self, owner).await
     }
 
     fn attach_connection_notifier(

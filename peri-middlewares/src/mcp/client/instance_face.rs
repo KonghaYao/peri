@@ -16,7 +16,7 @@ use super::*;
 use crate::mcp::resource_tool::{ResourceError, RESOURCE_READ_TIMEOUT};
 use crate::mcp::tool_bridge::{format_contents, TOOL_CALL_TIMEOUT};
 use crate::mcp::ToolCallError;
-use peri_acp_types::ports::McpResourceSubscription;
+use peri_acp_types::ports::{LiveTask, McpResourceSubscription, PeripheralTasks};
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, ReadResourceRequestParams, RequestMetaObject,
     ResourceContents, ServerNotification, SubscriptionFilter,
@@ -26,6 +26,30 @@ use tokio::sync::mpsc;
 
 /// 宿主面订阅的通知缓冲；满即丢弃（唤醒信号，消费方按快照补读）。
 const INSTANCE_SUBSCRIPTION_BUFFER: usize = 64;
+
+/// 恢复期的外围任务查询期限：进入会话不能被未响应的 workspace 拖住。
+const PERIPHERAL_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// `shell_task_list` 的 wire 形状（Workspace 以 JSON 文本返回）。
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShellTaskListWire {
+    unknown: bool,
+    #[serde(default)]
+    detail: Option<String>,
+    #[serde(default)]
+    tasks: Vec<ShellTaskWire>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShellTaskWire {
+    task_id: String,
+    #[serde(default)]
+    owner: Option<String>,
+    #[serde(default)]
+    state: String,
+}
 
 impl McpClientPool {
     /// 解析池内实例的可消费句柄（按实例消费的统一入口）。
@@ -115,6 +139,55 @@ impl McpClientPool {
             .to_string()),
             Err(error) => Err(instance_tool_error(instance, tool, error)),
         }
+    }
+
+    /// 按直接 owner（thread id）查询 workspace 实例持有的存活 Shell 任务。
+    ///
+    /// 传输失败、非 JSON 响应或服务端明确报告 `unknown` 都归入
+    /// [`PeripheralTasks::Unknown`]：调用方不得把它当成「没有存活任务」。
+    pub(crate) async fn workspace_live_tasks(&self, owner: &str) -> PeripheralTasks {
+        let call = self.call_instance_tool(
+            "workspace",
+            "shell_task_list",
+            serde_json::json!({ "owner": owner }),
+            None,
+        );
+        let text = match peri_time::timeout(PERIPHERAL_QUERY_TIMEOUT, call).await {
+            Ok(Ok(text)) => text,
+            Ok(Err(detail)) => return PeripheralTasks::unknown(detail),
+            Err(_) => {
+                return PeripheralTasks::unknown(format!(
+                    "shell task list query timed out after {}s",
+                    PERIPHERAL_QUERY_TIMEOUT.as_secs()
+                ));
+            }
+        };
+        let parsed: ShellTaskListWire = match serde_json::from_str(&text) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                return PeripheralTasks::unknown(format!(
+                    "shell task list response was not JSON: {error}"
+                ));
+            }
+        };
+        if parsed.unknown {
+            return PeripheralTasks::unknown(
+                parsed
+                    .detail
+                    .unwrap_or_else(|| "workspace reported an unknown shell task state".into()),
+            );
+        }
+        PeripheralTasks::Known(
+            parsed
+                .tasks
+                .into_iter()
+                .map(|task| LiveTask {
+                    task_id: task.task_id,
+                    owner: task.owner,
+                    state: task.state,
+                })
+                .collect(),
+        )
     }
 
     /// 读取池内某实例的资源 URI 正文（首个非空文本内容的按序拼接）。

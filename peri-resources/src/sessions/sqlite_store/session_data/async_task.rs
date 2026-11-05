@@ -10,12 +10,6 @@ impl SqliteSessionData {
         reminder: &TrustedSystemReminder,
     ) -> SessionResourceResult<bool> {
         self.writable()?;
-        let payload = PersistedPayload::SystemReminder {
-            id: message_id,
-            reminder: reminder.clone(),
-        };
-        let content = serialize_persisted_payload(&payload)
-            .map_err(|_| corrupt("history entry is not serializable"))?;
         let mut tx = self
             .database
             .pool
@@ -23,7 +17,30 @@ impl SqliteSessionData {
             .await
             .map_err(|e| map_sqlx(&e))?;
         self.require_session(&mut tx, id).await?;
-        if !thread_exists_on(&mut tx, id).await.map_err(read_failure)? {
+        let appended = self
+            .append_terminal_reminder_on(&mut tx, id, message_id, reminder)
+            .await?;
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(id.clone())))?;
+        Ok(appended)
+    }
+
+    /// 同一份终态提醒写入的事务内形态：关闭结算与单条幂等写入共用一处判定。
+    pub(super) async fn append_terminal_reminder_on(
+        &self,
+        tx: &mut SqliteConnection,
+        id: &ThreadId,
+        message_id: MessageId,
+        reminder: &TrustedSystemReminder,
+    ) -> SessionResourceResult<bool> {
+        let payload = PersistedPayload::SystemReminder {
+            id: message_id,
+            reminder: reminder.clone(),
+        };
+        let content = serialize_persisted_payload(&payload)
+            .map_err(|_| corrupt("history entry is not serializable"))?;
+        if !thread_exists_on(&mut *tx, id).await.map_err(read_failure)? {
             return Err(not_found());
         }
         let existing: Option<(String, String)> =
@@ -39,9 +56,6 @@ impl SqliteSessionData {
                     message_id.as_uuid()
                 )));
             }
-            tx.commit()
-                .await
-                .map_err(|_| commit_failure(Some(id.clone())))?;
             return Ok(false);
         }
         sqlx::query(
@@ -60,9 +74,6 @@ impl SqliteSessionData {
             .execute(&mut *tx)
             .await
             .map_err(|e| map_sqlx(&e))?;
-        tx.commit()
-            .await
-            .map_err(|_| commit_failure(Some(id.clone())))?;
         Ok(true)
     }
 

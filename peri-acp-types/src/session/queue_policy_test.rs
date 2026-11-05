@@ -1,6 +1,7 @@
 use super::*;
 use crate::identity::AttemptId;
 use crate::messages::BaseMessage;
+use crate::session::{MqReceiveDisposition, MqReceivePurpose, TurnId};
 
 fn execution() -> ExecutionBinding {
     ExecutionBinding {
@@ -14,21 +15,30 @@ fn message(policy: MessagePolicy) -> QueuedMessage {
         .with_policy(policy)
 }
 
-#[test]
-fn properties_not_kind_or_severity_decide_activation() {
+#[tokio::test]
+async fn properties_not_kind_or_severity_decide_activation() {
     let queue = MessageQueue::new();
     let current = execution();
-    queue.push(message(MessagePolicy::passive()));
-    assert!(!queue.has_required_for_run(&current));
-    assert!(!queue.has_ensure_processing());
-    queue.push(message(MessagePolicy::continue_current_run(
-        current.clone(),
-    )));
-    assert!(queue.has_required_for_run(&current));
-    assert!(!queue.has_ensure_processing());
-    assert!(!queue.has_required_for_run(&execution()));
-    queue.push(message(MessagePolicy::ensure_processing()));
-    assert!(queue.has_ensure_processing());
+    queue
+        .enqueue(message(MessagePolicy::passive()))
+        .await
+        .unwrap();
+    assert!(!queue.has_required_for_run(&current).await.unwrap());
+    assert!(!queue.has_ensure_processing().await.unwrap());
+    queue
+        .enqueue(message(MessagePolicy::continue_current_run(
+            current.clone(),
+        )))
+        .await
+        .unwrap();
+    assert!(queue.has_required_for_run(&current).await.unwrap());
+    assert!(!queue.has_ensure_processing().await.unwrap());
+    assert!(!queue.has_required_for_run(&execution()).await.unwrap());
+    queue
+        .enqueue(message(MessagePolicy::ensure_processing()))
+        .await
+        .unwrap();
+    assert!(queue.has_ensure_processing().await.unwrap());
 }
 
 #[test]
@@ -49,45 +59,68 @@ fn stop_intent_is_bound_to_its_own_execution() {
     assert!(!stop.policy.notifies_execution());
 }
 
-#[test]
-fn expired_guidance_is_explicitly_suppressed() {
+/// 旧执行绑定的 guidance 在 Receive 中被显式标记为 `Suppress`：删行、不写历史。
+#[tokio::test]
+async fn expired_guidance_is_explicitly_suppressed() {
     let queue = MessageQueue::new();
     let guidance = message(MessagePolicy::continue_current_run(execution()));
     assert_eq!(
         guidance.policy.disposition(&execution()),
         MessageDisposition::Suppressed
     );
-    queue.suppress(guidance);
-    assert_eq!(queue.suppressed_messages().len(), 1);
-    assert!(!queue.has_ensure_processing());
+    queue.enqueue(guidance).await.unwrap();
+    let permit = queue
+        .owner()
+        .begin_receive(MqReceivePurpose::ModelLoop, execution());
+    let items = queue.owner().select_for_receive(&permit).await.unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].disposition, MqReceiveDisposition::Suppress);
+    assert!(!queue.has_ensure_processing().await.unwrap());
 }
 
-#[test]
-fn receive_batch_is_bounded_and_requeue_preserves_admission_order() {
+/// 单次 Receive 有界；剩余项按 `(enqueued_at, id)` 保留，不因批次被截断而丢顺序。
+#[tokio::test]
+async fn receive_selection_is_bounded_and_preserves_remaining_order() {
     let queue = MessageQueue::new();
+    let mut ids = Vec::new();
     for _ in 0..70 {
-        queue.push(message(MessagePolicy::ensure_processing()));
+        let outcome = queue
+            .enqueue(message(MessagePolicy::ensure_processing()))
+            .await
+            .unwrap();
+        ids.push(outcome.entry.id);
     }
-    let claimed = queue.drain_batch(64);
+    let permit = queue
+        .owner()
+        .begin_receive(MqReceivePurpose::ModelLoop, execution());
+    let claimed = queue.owner().select_for_receive(&permit).await.unwrap();
     assert_eq!(claimed.len(), 64);
-    assert_eq!(queue.len(), 6);
-    queue.push(message(MessagePolicy::ensure_processing()));
-    queue.push_batch(claimed);
-    let all = queue.drain_all();
-    let sequences = all
+    let claimed_ids = claimed.iter().map(|item| item.entry.id).collect::<Vec<_>>();
+    assert_eq!(claimed_ids, ids[..64]);
+    queue.owner().receive(permit, claimed).await.unwrap();
+    assert_eq!(queue.len().await.unwrap(), 6);
+
+    let permit = queue
+        .owner()
+        .begin_receive(MqReceivePurpose::ModelLoop, execution());
+    let remaining = queue.owner().select_for_receive(&permit).await.unwrap();
+    let remaining_ids = remaining
         .iter()
-        .map(|item| item.admission_sequence.unwrap())
+        .map(|item| item.entry.id)
         .collect::<Vec<_>>();
-    assert_eq!(sequences, (1..=71).collect::<Vec<_>>());
+    assert_eq!(remaining_ids, ids[64..]);
 }
 
 #[tokio::test]
 async fn run_bound_guidance_wakes_only_its_current_execution() {
     let queue = MessageQueue::new();
     let current = execution();
-    queue.push(message(MessagePolicy::continue_current_run(
-        current.clone(),
-    )));
+    queue
+        .enqueue(message(MessagePolicy::continue_current_run(
+            current.clone(),
+        )))
+        .await
+        .unwrap();
     tokio::time::timeout(
         std::time::Duration::from_millis(20),
         queue.await_wake_for_run(&current),

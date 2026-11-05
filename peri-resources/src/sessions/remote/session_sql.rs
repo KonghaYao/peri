@@ -7,17 +7,18 @@
 //!
 //! 规则与 [`super::sql`] 一致，只是范围更大：SQL 文本在编译期定型（`concat!` + `const`），
 //! 会话 id、绑定、时间戳、分页游标、scope 过滤值全部走绑定参数。列投影只有一处来源
-//! （宏 `meta_columns!`），事实投影与前缀投影由它拼出，避免「同一列清单手抄三遍」漂移。
+//! （宏 `meta_columns!`），事实投影与前缀投影由它拼出，避免「同一列清单手抄三遍」漂移；
+//! 旧代只读库（schema ≤ 13）用同形占位列的 [`meta_columns_legacy!`]，解码仍是同一套。
 //!
-//! 解码用的列下标与投影同处一个模块，紧邻各自常量：投影改了，下标跟着改，测试拿真实
-//! 列文本核对前缀关系。
+//! 解码用的列下标与投影同处一个模块，且由最后一个下标推出（[`META_COLUMN_COUNT`]），
+//! 测试拿真实列文本核对前缀关系。
 
 use peri_acp_types::session_resources::{
     NewSession, NewSessionDraft, SessionMetaPatch, SessionResourceError, SessionResourceErrorKind,
     SessionResourceResult,
 };
 use peri_acp_types::store::{MessageFlags, PersistedPayload};
-use peri_acp_types::thread::AgentStatus;
+use peri_acp_types::thread::{AgentStatus, WorkState};
 use peri_acp_types::workspace::{ScopedThreadQuery, SessionBinding, ThreadScope, WorkspaceId};
 use turso_serverless::Value;
 
@@ -35,7 +36,20 @@ macro_rules! meta_columns {
     () => {
         "s.id, s.title, s.cwd, s.created_at, s.updated_at, s.message_count,
     0 as content_size,
-    s.parent_thread_id, s.snapshot_at_message_id, s.hidden, s.cancel_policy, s.config, s.agent_status"
+    s.parent_thread_id, s.snapshot_at_message_id, s.hidden, s.cancel_policy, s.config, s.agent_status,
+    s.context_usage_tokens, s.work_state"
+    };
+}
+
+/// 旧代际（schema ≤ 13）的同一投影：`threads` 还没有两列工作快照，用同形占位列。
+///
+/// 只读打开不迁移，必须能读旧库；列数与顺序与本代一致，解码因此只有一套。
+macro_rules! meta_columns_legacy {
+    () => {
+        "s.id, s.title, s.cwd, s.created_at, s.updated_at, s.message_count,
+    0 as content_size,
+    s.parent_thread_id, s.snapshot_at_message_id, s.hidden, s.cancel_policy, s.config, s.agent_status,
+    NULL as context_usage_tokens, 'idle' as work_state"
     };
 }
 
@@ -58,6 +72,16 @@ macro_rules! fact_columns {
     };
 }
 
+macro_rules! fact_columns_legacy {
+    () => {
+        concat!(
+            meta_columns_legacy!(),
+            ", s.frozen_context, s.inherited_context, ",
+            binding_columns!()
+        )
+    };
+}
+
 /// 列表投影 = meta 投影 + 绑定四列（分页列举需要绑定分类，但不要 frozen/继承区正文）。
 macro_rules! page_columns {
     () => {
@@ -65,9 +89,50 @@ macro_rules! page_columns {
     };
 }
 
+macro_rules! page_columns_legacy {
+    () => {
+        concat!(meta_columns_legacy!(), ", ", binding_columns!())
+    };
+}
+
+/// 同一条语句的两份投影文本：列清单来自同一组宏，`$tail` 只写一次。
+macro_rules! select_pair {
+    ($current:ident, $legacy:ident, $current_columns:ident, $legacy_columns:ident, $tail:literal) => {
+        const $current: &str = concat!("SELECT ", $current_columns!(), $tail);
+        const $legacy: &str = concat!("SELECT ", $legacy_columns!(), $tail);
+    };
+}
+
 // ─── 列下标（由投影顺序决定，测试核对） ────────────────────────────────────────
 
-pub(super) const META_COLUMN_COUNT: usize = 13;
+/// metadata 投影的代数：两列工作快照只在当前代（schema 14）的 `threads` 上存在。
+///
+/// 旧代只读库用同形占位列（`NULL` / `'idle'`），列数与下标不变：读取面只切换投影文本，
+/// 解码只有一套。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MetaProjection {
+    Current,
+    Legacy,
+}
+
+impl MetaProjection {
+    /// 由「压缩前的形状」判定选择投影；该判定来自打开时的身份与形状探测。
+    pub(super) fn from_legacy_shape(legacy: bool) -> Self {
+        if legacy {
+            Self::Legacy
+        } else {
+            Self::Current
+        }
+    }
+
+    fn sql(self, current: &'static str, legacy: &'static str) -> &'static str {
+        match self {
+            Self::Current => current,
+            Self::Legacy => legacy,
+        }
+    }
+}
+
 pub(super) const META_ID: usize = 0;
 pub(super) const META_TITLE: usize = 1;
 pub(super) const META_CWD: usize = 2;
@@ -81,61 +146,82 @@ pub(super) const META_HIDDEN: usize = 9;
 pub(super) const META_CANCEL_POLICY: usize = 10;
 pub(super) const META_CONFIG: usize = 11;
 pub(super) const META_AGENT_STATUS: usize = 12;
+/// 两列工作快照（旧代投影用同形占位列，下标不变）。
+pub(super) const META_CONTEXT_USAGE_TOKENS: usize = META_AGENT_STATUS + 1;
+pub(super) const META_WORK_STATE: usize = META_CONTEXT_USAGE_TOKENS + 1;
+/// meta 投影列数由最后一个下标推出，不另写一遍数字：投影追加列时只改下标。
+pub(super) const META_COLUMN_COUNT: usize = META_WORK_STATE + 1;
 
-pub(super) const FACT_FROZEN: usize = 13;
-pub(super) const FACT_INHERITED: usize = 14;
-pub(super) const FACT_BINDING_VERSION: usize = 15;
-pub(super) const FACT_BINDING_PROJECT: usize = 16;
-pub(super) const FACT_BINDING_WORKSPACE: usize = 17;
-pub(super) const FACT_BINDING_RELATIVE_CWD: usize = 18;
-pub(super) const FACT_COLUMN_TOTAL: usize = 19;
+pub(super) const FACT_FROZEN: usize = META_COLUMN_COUNT;
+pub(super) const FACT_INHERITED: usize = FACT_FROZEN + 1;
+pub(super) const FACT_BINDING_VERSION: usize = FACT_INHERITED + 1;
+pub(super) const FACT_BINDING_PROJECT: usize = FACT_BINDING_VERSION + 1;
+pub(super) const FACT_BINDING_WORKSPACE: usize = FACT_BINDING_PROJECT + 1;
+pub(super) const FACT_BINDING_RELATIVE_CWD: usize = FACT_BINDING_WORKSPACE + 1;
+pub(super) const FACT_COLUMN_TOTAL: usize = FACT_BINDING_RELATIVE_CWD + 1;
 
-pub(super) const PAGE_BINDING_VERSION: usize = 13;
-pub(super) const PAGE_BINDING_PROJECT: usize = 14;
-pub(super) const PAGE_BINDING_WORKSPACE: usize = 15;
-pub(super) const PAGE_BINDING_RELATIVE_CWD: usize = 16;
-pub(super) const PAGE_COLUMN_TOTAL: usize = 17;
+pub(super) const PAGE_BINDING_VERSION: usize = META_COLUMN_COUNT;
+pub(super) const PAGE_BINDING_PROJECT: usize = PAGE_BINDING_VERSION + 1;
+pub(super) const PAGE_BINDING_WORKSPACE: usize = PAGE_BINDING_PROJECT + 1;
+pub(super) const PAGE_BINDING_RELATIVE_CWD: usize = PAGE_BINDING_WORKSPACE + 1;
+pub(super) const PAGE_COLUMN_TOTAL: usize = PAGE_BINDING_RELATIVE_CWD + 1;
 
 /// 会话事实行（单会话读取）的投影。
 pub(super) const META_PROJECTION: &str = meta_columns!();
+pub(super) const META_PROJECTION_LEGACY: &str = meta_columns_legacy!();
 pub(super) const FACT_PROJECTION: &str = fact_columns!();
+pub(super) const FACT_PROJECTION_LEGACY: &str = fact_columns_legacy!();
 pub(super) const PAGE_PROJECTION: &str = page_columns!();
+pub(super) const PAGE_PROJECTION_LEGACY: &str = page_columns_legacy!();
 
 // ─── 读取语句 ─────────────────────────────────────────────────────────────────
 
-const SELECT_SESSION_SQL: &str = concat!(
-    "SELECT ",
-    fact_columns!(),
+select_pair!(
+    SELECT_SESSION_SQL,
+    SELECT_SESSION_SQL_LEGACY,
+    fact_columns,
+    fact_columns_legacy,
     " FROM threads s LEFT JOIN session_bindings b ON b.thread_id = s.id WHERE s.id = ?1"
 );
 
-const SELECT_META_SQL: &str = concat!(
-    "SELECT ",
-    meta_columns!(),
+select_pair!(
+    SELECT_META_SQL,
+    SELECT_META_SQL_LEGACY,
+    meta_columns,
+    meta_columns_legacy,
     " FROM threads s WHERE s.id = ?1"
 );
 
 /// 恢复准入的轻量 frozen 读取：只取一列，不拉绑定、继承区或任何正文。
 const SELECT_FROZEN_SQL: &str = "SELECT s.frozen_context FROM threads s WHERE s.id = ?1";
 
-const SELECT_CHILDREN_SQL: &str = concat!(
-    "SELECT ",
-    meta_columns!(),
+select_pair!(
+    SELECT_CHILDREN_SQL,
+    SELECT_CHILDREN_SQL_LEGACY,
+    meta_columns,
+    meta_columns_legacy,
     " FROM threads s WHERE s.parent_thread_id = ?1 ORDER BY s.created_at ASC, s.id ASC"
 );
 
 /// 以 `?1` 为根的整棵树（含自身）。CTE 名与投影别名同为 `s`，投影常量因此可复用
 /// （内层 `SELECT *` 的形状与表一致，列名即投影里的 `s.<column>`）。
-const SELECT_TREE_SQL: &str = concat!(
-    "WITH RECURSIVE s AS (
+macro_rules! tree_select {
+    ($columns:ident) => {
+        concat!(
+            "WITH RECURSIVE s AS (
         SELECT * FROM threads WHERE id = ?1
         UNION ALL
         SELECT p.* FROM threads p INNER JOIN s ON p.parent_thread_id = s.id
     )
     SELECT ",
-    meta_columns!(),
-    " FROM s ORDER BY s.created_at ASC, s.id ASC"
-);
+            $columns!(),
+            " FROM s ORDER BY s.created_at ASC, s.id ASC"
+        )
+    };
+}
+
+const SELECT_TREE_SQL: &str = tree_select!(meta_columns);
+const SELECT_TREE_SQL_LEGACY: &str = tree_select!(meta_columns_legacy);
 
 const SELECT_MESSAGES_SQL: &str =
     "SELECT m.message_id, m.content, m.truncated, m.excluded, m.projection
@@ -277,14 +363,35 @@ pub(super) fn select_root_statement(id: &str) -> StatementSpec {
     StatementSpec::new(SELECT_ROOT_SQL, vec![Value::Text(id.to_owned())])
 }
 
-/// 分页列举：scope 过滤、游标与上限全部是绑定参数，SQL 文本静态。
+/// 恢复范围候选：根子树中工作意图仍为 `working` 的 thread（与本地 adapter 同一 CTE）。
 ///
-/// scope 用整数判别位 + 绑定值表达（`?1`）：0 = 全部、1 = project、2 = workspace、
-/// 3 = 精确目录。没有绑定行的会话（远端不应存在，本机 legacy 才有的形状）不匹配任何
-/// 带 scope 的查询——远端不借用本机 workspace 登记，也就不假装能做 legacy 路径归属。
-const SELECT_PAGE_SQL: &str = concat!(
-    "SELECT ",
-    page_columns!(),
+/// `UNION`（非 `ALL`）保证父链成环时终止；根已由调用方严格解析，语句本身不再兜底。
+/// 远端投影与本地同代际形状，没有 legacy 分支。
+const SELECT_WORKING_TREE_SQL: &str = "WITH RECURSIVE thread_scope(id) AS (
+    SELECT id FROM threads WHERE id = ?1
+    UNION
+    SELECT child.id FROM threads AS child
+    JOIN thread_scope AS parent ON child.parent_thread_id = parent.id
+) SELECT t.id, t.parent_thread_id, t.context_usage_tokens, t.work_state
+  FROM threads AS t JOIN thread_scope AS scope ON scope.id = t.id
+  WHERE t.work_state = 'working'
+  ORDER BY t.created_at ASC";
+
+/// 恢复范围候选行（根子树 + `working`）。
+pub(super) fn select_working_tree_statement(root: &str) -> StatementSpec {
+    StatementSpec::new(SELECT_WORKING_TREE_SQL, vec![Value::Text(root.to_owned())])
+}
+
+// 分页列举：scope 过滤、游标与上限全部是绑定参数，SQL 文本静态。
+//
+// scope 用整数判别位 + 绑定值表达（`?1`）：0 = 全部、1 = project、2 = workspace、
+// 3 = 精确目录。没有绑定行的会话（远端不应存在，本机 legacy 才有的形状）不匹配任何
+// 带 scope 的查询——远端不借用本机 workspace 登记，也就不假装能做 legacy 路径归属。
+select_pair!(
+    SELECT_PAGE_SQL,
+    SELECT_PAGE_SQL_LEGACY,
+    page_columns,
+    page_columns_legacy,
     " FROM threads s LEFT JOIN session_bindings b ON b.thread_id = s.id
     WHERE s.parent_thread_id IS NULL AND s.hidden = 0 AND s.archived = ?8 AND s.message_count > 0
       AND (?1 = 0
@@ -295,9 +402,11 @@ const SELECT_PAGE_SQL: &str = concat!(
     ORDER BY s.updated_at DESC, s.id DESC LIMIT ?7"
 );
 
-const SELECT_ENV_PAGE_SQL: &str = concat!(
-    "SELECT ",
-    page_columns!(),
+select_pair!(
+    SELECT_ENV_PAGE_SQL,
+    SELECT_ENV_PAGE_SQL_LEGACY,
+    page_columns,
+    page_columns_legacy,
     " FROM threads s LEFT JOIN session_bindings b ON b.thread_id = s.id
     WHERE s.parent_thread_id IS NULL AND s.hidden = 0 AND s.archived = ?8 AND s.message_count > 0
       AND EXISTS (SELECT 1 FROM workspaces w WHERE w.id = s.workspace_id AND w.machine_id = ?2)
@@ -305,9 +414,11 @@ const SELECT_ENV_PAGE_SQL: &str = concat!(
     ORDER BY s.updated_at DESC, s.id DESC LIMIT ?7"
 );
 
-const SELECT_PAGE_V11_SQL: &str = concat!(
-    "SELECT ",
-    page_columns!(),
+select_pair!(
+    SELECT_PAGE_V11_SQL,
+    SELECT_PAGE_V11_SQL_LEGACY,
+    page_columns,
+    page_columns_legacy,
     " FROM threads s LEFT JOIN session_bindings b ON b.thread_id = s.id
     WHERE s.hidden = 0 AND s.message_count > 0
       AND (?1 = 0 OR (?1 = 1 AND b.project_id = ?2)
@@ -316,8 +427,12 @@ const SELECT_PAGE_V11_SQL: &str = concat!(
       AND (?4 = 0 OR (s.updated_at, s.id) < (?5, ?6))
     ORDER BY s.updated_at DESC, s.id DESC LIMIT ?7"
 );
-const SELECT_ENV_PAGE_V11_SQL: &str = concat!(
-    "SELECT ", page_columns!(),
+
+select_pair!(
+    SELECT_ENV_PAGE_V11_SQL,
+    SELECT_ENV_PAGE_V11_SQL_LEGACY,
+    page_columns,
+    page_columns_legacy,
     " FROM threads s LEFT JOIN session_bindings b ON b.thread_id = s.id
     WHERE s.hidden = 0 AND s.message_count > 0
       AND EXISTS (SELECT 1 FROM session_environments env WHERE env.thread_id = s.id AND env.machine_id = ?2)
@@ -326,13 +441,19 @@ const SELECT_ENV_PAGE_V11_SQL: &str = concat!(
 );
 
 /// 会话事实行（含绑定、frozen、继承区）。
-pub(super) fn select_session_statement(id: &str) -> StatementSpec {
-    StatementSpec::new(SELECT_SESSION_SQL, vec![Value::Text(id.to_owned())])
+pub(super) fn select_session_statement(id: &str, projection: MetaProjection) -> StatementSpec {
+    StatementSpec::new(
+        projection.sql(SELECT_SESSION_SQL, SELECT_SESSION_SQL_LEGACY),
+        vec![Value::Text(id.to_owned())],
+    )
 }
 
 /// 会话 metadata 行（不含大字段）。
-pub(super) fn select_meta_statement(id: &str) -> StatementSpec {
-    StatementSpec::new(SELECT_META_SQL, vec![Value::Text(id.to_owned())])
+pub(super) fn select_meta_statement(id: &str, projection: MetaProjection) -> StatementSpec {
+    StatementSpec::new(
+        projection.sql(SELECT_META_SQL, SELECT_META_SQL_LEGACY),
+        vec![Value::Text(id.to_owned())],
+    )
 }
 
 /// 恢复准入的 frozen 单列读取。
@@ -341,13 +462,19 @@ pub(super) fn select_frozen_statement(id: &str) -> StatementSpec {
 }
 
 /// 直接子会话 metadata。
-pub(super) fn select_children_statement(parent: &str) -> StatementSpec {
-    StatementSpec::new(SELECT_CHILDREN_SQL, vec![Value::Text(parent.to_owned())])
+pub(super) fn select_children_statement(parent: &str, projection: MetaProjection) -> StatementSpec {
+    StatementSpec::new(
+        projection.sql(SELECT_CHILDREN_SQL, SELECT_CHILDREN_SQL_LEGACY),
+        vec![Value::Text(parent.to_owned())],
+    )
 }
 
 /// 整棵树 metadata（含根自身）。
-pub(super) fn select_tree_statement(root: &str) -> StatementSpec {
-    StatementSpec::new(SELECT_TREE_SQL, vec![Value::Text(root.to_owned())])
+pub(super) fn select_tree_statement(root: &str, projection: MetaProjection) -> StatementSpec {
+    StatementSpec::new(
+        projection.sql(SELECT_TREE_SQL, SELECT_TREE_SQL_LEGACY),
+        vec![Value::Text(root.to_owned())],
+    )
 }
 
 /// 自有 payload 行（按 canonical 插入序，即 `rowid`）。
@@ -506,13 +633,17 @@ pub(super) fn select_message_flags_statement(id: &str, message_id: &str) -> Stat
 
 /// 分页列举语句；scope 里的相对路径必须能作为文本绑定，否则拒绝（不猜路径相等，
 /// 也不把「无法比较」静默当成「匹配为空」）。
-pub(super) fn page_statement(query: &ScopedThreadQuery) -> SessionResourceResult<StatementSpec> {
-    page_statement_for_archive(query, false)
+pub(super) fn page_statement(
+    query: &ScopedThreadQuery,
+    projection: MetaProjection,
+) -> SessionResourceResult<StatementSpec> {
+    page_statement_for_archive(query, false, projection)
 }
 
 pub(super) fn page_statement_for_archive(
     query: &ScopedThreadQuery,
     archived: bool,
+    projection: MetaProjection,
 ) -> SessionResourceResult<StatementSpec> {
     let (kind, scope_id, relative) = match &query.scope {
         ThreadScope::Environment(machine_id) => (4, Value::Text(machine_id.clone()), Value::Null),
@@ -546,9 +677,9 @@ pub(super) fn page_statement_for_archive(
     let limit = i64::from(query.limit.clamp(1, 200)) + 1;
     Ok(StatementSpec::new(
         if matches!(query.scope, ThreadScope::Environment(_)) {
-            SELECT_ENV_PAGE_SQL
+            projection.sql(SELECT_ENV_PAGE_SQL, SELECT_ENV_PAGE_SQL_LEGACY)
         } else {
-            SELECT_PAGE_SQL
+            projection.sql(SELECT_PAGE_SQL, SELECT_PAGE_SQL_LEGACY)
         },
         vec![
             int_value(kind),
@@ -565,12 +696,13 @@ pub(super) fn page_statement_for_archive(
 
 pub(super) fn page_statement_v11(
     query: &ScopedThreadQuery,
+    projection: MetaProjection,
 ) -> SessionResourceResult<StatementSpec> {
-    let mut spec = page_statement_for_archive(query, false)?;
+    let mut spec = page_statement_for_archive(query, false, projection)?;
     spec.sql = if matches!(query.scope, ThreadScope::Environment(_)) {
-        SELECT_ENV_PAGE_V11_SQL
+        projection.sql(SELECT_ENV_PAGE_V11_SQL, SELECT_ENV_PAGE_V11_SQL_LEGACY)
     } else {
-        SELECT_PAGE_V11_SQL
+        projection.sql(SELECT_PAGE_V11_SQL, SELECT_PAGE_V11_SQL_LEGACY)
     };
     spec.params.pop();
     Ok(spec)
@@ -905,6 +1037,42 @@ pub(super) fn insert_message_statement(
     Ok(StatementSpec::new(
         INSERT_MESSAGE_SQL,
         payload_params(thread_id, payload, flags)?,
+    ))
+}
+
+/// durable 工作意图：只写这一列，不碰 `updated_at`，也不改运行态。
+const UPDATE_WORK_STATE_SQL: &str = "UPDATE threads SET work_state = ?1 WHERE id = ?2";
+
+/// 上下文占用快照：只写这一列，不碰 `updated_at`；`None` 绑定 NULL（未知，不是零占用）。
+const UPDATE_CONTEXT_USAGE_SQL: &str = "UPDATE threads SET context_usage_tokens = ?1 WHERE id = ?2";
+
+/// 工作意图写入语句。
+pub(super) fn work_state_statement(id: &str, state: WorkState) -> StatementSpec {
+    StatementSpec::new(
+        UPDATE_WORK_STATE_SQL,
+        vec![
+            Value::Text(state.as_str().to_owned()),
+            Value::Text(id.to_owned()),
+        ],
+    )
+}
+
+/// 上下文占用写入语句；超出列范围的计数是输入错误，不冒充「暂不可用」。
+pub(super) fn context_usage_statement(
+    id: &str,
+    tokens: Option<u64>,
+) -> SessionResourceResult<StatementSpec> {
+    let tokens = match tokens {
+        Some(tokens) => int_value(i64::try_from(tokens).map_err(|_| {
+            SessionResourceError::new(SessionResourceErrorKind::InvalidInput {
+                detail: "context usage tokens exceed the storable range".to_owned(),
+            })
+        })?),
+        None => Value::Null,
+    };
+    Ok(StatementSpec::new(
+        UPDATE_CONTEXT_USAGE_SQL,
+        vec![tokens, Value::Text(id.to_owned())],
     ))
 }
 

@@ -9,8 +9,9 @@ use super::mutation::StoreAccess;
 use super::schema::{
     acceptance, decode_identity, identity_read_plan, initialization_plan, shape_probe,
     SchemaAcceptance, ShapeProbe, StoreId, StoreIdentityRead, StoreShapeRead, StoreSnapshot,
-    META_INSERT_INDEX, PREVIOUS_CURRENT_STORE_CONTRACT, PREVIOUS_STORE_CONTRACT,
-    REMOTE_SCHEMA_VERSION, STORE_CONTRACT, STORE_META_TABLE,
+    LEGACY_CURRENT_STORE_CONTRACT, META_INSERT_INDEX, OLDER_CURRENT_STORE_CONTRACT,
+    PREVIOUS_CURRENT_STORE_CONTRACT, PREVIOUS_STORE_CONTRACT, REMOTE_SCHEMA_VERSION,
+    STORE_CONTRACT, STORE_META_TABLE,
 };
 use super::session_data::{open_step, OpenStep};
 use super::sql::StatementSpec;
@@ -32,7 +33,7 @@ fn snapshot(version: i64, contract: &str) -> StoreSnapshot {
 /// 声明式形状 → 逐表列形状（判定入口的输入形态），用于离线判定漂移。
 fn declared_shape_map() -> HashMap<String, Vec<ActualColumn>> {
     let mut rows = Vec::new();
-    for table in schema_shape::CURRENT_TABLES {
+    for table in schema_shape::current_tables() {
         for column in table.columns {
             rows.push((
                 table.name.to_owned(),
@@ -75,8 +76,11 @@ fn acceptance_rejects_unknown_versions() {
     assert_eq!(acceptance(REMOTE_SCHEMA_VERSION), SchemaAcceptance::Accept);
     assert_eq!(acceptance(10), SchemaAcceptance::Upgradeable);
     assert_eq!(acceptance(11), SchemaAcceptance::Upgradeable);
-    // 未发布的中间代（13..19）：都是「比本构建新」，不迁移也不降级写入。
-    for version in 13..=19 {
+    // 上一代当前形状（13）只读可用，写打开走增量补齐。
+    assert_eq!(acceptance(12), SchemaAcceptance::Upgradeable);
+    assert_eq!(acceptance(13), SchemaAcceptance::Upgradeable);
+    // 未发布的中间代（15..19）：都是「比本构建新」，不迁移也不降级写入。
+    for version in 15..=19 {
         assert_eq!(
             acceptance(version),
             SchemaAcceptance::TooNew,
@@ -88,18 +92,27 @@ fn acceptance_rejects_unknown_versions() {
     assert_eq!(acceptance(-1), SchemaAcceptance::Unusable);
 }
 
-/// 读取面只有三个代数：本代（`v6` + 12）、上一代当前形状（`v5` + 11）与统一前的 `v2`
-/// （10|11）。其余一律不认识。
+/// 读取面只有五个代数：本代（`v8` + 14）、上一代当前形状（`v7` + 13）、再上一代当前形状
+/// （`v6` + 12）、更早的当前形状（`v5` + 11）与统一前的 `v2`（10|11）。其余一律不认识。
 #[test]
 fn only_the_compatible_contract_and_generation_are_readable() {
     assert!(snapshot(REMOTE_SCHEMA_VERSION, STORE_CONTRACT).readable());
-    assert!(snapshot(11, PREVIOUS_CURRENT_STORE_CONTRACT).readable());
+    assert!(snapshot(13, PREVIOUS_CURRENT_STORE_CONTRACT).readable());
+    assert!(!snapshot(12, PREVIOUS_CURRENT_STORE_CONTRACT).readable());
+    assert!(snapshot(12, LEGACY_CURRENT_STORE_CONTRACT).readable());
+    assert!(!snapshot(11, LEGACY_CURRENT_STORE_CONTRACT).readable());
+    assert!(snapshot(11, OLDER_CURRENT_STORE_CONTRACT).readable());
     assert!(snapshot(10, PREVIOUS_STORE_CONTRACT).readable());
     assert!(snapshot(11, PREVIOUS_STORE_CONTRACT).readable());
-    // 版本与契约必须互相匹配：`v6` 只覆盖 12，`v5` 只覆盖 11，`v2` 只覆盖 10|11。
+    // 版本与契约必须互相匹配：`v8` 只覆盖 14，`v7` 只覆盖 13，`v6` 只覆盖 12，
+    // `v5` 只覆盖 11，`v2` 只覆盖 10|11。
     assert!(!snapshot(10, STORE_CONTRACT).readable());
     assert!(!snapshot(11, STORE_CONTRACT).readable());
+    assert!(!snapshot(12, STORE_CONTRACT).readable());
+    assert!(!snapshot(13, STORE_CONTRACT).readable());
     assert!(!snapshot(REMOTE_SCHEMA_VERSION, PREVIOUS_CURRENT_STORE_CONTRACT).readable());
+    assert!(!snapshot(REMOTE_SCHEMA_VERSION, LEGACY_CURRENT_STORE_CONTRACT).readable());
+    assert!(!snapshot(REMOTE_SCHEMA_VERSION, OLDER_CURRENT_STORE_CONTRACT).readable());
     assert!(!snapshot(REMOTE_SCHEMA_VERSION, PREVIOUS_STORE_CONTRACT).readable());
     assert!(!snapshot(REMOTE_SCHEMA_VERSION, PREVIOUS_STORE_CONTRACT).matches_build());
     for version in [9, 12, 13, 14, 15, 16, 17, 18, 19] {
@@ -162,12 +175,19 @@ fn shape_probe_follows_the_readable_surface() {
         Some(ShapeProbe::Current)
     );
     assert_eq!(
-        shape_probe(&snapshot(
-            11,
-            super::schema::PREVIOUS_CURRENT_STORE_CONTRACT
-        )),
-        Some(ShapeProbe::Current),
-        "上一代当前形状与本代同形（只缺派生索引表），按当前形状探测"
+        shape_probe(&snapshot(13, PREVIOUS_CURRENT_STORE_CONTRACT)),
+        Some(ShapeProbe::PreviousCurrent),
+        "上一代当前形状只缺两列工作快照，按 v13 的冻结声明探测"
+    );
+    assert_eq!(
+        shape_probe(&snapshot(12, LEGACY_CURRENT_STORE_CONTRACT)),
+        Some(ShapeProbe::PreviousCurrent),
+        "再上一代当前形状缺 thread_mq 与两列，退让到 v12 的冻结声明"
+    );
+    assert_eq!(
+        shape_probe(&snapshot(11, OLDER_CURRENT_STORE_CONTRACT)),
+        Some(ShapeProbe::PreviousCurrent),
+        "更早的当前形状缺派生索引表、thread_mq 与两列，仍按 v12 声明探测（派生表可选）"
     );
     for version in [10, 11] {
         assert_eq!(
@@ -180,7 +200,9 @@ fn shape_probe_follows_the_readable_surface() {
         (10, STORE_CONTRACT),
         (9, PREVIOUS_STORE_CONTRACT),
         (12, PREVIOUS_STORE_CONTRACT),
-        (12, super::schema::PREVIOUS_CURRENT_STORE_CONTRACT),
+        (12, PREVIOUS_CURRENT_STORE_CONTRACT),
+        (13, LEGACY_CURRENT_STORE_CONTRACT),
+        (11, PREVIOUS_CURRENT_STORE_CONTRACT),
         (19, PREVIOUS_STORE_CONTRACT),
         (11, "peri.session.store/v3"),
         (11, "peri.session.store/v4"),
@@ -435,14 +457,9 @@ fn identity_decoding_rejects_shapes_it_cannot_explain() {
 #[test]
 fn current_remote_shape_uses_only_declared_tables_and_read_only_pragmas() {
     let tables = super::schema::CURRENT_TABLE_PRAGMAS;
-    assert_eq!(
-        tables.len(),
-        crate::sessions::schema_shape::CURRENT_TABLES.len()
-    );
-    for ((name, sql), shape) in tables
-        .iter()
-        .zip(crate::sessions::schema_shape::CURRENT_TABLES)
-    {
+    let declared = crate::sessions::schema_shape::current_tables();
+    assert_eq!(tables.len(), declared.len());
+    for ((name, sql), shape) in tables.iter().zip(declared) {
         assert_eq!(*name, shape.name);
         assert_eq!(*sql, format!("PRAGMA table_xinfo('{name}')"));
     }

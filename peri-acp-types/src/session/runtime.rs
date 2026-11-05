@@ -31,11 +31,24 @@ impl AgentRuntime {
 /// 同步子 agent（跟随父 agent 取消）。Independent（bg）子 agent 不受影响，
 /// 仅跟随 session 根取消。
 pub fn cancel_cascade_agents<'a>(runtimes: impl IntoIterator<Item = &'a AgentRuntime>) {
+    let _ = cancel_cascade_agents_collecting(runtimes);
+}
+
+/// 同 [`cancel_cascade_agents`]，并返回实际被取消的 thread 身份。
+///
+/// 调用方用它给这些对象落显式停止意图：取消范围与停止范围必须来自同一次判定，
+/// 不能各自再筛一遍。
+pub fn cancel_cascade_agents_collecting<'a>(
+    runtimes: impl IntoIterator<Item = &'a AgentRuntime>,
+) -> Vec<ThreadId> {
+    let mut cancelled = Vec::new();
     for runtime in runtimes {
         if runtime.cancel_policy == CancelPolicy::Cascade {
             runtime.cancel_token.cancel();
+            cancelled.push(runtime.thread_id.clone());
         }
     }
+    cancelled
 }
 
 /// 取消所有 agent（session 结束 / close_session 时）。

@@ -28,6 +28,7 @@ use crate::agent::LangfuseBridgeLike;
 use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
 use crate::session::Session;
 use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::thread::{ThreadId, WorkState};
 
 #[cfg(test)]
 #[path = "run_sync_test.rs"]
@@ -138,6 +139,17 @@ where
     let host = session
         .subagent_host()
         .ok_or("sync child host unavailable")?;
+    // 同步执行不纳入自动恢复：开始执行即回到 idle。新 thread 本就默认 idle，这一写同时
+    // 清掉此前明确停止或崩溃残留的工作意图；辅助写失败不阻断执行。
+    let resources = host.session_resources.clone();
+    if let Some(resources) = resources.as_deref() {
+        if let Err(error) = resources
+            .set_work_state(&ThreadId::from(child_thread_id.clone()), WorkState::Idle)
+            .await
+        {
+            tracing::warn!(%child_thread_id, %error, "sync child work state write failed");
+        }
+    }
     let (handoff_sender, mut handoff_ready) = oneshot::channel();
     let handed_off = Arc::new(AtomicBool::new(false));
     // 子执行由独立任务持有：父工具调用 future 因 cancel 被 drop 时 JoinHandle
@@ -279,6 +291,18 @@ where
         .collect();
     // 交接已成功：worker 持有执行，父调用 future 的 drop 不再终止子任务。
     cancel_guard.disarm();
+    // 交接后由 session 资源 owner 继续执行，必须留下续跑意图。已被取消说明 Stop 已经
+    // 生效，此时再写 working 会覆盖用户的显式停止。
+    if let Some(resources) = resources.as_deref() {
+        if !session.config().cancel_token.is_cancelled() {
+            if let Err(error) = resources
+                .set_work_state(&ThreadId::from(child_thread_id.clone()), WorkState::Working)
+                .await
+            {
+                tracing::warn!(%child_thread_id, %error, "sync child handoff work state write failed");
+            }
+        }
+    }
     Ok(SyncCompletion::Pending(SyncPending {
         receipt,
         pending_tasks,
@@ -712,6 +736,10 @@ pub(super) async fn run_sync_subagent(
         .subagent_host()
         .and_then(|host| host.child_owner.clone());
     // residual 是已确认的交接；无 receipt 时仍须检查动态到达的义务。
+    let unsettled_obligations = match owner.as_ref() {
+        Some(owner) => owner.has_unsettled_obligations().await,
+        None => false,
+    };
     let permit_result = if let Some(error) = settlement_error.as_ref() {
         Err(error.to_string())
     } else if history_flush_failed {
@@ -719,9 +747,7 @@ pub(super) async fn run_sync_subagent(
     } else if matches!(outcome, ChildRunOutcome::HandoffFailed { .. }) {
         Err("child handoff persistence is unconfirmed".into())
     } else if matches!(outcome, ChildRunOutcome::Failed { residual: None, .. })
-        && owner
-            .as_ref()
-            .is_some_and(|owner| owner.has_unsettled_obligations())
+        && unsettled_obligations
     {
         Err("child settlement is unconfirmed after execution failure".into())
     } else {

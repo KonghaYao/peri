@@ -48,19 +48,27 @@ pub(super) const REMOTE_SCHEMA_VERSION: i64 = crate::sessions::canonical::CURREN
 
 /// 远程存储契约标签：形状 + 语义代数，和版本一起决定「这是不是我们认识的那个库」。
 ///
-/// `v6` = 当前形状：在 `v5` 的 canonical 会话表上新增 inherited 派生索引两表（可从 inherited
-/// 列重建）；`v5` 是上一代当前形状（schema 11，没有派生索引表，写打开做一次增量补齐）；
-/// `v2` 是统一前远端会话表形状（schema 10|11，执行登记独立成表）。中间的 13..=19 是
-/// 未发布的开发期形状，本构建一律不认识。
-pub(super) const STORE_CONTRACT: &str = "peri.session.store/v6";
+/// `v8` = 当前形状：在 `v7` 的 canonical 会话表上给 `threads` 追加 `context_usage_tokens`
+/// 与 `work_state`；`v7` 是上一代当前形状（schema 13，已有 `thread_mq`，缺这两列，写打开
+/// 做一次增量补齐）；`v6` 是再上一代（schema 12，缺 `thread_mq`）；`v5` 是 v6 之前
+/// （schema 11，连派生索引表也没有）；`v2` 是统一前远端会话表形状（schema 10|11，
+/// 执行登记独立成表）。中间的 14..=19 是未发布的开发期形状，本构建一律不认识。
+pub(super) const STORE_CONTRACT: &str = "peri.session.store/v8";
 
 /// 唯一升级来源（压缩前形状）：远端会话表形状的上一代（schema 10|11），读得懂，
 /// 写打开先完成一次性搬运升级。
 pub(super) const PREVIOUS_STORE_CONTRACT: &str = "peri.session.store/v2";
 
-/// 上一代当前形状（schema 11）：canonical 会话表与本代相同，只缺 inherited 派生索引表。
-/// 读打开直接可用；写打开做一次增量补齐并推进版本与契约。
-pub(super) const PREVIOUS_CURRENT_STORE_CONTRACT: &str = "peri.session.store/v5";
+/// 上一代当前形状（schema 13）：canonical 会话表与本代相同，只缺 `threads` 的两列工作
+/// 快照。读打开直接可用；写打开做一次增量补齐并推进版本与契约。
+pub(super) const PREVIOUS_CURRENT_STORE_CONTRACT: &str = "peri.session.store/v7";
+
+/// 再上一代当前形状（schema 12）：canonical 会话表与本代相同，缺 `thread_mq` 与两列。
+pub(super) const LEGACY_CURRENT_STORE_CONTRACT: &str = "peri.session.store/v6";
+
+/// 更早的当前形状（schema 11）：canonical 会话表齐全，缺派生索引表、`thread_mq` 与两列。
+/// 同样只读可用，写打开走同一条幂等补齐路径。
+pub(super) const OLDER_CURRENT_STORE_CONTRACT: &str = "peri.session.store/v5";
 
 /// 统一之前的远端会话表：出现它们说明这是一个**旧形状的库**（不是空库）。
 ///
@@ -128,12 +136,15 @@ impl StoreSnapshot {
             && matches!(acceptance(self.schema_version), SchemaAcceptance::Accept)
     }
 
-    /// 本构建的读取面是否覆盖这个库：本代直接读；上一代当前形状（`v5` + 11）与统一前的
-    /// `v2`（10|11）只读可用，写打开走各自的升级路径。代际之外的形状一律不认识。
+    /// 本构建的读取面是否覆盖这个库：本代直接读；`v7` + 13、`v6` + 12 与 `v5` + 11
+    /// （上一代当前形状）以及统一前的 `v2`（10|11）只读可用，写打开走各自的升级路径。
+    /// 代际之外的形状一律不认识。
     pub(super) fn readable(&self) -> bool {
         self.matches_build()
             || (self.contract == PREVIOUS_STORE_CONTRACT && matches!(self.schema_version, 10 | 11))
-            || (self.contract == PREVIOUS_CURRENT_STORE_CONTRACT && self.schema_version == 11)
+            || (self.contract == PREVIOUS_CURRENT_STORE_CONTRACT && self.schema_version == 13)
+            || (self.contract == LEGACY_CURRENT_STORE_CONTRACT && self.schema_version == 12)
+            || (self.contract == OLDER_CURRENT_STORE_CONTRACT && self.schema_version == 11)
     }
 }
 
@@ -142,7 +153,7 @@ impl StoreSnapshot {
 pub(super) enum SchemaAcceptance {
     /// 本构建可读写。
     Accept,
-    /// 已识别的旧版（10|11）：只读使用同一组查询，写打开按契约走搬运或增量补齐。
+    /// 已识别的旧版（10|11|12|13）：只读使用同一组查询，写打开按契约走搬运或增量补齐。
     Upgradeable,
     /// 高于本构建：拒绝，不迁移、不降级写入。
     TooNew,
@@ -153,7 +164,7 @@ pub(super) enum SchemaAcceptance {
 pub(super) fn acceptance(version: i64) -> SchemaAcceptance {
     if version == REMOTE_SCHEMA_VERSION {
         SchemaAcceptance::Accept
-    } else if matches!(version, 10 | 11) {
+    } else if matches!(version, 10..=13) {
         SchemaAcceptance::Upgradeable
     } else if version > REMOTE_SCHEMA_VERSION {
         SchemaAcceptance::TooNew
@@ -244,9 +255,13 @@ pub(super) fn identity_read_plan() -> Vec<StatementSpec> {
 /// 判定不宽容：读得懂的库其形状必须与契约声明的代数逐项相符。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ShapeProbe {
-    /// 当前形状（`v6` + 12）：canonical 会话表逐表严格判定；两张 inherited 派生索引表
-    /// 可选（缺表时读取回退扫描），存在时仍逐项相符。
+    /// 当前形状（`v8` + 14）：canonical 会话表（`threads` 含两列工作快照）+ `thread_mq`
+    /// 逐表严格判定；两张 inherited 派生索引表可选（缺表时读取回退扫描），存在时仍逐项相符。
     Current,
+    /// 上一代与再上一代当前形状（`v7` + 13、`v6` + 12、`v5` + 11）：先按 v13 声明判定
+    /// （`thread_mq` 已就位、`threads` 缺两列），再按 v12 声明判定（缺 `thread_mq`）。
+    /// 写打开做一次增量补齐。
+    PreviousCurrent,
     /// 迁移输入形状（`v2` + 10|11）：搬运输入的上下界，外加要删除对象的严格判定。
     Input,
 }
@@ -274,6 +289,7 @@ pub(super) const CURRENT_TABLE_PRAGMAS: &[(&str, &str)] = &[
         "inherited_payload_index",
         "PRAGMA table_xinfo('inherited_payload_index')",
     ),
+    ("thread_mq", "PRAGMA table_xinfo('thread_mq')"),
 ];
 
 /// 与列形状一起读取；缺失的 canonical 索引由可写打开补齐。
@@ -325,14 +341,17 @@ impl ShapeProbe {
     /// 本机 SQLite 测试使用的单条 SELECT；远端打开使用逐表 PRAGMA，避免不兼容的表值函数。
     pub(super) fn sql(self) -> &'static str {
         match self {
-            Self::Current => schema_shape::CURRENT_COLUMNS_SQL,
+            Self::Current | Self::PreviousCurrent => schema_shape::CURRENT_COLUMNS_SQL,
             Self::Input => schema_shape::INPUT_COLUMNS_SQL,
         }
     }
 
     pub(super) fn table_names(self) -> impl Iterator<Item = &'static str> {
         match self {
-            Self::Current => schema_shape::CURRENT_TABLES
+            Self::Current => schema_shape::current_table_names().collect::<Vec<_>>(),
+            // 上一代当前形状的表集合：v13 的 11 张表（含 `thread_mq`）。v12/v11 缺这张表时
+            // PRAGMA 读回空行，判定按 v12 声明继续。
+            Self::PreviousCurrent => schema_shape::v13_tables()
                 .iter()
                 .map(|table| table.name)
                 .collect::<Vec<_>>(),
@@ -367,6 +386,8 @@ impl ShapeProbe {
         }
         let verdict = match self {
             Self::Current => schema_shape::check_current_shape(tables),
+            Self::PreviousCurrent => schema_shape::check_v13_shape(tables)
+                .or_else(|_| schema_shape::check_v12_shape(tables)),
             Self::Input => schema_shape::check_input_shape(tables)
                 .and_then(|()| schema_shape::check_dropped_shape(tables)),
         };
@@ -399,10 +420,18 @@ pub(super) enum StoreShapeRead {
 /// 与 [`StoreSnapshot::readable`] 同一份判据：探测面与读取面永远一致，不会出现「读得动但
 /// 不探测」或「探测了却不读」的库。
 pub(super) fn shape_probe(snapshot: &StoreSnapshot) -> Option<ShapeProbe> {
-    if snapshot.matches_build()
-        || (snapshot.contract == PREVIOUS_CURRENT_STORE_CONTRACT && snapshot.schema_version == 11)
-    {
+    if snapshot.matches_build() {
         Some(ShapeProbe::Current)
+    } else if snapshot.contract == PREVIOUS_CURRENT_STORE_CONTRACT && snapshot.schema_version == 13
+    {
+        Some(ShapeProbe::PreviousCurrent)
+    } else if snapshot.contract == LEGACY_CURRENT_STORE_CONTRACT && snapshot.schema_version == 12 {
+        // v6 的库缺 `thread_mq`；形状判定按 v13 → v12 的顺序退让。
+        Some(ShapeProbe::PreviousCurrent)
+    } else if snapshot.contract == OLDER_CURRENT_STORE_CONTRACT && snapshot.schema_version == 11 {
+        // v5 的库连 inherited 派生索引表都还没有；形状判定按 v12 声明（这两张表在声明里
+        // 是本可选表，缺表即通过），写打开做一次幂等补齐。
+        Some(ShapeProbe::PreviousCurrent)
     } else if snapshot.readable() {
         Some(ShapeProbe::Input)
     } else {

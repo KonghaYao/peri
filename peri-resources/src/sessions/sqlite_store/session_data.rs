@@ -23,6 +23,10 @@ use peri_acp_types::history_page::{
     HistorySegment, HistorySegmentPlan,
 };
 use peri_acp_types::messages::MessageId;
+use peri_acp_types::session::{
+    MqCancelOutcome, MqEnqueueOutcome, MqEntry, MqFilter, MqInput, MqReceiveOutcome,
+    MqReceiveSelection,
+};
 use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, BindingState, ChildSnapshot, CloseSettlement, ForkSnapshot,
     FrozenSnapshotBytes, FrozenState, NewSession, NewSessionDraft, PersistenceRecovery,
@@ -34,7 +38,7 @@ use peri_acp_types::store::{
     MessageFlags, PersistedPayload,
 };
 use peri_acp_types::system_reminder::TrustedSystemReminder;
-use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta};
+use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta, WorkState};
 use peri_acp_types::workspace::{
     ResolvedWorkspace, ScopedThreadPage, ScopedThreadQuery, SessionBinding, WorkspaceError,
     SESSION_BINDING_VERSION,
@@ -65,6 +69,8 @@ pub(super) mod inherited_index;
 mod inherited_page;
 #[path = "session_data/lifecycle.rs"]
 mod lifecycle;
+#[path = "session_data/mq.rs"]
+mod mq;
 #[path = "session_data/rewind_candidates.rs"]
 mod rewind_candidates;
 

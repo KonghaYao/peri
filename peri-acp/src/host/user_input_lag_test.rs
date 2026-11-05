@@ -6,7 +6,9 @@ async fn user_input_subscription_lag_republishes_current_snapshot() {
     let (cfg, _, sid) = make_user_input_session(&tmp).await;
     let transport = Arc::new(MockTransport::default());
     let wire: Arc<dyn crate::transport::AcpTransport> = transport.clone();
-    let mailbox = crate::host::user_input::ensure_mailbox(&sid, &cfg, &wire).unwrap();
+    let mailbox = crate::host::user_input::ensure_mailbox(&sid, &cfg, &wire)
+        .await
+        .unwrap();
     // 当前线程不 yield：ensure_mailbox 已 subscribe，但 delivery task 尚未运行。
     // 全部填充为其他会话事件；正常分支不会发出任何本会话快照。
     let mut witness = cfg.controller.subscribe();
@@ -47,7 +49,7 @@ async fn user_input_subscription_lag_republishes_current_snapshot() {
             if let Some(snapshot) = snapshots.first() {
                 assert_eq!(snapshot.session_id, sid);
                 assert_eq!(snapshot.generation, mailbox.generation());
-                assert_eq!(snapshot.revision, mailbox.snapshot().revision);
+                assert_eq!(snapshot.revision, mailbox.snapshot().await.revision);
                 break;
             }
             tokio::task::yield_now().await;

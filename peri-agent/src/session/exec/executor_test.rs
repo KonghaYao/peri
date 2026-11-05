@@ -28,6 +28,9 @@ use peri_acp_types::{
 };
 use tokio_util::sync::CancellationToken as AgentCancellationToken;
 
+use peri_acp_types::event::BackgroundTaskResult;
+use peri_acp_types::session::{MessageQueue, SessionAccessPort, SessionInbox};
+
 use super::{
     is_keepgoing, run_session_loop, FrozenSessionData, PromptStopReason, SessionContext, TurnInput,
 };
@@ -292,6 +295,102 @@ fn make_turn_input(
     }
 }
 
+/// 只提供 v2 MessageQueue 的访问端口：用于注入入队失败的会话级 MQ。
+struct FailingQueueAccess {
+    queue: MessageQueue,
+}
+
+impl SessionAccessPort for FailingQueueAccess {
+    fn v2_message_queue(&self, _session_id: &str) -> Option<MessageQueue> {
+        Some(self.queue.clone())
+    }
+
+    fn session_inbox(&self, _session_id: &str) -> Option<Arc<SessionInbox>> {
+        None
+    }
+
+    fn idle_suspended_flag(&self, _session_id: &str) -> Option<Arc<std::sync::atomic::AtomicBool>> {
+        None
+    }
+
+    fn task_manager(
+        &self,
+        _session_id: &str,
+    ) -> Option<Arc<dyn peri_acp_types::tasks::TaskManager>> {
+        None
+    }
+
+    fn goal_controller(
+        &self,
+        _session_id: &str,
+    ) -> Option<Arc<dyn peri_acp_types::goal::GoalController>> {
+        None
+    }
+
+    fn register_runtime(
+        &self,
+        _session_id: &str,
+    ) -> Option<peri_acp_types::frozen::RegisterRuntimeFn> {
+        None
+    }
+
+    fn deregister_runtime(
+        &self,
+        _session_id: &str,
+    ) -> Option<peri_acp_types::frozen::DeregisterRuntimeFn> {
+        None
+    }
+
+    fn cancel_cascade_children(&self, _session_id: &str) {}
+
+    fn cron_bridge_for(&self, _session_id: &str) -> bool {
+        false
+    }
+}
+
+/// [回归] `bg_results` 没有第二次投递机会：注入失败必须以本轮失败结束，
+/// 不能只留日志后继续当作成功。
+#[tokio::test]
+async fn bg_result_injection_failure_fails_the_turn() {
+    let session = crate::session::test_resources::TestSession::open().await;
+    let read_only = session.read_only_resources().await;
+    let queue = MessageQueue::bind(read_only, session.thread_id());
+    let mut ctx = make_session_context("bg-injection-failure");
+    ctx.session_access = Some(Arc::new(FailingQueueAccess { queue }));
+
+    let sink = Arc::new(MockEventSink::new());
+    let mut turn = make_turn_input(
+        Arc::clone(&sink) as Arc<dyn EventSink>,
+        MessageContent::text("继续"),
+        false,
+        vec![],
+    );
+    turn.bg_results = vec![BackgroundTaskResult {
+        task_id: "bg-injection-task".into(),
+        agent_name: "test-agent".into(),
+        prompt_summary: "test".into(),
+        success: true,
+        output: "done".into(),
+        tool_calls_count: 0,
+        duration_ms: 1,
+        timed_out: false,
+        child_thread_id: None,
+        subagent_failure: None,
+        shell_output: None,
+    }];
+
+    let result = run_session_loop(ctx, turn).await;
+
+    assert!(!result.ok, "注入失败不得静默成功");
+    let failure = result.failure.expect("本轮必须携带失败事实");
+    assert!(
+        failure.public_message.contains("bg-injection-task"),
+        "失败信息必须带 task_id: {}",
+        failure.public_message
+    );
+    assert_eq!(sink.last_push_done_stop_reason().as_deref(), Some("error"));
+}
+
 /// [回归测试] turn 缺少 frozen 时，fallback builder 产出的完整 snapshot
 /// 必须原样进入唯一 stage request，不能再拆成会丢失 language/meta 的 legacy 字段。
 #[tokio::test]
@@ -405,7 +504,7 @@ async fn test_user_input_keepgoing_with_empty_history_reaches_stage_for_resumed_
         Arc::new(|_| {}),
     );
     mailbox
-        .enqueue(&EnqueueUserInputRequest {
+        .enqueue_sync(&EnqueueUserInputRequest {
             session_id: "queued-keepgoing".into(),
             generation: mailbox.generation().into(),
             command_id: "enqueue".into(),
@@ -414,9 +513,9 @@ async fn test_user_input_keepgoing_with_empty_history_reaches_stage_for_resumed_
             original_draft: "首条输入尚未领取".into(),
         })
         .unwrap();
-    mailbox.stop();
+    mailbox.stop_sync();
     mailbox
-        .attach_external_attempt(AgentCancellationToken::new(), true)
+        .attach_external_attempt_sync(AgentCancellationToken::new(), true)
         .unwrap();
     context.user_input_mailbox = Some(mailbox);
     let sink = Arc::new(MockEventSink::new());
@@ -795,7 +894,7 @@ async fn test_run_session_loop_intercept_inject_enters_agent_pipeline() {
         1,
         "Inject 分发必须构建 agent 管线（stage_build 被调用一次）"
     );
-    let queued = session_arc.queue().drain_all();
+    let queued = session_arc.queue().drain_all_sync();
     let injected = queued.iter().find(|q| q.kind == MessageKind::Prompt);
     assert!(
         matches!(injected, Some(q) if q.message().unwrap().content().contains("/skill tdd")),

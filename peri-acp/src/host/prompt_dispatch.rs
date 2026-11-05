@@ -5,6 +5,7 @@ use std::sync::Arc;
 use super::continuation;
 use crate::dispatch::prompt::extract_and_validate_run_prompt_params;
 use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::thread::{ThreadId, WorkState};
 use serde_json::Value;
 
 use super::{extract_session_id, run_prompt, AcpServerConfig, PromptLocks, SharedSessions};
@@ -74,6 +75,27 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         .get(&prompt_session_id)
         .and_then(|state| state.environment.clone());
     let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+    // 恢复准备失败且分类为不可执行时，服务端拒绝本会话的全部执行入口：
+    // 用户 prompt、scheduled、continuation 与 idle-suspended 注入都在这里截住。
+    if let Some(block) = cfg
+        .session_manager
+        .get_session(&prompt_session_id)
+        .and_then(|session| session.recovery_execution_block())
+    {
+        return Err(AcpError::new(
+            -32017,
+            format!(
+                "Session execution is blocked by a failed recovery: {}: {}",
+                block.kind, block.detail
+            ),
+        )
+        .with_data(serde_json::json!({
+            "reason": "recovery_execution_blocked",
+            "kind": block.kind.as_str(),
+            "threadId": block.thread_id,
+            "detail": block.detail,
+        })));
+    }
     {
         let sessions = sessions.lock().await;
         let state = sessions
@@ -124,10 +146,19 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         super::workspace::validate_expected(cfg, &prompt_session_id, None).await?;
         let (_, content, _attachments) = extract_and_validate_run_prompt_params(&params)?;
         if let Some(inbox) = cfg.session_manager.session_inbox_for(&prompt_session_id) {
-            inbox.handle().push_prompt(
-                peri_acp_types::session::MessageSource::UserInput,
-                BaseMessage::human(content),
-            );
+            if let Err(error) = inbox
+                .handle()
+                .push_prompt(
+                    peri_acp_types::session::MessageSource::UserInput,
+                    BaseMessage::human(content),
+                )
+                .await
+            {
+                return Err(AcpError::new(
+                    -32603,
+                    format!("prompt injection into suspended turn failed: {error}"),
+                ));
+            }
             tracing::info!(
                 session_id = %prompt_session_id,
                 "prompt injected while turn suspended (await_wake); loop will wake and consume"
@@ -168,80 +199,129 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     if let Some(epoch) = continuation_epoch {
         #[cfg(test)]
         admission_gate::wait(&prompt_session_id).await;
-        let dispatchable = {
-            let mut sessions = sessions.lock().await;
-            sessions.get_mut(&prompt_session_id).is_some_and(|state| {
-                if state.closing
-                    || cfg
-                        .session_manager
-                        .get_session(&prompt_session_id)
-                        .is_none_or(|runtime| runtime.cancel_token.is_cancelled())
-                {
+        let mq_steering = matches!(
+            origin,
+            PromptOrigin::Scheduled
+                | PromptOrigin::Continuation {
+                    mq_steering: true,
+                    ..
+                }
+        );
+        // 只有显式的 continuation mq steering 需要激活门；Scheduled 已获调度批准，
+        // 不能再用上一次失败留下的抑制状态拒绝它。
+        let continuation_mq_steering = matches!(
+            origin,
+            PromptOrigin::Continuation {
+                mq_steering: true,
+                ..
+            }
+        );
+        let pending_result = matches!(
+            origin,
+            PromptOrigin::Continuation {
+                pending_result: true,
+                ..
+            }
+        );
+        // MQ 激活查询不能持有 sessions 锁。
+        let (cancelled, has_subagent, has_mq, has_ready_result) =
+            match cfg.session_manager.get_session(&prompt_session_id) {
+                Some(session) => {
+                    let cancelled = session.cancel_token.is_cancelled();
+                    let queue = session.v2_message_queue.clone();
+                    let has_ready_result = session.async_result_mailbox.has_ready();
+                    drop(session);
+                    (
+                        cancelled,
+                        queue
+                            .has_pending_defer(
+                                &peri_acp_types::session::MessageSource::SubAgentComplete,
+                            )
+                            .await
+                            .unwrap_or(false),
+                        queue.needs_mq_continuation().await.unwrap_or(false),
+                        has_ready_result,
+                    )
+                }
+                None => (true, false, false, false),
+            };
+        let base_dispatchable = {
+            let sessions = sessions.lock().await;
+            sessions.get(&prompt_session_id).is_some_and(|state| {
+                if state.closing || cancelled {
                     return false;
                 }
-                let (has_subagent, has_mq, has_ready_result) = cfg
-                    .session_manager
-                    .get_session(&prompt_session_id)
-                    .map(|session| {
-                        (
-                            session.v2_message_queue.has_pending_defer(
-                                &peri_acp_types::session::MessageSource::SubAgentComplete,
-                            ),
-                            session.v2_message_queue.needs_mq_continuation(),
-                            session.async_result_mailbox.has_ready(),
-                        )
-                    })
-                    .unwrap_or((false, false, false));
-                let mq_steering = matches!(
-                    origin,
-                    PromptOrigin::Scheduled
-                        | PromptOrigin::Continuation {
-                            mq_steering: true,
-                            ..
-                        }
-                );
-                let pending_result = matches!(
-                    origin,
-                    PromptOrigin::Continuation {
-                        pending_result: true,
-                        ..
-                    }
-                );
-                let dispatchable =
-                    continuation::continuation_dispatchable(
-                        state,
-                        epoch,
-                        has_subagent,
-                        has_mq,
-                        mq_steering,
-                        pending_result,
-                        has_ready_result,
-                    ) && (!matches!(
-                        origin,
-                        PromptOrigin::Continuation {
-                            mq_steering: true,
-                            ..
-                        }
-                    ) || super::activation::mq_allowed(cfg, &prompt_session_id))
-                        && (!pending_result
-                            || super::activation::result_allowed(cfg, &prompt_session_id));
-                if dispatchable {
-                    state.continuation_in_flight = true;
-                    state.continuation_mq_steering_pending = false;
-                    state.cancel_token = Some(tokio_util::sync::CancellationToken::new());
-                }
-                dispatchable
+                continuation::continuation_dispatchable(
+                    state,
+                    epoch,
+                    has_subagent,
+                    has_mq,
+                    mq_steering,
+                    pending_result,
+                    has_ready_result,
+                )
             })
         };
-        if !dispatchable {
+        let mq_allowed = super::activation::mq_steering_allowed(cfg, &prompt_session_id).await;
+        if !base_dispatchable
+            || (continuation_mq_steering && !mq_allowed)
+            || (pending_result && !super::activation::result_allowed(cfg, &prompt_session_id).await)
+        {
             tracing::debug!(
                 session_id = %prompt_session_id,
                 "continuation: superseded (newer prompt or Defer consumed), aborting"
             );
             return Ok(serde_json::Value::Null);
         }
+        let dispatchable = {
+            let mut sessions = sessions.lock().await;
+            sessions.get_mut(&prompt_session_id).is_some_and(|state| {
+                if state.closing {
+                    return false;
+                }
+                state.continuation_in_flight = true;
+                state.continuation_mq_steering_pending = false;
+                state.cancel_token = Some(tokio_util::sync::CancellationToken::new());
+                true
+            })
+        };
+        if !dispatchable {
+            return Ok(serde_json::Value::Null);
+        }
         #[cfg(test)]
         admission_gate::wait(&format!("{prompt_session_id}:committed")).await;
+    }
+
+    // 准入已通过、执行尚未开始：先提交 durable 工作意图。进程若在这一刻退出，
+    // 下次进入仍能看出这一轮需要继续；提交失败必须拒绝本轮，不能在没有续跑意图
+    // 证据的情况下放行模型调用。
+    let thread_id = {
+        let sessions = sessions.lock().await;
+        sessions
+            .get(&prompt_session_id)
+            .map(|state| state.thread_id.clone())
+    };
+    let Some(thread_id) = thread_id else {
+        rollback_continuation_admission(sessions, &prompt_session_id, is_continuation).await;
+        return Err(work_intent_error(
+            None,
+            "session thread identity is missing".to_owned(),
+        ));
+    };
+    let thread = ThreadId::from(thread_id.clone());
+    if let Err(error) = cfg
+        .session_manager
+        .session_resources()
+        .set_work_state(&thread, WorkState::Working)
+        .await
+    {
+        rollback_continuation_admission(sessions, &prompt_session_id, is_continuation).await;
+        tracing::error!(
+            session_id = %prompt_session_id,
+            %error,
+            "work state write before prompt failed; prompt rejected"
+        );
+        return Err(work_intent_error(Some(&thread_id), error.to_string()));
     }
 
     // Extract AgentPool from session, wrap in Arc<Mutex> for
@@ -253,10 +333,10 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     // 缓存丢失（跨轮次热缓存是本池的核心价值）。归还仍在锁内（函数末尾）。
     let pool_arc = {
         let mut sessions = sessions.lock().await;
-        let pool = sessions
-            .get_mut(&prompt_session_id)
-            .map(|s| std::mem::take(&mut s.agent_pool))
-            .unwrap_or_default();
+        let pool = match sessions.get_mut(&prompt_session_id) {
+            Some(state) => std::mem::take(&mut state.agent_pool),
+            None => Default::default(),
+        };
         Arc::new(parking_lot::Mutex::new(pool))
     };
 
@@ -277,6 +357,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         super::prediction::spawn_prediction(transport, &prompt_session_id, sessions, cfg);
     }
 
+    let mut abandoned_thread = None;
     {
         let mut sessions = sessions.lock().await;
         if let Some(state) = sessions.get_mut(&prompt_session_id) {
@@ -284,28 +365,79 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             if result.is_err() {
                 // Early assembly/controller errors may precede finish_prompt_turn.
                 // The prompt lock still identifies this attempt as the sole writer.
-                state.cancel_token = None;
+                // 只有还能取到 cancel_token 才说明本轮从未收尾：否则错误只是收尾后的
+                // wire 投影，工作意图已经写好（可能是 stopped），不得覆盖。
+                if state.cancel_token.take().is_some() {
+                    abandoned_thread = Some(state.thread_id.clone());
+                }
             }
             if let Ok(mutex) = Arc::try_unwrap(pool_arc) {
                 state.agent_pool = mutex.into_inner();
             }
         }
     }
+    // 准入后从未进入收尾的尝试按「明确失败」回收工作意图，避免 `working` 无限期滞留。
+    // 收尾阶段 turn 已经结束，失败只能重试并显式告警，不能伪装成成功。
+    if let Some(thread_id) = abandoned_thread {
+        if let Err(error) = set_work_state_with_retry(
+            cfg.session_manager.session_resources(),
+            &ThreadId::from(thread_id),
+            WorkState::Idle,
+        )
+        .await
+        {
+            tracing::error!(
+                session_id = %prompt_session_id,
+                %error,
+                "work state recovery after aborted prompt failed"
+            );
+        }
+    }
 
-    let continuation_request = {
+    // 冷 child 恢复的 turn 结束：结果通知投递回父 thread 的持久队列。目标挂在会话
+    // 实例上，所以用户 prompt、激活监听与启动门任一路径跑完都只投递一次；被取代的
+    // 续跑在本函数早期返回，走不到这里。
+    let recovery_parent = cfg
+        .session_manager
+        .get_session(&prompt_session_id)
+        .and_then(|runtime| runtime.take_recovery_parent());
+    if let Some(parent) = recovery_parent {
+        super::recovery::deliver_child_turn(
+            cfg,
+            sessions,
+            &prompt_session_id,
+            &parent,
+            super::recovery::turn_outcome(&result),
+        )
+        .await;
+    }
+
+    let pending_state = {
         let mut sessions = sessions.lock().await;
-        sessions.get_mut(&prompt_session_id).and_then(|state| {
+        sessions.get_mut(&prompt_session_id).map(|state| {
             state.continuation_mq_steering_pending = false;
-            let queue = cfg.session_manager.v2_queue_for(&prompt_session_id)?;
-            let runtime = cfg.session_manager.get_session(&prompt_session_id)?;
+            super::activation::PendingState::from_state(state)
+        })
+    };
+    let continuation_request = match (
+        pending_state,
+        cfg.session_manager.get_session(&prompt_session_id),
+    ) {
+        (Some(state), Some(runtime)) => {
+            let queue = runtime.v2_message_queue.clone();
+            let activation = Arc::clone(&runtime.activation);
+            let mailbox = Arc::clone(&runtime.async_result_mailbox);
+            drop(runtime);
             super::activation::pending_request(
                 &prompt_session_id,
-                state,
+                &state,
                 &queue,
-                &runtime.activation,
-                &runtime.async_result_mailbox,
+                &activation,
+                &mailbox,
             )
-        })
+            .await
+        }
+        _ => None,
     };
     if let Some(request) = continuation_request {
         if cont_tx.send(request).is_err() {
@@ -313,6 +445,51 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         }
     }
     result
+}
+
+/// 准入前工作意图提交失败：确定性拒绝，不进入模型调用。
+fn work_intent_error(thread_id: Option<&str>, detail: String) -> AcpError {
+    AcpError::new(
+        -32603,
+        format!("work state write before prompt failed: {detail}"),
+    )
+    .with_data(serde_json::json!({
+        "reason": "work_intent_commit_failed",
+        "threadId": thread_id,
+        "detail": detail,
+    }))
+}
+
+/// 回滚本轮 continuation 准入时设置的内存标记；用户 prompt 路径无事可做。
+async fn rollback_continuation_admission(
+    sessions: &SharedSessions,
+    session_id: &str,
+    is_continuation: bool,
+) {
+    if !is_continuation {
+        return;
+    }
+    let mut sessions = sessions.lock().await;
+    if let Some(state) = sessions.get_mut(session_id) {
+        state.continuation_in_flight = false;
+        state.cancel_token = None;
+    }
+}
+
+/// 收尾写入的有限重试：turn 已执行并提交正文，失败不能再拒绝执行，只能重试一次
+/// 并让调用方记录可诊断错误。
+pub(super) async fn set_work_state_with_retry(
+    resources: &Arc<dyn peri_acp_types::session_resources::SessionResources>,
+    thread_id: &ThreadId,
+    state: WorkState,
+) -> Result<(), String> {
+    match resources.set_work_state(thread_id, state).await {
+        Ok(()) => Ok(()),
+        Err(first) => match resources.set_work_state(thread_id, state).await {
+            Ok(()) => Ok(()),
+            Err(second) => Err(format!("{second} (first attempt: {first})")),
+        },
+    }
 }
 
 #[cfg(test)]

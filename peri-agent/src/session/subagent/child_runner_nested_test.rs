@@ -23,7 +23,7 @@ async fn old_bound_control_message_is_suppressed_on_new_run() {
         None,
         serde_json::json!({}),
     );
-    child.queue().push(
+    child.queue().push_sync(
         QueuedMessage::system_reminder(
             crate::session::MessageKind::Defer,
             MessageSource::SystemInjected,
@@ -81,7 +81,7 @@ async fn execution_error_with_handoff_write_failure_keeps_both_causes() {
         },
     )
     .unwrap();
-    child.queue().push(QueuedMessage::prompt(
+    child.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run shell"),
     ));
@@ -144,7 +144,7 @@ async fn receive_commit_crossing_deadline_hands_off_unprocessed_result() {
         FrozenContext::builder().build(),
         Some(child_id.clone()),
     );
-    let (owner, store) = bind_owner_store(&child, &manager);
+    let (owner, _store) = bind_owner_store(&child, &manager);
     child.set_subagent_host(SubagentHost {
         task_manager: Some(manager.clone()),
         child_owner: Some(owner),
@@ -161,7 +161,7 @@ async fn receive_commit_crossing_deadline_hands_off_unprocessed_result() {
         },
     )
     .unwrap();
-    child.queue().push(QueuedMessage::prompt(
+    child.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("run shell"),
     ));
@@ -187,7 +187,7 @@ async fn receive_commit_crossing_deadline_hands_off_unprocessed_result() {
     // No process exists in this fixture; the delayed obligation is the message.
     manager.confirm_external_execution_stopped(&ticket);
     assert!(manager.complete(&ticket, nested_result()));
-    let (entered, release) = store.gate_next_reminder_append();
+    let (entered, release) = child.queue().gate_next_receive();
     let delivery_id = peri_acp_types::messages::MessageId::new();
     let reminder = crate::session::producer_reminders::trusted_reminder(
         peri_acp_types::system_reminder::ReminderCategory::Task,
@@ -199,7 +199,7 @@ async fn receive_commit_crossing_deadline_hands_off_unprocessed_result() {
         None,
         serde_json::json!({}),
     );
-    child.queue().push(
+    child.queue().push_sync(
         QueuedMessage::system_reminder_with_delivery_id(
             crate::session::MessageKind::Defer,
             MessageSource::SystemInjected,
@@ -245,7 +245,7 @@ async fn nested_a_b_c_reports_incomplete_only_to_direct_parent() {
         },
     )
     .unwrap();
-    c.queue().push(QueuedMessage::prompt(
+    c.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("C task"),
     ));
@@ -261,8 +261,7 @@ async fn nested_a_b_c_reports_incomplete_only_to_direct_parent() {
         Some(b_manager.clone()),
         Some(crate::session::subagent::run_sync::new_sync_task_id()),
         Some(Arc::new(move |result, kind| {
-            inbox.route_bg_result(result, kind);
-            Ok(())
+            inbox.route_bg_result_blocking(result, kind)
         })),
         move |handoff, _| async move {
             crate::session::subagent::run_sync::run_sync_subagent(
@@ -294,14 +293,14 @@ async fn nested_a_b_c_reports_incomplete_only_to_direct_parent() {
     };
     assert_eq!(pending.receipt.child_thread_id, c_id);
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !b.queue().has_required() {
+        while !b.queue().has_required_sync() {
             tokio::task::yield_now().await;
         }
     })
     .await
     .expect("C's incomplete result must reach direct parent B");
 
-    b.queue().push(QueuedMessage::prompt(
+    b.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("B waits for C"),
     ));
@@ -316,7 +315,7 @@ async fn nested_a_b_c_reports_incomplete_only_to_direct_parent() {
     assert!(transcript_contains(&b, &c_id), "直接父 B 必须收到 C 的身份");
 
     let a = make_child(Arc::new(TaskManager::new()), false);
-    a.queue().push(QueuedMessage::prompt(
+    a.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("B summarized C"),
     ));

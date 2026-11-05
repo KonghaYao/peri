@@ -9,7 +9,7 @@ use peri_acp_types::{
     },
 };
 
-pub(super) fn push_input_recalls(queue: &MessageQueue, recalls: &[String]) {
+pub(super) async fn push_input_recalls(queue: &MessageQueue, recalls: &[String]) {
     let body = recalls.join("\n");
     let mut remaining = body.as_str();
     while !remaining.is_empty() {
@@ -31,11 +31,14 @@ pub(super) fn push_input_recalls(queue: &MessageQueue, recalls: &[String]) {
                 metadata: serde_json::json!({}),
             })
             .expect("recall 按 UTF-8 字节上限分段，受控元数据满足 Reminder 契约");
-        queue.push(QueuedMessage::system_reminder(
+        let message = QueuedMessage::system_reminder(
             MessageKind::Info,
             MessageSource::SystemInjected,
             reminder,
-        ));
+        );
+        if let Err(error) = queue.enqueue(message).await {
+            tracing::warn!(%error, "user input recall enqueue failed");
+        }
         remaining = &remaining[end..];
     }
 }

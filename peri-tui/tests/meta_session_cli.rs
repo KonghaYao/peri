@@ -123,6 +123,8 @@ fn fixture_meta(id: &str, title: &str, cwd: &str) -> ThreadMeta {
         cancel_policy: Default::default(),
         config: Some(FORBIDDEN_CONFIG.to_owned()),
         agent_status: AgentStatus::Done,
+        work_state: Default::default(),
+        context_usage_tokens: None,
     }
 }
 

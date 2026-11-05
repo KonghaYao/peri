@@ -26,6 +26,8 @@ use rmcp::{
 struct ShellState {
     records: HashMap<String, DetailedTask>,
     owners: HashMap<String, String>,
+    /// Agent thread that issued the task (design §6: recovery queries by it).
+    thread_owners: HashMap<String, String>,
     cancel_pending: HashSet<String>,
     cancel_accepted: HashSet<String>,
     pending_results: HashMap<String, BackgroundTaskResult>,
@@ -39,6 +41,117 @@ impl ShellState {
         self.owners
             .get(id)
             .is_some_and(|existing| existing == owner)
+    }
+
+    /// Live (non-terminal) tasks, optionally narrowed to one direct owner.
+    ///
+    /// Terminal records stay queryable through `tasks/get` but are not live
+    /// tasks a recovery pass can still observe.
+    fn live_tasks(&self, owner: Option<&str>) -> Vec<ShellTaskEntry> {
+        let mut tasks: Vec<_> = self
+            .records
+            .iter()
+            .filter(|(id, record)| {
+                !record.task.status.is_terminal()
+                    && owner.is_none_or(|owner| self.owned_by(id, owner))
+            })
+            .map(|(id, record)| ShellTaskEntry {
+                task_id: id.clone(),
+                owner: self.owners.get(id).cloned(),
+                thread_owner: self.thread_owners.get(id).cloned(),
+                state: shell_task_state(record.task.status).to_owned(),
+                started_at: record.task.created_at.clone(),
+            })
+            .collect();
+        tasks.sort_by(|left, right| {
+            left.started_at
+                .cmp(&right.started_at)
+                .then_with(|| left.task_id.cmp(&right.task_id))
+        });
+        tasks
+    }
+}
+
+/// Host-only `tools/call` name for querying live shell tasks by direct owner
+/// (design §6). It is answered directly by the handler, not advertised in
+/// `tools/list`: the model-facing surface stays the seven workspace tools.
+pub(crate) const SHELL_TASK_LIST_TOOL: &str = "shell_task_list";
+
+/// One live shell task in the query result.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct ShellTaskEntry {
+    task_id: String,
+    owner: Option<String>,
+    thread_owner: Option<String>,
+    state: String,
+    started_at: String,
+}
+
+/// Query result: `unknown` is a first-class outcome, never an empty list.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ShellTaskList {
+    unknown: bool,
+    detail: Option<String>,
+    tasks: Vec<ShellTaskEntry>,
+}
+
+impl ShellTaskList {
+    fn known(tasks: Vec<ShellTaskEntry>) -> Self {
+        Self {
+            unknown: false,
+            detail: None,
+            tasks,
+        }
+    }
+
+    fn unknown(detail: impl Into<String>) -> Self {
+        Self {
+            unknown: true,
+            detail: Some(detail.into()),
+            tasks: Vec::new(),
+        }
+    }
+}
+
+fn shell_task_state(status: TaskStatus) -> &'static str {
+    match status {
+        TaskStatus::Working => "working",
+        TaskStatus::InputRequired => "input_required",
+        TaskStatus::Completed => "completed",
+        TaskStatus::Failed => "failed",
+        TaskStatus::Cancelled => "cancelled",
+        // `TaskStatus` is non-exhaustive; a future status is reported as unknown
+        // rather than being mistaken for a live or terminal task.
+        _ => "unknown",
+    }
+}
+
+/// `shell_task_list` query face; `None` state reports `unknown` instead of an
+/// MCP error so callers can tell "state unavailable" from "no live tasks".
+pub(crate) struct ShellTaskListTool {
+    tasks: Option<ShellTasks>,
+}
+
+impl ShellTaskListTool {
+    pub(crate) fn new(tasks: Option<ShellTasks>) -> Self {
+        Self { tasks }
+    }
+
+    /// Serialize the query result; a serialization failure is still `unknown`,
+    /// never an empty task list.
+    pub(crate) fn list_text(&self, owner: Option<&str>) -> String {
+        let list = match &self.tasks {
+            Some(tasks) => tasks.live_tasks(owner),
+            // Not every Workspace instance owns shell task state (legacy `new`).
+            None => {
+                ShellTaskList::unknown("workspace shell task state is not enabled on this instance")
+            }
+        };
+        serde_json::to_string(&list).unwrap_or_else(|_| {
+            r#"{"unknown":true,"detail":"shell task list encoding failed","tasks":[]}"#.to_owned()
+        })
     }
 }
 
@@ -142,10 +255,18 @@ impl ShellTasks {
     }
 
     pub(crate) fn completion_callback(&self) -> OnBgCompleteFn {
-        self.completion_callback_for(None)
+        self.completion_callback_for_scope(None, None)
     }
 
-    pub(crate) fn completion_callback_for(&self, owner: Option<String>) -> OnBgCompleteFn {
+    /// Completion callback with both owner identities recorded on the task.
+    ///
+    /// `thread_owner` is the agent thread that issued the work; recovery queries
+    /// live tasks by it (design §6).
+    pub(crate) fn completion_callback_for_scope(
+        &self,
+        owner: Option<String>,
+        thread_owner: Option<String>,
+    ) -> OnBgCompleteFn {
         let state = Arc::clone(&self.state);
         let updates = self.updates.clone();
         Arc::new(move |result: &BackgroundTaskResult, kind: BgTaskKind| {
@@ -158,6 +279,12 @@ impl ShellTasks {
                     .owners
                     .entry(result.task_id.clone())
                     .or_insert_with(|| owner.clone());
+            }
+            if let Some(thread_owner) = &thread_owner {
+                state
+                    .thread_owners
+                    .entry(result.task_id.clone())
+                    .or_insert_with(|| thread_owner.clone());
             }
             if state.cancel_pending.contains(&result.task_id) {
                 state
@@ -216,6 +343,7 @@ impl ShellTasks {
         })
     }
 
+    #[cfg(test)]
     pub(crate) async fn spawn_owned(
         &self,
         command: String,
@@ -223,10 +351,31 @@ impl ShellTasks {
         timeout_ms: Option<u64>,
         owner: Option<&str>,
     ) -> Result<Task, McpError> {
+        self.spawn_owned_scoped(command, cwd, timeout_ms, owner, None)
+            .await
+    }
+
+    /// Spawn with both owner identities: the direct session and the agent
+    /// thread that issued the work.
+    pub(crate) async fn spawn_owned_scoped(
+        &self,
+        command: String,
+        cwd: String,
+        timeout_ms: Option<u64>,
+        owner: Option<&str>,
+        thread_owner: Option<&str>,
+    ) -> Result<Task, McpError> {
         let (started_tx, started_rx) = tokio::sync::oneshot::channel();
         let mut guard = SpawnCancelGuard::new(self.clone(), started_rx);
         let result = self
-            .spawn_owned_inner(command, cwd, timeout_ms, owner, Some(started_tx))
+            .spawn_owned_inner(
+                command,
+                cwd,
+                timeout_ms,
+                owner,
+                thread_owner,
+                Some(started_tx),
+            )
             .await;
         if result.is_ok() {
             guard.disarm();
@@ -268,13 +417,18 @@ impl ShellTasks {
         cwd: String,
         timeout_ms: Option<u64>,
         owner: Option<&str>,
+        thread_owner: Option<&str>,
         started: Option<tokio::sync::oneshot::Sender<String>>,
     ) -> Result<Task, McpError> {
         let manager = self.manager();
-        let callback = self.completion_callback_for(owner.map(str::to_owned));
+        let callback = self.completion_callback_for_scope(
+            owner.map(str::to_owned),
+            thread_owner.map(str::to_owned),
+        );
         let state = Arc::clone(&self.state);
         let updates = self.updates.clone();
         let owner = owner.map(str::to_owned);
+        let thread_owner = thread_owner.map(str::to_owned);
         #[cfg(test)]
         let spawn_after_gate = self.spawn_after_gate.clone();
         let handle: BgShellHandle = tokio::task::spawn_blocking(move || {
@@ -304,6 +458,11 @@ impl ShellTasks {
             }
             if let Some(owner) = &owner {
                 state.owners.insert(handle.task_id.clone(), owner.clone());
+            }
+            if let Some(thread_owner) = &thread_owner {
+                state
+                    .thread_owners
+                    .insert(handle.task_id.clone(), thread_owner.clone());
             }
             let inserted = !state.records.contains_key(&handle.task_id);
             let detail = state
@@ -342,7 +501,14 @@ impl ShellTasks {
 
     /// Register a foreground call that the Bash executor already promoted to
     /// its owned background manager. The callback may have won the race.
-    pub(crate) fn track_promoted_owned(&self, task_id: &str, owner: Option<&str>) -> Task {
+    ///
+    /// `thread_owner` is the issuing agent thread recorded for recovery queries.
+    pub(crate) fn track_promoted_scoped(
+        &self,
+        task_id: &str,
+        owner: Option<&str>,
+        thread_owner: Option<&str>,
+    ) -> Task {
         let now = peri_time::now_utc_rfc3339();
         let record = DetailedTask::new(
             Task::new(task_id, TaskStatus::Working, &now, &now)
@@ -360,6 +526,11 @@ impl ShellTasks {
         }
         if let Some(owner) = owner {
             state.owners.insert(task_id.into(), owner.into());
+        }
+        if let Some(thread_owner) = thread_owner {
+            state
+                .thread_owners
+                .insert(task_id.into(), thread_owner.into());
         }
         let inserted = !state.records.contains_key(task_id);
         let detail = state
@@ -467,6 +638,11 @@ impl ShellTasks {
 
     pub(crate) fn belongs_to(&self, id: &str, owner: &str) -> bool {
         self.state.lock().owned_by(id, owner)
+    }
+
+    /// Read live tasks for one direct owner (design §6 recovery query).
+    pub(crate) fn live_tasks(&self, owner: Option<&str>) -> ShellTaskList {
+        ShellTaskList::known(self.state.lock().live_tasks(owner))
     }
 
     pub(crate) fn cancel_owned(&self, id: &str, owner: &str) -> Result<(), McpError> {

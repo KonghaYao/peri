@@ -28,6 +28,7 @@ async fn background_child_hands_off_reports_failure() {
         None,
         None,
         None,
+        None,
         Some(Arc::new(move |_, _, _, _, is_error| {
             assert!(is_error, "handoff 必须以错误终态发布 Stop");
             stop_calls.fetch_add(1, Ordering::SeqCst);
@@ -78,6 +79,7 @@ async fn background_child_settles_before_deadline_reports_success() {
             }
             Ok(())
         })),
+        None,
         None,
         None,
         None,
@@ -135,6 +137,7 @@ async fn background_child_cancellation_reports_interrupted_terminal() {
             }
             Ok(())
         })),
+        None,
         None,
         None,
         None,
@@ -212,6 +215,7 @@ async fn background_drain_failure_blocks_resume() {
             Ok(())
         })),
         Some(Arc::new(PanicOnStopBridge)),
+        None,
         None,
         None,
         None,

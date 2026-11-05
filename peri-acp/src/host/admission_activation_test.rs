@@ -138,12 +138,13 @@ async fn revoke_before_commit(closing: bool) {
         if closing {
             sessions.get_mut(&harness.session_id).unwrap().closing = true;
         } else {
-            crate::host::notify::handle_notification(
+            let _ = crate::host::notify::handle_notification(
                 "session/cancel",
                 &json!({"sessionId": harness.session_id}),
                 &mut sessions,
                 &harness.cfg,
-            );
+            )
+            .await;
         }
     }
     gate.release.notify_one();
@@ -160,7 +161,9 @@ async fn revoke_before_commit(closing: bool) {
         .session_manager
         .v2_queue_for(&harness.session_id)
         .unwrap()
-        .has_ensure_processing());
+        .has_ensure_processing()
+        .await
+        .expect("test MQ policy"));
     assert!(!harness.sessions.lock().await[&harness.session_id].continuation_in_flight);
     model.assert_async().await;
     harness
@@ -226,6 +229,7 @@ async fn stop_after_atomic_admission_cancels_registered_token_before_model_start
             &mut sessions,
             &harness.cfg
         )
+        .await
         .is_none());
         token
     };

@@ -887,3 +887,46 @@ async fn test_slow_session_preparation_is_not_capped_by_receipt_deadline() {
     restore_notice(previous_notice);
     client.close();
 }
+
+/// `-32017` 是确定性拒绝：原稿恢复为待发，不进入无限重试。
+#[test]
+#[serial_test::serial]
+fn test_recovery_blocked_is_a_definitive_rejection() {
+    let _restore = RestoreProjection {
+        steers: STEERS.state().read().clone(),
+        session: atoms::ACTIVE_SESSION_ID.state().read().clone(),
+        epoch: atoms::BRIDGE_RESET_COUNTER.get(),
+    };
+    atoms::ACTIVE_SESSION_ID.set("s".into());
+    atoms::BRIDGE_RESET_COUNTER.set(7);
+    let mut state = SteerState::default();
+    state.reset_session("s", 7);
+    let mut command = first_input_command(7, "command", "input", "保留的原稿");
+    command.session_id = "s".into();
+    state.begin(command.clone());
+    STEERS.set(state);
+
+    let error = AcpError::new(
+        -32017,
+        "Session execution is blocked by a failed recovery: corrupt: missing parent",
+    );
+    assert!(
+        reject_command(&mut command, &error),
+        "服务端恢复阻断必须确认为确定性拒绝"
+    );
+    assert_eq!(
+        STEERS
+            .state()
+            .write()
+            .recover("s", 7, true)
+            .expect("原稿必须恢复")
+            .original_draft,
+        "保留的原稿"
+    );
+    let notice = failure_notice(SteerStage::Admit, true, &error);
+    assert!(
+        notice.contains("missing parent"),
+        "提示必须附服务端原因：{notice}"
+    );
+    assert_ne!(notice, crate::i18n::tr("steer-input-rejected"));
+}

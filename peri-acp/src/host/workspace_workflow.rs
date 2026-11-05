@@ -116,8 +116,7 @@ impl SessionEnvironment {
                         .as_ref()
                         .ok_or_else(|| "workflow session inbox unavailable".to_string())?;
                     peri_agent::session::async_router::AsyncRouter::new(inbox.clone())
-                        .route_workflow_task_result(result);
-                    Ok(())
+                        .route_workflow_task_result(result)
                 }),
             )
         });

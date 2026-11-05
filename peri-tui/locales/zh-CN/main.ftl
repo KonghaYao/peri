@@ -893,6 +893,7 @@ composer-attachments = @ { $count } 个文件
 composer-image-attachment = [图片] { $name }
 composer-image-attachments = [图片] ×{ $count } · { $names }
 composer-context-usage = { $pct }% ctx
+composer-context-usage-unknown = ctx 未知
 
 # ---- 消息视图占位符 ----
 
@@ -1425,7 +1426,12 @@ thread-history-user = 用户
 thread-history-assistant = 助手
 thread-history-system = 系统上下文
 thread-history-tool = 工具结果
-session-restore-failed = 会话恢复失败：{ $error }。请重试或使用 /clear 创建会话。
+session-restore-failed = 会话恢复失败：{ $error }。可重新发送消息重试，或使用 /clear 新建会话；也可在 /threads 选择历史会话。
+session-recovery-blocked = 历史已加载，但恢复准备失败（{ $kind }）：{ $detail }。该会话当前不可执行；可重新进入重试，或用 /clear 新建会话。
+session-recovery-failed-retryable = 历史已加载，但恢复准备失败（{ $kind }）：{ $detail }。可重试发送消息继续。
+session-recovery-partial = 历史已加载；{ $count } 个相关会话未能恢复。
+steer-recovery-blocked = 会话恢复未能完成，执行被阻止：{ $error }。原稿已保留；可重新进入会话重试，或用 /clear 新建。
+prompt-recovery-blocked = 会话恢复未能完成，执行被阻止：{ $error }。可重新进入会话重试，或用 /clear 新建。
 session-creation-failed = 会话创建失败：{ $error }
 
 panel-host-settings = 宿主配置

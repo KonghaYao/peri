@@ -10,7 +10,9 @@ use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{AssertSqlSafe, Connection, SqliteConnection};
 
 fn current_table(name: &str) -> Option<&'static TableShape> {
-    CURRENT_TABLES.iter().find(|table| table.name == name)
+    current_tables()
+        .into_iter()
+        .find(|table| table.name == name)
 }
 
 fn input_table(name: &str) -> Option<&'static InputTable> {
@@ -68,7 +70,7 @@ async fn declared_current_shape_matches_a_fresh_database() {
     for name in tables.keys() {
         assert!(current_table(name).is_some(), "undeclared table {name}");
     }
-    assert_eq!(tables.len(), CURRENT_TABLES.len());
+    assert_eq!(tables.len(), current_tables().len());
 }
 
 /// 可选表（凭证、关闭意图）缺表不是漂移，而必需表缺表必须失败——两条容忍线的分界。
@@ -88,6 +90,47 @@ async fn optional_tables_may_be_absent_but_mandatory_tables_may_not() {
         .unwrap();
     let error = check_current_shape(&tables).unwrap_err();
     assert!(error.contains("machines"), "{error}");
+}
+
+/// `thread_mq` 是本代新增且**必需**的表：缺表即拒绝，声明覆盖全部待发事实列。
+#[tokio::test]
+async fn thread_mq_is_a_mandatory_current_table_with_exactly_the_pending_columns() {
+    let (_directory, mut connection) = fresh_database().await;
+    let declared = current_table("thread_mq").expect("thread_mq 必须在当前形状声明里");
+    assert!(!declared.optional, "MQ 没有回退来源，缺表不能容忍");
+    assert_eq!(
+        declared.columns,
+        &[
+            "thread_id",
+            "id",
+            "enqueued_at",
+            "kind",
+            "source",
+            "policy_json",
+            "payload_json",
+            "original_draft",
+        ],
+        "MQ 只保存待发事实：没有终态、墓碑、seq 或执行状态列"
+    );
+    assert_eq!(declared.primary_key, &["thread_id", "id"]);
+
+    execute(&mut connection, "DROP TABLE thread_mq").await;
+    let tables = read_local_columns(&mut connection, CURRENT_COLUMNS_SQL)
+        .await
+        .unwrap();
+    let error = check_current_shape(&tables).unwrap_err();
+    assert!(error.contains("thread_mq"), "{error}");
+    // v12 的冻结声明不含它，也不含 v14 的两列：上一代形状仍然可判，升级路径不会被关掉。
+    execute(
+        &mut connection,
+        "ALTER TABLE threads DROP COLUMN context_usage_tokens;
+         ALTER TABLE threads DROP COLUMN work_state;",
+    )
+    .await;
+    let tables = read_local_columns(&mut connection, CURRENT_COLUMNS_SQL)
+        .await
+        .unwrap();
+    check_v12_shape(&tables).unwrap();
 }
 
 /// 可选表存在时仍必须同形：同名异形的凭证表是别的对象，不能因为「可选」而放行。
@@ -131,14 +174,20 @@ fn missing_table_is_refused() {
     assert!(check_strict(table, &actual).is_err());
 }
 
-/// 压缩前形状的列序列缺失即失败：`workspace_id` / `archived` 是当前形状才有的列。
+/// 压缩前形状的列序列缺失即失败：`workspace_id` / `archived` 与两列工作快照都是当前形状
+/// 才有的列。
 #[test]
 fn current_only_columns_are_not_expected_in_the_input_shape() {
     let table = input_table("threads").unwrap();
     let actual: Vec<ActualColumn> = THREADS_COLUMNS
         .iter()
         .copied()
-        .filter(|name| *name != "workspace_id" && *name != "archived")
+        .filter(|name| {
+            !matches!(
+                *name,
+                "workspace_id" | "archived" | "context_usage_tokens" | "work_state"
+            )
+        })
         .map(|name| ActualColumn::new(name, false, 0))
         .collect();
     check_input(table, &actual).unwrap();

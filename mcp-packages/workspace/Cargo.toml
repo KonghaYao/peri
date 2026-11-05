@@ -31,8 +31,11 @@ uuid.workspace = true
 walkdir = "2.5"
 
 [dev-dependencies]
-peri-resources = { path = "../../peri-resources" }
+# 测试面需要 `MessageQueue::push_async`（接收夹具）；生产构建不含这些方法。
+peri-acp-types = { path = "../../peri-acp-types", features = ["test-support"] }
 peri-mcp-web = { path = "../web" }
+peri-model = { path = "../../peri-model" }
+peri-resources = { path = "../../peri-resources" }
 filetime = "0.2"
 futures.workspace = true
 regex = "1"

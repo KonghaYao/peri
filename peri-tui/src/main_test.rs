@@ -336,7 +336,7 @@ fn test_db_path_conflicts_with_session_store_before_io() {
     .unwrap();
     assert_eq!(
         validate_cli(&cli),
-        Err("--db-path cannot be combined with --session-store")
+        Err("--db-path cannot be combined with --session-store".to_string())
     );
     // 部署参数构造同样拒绝，不设隐式覆盖顺序。
     assert!(session_store_deployment(&cli, AccessMode::ReadWrite).is_err());

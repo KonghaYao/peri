@@ -8,6 +8,10 @@
 mod cron_owner;
 mod execution;
 mod inbox;
+mod mq;
+mod mq_memory;
+#[cfg(test)]
+mod mq_test;
 mod queue;
 mod queue_policy;
 #[cfg(test)]
@@ -25,12 +29,26 @@ pub use execution::{
     TurnTelemetryOutcome, EXECUTION_FAILURE_FALLBACK_MESSAGE,
 };
 pub use inbox::{InboxHandle, SessionInbox};
-pub use queue::{MessageKind, MessageQueue, MessageSource, QueuedMessage, QueuedPayload};
+#[cfg(feature = "test-support")]
+pub use mq::ReceiveGate;
+pub use mq::{
+    MqCancelOutcome, MqEnqueueDisposition, MqEnqueueOutcome, MqEntry, MqFilter, MqInput,
+    MqReceiveDisposition, MqReceiveItem, MqReceiveItemOutcome, MqReceiveOutcome, MqReceivePurpose,
+    MqReceiveSelection, MqReceiveStatus, MqSendItemOutcome, MqSendOutcome, MqSendStatus,
+    MqWatermark, RetainedReminder, SessionResourcesMqStore, ThreadMqStore,
+};
+#[doc(hidden)]
+pub use mq_memory::InMemoryMqStore;
+pub use queue::{
+    MessageKind, MessageQueue, MessageSource, ProducerQueue, QueueOwner, QueuedMessage,
+    QueuedPayload, ReceivePermit,
+};
 pub use queue_policy::{
     ExecutionBinding, MessageActivation, MessageDisposition, MessagePolicy, MessageRequirement,
 };
 pub use runtime::{
-    cancel_all_agents, cancel_all_in, cancel_cascade_agents, cancel_cascade_in, AgentRuntime,
+    cancel_all_agents, cancel_all_in, cancel_cascade_agents, cancel_cascade_agents_collecting,
+    cancel_cascade_in, AgentRuntime,
 };
 pub use user_input::{
     DispatchUserInputsRequest, EnqueueUserInputRequest, TakeBackUserInputRequest, UserInput,

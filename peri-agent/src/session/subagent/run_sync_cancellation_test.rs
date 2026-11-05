@@ -7,7 +7,7 @@ async fn cancelled_sync_child_emits_stopped_after_caller_future_dropped() {
     let manager = Arc::new(TaskManager::new());
     let (session, _owner, store) = bound_child_with_store(manager.clone());
     let child_id = session.store().thread_id.clone().unwrap();
-    session.queue().push(QueuedMessage::prompt(
+    session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("block in model call"),
     ));

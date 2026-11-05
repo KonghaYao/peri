@@ -125,7 +125,7 @@ async fn no_mentions_no_injection() {
     let mw = AtMentionMiddleware::new(reader(&[]));
     let (ctx, _fixture) = context_with(dir.path(), mw).await;
     let input = BaseMessage::human("你好世界");
-    ctx.session.queue.push(QueuedMessage::prompt(
+    ctx.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         input.clone(),
     ));
@@ -141,7 +141,7 @@ async fn mention_uses_workspace_content_even_with_different_host_file() {
     let mw = AtMentionMiddleware::new(reader(&[("test.rs", "remote content")]));
     let (ctx, _fixture) = context_with(dir.path(), mw).await;
     let input = BaseMessage::human("看看 @test.rs");
-    ctx.session.queue.push(QueuedMessage::prompt(
+    ctx.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         input.clone(),
     ));
@@ -166,7 +166,7 @@ async fn unavailable_workspace_never_reads_host_file() {
     let mw = AtMentionMiddleware::new(reader(&[]));
     let (ctx, _fixture) = context_with(dir.path(), mw).await;
     let input = BaseMessage::human("看看 @test.rs");
-    ctx.session.queue.push(QueuedMessage::prompt(
+    ctx.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         input.clone(),
     ));
@@ -195,7 +195,7 @@ async fn range_mention_records_actual_workspace_request_and_line_prefix() {
     let mw = AtMentionMiddleware::new(reader(&[("sample.txt", "second\nthird")]));
     let (ctx, _fixture) = context_with(dir.path(), mw).await;
     let input = BaseMessage::human("看 @sample.txt#L2-3");
-    ctx.session.queue.push(QueuedMessage::prompt(
+    ctx.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         input.clone(),
     ));
@@ -221,7 +221,7 @@ async fn oversized_single_line_is_byte_budgeted_with_explicit_notice() {
     let mw = AtMentionMiddleware::new(reader(&[("huge.txt", &huge_line)]));
     let (ctx, _fixture) = context_with(dir.path(), mw).await;
     let input = BaseMessage::human("看 @huge.txt");
-    ctx.session.queue.push(QueuedMessage::prompt(
+    ctx.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         input.clone(),
     ));
@@ -251,7 +251,7 @@ async fn oversized_multiline_content_reports_resume_line() {
     let mw = AtMentionMiddleware::new(reader(&[("multi.txt", &content)]));
     let (ctx, _fixture) = context_with(dir.path(), mw).await;
     let input = BaseMessage::human("看 @multi.txt");
-    ctx.session.queue.push(QueuedMessage::prompt(
+    ctx.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         input.clone(),
     ));
@@ -289,7 +289,7 @@ async fn batch_budget_stops_reads_and_reports_not_loaded() {
         .collect::<Vec<_>>()
         .join(" ");
     let input = BaseMessage::human(format!("看 {mention}"));
-    ctx.session.queue.push(QueuedMessage::prompt(
+    ctx.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         input.clone(),
     ));
@@ -349,7 +349,7 @@ async fn batch_item_limit_counts_across_inputs() {
             .map(|index| format!("@f{index}.txt"))
             .collect::<Vec<_>>()
             .join(" ");
-        ctx.session.queue.push(QueuedMessage::prompt(
+        ctx.session.queue.push_sync(QueuedMessage::prompt(
             MessageSource::UserInput,
             BaseMessage::human(mentions),
         ));
@@ -383,7 +383,7 @@ async fn long_path_is_omitted_without_workspace_read() {
     let path = "p".repeat(MAX_BATCH_MENTION_BYTES);
     let mw = AtMentionMiddleware::new(counting_reader(&[], &reads));
     let (ctx, _fixture) = context_with(dir.path(), mw).await;
-    ctx.session.queue.push(QueuedMessage::prompt(
+    ctx.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         BaseMessage::human(format!("@\"{path}\"")),
     ));
@@ -409,7 +409,7 @@ async fn mid_loop_batch_prepares_only_new_inputs() {
     ));
     let (ctx, _fixture) = context_with(dir.path(), mw).await;
     let first = BaseMessage::human("看 @first.txt");
-    ctx.session.queue.push(QueuedMessage::prompt(
+    ctx.session.queue.push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         first.clone(),
     ));
@@ -486,7 +486,7 @@ async fn mention_batch_reads_first_input_without_replaying_history() {
         .write()
         .append(BaseMessage::ai("之前的回复"));
     for input in [&first, &last] {
-        session.queue().push(QueuedMessage::prompt(
+        session.queue().push_sync(QueuedMessage::prompt(
             MessageSource::UserInput,
             input.clone(),
         ));

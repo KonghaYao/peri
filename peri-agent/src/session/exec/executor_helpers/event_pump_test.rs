@@ -125,19 +125,19 @@ fn mailbox_with_two_deliveries() -> Arc<UserInputMailbox> {
     let inbox = Arc::new(SessionInbox::new(Arc::new(MessageQueue::new())));
     let mailbox = UserInputMailbox::new("s".into(), inbox.clone(), Arc::new(|_| {}));
     mailbox
-        .attach_external_attempt(CancellationToken::new(), false)
+        .attach_external_attempt_sync(CancellationToken::new(), false)
         .unwrap();
     let b = input(&mailbox, "00000000-0000-0000-0000-00000000000b", "B");
     let a = input(&mailbox, "00000000-0000-0000-0000-00000000000a", "A");
-    mailbox.enqueue(&b).unwrap();
-    mailbox.enqueue(&a).unwrap();
+    mailbox.enqueue_sync(&b).unwrap();
+    mailbox.enqueue_sync(&a).unwrap();
     for _ in [&b, &a] {
-        mailbox.enter_idle();
-        let messages = inbox.queue().drain_all();
+        mailbox.enter_idle_sync();
+        let messages = inbox.queue_for_test().drain_all_sync();
         assert_eq!(messages.len(), 1);
         let id = messages[0].message().unwrap().id();
-        mailbox.mark_claimed(&[id]);
-        assert_eq!(mailbox.mark_delivered(&[id]).len(), 1);
+        mailbox.mark_claimed_sync(&[id]);
+        assert_eq!(mailbox.mark_delivered_sync(&[id]).len(), 1);
     }
     // 前两条日志按 Receive 顺序存在；这里不再产生新交付。
     assert_eq!(
@@ -307,7 +307,7 @@ fn start_pump_with_subscription(
 #[tokio::test]
 async fn delivery_recorded_after_older_event_is_not_emitted_before_it() {
     let (mailbox, delivery_id) = mailbox_with_claimed_input();
-    mailbox.mark_delivered(&[delivery_id]);
+    mailbox.mark_delivered_sync(&[delivery_id]);
     let delivery_seq = SessionSeq::initial().next();
     mailbox.bind_delivery_sequence("00000000-0000-0000-0000-00000000000c", delivery_seq);
     let (message_tx, message_rx) = mpsc::unbounded_channel();
@@ -357,7 +357,7 @@ async fn delivery_recorded_after_older_event_is_not_emitted_before_it() {
 #[tokio::test]
 async fn bound_delivery_missed_by_lagged_subscription_is_replayed_before_next_event() {
     let (mailbox, delivery_id) = mailbox_with_claimed_input();
-    mailbox.mark_delivered(&[delivery_id]);
+    mailbox.mark_delivered_sync(&[delivery_id]);
     let delivery_seq = SessionSeq::initial().next();
     mailbox.bind_delivery_sequence("00000000-0000-0000-0000-00000000000c", delivery_seq);
     let (message_tx, message_rx) = mpsc::unbounded_channel();
@@ -397,7 +397,7 @@ async fn bound_delivery_missed_by_lagged_subscription_is_replayed_before_next_ev
 #[tokio::test]
 async fn unbound_delivery_is_flushed_at_tail_not_before_older_event() {
     let (mailbox, delivery_id) = mailbox_with_claimed_input();
-    mailbox.mark_delivered(&[delivery_id]);
+    mailbox.mark_delivered_sync(&[delivery_id]);
     let (message_tx, message_rx) = mpsc::unbounded_channel();
     let sink = Arc::new(RecordingSink::default());
     let (event_tx, stop_tx, handle) = start_pump_with_subscription(
@@ -433,7 +433,7 @@ async fn unbound_delivery_is_flushed_at_tail_not_before_older_event() {
 #[tokio::test]
 async fn duplicate_delivery_event_and_journal_entry_emit_once() {
     let (mailbox, delivery_id) = mailbox_with_claimed_input();
-    mailbox.mark_delivered(&[delivery_id]);
+    mailbox.mark_delivered_sync(&[delivery_id]);
     let delivery_seq = SessionSeq::initial();
     mailbox.bind_delivery_sequence("00000000-0000-0000-0000-00000000000c", delivery_seq);
     let (message_tx, message_rx) = mpsc::unbounded_channel();
@@ -482,7 +482,7 @@ async fn duplicate_delivery_event_and_journal_entry_emit_once() {
 #[tokio::test]
 async fn background_tail_event_precedes_later_delivery_bubble() {
     let (mailbox, delivery_id) = mailbox_with_claimed_input();
-    mailbox.mark_delivered(&[delivery_id]);
+    mailbox.mark_delivered_sync(&[delivery_id]);
     let delivery_seq = SessionSeq::initial().next();
     mailbox.bind_delivery_sequence("00000000-0000-0000-0000-00000000000c", delivery_seq);
     let (message_tx, message_rx) = mpsc::unbounded_channel();
@@ -531,14 +531,14 @@ fn mailbox_with_claimed_input() -> (Arc<UserInputMailbox>, MessageId) {
     let inbox = Arc::new(SessionInbox::new(Arc::new(MessageQueue::new())));
     let mailbox = UserInputMailbox::new("s".into(), inbox.clone(), Arc::new(|_| {}));
     mailbox
-        .attach_external_attempt(CancellationToken::new(), false)
+        .attach_external_attempt_sync(CancellationToken::new(), false)
         .unwrap();
     let request = input(&mailbox, "00000000-0000-0000-0000-00000000000c", "并发");
-    mailbox.enqueue(&request).unwrap();
-    mailbox.enter_idle();
-    let messages = inbox.queue().drain_all();
+    mailbox.enqueue_sync(&request).unwrap();
+    mailbox.enter_idle_sync();
+    let messages = inbox.queue_for_test().drain_all_sync();
     let id = messages[0].message().unwrap().id();
-    mailbox.mark_claimed(&[id]);
+    mailbox.mark_claimed_sync(&[id]);
     (mailbox, id)
 }
 
@@ -610,7 +610,7 @@ async fn concurrent_delivery_during_assistant_send_is_ordered_after_it_and_not_l
     peri_time::timeout(Duration::from_secs(2), sink.entered.notified())
         .await
         .expect("assistant push must start");
-    mailbox.mark_delivered(&[delivery_id]);
+    mailbox.mark_delivered_sync(&[delivery_id]);
     sink.release.notify_one();
 
     event_tx
@@ -688,7 +688,7 @@ impl EventSink for FlakySink {
 #[tokio::test]
 async fn failed_delivery_send_keeps_journal_until_retry_succeeds() {
     let (mailbox, delivery_id) = mailbox_with_claimed_input();
-    mailbox.mark_delivered(&[delivery_id]);
+    mailbox.mark_delivered_sync(&[delivery_id]);
     assert_eq!(mailbox.pending_delivery_notifications().len(), 1);
     let sink = Arc::new(FlakySink::new());
     let (event_tx, stop_tx, handle) = start_pump_with_sink(mailbox.clone(), sink.clone());
@@ -845,7 +845,7 @@ impl EventSink for TailFailSink {
 #[tokio::test]
 async fn trailing_delivery_failure_emits_error_and_skips_done() {
     let (mailbox, delivery_id) = mailbox_with_claimed_input();
-    mailbox.mark_delivered(&[delivery_id]);
+    mailbox.mark_delivered_sync(&[delivery_id]);
     let sink = Arc::new(TailFailSink::new());
     let (event_tx, stop_tx, handle) = start_pump_with_sink(mailbox.clone(), sink.clone());
 
@@ -910,7 +910,7 @@ impl EventSink for DeafSink {
 #[tokio::test]
 async fn unreachable_failure_event_does_not_hang_pump_and_is_bounded() {
     let (mailbox, delivery_id) = mailbox_with_claimed_input();
-    mailbox.mark_delivered(&[delivery_id]);
+    mailbox.mark_delivered_sync(&[delivery_id]);
     let sink = Arc::new(DeafSink::new());
     let (event_tx, stop_tx, handle) = start_pump_with_sink(mailbox, sink.clone());
 
