@@ -700,9 +700,11 @@ pub(crate) trait SessionDataPort: Send + Sync {
         .await
     }
 
-    /// 关闭结算：写入保留消息的终态提醒并删除对应 MQ 行，一次提交。
+    /// 关闭结算：写入保留消息的终态提醒并删除对应 MQ 行。
     ///
-    /// 默认实现逐步组合；语义差异同 [`Self::finalize_child_terminal`]。
+    /// 本机 SQLite adapter 覆写为单个事务；远端 adapter 尚未覆写，仍走这里的组合
+    /// 回退（已记录的限制，不是原子实现）。组合只保证「失败前不宣称完成」，进程在
+    /// 写提醒与删行之间退出可能留下已写提醒与未删行。
     async fn settle_retained_mq(
         &self,
         thread_id: &ThreadId,
@@ -725,7 +727,8 @@ pub(crate) trait SessionDataPort: Send + Sync {
 /// 把数据端口接到组合回退上的最小适配器。
 ///
 /// 组合逻辑只有一份（`peri_acp_types::session_resources::settlement`）：本机 SQLite
-/// 覆写为单事务，远端只走这里的组合路径。
+/// 把三条结算都覆写为单事务；远端覆写了终态结算两条，`settle_retained_mq` 仍走这里
+/// 的组合路径（已记录的非原子限制）。
 struct DataPortOps<'a, T: SessionDataPort + ?Sized>(&'a T);
 
 #[async_trait]

@@ -265,6 +265,8 @@ pub enum MqInput {
 - 本机 SQLite：`BEGIN IMMEDIATE` 完成终态、`work_state`、结果插入与接收方意图提升；结果插入和终态更新都要求 child 仍为 `active`，终态因此只写一次。
 - 远端存储：`finalize_child_terminal` 与 `settle_terminal_without_result` 各为一次 `commit_effects` 托管批；`Inserted` 的接纳与工作意图提升同批，`Existing` 在 `same_payload` 确认后单独提升，失败返回可重试错误。
 
+关闭结算 `settle_retained_mq` 目前只有本机 SQLite 的单事务实现；远端 adapter 尚未覆写为托管批，仍走组合回退（已记录的限制，不是原子实现）。组合回退先写提醒再删除 MQ 行，进程在两步之间退出可能留下已写提醒与未删行；不得把它当成关闭结算全有或全无的证据。
+
 没有跨行为事务的后端（内存、测试替身、未来 adapter）走组合默认实现，逐条提交并显式降级：只保证失败前不宣称完成，进程在两步之间退出可能留下部分写入；其成功不得当作原子提交证据。后端矩阵与崩溃窗口以 `session-durability.md` §5.3 为权威。
 
 `LocalTaskCompletion` 用于表达这个组合；不能先保存 Done，再独立入队。任务结果身份与幂等归类继续遵守 §4.2/§5.4。未来增加任务恢复状态时，其终态也必须参与同一提交边界，但本主题不创建任务恢复表。

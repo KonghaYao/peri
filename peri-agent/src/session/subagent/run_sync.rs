@@ -45,6 +45,10 @@ mod tests;
 #[path = "run_sync_settlement_test.rs"]
 mod settlement_tests;
 
+#[cfg(test)]
+#[path = "run_sync_sqlite_settlement_test.rs"]
+mod sqlite_settlement_tests;
+
 pub(super) struct SyncPending {
     pub receipt: ChildHandoffReceipt,
     pub pending_tasks: Vec<String>,

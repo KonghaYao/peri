@@ -687,3 +687,109 @@ async fn remote_settle_terminal_without_result_rejects_missing_child() {
         "{error:?}"
     );
 }
+
+// ─── 关闭结算：远端尚无托管批覆写 ─────────────────────────────────────────────
+
+fn reminder(body: &str) -> peri_acp_types::system_reminder::TrustedSystemReminder {
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    TrustedSystemReminderFactory::for_producer()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Task,
+            source: ReminderSource("task_manager".into()),
+            kind: "terminal".into(),
+            severity: ReminderSeverity::Info,
+            delivery: ReminderDelivery::Required,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model]),
+            body: body.into(),
+            summary: None,
+            metadata: serde_json::json!({}),
+        })
+        .unwrap()
+}
+
+/// 远端 `settle_retained_mq` 仍走组合回退：提醒与 MQ 行分别提交。
+///
+/// 成功路径与 SQLite 单事务结果相同，但这里不证明原子性；下一步用例固定记录
+/// 组合路径的崩溃窗口，避免后续把远端关闭结算误当成单批实现。
+#[tokio::test]
+async fn remote_retained_mq_settlement_uses_composed_fallback() {
+    use peri_acp_types::session::RetainedReminder;
+
+    let fixture = fixture().await;
+    let thread = thread("mq-thread");
+    let entry = fixture
+        .data
+        .mq_enqueue(&thread, input(MessageId::new(), "retained"))
+        .await
+        .unwrap();
+
+    fixture
+        .data
+        .settle_retained_mq(
+            &thread,
+            &[RetainedReminder {
+                id: MessageId::new(),
+                reminder: reminder("close settlement"),
+            }],
+            std::slice::from_ref(&entry.entry),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(history_rows(&fixture, &thread).await, 1);
+    assert_eq!(mq_rows(&fixture, &thread).await, 0);
+}
+
+/// 固定已记录的限制：远端关闭结算不是原子实现。
+///
+/// 提醒写入成功后删除 MQ 行的批被丢弃，组合回退返回错误，但已写提醒保留、待发行
+/// 仍在。若未来把远端 `settle_retained_mq` 改成托管批，本用例应随之更新。
+#[tokio::test]
+async fn remote_retained_mq_composed_fallback_is_not_atomic() {
+    use peri_acp_types::session::RetainedReminder;
+
+    let fixture = fixture().await;
+    let thread = thread("mq-thread");
+    let entry = fixture
+        .data
+        .mq_enqueue(&thread, input(MessageId::new(), "retained"))
+        .await
+        .unwrap();
+    fixture
+        .data
+        .inject_faults(FaultPlan {
+            drop_before_send: Some("mq_receive".to_owned()),
+            ..Default::default()
+        })
+        .await;
+
+    let error = fixture
+        .data
+        .settle_retained_mq(
+            &thread,
+            &[RetainedReminder {
+                id: MessageId::new(),
+                reminder: reminder("close settlement"),
+            }],
+            std::slice::from_ref(&entry.entry),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error.kind(),
+            SessionResourceErrorKind::PersistenceUncertain { .. }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        history_rows(&fixture, &thread).await,
+        1,
+        "组合回退已写下的提醒不会回滚"
+    );
+    assert_eq!(mq_rows(&fixture, &thread).await, 1, "待发行仍在");
+}

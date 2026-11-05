@@ -203,7 +203,7 @@ pub trait SessionRecovery: Send + Sync {
 child 的终态、`work_state` 收尾、结果接纳到目标 MQ，以及适用的接收方工作意图变更，在具备批/事务能力的后端上使用同一次提交；提交成功前不能宣称完成投递。
 
 - **本机 SQLite**：`BEGIN IMMEDIATE` 内一次写入 child 终态、`work_state`、结果 MQ 行与接收方 `idle → working` 提升。结果插入与终态更新都要求 child 仍为 `active`，同一 child 的终态只写一次；后到的结算不覆盖已提交终态，也不产生第二条结果。
-- **远端存储**：同样的效果放进一次 `commit_effects` 托管批。`Inserted` 的 MQ 接纳与工作意图提升同批；`Existing` 在 `same_payload` 确认后单独一批提升，失败返回可重试错误，调用方用同一稳定 ID 重试。`finalize_child_terminal` 与无结果的 `settle_terminal_without_result` 也各是一批，批内 `active` 守卫与批前/批后事实归类保证终态只写一次；批失败或结果未知不返回成功。
+- **远端存储**：同样的效果放进一次 `commit_effects` 托管批。`Inserted` 的 MQ 接纳与工作意图提升同批；`Existing` 在 `same_payload` 确认后单独一批提升，失败返回可重试错误，调用方用同一稳定 ID 重试。`finalize_child_terminal` 与无结果的 `settle_terminal_without_result` 也各是一批，批内 `active` 守卫与批前/批后事实归类保证终态只写一次；批失败或结果未知不返回成功。关闭结算 `settle_retained_mq` 尚无远端托管批覆写，仍走组合回退：先写提醒再删除 MQ 行，进程在两步之间退出可能留下已写提醒与未删行。这是已记录的限制，关闭结算因此不是原子实现。
 - **没有跨行为事务的后端**（内存、测试替身、未来 adapter）：走 `SessionResources` 的组合默认实现，按「工作意图 → 终态」或「终态 → 工作意图 → 结果接纳」逐条提交。它只保证失败前不宣称完成，**不是原子证据**；进程在两步之间退出可能留下 `Active + 目标工作意图` 或已写终态但结果未接纳。不得用这些后端的成功验收「全有或全无」。
 
 因此，已完成并成功入 MQ 的 child 不会因崩溃残留 `working` 而再次续跑。任务结果的稳定消息身份继续遵守 MQ 的去重契约；运行期任务登记本身不另建持久绑定表。
