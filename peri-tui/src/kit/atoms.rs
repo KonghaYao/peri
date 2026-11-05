@@ -60,19 +60,10 @@ pub struct AcpStateSnapshot {
     pub slash_hint_active: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ViewModelsSnapshot {
     pub items: im::Vector<TuiRenderUnit>,
     pub generation: u64,
-}
-
-impl Default for ViewModelsSnapshot {
-    fn default() -> Self {
-        Self {
-            items: im::Vector::new(),
-            generation: 0,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
