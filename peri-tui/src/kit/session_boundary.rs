@@ -1,6 +1,7 @@
 //! One synchronous projection boundary for interactive session transitions.
 
 use crate::app::panel_types::PanelKind;
+use crate::kit::program_status::{self, ProgramStatus};
 use crate::kit::{acp_events, atoms, input_history, panel_registry};
 
 /// Project a session transition before the client route can accept reverse work.
@@ -31,6 +32,9 @@ pub fn project_session_boundary(target_session_id: Option<&str>) {
         state.variant = 0;
         state.is_loading = false;
     }
+    // 旧会话的 done/error/blocked 不代表新会话；新 turn 开始时会由
+    // ExecutionStarted 重新上报 working。
+    program_status::publish(ProgramStatus::Idle);
     atoms::INPUT_BUFFER.state().write().clear();
     *atoms::HITL_PENDING.state().write() = None;
     *atoms::ASK_USER_PENDING.state().write() = None;

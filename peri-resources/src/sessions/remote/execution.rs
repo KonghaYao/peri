@@ -8,7 +8,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use peri_acp_types::thread::ThreadId;
 use peri_acp_types::workspace::{
-    ProjectId, ResolvedWorkspace, SessionBinding, WorkspaceError, WorkspaceId,
+    binding_cwd, ProjectId, ResolvedWorkspace, SessionBinding, WorkspaceError, WorkspaceId,
     SESSION_BINDING_VERSION,
 };
 use sha2::{Digest, Sha256};
@@ -97,7 +97,7 @@ impl RemoteExecution {
             if saved.kind != "virtual-v1" || saved.root != *root {
                 return Err(WorkspaceError::NeedsRelink.into());
             }
-            let cwd = root.join(&binding.cwd_relative_to_workspace);
+            let cwd = binding_cwd(root, &binding.cwd_relative_to_workspace);
             let path = root.to_str().ok_or(WorkspaceError::InvalidBinding)?;
             let recorded = self.data.workspace_for_path(machine_id, path).await?;
             if recorded != Some(owner)
@@ -213,7 +213,8 @@ impl LocalExecutionPort for RemoteExecution {
             let resolved = ResolvedWorkspace {
                 project_id,
                 workspace_id,
-                cwd: cwd.to_path_buf(),
+                // 与恢复路径同一形态：空相对路径不通过 `join` 追加尾分隔符。
+                cwd: binding_cwd(root, &relative_cwd),
                 root: root.clone(),
                 relative_cwd,
                 discovery_snapshot: Some(snapshot),

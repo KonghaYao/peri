@@ -77,6 +77,7 @@ pub fn expiry_for_cause(cause: ClaimCause) -> InteractionExpiryReason {
         ClaimCause::LifecycleDrain => InteractionExpiryReason::LifecycleDrain,
         ClaimCause::TurnTerminal => InteractionExpiryReason::TurnTerminal,
         ClaimCause::TransportTerminal => InteractionExpiryReason::TransportTerminal,
+        ClaimCause::ServerCancelled => InteractionExpiryReason::ServerCancelled,
         ClaimCause::UserResponse => InteractionExpiryReason::ResponseTransportFailed,
     }
 }

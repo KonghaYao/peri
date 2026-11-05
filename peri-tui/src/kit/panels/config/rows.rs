@@ -1,12 +1,10 @@
-//! Config 面板的行模型、行显示与纯变换。
+//! Config 面板的行模型、行显示与标签。
 //!
 //! 行模型 = 静态基础行（[`CONFIG_ROWS`]）+ 注册表驱动的 beta 区块；命中、导航
 //! 与渲染都以行模型的下标为身份——下标到语义静态稳定，不随外部刷新漂移。
 //!
-//! 本模块只读取句柄并做纯变换（`apply_*` 不触碰任何句柄）；写入与保存边界见
-//! `actions`。
+//! 本模块只读取句柄；写入与保存边界见 `actions`。
 
-use crate::config::{PeriConfig, TuiConfig};
 use crate::i18n;
 use crate::kit::atoms::{PERI_CONFIG_HANDLE, PERMISSION_MODE_HANDLE, TUI_CONFIG_HANDLE};
 use peri_acp_types::beta_flags::BETA_FLAGS;
@@ -344,98 +342,8 @@ pub(super) fn read_cycle_idx(row: usize, options: &[&str]) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// 纯函数变换与标签
+// 权限模式标签
 // ---------------------------------------------------------------------------
-
-/// 纯函数：toggle 行的值反转。返回反转后的新值（无效 row 返回 None）。
-/// 仅处理 PeriConfig 上的非 TUI 字段。
-#[allow(dead_code)]
-pub(super) fn apply_toggle_row(cfg: &mut PeriConfig, row: usize) -> Option<bool> {
-    let new_val = match row {
-        ROW_CACHE_WARN => {
-            let cur = cfg.config.show_cache_warning.unwrap_or(false);
-            cfg.config.show_cache_warning = Some(!cur);
-            !cur
-        }
-        ROW_1M_CONTEXT => {
-            let alias = cfg.config.active_alias.clone();
-            cfg.config
-                .profiles
-                .get_mut(&alias)
-                .map(|p| {
-                    p.context_1m = !p.context_1m;
-                    p.context_1m
-                })
-                .unwrap_or(false)
-        }
-        _ => return None,
-    };
-    Some(new_val)
-}
-
-/// 纯函数：cycle 行前进/后退并写入 PeriConfig 新值。返回新选项在 options 中的索引。
-/// 仅处理 PeriConfig 上的非 TUI 字段。
-#[allow(dead_code)]
-pub(super) fn apply_cycle_row(cfg: &mut PeriConfig, row: usize, forward: bool) -> Option<usize> {
-    let options: &[&str] = match row {
-        ROW_LANGUAGE => LANGUAGE_OPTS,
-        ROW_ACTIVE_ALIAS => ALIAS_OPTS,
-        ROW_PERMISSION_MODE => PERMISSION_OPTS,
-        _ => return None,
-    };
-    let cur_idx = match row {
-        ROW_LANGUAGE => LANGUAGE_OPTS
-            .iter()
-            .position(|s| cfg.config.language.as_deref() == Some(*s))
-            .unwrap_or(0),
-        ROW_ACTIVE_ALIAS => ALIAS_OPTS
-            .iter()
-            .position(|s| cfg.config.active_alias == *s)
-            .unwrap_or(0),
-        ROW_PERMISSION_MODE => 0, // 不持久化
-        _ => return None,
-    };
-    let next = if forward {
-        (cur_idx + 1) % options.len()
-    } else {
-        (cur_idx + options.len() - 1) % options.len()
-    };
-    let new_val = options[next];
-    match row {
-        ROW_LANGUAGE => cfg.config.language = Some(new_val.to_string()),
-        ROW_ACTIVE_ALIAS => cfg.config.active_alias = new_val.to_string(),
-        ROW_PERMISSION_MODE => {} // 由 PERMISSION_MODE_HANDLE 处理
-        _ => return None,
-    }
-    Some(next)
-}
-
-/// 纯函数：cycle 行前进/后退并写入 TuiConfig 新值。返回新选项在 options 中的索引。
-#[allow(dead_code)]
-pub(super) fn apply_cycle_row_tui(cfg: &mut TuiConfig, row: usize, forward: bool) -> Option<usize> {
-    let options: &[&str] = match row {
-        ROW_STREAMING => STREAMING_OPTS,
-        _ => return None,
-    };
-    let cur_idx = match row {
-        ROW_STREAMING => STREAMING_OPTS
-            .iter()
-            .position(|s| cfg.streaming_mode.as_deref() == Some(*s))
-            .unwrap_or(0),
-        _ => return None,
-    };
-    let next = if forward {
-        (cur_idx + 1) % options.len()
-    } else {
-        (cur_idx + options.len() - 1) % options.len()
-    };
-    let new_val = options[next];
-    match row {
-        ROW_STREAMING => cfg.streaming_mode = Some(new_val.to_string()),
-        _ => return None,
-    }
-    Some(next)
-}
 
 pub(super) fn parse_permission_mode(s: &str) -> Option<PermissionMode> {
     match s {

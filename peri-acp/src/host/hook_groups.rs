@@ -8,7 +8,7 @@ use peri_acp_types::hooks::{RegisteredHook, SettingsHooksPort};
 ///
 /// `skip_settings_hooks`：bare 模式跳过 global/project/local（与 print 既有语义
 /// 一致）；plugin hooks 为空时不产生空组。三级 settings hooks 经
-/// `SettingsHooksPort` 注入（装配点构造，磁盘加载与其信任准入留在实现方）。
+/// `SettingsHooksPort` 注入（装配点构造，磁盘加载留在实现方）。
 pub fn assemble_hook_groups(
     plugin_hooks: &[RegisteredHook],
     settings_hooks: &dyn SettingsHooksPort,

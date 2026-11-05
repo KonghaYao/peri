@@ -984,5 +984,60 @@ async fn test_new_session_flushes_notifications_in_wire_order_across_initializat
     client.close();
 }
 
+/// 服务端通过 `$/cancel_request` 撤销挂起 elicitation（提问超时）：
+/// 客户端按 wire id 认领，结算为 `Expired(ServerCancelled)`，供 bridge 关闭
+/// 问答面板并恢复普通输入。
+#[tokio::test]
+async fn test_server_cancel_request_expires_pending_elicitation() {
+    use crate::acp_client::InteractionExpiryReason;
+    use tokio_util::sync::CancellationToken;
+
+    let (client_transport, server_transport) = mpsc_transport_pair();
+    let (client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
+    client.lifecycle.force_stable("s1", true);
+    client.spawn_pump(notification_tx);
+    let server = Arc::new(server_transport);
+
+    let cancellation = CancellationToken::new();
+    let request_server = server.clone();
+    let request_cancellation = cancellation.clone();
+    let request = tokio::spawn(async move {
+        request_server
+            .send_cancellable_request(
+                "elicitation/create",
+                json!({"sessionId":"s1"}),
+                request_cancellation,
+            )
+            .await
+    });
+
+    let AcpNotification::Elicitation { owner, .. } = notification_rx.recv().await.unwrap() else {
+        panic!("expected elicitation request");
+    };
+    cancellation.cancel();
+
+    let error = request
+        .await
+        .unwrap()
+        .expect_err("cancelled request must fail");
+    assert_eq!(error.code, -32800);
+
+    let notification = notification_rx.recv().await.unwrap();
+    let AcpNotification::InteractionTerminal {
+        owner: ended,
+        outcome,
+    } = notification
+    else {
+        panic!("expected interaction terminal");
+    };
+    assert_eq!(ended, owner);
+    assert_eq!(
+        outcome,
+        InteractionUiOutcome::Expired {
+            reason: InteractionExpiryReason::ServerCancelled,
+        }
+    );
+}
+
 #[path = "client_reverse_abort_test.rs"]
 mod abort_tests;

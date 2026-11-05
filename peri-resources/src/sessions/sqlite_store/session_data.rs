@@ -84,6 +84,8 @@ mod port;
 
 #[path = "session_data_helpers.rs"]
 mod helpers;
+#[cfg(test)]
+pub(super) use helpers::message_insert_chunk_rows;
 use helpers::*;
 pub(super) use helpers::{new_session_draft_row, new_session_row, validate_unbound_legacy_frozen};
 

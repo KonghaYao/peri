@@ -74,7 +74,6 @@ fn marketplace(name: &str, source: &str) -> MsEntry {
         plugin_count: 0,
         installed_count: 0,
         status: MsStatus::Cached,
-        last_updated: None,
         auto_update: false,
     }
 }

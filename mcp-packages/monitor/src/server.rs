@@ -80,7 +80,13 @@ impl ServerHandler for MonitorMcpServer {
         match request.name.as_ref() {
             "monitor_start" => match parse_start(&arguments) {
                 Ok(start) => match self.state.start(start, owner).await {
-                    Ok(started) => Ok(CallToolResponse::Task(seed_task(started))),
+                    Ok(started) => {
+                        let ttl_ms = self
+                            .state
+                            .task_ttl_ms(&started.task_id)
+                            .map_err(unknown_task)?;
+                        Ok(CallToolResponse::Task(seed_task(started, ttl_ms)))
+                    }
                     Err(error) => Ok(tool_error("monitor_start", &error)),
                 },
                 Err(error) => Ok(tool_error("monitor_start", &error)),
@@ -134,7 +140,11 @@ impl ServerHandler for MonitorMcpServer {
             .state
             .snapshot(&request.task_id, owner.as_deref())
             .map_err(unknown_task)?;
-        let mut result = GetTaskResult::new(detailed_task(snapshot.clone()));
+        let ttl_ms = self
+            .state
+            .task_ttl_ms(&request.task_id)
+            .map_err(unknown_task)?;
+        let mut result = GetTaskResult::new(detailed_task(snapshot.clone(), ttl_ms));
         // The Tasks projection has no room for custom task fields; the host
         // task-subscription poller reads the cumulative alert projection from
         // result metadata and owns rate limiting / delivery.
@@ -175,7 +185,7 @@ fn unknown_task(_error: crate::state::MonitorError) -> McpError {
     McpError::invalid_params("unknown task", None)
 }
 
-fn seed_task(started: crate::state::StartedMonitor) -> CreateTaskResult {
+fn seed_task(started: crate::state::StartedMonitor, ttl_ms: u64) -> CreateTaskResult {
     let now = started.started_at.clone();
     let task = Task::new(
         started.task_id.clone(),
@@ -184,6 +194,7 @@ fn seed_task(started: crate::state::StartedMonitor) -> CreateTaskResult {
         now,
     )
     .with_status_message("Monitor command started. Read incremental events with monitor_read.")
+    .with_ttl_ms(ttl_ms)
     .with_poll_interval_ms(1_000);
     let mut meta = JsonObject::new();
     meta.insert(
@@ -197,14 +208,15 @@ fn seed_task(started: crate::state::StartedMonitor) -> CreateTaskResult {
     CreateTaskResult::new(task).with_meta(MetaObject(meta))
 }
 
-fn detailed_task(snapshot: TaskSnapshot) -> DetailedTask {
+fn detailed_task(snapshot: TaskSnapshot, ttl_ms: u64) -> DetailedTask {
     let mut task = Task::new(
         snapshot.task_id.clone(),
         rmcp_status(snapshot.status),
         snapshot.started_at.clone(),
         snapshot.last_updated_at.clone(),
     )
-    .with_poll_interval_ms(1_000);
+    .with_poll_interval_ms(1_000)
+    .with_ttl_ms(ttl_ms);
     if let Some(message) = snapshot.status_message.clone() {
         task = task.with_status_message(message);
     }

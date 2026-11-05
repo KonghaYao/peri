@@ -3366,7 +3366,6 @@ dependencies = [
  "peri-runtime",
  "peri-time",
  "serde_json",
- "serial_test",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -3386,7 +3385,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
- "tokio-util",
  "tracing",
 ]
 
@@ -3414,21 +3412,17 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
- "base64 0.23.1",
  "chrono",
  "fs4",
  "futures",
  "libc 0.2.189",
- "parking_lot",
  "peri-acp-types",
  "peri-agent",
  "peri-mcp-core",
  "peri-process",
  "peri-time",
  "rmcp",
- "serde",
  "serde_json",
- "serde_norway",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -3457,7 +3451,6 @@ dependencies = [
 name = "peri-mcp-core"
 version = "0.2.0"
 dependencies = [
- "parking_lot",
  "rmcp",
  "serde",
  "serde_json",
@@ -3546,7 +3539,6 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
- "tempfile",
  "tokio",
  "tracing",
 ]
@@ -3556,7 +3548,6 @@ name = "peri-mcp-workflow"
 version = "0.2.0"
 dependencies = [
  "async-trait",
- "parking_lot",
  "peri-acp-types",
  "peri-mcp-common",
  "peri-workflow",
@@ -3572,13 +3563,9 @@ dependencies = [
 name = "peri-mcp-workspace"
 version = "0.2.0"
 dependencies = [
- "anyhow",
  "async-trait",
- "axum",
  "base64 0.23.1",
  "chrono",
- "clap",
- "dirs 7.0.0",
  "filetime",
  "futures",
  "fuzzy-matcher",
@@ -3595,13 +3582,9 @@ dependencies = [
  "peri-resources",
  "peri-time",
  "regex",
- "reqwest",
  "rmcp",
  "serde",
  "serde_json",
- "serde_norway",
- "serial_test",
- "sha2 0.11.1",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -3634,7 +3617,6 @@ dependencies = [
  "peri-acp-types",
  "peri-agent",
  "peri-config",
- "peri-js-runtime",
  "peri-mcp-artifact",
  "peri-mcp-common",
  "peri-mcp-core",
@@ -3679,7 +3661,6 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "thiserror 2.0.20",
  "tokio",
  "tokio-util",
  "url",
@@ -3706,7 +3687,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "dirs 7.0.0",
- "js-sys",
  "peri-acp-types",
  "peri-process",
  "peri-time",
@@ -3722,8 +3702,6 @@ dependencies = [
  "turso_serverless",
  "url",
  "uuid",
- "wasm-bindgen",
- "wasm-bindgen-futures",
  "windows-sys 0.61.2",
 ]
 
@@ -3857,7 +3835,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
- "tokio-test",
  "tokio-util",
  "tracing",
  "uuid",
@@ -6018,17 +5995,6 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
-]
-
-[[package]]
-name = "tokio-test"
-version = "0.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f6d24790a10a7af737693a3e8f1d03faef7e6ca0cc99aae5066f533766de545"
-dependencies = [
- "futures-core",
- "tokio",
- "tokio-stream",
 ]
 
 [[package]]

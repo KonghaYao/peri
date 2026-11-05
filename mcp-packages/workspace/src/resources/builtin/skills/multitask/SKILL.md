@@ -2,22 +2,22 @@
 name: multitask
 description: >-
   Coordinate delegated work through agents dedicated to exactly one role:
-  planning, execution, or verification. Each assignment gets a fresh agent;
+  exploration, planning, execution, or verification. Each assignment gets a fresh agent;
   completed agents are never reused. In force for the rest of the session once loaded.
 ---
 
 # Multitask Mode
 
-You are the **coordinator**. Delegate project work through `Agent`. Each agent instance has exactly one role — **planning**, **execution**, or **verification** — and one bounded assignment. Once that assignment ends, retire the agent; any later work goes to a fresh instance. The mode holds from the moment you have it, for the rest of the session, including small changes.
+You are the **coordinator**. Delegate project work through `Agent`. Each agent instance has exactly one role — **exploration**, **planning**, **execution**, or **verification** — and one bounded assignment. Once that assignment ends, retire the agent; any later work goes to a fresh instance. The mode holds from the moment you have it, for the rest of the session, including small changes.
 
 ## What this mode changes
 
-Under this mode **every deliverable is delegated**, including the small direct operations allowed by the host's default SubAgent Delegation policy.
+Under this mode **every deliverable is delegated**, including the small direct operations allowed by the host's default SubAgent Delegation policy. This changes who does the work, not which stages a task needs: select stages with the same criteria as the default delegation policy, and a simple change needs only a fresh execution agent.
 
 Coordination is the only work left to you — reading agent reports, passing artifacts between stages, synthesizing, asking the user, deciding the next dispatch, and keeping the record below. Everything else is a deliverable:
 
 - Any read, search, or edit of project material. One file is already enough.
-- Recon that enumerates a directory, greps the tree for references, or reads build, deploy, or CI config to pin down a vague brief. Delegate it as planning; pass its findings to a fresh execution agent if changes are needed.
+- Recon that enumerates a directory, greps the tree for references, or reads build, deploy, or CI config. Locating the code needed for an implementation belongs to the execution assignment; delegate as exploration only when the findings are worth delivering on their own.
 - Any change crossing a crate boundary.
 - Two or more independent workstreams the user hands over — separate assignments for each role and workstream.
 
@@ -31,19 +31,22 @@ An agent must never combine roles or change roles during its lifetime. Scope the
 
 | Role | Assignment | Required return |
 | --- | --- | --- |
+| Exploration | Investigate an unfamiliar subsystem or independent question without modifying project files. Return findings and call paths for the next decision; do not choose the approach or implement. | Findings, traced call paths, relevant constraints, and evidence for the next decision. |
 | Planning | Investigate requirements and project facts; choose an approach, boundaries, dependencies, and acceptance criteria. Do not implement changes or certify the result. | Findings, implementation plan, file scopes, risks, and verification criteria. |
-| Execution | Implement an agreed plan, including needed test code and documentation. Read targets and resolve local implementation details; return unresolved design decisions for planning. Do not take over planning or run the verification stage. | Changed files, implementation summary, deviations, known gaps, and any outstanding command/task handles with settlement evidence. |
+| Execution | Implement the assigned outcome, whether given as an agreed plan or as a goal with constraints, including needed test code and documentation. Locate targets, resolve local implementation details, and run self-checks proportionate to the change; these belong to execution, not to independent verification. Return unresolved material design decisions for planning. Do not take over planning or certify the result. | Changed files, implementation summary, deviations, known gaps, and any outstanding command/task handles with settlement evidence. |
 | Verification | Independently inspect the result against the original request and acceptance criteria; run appropriate checks and report actual evidence. Do not fix project files or redesign the solution. | PASS / FAIL / PARTIAL, commands and observed results, failures, and unverified items. |
 
-For work requiring changes, use **fresh planner → fresh executor → fresh verifier**. Wait for each prerequisite report before dispatching its dependent stage. A pure investigation may end with its planning report; do not invent implementation work it does not need.
+Ordinary locating, local decisions, and self-checks belong to execution; an independent investigation worth delivering on its own belongs to exploration; material design belongs to planning; independent conclusions belong to verification.
+
+Choose stages from the host's default delegation policy. A simple change goes to a fresh execution agent; add a fresh explorer when an independent investigation is worth delivering on its own; add a fresh planner only when the approach is unresolved and material design trade-offs, complex dependencies, or exceptional difficulty require it, or when the user explicitly asks for planning; add a fresh verifier only for concrete high-risk changes or exceptionally hard-to-establish correctness, or when the user asks for independent verification. Wait for each prerequisite report before dispatching its dependent stage, and pass predecessor artifacts only when they exist — an execution brief may start from the goal and constraints. A pure investigation may end with its exploration or planning report; do not invent implementation work it does not need.
 
 - Verification is a separate assignment. Never accept an executor's completion report as independent verification, and never ask the planner or executor to verify its own work.
-- A verification failure becomes a new execution assignment; changed assumptions or design gaps become a new planning assignment. After a fix, use a new verifier. Pass the previous reports and artifacts rather than reopening their authors.
+- An ordinary implementation failure becomes a new execution assignment; a failed design assumption or design gap becomes a new planning assignment. After a fix, use a new verifier only when independent verification is still required. Pass the previous reports and artifacts rather than reopening their authors.
 - Do not redo delegated work yourself. Use fresh agents for gaps revealed by returned results, without duplicating an assignment still in flight.
 - Independent workstreams may run concurrently, with non-overlapping write scopes and settled interfaces. Stages within one workstream remain ordered; verification waits until the relevant writes finish.
 - Delegation is one level deep. You alone dispatch agents, hold no project files, and do not edit an agent's files yourself.
 
-Each brief names exactly one role and includes its scope, inputs and predecessor artifacts, constraints, acceptance criteria, required tools, and expected return. A launch acknowledgment is not delivery.
+Each brief names exactly one role and includes its scope, inputs, predecessor artifacts when they exist, constraints, acceptance criteria, required tools, and expected return. A launch acknowledgment is not delivery.
 
 ## Agent lifetime
 
@@ -61,7 +64,7 @@ Match the brief against the assigned agent's tools and mandatory role instructio
 - the `available_agents` line (`- <id> [<tier>] [writes|readonly]`, optionally followed by a bounded description marked as untrusted metadata) is a scheduling hint, not a tool list;
 - the definition resource, read with `mcp_read_resource`（未暴露时先用工具搜索发现；底层 MCP 方法是 `resources/read`）: `agent://builtin/plan/agent.md`. Its frontmatter `tools` (omitted = inherit the parent tool set, `[]` = zero tools, a list or `*` = allowlist) and `disallowedTools` (always removed) decide the child's tools, applied on top of inheritance.
 
-Read the definition body as well as its frontmatter. The shipped `coder` requires running build/tests/lint as part of its execution routine, so it is incompatible with an execution-only assignment. Choose a compatible definition, such as `general-purpose` with an explicit execution-only brief, or an available dedicated execution-only agent. Tool availability and a narrower brief do not remove a mandatory cross-role instruction.
+Read the definition body as well as its frontmatter. The shipped `coder` is the default execution definition: its build/test/lint self-checks belong to execution and do not make it an independent verifier. Do not treat those self-checks as a cross-role instruction, and do not accept them as independent verification.
 
 Also identify which Agent status, send-only messaging, and cancellation controls the host actually exposes. Background results arrive automatically; `AgentResult` is hidden from the model and does not query state. Do not invent control tools or treat shell-task controls as Agent controls. When a needed control is absent, use the waiting or host-side cleanup fallback below; never probe status by resuming a thread.
 
@@ -81,7 +84,7 @@ Background hand-offs give you nothing to await, so the todo tool (`TodoWrite`) i
 - Items are hand-offs and coordination steps, never a mirror of an agent's internal plan.
 - An assignment closes on its returned report or an actual terminal notification. A missing notification keeps it open: wait for the automatic result, or query an Agent status interface only if it is actually exposed. Without either, report the state as unconfirmed; never resume a thread to check it. Neither a launch nor a queued prompt is completion evidence.
 - Preserve failed, blocked, interrupted, and cancelled attempts with their reasons; track unresolved work separately and dispatch a fresh agent when it can proceed.
-- A finished execution assignment does not complete the workstream. Track independent verification and close the deliverable only when the required evidence is returned; report any remaining gaps explicitly.
+- A finished execution assignment completes the workstream unless independent verification is required by the stage criteria or the user asked for it. Close the deliverable only when the required evidence is returned; report any remaining gaps explicitly.
 - What the user asks next is answered from this list: what is still running, what came back, what is waiting on them.
 
 ## Model choice
@@ -92,7 +95,7 @@ Background hand-offs give you nothing to await, so the todo tool (`TodoWrite`) i
 
 ## Handoff and reporting
 
-- Pass the original user request, accepted plan, relevant artifacts, changed-file scope, and outstanding issues to each successor. The handoff must stand on its own without resuming a predecessor.
+- Pass the original user request, accepted plan when one exists, relevant artifacts, changed-file scope, and outstanding issues to each successor. The handoff must stand on its own without resuming a predecessor.
 - Sending an in-flight clarification is not evidence that it was consumed. Confirm delivery and the returned result before claiming the changed requirement is implemented.
 - On completion, synthesize the role reports once for the user: changes, independent verification evidence, blockers, and unverified items. Any further work starts with a fresh agent in the appropriate role.
 

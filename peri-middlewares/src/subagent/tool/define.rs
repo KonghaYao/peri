@@ -342,15 +342,7 @@ impl BaseTool for SubAgentTool {
         };
 
         let build_result = self
-            .build_agent_from_def(
-                &agent_def,
-                &agent_id,
-                &cwd,
-                peri_agent::session::subagent::SubagentCancelPolicy::Cascade,
-                false,
-                true,
-                model.as_deref(),
-            )
+            .build_agent_from_def(&agent_def, &agent_id, &cwd, model.as_deref())
             .await?;
 
         let llm = build_result.llm;

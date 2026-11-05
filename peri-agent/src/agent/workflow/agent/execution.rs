@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 
 use peri_acp_types::session_resources::{
@@ -39,9 +40,7 @@ impl WorkflowExecution {
         let FrozenState::Present(frozen) = snapshot.frozen else {
             return Err("Blocked: workflow parent frozen authorization unavailable".into());
         };
-        if snapshot.meta.cwd != context.cwd {
-            return Err("Blocked: workflow execution workspace differs from parent".into());
-        }
+        ensure_same_execution_directory(&snapshot.meta.cwd, &context.cwd)?;
         let mut root_id = parent_id.clone();
         let mut seen = HashSet::new();
         loop {
@@ -84,5 +83,39 @@ impl WorkflowExecution {
             session_id,
             resources,
         })
+    }
+}
+
+/// 父快照与本次 workflow 执行目录必须指向同一目录。
+///
+/// 与 subagent spawn 同一判定（`same_execution_directory`）：绑定恢复可能带回
+/// 尾分隔符，文本差异不构成换目录；真正不同的目录仍拒绝。
+fn ensure_same_execution_directory(parent_cwd: &str, cwd: &str) -> Result<(), String> {
+    if peri_acp_types::workspace::same_execution_directory(Path::new(parent_cwd), Path::new(cwd)) {
+        Ok(())
+    } else {
+        Err("Blocked: workflow execution workspace differs from parent".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_same_execution_directory;
+
+    #[test]
+    fn workflow_guard_accepts_same_directory_text_variants() {
+        assert!(ensure_same_execution_directory("/a/workspace", "/a/workspace/").is_ok());
+        assert!(ensure_same_execution_directory("/a/workspace/", "/a/workspace").is_ok());
+        assert!(ensure_same_execution_directory("/a/workspace", "/a/./workspace").is_ok());
+    }
+
+    #[test]
+    fn workflow_guard_rejects_different_directory() {
+        for other in ["/a/workspace/sub", "/a/other", "/a/workspace/../other"] {
+            assert_eq!(
+                ensure_same_execution_directory("/a/workspace", other),
+                Err("Blocked: workflow execution workspace differs from parent".into())
+            );
+        }
     }
 }

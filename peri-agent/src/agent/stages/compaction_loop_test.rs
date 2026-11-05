@@ -439,7 +439,7 @@ async fn test_run_react_loop_new_high_usage_generations_preserve_unexposed_histo
             ),
             (
                 crate::agent::events::CompactStrategy::Full,
-                97_082,
+                97_081,
                 Some(crate::agent::compact_v2::planner::FullEscalationReason::ForceThresholdExceeded),
                 crate::agent::compact_v2::CompactOutcome::FullApplied,
             ),

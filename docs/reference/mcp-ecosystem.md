@@ -18,7 +18,7 @@
 - [6. MCP Apps：交互式 UI 扩展（SEP-1865）](#6-mcp-apps交互式-ui-扩展sep-1865)
 - [7. skills：技能发现与加载](#7-skills技能发现与加载)
 - [8. 外部接入指引](#8-外部接入指引)
-- [9. peri 内部落地现状与路径](#9-peri-内部落地现状与目标路径)
+- [9. Peri 接入配置与事实源](#9-peri-接入配置与事实源)
 - [10. 参考](#10-参考)
 
 ## 1. 背景与术语
@@ -37,7 +37,7 @@
 ### 1.2 术语
 
 - **MCP server**：能力提供方，暴露 tools / resources 等原语。
-- **MCP client / host**：peri-agent；持有连接、调用能力、渲染 MCP App。
+- **MCP client / host**：Peri 宿主；`peri-middlewares` 实现连接与调用，ACP Host 持有部署生命周期；下游 Web Host 渲染 MCP App。
 - **原语（primitive）**：tools（可执行动作）、resources（只读内容）、prompts（用户模板，peri 不采用，见 4.1）。
 - **MRTR**：Multi-Round Tool Results，多轮工具结果。
 - **SEP**：Spec Extension Proposal，规范扩展提案编号（如 SEP-1865 是 MCP Apps）。
@@ -52,7 +52,7 @@
 MCP 在 perihelion 中是**标准的 connector——通用的外部能力对接器**。这句话有三层含义：
 
 - **对外**：任何外部能力提供方（工具、数据源、服务、交互界面）实现一个标准 MCP server 即可接入 peri，无需了解 peri 内部协议（ACP），也无需为 peri 定制。
-- **对内**：peri-agent 是 MCP client，持有 MCP 连接；peri-acp 是 ACP 数据出口；peri-tui / web UI 只是 view，所有 view 从 peri-acp 接数据。
+- **对内**：`peri-middlewares` 实现 MCP client，ACP Host 持有部署生命周期；`peri-agent` 消费工具与资源端口。`peri-acp` 是 ACP 数据出口，`peri-tui` / web UI 消费其投影。
 - **能力面**：由若干标准能力组合而成——`tools` / `resources`（核心原语）+ `subscriptions`（服务端通知）+ `MCP Apps`（官方扩展）+ `skills`（工作组推进中）。server 按需声明与组合，client 按能力协商。
 
 ### 2.2 互通拓扑
@@ -63,7 +63,7 @@ flowchart LR
     N["subscriptions/listen<br/>服务端通知"]
     S["skills（skill:// 技能资源）"]
     A["MCP App（ui:// 资源）"]
-    subgraph AGENT["peri-agent —— MCP 连接持有者（client）"]
+    subgraph AGENT["Peri 宿主 —— peri-middlewares MCP client"]
         MC["MCP Client<br/>tools/list · tools/call · resources/read · subscriptions/listen"]
         RELAY["Apps relay ports<br/>raw metadata/result · capability profile"]
     end
@@ -131,13 +131,13 @@ tools 原语在两个协议版本中基本兼容。2026-07-28 的新增与调整
 
 **例外**：声明为启动依赖的 server 用 `system_mcp_tools` 指名必需工具（配置语义见 §9.2）；这些工具的目标行为是不经 tool search、直接进入 RCRA 工具列表，契约见 `docs/design/mcp-adaptation-v4-part-1.md`。其余 MCP 工具仍全部落在 deferred 面。
 
-**内置实例（builtin）**：peri 自带的 Web / Artifact / Cron / Monitor / Workspace / Workflow 能力同样以 MCP 实例形态提供，只是 server 与 client 同进程，由本地默认配置层自动注入。各实例的工具、直连性与关闭键以 `peri-acp-types/src/builtin_mcp.rs` 的声明表和 §9.8 为准。
+**内置实例（builtin）**：peri 自带的 Web / Artifact / Cron / Monitor / Workspace / Workflow 能力同样以 MCP 实例形态提供，只是 server 与 client 同进程，由本地默认配置层自动注入。各实例的工具、直连性与关闭键见 [MCP packages 索引](../code-index/mcp-packages.md)；声明表 `peri-acp-types/src/builtin_mcp.rs` 是唯一事实源。
 
 ### 3.3 桥接与命名
 
 MCP 工具经 `McpToolBridge`（`peri-middlewares/src/mcp/tool_bridge.rs`）包装为 `BaseTool`：
 
-- **命名**：普通 MCP 工具与 deferred MCP 工具使用 `mcp__<server>__<tool>`，server / tool 名经 sanitize（非 `[a-zA-Z0-9_-]` 字符替换为 `_`），与 skills 命名（`mcp__<server>__<skill>`）同规则。被 `system_mcp_tools` 选中的工具以 wire 原始工具名注入模型面。
+- **命名**：普通 MCP 工具与 deferred MCP 工具使用 `mcp__<server>__<tool>`，server / tool 名经 sanitize（非 `[a-zA-Z0-9_-]` 字符替换为 `_`）；技能命令使用独立词法（见 §7.4）。被 `system_mcp_tools` 选中的工具以 wire 原始工具名注入模型面。
 - **内置实例工具名**：builtin `web`、`artifact`、`workspace` 的 direct 工具以原始名出现在模型面（`WebSearch`、`WebFetch`、`artifact`、`Read`、`Write`、`Edit`、`Glob`、`Grep`、`folder_operations`、`Bash`）；builtin `cron` / `monitor` / `workflow` 保持 deferred，模型面名为 `mcp__<实例>__<tool>`。普通 system MCP 的选中工具同样使用原始名，其余工具仍带前缀。MCP wire `tools/call.name` 始终使用原始工具名，原名注入不创建前缀别名。
 - **按绑定来源判定与匹配**：权限按工具来源和原始工具身份处理；未知或外部 MCP 工具不能因名称恰为 `Read`、`Write` 或 `Bash` 获得 builtin 权限。工具名匹配按实际模型可见名进行，不合成额外可调用别名。
 - **描述**：加 `[MCP:<server>]` 前缀，指明来源 server。
@@ -442,21 +442,22 @@ flowchart LR
 
 Peri 不创建 iframe、不实现 sandbox/CSP/Permissions Policy、不处理浏览器 `postMessage`，也不实现 MCP Apps FE。下游 Web Host 负责把 Peri 的 ACP 数据接入自己的 Apps host；`peri-tui` 不参与。
 
-Peri 侧数据流：
+Peri 侧接入以 [MCP Apps relay 设计](../design/mcp-multiplexing.md) 与
+[ACP wire 契约](../design/peri-acp-protocol.md)为准：
 
-1. Peri 在 MCP pool prewarm 前读取一次 `PERI_MCP_APPS` 是否存在并冻结 deployment profile；值不解析。
-2. 变量存在时，初始连接和重连均传播 `io.modelcontextprotocol/ui` 及 `text/html;profile=mcp-app`；不存在时使用普通 MCP capabilities。
-3. Peri 从 `tools/list` 发现 `Tool._meta.ui.resourceUri`，通过 `peri/mcp/open` 建立 connection-owned resource binding，再以 `peri/mcp/resource` 获取 `ui://` resource。Host 重开历史 App 走 `peri/mcp/invoke`：新的 MCP `tools/call` + 新 lease + `session/update` 投影新 `toolCallId`，随后仍用 `peri/mcp/open` 消费该 lease。
-4. Peri 保留 resource 的 `text|blob`/`_meta` 与 `CallToolResult` 的 `content`、`structuredContent`、`_meta`、`isError`。
-5. 下游是否创建 iframe、如何执行 `postMessage`、如何消费 Apps tool notifications，完全由下游 Web Host 决定。
+1. `PERI_MCP_APPS` 在进程启动时冻结 deployment profile；初始连接与重连传播相同的 UI capability。
+2. 下游 Host 使用 `peri/mcp/apps/list|attach|request|cancel|detach|close|rerun`。
+   `attach` 消费初始 canonical invocation 签发的 `McpAppRecord` 并绑定当前 ACP connection；
+   工具调用共用既有 Permission/HITL 执行路径。
+3. `request` 承载允许的 App 操作，保留 MCP resource/result 标准字段与 `_meta`；
+   请求 namespace、序号、去重与授权由 facade 校验，不能把任意 JSON-RPC 直接发给 MCP peer。
+4. iframe、sandbox、CSP、Permissions Policy 与浏览器 `postMessage` 由下游 Web Host 实现。
 
-### 6.3 Peri ACP 如何透传
+### 6.3 ACP 接入边界
 
-- **payload 保留 MCP Apps 原始消息**：Peri 解析外层 envelope 进行 server/session 路由校验，但不实现下游 Web Host 的 `postMessage` bridge。
-- **外层方法名统一包装**：`peri/mcp/open`、`peri/mcp/app`、`peri/mcp/resource`、`peri/mcp/invoke`；信封分离 `envelopeVersion`、`mcpProtocolVersion`、`appsProtocolVersion`，并携带 `serverId` / `appSessionId` / `resourceUri` 与 Apps payload。`invoke` 成功体带 `toolCallId`（即后续 `open` 的 `invocationToken`）。
-- **能力开关由环境驱动**：`PERI_MCP_APPS` 存在即启用整个进程的 immutable deployment profile；不再读取或回显 ACP MCP Apps capability。
-- **Web Host 属于下游**：iframe、sandbox、CSP、Permissions Policy、`postMessage` 和 MCP Apps FE 均不在 Peri 实现范围。
-- **工具调用不绕过权限**：App 发起的调用与 agent 发起的 MCP 工具调用共用既有执行路径与 HITL 权限。
+`peri/mcp/{open,resource,app,invoke}` 仅是既有客户端的兼容别名；新接入使用
+`peri/mcp/apps/*`，不使用旧 lease 或 `invocationToken` 模型设计新客户端。
+Apps payload 与 ACP 外层请求身份分别处理；完整 DTO、方法对应及生命周期只在权威设计维护。
 
 ### 6.4 关键 JSON-RPC 方法（当前 SDK/实验观察；不是封闭方法全集）
 
@@ -474,7 +475,6 @@ MCP Apps 协议会随 capability 扩展增加 `ui/*`、context、link、message�
 | Host → App | `ui/notifications/tool-cancelled` | 初始工具调用被取消 |
 | Host → App | `ui/resource-teardown` | Host → App request；需要按原 request id 返回 response |
 | Host → App | `ui/notifications/host-context-changed` | 宿主上下文变化 |
-| App → Host | `ui/notifications/size-changed` | 尺寸通知 |
 
 ```mermaid
 sequenceDiagram
@@ -517,14 +517,13 @@ Peri 不实现上述 Web Host ↔ App 的 handshake；Peri 只承载下游选择
 
 **技能（skill）= 给 agent 的结构化指令包**：`SKILL.md`（frontmatter 元数据 + 正文指令），教 agent「在特定任务下如何做」，区别于 tools（函数）与 prompts（用户模板）。
 
-在 MCP 生态中，技能以**资源形态分发**：server 以 `skill://` scheme 的资源暴露技能，client 发现后加载为可调用的技能实体。
+技能目录与正文分离：支持 Skills extension 的 server 通过 `skills/list` 发布目录，正文仍经资源读取；旧 server 可仅以 `skill://` 具体资源暴露技能。Peri 的发现与校验边界见 §7.4。
 
-### 7.2 生态现状：Claude Code 实践 + 官方工作组
+### 7.2 生态参考与工作组
 
-- **Claude Code 已实现 `skill://`**：对每个 server 调 `resources/list` → 过滤 `skill://` 前缀资源 → `resources/read` → 解析 markdown frontmatter → 注册为 `mcp__<server>__<skill>` 技能。依赖 server 声明 `capabilities.resources`，**零协议扩展成本**——纯用现有 resources 原语 + 自定义 URI 前缀。
-- **peri 已实现**：DiscoverMCP 只读工具 + MCP `skill://` 异步发现（`peri-middlewares/src/mcp/discover_tool.rs`、`skill_discovery.rs`；契约 `peri-acp-types/src/mcp_skills.rs`）。发现/注入/命令列表形态见 §7.4。
-- **安全约束**：MCP 来源的技能默认受限（Claude Code 禁内联 shell 执行），与本地技能权限区分。
-- **官方正在标准化**：MCP 官方 **Skills Over MCP 工作组**（2026 年 4 月成立）当前方向为 **SEP-2640 Skills Extension**（Extensions Track，**基于 Resources 原语**，与 Claude Code 实践同向），并协调 Agent Skills 规范（agentskills.io 的 well-known URI 发现）与 registry `skills.json`。**尚未进入 2026-07-28 规范正式扩展**（当前正式扩展：Apps / Tasks / Authorization）。
+- **Peri 接入**：提供只读查询、异步发现与统一激活；当前目录协议、正文校验及命令形态见 §7.4。
+- **安全边界**：技能正文是来源内容，不能凭声明取得工具执行权限；Peri 仍按工具准入与审批契约执行。
+- **官方正在标准化**：MCP 官方 **Skills Over MCP 工作组**（2026 年 4 月成立）当前方向为 **SEP-2640 Skills Extension**（Extensions Track，**基于 Resources 原语**），并协调 Agent Skills 规范（agentskills.io 的 well-known URI 发现）与 registry `skills.json`。**尚未进入 2026-07-28 规范正式扩展**（当前正式扩展：Apps / Tasks / Authorization）。
 
 ### 7.3 使用场景
 
@@ -532,16 +531,22 @@ Peri 不实现上述 Web Host ↔ App 的 handshake；Peri 只承载下游选择
 2. **组织级技能库**：registry `skills.json` 分发，多 server 共享技能集。
 3. **渐进式披露**：技能先于工具暴露使用说明（与 Primitive Grouping WG 思路一致），减少无谓的工具探索。
 
-### 7.4 peri 落点：统一 discover 工具 + 远端技能注入
+### 7.4 Peri 的发现与激活边界
 
-- **本地技能**：项目 `.claude/skills/` 目录（`SKILL.md` 格式）等本地来源由 builtin `workspace` 实例的**资源面**提供（`resources/list|read`、`skills/list|get` + digest/frontmatter 校验）；`DiscoverSkillsTool` / `SkillTool` **保留在宿主**跨来源聚合，只消费 MCP 来源、自身零文件系统读取，本地技能与远端技能走同一条读取与校验规则。
-- **远端技能发现入口约定**：MCP server 以 `skill://` 资源暴露技能（`resources/list` + `resources/read` 读取，`skill://<name>/SKILL.md` 即一个技能），依赖声明 `capabilities.resources`——零协议扩展成本。
-- **统一 discover 工具（DiscoverMCP）**：peri 提供**唯一的 MCP 域只读查询工具**（deferred 面、namespace `meta`，`peri-middlewares/src/mcp/discover_tool.rs`）：`search`（全域子串匹配 server / tool / resource / skill，工具类结果带完整 JSON Schema 供 `ExecuteExtraTool` 衔接）/ `list`（按 server + domain 清单）/ `detail`（server 全量状态）。**不代理任何执行**——MCP 工具执行仍只走 `ExecuteExtraTool`。错误契约为轻量 JSON-RPC（`-32601` 未知 method / `-32602` 参数错 / `-32000` server 不可用 / `0` 空结果）。
-- **远端技能注入（McpSkillRegistry，session 级）**：连接成功后异步发现——过滤 `skill://` 前缀 + `SKILL.md` 条目 → 并发 `resources/read` → 解析 frontmatter → 注册为 `mcp__<server>__<skill>`；断连移除、重连重扫。**分源合并**：`cached_skills` = `McpSkillRegistry` 当前投影（本地技能经 builtin `workspace` origin 的 `skills/list` 进入，宿主本地扫描已删除；同名按 origin 消歧），**系统来源技能进冻结摘要**，外部远端技能仍不进 prompt contribution / frozen summary / system-reminder（被动可见）。
-- **命令列表注入**：MCP 技能进用户 commands 列表（`mcp__<server>__<skill>`，TUI 以 `McpSkill` 分类 + 约定色标记）；用户触发后 SKILL.md 内容注入当前会话，**带来源标注**（server 名 + uri，提示注入防御）。
-- **安全分层**：来源标记（`source: mcp`）贯穿缓存 / `DiscoverSkillsTool` 结果 / 注入标注；权限类 frontmatter 对 MCP 来源默认不生效；内容仅存内存缓存不写盘；加载零 RPC。
-- **session 边界**：MCP 连接池不下沉 session（维持 app 级共享）；派生数据（远端注册表、发现任务、commands 数据源）**严格 session 级**——注册表挂 session middleware 实例、发现由首轮 `before_agent` 投影连接池触发（持 session 取消令牌）、commands 走 per-session `available_commands_update` 通知，不新增全局通道。
-- **技能原语现状**：SEP-2640 `skills/list`（+ `skills/get`）原语与 digest 校验已实现（provider 的 `skills/list|get` custom requests + `resources/read` 的 digest/frontmatter 校验）；`list_changed` 订阅热更新尚未实现（随 SEP-2640 正式化）。
+- **本地来源**：builtin `workspace` 实例提供项目、用户、插件与内置技能；宿主聚合工具只消费 MCP 来源，不回落磁盘。
+- **发现优先使用 `skills/list`**：server 声明 `io.modelcontextprotocol/skills` extension 后，
+  宿主按分页技能目录发现并校验 frontmatter；有完整资源清单时，在激活时核对 digest。
+  仅在未声明该能力时，兼容扫描 `resources/list` 中的 `skill://` 资源。
+  已声明能力但请求失败时明确报发现失败，不伪装为空目录或退回旧扫描。
+- **正文统一激活**：绑定资源经 `resources/read` 校验；stale 快照可经 `skills/get` 刷新。
+  技能模板不是具体条目，不能仅靠 `resources/templates/list` 展开出完整技能目录。
+- **命令与工具分别命名**：受信系统来源投影为 `core:{skill}`（显示 `/skill`），普通外部来源投影为
+  `{server}:{skill}`（显示 `/server:skill`）。`system_mcp` 启动依赖标记不赋予系统来源身份；
+  `mcp__<server>__<tool>` 是工具名规则，不能用作技能命令。
+- **内容不授予权限**：frontmatter 和正文仍是来源内容，不改变工具准入与审批。
+  连接、发现、断连清理与命令投影的具体入口见
+  [Middleware 索引](../code-index/peri-middlewares.md)；命令契约见
+  [Command 系统](../design/command-system.md)。
 
 **规范出处**：
 
@@ -556,182 +561,57 @@ Peri 不实现上述 Web Host ↔ App 的 handshake；Peri 只承载下游选择
 
 ### 8.1 互通边界与职责划分
 
-- **互通入口**：peri-agent 的 MCP client（stdio 或 Streamable HTTP 传输）。MCP 连接只存在于 agent 层；peri-acp 是 ACP 数据出口（stdio 出数据给 UI 界面）；peri-tui / web UI 只是 view，与 MCP 无直接关系。
+- **互通入口**：宿主侧 `peri-middlewares` MCP client（stdio 或 Streamable HTTP），由 ACP Host 管理部署生命周期；`peri-agent` 消费工具与资源端口。`peri-acp` 向 UI 投影结果，`peri-tui` / web UI 不持有 MCP 连接。
 - **外部职责**：实现标准 MCP server（可复用官方 SDK：`@modelcontextprotocol/sdk` + 可选 `@modelcontextprotocol/ext-apps`），按第 3–7 章声明能力、暴露工具 / 资源 / 通知 / App / 技能。
-- **内部职责**：peri-agent 侧 client 实现（连接、协商、工具执行 + HITL 权限、通知与 App 透传到事件链）。
-- **peri 侧配置**：server 在 `mcpServers` 中的条目（传输方式、协议版本、订阅、启动依赖）见 §9.2；外部实现者只需满足标准 MCP，不需要了解这些 key。
+- **内部职责**：`peri-middlewares` 负责连接、协商、工具桥接与订阅；宿主按 Permission/HITL 边界调用工具，ACP 负责事件与 Apps facade 投影。
+- **peri 侧配置**：server 在 `mcpServers` 中的配置入口与启动依赖见 §9.2；协议由实际连接协商，不配置固定 `protocolVersion`；外部实现者只需满足标准 MCP，不需要了解这些 key。
 
 ### 8.2 外部实现 checklist
 
 1. **基础原语**（第 3、4 章）：实现 `tools/list` + `tools/call`（或仅实现 `resources/*` 亦可），声明 `capabilities`。**可变实体遵守读写配对约定**（见 4.7）：资源只读，配套写工具在 description 中声明对应资源 URI，写成功后发 `updated` 通知。
 2. **服务端通知（可选，第 5 章）**：声明 `listChanged` / `subscribe` capability；按协商的协议版本实现 `subscriptions/listen`（2026-07-28）或 `resources/subscribe` + 直接 list_changed（2025-11-25）。
 3. **MCP App（可选，第 6 章）**：以 `ui://` resource 发布 HTML，工具携带 `_meta.ui.resourceUri` 绑定；App 内用 ext-apps `App` 类（`{ name, version }` 必填）。
-4. **技能（可选，第 7 章）**：以 `skill://` 资源暴露 `SKILL.md`（frontmatter + 正文），声明 `capabilities.resources` 即可被 peri 异步发现并注入技能缓存与命令列表（`mcp__<server>__<skill>`）；另提供 **skill 搜索工具**（检索入口，命名含 `skill`，如 `search_skills`）可提升检索直达性——peri 自有 DiscoverMCP 已提供全域查询（server / tool / resource / skill），server 侧搜索工具会作为普通 deferred 工具进索引，不强制。
+4. **技能（可选，第 7 章）**：声明 Skills extension，提供 `skills/list` 与可读取的技能正文；完整资源清单的 digest/frontmatter 须一致。旧 server 可通过 `resources/list` 暴露 `skill://` 具体资源走兼容路径；普通外部技能命令显示为 `/server:skill`。发现与激活约束见 §7.4。
 5. **安全基线**：HITL 确认、工具注解视为不可信、敏感操作提示确认；App 场景遵守 iframe 沙箱 + CSP 默认同源 + 权限默认全禁。
 
-## 9. peri 内部落地现状与目标路径
+## 9. Peri 接入配置与事实源
 
-> 本节区分代码事实与设计边界；Peri relay 的现行契约见 `docs/design/mcp-multiplexing.md`。
+### 9.1 当前能力与边界
 
-### 9.1 当前代码事实
+本指南不维护第二份内部实现清单或支持度矩阵。接入前按所需能力核对当前事实源：
 
-- MCP client 已进入 peri 主代码（`peri-middlewares/src/mcp/`，基于 rmcp）：tools 桥接、资源读取（`mcp_read_resource`）、OAuth、重连，以及由 `PERI_MCP_APPS` 启用的 stdio Apps relay 均已落地；Web Host、iframe 与 TUI Apps 渲染不属于 relay。
-- **builtin 实例**：`web` / `artifact` / `cron` / `monitor` / `workspace` / `workflow` 是 peri 自身的**同进程** MCP 实例（`TransportConfig::Builtin`：进程内 `duplex` + `rmcp::serve_server`），由默认配置层按 `system_mcp = true` 注入，与外部 server 走完全相同的连接、发现与提升链路：真实 `tools/list` 才提交 ready，工具仍经 `McpToolBridge` 包装，并沿用审批、事件投影与 cancel。旧的 Web / Artifact / Cron / Filesystem / Terminal / GitWatch / Workflow 链槽位均已删除，对应能力只由实例提供，原链槽位名转为实例关闭键（§9.8）。
-- **workspace 实例**：文件/终端工具的唯一提供面，全部 direct，模型面使用原始名。实现在 `mcp-packages/workspace`（`WorkspaceMcpServer::standalone`；文件工具在 `src/filesystem/`，`BashTool` 在 `src/terminal.rs`），实例自己持有 `ShellTasks`，不向会话注入后台任务状态；会话装配把资源面输入（`WorkspaceResourcesInput`）经 `HostAssemblyInput.workspace_resources` 传入。`--bare` 只装配 workspace（`load_bare_config` / `run_initialize_bare` 保留该实例），bare 下这些工具仍在；链上不存在 middleware 回退面。
-- **MCP 域查询与技能分发**：DiscoverMCP 只读工具（deferred / `meta`，search / list / detail）+ MCP `skill://` 异步发现与命令注入（McpSkillRegistry，session 级，分源合并），形态见 §7.4。
-- **MCP Apps relay**：实际行为与安全边界以 `docs/design/mcp-multiplexing.md`、对应代码和契约测试为准。
-- **MCP 通知（server → client）已实现**：2026-07-28 `subscriptions/listen` 全链路在 peri 主代码落地——`McpClientPool` 按 `McpSubscriptionsConfig`（`resources` URI 列表 + tools / prompts / resources 三个 list_changed 开关）协商协议并建立长流（`setup_subscription`），消费循环（`spawn_subscription_loop`）把 `notifications/resources/updated` 以 canonical ExternalEvent system reminder（kind `subscription_resource_updated`）注入会话 inbox 并唤醒 agent（server、uri、subscription_id 走结构化 metadata）；list_changed 系列由 rmcp peer 内部失效缓存，不进 agent。订阅通知默认进 agent，不进 view。
-- **订阅可靠性**：长流异常中断按 1s/2s/4s 指数退避重新 `listen`（最多 3 次，收到通知即重置计数）；连接重连后按当前配置重建长流。2025-11-25 旧路径（`resources/subscribe` + 直推 list_changed）未实现；无订阅配置时不建立长流。
-- **装配**：`McpSubscriptionPort`（`peri-acp-types/src/mcp.rs`）由 `McpClientPool` 实现——session 创建时注册 inbox、`close_session` 时注销。channel 自定义消息与权限通知已退役；MCP 标准资源订阅与 Apps relay 保留。
-
-### 9.2 System MCP 配置契约（`system_mcp` / `system_mcp_tools` / `system_mcp_timeout`）
-
-> 本节记录**配置层**的 key、取值与拒绝规则；启动准入、必需工具注入与目录发布的契约见
-> `docs/design/mcp-adaptation-v4-part-1.md`（「System MCP 启动依赖」「`system_mcp_tools` 一等工具注入」），
-> 运行时行为以代码与契约测试为准。
-
-三个 key 定义在 `McpServerConfig`（`peri-acp-types/src/plugin.rs`；`peri-middlewares/src/mcp/config.rs` 只 re-export）：
-
-| canonical key | camelCase 别名 | 类型 | 未声明时 | 语义 |
-| --- | --- | --- | --- | --- |
-| `system_mcp` | `systemMcp` | bool | `None` | `true` 声明该 MCP 是 react loop 的**启动依赖**；消费判定固定为 `== Some(true)`，`false` 与未声明都是普通 MCP |
-| `system_mcp_tools` | `systemMcpTools` | string[] | `None` | 该 server 必须提供的工具名，在**所属 server 的原始工具名**上精确匹配（不折叠大小写、不剥离 effective name 前缀、不跨 server 搜索） |
-| `system_mcp_timeout` | `systemMcpTimeout` | 整数（毫秒） | `McpServerConfig::DEFAULT_SYSTEM_MCP_TIMEOUT_MS`（30 000） | 启动等待超时；合法区间 `MIN_SYSTEM_MCP_TIMEOUT_MS..=MAX_SYSTEM_MCP_TIMEOUT_MS`（1..=600 000） |
-
-- **只按 canonical 写回**：序列化固定输出 snake_case 三 key，`false` / `None` 整 key 省略、写回不出现别名；输入两种拼法都接受，**同一字段两种拼法同时出现按 `duplicate field` 解析失败**（值相同也拒绝）。
-- **`None` 与 `Some([])` 不可互换**：未声明是「没有必需工具清单」；`[]` 是「只要求 ready，不向 RCRA 直接注入工具」。两者都可无损往返。
-- 工具名数组逐项保真：不 trim / 不排序 / 不去重 / 不展开 `${...}` / 不加前缀，合并与写回保持值与顺序。
-- System 三 key 显式 `null` 或类型不符一律解析失败，不降级成「未声明」。
-
-非法组合在**解析期**由 `McpServerConfig::validate` 按 `McpServerConfigValidationError` 拒绝（固定规则正文，不携带配置内容）：
-
-| 配置 | 错误 |
+| 接入内容 | 权威设计与实现入口 |
 | --- | --- |
-| `system_mcp_tools`（**含显式 `[]`**）而 `system_mcp != true` | `SystemMcpToolsRequiresSystemMcp` → `system_mcp_tools requires system_mcp = true` |
-| `system_mcp_timeout` 而 `system_mcp != true` | `SystemMcpTimeoutRequiresSystemMcp` |
-| `system_mcp_timeout` 越界 | `SystemMcpTimeoutOutOfRange` → `system_mcp_timeout must be within 1..=600000 milliseconds` |
+| 工具发现、调用与模型可见名 | [工具系统](../design/tool-system.md)、[Middleware 索引](../code-index/peri-middlewares.md) |
+| System MCP 启动依赖与 builtin 实例 | [MCP 适配设计](../design/mcp-adaptation-v4-part-1.md)、[MCP packages 索引](../code-index/mcp-packages.md) |
+| 会话 MCP 注册、重启与关闭 | [ACP MCP 运行控制](../design/acp-mcp-control.md) |
+| 标准 MCP Tasks、任务归属与取消 | [Session 异步任务入口](../design/session-async-tasks.md)、[Middleware 索引](../code-index/peri-middlewares.md) |
+| 资源订阅与提醒送达 | [System Reminder](../design/system-reminder.md)、[Git Watch](../design/git-watch-middleware.md) |
+| Apps relay 与下游 Web Host 边界 | [MCP Apps relay](../design/mcp-multiplexing.md)、[ACP wire](../design/peri-acp-protocol.md) |
+| 缓存策略与关闭 | [MCP 响应缓存](../design/mcp-cache.md) |
 
-同一份 `validate` 是唯一规则来源，每个入口都要过它：
+### 9.2 配置入口与启动依赖
 
-- **直接 serde**：`McpServerConfig` 手写 `Deserialize`，解析即校验（开发者也应预期手工构造的 struct 在建传输时被再校验）。
-- **项目级 `{cwd}/.mcp.json`**：`mcp::config::load_from_path`（缺文件仍是空配置，解析失败是 `ParseError`）。
-- **全局 `~/.peri/settings.json`**：`mcp::config::load_global_config`；`config.mcpServers` 与顶层 `mcpServers` 两个候选 map 都先解析校验，选择仍按 nested > top-level。
-- **插件 MCP**：`plugin::loader::load_enabled_plugins_for_mcp`（MCP 专用严格入口），manifest 内联条目与被引用的配置文件都逐项校验；插件面板 / skills 聚合用的宽容 API 不作为启动输入。
-- **写入口**：`mcp::config::set_server_disabled`、`remove_server_from_config` 在改动前后校验，失败不写盘。
-- **建传输前**：`TransportConfig::try_from(&McpServerConfig)` 再校验一次——`McpServerConfig` 是公开 struct，可手工构造，`Deserialize` 不是唯一闸门。
+外部 server 通过项目 `.mcp.json` 或用户 `~/.peri/settings.json` 的 `mcpServers` 接入，
+使用 stdio `command` 或 HTTP `url`。协议版本由连接协商；具体字段、别名与校验的
+事实源为 `peri-acp-types/src/plugin.rs::McpServerConfig`，来源合并见
+[配置权威面](../design/configuration-authority.md)。
 
-非法配置一律向上传播，不降级为空配置、不当作「未安装」跳过；`disabled = true` 也不绕过校验。三层合并仍是 global < plugin < project，System MCP 不参与跨来源内容 hash 去重（namespace 归属不得因内容相同而消失）。三个 key 只表达启动依赖等级与必需工具清单，不改变 MCP 实例隔离（见「MCP 运行形态」与「最小 MCP 隔离设计」）。
+| 字段 | 使用含义 |
+| --- | --- |
+| `system_mcp` | `true` 时必须在 RCRA 启动前 ready；未声明或 `false` 按普通 MCP 生命周期连接 |
+| `system_mcp_tools` | 同 server 的必需工具原名；仅能与 `system_mcp: true` 配合，空数组只要求 ready |
+| `system_mcp_timeout` | 启动等待预算（毫秒）；默认值与合法范围由 `McpServerConfig` 常量和校验定义 |
 
-**builtin 实例是本节 key 的自动使用者**：全部已实现实例由默认配置层补上 `system_mcp = true` 与 `system_mcp_tools`——`web` / `artifact` / `workspace` 的值为该实例声明为 direct 的原始工具名（`WebSearch` / `WebFetch` / `artifact` / `Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`），`cron` / `monitor` / `workflow` 的值为**空数组** `[]`（这些实例的工具全部 deferred，零提升，只保留 1R readiness 要求）。用户不需要（也不应）手写这三个 key；如要关闭或覆盖，写法与拒绝规则见 §9.8。
+无效配置明确失败，不能降级为空配置；启动与工具注入契约由
+[MCP 适配设计](../design/mcp-adaptation-v4-part-1.md)维护。
 
-### 9.3 信道划分（已定稿）
-
-传输层为纯 JSON-RPC 2.0（Request / Notification / Response）。MCP Apps 数据到达下游的 contract 见 `docs/design/mcp-multiplexing.md`：外层 ACP envelope、Apps payload id 与 ACP id 分离、connection-owned App session、错误分层和 lifecycle。
-
-1. Apps `payload` 保留 JSON-RPC 语义和下游 request id；Peri 将允许的方法映射到 MCP client API，不做字节级 server 透传。
-2. 外层使用 `peri/mcp/app` 与 `peri/mcp/resource`；信封携带 `envelopeVersion`、`serverId`、`appSessionId`、`resourceUri`，并分离 `mcpProtocolVersion` 与 `appsProtocolVersion`。
-3. `appSessionId` 必须由 ACP connection owner、server generation、resource/tool binding 共同约束。
-4. 已知方法名冲突通过 `peri/mcp/` 命名空间隔离；下游未知 Apps 方法与字段按版本化 contract 保留。
-
-### 9.4 协议层增量（已实现）
-
-relay 行为与安全边界以 `docs/design/mcp-multiplexing.md` 和代码契约测试为准：
-
-- 受 capability/profile 约束的 `resources/read`（拉取 `ui://` HTML，`peri-middlewares/src/mcp/apps_relay.rs`）。
-- raw tool metadata、resource item 与 `CallToolResult` 经 relay 保留标准字段和未知 `_meta`；不得提前压成文本。
-- 订阅场景：2026-07-28 `subscriptions/listen` 已落地（全链路见 9.1）；2025-11-25 旧路径（`resources/subscribe` + 直推 list_changed）未实现。
-
-### 9.5 Agent / 工具系统契约
-
-- App session 由经验证的 agent 初始 tool invocation 创建；`tool-input*` 与 `tool-result` / `tool-cancelled` 的投影由下游 Host 负责（§6.4、§9.6）。
-- App 发起的 `tools/call` 复用 session-local effective view、canonical dispatch 与既有 Permission/HITL seam；覆盖测试见 `peri-middlewares/src/mcp/apps_invoke_test.rs`。
-
-### 9.6 下游 Web Host 边界
-
-Web Host、iframe、sandbox、CSP、Permissions Policy、`postMessage` bridge 与 MCP Apps FE 均由下游实现，Peri 和 `peri-tui` 不实现这些能力。Peri 只提供 connection-scoped capability gate、MCP capability profile、resource/result DTO 和双向 ACP envelope。
-
-下游实现可自行选择 Web、IDE webview 或其他渲染容器；这些选择不能反向改变 Peri 的安全与传输 contract。
-
-### 9.7 MCP 能力支持度矩阵
-
-peri 作为 MCP client，对照 2026-07-28 协议能力面的支持度与路线决策（已支持项细节见 §9.1；未支持项无代码落点，部分支持项按备注限定）：
-
-| 能力面 | 状态 | 路线 | 备注 |
-| --- | --- | --- | --- |
-| Tools（list / call + HITL + deferred） | ✅ 完整 | — | 桥接 + DiscoverMCP |
-| Resources（list / read + `skill://`） | ✅ 完整 | — | 含技能注入（§7.4） |
-| Subscriptions（2026-07-28 `listen`） | ✅ 完整 | — | 通知进 agent 不进 view |
-| 自定义通知（双向） | ❌ 未处理 | 不做 | 订阅流忽略 `CustomNotification`；发送侧只用标准 `notifications/cancelled`（`tool_request.rs`） |
-| 连接 / 传输 / OAuth / 重连 | ✅ 完整 | — | stdio + Streamable HTTP + builtin（同进程实例，§9.8） |
-| Prompts（list / get） | ❌ 未实现 | **不做（永远）** | server 的 prompt 不可达 |
-| Sampling | ❌ 未实现（显式拒绝 `-32601`） | **不做（永远）** | server 请求 LLM 直接失败 |
-| Roots | ❌ 未实现 | **不做（永远）** | 不向 server 暴露工作目录 |
-| Tasks（正式扩展） | ❌ 未实现 | **不做（永远）** | rmcp 模型齐全，不接 |
-| Elicitation（SEP-1036 正式扩展） | ❌ 未实现（默认 Decline） | **搁置（可能做）** | 与 ACP `elicitation/create` 撞名（§9.3） |
-| MCP Apps（正式扩展） | ✅ relay 已实现（`PERI_MCP_APPS` 门控） | **Peri stdio relay；Web Host 不做** | capability gate、条件 MCP capability、raw resource/result DTO、connection-owned session、HITL seam 均已落地（§9.3–9.5） |
-| WebSocket 传输 | ❌ 未接 | **隔离**（不接入主链路） | rmcp 支持（`ws.rs`）；peri 仅 stdio + HTTP，需要时走独立路径 |
-| Progress / Cancelled 通知 | ⚠️ 部分 | 不做 | 发送侧在请求 drop 时发 `notifications/cancelled`（`tool_request.rs`）；不消费 server 的 progress / cancelled 通知 |
-| Logging（`logging/message` / `set_level`） | ❌ 未处理 | 不做 | |
-| Resource templates / complete | ❌ 未接 | 不做 | |
-
-**决策记录**：Prompts / Sampling / Roots / Tasks 明确不做；MCP Apps 只实现 Peri stdio relay，Web Host/iframe 永久留给下游；WebSocket transport 维持隔离。
-
-### 9.8 Builtin MCP 实例：名字、关闭语义与保留名
-
-peri 自带的 Web / Artifact / Cron / Monitor / Workspace / Workflow 能力不是 middleware 提供面，而是 peri 自身的**同进程** MCP 实例：`web`（`WebSearch` / `WebFetch`）、`artifact`（`artifact`）、`cron`（cron 工具）、`monitor`（`monitor_start` / `monitor_read` / `monitor_stop` / `monitor_list`）、`workspace`（`Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash`）与 `workflow`（编排工具）。工具、直连性与关闭键以 `peri-acp-types/src/builtin_mcp.rs` 的 `BUILTIN_MCP_INSTANCES` 为唯一事实源，下表是当前投影。它们经 `TransportConfig::Builtin`（进程内 `duplex` + `rmcp::serve_server`）接入与外部 server **完全相同**的连接、发现与提升链路：真实 `tools/list` 才提交 ready，工具仍经 `McpToolBridge` 包装，并沿用审批、事件投影与 cancel。
-
-| 实例（配置 key / server name） | 原始工具名（wire · 配置 · 审批判定） | 模型面名字（LLM tools · 事件 · transcript） | 直连性 | 关闭策略键 |
-| --- | --- | --- | --- | --- |
-| `web` | `WebSearch` | `WebSearch` | direct | `WebMiddleware` |
-| `web` | `WebFetch` | `WebFetch` | direct | `WebMiddleware` |
-| `artifact` | `artifact` | `artifact` | direct | `ArtifactMiddleware` |
-| `cron` | `cron_register` / `cron_list` / `cron_remove` / `cron_toggle`（模型可见）；`cron_acknowledge` 仅宿主 | `mcp__cron__<tool>` | deferred | `CronMiddleware` |
-| `monitor` | `monitor_start` / `monitor_read` / `monitor_stop` / `monitor_list` | `mcp__monitor__<tool>` | deferred | `MonitorMiddleware` |
-| `workspace` | `Read` / `Write` / `Edit` / `Glob` / `Grep` / `folder_operations` / `Bash` | 同名 | direct | `WorkspaceMiddleware` |
-| `workflow` | `Workflow` / `WorkflowStatus` / `WorkflowKill` | `mcp__workflow__<tool>` | deferred | `WorkflowMiddleware` |
-
-`workflow` 实例还声明宿主回填通道工具（`WorkflowAgentResult` 等）：它们保留在实例 `tools/list` 中供宿主经池调用，但不进入桥接、ToolSearch 索引与 LLM tools 参数；可见性不是授权边界，服务端仍校验调用方令牌。
-
-`web` / `artifact` / `workspace` 声明的工具是 **direct**（直接进 LLM tools 参数，不经 tool search，§3.2），模型面使用原始名；`cron`、`monitor` 与 `workflow` 的模型面工具是 **deferred**——只经 `SearchExtraTools` 发现、`ExecuteExtraTool` 执行，且 `system_mcp_tools` 为空数组，不会被提升成 direct。普通 MCP 的工具名仍使用 `mcp__<server>__<tool>`。MCP wire 上的 `tools/call.name` 始终是原始工具名。
-
-模型可见名发生冲突时，启动继续运行并记录 warning；按确定的准入顺序保留先准入者，后续冲突项不覆盖。连接完成先后不参与胜者选择。真实缺失的必需工具和无效 schema 仍使启动失败。`system_mcp_tools: []` 只要求 ready，cron 的 deferred 行为保持不变。
-
-**默认注入与用户覆盖**：全部已实现实例由**本地默认配置层**注入，`.mcp.json` 与 `~/.peri/settings.json` 里不需要写任何东西；注入后它们就是普通的 `system_mcp = true` 实例（三 key 语义见 §9.2）。用户仍可为任一实例写配置条目：
-
-- `{"web": {}}`（任何不带 `command` / `url` 的条目）：仍是 builtin 实例，并自动写入 `system_mcp = true` 与 `system_mcp_tools`（`web` / `artifact` / `workspace` 为该实例声明为 direct 的工具名，`cron` / `monitor` / `workflow` 为 `[]`，均不做字段级深合并）。效果是沿用声明表的直连性、**不会**被配置改写：direct 工具不会静默降级为 deferred，deferred 工具也不会因为没有工具名而被提升为 direct。
-- `{"web": {"disabled": true}}`：**唯一合法的关闭写法**。实例仍在 pool 中，状态为 `Disabled`（`ClientStatus`），不构成 system 启动依赖；其它实例与其它 capability 不受影响。
-- `{"web": {"disabled": true, "system_mcp": true}}`：**加载期拒绝**（typed error），不会启动。禁用与「声明为 system 依赖」互斥——若不拒绝，该组合会走到 readiness 的 fatal 并阻断**所有** session。
-- 给保留名声明 `command` / `url`（试图用外部进程接管这个名字）：**加载期拒绝**（typed error，错误文本只含实例名）。
-
-**保留实例名**：`web` / `artifact` / `cron` / `monitor` / `workspace` / `workflow` 均已实现（`BUILTIN_RESERVED_INSTANCE_NAMES` 即此集合，无「预留但未实现」的名字）。任一保留名都不得被配置用 `command` / `url` 接管：这些名字参与「按原始名判定」的审批与关闭语义，外部同名 server 一旦接管就会继承 builtin 一等工具的判定结果（静默移除 `mcp__*` 审批门），因此加载期即拒绝。该拒绝与非法关闭片段的拒绝都是**与 `PERI_MCP_BUILTIN` 无关**的加载期校验：即使把 env 置为 off，两类非法输入仍报 typed error。
-
-**关闭的三条路径**：关闭必须在同一 turn 的同一份 frozen policy 下**同时**从四个用户可观察面移除该实例的工具——首个 LLM 请求的 `tools`、tool search（`SearchExtraTools`）的 deferred 目录与检索结果、子 agent 继承面（`parent_tools`）、workflow agent 的工具列表。direct 工具会真实出现在后两面；deferred 工具在后两面**平凡成立**——不是被过滤掉，而是本来就不在那里。
-
-1. **MetaHarness 策略键**（会话级）：`"WebMiddleware": false` / `"ArtifactMiddleware": false` / `"CronMiddleware": false` / `"MonitorMiddleware": false` / `"WorkspaceMiddleware": false` / `"WorkflowMiddleware": false`。这些键不再是链槽位名（`MIDDLEWARE_NAMES` 只含链槽位名），而是 builtin 实例关闭键（`BUILTIN_INSTANCE_POLICY_KEYS`）；两表并集才是「已知键」集合，因此旧配置里的这些键**不会**被当成未知键忽略（未知键才是 warn + 忽略；`FilesystemMiddleware` / `TerminalMiddleware` 这两个旧键已是未知键，写它们只 warn 不生效）。
-2. **用户配置**（实例级）：`{"web": {"disabled": true}}` 等，任一实例同理。
-3. **环境开关**（进程级紧急闸门）：`PERI_MCP_BUILTIN`。
-
-**关闭语义矩阵**：可见性 / cron tick / readiness / 物理生命周期各自独立——策略键关闭**不是**物理销毁，「保留 handler / readiness」只对策略键成立；`WorkflowMiddleware` 是经裁决的物理关闭特例。
-
-| 操作 | 工具可见性 | cron tick | readiness | 物理生命周期 |
-| --- | --- | --- | --- | --- |
-| `CronMiddleware: false` | cron 工具关闭 | 保持运行 | 保持 1R ready | 不销毁实例 / scheduler / supervisor |
-| `WorkspaceMiddleware: false` | 该实例的文件/终端工具从模型面消失（不覆盖 外部 MCP server） | 不适用 | 保持 1R ready | 不销毁实例 / handler |
-| `WorkflowMiddleware: false` | workflow 工具关闭 | 不适用 | 不参与 | 实例与消费者都不装配（物理关闭） |
-| `FilesystemMiddleware` / `TerminalMiddleware` | **无效**（不是已知键 ⇒ warn 后丢弃） | 不适用 | 不变 | 不变 |
-| MCP 配置 `{"<实例>": {"disabled": true}}` | 该实例不连接 | 不 spawn | 不参与 readiness | 注册为 `Disabled` |
-| `PERI_MCP_BUILTIN=off` | 全部 builtin 实例零注入 | 不 spawn | 无 builtin ready 要求 | 无 builtin 对象 |
-| 物理 close / host shutdown | 全部关闭 | tick cancel + join | host 结束 | transport / supervisor 有界关闭 |
-
-`PERI_MCP_BUILTIN`：缺省或任何非 `off` / `0` 的值 → 注入全部已实现实例；`off` / `0` → **零注入**。它是显式**运维开关**，不是静默降级：off 时这些能力**不存在**（middleware 提供面已删除，**不存在**「回退到旧实现」这条路径——文件与终端工具同样没有 middleware 回退面），模型看不到这些实例的工具，tool search 里也没有；该变量只影响实例注入，**不**改变策略判定面（审批仍按原始名 parity）。未知取值 warn 后按缺省语义注入全部实例。
-
-**cron 的 tick 归属**：1s tick 在建立该代 builtin transport 时 spawn 一次，并绑定到**该代监督者**（`BuiltinInstanceSupervisor` 持有 `TickGuard`）；`CronMcpServer` 本身不持 tick、`Drop` 只是兜底。关闭走显式 cancel + 有界 join（顺序固定为 tick 先于 server task），reconnect 先停旧代再建新代（每代至多一个驱动）。它由宿主注入的 `tick_enabled`（`drive_cron_tick` 字段的投影）决定是否挂上：`peri-tui/src/launch.rs` 为 `true`，`cli_print` 与 ACP 的 stdio / workspace 宿主为 `false`。
-
-**权限与匹配按绑定来源处理**。内置工具的审批、编辑与 mutation 规则来自已绑定的 builtin 声明和原始工具身份；相同裸名的外部 MCP 工具不能继承 builtin 规则，未知或外部 MCP 仍走保守审批。hooks matcher、`--disallowed-tools` 与 agent `tools:` 匹配实际模型可见名，不通过前缀/裸名别名扩大匹配面。策略不改写 MCP wire 的 `tools/call.name`，也不创建第二个可调用工具名。 既有 builtin 前缀名只为旧 transcript 显示和配置/过滤输入归一保留，不会注册为执行别名。
-
-**关闭态下仍成立的事实（有意分层）**：用策略键或全局开关关闭时，MCP 面板（`all_server_infos()` / `snapshot()`）仍显示该实例为 connected、`transport_type` 为 `"builtin"`——面板是 pool 级事实，「本 turn 是否注入」是 turn 级策略（用户配置 `disabled: true` 则另按其显式语义注册为 `Disabled`；`WorkflowMiddleware` 物理关闭时实例不装配）；关闭不影响就绪判定，也不把有意的关闭报成启动失败。`cron` 的 tick 同属这一分层：策略键只关本 turn 的可见面，实例、handler、scheduler 与 readiness 都保留。
-
-**未验证声明**：capability root 隔离与凭据隔离在 builtin 形态下不可证伪（builtin 实例同属一个 pool，`capability_profile` 与 execution cwd 都是 pool 级），本文件**不**声称两者已验证。`workspace` 实例同样**未**引入独立 capability root：文件工具仍可访问 cwd 之外的绝对路径（`resolve_path` 不做包含性检查）、`Bash` 无沙箱。`workspace` 的工具使用自身期限（`Bash` 前台期限上限 2 分钟，前台超时且后台登记成功时提升为后台任务），其他 builtin 与外部 MCP 的发送与响应共用 120 秒期限。
+builtin 实例由默认配置层提供。用户关闭某个实例时使用
+`{"mcpServers":{"web":{"disabled":true}}}` 这一配置形态；不要同时声明
+`system_mcp: true`，也不要用 `command` / `url` 接管 builtin 保留名。
+实例保留名、工具与策略关闭键以声明表和 [MCP packages 索引](../code-index/mcp-packages.md)为准；
+进程级 `PERI_MCP_BUILTIN` 的合法值与关闭边界见
+[环境变量标准](../standards/environment-variables.md)。
 
 ## 10. 参考
 
@@ -743,5 +623,3 @@ peri 自带的 Web / Artifact / Cron / Monitor / Workspace / Workflow 能力不�
 - 构建教程：https://modelcontextprotocol.io/extensions/apps/build
 - Goose 教程：https://goose-docs.ai/docs/tutorials/building-mcp-apps（draft-spec 手写 client 写法，可见其演进前形态）
 - 2026-07-28 发布说明：https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate（Extensions 框架、Tasks、MCP Apps、授权总览）
-
-**调用取消与期限**：调用取消通知传至 builtin handler，Bash 按会话 owner 收尾；blocking 文件扫描仅协作取消。类型化安全原因与任务/日志/草稿恢复引用保留。事实源为 `docs/code-index/peri-middlewares.md` 与 `mcp-packages/common` 的结果映射。

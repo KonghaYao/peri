@@ -257,6 +257,37 @@ pub(super) async fn run_writer(
                     .await;
                 }
             }
+            Some(PersistOp::CommitBatch(batch)) => {
+                flush_appends(
+                    store.as_ref(),
+                    &tid,
+                    &mut pending_appends,
+                    &mut pending_reserved,
+                    &mut barrier_error,
+                    &mut processed,
+                    &budget,
+                )
+                .await;
+                let result = if let Some(error) = barrier_error.clone().or_else(|| budget.failure())
+                {
+                    Err(anyhow!(error))
+                } else {
+                    store
+                        .append_history(&tid, &batch.payloads)
+                        .await
+                        .map_err(|error| {
+                            let reason = format!("atomic exchange append_history failed: {error}");
+                            budget.mark_failed(&reason);
+                            barrier_error = Some(reason.clone());
+                            anyhow!(reason)
+                        })
+                };
+                let result = result.map(|()| {
+                    processed = processed.saturating_add(batch.payloads.len() as u64);
+                    batch.payloads
+                });
+                let _ = batch.ack.send(result);
+            }
             Some(PersistOp::Barrier(ack)) => {
                 // Barrier 语义：确认此前所有 op 均已实际调用 store
                 flush_appends(
@@ -327,7 +358,10 @@ pub(super) async fn run_writer(
                         reserved,
                         store.apply_message_projections(&tid, &updates).await,
                     ),
-                    PersistOp::Append { .. } | PersistOp::Barrier(_) | PersistOp::Shutdown => {
+                    PersistOp::Append { .. }
+                    | PersistOp::CommitBatch(_)
+                    | PersistOp::Barrier(_)
+                    | PersistOp::Shutdown => {
                         unreachable!("handled in dedicated branches above")
                     }
                 };

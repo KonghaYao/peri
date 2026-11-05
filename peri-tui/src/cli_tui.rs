@@ -3,7 +3,6 @@
 use super::*;
 
 /// TUI 模式启动选项
-#[allow(dead_code)] // 部分 CLI 桥接字段尚未接入
 pub(super) struct TuiOptions {
     pub(super) permission_mode: Option<String>,
     pub(super) skip_permissions: bool,

@@ -223,6 +223,9 @@ describe('Timeline turn folds', () => {
     expect(html).toContain('Worked for 2.0s');
     expect(html).toContain('最终回答');
     expect(html).not.toContain('data-timeline-row-kind="work"');
+    // 折叠入口在首个 work 组之前，而不是回复末尾。
+    expect(html.indexOf('data-timeline-row-kind="turn-fold"'))
+      .toBeLessThan(html.indexOf('data-timeline-row-kind="assistant"'));
   });
 
   test('expanded turns render the underlying work rows', () => {
@@ -233,5 +236,7 @@ describe('Timeline turn folds', () => {
     expect(html).toContain('data-timeline-row-kind="work"');
     expect(html).toContain('data-bare="true"');
     expect(html).toContain('1 个工具');
+    expect(html.indexOf('data-timeline-row-kind="turn-fold"'))
+      .toBeLessThan(html.indexOf('data-timeline-row-kind="work"'));
   });
 });

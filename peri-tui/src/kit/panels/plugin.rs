@@ -110,18 +110,14 @@ struct PluginSearchResultItem {
 // ── Marketplace view types ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 enum MsStatus {
-    Fresh,
     Cached,
-    Fetching,
     Stale,
     Failed,
     NotFound,
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct MsEntry {
     name: String,
     source: peri_middlewares::plugin::MarketplaceSource,
@@ -129,7 +125,6 @@ struct MsEntry {
     plugin_count: usize,
     installed_count: usize,
     status: MsStatus,
-    last_updated: Option<String>,
     auto_update: bool,
 }
 

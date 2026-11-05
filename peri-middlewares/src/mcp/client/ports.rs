@@ -112,9 +112,17 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
             McpInitStatus::Ready { .. } => "ready",
             McpInitStatus::Failed(_) => "failed",
         };
+        // System 收口与整池 initPhase 分开：启动等待只依赖前者，普通 MCP
+        // 的慢连接不改变这里。
+        let system_phase = if self.system_settled() {
+            "settled"
+        } else {
+            "pending"
+        };
         let infos = self.all_server_infos();
         serde_json::json!({
             "initPhase": init_phase,
+            "systemPhase": system_phase,
             "servers": infos.iter().map(|info| serde_json::json!({
                 "name": info.name.clone(),
                 "status": format!("{:?}", info.status).to_lowercase(),
@@ -256,8 +264,8 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
         }
     }
 
-    async fn read_builtin_workspace_skills(&self) -> Result<Vec<SkillMetadata>, String> {
-        McpClientPool::read_builtin_workspace_skills(self).await
+    async fn read_skills_catalog(&self, session_id: &str) -> Result<Vec<SkillMetadata>, String> {
+        McpClientPool::read_skills_catalog(self, session_id).await
     }
 
     async fn read_builtin_workspace_instructions(

@@ -43,6 +43,7 @@ function runtimeActivator(context: ChatInstanceContext): PeriHostActivator {
                 configJson: context.agentConfigJson,
                 env: context.runtimeEnv,
                 onDiagnostic: context.onRuntimeDiagnostic,
+                ownerChatId: context.chatId,
             });
             return {
                 transport: lease.transport,

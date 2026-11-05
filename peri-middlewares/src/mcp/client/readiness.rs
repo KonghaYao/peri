@@ -129,13 +129,12 @@ impl SystemMcpRequirement {
 
 /// 本代协商完成的 System MCP（transport + lifecycle + 能力协商 + `tools/list`）。
 ///
-/// `generation` 是 `handle` 在 pool 中的登记代际；调用方在后续任何异步步骤之后
+/// `generation` 是协商句柄在 pool 中的登记代际；调用方在后续任何异步步骤之后
 /// 必须重新核对代际（`pool.handle_generation`）与 pool 开闭状态，不得把本结构
 /// 当作长期有效的 ready。
 #[derive(Clone)]
 pub(crate) struct NegotiatedSystemMcp {
     pub requirement: SystemMcpRequirement,
-    pub handle: Arc<McpClientHandle>,
     pub generation: u64,
 }
 
@@ -149,8 +148,7 @@ impl std::fmt::Debug for NegotiatedSystemMcp {
     }
 }
 
-/// System MCP 启动准入错误（变体全集冻结于 sub-plan B §4.4；主 plan IF-M3 追加两条
-/// 硬约束：`Cancelled → AgentError::Interrupted`、timeout 不是 cancel）。
+/// System MCP 启动准入错误；取消映射为 `AgentError::Interrupted`，超时独立分类。
 ///
 /// Display 保留原始失败原因；server 标签仅做终端控制字符和长度处理。
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -204,8 +202,6 @@ pub(crate) enum SystemReadinessError {
         #[source]
         source: SystemToolError,
     },
-    #[error("System MCP 启动失败：工具目录发布被拒绝，未发布 ready")]
-    CatalogPublicationFailed,
 }
 
 impl SystemReadinessError {
@@ -546,7 +542,6 @@ impl McpClientPool {
             }
             Some(_) => Ok(Some(NegotiatedSystemMcp {
                 requirement: requirement.clone(),
-                handle,
                 generation,
             })),
         }

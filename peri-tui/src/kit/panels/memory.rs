@@ -35,7 +35,7 @@ const LIST_METRICS: ListMetrics = ListMetrics::new(3, 1, 0);
 pub fn MemoryPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     let theme_def = hooks.use_atom(&THEME_ATOM);
     let selected = hooks.use_state(|| 0usize);
-    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
+    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格
     let sv = hooks.use_state(ScrollViewState::default);
     let store = hooks.use_atom(&MEMORY_LIST);
     let entries: Vec<MemoryEntry> = store.read().clone();

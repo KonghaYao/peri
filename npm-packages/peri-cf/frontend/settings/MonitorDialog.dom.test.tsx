@@ -26,13 +26,11 @@ function snapshot(): MonitorSnapshot {
       tiers: { fable: "gpt-fable", opus: "gpt-opus", sonnet: "gpt-sonnet", haiku: "gpt-haiku" },
     },
     mcp: {
-      sandboxEnabled: true,
       remote: [{
         name: "remote",
         url: "https://mcp.example.com/mcp",
         headerNames: ["Authorization", "X-Test"],
       }],
-      sandbox: [{ sandboxId: ID, name: "workspace", url: "http://127.0.0.1:9000/mcp", state: "ready" }],
     },
     wasm: {
       moduleUrl: "/opt/peri/peri-wasm.js",
@@ -42,7 +40,45 @@ function snapshot(): MonitorSnapshot {
         heapUsedBytes: 10 * 1024 * 1024,
         arrayBufferBytes: 64 * 1024 * 1024,
       },
-      activeChats: 2,
+      chatHandles: 2,
+      startingInstances: 0,
+      unconfirmed: false,
+      truncated: false,
+      linearMemoryTotalBytes: 16 * 1024 * 1024,
+      linearMemoryKnownInstances: 1,
+      linearMemoryUnknownInstances: 0,
+      instances: [{
+        chatId: "chat-0123456789abcdef",
+        sessionId: "session-0123456789abcdef",
+        generationId: "generation-0123456789abcdef",
+        state: "live",
+        startedAt: "2026-10-27T09:00:00.000Z",
+        uptimeSeconds: 3_600,
+        linearMemoryBytes: 16 * 1024 * 1024,
+        running: true,
+        lastActivityAt: "2026-10-27T09:59:55.000Z",
+        queueDepth: 2,
+        pendingInteractions: 1,
+        turns: {
+          started: 4,
+          completed: 3,
+          cancelled: 0,
+          error: 1,
+          totalWallMs: 120_000,
+          lastWallMs: 30_000,
+          activeWallMs: 5_000,
+        },
+        tokens: {
+          llmCalls: 12,
+          inputTokens: 34_567,
+          outputTokens: 1_234,
+          auxiliaryCalls: 2,
+          partial: false,
+        },
+        context: { used: 12_345, size: 200_000 },
+        tools: { started: 5, completed: 4, failed: 1, cancelled: 0 },
+        lastStopReason: "end_turn",
+      }],
     },
     sandbox: {
       enabled: true,
@@ -99,7 +135,7 @@ describe("MonitorDialog", () => {
 
     const tab = (name: string) => screen.getByRole("tab", { name });
     expect(screen.getAllByRole("tab").map((item) => item.textContent))
-      .toEqual(["LLM 配置", "MCP 配置", "WASM 内存", "Sandbox 情况"]);
+      .toEqual(["LLM 配置", "MCP 配置", "WASM 实例", "Sandbox 情况"]);
     expect(tab("LLM 配置").getAttribute("aria-selected")).toBe("true");
     expect(screen.getByText("openai")).toBeTruthy();
     expect(screen.getByText("https://api.example.com/v1")).toBeTruthy();
@@ -108,16 +144,20 @@ describe("MonitorDialog", () => {
     fireEvent.click(tab("MCP 配置"));
     expect(screen.getByText("remote")).toBeTruthy();
     expect(screen.getByText("Authorization, X-Test")).toBeTruthy();
-    expect(screen.getByText("http://127.0.0.1:9000/mcp")).toBeTruthy();
     expect(screen.queryByText(/Bearer/)).toBeNull();
-    expect(screen.getAllByText(/未做连通性探测/)).toHaveLength(2);
+    expect(screen.getAllByText(/未做连通性探测/)).toHaveLength(1);
 
-    fireEvent.click(tab("WASM 内存"));
-    expect(screen.getByText(formatBytes(128 * 1024 * 1024))).toBeTruthy();
-    expect(screen.getByText(formatBytes(64 * 1024 * 1024))).toBeTruthy();
-    expect(screen.getByText("/opt/peri/peri-wasm.js")).toBeTruthy();
-    expect(screen.getByText(/SDK 未暴露每个 WASM 运行后端的堆占用/)).toBeTruthy();
-    expect(screen.getByText(/2 个/)).toBeTruthy();
+    fireEvent.click(tab("WASM 实例"));
+    expect(screen.getAllByText(formatBytes(128 * 1024 * 1024)).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(formatBytes(16 * 1024 * 1024)).length).toBeGreaterThan(0);
+    expect(screen.getByText("chat-0123456789abcdef")).toBeTruthy();
+    expect(screen.getByText("session-0123456789abcdef")).toBeTruthy();
+    expect(screen.getByText("34,567")).toBeTruthy();
+    expect(screen.getByText(/线性内存是 WebAssembly 实例的当前容量/)).toBeTruthy();
+    expect(screen.getByText(/墙钟不是 CPU 时间/)).toBeTruthy();
+    expect(screen.getByText(/Token 是 ACP 上报的计数，不是账单/)).toBeTruthy();
+    expect(screen.getByText(/只统计次数，不采集工具标题/)).toBeTruthy();
+    expect(screen.queryByText(/关闭未确认/)).toBeNull();
 
     fireEvent.click(tab("Sandbox 情况"));
     expect(screen.getByText("/sandboxes")).toBeTruthy();
@@ -127,6 +167,99 @@ describe("MonitorDialog", () => {
     expect(screen.getByText(`/sandboxes/${ID}/workspace`)).toBeTruthy();
     expect(screen.getByText(/1 小时/)).toBeTruthy();
     expect(screen.getByText("2")).toBeTruthy();
+  });
+
+  test("WASM 实例空态解释懒启动与句柄数", async () => {
+    const empty = snapshot();
+    empty.wasm.instances = [];
+    empty.wasm.linearMemoryTotalBytes = null;
+    empty.wasm.linearMemoryKnownInstances = 0;
+    empty.wasm.chatHandles = 3;
+    renderDialog({ repository: { read: async () => empty } });
+    await screen.findByText("gpt-sonnet");
+    fireEvent.click(screen.getByRole("tab", { name: "WASM 实例" }));
+
+    expect(screen.getByText("当前没有运行中的 WASM 实例。")).toBeTruthy();
+    expect(screen.getByText(
+      "实例在首次执行（创建/加载会话）时懒启动。当前有 3 个 Chat 句柄。",
+    )).toBeTruthy();
+  });
+
+  test("关闭未确认与内存不可读显式展示", async () => {
+    const broken = snapshot();
+    const instance = broken.wasm.instances[0]!;
+    instance.state = "close-unconfirmed";
+    instance.running = false;
+    instance.linearMemoryBytes = null;
+    broken.wasm.unconfirmed = true;
+    broken.wasm.linearMemoryTotalBytes = null;
+    broken.wasm.linearMemoryKnownInstances = 0;
+    broken.wasm.linearMemoryUnknownInstances = 1;
+    renderDialog({ repository: { read: async () => broken } });
+    await screen.findByText("gpt-sonnet");
+    fireEvent.click(screen.getByRole("tab", { name: "WASM 实例" }));
+
+    expect(screen.getByText(/有实例关闭未确认/)).toBeTruthy();
+    expect(screen.getAllByText("不可用").length).toBeGreaterThan(0);
+    expect(screen.getByText("1 个实例不可读")).toBeTruthy();
+    expect(screen.getAllByText("关闭未确认").length).toBeGreaterThan(0);
+  });
+
+  test("实例段读取失败时展示错误态但摘要仍可见", async () => {
+    const failed = snapshot();
+    failed.wasm.instancesError = "instance snapshot failed";
+    renderDialog({ repository: { read: async () => failed } });
+    await screen.findByText("gpt-sonnet");
+    fireEvent.click(screen.getByRole("tab", { name: "WASM 实例" }));
+
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toContain("实例指标读取失败：instance snapshot failed");
+    expect(screen.getAllByText(formatBytes(128 * 1024 * 1024)).length).toBeGreaterThan(0);
+  });
+
+  test("多实例选择与键盘操作更新详情", async () => {
+    const multi = snapshot();
+    const first = multi.wasm.instances[0]!;
+    const second = {
+      ...first,
+      chatId: "chat-bbbbbbbbbbbbbbbb",
+      sessionId: "session-bbbbbbbbbbbbbbbb",
+      generationId: "generation-bbbbbbbbbbbbbbbb",
+      running: false,
+      turns: { ...first.turns, started: 1, completed: 1, error: 0 },
+    };
+    multi.wasm.instances = [first, second];
+    renderDialog({ repository: { read: async () => multi } });
+    await screen.findByText("gpt-sonnet");
+    fireEvent.click(screen.getByRole("tab", { name: "WASM 实例" }));
+
+    const table = screen.getByRole("table", { name: "WASM 实例" });
+    const rows = within(table).getAllByRole("row").filter((row) => row.getAttribute("aria-selected") !== null);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.getAttribute("aria-selected")).toBe("true");
+
+    fireEvent.click(rows[1]!);
+    expect(rows[1]!.getAttribute("aria-selected")).toBe("true");
+    expect(rows[0]!.getAttribute("aria-selected")).toBe("false");
+    expect(screen.getByText("chat-bbbbbbbbbbbbbbbb")).toBeTruthy();
+
+    fireEvent.keyDown(rows[0]!, { key: "Enter" });
+    expect(rows[0]!.getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("chat-0123456789abcdef")).toBeTruthy();
+  });
+
+  test("业务计数不可用时明确标注而不是显示 0", async () => {
+    const missing = snapshot();
+    const instance = missing.wasm.instances[0]!;
+    instance.statsError = true;
+    instance.tokens = null;
+    instance.tools = null;
+    renderDialog({ repository: { read: async () => missing } });
+    await screen.findByText("gpt-sonnet");
+    fireEvent.click(screen.getByRole("tab", { name: "WASM 实例" }));
+
+    expect(screen.getByText("业务计数不可用（事实流订阅失败或已关闭）。")).toBeTruthy();
+    expect(screen.getByText("尚未收到 token 上报。")).toBeTruthy();
   });
 
   test("Sandbox 设置读取失败时展示错误态而不是空 profile", async () => {

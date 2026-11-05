@@ -675,9 +675,8 @@ pub(crate) fn viewport_at_backward_boundary(
 ///    事实判定，覆盖「稀疏首屏自动续读」——那时没有滚动事件可依赖；
 /// 2. **滚动事件**（`message_area/scroll/event.rs`）：**空闲会话**（无 turn、无内容
 ///    变化）里 effect deps 不变、`use_effect` 不会重跑，用户滚到已载入窗口顶端只能
-///    由滚动本身触发，否则翻页与失败后的重试都没有触发源。该路径按
-///    `scroll::project_viewport_after_pending` 预判节流窗口内 pending 落地后的视口
-///    事实——滚轮的 offset 落地晚于事件本身，只看当帧事实会漏掉那一次滚动。
+///    由滚动本身触发，否则翻页与失败后的重试都没有触发源。滚轮在事件派发前已
+///    逐事件落地，事件路径直接读当帧视口事实即可。
 pub(crate) fn request_older_page_at_boundary(
     follow_bottom: bool,
     scroll_y: usize,

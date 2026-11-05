@@ -8,6 +8,7 @@
 //! Design: `docs/design/monitor-mcp.md`.
 
 pub mod buffer;
+mod buffer_budget;
 pub mod server;
 pub mod state;
 pub mod tools;

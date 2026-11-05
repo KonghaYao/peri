@@ -479,6 +479,7 @@ fn snapshot_projects_alert_counters_and_last_seq() {
         label: Some("build".into()),
         alert: None,
         started_at: "2026-11-01T00:00:00Z".into(),
+        started_at_monotonic: Instant::now(),
         deadline_at: "2026-11-01T01:00:00Z".into(),
         deadline: Duration::from_secs(3600),
         inner: Mutex::new(TaskInner {
@@ -486,6 +487,7 @@ fn snapshot_projects_alert_counters_and_last_seq() {
             status_message: None,
             last_updated_at: "2026-11-01T00:00:00Z".into(),
             finished_at: None,
+            finished_at_monotonic: None,
             terminal: false,
             cleanup: CleanupReport {
                 requested: false,
@@ -493,6 +495,7 @@ fn snapshot_projects_alert_counters_and_last_seq() {
             },
         }),
         buffer: Arc::new(Mutex::new(EventBuffer::new(10, MIN_TASK_BYTES))),
+        buffers: Arc::clone(&state.buffers),
         alerts: Mutex::new(AlertCounters {
             matched: 9,
             last_seq: Some(17),

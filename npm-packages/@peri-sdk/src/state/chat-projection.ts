@@ -220,10 +220,14 @@ export class ChatProjection {
                 : null;
             this.docs.resetChat();
             let turnId = "history:0";
+            const historyTurns = new Set<string>(["history:0"]);
             let lastAssistantEntryId: string | null = null;
             const completedTools = new Map<string, { failed: boolean; resultText: string }>();
             for (const message of messages) {
-                if (message.role === "user") turnId = `history:${message.id}`;
+                if (message.role === "user") {
+                    turnId = `history:${message.id}`;
+                    historyTurns.add(turnId);
+                }
                 if (message.role === "tool") {
                     if (message.toolCallId) completedTools.set(message.toolCallId, {
                         failed: message.isError === true, resultText: message.resultText ?? "",
@@ -262,6 +266,13 @@ export class ChatProjection {
                 tool.set("status", outcome === undefined ? "cancelled" : outcome.failed ? "error" : "completed");
                 if (outcome) tool.set("result", { contentText: outcome.failed && !outcome.resultText.trim()
                     ? "Tool execution failed" : outcome.resultText });
+            }
+            const keepTurnId = live && typeof live.activeTurnId === "string" ? live.activeTurnId : null;
+            for (const id of historyTurns) {
+                if (id === keepTurnId) continue;
+                const hasEntries = Array.from(this.docs.turnEntries(id)).length > 0;
+                const hasTools = Array.from(this.docs.turnTools(id)).length > 0;
+                if (hasEntries || hasTools) this.turns.recordHistoricalTurn(id);
             }
             if (live) {
                 // 逐字段恢复：缺失即为缺失（原值为 undefined 时不写回 null 覆盖）。

@@ -176,6 +176,37 @@ test("并发启动共享 single-flight 编译", async () => {
   expect(second.shared!.module).toBe(first.shared!.module);
 });
 
+/** 导出 1 页线性内存（`fb`）的 wasm；loader 不应依赖压缩后的导出名。 */
+const memoryWasm = new Uint8Array([
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+  0x05, 0x03, 0x01, 0x00, 0x01,
+  0x07, 0x06, 0x01, 0x02, 0x66, 0x62, 0x02, 0x00,
+]);
+
+test("loader 捕获 WASM 导出的线性内存用于只读监控", async () => {
+  const url = sharedArtifactUrl("memory-artifact", memoryWasm);
+  const module = await instantiatePeriWasm({ moduleUrl: url });
+  expect(module.wasmMemory).toBeInstanceOf(WebAssembly.Memory);
+  expect(module.wasmMemory!.buffer.byteLength).toBe(65_536);
+});
+
+test("没有线性内存导出时 wasmMemory 保持 undefined", async () => {
+  const url = sharedArtifactUrl("no-memory-artifact", emptyWasm);
+  const module = await instantiatePeriWasm({ moduleUrl: url });
+  expect(module.wasmMemory).toBeUndefined();
+});
+
+test("moduleFactory 提供的 wasmMemory 不被覆盖", async () => {
+  const memory = new WebAssembly.Memory({ initial: 1 });
+  const module = await instantiatePeriWasm({
+    moduleFactory: async () => ({
+      PeriWasmAcp: { start: async () => { throw new Error("unused"); } },
+      wasmMemory: memory,
+    }),
+  });
+  expect(module.wasmMemory).toBe(memory);
+});
+
 test("编译失败不缓存，第二次启动会重试", async () => {
   const url = sharedArtifactUrl("broken-artifact", new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0xff, 0xff]));
   const failure = await instantiatePeriWasm({ moduleUrl: url }).catch((error: unknown) => error);

@@ -113,6 +113,54 @@ fn spawn_pump(
     incoming_rx
 }
 
+/// 服务端放弃等待请求时通知客户端取消。
+///
+/// 镜像 ACP SDK `SentRequest` 的 drop-time cancellation：调用方 future 被丢弃
+/// （例如提问超时）后不得让客户端把该 elicitation 永久当作 pending。通知发送
+/// 失败只记日志——连接可能已经关闭。
+struct CancelOnDrop {
+    sender: mpsc::Sender<ChannelMessage>,
+    id: RequestId,
+    armed: bool,
+}
+
+impl CancelOnDrop {
+    fn new(sender: &mpsc::Sender<ChannelMessage>, id: RequestId) -> Self {
+        Self {
+            sender: sender.clone(),
+            id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let message = ChannelMessage::Notification {
+            method: agent_client_protocol_schema::v1::PROTOCOL_LEVEL_METHOD_NAMES
+                .cancel_request
+                .to_string(),
+            params: serde_json::json!({ "requestId": self.id }),
+        };
+        match self.sender.try_send(message) {
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!(
+                    event = "acp_transport_backpressure",
+                    "取消通知未能入队：进程内 ACP 传输队列已满"
+                );
+            }
+        }
+    }
+}
+
 async fn send_or_close(
     sender: &mpsc::Sender<ChannelMessage>,
     router: &RequestRouter,
@@ -263,8 +311,25 @@ impl MpscServerTransport {
 #[async_trait]
 impl AcpTransport for MpscServerTransport {
     async fn send_request(&self, method: &str, params: Value) -> Result<Value, AcpError> {
-        self.send_cancellable_request(method, params, tokio_util::sync::CancellationToken::new())
-            .await
+        let pending = self.router.register()?;
+        let id = RequestId::Number(pending.id());
+        // 注册后即武装：发送阶段或等待阶段被丢弃都要通知客户端撤销请求。
+        let mut cancel = CancelOnDrop::new(&self.server_tx, id.clone());
+
+        send_or_close(
+            &self.server_tx,
+            &self.router,
+            ChannelMessage::Request {
+                id,
+                method: method.to_string(),
+                params,
+            },
+        )
+        .await?;
+
+        let result = pending.wait().await;
+        cancel.disarm();
+        result
     }
 
     async fn send_cancellable_request(

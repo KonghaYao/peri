@@ -3,7 +3,7 @@
 //! 身份取自安装记录（`installed_plugins.json` 的 id / scope / projectPath /
 //! origin）与启用选择事实，**不靠插件名或安装路径前缀推断**：同名插件在不同范围
 //! 安装或由不同项目声明时是不同来源。消费方是「用户全局安装 vs 项目声明」的区分
-//! 与 hook 执行来源信任门控（H4）。
+//! 与 hook 来源身份匹配。
 //!
 //! 本模块由 `plugin.rs` 迁出（STD-SIZE-001）；`plugin.rs` 保留 re-export，
 //! 调用方无需改路径。
@@ -48,11 +48,11 @@ impl InstallScope {
 /// 身份取自安装记录（`installed_plugins.json` 的 id / scope / projectPath /
 /// origin）与启用选择事实，**不靠插件名或安装路径前缀推断**：同名插件在不同
 /// 范围安装或由不同项目声明时是不同来源。消费方是「用户全局安装 vs 项目声明」
-/// 的区分（用户级 `/ 项目级` 层选择规则见 `select_enabled_plugins`）与 hook
-/// 执行来源信任门控（H4）。
+/// 的区分（用户级 `/ 项目级` 层选择规则见 `select_enabled_plugins`）与 hook 来源
+/// 身份匹配。
 ///
 /// 字段全部非敏感：不含 env / headers / OAuth 内容，也不含插件文件内容
-/// （摘要另由消费方按需计算，ARC-SECRET-001）。
+/// （ARC-SECRET-001）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PluginScope {
     /// 安装记录 id（`name@marketplace`）。
@@ -68,8 +68,7 @@ pub struct PluginScope {
 impl PluginScope {
     /// 归一化来源身份：`plugin:{origin}/{scope}/{plugin_id}[@{project_path}]`。
     ///
-    /// 信任绑定与诊断共用同一串；调用方（hook 信任）在其前加来源类别前缀，
-    /// 不在此处拼装信任文件格式。
+    /// 来源匹配与诊断共用同一串；调用方不在此处拼装展示格式。
     pub fn source_identity(&self) -> String {
         let mut identity = format!(
             "plugin:{}/{}/{}",

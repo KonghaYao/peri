@@ -11,6 +11,11 @@ export interface NativeWasmAcp {
 export interface PeriWasmModule {
   PeriWasmAcp: { start(configJson: string): Promise<NativeWasmAcp> };
   ENV?: Record<string, string>;
+  /**
+   * Emscripten 实例导出的线性内存；只读监控用。
+   * 只有 loader 自己实例化产物时才会挂载；宿主 injected factory 可自行提供。
+   */
+  readonly wasmMemory?: WebAssembly.Memory;
 }
 
 export type PeriWasmModuleFactory = (options?: Record<string, unknown>) => Promise<PeriWasmModule>;
@@ -61,6 +66,38 @@ function artifactUrl(moduleUrl?: string | URL): URL {
   }
 }
 
+/** 从 Emscripten 实例导出中找线性内存；不依赖压缩后的导出名。 */
+function findWasmMemory(instance: WebAssembly.Instance): WebAssembly.Memory | undefined {
+  try {
+    for (const value of Object.values(instance.exports)) {
+      if (value instanceof WebAssembly.Memory) return value;
+    }
+  } catch {
+    // 导出表不可读时监控降级为不可用，不影响启动。
+  }
+  return undefined;
+}
+
+/**
+ * 把 loader 观测到的线性内存挂到模块对象上。
+ *
+ * 只作为只读监控数据：`memory.buffer.byteLength` 是当前容量，读取 O(1)；
+ * 冻结/不可扩展的模块对象挂载失败时静默降级，不影响启动。
+ */
+function attachWasmMemory(module: PeriWasmModule, memory: WebAssembly.Memory | undefined): void {
+  if (!memory) return;
+  try {
+    if (module.wasmMemory !== undefined) return;
+    Object.defineProperty(module, "wasmMemory", {
+      value: memory,
+      enumerable: false,
+      configurable: true,
+    });
+  } catch {
+    // 宿主模块对象不可扩展；linearMemoryBytes 将返回 null。
+  }
+}
+
 /**
  * Emscripten only accepts an instance through this callback and ignores the return value, so a
  * failed instantiation has no rejection channel into the factory promise. Log failures and let the
@@ -71,13 +108,15 @@ function artifactUrl(moduleUrl?: string | URL): URL {
  * The factory cannot be rejected from here: Emscripten exposes no hook for that, and the startup
  * timeout is the only bound for a glue that keeps waiting.
  */
-function instantiateSharedWasm(artifact: WebAssembly.Module) {
+function instantiateSharedWasm(artifact: WebAssembly.Module,
+  onInstance?: (instance: WebAssembly.Instance) => void) {
   return (imports: WebAssembly.Imports,
     successCallback: (instance: WebAssembly.Instance, module: WebAssembly.Module) => void) => {
     void WebAssembly.instantiate(artifact, imports).then(
       (instance) => {
         try {
           successCallback(instance, artifact);
+          onInstance?.(instance);
         } catch (error) {
           console.error("[peri-sdk] Peri WASM instantiation callback failed", error);
         }
@@ -127,13 +166,22 @@ async function instantiate(url: URL | undefined, environment: Record<string, str
       Object.assign(runtime.ENV, environment);
     });
   const shared = loaderOwnsArtifact && url ? await loadSharedWasmModule(url, moduleOptions) : null;
+  let wasmMemory: WebAssembly.Memory | undefined;
+  let moduleValue: PeriWasmModule | undefined;
   const module = await resolved({
     ...moduleOptions,
     preRun,
-    ...(shared ? { instantiateWasm: instantiateSharedWasm(shared) } : {}),
+    ...(shared ? {
+      instantiateWasm: instantiateSharedWasm(shared, (instance) => {
+        wasmMemory = findWasmMemory(instance);
+        if (moduleValue) attachWasmMemory(moduleValue, wasmMemory);
+      }),
+    } : {}),
   });
   if (typeof module.PeriWasmAcp?.start !== "function")
     throw new Error("peri-wasm artifact does not expose the ACP Host");
+  moduleValue = module;
+  attachWasmMemory(module, wasmMemory);
   return module;
 }
 

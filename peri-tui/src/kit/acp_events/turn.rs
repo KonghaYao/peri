@@ -5,6 +5,7 @@
 use super::*;
 use crate::kit::acp_types::CurrentTurn;
 use crate::kit::atoms::{PERI_CONFIG_HANDLE, RENDER_HEARTBEAT};
+use crate::kit::program_status::{self, ProgramStatus};
 use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiReasoningBlock, TuiRenderUnit};
 
 pub(super) fn handle_turn_done(state: &mut BridgeState) {
@@ -24,6 +25,7 @@ pub(super) fn handle_turn_done(state: &mut BridgeState) {
     state.last_submitted_text = None;
 
     state.phase = SessionPhase::Idle;
+    program_status::publish(ProgramStatus::Done);
 
     tracing::info!(
         is_loading = state.phase == SessionPhase::PromptRunning,
@@ -83,14 +85,6 @@ pub(super) fn handle_cache_usage_updated(
             .map(|handle| handle.read().config.show_cache_warning.unwrap_or(false))
             .unwrap_or(false);
         inject_cache_coverage_warning_if_needed(state, sample, show_warning);
-    }
-}
-
-/// Turn-end helper for tests; production warnings emit on each root `usage_update`.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(super) fn finalize_cache_coverage(state: &mut BridgeState, show_warning: bool) {
-    if let Some(sample) = state.pending_cache_usage.take() {
-        inject_cache_coverage_warning_if_needed(state, &sample, show_warning);
     }
 }
 
@@ -183,6 +177,7 @@ pub(super) fn handle_turn_interrupted(
         state.last_pushed_reasoning_len = 0;
         state.variant = 0;
         state.phase = SessionPhase::Idle;
+        program_status::publish(ProgramStatus::Idle);
         state.publish_barrier();
         super::render::push_acp_state(state);
         // Issue 2026-08-05 遗留项（中）：stale 分支复位后主动 drain 排队输入。
@@ -231,6 +226,7 @@ pub(super) fn handle_turn_interrupted(
         state.last_pushed_reasoning_len = 0;
         state.variant = 0;
         state.phase = SessionPhase::Idle;
+        program_status::publish(ProgramStatus::Idle);
         state.publish_barrier();
         super::render::push_acp_state(state);
         return;
@@ -251,6 +247,7 @@ pub(super) fn handle_turn_interrupted(
     state.last_pushed_reasoning_len = 0;
     state.variant = 0;
     state.phase = SessionPhase::Idle;
+    program_status::publish(ProgramStatus::Idle);
     state.publish_barrier();
     super::render::push_acp_state(state);
 }
@@ -271,6 +268,7 @@ pub(super) fn handle_turn_suspended(state: &mut BridgeState) {
     state.last_pushed_reasoning_len = 0;
     state.variant = 0;
     state.phase = SessionPhase::Idle;
+    program_status::publish(ProgramStatus::Idle);
     state.publish_barrier();
     super::render::push_acp_state(state);
     // 注意：不调用 drain_input_buffer()——Agent 保持存活，
@@ -288,6 +286,7 @@ pub(super) fn handle_turn_committed(state: &mut BridgeState, steps: usize) {
 pub(super) fn handle_prompt_started(state: &mut BridgeState) {
     tracing::trace!("dead path: PromptStarted not emitted by notifier");
     state.phase = SessionPhase::PromptRunning;
+    program_status::publish(ProgramStatus::Working);
     state.variant = 1;
     super::render::push_acp_state(state);
 }
@@ -303,6 +302,7 @@ pub(super) fn handle_prompt_submitted(state: &mut BridgeState, request_id: &Opti
 
 pub(super) fn handle_execution_started(state: &mut BridgeState, request_id: &Option<String>) {
     state.phase = SessionPhase::PromptRunning;
+    program_status::publish(ProgramStatus::Working);
     state.variant = 1;
     // Issue 2026-08-05: 记录"已真正发出 prompt RPC"时的代际快照——
     // TurnInterrupted 的 stale 判定以 turn_generation > last_prompt_generation
@@ -409,6 +409,7 @@ pub(super) fn handle_user_input_delivered(
 pub(super) fn handle_loading_reset(state: &mut BridgeState) {
     if state.phase == SessionPhase::PromptRunning {
         state.phase = SessionPhase::Idle;
+        program_status::publish(ProgramStatus::Idle);
         state.publish_barrier();
         super::render::push_acp_state(state);
     }
@@ -418,6 +419,7 @@ pub(super) fn handle_prompt_failed(state: &mut BridgeState, request_id: &str) {
     if state.current_request_id.as_deref() == Some(request_id) {
         state.current_request_id = None;
         handle_loading_reset(state);
+        program_status::publish(ProgramStatus::Error);
     }
 }
 

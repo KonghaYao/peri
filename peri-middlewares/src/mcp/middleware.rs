@@ -73,7 +73,7 @@ impl McpMiddleware {
     ///
     /// 取投影而非把 admission 存成字段：middleware 每 turn 新建，准入输入的权威
     /// 来源仍是 middleware 自身字段，存第二份可写副本会引入漂移面（业务规则单一
-    /// 权威）。将来由 session 级持有者长期持有的实例走
+    /// 权威）。session invocation 复用
     /// [`McpAdmissionPreparation::new`] 同一条构造路径。
     fn admission(&self) -> McpAdmissionPreparation {
         McpAdmissionPreparation::new(
@@ -713,8 +713,8 @@ impl Middleware for McpMiddleware {
         state: &mut dyn hook_state::StartupState,
     ) -> peri_agent::error::AgentResult<()> {
         // 顺序不变：await_system_ready → startup_tool_update → stage_startup_tools。
-        // 准入逻辑本体在 session-owned 的 `McpAdmissionPreparation`（同一份实现
-        // 将来也服务 idle invocation），本钩子只保留触发时机与提交出口。
+        // 准入逻辑复用 session invocation 的 `McpAdmissionPreparation`，
+        // 本钩子只保留触发时机与提交出口。
         let admission = self.admission();
         let snapshot = admission
             .await_system_ready()

@@ -7,7 +7,7 @@ import type { TimelineRow } from './types';
 function workRow(id: string): TimelineRow {
   return {
     kind: 'work', id, turnId: 'turn:1', active: false,
-    failed: false, defaultExpanded: false, forceExpanded: false,
+    failed: false, defaultExpanded: false,
     items: [{
       kind: 'tool', id: `${id}:t`, entryId: 'e', blockId: 'b', status: 'completed',
       label: 'Read', createdAt: null, completedAt: null, failed: false,

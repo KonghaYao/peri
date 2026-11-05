@@ -10,6 +10,7 @@ import {
 } from "../src/agent/peri-instance";
 import { HistoryPageUnavailableError, StaleHistoryPageError } from "../src/state/history-browser";
 import { SessionCloseIncompleteError } from "../src/agent/session-close";
+import { SessionQueueStaleError } from "../src/agent/session-queue";
 import { RpcError } from "../src/transport/rpc-error";
 import type { JsonRpcNotification, ReverseRequestHandler, Transport } from "../src/transport/types";
 
@@ -52,6 +53,7 @@ class FakeTransport implements Transport {
   failNew?: Error;
   failRename?: Error;
   failCloseWire = false;
+  enqueueError?: Error;
   reverseHandler?: ReverseRequestHandler;
   pageGate?: Promise<void>;
   initializeGate?: Promise<void>;
@@ -100,6 +102,7 @@ class FakeTransport implements Transport {
       return this.queue as Response;
     }
     if (method === "session/input/enqueue") {
+      if (this.enqueueError) throw this.enqueueError;
       const inputId = (params as { inputId: string }).inputId;
       this.queue.items.push({ inputId, state: "queued" });
       this.queue.revision++;
@@ -272,6 +275,40 @@ test("new session: seed config, queue, send, delivery, turn completion and close
   expect(transport.closeRequests).toBe(1);
   expect(host.closed).toBe(1);
   expect(facts.filter((fact) => fact.kind === "closed")).toHaveLength(1);
+});
+
+test("queue change notification updates the generation used by the next send", async () => {
+  const { transport, instance } = setup();
+  await instance.bindNew({ path: "/workspace" });
+
+  transport.emit(agentEvent("user_input_queue_changed", {
+    snapshot: { generation: "generation-2", revision: 0, items: [] },
+  }));
+  await instance.send("input-1", "hello");
+
+  expect(transport.calls.find((call) => call.method === "session/input/enqueue")?.params)
+    .toMatchObject({ generation: "generation-2" });
+  await instance.close();
+});
+
+test("stale queue rejection blocks the instance until the runtime is rebuilt", async () => {
+  const { transport, instance, facts } = setup();
+  await instance.bindNew({ path: "/workspace" });
+  transport.enqueueError = new RpcError(
+    -32602,
+    "User input queue belongs to a different session generation",
+    { rejected: true, snapshot: { generation: "generation-2", revision: 0, items: [] } },
+  );
+
+  const failure = await instance.send("input-1", "hello").catch((error) => error);
+  expect(failure).toBeInstanceOf(SessionQueueStaleError);
+  expect(failure).toMatchObject({ generation: "generation-2", requiresRuntimeRestart: true });
+  expect(instance.needsReload).toBe(true);
+  expect(facts).toContainEqual({ kind: "run-state", running: false, executionBlocked: true });
+  await expect(instance.send("input-2", "again")).rejects.toBeInstanceOf(PeriInstanceNotBoundError);
+
+  await instance.close();
+  expect(instance.needsReload).toBe(false);
 });
 
 test("load: history batch precedes live notices and pages use the runtime cursor", async () => {

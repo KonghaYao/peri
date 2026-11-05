@@ -505,7 +505,7 @@ pub fn assemble_compact_messages(
     // 且必须以 continuation summary 的 Human 消息开头。
     if let Some(summary_index) = messages.iter().position(|message| {
         matches!(message, BaseMessage::Human { .. })
-            && message.content().contains(compact_v2::CONTINUATION_HINT)
+            && peri_acp_types::compact::is_continuation_hint(&message.content())
     }) {
         let summary = messages.remove(summary_index);
         messages.insert(0, summary);

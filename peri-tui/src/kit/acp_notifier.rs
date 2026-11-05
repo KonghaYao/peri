@@ -41,6 +41,7 @@ use crate::kit::atoms::{
     SPINNER_TOKEN_COUNT,
 };
 use crate::kit::input_area::refresh_slash_items;
+use crate::kit::program_status::{self, ProgramStatus};
 use interaction::{handle_elicitation, handle_request_permission};
 use peri_acp::event::AcpEvent;
 use serde_json::Value;
@@ -110,6 +111,7 @@ fn spawn_kit_notifier_inner(
                                 until: peri_time::monotonic_now() + std::time::Duration::from_secs(5),
                             });
                             RENDER_HEARTBEAT.set(RENDER_HEARTBEAT.get().wrapping_add(1));
+                            program_status::publish(ProgramStatus::Error);
                             break;
                         }
                     }

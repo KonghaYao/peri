@@ -7,8 +7,26 @@ use crate::event::CompactFileInfo;
 use crate::messages::BaseMessage;
 
 /// Full Compact 摘要消息的内部续接标记。
-pub const CONTINUATION_HINT: &str =
+///
+/// 必须保持单行：识别方按完整首行匹配，不解析多行结构。
+pub const CONTINUATION_HINT: &str = "[Context has been compacted. The summary below replaced earlier history. If it contains Recovery resources, before any other tool call use SkillTool to reload each listed, non-preloaded skill by its exact canonical name. If a reload fails, use the failure guidance, including DiscoverSkillsTool when directed, or report that the skill cannot be recovered. Rules in the summary are hints; the reloaded body is authoritative. A newer explicit user instruction takes precedence.]";
+
+/// 历史持久化摘要使用过的旧续接标记。
+///
+/// 只用于兼容识别旧持久化摘要，不再写入新摘要。
+pub const LEGACY_CONTINUATION_HINT: &str =
     "[Context has been compacted. Continue working based on the summary above.]";
+
+/// 摘要续接标记必须作为完整首行出现；同时识别历史持久化格式。
+pub fn is_continuation_hint(text: &str) -> bool {
+    let text = text.trim_start();
+    [CONTINUATION_HINT, LEGACY_CONTINUATION_HINT]
+        .into_iter()
+        .any(|hint| {
+            text.strip_prefix(hint)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('\n'))
+        })
+}
 
 /// 自动 Micro 最小净收益的默认分母：完整上下文窗口的 1/10，向上取整。
 ///

@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crate::kit::atoms::TUI_CONFIG_HANDLE;
 use crate::kit::message_area::props::ScrollbarFields;
@@ -30,10 +30,10 @@ fn fps_to_ms(fps: u32) -> u64 {
     }
 }
 
+/// 鼠标拖拽（滚动条 / 文本选区）的节流间隔。
 /// 优先级：TuiConfig.scroll_fps > PERI_SCROLL_THROTTLE_MS 环境变量 > 默认 50ms（20fps）。
 /// 下限 1ms 防止零值导致无节流。
 /// TuiConfig 每次读取（try_read 代价 ~5ns，无争用时），因为用户可能运行时切换。
-/// pub(crate)：面板滚轮仲裁（panel_scroll.rs）复用同一帧率配置。
 pub(crate) fn scroll_frame_ms() -> u64 {
     // 优先读 TuiConfig
     if let Some(handle) = TUI_CONFIG_HANDLE.get()
@@ -55,22 +55,6 @@ pub(crate) fn scroll_frame_ms() -> u64 {
     DEFAULT_SCROLL_FRAME_MS
 }
 
-#[derive(Debug, Clone)]
-/// pub(crate)：面板滚轮仲裁（panel_scroll.rs）复用同一节流器。
-pub(crate) struct ScrollThrottle {
-    pub(crate) last_flush: Instant,
-    pub(crate) pending_delta: i32, // positive = scroll_down, negative = scroll_up
-}
-
-impl Default for ScrollThrottle {
-    fn default() -> Self {
-        Self {
-            last_flush: peri_time::monotonic_now(),
-            pending_delta: 0,
-        }
-    }
-}
-
 // ── 拖拽选中节流 ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -86,10 +70,10 @@ impl Default for DragThrottle {
     }
 }
 
-// ── 滚动节流（私有）────────────────────────────────────────────────────
+// ── 滚动落地（私有）────────────────────────────────────────────────────
 
 /// 纯函数：offset 应用滚动量后的新位置（正=向下，负=向上；越界封顶/封底）。
-/// 哨兵归一化（offset > max_scroll 时先落到 max_scroll）由 `apply_pending` 负责。
+/// 调用方负责先做哨兵归一化（见 [`land_scroll_delta`]）。
 pub(super) fn apply_delta_to_offset(offset: usize, delta: i32, max_scroll: usize) -> usize {
     if delta > 0 {
         offset.saturating_add(delta as usize).min(max_scroll)
@@ -98,47 +82,25 @@ pub(super) fn apply_delta_to_offset(offset: usize, delta: i32, max_scroll: usize
     }
 }
 
-/// 反向判定：pending 与新 delta 方向相反时需要先落地旧 pending，
-/// 避免「先累积后抵消」造成滚动不到位/回弹（ghostty/ssh burst 场景）。
-pub(super) fn is_reverse_direction(pending_delta: i32, delta: i32) -> bool {
-    pending_delta != 0 && (pending_delta > 0) != (delta > 0)
-}
-
-/// 纯函数：把「节流窗口内还没落地的滚动量」投影成 flush 之后的视口事实
-/// `(offset, follow_bottom)`。
+/// 纯函数：一次滚轮事件落地后的 offset。
 ///
-/// 与 `apply_pending` 同一口径（哨兵归一化 → 应用 delta → 同步 follow 判定），
-/// 因此两处必须一起改。用途：滚动事件在**节流窗口内**判定视口是否贴到向前边界
-/// （REQ-C01-1）——只看当帧 `scroll_state.offset()` 会漏掉整段还在 `pending_delta`
-/// 里的上滚：那一次滚动的落地结果（offset=0）要等下一帧 flush 才可见，而空闲会话
-/// 没有后续事件可依赖，翻页与失败重试都会永远不触发。
-pub(in crate::kit::message_area) fn project_viewport_after_pending(
-    offset: usize,
-    pending_delta: i32,
-    content_length: usize,
-    viewport_length: usize,
-) -> (usize, bool) {
-    let max_scroll = content_length.saturating_sub(viewport_length);
-    let offset = if offset > max_scroll {
-        max_scroll
-    } else {
-        offset
-    };
-    let landed = apply_delta_to_offset(offset, pending_delta, max_scroll);
-    (
-        landed,
-        super::auto_follow::should_follow_after_user_scroll(max_scroll, landed),
-    )
+/// 与 `apply_scroll` 的写入口径一致：先把跟随态哨兵（usize::MAX）归一化到当帧
+/// 底部，再应用 delta。每个事件独立调用，不做时间窗合并——合并会让一次落地行数
+/// = `SCROLL_LINES` × 窗口内事件数，随轮速/相位变化，步长忽大忽小。
+pub(super) fn land_scroll_delta(offset: usize, delta: i32, max_scroll: usize) -> usize {
+    apply_delta_to_offset(offset.min(max_scroll), delta, max_scroll)
 }
 
-/// 把一段滚动量（正=向下，负=向上）推入 scroll_state，并同步 follow 状态。
-fn apply_pending(
-    pending: i32,
+/// 滚轮事件入口：每个事件立即把 delta（正=向下，负=向上）落进 scroll_state，
+/// 并同步 follow 状态（上滚即刻离开跟随态，流式增长不会把视口拉回底部）。
+/// write_no_update 不触发 notifier.wake()——依赖 dispatch 后 ratatui-kit loop 强制 render。
+pub(super) fn apply_scroll(
+    delta: i32,
     scroll_state: &State<ScrollPos>,
     scrollbar_fields: &State<ScrollbarFields>,
     follow_bottom: &State<bool>,
 ) {
-    if pending == 0 {
+    if delta == 0 {
         return;
     }
     let fields = *scrollbar_fields.read();
@@ -146,64 +108,8 @@ fn apply_pending(
     let mut state = scroll_state.write_no_update();
     // 跟随态下 offset 可能是 usize::MAX 哨兵（scroll_to_bottom 设置、渲染 clamp
     // 前）——先归一化到当帧底部，否则滚轮上滚要先"滚空气"。
-    if state.offset() > max_scroll {
-        state.set_offset(max_scroll);
-    }
-    let final_offset = apply_delta_to_offset(state.offset(), pending, max_scroll);
+    let final_offset = land_scroll_delta(state.offset(), delta, max_scroll);
     state.set_offset(final_offset);
     drop(state);
     update_follow_on_scroll(follow_bottom, max_scroll, final_offset);
-}
-
-/// 节流 flush 核心：把累积的 pending_delta 一次性推入 scroll_state 并同步 follow。
-/// 供 `apply_scroll`（事件到达时）与渲染帧兜底（mod.rs 每帧调用）共用。
-/// 返回是否实际 flush 了非零滚动量。
-pub(in crate::kit::message_area) fn flush_scroll_if_due(
-    scroll_throttle: &State<ScrollThrottle>,
-    scroll_state: &State<ScrollPos>,
-    scrollbar_fields: &State<ScrollbarFields>,
-    follow_bottom: &State<bool>,
-) -> bool {
-    let mut st = scroll_throttle.write_no_update();
-    let now = peri_time::monotonic_now();
-    if now.duration_since(st.last_flush) < Duration::from_millis(scroll_frame_ms()) {
-        return false;
-    }
-    let pending = st.pending_delta;
-    st.pending_delta = 0;
-    st.last_flush = now;
-    drop(st);
-    apply_pending(pending, scroll_state, scrollbar_fields, follow_bottom);
-    pending != 0
-}
-
-/// 滚动节流：累积 delta，仅在距上次 flush ≥ scroll_frame_ms() 时推入 scroll_state。
-/// write_no_update 不触发 notifier.wake()——依赖 dispatch 后 ratatui-kit loop 强制 render。
-pub(super) fn apply_scroll(
-    delta: i32,
-    scroll_throttle: &State<ScrollThrottle>,
-    scroll_state: &State<ScrollPos>,
-    scrollbar_fields: &State<ScrollbarFields>,
-    follow_bottom: &State<bool>,
-) {
-    {
-        let mut st = scroll_throttle.write_no_update();
-        // [Fix 反向落地] 反向滚动时旧方向 pending 立即落地（即使未到节流窗口），
-        // 再累积新方向——消除「先动后猛跳」的抵消错位（ghostty/ssh burst 场景）。
-        if is_reverse_direction(st.pending_delta, delta) {
-            let old = st.pending_delta;
-            st.pending_delta = 0;
-            st.last_flush = peri_time::monotonic_now();
-            drop(st);
-            apply_pending(old, scroll_state, scrollbar_fields, follow_bottom);
-        } else {
-            st.pending_delta += delta;
-        }
-    }
-    flush_scroll_if_due(
-        scroll_throttle,
-        scroll_state,
-        scrollbar_fields,
-        follow_bottom,
-    );
 }

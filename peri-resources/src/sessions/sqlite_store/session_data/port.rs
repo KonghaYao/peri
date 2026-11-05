@@ -205,7 +205,7 @@ impl SessionDataPort for SqliteSessionData {
                         SessionResourceErrorKind::Workspace(
                             WorkspaceError::ExecutionBindingMismatch,
                         ),
-                    ))
+                    ));
                 }
             }
         }

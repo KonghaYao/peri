@@ -112,7 +112,7 @@ pub fn McpPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         move || control.write().reset_scope(scope_for_effect.clone()),
         (control_scope.clone(),),
     );
-    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
+    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格
     let sv = hooks.use_state(ScrollViewState::default);
     let store = hooks.use_atom(&MCP_SERVERS);
     let projection_error = hooks.use_atom(&SERVICE_PROJECTION_ERROR);

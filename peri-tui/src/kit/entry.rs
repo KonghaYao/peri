@@ -313,11 +313,13 @@ pub async fn run_kit_fullscreen(
         );
         if let Err(error) = setup_result {
             shutdown.cancel();
+            crate::kit::program_status::clear();
             teardown_app(&mut app).await;
             return Err(error.into());
         }
         if !*atoms::SETUP_COMPLETED.state().read() {
             shutdown.cancel();
+            crate::kit::program_status::clear();
             teardown_app(&mut app).await;
             return Ok(());
         }
@@ -326,6 +328,7 @@ pub async fn run_kit_fullscreen(
             Ok(client) => Some(client),
             Err(error) => {
                 shutdown.cancel();
+                crate::kit::program_status::clear();
                 teardown_app(&mut app).await;
                 return Err(error);
             }
@@ -584,6 +587,9 @@ pub async fn run_kit_fullscreen(
         DisableMouseCapture,
         DisableBracketedPaste
     );
+
+    // 正常退出：清除 OSC 7501 根记录——done/error 会跨进程存活，不清会留在外层。
+    crate::kit::program_status::clear();
 
     // 5b. 退出提示——fullscreen 返回时 ratatui-kit 已 restore 终端（RestoreGuard），
     //     此处 stdout 只归本线程写；无会话（setup 取消、离线模式）不打印。

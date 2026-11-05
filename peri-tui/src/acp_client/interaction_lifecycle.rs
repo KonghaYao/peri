@@ -120,6 +120,8 @@ pub enum ClaimCause {
     LifecycleDrain,
     TurnTerminal,
     TransportTerminal,
+    /// 服务端通过 `$/cancel_request` 撤销请求（如提问超时）。
+    ServerCancelled,
 }
 
 #[derive(Debug)]
@@ -136,6 +138,8 @@ pub enum InteractionExpiryReason {
     TurnTerminal,
     TransportTerminal,
     ResponseTransportFailed,
+    /// 服务端撤销了挂起请求（提问超时），本地 UI 须结算并释放输入。
+    ServerCancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -534,6 +538,27 @@ impl InteractionLifecycle {
             return None;
         }
         let entry = state.pending.remove(&owner.token).unwrap();
+        Some(ClaimedInteraction {
+            owner: entry.owner,
+            request_id: entry.request_id,
+            cause,
+        })
+    }
+
+    /// 服务端撤销只给出 wire request id（`$/cancel_request`），按 id 找回并认领；
+    /// 已被用户响应或生命周期结算的请求返回 `None`（first-claim 语义不变）。
+    pub fn claim_by_request_id(
+        &self,
+        request_id: &RequestId,
+        cause: ClaimCause,
+    ) -> Option<ClaimedInteraction> {
+        let mut state = self.state.lock().unwrap();
+        let token = state
+            .pending
+            .iter()
+            .find(|(_, entry)| &entry.request_id == request_id)
+            .map(|(token, _)| *token)?;
+        let entry = state.pending.remove(&token)?;
         Some(ClaimedInteraction {
             owner: entry.owner,
             request_id: entry.request_id,

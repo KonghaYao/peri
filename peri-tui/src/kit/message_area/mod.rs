@@ -82,7 +82,7 @@ pub use props::MessageAreaProps;
 use props::{MsgAreaTracker, ScrollbarFields, ScrollbarHook};
 #[cfg(test)]
 use scroll::GesturePending;
-use scroll::{DragThrottle, ScrollThrottle, ScrollbarDragState};
+use scroll::{DragThrottle, ScrollbarDragState};
 use selection::{WrappedLineInfo, build_wrap_map, highlight_line_in_selection};
 
 // ── 组件 ──────────────────────────────────────────────────────────────────
@@ -191,7 +191,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
     let scroll_state = hooks.use_state(scroll::ScrollPos::default);
     let prev_items_len = hooks.use_state(|| 0usize);
     let _prev_is_loading = hooks.use_state(|| false);
-    let scroll_throttle = hooks.use_state(ScrollThrottle::default);
     let _todo_hash = hash_todo_items(&todo_items);
 
     // ── 文本选区 + 左键手势状态机 ──
@@ -360,7 +359,6 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         scrollbar_area,
         vis_width,
         scroll_state,
-        scroll_throttle,
         text_sel,
         gesture,
         drag_throttle,
@@ -515,20 +513,9 @@ pub fn MessageArea(props: &MessageAreaProps, mut hooks: Hooks) -> impl Into<AnyE
         g.viewport_length = vis_height as usize;
     }
 
-    // [Fix 滚动尾随] 渲染帧兜底 flush：ratatui-kit 无 tick 定时器，停手后事件不再
-    // 到达时，残留 pending_delta 在任意后续渲染帧（鼠标移动/内容更新/其他事件）
-    // 落地，消除「滚动停止不到位」；反向抵消已由 apply_scroll 先行处理。
-    // write_no_update 不触发 wake，无自激重渲染。
-    //
     // [REQ-C01-1] 历史翻页触发**不在这里**：render body 写 atom 被 TUI-RENDER-001
-    // 禁止，触发点放在滚动事件边界（`scroll/event.rs`），并按 `apply_pending` 的
-    // 同一口径预判节流窗口内 pending 落地后的视口事实，不依赖本帧 flush 的顺序。
-    scroll::flush_scroll_if_due(
-        &scroll_throttle,
-        &scroll_state,
-        &scrollbar_fields,
-        &follow_bottom,
-    );
+    // 禁止，触发点放在滚动事件边界（`scroll/event.rs`）——滚轮在派发前已逐事件落地，
+    // 事件路径直接读当帧视口事实即可。
 
     let new_output_active = scroll::new_output_indicator_active(
         *follow_bottom.read(),

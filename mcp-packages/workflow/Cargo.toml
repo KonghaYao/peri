@@ -11,7 +11,6 @@ peri-acp-types = { path = "../../peri-acp-types" }
 peri-mcp-common = { path = "../common" }
 peri-workflow = { path = "../../peri-workflow" }
 async-trait.workspace = true
-parking_lot.workspace = true
 rmcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true

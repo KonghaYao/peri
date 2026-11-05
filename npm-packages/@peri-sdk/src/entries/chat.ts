@@ -7,9 +7,14 @@
 
 export { ChatManager } from "../chat/manager";
 export { ChatService } from "../chat/service";
-export { ChatUserAction, parseChatUserAction } from "../chat/action";
+export {
+    CHAT_SEND_TEXT_MAX_LENGTH,
+    ChatUserAction,
+    parseChatUserAction,
+} from "../chat/action";
 export { clearSessionOwnership } from "../chat/ownership";
 export * from "../chat/errors";
+export { SessionQueueStaleError } from "../agent/session-queue";
 export { WorkspaceMismatchError } from "../workspace/errors";
 export type { WorkspaceRef } from "../workspace/types";
 
@@ -26,6 +31,7 @@ export type {
     LoadEarlierHistoryAction,
     SendAction,
     SessionAction,
+    SetConfigOptionAction,
     TakeBackAction,
 } from "../chat/action";
 export type {
@@ -47,6 +53,7 @@ export type {
     SessionReadyResult,
 } from "../chat/types";
 export type { ChatDatabase, ChatSessionDirectoryEntry } from "../contracts/chat";
+export type { WasmRuntimePoolSnapshot, WasmRuntimeInstanceSnapshot } from "../wasm/runtime-pool";
 export type { HistoryPageOutcome, PeriInstancePort } from "../agent/port";
 export type {
     ChatBindingTarget,

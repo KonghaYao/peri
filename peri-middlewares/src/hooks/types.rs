@@ -98,8 +98,8 @@ pub struct SyncHookResponse {
     /// 系统警告消息（展示给用户）
     #[serde(default, rename = "systemMessage")]
     pub system_message: Option<String>,
-    /// 事件特定输出
-    #[serde(default)]
+    /// 事件特定输出（Claude Code 标准写法是 camelCase，snake_case 为兼容保留）
+    #[serde(default, alias = "hookSpecificOutput")]
     pub hook_specific_output: Option<HookSpecificOutput>,
 }
 

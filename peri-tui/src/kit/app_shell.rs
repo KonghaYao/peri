@@ -82,6 +82,15 @@ pub fn AppShell(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
         (exit_requested_val,),
     );
 
+    // OSC 7501：把程序状态交给外层终端/agent inbox（如 herdr）。写在 effect 里
+    // 是因为 effect 与绘制同线程串行，不会把状态序列插进一帧中间。
+    let program_status_handle = hooks.use_atom(&atoms::PROGRAM_STATUS);
+    let program_status_val = *program_status_handle.read();
+    hooks.use_effect(
+        move || crate::kit::program_status::report(program_status_val),
+        (program_status_val,),
+    );
+
     let setup_preflight_active = *setup_preflight.read();
     let wizard_open = *wizard_active.read();
     let setup_phase = *setup_chatgpt.read();

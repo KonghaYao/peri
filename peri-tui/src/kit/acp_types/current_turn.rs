@@ -64,6 +64,13 @@ pub struct CurrentTurn {
     /// 空表示所有分组都已配对。
     pending_subagent_groups: Vec<PendingSubagentGroup>,
 
+    /// 流式期间到达、等待当前文本段冻结后落段的 SystemNote（FIFO）。
+    ///
+    /// note 不得插入正在增长的 assistant 消息内部（同一 ACP 消息会被拆成多个
+    /// 气泡）；文本段冻结（message_id 变化、tool/subagent 开始、user bubble、
+    /// reminder）或 turn 归档时才转成 `TurnSegment::SystemNote`。
+    pending_notes: Vec<PendingNote>,
+
     /// Chronological order of text flushes, tool starts, and sub-agent starts
     /// within this turn. Drive `sync_cache` to produce interleaved output.
     segments: Vec<TurnSegment>,
@@ -141,6 +148,7 @@ impl Default for CurrentTurn {
             deactivated: false,
             subagents: Vec::new(),
             pending_subagent_groups: Vec::new(),
+            pending_notes: Vec::new(),
             segments: Vec::new(),
             last_text_flush: 0,
             last_reasoning_flush: 0,
@@ -189,6 +197,12 @@ impl CurrentTurn {
                 .pending_subagent_groups
                 .iter()
                 .map(|g| g.parent_tool_call_id.as_ref().map_or(0, String::capacity))
+                .sum::<usize>()
+            + self.pending_notes.capacity() * std::mem::size_of::<PendingNote>()
+            + self
+                .pending_notes
+                .iter()
+                .map(|note| note.text.capacity())
                 .sum::<usize>()
             + self.last_message_id.as_ref().map_or(0, String::capacity);
         self.raw_memory_bytes()
@@ -248,6 +262,14 @@ pub(super) struct PendingSubagentGroup {
     /// 父 Agent 工具调用 id（`SubagentStarted.parent_tool_call_id`）。
     /// None = 生产端未提供身份，只能按到达顺序兜底配对。
     pub parent_tool_call_id: Option<String>,
+}
+
+/// 流式期间到达、尚未落到 segment 时序的 SystemNote。
+#[derive(Debug, Clone)]
+struct PendingNote {
+    text: String,
+    level: TuiNoteLevel,
+    content_hash: u64,
 }
 
 /// A single entry in the chronological ordering of a turn's streaming events.
@@ -351,6 +373,7 @@ impl CurrentTurn {
         self.tool_cards.clear();
         self.subagents.clear();
         self.pending_subagent_groups.clear();
+        self.pending_notes.clear();
         self.segments.clear();
         self.last_text_flush = 0;
         self.last_reasoning_flush = 0;
@@ -408,6 +431,8 @@ impl CurrentTurn {
             && self.reasoning.is_empty()
             && self.tool_cards.is_empty()
             && self.subagents.is_empty()
+            && self.pending_notes.is_empty()
+            && self.segments.is_empty()
             && self.cached_view_models.is_empty()
     }
 

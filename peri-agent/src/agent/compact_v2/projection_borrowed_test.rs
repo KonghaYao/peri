@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::messages::ToolCallRequest;
-use peri_acp_types::compact::CONTINUATION_HINT;
+use peri_acp_types::compact::LEGACY_CONTINUATION_HINT;
 use peri_acp_types::context_archive::build_catalog;
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::system_reminder::{
@@ -139,7 +139,7 @@ fn text_blocks_raw_and_reminders_keep_their_projection_bytes() {
             serde_json::json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "BBBB"}}),
         ]),
     };
-    let legacy = human_text(0x04, format!("{CONTINUATION_HINT}\nlegacy 正文 🙂"));
+    let legacy = human_text(0x04, format!("{LEGACY_CONTINUATION_HINT}\nlegacy 正文 🙂"));
     transcript.append(text);
     transcript.append(blocks);
     transcript.append(raw);

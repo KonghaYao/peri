@@ -6,6 +6,7 @@
 
 - 执行恢复：Work/control 数据端口、reducer 与账本表移除；新库不创建，升级到当前形状时按 `schema_cleanup::removal_plan` 删除。`sessions/canonical.rs` 定义保留业务表及删除清单；本地 `sqlite_store/schema.rs` 与远端 `remote/schema_upgrade.rs` 负责版本转换。
 - 历史数据：snapshot/history、frozen/inherited、消息 flags/projection、普通关闭意图与 OAuth 保留；普通远端 operation ledger 不属于 Agent 恢复账本。
+- 本机历史写入：append/fork 共用 `session_data_helpers.rs::SerializedHistoryChunks`，按 1 MiB 序列化正文与 225 行上限惰性分块，全部块仍由调用方同一事务提交；超窗单条独占一块并完整写入。窗口外最多预序列化一条 lookahead，不约束已持有的 canonical 历史或 SQLite 自身内存。
 - 工作区身份（形状版本以 `CURRENT_SCHEMA_VERSION` 为准）：`workspaces` 的 `(machine_id, path)` 是唯一归属键，`project_id`/`identity`/`discovery` 只描述该路径当前观测到的对象，不参与身份；`legacy_execution_registrations` 已删除，`session_bindings.workspace_id` 与 `threads.workspace_id` 一致。
 
 - 时间入口：生产路径经 `peri-time` 读取 UTC 墙钟、单调时钟并执行 sleep/timeout。`src/sessions/remote/connection.rs` 保留远端请求超时的 `Exceeded` 分类；`src/sessions/resources/deployment.rs` 与 `resources.rs` 保留关闭结清超时分类；`src/sessions/sqlite_store/connection.rs` 用单调时钟限制 schema 开库锁等待。持久字段继续使用既有 RFC 3339 形状，`ThreadMeta` 的 Chrono 类型在本 crate 边界由 `SystemTime` 转换。

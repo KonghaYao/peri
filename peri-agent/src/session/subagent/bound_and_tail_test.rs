@@ -1,6 +1,7 @@
 //! Bound subagent identity and background tail behavior.
 
 use super::*;
+use peri_acp_types::session_resources::SessionResources as _;
 use peri_acp_types::tasks::TaskManager as _;
 
 #[derive(Clone, Default)]
@@ -242,6 +243,56 @@ fn tail_spawn_config(
         frozen_skill_summary: None,
         frozen_date: None,
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn spawn_guard_accepts_same_directory_with_trailing_separator() {
+    // session/load 恢复后的 live cwd 带尾分隔符，父快照保留创建时的无分隔符形态。
+    let store = MockSessionResources::new();
+    let mut config = tail_spawn_config(store.clone(), TailOutcome::Completed);
+    config.cwd = Some("/tmp/tail-fixture/".into());
+    let spawned = SessionFactory::spawn_subagent(None, config).await.unwrap();
+    let child = store.load_meta(&spawned.child_thread_id).await.unwrap();
+    assert_eq!(child.cwd, "/tmp/tail-fixture/");
+    assert_eq!(
+        store
+            .load_session_binding(&spawned.child_thread_id)
+            .await
+            .unwrap(),
+        store
+            .load_session_binding(&"tail-parent".to_owned())
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn spawn_guard_accepts_subdirectory_session_path() {
+    // sessionPath 非空：父会话 cwd 是工作区子目录，派发继承同一目录。
+    let store = MockSessionResources::new();
+    let mut config = tail_spawn_config(store.clone(), TailOutcome::Completed);
+    store.register_bound_session("tail-parent", "/tmp/tail-fixture/sub");
+    config.cwd = Some("/tmp/tail-fixture/sub".into());
+    let spawned = SessionFactory::spawn_subagent(None, config).await.unwrap();
+    let child = store.load_meta(&spawned.child_thread_id).await.unwrap();
+    assert_eq!(child.cwd, "/tmp/tail-fixture/sub");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn spawn_guard_rejects_different_directory() {
+    let store = MockSessionResources::new();
+    let mut config = tail_spawn_config(store.clone(), TailOutcome::Completed);
+    config.cwd = Some("/tmp/tail-fixture/sub".into());
+    let error = match SessionFactory::spawn_subagent(None, config).await {
+        Ok(_) => panic!("different execution directory must be rejected"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("session execution binding does not match the requested environment"),
+        "unexpected error: {error}"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -197,11 +197,7 @@ impl EntryRenderCache {
         self.retained_bytes_with(&mut seen)
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn retained_bytes_with(
-        &self,
-        seen: &mut crate::kit::retained_bytes::SeenAllocations,
-    ) -> usize {
+    fn retained_bytes_with(&self, seen: &mut crate::kit::retained_bytes::SeenAllocations) -> usize {
         self.markdown.retained_bytes()
             + crate::kit::retained_bytes::retained_arc_lines_bytes(&self.lines, seen)
             + self.markdown_lines.retained_bytes_with(seen)
@@ -333,12 +329,6 @@ impl MarkdownLineCache {
             entry
         }));
         (visual_rows + tail_rows, result)
-    }
-
-    #[allow(dead_code)]
-    fn retained_bytes(&self) -> usize {
-        let mut seen = crate::kit::retained_bytes::SeenAllocations::default();
-        self.retained_bytes_with(&mut seen)
     }
 
     fn retained_bytes_with(&self, seen: &mut crate::kit::retained_bytes::SeenAllocations) -> usize {

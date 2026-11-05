@@ -46,7 +46,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | Ultra-ADLC | [ultra-adlc.md](ultra-adlc.md) | 超大交付模式的文件协议与编排契约 |
 | TUI 数据流 | [tui-acp-data-flow.md](tui-acp-data-flow.md) | ACP event → Atom → render 链路 |
 | TUI 流式 Markdown 性能 | [tui-streaming-markdown-performance.md](tui-streaming-markdown-performance.md) | publication scheduler、lazy projection、增量 Markdown 与 slot index |
-| Git Watch 中间件 | [git-watch-middleware.md](git-watch-middleware.md) | 分支/HEAD 变化 Info 注入（异步采样 + 60s 节流） |
+| Git ref 观察 | [git-watch-middleware.md](git-watch-middleware.md) | 分支/HEAD 变化 Info 注入（异步采样 + 60s 节流） |
 | System Reminder | [system-reminder.md](system-reminder.md) | canonical DTO、可信生产、队列/持久化、ACP/TUI 投影与 legacy fallback |
 | Beta Flag 系统 | [beta-flags.md](beta-flags.md) | 注册表、`config.betas` 配置面投影与装配期消费注入；不做远程下发、灰度与会话内热生效，安全与兼容语义不使用 flag；验收记录与剩余跟进项见 [2026-10-08 实施 issue](../../spec/issues/2026-10-08-beta-flags-implementation.md) |
 | Peri SDK Chat | [peri-sdk-chat.md](peri-sdk-chat.md) | `ChatManager`/`ChatService`/`ChatUserAction`/`PeriInstance`/`ChatView` 与 `ChatReplica` 的职责、事实/同步、宿主与关闭边界；公开入口见 [TS SDK 索引](../code-index/peri-ts-sdk.md) |
@@ -64,7 +64,7 @@ draft、proposal、可行性探查、审计报告和未采纳方案不进入本�
 | Command 系统 | [command-system.md](command-system.md) | 命令协议与执行边界以代码和契约测试为准 |
 | TUI Chat Workbench | [tui-chat-workbench.md](tui-chat-workbench.md) | transcript 展示、组合器与工作台布局的现行约束 |
 | Workflow as MCP | [workflow-mcp.md](workflow-mcp.md) | builtin 实例、任务资源与回填信道已落地；`peri-resources` 门面残留目标 |
-| MonitorMCP | [monitor-mcp.md](monitor-mcp.md) | [MonitorMCP 实施](../../spec/issues/2026-11-01-monitor-mcp.md)；v1 command source 与标准 MCP Tasks 已裁决；P2 alert 提醒已实现（终态不唤醒），poll/file/WS source 不在范围 |
+| MonitorMCP | [monitor-mcp.md](monitor-mcp.md) | v1 command source、标准 MCP Tasks 与 alert 提醒已实现（终态不唤醒）；实现入口见 [MCP packages 索引](../code-index/mcp-packages.md)，poll/file/WS source 不在范围 |
 | Serverless 执行环境身份 | [serverless-execution-identity.md](serverless-execution-identity.md) | Emscripten/Node/Bun/workerd 宿主可用；Cloudflare 托管部署与跨实例接管未验收 |
 | TUI 面板架构 | [tui-panel-architecture.md](tui-panel-architecture.md) | [TUI 面板架构重构](../../spec/issues/2026-10-15-tui-architecture-refactor.md)；面板外壳、共享视口、事件入口、操作作用域与完成门、快照发布单点、确认版本守卫已落地；未完成项见该 issue |
 | peri-cf 聊天对象契约 | [peri-cf-chat-objects.md](peri-cf-chat-objects.md) | 前端消费面与对象契约完整性；对象语义继续有效，Worker/DO 与旧控制通道已标注为历史；当前实现见 [Peri SDK Chat](peri-sdk-chat.md) 与 [服务端 Agent](peri-cf-server-agent.md) |

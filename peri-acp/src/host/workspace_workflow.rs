@@ -55,29 +55,28 @@ impl SessionEnvironment {
             return Ok(false);
         }
         // MCP 在 activate 后后台初始化，不能用一次瞬时查询永久跳过消费者。
-        // 只等待宿主连接状态；任务、就绪和关闭仍经 MCP 协议消费。
+        // 只等待 System 依赖收口；普通 MCP 的连接不是 workflow 装配的前置条件，
+        // 也不得拖住这里的判定。任务、就绪和关闭仍经 MCP 协议消费。
         let deadline = peri_time::monotonic_now() + std::time::Duration::from_secs(10);
         while !pool.has_instance("workflow") {
             let snapshot = pool.snapshot();
-            match snapshot["initPhase"].as_str() {
-                Some("ready") => {
+            match snapshot["systemPhase"].as_str() {
+                Some("settled") => {
                     // 终态快照可能晚于循环条件读取；再次确认，避免漏掉刚注册的实例。
                     if !pool.has_instance("workflow") {
+                        // System 收口且没有 workflow 实例：部署未提供该实例或被
+                        // A24 关闭集移除。会话本身仍可用，不把 Workflow 不可用
+                        // 升级为 session 失败。
+                        tracing::warn!(
+                            target: "workflow.consumer",
+                            "MCP system dependencies settled without a workflow instance; \
+                             skipping workflow consumer wiring"
+                        );
                         return Ok(false);
                     }
                     break;
                 }
-                Some("failed") => {
-                    // 终态且没有 workflow 实例：可能是无关 server 失败或部署未提供该
-                    // 实例。会话本身仍可用，不把 Workflow 不可用升级为 session 失败。
-                    tracing::warn!(
-                        target: "workflow.consumer",
-                        "MCP pool initialization failed without a workflow instance; \
-                         skipping workflow consumer wiring"
-                    );
-                    return Ok(false);
-                }
-                Some("pending" | "initializing") => {}
+                Some("pending") => {}
                 _ => {
                     return Err(
                         "workflow consumer setup failed: unknown MCP initialization state".into(),

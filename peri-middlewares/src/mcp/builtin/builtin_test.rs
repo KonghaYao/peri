@@ -13,6 +13,7 @@ use std::collections::{BTreeSet, HashSet};
 use peri_acp_types::builtin_mcp::BUILTIN_MCP_INSTANCES;
 
 use super::*;
+use crate::mcp::tool_bridge::effective_mcp_tool_name;
 
 // ─── 冻结字面量 ─────────────────────────────────────────────────────────────
 
@@ -323,7 +324,7 @@ impl Drop for BuiltinEnvGuard {
 fn injection_policy_all_and_none_shapes() {
     let all = BuiltinInjectionPolicy::all();
     assert_eq!(
-        all.enabled_instances().to_vec(),
+        all.enabled.clone(),
         vec![
             "web",
             "artifact",
@@ -351,7 +352,7 @@ fn injection_policy_all_and_none_shapes() {
     assert!(!all.enables("not-a-builtin"), "表外名字永不注入");
 
     let none = BuiltinInjectionPolicy::none();
-    assert!(none.enabled_instances().is_empty());
+    assert!(none.enabled.is_empty());
     assert!(
         !none.enables("web")
             && !none.enables("artifact")
@@ -367,9 +368,7 @@ fn injection_policy_from_env_three_states() {
     for off in ["off", "0", "OFF", " 0 "] {
         let _guard = BuiltinEnvGuard::set(Some(off));
         assert!(
-            builtin_injection_policy_from_env()
-                .enabled_instances()
-                .is_empty(),
+            builtin_injection_policy_from_env().enabled.is_empty(),
             "关闭取值必须解析为 none"
         );
         assert_eq!(
@@ -391,4 +390,52 @@ fn injection_policy_from_env_three_states() {
         BuiltinInjectionPolicy::all(),
         "未设置（缺省语义）必须解析为 all"
     );
+}
+
+/// 测试投影复用实际名字规则，核对声明表中的 effective name 字面量。
+fn effective_tool_name(instance: &str, original_tool: &str) -> Option<String> {
+    let instance = find(instance)?;
+    let tool = instance
+        .tools
+        .iter()
+        .find(|tool| tool.original_name == original_tool)?;
+    Some(if tool.direct {
+        tool.original_name.to_string()
+    } else {
+        effective_mcp_tool_name(instance.name, original_tool)
+    })
+}
+
+/// 为注册表成员断言收集模型面工具名。
+fn effective_tool_names(instance: &str) -> BTreeSet<String> {
+    find(instance)
+        .map(|instance| {
+            instance
+                .tools
+                .iter()
+                .filter_map(|tool| effective_tool_name(instance.name, tool.original_name))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 为 direct 声明断言收集注册表中的原始工具名。
+fn declared_direct_tools(instance: &str) -> Option<Vec<&'static str>> {
+    Some(
+        find(instance)?
+            .tools
+            .iter()
+            .filter(|tool| tool.direct)
+            .map(|tool| tool.original_name)
+            .collect(),
+    )
+}
+
+/// 查询声明模板，供模板形状断言使用。
+fn builtin_prompt_declaration(server_name: &str, original_tool: &str) -> Option<&'static str> {
+    find(server_name)?
+        .tools
+        .iter()
+        .find(|tool| tool.original_name == original_tool)?
+        .prompt_declaration
 }

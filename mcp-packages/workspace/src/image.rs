@@ -48,6 +48,17 @@ pub(crate) async fn handle_read_image(
     Ok(CustomResult::new(value))
 }
 
+/// Read 工具与 `image/read` 自定义请求共用同一读取规则（magic 判定、大小上限）。
+pub(crate) fn read_image_data(cwd: &str, path: &str, max_size: usize) -> ReadImageResponse {
+    load_image(
+        cwd,
+        ReadImageRequest {
+            path: path.to_owned(),
+            max_size,
+        },
+    )
+}
+
 fn load_image(cwd: &str, request: ReadImageRequest) -> ReadImageResponse {
     let expanded = if request.path == "~" || request.path.starts_with("~/") {
         let home = std::env::var_os("HOME")

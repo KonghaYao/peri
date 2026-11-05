@@ -618,18 +618,18 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     } else {
         None
     };
-    let compact_uncertain = v2_out
+    let history_commit_uncertain = v2_out
         .session
         .transcript()
         .read()
         .compaction_commit_state()
         .is_uncertain();
-    let persistence_inconsistent = flush_error.is_some() || compact_uncertain;
+    let persistence_inconsistent = flush_error.is_some() || history_commit_uncertain;
     let persistence_failure = if persistence_inconsistent {
         if let Some(error) = &flush_error {
             error!(session_id = %req.session_id, turn_id = %loop_turn_id, stage = "transcript_flush", error = %format_args!("{error:#}"), causes = ?error.chain().map(ToString::to_string).collect::<Vec<_>>(), "[v2] phase 8 transcript flush failed");
         } else {
-            error!(session_id = %req.session_id, "[v2] compact persistence outcome is unconfirmed");
+            error!(session_id = %req.session_id, "[v2] history persistence outcome is unconfirmed");
         }
         // A store call can commit before its future is cancelled or returns an error.
         // A successful writer barrier alone cannot confirm that lifecycle's memory view.

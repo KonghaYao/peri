@@ -245,6 +245,10 @@ impl SessionResources for MockSessionResources {
                 SessionResourceErrorKind::ReadOnlyStore,
             ));
         }
+        let gate = self.append_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.wait().await;
+        }
         self.injection.lock().unwrap().append_calls += 1;
         for payload in payloads {
             self.with_region(id, |region| region.payloads.push(payload.clone()));

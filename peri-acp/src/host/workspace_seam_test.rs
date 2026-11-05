@@ -229,7 +229,7 @@ impl peri_acp_types::ports::McpPoolPort for WorkflowSetupPool {
     }
 
     fn snapshot(&self) -> serde_json::Value {
-        serde_json::json!({"initPhase": self.phase})
+        serde_json::json!({"systemPhase": self.phase})
     }
 
     async fn shutdown(&self) -> peri_acp_types::ports::McpPoolShutdownReport {
@@ -250,7 +250,7 @@ async fn workflow_consumer_reports_setup_failures_without_binding_consumer() {
             .unwrap();
     for (phase, present, expected) in [
         ("unknown", false, "unknown MCP initialization state"),
-        ("ready", true, "runtime slot is not bound"),
+        ("settled", true, "runtime slot is not bound"),
         ("pending", false, "timed out"),
     ] {
         Arc::get_mut(&mut environment).unwrap().cfg.mcp_pool =
@@ -261,9 +261,9 @@ async fn workflow_consumer_reports_setup_failures_without_binding_consumer() {
             .unwrap_err();
         assert!(error.contains(expected), "{error}");
     }
-    // 初始化失败是终态；缺少 workflow 实例时只跳过接线，不影响会话可用性。
+    // System 收口后仍无 workflow 实例：只跳过接线，不影响会话可用性。
     Arc::get_mut(&mut environment).unwrap().cfg.mcp_pool = Some(Arc::new(WorkflowSetupPool {
-        phase: "failed",
+        phase: "settled",
         present: false,
     }));
     assert!(!environment
@@ -314,4 +314,60 @@ async fn session_task_manager_is_local_to_the_acp_session() {
         .task_manager;
     assert!(Arc::ptr_eq(stored, &manager));
     assert!(environment.shutdown().await);
+}
+
+/// 启动期技能读取只等 System 依赖收口：普通 MCP 仍在 initializing 时，
+/// 读取必须立即返回，而不是睡满 10s 上限。
+struct SkillCatalogOnlySystemPool {
+    system_phase: &'static str,
+}
+
+#[async_trait::async_trait]
+impl peri_acp_types::ports::McpPoolPort for SkillCatalogOnlySystemPool {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn snapshot(&self) -> serde_json::Value {
+        serde_json::json!({
+            "initPhase": "initializing",
+            "systemPhase": self.system_phase,
+        })
+    }
+
+    async fn read_skills_catalog(
+        &self,
+        _session_id: &str,
+    ) -> Result<Vec<peri_acp_types::skills::SkillMetadata>, String> {
+        Ok(Vec::new())
+    }
+
+    async fn shutdown(&self) -> peri_acp_types::ports::McpPoolShutdownReport {
+        peri_acp_types::ports::McpPoolShutdownReport::Complete {
+            settled_services: 0,
+            failed_services: 0,
+        }
+    }
+}
+
+#[tokio::test]
+async fn skill_catalog_waits_for_system_dependencies_only() {
+    let fixture = seam_fixture().await;
+    let mut environment =
+        SessionEnvironment::assemble(&fixture.cfg, &fixture.cwd, "skill-catalog-system-only")
+            .await
+            .unwrap()
+            .unwrap();
+    Arc::get_mut(&mut environment).unwrap().cfg.mcp_pool =
+        Some(Arc::new(SkillCatalogOnlySystemPool {
+            system_phase: "settled",
+        }));
+
+    let started = std::time::Instant::now();
+    let catalog = environment.read_skill_catalog().await.unwrap();
+    assert!(catalog.is_empty());
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "普通 MCP 未完成不得拖住技能读取"
+    );
 }

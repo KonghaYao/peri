@@ -29,7 +29,7 @@ mod cli_workflow;
 use cli_args::{argv_requests_settings_stdin, build_runtime};
 use peri_acp::host::stdio::StdioInput;
 use peri_acp_types::session_resources::AccessMode;
-use peri_acp_types::session_store::SessionStoreDeployment;
+use peri_acp_types::session_store::{SessionStoreDeployment, SessionStoreLocator};
 use peri_tui::kit::panic::init_panic_notify;
 
 // ─── CLI 定义 ──────────────────────────────────────────────────────────────
@@ -275,37 +275,8 @@ enum PluginAction {
         /// 搜索关键词
         query: String,
     },
-    /// 管理 hook 执行来源信任（项目/local settings、插件来源 hooks 默认不执行）
-    Trust {
-        #[command(subcommand)]
-        action: TrustAction,
-    },
     /// 清理 7 天未使用的孤儿插件文件
     Cleanup,
-}
-
-#[derive(Subcommand)]
-enum TrustAction {
-    /// 显式授权当前 workspace 的来源 hooks（settings 或插件来源，二选一）
-    Grant {
-        /// 来源范围：project / local（`--plugin` 时忽略）
-        #[arg(long, default_value = "project")]
-        scope: String,
-        /// 插件来源（安装记录 id 或插件名；身份的 origin/scope/projectPath 取自安装记录）
-        #[arg(long)]
-        plugin: Option<String>,
-    },
-    /// 撤销来源 hooks 的授权
-    Revoke {
-        /// 来源范围：project / local（`--plugin` 时忽略）
-        #[arg(long, default_value = "project")]
-        scope: String,
-        /// 插件来源（安装记录 id 或插件名）
-        #[arg(long)]
-        plugin: Option<String>,
-    },
-    /// 查看当前 workspace 的授权状态（含插件来源）
-    Status,
 }
 
 #[derive(Subcommand)]
@@ -566,6 +537,31 @@ fn session_store_deployment(
     Ok(deployment.with_access(access))
 }
 
+/// 本机会话库的绝对路径；远程或待解析 locator 不猜路径。
+fn local_session_db_path(deployment: &SessionStoreDeployment) -> Option<PathBuf> {
+    match deployment.locator() {
+        SessionStoreLocator::Default => {
+            dirs::home_dir().map(|home| home.join(".peri").join("threads").join("threads.db"))
+        }
+        SessionStoreLocator::LocalPath(path) if path.is_absolute() => Some(path.clone()),
+        SessionStoreLocator::LocalPath(path) => {
+            std::env::current_dir().ok().map(|cwd| cwd.join(path))
+        }
+        SessionStoreLocator::Locator(_) => None,
+    }
+}
+
+/// 在启动 TUI / print / ACP 子进程之前导出本机会话库路径，供 hooks 与插件 MCP 继承。
+///
+/// 以本次入口解析出的本机库为准（覆盖进程内已有同名变量）；远程/待解析 locator
+/// 没有确定的本地路径，不设置。
+fn export_session_db_path(deployment: &SessionStoreDeployment) {
+    if let Some(path) = local_session_db_path(deployment) {
+        // SAFETY: 设置点位于 main 启动路径，尚未创建并发读取环境的线程或子进程。
+        unsafe { std::env::set_var("PERI_DB_PATH", path) }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum TopLevelOptionShape {
     Flag,
@@ -794,6 +790,9 @@ fn main() -> Result<()> {
             .exit(),
     };
 
+    // hooks 与插件 MCP 以子进程方式读取会话库：导出本次入口实际解析出的本机路径。
+    export_session_db_path(&session_store);
+
     // 以 clap 解析结果为准（幂等；prescan 与 clap 同源 argv，二者一致）
     peri_tui::config::set_global_config_path(if settings_stdin {
         None
@@ -925,15 +924,6 @@ fn main() -> Result<()> {
                     }
                     PluginAction::Info { plugin } => cli_plugin::run_plugin_info(&plugin),
                     PluginAction::Search { query } => cli_plugin::run_plugin_search(&query),
-                    PluginAction::Trust { action } => match action {
-                        TrustAction::Grant { scope, plugin } => {
-                            cli_plugin::run_plugin_trust_grant(&scope, plugin.as_deref())
-                        }
-                        TrustAction::Revoke { scope, plugin } => {
-                            cli_plugin::run_plugin_trust_revoke(&scope, plugin.as_deref())
-                        }
-                        TrustAction::Status => cli_plugin::run_plugin_trust_status(),
-                    },
                     PluginAction::Cleanup => {
                         let claude_dir = dirs::home_dir()
                             .unwrap_or_else(|| std::path::PathBuf::from("."))

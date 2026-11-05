@@ -6,6 +6,7 @@ use super::*;
 use crate::i18n;
 use crate::kit::acp_types::PendingInteraction;
 use crate::kit::atoms::ASK_USER_PENDING;
+use crate::kit::program_status::{self, BlockedKind, ProgramStatus};
 use crate::kit::tui_render_unit::{InteractionKind, TuiAskUserBlock, TuiRenderUnit};
 use fluent_bundle::FluentValue;
 use peri_acp_types::event_data::{AskUser, HitlPending};
@@ -19,6 +20,7 @@ pub(crate) fn handle_hitl_pending(
     *crate::kit::atoms::HITL_PENDING.state().write() = Some(pending.clone());
     state.popup_kind = Some(crate::kit::atoms::PopupKind::Hitl);
     state.variant = 2;
+    program_status::publish(ProgramStatus::Blocked(BlockedKind::Permission));
     // [Slice 4 §6.8] 双轨：inline transcript block（可见 + 可聚焦 + 结果回写）
     // 与 HITL 弹窗（模态操作层）并存。block 按事件到达位置 push 到 committed
     // ——不进 CurrentTurn 缓存（sync_cache 段对齐不可破坏）。
@@ -42,6 +44,7 @@ pub(crate) fn handle_ask_user(state: &mut BridgeState, pending: &PendingInteract
     *ASK_USER_PENDING.state().write() = Some(pending.clone());
     crate::kit::panel_registry::open_panel(crate::app::panel_types::PanelKind::AskUser);
     state.variant = 2;
+    program_status::publish(ProgramStatus::Blocked(BlockedKind::Question));
     // [Slice 4 §6.8] 双轨：inline transcript block 与 AskUser 面板（模态操作层）
     // 并存；block push 到 committed（时序即事件到达位置）。
     let block = build_ask_user_block(pending);
@@ -155,6 +158,13 @@ pub(crate) fn handle_interaction_terminal(
     }
     state.publish_barrier();
     crate::kit::acp_events::render::push_acp_state(state);
+    // 用户已处理交互：agent 仍在跑就回到 working，否则回到 idle。
+    let status = if state.phase == crate::kit::acp_events::SessionPhase::PromptRunning {
+        ProgramStatus::Working
+    } else {
+        ProgramStatus::Idle
+    };
+    program_status::publish(status);
 }
 
 /// 构造 Permission（HITL）interaction block（§6.8）：

@@ -128,9 +128,8 @@ function isTurnExpanded(
   collapsed: ReadonlySet<string>,
 ): boolean {
   if (collapsed.has(turn.turnId)) return false;
-  if (expanded.has(turn.turnId)) return true;
-  // 失败/取消的 work 默认可见，只在用户显式折叠后收起。
-  return turn.status !== 'completed';
+  // 已结算 turn 默认折叠；失败/取消也收起，错误摘要保留在折叠标签上。
+  return expanded.has(turn.turnId);
 }
 
 function toolWorkItem(
@@ -220,13 +219,8 @@ export function deriveTimeline(
     const turnFailed = turnToolFailure ||
       foldTurn?.status === 'error' || foldTurn?.status === 'failed';
     const turnCancelled = facts?.cancelled === true || foldTurn?.status === 'cancelled';
-    const terminalFailure = foldTurn !== undefined &&
-      (foldTurn.status === 'error' || foldTurn.status === 'failed' || foldTurn.status === 'cancelled');
-    let foldExpanded = false;
     if (turnId && foldTurn) {
-      // 有失败证据时 fold 只做静态摘要：既不会隐藏失败工具，也不提供无效的折叠开关。
-      const expanded = turnFailed ? true : isTurnExpanded(foldTurn, expandedTurnIds, collapsedTurnIds);
-      foldExpanded = expanded;
+      const expanded = isTurnExpanded(foldTurn, expandedTurnIds, collapsedTurnIds);
       if (!emittedFolds.has(turnId)) {
         emittedFolds.add(turnId);
         const counts = turnWorkCounts.get(turnId);
@@ -241,19 +235,18 @@ export function deriveTimeline(
           startedAt: foldTurn.startedAt,
           completedAt: foldTurn.completedAt,
           expanded,
-          ...(turnFailed ? { static: true } : {}),
         });
       }
-      // 折叠只隐藏干净的已完成 work；失败工具始终保留，不因 fold 丢失错误证据。
-      if (!expanded && !hasFailure && !turnToolFailure) {
+      // 失败/取消也默认收起；错误摘要保留在 fold 标签，用户手动展开。
+      if (!expanded) {
         workItems = [];
         workActive = false;
         workTurnId = null;
         return;
       }
     }
-    // 干净 turn 展开后由 fold 作为唯一折叠层；失败/取消保留组头与失败计数。
-    const bare = foldTurn !== undefined && foldExpanded && !turnFailed && !terminalFailure;
+    // 展开后直接展示工作项，不再包一层工作组标题。
+    const bare = foldTurn !== undefined;
     rows.push({
       kind: 'work',
       id: `work:${workItems[0]!.id}`,
@@ -261,10 +254,7 @@ export function deriveTimeline(
       items: workItems,
       active: workActive || workItems.some((item) => isRunning(item.status)),
       failed: hasFailure,
-      // 失败/取消 turn 的 work 与失败工具必须在首屏可见，不能只靠 fold 摘要。
-      defaultExpanded: workActive || hasFailure || terminalFailure ||
-        workItems.some((item) => isRunning(item.status)),
-      forceExpanded: hasFailure || terminalFailure,
+      defaultExpanded: workActive || workItems.some((item) => isRunning(item.status)),
       ...(bare ? { bare: true } : {}),
     });
     workItems = [];

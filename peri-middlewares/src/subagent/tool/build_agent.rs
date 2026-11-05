@@ -2,15 +2,9 @@
 //! skill_names + max_iterations），调用方组装 [`SubagentSpawnConfig`](peri_agent::session::subagent::SubagentSpawnConfig) 后经
 //! [`SessionFactory::spawn_subagent`](peri_agent::session::subagent::SessionFactory::spawn_subagent)（Agent 层统一入口）创建与运行。
 //!
-//! **P5.1 重构**：旧版本通过 `SubAgentBuilder.build()` 构造 v1 Agent，
-//! 现在直接产出 v2 字段。L3：建 thread / cancel token / 事件 / 运行收尾
-//! 全部移入 [`SessionFactory::spawn_subagent`](peri_agent::session::subagent::SessionFactory::spawn_subagent)，本模块只保留 agent_def 解析与
-//! 工具过滤等 middlewares 能力。
+//! 本模块负责 agent_def 解析与工具过滤；thread、取消、事件与运行收尾由 Agent 层统一入口负责。
 
-use peri_agent::{
-    session::subagent::{SubagentCancelPolicy, SubagentLlmSource},
-    tools::BaseTool,
-};
+use peri_agent::{session::subagent::SubagentLlmSource, tools::BaseTool};
 
 use peri_mcp_core::agent_definition::ClaudeAgent;
 
@@ -44,15 +38,11 @@ impl super::SubAgentTool {
     /// - `Some("inherit")` → 显式继承父模型（覆盖 frontmatter）
     /// - `Some(档位)` → 校验通过后覆盖 frontmatter；未知档位直接报错，不静默回退
     ///   （resume 路径恒传 `None`：恢复保持原定义，不允许调用参数覆盖）
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn build_agent_from_def(
         &self,
         agent_def: &ClaudeAgent,
         agent_name: &str,
         cwd: &str,
-        _cancel_policy: SubagentCancelPolicy,
-        _skip_events: bool,
-        _setup_event_handler: bool,
         model_override: Option<&str>,
     ) -> Result<AgentBuildResult, Box<dyn std::error::Error + Send + Sync>> {
         // 1. Filter tools

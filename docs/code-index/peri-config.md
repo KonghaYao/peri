@@ -32,16 +32,12 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
 | MCP 基础配置 | `mcp.rs`：`parse_global`、`parse_project`、`resolve_from_files`、`validate_config`、`server_config_hash` | global/plugin/project 合并、插件手动去重、typed 准入与 cache 关闭优先 |
 | Builtin 环境策略 | `mcp.rs`：`builtin_enabled` | `PERI_MCP_BUILTIN` 解释规则归 core；builtin adapter 只采集 env，不复制规则 |
 | 快照中的插件/普通/bare 投影 | `system.rs`：`mcp_with_plugins`、`bare_mcp`、`cache_policy`、`builtin_mcp_enabled` | 从冻结原始输入派生；插件发现和执行展开留在 middleware |
-| Langfuse 基础键 | `observability.rs`：`LangfuseConfig`、`resolve`、`ENVIRONMENT_KEYS`、`LangfuseCompression`、`ConfigValueSource` | 旧键保持 clamp/忽略非法值语义，`batch_max_event_bytes` 默认 4 MiB；Debug 脱敏；`ENVIRONMENT_KEYS` 由本模块与 `observability_spool` 的常量拼入，不在别处维护第二份清单 |
+| Langfuse 基础键 | `observability.rs`：`LangfuseConfig`、`resolve`、`ENVIRONMENT_KEYS`、`LangfuseCompression`、`ConfigValueSource` | 旧键保持 clamp/忽略非法值语义，`batch_max_event_bytes` 默认 4 MiB；Debug 保留原始配置；`ENVIRONMENT_KEYS` 由本模块与 `observability_spool` 的常量拼入，不在别处维护第二份清单 |
 | Langfuse spool/编码/预算键 | `observability_spool.rs`：`SPOOL_ENABLED`…`SHUTDOWN_GRACE_SECS`、逐键解析与 `resolve` | spool 键逐键选胜出来源（env > `langfuse.*` settings > default），布尔/压缩/非零十进制规则见[环境变量表](../standards/environment-variables.md)；胜出值非法返回 `LangfuseConfigError`，不回退默认；跨键约束（阈值、块大小与预算）归客户端构造期校验 |
 | Langfuse 配置错误 | `observability.rs`：`LangfuseConfigError::Invalid { key, origin, reason }`；`assembly.rs::resolve` | 错误只带键名、来源与原因，不带原值；按来源映射为 `ConfigurationError::InvalidInput`（settings→GlobalFile，env→Environment），拒绝整份快照的发布 |
 | TUI | `ui.rs`：`TuiConfig::{from_extra,sync_to_extra}` | UI 默认值、typed 字段和 extra 保存规则；视图状态留在 TUI |
 
 ## 更新接纳边界
-
-- Hook trust 的 settings 摘要在 `trust.rs::settings_binding` 覆盖来源存在状态，
-  缺失与空文件不共享授权；摘要格式变化使旧 settings 授权失效，须显式重新授权。
-  回归入口为 `trust_test.rs::missing_settings_file_has_no_digest_collision_with_empty_file`。
 
 - settings 更新保留目标原文 nested `config.mcpServers` / `config.mcpCache`，
   only-provider 请求不能删除；workspace 不从 effective global 导入这些键，
@@ -74,7 +70,7 @@ fallback。纯 resolver 只使用输入值；system 管发布和更新。模块�
 ## 验证入口与限制
 
 - `system_test.rs`：scope/revision、隔离、冻结、失败不 publish、stale revision、
-  外部环境/文件变更、CAS/I/O 失败、兄弟域保留、global 失效与脱敏解释。
+  外部环境/文件变更、CAS/I/O 失败、兄弟域保留、global 失效，以及来源解释省略密钥而 Debug 保留原始输入。
 - `settings_test.rs`：固定布局、同文件身份、差异保存、显式 reload、lenient
   错误禁止写错层、unknown 顶层字段保留。
 - `app_test.rs`、`mcp_test.rs`、`observability_test.rs`、`ui_test.rs`、`resources_test.rs`：领域规则。

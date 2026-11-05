@@ -3,17 +3,14 @@
 //!
 //! 数据侧（实例 / 原始工具名 / effective name 字面量 / 逐工具 `direct` /
 //! `prompt_declaration` / 保留名表 / 归一表）在 `peri_acp_types::builtin_mcp`。
-//! 本模块不得复制 `sanitize_name_component` 的名字规则：`effective_tool_name` 调用
-//! `tool_bridge` 的同一规则与模板（规则一份实现、字面量一份声明，两者由
-//! `mcp::builtin::tests` 的字面量测试对齐）。
+//! 名字规则由 `tool_bridge` 维护；`mcp::builtin::tests` 将实际规则与声明表的
+//! effective name 字面量逐项对齐。
 //!
 //! 配置注入统一由 `mcp/config.rs` 完成：普通 loader 的 step 6.5 与 bare 的 workspace 子集；注入策略是**显式参数**，
 //! 本模块（含 `apply_builtin_overlay`）**禁止**读 env——env 只在
 //! [`builtin_injection_policy_from_env`] 读一次，由配置加载入口调用。
 //!
 //! Builtin handler 行为由 `mcp-packages/*` 提供，本模块保留策略和宿主生命周期。
-
-#![allow(dead_code)]
 
 // context：宿主装配注入的实例上下文载体（`BuiltinInstanceContext` / 实例输入 /
 // 一次性注入的 typed 错误，owner H-02，W2）。它是「实例构造所需状态」的**唯一**载体：
@@ -46,15 +43,12 @@ pub(crate) fn default_subscriptions_for(
 }
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::LazyLock;
 
 use peri_acp_types::builtin_mcp::{
     find, is_reserved_instance_name, BuiltinMcpInstance, BUILTIN_MCP_INSTANCES,
 };
 use peri_acp_types::plugin::{ConfigSource, McpServerConfig};
 use thiserror::Error;
-
-use crate::mcp::tool_bridge::effective_mcp_tool_name;
 
 /// `PERI_MCP_BUILTIN` 环境变量名（紧急闸门，A2：显式运维开关，不是静默降级）。
 pub(crate) const BUILTIN_INJECTION_ENV: &str = peri_config::mcp::MCP_BUILTIN_ENV;
@@ -107,11 +101,6 @@ impl BuiltinInjectionPolicy {
         }
     }
 
-    /// 已启用的实例名（注册表顺序）。
-    pub(crate) fn enabled_instances(&self) -> &[&'static str] {
-        &self.enabled
-    }
-
     /// 该实例是否在策略内（`false` ⇒ overlay 不注入、不填 `source`）。
     pub(crate) fn enables(&self, instance: &str) -> bool {
         self.enabled.contains(&instance)
@@ -143,47 +132,6 @@ pub(crate) enum BuiltinOverlayError {
     UntrustedWorkspaceSource { name: String },
 }
 
-/// effective name 计算：`mcp__{sanitize(instance)}__{sanitize(original_tool)}`。
-///
-/// 名字规则与模板都来自 `tool_bridge`（**不得**在本模块复制）；只有已实现实例
-/// 且工具在声明表内时可计算，其余返回 `None`。
-pub(crate) fn effective_tool_name(instance: &str, original_tool: &str) -> Option<String> {
-    let instance = find(instance)?;
-    let tool = instance
-        .tools
-        .iter()
-        .find(|tool| tool.original_name == original_tool)?;
-    Some(if tool.direct {
-        tool.original_name.to_string()
-    } else {
-        effective_mcp_tool_name(instance.name, original_tool)
-    })
-}
-
-/// 实例全部工具的 effective name 集合（关闭集与断言共用）。
-pub(crate) fn effective_tool_names(instance: &str) -> BTreeSet<String> {
-    find(instance)
-        .map(|instance| {
-            instance
-                .tools
-                .iter()
-                .filter_map(|tool| effective_tool_name(instance.name, tool.original_name))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-/// 实例声明为 direct 的**原始工具名**（IF-D13 / IF-D9 的一致性的唯一来源）。
-///
-/// 未实现 / 未知名返回 `None`；返回值与注册表逐工具 `direct` 派生一致
-/// （派生，不是第二份声明）。
-pub(crate) fn declared_direct_tools(instance: &str) -> Option<&'static [&'static str]> {
-    let instance = find(instance)?;
-    direct_tools_table()
-        .get(instance.name)
-        .map(|names| &**names)
-}
-
 /// `(server_name, original_tool)` 是否为已实现实例声明为 direct 的工具。
 pub(crate) fn is_declared_direct(server_name: &str, original_tool: &str) -> bool {
     find(server_name).is_some_and(|instance| {
@@ -208,21 +156,6 @@ pub(crate) fn is_declared_model_hidden(server_name: &str, original_tool: &str) -
             .iter()
             .any(|tool| !tool.model_visible && tool.original_name == original_tool)
     })
-}
-
-/// builtin 工具的提示词层声明模板（A9）。
-///
-/// 只暴露模板本身；渲染（`{{name}}` → effective name）仍由
-/// `tool_search/declaration.rs` 的既有规则负责。
-pub(crate) fn builtin_prompt_declaration(
-    server_name: &str,
-    original_tool: &str,
-) -> Option<&'static str> {
-    find(server_name)?
-        .tools
-        .iter()
-        .find(|tool| tool.original_name == original_tool)?
-        .prompt_declaration
 }
 
 /// IF-D10 的唯一判定入口：`policy_key ∈ disabled_middlewares` 的实例进入关闭集。
@@ -253,6 +186,12 @@ pub(crate) fn is_closed_source(
         && is_closed(server_name, closed)
 }
 
+/// 该来源是否为宿主系统资源面（instructions / meta / agents）的信任来源。
+///
+/// 这是 **host-assigned 身份**判定，不是 MCP 能力过滤：技能发现与冻结快照
+/// 按 `skills_capable` 能力聚合（`McpClientPool::read_skills_catalog`），
+/// 不要求来源是 workspace；本函数只决定哪些连接可以承载 `peri-instruction://`
+/// / `peri-meta://` 等宿主系统 URI。
 pub(crate) fn is_workspace_source(source: Option<&ConfigSource>) -> bool {
     matches!(source, Some(ConfigSource::Builtin { instance }) if instance == "workspace")
         || matches!(source, Some(ConfigSource::WorkspaceRemote))
@@ -449,28 +388,6 @@ fn direct_tool_name_strings(instance: &BuiltinMcpInstance) -> Vec<String> {
         .filter(|tool| tool.direct)
         .map(|tool| tool.original_name.to_string())
         .collect()
-}
-
-/// 逐工具 `direct` 派生出的原始名切片（`declared_direct_tools` 的 `'static` 形态）。
-///
-/// 派生而非第二份声明：只遍历注册表。表是进程级静态（构建一次），切片由静态表持有，
-/// 因此可安全返回 `'static`。
-fn direct_tools_table() -> &'static HashMap<&'static str, Box<[&'static str]>> {
-    static TABLE: LazyLock<HashMap<&'static str, Box<[&'static str]>>> = LazyLock::new(|| {
-        BUILTIN_MCP_INSTANCES
-            .iter()
-            .map(|instance| {
-                let names: Box<[&'static str]> = instance
-                    .tools
-                    .iter()
-                    .filter(|tool| tool.direct)
-                    .map(|tool| tool.original_name)
-                    .collect();
-                (instance.name, names)
-            })
-            .collect()
-    });
-    &TABLE
 }
 
 #[cfg(test)]

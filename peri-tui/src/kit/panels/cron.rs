@@ -62,7 +62,7 @@ pub fn CronPanel(mut hooks: Hooks) -> impl Into<AnyElement<'static>> {
     // 待删任务的稳定身份（job.id）；None = 不在确认模式。
     // 进入确认时固定 id，确认执行按 id 定位——确认期间列表刷新/重排不会把删除落到别的任务。
     let confirm_delete = hooks.use_state(|| Option::<String>::None);
-    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格 + 节流
+    // 外部滚动状态——面板滚轮仲裁（panel_scroll.rs）驱动，统一 3 行/格
     let sv = hooks.use_state(ScrollViewState::default);
 
     // S6c: 订阅 CRON_JOBS atom——后台 service_snapshot 2s 派生一次

@@ -46,13 +46,15 @@ mod summary;
 /// 摘要恢复提示：从已有正文末尾续写，只输出缺失部分。
 const SUMMARY_RECOVERY_PROMPT: &str = "Your summary was cut off. Continue exactly from the end of your previous text, \
 including any unfinished word or tag. Output only the missing remainder; do not restart, repeat earlier sections, or add \
-analysis. Prioritize the essential facts that are still missing — the active request and its constraints, work status, \
+analysis. Prioritize the essential facts that are still missing — the active request and its constraints, recovery \
+resources (skills whose bodies were archived and must be reloaded, plus any contract-vs-actual deviation), work status, \
 and the next step — instead of only closing tags. Do not call tools.";
 
 /// 最后一次生成的提示：补齐必要内容并在预算内简短收尾。
 const SUMMARY_FINAL_PROMPT: &str = "Your summary is still incomplete. Continue exactly from the end of your previous text \
 and output only the missing remainder; do not restart or repeat earlier sections. This is your final response: finish \
-the remaining essential facts — the active request and constraints, work status, and the next step — concisely within \
+the remaining essential facts — the active request and constraints, recovery resources (skills whose bodies were \
+archived and must be reloaded, plus any contract-vs-actual deviation), work status, and the next step — concisely within \
 the output budget and close </summary>. There will be no further continuation. Do not call tools.";
 
 /// 从未取得正文时的重新生成提示（替换原摘要指令，目标已减半）。

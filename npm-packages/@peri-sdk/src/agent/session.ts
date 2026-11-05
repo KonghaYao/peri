@@ -3,6 +3,7 @@ import { EventQueue } from "../transport/event-queue";
 import { raceAbort, throwIfAborted } from "../util/abort";
 import { initializeAcpClient } from "./acp-handshake";
 import { closeDrainBudget, closeUntilSettled, type CloseOptions } from "./session-close";
+import { queueGenerationOf, rejectedQueueSnapshot, SessionQueueStaleError } from "./session-queue";
 
 /**
  * 单个 Session 的纯 ACP 客户端。
@@ -341,15 +342,21 @@ export class Session {
             this.deferredLive.push(event);
             return;
         }
-        if (event.method === "peri/agent_event") this.acceptDeliveryEvent(event);
+        if (event.method === "peri/agent_event") this.acceptAgentEvent(event);
         this.options.onNotification?.(event);
     }
 
-    private acceptDeliveryEvent(event: JsonRpcNotification): void {
+    private acceptAgentEvent(event: JsonRpcNotification): void {
         if (event.method !== "peri/agent_event") return;
         const params = record(event.params);
         const decoded = decodeAgentEvent(params?.event_json);
-        if (!decoded || decoded.type !== "user_input_delivered") return;
+        if (!decoded) return;
+        if (decoded.type === "user_input_queue_changed") {
+            // 队列换代没有单独 RPC；通知里的快照是 generation 的权威来源。
+            this.adoptQueueGeneration(decoded.value.snapshot);
+            return;
+        }
+        if (decoded.type !== "user_input_delivered") return;
         const inputId = nonEmpty(decoded.value.input_id);
         if (!inputId) return;
         const generation = nonEmpty(decoded.value.generation);
@@ -435,50 +442,125 @@ export class Session {
         const state = receipt.results?.find((item) => item.inputId === inputId)?.state;
         if (!state || state === "unknown" || state === "withdrawn")
             throw new Error(`Input not accepted: ${state ?? "missing"}`);
-        if (receipt.snapshot !== undefined) this.options.onQueueSnapshot?.(receipt.snapshot);
         return state;
+    }
+
+    /** 服务端队列快照是 generation 的权威来源；回执与拒绝回执都要同步。 */
+    private adoptQueueGeneration(snapshot: unknown): string | null {
+        const generation = queueGenerationOf(snapshot);
+        if (!generation) return null;
+        this.queueGeneration = generation;
+        return generation;
+    }
+
+    private observeQueueSnapshot(snapshot: unknown): string | null {
+        const generation = this.adoptQueueGeneration(snapshot);
+        if (generation) this.options.onQueueSnapshot?.(snapshot);
+        return generation;
+    }
+
+    private observeQueueReceipt(receipt: QueueReceipt): void {
+        if (receipt.snapshot !== undefined) this.observeQueueSnapshot(receipt.snapshot);
+    }
+
+    private requireQueueGeneration(): string {
+        if (!this.queueGeneration) throw new Error("Session input queue generation is unavailable");
+        return this.queueGeneration;
+    }
+
+    /**
+     * 识别换代拒绝：服务端 snapshot 的 generation 与请求值不同才是 StaleSession。
+     * 同 generation 的 `-32602`（队列已关闭 / 容量满 / 身份冲突）保持原错误。
+     */
+    private queueFailure(error: unknown, requestedGeneration: string): unknown {
+        const snapshot = rejectedQueueSnapshot(error);
+        if (snapshot === null) return error;
+        const generation = this.observeQueueSnapshot(snapshot);
+        if (!generation || generation === requestedGeneration) return error;
+        return new SessionQueueStaleError(
+            generation,
+            snapshot,
+            `Input queue moved to a new generation; recreate the runtime before sending again: ${errorMessage(error)}`,
+            { cause: error },
+        );
+    }
+
+    private async inputRequest<T>(
+        method: string,
+        generation: string,
+        params: Record<string, unknown>,
+    ): Promise<T> {
+        try {
+            return await this.activeTransport().request<T>(method, params);
+        } catch (error) {
+            throw this.queueFailure(error, generation);
+        }
     }
 
     /** 入队即由 Rust mailbox 决定调度；SDK 不另行申请执行准入。 */
     async enqueue(inputId: string, text: string): Promise<string> {
-        const receipt = await this.activeTransport().request<QueueReceipt>("session/input/enqueue", {
+        const generation = this.requireQueueGeneration();
+        const receipt = await this.inputRequest<QueueReceipt>("session/input/enqueue", generation, {
             sessionId: this.id,
-            generation: this.queueGeneration,
+            generation,
             commandId: `${inputId}:enqueue`,
             inputId,
             content: text,
             originalDraft: text,
         });
+        this.observeQueueReceipt(receipt);
         return this.queueReceiptState(receipt, inputId);
     }
 
     async dispatch(inputId: string): Promise<void> {
-        const receipt = await this.activeTransport().request<QueueReceipt>("session/input/dispatch", {
+        const generation = this.requireQueueGeneration();
+        const receipt = await this.inputRequest<QueueReceipt>("session/input/dispatch", generation, {
             sessionId: this.id,
-            generation: this.queueGeneration,
+            generation,
             commandId: `${inputId}:dispatch`,
             inputIds: [inputId],
         });
+        this.observeQueueReceipt(receipt);
         this.queueReceiptState(receipt, inputId);
     }
 
     /** 撤回队列中尚未派发的输入；`withdrawn` 是本次撤回成功的结果状态。 */
     async takeBack(inputId: string): Promise<void> {
-        const receipt = await this.activeTransport().request<QueueReceipt>("session/input/takeback", {
+        const generation = this.requireQueueGeneration();
+        const receipt = await this.inputRequest<QueueReceipt>("session/input/takeback", generation, {
             sessionId: this.id,
-            generation: this.queueGeneration,
+            generation,
             commandId: `${inputId}:takeback`,
             inputId,
         });
+        this.observeQueueReceipt(receipt);
         const state = receipt.results?.find((item) => item.inputId === inputId)?.state;
-        if (receipt.snapshot !== undefined) this.options.onQueueSnapshot?.(receipt.snapshot);
         if (!state || state === "unknown")
             throw new Error(`Input not taken back: ${state ?? "missing"}`);
+    }
+
+    /** 重新读取队列快照并绑定其 generation；不修复已失效的持久化 writer。 */
+    async refreshInputQueue(): Promise<unknown> {
+        const snapshot = await this.activeTransport().request<QueueSnapshot>("session/input/snapshot", {
+            sessionId: this.id,
+        });
+        if (!this.observeQueueSnapshot(snapshot))
+            throw new Error("Peri returned no input queue generation");
+        return snapshot;
     }
 
     /** 当前 ACP 的取消是一次会话级通知；未完成 turn 的收敛由 Peri 决定。 */
     async cancel(): Promise<void> {
         await this.activeTransport().notify("session/cancel", { sessionId: this.id });
+    }
+
+    /** 写入会话配置；响应中的 configOptions 由 ACP 通知投影接管，这里只确认请求成功。 */
+    async setConfigOption(configId: string, value: string): Promise<void> {
+        await this.activeTransport().request("session/set_config_option", {
+            sessionId: this.id,
+            configId,
+            value,
+        });
     }
 
     /** 可选标题重命名；失败保留 `createdSessionId` 供上层判定创建阶段。 */

@@ -73,7 +73,6 @@ tokio = { workspace = true, features = ["test-util"] }
 [target.'cfg(not(target_os = "emscripten"))'.dependencies]
 peri-mcp-common.workspace = true
 tokio = { workspace = true, features = ["full"] }
-peri-js-runtime = { path = "../peri-js-runtime" }
 peri-process = { path = "../peri-process" }
 peri-mcp-web.workspace = true
 peri-mcp-artifact.workspace = true
