@@ -657,6 +657,13 @@ impl SessionDataPort for SqliteSessionData {
         })
     }
 
+    async fn interrupted_threads(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<Vec<peri_acp_types::recovery::InterruptedThread>> {
+        self.interrupted_threads_impl(id).await
+    }
+
     async fn list_sessions(
         &self,
         query: &ScopedThreadQuery,
@@ -1133,6 +1140,16 @@ impl SessionDataPort for SqliteSessionData {
         message: MqInput,
     ) -> SessionResourceResult<MqEnqueueOutcome> {
         self.finalize_child_terminal_mq(child, status, work_state, target, message)
+            .await
+    }
+
+    async fn settle_terminal_without_result(
+        &self,
+        child: &ThreadId,
+        status: AgentStatus,
+        work_state: WorkState,
+    ) -> SessionResourceResult<TerminalSettlementOutcome> {
+        self.settle_terminal_without_result_rows(child, status, work_state)
             .await
     }
 

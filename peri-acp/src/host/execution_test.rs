@@ -44,6 +44,7 @@ async fn internal_execution_announces_identity_and_matching_terminal() {
         crate::host::PromptOrigin::Continuation {
             mq_steering: true,
             pending_result: false,
+            recovery: false,
         },
         Some(0),
         &harness.sessions,
@@ -86,6 +87,7 @@ async fn failed_execution_assembly_closes_the_announced_identity_once() {
         crate::host::PromptOrigin::Continuation {
             mq_steering: true,
             pending_result: false,
+            recovery: false,
         },
         Some(0),
         &harness.sessions,

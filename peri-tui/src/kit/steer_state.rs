@@ -107,6 +107,26 @@ impl FatalSubmissionReport {
     }
 }
 
+/// 服务端在同一线性化点生成 revision 与内容；同 revision 只接受同一投影重复到达。
+///
+/// 严格更旧的 revision、或同 revision 的不同内容，都可能是乱序旧查询结果，
+/// 覆盖当前投影会丢新消息。
+fn newer_or_identical(previous: &UserInputQueueSnapshot, next: &UserInputQueueSnapshot) -> bool {
+    if next.revision > previous.revision {
+        return true;
+    }
+    next.revision == previous.revision
+        && previous.active_request_id == next.active_request_id
+        && previous.terminal_items == next.terminal_items
+        && previous.items.len() == next.items.len()
+        && previous.items.iter().zip(&next.items).all(|(left, right)| {
+            left.input_id == right.input_id
+                && left.state == right.state
+                && left.content == right.content
+                && left.original_draft == right.original_draft
+        })
+}
+
 impl SessionSteers {
     fn reconcile_direct_submissions(&mut self) {
         let Some(snapshot) = &self.snapshot else {
@@ -248,7 +268,7 @@ impl SteerState {
         }
         match &session.snapshot {
             Some(previous) if previous.generation != snapshot.generation => return false,
-            Some(previous) if previous.revision > snapshot.revision => return false,
+            Some(previous) if !newer_or_identical(previous, &snapshot) => return false,
             None if !establish => return false,
             _ => {}
         }

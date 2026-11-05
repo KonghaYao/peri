@@ -251,6 +251,7 @@ async fn assembly_failure_blocks_old_watermark_and_automatically_processes_new_e
                 kind: BgTaskKind::Agent,
                 mq_steering: true,
                 pending_result: false,
+                recovery: false,
             })
             .unwrap();
     }

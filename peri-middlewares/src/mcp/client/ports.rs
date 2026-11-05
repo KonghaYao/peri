@@ -191,6 +191,14 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
         McpClientPool::bind_session_task_manager(self, session_id, manager);
     }
 
+    async fn watch_workspace_tasks(
+        self: Arc<Self>,
+        session_id: &str,
+        cancel: tokio_util::sync::CancellationToken,
+    ) {
+        McpClientPool::watch_workspace_tasks(self, session_id, cancel).await;
+    }
+
     async fn workspace_live_tasks(&self, owner: &str) -> peri_acp_types::ports::PeripheralTasks {
         McpClientPool::workspace_live_tasks(self, owner).await
     }

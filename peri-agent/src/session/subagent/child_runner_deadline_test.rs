@@ -253,6 +253,17 @@ async fn admitted_act_tool_result_parent_result_is_failure() {
     window.start();
     built.context.async_ctx.child_settlement = Some(window);
     let child_id = child.store().thread_id.clone().unwrap();
+    let terminal_route = child
+        .subagent_host()
+        .and_then(|host| host.child_owner.clone())
+        .and_then(|owner| owner.resources.clone())
+        .map(
+            |store| crate::session::subagent::terminal_settlement::TerminalMqRoute {
+                store,
+                target: child_id.clone(),
+                mailbox: None,
+            },
+        );
     let task_id = crate::session::subagent::run_sync::new_sync_task_id();
     let (delivered_tx, delivered_rx) = tokio::sync::oneshot::channel();
     let delivered_tx = parking_lot::Mutex::new(Some(delivered_tx));
@@ -273,6 +284,7 @@ async fn admitted_act_tool_result_parent_result_is_failure() {
                     Ok(())
                 },
             )),
+            terminal_route,
             move |handoff, _| async move {
                 crate::session::subagent::run_sync::run_sync_subagent(
                     &run_id,
@@ -541,6 +553,17 @@ async fn hook_stop_after_act_hands_off_tool_result_and_parent_fails() {
         )),
     );
     let child_id = child.store().thread_id.clone().unwrap();
+    let terminal_route = child
+        .subagent_host()
+        .and_then(|host| host.child_owner.clone())
+        .and_then(|owner| owner.resources.clone())
+        .map(
+            |store| crate::session::subagent::terminal_settlement::TerminalMqRoute {
+                store,
+                target: child_id.clone(),
+                mailbox: None,
+            },
+        );
     let task_id = crate::session::subagent::run_sync::new_sync_task_id();
     let (delivered_tx, delivered_rx) = tokio::sync::oneshot::channel();
     let delivered_tx = parking_lot::Mutex::new(Some(delivered_tx));
@@ -561,6 +584,7 @@ async fn hook_stop_after_act_hands_off_tool_result_and_parent_fails() {
                     Ok(())
                 },
             )),
+            terminal_route,
             move |handoff, _| async move {
                 crate::session::subagent::run_sync::run_sync_subagent(
                     &run_id,

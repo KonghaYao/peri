@@ -436,6 +436,7 @@ async fn steer_dispatch_cancelled_turn_keeps_activation_and_consumes_input() {
         crate::host::PromptOrigin::Continuation {
             mq_steering: true,
             pending_result: false,
+            recovery: false,
         },
         Some(epoch),
         &harness.sessions,

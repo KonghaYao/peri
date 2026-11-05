@@ -31,7 +31,7 @@ use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, BindingState, ChildSnapshot, CloseSettlement, ForkSnapshot,
     FrozenSnapshotBytes, FrozenState, NewSession, NewSessionDraft, PersistenceRecovery,
     RewindBoundary, RewindCandidate, RewindOutcome, SessionMetaPatch, SessionResourceError,
-    SessionResourceErrorKind, SessionResourceResult, SessionSnapshot,
+    SessionResourceErrorKind, SessionResourceResult, SessionSnapshot, TerminalSettlementOutcome,
 };
 use peri_acp_types::store::{
     deserialize_persisted_payload, serialize_persisted_payload, CompactionChange, InheritedContext,
@@ -67,6 +67,8 @@ mod inherited_facts;
 pub(super) mod inherited_index;
 #[path = "session_data/inherited_page.rs"]
 mod inherited_page;
+#[path = "session_data/interrupted.rs"]
+mod interrupted;
 #[path = "session_data/lifecycle.rs"]
 mod lifecycle;
 #[path = "session_data/mq.rs"]

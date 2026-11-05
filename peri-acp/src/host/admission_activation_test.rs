@@ -64,6 +64,7 @@ async fn user_input_between_continuation_validation_and_commit_revokes_old_turn(
         crate::host::PromptOrigin::Continuation {
             mq_steering: true,
             pending_result: false,
+            recovery: false,
         },
         Some(0),
     );
@@ -127,6 +128,7 @@ async fn revoke_before_commit(closing: bool) {
         crate::host::PromptOrigin::Continuation {
             mq_steering: true,
             pending_result: false,
+            recovery: false,
         },
         Some(0),
     );
@@ -212,6 +214,7 @@ async fn stop_after_atomic_admission_cancels_registered_token_before_model_start
         crate::host::PromptOrigin::Continuation {
             mq_steering: true,
             pending_result: false,
+            recovery: false,
         },
         Some(0),
     );
@@ -288,6 +291,7 @@ async fn user_input_after_atomic_admission_waits_for_the_committed_turn() {
         crate::host::PromptOrigin::Continuation {
             mq_steering: true,
             pending_result: false,
+            recovery: false,
         },
         Some(0),
     );

@@ -13,7 +13,7 @@ use peri_acp_types::session::{
 };
 use peri_acp_types::session_resources::SessionResourceErrorKind;
 use peri_acp_types::store::PersistedPayload;
-use peri_acp_types::thread::ThreadId;
+use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
 
@@ -27,6 +27,7 @@ use crate::sessions::data::SessionDataPort;
 struct Fixture {
     _directory: tempfile::TempDir,
     pool: SqlitePool,
+    transport: Arc<SqliteTransport>,
     data: RemoteSessionData,
 }
 
@@ -101,7 +102,7 @@ async fn fixture() -> Fixture {
         StoreId::mint(),
         store,
         Arc::new(MqFactory {
-            transport,
+            transport: transport.clone(),
             gate: gate.clone(),
         }),
         gate,
@@ -109,6 +110,7 @@ async fn fixture() -> Fixture {
     Fixture {
         _directory: directory,
         pool,
+        transport,
         data,
     }
 }
@@ -133,6 +135,27 @@ fn input(id: MessageId, text: &str) -> MqInput {
         policy: MessagePolicy::ensure_processing(),
         original_draft: Some(text.to_owned()),
     }
+}
+
+fn terminal_input(id: MessageId, text: &str) -> MqInput {
+    MqInput {
+        kind: MessageKind::Defer,
+        source: MessageSource::SubAgentComplete,
+        ..input(id, text)
+    }
+}
+
+/// 读 `(agent_status, work_state)`，用于断言「一条都没写」。
+async fn terminal_facts(fixture: &Fixture, thread: &ThreadId) -> (String, String) {
+    sqlx::query_as("SELECT agent_status, work_state FROM threads WHERE id = ?1")
+        .bind(thread.as_str())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap()
+}
+
+async fn work_state(fixture: &Fixture, thread: &ThreadId) -> WorkState {
+    terminal_facts(fixture, thread).await.1.parse().unwrap()
 }
 
 fn selection(
@@ -659,12 +682,10 @@ async fn remote_normalized_retry_promotes_work_intent() {
     );
 }
 
-/// 提升失败不能被吞掉：入队返回可重试的未决错误，MQ 行留在原地；同一 ID 重试读出
-/// `Existing` 并再次执行提升，最终不存在 `idle + pending`。
+/// #342 回归按单批接纳语义适配：插入与提升同批，提升失败时整批不生效；同一 ID
+/// 重试才真正接纳并提升，不会留下 `idle + pending`。
 #[tokio::test]
 async fn remote_promotion_failure_surfaces_and_same_id_retry_promotes() {
-    use peri_acp_types::thread::WorkState;
-
     let fixture = fixture().await;
     let thread = thread("mq-thread");
     let id = MessageId::new();
@@ -673,37 +694,57 @@ async fn remote_promotion_failure_surfaces_and_same_id_retry_promotes() {
         .set_work_state(&thread, WorkState::Idle)
         .await
         .unwrap();
-    fixture
-        .data
-        .inject_faults(FaultPlan {
-            drop_reply: None,
-            drop_before_send: Some("work_state_promote".to_owned()),
-        })
-        .await;
+    sqlx::query(
+        "CREATE TRIGGER fail_work_promote BEFORE UPDATE ON threads
+         WHEN NEW.work_state = 'working'
+         BEGIN SELECT RAISE(ABORT, 'injected promote failure'); END",
+    )
+    .execute(&fixture.pool)
+    .await
+    .unwrap();
 
     let error = fixture
         .data
         .mq_enqueue(&thread, input(id, "wake"))
         .await
         .expect_err("a failed promotion must not be reported as an accepted enqueue");
-    assert!(error.is_persistence_uncertain(), "{error:?}");
-    assert_eq!(mq_rows(&fixture, &thread).await, 1, "MQ 行已提交，等待重试");
+    // 触发器中止的 SDK 分类随驱动而定：这里只要求「确定未生效」，语义由回滚断言覆盖。
+    assert!(
+        matches!(
+            error.kind(),
+            SessionResourceErrorKind::InvalidInput { .. }
+                | SessionResourceErrorKind::Unavailable { .. }
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        mq_rows(&fixture, &thread).await,
+        0,
+        "插入必须随提升失败一起回滚，等待同一 ID 重试"
+    );
     assert_eq!(
         fixture.data.load_meta(&thread).await.unwrap().work_state,
         WorkState::Idle,
-        "提升失败时仍是 idle + pending"
+        "首次接纳失败时不能留下 idle + pending"
     );
 
+    sqlx::query("DROP TRIGGER fail_work_promote")
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
     let again = fixture
         .data
         .mq_enqueue(&thread, input(id, "wake"))
         .await
         .unwrap();
-    assert_eq!(again.disposition, MqEnqueueDisposition::Existing);
+    assert_eq!(again.disposition, MqEnqueueDisposition::Inserted);
     assert_eq!(
         fixture.data.load_meta(&thread).await.unwrap().work_state,
         WorkState::Working,
-        "同一 ID 重试必须再次执行提升"
+        "同一 ID 重试必须完成提升"
     );
     assert_eq!(mq_rows(&fixture, &thread).await, 1);
 }
+
+#[path = "session_settlement_test.rs"]
+mod settlement_tests;

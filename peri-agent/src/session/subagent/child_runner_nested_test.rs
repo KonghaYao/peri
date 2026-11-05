@@ -250,6 +250,17 @@ async fn nested_a_b_c_reports_incomplete_only_to_direct_parent() {
         crate::messages::BaseMessage::human("C task"),
     ));
     let c_built = fixed_context(&c, "C waiting");
+    let c_terminal_route = c
+        .subagent_host()
+        .and_then(|host| host.child_owner.clone())
+        .and_then(|owner| owner.resources.clone())
+        .map(
+            |store| crate::session::subagent::terminal_settlement::TerminalMqRoute {
+                store,
+                target: c_id.clone(),
+                mailbox: None,
+            },
+        );
     let b_manager = Arc::new(TaskManager::new());
     let b = make_child(b_manager.clone(), false);
     let inbox = crate::session::async_router::AsyncRouter::for_queue(b.queue());
@@ -263,6 +274,7 @@ async fn nested_a_b_c_reports_incomplete_only_to_direct_parent() {
         Some(Arc::new(move |result, kind| {
             inbox.route_bg_result_blocking(result, kind)
         })),
+        c_terminal_route,
         move |handoff, _| async move {
             crate::session::subagent::run_sync::run_sync_subagent(
                 &c_run_id,

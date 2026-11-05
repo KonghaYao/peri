@@ -422,6 +422,9 @@ mod behavior_tests;
 #[path = "recovery_child_test.rs"]
 mod recovery_child;
 
+#[path = "recovery_parent_binding_test.rs"]
+mod parent_binding_tests;
+
 #[path = "recovery_wire_test.rs"]
 mod wire_tests;
 

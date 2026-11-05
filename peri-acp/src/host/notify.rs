@@ -133,6 +133,7 @@ pub(crate) async fn handle_notification(
                         kind: BgTaskKind::Agent,
                         mq_steering: false,
                         pending_result: false,
+                        recovery: false,
                     });
                 }
             }

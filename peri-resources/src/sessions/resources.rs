@@ -1,6 +1,8 @@
 //! 会话数据资源门面：工作区校验、读写权限与持久化结清。
 //! 执行所有权由 peri-sdk 维护，本模块不登记或认领执行者。
 
+mod admission;
+mod assembly;
 mod claim;
 mod evidence;
 mod gate;
@@ -33,7 +35,7 @@ use peri_acp_types::session_resources::{
     NewSessionDraft, PersistenceRecovery, RewindBoundary, RewindCandidate, RewindOutcome,
     SessionAvailability, SessionHistoryWindowBounds, SessionInitialization, SessionMetaPatch,
     SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionResources,
-    SessionSnapshot,
+    SessionSnapshot, TerminalSettlementOutcome,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta, WorkState};
@@ -115,152 +117,10 @@ pub struct SessionResourcesImpl {
 }
 
 impl SessionResourcesImpl {
-    /// 打开或创建会话库，原地升级已知旧 schema 并保留历史数据。
-    #[cfg(not(target_os = "emscripten"))]
-    pub async fn open(db_path: impl Into<PathBuf>) -> anyhow::Result<Self> {
-        Ok(Self::from_local(LocalExecution::open(db_path).await?))
-    }
-
-    /// 以只读方式打开已存在的会话库；不创建目录、库、schema 或锁文件。
-    #[cfg(not(target_os = "emscripten"))]
-    pub async fn open_existing_read_only(
-        db_path: impl AsRef<Path>,
-    ) -> Result<Self, ReadOnlyThreadStoreError> {
-        Ok(Self::from_local(
-            LocalExecution::open_existing_read_only(db_path).await?,
-        ))
-    }
-
-    /// 默认数据库位置 `~/.peri/threads/threads.db`；不创建目录、数据库或连接。
-    #[cfg(not(target_os = "emscripten"))]
-    pub fn default_database_path() -> anyhow::Result<PathBuf> {
-        LocalExecution::default_database_path()
-    }
-
-    /// 与迁移桥共享同一个库句柄（迁移期唯一装配点 `SqliteThreadStore::open_shared*` 使用）。
-    ///
-    /// 本机组合：数据面与执行面由同一个库句柄回答（同一条连接真相），两个端口因此只是
-    /// 同一实现的两张面孔。
-    #[cfg(not(target_os = "emscripten"))]
-    pub(in crate::sessions) fn from_local(local: LocalExecution) -> Self {
-        let data = Arc::new(local.data_port());
-        Self::from_ports(data, Arc::new(local), SessionDataHome::LocalLibrary)
-    }
-
-    /// 组合层装配点：数据面 + 本机执行面，两者由调用方决定指向哪个后端。
-    ///
-    /// 门面不持有任何后端判断，只按 `home`（组合层给出的**事实**）决定 `create_session`
-    /// 是一步还是两步；公开行为仍只有 [`SessionResources`] 这一套。
-    pub(in crate::sessions) fn from_ports(
-        data: Arc<dyn SessionDataPort>,
-        local: Arc<dyn LocalExecutionPort>,
-        home: SessionDataHome,
-    ) -> Self {
-        let lifecycle = Lifecycle::new();
-        let gate = MutationGate::new(data, local, lifecycle.clone(), home);
-        Self {
-            gate,
-            lifecycle,
-            close_confirm: tokio::sync::Mutex::new(()),
-            credential_operations: Arc::new(tokio::sync::RwLock::new(())),
-            home,
-        }
-    }
-
-    async fn execution_availability(
-        &self,
-        id: &ThreadId,
-    ) -> SessionResourceResult<ExecutionAvailability> {
-        let local = self.gate.local();
-        if local.is_read_only() {
-            return Ok(ExecutionAvailability::ReadOnlyStore);
-        }
-        if !self.gate.data().session_exists(id).await? {
-            return Err(not_found());
-        }
-        if let Some(machine_id) = self.gate.data().machine_id_of(id).await? {
-            if machine_id
-                != local.machine_id().map_err(|_| {
-                    crate::sessions::failure::unavailable("machine identity is not initialized")
-                })?
-            {
-                return Ok(ExecutionAvailability::WorkspaceUnavailable);
-            }
-        }
-        let meta = self.gate.data().load_meta(id).await?;
-        if matches!(self.home, SessionDataHome::RemoteStore)
-            && self
-                .gate
-                .data()
-                .binding_discovery_snapshot(id)
-                .await?
-                .is_none()
-        {
-            return Ok(ExecutionAvailability::WorkspaceUnavailable);
-        }
-        if !local.directory_available(Path::new(&meta.cwd)).await {
-            return Ok(ExecutionAvailability::WorkspaceUnavailable);
-        }
-        if matches!(self.home, SessionDataHome::RemoteStore) {
-            match self.recheck_binding_of(id, true).await {
-                Ok(_) => {}
-                Err(error) if matches!(error.kind(), SessionResourceErrorKind::Workspace(_)) => {
-                    return Ok(ExecutionAvailability::WorkspaceUnavailable);
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(ExecutionAvailability::Available)
-    }
-
-    /// 完整创建的重试：不可变事实一致时只重新建立执行准入。
-    ///
-    /// 前提（又是同一次创建、工作区证据仍然一致）成立时补上准入；否则保留 identity 并
-    /// 如实报告「已保存、未准入」——既不重造 binding/frozen，也不谎称「确定未创建」。
-    async fn admit_saved_creation(&self, input: &NewSession) -> SessionResourceResult<()> {
-        let id = &input.thread_id;
-        let saved = self.gate.data().load_snapshot(id).await?;
-        let created_at = chrono::DateTime::parse_from_rfc3339(&input.created_at)
-            .map_err(|_| invalid_input("invalid session creation timestamp"))?;
-        let snapshot_at = input
-            .meta
-            .snapshot_at_message_id
-            .map(|message| message.as_uuid().to_string());
-        if saved.meta.id != *id
-            || saved.meta.created_at != created_at
-            || saved.meta.cwd != input.meta.cwd
-            || saved.meta.parent_thread_id != input.meta.parent_thread_id
-            || saved.meta.snapshot_at_message_id != snapshot_at
-            || saved.binding != BindingState::Bound(input.binding.clone())
-            || saved.frozen != FrozenState::Present(input.frozen.clone())
-        {
-            return Err(SessionResourceError::conflict(
-                "session identity has different immutable creation facts",
-            ));
-        }
-        if !matches!(
-            self.execution_availability(id).await?,
-            ExecutionAvailability::Available
-        ) {
-            return Err(SessionResourceError::saved_but_not_admitted(id.clone()));
-        }
-        self.recheck_binding(Some(&input.binding), false).await?;
-        Ok(())
-    }
-
     fn workspace_mismatch() -> SessionResourceError {
         SessionResourceError::new(SessionResourceErrorKind::Workspace(
             WorkspaceError::ExecutionBindingMismatch,
         ))
-    }
-
-    /// 测试用：本机组合背后的 SQLite 连接池（逐条构造事实的夹具使用）。
-    #[cfg(all(test, not(target_os = "emscripten")))]
-    pub(super) fn local_pool(&self) -> &sqlx::SqlitePool {
-        self.gate
-            .local()
-            .sqlite_pool()
-            .expect("local composition always has a SQLite pool")
     }
 }
 
@@ -644,6 +504,13 @@ impl SessionResources for SessionResourcesImpl {
         self.gate.data().recovery_scope(id).await
     }
 
+    async fn load_interrupted_threads(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<Vec<peri_acp_types::recovery::InterruptedThread>> {
+        self.gate.data().interrupted_threads(id).await
+    }
+
     async fn session_environment_id(&self, id: &ThreadId) -> SessionResourceResult<Option<String>> {
         self.gate.data().machine_id_of(id).await
     }
@@ -972,6 +839,22 @@ impl SessionResources for SessionResourcesImpl {
                 self.gate
                     .data()
                     .finalize_child_terminal(child, status, work_state, target, message)
+            })
+            .await
+    }
+
+    /// 无结果终态与门禁同一条树根：事务边界在数据端口，门面只负责排空与互斥。
+    async fn settle_terminal_without_result(
+        &self,
+        child: &ThreadId,
+        status: AgentStatus,
+        work_state: WorkState,
+    ) -> SessionResourceResult<TerminalSettlementOutcome> {
+        self.gate
+            .with_mutation(child, || {
+                self.gate
+                    .data()
+                    .settle_terminal_without_result(child, status, work_state)
             })
             .await
     }

@@ -860,6 +860,21 @@ pub trait SessionResources: Send + Sync {
             SessionResourceErrorKind::Unsupported,
         ))
     }
+
+    /// 进入根时的遗留 Active 收敛候选：该根子树中 `agent_status = active` 且
+    /// 工作意图为 `idle`/`stopped` 的非根 thread（只读）。
+    ///
+    /// 候选只描述存储事实；本进程活实例与 close 未结清由 Host 侧排除。
+    /// 默认实现返回 `Unsupported`，让非生产后端显式失败而不是把「不支持」当成
+    /// 「没有需要收敛的 child」。
+    async fn load_interrupted_threads(
+        &self,
+        _id: &ThreadId,
+    ) -> SessionResourceResult<Vec<crate::recovery::InterruptedThread>> {
+        Err(SessionResourceError::new(
+            SessionResourceErrorKind::Unsupported,
+        ))
+    }
     async fn session_environment_id(
         &self,
         _id: &ThreadId,
@@ -1161,9 +1176,9 @@ pub trait SessionResources: Send + Sync {
     /// `Existing`/`AlreadyHandedOff`。
     ///
     /// 原子性按后端分档：
-    /// - 具备跨行为事务的后端（本机 SQLite）覆写为单事务：失败时 child 状态、
-    ///   `work_state` 与目标 MQ 都不变。
-    /// - 组合默认实现（远端、嵌入、内存）依次调用 [`Self::update_session_meta`]、
+    /// - 具备跨行为事务的后端（本机 SQLite、远端托管批）覆写为单事务/单批：失败时
+    ///   child 状态、`work_state` 与目标 MQ 都不变。
+    /// - 组合默认实现（嵌入、内存、其他无事务后端）依次调用 [`Self::update_session_meta`]、
     ///   [`Self::set_work_state`] 与 [`Self::mq_enqueue`]：只保证「失败前不宣称完成」，
     ///   进程在两步之间退出可能留下已写的终态。调用方不得把这里的成功当成事务提交的
     ///   证据；见 `docs/design/session-durability.md` §5.3。
@@ -1179,6 +1194,29 @@ pub trait SessionResources: Send + Sync {
             self, child, status, work_state, target, message,
         )
         .await
+    }
+
+    /// 无结果终态结算：child 终态与 durable 工作意图一次写入。
+    ///
+    /// 只允许 `active → 终态` 一次写入：child 已是终态时返回
+    /// [`TerminalSettlementOutcome::AlreadyTerminal`] 且不改写任何列（重复收尾是
+    /// no-op），既有终态不被覆盖；child 不存在时返回 `NotFound`。终态与工作意图由
+    /// 同一映射决定，调用方传 [`WorkState::after_agent_terminal`]。
+    ///
+    /// 原子性按后端分档：
+    /// - 具备跨行为事务的后端（本机 SQLite、远端托管批）在同一次提交里条件更新
+    ///   两列，并回报本次是否写入。
+    /// - 无事务后端使用 [`composed_settle_terminal_without_result`] 逐步组合：
+    ///   只保证失败前不宣称完成，且顺序不会产生 `Done + working`；进程在两步之间
+    ///   退出仍可能留下 `Active + 目标工作意图`。调用方不得把这档成功当成事务提交的
+    ///   证据，见 `docs/design/session-durability.md` §5.3。
+    async fn settle_terminal_without_result(
+        &self,
+        child: &ThreadId,
+        status: AgentStatus,
+        work_state: WorkState,
+    ) -> SessionResourceResult<TerminalSettlementOutcome> {
+        settlement::composed_settle_terminal_without_result(self, child, status, work_state).await
     }
 
     /// 关闭结算：写入保留消息的终态提醒，并删除这些 MQ 行，一次提交。
@@ -1219,7 +1257,8 @@ pub use lifecycle::SessionStoreShutdownPort;
 
 mod settlement;
 pub use settlement::{
-    composed_finalize_child_terminal, composed_settle_retained_mq, ComposedSettlementOps,
+    composed_finalize_child_terminal, composed_settle_retained_mq,
+    composed_settle_terminal_without_result, ComposedSettlementOps, TerminalSettlementOutcome,
 };
 
 #[cfg(test)]

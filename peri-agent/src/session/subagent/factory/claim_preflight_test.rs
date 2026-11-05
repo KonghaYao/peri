@@ -249,6 +249,13 @@ impl SessionResources for ClaimResources {
         }
         self.inner.update_session_meta(id, patch).await
     }
+    async fn set_work_state(
+        &self,
+        id: &ThreadId,
+        state: peri_acp_types::thread::WorkState,
+    ) -> SessionResourceResult<()> {
+        self.inner.set_work_state(id, state).await
+    }
     async fn delete_session_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.inner.delete_session_tree(id).await
     }

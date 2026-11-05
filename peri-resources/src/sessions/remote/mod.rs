@@ -144,6 +144,7 @@ mod session_lifecycle;
 mod session_mq;
 mod session_read;
 mod session_schema;
+mod session_settlement;
 mod session_sql;
 mod session_write;
 mod sql;

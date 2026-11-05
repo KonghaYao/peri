@@ -111,6 +111,8 @@ pub struct ContinuationRequest {
     pub mq_steering: bool,
     /// 已规范提交但尚未被主模型响应覆盖的后台结果构成的工作来源。
     pub pending_result: bool,
+    /// 由恢复启动门发出的 continuation：只有这类请求的早失败会反馈给恢复协调器。
+    pub recovery: bool,
 }
 
 /// Result of prompt execution.

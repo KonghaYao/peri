@@ -347,6 +347,7 @@ async fn empty_queued_continuation_does_not_block_the_next_child_result() {
         kind: BgTaskKind::Agent,
         mq_steering: true,
         pending_result: false,
+        recovery: false,
     };
     let epoch = {
         let mut sessions = harness.sessions.lock().await;
@@ -364,6 +365,7 @@ async fn empty_queued_continuation_does_not_block_the_next_child_result() {
         crate::host::PromptOrigin::Continuation {
             mq_steering: true,
             pending_result: false,
+            recovery: false,
         },
         Some(epoch),
         &harness.sessions,
@@ -389,6 +391,7 @@ async fn empty_queued_continuation_does_not_block_the_next_child_result() {
         crate::host::PromptOrigin::Continuation {
             mq_steering: true,
             pending_result: false,
+            recovery: false,
         },
         next_epoch,
         &harness.sessions,
@@ -553,6 +556,7 @@ async fn approved_schedule_runs_without_reenabling_suppressed_passive_results() 
         crate::host::PromptOrigin::Continuation {
             mq_steering: true,
             pending_result: false,
+            recovery: false,
         },
         Some(0),
         &harness.sessions,

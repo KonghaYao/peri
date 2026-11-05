@@ -7,7 +7,7 @@ pub(crate) mod mock;
 use std::sync::Arc;
 
 use peri_acp_types::session_resources::{
-    FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources,
+    BindingState, FrozenSnapshotBytes, NewSession, NewSessionMeta, SessionResources,
 };
 use peri_acp_types::thread::{CancelPolicy, ThreadId};
 use peri_acp_types::workspace::{SessionBinding, SESSION_BINDING_VERSION};
@@ -66,6 +66,43 @@ impl TestSession {
     /// 同一条会话的另一个门面句柄（用于验证「写入真的落库」而不是只改了内存）。
     pub(crate) fn resources(&self) -> Arc<dyn SessionResources> {
         Arc::clone(&self.resources)
+    }
+
+    /// 在根会话下创建一条 child thread（恢复候选/父子链断言用）。
+    pub(crate) async fn create_child(&self, parent: &ThreadId) -> ThreadId {
+        let binding = match self
+            .resources
+            .load_session_binding(&self.thread_id)
+            .await
+            .unwrap()
+        {
+            BindingState::Bound(binding) => binding,
+            other => panic!("fixture root must be bound, got {other:?}"),
+        };
+        let root = self
+            .resources
+            .load_session_meta(&self.thread_id)
+            .await
+            .unwrap();
+        let child = uuid::Uuid::now_v7().to_string();
+        self.resources
+            .create_session(&NewSession {
+                thread_id: child.clone(),
+                created_at: peri_time::now_utc_rfc3339(),
+                meta: NewSessionMeta {
+                    title: Some("child".to_owned()),
+                    cwd: root.cwd,
+                    parent_thread_id: Some(parent.clone()),
+                    hidden: true,
+                    cancel_policy: CancelPolicy::Cascade,
+                    snapshot_at_message_id: None,
+                },
+                binding,
+                frozen: FrozenSnapshotBytes::new("{\"version\":1,\"test\":true}"),
+            })
+            .await
+            .unwrap();
+        child
     }
 
     pub(crate) fn thread_id(&self) -> ThreadId {

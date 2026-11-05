@@ -40,6 +40,17 @@ pub struct RecoveryScope {
     pub candidates: Vec<RecoveryCandidate>,
 }
 
+/// 进入根时待收敛的遗留 child：`agent_status = active` 且工作意图已落到
+/// `idle`/`stopped`。工作意图保持原值，只把运行状态收尾为终态。
+///
+/// 这只是候选事实：本进程活实例、close 未结清等排除由 Host 侧按运行期事实过滤。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterruptedThread {
+    pub thread_id: ThreadId,
+    /// 只会是 `Idle` 或 `Stopped`。
+    pub work_state: crate::thread::WorkState,
+}
+
 impl RecoveryScope {
     /// 空范围：根自身就是全部，没有候选。
     pub fn idle(root_thread_id: ThreadId) -> Self {

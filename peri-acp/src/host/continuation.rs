@@ -415,6 +415,7 @@ pub(crate) async fn run_continuation_scheduler(
             }
         };
         if closing {
+            mark_recovery_launch_failed(&cfg, &req);
             continue;
         }
         let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(&cfg);
@@ -423,6 +424,7 @@ pub(crate) async fn run_continuation_scheduler(
             || (req.pending_result
                 && !super::activation::result_allowed(local, &req.session_id).await)
         {
+            mark_recovery_launch_failed(&cfg, &req);
             continue;
         }
         let epoch = {
@@ -433,6 +435,7 @@ pub(crate) async fn run_continuation_scheduler(
             }
         };
         let Some(epoch) = epoch else {
+            mark_recovery_launch_failed(&cfg, &req);
             continue;
         };
         info!(
@@ -463,6 +466,7 @@ pub(crate) async fn run_continuation_scheduler(
                     super::PromptOrigin::Continuation {
                         mq_steering: req.mq_steering,
                         pending_result: req.pending_result,
+                        recovery: req.recovery,
                     },
                     Some(epoch),
                     &sessions2,
@@ -487,7 +491,20 @@ pub(crate) async fn run_continuation_scheduler(
         );
         if let Err(error) = admitted {
             tracing::error!(session_id = %req.session_id, error = ?error, "continuation task admission failed");
+            mark_recovery_launch_failed(&cfg, &req);
         }
+    }
+}
+
+/// 恢复启动请求没有进入 dispatch：写进程内失败事实，供下一次显式进入重试。
+///
+/// 只认 `recovery` 来源，普通 bg/steering 续跑的跳过不影响恢复准入。
+fn mark_recovery_launch_failed(cfg: &AcpServerConfig, req: &ContinuationRequest) {
+    if !req.recovery {
+        return;
+    }
+    if let Some(runtime) = cfg.session_manager.get_session(&req.session_id) {
+        runtime.mark_recovery_launch_failed();
     }
 }
 

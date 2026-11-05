@@ -15,7 +15,7 @@ use peri_acp_types::session_resources::{
     ForkSnapshot, FrozenSnapshotBytes, FrozenState, NewSession, NewSessionMeta,
     PersistenceRecovery, RewindBoundary, RewindOutcome, SessionAvailability, SessionMetaPatch,
     SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionResources,
-    SessionSnapshot,
+    SessionSnapshot, TerminalSettlementOutcome,
 };
 use peri_acp_types::store::{CompactionChange, InheritedContext, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta, WorkState};
@@ -164,6 +164,20 @@ pub(crate) struct MockSessionResources {
     mq_enqueue_failure: AtomicBool,
     /// 故障注入：置位后历史查询返回内部错误（验证 `Unknown` 不得被当作不存在）。
     mq_history_failure: AtomicBool,
+    /// 故障注入：剩余多少次 MQ 查询返回内部错误（验证查询失败不清理运行期状态）。
+    mq_query_failures: AtomicUsize,
+    /// 故障注入：剩余多少次终态结算在写入前返回错误（验证同身份重试）。
+    finalize_failures: AtomicUsize,
+    /// 已发生的终态结算次数（含注入失败）。
+    finalize_attempts: AtomicUsize,
+    /// 每次 `finalize_child_terminal` 收到的结果消息身份（含注入失败的重试）。
+    finalize_message_ids: Mutex<Vec<MessageId>>,
+    /// 已发生的状态写入次数（含同值去重前的调用），用于断言唯一写入者。
+    status_writes: AtomicUsize,
+    /// 模拟远端 `active` 守卫：仅 child 仍 active 时允许 finalize。
+    finalize_requires_active: AtomicBool,
+    /// 故障注入：剩余多少次无结果终态写入在写完工作意图、写状态前失败。
+    terminal_status_failures: AtomicUsize,
     /// `enqueued_at` 生成器：同一进程内单调递增，测试不依赖真实时钟。
     mq_clock: Mutex<u64>,
 }
@@ -193,6 +207,13 @@ impl MockSessionResources {
             mq: peri_acp_types::session::InMemoryMqStore::new(),
             mq_enqueue_failure: AtomicBool::new(false),
             mq_history_failure: AtomicBool::new(false),
+            mq_query_failures: AtomicUsize::new(0),
+            finalize_failures: AtomicUsize::new(0),
+            finalize_attempts: AtomicUsize::new(0),
+            finalize_message_ids: Mutex::new(Vec::new()),
+            status_writes: AtomicUsize::new(0),
+            finalize_requires_active: AtomicBool::new(false),
+            terminal_status_failures: AtomicUsize::new(0),
             mq_clock: Mutex::new(0),
         })
     }
@@ -210,6 +231,41 @@ impl MockSessionResources {
     /// 故障注入：让后续 MQ 历史查询全部失败。
     pub(crate) fn fail_mq_history_lookup(&self) {
         self.mq_history_failure.store(true, Ordering::SeqCst);
+    }
+
+    /// 故障注入：让接下来的 `count` 次 MQ 查询失败。
+    pub(crate) fn fail_next_mq_queries(&self, count: usize) {
+        self.mq_query_failures.store(count, Ordering::SeqCst);
+    }
+
+    /// 故障注入：让接下来的 `count` 次终态结算在写入前失败。
+    pub(crate) fn fail_next_finalizes(&self, count: usize) {
+        self.finalize_failures.store(count, Ordering::SeqCst);
+    }
+
+    /// 故障注入：让接下来的 `count` 次无结果终态写入在写完工作意图、写状态前失败。
+    ///
+    /// 用来验证「部分写入不产生 Done + working」以及同一轮重试能否收敛。
+    pub(crate) fn fail_next_terminal_status_writes(&self, count: usize) {
+        self.terminal_status_failures.store(count, Ordering::SeqCst);
+    }
+
+    pub(crate) fn finalize_attempts(&self) -> usize {
+        self.finalize_attempts.load(Ordering::SeqCst)
+    }
+
+    /// 每次 finalize 尝试携带的结果消息身份；重试必须保持同一身份。
+    pub(crate) fn finalize_message_ids(&self) -> Vec<MessageId> {
+        self.finalize_message_ids.lock().unwrap().clone()
+    }
+
+    pub(crate) fn status_writes(&self) -> usize {
+        self.status_writes.load(Ordering::SeqCst)
+    }
+
+    /// 模拟远端 `active` 守卫：非 active 的 child 不得再被结算。
+    pub(crate) fn require_active_for_finalize(&self) {
+        self.finalize_requires_active.store(true, Ordering::SeqCst);
     }
 
     /// 当前 meta 状态序列（`(thread_id, status)`），只含真实发生变更的写入。
@@ -295,6 +351,7 @@ impl MockSessionResources {
 
     /// 状态写入入口：只在值真的变化时记录并唤醒等待者。
     fn write_status(&self, id: &ThreadId, status: AgentStatus) {
+        self.status_writes.fetch_add(1, Ordering::SeqCst);
         write_status_shared(
             &self.regions,
             &self.statuses,

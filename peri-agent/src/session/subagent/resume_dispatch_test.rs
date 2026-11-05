@@ -427,7 +427,7 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
         1,
         "this cancellation happens after lifecycle Start"
     );
-    wait_for_resume_status(&store, &thread_id, AgentStatus::Error).await;
+    wait_for_resume_status(&store, &thread_id, AgentStatus::Cancelled).await;
     assert_eq!(
         stops.load(Ordering::SeqCst),
         1,

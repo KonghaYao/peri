@@ -12,13 +12,18 @@ use peri_acp_types::session::{
     MqInput, MqReceiveDisposition, MqReceiveItem, MqReceivePurpose, MqReceiveSelection,
     MqReceiveStatus,
 };
-use peri_acp_types::session_resources::{RewindBoundary, SessionResourceErrorKind};
+use peri_acp_types::session_resources::{
+    RewindBoundary, SessionResourceErrorKind, TerminalSettlementOutcome,
+};
 use peri_acp_types::store::PersistedPayload;
 use peri_acp_types::thread::{ThreadId, ThreadMeta};
 
 use super::*;
 use crate::sessions::canonical;
 use crate::sessions::data::SessionDataPort;
+
+#[path = "session_mq_terminal_test.rs"]
+mod terminal_settlement;
 
 struct Fixture {
     directory: tempfile::TempDir,
@@ -836,6 +841,101 @@ fn terminal_input(id: MessageId, body: &str) -> MqInput {
         policy: MessagePolicy::ensure_processing(),
         original_draft: None,
     }
+}
+
+/// 无结果终态：一次条件更新同时写终态与工作意图。
+#[tokio::test]
+async fn settle_terminal_without_result_commits_status_and_work_state() {
+    use peri_acp_types::thread::{AgentStatus, WorkState};
+
+    let fixture = Fixture::new().await;
+    let child = fixture.thread("child").await;
+    fixture
+        .data
+        .set_work_state(&child, WorkState::Working)
+        .await
+        .unwrap();
+
+    let outcome = fixture
+        .data
+        .settle_terminal_without_result(&child, AgentStatus::Done, WorkState::Idle)
+        .await
+        .unwrap();
+    assert_eq!(outcome, TerminalSettlementOutcome::Settled);
+    assert_eq!(
+        terminal_facts(&fixture, &child).await,
+        ("done".to_owned(), Some("idle".to_owned()))
+    );
+}
+
+/// 重复结算读取既有终态并返回 no-op，不改写工作意图。
+#[tokio::test]
+async fn settle_terminal_without_result_is_idempotent() {
+    use peri_acp_types::thread::{AgentStatus, WorkState};
+
+    let fixture = Fixture::new().await;
+    let child = fixture.thread("child").await;
+    fixture
+        .data
+        .settle_terminal_without_result(&child, AgentStatus::Done, WorkState::Idle)
+        .await
+        .unwrap();
+    let replay = fixture
+        .data
+        .settle_terminal_without_result(&child, AgentStatus::Done, WorkState::Working)
+        .await
+        .unwrap();
+    assert_eq!(
+        replay,
+        TerminalSettlementOutcome::AlreadyTerminal(AgentStatus::Done)
+    );
+    assert_eq!(
+        terminal_facts(&fixture, &child).await,
+        ("done".to_owned(), Some("idle".to_owned())),
+        "no-op 不得改写 work_state"
+    );
+}
+
+/// child 不存在时按 NotFound 失败，不创建行。
+#[tokio::test]
+async fn settle_terminal_without_result_rejects_unknown_child() {
+    use peri_acp_types::thread::{AgentStatus, WorkState};
+
+    let fixture = Fixture::new().await;
+    let child = ThreadId::from("missing-child".to_owned());
+    let error = fixture
+        .data
+        .settle_terminal_without_result(&child, AgentStatus::Error, WorkState::Idle)
+        .await
+        .unwrap_err();
+    assert!(matches!(error.kind(), SessionResourceErrorKind::NotFound));
+}
+
+/// 后到的终态不能覆盖先提交的终态。
+#[tokio::test]
+async fn settle_terminal_without_result_does_not_overwrite_terminal() {
+    use peri_acp_types::thread::{AgentStatus, WorkState};
+
+    let fixture = Fixture::new().await;
+    let child = fixture.thread("child").await;
+    fixture
+        .data
+        .settle_terminal_without_result(&child, AgentStatus::Done, WorkState::Idle)
+        .await
+        .unwrap();
+    let late = fixture
+        .data
+        .settle_terminal_without_result(&child, AgentStatus::Error, WorkState::Idle)
+        .await
+        .unwrap();
+    assert_eq!(
+        late,
+        TerminalSettlementOutcome::AlreadyTerminal(AgentStatus::Done)
+    );
+    assert_eq!(
+        terminal_facts(&fixture, &child).await,
+        ("done".to_owned(), Some("idle".to_owned()))
+    );
 }
 
 /// 三步在同一提交里生效：重开后终态、工作意图与目标 MQ 行都能读到。

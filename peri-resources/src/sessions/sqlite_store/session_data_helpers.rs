@@ -110,6 +110,19 @@ pub(in crate::sessions) fn recovery_scope_statement_with(projection: &str, filte
     )
 }
 
+/// 进入根时的遗留 Active 候选：根子树中非根、`active` 且 `idle`/`stopped` 的
+/// thread。只读；参数只有 `?1 = 根 thread`。
+pub(in crate::sessions) const INTERRUPTED_TREE_SQL: &str = "WITH RECURSIVE thread_scope(id) AS (
+    SELECT id FROM threads WHERE id = ?1
+    UNION
+    SELECT child.id FROM threads AS child
+    JOIN thread_scope AS parent ON child.parent_thread_id = parent.id
+)
+SELECT t.id, t.work_state
+FROM threads AS t JOIN thread_scope AS scope ON scope.id = t.id
+WHERE t.id <> ?1 AND t.agent_status = 'active' AND t.work_state IN ('idle', 'stopped')
+ORDER BY t.created_at ASC";
+
 /// 绑定行的事实：绑定、指向已消失的登记、或没有绑定行。
 pub(in crate::sessions) enum BindingRowState {
     Bound(SessionBinding),

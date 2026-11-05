@@ -1,6 +1,9 @@
 use super::*;
 use peri_acp_types::session::{UserInputQueueItem, UserInputQueueTerminalItem};
 
+#[path = "steer_state_projection_test.rs"]
+mod projection_tests;
+
 pub(super) fn make_input(id: &str) -> UserInput {
     UserInput {
         input_id: id.to_owned(),
@@ -50,51 +53,6 @@ pub(super) fn make_idle_state() -> SteerState {
     snapshot.items.clear();
     state.accept_snapshot(snapshot, 1, true);
     state
-}
-
-#[test]
-fn test_steer_projection_rejects_old_revision_and_generation() {
-    let mut state = make_state();
-    let mut other_generation = make_snapshot(8);
-    other_generation.generation = "old-instance".to_owned();
-    assert!(
-        !state.accept_snapshot(make_snapshot(0), 1, false),
-        "旧 revision 不得覆盖当前投影"
-    );
-    assert!(
-        !state.accept_snapshot(other_generation, 1, true),
-        "不同实例回执不得覆盖当前投影"
-    );
-    assert_eq!(
-        state.snapshot("s", 1).unwrap().revision,
-        1,
-        "当前 revision 应保留"
-    );
-}
-
-#[test]
-fn test_steer_projection_session_reset_rejects_old_epoch() {
-    let mut state = make_state();
-    state.reset_session("s", 2);
-    assert!(
-        !state.accept_snapshot(make_snapshot(99), 1, true),
-        "相同 sessionId 重载仍要拒绝旧 epoch"
-    );
-    assert!(state.snapshot("s", 2).is_none(), "旧回执不得重新建立实例");
-}
-
-#[test]
-fn test_steer_projection_notifications_need_established_generation() {
-    let mut state = SteerState::default();
-    state.reset_session("s", 1);
-    assert!(
-        !state.accept_snapshot(make_snapshot(4), 1, false),
-        "首个通知不能代替可信 snapshot 查询"
-    );
-    assert!(
-        state.accept_snapshot(make_snapshot(5), 1, true),
-        "明确查询结果可建立实例"
-    );
 }
 
 #[test]

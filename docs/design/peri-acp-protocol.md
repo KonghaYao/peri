@@ -93,10 +93,12 @@ reminder 出口），客户端据此把通知与那次 load 配对；历史页�
 
 - `status`：无失败为 `ok`；仅逐项失败为 `partial`；进入会话的恢复本身失败为 `failed`。
 - `Corrupt` / `ReadOnly` / `NotFound` 使会话不可执行：服务端在内存中设置执行阻断，`session/prompt` 返回 `-32017`，`data.reason = "recovery_execution_blocked"`（附 `kind`/`threadId`/`detail`），模型与 continuation 均不启动。
+- 恢复 child 的结果通知投递到持久父链上的直接父 `parent_thread_id`，不按显式 resume 的调用者改投（例如 B resume 原属 A 的 child 后崩溃，结果仍回 A）。通知使用 `ensure_processing`：接纳时把父级 `idle` 提升为 `working`；live 且已激活的 idle 父级收到唤醒，未 live 的父级由下一次进入消费 durable 行，`stopped` 不被解除。
+- 恢复启动资格只在响应后真正交出执行时保留；跳过或 Receive 前早失败只撤销进程内准入，提醒仍留在 MQ，由下一次显式进入重试。该重试不通过协议字段暴露，也不自动发生。
 - `Unavailable` / `Superseded` / `Unsupported` 不阻断：用户可显式发送消息继续，服务端仍按正常准入复核。
 - 每次新的 load/resume 重新尝试恢复并按本次结果重设阻断；成功或可重试失败清除旧阻断。阻断不持久化。
 - `_meta.peri.contextUsage = { tokens, window }` 随 `session/load` 与 `session/resume` 成功响应返回：`tokens` 是 `threads.context_usage_tokens` 的最后提交快照（`null` 表示未知，不是零占用），`window` 取当前有效配置的上下文窗口。进入会话先展示该值，运行期由模型 usage 覆盖。
-- 只读/不可执行 Store 的 `session/load` / `session/resume` 不再失败整次请求：服务端发布无执行环境的视图态，历史与 `_meta.peri.contextUsage` 照常返回，`peri.recovery` 报 `failed` + `executionBlocked=true`；该会话的全部执行入口返回 `-32017`。视图态不写库，`session/close` 即可释放。
+- 只读/不可执行 Store 的 `session/load` / `session/resume` 不再失败整次请求：若该会话尚无 live 实例，服务端发布无执行环境的视图态；已有 live 会话不降级。视图态的历史与 `_meta.peri.contextUsage` 照常返回，`peri.recovery` 报 `failed` + `executionBlocked=true`；该会话的全部执行入口（用户 prompt、scheduled、continuation 与 idle 注入）在模型调用前统一返回 `-32017`，历史与独立读取入口保持可读。视图态不写库，`session/close` 即可释放；可重复 load 同一视图会话。
 
 #### 2.1.2 历史窗口 `peri.historyWindowV1`（默认关闭）
 

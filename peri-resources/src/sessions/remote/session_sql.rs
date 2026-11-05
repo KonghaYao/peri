@@ -382,6 +382,25 @@ pub(super) fn select_working_tree_statement(root: &str) -> StatementSpec {
     StatementSpec::new(SELECT_WORKING_TREE_SQL, vec![Value::Text(root.to_owned())])
 }
 
+/// 进入根时待收敛的 child：根子树中非根、`active` 且 `idle`/`stopped` 的 thread。
+const SELECT_INTERRUPTED_TREE_SQL: &str = "WITH RECURSIVE thread_scope(id) AS (
+    SELECT id FROM threads WHERE id = ?1
+    UNION
+    SELECT child.id FROM threads AS child
+    JOIN thread_scope AS parent ON child.parent_thread_id = parent.id
+) SELECT t.id, t.work_state
+  FROM threads AS t JOIN thread_scope AS scope ON scope.id = t.id
+  WHERE t.id <> ?1 AND t.agent_status = 'active' AND t.work_state IN ('idle', 'stopped')
+  ORDER BY t.created_at ASC";
+
+/// 遗留 Active 收敛候选行（根子树 + 非根 + `idle`/`stopped`）。
+pub(super) fn select_interrupted_tree_statement(root: &str) -> StatementSpec {
+    StatementSpec::new(
+        SELECT_INTERRUPTED_TREE_SQL,
+        vec![Value::Text(root.to_owned())],
+    )
+}
+
 // 分页列举：scope 过滤、游标与上限全部是绑定参数，SQL 文本静态。
 //
 // scope 用整数判别位 + 绑定值表达（`?1`）：0 = 全部、1 = project、2 = workspace、

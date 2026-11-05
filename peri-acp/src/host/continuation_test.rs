@@ -123,6 +123,7 @@ fn test_mq_steering_during_in_flight_sets_pending() {
         kind: BgTaskKind::Agent,
         mq_steering: true,
         pending_result: false,
+        recovery: false,
     };
     assert!(
         take_continuation_for_request(&mut state, &req).is_none(),
