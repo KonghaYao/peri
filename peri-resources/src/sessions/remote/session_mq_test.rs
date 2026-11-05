@@ -18,7 +18,7 @@ use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
 
 use super::generation::{ConnectionFactory, ConnectionGate};
-use super::mutation::{RemoteStore, StoreAccess};
+use super::mutation::{FaultPlan, RemoteStore, StoreAccess};
 use super::schema::{self, StoreId};
 use super::schema_upgrade_tests::SqliteTransport;
 use super::session_data::RemoteSessionData;
@@ -657,4 +657,53 @@ async fn remote_normalized_retry_promotes_work_intent() {
         WorkState::Working,
         "same_payload 确认的同一条消息必须提升工作意图"
     );
+}
+
+/// 提升失败不能被吞掉：入队返回可重试的未决错误，MQ 行留在原地；同一 ID 重试读出
+/// `Existing` 并再次执行提升，最终不存在 `idle + pending`。
+#[tokio::test]
+async fn remote_promotion_failure_surfaces_and_same_id_retry_promotes() {
+    use peri_acp_types::thread::WorkState;
+
+    let fixture = fixture().await;
+    let thread = thread("mq-thread");
+    let id = MessageId::new();
+    fixture
+        .data
+        .set_work_state(&thread, WorkState::Idle)
+        .await
+        .unwrap();
+    fixture
+        .data
+        .inject_faults(FaultPlan {
+            drop_reply: None,
+            drop_before_send: Some("work_state_promote".to_owned()),
+        })
+        .await;
+
+    let error = fixture
+        .data
+        .mq_enqueue(&thread, input(id, "wake"))
+        .await
+        .expect_err("a failed promotion must not be reported as an accepted enqueue");
+    assert!(error.is_persistence_uncertain(), "{error:?}");
+    assert_eq!(mq_rows(&fixture, &thread).await, 1, "MQ 行已提交，等待重试");
+    assert_eq!(
+        fixture.data.load_meta(&thread).await.unwrap().work_state,
+        WorkState::Idle,
+        "提升失败时仍是 idle + pending"
+    );
+
+    let again = fixture
+        .data
+        .mq_enqueue(&thread, input(id, "wake"))
+        .await
+        .unwrap();
+    assert_eq!(again.disposition, MqEnqueueDisposition::Existing);
+    assert_eq!(
+        fixture.data.load_meta(&thread).await.unwrap().work_state,
+        WorkState::Working,
+        "同一 ID 重试必须再次执行提升"
+    );
+    assert_eq!(mq_rows(&fixture, &thread).await, 1);
 }

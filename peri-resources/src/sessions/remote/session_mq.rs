@@ -127,7 +127,7 @@ impl RemoteSessionData {
                 &enqueued_at,
                 ensures_processing,
             )
-            .await;
+            .await?;
             return Ok(MqEnqueueOutcome {
                 disposition: MqEnqueueDisposition::Inserted,
                 entry,
@@ -142,7 +142,7 @@ impl RemoteSessionData {
                     &outcome.entry.enqueued_at,
                     ensures_processing,
                 )
-                .await;
+                .await?;
             }
             return Ok(outcome);
         }
@@ -154,17 +154,17 @@ impl RemoteSessionData {
     /// 接纳确认后的工作意图提升：`same_payload` 已确认是哪条消息，SQL 只负责
     /// `idle → working` 与「该稳定行仍在」的并发守卫。
     ///
-    /// 远端没有跨行为事务：接纳已提交后提升失败只记录 error，调用方重试同一 ID
-    /// 会得到 `Existing` 并再次尝试，不伪装成接纳失败。
+    /// 远端没有跨行为事务：MQ 行已提交后提升失败必须原样上抛，由调用方用同一 ID 重试
+    /// （重试读到 `Existing` 时再次尝试提升），不能把 `idle + pending` 当成接纳成功。
     async fn promote_work_intent_after_accept(
         &self,
         thread_id: &ThreadId,
         message_id: &str,
         enqueued_at: &str,
         ensures_processing: bool,
-    ) {
+    ) -> SessionResourceResult<()> {
         if !ensures_processing {
-            return;
+            return Ok(());
         }
         let inputs = vec![
             thread_id.as_str().to_owned(),
@@ -179,17 +179,10 @@ impl RemoteSessionData {
                 Value::Text(enqueued_at.to_owned()),
             ],
         );
-        if let Err(error) = self
-            .commit_effects("work_state_promote", &inputs, vec![statement], thread_id)
-            .await
-        {
-            tracing::error!(
-                %thread_id,
-                %message_id,
-                %error,
-                "work intent promote after MQ acceptance failed; retry the same id"
-            );
-        }
+        self.commit_effects("work_state_promote", &inputs, vec![statement], thread_id)
+            .await?;
+        // UPDATE 影响 0 行表示已移交或状态不再是 idle；条件未命中不是失败。
+        Ok(())
     }
 
     /// turn 收尾的条件收敛：返回是否真的写入 `idle`。
