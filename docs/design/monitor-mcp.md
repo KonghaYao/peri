@@ -2,8 +2,8 @@
 
 > **状态**：**已批准目标设计**——v1 command source、标准 MCP Tasks 通信与 P2
 > alert 提醒已实现。提醒由宿主任务订阅轮询 `tasks/get` 的
-> `_meta["peri/monitor"]` 驱动：只有 alert 命中唤醒 owner，任务终态不唤醒但会
-> flush 尚未报告的命中。poll/file/WS source 不在范围。
+> `_meta["peri/monitor"]` 驱动：运行中的 alert 命中与任务终态都会唤醒 owner，
+> 终态提醒同时合并尚未报告的命中。poll/file/WS source 不在范围。
 >
 > **事实源**：`mcp-packages/monitor/src/{server,state,buffer,tools}.rs`（handler、
 > 任务状态机、事件 buffer、工具声明）；注册表与工具声明在
@@ -32,9 +32,9 @@ agent ────────────────────────�
   │                                                                       ▼
   └── 宿主任务订阅轮询 tasks/get（每 2 秒）◀── _meta["peri/monitor"] ── MonitorState
             │                              {alertMatched, lastAlertSeq, label}
-            │ alertMatched > processed
+            │ alertMatched > processed / 终态
             ▼
-      发起会话 inbox：Defer 提醒（30 秒合并；终态 flush）
+      发起会话 inbox：Defer 提醒（运行中 30 秒合并；终态一条并合并未报告命中）
                                         ┌─────────────────────────────────┤
                                         ▼                                 ▼
                                  shell command                      EventBuffer
@@ -229,9 +229,10 @@ working ───▶ cancelling（对外仍 working）──▶ cancelled       
 
 ## 4.1 alert 与提醒（P2）
 
-- **alert-only**：只有 `alert` 命中的事件产生提醒。未命中事件只进 ring buffer，
-  不通知模型。正则使用 `regex` crate（线性时间，无回溯），编译失败或超过 512 字符
-  在启动前拒绝，错误文本为 `invalid alert pattern`。
+- **alert-only（运行中）**：只有 `alert` 命中的事件产生运行中提醒；任务终态始终
+  产生一条终态提醒。未命中事件只进 ring buffer，不通知模型。正则使用 `regex`
+  crate（线性时间，无回溯），编译失败或超过 512 字符在启动前拒绝，错误文本为
+  `invalid alert pattern`。
 - **累计计数**：每次命中同时 `alertMatched += 1` 并更新 `lastAlertSeq`；`seq` 是
   命中事件的序号。服务端不排队、不保存待报告记录，只投影累计值（见 2.5）。
 - **宿主订阅轮询**：`spawn_managed_task_subscription` 每 2 秒 `tasks/get`，仅对
@@ -242,30 +243,37 @@ working ───▶ cancelling（对外仍 working）──▶ cancelled       
   不以首轮值做基线。非终态投递后 `next_allowed = now + 30s`；窗口内
   `alertMatched > processed` 只标记 suppressed，`processed` 不推进。窗口结束后用
   **累计值**投递（不是 delta）。
-- **终态 flush**：观察到终态时，若 `alertMatched > processed`，无条件立即投递最终
-  摘要（绕过 30 秒），并且必须在 `deliver_managed_task_status` /
-  `settle_external` **之前**完成；若 `alertMatched == processed`，不投任何终态提醒，
-  直接结算。终态投递失败或无 inbox 不得阻塞结算（失败一律视为确定性丢弃）。
+- **终态提醒**：观察到终态时先 `take_unreported(alertMatched)` 取走尚未报告的命中
+  并推进 `processed`；累计命中数、未报告数、最近命中 seq 与 label 由
+  `monitor_terminal_alert_note` 合并进**唯一**一条终态提醒正文，随
+  `deliver_managed_task_status` / `settle_external` 投递。终态轮次不再单独投递
+  alert 提醒；`alertMatched == processed` 时正文只含终态与 monitor id。无 inbox 或
+  inbox wake 失败时丢弃终态提醒并继续结算；canonical delivery 失败仍返回错误，
+  任务保持待结算并重试。
 - **投递**：`InboxHandle::push_system_reminder_with_delivery_id(MessageKind::Defer,
   MessageSource::McpNotification, ...)`。只投给订阅参数里的发起会话（子 agent 即
   子 session id），不广播。
-- **delivery id 与正文**：`delivery_id = f(raw_monitor_id, alert_matched)`；正文是
-  `(raw_monitor_id, label, alert_matched, last_alert_seq)` 的纯函数，不含时间、delta、
-  终态标记或 pending 数；同一 `(id, hits)` 逐字相同。终态摘要复用同一函数，不区分
-  终态文案。
-- **失败与离线**：inbox 不存在 → 丢弃、推进 `processed`、warn，不重投、不跨会话；
-  `push_system_reminder_with_delivery_id` 本身不返回错误；reminder 构造失败是确定性
-  失败 → 推进并 warn。meta 缺失或字段类型错误 → 非终态不推进、每任务记录一次 warn、
-  下一轮再试；终态观测遇到该情况只跳过提醒，仍照常执行
-  `deliver_managed_task_status` / `settle_external`——结算不依赖 meta 是否可用，
-  名称回退匹配到的 server 也不会因此把终态任务永远留在 unsettled。
+- **delivery id 与正文**：运行中 alert `delivery_id = f(raw_monitor_id,
+  alert_matched)`，正文是 `(raw_monitor_id, label, alert_matched, last_alert_seq)`
+  的纯函数，不含时间或 delta；同一 `(id, hits)` 逐字相同。终态提醒使用结算的稳定
+  delivery id，重试复用同一 id；合并摘要只由 `(raw_monitor_id, alert_matched,
+  unreported, last_alert_seq, label)` 决定。
+- **失败与离线**：inbox 不存在或 inbox wake 失败 → 运行中命中丢弃、推进
+  `processed`、warn；终态提醒 best-effort 丢弃并返回成功，不重投、不跨会话、
+  不阻塞结算。canonical `delivery.deliver` 失败仍传播错误并保持任务待结算，由订阅
+  循环重试；reminder 构造失败是确定性失败 → 推进并 warn。meta 缺失或字段类型错误 →
+  非终态不推进、每任务记录一次 warn、下一轮再试；终态观测遇到该情况只省略合并计数，
+  仍投递终态提醒并照常执行 `deliver_managed_task_status` / `settle_external`——结算
+  不依赖 meta 是否可用，名称回退匹配到的 server 也不会因此把终态任务永远留在
+  unsettled。
 - **审批**：提醒路径不经过任何交互审批；`monitor_start` 的工具审批覆盖后续提醒。
-- **终态不唤醒**：任务成功、失败、取消或 owner 不可观测的终态只更新任务投影
-  （`tasks/get`、`monitor_list`、TUI Tasks 面板）；只有未报告的 alert 命中会触发
-  终态 flush。命令在命中 alert 后立即退出只产生一条对应计数的提醒，不会出现
-  「alert 提醒 + 任务完成提醒」的重复唤醒。
+- **终态唤醒**：任务成功、失败、取消或 deadline 都会向发起会话投递最多一条
+  best-effort Defer 终态提醒，正文含终态、monitor id，必要时含合并后的命中计数。命令在命中 alert 后
+  立即退出只产生一条合并提醒，不会出现「alert 提醒 + 任务完成提醒」的重复唤醒。
+  运行中的命中仍按 30 秒窗口合并。
 - **owner 定向**：提醒只投递给发起会话；会话已释放（例如子 agent 结束）或没有
-  inbox 时丢弃并推进计数，不重投、不跨会话。
+  inbox 时，运行中命中丢弃并推进计数，终态提醒 best-effort 丢弃，均不重投、
+  不跨会话、不阻塞结算。
 - **可观测性**：delivered / offline_dropped / suppressed / meta_missing 走 tracing
   warn/debug，不新增指标面。
 - **不做**：资源通知 hint、`notifications/resources/updated`、unknown task 快速

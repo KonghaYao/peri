@@ -4,6 +4,7 @@ use std::{
 };
 
 use peri_acp_types::event::BackgroundTaskResult;
+use peri_acp_types::monitor::monitor_terminal_alert_note;
 use peri_acp_types::tasks::{TaskManager, TaskRegistrationTicket};
 use rmcp::{
     model::{DetailedTask, GetTaskParams, MetaObject, TaskPayload},
@@ -104,6 +105,7 @@ impl McpClientPool {
             let mut known_terminal: Option<ObservedTask> = None;
             let mut monitor_alerts = MonitorAlertState::default();
             let mut monitor_meta_warned = false;
+            let mut terminal_note: Option<String> = None;
             loop {
                 let Some(pool) = weak_pool.upgrade() else {
                     break;
@@ -124,22 +126,26 @@ impl McpClientPool {
                 };
                 match observed {
                     Ok(observed) if observed.task.status().is_terminal() => {
-                        // Terminal alert flush must happen before settlement:
-                        // settlement commits the terminal projection and the
-                        // loop then stops polling this task. Delivery is
-                        // best-effort; a missing or malformed projection warns
-                        // once and skips the reminder, but settlement never
-                        // depends on the alert metadata being available.
-                        pool.observe_monitor_alert(
-                            &session_id,
-                            &server,
-                            &raw_task_id,
-                            observed.meta.as_ref(),
-                            true,
-                            &mut monitor_alerts,
-                            &mut monitor_meta_warned,
-                        )
-                        .await;
+                        // A terminal task wakes its initiator exactly once.
+                        // Hits without an earlier alert reminder are merged
+                        // into that reminder, so the terminal round never
+                        // pushes a second alert. The note is cached with the
+                        // terminal observation: a settlement retry reuses the
+                        // same terminal delivery id and body.
+                        let note = if known_terminal.is_some() {
+                            terminal_note.clone()
+                        } else {
+                            let note = pool.consume_monitor_terminal_alert(
+                                &session_id,
+                                &server,
+                                &raw_task_id,
+                                observed.meta.as_ref(),
+                                &mut monitor_alerts,
+                                &mut monitor_meta_warned,
+                            );
+                            terminal_note = note.clone();
+                            note
+                        };
                         known_terminal = Some(observed.clone());
                         let transition_id = format!("{raw_task_id}:terminal");
                         let result = pool
@@ -149,6 +155,7 @@ impl McpClientPool {
                                 &transition_id,
                                 &observed.task,
                                 is_workspace_shell,
+                                note.as_deref(),
                                 manager.as_ref(),
                             )
                             .await;
@@ -168,7 +175,6 @@ impl McpClientPool {
                             &server,
                             &raw_task_id,
                             observed.meta.as_ref(),
-                            false,
                             &mut monitor_alerts,
                             &mut monitor_meta_warned,
                         )
@@ -220,7 +226,8 @@ impl McpClientPool {
         })
     }
 
-    /// Apply one monitor alert observation to the per-task delivery state.
+    /// Apply one running-task monitor alert observation to the per-task
+    /// delivery state.
     ///
     /// A missing or malformed `tasks/get` projection warns once per task, since
     /// the observation cannot be turned into a delivery. That is the whole
@@ -228,14 +235,12 @@ impl McpClientPool {
     /// that merely matches the monitor identity by name can never keep a task
     /// unsettled. Non-terminal observations are retried by the next poll, which
     /// keeps the processed count untouched.
-    #[allow(clippy::too_many_arguments)]
     async fn observe_monitor_alert(
         &self,
         session_id: &str,
         server: &str,
         raw_task_id: &str,
         meta: Option<&MetaObject>,
-        terminal: bool,
         state: &mut MonitorAlertState,
         warned_meta: &mut bool,
     ) {
@@ -251,7 +256,6 @@ impl McpClientPool {
                         server = %server,
                         session_id = %session_id,
                         task_id = %raw_task_id,
-                        terminal,
                         reason,
                         "monitor alert projection unavailable; skipping reminder delivery"
                     );
@@ -261,7 +265,7 @@ impl McpClientPool {
         };
         let now = Instant::now();
         let has_inbox = self.owner_online(session_id);
-        match state.decide(meta.alert_matched, now, terminal, has_inbox) {
+        match state.decide(meta.alert_matched, now, has_inbox) {
             MonitorAlertAction::Nothing => {}
             MonitorAlertAction::Send { hits } => {
                 push_monitor_alert(self, session_id, raw_task_id, &meta, hits).await;
@@ -272,7 +276,6 @@ impl McpClientPool {
                     session_id = %session_id,
                     task_id = %raw_task_id,
                     hits,
-                    terminal,
                     "monitor alert dropped: initiating session has no inbox"
                 );
             }
@@ -288,6 +291,52 @@ impl McpClientPool {
         }
     }
 
+    /// Build the alert summary merged into a terminal monitor reminder.
+    ///
+    /// The terminal reminder is the only wake for a finished task, so the
+    /// unreported count is consumed here rather than delivered as a second
+    /// alert. A missing or malformed projection only drops the counts (warned
+    /// once per task); settlement never depends on the projection. Non-monitor
+    /// servers return `None` without parsing.
+    fn consume_monitor_terminal_alert(
+        &self,
+        session_id: &str,
+        server: &str,
+        raw_task_id: &str,
+        meta: Option<&MetaObject>,
+        state: &mut MonitorAlertState,
+        warned_meta: &mut bool,
+    ) -> Option<String> {
+        if !self.is_monitor_server(server) {
+            return None;
+        }
+        let meta = match parse_monitor_meta(meta) {
+            Ok(meta) => meta,
+            Err(reason) => {
+                if !*warned_meta {
+                    *warned_meta = true;
+                    tracing::warn!(
+                        server = %server,
+                        session_id = %session_id,
+                        task_id = %raw_task_id,
+                        reason,
+                        "monitor alert projection unavailable; terminal reminder omits alert counts"
+                    );
+                }
+                return None;
+            }
+        };
+        let unreported = state.take_unreported(meta.alert_matched);
+        monitor_terminal_alert_note(
+            raw_task_id,
+            meta.alert_matched,
+            unreported,
+            meta.last_alert_seq,
+            meta.label.as_deref(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn deliver_managed_task_status(
         &self,
         server: &str,
@@ -295,10 +344,16 @@ impl McpClientPool {
         transition_id: &str,
         task: &DetailedTask,
         is_workspace_shell: bool,
+        terminal_note: Option<&str>,
         manager: &dyn TaskManager,
     ) -> Result<(), String> {
         let task_id = ticket.task_id();
-        let result = Self::map_task_result(server, task_id, task, is_workspace_shell);
+        let mut result = Self::map_task_result(server, task_id, task, is_workspace_shell);
+        if let Some(note) = terminal_note {
+            // The note carries alert counts merged into this same terminal
+            // wake; a blank line keeps the result statement distinct.
+            result.output = format!("{}\n\n{note}", result.output);
+        }
         if manager
             .settle_external(ticket, transition_id, result)
             .await?

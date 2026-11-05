@@ -457,10 +457,11 @@ impl BaseTool for McpToolBridge {
                                 }));
                     }
                 }
-                // Monitor alert reminders are driven by the task subscription's
-                // `tasks/get` polling; monitor terminal states never wake the
-                // owner (only alert matches do), so the receipt below must not
-                // promise completion delivery.
+                // Monitor reminders are driven by the task subscription's
+                // `tasks/get` polling: alert hits wake while the task runs, and
+                // the terminal state always wakes the initiator once (with any
+                // unreported hits merged into it). The receipt below must still
+                // not promise resumable delivery.
                 let is_monitor = matches!(
                     self.client.source.as_ref(),
                     Some(super::config::ConfigSource::Builtin { instance }) if instance == "monitor"

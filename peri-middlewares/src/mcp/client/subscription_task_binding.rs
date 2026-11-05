@@ -25,6 +25,11 @@ impl McpClientPool {
     /// push only wakes a live initiator. A registered session inbox is preferred
     /// for the wake because it carries the executor wake handle; otherwise the
     /// delivery route lands the reminder in the initiator's own queue.
+    ///
+    /// Monitor tasks also wake on every terminal state: the reminder reports
+    /// the outcome and carries any alert counts merged by the subscription. An
+    /// offline monitor initiator drops that wake instead of failing, because a
+    /// dropped wake must never block settlement.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn deliver_task_reminder(
         &self,
@@ -37,22 +42,16 @@ impl McpClientPool {
         delivery: Option<&Arc<dyn peri_acp_types::tasks::TaskTerminalDelivery>>,
         remote_task_id: &str,
     ) -> Result<(), String> {
-        // 用户裁决：alert 命中才唤醒，否则不告知。monitor 任务的终态仍由
-        // `settle_external` 发布到任务投影（`tasks/get` / `monitor_list` /
-        // TUI Tasks 面板），但不再向 owner inbox 投递任何 reminder；否则
-        // 「无 alert 命中」的正常结束/失败/取消也会拉起模型，且 alert 命中后
-        // 立即退出会与 alert 提醒形成重复唤醒。
-        //
         // 按 server 身份判定：`monitor` 是保留 builtin 实例名；连接句柄的
         // `ConfigSource::Builtin { instance }` 是权威身份（用户配置无法伪造），
         // 因此其他 MCP 实例（workspace / workflow 等）的终态投递语义不变。
-        if self.is_monitor_server(server) {
-            return Ok(());
-        }
+        let is_monitor = self.is_monitor_server(server);
         let is_shell = kind == BgTaskKind::Shell;
         let outcome = result.outcome_label();
         // 标题与正文共用同一终态标签：失败/超时/unresolved 不得显示为已完成。
-        let summary = if is_shell {
+        let summary = if is_monitor {
+            format!("Monitor task {outcome}")
+        } else if is_shell {
             format!("Shell task {outcome}")
         } else if outcome == "succeeded" {
             "MCP task completed".to_string()
@@ -96,6 +95,11 @@ impl McpClientPool {
                 ]),
                 body: if is_shell {
                     result.to_notification()
+                } else if is_monitor {
+                    // The host public id is not accepted by the monitor tools,
+                    // so the wake itself must name the monitor task the model
+                    // has to read; the settlement output follows unchanged.
+                    format!("Monitor task {remote_task_id}.\n{}", result.output)
                 } else {
                     result.output.clone()
                 },
@@ -118,19 +122,43 @@ impl McpClientPool {
         }
         let inbox = self.session_bindings.read().inbox(target_session);
         if let Some(inbox) = inbox {
-            inbox
+            let pushed = inbox
                 .push_system_reminder_with_delivery_id(
                     MessageKind::Defer,
                     source,
                     reminder,
                     delivery_id,
                 )
-                .await
-                .map_err(|error| error.to_string())?;
+                .await;
+            if let Err(error) = pushed {
+                if !is_monitor {
+                    return Err(error.to_string());
+                }
+                // The monitor wake is best-effort even for a live inbox: a
+                // failed push must not leave the task unsettled and retrying.
+                tracing::warn!(
+                    session_id = %target_session,
+                    task_id = %result.task_id,
+                    server = %server,
+                    %error,
+                    "monitor terminal wake dropped after inbox push failure"
+                );
+            }
             return Ok(());
         }
         if delivery.is_some() {
             // Canonical commit already landed; the queue wake is best-effort.
+            return Ok(());
+        }
+        if is_monitor {
+            // Best-effort terminal wake: dropping it must not block settlement
+            // or trigger an unbounded settlement retry.
+            tracing::warn!(
+                session_id = %target_session,
+                task_id = %result.task_id,
+                server = %server,
+                "monitor terminal reminder dropped: initiating session inbox is gone"
+            );
             return Ok(());
         }
         Err("session inbox unavailable".to_owned())
