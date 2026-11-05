@@ -615,3 +615,46 @@ async fn remote_conflicting_reacceptance_does_not_promote_work_state() {
         "失败的接纳不得提升工作意图"
     );
 }
+
+/// 同 ID 重试时存储侧文本可能被重新序列化；`same_payload` 判定为同一条时仍须提升。
+#[tokio::test]
+async fn remote_normalized_retry_promotes_work_intent() {
+    use peri_acp_types::thread::WorkState;
+
+    let fixture = fixture().await;
+    let thread = thread("mq-thread");
+    let id = MessageId::new();
+    fixture
+        .data
+        .set_work_state(&thread, WorkState::Idle)
+        .await
+        .unwrap();
+    fixture
+        .data
+        .mq_enqueue(&thread, input(id, "wake"))
+        .await
+        .unwrap();
+    fixture
+        .data
+        .set_work_state(&thread, WorkState::Idle)
+        .await
+        .unwrap();
+    // 语义相同、文本不同：模拟存储侧重新序列化。
+    sqlx::query("UPDATE thread_mq SET payload_json = payload_json || ' ' WHERE id = ?1")
+        .bind(id.as_uuid().to_string())
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+
+    let again = fixture
+        .data
+        .mq_enqueue(&thread, input(id, "wake"))
+        .await
+        .unwrap();
+    assert_eq!(again.disposition, MqEnqueueDisposition::Existing);
+    assert_eq!(
+        fixture.data.load_meta(&thread).await.unwrap().work_state,
+        WorkState::Working,
+        "same_payload 确认的同一条消息必须提升工作意图"
+    );
+}

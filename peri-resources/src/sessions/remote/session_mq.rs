@@ -36,19 +36,16 @@ use super::session_codec::corrupt;
 use super::session_data::{invalid_input, not_found, RemoteSessionData};
 use super::sql::{text_at, StatementSpec};
 
-/// 接纳 `EnsureProcessing` 消息时维护目标工作意图：只把 `idle` 提升为 `working`。
+/// 接纳确认后的工作意图提升：只把 `idle` 提升为 `working`，且仅当该消息仍以
+/// 本次接纳的稳定行存在（并发移交/替换后不再提升）。
 ///
-/// 已移交历史的消息不再要求继续处理，`NOT EXISTS` 排除这类重复接纳；`stopped`
-/// 不被被动回调解除（设计 §5.2）。只有本次接纳的消息仍以同一内容在 MQ 中
-/// （新插入或既有同 ID）才提升；同 ID 冲突不改变工作意图。
+/// 是否属于「同一条消息」由调用方用 `same_payload` 判定；SQL 只做并发守卫，
+/// 不用 payload 文本比较（重序列化后的文本可能不同）。
 const PROMOTE_WORK_INTENT_SQL: &str = "UPDATE threads SET work_state = 'working'
     WHERE id = ?1 AND work_state = 'idle'
-      AND NOT EXISTS (SELECT 1 FROM messages WHERE message_id = ?2)
       AND EXISTS (
         SELECT 1 FROM thread_mq
-        WHERE thread_id = ?1 AND id = ?2
-          AND kind = ?3 AND source = ?4 AND policy_json = ?5
-          AND payload_json = ?6 AND original_draft IS ?7
+        WHERE thread_id = ?1 AND id = ?2 AND enqueued_at = ?3
       )";
 
 /// turn 收尾：没有待处理的 `EnsureProcessing` 条目才把 `working` 收敛为 `idle`。
@@ -119,36 +116,80 @@ impl RemoteSessionData {
             original_draft: input.original_draft.as_deref(),
         };
         // 一次条件写入：0 行只表示「已有同 ID 事实」，回到读取判定，不重试出第二行。
-        let mut effects = vec![insert];
-        if ensures_processing {
-            effects.push(StatementSpec::new(
-                PROMOTE_WORK_INTENT_SQL,
-                vec![
-                    Value::Text(thread_id.as_str().to_owned()),
-                    Value::Text(message_id.clone()),
-                    Value::Text(kind.clone()),
-                    Value::Text(source.clone()),
-                    Value::Text(policy.clone()),
-                    Value::Text(payload.clone()),
-                    super::session_codec::optional_text(incoming.original_draft),
-                ],
-            ));
-        }
         let counts = self
-            .commit_effects("mq_enqueue", &inputs, effects, thread_id)
+            .commit_effects("mq_enqueue", &inputs, vec![insert], thread_id)
             .await?;
         if counts.first() == Some(&1) {
+            let entry = decode_entry(RawMqRow { ..incoming })?;
+            self.promote_work_intent_after_accept(
+                thread_id,
+                &message_id,
+                &enqueued_at,
+                ensures_processing,
+            )
+            .await;
             return Ok(MqEnqueueOutcome {
                 disposition: MqEnqueueDisposition::Inserted,
-                entry: decode_entry(RawMqRow { ..incoming })?,
+                entry,
             });
         }
         if let Some(outcome) = self.enqueue_mq_fact(thread_id, &incoming).await? {
+            // 只有 same_payload 确认是同一条消息才提升；同 ID 冲突与已移交都不提升。
+            if outcome.disposition == MqEnqueueDisposition::Existing {
+                self.promote_work_intent_after_accept(
+                    thread_id,
+                    &message_id,
+                    &outcome.entry.enqueued_at,
+                    ensures_processing,
+                )
+                .await;
+            }
             return Ok(outcome);
         }
         Err(conflict(
             "MQ enqueue raced the same message id; read the id back before retrying",
         ))
+    }
+
+    /// 接纳确认后的工作意图提升：`same_payload` 已确认是哪条消息，SQL 只负责
+    /// `idle → working` 与「该稳定行仍在」的并发守卫。
+    ///
+    /// 远端没有跨行为事务：接纳已提交后提升失败只记录 error，调用方重试同一 ID
+    /// 会得到 `Existing` 并再次尝试，不伪装成接纳失败。
+    async fn promote_work_intent_after_accept(
+        &self,
+        thread_id: &ThreadId,
+        message_id: &str,
+        enqueued_at: &str,
+        ensures_processing: bool,
+    ) {
+        if !ensures_processing {
+            return;
+        }
+        let inputs = vec![
+            thread_id.as_str().to_owned(),
+            message_id.to_owned(),
+            enqueued_at.to_owned(),
+        ];
+        let statement = StatementSpec::new(
+            PROMOTE_WORK_INTENT_SQL,
+            vec![
+                Value::Text(thread_id.as_str().to_owned()),
+                Value::Text(message_id.to_owned()),
+                Value::Text(enqueued_at.to_owned()),
+            ],
+        );
+        if let Err(error) = self
+            .commit_effects("work_state_promote", &inputs, vec![statement], thread_id)
+            .await
+        {
+            tracing::error!(
+                %thread_id,
+                %message_id,
+                %error,
+                "work intent promote after MQ acceptance failed; retry the same id"
+            );
+        }
     }
 
     /// turn 收尾的条件收敛：返回是否真的写入 `idle`。
