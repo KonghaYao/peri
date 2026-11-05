@@ -32,7 +32,7 @@ use std::time::Instant;
 /// `segments` records this chronological order so that `sync_cache` can
 /// create separate `TuiAssistantBubble` entries for text before and after each
 /// tool/sub-agent boundary, instead of merging everything into one fat bubble.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CurrentTurn {
     /// Accumulated assistant text for the current turn.
     pub text: String,
@@ -135,34 +135,6 @@ pub struct CurrentTurn {
     /// 时调用 `sync_cache` 重同步。流式变更只置位，由 publication、freeze、
     /// terminal 或明确读取形成 projection barrier。
     cache_dirty: bool,
-}
-
-impl Default for CurrentTurn {
-    fn default() -> Self {
-        Self {
-            text: String::new(),
-            reasoning: String::new(),
-            tool_cards: Vec::new(),
-            committed: false,
-            active: false,
-            deactivated: false,
-            subagents: Vec::new(),
-            pending_subagent_groups: Vec::new(),
-            pending_notes: Vec::new(),
-            segments: Vec::new(),
-            last_text_flush: 0,
-            last_reasoning_flush: 0,
-            last_message_id: None,
-            open_text_hash: 0,
-            open_reasoning_hash: 0,
-            reasoning_started_at: None,
-            text_started_at: None,
-            trailing_frozen: None,
-            trailing_reasoning_frozen_ms: None,
-            cached_view_models: im::Vector::new(),
-            cache_dirty: false,
-        }
-    }
 }
 
 impl CurrentTurn {
