@@ -1176,9 +1176,9 @@ pub trait SessionResources: Send + Sync {
     /// `Existing`/`AlreadyHandedOff`。
     ///
     /// 原子性按后端分档：
-    /// - 具备跨行为事务的后端（本机 SQLite）覆写为单事务：失败时 child 状态、
-    ///   `work_state` 与目标 MQ 都不变。
-    /// - 组合默认实现（远端、嵌入、内存）依次调用 [`Self::update_session_meta`]、
+    /// - 具备跨行为事务的后端（本机 SQLite、远端托管批）覆写为单事务/单批：失败时
+    ///   child 状态、`work_state` 与目标 MQ 都不变。
+    /// - 组合默认实现（嵌入、内存、其他无事务后端）依次调用 [`Self::update_session_meta`]、
     ///   [`Self::set_work_state`] 与 [`Self::mq_enqueue`]：只保证「失败前不宣称完成」，
     ///   进程在两步之间退出可能留下已写的终态。调用方不得把这里的成功当成事务提交的
     ///   证据；见 `docs/design/session-durability.md` §5.3。
