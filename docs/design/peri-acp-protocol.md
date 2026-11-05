@@ -95,7 +95,8 @@ reminder 出口），客户端据此把通知与那次 load 配对；历史页�
 - `Corrupt` / `ReadOnly` / `NotFound` 使会话不可执行：服务端在内存中设置执行阻断，`session/prompt` 返回 `-32017`，`data.reason = "recovery_execution_blocked"`（附 `kind`/`threadId`/`detail`），模型与 continuation 均不启动。
 - `Unavailable` / `Superseded` / `Unsupported` 不阻断：用户可显式发送消息继续，服务端仍按正常准入复核。
 - 每次新的 load/resume 重新尝试恢复并按本次结果重设阻断；成功或可重试失败清除旧阻断。阻断不持久化。
-- 只读 Store 下的 `session/load` 仍在回放前明确拒绝（`ReadOnlyStore`），本版本不提供经 `-r` 浏览只读历史；只读历史查询走独立入口。
+- `_meta.peri.contextUsage = { tokens, window }` 随 `session/load` 与 `session/resume` 成功响应返回：`tokens` 是 `threads.context_usage_tokens` 的最后提交快照（`null` 表示未知，不是零占用），`window` 取当前有效配置的上下文窗口。进入会话先展示该值，运行期由模型 usage 覆盖。
+- 只读/不可执行 Store 的 `session/load` / `session/resume` 不再失败整次请求：服务端发布无执行环境的视图态，历史与 `_meta.peri.contextUsage` 照常返回，`peri.recovery` 报 `failed` + `executionBlocked=true`；该会话的全部执行入口返回 `-32017`。视图态不写库，`session/close` 即可释放。
 
 #### 2.1.2 历史窗口 `peri.historyWindowV1`（默认关闭）
 

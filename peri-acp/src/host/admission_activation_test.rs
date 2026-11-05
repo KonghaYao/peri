@@ -230,6 +230,7 @@ async fn stop_after_atomic_admission_cancels_registered_token_before_model_start
             &harness.cfg
         )
         .await
+        .continuation
         .is_none());
         token
     };

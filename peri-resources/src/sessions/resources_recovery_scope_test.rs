@@ -71,6 +71,68 @@ async fn set_work(facade: &SessionResourcesImpl, id: &str, state: WorkState) {
     facade.set_work_state(&id.to_owned(), state).await.unwrap();
 }
 
+/// 两个根各自 `working`：进入 A 只读 A 子树，B 的范围不被检查（设计 §9 #1）。
+#[tokio::test]
+async fn sibling_roots_are_isolated() {
+    let fixture = Fixture::new().await;
+    let workspace = fixture.workspace().await;
+    create_root(&fixture.facade, &workspace, "A").await;
+    create_root(&fixture.facade, &workspace, "B").await;
+    save_child(
+        &fixture.facade,
+        &workspace,
+        "A1",
+        "A",
+        "A",
+        "2026-09-26T00:00:01Z",
+    )
+    .await;
+    save_child(
+        &fixture.facade,
+        &workspace,
+        "B1",
+        "B",
+        "B",
+        "2026-09-26T00:00:02Z",
+    )
+    .await;
+    for thread in ["A", "A1", "B", "B1"] {
+        set_work(&fixture.facade, thread, WorkState::Working).await;
+    }
+
+    for entered in ["A", "A1"] {
+        let scope = fixture
+            .facade
+            .load_recovery_scope(&entered.to_owned())
+            .await
+            .unwrap();
+        assert_eq!(scope.root_thread_id, "A");
+        assert_eq!(
+            scope
+                .candidates
+                .iter()
+                .map(|candidate| candidate.thread_id.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "A1"],
+            "进入 A 范围不得看到 B 的 working"
+        );
+    }
+    let scope = fixture
+        .facade
+        .load_recovery_scope(&"B".to_owned())
+        .await
+        .unwrap();
+    assert_eq!(scope.root_thread_id, "B");
+    assert_eq!(
+        scope
+            .candidates
+            .iter()
+            .map(|candidate| candidate.thread_id.as_str())
+            .collect::<Vec<_>>(),
+        ["B", "B1"]
+    );
+}
+
 /// A(root) → B → D，A → C：只有 `working` 的 thread 进候选，子树不变。
 #[tokio::test]
 async fn scope_reads_the_working_subtree_from_any_entry_thread() {

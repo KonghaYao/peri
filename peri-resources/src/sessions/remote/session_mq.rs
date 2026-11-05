@@ -36,6 +36,29 @@ use super::session_codec::corrupt;
 use super::session_data::{invalid_input, not_found, RemoteSessionData};
 use super::sql::{text_at, StatementSpec};
 
+/// 接纳 `EnsureProcessing` 消息时维护目标工作意图：只把 `idle` 提升为 `working`。
+///
+/// 已移交历史的消息不再要求继续处理，`NOT EXISTS` 排除这类重复接纳；`stopped`
+/// 不被被动回调解除（设计 §5.2）。
+const PROMOTE_WORK_INTENT_SQL: &str = "UPDATE threads SET work_state = 'working'
+    WHERE id = ?1 AND work_state = 'idle'
+      AND NOT EXISTS (SELECT 1 FROM messages WHERE message_id = ?2)";
+
+/// turn 收尾：没有待处理的 `EnsureProcessing` 条目才把 `working` 收敛为 `idle`。
+///
+/// 判定与写入同一条语句；`policy_json` 的 `EnsureProcessing` 形态由
+/// `MessagePolicy::ensures_processing()` 的序列化固定（required + model_visible +
+/// activation.kind = ensure_processing）。`stopped` 不被收尾解除（设计 §5.1）。
+const SETTLE_WORK_STATE_SQL: &str = "UPDATE threads SET work_state = 'idle'
+    WHERE id = ?1 AND work_state = 'working'
+      AND NOT EXISTS (
+        SELECT 1 FROM thread_mq
+        WHERE thread_id = ?1
+          AND json_extract(policy_json, '$.requirement') = 'required'
+          AND json_extract(policy_json, '$.model_visible') = 1
+          AND json_extract(policy_json, '$.activation.kind') = 'ensure_processing'
+      )";
+
 impl RemoteSessionData {
     pub(super) async fn enqueue_mq(
         &self,
@@ -54,6 +77,7 @@ impl RemoteSessionData {
         let message_id = label(input.id);
         let payload = payload_json(&input.payload)?;
         let policy = policy_json(&input.policy);
+        let ensures_processing = input.policy.ensures_processing();
         let kind = kind_token(input.kind)?;
         let source = source_token(&input.source)?;
         let enqueued_at = enqueued_at_now();
@@ -88,8 +112,18 @@ impl RemoteSessionData {
             original_draft: input.original_draft.as_deref(),
         };
         // 一次条件写入：0 行只表示「已有同 ID 事实」，回到读取判定，不重试出第二行。
+        let mut effects = vec![insert];
+        if ensures_processing {
+            effects.push(StatementSpec::new(
+                PROMOTE_WORK_INTENT_SQL,
+                vec![
+                    Value::Text(thread_id.as_str().to_owned()),
+                    Value::Text(message_id.clone()),
+                ],
+            ));
+        }
         let counts = self
-            .commit_effects("mq_enqueue", &inputs, vec![insert], thread_id)
+            .commit_effects("mq_enqueue", &inputs, effects, thread_id)
             .await?;
         if counts.first() == Some(&1) {
             return Ok(MqEnqueueOutcome {
@@ -103,6 +137,26 @@ impl RemoteSessionData {
         Err(conflict(
             "MQ enqueue raced the same message id; read the id back before retrying",
         ))
+    }
+
+    /// turn 收尾的条件收敛：返回是否真的写入 `idle`。
+    pub(super) async fn settle_work_state_after_turn_mq(
+        &self,
+        thread_id: &ThreadId,
+    ) -> SessionResourceResult<bool> {
+        let inputs = vec![thread_id.as_str().to_owned()];
+        let counts = self
+            .commit_effects(
+                "work_state_settle",
+                &inputs,
+                vec![StatementSpec::new(
+                    SETTLE_WORK_STATE_SQL,
+                    vec![Value::Text(thread_id.as_str().to_owned())],
+                )],
+                thread_id,
+            )
+            .await?;
+        Ok(counts.first() == Some(&1))
     }
 
     /// 条件插入没命中时的事实判定：历史优先，其次 MQ。

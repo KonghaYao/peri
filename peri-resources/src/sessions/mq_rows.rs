@@ -28,6 +28,13 @@ pub(in crate::sessions) const SELECT_THREAD_MQ_BY_ID_SQL: &str =
     "SELECT thread_id, id, enqueued_at, kind, source, policy_json, payload_json, original_draft
     FROM thread_mq WHERE id = ?1";
 
+/// 收尾判定用：只读待发行的策略列，不解释正文。
+///
+/// 行在 `thread_mq` 里就是「尚未移交」。工作意图收尾据此确认没有仍要求继续处理
+/// 的新工作（`docs/design/session-durability.md` §5.1）。
+pub(in crate::sessions) const SELECT_THREAD_MQ_POLICIES_SQL: &str =
+    "SELECT policy_json FROM thread_mq WHERE thread_id = ?1";
+
 /// 条件插入：历史或 MQ 已有同 ID、或目标 thread 不存在时不插入（影响 0 行）。
 ///
 /// 与 Receive 竞争同一 ID 时，这条 `WHERE NOT EXISTS` 是唯一的裁决点——不能先查后插，
@@ -150,6 +157,17 @@ pub(in crate::sessions) fn decode_entry(row: RawMqRow<'_>) -> SessionResourceRes
         policy,
         original_draft: row.original_draft.map(str::to_owned),
     })
+}
+
+/// 行内策略是否要求「继续处理」：收尾判定复用同一份领域规则，不按来源或 kind 猜。
+///
+/// 读不懂的策略按损坏失败关闭：把一条待发行当成无需处理会让收尾提前写 `idle`。
+pub(in crate::sessions) fn policy_ensures_processing(
+    policy_json: &str,
+) -> SessionResourceResult<bool> {
+    serde_json::from_str::<peri_acp_types::session::MessagePolicy>(policy_json)
+        .map(|policy| policy.ensures_processing())
+        .map_err(|_| corrupt("MQ row has an unreadable message policy"))
 }
 
 /// 投影过滤：输入必须已按 `(enqueued_at, id)` 升序（SQL 负责），这里只做收敛。

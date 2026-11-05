@@ -920,3 +920,79 @@ async fn shell_task_list_without_task_state_reports_unknown() {
     drop(client);
     server_task.await.expect("join server");
 }
+
+/// 恢复协调器以 thread id 查询（设计 §6）；session id 与 thread id 都是直接 owner，
+/// 等值匹配即可看到该任务，不相干 owner 仍是 known-empty。
+#[tokio::test]
+async fn shell_task_list_matches_session_and_thread_owner() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let server = WorkspaceMcpServer::standalone(dir.path().to_string_lossy(), false);
+    let (client, server_task) = connect(
+        server.clone(),
+        ClientCapabilities::builder().enable_tasks().build(),
+    )
+    .await;
+
+    let mut request = CallToolRequestParams::new("Bash").with_arguments(
+        serde_json::json!({"command": "sleep 30", "run_in_background": true})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    request.meta = Some(scope_meta("session-a", "thread-a"));
+    let CallToolResponse::Task(task) = client
+        .peer()
+        .call_tool_once(request)
+        .await
+        .expect("owned task")
+    else {
+        panic!("task handle")
+    };
+
+    for owner in ["session-a", "thread-a"] {
+        let listed = shell_task_list(&client, Some(owner)).await;
+        assert_eq!(listed["unknown"], serde_json::json!(false));
+        let tasks = listed["tasks"].as_array().expect("tasks array");
+        assert_eq!(
+            tasks.len(),
+            1,
+            "{owner} 必须看到直接归属的存活任务: {listed}"
+        );
+        assert_eq!(tasks[0]["taskId"], task.task.task_id);
+    }
+
+    let listed = shell_task_list(&client, Some("thread-other")).await;
+    assert_eq!(listed["unknown"], serde_json::json!(false));
+    assert_eq!(listed["tasks"], serde_json::json!([]));
+
+    let mut cancel = CancelTaskParams::new(&task.task.task_id);
+    cancel.meta = Some(owner_meta("session-a"));
+    client
+        .peer()
+        .cancel_task(cancel)
+        .await
+        .expect("cancel owned task");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let by_thread = shell_task_list(&client, Some("thread-a")).await;
+            let by_session = shell_task_list(&client, Some("session-a")).await;
+            if by_thread["tasks"] == serde_json::json!([])
+                && by_session["tasks"] == serde_json::json!([])
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("terminal tasks leave the live list");
+
+    drop(client);
+    server_task.await.expect("join server");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), server.shutdown_shell_tasks())
+            .await
+            .expect("process cleanup deadline"),
+        Some(peri_acp_types::tasks::TaskShutdownReport::Complete)
+    );
+}

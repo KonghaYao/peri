@@ -441,3 +441,138 @@ async fn query_clear_and_tree_deletion_follow_the_thread_scope() {
         .unwrap();
     assert_eq!(rows, 0);
 }
+
+/// 远端接纳 `EnsureProcessing` 消息同样维护工作意图：`idle → working`，不解除 `stopped`。
+#[tokio::test]
+async fn remote_acceptance_promotes_idle_without_unlocking_stopped() {
+    use peri_acp_types::thread::WorkState;
+
+    let fixture = fixture().await;
+    let thread = thread("mq-thread");
+
+    fixture
+        .data
+        .set_work_state(&thread, WorkState::Idle)
+        .await
+        .unwrap();
+    fixture
+        .data
+        .mq_enqueue(&thread, input(MessageId::new(), "wake"))
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.data.load_meta(&thread).await.unwrap().work_state,
+        WorkState::Working
+    );
+
+    fixture
+        .data
+        .set_work_state(&thread, WorkState::Stopped)
+        .await
+        .unwrap();
+    fixture
+        .data
+        .mq_enqueue(&thread, input(MessageId::new(), "stopped-stays"))
+        .await
+        .unwrap();
+    assert_eq!(
+        fixture.data.load_meta(&thread).await.unwrap().work_state,
+        WorkState::Stopped,
+        "EnsureProcessing 也不解除显式停止"
+    );
+}
+
+/// 已移交历史的消息重复接纳不能重新授予执行资格。
+#[tokio::test]
+async fn remote_reaccepting_handed_off_message_keeps_idle() {
+    use peri_acp_types::thread::WorkState;
+
+    let fixture = fixture().await;
+    let thread = thread("mq-thread");
+    let id = MessageId::new();
+    let enqueued = fixture
+        .data
+        .mq_enqueue(&thread, input(id, "wake"))
+        .await
+        .unwrap();
+    fixture
+        .data
+        .mq_receive(
+            &thread,
+            selection(&enqueued.entry, MqReceiveDisposition::Commit),
+        )
+        .await
+        .unwrap();
+    fixture
+        .data
+        .set_work_state(&thread, WorkState::Idle)
+        .await
+        .unwrap();
+
+    let again = fixture
+        .data
+        .mq_enqueue(&thread, input(id, "wake"))
+        .await
+        .unwrap();
+    assert_eq!(again.disposition, MqEnqueueDisposition::AlreadyHandedOff);
+    assert_eq!(
+        fixture.data.load_meta(&thread).await.unwrap().work_state,
+        WorkState::Idle
+    );
+}
+
+/// 收尾收敛：待处理的 `EnsureProcessing` 阻止写 `idle`；`stopped` 不被解除。
+#[tokio::test]
+async fn remote_settle_after_turn_respects_pending_work_and_stop() {
+    use peri_acp_types::thread::WorkState;
+
+    let fixture = fixture().await;
+    let thread = thread("mq-thread");
+
+    fixture
+        .data
+        .set_work_state(&thread, WorkState::Working)
+        .await
+        .unwrap();
+    fixture
+        .data
+        .mq_enqueue(&thread, input(MessageId::new(), "still-pending"))
+        .await
+        .unwrap();
+    assert!(!fixture
+        .data
+        .settle_work_state_after_turn(&thread)
+        .await
+        .unwrap());
+    assert_eq!(
+        fixture.data.load_meta(&thread).await.unwrap().work_state,
+        WorkState::Working,
+        "仍有待处理工作时不写 idle"
+    );
+
+    fixture.data.mq_clear(&thread).await.unwrap();
+    assert!(fixture
+        .data
+        .settle_work_state_after_turn(&thread)
+        .await
+        .unwrap());
+    assert_eq!(
+        fixture.data.load_meta(&thread).await.unwrap().work_state,
+        WorkState::Idle
+    );
+
+    fixture
+        .data
+        .set_work_state(&thread, WorkState::Stopped)
+        .await
+        .unwrap();
+    assert!(!fixture
+        .data
+        .settle_work_state_after_turn(&thread)
+        .await
+        .unwrap());
+    assert_eq!(
+        fixture.data.load_meta(&thread).await.unwrap().work_state,
+        WorkState::Stopped
+    );
+}

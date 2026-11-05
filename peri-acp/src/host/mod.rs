@@ -230,6 +230,11 @@ pub(crate) struct SessionState {
     pub(crate) continuation_epoch: u64,
     pub(crate) continuation_in_flight: bool,
     pub(crate) continuation_mq_steering_pending: bool,
+    /// 本轮属于冷 child 恢复结算：`finish_prompt_turn` 跳过独立的 `work_state`
+    /// 写入，由 prompt dispatch 在 turn 后统一 `finalize_child_terminal`（§5.3）。
+    pub(crate) recovery_settlement_pending: bool,
+    /// 只读/不可执行 store 的视图态：没有执行环境，不参与恢复启动。
+    pub(crate) view_only: bool,
     // ── Frozen session data (populated at creation, immutable thereafter) ──
     pub(crate) frozen: Option<crate::session::executor::FrozenSessionData>,
     /// Recall items from previous turn (injected as <system-reminder> in next user message).
@@ -244,8 +249,48 @@ pub(crate) struct SessionState {
 }
 
 impl SessionState {
+    /// 只读/不可执行 store 的视图态：可回放历史与占用，但没有任何执行环境。
+    ///
+    /// 这是独立的只读视图生命周期（设计 §3）：不注册可执行 runtime 的 MCP 池、
+    /// 不领取 AgentPool；`session/prompt` 由 runtime 上的执行阻断返回 `-32017`。
+    pub(crate) fn view_only(session_id: String, thread_id: String, cwd: String) -> Self {
+        Self {
+            session_id,
+            thread_id,
+            cwd,
+            environment: None,
+            closing: false,
+            // 视图态没有热态正文：回放从存储读取，不让空集合冒充空会话。
+            context_ownership: ContextOwnership::ReloadRequired,
+            history_payloads: Vec::new(),
+            structure_version: 0,
+            session_generation: next_session_generation(),
+            history_window: Default::default(),
+            event_health: Default::default(),
+            cancel_token: None,
+            interaction_gate: Arc::new(tokio::sync::Mutex::new(())),
+            host_request_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            continuation_armed: false,
+            continuation_epoch: 0,
+            continuation_in_flight: false,
+            continuation_mq_steering_pending: false,
+            recovery_settlement_pending: false,
+            view_only: true,
+            frozen: None,
+            recall_items: Vec::new(),
+            agent_pool: crate::session::agent_pool::AgentPool::new(),
+            title: None,
+            tags: Vec::new(),
+        }
+    }
+
     pub(crate) fn event_health(&self) -> peri_acp_types::event_v2::BusHealthSnapshot {
         self.event_health.snapshot()
+    }
+
+    /// 只读/不可执行 store 的视图态：没有执行环境，不参与恢复启动。
+    pub(crate) fn is_view_only(&self) -> bool {
+        self.view_only
     }
 
     /// 测试专用：模拟结构/代次变化并撤销窗口票据。

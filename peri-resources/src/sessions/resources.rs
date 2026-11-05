@@ -872,6 +872,11 @@ impl SessionResources for SessionResourcesImpl {
             .await
     }
 
+    async fn settle_work_state_after_turn(&self, id: &ThreadId) -> SessionResourceResult<bool> {
+        self.gate
+            .with_mutation(id, || self.gate.data().settle_work_state_after_turn(id))
+            .await
+    }
     async fn set_context_usage(
         &self,
         id: &ThreadId,
@@ -881,13 +886,11 @@ impl SessionResources for SessionResourcesImpl {
             .with_mutation(id, || self.gate.data().set_context_usage(id, tokens))
             .await
     }
-
     async fn delete_session_tree(&self, id: &ThreadId) -> SessionResourceResult<()> {
         self.gate
             .with_mutation(id, || self.gate.data().delete_tree(id))
             .await
     }
-
     async fn recover_session_persistence(
         &self,
         id: &ThreadId,

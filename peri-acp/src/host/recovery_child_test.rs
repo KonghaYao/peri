@@ -4,8 +4,9 @@
 //! 与 `recovery_behavior_test.rs` 同夹具；本文件只覆盖 child 路径。
 
 use super::*;
+use crate::host::recovery::{deliver_child_turn, ChildTurnOutcome};
 use peri_acp_types::session::{MessageKind, MessageSource};
-use peri_acp_types::thread::WorkState;
+use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
 
 /// 该 thread 的 MQ 行（不按来源过滤）。
 async fn entries(harness: &RecoveryHarness, thread: &str) -> Vec<peri_acp_types::session::MqEntry> {
@@ -40,6 +41,19 @@ fn child_streamed(harness: &RecoveryHarness, child: &str) -> bool {
                 && params["update"]["sessionUpdate"] == "agent_message_chunk"
                 && params.to_string().contains("recovered")
         })
+}
+
+/// child 的持久事实：终态与续跑意图。
+async fn settled_meta(
+    harness: &RecoveryHarness,
+    thread: &str,
+) -> peri_acp_types::thread::ThreadMeta {
+    harness
+        .cfg
+        .session_resources
+        .load_session_meta(&thread.to_owned())
+        .await
+        .unwrap()
 }
 
 async fn set_cwd(db_path: &std::path::Path, thread: &str, cwd: &str) {
@@ -117,16 +131,16 @@ async fn idle_root_recovers_working_child_and_only_the_child_runs_a_turn() {
     let body = reminder_body(&notices[0]);
     assert!(body.contains("child-b"), "通知必须指明来源 thread：{body}");
     // child 的收尾是 durable 的：正常结束后不再有自动续跑意图。
+    let meta = settled_meta(&harness, "child-b").await;
     assert_eq!(
-        harness
-            .cfg
-            .session_resources
-            .load_session_meta(&"child-b".to_owned())
-            .await
-            .unwrap()
-            .work_state,
+        meta.work_state,
         WorkState::Idle,
         "child turn 结束后不得残留 working"
+    );
+    assert_eq!(
+        meta.agent_status,
+        AgentStatus::Done,
+        "恢复 child 的 end_turn 必须提交 Done 终态"
     );
 }
 
@@ -353,5 +367,137 @@ async fn child_assembly_failure_is_reported_as_skip_without_failing_the_entry() 
             .work_state,
         WorkState::Working,
         "失败不得改写工作意图"
+    );
+}
+
+/// 7. 恢复 turn 被取消：终态 `cancelled`、工作意图 `stopped`，结果仍入父 MQ。
+#[tokio::test]
+async fn recovered_child_cancelled_settles_cancelled_and_stopped() {
+    let harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-b", &root).await;
+    harness.set_working("child-b").await;
+    let recovery = harness.recovery();
+    recovery.enter(&root).await.unwrap();
+
+    deliver_child_turn(
+        &harness.cfg,
+        &harness.sessions,
+        "child-b",
+        &ThreadId::from(root.clone()),
+        ChildTurnOutcome::Finished {
+            stop_reason: "cancelled",
+        },
+    )
+    .await;
+
+    let meta = settled_meta(&harness, "child-b").await;
+    assert_eq!(meta.agent_status, AgentStatus::Cancelled);
+    assert_eq!(meta.work_state, WorkState::Stopped);
+    assert_eq!(parent_notices(&harness, &root).await.len(), 1);
+}
+
+/// 8. 恢复 turn 明确失败：终态 `error`、工作意图 `idle`，结果仍入父 MQ。
+#[tokio::test]
+async fn recovered_child_failure_settles_error_and_idle() {
+    let harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-b", &root).await;
+    harness.set_working("child-b").await;
+    let recovery = harness.recovery();
+    recovery.enter(&root).await.unwrap();
+
+    deliver_child_turn(
+        &harness.cfg,
+        &harness.sessions,
+        "child-b",
+        &ThreadId::from(root.clone()),
+        ChildTurnOutcome::Failed {
+            code: -32603,
+            message: "recovered child failed",
+        },
+    )
+    .await;
+
+    let meta = settled_meta(&harness, "child-b").await;
+    assert_eq!(meta.agent_status, AgentStatus::Error);
+    assert_eq!(meta.work_state, WorkState::Idle);
+    assert_eq!(parent_notices(&harness, &root).await.len(), 1);
+}
+
+/// 9. run_prompt 早失败（未进入 finish_prompt_turn）：本轮没有可结算的终态，
+///    不伪造完成/失败，也不投递父级结果；保留 working 与恢复提醒供下次进入重试。
+#[tokio::test]
+async fn recovered_child_early_failure_keeps_intent_without_fake_terminal() {
+    let mut harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-b", &root).await;
+    harness.set_working("child-b").await;
+    harness.spawn_continuation_scheduler();
+    let recovery = harness.recovery();
+
+    let report = recovery.enter(&root).await.unwrap();
+    assert_eq!(report.recovered, vec!["child-b".to_owned()]);
+    // 装配成功后移除冻结上下文：run_prompt 会在进入收尾前失败。
+    {
+        let mut states = harness.sessions.lock().await;
+        states.get_mut("child-b").unwrap().frozen = None;
+    }
+
+    recovery.launch(&report).await;
+    // 早失败不产生终态结算，因此没有父级结果通知可等；等调度器收到续跑请求后给
+    // 失败路径留出完成窗口。
+    wait_for("续跑请求进入调度器", || async {
+        harness.order.lock().unwrap().contains(&"continuation")
+    })
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let meta = settled_meta(&harness, "child-b").await;
+    // 本次 attempt 未进入 Receive：不伪造终态，也不向父级投递结果事实；保留
+    // `working` 与原提醒，供下一次显式进入重试（设计 §5.1）。
+    assert_eq!(meta.agent_status, AgentStatus::Active);
+    assert_eq!(meta.work_state, WorkState::Working);
+    assert!(
+        entries(&harness, "child-b")
+            .await
+            .iter()
+            .any(|entry| entry.policy.ensures_processing()),
+        "早失败不会消费恢复提醒"
+    );
+    assert!(parent_notices(&harness, &root).await.is_empty());
+    assert!(!harness._mock.matched(), "早失败不得调用模型");
+}
+
+/// 10. 重复结算：同一 child 的终态只投递一次结果，重复调用是 no-op。
+#[tokio::test]
+async fn repeated_recovered_child_settlement_is_idempotent() {
+    let harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-b", &root).await;
+    harness.set_working("child-b").await;
+    let recovery = harness.recovery();
+    recovery.enter(&root).await.unwrap();
+
+    for _ in 0..2 {
+        deliver_child_turn(
+            &harness.cfg,
+            &harness.sessions,
+            "child-b",
+            &ThreadId::from(root.clone()),
+            ChildTurnOutcome::Finished {
+                stop_reason: "end_turn",
+            },
+        )
+        .await;
+    }
+
+    let meta = settled_meta(&harness, "child-b").await;
+    assert_eq!(meta.agent_status, AgentStatus::Done);
+    assert_eq!(meta.work_state, WorkState::Idle);
+    assert_eq!(
+        parent_notices(&harness, &root).await.len(),
+        1,
+        "重复结算不得产生第二条结果"
     );
 }

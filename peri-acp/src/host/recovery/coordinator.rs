@@ -5,6 +5,7 @@
 //! 重启后不恢复旧执行。`enter` 只写 MQ（提醒）与内存表；`launch` 才放行执行，且调用方
 //! 必须在本轮会话响应发出之后调用，避免恢复 turn 的通知先于响应。
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -13,7 +14,7 @@ use peri_acp_types::recovery::{
     RecoveryCandidate, RecoveryError, RecoveryErrorKind, RecoveryFailure, RecoveryReport,
     RecoveryScope, RecoverySkip, RecoverySkipReason, SessionRecovery,
 };
-use peri_acp_types::session::MessageQueue;
+use peri_acp_types::session::{MessageQueue, MqEnqueueDisposition, MqEnqueueOutcome};
 use peri_acp_types::session_resources::{
     SessionResourceError, SessionResourceErrorKind, SessionResources,
 };
@@ -35,7 +36,10 @@ pub(crate) struct HostSessionRecovery {
     cfg: Arc<AcpServerConfig>,
     cont_tx: Arc<tokio::sync::mpsc::UnboundedSender<ContinuationRequest>>,
     /// 正在准备的根 → 该根的串行锁；并发进入在同一把锁上排队。
-    in_flight: DashMap<ThreadId, Arc<Mutex<()>>>,
+    ///
+    /// 注册表本身也加锁：移除判定必须与「取锁 + 克隆」线性化，否则清点后被
+    /// 新进入者克隆再删表，顺序会退化成两把并行的锁。
+    in_flight: parking_lot::Mutex<HashMap<ThreadId, Arc<Mutex<()>>>>,
     /// 已接纳提醒的 thread：进程内唯一防重复事实（需要覆盖 `discard` 后的复用）。
     admitted: DashMap<ThreadId, AdmittedRecovery>,
 }
@@ -66,10 +70,23 @@ struct LifecycleSnapshot {
 /// 单个 thread 的准备结论（根与冷 child 共用）。
 enum ThreadOutcome {
     Reused,
-    /// 已接纳提醒；携带按该 thread 直接 owner 查询到的外围任务事实。
-    Injected(PeripheralTasks),
+    /// 已接纳提醒；携带按该 thread 直接 owner 查询到的外围任务事实与本代次准入。
+    Injected {
+        peripheral_tasks: PeripheralTasks,
+        admission: AdmittedRecovery,
+    },
     Skipped(RecoverySkipReason),
     Failed(RecoveryFailure),
+}
+
+/// 一次 `enter` 的结果与它实际写入的准入快照。
+///
+/// `discard` 必须按这份快照匹配，不能只凭 thread id 猜测：并发进入可能已经写下
+/// 更新代次的准入，旧响应失败不得把它删掉。
+#[derive(Debug)]
+pub(crate) struct EnteredRecovery {
+    pub(crate) report: RecoveryReport,
+    admissions: Vec<(ThreadId, AdmittedRecovery)>,
 }
 
 impl HostSessionRecovery {
@@ -86,18 +103,21 @@ impl HostSessionRecovery {
             sessions,
             cfg,
             cont_tx,
-            in_flight: DashMap::new(),
+            in_flight: parking_lot::Mutex::new(HashMap::new()),
             admitted: DashMap::new(),
         }
     }
 
     /// 响应未能发出时丢弃本次启动资格：提醒留在 MQ，下一次进入可采纳并重新启动。
     ///
-    /// 只移除 `Prepared`：`Launched` 已有本进程执行证据，不能因响应丢弃而失忆。
-    pub(crate) fn discard(&self, report: &RecoveryReport) {
-        for thread_id in &report.recovered {
+    /// 只移除本次 `enter` 自己写入、且仍是 `Prepared` 的准入：`Launched` 已有本进程
+    /// 执行证据，更新代次留下的准入也不能因旧报告被删。
+    pub(crate) fn discard(&self, entered: &EnteredRecovery) {
+        for (thread_id, admission) in &entered.admissions {
             self.admitted.remove_if(thread_id, |_, entry| {
-                entry.phase == AdmissionPhase::Prepared
+                entry.generation == admission.generation
+                    && entry.session_id == admission.session_id
+                    && entry.phase == AdmissionPhase::Prepared
             });
         }
     }
@@ -113,7 +133,7 @@ impl HostSessionRecovery {
         &self,
         scope: RecoveryScope,
         entered: &ThreadId,
-    ) -> Result<RecoveryReport, RecoveryError> {
+    ) -> Result<EnteredRecovery, RecoveryError> {
         let partition = scope::partition(scope);
         let root = partition.root_thread_id.clone();
         let entered_is_root = root == *entered;
@@ -122,6 +142,7 @@ impl HostSessionRecovery {
             entered_thread_id: entered.clone(),
             ..Default::default()
         };
+        let mut admissions = Vec::new();
 
         match partition.root {
             None => report.skipped.push(RecoverySkip {
@@ -130,9 +151,13 @@ impl HostSessionRecovery {
             }),
             Some(_) => match self.prepare_root(&partition, entered_is_root).await? {
                 ThreadOutcome::Reused => report.reused.push(root.clone()),
-                ThreadOutcome::Injected(peripheral) => {
-                    report.peripheral_tasks = peripheral;
+                ThreadOutcome::Injected {
+                    peripheral_tasks,
+                    admission,
+                } => {
+                    report.peripheral_tasks = peripheral_tasks;
                     report.recovered.push(root.clone());
+                    admissions.push((root.clone(), admission));
                 }
                 ThreadOutcome::Skipped(reason) => report.skipped.push(RecoverySkip {
                     thread_id: root.clone(),
@@ -148,7 +173,10 @@ impl HostSessionRecovery {
         for child in &partition.children {
             match self.prepare_child(&partition, child).await {
                 ThreadOutcome::Reused => report.reused.push(child.thread_id.clone()),
-                ThreadOutcome::Injected(_) => report.recovered.push(child.thread_id.clone()),
+                ThreadOutcome::Injected { admission, .. } => {
+                    report.recovered.push(child.thread_id.clone());
+                    admissions.push((child.thread_id.clone(), admission));
+                }
                 ThreadOutcome::Skipped(reason) => report.skipped.push(RecoverySkip {
                     thread_id: child.thread_id.clone(),
                     reason,
@@ -170,7 +198,7 @@ impl HostSessionRecovery {
         }
 
         self.record_failure_notice(entered, &report).await;
-        Ok(report)
+        Ok(EnteredRecovery { report, admissions })
     }
 
     async fn prepare_root(
@@ -407,44 +435,63 @@ impl HostSessionRecovery {
         }
 
         // 注入前复核：等待根锁或读写期间会话可能已换代或个人已停止。
-        let Some(current) = self.lifecycle(session_id).await else {
-            return Ok(ThreadOutcome::Skipped(RecoverySkipReason::Superseded));
-        };
-        if current.generation != before.generation {
-            return Ok(ThreadOutcome::Skipped(RecoverySkipReason::Superseded));
-        }
-        if current.closing || current.turn_active {
-            return Ok(ThreadOutcome::Skipped(if current.turn_active {
-                RecoverySkipReason::AlreadyRunning
-            } else {
-                RecoverySkipReason::Stopped
-            }));
+        if let Some(reason) = self.lifecycle_skip(session_id, before).await {
+            return Ok(ThreadOutcome::Skipped(reason));
         }
 
         // 设计 §6：外围任务只按本 thread 的直接 owner 查询。查询失败 / 未接线
         // 都是 Unknown，绝不写成「没有任务」；它也不阻断本 thread 的恢复。
         let peripheral_tasks = self.peripheral_tasks(session_id, thread).await;
-        if inject {
-            let trusted =
-                match reminder::recovery_reminder(root, thread, direct_children, &peripheral_tasks)
-                {
-                    Ok(trusted) => trusted,
-                    Err(detail) => {
-                        return self.thread_failure(
-                            thread,
-                            format!("recovery reminder was rejected: {detail}"),
-                            fatal,
-                        )
-                    }
-                };
+
+        // 外围查询同样是异步窗口：结束之后、入队之前重新核对一次，旧快照不得
+        // 覆盖快照之后发生的 Stop、关闭、换代或新的 turn。
+        if let Some(reason) = self.lifecycle_skip(session_id, before).await {
+            return Ok(ThreadOutcome::Skipped(reason));
+        }
+        if activation.user_stopped() {
+            return Ok(ThreadOutcome::Skipped(RecoverySkipReason::Stopped));
+        }
+
+        // 提醒构造失败时不改变执行资格：先构造，再尝试放行。
+        let trusted = if inject {
+            match reminder::recovery_reminder(root, thread, direct_children, &peripheral_tasks) {
+                Ok(trusted) => Some(trusted),
+                Err(detail) => {
+                    return self.thread_failure(
+                        thread,
+                        format!("recovery reminder was rejected: {detail}"),
+                        fatal,
+                    )
+                }
+            }
+        } else {
+            None
+        };
+
+        #[cfg(test)]
+        admission_gate::wait(thread.as_str(), admission_gate::PausePoint::BeforeAdmit).await;
+
+        // 放行与 Stop 在同一把锁内线性化：复核之后落下的 Stop 不能被这里清除。
+        if !activation.try_allow() {
+            return Ok(ThreadOutcome::Skipped(RecoverySkipReason::Stopped));
+        }
+        if let Some(trusted) = trusted {
             // 提醒接纳要能通过 `pending_request` 的激活门：放行执行资格在启动前最后一次复核。
-            activation.allow();
-            if let Err(error) = queue.enqueue(reminder::queued_recovery(trusted)).await {
-                return self.thread_failure(thread, error.to_string(), fatal);
+            let outcome = match queue.enqueue(reminder::queued_recovery(trusted)).await {
+                Ok(outcome) => outcome,
+                Err(error) => return self.thread_failure(thread, error.to_string(), fatal),
+            };
+            // 入队也是异步窗口：结果若已换代或被 Stop，撤销本次提醒，不能把它带进
+            // 新生命周期。存储不支持取消提醒时保留，下一次进入会采纳同一条。
+            if let Some(reason) = self.post_admit_skip(session_id, before, &activation).await {
+                withdraw_new_reminder(&queue, &outcome).await;
+                return Ok(ThreadOutcome::Skipped(reason));
             }
         } else {
             // 采纳旧提醒：不重复入队；任务实时状态由当前 turn 的工具查询修正。
-            activation.allow();
+            if let Some(reason) = self.post_admit_skip(session_id, before, &activation).await {
+                return Ok(ThreadOutcome::Skipped(reason));
+            }
         }
         // 结果通知挂在会话实例上：本轮无论由启动门、激活监听还是用户 prompt 发起，
         // 收尾都能投递一次（不依赖哪一条续跑请求真正跑到）。
@@ -453,15 +500,53 @@ impl HostSessionRecovery {
                 runtime.record_recovery_parent(parent);
             }
         }
-        self.admitted.insert(
-            thread.clone(),
-            AdmittedRecovery {
-                generation: before.generation,
-                session_id: session_id.to_owned(),
-                phase: AdmissionPhase::Prepared,
-            },
-        );
-        Ok(ThreadOutcome::Injected(peripheral_tasks))
+        let admission = AdmittedRecovery {
+            generation: before.generation,
+            session_id: session_id.to_owned(),
+            phase: AdmissionPhase::Prepared,
+        };
+        self.admitted.insert(thread.clone(), admission.clone());
+        Ok(ThreadOutcome::Injected {
+            peripheral_tasks,
+            admission,
+        })
+    }
+
+    /// 生命周期复核：同一代次、未关闭且没有新 turn 才能继续本次准备。
+    async fn lifecycle_skip(
+        &self,
+        session_id: &str,
+        before: LifecycleSnapshot,
+    ) -> Option<RecoverySkipReason> {
+        let Some(current) = self.lifecycle(session_id).await else {
+            return Some(RecoverySkipReason::Superseded);
+        };
+        if current.generation != before.generation {
+            return Some(RecoverySkipReason::Superseded);
+        }
+        if current.closing {
+            return Some(RecoverySkipReason::Stopped);
+        }
+        if current.turn_active {
+            return Some(RecoverySkipReason::AlreadyRunning);
+        }
+        None
+    }
+
+    /// 放行之后、登记之前的复核：Stop 也会复位 `allowed`，两处都要看。
+    async fn post_admit_skip(
+        &self,
+        session_id: &str,
+        before: LifecycleSnapshot,
+        activation: &crate::session::SessionActivation,
+    ) -> Option<RecoverySkipReason> {
+        if let Some(reason) = self.lifecycle_skip(session_id, before).await {
+            return Some(reason);
+        }
+        if activation.user_stopped() || !activation.is_allowed() {
+            return Some(RecoverySkipReason::Stopped);
+        }
+        None
     }
 
     /// 逐项失败分类：`fatal` 时上抛请求错误，否则只进报告。
@@ -554,31 +639,77 @@ impl HostSessionRecovery {
 
     fn gate_for(&self, root: &ThreadId) -> Arc<Mutex<()>> {
         self.in_flight
+            .lock()
             .entry(root.clone())
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     }
 
-    /// 只移除自己插入的那把锁：并发的下一次进入可能已建立新锁。
+    /// 只移除已无等待者的锁：map + 本地各一份时才算独占。
+    ///
+    /// 等待者仍持有 Arc 时删表，下一次进入会新建另一把锁并并行执行。
+    /// 判定与 [`Self::gate_for`] 共用注册表锁，避免清点后又被新进入者克隆。
     fn release_gate(&self, root: &ThreadId, gate: &Arc<Mutex<()>>) {
-        let same = self
-            .in_flight
-            .get(root)
-            .is_some_and(|entry| Arc::ptr_eq(entry.value(), gate));
-        if same {
-            self.in_flight.remove(root);
+        let mut in_flight = self.in_flight.lock();
+        let Some(entry) = in_flight.get(root) else {
+            return;
+        };
+        let exclusive = Arc::strong_count(entry) == 2 && Arc::ptr_eq(entry, gate);
+        if exclusive {
+            in_flight.remove(root);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn in_flight_gate(&self, root: &ThreadId) -> Option<Arc<Mutex<()>>> {
+        self.in_flight.lock().get(root).cloned()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn in_flight_gate_count(&self, root: &ThreadId) -> usize {
+        self.in_flight.lock().get(root).map_or(0, Arc::strong_count)
+    }
+}
+
+/// 撤销本次刚接纳的提醒。
+///
+/// MQ 目前只允许取消用户输入；存储拒绝时提醒保留，下一次进入会采纳同一条而不是
+/// 重复注入（与 `discard` 语义相同）。
+async fn withdraw_new_reminder(queue: &MessageQueue, outcome: &MqEnqueueOutcome) {
+    if outcome.disposition != MqEnqueueDisposition::Inserted {
+        return;
+    }
+    if let Err(error) = queue.cancel_user_input(&outcome.entry.id).await {
+        tracing::debug!(
+            error = %error,
+            "recovery: reminder withdraw is not supported; the next entry will adopt it"
+        );
     }
 }
 
 #[async_trait::async_trait]
 impl SessionRecovery for HostSessionRecovery {
     async fn enter(&self, thread_id: &ThreadId) -> Result<RecoveryReport, RecoveryError> {
+        self.enter_prepared(thread_id)
+            .await
+            .map(|entered| entered.report)
+    }
+}
+
+impl HostSessionRecovery {
+    /// 与 trait [`SessionRecovery::enter`] 同一流程，额外返回本次写入的准入快照：
+    /// 响应失败时 `discard` 必须按这份快照匹配，不能删除其他并发进入的准入。
+    pub(crate) async fn enter_prepared(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<EnteredRecovery, RecoveryError> {
         // 先解析根，再按根串行：同一根下不同 thread 的并发进入必须合并。
         let initial = self.load_scope(thread_id).await?;
         let root = initial.root_thread_id.clone();
         let gate = self.gate_for(&root);
         let guard = gate.lock().await;
+        #[cfg(test)]
+        admission_gate::wait(root.as_str(), admission_gate::PausePoint::InsideGate).await;
         // 持锁重读：等待期间另一次进入可能已完成注入或启动。
         let prepared = match self.load_scope(thread_id).await {
             Ok(scope) => self.prepare(scope, thread_id).await,
@@ -682,5 +813,99 @@ impl HostSessionRecovery {
                 "recovery launch skipped: continuation scheduler is gone"
             );
         }
+    }
+}
+
+/// 仅测试：把恢复准备暂停在指定窗口，构造 Stop 与并发进入的真实竞态。
+///
+/// 生产路径只多一次 `cfg(test)` 查表，不引入运行时状态。
+#[cfg(test)]
+pub(crate) mod admission_gate {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, LazyLock, Mutex};
+    use tokio::sync::{Notify, Semaphore};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub(crate) enum PausePoint {
+        /// 已取得根锁：后续进入必须排在同一个门后。
+        InsideGate,
+        /// 外围查询与生命周期复核之后、恢复放行之前。
+        BeforeAdmit,
+    }
+
+    pub(crate) struct Gate {
+        arrived: AtomicUsize,
+        entered: Notify,
+        released: Semaphore,
+    }
+
+    impl Gate {
+        fn new() -> Self {
+            Self {
+                arrived: AtomicUsize::new(0),
+                entered: Notify::new(),
+                released: Semaphore::new(0),
+            }
+        }
+
+        pub(crate) fn arrived(&self) -> usize {
+            self.arrived.load(Ordering::Acquire)
+        }
+
+        /// 等到至少 `count` 次准备停在这道门上。
+        pub(crate) async fn wait_arrived(&self, count: usize) {
+            loop {
+                let notified = self.entered.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.arrived() >= count {
+                    return;
+                }
+                notified.await;
+            }
+        }
+
+        /// 放行 `permits` 次等待。
+        pub(crate) fn release(&self, permits: usize) {
+            self.released.add_permits(permits);
+        }
+    }
+
+    type GateRegistry = Mutex<HashMap<(String, PausePoint), Arc<Gate>>>;
+
+    static GATES: LazyLock<GateRegistry> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(crate) fn install(thread_id: &str, point: PausePoint) -> Arc<Gate> {
+        let gate = Arc::new(Gate::new());
+        GATES
+            .lock()
+            .unwrap()
+            .insert((thread_id.to_owned(), point), Arc::clone(&gate));
+        gate
+    }
+
+    pub(crate) fn uninstall(thread_id: &str, point: PausePoint) {
+        GATES.lock().unwrap().remove(&(thread_id.to_owned(), point));
+    }
+
+    pub(crate) async fn wait(thread_id: &str, point: PausePoint) {
+        let gate = GATES
+            .lock()
+            .unwrap()
+            .get(&(thread_id.to_owned(), point))
+            .cloned();
+        let Some(gate) = gate else {
+            return;
+        };
+        gate.arrived.fetch_add(1, Ordering::AcqRel);
+        gate.entered.notify_waiters();
+        let permit = gate
+            .released
+            .acquire()
+            .await
+            .expect("test admission gate stays open");
+        // forget：消费许可而不是归还，一次 release 只放行一次。
+        permit.forget();
     }
 }

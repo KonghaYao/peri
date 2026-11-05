@@ -564,6 +564,15 @@ pub(crate) trait SessionDataPort: Send + Sync {
         Err(super::failure::unsupported())
     }
 
+    /// 收尾收敛到 `idle`：没有待处理的 `EnsureProcessing` 条目才写，`stopped` 不解除。
+    ///
+    /// 默认实现退回单列写入（无条件 `idle`）：只有具备事务能力的后端才能在
+    /// 同一次提交里判定待处理消息并写工作意图。
+    async fn settle_work_state_after_turn(&self, id: &ThreadId) -> SessionResourceResult<bool> {
+        self.set_work_state(id, WorkState::Idle).await?;
+        Ok(true)
+    }
+
     /// 只写上下文占用快照这一列；`None` 写 NULL（未知，不是零占用）。
     async fn set_context_usage(
         &self,

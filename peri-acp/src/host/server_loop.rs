@@ -746,42 +746,56 @@ impl ServerLoop<'_> {
             if let Some(session_id) =
                 super::recovery::wiring::session_setup(&method, &params, result.as_ref().ok())
             {
-                match super::recovery::wiring::enter_recovery(
-                    self.recovery,
-                    self.sessions,
-                    &session_id,
-                )
-                .await
-                {
-                    Ok(Some(report)) => {
-                        let view = peri_acp_types::recovery::RecoveryView::from_report(&report);
-                        super::recovery::wiring::apply_recovery_execution_block(
-                            cfg,
-                            &session_id,
-                            &view,
-                        );
-                        super::recovery::wiring::attach_recovery_meta(&mut result, &view);
-                        // 冷 child 已装配但还没有运行期绑定：响应后的 launch 启动 child 前
-                        // 必须补齐 TaskManager 与在线 endpoint。
-                        super::recovery::wiring::bind_recovered_sessions(
-                            cfg,
-                            self.sessions,
-                            self.connection,
-                            self.transport,
-                            &report,
-                        )
-                        .await;
-                        recovery_report = Some(report);
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        let view = super::recovery::wiring::error_view(&session_id, &error);
-                        super::recovery::wiring::apply_recovery_execution_block(
-                            cfg,
-                            &session_id,
-                            &view,
-                        );
-                        super::recovery::wiring::attach_recovery_meta(&mut result, &view);
+                // 视图态只有历史与占用，没有执行环境：保留 load 已附带的只读阻断与
+                // 恢复元数据，不进入恢复协调（否则会清掉 executionBlocked）。
+                let view_only = {
+                    let states = self.sessions.lock().await;
+                    states
+                        .get(&session_id)
+                        .is_some_and(|state| state.is_view_only())
+                };
+                if view_only {
+                    // 不启动恢复；响应与阻断已由只读视图加载写入。
+                } else {
+                    match super::recovery::wiring::enter_recovery(
+                        self.recovery,
+                        self.sessions,
+                        &session_id,
+                    )
+                    .await
+                    {
+                        Ok(Some(entered)) => {
+                            let view = peri_acp_types::recovery::RecoveryView::from_report(
+                                &entered.report,
+                            );
+                            super::recovery::wiring::apply_recovery_execution_block(
+                                cfg,
+                                &session_id,
+                                &view,
+                            );
+                            super::recovery::wiring::attach_recovery_meta(&mut result, &view);
+                            // 冷 child 已装配但还没有运行期绑定：响应后的 launch 启动 child 前
+                            // 必须补齐 TaskManager 与在线 endpoint。
+                            super::recovery::wiring::bind_recovered_sessions(
+                                cfg,
+                                self.sessions,
+                                self.connection,
+                                self.transport,
+                                &entered.report,
+                            )
+                            .await;
+                            recovery_report = Some(entered);
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            let view = super::recovery::wiring::error_view(&session_id, &error);
+                            super::recovery::wiring::apply_recovery_execution_block(
+                                cfg,
+                                &session_id,
+                                &view,
+                            );
+                            super::recovery::wiring::attach_recovery_meta(&mut result, &view);
+                        }
                     }
                 }
             }
@@ -867,8 +881,8 @@ impl ServerLoop<'_> {
         let response_sent = diagnostics.send(transport.as_ref(), result).await.is_ok();
         // 恢复的启动门：响应已发出才放行执行；发送失败则丢弃本次启动资格。
         match (response_sent, recovery_report.take()) {
-            (true, Some(report)) => self.recovery.launch(&report).await,
-            (false, Some(report)) => self.recovery.discard(&report),
+            (true, Some(entered)) => self.recovery.launch(&entered.report).await,
+            (false, Some(entered)) => self.recovery.discard(&entered),
             _ => {}
         }
         if response_sent {
@@ -956,11 +970,11 @@ impl ServerLoop<'_> {
         // （race 兜底：bg 结果已 route 为 Defer，但通知可能在 cancel
         // 置位前被 scheduler 跳过）。unbounded send 虽不阻塞，仍统一
         // 在释放 sessions 锁后发送，避免 notify 路径持锁触碰 scheduler。
-        let cont_req = {
+        let outcome = {
             let mut sessions = sessions.lock().await;
             handle_notification(&method, &params, &mut sessions, cfg).await
         };
-        if let Some(req) = cont_req {
+        if let Some(req) = outcome.continuation {
             if cont_tx.send(req).is_err() {
                 tracing::warn!(
                     method,
@@ -969,5 +983,14 @@ impl ServerLoop<'_> {
                 );
             }
         }
+        // 用户 Stop 与模型配置变化的锁外持久化：停止意图先落库；占用快照失效写
+        // NULL。失败只记 error，不阻断取消/配置更新本身（设计 §5.4 / §2.2）。
+        super::notify::persist_notification_effects(
+            &method,
+            cfg,
+            outcome.stop_targets,
+            outcome.context_usage_invalidations,
+        )
+        .await;
     }
 }

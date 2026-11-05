@@ -58,6 +58,8 @@ async fn test_fork_registers_session_and_copies_history() {
             continuation_epoch: 0,
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,
+            recovery_settlement_pending: false,
+            view_only: false,
             frozen: Some(source_frozen),
             recall_items: Vec::new(),
             agent_pool: crate::session::agent_pool::AgentPool::new(),

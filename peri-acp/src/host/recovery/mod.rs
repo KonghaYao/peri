@@ -16,5 +16,9 @@ mod reminder;
 mod scope;
 pub(crate) mod wiring;
 
-pub(crate) use coordinator::HostSessionRecovery;
+#[cfg(test)]
+pub(crate) use coordinator::admission_gate;
+pub(crate) use coordinator::{EnteredRecovery, HostSessionRecovery};
+#[cfg(test)]
+pub(crate) use parent_notice::ChildTurnOutcome;
 pub(crate) use parent_notice::{deliver_child_turn, turn_outcome};

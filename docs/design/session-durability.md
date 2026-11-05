@@ -108,7 +108,7 @@ WHERE t.work_state = 'working';
 
 这条查询确定候选，不直接授权启动。主会话不是 `working` 时，仍检查同范围内各 child 的自身状态；为 child 重建必要的父级收件地址，不意味着启动父级模型。
 
-只读 Store、不可执行环境或损坏关系不能放行执行；已能读取的历史与占用仍可展示，恢复错误显式报告。会话装配与历史回放成功后，恢复准备失败按「部分成功」返回：`session/load|resume` 仍为 Ok，结果写入 `_meta.peri.recovery`；使会话不可执行的失败（`Corrupt` / `ReadOnly` / `NotFound`）另以 `-32017` 拒绝 prompt。只读 Store 下的 `session/load` 仍在回放前明确拒绝（`ReadOnlyStore`）；经 `-r` 浏览只读历史本版本不提供，需独立的只读视图会话生命周期，不能用小补丁伪装成可重试。
+只读 Store、不可执行环境或损坏关系不能放行执行；已能读取的历史与占用仍可展示，恢复错误显式报告。会话装配与历史回放成功后，恢复准备失败按「部分成功」返回：`session/load|resume` 仍为 Ok，结果写入 `_meta.peri.recovery`；使会话不可执行的失败（`Corrupt` / `ReadOnly` / `NotFound`）另以 `-32017` 拒绝 prompt。只读/不可执行 Store 的 `session/load|resume` 装配失败时改为**视图态**：`SessionState` 无执行环境、不注册可执行 MCP/TaskManager，历史与占用照常回放，`_meta.peri.recovery` 报 `failed` + `executionBlocked=true`，prompt 统一返回 `-32017`；视图态不写库，关闭后释放。
 
 ## 4. 恢复流程
 

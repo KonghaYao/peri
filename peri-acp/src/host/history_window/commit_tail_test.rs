@@ -169,6 +169,8 @@ fn state_with(
         continuation_epoch: 0,
         continuation_in_flight: false,
         continuation_mq_steering_pending: false,
+        recovery_settlement_pending: false,
+        view_only: false,
         frozen: None,
         recall_items: vec![],
         agent_pool: AgentPool::new(),

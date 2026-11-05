@@ -37,6 +37,12 @@ pub(crate) fn task_owner_meta(
             peri_mcp_core::task_owner::TASK_OWNER_META_KEY.into(),
             session_id.into(),
         );
+        // ACP 会话身份就是 thread 身份；恢复查询按 thread id 过滤存活任务时需要
+        // `peri/threadOwner`。若未来两者分离，这里必须改传真实 thread id。
+        meta.0 .0.insert(
+            peri_mcp_core::task_owner::THREAD_OWNER_META_KEY.into(),
+            session_id.into(),
+        );
         meta
     })
 }

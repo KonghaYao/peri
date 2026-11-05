@@ -1027,6 +1027,18 @@ pub trait SessionResources: Send + Sync {
         ))
     }
 
+    /// turn 收尾把工作意图收敛到 `idle`，但不得覆盖仍要求继续处理的新工作。
+    ///
+    /// 与消息接纳共用协调：存储操作内确认没有待处理的 `EnsureProcessing` 条目后
+    /// 才写 `idle`；`stopped` 不被收尾解除。返回是否真的写入了 `idle`。
+    ///
+    /// 默认实现退回 [`Self::set_work_state`]（无条件写 `idle`）：没有事务能力的
+    /// 后端只能保证「没有新工作时写 idle」，不能凭空判定待处理消息。
+    async fn settle_work_state_after_turn(&self, id: &ThreadId) -> SessionResourceResult<bool> {
+        self.set_work_state(id, WorkState::Idle).await?;
+        Ok(true)
+    }
+
     /// 写入最近一次有效上下文占用快照（`threads.context_usage_tokens`）。
     ///
     /// `None` 表示「未知」，写 NULL；不更新 `updated_at`。默认实现返回 `Unsupported`。

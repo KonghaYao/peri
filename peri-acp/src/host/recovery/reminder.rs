@@ -153,11 +153,12 @@ pub(super) fn is_pending_recovery(entry: &MqEntry) -> bool {
 pub(super) async fn find_pending_recovery(
     queue: &MessageQueue,
 ) -> SessionResourceResult<Option<MqEntry>> {
+    // 不设行数上限：本线程的提醒可能有任意多条，固定上限会漏掉可复用的 entry
+    // 并重复注入。来源与 Kind 已在存储侧收敛，扫描范围仍是本 thread 的恢复提醒。
     let rows = queue
         .query(MqFilter {
             sources: vec![MessageSource::SessionRecovery],
             kinds: vec![MessageKind::Defer],
-            limit: Some(8),
             ..Default::default()
         })
         .await

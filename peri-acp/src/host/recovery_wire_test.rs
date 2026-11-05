@@ -363,6 +363,25 @@ async fn load_response_carries_saved_context_usage() {
     load_and_check_usage(&harness, 2, &thread_id, json!(4096), window).await;
 }
 
+/// 13. `session/resume` 与 load 同一展示契约：已保存占用 + 当前有效 window；
+///     NULL 如实为 null，不写成零占用。
+#[tokio::test]
+async fn resume_response_carries_saved_context_usage() {
+    let harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    let window = u64::from(harness.cfg.provider.read().effective_context_window());
+
+    resume_and_check_usage(&harness, 1, &thread_id, Value::Null, window).await;
+
+    harness
+        .cfg
+        .session_resources
+        .set_context_usage(&thread_id, Some(4096))
+        .await
+        .unwrap();
+    resume_and_check_usage(&harness, 2, &thread_id, json!(4096), window).await;
+}
+
 /// `session/resume` 与 load 共用恢复接线：恢复失败仍是成功响应，原因放 `_meta`。
 #[tokio::test]
 async fn resume_returns_success_with_failed_recovery_meta() {
@@ -420,19 +439,154 @@ async fn load_and_check_usage(
 ) {
     push_request(harness, id, "session/load", json!({"sessionId": thread_id}));
     run_server_loop(harness).await;
+    let response = response_for(harness, id, "load");
+    assert_usage(&response, "load", &expected, window);
+}
+
+async fn resume_and_check_usage(
+    harness: &RecoveryHarness,
+    id: i64,
+    thread_id: &str,
+    expected: Value,
+    window: u64,
+) {
+    push_request(
+        harness,
+        id,
+        "session/resume",
+        json!({"sessionId": thread_id}),
+    );
+    run_server_loop(harness).await;
+    let response = response_for(harness, id, "resume");
+    assert_usage(&response, "resume", &expected, window);
+}
+
+fn response_for(harness: &RecoveryHarness, id: i64, label: &str) -> Value {
     let responses = harness.recorded.responses();
     let (_, result) = responses
         .iter()
         .find(|(request_id, _)| *request_id == RequestId::Number(id))
-        .expect("load 必须有响应");
-    let response = result.as_ref().expect("load 必须成功");
+        .unwrap_or_else(|| panic!("{label} 必须有响应"));
+    result
+        .as_ref()
+        .unwrap_or_else(|error| panic!("{label} 必须成功: {error}"))
+        .clone()
+}
+
+fn assert_usage(response: &Value, label: &str, expected: &Value, window: u64) {
     assert_eq!(
-        response["_meta"]["peri.contextUsage"]["tokens"], expected,
-        "载荷必须给出已保存占用（NULL 保持未知）：{response}"
+        response["_meta"]["peri.contextUsage"]["tokens"], *expected,
+        "{label} 载荷必须给出已保存占用（NULL 保持未知）：{response}"
     );
     assert_eq!(
         response["_meta"]["peri.contextUsage"]["window"],
         json!(window),
-        "百分比按当前有效 window 计算：{response}"
+        "{label} 百分比按当前有效 window 计算：{response}"
+    );
+}
+
+// ── Stop 的持久停止意图（设计 §5.4） ────────────────────────────────────────
+
+fn push_notification(harness: &RecoveryHarness, method: &str, params: Value) {
+    harness
+        .recorded
+        .incoming
+        .lock()
+        .unwrap()
+        .push_back(IncomingMessage::Notification {
+            method: method.to_owned(),
+            params,
+        });
+}
+
+async fn stored_work_state(harness: &RecoveryHarness, thread_id: &str) -> WorkState {
+    harness
+        .cfg
+        .session_resources
+        .load_session_meta(&thread_id.to_owned())
+        .await
+        .unwrap()
+        .work_state
+}
+
+/// 没有活动 turn 时 Stop 仍要落 `stopped`：只 suppress 内存会让会话保留自动续跑资格。
+#[tokio::test]
+async fn cancel_without_active_turn_persists_stopped() {
+    let harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    push_notification(
+        &harness,
+        "session/cancel",
+        json!({"sessionId": thread_id.clone()}),
+    );
+    run_server_loop(&harness).await;
+
+    assert_eq!(
+        stored_work_state(&harness, &thread_id).await,
+        WorkState::Stopped
+    );
+}
+
+/// 用户 Stop 的受影响对象包含 cascade child：父子一起落 `stopped`。
+#[tokio::test]
+async fn cancel_persists_stopped_for_cascade_children() {
+    let harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    let child = "cascade-child".to_owned();
+    harness.add_child(&thread_id, &child, &thread_id).await;
+    harness
+        .cfg
+        .session_manager
+        .get_session_mut(&thread_id)
+        .expect("session runtime")
+        .active_agents
+        .insert(
+            child.clone(),
+            peri_acp_types::session::AgentRuntime::new(
+                child.clone(),
+                peri_acp_types::thread::CancelPolicy::Cascade,
+            ),
+        );
+
+    push_notification(
+        &harness,
+        "session/cancel",
+        json!({"sessionId": thread_id.clone()}),
+    );
+    run_server_loop(&harness).await;
+
+    assert_eq!(
+        stored_work_state(&harness, &thread_id).await,
+        WorkState::Stopped
+    );
+    assert_eq!(
+        stored_work_state(&harness, &child).await,
+        WorkState::Stopped,
+        "应受取消影响的 child 不得保留自动续跑资格"
+    );
+}
+
+/// Stop 之后收尾不把 `stopped` 改回 `idle`：收尾只收敛 `working`。
+#[tokio::test]
+async fn settle_after_stop_keeps_stopped() {
+    let harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    push_notification(
+        &harness,
+        "session/cancel",
+        json!({"sessionId": thread_id.clone()}),
+    );
+    run_server_loop(&harness).await;
+
+    let written = harness
+        .cfg
+        .session_resources
+        .settle_work_state_after_turn(&thread_id)
+        .await
+        .unwrap();
+    assert!(!written, "stopped 不在收尾的写入条件里");
+    assert_eq!(
+        stored_work_state(&harness, &thread_id).await,
+        WorkState::Stopped
     );
 }

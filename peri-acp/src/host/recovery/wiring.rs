@@ -5,14 +5,14 @@
 
 use std::sync::Arc;
 
-use peri_acp_types::recovery::{RecoveryError, RecoveryReport, RecoveryView, SessionRecovery};
+use peri_acp_types::recovery::{RecoveryError, RecoveryReport, RecoveryView};
 use peri_acp_types::thread::ThreadId;
 use serde_json::Value;
 
 use super::super::connection::ConnectionContext;
 use super::super::session_endpoint::register_session_endpoint;
 use super::super::{AcpServerConfig, SharedSessions};
-use super::HostSessionRecovery;
+use super::{EnteredRecovery, HostSessionRecovery};
 use crate::transport::types::AcpError;
 
 /// 进入会话时触发恢复的 setup 方法。`session/fork` 派生新会话，不恢复旧工作。
@@ -53,7 +53,7 @@ pub(crate) async fn enter_recovery(
     recovery: &HostSessionRecovery,
     sessions: &SharedSessions,
     session_id: &str,
-) -> Result<Option<RecoveryReport>, RecoveryError> {
+) -> Result<Option<EnteredRecovery>, RecoveryError> {
     let thread_id = {
         let states = sessions.lock().await;
         states.get(session_id).map(|state| state.thread_id.clone())
@@ -65,7 +65,10 @@ pub(crate) async fn enter_recovery(
         );
         return Ok(None);
     };
-    recovery.enter(&ThreadId::from(thread_id)).await.map(Some)
+    recovery
+        .enter_prepared(&ThreadId::from(thread_id))
+        .await
+        .map(Some)
 }
 
 /// 恢复失败的 wire 视图：entered thread 取失败分类携带的 thread，否则回落会话 id。

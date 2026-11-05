@@ -108,6 +108,8 @@ fn make_session_state(armed: bool, epoch: u64) -> SessionState {
         continuation_epoch: epoch,
         continuation_in_flight: false,
         continuation_mq_steering_pending: false,
+        recovery_settlement_pending: false,
+        view_only: false,
     }
 }
 

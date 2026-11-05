@@ -13,6 +13,9 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use peri_acp_types::recovery::{
+    RecoveryErrorKind, RecoveryFailureView, RecoveryView, RecoveryViewStatus,
+};
 use peri_acp_types::thread::ThreadId;
 
 use crate::host::connection::ConnectionFacts;
@@ -31,7 +34,25 @@ pub(crate) async fn handle_load_shared(
 ) -> Result<Value, AcpError> {
     let generation = crate::host::history_page::initial_load_generation(params)?
         .unwrap_or_else(LoadGeneration::generate);
-    let prepared = prepare_shared(params, cfg, sessions).await?.prepared;
+    let prepared = match prepare_shared(params, cfg, sessions).await {
+        Ok(prepared) => prepared.prepared,
+        Err(error) => {
+            if let Some(kind) = view_only_kind(&error) {
+                return serve_view_only_load(
+                    params,
+                    cfg,
+                    sessions,
+                    transport,
+                    &connection,
+                    &generation,
+                    kind,
+                    &error,
+                )
+                .await;
+            }
+            return Err(error);
+        }
+    };
     // 窗口连接的首屏不是 load 响应里的回放：声明 `peri.historyWindowV1` 后，
     // `session/load` 只装配会话，历史由随后的 `history.open` 提供。判据取本连接
     // 的协商事实，不能用 `history_pagination` 代替——两者独立。
@@ -170,16 +191,19 @@ async fn prepare_live_shared(
         AccessMode, ExecutionAvailability, SessionResourceError, SessionResourceErrorKind,
     };
     if availability.access == AccessMode::ReadOnly {
-        return Err(crate::host::workspace::resource_error(
-            SessionResourceError::new(SessionResourceErrorKind::ReadOnlyStore),
+        return Err(super::view_only_error(
+            "read_only",
+            crate::host::workspace::resource_error(SessionResourceError::new(
+                SessionResourceErrorKind::ReadOnlyStore,
+            )),
         ));
     }
     match availability.execution {
         Some(ExecutionAvailability::Available | ExecutionAvailability::BindingMissing) => {}
         reason => {
-            return Err(AcpError::new(
-                -32010,
-                format!("Session execution unavailable: {reason:?}"),
+            return Err(super::view_only_error(
+                "unavailable",
+                AcpError::new(-32010, format!("Session execution unavailable: {reason:?}")),
             ))
         }
     }
@@ -420,6 +444,170 @@ pub(crate) async fn cleanup_unpublished_restore(
     }
 }
 
+/// 只读/不可执行装配错误的视图态标记（由 `session_restore::view_only_error` 写入）。
+fn view_only_kind(error: &AcpError) -> Option<&'static str> {
+    let data = error.data.as_ref()?;
+    if data.get("reason").and_then(Value::as_str) != Some("view_only") {
+        return None;
+    }
+    Some(match data.get("kind").and_then(Value::as_str) {
+        Some("read_only") => "read_only",
+        _ => "unavailable",
+    })
+}
+
+/// 建立只读视图态：发布无执行环境的 `SessionState`，在 runtime 上留下执行阻断。
+///
+/// 已 live 的会话不降级为视图态——那会把正在执行的实例替换成不可执行视图。
+async fn ensure_view_only_state(
+    params: &Value,
+    cfg: &AcpServerConfig,
+    sessions: &SharedSessions,
+    kind: &'static str,
+    error: &AcpError,
+) -> Result<(String, ThreadId, RecoveryFailureView), AcpError> {
+    let session_id = params
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AcpError::new(-32602, "missing sessionId"))?
+        .to_owned();
+    let thread = ThreadId::from(session_id.clone());
+    let meta = match cfg.session_resources.load_session_meta(&thread).await {
+        Ok(meta) => meta,
+        // 连元数据都读不到：保持原始装配错误，不伪装成可浏览历史。
+        Err(_) => return Err(error.clone()),
+    };
+    {
+        let mut states = sessions.lock().await;
+        if states.contains_key(&session_id) {
+            return Err(error.clone());
+        }
+        states.insert(
+            session_id.clone(),
+            crate::host::SessionState::view_only(
+                session_id.clone(),
+                thread.as_str().to_owned(),
+                meta.cwd.clone(),
+            ),
+        );
+    }
+    cfg.session_manager.ensure_session(&session_id, &meta.cwd);
+    let kind = if kind == "read_only" {
+        RecoveryErrorKind::ReadOnly
+    } else {
+        RecoveryErrorKind::Unavailable
+    };
+    let failure = RecoveryFailureView {
+        thread_id: thread.clone(),
+        kind,
+        detail: error.message.clone(),
+        execution_blocked: true,
+    };
+    if let Some(runtime) = cfg.session_manager.get_session(&session_id) {
+        runtime.set_recovery_execution_block(failure.clone());
+    }
+    Ok((session_id, thread, failure))
+}
+
+fn view_only_recovery_view(
+    thread: &ThreadId,
+    failure: RecoveryFailureView,
+) -> Result<Value, AcpError> {
+    serde_json::to_value(RecoveryView {
+        status: RecoveryViewStatus::Failed,
+        root_thread_id: Some(thread.clone()),
+        entered_thread_id: thread.clone(),
+        recovered: Vec::new(),
+        reused: Vec::new(),
+        skipped: Vec::new(),
+        failures: Vec::new(),
+        error: Some(failure),
+        execution_blocked: true,
+    })
+    .map_err(|error| AcpError::new(-32603, error.to_string()))
+}
+
+/// 只读/不可执行 store 的 load：装配失败但历史与占用仍可展示，执行被阻断。
+#[allow(clippy::too_many_arguments)]
+async fn serve_view_only_load(
+    params: &Value,
+    cfg: &AcpServerConfig,
+    sessions: &SharedSessions,
+    transport: &Arc<dyn crate::transport::AcpTransport>,
+    connection: &ConnectionFacts,
+    generation: &LoadGeneration,
+    kind: &'static str,
+    error: &AcpError,
+) -> Result<Value, AcpError> {
+    let (session_id, thread, failure) =
+        ensure_view_only_state(params, cfg, sessions, kind, error).await?;
+    // 与正常 load 同一条回放路径：窗口连接跳过首屏回放，其余连接读存储回放。
+    if let Err(replay_error) = replay_after_load(
+        cfg,
+        sessions,
+        &session_id,
+        transport,
+        connection,
+        generation,
+        connection.history_window_v1,
+    )
+    .await
+    {
+        cleanup_unpublished_restore(cfg, &session_id, None).await;
+        sessions.lock().await.remove(&session_id);
+        return Err(replay_error);
+    }
+    let identity = response_identity(cfg, &session_id).await.ok().flatten();
+    let context_usage = saved_context_usage(cfg, sessions, &session_id).await;
+    let mut response = finish_load_response(
+        cfg,
+        transport,
+        &session_id,
+        identity,
+        connection,
+        generation,
+        context_usage,
+    )
+    .await?;
+    response["_meta"]["peri.recovery"] = view_only_recovery_view(&thread, failure)?;
+    Ok(response)
+}
+
+/// 只读/不可执行 store 的 resume：不取执行环境，只回身份、占用与阻断结果。
+async fn serve_view_only_resume(
+    params: &Value,
+    cfg: &AcpServerConfig,
+    sessions: &SharedSessions,
+    transport: &Arc<dyn crate::transport::AcpTransport>,
+    kind: &'static str,
+    error: &AcpError,
+) -> Result<Value, AcpError> {
+    let (session_id, thread, failure) =
+        ensure_view_only_state(params, cfg, sessions, kind, error).await?;
+    let context_usage = saved_context_usage(cfg, sessions, &session_id).await;
+    let caps = cfg.session_manager.ensure_session_caps(&session_id);
+    send_available_commands_update(
+        transport,
+        &session_id,
+        &caps,
+        cfg.session_manager.command_registry_for(&session_id),
+        cfg.stdio_command_filter,
+    )
+    .await;
+    prewarm_session_mcp_discovery(cfg, &session_id);
+    let identity = response_identity(cfg, &session_id).await.ok().flatten();
+    let mut response = identity_response(
+        serde_json::to_value(ResumeSessionResponse::new())
+            .map_err(|error| AcpError::new(-32603, error.to_string()))?,
+        identity,
+    )?;
+    if let Some(usage) = context_usage {
+        response["_meta"]["peri.contextUsage"] = usage;
+    }
+    response["_meta"]["peri.recovery"] = view_only_recovery_view(&thread, failure)?;
+    Ok(response)
+}
+
 async fn finish_load_response(
     cfg: &AcpServerConfig,
     transport: &Arc<dyn crate::transport::AcpTransport>,
@@ -469,7 +657,16 @@ pub(crate) async fn handle_resume_shared(
     sessions: &SharedSessions,
     transport: &Arc<dyn crate::transport::AcpTransport>,
 ) -> Result<Value, AcpError> {
-    let PreparedShared { prepared, .. } = prepare_shared(params, cfg, sessions).await?;
+    let prepared = match prepare_shared(params, cfg, sessions).await {
+        Ok(prepared) => prepared.prepared,
+        Err(error) => {
+            if let Some(kind) = view_only_kind(&error) {
+                return serve_view_only_resume(params, cfg, sessions, transport, kind, &error)
+                    .await;
+            }
+            return Err(error);
+        }
+    };
     let environment = {
         let states = sessions.lock().await;
         states
@@ -479,6 +676,8 @@ pub(crate) async fn handle_resume_shared(
             .clone()
     };
     let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+    // 与 load 同一展示契约：进入会话先给出已保存占用（设计 §2.2）。
+    let context_usage = saved_context_usage(cfg, sessions, &prepared.id).await;
     let caps = cfg.session_manager.ensure_session_caps(&prepared.id);
     send_available_commands_update(
         transport,
@@ -490,8 +689,12 @@ pub(crate) async fn handle_resume_shared(
     .await;
     prewarm_session_mcp_discovery(cfg, &prepared.id);
     let resp = ResumeSessionResponse::new();
-    identity_response(
+    let mut response = identity_response(
         serde_json::to_value(resp).map_err(|e| AcpError::new(-32603, e.to_string()))?,
         prepared.identity,
-    )
+    )?;
+    if let Some(usage) = context_usage {
+        response["_meta"]["peri.contextUsage"] = usage;
+    }
+    Ok(response)
 }

@@ -810,11 +810,13 @@ pub(super) async fn finish_prompt_turn(
     let mut commit_generation = None;
     let mut commit_structure = None;
     let mut turn_thread = None;
+    let mut recovery_settlement_pending = false;
     let adoption_memory = {
         let mut sessions = sessions.lock().await;
         let mut adoption_memory = None;
         if let Some(state) = sessions.get_mut(session_id) {
             turn_thread = Some(state.thread_id.clone());
+            recovery_settlement_pending = state.recovery_settlement_pending;
             if result.persistence_inconsistent {
                 // 提交结果不确定：不保留任何可继续执行的旧正文，也不删除身份。
                 // 下一次 prompt / restore 从权威存储恢复（ReloadRequired）。
@@ -907,6 +909,13 @@ pub(super) async fn finish_prompt_turn(
     // durable 收尾：先落续跑意图，再落占用快照。取消分支写 `stopped`，此后再无 `idle`
     // 写入覆盖它——这就是 Stop 意图不被收尾覆盖的顺序保证。提交结果不确定时不写，
     // 保留最后一次已提交的事实。
+    //
+    // 正常收尾不是无条件写 `idle`：收尾与消息接纳共用协调，仍需处理的新消息
+    // （`EnsureProcessing`）留在 MQ 时保持 `working`，已显式停止的 thread 不被解除
+    // （设计 §5.1）。
+    //
+    // 冷 child 恢复的本轮跳过工作意图：终态与 `work_state` 由 prompt dispatch 的
+    // `finalize_child_terminal` 与结果消息一次提交（设计 §5.3），这里只更新占用快照。
     if let Some(work_state) =
         WorkState::after_prompt_turn(result.stop_reason, result.persistence_inconsistent)
     {
@@ -914,15 +923,29 @@ pub(super) async fn finish_prompt_turn(
             (session_resources.as_ref(), turn_thread.as_ref())
         {
             let thread_id = ThreadId::from(thread_id.clone());
-            if let Err(error) =
-                super::prompt_dispatch::set_work_state_with_retry(resources, &thread_id, work_state)
-                    .await
-            {
-                tracing::error!(
-                    session_id,
-                    %error,
-                    "work state write after prompt failed after retry"
-                );
+            if !recovery_settlement_pending {
+                let written = match work_state {
+                    WorkState::Stopped => {
+                        super::prompt_dispatch::set_work_state_with_retry(
+                            resources,
+                            &thread_id,
+                            WorkState::Stopped,
+                        )
+                        .await
+                    }
+                    _ => {
+                        super::prompt_dispatch::settle_work_state_with_retry(resources, &thread_id)
+                            .await
+                            .map(|_written| ())
+                    }
+                };
+                if let Err(error) = written {
+                    tracing::error!(
+                        session_id,
+                        %error,
+                        "work state write after prompt failed after retry"
+                    );
+                }
             }
             if let Err(error) = resources
                 .set_context_usage(&thread_id, result.context_usage_tokens)

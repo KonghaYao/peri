@@ -100,14 +100,14 @@ async fn wait_for_cancelled_done(harness: &ActivationHarness) {
 }
 
 async fn stop(harness: &ActivationHarness, sessions: &mut HashMap<String, SessionState>) {
-    if let Some(request) = crate::host::notify::handle_notification(
+    let outcome = crate::host::notify::handle_notification(
         "session/cancel",
         &json!({"sessionId": harness.session_id}),
         sessions,
         &harness.cfg,
     )
-    .await
-    {
+    .await;
+    if let Some(request) = outcome.continuation {
         harness.sender.send(request).unwrap();
     }
 }
