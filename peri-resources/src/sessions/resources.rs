@@ -33,7 +33,7 @@ use peri_acp_types::session_resources::{
     NewSessionDraft, PersistenceRecovery, RewindBoundary, RewindCandidate, RewindOutcome,
     SessionAvailability, SessionHistoryWindowBounds, SessionInitialization, SessionMetaPatch,
     SessionResourceError, SessionResourceErrorKind, SessionResourceResult, SessionResources,
-    SessionSnapshot,
+    SessionSnapshot, TerminalSettlementOutcome,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::thread::{AgentStatus, ThreadId, ThreadMeta, WorkState};
@@ -644,6 +644,13 @@ impl SessionResources for SessionResourcesImpl {
         self.gate.data().recovery_scope(id).await
     }
 
+    async fn load_interrupted_threads(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<Vec<peri_acp_types::recovery::InterruptedThread>> {
+        self.gate.data().interrupted_threads(id).await
+    }
+
     async fn session_environment_id(&self, id: &ThreadId) -> SessionResourceResult<Option<String>> {
         self.gate.data().machine_id_of(id).await
     }
@@ -972,6 +979,22 @@ impl SessionResources for SessionResourcesImpl {
                 self.gate
                     .data()
                     .finalize_child_terminal(child, status, work_state, target, message)
+            })
+            .await
+    }
+
+    /// 无结果终态与门禁同一条树根：事务边界在数据端口，门面只负责排空与互斥。
+    async fn settle_terminal_without_result(
+        &self,
+        child: &ThreadId,
+        status: AgentStatus,
+        work_state: WorkState,
+    ) -> SessionResourceResult<TerminalSettlementOutcome> {
+        self.gate
+            .with_mutation(child, || {
+                self.gate
+                    .data()
+                    .settle_terminal_without_result(child, status, work_state)
             })
             .await
     }

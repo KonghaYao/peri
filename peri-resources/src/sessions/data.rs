@@ -22,7 +22,7 @@ use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, BindingState, ChildSnapshot, ForkSnapshot, FrozenSnapshotBytes,
     FrozenState, HistoryWindowPagePlan, HistoryWindowRows, NewSession, PersistenceRecovery,
     RewindBoundary, RewindCandidate, RewindOutcome, SessionHistoryWindowBounds, SessionMetaPatch,
-    SessionResourceResult, SessionSnapshot,
+    SessionResourceResult, SessionSnapshot, TerminalSettlementOutcome,
 };
 use peri_acp_types::store::{CompactionChange, MessageFlags, PersistedPayload};
 use peri_acp_types::system_reminder::TrustedSystemReminder;
@@ -435,6 +435,14 @@ pub(crate) trait SessionDataPort: Send + Sync {
         id: &ThreadId,
     ) -> SessionResourceResult<peri_acp_types::recovery::RecoveryScope>;
 
+    /// 留待收敛的 child 事实：根子树中 `active` 且 `idle`/`stopped` 的非根 thread。
+    ///
+    /// 只读；旧代际库没有工作快照列时返回空候选人，不把「读不到」当 `idle`。
+    async fn interrupted_threads(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<Vec<peri_acp_types::recovery::InterruptedThread>>;
+
     /// 分页列举：过滤在数据端完成。
     async fn list_sessions(
         &self,
@@ -649,10 +657,10 @@ pub(crate) trait SessionDataPort: Send + Sync {
 
     /// 本地 child 终态结算：终态、工作意图与结果消息的 MQ 接纳一次提交。
     ///
-    /// 默认实现逐步组合既有行为；远端存储没有跨行为事务，只能保证「失败前不宣称
-    /// 完成」，进程在两步之间退出可能留下已写的终态。本机 SQLite adapter 覆写为
-    /// 单个 `BEGIN IMMEDIATE` 事务。组合逻辑与 `SessionResources` 的默认实现共用
-    /// 同一份代码。
+    /// 默认实现逐步组合既有行为，只保证「失败前不宣称完成」，进程在两步之间退出
+    /// 可能留下已写的终态。本机 SQLite adapter 覆写为单个 `BEGIN IMMEDIATE` 事务，
+    /// 远端 adapter 覆写为单个托管事务批；只有无事务能力的后端才退回组合降级。
+    /// 组合逻辑与 `SessionResources` 的默认实现共用同一份代码。
     async fn finalize_child_terminal(
         &self,
         child: &ThreadId,
@@ -668,6 +676,26 @@ pub(crate) trait SessionDataPort: Send + Sync {
             work_state,
             target,
             message,
+        )
+        .await
+    }
+
+    /// 无结果终态写入：child 终态与工作意图一次提交，不产生结果消息。
+    ///
+    /// 默认实现按「工作意图 → 终态」组合既有行为，是无事务后端的降级：只保证失败前
+    /// 不宣称完成、失败不产生 `Done + working`，进程在两步之间退出仍可能留下
+    /// `Active + 目标工作意图`。具备事务能力的 adapter 覆写并回报本次是否写入。
+    async fn settle_terminal_without_result(
+        &self,
+        child: &ThreadId,
+        status: peri_acp_types::thread::AgentStatus,
+        work_state: WorkState,
+    ) -> SessionResourceResult<TerminalSettlementOutcome> {
+        peri_acp_types::session_resources::composed_settle_terminal_without_result(
+            &DataPortOps(self),
+            child,
+            status,
+            work_state,
         )
         .await
     }

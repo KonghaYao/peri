@@ -1,9 +1,9 @@
 //! 跨行为原子操作的**回退组合**。
 //!
-//! 本机 SQLite 后端用单个事务覆写这两条行为；没有跨行为事务的后端（远端存储、
-//! 测试替身）只能按既有单行为逐条组合。差异只在崩溃窗口：组合实现保证「失败前
-//! 不宣称完成」，但进程在两步之间退出仍可能留下已写的终态或已写的提醒。
-//! 调用方因此不得把这里的成功当成事务提交的证据，也不得依赖它做补偿。
+//! 本机 SQLite 用单个事务、远端存储用单个托管事务批覆写这两条行为；只有不具备
+//! 事务能力的后端（测试替身等）才按既有单行为逐条组合。差异只在崩溃窗口：组合
+//! 实现保证「失败前不宣称完成」，但进程在两步之间退出仍可能留下已写的终态或已写
+//! 的提醒。调用方因此不得把这里的成功当成事务提交的证据，也不得依赖它做补偿。
 
 use async_trait::async_trait;
 
@@ -133,10 +133,53 @@ impl<T: SessionResources + ?Sized> ComposedSettlementOps for T {
     }
 }
 
+/// 无结果终态写入的结果：本次是否真的写入，以及既有终态是什么。
+///
+/// `AlreadyTerminal` 是重复收尾的幂等 no-op，不表示结算失败；调用方不得再补写
+/// 另一组终态/工作意图。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalSettlementOutcome {
+    /// 本次调用把 child 从 `active` 写为终态，并写入对应的工作意图。
+    Settled,
+    /// child 已有终态；本次调用没有改写任何列。
+    AlreadyTerminal(AgentStatus),
+}
+
+/// [`super::SessionResources::settle_terminal_without_result`] 的组合回退。
+///
+/// **降级实现**：先读状态，已是终态则直接 no-op；否则按「工作意图 → 终态」逐步提交。
+/// 这个顺序保证失败时不会出现契约禁止的 `Done + working`，但两个行为不在同一个
+/// 提交里：进程在两步之间退出可能留下 `Active + 目标工作意图`，并发写者也不能靠
+/// 单次条件更新互斥。调用方不得把 `Settled` 当成原子提交的证据。
+pub async fn composed_settle_terminal_without_result<R>(
+    resources: &R,
+    child: &ThreadId,
+    status: AgentStatus,
+    work_state: WorkState,
+) -> SessionResourceResult<TerminalSettlementOutcome>
+where
+    R: ComposedSettlementOps + ?Sized,
+{
+    let current = resources.settlement_agent_status(child).await?;
+    if current.is_terminal() {
+        return Ok(TerminalSettlementOutcome::AlreadyTerminal(current));
+    }
+    resources
+        .settlement_set_work_state(child, work_state)
+        .await?;
+    resources.settlement_update_status(child, status).await?;
+    Ok(TerminalSettlementOutcome::Settled)
+}
+
 /// [`super::SessionResources::finalize_child_terminal`] 的回退：终态 → 工作意图 → 结果接纳。
 ///
 /// 幂等判据是「这次结算是否已落地」：child 已是终态且结果 ID 已在目标 thread 的历史里
 /// 时直接返回成功，不写状态、不写 `work_state`、不入队结果。
+///
+/// **降级实现**：三步不在同一个提交里，且状态先写；`work_state` 写入失败会留下
+/// `Done + working`，后续步骤之间退出也可能留下已写终态但没有结果行。调用方不得把
+/// 这里的成功当成原子提交的证据，也不得据此做补偿。具备批事务能力的后端必须覆写为
+/// 单批（本机 SQLite 与远端 `finalize_child_terminal` 均如此）。
 pub async fn composed_finalize_child_terminal<R>(
     resources: &R,
     child: &ThreadId,

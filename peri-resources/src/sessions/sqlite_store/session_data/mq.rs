@@ -68,6 +68,31 @@ fn listed_entry_of(row: &MqListRow) -> SessionResourceResult<MqEntry> {
     })
 }
 
+/// 结算批内的结果接纳：与 [`INSERT_THREAD_MQ_SQL`] 同列同条件，额外要求 child 仍 `active`。
+///
+/// 0 行同时表示「结果 ID 已落地」「child 已终态」或「结果 ID 属于别的 thread」，
+/// 调用方按既有事实归类，不能把 0 行当成成功写入。
+const INSERT_TERMINAL_RESULT_MQ_SQL: &str = "INSERT INTO thread_mq
+    (thread_id, id, enqueued_at, kind, source, policy_json, payload_json, original_draft)
+    SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8
+    WHERE NOT EXISTS (SELECT 1 FROM messages WHERE message_id = ?2)
+      AND NOT EXISTS (SELECT 1 FROM thread_mq WHERE id = ?2)
+      AND EXISTS (SELECT 1 FROM threads WHERE id = ?1)
+      AND EXISTS (SELECT 1 FROM threads WHERE id = ?9 AND agent_status = 'active')";
+
+/// 结算批内的接收方提升：只认本次结果在目标 MQ 里的待发行，且 child 仍 `active`。
+///
+/// 结果投递回 child 自己时由调用方跳过，避免把刚写的终态重新提升为 `working`。
+const PROMOTE_RECEIVER_ON_TERMINAL_SQL: &str = "UPDATE threads SET work_state = 'working'
+    WHERE id = ?1 AND work_state = 'idle'
+      AND EXISTS (SELECT 1 FROM thread_mq WHERE thread_id = ?1 AND id = ?2)
+      AND EXISTS (SELECT 1 FROM threads WHERE id = ?3 AND agent_status = 'active')";
+
+/// 终态 + 工作意图一次写入；`agent_status = 'active'` 保证同一 child 的终态只写一次。
+const SETTLE_CHILD_TERMINAL_SQL: &str = "UPDATE threads
+    SET agent_status = ?1, updated_at = ?2, work_state = ?3
+    WHERE id = ?4 AND agent_status = 'active'";
+
 impl SqliteSessionData {
     pub(super) async fn enqueue_mq(
         &self,
@@ -450,6 +475,10 @@ impl SqliteSessionData {
     ///
     /// 三步分开提交会留下「子任务已结束、父会话没收到结果」：中途崩溃后终态已写、
     /// 结果永远不落库（`docs/design/session-durability.md` §5.3）。
+    ///
+    /// 批内顺序与远端一致：结果插入 → 接收方意图提升 → child 终态。插入与终态更新
+    /// 都要求 child 仍 `active`，同一 child 的终态因此只写一次；批前读取只做快速
+    /// no-op，批后按插入行数与既有事实归类。
     pub(super) async fn finalize_child_terminal_mq(
         &self,
         child: &ThreadId,
@@ -490,72 +519,126 @@ impl SqliteSessionData {
         let ensures_processing = input.policy.ensures_processing();
         let kind = kind_token(input.kind)?;
         let source = source_token(&input.source)?;
+        let enqueued_at = enqueued_at_now();
         let incoming = RawMqRow {
             id: &message_id,
-            enqueued_at: "",
+            enqueued_at: &enqueued_at,
             kind: &kind,
             source: &source,
             policy_json: &policy,
             payload_json: &payload,
             original_draft: input.original_draft.as_deref(),
         };
-        // 终态：与 `update_meta(status)` 同列同时间戳语义，只是不再单独提交。
-        sqlx::query("UPDATE threads SET agent_status = ?1, updated_at = ?2 WHERE id = ?3")
-            .bind(status.as_str())
-            .bind(peri_time::now_utc_rfc3339())
+        // 结果插入在前：0 行同时表示「结果已落地」「child 已终态」或「ID 跨 thread
+        // 冲突」。后续写入都以 `active` 与结果行存在为前提，后到的结算不能覆盖终态或
+        // 重复接纳；两张 `NOT EXISTS` 同时挡住别的 thread 已占用的结果 ID。
+        let inserted = sqlx::query(INSERT_TERMINAL_RESULT_MQ_SQL)
+            .bind(target.as_str())
+            .bind(incoming.id)
+            .bind(incoming.enqueued_at)
+            .bind(incoming.kind)
+            .bind(incoming.source)
+            .bind(incoming.policy_json)
+            .bind(incoming.payload_json)
+            .bind(incoming.original_draft)
             .bind(child.as_str())
             .execute(&mut *tx)
             .await
             .map_err(|error| map_sqlx(&error))?;
-        session_rows::write_work_state_on(&mut tx, child, work_state)
-            .await
-            .map_err(write_failure)?;
-        // 结果接纳：与 `enqueue_mq` 同一判定顺序（历史 → MQ → 条件插入）。
-        let outcome = match self.mq_enqueue_fact(&mut tx, target, &incoming).await? {
-            Some(outcome) => outcome,
-            None => {
-                let enqueued_at = enqueued_at_now();
-                let inserted = sqlx::query(INSERT_THREAD_MQ_SQL)
+        let outcome = if inserted.rows_affected() == 1 {
+            Some(MqEnqueueOutcome {
+                disposition: MqEnqueueDisposition::Inserted,
+                entry: decode_entry(incoming)?,
+            })
+        } else {
+            // 0 行不是成功：先按既有事实归类。跨 thread 冲突在这里返回；同 ID 已落地
+            // 返回 `AlreadyHandedOff`/`Existing`；都没有且 child 已终态则本次是 no-op。
+            let fact = self.mq_enqueue_fact(&mut tx, target, &incoming).await?;
+            if fact.is_none() && !current.is_terminal() {
+                // 批前快照为 active 且没有任何结果事实，条件插入仍 0 行：状态不可解释，
+                // 不能把未写入报告成成功。
+                return Err(conflict("child terminal settlement lost its active row"));
+            }
+            fact
+        };
+        // 只有本次仍能把 child 从 `active` 写成终态时才继续；已终态的结算不写任何行。
+        // 提升在终态之前，且只认目标 MQ 里仍存在的本次结果行（设计 §5.3）。
+        if !current.is_terminal() {
+            if ensures_processing && target != child {
+                sqlx::query(PROMOTE_RECEIVER_ON_TERMINAL_SQL)
                     .bind(target.as_str())
-                    .bind(incoming.id)
-                    .bind(&enqueued_at)
-                    .bind(incoming.kind)
-                    .bind(incoming.source)
-                    .bind(incoming.policy_json)
-                    .bind(incoming.payload_json)
-                    .bind(incoming.original_draft)
+                    .bind(&message_id)
+                    .bind(child.as_str())
                     .execute(&mut *tx)
                     .await
                     .map_err(|error| map_sqlx(&error))?;
-                if inserted.rows_affected() != 1 {
-                    return Err(conflict(
-                        "MQ enqueue raced the same message id; read the id back before retrying",
-                    ));
-                }
-                MqEnqueueOutcome {
-                    disposition: MqEnqueueDisposition::Inserted,
-                    entry: decode_entry(RawMqRow {
-                        enqueued_at: &enqueued_at,
-                        ..incoming
-                    })?,
-                }
             }
-        };
-        // 接收方工作意图与结果接纳共用同一事务（设计 §5.3）。已移交历史的结果
-        // 不再要求继续处理；结果投递回 child 自己（恢复期自投递）不构成新的接收方，
-        // 不能把它刚写的终态 work_state 重新提升为 working。
-        let receiver_pending =
-            target != child && outcome.disposition != MqEnqueueDisposition::AlreadyHandedOff;
-        self.maintain_work_intent_on_accept(
-            &mut tx,
-            target,
-            ensures_processing && receiver_pending,
-        )
-        .await?;
+            let updated = sqlx::query(SETTLE_CHILD_TERMINAL_SQL)
+                .bind(status.as_str())
+                .bind(peri_time::now_utc_rfc3339())
+                .bind(work_state.as_str())
+                .bind(child.as_str())
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| map_sqlx(&error))?;
+            if updated.rows_affected() != 1 {
+                // 同一 `BEGIN IMMEDIATE` 内读到的不是终态且行存在，条件更新仍 0 行说明
+                // 状态不可解释；不能把未写入报告成成功。
+                return Err(conflict("child terminal settlement lost its active row"));
+            }
+        }
         tx.commit()
             .await
             .map_err(|_| commit_failure(Some(child.clone())))?;
-        Ok(outcome)
+        Ok(outcome.unwrap_or_else(|| settled_without_write(input)))
+    }
+
+    /// 无结果终态：`BEGIN IMMEDIATE` 内一次条件更新 `agent_status` 与 `work_state`。
+    ///
+    /// 条件 `agent_status = 'active'` 保证同一 child 的终态只写一次；已终态时按同一
+    /// 快照读回既有终态并返回 no-op，不覆盖它。两步独立写入会留下 `Done + working`
+    /// 或半完成终态，因此这里与 [`Self::finalize_child_terminal_mq`] 共用事务形状。
+    pub(super) async fn settle_terminal_without_result_rows(
+        &self,
+        child: &ThreadId,
+        status: peri_acp_types::thread::AgentStatus,
+        work_state: peri_acp_types::thread::WorkState,
+    ) -> SessionResourceResult<TerminalSettlementOutcome> {
+        self.writable()?;
+        let mut tx = self
+            .database
+            .pool
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(|error| map_sqlx(&error))?;
+        self.require_session(&mut tx, child).await?;
+        let current = stored_agent_status(&mut tx, child).await?;
+        if current.is_terminal() {
+            tx.commit()
+                .await
+                .map_err(|_| commit_failure(Some(child.clone())))?;
+            return Ok(TerminalSettlementOutcome::AlreadyTerminal(current));
+        }
+        let updated = sqlx::query(
+            "UPDATE threads SET agent_status = ?1, updated_at = ?2, work_state = ?3
+             WHERE id = ?4 AND agent_status = 'active'",
+        )
+        .bind(status.as_str())
+        .bind(peri_time::now_utc_rfc3339())
+        .bind(work_state.as_str())
+        .bind(child.as_str())
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| map_sqlx(&error))?;
+        if updated.rows_affected() != 1 {
+            // 同一 `BEGIN IMMEDIATE` 内读到的不是终态且行存在，条件更新仍 0 行说明
+            // 状态不可解释；不能把未写入报告成成功。
+            return Err(conflict("child terminal settlement lost its active row"));
+        }
+        tx.commit()
+            .await
+            .map_err(|_| commit_failure(Some(child.clone())))?;
+        Ok(TerminalSettlementOutcome::Settled)
     }
 
     /// 关闭结算：写终态提醒与删除 MQ 行共用一次 `BEGIN IMMEDIATE`。

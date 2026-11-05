@@ -27,7 +27,11 @@ enum ClaimDecision {
         accepted: oneshot::Receiver<()>,
     },
     /// 同步收尾：先结清认领，再写领域终态。
-    Finish(AgentStatus),
+    Finish {
+        status: AgentStatus,
+    },
+    /// 终态由 handoff worker 的 finalize 提交：只结束认领，不写任何状态。
+    Release,
     CancelRunning(Arc<crate::session::Session>),
 }
 
@@ -51,7 +55,7 @@ impl BackgroundHandoff {
 
 impl ResumeClaim {
     /// 校验（只读）后由资源侧串行认领 child；认领在写侧门禁内完成「读状态 + 写 active」。
-    pub(super) async fn acquire(
+    pub(in crate::session::subagent) async fn acquire(
         store: Arc<dyn SessionResources>,
         thread_id: String,
         root_id: String,
@@ -107,10 +111,23 @@ impl ResumeClaim {
         mut self,
         status: AgentStatus,
     ) -> Result<(), String> {
-        self.decide(ClaimDecision::Finish(status));
+        self.decide(ClaimDecision::Finish { status });
         (&mut self.worker)
             .await
             .map_err(|error| format!("resume status completion worker failed: {error}"))?
+    }
+
+    /// handoff worker 持有终态：只结束认领 worker，不写任何状态。
+    ///
+    /// 认领事实就是记录仍为 `active`；这里保留 active 直到 finalize 提交终态，
+    /// 远端存储的 `active` 守卫因此仍能命中唯一一次终态写入。
+    pub(in crate::session::subagent) async fn release_without_terminal(
+        mut self,
+    ) -> Result<(), String> {
+        self.decide(ClaimDecision::Release);
+        (&mut self.worker)
+            .await
+            .map_err(|error| format!("resume status release worker failed: {error}"))?
     }
 
     /// 准备失败：关闭决定通道，worker 恢复到认领前的记录并报告其失败。
@@ -208,7 +225,7 @@ async fn own_claim(
                     .map_err(|error| format!("resume hand-off rollback failed: {error}"))?;
             }
         }
-        Ok(ClaimDecision::Finish(status)) => {
+        Ok(ClaimDecision::Finish { status }) => {
             // 顺序不可反——结清会把记录写回认领前的值，先写终态会被它覆盖。
             handle
                 .mark_terminated()
@@ -224,6 +241,10 @@ async fn own_claim(
                 )
                 .await
                 .map_err(|error| format!("resume terminal status write failed: {error}"))?;
+        }
+        Ok(ClaimDecision::Release) => {
+            // 不写记录：认领事实由 finalize 写入的终态解除；提前写回 previous
+            // 会让远端 `active` 守卫拒绝随后唯一的 finalize。
         }
         Ok(ClaimDecision::CancelRunning(session)) => {
             // 资源关闭可能因未确认交接返回 Incomplete；此时仍须先结清认领并

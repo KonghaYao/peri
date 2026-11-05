@@ -108,7 +108,7 @@ WHERE t.work_state = 'working';
 
 这条查询确定候选，不直接授权启动。主会话不是 `working` 时，仍检查同范围内各 child 的自身状态；为 child 重建必要的父级收件地址，不意味着启动父级模型。
 
-只读 Store、不可执行环境或损坏关系不能放行执行；已能读取的历史与占用仍可展示，恢复错误显式报告。会话装配与历史回放成功后，恢复准备失败按「部分成功」返回：`session/load|resume` 仍为 Ok，结果写入 `_meta.peri.recovery`；使会话不可执行的失败（`Corrupt` / `ReadOnly` / `NotFound`）另以 `-32017` 拒绝 prompt。只读/不可执行 Store 的 `session/load|resume` 装配失败时改为**视图态**：`SessionState` 无执行环境、不注册可执行 MCP/TaskManager，历史与占用照常回放，`_meta.peri.recovery` 报 `failed` + `executionBlocked=true`，prompt 统一返回 `-32017`；视图态不写库，关闭后释放。
+只读 Store、不可执行环境或损坏关系不能放行执行；已能读取的历史与占用仍可展示，恢复错误显式报告。会话装配与历史回放成功后，恢复准备失败按「部分成功」返回：`session/load|resume` 仍为 Ok，结果写入 `_meta.peri.recovery`；使会话不可执行的失败（`Corrupt` / `ReadOnly` / `NotFound`）另以 `-32017` 拒绝 prompt。只读/不可执行 Store 的 `session/load|resume` 装配失败时改为**视图态**：`SessionState` 无执行环境、不注册可执行 MCP/TaskManager，历史与占用照常回放，`_meta.peri.recovery` 报 `failed` + `executionBlocked=true`，所有执行入口（用户 prompt、scheduled、continuation 与 idle 注入）统一返回 `-32017`；视图态不写库，关闭后释放；已有 live 会话不降级，视图态可重复 load。
 
 ## 4. 恢复流程
 
@@ -198,15 +198,25 @@ pub trait SessionRecovery: Send + Sync {
 
 普通用户待发输入保留 Thread MQ 的忙碌、单发、全发、空闲队首和 Stop 规则；不能因为本设计统一写入工作意图，就排空所有待发输入。
 
-### 5.3 本地 async Agent 完成
+### 5.3 child 完成与终态结算
 
-本地 child 的终态、`work_state` 收尾、结果接纳到目标 MQ，以及适用的接收方工作意图变更，使用同一 Store 原子操作。提交成功前不能宣称完成投递。
+child 的终态、`work_state` 收尾、结果接纳到目标 MQ，以及适用的接收方工作意图变更，在具备批/事务能力的后端上使用同一次提交；提交成功前不能宣称完成投递。
+
+- **本机 SQLite**：`BEGIN IMMEDIATE` 内一次写入 child 终态、`work_state`、结果 MQ 行与接收方 `idle → working` 提升。结果插入与终态更新都要求 child 仍为 `active`，同一 child 的终态只写一次；后到的结算不覆盖已提交终态，也不产生第二条结果。
+- **远端存储**：同样的效果放进一次 `commit_effects` 托管批。`Inserted` 的 MQ 接纳与工作意图提升同批；`Existing` 在 `same_payload` 确认后单独一批提升，失败返回可重试错误，调用方用同一稳定 ID 重试。`finalize_child_terminal` 与无结果的 `settle_terminal_without_result` 也各是一批，批内 `active` 守卫与批前/批后事实归类保证终态只写一次；批失败或结果未知不返回成功。
+- **没有跨行为事务的后端**（内存、测试替身、未来 adapter）：走 `SessionResources` 的组合默认实现，按「工作意图 → 终态」或「终态 → 工作意图 → 结果接纳」逐条提交。它只保证失败前不宣称完成，**不是原子证据**；进程在两步之间退出可能留下 `Active + 目标工作意图` 或已写终态但结果未接纳。不得用这些后端的成功验收「全有或全无」。
 
 因此，已完成并成功入 MQ 的 child 不会因崩溃残留 `working` 而再次续跑。任务结果的稳定消息身份继续遵守 MQ 的去重契约；运行期任务登记本身不另建持久绑定表。
 
 同一 child 的终态只写一次：重复结算（含 panic 兜底）不得改写已写下的终态，也不得因正文不同产生身份冲突。同一 child 的多次恢复使用各自恢复提醒的稳定 ID 作为结果身份；只有同一次恢复的重复结算才幂等，后续恢复的结果不得被上一条历史身份跳过。
 
-具备跨行为事务的后端（本机 SQLite）全有或全无；远端与嵌入后端没有跨行为事务，只保证失败前不宣称完成，进程在两步之间退出可能留下已写终态。
+sync 委派实际转为后台继续执行时，终态写入只归 handoff worker。执行体与 worker 用进程内 `TerminalOwnership` CAS 决定唯一写入者；worker 先建立父 `AsyncResultMailbox` 的 Queued 责任，再用 `finalize_child_terminal` 一次提交 child 终态、`work_state` 与父 MQ 结果。没有可用 terminal route 时不 detach，按同步路径执行并用 `settle_terminal_without_result` 收尾；worker 准入被拒时同样回退同步，由 wrapper/执行体按同一 CAS 唯一写终态，不产生父回执。映射为：正常结束 `Done + Idle`；明确取消 `Cancelled + Stopped`；其他中断、失败、交接未完成或 close 失败 `Error + Idle`。finalize 失败时结果未确认，child 仍按 `working` 交给下一次进入，并用同一消息身份重试（若提交实际已落地，重试为幂等 no-op），不伪报完成。
+
+恢复 child 的 continuation 在 turn 真正获得准入后登记到 live 且未 closing 的**直接父级**：父级 TaskManager 任务投影（任务身份取稳定 child thread id）、父级 `active_agents` 的 Cascade 取消关系，以及 child turn 的取消令牌。父级未 live 时跳过登记，父级之后进入时对已在运行的 child 补做 adoption，不冷装配祖先链；child 终态结算或启动早失败时收尾父任务，不留 pending。该登记只在本进程内，随会话实例释放，不新增持久绑定表。`TaskRecord.child_thread_id` 仍为空：公共注册契约不接受 live inbox，父任务身份由 `task_id = child thread id` 表达。
+
+结果通知固定投递到持久父链上的直接父 `parent_thread_id`，收件地址不由显式 resume 的调用者决定：其他会话 resume 该 child 不会改写 `parent_thread_id`，因此崩溃后的结果仍回到原直接父（例如 B 显式 resume 原属 A 的 C 后崩溃，结果回到 A，而不是 B）。这是既有持久父链的限制，不靠猜测调用者或回退 root 规避。结果消息使用与普通后台结果一致的 `ensure_processing` 策略：接纳时把父级从 `idle` 提升为 `working`；live 且已激活的 idle 父级收到唤醒，未 live 的父级由下一次进入消费 durable 行，`stopped` 不被解除。
+
+恢复启动只在真正交出执行后保持启动资格。`launch` 的任一跳过路径（会话态消失、代次变化、closing、turn 已活跃、activation 不允许、listener 启动失败、scheduler 消失）都撤销本次准入；continuation 已发出但调度或分发在 Receive 前失败时，只在恢复来源下写进程内 `recovery_launch_failed`。下一次显式进入读取并清除该标记，重新采纳 MQ 中的同一条提醒；不做同进程自动重试，不新增持久相位，也不把早失败伪报为完成或取消。
 
 ### 5.4 Stop
 
@@ -214,14 +224,22 @@ Stop 按既有取消策略确定实际受影响对象，在持久操作中保存
 
 恢复准备与 Stop 竞争时，旧快照不能覆盖新的 `stopped`。已经进入提交阶段的消息与当前执行按既有协调结算；Stop 不回删已提交历史，待发消息继续留在 MQ。
 
+### 5.5 sync 中断的收敛
+
+进入根会话时，在根级 single-flight 门内、读取恢复候选之前收敛该根子树中遗留的 `Active` child：非根、`agent_status = active`、`work_state` 为 `idle` 或 `stopped`、本进程没有活动实例（无 runtime、无 turn 令牌、未 closing），且 close 已结清。`idle` 收敛为 `Error`，`stopped` 收敛为 `Cancelled`；`work_state` 保持原值，不写 `Done`。
+
+收敛不续跑、不注入提醒、不产生结果通知；它只让显式 resume 不再被遗留 `Active` 拒绝。close 未结清、状态查询失败或 child 仍是 `working` 时不收敛，单个收敛失败只记录日志，不阻断本次进入。旧代际库没有 `work_state` 列，读作零候选。
+
 ## 6. 外围任务边界
 
 - Peri 不恢复 MCP 服务、进程、句柄或旧连接；只有外围服务仍持有的任务能被查询发现。
 - Workspace 需要提供按直接 owner 查询当前存活 Shell 的能力，复用现有 MCP 能力面。不会扫描并接管其他 thread 的任务。
 - 当前查询结果进入任务投影；查询失败表达为未知／失败，不能伪装成空列表。影响该 Agent 恢复准备的失败不阻止无关会话正常读取。
-- 对本次发现的任务建立订阅后重新核对当前状态，处理发现与监听之间的变化；重复通知沿稳定外围 task 身份收敛。
-- 不补播 downtime 期间的完成、输出或告警事件。没有发现某个旧任务，不等于它成功、失败或已取消。
+- 宿主侧 `McpPoolPort::watch_workspace_tasks` 在会话任务绑定启动时开始监听，随 close/取消退出：立即扫描一次，之后按固定间隔重扫，未确认的查询在下一轮重试。当前 owner 取 session id（ACP 中与 thread id 同值；若二者分叉，恢复需传真实 thread id）。只登记早于 watcher 启动、`shell_task_list` 仍报告的 live Shell；登记走既有 external task registration，再以现有 `tasks/get` 订阅（订阅首轮立即查询一次）覆盖发现与监听之间的变化。source identity 为 `(session_id, owner_identity, owner_task_id)`，重复登记按已登记处理。
+- 终态经既有 `settle_external` 投递到 owner MQ；重复通知沿稳定外围 task 身份收敛。watcher 退出不发送 `tasks/cancel`；会话 close 仍按既有 `cancel_session_external_tasks` 处理已登记任务。
+- 不补播 downtime 期间的完成、输出或告警事件。只登记查询返回的 live 任务，停机期间完成的终态不会补发；没有发现某个旧任务，不等于它成功、失败或已取消。
 - 正常重连后的新完成结果走原 owner 的 MQ；不能直接写入历史，也不能解除用户 Stop。
+- 恢复提醒里的 `workspace_live_tasks` 只是只读发现，不承担登记或订阅。范围限于 Workspace Shell；其他 MCP server 的协议任务没有可枚举面，不纳入本次恢复。
 
 ## 7. 历史与 Compact 的边界
 
@@ -267,23 +285,27 @@ Peri 启动时不执行恢复查询。进入 `root-a` 后，第 3 节查询返�
 | --- | --- |
 | 多个根均存有 working | 进程启动零自动续跑；进入 A 只检查 A 范围。 |
 | 重复进入／并发进入同一根 | 每个 thread 最多一个当前运行实例；不重复注入同一次恢复提醒。 |
-| 主会话 idle、async child working | child 可恢复；不把父级 idle 强行改为正在执行。 |
+| 主会话 idle、async child working | 进入阶段 child 可恢复；不因装配 child 而启动父级模型。 |
 | 嵌套 async Agent | 保留原 thread 与直接会话归属，结果不统一转投 root。 |
-| sync 中断 | 不自动续跑、不伪报 Done；后续显式 resume 可用。 |
-| sync 实际转为后台继续 | 交接提交后带 working 意图，进入时按 async 恢复。 |
+| sync 中断 | 不自动续跑、不伪报 Done；进入根时把非根、非 working、非活实例且 close 已结清的遗留 Active 收敛为 Error（idle）或 Cancelled（stopped）；后续显式 resume 可用。 |
+| sync 实际转为后台继续 | 交接提交后带 working 意图；终态、工作意图与父结果由 handoff worker 一次 finalize；无 terminal route 时不 detach。 |
 | 恢复准备期间 Stop／关闭／手动 resume | 启动前复核生效；旧快照、旧事件和旧 worker 不覆盖新状态。 |
 | MQ 已移交、模型推进前退出 | 历史存在且 MQ 不重复；working 让进入后从历史继续。 |
-| child 完成提交边界退出 | 终态与父 MQ 全有或全无；不发生结果已接纳而 child 被再次恢复。 |
+| child 完成提交边界退出 | SQLite 单事务、远端托管批：终态与父 MQ 全有或全无；无事务后端走组合回退并显式降级，不得当作原子证据。 |
 | 最后一条回复与新回调竞争 | 不丢新消息的工作意图；被动回调不解除 stopped。 |
 | 进入前已有可唤醒消息入 MQ | 接纳及意图持久化但不冷启动；进入后按 working 正常推进。 |
-| 进入后重建 Shell 视图 | 只看到直接 owner 的存活任务；查询失败不等于零任务。 |
-| 外围查询与订阅之间变化 | 通过重查当前状态收敛，不补播整个 downtime。 |
+| 进入后重建 Shell 视图 | watcher 只看到直接 owner 的 live Shell；查询失败不等于零任务；停机期间完成的终态不补播。 |
+| 外围查询与订阅之间变化 | 订阅首轮立即查一次、watcher 定期重试当前状态收敛，不补播整个 downtime。 |
 | Context 初次展示与失效 | 已保存值立即显示；NULL 不显示为 0；失效值不用于精确预算判断。 |
 | 旧库升级 | 只新增本文两列；旧 Active 不触发自动恢复，历史与 MQ 内容不被改写。 |
 | 结果处理范围 | 不出现任务绑定表、历史处理标记或隐藏的 pending-result 持久副本。 |
 | 恢复准备失败（装配成功） | load/resume 返回 Ok，`_meta.peri.recovery` 报 `failed`/`partial`，历史保留；不可执行分类另以 `-32017` 拒绝 prompt。 |
 | 响应发送失败后再次进入 | 只丢弃 Prepared 启动资格，MQ 提醒保留；下一次进入采纳同一条提醒，不重复注入。 |
 | 冷 child 恢复 | 响应前补齐 TaskManager 绑定与在线 endpoint；父级不启动模型。 |
+| 恢复 child 父级登记 | 恢复 continuation 的 turn 准入后只登记 live 且未 closing 的直接父 TaskManager（task_id = child thread id）与 Cascade；父未 live 跳过，之后进入 adoption；结算或早失败收尾。 |
+| 恢复启动早失败 | launch 的跳过路径撤销准入；恢复来源的 continuation 在 Receive 前失败写进程内标记，下一次显式进入重试；不自动重试、不新增持久相位。 |
+| 恢复结果唤醒 | `ensure_processing`：live idle 父级被唤醒，未 live 下一次进入消费；`stopped` 不被解除；结果回到持久父链的直接父。 |
+| 只读／不可执行 Store | load/resume 返回历史与占用，会话为无执行环境的视图态；prompt 等执行入口统一 `-32017`；视图态不写库。 |
 | 准入工作意图写入失败 | prompt 拒绝、模型零调用、工作意图不留下 `working`。 |
 
 所有业务写入经 Rust 行为接口和同一 Session Store。恢复入口负责装配与准入，普通执行负责正常状态变化；TUI、ACP 和回调不直接执行 SQL。
@@ -298,6 +320,6 @@ Peri 启动时不执行恢复查询。进入 `root-a` 后，第 3 节查询返�
 | 4 | Workspace 提供按 owner 发现存活 Shell，恢复当前订阅与任务投影。 | owner 隔离、查询失败和查询／订阅间变化通过；不补播 downtime。 |
 | 5 | 整体验证异常退出与再次进入。 | 使用真实 SQLite 提交边界验证 MQ、历史、工作意图及本地完成事务，无重放和错误冷启动。 |
 
-本文只制定设计与实施计划，不代表运行时代码已经修改。文档 SQL 可独立仿真，但不能替代以上运行时验收。
+本文是实现契约，不宣称验收已通过；实现状态以代码和测试为准。文档 SQL 可独立仿真，但不能替代运行时验收。
 
 文档校验已使用 SQLite 执行上述两列迁移，写入第 8 节七行数据并重新打开数据库，验证根范围隔离、idle 父级、stopped child、旧数据默认值以及字段约束。该校验没有运行 Peri Agent，也没有验证运行时崩溃恢复。

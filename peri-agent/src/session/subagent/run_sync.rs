@@ -10,11 +10,18 @@ use peri_acp_types::identity::AgentId;
 
 use super::factory::ResumeClaim;
 use super::lifecycle::drain_subagent_events;
+use super::sync_settlement::{
+    parent_result, settle_with_retry, terminal_status, terminal_status_for_outcome,
+    SyncExecutionResult,
+};
+use super::terminal_settlement::{
+    settle_terminal_without_result, TerminalMqRoute, TerminalOwnership,
+};
 use super::types::{
     ChildHandoffReason, ChildHandoffReceipt, ChildRunOutcome, SubagentFailure,
     SubagentLifecycleStart, SubagentLifecycleStop,
 };
-use super::util::{extract_last_ai_text, format_handoff_notice};
+use super::util::extract_last_ai_text;
 use super::v2_bridge::{forward_subagent_start_v1, forward_subagent_stop_v1, V2SubagentContext};
 use super::{
     build_subagent_start_v2, build_subagent_stop_v2_with_failure, emit_subagent_start_v2,
@@ -34,9 +41,21 @@ use peri_acp_types::thread::{ThreadId, WorkState};
 #[path = "run_sync_test.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "run_sync_settlement_test.rs"]
+mod settlement_tests;
+
 pub(super) struct SyncPending {
     pub receipt: ChildHandoffReceipt,
     pub pending_tasks: Vec<String>,
+}
+
+/// 交接信号：receipt 通道与终态归属同行，避免执行体与 worker 各写一次终态。
+pub(super) struct SyncHandoffSignal {
+    sender: oneshot::Sender<ChildHandoffReceipt>,
+    terminal: Arc<TerminalOwnership>,
+    /// wrapper 在无 detach 时也有存储可收敛；否则执行体必须自己写终态。
+    wrapper_settles: bool,
 }
 
 pub(super) enum SyncCompletion {
@@ -44,7 +63,6 @@ pub(super) enum SyncCompletion {
     Pending(SyncPending),
 }
 
-type SyncExecutionResult = Result<ChildRunOutcome, Box<dyn std::error::Error + Send + Sync>>;
 type SyncExecutionTask = tokio::task::JoinHandle<SyncExecutionResult>;
 
 /// 父 future 只消费已 spawn 的子执行结果；JoinError 只可能来自子任务 panic
@@ -93,6 +111,15 @@ impl Drop for SyncChildCancelGuard {
     }
 }
 
+/// wrapper 仍可能接管终态：Drop 后执行体不再让位，自己写终态。
+struct SyncWrapperAlive(Arc<TerminalOwnership>);
+
+impl Drop for SyncWrapperAlive {
+    fn drop(&mut self) {
+        self.0.wrapper_finished();
+    }
+}
+
 pub(super) fn new_sync_task_id() -> String {
     format!("sync-{}", uuid::Uuid::now_v7())
 }
@@ -120,6 +147,7 @@ pub(super) fn handoff_event_handler(
     })))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn run_sync_with_registered_handoff<Run, Execution>(
     session: Arc<Session>,
     child_thread_id: String,
@@ -127,11 +155,11 @@ pub(super) async fn run_sync_with_registered_handoff<Run, Execution>(
     parent_manager: Option<Arc<TaskManager>>,
     task_id: Option<String>,
     on_complete: Option<OnBgCompleteFn>,
+    terminal_route: Option<TerminalMqRoute>,
     run: Run,
 ) -> Result<SyncCompletion, Box<dyn std::error::Error + Send + Sync>>
 where
-    Run:
-        FnOnce(oneshot::Sender<ChildHandoffReceipt>, Arc<AtomicBool>) -> Execution + Send + 'static,
+    Run: FnOnce(SyncHandoffSignal, Arc<AtomicBool>) -> Execution + Send + 'static,
     Execution: Future<Output = Result<ChildRunOutcome, Box<dyn std::error::Error + Send + Sync>>>
         + Send
         + 'static,
@@ -152,11 +180,26 @@ where
     }
     let (handoff_sender, mut handoff_ready) = oneshot::channel();
     let handed_off = Arc::new(AtomicBool::new(false));
+    let terminal_ownership = Arc::new(TerminalOwnership::new());
+    // 只有拿到终态路由时 wrapper 才接管无 detach 的收敛；无 route 由执行体按
+    // 同步路径写终态。
+    let wrapper_settles = terminal_route.is_some();
+    let settlement_store = terminal_route
+        .as_ref()
+        .map(|route| Arc::clone(&route.store));
+    let _wrapper_alive = SyncWrapperAlive(Arc::clone(&terminal_ownership));
     // 子执行由独立任务持有：父工具调用 future 因 cancel 被 drop 时 JoinHandle
     // 只 detach，子任务仍能观察到已取消的 child token，走完 flush / close /
     // 终态持久化 / SubagentStop / permit 结算的既有收尾。
     let mut cancel_guard = SyncChildCancelGuard::new(Arc::clone(&session));
-    let mut execution = tokio::spawn(run(handoff_sender, Arc::clone(&handed_off)));
+    let mut execution = tokio::spawn(run(
+        SyncHandoffSignal {
+            sender: handoff_sender,
+            terminal: Arc::clone(&terminal_ownership),
+            wrapper_settles,
+        },
+        Arc::clone(&handed_off),
+    ));
     let receipt = tokio::select! {
         biased;
         // 交接 receipt 优先于执行终态：spawn 后两者独立完成，已提交的交接
@@ -185,18 +228,43 @@ where
         cancel_guard.disarm();
         return Ok(SyncCompletion::Finished(outcome));
     }
-    handed_off.store(true, Ordering::Release);
-
-    let can_detach = parent_manager.is_some() && task_id.is_some() && on_complete.is_some();
+    // 没有可原子结算的目标时保持同步：先 detach 再找投递方会留下无人收尾的后台任务。
+    let can_detach = terminal_route.is_some()
+        && parent_manager.is_some()
+        && task_id.is_some()
+        && on_complete.is_some();
     if !can_detach || host.close_state.is_closing() {
         tracing::warn!(
             %child_thread_id,
-            "sync child handoff has no live parent delivery owner; finishing synchronously"
+            "sync child handoff has no live terminal route; finishing synchronously"
         );
+        // 执行体看到交接已提交时会先让位；wrapper 有存储时必须接回终态写入。
+        let owns_terminal = settlement_store.is_some() && terminal_ownership.claim_handoff();
+        let outcome = await_execution(execution).await;
+        if owns_terminal {
+            if let Some(store) = settlement_store.as_deref() {
+                let status = terminal_status(&outcome, &session);
+                if let Err(error) = settle_terminal_without_result(
+                    store,
+                    &ThreadId::from(child_thread_id.clone()),
+                    status,
+                )
+                .await
+                {
+                    tracing::error!(%child_thread_id, %error, "sync child terminal write failed without detach");
+                }
+            }
+        }
+        cancel_guard.disarm();
+        return Ok(SyncCompletion::Finished(outcome?));
+    }
+    if !terminal_ownership.claim_handoff() {
+        // 执行已先收尾（Settled），交接不能再改写终态。
         let outcome = await_execution(execution).await?;
         cancel_guard.disarm();
         return Ok(SyncCompletion::Finished(outcome));
     }
+    let terminal_route = terminal_route.expect("checked above");
     let manager = parent_manager.expect("checked above");
     let worker_task_id = task_id.expect("checked above");
 
@@ -207,6 +275,7 @@ where
     let worker_close_state = Arc::clone(&host.close_state);
     let delivery = on_complete.expect("checked above");
     let close_task_id = worker_task_id.clone();
+    let worker_terminal_route = terminal_route.clone();
     // Keep ownership until close admission has atomically installed both the
     // registration and completion worker. Rejection creates no parent receipt.
     let mut execution = Some(execution);
@@ -217,9 +286,24 @@ where
         })?;
         let execution = execution.take().expect("worker admitted only once");
         Ok(async move {
+            // 续跑意图写进已准入的 worker：claim→admission 之间没有 await，
+            // wrapper 被 drop 也不会留下「已交接但无人写终态」的窗口。
+            if !worker_session.config().cancel_token.is_cancelled() {
+                if let Err(error) = worker_terminal_route
+                    .store
+                    .set_work_state(
+                        &ThreadId::from(worker_thread_id.clone()),
+                        WorkState::Working,
+                    )
+                    .await
+                {
+                    tracing::warn!(%worker_thread_id, %error, "sync child handoff work state write failed");
+                }
+            }
             let outcome = await_execution(execution).await;
             // The child task has joined; only this producer can prove its resources stopped.
             manager.confirm_external_execution_stopped(&registration);
+            let status = terminal_status(&outcome, &worker_session);
             let result = parent_result(
                 &outcome,
                 &worker_session,
@@ -227,6 +311,36 @@ where
                 &worker_agent_name,
                 &worker_thread_id,
             );
+            let message = worker_terminal_route.message(&result);
+            // A3：先建立父 mailbox 的 Queued 责任，再让结果在 finalize 中可见。
+            if let Err(error) = worker_terminal_route.accept(&message) {
+                tracing::error!(
+                    %worker_thread_id,
+                    %error,
+                    "sync child terminal result acceptance failed; retaining working for retry"
+                );
+                worker_close_state.record_sync_delivery_failure(
+                    &worker_task_id,
+                    &format!("terminal result accept failed: {error}"),
+                );
+                return;
+            }
+            // finalize 失败时用同一 ID 与正文重试；改写 payload 会让重试变成 Conflict，
+            // registry 交付因此永久 pending。稳定 ID 的重复提交是幂等 Existing。
+            if let Err(error) =
+                settle_with_retry(&worker_terminal_route, &worker_thread_id, status, &message).await
+            {
+                tracing::error!(
+                    %worker_thread_id,
+                    %error,
+                    "sync child terminal settlement failed after retries; retaining working for next entry"
+                );
+                worker_close_state.record_sync_delivery_failure(
+                    &worker_task_id,
+                    &format!("terminal settlement failed after retries: {error}"),
+                );
+                return;
+            }
             let delivery_close_state = Arc::clone(&worker_close_state);
             let delivery_task_id = worker_task_id.clone();
             let confirmed: OnBgCompleteFn = Arc::new(move |result, kind| {
@@ -265,12 +379,29 @@ where
     });
     if let Err(error) = spawned {
         tracing::warn!(%error, task_id = %log_task_id, "sync worker admission rejected; finishing synchronously without a parent receipt");
+        // 准入被拒时没有 worker 接管终态；执行体与 wrapper 用同一 CAS 竞争唯一写入，
+        // 任何一侧被 drop 都不会留下无人收敛的 HandedOff。
+        terminal_ownership.abandon_handoff();
         let outcome =
-            await_execution(execution.expect("rejected factory leaves execution owned")).await?;
+            await_execution(execution.expect("rejected factory leaves execution owned")).await;
+        if terminal_ownership.reclaim_abandoned_handoff() {
+            let status = terminal_status(&outcome, &session);
+            if let Err(error) = settle_terminal_without_result(
+                terminal_route.store.as_ref(),
+                &ThreadId::from(child_thread_id.clone()),
+                status,
+            )
+            .await
+            {
+                tracing::error!(%child_thread_id, %error, "sync child terminal write failed after rejected handoff");
+            }
+        }
         cancel_guard.disarm();
-        return Ok(SyncCompletion::Finished(outcome));
+        return Ok(SyncCompletion::Finished(outcome?));
     }
 
+    terminal_ownership.mark_worker_admitted();
+    handed_off.store(true, Ordering::Release);
     tracing::warn!(
         %child_thread_id,
         task_id = %log_task_id,
@@ -291,119 +422,10 @@ where
         .collect();
     // 交接已成功：worker 持有执行，父调用 future 的 drop 不再终止子任务。
     cancel_guard.disarm();
-    // 交接后由 session 资源 owner 继续执行，必须留下续跑意图。已被取消说明 Stop 已经
-    // 生效，此时再写 working 会覆盖用户的显式停止。
-    if let Some(resources) = resources.as_deref() {
-        if !session.config().cancel_token.is_cancelled() {
-            if let Err(error) = resources
-                .set_work_state(&ThreadId::from(child_thread_id.clone()), WorkState::Working)
-                .await
-            {
-                tracing::warn!(%child_thread_id, %error, "sync child handoff work state write failed");
-            }
-        }
-    }
     Ok(SyncCompletion::Pending(SyncPending {
         receipt,
         pending_tasks,
     }))
-}
-
-fn parent_result(
-    outcome: &Result<ChildRunOutcome, Box<dyn std::error::Error + Send + Sync>>,
-    session: &Arc<Session>,
-    task_id: &str,
-    agent_name: &str,
-    child_thread_id: &str,
-) -> peri_acp_types::event::BackgroundTaskResult {
-    let produced = extract_last_ai_text(session);
-    let (success, output, subagent_failure) = match outcome {
-        Ok(ChildRunOutcome::Settled) => (true, produced, None),
-        Ok(ChildRunOutcome::Interrupted) => (
-            false,
-            "Sub-agent was interrupted after handoff".to_string(),
-            None,
-        ),
-        Ok(ChildRunOutcome::HandedOff { receipt }) => {
-            let failure =
-                SubagentFailure::handed_off(&receipt.child_thread_id, agent_name, receipt.clone());
-            (
-                false,
-                format!("{produced}\n\n{}", format_handoff_notice(receipt)),
-                failure.safe_failure(),
-            )
-        }
-        Ok(ChildRunOutcome::Failed { error, residual }) => {
-            let failure = SubagentFailure::safe_failure_from_error(child_thread_id, error);
-            (
-                false,
-                format!(
-                    "Sub-agent failed after handoff: {}{}",
-                    error.user_facing_message(),
-                    residual
-                        .as_ref()
-                        .map(|receipt| format!("\n\n{}", format_handoff_notice(receipt)))
-                        .unwrap_or_default()
-                ),
-                failure,
-            )
-        }
-        Ok(ChildRunOutcome::HandoffFailed { cause, failure }) => {
-            let mut output = String::new();
-            if let Some(cause) = cause {
-                output.push_str(&cause.user_facing_message());
-                output.push_str("\n\n");
-            }
-            output.push_str(&format!(
-                "{}: {}",
-                super::types::handoff_failure_label(failure),
-                failure.error
-            ));
-            if let Some(flush) = &failure.flush_error {
-                output.push_str(&format!("\nhandoff history flush failed: {flush}"));
-            }
-            if let Some(receipt) = &failure.receipt {
-                output.push_str("\n\n");
-                output.push_str(&format_handoff_notice(receipt));
-            }
-            let safe = match cause {
-                Some(cause) => SubagentFailure::safe_failure_from_error(child_thread_id, cause),
-                None => {
-                    let error = super::types::handoff_failure_agent_error(failure);
-                    SubagentFailure::safe_failure_from_error(child_thread_id, &error)
-                }
-            };
-            (false, output, safe)
-        }
-        Err(error) => {
-            let failure = error
-                .downcast_ref::<SubagentFailure>()
-                .and_then(SubagentFailure::safe_failure);
-            let residual = error
-                .downcast_ref::<SubagentFailure>()
-                .and_then(|failure| failure.handoff())
-                .map(format_handoff_notice)
-                .unwrap_or_default();
-            (
-                false,
-                format!("Sub-agent failed after handoff: {error}{residual}"),
-                failure,
-            )
-        }
-    };
-    peri_acp_types::event::BackgroundTaskResult {
-        task_id: task_id.to_string(),
-        agent_name: agent_name.to_string(),
-        prompt_summary: "synchronous sub-agent handoff".into(),
-        success,
-        output,
-        tool_calls_count: super::util::count_tool_calls_from_session(session),
-        duration_ms: 0,
-        timed_out: false,
-        child_thread_id: Some(child_thread_id.to_string()),
-        subagent_failure,
-        shell_output: None,
-    }
 }
 
 // ─── 同步运行 ────────────────────────────────────────────────────────────────
@@ -427,8 +449,16 @@ pub(super) async fn run_sync_subagent(
     v2_ctx: V2SubagentContext,
     session: Arc<Session>,
     mut resume_claim: Option<ResumeClaim>,
-    handoff_start: Option<tokio::sync::oneshot::Sender<ChildHandoffReceipt>>,
+    handoff_start: Option<SyncHandoffSignal>,
 ) -> Result<ChildRunOutcome, Box<dyn std::error::Error + Send + Sync>> {
+    // 交接信号拆两半：sender 交给 child runner，终态归属留在执行体直到收尾。
+    let (handoff_start, terminal_state) = match handoff_start {
+        Some(signal) => (
+            Some(signal.sender),
+            Some((signal.terminal, signal.wrapper_settles)),
+        ),
+        None => (None, None),
+    };
     let mut permit = session
         .subagent_host()
         .and_then(|host| host.child_owner.clone())
@@ -603,10 +633,39 @@ pub(super) async fn run_sync_subagent(
     // 真实资源关闭失败时不写终态：资源未释放的事实必须保持可见（与 background
     // 路径的 terminal withheld 一致），resume 仍由 Active 状态拒绝。
     let close_failed = close_error.is_some();
-    let stop_resources = if close_failed { None } else { stop_resources };
+    // handoff worker 已接管终态时，执行体不再单独写状态；非 handoff 路径保持原逻辑。
+    let terminal_owner = if close_failed {
+        true
+    } else {
+        match terminal_state.as_ref() {
+            Some((ownership, wrapper_settles))
+                if *wrapper_settles
+                    && matches!(&outcome, ChildRunOutcome::HandedOff { .. })
+                    && ownership.should_yield_handoff() =>
+            {
+                // 交接已提交且 wrapper 仍可收敛：等它 claim HandedOff，避免抢写。
+                false
+            }
+            Some((ownership, _)) if ownership.reclaim_abandoned_handoff() => {
+                // 准入被拒或 wrapper 在交接后退出：执行体接回唯一终态写入。
+                true
+            }
+            Some((ownership, _)) => ownership.claim_settlement(),
+            None => true,
+        }
+    };
+    let stop_resources = if close_failed || !terminal_owner {
+        None
+    } else {
+        stop_resources
+    };
 
     let (mut stop_result, mut stop_is_error, mut stop_failure) =
         stop_projection(&outcome, &agent_name, child_thread_id, &session);
+    // 终态与工作意图共用同一个映射：真实取消 → Cancelled + Stopped；其余中断/失败
+    // → Error + Idle；只有 Settled 才是 Done。写入推迟到事件排空之后：排空失败要把
+    // 本次执行收口为 Error，不能先写 Done 再改写既有终态。
+    let mut terminal_status_value = terminal_status_for_outcome(&outcome, &session);
     if let Some(error) = &close_error {
         let error: crate::error::AgentError =
             anyhow::anyhow!("child close incomplete: {error}").into();
@@ -614,13 +673,14 @@ pub(super) async fn run_sync_subagent(
         stop_is_error = true;
         stop_failure = SubagentFailure::safe_failure_from_error(child_thread_id, &error);
     }
+    // 这里只触发 SubagentStop hook；终态写入在排空结果确定后执行一次。
     let mut settlement_error = on_subagent_stop_handler(
         &on_subagent_stop,
-        &stop_resources,
+        &None,
         &agent_name,
         child_thread_id,
         &stop_result,
-        stop_is_error,
+        terminal_status_value,
         &cwd,
     )
     .await
@@ -628,22 +688,6 @@ pub(super) async fn run_sync_subagent(
     if settlement_error.is_none() {
         if let Some(error) = close_error {
             settlement_error = Some(anyhow::anyhow!("child close incomplete: {error}").into());
-        }
-    }
-    let claim = if close_failed {
-        None
-    } else {
-        resume_claim.take()
-    };
-    if let Some(claim) = claim {
-        let status = if stop_is_error {
-            peri_acp_types::thread::AgentStatus::Error
-        } else {
-            peri_acp_types::thread::AgentStatus::Done
-        };
-        if let Err(error) = claim.finish(status).await {
-            settlement_error =
-                Some(anyhow::anyhow!("terminal_status_persist_failed: {error}").into());
         }
     }
     // 关闭失败时认领不在此结清：Drop 以 CancelRunning 重试关闭，且失败时保留
@@ -674,25 +718,9 @@ pub(super) async fn run_sync_subagent(
         tracing::error!(thread_id = %child_thread_id, error = %error.user_facing_message(), causes = ?error.cause_chain(), "sync child event forwarding barrier incomplete");
         settlement_error = Some(anyhow::anyhow!("child event drain failed: {error}").into());
         // 关闭失败时即使 drain 也失败，仍不得写终态：资源未释放的事实必须保持
-        // 可见，resume 继续由 Active 状态拒绝。
-        let fallback_resources = if close_failed {
-            None
-        } else {
-            terminal_resources.clone()
-        };
-        if let Err(status_error) = on_subagent_stop_handler(
-            &None,
-            &fallback_resources,
-            &agent_name,
-            child_thread_id,
-            "child event drain failed",
-            true,
-            &cwd,
-        )
-        .await
-        {
-            settlement_error = Some(status_error);
-        }
+        // 可见，resume 继续由 Active 状态拒绝。其余路径把终态改为 Error，
+        // 由下面的唯一写入点落库，不覆盖任何已提交终态。
+        terminal_status_value = peri_acp_types::thread::AgentStatus::Error;
         let residual = match &outcome {
             ChildRunOutcome::HandedOff { receipt } => Some(receipt.clone()),
             ChildRunOutcome::Failed { residual, .. } => residual.clone(),
@@ -713,6 +741,72 @@ pub(super) async fn run_sync_subagent(
         .collect();
         stop_is_error = true;
         stop_failure = SubagentFailure::safe_failure_from_error(child_thread_id, &error);
+    }
+    // 排空结果已确定：认领与未交接收尾都只在此时写一次最终终态。
+    let claim = if close_failed {
+        None
+    } else {
+        resume_claim.take()
+    };
+    let mut terminal_write_failed = false;
+    if let Some(claim) = claim {
+        let finished = if terminal_owner {
+            // 与 handler 的写入顺序一致：先工作意图，再终态；写失败时保留 Active
+            // 供恢复，而不是留下 Done + working 或写回认领前的状态。
+            let work_state = WorkState::after_agent_terminal(terminal_status_value);
+            let work_state_result = match terminal_resources.as_deref() {
+                Some(store) => {
+                    store
+                        .set_work_state(&ThreadId::from(child_thread_id), work_state)
+                        .await
+                }
+                None => Ok(()),
+            };
+            match work_state_result {
+                Ok(()) => claim.finish(terminal_status_value).await,
+                Err(error) => {
+                    let released = claim.release_without_terminal().await;
+                    match released {
+                        Ok(()) => Err(format!("terminal work state write failed: {error}")),
+                        Err(release_error) => Err(format!(
+                            "terminal work state write failed: {error}; {release_error}"
+                        )),
+                    }
+                }
+            }
+        } else {
+            // finalize 持有终态：认领不写任何状态，child 保持 Active 直到 finalize
+            // 提交；远端存储的 active 守卫因此仍能命中唯一的终态写入。
+            claim.release_without_terminal().await
+        };
+        if let Err(error) = finished {
+            terminal_write_failed = true;
+            settlement_error =
+                Some(anyhow::anyhow!("terminal_status_persist_failed: {error}").into());
+        }
+    }
+    // close_failed / handoff 让位 / resume 认领都不会进入这里：`stop_resources`
+    // 已按同一组条件在写终态前收敛为 None。
+    if let Some(store) = stop_resources.as_deref() {
+        if let Err(error) = settle_terminal_without_result(
+            store,
+            &ThreadId::from(child_thread_id),
+            terminal_status_value,
+        )
+        .await
+        {
+            tracing::error!(thread_id = %child_thread_id, %error, "terminal_status_persist_failed");
+            terminal_write_failed = true;
+            settlement_error =
+                Some(anyhow::anyhow!("terminal_status_persist_failed: {error}").into());
+        }
+    }
+    if terminal_write_failed {
+        if let Some(error) = settlement_error.as_ref() {
+            stop_result = error.to_string();
+            stop_is_error = true;
+            stop_failure = SubagentFailure::safe_failure_from_error(child_thread_id, error);
+        }
     }
     // v1 协议化载体直发（SubagentStopped）：与 Started 同源（v2 事件构造 +
     // observe_event_to_executor 同步映射），保证 Stopped 在 turn 收尾前到达

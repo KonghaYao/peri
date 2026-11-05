@@ -128,3 +128,125 @@ async fn test_drain_subagent_events_abort_during_handler_does_not_publish_stop()
         "强制取消后遥测终态保持 incomplete"
     );
 }
+
+/// sync 未交接收尾必须同时写终态与工作意图：执行期间被提升为 working 后，
+/// 不得留下 Done + working；取消映射 Cancelled + Stopped。
+#[tokio::test]
+async fn stop_handler_writes_status_with_terminal_work_state() {
+    use peri_acp_types::thread::WorkState;
+    let resources = crate::session::test_resources::mock::MockSessionResources::new();
+    let store: Arc<dyn SessionResources> = resources.clone();
+    for (status, expected_work_state) in [
+        (AgentStatus::Done, WorkState::Idle),
+        (AgentStatus::Cancelled, WorkState::Stopped),
+        (AgentStatus::Error, WorkState::Idle),
+    ] {
+        let id = uuid::Uuid::now_v7().to_string();
+        resources.register_bound_session(&id, "/tmp");
+        resources
+            .set_work_state(&ThreadId::from(id.clone()), WorkState::Working)
+            .await
+            .unwrap();
+        on_subagent_stop_handler(
+            &None,
+            &Some(Arc::clone(&store)),
+            "fixture",
+            &id,
+            "done",
+            status,
+            "/tmp",
+        )
+        .await
+        .unwrap();
+        let meta = resources.load_session_meta(&id).await.unwrap();
+        assert_eq!(meta.agent_status, status);
+        assert_eq!(meta.work_state, expected_work_state);
+    }
+}
+
+/// 状态写入失败时保留 Active + 已写工作意图，不产生 Done + working；
+/// 同一轮重试必须收敛到 Done + Idle。
+#[tokio::test]
+async fn stop_handler_failure_never_leaves_done_working() {
+    use peri_acp_types::thread::WorkState;
+    let resources = crate::session::test_resources::mock::MockSessionResources::new();
+    let id = uuid::Uuid::now_v7().to_string();
+    resources.register_bound_session(&id, "/tmp");
+    resources
+        .set_work_state(&ThreadId::from(id.clone()), WorkState::Working)
+        .await
+        .unwrap();
+    resources.fail_next_terminal_status_writes(1);
+    let store: Arc<dyn SessionResources> = resources.clone();
+
+    on_subagent_stop_handler(
+        &None,
+        &Some(Arc::clone(&store)),
+        "fixture",
+        &id,
+        "done",
+        AgentStatus::Done,
+        "/tmp",
+    )
+    .await
+    .unwrap_err();
+    let meta = resources.load_session_meta(&id).await.unwrap();
+    assert_eq!(
+        meta.agent_status,
+        AgentStatus::Active,
+        "状态未写成功时不得宣称终态"
+    );
+    assert_eq!(meta.work_state, WorkState::Idle);
+
+    on_subagent_stop_handler(
+        &None,
+        &Some(store),
+        "fixture",
+        &id,
+        "done",
+        AgentStatus::Done,
+        "/tmp",
+    )
+    .await
+    .unwrap();
+    let meta = resources.load_session_meta(&id).await.unwrap();
+    assert_eq!(meta.agent_status, AgentStatus::Done);
+    assert_eq!(meta.work_state, WorkState::Idle);
+}
+
+/// 已经落地的终态不能被后一次收尾改写。
+#[tokio::test]
+async fn repeated_terminal_settlement_does_not_overwrite() {
+    use peri_acp_types::thread::WorkState;
+    let resources = crate::session::test_resources::mock::MockSessionResources::new();
+    let id = uuid::Uuid::now_v7().to_string();
+    resources.register_bound_session(&id, "/tmp");
+    let store: Arc<dyn SessionResources> = resources.clone();
+
+    on_subagent_stop_handler(
+        &None,
+        &Some(Arc::clone(&store)),
+        "fixture",
+        &id,
+        "done",
+        AgentStatus::Done,
+        "/tmp",
+    )
+    .await
+    .unwrap();
+    on_subagent_stop_handler(
+        &None,
+        &Some(store),
+        "fixture",
+        &id,
+        "late failure",
+        AgentStatus::Error,
+        "/tmp",
+    )
+    .await
+    .unwrap();
+
+    let meta = resources.load_session_meta(&id).await.unwrap();
+    assert_eq!(meta.agent_status, AgentStatus::Done);
+    assert_eq!(meta.work_state, WorkState::Idle);
+}

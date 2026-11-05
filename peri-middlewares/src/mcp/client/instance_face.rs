@@ -49,6 +49,22 @@ struct ShellTaskWire {
     owner: Option<String>,
     #[serde(default)]
     state: String,
+    #[serde(default)]
+    started_at: Option<String>,
+}
+
+/// One live Shell task as reported by `shell_task_list`, keeping the owner
+/// creation timestamp for recovery admission.
+///
+/// The timestamp is not part of the public [`LiveTask`] port: recovery uses it
+/// to distinguish tasks that pre-date this process (adoptable) from tasks this
+/// process started normally (already registered by the tool bridge).
+#[derive(Debug, Clone)]
+pub(super) struct WorkspaceLiveTask {
+    pub task_id: String,
+    pub owner: Option<String>,
+    pub state: String,
+    pub started_at: Option<String>,
 }
 
 impl McpClientPool {
@@ -146,6 +162,29 @@ impl McpClientPool {
     /// 传输失败、非 JSON 响应或服务端明确报告 `unknown` 都归入
     /// [`PeripheralTasks::Unknown`]：调用方不得把它当成「没有存活任务」。
     pub(crate) async fn workspace_live_tasks(&self, owner: &str) -> PeripheralTasks {
+        match self.workspace_shell_tasks(owner).await {
+            Ok(tasks) => PeripheralTasks::Known(
+                tasks
+                    .into_iter()
+                    .map(|task| LiveTask {
+                        task_id: task.task_id,
+                        owner: task.owner,
+                        state: task.state,
+                    })
+                    .collect(),
+            ),
+            Err(detail) => PeripheralTasks::unknown(detail),
+        }
+    }
+
+    /// 查询内核：`Ok` 是服务端确认的存活任务（可为空），`Err` 是未能确认。
+    ///
+    /// 恢复监听需要 owner 创建时间来判断任务是否先于本进程；端口只暴露
+    /// [`LiveTask`]，因此保留这份更完整的内部事实，避免公开契约漂移。
+    pub(super) async fn workspace_shell_tasks(
+        &self,
+        owner: &str,
+    ) -> Result<Vec<WorkspaceLiveTask>, String> {
         let call = self.call_instance_tool(
             "workspace",
             "shell_task_list",
@@ -154,40 +193,31 @@ impl McpClientPool {
         );
         let text = match peri_time::timeout(PERIPHERAL_QUERY_TIMEOUT, call).await {
             Ok(Ok(text)) => text,
-            Ok(Err(detail)) => return PeripheralTasks::unknown(detail),
+            Ok(Err(detail)) => return Err(detail),
             Err(_) => {
-                return PeripheralTasks::unknown(format!(
+                return Err(format!(
                     "shell task list query timed out after {}s",
                     PERIPHERAL_QUERY_TIMEOUT.as_secs()
                 ));
             }
         };
-        let parsed: ShellTaskListWire = match serde_json::from_str(&text) {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                return PeripheralTasks::unknown(format!(
-                    "shell task list response was not JSON: {error}"
-                ));
-            }
-        };
+        let parsed: ShellTaskListWire = serde_json::from_str(&text)
+            .map_err(|error| format!("shell task list response was not JSON: {error}"))?;
         if parsed.unknown {
-            return PeripheralTasks::unknown(
-                parsed
-                    .detail
-                    .unwrap_or_else(|| "workspace reported an unknown shell task state".into()),
-            );
+            return Err(parsed
+                .detail
+                .unwrap_or_else(|| "workspace reported an unknown shell task state".into()));
         }
-        PeripheralTasks::Known(
-            parsed
-                .tasks
-                .into_iter()
-                .map(|task| LiveTask {
-                    task_id: task.task_id,
-                    owner: task.owner,
-                    state: task.state,
-                })
-                .collect(),
-        )
+        Ok(parsed
+            .tasks
+            .into_iter()
+            .map(|task| WorkspaceLiveTask {
+                task_id: task.task_id,
+                owner: task.owner,
+                state: task.state,
+                started_at: task.started_at,
+            })
+            .collect())
     }
 
     /// 读取池内某实例的资源 URI 正文（首个非空文本内容的按序拼接）。

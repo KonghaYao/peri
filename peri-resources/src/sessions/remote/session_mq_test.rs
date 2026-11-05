@@ -13,12 +13,12 @@ use peri_acp_types::session::{
 };
 use peri_acp_types::session_resources::SessionResourceErrorKind;
 use peri_acp_types::store::PersistedPayload;
-use peri_acp_types::thread::ThreadId;
+use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
 use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
 
 use super::generation::{ConnectionFactory, ConnectionGate};
-use super::mutation::{RemoteStore, StoreAccess};
+use super::mutation::{FaultPlan, RemoteStore, StoreAccess};
 use super::schema::{self, StoreId};
 use super::schema_upgrade_tests::SqliteTransport;
 use super::session_data::RemoteSessionData;
@@ -27,6 +27,7 @@ use crate::sessions::data::SessionDataPort;
 struct Fixture {
     _directory: tempfile::TempDir,
     pool: SqlitePool,
+    transport: Arc<SqliteTransport>,
     data: RemoteSessionData,
 }
 
@@ -101,7 +102,7 @@ async fn fixture() -> Fixture {
         StoreId::mint(),
         store,
         Arc::new(MqFactory {
-            transport,
+            transport: transport.clone(),
             gate: gate.clone(),
         }),
         gate,
@@ -109,6 +110,7 @@ async fn fixture() -> Fixture {
     Fixture {
         _directory: directory,
         pool,
+        transport,
         data,
     }
 }
@@ -133,6 +135,27 @@ fn input(id: MessageId, text: &str) -> MqInput {
         policy: MessagePolicy::ensure_processing(),
         original_draft: Some(text.to_owned()),
     }
+}
+
+fn terminal_input(id: MessageId, text: &str) -> MqInput {
+    MqInput {
+        kind: MessageKind::Defer,
+        source: MessageSource::SubAgentComplete,
+        ..input(id, text)
+    }
+}
+
+/// 读 `(agent_status, work_state)`，用于断言「一条都没写」。
+async fn terminal_facts(fixture: &Fixture, thread: &ThreadId) -> (String, String) {
+    sqlx::query_as("SELECT agent_status, work_state FROM threads WHERE id = ?1")
+        .bind(thread.as_str())
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap()
+}
+
+async fn work_state(fixture: &Fixture, thread: &ThreadId) -> WorkState {
+    terminal_facts(fixture, thread).await.1.parse().unwrap()
 }
 
 fn selection(
@@ -658,3 +681,6 @@ async fn remote_normalized_retry_promotes_work_intent() {
         "same_payload 确认的同一条消息必须提升工作意图"
     );
 }
+
+#[path = "session_settlement_test.rs"]
+mod settlement_tests;

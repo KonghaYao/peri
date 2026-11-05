@@ -952,6 +952,7 @@ impl McpClientPool {
 
 mod ports;
 mod session_bindings;
+mod workspace_watch;
 
 #[cfg(test)]
 #[path = "client_test.rs"]

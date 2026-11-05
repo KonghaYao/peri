@@ -1,7 +1,7 @@
 //! `SessionResources` 门面替身：实现契约语义，未覆盖的行为按 `Unsupported` 拒绝而不是静默 no-op。
 
 use super::*;
-use peri_acp_types::session::ThreadMqStore as _;
+use peri_acp_types::session::{MqEnqueueOutcome, MqInput, ThreadMqStore as _};
 
 /// 替身的工作区投影：按保存路径造一个自洽的 `ResolvedWorkspace`。
 ///
@@ -301,6 +301,19 @@ impl SessionResources for MockSessionResources {
         thread_id: &ThreadId,
         filter: peri_acp_types::session::MqFilter,
     ) -> SessionResourceResult<Vec<peri_acp_types::session::MqEntry>> {
+        if self
+            .mq_query_failures
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok()
+        {
+            return Err(SessionResourceError::new(
+                SessionResourceErrorKind::Internal {
+                    detail: "injected MQ query failure".to_owned(),
+                },
+            ));
+        }
         self.mq.mq_query(thread_id, filter).await
     }
 
@@ -618,6 +631,88 @@ impl SessionResources for MockSessionResources {
         self.ensure_writable()?;
         self.write_work_state(id, state);
         Ok(())
+    }
+
+    /// 与组合默认实现同序（状态 → 工作意图 → 结果接纳），并支持 finalize 故障注入。
+    async fn finalize_child_terminal(
+        &self,
+        child: &ThreadId,
+        status: AgentStatus,
+        work_state: WorkState,
+        target: &ThreadId,
+        message: MqInput,
+    ) -> SessionResourceResult<MqEnqueueOutcome> {
+        self.finalize_attempts.fetch_add(1, Ordering::SeqCst);
+        self.finalize_message_ids
+            .lock()
+            .unwrap()
+            .push(message.payload.id());
+        if self
+            .finalize_failures
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(SessionResourceError::new(
+                SessionResourceErrorKind::Internal {
+                    detail: "injected finalize failure".into(),
+                },
+            ));
+        }
+        if self.finalize_requires_active.load(Ordering::SeqCst) {
+            let current = self.load_session_meta(child).await?.agent_status;
+            if !current.is_active() {
+                return Err(SessionResourceError::new(
+                    SessionResourceErrorKind::Conflict {
+                        detail: "child terminal settlement requires active child".into(),
+                    },
+                ));
+            }
+        }
+        self.update_session_meta(
+            child,
+            &SessionMetaPatch {
+                status: Some(status),
+                ..Default::default()
+            },
+        )
+        .await?;
+        self.set_work_state(child, work_state).await?;
+        self.mq_enqueue(target, message).await
+    }
+
+    /// 与组合默认实现同序（先工作意图、后状态），并支持「状态写入前失败」注入。
+    async fn settle_terminal_without_result(
+        &self,
+        child: &ThreadId,
+        status: AgentStatus,
+        work_state: WorkState,
+    ) -> SessionResourceResult<TerminalSettlementOutcome> {
+        self.ensure_writable()?;
+        let current = self.load_session_meta(child).await?.agent_status;
+        if current.is_terminal() {
+            return Ok(TerminalSettlementOutcome::AlreadyTerminal(current));
+        }
+        self.set_work_state(child, work_state).await?;
+        if self
+            .terminal_status_failures
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(SessionResourceError::new(
+                SessionResourceErrorKind::Internal {
+                    detail: "injected terminal status failure".into(),
+                },
+            ));
+        }
+        self.update_session_meta(
+            child,
+            &SessionMetaPatch {
+                status: Some(status),
+                ..Default::default()
+            },
+        )
+        .await?;
+        Ok(TerminalSettlementOutcome::Settled)
     }
 
     async fn set_context_usage(

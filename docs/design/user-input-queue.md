@@ -6,13 +6,18 @@
 
 ## 状态归属
 
-待发送消息及其原稿由 [Thread MQ](thread-mq.md) 持久保存在所属 thread 的 MQ 中；发布/领取选择、
-当前 run ticket 和执行恢复仍只属于当前进程。不保存持久 Work 命令或回放旧发送命令；重启后
+待发送消息及其原稿由 [Thread MQ](thread-mq.md) 持久保存在所属 thread 的 MQ 中；MQ 是待发事实的唯一持久权威。
+发布/领取选择、当前 run ticket 和执行恢复仍只属于当前进程。不保存持久 Work 命令或回放旧发送命令；重启后
 尚未移交的消息仍待发送，但旧执行不恢复。已提交的 canonical 历史照常持久化。当前发送/取回/取消的
 身份校验与交互行为保留。
 
 Agent 会话的 `UserInputMailbox` 是投递生命周期的唯一 owner，宿主持有跨 turn 的共享实例。
-它保留稳定输入身份、命令回执及运行 ticket，待发送内容一律经 Thread MQ 查询，不另存副本；
+它保留稳定输入身份、命令回执、运行 ticket，以及一份**内存投影缓存**（正文、原稿与展示状态）；
+缓存不是第二份持久待发账本。`snapshot()` 只读这份投影，不查询 MQ、不清理记录、不推进 revision；
+`refresh_from_store()` 是显式对账入口：查询本 thread 的用户待发 MQ，成功且 revision 窗口未变化时
+补齐缺失记录并清理已确定不在 MQ 的 Queued 记录，查询失败或窗口内 revision 变化时不修改已有投影。
+`session/input/snapshot` RPC 先 refresh 再取纯快照，查询失败返回 RPC 错误而不是空队列；
+错误响应只附纯快照，不产生查询、清理或 revision 副作用。
 ACP 定位会话、检查能力和写权限，执行 Agent 给出的准入决定；TUI 只保存编辑器草稿、未确认请求及服务端投影。
 
 loading 期间普通输入只进入 Thread MQ 的待发投影，不打断当前模型或工具执行。
@@ -68,10 +73,12 @@ transcript flush 与事件 forwarder 收尾，确认自然成功；同一 attemp
 | `session/input/enqueue` | 保存完整内容和原始草稿，以稳定 input ID 入队 |
 | `session/input/dispatch` | 发送指定 input ID 集合 |
 | `session/input/takeback` | 原子撤回一条 Queued 输入并返回完整载荷 |
-| `session/input/snapshot` | 查询当前 generation、revision、待发项与实际运行身份 |
+| `session/input/snapshot` | 先按 MQ 显式对账，再查询当前 generation、revision、待发项与实际运行身份 |
 
 变更请求绑定 session ID、generation 与 command ID。回执和事件按 revision 合并，
 迟到响应不能覆盖新状态；响应不明确时只在相同会话实例中以同一身份重试，不能改走旧 prompt 重复投递。
+服务端在同一线性化点生成 revision 与投影内容：同 revision 只在内容完全一致时幂等接受，
+内容不同或严格更旧一律拒绝，避免乱序旧快照覆盖新状态。
 consumer 发现命令已不在本地待结算账本（被致命失败结算、会话重置或实例 generation 变化）时，
 只能报告“已结算”：不得当作发送成功，也不得重试或改换 input ID。
 首次输入的准备阶段（工作区发现、服务端建会话、初次快照）与已发出请求的受理回执各自计时：

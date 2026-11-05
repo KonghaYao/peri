@@ -387,6 +387,15 @@ pub(super) async fn spawn_subagent_impl(
         return Err(detail.into());
     }
 
+    // 终态结果投递到父会话的 MQ（无父 thread 时不做跨会话投递）。
+    let terminal_route = match (&session_resources, parent_thread_id.clone()) {
+        (Some(store), Some(target)) => Some(super::super::terminal_settlement::TerminalMqRoute {
+            store: Arc::clone(store),
+            target: peri_acp_types::thread::ThreadId::from(target.as_str()),
+            mailbox: parent.map(|parent| parent.async_result_mailbox()),
+        }),
+        _ => None,
+    };
     match run_mode {
         SubagentRunMode::Sync => {
             let run_thread_id = child_thread_id.clone();
@@ -403,6 +412,7 @@ pub(super) async fn spawn_subagent_impl(
                     .and_then(|host| host.task_manager.clone()),
                 Some(sync_task_id.clone()),
                 super::completion_delivery(parent, on_bg_complete),
+                terminal_route,
                 move |handoff_start, handed_off| async move {
                     run_sync_subagent(
                         &run_thread_id,
@@ -476,16 +486,6 @@ pub(super) async fn spawn_subagent_impl(
         }
         SubagentRunMode::Background => {
             let task_id_clone = task_id.clone();
-            // 终态结果投递到父会话的 MQ（无父 thread 时不做跨会话投递）。
-            let terminal_route = match (&session_resources, parent_thread_id.clone()) {
-                (Some(store), Some(target)) => {
-                    Some(super::super::terminal_settlement::TerminalMqRoute {
-                        store: Arc::clone(store),
-                        target: peri_acp_types::thread::ThreadId::from(target.as_str()),
-                    })
-                }
-                _ => None,
-            };
             spawn_background_subagent(
                 task_id.clone(),
                 child_thread_id.clone(),

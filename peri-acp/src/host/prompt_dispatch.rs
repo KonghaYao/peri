@@ -19,6 +19,8 @@ pub(crate) enum PromptOrigin {
         mq_steering: bool,
         /// 由「已规范提交但未覆盖的 Ready 结果」触发的续跑。
         pending_result: bool,
+        /// 由恢复启动门发出：早失败要反馈给恢复协调器，供下一次显式进入重试。
+        recovery: bool,
     },
     Scheduled,
 }
@@ -68,6 +70,9 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     input_ticket: Option<super::user_input::UserInputRun>,
 ) -> Result<Value, AcpError> {
     let is_continuation = !matches!(origin, PromptOrigin::User);
+    // 恢复启动门发出的 continuation：只有它的早失败反馈给协调器。用户 prompt 或
+    // 普通续跑失败不改变恢复准入。
+    let recovery_origin = matches!(origin, PromptOrigin::Continuation { recovery: true, .. });
     let prompt_session_id = extract_session_id(&params, "").to_string();
     let environment = sessions
         .lock()
@@ -282,6 +287,9 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
                 session_id = %prompt_session_id,
                 "continuation: superseded (newer prompt or Defer consumed), aborting"
             );
+            if recovery_origin {
+                mark_recovery_launch_failed(cfg, &prompt_session_id);
+            }
             return Ok(serde_json::Value::Null);
         }
         let dispatchable = {
@@ -297,6 +305,9 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             })
         };
         if !dispatchable {
+            if recovery_origin {
+                mark_recovery_launch_failed(cfg, &prompt_session_id);
+            }
             return Ok(serde_json::Value::Null);
         }
         #[cfg(test)]
@@ -320,6 +331,27 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         ));
     };
     let thread = ThreadId::from(thread_id.clone());
+    // 恢复 child 的父级运行登记必须发生在准入之后、模型调用之前：只有真正获得
+    // 本次 turn 资格的 child 才进入父任务投影。恢复提醒可能先被激活监听拉起
+    // （`recovery_origin=false`），因此按投递事实而不是启动来源判定；登记失败
+    // 撤销启动资格，提醒与准入留给下一次显式进入重试。
+    if is_continuation {
+        if let Err(error) =
+            super::recovery::register_recovered_child_for_turn(cfg, sessions, &prompt_session_id)
+                .await
+        {
+            rollback_continuation_admission(sessions, &prompt_session_id, is_continuation).await;
+            if recovery_origin {
+                mark_recovery_launch_failed(cfg, &prompt_session_id);
+            }
+            tracing::warn!(
+                session_id = %prompt_session_id,
+                %error,
+                "recovery: parent task registration failed; launch rolled back"
+            );
+            return Ok(serde_json::Value::Null);
+        }
+    }
     if let Err(error) = cfg
         .session_manager
         .session_resources()
@@ -327,6 +359,11 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         .await
     {
         rollback_continuation_admission(sessions, &prompt_session_id, is_continuation).await;
+        // 已登记但尚未开始执行的父任务必须收尾；没有投递时是 no-op。
+        super::recovery::abort_recovery_launch(cfg, &prompt_session_id);
+        if recovery_origin {
+            mark_recovery_launch_failed(cfg, &prompt_session_id);
+        }
         tracing::error!(
             session_id = %prompt_session_id,
             %error,
@@ -396,7 +433,11 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
                 // wire 投影，工作意图已经写好（可能是 stopped），不得覆盖。
                 // 恢复结算由 finalize 统一写终态与工作意图，这里不能再单独写 idle。
                 let never_finished = state.cancel_token.take().is_some();
-                if never_finished && recovery_settlement_pending {
+                // 恢复来源的本轮早失败：既可能是冷 child 的恢复结算，也可能是
+                // 根/child 的恢复启动 continuation。保留 working 与提醒，供下一次
+                // 显式进入重试；不能按普通中断回收成 idle。
+                let recovery_attempt = recovery_settlement_pending || recovery_origin;
+                if never_finished && recovery_attempt {
                     recovery_early_failure = true;
                 } else if never_finished {
                     abandoned_thread = Some(state.thread_id.clone());
@@ -411,7 +452,11 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     // 不伪造完成或取消，保留 `working` 与原提醒供下一次显式进入重试；同时把当前
     // MQ 水位记为失败水位，避免遗留提醒立刻触发第二次自动尝试。
     if recovery_early_failure {
-        if let Some(runtime) = cfg.session_manager.get_session(&prompt_session_id) {
+        // 进程内事实：本次恢复启动没有跑到 Receive。下一次显式进入读取并清除，
+        // 允许采纳同一提醒重试；此处不做任何自动重试。
+        let runtime = cfg.session_manager.get_session(&prompt_session_id);
+        if let Some(runtime) = runtime {
+            runtime.mark_recovery_launch_failed();
             let queue = runtime.v2_message_queue.clone();
             let activation = Arc::clone(&runtime.activation);
             drop(runtime);
@@ -440,24 +485,24 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     // 冷 child 恢复的 turn 结束：终态、工作意图与结果通知由一次原子结算提交到父
     // thread。目标挂在会话实例上，所以用户 prompt、激活监听与启动门任一路径跑完都只
     // 结算一次；被取代的续跑在本函数早期返回，走不到这里。早失败没有终态可结算，
-    // 不向父级投递「已完成/已失败」的结果事实。
-    let recovery_parent = if recovery_early_failure {
-        None
-    } else {
-        cfg.session_manager
-            .get_session(&prompt_session_id)
-            .and_then(|runtime| runtime.take_recovery_parent())
-    };
-    if let Some(delivery) = recovery_parent {
-        super::recovery::deliver_child_turn(
-            cfg,
-            sessions,
-            &prompt_session_id,
-            &delivery.parent,
-            delivery.seed,
-            super::recovery::turn_outcome(&result),
-        )
-        .await;
+    // 不向父级投递「已完成/已失败」的结果事实，但仍要收尾已登记的父级任务。
+    let recovery_delivery = cfg
+        .session_manager
+        .get_session(&prompt_session_id)
+        .and_then(|runtime| runtime.take_recovery_parent());
+    if let Some(delivery) = recovery_delivery {
+        if recovery_early_failure {
+            super::recovery::finish_recovered_child_without_result(cfg, &delivery);
+        } else {
+            super::recovery::deliver_child_turn(
+                cfg,
+                sessions,
+                &prompt_session_id,
+                &delivery,
+                super::recovery::turn_outcome(&result),
+            )
+            .await;
+        }
     }
 
     let pending_state = {
@@ -506,6 +551,14 @@ fn work_intent_error(thread_id: Option<&str>, detail: String) -> AcpError {
         "threadId": thread_id,
         "detail": detail,
     }))
+}
+
+/// 恢复启动的 continuation 在 Receive 前失败：写进程内标记，下一次显式进入
+/// 据此清除 Launched 占位并重新采纳提醒。用户 prompt 与非恢复续跑不写。
+fn mark_recovery_launch_failed(cfg: &AcpServerConfig, session_id: &str) {
+    if let Some(runtime) = cfg.session_manager.get_session(session_id) {
+        runtime.mark_recovery_launch_failed();
+    }
 }
 
 /// 回滚本轮 continuation 准入时设置的内存标记；用户 prompt 路径无事可做。

@@ -1,4 +1,6 @@
 use super::*;
+use peri_acp_types::session_resources::SessionResources;
+use peri_acp_types::thread::{AgentStatus, WorkState};
 
 #[tokio::test(start_paused = true)]
 async fn background_child_hands_off_reports_failure() {
@@ -59,6 +61,10 @@ async fn background_child_hands_off_reports_failure() {
 async fn background_child_settles_before_deadline_reports_success() {
     let (child, manager, built, initial_calls, result_calls, ticket) = child_with_nested_task();
     let child_id = child.store().thread_id.clone().unwrap();
+    // 成功结果需要终态可持久化；无 SessionResources 时后台路径按未结算失败收口。
+    let store = crate::session::test_resources::mock::MockSessionResources::new();
+    store.register_bound_session(&child_id, "/tmp");
+    let resources: Arc<dyn SessionResources> = store.clone();
     let parent_manager = Arc::new(TaskManager::new());
     let (tx, rx) = tokio::sync::oneshot::channel();
     let tx = parking_lot::Mutex::new(Some(tx));
@@ -66,7 +72,7 @@ async fn background_child_settles_before_deadline_reports_success() {
     let stop_calls = stops.clone();
     crate::session::subagent::background::spawn_background_subagent(
         "parent-task".into(),
-        child_id,
+        child_id.clone(),
         "fixture".into(),
         "initial child work".into(),
         "/tmp".into(),
@@ -80,7 +86,7 @@ async fn background_child_settles_before_deadline_reports_success() {
             Ok(())
         })),
         None,
-        None,
+        Some(resources),
         None,
         None,
         None,
@@ -108,6 +114,9 @@ async fn background_child_settles_before_deadline_reports_success() {
     assert_eq!(initial_calls.load(Ordering::SeqCst), 1);
     assert_eq!(result_calls.load(Ordering::SeqCst), 1);
     assert_eq!(stops.load(Ordering::SeqCst), 1);
+    let meta = store.load_session_meta(&child_id).await.unwrap();
+    assert_eq!(meta.agent_status, AgentStatus::Done);
+    assert_eq!(meta.work_state, WorkState::Idle);
 }
 
 /// 后台协作取消：原身份终态一次，失败语义不伪装成功。

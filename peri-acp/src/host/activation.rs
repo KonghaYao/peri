@@ -60,6 +60,7 @@ pub(super) async fn pending_request(
         kind: BgTaskKind::Agent,
         mq_steering,
         pending_result,
+        recovery: false,
     })
 }
 

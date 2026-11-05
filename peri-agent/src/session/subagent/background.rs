@@ -8,7 +8,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use super::lifecycle::drain_subagent_events;
-use super::terminal_settlement::TerminalMqRoute;
+use super::terminal_settlement::{settle_terminal_without_result, TerminalMqRoute};
 use super::types::{
     ChildRunOutcome, SubagentFailure, SubagentLifecycleStart, SubagentLifecycleStop,
 };
@@ -26,7 +26,7 @@ use crate::agent::events::{AgentEventHandler, ExecutorEvent};
 use crate::agent::subagent_event_forwarder::spawn_subagent_event_forwarder_for_completion;
 use crate::agent::LangfuseBridgeLike;
 use crate::session::factory::{DeregisterRuntimeFn, RegisterRuntimeFn};
-use peri_acp_types::session_resources::{SessionMetaPatch, SessionResources};
+use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::thread::{AgentStatus, ThreadId, WorkState};
 
 pub(super) struct BackgroundStartGate {
@@ -761,17 +761,21 @@ async fn persist_background_terminal(
         return true;
     }
     let Some(store) = store else {
-        return true;
+        // 没有存储就无法把终态与工作意图一次提交；不写半状态，按未结算失败返回，
+        // 让父会话看到「结算未完成」而不是伪装成功。
+        tracing::error!(
+            %thread_id,
+            "subagent terminal status write failed: session resources unavailable"
+        );
+        result.success = false;
+        result.output = format!(
+            "{}; subagent terminal status write failed: session resources unavailable",
+            result.output
+        );
+        return false;
     };
-    if let Err(error) = store
-        .update_session_meta(
-            &ThreadId::from(thread_id),
-            &SessionMetaPatch {
-                status: Some(status),
-                ..Default::default()
-            },
-        )
-        .await
+    if let Err(error) =
+        settle_terminal_without_result(store, &ThreadId::from(thread_id), status).await
     {
         tracing::error!(%thread_id, %error, "subagent terminal status write failed");
         result.success = false;
@@ -780,17 +784,6 @@ async fn persist_background_terminal(
             result.output
         );
         return false;
-    }
-    // 终态与续跑意图同一 seam 收尾：被取消保留停止意图，完成/失败不再自动续跑。
-    // 意图是辅助事实：写失败不能吞掉已经产出的结果，保留最后提交的值并留日志。
-    if let Err(error) = store
-        .set_work_state(
-            &ThreadId::from(thread_id),
-            WorkState::after_agent_terminal(status),
-        )
-        .await
-    {
-        tracing::warn!(%thread_id, %error, "subagent terminal work state write failed");
     }
     true
 }
@@ -859,3 +852,7 @@ impl Drop for PendingBackgroundRegistration {
 #[cfg(test)]
 #[path = "background_registration_test.rs"]
 mod registration_tests;
+
+#[cfg(test)]
+#[path = "background_terminal_test.rs"]
+mod terminal_tests;

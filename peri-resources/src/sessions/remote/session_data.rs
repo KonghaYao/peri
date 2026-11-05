@@ -40,13 +40,8 @@
 //! - 不解析本机目录、不发执行资格、不判定 legacy：`LegacyConfirmed` 与执行准入由门面与
 //!   执行面按本机证据判定（这也是 `load_binding` 只回答绑定事实的原因）；
 
-use super::credentials::SessionStoreCredential;
-use super::endpoint::RemoteEndpoint;
-use super::generation::{ConnectionFactory, ConnectionGate, RemoteConnectionFactory};
-use super::mutation::{RemoteStore, StoreAccess};
-use super::schema::{StoreId, StoreIdentityRead, StoreShapeRead};
-use super::schema_upgrade;
-use super::session_schema;
+use super::generation::{ConnectionFactory, ConnectionGate};
+use super::schema::StoreId;
 use super::session_sql;
 use super::sql::StatementSpec;
 use crate::sessions::data::{ChildResumeRecord, SessionDataPort};
@@ -69,13 +64,20 @@ use peri_acp_types::workspace::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{RwLock, RwLockReadGuard};
+use tokio::sync::RwLock;
 use turso_serverless::Value;
 #[cfg(test)]
 #[path = "session_data_fixture.rs"]
 mod fixtures;
 #[path = "session_close.rs"]
 mod session_close;
+
+mod connection_lifecycle;
+mod construction;
+mod ownership;
+mod recovery;
+
+use connection_lifecycle::{connection_closed, ConnectionSlot};
 
 /// 本次打开对远端 store 身份做了什么：首次登记资格的唯一证据。
 ///
@@ -94,12 +96,11 @@ mod session_open;
 pub(super) use session_open::{
     open_step, open_verdict, probe_shape, verify_legacy_open_identity, OpenStep,
 };
-use session_open::{refuse_legacy_shape, resolve_open_machine_id};
 
 /// 远端会话数据 adapter：一个已初始化（或已读回身份）的远程 store 上的会话行为。
 ///
 /// 连接在关闭**确认**之前一直活着：服务期间留在槽里；关闭一开始就离开业务路径、移进关闭
-/// 句柄（[`ClosingConnection`]），由它保留真实资源并允许重试，`close` 成功返回才算确认。
+/// 句柄（[`connection_lifecycle::ClosingConnection`]），由它保留真实资源并允许重试，`close` 成功返回才算确认。
 /// 一次已经发出的在途请求被丢弃（超时、取消）之后，用到它的那一代连接被记为失效，
 /// **下一次访问按同一份打开事实重建**（见 [`Self::store`]）。关闭开始之后（无论上一次成功
 /// 与否）再没有重连：槽里没有可服务的连接时如实返回关闭错误，绝不用一次重连把关闭事实盖掉。
@@ -125,115 +126,6 @@ pub(super) struct RemoteSessionData {
 }
 
 impl RemoteSessionData {
-    /// 打开远程会话数据：读回 store 身份；未初始化时只在可写打开下创建本任务 schema。
-    ///
-    /// 返回值里的 [`StoreInitialization`] 是「首次登记」的唯一证据，且只有一个来源：
-    /// [`open_verdict`] 对身份竞争结论（[`StoreIdentityOutcome`]）的映射——只有本事务确切
-    /// 插入元数据行并提交（`Created`）才是 `CreatedByThisOpen`。初始化结果未知（丢响应、
-    /// 超时）会让本次打开直接失败：既不发身份，也不发创建事实。
-    ///
-    /// 四条拒绝路径都不猜：版本/契约不认识、元数据形状不可解释、会话表形状与契约声明的
-    /// 代数不符（[`probe_shape`]，只读）、只读打开遇上尚未初始化的 store（没有 schema 就
-    /// 没有会话事实可读，也不越权建表）。
-    pub(super) async fn open(
-        endpoint: &RemoteEndpoint,
-        credential: &SessionStoreCredential,
-        access: StoreAccess,
-    ) -> SessionResourceResult<(Self, StoreInitialization)> {
-        Self::open_with_machine(endpoint, credential, access, None).await
-    }
-
-    pub(super) async fn open_with_machine(
-        endpoint: &RemoteEndpoint,
-        credential: &SessionStoreCredential,
-        access: StoreAccess,
-        supplied_machine_id: Option<String>,
-    ) -> SessionResourceResult<(Self, StoreInitialization)> {
-        let gate = Arc::new(ConnectionGate::default());
-        let factory: Arc<dyn ConnectionFactory> = Arc::new(RemoteConnectionFactory::new(
-            endpoint.clone(),
-            credential.duplicate(),
-            access,
-            Arc::clone(&gate),
-        ));
-        let store = factory.connect().await?;
-        // 打开路径的两份只读事实：身份（版本 + 契约 + store id）与会话表形状。
-        // 后者连同必要索引在一次只读批中探测；列形状不符即拒绝。
-        let read = store.read_identity().await?;
-        let shape = probe_shape(&store, &read).await?;
-        let schema_work = shape.clone();
-        let legacy_shape = matches!(&read, StoreIdentityRead::Present(snapshot) if !snapshot.matches_build())
-            && access == StoreAccess::ReadOnly;
-        let legacy_open_identity = legacy_shape.then(|| read.clone());
-        let step = open_step(read, shape, access)?;
-        let upgraded = matches!(step, OpenStep::Upgrade(_));
-        let (store_id, initialization) = match step {
-            OpenStep::Existing(store_id) => (store_id, StoreInitialization::Existing),
-            OpenStep::Upgrade(snapshot) => {
-                schema_upgrade::upgrade(&store, &snapshot).await?;
-                (snapshot.store_id, StoreInitialization::Existing)
-            }
-            // 空库：写打开在这里才参与身份竞争，结论由本事务的结果给出（见 [`open_verdict`]），
-            // 不由「刚才读到空库」推定创建。
-            OpenStep::NeedsInitialization => {
-                // 空库与「旧形状的库」在身份读取上都读作未初始化：先问一次后者，命中即拒绝。
-                refuse_legacy_shape(&store).await?;
-                open_verdict(store.initialize_store().await?)
-            }
-        };
-        let machine_id = resolve_open_machine_id(supplied_machine_id, access).await?;
-        // 健康的当前库已通过严格列形状与必要索引检查，无须每次重放 DDL。
-        // 身份早于会话表建立的库仍需补齐；缺索引时只补索引。
-        if access == StoreAccess::ReadWrite {
-            // 父行检查先归位：canonical 形状里的外键在远端没有可满足的父行（见方法文档）。
-            store.force_parent_checks_off().await?;
-            if !upgraded {
-                let plan = match schema_work {
-                    Some(StoreShapeRead::NeedsCurrentRepair {
-                        missing_indexes,
-                        missing_close_intents,
-                    }) => session_schema::repair_plan(missing_indexes, missing_close_intents),
-                    Some(StoreShapeRead::Unbuilt) | None => session_schema::initialization_plan(),
-                    Some(StoreShapeRead::Consistent | StoreShapeRead::Drifted(_)) => Vec::new(),
-                };
-                if !plan.is_empty() {
-                    store.apply_schema(plan).await?;
-                }
-            }
-            let machine_exists = store
-                .fetch_row(&StatementSpec::new(
-                    "SELECT id FROM machines WHERE id = ?1",
-                    vec![Value::Text(machine_id.clone())],
-                ))
-                .await?
-                .is_some();
-            if !machine_exists {
-                store
-                .apply_schema(vec![StatementSpec::new(
-                    "INSERT OR IGNORE INTO machines(id, name, identity_kind) VALUES (?1, '我的电脑', 'known')",
-                    vec![Value::Text(machine_id.clone())],
-                )])
-                .await?;
-            }
-        }
-        // 旧形状只读打开可能与另一实例的原子升级竞争；不可带过期的读法返回。
-        if let Some(initial) = legacy_open_identity {
-            verify_legacy_open_identity(&initial, &store.read_identity().await?)?;
-        }
-        Ok((
-            Self {
-                machine_id,
-                slot: RwLock::new(ConnectionSlot::serving(store)),
-                factory,
-                gate,
-                store_id,
-                legacy_shape,
-                roots: RwLock::new(HashMap::new()),
-            },
-            initialization,
-        ))
-    }
-
     /// metadata 投影代数：打开时的身份读回判为旧代只读形状（`legacy_shape`）时，
     /// `threads` 没有两列工作快照，读取改用同形占位列；codec 仍是同一套。
     pub(super) fn meta_projection(&self) -> session_sql::MetaProjection {
@@ -256,253 +148,6 @@ impl RemoteSessionData {
             Err(_) => id.clone(),
         }
     }
-
-    /// 取当前连接（已就绪的借用）。
-    ///
-    /// 只有「槽里还有一条**服务中**的连接、但这一代已被记为失效」才重建，而且**只重建一次**：
-    /// 失败如实上报，下一次调用再试。槽里没有可服务的连接（关闭已经开始、关闭已确认，或
-    /// 关闭态装配）一律返回关闭错误——一次重连绝不能把「已经开始的关闭」变回来。
-    ///
-    /// 重建判定与取守卫之间还有一个空窗：另一条在途调用被放弃（超时、取消）会把**当前**这一代
-    /// 记为失效。拿到读锁之后再复核一次，就不会把已知失效的连接交出去——本调用什么都没发，
-    /// 只如实失败（[`Unavailable`](SessionResourceErrorKind::Unavailable)），下一次访问按它重建。
-    /// 不做自动重试：重建是下一次访问的事，本次绝不把请求发到一条已经不可证明的连接上。
-    pub(super) async fn store(&self) -> SessionResourceResult<RwLockReadGuard<'_, RemoteStore>> {
-        self.reconnect_if_retired().await?;
-        let slot = self.slot.read().await;
-        let store = RwLockReadGuard::try_map(slot, ConnectionSlot::serving_store)
-            .map_err(|_| connection_closed())?;
-        if self.gate.is_invalid(store.generation()) {
-            return Err(retired_connection());
-        }
-        Ok(store)
-    }
-
-    /// 只读打开的访问意图下，先于任何「读前置事实」拒绝写入。
-    ///
-    /// mutation 层自己也会拒绝只读写入，但那发生在**发起写入**时：读前置事实之后提前
-    /// 返回成功的路径（如「未知边界 = 无变更」）会绕过它，让只读请求以成功收场。
-    /// 本机 adapter 的同类路径先 `writable()` 再读边界，这里保持同一顺序。
-    pub(super) async fn ensure_writable(&self) -> SessionResourceResult<()> {
-        self.store().await?.access().ensure_writable()
-    }
-
-    /// 失效代际的重建：建立新连接、重核实身份、替换槽位、关闭退场连接。
-    async fn reconnect_if_retired(&self) -> SessionResourceResult<()> {
-        let Some(retired) = self.retired_generation().await else {
-            return Ok(());
-        };
-        let replacement = self.factory.connect().await?;
-        if let Err(error) = self.verify_reconnect(&replacement).await {
-            // 没能证明「还是这个库」的新连接不装回槽里：关闭它，按原错误上报。
-            retire(replacement).await;
-            return Err(error);
-        }
-        let replaced = {
-            let mut slot = self.slot.write().await;
-            match slot.serving_store().map(RemoteStore::generation) {
-                // 槽在重建期间失去服务中的连接（关闭开始把连接移进关闭句柄）：不复活，不装回去。
-                None => {
-                    drop(slot);
-                    retire(replacement).await;
-                    return Err(connection_closed());
-                }
-                // 别的调用已经重建好了：自己这条一次请求都没发过，丢弃即可。
-                Some(current) if current != retired => {
-                    drop(slot);
-                    retire(replacement).await;
-                    return Ok(());
-                }
-                Some(_) => slot.replace_serving(replacement),
-            }
-        };
-        // 退场连接的关闭在锁外做，而且不阻塞其它访问：重建路径不能因为一次关闭把别人堵住。
-        if let Some(replaced) = replaced {
-            retire(replaced).await;
-        }
-        Ok(())
-    }
-
-    /// 当前**服务中**的连接是否已被记为失效；返回那一代的代际号。
-    ///
-    /// 关闭中的槽没有服务中的连接，也就没有「重建」这回事（返回 `None`：业务读如实失败，
-    /// 不重连）。
-    async fn retired_generation(&self) -> Option<u64> {
-        let slot = self.slot.read().await;
-        let store = slot.serving_store()?;
-        self.gate
-            .is_invalid(store.generation())
-            .then(|| store.generation())
-    }
-
-    /// 重建后的重核实：新连接必须就是**同一个** store，且本构建认识它。
-    ///
-    /// 只读检查——不建表、不初始化、不登记：重连不改变任何事实，只证明「还是这个库」。
-    /// 只读打开因此与可写打开走同一条重建路径，且不产生任何写入。
-    async fn verify_reconnect(&self, store: &RemoteStore) -> SessionResourceResult<()> {
-        match store.read_identity().await? {
-            StoreIdentityRead::Present(snapshot)
-                if !(snapshot.matches_build()
-                    || (store.access() == StoreAccess::ReadOnly && snapshot.readable())) =>
-            {
-                Err(unsupported_behavior(
-                    "unrecognized remote store schema after reconnect",
-                ))
-            }
-            StoreIdentityRead::Present(snapshot)
-                if snapshot.store_id.as_str() != self.store_id.as_str() =>
-            {
-                Err(unsupported_behavior(
-                    "reconnect reached a different remote store",
-                ))
-            }
-            StoreIdentityRead::Present(_) => Ok(()),
-            StoreIdentityRead::Malformed => Err(super::session_codec::corrupt(
-                "remote session store metadata is not interpretable after reconnect",
-            )),
-            StoreIdentityRead::Uninitialized => Err(unsupported_behavior(
-                "reconnected remote store has no session schema",
-            )),
-        }
-    }
-}
-
-/// 关闭态装配用的连接工厂：任何一次重建都明确失败（关闭的实例不重连）。
-#[cfg(test)]
-struct NoConnectionFactory;
-
-#[cfg(test)]
-#[async_trait]
-impl ConnectionFactory for NoConnectionFactory {
-    async fn connect(&self) -> SessionResourceResult<RemoteStore> {
-        Err(connection_closed())
-    }
-}
-
-/// 退场连接的收尾：尝试关闭并记下结果。
-///
-/// 关闭失败**不**掩盖本次重建的结论：这一代本来就已经不可信，重连的意义是让后续访问有路
-/// 可走；但也不能悄悄丢掉——失败按诊断记录，不含凭证、URL 或语句内容。
-async fn retire(store: RemoteStore) {
-    if store.close().await.is_err() {
-        tracing::debug!("retired remote connection did not close cleanly");
-    }
-}
-
-/// 连接的生命周期槽位：**服务中**，或**关闭中**（含已确认关闭）。
-///
-/// 两个字段互斥，翻转点只有一个（[`Self::begin_close`]）：取走 `serving`、装上 `closing`。
-/// 空槽（两者皆空）只属于「从来没有过连接」的装配。
-struct ConnectionSlot {
-    /// 服务中的连接；关闭开始后为空——业务读不再经过它，也不会因此重连。
-    serving: Option<RemoteStore>,
-    /// 关闭句柄；关闭开始后一直保留（含已确认关闭），真实资源的关闭进度在它里面。
-    closing: Option<Arc<ClosingConnection>>,
-}
-
-impl ConnectionSlot {
-    /// 装配一条服务中的连接。
-    fn serving(store: RemoteStore) -> Self {
-        Self {
-            serving: Some(store),
-            closing: None,
-        }
-    }
-
-    /// 服务中的连接（关闭中、空槽为 `None`）。
-    fn serving_store(&self) -> Option<&RemoteStore> {
-        self.serving.as_ref()
-    }
-
-    /// 换掉服务中的连接，返回退场的那一条；只在确认槽里有服务中的连接时调用。
-    fn replace_serving(&mut self, store: RemoteStore) -> Option<RemoteStore> {
-        self.serving.replace(store)
-    }
-
-    /// 开始关闭（幂等）：把服务中的连接移进关闭句柄；已经在关闭中时复用同一个句柄。
-    ///
-    /// `None` 只出现在空槽（从来没有过连接）：这与「关闭失败」**不同**——失败时句柄已经被
-    /// 保留下来，重试关闭的是同一条真实连接。
-    fn begin_close(&mut self) -> Option<Arc<ClosingConnection>> {
-        if let Some(closing) = &self.closing {
-            return Some(Arc::clone(closing));
-        }
-        let store = self.serving.take()?;
-        let closing = Arc::new(ClosingConnection::new(store));
-        self.closing = Some(Arc::clone(&closing));
-        Some(closing)
-    }
-}
-
-impl Default for ConnectionSlot {
-    /// 空槽：连接从来没有过（关闭态装配）。
-    fn default() -> Self {
-        Self {
-            serving: None,
-            closing: None,
-        }
-    }
-}
-
-/// 关闭句柄：连接退出业务路径之后，真实资源的关闭进度被保留在这里。
-///
-/// 唯一句柄在**句柄里**而不在关闭 future 里：调用方超时、取消或整个 future 被丢弃都不会丢
-/// 连接。关闭失败或被取消都不确认（[`CloseProgress::Unconfirmed`]），下一次调用在**同一条
-/// 连接**上继续关——不新建连接，也不把一次未确认的失败固化成永久错误。
-struct ClosingConnection {
-    /// 待关闭的连接：确认关闭成功之前一直保留。
-    connection: RemoteStore,
-    /// 关闭尝试的串行点：并发关闭共享同一次真实关闭的结论，成功只发生一次。
-    progress: tokio::sync::Mutex<CloseProgress>,
-}
-
-/// 真实关闭的进度：只有「已确认成功」会让关闭不再重做。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CloseProgress {
-    /// 尚未成功（从未尝试，或上一次失败/被取消）：允许重试。
-    Unconfirmed,
-    /// 已确认成功：不再重复关闭同一条连接，后续关闭幂等成功。
-    Confirmed,
-}
-
-impl ClosingConnection {
-    fn new(connection: RemoteStore) -> Self {
-        Self {
-            connection,
-            progress: tokio::sync::Mutex::new(CloseProgress::Unconfirmed),
-        }
-    }
-
-    /// 真实关闭；并发调用被串行化，成功只发生一次。
-    ///
-    /// 失败如实上报且**不**确认：连接仍在句柄里，下一次调用在同一条连接上继续关闭。
-    /// 调用 future 被丢弃只放弃这一次尝试——句柄与进度都不在 future 里，因此什么也不会丢。
-    async fn shutdown(&self) -> SessionResourceResult<()> {
-        let mut progress = self.progress.lock().await;
-        if *progress == CloseProgress::Confirmed {
-            return Ok(());
-        }
-        self.connection.close().await?;
-        *progress = CloseProgress::Confirmed;
-        Ok(())
-    }
-}
-
-/// 槽里没有可服务的连接（关闭已经开始、关闭已确认，或从来没有过连接）：不是「没有连接就没问题」。
-fn connection_closed() -> SessionResourceError {
-    SessionResourceError::new(SessionResourceErrorKind::Internal {
-        detail: "remote session store connection is closed".to_owned(),
-    })
-}
-
-/// 这一代在守卫交出去之前就被记为失效：本调用**没有发出任何请求**。
-///
-/// 保守归类为 `Unavailable`（连接这一刻不可用），而不是「关闭」或「契约」类错误：这不是
-/// 会话数据的结论，也不代表远端拒绝；下一次访问会按同一份打开事实重建。
-fn retired_connection() -> SessionResourceError {
-    SessionResourceError::new(SessionResourceErrorKind::Unavailable {
-        detail: "remote session store connection was retired before use".to_owned(),
-    })
 }
 
 pub(super) fn not_found() -> SessionResourceError {
@@ -548,45 +193,13 @@ impl SessionDataPort for RemoteSessionData {
     }
 
     async fn machine_id_of(&self, id: &ThreadId) -> SessionResourceResult<Option<String>> {
-        let store = self.store().await?;
-        if self.legacy_shape {
-            let row = store
-                .fetch_row(&StatementSpec::new(
-                    "SELECT machine_id FROM session_environments WHERE thread_id = ?1",
-                    vec![Value::Text(id.clone())],
-                ))
-                .await?;
-            return Ok(row.and_then(|values| super::sql::text_at(&values, 0).map(str::to_owned)));
-        }
-        let row = store
-            .fetch_row(&StatementSpec::new(
-                "SELECT w.machine_id FROM threads t JOIN workspaces w ON w.id = t.workspace_id WHERE t.id = ?1",
-                vec![Value::Text(id.clone())],
-            ))
-            .await?;
-        Ok(row.and_then(|values| super::sql::text_at(&values, 0).map(str::to_owned)))
+        self.read_machine_id_of(id).await
     }
     async fn workspace_id_of(
         &self,
         id: &ThreadId,
     ) -> SessionResourceResult<Option<peri_acp_types::workspace::WorkspaceId>> {
-        if self.legacy_shape {
-            return Ok(None);
-        }
-        let store = self.store().await?;
-        let row = store
-            .fetch_row(&StatementSpec::new(
-                "SELECT workspace_id FROM threads WHERE id = ?1",
-                vec![Value::Text(id.clone())],
-            ))
-            .await?;
-        row.map(|row| {
-            super::sql::text_at(&row, 0)
-                .ok_or_else(|| super::session_codec::corrupt("invalid remote workspace id"))?
-                .parse()
-                .map_err(|_| super::session_codec::corrupt("invalid remote workspace id"))
-        })
-        .transpose()
+        self.read_workspace_id_of(id).await
     }
     async fn list_machines(
         &self,
@@ -792,50 +405,14 @@ impl SessionDataPort for RemoteSessionData {
         id: &ThreadId,
     ) -> SessionResourceResult<peri_acp_types::recovery::RecoveryScope> {
         // 与本地 adapter 同语义：先严格解析根（远端不退回自身），再读根子树的 working 候选。
-        let root = self.root_of(id).await?;
-        // 旧形状（v10/v11 只读）没有两列工作快照：读不到工作意图就是零候选，不能猜成 working。
-        if self.legacy_shape {
-            return Ok(peri_acp_types::recovery::RecoveryScope::idle(root));
-        }
-        let store = self.store().await?;
-        let rows = store
-            .fetch_rows(&session_sql::select_working_tree_statement(&root))
-            .await?;
-        let mut candidates = Vec::with_capacity(rows.len());
-        for row in rows {
-            let thread_id = super::sql::text_at(&row, 0)
-                .ok_or_else(|| {
-                    super::session_codec::corrupt("recovery scope row has no thread id")
-                })?
-                .to_owned();
-            let parent_thread_id = super::sql::text_at(&row, 1).map(str::to_owned);
-            let context_usage_tokens = match super::sql::int_at(&row, 2) {
-                None => None,
-                Some(usage) => Some(u64::try_from(usage).map_err(|_| {
-                    super::session_codec::corrupt("recovery scope row has a negative context usage")
-                })?),
-            };
-            let state = super::sql::text_at(&row, 3).ok_or_else(|| {
-                super::session_codec::corrupt("recovery scope row has no work state")
-            })?;
-            let state = state
-                .parse::<peri_acp_types::thread::WorkState>()
-                .map_err(|_| {
-                    super::session_codec::corrupt("stored work state is not a known value")
-                })?;
-            if state != peri_acp_types::thread::WorkState::Working {
-                continue;
-            }
-            candidates.push(peri_acp_types::recovery::RecoveryCandidate {
-                thread_id,
-                parent_thread_id,
-                context_usage_tokens,
-            });
-        }
-        Ok(peri_acp_types::recovery::RecoveryScope {
-            root_thread_id: root,
-            candidates,
-        })
+        self.read_recovery_scope(id).await
+    }
+
+    async fn interrupted_threads(
+        &self,
+        id: &ThreadId,
+    ) -> SessionResourceResult<Vec<peri_acp_types::recovery::InterruptedThread>> {
+        self.read_interrupted_threads(id).await
     }
 
     async fn list_sessions(
@@ -1052,6 +629,30 @@ impl SessionDataPort for RemoteSessionData {
         self.history_contains(thread_id, id).await
     }
 
+    /// 远端 child 终态结算入口；单批语义与终态守卫见 `session_settlement`。
+    async fn finalize_child_terminal(
+        &self,
+        child: &ThreadId,
+        status: peri_acp_types::thread::AgentStatus,
+        work_state: WorkState,
+        target: &ThreadId,
+        message: peri_acp_types::session::MqInput,
+    ) -> SessionResourceResult<peri_acp_types::session::MqEnqueueOutcome> {
+        self.finalize_child_terminal_settlement(child, status, work_state, target, message)
+            .await
+    }
+
+    /// 远端无结果终态结算入口；守卫与批后分类见 `session_settlement`。
+    async fn settle_terminal_without_result(
+        &self,
+        child: &ThreadId,
+        status: peri_acp_types::thread::AgentStatus,
+        work_state: WorkState,
+    ) -> SessionResourceResult<peri_acp_types::session_resources::TerminalSettlementOutcome> {
+        self.settle_terminal_without_result_settlement(child, status, work_state)
+            .await
+    }
+
     /// 远端未决收敛：拿本机日志里的操作 id 向远端账本求证终态（C §5.1 第 4 步）。
     ///
     /// 每条未结清记录只有三种结论，且都由**写确认过的证据**给出，不靠空查询或超时推断：
@@ -1098,7 +699,8 @@ impl SessionDataPort for RemoteSessionData {
     /// （无论成功与否）连接就离开业务路径且不再重连；失败或取消都不丢句柄——重试关闭的是
     /// **同一条被保留的连接**，不新建连接，也不把「没有连接可用」当成「已经干净关闭」。
     ///
-    /// 「确认」的范围是**本机传输面关闭成功**（见 [`RemoteStore::close`] 与 `remote` 模块
+    /// 「确认」的范围是**本机传输面关闭成功**（见
+    /// [`RemoteStore::close`](crate::sessions::remote::mutation::RemoteStore::close) 与 `remote` 模块
     /// 文档的 shutdown 定义）：它不证明服务端连接已释放，也不证明任何未知的远端写没有生效——
     /// v10 撤销本机操作日志后，本机已没有可以向远端账本求证的 durable 锚点，这条判定只剩下
     /// 当前实例 persistence gate 的未结清标记；重开不构成对前次未知写入效果的证明。

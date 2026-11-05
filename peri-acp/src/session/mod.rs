@@ -134,6 +134,11 @@ pub struct AcpSession {
     /// 任何一条路径发起，投递都只发生一次（收尾取走即清空）。种子取本次恢复提醒
     /// 的稳定 ID；同一 child 的多次恢复不能共用结果消息身份。
     pub(crate) recovery_parent: parking_lot::Mutex<Option<crate::session::RecoveryDelivery>>,
+    /// 恢复启动的 continuation 在 Receive 前失败（进程内事实，不持久化）。
+    ///
+    /// 由 prompt dispatch 写入、下一次显式进入 take 并清除：允许采纳同一提醒重试，
+    /// 不自动重试，也不新增持久相位。
+    pub(crate) recovery_launch_failed: std::sync::atomic::AtomicBool,
     /// 恢复准备失败且分类为不可执行时的执行阻断（仅内存，不持久化）。
     ///
     /// 每次 `session/load|resume` 重新尝试恢复：成功清除，失败按当前分类重设。
@@ -195,7 +200,7 @@ pub struct SessionManager {
     inner: Arc<SessionManagerInner>,
 }
 
-/// 冷 child 恢复的一次结算投递：父 thread 与本次恢复的稳定种子。
+/// 冷 child 恢复的一次结算投递：父 thread、本次恢复的稳定种子与父级运行登记。
 ///
 /// 种子取本次恢复提醒的稳定 ID。同一 child 被再次恢复时，新提醒带来新种子，
 /// 结果消息身份随之改变；重复投递同一次恢复才得到同一 ID（幂等 no-op）。
@@ -203,16 +208,91 @@ pub struct SessionManager {
 pub(crate) struct RecoveryDelivery {
     pub(crate) parent: ThreadId,
     pub(crate) seed: Option<peri_acp_types::messages::MessageId>,
+    /// 本次 turn 在直接父级 TaskManager / `active_agents` 的运行登记。
+    ///
+    /// 只在 turn 真正获得准入后挂上；结算或早失败时收尾。父级未 live 时保持
+    /// `None`，父级之后进入由恢复协调做 adoption。
+    pub(crate) task: Option<RecoveryTaskBinding>,
+}
+
+/// 恢复 child 在直接父级的一次运行登记（不持久化，随会话实例释放）。
+#[derive(Clone)]
+pub(crate) struct RecoveryTaskBinding {
+    pub(crate) parent: ThreadId,
+    pub(crate) parent_session_id: String,
+    pub(crate) child: ThreadId,
+    pub(crate) task_id: String,
+    pub(crate) cancel_token: CancellationToken,
+    pub(crate) ticket: peri_acp_types::tasks::TaskRegistrationTicket,
 }
 
 impl AcpSession {
     /// 登记冷 child 恢复的父 thread（Host 恢复协调在接纳提醒后调用）。
+    ///
+    /// 已有带运行登记的投递尚未结算时拒绝替换：新准入不得覆盖尚未收尾的父任务，
+    /// 调用方按 `AlreadyRunning` 跳过本次注入。
     pub(crate) fn record_recovery_parent(
         &self,
         parent: ThreadId,
         seed: Option<peri_acp_types::messages::MessageId>,
-    ) {
-        *self.recovery_parent.lock() = Some(RecoveryDelivery { parent, seed });
+    ) -> bool {
+        let mut slot = self.recovery_parent.lock();
+        if slot
+            .as_ref()
+            .is_some_and(|delivery| delivery.task.is_some())
+        {
+            return false;
+        }
+        *slot = Some(RecoveryDelivery {
+            parent,
+            seed,
+            task: None,
+        });
+        true
+    }
+
+    /// 在待结算投递上登记本次 turn 的父级任务；已有登记或投递已结算时拒绝。
+    ///
+    /// 任务注册与投递槽在同一把锁内完成：结算取走投递与本次登记只能有一个先发生，
+    /// 不存在「任务已注册但投递已被取走」的幽灵登记。
+    pub(crate) fn register_recovery_task(
+        &self,
+        parent: ThreadId,
+        parent_session_id: String,
+        child: ThreadId,
+        cancel_token: CancellationToken,
+        task_manager: &Arc<dyn peri_acp_types::tasks::TaskManager>,
+    ) -> Result<bool, String> {
+        let mut slot = self.recovery_parent.lock();
+        let Some(delivery) = slot.as_mut() else {
+            return Ok(false);
+        };
+        if delivery.parent != parent || delivery.task.is_some() {
+            return Ok(false);
+        }
+        let cancel_on_kill = cancel_token.clone();
+        let task_id = child.to_string();
+        let ticket = task_manager
+            .register(peri_acp_types::tasks::BgTaskRegistration {
+                // 任务身份 = 稳定 child thread id：adoption、重复进入与 resume 指令
+                // 都指向同一身份。`TaskRecord.child_thread_id` 仍为空，因为公共注册
+                // 契约不接受 live inbox；task_id 本身即 child 身份。
+                task_id: task_id.clone(),
+                kind: peri_acp_types::tasks::BgTaskKind::Agent,
+                summary: "recovered subagent".to_owned(),
+                pid: None,
+                kill: Some(Box::new(move || cancel_on_kill.cancel())),
+            })
+            .map_err(|error| format!("parent task projection rejected the child: {error}"))?;
+        delivery.task = Some(RecoveryTaskBinding {
+            parent,
+            parent_session_id,
+            child,
+            task_id,
+            cancel_token,
+            ticket,
+        });
+        Ok(true)
     }
 
     /// 只读查看待投递的父 thread：用于在 turn 开始前决定本轮是否走恢复结算。
@@ -226,6 +306,25 @@ impl AcpSession {
     /// 取走待投递的父 thread 与本次恢复种子：一次 turn 只投递一次。
     pub(crate) fn take_recovery_parent(&self) -> Option<RecoveryDelivery> {
         self.recovery_parent.lock().take()
+    }
+
+    /// 记录一次恢复启动在 Receive 前失败；下一次显式进入读取并清除。
+    pub(crate) fn mark_recovery_launch_failed(&self) {
+        self.recovery_launch_failed
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// 读取并清除恢复启动早失败事实：同一次失败最多触发一次重新准入。
+    pub(crate) fn take_recovery_launch_failed(&self) -> bool {
+        self.recovery_launch_failed
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+    }
+
+    /// 仅测试：当前是否仍保留恢复启动早失败标记。
+    #[cfg(test)]
+    pub(crate) fn recovery_launch_failed(&self) -> bool {
+        self.recovery_launch_failed
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// 设置执行阻断：恢复准备失败且当前分类不可执行。

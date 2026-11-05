@@ -582,6 +582,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                     kind: BgTaskKind::Agent,
                     mq_steering: true,
                     pending_result: false,
+                    recovery: false,
                 });
                 let queue_len = queue.len().await.unwrap_or(0);
                 tracing::debug!(

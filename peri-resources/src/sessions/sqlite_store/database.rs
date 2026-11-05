@@ -64,6 +64,11 @@ impl SqliteSessionDatabase {
         }
     }
 
+    /// 只读旧库没有工作快照列：依赖 `work_state` 的查询必须跳过而不是报错。
+    pub(super) fn has_work_state_columns(&self) -> bool {
+        !self.legacy_meta
+    }
+
     /// 只读打开探测到旧形状后切换投影。
     pub(super) fn use_legacy_meta_columns(&mut self) {
         self.meta_columns = THREAD_META_COLUMNS_LEGACY;

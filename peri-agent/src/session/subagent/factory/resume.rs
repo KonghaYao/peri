@@ -332,6 +332,14 @@ pub(super) async fn resume_subagent_impl(
     // 认领已写入 Active；准备门在进入执行前释放，避免与本次 run 的
     // 执行 permit 互斥（并发的第二次 resume 由 claim/status 拒绝）。
     drop(preparation);
+    // 终态结果投递到父会话的 MQ（无父 thread 时不做跨会话投递）。
+    let terminal_route = super::spawn::parent_thread_id_of(parent).map(|target| {
+        super::super::terminal_settlement::TerminalMqRoute {
+            store: Arc::clone(&session_resources),
+            target: peri_acp_types::thread::ThreadId::from(target.as_str()),
+            mailbox: parent.map(|parent| parent.async_result_mailbox()),
+        }
+    });
     match run_mode {
         SubagentRunMode::Sync => {
             let run_thread_id = thread_id.clone();
@@ -348,6 +356,7 @@ pub(super) async fn resume_subagent_impl(
                     .and_then(|host| host.task_manager.clone()),
                 Some(sync_task_id.clone()),
                 super::completion_delivery(parent, on_bg_complete),
+                terminal_route,
                 move |handoff_start, handed_off| async move {
                     run_sync_subagent(
                         &run_thread_id,
@@ -424,13 +433,6 @@ pub(super) async fn resume_subagent_impl(
             // 调用点对齐；prompt 传实际注入文本——用户 prompt 或 continue 常量，
             // 仅用于 prompt_summary 展示，R2-LOW-3）
             let task_id = format!("bg-{}", uuid::Uuid::now_v7());
-            // 终态结果投递到父会话的 MQ（无父 thread 时不做跨会话投递）。
-            let terminal_route = super::spawn::parent_thread_id_of(parent).map(|target| {
-                super::super::terminal_settlement::TerminalMqRoute {
-                    store: Arc::clone(&session_resources),
-                    target: peri_acp_types::thread::ThreadId::from(target.as_str()),
-                }
-            });
             match spawn_background_subagent(
                 task_id.clone(),
                 thread_id.clone(),

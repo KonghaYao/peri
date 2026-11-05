@@ -26,7 +26,55 @@ fn route(session: &TestSession, target: peri_acp_types::thread::ThreadId) -> Ter
     TerminalMqRoute {
         store: session.resources(),
         target,
+        mailbox: None,
     }
+}
+
+/// 终态写入只有一个归属：handoff 接管后执行体不得再写，反之亦然。
+#[test]
+fn terminal_ownership_has_exactly_one_writer() {
+    let handed_off = TerminalOwnership::new();
+    assert!(handed_off.claim_handoff());
+    assert!(
+        !handed_off.claim_settlement(),
+        "handoff worker 已接管时执行体必须让出终态"
+    );
+
+    let execution = TerminalOwnership::new();
+    assert!(execution.claim_settlement());
+    assert!(!execution.claim_handoff(), "执行体已收尾时不得再 detach");
+}
+
+/// 交接后 wrapper 退出/准入被拒：执行体与 wrapper 通过同一 CAS 竞争唯一写入；
+/// worker 已准入时任何一方都不得抢写。
+#[test]
+fn abandoned_handoff_has_exactly_one_terminal_writer() {
+    let wrapper_exit = TerminalOwnership::new();
+    assert!(wrapper_exit.claim_handoff());
+    wrapper_exit.mark_worker_admitted();
+    wrapper_exit.wrapper_finished();
+    assert!(
+        !wrapper_exit.reclaim_abandoned_handoff(),
+        "已准入的 worker 持有终态"
+    );
+    assert!(!wrapper_exit.claim_settlement());
+
+    let rejected = TerminalOwnership::new();
+    assert!(rejected.claim_handoff());
+    rejected.abandon_handoff();
+    assert!(
+        rejected.reclaim_abandoned_handoff(),
+        "准入被拒后由执行体接回终态"
+    );
+    assert!(!rejected.reclaim_abandoned_handoff(), "只能有一个写入者");
+
+    let dropped = TerminalOwnership::new();
+    assert!(dropped.claim_handoff());
+    dropped.wrapper_finished();
+    assert!(
+        dropped.reclaim_abandoned_handoff(),
+        "wrapper 在准入前退出时由执行体写终态"
+    );
 }
 
 /// 一次提交同时成立：终态、续跑意图与目标 MQ 行。

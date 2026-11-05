@@ -3,6 +3,7 @@
 //! 与 `recovery_test.rs` 同夹具；本文件只放不需要 `ServerLoop` 的协调器用例。
 
 use super::*;
+use crate::host::{dispatch_prompt_turn, PromptOrigin};
 
 /// 1. 根 `working`：进入后只注入一条提醒，启动后恰好跑一个 turn 并被 Receive 移交。
 #[tokio::test]
@@ -124,6 +125,189 @@ async fn discard_keeps_reminder_and_next_enter_adopts_without_duplicate() {
     })
     .await;
     harness._mock.assert_async().await;
+}
+
+/// 2b-1. 启动门跳过（listener 无法启动）：不得留下永久 Launched，下一次进入
+///       仍能采纳同一条提醒。
+#[tokio::test]
+async fn listener_failure_rolls_back_admission_for_the_next_entry() {
+    let harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    harness.set_working(&thread_id).await;
+    let recovery = harness.recovery();
+
+    let report = recovery.enter(&thread_id).await.unwrap();
+    assert_eq!(report.recovered, vec![thread_id.clone()]);
+    harness
+        .cfg
+        .host_task_owner
+        .as_ref()
+        .expect("host task owner is configured")
+        .begin_shutdown();
+
+    recovery.launch(&report).await;
+    assert!(
+        !recovery.has_launched_admission(&thread_id),
+        "listener 启动失败后不得保留 Launched 占位"
+    );
+
+    let second = recovery.enter(&thread_id).await.unwrap();
+    assert_eq!(
+        second.recovered,
+        vec![thread_id.clone()],
+        "下一次进入必须重新采纳提醒，而不是永久 AlreadyRunning"
+    );
+    assert_eq!(harness.recovery_rows(&thread_id).await.len(), 1);
+}
+
+/// 2b-2. continuation 调度通道已关闭：同样撤销准入。
+#[tokio::test]
+async fn closed_scheduler_channel_rolls_back_admission() {
+    let harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    harness.set_working(&thread_id).await;
+    let (dead_tx, dead_rx) = mpsc::unbounded_channel();
+    drop(dead_rx);
+    let dead_tx = Arc::new(dead_tx);
+    let recovery = recovery_for(&harness.cfg, &harness.sessions, &dead_tx);
+
+    let report = recovery.enter(&thread_id).await.unwrap();
+    assert_eq!(report.recovered, vec![thread_id.clone()]);
+    recovery.launch(&report).await;
+    assert!(
+        !recovery.has_launched_admission(&thread_id),
+        "通道关闭后不得保留 Launched 占位"
+    );
+
+    let second = recovery.enter(&thread_id).await.unwrap();
+    assert_eq!(second.recovered, vec![thread_id.clone()]);
+    assert_eq!(harness.recovery_rows(&thread_id).await.len(), 1);
+}
+
+/// 2b-3. 代次变化：启动门跳过同样回退准入。
+#[tokio::test]
+async fn generation_change_rolls_back_admission() {
+    let harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    harness.set_working(&thread_id).await;
+    let recovery = harness.recovery();
+
+    let report = recovery.enter(&thread_id).await.unwrap();
+    assert_eq!(report.recovered, vec![thread_id.clone()]);
+    {
+        let mut states = harness.sessions.lock().await;
+        states
+            .get_mut(&thread_id)
+            .expect("session state is published")
+            .refresh_session_generation();
+    }
+
+    recovery.launch(&report).await;
+    assert!(
+        !recovery.has_launched_admission(&thread_id),
+        "代次变化后不得保留 Launched 占位"
+    );
+}
+
+/// 2e. 恢复启动的 continuation 在 Receive 前失败：写进程内标记但不自动重试；
+///     下一次显式进入采纳同一条提醒并重试一次。
+#[tokio::test]
+async fn early_failed_recovery_launch_retries_only_on_the_next_entry() {
+    let mut harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    harness.set_working(&thread_id).await;
+    harness.spawn_continuation_scheduler();
+    let recovery = harness.recovery();
+
+    let report = recovery.enter(&thread_id).await.unwrap();
+    assert_eq!(report.recovered, vec![thread_id.clone()]);
+    // 移除冻结上下文：run_prompt 在 Receive 前失败，但不会进入 finish。
+    let frozen = {
+        let mut states = harness.sessions.lock().await;
+        states
+            .get_mut(&thread_id)
+            .expect("session state is published")
+            .frozen
+            .take()
+    };
+    recovery.launch(&report).await;
+    wait_for("恢复启动失败被记录", || async {
+        harness
+            .cfg
+            .session_manager
+            .get_session(&thread_id)
+            .is_some_and(|session| session.recovery_launch_failed())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!harness._mock.matched(), "早失败不得自动重试");
+
+    {
+        let mut states = harness.sessions.lock().await;
+        states
+            .get_mut(&thread_id)
+            .expect("session state is published")
+            .frozen = frozen;
+    }
+    let second = recovery.enter(&thread_id).await.unwrap();
+    assert_eq!(
+        second.recovered,
+        vec![thread_id.clone()],
+        "显式进入必须采纳旧提醒，而不是 AlreadyRunning"
+    );
+    assert_eq!(
+        harness.recovery_rows(&thread_id).await.len(),
+        1,
+        "重试采纳不得重复入队"
+    );
+
+    recovery.launch(&second).await;
+    wait_for("重试的恢复 turn 调用模型", || async {
+        harness._mock.matched()
+    })
+    .await;
+    harness._mock.assert_async().await;
+}
+
+/// 2f. 普通用户 prompt 的早失败不写恢复标记。
+#[tokio::test]
+async fn normal_user_prompt_early_failure_does_not_set_recovery_flag() {
+    let harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    harness.set_working(&thread_id).await;
+    {
+        let mut states = harness.sessions.lock().await;
+        states
+            .get_mut(&thread_id)
+            .expect("session state is published")
+            .frozen = None;
+    }
+
+    let error = dispatch_prompt_turn(
+        json!({
+            "sessionId": thread_id,
+            "prompt": [{"type": "text", "text": "hello"}],
+        }),
+        PromptOrigin::User,
+        None,
+        &harness.sessions,
+        &harness.locks,
+        &harness.transport,
+        &harness.cfg,
+        &harness.sender,
+    )
+    .await
+    .expect_err("缺少冻结上下文时用户 prompt 必须失败");
+    assert_ne!(error.code, 0);
+    assert!(
+        !harness
+            .cfg
+            .session_manager
+            .get_session(&thread_id)
+            .expect("session runtime is registered")
+            .recovery_launch_failed(),
+        "用户 prompt 失败不得写恢复启动标记"
+    );
 }
 
 /// 2c. 同来源的 Info（诊断提醒）不构成恢复 entry，不得抑制注入。

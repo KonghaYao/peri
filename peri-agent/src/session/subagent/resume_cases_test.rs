@@ -491,8 +491,8 @@ async fn test_resume_subagent_interrupted_then_manual_history_continue() {
         let statuses = store.statuses();
         assert_eq!(
             statuses.last().map(|(_, s)| s.as_str()),
-            Some("error"),
-            "R-M3：sync 中断收尾写 error"
+            Some("cancelled"),
+            "A3：真实取消的 sync 中断收尾写 cancelled"
         );
     }
 

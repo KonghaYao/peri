@@ -8,7 +8,7 @@ use crate::agent::events::ExecutorEvent;
 use crate::agent::events_v2::{observe_event_to_executor, EventBus};
 use crate::session::factory::DeregisterRuntimeFn;
 use crate::session::TurnContext;
-use peri_acp_types::session_resources::{SessionMetaPatch, SessionResources};
+use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::thread::{AgentStatus, ThreadId};
 
 // The loop has released its producers before this seam. A cleanup guard must
@@ -154,29 +154,28 @@ pub(crate) async fn on_subagent_stop_handler(
     agent_id: &str,
     child_thread_id: &str,
     output_summary: &str,
-    is_error: bool,
+    status: AgentStatus,
     cwd: &str,
 ) -> crate::error::AgentResult<()> {
     // 1. lifecycle hook（闭包由 middlewares 构造，内部触发 RegisteredHook）
     if let Some(ref on_stop) = on_subagent_stop {
-        on_stop(child_thread_id, agent_id, cwd, output_summary, is_error);
+        on_stop(
+            child_thread_id,
+            agent_id,
+            cwd,
+            output_summary,
+            status != AgentStatus::Done,
+        );
     }
-    // 3. 终态状态（仅 sync 路径有此步骤）：定向 patch 只写状态，不覆盖并发标题/计数。
+    // 3. 终态状态（仅 sync 路径有此步骤）：状态与 work_state 一次收尾，
+    // 避免执行期间被 `ensure_processing` 提升为 working 后残留 Done + working。
     if let Some(ref store) = session_resources {
-        let status = if is_error {
-            AgentStatus::Error
-        } else {
-            AgentStatus::Done
-        };
-        if let Err(error) = store
-            .update_session_meta(
-                &ThreadId::from(child_thread_id),
-                &SessionMetaPatch {
-                    status: Some(status),
-                    ..Default::default()
-                },
-            )
-            .await
+        if let Err(error) = super::terminal_settlement::settle_terminal_without_result(
+            store.as_ref(),
+            &ThreadId::from(child_thread_id),
+            status,
+        )
+        .await
         {
             tracing::error!(thread_id = %child_thread_id, %error, "terminal_status_persist_failed");
             return Err(anyhow::anyhow!("terminal_status_persist_failed: {error}").into());

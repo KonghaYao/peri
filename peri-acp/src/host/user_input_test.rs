@@ -583,3 +583,80 @@ async fn test_user_input_cancel_rejects_stale_ticket_without_cancelling_current_
         "当前 ticket 的 Stop 必须传到真实执行 token"
     );
 }
+
+/// [回归] 错误响应只带纯投影：不按 MQ 查询结果清理记录，也不推进 revision。
+#[tokio::test]
+async fn test_user_input_error_response_does_not_prune_or_bump_revision() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let (cfg, mut sessions, sid) = make_user_input_session(&tmp).await;
+    let transport: Arc<dyn crate::transport::AcpTransport> = Arc::new(MockTransport::default());
+    let initial = handle_request(
+        "session/input/snapshot",
+        &json!({"sessionId": sid}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+    let generation = initial["generation"].as_str().unwrap().to_owned();
+    let mailbox = cfg.session_manager.user_input_mailbox_for(&sid).unwrap();
+    mailbox
+        .attach_external_attempt(tokio_util::sync::CancellationToken::new(), false)
+        .await
+        .unwrap();
+    let input_id = "00000000-0000-0000-0000-000000000009";
+    handle_request(
+        "session/input/enqueue",
+        &make_user_input_request(&sid, &generation, input_id, "错误响应"),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+
+    // 模拟 MQ 行在发送结果未确认时消失：旧错误响应会触发 snapshot 查询并清理记录。
+    let inbox = cfg.session_manager.session_inbox_for(&sid).unwrap();
+    let id = peri_acp_types::messages::MessageId::from(
+        uuid::Uuid::parse_str(input_id).expect("test input id"),
+    );
+    assert!(matches!(
+        inbox.queue().cancel_user_input(&id).await.unwrap(),
+        peri_acp_types::session::MqCancelOutcome::Cancelled(_)
+    ));
+    let before = mailbox.snapshot().await;
+    assert!(
+        before.items.iter().any(|item| item.input_id == input_id),
+        "待发记录必须存在"
+    );
+
+    let error = handle_request(
+        "session/input/dispatch",
+        &json!({
+            "sessionId": sid,
+            "generation": "stale-generation",
+            "commandId": "stale-dispatch",
+            "inputIds": [input_id],
+        }),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+    let snapshot = &error.data.as_ref().expect("错误响应必须附带快照")["snapshot"];
+    assert_eq!(
+        snapshot["revision"].as_u64().unwrap(),
+        before.revision,
+        "错误响应不得推进 revision"
+    );
+    assert!(
+        snapshot["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["inputId"] == input_id),
+        "错误响应不得清理尚未确认的待发记录"
+    );
+}

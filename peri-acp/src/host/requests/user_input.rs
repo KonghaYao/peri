@@ -67,6 +67,12 @@ pub(super) async fn handle_prepared_user_input(
         }
         "session/input/snapshot" => {
             let request: UserInputQueueSnapshotRequest = decode(params)?;
+            // 快照 RPC 是显式对账入口：先按 MQ 查询结果同步记录，再读取纯投影。
+            // 查询失败返回 RPC 错误，不能把“未知”伪装成空队列。
+            mailbox
+                .refresh_from_store()
+                .await
+                .map_err(|error| AcpError::new(-32603, error.to_string()))?;
             let snapshot = mailbox.snapshot().await;
             if request
                 .generation
@@ -85,6 +91,7 @@ pub(super) async fn handle_prepared_user_input(
     match receipt {
         Ok(receipt) => encode(receipt),
         Err(error) => {
+            // 错误响应只附加纯投影：不得查询、清理或推进 revision。
             let snapshot = mailbox.snapshot().await;
             Err(
                 AcpError::new(-32602, error.to_string()).with_data(serde_json::json!({

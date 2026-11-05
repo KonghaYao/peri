@@ -360,3 +360,44 @@ async fn legacy_read_only_database_yields_zero_candidates_without_writing() {
         .unwrap();
     assert_eq!(version, 13, "只读打开不得升级 schema");
 }
+
+/// 遗留 Active 候选只列非根、`idle`/`stopped` 的 child；`working`、根与终态不在内。
+#[tokio::test]
+async fn interrupted_threads_are_non_root_and_not_working() {
+    let fixture = Fixture::new().await;
+    let workspace = fixture.workspace().await;
+    create_root(&fixture.facade, &workspace, "A").await;
+    for (child, parent, at) in [
+        ("A1", "A", "2026-09-26T00:00:01Z"),
+        ("A2", "A1", "2026-09-26T00:00:02Z"),
+        ("A3", "A", "2026-09-26T00:00:03Z"),
+        ("A4", "A", "2026-09-26T00:00:04Z"),
+    ] {
+        save_child(&fixture.facade, &workspace, child, parent, "A", at).await;
+    }
+    set_work(&fixture.facade, "A3", WorkState::Working).await;
+    set_work(&fixture.facade, "A4", WorkState::Stopped).await;
+    fixture
+        .facade
+        .settle_terminal_without_result(
+            &"A2".to_owned(),
+            peri_acp_types::thread::AgentStatus::Done,
+            WorkState::Idle,
+        )
+        .await
+        .unwrap();
+
+    let candidates = fixture
+        .facade
+        .load_interrupted_threads(&"A".to_owned())
+        .await
+        .unwrap();
+    assert_eq!(
+        candidates
+            .iter()
+            .map(|candidate| (candidate.thread_id.as_str(), candidate.work_state))
+            .collect::<Vec<_>>(),
+        [("A1", WorkState::Idle), ("A4", WorkState::Stopped)],
+        "只收敛非根、active 且 idle/stopped 的 child"
+    );
+}

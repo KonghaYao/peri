@@ -1,9 +1,10 @@
 //! 冷 child 恢复的终态结算：本次 turn 结束后把 child 终态、工作意图与结果通知
 //! 一次提交到父 thread 的持久队列（设计 §5.3）。
 //!
-//! 通知按 `SubAgentComplete` 语义入队，但使用 `passive` 策略：它是结果事实，
-//! 不是执行授权。父级 `idle` 不因它被唤醒；父级下次执行时由既有 Receive 消费
-//! 同一份持久行（父级已有活实例时也是这份队列）。
+//! 通知按普通后台结果的 `ensure_processing` 策略入队：它既是结果事实，也允许
+//! 把收到结果的父级从 `idle` 推进到 `working`。live 且已激活的父级在入队后收到
+//! 唤醒；其余父级下一次进入时消费同一份持久行。收件人固定为 child 的直接父
+//! `parent_thread_id`（保留的持久父链），不按显式 resume 的调用者改投。
 
 use peri_acp_types::messages::MessageId;
 use peri_acp_types::session::{MessageKind, MessagePolicy, MessageSource, QueuedMessage};
@@ -17,6 +18,8 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use super::super::{AcpServerConfig, SharedSessions};
+use super::runtime_binding::{self, RecoveryTaskTerminal};
+use crate::session::RecoveryDelivery;
 
 /// 本次恢复 turn 的结束事实（来自 continuation dispatch 的结果）。
 pub(crate) enum ChildTurnOutcome<'a> {
@@ -75,14 +78,16 @@ pub(crate) fn turn_outcome(
 ///
 /// 终态、`work_state` 与结果消息共用一次 `finalize_child_terminal`
 /// （设计 §5.3）：提交成功前不宣称已投递，重复结算按稳定消息身份幂等。
+/// 收件人固定为持久父链上的直接父（`delivery.parent`），不按显式 resume 的
+/// 调用者改投；结算后父级任务登记也必须收尾。
 pub(crate) async fn deliver_child_turn(
     cfg: &AcpServerConfig,
     sessions: &SharedSessions,
     child_session_id: &str,
-    parent: &ThreadId,
-    seed: Option<peri_acp_types::messages::MessageId>,
+    delivery: &RecoveryDelivery,
     outcome: ChildTurnOutcome<'_>,
 ) {
+    let parent = &delivery.parent;
     let child_thread_id = {
         let states = sessions.lock().await;
         states
@@ -106,6 +111,7 @@ pub(crate) async fn deliver_child_turn(
                     %detail,
                     "recovered child result notification was rejected"
                 );
+                runtime_binding::finish_recovered_child(cfg, delivery, None);
                 return;
             }
         };
@@ -114,25 +120,70 @@ pub(crate) async fn deliver_child_turn(
         MessageKind::Defer,
         MessageSource::SubAgentComplete,
         reminder,
-        settlement_delivery_id(&child_thread_id, parent, seed),
+        settlement_delivery_id(&child_thread_id, parent, delivery.seed),
     )
-    .with_policy(MessagePolicy::passive());
-    if let Err(error) = cfg
+    .with_policy(MessagePolicy::ensure_processing());
+    let committed = match cfg
         .session_resources
         .finalize_child_terminal(
             &child_thread_id,
             status,
             WorkState::after_agent_terminal(status),
             parent,
-            message.into_mq_input(),
+            message.clone().into_mq_input(),
         )
         .await
     {
-        tracing::error!(
-            child_thread_id = %child_thread_id,
+        Ok(_) => true,
+        Err(error) => {
+            tracing::error!(
+                child_thread_id = %child_thread_id,
+                parent_thread_id = %parent,
+                %error,
+                "recovered child terminal settlement was not committed"
+            );
+            false
+        }
+    };
+    if committed {
+        // live 父级沿普通后台结果的唤醒路径处理同一份持久行；父级未 live 时
+        // 保留 durable 行，由下一次进入消费。
+        wake_live_parent(cfg, parent, message).await;
+    }
+    let terminal = if !committed {
+        None
+    } else {
+        match &outcome {
+            ChildTurnOutcome::Finished { stop_reason } if *stop_reason == "cancelled" => {
+                Some(RecoveryTaskTerminal::Cancelled)
+            }
+            ChildTurnOutcome::Finished { stop_reason } => Some(RecoveryTaskTerminal::Completed {
+                success: *stop_reason == "end_turn",
+                output: format!("recovered child finished: {stop_reason}"),
+            }),
+            ChildTurnOutcome::Failed { code, message } => Some(RecoveryTaskTerminal::Completed {
+                success: false,
+                output: format!("recovered child failed: {code}: {message}"),
+            }),
+        }
+    };
+    runtime_binding::finish_recovered_child(cfg, delivery, terminal);
+}
+
+/// 唤醒 live 父级：同一稳定 ID 的重放只会得到 `Existing`/`AlreadyHandedOff`，
+/// 但会让父级 MQ 发布一次唤醒（普通后台结果的回调路径相同）。
+async fn wake_live_parent(cfg: &AcpServerConfig, parent: &ThreadId, message: QueuedMessage) {
+    let Some(parent_session_id) = cfg.session_manager.session_id_for_thread(parent) else {
+        return;
+    };
+    let Some(queue) = cfg.session_manager.v2_queue_for(&parent_session_id) else {
+        return;
+    };
+    if let Err(error) = queue.enqueue(message).await {
+        tracing::warn!(
             parent_thread_id = %parent,
             %error,
-            "recovered child terminal settlement was not committed"
+            "recovered child result wake was not published"
         );
     }
 }

@@ -1,3 +1,5 @@
+use super::super::mutation::RemoteStore;
+use super::connection_lifecycle::{ConnectionSlot, NoConnectionFactory};
 use super::*;
 
 impl RemoteSessionData {

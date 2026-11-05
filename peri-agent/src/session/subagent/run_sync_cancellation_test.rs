@@ -7,6 +7,7 @@ async fn cancelled_sync_child_emits_stopped_after_caller_future_dropped() {
     let manager = Arc::new(TaskManager::new());
     let (session, _owner, store) = bound_child_with_store(manager.clone());
     let child_id = session.store().thread_id.clone().unwrap();
+    store.register_bound_session(&child_id, "/tmp");
     session.queue().push_sync(QueuedMessage::prompt(
         MessageSource::UserInput,
         crate::messages::BaseMessage::human("block in model call"),
@@ -35,6 +36,7 @@ async fn cancelled_sync_child_emits_stopped_after_caller_future_dropped() {
             None,
             Some(new_sync_task_id()),
             Some(Arc::new(|_, _| Ok(()))),
+            None,
             move |handoff, _| async move {
                 run_sync_subagent(
                     &run_id,
@@ -119,9 +121,11 @@ async fn cancelled_sync_child_emits_stopped_after_caller_future_dropped() {
     // 收尾顺序：close 落盘终态后才是 v1 Stopped，故此处终态已持久化。
     assert_eq!(
         store.statuses().last().map(|(_, status)| status.as_str()),
-        Some("error"),
-        "子线程终态必须持久化"
+        Some("cancelled"),
+        "真实取消必须持久化为 Cancelled"
     );
+    let meta = store.load_session_meta(&child_id).await.unwrap();
+    assert_eq!(meta.work_state, WorkState::Stopped, "取消必须写 Stopped");
     assert_eq!(manager.active_count(), 0);
 
     peri_time::sleep(Duration::from_millis(200)).await;
