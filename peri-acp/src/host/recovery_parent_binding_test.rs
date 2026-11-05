@@ -68,6 +68,17 @@ async fn recovered_child_registers_in_live_parent_and_finishes_after_settlement(
     .await;
     harness._mock.assert_async().await;
 
+    // 结果通知先于父任务结算提交；以任务投影离开 running 作为收尾完成的可观察点，
+    // 否则会在 continuation 尚未执行完结算时读取事件。
+    wait_for("父任务收尾为完成", || async {
+        parent_manager
+            .snapshot()
+            .tasks
+            .iter()
+            .any(|task| task.task_id == "child-b" && task.status != "running")
+    })
+    .await;
+
     // 任务身份在 turn 真正开始前登记：Started 事件证明它进入过父任务投影。
     let (started, completed) = child_task_events(&mut events, "child-b");
     assert!(started, "恢复 child 必须以父任务身份开始过");
