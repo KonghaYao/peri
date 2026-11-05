@@ -122,15 +122,28 @@ impl McpClientPool {
         }
         let inbox = self.session_bindings.read().inbox(target_session);
         if let Some(inbox) = inbox {
-            inbox
+            let pushed = inbox
                 .push_system_reminder_with_delivery_id(
                     MessageKind::Defer,
                     source,
                     reminder,
                     delivery_id,
                 )
-                .await
-                .map_err(|error| error.to_string())?;
+                .await;
+            if let Err(error) = pushed {
+                if !is_monitor {
+                    return Err(error.to_string());
+                }
+                // The monitor wake is best-effort even for a live inbox: a
+                // failed push must not leave the task unsettled and retrying.
+                tracing::warn!(
+                    session_id = %target_session,
+                    task_id = %result.task_id,
+                    server = %server,
+                    %error,
+                    "monitor terminal wake dropped after inbox push failure"
+                );
+            }
             return Ok(());
         }
         if delivery.is_some() {
