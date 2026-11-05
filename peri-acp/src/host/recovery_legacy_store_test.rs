@@ -298,4 +298,25 @@ async fn schema_v13_read_only_entry_serves_history_with_execution_block() {
     );
     assert_eq!(error.data.as_ref().unwrap()["kind"], "read_only");
     assert!(!harness._mock.matched(), "阻断必须在模型调用之前");
+
+    // 重复加载同一只读会话：复用已发布的视图态，不得第二次报错。
+    super::wire_tests::push_request(
+        &harness,
+        4,
+        "session/load",
+        json!({"sessionId": thread_id.clone(), "cwd": cwd.clone()}),
+    );
+    super::wire_tests::run_server_loop(&harness).await;
+    let responses = harness.recorded.responses();
+    let response = responses
+        .iter()
+        .find(|(id, _)| *id == RequestId::Number(4))
+        .expect("第二次 load 必须有响应")
+        .1
+        .as_ref()
+        .expect("第二次只读 load 必须返回视图，而不是失败");
+    assert_eq!(
+        response["_meta"]["peri.recovery"]["error"]["kind"],
+        "read_only"
+    );
 }

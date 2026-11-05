@@ -39,10 +39,17 @@ use super::sql::{text_at, StatementSpec};
 /// 接纳 `EnsureProcessing` 消息时维护目标工作意图：只把 `idle` 提升为 `working`。
 ///
 /// 已移交历史的消息不再要求继续处理，`NOT EXISTS` 排除这类重复接纳；`stopped`
-/// 不被被动回调解除（设计 §5.2）。
+/// 不被被动回调解除（设计 §5.2）。只有本次接纳的消息仍以同一内容在 MQ 中
+/// （新插入或既有同 ID）才提升；同 ID 冲突不改变工作意图。
 const PROMOTE_WORK_INTENT_SQL: &str = "UPDATE threads SET work_state = 'working'
     WHERE id = ?1 AND work_state = 'idle'
-      AND NOT EXISTS (SELECT 1 FROM messages WHERE message_id = ?2)";
+      AND NOT EXISTS (SELECT 1 FROM messages WHERE message_id = ?2)
+      AND EXISTS (
+        SELECT 1 FROM thread_mq
+        WHERE thread_id = ?1 AND id = ?2
+          AND kind = ?3 AND source = ?4 AND policy_json = ?5
+          AND payload_json = ?6 AND original_draft IS ?7
+      )";
 
 /// turn 收尾：没有待处理的 `EnsureProcessing` 条目才把 `working` 收敛为 `idle`。
 ///
@@ -119,6 +126,11 @@ impl RemoteSessionData {
                 vec![
                     Value::Text(thread_id.as_str().to_owned()),
                     Value::Text(message_id.clone()),
+                    Value::Text(kind.clone()),
+                    Value::Text(source.clone()),
+                    Value::Text(policy.clone()),
+                    Value::Text(payload.clone()),
+                    super::session_codec::optional_text(incoming.original_draft),
                 ],
             ));
         }

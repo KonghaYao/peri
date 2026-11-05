@@ -383,6 +383,7 @@ impl HostSessionRecovery {
         // 这样 `discard`、响应失败或进程内表项被清理后，下一次进入仍能采纳旧提醒，
         // 而不会把它误判成永久 AlreadyRunning。
         let mut inject = true;
+        let mut adopted_seed = None;
         if let Some(entry) = self.admitted.get(thread).map(|entry| entry.clone()) {
             let same_lifecycle =
                 entry.generation == before.generation && entry.session_id == session_id;
@@ -418,7 +419,11 @@ impl HostSessionRecovery {
             }
         } else {
             match reminder::find_pending_recovery(&queue).await {
-                Ok(Some(_)) => inject = false,
+                Ok(Some(entry)) => {
+                    inject = false;
+                    // 采纳同一条提醒：结果身份沿用该提醒，重复进入仍幂等。
+                    adopted_seed = Some(entry.id);
+                }
                 Ok(None) => {}
                 Err(error) if fatal => {
                     return Err(RecoveryError::from(error).with_thread(thread));
@@ -475,12 +480,14 @@ impl HostSessionRecovery {
         if !activation.try_allow() {
             return Ok(ThreadOutcome::Skipped(RecoverySkipReason::Stopped));
         }
+        let mut settlement_seed = adopted_seed;
         if let Some(trusted) = trusted {
             // 提醒接纳要能通过 `pending_request` 的激活门：放行执行资格在启动前最后一次复核。
             let outcome = match queue.enqueue(reminder::queued_recovery(trusted)).await {
                 Ok(outcome) => outcome,
                 Err(error) => return self.thread_failure(thread, error.to_string(), fatal),
             };
+            settlement_seed = Some(outcome.entry.id);
             // 入队也是异步窗口：结果若已换代或被 Stop，撤销本次提醒，不能把它带进
             // 新生命周期。存储不支持取消提醒时保留，下一次进入会采纳同一条。
             if let Some(reason) = self.post_admit_skip(session_id, before, &activation).await {
@@ -497,7 +504,7 @@ impl HostSessionRecovery {
         // 收尾都能投递一次（不依赖哪一条续跑请求真正跑到）。
         if let Some(parent) = parent.clone() {
             if let Some(runtime) = self.manager.get_session(session_id) {
-                runtime.record_recovery_parent(parent);
+                runtime.record_recovery_parent(parent, settlement_seed);
             }
         }
         let admission = AdmittedRecovery {

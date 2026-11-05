@@ -127,11 +127,13 @@ pub struct AcpSession {
     pub task_manager: Arc<dyn peri_acp_types::tasks::TaskManager>,
     /// The ACP task event stream is bound once per session runtime.
     pub(crate) task_events_started: std::sync::atomic::AtomicBool,
-    /// 冷 child 恢复的待投递父 thread：该会话下一次 turn 结束后投递结果通知。
+    /// 冷 child 恢复的待投递父 thread 与本次恢复的稳定种子：该会话下一次 turn
+    /// 结束后投递结果通知。
     ///
     /// 挂在会话实例上而不是续跑请求上：本轮能由启动门、激活监听或用户 prompt
-    /// 任何一条路径发起，投递都只发生一次（收尾取走即清空）。
-    pub(crate) recovery_parent: parking_lot::Mutex<Option<ThreadId>>,
+    /// 任何一条路径发起，投递都只发生一次（收尾取走即清空）。种子取本次恢复提醒
+    /// 的稳定 ID；同一 child 的多次恢复不能共用结果消息身份。
+    pub(crate) recovery_parent: parking_lot::Mutex<Option<crate::session::RecoveryDelivery>>,
     /// 恢复准备失败且分类为不可执行时的执行阻断（仅内存，不持久化）。
     ///
     /// 每次 `session/load|resume` 重新尝试恢复：成功清除，失败按当前分类重设。
@@ -193,19 +195,36 @@ pub struct SessionManager {
     inner: Arc<SessionManagerInner>,
 }
 
+/// 冷 child 恢复的一次结算投递：父 thread 与本次恢复的稳定种子。
+///
+/// 种子取本次恢复提醒的稳定 ID。同一 child 被再次恢复时，新提醒带来新种子，
+/// 结果消息身份随之改变；重复投递同一次恢复才得到同一 ID（幂等 no-op）。
+#[derive(Clone)]
+pub(crate) struct RecoveryDelivery {
+    pub(crate) parent: ThreadId,
+    pub(crate) seed: Option<peri_acp_types::messages::MessageId>,
+}
+
 impl AcpSession {
     /// 登记冷 child 恢复的父 thread（Host 恢复协调在接纳提醒后调用）。
-    pub(crate) fn record_recovery_parent(&self, parent: ThreadId) {
-        *self.recovery_parent.lock() = Some(parent);
+    pub(crate) fn record_recovery_parent(
+        &self,
+        parent: ThreadId,
+        seed: Option<peri_acp_types::messages::MessageId>,
+    ) {
+        *self.recovery_parent.lock() = Some(RecoveryDelivery { parent, seed });
     }
 
     /// 只读查看待投递的父 thread：用于在 turn 开始前决定本轮是否走恢复结算。
     pub(crate) fn recovery_parent(&self) -> Option<ThreadId> {
-        self.recovery_parent.lock().clone()
+        self.recovery_parent
+            .lock()
+            .as_ref()
+            .map(|delivery| delivery.parent.clone())
     }
 
-    /// 取走待投递的父 thread：一次 turn 只投递一次。
-    pub(crate) fn take_recovery_parent(&self) -> Option<ThreadId> {
+    /// 取走待投递的父 thread 与本次恢复种子：一次 turn 只投递一次。
+    pub(crate) fn take_recovery_parent(&self) -> Option<RecoveryDelivery> {
         self.recovery_parent.lock().take()
     }
 

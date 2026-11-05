@@ -576,3 +576,42 @@ async fn remote_settle_after_turn_respects_pending_work_and_stop() {
         WorkState::Stopped
     );
 }
+
+/// 同 ID 不同内容的接纳冲突不得改变目标工作意图（批次已提交也不例外）。
+#[tokio::test]
+async fn remote_conflicting_reacceptance_does_not_promote_work_state() {
+    use peri_acp_types::thread::WorkState;
+
+    let fixture = fixture().await;
+    let thread = thread("mq-thread");
+    let id = MessageId::new();
+    fixture
+        .data
+        .set_work_state(&thread, WorkState::Idle)
+        .await
+        .unwrap();
+    fixture
+        .data
+        .mq_enqueue(&thread, input(id, "first"))
+        .await
+        .unwrap();
+    fixture
+        .data
+        .set_work_state(&thread, WorkState::Idle)
+        .await
+        .unwrap();
+
+    assert!(
+        fixture
+            .data
+            .mq_enqueue(&thread, input(id, "different content"))
+            .await
+            .is_err(),
+        "同 ID 不同内容必须冲突"
+    );
+    assert_eq!(
+        fixture.data.load_meta(&thread).await.unwrap().work_state,
+        WorkState::Idle,
+        "失败的接纳不得提升工作意图"
+    );
+}
