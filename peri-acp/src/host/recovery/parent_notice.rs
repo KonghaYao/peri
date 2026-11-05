@@ -80,6 +80,7 @@ pub(crate) async fn deliver_child_turn(
     sessions: &SharedSessions,
     child_session_id: &str,
     parent: &ThreadId,
+    seed: Option<peri_acp_types::messages::MessageId>,
     outcome: ChildTurnOutcome<'_>,
 ) {
     let child_thread_id = {
@@ -113,7 +114,7 @@ pub(crate) async fn deliver_child_turn(
         MessageKind::Defer,
         MessageSource::SubAgentComplete,
         reminder,
-        settlement_delivery_id(&child_thread_id, parent),
+        settlement_delivery_id(&child_thread_id, parent, seed),
     )
     .with_policy(MessagePolicy::passive());
     if let Err(error) = cfg
@@ -136,15 +137,23 @@ pub(crate) async fn deliver_child_turn(
     }
 }
 
-/// 同一 child 恢复 turn 的稳定投递身份：重复结算不产生第二条结果。
+/// 同一次恢复 turn 的稳定投递身份：重复结算不产生第二条结果。
 ///
-/// 身份只取 child 与直接父 thread，不取正文/停止原因：同一 child 的终态只投递一次，
-/// 正文变化不能变成新的投递身份（设计 §5.3）。
-fn settlement_delivery_id(child_thread_id: &str, parent: &ThreadId) -> MessageId {
+/// 身份取 child、直接父 thread 与本次恢复提醒的稳定 ID，不取正文/停止原因。
+/// 同一 child 再次被恢复时会拿到新提醒，结果身份随之改变；同一恢复的重复结算
+/// 才复用同一 ID（设计 §5.3）。
+fn settlement_delivery_id(
+    child_thread_id: &str,
+    parent: &ThreadId,
+    seed: Option<MessageId>,
+) -> MessageId {
     let mut hasher = Sha256::new();
     for part in ["peri-recovered-child-terminal", child_thread_id, parent] {
         hasher.update((part.len() as u64).to_be_bytes());
         hasher.update(part.as_bytes());
+    }
+    if let Some(seed) = seed {
+        hasher.update(seed.as_uuid().as_bytes());
     }
     let digest = hasher.finalize();
     let mut bytes = [0_u8; 16];

@@ -18,7 +18,7 @@ use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
 
 use super::generation::{ConnectionFactory, ConnectionGate};
-use super::mutation::{RemoteStore, StoreAccess};
+use super::mutation::{FaultPlan, RemoteStore, StoreAccess};
 use super::schema::{self, StoreId};
 use super::schema_upgrade_tests::SqliteTransport;
 use super::session_data::RemoteSessionData;
@@ -575,4 +575,135 @@ async fn remote_settle_after_turn_respects_pending_work_and_stop() {
         fixture.data.load_meta(&thread).await.unwrap().work_state,
         WorkState::Stopped
     );
+}
+
+/// 同 ID 不同内容的接纳冲突不得改变目标工作意图（批次已提交也不例外）。
+#[tokio::test]
+async fn remote_conflicting_reacceptance_does_not_promote_work_state() {
+    use peri_acp_types::thread::WorkState;
+
+    let fixture = fixture().await;
+    let thread = thread("mq-thread");
+    let id = MessageId::new();
+    fixture
+        .data
+        .set_work_state(&thread, WorkState::Idle)
+        .await
+        .unwrap();
+    fixture
+        .data
+        .mq_enqueue(&thread, input(id, "first"))
+        .await
+        .unwrap();
+    fixture
+        .data
+        .set_work_state(&thread, WorkState::Idle)
+        .await
+        .unwrap();
+
+    assert!(
+        fixture
+            .data
+            .mq_enqueue(&thread, input(id, "different content"))
+            .await
+            .is_err(),
+        "同 ID 不同内容必须冲突"
+    );
+    assert_eq!(
+        fixture.data.load_meta(&thread).await.unwrap().work_state,
+        WorkState::Idle,
+        "失败的接纳不得提升工作意图"
+    );
+}
+
+/// 同 ID 重试时存储侧文本可能被重新序列化；`same_payload` 判定为同一条时仍须提升。
+#[tokio::test]
+async fn remote_normalized_retry_promotes_work_intent() {
+    use peri_acp_types::thread::WorkState;
+
+    let fixture = fixture().await;
+    let thread = thread("mq-thread");
+    let id = MessageId::new();
+    fixture
+        .data
+        .set_work_state(&thread, WorkState::Idle)
+        .await
+        .unwrap();
+    fixture
+        .data
+        .mq_enqueue(&thread, input(id, "wake"))
+        .await
+        .unwrap();
+    fixture
+        .data
+        .set_work_state(&thread, WorkState::Idle)
+        .await
+        .unwrap();
+    // 语义相同、文本不同：模拟存储侧重新序列化。
+    sqlx::query("UPDATE thread_mq SET payload_json = payload_json || ' ' WHERE id = ?1")
+        .bind(id.as_uuid().to_string())
+        .execute(&fixture.pool)
+        .await
+        .unwrap();
+
+    let again = fixture
+        .data
+        .mq_enqueue(&thread, input(id, "wake"))
+        .await
+        .unwrap();
+    assert_eq!(again.disposition, MqEnqueueDisposition::Existing);
+    assert_eq!(
+        fixture.data.load_meta(&thread).await.unwrap().work_state,
+        WorkState::Working,
+        "same_payload 确认的同一条消息必须提升工作意图"
+    );
+}
+
+/// 提升失败不能被吞掉：入队返回可重试的未决错误，MQ 行留在原地；同一 ID 重试读出
+/// `Existing` 并再次执行提升，最终不存在 `idle + pending`。
+#[tokio::test]
+async fn remote_promotion_failure_surfaces_and_same_id_retry_promotes() {
+    use peri_acp_types::thread::WorkState;
+
+    let fixture = fixture().await;
+    let thread = thread("mq-thread");
+    let id = MessageId::new();
+    fixture
+        .data
+        .set_work_state(&thread, WorkState::Idle)
+        .await
+        .unwrap();
+    fixture
+        .data
+        .inject_faults(FaultPlan {
+            drop_reply: None,
+            drop_before_send: Some("work_state_promote".to_owned()),
+        })
+        .await;
+
+    let error = fixture
+        .data
+        .mq_enqueue(&thread, input(id, "wake"))
+        .await
+        .expect_err("a failed promotion must not be reported as an accepted enqueue");
+    assert!(error.is_persistence_uncertain(), "{error:?}");
+    assert_eq!(mq_rows(&fixture, &thread).await, 1, "MQ 行已提交，等待重试");
+    assert_eq!(
+        fixture.data.load_meta(&thread).await.unwrap().work_state,
+        WorkState::Idle,
+        "提升失败时仍是 idle + pending"
+    );
+
+    let again = fixture
+        .data
+        .mq_enqueue(&thread, input(id, "wake"))
+        .await
+        .unwrap();
+    assert_eq!(again.disposition, MqEnqueueDisposition::Existing);
+    assert_eq!(
+        fixture.data.load_meta(&thread).await.unwrap().work_state,
+        WorkState::Working,
+        "同一 ID 重试必须再次执行提升"
+    );
+    assert_eq!(mq_rows(&fixture, &thread).await, 1);
 }

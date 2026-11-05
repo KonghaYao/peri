@@ -479,17 +479,21 @@ async fn ensure_view_only_state(
     };
     {
         let mut states = sessions.lock().await;
-        if states.contains_key(&session_id) {
-            return Err(error.clone());
-        }
-        states.insert(
-            session_id.clone(),
-            crate::host::SessionState::view_only(
+        if let Some(state) = states.get(&session_id) {
+            // 已有 live 会话不降级；已发布的视图态可重复加载（历史/占用重放）。
+            if !state.is_view_only() {
+                return Err(error.clone());
+            }
+        } else {
+            states.insert(
                 session_id.clone(),
-                thread.as_str().to_owned(),
-                meta.cwd.clone(),
-            ),
-        );
+                crate::host::SessionState::view_only(
+                    session_id.clone(),
+                    thread.as_str().to_owned(),
+                    meta.cwd.clone(),
+                ),
+            );
+        }
     }
     cfg.session_manager.ensure_session(&session_id, &meta.cwd);
     let kind = if kind == "read_only" {

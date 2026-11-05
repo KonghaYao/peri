@@ -448,12 +448,13 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             .get_session(&prompt_session_id)
             .and_then(|runtime| runtime.take_recovery_parent())
     };
-    if let Some(parent) = recovery_parent {
+    if let Some(delivery) = recovery_parent {
         super::recovery::deliver_child_turn(
             cfg,
             sessions,
             &prompt_session_id,
-            &parent,
+            &delivery.parent,
+            delivery.seed,
             super::recovery::turn_outcome(&result),
         )
         .await;

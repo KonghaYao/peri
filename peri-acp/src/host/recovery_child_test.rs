@@ -385,6 +385,7 @@ async fn recovered_child_cancelled_settles_cancelled_and_stopped() {
         &harness.sessions,
         "child-b",
         &ThreadId::from(root.clone()),
+        None,
         ChildTurnOutcome::Finished {
             stop_reason: "cancelled",
         },
@@ -412,6 +413,7 @@ async fn recovered_child_failure_settles_error_and_idle() {
         &harness.sessions,
         "child-b",
         &ThreadId::from(root.clone()),
+        None,
         ChildTurnOutcome::Failed {
             code: -32603,
             message: "recovered child failed",
@@ -485,6 +487,7 @@ async fn repeated_recovered_child_settlement_is_idempotent() {
             &harness.sessions,
             "child-b",
             &ThreadId::from(root.clone()),
+            None,
             ChildTurnOutcome::Finished {
                 stop_reason: "end_turn",
             },
@@ -499,5 +502,50 @@ async fn repeated_recovered_child_settlement_is_idempotent() {
         parent_notices(&harness, &root).await.len(),
         1,
         "重复结算不得产生第二条结果"
+    );
+}
+
+/// 同一 child 再次恢复：新恢复提醒带来新种子，结果不得被上一条历史身份跳过。
+#[tokio::test]
+async fn second_recovery_settlement_uses_a_new_delivery_identity() {
+    let harness = RecoveryHarness::new().await;
+    let root = harness.thread_id.clone();
+    harness.add_child(&root, "child-b", &root).await;
+    harness.set_working("child-b").await;
+    let parent = ThreadId::from(root.clone());
+
+    deliver_child_turn(
+        &harness.cfg,
+        &harness.sessions,
+        "child-b",
+        &parent,
+        Some(peri_acp_types::messages::MessageId::new()),
+        ChildTurnOutcome::Finished {
+            stop_reason: "end_turn",
+        },
+    )
+    .await;
+    assert_eq!(parent_notices(&harness, &root).await.len(), 1);
+
+    deliver_child_turn(
+        &harness.cfg,
+        &harness.sessions,
+        "child-b",
+        &parent,
+        Some(peri_acp_types::messages::MessageId::new()),
+        ChildTurnOutcome::Failed {
+            code: -32603,
+            message: "second recovery run failed",
+        },
+    )
+    .await;
+    assert_eq!(
+        parent_notices(&harness, &root).await.len(),
+        2,
+        "第二次恢复的结果不得被上一条历史身份吞掉"
+    );
+    assert_eq!(
+        settled_meta(&harness, "child-b").await.agent_status,
+        AgentStatus::Error
     );
 }
