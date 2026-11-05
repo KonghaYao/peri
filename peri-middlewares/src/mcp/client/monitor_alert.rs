@@ -59,19 +59,16 @@ impl MonitorAlertState {
         self.next_allowed
     }
 
-    /// Choose the action for one observation.
+    /// Choose the action for one observation while the task is still running.
     ///
     /// `hits` is the server-side cumulative count. A zero initial `processed`
     /// means the first observation with `hits > 0` delivers immediately,
     /// including matches that happened before the first poll: there is no
-    /// baseline snapshot. Terminal observations bypass the merge window so
-    /// unreported hits are flushed before settlement; they do not create a
-    /// second reminder when the count is unchanged.
+    /// baseline snapshot.
     pub(crate) fn decide(
         &mut self,
         hits: u64,
         now: Instant,
-        terminal: bool,
         has_inbox: bool,
     ) -> MonitorAlertAction {
         if hits <= self.processed {
@@ -81,12 +78,25 @@ impl MonitorAlertState {
             self.processed = hits;
             return MonitorAlertAction::DropOffline { hits };
         }
-        if terminal || self.next_allowed.is_none_or(|next| now >= next) {
+        if self.next_allowed.is_none_or(|next| now >= next) {
             self.processed = hits;
             self.next_allowed = Some(now + MONITOR_ALERT_MERGE_WINDOW);
             return MonitorAlertAction::Send { hits };
         }
         MonitorAlertAction::Suppressed
+    }
+
+    /// Consume hits that no alert reminder has reported yet.
+    ///
+    /// Terminal settlement merges them into the single terminal reminder, so
+    /// they bypass the merge window but still advance `processed`: a repeated
+    /// terminal observation must not merge the same hits twice.
+    pub(crate) fn take_unreported(&mut self, hits: u64) -> u64 {
+        let unreported = hits.saturating_sub(self.processed);
+        if unreported > 0 {
+            self.processed = hits;
+        }
+        unreported
     }
 }
 
