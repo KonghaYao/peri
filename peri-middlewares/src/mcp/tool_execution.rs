@@ -29,10 +29,11 @@ pub(super) fn monitor_started(public_id: String, monitor_id: &str) -> ToolOutput
             "Background task started: {public_id}. task_id: {public_id} (host background task id; \
              only for host task management and the Tasks panel). monitor_id: {monitor_id} (use this \
              as task_id for monitor_read, monitor_stop, and MCP tasks/get; monitor_list also reports \
-             it). Do not pass the host task_id to the monitor tools. The initiating session is woken \
-             exactly once when the task reaches a terminal state (completion, failure, \
-             cancellation, or deadline); alert matches also wake it while the task runs. Read \
-             progress with monitor_read."
+             it). Do not pass the host task_id to the monitor tools. At most one best-effort \
+             reminder wakes the initiating session when the task reaches a terminal state \
+             (completion, failure, cancellation, or deadline); a missing inbox or failed push \
+             drops it. Alert matches also wake it while the task runs. Read progress with \
+             monitor_read."
         ),
         evidence(ToolExecutionStatus::Running, Some(public_id)),
     )

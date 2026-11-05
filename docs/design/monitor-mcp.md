@@ -247,8 +247,9 @@ working ───▶ cancelling（对外仍 working）──▶ cancelled       
   并推进 `processed`；累计命中数、未报告数、最近命中 seq 与 label 由
   `monitor_terminal_alert_note` 合并进**唯一**一条终态提醒正文，随
   `deliver_managed_task_status` / `settle_external` 投递。终态轮次不再单独投递
-  alert 提醒；`alertMatched == processed` 时正文只含终态与 monitor id。投递失败或
-  无 inbox 不得阻塞结算（失败一律视为确定性丢弃）。
+  alert 提醒；`alertMatched == processed` 时正文只含终态与 monitor id。无 inbox 或
+  inbox wake 失败时丢弃终态提醒并继续结算；canonical delivery 失败仍返回错误，
+  任务保持待结算并重试。
 - **投递**：`InboxHandle::push_system_reminder_with_delivery_id(MessageKind::Defer,
   MessageSource::McpNotification, ...)`。只投给订阅参数里的发起会话（子 agent 即
   子 session id），不广播。
@@ -257,16 +258,17 @@ working ───▶ cancelling（对外仍 working）──▶ cancelled       
   的纯函数，不含时间或 delta；同一 `(id, hits)` 逐字相同。终态提醒使用结算的稳定
   delivery id，重试复用同一 id；合并摘要只由 `(raw_monitor_id, alert_matched,
   unreported, last_alert_seq, label)` 决定。
-- **失败与离线**：inbox 不存在 → 运行中命中丢弃、推进 `processed`、warn；终态提醒
-  best-effort 丢弃并返回成功，不重投、不跨会话、不阻塞结算。
-  `push_system_reminder_with_delivery_id` 本身不返回错误；reminder 构造失败是确定性
-  失败 → 推进并 warn。meta 缺失或字段类型错误 → 非终态不推进、每任务记录一次 warn、
-  下一轮再试；终态观测遇到该情况只省略合并计数，仍投递终态提醒并照常执行
-  `deliver_managed_task_status` / `settle_external`——结算不依赖 meta 是否可用，
-  名称回退匹配到的 server 也不会因此把终态任务永远留在 unsettled。
+- **失败与离线**：inbox 不存在或 inbox wake 失败 → 运行中命中丢弃、推进
+  `processed`、warn；终态提醒 best-effort 丢弃并返回成功，不重投、不跨会话、
+  不阻塞结算。canonical `delivery.deliver` 失败仍传播错误并保持任务待结算，由订阅
+  循环重试；reminder 构造失败是确定性失败 → 推进并 warn。meta 缺失或字段类型错误 →
+  非终态不推进、每任务记录一次 warn、下一轮再试；终态观测遇到该情况只省略合并计数，
+  仍投递终态提醒并照常执行 `deliver_managed_task_status` / `settle_external`——结算
+  不依赖 meta 是否可用，名称回退匹配到的 server 也不会因此把终态任务永远留在
+  unsettled。
 - **审批**：提醒路径不经过任何交互审批；`monitor_start` 的工具审批覆盖后续提醒。
-- **终态唤醒**：任务成功、失败、取消或 deadline 都会向发起会话投递恰好一条 Defer
-  终态提醒，正文含终态、monitor id，必要时含合并后的命中计数。命令在命中 alert 后
+- **终态唤醒**：任务成功、失败、取消或 deadline 都会向发起会话投递最多一条
+  best-effort Defer 终态提醒，正文含终态、monitor id，必要时含合并后的命中计数。命令在命中 alert 后
   立即退出只产生一条合并提醒，不会出现「alert 提醒 + 任务完成提醒」的重复唤醒。
   运行中的命中仍按 30 秒窗口合并。
 - **owner 定向**：提醒只投递给发起会话；会话已释放（例如子 agent 结束）或没有

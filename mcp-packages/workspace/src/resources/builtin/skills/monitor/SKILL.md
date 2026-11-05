@@ -93,10 +93,11 @@ monitor server itself never queues or acknowledges alerts.
 - Reminders are merged per task: after one is delivered, later matches inside
   30 seconds are folded into the next reminder, whose count is cumulative (not
   a delta). No reminder is sent when there are no unreported matches.
-- When the task reaches a terminal state, exactly one terminal reminder is
-  delivered to the initiating session. Unreported matches are merged into that
-  reminder with their cumulative count and latest `seq`; a task with no
-  unreported matches still sends the plain terminal reminder.
+- When the task reaches a terminal state, at most one best-effort terminal
+  reminder is delivered to the initiating session (a missing inbox or a failed
+  push drops it). Unreported matches are merged into that reminder with their
+  cumulative count and latest `seq`; a task with no unreported matches still
+  sends the plain terminal reminder.
 - Delivery uses the initiating session's inbox only. Another session never
   receives it; a session with no live inbox drops the alert without retrying.
 - `lastAlertSeq` is only a hint about the most recent matching line. It is
