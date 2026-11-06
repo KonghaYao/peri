@@ -3,9 +3,283 @@
 #[cfg(test)]
 use super::*;
 
+use std::time::Duration;
+
 use crate::kit::atoms::{ACP_STATE, VIEW_MODELS, ViewModelsSnapshot};
+use peri_acp::transport::AcpTransport;
 use peri_acp::transport::mpsc::{MpscClientTransport, MpscServerTransport, mpsc_transport_pair};
+use peri_acp::transport::types::{AcpError, IncomingMessage, RequestId};
+use serde_json::json;
 use serial_test::serial;
+
+async fn expect_prompt(server: &MpscServerTransport) -> (RequestId, String, String) {
+    let incoming = tokio::time::timeout(Duration::from_secs(5), server.recv())
+        .await
+        .expect("expected session/prompt")
+        .expect("transport must stay open");
+    let IncomingMessage::Request {
+        id, method, params, ..
+    } = incoming
+    else {
+        panic!("expected request, got {incoming:?}");
+    };
+    assert_eq!(method, "session/prompt");
+    let session_id = params["sessionId"]
+        .as_str()
+        .expect("prompt carries sessionId")
+        .to_string();
+    let text = params["message"]["content"]
+        .as_str()
+        .expect("text-only prompt content")
+        .to_string();
+    (id, session_id, text)
+}
+
+/// [回归 #210] TurnDone 排空旧队列后，10 条消息在模型侧必须按入队顺序提交。
+///
+/// 用多线程 runtime：真实 TUI 是多线程，spawn 的每条提交会被不同 worker
+/// 取走，单线程 runtime 掩盖了并发提交的乱序窗口。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_drained_input_buffer_prompts_preserve_fifo() {
+    let (client, server) = make_client_without_pump();
+    client.force_stable_for_test("fifo-session", false);
+    let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
+    let shutdown = CancellationToken::new();
+    let consumer = spawn_submit_consumer(client, rx, ".".into(), shutdown.clone());
+
+    for index in 0..10 {
+        tx.send(SubmitRequest::AgentText {
+            text: format!("m{index}"),
+            attachments: Vec::new(),
+        })
+        .unwrap();
+    }
+
+    let received = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut texts = Vec::new();
+        for _ in 0..10 {
+            let (id, _, text) = expect_prompt(&server).await;
+            texts.push(text);
+            server
+                .send_response(id, Ok(json!({"stopReason": "end_turn"})))
+                .await
+                .unwrap();
+        }
+        texts
+    })
+    .await
+    .expect("all prompts must be submitted");
+
+    let expected: Vec<String> = (0..10).map(|index| format!("m{index}")).collect();
+    assert_eq!(received, expected, "prompt 提交顺序必须与入队顺序一致");
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_millis(500), consumer).await;
+}
+
+/// [回归 #210] 前一条 prompt RPC 失败不得吞掉后续消息。
+#[tokio::test]
+async fn test_failed_prompt_does_not_block_following_prompts() {
+    let (client, server) = make_client_without_pump();
+    client.force_stable_for_test("fifo-session", false);
+    let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
+    let shutdown = CancellationToken::new();
+    let consumer = spawn_submit_consumer(client, rx, ".".into(), shutdown.clone());
+
+    for index in 0..3 {
+        tx.send(SubmitRequest::AgentText {
+            text: format!("m{index}"),
+            attachments: Vec::new(),
+        })
+        .unwrap();
+    }
+
+    let (first_id, _, first_text) = expect_prompt(&server).await;
+    assert_eq!(first_text, "m0");
+    server
+        .send_response(first_id, Err(AcpError::new(-32000, "boom")))
+        .await
+        .unwrap();
+
+    let received = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut texts = Vec::new();
+        for _ in 0..2 {
+            let (id, _, text) = expect_prompt(&server).await;
+            texts.push(text);
+            server
+                .send_response(id, Ok(json!({"stopReason": "end_turn"})))
+                .await
+                .unwrap();
+        }
+        texts
+    })
+    .await
+    .expect("后续 prompt 必须继续提交");
+
+    assert_eq!(received, vec!["m1".to_string(), "m2".to_string()]);
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_millis(500), consumer).await;
+}
+
+/// [回归 #210] 第一条 prompt 未返回时，同会话第二条不得越过它提交。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_pending_prompt_blocks_same_session_successor() {
+    let (client, server) = make_client_without_pump();
+    client.force_stable_for_test("fifo-session", false);
+    let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
+    let shutdown = CancellationToken::new();
+    let consumer = spawn_submit_consumer(client, rx, ".".into(), shutdown.clone());
+
+    for index in 0..2 {
+        tx.send(SubmitRequest::AgentText {
+            text: format!("m{index}"),
+            attachments: Vec::new(),
+        })
+        .unwrap();
+    }
+
+    let (first_id, _, first_text) = expect_prompt(&server).await;
+    assert_eq!(first_text, "m0");
+    let early = tokio::time::timeout(Duration::from_millis(300), server.recv()).await;
+    assert!(
+        early.is_err(),
+        "第一条 prompt 未完成时，同会话第二条不得提交: {early:?}"
+    );
+
+    server
+        .send_response(first_id, Ok(json!({"stopReason": "end_turn"})))
+        .await
+        .unwrap();
+    let (second_id, _, second_text) = expect_prompt(&server).await;
+    assert_eq!(second_text, "m1");
+    server
+        .send_response(second_id, Ok(json!({"stopReason": "end_turn"})))
+        .await
+        .unwrap();
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_millis(500), consumer).await;
+}
+
+/// [回归 #210] 旧会话的 prompt 未返回时，新会话的提交不得被拖住。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_pending_prompt_does_not_block_another_session() {
+    let (client, server) = make_client_without_pump();
+    client.force_stable_for_test("session-a", false);
+    let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
+    let shutdown = CancellationToken::new();
+    let consumer = spawn_submit_consumer(client.clone(), rx, ".".into(), shutdown.clone());
+
+    tx.send(SubmitRequest::AgentText {
+        text: "a".to_string(),
+        attachments: Vec::new(),
+    })
+    .unwrap();
+    let (first_id, first_session, first_text) = expect_prompt(&server).await;
+    assert_eq!(first_session, "session-a");
+    assert_eq!(first_text, "a");
+
+    // 第一条 prompt 故意不返回：切换到新会话后，第二条必须立即提交。
+    client.force_stable_for_test("session-b", false);
+    tx.send(SubmitRequest::AgentText {
+        text: "b".to_string(),
+        attachments: Vec::new(),
+    })
+    .unwrap();
+    let (second_id, second_session, second_text) =
+        tokio::time::timeout(Duration::from_secs(2), expect_prompt(&server))
+            .await
+            .expect("新会话的 prompt 不得等待旧会话 turn 结束");
+    assert_eq!(second_session, "session-b");
+    assert_eq!(second_text, "b");
+
+    server
+        .send_response(second_id, Ok(json!({"stopReason": "end_turn"})))
+        .await
+        .unwrap();
+    server
+        .send_response(first_id, Ok(json!({"stopReason": "end_turn"})))
+        .await
+        .unwrap();
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_millis(500), consumer).await;
+}
+
+/// 车道保证同会话内顺序：每条提交都先让出调度器，仍按 push 顺序执行。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_submit_lanes_keep_fifo_within_session() {
+    let mut lanes: SubmitLanes<Option<String>> = SubmitLanes::new();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    for index in 0..10 {
+        let tx = tx.clone();
+        lanes.push(Some("s".to_string()), async move {
+            tokio::task::yield_now().await;
+            let _ = tx.send(index);
+        });
+    }
+    drop(tx);
+
+    let mut received = Vec::new();
+    for _ in 0..10 {
+        received.push(
+            tokio::time::timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .expect("lane must drive all submissions")
+                .expect("sender stays alive until all work runs"),
+        );
+    }
+    assert_eq!(received, (0..10).collect::<Vec<_>>());
+}
+
+/// 车道首条 task panic 只结束它自己，后续消息继续执行。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_submit_lanes_continue_after_tail_panics() {
+    let mut lanes: SubmitLanes<Option<String>> = SubmitLanes::new();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    lanes.push(Some("s".to_string()), async move {
+        panic!("simulated submit task abort");
+    });
+    let follow_tx = tx.clone();
+    lanes.push(Some("s".to_string()), async move {
+        let _ = follow_tx.send("after");
+    });
+    drop(tx);
+
+    let received = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("后续消息不得被前一条的 panic 阻塞");
+    assert_eq!(received, Some("after"));
+}
+
+/// 不同会话各自推进：慢会话不能拖住另一会话的消息。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_submit_lanes_run_sessions_independently() {
+    let mut lanes: SubmitLanes<Option<String>> = SubmitLanes::new();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+
+    let blocked_tx = tx.clone();
+    lanes.push(Some("a".to_string()), async move {
+        let _ = release_rx.await;
+        let _ = blocked_tx.send("a");
+    });
+    let free_tx = tx.clone();
+    lanes.push(Some("b".to_string()), async move {
+        let _ = free_tx.send("b");
+    });
+    drop(tx);
+
+    let first = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("另一会话不得等待 a 的挂起提交")
+        .expect("sender stays alive");
+    assert_eq!(first, "b");
+
+    release_tx.send(()).unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .expect("a 释放后应继续执行")
+        .expect("sender stays alive");
+    assert_eq!(second, "a");
+}
 
 /// 用真实 mpsc transport 对创建 AcpTuiClient（不启动 pump）。
 fn make_client_without_pump() -> (AcpTuiClient, MpscServerTransport) {

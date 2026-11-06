@@ -5,10 +5,14 @@
 //! **首次会话懒初始化**：用户第一次提交时如果还没有 session，先创建。
 //!
 //! 设计：
-//! - 单消费者，从 `mpsc::UnboundedReceiver<SubmitRequest>` 顺序读取（保证提交顺序）
+//! - 单读取者，从 `mpsc::UnboundedReceiver<SubmitRequest>` 取请求；用户消息按
+//!   会话车道串行（同会话 FIFO，跨会话并行），控制/视图请求即时执行
 //! - 与 notifier / bridge 并行运行，三者通过独立 channel 解耦
 //! - shutdown 信号触发时干净退出，不发残留请求
 
+use std::collections::HashMap;
+use std::future::Future;
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -17,6 +21,7 @@ use fluent_bundle::FluentValue;
 use peri_acp_types::messages::MessageContent;
 use ratatui::text::Line;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -34,6 +39,43 @@ use crate::kit::submit_request::{
 /// 取消通知的等待上限；超时不把未知结果当作已停止。
 const CANCEL_RPC_TIMEOUT_SECS: u64 = 2;
 
+/// 单会话提交车道：同会话按入队顺序串行，跨会话互不等待。
+///
+/// 旧服务端不支持 user-input queue：运行期输入缓存于 INPUT_BUFFER，TurnDone
+/// 一次排空。通道只保证入队顺序；`tokio::spawn` 后每条提交由 runtime 并行
+/// 调度，相邻 prompt 可能反向到达服务端——本地气泡按原顺序显示，模型却按
+/// 另一顺序处理（#210）。车道以提交时的会话为键，让后一条等前一条结束；
+/// 新式 steer 走独立 consumer，不受这里的串行约束。
+struct SubmitLanes<K> {
+    tails: HashMap<K, JoinHandle<()>>,
+}
+
+impl<K: Eq + Hash> SubmitLanes<K> {
+    fn new() -> Self {
+        Self {
+            tails: HashMap::new(),
+        }
+    }
+
+    /// 把 `work` 追加到 `key` 车道末尾。
+    ///
+    /// 前一条失败、panic 或被取消都只结束它自己，不阻断后续消息。
+    fn push(&mut self, key: K, work: impl Future<Output = ()> + Send + 'static) {
+        // 已完成车道的句柄没有等待价值，顺手收敛 map（会话切换会换 key）。
+        self.tails.retain(|_, tail| !tail.is_finished());
+        let previous = self.tails.remove(&key);
+        let handle = tokio::spawn(async move {
+            if let Some(previous) = previous
+                && let Err(error) = previous.await
+            {
+                warn!(error = %error, "kit submit_consumer: previous submit task aborted");
+            }
+            work.await;
+        });
+        self.tails.insert(key, handle);
+    }
+}
+
 /// 启动提交消费者后台任务。
 ///
 /// 参数：
@@ -49,6 +91,7 @@ pub fn spawn_submit_consumer(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         info!("kit submit_consumer: started");
+        let mut lanes: SubmitLanes<Option<String>> = SubmitLanes::new();
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => {
@@ -66,22 +109,33 @@ pub fn spawn_submit_consumer(
                                 &request,
                                 SubmitRequest::SessionControl(SessionControlRequest::Clear)
                             );
-                            // Issue 2026-08-06：每请求 spawn 分离 task，不再串行 await。
-                            // 旧实现单飞阻塞在 prompt() RPC 上直到 turn 完成——挂起期间
-                            // （await_wake，bg 任务活跃）RPC 会挂住，后续用户输入在
-                            // SUBMIT_TX channel 中排队，表现为"输入石沉大海"。spawn 化后
-                            // 每个请求独立推进：挂起期间的新 prompt 立即发出 RPC，服务端
-                            // 走注入路径（见 host dispatch_prompt_turn），无需等待 bg 完成。
+                            // 用户消息按会话串行：旧队列排空后每条都要等前一条
+                            // 的 prompt 完成，否则模型侧顺序可能与气泡相反
+                            // （#210）。控制/视图请求保持即时执行——它们不是
+                            // 消息，不能被长 turn 拖住。
+                            let lane = match &request {
+                                SubmitRequest::AgentText { .. } | SubmitRequest::KeepGoing => {
+                                    // 无会话时共用 None 车道，直到 ensure_session 建好会话。
+                                    Some(acp_client.current_session_id())
+                                }
+                                _ => None,
+                            };
                             let client = acp_client.clone();
                             let cwd = cwd.clone();
-                            tokio::spawn(async move {
+                            let work = async move {
                                 if let Err(e) = handle_submit(&client, &cwd, request).await {
                                     error!(error = %e, "kit submit_consumer: prompt failed");
                                     if clear_session {
                                         clear_loading_state();
                                     }
                                 }
-                            });
+                            };
+                            match lane {
+                                Some(key) => lanes.push(key, work),
+                                None => {
+                                    tokio::spawn(work);
+                                }
+                            }
                         }
                     }
                 }
