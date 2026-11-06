@@ -54,7 +54,7 @@ impl ConnectionFactory for RaceFactory {
 async fn fixture() -> Fixture {
     let directory = tempfile::tempdir().unwrap();
     let pool = SqlitePoolOptions::new()
-        .max_connections(1)
+        .max_connections(4)
         .connect_with(
             sqlx::sqlite::SqliteConnectOptions::new()
                 .filename(directory.path().join("remote-tree-race.db"))
@@ -82,10 +82,21 @@ async fn fixture() -> Fixture {
         .unwrap();
 
     let transport = Arc::new(SqliteTransport::for_test(pool.clone()));
-    let gate = Arc::new(ConnectionGate::default());
+    let data = remote_adapter(&transport);
+    Fixture {
+        _directory: directory,
+        pool,
+        transport,
+        data,
+    }
+}
+
+/// 第二个独立 adapter：与第一个共享同一个「远端库」，用于两实例并发用例。
+fn remote_adapter(transport: &Arc<SqliteTransport>) -> RemoteSessionData {
     let access = StoreAccess::ReadWrite;
+    let gate = Arc::new(ConnectionGate::default());
     let store = RemoteStore::new(transport.clone(), access, gate.mint(), gate.clone());
-    let data = RemoteSessionData::with_connection_for_test(
+    RemoteSessionData::with_connection_for_test(
         StoreId::mint(),
         store,
         Arc::new(RaceFactory {
@@ -94,13 +105,7 @@ async fn fixture() -> Fixture {
             gate: gate.clone(),
         }),
         gate,
-    );
-    Fixture {
-        _directory: directory,
-        pool,
-        transport,
-        data,
-    }
+    )
 }
 
 async fn seed_thread(pool: &SqlitePool, id: &str, parent: Option<&str>, frozen: Option<&str>) {
@@ -267,4 +272,60 @@ async fn child_creation_then_tree_deletion_round_trips() {
 
     assert_eq!(count_threads(&fixture.pool, &["root", "child"]).await, 0);
     assert_eq!(count_orphans(&fixture.pool).await, 0);
+}
+
+/// 两实例并发：一个 adapter 删树，另一个创建 child。无论谁先拿到写锁，都不允许留下
+/// 指向已删除父行的 child；child 存活时父行必须同时存活。
+#[tokio::test]
+async fn two_instances_deleting_a_tree_and_creating_a_child_leave_no_orphan() {
+    let fixture = fixture().await;
+    for round in 0..25 {
+        let root = format!("two-root-{round}");
+        let child = format!("two-child-{round}");
+        seed_thread(&fixture.pool, &root, None, Some(FROZEN)).await;
+
+        let creator = remote_adapter(&fixture.transport);
+        let snapshot = child_snapshot(&child, &root);
+        let (_deleted, _created) = tokio::join!(
+            fixture.data.delete_tree(&root),
+            creator.save_child(&snapshot)
+        );
+
+        assert_eq!(count_orphans(&fixture.pool).await, 0, "round {round}");
+        if count_threads(&fixture.pool, &[&child]).await > 0 {
+            assert_eq!(
+                count_threads(&fixture.pool, &[&root]).await,
+                1,
+                "round {round}: a surviving child must keep its parent"
+            );
+        }
+    }
+}
+
+/// 两实例并发：一个 adapter 撤销会话，另一个创建 child。撤销要么在 child 提交后拒绝，
+/// 要么在 child 之前完成并让 child 创建失败；不允许父行消失而 child 留下。
+#[tokio::test]
+async fn two_instances_revoking_and_creating_a_child_leave_no_orphan() {
+    let fixture = fixture().await;
+    for round in 0..25 {
+        let parent = format!("rev-root-{round}");
+        let child = format!("rev-child-{round}");
+        seed_thread(&fixture.pool, &parent, None, Some(FROZEN)).await;
+
+        let creator = remote_adapter(&fixture.transport);
+        let snapshot = child_snapshot(&child, &parent);
+        let (_revoked, _created) = tokio::join!(
+            fixture.data.revoke_unpublished_session(&parent),
+            creator.save_child(&snapshot)
+        );
+
+        assert_eq!(count_orphans(&fixture.pool).await, 0, "round {round}");
+        if count_threads(&fixture.pool, &[&child]).await > 0 {
+            assert_eq!(
+                count_threads(&fixture.pool, &[&parent]).await,
+                1,
+                "round {round}: a surviving child must keep its parent"
+            );
+        }
+    }
 }
