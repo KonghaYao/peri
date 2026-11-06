@@ -9,6 +9,46 @@ use crate::plugin::{
     types::{InstallScope, InstalledPlugin, PluginOrigin},
 };
 
+/// 外部字符串只能作为缓存目录中的单个正常分量，拒绝 `.`、`..`、分隔符与绝对路径。
+fn validate_cache_path_segment(field: &str, value: &str) -> Result<(), InstallerError> {
+    let mut components = Path::new(value).components();
+    let single_normal = matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    );
+    if !single_normal {
+        return Err(InstallerError::SettingsError(format!(
+            "插件{field}不能作为缓存目录名: {value:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// 删除或写入前确认目标严格位于缓存根内。
+///
+/// 分量校验已挡住词法穿越；这里再挡住「缓存内某一层被替换为指向根外的符号链接」。
+fn ensure_within_cache_root(cache_root: &Path, target: &Path) -> Result<(), InstallerError> {
+    let mut probe = target;
+    while !probe.exists() {
+        probe = probe.parent().ok_or_else(|| {
+            InstallerError::SettingsError(format!(
+                "插件缓存目标缺少可校验的父目录: {}",
+                target.display()
+            ))
+        })?;
+    }
+    let canonical_probe = probe.canonicalize()?;
+    if !canonical_probe.starts_with(cache_root)
+        || (probe == target && canonical_probe == cache_root)
+    {
+        return Err(InstallerError::SettingsError(format!(
+            "插件缓存目标越出缓存根: {}",
+            target.display()
+        )));
+    }
+    Ok(())
+}
+
 pub async fn install_plugin(
     name: &str,
     marketplace: &str,
@@ -18,6 +58,8 @@ pub async fn install_plugin(
     project_dir: Option<&Path>,
 ) -> Result<InstalledPlugin, InstallerError> {
     super::enabled_plugins_settings_path(scope, claude_dir, project_dir)?;
+    validate_cache_path_segment("名称", name)?;
+    validate_cache_path_segment("marketplace", marketplace)?;
     let project_dir = if scope == InstallScope::User {
         None
     } else {
@@ -125,21 +167,28 @@ pub async fn install_plugin(
             }
         });
 
+    validate_cache_path_segment("版本", &version)?;
+
     let target_dir = claude_dir
         .join("plugins")
         .join("cache")
         .join(marketplace)
         .join(name)
         .join(&version);
+    let cache_root = claude_dir.join("plugins").join("cache");
 
     tokio::task::spawn_blocking({
         let source_dir = source_dir.clone();
         let target_dir = target_dir.clone();
         move || -> Result<(), InstallerError> {
+            std::fs::create_dir_all(&cache_root)?;
+            let cache_root = cache_root.canonicalize()?;
+            ensure_within_cache_root(&cache_root, &target_dir)?;
             if target_dir.exists() {
                 let _ = std::fs::remove_dir_all(&target_dir);
             }
             std::fs::create_dir_all(&target_dir)?;
+            ensure_within_cache_root(&cache_root, &target_dir)?;
             copy_dir_recursive(&source_dir, &target_dir).map_err(|e| {
                 InstallerError::CopyFailed {
                     src: source_dir.clone(),
@@ -196,6 +245,8 @@ pub async fn update_plugin(
         project_dir
     };
     let (name, marketplace) = plugin_id.split_once('@').unwrap_or((plugin_id, ""));
+    validate_cache_path_segment("名称", name)?;
+    validate_cache_path_segment("marketplace", marketplace)?;
 
     let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
     let installed = load_installed_plugins(Some(&plugins_path))?;
@@ -216,6 +267,8 @@ pub async fn update_plugin(
         .as_ref()
         .map(|s| s.chars().take(7).collect::<String>())
         .unwrap_or_else(|| latest.version.clone());
+    // 必须在 uninstall 之前校验：旧实现会先卸载再进入安装路径校验。
+    validate_cache_path_segment("版本", &latest_version)?;
 
     if latest_version == current.version {
         return Ok(current.clone());
