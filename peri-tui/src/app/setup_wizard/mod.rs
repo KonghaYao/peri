@@ -589,18 +589,39 @@ pub fn save_setup(state: &SetupWizardState) -> anyhow::Result<crate::config::Per
             .is_none_or(|original| original == &provider.provider_id)),
         "existing provider identity cannot be renamed by setup"
     );
-    let merged = if let Some(source) = crate::kit::atoms::CONFIG_SOURCE_HANDLE.get() {
+    let source = crate::kit::atoms::CONFIG_SOURCE_HANDLE.get();
+    let merged = if let Some(source) = source {
         source.reload_merged()?
     } else {
         crate::config::load()?
     };
     let merged = merge_setup(state, merged);
+    let Some(source) = source else {
+        anyhow::ensure!(
+            crate::app::agent::LlmProvider::from_config(&merged).is_some(),
+            "setup configuration has no usable active provider"
+        );
+        crate::config::save_effective(&merged)?;
+        return Ok(merged);
+    };
+    let revision = source
+        .snapshot()
+        .ok_or_else(|| anyhow::anyhow!("configuration authority unavailable"))?
+        .revision();
+    // workspace 保存会剥离继承自 global 的凭据；端点变更后该凭据不再回填，
+    // accepted snapshot 可能没有可用 provider。落盘前用权威预览确认，避免
+    // 保存成功但重启后 provider 丢失。
+    let preview = source.preview(revision, &merged)?;
     anyhow::ensure!(
-        crate::app::agent::LlmProvider::from_config(&merged).is_some(),
+        preview.provider().is_some(),
         "setup configuration has no usable active provider"
     );
-    crate::config::save_effective(&merged)?;
-    Ok(merged)
+    let accepted = source.save(revision, &merged)?;
+    anyhow::ensure!(
+        accepted.provider().is_some(),
+        "setup configuration has no usable active provider"
+    );
+    Ok(accepted.settings().clone())
 }
 
 fn merge_setup(

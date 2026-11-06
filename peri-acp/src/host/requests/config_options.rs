@@ -157,9 +157,21 @@ pub(crate) async fn handle_update_config(
         }
     }
 
-    let new_provider =
-        LlmProvider::from_config_for_alias(&new_cfg, &new_cfg.config.active_alias)
-            .ok_or_else(|| AcpError::new(-32602, "active profile has no usable provider"))?;
+    LlmProvider::from_config_for_alias(&new_cfg, &new_cfg.config.active_alias)
+        .ok_or_else(|| AcpError::new(-32602, "active profile has no usable provider"))?;
+    // Authority acceptance can differ from the candidate: workspace saves strip
+    // credentials inherited from global. Resolve the would-be accepted snapshot
+    // before writing, so activation never falls back to the pre-save candidate.
+    let preview = cfg
+        .config_source
+        .preview(revision, &new_cfg)
+        .map_err(|_| AcpError::new(-32603, "Failed to persist config"))?;
+    if preview.provider().is_none() {
+        return Err(AcpError::new(
+            -32602,
+            "accepted configuration has no usable provider",
+        ));
+    }
     // Each environment owns its model selection; only connection definitions are
     // shared with environments assembled from this exact configuration source.
     // Resolve every candidate before persistence so failure leaves live state intact.
@@ -174,7 +186,7 @@ pub(crate) async fn handle_update_config(
             continue;
         }
         let mut candidate = environment.cfg.peri_config.read().clone();
-        candidate.config.providers = new_cfg.config.providers.clone();
+        candidate.config.providers = preview.settings().config.providers.clone();
         let provider =
             LlmProvider::from_config_for_alias(&candidate, &candidate.config.active_alias)
                 .ok_or_else(|| {
@@ -186,16 +198,27 @@ pub(crate) async fn handle_update_config(
         .config_source
         .save(revision, &new_cfg)
         .map_err(|_| AcpError::new(-32603, "Failed to persist config"))?;
-    *cfg.peri_config.write() = accepted.settings().clone();
-    *cfg.provider.write() = accepted
-        .provider()
-        .cloned()
-        .map(LlmProvider::from_resolved)
-        .unwrap_or(new_provider);
-    for (_, _, candidate, _) in &mut refreshed {
+    let Some(active_provider) = accepted.provider().cloned().map(LlmProvider::from_resolved) else {
+        return Err(AcpError::new(
+            -32602,
+            "accepted configuration has no usable provider",
+        ));
+    };
+    // Rebuild associated sessions from the accepted providers, not from the
+    // candidate used to request the save.
+    let mut accepted_refreshed = Vec::with_capacity(refreshed.len());
+    for (id, environment, mut candidate, _) in refreshed {
         candidate.config.providers = accepted.settings().config.providers.clone();
+        let provider =
+            LlmProvider::from_config_for_alias(&candidate, &candidate.config.active_alias)
+                .ok_or_else(|| {
+                    AcpError::new(-32602, "existing session profile has no usable provider")
+                })?;
+        accepted_refreshed.push((id, environment, candidate, provider));
     }
-    for (_, environment, candidate, provider) in &refreshed {
+    *cfg.peri_config.write() = accepted.settings().clone();
+    *cfg.provider.write() = active_provider;
+    for (_, environment, candidate, provider) in &accepted_refreshed {
         *environment.cfg.peri_config.write() = candidate.clone();
         *environment.cfg.provider.write() = provider.clone();
     }
@@ -206,7 +229,7 @@ pub(crate) async fn handle_update_config(
             state.agent_pool.invalidate();
         }
     }
-    for (id, environment, _, _) in &refreshed {
+    for (id, environment, _, _) in &accepted_refreshed {
         send_config_option_update(transport.as_ref(), id, &environment.cfg).await;
     }
 

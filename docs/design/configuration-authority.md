@@ -88,13 +88,19 @@ snapshot、显式 `reload_merged` 与 `save`；ACP store 仅 re-export。lenient
 `Result<Arc<ConfigurationSnapshot>>`，caller 使用返回的 accepted snapshot 发布结果。
 expected revision 必须在编辑开始从基线 snapshot 捕获并随草稿保留；提交时现场
 读取最新版 revision 会丢掉 stale draft 检测，不能当作版本保护已完成。
+`ConfigSource::preview(expected_revision, &PeriConfig)` 用同一候选生成将发布的
+snapshot 但不写目标文件，供 caller 在提交前校验 accepted 投影（例如 setup 仍须
+有可用 provider）；随后 save 仍核对 revision，竞争写者表现为冲突而非旧写覆盖。
 
 权威 `update` / `update_mcp` 顺序为：核对 current 的预期 revision → 重新采集
 并核对输入 revision → 生成负责领域的候选正文 → 纯 resolve/校验 → 目标文件
 字节 CAS → 发布新 snapshot。冲突、解析、校验或 I/O 失败不 publish。
 
 settings 保存只更新 `config` / schema，保留 `mcpServers`、`langfuse` 等兄弟域；
-workspace 保存 global 相对差异，不把 global credentials 复制到工作区。
+workspace 保存 global 相对差异，不把 global credentials 复制到工作区。provider 的
+`apiKey` 与 global 同 id 条目相同时写回空值；读取期仅在同 id 且 `type`/`baseUrl`/
+`auth` 一致时继承，端点或认证上下文被改写时保持无密钥，避免凭据被发往其他 endpoint。
+ChatGPT plan 仍以空 `apiKey` 表示，不回填。
 其中 nested `config.mcpServers` / `config.mcpCache` 由所属领域维护，settings 更新
 保留目标原文中的值，即使 only-provider 请求未带它们也不删除；目标没有这些键时
 不从 effective global 复制进 workspace。已有 workspace `$schema` 优先保留。
@@ -125,6 +131,8 @@ ACP 持久 configOptions 分支与 `update_config` 按 candidate → 验证 → 
 TUI `save_effective` 仍为即时编辑便利入口，提交时读取 snapshot revision；Login provider
 编辑与 Model 的 Responses 档位/contextWindow 长草稿改用 `save_effective_at(expected, cfg)`：
 进入编辑时捕获 token，成功后只发布 authority 返回的 accepted snapshot，冲突要求重新载入。
+Setup wizard 保存用 `preview` 校验 accepted provider：端点变更导致继承凭据不再回填时
+拒绝落盘并保留旧配置，避免重启后 provider 丢失。
 打开 Login/Model 与冲突后的 `Ctrl+R` 走显式 `reload_merged` 并刷新缓存，不写文件；重载
 使当前草稿失效，再次进入编辑以新 revision 为基线，不自动 rebase 或重试保存。只有
 revision/authority 冲突显示重新载入提示，字段错误不提供该动作。

@@ -327,57 +327,44 @@ impl ConfigurationSystem {
         settings: &PeriConfig,
     ) -> Result<Arc<ConfigurationSnapshot>, ConfigurationError> {
         self.update_document(scope, expected_revision, |current, inputs| {
-            let workspace = inputs.workspace.is_some();
-            let layer = if workspace {
-                PeriConfig {
-                    schema: settings.schema.clone(),
-                    config: settings
-                        .config
-                        .extract_overrides(&current.global_settings.config),
-                }
-            } else {
-                settings.clone()
-            };
-            let content = if workspace {
-                &mut inputs.workspace
-            } else {
-                &mut inputs.global
-            };
-            let mut document = parse_document(
-                content.as_deref(),
-                if workspace {
-                    SourceIdentity::WorkspaceFile
-                } else {
-                    SourceIdentity::GlobalFile
-                },
-            )?;
-            let encoded = serde_json::to_value(layer).map_err(ConfigurationError::Serialization)?;
-            let mut settings_document = encoded["config"].clone();
-            for key in ["mcpServers", "mcpCache"] {
-                if let Some(original) = document.get("config").and_then(|config| config.get(key)) {
-                    settings_document[key] = original.clone();
-                } else if let Some(object) = settings_document.as_object_mut() {
-                    object.remove(key);
-                }
-            }
-            document["config"] = settings_document;
-            if !workspace || document.get("$schema").is_none() {
-                if let Some(schema) = encoded.get("$schema") {
-                    document["$schema"] = schema.clone();
-                }
-            }
-            let expected = content.clone();
-            *content = Some(
-                serde_json::to_string_pretty(&document)
-                    .map_err(ConfigurationError::Serialization)?,
-            );
-            let path = if workspace {
-                assembly::workspace_settings_path(&scope.cwd)
-            } else {
-                scope.global_settings.clone()
-            };
-            Ok((path, expected, content.clone().expect("encoded document")))
+            settings_update_document(scope, current, inputs, settings)
         })
+    }
+
+    /// Resolve the snapshot an update would publish without writing the target file.
+    ///
+    /// Callers validate the accepted projection before committing a candidate (for
+    /// example, that a setup wizard still has a usable provider). [`Self::update`]
+    /// rechecks the revision, so a racing writer surfaces as a conflict instead of
+    /// a stale write.
+    pub fn preview_update(
+        &self,
+        scope: &ConfigurationScope,
+        expected_revision: ConfigurationRevision,
+        settings: &PeriConfig,
+    ) -> Result<Arc<ConfigurationSnapshot>, ConfigurationError> {
+        let snapshots = self
+            .snapshots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let current = snapshots
+            .get(scope)
+            .ok_or(ConfigurationError::UnresolvedScope)?;
+        if current.revision != expected_revision {
+            return Err(ConfigurationError::Conflict);
+        }
+        let mut inputs = self
+            .source
+            .collect(scope)
+            .map_err(ConfigurationError::InputUnavailable)?;
+        if revision_of(scope, &inputs)? != expected_revision {
+            return Err(ConfigurationError::Conflict);
+        }
+        settings_update_document(scope, current, &mut inputs, settings)?;
+        Ok(Arc::new(ConfigurationSnapshot::resolve(
+            scope.clone(),
+            inputs,
+        )?))
     }
 
     pub fn update_mcp(
@@ -464,6 +451,66 @@ impl ConfigurationSystem {
         snapshots.insert(scope.clone(), next.clone());
         Ok(next)
     }
+}
+
+/// Build the target document for a settings update and install it in `inputs`.
+///
+/// Shared by the committing and preview paths so both resolve exactly the same
+/// candidate; only the caller decides whether the resulting bytes are written.
+fn settings_update_document(
+    scope: &ConfigurationScope,
+    current: &ConfigurationSnapshot,
+    inputs: &mut ConfigurationInputs,
+    settings: &PeriConfig,
+) -> Result<(PathBuf, Option<String>, String), ConfigurationError> {
+    let workspace = inputs.workspace.is_some();
+    let layer = if workspace {
+        PeriConfig {
+            schema: settings.schema.clone(),
+            config: settings
+                .config
+                .extract_overrides(&current.global_settings.config),
+        }
+    } else {
+        settings.clone()
+    };
+    let content = if workspace {
+        &mut inputs.workspace
+    } else {
+        &mut inputs.global
+    };
+    let mut document = parse_document(
+        content.as_deref(),
+        if workspace {
+            SourceIdentity::WorkspaceFile
+        } else {
+            SourceIdentity::GlobalFile
+        },
+    )?;
+    let encoded = serde_json::to_value(layer).map_err(ConfigurationError::Serialization)?;
+    let mut settings_document = encoded["config"].clone();
+    for key in ["mcpServers", "mcpCache"] {
+        if let Some(original) = document.get("config").and_then(|config| config.get(key)) {
+            settings_document[key] = original.clone();
+        } else if let Some(object) = settings_document.as_object_mut() {
+            object.remove(key);
+        }
+    }
+    document["config"] = settings_document;
+    if !workspace || document.get("$schema").is_none() {
+        if let Some(schema) = encoded.get("$schema") {
+            document["$schema"] = schema.clone();
+        }
+    }
+    let expected = content.clone();
+    *content =
+        Some(serde_json::to_string_pretty(&document).map_err(ConfigurationError::Serialization)?);
+    let path = if workspace {
+        assembly::workspace_settings_path(&scope.cwd)
+    } else {
+        scope.global_settings.clone()
+    };
+    Ok((path, expected, content.clone().expect("encoded document")))
 }
 
 fn revision_of(

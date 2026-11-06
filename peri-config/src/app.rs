@@ -246,7 +246,9 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn merge_overrides(&mut self, workspace: AppConfig) {
         if !workspace.providers.is_empty() {
-            self.providers = workspace.providers;
+            let mut providers = workspace.providers;
+            Self::inherit_provider_credentials(&mut providers, &self.providers);
+            self.providers = providers;
         }
         if !workspace.active_alias.is_empty() {
             self.active_alias = workspace.active_alias;
@@ -295,10 +297,55 @@ impl AppConfig {
         self.extra.extend(workspace.extra);
     }
 
+    /// workspace 只保存 global 相对差异：同 id、凭据绑定上下文一致且未声明
+    /// `apiKey` 的 provider 从 global 继承凭据。ChatGPT plan 以空 `apiKey`
+    /// 表示，不能回填；上下文不一致时宁可不继承，避免把凭据发往其他 endpoint。
+    fn inherit_provider_credentials(providers: &mut [ProviderConfig], global: &[ProviderConfig]) {
+        for provider in providers {
+            if !provider.api_key.is_empty()
+                || matches!(provider.auth, Some(ProviderAuthConfig::ChatGptPlan { .. }))
+            {
+                continue;
+            }
+            if let Some(base) = global.iter().find(|base| {
+                base.id == provider.id && Self::same_credential_binding(provider, base)
+            }) {
+                provider.api_key = base.api_key.clone();
+            }
+        }
+    }
+
+    /// 凭据只回到它原本绑定的 endpoint/认证上下文：`type`、`baseUrl` 与 `auth`
+    /// （含 plan 引用）全部一致才继承；无法证明一致时不继承。
+    fn same_credential_binding(provider: &ProviderConfig, base: &ProviderConfig) -> bool {
+        provider.provider_type == base.provider_type
+            && provider.base_url == base.base_url
+            && provider.auth == base.auth
+    }
+
     pub fn extract_overrides(&self, global: &AppConfig) -> AppConfig {
         let mut overrides = AppConfig::default();
         if self.providers != global.providers {
-            overrides.providers = self.providers.clone();
+            overrides.providers = self
+                .providers
+                .iter()
+                .map(|provider| {
+                    let mut provider = provider.clone();
+                    // 与 global 同 id 同值的 key 可能是继承/复制的全局凭据，写回时
+                    // 剥离，避免凭据落进工作区；仅当 endpoint/type/auth 一致时读取期
+                    // 才回填，上下文被改写的 provider 保持无密钥。
+                    if !provider.api_key.is_empty()
+                        && global
+                            .providers
+                            .iter()
+                            .find(|base| base.id == provider.id)
+                            .is_some_and(|base| base.api_key == provider.api_key)
+                    {
+                        provider.api_key.clear();
+                    }
+                    provider
+                })
+                .collect();
         }
         overrides.active_alias = self.active_alias.clone();
         for alias in Profiles::ALL {

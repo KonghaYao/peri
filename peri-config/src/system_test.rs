@@ -392,6 +392,33 @@ fn invalid_observability_value_rejects_snapshot_by_actual_source() {
 }
 
 #[test]
+fn preview_update_reports_acceptance_without_writing_or_publishing() {
+    let temp = tempfile::tempdir().unwrap();
+    let scope = make_scope(temp.path(), "project");
+    let global = r#"{"config":{"active_alias":"opus","providers":[{"id":"p","type":"openai","apiKey":"global-key","models":{"opus":"m"}}],"profiles":{"opus":{"provider":"p","model":"m"}}}}"#;
+    let workspace = r#"{"config":{"language":"en"}}"#;
+    let (source, system) = make_system(&scope, make_inputs(Some(global), Some(workspace), None));
+    let current = system.resolve(scope.clone()).unwrap();
+    let mut candidate = current.settings().clone();
+    // Changing the endpoint breaks credential inheritance: the saved workspace
+    // layer loses the global key, and the accepted snapshot has no usable provider.
+    candidate.config.providers[0].base_url = "https://other.example/v1".into();
+
+    let preview = system
+        .preview_update(&scope, current.revision(), &candidate)
+        .unwrap();
+    assert!(preview.provider().is_none());
+    assert!(source.writes().is_empty(), "预览不得写目标文件");
+    assert!(Arc::ptr_eq(&current, &system.current(&scope).unwrap()));
+
+    let accepted = system
+        .update(&scope, current.revision(), &candidate)
+        .unwrap();
+    assert_eq!(accepted.settings(), preview.settings());
+    assert_eq!(source.writes().len(), 1);
+}
+
+#[test]
 fn update_rejects_stale_registry_revision_without_writing() {
     let temp = tempfile::tempdir().unwrap();
     let scope = make_scope(temp.path(), "project");
@@ -601,6 +628,55 @@ fn workspace_settings_write_only_relative_diff_without_global_credentials() {
     assert_eq!(document["config"]["active_alias"], "opus");
     assert!(document["config"].get("providers").is_none());
     assert_eq!(next.settings().config.providers.len(), 1);
+}
+
+#[test]
+fn workspace_provider_edit_does_not_copy_global_api_keys() {
+    let temp = tempfile::tempdir().unwrap();
+    let scope = make_scope(temp.path(), "project");
+    let global = r#"{"config":{"active_alias":"sonnet","providers":[{"id":"global","type":"openai","apiKey":"sk-global-secret"}]}}"#;
+    let workspace = r#"{"config":{"active_alias":"haiku"}}"#;
+    let (source, system) = make_system(&scope, make_inputs(Some(global), Some(workspace), None));
+    let current = system.resolve(scope.clone()).unwrap();
+    let mut updated = current.settings().clone();
+    // setup wizard：编辑 global provider 的非凭据字段，并新增一个带自有密钥的 provider。
+    updated.config.providers[0].base_url = "https://proxy.example.test/v1".into();
+    updated.config.providers.push(
+        serde_json::from_value(json!({
+            "id": "workspace",
+            "type": "anthropic",
+            "apiKey": "sk-workspace-owned"
+        }))
+        .unwrap(),
+    );
+    let next = system.update(&scope, current.revision(), &updated).unwrap();
+    let (_, _, content) = source.writes().pop().unwrap();
+    assert!(
+        !content.contains("sk-global-secret"),
+        "workspace 写回不得复制全局凭据: {content}"
+    );
+    assert!(content.contains("sk-workspace-owned"));
+    let document: Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(document["config"]["active_alias"], "haiku");
+    let providers = document["config"]["providers"].as_array().unwrap();
+    assert_eq!(providers.len(), 2);
+    let inherited = providers
+        .iter()
+        .find(|provider| provider["id"] == "global")
+        .unwrap();
+    assert_eq!(inherited["apiKey"], "");
+    assert_eq!(inherited["baseUrl"], "https://proxy.example.test/v1");
+    // endpoint 已改写，凭据绑定上下文不再一致：保存后不得回填全局密钥，
+    // 也不得把它发往新 endpoint。
+    assert!(
+        next.settings().config.providers[0].api_key.is_empty(),
+        "endpoint 改写后不得回填全局密钥"
+    );
+    let reloaded = system.resolve(scope.clone()).unwrap();
+    assert!(
+        reloaded.settings().config.providers[0].api_key.is_empty(),
+        "重新 resolve 不得回填全局密钥"
+    );
 }
 
 #[test]
