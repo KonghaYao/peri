@@ -28,6 +28,7 @@ use super::ledger::{OperationId, OperationIdentity};
 use super::mutation::QualifiedMutation;
 use super::session_codec::{self as codec, corrupt};
 use super::session_data::{invalid_input, not_found, RemoteSessionData};
+use super::session_lifecycle::guard_session_statement;
 use super::session_sql::{self, SessionInsert};
 use super::sql::StatementSpec;
 
@@ -303,20 +304,35 @@ impl RemoteSessionData {
         let inherited = codec::inherited_json(&child.inherited)?;
         let insert: SessionInsert<'_> =
             session_sql::session_insert(&child.target, 0, Some(inherited.as_str()));
-        let statements = session_sql::insert_session_statements(&insert)?;
+        // 父存在性的预检在批外，删除树可能在这两步之间提交；守卫把同一判据放进批内，
+        // 父行消失时整批回滚，不会留下指向空父节点的 child。
+        let mut statements = vec![guard_session_statement(&child.parent_id)];
+        statements.extend(session_sql::insert_session_statements(&insert)?);
         let mut inputs = session_inputs(&child.target);
         inputs.push(format!("parent:{}", child.parent_id.as_str()));
         inputs.push(format!("root:{}", child.root_id.as_str()));
         inputs.push(inherited);
         // 子会话的根是显式给定的（已与父链核对一致），不需要再解析一次。
-        self.commit_effects(
-            "child_session",
-            &inputs,
-            statements,
-            &child.target.thread_id,
-        )
-        .await
-        .map(|_| ())
+        match self
+            .commit_effects(
+                "child_session",
+                &inputs,
+                statements,
+                &child.target.thread_id,
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                // 守卫把并发删除折成批内约束拒绝；对外仍按父会话缺失归类。
+                if matches!(error.kind(), SessionResourceErrorKind::InvalidInput { .. })
+                    && !self.exists(&child.parent_id).await.unwrap_or(true)
+                {
+                    return Err(not_found());
+                }
+                Err(error)
+            }
+        }
     }
 
     /// 定向 metadata 更新：没有字段要改时不写、也不假装更新了时间戳。
