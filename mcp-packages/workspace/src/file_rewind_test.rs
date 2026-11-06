@@ -1,5 +1,5 @@
 use super::*;
-use crate::filesystem::transaction::{replace_if_unchanged, RewindCommitError};
+use crate::filesystem::transaction::{replace_if_unchanged, with_target_lock, RewindCommitError};
 use crate::rewind_snapshot::{RewindSnapshots, Snapshot};
 
 fn request(changes: serde_json::Value) -> CustomRequest {
@@ -486,6 +486,46 @@ fn replace_if_unchanged_replaces_and_removes() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), "restored");
     replace_if_unchanged(&file, Some(b"restored"), None).unwrap();
     assert!(!file.exists());
+}
+
+#[test]
+fn replace_if_unchanged_restores_sentinel_pre_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("sentinel.txt");
+    std::fs::write(&file, "agent output").unwrap();
+    let pre = "... [12 字符已省略] ...\nuser content";
+    replace_if_unchanged(&file, Some(b"agent output"), Some(pre.as_bytes())).unwrap();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), pre);
+}
+
+#[test]
+fn replace_if_unchanged_shares_the_write_target_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("locked.txt");
+    std::fs::write(&file, "actual").unwrap();
+    let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder_path = file.clone();
+    let holder = std::thread::spawn(move || {
+        with_target_lock(&holder_path, |_| {
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+    });
+    locked_rx.recv().unwrap();
+    let applier_path = file.clone();
+    let applier = std::thread::spawn(move || {
+        replace_if_unchanged(&applier_path, Some(b"actual"), Some(b"restored"))
+    });
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(
+        !applier.is_finished(),
+        "rewind replacement must wait for the same target lock as Write/Edit"
+    );
+    release_tx.send(()).unwrap();
+    applier.join().unwrap().unwrap();
+    holder.join().unwrap();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "restored");
 }
 
 #[tokio::test]

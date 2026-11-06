@@ -35,7 +35,14 @@ impl LockedTarget<'_> {
         if introduces_projection_sentinel_bytes(pre, post) {
             return Err(CommitError::Sentinel);
         }
+        self.replace(post)
+    }
 
+    /// Atomically replace the target without the model-write sentinel guard.
+    ///
+    /// Rewind restores bytes the file already held before a tool call, so a
+    /// restored projection sentinel line is not a new model-write introduction.
+    pub(crate) fn replace(&self, post: &[u8]) -> Result<(), CommitError> {
         let parent = self.path.parent().ok_or_else(|| {
             CommitError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -109,9 +116,11 @@ pub(crate) enum RewindCommitError {
 /// Apply one rewound file under the same per-target lock as Write/Edit.
 ///
 /// The caller's plan may be stale by the time it is applied. Re-reading under the
-/// shared lock keeps in-process tool calls and this replacement mutually exclusive,
-/// and `guard_and_commit` writes through a temp file so a failed write never
-/// truncates the target.
+/// shared lock keeps in-process tool calls and this replacement mutually exclusive;
+/// `replace` writes through a temp file so a failed write never truncates the
+/// target. External writers are not coordinated by this lock: a write that lands
+/// after the re-read can still be overwritten, because regular files provide no
+/// portable compare-and-swap primitive.
 pub(crate) fn replace_if_unchanged(
     path: &Path,
     expected: Option<&[u8]>,
@@ -125,9 +134,7 @@ pub(crate) fn replace_if_unchanged(
             return Err(RewindCommitError::ChangedSinceValidation);
         }
         match replacement {
-            Some(bytes) => locked
-                .guard_and_commit(expected.unwrap_or_default(), bytes)
-                .map_err(RewindCommitError::Commit),
+            Some(bytes) => locked.replace(bytes).map_err(RewindCommitError::Commit),
             None => std::fs::remove_file(path)
                 .map_err(|error| RewindCommitError::Commit(CommitError::Io(error))),
         }
