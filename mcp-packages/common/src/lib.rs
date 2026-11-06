@@ -8,7 +8,7 @@ mod numeric;
 mod private_temp;
 pub mod process_env;
 pub mod result_mapping;
-pub use peri_mcp_core::task_owner;
+pub use peri_mcp_core::{invocation, task_owner};
 
 pub use helpers::{invoke_tool_call, list_tools_of, rmcp_tool_from_base, server_info};
 pub use numeric::parse_optional_u64;

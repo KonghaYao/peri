@@ -164,6 +164,25 @@ async fn execute_rewind_cmd(cmd: &RewindCommand, ctx: CommandContext) -> Command
     }
 }
 
+/// 回退的 wire 载荷必须携带模型 tool-call id：Workspace 按它取调用时记录的
+/// pre-image（两种消息格式同一契约）。
+#[test]
+fn test_extract_file_changes_carries_tool_call_id() {
+    let changes = extract_file_changes(&[
+        make_ai_write_call("a.txt", "hello"),
+        make_ai_edit_call("b.txt", "old", "new"),
+    ]);
+    let json = serde_json::to_value(&changes).unwrap();
+    assert_eq!(json[0]["kind"], "write");
+    assert_eq!(json[0]["tool_call_id"], "call_write_1");
+    assert_eq!(json[1]["kind"], "edit");
+    assert_eq!(json[1]["tool_call_id"], "call_edit_1");
+
+    let block_changes = extract_file_changes(&[make_ai_write_block("c.txt", "hello")]);
+    let json = serde_json::to_value(&block_changes).unwrap();
+    assert_eq!(json[0]["tool_call_id"], "toolu_write_1");
+}
+
 // ── extract_file_changes 测试 ─────────────────────────────────────────────
 
 #[test]
@@ -354,7 +373,7 @@ fn rewind_collects_workspace_effective_write_and_edit() {
     assert!(
         matches!(
             &anthropic_changes[0],
-            FileChange::Edit { path, old_string, new_string }
+            FileChange::Edit { path, old_string, new_string, .. }
                 if path.as_str() == "src/ws_edit.rs"
                     && old_string == "old text"
                     && new_string == "new text"
