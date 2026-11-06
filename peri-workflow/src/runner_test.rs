@@ -161,10 +161,10 @@ impl AgentExecutor for MockAgentExecutor {
 #[test]
 fn run_limit_state_tracks_tool_calls_and_keeps_first_breach() {
     let state = RunLimitState::new(Some(5));
-    assert!(state.observe_tool_calls(3).is_none());
+    assert!(state.observe_tool_calls("t-1", 3).is_none());
     assert_eq!(state.breach(), None, "未超限不得置 breach");
     assert_eq!(
-        state.observe_tool_calls(3).as_deref(),
+        state.observe_tool_calls("t-2", 3).as_deref(),
         Some("workflow exceeded maxToolCalls (5)"),
         "累计超限时返回首次 breach 详情",
     );
@@ -177,6 +177,72 @@ fn run_limit_state_tracks_tool_calls_and_keeps_first_breach() {
     assert_eq!(
         state.breach().as_deref(),
         Some("workflow exceeded maxToolCalls (5)"),
+    );
+}
+
+#[test]
+fn run_limit_state_counts_each_task_once_on_redelivery() {
+    let state = RunLimitState::new(Some(5));
+    assert!(
+        state.observe_tool_calls("t-1", 3).is_none(),
+        "首次终态结果正常计数"
+    );
+    assert!(
+        state.observe_tool_calls("t-1", 3).is_none(),
+        "同一 task 的投递重试不得重复计入（3+3 > 5 会误报超限）"
+    );
+    assert_eq!(state.breach(), None, "重投不产生 breach");
+    assert_eq!(
+        state.observe_tool_calls("t-2", 3).as_deref(),
+        Some("workflow exceeded maxToolCalls (5)"),
+        "去重只按 task 生效：首次的 3 确实计入，另一任务累计后超限",
+    );
+}
+
+#[test]
+fn concurrent_redelivery_of_one_task_counts_once() {
+    let state = Arc::new(RunLimitState::new(Some(5)));
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            let state = Arc::clone(&state);
+            scope.spawn(move || {
+                assert!(
+                    state.observe_tool_calls("t-1", 3).is_none(),
+                    "并发重投不得触发超限"
+                );
+            });
+        }
+    });
+    assert_eq!(state.breach(), None, "8 次并发重投也只能计一次");
+    assert_eq!(
+        state.observe_tool_calls("t-2", 3).as_deref(),
+        Some("workflow exceeded maxToolCalls (5)"),
+        "并发去重后累计值仍只来自首次的 3",
+    );
+}
+
+#[test]
+fn duplicate_task_backfill_counts_tool_calls_once() {
+    let executor = Arc::new(MockAgentExecutor {
+        delay: std::time::Duration::ZERO,
+    }) as Arc<dyn AgentExecutor>;
+    let runner = WorkflowRunner::new(executor, ".", None);
+    runner
+        .run_limit_states
+        .insert("run-201".into(), Arc::new(RunLimitState::new(Some(5))));
+
+    // 首次终态提交：3 次工具调用正常计入。
+    assert_eq!(runner.note_task_tool_calls("run-201", "t-1", 3), None);
+    // 投递重试（任务表幂等分支再次回填同一结果）：不得重复累计。
+    assert_eq!(
+        runner.note_task_tool_calls("run-201", "t-1", 3),
+        None,
+        "同一 task 的重复回填只计首次"
+    );
+    // 另一任务继续累计：3+3 > 5 说明首次的 3 未被去重吞掉。
+    assert_eq!(
+        runner.note_task_tool_calls("run-201", "t-2", 3).as_deref(),
+        Some("workflow exceeded maxToolCalls (5)")
     );
 }
 

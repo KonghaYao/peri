@@ -720,3 +720,46 @@ fn conflicting_late_settle_keeps_first_result() {
         other => panic!("冲突回填必须幂等返回既有终态：{other:?}"),
     }
 }
+
+/// 重复回填是投递重试入口（design §5.1）：sink 会再次收到同一终态结果。
+///
+/// 计数侧按 taskId 去重（`RunLimitState::observe_tool_calls`），这里固化投递语义：
+/// 重投必须发生，不能被"只通知一次"的实现吞掉。
+#[test]
+fn duplicate_settle_redelivers_the_same_terminal_result() {
+    let (table, _rx) = make_table();
+    let delivered = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink_deliveries = Arc::clone(&delivered);
+    table.set_terminal_sink(Arc::new(move |record| {
+        sink_deliveries.lock().unwrap().push(record.clone());
+    }));
+    table.publish("t-1".into(), make_params("run-1", 1));
+    assert!(matches!(
+        table.mark_executing("run-1", "t-1", CancellationToken::new()),
+        ClaimOutcome::Claimed(_)
+    ));
+    let result = AgentRunResult::Ok {
+        output: "done".into(),
+        usage: Usage { output_tokens: 3 },
+        model: None,
+        tool_count: Some(3),
+        token_count: None,
+        phase: None,
+        duration_ms: None,
+    };
+    for _ in 0..2 {
+        table.settle(
+            "run-1",
+            "t-1",
+            SettleAdmission::ExecutingOnly,
+            WorkflowTaskState::Completed,
+            Some(result.clone()),
+            None,
+        );
+    }
+
+    let delivered = delivered.lock().unwrap();
+    assert_eq!(delivered.len(), 2, "重复回填必须再次投递终态结果");
+    assert_eq!(delivered[0].task_id, delivered[1].task_id);
+    assert_eq!(delivered[0].result, delivered[1].result, "重投同一份结果");
+}
