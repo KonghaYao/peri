@@ -18,9 +18,9 @@
 
 use std::str::FromStr;
 
-#[cfg(test)]
-use peri_acp_types::session_resources::SessionResourceErrorKind;
-use peri_acp_types::session_resources::{SessionResourceError, SessionResourceResult};
+use peri_acp_types::session_resources::{
+    SessionResourceError, SessionResourceErrorKind, SessionResourceResult,
+};
 use peri_acp_types::thread::{AgentStatus, ThreadId};
 use turso_serverless::Value;
 
@@ -28,7 +28,7 @@ use super::mutation::{incomplete_reply, RemoteStore};
 use super::schema;
 use super::session_codec as codec;
 use super::session_data::{invalid_input, not_found, RemoteSessionData};
-use super::session_sql::{self, DELETE_SESSION_SQL};
+use super::session_sql;
 use super::sql::{int_at, text_at, StatementSpec};
 use crate::sessions::canonical;
 use crate::sessions::data::ChildResumeRecord;
@@ -38,14 +38,54 @@ use crate::sessions::data::ChildResumeRecord;
 const GUARD_SESSION_ABSENT_SQL: &str = "INSERT INTO peri_store_meta(singleton)
     SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM threads WHERE id = ?1)";
 
+/// 撤销批内的子会话守卫：`COUNT` 的读与删除不在同一事务时，另一个实例可能在这两步之间
+/// 提交 child；谓词成立就撞 `peri_store_meta` 的单行主键，整批回滚。
+const GUARD_CHILDREN_PRESENT_SQL: &str = "INSERT INTO peri_store_meta(singleton)
+    SELECT 0 WHERE EXISTS (SELECT 1 FROM threads WHERE parent_thread_id = ?1)";
+
 // ─── 效果语句 ─────────────────────────────────────────────────────────────────
 
-/// 子树 id（含根自身）；只读，用于确认删除范围。
-const SELECT_TREE_IDS_SQL: &str = "WITH RECURSIVE tree(id) AS (
-    SELECT id FROM threads WHERE id = ?1
-    UNION ALL
-    SELECT s.id FROM threads s JOIN tree t ON s.parent_thread_id = t.id
-) SELECT id FROM tree";
+/// 子树范围前缀：每条删除各自带上递归定义，使「选范围」与「删范围」落进同一个托管事务批。
+///
+/// 远端批无法把一次读取的结果喂给后续语句，因此不能先读 id 列表再逐条删除——那会把删除
+/// 范围钉在批外的快照上（子会话在两步之间提交就会成为孤儿）。删除范围由 SQL 在批内重新
+/// 计算，读与写共享同一个事务快照。
+macro_rules! tree_scoped {
+    ($tail:literal) => {
+        concat!(
+            "WITH RECURSIVE tree(id) AS (",
+            " SELECT id FROM threads WHERE id = ?1",
+            " UNION ALL",
+            " SELECT s.id FROM threads s JOIN tree t ON s.parent_thread_id = t.id",
+            ") ",
+            $tail
+        )
+    };
+}
+
+const DELETE_TREE_MESSAGES_SQL: &str =
+    tree_scoped!("DELETE FROM messages WHERE thread_id IN (SELECT id FROM tree)");
+
+const DELETE_TREE_BINDINGS_SQL: &str =
+    tree_scoped!("DELETE FROM session_bindings WHERE thread_id IN (SELECT id FROM tree)");
+
+const DELETE_TREE_CLOSE_INTENTS_SQL: &str =
+    tree_scoped!("DELETE FROM session_close_intents WHERE thread_id IN (SELECT id FROM tree)");
+
+const DELETE_TREE_MQ_SQL: &str =
+    tree_scoped!("DELETE FROM thread_mq WHERE thread_id IN (SELECT id FROM tree)");
+
+/// payload 行只能经 snapshot 的 `snapshot_id` 定位；必须先于 snapshot 行删除。
+const DELETE_TREE_INHERITED_PAYLOADS_SQL: &str = tree_scoped!(
+    "DELETE FROM inherited_payload_index WHERE snapshot_id IN \
+     (SELECT snapshot_id FROM inherited_snapshot_index WHERE thread_id IN (SELECT id FROM tree))"
+);
+
+const DELETE_TREE_INHERITED_SNAPSHOTS_SQL: &str =
+    tree_scoped!("DELETE FROM inherited_snapshot_index WHERE thread_id IN (SELECT id FROM tree)");
+
+const DELETE_TREE_THREADS_SQL: &str =
+    tree_scoped!("DELETE FROM threads WHERE id IN (SELECT id FROM tree)");
 
 /// 直接子会话计数（撤销必须拒绝「已有子会话」的 identity，否则子会话会指向不存在的父）。
 const COUNT_CHILDREN_SQL: &str = "SELECT COUNT(*) FROM threads WHERE parent_thread_id = ?1";
@@ -204,71 +244,113 @@ impl RemoteSessionData {
         // 子会话数与后面的写入各取一次连接：借用不跨过去（见上）。
         drop(store);
         revocation_gate(children.as_ref().and_then(|values| int_at(values, 0)))?;
-        self.commit_effects(behavior, &[format!("id:{}", id.as_str())], effects, id)
+        // 预检只负责尽早给出可读的错误；真正的判据在批内重算，child 创建与撤销因此互斥。
+        let mut guarded = Vec::with_capacity(effects.len() + 1);
+        guarded.push(guard_children_statement(id));
+        guarded.extend(effects);
+        match self
+            .commit_effects(behavior, &[format!("id:{}", id.as_str())], guarded, id)
             .await
+        {
+            Ok(counts) => Ok(counts),
+            Err(error) => {
+                // 守卫把并发出现的子会话折成批内约束拒绝；对外仍按撤销判据归类。
+                if matches!(error.kind(), SessionResourceErrorKind::InvalidInput { .. })
+                    && self.has_children(id).await.unwrap_or(false)
+                {
+                    return Err(invalid_input(
+                        "session has published children and cannot be revoked",
+                    ));
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// 直接子会话是否存在；只用于失败路径的归类：读不出计数时保留原错误。
+    async fn has_children(&self, id: &ThreadId) -> SessionResourceResult<bool> {
+        let store = self.store().await?;
+        let children = store
+            .fetch_row(&StatementSpec::new(
+                COUNT_CHILDREN_SQL,
+                vec![Value::Text(id.as_str().to_owned())],
+            ))
+            .await?;
+        Ok(children
+            .as_ref()
+            .and_then(|values| int_at(values, 0))
+            .is_some_and(|count| count > 0))
     }
 
     /// 删除会话树：子树（含根）的历史与会话行在同一批里消失。
     ///
     /// 删除是刻意行为：没有墓碑、没有执行行清理（远端都没有这些事实），但**不留半棵**——
-    /// 子树 id 先只读确认，删除在同一托管批内完成。
+    /// 子树范围由每条删除语句在**同一托管事务批内**重新计算，不再先读一份 id 快照。
     ///
-    /// 根是否存在**只由这次子树读取决定**（不再先问一次 `exists`，两次读取之间的空档会让
-    /// 「刚被删掉的根」既非存在也非不存在）：`SELECT_TREE_IDS_SQL` 的递归从根行出发，所以
-    /// 空子树等价于「根不存在」→ `NotFound`，与本机 `delete_tree` 同一结果。反过来，空结果
-    /// **不能**当成「没有东西要删」而报成功——那会在没删任何行的情况下返回 `Ok`。
+    /// 根是否存在由批内守卫决定：根行缺失时守卫撞单行主键 → 整批回滚 → `NotFound`；空结果
+    /// **不能**当成「没有东西要删」而报成功。子会话在批开始前提交时，批内递归已经包含它；
+    /// 在批持锁期间提交则被串行化到删除之后，由 child 侧的父存在守卫拒绝。
     pub(super) async fn write_tree_deletion(&self, id: &ThreadId) -> SessionResourceResult<()> {
         let store = self.store().await?;
-        let rows = store
-            .fetch_rows(&StatementSpec::new(
-                SELECT_TREE_IDS_SQL,
-                vec![Value::Text(id.as_str().to_owned())],
-            ))
-            .await?;
         let (has_snapshot, has_payload) = inherited_index_tables(&store).await?;
-        // 树上的 id 读完再写：借用不跨到后面的写入路径（见上）。
         drop(store);
-        let tree = tree_ids(&rows)?;
-        // 删除不新增墓碑：树上的每个会话先清子行（messages → session_bindings，
-        // 与 `canonical::THREAD_CHILD_DELETES` 同一份语句与顺序），再清 inherited
-        // 派生索引（payload → snapshot，可选表先探测），最后清会话行，全部在同一个批里。
-        let mut effects = Vec::with_capacity(tree.len() * 6);
-        for (_, statement) in crate::sessions::canonical::THREAD_CHILD_DELETES {
-            for thread in &tree {
-                effects.push(StatementSpec::new(
-                    statement,
-                    vec![Value::Text(thread.clone())],
-                ));
-            }
-        }
+        // 删除不新增墓碑：树上的会话先清子行（与 `canonical::THREAD_CHILD_DELETES` 同一顺序：
+        // messages → session_bindings → close intents → thread_mq），再清 inherited 派生索引
+        // （payload → snapshot，可选表先探测），最后清会话行，全部在同一个批里。
+        let mut effects = Vec::with_capacity(8);
+        effects.push(guard_session_statement(id));
+        effects.push(StatementSpec::new(
+            DELETE_TREE_MESSAGES_SQL,
+            vec![Value::Text(id.as_str().to_owned())],
+        ));
+        effects.push(StatementSpec::new(
+            DELETE_TREE_BINDINGS_SQL,
+            vec![Value::Text(id.as_str().to_owned())],
+        ));
+        effects.push(StatementSpec::new(
+            DELETE_TREE_CLOSE_INTENTS_SQL,
+            vec![Value::Text(id.as_str().to_owned())],
+        ));
+        effects.push(StatementSpec::new(
+            DELETE_TREE_MQ_SQL,
+            vec![Value::Text(id.as_str().to_owned())],
+        ));
         if has_snapshot {
             if has_payload {
-                for thread in &tree {
-                    effects.push(StatementSpec::new(
-                        canonical::DELETE_INHERITED_PAYLOADS_BY_THREAD_SQL,
-                        vec![Value::Text(thread.clone())],
-                    ));
-                }
-            }
-            for thread in &tree {
                 effects.push(StatementSpec::new(
-                    canonical::DELETE_INHERITED_SNAPSHOT_BY_THREAD_SQL,
-                    vec![Value::Text(thread.clone())],
+                    DELETE_TREE_INHERITED_PAYLOADS_SQL,
+                    vec![Value::Text(id.as_str().to_owned())],
                 ));
             }
-        }
-        for thread in &tree {
             effects.push(StatementSpec::new(
-                DELETE_SESSION_SQL,
-                vec![Value::Text(thread.clone())],
+                DELETE_TREE_INHERITED_SNAPSHOTS_SQL,
+                vec![Value::Text(id.as_str().to_owned())],
             ));
         }
-        // 删除的摘要输入 = 目标本身 + 这次实际命中的子树（同一根下删掉了哪些会话构成这次操作）。
-        let mut inputs = vec![format!("id:{}", id.as_str())];
-        inputs.extend(tree.iter().cloned());
-        self.commit_effects("delete_session_tree", &inputs, effects, id)
+        effects.push(StatementSpec::new(
+            DELETE_TREE_THREADS_SQL,
+            vec![Value::Text(id.as_str().to_owned())],
+        ));
+        match self
+            .commit_effects(
+                "delete_session_tree",
+                &[format!("id:{}", id.as_str())],
+                effects,
+                id,
+            )
             .await
-            .map(|_| ())
+        {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                // 守卫把「根不存在」折成批内约束拒绝；对外仍是删除入口的同一结果。
+                if matches!(error.kind(), SessionResourceErrorKind::InvalidInput { .. })
+                    && !self.exists(id).await.unwrap_or(true)
+                {
+                    return Err(not_found());
+                }
+                Err(error)
+            }
+        }
     }
 
     /// 读取 child resume 认领事实：状态 + 是否仍在认领中。
@@ -328,32 +410,22 @@ impl RemoteSessionData {
     }
 }
 
-fn guard_session_statement(id: &ThreadId) -> StatementSpec {
+pub(super) fn guard_session_statement(id: &ThreadId) -> StatementSpec {
     StatementSpec::new(
         GUARD_SESSION_ABSENT_SQL,
         vec![Value::Text(id.as_str().to_owned())],
     )
 }
 
-fn timestamp() -> String {
-    peri_time::now_utc_rfc3339()
+fn guard_children_statement(id: &ThreadId) -> StatementSpec {
+    StatementSpec::new(
+        GUARD_CHILDREN_PRESENT_SQL,
+        vec![Value::Text(id.as_str().to_owned())],
+    )
 }
 
-/// 子树读取 → 会话 id 列表。
-///
-/// 空结果**不是**「没有东西要删」：递归从根行开始，读不到根就是根不存在 → `NotFound`
-/// （与本机 `delete_tree` 对不存在会话的同一结果），而不是一次「成功但什么都没删」。
-fn tree_ids(rows: &[Vec<Value>]) -> SessionResourceResult<Vec<String>> {
-    if rows.is_empty() {
-        return Err(not_found());
-    }
-    rows.iter()
-        .map(|row| {
-            text_at(row, 0)
-                .map(str::to_owned)
-                .ok_or_else(|| codec::corrupt("session tree row is not a session id"))
-        })
-        .collect()
+fn timestamp() -> String {
+    peri_time::now_utc_rfc3339()
 }
 
 /// 撤销前的子会话判据：只有**明确读到 0** 才继续。
@@ -374,53 +446,96 @@ fn revocation_gate(children: Option<i64>) -> SessionResourceResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::session_sql::{DELETE_SESSION_BINDINGS_SQL, DELETE_SESSION_MESSAGES_SQL};
+    use super::super::session_sql::{
+        DELETE_SESSION_BINDINGS_SQL, DELETE_SESSION_MESSAGES_SQL, DELETE_SESSION_SQL,
+    };
     use super::*;
 
     fn placeholders(sql: &str) -> usize {
         sql.matches('?').count()
     }
 
+    const TREE_DELETES: [(&str, &str); 6] = [
+        (DELETE_TREE_MESSAGES_SQL, "DELETE FROM messages"),
+        (DELETE_TREE_BINDINGS_SQL, "DELETE FROM session_bindings"),
+        (
+            DELETE_TREE_CLOSE_INTENTS_SQL,
+            "DELETE FROM session_close_intents",
+        ),
+        (DELETE_TREE_MQ_SQL, "DELETE FROM thread_mq"),
+        (
+            DELETE_TREE_INHERITED_SNAPSHOTS_SQL,
+            "DELETE FROM inherited_snapshot_index",
+        ),
+        (DELETE_TREE_THREADS_SQL, "DELETE FROM threads"),
+    ];
+
     #[test]
     fn every_statement_is_static_and_fully_bound() {
-        let cases: [(&str, usize); 7] = [
+        let cases = [
             (GUARD_SESSION_ABSENT_SQL, 1),
-            (SELECT_TREE_IDS_SQL, 1),
+            (GUARD_CHILDREN_PRESENT_SQL, 1),
             (COUNT_CHILDREN_SQL, 1),
             (DELETE_SESSION_MESSAGES_SQL, 1),
             (DELETE_SESSION_BINDINGS_SQL, 1),
             (DELETE_SESSION_SQL, 1),
             (UPDATE_AGENT_STATUS_SQL, 3),
+            (DELETE_TREE_INHERITED_PAYLOADS_SQL, 1),
         ];
-        for (sql, expected) in cases {
+        let tree_deletes = TREE_DELETES.iter().map(|(sql, _)| (*sql, 1));
+        for (sql, expected) in cases.into_iter().chain(tree_deletes) {
             assert_eq!(placeholders(sql), expected, "绑定量与占位符不一致: {sql}");
             assert!(!sql.contains('\''), "语句里出现了字面量: {sql}");
         }
     }
 
-    /// 删除范围是整棵子树（含根），且删除语句不含任何计算——范围完全由绑定参数给出。
+    /// 删除范围是整棵子树（含根），范围在**同一个批内**由递归重新计算，不依赖批外快照。
     #[test]
-    fn tree_scope_is_the_whole_subtree() {
-        assert!(SELECT_TREE_IDS_SQL.starts_with("WITH RECURSIVE tree(id) AS ("));
-        assert!(SELECT_TREE_IDS_SQL.contains("UNION ALL"));
-        assert!(SELECT_TREE_IDS_SQL
-            .trim_end()
-            .ends_with("SELECT id FROM tree"));
-        assert_eq!(DELETE_SESSION_SQL, "DELETE FROM threads WHERE id = ?1");
-        assert_eq!(
-            DELETE_SESSION_MESSAGES_SQL,
-            "DELETE FROM messages WHERE thread_id = ?1"
-        );
-        assert_eq!(
-            DELETE_SESSION_BINDINGS_SQL,
-            "DELETE FROM session_bindings WHERE thread_id = ?1"
-        );
+    fn tree_scope_is_recomputed_inside_the_delete_batch() {
+        for (sql, tail) in TREE_DELETES {
+            assert!(
+                sql.starts_with("WITH RECURSIVE tree(id) AS ("),
+                "删除范围必须由批内递归给出: {sql}"
+            );
+            assert!(sql.contains("UNION ALL"), "递归必须沿 parent 链展开: {sql}");
+            assert!(
+                sql.contains("JOIN tree t ON s.parent_thread_id = t.id"),
+                "递归必须沿 parent 链展开: {sql}"
+            );
+            assert!(sql.contains(tail), "删除目标不匹配: {sql}");
+        }
+        assert!(DELETE_TREE_INHERITED_PAYLOADS_SQL.contains("thread_id IN (SELECT id FROM tree)"));
+    }
+
+    /// 递归删除必须覆盖 canonical 的每一张子表：新增 `REFERENCES threads` 子表时，
+    /// `THREAD_CHILD_DELETES` 会先被本机测试拦下，这里保证远端子树删除同步跟上。
+    #[test]
+    fn tree_deletes_cover_every_canonical_child_table() {
+        for (table, _) in crate::sessions::canonical::THREAD_CHILD_DELETES {
+            let expected = format!("DELETE FROM {table} ");
+            assert!(
+                TREE_DELETES.iter().any(|(sql, _)| sql.contains(&expected)),
+                "tree deletion does not clear canonical child table {table}"
+            );
+        }
+        for (table, _) in crate::sessions::canonical::THREAD_DERIVED_DELETES {
+            let expected = format!("DELETE FROM {table} ");
+            let covered = TREE_DELETES.iter().any(|(sql, _)| sql.contains(&expected))
+                || DELETE_TREE_INHERITED_PAYLOADS_SQL.contains(&expected);
+            assert!(
+                covered,
+                "tree deletion does not clear canonical derived table {table}"
+            );
+        }
     }
 
     /// 撤销必须先问「有没有子会话」：有子会话的 identity 被补偿掉会让子会话指向空父节点。
     #[test]
     fn revocation_checks_published_children_first() {
         assert!(COUNT_CHILDREN_SQL.contains("parent_thread_id = ?1"));
+        // 预检之外还有批内守卫：计数与删除之间的并发 child 由它挡住。
+        assert!(GUARD_CHILDREN_PRESENT_SQL.contains("EXISTS"));
+        assert!(GUARD_CHILDREN_PRESENT_SQL.contains("parent_thread_id = ?1"));
     }
 
     /// 撤销门槛只有三种落点，且「读不到计数」不是「没有子会话」。
@@ -444,24 +559,12 @@ mod tests {
         ));
     }
 
-    /// 空子树是「根不存在」（`NotFound`），不是「成功但没删任何行」。
+    /// 根不存在由批内守卫报 `NotFound`，不是「成功但没删任何行」。
     #[test]
-    fn empty_subtree_is_not_found_and_rows_must_be_ids() {
-        let absent = tree_ids(&[]).unwrap_err();
-        assert!(matches!(absent.kind(), SessionResourceErrorKind::NotFound));
-
-        let malformed = tree_ids(&[vec![Value::Integer(1)]]).unwrap_err();
-        assert!(matches!(
-            malformed.kind(),
-            SessionResourceErrorKind::Corrupt { .. }
-        ));
-
-        let ids = tree_ids(&[
-            vec![Value::Text("root".to_owned())],
-            vec![Value::Text("child".to_owned())],
-        ])
-        .unwrap();
-        assert_eq!(ids, vec!["root".to_owned(), "child".to_owned()]);
+    fn absent_root_is_rejected_inside_the_batch() {
+        assert!(GUARD_SESSION_ABSENT_SQL.contains("NOT EXISTS"));
+        assert!(GUARD_SESSION_ABSENT_SQL.contains("FROM threads WHERE id = ?1"));
+        assert!(!DELETE_TREE_THREADS_SQL.contains("SELECT 1 FROM threads WHERE id = ?1"));
     }
 
     /// 认领标记由状态派生，不是独立列：写入只动 `agent_status` 与更新时间。
