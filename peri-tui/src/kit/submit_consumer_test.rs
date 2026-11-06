@@ -5,7 +5,7 @@ use super::*;
 
 use std::time::Duration;
 
-use crate::kit::atoms::{ACP_STATE, VIEW_MODELS, ViewModelsSnapshot};
+use crate::kit::atoms::{ACP_STATE, NOTIFICATION, VIEW_MODELS, ViewModelsSnapshot};
 use peri_acp::transport::AcpTransport;
 use peri_acp::transport::mpsc::{MpscClientTransport, MpscServerTransport, mpsc_transport_pair};
 use peri_acp::transport::types::{AcpError, IncomingMessage, RequestId};
@@ -33,6 +33,35 @@ async fn expect_prompt(server: &MpscServerTransport) -> (RequestId, String, Stri
         .expect("text-only prompt content")
         .to_string();
     (id, session_id, text)
+}
+
+/// 接收一个指定方法的 ACP 请求（用于 session/new、session/close 等控制链路）。
+async fn expect_request(
+    server: &MpscServerTransport,
+    expected_method: &str,
+) -> (RequestId, serde_json::Value) {
+    let incoming = tokio::time::timeout(Duration::from_secs(5), server.recv())
+        .await
+        .expect("expected ACP request")
+        .expect("transport must stay open");
+    let IncomingMessage::Request {
+        id, method, params, ..
+    } = incoming
+    else {
+        panic!("expected request, got {incoming:?}");
+    };
+    assert_eq!(method, expected_method);
+    (id, params)
+}
+
+async fn wait_for_session(client: &AcpTuiClient, expected: &str) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while client.current_session_id().as_deref() != Some(expected) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("session must become stable");
 }
 
 /// [回归 #210] TurnDone 排空旧队列后，10 条消息在模型侧必须按入队顺序提交。
@@ -203,6 +232,131 @@ async fn test_pending_prompt_does_not_block_another_session() {
     let _ = tokio::time::timeout(Duration::from_millis(500), consumer).await;
 }
 
+/// 用户文本提交。
+fn agent_text(text: &str) -> SubmitRequest {
+    SubmitRequest::AgentText {
+        text: text.to_string(),
+        attachments: Vec::new(),
+    }
+}
+
+/// [回归 P1] 会话切换后，旧会话排队中的提交不得改投新会话。
+///
+/// A0 挂起 → A1 排队 → `/clear` 切到 B → 释放 A0。A1 在准入时必须被显式
+/// 取消并给出反馈，wire 上不得出现发往 B 的 A1 prompt。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn test_queued_submit_is_cancelled_after_session_switch() {
+    crate::kit::atoms::init_atoms();
+    *NOTIFICATION.state().write() = None;
+    let (client, server) = make_client_without_pump();
+    client.force_stable_for_test("session-a", false);
+    let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
+    let shutdown = CancellationToken::new();
+    let consumer = spawn_submit_consumer(client.clone(), rx, ".".into(), shutdown.clone());
+
+    tx.send(agent_text("a0")).unwrap();
+    let (a0_id, a0_session, a0_text) = expect_prompt(&server).await;
+    assert_eq!((a0_session.as_str(), a0_text.as_str()), ("session-a", "a0"));
+
+    // A1 在 A0 未返回时入队：车道与准入身份都固定为 session-a。
+    tx.send(agent_text("a1")).unwrap();
+    // 控制请求即时执行：/clear 关闭 A 并建立 B。
+    tx.send(SubmitRequest::SessionControl(SessionControlRequest::Clear))
+        .unwrap();
+
+    let (close_id, close_params) = expect_request(&server, "session/close").await;
+    assert_eq!(close_params["sessionId"], "session-a");
+    server.send_response(close_id, Ok(json!({}))).await.unwrap();
+    let (new_id, _) = expect_request(&server, "session/new").await;
+    server
+        .send_response(new_id, Ok(json!({"sessionId": "session-b"})))
+        .await
+        .unwrap();
+    wait_for_session(&client, "session-b").await;
+
+    // 旧会话 turn 结束，A1 被车道放行：准入校验必须拒绝它。
+    server
+        .send_response(a0_id, Ok(json!({"stopReason": "end_turn"})))
+        .await
+        .unwrap();
+
+    let stray = tokio::time::timeout(Duration::from_millis(400), server.recv()).await;
+    assert!(stray.is_err(), "会话切换后旧提交不得改投新会话: {stray:?}");
+    assert!(
+        NOTIFICATION.state().read().is_some(),
+        "取消排队提交必须有用户可见反馈"
+    );
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_millis(500), consumer).await;
+}
+
+/// [回归 P2] 首次建会话期间排队的消息，不得被建好后才入队的消息越过。
+///
+/// 延迟 `session/new`：m0/m1 在无会话时进入初始化车道；建好 S 后 m2 入队。
+/// 旧实现把 m2 放进 Some(S) 车道，m0 的 TurnDone 排空时 m2 会越过 m1。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_initializing_lane_keeps_fifo_after_session_created() {
+    let (client, server) = make_client_without_pump();
+    let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
+    let shutdown = CancellationToken::new();
+    let consumer = spawn_submit_consumer(client.clone(), rx, ".".into(), shutdown.clone());
+
+    tx.send(agent_text("m0")).unwrap();
+    tx.send(agent_text("m1")).unwrap();
+
+    // 初始化挂起：m0/m1 都已入队，但会话尚未建立。
+    let (new_id, _) = expect_request(&server, "session/new").await;
+    server
+        .send_response(new_id, Ok(json!({"sessionId": "session-s"})))
+        .await
+        .unwrap();
+    wait_for_session(&client, "session-s").await;
+    // 建好后第三条入队：必须继续排在 m1 之后。
+    tx.send(agent_text("m2")).unwrap();
+
+    let (first_id, first_session, first_text) = expect_prompt(&server).await;
+    assert_eq!(
+        (first_session.as_str(), first_text.as_str()),
+        ("session-s", "m0")
+    );
+    let overlap = tokio::time::timeout(Duration::from_millis(250), server.recv()).await;
+    assert!(
+        overlap.is_err(),
+        "m0 未完成时不得出现下一条 prompt: {overlap:?}"
+    );
+    server
+        .send_response(first_id, Ok(json!({"stopReason": "end_turn"})))
+        .await
+        .unwrap();
+
+    let (second_id, second_session, second_text) = expect_prompt(&server).await;
+    assert_eq!(
+        (second_session.as_str(), second_text.as_str()),
+        ("session-s", "m1")
+    );
+    let overlap = tokio::time::timeout(Duration::from_millis(250), server.recv()).await;
+    assert!(overlap.is_err(), "m2 不得越过仍在排队的 m1: {overlap:?}");
+    server
+        .send_response(second_id, Ok(json!({"stopReason": "end_turn"})))
+        .await
+        .unwrap();
+
+    let (third_id, third_session, third_text) = expect_prompt(&server).await;
+    assert_eq!(
+        (third_session.as_str(), third_text.as_str()),
+        ("session-s", "m2")
+    );
+    server
+        .send_response(third_id, Ok(json!({"stopReason": "end_turn"})))
+        .await
+        .unwrap();
+
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_millis(500), consumer).await;
+}
+
 /// 车道保证同会话内顺序：每条提交都先让出调度器，仍按 push 顺序执行。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_submit_lanes_keep_fifo_within_session() {
@@ -309,6 +463,7 @@ async fn test_empty_agent_text_skipped() {
             text: "   \n\t ".to_string(),
             attachments: Vec::new(),
         },
+        None,
     )
     .await;
     assert!(result.is_ok());
@@ -331,6 +486,7 @@ async fn test_creates_session_when_missing() {
                 text: "hello".to_string(),
                 attachments: Vec::new(),
             },
+            None,
         ),
     )
     .await;
@@ -498,6 +654,7 @@ async fn test_clear_request_bypasses_prompt() {
             &client,
             &cwd,
             SubmitRequest::SessionControl(SessionControlRequest::Clear),
+            None,
         ),
     )
     .await;

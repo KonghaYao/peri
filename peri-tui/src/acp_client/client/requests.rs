@@ -165,7 +165,25 @@ impl AcpTuiClient {
         content: &peri_acp_types::messages::MessageContent,
         request_id: Option<String>,
     ) -> Result<(), AcpError> {
-        self.send_prompt(content, request_id).await.map(|_| ())
+        self.send_prompt(content, request_id, None)
+            .await
+            .map(|_| ())
+    }
+
+    /// 仅在当前 Stable 仍是入队时绑定的会话身份时提交 prompt。
+    ///
+    /// 身份校验与 Stable 选择在同一 operation gate 内完成；切换会话后迟到的
+    /// 排队提交返回 [`crate::acp_client::SESSION_BINDING_CHANGED_CODE`]，由
+    /// 调用方显式取消并反馈，绝不改投新会话。
+    pub(crate) async fn prompt_in_session(
+        &self,
+        content: &peri_acp_types::messages::MessageContent,
+        request_id: Option<String>,
+        expected: &(String, u64),
+    ) -> Result<(), AcpError> {
+        self.send_prompt(content, request_id, Some(expected))
+            .await
+            .map(|_| ())
     }
 
     /// Submit a prompt and preserve its typed ACP terminal response.
@@ -174,7 +192,7 @@ impl AcpTuiClient {
         content: &peri_acp_types::messages::MessageContent,
         request_id: Option<String>,
     ) -> Result<PromptResponse, AcpError> {
-        let response = self.send_prompt(content, request_id).await?;
+        let response = self.send_prompt(content, request_id, None).await?;
         serde_json::from_value(response).map_err(|error| {
             AcpError::new(-32603, format!("invalid session/prompt response: {error}"))
         })
@@ -184,9 +202,10 @@ impl AcpTuiClient {
         &self,
         content: &peri_acp_types::messages::MessageContent,
         request_id: Option<String>,
+        expected: Option<&(String, u64)>,
     ) -> Result<Value, AcpError> {
         let (session_id, lease) = self
-            .open_prompt_after_session_loads(request_id.clone())
+            .open_prompt_after_session_loads(request_id.clone(), expected)
             .await?;
         let mut params = json!({
             "sessionId": session_id,
@@ -221,7 +240,7 @@ impl AcpTuiClient {
         request_id: Option<String>,
     ) -> Result<(), AcpError> {
         let (session_id, lease) = self
-            .open_prompt_after_session_loads(request_id.clone())
+            .open_prompt_after_session_loads(request_id.clone(), None)
             .await?;
         let mut params = json!({
             "sessionId": session_id,

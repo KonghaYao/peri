@@ -425,6 +425,7 @@ impl AcpTuiClient {
     pub(super) async fn open_prompt_after_session_loads(
         &self,
         request_id: Option<String>,
+        expected: Option<&(String, u64)>,
     ) -> Result<(String, PromptLease), AcpError> {
         let mut epoch_rx = self.session_load_reservations.epoch_tx.subscribe();
         loop {
@@ -436,11 +437,21 @@ impl AcpTuiClient {
                     None
                 } else {
                     self.check_restore_error()?;
-                    let session_id = self
+                    let identity = self
                         .lifecycle
                         .stable_identity()
-                        .map(|(session_id, _)| session_id)
                         .ok_or_else(|| AcpError::new(-32603, "no active session"))?;
+                    // 准入与 Stable 选择同锁完成：/clear、load 或启动恢复一旦切换
+                    // 身份，入队时绑定的提交在这里被确定性拒绝，不改投新会话。
+                    if let Some(expected) = expected
+                        && &identity != expected
+                    {
+                        return Err(AcpError::new(
+                            crate::acp_client::SESSION_BINDING_CHANGED_CODE,
+                            "session changed before prompt",
+                        ));
+                    }
+                    let session_id = identity.0;
                     let lease = self
                         .lifecycle
                         .open_prompt(request_id.clone())

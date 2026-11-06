@@ -1434,6 +1434,7 @@ session-recovery-failed-retryable = History was loaded, but recovery preparation
 session-recovery-partial = History was loaded; { $count } related session(s) could not be recovered.
 steer-recovery-blocked = Session recovery did not complete, so execution is blocked: { $error }. Your draft has been kept; re-enter the session to retry, or use /clear.
 prompt-recovery-blocked = Session recovery did not complete, so execution is blocked: { $error }. Re-enter the session to retry, or use /clear.
+submit-cancelled-session-changed = Queued message was not sent because the session changed.
 session-creation-failed = Session creation failed: { $error }
 
 panel-host-settings = Host settings
