@@ -24,6 +24,32 @@ fn validate_cache_path_segment(field: &str, value: &str) -> Result<(), Installer
     Ok(())
 }
 
+/// marketplace 条目声明的版本：sha 前 7 位优先，其次非空 version。
+pub(super) fn declared_version(
+    marketplace_plugin: &crate::plugin::types::MarketplacePlugin,
+) -> Option<String> {
+    match marketplace_plugin.sha.as_deref() {
+        Some(sha) => Some(sha.chars().take(7).collect()),
+        None if !marketplace_plugin.version.is_empty() => Some(marketplace_plugin.version.clone()),
+        None => None,
+    }
+}
+
+/// 解析可直接用作缓存目录名的有效版本。
+///
+/// 仅缺失/空 version 回退到安装时刻时间戳；其他非法值仍由分量校验拒绝。
+fn resolve_cache_version(
+    marketplace_plugin: &crate::plugin::types::MarketplacePlugin,
+) -> Result<String, InstallerError> {
+    let version = declared_version(marketplace_plugin).unwrap_or_else(|| {
+        chrono::DateTime::<chrono::Utc>::from(peri_time::now_wall())
+            .format("%Y%m%d%H%M%S")
+            .to_string()
+    });
+    validate_cache_path_segment("版本", &version)?;
+    Ok(version)
+}
+
 /// 删除或写入前确认目标严格位于缓存根内。
 ///
 /// 分量校验已挡住词法穿越；这里再挡住「缓存内某一层被替换为指向根外的符号链接」。
@@ -152,22 +178,7 @@ pub async fn install_plugin(
         false
     };
 
-    let version = marketplace_plugin
-        .sha
-        .as_ref()
-        .map(|s| s.chars().take(7).collect())
-        .unwrap_or_else(|| {
-            let v = marketplace_plugin.version.clone();
-            if v.is_empty() {
-                chrono::DateTime::<chrono::Utc>::from(peri_time::now_wall())
-                    .format("%Y%m%d%H%M%S")
-                    .to_string()
-            } else {
-                v
-            }
-        });
-
-    validate_cache_path_segment("版本", &version)?;
+    let version = resolve_cache_version(&marketplace_plugin)?;
 
     let target_dir = claude_dir
         .join("plugins")
@@ -262,13 +273,8 @@ pub async fn update_plugin(
             marketplace: marketplace.into(),
         })?;
 
-    let latest_version = latest
-        .sha
-        .as_ref()
-        .map(|s| s.chars().take(7).collect::<String>())
-        .unwrap_or_else(|| latest.version.clone());
-    // 必须在 uninstall 之前校验：旧实现会先卸载再进入安装路径校验。
-    validate_cache_path_segment("版本", &latest_version)?;
+    // 解析即校验，且必须发生在 uninstall 之前：旧实现会先卸载再进入安装路径校验。
+    let latest_version = resolve_cache_version(latest)?;
 
     if latest_version == current.version {
         return Ok(current.clone());
