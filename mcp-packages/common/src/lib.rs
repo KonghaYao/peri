@@ -5,6 +5,7 @@ pub mod context_archive;
 pub mod failure;
 mod helpers;
 mod numeric;
+mod private_temp;
 pub mod process_env;
 pub mod result_mapping;
 pub use peri_mcp_core::task_owner;

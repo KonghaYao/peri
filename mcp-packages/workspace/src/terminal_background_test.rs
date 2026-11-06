@@ -368,6 +368,23 @@ async fn test_sync_timeout_without_registry_kills_and_persists_partial() {
         file_content.contains("partial-before-timeout"),
         "部分输出文件应含已产生输出: {file_content}"
     );
+    // 完整输出可能含敏感内容：文件必须是 owner-only，目录必须是私有的。
+    use std::os::unix::fs::PermissionsExt;
+    let file_mode = std::fs::metadata(path_str).unwrap().permissions().mode() & 0o777;
+    assert_eq!(file_mode, 0o600, "部分输出文件权限应为 0600: {path_str}");
+    let directory = std::path::Path::new(path_str).parent().unwrap();
+    let dir_mode = std::fs::metadata(directory).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        dir_mode,
+        0o700,
+        "部分输出目录权限应为 0700: {}",
+        directory.display()
+    );
+    assert_ne!(
+        directory,
+        std::env::temp_dir(),
+        "部分输出不得直接落在共享临时目录根"
+    );
     let _ = std::fs::remove_file(path_str);
 }
 

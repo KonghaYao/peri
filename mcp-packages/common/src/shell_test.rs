@@ -236,6 +236,39 @@ fn test_persist_writes_file_and_returns_hint() {
     std::fs::remove_file(path).ok();
 }
 
+#[cfg(unix)]
+#[test]
+fn test_persist_output_uses_private_directory_and_owner_only_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let hint = persist_truncated_output("secret\npayload");
+    let path = hint
+        .split("saved to ")
+        .nth(1)
+        .and_then(|rest| rest.split(" — ").next())
+        .expect("hint should contain the saved path");
+    let file = std::path::Path::new(path);
+    let file_mode = std::fs::metadata(file).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        file_mode, 0o600,
+        "persisted output must be owner-only: {path}"
+    );
+    let directory = file.parent().expect("persisted file parent");
+    let dir_mode = std::fs::metadata(directory).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        dir_mode,
+        0o700,
+        "persisted output directory must be owner-only: {}",
+        directory.display()
+    );
+    assert_ne!(
+        directory,
+        std::env::temp_dir(),
+        "persisted output must not sit in the shared temp root"
+    );
+    std::fs::remove_file(file).ok();
+}
+
 #[test]
 fn test_persist_empty_string() {
     let hint = persist_truncated_output("");

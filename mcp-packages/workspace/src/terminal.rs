@@ -8,15 +8,14 @@ use peri_agent::agent::async_tasks::{
 };
 use peri_agent::tools::{BaseTool, ToolExecutionEvidence, ToolExecutionStatus, ToolOutput};
 use peri_mcp_common::shell::{
-    kill_process_group, shell_command, tee_pipe_with_output, ShellExecutionGuard,
+    kill_process_group, persist_private_output, persist_truncated_output_with_ref, shell_command,
+    tee_pipe_with_output, ShellExecutionGuard,
 };
 use peri_mcp_common::shell_output::ShellOutputCapture;
 use peri_time::timeout;
 use serde_json::Value;
 use std::time::Duration;
 use tracing::warn;
-
-use peri_mcp_common::shell::persist_truncated_output_with_ref;
 
 // Render only the host platform's cleanup command; Unix PGIDs are not Windows PIDs.
 fn background_cleanup_hint(pid: u32, platform: &str) -> String {
@@ -264,15 +263,10 @@ fn merge_output(stdout: &str, stderr: &str, exit_code: Option<i32>) -> String {
 }
 
 /// 将超时前捕获的部分输出写入临时文件，返回提示字符串（含 "partial output" 字样）。
-/// 文件路径：`{temp_dir}/peri-tool-output-{uuid}.txt`
+/// 文件落在进程私有的 0700 目录内，文件权限 0600。
 fn persist_partial_output_with_ref(output: &str) -> (String, Option<String>) {
-    let id = uuid::Uuid::new_v4();
-    let dir = std::env::temp_dir();
-    let file_name = format!("peri-tool-output-{id}.txt");
-    let file_path = dir.join(&file_name);
-
-    match std::fs::write(&file_path, output) {
-        Ok(_) => (
+    match persist_private_output(output) {
+        Ok(file_path) => (
             format!(
                 // 指引指代 builtin 文件工具时必须用**模型面名字**（裸名已无提供面）；
                 // 查表未命中的兜底不含工具名，不得回落到裸名。
@@ -285,11 +279,8 @@ fn persist_partial_output_with_ref(output: &str) -> (String, Option<String>) {
             ),
             Some(file_path.to_string_lossy().into_owned()),
         ),
-        Err(e) => (
-            format!(
-                "\n\n[Failed to save partial output to {}: {e}]",
-                file_path.display()
-            ),
+        Err(error) => (
+            format!("\n\n[Failed to save partial output: {error}]"),
             None,
         ),
     }
