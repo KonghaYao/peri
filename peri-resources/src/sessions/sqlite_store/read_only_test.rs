@@ -268,6 +268,39 @@ async fn test_readonly_store_loads_exact_meta_and_distinguishes_missing_session(
     assert_eq!(directory_snapshot(dir.path()), directory_before);
 }
 
+/// `close` 必须可并发等待并完成收尾：桥与门面共享同一 pool，返回后侧车文件已清理，
+/// 紧接的只读打开不依赖 busy 重试；只 `Drop` 不提供这一保证。
+#[tokio::test]
+async fn concurrent_close_settles_before_read_only_reopen() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("threads.db");
+    let (bridge, facade) = crate::sessions::open_store_and_facade_for_tests(&db_path)
+        .await
+        .unwrap();
+    let expected = ThreadMeta::new_at(absolute_test_path("workspace"), peri_time::now_wall());
+    let id = bridge.create_thread(expected).await.unwrap();
+    let bridge = Arc::new(bridge);
+    let (first, second) = tokio::join!(
+        tokio::spawn({
+            let bridge = Arc::clone(&bridge);
+            async move { bridge.close().await }
+        }),
+        tokio::spawn({
+            let bridge = Arc::clone(&bridge);
+            async move { bridge.close().await }
+        }),
+    );
+    first.unwrap();
+    second.unwrap();
+    assert!(!db_path.with_extension("db-wal").exists());
+    assert!(!db_path.with_extension("db-shm").exists());
+    drop(facade);
+    let reader = SqliteThreadStore::open_existing_read_only(&db_path)
+        .await
+        .unwrap();
+    assert_eq!(reader.load_meta(&id).await.unwrap().id, id);
+}
+
 #[test]
 fn test_meta_decoder_rejects_negative_derived_content_size() {
     let error = meta_from_row(
