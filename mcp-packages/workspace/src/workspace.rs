@@ -741,14 +741,22 @@ impl ServerHandler for WorkspaceMcpServer {
         let thread_owner = self.thread_owner(&context)?;
         let owner = owner.as_deref();
         let thread_owner = thread_owner.as_deref();
-        // Capture the pre-image before the tool commits. Reading outside the
-        // transaction is safe for sequential calls; a concurrent same-target write
-        // can only make the later rewind refuse (post image mismatch), never
-        // restore a different file's bytes.
-        let rewind_target = rewind_snapshot_target(&request, &self.cwd);
+        // Capture the pre-image before the tool commits, but only when this call
+        // can be correlated with a transcript entry and fits the rewind budget.
+        // Reading outside the transaction is safe for sequential calls; a
+        // concurrent same-target write can only make the later rewind refuse.
+        let rewind_tool_call_id =
+            peri_mcp_common::invocation::tool_call_id_from_meta(&context.meta);
+        let rewind_target = rewind_tool_call_id
+            .as_ref()
+            .and_then(|_| rewind_snapshot_target(&request, &self.cwd));
         let rewind_pre = match rewind_target.as_deref() {
-            Some(path) => match tokio::fs::read(path).await {
-                Ok(bytes) => Some(Some(bytes)),
+            Some(path) => match tokio::fs::metadata(path).await {
+                Ok(meta) if meta.len() > crate::rewind_snapshot::MAX_RECORD_BYTES as u64 => None,
+                Ok(_) => match tokio::fs::read(path).await {
+                    Ok(bytes) => Some(Some(bytes)),
+                    Err(_) => None,
+                },
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(None),
                 Err(_) => None,
             },
@@ -804,17 +812,20 @@ impl ServerHandler for WorkspaceMcpServer {
         if matches!(&response, Ok(CallToolResponse::Complete(result)) if result.is_error != Some(true))
         {
             // Only a successful call has a post image worth rewinding to.
-            if let (Some(tool_call_id), Some(path), Some(pre)) = (
-                peri_mcp_common::invocation::tool_call_id_from_meta(&context.meta),
-                rewind_target,
-                rewind_pre,
-            ) {
-                if let Ok(post) = tokio::fs::read(&path).await {
-                    self.rewind_snapshots.record(
-                        owner,
-                        &tool_call_id,
-                        crate::rewind_snapshot::Snapshot { path, pre, post },
-                    );
+            if let (Some(tool_call_id), Some(path), Some(pre)) =
+                (rewind_tool_call_id, rewind_target, rewind_pre)
+            {
+                let fits_budget = tokio::fs::metadata(&path).await.is_ok_and(|meta| {
+                    meta.len() <= crate::rewind_snapshot::MAX_RECORD_BYTES as u64
+                });
+                if fits_budget {
+                    if let Ok(post) = tokio::fs::read(&path).await {
+                        self.rewind_snapshots.record(
+                            owner,
+                            &tool_call_id,
+                            crate::rewind_snapshot::Snapshot { path, pre, post },
+                        );
+                    }
                 }
             }
             self.spawn_git_sample();

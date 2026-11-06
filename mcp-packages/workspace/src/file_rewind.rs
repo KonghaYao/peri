@@ -60,6 +60,7 @@ pub(crate) async fn rewind_files(
         .await
         .map_err(|_| invalid("Workspace root unavailable"))?;
     let mut planned: HashMap<PathBuf, Option<Vec<u8>>> = HashMap::new();
+    let mut expected_on_disk: HashMap<PathBuf, Option<Vec<u8>>> = HashMap::new();
     let mut order = Vec::new();
     // Validate the complete batch before the first mutation. If any history record
     // no longer matches the current Workspace content, leave every file untouched.
@@ -122,24 +123,40 @@ pub(crate) async fn rewind_files(
         };
         if !planned.contains_key(&path) {
             order.push(path.clone());
+            expected_on_disk.insert(path.clone(), current);
         }
         planned.insert(path, replacement);
     }
     for path in order {
-        match planned.remove(&path).expect("planned path") {
-            Some(content) => tokio::fs::write(&path, content).await.map_err(|_| {
-                McpError::internal_error(
-                    "Workspace rewind write failed; some files may already be changed",
-                    None,
-                )
-            })?,
-            None => tokio::fs::remove_file(&path).await.map_err(|_| {
-                McpError::internal_error(
-                    "Workspace rewind remove failed; some files may already be changed",
-                    None,
-                )
-            })?,
-        }
+        let replacement = planned.remove(&path).expect("planned path");
+        let expected = expected_on_disk.remove(&path).expect("expected path");
+        let apply_path = path.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::filesystem::transaction::replace_if_unchanged(
+                &apply_path,
+                expected.as_deref(),
+                replacement.as_deref(),
+            )
+        })
+        .await
+        .map_err(|_| {
+            McpError::internal_error(
+                "Workspace rewind task failed; some files may already be changed",
+                None,
+            )
+        })?
+        .map_err(|error| {
+            let message = match error {
+                crate::filesystem::transaction::RewindCommitError::ChangedSinceValidation => {
+                    "Workspace rewind target changed during apply; some files may already be changed"
+                }
+                crate::filesystem::transaction::RewindCommitError::Commit(error) => {
+                    tracing::warn!(?error, "workspace rewind commit failed");
+                    "Workspace rewind write failed; some files may already be changed"
+                }
+            };
+            McpError::internal_error(message, None)
+        })?;
     }
     Ok(CustomResult::new(serde_json::json!({"ok": true})))
 }

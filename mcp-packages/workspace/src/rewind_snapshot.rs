@@ -16,7 +16,7 @@ use std::{
 use parking_lot::Mutex;
 
 /// Per-record cap. Larger writes still succeed but cannot be rewound.
-const MAX_RECORD_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_RECORD_BYTES: usize = 8 * 1024 * 1024;
 /// Total cap; oldest records are evicted first.
 const MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 
@@ -87,6 +87,7 @@ impl RewindSnapshots {
     }
 }
 
+/// Key for one session's tool call.
 fn key(owner: Option<&str>, tool_call_id: &str) -> Key {
     Key {
         owner: owner.map(str::to_owned),
@@ -94,6 +95,7 @@ fn key(owner: Option<&str>, tool_call_id: &str) -> Key {
     }
 }
 
+/// Bytes charged against the bounded store for one snapshot.
 fn record_bytes(snapshot: &Snapshot) -> usize {
     snapshot.pre.as_deref().map_or(0, <[u8]>::len) + snapshot.post.len()
 }

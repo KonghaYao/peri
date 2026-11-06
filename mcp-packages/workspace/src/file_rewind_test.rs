@@ -1,4 +1,5 @@
 use super::*;
+use crate::filesystem::transaction::{replace_if_unchanged, RewindCommitError};
 use crate::rewind_snapshot::{RewindSnapshots, Snapshot};
 
 fn request(changes: serde_json::Value) -> CustomRequest {
@@ -464,6 +465,27 @@ async fn test_rewind_write_payload_mismatch_refuses() {
         .to_string()
         .contains("does not match recorded pre-image"));
     assert_eq!(tokio::fs::read_to_string(file).await.unwrap(), "current");
+}
+
+#[test]
+fn replace_if_unchanged_refuses_stale_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("race.txt");
+    std::fs::write(&file, "actual").unwrap();
+    let error = replace_if_unchanged(&file, Some(b"expected"), Some(b"restored")).unwrap_err();
+    assert!(matches!(error, RewindCommitError::ChangedSinceValidation));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "actual");
+}
+
+#[test]
+fn replace_if_unchanged_replaces_and_removes() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("apply.txt");
+    std::fs::write(&file, "actual").unwrap();
+    replace_if_unchanged(&file, Some(b"actual"), Some(b"restored")).unwrap();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "restored");
+    replace_if_unchanged(&file, Some(b"restored"), None).unwrap();
+    assert!(!file.exists());
 }
 
 #[tokio::test]

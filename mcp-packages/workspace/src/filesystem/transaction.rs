@@ -98,6 +98,42 @@ pub(crate) enum CommitError {
     Io(std::io::Error),
 }
 
+/// Failure from a conditional rewind replacement.
+#[derive(Debug)]
+pub(crate) enum RewindCommitError {
+    /// The file no longer matches the state the rewind planned against.
+    ChangedSinceValidation,
+    Commit(CommitError),
+}
+
+/// Apply one rewound file under the same per-target lock as Write/Edit.
+///
+/// The caller's plan may be stale by the time it is applied. Re-reading under the
+/// shared lock keeps in-process tool calls and this replacement mutually exclusive,
+/// and `guard_and_commit` writes through a temp file so a failed write never
+/// truncates the target.
+pub(crate) fn replace_if_unchanged(
+    path: &Path,
+    expected: Option<&[u8]>,
+    replacement: Option<&[u8]>,
+) -> Result<(), RewindCommitError> {
+    with_target_lock(path, |locked| {
+        let actual = locked
+            .read_pre()
+            .map_err(|error| RewindCommitError::Commit(CommitError::Io(error)))?;
+        if actual.as_deref() != expected {
+            return Err(RewindCommitError::ChangedSinceValidation);
+        }
+        match replacement {
+            Some(bytes) => locked
+                .guard_and_commit(expected.unwrap_or_default(), bytes)
+                .map_err(RewindCommitError::Commit),
+            None => std::fs::remove_file(path)
+                .map_err(|error| RewindCommitError::Commit(CommitError::Io(error))),
+        }
+    })
+}
+
 pub(crate) fn logical_path_key(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
