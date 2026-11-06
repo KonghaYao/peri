@@ -89,6 +89,7 @@ impl JsExecutionHost {
         Self::spawn_with_frame_limit(spec, DEFAULT_MAX_FRAME_BYTES)
     }
 
+    /// 启动 Node 进程，并装配 RPC channel、stdout/stderr reader 与进程树 owner。
     pub(crate) fn spawn_with_frame_limit(
         spec: JsProcessSpec,
         max_frame_bytes: usize,
