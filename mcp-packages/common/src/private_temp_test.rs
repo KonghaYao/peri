@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(unix)]
 use std::time::{Duration, SystemTime};
 
 #[cfg(unix)]

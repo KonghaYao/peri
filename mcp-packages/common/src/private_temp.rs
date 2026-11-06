@@ -50,7 +50,10 @@ pub(crate) fn write_output(content: &str) -> io::Result<PathBuf> {
 fn create_private_dir(parent: &Path) -> io::Result<PrivateDir> {
     sweep_stale_dirs(parent);
     let path = parent.join(format!("{OUTPUT_PREFIX}{}", uuid::Uuid::new_v4()));
+    #[cfg(unix)]
     let mut builder = std::fs::DirBuilder::new();
+    #[cfg(not(unix))]
+    let builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
