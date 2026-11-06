@@ -176,14 +176,14 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         let mut locks = prompt_locks.lock().await;
         locks
             .entry(prompt_session_id.clone())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .or_insert_with(|| Arc::new(super::PromptGate::new()))
             .clone()
     };
 
     // Serialize prompts per session: wait for any in-flight prompt to finish so the next
     // turn sees the adopted effective history (or ReloadRequired) instead of a HandedOff
     // empty container.
-    let _guard = prompt_lock.lock().await;
+    let _guard = prompt_lock.turn.lock().await;
     {
         let sessions = sessions.lock().await;
         let state = sessions
@@ -352,12 +352,16 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             return Ok(serde_json::Value::Null);
         }
     }
+    // `working` 落库与意图代次推进必须同在 work_intent 临界区内：Stop 持久化在
+    // 同一把锁下复核代次，才不会把本轮的 working 覆盖回 stopped。
+    let work_intent_guard = prompt_lock.work_intent.lock().await;
     if let Err(error) = cfg
         .session_manager
         .session_resources()
         .set_work_state(&thread, WorkState::Working)
         .await
     {
+        drop(work_intent_guard);
         rollback_continuation_admission(sessions, &prompt_session_id, is_continuation).await;
         // 已登记但尚未开始执行的父任务必须收尾；没有投递时是 no-op。
         super::recovery::abort_recovery_launch(cfg, &prompt_session_id);
@@ -371,6 +375,13 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         );
         return Err(work_intent_error(Some(&thread_id), error.to_string()));
     }
+    {
+        let mut sessions = sessions.lock().await;
+        if let Some(state) = sessions.get_mut(&prompt_session_id) {
+            state.work_intent_epoch += 1;
+        }
+    }
+    drop(work_intent_guard);
 
     // 冷 child 恢复的本轮把终态、工作意图与结果消息交给一次原子结算（§5.3）：
     // 在 run_prompt 前标记，finish_prompt_turn 据此跳过独立的 work_state 写入。

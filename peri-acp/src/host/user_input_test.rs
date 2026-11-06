@@ -278,8 +278,8 @@ async fn test_user_input_wire_control_responds_while_prompt_lock_is_held() {
         .unwrap();
     let generation = mailbox.snapshot().await.generation;
     let states = Arc::new(tokio::sync::Mutex::new(states));
-    let prompt_lock = Arc::new(tokio::sync::Mutex::new(()));
-    let _running_prompt = Arc::clone(&prompt_lock).lock_owned().await;
+    let prompt_lock = Arc::new(crate::host::PromptGate::new());
+    let _running_prompt = prompt_lock.turn.clone().lock_owned().await;
     let locks = Arc::new(tokio::sync::Mutex::new(HashMap::from([(
         sid.clone(),
         prompt_lock,

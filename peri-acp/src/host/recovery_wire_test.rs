@@ -509,6 +509,17 @@ async fn stored_work_state(harness: &RecoveryHarness, thread_id: &str) -> WorkSt
         .work_state
 }
 
+/// Stop 持久化已移出收包循环：`run_server_loop` 返回后写入仍可能在途，按终态等待。
+async fn wait_for_work_state(harness: &RecoveryHarness, thread_id: &str, expected: WorkState) {
+    for _ in 0..200 {
+        if stored_work_state(harness, thread_id).await == expected {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(stored_work_state(harness, thread_id).await, expected);
+}
+
 /// 没有活动 turn 时 Stop 仍要落 `stopped`：只 suppress 内存会让会话保留自动续跑资格。
 #[tokio::test]
 async fn cancel_without_active_turn_persists_stopped() {
@@ -521,10 +532,7 @@ async fn cancel_without_active_turn_persists_stopped() {
     );
     run_server_loop(&harness).await;
 
-    assert_eq!(
-        stored_work_state(&harness, &thread_id).await,
-        WorkState::Stopped
-    );
+    wait_for_work_state(&harness, &thread_id, WorkState::Stopped).await;
 }
 
 /// 用户 Stop 的受影响对象包含 cascade child：父子一起落 `stopped`。
@@ -555,15 +563,8 @@ async fn cancel_persists_stopped_for_cascade_children() {
     );
     run_server_loop(&harness).await;
 
-    assert_eq!(
-        stored_work_state(&harness, &thread_id).await,
-        WorkState::Stopped
-    );
-    assert_eq!(
-        stored_work_state(&harness, &child).await,
-        WorkState::Stopped,
-        "应受取消影响的 child 不得保留自动续跑资格"
-    );
+    wait_for_work_state(&harness, &thread_id, WorkState::Stopped).await;
+    wait_for_work_state(&harness, &child, WorkState::Stopped).await;
 }
 
 /// Stop 之后收尾不把 `stopped` 改回 `idle`：收尾只收敛 `working`。
@@ -578,6 +579,7 @@ async fn settle_after_stop_keeps_stopped() {
     );
     run_server_loop(&harness).await;
 
+    wait_for_work_state(&harness, &thread_id, WorkState::Stopped).await;
     let written = harness
         .cfg
         .session_resources

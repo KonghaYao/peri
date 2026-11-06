@@ -157,8 +157,8 @@ async fn cron_register_tick_approval_continuation() {
         .subagent_llm_cache
         .insert(model_fingerprint, Arc::clone(&turn_model) as Arc<dyn Model>);
 
-    let gate = Arc::new(tokio::sync::Mutex::new(()));
-    let gate_guard = gate.lock().await;
+    let gate = Arc::new(crate::host::PromptGate::new());
+    let gate_guard = gate.turn.lock().await;
     let shared: SharedSessions = Arc::new(tokio::sync::Mutex::new(sessions));
     let locks: PromptLocks = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     locks
@@ -226,7 +226,7 @@ async fn cron_register_tick_approval_continuation() {
     .expect("拒绝审批必须清理当前执行窗口");
     transport.set_approve(true);
     let response_gate = transport.hold_next_response();
-    let gate_guard = gate.lock().await;
+    let gate_guard = gate.turn.lock().await;
     assert!(scheduler.lock().force_next_fire_to_past(&task_id));
     let trigger = tokio::time::timeout(std::time::Duration::from_secs(15), triggers.recv())
         .await
@@ -246,7 +246,7 @@ async fn cron_register_tick_approval_continuation() {
         )
         .await
     );
-    let mut next_lock = Box::pin(gate.lock());
+    let mut next_lock = Box::pin(gate.turn.lock());
     assert!(futures::poll!(next_lock.as_mut()).is_pending());
     response_gate.notify_one();
     let gate_guard = tokio::time::timeout(std::time::Duration::from_secs(15), next_lock)

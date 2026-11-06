@@ -411,6 +411,7 @@ fn make_host_sessions(ctx: &SessionContext, payloads: Vec<PersistedPayload>) -> 
         host_request_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         continuation_armed: false,
         continuation_epoch: 0,
+        work_intent_epoch: 0,
         continuation_in_flight: false,
         continuation_mq_steering_pending: false,
         recovery_settlement_pending: false,

@@ -34,6 +34,8 @@ pub(crate) enum HostTaskKind {
     ContinuationTurn,
     Prompt,
     Prediction,
+    /// 通知路径的锁外持久化（Stop 意图 / 占用失效）。
+    NotificationEffect,
     McpAppsRelay,
     McpControl,
     UserInputEvents,

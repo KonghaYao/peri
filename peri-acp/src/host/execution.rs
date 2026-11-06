@@ -22,10 +22,10 @@ pub(super) async fn approve_schedule(
         Arc::clone(
             locks
                 .entry(request.session_id.clone())
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+                .or_insert_with(|| Arc::new(super::PromptGate::new())),
         )
     };
-    let _guard = lock.lock().await;
+    let _guard = lock.turn.lock().await;
     super::workspace::validate_expected(cfg, &request.session_id, None).await?;
     let runtime = cfg
         .session_manager
