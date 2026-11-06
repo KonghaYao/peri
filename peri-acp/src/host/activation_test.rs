@@ -614,9 +614,10 @@ async fn model_config_update_invalidates_saved_context_usage() {
         &harness.cfg,
     )
     .await;
+    assert_eq!(outcome.context_usage_invalidations.len(), 1);
     assert_eq!(
-        outcome.context_usage_invalidations,
-        vec![ThreadId::from(harness.session_id.clone())]
+        outcome.context_usage_invalidations[0].thread_id,
+        ThreadId::from(harness.session_id.clone())
     );
     drop(sessions);
     harness

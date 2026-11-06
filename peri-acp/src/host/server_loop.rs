@@ -640,10 +640,14 @@ impl ServerLoop<'_> {
                 .lock()
                 .await
                 .entry(lifecycle_session_id)
-                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .or_insert_with(|| Arc::new(super::PromptGate::new()))
                 .clone();
             if matches!(method.as_str(), "session/close" | "session/delete") {
-                match peri_time::timeout(std::time::Duration::from_secs(5), lock.lock_owned()).await
+                match peri_time::timeout(
+                    std::time::Duration::from_secs(5),
+                    Arc::clone(&lock.turn).lock_owned(),
+                )
+                .await
                 {
                     Ok(guard) => Some(guard),
                     Err(_) => {
@@ -660,7 +664,7 @@ impl ServerLoop<'_> {
                     }
                 }
             } else {
-                match lock.try_lock_owned() {
+                match Arc::clone(&lock.turn).try_lock_owned() {
                     Ok(guard) => Some(guard),
                     Err(_) => {
                         let _ = diagnostics
@@ -984,13 +988,34 @@ impl ServerLoop<'_> {
             }
         }
         // 用户 Stop 与模型配置变化的锁外持久化：停止意图先落库；占用快照失效写
-        // NULL。失败只记 error，不阻断取消/配置更新本身（设计 §5.4 / §2.2）。
-        super::notify::persist_notification_effects(
-            &method,
-            cfg,
-            outcome.stop_targets,
-            outcome.context_usage_invalidations,
-        )
-        .await;
+        // NULL。写入受存储争用支配，交给 host task 执行，收包循环不再等待同连接
+        // 后续帧。失败只记 error/warn，不阻断取消/配置更新本身（设计 §5.4 / §2.2）。
+        if !outcome.stop_targets.is_empty() || !outcome.context_usage_invalidations.is_empty() {
+            let persist_method = method.clone();
+            let cfg = Arc::clone(self.cfg);
+            let sessions = Arc::clone(self.sessions);
+            let prompt_locks = Arc::clone(self.prompt_locks);
+            let spawned = self.cfg.host_task_spawner.spawn(
+                task_scope::HostTaskOwnerKind::Session,
+                task_scope::HostTaskKind::NotificationEffect,
+                async move {
+                    super::notify::persist_notification_effects(
+                        &persist_method,
+                        &cfg,
+                        &sessions,
+                        &prompt_locks,
+                        outcome.stop_targets,
+                        outcome.context_usage_invalidations,
+                    )
+                    .await;
+                },
+            );
+            if spawned.is_err() {
+                tracing::warn!(
+                    method,
+                    "notification effect persistence skipped: host scope closed"
+                );
+            }
+        }
     }
 }

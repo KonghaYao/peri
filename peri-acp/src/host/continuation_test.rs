@@ -106,6 +106,7 @@ fn make_session_state(armed: bool, epoch: u64) -> SessionState {
         tags: vec![],
         continuation_armed: armed,
         continuation_epoch: epoch,
+        work_intent_epoch: 0,
         continuation_in_flight: false,
         continuation_mq_steering_pending: false,
         recovery_settlement_pending: false,

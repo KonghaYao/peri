@@ -354,11 +354,16 @@ async fn parent_stop_cancels_cascade_recovered_child_and_persists_stopped() {
         )
         .await
     };
-    assert!(outcome.stop_targets.contains(&ThreadId::from("child-b")));
+    assert!(outcome
+        .stop_targets
+        .iter()
+        .any(|target| target.thread_id == "child-b"));
     assert!(token.is_cancelled(), "父 Stop 必须取消 cascade 恢复 child");
     crate::host::notify::persist_notification_effects(
         "session/cancel",
         &harness.cfg,
+        &harness.sessions,
+        &harness.locks,
         outcome.stop_targets,
         outcome.context_usage_invalidations,
     )

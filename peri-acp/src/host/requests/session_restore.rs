@@ -290,6 +290,7 @@ pub(crate) async fn prepare_existing(
                 continuation_armed: false,
                 host_request_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                 continuation_epoch: 0,
+                work_intent_epoch: 0,
                 continuation_in_flight: false,
                 continuation_mq_steering_pending: false,
                 recovery_settlement_pending: false,

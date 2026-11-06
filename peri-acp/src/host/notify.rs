@@ -18,10 +18,20 @@ use peri_acp_types::PeriCaps;
 use serde_json::Value;
 use tracing::{debug, info};
 
-use super::{AcpServerConfig, SessionState};
+use super::{AcpServerConfig, PromptGate, PromptLocks, SessionState, SharedSessions};
 use crate::provider::LlmProvider;
 
 // ── Notification dispatch ────────────────────────────────────────────────────
+
+/// 一次锁外持久化要作用的目标，以及通知处理时捕获的工作意图代次。
+///
+/// 持久化在收包循环外异步执行；写入前必须用它复核代次，避免迟到的旧意图
+/// 覆盖之后发生的 turn 准入。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IntentTarget {
+    pub(crate) thread_id: ThreadId,
+    pub(crate) epoch: u64,
+}
 
 /// 通知处理后交给调用方的后续动作。
 ///
@@ -32,9 +42,9 @@ pub(crate) struct NotificationOutcome {
     /// 需要在锁外补发一次 continuation（`session/cancel` race 兜底）。
     pub(crate) continuation: Option<ContinuationRequest>,
     /// 本次取消实际影响的 thread（本会话与 cascade children），需要写 `stopped`。
-    pub(crate) stop_targets: Vec<ThreadId>,
+    pub(crate) stop_targets: Vec<IntentTarget>,
     /// 模型配置变化后旧占用快照失效的 thread，需要写 `NULL`（设计 §2.2）。
-    pub(crate) context_usage_invalidations: Vec<ThreadId>,
+    pub(crate) context_usage_invalidations: Vec<IntentTarget>,
 }
 
 /// 返回 [`NotificationOutcome`]：调用方需在 **sessions 锁外** 补发 continuation，
@@ -49,7 +59,14 @@ pub(crate) async fn handle_notification(
         "session/cancel" => {
             let mut outcome = NotificationOutcome::default();
             let session_id = extract_session_id(params, "");
+            // `get_mut` 借用期间无法回查其他会话：先快照 thread_id -> epoch，
+            // cascade children 的代次从同一快照取（无 live 会话时取 0）。
+            let work_intent_epochs: HashMap<String, u64> = sessions
+                .values()
+                .map(|state| (state.thread_id.clone(), state.work_intent_epoch))
+                .collect();
             if let Some(state) = sessions.get_mut(session_id) {
+                let root_epoch = state.work_intent_epoch;
                 let environment = state.environment.clone();
                 let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
                 let targeted =
@@ -76,17 +93,27 @@ pub(crate) async fn handle_notification(
                 }
                 state.continuation_epoch += 1;
                 // 用户 Stop 的实际受影响对象由既有取消策略确定：本会话 thread 与本次
-                // 取消的 cascade children。这里只收集身份，不写库（§5.4）。
-                outcome
-                    .stop_targets
-                    .push(ThreadId::from(state.thread_id.clone()));
+                // 取消的 cascade children。这里只收集身份与代次，不写库（§5.4）。
+                outcome.stop_targets.push(IntentTarget {
+                    thread_id: ThreadId::from(state.thread_id.clone()),
+                    epoch: root_epoch,
+                });
                 if let Some(runtime) = cfg.session_manager.get_session(session_id) {
                     runtime.activation.suppress();
                     // 显式用户取消终止当前 blocked 周期的自动恢复；新 prompt 不取消。
                     runtime.goal_state.cancel_recovery();
                     outcome
                         .stop_targets
-                        .extend(runtime.cancel_cascade_children());
+                        .extend(
+                            runtime
+                                .cancel_cascade_children()
+                                .into_iter()
+                                .map(|thread_id| {
+                                    let epoch =
+                                        work_intent_epochs.get(&thread_id).copied().unwrap_or(0);
+                                    IntentTarget { thread_id, epoch }
+                                }),
+                        );
                 }
                 state.continuation_mq_steering_pending = false;
                 let Some(token) = state.cancel_token.as_ref() else {
@@ -200,13 +227,15 @@ pub(crate) async fn handle_notification(
             // 模型/供应商变化会让旧 token 快照失效：只对本次通知指向的会话写 NULL，
             // 不猜测其他会话的配置（设计 §2.2）。
             if model_config_changed {
-                if let Some(thread) = params
+                if let Some(state) = params
                     .get("sessionId")
                     .and_then(Value::as_str)
                     .and_then(|session_id| sessions.get(session_id))
-                    .map(|state| ThreadId::from(state.thread_id.clone()))
                 {
-                    outcome.context_usage_invalidations.push(thread);
+                    outcome.context_usage_invalidations.push(IntentTarget {
+                        thread_id: ThreadId::from(state.thread_id.clone()),
+                        epoch: state.work_intent_epoch,
+                    });
                 }
             }
             outcome
@@ -220,40 +249,109 @@ pub(crate) async fn handle_notification(
 
 // ── Notification helpers ───────────────────────────────────────────────────────
 
+/// 目标 thread 在 `prompt_locks` 中的 key：会话 id 优先，找不到活会话时退回 thread id。
+async fn lock_key_for(sessions: &SharedSessions, thread_id: &ThreadId) -> String {
+    let sessions = sessions.lock().await;
+    sessions
+        .iter()
+        .find(|(_, state)| state.thread_id == *thread_id)
+        .map(|(session_id, _)| session_id.clone())
+        .unwrap_or_else(|| thread_id.clone())
+}
+
+/// 取得（必要时创建）目标会话的执行门；与 prompt 准入共享同一把 `work_intent`。
+async fn gate_for(
+    sessions: &SharedSessions,
+    prompt_locks: &PromptLocks,
+    thread_id: &ThreadId,
+) -> Arc<PromptGate> {
+    let key = lock_key_for(sessions, thread_id).await;
+    prompt_locks
+        .lock()
+        .await
+        .entry(key)
+        .or_insert_with(|| Arc::new(PromptGate::new()))
+        .clone()
+}
+
+/// 锁内复核 live 会话的工作意图代次；无 live 会话返回 `None`（照常写入）。
+async fn live_work_intent_epoch(sessions: &SharedSessions, thread_id: &ThreadId) -> Option<u64> {
+    let sessions = sessions.lock().await;
+    sessions
+        .values()
+        .find(|state| state.thread_id == *thread_id)
+        .map(|state| state.work_intent_epoch)
+}
+
 /// 通知的锁外持久化副作用：Stop 意图与模型配置变化后的占用失效。
 ///
 /// 调用方必须已释放 sessions 锁；写失败只记 error，不改变取消/配置更新本身。
+/// 每个目标按会话取 `work_intent` 短临界区并在写入前复核代次：已有更新 turn
+/// 准入时跳过，迟到的旧意图不得覆盖新状态。
 pub(crate) async fn persist_notification_effects(
     method: &str,
     cfg: &AcpServerConfig,
-    stop_targets: Vec<ThreadId>,
-    context_usage_invalidations: Vec<ThreadId>,
+    sessions: &SharedSessions,
+    prompt_locks: &PromptLocks,
+    stop_targets: Vec<IntentTarget>,
+    context_usage_invalidations: Vec<IntentTarget>,
 ) {
-    for thread_id in stop_targets {
+    for target in stop_targets {
+        let gate = gate_for(sessions, prompt_locks, &target.thread_id).await;
+        let _guard = gate.work_intent.lock().await;
+        if let Some(epoch) = live_work_intent_epoch(sessions, &target.thread_id).await {
+            if epoch != target.epoch {
+                debug!(
+                    method,
+                    thread_id = %target.thread_id,
+                    captured_epoch = target.epoch,
+                    current_epoch = epoch,
+                    "stop intent superseded by newer turn admission; skip persistence"
+                );
+                continue;
+            }
+        }
         if let Err(error) = cfg
             .session_manager
             .session_resources()
-            .set_work_state(&thread_id, peri_acp_types::thread::WorkState::Stopped)
+            .set_work_state(
+                &target.thread_id,
+                peri_acp_types::thread::WorkState::Stopped,
+            )
             .await
         {
             tracing::error!(
                 method,
-                %thread_id,
+                thread_id = %target.thread_id,
                 %error,
                 "stop intent persistence failed; cancel remains effective"
             );
         }
     }
-    for thread_id in context_usage_invalidations {
+    for target in context_usage_invalidations {
+        let gate = gate_for(sessions, prompt_locks, &target.thread_id).await;
+        let _guard = gate.work_intent.lock().await;
+        if let Some(epoch) = live_work_intent_epoch(sessions, &target.thread_id).await {
+            if epoch != target.epoch {
+                debug!(
+                    method,
+                    thread_id = %target.thread_id,
+                    captured_epoch = target.epoch,
+                    current_epoch = epoch,
+                    "context usage invalidation superseded by newer turn admission; skip persistence"
+                );
+                continue;
+            }
+        }
         if let Err(error) = cfg
             .session_manager
             .session_resources()
-            .set_context_usage(&thread_id, None)
+            .set_context_usage(&target.thread_id, None)
             .await
         {
             tracing::error!(
                 method,
-                %thread_id,
+                thread_id = %target.thread_id,
                 %error,
                 "context usage invalidation failed"
             );

@@ -95,6 +95,9 @@ mod mcp_v4_wire_fixture;
 #[path = "mcp_v4_wave2_test.rs"]
 mod mcp_v4_wave2;
 mod notify;
+#[cfg(test)]
+#[path = "notify_persistence_test.rs"]
+mod notify_persistence_tests;
 mod oauth_delivery;
 mod ownership;
 mod prediction;
@@ -228,6 +231,11 @@ pub(crate) struct SessionState {
     pub(crate) host_request_seq: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) continuation_armed: bool,
     pub(crate) continuation_epoch: u64,
+    /// durable 工作意图代次：每次 `working` 落库成功后推进。
+    ///
+    /// Stop 持久化在锁外异步执行，写入前比对捕获时的代次；不等即说明已有更新
+    /// 的 turn 准入，旧停止意图不得覆盖它。
+    pub(crate) work_intent_epoch: u64,
     pub(crate) continuation_in_flight: bool,
     pub(crate) continuation_mq_steering_pending: bool,
     /// 本轮属于冷 child 恢复结算：`finish_prompt_turn` 跳过独立的 `work_state`
@@ -272,6 +280,7 @@ impl SessionState {
             host_request_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             continuation_armed: false,
             continuation_epoch: 0,
+            work_intent_epoch: 0,
             continuation_in_flight: false,
             continuation_mq_steering_pending: false,
             recovery_settlement_pending: false,
@@ -454,9 +463,30 @@ pub struct AcpServerConfig {
 // ── Main server loop ────────────────────────────────────────────────────────
 
 pub(crate) type SharedSessions = Arc<tokio::sync::Mutex<HashMap<String, SessionState>>>;
+
+/// 会话级执行门：turn 串行与工作意图临界区各一把锁。
+///
+/// `turn` 保持原有语义（prompt / continuation / 定时调度共用）；`work_intent`
+/// 只包住 `working` 落库 + 代次推进，以及锁外 Stop/占用失效的写库，
+/// 使 Stop 不必等待整个 turn 结束，又不会与新准入互相覆盖。
+pub(crate) struct PromptGate {
+    /// `Arc` 包装：`session/close|delete` 需要可跨锁块持有的 owned guard。
+    pub(crate) turn: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) work_intent: tokio::sync::Mutex<()>,
+}
+
+impl PromptGate {
+    pub(crate) fn new() -> Self {
+        Self {
+            turn: Arc::new(tokio::sync::Mutex::new(())),
+            work_intent: tokio::sync::Mutex::new(()),
+        }
+    }
+}
+
 /// Per-session prompt serialization lock map（与 prompt dispatch 共用，
 /// continuation scheduler 通过同一把锁串行化内部续跑）。
-pub(crate) type PromptLocks = Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>;
+pub(crate) type PromptLocks = Arc<tokio::sync::Mutex<HashMap<String, Arc<PromptGate>>>>;
 
 /// Main ACP server loop. Accepts any `AcpTransport` (mpsc for TUI, stdio for IDE).
 ///

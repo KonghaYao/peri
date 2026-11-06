@@ -22,8 +22,8 @@ async fn a_page_request_is_answered_while_the_session_holds_the_execution_lock()
         spawn_loop(Arc::clone(&cfg), fixture.sessions, Some(pagination_caps())).await;
     let sid = fixture.sid.clone();
     // 执行中的 turn：该会话的 prompt 锁被持有。
-    let prompt_lock = Arc::new(tokio::sync::Mutex::new(()));
-    let held = Arc::clone(&prompt_lock).lock_owned().await;
+    let prompt_lock = Arc::new(crate::host::PromptGate::new());
+    let held = prompt_lock.turn.clone().lock_owned().await;
     {
         let mut states = sessions.lock().await;
         states.get_mut(&sid).unwrap().cancel_token = Some(CancellationToken::new());

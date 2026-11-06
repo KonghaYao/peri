@@ -503,8 +503,8 @@ async fn failed_attach_keeps_drop_fallback_and_allows_next_dispatch() {
     assert_eq!(running.results[0].state, UserInputState::Dispatching);
 
     // 持锁让 schedule_mailbox 的任务停在 attach 之前，保证随后的暂停必然命中 attach。
-    let prompt_lock = Arc::new(tokio::sync::Mutex::new(()));
-    let held = Arc::clone(&prompt_lock).lock_owned().await;
+    let prompt_lock = Arc::new(crate::host::PromptGate::new());
+    let held = prompt_lock.turn.clone().lock_owned().await;
     {
         let mut locks = harness.locks.lock().await;
         locks.insert(harness.session_id.clone(), prompt_lock);
