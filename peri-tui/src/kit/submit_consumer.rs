@@ -26,7 +26,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::acp_client::AcpTuiClient;
+use crate::acp_client::{AcpTuiClient, AdmissionGuard, AdmissionRoute};
 use crate::i18n;
 use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch};
 use crate::kit::atoms::{
@@ -48,26 +48,127 @@ type SessionIdentity = (String, u64);
 
 /// 提交车道键。
 ///
-/// `Initializing` 承载「入队时尚无稳定会话」的提交；会话建立后它继续作为该
-/// 会话的车道被后续消息复用，保证初始化期间排队的消息不会被后来者越过。
+/// 尚未落定身份的提交按 cohort 串行；落定后仍留在 cohort 车道，直到该 cohort
+/// 的队列排空，保证后来者不会越过仍在排队的前序消息。
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum LaneKey {
-    Initializing,
+    Cohort(CohortKey),
     Session(SessionIdentity),
 }
 
-/// 初始化车道共享的采纳槽：首个提交建立/发现会话后写入身份。
-type InitAdoption = Arc<Mutex<Option<SessionIdentity>>>;
+/// cohort 的队列键：同一次初始化/切换期间入队的提交共享车道。
+///
+/// generation 是生命周期路由的代际：观察到 `Transitioning { generation }` 的
+/// cohort，切换落定后必然对应同代际的 `Stable`。加载预约尚未进入 transition，
+/// 因此按预约时的决策序号区分，避免和历史切换车道混在一起（P2）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum CohortKey {
+    Generation(u64),
+    PendingSwitch(u64),
+}
+
+/// cohort 的身份落定状态。
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CohortState {
+    /// 尚未落定；同 cohort 的首条提交负责解析。
+    Pending,
+    /// 已落定；后续成员复用它。
+    Adopted(SessionIdentity),
+    /// 身份已失效：剩余成员全部取消，不得把空槽当作「可重新初始化」。
+    Cancelled,
+}
+
+/// cohort 的会话解析语义。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CohortMode {
+    /// 入队时没有会话：允许在 cohort 仍有效时建立会话。
+    Establish,
+    /// 入队时切换已预约/进行中：只等待它落定，绝不代用户新建。
+    Await,
+}
+
+/// 一个等待落定身份的 cohort。
+struct CohortEntry {
+    state: Arc<Mutex<CohortState>>,
+    mode: CohortMode,
+    /// 入队时的用户会话决策序号；变化即表示本 cohort 已被新决定取代。
+    switch_seq: u64,
+    /// 落定后应出现的 Stable generation，用于把落定前入队的提交并回同一车道。
+    expected_generation: u64,
+}
+
+impl CohortEntry {
+    fn new(mode: CohortMode, switch_seq: u64, expected_generation: u64) -> Self {
+        Self {
+            state: Arc::new(Mutex::new(CohortState::Pending)),
+            mode,
+            switch_seq,
+            expected_generation,
+        }
+    }
+
+    fn ticket(&self) -> CohortTicket {
+        CohortTicket {
+            state: Arc::clone(&self.state),
+            mode: self.mode,
+            switch_seq: self.switch_seq,
+        }
+    }
+
+    /// 该 cohort 是否接受这条稳定身份（落定前/落定后都要并入同一条车道）。
+    fn accepts(&self, identity: &SessionIdentity, switch_seq: u64) -> bool {
+        if self.switch_seq != switch_seq {
+            return false;
+        }
+        match &*self.state.lock().unwrap() {
+            CohortState::Adopted(adopted) => adopted == identity,
+            CohortState::Pending => self.expected_generation == identity.1,
+            CohortState::Cancelled => false,
+        }
+    }
+}
+
+/// 一条提交对 cohort 的引用。
+#[derive(Clone)]
+struct CohortTicket {
+    state: Arc<Mutex<CohortState>>,
+    mode: CohortMode,
+    switch_seq: u64,
+}
+
+impl CohortTicket {
+    fn is_cancelled(&self) -> bool {
+        matches!(&*self.state.lock().unwrap(), CohortState::Cancelled)
+    }
+
+    fn adopted(&self) -> Option<SessionIdentity> {
+        match &*self.state.lock().unwrap() {
+            CohortState::Adopted(identity) => Some(identity.clone()),
+            _ => None,
+        }
+    }
+
+    /// 永久取消本 cohort：身份一旦失效，后续成员不得重新初始化。
+    fn cancel(&self) {
+        let mut state = self.state.lock().unwrap();
+        if !matches!(&*state, CohortState::Cancelled) {
+            *state = CohortState::Cancelled;
+        }
+    }
+}
 
 /// 一条用户提交的准入信息。
 ///
-/// `binding` 是入队时的稳定会话身份；`None` 表示入队时尚无会话，由
-/// `init_adoption` 在初始化车道内采纳。控制/视图请求不构造该结构。
+/// `binding` 是入队时的稳定会话身份；`cohort` 是尚未落定身份的提交所属的
+/// 队列 cohort。控制/视图请求不构造该结构。
 #[derive(Clone)]
 struct SubmitAdmission {
     binding: Option<SessionIdentity>,
-    init_adoption: Option<InitAdoption>,
+    cohort: Option<CohortTicket>,
 }
+
+/// 提交队列的 cohort 登记表。
+type Cohorts = HashMap<CohortKey, CohortEntry>;
 
 /// 单会话提交车道：同会话按入队顺序串行，跨会话互不等待。
 ///
@@ -127,7 +228,7 @@ pub fn spawn_submit_consumer(
     tokio::spawn(async move {
         info!("kit submit_consumer: started");
         let mut lanes: SubmitLanes<LaneKey> = SubmitLanes::new();
-        let mut init_adoption: InitAdoption = Arc::new(Mutex::new(None));
+        let mut cohorts: Cohorts = Cohorts::new();
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => {
@@ -152,7 +253,8 @@ pub fn spawn_submit_consumer(
                             //
                             // 车道身份在入队时固定：切换/clear 后迟到的提交仍
                             // 留在原车道，执行前由 prompt 准入校验拒绝，不会改投
-                            // 新会话（P1）。
+                            // 新会话（P1）。身份尚未落定的提交按 cohort 分道，
+                            // 切换期间的新输入不会复用旧会话的采纳槽（P2）。
                             //
                             // 车道只服务旧服务端的直接 prompt 路径；新式服务端
                             // 由 session inbox 自管顺序与挂起注入，占用车道会让
@@ -160,56 +262,21 @@ pub fn spawn_submit_consumer(
                             // command，使其到不了注入路径。
                             let (lane, admission) = match &request {
                                 SubmitRequest::AgentText { .. } | SubmitRequest::KeepGoing => {
-                                    let binding = acp_client.stable_session_identity();
                                     if acp_client.supports_user_input_queue() {
                                         (
                                             None,
                                             Some(SubmitAdmission {
-                                                binding,
-                                                init_adoption: None,
+                                                binding: acp_client.stable_session_identity(),
+                                                cohort: None,
                                             }),
                                         )
                                     } else {
-                                        match binding {
-                                            Some(identity) => {
-                                                // 初始化车道尚未结束时，新会话消息必须
-                                                // 排在初始化消息之后，否则会越过仍在
-                                                // 排队的 m1（P2）。采纳的身份不同（例如
-                                                // /clear 已切到 B）时各走各的车道。
-                                                let adopted = init_adoption.lock().unwrap().clone();
-                                                let joins_init =
-                                                    lanes.is_active(&LaneKey::Initializing)
-                                                        && adopted.as_ref().is_none_or(
-                                                            |adopted| adopted == &identity,
-                                                        );
-                                                let admission = SubmitAdmission {
-                                                    binding: Some(identity.clone()),
-                                                    init_adoption: joins_init
-                                                        .then(|| init_adoption.clone()),
-                                                };
-                                                if joins_init {
-                                                    (Some(LaneKey::Initializing), Some(admission))
-                                                } else {
-                                                    (
-                                                        Some(LaneKey::Session(identity)),
-                                                        Some(admission),
-                                                    )
-                                                }
-                                            }
-                                            None => {
-                                                if !lanes.is_active(&LaneKey::Initializing) {
-                                                    // 旧初始化车道已结束：新消息开启新的采纳槽。
-                                                    init_adoption = Arc::new(Mutex::new(None));
-                                                }
-                                                (
-                                                    Some(LaneKey::Initializing),
-                                                    Some(SubmitAdmission {
-                                                        binding: None,
-                                                        init_adoption: Some(init_adoption.clone()),
-                                                    }),
-                                                )
-                                            }
-                                        }
+                                        cohorts.retain(|key, _| {
+                                            lanes.is_active(&LaneKey::Cohort(*key))
+                                        });
+                                        let (lane, admission) =
+                                            register_admission(&acp_client, &mut cohorts, &lanes);
+                                        (Some(lane), Some(admission))
                                     }
                                 }
                                 _ => (None, None),
@@ -238,6 +305,90 @@ pub fn spawn_submit_consumer(
             }
         }
     })
+}
+
+/// 为一条排队提交登记车道与准入信息。
+///
+/// 稳定会话上的提交直接绑定身份；会话尚未落定（无会话、切换进行中或有未消费的
+/// 加载预约）时归入对应 cohort。同一 cohort 的提交共用一条车道，落定后才按
+/// 采纳的身份继续串行——否则切换期间的新输入会复用旧会话的采纳槽（P2）。
+fn register_admission(
+    acp_client: &AcpTuiClient,
+    cohorts: &mut Cohorts,
+    lanes: &SubmitLanes<LaneKey>,
+) -> (LaneKey, SubmitAdmission) {
+    let snapshot = acp_client.session_admission_snapshot();
+    if !snapshot.pending_load
+        && let AdmissionRoute::Stable {
+            session_id,
+            generation,
+        } = &snapshot.route
+    {
+        let identity: SessionIdentity = (session_id.clone(), *generation);
+        // 身份相同就并入仍在排队的 cohort：落定前后的提交必须共用车道，
+        // 否则后来者会越过仍排队的前序消息（#210）。
+        if let Some((key, entry)) = cohorts.iter().find(|(key, entry)| {
+            entry.accepts(&identity, snapshot.switch_seq)
+                && lanes.is_active(&LaneKey::Cohort(**key))
+        }) {
+            return (
+                LaneKey::Cohort(*key),
+                SubmitAdmission {
+                    binding: Some(identity),
+                    cohort: Some(entry.ticket()),
+                },
+            );
+        }
+        return (
+            LaneKey::Session(identity.clone()),
+            SubmitAdmission {
+                binding: Some(identity),
+                cohort: None,
+            },
+        );
+    }
+
+    let (key, mode, expected_generation) = if snapshot.pending_load {
+        // 预约的 load 从当前路由代际起算：已在进行中的切换会用当前 generation
+        // 提交，尚未开始的那次则 +1。
+        let generation = match &snapshot.route {
+            AdmissionRoute::Transitioning { generation } => *generation,
+            AdmissionRoute::Stable { generation, .. }
+            | AdmissionRoute::NoSession { generation } => *generation + 1,
+        };
+        (
+            CohortKey::PendingSwitch(snapshot.switch_seq),
+            CohortMode::Await,
+            generation,
+        )
+    } else {
+        match &snapshot.route {
+            // `pending_load` 为假时不会走到稳定分支。
+            AdmissionRoute::Stable { .. } => {
+                unreachable!("stable route without pending load is handled above")
+            }
+            AdmissionRoute::Transitioning { generation } => (
+                CohortKey::Generation(*generation),
+                CohortMode::Await,
+                *generation,
+            ),
+            AdmissionRoute::NoSession { generation } => (
+                CohortKey::Generation(*generation),
+                CohortMode::Establish,
+                *generation + 1,
+            ),
+        }
+    };
+    let entry = cohorts
+        .entry(key)
+        .or_insert_with(|| CohortEntry::new(mode, snapshot.switch_seq, expected_generation));
+    (
+        LaneKey::Cohort(key),
+        SubmitAdmission {
+            binding: None,
+            cohort: Some(entry.ticket()),
+        },
+    )
 }
 
 /// 处理单条提交：确保 session 存在 → 发送 prompt。
@@ -307,8 +458,8 @@ async fn handle_agent_text_submit(
     attachments: Vec<crate::kit::atoms::PendingAttachment>,
     admission: Option<&SubmitAdmission>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // 入队时绑定的会话已切换：排队消息显式取消，不得改投新会话（P1）。
-    if session_binding_changed(acp_client, admission) {
+    // 入队时绑定的会话已切换，或所属 cohort 已作废：显式取消，不得改投新会话（P1）。
+    if admission.is_some_and(|admission| admission_invalidated(acp_client, admission)) {
         notify_cancelled_submit();
         return Ok(());
     }
@@ -324,14 +475,19 @@ async fn handle_agent_text_submit(
         return Ok(());
     }
 
-    // 初始化车道首个提交在此建立/发现会话，并把身份固定到车道；ensure_session
-    // 的 Stable 选择与启动恢复/load 共用 operation gate，晚到的 producer 不能
-    // 替换这次提交的会话。
+    // 身份在本 cohort 内落定：ensure/切换与采纳共用 operation gate，落定后
+    // 不会再读到另一个 generation（P1）。
     let Some(identity) = resolve_admission_identity(acp_client, cwd, admission).await? else {
         notify_cancelled_submit();
         return Ok(());
     };
+    #[cfg(test)]
+    admission_probe::pause(&identity).await;
     if acp_client.stable_session_identity().as_ref() != Some(&identity) {
+        // 身份在落定后被切走：本 cohort 剩余消息都必须取消，不能重新初始化。
+        if let Some(cohort) = admission.and_then(|admission| admission.cohort.as_ref()) {
+            cohort.cancel();
+        }
         notify_cancelled_submit();
         return Ok(());
     }
@@ -377,6 +533,9 @@ async fn handle_agent_text_submit(
         reset_failed_prompt(&identity.0, &request_id);
         if e.code == crate::acp_client::SESSION_BINDING_CHANGED_CODE {
             // 准入时身份已变化：显式取消并反馈，绝不改投。
+            if let Some(cohort) = admission.and_then(|admission| admission.cohort.as_ref()) {
+                cohort.cancel();
+            }
             notify_cancelled_submit();
             return Ok(());
         }
@@ -396,53 +555,64 @@ async fn handle_agent_text_submit(
     Ok(())
 }
 
-/// 提交在入队时绑定的身份是否已经失效。
-fn session_binding_changed(acp_client: &AcpTuiClient, admission: Option<&SubmitAdmission>) -> bool {
-    admission_identity(admission)
-        .is_some_and(|binding| acp_client.stable_session_identity().as_ref() != Some(&binding))
-}
-
-/// 已确定的提交身份：显式绑定优先，其次是初始化车道采纳的会话。
-fn admission_identity(admission: Option<&SubmitAdmission>) -> Option<SessionIdentity> {
-    let admission = admission?;
-    admission.binding.clone().or_else(|| {
-        admission
-            .init_adoption
-            .as_ref()
-            .and_then(|slot| slot.lock().unwrap().clone())
-    })
+/// 提交的准入是否已经失效：所属 cohort 已作废，或绑定身份已不是当前稳定会话。
+fn admission_invalidated(acp_client: &AcpTuiClient, admission: &SubmitAdmission) -> bool {
+    if admission
+        .cohort
+        .as_ref()
+        .is_some_and(CohortTicket::is_cancelled)
+    {
+        return true;
+    }
+    admission
+        .binding
+        .as_ref()
+        .is_some_and(|binding| acp_client.stable_session_identity().as_ref() != Some(binding))
 }
 
 /// 解析本次提交实际要写入的会话身份。
 ///
-/// 已绑定提交直接沿用入队身份；初始化车道的首个提交调用 `ensure_session`
-/// 建立/发现会话后把身份写入车道采纳槽，后续同车道消息复用它。
-/// `None` 表示 ensure 期间会话已被其他操作切换，调用方必须显式取消。
+/// 已绑定提交直接沿用入队身份；尚未落定的提交由所属 cohort 的首条成员在
+/// 生命周期同步内确定完整身份并写回 cohort，后续成员复用它。
+/// `None` 表示身份已失效（切换取代/落定失败），调用方必须显式取消。
 async fn resolve_admission_identity(
     acp_client: &AcpTuiClient,
     cwd: &str,
     admission: Option<&SubmitAdmission>,
 ) -> Result<Option<SessionIdentity>, Box<dyn std::error::Error + Send + Sync>> {
-    if let Some(identity) = admission_identity(admission) {
-        return Ok(Some(identity));
+    let Some(admission) = admission else {
+        // 无准入信息（直接调用方）：按首次提交处理，身份不再跨临界区重读。
+        return Ok(Some(acp_client.ensure_session_identity(cwd, None).await?));
+    };
+    if let Some(binding) = &admission.binding {
+        return Ok(Some(binding.clone()));
     }
-
-    info!(cwd = %cwd, "kit submit_consumer: ensuring session");
-    let session_id = acp_client.ensure_session(cwd, None).await?;
-    let Some(identity) = acp_client
-        .stable_session_identity()
-        .filter(|(stable_id, _)| stable_id == &session_id)
-    else {
+    let Some(cohort) = &admission.cohort else {
         return Ok(None);
     };
-    if let Some(slot) = admission.and_then(|admission| admission.init_adoption.as_ref()) {
-        let mut adopted = slot.lock().unwrap();
-        // 同车道串行执行，正常情况下只有首个提交会走到这里。
-        if adopted.is_none() {
-            *adopted = Some(identity.clone());
-        }
+    match &*cohort.state.lock().unwrap() {
+        CohortState::Adopted(identity) => return Ok(Some(identity.clone())),
+        CohortState::Cancelled => return Ok(None),
+        CohortState::Pending => {}
     }
-    Ok(Some(identity))
+
+    info!(cwd = %cwd, "kit submit_consumer: resolving session admission");
+    let allow_create = matches!(cohort.mode, CohortMode::Establish);
+    let guard = AdmissionGuard::new(cohort.switch_seq, allow_create);
+    let mut resolved = None;
+    acp_client
+        .resolve_session_admission(cwd, guard, |identity| {
+            let mut state = cohort.state.lock().unwrap();
+            match identity {
+                Some(identity) => {
+                    resolved = Some(identity.clone());
+                    *state = CohortState::Adopted(identity.clone());
+                }
+                None => *state = CohortState::Cancelled,
+            }
+        })
+        .await?;
+    Ok(resolved)
 }
 
 /// 会话切换导致排队提交被取消时的用户可见反馈。
@@ -466,9 +636,13 @@ async fn handle_keepgoing_submit(
     _cwd: &str,
     admission: Option<&SubmitAdmission>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if admission.is_some_and(|admission| admission_invalidated(acp_client, admission)) {
+        notify_cancelled_submit();
+        return Ok(());
+    }
     let adopted = admission
-        .and_then(|admission| admission.init_adoption.as_ref())
-        .and_then(|slot| slot.lock().unwrap().clone());
+        .and_then(|admission| admission.cohort.as_ref())
+        .and_then(CohortTicket::adopted);
     let expected = admission
         .and_then(|admission| admission.binding.clone())
         .or(adopted)
@@ -479,6 +653,9 @@ async fn handle_keepgoing_submit(
         return Ok(());
     };
     if acp_client.stable_session_identity().as_ref() != Some(&identity) {
+        if let Some(cohort) = admission.and_then(|admission| admission.cohort.as_ref()) {
+            cohort.cancel();
+        }
         notify_cancelled_submit();
         return Ok(());
     }
@@ -520,6 +697,9 @@ async fn handle_keepgoing_submit(
         warn!(session_id = %identity.0, request_id = %request_id, error = ?e, "kit submit_consumer: keepgoing prompt RPC failed");
         reset_failed_prompt(&identity.0, &request_id);
         if e.code == crate::acp_client::SESSION_BINDING_CHANGED_CODE {
+            if let Some(cohort) = admission.and_then(|admission| admission.cohort.as_ref()) {
+                cohort.cancel();
+            }
             notify_cancelled_submit();
             return Ok(());
         }
@@ -752,6 +932,43 @@ pub fn spawn_cancel_consumer(
             }
         }
     })
+}
+
+/// 测试用可控断点：在身份落定与准入校验之间暂停指定会话的提交。
+///
+/// 覆盖「ensure 选 A 之后、发送之前切换/重载」的窗口；生产构建不编译。
+#[cfg(test)]
+mod admission_probe {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use tokio::sync::{mpsc, oneshot};
+
+    static PROBE: Mutex<Option<(String, mpsc::UnboundedSender<oneshot::Sender<()>>)>> =
+        Mutex::new(None);
+
+    pub(super) fn install(session_id: &str, tx: mpsc::UnboundedSender<oneshot::Sender<()>>) {
+        *PROBE.lock().unwrap() = Some((session_id.to_string(), tx));
+    }
+
+    pub(super) fn clear() {
+        *PROBE.lock().unwrap() = None;
+    }
+
+    pub(super) async fn pause(identity: &super::SessionIdentity) {
+        let probe = PROBE.lock().unwrap().clone();
+        let Some((session_id, tx)) = probe else {
+            return;
+        };
+        if session_id != identity.0 {
+            return;
+        }
+        let (release, wait) = oneshot::channel();
+        if tx.send(release).is_ok() {
+            // 测试挂死比断言失败更难排查：断点自带上限。
+            let _ = tokio::time::timeout(Duration::from_secs(5), wait).await;
+        }
+    }
 }
 
 #[cfg(test)]

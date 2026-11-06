@@ -65,6 +65,18 @@ impl SessionRoute {
     }
 }
 
+/// 队列准入观察到的会话路由。
+///
+/// `generation` 在每次切换/建立时递增且提交时复用同一个值：轮询到
+/// `Transitioning { generation }` 的提交，切换落定后必然看到同 generation 的
+/// `Stable`。队列据此把「切换期间的新输入」与「切换前的旧 session 车道」区分开。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AdmissionRoute {
+    Stable { session_id: String, generation: u64 },
+    Transitioning { generation: u64 },
+    NoSession { generation: u64 },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InteractionOwner {
     pub client_instance_id: u64,
@@ -290,6 +302,28 @@ impl InteractionLifecycle {
                 ..
             } => Some((session_id.clone(), *generation)),
             _ => None,
+        }
+    }
+
+    /// 提交准入看到的路由快照（含 generation），一次加锁读出。
+    pub(crate) fn admission_route(&self) -> AdmissionRoute {
+        match &self.state.lock().unwrap().route {
+            SessionRoute::Stable {
+                session_id,
+                generation,
+                ..
+            } => AdmissionRoute::Stable {
+                session_id: session_id.clone(),
+                generation: *generation,
+            },
+            SessionRoute::Transitioning { generation, .. } => AdmissionRoute::Transitioning {
+                generation: *generation,
+            },
+            SessionRoute::Bootstrapping { generation } | SessionRoute::NoSession { generation } => {
+                AdmissionRoute::NoSession {
+                    generation: *generation,
+                }
+            }
         }
     }
 
