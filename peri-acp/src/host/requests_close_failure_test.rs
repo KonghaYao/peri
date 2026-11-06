@@ -524,6 +524,81 @@ async fn queued_prompt_cannot_overtake_a_waiting_close() {
     );
 }
 
+/// 已通过准入、但尚未开跑的轮次必须能被 close 取消：令牌在准入段与关闭闸门
+/// 同锁发布，close 取消后由执行前复核终止本轮（#196 P2）。
+///
+/// 判据：close 不超时且成功移除会话；prompt 被拒绝，不得开跑第二轮。
+#[tokio::test]
+async fn admitted_prompt_is_cancelled_by_close_before_it_runs() {
+    let harness = CloseHarness::new(CloseFault::None).await;
+    // 先跑完一轮，令牌在收尾时清除；第二轮才暴露「准入后、开跑前」的窗口。
+    let first = harness.prompt().await.expect("第一轮必须成功");
+    assert_eq!(first["stopReason"], "end_turn", "{first}");
+    assert!(
+        harness.sessions.lock().await[&harness.sid]
+            .cancel_token
+            .is_none(),
+        "正常收尾必须清除本轮令牌"
+    );
+
+    let gate =
+        crate::host::prompt_dispatch::admission_gate::install(&format!("{}:admitted", harness.sid));
+    let prompt = {
+        let client = Arc::clone(&harness.client);
+        let sid = harness.sid.clone();
+        tokio::spawn(async move {
+            client
+                .send_request(
+                    "session/prompt",
+                    json!({
+                        "sessionId": sid,
+                        "prompt": [{ "type": "text", "text": "第二轮" }],
+                    }),
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), gate.entered.notified())
+        .await
+        .expect("第二轮 prompt 必须到达准入后的暂停点");
+
+    let close = {
+        let client = Arc::clone(&harness.client);
+        let sid = harness.sid.clone();
+        tokio::spawn(async move {
+            client
+                .send_request("session/close", json!({ "sessionId": sid }))
+                .await
+        })
+    };
+    // close 置闸门并取消本轮令牌后，再放行暂停的 prompt。
+    wait_until(&harness, "close 置等锁闸门", |state| {
+        state.close_in_flight > 0
+    })
+    .await;
+    gate.release.notify_one();
+
+    let prompt_result = tokio::time::timeout(std::time::Duration::from_secs(10), prompt)
+        .await
+        .expect("prompt 任务不得挂起")
+        .expect("prompt 任务不得 panic");
+    let close_result = tokio::time::timeout(std::time::Duration::from_secs(10), close)
+        .await
+        .expect("close 不得等满 5s 预算")
+        .expect("close 任务不得 panic");
+    let error = prompt_result.expect_err("已准入但未开跑的轮次必须被 close 取消");
+    assert_eq!(error.code, -32010, "{error:?}");
+    assert!(
+        error.message.contains("Session is closing"),
+        "拒绝原因必须指明关闭：{error:?}"
+    );
+    close_result.expect("close 不得被已准入的 prompt 拖到超时");
+    assert!(
+        !harness.sessions.lock().await.contains_key(&harness.sid),
+        "关闭成功后内存会话必须移除"
+    );
+}
+
 /// 轮询会话态直到条件成立（有界等待，避免用例自身无限阻塞）。
 async fn wait_until(
     harness: &CloseHarness,

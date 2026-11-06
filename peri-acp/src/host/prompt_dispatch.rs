@@ -185,9 +185,9 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     // empty container.
     let _guard = prompt_lock.lock().await;
     {
-        let sessions = sessions.lock().await;
+        let mut sessions = sessions.lock().await;
         let state = sessions
-            .get(&prompt_session_id)
+            .get_mut(&prompt_session_id)
             .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
         if state.closing || state.close_in_flight > 0 {
             return Err(AcpError::new(-32010, "Session is closing"));
@@ -199,8 +199,20 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         {
             return Err(AcpError::new(-32010, "Session runtime is no longer active"));
         }
+        // 准入闸门与令牌发布必须同锁：close 先置闸门再取消令牌，若令牌还没发布
+        // 就无从取消，已准入的轮次会在关闭等锁期间开跑并把 close 拖到超时
+        // （#196 P2）。epoch 入口（续跑 / 定时）在下方提交段原子发布令牌；
+        // 用户 prompt 与队列输入在这里发布。
+        if continuation_epoch.is_none() {
+            state.cancel_token = Some(tokio_util::sync::CancellationToken::new());
+        }
     }
-    super::workspace::validate_expected(cfg, &prompt_session_id, None).await?;
+    #[cfg(test)]
+    admission_gate::wait(&format!("{prompt_session_id}:admitted")).await;
+    if let Err(error) = super::workspace::validate_expected(cfg, &prompt_session_id, None).await {
+        rollback_turn_admission(sessions, &prompt_session_id, is_continuation).await;
+        return Err(error);
+    }
     if let Some(epoch) = continuation_epoch {
         #[cfg(test)]
         admission_gate::wait(&prompt_session_id).await;
@@ -324,7 +336,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             .map(|state| state.thread_id.clone())
     };
     let Some(thread_id) = thread_id else {
-        rollback_continuation_admission(sessions, &prompt_session_id, is_continuation).await;
+        rollback_turn_admission(sessions, &prompt_session_id, is_continuation).await;
         return Err(work_intent_error(
             None,
             "session thread identity is missing".to_owned(),
@@ -340,7 +352,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             super::recovery::register_recovered_child_for_turn(cfg, sessions, &prompt_session_id)
                 .await
         {
-            rollback_continuation_admission(sessions, &prompt_session_id, is_continuation).await;
+            rollback_turn_admission(sessions, &prompt_session_id, is_continuation).await;
             if recovery_origin {
                 mark_recovery_launch_failed(cfg, &prompt_session_id);
             }
@@ -358,7 +370,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         .set_work_state(&thread, WorkState::Working)
         .await
     {
-        rollback_continuation_admission(sessions, &prompt_session_id, is_continuation).await;
+        rollback_turn_admission(sessions, &prompt_session_id, is_continuation).await;
         // 已登记但尚未开始执行的父任务必须收尾；没有投递时是 no-op。
         super::recovery::abort_recovery_launch(cfg, &prompt_session_id);
         if recovery_origin {
@@ -561,19 +573,22 @@ fn mark_recovery_launch_failed(cfg: &AcpServerConfig, session_id: &str) {
     }
 }
 
-/// 回滚本轮 continuation 准入时设置的内存标记；用户 prompt 路径无事可做。
-async fn rollback_continuation_admission(
+/// 回滚本轮在准入段发布的内存标记。
+///
+/// 用户 prompt 与队列输入在准入段发布 `cancel_token`（与关闭闸门同锁），续跑
+/// 入口额外持有 `continuation_in_flight`。任何在 `run_prompt` 之前的确定性失败
+/// 都必须在释放 prompt lock 前撤销，否则关闭/恢复会把从未开跑的轮次误判为在飞。
+async fn rollback_turn_admission(
     sessions: &SharedSessions,
     session_id: &str,
     is_continuation: bool,
 ) {
-    if !is_continuation {
-        return;
-    }
     let mut sessions = sessions.lock().await;
     if let Some(state) = sessions.get_mut(session_id) {
-        state.continuation_in_flight = false;
         state.cancel_token = None;
+        if is_continuation {
+            state.continuation_in_flight = false;
+        }
     }
 }
 

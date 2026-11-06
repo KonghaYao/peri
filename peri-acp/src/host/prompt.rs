@@ -301,11 +301,14 @@ async fn run_prompt_attempt(
     // Create cancel token and register in sessions.
     // `AgentCancellationToken` 即 `tokio_util::sync::CancellationToken` 别名
     // （peri-agent re-export；ACP 协议面直接使用底层类型，不经业务 crate）。
+    //
+    // 令牌在准入段（用户 prompt / 队列输入）或续跑提交段（epoch 入口）就与关闭
+    // 闸门同锁发布；这里只复用，绝不能再新建独立令牌，否则 close 取消不到本轮，
+    // 已准入的轮次会在关闭等锁期间开跑（#196 P2）。
     let cancel = {
         let sessions = sessions.lock().await;
         sessions
             .get(&session_id)
-            .filter(|state| continuation && state.continuation_in_flight)
             .and_then(|state| state.cancel_token.clone())
             .unwrap_or_default()
     };
@@ -396,6 +399,16 @@ async fn run_prompt_attempt(
         }
         if state.event_health().dirty {
             tracing::warn!(session_id = %session_id, "会话事件视图仍需重同步；开始新轮次不会清除丢失记录");
+        }
+        // 已准入但尚未开跑：关闭闸门必须在这里终止本轮，不能再把正文交给
+        // 执行器。令牌与闸门在准入段同锁发布，close 已经取消过它；继续开跑会让
+        // close 等一个它以为已经中断的 turn（#196 P2）。轮次级 Stop 不走这里：
+        // 已取消的令牌交给执行器，按既有语义收尾为 cancelled 而不是请求错误。
+        if state.closing || state.close_in_flight > 0 {
+            return Err(AcpError::new(
+                -32010,
+                "Session is closing before prompt execution",
+            ));
         }
         state.cancel_token = Some(cancel.clone());
         // 正文所有权在短锁内移交给执行器：Host 不再保留一份“以防万一”的全文。
