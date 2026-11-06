@@ -432,12 +432,10 @@ fn render_browse(
             i18n::tr("setup-field-sonnet"),
             i18n::tr("setup-field-haiku"),
         ];
+        // 模型别名可含 CJK/emoji：按显示宽度截断，避免按字节索引切在字符内部。
+        const ALIAS_MAX_WIDTH: usize = 40;
         for (ai, label) in alias_labels.iter().enumerate() {
-            let model_text = if mp.aliases[ai].len() > 40 {
-                format!("{}...", &mp.aliases[ai][..37])
-            } else {
-                mp.aliases[ai].clone()
-            };
+            let model_text = crate::truncate::truncate_by_width(&mp.aliases[ai], ALIAS_MAX_WIDTH);
             lines.push(Line::from(vec![
                 Span::styled("     ", Style::default()),
                 Span::styled(format!("{} → ", label), Style::default().fg(dim)),
@@ -788,3 +786,7 @@ pub(super) fn render_done_step(
     }
     ("setup-complete-title".to_string(), lines)
 }
+
+#[cfg(test)]
+#[path = "render_test.rs"]
+mod render_test;

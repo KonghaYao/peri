@@ -124,7 +124,8 @@ mod real_http_round_trip {
     use peri_agent::tools::{BaseTool, ToolContext};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use crate::web_fetch::{read_body_capped, WebFetchTool};
+    use crate::web_common::read_body_capped;
+    use crate::web_fetch::WebFetchTool;
 
     /// 合法的 Tavily /extract 响应：**故意不含** `failed_results` —— 生产结构
     /// （`web_fetch.rs` 的 `TavilyExtractResponse`）上有 `#[serde(default)]`，
@@ -368,7 +369,7 @@ mod real_http_round_trip {
             .expect("本地桩必须返回响应");
         assert!(resp.content_length().is_none(), "桩不得声明 Content-Length");
 
-        let err = read_body_capped(resp, 16)
+        let err = read_body_capped(resp, 16, "Extract")
             .await
             .expect_err("流式正文超过 cap 必须失败");
         assert!(err.contains("exceeds"), "实际错误：{err}");
@@ -384,7 +385,7 @@ mod real_http_round_trip {
             .await
             .expect("本地桩必须返回响应");
 
-        let body = read_body_capped(resp, 32)
+        let body = read_body_capped(resp, 32, "Extract")
             .await
             .expect("恰好等于 cap 的正文必须接受");
         assert_eq!(body.len(), 32);

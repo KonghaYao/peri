@@ -51,10 +51,10 @@ impl WriteFileTool {
     ) -> Result<usize, CommitError> {
         with_target_lock(target, |locked| {
             let pre = locked.read_pre().map_err(CommitError::Io)?;
-            let pre = pre.unwrap_or_default();
+            let existing = pre.as_deref().unwrap_or_default();
             let post = if append {
-                let mut post = Vec::with_capacity(pre.len() + content.len());
-                post.extend_from_slice(&pre);
+                let mut post = Vec::with_capacity(existing.len() + content.len());
+                post.extend_from_slice(existing);
                 post.extend_from_slice(content.as_bytes());
                 post
             } else {
@@ -62,7 +62,7 @@ impl WriteFileTool {
             };
             let total_lines = post.split(|byte| *byte == b'\n').count()
                 - usize::from(post.last() == Some(&b'\n'));
-            locked.guard_and_commit(&pre, &post)?;
+            locked.guard_and_commit(pre, post)?;
             Ok(total_lines)
         })
     }

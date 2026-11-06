@@ -244,9 +244,9 @@ impl WorkflowRuntime {
                 .clone()
                 .unwrap_or_else(|| cancelled_delivery_result(record));
             // tool 计数与投递同点（任务终态先提交后投递）：计数只影响 run 终态投影，
-            // 不改变已提交结果（design §5.2 第 5 条 limits 计费）。
+            // 不改变已提交结果（design §5.2 第 5 条 limits 计费）；重复回投按 taskId 去重。
             if let Some(count) = result.tool_count() {
-                runner.note_task_tool_calls(&record.run_id, count);
+                runner.note_task_tool_calls(&record.run_id, &record.task_id, count);
             }
             runner.deliver_agent_result(&record.run_id, &record.task_id, &result);
         }));

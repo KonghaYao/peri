@@ -1,7 +1,7 @@
 use peri_acp_types::tools::ToolContext;
 use rmcp::model::RequestMetaObject;
 
-pub(crate) const INVOCATION_META_KEY: &str = "peri.invocation";
+pub(crate) use peri_mcp_core::invocation::INVOCATION_META_KEY;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum InvocationError {
