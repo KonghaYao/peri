@@ -189,7 +189,7 @@ mod real_http_round_trip {
     use peri_agent::tools::{BaseTool, ToolContext};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use crate::web_search::{WebSearchTool, REQUEST_TIMEOUT};
+    use crate::web_search::{WebSearchTool, MAX_RESPONSE_BYTES, REQUEST_TIMEOUT};
 
     /// 合法的 Tavily /search 响应：字段对齐 `web_search.rs` 的私有
     /// `TavilySearchResponse`（`results[]` 的 `title` / `url` 必填、`content` 可空；
@@ -212,13 +212,75 @@ mod real_http_round_trip {
         ]
     }"#;
 
+    /// 读走请求头（到首个空行为止），返回其原文。
+    async fn read_request_head(socket: &mut tokio::net::TcpStream) -> String {
+        let mut received = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            match socket.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    received.extend_from_slice(&chunk[..read]);
+                    if received.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+            }
+        }
+        String::from_utf8_lossy(&received).into_owned()
+    }
+
     /// 本地回环 HTTP 桩：接受一次连接，读到请求头后回一段固定原文响应。
     ///
     /// 返回 `(base_url, 请求头任务)`；任务的值是请求头原文，供断言请求行与「不发
     /// auth header」，**不得**打印（§9 规则 7：不打印 headers）。
     async fn spawn_response_stub(
         status_line: &'static str,
-        body: &'static str,
+        body: impl Into<String>,
+    ) -> (String, tokio::task::JoinHandle<String>) {
+        let body = body.into();
+        let declared = body.len();
+        spawn_response_stub_with_length(status_line, body, Some(declared)).await
+    }
+
+    /// 同 [`spawn_response_stub`]，可声明与实际正文不同的 `Content-Length`。
+    async fn spawn_response_stub_with_length(
+        status_line: &'static str,
+        body: impl Into<String>,
+        declared_content_length: Option<usize>,
+    ) -> (String, tokio::task::JoinHandle<String>) {
+        let body = body.into();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("本地桩必须能绑定回环端口");
+        let port = listener.local_addr().expect("本地桩地址可读").port();
+        let handle = tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return String::new();
+            };
+            let head = read_request_head(&mut socket).await;
+            let response = match declared_content_length {
+                Some(len) => format!(
+                    "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}"
+                ),
+                None => format!(
+                    "{status_line}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{body}"
+                ),
+            };
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.flush().await;
+            head
+        });
+        (format!("http://127.0.0.1:{port}"), handle)
+    }
+
+    /// 不声明 `Content-Length`、以 `Connection: close` 流式发送 `body_len` 字节的桩。
+    ///
+    /// 正文按块生成，避免测试进程自身分配与上限同量级的内存，从而只验证客户端侧
+    /// 的流式累计上限。
+    async fn spawn_streaming_stub(
+        status_line: &'static str,
+        body_len: usize,
     ) -> (String, tokio::task::JoinHandle<String>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -228,25 +290,22 @@ mod real_http_round_trip {
             let Ok((mut socket, _)) = listener.accept().await else {
                 return String::new();
             };
-            let mut received = Vec::new();
-            let mut chunk = [0u8; 1024];
-            loop {
-                match socket.read(&mut chunk).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(read) => {
-                        received.extend_from_slice(&chunk[..read]);
-                        if received.windows(4).any(|window| window == b"\r\n\r\n") {
-                            break;
-                        }
-                    }
-                }
-            }
-            let head = String::from_utf8_lossy(&received).into_owned();
-            let response = format!(
-                "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
+            let head = read_request_head(&mut socket).await;
+            let response_head = format!(
+                "{status_line}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n"
             );
-            let _ = socket.write_all(response.as_bytes()).await;
+            if socket.write_all(response_head.as_bytes()).await.is_err() {
+                return head;
+            }
+            let block = [b'x'; 64 * 1024];
+            let mut sent = 0;
+            while sent < body_len {
+                let len = (body_len - sent).min(block.len());
+                if socket.write_all(&block[..len]).await.is_err() {
+                    break;
+                }
+                sent += len;
+            }
             let _ = socket.flush().await;
             head
         });
@@ -315,6 +374,109 @@ mod real_http_round_trip {
         assert!(
             output.contains("2. **Learn Rust** (https://doc.rust-lang.org/book/)"),
             "content: null 的第二条仍须出标题行；实际: {output}"
+        );
+    }
+
+    /// 声明超过上限的 `Content-Length` 在读取正文前快速失败（issue #208）。
+    #[tokio::test]
+    async fn test_websearch_invoke_rejects_declared_content_length_over_cap() {
+        let declared = MAX_RESPONSE_BYTES as usize + 1;
+        let (base_url, _head) =
+            spawn_response_stub_with_length("HTTP/1.1 200 OK", "{}", Some(declared)).await;
+        let tool = WebSearchTool::with_endpoint_for_test(&base_url);
+
+        let err = tool
+            .invoke(
+                serde_json::json!({"query": "rust"}),
+                ToolContext::new(&[], "."),
+            )
+            .await
+            .expect_err("Content-Length 超限必须失败");
+
+        let text = err.to_string();
+        assert!(text.contains("exceeds"), "应报告超限：{text}");
+        assert!(
+            text.contains(&declared.to_string()),
+            "应包含声明长度：{text}"
+        );
+        assert!(
+            !text.contains("Failed to parse search response"),
+            "必须在 JSON 解析前失败：{text}"
+        );
+    }
+
+    /// 无 `Content-Length` 时以流式累计为准：超过上限立即失败（issue #208）。
+    #[tokio::test]
+    async fn test_websearch_invoke_rejects_stream_over_cap_without_content_length() {
+        let (base_url, _head) =
+            spawn_streaming_stub("HTTP/1.1 200 OK", MAX_RESPONSE_BYTES as usize + 1).await;
+        let tool = WebSearchTool::with_endpoint_for_test(&base_url);
+
+        let err = tool
+            .invoke(
+                serde_json::json!({"query": "rust"}),
+                ToolContext::new(&[], "."),
+            )
+            .await
+            .expect_err("无 Content-Length 的超限响应必须失败");
+
+        let text = err.to_string();
+        assert!(
+            text.contains(&format!(
+                "Search response exceeds {MAX_RESPONSE_BYTES} byte limit"
+            )),
+            "必须由流式累计判定超限：{text}"
+        );
+    }
+
+    /// 非 2xx 分支同样受响应体上限约束，不能无界读取错误正文（issue #208）。
+    #[tokio::test]
+    async fn test_websearch_invoke_non_2xx_declared_length_over_cap_is_rejected() {
+        let (base_url, _head) = spawn_response_stub_with_length(
+            "HTTP/1.1 502 Bad Gateway",
+            "{}",
+            Some(MAX_RESPONSE_BYTES as usize + 1),
+        )
+        .await;
+        let tool = WebSearchTool::with_endpoint_for_test(&base_url);
+
+        let err = tool
+            .invoke(
+                serde_json::json!({"query": "rust"}),
+                ToolContext::new(&[], "."),
+            )
+            .await
+            .expect_err("非 2xx 的超限正文必须失败");
+
+        assert!(err.to_string().contains("exceeds"), "应报告超限：{err}");
+    }
+
+    /// `num_results` 只是请求参数；后端多返回时只渲染请求数量（issue #208）。
+    #[tokio::test]
+    async fn test_websearch_renders_at_most_requested_result_count() {
+        const THREE_RESULTS: &str = r#"{
+            "results": [
+                {"title": "One", "url": "https://one.example/", "content": "first"},
+                {"title": "Two", "url": "https://two.example/", "content": "second"},
+                {"title": "Three", "url": "https://three.example/", "content": "third"}
+            ]
+        }"#;
+        let (base_url, _head) = spawn_response_stub("HTTP/1.1 200 OK", THREE_RESULTS).await;
+        let tool = WebSearchTool::with_endpoint_for_test(&base_url);
+
+        let output = tool
+            .invoke(
+                serde_json::json!({"query": "rust", "num_results": 2}),
+                ToolContext::new(&[], "."),
+            )
+            .await
+            .expect("合法响应必须成功");
+
+        assert!(output.contains("1. **One**"), "实际: {output}");
+        assert!(output.contains("2. **Two**"), "实际: {output}");
+        assert!(
+            !output.contains("**Three**"),
+            "超过请求数量的结果不得渲染：{output}"
         );
     }
 
