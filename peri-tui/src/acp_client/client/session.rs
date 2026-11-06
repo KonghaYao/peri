@@ -558,6 +558,29 @@ impl AcpTuiClient {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// 当前用户会话决策序号；队列提交用它快照入队时的意图。
+    pub(crate) fn session_switch_seq(&self) -> u64 {
+        self.current_session_switch_seq()
+    }
+
+    /// 无车道的未绑定提交（新式服务端的远程命令）：在决策守卫下建立/等待会话。
+    ///
+    /// 与 cohort 解析共用同一入口：决策序号一旦变化即返回 `None`，绝不把命令
+    /// 改投到此后才建立的会话。
+    pub(crate) async fn resolve_unbound_admission(
+        &self,
+        cwd: &str,
+        switch_seq: u64,
+    ) -> Result<Option<(String, u64)>, AcpError> {
+        self.ensure_session_inner(
+            cwd,
+            None,
+            Some(AdmissionGuard::new(switch_seq, true)),
+            |_| {},
+        )
+        .await
+    }
+
     fn bump_session_switch_seq(&self) {
         self.session_switch_seq
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);

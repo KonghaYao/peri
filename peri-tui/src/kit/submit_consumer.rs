@@ -160,11 +160,13 @@ impl CohortTicket {
 /// 一条用户提交的准入信息。
 ///
 /// `binding` 是入队时的稳定会话身份；`cohort` 是尚未落定身份的提交所属的
-/// 队列 cohort。控制/视图请求不构造该结构。
+/// 队列 cohort。新式服务端不占车道，无稳定会话的远程命令改用
+/// `unbound_switch_seq` 在决策守卫下建立/等待会话。控制/视图请求不构造该结构。
 #[derive(Clone)]
 struct SubmitAdmission {
     binding: Option<SessionIdentity>,
     cohort: Option<CohortTicket>,
+    unbound_switch_seq: Option<u64>,
 }
 
 /// 提交队列的 cohort 登记表。
@@ -263,11 +265,18 @@ pub fn spawn_submit_consumer(
                             let (lane, admission) = match &request {
                                 SubmitRequest::AgentText { .. } | SubmitRequest::KeepGoing => {
                                     if acp_client.supports_user_input_queue() {
+                                        // 新式服务端不占车道，但远程命令仍可能
+                                        // 在没有会话时提交：无稳定身份就记下决策
+                                        // 序号，稍后在守卫下建立/等待会话。
+                                        let binding = acp_client.stable_session_identity();
+                                        let unbound_switch_seq =
+                                            binding.is_none().then(|| acp_client.session_switch_seq());
                                         (
                                             None,
                                             Some(SubmitAdmission {
-                                                binding: acp_client.stable_session_identity(),
+                                                binding,
                                                 cohort: None,
+                                                unbound_switch_seq,
                                             }),
                                         )
                                     } else {
@@ -336,6 +345,7 @@ fn register_admission(
                 SubmitAdmission {
                     binding: Some(identity),
                     cohort: Some(entry.ticket()),
+                    unbound_switch_seq: None,
                 },
             );
         }
@@ -344,6 +354,7 @@ fn register_admission(
             SubmitAdmission {
                 binding: Some(identity),
                 cohort: None,
+                unbound_switch_seq: None,
             },
         );
     }
@@ -387,6 +398,7 @@ fn register_admission(
         SubmitAdmission {
             binding: None,
             cohort: Some(entry.ticket()),
+            unbound_switch_seq: None,
         },
     )
 }
@@ -588,7 +600,14 @@ async fn resolve_admission_identity(
         return Ok(Some(binding.clone()));
     }
     let Some(cohort) = &admission.cohort else {
-        return Ok(None);
+        // 新式服务端不占车道：远程命令在入队时的决策守卫下建立/等待会话，
+        // 期间发生切换则取消，不改投（P1）。
+        return match admission.unbound_switch_seq {
+            Some(switch_seq) => Ok(acp_client
+                .resolve_unbound_admission(cwd, switch_seq)
+                .await?),
+            None => Ok(None),
+        };
     };
     match &*cohort.state.lock().unwrap() {
         CohortState::Adopted(identity) => return Ok(Some(identity.clone())),

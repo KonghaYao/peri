@@ -554,6 +554,70 @@ async fn test_input_during_session_load_keeps_new_cohort() {
     let _ = tokio::time::timeout(Duration::from_millis(500), consumer).await;
 }
 
+/// [回归 review] 新式服务端不占车道，但无会话时的远程命令仍须建立会话并投递，
+/// 不能被当作「既无绑定也无 cohort」直接取消；建立期间切换则取消（决策守卫）。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn test_remote_command_without_session_creates_it() {
+    crate::kit::atoms::init_atoms();
+    let previous_commands = crate::kit::atoms::AVAILABLE_SLASH_COMMANDS
+        .state()
+        .read()
+        .clone();
+    let previous_window_capable = crate::kit::atoms::HISTORY_WINDOW_CAPABLE.get();
+    let (client, server) = make_client_without_pump();
+    let negotiator = client.clone();
+    let negotiate = tokio::spawn(async move { negotiator.register_ui_commands(&[]).await });
+    let (init_id, _) = expect_request(&server, "initialize").await;
+    server
+        .send_response(
+            init_id,
+            Ok(json!({"agentCapabilities": {"_meta": {"peri.userInputQueue": true}}})),
+        )
+        .await
+        .unwrap();
+    negotiate.await.unwrap().unwrap();
+    assert!(client.supports_user_input_queue());
+    *crate::kit::atoms::AVAILABLE_SLASH_COMMANDS.state().write() =
+        vec![crate::kit::slash_projection::SlashCommandEntry {
+            fullname: "demo:remote".into(),
+            level: 2,
+            ..Default::default()
+        }];
+
+    let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
+    let shutdown = CancellationToken::new();
+    let consumer = spawn_submit_consumer(client.clone(), rx, ".".into(), shutdown.clone());
+
+    tx.send(agent_text("/demo:remote")).unwrap();
+    let (new_id, _) = expect_request(&server, "session/new").await;
+    server
+        .send_response(new_id, Ok(json!({"sessionId": "remote-session"})))
+        .await
+        .unwrap();
+    // 新式服务端在会话建立后拉取输入快照，之后才发送 prompt。
+    let (snapshot_id, _) = expect_request(&server, "session/input/snapshot").await;
+    server
+        .send_response(
+            snapshot_id,
+            Ok(json!({"sessionId": "remote-session", "generation": "g", "revision": 1, "items": []})),
+        )
+        .await
+        .unwrap();
+
+    let (_prompt_id, session_id, text) = expect_prompt(&server).await;
+    assert_eq!(
+        (session_id.as_str(), text.as_str()),
+        ("remote-session", "/demo:remote"),
+        "远程命令必须落到新建会话，而不是被取消"
+    );
+
+    *crate::kit::atoms::AVAILABLE_SLASH_COMMANDS.state().write() = previous_commands;
+    crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(previous_window_capable);
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_millis(500), consumer).await;
+}
+
 /// [回归 review] 服务端自管输入队列时，KeepGoing 必须直达挂起注入路径，
 /// 不得排在一条挂起未返回的 prompt 之后。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
