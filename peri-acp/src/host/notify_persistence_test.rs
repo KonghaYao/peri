@@ -115,6 +115,7 @@ forward_session_resources_except_stop_write! {
     mq_history_contains(thread_id: &ThreadId, id: peri_acp_types::messages::MessageId) -> bool;
 }
 
+/// 最小 provider 配置：夹具只需要可解析的模型别名，不发起真实请求。
 fn test_peri_config() -> PeriConfig {
     let mut peri_config = PeriConfig::default();
     peri_config.config.active_alias = "sonnet".to_string();
@@ -131,6 +132,7 @@ fn test_peri_config() -> PeriConfig {
     peri_config
 }
 
+/// 生产同形宿主配置：注入给定的资源门面，使 Stop 持久化走真实调用链。
 async fn build_config(
     tmp: &tempfile::TempDir,
     session_resources: Arc<dyn SessionResources>,
@@ -178,6 +180,7 @@ async fn create_bound_session(cfg: &AcpServerConfig, cwd: &str, sid: &str) {
         .unwrap();
 }
 
+/// 只读夹具：不装配 environment/frozen，只保留 sessions 映射所需的身份与代次。
 fn session_state(sid: &str, cwd: &str) -> SessionState {
     SessionState {
         session_id: sid.to_string(),
@@ -209,6 +212,7 @@ fn session_state(sid: &str, cwd: &str) -> SessionState {
     }
 }
 
+/// 直接读存储中的 durable 工作意图，不依赖 Host 内存态。
 async fn work_state(cfg: &AcpServerConfig, sid: &str) -> WorkState {
     cfg.session_resources
         .load_session_meta(&sid.to_owned())
@@ -217,6 +221,7 @@ async fn work_state(cfg: &AcpServerConfig, sid: &str) -> WorkState {
         .work_state
 }
 
+/// 有界轮询等待异步持久化收敛（写入已移出收包循环）。
 async fn wait_for_work_state(cfg: &AcpServerConfig, sid: &str, expected: WorkState) {
     for _ in 0..100 {
         if work_state(cfg, sid).await == expected {
