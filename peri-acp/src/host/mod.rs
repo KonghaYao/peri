@@ -191,7 +191,14 @@ pub(crate) struct SessionState {
     pub(crate) thread_id: String,
     pub(crate) cwd: String,
     pub(crate) environment: Option<Arc<workspace::SessionEnvironment>>,
+    /// 已成立的关闭事实：只在 `close_session` 确认持久化关闭意图后置位。
     pub(crate) closing: bool,
+    /// 正在等待/执行 `session/close` / `session/delete` 的请求数。
+    ///
+    /// 可逆的准入闸门：等锁期间禁止新执行入口抢在关闭之前拿锁；等待结束即归零，
+    /// 关闭失败不会把会话永久挡在续聊之外（#196）。与 [`Self::closing`] 分开：
+    /// 后者是已提交的事实，本字段只是在途请求。
+    pub(crate) close_in_flight: usize,
     /// 有效上下文的执行期所有权（S2 所有权收敛）。
     pub(crate) context_ownership: ContextOwnership,
     /// 当前**有效**的持久化历史（excluded 正文不在其中）。这是 Host 唯一持有的
@@ -260,6 +267,7 @@ impl SessionState {
             cwd,
             environment: None,
             closing: false,
+            close_in_flight: 0,
             // 视图态没有热态正文：回放从存储读取，不让空集合冒充空会话。
             context_ownership: ContextOwnership::ReloadRequired,
             history_payloads: Vec::new(),

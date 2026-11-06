@@ -103,6 +103,7 @@ async fn register_child_with_inherited_history(
             cwd: workspace.cwd.to_str().unwrap().to_owned(),
             environment: None,
             closing: false,
+            close_in_flight: 0,
             context_ownership: crate::host::ContextOwnership::Resident,
             history_payloads: effective,
             structure_version: 0,

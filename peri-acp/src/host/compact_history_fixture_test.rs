@@ -400,6 +400,7 @@ fn make_host_sessions(ctx: &SessionContext, payloads: Vec<PersistedPayload>) -> 
         cwd: ctx.cwd.clone(),
         environment: None,
         closing: false,
+        close_in_flight: 0,
         context_ownership: crate::host::ContextOwnership::Resident,
         history_payloads: payloads,
         structure_version: 0,

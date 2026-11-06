@@ -625,20 +625,22 @@ impl ServerLoop<'_> {
                 | "session/delete"
         ) {
             let lifecycle_session_id = extract_session_id(&params, "").to_owned();
+            let mut close_gate = false;
             if matches!(method.as_str(), "session/close" | "session/delete") {
                 // 关闭要取得生命周期锁，必须先让在飞 turn 停下来：中断面与
-                // `session/cancel` 相同（本轮根令牌 + Cascade 子 agent）。这里
-                // **不能**先落不可逆状态——`closing` 闸门与 `pre_close_session`
-                // 属于已成立的关闭事实，只允许在 `close_session` 确认持久化关闭
-                // 意图之后设置。锁超时/存储失败时客户端收到关闭失败，会话必须
-                // 仍可续聊（#196）。
+                // `session/cancel` 相同（本轮根令牌 + Cascade 子 agent）。等锁期间
+                // 只置可逆的准入闸门 `close_in_flight`（排队中的 prompt 不得抢在
+                // 关闭之前拿锁）；`closing` 与 `pre_close_session` 属于已成立的关闭
+                // 事实，只允许在 `close_session` 确认持久化关闭意图之后设置。
+                // 锁超时/存储失败时客户端收到关闭失败，会话必须仍可续聊（#196）。
                 {
-                    let states = sessions.lock().await;
-                    if let Some(token) = states
-                        .get(&lifecycle_session_id)
-                        .and_then(|state| state.cancel_token.as_ref())
-                    {
-                        token.cancel();
+                    let mut states = sessions.lock().await;
+                    if let Some(state) = states.get_mut(&lifecycle_session_id) {
+                        state.close_in_flight += 1;
+                        close_gate = true;
+                        if let Some(token) = &state.cancel_token {
+                            token.cancel();
+                        }
                     }
                 }
                 if let Some(runtime) = cfg.session_manager.get_session(&lifecycle_session_id) {
@@ -649,14 +651,25 @@ impl ServerLoop<'_> {
                 .prompt_locks
                 .lock()
                 .await
-                .entry(lifecycle_session_id)
+                .entry(lifecycle_session_id.clone())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone();
             if matches!(method.as_str(), "session/close" | "session/delete") {
-                match peri_time::timeout(std::time::Duration::from_secs(5), lock.lock_owned()).await
-                {
-                    Ok(guard) => Some(guard),
-                    Err(_) => {
+                let acquired =
+                    peri_time::timeout(std::time::Duration::from_secs(5), lock.lock_owned())
+                        .await
+                        .ok();
+                if close_gate {
+                    // 等锁结束即撤下临时闸门：关闭成功时会话已被移除；失败时
+                    // 新执行入口恢复准入，会话仍可续聊（#196）。
+                    let mut states = sessions.lock().await;
+                    if let Some(state) = states.get_mut(&lifecycle_session_id) {
+                        state.close_in_flight = state.close_in_flight.saturating_sub(1);
+                    }
+                }
+                match acquired {
+                    Some(guard) => Some(guard),
+                    None => {
                         let _ = diagnostics
                             .send(
                                 transport.as_ref(),

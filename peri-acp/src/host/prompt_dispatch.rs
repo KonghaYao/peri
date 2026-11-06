@@ -106,7 +106,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         let state = sessions
             .get(&prompt_session_id)
             .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
-        if state.closing {
+        if state.closing || state.close_in_flight > 0 {
             return Err(AcpError::new(-32010, "Session is closing"));
         }
         if cfg
@@ -189,7 +189,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         let state = sessions
             .get(&prompt_session_id)
             .ok_or_else(|| AcpError::new(-32602, "session not found"))?;
-        if state.closing {
+        if state.closing || state.close_in_flight > 0 {
             return Err(AcpError::new(-32010, "Session is closing"));
         }
         if cfg
@@ -295,7 +295,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         let dispatchable = {
             let mut sessions = sessions.lock().await;
             sessions.get_mut(&prompt_session_id).is_some_and(|state| {
-                if state.closing {
+                if state.closing || state.close_in_flight > 0 {
                     return false;
                 }
                 state.continuation_in_flight = true;

@@ -448,3 +448,98 @@ async fn close_success_still_removes_session() {
         "已关闭会话的拒绝原因必须明确：{error:?}"
     );
 }
+
+/// 关闭等锁期间，已排队的 prompt 不得抢锁先开一轮：否则 close 会被一个与本请求
+/// 无关的新 turn 拖到超时，而 close 明明已经中断了到达时在飞的那一轮。
+///
+/// 判据：prompt 被准入闸门拒绝（不得成功开轮），close 成功完成。
+#[tokio::test]
+async fn queued_prompt_cannot_overtake_a_waiting_close() {
+    let harness = CloseHarness::new(CloseFault::None).await;
+    let lock = {
+        let mut locks = harness.locks.lock().await;
+        Arc::clone(
+            locks
+                .entry(harness.sid.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    };
+    let guard = lock.lock().await;
+
+    // prompt 先到达并通过准入门，排在生命周期锁上（用户 prompt 会先推进代际）。
+    let initial_epoch = {
+        let states = harness.sessions.lock().await;
+        states[&harness.sid].continuation_epoch
+    };
+    let prompt = {
+        let client = Arc::clone(&harness.client);
+        let sid = harness.sid.clone();
+        tokio::spawn(async move {
+            client
+                .send_request(
+                    "session/prompt",
+                    json!({
+                        "sessionId": sid,
+                        "prompt": [{ "type": "text", "text": "排队中" }],
+                    }),
+                )
+                .await
+        })
+    };
+    wait_until(&harness, "prompt 进入准入门并排队", |state| {
+        state.continuation_epoch > initial_epoch
+    })
+    .await;
+
+    // close 随后到达：置等锁闸门后阻塞在同一把锁上。
+    let close = {
+        let client = Arc::clone(&harness.client);
+        let sid = harness.sid.clone();
+        tokio::spawn(async move {
+            client
+                .send_request("session/close", json!({ "sessionId": sid }))
+                .await
+        })
+    };
+    wait_until(&harness, "close 置等锁闸门", |state| {
+        state.close_in_flight > 0
+    })
+    .await;
+
+    // 在飞 turn 结束：排队的 prompt 先拿到锁，但必须被闸门拒绝。
+    drop(guard);
+    let prompt_result = prompt.await.expect("prompt 任务不得 panic");
+    let close_result = close.await.expect("close 任务不得 panic");
+    assert!(
+        prompt_result.is_err(),
+        "关闭等锁期间排队的 prompt 不得抢跑成一轮，实际成功：{prompt_result:?}"
+    );
+    assert!(
+        close_result.is_ok(),
+        "close 不得被排队的 prompt 拖到超时：{close_result:?}"
+    );
+    assert!(
+        !harness.sessions.lock().await.contains_key(&harness.sid),
+        "关闭成功后内存会话必须移除"
+    );
+}
+
+/// 轮询会话态直到条件成立（有界等待，避免用例自身无限阻塞）。
+async fn wait_until(
+    harness: &CloseHarness,
+    label: &str,
+    mut ready: impl FnMut(&SessionState) -> bool,
+) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let matched = {
+            let states = harness.sessions.lock().await;
+            states.get(&harness.sid).is_some_and(&mut ready)
+        };
+        if matched {
+            return;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "等待超时：{label}");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
