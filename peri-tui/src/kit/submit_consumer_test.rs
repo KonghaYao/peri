@@ -248,7 +248,8 @@ fn agent_text(text: &str) -> SubmitRequest {
 #[serial]
 async fn test_queued_submit_is_cancelled_after_session_switch() {
     crate::kit::atoms::init_atoms();
-    *NOTIFICATION.state().write() = None;
+    // 本用例会真实建会话并写 NOTIFICATION；与其它 serial 用例共用全局态。
+    let previous_notification = std::mem::take(&mut *NOTIFICATION.state().write());
     let (client, server) = make_client_without_pump();
     client.force_stable_for_test("session-a", false);
     let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
@@ -288,6 +289,7 @@ async fn test_queued_submit_is_cancelled_after_session_switch() {
         "取消排队提交必须有用户可见反馈"
     );
 
+    *NOTIFICATION.state().write() = previous_notification;
     shutdown.cancel();
     let _ = tokio::time::timeout(Duration::from_millis(500), consumer).await;
 }
@@ -297,6 +299,7 @@ async fn test_queued_submit_is_cancelled_after_session_switch() {
 /// 延迟 `session/new`：m0/m1 在无会话时进入初始化车道；建好 S 后 m2 入队。
 /// 旧实现把 m2 放进 Some(S) 车道，m0 的 TurnDone 排空时 m2 会越过 m1。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
 async fn test_initializing_lane_keeps_fifo_after_session_created() {
     let (client, server) = make_client_without_pump();
     let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();

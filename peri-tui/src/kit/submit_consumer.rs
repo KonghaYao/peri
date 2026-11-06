@@ -308,7 +308,10 @@ async fn handle_agent_text_submit(
     // 初始化车道首个提交在此建立/发现会话，并把身份固定到车道；ensure_session
     // 的 Stable 选择与启动恢复/load 共用 operation gate，晚到的 producer 不能
     // 替换这次提交的会话。
-    let identity = resolve_admission_identity(acp_client, cwd, admission).await?;
+    let Some(identity) = resolve_admission_identity(acp_client, cwd, admission).await? else {
+        notify_cancelled_submit();
+        return Ok(());
+    };
     if acp_client.stable_session_identity().as_ref() != Some(&identity) {
         notify_cancelled_submit();
         return Ok(());
@@ -395,21 +398,24 @@ fn admission_identity(admission: Option<&SubmitAdmission>) -> Option<SessionIden
 ///
 /// 已绑定提交直接沿用入队身份；初始化车道的首个提交调用 `ensure_session`
 /// 建立/发现会话后把身份写入车道采纳槽，后续同车道消息复用它。
+/// `None` 表示 ensure 期间会话已被其他操作切换，调用方必须显式取消。
 async fn resolve_admission_identity(
     acp_client: &AcpTuiClient,
     cwd: &str,
     admission: Option<&SubmitAdmission>,
-) -> Result<SessionIdentity, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<Option<SessionIdentity>, Box<dyn std::error::Error + Send + Sync>> {
     if let Some(identity) = admission_identity(admission) {
-        return Ok(identity);
+        return Ok(Some(identity));
     }
 
     info!(cwd = %cwd, "kit submit_consumer: ensuring session");
     let session_id = acp_client.ensure_session(cwd, None).await?;
-    let identity = acp_client
+    let Some(identity) = acp_client
         .stable_session_identity()
         .filter(|(stable_id, _)| stable_id == &session_id)
-        .ok_or_else(|| std::io::Error::other("no stable session after ensure"))?;
+    else {
+        return Ok(None);
+    };
     if let Some(slot) = admission.and_then(|admission| admission.init_adoption.as_ref()) {
         let mut adopted = slot.lock().unwrap();
         // 同车道串行执行，正常情况下只有首个提交会走到这里。
@@ -417,7 +423,7 @@ async fn resolve_admission_identity(
             *adopted = Some(identity.clone());
         }
     }
-    Ok(identity)
+    Ok(Some(identity))
 }
 
 /// 会话切换导致排队提交被取消时的用户可见反馈。
