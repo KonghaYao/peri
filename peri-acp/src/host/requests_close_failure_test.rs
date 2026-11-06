@@ -15,10 +15,10 @@ use peri_acp_types::history_page::{
 use peri_acp_types::history_window::{
     HistoryBodyChunk, HistoryCommittedTail, HistoryReadTicket, HistorySource,
 };
-use peri_acp_types::messages::MessageId;
+use peri_acp_types::messages::{MessageContent, MessageId};
 use peri_acp_types::session::{
-    MqCancelOutcome, MqEnqueueOutcome, MqEntry, MqFilter, MqInput, MqReceiveOutcome,
-    MqReceiveSelection,
+    EnqueueUserInputRequest, MqCancelOutcome, MqEnqueueOutcome, MqEntry, MqFilter, MqInput,
+    MqReceiveOutcome, MqReceiveSelection,
 };
 use peri_acp_types::session_resources::{
     ActiveSessionSnapshot, BindingRecheck, ChildResumeClaim, ChildSnapshot, CloseSettlement,
@@ -593,6 +593,82 @@ async fn admitted_prompt_is_cancelled_by_close_before_it_runs() {
         "拒绝原因必须指明关闭：{error:?}"
     );
     close_result.expect("close 不得被已准入的 prompt 拖到超时");
+    assert!(
+        !harness.sessions.lock().await.contains_key(&harness.sid),
+        "关闭成功后内存会话必须移除"
+    );
+}
+
+/// P2 复审：已准入、尚未 attach 的队列输入被 Stop 撤销后，`run_prompt` 在 attach
+/// 前返回 `Ok(Null)`。这是成功空操作，但同样没有执行器接管准入段发布的令牌；
+/// 若不回滚，close 会读到残留令牌并报 "prompt is still active"（#196）。
+///
+/// 判据：Stop 后放行到 `Ok(Null)`，`cancel_token` 必须清除，随后 close 成功。
+#[tokio::test]
+async fn stop_revoked_queued_input_rolls_back_admission_token() {
+    let harness = CloseHarness::new(CloseFault::None).await;
+    let transport: Arc<dyn AcpTransport> = Arc::new(MockTransport::default());
+    let mailbox = crate::host::user_input::ensure_mailbox(&harness.sid, &harness.cfg, &transport)
+        .await
+        .expect("队列会话必须能建立 mailbox");
+    let generation = mailbox.generation().to_owned();
+    mailbox
+        .enqueue(&EnqueueUserInputRequest {
+            session_id: harness.sid.clone(),
+            generation,
+            command_id: "enqueue-before-stop".into(),
+            input_id: "00000000-0000-0000-0000-000000000181".into(),
+            content: MessageContent::text("被 Stop 撤销的队列输入"),
+            original_draft: "被 Stop 撤销的队列输入".into(),
+        })
+        .await
+        .expect("队列输入应入队");
+
+    // 暂停在准入段发布令牌之后、attach 之前。
+    let gate =
+        crate::host::prompt_dispatch::admission_gate::install(&format!("{}:admitted", harness.sid));
+    let (cont_tx, _cont_rx) = tokio::sync::mpsc::unbounded_channel();
+    crate::host::user_input::schedule_mailbox(
+        &harness.sid,
+        &harness.sessions,
+        &harness.locks,
+        &harness.cfg,
+        &transport,
+        &Arc::new(cont_tx),
+    );
+    tokio::time::timeout(std::time::Duration::from_secs(10), gate.entered.notified())
+        .await
+        .expect("队列输入必须到达准入后的暂停点");
+
+    // Stop 撤销尚未 attach 的预约：active 没有令牌，直接移除。
+    harness
+        .client
+        .send_notification("session/cancel", json!({ "sessionId": harness.sid }))
+        .await
+        .expect("session/cancel 通知必须送达");
+    wait_until(&harness, "Stop 取消准入令牌", |state| {
+        state
+            .cancel_token
+            .as_ref()
+            .is_some_and(|token| token.is_cancelled())
+    })
+    .await;
+
+    gate.release.notify_one();
+    // attach 返回 false 后 run_prompt 返回 Ok(Null)：空轮次不得留下在飞令牌。
+    wait_until(&harness, "空轮次清理准入令牌", |state| {
+        state.cancel_token.is_none()
+    })
+    .await;
+
+    let close_result = harness.close().await;
+    if let Err(error) = &close_result {
+        assert!(
+            !error.message.contains("prompt is still active"),
+            "空轮次不得阻塞 close：{error:?}"
+        );
+    }
+    close_result.expect("空轮次清理后 close 必须成功");
     assert!(
         !harness.sessions.lock().await.contains_key(&harness.sid),
         "关闭成功后内存会话必须移除"
