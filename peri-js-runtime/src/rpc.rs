@@ -242,6 +242,7 @@ async fn deliver(
     }
 }
 
+/// 把 stdout 的 NDJSON 帧解码为入站消息；终止信号置位时停止投递并退出。
 #[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn spawn_stdout_reader(
     stdout: ChildStdout,

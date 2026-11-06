@@ -207,6 +207,7 @@ impl JsExecutionHost {
         }
     }
 
+    /// 终止进程树并等待整树与 reader 退出；终止清理不依赖入站消费者。
     pub(crate) async fn terminate_and_wait(
         &self,
         reason: &'static str,
