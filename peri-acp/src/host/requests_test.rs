@@ -365,6 +365,7 @@ async fn register_session_with_history(
             cwd: workspace.cwd.to_str().unwrap().to_owned(),
             environment: None,
             closing: false,
+            close_in_flight: 0,
             context_ownership: crate::host::ContextOwnership::Resident,
             history_payloads,
             structure_version: 0,
@@ -620,6 +621,9 @@ mod workflow_cases;
 #[path = "requests_lifecycle_cases_test.rs"]
 mod lifecycle_cases;
 
+#[path = "requests_close_failure_test.rs"]
+mod close_failure;
+
 #[path = "requests_mcp_cases_test.rs"]
 mod mcp_cases;
 
@@ -723,6 +727,7 @@ async fn register_session_with_workflow(
                 .to_owned(),
             environment: None,
             closing: false,
+            close_in_flight: 0,
             context_ownership: crate::host::ContextOwnership::Resident,
             history_payloads: Vec::new(),
             structure_version: 0,

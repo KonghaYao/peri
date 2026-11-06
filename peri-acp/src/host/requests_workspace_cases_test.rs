@@ -923,6 +923,7 @@ async fn prompt_without_frozen_snapshot_fails_closed() {
             cwd: cwd.to_str().unwrap().to_owned(),
             environment: None,
             closing: false,
+            close_in_flight: 0,
             context_ownership: crate::host::ContextOwnership::Resident,
             history_payloads: Vec::new(),
             structure_version: 0,

@@ -57,4 +57,90 @@ async fn work_state_commit_failure_rejects_prompt_before_model_call() {
         WorkState::Idle,
         "写入失败不得留下 working"
     );
+    assert!(
+        harness
+            .sessions
+            .lock()
+            .await
+            .get(&thread_id)
+            .is_some_and(|state| state.cancel_token.is_none()),
+        "准入失败必须清除本次发布的令牌"
+    );
+}
+
+/// 准入回滚只撤销本次准入发布的令牌：后续轮次已替换的令牌不得被误清（#196 P2 复审）。
+///
+/// 在准入闸门处人为固定「后续轮次已替换令牌」的时序，再让工作意图写入失败，
+/// 验证错误提前返回的清理按令牌身份判断。
+#[tokio::test]
+async fn admission_rollback_only_clears_its_own_token() {
+    let harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    use sqlx::Connection as _;
+    let mut connection = sqlx::SqliteConnection::connect_with(
+        &sqlx::sqlite::SqliteConnectOptions::new().filename(&harness.db_path),
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "CREATE TRIGGER fail_work_state BEFORE UPDATE OF work_state ON threads
+         BEGIN SELECT RAISE(ABORT, 'work_state blocked'); END;",
+    )
+    .execute(&mut connection)
+    .await
+    .unwrap();
+    drop(connection);
+
+    let gate =
+        crate::host::prompt_dispatch::admission_gate::install(&format!("{thread_id}:admitted"));
+    let prompt = {
+        let sessions = Arc::clone(&harness.sessions);
+        let locks = Arc::clone(&harness.locks);
+        let transport = Arc::clone(&harness.transport);
+        let cfg = Arc::clone(&harness.cfg);
+        let sender = Arc::clone(&harness.sender);
+        let thread_id = thread_id.clone();
+        tokio::spawn(async move {
+            dispatch_prompt_turn(
+                json!({
+                    "sessionId": thread_id,
+                    "prompt": [{"type": "text", "text": "hello"}],
+                }),
+                PromptOrigin::User,
+                None,
+                &sessions,
+                &locks,
+                &transport,
+                &cfg,
+                &sender,
+            )
+            .await
+        })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), gate.entered.notified())
+        .await
+        .expect("prompt 必须到达准入后的暂停点");
+
+    // 模拟后续轮次已经发布自己的令牌：本次准入只能撤销自己持有的那一个。
+    let later = tokio_util::sync::CancellationToken::new();
+    harness
+        .sessions
+        .lock()
+        .await
+        .get_mut(&thread_id)
+        .expect("会话存在")
+        .cancel_token = Some(later.clone());
+    gate.release.notify_one();
+
+    let error = prompt
+        .await
+        .expect("prompt 任务不得 panic")
+        .expect_err("工作意图写入失败必须拒绝 prompt");
+    assert_eq!(error.code, -32603, "{error:?}");
+    let states = harness.sessions.lock().await;
+    assert_eq!(
+        states[&thread_id].cancel_token.as_ref(),
+        Some(&later),
+        "回滚不得清除后续轮次发布的令牌"
+    );
 }

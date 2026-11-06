@@ -36,6 +36,7 @@ fn seeded_sessions(provider: &LlmProvider) -> HashMap<String, SessionState> {
             cwd: String::new(),
             environment: None,
             closing: false,
+            close_in_flight: 0,
             context_ownership: crate::host::ContextOwnership::Resident,
             history_payloads: Vec::new(),
             structure_version: 0,
