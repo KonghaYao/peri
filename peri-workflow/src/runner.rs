@@ -219,12 +219,18 @@ impl WorkflowRunner {
 
     /// 记录一次任务结果的 tool 调用数（design §5.2 第 5 条：与 run limits 同一权威）。
     ///
+    /// `task_id` 是去重身份：任务终态回投是投递重试，同一任务只计入首次。
     /// 返回首次超限的 breach 详情（若有）；breach 由消息循环在 `workflow/done`
     /// 读取并投影为 run 终态（`status = failed` + 限额错误）。
-    pub(crate) fn note_task_tool_calls(&self, run_id: &str, count: u64) -> Option<String> {
+    pub(crate) fn note_task_tool_calls(
+        &self,
+        run_id: &str,
+        task_id: &str,
+        count: u64,
+    ) -> Option<String> {
         self.run_limit_states
             .get(run_id)
-            .and_then(|state| state.observe_tool_calls(count))
+            .and_then(|state| state.observe_tool_calls(task_id, count))
     }
 
     /// Bind workflow agent tools to the owning session's execution scope.
