@@ -649,7 +649,9 @@ async fn legacy_read_only_store_does_not_bootstrap_or_adopt() {
     )
     .await;
     let id = old_thread(&bridge, &cwd).await;
-    // 关掉写句柄后以只读方式重新打开同一库。
+    // `Drop` 只标记连接池关闭，连接由运行时后台任务归还后才真正释放，只读重开必须
+    // 先等待 pool 收尾（含 WAL checkpoint），不能依赖 `Drop` 与只读打开之间的时序。
+    bridge.close().await;
     drop(bridge);
     drop(writable_cfg);
     let read_only: Arc<dyn SessionResources> = Arc::new(
