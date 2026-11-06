@@ -360,6 +360,59 @@ async fn test_initializing_lane_keeps_fifo_after_session_created() {
     let _ = tokio::time::timeout(Duration::from_millis(500), consumer).await;
 }
 
+/// [回归 review] 服务端自管输入队列时，KeepGoing 必须直达挂起注入路径，
+/// 不得排在一条挂起未返回的 prompt 之后。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn test_keepgoing_bypasses_lane_when_server_queues_input() {
+    let previous_window_capable = crate::kit::atoms::HISTORY_WINDOW_CAPABLE.get();
+    let (client, server) = make_client_without_pump();
+    let negotiator = client.clone();
+    let negotiate = tokio::spawn(async move { negotiator.register_ui_commands(&[]).await });
+    let (init_id, _) = expect_request(&server, "initialize").await;
+    server
+        .send_response(
+            init_id,
+            Ok(json!({"agentCapabilities": {"_meta": {"peri.userInputQueue": true}}})),
+        )
+        .await
+        .unwrap();
+    negotiate.await.unwrap().unwrap();
+    assert!(client.supports_user_input_queue());
+
+    client.force_stable_for_test("session-a", false);
+    let (tx, rx) = mpsc::unbounded_channel::<SubmitRequest>();
+    let shutdown = CancellationToken::new();
+    let consumer = spawn_submit_consumer(client.clone(), rx, ".".into(), shutdown.clone());
+
+    // 第一条 keepgoing 故意不返回：模拟 suspended turn 上仍挂着的 prompt RPC。
+    tx.send(SubmitRequest::KeepGoing).unwrap();
+    let (first_id, first_session, first_text) = expect_prompt(&server).await;
+    assert_eq!(first_session, "session-a");
+    assert_eq!(first_text, "");
+
+    tx.send(SubmitRequest::KeepGoing).unwrap();
+    let (second_id, second_session, second_text) =
+        tokio::time::timeout(Duration::from_millis(500), expect_prompt(&server))
+            .await
+            .expect("KeepGoing 不得等待挂起的 prompt 完成");
+    assert_eq!(second_session, "session-a");
+    assert_eq!(second_text, "");
+
+    server
+        .send_response(second_id, Ok(json!({"stopReason": "end_turn"})))
+        .await
+        .unwrap();
+    server
+        .send_response(first_id, Ok(json!({"stopReason": "end_turn"})))
+        .await
+        .unwrap();
+
+    crate::kit::atoms::HISTORY_WINDOW_CAPABLE.set(previous_window_capable);
+    shutdown.cancel();
+    let _ = tokio::time::timeout(Duration::from_millis(500), consumer).await;
+}
+
 /// 车道保证同会话内顺序：每条提交都先让出调度器，仍按 push 顺序执行。
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_submit_lanes_keep_fifo_within_session() {

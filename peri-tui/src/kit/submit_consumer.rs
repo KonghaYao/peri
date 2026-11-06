@@ -153,43 +153,62 @@ pub fn spawn_submit_consumer(
                             // 车道身份在入队时固定：切换/clear 后迟到的提交仍
                             // 留在原车道，执行前由 prompt 准入校验拒绝，不会改投
                             // 新会话（P1）。
+                            //
+                            // 车道只服务旧服务端的直接 prompt 路径；新式服务端
+                            // 由 session inbox 自管顺序与挂起注入，占用车道会让
+                            // 一个 suspended prompt 挡住后续 KeepGoing/remote
+                            // command，使其到不了注入路径。
                             let (lane, admission) = match &request {
                                 SubmitRequest::AgentText { .. } | SubmitRequest::KeepGoing => {
-                                    match acp_client.stable_session_identity() {
-                                        Some(identity) => {
-                                            // 初始化车道尚未结束时，新会话消息必须
-                                            // 排在初始化消息之后，否则会越过仍在
-                                            // 排队的 m1（P2）。采纳的身份不同（例如
-                                            // /clear 已切到 B）时各走各的车道。
-                                            let adopted = init_adoption.lock().unwrap().clone();
-                                            let joins_init =
-                                                lanes.is_active(&LaneKey::Initializing)
-                                                    && adopted
-                                                        .as_ref()
-                                                        .is_none_or(|adopted| adopted == &identity);
-                                            let admission = SubmitAdmission {
-                                                binding: Some(identity.clone()),
-                                                init_adoption: joins_init
-                                                    .then(|| init_adoption.clone()),
-                                            };
-                                            if joins_init {
-                                                (Some(LaneKey::Initializing), Some(admission))
-                                            } else {
-                                                (Some(LaneKey::Session(identity)), Some(admission))
+                                    let binding = acp_client.stable_session_identity();
+                                    if acp_client.supports_user_input_queue() {
+                                        (
+                                            None,
+                                            Some(SubmitAdmission {
+                                                binding,
+                                                init_adoption: None,
+                                            }),
+                                        )
+                                    } else {
+                                        match binding {
+                                            Some(identity) => {
+                                                // 初始化车道尚未结束时，新会话消息必须
+                                                // 排在初始化消息之后，否则会越过仍在
+                                                // 排队的 m1（P2）。采纳的身份不同（例如
+                                                // /clear 已切到 B）时各走各的车道。
+                                                let adopted = init_adoption.lock().unwrap().clone();
+                                                let joins_init =
+                                                    lanes.is_active(&LaneKey::Initializing)
+                                                        && adopted.as_ref().is_none_or(
+                                                            |adopted| adopted == &identity,
+                                                        );
+                                                let admission = SubmitAdmission {
+                                                    binding: Some(identity.clone()),
+                                                    init_adoption: joins_init
+                                                        .then(|| init_adoption.clone()),
+                                                };
+                                                if joins_init {
+                                                    (Some(LaneKey::Initializing), Some(admission))
+                                                } else {
+                                                    (
+                                                        Some(LaneKey::Session(identity)),
+                                                        Some(admission),
+                                                    )
+                                                }
                                             }
-                                        }
-                                        None => {
-                                            if !lanes.is_active(&LaneKey::Initializing) {
-                                                // 旧初始化车道已结束：新消息开启新的采纳槽。
-                                                init_adoption = Arc::new(Mutex::new(None));
+                                            None => {
+                                                if !lanes.is_active(&LaneKey::Initializing) {
+                                                    // 旧初始化车道已结束：新消息开启新的采纳槽。
+                                                    init_adoption = Arc::new(Mutex::new(None));
+                                                }
+                                                (
+                                                    Some(LaneKey::Initializing),
+                                                    Some(SubmitAdmission {
+                                                        binding: None,
+                                                        init_adoption: Some(init_adoption.clone()),
+                                                    }),
+                                                )
                                             }
-                                            (
-                                                Some(LaneKey::Initializing),
-                                                Some(SubmitAdmission {
-                                                    binding: None,
-                                                    init_adoption: Some(init_adoption.clone()),
-                                                }),
-                                            )
                                         }
                                     }
                                 }
