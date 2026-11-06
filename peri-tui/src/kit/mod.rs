@@ -68,6 +68,7 @@ pub(crate) mod steer_consumer;
 pub mod steer_queue;
 pub(crate) mod steer_state;
 pub mod stream_data;
+pub(crate) mod submit_admission;
 pub mod submit_consumer;
 pub mod submit_request;
 pub mod terminal_caps;

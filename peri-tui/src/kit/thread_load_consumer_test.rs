@@ -80,7 +80,8 @@ fn make_interactive_client_without_pump() -> (AcpTuiClient, MpscServerTransport)
 #[tokio::test]
 async fn test_empty_thread_id_skipped() {
     let (client, _server) = make_client_without_pump();
-    let result = handle_load(&client, ".", "   ".to_string()).await;
+    let reservation = client.reserve_session_load();
+    let result = handle_load(&client, ".", "   ".to_string(), &reservation).await;
     assert!(result.is_ok());
 }
 
@@ -169,10 +170,13 @@ async fn test_handle_load_resets_popup_todo_history_atoms() {
     let cwd = ".".to_string();
 
     // Act：load_session 会在 session/load 上挂起；轮询直到 boundary 投影完成。
+    let reservation = client.reserve_session_load();
     let load_task = {
         let client = client.clone();
         let cwd = cwd.clone();
-        tokio::spawn(async move { handle_load(&client, &cwd, "thread-xyz".to_string()).await })
+        tokio::spawn(async move {
+            handle_load(&client, &cwd, "thread-xyz".to_string(), &reservation).await
+        })
     };
     wait_for_session_boundary_reset(Duration::from_secs(5)).await;
     load_task.abort();

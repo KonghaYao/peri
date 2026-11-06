@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, watch};
 pub(crate) use super::interaction_lifecycle::AdmissionRoute;
 use super::interaction_lifecycle::{InteractionLifecycle, InteractionOwner, InteractionUiOutcome};
 use super::interaction_settlement::spawn_settlement_worker;
-use session::SessionLoadReservationState;
+use session_load_reservation::SessionLoadReservationState;
 
 mod child_history;
 mod history_page;
@@ -23,10 +23,12 @@ mod pump;
 mod recovery_view;
 mod requests;
 mod session;
+mod session_load_reservation;
 mod steer;
 mod workspace;
 
-pub(crate) use session::{AdmissionGuard, SessionLoadReservation};
+pub(crate) use session::AdmissionGuard;
+pub(crate) use session_load_reservation::SessionLoadReservation;
 
 /// Notification events dispatched from the background pump to the TUI event loop.
 #[derive(Debug)]
@@ -208,10 +210,7 @@ impl AcpTuiClient {
             projection_mode,
             notification_weak,
             startup_restore_tx,
-            session_load_reservations: Arc::new(SessionLoadReservationState {
-                pending: Mutex::new(0),
-                epoch_tx: load_epoch_tx,
-            }),
+            session_load_reservations: Arc::new(SessionLoadReservationState::new(load_epoch_tx)),
             session_switch_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             user_input_queue: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             session_workspace: Arc::new(std::sync::atomic::AtomicBool::new(false)),

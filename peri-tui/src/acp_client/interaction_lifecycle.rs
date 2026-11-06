@@ -77,6 +77,16 @@ pub(crate) enum AdmissionRoute {
     NoSession { generation: u64 },
 }
 
+impl AdmissionRoute {
+    pub(crate) fn generation(&self) -> u64 {
+        match self {
+            Self::Stable { generation, .. }
+            | Self::Transitioning { generation }
+            | Self::NoSession { generation } => *generation,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InteractionOwner {
     pub client_instance_id: u64,

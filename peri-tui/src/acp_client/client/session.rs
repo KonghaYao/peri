@@ -1,6 +1,6 @@
 //! Session transitions and queue-side load reservations under the lifecycle gate.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use peri_acp::transport::{AcpTransport, types::AcpError};
 use serde_json::json;
@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 use super::super::interaction_lifecycle::{PromptLease, TransitionKind};
+use super::session_load_reservation::SessionLoadReservation;
 use super::{AcpTuiClient, ClientProjectionMode};
 
 struct StartupRestoreGuard<'a>(&'a watch::Sender<bool>);
@@ -62,16 +63,13 @@ impl Drop for SessionProjectionGuard<'_> {
     }
 }
 
-pub(super) struct SessionLoadReservationState {
-    pub(super) pending: Mutex<usize>,
-    pub(super) epoch_tx: watch::Sender<u64>,
-}
-
 /// 入队时的会话准入快照。
 pub(crate) struct SessionAdmissionSnapshot {
     pub(crate) route: super::AdmissionRoute,
     /// 有尚未消费的加载预约：紧随其后的 `session/load` 才是当前用户意图。
     pub(crate) pending_load: bool,
+    /// 仍有预约未被 load 认领：下一次切换还会把 generation 推进一代。
+    pub(crate) unclaimed_load: bool,
     /// 用户会话决策序号；变化即表示这份输入已被新的决定取代。
     pub(crate) switch_seq: u64,
 }
@@ -90,28 +88,6 @@ impl AdmissionGuard {
             switch_seq,
             allow_create,
         }
-    }
-}
-
-/// Synchronous queue-side ownership for an ordinary session load.
-///
-/// The reservation is acquired before a load request enters its async consumer.
-/// Dropping the guard releases exactly one queued/in-flight load and wakes prompt
-/// waiters. It is deliberately not Clone: the pending count represents queue
-/// ownership, not arbitrary client clones.
-pub(crate) struct SessionLoadReservation {
-    state: Arc<SessionLoadReservationState>,
-}
-
-impl Drop for SessionLoadReservation {
-    fn drop(&mut self) {
-        let mut pending = self.state.pending.lock().unwrap();
-        debug_assert!(*pending > 0, "session load reservation underflow");
-        *pending = pending.saturating_sub(1);
-        drop(pending);
-        self.state
-            .epoch_tx
-            .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
     }
 }
 
@@ -389,13 +365,15 @@ impl AcpTuiClient {
     /// 写入，因此快照不会把「已预约的切换」误判成稳定会话。路由随后读取，锁序
     /// 与 `ensure_session` 一致（pending → lifecycle state）。
     pub(crate) fn session_admission_snapshot(&self) -> SessionAdmissionSnapshot {
-        let pending = self.session_load_reservations.pending.lock().unwrap();
-        let pending_load = *pending > 0;
+        let reservations = self.session_load_reservations.reservations.lock().unwrap();
+        let pending_load = reservations.pending() > 0;
+        let unclaimed_load = reservations.has_unclaimed();
         let switch_seq = self.current_session_switch_seq();
         let route = self.lifecycle.admission_route();
         SessionAdmissionSnapshot {
             route,
             pending_load,
+            unclaimed_load,
             switch_seq,
         }
     }
@@ -435,7 +413,7 @@ impl AcpTuiClient {
             let operation = self.lifecycle.operation_gate().lock().await;
             let (pending_load, stable_session) = {
                 let _ = *load_epoch_rx.borrow_and_update();
-                let pending = self.session_load_reservations.pending.lock().unwrap();
+                let reservations = self.session_load_reservations.reservations.lock().unwrap();
                 // 决策序号与预约计数同锁读取：reserve_session_load 在同一临界区
                 // 递增两者，因此这里不会读到「新预约 + 旧决策」的撕裂组合。
                 if admission.as_ref().is_some_and(|admission| {
@@ -444,7 +422,7 @@ impl AcpTuiClient {
                     commit(None);
                     return Ok(None);
                 }
-                if *pending > 0 {
+                if reservations.pending() > 0 {
                     (true, None)
                 } else {
                     // Hold the reservation mutex through Stable selection so a
@@ -514,7 +492,9 @@ impl AcpTuiClient {
         cwd: &str,
         model: Option<&str>,
     ) -> Result<Option<(String, u64)>, AcpError> {
-        let loaded = self.load_session_under_gate(session_id, cwd, model).await?;
+        let loaded = self
+            .load_session_under_gate(session_id, cwd, model, None)
+            .await?;
         Ok(self
             .lifecycle
             .stable_identity()
@@ -537,25 +517,29 @@ impl AcpTuiClient {
     /// This synchronous boundary closes the browser-select → consumer scheduling
     /// window where a fast submit could otherwise bind to the old Stable session.
     pub(crate) fn reserve_session_load(&self) -> SessionLoadReservation {
-        let mut pending = self.session_load_reservations.pending.lock().unwrap();
-        *pending = pending
-            .checked_add(1)
-            .expect("session load reservation count overflow");
+        let mut reservations = self.session_load_reservations.reservations.lock().unwrap();
+        let id = reservations.reserve();
         // 预约本身就是一次用户会话决定：与计数同锁递增，排队输入的准入快照
         // 因此不会读到「已预约、决策仍是旧的」的撕裂组合。
         self.bump_session_switch_seq();
-        drop(pending);
+        drop(reservations);
         self.session_load_reservations
             .epoch_tx
             .send_modify(|epoch| *epoch = epoch.wrapping_add(1));
-        SessionLoadReservation {
-            state: Arc::clone(&self.session_load_reservations),
-        }
+        SessionLoadReservation::new(Arc::clone(&self.session_load_reservations), id)
     }
 
     fn current_session_switch_seq(&self) -> u64 {
         self.session_switch_seq
             .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn claim_next_session_load(&self) {
+        self.session_load_reservations
+            .reservations
+            .lock()
+            .unwrap()
+            .claim_oldest();
     }
 
     /// 当前用户会话决策序号；队列提交用它快照入队时的意图。
@@ -588,7 +572,11 @@ impl AcpTuiClient {
 
     #[cfg(test)]
     pub(crate) fn pending_session_load_count(&self) -> usize {
-        *self.session_load_reservations.pending.lock().unwrap()
+        self.session_load_reservations
+            .reservations
+            .lock()
+            .unwrap()
+            .pending()
     }
 
     pub(super) async fn wait_for_session_load(
@@ -597,7 +585,14 @@ impl AcpTuiClient {
     ) -> Result<(), AcpError> {
         loop {
             let _ = *epoch_rx.borrow_and_update();
-            if *self.session_load_reservations.pending.lock().unwrap() == 0 {
+            if self
+                .session_load_reservations
+                .reservations
+                .lock()
+                .unwrap()
+                .pending()
+                == 0
+            {
                 return Ok(());
             }
             epoch_rx.changed().await.map_err(|_| {
@@ -615,9 +610,9 @@ impl AcpTuiClient {
         loop {
             let opened = {
                 let _operation = self.lifecycle.operation_gate().lock().await;
-                let pending = self.session_load_reservations.pending.lock().unwrap();
+                let reservations = self.session_load_reservations.reservations.lock().unwrap();
                 let _ = *epoch_rx.borrow_and_update();
-                if *pending > 0 {
+                if reservations.pending() > 0 {
                     None
                 } else {
                     self.check_restore_error()?;
@@ -672,7 +667,9 @@ impl AcpTuiClient {
         // 启动恢复失败后仍保留目标：下一次 ensure 先重试同一会话，不静默新建。
         *self.startup_restore_target.lock().unwrap() = Some(session_id.to_owned());
         let reservation = StartupRestoreGuard(&self.startup_restore_tx);
-        let result = self.load_session_under_gate(session_id, cwd, model).await;
+        let result = self
+            .load_session_under_gate(session_id, cwd, model, None)
+            .await;
         drop(reservation);
         result
     }
@@ -697,7 +694,26 @@ impl AcpTuiClient {
         let _operation = self.lifecycle.operation_gate().lock().await;
         // 交互式切换是新的用户意图：不再自动重试上一次启动恢复目标。
         self.clear_startup_restore_target();
-        self.load_session_under_gate(session_id, cwd, model).await
+        self.load_session_under_gate(session_id, cwd, model, None)
+            .await
+    }
+
+    /// 线程切换消费者在预约保护下加载。
+    ///
+    /// 预约在本方法开始切换前被认领：此后的准入快照知道输入属于这次
+    /// load 落定的代际，不会再预测一次不存在的切换。
+    pub(crate) async fn load_reserved_session(
+        &self,
+        reservation: &SessionLoadReservation,
+        session_id: &str,
+        cwd: &str,
+        model: Option<&str>,
+    ) -> Result<String, AcpError> {
+        let _operation = self.lifecycle.operation_gate().lock().await;
+        // 交互式切换是新的用户意图：不再自动重试上一次启动恢复目标。
+        self.clear_startup_restore_target();
+        self.load_session_under_gate(session_id, cwd, model, Some(reservation))
+            .await
     }
 
     async fn load_session_under_gate(
@@ -705,6 +721,7 @@ impl AcpTuiClient {
         session_id: &str,
         cwd: &str,
         model: Option<&str>,
+        reservation: Option<&SessionLoadReservation>,
     ) -> Result<String, AcpError> {
         *self.restore_error.lock().unwrap() =
             Some("session restore has not completed; retry or create a new session".into());
@@ -725,6 +742,14 @@ impl AcpTuiClient {
             cwd.to_string()
         };
         self.project_execution_cwd(None);
+        // 先认领预约再开始切换：准入快照在预约锁内读取未认领标记、随后读路由，
+        // 认领先行保证它不会观察到「未认领 + Transitioning」的撕裂组合——那会
+        // 把本次加载之后的输入误判成下一代会话，拆出第二条车道。直接调用方
+        // 没有传入预约对象时消费最早一个：它保护的正是接下来这次 load。
+        match reservation {
+            Some(reservation) => reservation.claim(),
+            None => self.claim_next_session_load(),
+        }
         let start = self
             .lifecycle
             .begin_transition(TransitionKind::Load, Some(session_id.to_string()))
