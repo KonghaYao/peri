@@ -1,6 +1,7 @@
 use tempfile::tempdir;
 
 use super::*;
+use crate::plugin::PluginOrigin;
 
 // ── #198：外部清单字段不得逃出插件缓存根 ──────────────────────────────
 
@@ -360,4 +361,30 @@ async fn test_missing_version_update_reinstalls_under_new_timestamp() {
     assert_eq!(records.plugins.len(), 1);
     assert_eq!(records.plugins[0].version, reinstalled.version);
     assert_eq!(records.plugins[0].install_path, reinstalled.install_path);
+}
+
+#[tokio::test]
+async fn test_check_updates_skips_versionless_marketplace_entry() {
+    let cache_dir = tempdir().unwrap();
+    setup_marketplace_plugin_with_version(cache_dir.path(), "evil-plugin", None);
+
+    let installed = InstalledPlugins {
+        version: 1,
+        plugins: vec![InstalledPlugin {
+            id: "evil-plugin@test-mkt".into(),
+            name: "evil-plugin".into(),
+            version: "20260101000000".into(),
+            marketplace: "test-mkt".into(),
+            install_path: cache_dir.path().join("cache"),
+            scope: InstallScope::User,
+            project_path: None,
+            origin: PluginOrigin::PeriInstalled,
+        }],
+    };
+
+    let updates = check_updates(&installed, cache_dir.path()).await;
+    assert!(
+        updates.is_empty(),
+        "未声明版本的条目无法比较，不应报告更新: {updates:?}"
+    );
 }

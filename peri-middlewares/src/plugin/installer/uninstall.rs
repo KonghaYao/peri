@@ -127,7 +127,10 @@ pub async fn check_updates(
 
         let manifest = &manifest_cache[marketplace];
         if let Some(latest) = manifest.plugins.iter().find(|p| p.name == name) {
-            let latest_version = declared_version(latest).unwrap_or_default();
+            // 未声明版本的条目无法与已安装时间戳比较，不报告更新。
+            let Some(latest_version) = declared_version(latest) else {
+                continue;
+            };
 
             if latest_version != plugin.version {
                 result.push(PluginUpdateInfo {
