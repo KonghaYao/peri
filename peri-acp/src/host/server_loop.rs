@@ -626,14 +626,24 @@ impl ServerLoop<'_> {
         ) {
             let lifecycle_session_id = extract_session_id(&params, "").to_owned();
             if matches!(method.as_str(), "session/close" | "session/delete") {
-                if let Some(state) = sessions.lock().await.get_mut(&lifecycle_session_id) {
-                    state.closing = true;
-
-                    if let Some(token) = &state.cancel_token {
+                // 关闭要取得生命周期锁，必须先让在飞 turn 停下来：中断面与
+                // `session/cancel` 相同（本轮根令牌 + Cascade 子 agent）。这里
+                // **不能**先落不可逆状态——`closing` 闸门与 `pre_close_session`
+                // 属于已成立的关闭事实，只允许在 `close_session` 确认持久化关闭
+                // 意图之后设置。锁超时/存储失败时客户端收到关闭失败，会话必须
+                // 仍可续聊（#196）。
+                {
+                    let states = sessions.lock().await;
+                    if let Some(token) = states
+                        .get(&lifecycle_session_id)
+                        .and_then(|state| state.cancel_token.as_ref())
+                    {
                         token.cancel();
                     }
                 }
-                cfg.session_manager.pre_close_session(&lifecycle_session_id);
+                if let Some(runtime) = cfg.session_manager.get_session(&lifecycle_session_id) {
+                    runtime.cancel_cascade_children();
+                }
             }
             let lock = self
                 .prompt_locks

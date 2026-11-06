@@ -620,6 +620,9 @@ mod workflow_cases;
 #[path = "requests_lifecycle_cases_test.rs"]
 mod lifecycle_cases;
 
+#[path = "requests_close_failure_test.rs"]
+mod close_failure;
+
 #[path = "requests_mcp_cases_test.rs"]
 mod mcp_cases;
 
