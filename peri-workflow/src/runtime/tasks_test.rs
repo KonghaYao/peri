@@ -721,23 +721,28 @@ fn conflicting_late_settle_keeps_first_result() {
     }
 }
 
-/// 重复回填是投递重试入口（design §5.1）：sink 会再次收到同一终态结果。
+/// 同一任务两次终态回填（投递重试）：结果必须再投，工具调用只计一次。
 ///
-/// 计数侧按 taskId 去重（`RunLimitState::observe_tool_calls`），这里固化投递语义：
-/// 重投必须发生，不能被"只通知一次"的实现吞掉。
+/// sink 侧接线与 `WorkflowRuntime::new` 一致：按 taskId 观察结果中的 `tool_count`，
+/// 限额判定归 `RunLimitState`。
 #[test]
-fn duplicate_settle_redelivers_the_same_terminal_result() {
+fn duplicate_settle_redelivers_result_and_counts_tool_calls_once() {
     let (table, _rx) = make_table();
+    let limit = Arc::new(crate::runner::RunLimitState::new(Some(5)));
     let delivered = Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink_deliveries = Arc::clone(&delivered);
+    let sink_limit = Arc::clone(&limit);
     table.set_terminal_sink(Arc::new(move |record| {
+        if let Some(count) = record
+            .result
+            .as_ref()
+            .and_then(|result| result.tool_count())
+        {
+            sink_limit.observe_tool_calls(&record.task_id, count);
+        }
         sink_deliveries.lock().unwrap().push(record.clone());
     }));
-    table.publish("t-1".into(), make_params("run-1", 1));
-    assert!(matches!(
-        table.mark_executing("run-1", "t-1", CancellationToken::new()),
-        ClaimOutcome::Claimed(_)
-    ));
+
     let result = AgentRunResult::Ok {
         output: "done".into(),
         usage: Usage { output_tokens: 3 },
@@ -747,6 +752,11 @@ fn duplicate_settle_redelivers_the_same_terminal_result() {
         phase: None,
         duration_ms: None,
     };
+    table.publish("t-1".into(), make_params("run-1", 1));
+    assert!(matches!(
+        table.mark_executing("run-1", "t-1", CancellationToken::new()),
+        ClaimOutcome::Claimed(_)
+    ));
     for _ in 0..2 {
         table.settle(
             "run-1",
@@ -762,4 +772,30 @@ fn duplicate_settle_redelivers_the_same_terminal_result() {
     assert_eq!(delivered.len(), 2, "重复回填必须再次投递终态结果");
     assert_eq!(delivered[0].task_id, delivered[1].task_id);
     assert_eq!(delivered[0].result, delivered[1].result, "重投同一份结果");
+    drop(delivered);
+    assert_eq!(
+        limit.breach(),
+        None,
+        "同一任务只计首次：3+3 若重复累计会误报 maxToolCalls(5)"
+    );
+
+    // 另一任务继续累计并超限，证明首次的 3 确实计入、去重只按 task 生效。
+    table.publish("t-2".into(), make_params("run-1", 2));
+    assert!(matches!(
+        table.mark_executing("run-1", "t-2", CancellationToken::new()),
+        ClaimOutcome::Claimed(_)
+    ));
+    table.settle(
+        "run-1",
+        "t-2",
+        SettleAdmission::ExecutingOnly,
+        WorkflowTaskState::Completed,
+        Some(result),
+        None,
+    );
+    assert_eq!(
+        limit.breach().as_deref(),
+        Some("workflow exceeded maxToolCalls (5)"),
+        "另一任务的 3 次调用应正常累计到 6"
+    );
 }

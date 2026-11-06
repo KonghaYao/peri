@@ -43,8 +43,8 @@
   - `runner::tests::run_limit_state_counts_each_task_once_on_redelivery`（重投只计一次）
   - `runner::tests::concurrent_redelivery_of_one_task_counts_once`（并发重投只计一次）
   - `runner::tests::duplicate_task_backfill_counts_tool_calls_once`（首次正常计数）
-  - `runtime::tasks::tests::duplicate_settle_redelivers_the_same_terminal_result`
-    （重投仍会再次投递）
+  - `runtime::tasks::tests::duplicate_settle_redelivers_result_and_counts_tool_calls_once`
+    （带 `maxToolCalls` 的同 task 两次回填：结果重投，工具调用只计一次）
 
 ## 验证记录
 
