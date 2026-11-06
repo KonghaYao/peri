@@ -1,5 +1,6 @@
 //! Tests for setup_wizard
 use super::*;
+use crate::kit::atoms::SETUP_WIZARD;
 use serial_test::serial;
 use std::path::{Path, PathBuf};
 
@@ -405,6 +406,10 @@ fn test_reopened_setup_save_preserves_existing_custom_provider_fields() {
             let disk = crate::config::ConfigSource::load_at(&cwd, global.clone())
                 .unwrap()
                 .loaded_merged();
+            assert_eq!(
+                merged, disk,
+                "save_setup 必须返回 authority 接纳后的快照，而不是保存前候选"
+            );
             assert_eq!(disk.config.providers.len(), 1);
             let provider = disk
                 .config
@@ -429,6 +434,116 @@ fn test_reopened_setup_save_preserves_existing_custom_provider_fields() {
             assert_eq!(
                 std::fs::read_to_string(&sentinel).unwrap(),
                 "do-not-touch-sentinel"
+            );
+        },
+    );
+}
+
+/// [回归测试] 全局 key + 工作区配置下，在 /setup 修改 provider endpoint：
+/// workspace 保存会剥离继承凭据，accepted snapshot 不再有可用 provider。
+/// 必须在落盘前拒绝，旧配置保持不变；重载后 provider 不能丢失。
+#[test]
+fn test_setup_endpoint_change_without_own_key_keeps_persisted_provider() {
+    isolated(
+        "test_setup_endpoint_change_without_own_key_keeps_persisted_provider",
+        || {
+            for key in [
+                "ANTHROPIC_API_KEY",
+                "OPENAI_API_KEY",
+                "CODEX_API_KEY",
+                "ANTHROPIC_BASE_URL",
+                "OPENAI_BASE_URL",
+                "CODEX_BASE_URL",
+            ] {
+                // SAFETY: 当前用例独占子进程，且尚未派发任何任务。
+                unsafe { std::env::remove_var(key) };
+            }
+            let root = std::env::current_dir().unwrap();
+            let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+            let cwd = root.join("workspace");
+            std::fs::create_dir_all(cwd.join(".peri")).unwrap();
+            let global = home.join(".peri/settings.json");
+            let cfg: crate::config::PeriConfig = serde_json::from_value(serde_json::json!({
+                "config": {
+                    "active_alias": "opus",
+                    "language": "zh-CN",
+                    "profiles": {
+                        "opus": {
+                            "provider": "openai",
+                            "model": "session-model",
+                            "effort": "high"
+                        }
+                    },
+                    "providers": [{
+                        "id": "openai",
+                        "name": "Global OpenAI",
+                        "type": "openai",
+                        "apiKey": "global-secret",
+                        "baseUrl": "https://old.example/v1",
+                        "models": {
+                            "fable": "fable-model",
+                            "opus": "opus-model",
+                            "sonnet": "sonnet-model",
+                            "haiku": "haiku-model"
+                        }
+                    }]
+                }
+            }))
+            .unwrap();
+            crate::config::save_to(&cfg, &global).unwrap();
+            let global_before = std::fs::read(&global).unwrap();
+            let workspace = cwd.join(".peri/settings.json");
+            let workspace_before = r#"{"config":{"language":"zh-CN"}}"#;
+            std::fs::write(&workspace, workspace_before).unwrap();
+
+            let source = std::sync::Arc::new(
+                crate::config::ConfigSource::load_at(&cwd, global.clone()).unwrap(),
+            );
+            assert!(
+                crate::kit::atoms::CONFIG_SOURCE_HANDLE
+                    .set(source.clone())
+                    .is_ok()
+            );
+
+            let mut state = state_from_config(&source.loaded_merged());
+            assert_eq!(
+                state.providers[0].api_key, "global-secret",
+                "加载后的候选应包含从 global 继承的凭据"
+            );
+            state.providers[0].base_url = "https://changed.example/v1".into();
+
+            let error =
+                save_setup(&state).expect_err("accepted snapshot 无可用 provider 时必须拒绝保存");
+            assert!(
+                error.to_string().contains("no usable active provider"),
+                "错误必须说明 accepted 配置没有可用 provider: {error}"
+            );
+
+            assert_eq!(
+                std::fs::read(&workspace).unwrap(),
+                workspace_before.as_bytes(),
+                "拒绝保存时不得写工作区文件"
+            );
+            assert_eq!(std::fs::read(&global).unwrap(), global_before);
+            assert!(
+                !std::fs::read_to_string(&workspace)
+                    .unwrap()
+                    .contains("global-secret")
+            );
+
+            let reloaded = crate::config::ConfigSource::load_at(&cwd, global).unwrap();
+            let merged = reloaded.loaded_merged();
+            let provider = merged
+                .config
+                .providers
+                .iter()
+                .find(|provider| provider.id == "openai")
+                .expect("拒绝保存后 provider 必须仍在");
+            assert_eq!(provider.base_url, "https://old.example/v1");
+            assert_eq!(provider.api_key, "global-secret");
+            assert!(
+                crate::app::agent::LlmProvider::from_config(&merged).is_some(),
+                "重载后 provider 不能丢失"
             );
         },
     );
@@ -746,4 +861,155 @@ fn test_provider_identity_provenance_survives_state_roundtrip() {
         .remove("original_provider_id");
     let restored: MigratedProvider = serde_json::from_value(old_provider).unwrap();
     assert!(restored.provider_id_is_editable());
+}
+
+/// 独立子进程内的全局 key + 工作区 fixture。
+fn write_inherited_key_fixture() -> (PathBuf, PathBuf, PathBuf, Vec<u8>) {
+    for key in [
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "OPENAI_BASE_URL",
+        "CODEX_BASE_URL",
+    ] {
+        // SAFETY: 当前用例独占子进程，且尚未派发任何任务。
+        unsafe { std::env::remove_var(key) };
+    }
+    let root = std::env::current_dir().unwrap();
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+    let cwd = root.join("workspace");
+    std::fs::create_dir_all(cwd.join(".peri")).unwrap();
+    let global = home.join(".peri/settings.json");
+    let cfg: crate::config::PeriConfig = serde_json::from_value(serde_json::json!({
+        "config": {
+            "active_alias": "opus",
+            "language": "zh-CN",
+            "profiles": {
+                "opus": {
+                    "provider": "openai",
+                    "model": "session-model",
+                    "effort": "high"
+                }
+            },
+            "providers": [{
+                "id": "openai",
+                "name": "Global OpenAI",
+                "type": "openai",
+                "apiKey": "global-secret",
+                "baseUrl": "https://old.example/v1",
+                "models": {
+                    "fable": "fable-model",
+                    "opus": "opus-model",
+                    "sonnet": "sonnet-model",
+                    "haiku": "haiku-model"
+                }
+            }]
+        }
+    }))
+    .unwrap();
+    crate::config::save_to(&cfg, &global).unwrap();
+    let global_before = std::fs::read(&global).unwrap();
+    let workspace = cwd.join(".peri/settings.json");
+    std::fs::write(&workspace, r#"{"config":{"language":"zh-CN"}}"#).unwrap();
+    (cwd, global, workspace, global_before)
+}
+
+/// [回归测试] 保存失败时 finish_setup 不得发布保存前候选，也不得完成 setup。
+#[test]
+fn test_finish_setup_never_publishes_credential_stripped_candidate() {
+    isolated(
+        "test_finish_setup_never_publishes_credential_stripped_candidate",
+        || {
+            let (cwd, global, workspace, global_before) = write_inherited_key_fixture();
+            let workspace_before = std::fs::read(&workspace).unwrap();
+            let source = std::sync::Arc::new(
+                crate::config::ConfigSource::load_at(&cwd, global.clone()).unwrap(),
+            );
+            assert!(
+                crate::kit::atoms::CONFIG_SOURCE_HANDLE
+                    .set(source.clone())
+                    .is_ok()
+            );
+            let original = source.loaded_merged();
+            let handle = std::sync::Arc::new(parking_lot::RwLock::new(original.clone()));
+            assert!(
+                crate::kit::atoms::PERI_CONFIG_HANDLE
+                    .set(handle.clone())
+                    .is_ok()
+            );
+
+            let mut state = state_from_config(&original);
+            state.from_command = true;
+            state.save_in_progress = true;
+            state.providers[0].base_url = "https://changed.example/v1".into();
+            SETUP_WIZARD.set(state.clone());
+
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            runtime.block_on(crate::kit::setup_wizard::finish_setup(state));
+
+            assert_eq!(
+                *handle.read(),
+                original,
+                "失败时运行态必须保持已持久化配置，不得发布候选"
+            );
+            assert!(!*crate::kit::atoms::SETUP_COMPLETED.state().read());
+            let wizard = SETUP_WIZARD.state();
+            let current = wizard.read();
+            assert!(current.submit_error.is_some());
+            assert!(!current.save_in_progress);
+            drop(current);
+            assert_eq!(std::fs::read(&workspace).unwrap(), workspace_before);
+            assert_eq!(std::fs::read(&global).unwrap(), global_before);
+            assert!(
+                !std::fs::read_to_string(&workspace)
+                    .unwrap()
+                    .contains("global-secret")
+            );
+        },
+    );
+}
+
+/// [回归测试] 保存成功时 finish_setup 发布 authority 接纳的 accepted snapshot。
+#[test]
+fn test_finish_setup_publishes_accepted_snapshot() {
+    isolated("test_finish_setup_publishes_accepted_snapshot", || {
+        let (cwd, global, workspace, global_before) = write_inherited_key_fixture();
+        let source = std::sync::Arc::new(
+            crate::config::ConfigSource::load_at(&cwd, global.clone()).unwrap(),
+        );
+        assert!(
+            crate::kit::atoms::CONFIG_SOURCE_HANDLE
+                .set(source.clone())
+                .is_ok()
+        );
+        let original = source.loaded_merged();
+        let handle = std::sync::Arc::new(parking_lot::RwLock::new(original.clone()));
+        assert!(
+            crate::kit::atoms::PERI_CONFIG_HANDLE
+                .set(handle.clone())
+                .is_ok()
+        );
+
+        let mut state = state_from_config(&original);
+        state.from_command = false;
+        state.save_in_progress = true;
+        SETUP_WIZARD.set(state.clone());
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(crate::kit::setup_wizard::finish_setup(state));
+
+        let accepted = crate::config::ConfigSource::load_at(&cwd, global.clone())
+            .unwrap()
+            .loaded_merged();
+        assert_eq!(*handle.read(), accepted, "只能发布 accepted snapshot");
+        assert!(*crate::kit::atoms::SETUP_COMPLETED.state().read());
+        assert!(SETUP_WIZARD.state().read().submit_error.is_none());
+        assert_eq!(std::fs::read(&global).unwrap(), global_before);
+        assert!(
+            !std::fs::read_to_string(&workspace)
+                .unwrap()
+                .contains("global-secret")
+        );
+    });
 }

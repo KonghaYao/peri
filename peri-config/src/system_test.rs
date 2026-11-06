@@ -392,6 +392,33 @@ fn invalid_observability_value_rejects_snapshot_by_actual_source() {
 }
 
 #[test]
+fn preview_update_reports_acceptance_without_writing_or_publishing() {
+    let temp = tempfile::tempdir().unwrap();
+    let scope = make_scope(temp.path(), "project");
+    let global = r#"{"config":{"active_alias":"opus","providers":[{"id":"p","type":"openai","apiKey":"global-key","models":{"opus":"m"}}],"profiles":{"opus":{"provider":"p","model":"m"}}}}"#;
+    let workspace = r#"{"config":{"language":"en"}}"#;
+    let (source, system) = make_system(&scope, make_inputs(Some(global), Some(workspace), None));
+    let current = system.resolve(scope.clone()).unwrap();
+    let mut candidate = current.settings().clone();
+    // Changing the endpoint breaks credential inheritance: the saved workspace
+    // layer loses the global key, and the accepted snapshot has no usable provider.
+    candidate.config.providers[0].base_url = "https://other.example/v1".into();
+
+    let preview = system
+        .preview_update(&scope, current.revision(), &candidate)
+        .unwrap();
+    assert!(preview.provider().is_none());
+    assert!(source.writes().is_empty(), "预览不得写目标文件");
+    assert!(Arc::ptr_eq(&current, &system.current(&scope).unwrap()));
+
+    let accepted = system
+        .update(&scope, current.revision(), &candidate)
+        .unwrap();
+    assert_eq!(accepted.settings(), preview.settings());
+    assert_eq!(source.writes().len(), 1);
+}
+
+#[test]
 fn update_rejects_stale_registry_revision_without_writing() {
     let temp = tempfile::tempdir().unwrap();
     let scope = make_scope(temp.path(), "project");

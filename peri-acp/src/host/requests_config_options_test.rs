@@ -332,6 +332,151 @@ async fn update_config_publishes_accepted_settings_and_preserves_owned_fields() 
 
 #[tokio::test]
 #[serial]
+async fn update_config_rejects_credential_stripped_accepted_snapshot() {
+    let temporary = tempfile::tempdir().unwrap();
+    let cwd = temporary.path().join("workspace");
+    std::fs::create_dir_all(cwd.join(".peri")).unwrap();
+    let workspace_path = cwd.join(".peri/settings.json");
+    std::fs::write(&workspace_path, r#"{"config":{"language":"zh-CN"}}"#).unwrap();
+    let global_path = temporary.path().join("global.json");
+    let mut config = make_peri_config_with_provider(make_provider_config(
+        "openai",
+        "openai",
+        "global-secret",
+        "session-model",
+    ));
+    config.config.providers[0].base_url = "https://old.example/v1".into();
+    crate::provider::save_to(&config, &global_path).unwrap();
+    let global_before = std::fs::read(&global_path).unwrap();
+
+    let source =
+        Arc::new(crate::provider::ConfigSource::load_at(&cwd, global_path.clone()).unwrap());
+    let loaded = source.loaded_merged();
+    assert_eq!(loaded.config.providers[0].api_key, "global-secret");
+    let provider = LlmProvider::from_config(&loaded).unwrap();
+    let mut cfg = make_server_config(loaded.clone(), provider.clone(), &temporary).await;
+    cfg.config_source = source;
+    *cfg.peri_config.write() = loaded.clone();
+    *cfg.provider.write() = provider.clone();
+    let mut sessions = seeded_sessions(&provider);
+    let workspace_before = std::fs::read(&workspace_path).unwrap();
+    let mock = Arc::new(MockTransport::default());
+    let transport: Arc<dyn crate::transport::AcpTransport> = mock.clone();
+
+    // 候选仍带全球 key；workspace 保存会因 endpoint 变更剥离它，
+    // accepted snapshot 不再有可用 provider。
+    let mut candidate = loaded.clone();
+    candidate.config.providers[0].base_url = "https://changed.example/v1".into();
+    let error = handle_update_config(
+        &json!({"config": candidate}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error.code, -32602);
+    assert_eq!(
+        error.message,
+        "accepted configuration has no usable provider"
+    );
+    assert_eq!(*cfg.peri_config.read(), loaded);
+    assert_eq!(
+        crate::session::agent_pool::fingerprint(&cfg.provider.read()),
+        crate::session::agent_pool::fingerprint(&provider)
+    );
+    assert_eq!(
+        sessions["session"].agent_pool.fingerprint(),
+        "seed-fingerprint"
+    );
+    assert_eq!(std::fs::read(&workspace_path).unwrap(), workspace_before);
+    assert_eq!(std::fs::read(&global_path).unwrap(), global_before);
+    assert!(!std::fs::read_to_string(&workspace_path)
+        .unwrap()
+        .contains("global-secret"));
+    assert!(mock.notifications().is_empty());
+
+    let reloaded = crate::provider::ConfigSource::load_at(&cwd, global_path)
+        .unwrap()
+        .loaded_merged();
+    assert_eq!(
+        reloaded.config.providers[0].base_url,
+        "https://old.example/v1"
+    );
+    assert!(
+        LlmProvider::from_config(&reloaded).is_some(),
+        "拒绝后重载 provider 不能丢失"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn update_config_persists_workspace_relative_diff_and_uses_accepted_provider() {
+    let temporary = tempfile::tempdir().unwrap();
+    let cwd = temporary.path().join("workspace");
+    std::fs::create_dir_all(cwd.join(".peri")).unwrap();
+    let workspace_path = cwd.join(".peri/settings.json");
+    std::fs::write(&workspace_path, r#"{"config":{"language":"zh-CN"}}"#).unwrap();
+    let global_path = temporary.path().join("global.json");
+    let mut config = make_peri_config_with_provider(make_provider_config(
+        "openai",
+        "openai",
+        "global-secret",
+        "old-model",
+    ));
+    config.config.providers[0].base_url = "https://old.example/v1".into();
+    // 工作区文档缺省 active_alias 时按 opus 生效。
+    config.config.providers[0].models.opus = "old-model".into();
+    crate::provider::save_to(&config, &global_path).unwrap();
+
+    let source =
+        Arc::new(crate::provider::ConfigSource::load_at(&cwd, global_path.clone()).unwrap());
+    let loaded = source.loaded_merged();
+    assert_eq!(loaded.config.providers[0].models.opus, "old-model");
+    let provider = LlmProvider::from_config(&loaded).unwrap();
+    let mut cfg = make_server_config(loaded.clone(), provider.clone(), &temporary).await;
+    cfg.config_source = source;
+    *cfg.peri_config.write() = loaded.clone();
+    *cfg.provider.write() = provider;
+    let mut sessions = seeded_sessions(&LlmProvider::from_config(&loaded).unwrap());
+    let mock = Arc::new(MockTransport::default());
+    let transport: Arc<dyn crate::transport::AcpTransport> = mock.clone();
+
+    let mut candidate = loaded.clone();
+    candidate.config.providers[0].models.opus = "updated-model".into();
+    handle_update_config(
+        &json!({"sessionId":"session", "config": candidate}),
+        &cfg,
+        &mut sessions,
+        &transport,
+    )
+    .await
+    .unwrap();
+
+    let workspace_text = std::fs::read_to_string(&workspace_path).unwrap();
+    assert!(
+        !workspace_text.contains("global-secret"),
+        "工作区保存不得复制全局 key"
+    );
+    let workspace: Value = serde_json::from_str(&workspace_text).unwrap();
+    assert_eq!(workspace["config"]["providers"][0]["apiKey"], "");
+    let accepted = crate::provider::ConfigSource::load_at(&cwd, global_path)
+        .unwrap()
+        .loaded_merged();
+    assert_eq!(*cfg.peri_config.read(), accepted);
+    let accepted_provider = LlmProvider::from_config(&accepted).unwrap();
+    assert_eq!(cfg.provider.read().model_name(), "updated-model");
+    assert_eq!(
+        crate::session::agent_pool::fingerprint(&cfg.provider.read()),
+        crate::session::agent_pool::fingerprint(&accepted_provider),
+        "运行态 provider 必须来自 accepted 配置"
+    );
+    assert!(!mock.notifications().is_empty());
+}
+
+#[tokio::test]
+#[serial]
 async fn invalid_model_candidate_is_rejected_before_persistence() {
     let temporary = tempfile::tempdir().unwrap();
     let config = live_config();

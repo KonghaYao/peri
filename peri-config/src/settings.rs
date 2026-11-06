@@ -322,6 +322,25 @@ impl ConfigSource {
         expected_revision: crate::ConfigurationRevision,
         merged: &PeriConfig,
     ) -> Result<Arc<ConfigurationSnapshot>> {
+        let (authority, scope) = self.writable_authority()?;
+        Ok(authority.update(scope, expected_revision, merged)?)
+    }
+
+    /// Resolve the snapshot [`Self::save`] would publish without writing the target.
+    ///
+    /// Callers validate the accepted projection before committing a candidate;
+    /// the subsequent save still rechecks the revision, so a racing writer
+    /// surfaces as a conflict instead of a stale write.
+    pub fn preview(
+        &self,
+        expected_revision: crate::ConfigurationRevision,
+        merged: &PeriConfig,
+    ) -> Result<Arc<ConfigurationSnapshot>> {
+        let (authority, scope) = self.writable_authority()?;
+        Ok(authority.preview_update(scope, expected_revision, merged)?)
+    }
+
+    fn writable_authority(&self) -> Result<(&ConfigurationSystem, &ConfigurationScope)> {
         if self.layout_error.is_some() {
             return Err(SettingsError::AuthorityUnavailable);
         }
@@ -331,7 +350,7 @@ impl ConfigSource {
             if self.workspace_path.is_some() && snapshot.global_settings() != &self.global {
                 return Err(SettingsError::GlobalBaselineChanged);
             }
-            return Ok(authority.update(scope, expected_revision, merged)?);
+            return Ok((authority, scope));
         }
         Err(SettingsError::AuthorityUnavailable)
     }
