@@ -125,23 +125,21 @@ impl ToolBatch {
         tool_call_id: &str,
         output: &str,
         is_error: bool,
-    ) -> Option<CompletedTool> {
-        self.pending_tools.remove(tool_call_id).map(|pt| {
-            let now = peri_time::now_utc_rfc3339();
-            self.batch_end_time = Some(now.clone());
-            let ct = CompletedTool {
-                name: pt.name,
-                input: pt.input,
-                output: output.to_string(),
-                span_id: pt.span_id,
-                start_time: pt.start_time,
-                end_time: now,
-                is_agent: pt.is_agent,
-                is_error,
-            };
-            self.completed_tools.push(ct.clone());
-            ct
-        })
+    ) -> Option<&CompletedTool> {
+        let pt = self.pending_tools.remove(tool_call_id)?;
+        let now = peri_time::now_utc_rfc3339();
+        self.batch_end_time = Some(now.clone());
+        self.completed_tools.push(CompletedTool {
+            name: pt.name,
+            input: pt.input,
+            output: output.to_string(),
+            span_id: pt.span_id,
+            start_time: pt.start_time,
+            end_time: now,
+            is_agent: pt.is_agent,
+            is_error,
+        });
+        self.completed_tools.last()
     }
 
     pub(crate) fn record_end_time(&mut self, end_time: String) {

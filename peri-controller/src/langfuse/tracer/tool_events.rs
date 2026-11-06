@@ -190,20 +190,20 @@ impl LangfuseTracer {
             );
 
             // 每个工具以 ObservationCreate + ObservationType::Tool 上报
-            for tool in &flush.tools {
+            for tool in flush.tools {
                 let level = if tool.is_error {
                     Some(ObservationLevel::Error)
                 } else {
                     None
                 };
                 let obs_body = ObservationBody {
-                    id: Some(tool.span_id.clone()),
+                    id: Some(tool.span_id),
                     trace_id: Some(self.trace_id.clone()),
                     r#type: ObservationType::Tool,
-                    name: Some(tool.name.clone()),
-                    start_time: Some(tool.start_time.clone()),
+                    name: Some(tool.name),
+                    start_time: Some(tool.start_time),
                     end_time: Some(tool.end_time.clone()),
-                    input: Some(tool.input.clone()),
+                    input: Some(tool.input),
                     output: Some(if tool.is_error {
                         // error_message 携带工具实际错误正文(截断防超大),
                         // 替代 v1 只写 error_class 的信息丢失
@@ -213,7 +213,7 @@ impl LangfuseTracer {
                             "error_schema_version": 2,
                         })
                     } else {
-                        serde_json::json!(tool.output)
+                        serde_json::Value::String(tool.output)
                     }),
                     parent_observation_id: Some(batch.batch_span_id.clone()),
                     level,
@@ -223,7 +223,7 @@ impl LangfuseTracer {
                 };
                 let tool_event = IngestionEvent::ObservationCreate {
                     id: new_uuid(),
-                    timestamp: tool.end_time.clone(),
+                    timestamp: tool.end_time,
                     body: obs_body,
                     metadata: None,
                 };
