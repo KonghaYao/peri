@@ -73,8 +73,8 @@ fn prepare_private_dir(path: &Path) -> io::Result<std::fs::File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        // DirBuilder's mode is filtered by umask; pin the exact bits so a
-        // permissive umask cannot widen the directory.
+        // umask can strip bits from the requested mode; pin the exact bits so
+        // the directory is always usable and private.
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
     }
     let mut options = std::fs::OpenOptions::new();
@@ -121,8 +121,8 @@ fn write_owner_only(file: &mut std::fs::File, content: &[u8]) -> io::Result<()> 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        // OpenOptions' mode is filtered by umask; pin the exact bits on the
-        // open descriptor so a path swap cannot redirect the chmod.
+        // umask can strip bits from the requested mode; pin the exact bits on
+        // the open descriptor so a path swap cannot redirect the chmod.
         file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
     io::Write::write_all(file, content)
