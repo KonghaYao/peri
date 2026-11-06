@@ -291,6 +291,36 @@ impl peri_acp_types::tasks::TaskManager for TaskManager {
         self.complete(ticket, result)
     }
 
+    fn register_live_agent(
+        &self,
+        request: peri_acp_types::tasks::LiveAgentRegistration,
+    ) -> Result<TaskRegistrationTicket, String> {
+        let inbox = super::agent_inbox::BackgroundAgentInbox::new(
+            request.child_thread_id,
+            request.queue,
+            request.cancel.clone(),
+        );
+        let cancel = request.cancel.clone();
+        self.register_with_kind(BackgroundTask {
+            id: request.task_id,
+            agent_name: "agent".into(),
+            prompt_summary: request.summary,
+            status: BackgroundTaskStatus::Running,
+            started_at: peri_time::monotonic_now(),
+            chrono_started_at: peri_time::now_wall().into(),
+            kind: BgTaskKind::Agent,
+            cancel_handle: BgCancelHandle::Kill(Some(Box::new(move || cancel.cancel()))),
+            cancel_token: Some(request.cancel),
+            pid: None,
+            output_preview: None,
+            agent_inbox: Some(inbox),
+            initiator_session_id: None,
+            owner_session_id: None,
+            owner_identity: None,
+        })
+        .map_err(|error| error.to_string())
+    }
+
     fn settle_completed(
         &self,
         ticket: &TaskRegistrationTicket,

@@ -655,152 +655,40 @@ pub(crate) trait SessionDataPort: Send + Sync {
         Err(super::failure::unsupported())
     }
 
-    /// 本地 child 终态结算：终态、工作意图与结果消息的 MQ 接纳一次提交。
-    ///
-    /// 默认实现逐步组合既有行为，只保证「失败前不宣称完成」，进程在两步之间退出
-    /// 可能留下已写的终态。本机 SQLite adapter 覆写为单个 `BEGIN IMMEDIATE` 事务，
-    /// 远端 adapter 覆写为单个托管事务批；只有无事务能力的后端才退回组合降级。
-    /// 组合逻辑与 `SessionResources` 的默认实现共用同一份代码。
+    /// 原子终态与 MQ 结算；无实现时拒绝，不降级成分步写入。
     async fn finalize_child_terminal(
         &self,
-        child: &ThreadId,
-        status: peri_acp_types::thread::AgentStatus,
-        work_state: WorkState,
-        target: &ThreadId,
-        message: MqInput,
+        _child: &ThreadId,
+        _status: peri_acp_types::thread::AgentStatus,
+        _work_state: WorkState,
+        _target: &ThreadId,
+        _message: MqInput,
     ) -> SessionResourceResult<MqEnqueueOutcome> {
-        peri_acp_types::session_resources::composed_finalize_child_terminal(
-            &DataPortOps(self),
-            child,
-            status,
-            work_state,
-            target,
-            message,
-        )
-        .await
+        Err(super::failure::unsupported())
     }
 
-    /// 无结果终态写入：child 终态与工作意图一次提交，不产生结果消息。
-    ///
-    /// 默认实现按「工作意图 → 终态」组合既有行为，是无事务后端的降级：只保证失败前
-    /// 不宣称完成、失败不产生 `Done + working`，进程在两步之间退出仍可能留下
-    /// `Active + 目标工作意图`。具备事务能力的 adapter 覆写并回报本次是否写入。
+    /// 原子写入无结果终态与工作意图；已有终态不得覆盖。
     async fn settle_terminal_without_result(
         &self,
-        child: &ThreadId,
-        status: peri_acp_types::thread::AgentStatus,
-        work_state: WorkState,
+        _child: &ThreadId,
+        _status: peri_acp_types::thread::AgentStatus,
+        _work_state: WorkState,
     ) -> SessionResourceResult<TerminalSettlementOutcome> {
-        peri_acp_types::session_resources::composed_settle_terminal_without_result(
-            &DataPortOps(self),
-            child,
-            status,
-            work_state,
-        )
-        .await
+        Err(super::failure::unsupported())
     }
 
-    /// 关闭结算：写入保留消息的终态提醒并删除对应 MQ 行。
-    ///
-    /// 本机 SQLite adapter 覆写为单个事务；远端 adapter 尚未覆写，仍走这里的组合
-    /// 回退（已记录的限制，不是原子实现）。组合只保证「失败前不宣称完成」，进程在
-    /// 写提醒与删行之间退出可能留下已写提醒与未删行。
+    /// 提醒写入与 MQ 快照水位删除必须同批提交。
     async fn settle_retained_mq(
         &self,
-        thread_id: &ThreadId,
-        reminders: &[peri_acp_types::session::RetainedReminder],
-        rows: &[MqEntry],
+        _thread_id: &ThreadId,
+        _reminders: &[peri_acp_types::session::RetainedReminder],
+        _rows: &[MqEntry],
     ) -> SessionResourceResult<()> {
-        peri_acp_types::session_resources::composed_settle_retained_mq(
-            &DataPortOps(self),
-            thread_id,
-            reminders,
-            rows,
-        )
-        .await
+        Err(super::failure::unsupported())
     }
 
     /// 关闭数据端口：返回后不再接受新写入。
     async fn close(&self) -> SessionResourceResult<()>;
-}
-
-/// 把数据端口接到组合回退上的最小适配器。
-///
-/// 组合逻辑只有一份（`peri_acp_types::session_resources::settlement`）：本机 SQLite
-/// 把三条结算都覆写为单事务；远端覆写了终态结算两条，`settle_retained_mq` 仍走这里
-/// 的组合路径（已记录的非原子限制）。
-struct DataPortOps<'a, T: SessionDataPort + ?Sized>(&'a T);
-
-#[async_trait]
-impl<T: SessionDataPort + ?Sized> peri_acp_types::session_resources::ComposedSettlementOps
-    for DataPortOps<'_, T>
-{
-    async fn settlement_agent_status(
-        &self,
-        child: &ThreadId,
-    ) -> SessionResourceResult<peri_acp_types::thread::AgentStatus> {
-        Ok(self.0.load_meta(child).await?.agent_status)
-    }
-
-    async fn settlement_update_status(
-        &self,
-        child: &ThreadId,
-        status: peri_acp_types::thread::AgentStatus,
-    ) -> SessionResourceResult<()> {
-        self.0
-            .update_meta(
-                child,
-                &SessionMetaPatch {
-                    status: Some(status),
-                    ..Default::default()
-                },
-            )
-            .await
-    }
-
-    async fn settlement_set_work_state(
-        &self,
-        child: &ThreadId,
-        state: WorkState,
-    ) -> SessionResourceResult<()> {
-        self.0.set_work_state(child, state).await
-    }
-
-    async fn settlement_history_contains(
-        &self,
-        thread_id: &ThreadId,
-        message_id: MessageId,
-    ) -> SessionResourceResult<bool> {
-        self.0.mq_history_contains(thread_id, message_id).await
-    }
-
-    async fn settlement_mq_enqueue(
-        &self,
-        target: &ThreadId,
-        message: MqInput,
-    ) -> SessionResourceResult<MqEnqueueOutcome> {
-        self.0.mq_enqueue(target, message).await
-    }
-
-    async fn settlement_append_reminder(
-        &self,
-        thread_id: &ThreadId,
-        message_id: MessageId,
-        reminder: &TrustedSystemReminder,
-    ) -> SessionResourceResult<()> {
-        self.0
-            .append_reminder_if_absent(thread_id, message_id, reminder)
-            .await
-            .map(|_| ())
-    }
-
-    async fn settlement_mq_receive(
-        &self,
-        thread_id: &ThreadId,
-        selection: MqReceiveSelection,
-    ) -> SessionResourceResult<MqReceiveOutcome> {
-        self.0.mq_receive(thread_id, selection).await
-    }
 }
 
 // ─── child 快照的输入一致性：唯一一条规则 ─────────────────────────────────────

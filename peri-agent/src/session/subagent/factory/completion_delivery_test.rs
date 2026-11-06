@@ -48,3 +48,45 @@ fn configured_delivery_is_preserved_and_parentless_can_be_execution_only() {
     ));
     assert!(completion_delivery(None, None).is_none());
 }
+
+#[tokio::test]
+async fn completion_target_follows_known_callback_and_preserves_original_parent() {
+    let parent = Session::new(
+        Arc::from("/tmp"),
+        FrozenContext::builder().build(),
+        Some("b".into()),
+    );
+    let callback: OnBgCompleteFn = Arc::new(|_, _| Ok(()));
+    parent.set_subagent_host(crate::session::subagent::SubagentHost {
+        on_bg_complete: Some(callback.clone()),
+        completion_target: Some("configured-recipient".into()),
+        ..Default::default()
+    });
+    assert_eq!(
+        completion_target(Some(&parent), Some(&callback), Some("b".into())).as_deref(),
+        Some("configured-recipient")
+    );
+    let opaque: OnBgCompleteFn = Arc::new(|_, _| Ok(()));
+    assert_eq!(
+        completion_target(Some(&parent), Some(&opaque), Some("b".into())),
+        None
+    );
+    assert_eq!(
+        completion_target(Some(&parent), None, Some("b".into())).as_deref(),
+        Some("b")
+    );
+
+    let test = crate::session::test_resources::TestSession::open().await;
+    let store = test.resources();
+    let original = test.thread_id();
+    let child = test.create_child(&original).await;
+    persist_completion_target(store.as_ref(), &child, Some("b"))
+        .await
+        .unwrap();
+    let meta = store.load_session_meta(&child).await.unwrap();
+    assert_eq!(meta.parent_thread_id.as_ref(), Some(&original));
+    assert_eq!(
+        peri_acp_types::thread::completion_target(meta.config.as_deref()).unwrap(),
+        "b"
+    );
+}

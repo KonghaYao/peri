@@ -171,16 +171,12 @@ where
     let host = session
         .subagent_host()
         .ok_or("sync child host unavailable")?;
-    // 同步执行不纳入自动恢复：开始执行即回到 idle。新 thread 本就默认 idle，这一写同时
-    // 清掉此前明确停止或崩溃残留的工作意图；辅助写失败不阻断执行。
+    // 同步执行必须先清掉旧续跑意图，否则崩溃后可能被当作后台执行恢复。
     let resources = host.session_resources.clone();
     if let Some(resources) = resources.as_deref() {
-        if let Err(error) = resources
+        resources
             .set_work_state(&ThreadId::from(child_thread_id.clone()), WorkState::Idle)
-            .await
-        {
-            tracing::warn!(%child_thread_id, %error, "sync child work state write failed");
-        }
+            .await?;
     }
     let (handoff_sender, mut handoff_ready) = oneshot::channel();
     let handed_off = Arc::new(AtomicBool::new(false));
@@ -280,6 +276,7 @@ where
     let delivery = on_complete.expect("checked above");
     let close_task_id = worker_task_id.clone();
     let worker_terminal_route = terminal_route.clone();
+    let (durable_tx, durable_rx) = oneshot::channel();
     // Keep ownership until close admission has atomically installed both the
     // registration and completion worker. Rejection creates no parent receipt.
     let mut execution = Some(execution);
@@ -290,20 +287,24 @@ where
         })?;
         let execution = execution.take().expect("worker admitted only once");
         Ok(async move {
-            // 续跑意图写进已准入的 worker：claim→admission 之间没有 await，
-            // wrapper 被 drop 也不会留下「已交接但无人写终态」的窗口。
-            if !worker_session.config().cancel_token.is_cancelled() {
-                if let Err(error) = worker_terminal_route
+            // worker 持有不可取消的写入；Pending 只能在持久化确认后返回。
+            let durable = if worker_session.config().cancel_token.is_cancelled() {
+                Err("sync child was cancelled before background handoff".to_owned())
+            } else {
+                worker_terminal_route
                     .store
                     .set_work_state(
                         &ThreadId::from(worker_thread_id.clone()),
                         WorkState::Working,
                     )
                     .await
-                {
-                    tracing::warn!(%worker_thread_id, %error, "sync child handoff work state write failed");
-                }
+                    .map_err(|error| error.to_string())
+            };
+            if let Err(error) = &durable {
+                tracing::error!(%worker_thread_id, %error, "sync child background handoff rejected");
+                worker_session.config().cancel_token.cancel();
             }
+            let _ = durable_tx.send(durable);
             let outcome = await_execution(execution).await;
             // The child task has joined; only this producer can prove its resources stopped.
             manager.confirm_external_execution_stopped(&registration);
@@ -405,6 +406,9 @@ where
     }
 
     terminal_ownership.mark_worker_admitted();
+    durable_rx.await.map_err(|error| {
+        format!("sync child handoff worker ended before durable acceptance: {error}")
+    })??;
     handed_off.store(true, Ordering::Release);
     tracing::warn!(
         %child_thread_id,

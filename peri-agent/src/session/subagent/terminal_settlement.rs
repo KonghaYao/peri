@@ -2,7 +2,7 @@
 //!
 //! 后台 task 与 sync 交接 worker 共用此路由。三次独立写入之间崩溃会留下
 //! 「子任务已结束、父会话没收到结果」（`docs/design/session-durability.md` §5.3）；
-//! 具备事务的后端一次提交，组合后端只保证失败前不宣称完成。
+//! 后端一次提交，未实现原子操作则返回 Unsupported。
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -96,8 +96,7 @@ impl TerminalOwnership {
 
 /// 没有结果可投递时的同步终态结算（无 detach / worker 准入被拒 / 执行体收尾）。
 ///
-/// 终态与工作意图由资源侧同一次提交；无事务后端按「工作意图 → 终态」组合并显式
-/// 降级。child 已是终态时是幂等 no-op，不覆盖既有终态。
+/// 终态与工作意图由资源侧同一次提交；未实现原子操作则拒绝。child 已是终态时是幂等 no-op，不覆盖既有终态。
 pub(super) async fn settle_terminal_without_result(
     store: &dyn SessionResources,
     child: &ThreadId,

@@ -93,7 +93,7 @@ reminder 出口），客户端据此把通知与那次 load 配对；历史页�
 
 - `status`：无失败为 `ok`；仅逐项失败为 `partial`；进入会话的恢复本身失败为 `failed`。
 - `Corrupt` / `ReadOnly` / `NotFound` 使会话不可执行：服务端在内存中设置执行阻断，`session/prompt` 返回 `-32017`，`data.reason = "recovery_execution_blocked"`（附 `kind`/`threadId`/`detail`），模型与 continuation 均不启动。
-- 恢复 child 的结果通知投递到持久父链上的直接父 `parent_thread_id`，不按显式 resume 的调用者改投（例如 B resume 原属 A 的 child 后崩溃，结果仍回 A）。通知使用 `ensure_processing`：接纳时把父级 `idle` 提升为 `working`；live 且已激活的 idle 父级收到唤醒，未 live 的父级由下一次进入消费 durable 行，`stopped` 不被解除。
+- 恢复 child 的结果通知投递到 `threads.config.completion_target` 记录的实际收件人，不按历史父链猜测（例如 B 显式 resume 原属 A 的 child 后崩溃，结果仍回 B）；目标缺失或不在同一根树时报告失败。通知使用 `ensure_processing`：接纳时把收件方 `idle` 提升为 `working`；live 且已激活的 idle 收件方收到唤醒，未 live 的收件方由下一次进入消费 durable 行，`stopped` 不被解除。
 - 恢复启动资格只在响应后真正交出执行时保留；跳过或 Receive 前早失败只撤销进程内准入，提醒仍留在 MQ，由下一次显式进入重试。该重试不通过协议字段暴露，也不自动发生。
 - `Unavailable` / `Superseded` / `Unsupported` 不阻断：用户可显式发送消息继续，服务端仍按正常准入复核。
 - 每次新的 load/resume 重新尝试恢复并按本次结果重设阻断；成功或可重试失败清除旧阻断。阻断不持久化。

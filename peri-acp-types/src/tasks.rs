@@ -213,6 +213,15 @@ pub struct BgTaskRegistration {
     pub kill: Option<Box<dyn FnOnce() + Send + Sync>>,
 }
 
+/// A live Agent registration includes its revocable message route, not only a UI task.
+pub struct LiveAgentRegistration {
+    pub task_id: String,
+    pub child_thread_id: String,
+    pub summary: String,
+    pub queue: crate::session::MessageQueue,
+    pub cancel: tokio_util::sync::CancellationToken,
+}
+
 /// 确认终态已发布到接收方；失败或 panic 时 owner 保留原结果，不能提前完成任务。
 /// `Ok(())` 确认接纳，不表示 Receive 或模型已经处理。
 pub type OnBgCompleteFn =
@@ -371,6 +380,14 @@ pub trait TaskManager: std::any::Any + Send + Sync {
     /// 按类型注册任务（Shell / Workflow 有 kind 独立并发上限；Agent 类不限额；
     /// middleware 发起面调用，错误语义经 String 表达——并发上限 / 注册失败）。
     fn register(&self, request: BgTaskRegistration) -> Result<TaskRegistrationTicket, String>;
+
+    /// Rebuild current execution control and message admission together.
+    fn register_live_agent(
+        &self,
+        _request: LiveAgentRegistration,
+    ) -> Result<TaskRegistrationTicket, String> {
+        Err("live Agent registration is unavailable".into())
+    }
 
     /// 仅结算无需通知接收方的 execution-only 任务，或已确认交付的外部任务。
     /// 需要通知接收方的 owned 任务必须使用 settle_completed。

@@ -136,6 +136,8 @@ pub(crate) struct MockSessionResources {
     pub(crate) inherited_load_gate: Mutex<Option<ResumeLoadGate>>,
     pub(crate) flags_load_gate: Mutex<Option<ResumeLoadGate>>,
     pub(crate) active_write_gate: Mutex<Option<ResumeLoadGate>>,
+    pub(crate) working_write_gate: Mutex<Option<ResumeLoadGate>>,
+    pub(crate) fail_working_write: AtomicBool,
     /// 交接提醒的持久化门：让用例在「flush 已成功、提醒尚未写入」之间观察。
     pub(crate) reminder_append_gate: Mutex<Option<ResumeLoadGate>>,
     pub(crate) archive_probe_gate: Mutex<Option<ResumeLoadGate>>,
@@ -197,6 +199,8 @@ impl MockSessionResources {
             inherited_load_gate: Mutex::new(None),
             flags_load_gate: Mutex::new(None),
             active_write_gate: Mutex::new(None),
+            working_write_gate: Mutex::new(None),
+            fail_working_write: AtomicBool::new(false),
             reminder_append_gate: Mutex::new(None),
             archive_probe_gate: Mutex::new(None),
             claimed: Arc::new(AtomicBool::new(false)),

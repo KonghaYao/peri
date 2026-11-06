@@ -653,6 +653,16 @@ impl SessionDataPort for RemoteSessionData {
             .await
     }
 
+    async fn settle_retained_mq(
+        &self,
+        thread_id: &ThreadId,
+        reminders: &[peri_acp_types::session::RetainedReminder],
+        rows: &[peri_acp_types::session::MqEntry],
+    ) -> SessionResourceResult<()> {
+        self.settle_retained_mq_atomic(thread_id, reminders, rows)
+            .await
+    }
+
     /// 远端未决收敛：拿本机日志里的操作 id 向远端账本求证终态（C §5.1 第 4 步）。
     ///
     /// 每条未结清记录只有三种结论，且都由**写确认过的证据**给出，不靠空查询或超时推断：

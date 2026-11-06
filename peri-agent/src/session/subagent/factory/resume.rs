@@ -157,10 +157,22 @@ pub(super) async fn resume_subagent_impl(
     )
     .await?;
 
+    let completion_target = super::completion_target(
+        parent,
+        on_bg_complete.as_ref(),
+        super::spawn::parent_thread_id_of(parent),
+    );
     // The claim remains owned across history I/O and session construction. A
     // dropped caller closes its decision channel, leaving ordered rollback to
     // the worker that performed the active write.
     let restored = async {
+        super::persist_completion_target(
+            session_resources.as_ref(),
+            &thread_id,
+            completion_target.as_deref(),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
         // 一次一致快照：inherit 区与自有 payload/flags 同一次读取（不再分三次）。
         // 恢复只重建有效视图：已排除 own 正文不属于续聊的当前上下文。
         let snapshot = session_resources
@@ -333,13 +345,16 @@ pub(super) async fn resume_subagent_impl(
     // 执行 permit 互斥（并发的第二次 resume 由 claim/status 拒绝）。
     drop(preparation);
     // 终态结果投递到父会话的 MQ（无父 thread 时不做跨会话投递）。
-    let terminal_route = super::spawn::parent_thread_id_of(parent).map(|target| {
-        super::super::terminal_settlement::TerminalMqRoute {
-            store: Arc::clone(&session_resources),
-            target: peri_acp_types::thread::ThreadId::from(target.as_str()),
-            mailbox: parent.map(|parent| parent.async_result_mailbox()),
-        }
-    });
+    let terminal_route =
+        completion_target.map(
+            |target| super::super::terminal_settlement::TerminalMqRoute {
+                store: Arc::clone(&session_resources),
+                target: peri_acp_types::thread::ThreadId::from(target.as_str()),
+                mailbox: parent
+                    .filter(|_| super::spawn::parent_thread_id_of(parent).as_ref() == Some(&target))
+                    .map(|parent| parent.async_result_mailbox()),
+            },
+        );
     match run_mode {
         SubagentRunMode::Sync => {
             let run_thread_id = thread_id.clone();

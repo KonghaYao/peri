@@ -270,6 +270,8 @@ pub struct SubagentHost {
     pub bg_event_sender: Option<tokio::sync::mpsc::UnboundedSender<ExecutorEvent>>,
     /// bg 完成同步回调（registry.complete 之前调用，推送 Defer 到本会话 MQ）
     pub on_bg_complete: Option<peri_acp_types::tasks::OnBgCompleteFn>,
+    /// 已知回调的实际收件人；自定义不透明回调保持 None。
+    pub completion_target: Option<String>,
     /// 子 agent 启动注册回调（active_agents）
     pub register_runtime: Option<RegisterRuntimeFn>,
     /// 子 agent 结束注销回调

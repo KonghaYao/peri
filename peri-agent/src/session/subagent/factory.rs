@@ -15,6 +15,45 @@ pub(super) use claim::ResumeClaim;
 use resume::resume_subagent_impl;
 use spawn::spawn_subagent_impl;
 
+/// 配置回调优先；只有宿主声明过目标的同一回调才能恢复，不能猜测闭包的接收方。
+fn completion_target(
+    parent: Option<&Arc<Session>>,
+    configured: Option<&peri_acp_types::tasks::OnBgCompleteFn>,
+    fallback: Option<String>,
+) -> Option<String> {
+    match configured {
+        None => fallback,
+        Some(callback) => parent
+            .and_then(|parent| parent.subagent_host())
+            .and_then(|host| {
+                host.on_bg_complete
+                    .as_ref()
+                    .filter(|known| Arc::ptr_eq(known, callback))
+                    .and_then(|_| host.completion_target.clone())
+            }),
+    }
+}
+
+async fn persist_completion_target(
+    store: &dyn peri_acp_types::session_resources::SessionResources,
+    child: &str,
+    target: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let child = child.to_owned();
+    let meta = store.load_session_meta(&child).await?;
+    let config = peri_acp_types::thread::with_completion_target(meta.config.as_deref(), target)?;
+    store
+        .update_session_meta(
+            &child,
+            &peri_acp_types::session_resources::SessionMetaPatch {
+                config: Some(Some(config)),
+                ..Default::default()
+            },
+        )
+        .await?;
+    Ok(())
+}
+
 fn completion_delivery(
     parent: Option<&Arc<Session>>,
     configured: Option<peri_acp_types::tasks::OnBgCompleteFn>,

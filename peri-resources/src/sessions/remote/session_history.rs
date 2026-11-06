@@ -138,7 +138,7 @@ impl RemoteSessionData {
         }
     }
 
-    async fn read_reminder_row(
+    pub(super) async fn read_reminder_row(
         &self,
         message_id: MessageId,
     ) -> SessionResourceResult<Option<(String, String)>> {
@@ -596,7 +596,7 @@ impl RemoteSessionData {
     }
 }
 
-fn check_reminder_row(
+pub(super) fn check_reminder_row(
     id: &ThreadId,
     message_id: MessageId,
     content: &str,
