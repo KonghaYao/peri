@@ -246,7 +246,9 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn merge_overrides(&mut self, workspace: AppConfig) {
         if !workspace.providers.is_empty() {
-            self.providers = workspace.providers;
+            let mut providers = workspace.providers;
+            Self::inherit_provider_credentials(&mut providers, &self.providers);
+            self.providers = providers;
         }
         if !workspace.active_alias.is_empty() {
             self.active_alias = workspace.active_alias;
@@ -295,10 +297,43 @@ impl AppConfig {
         self.extra.extend(workspace.extra);
     }
 
+    /// workspace 只保存 global 相对差异：同 id 且未声明 `apiKey` 的 provider 从
+    /// global 继承凭据。ChatGPT plan 以空 `apiKey` 表示，不能回填。
+    fn inherit_provider_credentials(providers: &mut [ProviderConfig], global: &[ProviderConfig]) {
+        for provider in providers {
+            if !provider.api_key.is_empty()
+                || matches!(provider.auth, Some(ProviderAuthConfig::ChatGptPlan { .. }))
+            {
+                continue;
+            }
+            if let Some(base) = global.iter().find(|base| base.id == provider.id) {
+                provider.api_key = base.api_key.clone();
+            }
+        }
+    }
+
     pub fn extract_overrides(&self, global: &AppConfig) -> AppConfig {
         let mut overrides = AppConfig::default();
         if self.providers != global.providers {
-            overrides.providers = self.providers.clone();
+            overrides.providers = self
+                .providers
+                .iter()
+                .map(|provider| {
+                    let mut provider = provider.clone();
+                    // 与 global 同 id 同值的 key 是继承而来，写回工作区时剥离；
+                    // 读取期由 merge_overrides 按 id 回填，workspace 自有密钥保留。
+                    if !provider.api_key.is_empty()
+                        && global
+                            .providers
+                            .iter()
+                            .find(|base| base.id == provider.id)
+                            .is_some_and(|base| base.api_key == provider.api_key)
+                    {
+                        provider.api_key.clear();
+                    }
+                    provider
+                })
+                .collect();
         }
         overrides.active_alias = self.active_alias.clone();
         for alias in Profiles::ALL {

@@ -94,7 +94,8 @@ fn workspace_save_persists_unfinished_effective_responses_binding() {
     );
 }
 
-/// 保存边界不因此放松 provider 级校验：缺 API key 的 Responses 绑定仍拒绝写入。
+/// 保存边界不因此放松 provider 级校验：没有 global 同 id 凭据可继承的缺 key
+/// Responses provider 仍拒绝写入。
 #[test]
 fn workspace_save_rejects_provider_level_error_on_responses_binding() {
     let tmp = tempfile::tempdir().unwrap();
@@ -105,11 +106,15 @@ fn workspace_save_rejects_provider_level_error_on_responses_binding() {
     let mut candidate = source.loaded_merged();
     candidate.config.profiles.opus.provider = "codex".into();
     candidate.config.profiles.opus.model = Some("gpt-6-astra".into());
-    candidate.config.providers[1].api_key.clear();
+    candidate.config.providers.push(crate::app::ProviderConfig {
+        id: "keyless".into(),
+        provider_type: "openai_responses".into(),
+        ..Default::default()
+    });
 
     assert!(
         source.save(revision(&source), &candidate).is_err(),
-        "缺 API key 是 provider 级硬错误"
+        "无 global 凭据可继承时缺 API key 是 provider 级硬错误"
     );
     assert_eq!(
         std::fs::read_to_string(&workspace_path).unwrap(),

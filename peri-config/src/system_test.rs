@@ -604,6 +604,54 @@ fn workspace_settings_write_only_relative_diff_without_global_credentials() {
 }
 
 #[test]
+fn workspace_provider_edit_does_not_copy_global_api_keys() {
+    let temp = tempfile::tempdir().unwrap();
+    let scope = make_scope(temp.path(), "project");
+    let global = r#"{"config":{"active_alias":"sonnet","providers":[{"id":"global","type":"openai","apiKey":"sk-global-secret"}]}}"#;
+    let workspace = r#"{"config":{"active_alias":"haiku"}}"#;
+    let (source, system) = make_system(&scope, make_inputs(Some(global), Some(workspace), None));
+    let current = system.resolve(scope.clone()).unwrap();
+    let mut updated = current.settings().clone();
+    // setup wizard：编辑 global provider 的非凭据字段，并新增一个带自有密钥的 provider。
+    updated.config.providers[0].base_url = "https://proxy.example.test/v1".into();
+    updated.config.providers.push(
+        serde_json::from_value(json!({
+            "id": "workspace",
+            "type": "anthropic",
+            "apiKey": "sk-workspace-owned"
+        }))
+        .unwrap(),
+    );
+    let next = system.update(&scope, current.revision(), &updated).unwrap();
+    let (_, _, content) = source.writes().pop().unwrap();
+    assert!(
+        !content.contains("sk-global-secret"),
+        "workspace 写回不得复制全局凭据: {content}"
+    );
+    assert!(content.contains("sk-workspace-owned"));
+    let document: Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(document["config"]["active_alias"], "haiku");
+    let providers = document["config"]["providers"].as_array().unwrap();
+    assert_eq!(providers.len(), 2);
+    let inherited = providers
+        .iter()
+        .find(|provider| provider["id"] == "global")
+        .unwrap();
+    assert_eq!(inherited["apiKey"], "");
+    assert_eq!(inherited["baseUrl"], "https://proxy.example.test/v1");
+    // 生效快照与重新 resolve 都必须按 id 从 global 继承密钥，行为不回归。
+    assert_eq!(
+        next.settings().config.providers[0].api_key,
+        "sk-global-secret"
+    );
+    let reloaded = system.resolve(scope.clone()).unwrap();
+    assert_eq!(
+        reloaded.settings().config.providers[0].api_key,
+        "sk-global-secret"
+    );
+}
+
+#[test]
 fn mcp_update_preserves_top_level_siblings() {
     let temp = tempfile::tempdir().unwrap();
     let scope = make_scope(temp.path(), "project");

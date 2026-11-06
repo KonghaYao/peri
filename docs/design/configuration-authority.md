@@ -94,7 +94,9 @@ expected revision 必须在编辑开始从基线 snapshot 捕获并随草稿保�
 字节 CAS → 发布新 snapshot。冲突、解析、校验或 I/O 失败不 publish。
 
 settings 保存只更新 `config` / schema，保留 `mcpServers`、`langfuse` 等兄弟域；
-workspace 保存 global 相对差异，不把 global credentials 复制到工作区。
+workspace 保存 global 相对差异，不把 global credentials 复制到工作区。provider 的
+`apiKey` 与 global 同 id 条目相同时写回空值，读取期按 id 继承；ChatGPT plan 仍以空
+`apiKey` 表示，不回填。
 其中 nested `config.mcpServers` / `config.mcpCache` 由所属领域维护，settings 更新
 保留目标原文中的值，即使 only-provider 请求未带它们也不删除；目标没有这些键时
 不从 effective global 复制进 workspace。已有 workspace `$schema` 优先保留。
