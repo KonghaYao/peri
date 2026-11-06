@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 use tokio::task::JoinHandle;
 
 use crate::{JsRuntimeError, ResourceKind, Result};
@@ -214,11 +214,41 @@ pub fn parse_message(raw: &str) -> Result<ParsedMessage> {
     })
 }
 
+/// 等待宿主发出终止信号（发送端被丢弃也视同终止）。
+async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
+    loop {
+        if *shutdown.borrow_and_update() {
+            return;
+        }
+        if shutdown.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// 入站投递与终止信号竞速。
+///
+/// 队列满时 `send` 会等待消费者；终止路径（启动失败/超时/kill）可能根本没有
+/// 消费者，必须让 reader 能退出，否则 `join_readers` 永久挂起。
+async fn deliver(
+    sender: &mpsc::Sender<IncomingMessage>,
+    shutdown: &mut watch::Receiver<bool>,
+    message: IncomingMessage,
+) -> bool {
+    tokio::select! {
+        biased;
+        _ = wait_for_shutdown(shutdown) => false,
+        result = sender.send(message) => result.is_ok(),
+    }
+}
+
+/// 把 stdout 的 NDJSON 帧解码为入站消息；终止信号置位时停止投递并退出。
 #[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn spawn_stdout_reader(
     stdout: ChildStdout,
     channel: Arc<RpcChannel>,
     sender: mpsc::Sender<IncomingMessage>,
+    mut shutdown: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
@@ -230,11 +260,12 @@ pub(crate) fn spawn_stdout_reader(
                 let available = match reader.fill_buf().await {
                     Ok(available) => available,
                     Err(_) => {
-                        let _ = sender
-                            .send(IncomingMessage::ProtocolError(
-                                "JavaScript RPC protocol error".into(),
-                            ))
-                            .await;
+                        let _ = deliver(
+                            &sender,
+                            &mut shutdown,
+                            IncomingMessage::ProtocolError("JavaScript RPC protocol error".into()),
+                        )
+                        .await;
                         channel.drain_pending("JavaScript RPC protocol error");
                         return;
                     }
@@ -252,13 +283,16 @@ pub(crate) fn spawn_stdout_reader(
                 frame.extend_from_slice(&chunk[..copied]);
                 if frame.len() > channel.max_frame_bytes {
                     channel.drain_pending("JavaScript RPC frame exceeded limit");
-                    let _ = sender
-                        .send(IncomingMessage::ResourceLimit {
+                    let _ = deliver(
+                        &sender,
+                        &mut shutdown,
+                        IncomingMessage::ResourceLimit {
                             resource: ResourceKind::FrameBytes,
                             limit: channel.max_frame_bytes,
                             observed: frame.len(),
-                        })
-                        .await;
+                        },
+                    )
+                    .await;
                     return;
                 }
                 if copied == 0 || frame.last() == Some(&b'\n') {
@@ -276,28 +310,32 @@ pub(crate) fn spawn_stdout_reader(
             }
             if frame.len() > channel.max_frame_bytes {
                 channel.drain_pending("JavaScript RPC frame exceeded limit");
-                let _ = sender
-                    .send(IncomingMessage::ResourceLimit {
+                let _ = deliver(
+                    &sender,
+                    &mut shutdown,
+                    IncomingMessage::ResourceLimit {
                         resource: ResourceKind::FrameBytes,
                         limit: channel.max_frame_bytes,
                         observed: frame.len(),
-                    })
-                    .await;
+                    },
+                )
+                .await;
                 break;
             }
             let line = match std::str::from_utf8(&frame) {
                 Ok(line) => line,
                 Err(_) => {
-                    let _ = sender
-                        .send(IncomingMessage::ProtocolError(
-                            "JavaScript RPC protocol error".into(),
-                        ))
-                        .await;
+                    let _ = deliver(
+                        &sender,
+                        &mut shutdown,
+                        IncomingMessage::ProtocolError("JavaScript RPC protocol error".into()),
+                    )
+                    .await;
                     break;
                 }
             };
             if let Some(message) = channel.handle_incoming(line) {
-                if sender.send(message).await.is_err() {
+                if !deliver(&sender, &mut shutdown, message).await {
                     break;
                 }
             }

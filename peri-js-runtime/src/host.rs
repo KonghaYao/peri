@@ -79,6 +79,8 @@ pub struct JsExecutionHost {
     process_tree: ProcessTree,
     stdout_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     stderr_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    /// 终止 reader 的显式信号：consumer 缺席时队列满不能靠 receiver drop 解阻塞。
+    reader_shutdown: tokio::sync::watch::Sender<bool>,
     stderr_tail: Arc<Mutex<Vec<u8>>>,
 }
 
@@ -87,6 +89,7 @@ impl JsExecutionHost {
         Self::spawn_with_frame_limit(spec, DEFAULT_MAX_FRAME_BYTES)
     }
 
+    /// 启动 Node 进程，并装配 RPC channel、stdout/stderr reader 与进程树 owner。
     pub(crate) fn spawn_with_frame_limit(
         spec: JsProcessSpec,
         max_frame_bytes: usize,
@@ -129,7 +132,8 @@ impl JsExecutionHost {
 
         let channel = Arc::new(RpcChannel::new(stdin, max_frame_bytes));
         let (sender, incoming) = mpsc::channel(256);
-        let stdout_task = spawn_stdout_reader(stdout, Arc::clone(&channel), sender);
+        let (reader_shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+        let stdout_task = spawn_stdout_reader(stdout, Arc::clone(&channel), sender, shutdown_rx);
         let stderr_tail = Arc::new(Mutex::new(Vec::new()));
         let stderr_task = tokio::spawn({
             let stderr_tail = Arc::clone(&stderr_tail);
@@ -159,6 +163,7 @@ impl JsExecutionHost {
             process_tree,
             stdout_task: tokio::sync::Mutex::new(Some(stdout_task)),
             stderr_task: tokio::sync::Mutex::new(Some(stderr_task)),
+            reader_shutdown,
             stderr_tail,
         })
     }
@@ -203,11 +208,14 @@ impl JsExecutionHost {
         }
     }
 
+    /// 终止进程树并等待整树与 reader 退出；终止清理不依赖入站消费者。
     pub(crate) async fn terminate_and_wait(
         &self,
         reason: &'static str,
     ) -> Result<std::process::ExitStatus> {
         self.channel.drain_pending(reason);
+        // 终止路径没有消费者保证：队列满时 reader 停在 send，须显式停止才能 join。
+        self.reader_shutdown.send_replace(true);
         // A reaped leader can leave descendants holding stdout/stderr open. Close
         // the owned tree before awaiting reader EOF, even when the leader exited.
         self.process_tree.terminate();
