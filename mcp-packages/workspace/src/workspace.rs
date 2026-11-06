@@ -741,35 +741,21 @@ impl ServerHandler for WorkspaceMcpServer {
         let thread_owner = self.thread_owner(&context)?;
         let owner = owner.as_deref();
         let thread_owner = thread_owner.as_deref();
-        // Capture the pre-image before the tool commits, but only when this call
-        // can be correlated with a transcript entry and fits the rewind budget.
-        // Reading outside the transaction is safe for sequential calls; a
-        // concurrent same-target write can only make the later rewind refuse.
+        // Rewind images come from the locked Write/Edit transaction itself, so a
+        // concurrent writer can never leak into the recorded post image.
         let rewind_tool_call_id =
             peri_mcp_common::invocation::tool_call_id_from_meta(&context.meta);
         let rewind_target = rewind_tool_call_id
             .as_ref()
             .and_then(|_| rewind_snapshot_target(&request, &self.cwd));
-        let rewind_pre = match rewind_target.as_deref() {
-            Some(path) => match tokio::fs::metadata(path).await {
-                Ok(meta) if meta.len() > crate::rewind_snapshot::MAX_RECORD_BYTES as u64 => None,
-                Ok(_) => match tokio::fs::read(path).await {
-                    Ok(bytes) => Some(Some(bytes)),
-                    Err(_) => None,
-                },
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(None),
-                Err(_) => None,
-            },
-            None => None,
-        };
         // 传实例冻结的 host cwd（不走 `web` / `cron` 的空串形态）。**注意**：本参
         // 只落进 `ToolContext`，而本波 7 个工具都忽略 `ToolContext`（`invoke` 的 `_ctx`），
         // 真正生效的 cwd 绑定点是 [`Self::new`] 注入各工具的 `cwd` 字段——不得据本行推断
         // 「cwd 由 `tools/call` 决定」（反例实验证据见 `workspace_test.rs` 模块头）。
-        let response = tokio::select! {
+        let (response, committed) = tokio::select! {
             biased;
-            _ = context.ct.cancelled() => Ok(CallToolResponse::Complete(rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text("Tool execution cancelled.")]))),
-            result = async {
+            _ = context.ct.cancelled() => (Ok(CallToolResponse::Complete(rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text("Tool execution cancelled.")]))), None),
+            captured = crate::filesystem::transaction::capture_committed_image(async {
                 // Host-only query face (design §6): answered here instead of
                 // `tools/list` so the model-facing seven-tool surface stays put.
                 // Legacy instances without task state answer `unknown`, never an
@@ -805,27 +791,27 @@ impl ServerHandler for WorkspaceMcpServer {
                 } else {
                     invoke_tool_call(self.tools(), &self.cwd, &request).await
                 }
-            } => result,
+            }) => captured,
         };
         // D-1 触发语义：仅**成功**返回后触发（`is_error != Some(true)`，旧 after_tool 门
         // 逐字）；`spawn` 不阻塞响应，采样在后台收口。
         if matches!(&response, Ok(CallToolResponse::Complete(result)) if result.is_error != Some(true))
         {
-            // Only a successful call has a post image worth rewinding to.
-            if let (Some(tool_call_id), Some(path), Some(pre)) =
-                (rewind_tool_call_id, rewind_target, rewind_pre)
+            // Only a successful call has a post image worth rewinding to, and it
+            // must be the image committed by this call's own locked transaction.
+            if let (Some(tool_call_id), Some(target), Some(image)) =
+                (rewind_tool_call_id, rewind_target, committed)
             {
-                let fits_budget = tokio::fs::metadata(&path).await.is_ok_and(|meta| {
-                    meta.len() <= crate::rewind_snapshot::MAX_RECORD_BYTES as u64
-                });
-                if fits_budget {
-                    if let Ok(post) = tokio::fs::read(&path).await {
-                        self.rewind_snapshots.record(
-                            owner,
-                            &tool_call_id,
-                            crate::rewind_snapshot::Snapshot { path, pre, post },
-                        );
-                    }
+                if image.path == target {
+                    self.rewind_snapshots.record(
+                        owner,
+                        &tool_call_id,
+                        crate::rewind_snapshot::Snapshot {
+                            path: image.path,
+                            pre: image.pre,
+                            post: image.post,
+                        },
+                    );
                 }
             }
             self.spawn_git_sample();

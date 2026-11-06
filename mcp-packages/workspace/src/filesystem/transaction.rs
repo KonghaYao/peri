@@ -1,8 +1,11 @@
 //! Write/Edit 共用的进程内 per-target 事务。
 
-use std::collections::HashMap;
-use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::{
+    collections::HashMap,
+    future::Future,
+    path::{Component, Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock, Weak},
+};
 
 use parking_lot::Mutex as TargetMutex;
 use peri_acp_types::sentinel::projection_sentinel_counts_v1;
@@ -11,6 +14,35 @@ pub(crate) const SENTINEL_REJECTION: &str =
     "File change rejected because the result contains newly introduced protected projection text.";
 
 type Registry = Mutex<HashMap<PathBuf, Weak<TargetMutex<()>>>>;
+
+/// Pre/post bytes of one successful locked Write/Edit commit.
+///
+/// `pre` is `None` when the target did not exist. `post` is exactly the payload
+/// this transaction wrote, not a later read of the shared path.
+#[derive(Debug)]
+pub(crate) struct CommittedImage {
+    pub(crate) path: PathBuf,
+    pub(crate) pre: Option<Vec<u8>>,
+    pub(crate) post: Vec<u8>,
+}
+
+tokio::task_local! {
+    static COMMIT_CAPTURE: Arc<Mutex<Option<CommittedImage>>>;
+}
+
+/// Run `future` while capturing the first successful Write/Edit commit.
+///
+/// The image is produced inside the per-target lock, so a cooperating writer
+/// cannot interleave between its pre and post halves. Rewind consumes this
+/// image instead of reading the shared path again after the tool returns.
+pub(crate) async fn capture_committed_image<F: Future>(
+    future: F,
+) -> (F::Output, Option<CommittedImage>) {
+    let slot = Arc::new(Mutex::new(None));
+    let output = COMMIT_CAPTURE.scope(Arc::clone(&slot), future).await;
+    let captured = slot.lock().ok().and_then(|mut slot| slot.take());
+    (output, captured)
+}
 
 pub(crate) struct LockedTarget<'a> {
     path: &'a Path,
@@ -31,11 +63,34 @@ impl LockedTarget<'_> {
         }
     }
 
-    pub(crate) fn guard_and_commit(&self, pre: &[u8], post: &[u8]) -> Result<(), CommitError> {
-        if introduces_projection_sentinel_bytes(pre, post) {
+    /// Commit `post`, then publish this transaction's pre/post image to the
+    /// armed capture scope. Both halves come from the same lock acquisition.
+    pub(crate) fn guard_and_commit(
+        &self,
+        pre: Option<Vec<u8>>,
+        post: Vec<u8>,
+    ) -> Result<(), CommitError> {
+        if introduces_projection_sentinel_bytes(pre.as_deref().unwrap_or_default(), &post) {
             return Err(CommitError::Sentinel);
         }
-        self.replace(post)
+        self.replace(&post)?;
+        let image = CommittedImage {
+            path: self.path.to_path_buf(),
+            pre,
+            post,
+        };
+        // Capture only affects rewind bookkeeping; a write outside a capture
+        // scope is still a successful commit.
+        let _ = COMMIT_CAPTURE.try_with(|slot| {
+            if let Ok(mut slot) = slot.lock() {
+                if slot.is_none() {
+                    *slot = Some(image);
+                }
+            }
+        });
+        #[cfg(test)]
+        wait_commit_gate(self.path);
+        Ok(())
     }
 
     /// Atomically replace the target without the model-write sentinel guard.
@@ -97,6 +152,51 @@ fn introduces_projection_sentinel_bytes(pre: &[u8], post: &[u8]) -> bool {
     counts(post)
         .into_iter()
         .any(|(sentinel, count)| count > pre_counts.get(&sentinel).copied().unwrap_or(0))
+}
+
+#[cfg(test)]
+static COMMIT_GATES: OnceLock<Mutex<HashMap<PathBuf, Arc<CommitGate>>>> = OnceLock::new();
+
+/// Test-only one-shot gate fired after a locked commit, before the lock is released.
+///
+/// Lets a regression simulate an uncoordinated writer landing between the
+/// tool's commit and any snapshot bookkeeping.
+#[cfg(test)]
+pub(crate) struct CommitGate {
+    pub(crate) entered: tokio::sync::Notify,
+    pub(crate) release: std::sync::Barrier,
+}
+
+#[cfg(test)]
+impl CommitGate {
+    pub(crate) fn new() -> Self {
+        Self {
+            entered: tokio::sync::Notify::new(),
+            release: std::sync::Barrier::new(2),
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn gate_next_commit(path: &Path, gate: Arc<CommitGate>) {
+    COMMIT_GATES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(logical_path_key(path), gate);
+}
+
+#[cfg(test)]
+fn wait_commit_gate(path: &Path) {
+    let gate = COMMIT_GATES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .remove(&logical_path_key(path));
+    if let Some(gate) = gate {
+        gate.entered.notify_one();
+        gate.release.wait();
+    }
 }
 
 #[derive(Debug)]
