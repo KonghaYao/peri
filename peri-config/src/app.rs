@@ -297,8 +297,9 @@ impl AppConfig {
         self.extra.extend(workspace.extra);
     }
 
-    /// workspace 只保存 global 相对差异：同 id 且未声明 `apiKey` 的 provider 从
-    /// global 继承凭据。ChatGPT plan 以空 `apiKey` 表示，不能回填。
+    /// workspace 只保存 global 相对差异：同 id、凭据绑定上下文一致且未声明
+    /// `apiKey` 的 provider 从 global 继承凭据。ChatGPT plan 以空 `apiKey`
+    /// 表示，不能回填；上下文不一致时宁可不继承，避免把凭据发往其他 endpoint。
     fn inherit_provider_credentials(providers: &mut [ProviderConfig], global: &[ProviderConfig]) {
         for provider in providers {
             if !provider.api_key.is_empty()
@@ -306,10 +307,20 @@ impl AppConfig {
             {
                 continue;
             }
-            if let Some(base) = global.iter().find(|base| base.id == provider.id) {
+            if let Some(base) = global.iter().find(|base| {
+                base.id == provider.id && Self::same_credential_binding(provider, base)
+            }) {
                 provider.api_key = base.api_key.clone();
             }
         }
+    }
+
+    /// 凭据只回到它原本绑定的 endpoint/认证上下文：`type`、`baseUrl` 与 `auth`
+    /// （含 plan 引用）全部一致才继承；无法证明一致时不继承。
+    fn same_credential_binding(provider: &ProviderConfig, base: &ProviderConfig) -> bool {
+        provider.provider_type == base.provider_type
+            && provider.base_url == base.base_url
+            && provider.auth == base.auth
     }
 
     pub fn extract_overrides(&self, global: &AppConfig) -> AppConfig {
@@ -320,8 +331,9 @@ impl AppConfig {
                 .iter()
                 .map(|provider| {
                     let mut provider = provider.clone();
-                    // 与 global 同 id 同值的 key 是继承而来，写回工作区时剥离；
-                    // 读取期由 merge_overrides 按 id 回填，workspace 自有密钥保留。
+                    // 与 global 同 id 同值的 key 可能是继承/复制的全局凭据，写回时
+                    // 剥离，避免凭据落进工作区；仅当 endpoint/type/auth 一致时读取期
+                    // 才回填，上下文被改写的 provider 保持无密钥。
                     if !provider.api_key.is_empty()
                         && global
                             .providers

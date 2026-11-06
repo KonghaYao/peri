@@ -639,15 +639,16 @@ fn workspace_provider_edit_does_not_copy_global_api_keys() {
         .unwrap();
     assert_eq!(inherited["apiKey"], "");
     assert_eq!(inherited["baseUrl"], "https://proxy.example.test/v1");
-    // 生效快照与重新 resolve 都必须按 id 从 global 继承密钥，行为不回归。
-    assert_eq!(
-        next.settings().config.providers[0].api_key,
-        "sk-global-secret"
+    // endpoint 已改写，凭据绑定上下文不再一致：保存后不得回填全局密钥，
+    // 也不得把它发往新 endpoint。
+    assert!(
+        next.settings().config.providers[0].api_key.is_empty(),
+        "endpoint 改写后不得回填全局密钥"
     );
     let reloaded = system.resolve(scope.clone()).unwrap();
-    assert_eq!(
-        reloaded.settings().config.providers[0].api_key,
-        "sk-global-secret"
+    assert!(
+        reloaded.settings().config.providers[0].api_key.is_empty(),
+        "重新 resolve 不得回填全局密钥"
     );
 }
 
