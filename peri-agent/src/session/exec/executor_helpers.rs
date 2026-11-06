@@ -31,7 +31,8 @@
 //!   且与 failure / `TurnEnded` 共用一次 post-flush cancel 采样的
 //!   单一终态分类；顺序保持 failure 事件 → `TurnEnded` → cascade
 //! - `collect_result` 严格 "close → wait_for_pump(10s timeout) → drain recall"，
-//!   顺序不变（pump 必须先 close sender 才能退出 recv 循环）
+//!   顺序不变（pump 必须先 close sender 才能退出 recv 循环）；泵未送达终态时
+//!   本轮按失败结算，避免客户端缺 `done` 停在 loading
 
 use peri_acp_types::command::PromptStopReason;
 use peri_acp_types::session::ExecutionFailure;
@@ -100,6 +101,10 @@ pub(crate) fn pending_task_count(
 #[cfg(test)]
 #[path = "executor_helpers/event_pump_test.rs"]
 mod event_pump_tests;
+
+#[cfg(test)]
+#[path = "executor_helpers/collect_test.rs"]
+mod collect_tests;
 
 #[cfg(test)]
 #[path = "executor_helpers_test.rs"]
