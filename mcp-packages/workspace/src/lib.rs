@@ -10,6 +10,7 @@ pub mod image;
 mod input;
 mod output_store;
 pub mod resources;
+mod rewind_snapshot;
 mod shell_hints;
 mod shell_tasks;
 pub mod terminal;

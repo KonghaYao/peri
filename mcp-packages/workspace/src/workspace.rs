@@ -91,6 +91,9 @@ pub struct WorkspaceMcpServer {
     /// 新 scheme 的 `resources/read` 返回 `-32602`（见模块头）。
     resources: Option<Arc<WorkspaceResourceProvider>>,
     outputs: Arc<crate::output_store::OutputStore>,
+    /// Exact pre/post images of successful Write/Edit calls, keyed by session and
+    /// tool-call id. `/rewind` restores these instead of guessing from Git HEAD.
+    rewind_snapshots: Arc<crate::rewind_snapshot::RewindSnapshots>,
     /// Workspace-owned Bash tasks shared by all connections to this instance.
     shell_tasks: Option<ShellTasks>,
 }
@@ -138,6 +141,7 @@ impl WorkspaceMcpServer {
             sinks: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             resources: None,
             outputs: Arc::new(crate::output_store::OutputStore::new()),
+            rewind_snapshots: crate::rewind_snapshot::RewindSnapshots::new(),
             shell_tasks: None,
         }
     }
@@ -553,12 +557,12 @@ impl ServerHandler for WorkspaceMcpServer {
     async fn on_custom_request(
         &self,
         request: CustomRequest,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CustomResult, McpError> {
         if request.method == crate::image::READ_IMAGE_METHOD {
             return tokio::select! {
                 biased;
-                _ = _context.ct.cancelled() => Err(McpError::internal_error("image read cancelled", None)),
+                _ = context.ct.cancelled() => Err(McpError::internal_error("image read cancelled", None)),
                 result = crate::image::handle_read_image(&self.cwd, request) => result,
             };
         }
@@ -566,7 +570,7 @@ impl ServerHandler for WorkspaceMcpServer {
         if method == "workspace/gitBranch" {
             return tokio::select! {
                 biased;
-                _ = _context.ct.cancelled() => Err(McpError::internal_error("workspace branch read cancelled", None)),
+                _ = context.ct.cancelled() => Err(McpError::internal_error("workspace branch read cancelled", None)),
                 result = crate::git_branch::read_branch(&self.cwd) => result,
             };
         }
@@ -579,7 +583,7 @@ impl ServerHandler for WorkspaceMcpServer {
             let outputs = Arc::clone(&self.outputs);
             return tokio::select! {
                 biased;
-                _ = _context.ct.cancelled() => Err(McpError::internal_error("workspace output store cancelled", None)),
+                _ = context.ct.cancelled() => Err(McpError::internal_error("workspace output store cancelled", None)),
                 result = tokio::task::spawn_blocking(move || outputs.store(input)) => {
                     result.map_err(|_| McpError::internal_error("workspace output persistence failed", None))?
                 },
@@ -588,21 +592,24 @@ impl ServerHandler for WorkspaceMcpServer {
         if method == "workspace/readText" {
             return tokio::select! {
                 biased;
-                _ = _context.ct.cancelled() => Err(McpError::internal_error("workspace read cancelled", None)),
+                _ = context.ct.cancelled() => Err(McpError::internal_error("workspace read cancelled", None)),
                 result = crate::file_observation::read_text(&self.cwd, request) => result,
             };
         }
         if method == "workspace/rewindFiles" {
+            // rmcp hoists request `_meta` into the context; the owner scopes the
+            // pre-images recorded by this session's Write/Edit calls.
+            let owner = task_owner_from_meta(&context.meta)?;
             return tokio::select! {
                 biased;
-                _ = _context.ct.cancelled() => Err(McpError::internal_error("workspace rewind cancelled", None)),
-                result = crate::file_rewind::rewind_files(&self.cwd, request) => result,
+                _ = context.ct.cancelled() => Err(McpError::internal_error("workspace rewind cancelled", None)),
+                result = crate::file_rewind::rewind_files(&self.cwd, &self.rewind_snapshots, owner.as_deref(), request) => result,
             };
         }
         if method == "workspace/readMention" {
             return tokio::select! {
                 biased;
-                _ = _context.ct.cancelled() => Err(McpError::internal_error("workspace mention read cancelled", None)),
+                _ = context.ct.cancelled() => Err(McpError::internal_error("workspace mention read cancelled", None)),
                 result = crate::file_observation::read_mention(&self.cwd, request) => result,
             };
         }
@@ -734,6 +741,19 @@ impl ServerHandler for WorkspaceMcpServer {
         let thread_owner = self.thread_owner(&context)?;
         let owner = owner.as_deref();
         let thread_owner = thread_owner.as_deref();
+        // Capture the pre-image before the tool commits. Reading outside the
+        // transaction is safe for sequential calls; a concurrent same-target write
+        // can only make the later rewind refuse (post image mismatch), never
+        // restore a different file's bytes.
+        let rewind_target = rewind_snapshot_target(&request, &self.cwd);
+        let rewind_pre = match rewind_target.as_deref() {
+            Some(path) => match tokio::fs::read(path).await {
+                Ok(bytes) => Some(Some(bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(None),
+                Err(_) => None,
+            },
+            None => None,
+        };
         // 传实例冻结的 host cwd（不走 `web` / `cron` 的空串形态）。**注意**：本参
         // 只落进 `ToolContext`，而本波 7 个工具都忽略 `ToolContext`（`invoke` 的 `_ctx`），
         // 真正生效的 cwd 绑定点是 [`Self::new`] 注入各工具的 `cwd` 字段——不得据本行推断
@@ -783,6 +803,20 @@ impl ServerHandler for WorkspaceMcpServer {
         // 逐字）；`spawn` 不阻塞响应，采样在后台收口。
         if matches!(&response, Ok(CallToolResponse::Complete(result)) if result.is_error != Some(true))
         {
+            // Only a successful call has a post image worth rewinding to.
+            if let (Some(tool_call_id), Some(path), Some(pre)) = (
+                peri_mcp_common::invocation::tool_call_id_from_meta(&context.meta),
+                rewind_target,
+                rewind_pre,
+            ) {
+                if let Ok(post) = tokio::fs::read(&path).await {
+                    self.rewind_snapshots.record(
+                        owner,
+                        &tool_call_id,
+                        crate::rewind_snapshot::Snapshot { path, pre, post },
+                    );
+                }
+            }
             self.spawn_git_sample();
         }
         response
@@ -852,6 +886,18 @@ fn map_resource_read_error(error: ResourceError) -> McpError {
             McpError::internal_error("resource unavailable", None)
         }
     }
+}
+
+/// Resolved target for a reversible file mutation, or `None` for other tools.
+fn rewind_snapshot_target(
+    request: &CallToolRequestParams,
+    cwd: &str,
+) -> Option<std::path::PathBuf> {
+    if !matches!(request.name.as_ref(), "Write" | "Edit") {
+        return None;
+    }
+    let file_path = request.arguments.as_ref()?.get("file_path")?.as_str()?;
+    Some(crate::filesystem::resolve_path(cwd, file_path))
 }
 
 /// `skills/*` 的错误映射（MCPP 约定：未知 `skills/get` URI 一律 `-32602`）。
