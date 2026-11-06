@@ -9,6 +9,72 @@ use crate::plugin::{
     types::{InstallScope, InstalledPlugin, PluginOrigin},
 };
 
+/// 外部字符串只能作为缓存目录中的单个正常分量，拒绝 `.`、`..`、分隔符与绝对路径。
+fn validate_cache_path_segment(field: &str, value: &str) -> Result<(), InstallerError> {
+    let mut components = Path::new(value).components();
+    let single_normal = matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    );
+    if !single_normal {
+        return Err(InstallerError::SettingsError(format!(
+            "插件{field}不能作为缓存目录名: {value:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// marketplace 条目声明的版本：sha 前 7 位优先，其次非空 version。
+pub(super) fn declared_version(
+    marketplace_plugin: &crate::plugin::types::MarketplacePlugin,
+) -> Option<String> {
+    match marketplace_plugin.sha.as_deref() {
+        Some(sha) => Some(sha.chars().take(7).collect()),
+        None if !marketplace_plugin.version.is_empty() => Some(marketplace_plugin.version.clone()),
+        None => None,
+    }
+}
+
+/// 解析可直接用作缓存目录名的有效版本。
+///
+/// 仅缺失/空 version 回退到安装时刻时间戳；其他非法值仍由分量校验拒绝。
+fn resolve_cache_version(
+    marketplace_plugin: &crate::plugin::types::MarketplacePlugin,
+) -> Result<String, InstallerError> {
+    let version = declared_version(marketplace_plugin).unwrap_or_else(|| {
+        chrono::DateTime::<chrono::Utc>::from(peri_time::now_wall())
+            .format("%Y%m%d%H%M%S")
+            .to_string()
+    });
+    validate_cache_path_segment("版本", &version)?;
+    Ok(version)
+}
+
+/// 删除或写入前确认目标严格位于缓存根内。
+///
+/// 分量校验已挡住词法穿越；这里再挡住「缓存内某一层被替换为指向根外的符号链接」。
+fn ensure_within_cache_root(cache_root: &Path, target: &Path) -> Result<(), InstallerError> {
+    let mut probe = target;
+    while !probe.exists() {
+        probe = probe.parent().ok_or_else(|| {
+            InstallerError::SettingsError(format!(
+                "插件缓存目标缺少可校验的父目录: {}",
+                target.display()
+            ))
+        })?;
+    }
+    let canonical_probe = probe.canonicalize()?;
+    if !canonical_probe.starts_with(cache_root)
+        || (probe == target && canonical_probe == cache_root)
+    {
+        return Err(InstallerError::SettingsError(format!(
+            "插件缓存目标越出缓存根: {}",
+            target.display()
+        )));
+    }
+    Ok(())
+}
+
 pub async fn install_plugin(
     name: &str,
     marketplace: &str,
@@ -18,6 +84,8 @@ pub async fn install_plugin(
     project_dir: Option<&Path>,
 ) -> Result<InstalledPlugin, InstallerError> {
     super::enabled_plugins_settings_path(scope, claude_dir, project_dir)?;
+    validate_cache_path_segment("名称", name)?;
+    validate_cache_path_segment("marketplace", marketplace)?;
     let project_dir = if scope == InstallScope::User {
         None
     } else {
@@ -110,20 +178,7 @@ pub async fn install_plugin(
         false
     };
 
-    let version = marketplace_plugin
-        .sha
-        .as_ref()
-        .map(|s| s.chars().take(7).collect())
-        .unwrap_or_else(|| {
-            let v = marketplace_plugin.version.clone();
-            if v.is_empty() {
-                chrono::DateTime::<chrono::Utc>::from(peri_time::now_wall())
-                    .format("%Y%m%d%H%M%S")
-                    .to_string()
-            } else {
-                v
-            }
-        });
+    let version = resolve_cache_version(&marketplace_plugin)?;
 
     let target_dir = claude_dir
         .join("plugins")
@@ -131,15 +186,20 @@ pub async fn install_plugin(
         .join(marketplace)
         .join(name)
         .join(&version);
+    let cache_root = claude_dir.join("plugins").join("cache");
 
     tokio::task::spawn_blocking({
         let source_dir = source_dir.clone();
         let target_dir = target_dir.clone();
         move || -> Result<(), InstallerError> {
+            std::fs::create_dir_all(&cache_root)?;
+            let cache_root = cache_root.canonicalize()?;
+            ensure_within_cache_root(&cache_root, &target_dir)?;
             if target_dir.exists() {
                 let _ = std::fs::remove_dir_all(&target_dir);
             }
             std::fs::create_dir_all(&target_dir)?;
+            ensure_within_cache_root(&cache_root, &target_dir)?;
             copy_dir_recursive(&source_dir, &target_dir).map_err(|e| {
                 InstallerError::CopyFailed {
                     src: source_dir.clone(),
@@ -196,6 +256,8 @@ pub async fn update_plugin(
         project_dir
     };
     let (name, marketplace) = plugin_id.split_once('@').unwrap_or((plugin_id, ""));
+    validate_cache_path_segment("名称", name)?;
+    validate_cache_path_segment("marketplace", marketplace)?;
 
     let plugins_path = claude_dir.join("plugins").join("installed_plugins.json");
     let installed = load_installed_plugins(Some(&plugins_path))?;
@@ -211,11 +273,8 @@ pub async fn update_plugin(
             marketplace: marketplace.into(),
         })?;
 
-    let latest_version = latest
-        .sha
-        .as_ref()
-        .map(|s| s.chars().take(7).collect::<String>())
-        .unwrap_or_else(|| latest.version.clone());
+    // 解析即校验，且必须发生在 uninstall 之前：旧实现会先卸载再进入安装路径校验。
+    let latest_version = resolve_cache_version(latest)?;
 
     if latest_version == current.version {
         return Ok(current.clone());
