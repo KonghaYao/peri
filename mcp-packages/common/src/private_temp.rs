@@ -23,28 +23,56 @@ struct PrivateDir {
     _lock: std::fs::File,
 }
 
-static PRIVATE_DIR: OnceLock<Option<PrivateDir>> = OnceLock::new();
-
-/// Directory shared by every persisted output in this process.
-pub(crate) fn private_output_dir() -> Option<&'static Path> {
-    PRIVATE_DIR
-        .get_or_init(|| match create_private_dir(&std::env::temp_dir()) {
-            Ok(dir) => Some(dir),
-            Err(error) => {
-                tracing::warn!(%error, "failed to create private tool output directory");
-                None
-            }
-        })
-        .as_ref()
-        .map(|dir| dir.path.as_path())
+/// Process-wide cache for the private output directory.
+///
+/// Only a successful creation is cached: a transient failure (ENOSPC, EMFILE,
+/// permission changes) must not disable persistence until restart, so the next
+/// write retries. The mutex keeps concurrent first writes to one creation.
+#[derive(Default)]
+struct PrivateDirCache {
+    dir: std::sync::Mutex<Option<PrivateDir>>,
 }
+
+impl PrivateDirCache {
+    fn get_or_try_init(&self, parent: &Path) -> io::Result<PathBuf> {
+        let mut dir = self
+            .dir
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(dir) = dir.as_ref() {
+            return Ok(dir.path.clone());
+        }
+        match create_private_dir(parent) {
+            Ok(created) => {
+                let path = created.path.clone();
+                *dir = Some(created);
+                Ok(path)
+            }
+            Err(error) => {
+                // Leave the cache empty so later writes retry; callers still
+                // receive the original I/O error.
+                tracing::warn!(%error, "failed to create private tool output directory");
+                Err(error)
+            }
+        }
+    }
+}
+
+static PRIVATE_DIR: OnceLock<PrivateDirCache> = OnceLock::new();
 
 /// Persist `content` as a new owner-only file and return its path.
 pub(crate) fn write_output(content: &str) -> io::Result<PathBuf> {
-    let directory = private_output_dir()
-        .ok_or_else(|| io::Error::other("private tool output directory is unavailable"))?;
+    write_output_to(
+        PRIVATE_DIR.get_or_init(PrivateDirCache::default),
+        &std::env::temp_dir(),
+        content,
+    )
+}
+
+fn write_output_to(cache: &PrivateDirCache, parent: &Path, content: &str) -> io::Result<PathBuf> {
+    let directory = cache.get_or_try_init(parent)?;
     let name = format!("{OUTPUT_PREFIX}{}.txt", uuid::Uuid::new_v4());
-    write_private_file(directory, &name, content.as_bytes())
+    write_private_file(&directory, &name, content.as_bytes())
 }
 
 fn create_private_dir(parent: &Path) -> io::Result<PrivateDir> {

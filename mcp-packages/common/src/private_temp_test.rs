@@ -23,16 +23,45 @@ fn created_directory_and_file_are_owner_only() {
 
 #[test]
 fn persisted_directory_is_process_private_and_stable() {
-    let first = private_output_dir().expect("private output directory");
-    let second = private_output_dir().expect("private output directory");
+    let first = write_output("first").expect("private output file");
+    let second = write_output("second").expect("private output file");
+    let first_dir = first.parent().expect("file parent");
+    let second_dir = second.parent().expect("file parent");
 
-    assert_eq!(first, second);
-    assert_ne!(first, std::env::temp_dir());
-    assert!(first
+    assert_eq!(first_dir, second_dir);
+    assert_ne!(first_dir, std::env::temp_dir());
+    assert!(first_dir
         .file_name()
         .unwrap()
         .to_string_lossy()
         .starts_with(OUTPUT_PREFIX));
+}
+
+#[cfg(unix)]
+#[test]
+fn initialization_failure_is_retried_after_recovery() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Root bypasses directory permissions, so the injected failure would not
+    // occur there.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+
+    let parent = tempfile::tempdir().unwrap();
+    let cache = PrivateDirCache::default();
+
+    std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    let error = write_output_to(&cache, parent.path(), "first").unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(cache.dir.lock().unwrap().is_none());
+
+    std::fs::set_permissions(parent.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = write_output_to(&cache, parent.path(), "recovered").expect("retry after recovery");
+
+    assert_eq!(std::fs::read(&path).unwrap(), b"recovered");
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(mode(path.parent().unwrap()), 0o700);
 }
 
 #[test]
