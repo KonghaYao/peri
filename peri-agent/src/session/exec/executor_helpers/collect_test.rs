@@ -14,7 +14,7 @@ use peri_acp_types::{
         EventMessage, EventSink, EventSinkError, EventSubscriber, ExecutorEvent, SubscriptionError,
     },
     messages::MessageId,
-    session::TurnTelemetryOutcome,
+    session::{ExecutionFailure, TurnTelemetryOutcome},
 };
 use tokio::sync::{mpsc, oneshot, Notify};
 
@@ -26,14 +26,17 @@ use super::{
 
 type EventTx = Arc<parking_lot::Mutex<Option<mpsc::UnboundedSender<ExecutorEvent>>>>;
 
+/// 永不产生广播事件的订阅者，让泵只消费 `event_rx` 与 sink。
 struct PendingSubscriber;
 
 #[async_trait]
 impl EventSubscriber for PendingSubscriber {
+    /// 保持订阅挂起，模拟无外部事件源。
     async fn recv(&mut self) -> Result<EventMessage, SubscriptionError> {
         std::future::pending().await
     }
 
+    /// 订阅无积压事件。
     fn try_recv(&mut self) -> Result<Option<EventMessage>, SubscriptionError> {
         Ok(None)
     }
@@ -48,6 +51,7 @@ struct BlockingSink {
 }
 
 impl BlockingSink {
+    /// 构造未阻塞、未送达 done 的 sink。
     fn new() -> Self {
         Self {
             entered: Notify::new(),
@@ -57,6 +61,7 @@ impl BlockingSink {
         }
     }
 
+    /// 已送达的 done 次数。
     fn done_count(&self) -> usize {
         self.done_count.load(Ordering::SeqCst)
     }
@@ -64,6 +69,7 @@ impl BlockingSink {
 
 #[async_trait]
 impl EventSink for BlockingSink {
+    /// 首个 assistant 事件通知测试并等待放行。
     async fn push_event(
         &self,
         _session_id: &str,
@@ -77,12 +83,14 @@ impl EventSink for BlockingSink {
         Ok(())
     }
 
+    /// 记录 done 并唤醒等待者。
     async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {
         self.done_count.fetch_add(1, Ordering::SeqCst);
         self.done.notify_one();
     }
 }
 
+/// 启动泵并预置成功终态，返回事件发送端与泵句柄。
 fn start_pump(sink: Arc<dyn EventSink>) -> (EventTx, PumpHandle) {
     let (event_tx, event_rx) = mpsc::unbounded_channel();
     let (stop_tx, stop_rx) = oneshot::channel();
@@ -104,6 +112,7 @@ fn start_pump(sink: Arc<dyn EventSink>) -> (EventTx, PumpHandle) {
     (Arc::new(parking_lot::Mutex::new(Some(event_tx))), handle)
 }
 
+/// 构造无失败、`ok` 指定的执行结果。
 fn exec_outcome(ok: bool) -> ExecOutcome {
     ExecOutcome {
         ok,
@@ -116,12 +125,28 @@ fn exec_outcome(ok: bool) -> ExecOutcome {
     }
 }
 
+/// 构造一条 assistant 文本事件。
 fn text_chunk() -> ExecutorEvent {
     ExecutorEvent::TextChunk {
         message_id: MessageId::new(),
         chunk: "answer".into(),
         source_agent_id: None,
     }
+}
+
+/// 启动一个已阻塞在首个 assistant 事件上的泵。
+async fn start_stalled_pump() -> (Arc<BlockingSink>, EventTx, PumpHandle) {
+    let sink = Arc::new(BlockingSink::new());
+    let (event_tx, pump) = start_pump(sink.clone());
+    event_tx
+        .lock()
+        .as_ref()
+        .expect("event sender open")
+        .send(text_chunk())
+        .expect("pump receiver open");
+    // 确认泵已经阻塞在 sink 内，而不是尚未开始处理事件。
+    sink.entered.notified().await;
+    (sink, event_tx, pump)
 }
 
 /// 正常泵：事件排空、done 送达后仍按执行结果成功结算。
@@ -183,16 +208,7 @@ async fn pump_signal_channel_closed_without_done_cannot_return_success() {
 /// 泵被阻塞 sink 卡住超过 10 秒：prompt 必须结算为失败，不能按成功返回。
 #[tokio::test(start_paused = true)]
 async fn stalled_pump_beyond_ten_seconds_cannot_return_success() {
-    let sink = Arc::new(BlockingSink::new());
-    let (event_tx, pump) = start_pump(sink.clone());
-    event_tx
-        .lock()
-        .as_ref()
-        .expect("event sender open")
-        .send(text_chunk())
-        .expect("pump receiver open");
-    // 确认泵已经阻塞在 sink 内，而不是尚未开始处理事件。
-    sink.entered.notified().await;
+    let (sink, event_tx, pump) = start_stalled_pump().await;
 
     let started = tokio::time::Instant::now();
     let result = collect_result(CollectRequest {
@@ -228,4 +244,39 @@ async fn stalled_pump_beyond_ten_seconds_cannot_return_success() {
     sink.release.notify_one();
     sink.done.notified().await;
     assert_eq!(sink.done_count(), 1);
+}
+
+/// 已有执行失败时保留原归因，同时把终态未交付记录为附加 cause。
+#[tokio::test(start_paused = true)]
+async fn stalled_pump_preserves_existing_failure_and_records_delivery_gap() {
+    let (sink, event_tx, pump) = start_stalled_pump().await;
+    let mut outcome = exec_outcome(false);
+    outcome.failure = Some(ExecutionFailure::internal("original execution failure"));
+
+    let result = collect_result(CollectRequest {
+        event_tx: &event_tx,
+        pump_handle: pump,
+        session_id: "test-session",
+        exec_outcome: outcome,
+        pending_tasks: 0,
+    })
+    .await;
+
+    assert!(!result.ok);
+    let failure = result.failure.expect("已有失败必须保留");
+    assert_eq!(
+        failure.public_message, "original execution failure",
+        "原始执行失败归因不得被泵超时覆盖"
+    );
+    assert!(
+        failure
+            .causes
+            .iter()
+            .any(|cause| cause.contains("event pump")),
+        "终态未交付必须作为附加 cause 保留：{:?}",
+        failure.causes
+    );
+
+    sink.release.notify_one();
+    sink.done.notified().await;
 }

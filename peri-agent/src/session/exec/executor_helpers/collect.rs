@@ -59,13 +59,24 @@ pub async fn collect_result(req: CollectRequest<'_>) -> PromptResult {
         pending_tasks,
         context_usage_tokens,
     };
-    if let Err(failure) = pump_failure {
+    if let Err(pump_failure) = pump_failure {
         // 执行结果已产生但终态事件未交付：不能按完成报告，否则客户端无法收敛
-        // loading；已有执行失败保留原始归因。
+        // loading；已有执行失败保留原始归因，并把终态未交付记为附加 cause。
         result.ok = false;
-        result.failure.get_or_insert(failure);
+        match result.failure.as_mut() {
+            Some(failure) => append_pump_failure_cause(failure, &pump_failure.public_message),
+            None => result.failure = Some(pump_failure),
+        }
     }
     result
+}
+
+/// 保留原执行失败的同时记录终态未交付；cause 上限与 `bounded_error_causes` 一致。
+fn append_pump_failure_cause(failure: &mut ExecutionFailure, cause: &str) {
+    const MAX_CAUSES: usize = 64;
+    if failure.causes.len() < MAX_CAUSES {
+        failure.causes.push(cause.to_owned());
+    }
 }
 
 pub fn close_channel(
