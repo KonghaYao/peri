@@ -413,7 +413,8 @@ async fn schema_v11_readonly_old_and_new_databases_never_migrate_or_write_on_rea
     drop(connection);
     drop(reader);
     let writer = SqliteThreadStore::new(&path).await.unwrap();
-    drop(writer);
+    // `Drop` 不等待连接回收；只读重开前显式收尾，避免与 WAL checkpoint 竞争。
+    writer.close().await;
     let reader = SqliteThreadStore::open_existing_read_only(&path)
         .await
         .unwrap();
