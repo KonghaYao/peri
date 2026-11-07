@@ -6,6 +6,7 @@
 pub mod auth;
 pub mod config;
 pub mod store;
+pub mod transport_route;
 
 use std::sync::Arc;
 
@@ -239,6 +240,14 @@ impl LlmProvider {
     }
 
     pub fn into_model(self) -> Box<dyn peri_model::Model> {
+        self.into_model_with_transport_route(None)
+    }
+
+    /// 宿主显式注入传输路由；provider 身份、请求内容与认证配置保持原值。
+    pub fn into_model_with_transport_route(
+        self,
+        transport_route: Option<peri_model::ModelTransportRoute>,
+    ) -> Box<dyn peri_model::Model> {
         let context_window = self.effective_context_window();
         match self {
             Self::Responses {
@@ -277,11 +286,7 @@ impl LlmProvider {
                 config = config
                     .with_max_tokens(max_tokens)
                     .with_context_window(Some(context_window))
-                    .with_runtime(match retry_observer {
-                        Some(observer) => peri_model::ModelRuntimeConfig::with_full_observation()
-                            .with_retry_observer(observer),
-                        None => peri_model::ModelRuntimeConfig::with_full_observation(),
-                    });
+                    .with_runtime(model_runtime(retry_observer, transport_route));
                 Box::new(ResponsesModel::new(config))
             }
             Self::OpenAi {
@@ -303,11 +308,7 @@ impl LlmProvider {
                 config = config.with_max_tokens(max_tokens);
                 config = config.with_context_window(Some(context_window));
                 // 全量观测：langfuse input 与实际发送请求体一致（敏感键/data URI 仍强制脱敏）
-                config = config.with_runtime(match retry_observer {
-                    Some(observer) => peri_model::ModelRuntimeConfig::with_full_observation()
-                        .with_retry_observer(observer),
-                    None => peri_model::ModelRuntimeConfig::with_full_observation(),
-                });
+                config = config.with_runtime(model_runtime(retry_observer, transport_route));
                 Box::new(OpenAiModel::new(config))
             }
             Self::Anthropic {
@@ -336,15 +337,25 @@ impl LlmProvider {
                 config = config.with_max_tokens(output_max_tokens);
                 config = config.with_context_window(Some(context_window));
                 // 全量观测：langfuse input 与实际发送请求体一致（敏感键/data URI 仍强制脱敏）
-                config = config.with_runtime(match retry_observer {
-                    Some(observer) => peri_model::ModelRuntimeConfig::with_full_observation()
-                        .with_retry_observer(observer),
-                    None => peri_model::ModelRuntimeConfig::with_full_observation(),
-                });
+                config = config.with_runtime(model_runtime(retry_observer, transport_route));
                 Box::new(AnthropicModel::new(config))
             }
         }
     }
+}
+
+fn model_runtime(
+    retry_observer: Option<Arc<dyn peri_model::RetryObserver>>,
+    transport_route: Option<peri_model::ModelTransportRoute>,
+) -> peri_model::ModelRuntimeConfig {
+    let mut runtime = peri_model::ModelRuntimeConfig::with_full_observation();
+    if let Some(observer) = retry_observer {
+        runtime = runtime.with_retry_observer(observer);
+    }
+    if let Some(route) = transport_route {
+        runtime = runtime.with_transport_route(route);
+    }
+    runtime
 }
 
 /// 解析 provider endpoint；非法 URL 时记录告警并回落到默认值，

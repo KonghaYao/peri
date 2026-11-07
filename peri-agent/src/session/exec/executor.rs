@@ -252,6 +252,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
             .filter_map(|payload| payload.as_message().cloned())
             .collect();
         return PromptResult {
+            execution_binding: None,
             persisted_payloads: history_payloads,
             messages,
             ok: true,
@@ -301,6 +302,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
                 .filter_map(|payload| payload.as_message().cloned())
                 .collect();
             return PromptResult {
+                execution_binding: None,
                 persisted_payloads: history_payloads,
                 messages,
                 ok: false,

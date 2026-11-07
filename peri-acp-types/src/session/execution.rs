@@ -192,6 +192,9 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 /// 单轮 prompt 执行结果（ACP 协议面 / 执行薄壳消费；Agent 层命令执行体与
 /// 执行句柄经本类型回传）。
 pub struct PromptResult {
+    /// Actual Agent execution that produced this result; absent when no turn was started.
+    /// Auxiliary work triggered by completion must use this fact, not a user-input ticket ID.
+    pub execution_binding: Option<crate::session::ExecutionBinding>,
     /// Canonical transcript snapshot captured after Agent persistence barrier.
     /// 只含**有效**（未排除）条目：Full Compact 提交释放的 own 原文不在其中，
     /// 完整历史（含归档原文）只能从存储读取。
@@ -227,6 +230,7 @@ impl Default for PromptResult {
     /// 不能让空 payload 覆盖 host 的历史快照。
     fn default() -> Self {
         Self {
+            execution_binding: None,
             persisted_payloads: Vec::new(),
             messages: Vec::new(),
             ok: false,

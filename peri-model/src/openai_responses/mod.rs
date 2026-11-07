@@ -138,10 +138,7 @@ pub struct ResponsesModel {
 impl ResponsesModel {
     pub fn new(config: ResponsesConfig) -> Self {
         // In particular, never forward a ChatGPT grant to a redirect target.
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("Responses HTTP client construction");
+        let client = crate::transport::http::client_for_runtime(&config.runtime, false);
         Self {
             config,
             transport: Arc::new(ReqwestTransport::new(client.clone())),
@@ -203,6 +200,7 @@ impl crate::Model for ResponsesModel {
     }
 
     fn prepare_stream(&self, request: ModelRequest) -> ModelResult<PreparedModelCall> {
+        let call_context = request.call_context.clone();
         let built = Arc::new(request::build_request(&self.config, &request)?);
         let checkpoint = serde_json::json!({
             "provider": PROVIDER_NAME,
@@ -221,6 +219,7 @@ impl crate::Model for ResponsesModel {
             let request_factory = Arc::new(move |credential: &RequestCredential| {
                 endpoint_auth.validate_endpoint(&built.endpoint)?;
                 Self::native_request(&client, credential.bearer(), &built)
+                    .map(|wire| wire.with_call_context(call_context.clone()))
             });
             return Ok(PreparedModelCall::new(checkpoint, move |cancellation| {
                 Ok(
@@ -236,7 +235,10 @@ impl crate::Model for ResponsesModel {
                 )
             }));
         }
-        let request_factory = Arc::new(move || Self::native_request(&client, &bearer, &built));
+        let request_factory = Arc::new(move || {
+            Self::native_request(&client, &bearer, &built)
+                .map(|wire| wire.with_call_context(call_context.clone()))
+        });
         Ok(PreparedModelCall::new(checkpoint, move |cancellation| {
             Ok(runtime_http_sse_stream(
                 &runtime,

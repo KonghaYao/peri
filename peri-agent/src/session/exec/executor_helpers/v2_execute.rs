@@ -229,6 +229,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                 },
             );
             return ExecOutcome {
+                execution_binding: None,
                 ok: false,
                 stop_reason: PromptStopReason::EndTurn,
                 failure: Some(failure),
@@ -315,6 +316,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
                 );
             }
             return ExecOutcome {
+                execution_binding: Some(v2_out.context.session.turn.execution_binding()),
                 ok: false,
                 stop_reason: PromptStopReason::EndTurn,
                 failure: Some(failure),
@@ -782,6 +784,7 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     }
 
     ExecOutcome {
+        execution_binding: Some(loop_turn.execution_binding()),
         ok: terminal.ok,
         stop_reason: terminal.stop_reason,
         failure: terminal.failure,

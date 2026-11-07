@@ -1,9 +1,11 @@
+mod call_context;
 mod model;
 pub(crate) mod prepared;
 pub use prepared::PreparedModelCall;
 mod types;
 
 pub use crate::runtime::{ModelError, ModelResult};
+pub use call_context::{ModelCallContext, ModelCallParent};
 pub use model::{Model, ModelStream, ModelStreamEvent};
 pub use types::{
     ContentBlock, DocumentSource, ImageSource, JsonObject, MediaType, ModelCapabilities,

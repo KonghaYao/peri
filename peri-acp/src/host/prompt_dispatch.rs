@@ -8,7 +8,7 @@ use peri_acp_types::messages::BaseMessage;
 use peri_acp_types::thread::{ThreadId, WorkState};
 use serde_json::Value;
 
-use super::{extract_session_id, run_prompt, AcpServerConfig, PromptLocks, SharedSessions};
+use super::{extract_session_id, AcpServerConfig, PromptLocks, SharedSessions};
 use crate::transport::types::AcpError;
 
 #[derive(Clone, Copy)]
@@ -444,7 +444,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         Arc::new(parking_lot::Mutex::new(pool))
     };
 
-    let result = run_prompt(
+    let outcome = super::prompt::run_prompt_with_outcome(
         params,
         sessions,
         cfg,
@@ -455,6 +455,10 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         input_ticket,
     )
     .await;
+    let (result, prediction_execution) = match outcome {
+        Ok(outcome) => (Ok(outcome.response), outcome.execution_binding),
+        Err(error) => (Err(error), None),
+    };
 
     // `run_prompt` 在 attach 前失败时返回 `Ok(Null)`：本轮从未移交执行器，成功空操作
     // 同样要撤销本次准入发布的令牌，否则 close 会把空轮次误判为在飞（#196 P2 复审）。
@@ -470,7 +474,13 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
 
     // Prediction remains admitted before pool restoration and while the prompt lock is held.
     if !is_continuation && result.is_ok() {
-        super::prediction::spawn_prediction(transport, &prompt_session_id, sessions, cfg);
+        super::prediction::spawn_prediction(
+            transport,
+            &prompt_session_id,
+            sessions,
+            cfg,
+            prediction_execution,
+        );
     }
 
     let mut abandoned_thread = None;

@@ -412,6 +412,7 @@ impl SessionEnvironment {
         cfg.controller = host.controller.clone();
         cfg.langfuse_session = host.langfuse_session.clone();
         cfg.stdio_command_filter = host.stdio_command_filter;
+        cfg.model_transport_route = host.model_transport_route.clone();
         let task_owner = cfg.host_task_owner.take().expect("session resource owner");
         let mcp_owner = cfg
             .mcp_task_owner

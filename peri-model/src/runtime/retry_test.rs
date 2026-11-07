@@ -25,7 +25,7 @@ fn scripted_attempt(
     calls: Arc<AtomicUsize>,
 ) -> StreamAttempt {
     let steps = Arc::new(Mutex::new(VecDeque::from(steps)));
-    Arc::new(move |cancellation| {
+    Arc::new(move |cancellation, _attempt| {
         calls.fetch_add(1, Ordering::SeqCst);
         let step = steps
             .lock()
@@ -773,7 +773,7 @@ async fn abort_stops_pending_connect_without_starting_another_attempt() {
     let calls = Arc::new(AtomicUsize::new(0));
     let attempt: StreamAttempt = {
         let calls = calls.clone();
-        Arc::new(move |_| {
+        Arc::new(move |_, _attempt| {
             calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(futures::future::pending())
         })
@@ -800,7 +800,7 @@ async fn abort_stops_pending_sse_read_without_starting_another_attempt() {
     let calls = Arc::new(AtomicUsize::new(0));
     let attempt: StreamAttempt = {
         let calls = calls.clone();
-        Arc::new(move |cancellation| {
+        Arc::new(move |cancellation, _attempt| {
             calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
                 Ok(ModelStream::with_cancellation(
@@ -833,7 +833,7 @@ async fn abort_stops_connect_read_and_backoff() {
     let calls = Arc::new(AtomicUsize::new(0));
     let attempt: StreamAttempt = {
         let calls = calls.clone();
-        Arc::new(move |_| {
+        Arc::new(move |_, _attempt| {
             calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async {
                 Err(ModelError::transport(
@@ -866,7 +866,7 @@ async fn bounded_event_channel_blocks_producer_until_consumer_receives() {
     let attempt: StreamAttempt = {
         let started = started.clone();
         let produced = produced.clone();
-        Arc::new(move |cancellation| {
+        Arc::new(move |cancellation, _attempt| {
             let started = started.clone();
             let produced = produced.clone();
             Box::pin(async move {
@@ -927,7 +927,7 @@ async fn cancellation_releases_producer_blocked_on_bounded_send() {
         let started = started.clone();
         let dropped = dropped.clone();
         let produced = produced.clone();
-        Arc::new(move |cancellation| {
+        Arc::new(move |cancellation, _attempt| {
             let started = started.clone();
             let dropped = dropped.clone();
             let produced = produced.clone();

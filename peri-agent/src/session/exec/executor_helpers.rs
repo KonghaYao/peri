@@ -69,6 +69,7 @@ fn done_stop_reason(reason: PromptStopReason) -> &'static str {
 
 /// Agent 执行后的最终输出（state + 停止原因）。
 pub struct ExecOutcome {
+    pub execution_binding: Option<peri_acp_types::session::ExecutionBinding>,
     pub ok: bool,
     pub stop_reason: PromptStopReason,
     /// 致命执行失败（None = 正常终止 / 用户取消 / 最大轮数；Some = 真正

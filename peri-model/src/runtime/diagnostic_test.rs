@@ -164,7 +164,7 @@ async fn retry_exhaustion_and_observer_preserve_actual_error_details() {
         .with_message("provider failed")
         .with_causes(vec!["actual cause".into()]);
     let expected = error.diagnostic();
-    let attempt: StreamAttempt = Arc::new(move |_| {
+    let attempt: StreamAttempt = Arc::new(move |_, _attempt| {
         let error = error.clone();
         Box::pin(async move { Err(error) })
     });
@@ -206,7 +206,7 @@ async fn visible_delta_interruption_preserves_transport_and_protocol_diagnostics
             .with_body("provider raw body")
             .with_causes(vec!["root cause".into()]);
         let expected = error.diagnostic();
-        let attempt: StreamAttempt = Arc::new(move |_| {
+        let attempt: StreamAttempt = Arc::new(move |_, _attempt| {
             let error = error.clone();
             Box::pin(async move {
                 Ok(ModelStream::new(stream::iter(vec![

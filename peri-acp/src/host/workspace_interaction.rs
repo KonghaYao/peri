@@ -79,6 +79,7 @@ where
         let provider = provider.clone();
         let peri_config = Arc::clone(peri_config);
         let session_id = session_id.to_owned();
+        let transport_route = cfg.model_transport_route.clone();
         Arc::new(move |alias: Option<&str>| {
             let resolved =
                 alias.and_then(|alias| LlmProvider::from_config_for_alias(&peri_config, alias));
@@ -89,14 +90,23 @@ where
                 }
                 None => (provider.clone(), provider.model_name().to_string()),
             };
-            SubagentLlmSource::model(model_provider.into_model().into(), model_name)
-                .with_session_id(session_id.clone())
+            SubagentLlmSource::model(
+                model_provider
+                    .into_model_with_transport_route(transport_route.clone())
+                    .into(),
+                model_name,
+            )
+            .with_session_id(session_id.clone())
         })
     };
 
     // auto-classifier 端口（Permission 的自动分类分支）：session provider 快照的
     // 真实模型；idle 入口不装 per-turn 观测。
-    let auto_classifier_model = Arc::new(tokio::sync::Mutex::new(provider.clone().into_model()));
+    let auto_classifier_model = Arc::new(tokio::sync::Mutex::new(
+        provider
+            .clone()
+            .into_model_with_transport_route(cfg.model_transport_route.clone()),
+    ));
 
     // 会话级后台任务管理器：**还原具体类型**（`AssemblyContext` 只接受具体实现）。
     //

@@ -1,0 +1,1 @@
+{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"prompt","prompt":"T06_HOOK_EVALUATION: Return a structured PreToolUse decision with updatedInput.","timeout":15}]}]}}

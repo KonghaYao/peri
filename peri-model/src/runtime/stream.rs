@@ -42,13 +42,14 @@ pub(crate) fn retrying_http_sse_stream(
     provider: Arc<str>,
     decoders: SseDecoderFactory,
 ) -> ModelStream {
-    let attempt: StreamAttempt = Arc::new(move |attempt_cancellation| {
+    let attempt: StreamAttempt = Arc::new(move |attempt_cancellation, attempts| {
         let transport = transport.clone();
         let request = request.clone();
         let provider = provider.clone();
         let (decoder, completion_decoder) = decoders();
         Box::pin(async move {
-            let request = request()?;
+            let mut request = request()?;
+            request.attempt = attempts.next_wire_attempt();
             let response = transport
                 .send(request, attempt_cancellation.clone())
                 .await?;
@@ -78,7 +79,7 @@ pub(crate) fn runtime_http_sse_stream(
         runtime.retry().clone(),
         cancellation,
         runtime.retry_observer(),
-        transport,
+        crate::transport::routed_transport(transport, runtime.transport_route()),
         request,
         provider,
         decoders,
@@ -96,6 +97,7 @@ pub(crate) fn runtime_authenticated_http_sse_stream(
     decoders: SseDecoderFactory,
     auth: Arc<dyn crate::RequestAuth>,
 ) -> ModelStream {
+    let transport = crate::transport::routed_transport(transport, runtime.transport_route());
     let call_cancellation = cancellation.child_token();
     let watcher_stop = CancellationToken::new();
     if let Some(session_cancellation) = auth.cancellation_token() {
@@ -115,7 +117,7 @@ pub(crate) fn runtime_authenticated_http_sse_stream(
         }
     }
     let refreshed = Arc::new(AtomicBool::new(false));
-    let attempt: StreamAttempt = Arc::new(move |attempt_cancellation| {
+    let attempt: StreamAttempt = Arc::new(move |attempt_cancellation, attempts| {
         let transport = transport.clone();
         let request = request.clone();
         let provider = provider.clone();
@@ -128,8 +130,10 @@ pub(crate) fn runtime_authenticated_http_sse_stream(
                 _ = attempt_cancellation.cancelled() => return Err(ModelError::cancelled()),
                 value = auth.credential(attempt_cancellation.clone()) => value?,
             };
+            let mut request = request(&credential)?;
+            request.attempt = attempts.next_wire_attempt();
             let response = transport
-                .send(request(&credential)?, attempt_cancellation.clone())
+                .send(request, attempt_cancellation.clone())
                 .await?;
             if response.status == 401 && !refreshed.swap(true, Ordering::AcqRel) {
                 let renewed = tokio::select! {

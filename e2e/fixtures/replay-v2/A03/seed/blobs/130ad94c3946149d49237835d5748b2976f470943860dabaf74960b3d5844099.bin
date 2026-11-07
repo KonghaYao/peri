@@ -1,0 +1,7 @@
+---
+name: replay-worker
+description: A worker for deterministic delegation tests
+model: inherit
+---
+
+Complete the delegated task with the available workspace tools.

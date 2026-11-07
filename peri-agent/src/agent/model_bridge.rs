@@ -38,6 +38,7 @@ pub struct AgentModelBridge {
     derives_system_prompt: bool,
     system_contribution_provider: Option<SystemContributionProvider>,
     session_id: Option<String>,
+    call_context: Option<peri_model::ModelCallContext>,
     /// M3/H1 子身份归一化：模型投影中吸收与 base system 逐字相同的第一条
     /// System 消息（历史本体与持久化不变；仅影响请求投影）。
     absorb_system_message: bool,
@@ -61,6 +62,7 @@ impl AgentModelBridge {
             derives_system_prompt: false,
             system_contribution_provider: None,
             session_id: None,
+            call_context: None,
             absorb_system_message: false,
         }
     }
@@ -131,6 +133,12 @@ impl AgentModelBridge {
 
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// Bind one auxiliary call without changing the shared provider configuration.
+    pub fn with_call_context(mut self, context: peri_model::ModelCallContext) -> Self {
+        self.call_context = Some(context);
         self
     }
 
@@ -328,6 +336,7 @@ impl AgentModelBridge {
             messages,
             tools,
             session_id: self.session_id.clone(),
+            call_context: self.call_context.clone(),
             ..Default::default()
         })
     }
@@ -397,10 +406,16 @@ impl AgentModelBridge {
     /// 已构建的 request，消除每轮 LLM 调用的 request 双构建。
     async fn generate_from_request(
         &self,
-        request: ModelRequest,
+        mut request: ModelRequest,
         streaming: Option<StreamingContext>,
         prepared: Option<peri_model::PreparedModelCall>,
     ) -> AgentResult<Reasoning> {
+        if let Some(context) = streaming
+            .as_ref()
+            .and_then(|context| context.call_context.clone())
+        {
+            request.call_context = Some(context);
+        }
         let model_name = self.model_name();
         // 本条 AI 消息的稳定身份：一次 LLM 调用 = 一条 assistant 消息。流式
         // chunk（ThinkingChunk/TextChunk）共享该 ID，流式结束构建 source_message
@@ -610,6 +625,11 @@ impl AgentModelBridge {
 
 #[async_trait]
 impl ReactLLM for AgentModelBridge {
+    fn set_call_context(&mut self, context: peri_model::ModelCallContext) -> AgentResult<()> {
+        self.call_context = Some(context);
+        Ok(())
+    }
+
     fn prepare_reasoning(
         &self,
         messages: &[BaseMessage],
@@ -625,6 +645,16 @@ impl ReactLLM for AgentModelBridge {
         prepared: peri_model::PreparedModelCall,
         streaming: Option<StreamingContext>,
     ) -> AgentResult<Reasoning> {
+        if let Some(context) = streaming
+            .as_ref()
+            .and_then(|value| value.call_context.as_ref())
+        {
+            if self.call_context.as_ref() != Some(context) {
+                return Err(AgentError::LlmError(
+                    "Prepared call identity must be bound before preparation".into(),
+                ));
+            }
+        }
         self.generate_from_request(ModelRequest::default(), streaming, Some(prepared))
             .await
     }
