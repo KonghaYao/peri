@@ -145,6 +145,9 @@ pub struct AcpTuiClient {
     #[cfg(test)]
     transition_commit_hook:
         Arc<Mutex<Option<mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>>>,
+    /// 测试用：在「认领预约」之后、「切换路由」之前同步暂停，且仍持有预约锁。
+    #[cfg(test)]
+    transition_claim_hook: Arc<Mutex<Option<std::sync::mpsc::Sender<std::sync::mpsc::Sender<()>>>>>,
 }
 
 impl AcpTuiClient {
@@ -221,6 +224,8 @@ impl AcpTuiClient {
             pending_close: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             transition_commit_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            transition_claim_hook: Arc::new(Mutex::new(None)),
         };
         (client, notification_tx, notification_rx)
     }

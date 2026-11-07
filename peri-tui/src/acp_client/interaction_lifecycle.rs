@@ -32,6 +32,36 @@ pub enum TransitionKind {
     DeleteCurrent,
 }
 
+/// 一次会话操作（预约、建立、切换）的身份。
+///
+/// 由生命周期在操作开始时分配，并贯穿 `NoSession → Transitioning → Stable`：
+/// 队列按这个身份分道，不再从 `unclaimed` 标记预测下一次 generation。预约在
+/// 创建时取得身份，因此多次连续预约各自身份明确，最新一个代表用户最新决定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SessionOperationId(u64);
+
+impl SessionOperationId {
+    fn next(state: &mut InteractionLifecycleState) -> Self {
+        let id = state.next_operation_id;
+        state.next_operation_id = state
+            .next_operation_id
+            .checked_add(1)
+            .expect("session operation id overflow");
+        Self(id)
+    }
+}
+
+/// 新切换使用的操作身份来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransitionOperation {
+    /// 采用调用方已持有的身份（预约或准入 cohort）。
+    Owned(SessionOperationId),
+    /// 沿用队列已登记、尚未落定的身份；没有则新建。启动恢复用它接续排队车道。
+    AdoptPending,
+    /// 新的一次用户决定：新建身份并取代待定身份。
+    New,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionRoute {
     Bootstrapping {
@@ -40,6 +70,8 @@ pub enum SessionRoute {
     Stable {
         session_id: String,
         generation: u64,
+        /// 产生这个稳定会话的操作；`None` 仅出现在测试夹具。
+        operation: Option<SessionOperationId>,
         accepting_reverse: bool,
         prompt_epoch: u64,
     },
@@ -48,6 +80,7 @@ pub enum SessionRoute {
         from: Option<String>,
         target: Option<String>,
         generation: u64,
+        operation: SessionOperationId,
     },
     NoSession {
         generation: u64,
@@ -67,24 +100,25 @@ impl SessionRoute {
 
 /// 队列准入观察到的会话路由。
 ///
-/// `generation` 在每次切换/建立时递增且提交时复用同一个值：轮询到
-/// `Transitioning { generation }` 的提交，切换落定后必然看到同 generation 的
-/// `Stable`。队列据此把「切换期间的新输入」与「切换前的旧 session 车道」区分开。
+/// `generation` 在每次切换/建立时递增且提交时复用同一个值；`operation` 是
+/// 产生该路由的操作身份。队列按操作身份分道：同一个预约/建立操作从开始到
+/// 落定的所有输入共享一条有序车道，不依赖对 generation 的预测。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AdmissionRoute {
-    Stable { session_id: String, generation: u64 },
-    Transitioning { generation: u64 },
-    NoSession { generation: u64 },
-}
-
-impl AdmissionRoute {
-    pub(crate) fn generation(&self) -> u64 {
-        match self {
-            Self::Stable { generation, .. }
-            | Self::Transitioning { generation }
-            | Self::NoSession { generation } => *generation,
-        }
-    }
+    Stable {
+        session_id: String,
+        generation: u64,
+        operation: Option<SessionOperationId>,
+    },
+    Transitioning {
+        generation: u64,
+        operation: SessionOperationId,
+    },
+    NoSession {
+        generation: u64,
+        /// 队列可等待的建立身份；无会话时总会分配，失败重试因此沿用同一车道。
+        operation: SessionOperationId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -213,6 +247,9 @@ struct ExecutionRuns {
 struct InteractionLifecycleState {
     client_instance_id: u64,
     route: SessionRoute,
+    /// 最近一次会话决定的操作身份；无会话时队列沿用它等待建立。
+    current_operation: Option<SessionOperationId>,
+    next_operation_id: u64,
     next_token: u64,
     deleted_session_ids: HashSet<String>,
     pending: BTreeMap<u64, PendingInteractionEntry>,
@@ -249,6 +286,8 @@ impl InteractionLifecycle {
             state: Arc::new(Mutex::new(InteractionLifecycleState {
                 client_instance_id,
                 route: SessionRoute::Bootstrapping { generation: 0 },
+                current_operation: None,
+                next_operation_id: 1,
                 next_token: 1,
                 deleted_session_ids: HashSet::new(),
                 pending: BTreeMap::new(),
@@ -315,32 +354,86 @@ impl InteractionLifecycle {
         }
     }
 
-    /// 提交准入看到的路由快照（含 generation），一次加锁读出。
-    pub(crate) fn admission_route(&self) -> AdmissionRoute {
+    /// Stable 身份及其产生它的操作；准入在同一临界区内判定身份归属。
+    pub(crate) fn stable_identity_with_operation(
+        &self,
+    ) -> Option<(String, u64, Option<SessionOperationId>)> {
         match &self.state.lock().unwrap().route {
             SessionRoute::Stable {
                 session_id,
                 generation,
+                operation,
+                ..
+            } => Some((session_id.clone(), *generation, *operation)),
+            _ => None,
+        }
+    }
+
+    /// 排队提交看到的路由快照（含操作身份），一次加锁读出。
+    ///
+    /// `NoSession` 没有在途操作时按需分配一个建立身份并记住它：后续输入与
+    /// 失败后的重试继续使用同一身份，车道不会因为「还没有操作」而分裂。
+    pub(crate) fn admission_route(&self) -> AdmissionRoute {
+        let mut state = self.state.lock().unwrap();
+        match state.route.clone() {
+            SessionRoute::Stable {
+                session_id,
+                generation,
+                operation,
                 ..
             } => AdmissionRoute::Stable {
-                session_id: session_id.clone(),
-                generation: *generation,
+                session_id,
+                generation,
+                operation,
             },
-            SessionRoute::Transitioning { generation, .. } => AdmissionRoute::Transitioning {
-                generation: *generation,
+            SessionRoute::Transitioning {
+                generation,
+                operation,
+                ..
+            } => AdmissionRoute::Transitioning {
+                generation,
+                operation,
             },
             SessionRoute::Bootstrapping { generation } | SessionRoute::NoSession { generation } => {
+                let operation = match state.current_operation {
+                    Some(operation) => operation,
+                    None => {
+                        let operation = SessionOperationId::next(&mut state);
+                        state.current_operation = Some(operation);
+                        operation
+                    }
+                };
                 AdmissionRoute::NoSession {
-                    generation: *generation,
+                    generation,
+                    operation,
                 }
             }
         }
     }
 
+    /// 新的一次用户决定：分配新身份并记为当前待定身份。
+    pub(crate) fn allocate_operation(&self) -> SessionOperationId {
+        let mut state = self.state.lock().unwrap();
+        let operation = SessionOperationId::next(&mut state);
+        state.current_operation = Some(operation);
+        operation
+    }
+
+    /// 新的一次用户决定：分配新身份。
     pub fn begin_transition(
         &self,
         kind: TransitionKind,
         target: Option<String>,
+    ) -> Result<TransitionStart, &'static str> {
+        self.begin_transition_with_operation(kind, target, TransitionOperation::New)
+    }
+
+    /// 用明确的身份来源开始切换；`Owned` 让同一预约/cohort 贯穿全部阶段。
+    pub(crate) fn begin_transition_with_operation(
+        &self,
+        kind: TransitionKind,
+        target: Option<String>,
+        operation: TransitionOperation,
     ) -> Result<TransitionStart, &'static str> {
         let mut state = self.state.lock().unwrap();
         let generation = state
@@ -348,6 +441,27 @@ impl InteractionLifecycle {
             .generation()
             .checked_add(1)
             .ok_or("session generation exhausted")?;
+        let operation = match operation {
+            TransitionOperation::Owned(operation) => {
+                // 旧决定可能仍在执行（例如先后预约 B、C 时 B 先开始）；
+                // 不覆盖更新的待定身份，队列仍以最新决定为准。
+                state.current_operation.get_or_insert(operation);
+                operation
+            }
+            TransitionOperation::AdoptPending => match state.current_operation {
+                Some(operation) => operation,
+                None => {
+                    let operation = SessionOperationId::next(&mut state);
+                    state.current_operation = Some(operation);
+                    operation
+                }
+            },
+            TransitionOperation::New => {
+                let operation = SessionOperationId::next(&mut state);
+                state.current_operation = Some(operation);
+                operation
+            }
+        };
         let from = match &state.route {
             SessionRoute::Stable { session_id, .. } => Some(session_id.clone()),
             SessionRoute::Transitioning { target, .. } => target.clone(),
@@ -358,6 +472,7 @@ impl InteractionLifecycle {
             from: from.clone(),
             target,
             generation,
+            operation,
         };
         state.active_prompt = None;
         state.new_buffer.clear();
@@ -389,9 +504,16 @@ impl InteractionLifecycle {
         if state.route.generation() != generation {
             return;
         }
+        // 落定身份保留产生它的操作：排队输入据此确认「这就是我在等的操作」。
+        let operation = match &state.route {
+            SessionRoute::Transitioning { operation, .. } => Some(*operation),
+            SessionRoute::Stable { operation, .. } => *operation,
+            _ => None,
+        };
         state.route = SessionRoute::Stable {
             session_id,
             generation,
+            operation,
             accepting_reverse: false,
             prompt_epoch: 0,
         };
@@ -531,6 +653,7 @@ impl InteractionLifecycle {
                 generation,
                 accepting_reverse: true,
                 prompt_epoch,
+                ..
             } if current == session_id => (*generation, *prompt_epoch),
             _ => return RegisterDecision::Settle { kind, id },
         };
@@ -841,6 +964,7 @@ impl InteractionLifecycle {
             generation,
             accepting_reverse,
             prompt_epoch,
+            ..
         } = &mut state.route
             && session_id == &marker.session_id
             && *generation == marker.generation
@@ -933,6 +1057,7 @@ impl InteractionLifecycle {
         state.route = SessionRoute::Stable {
             session_id: session_id.to_string(),
             generation: 1,
+            operation: None,
             accepting_reverse,
             prompt_epoch: u64::from(accepting_reverse),
         };

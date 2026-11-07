@@ -5,6 +5,7 @@ mod deployment;
 pub(crate) const SESSION_BINDING_CHANGED_CODE: i64 = -32018;
 pub use deployment::AcpDeployment;
 pub mod interaction_lifecycle;
+pub(crate) use interaction_lifecycle::SessionOperationId;
 #[doc(hidden)]
 pub mod interaction_response;
 mod interaction_settlement;

@@ -415,7 +415,8 @@ async fn resolve_admission_identity(
 
     info!(cwd = %cwd, "kit submit_consumer: resolving session admission");
     let allow_create = matches!(cohort.mode, CohortMode::Establish);
-    let guard = AdmissionGuard::new(cohort.switch_seq, allow_create);
+    let guard =
+        AdmissionGuard::new(cohort.switch_seq, allow_create).with_operation(cohort.operation);
     let mut resolved = None;
     acp_client
         .resolve_session_admission(cwd, guard, |identity| {

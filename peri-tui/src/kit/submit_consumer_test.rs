@@ -15,6 +15,9 @@ mod session_switch;
 #[path = "submit_consumer_test/lane.rs"]
 mod lane;
 
+#[path = "submit_consumer_test/admission.rs"]
+mod admission;
+
 #[path = "submit_consumer_test/commands.rs"]
 mod commands;
 

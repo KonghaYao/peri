@@ -1,12 +1,14 @@
 //! 提交车道的准入与 cohort 路由。
 //!
-//! 车道键在入队时确定：同一次建立/切换从 `NoSession` 经 `Transitioning` 到
-//! `Stable` 全程共享一个 [`CohortKey`]，不靠事后匹配合并。
+//! 车道键是显式的会话操作身份：预约在创建时取得身份，建立/启动恢复沿用队列
+//! 已登记的身份，切换与落定沿途保留同一个 [`SessionOperationId`]。因此
+//! `NoSession`→`Transitioning`→`Stable` 全程共享同一条有序车道，不再根据
+//! 「是否存在未认领预约」预测 `generation + 1`。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use crate::acp_client::{AcpTuiClient, AdmissionRoute};
+use crate::acp_client::{AcpTuiClient, AdmissionRoute, SessionOperationId};
 
 use super::submit_consumer::SubmitLanes;
 
@@ -18,25 +20,21 @@ pub(super) type SessionIdentity = (String, u64);
 
 /// 提交车道键。
 ///
-/// 尚未落定身份的提交按 cohort 串行；落定后仍留在 cohort 车道，直到该 cohort
-/// 的队列排空，保证后来者不会越过仍在排队的前序消息。
+/// 尚未落定身份的提交按操作 cohort 串行；落定后仍留在 cohort 车道，直到该
+/// cohort 的队列排空，保证后来者不会越过仍在排队的前序消息。
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum LaneKey {
     Cohort(CohortKey),
     Session(SessionIdentity),
 }
 
-/// cohort 的队列键：同一次初始化/切换全程共享。
+/// 一次明确的会话操作：预约、建立或切换。
 ///
-/// `settled_generation` 是这次操作**最终落定**的 generation，而不是当前路由
-/// 观察到的代际：`NoSession(g)` 会由随后的建立推进到 `g + 1`，因此与
-/// `Transitioning(g + 1)`、`Stable(_, g + 1)` 使用同一个键，队列不会在阶段
-/// 交界处裂成两个可并行 cohort。`switch_seq` 区分同一代际下的不同用户决定
-/// （例如建立途中又预约了历史加载），避免复用已被取代的采纳槽。
+/// 操作身份由生命周期分配，贯穿该操作的整个生命周期。连续预约各有独立身份，
+/// 队列以最新未认领预约为目标，先开始的旧预约不会把输入改道。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct CohortKey {
-    settled_generation: u64,
-    switch_seq: u64,
+    operation: SessionOperationId,
 }
 
 /// cohort 的身份落定状态。
@@ -62,31 +60,39 @@ pub(super) enum CohortMode {
 /// 一个等待落定身份的 cohort。
 pub(super) struct CohortEntry {
     state: Arc<Mutex<CohortState>>,
-    /// 落定后应出现的 Stable generation，用于把落定前入队的提交并回同一车道。
-    expected_generation: u64,
 }
 
 impl CohortEntry {
-    fn new(expected_generation: u64) -> Self {
+    fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(CohortState::Pending)),
-            expected_generation,
         }
     }
 
-    fn ticket(&self, mode: CohortMode, switch_seq: u64) -> CohortTicket {
+    fn is_cancelled(&self) -> bool {
+        matches!(&*self.state.lock().unwrap(), CohortState::Cancelled)
+    }
+
+    fn ticket(
+        &self,
+        mode: CohortMode,
+        operation: SessionOperationId,
+        switch_seq: u64,
+    ) -> CohortTicket {
         CohortTicket {
             state: Arc::clone(&self.state),
             mode,
+            operation,
             switch_seq,
         }
     }
 
-    /// 该 cohort 是否接受这条稳定身份（落定前/落定后都要并入同一条车道）。
+    /// 该 cohort 是否接受这条稳定身份（落定前/落定后都并入同一条车道）。
     fn accepts(&self, identity: &SessionIdentity) -> bool {
         match &*self.state.lock().unwrap() {
             CohortState::Adopted(adopted) => adopted == identity,
-            CohortState::Pending => self.expected_generation == identity.1,
+            // 键就是操作身份：同一操作的落定结果必然属于这个 cohort。
+            CohortState::Pending => true,
             CohortState::Cancelled => false,
         }
     }
@@ -97,6 +103,7 @@ impl CohortEntry {
 pub(super) struct CohortTicket {
     pub(super) state: Arc<Mutex<CohortState>>,
     pub(super) mode: CohortMode,
+    pub(super) operation: SessionOperationId,
     pub(super) switch_seq: u64,
 }
 
@@ -138,10 +145,9 @@ pub(super) type Cohorts = HashMap<CohortKey, CohortEntry>;
 
 /// 为一条排队提交登记车道与准入信息。
 ///
-/// 车道在路由阶段按「这次操作最终落定的 generation」确定：`NoSession(g)`、
-/// `Transitioning(g + 1)` 与 `Stable(_, g + 1)` 因此共用同一条有序队列；
-/// 已完成落定的 Stable 输入优先并入仍在执行的同代 cohort，否则按会话身份
-/// 单独成道。不存在「先分道、再任取匹配项合并」的路径。
+/// 目标操作按「用户最新决定」确定：未认领预约优先，其次是正在进行的切换，
+/// 最后是无会话时的建立身份。稳定会话只在没有待定操作时直接绑定；仍在执行的
+/// 同操作 cohort 优先，后来者不会越过前序消息。
 pub(super) fn register_admission(
     acp_client: &AcpTuiClient,
     cohorts: &mut Cohorts,
@@ -149,47 +155,43 @@ pub(super) fn register_admission(
 ) -> (LaneKey, SubmitAdmission) {
     let snapshot = acp_client.session_admission_snapshot();
 
-    // 尚未被 load 认领的预约一定会推进 generation，是用户最新的会话决定：
-    // 输入必须等它落定，不能绑定当前 Stable。已认领的预约不再预测下一代
-    // ——那正是「load 已 commit、预约未释放」窗口把后续输入拆道的原因。
-    if snapshot.unclaimed_load {
-        let expected = snapshot.route.generation().saturating_add(1);
-        return cohort_admission(
-            cohorts,
-            CohortKey {
-                settled_generation: expected,
-                switch_seq: snapshot.switch_seq,
-            },
-            CohortMode::Await,
-            expected,
-        );
+    // 尚未被 load 认领的预约一定会推进会话，是用户最新的决定：输入必须等它
+    // 落定，不能绑定当前 Stable。多个预约同时排队时取队尾，让所有输入等最终
+    // 目标，而不是各自预测一次 generation。
+    if let Some(operation) = snapshot.unclaimed_load {
+        return cohort_admission(cohorts, operation, CohortMode::Await, snapshot.switch_seq);
     }
 
     match &snapshot.route {
         AdmissionRoute::Stable {
             session_id,
             generation,
+            operation,
         } => {
             let identity: SessionIdentity = (session_id.clone(), *generation);
-            let key = CohortKey {
-                settled_generation: *generation,
-                switch_seq: snapshot.switch_seq,
-            };
-            // 同代 cohort 仍在执行：落定前后的提交必须共用车道，否则后来者
-            // 会越过仍排队的前序消息（#210）。按 generation 直接取值，不做
-            // 任意匹配。
-            if let Some(entry) = cohorts.get(&key)
-                && entry.accepts(&identity)
-                && lanes.is_active(&LaneKey::Cohort(key))
-            {
-                return (
-                    LaneKey::Cohort(key),
-                    SubmitAdmission {
-                        binding: Some(identity),
-                        cohort: Some(entry.ticket(CohortMode::Await, key.switch_seq)),
-                        unbound_switch_seq: None,
-                    },
-                );
+            // 同一次操作的 cohort 仍在执行：落定前后的提交必须共用车道，否则
+            // 后来者会越过仍排队的前序消息（#210）。按操作身份直接取值。
+            if let Some(operation) = operation {
+                let key = CohortKey {
+                    operation: *operation,
+                };
+                if let Some(entry) = cohorts.get(&key)
+                    && entry.accepts(&identity)
+                    && lanes.is_active(&LaneKey::Cohort(key))
+                {
+                    return (
+                        LaneKey::Cohort(key),
+                        SubmitAdmission {
+                            binding: Some(identity),
+                            cohort: Some(entry.ticket(
+                                CohortMode::Await,
+                                *operation,
+                                snapshot.switch_seq,
+                            )),
+                            unbound_switch_seq: None,
+                        },
+                    );
+                }
             }
             (
                 LaneKey::Session(identity.clone()),
@@ -200,49 +202,45 @@ pub(super) fn register_admission(
                 },
             )
         }
-        AdmissionRoute::Transitioning { generation } => cohort_admission(
-            cohorts,
-            CohortKey {
-                settled_generation: *generation,
-                switch_seq: snapshot.switch_seq,
-            },
-            CohortMode::Await,
-            *generation,
-        ),
-        AdmissionRoute::NoSession { generation } => {
-            let expected = generation.saturating_add(1);
-            cohort_admission(
-                cohorts,
-                CohortKey {
-                    settled_generation: expected,
-                    switch_seq: snapshot.switch_seq,
-                },
-                if snapshot.pending_load {
-                    CohortMode::Await
-                } else {
-                    CohortMode::Establish
-                },
-                expected,
-            )
+        AdmissionRoute::Transitioning { operation, .. } => {
+            cohort_admission(cohorts, *operation, CohortMode::Await, snapshot.switch_seq)
+        }
+        AdmissionRoute::NoSession { operation, .. } => {
+            // 有在途预约时只等待它落定，绝不代用户新建；无预约则允许本 cohort
+            // 建立会话，失败重试沿用同一操作身份。
+            let mode = if snapshot.pending_load {
+                CohortMode::Await
+            } else {
+                CohortMode::Establish
+            };
+            let mut operation = *operation;
+            // 同一操作已永久取消：旧票保持取消，新输入换新身份重试，不复用空槽。
+            if mode == CohortMode::Establish
+                && cohorts
+                    .get(&CohortKey { operation })
+                    .is_some_and(CohortEntry::is_cancelled)
+            {
+                operation = acp_client.renew_session_operation();
+            }
+            cohort_admission(cohorts, operation, mode, snapshot.switch_seq)
         }
     }
 }
 
-/// 把提交并入 `key` 对应的 cohort；同键提交始终共享一条车道。
+/// 把提交并入 `operation` 对应的 cohort；同键提交始终共享一条车道。
 fn cohort_admission(
     cohorts: &mut Cohorts,
-    key: CohortKey,
+    operation: SessionOperationId,
     mode: CohortMode,
-    expected_generation: u64,
+    switch_seq: u64,
 ) -> (LaneKey, SubmitAdmission) {
-    let entry = cohorts
-        .entry(key)
-        .or_insert_with(|| CohortEntry::new(expected_generation));
+    let key = CohortKey { operation };
+    let entry = cohorts.entry(key).or_insert_with(CohortEntry::new);
     (
         LaneKey::Cohort(key),
         SubmitAdmission {
             binding: None,
-            cohort: Some(entry.ticket(mode, key.switch_seq)),
+            cohort: Some(entry.ticket(mode, operation, switch_seq)),
             unbound_switch_seq: None,
         },
     )
