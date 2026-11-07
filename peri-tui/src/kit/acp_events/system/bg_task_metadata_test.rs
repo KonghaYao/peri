@@ -83,12 +83,20 @@ fn terminal_event_burst_bounds_display_identity_and_vector_capacity() {
     for index in 0..1000 {
         let entry = task(format!("burst-{index}"), "running", &summary);
         handle_bg_task_started(&mut state, &entry);
-        handle_bg_task_completed(&entry.task_id, true, 1, Some("done".into()), None);
+        handle_bg_task_completed(
+            &state,
+            &entry.task_id,
+            Some(entry.kind.as_str()),
+            true,
+            1,
+            Some("done".into()),
+            None,
+        );
     }
     assert!(BG_TASKS.state().read().is_empty());
     assert_recent_bounds(0);
     assert!(!BG_TASK_IDENTITY.state().read().contains_key("burst-0"));
-    handle_bg_task_completed("burst-0", true, 1, Some(summary), None);
+    handle_bg_task_completed(&state, "burst-0", None, true, 1, Some(summary), None);
     assert!(!BG_TASK_IDENTITY.state().read().contains_key("burst-0"));
     assert!(!BG_LIVE_DETAIL.state().read().contains_key("burst-0"));
 }
