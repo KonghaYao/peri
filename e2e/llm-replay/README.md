@@ -63,7 +63,7 @@ fast 模式去掉录制延时，recorded 模式按观察时间调度，实际时
 
 `createRequestBindingAdapter({ mode, runId, declarations, owner: "world" })` 提供 `declareAndBind`、`onRequest`、`requestRules`、`snapshotDeclarations` 和 `responsePlans`。录制阶段根据已登记的真实 world/session/child 身份生成精确路径规则，封存在 cassette 中；重放不重新发现或放宽规则。`typed-template` 包含原样文字和 `{ kind, alias }` 引用，完整字段必须等于当前绑定渲染出的模板，才能转换引用。根目录、HOME、工作区按最长合法路径边界识别；同路径片段、`bg-<UUID>` 等派生 ID 不能隐式冒充已声明身份。
 
-日期只允许系统环境 `<env>` 段中带 `Today's date: ` 标签的快照字段绑定。场景固定 `TZ=UTC`，其 ambient UTC date 不是业务断言；用户日期、工具时间输出和其它时间戳仍严格匹配。未声明的操作系统、提示词或其它环境变化会产生 fixture drift。
+日期只允许系统环境 `<env>` 段中带 `Today's date: ` 标签的快照字段绑定。场景固定 `TZ=UTC`，其 ambient UTC date 不是业务断言；用户日期、工具时间输出和其它时间戳仍严格匹配。同样的窄规则只适用于 `<env>` 段中的 `Platform: ` 与 `OS Version: ` 两行：镜像补丁版本随 CI 升级变化，不代表业务行为；其它系统提示、工具列表和消息仍严格匹配。未声明的提示词或其它环境变化会产生 fixture drift。
 
 原始录制保持不变。portable 派生当前支持 Anthropic 和 Responses 的完整工具参数；Responses 的 delta、arguments.done、item.done、completed 副本必须一致。只修改声明的字符串叶节点，并保留工具参数各份副本的键序、空白和未修改的数值字面量，避免下一轮 history 字符串因重新序列化而漂移。每份计划保留原始响应 SHA-256、规则版本和新的分片计划；重放核验来源，不保留原始分块时间。
 

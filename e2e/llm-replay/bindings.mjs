@@ -3,7 +3,7 @@ import { BindingError } from './binding-error.mjs';
 
 export { BindingError } from './binding-error.mjs';
 
-const KINDS = new Set(['session', 'thread', 'task', 'execution', 'tool_call', 'path', 'date']);
+const KINDS = new Set(['session', 'thread', 'task', 'execution', 'tool_call', 'path', 'date', 'platform', 'os_version']);
 const PROTECTED_KEYS = new Set(['signature', 'encrypted_content', 'provider_state', 'providerState', 'reasoning_content', 'thoughtSignature', 'thought_signature']);
 const PROTECTED_TYPES = new Set(['thinking', 'redacted_thinking', 'reasoning', 'redacted_reasoning', 'provider_state']);
 
@@ -38,8 +38,8 @@ function bindingValue(value, kind, field) {
 }
 
 function valueKeyOf({ owner, kind }, value) {
-  // 多个会话可共享同一工作区；身份 ID 不允许跨 owner 认领，路径别名只在 owner 内唯一。
-  return JSON.stringify(['path', 'date'].includes(kind) ? [owner, kind, value] : [kind, value]);
+  // 多个会话可共享同一工作区；身份 ID 不允许跨 owner 认领，路径、日期与宿主环境只在 owner 内唯一。
+  return JSON.stringify(['path', 'date', 'platform', 'os_version'].includes(kind) ? [owner, kind, value] : [kind, value]);
 }
 
 function pointerTokens(pointer) {

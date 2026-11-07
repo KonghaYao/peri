@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { runReplayScenario, type ReplayScenarioContext } from "../../helpers/llm-replay-suite.js";
 import { ScenarioIdentity } from "../../helpers/llm-replay-identity.js";
+import { declareReplayAmbientBindings } from "../../helpers/llm-replay-runtime.js";
 import {
   createReplayWorld, prepareReplaySessions, REPLAY_BINARY, replayEnvironment, ReplayTui,
   syntheticRequestEvidence, type ReplayWorld,
@@ -195,8 +196,7 @@ describe("I01-I02 real session and replay-run isolation", () => {
             secondRunId = `${ctx.runId}-independent`;
             secondIdentity = new ScenarioIdentity([{ live: secondSession!, canonical: "root" }]);
             const bindings = createRequestBindingAdapter({ mode: "replay", runId: secondRunId, declarations: ctx.bindings.snapshotDeclarations() });
-            for (const alias of ["root", "home", "work"] as const) bindings.declareAndBind({ kind: "path", alias, live: secondWorld[alias], anchor: `isolated scenario ${alias}` });
-            bindings.declareAndBind({ kind: "date", alias: "today", live: new Date().toISOString().slice(0, 10), anchor: "ambient UTC date in system environment" });
+            await declareReplayAmbientBindings(bindings, secondWorld);
             bindings.declareAndBind({ kind: "session", alias: "root", live: secondSession!, anchor: "ACP session/new result" });
             secondRun = ctx.proxy.createRun(secondRunId, { resolveContext: secondIdentity.resolve, bindings: bindings.registry,
               bindingOwnerFor: bindings.bindingOwnerFor, portableResponses: ctx.run.options.portableResponses,

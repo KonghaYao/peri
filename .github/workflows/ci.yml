@@ -220,11 +220,12 @@ jobs:
     # 离线录放业务回归：真实 Peri/ACP/工具/TUI，模型上游由持久 cassette 回放，
     # 不访问线上模型。仅在 Linux 跑（PTY 与 @xterm/headless 的验收环境）。
     # tui-tester 子模块是公开仓库；checkout 不递归拉取，避免依赖 SSH deploy key。
+    # 固定 24.04：fixture 录制基线为 Ubuntu 24.04；系统提示只绑定 OS 版本行，不随镜像迁移漂移。
     e2e-replay:
         name: E2E replay (Linux)
         needs: changes
         if: needs.changes.outputs.docs_only != 'true'
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         timeout-minutes: 30
         steps:
             - name: Checkout repository
@@ -273,6 +274,15 @@ jobs:
             - name: Run offline replay (30 scenarios)
               working-directory: e2e
               run: npm run e2e:replay
+
+            - name: Upload replay evidence on failure
+              if: failure()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: e2e-replay-results
+                  path: e2e/results/replay-v2
+                  retention-days: 7
+                  if-no-files-found: ignore
 
     # 汇总检查：只要本 job 运行就给出确定的结论 —— 区分「文档按策略跳过」与
     # 「代码测试失败 / 取消 / 意外跳过」，避免后者被读成通过。

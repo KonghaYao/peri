@@ -11,15 +11,28 @@ const referenceKey = ({ owner, kind, alias }) => JSON.stringify([owner, kind, al
 const pointerToken = (text) => text.replace(/~/gu, '~0').replace(/\//gu, '~1');
 const fail = (code, message) => { throw new BindingError(code, message); };
 
+const ENV_LINE_LABELS = { date: "Today's date: ", platform: 'Platform: ', os_version: 'OS Version: ' };
+
+/** 只在系统环境段内、带固定标签且以换行结束的值可变；同一文本出现在用户消息或工具结果时不绑定。 */
+function environmentLine(text, offset, value, label) {
+  const after = text[offset + value.length];
+  return text.slice(Math.max(0, offset - label.length), offset) === label &&
+    (!after || after === '\n' || after === '\r') &&
+    text.lastIndexOf('<env>', offset) > text.lastIndexOf('</env>', offset) &&
+    text.indexOf('</env>', offset + value.length) !== -1;
+}
+
 function tokenBoundary(text, offset, binding, source, systemText) {
   const value = binding[source];
   const before = text[offset - 1] ?? '';
   const after = text[offset + value.length] ?? '';
   if (binding.kind === 'date') {
     // 日期只有系统环境快照中的这个带标签字段可变；用户日期和工具结果仍严格匹配。
-    return systemText && text.slice(Math.max(0, offset - 14), offset) === "Today's date: " &&
-      (!after || after === '\n' || after === '\r') && text.lastIndexOf('<env>', offset) > text.lastIndexOf('</env>', offset) &&
-      text.indexOf('</env>', offset + value.length) !== -1;
+    return systemText && environmentLine(text, offset, value, ENV_LINE_LABELS.date);
+  }
+  if (binding.kind === 'platform' || binding.kind === 'os_version') {
+    // 宿主平台与补丁版本随 CI 镜像升级变化，不是业务行为；只归一化这两行，其余系统提示严格匹配。
+    return systemText && environmentLine(text, offset, value, ENV_LINE_LABELS[binding.kind]);
   }
   if (binding.kind === 'path') {
     if ((before && /[\p{L}\p{N}_./~+%\-]/u.test(before)) || (after && after !== '/' && /[\p{L}\p{N}_.~+%\-]/u.test(after))) return false;

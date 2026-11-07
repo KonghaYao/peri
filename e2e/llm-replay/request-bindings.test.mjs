@@ -59,6 +59,34 @@ test('自动发现遵守路径及 ID 边界，不能把相邻前缀、穿越、o
   assert.throws(() => adapter.declareAndBind({ kind: 'date', alias: 'bad-date', live: '2026-02-30', anchor: 'bad' }), { code: 'invalid_binding_date' });
 });
 
+test('平台与 OS 版本只绑定系统环境段的带标签行，用户消息中的同形文本仍严格匹配', () => {
+  const envValues = (root, session, platform, osVersion) => ({
+    ...worldValues(root, session), platform: ['platform', platform], os_version: ['os_version', osVersion],
+  });
+  const recording = createRequestBindingAdapter({ mode: 'record', runId: 'platform-record' });
+  bindWorld(recording, envValues('/record/root', 'session-recorded', 'linux', 'Ubuntu 24.04.3 LTS'));
+  const system = (root, platform, osVersion) => `strict instruction\n<env>\nWorking directory: ${root}/work\n` +
+    `Platform: ${platform}\nOS Version: ${osVersion}\nToday's date: 2026-11-07\n</env>`;
+  const original = { model: 'fixture-model', system: [{ type: 'text', text: system('/record/root', 'linux', 'Ubuntu 24.04.3 LTS') }],
+    messages: [{ role: 'user', content: 'Platform: linux\nOS Version: Ubuntu 24.04.3 LTS' }] };
+  recording.onRequest({ context: identity, request: { body: Buffer.from(JSON.stringify(original)) } });
+  const rules = recording.requestRules(identity);
+  assert.deepEqual(rules.map((rule) => rule.path), ['/system/0/text']);
+  assert.ok(rules[0].segments.some((part) => part?.alias === 'platform'));
+  assert.ok(rules[0].segments.some((part) => part?.alias === 'os_version'));
+
+  const replaying = createRequestBindingAdapter({ mode: 'replay', runId: 'platform-replay', declarations: recording.snapshotDeclarations() });
+  bindWorld(replaying, envValues('/runtime/root', 'new-session', 'macos', 'macOS 26.5.1'));
+  const actual = structuredClone(original);
+  actual.system[0].text = system('/runtime/root', 'macos', 'macOS 26.5.1');
+  const canonical = (value, registry) => canonicalBody(Buffer.from(JSON.stringify(value)), { bindings: registry, owner: 'world', rules });
+  assert.equal(canonical(actual, replaying.registry), canonical(original, recording.registry));
+  actual.messages[0].content = 'Platform: macos\nOS Version: macOS 26.5.1';
+  assert.notEqual(canonical(actual, replaying.registry), canonical(original, recording.registry));
+  assert.deepEqual(discoverBindingRules({ system: [{ type: 'text', text: 'Platform: linux\nOS Version: Ubuntu 24.04.3 LTS' }] },
+    { registry: recording.registry }).map((rule) => rule.path), [], '没有 <env> 段时不得推断可忽略字段');
+});
+
 test('typed 模板不能借跨 owner、未知引用或额外对象字段获取宽松匹配', () => {
   const adapter = createRequestBindingAdapter({ mode: 'record', runId: 'strict' });
   bindWorld(adapter, worldValues('/record/root', 'session-recorded'));

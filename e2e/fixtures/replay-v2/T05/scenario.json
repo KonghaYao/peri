@@ -64,6 +64,20 @@
     },
     {
       "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
       "kind": "session",
       "alias": "root",
       "recorded": "01a1b607-8b2d-72d0-94bf-11d078b0a552",

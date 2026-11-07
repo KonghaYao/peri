@@ -25,7 +25,17 @@
               "kind": "path",
               "alias": "work"
             },
-            "\nIs directory a git repo: No\nPlatform: linux\nOS Version: Ubuntu 24.04.3 LTS\nToday's date: ",
+            "\nIs directory a git repo: No\nPlatform: ",
+            {
+              "kind": "platform",
+              "alias": "platform"
+            },
+            "\nOS Version: ",
+            {
+              "kind": "os_version",
+              "alias": "os_version"
+            },
+            "\nToday's date: ",
             {
               "kind": "date",
               "alias": "today"
@@ -112,7 +122,17 @@
               "kind": "path",
               "alias": "work"
             },
-            "\nIs directory a git repo: No\nPlatform: linux\nOS Version: Ubuntu 24.04.3 LTS\nToday's date: ",
+            "\nIs directory a git repo: No\nPlatform: ",
+            {
+              "kind": "platform",
+              "alias": "platform"
+            },
+            "\nOS Version: ",
+            {
+              "kind": "os_version",
+              "alias": "os_version"
+            },
+            "\nToday's date: ",
             {
               "kind": "date",
               "alias": "today"
@@ -199,7 +219,17 @@
               "kind": "path",
               "alias": "work"
             },
-            "\nIs directory a git repo: No\nPlatform: linux\nOS Version: Ubuntu 24.04.3 LTS\nToday's date: ",
+            "\nIs directory a git repo: No\nPlatform: ",
+            {
+              "kind": "platform",
+              "alias": "platform"
+            },
+            "\nOS Version: ",
+            {
+              "kind": "os_version",
+              "alias": "os_version"
+            },
+            "\nToday's date: ",
             {
               "kind": "date",
               "alias": "today"
@@ -308,7 +338,17 @@
               "kind": "path",
               "alias": "work"
             },
-            "\nIs directory a git repo: No\nPlatform: linux\nOS Version: Ubuntu 24.04.3 LTS\nToday's date: ",
+            "\nIs directory a git repo: No\nPlatform: ",
+            {
+              "kind": "platform",
+              "alias": "platform"
+            },
+            "\nOS Version: ",
+            {
+              "kind": "os_version",
+              "alias": "os_version"
+            },
+            "\nToday's date: ",
             {
               "kind": "date",
               "alias": "today"
@@ -389,7 +429,17 @@
               "kind": "path",
               "alias": "work"
             },
-            "\nIs directory a git repo: No\nPlatform: linux\nOS Version: Ubuntu 24.04.3 LTS\nToday's date: ",
+            "\nIs directory a git repo: No\nPlatform: ",
+            {
+              "kind": "platform",
+              "alias": "platform"
+            },
+            "\nOS Version: ",
+            {
+              "kind": "os_version",
+              "alias": "os_version"
+            },
+            "\nToday's date: ",
             {
               "kind": "date",
               "alias": "today"
@@ -470,7 +520,17 @@
               "kind": "path",
               "alias": "work"
             },
-            "\nIs directory a git repo: No\nPlatform: linux\nOS Version: Ubuntu 24.04.3 LTS\nToday's date: ",
+            "\nIs directory a git repo: No\nPlatform: ",
+            {
+              "kind": "platform",
+              "alias": "platform"
+            },
+            "\nOS Version: ",
+            {
+              "kind": "os_version",
+              "alias": "os_version"
+            },
+            "\nToday's date: ",
             {
               "kind": "date",
               "alias": "today"
@@ -551,7 +611,17 @@
               "kind": "path",
               "alias": "work"
             },
-            "\nIs directory a git repo: No\nPlatform: linux\nOS Version: Ubuntu 24.04.3 LTS\nToday's date: ",
+            "\nIs directory a git repo: No\nPlatform: ",
+            {
+              "kind": "platform",
+              "alias": "platform"
+            },
+            "\nOS Version: ",
+            {
+              "kind": "os_version",
+              "alias": "os_version"
+            },
+            "\nToday's date: ",
             {
               "kind": "date",
               "alias": "today"
@@ -632,7 +702,17 @@
               "kind": "path",
               "alias": "work"
             },
-            "\nIs directory a git repo: No\nPlatform: linux\nOS Version: Ubuntu 24.04.3 LTS\nToday's date: ",
+            "\nIs directory a git repo: No\nPlatform: ",
+            {
+              "kind": "platform",
+              "alias": "platform"
+            },
+            "\nOS Version: ",
+            {
+              "kind": "os_version",
+              "alias": "os_version"
+            },
+            "\nToday's date: ",
             {
               "kind": "date",
               "alias": "today"

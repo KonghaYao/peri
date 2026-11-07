@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { performance } from "node:perf_hooks";
 import { ScenarioIdentity } from "./llm-replay-identity.js";
+import { declareReplayAmbientBindings } from "./llm-replay-runtime.js";
 import {
   createReplayWorld, FIXTURE_MODEL_ORIGIN, prepareReplaySessions, ReplayTui,
   syntheticRequestEvidence, type ReplayTuiOptions, type ReplayWorld,
@@ -202,8 +203,7 @@ export async function runReplayScenario(definition: ReplayScenarioDefinition): P
     if (mode === "record") manifest.recordedSessionIds = sessionIds;
     currentRun = `${definition.id}-${mode}-${randomUUID()}`;
     const bindings = createRequestBindingAdapter({ mode, runId: currentRun, declarations: manifest.bindings, owner: "world" });
-    for (const alias of ["root", "home", "work"] as const) bindings.declareAndBind({ kind: "path", alias, live: world[alias], anchor: `isolated scenario ${alias}` });
-    bindings.declareAndBind({ kind: "date", alias: "today", live: new Date().toISOString().slice(0, 10), anchor: "ambient UTC date in system environment" });
+    await declareReplayAmbientBindings(bindings, world);
     const syncOwners = () => {
       for (const owner of identity.ownerBindings()) bindings.declareAndBind({ kind: "session", alias: owner.canonical, live: owner.live, anchor: owner.anchor });
     };
