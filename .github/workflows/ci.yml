@@ -217,6 +217,63 @@ jobs:
                       ./scripts/cargo-rmcp-patched.sh clippy --locked --workspace --all-targets -- -D warnings
                   fi
 
+    # 离线录放业务回归：真实 Peri/ACP/工具/TUI，模型上游由持久 cassette 回放，
+    # 不访问线上模型。仅在 Linux 跑（PTY 与 @xterm/headless 的验收环境）。
+    # tui-tester 子模块是公开仓库；checkout 不递归拉取，避免依赖 SSH deploy key。
+    e2e-replay:
+        name: E2E replay (Linux)
+        needs: changes
+        if: needs.changes.outputs.docs_only != 'true'
+        runs-on: ubuntu-latest
+        timeout-minutes: 30
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v7
+              with:
+                  persist-credentials: false
+
+            - name: Initialize e2e submodule over HTTPS
+              run: |
+                  git config --global url."https://github.com/".insteadOf "git@github.com:"
+                  git submodule update --init e2e/tui-tester
+
+            - name: Install Rust toolchain
+              uses: dtolnay/rust-toolchain@master
+              with:
+                  toolchain: 1.99.0
+
+            - name: Cache cargo registry and build
+              uses: Swatinem/rust-cache@v2
+              with:
+                  key: e2e-replay
+                  save-if: ${{ github.ref == 'refs/heads/main' }}
+
+            - name: Build peri binary
+              run: ./scripts/cargo-rmcp-patched.sh build --locked -p peri-tui --bin peri
+
+            - name: Install Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 24
+                  cache: npm
+                  cache-dependency-path: e2e/package-lock.json
+
+            - name: Install e2e dependencies
+              working-directory: e2e
+              run: npm ci
+
+            - name: Type-check replay harness
+              working-directory: e2e
+              run: npm run e2e:replay:check
+
+            - name: Run replay unit tests
+              working-directory: e2e
+              run: npm run e2e:replay:unit
+
+            - name: Run offline replay (30 scenarios)
+              working-directory: e2e
+              run: npm run e2e:replay
+
     # 汇总检查：只要本 job 运行就给出确定的结论 —— 区分「文档按策略跳过」与
     # 「代码测试失败 / 取消 / 意外跳过」，避免后者被读成通过。
     #
@@ -228,7 +285,7 @@ jobs:
     ci-result:
         name: CI result
         if: always()
-        needs: [changes, build]
+        needs: [changes, build, e2e-replay]
         runs-on: ubuntu-latest
         timeout-minutes: 5
         steps:
@@ -236,12 +293,13 @@ jobs:
               env:
                   CHANGES_RESULT: ${{ needs.changes.result }}
                   BUILD_RESULT: ${{ needs.build.result }}
+                  E2E_RESULT: ${{ needs.e2e-replay.result }}
                   DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
                   DOCS_REASON: ${{ needs.changes.outputs.reason }}
               run: |
                   set -euo pipefail
-                  printf 'changes=%s build=%s docs_only=%s\n' \
-                      "$CHANGES_RESULT" "$BUILD_RESULT" "$DOCS_ONLY"
+                  printf 'changes=%s build=%s e2e_replay=%s docs_only=%s\n' \
+                      "$CHANGES_RESULT" "$BUILD_RESULT" "$E2E_RESULT" "$DOCS_ONLY"
                   printf 'reason: %s\n' "$DOCS_REASON"
 
                   if [[ "$CHANGES_RESULT" != "success" ]]; then
@@ -258,6 +316,12 @@ jobs:
                   # 出了问题，不能当成通过。
                   if [[ "$BUILD_RESULT" != "success" ]]; then
                       printf '::error::Rust 三平台任务结果 = %s（期望 success）\n' "$BUILD_RESULT" >&2
+                      exit 1
+                  fi
+
+                  # 非 docs-only 时录放 e2e 必须真跑且成功；skipped 同样视为异常。
+                  if [[ "$E2E_RESULT" != "success" ]]; then
+                      printf '::error::E2E replay 结果 = %s（期望 success）\n' "$E2E_RESULT" >&2
                       exit 1
                   fi
 
