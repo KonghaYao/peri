@@ -91,7 +91,5 @@ bun install
 ## Run the MCP server
 
 ```bash
-bun run index.ts
+bun run src/index.ts
 ```
-
-This project was created with `bun init` using Bun v1.4.0. [Bun](https://bun.com) is an all-in-one JavaScript runtime.
