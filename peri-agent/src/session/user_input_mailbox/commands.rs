@@ -206,7 +206,15 @@ impl UserInputMailbox {
                 &request.generation,
                 &request.command_id,
             )?;
-            let promoted = super::state::promote_ids(&mut state, &request.input_ids);
+            let mut promoted = super::state::promote_ids(&mut state, &request.input_ids);
+            for record in &state.records {
+                if record.state == UserInputState::Dispatching
+                    && request.input_ids.contains(&record.input_id)
+                    && !promoted.contains(&record.input_id)
+                {
+                    promoted.push(record.input_id.clone());
+                }
+            }
             if !promoted.is_empty() {
                 state.paused = false;
             }
@@ -227,7 +235,6 @@ impl UserInputMailbox {
             {
                 Ok(outcome) => Some(outcome),
                 Err(error) => {
-                    self.revert_promotion(&promoted);
                     return Err(UserInputQueueError::Store(error.to_string()));
                 }
             }
@@ -319,10 +326,9 @@ impl UserInputMailbox {
             cancel.cancel();
         }
         if !unknown.is_empty() {
-            // 已 Accepted 的记录保持已标记；只回退无法确认的 ID，重试同 ID 是幂等的。
-            self.revert_promotion(&unknown);
+            // 超时/未知不证明未发送；保留 Dispatching，由相同 ID 的显式重试求证。
             return Err(UserInputQueueError::Store(format!(
-                "cannot confirm whether {} input(s) were handed off; they remain queued",
+                "cannot confirm whether {} input(s) were handed off; they remain dispatching",
                 unknown.len()
             )));
         }
@@ -474,18 +480,6 @@ impl UserInputMailbox {
                 tracing::warn!(%error, "user input send selection failed; input stays queued");
             }
         }
-    }
-
-    fn revert_promotion(&self, ids: &[String]) {
-        let mut state = self.state.lock();
-        for record in &mut state.records {
-            if record.state == UserInputState::Dispatching && ids.contains(&record.input_id) {
-                record.state = UserInputState::Queued;
-                record.handed_off = false;
-            }
-        }
-        state.ready.retain(|id| !ids.contains(id));
-        state.revision += 1;
     }
 
     fn validate(

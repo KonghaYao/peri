@@ -149,7 +149,7 @@ impl UserInputMailbox {
             let mut changed = false;
             for record in &mut state.records {
                 if record.state == UserInputState::Dispatching
-                    && (!record.handed_off || existing.contains(&record.input_id))
+                    && existing.contains(&record.input_id)
                 {
                     record.state = UserInputState::Queued;
                     record.handed_off = false;
@@ -157,7 +157,7 @@ impl UserInputMailbox {
                     changed = true;
                 }
             }
-            state.ready.clear();
+            state.ready.retain(|id| !reclaimed.contains(id));
             if changed {
                 state.revision += 1;
             }

@@ -134,8 +134,23 @@ impl HostSessionRecovery {
         scope: RecoveryScope,
         entered: &ThreadId,
     ) -> Result<EnteredRecovery, RecoveryError> {
-        let partition = scope::partition(scope);
+        let mut partition = scope::partition(scope);
         let root = partition.root_thread_id.clone();
+        let tree = self
+            .resources
+            .list_session_tree(&root)
+            .await
+            .map_err(RecoveryError::from)?;
+        // 范围仍来自历史父链；任务提醒与运行登记使用当前结果接收关系。
+        for child in &mut partition.children {
+            child.parent_thread_id = tree
+                .iter()
+                .find(|meta| meta.id == child.thread_id)
+                .and_then(|meta| {
+                    peri_acp_types::thread::completion_target(meta.config.as_deref()).ok()
+                })
+                .filter(|target| tree.iter().any(|meta| meta.id == *target));
+        }
         let entered_is_root = root == *entered;
         let mut report = RecoveryReport {
             root_thread_id: root.clone(),
@@ -181,7 +196,7 @@ impl HostSessionRecovery {
                     thread_id: child.thread_id.clone(),
                     reason,
                 }),
-                // child 的逐项失败不失败请求：装配/接纳失败按 Skip 报告（见 `prepare_child`）。
+                // 保留逐项失败诊断；load/resume 仍返回其余成功结果。
                 ThreadOutcome::Failed(failure) => {
                     tracing::warn!(
                         thread_id = %failure.thread_id,
@@ -189,10 +204,7 @@ impl HostSessionRecovery {
                         detail = %failure.detail,
                         "recovery: child preparation failed"
                     );
-                    report.skipped.push(RecoverySkip {
-                        thread_id: failure.thread_id,
-                        reason: RecoverySkipReason::AssemblyFailed,
-                    });
+                    report.failures.push(failure);
                 }
             }
         }
@@ -255,7 +267,7 @@ impl HostSessionRecovery {
     ) -> ThreadOutcome {
         let thread = &child.thread_id;
         // 父 turn 内的子 agent 已有执行登记：连接现有实例；若它是恢复 child 且
-        // 直接父级此时已 live，则补做 adoption（不启动新执行）。
+        // 实际接收会话此时已 live，则补做 adoption（不启动新执行）。
         if self.manager.thread_has_runtime(thread) {
             self.adopt_live(thread).await;
             return ThreadOutcome::Reused;
@@ -272,15 +284,6 @@ impl HostSessionRecovery {
             WorkState::Idle => return ThreadOutcome::Skipped(RecoverySkipReason::Idle),
             WorkState::Stopped => return ThreadOutcome::Skipped(RecoverySkipReason::Stopped),
         }
-        // 投递目标必须能由持久父链确定：没有直接父就如实报告，不猜收件人。
-        if meta.parent_thread_id.is_none() {
-            tracing::warn!(
-                thread_id = %thread,
-                "recovery: child has no parent thread; reminder not injected"
-            );
-            return ThreadOutcome::Skipped(RecoverySkipReason::AssemblyFailed);
-        }
-
         let mut session_id = self.manager.session_id_for_thread(thread);
         if session_id.is_none() {
             // 失败也可能是并发装配刚完成：以现场实例再判一次，仍没有才算装配失败。
@@ -311,10 +314,23 @@ impl HostSessionRecovery {
             WorkState::Idle => return ThreadOutcome::Skipped(RecoverySkipReason::Idle),
             WorkState::Stopped => return ThreadOutcome::Skipped(RecoverySkipReason::Stopped),
         }
-        let Some(parent) = current.parent_thread_id else {
-            return ThreadOutcome::Skipped(RecoverySkipReason::AssemblyFailed);
+        let parent = match peri_acp_types::thread::completion_target(current.config.as_deref()) {
+            Ok(target) => target,
+            Err(detail) => {
+                return ThreadOutcome::Failed(RecoveryFailure {
+                    thread_id: thread.clone(),
+                    kind: RecoveryErrorKind::Unavailable,
+                    detail: detail.to_string(),
+                })
+            }
         };
 
+        if child.parent_thread_id.as_ref() != Some(&parent) {
+            return ThreadOutcome::Failed(RecoveryFailure {
+                thread_id: thread.clone(), kind: RecoveryErrorKind::Unavailable,
+                detail: "child completion target is missing, outside the root tree, or changed during recovery".into(),
+            });
+        }
         let direct_children = partition.direct_children_of(thread);
         match self
             .admit_thread(
@@ -385,7 +401,7 @@ impl HostSessionRecovery {
         })
     }
 
-    /// 直接父级之后进入时，为已在运行的恢复 child 补登记父任务/取消关系。
+    /// 实际接收会话之后进入时，为已在运行的恢复 child 补登记父任务/取消关系。
     async fn adopt_live(&self, thread: &ThreadId) {
         let Some(session_id) = self.manager.session_id_for_thread(thread) else {
             return;

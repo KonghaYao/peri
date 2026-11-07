@@ -437,12 +437,31 @@ async fn test_resume_running_cancelled_by_dispatch_finalizes_claim() {
 
 #[tokio::test]
 async fn test_resume_precancelled_background_still_registers_and_completes() {
-    let store = MockSessionResources::new();
-    let thread_id = uuid::Uuid::now_v7().to_string();
-    preset_resumable_thread(&store, &thread_id, None).await;
+    // 取消会结算未消费的输入，使用真实原子 MQ adapter。
+    let test = crate::session::test_resources::TestSession::open().await;
+    let store = test.resources();
+    let root = test.thread_id();
+    let thread_id = test.create_child(&root).await;
+    store
+        .update_session_meta(
+            &thread_id,
+            &peri_acp_types::session_resources::SessionMetaPatch {
+                status: Some(AgentStatus::Done),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let cwd = store.load_session_meta(&root).await.unwrap().cwd;
     let task_manager = Arc::new(TaskManager::new());
     let token = CancellationToken::new();
     token.cancel();
+    let parent = Session::new_with_cancel(
+        Arc::from(cwd.as_str()),
+        FrozenContext::builder().build(),
+        Some(root.clone()),
+        Arc::new(token.clone()),
+    );
     let llm = RecordingLLM::new();
     let received = llm.received.clone();
     let (completed_tx, completed_rx) = tokio::sync::oneshot::channel();
@@ -464,7 +483,7 @@ async fn test_resume_precancelled_background_still_registers_and_completes() {
         }
         Ok(())
     }));
-    let spawned = SessionFactory::resume_subagent(None, config)
+    let spawned = SessionFactory::resume_subagent(Some(&parent), config)
         .await
         .expect("background cancellation retains real registration and completion");
     assert_eq!(spawned.child_thread_id, thread_id);
@@ -487,13 +506,30 @@ async fn test_resume_precancelled_background_still_registers_and_completes() {
     assert!(!completed.success);
     assert!(received.read().is_empty());
     assert_eq!(
-        store.load_meta(&thread_id).await.unwrap().agent_status,
+        store
+            .load_session_meta(&thread_id)
+            .await
+            .unwrap()
+            .agent_status,
         AgentStatus::Cancelled
     );
-    let resumed =
-        SessionFactory::resume_subagent(None, resume_config(store.clone(), thread_id.clone()))
-            .await
-            .unwrap();
+    let parent = test.session(&cwd, FrozenContext::builder().build());
+    let resumed = SessionFactory::resume_subagent(
+        Some(&parent),
+        resume_config_with(
+            store.clone(),
+            thread_id.clone(),
+            crate::session::test_resources::mock::model::fixture_source(
+                Arc::new(EchoLLM),
+                "fixture-scripted",
+            ),
+            SubagentRunMode::Sync,
+            None,
+            None,
+        ),
+    )
+    .await
+    .unwrap();
     assert_eq!(resumed.child_thread_id, thread_id);
 }
 

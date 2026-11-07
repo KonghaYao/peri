@@ -18,7 +18,7 @@
 
 本设计恢复线程树内的工作与当前运行登记。旧进程任意自定义闭包的恢复不属于承诺范围；正常装配仍遵循现有会话绑定、配置回调优先级和直接接收会话规则。
 
-原投递目标必须能由现有持久关系与配置、经既有装配规则重新确定。无法确定时，该 child 报告恢复失败，不猜测接收人或回退到 root；也不为此新增持久绑定数据。
+原投递目标必须能由现有持久关系与配置、经既有装配规则重新确定。无法确定时，该 child 报告恢复失败，不猜测接收人或回退到 root；不新增绑定表。当前收件人是不能从历史父链推导的必要配置，保存在既有 `threads.config.completion_target`；spawn／显式 resume 在接纳工作前保存。缺失、为空或自定义回调没有声明目标时，冷恢复明确失败，用户可显式 resume 重新建立路由。
 
 ## 2. SQLite：会话表只新增两列
 
@@ -203,18 +203,18 @@ pub trait SessionRecovery: Send + Sync {
 child 的终态、`work_state` 收尾、结果接纳到目标 MQ，以及适用的接收方工作意图变更，在具备批/事务能力的后端上使用同一次提交；提交成功前不能宣称完成投递。
 
 - **本机 SQLite**：`BEGIN IMMEDIATE` 内一次写入 child 终态、`work_state`、结果 MQ 行与接收方 `idle → working` 提升。结果插入与终态更新都要求 child 仍为 `active`，同一 child 的终态只写一次；后到的结算不覆盖已提交终态，也不产生第二条结果。
-- **远端存储**：同样的效果放进一次 `commit_effects` 托管批。`Inserted` 的 MQ 接纳与工作意图提升同批；`Existing` 在 `same_payload` 确认后单独一批提升，失败返回可重试错误，调用方用同一稳定 ID 重试。`finalize_child_terminal` 与无结果的 `settle_terminal_without_result` 也各是一批，批内 `active` 守卫与批前/批后事实归类保证终态只写一次；批失败或结果未知不返回成功。关闭结算 `settle_retained_mq` 尚无远端托管批覆写，仍走组合回退：先写提醒再删除 MQ 行，进程在两步之间退出可能留下已写提醒与未删行。这是已记录的限制，关闭结算因此不是原子实现。
-- **没有跨行为事务的后端**（内存、测试替身、未来 adapter）：走 `SessionResources` 的组合默认实现，按「工作意图 → 终态」或「终态 → 工作意图 → 结果接纳」逐条提交。它只保证失败前不宣称完成，**不是原子证据**；进程在两步之间退出可能留下 `Active + 目标工作意图` 或已写终态但结果未接纳。不得用这些后端的成功验收「全有或全无」。
+- **远端存储**：同样的效果放进一次 `commit_effects` 托管批。`Inserted` 的 MQ 接纳与工作意图提升同批；`Existing` 在 `same_payload` 确认后单独一批提升，失败返回可重试错误，调用方用同一稳定 ID 重试。`finalize_child_terminal` 与无结果的 `settle_terminal_without_result` 也各是一批，批内 `active` 守卫与批前/批后事实归类保证终态只写一次；批失败或结果未知不返回成功。关闭结算 `settle_retained_mq` 将提醒写入、MQ 水位删除和派生计数更新置于同一托管批；删除失败时提醒也回滚。
+- **未实现原子操作的后端**：`SessionResources` 与数据端口默认返回 `Unsupported`，不执行任何部分写入。适配器必须显式提供符合契约的实现。
 
 因此，已完成并成功入 MQ 的 child 不会因崩溃残留 `working` 而再次续跑。任务结果的稳定消息身份继续遵守 MQ 的去重契约；运行期任务登记本身不另建持久绑定表。
 
 同一 child 的终态只写一次：重复结算（含 panic 兜底）不得改写已写下的终态，也不得因正文不同产生身份冲突。同一 child 的多次恢复使用各自恢复提醒的稳定 ID 作为结果身份；只有同一次恢复的重复结算才幂等，后续恢复的结果不得被上一条历史身份跳过。
 
-sync 委派实际转为后台继续执行时，终态写入只归 handoff worker。执行体与 worker 用进程内 `TerminalOwnership` CAS 决定唯一写入者；worker 先建立父 `AsyncResultMailbox` 的 Queued 责任，再用 `finalize_child_terminal` 一次提交 child 终态、`work_state` 与父 MQ 结果。没有可用 terminal route 时不 detach，按同步路径执行并用 `settle_terminal_without_result` 收尾；worker 准入被拒时同样回退同步，由 wrapper/执行体按同一 CAS 唯一写终态，不产生父回执。映射为：正常结束 `Done + Idle`；明确取消 `Cancelled + Stopped`；其他中断、失败、交接未完成或 close 失败 `Error + Idle`。finalize 失败时结果未确认，child 仍按 `working` 交给下一次进入，并用同一消息身份重试（若提交实际已落地，重试为幂等 no-op），不伪报完成。
+sync 委派实际转为后台继续执行时，worker 持有 `working` 写入并向调用方确认；写入失败取消子执行并返回错误，成功确认前不能返回 Pending。终态写入只归 handoff worker。执行体与 worker 用进程内 `TerminalOwnership` CAS 决定唯一写入者；worker 先建立父 `AsyncResultMailbox` 的 Queued 责任，再用 `finalize_child_terminal` 一次提交 child 终态、`work_state` 与父 MQ 结果。没有可用 terminal route 时不 detach，按同步路径执行并用 `settle_terminal_without_result` 收尾；worker 准入被拒时同样回退同步，由 wrapper/执行体按同一 CAS 唯一写终态，不产生父回执。映射为：正常结束 `Done + Idle`；明确取消 `Cancelled + Stopped`；其他中断、失败、交接未完成或 close 失败 `Error + Idle`。finalize 失败时结果未确认，child 仍按 `working` 交给下一次进入，并用同一消息身份重试（若提交实际已落地，重试为幂等 no-op），不伪报完成。
 
-恢复 child 的 continuation 在 turn 真正获得准入后登记到 live 且未 closing 的**直接父级**：父级 TaskManager 任务投影（任务身份取稳定 child thread id）、父级 `active_agents` 的 Cascade 取消关系，以及 child turn 的取消令牌。父级未 live 时跳过登记，父级之后进入时对已在运行的 child 补做 adoption，不冷装配祖先链；child 终态结算或启动早失败时收尾父任务，不留 pending。该登记只在本进程内，随会话实例释放，不新增持久绑定表。`TaskRecord.child_thread_id` 仍为空：公共注册契约不接受 live inbox，父任务身份由 `task_id = child thread id` 表达。
+恢复 child 的 continuation 在 turn 真正获得准入后登记到 live 且未 closing 的实际接收会话。`TaskManager::register_live_agent` 同时建立任务投影、原 child thread 的可撤销消息入口和取消令牌；`TaskRecord.child_thread_id` 填写原 thread。`active_agents` 沿已保存的 `cancel_policy` 保留 Cascade／Independent 行为。接收会话未 live 时跳过登记，其之后进入时补做 adoption，不冷装配祖先链；child 终态结算或启动早失败时关闭 inbox 并收尾任务。
 
-结果通知固定投递到持久父链上的直接父 `parent_thread_id`，收件地址不由显式 resume 的调用者决定：其他会话 resume 该 child 不会改写 `parent_thread_id`，因此崩溃后的结果仍回到原直接父（例如 B 显式 resume 原属 A 的 C 后崩溃，结果回到 A，而不是 B）。这是既有持久父链的限制，不靠猜测调用者或回退 root 规避。结果消息使用与普通后台结果一致的 `ensure_processing` 策略：接纳时把父级从 `idle` 提升为 `working`；live 且已激活的 idle 父级收到唤醒，未 live 的父级由下一次进入消费 durable 行，`stopped` 不被解除。
+结果通知使用 `threads.config` 中的 `completion_target`，历史 `parent_thread_id` 只确定恢复范围，不改写：B 显式 resume 原属 A 的 C 后崩溃，C 的结果仍回到 B。配置回调保持优先；只有声明过目标的同一回调才能恢复。恢复准备会核实目标仍在同一根树中，缺失或不可确定时报告失败，不回退 A 或 root。任务提醒也按实际接收关系列举。结果消息沿用 `ensure_processing`：live 且已激活的 idle 接收方被唤醒，未 live 时下一次进入消费 durable 行，`stopped` 不被解除。
 
 恢复启动只在真正交出执行后保持启动资格。`launch` 的任一跳过路径（会话态消失、代次变化、closing、turn 已活跃、activation 不允许、listener 启动失败、scheduler 消失）都撤销本次准入；continuation 已发出但调度或分发在 Receive 前失败时，只在恢复来源下写进程内 `recovery_launch_failed`。下一次显式进入读取并清除该标记，重新采纳 MQ 中的同一条提醒；不做同进程自动重试，不新增持久相位，也不把早失败伪报为完成或取消。
 
@@ -291,7 +291,7 @@ Peri 启动时不执行恢复查询。进入 `root-a` 后，第 3 节查询返�
 | sync 实际转为后台继续 | 交接提交后带 working 意图；终态、工作意图与父结果由 handoff worker 一次 finalize；无 terminal route 时不 detach。 |
 | 恢复准备期间 Stop／关闭／手动 resume | 启动前复核生效；旧快照、旧事件和旧 worker 不覆盖新状态。 |
 | MQ 已移交、模型推进前退出 | 历史存在且 MQ 不重复；working 让进入后从历史继续。 |
-| child 完成提交边界退出 | SQLite 单事务、远端托管批：终态与父 MQ 全有或全无；无事务后端走组合回退并显式降级，不得当作原子证据。 |
+| child 完成提交边界退出 | SQLite 单事务、远端托管批：终态与父 MQ 全有或全无；未实现原子结算的后端返回 Unsupported，零部分写入。 |
 | 最后一条回复与新回调竞争 | 不丢新消息的工作意图；被动回调不解除 stopped。 |
 | 进入前已有可唤醒消息入 MQ | 接纳及意图持久化但不冷启动；进入后按 working 正常推进。 |
 | 进入后重建 Shell 视图 | watcher 只看到直接 owner 的 live Shell；查询失败不等于零任务；停机期间完成的终态不补播。 |
@@ -302,9 +302,9 @@ Peri 启动时不执行恢复查询。进入 `root-a` 后，第 3 节查询返�
 | 恢复准备失败（装配成功） | load/resume 返回 Ok，`_meta.peri.recovery` 报 `failed`/`partial`，历史保留；不可执行分类另以 `-32017` 拒绝 prompt。 |
 | 响应发送失败后再次进入 | 只丢弃 Prepared 启动资格，MQ 提醒保留；下一次进入采纳同一条提醒，不重复注入。 |
 | 冷 child 恢复 | 响应前补齐 TaskManager 绑定与在线 endpoint；父级不启动模型。 |
-| 恢复 child 父级登记 | 恢复 continuation 的 turn 准入后只登记 live 且未 closing 的直接父 TaskManager（task_id = child thread id）与 Cascade；父未 live 跳过，之后进入 adoption；结算或早失败收尾。 |
+| 恢复 child 父级登记 | 恢复 continuation 准入后登记实际接收会话的 TaskManager、child inbox 和已保存的取消策略；未 live 时之后 adoption；结算或早失败收尾。 |
 | 恢复启动早失败 | launch 的跳过路径撤销准入；恢复来源的 continuation 在 Receive 前失败写进程内标记，下一次显式进入重试；不自动重试、不新增持久相位。 |
-| 恢复结果唤醒 | `ensure_processing`：live idle 父级被唤醒，未 live 下一次进入消费；`stopped` 不被解除；结果回到持久父链的直接父。 |
+| 恢复结果唤醒 | `ensure_processing`：live idle 父级被唤醒，未 live 下一次进入消费；`stopped` 不被解除；结果回到已保存的实际收件人。 |
 | 只读／不可执行 Store | load/resume 返回历史与占用，会话为无执行环境的视图态；prompt 等执行入口统一 `-32017`；视图态不写库。 |
 | 准入工作意图写入失败 | prompt 拒绝、模型零调用、工作意图不留下 `working`。 |
 

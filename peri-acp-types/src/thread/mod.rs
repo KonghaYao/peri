@@ -3,7 +3,9 @@
 //! 纯数据 + 强类型枚举，供 ThreadStore 契约（`crate::store`）与各层引用。
 //! peri-agent::thread 保留 re-export 兼容路径。
 
+mod completion_target;
 mod types;
+pub use completion_target::{completion_target, with_completion_target, CompletionTargetError};
 
 pub use types::{
     AgentStatus, CancelPolicy, ThreadId, ThreadListEntry, ThreadMeta, ThreadMetaParseError,

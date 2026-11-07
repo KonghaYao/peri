@@ -620,6 +620,13 @@ impl SessionResources for MockSessionResources {
         if let Some(status) = patch.status {
             self.write_status(id, status);
         }
+        if let Some(config) = &patch.config {
+            self.with_region(id, |region| {
+                if let Some(meta) = region.meta.as_mut() {
+                    meta.config = config.clone();
+                }
+            });
+        }
         Ok(())
     }
 
@@ -629,11 +636,21 @@ impl SessionResources for MockSessionResources {
         state: peri_acp_types::thread::WorkState,
     ) -> SessionResourceResult<()> {
         self.ensure_writable()?;
+        if state == WorkState::Working {
+            Self::wait_gate(&self.working_write_gate).await;
+            if self.fail_working_write.load(Ordering::SeqCst) {
+                return Err(SessionResourceError::new(
+                    SessionResourceErrorKind::Unavailable {
+                        detail: "injected working write failure".into(),
+                    },
+                ));
+            }
+        }
         self.write_work_state(id, state);
         Ok(())
     }
 
-    /// 与组合默认实现同序（状态 → 工作意图 → 结果接纳），并支持 finalize 故障注入。
+    /// 测试替身的 finalize 故障注入；事务原子性由真实 SQLite／远端用例验证。
     async fn finalize_child_terminal(
         &self,
         child: &ThreadId,
@@ -680,7 +697,7 @@ impl SessionResources for MockSessionResources {
         self.mq_enqueue(target, message).await
     }
 
-    /// 与组合默认实现同序（先工作意图、后状态），并支持「状态写入前失败」注入。
+    /// 测试替身支持「状态写入前失败」注入，用于验证调用方收敛。
     async fn settle_terminal_without_result(
         &self,
         child: &ThreadId,
