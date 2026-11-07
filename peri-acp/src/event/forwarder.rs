@@ -27,8 +27,8 @@ use peri_acp_types::event_v2::{
 use peri_acp_types::identity::EventDeliveryClass;
 use peri_acp_types::runtime::UnstampedEvent;
 
-use peri_controller::langfuse::bridge::{LangfuseBridge, UnifiedLangfuseEvent};
-use peri_controller::langfuse::tracer::stages::StageHandle;
+use peri_agent::agent::LangfuseBridgeLike;
+use peri_controller::langfuse::bridge::LangfuseBridge;
 
 /// 从协议载荷提取 message_id：chunk 保留消息级身份，工具事件由 turn_id 派生；
 /// 提取结果作为 envelope 身份的一部分。
@@ -94,9 +94,6 @@ pub(crate) async fn forward_eventbus<F>(
 ) where
     F: Fn(UnstampedEvent, ExecutorEvent) + Send + Sync + 'static,
 {
-    // key = 事件 agent_id（主 agent 路径下只有主 agent 的事件，单 entry）
-    let mut active_stage: std::collections::HashMap<String, StageHandle> =
-        std::collections::HashMap::new();
     loop {
         // biased + render 优先：保证 Render 通道（含 TurnCompleted）先于 State 通道
         // 被消费，否则 partial 污染（详见模块顶部不变量注释）。
@@ -110,9 +107,7 @@ pub(crate) async fn forward_eventbus<F>(
                 // 去重保护，产生流式期间 md 重复渲染（文本以字节偏移交错重复）。
                 // Langfuse: render 层追踪（TextChunk, BudgetWarning）
                 if let Some(ref bridge) = bridge {
-                    if let Some(u) = UnifiedLangfuseEvent::from_render_event(ev.clone()) {
-                        bridge.process_event(&u, &mut active_stage);
-                    }
+                    bridge.process_render_event(&ev);
                 }
                 if let Some(exec_ev) = render_event_to_executor(ev.clone()) {
                     let source = UnstampedEvent::new(
@@ -146,9 +141,8 @@ pub(crate) async fn forward_eventbus<F>(
                         // forwarder 侧直达 bridge（C4）。
                         // Langfuse: observe 层追踪（LLM/Tool/Stage/Compact）
                         if let Some(ref bridge) = bridge {
-                            if let Some(u) = UnifiedLangfuseEvent::from_observe_event(ev.clone()) {
-                                bridge.process_event(&u, &mut active_stage);
-                            }
+                            // 共享入口在采样后借用请求 Arc，避免在冻结准入前复制上下文。
+                            bridge.process_observe_event(&ev);
                         }
                         if let Some(exec_ev) = observe_event_to_executor(ev.clone()) {
                             let source = UnstampedEvent::new(
