@@ -192,11 +192,19 @@ async fn compact_core(input: CompactInput) -> (crate::error::AgentResult<Compact
         tracing::trace!(step, budget_pct = %pct, action = ?compact_action, "Compact 预算检查");
 
         // 调用 compact_v2：取出 transcript 所有权，运行后放回（避免跨 await 持锁）
-        let compact_llm_ref: Option<&dyn peri_model::Model> = ctx
+        let operation = ctx
             .compact
-            .compact_llm
+            .model_operations
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let compact_llm = ctx.compact.compact_llm.as_ref().map(|model| {
+            crate::agent::model_call::ScopedModel::new(
+                model.as_ref(),
+                ctx.model_call_context("compact", format!("compact:{step}:{operation}")),
+            )
+        });
+        let compact_llm_ref = compact_llm
             .as_ref()
-            .map(|arc| arc.as_ref() as &dyn peri_model::Model);
+            .map(|model| model as &dyn peri_model::Model);
 
         let mut transcript_owned = {
             let mut guard = ctx.session.transcript.write();

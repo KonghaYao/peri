@@ -98,6 +98,11 @@ pub struct HookMiddleware {
 }
 
 impl HookMiddleware {
+    pub(crate) fn with_model_call_scope(mut self, scope: String) -> Self {
+        self.dispatcher = self.dispatcher.with_model_call_scope(scope);
+        self
+    }
+
     pub fn new(
         registered_hooks: Vec<RegisteredHook>,
         llm_factory: Arc<dyn Fn() -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
@@ -322,6 +327,38 @@ impl HookMiddleware {
     // fire_event — Facade 委托给 dispatcher，保留 pub(crate) 接口供测试与
     // middleware trait 方法调用。
     // -----------------------------------------------------------------------
+
+    async fn fire_tool_event(
+        &self,
+        state: &dyn hook_state::BeforeToolState,
+        event: HookEvent,
+        input: &HookInput,
+        tool_call: &ToolCall,
+    ) -> HookAction {
+        let context = state
+            .session_id()
+            .zip(state.execution_binding())
+            .zip(state.current_step())
+            .map(|((owner, execution), step)| peri_model::ModelCallContext {
+                owner: owner.to_owned(),
+                execution: execution.attempt_id.to_string(),
+                call: format!("reason:{step}:{}", tool_call.id),
+                purpose: "hook".into(),
+                parent: None,
+            });
+        let action = self
+            .dispatcher
+            .fire_event_with_call_context(
+                event.clone(),
+                input,
+                Some(&tool_call.name),
+                Some(&tool_call.input),
+                context,
+            )
+            .await;
+        route_hook_output(state, &event, &action);
+        action
+    }
 
     /// 触发 hook 事件，返回归约后的最终 action。
     ///
@@ -570,13 +607,7 @@ impl Middleware for HookMiddleware {
 
         // Fire PreToolUse
         let action = self
-            .fire_event_with_delivery(
-                Some(state),
-                HookEvent::PreToolUse,
-                &input,
-                Some(&tool_call.name),
-                Some(&tool_call.input),
-            )
+            .fire_tool_event(state, HookEvent::PreToolUse, &input, tool_call)
             .await;
 
         // 原实现的 `_ => {}`：只有 Block / PreventContinuation / ModifyInput 会
@@ -648,15 +679,9 @@ impl Middleware for HookMiddleware {
         if should_fire {
             // M10 字段路由：`PermissionRequest` 的输出同样可能携带 `systemMessage`
             // 等受众字段。本阶段的 `BeforeToolState` 带 `HookOutputState`，有投递面，
-            // 因此必须走 `fire_event_with_delivery`——不得解析成功却只落 DEBUG 诊断。
+            // 因此必须走带投递面的工具事件入口，不得解析成功却只落 DEBUG 诊断。
             let action = self
-                .fire_event_with_delivery(
-                    Some(state),
-                    HookEvent::PermissionRequest,
-                    &input,
-                    Some(&effective_call.name),
-                    Some(&effective_call.input),
-                )
+                .fire_tool_event(state, HookEvent::PermissionRequest, &input, &effective_call)
                 .await;
 
             // P1-5: PermissionDenied —— 当 hook 拒绝权限时触发。
@@ -670,25 +695,13 @@ impl Middleware for HookMiddleware {
                 || matches!(&action, HookAction::PreventContinuation { .. })
                 || override_denies;
             if is_denied {
-                self.fire_event_with_delivery(
-                    Some(state),
-                    HookEvent::PermissionDenied,
-                    &input,
-                    Some(&effective_call.name),
-                    Some(&effective_call.input),
-                )
-                .await;
+                self.fire_tool_event(state, HookEvent::PermissionDenied, &input, &effective_call)
+                    .await;
             }
 
             // Fire Notification (agent is waiting for user permission)
-            self.fire_event_with_delivery(
-                Some(state),
-                HookEvent::Notification,
-                &input,
-                Some(&effective_call.name),
-                Some(&effective_call.input),
-            )
-            .await;
+            self.fire_tool_event(state, HookEvent::Notification, &input, &effective_call)
+                .await;
 
             // PermissionOverride 的 deny/非法判定不经过 resolve_action_to_toolcall
             // （该归约只认 Block/PreventContinuation）：必须显式零执行，绝不放行。

@@ -192,6 +192,7 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         turn_id,
         agent_id,
         cancel: tokio_util::sync::CancellationToken::clone(&ctx.session.turn.cancel_token),
+        call_context: ctx.model_call_context("reason", format!("reason:{step}")),
     });
 
     // 将本次实际请求与最近成功的 Full 对齐；不得借用 tracker 的旧 usage。

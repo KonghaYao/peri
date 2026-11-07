@@ -564,6 +564,7 @@ async fn assert_next_turn_sees_summary(mut ctx: SessionContext, sessions: &Share
 
 fn synthetic_result(compact: bool) -> peri_acp_types::session::PromptResult {
     peri_acp_types::session::PromptResult {
+        execution_binding: None,
         persisted_payloads: Vec::new(),
         messages: Vec::new(),
         ok: true,

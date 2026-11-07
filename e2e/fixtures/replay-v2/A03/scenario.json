@@ -1,0 +1,96 @@
+{
+  "version": 2,
+  "id": "A03",
+  "title": "异步 child 完成并通过 mailbox 回送主会话",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "work",
+      "work/.claude",
+      "work/.claude/agents"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      },
+      {
+        "path": "work/.claude/agents/replay-worker.md",
+        "sha256": "130ad94c3946149d49237835d5748b2976f470943860dabaf74960b3d5844099",
+        "size": 165,
+        "mode": 420
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-iX8HNO",
+    "home": "/tmp/peri-wire-e2e-iX8HNO/home",
+    "work": "/tmp/peri-wire-e2e-iX8HNO/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b607-9932-74d1-ab42-7c58a0cd0b99"
+  },
+  "configurationFingerprint": "ab41bb646cbc7b72569c6ba7fe98afa0aacdd648dcf393a6f03e93c29b8c2fe5",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-iX8HNO",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-iX8HNO/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-iX8HNO/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-07",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b607-9932-74d1-ab42-7c58a0cd0b99",
+      "anchor": "ACP session/new result"
+    },
+    {
+      "owner": "world",
+      "kind": "thread",
+      "alias": "child-worker",
+      "recorded": "01a1b607-9b2b-7ed2-b616-7373f5b7105f",
+      "anchor": "created child worker"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "task-A03-spawn",
+      "recorded": "bg-01a1b607-9b2b-7ed2-b616-7383eee9121a",
+      "anchor": "Agent background receipt A03-spawn"
+    }
+  ],
+  "portableResponses": []
+}

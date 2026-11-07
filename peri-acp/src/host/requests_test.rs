@@ -179,6 +179,7 @@ pub(in crate::host) async fn build_server_config(
         host_task_spawner,
         mcp_task_owner: Some(Box::new(mcp_task_owner)),
         provider: Arc::new(parking_lot::RwLock::new(provider)),
+        model_transport_route: None,
         peri_config: Arc::new(parking_lot::RwLock::new(peri_config)),
         permission_mode: SharedPermissionMode::new(PermissionMode::Bypass),
         cron_scheduler: None,

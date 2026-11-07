@@ -533,6 +533,17 @@ async fn dispatch_concurrent(
             let output_limit = tool.as_ref().and_then(|tool| tool.output_char_limit());
             let origin = ctx.origin_for(&ToolCallId::new(model_tool_call_id.clone()));
             let session_id = session_id.clone();
+            let model_parent =
+                session_id
+                    .as_ref()
+                    .zip(turn)
+                    .map(|(owner, turn)| peri_model::ModelCallParent {
+                        owner: owner.clone(),
+                        execution: turn.execution_binding().attempt_id.to_string(),
+                        call: format!("reason:{}", turn.step()),
+                        tool_call: model_tool_call_id.clone(),
+                        slot: None,
+                    });
             // turn_generation 只有真实 turn 才有：无 turn 的执行不写（不伪造）。
             let turn_generation = turn_id.map(|turn_id| turn_id.to_string());
             // 归属事实按**单条执行的来源**投影：App / Host 来源由来源自身派生，
@@ -541,7 +552,7 @@ async fn dispatch_concurrent(
             let session_resources = session_resources.clone();
             async move {
                 let timeout_opt = tool.as_ref().and_then(|t| t.timeout());
-                let invoke_fut = async {
+                let invoke_fut = crate::agent::model_call::scope_tool_parent(model_parent, async {
                     let mut ctx_param = crate::tools::ToolContext::new(&messages, &cwd)
                         .with_invocation(
                             Arc::new(
@@ -591,7 +602,7 @@ async fn dispatch_concurrent(
                             tool_name.clone(),
                         ))),
                     }
-                };
+                });
                 let result = tokio::select! {
                     biased;
                     _ = cancel.cancelled() => {

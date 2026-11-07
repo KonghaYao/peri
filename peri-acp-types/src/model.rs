@@ -8,7 +8,10 @@
 //!
 //! 随 StageBuildFn 签名改造 / v1 退役时可收敛。
 
-pub use peri_model::{prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY, Model, TokenUsage};
+pub use peri_model::{
+    prompt_cache::SYSTEM_PROMPT_DYNAMIC_BOUNDARY, Model, ModelCallContext, ModelCallParent,
+    ModelTransportRoute, TokenUsage,
+};
 
 /// 模型认证账号引用：1..=128 个 ASCII 字母、数字、下划线或连字符。
 /// 不做 trim；调用方必须校验实际传递和保存的引用。

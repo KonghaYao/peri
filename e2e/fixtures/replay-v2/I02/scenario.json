@@ -1,0 +1,105 @@
+{
+  "version": 2,
+  "id": "I02",
+  "title": "同份录制双 run 并发重放，真实重试和文件状态互不串扰",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "work"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-e4D5LY",
+    "home": "/tmp/peri-wire-e2e-e4D5LY/home",
+    "work": "/tmp/peri-wire-e2e-e4D5LY/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b607-7544-7b02-9d90-ae4176a2d598"
+  },
+  "configurationFingerprint": "064824d7e12ef51b5ca40a47f4501683b3a277a9366d51e5aa628281dc1f8081",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-e4D5LY",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-e4D5LY/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-e4D5LY/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-07",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b607-7544-7b02-9d90-ae4176a2d598",
+      "anchor": "ACP session/new result"
+    }
+  ],
+  "portableResponses": [
+    {
+      "identity": {
+        "owner": "root",
+        "execution": "turn-1",
+        "call": "reason:1",
+        "attempt": 2,
+        "purpose": "reason"
+      },
+      "protocol": "anthropic",
+      "owner": "world",
+      "tools": [
+        {
+          "toolCallId": "I02-write",
+          "rules": [
+            {
+              "path": "/file_path",
+              "kind": "path",
+              "alias": "work",
+              "mode": "path-prefix"
+            }
+          ]
+        }
+      ],
+      "rulesVersion": "world-bindings-v1",
+      "fragmentPlan": {
+        "kind": "utf8",
+        "maxBytes": 128
+      },
+      "sourceSha256": "dde5f5bb1836548400522d0c7085d9907e0e059baf1a3faad2d1ae8e71f356cd"
+    }
+  ]
+}

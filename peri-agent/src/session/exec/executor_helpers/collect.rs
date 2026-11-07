@@ -48,6 +48,7 @@ pub async fn collect_result(req: CollectRequest<'_>) -> PromptResult {
         .token_tracker
         .estimated_context_tokens();
     let mut result = PromptResult {
+        execution_binding: exec_outcome.execution_binding,
         persisted_payloads: exec_outcome.persisted_payloads,
         messages: exec_outcome.agent_state.into_messages(),
         ok: exec_outcome.ok,

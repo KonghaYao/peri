@@ -5,6 +5,20 @@ use tokio_util::sync::CancellationToken;
 
 use super::lock_or_shutdown;
 
+#[test]
+fn prediction_keeps_actual_trigger_execution_and_separate_call_purpose() {
+    let execution = peri_acp_types::session::ExecutionBinding {
+        turn_id: peri_acp_types::session::TurnId::new(),
+        attempt_id: peri_acp_types::identity::AttemptId::new(),
+    };
+    let context = super::prediction_call_context("session-one", execution.clone());
+    assert_eq!(context.owner, "session-one");
+    assert_eq!(context.execution, execution.attempt_id.to_string());
+    assert_eq!(context.call, "prediction:0");
+    assert_eq!(context.purpose, "prediction");
+    assert_eq!(context.parent, None);
+}
+
 /// [回归测试] 关停方持 sessions 锁等待任务收摊时，预测任务必须立刻放弃等锁。
 ///
 /// 旧行为：任务继续排队等同一把锁；关停方（`session/close` →

@@ -11,10 +11,14 @@ pub(super) fn spawn_prediction(
     prompt_session_id: &str,
     sessions: &SharedSessions,
     cfg: &AcpServerConfig,
+    execution: Option<peri_acp_types::session::ExecutionBinding>,
 ) {
     let pred_transport = Arc::clone(transport);
     let pred_session_id = prompt_session_id.to_string();
     let pred_provider = cfg.provider.clone();
+    let transport_route = cfg.model_transport_route.clone();
+    let call_context =
+        execution.map(|execution| prediction_call_context(prompt_session_id, execution));
     let pred_sessions = sessions.clone();
     let pred_resources = cfg.session_resources.clone();
     let pred_caps_registry = cfg.session_manager.caps_registry();
@@ -67,10 +71,13 @@ pub(super) fn spawn_prediction(
             // Facade：agent 构建与执行统一由 peri-acp executor 承担，
             // TUI 层不再直接构建 Agent（ARC-BOUNDARY-001，docs/standards/architecture-contracts.md）。
             // L5：LLM 构造（AgentModelBridge）在协议面完成，执行体只收 ReactLLM。
-            let llm: Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync> =
-                Box::new(peri_agent::agent::model_bridge::AgentModelBridge::new(
-                    Arc::from(llm_provider.into_model()),
-                ));
+            let mut bridge = peri_agent::agent::model_bridge::AgentModelBridge::new(Arc::from(
+                llm_provider.into_model_with_transport_route(transport_route),
+            ));
+            if let Some(context) = call_context {
+                bridge = bridge.with_call_context(context);
+            }
+            let llm: Box<dyn peri_agent::agent::react::ReactLLM + Send + Sync> = Box::new(bridge);
             let result = crate::session::executor::execute_prediction(
                 llm,
                 recent,
@@ -188,6 +195,20 @@ pub(super) fn spawn_prediction(
             }
         },
     );
+}
+
+/// 预测属于完成它的主执行；不能使用 mailbox ticket 或 HTTP 到达顺序冒充该身份。
+fn prediction_call_context(
+    session_id: &str,
+    execution: peri_acp_types::session::ExecutionBinding,
+) -> peri_acp_types::model::ModelCallContext {
+    peri_acp_types::model::ModelCallContext {
+        owner: session_id.to_owned(),
+        execution: execution.attempt_id.to_string(),
+        call: "prediction:0".to_owned(),
+        purpose: "prediction".to_owned(),
+        parent: None,
+    }
 }
 
 /// 获取 sessions 锁，同时观察宿主 scope 的关停信号：关停开始即返回 `None`。

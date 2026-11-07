@@ -1,0 +1,83 @@
+{
+  "version": 2,
+  "id": "I03",
+  "title": "同后端双会话取消隔离与旧执行屏障",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "A",
+    "B"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "work"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-kM903A",
+    "home": "/tmp/peri-wire-e2e-kM903A/home",
+    "work": "/tmp/peri-wire-e2e-kM903A/work"
+  },
+  "recordedSessionIds": {
+    "A": "01a1b607-a8ad-79e0-ba3d-7ec9c83e277b",
+    "B": "01a1b607-a925-7390-8704-5798d0a6cb1b"
+  },
+  "configurationFingerprint": "064824d7e12ef51b5ca40a47f4501683b3a277a9366d51e5aa628281dc1f8081",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-kM903A",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-kM903A/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-kM903A/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-07",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "A",
+      "recorded": "01a1b607-a8ad-79e0-ba3d-7ec9c83e277b",
+      "anchor": "ACP session/new result"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "B",
+      "recorded": "01a1b607-a925-7390-8704-5798d0a6cb1b",
+      "anchor": "ACP session/new result"
+    }
+  ],
+  "portableResponses": []
+}

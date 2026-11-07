@@ -1,0 +1,105 @@
+{
+  "version": 2,
+  "id": "S06",
+  "title": "Responses 协议真实工具与终态",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "work"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "f3dd37d2ebb737daff8827a51edea4edb6a2a9f1c1ab942b4fc7e6f8e9145390",
+        "size": 684,
+        "mode": 384
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-H7OJY8",
+    "home": "/tmp/peri-wire-e2e-H7OJY8/home",
+    "work": "/tmp/peri-wire-e2e-H7OJY8/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b607-5bf0-7570-a3dc-a31d7403ca40"
+  },
+  "configurationFingerprint": "19ae89751ef07b01d8f4561f25b88a256ed8aba574b2c9881cca9176efab0625",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-H7OJY8",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-H7OJY8/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-H7OJY8/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-07",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b607-5bf0-7570-a3dc-a31d7403ca40",
+      "anchor": "ACP session/new result"
+    }
+  ],
+  "portableResponses": [
+    {
+      "identity": {
+        "owner": "root",
+        "execution": "turn-1",
+        "call": "reason:1",
+        "attempt": 1,
+        "purpose": "reason"
+      },
+      "protocol": "openai-responses",
+      "owner": "world",
+      "tools": [
+        {
+          "toolCallId": "s06-call",
+          "rules": [
+            {
+              "path": "/file_path",
+              "kind": "path",
+              "alias": "work",
+              "mode": "path-prefix"
+            }
+          ]
+        }
+      ],
+      "rulesVersion": "world-bindings-v1",
+      "fragmentPlan": {
+        "kind": "utf8",
+        "maxBytes": 128
+      },
+      "sourceSha256": "2b3ddfd9474f18a93c39a161865da7e8124871139f68fb86648301a647cccc60"
+    }
+  ]
+}

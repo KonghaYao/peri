@@ -487,12 +487,14 @@ impl McpMiddleware {
     ///
     /// 无任何已配置服务器时返回 `None`（零噪音，不注入）。
     fn overview_text(&self) -> Option<String> {
-        let infos = self
+        let mut infos = self
             .pool
             .all_server_infos_visible_to(self.session_id.as_deref());
         if infos.is_empty() {
             return None;
         }
+        // This is a set snapshot, not the ordered lifecycle event stream.
+        infos.sort_by(|left, right| left.name.cmp(&right.name));
         let (mut connected, mut failed, mut disabled, mut other) = (0usize, 0usize, 0usize, 0usize);
         let mut lines = Vec::new();
         for info in &infos {

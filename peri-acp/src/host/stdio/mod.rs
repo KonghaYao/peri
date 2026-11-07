@@ -144,6 +144,7 @@ async fn assemble_stdio_config(
     input: StdioInput,
     injected_settings: Option<&str>,
 ) -> anyhow::Result<super::AcpServerConfig> {
+    let model_transport_route = crate::provider::transport_route::from_environment()?;
     // 解析工作目录
     let cwd = std::path::Path::new(&input.cwd)
         .canonicalize()
@@ -247,6 +248,7 @@ async fn assemble_stdio_config(
 
     // stdio 部署过滤 rewind/clear（IDE 客户端自管理；不拦截，fall-through 进模型）。
     cfg.stdio_command_filter = true;
+    cfg.model_transport_route = model_transport_route;
 
     Ok(cfg)
 }

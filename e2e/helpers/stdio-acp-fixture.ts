@@ -122,6 +122,10 @@ class JsonlPeer {
     });
   }
 
+  notify(method: string, params: any): void {
+    this.send({ method, params });
+  }
+
   private async receive(line: string): Promise<void> {
     if (Buffer.byteLength(line) > MAX_FRAME_BYTES) throw new Error(`${this.name} frame exceeds limit`);
     const message = JSON.parse(line) as WireMessage;
@@ -225,6 +229,7 @@ async function readRustDiagnostics(directory: string): Promise<Record<string, un
 /** e2e 自有 stdio transport；只驱动当前 ACP，不提供 SDK 执行准入或持久 registry。 */
 export async function startStdioAcpFixture(options: FixtureOptions): Promise<{
   call(method: string, params: any, timeoutMs?: number): Promise<WireMessage>;
+  notify(method: string, params: any): void;
   close(): Promise<number | null>;
   diagnostics(): Promise<string>;
 }> {
@@ -250,6 +255,7 @@ export async function startStdioAcpFixture(options: FixtureOptions): Promise<{
   let closing: Promise<number | null> | undefined;
   return {
     call: (method, params, timeoutMs) => peri.call(method, params, timeoutMs),
+    notify: (method, params) => peri.notify(method, params),
     close: () => closing ??= (async () => {
       const code = await peri.stop();
       await peri.join();

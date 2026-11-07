@@ -477,6 +477,19 @@ fn unanswered_rejection(call: &ToolCall, cause: UnansweredCause) -> AgentError {
     }
 }
 
+fn classifier_context(
+    state: &dyn hook_state::StateView,
+    call: &ToolCall,
+) -> Option<peri_model::ModelCallContext> {
+    Some(peri_model::ModelCallContext {
+        owner: state.session_id()?.to_owned(),
+        execution: state.execution_binding()?.attempt_id.to_string(),
+        call: format!("auto-classify:{}:{}", state.current_step()?, call.id),
+        purpose: "auto-classify".into(),
+        parent: None,
+    })
+}
+
 impl PermissionMiddleware {
     /// 批量处理一批工具调用：收集所有需要审批的项，一次性弹窗，返回每个 call 的处理结果。
     ///
@@ -488,6 +501,7 @@ impl PermissionMiddleware {
         calls: &[ToolCall],
         origins: &[Option<hook_state::BoundToolOrigin>],
         owner: Option<&TrustedInteractionOwner>,
+        state: Option<&dyn hook_state::StateView>,
     ) -> Vec<AgentResult<ToolCall>> {
         let mut results: Vec<AgentResult<ToolCall>> = Vec::with_capacity(calls.len());
 
@@ -506,8 +520,14 @@ impl PermissionMiddleware {
             // 有 mode → 使用快照模式决策
             if let Some(mode) = &mode_snapshot {
                 results.push(
-                    self.decide_by_mode(mode, call, origins[i].as_ref(), owner)
-                        .await,
+                    self.decide_by_mode(
+                        mode,
+                        call,
+                        origins[i].as_ref(),
+                        owner,
+                        state.and_then(|state| classifier_context(state, call)),
+                    )
+                    .await,
                 );
                 continue;
             }
@@ -587,6 +607,7 @@ impl PermissionMiddleware {
         tool_call: &ToolCall,
         origin: Option<&hook_state::BoundToolOrigin>,
         owner: Option<&TrustedInteractionOwner>,
+        model_context: Option<peri_model::ModelCallContext>,
     ) -> AgentResult<ToolCall> {
         match mode.load() {
             PermissionMode::Bypass => Ok(tool_call.clone()),
@@ -604,7 +625,11 @@ impl PermissionMiddleware {
                 Some(classifier) => {
                     let classification_name = classifier_tool_name(tool_call, origin);
                     let result = classifier
-                        .classify(&classification_name, &tool_call.input)
+                        .classify_with_context(
+                            &classification_name,
+                            &tool_call.input,
+                            model_context,
+                        )
                         .await;
                     match result {
                         Classification::Allow => Ok(tool_call.clone()),
@@ -792,7 +817,7 @@ impl Middleware for PermissionMiddleware {
             .collect();
         // 归属在弹窗前一次性铸造（同一批次 = 同一 turn owner）；缺失即拒绝。
         let owner = crate::interaction_owner::owner_from_hook_state(state);
-        self.process_batch_with_origins(calls, &origins, owner.as_ref())
+        self.process_batch_with_origins(calls, &origins, owner.as_ref(), Some(state))
             .await
     }
 
@@ -813,7 +838,13 @@ impl Middleware for PermissionMiddleware {
             // 不受缺失归属影响（显式 Bypass 仍由原 Permission 权威裁决）。
             let owner = crate::interaction_owner::owner_from_hook_state(state);
             return self
-                .decide_by_mode(mode, tool_call, origin.as_ref(), owner.as_ref())
+                .decide_by_mode(
+                    mode,
+                    tool_call,
+                    origin.as_ref(),
+                    owner.as_ref(),
+                    classifier_context(state, tool_call),
+                )
                 .await;
         }
 

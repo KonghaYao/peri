@@ -4,19 +4,46 @@ use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
-use crate::{ModelError, ModelResult, TransportErrorKind};
+use crate::{ModelCallContext, ModelError, ModelResult, ModelRuntimeConfig, TransportErrorKind};
 
 pub(crate) type HttpBody = Pin<Box<dyn Stream<Item = ModelResult<Vec<u8>>> + Send>>;
 
 /// 只在 crate 内使用的 HTTP 请求；认证 headers 与 client 不会离开 transport 层。
 pub(crate) struct HttpRequest {
     pub(crate) request: reqwest::Request,
+    pub(crate) call_context: Option<ModelCallContext>,
+    pub(crate) attempt: u32,
 }
 
 impl HttpRequest {
     pub(crate) fn new(request: reqwest::Request) -> Self {
-        Self { request }
+        Self {
+            request,
+            call_context: None,
+            attempt: 1,
+        }
     }
+
+    pub(crate) fn with_call_context(mut self, context: Option<ModelCallContext>) -> Self {
+        self.call_context = context;
+        self
+    }
+}
+
+/// 显式代理路由不跟随重定向或环境代理，防止关联头越过已配置的传输边界。
+pub(crate) fn client_for_runtime(
+    runtime: &ModelRuntimeConfig,
+    follow_redirects: bool,
+) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder();
+    if !follow_redirects || runtime.transport_route().is_some() {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
+    if runtime.transport_route().is_some() {
+        // HTTP 客户端的隐式重试会绕过 runtime 的物理发送序号。
+        builder = builder.no_proxy().retry(reqwest::retry::never());
+    }
+    builder.build().expect("Model HTTP client construction")
 }
 
 /// 已建立连接后的安全响应元数据与可取消 body。

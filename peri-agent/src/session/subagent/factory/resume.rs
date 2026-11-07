@@ -258,7 +258,7 @@ pub(super) async fn resume_subagent_impl(
     // 6. 重建 session（thread_id 固定 = config.thread_id；ancestor/own 显式分区，
     //    两区 flags 均恢复后绑定持久化——helper 内）
     //    不注入 parent_messages / identity System / skill_names（F4 / R-H1）
-    let (session, v2_ctx) = build_subagent_session_v2(
+    let (session, mut v2_ctx) = build_subagent_session_v2(
         cwd.clone(),
         frozen,
         cancel_token.clone(),
@@ -286,6 +286,10 @@ pub(super) async fn resume_subagent_impl(
         identity.is_some(),
     )
     .await?;
+    let parent_thread = super::spawn::parent_thread_id_of(parent);
+    v2_ctx.context.session.model_parent =
+        crate::agent::model_call::capture_tool_parent(parent_tool_call_id.as_deref())
+            .filter(|parent| Some(parent.owner.as_str()) == parent_thread.as_deref());
 
     // Assembly is synchronous but can observe cancellation from another task
     // (or a callback). Sync callers still receive the established interrupted

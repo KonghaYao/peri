@@ -104,6 +104,7 @@ async fn test_bridge_stream_interruption_preserves_only_partial_text() {
                     turn_id: TurnId::new(),
                     agent_id: AgentId::new(),
                     cancel: CancellationToken::new(),
+                    call_context: None,
                 }),
             )
             .await
@@ -522,6 +523,7 @@ async fn bridge_preserves_completed_message_and_only_emits_visible_deltas() {
         turn_id: TurnId::new(),
         agent_id: AgentId::new(),
         cancel: CancellationToken::new(),
+        call_context: None,
     };
 
     let reasoning = bridge
@@ -645,6 +647,7 @@ async fn bridge_emits_tool_started_on_first_tool_call_delta() {
         turn_id: TurnId::new(),
         agent_id: AgentId::new(),
         cancel: CancellationToken::new(),
+        call_context: None,
     };
 
     let reasoning = bridge
@@ -875,6 +878,7 @@ async fn bridge_maps_precancelled_token_to_interrupted_without_events() {
         turn_id: TurnId::new(),
         agent_id: AgentId::new(),
         cancel,
+        call_context: None,
     };
 
     let result = bridge
@@ -917,6 +921,7 @@ async fn assert_bridge_stops_emitting_after_cancellation(reasoning: bool) {
         turn_id: TurnId::new(),
         agent_id: AgentId::new(),
         cancel,
+        call_context: None,
     };
 
     let result = bridge

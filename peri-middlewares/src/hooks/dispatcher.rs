@@ -39,6 +39,7 @@ pub struct HookDispatcher {
     /// Agent hook 执行时的工作目录（对齐原 HookMiddleware.cwd）。
     cwd: String,
     task_manager: Option<Arc<dyn TaskManager>>,
+    model_call_scope: String,
 }
 
 impl HookDispatcher {
@@ -54,6 +55,7 @@ impl HookDispatcher {
             once_tracker,
             cwd,
             task_manager: None,
+            model_call_scope: "local".into(),
         }
     }
 
@@ -73,11 +75,17 @@ impl HookDispatcher {
             once_tracker,
             cwd,
             task_manager: None,
+            model_call_scope: "local".into(),
         }
     }
 
     pub fn with_task_manager(mut self, task_manager: Arc<dyn TaskManager>) -> Self {
         self.task_manager = Some(task_manager);
+        self
+    }
+
+    pub(crate) fn with_model_call_scope(mut self, scope: String) -> Self {
+        self.model_call_scope = scope;
         self
     }
 
@@ -125,6 +133,18 @@ impl HookDispatcher {
         tool_name: Option<&str>,
         tool_input: Option<&serde_json::Value>,
     ) -> HookAction {
+        self.fire_event_with_call_context(event, input, tool_name, tool_input, None)
+            .await
+    }
+
+    pub(crate) async fn fire_event_with_call_context(
+        &self,
+        event: HookEvent,
+        input: &HookInput,
+        tool_name: Option<&str>,
+        tool_input: Option<&serde_json::Value>,
+        call_context: Option<peri_model::ModelCallContext>,
+    ) -> HookAction {
         // 确保 hook_event_name 与实际触发的事件一致。
         //
         // 调用方可能在 before_tool 中复用同一个 HookInput 连续触发多个事件
@@ -166,7 +186,7 @@ impl HookDispatcher {
 
         let mut final_action = HookAction::Allow;
 
-        for registered in &hooks {
+        for (hook_index, registered) in hooks.iter().enumerate() {
             // matcher check
             if let Some(name) = tool_name {
                 let matcher_str = registered.matcher.as_deref().unwrap_or_else(|| {
@@ -217,7 +237,14 @@ impl HookDispatcher {
                 }
                 HookAction::Allow
             } else {
-                self.execute_sync(&registered.hook, &input, registered)
+                let context = call_context.clone().map(|mut context| {
+                    context.call = format!(
+                        "hook:{}:{event:?}:{}:{hook_index}",
+                        self.model_call_scope, context.call
+                    );
+                    context
+                });
+                self.execute_sync(&registered.hook, &input, registered, context)
                     .await
             };
 
@@ -242,6 +269,7 @@ impl HookDispatcher {
         hook: &HookType,
         input: &HookInput,
         registered: &RegisteredHook,
+        call_context: Option<peri_model::ModelCallContext>,
     ) -> HookAction {
         match hook {
             HookType::Command { .. } => {
@@ -249,7 +277,7 @@ impl HookDispatcher {
                     .await
             }
             HookType::Prompt { .. } => match &self.llm_factory {
-                Some(factory) => execute_prompt_hook(hook, input, factory).await,
+                Some(factory) => execute_prompt_hook(hook, input, factory, call_context).await,
                 None => {
                     tracing::debug!(
                         event = ?input.hook_event_name,
@@ -260,7 +288,9 @@ impl HookDispatcher {
             },
             HookType::Http { .. } => execute_http_hook(hook, input).await,
             HookType::Agent { .. } => match &self.llm_factory {
-                Some(factory) => execute_agent_hook(hook, input, factory, &self.cwd).await,
+                Some(factory) => {
+                    execute_agent_hook(hook, input, factory, &self.cwd, call_context).await
+                }
                 None => {
                     tracing::debug!(
                         event = ?input.hook_event_name,
@@ -768,3 +798,7 @@ fn spawn_async_hook(
 #[cfg(test)]
 #[path = "hook_action_merge_test.rs"]
 mod hook_action_merge_tests;
+
+#[cfg(test)]
+#[path = "model_call_context_test.rs"]
+mod model_call_context_tests;

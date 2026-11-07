@@ -195,6 +195,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                     .push_done(req.session_id, "end_turn", None)
                     .await;
                 return InterceptOutcome::Handled(Box::new(PromptResult {
+                    execution_binding: None,
                     persisted_payloads: req.history_payloads.to_vec(),
                     messages: result.messages,
                     ok: true,
@@ -342,6 +343,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                     .map(peri_acp_types::store::PersistedPayload::Message),
             );
             InterceptOutcome::Handled(Box::new(PromptResult {
+                execution_binding: None,
                 persisted_payloads,
                 messages: result.messages,
                 ok: !persistence_inconsistent,
