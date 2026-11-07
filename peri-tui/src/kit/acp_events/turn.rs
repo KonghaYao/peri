@@ -4,9 +4,26 @@
 
 use super::*;
 use crate::kit::acp_types::CurrentTurn;
-use crate::kit::atoms::{PERI_CONFIG_HANDLE, RENDER_HEARTBEAT};
+use crate::kit::atoms::{PERI_CONFIG_HANDLE, PROGRAM_STATUS, RENDER_HEARTBEAT};
 use crate::kit::program_status::{self, ProgramStatus};
 use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiReasoningBlock, TuiRenderUnit};
+
+/// turn 结束类转换的统一出口：仍有 async agent 在跑就保持 working，避免
+/// herdr 把主 turn 结束误判为空闲。blocked/error 是用户可操作或失败终态，
+/// 不能被工作态覆盖。
+fn publish_turn_end(fallback: ProgramStatus) {
+    if !super::system::has_active_async_agent() {
+        program_status::publish(fallback);
+        return;
+    }
+    if matches!(
+        *PROGRAM_STATUS.state().read(),
+        ProgramStatus::Blocked(_) | ProgramStatus::Error
+    ) {
+        return;
+    }
+    program_status::publish(ProgramStatus::Working);
+}
 
 pub(super) fn handle_turn_done(state: &mut BridgeState) {
     // H3: TurnDone 仅做两件事：
@@ -25,7 +42,7 @@ pub(super) fn handle_turn_done(state: &mut BridgeState) {
     state.last_submitted_text = None;
 
     state.phase = SessionPhase::Idle;
-    program_status::publish(ProgramStatus::Done);
+    publish_turn_end(ProgramStatus::Done);
 
     tracing::info!(
         is_loading = state.phase == SessionPhase::PromptRunning,
@@ -177,7 +194,7 @@ pub(super) fn handle_turn_interrupted(
         state.last_pushed_reasoning_len = 0;
         state.variant = 0;
         state.phase = SessionPhase::Idle;
-        program_status::publish(ProgramStatus::Idle);
+        publish_turn_end(ProgramStatus::Idle);
         state.publish_barrier();
         super::render::push_acp_state(state);
         // Issue 2026-08-05 遗留项（中）：stale 分支复位后主动 drain 排队输入。
@@ -226,7 +243,7 @@ pub(super) fn handle_turn_interrupted(
         state.last_pushed_reasoning_len = 0;
         state.variant = 0;
         state.phase = SessionPhase::Idle;
-        program_status::publish(ProgramStatus::Idle);
+        publish_turn_end(ProgramStatus::Idle);
         state.publish_barrier();
         super::render::push_acp_state(state);
         return;
@@ -247,7 +264,7 @@ pub(super) fn handle_turn_interrupted(
     state.last_pushed_reasoning_len = 0;
     state.variant = 0;
     state.phase = SessionPhase::Idle;
-    program_status::publish(ProgramStatus::Idle);
+    publish_turn_end(ProgramStatus::Idle);
     state.publish_barrier();
     super::render::push_acp_state(state);
 }
@@ -268,7 +285,7 @@ pub(super) fn handle_turn_suspended(state: &mut BridgeState) {
     state.last_pushed_reasoning_len = 0;
     state.variant = 0;
     state.phase = SessionPhase::Idle;
-    program_status::publish(ProgramStatus::Idle);
+    publish_turn_end(ProgramStatus::Idle);
     state.publish_barrier();
     super::render::push_acp_state(state);
     // 注意：不调用 drain_input_buffer()——Agent 保持存活，
@@ -409,7 +426,7 @@ pub(super) fn handle_user_input_delivered(
 pub(super) fn handle_loading_reset(state: &mut BridgeState) {
     if state.phase == SessionPhase::PromptRunning {
         state.phase = SessionPhase::Idle;
-        program_status::publish(ProgramStatus::Idle);
+        publish_turn_end(ProgramStatus::Idle);
         state.publish_barrier();
         super::render::push_acp_state(state);
     }

@@ -5,10 +5,11 @@
 
 use super::*;
 use crate::i18n;
+use crate::kit::acp_events::SessionPhase;
 use crate::kit::acp_types::{BgTaskEntry, BgTaskSnapshotSource};
 use crate::kit::atoms::{
     ACP_CLIENT_HANDLE, ACTIVE_SESSION_ID, BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_IDENTITY,
-    BG_TASK_REVISION, BG_TASKS, NOTIFICATION,
+    BG_TASK_REVISION, BG_TASKS, BgLiveStatus, NOTIFICATION, PROGRAM_STATUS,
 };
 use crate::kit::bg_task_identity::{
     METADATA_TEXT_BYTES, RECENT_METADATA_BYTES, RECENT_METADATA_ENTRIES, bounded_label,
@@ -19,6 +20,7 @@ use crate::kit::bg_task_live::{
     seed_live_from_started, seed_live_from_terminal_snapshot, seed_unobserved_snapshot,
 };
 use crate::kit::bg_task_status::BgTaskStatus;
+use crate::kit::program_status::{self, ProgramStatus};
 use fluent_bundle::FluentValue;
 use serde_json::Value;
 use std::time::Duration;
@@ -165,6 +167,57 @@ fn has_live_detail(task_id: &str) -> bool {
     BG_LIVE_DETAIL.state().read().contains_key(task_id)
 }
 
+/// wire 上 `BgTaskKind::Agent` 的 serde snake_case 值。
+const AGENT_KIND: &str = "agent";
+
+fn is_agent_task(task: &BgTaskEntry) -> bool {
+    task.kind == AGENT_KIND
+}
+
+/// 是否仍有 async agent 在跑。只计 `BgTaskKind::Agent`，且必须同时具备 live
+/// 证据（`BG_LIVE_DETAIL` 为 Running）：历史快照会把非终态任务 seed 为
+/// Unobserved，不能据此让程序状态停在 working。shell 是用户显式放到后台的命令，
+/// workflow/mcp 的生命周期由各自调度承担，都不代表主程序还在推进任务。
+pub(crate) fn has_active_async_agent() -> bool {
+    let tasks = BG_TASKS.state();
+    let tasks = tasks.read();
+    let live = BG_LIVE_DETAIL.state();
+    let live = live.read();
+    tasks.iter().any(|task| {
+        is_agent_task(task)
+            && BgTaskStatus::classify(task.status.as_deref()).is_active()
+            && live
+                .get(&task.task_id)
+                .is_some_and(|detail| detail.status == BgLiveStatus::Running)
+    })
+}
+
+fn task_is_agent(task_id: &str) -> bool {
+    BG_TASKS
+        .state()
+        .read()
+        .iter()
+        .any(|task| task.task_id == task_id && is_agent_task(task))
+}
+
+/// 最后一个 async agent 结束后退出合成的 working。完成/取消事件可能已经由
+/// bg 回调启动新 turn（phase=PromptRunning），此时交给该 turn 结算；blocked、
+/// error、done、idle 也不在这里覆盖。
+fn settle_async_agent_status(state: &BridgeState, success: bool) {
+    if state.phase == SessionPhase::PromptRunning || has_active_async_agent() {
+        return;
+    }
+    if *PROGRAM_STATUS.state().read() != ProgramStatus::Working {
+        return;
+    }
+    let status = if success {
+        ProgramStatus::Done
+    } else {
+        ProgramStatus::Idle
+    };
+    program_status::publish(status);
+}
+
 fn bg_task_description(summary: &str, status: Option<&str>) -> String {
     let summary = bounded_label(summary);
     match BgTaskStatus::classify(status) {
@@ -186,6 +239,11 @@ pub(crate) fn handle_bg_task_snapshot(
         return;
     }
     crate::kit::acp_events::render::push_acp_state(state);
+    // 权威 live 快照移除最后一个活跃 agent 时，完成回调可能已随 revision
+    // gap 被丢弃；这里按成功快照结算，Historical 不赋予活动。
+    if source == BgTaskSnapshotSource::Live {
+        settle_async_agent_status(state, true);
+    }
 }
 
 pub(crate) fn request_bg_task_snapshot() {
@@ -286,7 +344,9 @@ pub(crate) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEnt
 }
 
 pub(crate) fn handle_bg_task_completed(
+    state: &BridgeState,
     task_id: &str,
+    kind: Option<&str>,
     success: bool,
     duration_ms: u64,
     output_preview: Option<String>,
@@ -295,6 +355,7 @@ pub(crate) fn handle_bg_task_completed(
     if !accept_bg_task_delta(revision) {
         return;
     }
+    let was_agent = task_is_agent(task_id);
     BG_TASKS.state().write().retain(|t| t.task_id != *task_id);
     mark_task_completed(task_id, success, duration_ms, output_preview);
     // 标记后台显示条目为完成（保留 3s 后自动清除）
@@ -334,12 +395,21 @@ pub(crate) fn handle_bg_task_completed(
             message: msg,
             until: peri_time::monotonic_now() + Duration::from_millis(1500),
         });
+    if kind.is_some_and(|kind| kind == AGENT_KIND) || was_agent {
+        settle_async_agent_status(state, success);
+    }
 }
 
-pub(crate) fn handle_bg_task_cancelled(task_id: &str, reason: &str, revision: Option<u64>) {
+pub(crate) fn handle_bg_task_cancelled(
+    state: &BridgeState,
+    task_id: &str,
+    reason: &str,
+    revision: Option<u64>,
+) {
     if !accept_bg_task_delta(revision) {
         return;
     }
+    let was_agent = task_is_agent(task_id);
     BG_TASKS.state().write().retain(|t| t.task_id != *task_id);
     mark_task_cancelled(task_id, reason);
     // 标记后台显示条目为失败（3s 倒计时）
@@ -355,6 +425,9 @@ pub(crate) fn handle_bg_task_cancelled(task_id: &str, reason: &str, revision: Op
         entry.completed_at = Some(now);
     }
     prune_metadata();
+    if was_agent {
+        settle_async_agent_status(state, false);
+    }
 }
 
 pub(crate) fn handle_bg_task_updated(task_id: &str, status: &str, revision: Option<u64>) {
