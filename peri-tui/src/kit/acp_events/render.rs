@@ -921,9 +921,9 @@ pub(crate) fn push_popup_kind(state: &BridgeState) {
 /// 再 `tx.send(AgentText)`；`handle_local_user_bubble` 的 last_submitted_text /
 /// turn_generation 语义与非 loading 提交完全一致。
 ///
-/// 多条输入的顺序保证：VecDeque + 顺序 `tx.send` + submit_consumer 单消费者 →
-/// 严格 FIFO。第一条立即触发 prompt，后续在 submit_consumer 内部顺序处理
-/// （每条都等上一条的 RPC 完成）。
+/// 多条输入的顺序保证：VecDeque + 顺序 `tx.send` + submit_consumer 会话车道 →
+/// 严格 FIFO。第一条立即触发 prompt，同会话后续消息等上一条完成后提交；不同
+/// 会话的车道互不等待。
 pub(crate) fn drain_input_buffer() {
     if crate::kit::steer_state::is_enabled() {
         return;

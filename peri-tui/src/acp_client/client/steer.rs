@@ -29,7 +29,7 @@ impl AcpTuiClient {
         let gate_started = peri_time::monotonic_now();
         loop {
             let operation = self.lifecycle.operation_gate().lock().await;
-            let pending = *self.session_load_reservations.pending.lock().unwrap() > 0;
+            let pending = self.session_load_reservations.pending() > 0;
             if pending {
                 drop(operation);
                 self.wait_for_session_load(&mut epoch).await?;
@@ -108,7 +108,7 @@ impl AcpTuiClient {
         let mut epoch = self.session_load_reservations.epoch_tx.subscribe();
         let operation = loop {
             let operation = self.lifecycle.operation_gate().lock().await;
-            if *self.session_load_reservations.pending.lock().unwrap() == 0 {
+            if self.session_load_reservations.pending() == 0 {
                 break operation;
             }
             drop(operation);

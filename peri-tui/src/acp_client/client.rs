@@ -11,9 +11,10 @@ use peri_acp_types::event_data::PredictionAction;
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 
+pub(crate) use super::interaction_lifecycle::AdmissionRoute;
 use super::interaction_lifecycle::{InteractionLifecycle, InteractionOwner, InteractionUiOutcome};
 use super::interaction_settlement::spawn_settlement_worker;
-use session::SessionLoadReservationState;
+use session_load_reservation::SessionLoadReservationState;
 
 mod child_history;
 mod history_page;
@@ -22,10 +23,12 @@ mod pump;
 mod recovery_view;
 mod requests;
 mod session;
+mod session_load_reservation;
 mod steer;
 mod workspace;
 
-pub(crate) use session::SessionLoadReservation;
+pub(crate) use session::AdmissionGuard;
+pub(crate) use session_load_reservation::SessionLoadReservation;
 
 /// Notification events dispatched from the background pump to the TUI event loop.
 #[derive(Debug)]
@@ -121,6 +124,11 @@ pub struct AcpTuiClient {
     /// with it.
     startup_restore_tx: watch::Sender<bool>,
     session_load_reservations: Arc<SessionLoadReservationState>,
+    /// 用户会话决策序号：`/clear`、历史切换预约各递增一次。
+    ///
+    /// 队列提交在入队时快照该序号，落定身份前重读；变化即表示这份输入已经被
+    /// 新的用户决定取代，只能取消，不得改投新会话。
+    session_switch_seq: Arc<std::sync::atomic::AtomicU64>,
     user_input_queue: Arc<std::sync::atomic::AtomicBool>,
     session_workspace: Arc<std::sync::atomic::AtomicBool>,
     mcp_control: Arc<std::sync::atomic::AtomicBool>,
@@ -137,6 +145,9 @@ pub struct AcpTuiClient {
     #[cfg(test)]
     transition_commit_hook:
         Arc<Mutex<Option<mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>>>,
+    /// 测试用：在「认领预约」之后、「切换路由」之前同步暂停，且仍持有预约锁。
+    #[cfg(test)]
+    transition_claim_hook: Arc<Mutex<Option<std::sync::mpsc::Sender<std::sync::mpsc::Sender<()>>>>>,
 }
 
 impl AcpTuiClient {
@@ -202,10 +213,8 @@ impl AcpTuiClient {
             projection_mode,
             notification_weak,
             startup_restore_tx,
-            session_load_reservations: Arc::new(SessionLoadReservationState {
-                pending: Mutex::new(0),
-                epoch_tx: load_epoch_tx,
-            }),
+            session_load_reservations: Arc::new(SessionLoadReservationState::new(load_epoch_tx)),
+            session_switch_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             user_input_queue: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             session_workspace: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_control: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -215,6 +224,8 @@ impl AcpTuiClient {
             pending_close: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             transition_commit_hook: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            transition_claim_hook: Arc::new(Mutex::new(None)),
         };
         (client, notification_tx, notification_rx)
     }

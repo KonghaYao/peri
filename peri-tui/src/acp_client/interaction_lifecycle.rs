@@ -3,7 +3,15 @@
 //! Wire request ids identify JSON-RPC frames. [`InteractionOwner`] identifies
 //! the one UI operation that may settle a reverse request.  Session boundaries,
 //! prompt terminals, bridge publication and user responses all compete for that
-//! same owner in this module.
+//! same owner in this module tree.
+
+mod leases;
+mod ordinary;
+mod prompt;
+mod reverse;
+mod session_route;
+
+pub use leases::{ClaimedBatchLease, ClaimedSettlementLease, PromptLease, TransitionLease};
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,6 +40,25 @@ pub enum TransitionKind {
     DeleteCurrent,
 }
 
+/// 一次会话操作（预约、建立、切换）的身份。
+///
+/// 由生命周期在操作开始时分配，并贯穿 `NoSession → Transitioning → Stable`：
+/// 队列按这个身份分道，不再从 `unclaimed` 标记预测下一次 generation。预约在
+/// 创建时取得身份，因此多次连续预约各自身份明确，最新一个代表用户最新决定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SessionOperationId(u64);
+
+/// 新切换使用的操作身份来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransitionOperation {
+    /// 采用调用方已持有的身份（预约或准入 cohort）。
+    Owned(SessionOperationId),
+    /// 沿用队列已登记、尚未落定的身份；没有则新建。启动恢复用它接续排队车道。
+    AdoptPending,
+    /// 新的一次用户决定：新建身份并取代待定身份。
+    New,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionRoute {
     Bootstrapping {
@@ -40,6 +67,8 @@ pub enum SessionRoute {
     Stable {
         session_id: String,
         generation: u64,
+        /// 产生这个稳定会话的操作；`None` 仅出现在测试夹具。
+        operation: Option<SessionOperationId>,
         accepting_reverse: bool,
         prompt_epoch: u64,
     },
@@ -48,21 +77,34 @@ pub enum SessionRoute {
         from: Option<String>,
         target: Option<String>,
         generation: u64,
+        operation: SessionOperationId,
     },
     NoSession {
         generation: u64,
     },
 }
 
-impl SessionRoute {
-    fn generation(&self) -> u64 {
-        match self {
-            Self::Bootstrapping { generation }
-            | Self::Stable { generation, .. }
-            | Self::Transitioning { generation, .. }
-            | Self::NoSession { generation } => *generation,
-        }
-    }
+/// 队列准入观察到的会话路由。
+///
+/// `generation` 在每次切换/建立时递增且提交时复用同一个值；`operation` 是
+/// 产生该路由的操作身份。队列按操作身份分道：同一个预约/建立操作从开始到
+/// 落定的所有输入共享一条有序车道，不依赖对 generation 的预测。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AdmissionRoute {
+    Stable {
+        session_id: String,
+        generation: u64,
+        operation: Option<SessionOperationId>,
+    },
+    Transitioning {
+        generation: u64,
+        operation: SessionOperationId,
+    },
+    NoSession {
+        generation: u64,
+        /// 队列可等待的建立身份；无会话时总会分配，失败重试因此沿用同一车道。
+        operation: SessionOperationId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -191,6 +233,9 @@ struct ExecutionRuns {
 struct InteractionLifecycleState {
     client_instance_id: u64,
     route: SessionRoute,
+    /// 最近一次会话决定的操作身份；无会话时队列沿用它等待建立。
+    current_operation: Option<SessionOperationId>,
+    next_operation_id: u64,
     next_token: u64,
     deleted_session_ids: HashSet<String>,
     pending: BTreeMap<u64, PendingInteractionEntry>,
@@ -227,6 +272,8 @@ impl InteractionLifecycle {
             state: Arc::new(Mutex::new(InteractionLifecycleState {
                 client_instance_id,
                 route: SessionRoute::Bootstrapping { generation: 0 },
+                current_operation: None,
+                next_operation_id: 1,
                 next_token: 1,
                 deleted_session_ids: HashSet::new(),
                 pending: BTreeMap::new(),
@@ -243,676 +290,6 @@ impl InteractionLifecycle {
     pub fn operation_gate(&self) -> &AsyncMutex<()> {
         &self.operation_gate
     }
-
-    pub fn install_drop_settlement_sender(&self, tx: mpsc::UnboundedSender<ClaimedInteraction>) {
-        *self.drop_settlement_tx.lock().unwrap() = Some(tx);
-    }
-
-    fn enqueue_drop_claims(&self, claims: Vec<ClaimedInteraction>) {
-        let tx = self.drop_settlement_tx.lock().unwrap().clone();
-        if let Some(tx) = tx {
-            for claim in claims {
-                let _ = tx.send(claim);
-            }
-        }
-    }
-
-    /// Arm an already-owned batch before the first transport await. If the
-    /// caller future is dropped, both the in-flight claim and every unstarted
-    /// claim are handed to the cancellation-safe settlement worker.
-    pub fn arm_claimed_batch(&self, claims: Vec<ClaimedInteraction>) -> ClaimedBatchLease {
-        ClaimedBatchLease {
-            lifecycle: self.clone(),
-            claims: claims.into(),
-        }
-    }
-
-    pub fn has_session(&self) -> bool {
-        matches!(
-            self.state.lock().unwrap().route,
-            SessionRoute::Stable { .. }
-        )
-    }
-
-    pub fn current_session_id(&self) -> Option<String> {
-        match &self.state.lock().unwrap().route {
-            SessionRoute::Stable { session_id, .. } => Some(session_id.clone()),
-            SessionRoute::Transitioning { target, .. } => target.clone(),
-            SessionRoute::Bootstrapping { .. } | SessionRoute::NoSession { .. } => None,
-        }
-    }
-
-    pub fn stable_identity(&self) -> Option<(String, u64)> {
-        match &self.state.lock().unwrap().route {
-            SessionRoute::Stable {
-                session_id,
-                generation,
-                ..
-            } => Some((session_id.clone(), *generation)),
-            _ => None,
-        }
-    }
-
-    pub fn begin_transition(
-        &self,
-        kind: TransitionKind,
-        target: Option<String>,
-    ) -> Result<TransitionStart, &'static str> {
-        let mut state = self.state.lock().unwrap();
-        let generation = state
-            .route
-            .generation()
-            .checked_add(1)
-            .ok_or("session generation exhausted")?;
-        let from = match &state.route {
-            SessionRoute::Stable { session_id, .. } => Some(session_id.clone()),
-            SessionRoute::Transitioning { target, .. } => target.clone(),
-            _ => None,
-        };
-        state.route = SessionRoute::Transitioning {
-            kind,
-            from: from.clone(),
-            target,
-            generation,
-        };
-        state.active_prompt = None;
-        state.new_buffer.clear();
-        state.new_flush_pending = false;
-        state.warned_buffer_full = false;
-        let claims = drain_pending(&mut state, ClaimCause::LifecycleDrain, |_| true);
-        Ok(TransitionStart {
-            generation,
-            from,
-            claims,
-        })
-    }
-
-    pub fn arm_transition(&self, generation: u64) -> TransitionLease {
-        TransitionLease {
-            lifecycle: self.clone(),
-            generation,
-            armed: true,
-        }
-    }
-
-    /// 切到 Stable 路由，但保留 New 期间缓存的普通通知。
-    ///
-    /// 调用方随后仍要完成初始化（可能等待 `session/input/snapshot`）。这段窗口
-    /// 内到达的通知必须继续入队，否则会先于缓存帧投递并破坏 wire FIFO；缓存由
-    /// [`Self::take_buffered_batch`] 在初始化结束后原子排空。
-    pub fn commit_stable(&self, generation: u64, session_id: String) {
-        let mut state = self.state.lock().unwrap();
-        if state.route.generation() != generation {
-            return;
-        }
-        state.route = SessionRoute::Stable {
-            session_id,
-            generation,
-            accepting_reverse: false,
-            prompt_epoch: 0,
-        };
-        state.active_prompt = None;
-        state.warned_buffer_full = false;
-        state.new_flush_pending = true;
-    }
-
-    /// 原子取出一批待投递的普通通知。
-    ///
-    /// 非空批次返回后 pending 仍为真：调用方投递这批通知期间到达的新通知会继续
-    /// 入队，下一批因此保持 wire 顺序。只有再次加锁发现队列为空时，才在同一临界区
-    /// 清除 pending 并返回 `None`；此后通知恢复即时 Forward。
-    pub fn take_buffered_batch(&self) -> Option<Vec<AcpNotification>> {
-        let mut state = self.state.lock().unwrap();
-        if !state.new_flush_pending {
-            return None;
-        }
-        let SessionRoute::Stable { session_id, .. } = &state.route else {
-            state.new_buffer.clear();
-            state.new_flush_pending = false;
-            return None;
-        };
-        let session_id = session_id.clone();
-        let batch: Vec<AcpNotification> = state
-            .new_buffer
-            .drain(..)
-            .filter(|item| item.session_id == session_id)
-            .map(|item| item.notification)
-            .collect();
-        if batch.is_empty() {
-            state.new_flush_pending = false;
-            None
-        } else {
-            Some(batch)
-        }
-    }
-
-    pub fn fail_transition(&self, generation: u64) -> Vec<ClaimedInteraction> {
-        let mut state = self.state.lock().unwrap();
-        if state.route.generation() != generation {
-            return Vec::new();
-        }
-        state.route = SessionRoute::NoSession { generation };
-        state.active_prompt = None;
-        state.new_buffer.clear();
-        state.new_flush_pending = false;
-        state.warned_buffer_full = false;
-        drain_pending(&mut state, ClaimCause::LifecycleDrain, |_| true)
-    }
-
-    pub fn mark_deleted(&self, session_id: &str) {
-        let mut state = self.state.lock().unwrap();
-        state.deleted_session_ids.insert(session_id.to_string());
-    }
-
-    pub fn is_current_session(&self, session_id: &str) -> bool {
-        if session_id.is_empty() {
-            return true;
-        }
-        let state = self.state.lock().unwrap();
-        if state.deleted_session_ids.contains(session_id) {
-            return false;
-        }
-        match &state.route {
-            SessionRoute::Stable {
-                session_id: current,
-                ..
-            } => current == session_id,
-            SessionRoute::Transitioning {
-                kind: TransitionKind::Load,
-                target: Some(target),
-                ..
-            } => target == session_id,
-            _ => false,
-        }
-    }
-
-    pub fn route_ordinary(
-        &self,
-        session_id: String,
-        notification: AcpNotification,
-    ) -> OrdinaryDecision {
-        if session_id.is_empty() {
-            return OrdinaryDecision::Forward(Box::new(notification));
-        }
-        let mut state = self.state.lock().unwrap();
-        if state.deleted_session_ids.contains(&session_id) {
-            return OrdinaryDecision::Drop;
-        }
-        match &state.route {
-            SessionRoute::Stable {
-                session_id: current,
-                ..
-            } if current == &session_id => {
-                if !state.new_flush_pending {
-                    OrdinaryDecision::Forward(Box::new(notification))
-                } else {
-                    buffer_ordinary(&mut state, session_id, notification);
-                    OrdinaryDecision::Buffered
-                }
-            }
-            SessionRoute::Transitioning {
-                kind: TransitionKind::Load,
-                target: Some(target),
-                ..
-            } if target == &session_id => OrdinaryDecision::Forward(Box::new(notification)),
-            SessionRoute::Transitioning {
-                kind: TransitionKind::New,
-                target: None,
-                ..
-            } => {
-                buffer_ordinary(&mut state, session_id, notification);
-                OrdinaryDecision::Buffered
-            }
-            _ => OrdinaryDecision::Drop,
-        }
-    }
-
-    pub fn register_reverse(
-        &self,
-        kind: ReverseInteractionKind,
-        id: RequestId,
-        session_id: Option<&str>,
-        params: Value,
-    ) -> RegisterDecision {
-        let mut state = self.state.lock().unwrap();
-        let Some(session_id) = session_id else {
-            return RegisterDecision::Settle { kind, id };
-        };
-        if state.client_instance_id == 0 || state.deleted_session_ids.contains(session_id) {
-            return RegisterDecision::Settle { kind, id };
-        }
-        let (generation, prompt_epoch) = match &state.route {
-            SessionRoute::Stable {
-                session_id: current,
-                generation,
-                accepting_reverse: true,
-                prompt_epoch,
-            } if current == session_id => (*generation, *prompt_epoch),
-            _ => return RegisterDecision::Settle { kind, id },
-        };
-        let Some(next_token) = state.next_token.checked_add(1) else {
-            return RegisterDecision::Settle { kind, id };
-        };
-        let token = state.next_token;
-        state.next_token = next_token;
-        let owner = InteractionOwner {
-            client_instance_id: state.client_instance_id,
-            token,
-            session_id: session_id.to_string(),
-            generation,
-            prompt_epoch,
-            kind,
-        };
-        let request_id_json = serde_json::to_string(&id)
-            .expect("RequestId Number/String serialization is infallible");
-        state.pending.insert(
-            token,
-            PendingInteractionEntry {
-                owner: owner.clone(),
-                request_id: id,
-            },
-        );
-        RegisterDecision::Forward(RegisteredReverseRequest {
-            owner,
-            request_id_json,
-            params,
-        })
-    }
-
-    pub fn is_pending_owner(&self, owner: &InteractionOwner) -> bool {
-        self.state
-            .lock()
-            .unwrap()
-            .pending
-            .get(&owner.token)
-            .is_some_and(|entry| entry.owner == *owner)
-    }
-
-    pub fn claim(&self, owner: &InteractionOwner, cause: ClaimCause) -> Option<ClaimedInteraction> {
-        let mut state = self.state.lock().unwrap();
-        let matches = state
-            .pending
-            .get(&owner.token)
-            .is_some_and(|entry| entry.owner == *owner);
-        if !matches {
-            return None;
-        }
-        let entry = state.pending.remove(&owner.token).unwrap();
-        Some(ClaimedInteraction {
-            owner: entry.owner,
-            request_id: entry.request_id,
-            cause,
-        })
-    }
-
-    /// 服务端撤销只给出 wire request id（`$/cancel_request`），按 id 找回并认领；
-    /// 已被用户响应或生命周期结算的请求返回 `None`（first-claim 语义不变）。
-    pub fn claim_by_request_id(
-        &self,
-        request_id: &RequestId,
-        cause: ClaimCause,
-    ) -> Option<ClaimedInteraction> {
-        let mut state = self.state.lock().unwrap();
-        let token = state
-            .pending
-            .iter()
-            .find(|(_, entry)| &entry.request_id == request_id)
-            .map(|(token, _)| *token)?;
-        let entry = state.pending.remove(&token)?;
-        Some(ClaimedInteraction {
-            owner: entry.owner,
-            request_id: entry.request_id,
-            cause,
-        })
-    }
-
-    pub fn open_prompt(&self, request_id: Option<String>) -> Result<PromptLease, &'static str> {
-        let mut state = self.state.lock().unwrap();
-        let client_instance_id = state.client_instance_id;
-        let (session_id, generation, next_epoch) = match &state.route {
-            SessionRoute::Stable {
-                session_id,
-                generation,
-                prompt_epoch,
-                ..
-            } => (
-                session_id.clone(),
-                *generation,
-                prompt_epoch
-                    .checked_add(1)
-                    .ok_or("prompt epoch exhausted")?,
-            ),
-            _ => return Err("no stable session"),
-        };
-        let marker = PromptMarker {
-            client_instance_id,
-            session_id,
-            generation,
-            prompt_epoch: next_epoch,
-            request_id,
-        };
-        if let SessionRoute::Stable {
-            accepting_reverse,
-            prompt_epoch,
-            ..
-        } = &mut state.route
-        {
-            *accepting_reverse = true;
-            *prompt_epoch = next_epoch;
-        }
-        state.active_prompt = Some(marker.clone());
-        Ok(PromptLease {
-            lifecycle: self.clone(),
-            marker,
-            armed: true,
-        })
-    }
-
-    /// 只绑定当前 stable route 发出的快照，迟到响应不能重新打开旧会话。
-    pub(crate) fn bind_user_input_generation(
-        &self,
-        session_id: &str,
-        local_generation: u64,
-        generation: &str,
-    ) -> bool {
-        let mut state = self.state.lock().unwrap();
-        if generation.is_empty()
-            || !matches!(&state.route, SessionRoute::Stable { session_id: current, generation: local, .. }
-                if current == session_id && *local == local_generation)
-            || state.deleted_session_ids.contains(session_id)
-        {
-            return false;
-        }
-        let runs = state
-            .execution_runs
-            .entry(session_id.to_owned())
-            .or_insert_with(|| ExecutionRuns {
-                generation: generation.to_owned(),
-                local_generation,
-                latest_request: None,
-                pending_terminal_request: None,
-                managed_input: false,
-                retired: HashSet::new(),
-            });
-        if runs.generation != generation {
-            // 新服务端实例只在一次明确的本地会话边界后重新绑定。
-            if runs.local_generation == local_generation {
-                return false;
-            }
-            runs.generation = generation.to_owned();
-            runs.latest_request = None;
-            runs.pending_terminal_request = None;
-            runs.retired.clear();
-        }
-        runs.local_generation = local_generation;
-        true
-    }
-
-    pub(crate) fn matches_user_input_generation(&self, session_id: &str, generation: &str) -> bool {
-        let state = self.state.lock().unwrap();
-        if state.deleted_session_ids.contains(session_id) {
-            return false;
-        }
-        matches!(&state.route, SessionRoute::Stable { session_id: current, generation: local, .. }
-            if current == session_id && state.execution_runs.get(session_id).is_some_and(|runs|
-                runs.local_generation == *local && runs.generation == generation))
-    }
-
-    pub(crate) fn user_input_snapshot_identity(
-        &self,
-        session_id: &str,
-    ) -> Option<UserInputSnapshotIdentity> {
-        let state = self.state.lock().unwrap();
-        let SessionRoute::Stable {
-            session_id: current,
-            generation: local,
-            prompt_epoch,
-            ..
-        } = &state.route
-        else {
-            return None;
-        };
-        let runs = state.execution_runs.get(session_id)?;
-        (current == session_id
-            && runs.local_generation == *local
-            && !state.deleted_session_ids.contains(session_id))
-        .then(|| UserInputSnapshotIdentity {
-            client_instance_id: state.client_instance_id,
-            session_id: session_id.to_owned(),
-            local_generation: *local,
-            generation: runs.generation.clone(),
-            prompt_epoch: *prompt_epoch,
-            active_prompt: state.active_prompt.clone(),
-        })
-    }
-
-    /// 服务端已开始的 execution 由 done/Stop/会话边界结束，无短 RPC 的 RAII lease。
-    /// 返回 None 表示重复或陈旧事件，调用方不能再次发布 loading 状态。
-    pub(crate) fn open_execution(
-        &self,
-        session_id: &str,
-        generation: &str,
-        request_id: &str,
-        managed_input: bool,
-    ) -> Option<Vec<ClaimedInteraction>> {
-        let mut state = self.state.lock().unwrap();
-        if request_id.is_empty() || state.deleted_session_ids.contains(session_id) {
-            return None;
-        }
-        let (local_generation, next_epoch) = match &state.route {
-            SessionRoute::Stable {
-                session_id: current,
-                generation,
-                prompt_epoch,
-                ..
-            } if current == session_id => (*generation, prompt_epoch.checked_add(1)?),
-            _ => return None,
-        };
-        let runs = state.execution_runs.get(session_id)?;
-        if runs.generation != generation
-            || runs.local_generation != local_generation
-            || runs.retired.contains(request_id)
-        {
-            return None;
-        }
-        if state.active_prompt.as_ref().is_some_and(|marker| {
-            marker.session_id == session_id && marker.request_id.as_deref() == Some(request_id)
-        }) {
-            let runs = state.execution_runs.get_mut(session_id)?;
-            runs.managed_input = managed_input;
-            runs.pending_terminal_request = Some(request_id.to_owned());
-            if let Some(previous) = runs.latest_request.replace(request_id.to_owned())
-                && previous != request_id
-            {
-                runs.retired.insert(previous);
-            }
-            return None;
-        }
-        let old_marker = state.active_prompt.take();
-        let claims = drain_pending(&mut state, ClaimCause::TurnTerminal, |owner| {
-            old_marker.as_ref().is_some_and(|marker| {
-                owner.session_id == marker.session_id
-                    && owner.generation == marker.generation
-                    && owner.prompt_epoch == marker.prompt_epoch
-            })
-        });
-        let runs = state.execution_runs.get_mut(session_id)?;
-        runs.managed_input = managed_input;
-        runs.pending_terminal_request = Some(request_id.to_owned());
-        if let Some(previous) = runs.latest_request.replace(request_id.to_owned())
-            && previous != request_id
-        {
-            runs.retired.insert(previous);
-        }
-        state.active_prompt = Some(PromptMarker {
-            client_instance_id: state.client_instance_id,
-            session_id: session_id.to_owned(),
-            generation: local_generation,
-            prompt_epoch: next_epoch,
-            request_id: Some(request_id.to_owned()),
-        });
-        if let SessionRoute::Stable {
-            accepting_reverse,
-            prompt_epoch,
-            ..
-        } = &mut state.route
-        {
-            *accepting_reverse = true;
-            *prompt_epoch = next_epoch;
-        }
-        Some(claims)
-    }
-
-    pub(crate) fn active_execution(&self, managed_only: bool) -> Option<(String, String, String)> {
-        let state = self.state.lock().unwrap();
-        let marker = state.active_prompt.as_ref()?;
-        let runs = state.execution_runs.get(&marker.session_id)?;
-        let request_id = marker.request_id.as_ref()?;
-        ((!managed_only || runs.managed_input)
-            && runs.local_generation == marker.generation
-            && runs.latest_request.as_ref() == Some(request_id)
-            && !runs.retired.contains(request_id))
-        .then(|| {
-            (
-                marker.session_id.clone(),
-                runs.generation.clone(),
-                request_id.clone(),
-            )
-        })
-    }
-
-    pub fn close_prompt_exact(
-        &self,
-        marker: &PromptMarker,
-        cause: ClaimCause,
-    ) -> Vec<ClaimedInteraction> {
-        let mut state = self.state.lock().unwrap();
-        if state.active_prompt.as_ref() != Some(marker) {
-            return Vec::new();
-        }
-        state.active_prompt = None;
-        retire_execution(&mut state, &marker.session_id, marker.request_id.as_deref());
-        if let SessionRoute::Stable {
-            session_id,
-            generation,
-            accepting_reverse,
-            prompt_epoch,
-        } = &mut state.route
-            && session_id == &marker.session_id
-            && *generation == marker.generation
-            && *prompt_epoch == marker.prompt_epoch
-        {
-            *accepting_reverse = false;
-        }
-        drain_pending(&mut state, cause, |owner| {
-            owner.client_instance_id == marker.client_instance_id
-                && owner.session_id == marker.session_id
-                && owner.generation == marker.generation
-                && owner.prompt_epoch == marker.prompt_epoch
-        })
-    }
-
-    pub fn close_prompt_by_wire_identity(
-        &self,
-        session_id: &str,
-        request_id: Option<&str>,
-    ) -> Vec<ClaimedInteraction> {
-        let Some(request_id) = request_id.filter(|id| !id.is_empty()) else {
-            return Vec::new();
-        };
-        let marker = {
-            let mut state = self.state.lock().unwrap();
-            if let Some(runs) = state.execution_runs.get_mut(session_id)
-                && runs.pending_terminal_request.as_deref() == Some(request_id)
-            {
-                runs.pending_terminal_request = None;
-            }
-            retire_execution(&mut state, session_id, Some(request_id));
-            state.active_prompt.as_ref().and_then(|marker| {
-                (marker.session_id == session_id
-                    && marker.request_id.as_deref() == Some(request_id))
-                .then(|| marker.clone())
-            })
-        };
-        marker
-            .map(|marker| self.close_prompt_exact(&marker, ClaimCause::TurnTerminal))
-            .unwrap_or_default()
-    }
-
-    /// 快照可能先恢复下一轮，旧 done 此时不得把新的 loading 清为空闲。
-    pub(crate) fn should_forward_prompt_terminal(
-        &self,
-        session_id: &str,
-        request_id: Option<&str>,
-    ) -> bool {
-        let state = self.state.lock().unwrap();
-        if let Some(marker) = &state.active_prompt
-            && marker.session_id == session_id
-            && marker.request_id.is_some()
-        {
-            return marker.request_id.as_deref() == request_id;
-        }
-        let Some(runs) = state.execution_runs.get(session_id) else {
-            return true;
-        };
-        request_id.is_some() && runs.pending_terminal_request.as_deref() == request_id
-            || !request_id.is_some_and(|request_id| runs.retired.contains(request_id))
-    }
-
-    pub fn cancel_active_prompt(&self) -> Vec<ClaimedInteraction> {
-        let marker = self.state.lock().unwrap().active_prompt.clone();
-        let claims = marker
-            .map(|marker| self.close_prompt_exact(&marker, ClaimCause::TurnTerminal))
-            .unwrap_or_default();
-        let mut state = self.state.lock().unwrap();
-        if let SessionRoute::Stable { prompt_epoch, .. } = &mut state.route {
-            *prompt_epoch = prompt_epoch.checked_add(1).expect("prompt epoch exhausted");
-        }
-        claims
-    }
-
-    pub fn transport_terminal(&self) -> Vec<ClaimedInteraction> {
-        let mut state = self.state.lock().unwrap();
-        if let SessionRoute::Stable {
-            accepting_reverse, ..
-        } = &mut state.route
-        {
-            *accepting_reverse = false;
-        }
-        state.active_prompt = None;
-        drain_pending(&mut state, ClaimCause::TransportTerminal, |_| true)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn force_stable(&self, session_id: &str, accepting_reverse: bool) {
-        let mut state = self.state.lock().unwrap();
-        state.route = SessionRoute::Stable {
-            session_id: session_id.to_string(),
-            generation: 1,
-            accepting_reverse,
-            prompt_epoch: u64::from(accepting_reverse),
-        };
-        state.active_prompt = accepting_reverse.then(|| PromptMarker {
-            client_instance_id: state.client_instance_id,
-            session_id: session_id.to_string(),
-            generation: 1,
-            prompt_epoch: 1,
-            request_id: Some("test-prompt".into()),
-        });
-    }
-}
-
-fn retire_execution(
-    state: &mut InteractionLifecycleState,
-    session_id: &str,
-    request_id: Option<&str>,
-) {
-    if let Some(runs) = state.execution_runs.get_mut(session_id)
-        && let Some(request_id) = request_id
-        && runs.latest_request.as_deref() == Some(request_id)
-    {
-        runs.retired.insert(request_id.to_owned());
-    }
 }
 
 impl Default for InteractionLifecycle {
@@ -921,155 +298,11 @@ impl Default for InteractionLifecycle {
     }
 }
 
-fn buffer_ordinary(
-    state: &mut InteractionLifecycleState,
-    session_id: String,
-    notification: AcpNotification,
-) {
-    if state.new_buffer.len() < NEW_SESSION_EVENT_BUFFER_CAPACITY {
-        state.new_buffer.push_back(BufferedOrdinaryNotification {
-            session_id,
-            notification,
-        });
-    } else if !state.warned_buffer_full {
-        state.warned_buffer_full = true;
-        tracing::warn!(
-            capacity = NEW_SESSION_EVENT_BUFFER_CAPACITY,
-            "ACP client: new-session ordinary notification buffer full"
-        );
-    }
-}
-
-fn drain_pending(
-    state: &mut InteractionLifecycleState,
-    cause: ClaimCause,
-    mut predicate: impl FnMut(&InteractionOwner) -> bool,
-) -> Vec<ClaimedInteraction> {
-    let tokens: Vec<u64> = state
-        .pending
-        .iter()
-        .filter_map(|(token, entry)| predicate(&entry.owner).then_some(*token))
-        .collect();
-    tokens
-        .into_iter()
-        .filter_map(|token| state.pending.remove(&token))
-        .map(|entry| ClaimedInteraction {
-            owner: entry.owner,
-            request_id: entry.request_id,
-            cause,
-        })
-        .collect()
-}
-
 #[derive(Debug)]
 pub struct TransitionStart {
     pub generation: u64,
     pub from: Option<String>,
     pub claims: Vec<ClaimedInteraction>,
-}
-
-pub struct PromptLease {
-    lifecycle: InteractionLifecycle,
-    marker: PromptMarker,
-    armed: bool,
-}
-
-pub struct TransitionLease {
-    lifecycle: InteractionLifecycle,
-    generation: u64,
-    armed: bool,
-}
-
-pub struct ClaimedBatchLease {
-    lifecycle: InteractionLifecycle,
-    claims: VecDeque<ClaimedInteraction>,
-}
-
-pub struct ClaimedSettlementLease {
-    lifecycle: InteractionLifecycle,
-    claim: Option<ClaimedInteraction>,
-}
-
-impl ClaimedBatchLease {
-    pub fn next_claim(&mut self) -> Option<ClaimedSettlementLease> {
-        self.claims.pop_front().map(|claim| ClaimedSettlementLease {
-            lifecycle: self.lifecycle.clone(),
-            claim: Some(claim),
-        })
-    }
-}
-
-impl Drop for ClaimedBatchLease {
-    fn drop(&mut self) {
-        self.lifecycle
-            .enqueue_drop_claims(self.claims.drain(..).collect());
-    }
-}
-
-impl ClaimedSettlementLease {
-    pub fn claim(&self) -> &ClaimedInteraction {
-        self.claim
-            .as_ref()
-            .expect("claimed settlement lease is armed")
-    }
-
-    pub fn complete(mut self) -> ClaimedInteraction {
-        self.claim
-            .take()
-            .expect("claimed settlement lease is armed")
-    }
-}
-
-impl Drop for ClaimedSettlementLease {
-    fn drop(&mut self) {
-        if let Some(claim) = self.claim.take() {
-            self.lifecycle.enqueue_drop_claims(vec![claim]);
-        }
-    }
-}
-
-impl TransitionLease {
-    pub fn disarm(mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for TransitionLease {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let claims = self.lifecycle.fail_transition(self.generation);
-        self.lifecycle.enqueue_drop_claims(claims);
-        self.armed = false;
-    }
-}
-
-impl PromptLease {
-    pub fn marker(&self) -> &PromptMarker {
-        &self.marker
-    }
-
-    pub fn finish(mut self) -> Vec<ClaimedInteraction> {
-        let claims = self
-            .lifecycle
-            .close_prompt_exact(&self.marker, ClaimCause::TurnTerminal);
-        self.armed = false;
-        claims
-    }
-}
-
-impl Drop for PromptLease {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let claims = self
-            .lifecycle
-            .close_prompt_exact(&self.marker, ClaimCause::TurnTerminal);
-        self.lifecycle.enqueue_drop_claims(claims);
-        self.armed = false;
-    }
 }
 
 #[cfg(test)]

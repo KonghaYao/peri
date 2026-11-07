@@ -31,7 +31,7 @@ use crate::kit::atoms;
 /// finishes (or the request is dropped/cancelled).
 pub struct ThreadLoadRequest {
     thread_id: String,
-    _reservation: SessionLoadReservation,
+    reservation: SessionLoadReservation,
 }
 
 /// Synchronous producer boundary shared by the thread browser and the confirm
@@ -54,7 +54,7 @@ impl ThreadLoadDispatcher {
     pub fn send(&self, thread_id: String) -> Result<(), ThreadLoadDispatchError> {
         let request = ThreadLoadRequest {
             thread_id,
-            _reservation: self.client.reserve_session_load(),
+            reservation: self.client.reserve_session_load(),
         };
         self.tx.send(request).map_err(|_| ThreadLoadDispatchError)
     }
@@ -132,7 +132,7 @@ pub fn spawn_thread_load_consumer(
                                     drop(request);
                                     break;
                                 }
-                                result = handle_load(&acp_client, &cwd, thread_id) => result,
+                                result = handle_load(&acp_client, &cwd, thread_id, &request.reservation) => result,
                             };
                             // Explicitly keep the reservation alive across the load RPC.
                             drop(request);
@@ -156,6 +156,7 @@ async fn handle_load(
     acp_client: &AcpTuiClient,
     cwd: &str,
     thread_id: String,
+    reservation: &SessionLoadReservation,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if thread_id.trim().is_empty() {
         return Ok(());
@@ -169,7 +170,9 @@ async fn handle_load(
         thread_id = %thread_id,
         "thread_load_consumer: about to call load_session() for history replay",
     );
-    acp_client.load_session(&thread_id, cwd, None).await?;
+    acp_client
+        .load_reserved_session(reservation, &thread_id, cwd, None)
+        .await?;
     Ok(())
 }
 
