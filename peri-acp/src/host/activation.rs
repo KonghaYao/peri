@@ -36,7 +36,11 @@ pub(super) async fn pending_request(
     activation: &SessionActivation,
     mailbox: &AsyncResultMailbox,
 ) -> Option<ContinuationRequest> {
-    if state.closing || state.cancel_active || state.continuation_in_flight {
+    if state.closing
+        || state.cancel_active
+        || state.continuation_in_flight
+        || activation.recovery_launch_pending()
+    {
         return None;
     }
     let (mq_steering, pending_result) = if activation.can_activate(queue).await {
@@ -94,7 +98,18 @@ pub(super) fn ensure_listener(
         task_scope::HostTaskOwnerKind::Session,
         task_scope::HostTaskKind::SessionActivation,
         async move {
+            #[cfg(test)]
+            let mut first_poll = true;
             loop {
+                // 测试屏障：固定「监听器已启动、恢复续跑尚未提交」的窗口，验证
+                // 普通激活不会抢在恢复启动门之前为同一条提醒下单。
+                #[cfg(test)]
+                if std::mem::take(&mut first_poll) {
+                    super::prompt_dispatch::admission_gate::wait(&format!(
+                        "{session_id}:listener-first-poll"
+                    ))
+                    .await;
+                }
                 if cancellation.is_cancelled() || shutdown.is_cancelled() {
                     return;
                 }

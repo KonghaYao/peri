@@ -416,6 +416,7 @@ pub(crate) async fn run_continuation_scheduler(
         };
         if closing {
             mark_recovery_launch_failed(&cfg, &req);
+            finish_recovery_launch(&cfg, &req);
             continue;
         }
         let local = environment.as_ref().map(|env| &env.cfg).unwrap_or(&cfg);
@@ -425,6 +426,7 @@ pub(crate) async fn run_continuation_scheduler(
                 && !super::activation::result_allowed(local, &req.session_id).await)
         {
             mark_recovery_launch_failed(&cfg, &req);
+            finish_recovery_launch(&cfg, &req);
             continue;
         }
         let epoch = {
@@ -436,6 +438,7 @@ pub(crate) async fn run_continuation_scheduler(
         };
         let Some(epoch) = epoch else {
             mark_recovery_launch_failed(&cfg, &req);
+            finish_recovery_launch(&cfg, &req);
             continue;
         };
         info!(
@@ -451,11 +454,13 @@ pub(crate) async fn run_continuation_scheduler(
         let cfg2 = Arc::clone(&cfg);
         let transport2 = Arc::clone(&transport);
         let cont_tx2 = cont_tx.clone();
+        let task_req = req.clone();
         let admitted = task_spawner.spawn(
             HostTaskOwnerKind::Session,
             HostTaskKind::ContinuationTurn,
             async move {
                 let Some(cont_tx2) = cont_tx2.upgrade() else {
+                    finish_recovery_launch(&cfg2, &task_req);
                     return;
                 };
                 // dispatch_prompt_turn 在获取同一把 prompt lock 后校验 epoch 和
@@ -464,9 +469,9 @@ pub(crate) async fn run_continuation_scheduler(
                 let result = dispatch_prompt_turn(
                     params,
                     super::PromptOrigin::Continuation {
-                        mq_steering: req.mq_steering,
-                        pending_result: req.pending_result,
-                        recovery: req.recovery,
+                        mq_steering: task_req.mq_steering,
+                        pending_result: task_req.pending_result,
+                        recovery: task_req.recovery,
                     },
                     Some(epoch),
                     &sessions2,
@@ -479,6 +484,8 @@ pub(crate) async fn run_continuation_scheduler(
                 if let Err(error) = result {
                     tracing::error!(session_id = %session_id, code = error.code, error = %error.message, "continuation dispatch failed");
                 }
+                // 恢复续跑已结束（提交或早失败）或确定不会提交：解除普通激活抑制。
+                finish_recovery_launch(&cfg2, &task_req);
                 super::user_input::schedule_mailbox(
                     &session_id,
                     &sessions2,
@@ -492,6 +499,7 @@ pub(crate) async fn run_continuation_scheduler(
         if let Err(error) = admitted {
             tracing::error!(session_id = %req.session_id, error = ?error, "continuation task admission failed");
             mark_recovery_launch_failed(&cfg, &req);
+            finish_recovery_launch(&cfg, &req);
         }
     }
 }
@@ -505,6 +513,18 @@ fn mark_recovery_launch_failed(cfg: &AcpServerConfig, req: &ContinuationRequest)
     }
     if let Some(runtime) = cfg.session_manager.get_session(&req.session_id) {
         runtime.mark_recovery_launch_failed();
+    }
+}
+
+/// 恢复启动门已确定结束（提交准入、跳过或任务结束）：解除普通激活抑制。
+///
+/// 只由 recovery 请求触发；普通续跑没有启动门可释放。
+fn finish_recovery_launch(cfg: &AcpServerConfig, req: &ContinuationRequest) {
+    if !req.recovery {
+        return;
+    }
+    if let Some(runtime) = cfg.session_manager.get_session(&req.session_id) {
+        runtime.activation.finish_recovery_launch();
     }
 }
 

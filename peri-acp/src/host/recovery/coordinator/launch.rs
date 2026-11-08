@@ -42,11 +42,20 @@ impl HostSessionRecovery {
 
     /// 启动没有真正交出执行：按同代次快照撤销 Launched 占位。
     fn rollback_launch(&self, thread_id: &ThreadId, admission: &AdmittedRecovery) {
-        self.admitted.remove_if(thread_id, |_, current| {
-            current.generation == admission.generation
-                && current.session_id == admission.session_id
-                && current.phase == AdmissionPhase::Launched
-        });
+        let removed = self
+            .admitted
+            .remove_if(thread_id, |_, current| {
+                current.generation == admission.generation
+                    && current.session_id == admission.session_id
+                    && current.phase == AdmissionPhase::Launched
+            })
+            .is_some();
+        if removed {
+            // 本次启动门不再交出 recovery 续跑：解除普通激活抑制，下一次进入重试。
+            if let Some(runtime) = self.manager.get_session(&admission.session_id) {
+                runtime.activation.finish_recovery_launch();
+            }
+        }
     }
 
     /// 返回是否已把执行交给 continuation 调度器。

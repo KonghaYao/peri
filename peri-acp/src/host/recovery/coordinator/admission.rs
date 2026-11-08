@@ -172,25 +172,34 @@ impl HostSessionRecovery {
         if !activation.try_allow() {
             return Ok(ThreadOutcome::Skipped(RecoverySkipReason::Stopped));
         }
+        // 恢复启动门：从提醒采纳到 recovery 续跑取得准入期间，普通激活不得为同一条
+        // 提醒并发下单；否则两条续跑会在 prompt lock 上竞争，普通轮次的早失败会
+        // 污染恢复的工作意图。提交准入、调度器跳过或响应丢弃时解除。
+        activation.begin_recovery_launch();
         let mut settlement_seed = adopted_seed;
         let mut enqueued = None;
         if let Some(trusted) = trusted {
             // 提醒接纳要能通过 `pending_request` 的激活门：放行执行资格在启动前最后一次复核。
             let outcome = match queue.enqueue(reminder::queued_recovery(trusted)).await {
                 Ok(outcome) => outcome,
-                Err(error) => return self.thread_failure(thread, error.to_string(), fatal),
+                Err(error) => {
+                    activation.finish_recovery_launch();
+                    return self.thread_failure(thread, error.to_string(), fatal);
+                }
             };
             settlement_seed = Some(outcome.entry.id);
             // 入队也是异步窗口：结果若已换代或被 Stop，撤销本次提醒，不能把它带进
             // 新生命周期。存储不支持取消提醒时保留，下一次进入会采纳同一条。
             if let Some(reason) = self.post_admit_skip(session_id, before, &activation).await {
                 withdraw_new_reminder(&queue, &outcome).await;
+                activation.finish_recovery_launch();
                 return Ok(ThreadOutcome::Skipped(reason));
             }
             enqueued = Some(outcome);
         } else {
             // 采纳旧提醒：不重复入队；任务实时状态由当前 turn 的工具查询修正。
             if let Some(reason) = self.post_admit_skip(session_id, before, &activation).await {
+                activation.finish_recovery_launch();
                 return Ok(ThreadOutcome::Skipped(reason));
             }
         }
@@ -203,6 +212,7 @@ impl HostSessionRecovery {
                     if let Some(outcome) = &enqueued {
                         withdraw_new_reminder(&queue, outcome).await;
                     }
+                    activation.finish_recovery_launch();
                     return Ok(ThreadOutcome::Skipped(RecoverySkipReason::AlreadyRunning));
                 }
             }

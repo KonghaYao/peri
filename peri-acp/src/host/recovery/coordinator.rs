@@ -114,11 +114,20 @@ impl HostSessionRecovery {
     /// 执行证据，更新代次留下的准入也不能因旧报告被删。
     pub(crate) fn discard(&self, entered: &EnteredRecovery) {
         for (thread_id, admission) in &entered.admissions {
-            self.admitted.remove_if(thread_id, |_, entry| {
-                entry.generation == admission.generation
-                    && entry.session_id == admission.session_id
-                    && entry.phase == AdmissionPhase::Prepared
-            });
+            let removed = self
+                .admitted
+                .remove_if(thread_id, |_, entry| {
+                    entry.generation == admission.generation
+                        && entry.session_id == admission.session_id
+                        && entry.phase == AdmissionPhase::Prepared
+                })
+                .is_some();
+            if removed {
+                // 响应未能发出，启动门不会再交出 recovery 续跑：解除普通激活抑制。
+                if let Some(runtime) = self.manager.get_session(&admission.session_id) {
+                    runtime.activation.finish_recovery_launch();
+                }
+            }
         }
     }
 

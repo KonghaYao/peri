@@ -269,6 +269,143 @@ async fn early_failed_recovery_launch_retries_only_on_the_next_entry() {
     harness._mock.assert_async().await;
 }
 
+/// 2e-a. 启动失败不是用户 Stop：attach 之后的失败清理会取消本轮令牌，但终态
+///       必须保持 `working`，待处理恢复提醒保留，下一次显式进入仍能恢复。
+#[tokio::test]
+async fn startup_failure_without_stop_keeps_working_and_reminder() {
+    use peri_acp_types::session::{MessageKind, MessageSource, QueuedMessage};
+
+    let harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    harness.set_working(&thread_id).await;
+    harness
+        .queue(&thread_id)
+        .enqueue(QueuedMessage::system_reminder(
+            MessageKind::Defer,
+            MessageSource::SessionRecovery,
+            recovery_model_reminder(&thread_id),
+        ))
+        .await
+        .expect("恢复提醒必须入队");
+    // 移除冻结上下文：`run_prompt` 在 attach 之后失败，`InputAttemptGuard` Drop 的
+    // `fail_reserved` 会取消本轮令牌。整个过程没有 `session/cancel`。
+    let frozen = {
+        let mut states = harness.sessions.lock().await;
+        states
+            .get_mut(&thread_id)
+            .expect("session state is published")
+            .frozen
+            .take()
+    };
+    let error = dispatch_prompt_turn(
+        json!({
+            "sessionId": thread_id,
+            "prompt": [{"type": "text", "text": "hello"}],
+        }),
+        PromptOrigin::User,
+        None,
+        &harness.sessions,
+        &harness.locks,
+        &harness.transport,
+        &harness.cfg,
+        &harness.sender,
+    )
+    .await
+    .expect_err("缺少冻结上下文时用户 prompt 必须失败");
+    assert_eq!(error.code, -32603, "{error:?}");
+    assert!(!harness._mock.matched(), "失败必须在模型调用之前");
+    assert_eq!(
+        harness
+            .cfg
+            .session_resources
+            .load_session_meta(&thread_id.to_owned())
+            .await
+            .unwrap()
+            .work_state,
+        WorkState::Working,
+        "失败清理取消令牌不等于用户停止，不得写 stopped"
+    );
+    assert_eq!(
+        harness.recovery_rows(&thread_id).await.len(),
+        1,
+        "待处理的恢复提醒必须保留"
+    );
+
+    {
+        let mut states = harness.sessions.lock().await;
+        states
+            .get_mut(&thread_id)
+            .expect("session state is published")
+            .frozen = frozen;
+    }
+    let report = harness.recovery().enter(&thread_id).await.unwrap();
+    assert_eq!(
+        report.recovered,
+        vec![thread_id.clone()],
+        "没有 Stop 的启动失败不得阻断下一次恢复"
+    );
+}
+
+/// 2e-b. 恢复启动门先于普通激活：listener 首轮用屏障固定在恢复续跑已排入调度
+///       之后，释放后普通激活不得为同一条提醒再排一条竞争请求。
+#[tokio::test]
+async fn recovery_launch_holds_plain_activation_until_admitted() {
+    use crate::host::prompt_dispatch::admission_gate;
+
+    let mut harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    harness.set_working(&thread_id).await;
+    let recovery = harness.recovery();
+    let gate = admission_gate::install(&format!("{thread_id}:listener-first-poll"));
+
+    let report = recovery.enter(&thread_id).await.unwrap();
+    assert_eq!(report.recovered, vec![thread_id.clone()]);
+    // 移除冻结上下文：即使恢复续跑早失败，也必须由恢复来源自己记录；普通激活
+    // 不得抢在它之前为同一条提醒下单。
+    {
+        let mut states = harness.sessions.lock().await;
+        states
+            .get_mut(&thread_id)
+            .expect("session state is published")
+            .frozen = None;
+    }
+    recovery.launch(&report).await;
+
+    tokio::time::timeout(WAIT_TIMEOUT, gate.entered.notified())
+        .await
+        .expect("激活监听必须到达首轮屏障");
+    let first = harness
+        .receiver
+        .as_mut()
+        .expect("本用例不启动 scheduler")
+        .try_recv()
+        .expect("恢复续跑必须先于普通激活排入调度");
+    assert!(first.recovery, "第一个请求必须是恢复续跑: {first:?}");
+    assert!(first.mq_steering, "恢复续跑经 MQ steering 接管提醒");
+
+    gate.release.notify_one();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        harness
+            .receiver
+            .as_mut()
+            .expect("本用例不启动 scheduler")
+            .try_recv()
+            .is_err(),
+        "恢复续跑提交准入之前，普通激活不得为同一条提醒并发下单"
+    );
+    assert!(
+        harness
+            .cfg
+            .session_manager
+            .get_session(&thread_id)
+            .expect("session runtime is registered")
+            .activation
+            .recovery_launch_pending(),
+        "未提交的恢复启动门必须保持关闭"
+    );
+}
+
 /// 2f. 普通用户 prompt 的早失败不写恢复标记。
 #[tokio::test]
 async fn normal_user_prompt_early_failure_does_not_set_recovery_flag() {
@@ -718,6 +855,31 @@ async fn pending_recovery_is_found_behind_more_than_eight_defer_rows() {
         10,
         "采纳不得重复注入"
     );
+}
+
+/// 与真实恢复提醒同形状且模型可见的 Defer 提醒：只有模型可见才构成
+/// `ensure_processing`，收尾时才必须保留 `working`。
+fn recovery_model_reminder(
+    thread_id: &str,
+) -> peri_acp_types::system_reminder::TrustedSystemReminder {
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SystemReminder, TrustedSystemReminderFactory, SYSTEM_REMINDER_VERSION,
+    };
+    TrustedSystemReminderFactory::for_recovery()
+        .construct(SystemReminder {
+            version: SYSTEM_REMINDER_VERSION,
+            category: ReminderCategory::Lifecycle,
+            source: ReminderSource("session_recovery".to_owned()),
+            kind: "entry".to_owned(),
+            severity: ReminderSeverity::Warning,
+            delivery: ReminderDelivery::Required,
+            audiences: ReminderAudiences(vec![ReminderAudience::Model, ReminderAudience::Tui]),
+            body: "diagnostic notice".to_owned(),
+            summary: None,
+            metadata: serde_json::json!({"thread_id": thread_id}),
+        })
+        .expect("trusted recovery reminder")
 }
 
 /// 构造与真实恢复提醒同形状的可信提醒（来源/kind 由调用方经 QueuedMessage 指定）。

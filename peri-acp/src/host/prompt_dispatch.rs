@@ -210,6 +210,12 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             let token = tokio_util::sync::CancellationToken::new();
             state.cancel_token = Some(token.clone());
             admitted_cancel = Some(token);
+            // 用户/队列输入取得本轮准入：上一轮的显式 Stop 不再代表本轮。与 Stop
+            // 通知的 `suppress()` 共用 sessions 锁线性化，避免失败清理在后续被
+            // 误判成用户停止。
+            if let Some(runtime) = cfg.session_manager.get_session(&prompt_session_id) {
+                runtime.activation.begin_user_turn();
+            }
         }
     }
     #[cfg(test)]
@@ -334,6 +340,13 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
                 mark_recovery_launch_failed(cfg, &prompt_session_id);
             }
             return Ok(serde_json::Value::Null);
+        }
+        if recovery_origin {
+            // recovery 续跑已提交本轮准入：启动门可以让普通激活恢复观察新工作；
+            // 同一条恢复提醒已由本轮持有，不再并发下单。
+            if let Some(runtime) = cfg.session_manager.get_session(&prompt_session_id) {
+                runtime.activation.finish_recovery_launch();
+            }
         }
         #[cfg(test)]
         admission_gate::wait(&format!("{prompt_session_id}:committed")).await;
@@ -480,12 +493,14 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         Err(error) => (Err(error), None),
     };
 
-    // 本轮准入发布的令牌是否已在本轮移交执行器之前被取消（用户 Stop / close）。
-    // Stop 通知可能落在 working 提交与代次推进之间：它捕获旧代次，锁外持久化会被
-    // 代次守卫跳过，因此取消的准入必须在这里自行提交 `stopped`，不能只清内存令牌。
+    // 本轮准入发布的令牌是否已在本轮移交执行器之前被取消。取消本身不代表用户
+    // Stop：执行前失败清理（`InputAttemptGuard` Drop → `fail_reserved`）也会取消
+    // 同一令牌。只有显式 Stop/close 意图才能把本轮终态写成 `stopped`。
     let cancelled_before_handoff = admitted_cancel
         .as_ref()
         .is_some_and(|token| token.is_cancelled());
+    let stopped_before_handoff =
+        cancelled_before_handoff && explicit_stop_intent(cfg, sessions, &prompt_session_id).await;
     // `run_prompt` 在 attach 前失败时返回 `Ok(Null)`：本轮从未移交执行器，成功空操作
     // 同样要撤销本次准入发布的令牌，否则 close 会把空轮次误判为在飞（#196 P2 复审）。
     if matches!(&result, Ok(Value::Null)) {
@@ -496,7 +511,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             admitted_cancel.as_ref(),
         )
         .await;
-        if cancelled_before_handoff {
+        if stopped_before_handoff {
             persist_stopped_after_cancelled_admission(cfg, &prompt_session_id, &thread).await;
         }
     }
@@ -537,7 +552,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
                 // 根/child 的恢复启动 continuation。保留 working 与提醒，供下一次
                 // 显式进入重试；不能按普通中断回收成 idle。
                 let recovery_attempt = recovery_settlement_pending || recovery_origin;
-                if never_finished && cancelled_before_handoff && !recovery_attempt {
+                if never_finished && stopped_before_handoff && !recovery_attempt {
                     // 已取消且从未移交执行器：显式停止必须落库。恢复来源保留既有
                     // 「working + 提醒」语义，由恢复结算统一写终态（§5.3）。
                     stopped_thread = Some(state.thread_id.clone());
@@ -552,8 +567,9 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             }
         }
     }
-    // 取消发生在本轮移交执行器之前：Stop 通知捕获的是 working 提交前的代次，
+    // 显式 Stop 发生在本轮移交执行器之前：Stop 通知捕获的是 working 提交前的代次，
     // 其锁外持久化会被代次守卫跳过；这里由仍持有 turn 锁的本轮提交 `stopped`。
+    // 失败清理取消同一令牌不满足显式意图，不能走到这里。
     if let Some(thread_id) = stopped_thread {
         persist_stopped_after_cancelled_admission(
             cfg,
@@ -673,6 +689,29 @@ fn mark_recovery_launch_failed(cfg: &AcpServerConfig, session_id: &str) {
     if let Some(runtime) = cfg.session_manager.get_session(session_id) {
         runtime.mark_recovery_launch_failed();
     }
+}
+
+/// 本轮取消是否来自显式停止意图（用户 Stop / 会话关闭），而不是失败清理。
+///
+/// `activation.user_stop` 只由 `session/cancel` 的 `suppress()` 置位，并由新的
+/// 用户轮次准入或恢复放行清除；关闭意图直接读准入闸门事实。两者都不看令牌
+/// 状态，避免 `fail_reserved` 的清理取消被当成用户停止。
+async fn explicit_stop_intent(
+    cfg: &AcpServerConfig,
+    sessions: &SharedSessions,
+    session_id: &str,
+) -> bool {
+    if cfg
+        .session_manager
+        .get_session(session_id)
+        .is_some_and(|runtime| runtime.activation.user_stopped())
+    {
+        return true;
+    }
+    let states = sessions.lock().await;
+    states
+        .get(session_id)
+        .is_some_and(|state| state.closing || state.close_in_flight > 0)
 }
 
 /// 回滚本轮在准入段发布的内存标记。
