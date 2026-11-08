@@ -141,6 +141,7 @@ describe("B10–B12 actual TurnDone, continuation cancellation and process resta
         await second.waitFor(healthy(ctx, (screen) => screen.includes("Total:")), "restarted Tasks panel is loaded");
         expect(await second.screen()).not.toContain("[running]"); expect(await second.screen()).not.toContain("[reconnecting]");
         await second.save("no-resurrected-background-task"); await second.key("Escape");
+        await second.waitFor(healthy(ctx, (screen) => !screen.includes("─ Tasks ─")), "Tasks panel is actually closed before further input", 10_000);
         expect(ctx.requests.length).toBe(before); await assertFile(ctx, "b12-once.txt", "B12_CHILD_WROTE_ONCE\n");
         actors.arm("turn-2"); await second.prompt("Execute B12 verify stored history."); await completed(ctx, second, "B12_RESTART_HISTORY_VERIFIED");
         await assertOsc(second, "done", "new-explicit-turn-done"); expect(persistedTrace(ctx).children).toHaveLength(1);
