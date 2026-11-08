@@ -31,7 +31,7 @@ fn test_bind_linked_agent_id_on_bg_subagent_started() {
     });
     upsert_identity_from_started("task-1", "agent", "job", None);
     bind_registered_child("task-1", Some("agent-99"), None);
-    let bound = bind_linked_agent_on_subagent_started("agent-99", "coder", Some("run"));
+    let bound = bind_linked_agent_on_subagent_started("agent-99", "coder", Some("run"), None);
     assert_eq!(bound.as_deref(), Some("task-1"));
     assert_eq!(
         BG_DISPLAY.state().read()[0].linked_agent_id.as_deref(),
@@ -56,7 +56,7 @@ fn uncorrelated_child_never_claims_an_unbound_background_row() {
         completed_at: None,
     });
     assert!(
-        bind_linked_agent_on_subagent_started("unrelated-child", "same worker", Some("run"))
+        bind_linked_agent_on_subagent_started("unrelated-child", "same worker", Some("run"), None)
             .is_none()
     );
     assert!(BG_DISPLAY.state().read()[0].linked_agent_id.is_none());
@@ -200,13 +200,13 @@ fn identity_refresh_and_duplicate_bind_preserve_the_current_agent_mapping() {
     }
     bind_registered_child("other", Some("child"), None);
     assert_eq!(
-        bind_linked_agent_on_subagent_started("child", "coder", Some("first-run")).as_deref(),
+        bind_linked_agent_on_subagent_started("child", "coder", Some("first-run"), None).as_deref(),
         Some("other")
     );
     crate::kit::bg_task_live::init_agent_live_detail("other", "child", "coder", Some("first-run"));
     upsert_identity_from_started("other", "agent", &"工作🙂".repeat(8192), None);
     assert_eq!(
-        bind_linked_agent_on_subagent_started("child", "coder", Some("first-run")).as_deref(),
+        bind_linked_agent_on_subagent_started("child", "coder", Some("first-run"), None).as_deref(),
         Some("other")
     );
     let identities = BG_TASK_IDENTITY.state();
@@ -240,7 +240,7 @@ fn resumed_child_binds_new_task_before_the_previous_bg_completion_arrives() {
     upsert_identity_from_started("old-task", "agent", "old", None);
     bind_registered_child("old-task", Some("child"), None);
     assert_eq!(
-        bind_linked_agent_on_subagent_started("child", "coder", Some("old-run")).as_deref(),
+        bind_linked_agent_on_subagent_started("child", "coder", Some("old-run"), None).as_deref(),
         Some("old-task")
     );
     crate::kit::bg_task_live::init_agent_live_detail("old-task", "child", "coder", Some("old-run"));
@@ -251,7 +251,7 @@ fn resumed_child_binds_new_task_before_the_previous_bg_completion_arrives() {
     upsert_identity_from_started("new-task", "agent", "new", None);
     bind_registered_child("new-task", Some("child"), None);
     assert_eq!(
-        bind_linked_agent_on_subagent_started("child", "coder", Some("new-run")).as_deref(),
+        bind_linked_agent_on_subagent_started("child", "coder", Some("new-run"), None).as_deref(),
         Some("new-task")
     );
     crate::kit::bg_task_live::init_agent_live_detail("new-task", "child", "coder", Some("new-run"));

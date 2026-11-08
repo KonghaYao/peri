@@ -719,3 +719,134 @@ async fn live_snapshot_row_consumes_started_first_occurrence_before_next_row() {
     atoms::PROGRAM_STATUS.set(old_program);
     *atoms::BG_TASK_REVISION.state().write() = old_revision;
 }
+
+/// A snapshot-created row has no current-turn instance. If the old Stop is
+/// missed and the next child Started arrives before its registry row, the old
+/// row must not be relabelled with the new run.
+#[tokio::test]
+#[serial]
+async fn snapshot_bound_old_row_does_not_steal_new_child_started() {
+    let _restore = ReplayAtomsGuard::new();
+    let old_active = atoms::ACTIVE_SESSION_ID.state().read().clone();
+    let old_reset = atoms::BRIDGE_RESET_COUNTER.get();
+    let old_tasks = atoms::BG_TASKS.state().read().clone();
+    let old_display = atoms::BG_DISPLAY.state().read().clone();
+    let old_live = atoms::BG_LIVE_DETAIL.state().read().clone();
+    let old_identity = atoms::BG_TASK_IDENTITY.state().read().clone();
+    let old_agent_ids = atoms::BG_AGENT_IDS.state().read().clone();
+    let old_notification = atoms::NOTIFICATION.state().write().take();
+    let old_program = *atoms::PROGRAM_STATUS.state().read();
+    let old_revision = *atoms::BG_TASK_REVISION.state().read();
+
+    let epoch = old_reset.wrapping_add(1);
+    atoms::ACTIVE_SESSION_ID.set("s1".into());
+    atoms::BRIDGE_RESET_COUNTER.set(epoch);
+    let (tx, rx) = mpsc::channel(32);
+    let (observed_tx, mut observed) = mpsc::unbounded_channel();
+    let shutdown = CancellationToken::new();
+    let bridge = spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
+
+    let old = shared_child_run(31);
+    let mut current = shared_child_run(32);
+    // 旧 run 由 snapshot 建行并绑定 31，旧 Stop 丢失，行上没有 instance。
+    assert!(send(&tx, &mut observed, shared_child_start(), &old, epoch).await);
+    assert!(
+        send(
+            &tx,
+            &mut observed,
+            live_snapshot(1, vec![snapshot_task("bg-old", "shared-child")]),
+            &old,
+            epoch
+        )
+        .await
+    );
+    assert_eq!(
+        atoms::BG_TASK_IDENTITY.state().read()["bg-old"].run_order,
+        Some(31)
+    );
+    // 新 child Started 先于其 registry 行到达。
+    assert!(send(&tx, &mut observed, shared_child_start(), &current, epoch).await);
+    assert_eq!(
+        atoms::BG_TASK_IDENTITY.state().read()["bg-old"].run_order,
+        Some(31),
+        "旧行不得被新 run 覆盖"
+    );
+    // 新 registry 行取走 32 并完成自己的生命周期。
+    assert!(
+        send(
+            &tx,
+            &mut observed,
+            registry_started_at("bg-new", "shared-child", 2),
+            &old,
+            epoch
+        )
+        .await
+    );
+    assert_eq!(
+        atoms::BG_TASK_IDENTITY.state().read()["bg-new"].run_order,
+        Some(32)
+    );
+    current.sequence = 2;
+    assert!(
+        send(
+            &tx,
+            &mut observed,
+            AcpEventData::TextChunk(TuiTextChunk {
+                text: "new run output".into(),
+                message_id: None,
+                agent_id: Some("shared-child".into()),
+            }),
+            &current,
+            epoch
+        )
+        .await
+    );
+    current.sequence = 3;
+    assert!(
+        send(
+            &tx,
+            &mut observed,
+            AcpEventData::SubagentStopped {
+                agent_id: "shared-child".into(),
+                result: "new done".into(),
+                is_error: false,
+            },
+            &current,
+            epoch
+        )
+        .await
+    );
+    {
+        let live = atoms::BG_LIVE_DETAIL.state();
+        let live = live.read();
+        assert_eq!(live["bg-new"].status, atoms::BgLiveStatus::Succeeded);
+        assert_eq!(live["bg-old"].status, atoms::BgLiveStatus::Running);
+        let text: String = live["bg-new"]
+            .nested_units
+            .iter()
+            .filter_map(|unit| match unit {
+                TuiRenderUnit::TuiAssistantBubble(bubble) => Some(bubble.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "new run output");
+    }
+    let tasks = atoms::BG_TASKS.state();
+    let tasks = tasks.read();
+    assert!(tasks.iter().any(|task| task.task_id == "bg-old"));
+    assert!(!tasks.iter().any(|task| task.task_id == "bg-new"));
+    drop(tasks);
+
+    shutdown.cancel();
+    bridge.await.unwrap();
+    atoms::ACTIVE_SESSION_ID.set(old_active);
+    atoms::BRIDGE_RESET_COUNTER.set(old_reset);
+    atoms::BG_TASKS.set(old_tasks);
+    atoms::BG_DISPLAY.set(old_display);
+    atoms::BG_LIVE_DETAIL.set(old_live);
+    atoms::BG_TASK_IDENTITY.set(old_identity);
+    atoms::BG_AGENT_IDS.set(old_agent_ids);
+    atoms::NOTIFICATION.set(old_notification);
+    atoms::PROGRAM_STATUS.set(old_program);
+    *atoms::BG_TASK_REVISION.state().write() = old_revision;
+}

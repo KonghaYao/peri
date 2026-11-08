@@ -29,6 +29,7 @@ pub fn bind_linked_agent_on_subagent_started(
     agent_id: &str,
     agent_name: &str,
     instance_id: Option<&str>,
+    run_order: Option<u64>,
 ) -> Option<String> {
     // A missing old Stop can leave its detail Running. Only the same display
     // occurrence proves a duplicate; a new run must claim its new unbound row.
@@ -53,11 +54,26 @@ pub fn bind_linked_agent_on_subagent_started(
         .collect();
     let display_store = BG_DISPLAY.state();
     let task_id = {
+        // A row that already owns another run (or knows a newer floor) must not
+        // be relabelled by this Started. Snapshot-created rows have no instance,
+        // so without this check a missed old Stop lets the new run overwrite
+        // the old row and leaves its own registry row unbound.
+        let identities_store = BG_TASK_IDENTITY.state();
+        let identities = identities_store.read();
+        let can_claim = |task_id: &str| {
+            run_order.is_none_or(|run| {
+                identities.get(task_id).is_none_or(|identity| {
+                    identity.run_order.is_none_or(|known| known == run)
+                        && identity.run_floor.is_none_or(|floor| run > floor)
+                })
+            })
+        };
         let display = display_store.read();
         if let Some(existing) = display.iter().rev().find(|entry| {
             entry.is_active
                 && entry.linked_agent_id.as_deref() == Some(agent_id)
                 && same_run_tasks.contains(&entry.id)
+                && can_claim(&entry.id)
         }) {
             existing.id.clone()
         } else {
@@ -65,6 +81,7 @@ pub fn bind_linked_agent_on_subagent_started(
                 entry.is_active
                     && entry.linked_agent_id.as_deref() == Some(agent_id)
                     && !claimed_tasks.contains(&entry.id)
+                    && can_claim(&entry.id)
             })?;
             entry.id.clone()
         }

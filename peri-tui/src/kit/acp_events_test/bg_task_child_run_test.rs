@@ -623,3 +623,274 @@ fn ambiguous_snapshot_occurrences_never_bind_a_later_row() {
     assert!(tasks.iter().any(|task| task.task_id == "bg-current"));
     assert!(tasks.iter().any(|task| task.task_id == "bg-next"));
 }
+
+fn task_entry_with_status(task_id: &str, child: &str, status: &str) -> BgTaskEntry {
+    let mut entry = task_entry(task_id, child);
+    entry.status = Some(status.into());
+    entry
+}
+
+fn bg_started() -> AcpEventData {
+    AcpEventData::SubagentStarted {
+        agent_id: "shared-child".into(),
+        agent_name: "coder".into(),
+        is_background: true,
+        parent_tool_call_id: None,
+    }
+}
+
+fn bg_text(text: &str) -> AcpEventData {
+    AcpEventData::TextChunk(TuiTextChunk {
+        text: text.into(),
+        message_id: None,
+        agent_id: Some("shared-child".into()),
+    })
+}
+
+fn bg_stopped(result: &str) -> AcpEventData {
+    AcpEventData::SubagentStopped {
+        agent_id: "shared-child".into(),
+        result: result.into(),
+        is_error: false,
+    }
+}
+
+#[test]
+#[serial]
+fn terminal_snapshot_row_does_not_leave_old_occurrence_for_next_row() {
+    let _restore = RestoreBgAtoms::empty();
+    let mut state = make_fold_test_state();
+    let mut old = origin("shared-child", 31);
+
+    // 旧 child Started 先到；revision gap 时旧任务已终态，快照没有 active 行。
+    dispatch_run(&mut state, &old, bg_started());
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskSnapshot {
+            tasks: vec![task_entry_with_status(
+                "bg-old",
+                "shared-child",
+                "completed",
+            )],
+            revision: Some(1),
+            source: BgTaskSnapshotSource::Live,
+        },
+    );
+    assert!(
+        state
+            .child_runs
+            .take_unbound_start("shared-child")
+            .is_none(),
+        "snapshot 已解释的旧 occurrence 不得留在队列"
+    );
+    // 后续 registry 行不得取走旧 31。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskStarted(task_entry("bg-new", "shared-child")),
+    );
+    {
+        let identities = BG_TASK_IDENTITY.state();
+        let identities = identities.read();
+        assert_eq!(identities["bg-new"].run_order, None);
+        assert_eq!(identities["bg-new"].run_floor, Some(31));
+    }
+    // 延迟旧 Stop 只能命中旧终态行，不能结算 bg-new。
+    old.sequence += 1;
+    dispatch_run(&mut state, &old, bg_stopped("old done"));
+    {
+        let live = BG_LIVE_DETAIL.state();
+        let live = live.read();
+        assert_eq!(
+            live["bg-new"].status,
+            crate::kit::atoms::BgLiveStatus::Running
+        );
+    }
+    assert!(
+        BG_TASKS
+            .state()
+            .read()
+            .iter()
+            .any(|task| task.task_id == "bg-new")
+    );
+
+    // 新 run 的 Started/文本/Stop 仍完整归属 bg-new。
+    let mut new = origin("shared-child", 32);
+    dispatch_run(&mut state, &new, bg_started());
+    assert_eq!(
+        BG_TASK_IDENTITY.state().read()["bg-new"].run_order,
+        Some(32)
+    );
+    new.sequence += 1;
+    dispatch_run(&mut state, &new, bg_text("new run output"));
+    new.sequence += 1;
+    dispatch_run(&mut state, &new, bg_stopped("new done"));
+    {
+        let live = BG_LIVE_DETAIL.state();
+        let live = live.read();
+        assert_eq!(
+            live["bg-new"].status,
+            crate::kit::atoms::BgLiveStatus::Succeeded
+        );
+        assert_eq!(bubbles(&live["bg-new"]), "new run output");
+    }
+    assert!(
+        !BG_TASKS
+            .state()
+            .read()
+            .iter()
+            .any(|task| task.task_id == "bg-new")
+    );
+}
+
+#[test]
+#[serial]
+fn terminal_and_active_snapshot_rows_do_not_bind_old_occurrence_to_new_row() {
+    let _restore = RestoreBgAtoms::empty();
+    let mut state = make_fold_test_state();
+    let mut old = origin("shared-child", 31);
+
+    dispatch_run(&mut state, &old, bg_started());
+    // 快照同时包含旧终态行与复用同一 child 的新 active 行。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskSnapshot {
+            tasks: vec![
+                task_entry_with_status("bg-old", "shared-child", "completed"),
+                task_entry("bg-new", "shared-child"),
+            ],
+            revision: Some(1),
+            source: BgTaskSnapshotSource::Live,
+        },
+    );
+    assert!(
+        state
+            .child_runs
+            .take_unbound_start("shared-child")
+            .is_none(),
+        "snapshot 行已能解释的旧 occurrence 不得留在队列"
+    );
+    {
+        let identities = BG_TASK_IDENTITY.state();
+        let identities = identities.read();
+        assert_eq!(
+            identities["bg-new"].run_order, None,
+            "旧 occurrence 不得绑定新行"
+        );
+        assert_eq!(identities["bg-new"].run_floor, Some(31));
+    }
+    // 旧 Stop 不得结算 bg-new。
+    old.sequence += 1;
+    dispatch_run(&mut state, &old, bg_stopped("old done"));
+    {
+        let live = BG_LIVE_DETAIL.state();
+        let live = live.read();
+        assert_eq!(
+            live["bg-new"].status,
+            crate::kit::atoms::BgLiveStatus::Running
+        );
+    }
+    assert!(
+        BG_TASKS
+            .state()
+            .read()
+            .iter()
+            .any(|task| task.task_id == "bg-new")
+    );
+
+    // 后续自己的 run 仍正常归属 bg-new。
+    let mut new = origin("shared-child", 32);
+    dispatch_run(&mut state, &new, bg_started());
+    assert_eq!(
+        BG_TASK_IDENTITY.state().read()["bg-new"].run_order,
+        Some(32)
+    );
+    new.sequence += 1;
+    dispatch_run(&mut state, &new, bg_text("new run output"));
+    new.sequence += 1;
+    dispatch_run(&mut state, &new, bg_stopped("new done"));
+    {
+        let live = BG_LIVE_DETAIL.state();
+        let live = live.read();
+        assert_eq!(
+            live["bg-new"].status,
+            crate::kit::atoms::BgLiveStatus::Succeeded
+        );
+        assert_eq!(bubbles(&live["bg-new"]), "new run output");
+    }
+}
+
+#[test]
+#[serial]
+fn older_terminal_snapshot_row_does_not_block_new_run_before_registry_row() {
+    let _restore = RestoreBgAtoms::empty();
+    let mut state = make_fold_test_state();
+    let old = origin("shared-child", 30);
+
+    // 旧任务先绑定 run30 并完成；其终态仍会出现在后续 live snapshot 中。
+    dispatch_run(&mut state, &old, bg_started());
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskStarted(task_entry("bg-old", "shared-child")),
+    );
+    assert_eq!(
+        BG_TASK_IDENTITY.state().read()["bg-old"].run_order,
+        Some(30)
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskCompleted {
+            task_id: "bg-old".into(),
+            kind: Some("agent".into()),
+            success: true,
+            duration_ms: 1,
+            output_preview: None,
+            revision: None,
+        },
+    );
+
+    // 新 run31 的 child Started 先于它的 registry 行到达。
+    let mut new = origin("shared-child", 31);
+    dispatch_run(&mut state, &new, bg_started());
+    assert_eq!(
+        state.child_runs.pending_run_ceiling("shared-child"),
+        Some(31)
+    );
+
+    // 快照含旧终态行与新 active 行；31 严格新于已知 run30，仍应绑定新行。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskSnapshot {
+            tasks: vec![
+                task_entry_with_status("bg-old", "shared-child", "completed"),
+                task_entry("bg-new", "shared-child"),
+            ],
+            revision: Some(1),
+            source: BgTaskSnapshotSource::Live,
+        },
+    );
+    assert!(
+        state
+            .child_runs
+            .take_unbound_start("shared-child")
+            .is_none(),
+        "可归属新行的 occurrence 不应留在队列"
+    );
+    assert_eq!(
+        BG_TASK_IDENTITY.state().read()["bg-new"].run_order,
+        Some(31)
+    );
+
+    new.sequence += 1;
+    dispatch_run(&mut state, &new, bg_text("new run output"));
+    new.sequence += 1;
+    dispatch_run(&mut state, &new, bg_stopped("new done"));
+    {
+        let live = BG_LIVE_DETAIL.state();
+        let live = live.read();
+        assert_eq!(
+            live["bg-new"].status,
+            crate::kit::atoms::BgLiveStatus::Succeeded
+        );
+        assert_eq!(bubbles(&live["bg-new"]), "new run output");
+    }
+}

@@ -41,9 +41,12 @@ pub(super) fn handle_subagent_started(
             .current_turn
             .subagent_instance_id(agent_id)
             .map(str::to_string);
-        if let Some(task_id) =
-            bind_linked_agent_on_subagent_started(agent_id, agent_name, instance_id.as_deref())
-        {
+        if let Some(task_id) = bind_linked_agent_on_subagent_started(
+            agent_id,
+            agent_name,
+            instance_id.as_deref(),
+            origin.map(|origin| origin.run_order),
+        ) {
             init_agent_live_detail(&task_id, agent_id, agent_name, instance_id.as_deref());
             if let Some(origin) = origin {
                 bind_task_run(&task_id, origin.run_order);

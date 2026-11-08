@@ -143,49 +143,107 @@ fn apply_bg_task_snapshot_with_routing(
     true
 }
 
+/// One snapshot row's known child occurrence. Terminal rows matter because a
+/// full snapshot includes completed tasks for the same child.
+struct SnapshotRow<'a> {
+    task_id: &'a str,
+    active: bool,
+    run_order: Option<u64>,
+    known: Option<u64>,
+}
+
 /// Pair live snapshot rows with child occurrences already seen without a row.
 ///
-/// One visible row and one pending occurrence is the Started-first case the
-/// occurrence exists for. Anything else is ambiguous: retire the occurrences
-/// into a floor so they cannot be claimed by a later, unrelated row, while
-/// occurrences newer than every visible row stay queued for a row that has not
+/// Every row for the child is evidence, not only the active one: a terminal row
+/// can already account for an old occurrence, and binding that occurrence to a
+/// newer row is what lets a delayed Stop end the new task. One active row and
+/// one occurrence is still the Started-first case, but only when no other row
+/// could own the occurrence. An occurrence that is not strictly newer than a
+/// known run/floor is retired into a floor and never handed to a later row;
+/// only a provably newer occurrence stays queued for a row that has not
 /// arrived yet.
 fn snapshot_pending_runs(
     tasks: &[BgTaskEntry],
     routing: &mut ChildRunRouting,
 ) -> HashMap<String, PendingChildRun> {
-    let mut rows_by_child: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut rows_by_child: HashMap<&str, Vec<SnapshotRow<'_>>> = HashMap::new();
     for task in tasks {
         let Some(child) = task.child_thread_id.as_deref() else {
             continue;
         };
-        if BgTaskStatus::classify(task.status.as_deref()).is_active() {
-            rows_by_child.entry(child).or_default().push(&task.task_id);
-        }
+        let (run_order, known) = {
+            let identities = BG_TASK_IDENTITY.state();
+            let identities = identities.read();
+            identities
+                .get(&task.task_id)
+                .map_or((None, None), |identity| {
+                    (
+                        identity.run_order,
+                        identity
+                            .run_order
+                            .into_iter()
+                            .chain(identity.run_floor)
+                            .max(),
+                    )
+                })
+        };
+        rows_by_child.entry(child).or_default().push(SnapshotRow {
+            task_id: &task.task_id,
+            active: BgTaskStatus::classify(task.status.as_deref()).is_active(),
+            run_order,
+            known,
+        });
     }
     let mut pending = HashMap::new();
-    for (child, task_ids) in rows_by_child {
+    for (child, rows) in rows_by_child {
         let occurrences = routing.drain_unbound_starts(child);
         if occurrences.is_empty() {
             continue;
         }
-        let runs: Vec<Option<u64>> = task_ids
-            .iter()
-            .map(|task_id| {
-                BG_TASK_IDENTITY
-                    .state()
-                    .read()
-                    .get(*task_id)
-                    .and_then(|identity| identity.run_order)
-            })
-            .collect();
-        let bound_ceiling = runs.iter().flatten().copied().max();
-        let (future, retired): (Vec<_>, Vec<_>) = match bound_ceiling {
-            Some(ceiling) => occurrences
-                .into_iter()
-                .partition(|run| run.run_order > ceiling),
-            None => (Vec::new(), occurrences),
-        };
+        // Known run/floor values also include rows that have fallen out of the
+        // bounded snapshot; an occurrence at or below any of them is explained.
+        let mut known_ceiling = rows.iter().filter_map(|row| row.known).max();
+        {
+            let identities = BG_TASK_IDENTITY.state();
+            let identities = identities.read();
+            for identity in identities
+                .values()
+                .filter(|identity| identity.agent_id.as_deref() == Some(child))
+            {
+                for known in identity.run_order.into_iter().chain(identity.run_floor) {
+                    known_ceiling = Some(known_ceiling.map_or(known, |current| current.max(known)));
+                }
+            }
+        }
+        let unaccounted_row = rows.iter().any(|row| row.known.is_none());
+        let unaccounted_terminal = rows.iter().any(|row| !row.active && row.known.is_none());
+        let active_rows: Vec<_> = rows.iter().filter(|row| row.active).collect();
+        // Started-first shortcut: exactly one visible active row, exactly one
+        // occurrence, and no terminal row that could own the occurrence instead.
+        if !unaccounted_terminal
+            && active_rows.len() == 1
+            && active_rows[0].run_order.is_none()
+            && occurrences.len() == 1
+            && known_ceiling.is_none_or(|known| occurrences[0].run_order > known)
+        {
+            pending.insert(
+                active_rows[0].task_id.to_owned(),
+                PendingChildRun::Bind(occurrences[0]),
+            );
+            continue;
+        }
+        let mut future = Vec::new();
+        let mut retired = Vec::new();
+        for run in occurrences {
+            // An unaccounted visible row could own this occurrence. Only when
+            // every visible row has a known run can a strictly newer
+            // occurrence belong to a row that has not arrived yet.
+            if !unaccounted_row && known_ceiling.is_some_and(|known| run.run_order > known) {
+                future.push(run);
+            } else {
+                retired.push(run);
+            }
+        }
         for run in future {
             routing.restore_unbound_start(child, run);
         }
@@ -197,12 +255,11 @@ fn snapshot_pending_runs(
             .map(|run| run.run_order)
             .max()
             .unwrap_or_default();
-        if task_ids.len() == 1 && runs[0].is_none() && retired.len() == 1 {
-            pending.insert(task_ids[0].to_owned(), PendingChildRun::Bind(retired[0]));
-        } else {
-            for task_id in task_ids {
-                pending.insert(task_id.to_owned(), PendingChildRun::Floor(max_retired));
-            }
+        // Floor every row, including terminal ones: with no active row left,
+        // this is the only thing that keeps a delayed Stop from falling back to
+        // a later registry row.
+        for row in &rows {
+            pending.insert(row.task_id.to_owned(), PendingChildRun::Floor(max_retired));
         }
     }
     pending
