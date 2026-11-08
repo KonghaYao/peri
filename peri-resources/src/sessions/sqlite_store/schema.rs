@@ -505,10 +505,20 @@ pub(super) async fn migrate_v15_cleanup(connection: &mut SqliteConnection) -> Re
         )
         .into());
     }
-    // 4. 退役的派生索引表（payload 先于 snapshot）。`IF EXISTS` 让从未建过它们的库幂等。
-    for statement in canonical::DROP_INHERITED_INDEX_TABLES {
-        // 语句文本来自 `canonical` 的静态清单，不含外部输入。
-        sqlx::query(AssertSqlSafe((*statement).to_owned()))
+    // 4. 退役的派生索引表（payload 先于 snapshot）。删除前先读**实际形状**：
+    //    同名异形的表不是迁移认识的对象，拒绝并回滚整段（`user_version` 保持原值）。
+    //    缺表合法（派生索引在 v14 即可选，远端从未建过），此时跳过删除。
+    let retired =
+        schema_shape::read_local_columns(&mut *connection, schema_shape::DROPPED_COLUMNS_SQL)
+            .await?;
+    let retired_drops = schema_shape::inherited_retirement_plan(&retired).map_err(|reason| {
+        WorkspaceError::DiscoveryError(format!(
+            "schema v15 refuses to drop a foreign inherited table: {reason}"
+        ))
+    })?;
+    for statement in retired_drops {
+        // 语句文本来自 `schema_shape` 的静态清单，不含外部输入。
+        sqlx::query(AssertSqlSafe(statement.to_owned()))
             .execute(&mut *connection)
             .await?;
     }

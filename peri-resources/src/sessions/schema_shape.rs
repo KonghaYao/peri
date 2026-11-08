@@ -857,6 +857,35 @@ pub(super) fn check_input_shape(tables: &HashMap<String, Vec<ActualColumn>>) -> 
     Ok(())
 }
 
+/// v15 退役的两张 inherited 派生索引表：先判定形状，再给出实际要下发的删除。
+///
+/// 与 [`dropped_plan`] 分开，是因为 v15 清理作用在**当前形状**的库上，那里
+/// `mcp_oauth_credentials` 已是 workspace 作用域的新形状——按完整的迁移期删除清单判定
+/// 会把它误判成同名异形。这里只覆盖两张派生表：
+///
+/// - 缺表合法（远端从未建过派生索引，本机也可能手工删过）；
+/// - 存在时必须与 v14 冻结声明逐列相符，同名异形的表**不删**并拒绝整段升级。
+pub(super) fn inherited_retirement_plan(
+    tables: &HashMap<String, Vec<ActualColumn>>,
+) -> Result<Vec<&'static str>, String> {
+    let mut plan = Vec::new();
+    for table in DROPPED_TABLES
+        .iter()
+        .filter(|table| table.shape.name.starts_with("inherited_"))
+    {
+        let actual = tables
+            .get(table.shape.name)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        if actual.is_empty() {
+            continue;
+        }
+        check_strict(&table.shape, actual)?;
+        plan.push(table.drop_sql);
+    }
+    Ok(plan)
+}
+
 /// 按 `(表名, 列名, NOT NULL, 主键)` 的四列读取结果分组为逐表列序列。
 ///
 /// 生产读取语句是[`CURRENT_COLUMNS_SQL`] / [`INPUT_COLUMNS_SQL`]（自带 `cid` 排序），

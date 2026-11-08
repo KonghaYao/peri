@@ -318,3 +318,123 @@ async fn legacy_identity_json_stays_readable() {
         Some(std::path::PathBuf::from("/work/.git"))
     );
 }
+
+/// 退役列删除前的形状守卫：同名异形的 `inherited_*` 表不是迁移认识的对象。
+///
+/// 与计划 §3.6 一致：存在但形状不符 → 拒绝、回滚、库保持 14，原表与数据不动。
+#[tokio::test]
+async fn foreign_shaped_inherited_tables_refuse_the_upgrade() {
+    let (_directory, path) = v14_fixture().await;
+    {
+        let mut connection = connect(&path).await;
+        sqlx::raw_sql(
+            "DROP TABLE inherited_payload_index;
+             DROP TABLE inherited_snapshot_index;
+             CREATE TABLE inherited_payload_index (
+                 snapshot_id TEXT PRIMARY KEY, totally_other_column TEXT);
+             CREATE TABLE inherited_snapshot_index (whatever TEXT);",
+        )
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        connection.close().await.unwrap();
+    }
+    let error = SqliteThreadStore::new(&path).await.err().unwrap();
+    let message = error.to_string();
+    assert!(
+        message.contains("refuses to drop a foreign inherited table"),
+        "错误必须说明拒绝删除同名异形表: {message}"
+    );
+    assert!(
+        message.contains("inherited_"),
+        "错误必须报出具体表名: {message}"
+    );
+
+    // 失败回滚：版本 14、会话数据与两张表原样保留。
+    let mut connection = connect(&path).await;
+    let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(version, 14, "拒绝后版本必须保持 14");
+    let tables: Vec<(String,)> = sqlx::query_as(
+        "SELECT name FROM sqlite_schema WHERE type = 'table'
+         AND name IN ('inherited_payload_index', 'inherited_snapshot_index') ORDER BY name",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(
+        tables
+            .iter()
+            .map(|(name,)| name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["inherited_payload_index", "inherited_snapshot_index"],
+        "同名异形表不得被删除"
+    );
+    let (threads,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM threads")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(threads, 2, "会话行不得因回滚丢失");
+    let (messages,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM messages")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(messages, 1, "历史不得因回滚丢失");
+    let violations: Vec<(String, i64, String, i64)> = sqlx::query_as("PRAGMA foreign_key_check")
+        .fetch_all(&mut connection)
+        .await
+        .unwrap();
+    assert!(violations.is_empty(), "{violations:?}");
+}
+
+/// 缺表合法：派生索引在 v14 即可选，升级照常完成。
+#[tokio::test]
+async fn missing_inherited_tables_upgrade_cleanly() {
+    let (_directory, path) = v14_fixture().await;
+    {
+        let mut connection = connect(&path).await;
+        sqlx::raw_sql(
+            "DROP TABLE inherited_payload_index;
+             DROP TABLE inherited_snapshot_index;",
+        )
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        connection.close().await.unwrap();
+    }
+    SqliteThreadStore::new(&path).await.unwrap().close().await;
+    let mut connection = connect(&path).await;
+    let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(version, canonical::CURRENT_SCHEMA_VERSION);
+    let (threads,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM threads")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(threads, 2);
+}
+
+/// 正确 v14 形状 → 两表被删除、版本推进（与 `v14_to_v15_...` 共同覆盖成功路径）。
+#[tokio::test]
+async fn correctly_shaped_inherited_tables_are_dropped() {
+    let (_directory, path) = v14_fixture().await;
+    SqliteThreadStore::new(&path).await.unwrap().close().await;
+    let mut connection = connect(&path).await;
+    let tables: Vec<(String,)> = sqlx::query_as(
+        "SELECT name FROM sqlite_schema WHERE type = 'table'
+         AND name IN ('inherited_payload_index', 'inherited_snapshot_index')",
+    )
+    .fetch_all(&mut connection)
+    .await
+    .unwrap();
+    assert!(tables.is_empty(), "正确形状的派生表必须被删除: {tables:?}");
+    let (version,): (i64,) = sqlx::query_as("PRAGMA user_version")
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+    assert_eq!(version, canonical::CURRENT_SCHEMA_VERSION);
+}
