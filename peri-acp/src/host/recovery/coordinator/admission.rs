@@ -183,6 +183,7 @@ impl HostSessionRecovery {
             let outcome = match queue.enqueue(reminder::queued_recovery(trusted)).await {
                 Ok(outcome) => outcome,
                 Err(error) => {
+                    activation.mark_recovery_launch_failed();
                     activation.finish_recovery_launch();
                     return self.thread_failure(thread, error.to_string(), fatal);
                 }
@@ -192,6 +193,7 @@ impl HostSessionRecovery {
             // 新生命周期。存储不支持取消提醒时保留，下一次进入会采纳同一条。
             if let Some(reason) = self.post_admit_skip(session_id, before, &activation).await {
                 withdraw_new_reminder(&queue, &outcome).await;
+                activation.mark_recovery_launch_failed();
                 activation.finish_recovery_launch();
                 return Ok(ThreadOutcome::Skipped(reason));
             }
@@ -199,6 +201,7 @@ impl HostSessionRecovery {
         } else {
             // 采纳旧提醒：不重复入队；任务实时状态由当前 turn 的工具查询修正。
             if let Some(reason) = self.post_admit_skip(session_id, before, &activation).await {
+                activation.mark_recovery_launch_failed();
                 activation.finish_recovery_launch();
                 return Ok(ThreadOutcome::Skipped(reason));
             }
@@ -212,6 +215,7 @@ impl HostSessionRecovery {
                     if let Some(outcome) = &enqueued {
                         withdraw_new_reminder(&queue, outcome).await;
                     }
+                    activation.mark_recovery_launch_failed();
                     activation.finish_recovery_launch();
                     return Ok(ThreadOutcome::Skipped(RecoverySkipReason::AlreadyRunning));
                 }

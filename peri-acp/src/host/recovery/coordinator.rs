@@ -125,6 +125,8 @@ impl HostSessionRecovery {
             if removed {
                 // 响应未能发出，启动门不会再交出 recovery 续跑：解除普通激活抑制。
                 if let Some(runtime) = self.manager.get_session(&admission.session_id) {
+                    // 响应未能发出：本次启动的提醒只由下一次显式进入重试。
+                    runtime.activation.mark_recovery_launch_failed();
                     runtime.activation.finish_recovery_launch();
                 }
             }

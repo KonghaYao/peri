@@ -53,6 +53,9 @@ impl HostSessionRecovery {
         if removed {
             // 本次启动门不再交出 recovery 续跑：解除普通激活抑制，下一次进入重试。
             if let Some(runtime) = self.manager.get_session(&admission.session_id) {
+                // 本次启动不会交出 recovery 续跑：标记早失败，门释放后的普通
+                // 激活不得自动重试同一条提醒（只由下一次显式进入重试）。
+                runtime.activation.mark_recovery_launch_failed();
                 runtime.activation.finish_recovery_launch();
             }
         }
