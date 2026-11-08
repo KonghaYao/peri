@@ -837,6 +837,9 @@ mod resume_dispatch_cases;
 #[path = "subagent/resume_owner_reuse_test.rs"]
 mod resume_owner_reuse;
 
+#[path = "subagent/parked_inbox_test.rs"]
+mod parked_inbox;
+
 #[path = "subagent/close_lifecycle_test.rs"]
 mod close_lifecycle_cases;
 

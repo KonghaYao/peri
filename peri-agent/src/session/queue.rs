@@ -6,7 +6,8 @@
 
 pub use peri_acp_types::session::{
     ExecutionBinding, MessageActivation, MessageDisposition, MessageKind, MessagePolicy,
-    MessageQueue, MessageRequirement, MessageSource, ProducerQueue, QueuedMessage, QueuedPayload,
+    MessageQueue, MessageRequirement, MessageSource, ProducerQueue, QueueClosed, QueuedMessage,
+    QueuedPayload,
 };
 
 /// 同步能力面的入队：等到真实持久提交后返回结论。

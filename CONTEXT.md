@@ -20,7 +20,7 @@ _Avoid_: 将一个文件系统路径或一个进程等同于一个会话。
 _Avoid_: 用机器名称、硬件指纹、当前进程或用户身份代替机器 ID。
 
 **归档（Archived；存储 v2 目标）**：用户对会话列表位置的选择，可撤销，不改变会话历史或运行资格。
-_Avoid_: 与子 Agent 的 `hidden`、删除或运行终止混用。
+_Avoid_: 与会话列表的 `hidden` 展示开关、删除或运行终止混用。
 
 **工作区鉴权范围（Workspace authorization scope；存储 v2 目标）**：同一 Workspace 的会话共享持久 MCP 鉴权，不同 Workspace 的凭证和私有 MCP 数据相互隔离。
 _Avoid_: 用机器 ID、MCP server 名、当前进程或单条 Session ID 代替 Workspace ID。

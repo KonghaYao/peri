@@ -95,19 +95,25 @@ MCP server，也不能读取或覆盖彼此的凭证和私有状态。Git worktr
 | --- | --- | --- |
 | `machines` | `id`, `name`, `identity_kind` | `id` 主键；`name` 仅展示；`identity_kind` 区分真实机器身份与迁移时来源未知的占位身份 |
 | `workspaces` | `id`, `machine_id`, `path`, `path_source`，以及诊断列 `project_id`、`discovery` | `id` 为 UUID 主键；`machine_id` 必须引用 Machine；`UNIQUE(machine_id, path)`；`path_source` 记录 discovered / derived_legacy / unverified；诊断列只描述当前占用该路径的对象，不参与执行准入；v15 起不再有 `identity` 列 |
-| `threads`（Session） | `id`, `workspace_id`, `parent_thread_id`, `archived`, 现有会话元数据与上下文 | `id` 主键；`workspace_id` 非空并引用 Workspace；`archived` 非空，默认 `false` |
+| `threads`（Session） | `id`, `workspace_id`, `parent_thread_id`, `hidden`, `archived`, 现有会话元数据与上下文 | `id` 主键；`workspace_id` 非空并引用 Workspace；`hidden` 非空，是会话列表展示开关；`archived` 非空，默认 `false` |
 | `session_bindings` | 现有 Project/relative cwd 与最小执行根（`discovery_snapshot`） | 保存每条 Session 创建或旧库迁移时的执行证据；native 只有 `root`，virtual 另带 `kind`；可缺失的旧远端证据不得凭空补造 |
 | `mcp_oauth_credentials` | `principal_id`, `workspace_id`, `server_key`, 凭证正文与更新时间 | 凭证属于 Workspace；同 Workspace 的 thread 共享，同机其他 Workspace 不可见 |
 | `messages` | `message_id`, `thread_id`, payload 与 flags | 消息只归属一个 thread，现有顺序、内容和 compact 语义保留 |
 
 `archived` 只表示用户将 Session 从普通列表移入归档。创建时为 `false`；用户可将
 其改为 `true`，也可取消归档。归档不删除消息、不终止运行、不改变执行资格，
-也不修改 `updated_at` 所表达的会话内容活动时间。普通列表只列未归档的、
-`message_count > 0` 的根 Session；归档列表只列已归档的、`message_count > 0`
-的根 Session。未发布草稿和已发布但仍为零消息的 Session 都不进入这两个列表，
-但可按 ID 读取已发布会话。归档操作只对根 Session 开放；子 Session 随父会话
-浏览，不独立归档。现有 `hidden` 是子 Agent 展示规则，不是归档状态，
-迁移时不得把 `hidden=true` 转成 `archived=true`。
+也不修改 `updated_at` 所表达的会话内容活动时间。普通列表只列未归档、未隐藏
+（`hidden=0`）、`message_count > 0` 的根 Session；归档列表只列已归档、未隐藏
+（`hidden=0`）、`message_count > 0` 的根 Session。未发布草稿和已发布但仍为零消息
+的 Session 都不进入这两个列表，但可按 ID 读取已发布会话。归档操作只对根 Session
+开放；子 Session 随父会话浏览，不独立归档。
+
+`hidden` 是会话列表的展示开关，与 `archived` 相互独立，列本身保留。子 Agent 创建
+时默认 `hidden=true`，根 Session 与 fork 默认 `false`；用户也可手动把任意 Session
+（包括根 Session）的 `hidden` 置为 `true`，因此 hidden 根 Session 是合法状态，
+不能由 `parent_thread_id` 反推。隐藏不删除消息、不终止运行、不改变执行资格；
+普通列表与归档列表都继续过滤 `hidden=0`。迁移不得把 `hidden=true` 转成
+`archived=true`。
 
 `identity_kind=known` 的 Machine ID 必须是规范 UUID；`legacy_unknown` 仅用于
 旧库来源未知的记录，其原标识不得与真实机器 ID 混同。展示名不参与唯一性。
@@ -190,8 +196,8 @@ Machine、当前 Workspace 或当前 `pwd` 条件；列表筛选与读取权限�
 
 写打开升级时，在一个可回滚的迁移边界内建立 Machine、Workspace 与 Session 归属；
 旧 Session ID、消息 ID、消息顺序、父子链、flags、frozen/inherited context 与归档以外
-的元数据保持不变。所有旧 Session 的 `archived` 置为 `false`，包括现有 `hidden` 子
-Session；迁移不得把 `hidden` 当作用户归档意愿。
+的元数据保持不变。所有旧 Session 的 `archived` 置为 `false`，包括现有 `hidden`
+记录（含子 Session）；迁移不得把 `hidden` 当作用户归档意愿。
 
 归属回填遵循以下规则：
 

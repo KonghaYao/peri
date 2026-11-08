@@ -892,3 +892,195 @@ async fn ensure_session_without_factory_still_falls_back_to_noop() {
         .as_any()
         .is::<peri_acp_types::tasks::NoopTaskManager>());
 }
+
+// ── 优雅退出：会话关闭必须结算 dormant child 资源 ────────────────────────────
+
+/// 记录 `close_child_resources` 调用并按需注入失败的最小 `TaskManager`。
+struct CloseTrackingTaskManager {
+    close_calls: std::sync::atomic::AtomicUsize,
+    close_failure: Option<String>,
+}
+
+impl CloseTrackingTaskManager {
+    fn new(close_failure: Option<&str>) -> Arc<Self> {
+        Arc::new(Self {
+            close_calls: std::sync::atomic::AtomicUsize::new(0),
+            close_failure: close_failure.map(str::to_owned),
+        })
+    }
+
+    fn close_calls(&self) -> usize {
+        self.close_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl peri_acp_types::tasks::TaskManager for CloseTrackingTaskManager {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn active_count(&self) -> usize {
+        0
+    }
+
+    fn register(
+        &self,
+        _request: peri_acp_types::tasks::BgTaskRegistration,
+    ) -> Result<peri_acp_types::tasks::TaskRegistrationTicket, String> {
+        Err("test manager does not register tasks".into())
+    }
+
+    fn complete(
+        &self,
+        _ticket: &peri_acp_types::tasks::TaskRegistrationTicket,
+        _result: peri_acp_types::event::BackgroundTaskResult,
+    ) -> bool {
+        false
+    }
+
+    fn settle_completed(
+        &self,
+        _ticket: &peri_acp_types::tasks::TaskRegistrationTicket,
+        _result: peri_acp_types::event::BackgroundTaskResult,
+        _delivery: peri_acp_types::tasks::OnBgCompleteFn,
+    ) -> Result<bool, String> {
+        Err("test manager does not deliver results".into())
+    }
+
+    fn set_event_sender(
+        &self,
+        _sender: tokio::sync::mpsc::UnboundedSender<peri_acp_types::tasks::BgRegistryEvent>,
+        _session_id: String,
+    ) {
+    }
+
+    fn retry_pending_deliveries(&self) -> usize {
+        0
+    }
+
+    fn cancel(&self, _task_id: &str) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn cancel_all(&self) {}
+
+    fn shutdown(
+        &self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = peri_acp_types::tasks::TaskShutdownReport> + Send + '_,
+        >,
+    > {
+        Box::pin(async { peri_acp_types::tasks::TaskShutdownReport::Complete })
+    }
+
+    fn close_child_resources(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send + '_>> {
+        self.close_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let failure = self.close_failure.clone();
+        Box::pin(async move { failure.map_or(Ok(()), Err) })
+    }
+
+    fn spawn_shell(
+        &self,
+        _command: String,
+        _cwd: String,
+        _timeout_ms: Option<u64>,
+        _on_bg_complete: Option<peri_acp_types::tasks::OnBgCompleteFn>,
+    ) -> Result<peri_acp_types::tasks::BgShellHandle, Box<dyn std::error::Error + Send + Sync>>
+    {
+        Err("test manager does not spawn shells".into())
+    }
+
+    fn finalize_bg_shell(
+        &self,
+        _on_bg_complete: &Option<peri_acp_types::tasks::OnBgCompleteFn>,
+        _ticket: peri_acp_types::tasks::TaskRegistrationTicket,
+        _prompt_summary: String,
+        _success: bool,
+        _output: String,
+        _duration_ms: u64,
+        _timed_out: bool,
+        _shell_output: Option<peri_acp_types::event::ShellOutput>,
+    ) {
+    }
+}
+
+/// [回归] 优雅退出路径必须走既有 `close_child_resources`：关闭会话时调用一次，
+/// 且不阻塞、不影响其他会话记录。
+#[tokio::test]
+async fn close_session_settles_dormant_child_resources_without_affecting_other_sessions() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = make_session_manager(&tmp).await;
+    let tracking = CloseTrackingTaskManager::new(None);
+    let manager: Arc<dyn peri_acp_types::tasks::TaskManager> = tracking.clone();
+    mgr.ensure_session_with_task_manager(
+        "dormant-close",
+        tmp.path().to_str().unwrap(),
+        Some(manager),
+    );
+    mgr.ensure_session("bystander-root", tmp.path().to_str().unwrap());
+
+    tokio::time::timeout(Duration::from_secs(5), mgr.close_session("dormant-close"))
+        .await
+        .expect("close must not hang")
+        .unwrap();
+
+    assert_eq!(
+        tracking.close_calls(),
+        1,
+        "会话关闭必须先走 dormant child 资源结算"
+    );
+    assert!(
+        mgr.get_session("bystander-root").is_some(),
+        "关闭一个会话不得影响其他根会话"
+    );
+}
+
+/// [回归] child 结算失败必须上报并保留会话记录供退出重试，而不是静默成功。
+#[tokio::test]
+async fn close_session_reports_dormant_child_close_failure_and_retains_record() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mgr = make_session_manager(&tmp).await;
+    let tracking =
+        CloseTrackingTaskManager::new(Some("Incomplete: dormant child MQ settlement failed"));
+    let manager: Arc<dyn peri_acp_types::tasks::TaskManager> = tracking.clone();
+    mgr.ensure_session_with_task_manager(
+        "dormant-close-failure",
+        tmp.path().to_str().unwrap(),
+        Some(manager),
+    );
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        mgr.close_session("dormant-close-failure"),
+    )
+    .await
+    .expect("close must not hang")
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("owned resources are still active"),
+        "关闭失败必须作为 Incomplete 上报: {error}"
+    );
+    assert_eq!(tracking.close_calls(), 1);
+    assert!(
+        mgr.get_session("dormant-close-failure").is_some(),
+        "失败后必须保留会话记录以便退出重试"
+    );
+
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        mgr.close_session("dormant-close-failure"),
+    )
+    .await
+    .expect("retry must not hang");
+    assert_eq!(
+        tracking.close_calls(),
+        2,
+        "重试关闭必须再次执行真实结算检查"
+    );
+}

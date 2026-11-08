@@ -344,6 +344,11 @@ impl AcpSession {
     }
 
     /// Close the same resources again after Incomplete; no registry guard crosses await.
+    ///
+    /// 停驻 child 的保留消息必须经既有 `close_child_resources` 结算；只关闭本会话
+    /// 任务 scope 会让 done child 的 passive MQ 行跨进程残留
+    /// （`docs/design/session-async-tasks.md` §7）。子资源失败与任务排空结果一并
+    /// 上报，保留记录供退出重试。
     pub(crate) async fn close_resources(&self) -> bool {
         if let Some(mailbox) = &self.user_input_mailbox {
             mailbox.invalidate();
@@ -351,8 +356,20 @@ impl AcpSession {
         self.user_input_events_cancel.cancel();
         peri_acp_types::session::cancel_all_agents(self.active_agents.values());
         self.cancel_token.cancel();
-        self.task_manager.shutdown().await == peri_acp_types::tasks::TaskShutdownReport::Complete
-            && self.active_agents.is_empty()
+        let children_settled = match self.task_manager.close_child_resources().await {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %self.session_id,
+                    %error,
+                    "session close left dormant child resources unsettled"
+                );
+                false
+            }
+        };
+        let tasks_settled = self.task_manager.shutdown().await
+            == peri_acp_types::tasks::TaskShutdownReport::Complete;
+        children_settled && tasks_settled && self.active_agents.is_empty()
     }
 }
 

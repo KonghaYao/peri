@@ -28,6 +28,14 @@ pub struct ParkedChildOwner {
     parent: parking_lot::Mutex<Option<std::sync::Weak<TaskManager>>>,
     writer: parking_lot::Mutex<Option<Arc<tokio::sync::mpsc::UnboundedSender<PersistOp>>>>,
     state: parking_lot::Mutex<OwnerState>,
+    /// 仅测试：暂停 close 的结算前快照，复现「关闸后被迟到入队」窗口。
+    #[cfg(test)]
+    settle_gate: parking_lot::Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
 }
 
 #[derive(Default)]
@@ -101,6 +109,8 @@ impl ParkedChildOwner {
             parent: parking_lot::Mutex::new(None),
             writer: parking_lot::Mutex::new(None),
             state: parking_lot::Mutex::new(OwnerState::default()),
+            #[cfg(test)]
+            settle_gate: parking_lot::Mutex::new(None),
         })
     }
 
@@ -181,6 +191,29 @@ impl ParkedChildOwner {
     #[cfg(test)]
     pub fn has_unsettled_obligations_sync(&self) -> bool {
         futures::executor::block_on(self.has_unsettled_obligations())
+    }
+
+    /// 仅测试：下一次 close 在关闸后、结算读取前暂停；返回（进入通知，放行信号）。
+    #[cfg(test)]
+    pub fn gate_next_close_settlement(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *self.settle_gate.lock() = Some((entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+
+    #[cfg(test)]
+    async fn wait_close_settlement_gate(&self) {
+        let gate = self.settle_gate.lock().take();
+        if let Some((entered, release)) = gate {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
     }
 
     pub fn freeze_receipt(
@@ -281,6 +314,13 @@ impl ParkedChildOwner {
                 "Incomplete: child settlement is unconfirmed ({reason}); resources closed but owner and frozen state retained"
             ));
         }
+        // 关闭结算开始：先拒绝新入队并等已通过闸门的写入提交，随后读取的 MQ
+        // 快照才覆盖关闭前的全部外部输入。结算自身的存储写入直接经资源门面，
+        // 不经过该闸门；闸门只存在于本门面，resume 新建 bind 会重新开放。
+        self.queue.close_admission();
+        self.queue.await_pending_enqueues().await;
+        #[cfg(test)]
+        self.wait_close_settlement_gate().await;
         self.settle_retained_messages().await?;
         if self.queue.has_required().await.unwrap_or(true) {
             return Err("Incomplete: retained child messages remain unprocessed".into());

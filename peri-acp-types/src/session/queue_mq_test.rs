@@ -955,3 +955,69 @@ async fn producer_view_exposes_enqueue_and_reads_but_not_lifecycle_capabilities(
     takes_owner(queue.owner());
     takes_producer(handle.queue());
 }
+
+// ─── 关闭闸门 ────────────────────────────────────────────────────────────────
+
+/// 关闸后单发与批量入队都明确拒绝，且不写存储；clone 共享同一闸门。
+#[tokio::test]
+async fn close_admission_rejects_single_and_batch_enqueue_without_writing() {
+    let queue = MessageQueue::new();
+    queue.enqueue(prompt("before close")).await.unwrap();
+
+    let clone = queue.clone();
+    clone.close_admission();
+    assert!(queue.is_admission_closed(), "闸门必须被 clone 共享");
+
+    let error = queue.enqueue(prompt("late")).await.unwrap_err();
+    assert!(
+        error.downcast_ref::<QueueClosed>().is_some(),
+        "关闭后必须返回可识别错误: {error}"
+    );
+    let error = queue
+        .enqueue_batch(vec![prompt("late-1"), prompt("late-2")])
+        .await
+        .unwrap_err();
+    assert!(error.downcast_ref::<QueueClosed>().is_some());
+
+    assert_eq!(queue.len().await.unwrap(), 1, "只有关闸前的消息被写入");
+}
+
+/// 关闸不是丢弃在途写入：close 等计数归零之后才取得稳定快照。
+#[tokio::test]
+async fn close_admission_waits_for_in_flight_enqueue() {
+    let queue = MessageQueue::new();
+    let pending = queue.begin_detached_enqueue();
+    queue.close_admission();
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let waiting = {
+        let queue = queue.clone();
+        tokio::spawn(async move {
+            let _ = entered_tx.send(());
+            queue.await_pending_enqueues().await;
+        })
+    };
+    entered_rx.await.unwrap();
+    tokio::task::yield_now().await;
+    assert!(!waiting.is_finished(), "在途写入结束前不得放行关闭");
+
+    drop(pending);
+    waiting.await.unwrap();
+}
+
+/// 闸门只属于门面，不写入存储：同一 thread 的新 bind（resume / 新 owner）
+/// 重新开放入队。
+#[tokio::test]
+async fn a_new_bind_for_the_same_thread_admits_enqueue_after_close() {
+    let resources = Arc::new(FakeMqResources::default());
+    let thread: ThreadId = "thread-reopen".into();
+    let closed = MessageQueue::bind(resources.clone(), thread.clone());
+    closed.enqueue(prompt("before close")).await.unwrap();
+    closed.close_admission();
+    assert!(closed.enqueue(prompt("late")).await.is_err());
+
+    let reopened = MessageQueue::bind(resources, thread);
+    assert!(!reopened.is_admission_closed());
+    let outcome = reopened.enqueue(prompt("resume")).await.unwrap();
+    assert_eq!(outcome.disposition, MqEnqueueDisposition::Inserted);
+}

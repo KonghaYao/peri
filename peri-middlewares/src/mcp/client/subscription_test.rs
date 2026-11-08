@@ -11,7 +11,11 @@ use super::{
 };
 use peri_acp_types::mcp::McpSubscriptionPort;
 use peri_acp_types::mcp::{McpNotificationMessageKind, MCP_MESSAGE_KIND_META_KEY};
-use peri_acp_types::session::{MessageKind, MessageQueue, SessionInbox};
+use peri_acp_types::messages::BaseMessage;
+use peri_acp_types::ports::McpPoolPort;
+use peri_acp_types::session::{
+    MessageKind, MessageQueue, MessageSource, QueuedMessage, SessionInbox,
+};
 use peri_acp_types::system_reminder::{
     ReminderAudience, ReminderCategory, ReminderDelivery, ReminderSeverity,
 };
@@ -123,4 +127,62 @@ fn git_watch_binding_is_workspace_instance_and_git_ref_uri_only() {
         !is_git_watch_resource("external-server", GIT_URI),
         "外部 server 不映射（只绑定内置实例）"
     );
+}
+
+/// 停驻的 Agent binding 不接收 passive 广播；resume 重新注册后恢复接收，
+/// 停驻前积压的 MQ 行不受 park 影响。
+#[tokio::test]
+async fn parked_agent_is_skipped_by_broadcast_until_resume() {
+    let pool = McpClientPool::new_pending();
+    let root_inbox = SessionInbox::new(Arc::new(MessageQueue::new()));
+    pool.register_inbox("root", root_inbox.handle());
+    let child_inbox = SessionInbox::new(Arc::new(MessageQueue::new()));
+    let manager: Arc<dyn peri_acp_types::tasks::TaskManager> =
+        Arc::new(peri_agent::agent::async_tasks::TaskManager::new());
+    pool.bind_agent_session(
+        "child",
+        child_inbox.handle(),
+        child_inbox.queue_for_test().clone(),
+        manager.clone(),
+    );
+    child_inbox.queue_for_test().push_sync(QueuedMessage::info(
+        MessageSource::McpNotification,
+        BaseMessage::human("backlog"),
+    ));
+
+    pool.park_agent_session("child");
+    assert!(
+        pool.session_bindings.read().inbox("child").is_none(),
+        "parked child 不在 broadcast 收件人集合"
+    );
+    pool.dispatch_resource_updated(
+        "workspace",
+        GIT_URI,
+        "sub",
+        Some(McpNotificationMessageKind::Info),
+    )
+    .await;
+    assert_eq!(root_inbox.queue_for_test().len_sync(), 1, "根会话继续接收");
+    assert_eq!(
+        child_inbox.queue_for_test().len_sync(),
+        1,
+        "停驻期间广播不再入队，积压行保留"
+    );
+
+    // resume 装配重新 bind_agent_session；广播恢复，积压行仍可查询。
+    pool.bind_agent_session(
+        "child",
+        child_inbox.handle(),
+        child_inbox.queue_for_test().clone(),
+        manager,
+    );
+    pool.dispatch_resource_updated(
+        "workspace",
+        GIT_URI,
+        "sub",
+        Some(McpNotificationMessageKind::Info),
+    )
+    .await;
+    assert_eq!(child_inbox.queue_for_test().len_sync(), 2);
+    assert_eq!(root_inbox.queue_for_test().len_sync(), 2);
 }

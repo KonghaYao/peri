@@ -39,6 +39,9 @@ impl peri_acp_types::ports::McpPoolPort for McpClientPool {
         Ok(())
     }
 
+    fn park_agent_session(&self, session_id: &str) {
+        self.session_bindings.write().park_agent(session_id);
+    }
     fn release_agent_session(&self, session_id: &str) -> Result<(), String> {
         self.session_bindings.write().release(session_id);
         Ok(())

@@ -549,3 +549,241 @@ async fn test_concurrent_prepare_resume_allows_only_one_permit() {
     assert_eq!(granted, 1);
     child.prepare_resume().unwrap();
 }
+
+// ─── 关闭结算入队闸门 ────────────────────────────────────────────────────────
+
+/// [回归] close 完成资源排空、进入消息结算后，迟到入队必须被拒绝；关闭前
+/// 已接纳的消息按既有 settlement 写入历史，MQ 不留下无人消费的行。
+#[tokio::test]
+async fn late_enqueue_during_close_settlement_is_rejected_without_orphan_rows() {
+    use peri_acp_types::session::{MessageSource, QueueClosed};
+
+    let session = crate::session::test_resources::TestSession::open().await;
+    let resources = session.resources();
+    let child_id = session.create_child(&session.thread_id()).await;
+    let child = ParkedChildOwner::new(
+        child_id.clone(),
+        session.thread_id().to_string(),
+        Arc::new(TaskManager::new()),
+        MessageQueue::bind(resources.clone(), child_id.clone()),
+        Some(resources.clone()),
+        None,
+    );
+    child
+        .queue
+        .enqueue(crate::session::QueuedMessage::prompt(
+            MessageSource::UserInput,
+            crate::messages::BaseMessage::human("关闭前输入"),
+        ))
+        .await
+        .unwrap();
+
+    let (entered, release) = child.gate_next_close_settlement();
+    let closing = {
+        let child = child.clone();
+        tokio::spawn(async move { child.close().await })
+    };
+    entered.await.unwrap();
+    assert!(
+        child.queue.is_admission_closed(),
+        "结算读取前必须已关闭入队闸门"
+    );
+
+    let error = child
+        .queue
+        .enqueue(crate::session::QueuedMessage::prompt(
+            MessageSource::UserInput,
+            crate::messages::BaseMessage::human("关闭后迟到输入"),
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        error.downcast_ref::<QueueClosed>().is_some(),
+        "迟到入队必须被明确拒绝: {error}"
+    );
+
+    release.send(()).unwrap();
+    closing.await.unwrap().unwrap();
+    assert!(
+        child
+            .queue
+            .query(Default::default())
+            .await
+            .unwrap()
+            .is_empty(),
+        "结算后不得留下无人消费的 MQ 行"
+    );
+    let history = resources.load_session_history(&child_id).await.unwrap();
+    assert!(
+        history.iter().any(|payload| matches!(
+            payload,
+            PersistedPayload::SystemReminder { reminder, .. }
+                if reminder.as_reminder().kind == "child_retained_input_unprocessed"
+        )),
+        "关闭前未处理输入必须按既有 settlement 写入历史"
+    );
+}
+
+/// 关闭完成后原门面持续拒绝；同一 thread 的新 bind（resume 新 owner 路径）
+/// 重新开放入队。
+#[tokio::test]
+async fn closed_owner_queue_rejects_after_close_and_a_new_binding_reopens() {
+    use peri_acp_types::session::{MessageSource, MqEnqueueDisposition, QueueClosed};
+
+    let session = crate::session::test_resources::TestSession::open().await;
+    let resources = session.resources();
+    let child_id = session.create_child(&session.thread_id()).await;
+    let child = ParkedChildOwner::new(
+        child_id.clone(),
+        session.thread_id().to_string(),
+        Arc::new(TaskManager::new()),
+        MessageQueue::bind(resources.clone(), child_id.clone()),
+        Some(resources.clone()),
+        None,
+    );
+    child.close().await.unwrap();
+
+    assert!(child.queue.is_admission_closed());
+    let error = child
+        .queue
+        .enqueue(crate::session::QueuedMessage::prompt(
+            MessageSource::UserInput,
+            crate::messages::BaseMessage::human("关闭后输入"),
+        ))
+        .await
+        .unwrap_err();
+    assert!(error.downcast_ref::<QueueClosed>().is_some(), "{error}");
+
+    let reopened = MessageQueue::bind(resources, child_id);
+    assert!(!reopened.is_admission_closed());
+    let outcome = reopened
+        .enqueue(crate::session::QueuedMessage::prompt(
+            MessageSource::UserInput,
+            crate::messages::BaseMessage::human("resume 输入"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(outcome.disposition, MqEnqueueDisposition::Inserted);
+}
+
+/// 并发 close/enqueue：成功写入的行都被结算，关闸后的入队被拒绝；结束后
+/// MQ 为空，没有无人消费的残留行。
+#[tokio::test]
+async fn concurrent_close_and_enqueue_leave_no_unconsumed_rows() {
+    use peri_acp_types::session::{MessageSource, QueueClosed};
+
+    let session = crate::session::test_resources::TestSession::open().await;
+    let resources = session.resources();
+    let child_id = session.create_child(&session.thread_id()).await;
+    let child = ParkedChildOwner::new(
+        child_id.clone(),
+        session.thread_id().to_string(),
+        Arc::new(TaskManager::new()),
+        MessageQueue::bind(resources.clone(), child_id.clone()),
+        Some(resources.clone()),
+        None,
+    );
+
+    let mut workers = tokio::task::JoinSet::new();
+    for index in 0..16 {
+        let queue = child.queue.clone();
+        workers.spawn(async move {
+            queue
+                .enqueue(crate::session::QueuedMessage::prompt(
+                    MessageSource::UserInput,
+                    crate::messages::BaseMessage::human(format!("并发输入 {index}")),
+                ))
+                .await
+        });
+    }
+    let closing = {
+        let child = child.clone();
+        tokio::spawn(async move { child.close().await })
+    };
+    while let Some(result) = workers.join_next().await {
+        if let Err(error) = result.unwrap() {
+            assert!(
+                error.downcast_ref::<QueueClosed>().is_some(),
+                "只有关闸拒绝可以出现在 close 期间: {error}"
+            );
+        }
+    }
+    closing.await.unwrap().unwrap();
+    assert!(
+        child
+            .queue
+            .query(Default::default())
+            .await
+            .unwrap()
+            .is_empty(),
+        "并发 close/enqueue 后不得留下无人消费的 MQ 行"
+    );
+}
+
+/// [回归] 优雅退出复用的 `close_child_resources` 必须结算 dormant child 的
+/// passive Info（git_watch 类）行：不直接清空 MQ，按未处理输入规则写入历史。
+#[tokio::test]
+async fn close_child_resources_settles_dormant_passive_rows() {
+    use peri_acp_types::session::{MessageKind, MessageSource};
+
+    let session = crate::session::test_resources::TestSession::open().await;
+    let resources = session.resources();
+    let child_id = session.create_child(&session.thread_id()).await;
+    let root = Arc::new(TaskManager::new());
+    let child = ParkedChildOwner::new(
+        child_id.clone(),
+        session.thread_id().to_string(),
+        Arc::new(TaskManager::new()),
+        MessageQueue::bind(resources.clone(), child_id.clone()),
+        Some(resources.clone()),
+        None,
+    );
+    root.register_child_owner(child.clone()).unwrap();
+
+    let reminder = crate::session::producer_reminders::trusted_reminder(
+        ReminderCategory::Diagnostic,
+        "git_watch",
+        "repository_ref_changed",
+        ReminderSeverity::Info,
+        ReminderDelivery::Configurable,
+        "branch moved".into(),
+        None,
+        serde_json::json!({}),
+    );
+    child
+        .queue
+        .enqueue(crate::session::QueuedMessage::system_reminder(
+            MessageKind::Info,
+            MessageSource::McpNotification,
+            reminder,
+        ))
+        .await
+        .unwrap();
+    assert!(
+        !child.queue.has_required().await.unwrap(),
+        "passive Info 不是 Required，不得阻塞关闭"
+    );
+
+    root.close_child_resources().await.unwrap();
+
+    assert!(root.child_owner(&child_id).is_none(), "owner 必须释放");
+    assert!(
+        child
+            .queue
+            .query(Default::default())
+            .await
+            .unwrap()
+            .is_empty(),
+        "dormant child 的 passive 行不得残留"
+    );
+    let history = resources.load_session_history(&child_id).await.unwrap();
+    assert!(
+        history.iter().any(|payload| matches!(
+            payload,
+            PersistedPayload::SystemReminder { reminder, .. }
+                if reminder.as_reminder().kind == "repository_ref_changed"
+                    && reminder.as_reminder().source.0 == "git_watch"
+        )),
+        "passive 行必须按既有 delivery 规则写入 child 历史: {history:?}"
+    );
+}

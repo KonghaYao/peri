@@ -304,6 +304,12 @@ pub trait McpPoolPort: Send + Sync {
         Err("Incomplete: shared environment child ownership unknown".into())
     }
 
+    /// 终态停驻的子 Agent 停止接收 passive 广播；binding、owner 与 queue 保留，
+    /// resume 装配经 [`Self::bind_agent_session`] 重新注册。
+    ///
+    /// 只影响 Agent binding；根会话与 Initial binding 不受影响。
+    fn park_agent_session(&self, _session_id: &str) {}
+
     /// 资源 owner 完成消息与任务结清后释放子会话绑定；失败不得宣称已关闭。
     fn release_agent_session(&self, _session_id: &str) -> Result<(), String> {
         Ok(())

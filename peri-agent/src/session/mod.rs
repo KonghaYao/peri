@@ -51,7 +51,7 @@ pub use config::{PermissionMode, SessionConfig, ThinkingConfig};
 pub use peri_acp_types::store::MessageFlags;
 pub use queue::{
     ExecutionBinding, MessageActivation, MessageDisposition, MessageKind, MessagePolicy,
-    MessageQueue, MessageRequirement, MessageSource, QueuedMessage, QueuedPayload,
+    MessageQueue, MessageRequirement, MessageSource, QueueClosed, QueuedMessage, QueuedPayload,
 };
 pub use store::{FrozenContext, FrozenContextBuilder, SessionId, SessionStore};
 pub use transcript::{MessageTranscript, StagedData, TranscriptEntry};
