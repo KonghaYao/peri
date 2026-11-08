@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::session::event_sink::TransportEventSink;
-use peri_acp_types::tasks::BgRegistryEvent;
+use peri_acp_types::tasks::{BgRegistryEvent, TaskChange};
 use serde_json::json;
 use serde_json::Value;
 use std::sync::atomic::Ordering;
@@ -295,36 +295,7 @@ pub(crate) fn bind_session_tasks(
                         continue;
                     }
                     revision = change.revision;
-                    let (event, data) = match change.event {
-                        BgRegistryEvent::Started {
-                            task_id,
-                            kind,
-                            summary,
-                            started_at,
-                        } => (
-                            "bg-task-started",
-                            json!({"task_id":task_id,"kind":kind,"summary":summary,"started_at":started_at,"revision":change.revision}),
-                        ),
-                        BgRegistryEvent::Completed {
-                            task_id,
-                            kind,
-                            success,
-                            output_preview,
-                            duration_ms,
-                            ..
-                        } => (
-                            "bg-task-completed",
-                            json!({"task_id":task_id,"kind":kind,"success":success,"output_preview":output_preview,"duration_ms":duration_ms,"revision":change.revision}),
-                        ),
-                        BgRegistryEvent::Cancelled { task_id, reason } => (
-                            "bg-task-cancelled",
-                            json!({"task_id":task_id,"reason":reason,"revision":change.revision}),
-                        ),
-                        BgRegistryEvent::Updated { task_id, status } => (
-                            "bg-task-updated",
-                            json!({"task_id":task_id,"status":status,"revision":change.revision}),
-                        ),
-                    };
+                    let (event, data) = task_change_value(change);
                     let _ = sink.push_unstable_event(&id, event.into(), data).await;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
@@ -361,6 +332,57 @@ pub(super) fn task_snapshot_value(snapshot: peri_acp_types::tasks::TaskSnapshot)
     })
 }
 
+fn task_change_value(change: TaskChange) -> (&'static str, Value) {
+    match change.event {
+        BgRegistryEvent::Started {
+            task_id,
+            kind,
+            summary,
+            started_at,
+            child_thread_id,
+        } => (
+            "bg-task-started",
+            json!({"task_id":task_id,"kind":kind,"summary":summary,"started_at":started_at,"child_thread_id":child_thread_id,"revision":change.revision}),
+        ),
+        BgRegistryEvent::Completed {
+            task_id,
+            kind,
+            success,
+            output_preview,
+            duration_ms,
+            result,
+        } => {
+            if kind == Some(peri_acp_types::tasks::BgTaskKind::Shell)
+                && result.outcome_label() == "cancelled"
+            {
+                // Use the existing cancellation wire contract while the registry
+                // keeps one completion event for terminal delivery accounting.
+                (
+                    "bg-task-cancelled",
+                    json!({"task_id":task_id,"reason":"cancelled","revision":change.revision}),
+                )
+            } else {
+                (
+                    "bg-task-completed",
+                    json!({"task_id":task_id,"kind":kind,"success":success,"output_preview":output_preview,"duration_ms":duration_ms,"revision":change.revision}),
+                )
+            }
+        }
+        BgRegistryEvent::Cancelled { task_id, reason } => (
+            "bg-task-cancelled",
+            json!({"task_id":task_id,"reason":reason,"revision":change.revision}),
+        ),
+        BgRegistryEvent::Updated { task_id, status } => (
+            "bg-task-updated",
+            json!({"task_id":task_id,"status":status,"revision":change.revision}),
+        ),
+    }
+}
+
 #[cfg(test)]
 #[path = "requests_test.rs"]
 pub(super) mod tests;
+
+#[cfg(test)]
+#[path = "requests_task_events_test.rs"]
+mod task_event_tests;

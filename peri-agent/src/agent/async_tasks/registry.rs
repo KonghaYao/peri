@@ -685,6 +685,10 @@ impl BackgroundTaskRegistry {
             self.unsettled_external.lock().insert(task.id.clone());
         }
         let mut projection = self.projection.lock();
+        let child_thread_id = task
+            .agent_inbox
+            .as_ref()
+            .map(|inbox| inbox.thread_id.clone());
         projection.insert(TaskRecord {
             task_id: task.id.clone(),
             kind,
@@ -697,10 +701,7 @@ impl BackgroundTaskRegistry {
             // 线程身份的事实源是注册时的 live inbox；取快照进投影，终态回收
             // inbox（complete 时 close、active 条目 retain 移除）后机器消费者
             // 仍能拿真实身份，不必按到达顺序猜测或由 `bg-` 前缀推导。
-            child_thread_id: task
-                .agent_inbox
-                .as_ref()
-                .map(|inbox| inbox.thread_id.clone()),
+            child_thread_id: child_thread_id.clone(),
         });
         tasks.insert(task.id.clone(), task);
         let event = match registration {
@@ -710,6 +711,7 @@ impl BackgroundTaskRegistry {
                     kind,
                     summary,
                     started_at: peri_time::now_utc_rfc3339(),
+                    child_thread_id,
                 }
             }
             TaskRegistration::TerminalRecovery => BgRegistryEvent::Updated {
@@ -752,6 +754,7 @@ impl BackgroundTaskRegistry {
             return false;
         }
         let kind = tasks.get(task_id).map(|task| task.kind);
+        let cancelled = kind == Some(BgTaskKind::Shell) && result.outcome_label() == "cancelled";
         let existed = tasks
             .get(task_id)
             .map(|task| is_active_status(&task.status))
@@ -772,7 +775,14 @@ impl BackgroundTaskRegistry {
             task.output_preview = Some(output_preview.clone());
             let mut projection = self.projection.lock();
             if let Some(record) = projection.records.get_mut(task_id) {
-                record.status = if success { "completed" } else { "failed" }.into();
+                record.status = if cancelled {
+                    "cancelled"
+                } else if success {
+                    "completed"
+                } else {
+                    "failed"
+                }
+                .into();
                 record.duration_ms = duration_ms;
                 record.output_preview = Some(output_preview.clone());
             }

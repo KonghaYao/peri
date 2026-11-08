@@ -177,6 +177,7 @@ async fn forward_subagent_events(
                     crate::agent::events_v2::RenderEvent::TurnCompleted { .. }
                     | crate::agent::events_v2::RenderEvent::HitlPending { .. }
                     | crate::agent::events_v2::RenderEvent::TurnSuspended { .. }
+                    | crate::agent::events_v2::RenderEvent::ReasonStarted { .. }
                 );
                 if should_forward {
                     // Langfuse bridge 调用必须在 ev 被 render_event_to_executor move 之前

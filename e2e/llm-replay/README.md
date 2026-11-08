@@ -13,15 +13,15 @@ cd e2e
 npm ci
 npm run e2e:replay:unit
 npm run e2e:replay:check
-npx tsc --noEmit --project tsconfig.replay-v2.json
+npx tsc --noEmit --project tsconfig.replay.json
 npm run e2e:replay
 ```
 
 需要 Node、Python 3 与可用的 PTY。`PERI_E2E_BINARY` 可以指定已经构建的 Peri 二进制。默认 `e2e:replay` 只读取已封存的 v2 fixture，不启动模型上游，不补录缺失请求，不回退在线模型。显式更新 fixture 使用 `npm run e2e:replay:record`；CI 拒绝 record 模式。`npm run e2e:replay:smoke` 保留旧版同进程录制后重放的实验用例。
 
-v2 业务目录包含 30 个固定场景：S01–S06 流式与协议，T01–T06 工具与环境，A01–A06 子 Agent，U01–U09 会话与交互，I01–I03 并发隔离。完整目录见 [fixture 说明](../fixtures/replay-v2/README.md)。这些场景通过本地合成模型响应驱动真实模型适配器、ACP、Agent、工具与 TUI；录制来源标记为 `local-fixture-model`、`realLlm: false`，不代表线上模型质量或可用性验证。实际通过情况、耗时和证据以对应 invocation 的报告为准。
+基础目录包含 30 个固定场景：S01–S06 流式与协议，T01–T06 工具与环境，A01–A06 子 Agent，U01–U09 会话与交互，I01–I03 并发隔离。v3 另外补充 64 个异步任务、monitor、长上下文与存储代际场景。完整目录见 [fixture 说明](../fixtures/replay-v2/README.md)。这些场景通过本地合成模型响应驱动真实模型适配器、ACP、Agent、工具与 TUI；录制来源标记为 `local-fixture-model`、`realLlm: false`，不代表线上模型质量或可用性验证。实际通过情况、耗时和证据以对应 invocation 的报告为准。
 
-每个场景的 fixture 包含初始化配置与工作文件 seed、原始 HTTP cassette、动态值声明和 portable 响应计划。seed 在创建会话前保存，不迁移或修改业务数据库。record 和 replay 分别创建新目录、新 HOME 与真实 ACP 会话，通过显式绑定复用录制。record 成功后删除旧 HOME/work，避免重放意外依赖录制环境。配置指纹、seed 哈希或请求发生变化时失败，必须显式审核并重录。
+每个场景的 fixture 包含初始化配置与工作文件 seed、原始 HTTP cassette、动态值声明和 portable 响应计划。seed 在创建会话前保存，不迁移或修改业务数据库。record 和 replay 分别创建新目录、新 HOME 与真实 ACP 会话，通过显式绑定复用录制。record/replay 成功后删除临时 HOME/work，避免重放意外依赖录制环境。配置指纹、seed 哈希或请求发生变化时失败，必须显式审核并重录。
 
 ## 入口与职责
 
@@ -35,7 +35,7 @@ v2 业务目录包含 30 个固定场景：S01–S06 流式与协议，T01–T06
 | `portable-sse.mjs` | 从原始录制派生工具参数可移植版本，保留来源哈希 |
 | `../helpers/llm-replay-suite.ts` | record/replay-only 生命周期、seed、fixture 发布和逐场景报告 |
 | `../helpers/llm-replay-*.ts` | 场景身份与真实终端驱动 |
-| `../tests/replay-v2/` | 30 个业务场景；检查真实屏幕、ACP 事件、历史与文件效果 |
+| `../tests/replay-v2/`、`../tests/replay-v3/` | 94 个业务场景；检查真实屏幕、ACP 事件、历史与文件效果 |
 
 部署入口同时设置 `PERI_MODEL_TRANSPORT_PROXY` 和 `PERI_REPLAY_RUN`。非法或不完整配置在启动时失败；不回退到真实模型。模型原始 endpoint/profile/credential identity 保持不变，网络路由在 HTTP 请求构建完后才生效。普通运行未设置变量时保持原路径。
 
@@ -63,7 +63,7 @@ fast 模式去掉录制延时，recorded 模式按观察时间调度，实际时
 
 `createRequestBindingAdapter({ mode, runId, declarations, owner: "world" })` 提供 `declareAndBind`、`onRequest`、`requestRules`、`snapshotDeclarations` 和 `responsePlans`。录制阶段根据已登记的真实 world/session/child 身份生成精确路径规则，封存在 cassette 中；重放不重新发现或放宽规则。`typed-template` 包含原样文字和 `{ kind, alias }` 引用，完整字段必须等于当前绑定渲染出的模板，才能转换引用。根目录、HOME、工作区按最长合法路径边界识别；同路径片段、`bg-<UUID>` 等派生 ID 不能隐式冒充已声明身份。
 
-日期只允许系统环境 `<env>` 段中带 `Today's date: ` 标签的快照字段绑定。场景固定 `TZ=UTC`，其 ambient UTC date 不是业务断言；用户日期、工具时间输出和其它时间戳仍严格匹配。同样的窄规则只适用于 `<env>` 段中的 `Platform: ` 与 `OS Version: ` 两行：镜像补丁版本随 CI 升级变化，不代表业务行为；其它系统提示、工具列表和消息仍严格匹配。未声明的提示词或其它环境变化会产生 fixture drift。
+日期只允许系统环境 `<env>` 段中带 `Today's date: ` 标签的快照字段绑定。场景固定 `TZ=UTC`，其 ambient UTC date 不是业务断言；用户日期、工具时间输出和其它时间戳仍严格匹配。monitor 时钟是单独显式声明的 `timestamp` 类型：必须先验证真实 task、event seq、字段归属与合法 RFC3339，再对精确 JSON Pointer 使用完整字段模板。时间戳不会自动发现；非时间字段、事件顺序、正文与未声明字段继续逐字严格。相同时间可以属于不同事件，不能反推身份。同样的窄规则只适用于 `<env>` 段中的 `Platform: ` 与 `OS Version: ` 两行：镜像补丁版本随 CI 升级变化，不代表业务行为；其它系统提示、工具列表和消息仍严格匹配。未声明的提示词或其它环境变化会产生 fixture drift。
 
 原始录制保持不变。portable 派生当前支持 Anthropic 和 Responses 的完整工具参数；Responses 的 delta、arguments.done、item.done、completed 副本必须一致。只修改声明的字符串叶节点，并保留工具参数各份副本的键序、空白和未修改的数值字面量，避免下一轮 history 字符串因重新序列化而漂移。每份计划保留原始响应 SHA-256、规则版本和新的分片计划；重放核验来源，不保留原始分块时间。
 

@@ -1,0 +1,103 @@
+{
+  "version": 2,
+  "id": "H10",
+  "title": "关闭会话清理后台进程，重载独立 session store 不复活旧 Shell",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
+      "work"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-tELOHG",
+    "home": "/tmp/peri-wire-e2e-tELOHG/home",
+    "work": "/tmp/peri-wire-e2e-tELOHG/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b8e2-cc14-7a51-aa7f-943f3646bd15"
+  },
+  "configurationFingerprint": "d1da89e89de69d5f0179df6ffc918aa201425e7913cf57da5c31313ad68ee0ca",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-tELOHG",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-tELOHG/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-tELOHG/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-08",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b8e2-cc14-7a51-aa7f-943f3646bd15",
+      "anchor": "ACP session/new result"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "shell-h10",
+      "recorded": "mcp-01a1b8e2-cdbe-7721-aade-8fe94f64fddf",
+      "anchor": "Bash tool receipt H10-bash"
+    }
+  ],
+  "portableResponses": []
+}

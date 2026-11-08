@@ -36,6 +36,7 @@ fn test_all_executor_event_variants_mapped() {
         "TurnCommitted",
         "StateSnapshotMeta",
         "TurnSuspended",
+        "ReasonStarted",
         "LlmCallStart",
         "LlmRequestPayload",
         "ContextWarning",

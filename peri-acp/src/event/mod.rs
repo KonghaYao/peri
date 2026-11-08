@@ -112,6 +112,8 @@ pub enum AcpEvent {
     ///
     /// `turn_id` / `agent_id` 为 v2 事件透传的身份（v1 兼容层最小身份载体）。
     TurnSuspended { turn_id: String, agent_id: String },
+    /// The current root execution is requesting a model response, before any output arrives.
+    ReasonStarted { turn_id: String, agent_id: String },
     /// SubAgent started executing
     SubagentStarted {
         agent_name: String,

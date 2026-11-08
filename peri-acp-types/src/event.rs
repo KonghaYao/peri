@@ -707,6 +707,11 @@ pub enum ExecutorEvent {
         turn_id: String,
         agent_id: String,
     },
+    /// Reliable, payload-free model-start signal, retaining the active execution's source identity.
+    ReasonStarted {
+        turn_id: String,
+        agent_id: String,
+    },
     /// LLM 调用开始（携带完整 input messages 快照 + 工具定义，用于 Langfuse Generation）
     LlmCallStart {
         step: usize,

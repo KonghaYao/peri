@@ -1,0 +1,124 @@
+{
+  "version": 2,
+  "id": "H11",
+  "title": "full-async-tools 下 Bash 省略参数走后台，显式 false 保持前台",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
+      "work"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "48d8d00a7f91c2a7701d413304e00cb523637f58aa38c2fbf5c0aa7028910f36",
+        "size": 619,
+        "mode": 384
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-uvHl0t",
+    "home": "/tmp/peri-wire-e2e-uvHl0t/home",
+    "work": "/tmp/peri-wire-e2e-uvHl0t/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b8e3-a5e6-7091-9e6a-12f0f6176d38"
+  },
+  "configurationFingerprint": "e2b6be816aeea4543c0188e932e77a070b13ed19330ad11ab84d5c5a70ba378c",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-uvHl0t",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-uvHl0t/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-uvHl0t/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-08",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b8e3-a5e6-7091-9e6a-12f0f6176d38",
+      "anchor": "ACP session/new result"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "shell-h11",
+      "recorded": "mcp-01a1b8e3-aca0-7fa0-b164-f1b52588c347",
+      "anchor": "Bash tool receipt H11-default"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "shell-h11-remote",
+      "recorded": "shell-01a1b8e3-ac9b-7343-b66e-63a5874c8da2",
+      "anchor": "MCP remote task linked to Bash tool H11-default"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "shell-h11-stdout",
+      "recorded": "/tmp/peri-wire-e2e-uvHl0t/home/tmp/peri-bg-shell-01a1b8e3-ac9b-7343-b66e-63a5874c8da2-b3a6d23a-70fc-4acc-86fc-f969e72f060d-stdout.log",
+      "anchor": "terminal stdout reference for H11-default"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "shell-h11-stderr",
+      "recorded": "/tmp/peri-wire-e2e-uvHl0t/home/tmp/peri-bg-shell-01a1b8e3-ac9b-7343-b66e-63a5874c8da2-d2c2c7aa-d213-44e9-a4c4-1a78c9633402-stderr.log",
+      "anchor": "terminal stderr reference for H11-default"
+    }
+  ],
+  "portableResponses": []
+}

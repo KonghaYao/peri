@@ -46,6 +46,8 @@ pub struct InterceptRequest<'a> {
     // ── 会话上下文 ──
     pub cwd: &'a str,
     pub session_id: &'a str,
+    /// The originating prompt identity also owns immediate-command completion.
+    pub request_id: Option<&'a str>,
     pub cancel: &'a CancellationToken,
     pub session_resources: Option<Arc<dyn SessionResources>>,
     pub thread_id: Option<String>,
@@ -192,7 +194,7 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
                 };
                 emit_command_feedback(req.event_sink, req.session_id, &mut result).await;
                 req.event_sink
-                    .push_done(req.session_id, "end_turn", None)
+                    .push_done(req.session_id, "end_turn", req.request_id)
                     .await;
                 return InterceptOutcome::Handled(Box::new(PromptResult {
                     execution_binding: None,
@@ -320,12 +322,13 @@ pub async fn intercept_immediate_command(req: InterceptRequest<'_>) -> Intercept
             emit_command_feedback(req.event_sink, req.session_id, &mut result).await;
             // Immediate 命令跳过 agent event pump，必须手动发送 push_done
             // 通知 TUI agent 执行完成，否则界面永久卡在 loading 状态。
-            // 命令 turn 无 request_id（None）——TUI 侧跳过 id 配对、回退代际兜底。
+            // 与普通 prompt 一样回带 request_id；缺失会被客户端当前 turn 的
+            // 身份闸门拒绝，导致命令已经完成但界面仍永久 loading。
             req.event_sink
                 .push_done(
                     req.session_id,
                     super::done_stop_reason(result.stop_reason),
-                    None,
+                    req.request_id,
                 )
                 .await;
             let mut persisted_payloads =

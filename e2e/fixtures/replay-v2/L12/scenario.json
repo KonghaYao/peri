@@ -1,0 +1,108 @@
+{
+  "version": 2,
+  "id": "L12",
+  "title": "两代真实 Read 工具往返经 compact 与重启后，工具结果归档和摘要上下文正确",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
+      "work"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      },
+      {
+        "path": "work/ledger-one.txt",
+        "sha256": "afb8711c5b693a006e7bf458842ed39597d1436c8d0a18399c44449b537b1f2a",
+        "size": 3419,
+        "mode": 420
+      },
+      {
+        "path": "work/ledger-two.txt",
+        "sha256": "639ee34d46ce2cad2f46bb0b07036a2edff17d72eec55bf1354a9ca75558f050",
+        "size": 3419,
+        "mode": 420
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-tdqx3J",
+    "home": "/tmp/peri-wire-e2e-tdqx3J/home",
+    "work": "/tmp/peri-wire-e2e-tdqx3J/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b8e5-7732-7540-8f45-c86ce117e531"
+  },
+  "configurationFingerprint": "06db831afa6c352c257eb08b258c57053ffc8baf9f3f4480611090147991e97a",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-tdqx3J",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-tdqx3J/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-tdqx3J/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-08",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b8e5-7732-7540-8f45-c86ce117e531",
+      "anchor": "ACP session/new result"
+    }
+  ],
+  "portableResponses": []
+}

@@ -1,0 +1,183 @@
+{
+  "version": 2,
+  "id": "H05",
+  "title": "真实任务面板取消进程组，同名命令再次启动不受旧终态污染",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
+      "work"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-QAdSxO",
+    "home": "/tmp/peri-wire-e2e-QAdSxO/home",
+    "work": "/tmp/peri-wire-e2e-QAdSxO/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b8e3-ba39-7312-9813-6269f8ca1691"
+  },
+  "configurationFingerprint": "6821a5089c9c085eac71aee142a7de71786b8c553933fe1eedbf29dd461e7d4e",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-QAdSxO",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-QAdSxO/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-QAdSxO/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-08",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b8e3-ba39-7312-9813-6269f8ca1691",
+      "anchor": "ACP session/new result"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "shell-old",
+      "recorded": "mcp-01a1b8e3-c0bb-74a1-be86-43dc313ced49",
+      "anchor": "Bash tool receipt H05-old"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "shell-old-remote",
+      "recorded": "shell-01a1b8e3-c0b7-7142-a1f4-066178e378ae",
+      "anchor": "MCP remote task linked to Bash tool H05-old"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "shell-old-stdout",
+      "recorded": "/tmp/peri-wire-e2e-QAdSxO/home/tmp/peri-bg-shell-01a1b8e3-c0b7-7142-a1f4-066178e378ae-b69e073d-c758-4467-a5f8-277ac2655430-stdout.log",
+      "anchor": "terminal stdout reference for H05-old"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "shell-old-stderr",
+      "recorded": "/tmp/peri-wire-e2e-QAdSxO/home/tmp/peri-bg-shell-01a1b8e3-c0b7-7142-a1f4-066178e378ae-c65fa1d8-5e39-4287-98de-72cac554f976-stderr.log",
+      "anchor": "terminal stderr reference for H05-old"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "shell-new",
+      "recorded": "mcp-01a1b8e3-ca36-7630-b7ef-3e47e98eb0de",
+      "anchor": "Bash tool receipt H05-new"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "shell-new-remote",
+      "recorded": "shell-01a1b8e3-ca31-7ea3-9519-e1c8c55cb412",
+      "anchor": "MCP remote task linked to Bash tool H05-new"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "shell-new-stdout",
+      "recorded": "/tmp/peri-wire-e2e-QAdSxO/home/tmp/peri-bg-shell-01a1b8e3-ca31-7ea3-9519-e1c8c55cb412-2bf9c970-392f-42e0-a8a5-d05ad8211468-stdout.log",
+      "anchor": "terminal stdout reference for H05-new"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "shell-new-stderr",
+      "recorded": "/tmp/peri-wire-e2e-QAdSxO/home/tmp/peri-bg-shell-01a1b8e3-ca31-7ea3-9519-e1c8c55cb412-f194064c-630f-45f5-97bd-e028adca617c-stderr.log",
+      "anchor": "terminal stderr reference for H05-new"
+    }
+  ],
+  "portableResponses": [
+    {
+      "identity": {
+        "owner": "root",
+        "execution": "start",
+        "call": "reason:3",
+        "attempt": 1,
+        "purpose": "reason"
+      },
+      "protocol": "anthropic",
+      "owner": "world",
+      "tools": [
+        {
+          "toolCallId": "H05-read-cancelled",
+          "rules": [
+            {
+              "path": "/file_path",
+              "kind": "path",
+              "alias": "shell-old-stdout",
+              "mode": "path-prefix"
+            }
+          ]
+        }
+      ],
+      "rulesVersion": "world-bindings-v1",
+      "fragmentPlan": {
+        "kind": "utf8",
+        "maxBytes": 128
+      },
+      "sourceSha256": "2852d6ce596178875092465a76973b7303b1f8d2e8aa72297be9cca6e34f221b"
+    }
+  ]
+}

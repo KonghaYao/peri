@@ -1,0 +1,191 @@
+{
+  "version": 2,
+  "id": "H03",
+  "title": "超过 2 MiB Unicode 后台日志完整落盘，通知只带引用并真实读取尾部",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
+      "work"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      },
+      {
+        "path": "work/payload.txt",
+        "sha256": "ece8a843377e0b6d901725c83fa999854724c7079010b1ae9da66c05d8bda06f",
+        "size": 2652024,
+        "mode": 420
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-I0NgnW",
+    "home": "/tmp/peri-wire-e2e-I0NgnW/home",
+    "work": "/tmp/peri-wire-e2e-I0NgnW/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b8e3-85fb-7e50-913b-b048d7dac7e4"
+  },
+  "configurationFingerprint": "208dd59c72f32a9308ebf55081dba545dd6c239de0026fbbe9aed466568eea7e",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-I0NgnW",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-I0NgnW/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-I0NgnW/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-08",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b8e3-85fb-7e50-913b-b048d7dac7e4",
+      "anchor": "ACP session/new result"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "shell-h03",
+      "recorded": "mcp-01a1b8e3-886c-7552-bf29-c50856756826",
+      "anchor": "Bash tool receipt H03-bash"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "shell-h03-remote",
+      "recorded": "shell-01a1b8e3-8868-7f51-b77f-076a2ee5ae11",
+      "anchor": "MCP remote task linked to Bash tool H03-bash"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "shell-h03-stdout",
+      "recorded": "/tmp/peri-wire-e2e-I0NgnW/home/tmp/peri-bg-shell-01a1b8e3-8868-7f51-b77f-076a2ee5ae11-24f8cc9e-6e70-4035-8c8f-ad4b7ef5d0cb-stdout.log",
+      "anchor": "terminal stdout reference for H03-bash"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "shell-h03-stderr",
+      "recorded": "/tmp/peri-wire-e2e-I0NgnW/home/tmp/peri-bg-shell-01a1b8e3-8868-7f51-b77f-076a2ee5ae11-98436935-7644-41bf-a766-80d3587519f5-stderr.log",
+      "anchor": "terminal stderr reference for H03-bash"
+    }
+  ],
+  "portableResponses": [
+    {
+      "identity": {
+        "owner": "root",
+        "execution": "start",
+        "call": "reason:3",
+        "attempt": 1,
+        "purpose": "reason"
+      },
+      "protocol": "anthropic",
+      "owner": "world",
+      "tools": [
+        {
+          "toolCallId": "H03-read-stdout",
+          "rules": [
+            {
+              "path": "/file_path",
+              "kind": "path",
+              "alias": "shell-h03-stdout",
+              "mode": "path-prefix"
+            }
+          ]
+        }
+      ],
+      "rulesVersion": "world-bindings-v1",
+      "fragmentPlan": {
+        "kind": "utf8",
+        "maxBytes": 128
+      },
+      "sourceSha256": "68357f03b5a04c14e9ce047f57841752a3acc7b1d41bce8b90c5152974e7a8d3"
+    },
+    {
+      "identity": {
+        "owner": "root",
+        "execution": "start",
+        "call": "reason:4",
+        "attempt": 1,
+        "purpose": "reason"
+      },
+      "protocol": "anthropic",
+      "owner": "world",
+      "tools": [
+        {
+          "toolCallId": "H03-read-stderr",
+          "rules": [
+            {
+              "path": "/file_path",
+              "kind": "path",
+              "alias": "shell-h03-stderr",
+              "mode": "path-prefix"
+            }
+          ]
+        }
+      ],
+      "rulesVersion": "world-bindings-v1",
+      "fragmentPlan": {
+        "kind": "utf8",
+        "maxBytes": 128
+      },
+      "sourceSha256": "02e7f31b15fe807c72da89a1296318d9a2bdb8921aa84e916cc6f9c73aca9bc1"
+    }
+  ]
+}

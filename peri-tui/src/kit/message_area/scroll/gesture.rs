@@ -101,7 +101,7 @@ pub(in crate::kit::message_area) fn text_selection_accepts_pointer(
 }
 
 /// entry 单击命中解析：视觉行 → `(slot_index, local_idx)`；仅当该行属于
-/// entry 的逻辑首行（`local_idx == 0`，即 header/label 行）时命中。
+/// entry 的 header/label 行时命中（过程区台阶可能占据逻辑第 0 行）。
 ///
 /// [Why 仅首行] 正文行保留给文本选区/复制；展开动作只挂在 header 上，
 /// 与键盘 Enter（焦点在 entry 时切换）语义一致。wrap_map 越界
@@ -112,7 +112,10 @@ pub(in crate::kit::message_area) fn entry_click_target_index(
     visual_row: usize,
 ) -> Option<(usize, usize)> {
     let lookup = index.visual_lookup(visual_row)?;
-    (lookup.local_logical == 0).then_some((lookup.slot_index, 0))
+    // Freeze a normalized header hit for the existing Up gesture contract;
+    // the decorative step and body rows remain available for text selection.
+    (lookup.local_logical == index.entry_header_logical(lookup.slot_index))
+        .then_some((lookup.slot_index, 0))
 }
 
 #[cfg(test)]

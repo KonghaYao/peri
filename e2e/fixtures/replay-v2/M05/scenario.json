@@ -1,0 +1,233 @@
+{
+  "version": 2,
+  "id": "M05",
+  "title": "monitor 超长 Unicode 行在 UTF-8 边界截断，小读预算仍推进完整事件",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
+      "work"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      },
+      {
+        "path": "work/monitor-source.py",
+        "sha256": "e8cd83ebda82f44798f15160ab53fca2ff2a0f0ee3db17ce0ccc55253349ee10",
+        "size": 2137,
+        "mode": 420
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-uBrw0g",
+    "home": "/tmp/peri-wire-e2e-uBrw0g/home",
+    "work": "/tmp/peri-wire-e2e-uBrw0g/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b8e3-16cd-7a13-9043-88e5b0442ce8"
+  },
+  "configurationFingerprint": "1098af6137745c0290fa0a88b03255ba75a9acfb387730882258269bf7b55f0b",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-uBrw0g",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-uBrw0g/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-uBrw0g/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-08",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b8e3-16cd-7a13-9043-88e5b0442ce8",
+      "anchor": "ACP session/new result"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "monitor-m05-host",
+      "recorded": "mcp-01a1b8e3-19c2-7772-8924-9a12bc77641f",
+      "anchor": "monitor_start host receipt M05-start"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "monitor-m05-raw",
+      "recorded": "monitor-01a1b8e3-19bf-7980-91a8-0bcdeebaecb2",
+      "anchor": "monitor_start raw receipt M05-start"
+    },
+    {
+      "owner": "world",
+      "kind": "timestamp",
+      "alias": "monitor-m05-event-1-ts",
+      "recorded": "2026-11-08T02:00:53.517009767+00:00",
+      "anchor": "monitor M05-start event seq 1 capture timestamp"
+    },
+    {
+      "owner": "world",
+      "kind": "timestamp",
+      "alias": "monitor-m05-event-2-ts",
+      "recorded": "2026-11-08T02:00:53.517056427+00:00",
+      "anchor": "monitor M05-start event seq 2 capture timestamp"
+    }
+  ],
+  "portableResponses": [
+    {
+      "identity": {
+        "owner": "root",
+        "execution": "start",
+        "call": "reason:4",
+        "attempt": 1,
+        "purpose": "reason"
+      },
+      "protocol": "anthropic",
+      "owner": "world",
+      "tools": [
+        {
+          "toolCallId": "M05-read-1",
+          "rules": [
+            {
+              "path": "/params/task_id",
+              "mode": "typed-template",
+              "segments": [
+                {
+                  "kind": "task",
+                  "alias": "monitor-m05-raw"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "rulesVersion": "world-bindings-v1",
+      "fragmentPlan": {
+        "kind": "utf8",
+        "maxBytes": 128
+      },
+      "sourceSha256": "18dc2c621783343c6464257eb24d2785b06fcf8c119441baebe04ce42c5fc12c"
+    },
+    {
+      "identity": {
+        "owner": "root",
+        "execution": "start",
+        "call": "reason:5",
+        "attempt": 1,
+        "purpose": "reason"
+      },
+      "protocol": "anthropic",
+      "owner": "world",
+      "tools": [
+        {
+          "toolCallId": "M05-read-2",
+          "rules": [
+            {
+              "path": "/params/task_id",
+              "mode": "typed-template",
+              "segments": [
+                {
+                  "kind": "task",
+                  "alias": "monitor-m05-raw"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "rulesVersion": "world-bindings-v1",
+      "fragmentPlan": {
+        "kind": "utf8",
+        "maxBytes": 128
+      },
+      "sourceSha256": "31f13de66f5bfa2b7144aec9c4b1709826096979f50a7c2c34e98be29820e2b4"
+    },
+    {
+      "identity": {
+        "owner": "root",
+        "execution": "start",
+        "call": "reason:6",
+        "attempt": 1,
+        "purpose": "reason"
+      },
+      "protocol": "anthropic",
+      "owner": "world",
+      "tools": [
+        {
+          "toolCallId": "M05-read-3",
+          "rules": [
+            {
+              "path": "/params/task_id",
+              "mode": "typed-template",
+              "segments": [
+                {
+                  "kind": "task",
+                  "alias": "monitor-m05-raw"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "rulesVersion": "world-bindings-v1",
+      "fragmentPlan": {
+        "kind": "utf8",
+        "maxBytes": 128
+      },
+      "sourceSha256": "ab2dd1a2d1c1791b0c12c5cb8aecc9a38085ffff327d40f939143aad62298b3e"
+    }
+  ]
+}

@@ -395,6 +395,9 @@ async fn test_forwarder_filters_turn_committed() {
     // 发送 TurnSuspended → 应被过滤（子 Agent 挂起信号不得让父 TUI 停止 loading）
     let (turn_id, agent_id) = ids();
     bus.emit_render(RenderEvent::TurnSuspended { turn_id, agent_id });
+    // A child model request must not resume the root loading/cancellation state.
+    bus.emit_render_reliable(RenderEvent::ReasonStarted { turn_id, agent_id })
+        .await;
 
     // 发送 TextChunk → 应正常转发
     let (turn_id, agent_id) = ids();

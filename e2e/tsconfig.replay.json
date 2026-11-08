@@ -1,5 +1,5 @@
 {
   "extends": "./tsconfig.json",
-  "include": ["tests/replay/**/*.ts", "tests/replay-v2/**/*.ts", "helpers/llm-replay-*.ts", "vitest.replay.config.ts", "vitest.replay-v2.config.ts"],
+  "include": ["tests/replay/**/*.ts", "tests/replay-v2/**/*.ts", "tests/replay-v3/**/*.ts", "helpers/llm-replay-*.ts", "helpers/replay-isolation*.ts", "vitest.replay.config.ts", "vitest.replay-v2.config.ts", "vitest.replay-v3.config.ts"],
   "exclude": ["node_modules", "dist", "tui-tester"]
 }

@@ -58,6 +58,7 @@ fn reset() -> BridgeState {
 
 fn bg_entry(task_id: &str, kind: &str, status: Option<&str>) -> crate::kit::acp_types::BgTaskEntry {
     crate::kit::acp_types::BgTaskEntry {
+        child_thread_id: None,
         task_id: task_id.into(),
         kind: kind.into(),
         summary: "worker".into(),
@@ -139,6 +140,49 @@ fn prompt_lifecycle_reports_working_then_done() {
 
     dispatch_and_notify(&mut state, &AcpEventData::TurnDone);
     assert_eq!(current(), ProgramStatus::Done);
+}
+
+#[test]
+#[serial]
+fn reason_started_resumes_suspended_request_before_output_and_keeps_cancel_identity() {
+    let mut state = reset();
+    prompt(&mut state, "same-request");
+    dispatch_and_notify(&mut state, &AcpEventData::TurnSuspended);
+    assert_eq!(state.phase, SessionPhase::Idle);
+    assert!(!crate::kit::atoms::ACP_STATE.state().read().is_loading);
+    dispatch_and_notify(&mut state, &AcpEventData::ReasonStarted);
+    assert_eq!(state.phase, SessionPhase::PromptRunning);
+    assert!(crate::kit::atoms::ACP_STATE.state().read().is_loading);
+    assert_eq!(current(), ProgramStatus::Working);
+    assert_eq!(state.current_request_id.as_deref(), Some("same-request"));
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::TurnInterrupted {
+            reason: "user cancelled".into(),
+            request_id: Some("same-request".into()),
+        },
+    );
+    assert_eq!(state.phase, SessionPhase::Idle);
+    assert!(state.current_request_id.is_none());
+    dispatch_and_notify(&mut state, &AcpEventData::ReasonStarted);
+    assert_eq!(
+        state.phase,
+        SessionPhase::Idle,
+        "settled requests must not revive"
+    );
+    assert!(!crate::kit::atoms::ACP_STATE.state().read().is_loading);
+}
+
+#[test]
+#[serial]
+fn reason_started_cannot_turn_history_replay_into_a_live_execution() {
+    let mut state = reset();
+    prompt(&mut state, "old-request");
+    dispatch_and_notify(&mut state, &AcpEventData::SessionReplayStarted);
+    dispatch_and_notify(&mut state, &AcpEventData::ReasonStarted);
+    assert_eq!(state.phase, SessionPhase::ReplayingHistory);
+    assert!(!crate::kit::atoms::ACP_STATE.state().read().is_loading);
+    assert_eq!(state.current_request_id.as_deref(), Some("old-request"));
 }
 
 #[test]
@@ -366,4 +410,23 @@ fn live_snapshot_removing_last_agent_exits_working_to_done() {
         &bg_snapshot(Vec::new(), 2, BgTaskSnapshotSource::Live),
     );
     assert_eq!(current(), ProgramStatus::Done);
+}
+
+#[test]
+#[serial]
+fn cancelled_shell_has_cancelled_live_detail_and_feedback() {
+    let mut state = reset();
+    crate::kit::atoms::NOTIFICATION.set(None);
+    set_bg_tasks(vec![bg_entry("shell-cancel", "shell", Some("running"))]);
+    dispatch_and_notify(&mut state, &bg_cancelled("shell-cancel"));
+    assert!(crate::kit::atoms::BG_TASKS.state().read().is_empty());
+    assert_eq!(
+        crate::kit::atoms::BG_LIVE_DETAIL.state().read()["shell-cancel"].status,
+        crate::kit::atoms::BgLiveStatus::Cancelled
+    );
+    let notice = crate::kit::atoms::NOTIFICATION.state();
+    let notice = notice.read();
+    let message = &notice.as_ref().expect("cancellation feedback").message;
+    assert!(message.contains("shell-cancel"));
+    assert!(!message.contains("app-note-bg-task-cancelled"));
 }

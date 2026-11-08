@@ -13,6 +13,14 @@
     "directories": [
       "home",
       "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
       "work",
       "work/.claude",
       "work/.claude/agents"
@@ -33,41 +41,41 @@
     ]
   },
   "recordedWorld": {
-    "root": "/tmp/peri-wire-e2e-jIDpFU",
-    "home": "/tmp/peri-wire-e2e-jIDpFU/home",
-    "work": "/tmp/peri-wire-e2e-jIDpFU/work"
+    "root": "/tmp/peri-wire-e2e-68yGwm",
+    "home": "/tmp/peri-wire-e2e-68yGwm/home",
+    "work": "/tmp/peri-wire-e2e-68yGwm/work"
   },
   "recordedSessionIds": {
-    "root": "01a1b607-957a-7e01-85f2-062c951418a1"
+    "root": "01a1b8e4-7c94-7951-9f39-0855b8515de2"
   },
-  "configurationFingerprint": "ab41bb646cbc7b72569c6ba7fe98afa0aacdd648dcf393a6f03e93c29b8c2fe5",
+  "configurationFingerprint": "7da90708353d305d29a4c28b842acf9d13341086979233df13a558736830c59f",
   "bindings": [
     {
       "owner": "world",
       "kind": "path",
       "alias": "root",
-      "recorded": "/tmp/peri-wire-e2e-jIDpFU",
+      "recorded": "/tmp/peri-wire-e2e-68yGwm",
       "anchor": "isolated scenario root"
     },
     {
       "owner": "world",
       "kind": "path",
       "alias": "home",
-      "recorded": "/tmp/peri-wire-e2e-jIDpFU/home",
+      "recorded": "/tmp/peri-wire-e2e-68yGwm/home",
       "anchor": "isolated scenario home"
     },
     {
       "owner": "world",
       "kind": "path",
       "alias": "work",
-      "recorded": "/tmp/peri-wire-e2e-jIDpFU/work",
+      "recorded": "/tmp/peri-wire-e2e-68yGwm/work",
       "anchor": "isolated scenario work"
     },
     {
       "owner": "world",
       "kind": "date",
       "alias": "today",
-      "recorded": "2026-11-07",
+      "recorded": "2026-11-08",
       "anchor": "ambient UTC date in system environment"
     },
     {
@@ -88,21 +96,21 @@
       "owner": "world",
       "kind": "session",
       "alias": "root",
-      "recorded": "01a1b607-957a-7e01-85f2-062c951418a1",
+      "recorded": "01a1b8e4-7c94-7951-9f39-0855b8515de2",
       "anchor": "ACP session/new result"
     },
     {
       "owner": "world",
       "kind": "thread",
       "alias": "child-left",
-      "recorded": "01a1b607-980c-7153-a46f-e2df7b20a4f7",
+      "recorded": "01a1b8e4-7f12-7f10-9045-ad6823a591a3",
       "anchor": "created child left"
     },
     {
       "owner": "world",
       "kind": "thread",
       "alias": "child-right",
-      "recorded": "01a1b607-980d-7d61-9c8b-54a6511c1d31",
+      "recorded": "01a1b8e4-7f13-78d1-892e-a99a5652263f",
       "anchor": "created child right"
     }
   ],

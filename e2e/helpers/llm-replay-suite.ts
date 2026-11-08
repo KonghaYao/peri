@@ -7,8 +7,9 @@ import { ScenarioIdentity } from "./llm-replay-identity.js";
 import { declareReplayAmbientBindings } from "./llm-replay-runtime.js";
 import {
   createReplayWorld, FIXTURE_MODEL_ORIGIN, prepareReplaySessions, ReplayTui,
-  syntheticRequestEvidence, type ReplayTuiOptions, type ReplayWorld,
+  syntheticRequestEvidence, type ReplayTuiOptions, type ReplayWorld, type ReplayProcessOutcome,
 } from "./llm-replay-tui.js";
+import { readReplayStore } from "./replay-isolation.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const proxyModule = new URL("../llm-replay/proxy.mjs", import.meta.url).href;
@@ -45,6 +46,7 @@ export interface ReplayScenarioDefinition {
   sessionNames?: string[];
   configVersion?: string;
   logicalOrigin?: string;
+  requestTimeoutMs?: number;
   configure?(world: ReplayWorld): Promise<void> | void;
   upstream?(world: ReplayWorld): Promise<{ url: string; close(): Promise<unknown> | unknown; [key: string]: any }>;
   runOptions?(context: ReplayScenarioContext): Promise<Record<string, any>> | Record<string, any>;
@@ -69,6 +71,8 @@ interface ScenarioManifest {
 
 export interface ReplayScenarioReport {
   version: 2;
+  invocation: string;
+  binary: { path: string; sha256?: string };
   id: string;
   title: string;
   mode: "record" | "replay";
@@ -77,6 +81,10 @@ export interface ReplayScenarioReport {
   fixtureDirectory: string;
   timings: { preparationMs: number; proxyBootMs: number; driverMs: number; scenarioMs: number; cleanupMs: number; totalMs: number };
   observations: Array<{ name: string; value: unknown; atMs: number }>;
+  processes: ReplayProcessOutcome[];
+  acpProcesses?: Array<{ exitCode: number | null; signal: string | null; forcedCleanup: boolean; databasePath: string }>;
+  store?: { path: string; integrity: string; threads: unknown[]; messageCount: number; messagesSha256: string };
+  temporaryDataRemoved?: boolean;
   proxy?: any;
   error?: { name: string; message: string; stack?: string };
 }
@@ -141,8 +149,10 @@ export async function runReplayScenario(definition: ReplayScenarioDefinition): P
   const started = performance.now();
   const configurationFingerprint = digest(Buffer.from(JSON.stringify({
     defaultWorld: createReplayWorld.toString(),
+    isolationSourceSha256: digest(await readFile(path.join(projectRoot, "e2e/helpers/replay-isolation.ts"))),
     configure: definition.configure?.toString() ?? null,
     configVersion: definition.configVersion ?? null,
+    requestTimeoutMs: definition.requestTimeoutMs ?? null,
   })));
   const fixtureRoot = path.resolve(process.env.PERI_E2E_REPLAY_FIXTURES ?? path.join(projectRoot, "e2e/fixtures/replay-v2"));
   const fixtureDirectory = path.join(fixtureRoot, definition.id);
@@ -151,8 +161,10 @@ export async function runReplayScenario(definition: ReplayScenarioDefinition): P
   world.evidence = path.join(reportRoot, definition.id);
   await mkdir(world.evidence, { recursive: true });
   const report: ReplayScenarioReport = {
-    version: 2, id: definition.id, title: definition.title, mode, status: "failed", world, fixtureDirectory,
-    timings: { preparationMs: 0, proxyBootMs: 0, driverMs: 0, scenarioMs: 0, cleanupMs: 0, totalMs: 0 }, observations: [],
+    version: 2, invocation: invocationId,
+    binary: { path: process.env.PERI_E2E_BINARY ?? path.join(projectRoot, "target/debug/peri"), sha256: process.env.PERI_E2E_BINARY_SHA256 },
+    id: definition.id, title: definition.title, mode, status: "failed", world, fixtureDirectory,
+    timings: { preparationMs: 0, proxyBootMs: 0, driverMs: 0, scenarioMs: 0, cleanupMs: 0, totalMs: 0 }, observations: [], processes: [],
   };
   let proxy: any;
   let upstream: any;
@@ -164,9 +176,23 @@ export async function runReplayScenario(definition: ReplayScenarioDefinition): P
   let primaryFailure = false;
   let currentRun: string | undefined;
   const terminals: ReplayTui[] = [];
+  const captureAcpProcesses = async (strict: boolean) => {
+    const directory = path.join(world.home, ".peri/logs");
+    const names = (await readdir(directory)).filter((name) => /^stdio-process-.*\.json$/.test(name));
+    report.acpProcesses = [];
+    for (const name of names) {
+      const bytes = await readFile(path.join(directory, name));
+      const outcome = JSON.parse(bytes.toString("utf8"));
+      report.acpProcesses.push(outcome);
+      await writeFile(path.join(world.evidence, name), bytes);
+      if (strict && (outcome.exitCode !== 0 || outcome.signal || outcome.forcedCleanup)) {
+        throw new Error(`ACP process did not close normally: ${name}`);
+      }
+    }
+  };
   try {
     const { startReplayProxy } = await import(proxyModule);
-    const { createRequestBindingAdapter } = await import(bindingModule);
+    const { createRequestBindingAdapter, mergeBindingRules } = await import(bindingModule);
     let manifest: ScenarioManifest;
     if (mode === "record") {
       await mkdir(fixtureRoot, { recursive: true });
@@ -216,7 +242,7 @@ export async function runReplayScenario(definition: ReplayScenarioDefinition): P
     }
     const cassetteDir = path.join(staging ?? fixtureDirectory, "cassette");
     const proxyBootStarted = performance.now();
-    proxy = await startReplayProxy({ mode, cassetteDir,
+    proxy = await startReplayProxy({ mode, cassetteDir, requestTimeoutMs: definition.requestTimeoutMs,
       ...(mode === "record" ? { upstreams: [{ logicalOrigin: definition.logicalOrigin ?? FIXTURE_MODEL_ORIGIN, transportOrigin: upstream.url }] } : {}),
       provenance: { ...manifest.provenance, scenario: definition.id },
     });
@@ -247,7 +273,8 @@ export async function runReplayScenario(definition: ReplayScenarioDefinition): P
       resolveContext: supplied.resolveContext ?? identity.resolve,
       bindings: bindings.registry,
       bindingOwnerFor: bindings.bindingOwnerFor,
-      requestRules: (call: any) => [...bindings.requestRules(call), ...(typeof supplied.requestRules === "function" ? supplied.requestRules(call) : supplied.requestRules ?? [])],
+      requestRules: (call: any) => mergeBindingRules(bindings.requestRules(call),
+        typeof supplied.requestRules === "function" ? supplied.requestRules(call) : supplied.requestRules ?? []),
       portableResponses: mode === "replay" ? manifest.portableResponses : undefined,
       onRequest: async (observation: ReplayRequestObservation) => {
         syncOwners();
@@ -265,6 +292,11 @@ export async function runReplayScenario(definition: ReplayScenarioDefinition): P
     await context.waitForCalls((snapshot) => snapshot.active === 0);
     if (mode === "record" && Array.isArray(upstream.errors) && upstream.errors.length) throw new Error(`fixture upstream errors: ${JSON.stringify(upstream.errors)}`);
     for (const tui of terminals) { await tui.save("final"); await tui.stop(); }
+    await captureAcpProcesses(true);
+    const store = readReplayStore(world);
+    if (store.integrity !== "ok") throw new Error(`session store integrity failed: ${store.integrity}`);
+    report.store = { path: store.path, integrity: store.integrity, threads: store.threads,
+      messageCount: store.messages.length, messagesSha256: digest(Buffer.from(JSON.stringify(store.messages))) };
     await cp(world.work, path.join(world.evidence, "final-work"), { recursive: true, dereference: false });
     report.proxy = await proxy.completeRun(currentRun);
     if (mode === "replay" && report.proxy.upstreamCalls !== 0) throw new Error("offline replay contacted an upstream");
@@ -300,14 +332,17 @@ export async function runReplayScenario(definition: ReplayScenarioDefinition): P
       if (report.status !== "passed") await cleanup(() => tui.save("failure"));
       await cleanup(() => tui.stop());
     }
+    report.processes = terminals.map((tui) => tui.outcome());
+    await cleanup(() => captureAcpProcesses(report.status === "passed"));
     if (proxy && currentRun && !report.proxy) {
       try { report.proxy = proxy.snapshot(currentRun); } catch { /* Failure can precede run registration. */ }
     }
     await cleanup(() => proxy?.close());
     await cleanup(() => upstream?.close());
-    if (report.status === "passed" && mode === "record") {
+    if (report.status === "passed") {
       // A replay must fail if it accidentally depends on a recording directory instead of its fresh seed.
       await cleanup(() => Promise.all([rm(world.home, { recursive: true, force: true }), rm(world.work, { recursive: true, force: true })]));
+      report.temporaryDataRemoved = cleanupErrors.length === 0;
     }
     if (staging) await cleanup(() => rm(staging!, { recursive: true, force: true }));
     if (lock) await cleanup(async () => {

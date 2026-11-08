@@ -123,7 +123,8 @@ async fn cancellation_targets_known_task_id() {
     let owner = ShellTasks::new();
     let task = owner
         .spawn_owned(
-            "trap '' TERM; printf ready > ready; while :; do sleep 1; done".into(),
+            "trap '' TERM; printf 'before-cancel'; printf ready > ready; while :; do sleep 1; done"
+                .into(),
             dir.path().to_string_lossy().into_owned(),
             None,
             Some("session-a"),
@@ -143,16 +144,37 @@ async fn cancellation_targets_known_task_id() {
         owner.get(&task.task_id).expect("task").task.status(),
         TaskStatus::Working
     );
-    tokio::time::timeout(Duration::from_secs(5), async {
+    let terminal = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if owner.get(&task.task_id).expect("task").task.status() == TaskStatus::Cancelled {
-                break;
+            let current = owner.get(&task.task_id).expect("task");
+            if current.task.status() == TaskStatus::Cancelled {
+                break current;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
     .expect("cancelled after process cleanup");
+    let wire = serde_json::to_value(terminal).expect("serialize task response");
+    assert_eq!(wire["status"], "cancelled");
+    assert!(
+        wire.get("result").is_none(),
+        "standard CancelledTask has no result payload"
+    );
+    let envelope: peri_acp_types::shell_task::ShellTaskResultMeta = serde_json::from_value(
+        wire["_meta"][peri_acp_types::shell_task::SHELL_TASK_RESULT_META_KEY].clone(),
+    )
+    .expect("cancelled task retains typed executor evidence");
+    let result = envelope
+        .into_cancelled_result(&task.task_id)
+        .expect("same cancelled shell");
+    let output = result.shell_output.expect("actual captured output");
+    assert!(output.complete);
+    assert_eq!(
+        std::fs::read_to_string(output.stdout_path.expect("stdout file")).unwrap(),
+        "before-cancel"
+    );
+    assert!(std::path::Path::new(&output.stderr_path.expect("stderr file")).exists());
     assert_eq!(
         tokio::time::timeout(Duration::from_secs(5), owner.shutdown())
             .await
@@ -200,6 +222,80 @@ async fn cancelling_after_completion_preserves_terminal_result() {
         owner.shutdown().await,
         peri_acp_types::tasks::TaskShutdownReport::Complete
     );
+}
+
+#[tokio::test]
+async fn accepted_cancel_racing_executor_timeout_preserves_timeout_evidence() {
+    use peri_acp_types::{
+        event::{BackgroundTaskResult, ShellOutput},
+        tasks::{BgTaskKind, BgTaskRegistration, TaskManager as TaskManagerPort},
+    };
+    let manager = Arc::new(TaskManager::new());
+    let mut owner = ShellTasks::new();
+    owner.manager = manager.clone();
+    owner.track_promoted_scoped("shell-timeout-race", Some("session"), None);
+    let result = BackgroundTaskResult {
+        task_id: "shell-timeout-race".into(),
+        agent_name: "bg-shell".into(),
+        prompt_summary: "deadline fixture".into(),
+        success: false,
+        output: "Shell command cancelled; read the output files as needed.".into(),
+        tool_calls_count: 0,
+        duration_ms: 100,
+        timed_out: true,
+        child_thread_id: None,
+        subagent_failure: None,
+        shell_output: Some(Box::new(ShellOutput {
+            stdout_path: Some("/tmp/deadline.stdout".into()),
+            stderr_path: Some("/tmp/deadline.stderr".into()),
+            complete: true,
+            error: None,
+            exit_code: None,
+        })),
+    };
+    let callback = owner.completion_callback();
+    let parked = result.clone();
+    let ticket = TaskManagerPort::register(
+        manager.as_ref(),
+        BgTaskRegistration {
+            task_id: result.task_id.clone(),
+            kind: BgTaskKind::Shell,
+            summary: "deadline fixture".into(),
+            pid: None,
+            // Runs inside manager.cancel, while Workspace still has cancel_pending.
+            kill: Some(Box::new(move || {
+                callback(&parked, BgTaskKind::Shell).unwrap()
+            })),
+        },
+    )
+    .unwrap();
+    owner.cancel_owned(&result.task_id, "session").unwrap();
+    let terminal = owner.get_owned(&result.task_id, "session").unwrap();
+    assert_eq!(terminal.task.status(), TaskStatus::Completed);
+    assert!(
+        terminal.meta.is_none(),
+        "timed-out result is not cancelled-task metadata"
+    );
+    let TaskPayload::Completed { result: payload } = terminal.task.payload else {
+        panic!("executor result payload")
+    };
+    let actual: BackgroundTaskResult =
+        serde_json::from_value(payload["structuredContent"].clone()).unwrap();
+    assert_eq!(actual.outcome_label(), "timed_out");
+    assert_eq!(
+        serde_json::to_value(&actual).unwrap(),
+        serde_json::to_value(&result).unwrap()
+    );
+    manager
+        .registry()
+        .settle_completed(&ticket, result, owner.completion_callback())
+        .unwrap();
+    assert!(!TaskManagerPort::is_execution_idle(manager.as_ref()));
+    // This synchronous race injector launches no process. Its callback has
+    // returned, so separately discharge the producer's execution responsibility;
+    // terminal publication alone is deliberately not cleanup evidence.
+    TaskManagerPort::confirm_external_execution_stopped(manager.as_ref(), &ticket);
+    assert_eq!(owner.shutdown().await, TaskShutdownReport::Complete);
 }
 
 /// 占满 Shell 并发位（真实进程），返回占位任务；调用方负责 `settle_shell_capacity`。

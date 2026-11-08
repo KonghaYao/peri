@@ -26,6 +26,8 @@ async fn test_suspended_then_resumed_output_remains_fifo_when_forwarder_is_delay
     let turn_id = peri_acp_types::session::TurnId::new();
     let agent_id = AgentId::new();
     bus.emit_render(RenderEvent::TurnSuspended { turn_id, agent_id });
+    bus.emit_render_reliable(RenderEvent::ReasonStarted { turn_id, agent_id })
+        .await;
     bus.emit_render(RenderEvent::TextChunk {
         turn_id,
         agent_id,
@@ -43,7 +45,11 @@ async fn test_suspended_then_resumed_output_remains_fifo_when_forwarder_is_delay
         .unwrap();
     let events = events.lock();
     assert!(matches!(&events[0], ExecutorEvent::TurnSuspended { .. }));
-    assert!(matches!(&events[1], ExecutorEvent::TextChunk { chunk, .. } if chunk == "resumed"));
+    assert!(
+        matches!(&events[1], ExecutorEvent::ReasonStarted { turn_id: actual_turn, agent_id: actual_agent }
+        if *actual_turn == turn_id.to_string() && *actual_agent == agent_id.to_string())
+    );
+    assert!(matches!(&events[2], ExecutorEvent::TextChunk { chunk, .. } if chunk == "resumed"));
 }
 
 /// 轮询等待条件成立（forwarder 是 fire-and-forget task，无 JoinHandle 可 await）。

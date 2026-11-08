@@ -13,6 +13,14 @@
     "directories": [
       "home",
       "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
       "work",
       "work/.claude",
       "work/.claude/agents"
@@ -33,41 +41,41 @@
     ]
   },
   "recordedWorld": {
-    "root": "/tmp/peri-wire-e2e-Zk3Ec8",
-    "home": "/tmp/peri-wire-e2e-Zk3Ec8/home",
-    "work": "/tmp/peri-wire-e2e-Zk3Ec8/work"
+    "root": "/tmp/peri-wire-e2e-V8Fz8d",
+    "home": "/tmp/peri-wire-e2e-V8Fz8d/home",
+    "work": "/tmp/peri-wire-e2e-V8Fz8d/work"
   },
   "recordedSessionIds": {
-    "root": "01a1b607-9c1c-7ae2-88a2-99ef257fee91"
+    "root": "01a1b8e4-8c56-7cb1-a64f-ba407a56df2a"
   },
-  "configurationFingerprint": "ab41bb646cbc7b72569c6ba7fe98afa0aacdd648dcf393a6f03e93c29b8c2fe5",
+  "configurationFingerprint": "7da90708353d305d29a4c28b842acf9d13341086979233df13a558736830c59f",
   "bindings": [
     {
       "owner": "world",
       "kind": "path",
       "alias": "root",
-      "recorded": "/tmp/peri-wire-e2e-Zk3Ec8",
+      "recorded": "/tmp/peri-wire-e2e-V8Fz8d",
       "anchor": "isolated scenario root"
     },
     {
       "owner": "world",
       "kind": "path",
       "alias": "home",
-      "recorded": "/tmp/peri-wire-e2e-Zk3Ec8/home",
+      "recorded": "/tmp/peri-wire-e2e-V8Fz8d/home",
       "anchor": "isolated scenario home"
     },
     {
       "owner": "world",
       "kind": "path",
       "alias": "work",
-      "recorded": "/tmp/peri-wire-e2e-Zk3Ec8/work",
+      "recorded": "/tmp/peri-wire-e2e-V8Fz8d/work",
       "anchor": "isolated scenario work"
     },
     {
       "owner": "world",
       "kind": "date",
       "alias": "today",
-      "recorded": "2026-11-07",
+      "recorded": "2026-11-08",
       "anchor": "ambient UTC date in system environment"
     },
     {
@@ -88,14 +96,14 @@
       "owner": "world",
       "kind": "session",
       "alias": "root",
-      "recorded": "01a1b607-9c1c-7ae2-88a2-99ef257fee91",
+      "recorded": "01a1b8e4-8c56-7cb1-a64f-ba407a56df2a",
       "anchor": "ACP session/new result"
     },
     {
       "owner": "world",
       "kind": "thread",
       "alias": "child-worker",
-      "recorded": "01a1b607-9e72-7e70-ba12-7b34285db22c",
+      "recorded": "01a1b8e4-8ea8-73a0-8518-20b6d2f2e1c9",
       "anchor": "created child worker"
     }
   ],
@@ -132,7 +140,7 @@
         "kind": "utf8",
         "maxBytes": 128
       },
-      "sourceSha256": "f104fa425a8bdbb8097e67f2beba5729e0ad32f0a22944eca5a48470f9572664"
+      "sourceSha256": "b03a9c074f6b374320fff317dfcf8c804c1f02834ef6765dc162c012952da218"
     }
   ]
 }

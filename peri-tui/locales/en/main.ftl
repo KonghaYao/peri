@@ -1051,6 +1051,7 @@ bg-task-status-pending-delivery = delivery pending
 bg-task-status-completed = completed
 bg-task-status-failed = failed
 bg-task-status-cancelled = cancelled
+app-note-bg-task-cancelled = Task cancelled: { $task_id }
 bg-task-status-unknown = unknown
 workflow-run-not-synced = Selected workflow run is not in the current snapshot (finished or not synced yet).
 

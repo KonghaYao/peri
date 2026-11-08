@@ -1,0 +1,18 @@
+event: message_start
+data: {"type":"message_start","message":{"id":"context-message","type":"message","role":"assistant","model":"fixture-model","content":[],"stop_reason":null,"usage":{"input_tokens":30,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"L02_HISTORY_HEAD\n\nL02_SCROLL_LINE_000\n\nL02_SCROLL_LINE_001\n\nL02_SCROLL_LINE_002\n\nL02_SCROLL_LINE_003\n\nL02_SCROLL_LINE_004\n\nL02_SCROLL_LINE_005\n\nL02_SCROLL_LINE_006\n\nL02_SCROLL_LINE_007\n\nL02_SCROLL_LINE_008\n\nL02_SCROLL_LINE_009\n\nL02_SCROLL_LINE_010\n\nL02_SCROLL_LINE_011\n\nL02_SCROLL_LINE_012\n\nL02_SCROLL_LINE_013\n\nL02_SCROLL_LINE_014\n\nL02_SCROLL_LINE_015\n\nL02_SCROLL_LINE_016\n\nL02_SCROLL_LINE_017\n\nL02_SCROLL_LINE_018\n\nL02_SCROLL_LINE_019\n\nL02_SCROLL_LINE_020\n\nL02_SCROLL_LINE_021\n\nL02_SCROLL_LINE_022\n\nL02_SCROLL_LINE_023\n\nL02_SCROLL_LINE_024\n\nL02_SCROLL_LINE_025\n\nL02_SCROLL_LINE_026\n\nL02_SCROLL_LINE_027\n\nL02_SCROLL_LINE_028\n\nL02_SCROLL_LINE_029\n\nL02_SCROLL_LINE_030\n\nL02_SCROLL_LINE_031\n\nL02_SCROLL_LINE_032\n\nL02_SCROLL_LINE_033\n\nL02_SCROLL_LINE_034\n\nL02_SCROLL_LINE_035\n\nL02_SCROLL_LINE_036\n\nL02_SCROLL_LINE_037\n\nL02_SCROLL_LINE_038\n\nL02_SCROLL_LINE_039\n\nL02_SCROLL_LINE_040\n\nL02_SCROLL_LINE_041\n\nL02_SCROLL_LINE_042\n\nL02_SCROLL_LINE_043\n\nL02_SCROLL_LINE_044\n\nL02_SCROLL_LINE_045\n\nL02_SCROLL_LINE_046\n\nL02_SCROLL_LINE_047\n\nL02_SCROLL_LINE_048\n\nL02_SCROLL_LINE_049\n\nL02_SCROLL_LINE_050\n\nL02_SCROLL_LINE_051\n\nL02_SCROLL_LINE_052\n\nL02_SCROLL_LINE_053\n\nL02_SCROLL_LINE_054\n\nL02_SCROLL_LINE_055\n\nL02_SCROLL_LINE_056\n\nL02_SCROLL_LINE_057\n\nL02_SCROLL_LINE_058\n\nL02_SCROLL_LINE_059\n\nL02_SCROLL_LINE_060\n\nL02_SCROLL_LINE_061\n\nL02_SCROLL_LINE_062\n\nL02_SCROLL_LINE_063\n\nL02_SCROLL_LINE_064\n\nL02_SCROLL_LINE_065\n\nL02_SCROLL_LINE_066\n\nL02_SCROLL_LINE_067\n\nL02_SCROLL_LINE_068\n\nL02_SCROLL_LINE_069\n\nL02_SCROLL_LINE_070\n\nL02_SCROLL_LINE_071\n\nL02_SCROLL_LINE_072\n\nL02_SCROLL_LINE_073\n\nL02_SCROLL_LINE_074\n\nL02_HISTORY_END"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":20}}
+
+event: message_stop
+data: {"type":"message_stop"}
+

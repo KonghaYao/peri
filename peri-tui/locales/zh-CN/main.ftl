@@ -1049,6 +1049,7 @@ bg-task-status-pending-delivery = 待投递
 bg-task-status-completed = 已完成
 bg-task-status-failed = 失败
 bg-task-status-cancelled = 已取消
+app-note-bg-task-cancelled = 后台任务已取消: { $task_id }
 bg-task-status-unknown = 未知
 workflow-run-not-synced = 所选 Workflow 运行不在当前快照中（可能已结束或尚未同步）。
 

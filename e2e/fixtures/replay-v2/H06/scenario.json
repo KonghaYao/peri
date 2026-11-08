@@ -1,0 +1,213 @@
+{
+  "version": 2,
+  "id": "H06",
+  "title": "同会话并行 Shell 反序完成，任务身份、真实 Read 和通知不串线",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
+      "work"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-Lkeb3T",
+    "home": "/tmp/peri-wire-e2e-Lkeb3T/home",
+    "work": "/tmp/peri-wire-e2e-Lkeb3T/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b8e3-d72b-7a71-b8c9-fb3e7cafdeca"
+  },
+  "configurationFingerprint": "3a4a1a7755271383d7e315d5debb70620e204ccc5d3564c98dda73a3c4b0c596",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-Lkeb3T",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-Lkeb3T/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-Lkeb3T/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-08",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b8e3-d72b-7a71-b8c9-fb3e7cafdeca",
+      "anchor": "ACP session/new result"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "shell-a",
+      "recorded": "mcp-01a1b8e3-d9e0-7473-8270-aef7919163cd",
+      "anchor": "Bash tool receipt H06-a"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "shell-b",
+      "recorded": "mcp-01a1b8e3-d9e4-7ea0-9fcf-28d88bd08a7d",
+      "anchor": "Bash tool receipt H06-b"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "shell-b-remote",
+      "recorded": "shell-01a1b8e3-d9dd-7c72-bffd-16b29272877d",
+      "anchor": "MCP remote task linked to Bash tool H06-b"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "shell-b-stdout",
+      "recorded": "/tmp/peri-wire-e2e-Lkeb3T/home/tmp/peri-bg-shell-01a1b8e3-d9dd-7c72-bffd-16b29272877d-ab01f8bf-7470-4a2f-8211-e43d27345311-stdout.log",
+      "anchor": "terminal stdout reference for H06-b"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "shell-b-stderr",
+      "recorded": "/tmp/peri-wire-e2e-Lkeb3T/home/tmp/peri-bg-shell-01a1b8e3-d9dd-7c72-bffd-16b29272877d-cb2e2142-8d14-4856-93f7-d72a514c394b-stderr.log",
+      "anchor": "terminal stderr reference for H06-b"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "shell-a-remote",
+      "recorded": "shell-01a1b8e3-d9da-7ed2-83db-e4e69b88ca05",
+      "anchor": "MCP remote task linked to Bash tool H06-a"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "shell-a-stdout",
+      "recorded": "/tmp/peri-wire-e2e-Lkeb3T/home/tmp/peri-bg-shell-01a1b8e3-d9da-7ed2-83db-e4e69b88ca05-3e0509b3-fe89-45ce-8454-adfc9c2c0caf-stdout.log",
+      "anchor": "terminal stdout reference for H06-a"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "shell-a-stderr",
+      "recorded": "/tmp/peri-wire-e2e-Lkeb3T/home/tmp/peri-bg-shell-01a1b8e3-d9da-7ed2-83db-e4e69b88ca05-fb232ff0-a6d7-456c-bde5-24805fdaecb8-stderr.log",
+      "anchor": "terminal stderr reference for H06-a"
+    }
+  ],
+  "portableResponses": [
+    {
+      "identity": {
+        "owner": "root",
+        "execution": "start",
+        "call": "reason:3",
+        "attempt": 1,
+        "purpose": "reason"
+      },
+      "protocol": "anthropic",
+      "owner": "world",
+      "tools": [
+        {
+          "toolCallId": "H06-read-b",
+          "rules": [
+            {
+              "path": "/file_path",
+              "kind": "path",
+              "alias": "shell-b-stdout",
+              "mode": "path-prefix"
+            }
+          ]
+        }
+      ],
+      "rulesVersion": "world-bindings-v1",
+      "fragmentPlan": {
+        "kind": "utf8",
+        "maxBytes": 128
+      },
+      "sourceSha256": "e54544d3bdb89dbb5935dea1ed710b4525b1690f5ece241d2d8d32fd6e51b520"
+    },
+    {
+      "identity": {
+        "owner": "root",
+        "execution": "start",
+        "call": "reason:5",
+        "attempt": 1,
+        "purpose": "reason"
+      },
+      "protocol": "anthropic",
+      "owner": "world",
+      "tools": [
+        {
+          "toolCallId": "H06-read-a",
+          "rules": [
+            {
+              "path": "/file_path",
+              "kind": "path",
+              "alias": "shell-a-stdout",
+              "mode": "path-prefix"
+            }
+          ]
+        }
+      ],
+      "rulesVersion": "world-bindings-v1",
+      "fragmentPlan": {
+        "kind": "utf8",
+        "maxBytes": 128
+      },
+      "sourceSha256": "2b7f7b1e41aeaf4b2d1eb8797a6eb21c342d729f8aed9db779f7be465052f3cd"
+    }
+  ]
+}

@@ -1,0 +1,102 @@
+{
+  "version": 2,
+  "id": "M11",
+  "title": "monitor 实例关闭清理进程树，重启后的旧 task ID 不复活且新任务正常",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
+      "work"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      },
+      {
+        "path": "work/monitor-source.py",
+        "sha256": "e8cd83ebda82f44798f15160ab53fca2ff2a0f0ee3db17ce0ccc55253349ee10",
+        "size": 2137,
+        "mode": 420
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-uaXIH6",
+    "home": "/tmp/peri-wire-e2e-uaXIH6/home",
+    "work": "/tmp/peri-wire-e2e-uaXIH6/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b8e5-d6b8-71b1-ba35-0ae217b3c700"
+  },
+  "configurationFingerprint": "3bb57e668d71b2ddd006084564e318d34ca593f9e91c5684ad3b360b2c36a23f",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-uaXIH6",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-uaXIH6/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-uaXIH6/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-08",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b8e5-d6b8-71b1-ba35-0ae217b3c700",
+      "anchor": "ACP session/new result"
+    }
+  ],
+  "portableResponses": []
+}

@@ -1,0 +1,206 @@
+{
+  "version": 2,
+  "id": "M01",
+  "title": "monitor 运行中增量告警、真实 Tasks 面板与终态合并未报告命中",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
+      "work"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      },
+      {
+        "path": "work/monitor-source.py",
+        "sha256": "e8cd83ebda82f44798f15160ab53fca2ff2a0f0ee3db17ce0ccc55253349ee10",
+        "size": 2137,
+        "mode": 420
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-BYnbZX",
+    "home": "/tmp/peri-wire-e2e-BYnbZX/home",
+    "work": "/tmp/peri-wire-e2e-BYnbZX/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b8e0-2b1e-78f0-96f0-d66af9a41069"
+  },
+  "configurationFingerprint": "4db3a6bd7022c0dd16d2c9c34c34172658d97ad5a306e5ae61f5b5317cb3137f",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-BYnbZX",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-BYnbZX/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-BYnbZX/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-08",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b8e0-2b1e-78f0-96f0-d66af9a41069",
+      "anchor": "ACP session/new result"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "monitor-m01-host",
+      "recorded": "mcp-01a1b8e0-2f1f-7e01-87e5-41dd5ed36982",
+      "anchor": "monitor_start host receipt M01-start"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "monitor-m01-raw",
+      "recorded": "monitor-01a1b8e0-2f1b-7563-82dd-76f4b338bcb9",
+      "anchor": "monitor_start raw receipt M01-start"
+    },
+    {
+      "owner": "world",
+      "kind": "timestamp",
+      "alias": "monitor-m01-event-1-ts",
+      "recorded": "2026-11-08T01:57:42.497985948+00:00",
+      "anchor": "monitor M01-start event seq 1 capture timestamp"
+    },
+    {
+      "owner": "world",
+      "kind": "timestamp",
+      "alias": "monitor-m01-event-2-ts",
+      "recorded": "2026-11-08T01:57:44.434894913+00:00",
+      "anchor": "monitor M01-start event seq 2 capture timestamp"
+    },
+    {
+      "owner": "world",
+      "kind": "timestamp",
+      "alias": "monitor-m01-event-3-ts",
+      "recorded": "2026-11-08T01:57:44.434954033+00:00",
+      "anchor": "monitor M01-start event seq 3 capture timestamp"
+    }
+  ],
+  "portableResponses": [
+    {
+      "identity": {
+        "owner": "root",
+        "execution": "start",
+        "call": "reason:4",
+        "attempt": 1,
+        "purpose": "reason"
+      },
+      "protocol": "anthropic",
+      "owner": "world",
+      "tools": [
+        {
+          "toolCallId": "M01-read-first",
+          "rules": [
+            {
+              "path": "/params/task_id",
+              "mode": "typed-template",
+              "segments": [
+                {
+                  "kind": "task",
+                  "alias": "monitor-m01-raw"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "rulesVersion": "world-bindings-v1",
+      "fragmentPlan": {
+        "kind": "utf8",
+        "maxBytes": 128
+      },
+      "sourceSha256": "80b77b06458b90cf9e0da58d0a2e1d37c0031644aaf05af456b8b58c0e9a914f"
+    },
+    {
+      "identity": {
+        "owner": "root",
+        "execution": "start",
+        "call": "reason:6",
+        "attempt": 1,
+        "purpose": "reason"
+      },
+      "protocol": "anthropic",
+      "owner": "world",
+      "tools": [
+        {
+          "toolCallId": "M01-read-terminal",
+          "rules": [
+            {
+              "path": "/params/task_id",
+              "mode": "typed-template",
+              "segments": [
+                {
+                  "kind": "task",
+                  "alias": "monitor-m01-raw"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "rulesVersion": "world-bindings-v1",
+      "fragmentPlan": {
+        "kind": "utf8",
+        "maxBytes": 128
+      },
+      "sourceSha256": "661b536cb5275af33ce9b13d7f3c6627da04791efc89c9e9ec207f4497738a93"
+    }
+  ]
+}

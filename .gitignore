@@ -166,6 +166,7 @@ claude-blog-cn
 !e2e/helpers/llm-replay-pty.py
 e2e/fixtures/replay-v2/.record-*/
 e2e/fixtures/replay-v2/.lock-*/
+e2e/fixtures/replay-v2/*/cassette.partial-*/
 !scripts/test-i386.py
 !scripts/test-loongarch64.py
 !scripts/test-install-beta.py

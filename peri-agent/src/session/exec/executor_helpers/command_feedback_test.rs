@@ -111,6 +111,7 @@ fn make_intercept_request<'a>(
         ),
         cwd: "/tmp",
         session_id,
+        request_id: Some("parse-feedback-request"),
         cancel,
         session_resources: None,
         thread_id: None,
@@ -233,6 +234,10 @@ async fn test_intercept_args_parse_failure_returns_error_feedback() {
         mock_sink.push_done_count(),
         1,
         "解析失败路径必须调用 push_done（TRAP 守护）"
+    );
+    assert_eq!(
+        mock_sink.push_done_request_ids.lock().unwrap().as_slice(),
+        [Some("parse-feedback-request".to_owned())]
     );
 }
 

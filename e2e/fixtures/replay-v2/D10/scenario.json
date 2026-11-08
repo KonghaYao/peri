@@ -1,0 +1,103 @@
+{
+  "version": 2,
+  "id": "D10",
+  "title": "真实 fork 固定历史快照，父与 fork 后续独立迭代不串扰",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
+      "work"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-F84bNW",
+    "home": "/tmp/peri-wire-e2e-F84bNW/home",
+    "work": "/tmp/peri-wire-e2e-F84bNW/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b8e2-4edb-7bb2-b727-3b7657aac83a"
+  },
+  "configurationFingerprint": "ad045351629dfccda164a536434d2f93bfffcc32e68dc292cf41c0a93beb95ed",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-F84bNW",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-F84bNW/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-F84bNW/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-08",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b8e2-4edb-7bb2-b727-3b7657aac83a",
+      "anchor": "ACP session/new result"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "fork",
+      "recorded": "01a1b8e2-57c6-7410-8bbb-d41a9dfe4ff0",
+      "anchor": "real ACP session/fork response for root at its first completed round"
+    }
+  ],
+  "portableResponses": []
+}

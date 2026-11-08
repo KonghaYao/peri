@@ -1,0 +1,124 @@
+{
+  "version": 2,
+  "id": "H09",
+  "title": "后台 Shell 正超时产生真实 timed_out，并阻止超时后的迟写",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
+      "work"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-NoZnml",
+    "home": "/tmp/peri-wire-e2e-NoZnml/home",
+    "work": "/tmp/peri-wire-e2e-NoZnml/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b8e3-eeca-7ce0-ab79-1605919c4784"
+  },
+  "configurationFingerprint": "5dbd7cf75a8e2572e274152315cceb6e647a2d2cb4c9c3d7bb2ebfcb01ea2680",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-NoZnml",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-NoZnml/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-NoZnml/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-08",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b8e3-eeca-7ce0-ab79-1605919c4784",
+      "anchor": "ACP session/new result"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "shell-h09",
+      "recorded": "mcp-01a1b8e3-f1f8-7203-886f-3e5625f4eca6",
+      "anchor": "Bash tool receipt H09-bash"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "shell-h09-remote",
+      "recorded": "shell-01a1b8e3-f1f4-73b3-bbac-eb729019a0ca",
+      "anchor": "MCP remote task linked to Bash tool H09-bash"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "shell-h09-stdout",
+      "recorded": "/tmp/peri-wire-e2e-NoZnml/home/tmp/peri-bg-shell-01a1b8e3-f1f4-73b3-bbac-eb729019a0ca-df4ad6b0-a7b5-42ec-bb26-547b8959ee08-stdout.log",
+      "anchor": "terminal stdout reference for H09-bash"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "shell-h09-stderr",
+      "recorded": "/tmp/peri-wire-e2e-NoZnml/home/tmp/peri-bg-shell-01a1b8e3-f1f4-73b3-bbac-eb729019a0ca-fe1a1dc2-aa46-4dbd-9dc8-f9ac8ec374a6-stderr.log",
+      "anchor": "terminal stderr reference for H09-bash"
+    }
+  ],
+  "portableResponses": []
+}

@@ -64,6 +64,7 @@ fn missing_old_stop_does_not_bind_a_new_background_occurrence_to_the_old_task() 
         dispatch_and_notify(
             &mut state,
             &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
+                child_thread_id: Some("same-child".into()),
                 task_id: task_id.into(),
                 kind: "agent".into(),
                 summary: "worker".into(),
@@ -174,6 +175,7 @@ fn live_lost_update_hides_activity_until_authoritative_running_snapshot() {
     dispatch_and_notify(
         &mut state,
         &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
+            child_thread_id: None,
             task_id: "lost-worker".into(),
             kind: "agent".into(),
             summary: "current worker".into(),
@@ -213,6 +215,7 @@ fn live_lost_update_hides_activity_until_authoritative_running_snapshot() {
     // 同样的恢复必须成立在“lost 快照删除底栏行 → running 快照”路径上。
     super::super::system::apply_bg_task_snapshot(
         &[crate::kit::acp_types::BgTaskEntry {
+            child_thread_id: None,
             task_id: "lost-worker".into(),
             kind: "agent".into(),
             summary: "current worker".into(),
@@ -227,6 +230,7 @@ fn live_lost_update_hides_activity_until_authoritative_running_snapshot() {
     assert!(BG_DISPLAY.state().read().is_empty());
     super::super::system::apply_bg_task_snapshot(
         &[crate::kit::acp_types::BgTaskEntry {
+            child_thread_id: None,
             task_id: "lost-worker".into(),
             kind: "agent".into(),
             summary: "current worker".into(),
@@ -250,6 +254,7 @@ fn live_lost_update_hides_activity_until_authoritative_running_snapshot() {
 fn live_running_snapshot_recovers_activity_without_started_event() {
     let _restore = RestoreSnapshotAtoms::empty();
     let task = crate::kit::acp_types::BgTaskEntry {
+        child_thread_id: None,
         task_id: "late-snapshot".into(),
         kind: "shell".into(),
         summary: "sleep 1".into(),
@@ -291,6 +296,7 @@ fn historical_nonterminal_snapshots_do_not_create_live_activity() {
     .enumerate()
     {
         let task = crate::kit::acp_types::BgTaskEntry {
+            child_thread_id: None,
             task_id: "historical-agent".into(),
             kind: "agent".into(),
             summary: "saved task".into(),
@@ -322,6 +328,7 @@ fn historical_snapshot_cannot_resurrect_lost_task_but_live_snapshot_can() {
     let _restore = RestoreSnapshotAtoms::empty();
     let mut state = make_fold_test_state();
     let mut task = crate::kit::acp_types::BgTaskEntry {
+        child_thread_id: None,
         task_id: "observed-shell".into(),
         kind: "shell".into(),
         summary: "sleep 1".into(),
@@ -496,6 +503,7 @@ fn terminal_snapshot_does_not_resurrect_a_running_task() {
     BG_LIVE_DETAIL.state().write().clear();
     assert!(super::super::system::apply_bg_task_snapshot(
         &[crate::kit::acp_types::BgTaskEntry {
+            child_thread_id: None,
             task_id: "finished-shell".into(),
             kind: "shell".into(),
             summary: "sleep 1".into(),
@@ -525,6 +533,7 @@ fn terminal_snapshot_does_not_resurrect_a_running_task() {
     );
     assert!(super::super::system::apply_bg_task_snapshot(
         &[crate::kit::acp_types::BgTaskEntry {
+            child_thread_id: None,
             task_id: "finished-shell".into(),
             kind: "shell".into(),
             summary: "sleep 1".into(),
@@ -554,6 +563,7 @@ fn test_mcp_shell_task_events_update_bottom_task_area() {
     dispatch_and_notify(
         &mut state,
         &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
+            child_thread_id: None,
             task_id: "shell-mcp".into(),
             kind: "shell".into(),
             summary: "sleep 1".into(),
@@ -605,6 +615,7 @@ fn snapshot_watermark_rejects_late_started_event() {
     dispatch_and_notify(
         &mut state,
         &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
+            child_thread_id: None,
             task_id: "already-finished".into(),
             kind: "shell".into(),
             summary: "echo done".into(),
@@ -628,6 +639,7 @@ fn test_bg_task_cancelled_persists_reason_on_live_detail() {
     dispatch_and_notify(
         &mut make_state(),
         &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
+            child_thread_id: None,
             task_id: "task-shell".into(),
             kind: "shell".into(),
             summary: "echo".into(),
@@ -662,6 +674,7 @@ fn test_bg_text_chunk_appends_live_detail_not_view_models() {
     dispatch_and_notify(
         &mut state,
         &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
+            child_thread_id: Some("bg-agent".into()),
             task_id: "task-1".into(),
             kind: "agent".into(),
             summary: "bg".into(),
@@ -785,6 +798,7 @@ fn test_bg_group_frozen_in_view_models_after_turn_suspended() {
     dispatch_and_notify(
         &mut state,
         &AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
+            child_thread_id: Some("bg-agent".into()),
             task_id: "task-1".into(),
             kind: "agent".into(),
             summary: "bg".into(),

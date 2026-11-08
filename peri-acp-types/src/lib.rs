@@ -75,6 +75,7 @@ pub mod model;
 pub mod monitor;
 pub mod oauth_credentials;
 pub mod peri_caps;
+pub mod shell_task;
 pub use peri_caps::PeriCaps;
 pub mod context_archive;
 pub mod permission;

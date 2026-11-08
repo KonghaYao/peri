@@ -1,5 +1,5 @@
 import { createServer, type ServerResponse } from "node:http";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { runReplayScenario, type ReplayScenarioContext } from "../../helpers/llm-replay-suite.js";
@@ -246,8 +246,11 @@ describe("I01-I02 real session and replay-run isolation", () => {
           }
         } finally {
           await second?.save("final").catch(() => {});
-          await second?.stop();
-          await first.stop();
+          try { await second?.stop(); }
+          finally {
+            try { await first.stop(); }
+            finally { if (secondWorld) await rm(secondWorld.root, { recursive: true, force: true }); }
+          }
         }
       },
     });

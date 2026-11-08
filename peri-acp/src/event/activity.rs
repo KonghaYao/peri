@@ -296,6 +296,7 @@ pub fn map_agent_activity(event: &ExecutorEvent) -> Option<AgentActivityWire> {
         | ExecutorEvent::GoalSnapshot { .. }
         | ExecutorEvent::MessageAdded(_)
         | ExecutorEvent::LlmCallStart { .. }
+        | ExecutorEvent::ReasonStarted { .. }
         | ExecutorEvent::LlmRequestPayload { .. }
         | ExecutorEvent::LlmCallEnd { .. }
         | ExecutorEvent::TodoUpdate(_)

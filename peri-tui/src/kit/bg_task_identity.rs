@@ -25,10 +25,6 @@ pub(crate) fn bounded_label(value: &str) -> String {
     result
 }
 
-pub fn is_unbound_agent_row(entry: &BgDisplayEntry) -> bool {
-    entry.agent_type == "agent" && entry.linked_agent_id.is_none()
-}
-
 pub fn bind_linked_agent_on_subagent_started(
     agent_id: &str,
     agent_name: &str,
@@ -48,9 +44,16 @@ pub fn bind_linked_agent_on_subagent_started(
         })
         .map(|(id, _)| id.clone())
         .collect();
+    let claimed_tasks: HashSet<_> = BG_LIVE_DETAIL
+        .state()
+        .read()
+        .iter()
+        .filter(|(_, detail)| detail.subagent_instance_id.is_some())
+        .map(|(id, _)| id.clone())
+        .collect();
     let display_store = BG_DISPLAY.state();
     let task_id = {
-        let mut display = display_store.write();
+        let display = display_store.read();
         if let Some(existing) = display.iter().rev().find(|entry| {
             entry.is_active
                 && entry.linked_agent_id.as_deref() == Some(agent_id)
@@ -58,11 +61,11 @@ pub fn bind_linked_agent_on_subagent_started(
         }) {
             existing.id.clone()
         } else {
-            let entry = display
-                .iter_mut()
-                .rev()
-                .find(|entry| entry.is_active && is_unbound_agent_row(entry))?;
-            entry.linked_agent_id = Some(agent_id.to_string());
+            let entry = display.iter().rev().find(|entry| {
+                entry.is_active
+                    && entry.linked_agent_id.as_deref() == Some(agent_id)
+                    && !claimed_tasks.contains(&entry.id)
+            })?;
             entry.id.clone()
         }
     };
@@ -72,6 +75,28 @@ pub fn bind_linked_agent_on_subagent_started(
         id.agent_name = Some(bounded_label(agent_name));
     }
     Some(task_id)
+}
+
+/// Registry ownership is authoritative even if SubagentStarted arrives first.
+/// Never infer this edge from the most recently displayed unbound task.
+pub(crate) fn bind_registered_child(task_id: &str, child_thread_id: Option<&str>) {
+    let Some(child) = child_thread_id else {
+        return;
+    };
+    if let Some(identity) = BG_TASK_IDENTITY.state().write().get_mut(task_id) {
+        identity.agent_id = Some(child.to_owned());
+    }
+    if let Some(row) = BG_DISPLAY
+        .state()
+        .write()
+        .iter_mut()
+        .find(|row| row.id == task_id)
+    {
+        row.linked_agent_id = Some(child.to_owned());
+    }
+    if let Some(detail) = BG_LIVE_DETAIL.state().write().get_mut(task_id) {
+        detail.agent_id = Some(child.to_owned());
+    }
 }
 
 pub fn resolve_subagent_id_for_display(entry: &BgDisplayEntry) -> Option<String> {

@@ -14,7 +14,11 @@ use peri_agent::session::exec::compact_pipeline::execute_compact;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Default)]
-struct AuditSink(Mutex<Vec<String>>, Mutex<Vec<String>>);
+struct AuditSink(
+    Mutex<Vec<String>>,
+    Mutex<Vec<String>>,
+    Mutex<Vec<Option<String>>>,
+);
 
 #[async_trait]
 impl EventSink for AuditSink {
@@ -30,8 +34,9 @@ impl EventSink for AuditSink {
             .push(serde_json::to_string(event).unwrap());
         Ok(())
     }
-    async fn push_done(&self, _: &str, reason: &str, _: Option<&str>) {
+    async fn push_done(&self, _: &str, reason: &str, request_id: Option<&str>) {
         self.1.lock().unwrap().push(reason.to_owned());
+        self.2.lock().unwrap().push(request_id.map(str::to_owned));
     }
 }
 
@@ -67,6 +72,7 @@ async fn test_cancelled_compact_done_agrees_with_prompt_result() {
         ),
         cwd: "/tmp",
         session_id: "audit-cancel",
+        request_id: Some("cancelled-compact-request"),
         cancel: &cancel,
         session_resources: None,
         thread_id: None,
@@ -98,6 +104,10 @@ async fn test_cancelled_compact_done_agrees_with_prompt_result() {
         sink.1.lock().unwrap().as_slice(),
         ["cancelled"],
         "取消后的 done 必须与 PromptResult 的 Cancelled 一致"
+    );
+    assert_eq!(
+        sink.2.lock().unwrap().as_slice(),
+        [Some("cancelled-compact-request".to_owned())]
     );
 }
 

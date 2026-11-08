@@ -4,6 +4,8 @@ Builtin MCP 的工具与 server handler 由独立 crate 持有；配置来源 I/
 
 Workspace 后台任务的资源结算以 `workspace/src/shell_tasks.rs` 为准：owner 在进程退出、管道回收和终态通知完成后结算；会话释放只取消 TaskManager 已知 external task 并等待 settled。Workspace 自身没有 scope close barrier、旧 owner 扫描、连接重建或跨进程恢复；generic 模式无 owner，不参与 session 隔离。宿主恢复时按 owner 调用 `shell_task_list` 重新发现仍存活的 Shell 并建立当前订阅（见 [peri-middlewares](peri-middlewares.md) 的 `client/workspace_watch.rs`），这不是 Workspace 进程的自我恢复。
 
+Shell 取消保留标准 MCP `CancelledTask`（无 `result` payload）；进程清理结束时的真实 `BackgroundTaskResult` 缓存在 Workspace，由 `tasks/get._meta["peri/shell-result"]` 返回版本化 `ShellTaskResultMeta`（`peri-acp-types/src/shell_task.rs`）。取消的命令摘要、退出码和 stdout/stderr 引用从这份 executor 证据恢复，不从状态文案推造。取消接受与已触发的超时竞态时，保留 executor 的 `timed_out` 结果，以 `Completed` payload 交付，不能改写成 `Cancelled`。回归：`shell_tasks_test.rs::{cancellation_targets_known_task_id,accepted_cancel_racing_executor_timeout_preserves_timeout_evidence}`、`e2e/tests/replay-v3/async-shell-lifecycle.test.ts` H05。
+
 宿主侧入口见 [`peri-middlewares` 代码索引](peri-middlewares.md)。本文是插件包的当前路径索引；设计契约见 [`architecture-contracts.md`](../standards/architecture-contracts.md) 与 [`MCP 适配目标设计（v4-part-1）`](../design/mcp-adaptation-v4-part-1.md)。
 
 Workspace git ref 更新由 `workspace/src/workspace.rs` 在 MCP 通知

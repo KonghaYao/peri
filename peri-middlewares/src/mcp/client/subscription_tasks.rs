@@ -5,6 +5,7 @@ use std::{
 
 use peri_acp_types::event::BackgroundTaskResult;
 use peri_acp_types::monitor::monitor_terminal_alert_note;
+use peri_acp_types::shell_task::{ShellTaskResultMeta, SHELL_TASK_RESULT_META_KEY};
 use peri_acp_types::tasks::{TaskManager, TaskRegistrationTicket};
 use rmcp::{
     model::{DetailedTask, GetTaskParams, MetaObject, TaskPayload},
@@ -30,6 +31,11 @@ struct ObservedTask {
 /// unobservable owner as unresolved. Settlement itself can still fail, and a
 /// known terminal result must never be replaced by an unresolved reminder.
 const LOST_ABANDON_ATTEMPTS: usize = 300;
+
+/// A terminal payload that cannot be validated is never cached as evidence.
+/// Re-query a few times so a repaired owner snapshot can recover, then settle
+/// explicitly unresolved rather than holding session shutdown forever.
+const INVALID_TERMINAL_ATTEMPTS: usize = 3;
 
 /// One settlement budget shared by every external task owned by a closing
 /// session. Per-task waits consume the remaining budget; they never add up.
@@ -101,6 +107,8 @@ impl McpClientPool {
         self.task_spawner.spawn(key, async move {
             let mut peer = initial_peer;
             let mut lost_owner_attempts: usize = 0;
+            let mut invalid_terminal_attempts: usize = 0;
+            let mut invalid_terminal_reason: Option<String> = None;
             let mut terminal_delivery_failures: usize = 0;
             let mut known_terminal: Option<ObservedTask> = None;
             let mut monitor_alerts = MonitorAlertState::default();
@@ -113,101 +121,146 @@ impl McpClientPool {
                 let Some(manager) = manager.as_ref() else {
                     break;
                 };
-                let mut params = GetTaskParams::new(&raw_task_id);
-                if owner_scoped {
-                    params.meta = pool.task_owner_meta_for(&server, &session_id);
-                }
-                let observed = match known_terminal.as_ref() {
-                    Some(observed) => Ok(observed.clone()),
-                    None => peer.get_task(params).await.map(|snapshot| ObservedTask {
-                        task: snapshot.task,
-                        meta: snapshot.meta,
-                    }),
-                };
-                match observed {
-                    Ok(observed) if observed.task.status().is_terminal() => {
-                        // A terminal task wakes its initiator exactly once.
-                        // Hits without an earlier alert reminder are merged
-                        // into that reminder, so the terminal round never
-                        // pushes a second alert. The note is cached with the
-                        // terminal observation: a settlement retry reuses the
-                        // same terminal delivery id and body.
-                        let note = if known_terminal.is_some() {
-                            terminal_note.clone()
-                        } else {
-                            let note = pool.consume_monitor_terminal_alert(
+                if invalid_terminal_reason.is_none() {
+                    let mut params = GetTaskParams::new(&raw_task_id);
+                    if owner_scoped {
+                        params.meta = pool.task_owner_meta_for(&server, &session_id);
+                    }
+                    let observed = match known_terminal.as_ref() {
+                        Some(observed) => Ok(observed.clone()),
+                        None => peer.get_task(params).await.map(|snapshot| ObservedTask {
+                            task: snapshot.task,
+                            meta: snapshot.meta,
+                        }),
+                    };
+                    match observed {
+                        Ok(observed) if observed.task.status().is_terminal() => {
+                            let mapped = if observed.task.task.task_id != raw_task_id {
+                                Err(format!(
+                                    "task result identity mismatch: requested {raw_task_id}, received {}",
+                                    observed.task.task.task_id
+                                ))
+                            } else {
+                                Self::map_task_result(
+                                    &server,
+                                    &task_id,
+                                    &observed.task,
+                                    observed.meta.as_ref(),
+                                    is_workspace_shell,
+                                )
+                            };
+                            match mapped {
+                                Err(error) => {
+                                    manager.mark_external_lost(&task_id);
+                                    invalid_terminal_attempts = invalid_terminal_attempts.saturating_add(1);
+                                    tracing::warn!(server = %server, session_id = %session_id,
+                                        task_id = %raw_task_id, invalid_terminal_attempts, %error,
+                                        "MCP task terminal evidence invalid; fetching a fresh snapshot");
+                                    if invalid_terminal_attempts >= INVALID_TERMINAL_ATTEMPTS {
+                                        invalid_terminal_reason = Some(format!(
+                                            "task terminal evidence invalid after {invalid_terminal_attempts} observations: {error}"
+                                        ));
+                                    }
+                                }
+                                Ok(mapped) => {
+                                    // A terminal task wakes its initiator exactly once.
+                                    // Hits without an earlier alert reminder are merged
+                                    // into that reminder, so the terminal round never
+                                    // pushes a second alert. The note is cached with the
+                                    // terminal observation: a settlement retry reuses the
+                                    // same terminal delivery id and body.
+                                    let note = if known_terminal.is_some() {
+                                        terminal_note.clone()
+                                    } else {
+                                        let note = pool.consume_monitor_terminal_alert(
+                                            &session_id,
+                                            &server,
+                                            &raw_task_id,
+                                            observed.meta.as_ref(),
+                                            &mut monitor_alerts,
+                                            &mut monitor_meta_warned,
+                                        );
+                                        terminal_note = note.clone();
+                                        note
+                                    };
+                                    known_terminal = Some(observed.clone());
+                                    let transition_id = format!("{raw_task_id}:terminal");
+                                    let result = pool
+                                        .settle_managed_task_result(
+                                            &ticket,
+                                            &transition_id,
+                                            mapped,
+                                            note.as_deref(),
+                                            manager.as_ref(),
+                                        )
+                                        .await;
+                                    if let Err(error) = result {
+                                        terminal_delivery_failures =
+                                            terminal_delivery_failures.saturating_add(1);
+                                        tracing::warn!(server = %server, session_id = %session_id,
+                                            task_id = %raw_task_id, terminal_delivery_failures, %error,
+                                            "MCP task terminal delivery pending reconciliation");
+                                    } else {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Ok(observed) => {
+                            pool.observe_monitor_alert(
                                 &session_id,
                                 &server,
                                 &raw_task_id,
                                 observed.meta.as_ref(),
                                 &mut monitor_alerts,
                                 &mut monitor_meta_warned,
-                            );
-                            terminal_note = note.clone();
-                            note
-                        };
-                        known_terminal = Some(observed.clone());
-                        let transition_id = format!("{raw_task_id}:terminal");
-                        let result = pool
-                            .deliver_managed_task_status(
-                                &server,
-                                &ticket,
-                                &transition_id,
-                                &observed.task,
-                                is_workspace_shell,
-                                note.as_deref(),
-                                manager.as_ref(),
                             )
                             .await;
-                        if let Err(error) = result {
-                            terminal_delivery_failures =
-                                terminal_delivery_failures.saturating_add(1);
-                            tracing::warn!(server = %server, session_id = %session_id,
-                                task_id = %raw_task_id, terminal_delivery_failures, %error,
-                                "MCP task terminal delivery pending reconciliation");
-                        } else {
-                            break;
+                            lost_owner_attempts = 0;
+                            manager.mark_external_running(&task_id);
                         }
-                    }
-                    Ok(observed) => {
-                        pool.observe_monitor_alert(
-                            &session_id,
-                            &server,
-                            &raw_task_id,
-                            observed.meta.as_ref(),
-                            &mut monitor_alerts,
-                            &mut monitor_meta_warned,
-                        )
-                        .await;
-                        lost_owner_attempts = 0;
-                        manager.mark_external_running(&task_id);
-                    }
-                    Err(error) => {
-                        manager.mark_external_lost(&task_id);
-                        if lost_owner_retry_due(&mut lost_owner_attempts) {
-                            match manager
-                                .abandon_external(
-                                    &ticket,
-                                    &format!("task status unavailable: {error}"),
-                                )
-                                .await
-                            {
-                                Ok(true) => break,
-                                Ok(false) => {
-                                    tracing::warn!(server = %server, session_id = %session_id,
-                                        task_id = %raw_task_id, lost_owner_attempts,
-                                        "MCP task abandon not yet committed");
-                                }
-                                Err(abandon_error) => {
-                                    tracing::warn!(server = %server, session_id = %session_id,
-                                        task_id = %raw_task_id, lost_owner_attempts,
-                                        %abandon_error, "MCP task abandon pending reconciliation");
+                        Err(error) => {
+                            manager.mark_external_lost(&task_id);
+                            if lost_owner_retry_due(&mut lost_owner_attempts) {
+                                match manager
+                                    .abandon_external(
+                                        &ticket,
+                                        &format!("task status unavailable: {error}"),
+                                    )
+                                    .await
+                                {
+                                    Ok(true) => break,
+                                    Ok(false) => {
+                                        tracing::warn!(server = %server, session_id = %session_id,
+                                            task_id = %raw_task_id, lost_owner_attempts,
+                                            "MCP task abandon not yet committed");
+                                    }
+                                    Err(abandon_error) => {
+                                        tracing::warn!(server = %server, session_id = %session_id,
+                                            task_id = %raw_task_id, lost_owner_attempts,
+                                            %abandon_error, "MCP task abandon pending reconciliation");
+                                    }
                                 }
                             }
+                            tracing::warn!(server = %server, session_id = %session_id,
+                                task_id = %raw_task_id, lost_owner_attempts, %error,
+                                "MCP task status unavailable; retrying");
                         }
-                        tracing::warn!(server = %server, session_id = %session_id,
-                            task_id = %raw_task_id, lost_owner_attempts, %error,
-                            "MCP task status unavailable; retrying");
+                    }
+                }
+                if let Some(reason) = invalid_terminal_reason.as_ref() {
+                    match manager.abandon_external(&ticket, reason).await {
+                        Ok(committed) if committed || ticket.is_settled() => break,
+                        Ok(_) => {
+                            tracing::warn!(server = %server, session_id = %session_id,
+                                task_id = %raw_task_id,
+                                "MCP task invalid terminal abandonment not yet committed");
+                        }
+                        Err(error) => {
+                            tracing::warn!(server = %server, session_id = %session_id,
+                                task_id = %raw_task_id, %error,
+                                "MCP task invalid terminal abandonment pending reconciliation");
+                        }
                     }
                 }
                 drop(pool);
@@ -336,6 +389,7 @@ impl McpClientPool {
         )
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     async fn deliver_managed_task_status(
         &self,
@@ -343,12 +397,26 @@ impl McpClientPool {
         ticket: &TaskRegistrationTicket,
         transition_id: &str,
         task: &DetailedTask,
+        meta: Option<&MetaObject>,
         is_workspace_shell: bool,
         terminal_note: Option<&str>,
         manager: &dyn TaskManager,
     ) -> Result<(), String> {
         let task_id = ticket.task_id();
-        let mut result = Self::map_task_result(server, task_id, task, is_workspace_shell);
+        let result = Self::map_task_result(server, task_id, task, meta, is_workspace_shell)?;
+        self.settle_managed_task_result(ticket, transition_id, result, terminal_note, manager)
+            .await
+    }
+
+    async fn settle_managed_task_result(
+        &self,
+        ticket: &TaskRegistrationTicket,
+        transition_id: &str,
+        mut result: BackgroundTaskResult,
+        terminal_note: Option<&str>,
+        manager: &dyn TaskManager,
+    ) -> Result<(), String> {
+        let task_id = ticket.task_id();
         if let Some(note) = terminal_note {
             // The note carries alert counts merged into this same terminal
             // wake; a blank line keeps the result statement distinct.
@@ -371,14 +439,34 @@ impl McpClientPool {
         server: &str,
         task_id: &str,
         task: &DetailedTask,
+        meta: Option<&MetaObject>,
         is_workspace_shell: bool,
-    ) -> BackgroundTaskResult {
+    ) -> Result<BackgroundTaskResult, String> {
         let shell_result = if is_workspace_shell {
             match &task.payload {
                 TaskPayload::Completed { result } => {
                     result.get("structuredContent").and_then(|value| {
                         serde_json::from_value::<BackgroundTaskResult>(value.clone()).ok()
                     })
+                }
+                TaskPayload::Cancelled => {
+                    match meta.and_then(|meta| meta.get(SHELL_TASK_RESULT_META_KEY)) {
+                        Some(value) => {
+                            let evidence: ShellTaskResultMeta = serde_json::from_value(value.clone())
+                                .map_err(|error| format!("invalid workspace shell result metadata: {error}"))?;
+                            Some(evidence.into_cancelled_result(&task.task.task_id)
+                                .map_err(|error| error.to_string())?)
+                        }
+                        // Older Workspace services speak standard CancelledTask
+                        // but cannot prove executor cleanup or provide log files.
+                        None => Some(BackgroundTaskResult {
+                            task_id: task_id.to_owned(), agent_name: "mcp".into(), prompt_summary: server.to_owned(),
+                            success: false,
+                            output: "Remote task reported Cancelled without executor evidence. Its execution outcome is abandoned as unresolved: process cleanup, exit status, and output file references remain unconfirmed.".into(),
+                            tool_calls_count: 0, duration_ms: 0, timed_out: false,
+                            child_thread_id: None, subagent_failure: None, shell_output: None,
+                        }),
+                    }
                 }
                 _ => None,
             }
@@ -420,7 +508,7 @@ impl McpClientPool {
         });
         let mut result = result;
         result.task_id = task_id.to_owned();
-        result
+        Ok(result)
     }
 }
 
@@ -430,6 +518,14 @@ mod binding;
 #[cfg(test)]
 #[path = "subscription_tasks_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "subscription_shell_result_test.rs"]
+mod shell_result_tests;
+
+#[cfg(test)]
+#[path = "subscription_shell_validation_test.rs"]
+mod shell_validation_tests;
 
 #[cfg(test)]
 #[path = "monitor_subscription_test.rs"]

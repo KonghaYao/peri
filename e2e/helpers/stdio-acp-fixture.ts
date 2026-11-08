@@ -1,7 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdir, open, readdir } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, open, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { assertReplayStorePath } from "./replay-isolation.js";
 
 type RequestId = string | number;
 type WireReply = { result: any } | { error: { code: number; message: string; data?: any } };
@@ -18,6 +20,7 @@ interface FixtureOptions {
   binary: string;
   cwd: string;
   home: string;
+  dbPath?: string;
   env: Record<string, string>;
   onServerRequest(request: WireRequest): void;
   handleServerRequest(request: WireRequest): WireReply | Promise<WireReply>;
@@ -39,6 +42,7 @@ class JsonlPeer {
   private readonly wire: Array<Record<string, unknown>> = [];
   private sequence = 0;
   private ending = false;
+  private forcedCleanup = false;
   readonly closed: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
 
   constructor(
@@ -171,6 +175,7 @@ class JsonlPeer {
     };
     let exit = await wait(15_000);
     if (!exit) {
+      this.forcedCleanup = true;
       this.killOwnedGroup("SIGTERM");
       exit = await wait(5_000);
     }
@@ -178,10 +183,32 @@ class JsonlPeer {
       this.killOwnedGroup("SIGKILL");
       exit = await this.closed;
     }
-    this.killOwnedGroup("SIGTERM");
-    this.killOwnedGroup("SIGKILL");
+    // A successful parent exit does not prove its children exited. Probe the
+    // same PID namespace before cleanup so leaked groups cannot report success.
+    if (this.ownedGroupExists()) {
+      this.forcedCleanup = true;
+      this.killOwnedGroup("SIGTERM");
+      this.killOwnedGroup("SIGKILL");
+    }
     this.lines.close();
     return exit.code;
+  }
+
+  processOutcome() {
+    return { kind: "acp", pid: this.child.pid, exitCode: this.child.exitCode,
+      signal: this.child.signalCode, forcedCleanup: this.forcedCleanup };
+  }
+
+  private ownedGroupExists(): boolean {
+    if (!this.child.pid) return false;
+    if (process.platform === "win32") return this.child.exitCode === null && this.child.signalCode === null;
+    try {
+      process.kill(-this.child.pid, 0);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+      throw error;
+    }
   }
 
   async join(): Promise<void> {
@@ -237,8 +264,10 @@ export async function startStdioAcpFixture(options: FixtureOptions): Promise<{
     throw new Error("ACP E2E 必须显式提供隔离的绝对 HOME");
   }
   const logDirectory = path.join(options.home, ".peri/logs");
+  const dbPath = options.dbPath ?? path.join(options.home, ".peri", "threads", "threads.db");
+  await assertReplayStorePath(options.home, dbPath);
   await mkdir(logDirectory, { recursive: true, mode: 0o700 });
-  const peri = new JsonlPeer(spawn(options.binary, ["acp", "--cwd", options.cwd], {
+  const peri = new JsonlPeer(spawn(options.binary, ["--db-path", dbPath, "acp", "--cwd", options.cwd], {
     cwd: options.cwd,
     env: {
       ...options.env,
@@ -259,6 +288,9 @@ export async function startStdioAcpFixture(options: FixtureOptions): Promise<{
     close: () => closing ??= (async () => {
       const code = await peri.stop();
       await peri.join();
+      await writeFile(path.join(logDirectory, `stdio-process-${randomUUID()}.json`),
+        JSON.stringify({ ...peri.processOutcome(), databasePath: dbPath }, null, 2));
+      if (peri.processOutcome().forcedCleanup) throw new Error("ACP fixture required forced process cleanup");
       return code;
     })(),
     diagnostics: async () => JSON.stringify({

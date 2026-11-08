@@ -300,6 +300,19 @@ impl SlotIndex {
     pub(super) fn canonical_items(&self) -> Option<&im::Vector<TuiRenderUnit>> {
         self.source.as_ref().map(|(items, _, _, _)| items)
     }
+    /// The renderer inserts a process-zone step before the entry header at wide
+    /// breakpoints. Hit testing must use that same layout fact, not logical row 0.
+    pub(super) fn entry_header_logical(&self, slot: usize) -> usize {
+        self.source.as_ref().map_or(0, |(items, grid, _, _)| {
+            usize::from(
+                grid.indent > 0
+                    && !matches!(
+                        super::transcript::zone_transition(items, slot),
+                        super::grid::ZoneTransition::None
+                    ),
+            )
+        })
+    }
     pub(super) fn viewport_logical_range(
         &self,
         scroll_y: usize,

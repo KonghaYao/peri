@@ -5,7 +5,7 @@ event: content_block_start
 data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t01-write","name":"Write","input":{}}}
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":\"/tmp/peri-wire-e2e-GjR7ql/work/note.txt\",\"content\":\"T01_WRITTEN_AND_READ\\n\"}"}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":\"/tmp/peri-wire-e2e-kicOD9/work/note.txt\",\"content\":\"T01_WRITTEN_AND_READ\\n\"}"}}
 
 event: content_block_stop
 data: {"type":"content_block_stop","index":0}

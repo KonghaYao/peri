@@ -35,6 +35,7 @@ impl Drop for Restore {
 
 fn task(id: String, status: &str, summary: &str) -> BgTaskEntry {
     BgTaskEntry {
+        child_thread_id: None,
         task_id: id,
         kind: "shell".into(),
         summary: summary.into(),

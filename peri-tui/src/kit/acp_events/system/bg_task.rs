@@ -64,15 +64,17 @@ pub(crate) fn apply_bg_task_snapshot(
             }
             Some(crate::kit::atoms::BgDisplayEntry {
                 id: t.task_id.clone(),
-                linked_agent_id: previous
-                    .and_then(|row| row.linked_agent_id.clone())
-                    .or_else(|| {
-                        BG_TASK_IDENTITY
-                            .state()
-                            .read()
-                            .get(&t.task_id)
-                            .and_then(|identity| identity.agent_id.clone())
-                    }),
+                linked_agent_id: t.child_thread_id.clone().or_else(|| {
+                    previous
+                        .and_then(|row| row.linked_agent_id.clone())
+                        .or_else(|| {
+                            BG_TASK_IDENTITY
+                                .state()
+                                .read()
+                                .get(&t.task_id)
+                                .and_then(|identity| identity.agent_id.clone())
+                        })
+                }),
                 agent_type: t.kind.clone(),
                 desc: bg_task_description(&t.summary, t.status.as_deref()),
                 is_active: active,
@@ -108,6 +110,10 @@ pub(crate) fn apply_bg_task_snapshot(
         } else if !has_live_detail(&t.task_id) {
             seed_unobserved_snapshot(&t.task_id, &t.kind, &t.summary, t.pid);
         }
+        crate::kit::bg_task_identity::bind_registered_child(
+            &t.task_id,
+            t.child_thread_id.as_deref(),
+        );
     }
     if live_source {
         crate::kit::bg_task_live::reconcile_snapshot_tasks(&protected_task_ids());
@@ -119,6 +125,7 @@ pub(crate) fn apply_bg_task_snapshot(
 fn project_task(task: &BgTaskEntry) -> BgTaskEntry {
     BgTaskEntry {
         task_id: task.task_id.clone(),
+        child_thread_id: task.child_thread_id.clone(),
         kind: bounded_label(&task.kind),
         summary: bounded_label(&task.summary),
         started_at: bounded_label(&task.started_at),
@@ -294,7 +301,7 @@ fn accept_bg_task_delta(revision: Option<u64>) -> bool {
     true
 }
 
-pub(crate) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEntry) {
+pub(crate) fn handle_bg_task_started(state: &mut BridgeState, entry: &BgTaskEntry) {
     if !accept_bg_task_delta(entry.revision) {
         return;
     }
@@ -319,7 +326,7 @@ pub(crate) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEnt
     seed_live_from_started(&entry.task_id, &entry.kind, &entry.summary, entry.pid);
     let display_entry = crate::kit::atoms::BgDisplayEntry {
         id: entry.task_id.clone(),
-        linked_agent_id: None,
+        linked_agent_id: entry.child_thread_id.clone(),
         agent_type: bounded_label(&entry.kind),
         desc: bg_task_description(&entry.summary, entry.status.as_deref()),
         is_active: true,
@@ -340,6 +347,24 @@ pub(crate) fn handle_bg_task_started(_state: &mut BridgeState, entry: &BgTaskEnt
         display.push(display_entry);
     }
     drop(display);
+    crate::kit::bg_task_identity::bind_registered_child(
+        &entry.task_id,
+        entry.child_thread_id.as_deref(),
+    );
+    if let Some(instance_id) = entry
+        .child_thread_id
+        .as_deref()
+        .and_then(|child| state.current_turn.subagent_instance_id(child))
+    {
+        let already_claimed = BG_LIVE_DETAIL.state().read().iter().any(|(task, detail)| {
+            task != &entry.task_id && detail.subagent_instance_id.as_deref() == Some(instance_id)
+        });
+        if !already_claimed
+            && let Some(detail) = BG_LIVE_DETAIL.state().write().get_mut(&entry.task_id)
+        {
+            detail.subagent_instance_id = Some(instance_id.to_owned());
+        }
+    }
     prune_metadata();
 }
 
@@ -425,6 +450,19 @@ pub(crate) fn handle_bg_task_cancelled(
         entry.completed_at = Some(now);
     }
     prune_metadata();
+    NOTIFICATION
+        .state()
+        .write()
+        .replace(crate::kit::atoms::Notification {
+            message: i18n::tr_args(
+                "app-note-bg-task-cancelled",
+                &[(
+                    "task_id".to_owned(),
+                    FluentValue::from(bounded_label(task_id)),
+                )],
+            ),
+            until: peri_time::monotonic_now() + Duration::from_millis(1500),
+        });
     if was_agent {
         settle_async_agent_status(state, false);
     }

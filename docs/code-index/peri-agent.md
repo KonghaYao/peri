@@ -187,3 +187,7 @@ Full 摘要不改变模型思考配置和单次输出上限。未完成的摘要
 归档恢复权限在 `agent/stages/archive_capability.rs` 校验最终工具目录与有界读取端口；`reason.rs` 在补充 Full 与模型调用前执行，即使低于自动压缩阈值。生命周期回归见 `peri-middlewares/src/subagent/tool/tool_test/resume_archive_test.rs`，多 block 全路径回查见 `agent/compact_v2/micro_block_budget_test.rs`。
 
 Durable 收件人由 `session/subagent/factory.rs::{completion_target,persist_completion_target}` 在 spawn／resume 接纳工作前保存到既有 thread config；配置回调优先，未知回调不猜目标。`run_sync.rs` 的交接 worker 确认 `working` 持久化后才返回 Pending。
+
+### 录放 v3 回归相关边界
+
+`agent/stages/reason.rs` 在实际 provider 调用前 await `RenderEvent::ReasonStarted`，与挂起/输出共用可靠 render FIFO。child forwarder 不上送子执行的该状态；诊断用 Observe LlmCallStart 仍独立。`session/exec/executor_helpers/intercept.rs` 的 Immediate 命令完成沿 originating `SessionContext.request_id` 回传，参数错误、取消和成功均不绕开客户端身份闸门。后台 registry 的 Started 投影携注册时真实 child_thread_id，禁止按到达顺序猜绑定。

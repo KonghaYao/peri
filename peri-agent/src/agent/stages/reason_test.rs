@@ -18,6 +18,59 @@ fn make_context() -> StageContext {
     StageContext::new(turn, session.transcript(), session.queue().clone())
 }
 
+#[tokio::test]
+async fn reason_start_waits_for_render_capacity_before_model_invocation() {
+    let (bus, mut handles) = EventBus::new(EventBusConfig {
+        render_capacity: 1,
+        ..Default::default()
+    });
+    let session = Session::new(
+        Arc::from("/tmp/reason-start"),
+        FrozenContext::builder().build(),
+        None,
+    );
+    let ctx = StageContext::builder(
+        session.start_turn(),
+        session.transcript(),
+        session.queue().clone(),
+    )
+    .with_event_bus(Arc::new(bus))
+    .build();
+    let turn_id = ctx.turn_id();
+    let agent_id = ctx.session.agent_id;
+    ctx.runtime
+        .event_bus
+        .emit_render(RenderEvent::TurnSuspended { turn_id, agent_id });
+    let task = run_reason(ReasonInput {
+        context: ctx.clone(),
+        has_tool_calls: false,
+    });
+    tokio::pin!(task);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), &mut task)
+            .await
+            .is_err()
+    );
+    assert!(
+        handles.try_observe().is_none(),
+        "model must not start ahead of its reliable lifecycle signal"
+    );
+    assert!(matches!(
+        handles.try_render(),
+        Some(RenderEvent::TurnSuspended { .. })
+    ));
+    let _ = task.await;
+    assert!(
+        matches!(handles.try_render(), Some(RenderEvent::ReasonStarted { turn_id: actual_turn, agent_id: actual_agent })
+        if actual_turn == turn_id && actual_agent == agent_id)
+    );
+    assert!(matches!(
+        handles.try_observe(),
+        Some(ObserveEvent::LlmCallStart { .. })
+    ));
+    assert_eq!(ctx.runtime.event_bus.health().render_dropped, 0);
+}
+
 /// 验证 run_reason 在多步 turn 中 emit 的 LlmCallEnd.step 与 turn.current_step() 一致
 ///
 /// Top 10 回归锁定：reason.rs:17 `let step = ctx.session.turn.current_step();`，

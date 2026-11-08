@@ -14,7 +14,8 @@ cd e2e
 npm ci
 npm run e2e:replay:check
 npm run e2e:replay:unit
-npm run e2e:replay
+npm run e2e:replay        # 完整门禁，含真实生产等待边界
+npm run e2e:replay:quick  # 跳过显式 [slow] 的快速回归
 ```
 
 默认只读取封存 fixture。缺录制、配置签名变化、请求漂移、额外/遗漏调用或错误终态都会失败。
@@ -23,12 +24,18 @@ npm run e2e:replay
 默认回放以 3 个 worker 并行执行测试文件，文件内场景串行；显式录制保持单 worker。
 排查顺序问题可执行 `npm run e2e:replay -- --maxWorkers 1 --no-file-parallelism`。
 
+入口校验受控场景目录：full 必须恰好 94 例通过且零跳过；quick 必须恰好 92 例通过，只跳过 B10、M09。
+明确按文件、名称或其他条件筛选的运行记录为 `profile=filtered`，即使通过也不能当作完整门禁。
+漏发现文件、重复 ID、意外 skip、零执行或报告计数不一致都会使门禁失败。CI 总是保存成功或失败的回放证据。
+
+终端使用官方 xterm Unicode11 addon，校验中文、常用 emoji 和 ANSI 光标覆写；不宣称完整 ZWJ 或 Unicode11 后新增字符支持。
+
 更新录制必须显式执行：
 
 ```bash
 npm run e2e:replay:record
 # 调试一个用例：
-PERI_E2E_REPLAY_MODE=record npx vitest run --config vitest.replay-v2.config.ts --testNamePattern S01
+PERI_E2E_REPLAY_MODE=record npx vitest run --config vitest.replay-v3.config.ts --testNamePattern S01
 ```
 
 `CI` 环境拒绝 record。场景使用本地合成模型 fixture；通过这些测试不代表某个线上模型的质量。
@@ -62,14 +69,14 @@ await runReplayScenario({
 `ctx.bindings` 注册显式 typed 值；重放只使用录制时冻结的精确字段模板，保留其余全文严格匹配。
 工具参数中的路径引用按白名单派生到当前 world，原始 cassette 不变。任意 shell 文本、签名和不透明状态不自动改写。
 
-`configure` 的源码及默认配置有签名；变化后必须重录。闭包值或外部配置变化还应修改 `configVersion`。
+`configure` 的源码、默认配置和完整隔离守卫源文件有签名；变化后必须重录。闭包值或外部配置变化还应修改 `configVersion`。
 seed 中不得写入录制 world 的绝对路径或会话数据库。相对工作目录配置能直接复用，模型工具的绝对参数由 typed 路径绑定处理。
-record 通过后保留最终工作文件证据并删除旧 HOME/work，随后独立 replay 必须只依赖自己的新目录。
+record/replay 通过后保留最终工作文件证据并删除临时 HOME/work，随后独立 replay 必须只依赖自己的新目录。
 
 ## 结果与时延
 
 每场景结果写入 `results/replay-v2/<invocation>/<id>/report.json`，同时保留屏幕 `.txt`、原始 `.pty`、
-请求 JSON 和 `final-work/`。失败也写报告，保留明确错误。`observe` 记录证据，不代替断言。
+请求 JSON、进程退出回执、临时 store 完整性与消息摘要以及 `final-work/`。失败也写报告，保留明确错误。`observe` 记录证据，不代替断言。
 
 | 字段 | 含义 |
 | --- | --- |
@@ -85,3 +92,11 @@ record 通过后保留最终工作文件证据并删除旧 HOME/work，随后独
 
 可用 `PERI_E2E_REPLAY_FIXTURES`、`PERI_E2E_REPLAY_RESULTS`、`PERI_E2E_REPLAY_INVOCATION` 指定 fixture 与报告位置。
 代理协议和管理 CLI 另见 [录放核心](llm-replay/README.md)。
+
+## 临时存储与生命周期
+
+所有进程入口显式 `--db-path <world>/home/.peri/threads/threads.db`，并锁定 HOME、XDG、TMPDIR/TMP/TEMP、PERI_DB_PATH。配置/CLI 覆盖和 symlink 逃逸在启动前拒绝。每次新建 world，不复用个人 store；同 case 的共享 store 与 fork 是用例明确选择。
+
+`ReplayTui.stop()` 走正常 `/exit` 并检查进程与 PTY 桥 exit 0；强杀清理会使场景失败。故障测试只能显式 `.crash()` 并核验后续恢复。辅助 ACP/MCP 也必须核验关闭码与子进程退出，不能把 `finally` 清理成功视为产品正常关闭。
+
+所有新用例通过原始请求、独立文件/数据库/ACP 事实和用户可见终端联合验收。父任务挂起、TurnDone、HTTP EOF 与后台任务完成是不同事件；不能用文本已显示或代理 `active=0` 替代生命周期事实。

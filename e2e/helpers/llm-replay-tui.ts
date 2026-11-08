@@ -4,9 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
-import headless from "@xterm/headless";
 import type { Terminal } from "@xterm/headless";
+import { createReplayTerminal } from "./llm-replay-terminal.js";
 import { startStdioAcpFixture } from "./stdio-acp-fixture.js";
+import { assertReplayIsolation, prepareReplayIsolation, replayIsolationEnvironment, replayStorePath } from "./replay-isolation.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 export const REPLAY_BINARY = process.env.PERI_E2E_BINARY ?? path.join(projectRoot, "target/debug/peri");
@@ -33,11 +34,21 @@ export interface ReplayTuiOptions {
   args?: string[];
 }
 
+export interface ReplayProcessOutcome {
+  label: string;
+  pid?: number;
+  exitCode?: number;
+  bridgeExitCode?: number | null;
+  shutdown: "natural" | "graceful" | "crash" | "cleanup";
+  forcedKill: boolean;
+}
+
 /** 一个 case 的客户端按声明共享 world；只有不同 case 才创建新 world。 */
 export async function createReplayWorld(): Promise<ReplayWorld> {
   const root = await mkdtemp(path.join(os.tmpdir(), "peri-wire-e2e-"));
   const world = { root, home: path.join(root, "home"), work: path.join(root, "work"), evidence: path.join(root, "evidence") };
   await Promise.all([mkdir(path.join(world.home, ".peri"), { recursive: true }), mkdir(world.work), mkdir(world.evidence)]);
+  await prepareReplayIsolation(world);
   await writeFile(path.join(world.home, ".peri/settings.json"), JSON.stringify({
     config: {
       language: "en", active_alias: "sonnet",
@@ -52,10 +63,7 @@ export async function createReplayWorld(): Promise<ReplayWorld> {
 
 export function replayEnvironment(world: ReplayWorld, route?: { proxy: string; run: string }): Record<string, string> {
   return {
-    HOME: world.home,
-    XDG_CONFIG_HOME: path.join(world.home, "config"),
-    XDG_CACHE_HOME: path.join(world.home, "cache"),
-    XDG_DATA_HOME: path.join(world.home, "data"),
+    ...replayIsolationEnvironment(world),
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
     TERM: "xterm-256color", LANG: "C.UTF-8", LC_ALL: "C.UTF-8", TZ: "UTC",
     HTTP_PROXY: "http://127.0.0.1:9", HTTPS_PROXY: "http://127.0.0.1:9", ALL_PROXY: "http://127.0.0.1:9",
@@ -65,8 +73,10 @@ export function replayEnvironment(world: ReplayWorld, route?: { proxy: string; r
 }
 
 export async function prepareReplaySessions(world: ReplayWorld, count = 1): Promise<string[]> {
+  await prepareReplayIsolation(world);
+  assertReplayIsolation(world, replayEnvironment(world));
   const peer = await startStdioAcpFixture({
-    binary: REPLAY_BINARY, cwd: world.work, home: world.home, env: replayEnvironment(world),
+    binary: REPLAY_BINARY, cwd: world.work, home: world.home, dbPath: replayStorePath(world), env: replayEnvironment(world),
     onNotification() {}, onServerRequest() {},
     handleServerRequest(request) { return { error: { code: -32601, message: `unexpected preparation request: ${request.method}` } }; },
   });
@@ -110,6 +120,11 @@ export class ReplayTui {
   private readonly child: ChildProcessWithoutNullStreams;
   private pendingOutput: Promise<void> = Promise.resolve();
   private exitCode: number | undefined;
+  private pid: number | undefined;
+  private bridgeExitCode: number | null | undefined;
+  private shutdown: ReplayProcessOutcome["shutdown"] = "natural";
+  private forcedKill = false;
+  private stopPromise: Promise<void> | undefined;
   private bridgeFailure: Error | undefined;
   private stderr = "";
   private rawOutput: Buffer[] = [];
@@ -121,13 +136,14 @@ export class ReplayTui {
 
   private constructor(readonly world: ReplayWorld, readonly label: string, options: ReplayTuiOptions) {
     const cols = options.cols ?? 120, rows = options.rows ?? 40;
-    this.terminal = new headless.Terminal({ cols, rows, scrollback: 5000, allowProposedApi: true });
+    this.terminal = createReplayTerminal(cols, rows);
     this.child = spawn(process.env.PERI_E2E_PYTHON ?? "python3", [path.join(projectRoot, "e2e/helpers/llm-replay-pty.py")], {
       cwd: world.work, stdio: ["pipe", "pipe", "pipe"],
       env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LANG: "C.UTF-8" },
     });
     this.running = true;
-    this.closed = new Promise((resolve) => this.child.once("close", () => {
+    this.closed = new Promise((resolve) => this.child.once("close", (code) => {
+      this.bridgeExitCode = code;
       if (this.exitCode === undefined) this.bridgeFailure ??= new Error(`PTY bridge closed: ${this.stderr}`);
       resolve();
     }));
@@ -138,7 +154,9 @@ export class ReplayTui {
     lines.on("line", (line) => {
       try {
         const message = JSON.parse(line);
-        if (message.type === "data") {
+        if (message.type === "ready") {
+          this.pid = message.pid;
+        } else if (message.type === "data") {
           const bytes = Buffer.from(message.data, "base64");
           this.rawOutput.push(bytes);
           const sequence = ++this.receivedOutput;
@@ -154,22 +172,25 @@ export class ReplayTui {
           pending.resolve(this.receivedOutput);
         } else if (message.type === "exit") {
           this.exitCode = message.code;
+          this.forcedKill = message.forcedKill === true;
         }
       } catch (error) { this.bridgeFailure = error instanceof Error ? error : new Error(String(error)); }
     });
     this.terminal.onData((data) => this.input(data));
     this.control({
-      command: [REPLAY_BINARY, "--resume", options.sessionId, "--permission-mode", options.permissionMode ?? "bypass", "--config-file", path.join(world.home, ".peri/settings.json"), ...(options.args ?? [])],
+      command: [REPLAY_BINARY, "--db-path", replayStorePath(world), "--resume", options.sessionId, "--permission-mode", options.permissionMode ?? "bypass", "--config-file", path.join(world.home, ".peri/settings.json"), ...(options.args ?? [])],
       cwd: world.work, env: { ...replayEnvironment(world, options), ...options.env }, cols, rows,
     });
   }
 
   static async start(world: ReplayWorld, options: ReplayTuiOptions): Promise<ReplayTui> {
+    await prepareReplayIsolation(world);
+    assertReplayIsolation(world, { ...replayEnvironment(world, options), ...options.env }, options.args);
     const tui = new ReplayTui(world, options.label, options);
     try {
       await tui.waitFor(options.ready ?? ((screen) => screen.includes(options.modelLabel ?? "fixture-model") && screen.includes("/: commands")), "TUI ready", 60_000);
       return tui;
-    } catch (error) { await tui.save("startup-failed"); await tui.stop(); throw error; }
+    } catch (error) { await tui.save("startup-failed"); await tui.forceCleanup(); throw error; }
   }
 
   private control(message: unknown): void {
@@ -190,6 +211,9 @@ export class ReplayTui {
       buffer.getLine(buffer.viewportY + row)?.translateToString(true, 0, this.terminal.cols) ?? "").join("\n");
     return this.lastScreen;
   }
+
+  /** A parsed application frame, useful as an input fence; business completion still needs its own oracle. */
+  outputRevision(): number { return this.parsedOutput; }
 
   async key(key: string): Promise<void> {
     const keys: Record<string, string> = {
@@ -256,8 +280,8 @@ export class ReplayTui {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const screen = await this.screen();
-      if (predicate(screen)) return screen;
       if (this.exitCode !== undefined) throw new Error(`${description}: Peri exited (${this.exitCode})\n${screen}`);
+      if (predicate(screen)) return screen;
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     throw new Error(`${description}: timed out after ${timeoutMs}ms\n${this.lastScreen}`);
@@ -269,19 +293,83 @@ export class ReplayTui {
     await writeFile(path.join(this.world.evidence, `${this.label}-${name}.pty`), Buffer.concat(this.rawOutput));
   }
 
-  async stop(): Promise<void> {
-    if (!this.running) return;
-    if (this.exitCode === undefined && this.child.stdin.writable) this.control({ type: "stop" });
-    this.running = false;
+  outcome(): ReplayProcessOutcome {
+    return { label: this.label, pid: this.pid, exitCode: this.exitCode, bridgeExitCode: this.bridgeExitCode,
+      shutdown: this.shutdown, forcedKill: this.forcedKill };
+  }
+
+  private async waitClosed(timeoutMs: number): Promise<boolean> {
     let timer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([this.closed, new Promise<void>((resolve) => {
-      timer = setTimeout(() => { this.child.kill("SIGKILL"); resolve(); }, 5000);
-    })]);
-    if (timer) clearTimeout(timer);
+    try {
+      return await Promise.race([this.closed.then(() => true), new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      })]);
+    } finally { if (timer) clearTimeout(timer); }
+  }
+
+  private async dispose(): Promise<void> {
+    this.running = false;
     await this.pendingOutput;
     await this.screen().catch(() => {});
-    this.terminal.dispose();
+    if (!this.disposed) this.terminal.dispose();
     this.disposed = true;
+    await writeFile(path.join(this.world.evidence, `${this.label}-process.json`), JSON.stringify(this.outcome(), null, 2));
+  }
+
+  private async forceCleanup(): Promise<void> {
+    if (this.disposed) return;
+    this.shutdown = "cleanup";
+    if (this.exitCode === undefined && this.child.stdin.writable) this.control({ type: "stop" });
+    if (!await this.waitClosed(5_000)) {
+      this.forcedKill = true;
+      this.child.kill("SIGKILL");
+      await this.waitClosed(2_000);
+    }
+    await this.dispose();
+  }
+
+  /** 正常重启先走产品 /exit；退出失败必须让场景失败，不能以清理强杀冒充通过。 */
+  async stop(): Promise<void> {
+    if (this.shutdown === "crash" && this.disposed) return;
+    return this.stopPromise ??= (async () => {
+      if (this.disposed) return;
+      try {
+        if (this.exitCode === undefined) {
+          this.shutdown = "graceful";
+          // Empty-editor double Escape opens Rewind. Close only an observed overlay,
+          // fencing each key on a rendered application frame before inspecting again.
+          // Notifications and narrow layouts may hide the normal footer: absence
+          // of that footer is never evidence of an overlay.
+          const hasOverlay = (screen: string) => /\bEsc(?:\s*:|\s+to)?\s+(?:close|back)\b/iu.test(screen);
+          for (let count = 0; count < 4 && hasOverlay(await this.screen()); count++) {
+            const before = this.parsedOutput;
+            await this.key("Escape");
+            await this.waitFor(() => this.parsedOutput > before, "overlay closes before exit", 3_000);
+          }
+          try { await this.command("exit"); }
+          catch (error) { if (this.exitCode !== 0) throw error; }
+        }
+        if (!await this.waitClosed(15_000)) throw new Error(`${this.label}: graceful Peri exit timed out`);
+        if (this.exitCode !== 0 || this.bridgeExitCode !== 0 || this.forcedKill || this.bridgeFailure) {
+          throw new Error(`${this.label}: unexpected process termination ${JSON.stringify(this.outcome())}: ${this.bridgeFailure?.message ?? ""}`);
+        }
+        await this.dispose();
+      } catch (error) {
+        await this.forceCleanup();
+        throw error;
+      }
+    })();
+  }
+
+  /** 仅供显式崩溃恢复场景；调用方仍须验证新进程恢复与旧工具未重放。 */
+  async crash(): Promise<ReplayProcessOutcome> {
+    if (!this.running || this.exitCode !== undefined || this.stopPromise) throw new Error("cannot crash an inactive TUI");
+    this.shutdown = "crash";
+    this.control({ type: "crash" });
+    if (!await this.waitClosed(10_000)) { await this.forceCleanup(); throw new Error("explicit crash did not terminate Peri"); }
+    await this.dispose();
+    if (this.exitCode !== -9 || this.bridgeExitCode !== 0 || !this.forcedKill) throw new Error(`unexpected crash outcome: ${JSON.stringify(this.outcome())}`);
+    return this.outcome();
   }
 }
 

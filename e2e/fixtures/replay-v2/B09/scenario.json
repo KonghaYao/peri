@@ -1,0 +1,132 @@
+{
+  "version": 2,
+  "id": "B09",
+  "title": "full-async-tools 对 Agent 缺省及显式 false 均强制后台",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
+      "work",
+      "work/.claude",
+      "work/.claude/agents"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "48d8d00a7f91c2a7701d413304e00cb523637f58aa38c2fbf5c0aa7028910f36",
+        "size": 619,
+        "mode": 384
+      },
+      {
+        "path": "work/.claude/agents/replay-worker.md",
+        "sha256": "130ad94c3946149d49237835d5748b2976f470943860dabaf74960b3d5844099",
+        "size": 165,
+        "mode": 420
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-bJ82W4",
+    "home": "/tmp/peri-wire-e2e-bJ82W4/home",
+    "work": "/tmp/peri-wire-e2e-bJ82W4/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b8e4-67a8-7e30-aa92-1dd63ccb679c"
+  },
+  "configurationFingerprint": "887e0c07d93ea8ada9b24373e5864e89ab6d18198d762ec9586d2bfa688aaad7",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-bJ82W4",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-bJ82W4/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-bJ82W4/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-08",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b8e4-67a8-7e30-aa92-1dd63ccb679c",
+      "anchor": "ACP session/new result"
+    },
+    {
+      "owner": "world",
+      "kind": "thread",
+      "alias": "child-omitted",
+      "recorded": "01a1b8e4-6a3a-7433-a853-6406c4536020",
+      "anchor": "created child omitted"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "task-B09-omitted",
+      "recorded": "bg-01a1b8e4-6a3a-7433-a853-641e630ee340",
+      "anchor": "Agent background receipt B09-omitted"
+    },
+    {
+      "owner": "world",
+      "kind": "thread",
+      "alias": "child-explicit",
+      "recorded": "01a1b8e4-6a3c-7a21-bdf1-fdf28584be8c",
+      "anchor": "created child explicit"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "task-B09-explicit",
+      "recorded": "bg-01a1b8e4-6a3c-7a21-bdf1-fe02d25c255c",
+      "anchor": "Agent background receipt B09-explicit"
+    }
+  ],
+  "portableResponses": []
+}

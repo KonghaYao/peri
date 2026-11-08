@@ -84,6 +84,8 @@ pub enum BgRegistryEvent {
         kind: BgTaskKind,
         summary: String,
         started_at: String,
+        /// Exact child owner, independent of registry event arrival order.
+        child_thread_id: Option<String>,
     },
     Completed {
         task_id: String,

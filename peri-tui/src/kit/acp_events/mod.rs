@@ -1,7 +1,6 @@
 //! ACP 事件类型定义和 Atom 写入辅助函数。
 //!
 //! 将 AcpEventData 映射为全局 Atom 写入，供 kit 组件通过 use_store 订阅。
-//! Phase 2 桥接层——ACP 事件 → Atom 写入。
 
 // ── Sub-modules ──
 mod agent;
@@ -687,6 +686,7 @@ pub(crate) fn dispatch_for_bridge(
             turn::handle_turn_interrupted(state, reason, request_id)
         }
         TurnSuspended => turn::handle_turn_suspended(state),
+        ReasonStarted => turn::handle_reason_started(state),
 
         // ── §4.3 Status events ──
         ToolCount(_tc) => tool::handle_tool_count(state),

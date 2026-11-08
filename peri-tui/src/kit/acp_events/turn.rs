@@ -300,6 +300,18 @@ pub(super) fn handle_turn_committed(state: &mut BridgeState, steps: usize) {
     super::render::push_acp_state(state);
 }
 
+pub(super) fn handle_reason_started(state: &mut BridgeState) {
+    // A stage transition resumes the existing request; it cannot create an execution
+    // during history replay or resurrect one whose terminal event already settled.
+    if state.phase == SessionPhase::ReplayingHistory || state.current_request_id.is_none() {
+        return;
+    }
+    state.phase = SessionPhase::PromptRunning;
+    state.variant = 1;
+    program_status::publish(ProgramStatus::Working);
+    super::render::push_acp_state(state);
+}
+
 pub(super) fn handle_prompt_started(state: &mut BridgeState) {
     tracing::trace!("dead path: PromptStarted not emitted by notifier");
     state.phase = SessionPhase::PromptRunning;

@@ -13,6 +13,14 @@
     "directories": [
       "home",
       "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
       "work"
     ],
     "files": [
@@ -25,41 +33,41 @@
     ]
   },
   "recordedWorld": {
-    "root": "/tmp/peri-wire-e2e-OHlVuH",
-    "home": "/tmp/peri-wire-e2e-OHlVuH/home",
-    "work": "/tmp/peri-wire-e2e-OHlVuH/work"
+    "root": "/tmp/peri-wire-e2e-6gisYy",
+    "home": "/tmp/peri-wire-e2e-6gisYy/home",
+    "work": "/tmp/peri-wire-e2e-6gisYy/work"
   },
   "recordedSessionIds": {
-    "root": "01a1b607-87de-7f00-a8c3-463634c26744"
+    "root": "01a1b8e3-4e8b-7863-aea7-a8a3e0893a2b"
   },
-  "configurationFingerprint": "6c6363511235a9dc8c72a6a1fffbd0b5e1b09be117f8f94c54a76f3f6ad18645",
+  "configurationFingerprint": "d4bb2f040229411c29f15d1ee725d94ccc2b20547219a6c811e47ac99d5c665e",
   "bindings": [
     {
       "owner": "world",
       "kind": "path",
       "alias": "root",
-      "recorded": "/tmp/peri-wire-e2e-OHlVuH",
+      "recorded": "/tmp/peri-wire-e2e-6gisYy",
       "anchor": "isolated scenario root"
     },
     {
       "owner": "world",
       "kind": "path",
       "alias": "home",
-      "recorded": "/tmp/peri-wire-e2e-OHlVuH/home",
+      "recorded": "/tmp/peri-wire-e2e-6gisYy/home",
       "anchor": "isolated scenario home"
     },
     {
       "owner": "world",
       "kind": "path",
       "alias": "work",
-      "recorded": "/tmp/peri-wire-e2e-OHlVuH/work",
+      "recorded": "/tmp/peri-wire-e2e-6gisYy/work",
       "anchor": "isolated scenario work"
     },
     {
       "owner": "world",
       "kind": "date",
       "alias": "today",
-      "recorded": "2026-11-07",
+      "recorded": "2026-11-08",
       "anchor": "ambient UTC date in system environment"
     },
     {
@@ -80,7 +88,7 @@
       "owner": "world",
       "kind": "session",
       "alias": "root",
-      "recorded": "01a1b607-87de-7f00-a8c3-463634c26744",
+      "recorded": "01a1b8e3-4e8b-7863-aea7-a8a3e0893a2b",
       "anchor": "ACP session/new result"
     }
   ],
@@ -113,7 +121,7 @@
         "kind": "utf8",
         "maxBytes": 128
       },
-      "sourceSha256": "8719231b9848bbbcc37f2e503cd22ce3f79348790652ef76214658d0f3fe1a32"
+      "sourceSha256": "aa08a4f3f8cb910315f966a8171f101428db9995d26ca7700504603479123093"
     },
     {
       "identity": {
@@ -143,7 +151,7 @@
         "kind": "utf8",
         "maxBytes": 128
       },
-      "sourceSha256": "de85eabb33abf32a66dd805489a2266a6019c48bdc4e4aceccb4f25a86187afe"
+      "sourceSha256": "45b8a9224ff7b9fea649602386f2ad118ef0ca6d434afda8ff6928d4e16e9335"
     },
     {
       "identity": {
@@ -173,7 +181,7 @@
         "kind": "utf8",
         "maxBytes": 128
       },
-      "sourceSha256": "51ebd2dd577ef138e58c68bd696e94ceb04f0a9ac19c34ed57bcabf52ccd74ff"
+      "sourceSha256": "fd25499a934329c90c144c8a849f32627b34f18ac9e0945ce30f7661f94ad5da"
     }
   ]
 }

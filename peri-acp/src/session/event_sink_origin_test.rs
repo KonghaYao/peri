@@ -6,6 +6,33 @@ use peri_acp_types::{
 };
 
 #[tokio::test]
+async fn reason_started_projects_root_only_and_retains_wire_identity() {
+    let (transport, sink) = compact_test_sink();
+    let execution = ExecutionBinding {
+        turn_id: TurnId::new(),
+        attempt_id: AttemptId::new(),
+    };
+    let event = ExecutorEvent::ReasonStarted {
+        turn_id: execution.turn_id.to_string(),
+        agent_id: "root-agent".into(),
+    };
+    let child = ChildEventStream::new("child".into(), execution).wrap(event.clone());
+    sink.push_event("s1", &child, 0).await.unwrap();
+    assert!(transport.notifications.lock().unwrap().is_empty());
+    sink.push_event("s1", &event, 0).await.unwrap();
+    let notifications = transport.notifications.lock().unwrap();
+    assert_eq!(notifications.len(), 1);
+    assert_eq!(notifications[0].0, "peri/agent_event");
+    assert_eq!(notifications[0].1["sessionId"], "s1");
+    let projected: AcpEvent =
+        serde_json::from_str(notifications[0].1["event_json"].as_str().unwrap()).unwrap();
+    assert!(
+        matches!(projected, AcpEvent::ReasonStarted { turn_id, agent_id }
+        if matches!(&event, ExecutorEvent::ReasonStarted { turn_id: original, .. } if *original == turn_id) && agent_id == "root-agent")
+    );
+}
+
+#[tokio::test]
 async fn child_origin_crosses_standard_and_legacy_wire_without_relabeling() {
     let (transport, sink) = compact_test_sink();
     let execution = ExecutionBinding {

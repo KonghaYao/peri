@@ -15,6 +15,10 @@ use crate::{
 /// 将 v2 `RenderEvent` 转换为 0 或 1 个 `ExecutorEvent`（穷尽匹配）。
 pub fn render_event_to_executor(event: RenderEvent) -> Option<ExecutorEvent> {
     match event {
+        RenderEvent::ReasonStarted { turn_id, agent_id } => Some(ExecutorEvent::ReasonStarted {
+            turn_id: turn_id.to_string(),
+            agent_id: agent_id.to_string(),
+        }),
         RenderEvent::TurnSuspended { turn_id, agent_id } => Some(ExecutorEvent::TurnSuspended {
             turn_id: turn_id.to_string(),
             agent_id: agent_id.to_string(),

@@ -5,7 +5,7 @@ event: content_block_start
 data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"A04-resume","name":"Agent","input":{}}}
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"resume_thread_id\":\"01a1b607-9e72-7e70-ba12-7b34285db22c\",\"prompt\":\"A04_RESUMED_CHILD_TASK\",\"run_in_background\":false}"}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"resume_thread_id\":\"01a1b8e4-8ea8-73a0-8518-20b6d2f2e1c9\",\"prompt\":\"A04_RESUMED_CHILD_TASK\",\"run_in_background\":false}"}}
 
 event: content_block_stop
 data: {"type":"content_block_stop","index":0}

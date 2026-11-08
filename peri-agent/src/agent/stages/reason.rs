@@ -7,7 +7,7 @@ use super::middleware_runner::{
     run_after_model, run_before_model, run_before_reason_catalog, run_on_error,
 };
 use super::{ReasonInput, ReasonOutput};
-use crate::agent::events_v2::{ObserveEvent, TurnErrorReason};
+use crate::agent::events_v2::{ObserveEvent, RenderEvent, TurnErrorReason};
 use crate::agent::react::{Reasoning, StreamingContext};
 use crate::error::{AgentError, AgentResult};
 
@@ -167,6 +167,17 @@ pub async fn run_reason(input: ReasonInput) -> AgentResult<ReasonOutput> {
         msg_count = messages_snapshot.len(),
         "Reason 阶段：准备调用 LLM"
     );
+
+    // Resume the user-visible execution before waiting for the provider's first byte.
+    // Observe events can lag; cancellation reachability must use the ordered render lane.
+    let outcome = ctx
+        .runtime
+        .event_bus
+        .emit_render_reliable(RenderEvent::ReasonStarted { turn_id, agent_id })
+        .await;
+    if outcome == peri_acp_types::event_v2::EmitOutcome::Closed {
+        tracing::warn!(%turn_id, "ReasonStarted receiver closed; event bus requires resynchronization");
+    }
 
     // emit LlmCallStart（携带 messages + tools 快照，对齐 v1 Langfuse Generation input）
     // messages 为 Arc 浅拷贝，与下方 LLM 调用共享同一份快照

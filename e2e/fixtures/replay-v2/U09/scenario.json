@@ -13,6 +13,14 @@
     "directories": [
       "home",
       "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
       "work"
     ],
     "files": [
@@ -25,41 +33,41 @@
     ]
   },
   "recordedWorld": {
-    "root": "/tmp/peri-wire-e2e-j4JaNc",
-    "home": "/tmp/peri-wire-e2e-j4JaNc/home",
-    "work": "/tmp/peri-wire-e2e-j4JaNc/work"
+    "root": "/tmp/peri-wire-e2e-sCyhGQ",
+    "home": "/tmp/peri-wire-e2e-sCyhGQ/home",
+    "work": "/tmp/peri-wire-e2e-sCyhGQ/work"
   },
   "recordedSessionIds": {
-    "root": "01a1b607-cb74-7b02-8e35-0f15b42ff21f"
+    "root": "01a1b8e5-ef15-7f40-8179-d1aaa37818ec"
   },
-  "configurationFingerprint": "064824d7e12ef51b5ca40a47f4501683b3a277a9366d51e5aa628281dc1f8081",
+  "configurationFingerprint": "ad045351629dfccda164a536434d2f93bfffcc32e68dc292cf41c0a93beb95ed",
   "bindings": [
     {
       "owner": "world",
       "kind": "path",
       "alias": "root",
-      "recorded": "/tmp/peri-wire-e2e-j4JaNc",
+      "recorded": "/tmp/peri-wire-e2e-sCyhGQ",
       "anchor": "isolated scenario root"
     },
     {
       "owner": "world",
       "kind": "path",
       "alias": "home",
-      "recorded": "/tmp/peri-wire-e2e-j4JaNc/home",
+      "recorded": "/tmp/peri-wire-e2e-sCyhGQ/home",
       "anchor": "isolated scenario home"
     },
     {
       "owner": "world",
       "kind": "path",
       "alias": "work",
-      "recorded": "/tmp/peri-wire-e2e-j4JaNc/work",
+      "recorded": "/tmp/peri-wire-e2e-sCyhGQ/work",
       "anchor": "isolated scenario work"
     },
     {
       "owner": "world",
       "kind": "date",
       "alias": "today",
-      "recorded": "2026-11-07",
+      "recorded": "2026-11-08",
       "anchor": "ambient UTC date in system environment"
     },
     {
@@ -80,7 +88,7 @@
       "owner": "world",
       "kind": "session",
       "alias": "root",
-      "recorded": "01a1b607-cb74-7b02-8e35-0f15b42ff21f",
+      "recorded": "01a1b8e5-ef15-7f40-8179-d1aaa37818ec",
       "anchor": "ACP session/new result"
     }
   ],

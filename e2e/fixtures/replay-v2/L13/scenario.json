@@ -1,0 +1,102 @@
+{
+  "version": 2,
+  "id": "L13",
+  "title": "过程区过渡线后的真实工具标题鼠标命中，展开与折叠内容无额外执行",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
+      "work"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      },
+      {
+        "path": "work/l13-tool.txt",
+        "sha256": "ba85a685d4c1d52302e3f959eb239f3a0c05e5545b2442972dac2b6eefc4efd4",
+        "size": 36,
+        "mode": 420
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-dE7gtl",
+    "home": "/tmp/peri-wire-e2e-dE7gtl/home",
+    "work": "/tmp/peri-wire-e2e-dE7gtl/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b8e6-17eb-7101-a416-cd4b4736180c"
+  },
+  "configurationFingerprint": "1570c2cf6812d6a67beb9b602bfd72bddd6d734d5a9b4d31aa1fd946f8754cc7",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-dE7gtl",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-dE7gtl/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-dE7gtl/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-08",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b8e6-17eb-7101-a416-cd4b4736180c",
+      "anchor": "ACP session/new result"
+    }
+  ],
+  "portableResponses": []
+}

@@ -12,6 +12,23 @@ fn ids() -> (TurnId, AgentId) {
 }
 
 #[test]
+fn reason_started_preserves_producer_identity_without_model_payload() {
+    let (turn_id, agent_id) = ids();
+    let event = RenderEvent::ReasonStarted { turn_id, agent_id };
+    assert_eq!(event.turn_id(), turn_id);
+    assert_eq!(event.agent_id(), agent_id);
+    let ExecutorEvent::ReasonStarted {
+        turn_id: mapped_turn,
+        agent_id: mapped_agent,
+    } = render_event_to_executor(event).unwrap()
+    else {
+        panic!("reason start must remain a lifecycle signal");
+    };
+    assert_eq!(mapped_turn, turn_id.to_string());
+    assert_eq!(mapped_agent, agent_id.to_string());
+}
+
+#[test]
 fn test_user_input_delivered_maps_identity_generation_and_full_content() {
     let (turn_id, agent_id) = ids();
     let input_id = uuid::Uuid::now_v7().to_string();

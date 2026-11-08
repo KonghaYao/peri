@@ -1,0 +1,130 @@
+{
+  "version": 2,
+  "id": "D07",
+  "title": "同样工作文件进入独立临时 store，真实工具可读但旧会话历史不可见",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
+      "work"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      },
+      {
+        "path": "work/shared.txt",
+        "sha256": "bd85c4c624bce05521256f9ea49ff2bb14cc5fae963726c4e79eb39955d28f38",
+        "size": 26,
+        "mode": 420
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-70DXU3",
+    "home": "/tmp/peri-wire-e2e-70DXU3/home",
+    "work": "/tmp/peri-wire-e2e-70DXU3/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b8e2-23a1-77f3-897f-79033d062b7a"
+  },
+  "configurationFingerprint": "677b0843c2a897b0173fd8da75f01bc2fa1f1af87e45c5edbef514edb4ba317b",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-70DXU3",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-70DXU3/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-70DXU3/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-08",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b8e2-23a1-77f3-897f-79033d062b7a",
+      "anchor": "ACP session/new result"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "clean-root",
+      "recorded": "/tmp/peri-wire-e2e-ecNS42",
+      "anchor": "independent clean store root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "clean-home",
+      "recorded": "/tmp/peri-wire-e2e-ecNS42/home",
+      "anchor": "independent clean store home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "clean-work",
+      "recorded": "/tmp/peri-wire-e2e-ecNS42/work",
+      "anchor": "independent clean store work"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "clean",
+      "recorded": "01a1b8e2-2afd-7953-8623-b741eef3b16d",
+      "anchor": "session/new in a distinct temporary store with copied working files only"
+    }
+  ],
+  "portableResponses": []
+}

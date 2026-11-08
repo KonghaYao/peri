@@ -1,6 +1,24 @@
 use crate::kit::acp_types::{AcpEventData, BgTaskSnapshotSource};
 
 #[test]
+fn bg_task_started_preserves_independent_child_thread_identity() {
+    for child in [Some("actual-child-thread"), None] {
+        let event = AcpEventData::decode(
+            "bg-task-started",
+            serde_json::json!({
+                "task_id": "bg-independent-task", "kind": "agent", "summary": "same worker",
+                "started_at": "", "child_thread_id": child,
+            }),
+        );
+        let AcpEventData::BgTaskStarted(entry) = event else {
+            panic!("expected task started");
+        };
+        assert_eq!(entry.child_thread_id.as_deref(), child);
+        assert_eq!(entry.task_id, "bg-independent-task");
+    }
+}
+
+#[test]
 fn test_bg_task_completed_decodes_output_preview() {
     let data = serde_json::json!({
         "task_id": "t1",

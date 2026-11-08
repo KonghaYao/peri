@@ -21,6 +21,8 @@ use crate::kit::tui_render_unit::{EntryStatus, FoldKey, FoldState, TuiReasoningB
 // `#[path]` 指向。
 #[path = "acp_events_test/append_probe_test.rs"]
 mod append_probe_test;
+#[path = "acp_events_test/bg_agent_identity_test.rs"]
+mod bg_agent_identity_test;
 #[path = "acp_events_test/bg_task_live_test.rs"]
 mod bg_task_live_test;
 #[path = "acp_events_test/command_feedback_test.rs"]
@@ -356,6 +358,7 @@ fn test_subagent_stopped_removes_only_matching_active_agent() {
         dispatch_and_notify(
             &mut state,
             &AcpEventData::BgTaskStarted(BgTaskEntry {
+                child_thread_id: Some(agent_id.into()),
                 task_id: task_id.into(),
                 kind: "agent".into(),
                 summary: task_id.into(),
@@ -403,6 +406,7 @@ fn test_unknown_subagent_stopped_keeps_running_agents() {
     dispatch_and_notify(
         &mut state,
         &AcpEventData::BgTaskStarted(BgTaskEntry {
+            child_thread_id: None,
             task_id: "task-running".into(),
             kind: "agent".into(),
             summary: "running".into(),

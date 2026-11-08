@@ -26,3 +26,30 @@ async fn every_builtin_instance_builds_a_handler() {
             .unwrap_or_else(|error| panic!("{name} handler: {error}"));
     }
 }
+
+#[tokio::test]
+async fn builtin_instances_without_workspace_accept_clean_transport_close() {
+    for name in BUILTIN_RESERVED_INSTANCE_NAMES {
+        if *name == "workspace" {
+            continue;
+        }
+        let factory = StandaloneFactory::new(name, PathBuf::from(".")).unwrap();
+        assert!(factory.workspace_handle().is_none());
+        super::cleanup_workspace(factory.workspace_handle())
+            .await
+            .unwrap_or_else(|error| panic!("{name} shutdown is not workspace cleanup: {error}"));
+    }
+}
+
+#[test]
+fn real_workspace_requires_positive_cleanup_evidence() {
+    use peri_acp_types::tasks::TaskShutdownReport;
+
+    assert!(super::require_workspace_cleanup(Some(TaskShutdownReport::Complete)).is_ok());
+    for report in [None, Some(TaskShutdownReport::Incomplete)] {
+        let error = super::require_workspace_cleanup(report).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Workspace shell task cleanup incomplete"));
+    }
+}

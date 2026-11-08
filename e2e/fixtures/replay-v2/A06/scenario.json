@@ -13,6 +13,14 @@
     "directories": [
       "home",
       "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
       "work",
       "work/.claude",
       "work/.claude/agents"
@@ -33,41 +41,41 @@
     ]
   },
   "recordedWorld": {
-    "root": "/tmp/peri-wire-e2e-MBALqb",
-    "home": "/tmp/peri-wire-e2e-MBALqb/home",
-    "work": "/tmp/peri-wire-e2e-MBALqb/work"
+    "root": "/tmp/peri-wire-e2e-BmxKeC",
+    "home": "/tmp/peri-wire-e2e-BmxKeC/home",
+    "work": "/tmp/peri-wire-e2e-BmxKeC/work"
   },
   "recordedSessionIds": {
-    "root": "01a1b607-a42f-7021-9c84-f6dbf4c0fffd"
+    "root": "01a1b8e4-9d9e-7182-9a8b-3b625a90c513"
   },
-  "configurationFingerprint": "ab41bb646cbc7b72569c6ba7fe98afa0aacdd648dcf393a6f03e93c29b8c2fe5",
+  "configurationFingerprint": "7da90708353d305d29a4c28b842acf9d13341086979233df13a558736830c59f",
   "bindings": [
     {
       "owner": "world",
       "kind": "path",
       "alias": "root",
-      "recorded": "/tmp/peri-wire-e2e-MBALqb",
+      "recorded": "/tmp/peri-wire-e2e-BmxKeC",
       "anchor": "isolated scenario root"
     },
     {
       "owner": "world",
       "kind": "path",
       "alias": "home",
-      "recorded": "/tmp/peri-wire-e2e-MBALqb/home",
+      "recorded": "/tmp/peri-wire-e2e-BmxKeC/home",
       "anchor": "isolated scenario home"
     },
     {
       "owner": "world",
       "kind": "path",
       "alias": "work",
-      "recorded": "/tmp/peri-wire-e2e-MBALqb/work",
+      "recorded": "/tmp/peri-wire-e2e-BmxKeC/work",
       "anchor": "isolated scenario work"
     },
     {
       "owner": "world",
       "kind": "date",
       "alias": "today",
-      "recorded": "2026-11-07",
+      "recorded": "2026-11-08",
       "anchor": "ambient UTC date in system environment"
     },
     {
@@ -88,21 +96,21 @@
       "owner": "world",
       "kind": "session",
       "alias": "root",
-      "recorded": "01a1b607-a42f-7021-9c84-f6dbf4c0fffd",
+      "recorded": "01a1b8e4-9d9e-7182-9a8b-3b625a90c513",
       "anchor": "ACP session/new result"
     },
     {
       "owner": "world",
       "kind": "thread",
       "alias": "child-worker",
-      "recorded": "01a1b607-a65e-7a22-98ef-e13605c39faa",
+      "recorded": "01a1b8e4-a06b-79a1-8670-97779b5c435d",
       "anchor": "created child worker"
     },
     {
       "owner": "world",
       "kind": "task",
       "alias": "task-A06-spawn",
-      "recorded": "bg-01a1b607-a65e-7a22-98ef-e14630864bfe",
+      "recorded": "bg-01a1b8e4-a06b-79a1-8670-97839770d9a7",
       "anchor": "Agent background receipt A06-spawn"
     }
   ],

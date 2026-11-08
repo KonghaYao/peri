@@ -131,6 +131,9 @@ pub enum AcpEventData {
     /// Agent 保持存活（await_wake），新 turn 的流事件自动恢复 loading。
     TurnSuspended,
 
+    /// A live root model request starts before its first text or thinking chunk.
+    ReasonStarted,
+
     /// TUI 内部事件：本地用户提交的 UserBubble。仅 TUI 内部使用，不走 ACP 协议。
     ///
     /// `attachments` 为附件的展示记录（图片序号与大小，不含 base64 载荷）——
@@ -686,6 +689,9 @@ pub enum FeedbackChannel {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct BgTaskEntry {
     pub task_id: String,
+    /// The actual child thread; task IDs must never be decoded into child IDs.
+    #[serde(default)]
+    pub child_thread_id: Option<String>,
     pub kind: String,
     pub summary: String,
     pub started_at: String,

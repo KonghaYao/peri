@@ -32,14 +32,27 @@ selector.register(master, selectors.EVENT_READ, "pty")
 selector.register(sys.stdin.fileno(), selectors.EVENT_READ, "control")
 pending = b""
 stop_at = None
+forced_kill = False
+exit_code = None
 emit({"type": "ready", "pid": pid})
 
 
 def terminate(signum):
+    global forced_kill
     try:
         os.killpg(pid, signum)
+        forced_kill = True
     except ProcessLookupError:
         pass
+
+
+def group_exists():
+    # /proc may expose host PIDs; the kernel checks this bridge's PID namespace.
+    try:
+        os.killpg(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
 
 
 try:
@@ -75,6 +88,8 @@ try:
                     elif command["type"] == "stop":
                         terminate(signal.SIGTERM)
                         stop_at = time.monotonic() + 1
+                    elif command["type"] == "crash":
+                        terminate(signal.SIGKILL)
                     else:
                         raise ValueError("unknown control message")
         ended, status = os.waitpid(pid, os.WNOHANG)
@@ -88,12 +103,16 @@ try:
                     emit({"type": "data", "data": base64.b64encode(output).decode("ascii")})
             except OSError:
                 pass
-            emit({"type": "exit", "code": os.waitstatus_to_exitcode(status)})
+            exit_code = os.waitstatus_to_exitcode(status)
             break
         if stop_at is not None and time.monotonic() >= stop_at:
             terminate(signal.SIGKILL)
             stop_at = None
 finally:
-    terminate(signal.SIGKILL)
+    # Report after cleanup: exit 0 with a surviving child still requires a kill.
+    if group_exists():
+        terminate(signal.SIGKILL)
     selector.close()
     os.close(master)
+    if exit_code is not None:
+        emit({"type": "exit", "code": exit_code, "forcedKill": forced_kill})

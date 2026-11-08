@@ -1,0 +1,51 @@
+import json, os, pathlib, subprocess, sys, time
+name, mode = sys.argv[1:3]
+def mark(suffix, value):
+    pathlib.Path(name + suffix).write_text(value)
+def gate(suffix):
+    end = time.monotonic() + 90
+    while not pathlib.Path(name + suffix).exists():
+        if time.monotonic() > end: raise RuntimeError('source gate timed out: ' + suffix)
+        time.sleep(.005)
+def emit(text, stream='stdout', newline=True):
+    raw = text + ('\n' if newline else '')
+    with open(name + '.ledger', 'a') as ledger: ledger.write(json.dumps({'text':text,'stream':stream,'newline':newline}, ensure_ascii=False) + '\n')
+    target = sys.stdout if stream == 'stdout' else sys.stderr
+    target.write(raw); target.flush()
+mark('.pid', str(os.getpid()))
+with open(name + '.starts', 'a') as starts: starts.write('started\n')
+if mode == 'tree':
+    child = subprocess.Popen([sys.executable, '-c', "import os,pathlib,time; pathlib.Path('" + name + ".child').write_text(str(os.getpid())); time.sleep(90)"])
+    while not pathlib.Path(name + '.child').exists(): time.sleep(.005)
+    emit(name.upper() + '_TREE_READY')
+    mark('.flushed', 'stdout flushed')
+    gate('.never')
+elif mode == 'deadline':
+    emit(name.upper() + '_DEADLINE_READY')
+    gate('.never')
+elif mode in ('incremental', 'alerts'):
+    gate('.release')
+    emit(name.upper() + '_ALERT_1')
+    mark('.first', 'emitted')
+    gate('.second')
+    emit(name.upper() + '_ALERT_2')
+    emit(name.upper() + '_ALERT_3')
+    mark('.second-done', 'emitted')
+    gate('.finish')
+else:
+    gate('.release')
+    if mode == 'streams':
+        emit(name.upper() + '_STDOUT')
+        emit(name.upper() + '_PARTIAL', newline=False)
+    elif mode == 'pages':
+        for i in range(1, 8): emit(name.upper() + '_SEQ_' + str(i))
+    elif mode == 'overflow':
+        for i in range(1, 11): emit(name.upper() + '_SEQ_' + str(i))
+    elif mode == 'unicode':
+        emit('文🧪' * 5000)
+        emit(name.upper() + '_AFTER_LONG')
+    elif mode == 'failure':
+        emit(name.upper() + '_FAILURE', 'stderr')
+        sys.exit(7)
+    else: emit(name.upper() + '_ACTUAL_EVENT')
+mark('.ended', 'source completed')

@@ -74,7 +74,8 @@ function templateFor(text, bindings, source, systemText) {
 /** 录制时只从已绑定身份发现精确字段模板；重放时绝不重新推断可忽略字段。 */
 export function discoverBindingRules(body, { registry, owner = 'world', source = 'live', paths } = {}) {
   if (!['live', 'recorded'].includes(source)) fail('invalid_binding_source', 'source 必须为 live 或 recorded');
-  const bindings = registry.snapshot().filter((binding) => binding.owner === owner);
+  // 业务时间只接受场景按真实工具结果构建的显式 pointer/template，不能全局扫描归一化。
+  const bindings = registry.snapshot().filter((binding) => binding.owner === owner && binding.kind !== 'timestamp');
   const allowed = paths === undefined ? null : new Set(paths);
   const rules = [];
   const visit = (value, pointer, systemText = false) => {
@@ -100,6 +101,18 @@ const DEFAULT_TOOL_FIELDS = {
   Write: ['/file_path'], Edit: ['/file_path'], Read: ['/file_path'],
   Agent: ['/resume_thread_id', '/prompt'], folder_operations: ['/path'],
 };
+
+/** 显式模板可细化同一字段的自动身份模板；其它字段的规则和所有模板文字保持严格。 */
+export function mergeBindingRules(automatic, explicit = []) {
+  if (!Array.isArray(automatic) || !Array.isArray(explicit)) fail('invalid_binding_rules', '规则必须是数组');
+  const paths = new Set();
+  for (const rule of explicit) {
+    if (typeof rule?.path !== 'string' || !rule.path.startsWith('/')) fail('invalid_binding_pointer', '显式规则必须声明精确 pointer');
+    if (paths.has(rule.path)) fail('duplicate_binding_rule', '同一字段只能有一条显式规则');
+    paths.add(rule.path);
+  }
+  return [...automatic.filter((rule) => !paths.has(rule.path)), ...explicit];
+}
 
 /**
  * 每个真实 run 独立创建。fixture 只持有 recorded 声明和模板；live world/session 由 runner 登记。

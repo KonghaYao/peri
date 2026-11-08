@@ -1,0 +1,18 @@
+event: message_start
+data: {"type":"message_start","message":{"id":"session-store-fixture","type":"message","role":"assistant","model":"fixture-model","content":[],"stop_reason":null,"usage":{"input_tokens":24,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"D01-env","name":"Bash","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"command\":\"python3 -c 'import json,os,tempfile; from pathlib import Path; keys=\\\"HOME USERPROFILE XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME XDG_RUNTIME_DIR TMPDIR TMP TEMP PERI_DB_PATH ANTHROPIC_API_KEY OPENAI_API_KEY BASH_ENV ENV PERI_SESSION_STORE\\\".split(); f=tempfile.NamedTemporaryFile(prefix=\\\"D01-\\\",delete=False); f.write(b\\\"D01_TEMP_EFFECT\\\"); f.close(); Path(\\\"environment.json\\\").write_text(json.dumps({\\\"env\\\":{k:os.environ.get(k) for k in keys},\\\"temp\\\":f.name})); print(\\\"D01_REAL_SHELL_COMPLETED\\\")'\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":12}}
+
+event: message_stop
+data: {"type":"message_stop"}
+

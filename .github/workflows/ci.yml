@@ -271,12 +271,12 @@ jobs:
               working-directory: e2e
               run: npm run e2e:replay:unit
 
-            - name: Run offline replay (30 scenarios)
+            - name: Run offline replay (94 scenarios, full gate)
               working-directory: e2e
               run: npm run e2e:replay
 
-            - name: Upload replay evidence on failure
-              if: failure()
+            - name: Upload replay evidence
+              if: always()
               uses: actions/upload-artifact@v4
               with:
                   name: e2e-replay-results

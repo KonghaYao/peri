@@ -185,12 +185,16 @@ impl McpClientPool {
         &self,
         owner: &str,
     ) -> Result<Vec<WorkspaceLiveTask>, String> {
-        let call = self.call_instance_tool(
-            "workspace",
-            "shell_task_list",
-            serde_json::json!({ "owner": owner }),
-            None,
-        );
+        let call = async {
+            self.await_pending_local_workspace().await?;
+            self.call_instance_tool(
+                "workspace",
+                "shell_task_list",
+                serde_json::json!({ "owner": owner }),
+                None,
+            )
+            .await
+        };
         let text = match peri_time::timeout(PERIPHERAL_QUERY_TIMEOUT, call).await {
             Ok(Ok(text)) => text,
             Ok(Err(detail)) => return Err(detail),
@@ -218,6 +222,48 @@ impl McpClientPool {
                 started_at: task.started_at,
             })
             .collect())
+    }
+
+    /// 冷恢复不能把已声明的本地实例「仍在装配」持久化成查询失败；等待与查询共用上层期限。
+    async fn await_pending_local_workspace(&self) -> Result<(), String> {
+        use peri_acp_types::ports::McpPoolPort;
+
+        let mut changed = self.system_readiness.subscribe();
+        loop {
+            let manifest = self.system_readiness.manifest();
+            let pending_local = match self.workspace_source() {
+                Some(peri_acp_types::plugin::ConfigSource::Builtin { instance })
+                    if instance == "workspace" =>
+                {
+                    self.configs
+                        .read()
+                        .get("workspace")
+                        .is_some_and(|config| config.disabled != Some(true))
+                }
+                None if manifest == readiness::SystemMcpManifest::Pending => {
+                    // 宿主已注入本地能力但清单尚未发布；先等配置事实，不等待任何远端连接。
+                    self.builtin_available
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        && self.builtin_instance_context().is_some()
+                }
+                _ => false,
+            };
+            if !pending_local
+                || !self.is_open()
+                || self.system_settled()
+                || manifest == readiness::SystemMcpManifest::Failed
+                || !matches!(
+                    self.builtin_workspace_state(),
+                    McpBuiltinWorkspaceState::Absent
+                )
+            {
+                return Ok(());
+            }
+            changed
+                .changed()
+                .await
+                .map_err(|_| "workspace readiness channel closed".to_owned())?;
+        }
     }
 
     /// 读取池内某实例的资源 URI 正文（首个非空文本内容的按序拼接）。
@@ -353,6 +399,10 @@ impl McpClientPool {
         Ok(McpResourceSubscription::new(receiver, cancel))
     }
 }
+
+#[cfg(test)]
+#[path = "instance_face_readiness_test.rs"]
+mod readiness_tests;
 
 /// 订阅转发循环：`notifications/resources/updated` → 宿主 channel。
 ///

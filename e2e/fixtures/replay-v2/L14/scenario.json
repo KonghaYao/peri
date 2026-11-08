@@ -1,0 +1,102 @@
+{
+  "version": 2,
+  "id": "L14",
+  "title": "生产默认阈值下 usage 压力自动 Full，同执行继续并冷重启，原文归档可追溯",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
+      "work"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      },
+      {
+        "path": "work/pressure-ledger.txt",
+        "sha256": "38cf8a0b6358df323bab1238fa83e5831c68d8dbd1b7611d4af049278c6c4209",
+        "size": 20,
+        "mode": 420
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-4pAhQa",
+    "home": "/tmp/peri-wire-e2e-4pAhQa/home",
+    "work": "/tmp/peri-wire-e2e-4pAhQa/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b8e6-41d0-7af1-9722-96c2772a184d"
+  },
+  "configurationFingerprint": "947c739132ddabc8e1f0839f6ac40398404ebf73ee3b125fab42c20d888c495e",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-4pAhQa",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-4pAhQa/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-4pAhQa/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-08",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b8e6-41d0-7af1-9722-96c2772a184d",
+      "anchor": "ACP session/new result"
+    }
+  ],
+  "portableResponses": []
+}

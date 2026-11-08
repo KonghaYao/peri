@@ -69,6 +69,7 @@ fn session_switch_removes_previous_session_background_tasks() {
     let old_selected = atoms::SELECTED_BG_TASK_ID.state().read().clone();
 
     atoms::BG_TASKS.state().write().push(BgTaskEntry {
+        child_thread_id: None,
         task_id: "previous-shell".into(),
         kind: "shell".into(),
         summary: "sleep 10".into(),
@@ -120,6 +121,7 @@ fn same_session_replay_keeps_running_background_task() {
     let old_tasks = atoms::BG_TASKS.state().read().clone();
     *atoms::ACTIVE_SESSION_ID.state().write() = "current".into();
     atoms::BG_TASKS.state().write().push(BgTaskEntry {
+        child_thread_id: None,
         task_id: "still-running".into(),
         kind: "shell".into(),
         summary: "long command".into(),

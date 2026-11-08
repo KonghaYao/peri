@@ -1,0 +1,118 @@
+{
+  "version": 2,
+  "id": "B04",
+  "title": "真实 Tasks 面板取消 child，工具副作用不发生且取消可见",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
+      "work",
+      "work/.claude",
+      "work/.claude/agents"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      },
+      {
+        "path": "work/.claude/agents/replay-worker.md",
+        "sha256": "130ad94c3946149d49237835d5748b2976f470943860dabaf74960b3d5844099",
+        "size": 165,
+        "mode": 420
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-8T0njQ",
+    "home": "/tmp/peri-wire-e2e-8T0njQ/home",
+    "work": "/tmp/peri-wire-e2e-8T0njQ/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b8e4-c458-70b3-bde7-b473f94e1d15"
+  },
+  "configurationFingerprint": "f87e35a199f73cbdb3b74ec6c76eb2ff201564e5d6673ce7f49154806623a61a",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-8T0njQ",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-8T0njQ/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-8T0njQ/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-08",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b8e4-c458-70b3-bde7-b473f94e1d15",
+      "anchor": "ACP session/new result"
+    },
+    {
+      "owner": "world",
+      "kind": "thread",
+      "alias": "child-worker",
+      "recorded": "01a1b8e4-c71c-7231-88a7-dfb087bef20c",
+      "anchor": "created child worker"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "task-B04-spawn",
+      "recorded": "bg-01a1b8e4-c71c-7231-88a7-dfcdfde0a82a",
+      "anchor": "Agent background receipt B04-spawn"
+    }
+  ],
+  "portableResponses": []
+}

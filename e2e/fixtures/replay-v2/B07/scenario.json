@@ -1,0 +1,160 @@
+{
+  "version": 2,
+  "id": "B07",
+  "title": "已完成 child 后台恢复，同线程新执行新 task 且历史可读",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
+      "work",
+      "work/.claude",
+      "work/.claude/agents"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      },
+      {
+        "path": "work/.claude/agents/replay-worker.md",
+        "sha256": "130ad94c3946149d49237835d5748b2976f470943860dabaf74960b3d5844099",
+        "size": 165,
+        "mode": 420
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-AFXHnq",
+    "home": "/tmp/peri-wire-e2e-AFXHnq/home",
+    "work": "/tmp/peri-wire-e2e-AFXHnq/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b8e4-554e-7dc3-a2fc-739d40c03c89"
+  },
+  "configurationFingerprint": "f87e35a199f73cbdb3b74ec6c76eb2ff201564e5d6673ce7f49154806623a61a",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-AFXHnq",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-AFXHnq/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-AFXHnq/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-08",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b8e4-554e-7dc3-a2fc-739d40c03c89",
+      "anchor": "ACP session/new result"
+    },
+    {
+      "owner": "world",
+      "kind": "thread",
+      "alias": "child-worker",
+      "recorded": "01a1b8e4-5823-7b52-b389-ecbaaa5e8fbc",
+      "anchor": "created child worker"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "task-B07-spawn",
+      "recorded": "bg-01a1b8e4-5823-7b52-b389-ecc6334082ae",
+      "anchor": "Agent background receipt B07-spawn"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "task-B07-resume",
+      "recorded": "bg-01a1b8e4-59dc-7540-868d-98f39a48f79d",
+      "anchor": "Agent background receipt B07-resume"
+    }
+  ],
+  "portableResponses": [
+    {
+      "identity": {
+        "owner": "root",
+        "execution": "turn-2",
+        "call": "reason:1",
+        "attempt": 1,
+        "purpose": "reason"
+      },
+      "protocol": "anthropic",
+      "owner": "world",
+      "tools": [
+        {
+          "toolCallId": "B07-resume",
+          "rules": [
+            {
+              "path": "/resume_thread_id",
+              "mode": "typed-template",
+              "segments": [
+                {
+                  "kind": "thread",
+                  "alias": "child-worker"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "rulesVersion": "world-bindings-v1",
+      "fragmentPlan": {
+        "kind": "utf8",
+        "maxBytes": 128
+      },
+      "sourceSha256": "8c9ac2df93fb538d448d470805e3237b6283557db3cb8e58a0e3726de254beba"
+    }
+  ]
+}

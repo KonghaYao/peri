@@ -1,0 +1,155 @@
+{
+  "version": 2,
+  "id": "H12",
+  "title": "ACP 取消保留 cancelled 快照、单次取消事件与真实输出证据",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
+      "work"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-ibM8kF",
+    "home": "/tmp/peri-wire-e2e-ibM8kF/home",
+    "work": "/tmp/peri-wire-e2e-ibM8kF/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b8e5-b159-7a03-a156-f3ecebdbd39a"
+  },
+  "configurationFingerprint": "bb0d10ad282ad3c7f2b7f09c67c3e5678efbb8028ec41e3e8eceafb5f45b4a84",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-ibM8kF",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-ibM8kF/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-ibM8kF/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-08",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b8e5-b159-7a03-a156-f3ecebdbd39a",
+      "anchor": "ACP session/new result"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "shell-h12",
+      "recorded": "mcp-01a1b8e5-b33d-7001-a47b-538df5d1c957",
+      "anchor": "Bash tool receipt H12-bash"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "shell-h12-remote",
+      "recorded": "shell-01a1b8e5-b339-7c83-aadd-7cfabea94601",
+      "anchor": "MCP remote task linked to Bash tool H12-bash"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "shell-h12-stdout",
+      "recorded": "/tmp/peri-wire-e2e-ibM8kF/home/tmp/peri-bg-shell-01a1b8e5-b339-7c83-aadd-7cfabea94601-be24729b-1e5b-44ad-a8be-3b7357b497ef-stdout.log",
+      "anchor": "terminal stdout reference for H12-bash"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "shell-h12-stderr",
+      "recorded": "/tmp/peri-wire-e2e-ibM8kF/home/tmp/peri-bg-shell-01a1b8e5-b339-7c83-aadd-7cfabea94601-35723308-4089-402c-8292-3bb9c9a41b3f-stderr.log",
+      "anchor": "terminal stderr reference for H12-bash"
+    }
+  ],
+  "portableResponses": [
+    {
+      "identity": {
+        "owner": "root",
+        "execution": "start",
+        "call": "reason:3",
+        "attempt": 1,
+        "purpose": "reason"
+      },
+      "protocol": "anthropic",
+      "owner": "world",
+      "tools": [
+        {
+          "toolCallId": "H12-read",
+          "rules": [
+            {
+              "path": "/file_path",
+              "kind": "path",
+              "alias": "shell-h12-stdout",
+              "mode": "path-prefix"
+            }
+          ]
+        }
+      ],
+      "rulesVersion": "world-bindings-v1",
+      "fragmentPlan": {
+        "kind": "utf8",
+        "maxBytes": 128
+      },
+      "sourceSha256": "1e3b8dcf5fee574fd447555b140475238674ede20e39020daad1f2d5de70a6cd"
+    }
+  ]
+}

@@ -357,6 +357,7 @@ fn frame_state(selected: usize, area: Rect) -> (TasksViewport, Vec<BgTaskEntry>)
 
 fn bg_task(id: &str) -> BgTaskEntry {
     BgTaskEntry {
+        child_thread_id: None,
         task_id: id.to_string(),
         kind: "shell".to_string(),
         summary: format!("script {id}"),

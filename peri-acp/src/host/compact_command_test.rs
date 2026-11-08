@@ -11,7 +11,10 @@ fn enable_compact_command(ctx: &mut SessionContext, model: Arc<dyn Model>) {
     ctx.fresh_auxiliary_model = Some(Arc::new(move || model.clone()));
 }
 
-async fn run_manual_compact(ctx: SessionContext, sessions: SharedSessions) -> serde_json::Value {
+async fn run_manual_compact(
+    mut ctx: SessionContext,
+    sessions: SharedSessions,
+) -> serde_json::Value {
     let (client, server) = mpsc_transport_pair();
     let caps = Arc::new(dashmap::DashMap::new());
     caps.insert(
@@ -21,6 +24,8 @@ async fn run_manual_compact(ctx: SessionContext, sessions: SharedSessions) -> se
             ..Default::default()
         },
     );
+    let request_id = uuid::Uuid::now_v7().to_string();
+    ctx.request_id = Some(request_id.clone());
     let mut turn = make_compact_turn(&ctx, &sessions, false).await;
     turn.content = MessageContent::text("/compact");
     turn.event_sink = Arc::new(TransportEventSink::new(Arc::new(server), caps));
@@ -59,6 +64,10 @@ async fn run_manual_compact(ctx: SessionContext, sessions: SharedSessions) -> se
         if let IncomingMessage::Notification { method, params } = notification {
             if method == "peri/agent_event_done" {
                 assert_eq!(params["sessionId"], ctx.session_id);
+                assert_eq!(
+                    params["requestId"], request_id,
+                    "compact done must settle its originating prompt identity"
+                );
                 assert_eq!(
                     params["stopReason"], response["stopReason"],
                     "done 通知与 PromptResponse 必须表达同一终态"

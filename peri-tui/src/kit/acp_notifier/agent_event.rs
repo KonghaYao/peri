@@ -172,6 +172,7 @@ pub(super) fn decode_agent_event(event: AcpEvent) -> Option<AcpEventData> {
         // 停止 loading spinner。双轨下线后（2026-08-05-3.0-m-event-chain-canonical）
         // 此信号仅经 ACP peri/agent_event 通道送达。
         AcpEvent::TurnSuspended { .. } => Some(AcpEventData::TurnSuspended),
+        AcpEvent::ReasonStarted { .. } => Some(AcpEventData::ReasonStarted),
         // OAuth 授权事件（host 级，跨 session）：OauthNeeded 打开 popup 收集
         // 授权码，Completed/Failed 关闭 popup 并提示结果。
         AcpEvent::OauthNeeded {

@@ -12,12 +12,14 @@ use std::{
 use parking_lot::Mutex;
 use peri_acp_types::{
     event::BackgroundTaskResult,
+    shell_task::{ShellTaskResultMeta, SHELL_TASK_RESULT_META_KEY},
     tasks::{BgShellHandle, BgTaskKind, OnBgCompleteFn, TaskManager, TaskShutdownReport},
 };
 use peri_agent::agent::async_tasks::BackgroundRegistryError;
 use rmcp::{
     model::{
-        CallToolResult, ContentBlock, DetailedTask, GetTaskResult, Task, TaskPayload, TaskStatus,
+        CallToolResult, ContentBlock, DetailedTask, GetTaskResult, MetaObject, Task, TaskPayload,
+        TaskStatus,
     },
     ErrorData as McpError,
 };
@@ -31,6 +33,8 @@ struct ShellState {
     cancel_pending: HashSet<String>,
     cancel_accepted: HashSet<String>,
     pending_results: HashMap<String, BackgroundTaskResult>,
+    /// CancelledTask has no result payload; keep the executor evidence for tasks/get.
+    cancelled_results: HashMap<String, ShellTaskResultMeta>,
     /// Tasks whose process has started but whose request future may not have
     /// registered a visible record yet (cancellation during spawn).
     tracked: HashSet<String>,
@@ -304,7 +308,10 @@ impl ShellTasks {
                     .insert(result.task_id.clone(), result.clone());
                 return Ok(());
             }
-            let cancelled = state.cancel_accepted.remove(&result.task_id);
+            let cancel_accepted = state.cancel_accepted.remove(&result.task_id);
+            // Acceptance can race an already-fired deadline; executor evidence
+            // remains authoritative after process cleanup finishes.
+            let cancelled = cancel_accepted && result.outcome_label() == "cancelled";
             let record = state
                 .records
                 .entry(result.task_id.clone())
@@ -348,6 +355,12 @@ impl ShellTasks {
                 record.task.status = TaskStatus::Completed;
             }
             let detail = record.clone();
+            if cancelled {
+                state.cancelled_results.insert(
+                    result.task_id.clone(),
+                    ShellTaskResultMeta::new(result.clone()),
+                );
+            }
             state.tracked.remove(&result.task_id);
             drop(state);
             let _ = updates.send(detail);
@@ -559,13 +572,22 @@ impl ShellTasks {
     }
 
     pub(crate) fn get(&self, task_id: &str) -> Result<GetTaskResult, McpError> {
-        self.state
-            .lock()
+        let state = self.state.lock();
+        let task = state
             .records
             .get(task_id)
             .cloned()
-            .map(GetTaskResult::new)
-            .ok_or_else(|| McpError::invalid_params("unknown task", None))
+            .ok_or_else(|| McpError::invalid_params("unknown task", None))?;
+        let mut response = GetTaskResult::new(task);
+        if let Some(result) = state.cancelled_results.get(task_id) {
+            let value = serde_json::to_value(result)
+                .map_err(|error| McpError::internal_error(error.to_string(), None))?;
+            response.meta = Some(MetaObject(serde_json::Map::from_iter([(
+                SHELL_TASK_RESULT_META_KEY.to_owned(),
+                value,
+            )])));
+        }
+        Ok(response)
     }
 
     pub(crate) fn cancel(&self, task_id: &str) -> Result<(), McpError> {

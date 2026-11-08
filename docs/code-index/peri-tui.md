@@ -268,3 +268,7 @@ TUI 生产时间入口统一经 `peri-time`：`kit/entry.rs` 的每日主题以�
 - ARC-HOST-SHUTDOWN-001：TUI 不持有 MCP 池/`McpTaskOwner`（池归 ACP Host 部署）；`teardown_app` 显式关闭 AcpDeployment 并等待 host 收口，Incomplete 不记为已关闭
 
 并发子 Agent 展示归属遵守 `ARC-SUBAGENT-IDENTITY-001`：启动事件 `parent_tool_call_id` 必须是模型工具调用 ID，而非持久化 invocation UUID；TUI 不转换执行身份。三组同名、六种启动顺序与父卡片先到/后到的发布快照回归见 `acp_events_test/subagent_identity_test.rs::three_same_named_subagents_keep_distinct_owners_across_arrival_orders`。
+
+### 录放 v3 界面回归
+
+`acp_events/turn.rs::handle_reason_started` 在 provider 首字节前恢复既有 request 的 loading/Working，不新造执行或取消 ID；历史重放与已结束请求忽略。`bg_task_identity.rs` 使用注册事件的真实 child_thread_id 绑定任务与 child，去掉按未绑定行到达次序认领。`message_area/transcript_index.rs::entry_header_logical` 与 `scroll/gesture.rs` 使用实际布局中的标题行命中，装饰过程行与正文不能误触折叠；L13 真实鼠标验收，L04 独立键盘验收。

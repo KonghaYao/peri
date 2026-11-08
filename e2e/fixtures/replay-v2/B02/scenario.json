@@ -1,0 +1,132 @@
+{
+  "version": 2,
+  "id": "B02",
+  "title": "双异步 child 逆序完成，结果归属与 working 终态准确",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
+      "work",
+      "work/.claude",
+      "work/.claude/agents"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      },
+      {
+        "path": "work/.claude/agents/replay-worker.md",
+        "sha256": "130ad94c3946149d49237835d5748b2976f470943860dabaf74960b3d5844099",
+        "size": 165,
+        "mode": 420
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-zjeCBL",
+    "home": "/tmp/peri-wire-e2e-zjeCBL/home",
+    "work": "/tmp/peri-wire-e2e-zjeCBL/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b8e4-aef3-7623-ae5c-e97c424ea5d4"
+  },
+  "configurationFingerprint": "f87e35a199f73cbdb3b74ec6c76eb2ff201564e5d6673ce7f49154806623a61a",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-zjeCBL",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-zjeCBL/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-zjeCBL/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-08",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b8e4-aef3-7623-ae5c-e97c424ea5d4",
+      "anchor": "ACP session/new result"
+    },
+    {
+      "owner": "world",
+      "kind": "thread",
+      "alias": "child-left",
+      "recorded": "01a1b8e4-b550-70a0-8b26-1581244b1e60",
+      "anchor": "created child left"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "task-B02-left",
+      "recorded": "bg-01a1b8e4-b550-70a0-8b26-159acb8338eb",
+      "anchor": "Agent background receipt B02-left"
+    },
+    {
+      "owner": "world",
+      "kind": "thread",
+      "alias": "child-right",
+      "recorded": "01a1b8e4-b551-7860-b5b1-0160c55c71e5",
+      "anchor": "created child right"
+    },
+    {
+      "owner": "world",
+      "kind": "task",
+      "alias": "task-B02-right",
+      "recorded": "bg-01a1b8e4-b551-7860-b5b1-017e188eedb2",
+      "anchor": "Agent background receipt B02-right"
+    }
+  ],
+  "portableResponses": []
+}

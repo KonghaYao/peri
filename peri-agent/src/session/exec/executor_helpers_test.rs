@@ -148,6 +148,7 @@ fn make_intercept_request<'a>(
         ),
         cwd: "/tmp",
         session_id,
+        request_id: None,
         cancel,
         session_resources: None,
         thread_id: None,

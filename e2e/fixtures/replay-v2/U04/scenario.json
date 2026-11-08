@@ -13,6 +13,14 @@
     "directories": [
       "home",
       "home/.peri",
+      "home/.peri/logs",
+      "home/.peri/threads",
+      "home/cache",
+      "home/config",
+      "home/data",
+      "home/runtime",
+      "home/state",
+      "home/tmp",
       "work"
     ],
     "files": [
@@ -25,41 +33,41 @@
     ]
   },
   "recordedWorld": {
-    "root": "/tmp/peri-wire-e2e-sJsl1e",
-    "home": "/tmp/peri-wire-e2e-sJsl1e/home",
-    "work": "/tmp/peri-wire-e2e-sJsl1e/work"
+    "root": "/tmp/peri-wire-e2e-Nse1si",
+    "home": "/tmp/peri-wire-e2e-Nse1si/home",
+    "work": "/tmp/peri-wire-e2e-Nse1si/work"
   },
   "recordedSessionIds": {
-    "root": "01a1b607-206a-7fb2-b659-bb98538a4ce7"
+    "root": "01a1b8e1-e3de-72b3-a13b-6bf39a917b43"
   },
-  "configurationFingerprint": "064824d7e12ef51b5ca40a47f4501683b3a277a9366d51e5aa628281dc1f8081",
+  "configurationFingerprint": "ad045351629dfccda164a536434d2f93bfffcc32e68dc292cf41c0a93beb95ed",
   "bindings": [
     {
       "owner": "world",
       "kind": "path",
       "alias": "root",
-      "recorded": "/tmp/peri-wire-e2e-sJsl1e",
+      "recorded": "/tmp/peri-wire-e2e-Nse1si",
       "anchor": "isolated scenario root"
     },
     {
       "owner": "world",
       "kind": "path",
       "alias": "home",
-      "recorded": "/tmp/peri-wire-e2e-sJsl1e/home",
+      "recorded": "/tmp/peri-wire-e2e-Nse1si/home",
       "anchor": "isolated scenario home"
     },
     {
       "owner": "world",
       "kind": "path",
       "alias": "work",
-      "recorded": "/tmp/peri-wire-e2e-sJsl1e/work",
+      "recorded": "/tmp/peri-wire-e2e-Nse1si/work",
       "anchor": "isolated scenario work"
     },
     {
       "owner": "world",
       "kind": "date",
       "alias": "today",
-      "recorded": "2026-11-07",
+      "recorded": "2026-11-08",
       "anchor": "ambient UTC date in system environment"
     },
     {
@@ -80,14 +88,14 @@
       "owner": "world",
       "kind": "session",
       "alias": "root",
-      "recorded": "01a1b607-206a-7fb2-b659-bb98538a4ce7",
+      "recorded": "01a1b8e1-e3de-72b3-a13b-6bf39a917b43",
       "anchor": "ACP session/new result"
     },
     {
       "owner": "world",
       "kind": "session",
       "alias": "fresh",
-      "recorded": "01a1b607-2753-7952-b972-e95398afa98e",
+      "recorded": "01a1b8e1-ef2c-7bf1-97e7-c2209478b1d1",
       "anchor": "only new persisted root after explicit /clear and user submission"
     }
   ],

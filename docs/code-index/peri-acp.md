@@ -261,3 +261,7 @@ Session ID 恢复与生命周期回归：`src/host/requests_workspace_cases_test
 | Workflow 会话装配 | `src/host/workspace_workflow.rs` | 绑定实例运行时与消费者令牌；启动 MCP 执行消费者及后台目录投影，实例与 Host 各持独立 TaskManager |
 | Workflow 后台目录与终态 | `src/host/workflow_projection.rs` | `workflow://background-tasks` → Host 外部任务目录；接收终态后 `WorkflowCompletionAck`；取消经 `WorkflowKill`；关闭经 `WorkflowClose` 并确认最终投影 |
 | Cron 触发客户端 | `peri-agent/src/session/cron_events.rs` | Session 与 print 共用 MCP 消费者；失败保留、确认重试不重复本地交付 |
+
+### 录放 v3 生命周期回归
+
+`session/event_sink/legacy.rs` 仅向 root 投影可靠 `ReasonStarted`，保留真实 turn/agent 身份；子来源拒绝。`host/requests.rs` 把可信 Shell 的真实 cancelled outcome 复用既有 bg-task-cancelled 展示事件，内部结果投递仍恰好一次；完整临时 store 的异步/恢复/界面链路见 e2e 的 94 个录放场景。

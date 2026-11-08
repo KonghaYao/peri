@@ -165,6 +165,7 @@ async fn child_origin_new_run_without_old_stop_and_same_session_reset_are_isolat
             &tx,
             &mut observed,
             AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
+                child_thread_id: None,
                 task_id: task_id.into(),
                 kind: "agent".into(),
                 summary: "control task".into(),

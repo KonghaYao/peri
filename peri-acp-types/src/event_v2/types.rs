@@ -49,6 +49,8 @@ impl fmt::Display for TurnErrorReason {
 /// critical 通道有界，满时降级丢弃。所有变体强制携带 `turn_id` 和 `agent_id`。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RenderEvent {
+    /// A real model request is starting; ordered with suspension and output on the reliable render lane.
+    ReasonStarted { turn_id: TurnId, agent_id: AgentId },
     /// Execution is awaiting asynchronous work; its owner remains alive.
     /// Ordered before subsequent output, which resumes the loading projection.
     TurnSuspended { turn_id: TurnId, agent_id: AgentId },
@@ -159,6 +161,7 @@ impl RenderEvent {
     pub fn turn_id(&self) -> TurnId {
         match self {
             Self::TextChunk { turn_id, .. }
+            | Self::ReasonStarted { turn_id, .. }
             | Self::TurnSuspended { turn_id, .. }
             | Self::UserInputDelivered { turn_id, .. }
             | Self::ThinkingChunk { turn_id, .. }
@@ -174,6 +177,7 @@ impl RenderEvent {
     pub fn agent_id(&self) -> AgentId {
         match self {
             Self::TextChunk { agent_id, .. }
+            | Self::ReasonStarted { agent_id, .. }
             | Self::TurnSuspended { agent_id, .. }
             | Self::UserInputDelivered { agent_id, .. }
             | Self::ThinkingChunk { agent_id, .. }

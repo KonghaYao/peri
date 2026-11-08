@@ -366,6 +366,7 @@ pub async fn run_session_loop(ctx: SessionContext, turn: TurnInput) -> PromptRes
         history_payloads: std::borrow::Cow::Borrowed(&history_payloads),
         cwd: &ctx.cwd,
         session_id: &ctx.session_id,
+        request_id: ctx.request_id.as_deref(),
         cancel: &ctx.cancel,
         session_resources: ctx.session_resources.clone(),
         thread_id: ctx.thread_id.clone(),

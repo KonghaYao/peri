@@ -5,7 +5,7 @@ event: content_block_start
 data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t02-read-after","name":"Read","input":{}}}
 
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":\"/tmp/peri-wire-e2e-dyv05F/work/config.txt\"}"}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":\"/tmp/peri-wire-e2e-zPwrXC/work/config.txt\"}"}}
 
 event: content_block_stop
 data: {"type":"content_block_stop","index":0}

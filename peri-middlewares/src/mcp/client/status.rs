@@ -319,6 +319,7 @@ impl McpClientPool {
     pub(crate) fn mark_system_settled(&self) {
         self.system_settled
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.system_readiness.bump();
     }
 
     /// System MCP 是否已处理完（含失败与空清单）。

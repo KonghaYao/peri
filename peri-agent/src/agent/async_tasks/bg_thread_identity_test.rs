@@ -63,6 +63,7 @@ fn record(registry: &BackgroundTaskRegistry) -> peri_acp_types::tasks::TaskRecor
 #[tokio::test]
 async fn agent_task_projection_keeps_child_thread_identity_past_terminal() {
     let registry = BackgroundTaskRegistry::new();
+    let mut changes = registry.subscribe_events();
     let inbox = BackgroundAgentInbox::new(
         CHILD_THREAD_ID.into(),
         MessageQueue::new(),
@@ -71,6 +72,17 @@ async fn agent_task_projection_keeps_child_thread_identity_past_terminal() {
     let ticket = registry
         .register_with_kind(base_task(BgTaskKind::Agent, Some(inbox)))
         .unwrap();
+    match changes.try_recv().unwrap().event {
+        BgRegistryEvent::Started {
+            task_id,
+            child_thread_id,
+            ..
+        } => {
+            assert_eq!(task_id, TASK_ID);
+            assert_eq!(child_thread_id.as_deref(), Some(CHILD_THREAD_ID));
+        }
+        other => panic!("expected registered child identity, got {other:?}"),
+    }
 
     let live = record(&registry);
     assert_eq!(

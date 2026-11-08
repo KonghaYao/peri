@@ -37,6 +37,36 @@ fn make_registration(on_terminal: ExternalNotifyFn) -> ExternalTaskRegistration 
     }
 }
 
+#[tokio::test]
+async fn cancelled_external_result_projects_cancelled_with_one_completion_event() {
+    let manager = TaskManager::new();
+    let mut registration = make_registration(ok_notify());
+    registration.kind = BgTaskKind::Shell;
+    let ticket = manager.register_external(registration).unwrap();
+    let mut events = manager.subscribe_events();
+    let mut result = make_result();
+    result.agent_name = "bg-shell".into();
+    result.success = false;
+    result.output = "Shell command cancelled; read the output files as needed.".into();
+    assert!(manager
+        .settle_external(&ticket, "terminal", result.clone())
+        .await
+        .unwrap());
+    assert_eq!(manager.snapshot().tasks[0].status, "cancelled");
+    let change = events.try_recv().unwrap();
+    assert!(matches!(
+        change.event,
+        peri_acp_types::tasks::BgRegistryEvent::Completed { success: false, .. }
+    ));
+    assert!(!manager
+        .settle_external(&ticket, "terminal", result)
+        .await
+        .unwrap());
+    assert!(events.try_recv().is_err());
+    assert_eq!(manager.active_count(), 0);
+    assert!(!manager.has_unsettled_external());
+}
+
 async fn reconcile_terminal(
     manager: &TaskManager,
     ticket: &TaskRegistrationTicket,

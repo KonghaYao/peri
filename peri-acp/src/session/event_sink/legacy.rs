@@ -26,6 +26,12 @@ impl TransportEventSink {
         let origin = event.child_origin();
         let event = event.payload();
         let acp_event = match event {
+            ExecutorEvent::ReasonStarted { turn_id, agent_id } if origin.is_none() => {
+                Some(AcpEvent::ReasonStarted {
+                    turn_id: turn_id.clone(),
+                    agent_id: agent_id.clone(),
+                })
+            }
             ExecutorEvent::UserInputRunStarted {
                 generation,
                 request_id,

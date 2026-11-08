@@ -295,7 +295,7 @@ impl SystemReadinessTracker {
         self.bump();
     }
 
-    fn bump(&self) {
+    pub(super) fn bump(&self) {
         self.revision
             .send_modify(|revision| *revision = revision.wrapping_add(1));
     }

@@ -52,12 +52,27 @@ pub async fn run(options: Options) -> Result<()> {
             allowed_hosts,
         } => serve_http(move || factory.create(), &host, port, &allowed_hosts).await,
     };
-    let cleanup = match workspace {
-        Some(server) => server.shutdown_shell_tasks().await,
-        None => None,
-    };
+    let cleanup = cleanup_workspace(workspace).await;
     served?;
-    if cleanup != Some(peri_acp_types::tasks::TaskShutdownReport::Complete) {
+    cleanup
+}
+
+#[cfg(not(target_os = "emscripten"))]
+async fn cleanup_workspace(
+    workspace: Option<peri_mcp_workspace::WorkspaceMcpServer>,
+) -> Result<()> {
+    let Some(server) = workspace else {
+        // Other builtin instances have no workspace shell registry to shut down.
+        return Ok(());
+    };
+    require_workspace_cleanup(server.shutdown_shell_tasks().await)
+}
+
+#[cfg(not(target_os = "emscripten"))]
+fn require_workspace_cleanup(
+    report: Option<peri_acp_types::tasks::TaskShutdownReport>,
+) -> Result<()> {
+    if report != Some(peri_acp_types::tasks::TaskShutdownReport::Complete) {
         anyhow::bail!("Workspace shell task cleanup incomplete");
     }
     Ok(())

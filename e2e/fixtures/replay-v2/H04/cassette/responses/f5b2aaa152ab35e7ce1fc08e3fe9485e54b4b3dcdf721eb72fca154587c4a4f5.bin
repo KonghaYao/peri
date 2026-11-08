@@ -1,0 +1,18 @@
+event: message_start
+data: {"type":"message_start","message":{"id":"root-start-reason:3","type":"message","role":"assistant","model":"fixture-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":20,"output_tokens":0}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"H04-read-stdout","name":"Read","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":\"/tmp/peri-wire-e2e-3qoV1Y/home/tmp/peri-foreground-shell-68227136-f78a-400e-9141-306bc038ba45-stdout.log\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":10}}
+
+event: message_stop
+data: {"type":"message_stop"}
+

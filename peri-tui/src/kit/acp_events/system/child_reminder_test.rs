@@ -259,6 +259,7 @@ fn background_child_reminder_uses_its_detail_budget_and_keeps_independent_shell(
         handle_bg_task_started(
             &mut state,
             &crate::kit::acp_types::BgTaskEntry {
+                child_thread_id: (kind == "agent").then(|| "bg-child".into()),
                 task_id: id.into(),
                 kind: kind.into(),
                 summary: "running".into(),

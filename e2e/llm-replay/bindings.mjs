@@ -3,7 +3,7 @@ import { BindingError } from './binding-error.mjs';
 
 export { BindingError } from './binding-error.mjs';
 
-const KINDS = new Set(['session', 'thread', 'task', 'execution', 'tool_call', 'path', 'date', 'platform', 'os_version']);
+const KINDS = new Set(['session', 'thread', 'task', 'execution', 'tool_call', 'path', 'date', 'timestamp', 'platform', 'os_version']);
 const PROTECTED_KEYS = new Set(['signature', 'encrypted_content', 'provider_state', 'providerState', 'reasoning_content', 'thoughtSignature', 'thought_signature']);
 const PROTECTED_TYPES = new Set(['thinking', 'redacted_thinking', 'reasoning', 'redacted_reasoning', 'provider_state']);
 
@@ -34,10 +34,20 @@ function bindingValue(value, kind, field) {
       Number.isNaN(Date.parse(`${value}T00:00:00Z`)) || new Date(`${value}T00:00:00Z`).toISOString().slice(0, 10) !== value)) {
     fail('invalid_binding_date', `${field} 必须是有效的 YYYY-MM-DD 日期`);
   }
+  if (kind === 'timestamp') {
+    const parts = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?(Z|[+-](\d{2}):(\d{2}))$/u.exec(value);
+    if (!parts || Number.isNaN(Date.parse(value)) || Number(parts[2]) > 23 || Number(parts[3]) > 59 ||
+        Number(parts[4]) > 59 || Number(parts[6] ?? 0) > 23 || Number(parts[7] ?? 0) > 59 ||
+        new Date(`${parts[1]}T00:00:00Z`).toISOString().slice(0, 10) !== parts[1]) {
+      fail('invalid_binding_timestamp', `${field} 必须是有效的带时区 RFC3339 时间戳`);
+    }
+  }
   return value;
 }
 
-function valueKeyOf({ owner, kind }, value) {
+function valueKeyOf({ owner, kind, anchor }, value) {
+  // 两个不同事件可以发生在同一毫秒；时间值不是身份，仍须由各自因果锚绑定。
+  if (kind === 'timestamp') return JSON.stringify([owner, kind, anchor, value]);
   // 多个会话可共享同一工作区；身份 ID 不允许跨 owner 认领，路径、日期与宿主环境只在 owner 内唯一。
   return JSON.stringify(['path', 'date', 'platform', 'os_version'].includes(kind) ? [owner, kind, value] : [kind, value]);
 }
