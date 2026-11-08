@@ -525,6 +525,9 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     // Phase 6.5: clone recall_buffer 的 Arc，便于 Phase 8.5 在 context 被
     // run_react_loop 消费后仍可访问累积的 recall。
     let recall_buffer = Arc::clone(&v2_out.context.recall_buffer);
+    // token_tracker 同样随 StageContext 被消费；保留共享句柄供 Phase 8
+    // 把本轮累积的占用快照交回 AgentState（collect_result 的唯一取值来源）。
+    let token_tracker = Arc::clone(&v2_out.context.compact.token_tracker);
 
     // Phase 7: 运行 v2 ReAct 循环
     // langfuse v2: capture turn_id before move, emit TurnStarted
@@ -687,6 +690,9 @@ pub async fn build_and_execute_agent_v2(req: V2ExecuteRequest) -> ExecOutcome {
     let mut agent_state = AgentState::with_messages(req.cwd.clone(), messages);
     agent_state.set_context("session_id", &req.session_id);
     agent_state.set_context("run_id", uuid::Uuid::now_v7().to_string());
+    // 本轮真实累积的 tracker 随 StageContext 一起结束；回填到结果态，
+    // 让 collect_result 读到最近一次有效占用而不是默认空 tracker。
+    agent_state.token_tracker = token_tracker.read().clone();
 
     // Phase 8.5: 把 v2 recall_buffer（middleware hook 期间累积）灌入 agent_state。
     // 下游 collect_result() 调用 agent_state.drain_recall() 取出 recall_items，

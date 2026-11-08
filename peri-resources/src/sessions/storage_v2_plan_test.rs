@@ -28,7 +28,6 @@ fn registration(
         root: root.into(),
         path_source,
         project_id: format!("project-{id}"),
-        root_identity: r#"{"device":1,"inode":1}"#.to_owned(),
         discovery: format!(r#"{{"root":{root:?}}}"#),
     }
 }
@@ -210,7 +209,6 @@ async fn reads_existing_local_registration_and_environment_without_git_probe() {
     // 计划之外的输入也一并读回：登记的归属证据与运行机器是搬运时要用的原始行。
     assert_eq!(input.registrations.len(), 1);
     assert_eq!(input.registrations[0].project_id, project);
-    assert_eq!(input.registrations[0].root_identity, identity);
     assert_eq!(input.registrations[0].discovery, discovery);
     assert_eq!(input.sessions.len(), 1);
     assert_eq!(

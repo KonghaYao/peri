@@ -1,6 +1,6 @@
 # 存储 v2：Machine → Workspace → Session
 
-> 状态：已批准目标设计。本机 schema 12 与远端存储契约 `peri.session.store/v6` 已接入；
+> 状态：已批准目标设计。本机 schema 15 与远端存储契约 `peri.session.store/v9` 已接入；
 > 真实远端验收待执行。当前行为以代码、契约测试和
 > [Session ID / 机器环境设计](session-id-environment.md)为准。
 >
@@ -94,9 +94,9 @@ MCP server，也不能读取或覆盖彼此的凭证和私有状态。Git worktr
 | 实体 | 权威字段 | 约束 |
 | --- | --- | --- |
 | `machines` | `id`, `name`, `identity_kind` | `id` 主键；`name` 仅展示；`identity_kind` 区分真实机器身份与迁移时来源未知的占位身份 |
-| `workspaces` | `id`, `machine_id`, `path`, `path_source`，以及诊断列 `project_id`、`identity`、`discovery` | `id` 为 UUID 主键；`machine_id` 必须引用 Machine；`UNIQUE(machine_id, path)`；`path_source` 记录 discovered / derived_legacy / unverified；诊断列只描述当前占用该路径的对象，不参与执行准入 |
+| `workspaces` | `id`, `machine_id`, `path`, `path_source`，以及诊断列 `project_id`、`discovery` | `id` 为 UUID 主键；`machine_id` 必须引用 Machine；`UNIQUE(machine_id, path)`；`path_source` 记录 discovered / derived_legacy / unverified；诊断列只描述当前占用该路径的对象，不参与执行准入；v15 起不再有 `identity` 列 |
 | `threads`（Session） | `id`, `workspace_id`, `parent_thread_id`, `archived`, 现有会话元数据与上下文 | `id` 主键；`workspace_id` 非空并引用 Workspace；`archived` 非空，默认 `false` |
-| `session_bindings` | 现有 Project/relative cwd 与版本化执行发现快照 | 保存每条 Session 创建或旧库迁移时的执行证据；可缺失的旧远端证据不得凭空补造 |
+| `session_bindings` | 现有 Project/relative cwd 与最小执行根（`discovery_snapshot`） | 保存每条 Session 创建或旧库迁移时的执行证据；native 只有 `root`，virtual 另带 `kind`；可缺失的旧远端证据不得凭空补造 |
 | `mcp_oauth_credentials` | `principal_id`, `workspace_id`, `server_key`, 凭证正文与更新时间 | 凭证属于 Workspace；同 Workspace 的 thread 共享，同机其他 Workspace 不可见 |
 | `messages` | `message_id`, `thread_id`, payload 与 flags | 消息只归属一个 thread，现有顺序、内容和 compact 语义保留 |
 
@@ -115,17 +115,18 @@ MCP server，也不能读取或覆盖彼此的凭证和私有状态。Git worktr
 ### `workspaces` 与 `session_bindings`
 
 `workspaces` 在本机与远端是同一张表，归属键为 `(machine_id, path)`；行上的
-`project_id`、`identity`、`discovery` 只描述当前占用该路径的对象，用于项目复用与
-诊断，不决定 Workspace 身份，也不参与执行准入。`threads.workspace_id` 是会话归属的
+`project_id`、`discovery` 只描述当前占用该路径的对象，用于项目复用与诊断，不决定
+Workspace 身份，也不参与执行准入（v15 删除了与 `discovery.root_identity` 重复且
+无读者的 `identity` 列）。`threads.workspace_id` 是会话归属的
 单一权威；`session_bindings.workspace_id` 与它保持同一归属行 ID，不再有独立的执行
 登记 ID 空间。
 
-`session_bindings` 保存每条新 Session 不可变的版本化执行发现快照（创建时的 root、
-文件对象身份、Git private/common directory 证据及执行目录相对路径），
-`evidence_origin=creation_snapshot`。旧本机绑定迁移时只能复制最后观测值并标
-`legacy_last_observation`，不得冒称为创建时证据。发现快照只作诊断与兼容数据：
-本机准入只要求归属行存在、机器一致且 cwd 可用；远端组合仍要求快照存在以定位 root，
-identity/Git 观测字段不参与比较；virtual 远端沿用快照 root / project 校验。旧远端
+`session_bindings` 保存每条新 Session 不可变的版本化执行根（创建时的 root 与执行
+目录相对路径）：v15 起该列收缩为**最小执行根**——native 只有 `root`，virtual 另带
+`kind`，不含文件对象身份与 Git 布局（后者只留在 `workspaces.discovery` 作诊断）。
+旧本机绑定迁移时复制最后观测值并投影为同一形态，不得冒称为创建时证据。本机准入只
+要求归属行存在、机器一致且 cwd 可用；远端组合仍要求快照存在以定位 root；virtual
+远端沿用快照 root / project 校验。旧远端
 缺快照的记录明确保持缺失，仅可按 ID 读取历史，不得用当前同名目录、本地旧登记或新的
 文件系统观测补造执行资格。
 
@@ -274,16 +275,20 @@ canonical DDL 在 `peri-resources/src/sessions/canonical.rs` 保持一份，本�
 | 表 | 关键列 | 数据约束 |
 | --- | --- | --- |
 | `machines` | `id`, `name`, `identity_kind` | `id` 主键；known ID 为规范 UUID；name 非空且可改；legacy_unknown 不可作为本机当前身份 |
-| `workspaces` | `id`, `machine_id`, `path`, `path_source`；`project_id`、`identity`、`discovery` 为诊断列 | `id` UUID 主键，`machine_id` 非空引用 machines，`path` 非空，`UNIQUE(machine_id,path)`；远端可创建无本机文件证据的行 |
+| `workspaces` | `id`, `machine_id`, `path`, `path_source`；`project_id`、`discovery` 为诊断列 | `id` UUID 主键，`machine_id` 非空引用 machines，`path` 非空，`UNIQUE(machine_id,path)`；远端可创建无本机文件证据的行；v15 起无 `identity` 列 |
 | `threads` | `workspace_id`, `archived` | workspace_id 非空引用 workspaces；archived 非空默认 false；`parent_thread_id` 及其他列保留 |
-| `session_bindings` | `thread_id`, `schema_version`, `project_id`, `workspace_id`, `relative_cwd`, `discovery_snapshot`, `evidence_origin` | 逻辑归属只通过 `threads.workspace_id` 读取；`workspace_id` 与会话归属行同值；旧远端缺证据不伪造，新创建必须有完整快照 |
+| `session_bindings` | `thread_id`, `schema_version`, `project_id`, `workspace_id`, `relative_cwd`, `discovery_snapshot` | 逻辑归属只通过 `threads.workspace_id` 读取；`workspace_id` 与会话归属行同值；旧远端缺证据不伪造，新创建写最小执行根（native `{"root":…}`、virtual 另带 `kind`） |
 | `mcp_oauth_credentials` | `principal_id`, `workspace_id`, `server_key` | 主键 `(principal_id,workspace_id,server_key)`；不能通过 machine_id 或 server 名兜底查找 |
 
-升级来源是正式基线 ≤10（本机先补齐到 V10 形状）与 11 的两种形状；当前版本是
-schema 12，远端 `peri_store_meta.schema_version` 取同一版本常量，存储契约标签为
-`peri.session.store/v6`，可读旧契约为 `v2` 的 10|11 与 `v5` 的 11。11 的当前形状
-只缺派生索引表，走只增派生对象的增量迁移；11 的旧登记形状与 ≤10 走搬运批次，
-不认识的版本直接拒绝。远端升级是一条受管原子批：在旧 schema/contract/store 身份
+升级来源是正式基线 ≤10（本机先补齐到 V10 形状）、11 的旧登记形状，以及 11..14 的
+历代当前形状；当前版本是 schema 15，远端 `peri_store_meta.schema_version` 取同一版本
+常量，存储契约标签为 `peri.session.store/v9`，可读旧契约为 `v2`（10|11）、`v5`（11）、
+`v6`（12）、`v7`（13）与 `v8`（14）。11..13 的当前形状走「补 `thread_mq` / 两列
+→ v15 清理」的增量批次；14 只走 v15 清理；旧登记形状与 ≤10 走搬运批次；不认识的版本
+直接拒绝。v15 是首个删列表代：`projects.object_identity`、`workspaces.identity` 与
+`session_bindings.evidence_origin` 退役，`projects` 唯一键收窄为 `UNIQUE(locator)`，
+两张 inherited 派生索引表退役，三张受影响表以「建暂存 → 搬入 → 删旧 → 建新 → 搬回」
+重建；重复 locator 保留最早登记一行、引用先改绑后删行。远端升级是一条受管原子批：在旧 schema/contract/store 身份
 与对象 SQL 快照守卫下搬运全部历史行、重建受影响表、清理旧凭证，最后把版本与
 contract 同批推进。远端批结果未知时重读身份、形状和数据验收摘要，不能把超时当成功。
 

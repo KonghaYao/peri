@@ -1355,30 +1355,9 @@ async fn migration_adds_thread_mq_from_the_legacy_current_generation() {
 }
 
 async fn downgrade(path: &Path, version: i64) {
-    let pool = sqlx::SqlitePool::connect_with(
-        sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(false),
-    )
-    .await
-    .unwrap();
-    sqlx::raw_sql(
-        "DROP TABLE thread_mq;
-         DROP TABLE IF EXISTS inherited_payload_index;
-         DROP TABLE IF EXISTS inherited_snapshot_index;
-         ALTER TABLE threads DROP COLUMN context_usage_tokens;
-         ALTER TABLE threads DROP COLUMN work_state;",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-    sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
-        "PRAGMA user_version = {version}"
-    )))
-    .execute(&pool)
-    .await
-    .unwrap();
-    pool.close().await;
+    // 形状退回与 `schema_v14_test` 共用同一份夹具：v15 改形的三张表必须整表重建，
+    // 否则列序（`identity` 在 `discovery` 之前）不满足旧代际的形状判定。
+    super::schema_v14_tests::downgrade(path, version, true).await;
 }
 
 async fn assert_mq_shape(store: &SqliteThreadStore) {

@@ -115,15 +115,16 @@ Git 管理目录写 Peri 身份标记。
 
 归属键是 `(machine_id, canonical path)`：同一台机器同一路径只有一个 Workspace，
 `WorkspaceId` 不随该路径上的文件对象变化重新分配——目录删除后重建、或换成另一个
-对象，都仍落在同一归属行上。行上另存该路径当前观测到的项目、文件对象识别信息
-（Unix device/inode 或 Windows volume/file index）与发现快照：它们只描述**当前占用
-这个路径的对象**，用于项目复用与诊断，**不参与执行准入**。inode / file ID 不能证明
-任意复制、重建或历史路径复用；不依赖 creation time，也不降级为 mtime/ctime。
+对象，都仍落在同一归属行上。行上另存该路径当前观测到的项目与发现快照（root /
+common_dir / private_dir）：它们只描述**当前占用这个路径的对象**，用于项目复用与
+诊断，**不参与执行准入**。文件对象身份（device/inode、file ID）跨主机与容器不可
+通用，v15 起不再持久化，也无法用来证明任意复制、重建或历史路径复用；同样不依赖
+creation time，也不降级为 mtime/ctime。
 
 执行准入只要求归属行存在、属于本机，且绑定的 cwd 可用（存在且是目录、canonical
 路径与保存路径一致）。这是**本机组合**的判定；远端组合仍要求绑定快照存在：快照里的
-root 用于定位执行目录，identity/Git 观测字段不参与比较。virtual 远端是独立例外，仍
-比较快照 root 与稳定 project id。文件对象身份、Git 布局（root / common_dir /
+root 用于定位执行目录（快照已收缩为最小执行根，不含身份字段）。virtual 远端是独立
+例外，仍比较快照 root 与稳定 project id。文件对象身份、Git 布局（root / common_dir /
 private_dir）与归属行当前项目都不参与通过/失败判定：容器重启、同路径重建、`git init`、
 移除 `.git` 都不再让旧会话失败。项目归属按 canonical locator 建立，但只用于**新归属行**
 （或尚无项目的历史惰性行）：新路径按当前 locator 选择/复用项目。已有归属行沿用其登记
@@ -147,9 +148,10 @@ locator 变化而改项目；已有绑定的 `project_id` 保持自己的值，�
 
 完整发现是**登记**级动作：解析或新建工作区时执行一次 Git 发现。已有绑定的准入
 复核不重复发现，也不做发现快照的身份比较——只读 SQL 关系并检查 cwd 可用，不启动
-外部进程。远端组合仍要求绑定快照存在：root 用于定位执行目录，identity/Git 观测字段
-不参与比较；virtual 远端是独立例外，沿用快照 root / project 校验。这样容器重启或目录
-重建导致的 inode 变化不会阻断 `session/load`。
+外部进程。远端组合仍要求绑定快照存在：root 用于定位执行目录（v15 起快照只保存最小
+执行根，native 只有 `root`，virtual 另带 `kind`）；virtual 远端是独立例外，沿用快照
+root / project 校验。容器重启或目录重建因此不再产生可比较的身份差异，也不会阻断
+`session/load`。
 
 ### 3.3 情景规则
 
@@ -247,7 +249,7 @@ Host 可以共享 transport、全局配置来源与确定可共享的服务；�
 
 ## 8. 存储打开与版本边界
 
-默认读写使用 `~/.peri/threads/threads.db`，`--db-path` 可选择显式路径；schema 版本记录在 `PRAGMA user_version`，当前版本由 `peri-resources/src/sessions/canonical.rs::CURRENT_SCHEMA_VERSION` 定义（当前 12：在 11 的归属形状上只增 `inherited_snapshot_index`/`inherited_payload_index` 两张派生索引表，可由 `threads.inherited_context` 重建）。升级来源是正式基线 ≤10（远端 `peri.session.store/v2` 契约的 10|11）与 11 的当前形状（远端 `v5`，只增派生索引表的增量升级）；不认识的版本明确拒绝。版本与迁移入口见 [Resources 代码索引](../code-index/peri-resources.md)，历史归属设计见 [存储 v2](storage-v2-machine-workspace-session.md)。
+默认读写使用 `~/.peri/threads/threads.db`，`--db-path` 可选择显式路径；schema 版本记录在 `PRAGMA user_version`，当前版本由 `peri-resources/src/sessions/canonical.rs::CURRENT_SCHEMA_VERSION` 定义（当前 15：首个删列表代，退役 `projects.object_identity`、`workspaces.identity`、`session_bindings.evidence_origin` 与两张 inherited 派生索引表，`projects` 唯一键收窄为 `UNIQUE(locator)`，绑定证据收缩为最小执行根）。升级来源是正式基线 ≤10（远端 `peri.session.store/v2` 契约的 10|11）、11 的旧登记形状，以及 11..14 的历代当前形状（远端 `v5`/`v6`/`v7`/`v8`）；不认识的版本明确拒绝。版本与迁移入口见 [Resources 代码索引](../code-index/peri-resources.md)，历史归属设计见 [存储 v2](storage-v2-machine-workspace-session.md)。
 
 只读 metadata 打开不创建数据库、不升级 schema、不登记或绑定；缺失的默认库按空历史处理，损坏与不兼容 shape 返回错误。启动时写打开失败（schema 锁被占、库文件或 WAL 不可写）降级为只读打开并记 warning：进入与历史浏览不受影响，但降级不假装可写——新会话与目录登记在进入 SQL 前按 `ReadOnlyStore` 失败。写打开走到版本判定时，本构建不认识的 schema 与 `user_version` 返回 `UnsupportedDatabaseSchema` / `UnsupportedSchemaVersion`，且不降级；升级前必须停止所有旧 writer，不支持新旧二进制混用同一库。schema 版本号不是对不遵守协议的旧 writer 或外部 SQLite writer 的访问控制。
 

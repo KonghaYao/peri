@@ -1,5 +1,37 @@
 use super::*;
 
+/// 历史 `schema 4` 的登记载荷规范化：只保留 `device`/`inode`，丢弃已退役的创建时间字段。
+///
+/// 生产侧的同一段逻辑现在住在 `schema.rs::normalize_legacy_identity`（只服务压缩前的登记
+/// 形状），这里独立抄一份而不是借道它：夹具要复现「v4 写下的字节」，不能因为生产实现
+/// 以后改写而让夹具悄悄不同。
+fn normalize_legacy_identity(value: &serde_json::Value) -> String {
+    let object = value.as_object().expect("identity must be an object");
+    serde_json::json!({
+        "device": object["device"].as_u64().expect("device"),
+        "inode": object["inode"].as_u64().expect("inode"),
+    })
+    .to_string()
+}
+
+fn normalize_legacy_discovery(value: &serde_json::Value) -> String {
+    let mut object = value
+        .as_object()
+        .expect("discovery must be an object")
+        .clone();
+    for key in ["root_identity", "common_identity", "private_identity"] {
+        if let Some(identity) = object.get(key).cloned() {
+            if !identity.is_null() {
+                object.insert(
+                    key.to_owned(),
+                    serde_json::from_str(&normalize_legacy_identity(&identity)).unwrap(),
+                );
+            }
+        }
+    }
+    serde_json::Value::Object(object).to_string()
+}
+
 /// 现行 schema 4：身份载荷已规范化，登记表仍保留单列唯一约束。
 async fn version4_database(path: &Path, root: &Path) -> SqliteConnection {
     let mut connection = version3_database(path, root).await;
@@ -7,10 +39,7 @@ async fn version4_database(path: &Path, root: &Path) -> SqliteConnection {
         .fetch_one(&mut connection)
         .await
         .unwrap();
-    let identity = crate::sessions::sqlite_store::discovery::normalize_identity_json(
-        &serde_json::from_str(&identity).unwrap(),
-    )
-    .unwrap();
+    let identity = normalize_legacy_identity(&serde_json::from_str(&identity).unwrap());
     sqlx::query("UPDATE projects SET object_identity = ?")
         .bind(identity)
         .execute(&mut connection)
@@ -21,14 +50,8 @@ async fn version4_database(path: &Path, root: &Path) -> SqliteConnection {
             .fetch_one(&mut connection)
             .await
             .unwrap();
-    let root_identity = crate::sessions::sqlite_store::discovery::normalize_identity_json(
-        &serde_json::from_str(&root_identity).unwrap(),
-    )
-    .unwrap();
-    let discovery = crate::sessions::sqlite_store::discovery::normalize_discovery_json(
-        &serde_json::from_str(&discovery).unwrap(),
-    )
-    .unwrap();
+    let root_identity = normalize_legacy_identity(&serde_json::from_str(&root_identity).unwrap());
+    let discovery = normalize_legacy_discovery(&serde_json::from_str(&discovery).unwrap());
     sqlx::query("UPDATE workspaces SET root_identity = ?, discovery = ?")
         .bind(root_identity)
         .bind(discovery)
@@ -76,6 +99,11 @@ async fn test_upgrade_to_v19_keeps_one_row_per_path_and_preserves_rows() {
         .unwrap();
     assert_eq!(version, CURRENT_SCHEMA_VERSION);
 
+    // 迁移本身不改写登记字节：在测试自己的 `resolve_workspace`（它会按当前观测刷新
+    // `workspaces.discovery`）之前先取快照，断言的对象因此只是迁移。
+    let after = identity_bytes(&mut store.database.pool.acquire().await.unwrap()).await;
+    assert_eq!(before, after, "迁移不得改写登记、绑定或执行状态");
+
     // 原有登记、绑定与历史原样可用。
     let workspace = store.resolve_workspace(dir.path()).await.unwrap();
     assert_eq!(
@@ -117,10 +145,8 @@ async fn test_upgrade_to_v19_keeps_one_row_per_path_and_preserves_rows() {
     )
     .await
     .unwrap();
-    let after = identity_bytes(&mut probe).await;
     let after_history = history_bytes(&mut probe).await;
     probe.close().await.unwrap();
-    assert_eq!(before, after, "迁移不得改写登记、绑定或执行状态");
     assert_eq!(
         before_history, after_history,
         "迁移不得改写线程行与消息：frozen snapshot 与历史都在其中"
@@ -140,24 +166,18 @@ async fn test_upgrade_to_v19_keeps_one_row_per_path_and_preserves_rows() {
         duplicate_workspace.is_err(),
         "同一 (machine_id, path) 不得重复登记"
     );
-    // 同一 locator 上的另一个文件对象可以登记（同一路径重新克隆）。
-    sqlx::query(
-        "INSERT INTO projects (id, locator, object_identity)
-         SELECT '55555555-5555-4555-8555-555555555555', locator, '{\"device\":10,\"inode\":10}' FROM projects",
-    )
-    .execute(&store.database.pool)
-    .await
-    .unwrap();
+    // v15 起项目身份就是 locator：同一 locator 的第二个项目同样被唯一约束拒绝——
+    // 与「同一路径重新克隆」不再产生第二个项目行（同 locator 直接复用最早一行）。
     let duplicate_project = sqlx::query(
-        "INSERT INTO projects (id, locator, object_identity)
-         SELECT '66666666-6666-4666-8666-666666666666', locator, object_identity FROM projects
+        "INSERT INTO projects (id, locator)
+         SELECT '66666666-6666-4666-8666-666666666666', locator FROM projects
          WHERE id = '11111111-1111-4111-8111-111111111111'",
     )
     .execute(&store.database.pool)
     .await;
     assert!(
         duplicate_project.is_err(),
-        "同一 (locator, object_identity) 不得重复登记"
+        "同一 locator 不得重复登记（v15 的唯一键是 UNIQUE(locator)）"
     );
     // 归属行仍受 projects 外键约束：引用不存在项目的工作区被拒绝。
     let orphan = sqlx::query(
@@ -346,11 +366,13 @@ async fn test_registration_upgrade_preserves_healthy_v5_composite_registrations(
     // 幸存的行：原路径的 '22222222'（同路径 id 最小的一条）与换位路径的 '55555555'；
     // '66666666' 是同一路径的第二条登记，并入后不再有独立行。
     let mut expected = before.clone();
-    expected.retain(|row| !row.starts_with("[\"66666666-"));
+    // v15 的两条合并：同一路径的第二条归属行（66666666）被并入；同一 locator 的第二个
+    // 项目（44444444）也被并入——项目身份就是 locator。
+    expected.retain(|row| !row.starts_with("[\"66666666-") && !row.starts_with("[\"44444444-"));
     assert_eq!(
         expected.len(),
-        before.len() - 1,
-        "夹具必须恰好有一条同路径的重复登记被并入"
+        before.len() - 2,
+        "夹具必须恰好有一条同路径的重复登记与一个重复 locator 项目被并入"
     );
     // 首次开库升级，第二次开库保持同一结果；不访问 fixture 中不存在的旧目录。
     for _ in 0..2 {

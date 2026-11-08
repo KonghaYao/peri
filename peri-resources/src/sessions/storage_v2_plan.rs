@@ -14,15 +14,14 @@ use super::discovery::Discovery;
 
 /// 旧登记（压缩前形状里 `workspaces` 的一行）：归属身份 + 最后观测证据。
 ///
-/// 证据三列随归属行一起搬到当前形状；`discovery` 同时是绑定行的证据来源，
-/// 因此它不只是展示数据，缺失会让升级 fail-closed。
+/// 证据列随归属行一起搬到当前形状；`discovery` 同时是绑定行的证据来源（投影成最小
+/// 执行根），因此它不只是展示数据，缺失会让升级 fail-closed。
 #[derive(Clone, Debug)]
 pub(crate) struct LegacyRegistration {
     pub id: WorkspaceId,
     pub root: PathBuf,
     pub path_source: WorkspacePathSource,
     pub project_id: String,
-    pub root_identity: String,
     pub discovery: String,
 }
 
@@ -70,12 +69,12 @@ type LegacySessionRow = (String, Option<String>, String, String, Option<String>)
 pub(crate) async fn read_local_plan(
     connection: &mut SqliteConnection,
 ) -> Result<LocalMigrationInput> {
-    let registration_rows: Vec<(String, String, String, String, String)> =
-        sqlx::query_as("SELECT id, project_id, root, root_identity, discovery FROM workspaces")
+    let registration_rows: Vec<(String, String, String, String)> =
+        sqlx::query_as("SELECT id, project_id, root, discovery FROM workspaces")
             .fetch_all(&mut *connection)
             .await?;
     let mut registrations = Vec::with_capacity(registration_rows.len());
-    for (id, project_id, root, root_identity, discovery) in registration_rows {
+    for (id, project_id, root, discovery) in registration_rows {
         let observed: Discovery = serde_json::from_str(&discovery)?;
         if observed.root != Path::new(&root) {
             bail!("legacy execution registration root differs from discovery");
@@ -89,7 +88,6 @@ pub(crate) async fn read_local_plan(
                 WorkspacePathSource::Unverified
             },
             project_id,
-            root_identity,
             discovery,
         });
     }
@@ -133,7 +131,6 @@ pub(crate) struct PlannedWorkspaceRow {
     pub path: PathBuf,
     pub path_source: WorkspacePathSource,
     pub project_id: Option<String>,
-    pub identity: Option<String>,
     pub discovery: Option<String>,
 }
 
@@ -148,7 +145,7 @@ pub(crate) struct LegacyBindingRow {
     pub relative_cwd: String,
 }
 
-/// 当前形状的绑定行：归属收敛到会话归属行，证据来自旧登记。
+/// 当前形状的绑定行：归属收敛到会话归属行，证据取旧登记的最小执行根。
 #[derive(Clone, Debug)]
 pub(crate) struct PlannedBindingRow {
     pub thread_id: ThreadId,
@@ -157,11 +154,7 @@ pub(crate) struct PlannedBindingRow {
     pub workspace_id: WorkspaceId,
     pub relative_cwd: String,
     pub discovery_snapshot: String,
-    pub evidence_origin: &'static str,
 }
-
-/// 压缩前形状的绑定证据来源：旧登记的最后观测，不是创建时的执行快照。
-pub(crate) const LEGACY_EVIDENCE_ORIGIN: &str = "legacy_last_observation";
 
 /// 旧机器 id 的展示名与身份种类：uuid 字面量是「已知机器」（本机铸造的 id），
 /// 其余是旧库留下的未知机器。规则与规划同源，两端搬运共用一份判定。
@@ -226,7 +219,6 @@ pub(crate) fn plan_workspace_rows(
             path: workspace.path.clone(),
             path_source: workspace.path_source,
             project_id: evidence.map(|registration| registration.project_id.clone()),
-            identity: evidence.map(|registration| registration.root_identity.clone()),
             discovery: evidence.map(|registration| registration.discovery.clone()),
         });
     }
@@ -253,7 +245,6 @@ pub(crate) fn plan_workspace_rows(
             path: registration.root.clone(),
             path_source: WorkspacePathSource::Unverified,
             project_id: Some(registration.project_id.clone()),
-            identity: Some(registration.root_identity.clone()),
             discovery: Some(registration.discovery.clone()),
         });
     }
@@ -277,9 +268,9 @@ fn bound_machine(
         .map(|workspace| workspace.machine_id.clone())
 }
 
-/// 绑定行的搬运：`workspace_id` 由旧登记收敛到**会话归属行**，证据取旧登记的
-/// `discovery`，来源标为最后观测。任一绑定落不到归属行、或其记录的根与归属行
-/// 不同路径，都说明改写会静默改绑，直接拒绝升级（fail-closed）。
+/// 绑定行的搬运：`workspace_id` 由旧登记收敛到**会话归属行**，证据取旧登记 `discovery`
+/// 投影后的最小执行根。任一绑定落不到归属行、或其记录的根与归属行不同路径，都说明改写会
+/// 静默改绑，直接拒绝升级（fail-closed）。
 pub(crate) fn plan_binding_rows(
     bindings: &[LegacyBindingRow],
     plan: &StorageV2Plan,
@@ -311,8 +302,10 @@ pub(crate) fn plan_binding_rows(
             project_id: binding.project_id.clone(),
             workspace_id: *owner,
             relative_cwd: binding.relative_cwd.clone(),
-            discovery_snapshot: registration.discovery.clone(),
-            evidence_origin: LEGACY_EVIDENCE_ORIGIN,
+            // 只有最小执行根入库：identity 与 Git 布局不再随绑定行保存。
+            discovery_snapshot: crate::sessions::binding_evidence::project(
+                &registration.discovery,
+            )?,
         });
     }
     Ok(rows)

@@ -197,6 +197,8 @@ async fn preserved_table_definitions(connection: &mut SqliteConnection) -> Vec<(
             && name != SESSION_ENVIRONMENTS_TABLE
             && name != "workspaces"
             && name != "session_bindings"
+            // v15 重建 `projects`（唯一键收窄为 `UNIQUE(locator)`），DDL 必然变化。
+            && name != "projects"
             && name != "legacy_execution_registrations"
             && name != "machines"
             && name != "session_close_intents"
@@ -254,8 +256,6 @@ async fn test_v7_v8_v9_all_converge_and_drop_only_the_remote_tables() {
             OAUTH_CREDENTIALS_TABLE.to_owned(),
             "machines".to_owned(),
             "session_close_intents".to_owned(),
-            "inherited_snapshot_index".to_owned(),
-            "inherited_payload_index".to_owned(),
             "thread_mq".to_owned(),
         ]);
         expected.sort();
@@ -341,8 +341,6 @@ async fn test_database_without_remote_tables_is_idempotent() {
         OAUTH_CREDENTIALS_TABLE.to_owned(),
         "machines".to_owned(),
         "session_close_intents".to_owned(),
-        "inherited_snapshot_index".to_owned(),
-        "inherited_payload_index".to_owned(),
         "thread_mq".to_owned(),
     ]);
     expected.sort();

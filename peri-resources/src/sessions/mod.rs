@@ -7,6 +7,7 @@
 
 mod archive;
 mod archive_fork;
+mod binding_evidence;
 mod canonical;
 mod data;
 #[cfg(not(target_os = "emscripten"))]

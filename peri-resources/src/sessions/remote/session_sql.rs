@@ -23,6 +23,7 @@ use peri_acp_types::workspace::{ScopedThreadQuery, SessionBinding, ThreadScope, 
 use turso_serverless::Value;
 
 use super::session_codec::{int_value, optional_text, payload_params};
+use super::session_data::invalid_input;
 use super::sql::StatementSpec;
 use crate::sessions::canonical;
 
@@ -790,11 +791,14 @@ const DELETE_DRAFT_SESSION_SQL: &str =
 
 /// 不可变绑定行插入：与本机 `session_rows.rs::insert_binding_row` 同一份语句，绑定住在
 /// `session_bindings` 表里（不再是会话行上的四个扁平列）。
+///
+/// `discovery_snapshot` 由调用方投影成最小执行根后传入（native `{"root":...}`、virtual
+/// 另带 `kind`）；`?6` 为空时从父行复制——父行已是最小形态，自复制天然正确。
 const INSERT_BINDING_SQL: &str =
     "INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd,
-        discovery_snapshot, evidence_origin)
+        discovery_snapshot)
      VALUES (?1, ?2, ?3, ?4, ?5, COALESCE(?6,
-        (SELECT discovery_snapshot FROM session_bindings WHERE thread_id = ?7)), 'creation_snapshot')";
+        (SELECT discovery_snapshot FROM session_bindings WHERE thread_id = ?7)))";
 
 /// 继承区写入：与本机 child 路径同一份语句（创建行之后单独写一次，INSERT 不多带一列）。
 ///
@@ -840,7 +844,9 @@ pub(super) struct SessionInsert<'a> {
     /// 已生效会话的 agent 状态；新行一律 `active`。
     pub(super) agent_status: &'a str,
     pub(super) owner_workspace_id: Option<WorkspaceId>,
-    pub(super) discovery_snapshot: Option<&'a str>,
+    /// 已投影的最小执行根（`binding_evidence::project`）。写入点必须投影，不能直接放完整
+    /// 发现快照：绑定行只保存创建时的执行根，完整布局留在 `workspaces.discovery`。
+    pub(super) discovery_snapshot: Option<String>,
 }
 
 /// 由 [`NewSession`] 组装一行插入参数（创建/fork/child 三条路径共用同一列形状）。
@@ -881,6 +887,15 @@ pub(super) fn insert_session_statements(
     row: &SessionInsert<'_>,
 ) -> SessionResourceResult<Vec<StatementSpec>> {
     let relative = binding_relative_text(row.binding)?;
+    // 防御性投影：即使调用方传了完整发现快照，落进绑定行的也只有最小执行根。
+    let evidence = row
+        .discovery_snapshot
+        .as_deref()
+        .map(|raw| {
+            crate::sessions::binding_evidence::project(raw)
+                .map_err(|_| invalid_input("workspace creation evidence is invalid"))
+        })
+        .transpose()?;
     let mut statements = vec![
         StatementSpec::new(
             INSERT_THREAD_SQL,
@@ -911,7 +926,7 @@ pub(super) fn insert_session_statements(
                 Value::Text(row.binding.project_id.to_string()),
                 Value::Text(row.binding.workspace_id.to_string()),
                 Value::Text(relative),
-                optional_text(row.discovery_snapshot),
+                optional_text(evidence.as_deref()),
                 optional_text(row.parent_thread_id),
             ],
         ),
@@ -937,6 +952,13 @@ pub(super) fn insert_session_draft_statements(
     owner_workspace_id: Option<WorkspaceId>,
     discovery_snapshot: Option<&str>,
 ) -> SessionResourceResult<Vec<StatementSpec>> {
+    // 入库值是最小执行根；投影失败按输入错误拒绝，不把完整 JSON 落进绑定行。
+    let discovery_snapshot = discovery_snapshot
+        .map(|raw| {
+            crate::sessions::binding_evidence::project(raw)
+                .map_err(|_| invalid_input("workspace creation evidence is invalid"))
+        })
+        .transpose()?;
     let relative = binding_relative_text(&draft.binding)?;
     let snapshot_at = draft
         .meta
@@ -971,7 +993,7 @@ pub(super) fn insert_session_draft_statements(
                 Value::Text(draft.binding.project_id.to_string()),
                 Value::Text(draft.binding.workspace_id.to_string()),
                 Value::Text(relative),
-                optional_text(discovery_snapshot),
+                optional_text(discovery_snapshot.as_deref()),
                 optional_text(draft.meta.parent_thread_id.as_deref()),
             ],
         ),
@@ -996,55 +1018,6 @@ pub(super) fn revoke_draft_statements(id: &str) -> Vec<StatementSpec> {
     .into_iter()
     .map(|sql| StatementSpec::new(sql, vec![Value::Text(id.to_owned())]))
     .collect()
-}
-
-/// 草稿撤销的 inherited 索引删除：与三条 canonical 删除共用同一 `frozen_context IS NULL`
-/// 判据，payload 先于 snapshot（R08）。
-const DELETE_DRAFT_INHERITED_PAYLOADS_SQL: &str =
-    "DELETE FROM inherited_payload_index WHERE snapshot_id IN
-    (SELECT snapshot_id FROM inherited_snapshot_index WHERE thread_id = ?1)
-    AND EXISTS (SELECT 1 FROM threads WHERE id = ?1 AND frozen_context IS NULL)";
-const DELETE_DRAFT_INHERITED_SNAPSHOT_SQL: &str = "DELETE FROM inherited_snapshot_index
-    WHERE thread_id = ?1 AND EXISTS (SELECT 1 FROM threads WHERE id = ?1 AND frozen_context IS NULL)";
-
-/// 把 inherited 派生索引删除插入撤销批次中**线程删除之前**。
-///
-/// `has_snapshot`/`has_payload` 由调用方探测可选表；缺表时跳过，旧库删除不因此失败。
-/// payload 行只能经 snapshot 的 `snapshot_id` 定位，所以缺 snapshot 表时两者都跳过。
-pub(super) fn with_inherited_index_deletes(
-    mut effects: Vec<StatementSpec>,
-    id: &str,
-    has_snapshot: bool,
-    has_payload: bool,
-    draft_guard: bool,
-) -> Vec<StatementSpec> {
-    if !has_snapshot {
-        return effects;
-    }
-    let mut derived = Vec::with_capacity(2);
-    if has_payload {
-        derived.push(StatementSpec::new(
-            if draft_guard {
-                DELETE_DRAFT_INHERITED_PAYLOADS_SQL
-            } else {
-                canonical::DELETE_INHERITED_PAYLOADS_BY_THREAD_SQL
-            },
-            vec![Value::Text(id.to_owned())],
-        ));
-    }
-    derived.push(StatementSpec::new(
-        if draft_guard {
-            DELETE_DRAFT_INHERITED_SNAPSHOT_SQL
-        } else {
-            canonical::DELETE_INHERITED_SNAPSHOT_BY_THREAD_SQL
-        },
-        vec![Value::Text(id.to_owned())],
-    ));
-    // 批次最后一条必须是线程删除（撤销流程用 `counts.last()` 判断判据是否成立）。
-    let thread_delete = effects.pop();
-    effects.extend(derived);
-    effects.extend(thread_delete);
-    effects
 }
 
 /// 历史行的插入语句：flags 与内容一次写入（fork 目标由门面完成 ID 重映射，本层不重跑算法）。
@@ -1190,29 +1163,18 @@ mod tests {
         }
     }
 
-    /// inherited 派生索引删除必须排在会话行删除之前；缺表时跳过，不改变原有撤销语句。
+    /// inherited 派生索引随 v15 退役：撤销批次只剩 canonical 删除，线程删除仍在末尾。
     #[test]
-    fn inherited_index_deletes_precede_thread_row_deletion() {
-        let effects =
-            with_inherited_index_deletes(revoke_session_statements("s"), "s", true, true, false);
-        let sqls: Vec<&str> = effects.iter().map(|statement| statement.sql).collect();
-        assert_eq!(effects.len(), 5);
-        assert_eq!(
-            sqls[2],
-            crate::sessions::canonical::DELETE_INHERITED_PAYLOADS_BY_THREAD_SQL
-        );
-        assert_eq!(
-            sqls[3],
-            crate::sessions::canonical::DELETE_INHERITED_SNAPSHOT_BY_THREAD_SQL
-        );
-        assert_eq!(sqls[4], DELETE_SESSION_SQL);
+    fn revoke_batches_end_with_the_thread_row_deletion() {
+        let effects = revoke_session_statements("s");
+        assert_eq!(effects.len(), 3);
+        assert_eq!(effects.last().unwrap().sql, DELETE_SESSION_SQL);
 
-        let draft =
-            with_inherited_index_deletes(revoke_draft_statements("s"), "s", true, true, true);
-        for statement in &draft[2..4] {
+        let draft = revoke_draft_statements("s");
+        for statement in &draft[..2] {
             assert!(
                 statement.sql.contains("frozen_context IS NULL"),
-                "草稿撤销的派生索引删除必须与线程删除共用未提交判据: {}",
+                "草稿撤销必须与线程删除共用未提交判据: {}",
                 statement.sql
             );
         }
@@ -1220,21 +1182,13 @@ mod tests {
             draft.last().unwrap().sql.starts_with("DELETE FROM threads"),
             "线程删除必须留在批次末尾（撤销流程按 counts.last() 判定）"
         );
-
-        assert_eq!(
-            with_inherited_index_deletes(revoke_session_statements("s"), "s", false, true, false)
-                .len(),
-            3,
-            "缺 snapshot 表时不能插入任何派生删除"
-        );
-        let snapshot_only =
-            with_inherited_index_deletes(revoke_session_statements("s"), "s", true, false, false);
-        assert_eq!(snapshot_only.len(), 4);
-        assert_eq!(
-            snapshot_only[2].sql,
-            crate::sessions::canonical::DELETE_INHERITED_SNAPSHOT_BY_THREAD_SQL
-        );
-        assert_eq!(snapshot_only[3].sql, DELETE_SESSION_SQL);
+        for statement in effects.iter().chain(draft.iter()) {
+            assert!(
+                !statement.sql.contains("inherited_"),
+                "v15 起撤销批次不得引用已退役的派生索引: {}",
+                statement.sql
+            );
+        }
     }
 
     /// 回退候选语句形状：阶段一 user 过滤 + keyset + LIMIT，阶段二按主键单行；

@@ -89,8 +89,8 @@ async fn upgrade_keeps_registration_evidence_without_any_sessions() {
     let plan = schema_upgrade::upgrade_plan(&fixture.snapshot, &read, "current-machine").unwrap();
     store.apply_schema_upgrade(plan).await.unwrap();
 
-    let (id, machine, project, identity, discovery): (String, String, String, String, String) =
-        sqlx::query_as("SELECT id, machine_id, project_id, identity, discovery FROM workspaces")
+    let (id, machine, project, discovery): (String, String, String, String) =
+        sqlx::query_as("SELECT id, machine_id, project_id, discovery FROM workspaces")
             .fetch_one(&fixture.transport.pool)
             .await
             .unwrap();
@@ -100,7 +100,6 @@ async fn upgrade_keeps_registration_evidence_without_any_sessions() {
     );
     assert_eq!(machine, "current-machine", "没有会话引用时落在当前机器上");
     assert_eq!(project, "project");
-    assert_eq!(identity, "root identity");
     assert_eq!(discovery, DISCOVERY);
     assert_eq!(
         fixture

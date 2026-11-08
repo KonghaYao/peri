@@ -56,10 +56,11 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         .await?;
     match version {
         v if v == CURRENT_SCHEMA_VERSION => return current_shape(connection).await,
-        // 11→12 补 inherited 派生索引表（11 也可能是压缩前的登记形状），12→13 补
-        // `thread_mq`，13→14 补 `threads` 的两列工作快照；三者都先交给同一条形状判定，
-        // 再按判定结果走对应的幂等升级或搬运。
+        // 11..=14 都是可升级来源（11 也可能是压缩前的登记形状）：先交给形状判定，再按判定
+        // 结果走对应的幂等升级或搬运。v12 已从常量链移出，这里必须显式列出——否则它会落到
+        // `other` 分支被当成「不支持的版本」，把可升级的库关在门外。
         canonical::LEGACY_REGISTRATION_SCHEMA_VERSION
+        | 12
         | canonical::LEGACY_CURRENT_SCHEMA_VERSION
         | canonical::PREVIOUS_CURRENT_SCHEMA_VERSION => {
             return previous_shape(connection).await;
@@ -146,13 +147,17 @@ async fn current_shape(connection: &mut SqliteConnection) -> Result<SchemaState>
     }
 }
 
-/// 上一代当前形状（11|12|13）的形状判定：先看 v13 冻结声明（v12 的表 + `thread_mq`，
-/// `threads` 少两列），再看 v12 冻结声明（10 张表，缺 `thread_mq`），最后看压缩前的
-/// 登记形状（搬运输入，只可能是 11）。都不是就拒绝——这三个版本号只服务这些已知输入。
+/// 上一代当前形状（11..=14）的形状判定：先看 v14 冻结声明（11 张表，含两列工作快照），
+/// 再依次退让到 v13（`threads` 少两列）、v12（还缺 `thread_mq`），最后看压缩前的登记形状
+/// （搬运输入，只可能是 11）。都不是就拒绝——这些版本号只服务这些已知输入。
 async fn previous_shape(connection: &mut SqliteConnection) -> Result<SchemaState> {
     let tables =
         schema_shape::read_local_columns(&mut *connection, schema_shape::CURRENT_COLUMNS_SQL)
             .await?;
+    let v14_reason = match schema_shape::check_v14_shape(&tables) {
+        Ok(()) => return Ok(SchemaState::PreviousCurrent),
+        Err(reason) => reason,
+    };
     let current_reason = match schema_shape::check_v13_shape(&tables) {
         Ok(()) => return Ok(SchemaState::PreviousCurrent),
         Err(reason) => reason,
@@ -161,14 +166,21 @@ async fn previous_shape(connection: &mut SqliteConnection) -> Result<SchemaState
         Ok(()) => return Ok(SchemaState::PreviousCurrent),
         Err(reason) => reason,
     };
-    let tables =
+    let mut tables =
         schema_shape::read_local_columns(&mut *connection, schema_shape::INPUT_COLUMNS_SQL).await?;
+    let mut dropped_tables =
+        schema_shape::read_local_columns(&mut *connection, schema_shape::DROPPED_COLUMNS_SQL)
+            .await?;
+    for (table, columns) in dropped_tables.drain() {
+        tables.entry(table).or_insert(columns);
+    }
     let input_reason = schema_shape::check_input_shape(&tables)
         .and_then(|()| schema_shape::check_dropped_shape(&tables));
     if input_reason.is_ok() {
         return Ok(SchemaState::RegistrationShape);
     }
     tracing::warn!(
+        v14 = %v14_reason,
         current = %current_reason,
         legacy = %legacy_reason,
         input = %input_reason.unwrap_err(),
@@ -220,11 +232,6 @@ impl SqliteSessionDatabase {
             // 形状判定只覆盖表与列，索引不在其中：`CREATE_INDEXES` 会随后续构建演进，
             // 当前形状的库同样要按清单幂等补齐（`IF NOT EXISTS`），否则升级上来的库
             // 永远拿不到新索引。语句文本来自 `canonical` 的静态清单，不含外部输入。
-            for statement in canonical::CREATE_INHERITED_INDEX_TABLES {
-                sqlx::raw_sql(AssertSqlSafe((*statement).to_owned()))
-                    .execute(&mut *connection)
-                    .await?;
-            }
             for statement in canonical::CREATE_INDEXES {
                 sqlx::raw_sql(AssertSqlSafe((*statement).to_owned()))
                     .execute(&mut *connection)
@@ -243,8 +250,23 @@ impl SqliteSessionDatabase {
             return Self::create_current_schema(&mut connection).await;
         }
         if state == SchemaState::PreviousCurrent {
-            // 上一代 canonical 形状只缺派生对象与两列工作快照：增量补齐，不搬运任何会话事实。
-            return Self::upgrade_previous_current(&mut connection).await;
+            // 上一代 canonical 形状：补齐到 v14 的增量（`thread_mq` 与两列工作快照），
+            // 再跑 v15 的重建清理。没有需要搬运的会话事实。
+            //
+            // v15 重建要 DROP `projects` / `workspaces`——它们被子表引用，外键打开时
+            // `DROP TABLE` 的隐式删除会立即检查引用。`PRAGMA foreign_keys` 在事务内是空操作，
+            // 因此按 `migrate_schema` 同一手法在**事务外**关闭，提交前用 `foreign_key_check`
+            // 补齐校验，最后恢复连接设置。
+            sqlx::query("PRAGMA foreign_keys = OFF")
+                .execute(&mut *connection)
+                .await?;
+            let migrated = Self::upgrade_previous_current(&mut connection).await;
+            let restored = sqlx::query("PRAGMA foreign_keys = ON")
+                .execute(&mut *connection)
+                .await;
+            migrated?;
+            restored?;
+            return Ok(());
         }
         if state == SchemaState::RegistrationShape {
             // 压缩前的登记形状：形状本身就是搬运输入，直接走单条搬运。
@@ -298,24 +320,16 @@ impl SqliteSessionDatabase {
         Ok(())
     }
 
-    /// 上一代当前形状（版本 11|12|13）→ 当前形状：只补派生索引表、`thread_mq`、两列工作
-    /// 快照与 canonical 索引集，不改写任何会话事实。整段一个事务，失败时库保持原版本，
-    /// 旧二进制仍可打开。
+    /// 上一代当前形状（版本 11|12|13|14）→ 当前形状：先把形状补齐到 v14（`thread_mq` 与
+    /// 两列工作快照），再跑 v15 的三表重建清理与退役表删除。整段一个事务，失败时库保持
+    /// 原版本，旧二进制仍可打开。调用方已在**事务外**关闭外键强制。
     ///
-    /// v11→v14 依次补齐派生索引表、`thread_mq` 与两列，v12 少第一步、v13 只缺最后一步；
-    /// 三者共用同一条幂等路径，避免按代际各写一份。
+    /// v11→v15 依次补齐 `thread_mq` 与两列、再重建三张表，v12 多补一张表、v13 只缺两列、
+    /// v14 什么都不用补——四者共用同一条路径，避免按代际各写一份。
     async fn upgrade_previous_current(connection: &mut SqliteConnection) -> Result<()> {
-        ensure_canonical_names_hold_tables(connection, canonical::CREATE_INHERITED_INDEX_TABLES)
-            .await?;
         ensure_canonical_names_hold_tables(connection, &[canonical::THREAD_MQ_TABLE]).await?;
         let mut tx = connection.begin_with("BEGIN IMMEDIATE").await?;
-        for statement in canonical::CREATE_INHERITED_INDEX_TABLES {
-            // 语句文本来自 `canonical` 的静态清单，不含外部输入。
-            sqlx::raw_sql(AssertSqlSafe((*statement).to_owned()))
-                .execute(&mut *tx)
-                .await?;
-        }
-        // `thread_mq` 与它的排序索引：12→13 的唯一形状增量；对 13 的库是同一份幂等 DDL。
+        // `thread_mq` 与它的排序索引：12→13 的唯一形状增量；对 13/14 的库是同一份幂等 DDL。
         sqlx::query(canonical::CREATE_THREAD_MQ_TABLE_SQL)
             .execute(&mut *tx)
             .await?;
@@ -331,20 +345,12 @@ impl SqliteSessionDatabase {
                 .await?;
             }
         }
-        for statement in canonical::CREATE_INDEXES {
-            sqlx::raw_sql(AssertSqlSafe((*statement).to_owned()))
-                .execute(&mut *tx)
-                .await?;
-        }
         sqlx::query(canonical::INSERT_CURRENT_MACHINE_SQL)
             .bind(crate::sessions::machine::current()?)
             .execute(&mut *tx)
             .await?;
-        sqlx::query(AssertSqlSafe(format!(
-            "PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"
-        )))
-        .execute(&mut *tx)
-        .await?;
+        // 14→15：三表重建 + 退役表删除 + 索引重放 + 版本推进，全部在本事务内。
+        migrate_v15_cleanup(&mut tx).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -454,6 +460,243 @@ impl SqliteSessionDatabase {
         tx.commit().await?;
         Ok(())
     }
+}
+
+/// v15 清理本体：把 `projects` / `workspaces` / `session_bindings` 重建为 v15 形状，
+/// 删除两张 inherited 派生索引表，重放 canonical 索引集并推进 `user_version`。
+///
+/// 调用方必须已关闭外键强制（`PRAGMA foreign_keys` 在事务内是空操作），且在同一事务内；
+/// 提交前用 `PRAGMA foreign_key_check` 补齐校验，失败即整段回滚、库保持原版本。
+///
+/// 顺序由外键方向决定：`projects` 被 `workspaces.project_id` 与 `session_bindings.project_id`
+/// 引用，因此先合并重复 locator 并改绑引用，再重建父表，最后重建绑定表。
+pub(super) async fn migrate_v15_cleanup(connection: &mut SqliteConnection) -> Result<()> {
+    // 1. 数据前置审计：引用完整性必须先成立，否则合并与重建会把错误的归属固化下来。
+    require_referential_integrity(
+        connection,
+        "schema v15 refuses a database with broken references",
+    )
+    .await?;
+    // 2. 重复 locator 合并：保留 rowid 最早的项目行，先改绑引用、再删重复行。
+    merge_duplicate_project_locators(connection).await?;
+    // 3. 三表重建。每张表只重建一次：`session_bindings` 的删列与最小执行根投影共用同一份
+    //    模板，绝不先建后改。
+    let projects_before = count_rows(connection, "projects").await?;
+    rebuild_projects(connection).await?;
+    if count_rows(connection, "projects").await? > projects_before {
+        return Err(WorkspaceError::DiscoveryError(
+            "schema v15 project rebuild duplicated rows".into(),
+        )
+        .into());
+    }
+    let workspaces_before = count_rows(connection, "workspaces").await?;
+    rebuild_workspaces(connection).await?;
+    if count_rows(connection, "workspaces").await? != workspaces_before {
+        return Err(WorkspaceError::DiscoveryError(
+            "schema v15 workspace rebuild changed the row count".into(),
+        )
+        .into());
+    }
+    let bindings_before = count_rows(connection, "session_bindings").await?;
+    rebuild_bindings(connection).await?;
+    if count_rows(connection, "session_bindings").await? != bindings_before {
+        return Err(WorkspaceError::DiscoveryError(
+            "schema v15 binding rebuild changed the row count".into(),
+        )
+        .into());
+    }
+    // 4. 退役的派生索引表（payload 先于 snapshot）。`IF EXISTS` 让从未建过它们的库幂等。
+    for statement in canonical::DROP_INHERITED_INDEX_TABLES {
+        // 语句文本来自 `canonical` 的静态清单，不含外部输入。
+        sqlx::query(AssertSqlSafe((*statement).to_owned()))
+            .execute(&mut *connection)
+            .await?;
+    }
+    // 5. 索引重放：重建的三张表随 `DROP TABLE` 丢掉了自己的索引。
+    for statement in canonical::CREATE_INDEXES {
+        sqlx::raw_sql(AssertSqlSafe((*statement).to_owned()))
+            .execute(&mut *connection)
+            .await?;
+    }
+    // 6. 外键补齐校验与版本推进。
+    require_referential_integrity(connection, "schema v15 rebuild broke references").await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "PRAGMA user_version = {CURRENT_SCHEMA_VERSION}"
+    )))
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
+/// 引用完整性补齐校验：任何违反都拒绝迁移，并报出第一处 `(表, rowid)`。
+///
+/// 只报标识，不报内容——诊断要能回答「哪里坏了」，但不能把会话数据写进错误文本。
+async fn require_referential_integrity(
+    connection: &mut SqliteConnection,
+    context: &str,
+) -> Result<()> {
+    let violations: Vec<(String, i64, String, i64)> = sqlx::query_as("PRAGMA foreign_key_check")
+        .fetch_all(&mut *connection)
+        .await?;
+    if let Some((table, rowid, parent, _)) = violations.first() {
+        return Err(WorkspaceError::DiscoveryError(format!(
+            "{context}: {table} row {rowid} -> {parent}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// 同 locator 多行时保留 rowid 最小的项目行，其余项目行的引用先改绑、后删除。
+///
+/// 读法与 `observation_project` 的 `ORDER BY rowid ASC LIMIT 1` 一致：项目身份就是
+/// locator，最早登记的那一行是它的权威记录。改绑失败会让整段迁移回滚，不会留下
+/// 「删了行但引用悬空」的中间态。
+async fn merge_duplicate_project_locators(connection: &mut SqliteConnection) -> Result<()> {
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, locator FROM projects ORDER BY rowid ASC")
+            .fetch_all(&mut *connection)
+            .await?;
+    let mut keep: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut merges: Vec<(String, String)> = Vec::new();
+    for (id, locator) in rows {
+        match keep.get(&locator) {
+            Some(keep_id) => merges.push((id, keep_id.clone())),
+            None => {
+                keep.insert(locator, id);
+            }
+        }
+    }
+    for (drop_id, keep_id) in merges {
+        sqlx::query("UPDATE workspaces SET project_id = ?1 WHERE project_id = ?2")
+            .bind(&keep_id)
+            .bind(&drop_id)
+            .execute(&mut *connection)
+            .await?;
+        sqlx::query("UPDATE session_bindings SET project_id = ?1 WHERE project_id = ?2")
+            .bind(&keep_id)
+            .bind(&drop_id)
+            .execute(&mut *connection)
+            .await?;
+        sqlx::query("DELETE FROM projects WHERE id = ?1")
+            .bind(&drop_id)
+            .execute(&mut *connection)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn count_rows(connection: &mut SqliteConnection, table: &str) -> Result<i64> {
+    // 表名来自本模块的静态清单，不含外部输入。
+    let (count,): (i64,) = sqlx::query_as(AssertSqlSafe(format!("SELECT COUNT(*) FROM {table}")))
+        .fetch_one(&mut *connection)
+        .await?;
+    Ok(count)
+}
+
+/// `projects` → v15：建暂存 → 搬入 → 删旧 → 建新 → 搬回 → 删暂存。
+async fn rebuild_projects(connection: &mut SqliteConnection) -> Result<()> {
+    for statement in [
+        canonical::CREATE_REBUILD_PROJECTS_TABLE_SQL,
+        canonical::INSERT_PROJECTS_INTO_REBUILD_SQL,
+        "DROP TABLE projects",
+        canonical::CREATE_PROJECTS_TABLE_SQL,
+        canonical::INSERT_REBUILD_INTO_PROJECTS_SQL,
+        "DROP TABLE projects_v15",
+    ] {
+        // 语句文本来自 `canonical` 的静态清单，不含外部输入。
+        sqlx::query(AssertSqlSafe(statement.to_owned()))
+            .execute(&mut *connection)
+            .await?;
+    }
+    Ok(())
+}
+
+/// `workspaces` → v15：重建链，`identity` 列不搬。
+async fn rebuild_workspaces(connection: &mut SqliteConnection) -> Result<()> {
+    for statement in [
+        canonical::CREATE_REBUILD_WORKSPACES_TABLE_SQL,
+        canonical::INSERT_WORKSPACES_INTO_REBUILD_SQL,
+        "DROP TABLE workspaces",
+        canonical::CREATE_WORKSPACES_TABLE_SQL,
+        canonical::INSERT_REBUILD_INTO_WORKSPACES_SQL,
+        "DROP TABLE workspaces_v15",
+    ] {
+        // 语句文本来自 `canonical` 的静态清单，不含外部输入。
+        sqlx::query(AssertSqlSafe(statement.to_owned()))
+            .execute(&mut *connection)
+            .await?;
+    }
+    Ok(())
+}
+
+/// `session_bindings` → v15：重建链，`evidence_origin` 不搬，`discovery_snapshot` 逐行投影
+/// 为最小执行根（native 只有 `root`，virtual 另带 `kind`）。
+///
+/// 投影必须在 Rust 侧完成：远端执行器是否提供 json1 未实测，而两端要求同一份搬运语义。
+/// 解析失败的行**拒绝整段升级**——静默降级成 `NULL` 会让 admission 从「有证据」变成
+/// 「无证据」，把可执行会话降级为只读历史。
+async fn rebuild_bindings(connection: &mut SqliteConnection) -> Result<()> {
+    let rows: Vec<(String, i64, String, String, String, Option<String>)> = sqlx::query_as(
+        "SELECT thread_id, schema_version, project_id, workspace_id, relative_cwd, discovery_snapshot FROM session_bindings",
+    )
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut projected = Vec::with_capacity(rows.len());
+    for (thread_id, schema_version, project_id, workspace_id, relative_cwd, snapshot) in rows {
+        let snapshot = match snapshot.as_deref() {
+            // 旧远端缺证据的行保持 NULL：不伪造创建时的执行根。
+            None => None,
+            Some(raw) => Some(
+                crate::sessions::binding_evidence::project(raw).map_err(|_| {
+                    WorkspaceError::DiscoveryError(
+                        "schema v15 cannot project a binding creation snapshot".into(),
+                    )
+                })?,
+            ),
+        };
+        projected.push((
+            thread_id,
+            schema_version,
+            project_id,
+            workspace_id,
+            relative_cwd,
+            snapshot,
+        ));
+    }
+    for statement in [
+        canonical::CREATE_REBUILD_BINDINGS_TABLE_SQL,
+        "DROP TABLE session_bindings",
+        canonical::CREATE_BINDINGS_TABLE_SQL,
+    ] {
+        // 语句文本来自 `canonical` 的静态清单，不含外部输入。
+        sqlx::query(AssertSqlSafe(statement.to_owned()))
+            .execute(&mut *connection)
+            .await?;
+    }
+    for (thread_id, schema_version, project_id, workspace_id, relative_cwd, snapshot) in projected {
+        sqlx::query(
+            "INSERT INTO session_bindings_v15 (thread_id, schema_version, project_id, workspace_id, relative_cwd, discovery_snapshot)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(&thread_id)
+        .bind(schema_version)
+        .bind(&project_id)
+        .bind(&workspace_id)
+        .bind(&relative_cwd)
+        .bind(&snapshot)
+        .execute(&mut *connection)
+        .await?;
+    }
+    sqlx::query(AssertSqlSafe(
+        canonical::INSERT_REBUILD_INTO_BINDINGS_SQL.to_owned(),
+    ))
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query("DROP TABLE session_bindings_v15")
+        .execute(&mut *connection)
+        .await?;
+    Ok(())
 }
 
 /// v10 回退：v7..v9 写下的本机远程痕迹一次性删除。
@@ -636,8 +879,7 @@ async fn migrate_identity_values(connection: &mut SqliteConnection) -> Result<()
     let mut normalized_projects = Vec::with_capacity(projects.len());
     let mut project_identities = HashSet::new();
     for (id, identity) in projects {
-        let value: serde_json::Value = serde_json::from_str(&identity)?;
-        let identity = super::discovery::normalize_identity_json(&value)?;
+        let identity = normalize_legacy_identity(&identity)?;
         if !project_identities.insert(identity.clone()) {
             return Err(WorkspaceError::DiscoveryError(
                 "object identity collision during schema migration".into(),
@@ -654,10 +896,7 @@ async fn migrate_identity_values(connection: &mut SqliteConnection) -> Result<()
     let mut normalized_workspaces = Vec::with_capacity(workspaces.len());
     let mut workspace_identities = HashSet::new();
     for (id, root_identity, discovery) in workspaces {
-        let identity =
-            super::discovery::normalize_identity_json(&serde_json::from_str(&root_identity)?)?;
-        let discovery =
-            super::discovery::normalize_discovery_json(&serde_json::from_str(&discovery)?)?;
+        let identity = normalize_legacy_identity(&root_identity)?;
         if !workspace_identities.insert(identity.clone()) {
             return Err(WorkspaceError::DiscoveryError(
                 "workspace identity collision during schema migration".into(),
@@ -683,6 +922,36 @@ async fn migrate_identity_values(connection: &mut SqliteConnection) -> Result<()
             .await?;
     }
     Ok(())
+}
+
+/// 旧登记形状（v2/v3）的文件对象身份规范化：只接受 `device`/`inode` 与两个已退役的
+/// 创建时间字段，输出 `{"device":..,"inode":..}`。
+///
+/// 这条路径服务的是**压缩前**的登记形状（`projects`/`workspaces` 里的
+/// `object_identity`/`root_identity`），它们在 v11 搬运时整表重建、迁移终点不再有这些列。
+/// 规范化因此留在本机迁移内，不跟随已退役的 `discovery::ObjectIdentity`。
+fn normalize_legacy_identity(raw: &str) -> Result<String> {
+    let value: serde_json::Value = serde_json::from_str(raw)?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| WorkspaceError::DiscoveryError("invalid object identity".into()))?;
+    if !object.keys().all(|key| {
+        matches!(
+            key.as_str(),
+            "device" | "inode" | "birth_seconds" | "birth_nanos"
+        )
+    }) {
+        return Err(WorkspaceError::DiscoveryError("unknown object identity field".into()).into());
+    }
+    let device = object
+        .get("device")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| WorkspaceError::DiscoveryError("invalid object identity device".into()))?;
+    let inode = object
+        .get("inode")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| WorkspaceError::DiscoveryError("invalid object identity inode".into()))?;
+    Ok(serde_json::json!({ "device": device, "inode": inode }).to_string())
 }
 
 #[cfg(test)]

@@ -271,18 +271,17 @@ async fn upgrades_the_registration_shape_preserving_execution_evidence() {
     assert!(index_exists(&mut connection, "idx_bindings_project").await);
     assert!(index_exists(&mut connection, "idx_bindings_workspace").await);
     assert!(index_exists(&mut connection, "idx_threads_workspace_archived").await);
-    let workspace: (String, String, String, String, String, String) = sqlx::query_as(
-        "SELECT id, machine_id, path, path_source, project_id, identity FROM workspaces",
-    )
-    .fetch_one(&mut connection)
-    .await
-    .unwrap();
+    // v15 删除了 `workspaces.identity`：证据只剩完整发现快照（原样搬运，不做清洗）。
+    let workspace: (String, String, String, String, String) =
+        sqlx::query_as("SELECT id, machine_id, path, path_source, project_id FROM workspaces")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
     assert_eq!(workspace.0, registration, "归属行沿用旧登记 UUID");
     assert_eq!(workspace.1, fixture.machine);
     assert_eq!(workspace.2, "/repo");
     assert_eq!(workspace.3, "unverified");
     assert_eq!(workspace.4, project);
-    assert_eq!(workspace.5, r#"{"device":1,"inode":1}"#);
     let (discovery,): (String,) = sqlx::query_as("SELECT discovery FROM workspaces WHERE id = ?1")
         .bind(registration)
         .fetch_one(&mut connection)
@@ -299,8 +298,8 @@ async fn upgrades_the_registration_shape_preserving_execution_evidence() {
     assert_eq!(thread.1, 0);
     assert_eq!(thread.2, "/repo");
 
-    let binding: (String, String, String, String, String) = sqlx::query_as(
-        "SELECT workspace_id, project_id, relative_cwd, discovery_snapshot, evidence_origin
+    let binding: (String, String, String, String) = sqlx::query_as(
+        "SELECT workspace_id, project_id, relative_cwd, discovery_snapshot
          FROM session_bindings WHERE thread_id = 'thread-1'",
     )
     .fetch_one(&mut connection)
@@ -309,8 +308,11 @@ async fn upgrades_the_registration_shape_preserving_execution_evidence() {
     assert_eq!(binding.0, registration, "绑定收敛到会话归属行");
     assert_eq!(binding.1, project);
     assert_eq!(binding.2, "");
-    assert_eq!(binding.3, discovery_at("/repo"), "证据取旧登记的最后观测");
-    assert_eq!(binding.4, "legacy_last_observation");
+    assert_eq!(
+        binding.3,
+        crate::sessions::binding_evidence::project(&discovery_at("/repo")).unwrap(),
+        "证据取旧登记的最后观测，并收缩为最小执行根"
+    );
 
     let credentials: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mcp_oauth_credentials")
         .fetch_one(&mut connection)
@@ -384,8 +386,13 @@ async fn merges_registrations_of_one_path_and_keeps_per_binding_snapshots() {
             .fetch_all(&mut connection)
             .await
             .unwrap();
-    assert_eq!(snapshots[0].0, discovery_at("/replaced"));
-    assert_eq!(snapshots[1].0, second_discovery, "证据按绑定各自保留");
+    // v15 起绑定证据收缩为最小执行根；两条绑定各自投影，互不覆盖。
+    assert_eq!(snapshots[0].0, r#"{"root":"/replaced"}"#);
+    assert_eq!(
+        snapshots[1].0,
+        crate::sessions::binding_evidence::project(&second_discovery).unwrap(),
+        "证据按绑定各自保留（投影后）"
+    );
     assert_no_foreign_key_violation(&mut connection).await;
 }
 
@@ -565,7 +572,7 @@ async fn released_schema_10_database_upgrades_through_the_store_once() {
         .await
         .unwrap();
     let row: (String, String, String) = sqlx::query_as(
-        "SELECT t.workspace_id, w.path, b.evidence_origin FROM threads t
+        "SELECT t.workspace_id, w.path, b.discovery_snapshot FROM threads t
          JOIN workspaces w ON w.id = t.workspace_id
          JOIN session_bindings b ON b.thread_id = t.id WHERE t.id = 'thread-1'",
     )
@@ -574,7 +581,7 @@ async fn released_schema_10_database_upgrades_through_the_store_once() {
     .unwrap();
     assert_eq!(row.0, registration);
     assert_eq!(row.1, "/repo");
-    assert_eq!(row.2, "legacy_last_observation");
+    assert_eq!(row.2, r#"{"root":"/repo"}"#, "v15 起绑定证据是最小执行根");
     store.close().await;
 
     let reopened = crate::sessions::sqlite_store::SqliteThreadStore::new(&fixture.path)

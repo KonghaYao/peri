@@ -318,22 +318,63 @@ impl Fixture {
         }
     }
 
-    /// 上一代当前形状（`v7` + 13）：canonical 会话表齐全，只缺两列工作快照。
-    ///
-    /// 从本构建的初始化计划建库，删掉两列与 `thread_mq` 的差集后把元数据退回上一代——
-    /// 这正是 `v7` 库在两端形状一致之后的样子。
-    pub(super) async fn previous_current() -> Self {
-        let fixture = Self::built_from_initialization_plan().await;
-        sqlx::raw_sql(
-            "ALTER TABLE threads DROP COLUMN context_usage_tokens;
-             ALTER TABLE threads DROP COLUMN work_state;
-             DROP TABLE thread_mq;",
-        )
-        .execute(&fixture.transport.pool)
-        .await
-        .unwrap();
+    /// v14 形状的建表与索引（v15 之前的一代：`projects` 带 `object_identity`、
+    /// `workspaces` 带 `identity`、`session_bindings` 带 `evidence_origin`，两张
+    /// inherited 派生索引表在位）。夹具不能拿当前 DDL 生成，否则测不到升级。
+    pub(super) const V14_TABLES: &[&str] = &[
+        "CREATE TABLE IF NOT EXISTS machines (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, identity_kind TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS projects (
+            id TEXT PRIMARY KEY, locator TEXT NOT NULL, object_identity TEXT NOT NULL,
+            UNIQUE(locator, object_identity))",
+        "CREATE TABLE IF NOT EXISTS workspaces (
+            id TEXT PRIMARY KEY, machine_id TEXT NOT NULL REFERENCES machines(id),
+            path TEXT NOT NULL, path_source TEXT NOT NULL, project_id TEXT REFERENCES projects(id),
+            identity TEXT, discovery TEXT, UNIQUE(machine_id, path))",
+        "CREATE TABLE IF NOT EXISTS threads (
+            id TEXT PRIMARY KEY, title TEXT, cwd TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            message_count INTEGER NOT NULL DEFAULT 0, parent_thread_id TEXT,
+            snapshot_at_message_id TEXT, hidden BOOLEAN NOT NULL DEFAULT 0,
+            cancel_policy TEXT NOT NULL DEFAULT 'cascade', config TEXT,
+            frozen_context TEXT, inherited_context TEXT, agent_status TEXT NOT NULL DEFAULT 'active',
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+            archived BOOLEAN NOT NULL DEFAULT 0, context_usage_tokens INTEGER,
+            work_state TEXT NOT NULL DEFAULT 'idle')",
+        "CREATE TABLE IF NOT EXISTS messages (
+            message_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL REFERENCES threads(id),
+            role TEXT NOT NULL, content TEXT NOT NULL, truncated BOOLEAN NOT NULL DEFAULT 0,
+            excluded BOOLEAN NOT NULL DEFAULT 0, projection TEXT)",
+        "CREATE TABLE IF NOT EXISTS session_bindings (
+            thread_id TEXT PRIMARY KEY REFERENCES threads(id),
+            schema_version INTEGER NOT NULL, project_id TEXT NOT NULL,
+            workspace_id TEXT NOT NULL, relative_cwd TEXT NOT NULL,
+            discovery_snapshot TEXT, evidence_origin TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS mcp_oauth_credentials (
+            principal_id TEXT NOT NULL, workspace_id TEXT NOT NULL REFERENCES workspaces(id),
+            server_key TEXT NOT NULL, credentials_blob TEXT NOT NULL, updated_at TEXT NOT NULL,
+            PRIMARY KEY (principal_id, workspace_id, server_key))",
+        "CREATE TABLE IF NOT EXISTS session_close_intents (
+            thread_id TEXT PRIMARY KEY REFERENCES threads(id), requested_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS thread_mq (
+            thread_id TEXT NOT NULL REFERENCES threads(id), id TEXT NOT NULL,
+            enqueued_at TEXT NOT NULL, kind TEXT NOT NULL, source TEXT NOT NULL,
+            policy_json TEXT NOT NULL, payload_json TEXT NOT NULL, original_draft TEXT,
+            PRIMARY KEY(thread_id, id), UNIQUE(id))",
+        "CREATE TABLE IF NOT EXISTS inherited_snapshot_index (
+            snapshot_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, payload_bytes INTEGER NOT NULL,
+            entry_count INTEGER NOT NULL, prepared_at TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS inherited_payload_index (
+            snapshot_id TEXT NOT NULL, ordinal INTEGER NOT NULL, entry_id TEXT NOT NULL,
+            raw_start INTEGER NOT NULL, raw_len INTEGER NOT NULL, logical_len INTEGER,
+            PRIMARY KEY(snapshot_id, ordinal), UNIQUE(snapshot_id, entry_id))",
+    ];
+
+    /// 上一代当前形状（`v8` + 14）：v15 之前的当前形状，含要删除的三列与两张派生索引表。
+    pub(super) async fn previous_generation() -> Self {
+        let fixture = Self::built_from_v14_schema().await;
         sqlx::query(
-            "UPDATE peri_store_meta SET schema_version = 13, contract = ?1 WHERE singleton = 0",
+            "UPDATE peri_store_meta SET schema_version = 14, contract = ?1 WHERE singleton = 0",
         )
         .bind(schema::PREVIOUS_CURRENT_STORE_CONTRACT)
         .execute(&fixture.transport.pool)
@@ -345,19 +386,18 @@ impl Fixture {
         }
     }
 
-    /// 再上一代当前形状（`v6` + 12）：canonical 会话表齐全，缺 `thread_mq` 与两列工作快照。
-    pub(super) async fn legacy_current() -> Self {
-        let fixture = Self::built_from_initialization_plan().await;
+    /// 上一代当前形状（`v7` + 13）：canonical 会话表齐全，缺 `threads` 的两列工作快照。
+    pub(super) async fn previous_current() -> Self {
+        let fixture = Self::built_from_v14_schema().await;
         sqlx::raw_sql(
             "ALTER TABLE threads DROP COLUMN context_usage_tokens;
-             ALTER TABLE threads DROP COLUMN work_state;
-             DROP TABLE thread_mq;",
+             ALTER TABLE threads DROP COLUMN work_state;",
         )
         .execute(&fixture.transport.pool)
         .await
         .unwrap();
         sqlx::query(
-            "UPDATE peri_store_meta SET schema_version = 12, contract = ?1 WHERE singleton = 0",
+            "UPDATE peri_store_meta SET schema_version = 13, contract = ?1 WHERE singleton = 0",
         )
         .bind(schema::LEGACY_CURRENT_STORE_CONTRACT)
         .execute(&fixture.transport.pool)
@@ -369,21 +409,19 @@ impl Fixture {
         }
     }
 
-    /// 更早的当前形状（`v5` + 11）：还缺两张 inherited 派生索引表。
-    pub(super) async fn older_current() -> Self {
-        let fixture = Self::built_from_initialization_plan().await;
+    /// 再上一代当前形状（`v6` + 12）：还缺 `thread_mq`。
+    pub(super) async fn legacy_current() -> Self {
+        let fixture = Self::built_from_v14_schema().await;
         sqlx::raw_sql(
-            "DROP TABLE inherited_payload_index;
-             DROP TABLE inherited_snapshot_index;
+            "DROP TABLE thread_mq;
              ALTER TABLE threads DROP COLUMN context_usage_tokens;
-             ALTER TABLE threads DROP COLUMN work_state;
-             DROP TABLE thread_mq;",
+             ALTER TABLE threads DROP COLUMN work_state;",
         )
         .execute(&fixture.transport.pool)
         .await
         .unwrap();
         sqlx::query(
-            "UPDATE peri_store_meta SET schema_version = 11, contract = ?1 WHERE singleton = 0",
+            "UPDATE peri_store_meta SET schema_version = 12, contract = ?1 WHERE singleton = 0",
         )
         .bind(schema::OLDER_CURRENT_STORE_CONTRACT)
         .execute(&fixture.transport.pool)
@@ -395,7 +433,34 @@ impl Fixture {
         }
     }
 
-    async fn built_from_initialization_plan() -> Self {
+    /// 更早的当前形状（`v5` + 11）：还缺两张 inherited 派生索引表。
+    pub(super) async fn older_current() -> Self {
+        let fixture = Self::built_from_v14_schema().await;
+        sqlx::raw_sql(
+            "DROP TABLE inherited_payload_index;
+             DROP TABLE inherited_snapshot_index;
+             DROP TABLE thread_mq;
+             ALTER TABLE threads DROP COLUMN context_usage_tokens;
+             ALTER TABLE threads DROP COLUMN work_state;",
+        )
+        .execute(&fixture.transport.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE peri_store_meta SET schema_version = 11, contract = ?1 WHERE singleton = 0",
+        )
+        .bind(schema::OLDEST_CURRENT_STORE_CONTRACT)
+        .execute(&fixture.transport.pool)
+        .await
+        .unwrap();
+        Self {
+            snapshot: Self::snapshot_of(&fixture.transport).await,
+            ..fixture
+        }
+    }
+
+    /// v14 形状的空库 + 一个项目行 + 元数据（版本 11 / `v5`，与旧夹具一致）。
+    async fn built_from_v14_schema() -> Self {
         let directory = tempfile::tempdir().unwrap();
         let options = sqlx::sqlite::SqliteConnectOptions::new()
             .filename(directory.path().join("remote.db"))
@@ -405,8 +470,11 @@ impl Fixture {
             .connect_with(options)
             .await
             .unwrap();
-        for statement in super::session_schema::initialization_plan() {
-            sqlx::query(statement.sql).execute(&pool).await.unwrap();
+        for statement in Self::V14_TABLES {
+            sqlx::query(sqlx::AssertSqlSafe((*statement).to_owned()))
+                .execute(&pool)
+                .await
+                .unwrap();
         }
         sqlx::query(schema::CREATE_STORE_META_SQL)
             .execute(&pool)
@@ -415,7 +483,7 @@ impl Fixture {
         sqlx::query(
             "INSERT INTO peri_store_meta VALUES (0, 11, 'existing-store', ?1, 'original timestamp')",
         )
-        .bind(schema::LEGACY_CURRENT_STORE_CONTRACT)
+        .bind(schema::OLDEST_CURRENT_STORE_CONTRACT)
         .execute(&pool)
         .await
         .unwrap();
@@ -583,7 +651,7 @@ async fn assert_upgraded(fixture: &Fixture) {
 async fn upgrade_moves_a_released_store_to_the_current_generation_in_one_batch() {
     let fixture = Fixture::new().await;
     let retained_sql = "SELECT 'threads', json_array(id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status) FROM threads
-        UNION ALL SELECT 'projects', json_array(id, locator, object_identity) FROM projects
+        UNION ALL SELECT 'projects', json_array(id, CASE WHEN locator = 'locator' THEN '/tmp' ELSE locator END) FROM projects
         UNION ALL SELECT 'bindings', json_array(thread_id, schema_version, project_id, relative_cwd) FROM session_bindings
         ORDER BY 1, 2";
     let before: Vec<(String, String)> = sqlx::query_as(retained_sql)
@@ -611,26 +679,23 @@ async fn upgrade_moves_a_released_store_to_the_current_generation_in_one_batch()
         .await
         .unwrap();
     assert_eq!(after, before);
-    let workspace: (String, String, String, String, String) = sqlx::query_as(
-        "SELECT machine_id, path, path_source, project_id, identity FROM workspaces",
-    )
-    .fetch_one(&fixture.transport.pool)
-    .await
-    .unwrap();
+    let workspace: (String, String, String, String) =
+        sqlx::query_as("SELECT machine_id, path, path_source, project_id FROM workspaces")
+            .fetch_one(&fixture.transport.pool)
+            .await
+            .unwrap();
     assert_eq!(workspace.0, "original machine");
     assert_eq!(workspace.1, "/tmp");
     assert_eq!(workspace.2, "unverified");
     assert_eq!(workspace.3, "project");
-    assert_eq!(workspace.4, "root identity");
-    let binding: (String, String, String) = sqlx::query_as(
-        "SELECT workspace_id, discovery_snapshot, evidence_origin FROM session_bindings",
-    )
-    .fetch_one(&fixture.transport.pool)
-    .await
-    .unwrap();
+    let binding: (String, String) =
+        sqlx::query_as("SELECT workspace_id, discovery_snapshot FROM session_bindings")
+            .fetch_one(&fixture.transport.pool)
+            .await
+            .unwrap();
     assert_eq!(binding.0, "11111111-1111-4111-8111-111111111111");
-    assert_eq!(binding.1, DISCOVERY);
-    assert_eq!(binding.2, "legacy_last_observation");
+    // 绑定行的创建证据收缩为最小执行根（v15）：native 只有 `root`。
+    assert_eq!(binding.1, r#"{"root":"/tmp"}"#);
     let thread: (String, i64) =
         sqlx::query_as("SELECT workspace_id, archived FROM threads WHERE id = 'session'")
             .fetch_one(&fixture.transport.pool)

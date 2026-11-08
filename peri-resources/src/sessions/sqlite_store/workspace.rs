@@ -15,12 +15,11 @@ use std::path::{Component, Path, PathBuf};
 
 pub(super) type BindingRow = (i64, String, String, String);
 
-/// 归属行按 `(machine_id, path)` 命中的已记录证据：`(id, project_id, discovery, identity)`。
+/// 归属行按 `(machine_id, path)` 命中的已记录证据：`(id, project_id, discovery)`。
 ///
-/// `project_id` 与 `discovery` 为 NULL 表示这行从未被写打开观测过（历史惰性行）；`identity`
-/// 是当前占用该路径的文件对象证据，只作诊断，不参与身份或执行准入。只读节点按 NULL 判
-/// 「本机不认识这个目录」。
-type RecordedWorkspace = (String, Option<String>, Option<String>, Option<String>);
+/// `project_id` 与 `discovery` 为 NULL 表示这行从未被写打开观测过（历史惰性行）。只读节点
+/// 按 NULL 判「本机不认识这个目录」。
+type RecordedWorkspace = (String, Option<String>, Option<String>);
 
 pub(super) fn decode_binding(row: BindingRow) -> Result<SessionBinding> {
     if row.0 != i64::from(SESSION_BINDING_VERSION) {
@@ -35,6 +34,20 @@ pub(super) fn decode_binding(row: BindingRow) -> Result<SessionBinding> {
         workspace_id: row.2.parse().map_err(|_| WorkspaceError::InvalidBinding)?,
         cwd_relative_to_workspace: relative,
     })
+}
+
+/// 把归属行记录的完整发现快照投影成绑定行的最小执行根。
+///
+/// 绑定行只保存创建时的执行根（native 只有 `root`，virtual 另带 `kind`）；完整布局留在
+/// `workspaces.discovery`。投影失败说明这条归属行的证据不可解释，按 `InvalidBinding`
+/// 拒绝写入，而不是把完整 JSON 或 `NULL` 落进绑定行（后者会把可执行会话降级为只读）。
+pub(super) fn projected_evidence(snapshot: Option<&str>) -> Result<Option<String>> {
+    snapshot
+        .map(|raw| {
+            crate::sessions::binding_evidence::project(raw)
+                .map_err(|_| WorkspaceError::InvalidBinding.into())
+        })
+        .transpose()
 }
 
 /// 相对路径必须是纯普通分量（不含 `..`、根、前缀），且文本可逆。
@@ -95,6 +108,7 @@ fn may_write_observation(recorded: Option<&str>, current: &str, git_answered: bo
 
 #[test]
 fn observation_write_follows_recorded_layout_and_git_answer() {
+    // 旧行仍带 `*_identity` 键：`Discovery` 没有 `deny_unknown_fields`，读取天然兼容。
     let directory = |root: &str| {
         format!(
             r#"{{"root":"{root}","root_identity":{{"device":1,"inode":1}},"common_dir":null,"common_identity":null,"private_dir":null,"private_identity":null}}"#
@@ -105,6 +119,10 @@ fn observation_write_follows_recorded_layout_and_git_answer() {
             r#"{{"root":"{root}","root_identity":{{"device":2,"inode":2}},"common_dir":"{root}/.git","common_identity":{{"device":2,"inode":2}},"private_dir":"{root}/.git","private_identity":{{"device":2,"inode":2}}}}"#
         )
     };
+    // 新写下的行只含路径布局（v15 起不再持久化文件对象身份）。
+    let current_directory = r#"{"root":"/work","common_dir":null,"private_dir":null}"#;
+    let current_repository =
+        r#"{"root":"/work","common_dir":"/work/.git","private_dir":"/work/.git"}"#;
     // 从未观测过的历史归组行接受第一条目录模式观测（迁移期行没有可被改写的布局）。
     assert!(may_write_observation(None, &directory("/work"), false));
     // 行上已有快照：同一 Git 布局照写（inode 变化不影响），不同布局只接受 Git 回答过的观测。
@@ -118,6 +136,22 @@ fn observation_write_follows_recorded_layout_and_git_answer() {
     assert!(may_write_observation(
         Some(&directory("/work")),
         rebuilt,
+        false
+    ));
+    // 新旧两种形态表达同一布局：不因键集合收缩而拒绝写入。
+    assert!(may_write_observation(
+        Some(&directory("/work")),
+        current_directory,
+        false
+    ));
+    assert!(may_write_observation(
+        Some(current_directory),
+        &directory("/work"),
+        false
+    ));
+    assert!(may_write_observation(
+        Some(current_repository),
+        &repository("/work"),
         false
     ));
     assert!(may_write_observation(
@@ -152,9 +186,7 @@ impl SqliteSessionDatabase {
         } = observed;
         let root = discovery::path_text(&discovered.root)?;
         let locator = discovery::path_text(discovered.project_locator())?;
-        let identity = serde_json::to_string(discovered.project_identity())?;
         let snapshot = serde_json::to_string(&discovered)?;
-        let root_identity = serde_json::to_string(&discovered.root_identity)?;
         let source = if discovered.common_dir.is_some() || discovered.private_dir.is_some() {
             "discovered"
         } else {
@@ -167,20 +199,20 @@ impl SqliteSessionDatabase {
         // 参与执行准入：目录被替换（同路径的新对象）或换位（同一对象的新路径）都不移动
         // 归属，已有绑定只要 cwd 可用就继续执行，不会静默改绑。
         let recorded: Option<RecordedWorkspace> = sqlx::query_as(
-            "SELECT id, project_id, discovery, identity FROM workspaces WHERE machine_id = ?1 AND path = ?2",
+            "SELECT id, project_id, discovery FROM workspaces WHERE machine_id = ?1 AND path = ?2",
         )
         .bind(machine)
         .bind(root)
         .fetch_optional(&mut *tx)
         .await?;
         let (workspace_id, project_id) = match recorded {
-            Some((id, project, _, _)) if self.read_only => {
+            Some((id, project, _)) if self.read_only => {
                 // 只读节点不能补写证据：读请求按这条归属行已记录的事实回答；没有项目
                 // 证据说明它从未被写打开观测过，按「本机不认识这个目录」失败。
                 let project = project.ok_or(WorkspaceError::InvalidBinding)?;
                 (id.parse::<WorkspaceId>()?, project.parse::<ProjectId>()?)
             }
-            Some((id, project, recorded, _)) => {
+            Some((id, project, recorded)) => {
                 // 目录模式的变化必须以 Git 的回答为准：只读目录观测（Git 没回答）不能
                 // 证明已记录的仓库消失了，保持 fail-closed，而不是把仓库改写成普通目录。
                 if !may_write_observation(recorded.as_deref(), &snapshot, git_answered) {
@@ -191,16 +223,15 @@ impl SqliteSessionDatabase {
                 // 用于新建归属行或尚未记录项目的历史惰性行选择/复用项目。
                 let project_id = match project {
                     Some(project) => project.parse::<ProjectId>()?,
-                    None => Self::observation_project(&mut tx, locator, &identity).await?,
+                    None => Self::observation_project(&mut tx, locator).await?,
                 };
                 sqlx::query(
-                    "UPDATE workspaces SET project_id = ?1, identity = ?2, discovery = ?3,
-                     path_source = CASE WHEN path_source = 'unverified' AND ?4 = 'discovered'
+                    "UPDATE workspaces SET project_id = ?1, discovery = ?2,
+                     path_source = CASE WHEN path_source = 'unverified' AND ?3 = 'discovered'
                                         THEN 'discovered' ELSE path_source END
-                     WHERE id = ?5",
+                     WHERE id = ?4",
                 )
                 .bind(project_id.to_string())
-                .bind(&root_identity)
                 .bind(&snapshot)
                 .bind(source)
                 .bind(&id)
@@ -213,18 +244,17 @@ impl SqliteSessionDatabase {
                 // 交给 SQLite 在写入时才报只读。
                 self.require_writable()?;
                 super::workspace_identity::ensure_current_machine(&mut tx).await?;
-                let project_id = Self::observation_project(&mut tx, locator, &identity).await?;
+                let project_id = Self::observation_project(&mut tx, locator).await?;
                 let id = WorkspaceId::new();
                 sqlx::query(
-                    "INSERT INTO workspaces(id, machine_id, path, path_source, project_id, identity, discovery)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    "INSERT INTO workspaces(id, machine_id, path, path_source, project_id, discovery)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 )
                 .bind(id.to_string())
                 .bind(machine)
                 .bind(root)
                 .bind(source)
                 .bind(project_id.to_string())
-                .bind(&root_identity)
                 .bind(&snapshot)
                 .execute(&mut *tx)
                 .await?;
@@ -313,12 +343,11 @@ impl SqliteSessionDatabase {
     /// 新归属行（或尚无项目的历史惰性行）的项目记录：按 canonical locator 选择/复用。
     ///
     /// 已有归属行不会走到这里——它沿用行上登记的 `project_id`，`git init`、移除
-    /// `.git` 或同路径换文件对象都不改项目。`identity` 只写入 `object_identity` 列
-    /// 作为诊断值，不参与匹配。
+    /// `.git` 或同路径换文件对象都不改项目。项目身份就是 locator（v15 起唯一键为
+    /// `UNIQUE(locator)`），同 locator 多行时取 rowid 最早的那一行。
     async fn observation_project(
         connection: &mut SqliteConnection,
         locator: &str,
-        identity: &str,
     ) -> Result<ProjectId> {
         let existing: Option<(String,)> =
             sqlx::query_as("SELECT id FROM projects WHERE locator = ?1 ORDER BY rowid ASC LIMIT 1")
@@ -329,10 +358,9 @@ impl SqliteSessionDatabase {
             Some((id,)) => Ok(id.parse::<ProjectId>()?),
             None => {
                 let id = ProjectId::new();
-                sqlx::query("INSERT INTO projects (id, locator, object_identity) VALUES (?, ?, ?)")
+                sqlx::query("INSERT INTO projects (id, locator) VALUES (?, ?)")
                     .bind(id.to_string())
                     .bind(locator)
-                    .bind(identity)
                     .execute(&mut *connection)
                     .await?;
                 Ok(id)
@@ -410,11 +438,11 @@ impl SqliteSessionDatabase {
             .bind(workspace.workspace_id.to_string())
             .execute(&mut *tx).await?;
         sqlx::query("INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd,
-            discovery_snapshot, evidence_origin)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'creation_snapshot')")
+            discovery_snapshot)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
             .bind(&meta.id).bind(i64::from(SESSION_BINDING_VERSION)).bind(workspace.project_id.to_string())
             .bind(workspace.workspace_id.to_string()).bind(discovery::path_text(&workspace.relative_cwd)?)
-            .bind(workspace.discovery_snapshot.as_deref())
+            .bind(projected_evidence(workspace.discovery_snapshot.as_deref())?)
             .execute(&mut *tx).await?;
         tx.commit().await?;
         Ok(meta.id)
@@ -495,12 +523,12 @@ impl SqliteSessionDatabase {
             .execute(&mut *tx)
             .await?;
             sqlx::query("INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd,
-                discovery_snapshot, evidence_origin)
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'legacy_last_observation')")
+                discovery_snapshot)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)")
                 .bind(id).bind(i64::from(SESSION_BINDING_VERSION))
                 .bind(workspace.project_id.to_string()).bind(workspace.workspace_id.to_string())
                 .bind(discovery::path_text(&workspace.relative_cwd)?)
-                .bind(workspace.discovery_snapshot.as_deref())
+                .bind(projected_evidence(workspace.discovery_snapshot.as_deref())?)
                 .execute(&mut *tx).await?;
         }
         tx.commit().await?;

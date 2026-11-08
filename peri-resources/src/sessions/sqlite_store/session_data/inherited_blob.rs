@@ -811,8 +811,7 @@ impl SqliteSessionData {
             }
             InheritedCacheLookup::Miss => {}
         }
-        // 缓存 miss 才读派生索引；此时首个 blob 句柄已经释放。
-        let indexed = super::inherited_index::read(connection, id).await?;
+        // 派生索引已退役（v15）：缓存 miss 直接按全列扫描取摘要。
         let probed = Self::inherited_blob_scope(connection, rowid, |reader| {
             let total = reader.total();
             if total == 0 {
@@ -830,14 +829,6 @@ impl SqliteSessionData {
                     return Ok(SummaryProbe::Cached(Arc::new(layout.summary())));
                 }
                 InheritedCacheLookup::Miss => {}
-            }
-            if let Some(indexed) = indexed
-                .as_ref()
-                .filter(|indexed| indexed.validate(id, parent.as_deref(), total))
-            {
-                let summary = Arc::new(indexed.summary());
-                self.store_inherited_facts(id, CachedInheritedFacts::Summary(Arc::clone(&summary)));
-                return Ok(SummaryProbe::Cached(summary));
             }
             match scan_summary(reader) {
                 Ok(summary) => {
@@ -916,8 +907,7 @@ impl SqliteSessionData {
             // summary 不含数组顺序，必须走索引或重新扫描成完整布局。
             InheritedCacheLookup::Summary(_) | InheritedCacheLookup::Miss => {}
         }
-        // 缓存 miss（或只有 summary）才读派生索引；此时首个 blob 句柄已经释放。
-        let indexed = super::inherited_index::read(connection, id).await?;
+        // 派生索引已退役（v15）：缓存 miss 或只有摘要时直接按全列扫描取完整布局。
         let probed = Self::inherited_blob_scope(connection, rowid, |reader| {
             let total = reader.total();
             if total == 0 {
@@ -933,14 +923,6 @@ impl SqliteSessionData {
                 }
                 // summary 不含数组顺序，必须走索引或重新扫描成完整布局。
                 InheritedCacheLookup::Summary(_) | InheritedCacheLookup::Miss => {}
-            }
-            if let Some(indexed) = indexed
-                .as_ref()
-                .filter(|indexed| indexed.validate(id, parent.as_deref(), total))
-            {
-                let layout = Arc::new(indexed.to_layout());
-                self.store_inherited_facts(id, CachedInheritedFacts::Layout(Arc::clone(&layout)));
-                return Ok(LayoutProbe::Cached(layout));
             }
             match scan_layout(reader) {
                 Ok(layout) => {
@@ -962,19 +944,6 @@ impl SqliteSessionData {
             }
         })
         .await?;
-        // legacy 回填：扫描已经付出 O(列总字节) 的代价，这里只把结果落成派生事实；
-        // 只读库不写，索引写入失败也不改变本次读取结果。
-        if let Ok(LayoutProbe::Parsed(layout)) = &probed {
-            if !self.database.is_read_only() {
-                super::inherited_index::backfill_from_layout(
-                    connection,
-                    id,
-                    parent.as_deref(),
-                    layout,
-                )
-                .await;
-            }
-        }
         match probed {
             Ok(LayoutProbe::Absent) => Ok(InheritedFactsRead::Facts {
                 snapshot: None,

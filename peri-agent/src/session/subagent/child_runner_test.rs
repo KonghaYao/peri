@@ -14,9 +14,11 @@ use crate::session::subagent::{
 };
 use crate::session::{FrozenContext, MessageTranscript};
 use crate::tools::BaseTool;
+use peri_acp_types::session_resources::SessionResources;
 use peri_acp_types::tasks::{
     BgTaskKind, BgTaskRegistration, TaskManager as TaskManagerPort, TaskRegistrationTicket,
 };
+use peri_acp_types::thread::ThreadId;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -972,6 +974,78 @@ fn transcript_contains(session: &Session, needle: &str) -> bool {
                     || reminder.as_reminder().metadata.to_string().contains(needle)
             }
         })
+}
+
+/// 子 Agent 结束时不走 ACP `finish_prompt_turn`，占用快照必须由 child runner
+/// 在终态结算前写入 `threads.context_usage_tokens`。
+struct UsageSnapshotLlm;
+
+#[async_trait::async_trait]
+impl ReactLLM for UsageSnapshotLlm {
+    async fn generate_reasoning(
+        &self,
+        _messages: &[crate::messages::BaseMessage],
+        _tools: &[&dyn BaseTool],
+        _streaming: Option<StreamingContext>,
+    ) -> crate::error::AgentResult<Reasoning> {
+        let mut reasoning = Reasoning::with_answer("", "child answer");
+        reasoning.usage = Some(peri_model::TokenUsage::new(2048, 16));
+        Ok(reasoning)
+    }
+}
+
+#[tokio::test]
+async fn child_terminal_persists_context_usage_snapshot() {
+    let manager = Arc::new(TaskManager::new());
+    let child_id = uuid::Uuid::now_v7().to_string();
+    let child = Session::new(
+        Arc::from("/tmp"),
+        FrozenContext::builder().build(),
+        Some(child_id.clone()),
+    );
+    let store = crate::session::test_resources::mock::MockSessionResources::new();
+    child.set_subagent_host(SubagentHost {
+        task_manager: Some(manager),
+        session_resources: Some(store.clone()),
+        ..Default::default()
+    });
+    child.queue().push_sync(QueuedMessage::prompt(
+        MessageSource::UserInput,
+        crate::messages::BaseMessage::human("child work"),
+    ));
+    let built = build_v2_subagent_context(
+        Some(child.clone()),
+        Box::new(UsageSnapshotLlm),
+        Arc::new(MiddlewareChain::new()),
+        Vec::new(),
+        Arc::new(|_| true),
+        None,
+        "/tmp",
+        child.config().cancel_token.as_ref().clone(),
+        None,
+        None,
+        None,
+        None,
+        Some(agent_id_from_child_thread(&child_id)),
+    );
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        run_child_until_terminal(built.context, 10, &child),
+    )
+    .await
+    .expect("child run must terminate");
+    assert!(matches!(outcome, ChildRunOutcome::Settled), "{outcome:?}");
+
+    let meta = store
+        .load_session_meta(&ThreadId::from(child_id))
+        .await
+        .expect("child meta must be readable after the snapshot write");
+    assert_eq!(
+        meta.context_usage_tokens,
+        Some(2048),
+        "child 完成后的真实占用必须已持久化"
+    );
 }
 
 #[path = "child_runner_background_test.rs"]

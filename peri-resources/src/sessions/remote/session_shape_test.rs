@@ -670,7 +670,7 @@ async fn draft_revocation_cleans_environment_without_cascade_and_preserves_commi
             .bind(id).bind(frozen).execute(&mut connection).await.unwrap();
         sqlx::query("INSERT INTO messages(message_id, thread_id, role, content) VALUES (?1, ?1, 'human', '{}')")
             .bind(id).execute(&mut connection).await.unwrap();
-        sqlx::query("INSERT INTO session_bindings(thread_id, schema_version, project_id, workspace_id, relative_cwd, evidence_origin) VALUES (?1, 1, 'project', 'owner', '', 'creation_snapshot')")
+        sqlx::query("INSERT INTO session_bindings(thread_id, schema_version, project_id, workspace_id, relative_cwd, discovery_snapshot) VALUES (?1, 1, 'project', 'owner', '', '{\"root\":\"/home/u/project\"}')")
             .bind(id).execute(&mut connection).await.unwrap();
         let statements = session_sql::revoke_draft_statements(id);
         assert_eq!(statements.len(), 3);
