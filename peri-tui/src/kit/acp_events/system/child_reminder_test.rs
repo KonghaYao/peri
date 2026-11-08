@@ -271,7 +271,7 @@ fn background_child_reminder_uses_its_detail_budget_and_keeps_independent_shell(
         );
     }
     crate::kit::acp_events::subagent::handle_subagent_started(
-        &mut state, "bg-child", "coder", true, None,
+        &mut state, "bg-child", "coder", true, None, None,
     );
     BG_LIVE_DETAIL
         .state()
@@ -326,7 +326,7 @@ fn background_child_reminder_uses_its_detail_budget_and_keeps_independent_shell(
     );
     let shell_before = BG_LIVE_DETAIL.state().read()["independent-shell"].clone();
     crate::kit::acp_events::subagent::handle_subagent_stopped(
-        &mut state, "bg-child", "done", false,
+        &mut state, "bg-child", "done", false, None,
     );
     let child_units = BG_LIVE_DETAIL.state().read()["bg-agent-task"]
         .nested_units

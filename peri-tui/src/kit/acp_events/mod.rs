@@ -4,6 +4,7 @@
 
 // ── Sub-modules ──
 mod agent;
+mod child_dispatch;
 mod compact;
 mod fold;
 mod history_page;
@@ -20,6 +21,11 @@ mod tool;
 mod turn;
 
 // ── Re-exports for external consumers ──
+pub(crate) use self::child_dispatch::dispatch_trusted_structured_for_bridge_with_origin;
+#[cfg(test)]
+pub(crate) use self::child_dispatch::{
+    dispatch_and_notify, dispatch_trusted_structured_for_bridge,
+};
 pub use self::render::handle_plan_update;
 pub(crate) use self::render::push_view_models;
 pub use self::render::push_view_models_for_reset;
@@ -33,6 +39,7 @@ pub use crate::kit::tui_render_unit::{TuiAssistantBubble, TuiRenderUnit, TuiUser
 use crate::kit::acp_types::{AcpEventData, CacheUsageSample, CurrentTurn};
 use crate::kit::atoms::*;
 use crate::kit::tui_render_unit::{TuiNoteLevel, UserAttachment, tui_hash_str};
+use peri_acp_types::event::ChildEventOrigin;
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -632,6 +639,18 @@ pub(crate) fn dispatch_for_bridge(
     state: &mut BridgeState,
     event: &AcpEventData,
 ) -> PublicationIntent {
+    dispatch_for_bridge_with_origin(state, event, None)
+}
+
+/// Dispatch a child event with its producer-issued occurrence. Child ids are
+/// reused by resume, so task routing must match the exact run, not the newest
+/// row for that id.
+pub(crate) fn dispatch_for_bridge_with_origin(
+    state: &mut BridgeState,
+    event: &AcpEventData,
+    child_origin: Option<&ChildEventOrigin>,
+) -> PublicationIntent {
+    let run_order = child_origin.map(|origin| origin.run_order);
     state.publication_intent = PublicationIntent::None;
     // 回放条目区间登记需要「本事件推入了哪个槽位」——在 handler 之前取长度。
     let committed_len_before = state.committed.len();
@@ -660,12 +679,14 @@ pub(crate) fn dispatch_for_bridge(
     }
     match event {
         // ── §4.1 Streaming events ──
-        TextChunk(tc) => return streaming::handle_text_chunk(state, tc),
-        ReasoningChunk(rc) => return streaming::handle_reasoning_chunk(state, rc),
+        TextChunk(tc) => return streaming::handle_text_chunk(state, tc, run_order),
+        ReasoningChunk(rc) => {
+            return streaming::handle_reasoning_chunk(state, rc, run_order);
+        }
 
         // ── §4.1 Tools ──
-        ToolStarted(ts) => tool::handle_tool_started(state, ts),
-        ToolEnded(te) => tool::handle_tool_ended(state, te),
+        ToolStarted(ts) => tool::handle_tool_started_in_run(state, ts, run_order),
+        ToolEnded(te) => tool::handle_tool_ended_in_run(state, te, run_order),
 
         // ── §4.2 Boundary events ──
         PromptStarted => turn::handle_prompt_started(state),
@@ -753,12 +774,13 @@ pub(crate) fn dispatch_for_bridge(
             agent_name,
             *is_background,
             parent_tool_call_id.clone(),
+            child_origin,
         ),
         SubagentStopped {
             agent_id,
             result,
             is_error,
-        } => subagent::handle_subagent_stopped(state, agent_id, result, *is_error),
+        } => subagent::handle_subagent_stopped(state, agent_id, result, *is_error, child_origin),
 
         // ── §4.8 Agent Event Extensions ──
         TurnCommitted {
@@ -957,33 +979,6 @@ pub(crate) fn dispatch_for_bridge(
     } else {
         PublicationIntent::None
     }
-}
-
-pub(crate) fn dispatch_trusted_structured_for_bridge(
-    state: &mut BridgeState,
-    event: AcpEventData,
-) -> PublicationIntent {
-    match event {
-        AcpEventData::SystemReminder {
-            reminder,
-            source_agent_id,
-            ..
-        } => {
-            system::handle_trusted_system_reminder(state, reminder, source_agent_id.as_deref());
-            std::mem::take(&mut state.publication_intent)
-        }
-        other => dispatch_for_bridge(state, &other),
-    }
-}
-
-/// 同步测试/非 bridge 调用的兼容入口；生产 bridge 使用 `dispatch_for_bridge`
-/// 消费 publication intent 并执行合帧。
-#[cfg(test)]
-pub(crate) fn dispatch_and_notify(state: &mut BridgeState, event: &AcpEventData) {
-    if dispatch_for_bridge(state, event) != PublicationIntent::Published {
-        render::push_view_models(state);
-    }
-    crate::kit::bg_task_live::publish_pending_streams();
 }
 
 // ---------------------------------------------------------------------------

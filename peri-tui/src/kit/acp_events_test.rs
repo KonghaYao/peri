@@ -23,6 +23,8 @@ use crate::kit::tui_render_unit::{EntryStatus, FoldKey, FoldState, TuiReasoningB
 mod append_probe_test;
 #[path = "acp_events_test/bg_agent_identity_test.rs"]
 mod bg_agent_identity_test;
+#[path = "acp_events_test/bg_task_child_run_test.rs"]
+mod bg_task_child_run_test;
 #[path = "acp_events_test/bg_task_live_test.rs"]
 mod bg_task_live_test;
 #[path = "acp_events_test/command_feedback_test.rs"]

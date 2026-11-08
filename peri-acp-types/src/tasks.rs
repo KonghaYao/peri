@@ -142,6 +142,30 @@ pub struct TaskSnapshot {
     pub tasks: Vec<TaskRecord>,
 }
 
+impl TaskSnapshot {
+    /// `bg-task-snapshot` 的 wire 投影（唯一事实源）。
+    ///
+    /// 这里不是 `Serialize` 透传：展示/持久化字段不全部上 wire，而 `child_thread_id`
+    /// 是 TUI 关联子事件的控制身份，快照与 Started 增量必须同源携带。
+    pub fn to_wire_value(&self) -> serde_json::Value {
+        serde_json::json!({
+            "revision": self.revision,
+            // 显式来源：当前 TaskManager 快照是活动证据；历史回放必须使用 historical。
+            "source": "live",
+            "tasks": self.tasks.iter().map(|task| serde_json::json!({
+                "task_id": task.task_id,
+                "kind": task.kind,
+                "summary": task.summary,
+                "started_at": task.started_at,
+                "status": task.status,
+                "duration_ms": task.duration_ms,
+                "output_preview": task.output_preview,
+                "child_thread_id": task.child_thread_id,
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
 pub type ExternalCancelFn =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>;
 /// Terminal delivery hook. Delivery is durable and confirmed before the task

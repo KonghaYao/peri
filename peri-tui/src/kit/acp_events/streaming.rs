@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::kit::atoms::BG_AGENT_IDS;
-use crate::kit::bg_task_live::{append_bg_reasoning_chunk, append_bg_text_chunk};
+use crate::kit::bg_task_live::{append_bg_reasoning_chunk_in_run, append_bg_text_chunk_in_run};
 use crate::kit::stream_data::{TuiReasoningChunk, TuiTextChunk};
 
 /// 路由失败的 chunk 是否属于仍在运行的 bg subagent（BG_AGENT_IDS 已注册）。
@@ -24,7 +24,11 @@ fn is_bg_agent_without_group(agent_id: &str) -> bool {
     is_bg
 }
 
-pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) -> PublicationIntent {
+pub(super) fn handle_text_chunk(
+    state: &mut BridgeState,
+    tc: &TuiTextChunk,
+    run_order: Option<u64>,
+) -> PublicationIntent {
     if tc.text.is_empty() {
         return PublicationIntent::None;
     }
@@ -54,7 +58,7 @@ pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) -> P
             .as_deref()
             .is_some_and(|id| BG_AGENT_IDS.state().read().contains(id));
         if is_bg && let Some(agent_id) = tc.agent_id.as_deref() {
-            append_bg_text_chunk(agent_id, tc);
+            append_bg_text_chunk_in_run(agent_id, run_order, tc);
         }
         if !is_bg {
             state.phase = SessionPhase::PromptRunning;
@@ -65,7 +69,7 @@ pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) -> P
         .is_some_and(is_bg_agent_without_group)
     {
         if let Some(agent_id) = tc.agent_id.as_deref() {
-            append_bg_text_chunk(agent_id, tc);
+            append_bg_text_chunk_in_run(agent_id, run_order, tc);
         }
         state.variant = 1;
         super::render::push_acp_state(state);
@@ -91,6 +95,7 @@ pub(super) fn handle_text_chunk(state: &mut BridgeState, tc: &TuiTextChunk) -> P
 pub(super) fn handle_reasoning_chunk(
     state: &mut BridgeState,
     rc: &TuiReasoningChunk,
+    run_order: Option<u64>,
 ) -> PublicationIntent {
     if rc.text.is_empty() {
         return PublicationIntent::None;
@@ -117,7 +122,7 @@ pub(super) fn handle_reasoning_chunk(
             .as_deref()
             .is_some_and(|id| BG_AGENT_IDS.state().read().contains(id));
         if is_bg && let Some(agent_id) = rc.agent_id.as_deref() {
-            append_bg_reasoning_chunk(agent_id, rc);
+            append_bg_reasoning_chunk_in_run(agent_id, run_order, rc);
         }
         if !is_bg {
             state.phase = SessionPhase::PromptRunning;
@@ -128,7 +133,7 @@ pub(super) fn handle_reasoning_chunk(
         .is_some_and(is_bg_agent_without_group)
     {
         if let Some(agent_id) = rc.agent_id.as_deref() {
-            append_bg_reasoning_chunk(agent_id, rc);
+            append_bg_reasoning_chunk_in_run(agent_id, run_order, rc);
         }
         state.variant = 1;
         super::render::push_acp_state(state);

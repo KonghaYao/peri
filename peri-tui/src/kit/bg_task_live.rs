@@ -2,7 +2,7 @@
 
 use crate::kit::acp_types::{ToolCardAccumulator, build_tool_card};
 use crate::kit::atoms::{BG_LIVE_DETAIL, BgLiveDetail, BgLiveStatus};
-use crate::kit::bg_task_identity::task_id_for_agent_id;
+use crate::kit::bg_task_identity::{task_id_for_agent_id, task_id_for_child_run};
 use crate::kit::stream_data::{TuiReasoningChunk, TuiTextChunk, TuiToolEnded, TuiToolStarted};
 use crate::kit::tui_render_unit::{
     EntryStatus, FoldState, TuiAssistantBubble, TuiReasoningBlock, TuiRenderUnit, tui_hash_roll,
@@ -323,8 +323,18 @@ pub(crate) fn publish_pending_streams() {
     preview::enforce(&mut map);
 }
 
-fn append_stream(agent_id: &str, message_id: Option<String>, chunk: &str, reasoning: bool) {
-    let Some(task_id) = task_id_for_agent_id(agent_id) else {
+fn append_stream(
+    agent_id: &str,
+    run_order: Option<u64>,
+    message_id: Option<String>,
+    chunk: &str,
+    reasoning: bool,
+) {
+    let task_id = match run_order {
+        Some(run_order) => task_id_for_child_run(agent_id, run_order),
+        None => task_id_for_agent_id(agent_id),
+    };
+    let Some(task_id) = task_id else {
         return;
     };
     let live = BG_LIVE_DETAIL.state();
@@ -390,11 +400,15 @@ where
     preview::enforce(&mut map);
 }
 
-fn with_live_detail_for_agent<F>(agent_id: &str, f: F)
+fn with_live_detail_for_agent<F>(agent_id: &str, run_order: Option<u64>, f: F)
 where
     F: FnOnce(&str, &mut BgLiveDetail),
 {
-    let Some(task_id) = task_id_for_agent_id(agent_id) else {
+    let task_id = match run_order {
+        Some(run_order) => task_id_for_child_run(agent_id, run_order),
+        None => task_id_for_agent_id(agent_id),
+    };
+    let Some(task_id) = task_id else {
         return;
     };
     let live = BG_LIVE_DETAIL.state();
@@ -587,13 +601,24 @@ pub fn seed_live_from_terminal_snapshot(
     });
 }
 
+#[cfg(test)]
 pub(crate) fn handle_bg_tool_started(
     agent_id: &str,
     ts: &TuiToolStarted,
     previous_todos: Option<&crate::kit::tool_semantics::TodoSnapshot>,
     todo_baseline_unknown: bool,
 ) {
-    with_live_detail_for_agent(agent_id, |_, detail| {
+    handle_bg_tool_started_in_run(agent_id, None, ts, previous_todos, todo_baseline_unknown);
+}
+
+pub(crate) fn handle_bg_tool_started_in_run(
+    agent_id: &str,
+    run_order: Option<u64>,
+    ts: &TuiToolStarted,
+    previous_todos: Option<&crate::kit::tool_semantics::TodoSnapshot>,
+    todo_baseline_unknown: bool,
+) {
+    with_live_detail_for_agent(agent_id, run_order, |_, detail| {
         let raw_input = preview::raw_input(&ts.raw_input, &mut detail.preview_omitted);
         let input_omitted = !ts.raw_input.is_null() && raw_input.is_null();
         let previous_fits = previous_todos.is_none_or(|todos| {
@@ -646,7 +671,11 @@ pub(crate) fn handle_bg_tool_started(
 }
 
 pub fn handle_bg_tool_ended(agent_id: &str, te: &TuiToolEnded) {
-    with_live_detail_for_agent(agent_id, |_, detail| {
+    handle_bg_tool_ended_in_run(agent_id, None, te);
+}
+
+pub fn handle_bg_tool_ended_in_run(agent_id: &str, run_order: Option<u64>, te: &TuiToolEnded) {
+    with_live_detail_for_agent(agent_id, run_order, |_, detail| {
         let Some(t) = detail
             .tool_cards
             .iter_mut()
@@ -666,17 +695,29 @@ pub fn handle_bg_tool_ended(agent_id: &str, te: &TuiToolEnded) {
 }
 
 pub fn append_bg_text_chunk(agent_id: &str, tc: &TuiTextChunk) {
+    append_bg_text_chunk_in_run(agent_id, None, tc);
+}
+
+pub fn append_bg_text_chunk_in_run(agent_id: &str, run_order: Option<u64>, tc: &TuiTextChunk) {
     if tc.text.is_empty() {
         return;
     }
-    append_stream(agent_id, tc.message_id.clone(), &tc.text, false);
+    append_stream(agent_id, run_order, tc.message_id.clone(), &tc.text, false);
 }
 
 pub fn append_bg_reasoning_chunk(agent_id: &str, rc: &TuiReasoningChunk) {
+    append_bg_reasoning_chunk_in_run(agent_id, None, rc);
+}
+
+pub fn append_bg_reasoning_chunk_in_run(
+    agent_id: &str,
+    run_order: Option<u64>,
+    rc: &TuiReasoningChunk,
+) {
     if rc.text.is_empty() {
         return;
     }
-    append_stream(agent_id, rc.message_id.clone(), &rc.text, true);
+    append_stream(agent_id, run_order, rc.message_id.clone(), &rc.text, true);
 }
 
 pub(crate) fn append_bg_system_reminder(
@@ -684,7 +725,7 @@ pub(crate) fn append_bg_system_reminder(
     reminder: crate::kit::tui_render_unit::TuiSystemReminder,
     omitted: bool,
 ) {
-    with_live_detail_for_agent(agent_id, |_, detail| {
+    with_live_detail_for_agent(agent_id, None, |_, detail| {
         detail.preview_omitted |= omitted;
         detail
             .nested_units
@@ -693,7 +734,16 @@ pub(crate) fn append_bg_system_reminder(
 }
 
 pub fn handle_bg_subagent_stopped(agent_id: &str, result: &str, is_error: bool) {
-    with_live_detail_for_agent(agent_id, |_, detail| {
+    handle_bg_subagent_stopped_in_run(agent_id, None, result, is_error);
+}
+
+pub fn handle_bg_subagent_stopped_in_run(
+    agent_id: &str,
+    run_order: Option<u64>,
+    result: &str,
+    is_error: bool,
+) {
+    with_live_detail_for_agent(agent_id, run_order, |_, detail| {
         detail.subagent_result = Some(preview::text(
             result,
             preview::FIELD_BYTES,

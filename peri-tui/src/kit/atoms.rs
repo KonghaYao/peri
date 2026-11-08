@@ -783,6 +783,14 @@ pub struct BgTaskIdentity {
     pub summary: String,
     pub agent_id: Option<String>,
     pub agent_name: Option<String>,
+    /// 绑定到本任务的 child 执行 occurrence（`ChildEventOrigin::run_order`）。
+    ///
+    /// `agent_id`（child_thread_id）会在 resume 时复用；只有 occurrence 能区分
+    /// 「旧运行的 Stop」与「新运行的任务行」。
+    pub run_order: Option<u64>,
+    /// 绑定本行时已观察到的最大 child occurrence。低于等于它的 Stop 属于更早
+    /// 的运行，不能回退认领本行（即使旧任务的明细已被回收）。
+    pub run_floor: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -690,10 +690,12 @@ fn spawn_acp_bridge_inner(
                             }
                             let event = epoch_event.event;
 
-                            let intent = acp_events::dispatch_trusted_structured_for_bridge(
-                                &mut state,
-                                event,
-                            );
+                            let intent =
+                                acp_events::dispatch_trusted_structured_for_bridge_with_origin(
+                                    &mut state,
+                                    event,
+                                    child_origin.as_ref(),
+                                );
                             if started && let Some(origin) = child_origin.as_ref() {
                                 state.current_turn.bind_subagent_execution(&origin.child_thread_id, &origin.execution);
                                 if !same_view {

@@ -6,14 +6,23 @@ use super::*;
 use crate::kit::acp_types::ToolCardAccumulator;
 use crate::kit::atoms::BG_AGENT_IDS;
 use crate::kit::bg_task_identity::{bounded_label, with_bg_display_for_agent};
-use crate::kit::bg_task_live::{handle_bg_tool_ended, handle_bg_tool_started};
+use crate::kit::bg_task_live::{handle_bg_tool_ended_in_run, handle_bg_tool_started_in_run};
 use crate::kit::retained_bytes::{SeenAllocations, retained_unit_bytes};
 use crate::kit::stream_data::{TuiToolEnded, TuiToolStarted};
 use crate::kit::tui_render_unit::{
     EntryStatus, FoldTarget, TuiRenderUnit, TuiToolCard, TuiToolPresentation, fold_for_status,
 };
 
+#[cfg(test)]
 pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) {
+    handle_tool_started_in_run(state, ts, None);
+}
+
+pub(super) fn handle_tool_started_in_run(
+    state: &mut BridgeState,
+    ts: &TuiToolStarted,
+    run_order: Option<u64>,
+) {
     if ts
         .agent_id
         .as_deref()
@@ -36,8 +45,9 @@ pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) 
             with_bg_display_for_agent(agent_id, |entry| {
                 entry.current_tool = Some(bounded_label(&ts.tool_name));
             });
-            handle_bg_tool_started(
+            handle_bg_tool_started_in_run(
                 agent_id,
+                run_order,
                 ts,
                 state.last_successful_todos.as_ref(),
                 state.todo_baseline_unknown(),
@@ -109,7 +119,16 @@ pub(super) fn handle_tool_started(state: &mut BridgeState, ts: &TuiToolStarted) 
     super::render::push_acp_state(state);
 }
 
+#[cfg(test)]
 pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
+    handle_tool_ended_in_run(state, te, None);
+}
+
+pub(super) fn handle_tool_ended_in_run(
+    state: &mut BridgeState,
+    te: &TuiToolEnded,
+    run_order: Option<u64>,
+) {
     if te
         .agent_id
         .as_deref()
@@ -124,7 +143,7 @@ pub(super) fn handle_tool_ended(state: &mut BridgeState, te: &TuiToolEnded) {
                 entry.current_tool = None;
                 entry.tool_count += 1;
             });
-            handle_bg_tool_ended(agent_id, te);
+            handle_bg_tool_ended_in_run(agent_id, run_order, te);
             state.variant = 1;
             // bg 工具事件不触碰 phase（Issue 2026-08-12，同 ToolStarted）。
             state.publish_barrier();

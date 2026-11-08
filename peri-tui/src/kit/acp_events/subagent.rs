@@ -2,8 +2,12 @@
 
 use super::*;
 use crate::kit::atoms::{BG_AGENT_IDS, BG_TASKS};
-use crate::kit::bg_task_identity::{bind_linked_agent_on_subagent_started, task_id_for_agent_id};
-use crate::kit::bg_task_live::{handle_bg_subagent_stopped, init_agent_live_detail};
+use crate::kit::bg_task_identity::{
+    bind_linked_agent_on_subagent_started, bind_task_run, is_latest_child_run,
+    task_id_for_agent_id, task_id_for_child_run,
+};
+use crate::kit::bg_task_live::{handle_bg_subagent_stopped_in_run, init_agent_live_detail};
+use peri_acp_types::event::ChildEventOrigin;
 
 pub(super) fn handle_subagent_started(
     state: &mut BridgeState,
@@ -11,6 +15,7 @@ pub(super) fn handle_subagent_started(
     agent_name: &str,
     is_background: bool,
     parent_tool_call_id: Option<String>,
+    origin: Option<&ChildEventOrigin>,
 ) {
     tracing::info!(
         target: "tui.acp_events",
@@ -40,6 +45,9 @@ pub(super) fn handle_subagent_started(
             bind_linked_agent_on_subagent_started(agent_id, agent_name, instance_id.as_deref())
         {
             init_agent_live_detail(&task_id, agent_id, agent_name, instance_id.as_deref());
+            if let Some(origin) = origin {
+                bind_task_run(&task_id, origin.run_order);
+            }
         }
     }
     state.variant = 1;
@@ -55,6 +63,7 @@ pub(super) fn handle_subagent_stopped(
     agent_id: &str,
     result: &str,
     is_error: bool,
+    origin: Option<&ChildEventOrigin>,
 ) {
     tracing::info!(
         target: "tui.acp_events",
@@ -63,9 +72,19 @@ pub(super) fn handle_subagent_stopped(
         "SubagentStopped: marking SubAgentGroup as done"
     );
     state.current_turn.stop_subagent(agent_id, is_error, result);
-    let task_id = task_id_for_agent_id(agent_id);
-    if BG_AGENT_IDS.state().read().contains(agent_id) {
-        handle_bg_subagent_stopped(agent_id, result, is_error);
+    let task_id = match origin {
+        Some(origin) => task_id_for_child_run(agent_id, origin.run_order),
+        None => task_id_for_agent_id(agent_id),
+    };
+    // A snapshot can bind the child before/without a live Started event; the
+    // task identity alone is enough to settle the exact run.
+    if task_id.is_some() || BG_AGENT_IDS.state().read().contains(agent_id) {
+        handle_bg_subagent_stopped_in_run(
+            agent_id,
+            origin.map(|origin| origin.run_order),
+            result,
+            is_error,
+        );
         if let Some(task_id) = task_id.as_deref() {
             BG_TASKS
                 .state()
@@ -73,8 +92,11 @@ pub(super) fn handle_subagent_stopped(
                 .retain(|task| task.task_id != task_id);
         }
     }
-    // 清理后台 agent_id 注册
-    BG_AGENT_IDS.state().write().remove(agent_id);
+    // A stale Stop must not unregister the child while a newer run is live.
+    let stale_stop = origin.is_some_and(|origin| !is_latest_child_run(agent_id, origin.run_order));
+    if !stale_stop {
+        BG_AGENT_IDS.state().write().remove(agent_id);
+    }
     state.variant = 1;
     // phase 由 SubagentStarted + 流式事件维护，此处不再无条件覆盖
     // （避免 bg agent 的场景 TurnDone/TurnSuspended 后被重新激活）

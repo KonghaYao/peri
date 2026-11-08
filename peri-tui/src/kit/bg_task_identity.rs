@@ -83,8 +83,16 @@ pub(crate) fn bind_registered_child(task_id: &str, child_thread_id: Option<&str>
     let Some(child) = child_thread_id else {
         return;
     };
+    let observed = highest_known_run(child, Some(task_id));
     if let Some(identity) = BG_TASK_IDENTITY.state().write().get_mut(task_id) {
         identity.agent_id = Some(child.to_owned());
+        if let Some(observed) = observed {
+            identity.run_floor = Some(
+                identity
+                    .run_floor
+                    .map_or(observed, |floor| floor.max(observed)),
+            );
+        }
     }
     if let Some(row) = BG_DISPLAY
         .state()
@@ -97,6 +105,104 @@ pub(crate) fn bind_registered_child(task_id: &str, child_thread_id: Option<&str>
     if let Some(detail) = BG_LIVE_DETAIL.state().write().get_mut(task_id) {
         detail.agent_id = Some(child.to_owned());
     }
+}
+
+fn highest_known_run(child: &str, exclude_task: Option<&str>) -> Option<u64> {
+    BG_TASK_IDENTITY
+        .state()
+        .read()
+        .iter()
+        .filter(|(task_id, identity)| {
+            exclude_task != Some(task_id.as_str()) && identity.agent_id.as_deref() == Some(child)
+        })
+        .filter_map(|(_, identity)| {
+            identity
+                .run_order
+                .into_iter()
+                .chain(identity.run_floor)
+                .max()
+        })
+        .max()
+}
+
+/// Bind the producer's execution occurrence to a task row. The child id is
+/// reused by resume, so later child events must match this exact occurrence.
+pub(crate) fn bind_task_run(task_id: &str, run_order: u64) {
+    let identities = BG_TASK_IDENTITY.state();
+    let mut identities = identities.write();
+    let Some(identity) = identities.get_mut(task_id) else {
+        return;
+    };
+    identity.run_order = Some(run_order);
+    let child = identity.agent_id.clone();
+    let Some(child) = child else {
+        return;
+    };
+    // Every other row for this child was created before this occurrence became
+    // known; a Stop at or below it is older than that row's run.
+    for (id, other) in identities.iter_mut() {
+        if id != task_id && other.agent_id.as_deref() == Some(child.as_str()) {
+            other.run_floor = Some(
+                other
+                    .run_floor
+                    .map_or(run_order, |floor| floor.max(run_order)),
+            );
+        }
+    }
+}
+
+/// Resolve the task row owned by a concrete child execution occurrence.
+///
+/// Exact occurrence wins even when the child id was reused. A run newer than
+/// every occurrence bound so far is a start whose Started/snapshot binding was
+/// missed, so the newest row for the child may claim it; an older or equal run
+/// without an exact owner is stale and must never settle a newer task.
+pub(crate) fn task_id_for_child_run(agent_id: &str, run_order: u64) -> Option<String> {
+    let identities = BG_TASK_IDENTITY.state();
+    let identities = identities.read();
+    if let Some(task_id) = identities
+        .iter()
+        .find(|(_, identity)| {
+            identity.agent_id.as_deref() == Some(agent_id) && identity.run_order == Some(run_order)
+        })
+        .map(|(task_id, _)| task_id.clone())
+    {
+        return Some(task_id);
+    }
+    let stale = identities.iter().any(|(_, identity)| {
+        identity.agent_id.as_deref() == Some(agent_id)
+            && (identity.run_order.is_some_and(|known| known >= run_order)
+                || identity.run_floor.is_some_and(|floor| floor >= run_order))
+    });
+    drop(identities);
+    if stale {
+        return None;
+    }
+    newest_display_task_for_child(agent_id)
+}
+
+/// Whether `run_order` is still the newest occurrence known for the child.
+/// A stale Stop must not unregister the child while a newer run is live.
+pub(crate) fn is_latest_child_run(agent_id: &str, run_order: u64) -> bool {
+    BG_TASK_IDENTITY
+        .state()
+        .read()
+        .iter()
+        .filter(|(_, identity)| identity.agent_id.as_deref() == Some(agent_id))
+        .all(|(_, identity)| {
+            identity.run_order.is_none_or(|known| known <= run_order)
+                && identity.run_floor.is_none_or(|floor| floor <= run_order)
+        })
+}
+
+fn newest_display_task_for_child(agent_id: &str) -> Option<String> {
+    BG_DISPLAY
+        .state()
+        .read()
+        .iter()
+        .rev()
+        .find(|entry| entry.linked_agent_id.as_deref() == Some(agent_id))
+        .map(|entry| entry.id.clone())
 }
 
 pub fn resolve_subagent_id_for_display(entry: &BgDisplayEntry) -> Option<String> {

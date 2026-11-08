@@ -319,17 +319,7 @@ pub(crate) fn bind_session_tasks(
 }
 
 pub(super) fn task_snapshot_value(snapshot: peri_acp_types::tasks::TaskSnapshot) -> Value {
-    json!({
-        "revision": snapshot.revision,
-        // 显式来源：当前 TaskManager 快照是活动证据；历史回放必须使用 historical。
-        "source": "live",
-        "tasks": snapshot.tasks.into_iter()
-            .map(|task| json!({
-                "task_id":task.task_id, "kind":task.kind, "summary":task.summary,
-                "started_at":task.started_at, "status":task.status,
-                "duration_ms":task.duration_ms, "output_preview":task.output_preview,
-            })).collect::<Vec<_>>(),
-    })
+    snapshot.to_wire_value()
 }
 
 fn task_change_value(change: TaskChange) -> (&'static str, Value) {
