@@ -256,7 +256,7 @@ async fn test_prompt_hook_wrong_type_returns_allow() {
     let input = make_hook_input();
     let llm_factory: Arc<dyn Fn() -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
         Arc::new(|| unimplemented!());
-    let action = execute_prompt_hook(&hook, &input, &llm_factory).await;
+    let action = execute_prompt_hook(&hook, &input, &llm_factory, None).await;
     assert!(matches!(action, HookAction::Allow));
 }
 
@@ -274,7 +274,7 @@ async fn test_agent_hook_wrong_type_returns_allow() {
     let input = make_hook_input();
     let llm_factory: Arc<dyn Fn() -> Box<dyn ReactLLM + Send + Sync> + Send + Sync> =
         Arc::new(|| unimplemented!());
-    let action = execute_agent_hook(&hook, &input, &llm_factory, "/tmp").await;
+    let action = execute_agent_hook(&hook, &input, &llm_factory, "/tmp", None).await;
     assert!(matches!(action, HookAction::Allow));
 }
 

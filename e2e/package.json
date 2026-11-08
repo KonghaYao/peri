@@ -11,7 +11,13 @@
     "e2e:l1": "node scripts/run-e2e.mjs --tier l1 --no-interactive",
     "e2e:l2": "node scripts/run-e2e.mjs --tier l2 --no-interactive",
     "e2e:release": "node scripts/run-e2e.mjs --tier release --no-interactive",
-    "e2e:release:strict": "node scripts/run-e2e.mjs --tier release --no-interactive --require-clean-first-pass"
+    "e2e:release:strict": "node scripts/run-e2e.mjs --tier release --no-interactive --require-clean-first-pass",
+    "e2e:replay:unit": "node --test llm-replay/*.test.mjs",
+    "e2e:replay": "node scripts/run-replay-v2.mjs",
+    "e2e:replay:record": "node scripts/run-replay-v2.mjs --record",
+    "e2e:replay:smoke": "vitest run --config vitest.replay.config.ts",
+    "llm:replay": "node llm-replay/cli.mjs",
+    "e2e:replay:check": "tsc --noEmit --project tsconfig.replay.json"
   },
   "dependencies": {
     "dotenv": "^17.4.2",
@@ -20,6 +26,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
+    "@xterm/headless": "6.0.0",
     "tsx": "^4.23.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"

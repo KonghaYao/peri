@@ -48,6 +48,7 @@ use crate::session::executor::FrozenSessionData;
 pub(crate) fn build_model_factory(
     provider: &Arc<RwLock<LlmProvider>>,
     peri_config: &RwLock<PeriConfig>,
+    transport_route: Option<peri_acp_types::model::ModelTransportRoute>,
 ) -> WorkflowModelFactory {
     let provider = Arc::clone(provider);
     let peri_config = Arc::new(peri_config.read().clone());
@@ -76,7 +77,11 @@ pub(crate) fn build_model_factory(
                 .unwrap_or(effective);
             let model_name = effective.model_name().to_string();
             WorkflowModel {
-                model: Arc::from(effective.with_retry_observer(Some(observer)).into_model()),
+                model: Arc::from(
+                    effective
+                        .with_retry_observer(Some(observer))
+                        .into_model_with_transport_route(transport_route.clone()),
+                ),
                 model_name,
                 tier,
             }
@@ -242,6 +247,7 @@ pub(crate) fn create_session_workflow_chain(
     agent_catalog: Arc<dyn AgentCatalogPort>,
     mcp_skill_registry: Option<Arc<McpSkillRegistry>>,
     session_resources: Arc<dyn peri_acp_types::session_resources::SessionResources>,
+    transport_route: Option<peri_acp_types::model::ModelTransportRoute>,
 ) -> SessionWorkflowChain {
     let prepared =
         crate::session::prepare_derived_environment(frozen_data, cwd, agent_catalog.as_ref());
@@ -299,7 +305,7 @@ pub(crate) fn create_session_workflow_chain(
             workflow_capabilities,
             frozen_data.runtime_env().cloned(),
         ),
-        model_factory: build_model_factory(&provider, peri_config),
+        model_factory: build_model_factory(&provider, peri_config, transport_route),
         middleware_factory: Arc::clone(&middleware_factory),
         system_prompt_fallback: build_workflow_system_prompt_fallback(
             agent_catalog,
@@ -349,7 +355,7 @@ mod tests {
             retry_observer: None,
         }));
         let config = RwLock::new(PeriConfig::default());
-        let factory = build_model_factory(&provider, &config);
+        let factory = build_model_factory(&provider, &config, None);
         let built = factory(Some("workflow-model"), None, Arc::new(|_| {}));
 
         assert_eq!(built.model_name, "workflow-model");

@@ -20,6 +20,8 @@
 | --- | --- | --- |
 | `MODEL_PROVIDER` | 与 `MODEL_TYPE` 同时设置；值为 settings 中精确匹配的 provider ID，选中该 provider 的凭据与 endpoint。只设置其中一个或 ID 无效时模型配置不可用。 | `peri-config/src/provider.rs` |
 | `MODEL_TYPE` | 与 `MODEL_PROVIDER` 同时设置；值为 `fable`、`opus`、`sonnet` 或 `haiku` 档位，从所选 provider 的 models 映射选模型（`fable` 映射缺失时沿用该 provider 的 `opus`）；该档位无模型时配置不可用。未设置这一对时沿用 active profile。 | 同上 |
+| `PERI_MODEL_TRANSPORT_PROXY` | 与 `PERI_REPLAY_RUN` 同时设置；将模型 HTTP 传输显式路由到指定 HTTP(S) origin，仅允许根路径，不允许 URL 凭据、query 或 fragment。保留原 provider endpoint、model、profile、credential identity、请求体与认证流程。缺省不改传输；缺一、空值或非法配置使 TUI/print/stdio ACP 启动失败，不回落直连。 | `peri-acp/src/provider/transport_route.rs`；TUI/print/stdio 部署入口捕获后随 host 注入模型工厂 |
+| `PERI_REPLAY_RUN` | 显式录放运行的关联标识，与代理地址配对；非空白且最多 256 bytes。它不决定代理的 record/replay 模式，也不绕过认证。回放测试须使用隔离配置和明确的合成凭据。会话创建、恢复与模型切换继承所属 host 的路由值，不在执行期重读环境。 | 同上 |
 | `DISABLE_COMPACT` | **存在即生效**：关闭自动 compact，且把 micro compact 阈值设为 `1.0`；`0` 也会触发。 | `peri-acp-types/src/compact.rs` |
 | `DISABLE_AUTO_COMPACT` | **存在即生效**：关闭自动 compact；`0` 也会触发。 | `peri-acp-types/src/compact.rs` |
 | `COMPACT_THRESHOLD` | 覆盖自动 compact 阈值；只接受 `0.0` 到 `1.0` 的有限可解析数字，非法值保留配置值。 | `peri-acp-types/src/compact.rs` |

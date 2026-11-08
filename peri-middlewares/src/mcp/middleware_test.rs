@@ -133,6 +133,82 @@ fn test_overview_mixed_statuses() {
     assert!(text.contains("- legacy (disabled)"), "disabled 行: {text}");
     assert!(text.contains("tool search"), "应提示 tool search 用法");
     assert!(!text.contains("resources"), "概览不含资源信息: {text}");
+    assert_eq!(
+        text.lines().skip(1).take(3).collect::<Vec<_>>(),
+        [
+            "- chrome (failed: transport closed)",
+            "- github (connected, 1 tools)",
+            "- legacy (disabled)",
+        ],
+    );
+}
+
+#[test]
+fn prompt_server_sets_have_stable_order_without_reordering_server_resources() {
+    let canonical_names = [
+        "artifact",
+        "cron",
+        "monitor",
+        "web",
+        "workflow",
+        "workspace",
+    ];
+    let expected_resources = canonical_names
+        .iter()
+        .map(|name| {
+            format!("- server \"{name}\": fixture://{name}/z, fixture://{name}/a (2 resources)")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let expected_overview = format!(
+        "MCP: 6 connected, 0 failed, 0 disabled\n{}\n\n{MCP_TOOL_USAGE_HINT}",
+        canonical_names
+            .iter()
+            .map(|name| format!("- {name} (connected, 1 tools)"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    for insertion_order in [
+        [
+            "workflow",
+            "workspace",
+            "web",
+            "monitor",
+            "artifact",
+            "cron",
+        ],
+        [
+            "cron",
+            "artifact",
+            "monitor",
+            "web",
+            "workspace",
+            "workflow",
+        ],
+    ] {
+        let (_mcp_owner, pool) = owned_discovery_pool();
+        for name in insertion_order {
+            let mut handle = make_connected_handle(name, 1);
+            Arc::get_mut(&mut handle).unwrap().resources = ["z", "a"]
+                .iter()
+                .map(|suffix| {
+                    rmcp::model::Resource::new(format!("fixture://{name}/{suffix}"), *suffix)
+                })
+                .collect();
+            pool.clients.write().insert(name.into(), handle);
+        }
+        let tool = McpResourceTool::new(Arc::clone(&pool), Arc::new(McpSkillRegistry::new()));
+        assert_eq!(
+            tool.description(),
+            format!(
+                "Read a resource from an MCP server. Available resources:\n{expected_resources}"
+            ),
+        );
+        assert_eq!(
+            McpMiddleware::new(pool).overview_text().unwrap(),
+            expected_overview
+        );
+    }
 }
 
 // ─── record_status_change：状态变化统一出口 ──────────────────────────────────

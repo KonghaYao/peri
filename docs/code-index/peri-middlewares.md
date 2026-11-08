@@ -328,3 +328,5 @@ CI 回归：`assembly_once_scope_test.rs` 用原生 shell 与 UTF-8 日志验证
 - 发现与加载：`{{available_agents}}` 经 `AgentCatalogPort::catalog`（`host_ports::AgentCatalogProvider` 绑定同一 registry）；定义加载（`subagent/tool/definitions.rs`）与 workflow `resolve_agent_definition_via_registry` 统一走 registry；project 根顺序为 `.claude/agents` → `{cwd}/agents`，同一来源内同名先到先得。
 - 校验与授权：workflow 面拒绝 `mcp__*` 远端 id；远端 agent 的 `skills` 清空，声明不构成隐式授权；本地名按契约段校验并拒绝 `mcp__` 前缀；symlink 定义不可发现。
 - 项目指令：`peri-instruction://workspace/{main|local}`，P4 读取后冻结构建 `FrozenInstructions`；`AgentsMdMiddleware` 是纯 adapter（无 `std::fs`），excludes 由 provider 输入 `instruction_excludes`。
+
+模型录放的确定性投影：`src/mcp/client/queries.rs::resource_summary` 与 `src/mcp/middleware.rs::overview_text` 仅按 server name 排列无序集合；不改变每个 server 的资源定义、工具定义及状态事件顺序。回归：`prompt_server_sets_have_stable_order_without_reordering_server_resources`。

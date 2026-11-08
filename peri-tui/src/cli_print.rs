@@ -99,6 +99,7 @@ pub async fn run_print(
     }
 
     let _telemetry = peri_acp::telemetry::init_tracing("peri-print");
+    let model_transport_route = peri_acp::provider::transport_route::from_environment()?;
 
     // `--max-turns` 是唯一例外：外部评测 harness 固定传入该参数，拒绝会让整条任务
     // 在启动前失败。这里接受参数但不实现限制（语义迭代预算另立），只在日志中标记
@@ -175,7 +176,7 @@ pub async fn run_print(
     let (session_resources, session_store_shutdown) = resources.into_parts();
 
     // ── ACP host 装配（与 TUI 同源，见 peri_acp::host::assemble）──
-    let host_config = assemble_server_config(HostAssemblyInput {
+    let mut host_config = assemble_server_config(HostAssemblyInput {
         provider: provider.clone(),
         peri_config: Arc::new(parking_lot::RwLock::new(peri_config)),
         config_source: config_source.clone(),
@@ -206,6 +207,7 @@ pub async fn run_print(
         session_mcp_servers: None,
     })
     .await;
+    host_config.model_transport_route = model_transport_route;
     let (client_transport, server_transport) = mpsc_transport_pair();
     let (acp_client, notification_tx, mut notification_rx) = AcpTuiClient::new(client_transport);
     let server_transport = Arc::new(server_transport);

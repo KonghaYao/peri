@@ -126,6 +126,16 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
     };
 
     // 阶段 4: 手动 compact 必须绑定会话资源门面，保证 Full lifecycle 可原子提交。
+    let scoped_model = crate::agent::model_call::ScopedModel::new(
+        auxiliary_model.as_ref(),
+        Some(peri_model::ModelCallContext {
+            owner: session_id.clone(),
+            execution: peri_acp_types::identity::AttemptId::new().to_string(),
+            call: "compact-command".into(),
+            purpose: "compact".into(),
+            parent: None,
+        }),
+    );
     let (session_resources, thread_id) = match (session_resources, thread_id) {
         (Some(store), Some(thread_id)) => (store, thread_id),
         _ => {
@@ -356,7 +366,7 @@ pub async fn run_pipeline(ctx: CommandContext) -> PipelineOutcome {
     let mut consecutive_failures = 0u32;
     let compact_result = match run_v2_compact_with_cancel(
         &mut transcript,
-        auxiliary_model.as_ref(),
+        &scoped_model,
         &compact_config,
         &cwd,
         &cancel_token,

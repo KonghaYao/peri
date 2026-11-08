@@ -12,6 +12,7 @@ pub mod events_v2;
 #[doc(hidden)]
 pub mod langfuse_bridge;
 pub mod model_bridge;
+pub mod model_call;
 pub mod react;
 pub mod session;
 pub mod stages;

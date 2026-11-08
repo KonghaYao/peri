@@ -41,6 +41,7 @@ pub async fn build_app_and_acp(
     opts: &TuiLaunchOptions,
     _panic_notify_rx: Option<mpsc::UnboundedReceiver<String>>,
 ) -> Result<(App, Option<(AcpTuiClient, mpsc::Receiver<AcpNotification>)>)> {
+    let model_transport_route = peri_acp::provider::transport_route::from_environment()?;
     let mut app = App::new(opts.session_store.clone()).await?;
 
     // (I17-D) panic_notify_rx 已退役——ServiceRegistry.panic_notify_rx 字段删除，
@@ -131,7 +132,7 @@ pub async fn build_app_and_acp(
     let acp_client = if needs_setup {
         None
     } else {
-        Some(attach_acp(&mut app).await?)
+        Some(attach_acp_with_transport_route(&mut app, model_transport_route).await?)
     };
 
     Ok((app, acp_client))
@@ -146,6 +147,14 @@ pub async fn build_app_and_acp(
 /// empty; an already attached deployment is rejected to avoid losing the
 /// notification receiver owned by the original attachment.
 pub async fn attach_acp(app: &mut App) -> Result<(AcpTuiClient, mpsc::Receiver<AcpNotification>)> {
+    let model_transport_route = peri_acp::provider::transport_route::from_environment()?;
+    attach_acp_with_transport_route(app, model_transport_route).await
+}
+
+async fn attach_acp_with_transport_route(
+    app: &mut App,
+    model_transport_route: Option<peri_acp::provider::transport_route::ModelTransportRoute>,
+) -> Result<(AcpTuiClient, mpsc::Receiver<AcpNotification>)> {
     if app.acp_client.is_some() || app.acp_deployment.is_some() {
         anyhow::bail!("ACP deployment is already attached to this App");
     }
@@ -165,7 +174,7 @@ pub async fn attach_acp(app: &mut App) -> Result<(AcpTuiClient, mpsc::Receiver<A
         };
 
         if let Some(provider) = provider {
-            let host_config = peri_acp::host::assemble::assemble_server_config(
+            let mut host_config = peri_acp::host::assemble::assemble_server_config(
                 peri_acp::host::assemble::HostAssemblyInput {
                     provider: provider.clone(),
                     peri_config: app.services.peri_config.clone(),
@@ -206,6 +215,7 @@ pub async fn attach_acp(app: &mut App) -> Result<(AcpTuiClient, mpsc::Receiver<A
                 },
             )
             .await;
+            host_config.model_transport_route = model_transport_route;
 
             // (I17-D) app.services.acp_session_manager 字段已退役——
             // 该句柄此前仅由 ServiceRegistry 持有但无任何消费者读取。

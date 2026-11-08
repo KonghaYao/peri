@@ -7,9 +7,11 @@
 #[cfg(all(target_os = "emscripten", feature = "cloudflare"))]
 mod cloudflare;
 pub(crate) mod http;
+mod route;
 pub(crate) mod sse;
 
 pub(crate) use http::{HttpBody, HttpRequest, HttpResponse, HttpTransport, ReqwestTransport};
+pub(crate) use route::routed_transport;
 pub(crate) use sse::{SseEvent, SseParser};
 
 #[cfg(test)]
@@ -19,3 +21,7 @@ mod http_test;
 #[cfg(test)]
 #[path = "sse_test.rs"]
 mod sse_test;
+
+#[cfg(test)]
+#[path = "route_test.rs"]
+mod route_test;

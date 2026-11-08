@@ -266,11 +266,23 @@ pub struct StreamingContext {
     pub agent_id: AgentId,
     /// 取消令牌：bridge 将其传入底层 Model stream。
     pub cancel: CancellationToken,
+    /// Immutable identity of this logical request; transport retries preserve it.
+    pub call_context: Option<peri_model::ModelCallContext>,
 }
 
 /// ReAct LLM trait
 #[async_trait::async_trait]
 pub trait ReactLLM: Send + Sync {
+    /// Bind one logical call on a newly created, exclusively owned bridge.
+    fn set_call_context(
+        &mut self,
+        _context: peri_model::ModelCallContext,
+    ) -> crate::error::AgentResult<()> {
+        Err(crate::error::AgentError::LlmError(
+            "explicit model call identity is unsupported".into(),
+        ))
+    }
+
     fn prepare_reasoning(
         &self,
         _messages: &[BaseMessage],
@@ -360,6 +372,13 @@ pub trait ReactLLM: Send + Sync {
 /// Blanket impl：允许将 Box<dyn ReactLLM + Send + Sync> 直接用于 v2 stages
 #[async_trait::async_trait]
 impl ReactLLM for Box<dyn ReactLLM + Send + Sync> {
+    fn set_call_context(
+        &mut self,
+        context: peri_model::ModelCallContext,
+    ) -> crate::error::AgentResult<()> {
+        (**self).set_call_context(context)
+    }
+
     fn prepare_reasoning(
         &self,
         messages: &[BaseMessage],

@@ -14,6 +14,7 @@ struct MockClassifyModel {
     response: std::sync::Mutex<String>,
     call_count: AtomicUsize,
     should_fail: std::sync::Mutex<bool>,
+    contexts: Arc<std::sync::Mutex<Vec<Option<peri_model::ModelCallContext>>>>,
 }
 
 impl MockClassifyModel {
@@ -22,6 +23,7 @@ impl MockClassifyModel {
             response: std::sync::Mutex::new(response.to_string()),
             call_count: AtomicUsize::new(0),
             should_fail: std::sync::Mutex::new(false),
+            contexts: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -56,9 +58,10 @@ impl Model for MockClassifyModel {
 
     async fn complete(
         &self,
-        _request: ModelRequest,
+        request: ModelRequest,
         _cancellation: CancellationToken,
     ) -> ModelResult<ModelResponse> {
+        self.contexts.lock().unwrap().push(request.call_context);
         if *self.should_fail.lock().unwrap() {
             return Err(ModelError::protocol(ProtocolErrorKind::Provider));
         }
@@ -70,6 +73,35 @@ impl Model for MockClassifyModel {
             None,
         )?)
     }
+}
+
+#[tokio::test]
+async fn shared_classifier_captures_each_approval_context_before_model_lock() {
+    let model = MockClassifyModel::new("ALLOW");
+    let captured = Arc::clone(&model.contexts);
+    let classifier = LlmAutoClassifier::with_cache_ttl(
+        Arc::new(AsyncMutex::new(Box::new(model))),
+        Duration::ZERO,
+    );
+    let context = |owner: &str| peri_model::ModelCallContext {
+        owner: owner.into(),
+        execution: format!("{owner}-execution"),
+        call: "auto-classify:1:tool-id".into(),
+        purpose: "auto-classify".into(),
+        parent: None,
+    };
+    let first = context("session-a");
+    let second = context("session-b");
+    let input = serde_json::json!({"command": "same command"});
+    let (a, b) = tokio::join!(
+        classifier.classify_with_context("Shell", &input, Some(first.clone())),
+        classifier.classify_with_context("Shell", &input, Some(second.clone())),
+    );
+    assert_eq!((a, b), (Classification::Allow, Classification::Allow));
+    let contexts = captured.lock().unwrap();
+    assert_eq!(contexts.len(), 2);
+    assert!(contexts.contains(&Some(first)));
+    assert!(contexts.contains(&Some(second)));
 }
 
 #[test]

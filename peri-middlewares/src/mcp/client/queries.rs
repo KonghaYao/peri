@@ -57,10 +57,15 @@ impl McpClientPool {
             .any(|c| matches!(c.status, ClientStatus::Connected) && !c.resources.is_empty())
     }
     pub fn resource_summary(&self) -> String {
-        self.clients
-            .read()
+        let clients = self.clients.read();
+        let mut resource_clients: Vec<_> = clients
             .values()
             .filter(|c| matches!(c.status, ClientStatus::Connected) && !c.resources.is_empty())
+            .collect();
+        // Server membership has no ordering; prompt text must not inherit HashMap iteration.
+        resource_clients.sort_by(|left, right| left.name.cmp(&right.name));
+        resource_clients
+            .into_iter()
             .map(|c| {
                 format!(
                     "- server \"{}\": {} ({} resources)",

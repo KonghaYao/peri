@@ -78,6 +78,7 @@ pub(super) fn create_session_workflow_chain(
         // （会话已登记时取到；未登记/print 模式为 None → 技能工具为空面）。
         cfg.session_manager.mcp_skill_registry_for(session_id),
         cfg.session_resources.clone(),
+        cfg.model_transport_route.clone(),
     )
 }
 

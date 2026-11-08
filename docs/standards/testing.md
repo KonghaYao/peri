@@ -343,11 +343,28 @@ Rust 单测与 E2E 分离：**E2E 命令在本文件维护**，不要写逐文�
 在 `e2e/` 目录：
 
 ```bash
+npm run e2e:replay:unit     # 本地录放代理与动态绑定契约
+npm run e2e:replay:check    # 录放 runner 与业务场景类型检查
+npm run e2e:replay         # 持久 fixture，只重放；真实 PTY/ACP/Agent/工具
+npm run e2e:replay:record  # 显式更新本地合成模型 fixture，不能用于 CI
 npm run e2e:l0              # PR 冒烟
 npm run e2e:l1              # 合并前（panels + tool-cards + smoke）
 npm run e2e:release         # 发版全量（含首轮 flake 预算）
 npm run e2e:release:strict  # 发版且不容忍首轮 flake
 ```
+
+录放业务场景以 `e2e/fixtures/replay-v2/README.md` 的目录为准。默认 runner 不启动录制上游、
+不生成缺失 cassette、不回退在线模型；`CI` 环境拒绝 record 模式。fixture 包含哈希校验的
+配置/工作文件 seed、封存的原始模型 HTTP cassette、显式动态绑定和完整工具参数派生计划。
+每次运行复制 seed 到新目录，再通过真实 ACP 离线新建会话；这段 preparation 单独计时。
+seed 不保存会话数据库，不通过改数据库中的 cwd 实现迁移。历史恢复场景必须在 case 内跨真实进程完成。
+
+`configure` 只生成录制 seed；默认配置源、`configure.toString()`、可选 `configVersion` 的签名变化
+要求显式重录。配置函数的闭包值或外部输入变化必须同步修改 `configVersion`。
+不得在 replay 自动补签名或更新预期。record 通过后删除录制的 HOME/work，防止新目录重放意外依赖旧世界。
+每场景在 `e2e/results/replay-v2/<invocation>/<id>/` 保存结构化报告、原始 PTY 输出、可见屏幕、
+真实请求和最终工作文件；报告区分 preparation、proxy 启动、驱动、收尾和总时延。
+屏幕断言与文件/ACP 终态联合验收，不使用在线 LLM judge。
 
 单文件调试：`npm run e2e -- --file tests/<path>.test.ts --serial --retry 0`
 

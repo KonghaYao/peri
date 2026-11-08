@@ -115,6 +115,7 @@ fn start_pump(sink: Arc<dyn EventSink>) -> (EventTx, PumpHandle) {
 /// 构造无失败、`ok` 指定的执行结果。
 fn exec_outcome(ok: bool) -> ExecOutcome {
     ExecOutcome {
+        execution_binding: None,
         ok,
         stop_reason: PromptStopReason::EndTurn,
         failure: None,
@@ -163,17 +164,25 @@ async fn completed_pump_keeps_success_result() {
     sink.entered.notified().await;
     sink.release.notify_one();
 
+    let binding = crate::session::turn::TurnContext::new(
+        Arc::from("/tmp"),
+        Arc::new(tokio_util::sync::CancellationToken::new()),
+    )
+    .execution_binding();
+    let mut outcome = exec_outcome(true);
+    outcome.execution_binding = Some(binding.clone());
     let result = collect_result(CollectRequest {
         event_tx: &event_tx,
         pump_handle: pump,
         session_id: "test-session",
-        exec_outcome: exec_outcome(true),
+        exec_outcome: outcome,
         pending_tasks: 0,
     })
     .await;
 
     assert!(result.ok, "正常完成的泵不得改变成功终态");
     assert!(result.failure.is_none());
+    assert_eq!(result.execution_binding, Some(binding));
     assert_eq!(sink.done_count(), 1, "正常路径必须送达 done");
 }
 

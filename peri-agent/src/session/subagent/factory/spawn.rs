@@ -319,7 +319,7 @@ pub(super) async fn spawn_subagent_impl(
         &frozen_skill_summary,
         &frozen_date,
     );
-    let (session, v2_ctx) = build_subagent_session_v2(
+    let (session, mut v2_ctx) = build_subagent_session_v2(
         cwd.clone(),
         frozen,
         cancel_token.clone(),
@@ -349,6 +349,9 @@ pub(super) async fn spawn_subagent_impl(
         true,
     )
     .await?;
+    v2_ctx.context.session.model_parent =
+        crate::agent::model_call::capture_tool_parent(parent_tool_call_id.as_deref())
+            .filter(|parent| Some(parent.owner.as_str()) == parent_thread_id.as_deref());
 
     // 父上下文已作为只读 ancestor 装载；不可用原 ID append 到 child messages。
     //

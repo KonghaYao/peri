@@ -148,7 +148,6 @@ pub(crate) use continuation::{
     run_continuation_scheduler, run_cron_continuation_scheduler, CronContinuationContext,
 };
 pub(crate) use notify::{extract_session_id, handle_notification, send_session_info_update};
-pub(crate) use prompt::run_prompt;
 pub(crate) use prompt_dispatch::{dispatch_prompt_turn, PromptOrigin};
 pub(crate) use requests::handle_request_for_connection;
 
@@ -350,6 +349,8 @@ pub struct AcpServerConfig {
     pub(crate) host_task_spawner: task_scope::HostTaskSpawner,
     pub(crate) mcp_task_owner: Option<Box<dyn McpTaskOwnerPort>>,
     pub provider: Arc<parking_lot::RwLock<LlmProvider>>,
+    /// 部署创建时捕获；会话重建与模型切换继续使用同一显式传输边界。
+    pub model_transport_route: Option<peri_acp_types::model::ModelTransportRoute>,
     pub peri_config: Arc<parking_lot::RwLock<PeriConfig>>,
     pub permission_mode: Arc<SharedPermissionMode>,
     pub cron_scheduler: Option<Arc<dyn CronSchedulerPort>>,

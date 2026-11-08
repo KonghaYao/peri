@@ -1,4 +1,12 @@
-use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use futures::StreamExt;
 use rand::RngExt;
@@ -253,7 +261,21 @@ where
 }
 
 type AttemptFuture = Pin<Box<dyn Future<Output = ModelResult<ModelStream>> + Send>>;
-pub(crate) type StreamAttempt = Arc<dyn Fn(CancellationToken) -> AttemptFuture + Send + Sync>;
+
+/// 认证准备失败也会消耗 retry 预算，但只有实际进入 transport 才分配发送序号。
+#[derive(Clone, Default)]
+pub(crate) struct AttemptContext {
+    sends: Arc<AtomicU32>,
+}
+
+impl AttemptContext {
+    pub(crate) fn next_wire_attempt(&self) -> u32 {
+        self.sends.fetch_add(1, Ordering::Relaxed) + 1
+    }
+}
+
+pub(crate) type StreamAttempt =
+    Arc<dyn Fn(CancellationToken, AttemptContext) -> AttemptFuture + Send + Sync>;
 
 const EVENT_CHANNEL_CAPACITY: usize = 16;
 
@@ -284,6 +306,7 @@ async fn run_retrying_stream(
     attempt: StreamAttempt,
     sender: tokio::sync::mpsc::Sender<ModelResult<ModelStreamEvent>>,
 ) {
+    let attempts = AttemptContext::default();
     for attempt_number in 1..=config.max_attempts() {
         if cancellation.is_cancelled() {
             return;
@@ -291,7 +314,7 @@ async fn run_retrying_stream(
         let mut stream = tokio::select! {
             biased;
             _ = cancellation.cancelled() => return,
-            result = attempt(cancellation.clone()) => match result {
+            result = attempt(cancellation.clone(), attempts.clone()) => match result {
                 Ok(stream) => stream,
                 Err(error) => {
                     if !retry_or_finish(&config, &cancellation, observer.as_ref(), &sender, attempt_number, error).await {

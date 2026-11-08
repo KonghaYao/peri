@@ -239,6 +239,7 @@ pub async fn execute_prompt_hook(
     hook: &HookType,
     input: &HookInput,
     llm_factory: &Arc<dyn Fn() -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
+    call_context: Option<peri_model::ModelCallContext>,
 ) -> HookAction {
     let (prompt_template, timeout_secs) = match hook {
         HookType::Prompt {
@@ -262,7 +263,10 @@ pub async fn execute_prompt_hook(
     let prompt = prompt.replace("${ARGUMENTS}", &input_json);
 
     let result = peri_time::timeout(Duration::from_secs(timeout_secs), async {
-        let llm = llm_factory();
+        let mut llm = llm_factory();
+        if let Some(context) = call_context {
+            llm.set_call_context(context)?;
+        }
         // Build a minimal message list with just the prompt as a system message
         let messages = vec![BaseMessage::system(prompt.clone())];
         let reasoning = llm.generate_reasoning(&messages, &[], None).await?;
@@ -404,6 +408,7 @@ pub async fn execute_agent_hook(
     input: &HookInput,
     llm_factory: &Arc<dyn Fn() -> Box<dyn ReactLLM + Send + Sync> + Send + Sync>,
     cwd: &str,
+    call_context: Option<peri_model::ModelCallContext>,
 ) -> HookAction {
     let (prompt_template, timeout_secs) = match hook {
         HookType::Agent {
@@ -429,7 +434,13 @@ pub async fn execute_agent_hook(
         BaseMessage::human(input_json),
     ];
 
-    let llm = llm_factory();
+    let mut llm = llm_factory();
+    if let Some(context) = call_context {
+        if let Err(error) = llm.set_call_context(context) {
+            tracing::warn!(%error, "Agent hook call identity could not be bound");
+            return HookAction::Allow;
+        }
+    }
     let _ = cwd; // cwd 保留签名兼容；当前实现未使用（v1 亦仅用于 AgentState::new）
 
     tracing::debug!(

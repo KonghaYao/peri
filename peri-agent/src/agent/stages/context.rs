@@ -16,6 +16,8 @@ pub struct SessionHandle {
     pub agent_id: AgentId,
     /// metrics/tracing 用键值对（不作为 middleware hook 的隐式共享协议）
     pub session_context: Arc<RwLock<HashMap<String, String>>>,
+    /// Parent model/tool invocation captured before a child starts or resumes.
+    pub(crate) model_parent: Option<peri_model::ModelCallParent>,
 }
 
 /// LLM 调用 + 工具执行运行时服务
@@ -48,6 +50,7 @@ pub struct CompactContext {
     pub consecutive_failures: Arc<AtomicU32>,
     /// Compact 连续失败计数（run_compact 内部递增/重置，仅用于 Compact 降级跳过决策）
     pub compact_consecutive_failures: Arc<AtomicU32>,
+    pub(crate) model_operations: Arc<AtomicU32>,
     pub(crate) exposure:
         Arc<parking_lot::Mutex<crate::agent::compact_v2::exposure::ExposureLedger>>,
     pub(crate) budget_recovery: Arc<parking_lot::Mutex<compact_progress::CompactBudgetRecovery>>,
@@ -99,6 +102,20 @@ impl StageContext {
             .cloned()
     }
 
+    pub(crate) fn model_call_context(
+        &self,
+        purpose: &str,
+        call: String,
+    ) -> Option<peri_model::ModelCallContext> {
+        Some(peri_model::ModelCallContext {
+            owner: self.project_session_id()?,
+            execution: self.session.turn.execution_binding().attempt_id.to_string(),
+            call,
+            purpose: purpose.to_owned(),
+            parent: self.session.model_parent.clone(),
+        })
+    }
+
     /// 测试最小上下文：仅传会话实体，运行时依赖按测试行为填充。
     ///
     /// **注意**：此构造函数仅用于单元测试。生产代码请用 `StageContextBuilder`。
@@ -130,6 +147,7 @@ impl StageContext {
                 ),
                 agent_id: AgentId::new(),
                 session_context: sctx,
+                model_parent: None,
             },
             runtime: RuntimeServices {
                 llm: Arc::new(NullReactLLM),
@@ -149,6 +167,7 @@ impl StageContext {
                 token_tracker: ttracker,
                 consecutive_failures: tool_fail,
                 compact_consecutive_failures: compact_fail,
+                model_operations: Arc::new(AtomicU32::new(0)),
                 exposure: Arc::default(),
                 budget_recovery: Arc::new(parking_lot::Mutex::new(Default::default())),
             },
@@ -187,6 +206,7 @@ impl StageContext {
                 ),
                 agent_id: AgentId::new(),
                 session_context: Arc::new(RwLock::new(std::collections::HashMap::new())),
+                model_parent: None,
             },
             runtime: RuntimeServices {
                 llm: Arc::new(NullReactLLM),
@@ -208,6 +228,7 @@ impl StageContext {
                 )),
                 consecutive_failures: Arc::new(AtomicU32::new(0)),
                 compact_consecutive_failures: Arc::new(AtomicU32::new(0)),
+                model_operations: Arc::new(AtomicU32::new(0)),
                 exposure: Arc::default(),
                 budget_recovery: Arc::new(parking_lot::Mutex::new(Default::default())),
             },

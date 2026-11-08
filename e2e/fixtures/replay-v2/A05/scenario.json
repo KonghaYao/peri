@@ -1,0 +1,103 @@
+{
+  "version": 2,
+  "id": "A05",
+  "title": "child 工具失败后真实恢复，错误与成功卡片并存",
+  "provenance": {
+    "source": "local-fixture-model",
+    "realLlm": false
+  },
+  "sessionNames": [
+    "root"
+  ],
+  "seed": {
+    "directories": [
+      "home",
+      "home/.peri",
+      "work",
+      "work/.claude",
+      "work/.claude/agents"
+    ],
+    "files": [
+      {
+        "path": "home/.peri/settings.json",
+        "sha256": "bf0303d1d85e9be8a95ae762af78670b6f8e75a8b649cc60ccae34f043272ff9",
+        "size": 585,
+        "mode": 384
+      },
+      {
+        "path": "work/.claude/agents/replay-worker.md",
+        "sha256": "130ad94c3946149d49237835d5748b2976f470943860dabaf74960b3d5844099",
+        "size": 165,
+        "mode": 420
+      }
+    ]
+  },
+  "recordedWorld": {
+    "root": "/tmp/peri-wire-e2e-lpThAU",
+    "home": "/tmp/peri-wire-e2e-lpThAU/home",
+    "work": "/tmp/peri-wire-e2e-lpThAU/work"
+  },
+  "recordedSessionIds": {
+    "root": "01a1b607-a10c-7781-a489-198641204887"
+  },
+  "configurationFingerprint": "ab41bb646cbc7b72569c6ba7fe98afa0aacdd648dcf393a6f03e93c29b8c2fe5",
+  "bindings": [
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "root",
+      "recorded": "/tmp/peri-wire-e2e-lpThAU",
+      "anchor": "isolated scenario root"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "home",
+      "recorded": "/tmp/peri-wire-e2e-lpThAU/home",
+      "anchor": "isolated scenario home"
+    },
+    {
+      "owner": "world",
+      "kind": "path",
+      "alias": "work",
+      "recorded": "/tmp/peri-wire-e2e-lpThAU/work",
+      "anchor": "isolated scenario work"
+    },
+    {
+      "owner": "world",
+      "kind": "date",
+      "alias": "today",
+      "recorded": "2026-11-07",
+      "anchor": "ambient UTC date in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "platform",
+      "alias": "platform",
+      "recorded": "linux",
+      "anchor": "ambient OS platform in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "os_version",
+      "alias": "os_version",
+      "recorded": "Ubuntu 24.04.3 LTS",
+      "anchor": "ambient OS version in system environment"
+    },
+    {
+      "owner": "world",
+      "kind": "session",
+      "alias": "root",
+      "recorded": "01a1b607-a10c-7781-a489-198641204887",
+      "anchor": "ACP session/new result"
+    },
+    {
+      "owner": "world",
+      "kind": "thread",
+      "alias": "child-worker",
+      "recorded": "01a1b607-a338-71e3-afce-66d486956ac6",
+      "anchor": "created child worker"
+    }
+  ],
+  "portableResponses": []
+}
