@@ -30,6 +30,12 @@ use crate::provider::LlmProvider;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IntentTarget {
     pub(crate) thread_id: ThreadId,
+    /// 捕获时所属 live session 的实例代次。
+    ///
+    /// close/load 会发布新 `SessionState` 并把 `work_intent_epoch` 归零；只比 epoch
+    /// 会让旧生命周期的 Stop 在新一轮写到相同 epoch 时误覆盖。没有 live 实例的
+    /// cascade child 为 `None`（无从比较，照常写入）。
+    pub(crate) session_generation: Option<u64>,
     pub(crate) epoch: u64,
 }
 
@@ -59,11 +65,16 @@ pub(crate) async fn handle_notification(
         "session/cancel" => {
             let mut outcome = NotificationOutcome::default();
             let session_id = extract_session_id(params, "");
-            // `get_mut` 借用期间无法回查其他会话：先快照 thread_id -> epoch，
-            // cascade children 的代次从同一快照取（无 live 会话时取 0）。
-            let work_intent_epochs: HashMap<String, u64> = sessions
+            // `get_mut` 借用期间无法回查其他会话：先快照 thread_id -> 生命周期身份
+            // 与代次，cascade children 的身份从同一快照取（无 live 会话时取 0/None）。
+            let work_intents: HashMap<String, (u64, u64)> = sessions
                 .values()
-                .map(|state| (state.thread_id.clone(), state.work_intent_epoch))
+                .map(|state| {
+                    (
+                        state.thread_id.clone(),
+                        (state.session_generation, state.work_intent_epoch),
+                    )
+                })
                 .collect();
             if let Some(state) = sessions.get_mut(session_id) {
                 let root_epoch = state.work_intent_epoch;
@@ -96,6 +107,7 @@ pub(crate) async fn handle_notification(
                 // 取消的 cascade children。这里只收集身份与代次，不写库（§5.4）。
                 outcome.stop_targets.push(IntentTarget {
                     thread_id: ThreadId::from(state.thread_id.clone()),
+                    session_generation: Some(state.session_generation),
                     epoch: root_epoch,
                 });
                 if let Some(runtime) = cfg.session_manager.get_session(session_id) {
@@ -109,9 +121,16 @@ pub(crate) async fn handle_notification(
                                 .cancel_cascade_children()
                                 .into_iter()
                                 .map(|thread_id| {
-                                    let epoch =
-                                        work_intent_epochs.get(&thread_id).copied().unwrap_or(0);
-                                    IntentTarget { thread_id, epoch }
+                                    let (session_generation, epoch) = work_intents
+                                        .get(&thread_id)
+                                        .copied()
+                                        .map(|(generation, epoch)| (Some(generation), epoch))
+                                        .unwrap_or((None, 0));
+                                    IntentTarget {
+                                        thread_id,
+                                        session_generation,
+                                        epoch,
+                                    }
                                 }),
                         );
                 }
@@ -234,6 +253,7 @@ pub(crate) async fn handle_notification(
                 {
                     outcome.context_usage_invalidations.push(IntentTarget {
                         thread_id: ThreadId::from(state.thread_id.clone()),
+                        session_generation: Some(state.session_generation),
                         epoch: state.work_intent_epoch,
                     });
                 }
@@ -274,13 +294,28 @@ async fn gate_for(
         .clone()
 }
 
-/// 锁内复核 live 会话的工作意图代次；无 live 会话返回 `None`（照常写入）。
-async fn live_work_intent_epoch(sessions: &SharedSessions, thread_id: &ThreadId) -> Option<u64> {
+/// 锁内复核 live 会话的生命周期代次与工作意图代次；无 live 会话返回 `None`
+/// （照常写入）。
+async fn live_work_intent(sessions: &SharedSessions, thread_id: &ThreadId) -> Option<(u64, u64)> {
     let sessions = sessions.lock().await;
     sessions
         .values()
         .find(|state| state.thread_id == *thread_id)
-        .map(|state| state.work_intent_epoch)
+        .map(|state| (state.session_generation, state.work_intent_epoch))
+}
+
+/// 捕获后目标是否已过期：live 实例换了生命周期，或已有更新 turn 准入。
+///
+/// 生命周期比较不可省：close/load 会把 `work_intent_epoch` 归零，旧生命周期的
+/// 代次与新实例重新计数的值可能相同，只有实例代次能区分两轮生命周期。
+async fn intent_superseded(sessions: &SharedSessions, target: &IntentTarget) -> bool {
+    let Some((generation, epoch)) = live_work_intent(sessions, &target.thread_id).await else {
+        return false;
+    };
+    let generation_moved = target
+        .session_generation
+        .is_some_and(|captured| captured != generation);
+    generation_moved || epoch != target.epoch
 }
 
 /// 通知的锁外持久化副作用：Stop 意图与模型配置变化后的占用失效。
@@ -298,18 +333,19 @@ pub(crate) async fn persist_notification_effects(
 ) {
     for target in stop_targets {
         let gate = gate_for(sessions, prompt_locks, &target.thread_id).await;
+        #[cfg(test)]
+        super::prompt_dispatch::admission_gate::wait(&format!("{}:stop-persist", target.thread_id))
+            .await;
         let _guard = gate.work_intent.lock().await;
-        if let Some(epoch) = live_work_intent_epoch(sessions, &target.thread_id).await {
-            if epoch != target.epoch {
-                debug!(
-                    method,
-                    thread_id = %target.thread_id,
-                    captured_epoch = target.epoch,
-                    current_epoch = epoch,
-                    "stop intent superseded by newer turn admission; skip persistence"
-                );
-                continue;
-            }
+        if intent_superseded(sessions, &target).await {
+            debug!(
+                method,
+                thread_id = %target.thread_id,
+                captured_generation = ?target.session_generation,
+                captured_epoch = target.epoch,
+                "stop intent superseded by newer session lifecycle or turn admission; skip persistence"
+            );
+            continue;
         }
         if let Err(error) = cfg
             .session_manager
@@ -331,17 +367,15 @@ pub(crate) async fn persist_notification_effects(
     for target in context_usage_invalidations {
         let gate = gate_for(sessions, prompt_locks, &target.thread_id).await;
         let _guard = gate.work_intent.lock().await;
-        if let Some(epoch) = live_work_intent_epoch(sessions, &target.thread_id).await {
-            if epoch != target.epoch {
-                debug!(
-                    method,
-                    thread_id = %target.thread_id,
-                    captured_epoch = target.epoch,
-                    current_epoch = epoch,
-                    "context usage invalidation superseded by newer turn admission; skip persistence"
-                );
-                continue;
-            }
+        if intent_superseded(sessions, &target).await {
+            debug!(
+                method,
+                thread_id = %target.thread_id,
+                captured_generation = ?target.session_generation,
+                captured_epoch = target.epoch,
+                "context usage invalidation superseded by newer session lifecycle or turn admission; skip persistence"
+            );
+            continue;
         }
         if let Err(error) = cfg
             .session_manager

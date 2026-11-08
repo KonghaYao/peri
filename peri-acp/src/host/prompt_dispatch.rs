@@ -418,6 +418,11 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         );
         return Err(work_intent_error(Some(&thread_id), error.to_string()));
     }
+    // Stop 幂等窗口：此刻 working 已提交、代次尚未推进。Stop 通知会读到旧代次，
+    // 其锁外持久化随后因代次前进而跳过；本轮若在 attach 前被取消，必须由本函数
+    // 自己落 `stopped`（见下方 Ok(Null)/Err 的取消分支）。测试在此固定该时序。
+    #[cfg(test)]
+    admission_gate::wait(&format!("{prompt_session_id}:working-committed")).await;
     {
         let mut sessions = sessions.lock().await;
         if let Some(state) = sessions.get_mut(&prompt_session_id) {
@@ -425,6 +430,10 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         }
     }
     drop(work_intent_guard);
+    // 代次已推进、Working 仍在：迟到 Stop 的持久化若只看 epoch，会在新一轮
+    // epoch 恰好相同时误覆盖；测试在此固定「新轮次已准入、尚未执行」的时序。
+    #[cfg(test)]
+    admission_gate::wait(&format!("{prompt_session_id}:epoch-advanced")).await;
 
     // 冷 child 恢复的本轮把终态、工作意图与结果消息交给一次原子结算（§5.3）：
     // 在 run_prompt 前标记，finish_prompt_turn 据此跳过独立的 work_state 写入。
@@ -471,6 +480,12 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         Err(error) => (Err(error), None),
     };
 
+    // 本轮准入发布的令牌是否已在本轮移交执行器之前被取消（用户 Stop / close）。
+    // Stop 通知可能落在 working 提交与代次推进之间：它捕获旧代次，锁外持久化会被
+    // 代次守卫跳过，因此取消的准入必须在这里自行提交 `stopped`，不能只清内存令牌。
+    let cancelled_before_handoff = admitted_cancel
+        .as_ref()
+        .is_some_and(|token| token.is_cancelled());
     // `run_prompt` 在 attach 前失败时返回 `Ok(Null)`：本轮从未移交执行器，成功空操作
     // 同样要撤销本次准入发布的令牌，否则 close 会把空轮次误判为在飞（#196 P2 复审）。
     if matches!(&result, Ok(Value::Null)) {
@@ -481,6 +496,9 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             admitted_cancel.as_ref(),
         )
         .await;
+        if cancelled_before_handoff {
+            persist_stopped_after_cancelled_admission(cfg, &prompt_session_id, &thread).await;
+        }
     }
 
     // Prediction remains admitted before pool restoration and while the prompt lock is held.
@@ -495,6 +513,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     }
 
     let mut abandoned_thread = None;
+    let mut stopped_thread = None;
     let mut recovery_early_failure = false;
     {
         let mut sessions = sessions.lock().await;
@@ -518,7 +537,11 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
                 // 根/child 的恢复启动 continuation。保留 working 与提醒，供下一次
                 // 显式进入重试；不能按普通中断回收成 idle。
                 let recovery_attempt = recovery_settlement_pending || recovery_origin;
-                if never_finished && recovery_attempt {
+                if never_finished && cancelled_before_handoff && !recovery_attempt {
+                    // 已取消且从未移交执行器：显式停止必须落库。恢复来源保留既有
+                    // 「working + 提醒」语义，由恢复结算统一写终态（§5.3）。
+                    stopped_thread = Some(state.thread_id.clone());
+                } else if never_finished && recovery_attempt {
                     recovery_early_failure = true;
                 } else if never_finished {
                     abandoned_thread = Some(state.thread_id.clone());
@@ -528,6 +551,16 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
                 state.agent_pool = mutex.into_inner();
             }
         }
+    }
+    // 取消发生在本轮移交执行器之前：Stop 通知捕获的是 working 提交前的代次，
+    // 其锁外持久化会被代次守卫跳过；这里由仍持有 turn 锁的本轮提交 `stopped`。
+    if let Some(thread_id) = stopped_thread {
+        persist_stopped_after_cancelled_admission(
+            cfg,
+            &prompt_session_id,
+            &ThreadId::from(thread_id),
+        )
+        .await;
     }
     // 恢复 turn 在进入收尾前明确失败：本轮没有产生可结算的终态。按设计 §5.1
     // 不伪造完成或取消，保留 `working` 与原提醒供下一次显式进入重试；同时把当前
@@ -663,6 +696,33 @@ async fn rollback_turn_admission(
         if is_continuation {
             state.continuation_in_flight = false;
         }
+    }
+}
+
+/// 已准入但被取消的轮次提交 durable `stopped`。
+///
+/// Stop 通知在 `working` 写入与代次推进之间到达时，其锁外持久化会因代次前进而
+/// 跳过；若本轮随后在 attach 前结束，`working` 会残留并在下次进入时被恢复。
+/// 取消轮次的终态语义是 `stopped`（与正常取消收尾一致），由仍持有 turn 锁的
+/// 本轮提交，后续轮次无法并发改写。
+async fn persist_stopped_after_cancelled_admission(
+    cfg: &AcpServerConfig,
+    session_id: &str,
+    thread_id: &ThreadId,
+) {
+    if let Err(error) = set_work_state_with_retry(
+        cfg.session_manager.session_resources(),
+        thread_id,
+        WorkState::Stopped,
+    )
+    .await
+    {
+        tracing::error!(
+            session_id,
+            thread_id = %thread_id,
+            %error,
+            "cancelled admission work state write failed after retry"
+        );
     }
 }
 

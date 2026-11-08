@@ -22,7 +22,7 @@ pub(crate) struct UserInputRun {
 }
 
 impl UserInputRun {
-    fn new(ticket: UserInputRunTicket) -> Self {
+    pub(super) fn new(ticket: UserInputRunTicket) -> Self {
         Self {
             ticket,
             terminal_delivered: Arc::new(AtomicBool::new(false)),
