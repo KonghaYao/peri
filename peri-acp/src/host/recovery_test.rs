@@ -15,6 +15,46 @@ use tokio::sync::mpsc;
 
 const WAIT_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// mock 模型端点的 SSE 响应（默认 mock 与可阻塞 mock 共用）。
+const MODEL_SSE: &str = "data: {\"id\":\"test-response\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"recovered\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+
+/// 可阻塞的模型响应闸门：测试线程等 `entered`，mockito 响应线程等 `release`。
+///
+/// 用它把恢复 child 固定在「执行器已启动、模型调用在途」，让 Stop 发生在真实的
+/// 执行阶段而不是准入窗口；`entered` 是 `Notify`，先通知后等待也不会丢失。
+#[derive(Default)]
+struct ModelGate {
+    entered: tokio::sync::Notify,
+    released: StdMutex<bool>,
+    release_cv: std::sync::Condvar,
+}
+
+impl ModelGate {
+    async fn entered(&self) {
+        self.entered.notified().await;
+    }
+
+    fn release(&self) {
+        *self.released.lock().unwrap() = true;
+        self.release_cv.notify_all();
+    }
+
+    /// mockito 的响应写入线程调用；有上限，用例失败时不会永久挂住 server Drop。
+    fn block_until_released(&self) {
+        self.entered.notify_one();
+        let mut released = self.released.lock().unwrap();
+        let deadline = std::time::Instant::now() + WAIT_TIMEOUT;
+        while !*released {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return;
+            }
+            let (guard, _) = self.release_cv.wait_timeout(released, remaining).unwrap();
+            released = guard;
+        }
+    }
+}
+
 // ── 记录型 transport ─────────────────────────────────────────────────────────
 
 #[derive(Default)]
@@ -161,9 +201,7 @@ impl RecoveryHarness {
             .mock("POST", mockito::Matcher::Any)
             .with_status(200)
             .with_header("content-type", "text/event-stream")
-            .with_body(
-                "data: {\"id\":\"test-response\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"recovered\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
-            )
+            .with_body(MODEL_SSE)
             .expect(1)
             .create_async()
             .await;
@@ -238,6 +276,83 @@ impl RecoveryHarness {
 
     fn recovery(&self) -> crate::host::recovery::HostSessionRecovery {
         recovery_for(&self.cfg, &self.sessions, &self.sender)
+    }
+
+    /// 把模型端点换成可阻塞响应：等到 `entered` 即处于「执行器已启动、模型调用
+    /// 在途」的真实执行窗口，可在返回前发送 Stop。
+    async fn install_gated_model(&mut self) -> Arc<ModelGate> {
+        self._server.reset();
+        let gate = Arc::new(ModelGate::default());
+        let body_gate = Arc::clone(&gate);
+        self._server
+            .mock("POST", mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "text/event-stream")
+            .with_chunked_body(move |writer| {
+                body_gate.block_until_released();
+                writer.write_all(MODEL_SSE.as_bytes())
+            })
+            .expect(1)
+            .create_async()
+            .await;
+        gate
+    }
+
+    /// 持久绑定的 workspace 归属（制造真实绑定校验失败用）。
+    async fn binding_workspace_id(&self, thread_id: &str) -> String {
+        use sqlx::Connection as _;
+
+        let mut connection = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new().filename(&self.db_path),
+        )
+        .await
+        .unwrap();
+        let (workspace_id,): (String,) =
+            sqlx::query_as("SELECT workspace_id FROM session_bindings WHERE thread_id = ?1")
+                .bind(thread_id)
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+        connection.close().await.unwrap();
+        workspace_id
+    }
+
+    async fn set_binding_workspace(&self, thread_id: &str, workspace_id: &str) {
+        use sqlx::Connection as _;
+
+        let mut connection = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new().filename(&self.db_path),
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE session_bindings SET workspace_id = ?1 WHERE thread_id = ?2")
+            .bind(workspace_id)
+            .bind(thread_id)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+    }
+
+    /// 让持久 MQ 查询真实失败/恢复（不改内存状态），用于 eligibility 查询失败出口。
+    async fn set_mq_table_hidden(&self, hidden: bool) {
+        use sqlx::Connection as _;
+
+        let statement = if hidden {
+            "ALTER TABLE thread_mq RENAME TO thread_mq_unavailable"
+        } else {
+            "ALTER TABLE thread_mq_unavailable RENAME TO thread_mq"
+        };
+        let mut connection = sqlx::SqliteConnection::connect_with(
+            &sqlx::sqlite::SqliteConnectOptions::new().filename(&self.db_path),
+        )
+        .await
+        .unwrap();
+        sqlx::query(statement)
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
     }
 
     async fn set_working(&self, thread_id: &str) {

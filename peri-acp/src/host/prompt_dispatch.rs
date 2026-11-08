@@ -80,6 +80,13 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         .get(&prompt_session_id)
         .and_then(|state| state.environment.clone());
     let cfg = environment.as_ref().map(|env| &env.cfg).unwrap_or(cfg);
+    // 恢复来源的预执行失败可能从任何一步返回（`?`、确定性拒绝、跳过）；Drop
+    // 守卫统一在返回前写进程内失败事实，调度器随后才释放启动门并唤醒普通激活。
+    // 执行器启动后由本轮自身的结算/失败分类处理，见下方的解除点。
+    let mut recovery_launch = recovery_origin.then(|| RecoveryLaunchGuard {
+        cfg,
+        session_id: &prompt_session_id,
+    });
     // 恢复准备失败且分类为不可执行时，服务端拒绝本会话的全部执行入口：
     // 用户 prompt、scheduled、continuation 与 idle-suspended 注入都在这里截住。
     if let Some(block) = cfg
@@ -477,7 +484,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         Arc::new(parking_lot::Mutex::new(pool))
     };
 
-    let outcome = super::prompt::run_prompt_with_outcome(
+    let attempt = super::prompt::run_prompt_with_outcome(
         params,
         sessions,
         cfg,
@@ -488,19 +495,27 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
         input_ticket,
     )
     .await;
-    let (result, prediction_execution) = match outcome {
+    let execution_started = attempt.execution_started;
+    let (result, prediction_execution) = match attempt.outcome {
         Ok(outcome) => (Ok(outcome.response), outcome.execution_binding),
         Err(error) => (Err(error), None),
     };
+    if execution_started {
+        // 执行器已启动：本轮的错误（模型失败、取消等）属于执行失败，已产生可结算
+        // 终态，不能再写成恢复启动失败，也不能跳过父级结算。
+        drop(recovery_launch.take());
+    }
 
     // 本轮准入发布的令牌是否已在本轮移交执行器之前被取消。取消本身不代表用户
     // Stop：执行前失败清理（`InputAttemptGuard` Drop → `fail_reserved`）也会取消
     // 同一令牌。只有显式 Stop/close 意图才能把本轮终态写成 `stopped`。
-    let cancelled_before_handoff = admitted_cancel
+    let cancelled_before_execution = admitted_cancel
         .as_ref()
         .is_some_and(|token| token.is_cancelled());
-    let stopped_before_handoff =
-        cancelled_before_handoff && explicit_stop_intent(cfg, sessions, &prompt_session_id).await;
+    // 只有执行器确实没有启动时才可能「未移交」；执行后取消/失败必须按终态结算。
+    let stopped_before_execution = cancelled_before_execution
+        && !execution_started
+        && explicit_stop_intent(cfg, sessions, &prompt_session_id).await;
     // `run_prompt` 在 attach 前失败时返回 `Ok(Null)`：本轮从未移交执行器，成功空操作
     // 同样要撤销本次准入发布的令牌，否则 close 会把空轮次误判为在飞（#196 P2 复审）。
     if matches!(&result, Ok(Value::Null)) {
@@ -511,7 +526,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
             admitted_cancel.as_ref(),
         )
         .await;
-        if stopped_before_handoff {
+        if stopped_before_execution {
             persist_stopped_after_cancelled_admission(cfg, &prompt_session_id, &thread).await;
         }
     }
@@ -550,16 +565,19 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
                 }
                 // 恢复来源的本轮早失败：既可能是冷 child 的恢复结算，也可能是
                 // 根/child 的恢复启动 continuation。保留 working 与提醒，供下一次
-                // 显式进入重试；不能按普通中断回收成 idle。
+                // 显式进入重试；不能按普通中断回收成 idle。执行器已经启动后的错误
+                // 不在此列：它有终态可结算，不是启动失败。
                 let recovery_attempt = recovery_settlement_pending || recovery_origin;
-                if never_finished && stopped_before_handoff {
+                if never_finished && stopped_before_execution {
                     // 显式停止优先于恢复早失败分类：User 与恢复来源都必须落 durable
                     // `stopped`，否则启动路径会把用户 Stop 留成待自动恢复的 working。
                     // 已取消令牌仍按既有契约移交执行器（cancelled/-32010 响应），
                     // 启动失败时的终态只能由准入层按显式意图收敛。
                     stopped_thread = Some(state.thread_id.clone());
                 } else if never_finished && recovery_attempt {
-                    recovery_early_failure = true;
+                    if !execution_started {
+                        recovery_early_failure = true;
+                    }
                 } else if never_finished {
                     abandoned_thread = Some(state.thread_id.clone());
                 }
@@ -618,14 +636,17 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     // thread。目标挂在会话实例上，所以用户 prompt、激活监听与启动门任一路径跑完都只
     // 结算一次；被取代的续跑在本函数早期返回，走不到这里。早失败没有终态可结算，
     // 不向父级投递「已完成/已失败」的结果事实，但仍要收尾已登记的父级任务。
+    //
+    // 只有执行器确实未启动时才算「没有终态」：执行后 Stop 的轮次返回 cancelled，
+    // 必须经 `deliver_child_turn` 结算 Cancelled + Stopped 与父级 durable 结果。
     let recovery_delivery = cfg
         .session_manager
         .get_session(&prompt_session_id)
         .and_then(|runtime| runtime.take_recovery_parent());
     if let Some(delivery) = recovery_delivery {
-        if recovery_early_failure || stopped_before_handoff {
-            // 早失败没有终态可结算；显式停止的轮次也从未执行，不向父级投递
-            // 完成/失败结果事实，只收尾已登记的父级任务（§5.3）。
+        if recovery_early_failure || stopped_before_execution {
+            // 早失败/未执行即被 Stop：没有终态可结算，不向父级投递完成/失败结果
+            // 事实，只收尾已登记的父级任务（§5.3）。
             super::recovery::finish_recovered_child_without_result(cfg, &delivery);
         } else {
             super::recovery::deliver_child_turn(
@@ -685,6 +706,22 @@ fn work_intent_error(thread_id: Option<&str>, detail: String) -> AcpError {
         "threadId": thread_id,
         "detail": detail,
     }))
+}
+
+/// 恢复启动守卫：本轮在执行器启动前返回就记一次启动失败。
+///
+/// 早失败出口分散在绑定复核、恢复执行阻断、准入提交与 `run_prompt` 内部（包括
+/// 各类 `?` 提前返回），Drop 统一覆盖，确保调度器释放启动门并唤醒普通激活之前，
+/// 失败事实已经落位。执行器启动后 `take` 解除：那类错误是执行失败而非启动失败。
+struct RecoveryLaunchGuard<'a> {
+    cfg: &'a AcpServerConfig,
+    session_id: &'a str,
+}
+
+impl Drop for RecoveryLaunchGuard<'_> {
+    fn drop(&mut self) {
+        mark_recovery_launch_failed(self.cfg, self.session_id);
+    }
 }
 
 /// 恢复启动的 continuation 在 Receive 前失败：写进程内标记，下一次显式进入
@@ -803,6 +840,7 @@ pub(super) async fn settle_work_state_with_retry(
 #[cfg(test)]
 pub(crate) mod admission_gate {
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, LazyLock, Mutex};
     use tokio::sync::Notify;
 
@@ -829,6 +867,51 @@ pub(crate) mod admission_gate {
         if let Some(gate) = gate {
             gate.entered.notify_one();
             gate.release.notified().await;
+        }
+    }
+
+    /// 激活监听器「重查后即将等待」的可观察进度。
+    ///
+    /// 用例用它确认监听器已消费本轮 watch 版本并进入等待，再触发启动门释放，
+    /// 从而证明重查由门释放唤醒，而不是依赖时间窗口。
+    #[derive(Default)]
+    pub(crate) struct ListenerProgress {
+        waits: AtomicUsize,
+        notify: Notify,
+    }
+
+    impl ListenerProgress {
+        /// 等待监听器至少完成 `target` 次「重查后进入等待」。
+        pub(crate) async fn wait_until(&self, target: usize) {
+            loop {
+                let notified = self.notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.waits.load(Ordering::Acquire) >= target {
+                    return;
+                }
+                notified.await;
+            }
+        }
+    }
+
+    static LISTENER_PROGRESS: LazyLock<Mutex<HashMap<String, Arc<ListenerProgress>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(crate) fn install_listener_progress(session_id: &str) -> Arc<ListenerProgress> {
+        let progress = Arc::new(ListenerProgress::default());
+        LISTENER_PROGRESS
+            .lock()
+            .unwrap()
+            .insert(session_id.into(), Arc::clone(&progress));
+        progress
+    }
+
+    pub(in crate::host) fn report_listener_wait(session_id: &str) {
+        let progress = LISTENER_PROGRESS.lock().unwrap().get(session_id).cloned();
+        if let Some(progress) = progress {
+            progress.waits.fetch_add(1, Ordering::AcqRel);
+            progress.notify.notify_waiters();
         }
     }
 }

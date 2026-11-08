@@ -217,6 +217,7 @@ pub(crate) async fn run_prompt(
         input_ticket,
     )
     .await
+    .outcome
     .map(|outcome| outcome.response)
 }
 
@@ -236,6 +237,7 @@ async fn run_prompt_attempt(
         Option<peri_acp_types::session::MqWatermark>,
         u64,
     )>,
+    execution_started: &mut bool,
 ) -> Result<outcome::PromptOutcome, AcpError> {
     // Borrow deployment services; turn-owned callbacks clone only their existing handles.
     // Provider/config snapshots remain below, after the session snapshot is captured.
@@ -644,6 +646,8 @@ async fn run_prompt_attempt(
             format!("run_session failed: {error}"),
         ));
     }
+    // 执行器已启动并完成：即使后续收尾失败，本轮也已有可结算的终态。
+    *execution_started = true;
     let result = handle.take_result();
     notifications.mark_terminal();
     if !result.ok || result.failure.is_some() {

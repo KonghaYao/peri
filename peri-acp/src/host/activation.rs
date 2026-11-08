@@ -147,6 +147,9 @@ pub(super) fn ensure_listener(
                         return;
                     }
                 }
+                // 测试屏障：固定「本轮重查已结束、即将等待下一次唤醒」的窗口。
+                #[cfg(test)]
+                super::prompt_dispatch::admission_gate::report_listener_wait(&session_id);
                 tokio::select! {
                     biased;
                     _ = cancellation.cancelled() => return,

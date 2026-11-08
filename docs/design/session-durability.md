@@ -216,7 +216,7 @@ sync 委派实际转为后台继续执行时，worker 持有 `working` 写入并
 
 结果通知使用 `threads.config` 中的 `completion_target`，历史 `parent_thread_id` 只确定恢复范围，不改写：B 显式 resume 原属 A 的 C 后崩溃，C 的结果仍回到 B。配置回调保持优先；只有声明过目标的同一回调才能恢复。恢复准备会核实目标仍在同一根树中，缺失或不可确定时报告失败，不回退 A 或 root。任务提醒也按实际接收关系列举。结果消息沿用 `ensure_processing`：live 且已激活的 idle 接收方被唤醒，未 live 时下一次进入消费 durable 行，`stopped` 不被解除。
 
-恢复启动只在真正交出执行后保持启动资格。`launch` 的任一跳过路径（会话态消失、代次变化、closing、turn 已活跃、activation 不允许、listener 启动失败、scheduler 消失）都撤销本次准入；continuation 已发出但调度或分发在 Receive 前失败时，只在恢复来源下写进程内 `recovery_launch_failed`。下一次显式进入读取并清除该标记，重新采纳 MQ 中的同一条提醒；不做同进程自动重试，不新增持久相位，也不把早失败伪报为完成或取消。
+恢复启动只在真正交出执行后保持启动资格。`launch` 的任一跳过路径（会话态消失、代次变化、closing、turn 已活跃、activation 不允许、listener 启动失败、scheduler 消失）都撤销本次准入；continuation 已发出但调度或分发在 Receive 前失败时，只在恢复来源下写进程内 `recovery_launch_failed`。执行器已启动后的错误与取消不属于启动早失败：本轮已产生终态，按执行结果结算终态、`work_state` 与父级结果通知，不得跳过父级结算。下一次显式进入读取并清除该标记，重新采纳 MQ 中的同一条提醒；不做同进程自动重试，不新增持久相位，也不把早失败伪报为完成或取消。
 
 恢复准入从提醒采纳到 recovery 续跑取得准入之间关闭普通激活：同一条提醒只允许恢复来源下单，避免普通 MQ steering 与恢复续跑在 prompt lock 上竞争。提交准入、调度器跳过、启动回滚或响应丢弃时解除该门；解除会唤醒激活监听器重查独立来源，避免已入队的普通工作等待无关事件。解除后普通激活仍按既有队列与水位判定；启动早失败的 `SessionRecovery` 提醒不参与普通激活，只由下一次显式进入重试。
 
@@ -224,7 +224,7 @@ sync 委派实际转为后台继续执行时，worker 持有 `working` 写入并
 
 Stop 按既有取消策略确定实际受影响对象，在持久操作中保存相应停止意图，再确认控制操作成功。不能只保存父级停止却让应受取消影响的 child 保留自动续跑资格。停止意图持久化异步执行，但按会话有序；目标同时绑定 live 实例代次与工作意图代次，旧生命周期或更新准入的意图不得覆盖当前状态。Stop 落在 `working` 提交与代次推进之间时，取消且未移交执行器的本轮由准入方自行提交 `stopped`，不能留下 `working`。
 
-停止意图必须来自显式 Stop 或关闭。执行前失败清理（输入 attempt guard 的 `fail_reserved`）也会取消本轮令牌，但不得据此写 `stopped`；用户与队列输入取得新一轮准入时清除上一轮停止意图，启动路径的 `allow()` 不清除。显式 Stop 优先于恢复早失败分类：恢复来源的根/child 启动失败同样落 `stopped`，不保留可自动恢复的 `working`。没有显式意图的早失败按普通失败收尾：仍有 `ensure_processing` 待处理消息时保持 `working`，否则收敛为 `idle`。
+停止意图必须来自显式 Stop 或关闭。执行前失败清理（输入 attempt guard 的 `fail_reserved`）也会取消本轮令牌，但不得据此写 `stopped`；用户与队列输入取得新一轮准入时清除上一轮停止意图，启动路径的 `allow()` 不清除。显式 Stop 优先于恢复早失败分类：恢复来源的根/child 启动失败同样落 `stopped`，不保留可自动恢复的 `working`。没有显式意图的早失败按普通失败收尾：仍有 `ensure_processing` 待处理消息时保持 `working`，否则收敛为 `idle`；恢复来源（无显式 Stop）的 Receive 前早失败是例外——不伪造终态，保留 `working` 与原提醒，只由下一次显式进入重试（§5.3）。
 
 恢复准备与 Stop 竞争时，旧快照不能覆盖新的 `stopped`。已经进入提交阶段的消息与当前执行按既有协调结算；Stop 不回删已提交历史，待发消息继续留在 MQ。
 

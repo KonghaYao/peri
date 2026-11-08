@@ -426,6 +426,14 @@ pub(crate) async fn run_continuation_scheduler(
                 && !super::activation::result_allowed(local, &req.session_id).await)
         {
             mark_recovery_launch_failed(&cfg, &req);
+            // 测试屏障：固定「eligibility 已失败并记录、启动门尚未释放」的窗口。
+            // 用例据此在门释放前恢复真实查询失败条件，验证重查只调度独立工作。
+            #[cfg(test)]
+            super::prompt_dispatch::admission_gate::wait(&format!(
+                "{}:recovery-eligibility-skip",
+                req.session_id
+            ))
+            .await;
             finish_recovery_launch(&cfg, &req);
             continue;
         }
