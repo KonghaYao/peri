@@ -16,7 +16,9 @@ use anyhow::{bail, Result};
 /// 把创建证据收缩为最小执行根。输入可以是完整 `Discovery`、已收缩形态或两者的混合。
 ///
 /// - 解析失败、`root` 缺失/非字符串/空 → `Err`（调用方决定 fail-closed 还是拒绝输入）；
-/// - `root` 为相对路径 → `Err`（与发现层的 `path_text` 同一判据，执行根必须是绝对路径）；
+/// - `root` 为相对路径 → `Err`；判定用 `has_root` 而不是平台相关的 `is_absolute`，
+///   因为 `/work` 在 Windows 上仍由根分量锚定、不会随进程 CWD 漂移（真实发现值由
+///   `canonicalize` 产生，永远带盘符；该判据同时允许跨平台旧库与测试夹具）；
 /// - `kind` 存在且为字符串时保留，其余类型直接丢弃（它不参与任何判定）。
 pub(super) fn project(raw: &str) -> Result<String> {
     let value: serde_json::Value = serde_json::from_str(raw)?;
@@ -28,8 +30,8 @@ pub(super) fn project(raw: &str) -> Result<String> {
         .and_then(serde_json::Value::as_str)
         .filter(|root| !root.is_empty())
         .ok_or_else(|| anyhow::anyhow!("binding evidence has no root"))?;
-    if !std::path::Path::new(root).is_absolute() {
-        bail!("binding evidence root is not absolute");
+    if !std::path::Path::new(root).has_root() {
+        bail!("binding evidence root is not rooted");
     }
     let projected = match object.get("kind").and_then(serde_json::Value::as_str) {
         Some(kind) => serde_json::json!({ "kind": kind, "root": root }),
@@ -84,6 +86,7 @@ mod tests {
         assert!(project(r#"{"root":""}"#).is_err());
         assert!(project(r#"{"root":7}"#).is_err());
         assert!(project(r#"{"root":"relative/path"}"#).is_err());
+        assert!(project(r#"{"root":"C:work"}"#).is_err());
         assert!(project("[]").is_err());
         assert!(project("not json").is_err());
     }

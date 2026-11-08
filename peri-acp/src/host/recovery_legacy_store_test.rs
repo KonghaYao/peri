@@ -61,13 +61,63 @@ async fn seed_schema_v13(db_path: &std::path::Path, cwd: &str) -> String {
 
 async fn downgrade_to_v13(db_path: &std::path::Path) {
     let mut connection = sqlx::SqliteConnection::connect_with(
-        &sqlx::sqlite::SqliteConnectOptions::new().filename(db_path),
+        &sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(db_path)
+            // 重命名期间不强制外键；各表重建完成后再由打开路径的检查兜底。
+            .foreign_keys(false),
     )
     .await
     .unwrap();
-    // 旧库遗留的 Active 状态：v13 没有工作意图列，Active 不是自动续跑的依据。
+    // v15 重建过 projects/workspaces/session_bindings 并退役了两张 inherited 表，只删
+    // threads 两列会得到任何已知代际都不匹配的混合形状。这里按 v14 冻结声明补回三表
+    // 形状与两张空派生表，得到真正的 v13 库；行数据原样保留。
     sqlx::raw_sql(
-        "UPDATE threads SET agent_status = 'active';
+        "CREATE TABLE projects_next (
+             id TEXT PRIMARY KEY, locator TEXT NOT NULL, object_identity TEXT NOT NULL,
+             UNIQUE(locator, object_identity));
+         INSERT INTO projects_next (id, locator, object_identity)
+             SELECT id, locator, '{\"device\":1,\"inode\":2}' FROM projects;
+         DROP TABLE projects;
+         ALTER TABLE projects_next RENAME TO projects;
+
+         CREATE TABLE workspaces_next (
+             id TEXT PRIMARY KEY, machine_id TEXT NOT NULL REFERENCES machines(id),
+             path TEXT NOT NULL,
+             path_source TEXT NOT NULL CHECK(path_source IN ('discovered', 'derived_legacy', 'unverified')),
+             project_id TEXT REFERENCES projects(id),
+             identity TEXT, discovery TEXT,
+             UNIQUE(machine_id, path));
+         INSERT INTO workspaces_next
+             (id, machine_id, path, path_source, project_id, discovery)
+             SELECT id, machine_id, path, path_source, project_id, discovery
+             FROM workspaces;
+         DROP TABLE workspaces;
+         ALTER TABLE workspaces_next RENAME TO workspaces;
+
+         CREATE TABLE session_bindings_next (
+             thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+             schema_version INTEGER NOT NULL,
+             project_id TEXT NOT NULL, workspace_id TEXT NOT NULL, relative_cwd TEXT NOT NULL,
+             discovery_snapshot TEXT, evidence_origin TEXT NOT NULL);
+         INSERT INTO session_bindings_next
+             (thread_id, schema_version, project_id, workspace_id, relative_cwd,
+              discovery_snapshot, evidence_origin)
+             SELECT thread_id, schema_version, project_id, workspace_id, relative_cwd,
+                    discovery_snapshot, 'creation_snapshot'
+             FROM session_bindings;
+         DROP TABLE session_bindings;
+         ALTER TABLE session_bindings_next RENAME TO session_bindings;
+
+         CREATE TABLE inherited_snapshot_index (
+             snapshot_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, payload_bytes INTEGER NOT NULL,
+             entry_count INTEGER NOT NULL, prepared_at TEXT NOT NULL);
+         CREATE TABLE inherited_payload_index (
+             snapshot_id TEXT NOT NULL, ordinal INTEGER NOT NULL, entry_id TEXT NOT NULL,
+             raw_start INTEGER NOT NULL, raw_len INTEGER NOT NULL, logical_len INTEGER,
+             PRIMARY KEY(snapshot_id, ordinal), UNIQUE(snapshot_id, entry_id));
+
+         -- 旧库遗留的 Active 状态：v13 没有工作意图列，Active 不是自动续跑的依据。
+         UPDATE threads SET agent_status = 'active';
          ALTER TABLE threads DROP COLUMN work_state;
          ALTER TABLE threads DROP COLUMN context_usage_tokens;
          PRAGMA user_version = 13;",
