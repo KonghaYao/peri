@@ -73,6 +73,44 @@ impl ChildRunRouting {
         self.unbound.remove(index).map(|(_, run)| run)
     }
 
+    /// Drain a child's unbound occurrences so a full snapshot can decide which
+    /// one (if any) belongs to a visible registry row.
+    pub(crate) fn drain_unbound_starts(&mut self, child: &str) -> Vec<UnboundStart> {
+        let mut taken = Vec::new();
+        let mut index = 0;
+        while index < self.unbound.len() {
+            if self.unbound[index].0 == child {
+                if let Some((_, run)) = self.unbound.remove(index) {
+                    taken.push(run);
+                }
+            } else {
+                index += 1;
+            }
+        }
+        taken
+    }
+
+    /// Keep an occurrence that cannot belong to any row visible in the
+    /// snapshot, preserving per-child start order for a future registry row.
+    pub(crate) fn restore_unbound_start(&mut self, child: &str, run: UnboundStart) {
+        if self
+            .unbound
+            .iter()
+            .any(|(id, existing)| id == child && existing.run_order == run.run_order)
+        {
+            return;
+        }
+        let position = self
+            .unbound
+            .iter()
+            .position(|(id, existing)| id == child && existing.run_order > run.run_order)
+            .unwrap_or(self.unbound.len());
+        self.unbound.insert(position, (child.to_owned(), run));
+        while self.unbound.len() > RETIRED_RUNS {
+            self.unbound.pop_front();
+        }
+    }
+
     /// Highest occurrence observed for the child before a row was created.
     /// A Stop at or below it cannot claim that row.
     pub(crate) fn pending_run_ceiling(&self, child: &str) -> Option<u64> {

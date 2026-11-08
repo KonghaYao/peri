@@ -547,3 +547,79 @@ fn lost_child_start_still_settles_its_registry_row() {
             .any(|task| task.task_id == "bg-snapshot")
     );
 }
+
+#[test]
+#[serial]
+fn ambiguous_snapshot_occurrences_never_bind_a_later_row() {
+    let _restore = RestoreBgAtoms::empty();
+    let mut state = make_fold_test_state();
+    let mut old = origin("shared-child", 71);
+    let new = origin("shared-child", 72);
+    let started = || AcpEventData::SubagentStarted {
+        agent_id: "shared-child".into(),
+        agent_name: "coder".into(),
+        is_background: true,
+        parent_tool_call_id: None,
+    };
+
+    // 两个 child occurrence 都先于任何 registry 行；快照只有一行，无法证明
+    // 哪个 occurrence 属于它。
+    dispatch_run(&mut state, &old, started());
+    dispatch_run(&mut state, &new, started());
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskSnapshot {
+            tasks: vec![task_entry("bg-current", "shared-child")],
+            revision: Some(1),
+            source: BgTaskSnapshotSource::Live,
+        },
+    );
+    {
+        let identities = BG_TASK_IDENTITY.state();
+        let identities = identities.read();
+        assert_eq!(identities["bg-current"].run_order, None);
+        assert_eq!(
+            identities["bg-current"].run_floor,
+            Some(72),
+            "歧义 occurrence 只能留下下界，不能选定 run"
+        );
+    }
+    // 后续新行也不得取走任一条旧 occurrence。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskStarted(task_entry("bg-next", "shared-child")),
+    );
+    {
+        let identities = BG_TASK_IDENTITY.state();
+        let identities = identities.read();
+        assert_eq!(identities["bg-next"].run_order, None);
+        assert_eq!(identities["bg-next"].run_floor, Some(72));
+    }
+    // 延迟的旧 Stop 同样不得结算任一可见行。
+    old.sequence += 1;
+    dispatch_run(
+        &mut state,
+        &old,
+        AcpEventData::SubagentStopped {
+            agent_id: "shared-child".into(),
+            result: "old done".into(),
+            is_error: false,
+        },
+    );
+    {
+        let live = BG_LIVE_DETAIL.state();
+        let live = live.read();
+        assert_eq!(
+            live["bg-current"].status,
+            crate::kit::atoms::BgLiveStatus::Running
+        );
+        assert_eq!(
+            live["bg-next"].status,
+            crate::kit::atoms::BgLiveStatus::Running
+        );
+    }
+    let tasks = BG_TASKS.state();
+    let tasks = tasks.read();
+    assert!(tasks.iter().any(|task| task.task_id == "bg-current"));
+    assert!(tasks.iter().any(|task| task.task_id == "bg-next"));
+}

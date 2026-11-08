@@ -77,6 +77,16 @@ pub fn bind_linked_agent_on_subagent_started(
     Some(task_id)
 }
 
+/// A child occurrence selected for a registry row.
+#[derive(Clone, Copy)]
+pub(crate) enum PendingChildRun {
+    /// The occurrence belongs to this row; bind it unless it already stopped.
+    Bind(crate::kit::child_run_routing::UnboundStart),
+    /// Every occurrence at or below this watermark predates the row. A full
+    /// snapshot uses it when rows and pending occurrences cannot be paired.
+    Floor(u64),
+}
+
 /// Registry ownership is authoritative even if SubagentStarted arrives first.
 /// Never infer this edge from the most recently displayed unbound task.
 ///
@@ -86,7 +96,7 @@ pub fn bind_linked_agent_on_subagent_started(
 pub(crate) fn bind_registered_child(
     task_id: &str,
     child_thread_id: Option<&str>,
-    pending: Option<crate::kit::child_run_routing::UnboundStart>,
+    pending: Option<PendingChildRun>,
 ) {
     let Some(child) = child_thread_id else {
         return;
@@ -105,30 +115,40 @@ pub(crate) fn bind_registered_child(
     if let Some(detail) = BG_LIVE_DETAIL.state().write().get_mut(task_id) {
         detail.agent_id = Some(child.to_owned());
     }
-    let pending_run = pending.map(|run| run.run_order);
-    let already_owned = pending_run.is_some_and(|run| {
-        BG_TASK_IDENTITY
-            .state()
-            .read()
-            .iter()
-            .any(|(id, identity)| {
-                id != task_id
-                    && identity.agent_id.as_deref() == Some(child)
-                    && identity.run_order == Some(run)
-            })
-    });
-    // A run that already stopped before its row appeared cannot own this row;
-    // the row only learns that everything at or below it is older.
+    let pending_run = match pending {
+        Some(PendingChildRun::Bind(run)) => Some(run),
+        _ => None,
+    };
+    let pending_floor = match pending {
+        Some(PendingChildRun::Floor(floor)) => Some(floor),
+        _ => None,
+    };
+    let pending_order = pending_run.map(|run| run.run_order);
+    // This row may already know a bound run or a floor from an earlier delta.
+    let own_known = {
+        let identities = BG_TASK_IDENTITY.state();
+        let identities = identities.read();
+        identities.get(task_id).and_then(|identity| {
+            identity
+                .run_order
+                .into_iter()
+                .chain(identity.run_floor)
+                .max()
+        })
+    };
+    let observed = highest_known_run(child, Some(task_id)).max(own_known);
+    // A run that already stopped, or one at or below a run another row (or this
+    // row) already owns/knows, cannot own this row; the row only learns that
+    // everything at or below it is older.
     if let Some(run) = pending_run
-        && !pending.is_some_and(|run| run.stopped)
-        && !already_owned
+        && !run.stopped
+        && observed.is_none_or(|known| run.run_order > known)
     {
-        bind_task_run(task_id, run);
+        bind_task_run(task_id, run.run_order);
         return;
     }
-    let observed = highest_known_run(child, Some(task_id));
     // An occurrence already owned by another row proves this row is newer.
-    let floor = observed.max(pending_run);
+    let floor = observed.max(pending_order).max(pending_floor);
     if let Some(floor) = floor
         && let Some(identity) = BG_TASK_IDENTITY.state().write().get_mut(task_id)
     {

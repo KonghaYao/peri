@@ -6,23 +6,26 @@
 use super::*;
 use crate::i18n;
 use crate::kit::acp_events::SessionPhase;
-use crate::kit::acp_types::{BgTaskEntry, BgTaskSnapshotSource};
+use crate::kit::acp_types::{AcpEventData, AcpEventWithEpoch, BgTaskEntry, BgTaskSnapshotSource};
 use crate::kit::atoms::{
     ACP_CLIENT_HANDLE, ACTIVE_SESSION_ID, BG_DISPLAY, BG_LIVE_DETAIL, BG_TASK_IDENTITY,
-    BG_TASK_REVISION, BG_TASKS, BgLiveStatus, NOTIFICATION, PROGRAM_STATUS,
+    BG_TASK_REVISION, BG_TASKS, BRIDGE_RESET_COUNTER, BgLiveStatus, LOCAL_EVENT_TX, NOTIFICATION,
+    PROGRAM_STATUS,
 };
 use crate::kit::bg_task_identity::{
-    METADATA_TEXT_BYTES, RECENT_METADATA_BYTES, RECENT_METADATA_ENTRIES, bounded_label,
-    protected_task_ids, prune_metadata, upsert_identity_from_started,
+    METADATA_TEXT_BYTES, PendingChildRun, RECENT_METADATA_BYTES, RECENT_METADATA_ENTRIES,
+    bounded_label, protected_task_ids, prune_metadata, upsert_identity_from_started,
 };
 use crate::kit::bg_task_live::{
     mark_task_cancelled, mark_task_completed, seed_live_from_running_snapshot,
     seed_live_from_started, seed_live_from_terminal_snapshot, seed_unobserved_snapshot,
 };
 use crate::kit::bg_task_status::BgTaskStatus;
+use crate::kit::child_run_routing::ChildRunRouting;
 use crate::kit::program_status::{self, ProgramStatus};
 use fluent_bundle::FluentValue;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::time::Duration;
 
 // ── §4.7 Background Tasks ──
@@ -31,6 +34,15 @@ pub(crate) fn apply_bg_task_snapshot(
     tasks: &[BgTaskEntry],
     revision: Option<u64>,
     source: BgTaskSnapshotSource,
+) -> bool {
+    apply_bg_task_snapshot_with_routing(tasks, revision, source, None)
+}
+
+fn apply_bg_task_snapshot_with_routing(
+    tasks: &[BgTaskEntry],
+    revision: Option<u64>,
+    source: BgTaskSnapshotSource,
+    routing: Option<&mut ChildRunRouting>,
 ) -> bool {
     if let (Some(incoming), Some(current)) = (revision, *BG_TASK_REVISION.state().read())
         && incoming < current
@@ -52,6 +64,14 @@ pub(crate) fn apply_bg_task_snapshot(
             }
         }
     }
+    // The full snapshot is the only upper bound on what is currently active.
+    // Consume child occurrences that this snapshot can account for before the
+    // per-row binding below; otherwise an old occurrence stays queued and the
+    // next registry Started would claim it as its own run.
+    let pending = match (live_source, routing) {
+        (true, Some(routing)) => snapshot_pending_runs(&tasks, routing),
+        _ => HashMap::new(),
+    };
     // 从快照全量构造 BG_DISPLAY 条目
     let entries: Vec<crate::kit::atoms::BgDisplayEntry> = tasks
         .iter()
@@ -113,7 +133,7 @@ pub(crate) fn apply_bg_task_snapshot(
         crate::kit::bg_task_identity::bind_registered_child(
             &t.task_id,
             t.child_thread_id.as_deref(),
-            None,
+            pending.get(&t.task_id).copied(),
         );
     }
     if live_source {
@@ -121,6 +141,71 @@ pub(crate) fn apply_bg_task_snapshot(
     }
     prune_metadata();
     true
+}
+
+/// Pair live snapshot rows with child occurrences already seen without a row.
+///
+/// One visible row and one pending occurrence is the Started-first case the
+/// occurrence exists for. Anything else is ambiguous: retire the occurrences
+/// into a floor so they cannot be claimed by a later, unrelated row, while
+/// occurrences newer than every visible row stay queued for a row that has not
+/// arrived yet.
+fn snapshot_pending_runs(
+    tasks: &[BgTaskEntry],
+    routing: &mut ChildRunRouting,
+) -> HashMap<String, PendingChildRun> {
+    let mut rows_by_child: HashMap<&str, Vec<&str>> = HashMap::new();
+    for task in tasks {
+        let Some(child) = task.child_thread_id.as_deref() else {
+            continue;
+        };
+        if BgTaskStatus::classify(task.status.as_deref()).is_active() {
+            rows_by_child.entry(child).or_default().push(&task.task_id);
+        }
+    }
+    let mut pending = HashMap::new();
+    for (child, task_ids) in rows_by_child {
+        let occurrences = routing.drain_unbound_starts(child);
+        if occurrences.is_empty() {
+            continue;
+        }
+        let runs: Vec<Option<u64>> = task_ids
+            .iter()
+            .map(|task_id| {
+                BG_TASK_IDENTITY
+                    .state()
+                    .read()
+                    .get(*task_id)
+                    .and_then(|identity| identity.run_order)
+            })
+            .collect();
+        let bound_ceiling = runs.iter().flatten().copied().max();
+        let (future, retired): (Vec<_>, Vec<_>) = match bound_ceiling {
+            Some(ceiling) => occurrences
+                .into_iter()
+                .partition(|run| run.run_order > ceiling),
+            None => (Vec::new(), occurrences),
+        };
+        for run in future {
+            routing.restore_unbound_start(child, run);
+        }
+        if retired.is_empty() {
+            continue;
+        }
+        let max_retired = retired
+            .iter()
+            .map(|run| run.run_order)
+            .max()
+            .unwrap_or_default();
+        if task_ids.len() == 1 && runs[0].is_none() && retired.len() == 1 {
+            pending.insert(task_ids[0].to_owned(), PendingChildRun::Bind(retired[0]));
+        } else {
+            for task_id in task_ids {
+                pending.insert(task_id.to_owned(), PendingChildRun::Floor(max_retired));
+            }
+        }
+    }
+    pending
 }
 
 fn project_task(task: &BgTaskEntry) -> BgTaskEntry {
@@ -243,7 +328,7 @@ pub(crate) fn handle_bg_task_snapshot(
     revision: Option<u64>,
     source: BgTaskSnapshotSource,
 ) {
-    if !apply_bg_task_snapshot(tasks, revision, source) {
+    if !apply_bg_task_snapshot_with_routing(tasks, revision, source, Some(&mut state.child_runs)) {
         return;
     }
     crate::kit::acp_events::render::push_acp_state(state);
@@ -280,7 +365,23 @@ pub(crate) fn request_bg_task_snapshot() {
             return;
         };
         if let Ok(tasks) = serde_json::from_value::<Vec<BgTaskEntry>>(tasks) {
-            apply_bg_task_snapshot(&tasks, revision, BgTaskSnapshotSource::Live);
+            // Re-enter through the bridge queue so this snapshot is reconciled
+            // with child occurrences in event order. Applying it here would
+            // leave the bridge's unbound queue behind the restored rows.
+            if let Some(tx) = LOCAL_EVENT_TX.get() {
+                let _ = tx.send(AcpEventWithEpoch {
+                    child_origin: None,
+                    view_epoch: BRIDGE_RESET_COUNTER.get(),
+                    event: AcpEventData::BgTaskSnapshot {
+                        tasks,
+                        revision,
+                        source: BgTaskSnapshotSource::Live,
+                    },
+                    active_session_id: session_id,
+                });
+            } else {
+                apply_bg_task_snapshot(&tasks, revision, BgTaskSnapshotSource::Live);
+            }
         }
     });
 }
@@ -357,12 +458,17 @@ pub(crate) fn handle_bg_task_started(state: &mut BridgeState, entry: &BgTaskEntr
     crate::kit::bg_task_identity::bind_registered_child(
         &entry.task_id,
         entry.child_thread_id.as_deref(),
-        pending_run,
+        pending_run.map(PendingChildRun::Bind),
     );
-    if let Some(instance_id) = entry
-        .child_thread_id
-        .as_deref()
-        .and_then(|child| state.current_turn.subagent_instance_id(child))
+    // Only a row that consumed this row's child occurrence may adopt the
+    // current turn instance; otherwise it still belongs to an older run whose
+    // Stop has not arrived, and claiming it would hide this row from the new
+    // run's Started.
+    if pending_run.is_some()
+        && let Some(instance_id) = entry
+            .child_thread_id
+            .as_deref()
+            .and_then(|child| state.current_turn.subagent_instance_id(child))
     {
         let already_claimed = BG_LIVE_DETAIL.state().read().iter().any(|(task, detail)| {
             task != &entry.task_id && detail.subagent_instance_id.as_deref() == Some(instance_id)
