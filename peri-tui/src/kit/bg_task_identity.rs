@@ -79,20 +79,20 @@ pub fn bind_linked_agent_on_subagent_started(
 
 /// Registry ownership is authoritative even if SubagentStarted arrives first.
 /// Never infer this edge from the most recently displayed unbound task.
-pub(crate) fn bind_registered_child(task_id: &str, child_thread_id: Option<&str>) {
+///
+/// `pending` is the child occurrence observed before this row existed. It
+/// must be bound here: the registry row carries no run identity, and an
+/// occurrence that is only remembered as a display instance cannot route Stops.
+pub(crate) fn bind_registered_child(
+    task_id: &str,
+    child_thread_id: Option<&str>,
+    pending: Option<crate::kit::child_run_routing::UnboundStart>,
+) {
     let Some(child) = child_thread_id else {
         return;
     };
-    let observed = highest_known_run(child, Some(task_id));
     if let Some(identity) = BG_TASK_IDENTITY.state().write().get_mut(task_id) {
         identity.agent_id = Some(child.to_owned());
-        if let Some(observed) = observed {
-            identity.run_floor = Some(
-                identity
-                    .run_floor
-                    .map_or(observed, |floor| floor.max(observed)),
-            );
-        }
     }
     if let Some(row) = BG_DISPLAY
         .state()
@@ -104,6 +104,39 @@ pub(crate) fn bind_registered_child(task_id: &str, child_thread_id: Option<&str>
     }
     if let Some(detail) = BG_LIVE_DETAIL.state().write().get_mut(task_id) {
         detail.agent_id = Some(child.to_owned());
+    }
+    let pending_run = pending.map(|run| run.run_order);
+    let already_owned = pending_run.is_some_and(|run| {
+        BG_TASK_IDENTITY
+            .state()
+            .read()
+            .iter()
+            .any(|(id, identity)| {
+                id != task_id
+                    && identity.agent_id.as_deref() == Some(child)
+                    && identity.run_order == Some(run)
+            })
+    });
+    // A run that already stopped before its row appeared cannot own this row;
+    // the row only learns that everything at or below it is older.
+    if let Some(run) = pending_run
+        && !pending.is_some_and(|run| run.stopped)
+        && !already_owned
+    {
+        bind_task_run(task_id, run);
+        return;
+    }
+    let observed = highest_known_run(child, Some(task_id));
+    // An occurrence already owned by another row proves this row is newer.
+    let floor = observed.max(pending_run);
+    if let Some(floor) = floor
+        && let Some(identity) = BG_TASK_IDENTITY.state().write().get_mut(task_id)
+    {
+        identity.run_floor = Some(
+            identity
+                .run_floor
+                .map_or(floor, |current| current.max(floor)),
+        );
     }
 }
 
@@ -158,6 +191,18 @@ pub(crate) fn bind_task_run(task_id: &str, run_order: u64) {
 /// missed, so the newest row for the child may claim it; an older or equal run
 /// without an exact owner is stale and must never settle a newer task.
 pub(crate) fn task_id_for_child_run(agent_id: &str, run_order: u64) -> Option<String> {
+    task_id_for_child_run_observed(agent_id, run_order, None)
+}
+
+/// `pending_ceiling` is the highest unbound child occurrence already observed.
+/// When it reaches `run_order`, the matching row may still be missing and the
+/// newest row belongs to a different occurrence: falling back would settle the
+/// wrong task, so no owner is returned.
+pub(crate) fn task_id_for_child_run_observed(
+    agent_id: &str,
+    run_order: u64,
+    pending_ceiling: Option<u64>,
+) -> Option<String> {
     let identities = BG_TASK_IDENTITY.state();
     let identities = identities.read();
     if let Some(task_id) = identities
@@ -168,6 +213,9 @@ pub(crate) fn task_id_for_child_run(agent_id: &str, run_order: u64) -> Option<St
         .map(|(task_id, _)| task_id.clone())
     {
         return Some(task_id);
+    }
+    if pending_ceiling.is_some_and(|known| known >= run_order) {
+        return None;
     }
     let stale = identities.iter().any(|(_, identity)| {
         identity.agent_id.as_deref() == Some(agent_id)
@@ -238,23 +286,33 @@ pub fn task_id_for_agent_id(agent_id: &str) -> Option<String> {
         .map(|e| e.id.clone())
 }
 
-pub fn with_bg_display_for_agent<F>(agent_id: &str, f: F)
+/// Update the display row of a concrete child occurrence. Reusing the latest
+/// row here would relabel a newer task with an old run's tool activity.
+pub fn with_bg_display_for_child_run<F>(agent_id: &str, run_order: Option<u64>, f: F)
 where
     F: FnOnce(&mut BgDisplayEntry),
 {
-    if let Some(task_id) = task_id_for_agent_id(agent_id) {
-        let display_store = BG_DISPLAY.state();
-        let mut display = display_store.write();
-        if let Some(entry) = display.iter_mut().find(|e| e.id == task_id) {
-            f(entry);
-            if let Some(tool) = &mut entry.current_tool {
-                *tool = bounded_label(tool);
-            }
-            return;
-        }
-    }
+    let task_id = match run_order {
+        Some(run_order) => task_id_for_child_run(agent_id, run_order),
+        None => task_id_for_agent_id(agent_id),
+    };
+    let Some(task_id) = task_id else {
+        return;
+    };
     let display_store = BG_DISPLAY.state();
     let mut display = display_store.write();
+    if let Some(entry) = display.iter_mut().find(|e| e.id == task_id) {
+        f(entry);
+        if let Some(tool) = &mut entry.current_tool {
+            *tool = bounded_label(tool);
+        }
+        return;
+    }
+    // Legacy events without an occurrence may still update a row that was only
+    // linked by child identity; run-scoped events must never guess.
+    if run_order.is_some() {
+        return;
+    }
     if let Some(entry) = display
         .iter_mut()
         .find(|e| e.linked_agent_id.as_deref() == Some(agent_id) || e.id == agent_id)

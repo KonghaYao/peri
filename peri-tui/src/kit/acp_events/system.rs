@@ -139,9 +139,10 @@ pub(super) fn handle_trusted_system_reminder(
     state: &mut BridgeState,
     reminder: peri_acp_types::system_reminder::SystemReminder,
     source_agent_id: Option<&str>,
+    run_order: Option<u64>,
 ) {
     if let Some(agent_id) = source_agent_id {
-        route_child_reminder(state, &reminder, agent_id, true);
+        route_child_reminder(state, &reminder, agent_id, true, run_order);
         return;
     }
     if let Some(mut vm) = TuiSystemReminder::from_trusted_structured(
@@ -161,7 +162,7 @@ pub(super) fn handle_system_reminder(
     source_agent_id: Option<&str>,
 ) {
     if let Some(agent_id) = source_agent_id {
-        route_child_reminder(state, reminder, agent_id, false);
+        route_child_reminder(state, reminder, agent_id, false, None);
         return;
     }
     if let Some(mut vm) = TuiSystemReminder::from_wire(reminder.clone()) {
@@ -180,6 +181,7 @@ fn route_child_reminder(
     reminder: &peri_acp_types::system_reminder::SystemReminder,
     agent_id: &str,
     trusted: bool,
+    run_order: Option<u64>,
 ) {
     use crate::kit::acp_types::subagent_preview::{FIELD_BYTES, text};
     let background = crate::kit::atoms::BG_AGENT_IDS
@@ -229,7 +231,7 @@ fn route_child_reminder(
     let Some(mut vm) = projected else { return };
     vm.attach_relay(resolve_reminder_relay(state, Some(agent_id)));
     if background {
-        crate::kit::bg_task_live::append_bg_system_reminder(agent_id, vm, omitted);
+        crate::kit::bg_task_live::append_bg_system_reminder(agent_id, run_order, vm, omitted);
     } else {
         state
             .current_turn

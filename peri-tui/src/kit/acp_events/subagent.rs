@@ -4,9 +4,9 @@ use super::*;
 use crate::kit::atoms::{BG_AGENT_IDS, BG_TASKS};
 use crate::kit::bg_task_identity::{
     bind_linked_agent_on_subagent_started, bind_task_run, is_latest_child_run,
-    task_id_for_agent_id, task_id_for_child_run,
+    task_id_for_agent_id, task_id_for_child_run_observed,
 };
-use crate::kit::bg_task_live::{handle_bg_subagent_stopped_in_run, init_agent_live_detail};
+use crate::kit::bg_task_live::{handle_bg_subagent_stopped_on_task, init_agent_live_detail};
 use peri_acp_types::event::ChildEventOrigin;
 
 pub(super) fn handle_subagent_started(
@@ -48,6 +48,11 @@ pub(super) fn handle_subagent_started(
             if let Some(origin) = origin {
                 bind_task_run(&task_id, origin.run_order);
             }
+        } else if let Some(origin) = origin {
+            // The registry row for this occurrence has not arrived yet. Keep
+            // the full occurrence, not just the display instance, so the row
+            // can bind it and route later Stops exactly.
+            state.child_runs.note_unbound_start(origin);
         }
     }
     state.variant = 1;
@@ -72,25 +77,27 @@ pub(super) fn handle_subagent_stopped(
         "SubagentStopped: marking SubAgentGroup as done"
     );
     state.current_turn.stop_subagent(agent_id, is_error, result);
+    if let Some(origin) = origin {
+        // Keep the occurrence terminal for a registry row that appears later;
+        // it must not be rebound as a live run.
+        state
+            .child_runs
+            .note_unbound_stop(agent_id, origin.run_order);
+    }
+    let pending_ceiling = state.child_runs.pending_run_ceiling(agent_id);
     let task_id = match origin {
-        Some(origin) => task_id_for_child_run(agent_id, origin.run_order),
+        Some(origin) => task_id_for_child_run_observed(agent_id, origin.run_order, pending_ceiling),
         None => task_id_for_agent_id(agent_id),
     };
     // A snapshot can bind the child before/without a live Started event; the
-    // task identity alone is enough to settle the exact run.
-    if task_id.is_some() || BG_AGENT_IDS.state().read().contains(agent_id) {
-        handle_bg_subagent_stopped_in_run(
-            agent_id,
-            origin.map(|origin| origin.run_order),
-            result,
-            is_error,
-        );
-        if let Some(task_id) = task_id.as_deref() {
-            BG_TASKS
-                .state()
-                .write()
-                .retain(|task| task.task_id != task_id);
-        }
+    // task identity alone is enough to settle the exact run. When no row owns
+    // the occurrence, settling the newest row would end a newer task.
+    if let Some(task_id) = task_id.as_deref() {
+        handle_bg_subagent_stopped_on_task(task_id, result, is_error);
+        BG_TASKS
+            .state()
+            .write()
+            .retain(|task| task.task_id != task_id);
     }
     // A stale Stop must not unregister the child while a newer run is live.
     let stale_stop = origin.is_some_and(|origin| !is_latest_child_run(agent_id, origin.run_order));

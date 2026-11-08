@@ -24,7 +24,12 @@ pub(crate) fn dispatch_trusted_structured_for_bridge_with_origin(
             source_agent_id,
             ..
         } => {
-            system::handle_trusted_system_reminder(state, reminder, source_agent_id.as_deref());
+            system::handle_trusted_system_reminder(
+                state,
+                reminder,
+                source_agent_id.as_deref(),
+                child_origin.map(|origin| origin.run_order),
+            );
             std::mem::take(&mut state.publication_intent)
         }
         other => dispatch_for_bridge_with_origin(state, &other, child_origin),

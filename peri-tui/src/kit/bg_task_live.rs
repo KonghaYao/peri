@@ -408,18 +408,28 @@ where
         Some(run_order) => task_id_for_child_run(agent_id, run_order),
         None => task_id_for_agent_id(agent_id),
     };
+    with_running_live_detail(task_id.as_deref(), f);
+}
+
+/// Apply `f` to the exact task's running detail. Callers that already resolved
+/// the occurrence must not resolve again: a second fallback would revive the
+/// newest-row guess the first resolution rejected.
+pub(crate) fn with_running_live_detail<F>(task_id: Option<&str>, f: F)
+where
+    F: FnOnce(&str, &mut BgLiveDetail),
+{
     let Some(task_id) = task_id else {
         return;
     };
     let live = BG_LIVE_DETAIL.state();
     let mut map = live.write();
-    if let Some(detail) = map.get_mut(&task_id) {
+    if let Some(detail) = map.get_mut(task_id) {
         if detail.status != BgLiveStatus::Running {
             return;
         }
         flush_detail(detail);
         detail.stream = None;
-        f(&task_id, detail);
+        f(task_id, detail);
         preview::touch(detail);
     }
     preview::enforce(&mut map);
@@ -722,10 +732,11 @@ pub fn append_bg_reasoning_chunk_in_run(
 
 pub(crate) fn append_bg_system_reminder(
     agent_id: &str,
+    run_order: Option<u64>,
     reminder: crate::kit::tui_render_unit::TuiSystemReminder,
     omitted: bool,
 ) {
-    with_live_detail_for_agent(agent_id, None, |_, detail| {
+    with_live_detail_for_agent(agent_id, run_order, |_, detail| {
         detail.preview_omitted |= omitted;
         detail
             .nested_units
@@ -744,19 +755,32 @@ pub fn handle_bg_subagent_stopped_in_run(
     is_error: bool,
 ) {
     with_live_detail_for_agent(agent_id, run_order, |_, detail| {
-        detail.subagent_result = Some(preview::text(
-            result,
-            preview::FIELD_BYTES,
-            &mut detail.preview_omitted,
-        ));
-        detail.subagent_is_error = is_error;
-        detail.status = if is_error {
-            BgLiveStatus::Failed
-        } else {
-            BgLiveStatus::Succeeded
-        };
-        preview::finish(detail);
+        settle_subagent_detail(detail, result, is_error);
     });
+}
+
+/// Settle the detail of a task whose occurrence was already resolved. Kept
+/// separate from `handle_bg_subagent_stopped_in_run` so a stale Stop cannot
+/// re-resolve through the newest-row fallback.
+pub(crate) fn handle_bg_subagent_stopped_on_task(task_id: &str, result: &str, is_error: bool) {
+    with_running_live_detail(Some(task_id), |_, detail| {
+        settle_subagent_detail(detail, result, is_error);
+    });
+}
+
+fn settle_subagent_detail(detail: &mut BgLiveDetail, result: &str, is_error: bool) {
+    detail.subagent_result = Some(preview::text(
+        result,
+        preview::FIELD_BYTES,
+        &mut detail.preview_omitted,
+    ));
+    detail.subagent_is_error = is_error;
+    detail.status = if is_error {
+        BgLiveStatus::Failed
+    } else {
+        BgLiveStatus::Succeeded
+    };
+    preview::finish(detail);
 }
 
 pub fn mark_task_completed(

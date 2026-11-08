@@ -113,6 +113,7 @@ pub(crate) fn apply_bg_task_snapshot(
         crate::kit::bg_task_identity::bind_registered_child(
             &t.task_id,
             t.child_thread_id.as_deref(),
+            None,
         );
     }
     if live_source {
@@ -347,9 +348,16 @@ pub(crate) fn handle_bg_task_started(state: &mut BridgeState, entry: &BgTaskEntr
         display.push(display_entry);
     }
     drop(display);
+    // The child Started may have arrived first (separate async source). Consume
+    // its occurrence here so the row owns a concrete run, not only an instance.
+    let pending_run = entry
+        .child_thread_id
+        .as_deref()
+        .and_then(|child| state.child_runs.take_unbound_start(child));
     crate::kit::bg_task_identity::bind_registered_child(
         &entry.task_id,
         entry.child_thread_id.as_deref(),
+        pending_run,
     );
     if let Some(instance_id) = entry
         .child_thread_id

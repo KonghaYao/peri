@@ -5,7 +5,7 @@ use super::live_tool_links;
 use super::*;
 use crate::kit::acp_types::ToolCardAccumulator;
 use crate::kit::atoms::BG_AGENT_IDS;
-use crate::kit::bg_task_identity::{bounded_label, with_bg_display_for_agent};
+use crate::kit::bg_task_identity::{bounded_label, with_bg_display_for_child_run};
 use crate::kit::bg_task_live::{handle_bg_tool_ended_in_run, handle_bg_tool_started_in_run};
 use crate::kit::retained_bytes::{SeenAllocations, retained_unit_bytes};
 use crate::kit::stream_data::{TuiToolEnded, TuiToolStarted};
@@ -42,7 +42,7 @@ pub(super) fn handle_tool_started_in_run(
         // bg sub-agent: TurnSuspended 后 SubAgentAccumulator 已被清除，
         // 后续 bg 工具事件仅更新 BG_DISPLAY，不走 start_subagent_tool
         if BG_AGENT_IDS.state().read().contains(agent_id) {
-            with_bg_display_for_agent(agent_id, |entry| {
+            with_bg_display_for_child_run(agent_id, run_order, |entry| {
                 entry.current_tool = Some(bounded_label(&ts.tool_name));
             });
             handle_bg_tool_started_in_run(
@@ -139,7 +139,7 @@ pub(super) fn handle_tool_ended_in_run(
     let _todo_advanced = if let Some(agent_id) = te.agent_id.as_deref() {
         // bg sub-agent 不生成消息卡片，但仍需在成功结束时推进 Todo 基线。
         if BG_AGENT_IDS.state().read().contains(agent_id) {
-            with_bg_display_for_agent(agent_id, |entry| {
+            with_bg_display_for_child_run(agent_id, run_order, |entry| {
                 entry.current_tool = None;
                 entry.tool_count += 1;
             });

@@ -13,6 +13,17 @@ struct ActiveRun {
     background: bool,
 }
 
+/// A background child occurrence seen before its registry task row exists.
+///
+/// The registry row carries no run identity, so the occurrence has to survive
+/// until that row appears; otherwise the first Stop can only fall back to the
+/// newest child row.
+#[derive(Clone, Copy)]
+pub(crate) struct UnboundStart {
+    pub run_order: u64,
+    pub stopped: bool,
+}
+
 /// Identities scale with observed live executions. Retired display identities are bounded.
 #[derive(Default)]
 pub(crate) struct ChildRunRouting {
@@ -21,6 +32,56 @@ pub(crate) struct ChildRunRouting {
     // An unknown first Start older than this bounded window expires its preview.
     // No total arrival order across child pumps or business completion is implied.
     retired_floor: u64,
+    // Starts whose registry row had not arrived yet. Bounded like retirement.
+    unbound: VecDeque<(String, UnboundStart)>,
+}
+
+impl ChildRunRouting {
+    /// Remember a background start that could not bind to a task row yet.
+    pub(crate) fn note_unbound_start(&mut self, origin: &ChildEventOrigin) {
+        if self.unbound.iter().any(|(child, run)| {
+            child == &origin.child_thread_id && run.run_order == origin.run_order
+        }) {
+            return;
+        }
+        self.unbound.push_back((
+            origin.child_thread_id.clone(),
+            UnboundStart {
+                run_order: origin.run_order,
+                stopped: false,
+            },
+        ));
+        while self.unbound.len() > RETIRED_RUNS {
+            self.unbound.pop_front();
+        }
+    }
+
+    /// Mark a known unbound occurrence terminal without discarding its floor.
+    pub(crate) fn note_unbound_stop(&mut self, child: &str, run_order: u64) {
+        if let Some((_, run)) = self
+            .unbound
+            .iter_mut()
+            .find(|(id, run)| id == child && run.run_order == run_order)
+        {
+            run.stopped = true;
+        }
+    }
+
+    /// Oldest unbound occurrence for a registry row, FIFO by start order.
+    pub(crate) fn take_unbound_start(&mut self, child: &str) -> Option<UnboundStart> {
+        let index = self.unbound.iter().position(|(id, _)| id == child)?;
+        self.unbound.remove(index).map(|(_, run)| run)
+    }
+
+    /// Highest occurrence observed for the child before a row was created.
+    /// A Stop at or below it cannot claim that row.
+    pub(crate) fn pending_run_ceiling(&self, child: &str) -> Option<u64> {
+        self.unbound
+            .iter()
+            .filter(|(id, _)| id == child)
+            .map(|(_, run)| run.run_order)
+            .max()
+    }
 }
 
 /// Business task settlement uses its own registry ownership, not preview lifetime.

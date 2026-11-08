@@ -34,7 +34,7 @@ fn reminder() -> SystemReminder {
 
 fn deliver(state: &mut BridgeState, value: &SystemReminder, child: Option<&str>, trusted: bool) {
     if trusted {
-        handle_trusted_system_reminder(state, value.clone(), child);
+        handle_trusted_system_reminder(state, value.clone(), child, None);
     } else {
         handle_system_reminder(state, value, child);
     }

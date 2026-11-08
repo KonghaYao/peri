@@ -218,3 +218,233 @@ async fn child_origin_new_run_without_old_stop_and_same_session_reset_are_isolat
     atoms::BG_AGENT_IDS.set(old_agent_ids);
     atoms::NOTIFICATION.set(old_notification);
 }
+
+fn shared_child_run(order: u64) -> ChildEventOrigin {
+    ChildEventOrigin {
+        child_thread_id: "shared-child".into(),
+        execution: ExecutionBinding {
+            turn_id: TurnId::new(),
+            attempt_id: AttemptId::new(),
+        },
+        run_order: order,
+        sequence: 1,
+    }
+}
+
+fn shared_child_start() -> AcpEventData {
+    AcpEventData::SubagentStarted {
+        agent_id: "shared-child".into(),
+        agent_name: "worker".into(),
+        is_background: true,
+        parent_tool_call_id: None,
+    }
+}
+
+fn registry_task(task_id: &str, child: &str) -> AcpEventData {
+    AcpEventData::BgTaskStarted(crate::kit::acp_types::BgTaskEntry {
+        task_id: task_id.into(),
+        child_thread_id: Some(child.into()),
+        kind: "agent".into(),
+        summary: "worker".into(),
+        started_at: String::new(),
+        pid: None,
+        revision: None,
+        status: Some("running".into()),
+    })
+}
+
+fn registry_completion(task_id: &str) -> AcpEventData {
+    AcpEventData::BgTaskCompleted {
+        task_id: task_id.into(),
+        kind: Some("agent".into()),
+        success: true,
+        duration_ms: 1,
+        output_preview: Some("old result".into()),
+        revision: None,
+    }
+}
+
+/// The registry subscription and the child event pump are independent async
+/// sources. Started-first is reachable and must not lose the occurrence.
+#[tokio::test]
+#[serial]
+async fn registry_row_arriving_after_child_start_binds_the_occurrence() {
+    let _restore = ReplayAtomsGuard::new();
+    let old_active = atoms::ACTIVE_SESSION_ID.state().read().clone();
+    let old_reset = atoms::BRIDGE_RESET_COUNTER.get();
+    let old_tasks = atoms::BG_TASKS.state().read().clone();
+    let old_display = atoms::BG_DISPLAY.state().read().clone();
+    let old_live = atoms::BG_LIVE_DETAIL.state().read().clone();
+    let old_identity = atoms::BG_TASK_IDENTITY.state().read().clone();
+    let old_agent_ids = atoms::BG_AGENT_IDS.state().read().clone();
+    let old_notification = atoms::NOTIFICATION.state().write().take();
+    let old_program = *atoms::PROGRAM_STATUS.state().read();
+    let old_revision = *atoms::BG_TASK_REVISION.state().read();
+
+    let epoch = old_reset.wrapping_add(1);
+    atoms::ACTIVE_SESSION_ID.set("s1".into());
+    atoms::BRIDGE_RESET_COUNTER.set(epoch);
+    let (tx, rx) = mpsc::channel(32);
+    let (observed_tx, mut observed) = mpsc::unbounded_channel();
+    let shutdown = CancellationToken::new();
+    let bridge = spawn_acp_bridge_observed(rx, shutdown.clone(), observed_tx);
+
+    let mut old = shared_child_run(31);
+    let mut current = shared_child_run(32);
+    // 1. 旧 child Started 先到，registry 行尚不存在。
+    assert!(send(&tx, &mut observed, shared_child_start(), &old, epoch).await);
+    // 2. 旧 registry Started。
+    assert!(
+        send(
+            &tx,
+            &mut observed,
+            registry_task("bg-old", "shared-child"),
+            &old,
+            epoch
+        )
+        .await
+    );
+    assert_eq!(
+        atoms::BG_TASK_IDENTITY.state().read()["bg-old"].run_order,
+        Some(31),
+        "registry 行出现时必须回填暂存 occurrence"
+    );
+    // 3. 旧 registry completion。
+    assert!(
+        send(
+            &tx,
+            &mut observed,
+            registry_completion("bg-old"),
+            &old,
+            epoch
+        )
+        .await
+    );
+    // 4. 新 registry Started。
+    assert!(
+        send(
+            &tx,
+            &mut observed,
+            registry_task("bg-new", "shared-child"),
+            &old,
+            epoch
+        )
+        .await
+    );
+    assert_eq!(
+        atoms::BG_TASK_IDENTITY.state().read()["bg-new"].run_floor,
+        Some(31),
+        "新行必须知道旧 occurrence，旧 Stop 才不能回落"
+    );
+    // 5. 旧 child Stop（真实递增 sequence）。
+    old.sequence = 2;
+    assert!(
+        send(
+            &tx,
+            &mut observed,
+            AcpEventData::SubagentStopped {
+                agent_id: "shared-child".into(),
+                result: "old done".into(),
+                is_error: false,
+            },
+            &old,
+            epoch
+        )
+        .await
+    );
+    assert_eq!(
+        atoms::BG_LIVE_DETAIL.state().read()["bg-new"].status,
+        atoms::BgLiveStatus::Running,
+        "旧 Stop 不得结算新任务"
+    );
+    assert!(
+        atoms::BG_TASKS
+            .state()
+            .read()
+            .iter()
+            .any(|task| task.task_id == "bg-new"),
+        "新任务必须保持 active"
+    );
+    assert!(
+        !atoms::BG_TASKS
+            .state()
+            .read()
+            .iter()
+            .any(|task| task.task_id == "bg-old")
+    );
+    // 6. 新 child Started + 文本 + Stop 完整归属新任务。
+    assert!(send(&tx, &mut observed, shared_child_start(), &current, epoch).await);
+    current.sequence = 2;
+    assert!(
+        send(
+            &tx,
+            &mut observed,
+            AcpEventData::TextChunk(TuiTextChunk {
+                text: "new run output".into(),
+                message_id: None,
+                agent_id: Some("shared-child".into()),
+            }),
+            &current,
+            epoch
+        )
+        .await
+    );
+    current.sequence = 3;
+    assert!(
+        send(
+            &tx,
+            &mut observed,
+            AcpEventData::SubagentStopped {
+                agent_id: "shared-child".into(),
+                result: "new done".into(),
+                is_error: false,
+            },
+            &current,
+            epoch
+        )
+        .await
+    );
+    {
+        let live = atoms::BG_LIVE_DETAIL.state();
+        let live = live.read();
+        assert_eq!(live["bg-new"].status, atoms::BgLiveStatus::Succeeded);
+        let text: String = live["bg-new"]
+            .nested_units
+            .iter()
+            .filter_map(|unit| match unit {
+                TuiRenderUnit::TuiAssistantBubble(bubble) => Some(bubble.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "new run output");
+        let old_text: String = live["bg-old"]
+            .nested_units
+            .iter()
+            .filter_map(|unit| match unit {
+                TuiRenderUnit::TuiAssistantBubble(bubble) => Some(bubble.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(old_text, "");
+    }
+    assert!(
+        !atoms::BG_TASKS
+            .state()
+            .read()
+            .iter()
+            .any(|task| task.task_id == "bg-new")
+    );
+
+    shutdown.cancel();
+    bridge.await.unwrap();
+    atoms::ACTIVE_SESSION_ID.set(old_active);
+    atoms::BRIDGE_RESET_COUNTER.set(old_reset);
+    atoms::BG_TASKS.set(old_tasks);
+    atoms::BG_DISPLAY.set(old_display);
+    atoms::BG_LIVE_DETAIL.set(old_live);
+    atoms::BG_TASK_IDENTITY.set(old_identity);
+    atoms::BG_AGENT_IDS.set(old_agent_ids);
+    atoms::NOTIFICATION.set(old_notification);
+    atoms::PROGRAM_STATUS.set(old_program);
+    *atoms::BG_TASK_REVISION.state().write() = old_revision;
+}

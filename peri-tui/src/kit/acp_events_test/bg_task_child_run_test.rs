@@ -263,13 +263,10 @@ fn live_task_snapshot_keeps_child_identity_for_followup_child_events() {
 fn old_child_stop_settles_only_the_previous_run() {
     let _restore = RestoreBgAtoms::empty();
     let mut state = make_fold_test_state();
-    let old_run = origin("shared-child", 31);
-    let new_run = origin("shared-child", 32);
+    let mut old_run = origin("shared-child", 31);
+    let mut new_run = origin("shared-child", 32);
 
-    dispatch_and_notify(
-        &mut state,
-        &AcpEventData::BgTaskStarted(task_entry("bg-old", "shared-child")),
-    );
+    // 旧 child Started 先到：registry 行还不存在，occurrence 只能暂存。
     dispatch_run(
         &mut state,
         &old_run,
@@ -280,12 +277,23 @@ fn old_child_stop_settles_only_the_previous_run() {
             parent_tool_call_id: None,
         },
     );
+    // 旧 registry Started 随后出现，必须把暂存的 occurrence 回填到行上。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskStarted(task_entry("bg-old", "shared-child")),
+    );
     // 新 registry Started 先把新任务行绑定到复用的 child id。
     dispatch_and_notify(
         &mut state,
         &AcpEventData::BgTaskStarted(task_entry("bg-new", "shared-child")),
     );
-    // 旧 Stop 仍按旧 execution origin 到达。
+    assert_eq!(
+        BG_TASK_IDENTITY.state().read()["bg-old"].run_order,
+        Some(31),
+        "registry 行必须绑定 Started 先到的 occurrence"
+    );
+    // 旧 Stop 仍按旧 execution origin 到达（sequence 真实递增）。
+    old_run.sequence += 1;
     dispatch_run(
         &mut state,
         &old_run,
@@ -330,6 +338,7 @@ fn old_child_stop_settles_only_the_previous_run() {
             parent_tool_call_id: None,
         },
     );
+    new_run.sequence += 1;
     dispatch_run(
         &mut state,
         &new_run,
@@ -339,6 +348,7 @@ fn old_child_stop_settles_only_the_previous_run() {
             agent_id: Some("shared-child".into()),
         }),
     );
+    new_run.sequence += 1;
     dispatch_run(
         &mut state,
         &new_run,
@@ -353,10 +363,6 @@ fn old_child_stop_settles_only_the_previous_run() {
         let live = BG_LIVE_DETAIL.state();
         let live = live.read();
         assert_eq!(
-            live["bg-old"].status,
-            crate::kit::atoms::BgLiveStatus::Succeeded
-        );
-        assert_eq!(
             live["bg-new"].status,
             crate::kit::atoms::BgLiveStatus::Succeeded
         );
@@ -369,5 +375,175 @@ fn old_child_stop_settles_only_the_previous_run() {
             .read()
             .iter()
             .any(|task| task.task_id == "bg-new")
+    );
+}
+
+#[test]
+#[serial]
+fn old_child_tool_events_label_only_the_previous_run() {
+    let _restore = RestoreBgAtoms::empty();
+    let mut state = make_fold_test_state();
+    let mut old_run = origin("shared-child", 41);
+
+    dispatch_run(
+        &mut state,
+        &old_run,
+        AcpEventData::SubagentStarted {
+            agent_id: "shared-child".into(),
+            agent_name: "coder".into(),
+            is_background: true,
+            parent_tool_call_id: None,
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskStarted(task_entry("bg-old", "shared-child")),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskStarted(task_entry("bg-new", "shared-child")),
+    );
+
+    old_run.sequence += 1;
+    dispatch_run(
+        &mut state,
+        &old_run,
+        AcpEventData::ToolStarted(crate::kit::stream_data::TuiToolStarted {
+            agent_id: Some("shared-child".into()),
+            tool_id: "tool-old".into(),
+            tool_name: "Read".into(),
+            input_summary: "old input".into(),
+            raw_input: serde_json::Value::Null,
+            origin_message_id: None,
+            origin_readable: None,
+        }),
+    );
+    {
+        let display = BG_DISPLAY.state();
+        let display = display.read();
+        let old = display.iter().find(|row| row.id == "bg-old").unwrap();
+        let new = display.iter().find(|row| row.id == "bg-new").unwrap();
+        assert_eq!(old.current_tool.as_deref(), Some("Read"));
+        assert_eq!(new.current_tool, None, "旧 run 不得改写新任务行标签");
+    }
+
+    old_run.sequence += 1;
+    dispatch_run(
+        &mut state,
+        &old_run,
+        AcpEventData::ToolEnded(crate::kit::stream_data::TuiToolEnded {
+            agent_id: Some("shared-child".into()),
+            tool_id: "tool-old".into(),
+            output_summary: "ok".into(),
+            is_error: false,
+        }),
+    );
+    let display = BG_DISPLAY.state();
+    let display = display.read();
+    let old = display.iter().find(|row| row.id == "bg-old").unwrap();
+    let new = display.iter().find(|row| row.id == "bg-new").unwrap();
+    assert_eq!(old.current_tool, None);
+    assert_eq!(old.tool_count, 1);
+    assert_eq!(new.tool_count, 0, "旧 run 的计数不得累加到新任务行");
+}
+
+#[test]
+#[serial]
+fn old_child_system_reminder_stays_with_its_occurrence() {
+    use peri_acp_types::system_reminder::{
+        ReminderAudience, ReminderAudiences, ReminderCategory, ReminderDelivery, ReminderSeverity,
+        ReminderSource, SYSTEM_REMINDER_VERSION, SystemReminder,
+    };
+
+    let _restore = RestoreBgAtoms::empty();
+    let mut state = make_fold_test_state();
+    let old_run = origin("shared-child", 51);
+
+    dispatch_run(
+        &mut state,
+        &old_run,
+        AcpEventData::SubagentStarted {
+            agent_id: "shared-child".into(),
+            agent_name: "coder".into(),
+            is_background: true,
+            parent_tool_call_id: None,
+        },
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskStarted(task_entry("bg-old", "shared-child")),
+    );
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskStarted(task_entry("bg-new", "shared-child")),
+    );
+    let reminder = SystemReminder {
+        version: SYSTEM_REMINDER_VERSION,
+        category: ReminderCategory::Task,
+        source: ReminderSource("child_task".into()),
+        kind: "update".into(),
+        severity: ReminderSeverity::Info,
+        delivery: ReminderDelivery::Required,
+        audiences: ReminderAudiences(vec![ReminderAudience::Tui]),
+        body: "old run reminder".into(),
+        summary: Some("child update".into()),
+        metadata: serde_json::json!({}),
+    };
+    reminder.validate().unwrap();
+    dispatch_run(
+        &mut state,
+        &old_run,
+        AcpEventData::SystemReminder {
+            reminder,
+            source_agent_id: Some("shared-child".into()),
+            replay: false,
+        },
+    );
+
+    let live = BG_LIVE_DETAIL.state();
+    let live = live.read();
+    let has_reminder = |task: &str| {
+        live[task]
+            .nested_units
+            .iter()
+            .any(|unit| matches!(unit, TuiRenderUnit::TuiSystemReminder(_)))
+    };
+    assert!(has_reminder("bg-old"), "提醒必须归属旧 occurrence");
+    assert!(!has_reminder("bg-new"), "提醒不得泄漏到新任务明细");
+}
+
+#[test]
+#[serial]
+fn lost_child_start_still_settles_its_registry_row() {
+    let _restore = RestoreBgAtoms::empty();
+    let mut state = make_fold_test_state();
+
+    // Child Started 丢失（Lagged）但 registry 行存在：没有任何待绑定
+    // occurrence，Stop 仍可按 registry 归属结算。生产 bridge 会在
+    // ChildRunRouting 拒绝未知 run，此用例单独覆盖 dispatch 层语义。
+    dispatch_and_notify(
+        &mut state,
+        &AcpEventData::BgTaskStarted(task_entry("bg-snapshot", "lost-child")),
+    );
+    let run = origin("lost-child", 61);
+    dispatch_run(
+        &mut state,
+        &run,
+        AcpEventData::SubagentStopped {
+            agent_id: "lost-child".into(),
+            result: "done".into(),
+            is_error: false,
+        },
+    );
+    assert_eq!(
+        BG_LIVE_DETAIL.state().read()["bg-snapshot"].status,
+        crate::kit::atoms::BgLiveStatus::Succeeded
+    );
+    assert!(
+        !BG_TASKS
+            .state()
+            .read()
+            .iter()
+            .any(|task| task.task_id == "bg-snapshot")
     );
 }

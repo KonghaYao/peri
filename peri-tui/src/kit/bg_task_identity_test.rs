@@ -30,7 +30,7 @@ fn test_bind_linked_agent_id_on_bg_subagent_started() {
         completed_at: None,
     });
     upsert_identity_from_started("task-1", "agent", "job", None);
-    bind_registered_child("task-1", Some("agent-99"));
+    bind_registered_child("task-1", Some("agent-99"), None);
     let bound = bind_linked_agent_on_subagent_started("agent-99", "coder", Some("run"));
     assert_eq!(bound.as_deref(), Some("task-1"));
     assert_eq!(
@@ -198,7 +198,7 @@ fn identity_refresh_and_duplicate_bind_preserve_the_current_agent_mapping() {
         });
         upsert_identity_from_started(id, "agent", "task", None);
     }
-    bind_registered_child("other", Some("child"));
+    bind_registered_child("other", Some("child"), None);
     assert_eq!(
         bind_linked_agent_on_subagent_started("child", "coder", Some("first-run")).as_deref(),
         Some("other")
@@ -238,7 +238,7 @@ fn resumed_child_binds_new_task_before_the_previous_bg_completion_arrives() {
     };
     BG_DISPLAY.state().write().push(row("old-task"));
     upsert_identity_from_started("old-task", "agent", "old", None);
-    bind_registered_child("old-task", Some("child"));
+    bind_registered_child("old-task", Some("child"), None);
     assert_eq!(
         bind_linked_agent_on_subagent_started("child", "coder", Some("old-run")).as_deref(),
         Some("old-task")
@@ -249,7 +249,7 @@ fn resumed_child_binds_new_task_before_the_previous_bg_completion_arrives() {
 
     BG_DISPLAY.state().write().push(row("new-task"));
     upsert_identity_from_started("new-task", "agent", "new", None);
-    bind_registered_child("new-task", Some("child"));
+    bind_registered_child("new-task", Some("child"), None);
     assert_eq!(
         bind_linked_agent_on_subagent_started("child", "coder", Some("new-run")).as_deref(),
         Some("new-task")
