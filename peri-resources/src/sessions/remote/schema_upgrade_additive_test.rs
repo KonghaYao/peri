@@ -51,6 +51,25 @@ fn additive_upgrade_plan_only_extends_the_shape_and_advances_the_version() {
                 || statement.contains("CREATE TABLE IF NOT EXISTS inherited_payload_index")),
             "v15 起不得再建 inherited 派生索引表"
         );
+        // 绑定守卫随重建段下发：必须在任何替换/改写绑定行或归属行的语句之前。
+        let guard = sql
+            .iter()
+            .position(|statement| *statement == schema_upgrade::GUARD_BINDING_COUNT_SQL)
+            .expect("additive 批次必须包含绑定计数守卫");
+        let destructive = sql
+            .iter()
+            .position(|statement| {
+                (statement.contains("session_bindings")
+                    && (statement.starts_with("DROP TABLE")
+                        || statement.starts_with("CREATE TABLE")
+                        || statement.starts_with("ALTER TABLE")))
+                    || (statement.contains("workspaces")
+                        && (statement.starts_with("UPDATE workspaces")
+                            || statement.starts_with("DROP TABLE")
+                            || statement.starts_with("CREATE TABLE")))
+            })
+            .expect("additive 批次必须包含 v15 重建");
+        assert!(guard < destructive, "绑定守卫必须先于破坏性语句");
         assert!(sql
             .last()
             .unwrap()

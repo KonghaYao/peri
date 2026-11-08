@@ -88,7 +88,10 @@ const GUARD_THREAD_ROW_SQL: &str =
 const GUARD_THREAD_ROW_WITHOUT_ENVIRONMENTS_SQL: &str =
     "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS (
     SELECT 1 FROM threads t WHERE t.id = ?1 AND t.parent_thread_id IS ?2 AND t.cwd = ?3 AND ?4 IS NULL)";
-const GUARD_BINDING_COUNT_SQL: &str = "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE
+/// 绑定行的并发拒绝面：重建只搬批外读到的绑定行，批间新增的行必须以唯一键冲突失败。
+/// `pub(super)` 供 additive 计划断言这条守卫落在破坏性语句之前。
+pub(super) const GUARD_BINDING_COUNT_SQL: &str =
+    "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE
     (SELECT COUNT(*) FROM session_bindings) <> ?1";
 const GUARD_BINDING_ROW_SQL: &str = "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS (
     SELECT 1 FROM session_bindings
@@ -279,15 +282,11 @@ pub(super) async fn upgrade(
         .await
 }
 
-/// 增量补齐的升级来源：`v7` + 13（只缺两列）、`v6` + 12（还缺 `thread_mq`）与
-/// `v5` + 11（还缺派生索引表）。
-///
-/// 只推进到**上一代当前形状**（v14 / `v8`）：v15 的删列与删表走独立的重建批
-/// （[`v15_cleanup_plan`]），不让两条路径共用同一份批次。
+/// 增量补齐的升级来源：`v7` + 13（只缺两列）、`v6` + 12 与 `v5` + 11
+/// （都还缺 `thread_mq`）。
 ///
 /// 三条来源共用同一份幂等批次：建表都是 `CREATE ... IF NOT EXISTS`；两列是 v14 的
-/// 唯一 `ALTER`，三条来源都必然缺它们。把几份形状会聚到同一终点，比按代际各写一条
-/// 路径更不容易漂移。
+/// 唯一 `ALTER`，三条来源都必然缺它们。增量补完后同一批接 v15 清理，终点一次到 v15。
 pub(super) fn additive_source(snapshot: &StoreSnapshot) -> bool {
     matches!(
         (snapshot.contract.as_str(), snapshot.schema_version),
@@ -306,8 +305,8 @@ pub(super) fn v15_cleanup_source(snapshot: &StoreSnapshot) -> bool {
     snapshot.contract == schema::PREVIOUS_CURRENT_STORE_CONTRACT && snapshot.schema_version == 14
 }
 
-/// 上一代/再上一代当前形状的升级批次：补派生索引表、`thread_mq` 与 canonical 索引集，
-/// 末尾推进版本与契约。整批仍是受管批次，守卫与推进语义与搬运路径一致。
+/// 上一代/再上一代当前形状的升级批次：补 `thread_mq` 与两列，末尾接 v15 清理并推进版本。
+/// 整批仍是受管批次，守卫与推进语义与搬运路径一致。
 ///
 /// v13/v12/v11 的终点是 v15：批次末尾接的是 v15 清理，因此补完列与表之后直接进入
 /// [`v15_cleanup_plan`] 的语句序列（同一批，原子）。
@@ -659,18 +658,29 @@ pub(super) fn upgrade_plan(
             unsupported()
         })?;
 
-    // 项目行：规划结果里的 `project_id` 就是 v15 要写入的项目主键，`locator` 取归属行路径
-    // （`plan_local_workspaces` 用 locator 建组）。同 locator 只保留 id 最小者——与
-    // `observation_project` 的 `rowid ASC LIMIT 1` 同义。被合并掉的 id 记进 remap，
-    // 否则后面的归属行与绑定行会引用一个不存在的项目。
+    // 项目行：v15 的 `projects` 以 `UNIQUE(locator)` 为身份，必须从旧库真实的项目行重建。
+    // `read.projects` 按 rowid 升序：同 locator 保留最早一行，其余 id 记进 remap，否则
+    // 后面的归属行与绑定行会引用一个不存在的项目。表里缺的 id（旧库没有 projects 表）
+    // 退回按归属行路径合成，同 locator 保留 id 最小者。
     let mut project_rows: Vec<(String, String)> = Vec::new();
     let mut locator_owner: HashMap<String, usize> = HashMap::new();
     let mut remap: HashMap<String, String> = HashMap::new();
+    for (id, locator) in &read.projects {
+        match locator_owner.get(locator) {
+            Some(&index) => {
+                remap.insert(id.clone(), project_rows[index].0.clone());
+            }
+            None => {
+                locator_owner.insert(locator.clone(), project_rows.len());
+                project_rows.push((id.clone(), locator.clone()));
+            }
+        }
+    }
     for row in &workspace_rows {
         let Some(project_id) = row.project_id.clone() else {
             continue;
         };
-        if project_rows.iter().any(|(id, _)| *id == project_id) {
+        if project_rows.iter().any(|(id, _)| *id == project_id) || remap.contains_key(&project_id) {
             continue;
         }
         let locator = row.path.to_str().ok_or_else(unsupported)?.to_owned();
@@ -736,10 +746,10 @@ pub(super) fn upgrade_plan(
 
     // 旧登记与引用它的绑定表整体换掉：两个 id 空间收敛成一个。
     //
-    // `projects` 也整表重建：v15 的唯一键收窄为 `UNIQUE(locator)`，搬过来的项目按
-    // `locator` 去重（保留 id 最小者，与 `observation_project` 的 `rowid ASC LIMIT 1` 同义），
-    // 引用关系由下面的规划保证只指向保留行。顺序：先删引用者（bindings/workspaces），
-    // 再删父表（projects），最后按 v15 DDL 重建。
+    // `projects` 也整表重建：v15 的唯一键收窄为 `UNIQUE(locator)`，真实项目行按
+    // `locator` 去重（保留 `read.projects` 的 rowid 最早一行），旧库缺 `projects` 表时
+    // 才按归属行路径合成；引用关系由上面的规划保证只指向保留行。顺序：先删引用者
+    // （bindings/workspaces），再删父表（projects），最后按 v15 DDL 重建。
     statements.push(StatementSpec::bare("DROP TABLE session_bindings"));
     statements.push(StatementSpec::bare("DROP TABLE workspaces"));
     statements.push(StatementSpec::bare("DROP TABLE projects"));
@@ -887,19 +897,8 @@ pub(super) fn v15_cleanup_plan(
             Value::Text(snapshot.contract.clone()),
         ],
     )];
-    statements.push(StatementSpec::new(
-        GUARD_BINDING_COUNT_SQL,
-        vec![Value::Integer(read.binding_snapshots.len() as i64)],
-    ));
-    for (thread_id, snapshot) in &read.binding_snapshots {
-        statements.push(StatementSpec::new(
-            GUARD_BINDING_SNAPSHOT_SQL,
-            vec![
-                Value::Text(thread_id.clone()),
-                snapshot.clone().map(Value::Text).unwrap_or(Value::Null),
-            ],
-        ));
-    }
+    // 绑定行的计数与逐行证据守卫由 `v15_cleanup_statements` 统一下发：additive 与
+    // v15 清理共用同一段重建，守卫必须跟着重建走。
     // 登记行只存在于压缩前的输入里；当前形状（v14 → v15）没有它们，不能下发计数守卫。
     if read.has_registration_shape() {
         statements.push(StatementSpec::new(
@@ -919,9 +918,11 @@ pub(super) fn v15_cleanup_plan(
     Ok(statements)
 }
 
-// NOTE: v13/v12/v11 的批次只推进到 v14；v15 由下一次写打开的重建批完成。
+// NOTE: additive 批次在补完 v14 的列与表后接 `v15_cleanup_statements`，一次推进到 v15；
+// 绑定守卫也由该语句段统一下发，覆盖 additive 与 v14 清理两条路径。
 
-/// v15 清理的语句段（不含元数据守卫与版本推进）：重建三表、删两表、重放索引。
+/// v15 清理的语句段（不含元数据/登记守卫与版本推进）：先下发绑定守卫，再重建三表、
+/// 删两表、重放索引。
 ///
 /// `binding_snapshots` 是批外读到的 `(thread_id, discovery_snapshot)` 原文；这里逐行投影成
 /// 最小执行根再插入暂存表——SQL 里不做这件事（远端 json1 未实测），两端因此在 Rust 侧共用
@@ -955,7 +956,21 @@ fn v15_cleanup_statements(
             }
         }
     }
-    let mut statements = Vec::new();
+    // 守卫链必须在任何破坏性语句之前：重建只搬批外读到的绑定行，批间新增或改写的行
+    // 要以唯一键冲突失败，不能被静默丢掉或写入未投影的旧证据。
+    let mut statements = vec![StatementSpec::new(
+        GUARD_BINDING_COUNT_SQL,
+        vec![Value::Integer(binding_snapshots.len() as i64)],
+    )];
+    for (thread_id, snapshot) in binding_snapshots {
+        statements.push(StatementSpec::new(
+            GUARD_BINDING_SNAPSHOT_SQL,
+            vec![
+                Value::Text(thread_id.clone()),
+                snapshot.clone().map(Value::Text).unwrap_or(Value::Null),
+            ],
+        ));
+    }
     for (drop_id, keep_id) in &merges {
         statements.push(StatementSpec::new(
             "UPDATE workspaces SET project_id = ?1 WHERE project_id = ?2",

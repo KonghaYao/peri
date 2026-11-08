@@ -286,7 +286,7 @@ impl Fixture {
             INSERT INTO thread_goals VALUES ('session', 'goal', 'old goal', 'active', NULL, 0, 0, 1, 1);
             INSERT INTO messages (rowid, message_id, thread_id, role, content, excluded, projection) VALUES (7, 'message', 'session', 'user', 'original content', 1, 'original projection');
             INSERT INTO execution_runs VALUES ('session', 7, 0);
-            INSERT INTO projects VALUES ('project', 'locator', 'identity');
+            INSERT INTO projects VALUES ('project', '/tmp', 'identity');
             INSERT INTO workspaces VALUES ('11111111-1111-4111-8111-111111111111', 'project', '/tmp', 'root identity', '{DISCOVERY}');
             INSERT INTO session_bindings VALUES ('session', 1, 'project', '11111111-1111-4111-8111-111111111111', '');
             INSERT INTO session_environments VALUES ('session', 'original machine');
@@ -651,7 +651,7 @@ async fn assert_upgraded(fixture: &Fixture) {
 async fn upgrade_moves_a_released_store_to_the_current_generation_in_one_batch() {
     let fixture = Fixture::new().await;
     let retained_sql = "SELECT 'threads', json_array(id, title, cwd, created_at, updated_at, message_count, parent_thread_id, snapshot_at_message_id, hidden, cancel_policy, config, frozen_context, inherited_context, agent_status) FROM threads
-        UNION ALL SELECT 'projects', json_array(id, CASE WHEN locator = 'locator' THEN '/tmp' ELSE locator END) FROM projects
+        UNION ALL SELECT 'projects', json_array(id, locator) FROM projects
         UNION ALL SELECT 'bindings', json_array(thread_id, schema_version, project_id, relative_cwd) FROM session_bindings
         ORDER BY 1, 2";
     let before: Vec<(String, String)> = sqlx::query_as(retained_sql)
@@ -778,6 +778,49 @@ async fn upgrade_moves_a_released_store_to_the_current_generation_in_one_batch()
         fixture.transport.writes.load(Ordering::SeqCst),
         1,
         "整段迁移是一个受管批次"
+    );
+}
+
+/// 真实项目行是 v15 `projects` 的身份来源：locator 不被归属行路径覆盖，重复 locator
+/// 保留 rowid 最早一行并改绑引用，没有被会话引用的项目也保留。
+#[tokio::test]
+async fn upgrade_preserves_project_rows_and_merges_duplicate_locators() {
+    let fixture = Fixture::new().await;
+    sqlx::raw_sql(
+        "INSERT INTO projects VALUES ('project-late', '/tmp', 'late identity');
+         INSERT INTO projects VALUES ('project-orphan', '/orphan', 'orphan identity');
+         UPDATE session_bindings SET project_id = 'project-late' WHERE thread_id = 'session'",
+    )
+    .execute(&fixture.transport.pool)
+    .await
+    .unwrap();
+
+    schema_upgrade::upgrade(&fixture.store(StoreAccess::ReadWrite), &fixture.snapshot)
+        .await
+        .unwrap();
+
+    let projects: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, locator FROM projects ORDER BY id")
+            .fetch_all(&fixture.transport.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        projects,
+        vec![
+            ("project".to_owned(), "/tmp".to_owned()),
+            ("project-orphan".to_owned(), "/orphan".to_owned()),
+        ],
+        "重复 locator 保留 rowid 最早一行，未被引用的项目不丢"
+    );
+    let (project_id,): (String,) =
+        sqlx::query_as("SELECT project_id FROM session_bindings WHERE thread_id = 'session'")
+            .fetch_one(&fixture.transport.pool)
+            .await
+            .unwrap();
+    assert_eq!(project_id, "project", "被合并行的引用改绑到保留行");
+    assert_eq!(
+        fixture.shape_verdict(schema::ShapeProbe::Current).await,
+        StoreShapeRead::Consistent
     );
 }
 

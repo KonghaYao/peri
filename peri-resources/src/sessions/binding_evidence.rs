@@ -16,9 +16,8 @@ use anyhow::{bail, Result};
 /// 把创建证据收缩为最小执行根。输入可以是完整 `Discovery`、已收缩形态或两者的混合。
 ///
 /// - 解析失败、`root` 缺失/非字符串/空 → `Err`（调用方决定 fail-closed 还是拒绝输入）；
-/// - `root` 为相对路径 → `Err`；判定用 `has_root` 而不是平台相关的 `is_absolute`，
-///   因为 `/work` 在 Windows 上仍由根分量锚定、不会随进程 CWD 漂移（真实发现值由
-///   `canonicalize` 产生，永远带盘符；该判据同时允许跨平台旧库与测试夹具）；
+/// - `root` 为相对路径 → `Err`；判定复用迁移路径的跨平台校验（POSIX 绝对、Windows 盘符、
+///   UNC），因为证据可能由另一台主机写入——远端库跨 OS 迁移时不能按本机语法拒绝；
 /// - `kind` 存在且为字符串时保留，其余类型直接丢弃（它不参与任何判定）。
 pub(super) fn project(raw: &str) -> Result<String> {
     let value: serde_json::Value = serde_json::from_str(raw)?;
@@ -30,8 +29,9 @@ pub(super) fn project(raw: &str) -> Result<String> {
         .and_then(serde_json::Value::as_str)
         .filter(|root| !root.is_empty())
         .ok_or_else(|| anyhow::anyhow!("binding evidence has no root"))?;
-    if !std::path::Path::new(root).has_root() {
-        bail!("binding evidence root is not rooted");
+    // 证据可能由另一台主机写入（远端库跨 OS 迁移），不能按本机语法判绝对。
+    if crate::sessions::storage_v2_plan::validate_saved_cwd(std::path::Path::new(root)).is_err() {
+        bail!("binding evidence root is not absolute: {root:?}");
     }
     let projected = match object.get("kind").and_then(serde_json::Value::as_str) {
         Some(kind) => serde_json::json!({ "kind": kind, "root": root }),
@@ -64,6 +64,18 @@ mod tests {
         assert_eq!(
             project(raw).unwrap(),
             r#"{"kind":"virtual-v1","root":"/work"}"#
+        );
+    }
+
+    #[test]
+    fn roots_written_on_another_host_are_accepted() {
+        assert_eq!(
+            project(r#"{"root":"C:/work"}"#).unwrap(),
+            r#"{"root":"C:/work"}"#
+        );
+        assert_eq!(
+            project(r#"{"root":"\\\\server\\share\\work"}"#).unwrap(),
+            r#"{"root":"\\\\server\\share\\work"}"#
         );
     }
 

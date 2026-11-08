@@ -76,7 +76,7 @@ pub(super) async fn inspect(connection: &mut SqliteConnection) -> Result<SchemaS
         2 => return Ok(SchemaState::Version2),
         0 => {}
         // 拒绝时复述实际版本：报错要能回答「为什么不支持」，而不是只给结论。
-        // 压缩掉的 15..=19 中间代（v4 内部用过、从未正式发布）也落在这里。
+        // 压缩掉的 16..=19 中间代（v4 内部用过、从未正式发布）也落在这里。
         other => {
             return Err(WorkspaceError::UnsupportedSchemaVersion {
                 found: other,
