@@ -523,7 +523,9 @@ mod tests;
 #[path = "subscription_shell_result_test.rs"]
 mod shell_result_tests;
 
+// 该组用例用真实 POSIX shell 取证并精确断言换行；Windows 下由 PowerShell 执行不成立。
 #[cfg(test)]
+#[cfg(unix)]
 #[path = "subscription_shell_validation_test.rs"]
 mod shell_validation_tests;
 
