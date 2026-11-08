@@ -194,9 +194,11 @@ async fn test_worktree_replaced_directory_keeps_workspace_and_binding() {
     let (replacement_thread, replacement) = bound(&store, &root).await;
     assert_eq!(replacement.workspace_id, registered.workspace_id);
     assert_eq!(replacement.project_id, registered.project_id);
-    assert_ne!(
+    // v15 起发现快照只记路径布局，不再持久化文件对象身份：同一路径的替换产生**相同**的
+    // 证据字节，归属行因此按 `(machine_id, path)` 稳定复用。
+    assert_eq!(
         replacement.discovery_snapshot, registered.discovery_snapshot,
-        "同一路径的新对象仍把该行的诊断快照更新为本次观测"
+        "同一路径的新对象在路径布局上等同，证据字节不再随 inode 变化"
     );
     assert_eq!(
         replacement.cwd,

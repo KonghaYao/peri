@@ -130,6 +130,10 @@ mod schema_upgrade_tests;
 mod schema_upgrade_additive_tests;
 
 #[cfg(test)]
+#[path = "schema_v15_cleanup_test.rs"]
+mod schema_v15_cleanup_tests;
+
+#[cfg(test)]
 #[path = "schema_probe_test.rs"]
 mod schema_probe_tests;
 

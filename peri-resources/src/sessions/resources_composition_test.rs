@@ -234,21 +234,18 @@ impl DoubleDbFixture {
     ///
     /// 两个库是两条独立连接，不能跨库 `INSERT ... SELECT`，因此逐行读出再写入。
     async fn mirror_workspace(&self, workspace: &ResolvedWorkspace) {
-        let project: (String, String, String) =
-            sqlx::query_as("SELECT id, locator, object_identity FROM projects WHERE id = ?1")
+        let project: (String, String) =
+            sqlx::query_as("SELECT id, locator FROM projects WHERE id = ?1")
                 .bind(workspace.project_id.to_string())
                 .fetch_one(self.local.pool())
                 .await
                 .unwrap();
-        sqlx::query(
-            "INSERT OR IGNORE INTO projects (id, locator, object_identity) VALUES (?1, ?2, ?3)",
-        )
-        .bind(&project.0)
-        .bind(&project.1)
-        .bind(&project.2)
-        .execute(self.data.pool())
-        .await
-        .unwrap();
+        sqlx::query("INSERT OR IGNORE INTO projects (id, locator) VALUES (?1, ?2)")
+            .bind(&project.0)
+            .bind(&project.1)
+            .execute(self.data.pool())
+            .await
+            .unwrap();
         let row: (
             String,
             String,
@@ -256,9 +253,8 @@ impl DoubleDbFixture {
             String,
             Option<String>,
             Option<String>,
-            Option<String>,
         ) = sqlx::query_as(
-            "SELECT id, machine_id, path, path_source, project_id, identity, discovery
+            "SELECT id, machine_id, path, path_source, project_id, discovery
                  FROM workspaces WHERE id = ?1",
         )
         .bind(workspace.workspace_id.to_string())
@@ -271,8 +267,8 @@ impl DoubleDbFixture {
             .await
             .unwrap();
         sqlx::query(
-            "INSERT OR IGNORE INTO workspaces(id, machine_id, path, path_source, project_id, identity, discovery)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT OR IGNORE INTO workspaces(id, machine_id, path, path_source, project_id, discovery)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )
         .bind(&row.0)
         .bind(&row.1)
@@ -280,7 +276,6 @@ impl DoubleDbFixture {
         .bind(&row.3)
         .bind(&row.4)
         .bind(&row.5)
-        .bind(&row.6)
         .execute(self.data.pool())
         .await
         .unwrap();

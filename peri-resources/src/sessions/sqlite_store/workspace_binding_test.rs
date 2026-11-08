@@ -57,15 +57,14 @@ async fn test_worktree_full_and_recorded_rechecks_are_equivalent() {
     let (store, _db) = store().await;
     let (id, registered) = bound(&store, repo.path()).await;
 
-    // 只改发现快照里的对象身份（模拟容器重启后的 inode 变化）。
+    // 改动发现快照的诊断内容（历史行仍可能带 v14 的 identity 键）：准入不比较它。
     let (snapshot,): (String,) = sqlx::query_as("SELECT discovery FROM workspaces WHERE id = ?1")
         .bind(registered.workspace_id.to_string())
         .fetch_one(&store.database.pool)
         .await
         .unwrap();
     let mut snapshot: serde_json::Value = serde_json::from_str(&snapshot).unwrap();
-    let inode = snapshot["root_identity"]["inode"].as_u64().unwrap();
-    snapshot["root_identity"]["inode"] = serde_json::json!(inode + 1);
+    snapshot["diagnostic_marker"] = serde_json::json!("changed");
     sqlx::query("UPDATE workspaces SET discovery = ?1 WHERE id = ?2")
         .bind(snapshot.to_string())
         .bind(registered.workspace_id.to_string())
@@ -89,10 +88,9 @@ async fn test_worktree_binding_project_survives_workspace_project_change() {
 
     // 同库登记另一个合法项目，再把归属行项目改到它：旧绑定仍指向原项目。
     let other_project = ProjectId::new();
-    sqlx::query("INSERT INTO projects (id, locator, object_identity) VALUES (?1, ?2, ?3)")
+    sqlx::query("INSERT INTO projects (id, locator) VALUES (?1, ?2)")
         .bind(other_project.to_string())
         .bind("/another-project")
-        .bind(r#"{"device":1,"inode":1}"#)
         .execute(&store.database.pool)
         .await
         .unwrap();

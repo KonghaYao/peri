@@ -24,13 +24,11 @@ use peri_acp_types::session_resources::{
 use peri_acp_types::thread::{AgentStatus, ThreadId};
 use turso_serverless::Value;
 
-use super::mutation::{incomplete_reply, RemoteStore};
-use super::schema;
+use super::mutation::incomplete_reply;
 use super::session_codec as codec;
 use super::session_data::{invalid_input, not_found, RemoteSessionData};
 use super::session_sql;
 use super::sql::{int_at, text_at, StatementSpec};
-use crate::sessions::canonical;
 use crate::sessions::data::ChildResumeRecord;
 
 // ─── 批内守卫 ─────────────────────────────────────────────────────────────────
@@ -75,15 +73,6 @@ const DELETE_TREE_CLOSE_INTENTS_SQL: &str =
 const DELETE_TREE_MQ_SQL: &str =
     tree_scoped!("DELETE FROM thread_mq WHERE thread_id IN (SELECT id FROM tree)");
 
-/// payload 行只能经 snapshot 的 `snapshot_id` 定位；必须先于 snapshot 行删除。
-const DELETE_TREE_INHERITED_PAYLOADS_SQL: &str = tree_scoped!(
-    "DELETE FROM inherited_payload_index WHERE snapshot_id IN \
-     (SELECT snapshot_id FROM inherited_snapshot_index WHERE thread_id IN (SELECT id FROM tree))"
-);
-
-const DELETE_TREE_INHERITED_SNAPSHOTS_SQL: &str =
-    tree_scoped!("DELETE FROM inherited_snapshot_index WHERE thread_id IN (SELECT id FROM tree)");
-
 const DELETE_TREE_THREADS_SQL: &str =
     tree_scoped!("DELETE FROM threads WHERE id IN (SELECT id FROM tree)");
 
@@ -95,28 +84,6 @@ const UPDATE_AGENT_STATUS_SQL: &str =
     "UPDATE threads SET agent_status = ?1, updated_at = ?2 WHERE id = ?3";
 
 const SELECT_AGENT_STATUS_SQL: &str = "SELECT agent_status FROM threads WHERE id = ?1";
-
-/// 两张 inherited 派生索引表是否存在。它们是可选表，旧库/损坏页可能缺表；
-/// 删除路径必须先探测，再把删除语句放进托管批（R08）。
-async fn inherited_index_tables(store: &RemoteStore) -> SessionResourceResult<(bool, bool)> {
-    let results = store
-        .read_batch(vec![
-            StatementSpec::new(
-                schema::TABLE_EXISTS_SQL,
-                vec![Value::Text(
-                    canonical::INHERITED_SNAPSHOT_INDEX_TABLE.to_owned(),
-                )],
-            ),
-            StatementSpec::new(
-                schema::TABLE_EXISTS_SQL,
-                vec![Value::Text(
-                    canonical::INHERITED_PAYLOAD_INDEX_TABLE.to_owned(),
-                )],
-            ),
-        ])
-        .await?;
-    Ok((!results[0].is_empty(), !results[1].is_empty()))
-}
 
 impl RemoteSessionData {
     pub(super) async fn write_close_intent(&self, id: &ThreadId) -> SessionResourceResult<()> {
@@ -162,17 +129,8 @@ impl RemoteSessionData {
     /// 远端不留 `creation_intent` 锚点：那本机事实用于判定「同一 identity 不被复活」，
     /// 远端没有第二个副本，也就没有需要锚定的复活路径。
     pub(super) async fn revoke_unpublished(&self, id: &ThreadId) -> SessionResourceResult<()> {
-        let (has_snapshot, has_payload) = {
-            let store = self.store().await?;
-            inherited_index_tables(&store).await?
-        };
-        let effects = session_sql::with_inherited_index_deletes(
-            session_sql::revoke_session_statements(id.as_str()),
-            id.as_str(),
-            has_snapshot,
-            has_payload,
-            false,
-        );
+        // inherited 派生索引随 v15 退役：撤销批次只剩三条 canonical 删除。
+        let effects = session_sql::revoke_session_statements(id.as_str());
         self.commit_revocation("revoke_unpublished_session", id, effects)
             .await
     }
@@ -186,17 +144,8 @@ impl RemoteSessionData {
         &self,
         id: &ThreadId,
     ) -> SessionResourceResult<()> {
-        let (has_snapshot, has_payload) = {
-            let store = self.store().await?;
-            inherited_index_tables(&store).await?
-        };
-        let effects = session_sql::with_inherited_index_deletes(
-            session_sql::revoke_draft_statements(id.as_str()),
-            id.as_str(),
-            has_snapshot,
-            has_payload,
-            true,
-        );
+        // inherited 派生索引随 v15 退役：草稿撤销批次只剩三条带判据的 canonical 删除。
+        let effects = session_sql::revoke_draft_statements(id.as_str());
         let counts = self
             .commit_revocation_counts("revoke_unpublished_draft", id, effects)
             .await?;
@@ -291,13 +240,10 @@ impl RemoteSessionData {
     /// **不能**当成「没有东西要删」而报成功。子会话在批开始前提交时，批内递归已经包含它；
     /// 在批持锁期间提交则被串行化到删除之后，由 child 侧的父存在守卫拒绝。
     pub(super) async fn write_tree_deletion(&self, id: &ThreadId) -> SessionResourceResult<()> {
-        let store = self.store().await?;
-        let (has_snapshot, has_payload) = inherited_index_tables(&store).await?;
-        drop(store);
         // 删除不新增墓碑：树上的会话先清子行（与 `canonical::THREAD_CHILD_DELETES` 同一顺序：
-        // messages → session_bindings → close intents → thread_mq），再清 inherited 派生索引
-        // （payload → snapshot，可选表先探测），最后清会话行，全部在同一个批里。
-        let mut effects = Vec::with_capacity(8);
+        // messages → session_bindings → close intents → thread_mq），最后清会话行，全部在
+        // 同一个批里。inherited 派生索引随 v15 退役，删除路径不再引用它们。
+        let mut effects = Vec::with_capacity(6);
         effects.push(guard_session_statement(id));
         effects.push(StatementSpec::new(
             DELETE_TREE_MESSAGES_SQL,
@@ -315,18 +261,6 @@ impl RemoteSessionData {
             DELETE_TREE_MQ_SQL,
             vec![Value::Text(id.as_str().to_owned())],
         ));
-        if has_snapshot {
-            if has_payload {
-                effects.push(StatementSpec::new(
-                    DELETE_TREE_INHERITED_PAYLOADS_SQL,
-                    vec![Value::Text(id.as_str().to_owned())],
-                ));
-            }
-            effects.push(StatementSpec::new(
-                DELETE_TREE_INHERITED_SNAPSHOTS_SQL,
-                vec![Value::Text(id.as_str().to_owned())],
-            ));
-        }
         effects.push(StatementSpec::new(
             DELETE_TREE_THREADS_SQL,
             vec![Value::Text(id.as_str().to_owned())],
@@ -455,7 +389,7 @@ mod tests {
         sql.matches('?').count()
     }
 
-    const TREE_DELETES: [(&str, &str); 6] = [
+    const TREE_DELETES: [(&str, &str); 5] = [
         (DELETE_TREE_MESSAGES_SQL, "DELETE FROM messages"),
         (DELETE_TREE_BINDINGS_SQL, "DELETE FROM session_bindings"),
         (
@@ -463,10 +397,6 @@ mod tests {
             "DELETE FROM session_close_intents",
         ),
         (DELETE_TREE_MQ_SQL, "DELETE FROM thread_mq"),
-        (
-            DELETE_TREE_INHERITED_SNAPSHOTS_SQL,
-            "DELETE FROM inherited_snapshot_index",
-        ),
         (DELETE_TREE_THREADS_SQL, "DELETE FROM threads"),
     ];
 
@@ -480,7 +410,6 @@ mod tests {
             (DELETE_SESSION_BINDINGS_SQL, 1),
             (DELETE_SESSION_SQL, 1),
             (UPDATE_AGENT_STATUS_SQL, 3),
-            (DELETE_TREE_INHERITED_PAYLOADS_SQL, 1),
         ];
         let tree_deletes = TREE_DELETES.iter().map(|(sql, _)| (*sql, 1));
         for (sql, expected) in cases.into_iter().chain(tree_deletes) {
@@ -504,7 +433,6 @@ mod tests {
             );
             assert!(sql.contains(tail), "删除目标不匹配: {sql}");
         }
-        assert!(DELETE_TREE_INHERITED_PAYLOADS_SQL.contains("thread_id IN (SELECT id FROM tree)"));
     }
 
     /// 递归删除必须覆盖 canonical 的每一张子表：新增 `REFERENCES threads` 子表时，
@@ -516,15 +444,6 @@ mod tests {
             assert!(
                 TREE_DELETES.iter().any(|(sql, _)| sql.contains(&expected)),
                 "tree deletion does not clear canonical child table {table}"
-            );
-        }
-        for (table, _) in crate::sessions::canonical::THREAD_DERIVED_DELETES {
-            let expected = format!("DELETE FROM {table} ");
-            let covered = TREE_DELETES.iter().any(|(sql, _)| sql.contains(&expected))
-                || DELETE_TREE_INHERITED_PAYLOADS_SQL.contains(&expected);
-            assert!(
-                covered,
-                "tree deletion does not clear canonical derived table {table}"
             );
         }
     }

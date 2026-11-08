@@ -330,7 +330,7 @@ impl SqliteSessionDatabase {
                 .bind(thread_id.as_str())
                 .fetch_optional(&mut *tx)
                 .await?;
-        let Some((parent,)) = parent else {
+        let Some((_parent,)) = parent else {
             anyhow::bail!("thread is missing");
         };
         let result = sqlx::query(
@@ -342,13 +342,6 @@ impl SqliteSessionDatabase {
         .await?;
         if result.rows_affected() != 1 {
             anyhow::bail!("inherited context already exists");
-        }
-        if let Some(write) = super::session_data::inherited_index::SnapshotWrite::from_serialization(
-            thread_id,
-            parent.as_deref(),
-            &serialization,
-        ) {
-            write.replace(&mut tx).await?;
         }
         tx.commit().await?;
         Ok(())

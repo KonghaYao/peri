@@ -120,17 +120,6 @@ async fn thread_mq_is_a_mandatory_current_table_with_exactly_the_pending_columns
         .unwrap();
     let error = check_current_shape(&tables).unwrap_err();
     assert!(error.contains("thread_mq"), "{error}");
-    // v12 的冻结声明不含它，也不含 v14 的两列：上一代形状仍然可判，升级路径不会被关掉。
-    execute(
-        &mut connection,
-        "ALTER TABLE threads DROP COLUMN context_usage_tokens;
-         ALTER TABLE threads DROP COLUMN work_state;",
-    )
-    .await;
-    let tables = read_local_columns(&mut connection, CURRENT_COLUMNS_SQL)
-        .await
-        .unwrap();
-    check_v12_shape(&tables).unwrap();
 }
 
 /// 可选表存在时仍必须同形：同名异形的凭证表是别的对象，不能因为「可选」而放行。
@@ -235,6 +224,10 @@ async fn mixed_input_shape_is_refused() {
 
 /// 删除声明 == 压缩前的建表文本（`canonical::V10_*`）：声明与真实 DDL 的一致性同样由测试守门，
 /// 判定不是另写的一份形状事实。
+///
+/// v15 的两张 inherited 派生索引表也在这里：它们的声明取自 v14 冻结形状，建表文本由
+/// [`INHERITED_INDEX_DDL`] 复现（v15 起 canonical 不再建它们）。形状读取用
+/// `CURRENT_COLUMNS_SQL`，因为它覆盖压缩前对象而不覆盖当前形状表。
 #[tokio::test]
 async fn declared_dropped_shapes_match_the_legacy_ddl() {
     let (_directory, mut connection) = empty_database().await;
@@ -248,9 +241,17 @@ async fn declared_dropped_shapes_match_the_legacy_ddl() {
         canonical::V10_CREATE_OAUTH_CREDENTIALS_TABLE_SQL,
     )
     .await;
-    let tables = read_local_columns(&mut connection, INPUT_COLUMNS_SQL)
+    execute(&mut connection, V14_INHERITED_INDEX_DDL).await;
+    // 与生产同一份读法：输入面 + 删除面（退役表不在输入读取面里）。
+    let mut tables = read_local_columns(&mut connection, INPUT_COLUMNS_SQL)
         .await
         .unwrap();
+    for (table, columns) in read_local_columns(&mut connection, DROPPED_COLUMNS_SQL)
+        .await
+        .unwrap()
+    {
+        tables.entry(table).or_insert(columns);
+    }
     let plan = dropped_plan(&tables).unwrap();
     for table in DROPPED_TABLES {
         assert!(plan.contains(&table.drop_sql), "{}", table.shape.name);
@@ -429,6 +430,18 @@ CREATE INDEX idx_messages_thread_id ON messages(thread_id);
 CREATE INDEX idx_bindings_project ON session_bindings(project_id, thread_id);
 CREATE INDEX idx_bindings_workspace ON session_bindings(workspace_id, relative_cwd, thread_id);
 CREATE INDEX idx_threads_updated ON threads(updated_at DESC, id DESC) WHERE hidden = 0 AND message_count > 0;";
+
+/// v14 冻结形状的两张 inherited 派生索引表建表文本（v15 起 canonical 不再建它们）。
+///
+/// 声明取自 [`V14_TABLES`] 的冻结列清单；这张夹具让「删除声明 == 真实 DDL」这条守门
+/// 也覆盖退役表——同名异形的表不得被迁移顺手删掉。
+const V14_INHERITED_INDEX_DDL: &str = "CREATE TABLE inherited_snapshot_index (
+    snapshot_id TEXT PRIMARY KEY, thread_id TEXT NOT NULL, payload_bytes INTEGER NOT NULL,
+    entry_count INTEGER NOT NULL, prepared_at TEXT NOT NULL);
+CREATE TABLE inherited_payload_index (
+    snapshot_id TEXT NOT NULL, ordinal INTEGER NOT NULL, entry_id TEXT NOT NULL,
+    raw_start INTEGER NOT NULL, raw_len INTEGER NOT NULL, logical_len INTEGER,
+    PRIMARY KEY(snapshot_id, ordinal), UNIQUE(snapshot_id, entry_id));";
 
 /// 会话持久化不引入任务绑定表或逐条结果处理标记（设计 §2/§9 #16）。
 #[tokio::test]

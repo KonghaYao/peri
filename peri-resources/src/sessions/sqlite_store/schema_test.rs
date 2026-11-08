@@ -33,7 +33,7 @@ async fn assert_no_recovery_tables(pool: &sqlx::SqlitePool) {
 }
 
 #[tokio::test]
-async fn current_store_has_eleven_business_tables_and_normal_history() {
+async fn current_store_has_nine_business_tables_and_normal_history() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("threads.db");
     let store = SqliteThreadStore::new(&path).await.unwrap();
@@ -44,9 +44,9 @@ async fn current_store_has_eleven_business_tables_and_normal_history() {
     .fetch_one(&store.database.pool)
     .await
     .unwrap();
-    // 执行登记并入 `workspaces`：新建库只有八张业务表 + 两张 inherited 派生索引表 + `thread_mq`，
+    // v15 起九张 canonical 表：两张 inherited 派生索引表退役，执行登记并入 `workspaces`。
     // 没有登记表，也没有运行时状态表。
-    assert_eq!(count, 11);
+    assert_eq!(count, 9);
     let registrations: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'legacy_execution_registrations'",
     )
@@ -81,10 +81,11 @@ async fn current_store_has_eleven_business_tables_and_normal_history() {
     reopened.close().await;
 }
 
-/// 压缩掉的开发期代数（15..19）一律拒绝：不迁移、不改写，库留在原位由上一版二进制打开。
+/// 压缩掉的开发期代数（16..19）一律拒绝：不迁移、不改写，库留在原位由上一版二进制打开。
+/// 15 是当前代数，不在拒绝面里。
 #[tokio::test]
 async fn compressed_dev_generations_are_refused_without_touching_the_database() {
-    for version in 15..=19_i64 {
+    for version in 16..=19_i64 {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("threads.db");
         let store = SqliteThreadStore::new(&path).await.unwrap();
@@ -700,16 +701,26 @@ async fn version3_database(path: &Path, root: &Path) -> SqliteConnection {
         value["birth_nanos"] = serde_json::json!(456);
         value
     };
-    let project_identity =
-        identity_with_legacy_fields(serde_json::to_value(discovery.project_identity()).unwrap());
     let mut discovery_json = serde_json::to_value(&discovery).unwrap();
-    for key in ["root_identity", "common_identity", "private_identity"] {
-        assert!(
-            discovery_json[key].is_object(),
-            "Git fixture must include {key}"
-        );
-        discovery_json[key] = identity_with_legacy_fields(discovery_json[key].clone());
+    // 旧行（schema ≤14）的文件对象身份：`Discovery` 已不再有这些字段，因此夹具按旧形状
+    // 手工补上——它测的正是「v14 及更早写下的字节仍能被识别并升级」。
+    let legacy_identity = |device: u64| {
+        identity_with_legacy_fields(serde_json::json!({ "device": device, "inode": device }))
+    };
+    discovery_json["root_identity"] = legacy_identity(1);
+    if discovery.common_dir.is_some() {
+        // `project_identity()` 取 common 优先、root 兜底：旧行里三者同源。
+        discovery_json["common_identity"] = legacy_identity(2);
+        discovery_json["private_identity"] = legacy_identity(2);
+    } else {
+        discovery_json["common_identity"] = serde_json::Value::Null;
+        discovery_json["private_identity"] = serde_json::Value::Null;
     }
+    let project_identity = if discovery_json["common_identity"].is_null() {
+        discovery_json["root_identity"].clone()
+    } else {
+        discovery_json["common_identity"].clone()
+    };
     let root_identity = discovery_json["root_identity"].clone();
     let root = discovery.root.to_str().unwrap();
     let locator = discovery.project_locator().to_str().unwrap();
@@ -829,8 +840,8 @@ async fn test_schema3_identity_migration_reuses_binding_and_survives_reopen() {
 ///
 /// 登记空间的**载体与列名**随版本变化：v12 之前是 `workspaces(root, root_identity)`，
 /// v12..v18 是改名为 `legacy_execution_registrations` 的原表，v19 起并回
-/// `workspaces(path, identity)`。同一 id 下的五元组 (id, project_id, 根, 根身份, 发现)
-/// 在搬运中逐字不变，所以投影按当前形状选择，跨版本的比较仍然落在同一份事实上。
+/// `workspaces(path, ...)`。文件对象身份列在 v15 退役，因此投影只取跨代稳定的事实
+/// (id, project_id, 根路径, 发现快照)——根路径在搬运中逐字不变。
 async fn identity_bytes(connection: &mut SqliteConnection) -> Vec<String> {
     let registrations = column_names(connection, "legacy_execution_registrations")
         .await
@@ -838,21 +849,21 @@ async fn identity_bytes(connection: &mut SqliteConnection) -> Vec<String> {
     let workspaces = column_names(connection, "workspaces").await.unwrap();
     let registration_query = match (registrations.is_empty(), workspaces.contains("root")) {
         (false, _) => {
-            "SELECT json_array(id, project_id, root, root_identity, discovery)
+            "SELECT json_array(id, project_id, root, discovery)
              FROM legacy_execution_registrations ORDER BY id"
         }
         (true, true) => {
-            "SELECT json_array(id, project_id, root, root_identity, discovery)
+            "SELECT json_array(id, project_id, root, discovery)
              FROM workspaces ORDER BY id"
         }
         (true, false) => {
-            "SELECT json_array(id, project_id, path, identity, discovery)
+            "SELECT json_array(id, project_id, path, discovery)
              FROM workspaces ORDER BY id"
         }
     };
     let mut values = Vec::new();
     for query in [
-        "SELECT json_array(id, locator, object_identity) FROM projects ORDER BY id",
+        "SELECT json_array(id, locator) FROM projects ORDER BY id",
         registration_query,
         "SELECT json_array(thread_id, schema_version, project_id, workspace_id, relative_cwd) FROM session_bindings ORDER BY thread_id",
     ] {
@@ -880,10 +891,23 @@ async fn test_version2_upgrade_removes_required_revision_and_preserves_identity(
     let store = SqliteThreadStore::new(&path).await.unwrap();
     let mut connection = store.database.pool.acquire().await.unwrap();
     assert_eq!(history_bytes(&mut connection).await, before_history);
-    let migrated_identity = identity_bytes(&mut connection).await;
-    assert!(migrated_identity
-        .iter()
-        .all(|value| !value.contains("birth_")));
+    // v15 起身份列整体退役：`projects` / `workspaces` / `session_bindings` 都不再有它们。
+    // `workspaces.discovery` 的字节**不做清洗**（历史证据原样保留），因此这里断言的是列，
+    // 不是快照内容。
+    for (table, column) in [
+        ("projects", "object_identity"),
+        ("workspaces", "identity"),
+        ("workspaces", "root_identity"),
+        ("session_bindings", "evidence_origin"),
+    ] {
+        assert!(
+            !column_names(&mut connection, table)
+                .await
+                .unwrap()
+                .contains(column),
+            "{table}.{column} 必须在 v15 退役"
+        );
+    }
     assert!(!column_names(&mut connection, "session_bindings")
         .await
         .unwrap()

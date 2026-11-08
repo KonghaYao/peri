@@ -32,6 +32,21 @@ use super::session_lifecycle::guard_session_statement;
 use super::session_sql::{self, SessionInsert};
 use super::sql::StatementSpec;
 
+/// 归属行上的完整发现快照 → 绑定行入库的最小执行根。
+///
+/// `path_source` 的判断在投影之前、对完整快照执行（见 `workspace_registration_statements`）：
+/// 它需要 `common_dir`/`private_dir`，而投影只作用于入库值。
+fn projected_evidence(workspace: &ResolvedWorkspace) -> SessionResourceResult<Option<String>> {
+    workspace
+        .discovery_snapshot
+        .as_deref()
+        .map(|raw| {
+            crate::sessions::binding_evidence::project(raw)
+                .map_err(|_| invalid_input("workspace creation evidence is invalid"))
+        })
+        .transpose()
+}
+
 impl RemoteSessionData {
     fn workspace_registration_statements(
         &self,
@@ -83,7 +98,7 @@ impl RemoteSessionData {
         }
         let mut row = session_sql::session_insert(input, 0, None);
         row.owner_workspace_id = Some(workspace.workspace_id);
-        row.discovery_snapshot = workspace.discovery_snapshot.as_deref();
+        row.discovery_snapshot = projected_evidence(workspace)?;
         let mut statements = self.workspace_registration_statements(workspace)?;
         statements.extend(session_sql::insert_session_statements(&row)?);
         let inputs = session_inputs(input);
@@ -241,7 +256,7 @@ impl RemoteSessionData {
             session_sql::session_insert(&fork.target, fork.payloads.len() as i64, None);
         if let Some(workspace) = workspace {
             insert.owner_workspace_id = Some(workspace.workspace_id);
-            insert.discovery_snapshot = workspace.discovery_snapshot.as_deref();
+            insert.discovery_snapshot = projected_evidence(workspace)?;
         }
         let mut statements = workspace
             .map(|workspace| self.workspace_registration_statements(workspace))

@@ -873,17 +873,7 @@ impl SessionDataPort for SqliteSessionData {
             .execute(&mut *tx)
             .await
             .map_err(|error| map_sqlx(&error))?;
-        // 列文本与派生索引同事务：命中路径从创建时就可用，不必等第一次布局扫描回填。
-        if let Some(write) = super::inherited_index::SnapshotWrite::from_serialization(
-            &child.target.thread_id,
-            Some(child.parent_id.as_str()),
-            &inherited,
-        ) {
-            write
-                .replace(&mut tx)
-                .await
-                .map_err(|error| map_sqlx(&error))?;
-        }
+        // `inherited_context` 字节是唯一事实源：v15 起不再派生索引（可从本列重建）。
         tx.commit()
             .await
             .map_err(|_| commit_failure(Some(child.target.thread_id.clone())))?;

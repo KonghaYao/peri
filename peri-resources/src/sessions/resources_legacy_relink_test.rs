@@ -139,14 +139,17 @@ impl Migrated {
             .await
             .unwrap();
         let resolved = scratch.resolve_workspace(repo.path()).await.unwrap();
-        let observed: (String, String, String) =
-            sqlx::query_as("SELECT project_id, identity, discovery FROM workspaces WHERE id = ?1")
+        let observed: (String, String) =
+            sqlx::query_as("SELECT project_id, discovery FROM workspaces WHERE id = ?1")
                 .bind(resolved.workspace_id.to_string())
                 .fetch_one(scratch.local_pool())
                 .await
                 .unwrap();
         drop(scratch);
-        let (project_id, root_identity, discovery) = observed;
+        let (project_id, discovery) = observed;
+        // V10 的 `workspaces.root_identity` 是 NOT NULL：搬运读取已不再取它，这里给一个
+        // 可分辨的占位值，确保测试断言的是「升级后不再保留身份列」而不是这个字节。
+        let root_identity = r#"{"device":1,"inode":1}"#.to_owned();
 
         let db = tempfile::tempdir().unwrap();
         let path = db.path().join("threads.db");
@@ -237,9 +240,9 @@ impl Migrated {
             .unwrap()
     }
 
-    async fn binding_rows(&self, id: &str) -> Vec<(String, String, String, String)> {
+    async fn binding_rows(&self, id: &str) -> Vec<(String, String, String, Option<String>)> {
         sqlx::query_as(
-            "SELECT project_id, workspace_id, relative_cwd, evidence_origin
+            "SELECT project_id, workspace_id, relative_cwd, discovery_snapshot
              FROM session_bindings WHERE thread_id = ?1",
         )
         .bind(id)
@@ -265,19 +268,19 @@ async fn migrated_unbound_history_is_relinked_from_current_evidence() {
     let id = "unbound-sub".to_owned();
 
     // 迁移现场：只有带绑定那条会话有绑定；子目录会话的归属行没有任何执行证据。
-    let mut bindings: Vec<(String, String)> = sqlx::query_as(
-        "SELECT thread_id, evidence_origin FROM session_bindings ORDER BY thread_id",
+    let mut bindings: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT thread_id, discovery_snapshot FROM session_bindings ORDER BY thread_id",
     )
     .fetch_all(facade.local_pool())
     .await
     .unwrap();
     bindings.sort();
-    assert_eq!(
-        bindings,
-        vec![(
-            "bound-root".to_owned(),
-            "legacy_last_observation".to_owned()
-        )]
+    assert_eq!(bindings.len(), 1, "只有带绑定那条会话有绑定行");
+    assert_eq!(bindings[0].0, "bound-root");
+    let snapshot = bindings[0].1.as_deref().expect("迁移必须搬入创建证据");
+    assert!(
+        snapshot.starts_with(r#"{"root":"#),
+        "v15 起绑定证据是最小执行根，实际是 {snapshot}"
     );
     let owner = store.workspace_of(&id).await;
     assert_eq!(
@@ -354,7 +357,12 @@ async fn migrated_unbound_history_is_relinked_from_current_evidence() {
     assert_eq!(rows[0].0, relinked.project_id.to_string());
     assert_eq!(rows[0].1, relinked.workspace_id.to_string());
     assert_eq!(rows[0].2, "sub");
-    assert_eq!(rows[0].3, "creation_snapshot");
+    // 新写入的绑定证据同为最小执行根：只有 `root`，不再携带身份或 Git 布局。
+    let snapshot = rows[0].3.as_deref().expect("新建绑定必须带执行根");
+    assert!(
+        snapshot.starts_with(r#"{"root":"#) && !snapshot.contains("identity"),
+        "新绑定证据必须是投影后的最小执行根，实际是 {snapshot}"
+    );
     let snapshot = facade.load_session_snapshot(&id).await.unwrap();
     assert!(matches!(snapshot.binding, BindingState::Bound(_)));
     assert_eq!(snapshot.payloads.len(), 1, "历史正文保持可读");
@@ -413,8 +421,9 @@ async fn relink_refuses_to_rebind_a_row_with_recorded_evidence() {
         ))
         .await
         .unwrap();
-    sqlx::query("UPDATE workspaces SET project_id = ?1, identity = 'recorded', discovery = ?2 WHERE id = ?3")
+    sqlx::query("UPDATE workspaces SET project_id = ?1, discovery = ?2 WHERE id = ?3")
         .bind(observed.project_id.to_string())
+        // 归属行的证据是完整发现快照（`workspaces.discovery`），不是绑定行那种最小执行根。
         .bind(observed.discovery_snapshot.clone().unwrap())
         .bind(&owner)
         .execute(facade.local_pool())

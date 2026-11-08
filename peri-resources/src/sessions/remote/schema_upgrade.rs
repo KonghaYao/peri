@@ -60,7 +60,14 @@ const READ_BINDINGS_SQL: &str =
     FROM session_bindings ORDER BY thread_id";
 /// 登记行：归属证据随行搬到当前形状的归属行。
 const READ_REGISTRATIONS_SQL: &str =
-    "SELECT id, project_id, root, root_identity, discovery FROM workspaces ORDER BY id";
+    "SELECT id, project_id, root, discovery FROM workspaces ORDER BY id";
+/// 项目行（id + locator，按 rowid 升序）：v15 的唯一键收窄为 `UNIQUE(locator)`，重复 locator
+/// 必须保留最早一行并改绑引用。
+const READ_PROJECTS_SQL: &str = "SELECT id, locator FROM projects ORDER BY rowid";
+
+/// 绑定行的创建证据：v15 清理要把它投影成最小执行根，因此单独读一次原文。
+const READ_BINDING_SNAPSHOTS_SQL: &str =
+    "SELECT thread_id, discovery_snapshot FROM session_bindings ORDER BY thread_id";
 /// 历史行数：重建链之后的结果守卫（[`GUARD_MESSAGES_COUNT_SQL`]）按它核对搬完之后的历史还在不在。
 const MESSAGES_COUNT_SQL: &str = "SELECT COUNT(*) FROM messages";
 
@@ -81,7 +88,10 @@ const GUARD_THREAD_ROW_SQL: &str =
 const GUARD_THREAD_ROW_WITHOUT_ENVIRONMENTS_SQL: &str =
     "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS (
     SELECT 1 FROM threads t WHERE t.id = ?1 AND t.parent_thread_id IS ?2 AND t.cwd = ?3 AND ?4 IS NULL)";
-const GUARD_BINDING_COUNT_SQL: &str = "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE
+/// 绑定行的并发拒绝面：重建只搬批外读到的绑定行，批间新增的行必须以唯一键冲突失败。
+/// `pub(super)` 供 additive 计划断言这条守卫落在破坏性语句之前。
+pub(super) const GUARD_BINDING_COUNT_SQL: &str =
+    "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE
     (SELECT COUNT(*) FROM session_bindings) <> ?1";
 const GUARD_BINDING_ROW_SQL: &str = "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS (
     SELECT 1 FROM session_bindings
@@ -97,7 +107,7 @@ pub(super) const GUARD_REGISTRATION_COUNT_SQL: &str =
 pub(super) const GUARD_REGISTRATION_ROW_SQL: &str =
     "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS (
     SELECT 1 FROM workspaces
-    WHERE id = ?1 AND project_id = ?2 AND root = ?3 AND root_identity = ?4 AND discovery = ?5)";
+    WHERE id = ?1 AND project_id = ?2 AND root = ?3 AND discovery = ?4)";
 /// 重建前的归属守卫：重建后的 `workspace_id` 是 NOT NULL，无归属的会话行会让重建在服务端
 /// 失败并回滚整批——那时行已经搬进过暂存表。守卫插在重建链**之前**把拒绝提前：它之前的
 /// `ALTER` / `UPDATE` 由整批回滚覆盖，没有任何行被搬进当前形状。
@@ -115,13 +125,18 @@ pub(super) const GUARD_UNASSIGNED_THREADS_SQL: &str =
 /// 位置与其余守卫相反（其余都在任何搬动之前）：级联只发生在重建链里，前置核对看不到它。
 pub(super) const GUARD_MESSAGES_COUNT_SQL: &str = "INSERT INTO peri_store_meta(singleton) SELECT 0
     WHERE (SELECT COUNT(*) FROM messages) <> ?1";
+/// 绑定行的创建证据守卫：逐行核对 `discovery_snapshot` 在批外读到、批内写入之前没有被
+/// 并发改写。现有 `GUARD_BINDING_COUNT_SQL` / `GUARD_BINDING_ROW_SQL` 不覆盖该列。
+const GUARD_BINDING_SNAPSHOT_SQL: &str =
+    "INSERT INTO peri_store_meta(singleton) SELECT 0 WHERE NOT EXISTS (
+    SELECT 1 FROM session_bindings WHERE thread_id = ?1 AND discovery_snapshot IS ?2)";
 const INSERT_MACHINE_SQL: &str =
     "INSERT OR IGNORE INTO machines(id, name, identity_kind) VALUES (?1, ?2, ?3)";
 const INSERT_WORKSPACE_SQL: &str =
-    "INSERT INTO workspaces(id, machine_id, path, path_source, project_id, identity, discovery)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
-const INSERT_BINDING_SQL: &str = "INSERT INTO session_bindings(thread_id, schema_version, project_id, workspace_id, relative_cwd, discovery_snapshot, evidence_origin)
-    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)";
+    "INSERT INTO workspaces(id, machine_id, path, path_source, project_id, discovery)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+const INSERT_BINDING_SQL: &str = "INSERT INTO session_bindings(thread_id, schema_version, project_id, workspace_id, relative_cwd, discovery_snapshot)
+    VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
 const UPDATE_THREAD_WORKSPACE_SQL: &str = "UPDATE threads SET workspace_id = ?2 WHERE id = ?1";
 const ADVANCE_VERSION_SQL: &str =
     "UPDATE peri_store_meta SET schema_version = ?1, contract = ?2 WHERE singleton = 0 AND schema_version = ?3 AND store_id = ?4 AND contract = ?5";
@@ -182,11 +197,19 @@ pub(super) struct MigrationRead {
     sessions: Vec<Vec<Value>>,
     bindings: Vec<Vec<Value>>,
     registrations: Vec<Vec<Value>>,
+    /// 绑定行的创建证据原文：`(thread_id, discovery_snapshot)`。v15 清理要在 Rust 侧把它
+    /// 投影成最小执行根；`None` 表示该行本来就没有证据。
+    binding_snapshots: Vec<(String, Option<String>)>,
     objects: Vec<SchemaObject>,
     /// `threads` 的完整列形状（含类型与默认值）：退役缓存列的判定要它，不是迁移输入判定。
     thread_columns: Vec<ColumnShape>,
     /// 迁移输入各表的列形状（逐表 PRAGMA，沿用本机迁移的输入形状声明）。
     input_columns: HashMap<String, Vec<schema_shape::ActualColumn>>,
+    /// 要删除对象的列形状（含 v15 退役的两张 inherited 表）：这些表不在输入读取面里，
+    /// 单独读一次供 `check_dropped_shape` 使用。
+    dropped_columns: HashMap<String, Vec<schema_shape::ActualColumn>>,
+    /// 项目行 `(id, locator)`，按 rowid 升序：v15 合并重复 locator 时保留最早一行。
+    projects: Vec<(String, String)>,
     /// 搬到之前的 `messages` 行数（结果守卫的基准）。`None` = 输入形状里没有这张表——
     /// 那时形状判定会以「不认识的输入」拒绝整条迁移，守卫本身不会被构造。
     messages_count: Option<i64>,
@@ -205,6 +228,17 @@ impl MigrationRead {
             .get(table)
             .is_some_and(|columns| !columns.is_empty())
     }
+
+    /// 输入是否带**压缩前**的登记形状（`workspaces.root`）。
+    ///
+    /// 当前形状的 `workspaces` 用 `path`，不具备登记语义；两者共用表名，因此按列判定。
+    fn has_registration_shape(&self) -> bool {
+        self.input_columns.get("workspaces").is_some_and(|columns| {
+            columns
+                .iter()
+                .any(|column| column.name.eq_ignore_ascii_case("root"))
+        })
+    }
 }
 
 pub(super) async fn upgrade(
@@ -217,44 +251,70 @@ pub(super) async fn upgrade(
         .await
         .map_err(|_| unsupported())?;
     let current_machine = crate::sessions::machine::current().map_err(|_| unsupported())?;
+    let read = read_input(store).await?;
+    // 每条路径的批次都含 `DROP TABLE threads` 或 `DROP TABLE workspaces`：服务端的
+    // `foreign_keys` 是跨连接共享的可变状态，若被别的连接打开，隐式删除会级联清掉
+    // `messages`。写打开与这里一样先归位。
+    store.force_parent_checks_off().await?;
     if additive_source(snapshot) {
-        // 上一代/再上一代当前形状只缺派生对象：增量补齐，不搬运、不删除任何会话事实。
+        // 上一代/再上一代当前形状（v13|12|11）：先补 `thread_mq` 与两列，再跑 v15 清理。
+        // 批次仍是原子的，终点就是当前形状。
         return store
-            .apply_schema_upgrade(additive_upgrade_plan(snapshot, current_machine)?)
+            .apply_schema_upgrade(additive_upgrade_plan(
+                snapshot,
+                current_machine,
+                &read.binding_snapshots,
+                &read.projects,
+            )?)
+            .await;
+    }
+    if v15_cleanup_source(snapshot) {
+        // v14 → v15：只删列、删表并投影绑定证据，不搬运任何会话事实。
+        return store
+            .apply_schema_upgrade(v15_cleanup_plan(snapshot, &read, current_machine)?)
             .await;
     }
     if !legacy_migration_source(snapshot) {
         return Err(unsupported());
     }
-    let read = read_input(store).await?;
-    // 批次里有 `DROP TABLE threads`（重建归属列）：服务端的 `foreign_keys` 是跨连接共享的
-    // 可变状态，若被别的连接打开，隐式删除会级联清掉 `messages`。写打开与这里一样先归位。
-    store.force_parent_checks_off().await?;
     store
         .apply_schema_upgrade(upgrade_plan(snapshot, &read, current_machine)?)
         .await
 }
 
-/// 增量补齐的升级来源：`v7` + 13（只缺两列）、`v6` + 12（还缺 `thread_mq`）与
-/// `v5` + 11（还缺派生索引表）。
+/// 增量补齐的升级来源：`v7` + 13（只缺两列）、`v6` + 12 与 `v5` + 11
+/// （都还缺 `thread_mq`）。
 ///
 /// 三条来源共用同一份幂等批次：建表都是 `CREATE ... IF NOT EXISTS`；两列是 v14 的
-/// 唯一 `ALTER`，三条来源都必然缺它们。把几份形状会聚到同一终点，比按代际各写一条
-/// 路径更不容易漂移。
+/// 唯一 `ALTER`，三条来源都必然缺它们。增量补完后同一批接 v15 清理，终点一次到 v15。
 pub(super) fn additive_source(snapshot: &StoreSnapshot) -> bool {
     matches!(
         (snapshot.contract.as_str(), snapshot.schema_version),
-        (schema::PREVIOUS_CURRENT_STORE_CONTRACT, 13)
-            | (schema::LEGACY_CURRENT_STORE_CONTRACT, 12)
-            | (schema::OLDER_CURRENT_STORE_CONTRACT, 11)
+        (schema::LEGACY_CURRENT_STORE_CONTRACT, 13)
+            | (schema::OLDER_CURRENT_STORE_CONTRACT, 12)
+            | (schema::OLDEST_CURRENT_STORE_CONTRACT, 11)
     )
 }
 
-/// 上一代/再上一代当前形状的升级批次：补派生索引表、`thread_mq` 与 canonical 索引集，
-/// 末尾推进版本与契约。整批仍是受管批次，守卫与推进语义与搬运路径一致。
+/// v15 清理的升级来源：`v8` + 14（v15 之前的当前形状）。
+///
+/// 它不缺任何列或表，缺的是 v15 的**删除**：三列退役加两张表退役，被唯一键引用的列不能
+/// `DROP COLUMN`，只能走重建。因此它不复用 additive 的 `CREATE ... IF NOT EXISTS`，
+/// 而是独立的受管批次 [`v15_cleanup_plan`]。
+pub(super) fn v15_cleanup_source(snapshot: &StoreSnapshot) -> bool {
+    snapshot.contract == schema::PREVIOUS_CURRENT_STORE_CONTRACT && snapshot.schema_version == 14
+}
+
+/// 上一代/再上一代当前形状的升级批次：补 `thread_mq` 与两列，末尾接 v15 清理并推进版本。
+/// 整批仍是受管批次，守卫与推进语义与搬运路径一致。
+///
+/// v13/v12/v11 的终点是 v15：批次末尾接的是 v15 清理，因此补完列与表之后直接进入
+/// [`v15_cleanup_plan`] 的语句序列（同一批，原子）。
 pub(super) fn additive_upgrade_plan(
     snapshot: &StoreSnapshot,
     current_machine: &str,
+    binding_snapshots: &[(String, Option<String>)],
+    projects: &[(String, String)],
 ) -> SessionResourceResult<Vec<StatementSpec>> {
     if !additive_source(snapshot) {
         return Err(unsupported());
@@ -267,19 +327,15 @@ pub(super) fn additive_upgrade_plan(
             Value::Text(snapshot.contract.clone()),
         ],
     )];
-    statements.extend(
-        canonical::CREATE_INHERITED_INDEX_TABLES
-            .iter()
-            .map(|sql| StatementSpec::bare(sql)),
-    );
     statements.push(StatementSpec::bare(canonical::CREATE_THREAD_MQ_TABLE_SQL));
     statements.extend(threads_v14_column_statements());
-    statements.extend(
-        canonical::CREATE_INDEXES
-            .iter()
-            .map(|sql| StatementSpec::bare(sql)),
-    );
     statements.push(current_machine_statement(current_machine));
+    // 补完 v14 的增量之后，同一批接 v15 清理（三表重建 + 删两表 + 索引重放）。
+    statements.extend(v15_cleanup_statements(
+        current_machine,
+        binding_snapshots,
+        projects,
+    )?);
     statements.push(advance_version(snapshot));
     Ok(statements)
 }
@@ -294,6 +350,51 @@ pub(super) async fn read_input(store: &RemoteStore) -> SessionResourceResult<Mig
     for table in schema_shape::INPUT_TABLES {
         let sql = schema::ShapeProbe::pragma_table_xinfo(table.name)
             .ok_or_else(|| incomplete_reply("remote upgrade input table is not supported"))?;
+        statements.push(StatementSpec::bare(sql));
+    }
+    // 要删除的对象（含 v15 退役的两张 inherited 表）不在输入读取面里。这些表在合法输入里
+    // **本来就可以不存在**（远端从未建过派生索引），而 `PRAGMA table_xinfo` 对缺表会让整个
+    // 读批次失败——所以先单独探一次存在性，只对存在的表补读形状。
+    let retired = [
+        "inherited_snapshot_index",
+        "inherited_payload_index",
+        "projects",
+    ];
+    let presence = store
+        .read_batch(
+            retired
+                .iter()
+                .map(|table| {
+                    StatementSpec::new(
+                        schema::TABLE_EXISTS_SQL,
+                        vec![Value::Text((*table).to_owned())],
+                    )
+                })
+                .collect(),
+        )
+        .await?;
+    let present: Vec<&str> = retired
+        .iter()
+        .zip(presence.iter())
+        .filter_map(|(table, rows)| (!rows.is_empty()).then_some(*table))
+        .collect();
+    // `projects` 只为 v15 的重复 locator 合并而读；它不在迁移输入面里（输入面只有属于
+    // 搬运的表），也不在删除面里。
+    let has_projects = present.contains(&"projects");
+    let dropped_names: Vec<&str> = present
+        .iter()
+        .copied()
+        .filter(|name| *name != "projects")
+        .chain(
+            schema_shape::DROPPED_TABLES
+                .iter()
+                .map(|table| table.shape.name)
+                .filter(|name| !retired.contains(name)),
+        )
+        .collect();
+    for name in &dropped_names {
+        let sql = schema::ShapeProbe::pragma_table_xinfo(name)
+            .ok_or_else(|| incomplete_reply("remote dropped table is not supported"))?;
         statements.push(StatementSpec::bare(sql));
     }
     let shape = store.read_batch(statements).await?;
@@ -315,15 +416,46 @@ pub(super) async fn read_input(store: &RemoteStore) -> SessionResourceResult<Mig
             ]);
         }
     }
+    let dropped_offset = 1 + schema_shape::INPUT_TABLES.len();
+    let mut dropped_columns = Vec::new();
+    for (table, rows) in dropped_names.iter().zip(shape.iter().skip(dropped_offset)) {
+        for row in rows {
+            let (Some(name), Some(not_null), Some(primary_key)) =
+                (row.get(1), row.get(3), row.get(5))
+            else {
+                return Err(incomplete_reply(
+                    "remote dropped table returned an incomplete column",
+                ));
+            };
+            dropped_columns.push(vec![
+                Value::Text((*table).to_owned()),
+                name.clone(),
+                not_null.clone(),
+                primary_key.clone(),
+            ]);
+        }
+    }
     let mut read = MigrationRead {
         sessions: Vec::new(),
         bindings: Vec::new(),
         registrations: Vec::new(),
+        binding_snapshots: Vec::new(),
         objects: decode_objects(&shape[0])?,
         thread_columns: decode_columns(&shape[1])?,
         input_columns: schema::decode_column_map(&columns)?,
+        dropped_columns: schema::decode_column_map(&dropped_columns)?,
+        projects: Vec::new(),
         messages_count: None,
     };
+    // v2 的绑定形状没有 `discovery_snapshot` 列（压缩前的输入只在 v11 起才有）。
+    let has_binding_snapshot = read
+        .input_columns
+        .get("session_bindings")
+        .is_some_and(|columns| {
+            columns
+                .iter()
+                .any(|column| column.name.eq_ignore_ascii_case("discovery_snapshot"))
+        });
     if read.thread_columns.is_empty() {
         return Ok(read);
     }
@@ -332,16 +464,54 @@ pub(super) async fn read_input(store: &RemoteStore) -> SessionResourceResult<Mig
     } else {
         READ_SESSIONS_WITHOUT_ENVIRONMENTS_SQL
     };
-    let rows = store
-        .read_batch(vec![
-            StatementSpec::bare(sessions_sql),
-            StatementSpec::bare(READ_BINDINGS_SQL),
-            StatementSpec::bare(READ_REGISTRATIONS_SQL),
-        ])
-        .await?;
+    let mut statements = vec![StatementSpec::bare(sessions_sql)];
+    statements.push(StatementSpec::bare(READ_BINDINGS_SQL));
+    // 登记行只存在于压缩前的形状（`workspaces.root`）。当前形状的 `workspaces` 用
+    // `path`，这条读法会在它上面报「no such column」——因此按列判断，而不是按表名。
+    let has_registration_shape = read.has_registration_shape();
+    if has_registration_shape {
+        statements.push(StatementSpec::bare(READ_REGISTRATIONS_SQL));
+    }
+    if has_binding_snapshot {
+        statements.push(StatementSpec::bare(READ_BINDING_SNAPSHOTS_SQL));
+    }
+    if has_projects {
+        statements.push(StatementSpec::bare(READ_PROJECTS_SQL));
+    }
+    let rows = store.read_batch(statements).await?;
+    let mut next = 2;
     read.sessions = rows[0].clone();
     read.bindings = rows[1].clone();
-    read.registrations = rows[2].clone();
+    if has_registration_shape {
+        read.registrations = rows[next].clone();
+        next += 1;
+    }
+    if has_binding_snapshot {
+        read.binding_snapshots = rows[next]
+            .iter()
+            .map(|row| {
+                Ok((
+                    text_at(row, 0).ok_or_else(unsupported)?.to_owned(),
+                    optional_text(row, 1)?,
+                ))
+            })
+            .collect::<SessionResourceResult<Vec<_>>>()?;
+        next += 1;
+    }
+    if has_projects {
+        let projects = rows
+            .get(next)
+            .ok_or_else(|| incomplete_reply("remote upgrade input returned no project rows"))?;
+        read.projects = projects
+            .iter()
+            .map(|row| {
+                Ok((
+                    text_at(row, 0).ok_or_else(unsupported)?.to_owned(),
+                    text_at(row, 1).ok_or_else(unsupported)?.to_owned(),
+                ))
+            })
+            .collect::<SessionResourceResult<Vec<_>>>()?;
+    }
     // 历史行数只在这张表确实存在时读（与 `has_environments` 同一条规则）：表缺席时形状判定
     // 会以 `Unsupported` 拒绝整条迁移，这里不能把那个拒绝降级成一次「表不存在」的读失败。
     if read.declares("messages") {
@@ -419,7 +589,14 @@ pub(super) fn upgrade_plan(
         unsupported()
     })?;
     // 要删除的压缩前对象先判定形状（判定与计划同一个入口）：同名异形的表不删并拒绝整批。
-    let dropped = schema_shape::dropped_plan(&read.input_columns).map_err(|reason| {
+    // 退役的两张 inherited 表不在输入读取面里，用同一批里读到的删除面形状补齐。
+    let mut dropped_shape = read.input_columns.clone();
+    for (table, columns) in &read.dropped_columns {
+        dropped_shape
+            .entry(table.clone())
+            .or_insert_with(|| columns.clone());
+    }
+    let dropped = schema_shape::dropped_plan(&dropped_shape).map_err(|reason| {
         tracing::warn!(
             reason = %reason,
             "remote store upgrade refuses to drop this object"
@@ -481,6 +658,53 @@ pub(super) fn upgrade_plan(
             unsupported()
         })?;
 
+    // 项目行：v15 的 `projects` 以 `UNIQUE(locator)` 为身份，必须从旧库真实的项目行重建。
+    // `read.projects` 按 rowid 升序：同 locator 保留最早一行，其余 id 记进 remap，否则
+    // 后面的归属行与绑定行会引用一个不存在的项目。表里缺的 id（旧库没有 projects 表）
+    // 退回按归属行路径合成，同 locator 保留 id 最小者。
+    let mut project_rows: Vec<(String, String)> = Vec::new();
+    let mut locator_owner: HashMap<String, usize> = HashMap::new();
+    let mut remap: HashMap<String, String> = HashMap::new();
+    for (id, locator) in &read.projects {
+        match locator_owner.get(locator) {
+            Some(&index) => {
+                remap.insert(id.clone(), project_rows[index].0.clone());
+            }
+            None => {
+                locator_owner.insert(locator.clone(), project_rows.len());
+                project_rows.push((id.clone(), locator.clone()));
+            }
+        }
+    }
+    for row in &workspace_rows {
+        let Some(project_id) = row.project_id.clone() else {
+            continue;
+        };
+        if project_rows.iter().any(|(id, _)| *id == project_id) || remap.contains_key(&project_id) {
+            continue;
+        }
+        let locator = row.path.to_str().ok_or_else(unsupported)?.to_owned();
+        match locator_owner.get(&locator) {
+            Some(index) if project_rows[*index].0.as_str() <= project_id.as_str() => {
+                remap.insert(project_id, project_rows[*index].0.clone());
+            }
+            Some(index) => {
+                let replaced = std::mem::replace(&mut project_rows[*index].0, project_id);
+                remap.insert(replaced, project_rows[*index].0.clone());
+            }
+            None => {
+                locator_owner.insert(locator.clone(), project_rows.len());
+                project_rows.push((project_id, locator));
+            }
+        }
+    }
+    let keep = |project_id: &str| {
+        remap
+            .get(project_id)
+            .cloned()
+            .unwrap_or_else(|| project_id.to_owned())
+    };
+
     // 守卫：读到什么形状，提交时就要求什么形状。
     statements.push(StatementSpec::new(
         GUARD_OBJECT_COUNT_SQL,
@@ -521,8 +745,24 @@ pub(super) fn upgrade_plan(
     statements.extend(removals.into_iter().map(StatementSpec::bare));
 
     // 旧登记与引用它的绑定表整体换掉：两个 id 空间收敛成一个。
+    //
+    // `projects` 也整表重建：v15 的唯一键收窄为 `UNIQUE(locator)`，真实项目行按
+    // `locator` 去重（保留 `read.projects` 的 rowid 最早一行），旧库缺 `projects` 表时
+    // 才按归属行路径合成；引用关系由上面的规划保证只指向保留行。顺序：先删引用者
+    // （bindings/workspaces），再删父表（projects），最后按 v15 DDL 重建。
     statements.push(StatementSpec::bare("DROP TABLE session_bindings"));
     statements.push(StatementSpec::bare("DROP TABLE workspaces"));
+    statements.push(StatementSpec::bare("DROP TABLE projects"));
+    statements.push(StatementSpec::bare(canonical::CREATE_PROJECTS_TABLE_SQL));
+    for (project_id, locator) in &project_rows {
+        statements.push(StatementSpec::new(
+            "INSERT INTO projects (id, locator) VALUES (?1, ?2)",
+            vec![
+                Value::Text(project_id.clone()),
+                Value::Text(locator.clone()),
+            ],
+        ));
+    }
     statements.push(StatementSpec::bare(canonical::CREATE_MACHINES_TABLE_SQL));
     statements.push(current_machine_statement(current_machine));
     statements.push(StatementSpec::bare(canonical::CREATE_WORKSPACES_TABLE_SQL));
@@ -546,8 +786,7 @@ pub(super) fn upgrade_plan(
                 Value::Text(row.machine_id.clone()),
                 Value::Text(path.to_owned()),
                 Value::Text(path_source_name(row.path_source).to_owned()),
-                optional_value(&row.project_id),
-                optional_value(&row.identity),
+                optional_value(&row.project_id.as_deref().map(keep)),
                 optional_value(&row.discovery),
             ],
         ));
@@ -602,11 +841,10 @@ pub(super) fn upgrade_plan(
             vec![
                 Value::Text(row.thread_id.clone()),
                 Value::Integer(row.schema_version),
-                Value::Text(row.project_id.clone()),
+                Value::Text(keep(&row.project_id)),
                 Value::Text(row.workspace_id.to_string()),
                 Value::Text(row.relative_cwd.clone()),
                 Value::Text(row.discovery_snapshot.clone()),
-                Value::Text(row.evidence_origin.to_owned()),
             ],
         ));
     }
@@ -619,18 +857,12 @@ pub(super) fn upgrade_plan(
     statements.push(StatementSpec::bare(
         canonical::CREATE_SESSION_CLOSE_INTENTS_TABLE_SQL,
     ));
-    // 派生索引表必须在索引重放之前建齐（索引依赖表）；`IF NOT EXISTS` 幂等。
-    statements.extend(
-        canonical::CREATE_INHERITED_INDEX_TABLES
-            .iter()
-            .map(|sql| StatementSpec::bare(sql)),
-    );
+    // 派生索引表随 v15 退役：这里不建。
     // `thread_mq` 与索引集里的 `idx_thread_mq_order` 是同一代新增的形状：重建路径不经过
     // `CREATE_TABLES`，必须在这里显式建表，否则末尾的索引重放会撞上「表不存在」。
     statements.push(StatementSpec::bare(canonical::CREATE_THREAD_MQ_TABLE_SQL));
-    // 索引重放：`DROP TABLE` 把被重建的表（`threads` / `session_bindings`）上的索引一并删掉，
-    // 批次末尾把 canonical 的**整份**索引集一次性重放，升级终点因此天然带齐索引——
-    // 按表分组、逐表补索引会漏掉「某张表被重建而那张表的清单没跟上」这种漂移。
+    // 索引重放：`DROP TABLE` 把被重建的表（`threads` / `session_bindings` / `projects` /
+    // `workspaces`）上的索引一并删掉，批次末尾把 canonical 的**整份**索引集一次性重放。
     // `IF NOT EXISTS` 让重放幂等（`messages` 的索引本来就在）。
     statements.extend(
         canonical::CREATE_INDEXES
@@ -641,7 +873,190 @@ pub(super) fn upgrade_plan(
     Ok(statements)
 }
 
-/// 当前 Machine 的登记行：批次与本机迁移下发同一条语句（`canonical` 是唯一来源）。
+/// v14 → v15 的清理批次：三表重建（删列、收窄唯一键、投影绑定证据）+ 两张退役表 +
+/// 索引重放 + 版本推进。
+///
+/// 与 additive / 搬运路径共用 [`v15_cleanup_statements`]：v14 的库不缺列，只差删除，因此
+/// 这里不做 `ALTER`、不搬会话事实；v13/v12/v11 的增量批次在补完列与表之后接同一段语句。
+///
+/// 守卫链在破坏性语句之前：元数据行、绑定行计数、逐行绑定证据与登记行，任何一条不成立都让
+/// 批次以唯一键冲突失败。
+pub(super) fn v15_cleanup_plan(
+    snapshot: &StoreSnapshot,
+    read: &MigrationRead,
+    current_machine: &str,
+) -> SessionResourceResult<Vec<StatementSpec>> {
+    if !v15_cleanup_source(snapshot) {
+        return Err(unsupported());
+    }
+    let mut statements = vec![StatementSpec::new(
+        GUARD_META_SQL,
+        vec![
+            Value::Integer(snapshot.schema_version),
+            Value::Text(snapshot.store_id.as_str().to_owned()),
+            Value::Text(snapshot.contract.clone()),
+        ],
+    )];
+    // 绑定行的计数与逐行证据守卫由 `v15_cleanup_statements` 统一下发：additive 与
+    // v15 清理共用同一段重建，守卫必须跟着重建走。
+    // 登记行只存在于压缩前的输入里；当前形状（v14 → v15）没有它们，不能下发计数守卫。
+    if read.has_registration_shape() {
+        statements.push(StatementSpec::new(
+            GUARD_REGISTRATION_COUNT_SQL,
+            vec![Value::Integer(read.registrations.len() as i64)],
+        ));
+        for row in &read.registrations {
+            statements.push(StatementSpec::new(GUARD_REGISTRATION_ROW_SQL, row.clone()));
+        }
+    }
+    statements.extend(v15_cleanup_statements(
+        current_machine,
+        &read.binding_snapshots,
+        &read.projects,
+    )?);
+    statements.push(advance_version(snapshot));
+    Ok(statements)
+}
+
+// NOTE: additive 批次在补完 v14 的列与表后接 `v15_cleanup_statements`，一次推进到 v15；
+// 绑定守卫也由该语句段统一下发，覆盖 additive 与 v14 清理两条路径。
+
+/// v15 清理的语句段（不含元数据/登记守卫与版本推进）：先下发绑定守卫，再重建三表、
+/// 删两表、重放索引。
+///
+/// `binding_snapshots` 是批外读到的 `(thread_id, discovery_snapshot)` 原文；这里逐行投影成
+/// 最小执行根再插入暂存表——SQL 里不做这件事（远端 json1 未实测），两端因此在 Rust 侧共用
+/// 同一份投影（`binding_evidence::project`）。解析失败即整批失败：静默降级成 NULL 会把
+/// 可执行会话变成只读历史。
+fn v15_cleanup_statements(
+    current_machine: &str,
+    binding_snapshots: &[(String, Option<String>)],
+    projects: &[(String, String)],
+) -> SessionResourceResult<Vec<StatementSpec>> {
+    let mut projected = Vec::with_capacity(binding_snapshots.len());
+    for (thread_id, snapshot) in binding_snapshots {
+        let snapshot = match snapshot.as_deref() {
+            None => Value::Null,
+            Some(raw) => Value::Text(
+                crate::sessions::binding_evidence::project(raw).map_err(|_| unsupported())?,
+            ),
+        };
+        projected.push((thread_id.clone(), snapshot));
+    }
+    // `projects`：保留每个 locator 的 rowid 最早一行（`projects` 已按 rowid 升序读回），
+    // 其余行的引用先改绑、后删除。这一步必须在重建之前：重建后的唯一键是
+    // `UNIQUE(locator)`，重复行会让搬入直接撞键。
+    let mut keep: HashMap<&str, &str> = HashMap::new();
+    let mut merges: Vec<(&str, &str)> = Vec::new();
+    for (id, locator) in projects {
+        match keep.get(locator.as_str()) {
+            Some(keep_id) => merges.push((id.as_str(), keep_id)),
+            None => {
+                keep.insert(locator.as_str(), id.as_str());
+            }
+        }
+    }
+    // 守卫链必须在任何破坏性语句之前：重建只搬批外读到的绑定行，批间新增或改写的行
+    // 要以唯一键冲突失败，不能被静默丢掉或写入未投影的旧证据。
+    let mut statements = vec![StatementSpec::new(
+        GUARD_BINDING_COUNT_SQL,
+        vec![Value::Integer(binding_snapshots.len() as i64)],
+    )];
+    for (thread_id, snapshot) in binding_snapshots {
+        statements.push(StatementSpec::new(
+            GUARD_BINDING_SNAPSHOT_SQL,
+            vec![
+                Value::Text(thread_id.clone()),
+                snapshot.clone().map(Value::Text).unwrap_or(Value::Null),
+            ],
+        ));
+    }
+    for (drop_id, keep_id) in &merges {
+        statements.push(StatementSpec::new(
+            "UPDATE workspaces SET project_id = ?1 WHERE project_id = ?2",
+            vec![
+                Value::Text((*keep_id).to_owned()),
+                Value::Text((*drop_id).to_owned()),
+            ],
+        ));
+        statements.push(StatementSpec::new(
+            "UPDATE session_bindings SET project_id = ?1 WHERE project_id = ?2",
+            vec![
+                Value::Text((*keep_id).to_owned()),
+                Value::Text((*drop_id).to_owned()),
+            ],
+        ));
+        statements.push(StatementSpec::new(
+            "DELETE FROM projects WHERE id = ?1",
+            vec![Value::Text((*drop_id).to_owned())],
+        ));
+    }
+    // 1. projects 重建为 `UNIQUE(locator)`：此时 locator 已唯一，整表搬运即可。
+    statements.push(StatementSpec::bare(
+        canonical::CREATE_REBUILD_PROJECTS_TABLE_SQL,
+    ));
+    statements.push(StatementSpec::bare(
+        canonical::INSERT_PROJECTS_INTO_REBUILD_SQL,
+    ));
+    // 2. workspaces：删 `identity`。归属与证据列原样搬运。
+    statements.push(StatementSpec::bare(
+        canonical::CREATE_REBUILD_WORKSPACES_TABLE_SQL,
+    ));
+    statements.push(StatementSpec::bare(
+        canonical::INSERT_WORKSPACES_INTO_REBUILD_SQL,
+    ));
+    // 3. session_bindings：删 `evidence_origin`，证据逐行投影。
+    statements.push(StatementSpec::bare(
+        canonical::CREATE_REBUILD_BINDINGS_TABLE_SQL,
+    ));
+    for (thread_id, snapshot) in &projected {
+        statements.push(StatementSpec::new(
+            "INSERT INTO session_bindings_v15 (thread_id, schema_version, project_id, workspace_id, relative_cwd, discovery_snapshot)
+             SELECT thread_id, schema_version, project_id, workspace_id, relative_cwd, ?2
+             FROM session_bindings WHERE thread_id = ?1",
+            vec![Value::Text(thread_id.clone()), snapshot.clone()],
+        ));
+    }
+    // 4. 换表：先删引用者，再删父表，最后按 v15 DDL 建新表并搬回。
+    statements.push(StatementSpec::bare("DROP TABLE session_bindings"));
+    statements.push(StatementSpec::bare("DROP TABLE workspaces"));
+    statements.push(StatementSpec::bare("DROP TABLE projects"));
+    statements.push(StatementSpec::bare(canonical::CREATE_PROJECTS_TABLE_SQL));
+    statements.push(StatementSpec::bare(canonical::CREATE_WORKSPACES_TABLE_SQL));
+    statements.push(StatementSpec::bare(canonical::CREATE_BINDINGS_TABLE_SQL));
+    statements.push(current_machine_statement(current_machine));
+    statements.push(StatementSpec::bare(
+        canonical::INSERT_REBUILD_INTO_PROJECTS_SQL,
+    ));
+    statements.push(StatementSpec::bare(
+        canonical::INSERT_REBUILD_INTO_WORKSPACES_SQL,
+    ));
+    statements.push(StatementSpec::bare(
+        canonical::INSERT_REBUILD_INTO_BINDINGS_SQL,
+    ));
+    statements.extend(
+        [
+            "DROP TABLE projects_v15",
+            "DROP TABLE workspaces_v15",
+            "DROP TABLE session_bindings_v15",
+        ]
+        .into_iter()
+        .map(StatementSpec::bare),
+    );
+    // 5. 退役的两张派生索引表（payload 先于 snapshot）。缺表时 `IF EXISTS` 幂等。
+    statements.extend(
+        canonical::DROP_INHERITED_INDEX_TABLES
+            .iter()
+            .map(|sql| StatementSpec::bare(sql)),
+    );
+    // 6. 索引重放：重建的三张表随 `DROP TABLE` 丢掉了自己的索引。
+    statements.extend(
+        canonical::CREATE_INDEXES
+            .iter()
+            .map(|sql| StatementSpec::bare(sql)),
+    );
+    Ok(statements)
+}
 fn current_machine_statement(current_machine: &str) -> StatementSpec {
     StatementSpec::new(
         canonical::INSERT_CURRENT_MACHINE_SQL,
@@ -781,8 +1196,7 @@ fn decode_registrations(rows: &[Vec<Value>]) -> SessionResourceResult<Vec<Legacy
             .map_err(|_| unsupported())?;
         let project_id = text_at(row, 1).ok_or_else(unsupported)?.to_owned();
         let root = text_at(row, 2).ok_or_else(unsupported)?.to_owned();
-        let root_identity = text_at(row, 3).ok_or_else(unsupported)?.to_owned();
-        let discovery = text_at(row, 4).ok_or_else(unsupported)?.to_owned();
+        let discovery = text_at(row, 3).ok_or_else(unsupported)?.to_owned();
         let observed: serde_json::Value =
             serde_json::from_str(&discovery).map_err(|_| unsupported())?;
         if observed.get("root").and_then(serde_json::Value::as_str) != Some(root.as_str()) {
@@ -804,7 +1218,6 @@ fn decode_registrations(rows: &[Vec<Value>]) -> SessionResourceResult<Vec<Legacy
             root: root.into(),
             path_source,
             project_id,
-            root_identity,
             discovery,
         });
     }

@@ -48,8 +48,13 @@ async fn seeded_database() -> (tempfile::TempDir, PathBuf) {
     let path = directory.path().join("threads.db");
     close(SqliteThreadStore::new(path.clone()).await.unwrap()).await;
     let mut connection = connect(&path).await;
+    // v15 的迁移以 `foreign_key_check` 为前置守卫，夹具因此必须给出真实的引用链。
     sqlx::raw_sql(
-        "INSERT INTO threads (id, title, created_at, updated_at, message_count, workspace_id)
+        "INSERT OR IGNORE INTO machines(id, name, identity_kind) VALUES ('machine', '机器', 'known');
+         INSERT OR IGNORE INTO projects(id, locator) VALUES ('project', '/work');
+         INSERT OR IGNORE INTO workspaces(id, machine_id, path, path_source, project_id)
+         VALUES ('workspace', 'machine', '/work', 'unverified', 'project');
+         INSERT INTO threads (id, title, created_at, updated_at, message_count, workspace_id)
          VALUES ('session', 'kept', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', 1, 'workspace');
          INSERT INTO messages (message_id, thread_id, role, content, truncated, excluded)
          VALUES ('message', 'session', 'user', 'kept content', 0, 0);
@@ -63,20 +68,59 @@ async fn seeded_database() -> (tempfile::TempDir, PathBuf) {
     (directory, path)
 }
 
-/// 把当前库退回指定代际：先删两列工作快照，再按目标版本删 `thread_mq` / 派生索引表。
-async fn downgrade(path: &Path, version: i64, drop_derived: bool) {
+/// 把当前库退回指定代际：重建三张被 v15 改形的表为旧形状，再删两列工作快照。
+///
+/// v15 删掉了三张表上的身份列，并把 `projects` 的唯一键收窄为 `UNIQUE(locator)`；
+/// 列序也参与形状判定（`identity` 在 v14 里排在 `discovery` 之前），因此必须整表重建，
+/// 不能 `ALTER ... ADD COLUMN`。夹具只关心形状与列值，连接已关闭父行检查。
+pub(super) async fn downgrade(path: &Path, version: i64, drop_derived: bool) {
     let mut connection = connect(path).await;
     let mut statements = String::from(
-        "ALTER TABLE threads DROP COLUMN context_usage_tokens;
+        "CREATE TABLE session_bindings_v14 (
+             thread_id TEXT PRIMARY KEY REFERENCES threads(id) ON DELETE CASCADE,
+             schema_version INTEGER NOT NULL,
+             project_id TEXT NOT NULL, workspace_id TEXT NOT NULL, relative_cwd TEXT NOT NULL,
+             discovery_snapshot TEXT, evidence_origin TEXT NOT NULL);
+         INSERT INTO session_bindings_v14
+             SELECT thread_id, schema_version, project_id, workspace_id, relative_cwd,
+                    discovery_snapshot, 'legacy_last_observation'
+             FROM session_bindings;
+         DROP TABLE session_bindings;
+         ALTER TABLE session_bindings_v14 RENAME TO session_bindings;
+
+         CREATE TABLE workspaces_v14 (
+             id TEXT PRIMARY KEY,
+             machine_id TEXT NOT NULL REFERENCES machines(id),
+             path TEXT NOT NULL,
+             path_source TEXT NOT NULL CHECK(path_source IN ('discovered', 'derived_legacy', 'unverified')),
+             project_id TEXT REFERENCES projects(id),
+             identity TEXT,
+             discovery TEXT,
+             UNIQUE(machine_id, path));
+         INSERT INTO workspaces_v14 (id, machine_id, path, path_source, project_id, discovery)
+             SELECT id, machine_id, path, path_source, project_id, discovery FROM workspaces;
+         DROP TABLE workspaces;
+         ALTER TABLE workspaces_v14 RENAME TO workspaces;
+
+         CREATE TABLE projects_v14 (
+             id TEXT PRIMARY KEY, locator TEXT NOT NULL, object_identity TEXT NOT NULL,
+             UNIQUE(locator, object_identity));
+         INSERT INTO projects_v14 (id, locator, object_identity)
+             SELECT id, locator, '{}' FROM projects;
+         DROP TABLE projects;
+         ALTER TABLE projects_v14 RENAME TO projects;
+
+         ALTER TABLE threads DROP COLUMN context_usage_tokens;
          ALTER TABLE threads DROP COLUMN work_state;",
     );
     if version <= 12 {
         statements.push_str(" DROP TABLE thread_mq;");
     }
     if drop_derived {
+        // v15 起这两种表已退役；退回更早的来源时它们本来就可以缺席。
         statements.push_str(
-            " DROP TABLE inherited_payload_index;
-              DROP TABLE inherited_snapshot_index;",
+            " DROP TABLE IF EXISTS inherited_payload_index;
+              DROP TABLE IF EXISTS inherited_snapshot_index;",
         );
     }
     statements.push_str(&format!(" PRAGMA user_version = {version};"));
@@ -152,7 +196,7 @@ async fn fresh_database_declares_the_work_snapshot_columns() {
         .unwrap();
 }
 
-/// v13 → v14：只补两列，历史、MQ 行与派生对象都保持原样。
+/// v13 → 当前形状：补齐两列并跑 v15 清理，历史与 MQ 行保持原样。
 #[tokio::test]
 async fn upgrading_from_v13_adds_the_columns_without_touching_history() {
     let (_directory, path) = seeded_database().await;
@@ -186,7 +230,7 @@ async fn upgrading_from_v13_adds_the_columns_without_touching_history() {
     assert_eq!(queued, 1, "v13 已有的 MQ 行必须保留");
 }
 
-/// v12 → v14：链式补齐 `thread_mq` 与两列，MQ 排序索引一并建立。
+/// v12 → 当前形状：链式补齐 `thread_mq` 与两列，再跑 v15 清理。
 #[tokio::test]
 async fn upgrading_from_v12_creates_thread_mq_and_the_columns() {
     let (_directory, path) = seeded_database().await;
@@ -201,7 +245,7 @@ async fn upgrading_from_v12_creates_thread_mq_and_the_columns() {
     .fetch_one(&mut connection)
     .await
     .unwrap();
-    assert_eq!(mq_table, 1, "v12 → v14 必须补齐 thread_mq");
+    assert_eq!(mq_table, 1, "v12 → 当前形状必须补齐 thread_mq");
     let (mq_index,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' AND name = 'idx_thread_mq_order'",
     )
@@ -220,7 +264,7 @@ async fn upgrading_from_v12_creates_thread_mq_and_the_columns() {
     assert_eq!((usage, state.as_str()), (None, "idle"));
 }
 
-/// v11 → v14：派生索引表、`thread_mq` 与两列一起补齐，历史不动。
+/// v11 → 当前形状：`thread_mq` 与两列一起补齐，v15 清理删除退役的派生索引表。
 #[tokio::test]
 async fn upgrading_from_v11_restores_derived_objects_and_the_columns() {
     let (_directory, path) = seeded_database().await;
@@ -231,12 +275,19 @@ async fn upgrading_from_v11_restores_derived_objects_and_the_columns() {
     assert_eq!(user_version(&mut connection).await, CURRENT_SCHEMA_VERSION);
     let (derived,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table'
-         AND name IN ('inherited_snapshot_index', 'inherited_payload_index', 'thread_mq')",
+         AND name IN ('inherited_snapshot_index', 'inherited_payload_index')",
     )
     .fetch_one(&mut connection)
     .await
     .unwrap();
-    assert_eq!(derived, 3);
+    assert_eq!(derived, 0, "v15 起两张派生索引表必须退役");
+    let (mq,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'thread_mq'",
+    )
+    .fetch_one(&mut connection)
+    .await
+    .unwrap();
+    assert_eq!(mq, 1);
     let (content,): (String,) =
         sqlx::query_as("SELECT content FROM messages WHERE message_id = 'message'")
             .fetch_one(&mut connection)

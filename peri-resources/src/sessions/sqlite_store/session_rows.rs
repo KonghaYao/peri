@@ -72,8 +72,8 @@ pub(super) async fn insert_thread_row(
 /// 插入 canonical binding 行。
 ///
 /// 绑定身份由调用方给出且必须已被本机 workspace 验证过；这里只做形状校验（版本、
-/// 相对路径）与写入。创建证据取归属行当前记录的执行证据：v19 之前它取自执行登记，
-/// 现在归属行的证据列就是同一份事实。
+/// 相对路径）与写入。创建证据取归属行当前记录的执行证据，并收缩为最小执行根
+/// （`binding_evidence::project`）：完整发现快照只留在 `workspaces.discovery`。
 pub(super) async fn insert_binding_row(
     connection: &mut SqliteConnection,
     thread_id: &str,
@@ -83,17 +83,24 @@ pub(super) async fn insert_binding_row(
     // 写绑定必须引用已登记项目；缺失按 InvalidBinding 拒绝，不静默补造。
     require_project_exists(connection, binding.project_id).await?;
     let version = i64::from(binding.schema_version);
+    let recorded: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT discovery FROM workspaces WHERE id = ?1")
+            .bind(binding.workspace_id.to_string())
+            .fetch_optional(&mut *connection)
+            .await?;
+    let snapshot =
+        super::workspace::projected_evidence(recorded.and_then(|(snapshot,)| snapshot).as_deref())?;
     sqlx::query(
         "INSERT INTO session_bindings (thread_id, schema_version, project_id, workspace_id, relative_cwd,
-            discovery_snapshot, evidence_origin)
-         VALUES (?1, ?2, ?3, ?4, ?5,
-            (SELECT discovery FROM workspaces WHERE id = ?4), 'creation_snapshot')",
+            discovery_snapshot)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )
     .bind(thread_id)
     .bind(version)
     .bind(binding.project_id.to_string())
     .bind(binding.workspace_id.to_string())
     .bind(super::discovery::path_text(&binding.cwd_relative_to_workspace)?)
+    .bind(snapshot)
     .execute(&mut *connection)
     .await?;
     Ok(())
@@ -122,9 +129,6 @@ pub(super) async fn insert_binding_row(
 /// 移除条件：两端不再依赖显式删除（远端能提供等价的级联语义，或出现统一的删除抽象）
 /// 之前，不要删除清单里的任何一项。
 pub(super) const THREAD_CHILD_DELETES: &[(&str, &str)] = canonical::THREAD_CHILD_DELETES;
-
-/// 删除 `threads` 行之前清理的派生表（无 threads 外键，可从 `inherited_context` 重建）。
-pub(super) const THREAD_DERIVED_DELETES: &[(&str, &str)] = canonical::THREAD_DERIVED_DELETES;
 
 /// 删除 `threads` 行本身的语句；只在 [`delete_thread_child_rows`] 之后执行（先子后父，
 /// 与远端 `session_lifecycle` 的 messages → session_bindings → threads 顺序一致）。
@@ -192,24 +196,10 @@ fn require_single_row(rows_affected: u64, column: &str) -> Result<()> {
     }
 }
 
-/// 表存在性探测：派生索引表是可选对象，旧库或手工删表后删除路径不得因此失败。
-async fn table_exists(
-    connection: &mut SqliteConnection,
-    table: &str,
-) -> std::result::Result<bool, sqlx::Error> {
-    let row: Option<(String,)> =
-        sqlx::query_as("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?1")
-            .bind(table)
-            .fetch_optional(&mut *connection)
-            .await?;
-    Ok(row.is_some())
-}
-
-/// 显式删除一条 `threads` 行的全部子行（[`THREAD_CHILD_DELETES`] 与
-/// [`THREAD_DERIVED_DELETES`] 逐条执行）。
+/// 显式删除一条 `threads` 行的全部子行（[`THREAD_CHILD_DELETES`] 逐条执行）。
 ///
-/// 派生索引没有 `threads` 外键，缺 snapshot 表时 payload 行也无法按线程定位；
-/// 两张可选表都按实际存在性跳过，旧库与损坏夹具不会让删除失败。
+/// `inherited_*` 派生索引已随 v15 退役，删除路径不再引用它们；`threads.inherited_context`
+/// 的字节不在此清理，随父行一起消失。
 ///
 /// 调用方负责随后用 [`DELETE_THREAD_SQL`] 删父行，并与本调用处于同一事务。返回
 /// `sqlx::Error` 而不是 `anyhow::Error`：调用点按 [`super::failure::map_sqlx`] 分类
@@ -223,20 +213,6 @@ pub(super) async fn delete_thread_child_rows(
             .bind(thread_id)
             .execute(&mut *connection)
             .await?;
-    }
-    let has_snapshot =
-        table_exists(&mut *connection, canonical::INHERITED_SNAPSHOT_INDEX_TABLE).await?;
-    for (table, statement) in THREAD_DERIVED_DELETES {
-        // payload 删除依赖 snapshot 子查询；缺 snapshot 表时无法定位线程的 payload 行。
-        let present = has_snapshot
-            && (*table != canonical::INHERITED_PAYLOAD_INDEX_TABLE
-                || table_exists(&mut *connection, table).await?);
-        if present {
-            sqlx::query(*statement)
-                .bind(thread_id)
-                .execute(&mut *connection)
-                .await?;
-        }
     }
     Ok(())
 }

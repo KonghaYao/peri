@@ -119,6 +119,43 @@ pub(super) async fn run_child_until_terminal(
 }
 
 pub(super) async fn run_child_with_handoff_signal(
+    context: StageContext,
+    max_iterations: usize,
+    session: &Arc<Session>,
+    handoff_start: Option<tokio::sync::oneshot::Sender<ChildHandoffReceipt>>,
+) -> ChildRunOutcome {
+    // tracker 随 StageContext 一起被循环消费；先保留共享句柄，执行结束后
+    // 才能把本轮真实占用快照交给宿主展示（sync/background 共用此入口）。
+    let token_tracker = Arc::clone(&context.compact.token_tracker);
+    let outcome =
+        run_child_with_handoff_signal_inner(context, max_iterations, session, handoff_start).await;
+    // 读锁 guard 不能跨 await：先取出快照再落库。
+    let tokens = token_tracker.read().estimated_context_tokens();
+    persist_context_usage(session, tokens).await;
+    outcome
+}
+
+/// 只刷新 `threads.context_usage_tokens` 展示快照，不参与终态提交：
+/// 写失败只记录，不影响子 Agent 的结算结果；无有效 usage 时写回 NULL。
+async fn persist_context_usage(session: &Arc<Session>, tokens: Option<u64>) {
+    let Some(thread_id) = session.store().thread_id.clone() else {
+        return;
+    };
+    let Some(resources) = session
+        .subagent_host()
+        .and_then(|host| host.session_resources.clone())
+    else {
+        return;
+    };
+    if let Err(error) = resources
+        .set_context_usage(&peri_acp_types::thread::ThreadId::from(thread_id), tokens)
+        .await
+    {
+        tracing::warn!(%error, "child context usage write failed");
+    }
+}
+
+async fn run_child_with_handoff_signal_inner(
     mut context: StageContext,
     max_iterations: usize,
     session: &Arc<Session>,

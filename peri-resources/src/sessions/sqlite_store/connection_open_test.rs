@@ -165,8 +165,10 @@ async fn concurrent_migration_rebuilds_registration_tables_only_once() {
             .await
             .unwrap();
         assert_eq!(cookie, expected_cookie, "DDL must run only once");
-        let row: (String, String, String, String) = sqlx::query_as(
-            "SELECT projects.id, projects.object_identity, w.id, w.discovery
+        // 归属行与项目行原样保留；`workspaces.discovery` 的字节不做清洗（历史证据），
+        // 身份列在 v15 已退役，因此这里不再读它们。
+        let row: (String, String, String) = sqlx::query_as(
+            "SELECT projects.id, w.id, w.discovery
              FROM projects JOIN workspaces w ON w.project_id = projects.id",
         )
         .fetch_one(&store.database.pool)
@@ -176,7 +178,6 @@ async fn concurrent_migration_rebuilds_registration_tables_only_once() {
             row,
             (
                 "project".into(),
-                "project-identity".into(),
                 "11111111-1111-4111-8111-111111111111".into(),
                 "{\"root\":\"/original\",\"root_identity\":{\"device\":1,\"inode\":1},\"common_dir\":null,\"common_identity\":null,\"private_dir\":null,\"private_identity\":null}".into()
             )
@@ -388,9 +389,9 @@ async fn failed_migration_closes_connections_and_releases_initialization_lock() 
 #[tokio::test]
 async fn incompatible_schema_is_rejected_without_wal_or_database_changes() {
     let directory = tempfile::tempdir().unwrap();
-    // 0 是「形状读不懂」的未知库；15..=19 是压缩掉的开发期代数（从未正式发布）。
+    // 0 是「形状读不懂」的未知库；16..=19 是压缩掉的开发期代数（从未正式发布）。
     // 两类都拒绝，且拒绝**不动库**：版本、数据行、库文件字节与侧车文件都保持原样。
-    for version in [0, 15, 16, 17, 18, 19] {
+    for version in [0, 16, 17, 18, 19] {
         let path = directory.path().join(format!("unsupported-{version}.db"));
         let mut connection = sqlx::SqliteConnection::connect_with(
             &SqliteConnectOptions::new()

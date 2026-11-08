@@ -63,8 +63,6 @@ mod history_window;
 mod inherited_blob;
 #[path = "session_data/inherited_facts.rs"]
 mod inherited_facts;
-#[path = "session_data/inherited_index.rs"]
-pub(super) mod inherited_index;
 #[path = "session_data/inherited_page.rs"]
 mod inherited_page;
 #[path = "session_data/interrupted.rs"]
@@ -105,10 +103,6 @@ mod history_window_incremental_tests;
 #[cfg(test)]
 #[path = "session_data/inherited_facts_test.rs"]
 mod inherited_facts_tests;
-
-#[cfg(test)]
-#[path = "session_data/inherited_index_test.rs"]
-mod inherited_index_tests;
 
 #[cfg(test)]
 #[path = "session_data/inherited_perf_test.rs"]

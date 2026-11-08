@@ -3703,7 +3703,6 @@ dependencies = [
  "turso_serverless",
  "url",
  "uuid",
- "windows-sys 0.61.2",
 ]
 
 [[package]]

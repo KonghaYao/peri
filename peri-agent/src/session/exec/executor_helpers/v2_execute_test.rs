@@ -4,16 +4,20 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use peri_acp_types::{
-    event::{EventPublisher, ExecutorEvent},
+    event::{
+        EventMessage, EventPublisher, EventSink, EventSinkError, EventSubscriber, ExecutorEvent,
+        SubscriptionError,
+    },
     identity::{EventDeliveryClass, SessionSeq},
     messages::{MessageContent, MessageId},
     runtime::UnstampedEvent,
-    session::{EnqueueUserInputRequest, MessageQueue, SessionInbox},
+    session::{EnqueueUserInputRequest, MessageQueue, SessionInbox, TurnTelemetryOutcome},
 };
 use tokio_util::sync::CancellationToken;
 
 use crate::session::user_input_mailbox::UserInputMailbox;
 
+use super::super::{collect_result, spawn_event_pump, CollectRequest, SpawnPumpRequest};
 use super::publish_forwarded_event;
 
 struct RecordingPublisher {
@@ -469,5 +473,163 @@ async fn main_executor_fails_when_initial_prompt_cannot_be_admitted() {
         mailbox.recorded_attempt_outcome(&ticket),
         Some(crate::session::user_input_mailbox::UserInputAttemptOutcome::Failed),
         "本次 attempt 必须记为 Failed，不能留在运行中"
+    );
+}
+
+// ── 真实执行一轮后的占用快照 ────────────────────────────────────────────────
+
+/// 只返回一次带 provider usage 的终答，不调用工具。
+struct UsageLlm;
+
+#[async_trait::async_trait]
+impl crate::agent::react::ReactLLM for UsageLlm {
+    async fn generate_reasoning(
+        &self,
+        _messages: &[crate::messages::BaseMessage],
+        _tools: &[&dyn crate::tools::BaseTool],
+        _streaming: Option<crate::agent::react::StreamingContext>,
+    ) -> crate::error::AgentResult<crate::agent::react::Reasoning> {
+        let mut reasoning = crate::agent::react::Reasoning::with_answer("", "answer");
+        reasoning.usage = Some(peri_model::TokenUsage::new(4321, 12));
+        Ok(reasoning)
+    }
+}
+
+struct IdleSubscriber;
+
+#[async_trait::async_trait]
+impl EventSubscriber for IdleSubscriber {
+    async fn recv(&mut self) -> Result<EventMessage, SubscriptionError> {
+        std::future::pending().await
+    }
+
+    fn try_recv(&mut self) -> Result<Option<EventMessage>, SubscriptionError> {
+        Ok(None)
+    }
+}
+
+struct NoopSink;
+
+#[async_trait::async_trait]
+impl EventSink for NoopSink {
+    async fn push_event(
+        &self,
+        _session_id: &str,
+        _event: &ExecutorEvent,
+        _context_window: u32,
+    ) -> Result<(), EventSinkError> {
+        Ok(())
+    }
+
+    async fn push_done(&self, _session_id: &str, _stop_reason: &str, _request_id: Option<&str>) {}
+}
+
+/// [回归] tracker 随 StageContext 一起被消费后，结果态必须携带本轮真实占用；
+/// PromptResult.context_usage_tokens 不得再因默认 tracker 恒为 None。
+#[tokio::test]
+async fn prompt_result_reports_real_context_usage_after_one_turn() {
+    use peri_acp_types::command::PromptStopReason;
+
+    let stage_build: super::StageBuildFn = Arc::new(|sbr: super::StageBuildRequest| {
+        use crate::agent::stages::StageContext;
+        use crate::middleware::chain::MiddlewareChain;
+        use peri_acp_types::event_v2::EventBus;
+
+        let session = crate::session::Session::new(
+            Arc::from("/tmp"),
+            sbr.frozen_session.v2_frozen().clone(),
+            None,
+        );
+        let turn = session.start_turn();
+        let tools: crate::agent::stages::SharedToolMap =
+            Arc::new(parking_lot::RwLock::new(Default::default()));
+        let (bus, handles) = EventBus::new(Default::default());
+        let context = StageContext::builder(turn, session.transcript(), session.queue().clone())
+            .with_llm(Arc::new(UsageLlm))
+            .with_tools(tools)
+            .with_middleware_chain(Arc::new(MiddlewareChain::new()))
+            .with_event_bus(Arc::new(bus))
+            .build();
+        let (_todo_tx, todo_rx) = tokio::sync::mpsc::channel(8);
+        let (_bg_tx, bg_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        Ok((
+            crate::session::exec::stage_builder::V2AgentOutput {
+                context,
+                session,
+                event_handles: handles,
+                todo_rx,
+                bg_event_rx,
+            },
+            None,
+        ))
+    });
+
+    let outcome = super::build_and_execute_agent_v2(super::V2ExecuteRequest {
+        session_id: "main-context-usage".into(),
+        user_input_mailbox: None,
+        async_result_mailbox: None,
+        cwd: "/tmp".into(),
+        cancel: CancellationToken::new(),
+        session_resources: None,
+        thread_id: None,
+        agent_input: crate::agent::react::AgentInput::text("measure usage"),
+        history_payloads: vec![],
+        cached_llm: None,
+        task_manager: None,
+        continuation: false,
+        frozen_session: crate::session::exec::executor::FrozenSessionData::from_frozen_parts(
+            crate::session::FrozenContext::builder().build(),
+            None,
+        ),
+        event_handler: Arc::new(peri_acp_types::event::FnEventHandler(|_: ExecutorEvent| {})),
+        agent_overrides: None,
+        preload_skills: vec![],
+        child_handler_factory: None,
+        auxiliary_model: None,
+        thread_persistence: Default::default(),
+        goal_controller: None,
+        on_bg_complete: None,
+        publisher: Arc::new(NoopPublisher),
+        stage_build,
+        store_llm: Arc::new(|_| {}),
+        cancel_cascade: Arc::new(|_| {}),
+        forwarder_launcher: draining_forwarder(),
+        continuation_notify: None,
+    })
+    .await;
+    assert!(outcome.ok, "一轮正常执行必须成功");
+
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let event_tx = Arc::new(Mutex::new(Some(event_tx)));
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let pump_handle = spawn_event_pump(SpawnPumpRequest {
+        subscription: Box::new(IdleSubscriber),
+        event_rx,
+        stop_reason_rx: stop_rx,
+        sink: Arc::new(NoopSink),
+        session_id: "main-context-usage".into(),
+        effective_context_window: 0,
+        langfuse_on_turn_start: None,
+        langfuse_on_turn_end: None,
+        request_id: None,
+        delivery_journal: None,
+    });
+    stop_tx
+        .send((PromptStopReason::EndTurn, TurnTelemetryOutcome::Completed))
+        .expect("stop reason receiver must be alive");
+
+    let result = collect_result(CollectRequest {
+        event_tx: &event_tx,
+        pump_handle,
+        session_id: "main-context-usage",
+        exec_outcome: outcome,
+        pending_tasks: 0,
+    })
+    .await;
+
+    assert_eq!(
+        result.context_usage_tokens,
+        Some(4321),
+        "必须读取真实累积的 provider usage，而不是默认空 tracker"
     );
 }

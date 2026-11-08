@@ -1,4 +1,4 @@
-//! Bounded Git discovery and conservative local filesystem identity evidence.
+//! Bounded Git discovery: the execution root plus the Git layout it belongs to.
 
 use anyhow::{Context, Result};
 use peri_acp_types::workspace::WorkspaceError;
@@ -15,79 +15,15 @@ use tokio::{
     process::Command,
 };
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(in crate::sessions) struct ObjectIdentity {
-    device: u64,
-    inode: u64,
-}
-
-/// Decode an identity written by schema 3 and emit the schema 4 canonical
-/// form. Creation timestamps are deliberately accepted only as legacy input;
-/// they are not part of identity or compared during discovery.
-pub(super) fn normalize_identity_json(value: &serde_json::Value) -> Result<String> {
-    let object = value
-        .as_object()
-        .ok_or_else(|| WorkspaceError::DiscoveryError("invalid object identity".into()))?;
-    if !object.keys().all(|key| {
-        matches!(
-            key.as_str(),
-            "device" | "inode" | "birth_seconds" | "birth_nanos"
-        )
-    }) {
-        return Err(WorkspaceError::DiscoveryError("unknown object identity field".into()).into());
-    }
-    let device = object
-        .get("device")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| WorkspaceError::DiscoveryError("invalid object identity device".into()))?;
-    let inode = object
-        .get("inode")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| WorkspaceError::DiscoveryError("invalid object identity inode".into()))?;
-    serde_json::to_string(&ObjectIdentity { device, inode }).map_err(Into::into)
-}
-
-pub(super) fn normalize_discovery_json(value: &serde_json::Value) -> Result<String> {
-    let mut value = value.clone();
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| WorkspaceError::DiscoveryError("invalid discovery snapshot".into()))?;
-    if !object.keys().all(|key| {
-        matches!(
-            key.as_str(),
-            "root"
-                | "root_identity"
-                | "common_dir"
-                | "common_identity"
-                | "private_dir"
-                | "private_identity"
-        )
-    }) {
-        return Err(
-            WorkspaceError::DiscoveryError("unknown discovery snapshot field".into()).into(),
-        );
-    }
-    for key in ["root_identity", "common_identity", "private_identity"] {
-        if let Some(identity) = object.get(key) {
-            if identity.is_null() {
-                continue;
-            }
-            let normalized = normalize_identity_json(identity)?;
-            object.insert(key.into(), serde_json::from_str(&normalized)?);
-        }
-    }
-    let discovery: Discovery = serde_json::from_value(value)?;
-    serde_json::to_string(&discovery).map_err(Into::into)
-}
-
+/// 一次目录发现得到的路径布局。
+///
+/// 不含文件对象身份（device/inode）：它随容器重启、同路径重建而变化，且跨主机/容器
+/// 不可通用，v15 起不再持久化。旧行里的 `root_identity` 等键由 serde 忽略。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::sessions) struct Discovery {
     pub root: PathBuf,
-    pub root_identity: ObjectIdentity,
     pub common_dir: Option<PathBuf>,
-    pub common_identity: Option<ObjectIdentity>,
     pub private_dir: Option<PathBuf>,
-    pub private_identity: Option<ObjectIdentity>,
 }
 
 pub(super) fn path_text(path: &Path) -> Result<&str> {
@@ -118,58 +54,18 @@ pub(in crate::sessions) async fn ensure_cwd_available(cwd: &Path) -> Result<Path
     Ok(canonical)
 }
 
-pub(super) async fn object_identity(path: &Path) -> Result<ObjectIdentity> {
+/// 执行目录必须是目录：发现只在可执行的目录上成立。
+///
+/// 这条判定原先由文件对象身份采集顺带给出（`metadata` + `is_dir`），身份退役后保留
+/// 同一个失败契约，不把「不是目录」降级成 Git 的后续错误。
+pub(super) async fn ensure_directory(path: &Path) -> Result<()> {
     let meta = tokio::fs::metadata(path)
         .await
         .map_err(|_| WorkspaceError::Unavailable)?;
     if !meta.is_dir() {
         return Err(WorkspaceError::Unavailable.into());
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        Ok(ObjectIdentity {
-            device: meta.dev(),
-            inode: meta.ino(),
-        })
-    }
-    #[cfg(windows)]
-    {
-        let path = path.to_path_buf();
-        tokio::task::spawn_blocking(move || windows_object_identity(&path)).await?
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = meta;
-        Err(WorkspaceError::Unsupported.into())
-    }
-}
-
-#[cfg(windows)]
-fn windows_object_identity(path: &Path) -> Result<ObjectIdentity> {
-    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
-    use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    };
-    let file = std::fs::OpenOptions::new()
-        .access_mode(FILE_READ_ATTRIBUTES)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-        .open(path)?;
-    let mut information = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
-    // The owned directory handle remains valid throughout this call, and the API
-    // initializes the output only on success. No handle is transferred or inherited.
-    let success =
-        unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
-    if success == 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    let information = unsafe { information.assume_init() };
-    Ok(ObjectIdentity {
-        device: u64::from(information.dwVolumeSerialNumber),
-        inode: (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
-    })
+    Ok(())
 }
 
 fn git_command_path(path: &Path) -> Result<PathBuf> {
@@ -508,7 +404,7 @@ async fn observe_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Obser
         .await
         .map_err(|_| WorkspaceError::Unavailable)?;
     path_text(&cwd)?;
-    let cwd_identity = object_identity(&cwd).await?;
+    ensure_directory(&cwd).await?;
     let inside = git(program, &cwd, &["rev-parse", "--is-inside-work-tree"]).await?;
     // `Some` 表示 Git 给出了回答（即使回答是「不是仓库」）；`None` 表示 Git 不可用。
     let git_answered = inside.is_some();
@@ -528,12 +424,9 @@ async fn observe_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Obser
             cwd.clone(),
             Observation {
                 discovery: Discovery {
-                    root_identity: cwd_identity,
                     root: cwd,
                     common_dir: None,
-                    common_identity: None,
                     private_dir: None,
-                    private_identity: None,
                 },
                 git_answered,
             },
@@ -595,9 +488,6 @@ async fn observe_with_git(cwd: &Path, program: &OsStr) -> Result<(PathBuf, Obser
         }
     }
     let discovered = Discovery {
-        root_identity: object_identity(&root).await?,
-        common_identity: Some(object_identity(&common_dir).await?),
-        private_identity: Some(object_identity(&private_dir).await?),
         root,
         common_dir: Some(common_dir),
         private_dir: Some(private_dir),
@@ -636,9 +526,6 @@ impl Discovery {
 
     pub fn project_locator(&self) -> &Path {
         self.common_dir.as_deref().unwrap_or(&self.root)
-    }
-    pub fn project_identity(&self) -> &ObjectIdentity {
-        self.common_identity.as_ref().unwrap_or(&self.root_identity)
     }
 }
 
