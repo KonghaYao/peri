@@ -86,6 +86,7 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     let mut recovery_launch = recovery_origin.then(|| RecoveryLaunchGuard {
         cfg,
         session_id: &prompt_session_id,
+        armed: true,
     });
     // 恢复准备失败且分类为不可执行时，服务端拒绝本会话的全部执行入口：
     // 用户 prompt、scheduled、continuation 与 idle-suspended 注入都在这里截住。
@@ -503,7 +504,9 @@ pub(crate) async fn dispatch_prompt_turn_with_input(
     if execution_started {
         // 执行器已启动：本轮的错误（模型失败、取消等）属于执行失败，已产生可结算
         // 终态，不能再写成恢复启动失败，也不能跳过父级结算。
-        drop(recovery_launch.take());
+        if let Some(guard) = recovery_launch.as_mut() {
+            guard.disarm();
+        }
     }
 
     // 本轮准入发布的令牌是否已在本轮移交执行器之前被取消。取消本身不代表用户
@@ -712,15 +715,25 @@ fn work_intent_error(thread_id: Option<&str>, detail: String) -> AcpError {
 ///
 /// 早失败出口分散在绑定复核、恢复执行阻断、准入提交与 `run_prompt` 内部（包括
 /// 各类 `?` 提前返回），Drop 统一覆盖，确保调度器释放启动门并唤醒普通激活之前，
-/// 失败事实已经落位。执行器启动后 `take` 解除：那类错误是执行失败而非启动失败。
+/// 失败事实已经落位。执行器启动后 `disarm` 解除：那类错误是执行失败而非启动失败。
 struct RecoveryLaunchGuard<'a> {
     cfg: &'a AcpServerConfig,
     session_id: &'a str,
+    /// 执行器启动后解除；Drop 本身不能区分「早失败」与「正常返回」。
+    armed: bool,
+}
+
+impl RecoveryLaunchGuard<'_> {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
 }
 
 impl Drop for RecoveryLaunchGuard<'_> {
     fn drop(&mut self) {
-        mark_recovery_launch_failed(self.cfg, self.session_id);
+        if self.armed {
+            mark_recovery_launch_failed(self.cfg, self.session_id);
+        }
     }
 }
 

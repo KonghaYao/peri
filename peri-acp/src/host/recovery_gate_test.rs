@@ -296,6 +296,26 @@ async fn stop_after_recovered_child_started_settles_cancelled_and_parent_result(
             .any(|task| task.task_id == "child-b" && task.status != "running")
     })
     .await;
+    // 执行器已启动后的 Stop 属于执行失败：本轮退出在飞状态时不得留下启动早失败
+    // 标记，否则下一次显式进入会把已结算的 Launched 占位当成启动失败回收。
+    wait_for("恢复续跑退出在飞状态", || async {
+        harness
+            .sessions
+            .lock()
+            .await
+            .get("child-b")
+            .is_some_and(|state| !state.continuation_in_flight)
+    })
+    .await;
+    assert!(
+        !harness
+            .cfg
+            .session_manager
+            .get_session("child-b")
+            .expect("child runtime is registered")
+            .recovery_launch_failed(),
+        "执行后 Stop 不是启动早失败，不得写恢复启动标记"
+    );
 
     let meta = settled_meta(&harness, "child-b").await;
     assert_eq!(
@@ -321,6 +341,49 @@ async fn stop_after_recovered_child_started_settles_cancelled_and_parent_result(
         parent_manager.active_count(),
         0,
         "结算后不得留下 pending/active 父任务"
+    );
+}
+
+/// 2k. 恢复 turn 已移交执行器并成功：执行事实不是启动早失败，不得写
+/// `recovery_launch_failed`；否则下一次显式进入会把已执行的 Launched 占位当成
+/// 启动失败回收，重新采纳已消费的提醒。
+#[tokio::test]
+async fn executed_recovery_turn_success_does_not_mark_launch_failed() {
+    let harness = RecoveryHarness::new().await;
+    let thread_id = harness.thread_id.clone();
+    harness.set_working(&thread_id).await;
+    let report = harness.recovery().enter(&thread_id).await.unwrap();
+    assert_eq!(report.recovered, vec![thread_id.clone()]);
+
+    let response = dispatch_prompt_turn(
+        json!({
+            "sessionId": thread_id,
+            "message": {"role": "user", "content": []},
+        }),
+        PromptOrigin::Continuation {
+            mq_steering: true,
+            pending_result: false,
+            recovery: true,
+        },
+        Some(0),
+        &harness.sessions,
+        &harness.locks,
+        &harness.transport,
+        &harness.cfg,
+        &harness.sender,
+    )
+    .await
+    .expect("恢复 turn 必须执行完成");
+    assert_eq!(response["stopReason"], "end_turn");
+    harness._mock.assert_async().await;
+    assert!(
+        !harness
+            .cfg
+            .session_manager
+            .get_session(&thread_id)
+            .expect("session runtime is registered")
+            .recovery_launch_failed(),
+        "执行器已启动的恢复轮次不得写成启动早失败"
     );
 }
 
