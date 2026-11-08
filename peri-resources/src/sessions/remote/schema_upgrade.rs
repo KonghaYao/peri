@@ -776,7 +776,7 @@ pub(super) fn upgrade_plan(
                 Value::Text(row.machine_id.clone()),
                 Value::Text(path.to_owned()),
                 Value::Text(path_source_name(row.path_source).to_owned()),
-                optional_value(&row.project_id.as_deref().map(|id| keep(id))),
+                optional_value(&row.project_id.as_deref().map(keep)),
                 optional_value(&row.discovery),
             ],
         ));

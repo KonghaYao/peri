@@ -716,11 +716,11 @@ async fn version3_database(path: &Path, root: &Path) -> SqliteConnection {
         discovery_json["common_identity"] = serde_json::Value::Null;
         discovery_json["private_identity"] = serde_json::Value::Null;
     }
-    let project_identity = discovery_json["common_identity"]
-        .clone()
-        .is_null()
-        .then(|| discovery_json["root_identity"].clone())
-        .unwrap_or_else(|| discovery_json["common_identity"].clone());
+    let project_identity = if discovery_json["common_identity"].is_null() {
+        discovery_json["root_identity"].clone()
+    } else {
+        discovery_json["common_identity"].clone()
+    };
     let root_identity = discovery_json["root_identity"].clone();
     let root = discovery.root.to_str().unwrap();
     let locator = discovery.project_locator().to_str().unwrap();

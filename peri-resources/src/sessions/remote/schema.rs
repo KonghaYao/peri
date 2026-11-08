@@ -366,7 +366,7 @@ impl ShapeProbe {
         CURRENT_TABLE_PRAGMAS
             .iter()
             .find_map(|&(name, sql)| (name == table).then_some(sql))
-            .or_else(|| match table {
+            .or(match table {
                 "session_environments" => Some("PRAGMA table_xinfo('session_environments')"),
                 "inherited_snapshot_index" => {
                     Some("PRAGMA table_xinfo('inherited_snapshot_index')")
