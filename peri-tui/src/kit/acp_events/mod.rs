@@ -896,13 +896,15 @@ pub(crate) fn dispatch_for_bridge(
         // server 的 continuation scheduler 承担，TUI bridge 不触发 KeepGoing。
         BgTaskCompleted {
             task_id,
-            kind: _,
+            kind,
             success,
             duration_ms,
             output_preview,
             revision,
         } => system::handle_bg_task_completed(
+            state,
             task_id,
+            kind.as_deref(),
             *success,
             *duration_ms,
             output_preview.clone(),
@@ -912,7 +914,7 @@ pub(crate) fn dispatch_for_bridge(
             task_id,
             reason,
             revision,
-        } => system::handle_bg_task_cancelled(task_id, reason, *revision),
+        } => system::handle_bg_task_cancelled(state, task_id, reason, *revision),
         BgTaskUpdated {
             task_id,
             status,

@@ -38,7 +38,7 @@ mod child_reminder_tests;
 pub(crate) use self::bg_task::request_bg_task_snapshot;
 pub(super) use self::bg_task::{
     handle_bg_task_cancelled, handle_bg_task_completed, handle_bg_task_snapshot,
-    handle_bg_task_started, handle_bg_task_updated,
+    handle_bg_task_started, handle_bg_task_updated, has_active_async_agent,
 };
 pub(super) use self::interaction::{
     handle_ask_user, handle_hitl_pending, handle_interaction_terminal,
